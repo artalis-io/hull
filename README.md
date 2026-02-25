@@ -26,7 +26,7 @@ Write backend logic in Lua, frontend in HTML5/JS, data in SQLite. `hull build` p
 - **Ship as a file.** One binary = the entire application. No installer, no runtime, no Docker, no cloud.
 - **Own your data.** SQLite file on the user's machine. Backup = copy a file.
 - **Built-in everything.** Routing, auth, RBAC, email, CSV, i18n, FTS, PDF, templates, validation, rate limiting, WebSockets, sessions, CSRF.
-- **Kernel sandbox.** pledge/unveil on Linux/OpenBSD. Apps declare what they can access; the kernel enforces it.
+- **Sandboxed.** Kernel sandbox (pledge/unveil) on Linux/OpenBSD. Windows App Container and macOS App Sandbox are on the roadmap. Lua sandbox is always in effect on all platforms.
 - **Ed25519 licensing.** Built-in license key system for commercial distribution. Offline verification, no activation server.
 - **AI-friendly.** Lua is small, consistent, and LLMs generate it reliably. The entire dev loop — write, test, fix — works in one terminal with any AI assistant.
 
