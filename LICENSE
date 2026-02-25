@@ -659,3 +659,136 @@ specific requirements.
 if any, to sign a "copyright disclaimer" for the program, if necessary.
 For more information on this, and how to apply and follow the GNU AGPL, see
 <https://www.gnu.org/licenses/>.
+
+==============================================================================
+
+                     HULL COMMERCIAL LICENSE TERMS
+
+                  Copyright (c) 2026 Artalis IO Kft.
+                       All rights reserved.
+
+==============================================================================
+
+Hull is dual-licensed. The AGPL-3.0 text above applies to all users who do
+not hold a commercial license. A commercial license, purchased from
+Artalis IO Kft., grants the following additional rights and is governed by
+the terms below.
+
+1. GRANT OF LICENSE
+
+   Upon purchase, Artalis IO Kft. ("Licensor") grants the Licensee a
+   worldwide, non-exclusive, non-transferable, perpetual license to:
+
+   (a) Use the Hull platform (C runtime, build tool, standard library)
+       to develop applications without AGPL obligations.
+
+   (b) Distribute compiled Hull applications in binary form without
+       distributing the Lua application source code.
+
+   (c) Build and distribute an unlimited number of applications to an
+       unlimited number of end users.
+
+   The commercial license covers the Licensee's Lua application layer
+   only. The Hull platform source code (C runtime, build tool, standard
+   library) remains AGPL-3.0 regardless of the Licensee's license tier.
+
+2. LICENSE TIERS
+
+   Standard    $99 one-time     1 developer     1 year of Hull updates
+   Team       $299 one-time     Up to 5 devs    1 year of Hull updates
+   Perpetual  $499 one-time     1 developer     Lifetime Hull updates
+
+   Update renewal (Standard/Team only):
+   Standard   $49/year
+   Team      $149/year
+
+3. PERPETUAL RIGHT
+
+   The commercial license to distribute closed-source applications is
+   perpetual. It does not expire when the update access period ends.
+   The Licensee retains the right to use, build, and distribute
+   applications with the last version of Hull received during their
+   active update period, indefinitely.
+
+4. NO FEATURE GATING
+
+   AGPL and commercial builds of Hull have identical features. The
+   commercial license is a legal instrument granting distribution
+   rights. It is not a DRM mechanism. There is no "community edition"
+   vs. "enterprise edition." All functionality is available under both
+   license types.
+
+5. PER-DEVELOPER, NOT PER-APPLICATION
+
+   Licenses are sold per developer seat, not per application or per
+   end user. One Standard license entitles one developer to build and
+   distribute unlimited Hull applications to unlimited end users.
+
+6. LICENSE KEY
+
+   A commercial license is delivered as an Ed25519-signed key file
+   containing the Licensee's identity, license tier, and update
+   expiry date. The key file is verified offline by the Hull build
+   tool — no activation server, no phone-home, no internet required.
+
+7. WHAT THE LICENSEE MAY NOT DO
+
+   (a) Redistribute, sublicense, or resell the Hull platform itself
+       (C runtime, build tool, standard library) under terms other
+       than AGPL-3.0, except as compiled into end-user applications.
+
+   (b) Transfer the license to another individual or entity without
+       written consent from Artalis IO Kft.
+
+   (c) Use the license key to circumvent AGPL obligations for projects
+       not developed by the licensed developer(s).
+
+   (d) Remove, alter, or obscure the Hull platform signature embedded
+       in compiled binaries.
+
+8. TERMINATION
+
+   The commercial license is perpetual and cannot be revoked except in
+   case of material breach of these terms. Termination of update access
+   (by non-renewal) does not terminate the license itself. The Licensee
+   retains all rights granted under Section 1 indefinitely.
+
+9. DEAD MAN'S SWITCH
+
+   If the Hull project publishes no tagged release on its official
+   GitHub repository (github.com/artalis-io/hull) for twenty-four (24)
+   consecutive months, the entire Hull codebase — C runtime, build
+   tool, standard library — automatically converts from AGPL-3.0 to
+   the MIT License. This conversion is irrevocable. Commercial license
+   holders retain their existing rights regardless of this conversion.
+
+10. WARRANTY DISCLAIMER
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+   EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+   NONINFRINGEMENT. IN NO EVENT SHALL ARTALIS IO KFT. BE LIABLE FOR
+   ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+   CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+   WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+11. GOVERNING LAW
+
+   This license shall be governed by and construed in accordance with
+   the laws of Hungary. Any disputes arising under this license shall
+   be subject to the exclusive jurisdiction of the courts of Budapest,
+   Hungary.
+
+12. CONTACT
+
+   Artalis IO Kft.
+   Email: license@artalis.io
+   Web:   https://hull.dev
+
+==============================================================================
+
+To purchase a commercial license, visit https://hull.dev or contact
+license@artalis.io.
+
+For AGPL usage (free, open-source distribution with source), no
+additional license is required — the AGPL-3.0 text above applies.
