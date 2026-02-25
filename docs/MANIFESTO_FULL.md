@@ -17,8 +17,8 @@
 **Platform Features**
 [Startup Sequence](#startup-sequence) · [Scheduled Tasks](#scheduled-tasks) · [Background Work](#background-work) · [Multi-Instance](#multi-instance) · [Application Updates](#application-updates) · [Email](#email) · [Secrets and API Keys](#secrets-and-api-keys) · [Logging](#logging) · [Authentication](#authentication) · [Development Mode](#development-mode) · [HTML Templating](#html-templating) · [PDF Generation](#pdf-generation) · [File Uploads](#file-uploads) · [Testing](#testing) · [App WebSockets](#app-websockets) · [CSV Export/Import](#csv-exportimport) · [Internationalization (i18n)](#internationalization-i18n) · [Full-Text Search](#full-text-search) · [Pagination](#pagination) · [Backup](#backup) · [Role-Based Access Control (RBAC)](#role-based-access-control-rbac) · [Data Validation](#data-validation) · [Rate Limiting](#rate-limiting)
 
-**Limitations & Comparisons**
-[Known Limitations](#known-limitations) · [How Hull Differs from Tauri](#how-hull-differs-from-tauri) · [How Hull Differs from Redbean](#how-hull-differs-from-redbean) · [Survivability](#survivability)
+**Limitations, Roadmap & Comparisons**
+[Known Limitations](#known-limitations) · [Roadmap](#roadmap) · [How Hull Differs from Tauri](#how-hull-differs-from-tauri) · [How Hull Differs from Redbean](#how-hull-differs-from-redbean) · [Survivability](#survivability)
 
 **Reference**
 [Project Structure](#project-structure) · [Build](#build)
@@ -3297,6 +3297,83 @@ Hull is honest about its constraints. These are known trade-offs, not bugs.
 **Windows and macOS sandbox.** pledge/unveil provides kernel-enforced sandboxing on Linux (SECCOMP BPF + Landlock LSM) and OpenBSD (native syscalls). On macOS and Windows, the kernel sandbox is not available. Hull still runs — the Lua sandbox (restricted stdlib, C-level path validation, network allowlist) provides application-level security on all platforms. The strongest security posture requires Linux or OpenBSD. Windows App Container (available since Windows 8, default-deny for filesystem/network/registry/IPC) and macOS App Sandbox are viable future directions for platform-specific sandbox enforcement. Both are on the roadmap but not yet implemented.
 
 **No mobile.** Hull produces desktop executables. The Lua + SQLite core could be embedded in native mobile apps (iOS/Android) as a library, and the HTML5/JS frontend could run in a mobile webview. This is a future roadmap item, not a current capability.
+
+## Roadmap
+
+Features that are planned but not yet implemented, in rough priority order.
+
+### WASM Workers — Performance-Critical Computation
+
+Lua is fast enough for HTTP handlers, business logic, and database queries. It is not fast enough for numerical computation, image processing, data transformation, or any CPU-bound workload where interpreted code hits a wall.
+
+Hull's answer is **WebAssembly (WASM) workers** — sandboxed, compiled modules that Lua can call for heavy lifting:
+
+```lua
+-- Load a WASM module compiled from C, Rust, Zig, or anything
+local matrix = require("wasm/matrix_ops.wasm")
+
+-- Call exported functions — runs at near-native speed
+local result = matrix.multiply(a, b, rows, cols)
+local det = matrix.determinant(data, n)
+```
+
+**Why WASM, not native code:**
+
+- **Sandboxed by design.** WASM modules run in a memory-isolated environment. A WASM worker cannot access the filesystem, the network, or the host process's memory. This maintains Hull's security model — the Lua sandbox restricts Lua, and the WASM sandbox restricts compiled code. No `ffi`, no `dlopen`, no escape hatches.
+- **Any language.** WASM is a compilation target, not a language. Write performance-critical code in C, C++, Rust, Zig, or anything that compiles to WASM. The developer chooses the language that fits the problem. Hull doesn't care — it runs the `.wasm` binary.
+- **Portable.** WASM modules are platform-independent by specification. The same `.wasm` file runs on every OS Hull supports, with no per-platform compilation. This preserves the single-binary story — the WASM modules embed into the APE binary alongside Lua and static assets.
+- **Auditable.** WASM modules are small, self-contained, and have a well-defined interface (exported functions with typed signatures). They are significantly easier to audit than native shared libraries.
+
+**Implementation path:** Embed a lightweight WASM runtime (wasm3 or wamr — both are small C libraries designed for embedding, under 100 KB). Expose a `require("wasm/module.wasm")` loader that returns a Lua table with the exported functions. WASM memory is separate from Lua memory. Data is passed via function arguments and return values (numbers, pointers into WASM linear memory for bulk data).
+
+**Use cases:**
+
+- PDF layout engine (compute-heavy text flow and table layout)
+- CSV/Excel parsing for large files (millions of rows)
+- Cryptographic operations beyond what TweetNaCl provides
+- Image resizing/conversion for file upload processing
+- Statistical calculations, financial modeling, Monte Carlo simulations
+- Custom compression/encoding for domain-specific data formats
+
+### LuaJIT (Alternative Performance Path)
+
+An alternative to WASM for performance-critical Lua code: optionally ship with LuaJIT instead of plain Lua 5.4.
+
+**Pros:** LuaJIT's tracing JIT compiler achieves near-C performance for numerical Lua code. No language boundary — the same Lua code just runs faster. FFI library enables zero-overhead calls to C functions.
+
+**Cons:** LuaJIT is stuck on Lua 5.1 semantics (no integers, no generational GC, no `goto`). It is maintained by a single person (Mike Pall). Platform support is narrower than plain Lua. LuaJIT's FFI bypasses the Lua sandbox — any code using FFI can call arbitrary C functions, which breaks Hull's security model.
+
+**Our position:** WASM workers are the preferred path because they maintain the sandbox. LuaJIT may be offered as an opt-in build flag for developers who need raw Lua speed and accept the security trade-off. Both approaches solve the same underlying problem (interpreted Lua is too slow for numerical work) via different trade-offs.
+
+### Mobile Frontend (iOS/Android)
+
+Hull currently produces desktop executables. The Lua + SQLite core could be embedded as a library in native iOS/Android apps, with the HTML5/JS frontend running in a platform webview (WKWebView on iOS, WebView on Android).
+
+This would mean: write the backend logic once in Lua, share the SQLite database schema, and run the same application on desktop and mobile. The HTML5/JS frontend already works in mobile browsers — the missing piece is packaging.
+
+**Not a priority for v1.0.** Desktop is the focus. Mobile comes after the core platform is stable.
+
+### Windows Sandbox (App Container)
+
+Windows App Container provides kernel-enforced process isolation (default-deny filesystem, network, registry, IPC) for standalone .exe files. It requires a broker/worker pattern — the process launches itself in a sandboxed child via `CreateProcess` with `SECURITY_CAPABILITIES`.
+
+Combined with `SetProcessMitigationPolicy()` (which blocks dynamic code generation, child processes, and unsigned DLL loading), this would bring Windows close to Linux's pledge/unveil enforcement level.
+
+**Implementation complexity is medium.** The Win32 API surface is well-documented but requires careful integration with Cosmopolitan's NT layer.
+
+### macOS App Sandbox
+
+macOS App Sandbox provides filesystem, network, and IPC restrictions for sandboxed processes. Unlike pledge/unveil, it requires an entitlements plist and code signing.
+
+**Feasibility depends on Cosmopolitan APE compatibility with Apple's code signing.** If APE binaries can be code-signed with entitlements, App Sandbox becomes viable. If not, macOS remains on the Lua-sandbox-only security tier.
+
+### Benchmarks
+
+Formal performance benchmarks comparing Hull (Keel + Lua + SQLite) against comparable stacks. Will be published when the platform is mature enough for the numbers to be meaningful and reproducible.
+
+### hull.com Marketplace
+
+A curated directory of Hull applications — both free (AGPL) and commercial. Developers list their apps, users discover and download them. 15% commission on commercial sales. Signature verification built in — every app listed must pass `hull verify`.
 
 ## How Hull Differs from Tauri
 
