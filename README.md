@@ -36,7 +36,7 @@ Write backend logic in Lua, frontend in HTML5/JS, data in SQLite. `hull build` p
 - **Built-in everything.** Routing, auth, RBAC, email, CSV, i18n, FTS, PDF, templates, validation, rate limiting, WebSockets, sessions, CSRF.
 - **Sandboxed.** Kernel sandbox (pledge/unveil) on Linux/OpenBSD. Windows App Container and macOS App Sandbox are on the roadmap. Lua sandbox is always in effect on all platforms.
 - **Ed25519 licensing.** Built-in license key system for commercial distribution. Offline verification, no activation server.
-- **AI-friendly.** Zero compilation — instant iteration speed. Lua is small, consistent, and LLMs generate it reliably. Errors include file, line, stack trace, and request context — piped straight to the LLM. The entire frontend and backend conversation is auditable, so you can steer the LLM to adhere to your specs. Write, test, fix — all in one terminal with any AI assistant.
+- **AI-friendly.** Zero compilation — instant iteration speed. Lua is small, consistent, and LLMs generate it reliably. Errors include file, line, stack trace, and request context — piped straight to the LLM. The entire frontend and backend conversation is auditable, so you can steer the LLM to adhere to your specs. Ralph loop it, Gastown it, or just let your agentic tool harness do its job — Hull's zero-compilation feedback loop is built for autonomous iteration.
 
 ## Architecture
 
