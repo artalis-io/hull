@@ -19,12 +19,42 @@
 #include <keel/response.h>
 #include <keel/router.h>
 
+#include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
 /* ── Response metatable name ────────────────────────────────────────── */
 
 #define HULL_RESPONSE_MT "HullResponse"
+
+/* ── Helper: retrieve HullLua from Lua registry ────────────────────── */
+
+static HullLua *get_hull_lua_from_L(lua_State *L)
+{
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_lua");
+    HullLua *lua = (HullLua *)lua_touserdata(L, -1);
+    lua_pop(L, 1);
+    return lua;
+}
+
+/*
+ * Copy body data into runtime-owned buffer so it survives until
+ * Keel sends the response (kl_response_body borrows the pointer).
+ */
+static const char *hull_lua_stash_body(lua_State *L, const char *data,
+                                        size_t len)
+{
+    HullLua *hlua = get_hull_lua_from_L(L);
+    if (!hlua)
+        return NULL;
+    free(hlua->response_body);
+    hlua->response_body = malloc(len + 1);
+    if (!hlua->response_body)
+        return NULL;
+    memcpy(hlua->response_body, data, len);
+    hlua->response_body[len] = '\0';
+    return hlua->response_body;
+}
 
 /* ── Request object ─────────────────────────────────────────────────── */
 
@@ -151,6 +181,200 @@ static int lua_res_header(lua_State *L)
     return 1;
 }
 
+/* ── Iterative JSON encoder (explicit stack, no C recursion) ─────────── */
+
+#define JSON_MAX_DEPTH 20
+
+static void json_encode_string(luaL_Buffer *b, lua_State *L, int idx)
+{
+    size_t slen;
+    const char *s = lua_tolstring(L, idx, &slen);
+    luaL_addchar(b, '"');
+    for (size_t i = 0; i < slen; i++) {
+        char c = s[i];
+        switch (c) {
+        case '"':  luaL_addstring(b, "\\\""); break;
+        case '\\': luaL_addstring(b, "\\\\"); break;
+        case '\n': luaL_addstring(b, "\\n");  break;
+        case '\r': luaL_addstring(b, "\\r");  break;
+        case '\t': luaL_addstring(b, "\\t");  break;
+        default:
+            if ((unsigned char)c < 0x20) {
+                char esc[8];
+                snprintf(esc, sizeof(esc), "\\u%04x", (unsigned char)c);
+                luaL_addstring(b, esc);
+            } else {
+                luaL_addchar(b, c);
+            }
+        }
+    }
+    luaL_addchar(b, '"');
+}
+
+static void json_encode_number(luaL_Buffer *b, lua_State *L, int idx)
+{
+    if (lua_isinteger(L, idx)) {
+        char num[32];
+        snprintf(num, sizeof(num), "%lld",
+                 (long long)lua_tointeger(L, idx));
+        luaL_addstring(b, num);
+    } else {
+        char num[64];
+        snprintf(num, sizeof(num), "%g",
+                 (double)lua_tonumber(L, idx));
+        luaL_addstring(b, num);
+    }
+}
+
+static void json_encode_scalar(luaL_Buffer *b, lua_State *L, int idx)
+{
+    int t = lua_type(L, idx);
+    if (t == LUA_TSTRING)
+        json_encode_string(b, L, idx);
+    else if (t == LUA_TNUMBER)
+        json_encode_number(b, L, idx);
+    else if (t == LUA_TBOOLEAN)
+        luaL_addstring(b, lua_toboolean(L, idx) ? "true" : "false");
+    else
+        luaL_addstring(b, "null");
+}
+
+/*
+ * Frame on the explicit work stack. Each frame tracks iteration state
+ * for one table (array or object) being serialized.
+ *
+ * For arrays:  iterate i from 1..arr_len using lua_rawgeti.
+ * For objects: iterate with lua_next (key kept on Lua stack between calls).
+ */
+typedef struct {
+    int         lua_idx;    /* absolute Lua stack index of the table */
+    int         is_array;
+    lua_Integer arr_len;    /* total array length (arrays only) */
+    lua_Integer arr_i;      /* next index to emit (arrays only) */
+    int         first;      /* true if no elements emitted yet */
+} JsonFrame;
+
+/*
+ * Encode the Lua value at stack index `idx` into the luaL_Buffer.
+ * Uses an explicit JsonFrame stack instead of C recursion.
+ */
+static void json_encode(lua_State *L, luaL_Buffer *b, int idx)
+{
+    int abs_idx = lua_absindex(L, idx);
+
+    /* If top-level value is not a table, encode directly */
+    if (lua_type(L, abs_idx) != LUA_TTABLE) {
+        json_encode_scalar(b, L, abs_idx);
+        return;
+    }
+
+    JsonFrame frames[JSON_MAX_DEPTH];
+    int depth = 0;
+
+    /* Helper: detect array vs object */
+    #define INIT_FRAME(fr, tbl_idx) do {                           \
+        (fr)->lua_idx  = (tbl_idx);                                \
+        (fr)->first    = 1;                                        \
+        lua_len(L, (tbl_idx));                                     \
+        (fr)->arr_len  = lua_tointeger(L, -1);                     \
+        lua_pop(L, 1);                                             \
+        (fr)->is_array = 0;                                        \
+        if ((fr)->arr_len > 0) {                                   \
+            lua_rawgeti(L, (tbl_idx), 1);                          \
+            (fr)->is_array = !lua_isnil(L, -1);                    \
+            lua_pop(L, 1);                                         \
+        }                                                          \
+        (fr)->arr_i = 1;                                           \
+    } while (0)
+
+    /* Push root table frame */
+    INIT_FRAME(&frames[0], abs_idx);
+    luaL_addchar(b, frames[0].is_array ? '[' : '{');
+    if (!frames[0].is_array)
+        lua_pushnil(L); /* seed lua_next */
+    depth = 1;
+
+    while (depth > 0) {
+        JsonFrame *f = &frames[depth - 1];
+
+        if (f->is_array) {
+            /* Array iteration */
+            if (f->arr_i > f->arr_len) {
+                luaL_addchar(b, ']');
+                depth--;
+                continue;
+            }
+
+            if (!f->first)
+                luaL_addchar(b, ',');
+            f->first = 0;
+
+            lua_rawgeti(L, f->lua_idx, f->arr_i);
+            f->arr_i++;
+
+            if (lua_type(L, -1) == LUA_TTABLE && depth < JSON_MAX_DEPTH) {
+                int tbl = lua_absindex(L, -1);
+                INIT_FRAME(&frames[depth], tbl);
+                luaL_addchar(b, frames[depth].is_array ? '[' : '{');
+                if (!frames[depth].is_array)
+                    lua_pushnil(L); /* seed lua_next */
+                depth++;
+            } else {
+                json_encode_scalar(b, L, lua_absindex(L, -1));
+                lua_pop(L, 1);
+            }
+        } else {
+            /* Object iteration — lua_next key is on top of Lua stack */
+            if (lua_next(L, f->lua_idx) == 0) {
+                luaL_addchar(b, '}');
+                depth--;
+                /* Pop the table we pushed for this frame (if nested) */
+                if (depth > 0)
+                    lua_pop(L, 1); /* pop the nested table value */
+                continue;
+            }
+
+            /* Key at -2, value at -1 */
+            if (lua_type(L, -2) != LUA_TSTRING) {
+                /* Skip non-string keys */
+                lua_pop(L, 1);
+                continue;
+            }
+
+            if (!f->first)
+                luaL_addchar(b, ',');
+            f->first = 0;
+
+            /* Emit key */
+            json_encode_string(b, L, lua_absindex(L, -2));
+            luaL_addchar(b, ':');
+
+            if (lua_type(L, -1) == LUA_TTABLE && depth < JSON_MAX_DEPTH) {
+                /* Nested table in object value — push new frame.
+                 * Keep key and value on Lua stack:
+                 *   key stays for lua_next resume (but we won't resume
+                 *   the parent until this sub-frame completes).
+                 * Actually, lua_next needs the key on top when we resume.
+                 * The sub-table's iteration will push/pop its own values.
+                 * After the sub-frame pops, the value is still at -1,
+                 * and we pop it in the close-bracket handler above.
+                 * The key then becomes -1 for the parent's lua_next. */
+                int tbl = lua_absindex(L, -1);
+                INIT_FRAME(&frames[depth], tbl);
+                luaL_addchar(b, frames[depth].is_array ? '[' : '{');
+                if (!frames[depth].is_array)
+                    lua_pushnil(L); /* seed lua_next for nested object */
+                depth++;
+            } else {
+                json_encode_scalar(b, L, lua_absindex(L, -1));
+                lua_pop(L, 1); /* pop value, keep key for next lua_next */
+            }
+        }
+    }
+
+    #undef INIT_FRAME
+}
+
 /* res:json(data, code?) */
 static int lua_res_json(lua_State *L)
 {
@@ -162,149 +386,19 @@ static int lua_res_json(lua_State *L)
         kl_response_status(res, code);
     }
 
-    /* Serialize Lua value to JSON manually */
     luaL_Buffer b;
     luaL_buffinit(L, &b);
-
-    /* Use a simple serializer for tables/values */
-    /* Push the value we want to serialize */
-    lua_pushvalue(L, 2);
-
-    /* We need a JSON encoder. Build one using a recursive approach. */
-    /* For simplicity, use a C function that walks the Lua value. */
-    /* This is registered as a helper. For now, serialize to JSON. */
-
-    /* Use the approach: push a cjson-like serializer, or manually walk. */
-    /* Since we don't have cjson, do a manual walk. */
-
-    int t = lua_type(L, 2);
-    if (t == LUA_TTABLE) {
-        /* Check if it's an array or object */
-        /* Array if sequential integer keys starting at 1 */
-        lua_len(L, 2);
-        lua_Integer arr_len = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-
-        int is_array = 0;
-        if (arr_len > 0) {
-            /* Check if key 1 exists — heuristic for array */
-            lua_rawgeti(L, 2, 1);
-            is_array = !lua_isnil(L, -1);
-            lua_pop(L, 1);
-        }
-
-        if (is_array && arr_len > 0) {
-            luaL_addchar(&b, '[');
-            for (lua_Integer i = 1; i <= arr_len; i++) {
-                if (i > 1)
-                    luaL_addchar(&b, ',');
-                lua_rawgeti(L, 2, i);
-                int vt = lua_type(L, -1);
-                if (vt == LUA_TSTRING) {
-                    size_t slen;
-                    const char *s = lua_tolstring(L, -1, &slen);
-                    luaL_addchar(&b, '"');
-                    luaL_addlstring(&b, s, slen);
-                    luaL_addchar(&b, '"');
-                } else if (vt == LUA_TNUMBER) {
-                    if (lua_isinteger(L, -1)) {
-                        char num[32];
-                        snprintf(num, sizeof(num), "%lld",
-                                 (long long)lua_tointeger(L, -1));
-                        luaL_addstring(&b, num);
-                    } else {
-                        char num[64];
-                        snprintf(num, sizeof(num), "%g",
-                                 (double)lua_tonumber(L, -1));
-                        luaL_addstring(&b, num);
-                    }
-                } else if (vt == LUA_TBOOLEAN) {
-                    luaL_addstring(&b, lua_toboolean(L, -1) ? "true" : "false");
-                } else {
-                    luaL_addstring(&b, "null");
-                }
-                lua_pop(L, 1);
-            }
-            luaL_addchar(&b, ']');
-        } else {
-            /* Object: iterate with lua_next */
-            luaL_addchar(&b, '{');
-            int first = 1;
-            lua_pushnil(L);
-            while (lua_next(L, 2) != 0) {
-                if (!first)
-                    luaL_addchar(&b, ',');
-                first = 0;
-
-                /* Key must be string */
-                if (lua_type(L, -2) == LUA_TSTRING) {
-                    size_t klen;
-                    const char *k = lua_tolstring(L, -2, &klen);
-                    luaL_addchar(&b, '"');
-                    luaL_addlstring(&b, k, klen);
-                    luaL_addstring(&b, "\":");
-
-                    int vt = lua_type(L, -1);
-                    if (vt == LUA_TSTRING) {
-                        size_t slen;
-                        const char *s = lua_tolstring(L, -1, &slen);
-                        luaL_addchar(&b, '"');
-                        luaL_addlstring(&b, s, slen);
-                        luaL_addchar(&b, '"');
-                    } else if (vt == LUA_TNUMBER) {
-                        if (lua_isinteger(L, -1)) {
-                            char num[32];
-                            snprintf(num, sizeof(num), "%lld",
-                                     (long long)lua_tointeger(L, -1));
-                            luaL_addstring(&b, num);
-                        } else {
-                            char num[64];
-                            snprintf(num, sizeof(num), "%g",
-                                     (double)lua_tonumber(L, -1));
-                            luaL_addstring(&b, num);
-                        }
-                    } else if (vt == LUA_TBOOLEAN) {
-                        luaL_addstring(&b, lua_toboolean(L, -1)
-                                           ? "true" : "false");
-                    } else {
-                        luaL_addstring(&b, "null");
-                    }
-                }
-                lua_pop(L, 1); /* pop value, keep key for next iteration */
-            }
-            luaL_addchar(&b, '}');
-        }
-    } else if (t == LUA_TSTRING) {
-        size_t slen;
-        const char *s = lua_tolstring(L, 2, &slen);
-        luaL_addchar(&b, '"');
-        luaL_addlstring(&b, s, slen);
-        luaL_addchar(&b, '"');
-    } else if (t == LUA_TNUMBER) {
-        if (lua_isinteger(L, 2)) {
-            char num[32];
-            snprintf(num, sizeof(num), "%lld",
-                     (long long)lua_tointeger(L, 2));
-            luaL_addstring(&b, num);
-        } else {
-            char num[64];
-            snprintf(num, sizeof(num), "%g", (double)lua_tonumber(L, 2));
-            luaL_addstring(&b, num);
-        }
-    } else if (t == LUA_TBOOLEAN) {
-        luaL_addstring(&b, lua_toboolean(L, 2) ? "true" : "false");
-    } else {
-        luaL_addstring(&b, "null");
-    }
-
-    lua_pop(L, 1); /* pop the extra pushvalue */
+    json_encode(L, &b, 2);
     luaL_pushresult(&b);
 
     size_t json_len;
     const char *json_str = lua_tolstring(L, -1, &json_len);
-    kl_response_header(res, "Content-Type", "application/json");
-    kl_response_body(res, json_str, json_len);
+    const char *copy = hull_lua_stash_body(L, json_str, json_len);
     lua_pop(L, 1); /* pop JSON string */
+    if (copy) {
+        kl_response_header(res, "Content-Type", "application/json");
+        kl_response_body(res, copy, json_len);
+    }
 
     return 0;
 }
@@ -315,8 +409,11 @@ static int lua_res_html(lua_State *L)
     KlResponse *res = check_response(L, 1);
     size_t len;
     const char *html = luaL_checklstring(L, 2, &len);
-    kl_response_header(res, "Content-Type", "text/html; charset=utf-8");
-    kl_response_body(res, html, len);
+    const char *copy = hull_lua_stash_body(L, html, len);
+    if (copy) {
+        kl_response_header(res, "Content-Type", "text/html; charset=utf-8");
+        kl_response_body(res, copy, len);
+    }
     return 0;
 }
 
@@ -326,8 +423,11 @@ static int lua_res_text(lua_State *L)
     KlResponse *res = check_response(L, 1);
     size_t len;
     const char *text = luaL_checklstring(L, 2, &len);
-    kl_response_header(res, "Content-Type", "text/plain; charset=utf-8");
-    kl_response_body(res, text, len);
+    const char *copy = hull_lua_stash_body(L, text, len);
+    if (copy) {
+        kl_response_header(res, "Content-Type", "text/plain; charset=utf-8");
+        kl_response_body(res, copy, len);
+    }
     return 0;
 }
 

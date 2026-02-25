@@ -48,10 +48,8 @@ typedef struct HullLua {
     /* Module search paths */
     const char     *app_dir;         /* application root directory */
 
-    /* Route handlers stored in Lua registry:
-     *   registry["__hull_routes"]     = { [1]=fn, [2]=fn, ... }
-     *   registry["__hull_route_defs"] = { [1]={method,pattern,handler_id}, ... }
-     */
+    /* Per-request response body (strdup'd, freed after dispatch) */
+    char           *response_body;
 } HullLua;
 
 /* ── Lifecycle ──────────────────────────────────────────────────────── */

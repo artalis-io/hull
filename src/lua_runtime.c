@@ -92,7 +92,17 @@ int hull_lua_init(HullLua *lua, const HullLuaConfig *cfg)
     if (!lua || !cfg)
         return -1;
 
+    /* Save caller-set fields before zeroing */
+    sqlite3 *db = lua->db;
+    HullFsConfig *fs_cfg = lua->fs_cfg;
+    HullEnvConfig *env_cfg = lua->env_cfg;
+
     memset(lua, 0, sizeof(*lua));
+
+    /* Restore caller-set fields */
+    lua->db = db;
+    lua->fs_cfg = fs_cfg;
+    lua->env_cfg = env_cfg;
     lua->mem_limit = cfg->max_heap_bytes;
 
     /* Create Lua state with custom allocator */
@@ -210,6 +220,8 @@ void hull_lua_free(HullLua *lua)
         free((void *)lua->app_dir);
         lua->app_dir = NULL;
     }
+    free(lua->response_body);
+    lua->response_body = NULL;
 }
 
 void hull_lua_dump_error(HullLua *lua)

@@ -215,7 +215,19 @@ int hull_js_init(HullJS *js, const HullJSConfig *cfg)
     if (!js || !cfg)
         return -1;
 
+    /* Save caller-set fields before zeroing */
+    sqlite3 *db = js->db;
+    HullFsConfig *fs_cfg = js->fs_cfg;
+    HullEnvConfig *env_cfg = js->env_cfg;
+    HullHttpConfig *http_cfg = js->http_cfg;
+
     memset(js, 0, sizeof(*js));
+
+    /* Restore caller-set fields */
+    js->db = db;
+    js->fs_cfg = fs_cfg;
+    js->env_cfg = env_cfg;
+    js->http_cfg = http_cfg;
     js->max_instructions = cfg->max_instructions;
 
     /* Create runtime (using default allocator for now;
@@ -377,6 +389,8 @@ void hull_js_free(HullJS *js)
         free((void *)js->app_dir);
         js->app_dir = NULL;
     }
+    free(js->response_body);
+    js->response_body = NULL;
 }
 
 void hull_js_dump_error(HullJS *js)

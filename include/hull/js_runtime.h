@@ -56,8 +56,8 @@ typedef struct HullJS {
     /* Module search paths */
     const char     *app_dir;         /* application root directory */
 
-    /* Route handlers (JS function references) */
-    /* Stored in JS globalThis.__hull_routes internally */
+    /* Per-request response body (strdup'd, freed after dispatch) */
+    char           *response_body;
 } HullJS;
 
 /* ── Lifecycle ──────────────────────────────────────────────────────── */

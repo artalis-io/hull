@@ -16,6 +16,7 @@
 #include <keel/response.h>
 #include <keel/router.h>
 
+#include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -124,6 +125,25 @@ JSValue hull_js_make_request(JSContext *ctx, KlRequest *req)
  *   res.redirect(url, code) → HTTP redirect
  */
 
+/*
+ * Copy body data into runtime-owned buffer so it survives until
+ * Keel sends the response (kl_response_body borrows the pointer).
+ */
+static const char *hull_js_stash_body(JSContext *ctx, const char *data,
+                                       size_t len)
+{
+    HullJS *js = (HullJS *)JS_GetContextOpaque(ctx);
+    if (!js)
+        return NULL;
+    free(js->response_body);
+    js->response_body = malloc(len + 1);
+    if (!js->response_body)
+        return NULL;
+    memcpy(js->response_body, data, len);
+    js->response_body[len] = '\0';
+    return js->response_body;
+}
+
 /* Class ID for response opaque data */
 static JSClassID hull_response_class_id;
 
@@ -205,9 +225,13 @@ static JSValue js_res_json(JSContext *ctx, JSValueConst this_val,
     if (!JS_IsException(result)) {
         const char *json_str = JS_ToCString(ctx, result);
         if (json_str) {
-            kl_response_header(res, "Content-Type", "application/json");
-            kl_response_body(res, json_str, strlen(json_str));
+            size_t json_len = strlen(json_str);
+            const char *copy = hull_js_stash_body(ctx, json_str, json_len);
             JS_FreeCString(ctx, json_str);
+            if (copy) {
+                kl_response_header(res, "Content-Type", "application/json");
+                kl_response_body(res, copy, json_len);
+            }
         }
     }
 
@@ -229,9 +253,13 @@ static JSValue js_res_html(JSContext *ctx, JSValueConst this_val,
 
     const char *html = JS_ToCString(ctx, argv[0]);
     if (html) {
-        kl_response_header(res, "Content-Type", "text/html; charset=utf-8");
-        kl_response_body(res, html, strlen(html));
+        size_t html_len = strlen(html);
+        const char *copy = hull_js_stash_body(ctx, html, html_len);
         JS_FreeCString(ctx, html);
+        if (copy) {
+            kl_response_header(res, "Content-Type", "text/html; charset=utf-8");
+            kl_response_body(res, copy, html_len);
+        }
     }
 
     return JS_UNDEFINED;
@@ -247,9 +275,13 @@ static JSValue js_res_text(JSContext *ctx, JSValueConst this_val,
 
     const char *text = JS_ToCString(ctx, argv[0]);
     if (text) {
-        kl_response_header(res, "Content-Type", "text/plain; charset=utf-8");
-        kl_response_body(res, text, strlen(text));
+        size_t text_len = strlen(text);
+        const char *copy = hull_js_stash_body(ctx, text, text_len);
         JS_FreeCString(ctx, text);
+        if (copy) {
+            kl_response_header(res, "Content-Type", "text/plain; charset=utf-8");
+            kl_response_body(res, copy, text_len);
+        }
     }
 
     return JS_UNDEFINED;
