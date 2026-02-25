@@ -2,18 +2,16 @@
 
 Local-first application platform. Single binary, zero dependencies, runs anywhere.
 
-Hull embeds six C libraries into one portable executable:
+Write backend logic in Lua, frontend in HTML5/JS, data in SQLite. `hull build` produces a single portable executable — under 2 MB — that runs on Linux, macOS, Windows, FreeBSD, OpenBSD, and NetBSD.
 
-| Component | Purpose |
-|-----------|---------|
-| [Keel](https://github.com/artalis-io/keel) | HTTP server (epoll/kqueue/io_uring/poll) |
-| Lua 5.4 | Application scripting |
-| SQLite | Database |
-| mbedTLS | TLS client |
-| TweetNaCl | Ed25519 signatures |
-| pledge/unveil | Kernel sandbox |
+## Start here
 
-Write backend logic in Lua, frontend in HTML5/JS, data in SQLite. `hull build` produces a single APE binary that runs on Linux, macOS, Windows, FreeBSD, OpenBSD, and NetBSD. Under 2 MB.
+| You are | Read this |
+|---------|-----------|
+| A developer who wants to build with Hull | [MANIFESTO.md](MANIFESTO.md) — design, architecture, security model, standard library |
+| A developer who wants implementation details | [docs/MANIFESTO_FULL.md](docs/MANIFESTO_FULL.md) — full feature docs with C/Lua code examples |
+| Exploring whether Hull fits your use case | [PERSONAS.md](PERSONAS.md) — eight real-world personas and how Hull solves their problems |
+| An investor evaluating the opportunity | [INVESTORS.md](INVESTORS.md) — the problem, the product, economics, moat, risks |
 
 ## What it does
 
@@ -24,9 +22,22 @@ Write backend logic in Lua, frontend in HTML5/JS, data in SQLite. `hull build` p
 - **Ed25519 licensing.** Built-in license key system for commercial distribution. Offline verification, no activation server.
 - **AI-friendly.** Lua is small, consistent, and LLMs generate it reliably. The entire dev loop — write, test, fix — works in one terminal with any AI assistant.
 
+## Architecture
+
+Six vendored C libraries, zero external dependencies:
+
+| Component | Purpose |
+|-----------|---------|
+| [Keel](https://github.com/artalis-io/keel) | HTTP server (epoll/kqueue/io_uring/poll) |
+| Lua 5.4 | Application scripting |
+| SQLite | Database |
+| mbedTLS | TLS client |
+| TweetNaCl | Ed25519 signatures |
+| pledge/unveil | Kernel sandbox |
+
 ## Status
 
-Hull is in active development. The [MANIFESTO.md](MANIFESTO.md) is the complete design document. [docs/MANIFESTO_FULL.md](docs/MANIFESTO_FULL.md) includes detailed feature documentation with implementation examples. [PERSONAS.md](PERSONAS.md) describes who Hull is for and why. [INVESTORS.md](INVESTORS.md) is the investor brief.
+Hull is in active development.
 
 ## License
 
