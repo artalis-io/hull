@@ -6,6 +6,8 @@ AI coding assistants solved code generation. Millions of people can now describe
 
 Hull is the missing piece. The AI writes Lua, `hull build` produces a single file. That file is the product. No cloud. No hosting. No dependencies. The developer owns it.
 
+The person who receives that file can trust it. Every Hull app declares exactly what it can access — files, hosts, resources. The kernel enforces it. Ed25519 signatures prove integrity. `hull inspect` and [verify.gethull.dev](https://verify.gethull.dev) let anyone verify that what the app claims is what the app does. Verifiable by guarantees, auditable by design.
+
 ## What
 
 Local-first application platform. Single binary, zero dependencies, runs anywhere.
