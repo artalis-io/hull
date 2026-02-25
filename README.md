@@ -26,7 +26,7 @@ Write backend logic in Lua, frontend in HTML5/JS, data in SQLite. `hull build` p
 
 ## Status
 
-Hull is in active development. The [MANIFESTO.md](MANIFESTO.md) is the complete design document. [docs/MANIFESTO_FULL.md](docs/MANIFESTO_FULL.md) includes detailed feature documentation with implementation examples. [PERSONAS.md](PERSONAS.md) describes who Hull is for and why.
+Hull is in active development. The [MANIFESTO.md](MANIFESTO.md) is the complete design document. [docs/MANIFESTO_FULL.md](docs/MANIFESTO_FULL.md) includes detailed feature documentation with implementation examples. [PERSONAS.md](PERSONAS.md) describes who Hull is for and why. [INVESTORS.md](INVESTORS.md) is the investor brief.
 
 ## License
 
