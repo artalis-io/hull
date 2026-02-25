@@ -1,5 +1,7 @@
 # Hull
 
+True digital freedom has arrived.
+
 ## Why
 
 AI coding assistants solved code generation. Millions of people can now describe software and have it built. But the output is always the same: a React frontend, a Node.js backend, a Postgres database, and a cloud deployment problem. The vibecoder swapped one dependency — coding skill — for another: the cloud. They don't own anything more than before. They just rent different things.
