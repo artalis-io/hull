@@ -8,6 +8,8 @@ Hull is the missing piece. The AI writes Lua, `hull build` produces a single fil
 
 Never depend on hyperscalers. Never depend on cloud vendors, database vendors, deployment pipelines, the software supply chain, or even a specific LLM provider — bring your own model, local or cloud, any that writes Lua. Six vendored C libraries. One build command. One file. That's the entire stack.
 
+Your data lives in an encrypted-at-rest SQLite file. Copy it, back it up, move it — it's yours. And Hull itself is built with Hull. `hull eject` copies the build tool into your project. No vendor lock-in. Walk away anytime and maintain your own copy.
+
 The person who receives that file can trust it. Every Hull app declares exactly what it can access — files, hosts, resources. The kernel enforces it. Ed25519 signatures prove integrity. `hull inspect` and [verify.gethull.dev](https://verify.gethull.dev) let anyone verify that what the app claims is what the app does. Verifiable by guarantees, auditable by design.
 
 ## What
