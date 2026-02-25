@@ -1,0 +1,33 @@
+# Build artifacts
+*.o
+*.a
+*.com
+*.exe
+hull
+
+# Database
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# License keys (user-specific)
+license.key
+
+# Backup files
+*.bak
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Environment
+.env
+.env.local
