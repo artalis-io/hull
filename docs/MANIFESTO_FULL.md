@@ -59,7 +59,7 @@ Three core beliefs:
 
 ### Security & Trust
 
-- **Self-declaring apps** — every Hull app exposes the files, hosts, env vars, and resources it will access. The startup banner, `hull inspect`, and verify.hull.dev show exactly what the app can touch. Hull helps you verify that what the app claims is what the app does.
+- **Self-declaring apps** — every Hull app exposes the files, hosts, env vars, and resources it will access. The startup banner, `hull inspect`, and verify.gethull.dev show exactly what the app can touch. Hull helps you verify that what the app claims is what the app does.
 - **Defense in depth** — five independent layers, each enforced separately:
   1. **Lua sandbox** — `os.execute`, `io.popen`, `loadfile`, `dofile` removed from runtime entirely. Restricted `hull.fs.*` API with C-level path validation.
   2. **C-level enforcement** — allowlist checks before every outbound connection and file access. Compiled code, not bypassable from Lua.
@@ -1146,9 +1146,9 @@ Distributed binary      ← user runs hull verify:
 
 Every link in this chain is verifiable. No link requires trust in something you can't inspect.
 
-#### Web verifier — verify.hull.dev
+#### Web verifier — verify.gethull.dev
 
-The Hull project publishes a static, single-page HTML5 application at **verify.hull.dev** (CDN-hosted, no backend, no server). The user drags and drops a Hull binary onto the page. The JavaScript running in their browser:
+The Hull project publishes a static, single-page HTML5 application at **verify.gethull.dev** (CDN-hosted, no backend, no server). The user drags and drops a Hull binary onto the page. The JavaScript running in their browser:
 
 1. Parses the binary structure to extract the platform attestation and app signature blocks
 2. Verifies the platform Ed25519 signature against the Hull project's public key (hardcoded in the page)
@@ -1159,7 +1159,7 @@ The Hull project publishes a static, single-page HTML5 application at **verify.h
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  verify.hull.dev                                        │
+│  verify.gethull.dev                                        │
 │                                                         │
 │  ┌───────────────────────────────────────────────────┐  │
 │  │  Drop a Hull binary here to verify                │  │
@@ -1663,7 +1663,7 @@ email.send({
 })
 ```
 
-The `email` module translates `email.send()` into the correct HTTP API call for the configured provider. Adding a new provider is adding a Lua file — no C changes. The provider's host is declared in `allowed_hosts`, so the network allowlist and `hull verify` / verify.hull.dev show exactly which email service the app uses.
+The `email` module translates `email.send()` into the correct HTTP API call for the configured provider. Adding a new provider is adding a Lua file — no C changes. The provider's host is declared in `allowed_hosts`, so the network allowlist and `hull verify` / verify.gethull.dev show exactly which email service the app uses.
 
 This works with scheduled tasks and background work:
 
@@ -1742,7 +1742,7 @@ Any application that talks to external services — email providers, tax authori
 
 ### Declared Environment Access
 
-Environment variable access follows the same pattern as network access: the application declares which variables it needs, and Hull only reads those. Undeclared variables return `nil`. This is part of the application's security manifest — visible at startup, in `hull inspect`, and on verify.hull.dev.
+Environment variable access follows the same pattern as network access: the application declares which variables it needs, and Hull only reads those. Undeclared variables return `nil`. This is part of the application's security manifest — visible at startup, in `hull inspect`, and on verify.gethull.dev.
 
 ```lua
 -- app.lua — declare which env vars the app needs
@@ -1775,7 +1775,7 @@ static int hull_env(lua_State *L) {
 }
 ```
 
-The application cannot read `HOME`, `PATH`, `USER`, `SSH_AUTH_SOCK`, or any other environment variable it didn't declare. The startup banner and verify.hull.dev show exactly which variables the app reads:
+The application cannot read `HOME`, `PATH`, `USER`, `SSH_AUTH_SOCK`, or any other environment variable it didn't declare. The startup banner and verify.gethull.dev show exactly which variables the app reads:
 
 ```
 Hull v0.1.0 | port 8080 | db: data.db
@@ -3396,7 +3396,7 @@ Hull and Tauri solve overlapping problems but make fundamentally different trade
 | LLM-friendliness | Rust is verbose and complex for LLMs | Lua is small (~60 keywords), LLMs generate it reliably |
 | App framework | Minimal (routing, IPC between Rust and JS) | Batteries included (auth, RBAC, email, CSV, i18n, FTS, PDF, sessions, validation) |
 | Distribution | Per-platform installers (.dmg, .msi, .deb) | Single file, no installer, no admin privileges |
-| Digital signatures | OS-level code signing ($99-299/year) | Ed25519 (free, self-managed, verify.hull.dev) |
+| Digital signatures | OS-level code signing ($99-299/year) | Ed25519 (free, self-managed, verify.gethull.dev) |
 
 **Where Tauri is stronger:**
 
@@ -3610,7 +3610,7 @@ The technical stack is not the moat. Someone with sufficient motivation could re
 The moat is the ecosystem:
 
 - **First mover in a new category.** The "vibecoder-to-product" pipeline doesn't exist yet. Hull is building it. Whoever gets there first accumulates trust, community, documentation, tutorials, and real-world applications. Catching up requires not just matching the technology but replicating the ecosystem.
-- **Trust accumulation.** Every signed Hull binary, every verify.hull.dev check, every AGPL application with visible source builds a trust network. Trust compounds over time and doesn't transfer to competitors.
+- **Trust accumulation.** Every signed Hull binary, every verify.gethull.dev check, every AGPL application with visible source builds a trust network. Trust compounds over time and doesn't transfer to competitors.
 - **Community gravity.** AGPL means every Hull application is a showcase. Commercial license is the natural upgrade path. The more apps that exist, the more discoverable Hull becomes, the more developers build with it.
 - **Ejection as trust signal.** Developers stay because Hull is useful, not because they're locked in. `hull eject` means you can leave anytime. This paradoxically increases loyalty — people trust platforms that let them leave.
 - **Simplicity as durability.** Fewer than 10 moving parts means a 2-3 person team can maintain the entire platform. Competitors building on larger stacks need larger teams to maintain parity. Hull's simplicity is a structural cost advantage.

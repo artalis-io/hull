@@ -664,19 +664,19 @@ For more information on this, and how to apply and follow the GNU AGPL, see
 
                      HULL COMMERCIAL LICENSE TERMS
 
-                  Copyright (c) 2026 Artalis IO Kft.
+                  Copyright (c) 2026 Artalis Consulting Kft.
                        All rights reserved.
 
 ==============================================================================
 
 Hull is dual-licensed. The AGPL-3.0 text above applies to all users who do
 not hold a commercial license. A commercial license, purchased from
-Artalis IO Kft., grants the following additional rights and is governed by
+Artalis Consulting Kft., grants the following additional rights and is governed by
 the terms below.
 
 1. GRANT OF LICENSE
 
-   Upon purchase, Artalis IO Kft. ("Licensor") grants the Licensee a
+   Upon purchase, Artalis Consulting Kft. ("Licensor") grants the Licensee a
    worldwide, non-exclusive, non-transferable, perpetual license to:
 
    (a) Use the Hull platform (C runtime, build tool, standard library)
@@ -738,7 +738,7 @@ the terms below.
        than AGPL-3.0, except as compiled into end-user applications.
 
    (b) Transfer the license to another individual or entity without
-       written consent from Artalis IO Kft.
+       written consent from Artalis Consulting Kft.
 
    (c) Use the license key to circumvent AGPL obligations for projects
        not developed by the licensed developer(s).
@@ -781,14 +781,14 @@ the terms below.
 
 12. CONTACT
 
-   Artalis IO Kft.
-   Email: license@artalis.io
-   Web:   https://hull.dev
+   Artalis Consulting Kft.
+   Email: info@artalis.io
+   Web:   https://gethull.dev
 
 ==============================================================================
 
-To purchase a commercial license, visit https://hull.dev or contact
-license@artalis.io.
+To purchase a commercial license, visit https://gethull.dev or contact
+info@artalis.io.
 
 For AGPL usage (free, open-source distribution with source), no
 additional license is required — the AGPL-3.0 text above applies.
