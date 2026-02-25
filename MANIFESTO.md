@@ -57,12 +57,13 @@ Three core beliefs:
 ### Security & Trust
 
 - **Self-declaring apps** — every Hull app exposes the files, hosts, env vars, and resources it will access. The startup banner, `hull inspect`, and verify.gethull.dev show exactly what the app can touch. Hull helps you verify that what the app claims is what the app does.
-- **Defense in depth** — five independent layers, each enforced separately:
+- **Defense in depth** — five independent layers (six with optional WAMR), each enforced separately:
   1. **Lua sandbox** — `os.execute`, `io.popen`, `loadfile`, `dofile` removed from runtime entirely. Restricted `hull.fs.*` API with C-level path validation.
   2. **C-level enforcement** — allowlist checks before every outbound connection and file access. Compiled code, not bypassable from Lua.
   3. **Allocator model** — Keel's `KlAllocator` vtable routes all allocations through a pluggable interface with `old_size`/`size` tracking on every realloc and free. Enables arena/pool allocation, bounded memory, and leak detection. No raw `malloc`/`free` anywhere in the codebase.
-  4. **Kernel sandbox** — pledge/unveil syscall filtering on Linux (SECCOMP BPF + Landlock LSM) and OpenBSD (native). The process physically cannot exceed its declared capabilities.
+  4. **Kernel sandbox** — pledge/unveil syscall filtering on Linux (SECCOMP BPF + Landlock LSM) and OpenBSD (native). Cosmopolitan libc provides libc-level pledge/unveil emulation on Windows and other platforms where native kernel sandboxing is unavailable. The process physically cannot exceed its declared capabilities.
   5. **Digital signatures** — Ed25519 platform + app signatures prove the C layer is legitimate Hull and hasn't been tampered with.
+  6. **WASM sandbox** *(when WAMR is enabled)* — compute plugins run in WAMR's isolated linear memory with no I/O imports, gas-metered execution, and configurable memory/instruction caps. An additional isolation layer for compiled code that complements the Lua sandbox.
 - **Sanitizer-hardened C runtime** — Keel (Hull's HTTP server) is developed and tested under the full sanitizer suite:
   - **ASan** (AddressSanitizer) — heap/stack buffer overflow, use-after-free, double-free, memory leaks
   - **UBSan** (UndefinedBehaviorSanitizer) — signed overflow, null dereference, misaligned access, shift overflow
@@ -73,7 +74,7 @@ Three core beliefs:
 - **Fuzz-tested** — libFuzzer targets cover the primary attack surface (untrusted network input): HTTP parser + chunked decoder, multipart/form-data parser. Fuzz targets run with ASan + UBSan enabled. Corpus-driven, crash-reproducing, continuous.
 - **LLM-based C audit** — Claude Code's `c-audit` skill reviews Hull's C modules for memory safety, buffer handling, integer overflow, and undefined behavior. Automated review catches patterns that static analysis misses. Used during development, not as a replacement for traditional tools — as a layer on top.
 - **Lua-side quality** — Selene (Lua linter) and `luacheck` for static analysis of the Lua standard library. Hull's `hull test` framework runs the application test suite. LLM-friendly error output (file:line, stack trace, source context) enables AI-assisted debugging and review of Lua code.
-- **Auditable** — 6 vendored C libs, ~1,500 lines of binding code. One person can review in a day.
+- **Auditable** — 6 vendored C libs (+1 optional), ~1,500 lines of binding code. One person can review in a day. The C attack surface is minimal.
 - **Zero supply chain risk** — no npm, no pip, no crates.io, no package managers, no transitive dependencies
 - **Encrypted at rest** — AES-256 database encryption, license-key-derived
 
@@ -89,7 +90,8 @@ Three core beliefs:
 
 ### Runtime
 
-- **2 MB total binary** — Keel + Lua + SQLite + mbedTLS + TweetNaCl + pledge/unveil
+- **Under 2 MB total binary** — Keel + Lua + SQLite + mbedTLS + TweetNaCl + pledge/unveil (under 2.5 MB with optional WAMR)
+- **Fast enough — and native speed when you need it.** Lua is 10-30x faster than Python and 5-10x faster than Ruby for application logic. For HTTP handlers, business logic, and database queries, Lua is never the bottleneck — I/O is. When you hit a wall on numerical computation, image processing, or CPU-bound workloads, optional WASM compute plugins (via WAMR) let you drop to near-native speed in C, Rust, or Zig — sandboxed, gas-metered, no I/O. Most Hull apps will never need WAMR. The ones that do get native performance without leaving the sandbox.
 - **Batteries included** — routing, auth, RBAC, email, CSV, i18n, FTS, PDF, templates, validation, rate limiting, WebSockets
 - **Single-threaded event loop** — easy to reason about, no race conditions, no deadlocks
 - **Cooperative multitasking** — cron jobs, long-running batch, background tasks via Lua coroutines
@@ -151,18 +153,19 @@ Hull is the third option nobody's offering: properly structured data that you st
 
 ## What Hull Is
 
-Hull is a self-contained application runtime that embeds six C libraries into a single binary:
+Hull is a self-contained application runtime that embeds six C libraries into a single binary, built on [Cosmopolitan libc](https://github.com/jart/cosmopolitan) for cross-platform APE binaries:
 
 | Component | Purpose | Size |
 |-----------|---------|------|
 | [Keel](https://github.com/artalis-io/keel) | HTTP server (epoll/kqueue/io_uring/poll) | ~60 KB |
-| Lua 5.4 | Application scripting | ~280 KB |
-| SQLite | Database | ~600 KB |
-| mbedTLS | TLS client for external API calls | ~400 KB |
-| TweetNaCl | Ed25519 license key signatures | ~8 KB |
+| [Lua 5.4](https://www.lua.org/) | Application scripting | ~280 KB |
+| [SQLite](https://sqlite.org/) | Database | ~600 KB |
+| [mbedTLS](https://github.com/Mbed-TLS/mbedtls) | TLS client for external API calls | ~400 KB |
+| [TweetNaCl](https://tweetnacl.cr.yp.to/) | Ed25519 license key signatures | ~8 KB |
 | [pledge/unveil](https://github.com/jart/pledge) | Kernel sandbox (Justine Tunney's polyfill) | ~30 KB |
+| [WAMR](https://github.com/bytecodealliance/wasm-micro-runtime) | WebAssembly compute plugins *(optional)* | ~85 KB |
 
-Total: under 2 MB. Runs on Linux, macOS, Windows, FreeBSD, OpenBSD, NetBSD from a single binary via Cosmopolitan C (Actually Portable Executable).
+Total: under 2 MB (under 2.5 MB with optional WAMR). Runs on Linux, macOS, Windows, FreeBSD, OpenBSD, NetBSD from a single binary via Cosmopolitan C (Actually Portable Executable).
 
 Hull is not a web framework. It is a platform for building local-first desktop applications that use an HTML5/JS frontend served to the user's browser. The user double-clicks a file, a browser tab opens, and they have a working application. Their data never leaves their machine.
 
@@ -184,7 +187,7 @@ Every design decision follows from one constraint: **the end user should be able
 
 **HTML5/JS frontend** because every widget, form element, date picker, and print stylesheet already exists. The developer writes standard HTML, CSS, and JavaScript — any framework or none. Building a native GUI toolkit would be a massive scope increase for no user benefit. The user doesn't know or care that localhost is involved. They see a browser tab with a form. That's an application to them.
 
-**pledge/unveil** because "your data is safe" should be a provable technical guarantee, not a policy promise. A Hull application declares at startup exactly what it can access: its own database file, its own directory, one network port. The kernel enforces this via syscall filtering. The application physically cannot exfiltrate data, access other files, or spawn processes. This is not a sandbox configuration — it is a property of the binary, verifiable by inspection. Hull vendors [Justine Tunney's pledge/unveil polyfill](https://github.com/jart/pledge) which ports OpenBSD's sandbox APIs to Linux using SECCOMP BPF for syscall filtering and Landlock LSM (Linux 5.13+) for filesystem restrictions. On OpenBSD, the native pledge/unveil syscalls are used directly. On macOS and Windows, the sandbox is not available at the kernel level — Hull still runs, but without the syscall-level enforcement. The security model degrades gracefully: full kernel sandbox on Linux and OpenBSD, application-level safety guarantees everywhere else.
+**pledge/unveil** because "your data is safe" should be a provable technical guarantee, not a policy promise. A Hull application declares at startup exactly what it can access: its own database file, its own directory, one network port. The kernel enforces this via syscall filtering. The application physically cannot exfiltrate data, access other files, or spawn processes. This is not a sandbox configuration — it is a property of the binary, verifiable by inspection. Hull vendors [Justine Tunney's pledge/unveil polyfill](https://github.com/jart/pledge) which ports OpenBSD's sandbox APIs to Linux using SECCOMP BPF for syscall filtering and Landlock LSM (Linux 5.13+) for filesystem restrictions. On OpenBSD, the native pledge/unveil syscalls are used directly. On macOS and Windows, native kernel sandboxing is unavailable — but [Cosmopolitan libc](https://github.com/jart/cosmopolitan), the cross-platform runtime that makes APE binaries possible, provides libc-level pledge/unveil emulation that restricts the process at the C library layer. The security model degrades gracefully: full kernel sandbox on Linux and OpenBSD, libc-level enforcement via Cosmopolitan on other platforms, application-level safety guarantees everywhere.
 
 ## What Gap It Fills
 
@@ -204,7 +207,7 @@ The closest alternatives and why they fall short:
 
 **Traditional web frameworks (Express, Django, Rails, Laravel)** — require runtime installation, package managers, database servers, and hosting. Designed for cloud deployment, not local-first applications. Every one of these stacks depends on a package manager ecosystem (npm, pip, composer, bundler) with the same supply-chain risks as Electron and Rust/Go, plus the operational attack surface of a production server.
 
-Hull fills the gap: **a complete application runtime in under 2 MB that produces a single file containing an HTTP server, a scripting engine, a database, and a web UI, runnable on any operating system, with kernel-enforced security, requiring zero installation.**
+Hull fills the gap: **a complete application runtime in under 2 MB that produces a single file containing an HTTP server, a scripting engine, a database, and a web UI, runnable on any operating system, with kernel-enforced security, requiring zero installation.** Optional WASM compute plugins add ~85 KB for apps that need native-speed computation.
 
 ## The Vibecoding Problem
 
@@ -314,6 +317,7 @@ All three layers packaged into a single binary by:
 │             Platform Layer (C)               │
 │         Keel + Lua + SQLite + mbedTLS        │
 │         + TweetNaCl + pledge/unveil          │
+│         + WAMR (optional WASM compute)       │
 │                                              │
 │  HTTP server, Lua runtime, DB engine         │
 │  TLS client, license verification            │
@@ -575,7 +579,8 @@ hull.com (APE binary, ~2 MB)
 │   ├── SQLite         # database
 │   ├── mbedTLS        # TLS
 │   ├── TweetNaCl      # signatures
-│   └── pledge/unveil  # sandbox
+│   ├── pledge/unveil  # sandbox
+│   └── WAMR          # WASM compute (optional)
 ├── Build Tool Lua Layer (signed by artalis-io)
 │   ├── cli.lua        # command dispatch
 │   ├── scaffold.lua   # project templates
@@ -817,13 +822,13 @@ Hull's security is layered:
 
 This is enforced by the operating system kernel. It is not a policy — it is a syscall-level guarantee. Hull vendors Justine Tunney's [pledge/unveil polyfill](https://github.com/jart/pledge) for Linux (SECCOMP BPF + Landlock LSM). On OpenBSD, native syscalls are used. On macOS and Windows, the sandbox is unavailable at the kernel level — the application runs without syscall restrictions, relying on OS-level permissions and application-layer safety instead. The strongest security posture is achieved on Linux and OpenBSD.
 
-**Supply chain** — six vendored C libraries, all designed for embedding, all auditable. No package manager, no transitive dependencies, no lockfiles, no supply chain attacks. The entire dependency tree is readable in an afternoon.
+**Supply chain** — six vendored C libraries (plus optional WAMR), all designed for embedding, all auditable. No package manager, no transitive dependencies, no lockfiles, no supply chain attacks. The entire dependency tree is readable in an afternoon.
 
 **SQL injection prevention** — all database access goes through parameterized queries at the C binding layer. Lua code cannot construct raw SQL that reaches SQLite without parameter binding.
 
 **License verification in compiled C** — not in Lua scripts that can be trivially edited. Verification checks are distributed across multiple functions in the compiled binary.
 
-**Minimal, auditable C surface** — Hull's own C code (the binding layer, license verification, HTTP client, startup sequence) is roughly 1,500 lines. Not 150,000 — fifteen hundred. A single security auditor can read the entire codebase in a day. The vendored libraries (Keel, Lua, SQLite, mbedTLS, TweetNaCl) are all established, battle-tested projects with decades of combined security scrutiny. The total attack surface is small and enumerable.
+**Minimal, auditable C surface** — Hull's own C code (the binding layer, license verification, HTTP client, startup sequence) is roughly 1,500 lines. Not 150,000 — fifteen hundred. A single security auditor can read the entire codebase in a day. The vendored libraries (Keel, Lua, SQLite, mbedTLS, TweetNaCl — plus optional WAMR) are all established, battle-tested projects with decades of combined security scrutiny. Cosmopolitan libc provides the cross-platform runtime and libc-level pledge/unveil emulation on platforms without native kernel sandboxing. The total attack surface is small and enumerable.
 
 **Lua sandbox and restricted file I/O** — Lua was designed to be embedded in hostile environments (game engines, network equipment, industrial controllers). The C host controls exactly which Lua standard library functions are available. Hull removes the entire `io` and `os` standard libraries, plus `loadfile` and `dofile`, from the Lua environment before any user code runs. These functions do not exist in the runtime — not deprecated, not blocked by policy, removed entirely.
 
@@ -1223,7 +1228,7 @@ This closes the trust loop for non-technical users. You don't need to understand
 | Can you verify the author? | Yes (optional Ed25519 app signature) | Code signing (expensive, opaque CAs) | Code signing (same) | No |
 | Can you verify the build? | Yes (reproducible, CI-built, signed) | Theoretically (practically impossible) | Yes (reproducible builds possible) | No |
 | Can you see what it accesses? | Yes (startup banner, kernel-enforced) | No | No | No |
-| Supply chain deps | 6 vendored C libs | 500-1,500 npm packages | 50-400 crates/modules | Unknown |
+| Supply chain deps | 6 vendored C libs (+1 optional) | 500-1,500 npm packages | 50-400 crates/modules | Unknown |
 | Can one person audit it? | Yes, in a day | No | No | No |
 | Cost to sign | Free (Ed25519 key pair) | $99-299/yr (Apple/MS certificates) | $99-299/yr (same) | N/A |
 
@@ -1311,6 +1316,7 @@ Hull ships a batteries-included Lua standard library embedded in the binary. Ful
 | **limit** | Rate limiting middleware (token bucket algorithm) | ~80 lines |
 | **session** | Cookie-based sessions stored in SQLite | ~60 lines |
 | **csrf** | CSRF token generation and verification middleware | ~40 lines |
+| **plugin** | WASM compute plugin invocation (`plugin.call`, `plugin.preload`) | C bridge |
 
 **Platform features documented in detail:**
 
@@ -1350,7 +1356,9 @@ Hull is honest about its constraints. These are known trade-offs, not bugs.
 
 **Performance.** Keel (Hull's HTTP server) is designed for performance — epoll/kqueue/io_uring, non-blocking I/O, pre-allocated connection pools. But Hull has not been formally benchmarked against other frameworks. For the target workload (local tool, 1-5 users), performance is not a concern. Benchmarks will be published when the platform is mature enough for them to be meaningful.
 
-**Windows and macOS sandbox.** pledge/unveil provides kernel-enforced sandboxing on Linux (SECCOMP BPF + Landlock LSM) and OpenBSD (native syscalls). On macOS and Windows, the kernel sandbox is not available. Hull still runs — the Lua sandbox (restricted stdlib, C-level path validation, network allowlist) provides application-level security on all platforms. The strongest security posture requires Linux or OpenBSD. Windows App Container (available since Windows 8, default-deny for filesystem/network/registry/IPC) and macOS App Sandbox are viable future directions for platform-specific sandbox enforcement. Both are on the roadmap but not yet implemented.
+**Windows and macOS sandbox.** pledge/unveil provides kernel-enforced sandboxing on Linux (SECCOMP BPF + Landlock LSM) and OpenBSD (native syscalls). On macOS and Windows, native kernel sandboxing is unavailable — but Cosmopolitan libc provides libc-level pledge/unveil emulation, and the Lua sandbox (restricted stdlib, C-level path validation, network allowlist) provides application-level security on all platforms. The C attack surface is minimal (~1,500 lines of binding code). The strongest security posture requires Linux or OpenBSD. Windows App Container (available since Windows 8, default-deny for filesystem/network/registry/IPC) and macOS App Sandbox are viable future directions for platform-specific sandbox enforcement. Both are on the roadmap but not yet implemented.
+
+**WASM plugins are optional and compute-only.** Most Hull apps don't need WAMR — Lua is fast enough for HTTP handlers, business logic, and database queries. When WAMR is enabled, plugins have no I/O capabilities — no filesystem, no network, no time, no random. They are pure functions: input bytes in, output bytes out. All I/O must go through Lua. This is by design — it preserves Lua as the single capability gate and keeps the security model auditable. If a plugin needs to read a file or call an API, Lua reads it and passes the data in.
 
 **No mobile.** Hull produces desktop executables. The Lua + SQLite core could be embedded in native mobile apps (iOS/Android) as a library, and the HTML5/JS frontend could run in a mobile webview. This is a future roadmap item, not a current capability.
 
@@ -1366,7 +1374,7 @@ Hull and Tauri solve overlapping problems but make fundamentally different trade
 | Frontend rendering | System webview (WKWebView, WebView2, WebKitGTK) | User's browser (any browser) |
 | Binary output | Per-platform (separate macOS, Windows, Linux builds) | Single APE binary (runs on all platforms) |
 | Database | None built-in (bring your own) | SQLite embedded, with migrations, encryption, FTS |
-| Dependencies | 200-400 crates from crates.io | 6 vendored C libraries, zero package manager |
+| Dependencies | 200-400 crates from crates.io | 6 vendored C libraries (+1 optional), zero package manager |
 | Build time | 60-120 seconds (Rust compilation) | Under 3 seconds (C compilation) |
 | Binary size | 5-15 MB (varies by platform and webview) | Under 2 MB (all platforms, all features) |
 | Sandbox | Inherits from OS webview sandbox | pledge/unveil (kernel-enforced on Linux/OpenBSD) |
@@ -1429,7 +1437,7 @@ Hull's value proposition depends on the platform being maintained. What happens 
 
 **The code is AGPL.** The entire Hull source — C runtime, build tool, standard library — is open source under AGPL-3.0. Anyone can fork, build, and distribute Hull from source. The Makefile builds the entire platform from scratch without hull.com (`make CC=cosmocc`). No proprietary component exists that couldn't be rebuilt from the published source.
 
-**The dependencies are vendored.** All six C libraries are included in the Hull repository. No external downloads, no package manager fetches, no URLs that could go offline. A git clone of the Hull repo contains everything needed to build the platform.
+**The dependencies are vendored.** All six core C libraries (plus optional WAMR) are included in the Hull repository. No external downloads, no package manager fetches, no URLs that could go offline. A git clone of the Hull repo contains everything needed to build the platform.
 
 **The ejection path is permanent.** `hull eject` copies hull.com into the project. An ejected project is fully self-contained — it can build production binaries forever, even if hull.com's website, CDN, and every artalis-io server vanishes. The ejected binary is signed and functional indefinitely.
 
@@ -1602,7 +1610,7 @@ The moat is the ecosystem:
 4. **Supply chain attacks are front-page news** — organizations actively want fewer dependencies
 5. **Hull is the only platform combining:** AI-friendly scripting + single-binary distribution + kernel sandbox + zero supply chain + built-in licensing + digital signatures
 6. **Platform plays compound:** every app built on Hull increases the ecosystem value
-7. **Minimal burn:** 6 vendored C libraries = small maintenance surface. A 2-3 person team can build and maintain Hull v1.0
+7. **Minimal burn:** 6 vendored C libraries (+1 optional) = small maintenance surface. A 2-3 person team can build and maintain Hull v1.0
 
 ### Path to Profitability
 

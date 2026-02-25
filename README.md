@@ -36,20 +36,22 @@ Write backend logic in Lua, frontend in HTML5/JS, data in SQLite. `hull build` p
 - **Built-in everything.** Routing, auth, RBAC, email, CSV, i18n, FTS, PDF, templates, validation, rate limiting, WebSockets, sessions, CSRF.
 - **Sandboxed.** Kernel sandbox (pledge/unveil) on Linux/OpenBSD. Windows App Container and macOS App Sandbox are on the roadmap. Lua sandbox is always in effect on all platforms.
 - **Own the business outcome.** Deploy it on your terms. License it on your terms. Built-in Ed25519 license key system for commercial distribution. Offline verification, no activation server. No platform takes a cut.
+- **Native speed when you need it.** Lua is faster than Python and Ruby for application logic — fast enough for HTTP handlers, business logic, and database queries. When you need more, optional WASM compute plugins let you write performance-critical code in C, Rust, or Zig. Sandboxed, gas-metered, no I/O — pure computation at near-native speed. Lua stays in control.
 - **AI-friendly.** Zero compilation — instant iteration speed. Lua is small, consistent, and LLMs generate it reliably. Errors include file, line, stack trace, and request context — piped straight to the LLM. The entire frontend and backend conversation is auditable, so you can steer the LLM to adhere to your specs. Ralph loop it, Gastown it, or just let your agentic tool harness do its job — Hull's zero-compilation feedback loop is built for autonomous iteration.
 
 ## Architecture
 
-Six vendored C libraries, zero external dependencies:
+Six vendored C libraries, zero external dependencies. Built on [Cosmopolitan libc](https://github.com/jart/cosmopolitan) for cross-platform APE binaries.
 
 | Component | Purpose |
 |-----------|---------|
 | [Keel](https://github.com/artalis-io/keel) | HTTP server (epoll/kqueue/io_uring/poll) |
-| Lua 5.4 | Application scripting |
-| SQLite | Database |
-| mbedTLS | TLS client |
-| TweetNaCl | Ed25519 signatures |
-| pledge/unveil | Kernel sandbox |
+| [Lua 5.4](https://www.lua.org/) | Application scripting |
+| [SQLite](https://sqlite.org/) | Database |
+| [mbedTLS](https://github.com/Mbed-TLS/mbedtls) | TLS client |
+| [TweetNaCl](https://tweetnacl.cr.yp.to/) | Ed25519 signatures |
+| [pledge/unveil](https://github.com/jart/pledge) | Kernel sandbox |
+| [WAMR](https://github.com/bytecodealliance/wasm-micro-runtime) | WebAssembly compute plugins *(optional)* |
 
 ## Status
 

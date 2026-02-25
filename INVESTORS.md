@@ -18,7 +18,7 @@ Hull is that piece.
 
 Hull is a local-first application platform. The developer writes backend logic in Lua, frontend in HTML5/JS, data in SQLite. `hull build` compiles everything into a single portable executable — under 2 MB — that runs on Linux, macOS, Windows, FreeBSD, OpenBSD, and NetBSD.
 
-Six vendored C libraries. Zero external dependencies. No package manager. No runtime installation. No cloud. The user double-clicks a file and has a working application. Their data never leaves their machine.
+Six vendored C libraries (plus an optional seventh — WAMR — for WASM compute plugins). Zero external dependencies. No package manager. No runtime installation. No cloud. The user double-clicks a file and has a working application. Their data never leaves their machine.
 
 Hull ships batteries included: routing, authentication, RBAC, email, CSV import/export, internationalization, full-text search, PDF generation, HTML templates, input validation, rate limiting, WebSockets, sessions, CSRF protection. A vibecoder describes an invoicing app to an AI, the AI writes Lua, `hull build` produces a file. That file is the product.
 
@@ -30,7 +30,7 @@ Three forces are converging:
 
 **2. Local-first is being driven by regulation.** GDPR, CCPA, the EU Digital Markets Act, and data sovereignty laws are pushing data back to the edge. Organizations want software that keeps data local, not software that sends it to a server they don't control. This is not ideology — it's compliance.
 
-**3. Supply chain security is a board-level concern.** SolarWinds, Log4j, xz-utils. "How many dependencies does this have?" is a question executives ask now. Hull's answer — six, all vendored, all auditable in a day — is the strongest possible position.
+**3. Supply chain security is a board-level concern.** SolarWinds, Log4j, xz-utils. "How many dependencies does this have?" is a question executives ask now. Hull's answer — six (plus one optional), all vendored, all auditable in a day — is the strongest possible position.
 
 The timing window is narrow. Whoever builds the vibecoder-to-product pipeline first accumulates the trust, community, and ecosystem that defines the category. This is a land grab.
 
@@ -84,7 +84,7 @@ The moat is the ecosystem:
 
 **Ejection as trust signal.** `hull eject` copies the build tool into the project. Developers can leave anytime. This paradoxically increases loyalty — people trust platforms that let them leave. No lock-in means the platform must earn retention through value, which is exactly the kind of retention that lasts.
 
-**Simplicity as structural advantage.** Six vendored C libraries. A 2-3 person team maintains the entire platform. Competitors building on larger stacks need larger teams for parity. Hull's simplicity is a cost advantage that compounds.
+**Simplicity as structural advantage.** Six vendored C libraries (plus one optional). A 2-3 person team maintains the entire platform. Competitors building on larger stacks need larger teams for parity. Hull's simplicity is a cost advantage that compounds.
 
 ## Comparables
 
@@ -103,9 +103,9 @@ Hull's cost structure is leaner than all of these. No servers to operate for cus
 
 **Lua adoption.** Lua is less popular than Python, JavaScript, or Rust. Developers may resist learning a new language. Mitigation: vibecoders don't learn languages — they describe what they want and the AI writes it. Lua's simplicity makes LLM generation more reliable, not less. The developer never needs to read Lua if they don't want to.
 
-**Single-threaded architecture.** SQLite serializes writes. Hull handles 1-5 concurrent users well. It won't handle 1,000. Mitigation: this is the design — Hull is for local tools, not cloud services. The limitation matches the use case. WASM workers are on the roadmap for CPU-intensive computation.
+**Single-threaded architecture.** SQLite serializes writes. Hull handles 1-5 concurrent users well. It won't handle 1,000. Mitigation: this is the design — Hull is for local tools, not cloud services. The limitation matches the use case. Optional WASM compute plugins (via WAMR) provide near-native speed for CPU-intensive computation when needed — most apps won't need them.
 
-**Sandbox gaps.** Kernel-enforced sandboxing (pledge/unveil) only works on Linux and OpenBSD. macOS and Windows rely on application-level safety. Mitigation: Windows App Container and macOS App Sandbox are on the roadmap. The Lua sandbox provides meaningful protection on all platforms.
+**Sandbox gaps.** Kernel-enforced sandboxing (pledge/unveil) only works on Linux and OpenBSD. macOS and Windows get libc-level pledge/unveil emulation via Cosmopolitan libc, plus application-level safety via the Lua sandbox. The C attack surface is minimal (~1,500 lines of binding code). Mitigation: Windows App Container and macOS App Sandbox are on the roadmap.
 
 **Platform risk.** Hull depends on Cosmopolitan C for cross-platform binaries. If Cosmopolitan development stalls, Hull's "runs anywhere" promise weakens. Mitigation: Cosmopolitan is open source and actively maintained by Justine Tunney. Hull could fall back to per-platform builds — less elegant, still functional.
 
@@ -127,7 +127,7 @@ This protects investors and customers. It also signals confidence — we wouldn'
 
 Artalis Consulting Kft. Budapest, Hungary.
 
-Small team, low burn, high leverage. The platform's simplicity is intentional — six C libraries means a 2-3 person team can build and maintain the entire platform. This is not a company that needs 50 engineers. It's a company that needs 3 good ones.
+Small team, low burn, high leverage. The platform's simplicity is intentional — six core C libraries (plus one optional) means a 2-3 person team can build and maintain the entire platform. This is not a company that needs 50 engineers. It's a company that needs 3 good ones.
 
 ## What we're looking for
 
