@@ -1,5 +1,13 @@
 # Hull
 
+## Why
+
+AI coding assistants solved code generation. Millions of people can now describe software and have it built. But the output is always the same: a React frontend, a Node.js backend, a Postgres database, and a cloud deployment problem. The vibecoder swapped one dependency — coding skill — for another: the cloud. They don't own anything more than before. They just rent different things.
+
+Hull is the missing piece. The AI writes Lua, `hull build` produces a single file. That file is the product. No cloud. No hosting. No dependencies. The developer owns it.
+
+## What
+
 Local-first application platform. Single binary, zero dependencies, runs anywhere.
 
 Write backend logic in Lua, frontend in HTML5/JS, data in SQLite. `hull build` produces a single portable executable — under 2 MB — that runs on Linux, macOS, Windows, FreeBSD, OpenBSD, and NetBSD.
