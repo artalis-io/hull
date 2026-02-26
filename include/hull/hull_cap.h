@@ -17,6 +17,7 @@
 /* Forward declarations for vendor types */
 typedef struct sqlite3 sqlite3;
 typedef struct sqlite3_stmt sqlite3_stmt;
+typedef struct HlAllocator HlAllocator;
 
 /* ── Value types (runtime-agnostic) ─────────────────────────────────── */
 
@@ -77,11 +78,13 @@ typedef int (*HlRowCallback)(void *ctx, HlColumn *cols, int ncols);
 /*
  * Execute a SELECT query with parameterized binding.
  * Calls cb(ctx, cols, ncols) for each result row.
+ * If alloc is non-NULL, overflow heap allocations are tracked.
  * Returns 0 on success, -1 on error.
  */
 int hl_cap_db_query(sqlite3 *db, const char *sql,
                       const HlValue *params, int nparams,
-                      HlRowCallback cb, void *ctx);
+                      HlRowCallback cb, void *ctx,
+                      HlAllocator *alloc);
 
 /*
  * Execute a non-SELECT statement (INSERT/UPDATE/DELETE) with parameterized

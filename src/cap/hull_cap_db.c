@@ -9,6 +9,7 @@
  */
 
 #include "hull/hull_cap.h"
+#include "hull/hull_alloc.h"
 #include <sqlite3.h>
 #include <stdlib.h>
 #include <string.h>
@@ -86,7 +87,8 @@ static void column_to_value(sqlite3_stmt *stmt, int col, HlValue *out)
 
 int hl_cap_db_query(sqlite3 *db, const char *sql,
                       const HlValue *params, int nparams,
-                      HlRowCallback cb, void *ctx)
+                      HlRowCallback cb, void *ctx,
+                      HlAllocator *alloc)
 {
     if (!db || !sql || !cb)
         return -1;
@@ -122,11 +124,13 @@ int hl_cap_db_query(sqlite3 *db, const char *sql,
             sqlite3_finalize(stmt);
             return -1;
         }
-        cols = malloc((size_t)ncols * sizeof(HlColumn));
-        vals = malloc((size_t)ncols * sizeof(HlValue));
+        size_t cols_size = (size_t)ncols * sizeof(HlColumn);
+        size_t vals_size = (size_t)ncols * sizeof(HlValue);
+        cols = hl_alloc_malloc(alloc, cols_size);
+        vals = hl_alloc_malloc(alloc, vals_size);
         if (!cols || !vals) {
-            free(cols);
-            free(vals);
+            hl_alloc_free(alloc, cols, cols_size);
+            hl_alloc_free(alloc, vals, vals_size);
             sqlite3_finalize(stmt);
             return -1;
         }
@@ -151,8 +155,8 @@ int hl_cap_db_query(sqlite3 *db, const char *sql,
         result = -1;
 
     if (cols != stack_cols) {
-        free(cols);
-        free(vals);
+        hl_alloc_free(alloc, cols, (size_t)ncols * sizeof(HlColumn));
+        hl_alloc_free(alloc, vals, (size_t)ncols * sizeof(HlValue));
     }
 
     sqlite3_finalize(stmt);

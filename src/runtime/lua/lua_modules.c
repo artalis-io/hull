@@ -312,7 +312,7 @@ static int lua_db_query(lua_State *L)
     };
 
     int rc = hl_cap_db_query(lua->db, sql, params, nparams,
-                                lua_query_row_cb, &qc);
+                                lua_query_row_cb, &qc, lua->alloc);
 
     /*
      * lua_to_hl_values left nparams values on the stack (to keep string

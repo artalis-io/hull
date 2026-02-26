@@ -393,7 +393,7 @@ static JSValue js_db_query(JSContext *ctx, JSValueConst this_val,
     };
 
     int rc = hl_cap_db_query(js->db, sql, params, nparams,
-                               js_query_row_cb, &qc);
+                               js_query_row_cb, &qc, js->alloc);
 
     js_free_hl_values(ctx, params, nparams);
     JS_FreeCString(ctx, sql);

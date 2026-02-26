@@ -9,6 +9,7 @@
  */
 
 #include "hull/js_runtime.h"
+#include "hull/hull_alloc.h"
 #include "hull/hull_limits.h"
 #include "hull/hull_cap.h"
 #include "quickjs.h"
@@ -150,10 +151,16 @@ static const char *hl_js_stash_body(JSContext *ctx, const char *data,
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     if (!js)
         return NULL;
-    free(js->response_body);
-    js->response_body = malloc(len + 1);
+    if (js->response_body) {
+        hl_alloc_free(js->alloc, js->response_body,
+                      js->response_body_size);
+        js->response_body = NULL;
+        js->response_body_size = 0;
+    }
+    js->response_body = hl_alloc_malloc(js->alloc, len + 1);
     if (!js->response_body)
         return NULL;
+    js->response_body_size = len + 1;
     memcpy(js->response_body, data, len);
     js->response_body[len] = '\0';
     return js->response_body;

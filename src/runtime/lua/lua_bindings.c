@@ -9,6 +9,7 @@
  */
 
 #include "hull/lua_runtime.h"
+#include "hull/hull_alloc.h"
 #include "hull/hull_limits.h"
 #include "hull/hull_cap.h"
 
@@ -48,10 +49,16 @@ static const char *hl_lua_stash_body(lua_State *L, const char *data,
     HlLua *hlua = get_hl_lua_from_L(L);
     if (!hlua)
         return NULL;
-    free(hlua->response_body);
-    hlua->response_body = malloc(len + 1);
+    if (hlua->response_body) {
+        hl_alloc_free(hlua->alloc, hlua->response_body,
+                      hlua->response_body_size);
+        hlua->response_body = NULL;
+        hlua->response_body_size = 0;
+    }
+    hlua->response_body = hl_alloc_malloc(hlua->alloc, len + 1);
     if (!hlua->response_body)
         return NULL;
+    hlua->response_body_size = len + 1;
     memcpy(hlua->response_body, data, len);
     hlua->response_body[len] = '\0';
     return hlua->response_body;

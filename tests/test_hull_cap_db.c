@@ -141,7 +141,7 @@ UTEST(hl_cap_db, query_basic)
     QueryResult result = { .count = 0 };
     int rc = hl_cap_db_query(test_db,
         "SELECT name, age, score FROM users", NULL, 0,
-        collect_rows, &result);
+        collect_rows, &result, NULL);
 
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(result.count, 1);
@@ -179,7 +179,7 @@ UTEST(hl_cap_db, query_with_params)
     QueryResult result = { .count = 0 };
     int rc = hl_cap_db_query(test_db,
         "SELECT name, age, score FROM users WHERE age > ?",
-        filter, 1, collect_rows, &result);
+        filter, 1, collect_rows, &result, NULL);
 
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(result.count, 1);
@@ -204,7 +204,7 @@ UTEST(hl_cap_db, query_null_param)
     QueryResult result = { .count = 0 };
     rc = hl_cap_db_query(test_db,
         "SELECT name, age FROM users", NULL, 0,
-        collect_rows, &result);
+        collect_rows, &result, NULL);
 
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(result.count, 1);
@@ -239,7 +239,7 @@ UTEST(hl_cap_db, last_id)
 
 UTEST(hl_cap_db, null_db)
 {
-    int rc = hl_cap_db_query(NULL, "SELECT 1", NULL, 0, collect_rows, NULL);
+    int rc = hl_cap_db_query(NULL, "SELECT 1", NULL, 0, collect_rows, NULL, NULL);
     ASSERT_EQ(rc, -1);
 
     rc = hl_cap_db_exec(NULL, "SELECT 1", NULL, 0);
@@ -250,7 +250,7 @@ UTEST(hl_cap_db, null_sql)
 {
     setup_db();
 
-    int rc = hl_cap_db_query(test_db, NULL, NULL, 0, collect_rows, NULL);
+    int rc = hl_cap_db_query(test_db, NULL, NULL, 0, collect_rows, NULL, NULL);
     ASSERT_EQ(rc, -1);
 
     rc = hl_cap_db_exec(test_db, NULL, NULL, 0);
@@ -266,7 +266,7 @@ UTEST(hl_cap_db, invalid_sql)
     QueryResult result = { .count = 0 };
     int rc = hl_cap_db_query(test_db,
         "SELECT * FROM nonexistent_table", NULL, 0,
-        collect_rows, &result);
+        collect_rows, &result, NULL);
     ASSERT_EQ(rc, -1);
 
     teardown_db();
@@ -289,7 +289,7 @@ UTEST(hl_cap_db, bool_param)
     QueryResult result = { .count = 0 };
     rc = hl_cap_db_query(test_db,
         "SELECT name, age FROM users", NULL, 0,
-        collect_rows, &result);
+        collect_rows, &result, NULL);
 
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(result.count, 1);

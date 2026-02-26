@@ -144,7 +144,8 @@ else
   CFLAGS    += -DHL_ENABLE_JS -DHL_ENABLE_LUA
 endif
 
-MAIN_OBJ := $(BUILDDIR)/main.o
+ALLOC_OBJ := $(BUILDDIR)/hull_alloc.o
+MAIN_OBJ  := $(BUILDDIR)/main.o
 
 # ── Stdlib embedding (xxd) ──────────────────────────────────────────
 #
@@ -246,8 +247,8 @@ INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(SQLITE_DIR) 
 all: $(BUILDDIR)/hull
 
 # Hull binary
-$(BUILDDIR)/hull: $(CAP_OBJS) $(RT_OBJS) $(MAIN_OBJ) $(VEND_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(KEEL_LIB)
-	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(RT_OBJS) $(MAIN_OBJ) $(VEND_OBJS) \
+$(BUILDDIR)/hull: $(CAP_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MAIN_OBJ) $(VEND_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(KEEL_LIB)
+	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MAIN_OBJ) $(VEND_OBJS) \
 		$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(KEEL_LIB) -lm -lpthread
 
 # Capability sources
@@ -260,6 +261,10 @@ $(BUILDDIR)/js_%.o: $(SRCDIR)/runtime/js/%.c | $(BUILDDIR)
 
 # Lua runtime sources (depend on generated stdlib headers)
 $(BUILDDIR)/lua_rt_%.o: $(SRCDIR)/runtime/lua/%.c $(STDLIB_LUA_HDRS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+# Hull allocator
+$(ALLOC_OBJ): $(SRCDIR)/hull/hull_alloc.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Main
@@ -318,20 +323,20 @@ TEST_JS_OBJS := $(JS_RT_OBJS)
 TEST_LUA_OBJS := $(LUA_RT_OBJS)
 
 # Default test rule (capability tests — Keel needed for body reader cap)
-$(BUILDDIR)/test_%: $(TESTDIR)/test_%.c $(TEST_CAP_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(KEEL_LIB) | $(BUILDDIR)
+$(BUILDDIR)/test_%: $(TESTDIR)/test_%.c $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(KEEL_LIB) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_CAP_OBJS) \
-		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) -lm -lpthread
+		$(ALLOC_OBJ) $(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) -lm -lpthread
 
 # JS runtime test — needs QuickJS + JS runtime objects + Keel
-$(BUILDDIR)/test_js_runtime: $(TESTDIR)/test_js_runtime.c $(TEST_CAP_OBJS) $(TEST_JS_OBJS) $(QJS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(KEEL_LIB) | $(BUILDDIR)
+$(BUILDDIR)/test_js_runtime: $(TESTDIR)/test_js_runtime.c $(TEST_CAP_OBJS) $(TEST_JS_OBJS) $(ALLOC_OBJ) $(QJS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(KEEL_LIB) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(TEST_CAP_OBJS) $(TEST_JS_OBJS) $(QJS_OBJS) \
+		$(TEST_CAP_OBJS) $(TEST_JS_OBJS) $(ALLOC_OBJ) $(QJS_OBJS) \
 		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) -lm -lpthread
 
 # Lua runtime test — needs Lua + Lua runtime objects + Keel + stdlib headers
-$(BUILDDIR)/test_lua_runtime: $(TESTDIR)/test_lua_runtime.c $(TEST_CAP_OBJS) $(TEST_LUA_OBJS) $(LUA_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(KEEL_LIB) $(STDLIB_LUA_HDRS) | $(BUILDDIR)
+$(BUILDDIR)/test_lua_runtime: $(TESTDIR)/test_lua_runtime.c $(TEST_CAP_OBJS) $(TEST_LUA_OBJS) $(ALLOC_OBJ) $(LUA_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(KEEL_LIB) $(STDLIB_LUA_HDRS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(TEST_CAP_OBJS) $(TEST_LUA_OBJS) $(LUA_OBJS) \
+		$(TEST_CAP_OBJS) $(TEST_LUA_OBJS) $(ALLOC_OBJ) $(LUA_OBJS) \
 		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) -lm -lpthread
 
 test: $(TEST_BINS)
@@ -415,8 +420,8 @@ cppcheck:
 		--suppress='*:$(LOG_DIR)/*' \
 		--error-exitcode=1 \
 		-I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(SQLITE_DIR) -I$(KEEL_INC) \
-		$(SRCDIR)/main.c $(SRCDIR)/cap/*.c $(SRCDIR)/runtime/js/*.c \
-		$(SRCDIR)/runtime/lua/*.c
+		$(SRCDIR)/main.c $(SRCDIR)/hull/*.c $(SRCDIR)/cap/*.c \
+		$(SRCDIR)/runtime/js/*.c $(SRCDIR)/runtime/lua/*.c
 
 # ── Benchmark ──────────────────────────────────────────────────────
 

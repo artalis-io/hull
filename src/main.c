@@ -24,6 +24,7 @@
 #include "lauxlib.h"
 #endif
 
+#include "hull/hull_alloc.h"
 #include "hull/hull_cap.h"
 #include "hull/hull_limits.h"
 #include "hull/parse_size.h"
@@ -88,9 +89,9 @@ static void *track_route_alloc(size_t size)
     return sh_arena_calloc(route_arena, 1, size);
 }
 
-static void free_route_allocs(void)
+static void free_route_allocs(HlAllocator *a)
 {
-    sh_arena_free(route_arena);
+    hl_arena_free(a, route_arena);
     route_arena = NULL;
 }
 
@@ -292,6 +293,7 @@ static void usage(const char *prog)
             "  -b ADDR     Bind address (default: 127.0.0.1)\n"
             "  -d FILE     SQLite database file (default: data.db)\n"
             "  -m SIZE     Runtime heap limit (default: 64m)\n"
+            "  -M SIZE     Process memory limit (default: unlimited)\n"
             "  -s SIZE     JS stack size limit (default: 1m)\n"
             "  -l LEVEL    Log level: trace|debug|info|warn|error|fatal (default: info)\n"
             "  -h          Show this help\n"
@@ -308,8 +310,9 @@ int main(int argc, char **argv)
     const char *bind_addr = "127.0.0.1";
     const char *db_path = "data.db";
     const char *entry_point = NULL;
-    long heap_limit = 0;   /* 0 = use default */
-    long stack_limit = 0;  /* 0 = use default */
+    long heap_limit = 0;    /* 0 = use default */
+    long stack_limit = 0;   /* 0 = use default */
+    long mem_limit = 0;     /* 0 = unlimited */
     int log_level = LOG_INFO;
 
     /* Parse arguments */
@@ -330,6 +333,12 @@ int main(int argc, char **argv)
             heap_limit = hl_parse_size(argv[++i]);
             if (heap_limit <= 0) {
                 fprintf(stderr, "hull: invalid heap size: %s\n", argv[i]);
+                return 1;
+            }
+        } else if (strcmp(argv[i], "-M") == 0 && i + 1 < argc) {
+            mem_limit = hl_parse_size(argv[++i]);
+            if (mem_limit <= 0) {
+                fprintf(stderr, "hull: invalid memory limit: %s\n", argv[i]);
                 return 1;
             }
         } else if (strcmp(argv[i], "-s") == 0 && i + 1 < argc) {
@@ -382,8 +391,15 @@ int main(int argc, char **argv)
     log_set_quiet(true);  /* suppress default stderr callback */
     log_add_callback(hl_log_callback, stderr, log_level);
 
-    /* Create route allocation arena (256 routes × 64 bytes = 16KB) */
-    route_arena = sh_arena_create(HL_MAX_ROUTES * 64);
+    /* Initialize tracking allocator */
+    HlAllocator alloc;
+    hl_alloc_init(&alloc, (size_t)mem_limit);
+    KlAllocator kl_alloc = hl_alloc_kl(&alloc);
+
+    int ret = 1;
+
+    /* Create route allocation arena (256 routes x 64 bytes = 16KB) */
+    route_arena = hl_arena_create(&alloc, HL_MAX_ROUTES * 64);
     if (!route_arena) {
         log_error("[hull:c] route arena allocation failed");
         return 1;
@@ -395,8 +411,7 @@ int main(int argc, char **argv)
     if (rc != SQLITE_OK) {
         log_error("[hull:c] cannot open database %s: %s",
                   db_path, sqlite3_errmsg(db));
-        sqlite3_close(db);
-        return 1;
+        goto cleanup_db;
     }
 
     /* Enable WAL mode for concurrent access */
@@ -409,6 +424,7 @@ int main(int argc, char **argv)
         .bind_addr = bind_addr,
         .max_connections = HL_DEFAULT_MAX_CONN,
         .read_timeout_ms = HL_DEFAULT_READ_TIMEOUT_MS,
+        .alloc = &kl_alloc,
         .log_fn = hl_keel_log_bridge,
         .log_user_data = NULL,
     };
@@ -416,8 +432,7 @@ int main(int argc, char **argv)
     KlServer server;
     if (kl_server_init(&server, &config) != 0) {
         log_error("[hull:c] server init failed");
-        sqlite3_close(db);
-        return 1;
+        goto cleanup_db;
     }
 
 #ifdef HL_ENABLE_JS
@@ -429,26 +444,24 @@ int main(int argc, char **argv)
         HlJS js;
 
         js.db = db;
+        js.alloc = &alloc;
 
         if (hl_js_init(&js, &js_cfg) != 0) {
             log_error("[hull:c] QuickJS init failed");
-            sqlite3_close(db);
-            return 1;
+            goto cleanup_server;
         }
 
         /* Load and evaluate the app */
         if (hl_js_load_app(&js, entry_point) != 0) {
             log_error("[hull:c] failed to load %s", entry_point);
             hl_js_free(&js);
-            sqlite3_close(db);
-            return 1;
+            goto cleanup_server;
         }
 
         /* Wire JS routes into Keel */
         if (wire_js_routes(&js, &server) != 0) {
             hl_js_free(&js);
-            sqlite3_close(db);
-            return 1;
+            goto cleanup_server;
         }
 
         log_info("[hull:c] listening on %s:%d (QuickJS runtime)",
@@ -459,6 +472,7 @@ int main(int argc, char **argv)
 
         /* Cleanup */
         hl_js_free(&js);
+        ret = 0;
     }
 #endif
 
@@ -470,26 +484,24 @@ int main(int argc, char **argv)
         HlLua lua;
 
         lua.db = db;
+        lua.alloc = &alloc;
 
         if (hl_lua_init(&lua, &lua_cfg) != 0) {
             log_error("[hull:c] Lua init failed");
-            sqlite3_close(db);
-            return 1;
+            goto cleanup_server;
         }
 
         /* Load and execute the app */
         if (hl_lua_load_app(&lua, entry_point) != 0) {
             log_error("[hull:c] failed to load %s", entry_point);
             hl_lua_free(&lua);
-            sqlite3_close(db);
-            return 1;
+            goto cleanup_server;
         }
 
         /* Wire Lua routes into Keel */
         if (wire_lua_routes(&lua, &server) != 0) {
             hl_lua_free(&lua);
-            sqlite3_close(db);
-            return 1;
+            goto cleanup_server;
         }
 
         log_info("[hull:c] listening on %s:%d (Lua runtime)",
@@ -500,12 +512,17 @@ int main(int argc, char **argv)
 
         /* Cleanup */
         hl_lua_free(&lua);
+        ret = 0;
     }
 #endif
 
-    free_route_allocs();
+cleanup_server:
     kl_server_free(&server);
+cleanup_db:
     sqlite3_close(db);
+    free_route_allocs(&alloc);
 
-    return 0;
+    log_debug("[hull:c] peak memory: %zu bytes", hl_alloc_peak(&alloc));
+
+    return ret;
 }
