@@ -9,6 +9,7 @@
  */
 
 #include "hull/js_runtime.h"
+#include "hull/hull_limits.h"
 #include "hull/hull_cap.h"
 #include "quickjs.h"
 
@@ -56,7 +57,7 @@ JSValue hl_js_make_request(JSContext *ctx, KlRequest *req)
     JSValue query_obj = JS_NewObject(ctx);
     if (req->query && req->query_len > 0) {
         /* Parse query string: key=val&key2=val2 */
-        char qbuf[4096];
+        char qbuf[HL_QUERY_BUF_SIZE];
         size_t qlen = req->query_len < sizeof(qbuf) - 1
                       ? req->query_len : sizeof(qbuf) - 1;
         memcpy(qbuf, req->query, qlen);
@@ -82,9 +83,9 @@ JSValue hl_js_make_request(JSContext *ctx, KlRequest *req)
     /* params — route params from Keel (e.g. :id → params.id) */
     JSValue params_obj = JS_NewObject(ctx);
     for (int i = 0; i < req->num_params; i++) {
-        char name[256];
-        size_t nlen = req->params[i].name_len < 255
-                      ? req->params[i].name_len : 255;
+        char name[HL_PARAM_NAME_MAX];
+        size_t nlen = req->params[i].name_len < HL_PARAM_NAME_MAX - 1
+                      ? req->params[i].name_len : HL_PARAM_NAME_MAX - 1;
         memcpy(name, req->params[i].name, nlen);
         name[nlen] = '\0';
         JS_SetPropertyStr(ctx, params_obj, name,

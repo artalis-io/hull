@@ -135,8 +135,14 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
     lua_pushlightuserdata(lua->L, (void *)lua);
     lua_setfield(lua->L, LUA_REGISTRYINDEX, "__hull_lua");
 
-    /* Register hull.* modules */
+    /* Register hull.* C modules */
     if (hl_lua_register_modules(lua) != 0) {
+        hl_lua_free(lua);
+        return -1;
+    }
+
+    /* Register Lua stdlib (embedded modules + custom require) */
+    if (hl_lua_register_stdlib(lua) != 0) {
         hl_lua_free(lua);
         return -1;
     }
@@ -163,6 +169,10 @@ int hl_lua_load_app(HlLua *lua, const char *filename)
             return -1;
     }
     lua->app_dir = app_dir;
+
+    /* Set module context so requires from app entry point resolve correctly */
+    lua_pushstring(lua->L, filename);
+    lua_setfield(lua->L, LUA_REGISTRYINDEX, "__hull_current_module");
 
     /* Load and execute the file */
     if (luaL_dofile(lua->L, filename) != LUA_OK) {

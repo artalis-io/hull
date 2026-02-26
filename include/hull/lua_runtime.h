@@ -12,6 +12,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "hull/hull_limits.h"
 #include "hull/hull_cap.h"
 
 /* Forward declarations */
@@ -27,7 +28,7 @@ typedef struct {
 
 /* Sensible defaults */
 #define HL_LUA_CONFIG_DEFAULT {           \
-    .max_heap_bytes = 64 * 1024 * 1024,     \
+    .max_heap_bytes = HL_LUA_DEFAULT_HEAP,  \
 }
 
 /* ── Runtime context ────────────────────────────────────────────────── */
@@ -94,6 +95,13 @@ void hl_lua_free(HlLua *lua);
  * Called internally by hl_lua_init().
  */
 int hl_lua_register_modules(HlLua *lua);
+
+/*
+ * Register Lua stdlib: custom require(), embedded module table,
+ * loaded-module cache, and pre-loaded globals (json).
+ * Called internally by hl_lua_init() after hl_lua_register_modules().
+ */
+int hl_lua_register_stdlib(HlLua *lua);
 
 /* ── Error reporting ────────────────────────────────────────────────── */
 

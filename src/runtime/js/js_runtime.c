@@ -9,6 +9,7 @@
  */
 
 #include "hull/js_runtime.h"
+#include "hull/hull_limits.h"
 #include "hull/hull_cap.h"
 #include "quickjs.h"
 
@@ -106,7 +107,7 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
     }
 
     /* Build filesystem path */
-    char path[4096];
+    char path[HL_MODULE_PATH_MAX];
     int n = snprintf(path, sizeof(path), "%s/%s", js->app_dir, module_name);
     if (n < 0 || (size_t)n >= sizeof(path)) {
         JS_ThrowReferenceError(ctx, "module path too long: %s", module_name);
@@ -122,7 +123,7 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
 
     fseek(f, 0, SEEK_END);
     long size = ftell(f);
-    if (size < 0 || size > 10 * 1024 * 1024) { /* 10 MB limit */
+    if (size < 0 || size > HL_MODULE_MAX_SIZE) {
         fclose(f);
         JS_ThrowReferenceError(ctx, "module too large: %s", module_name);
         return NULL;
@@ -310,7 +311,7 @@ int hl_js_load_app(HlJS *js, const char *filename)
 
     fseek(f, 0, SEEK_END);
     long size = ftell(f);
-    if (size < 0 || size > 10 * 1024 * 1024) {
+    if (size < 0 || size > HL_MODULE_MAX_SIZE) {
         fclose(f);
         fprintf(stderr, "hull: %s too large\n", filename);
         return -1;

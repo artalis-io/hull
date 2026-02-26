@@ -12,6 +12,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "hull/hull_limits.h"
 #include "hull/hull_cap.h"
 
 /* Forward declarations for types defined in other headers */
@@ -31,10 +32,10 @@ typedef struct {
 
 /* Sensible defaults */
 #define HL_JS_CONFIG_DEFAULT {        \
-    .max_heap_bytes   = 64 * 1024 * 1024,  \
-    .max_stack_bytes  = 1  * 1024 * 1024,  \
-    .max_instructions = 0,                  \
-    .gc_threshold     = 256 * 1024,         \
+    .max_heap_bytes   = HL_JS_DEFAULT_HEAP,  \
+    .max_stack_bytes  = HL_JS_DEFAULT_STACK, \
+    .max_instructions = 0,                   \
+    .gc_threshold     = HL_JS_GC_THRESHOLD,  \
 }
 
 /* ── Runtime context ────────────────────────────────────────────────── */

@@ -9,6 +9,7 @@
  */
 
 #include "hull/js_runtime.h"
+#include "hull/hull_limits.h"
 #include "hull/hull_cap.h"
 #include "quickjs.h"
 
@@ -650,8 +651,9 @@ static JSValue js_crypto_random(JSContext *ctx, JSValueConst this_val,
     if (JS_ToInt32(ctx, &n, argv[0]))
         return JS_EXCEPTION;
 
-    if (n <= 0 || n > 65536)
-        return JS_ThrowRangeError(ctx, "random bytes must be 1-65536");
+    if (n <= 0 || n > HL_RANDOM_MAX_BYTES)
+        return JS_ThrowRangeError(ctx, "random bytes must be 1-%d",
+                                  HL_RANDOM_MAX_BYTES);
 
     uint8_t *buf = js_malloc(ctx, (size_t)n);
     if (!buf)
@@ -688,9 +690,9 @@ static JSValue js_crypto_hash_password(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "random failed");
     }
 
-    /* PBKDF2-HMAC-SHA256, 100k iterations, 32-byte output */
+    /* PBKDF2-HMAC-SHA256, 32-byte output */
     uint8_t hash[32];
-    int iterations = 100000;
+    int iterations = HL_PBKDF2_ITERATIONS;
     if (hl_cap_crypto_pbkdf2(pw, pw_len, salt, sizeof(salt),
                                iterations, hash, sizeof(hash)) != 0) {
         JS_FreeCString(ctx, pw);
@@ -801,6 +803,67 @@ int hl_js_init_crypto_module(JSContext *ctx, HlJS *js)
 }
 
 /* ════════════════════════════════════════════════════════════════════
+ * hull:json module
+ *
+ * Wraps the built-in JSON.stringify/JSON.parse as:
+ *   json.encode(value) → string
+ *   json.decode(str)   → value
+ * ════════════════════════════════════════════════════════════════════ */
+
+static JSValue js_json_encode(JSContext *ctx, JSValueConst this_val,
+                               int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "json.encode requires (value)");
+
+    JSValue result = JS_JSONStringify(ctx, argv[0], JS_UNDEFINED, JS_UNDEFINED);
+    if (JS_IsException(result))
+        return JS_EXCEPTION;
+    /* JSON.stringify returns undefined for unsupported types */
+    if (JS_IsUndefined(result))
+        return JS_NewString(ctx, "null");
+    return result;
+}
+
+static JSValue js_json_decode(JSContext *ctx, JSValueConst this_val,
+                               int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "json.decode requires (str)");
+
+    const char *str = JS_ToCString(ctx, argv[0]);
+    if (!str)
+        return JS_EXCEPTION;
+
+    JSValue result = JS_ParseJSON(ctx, str, strlen(str), "<json>");
+    JS_FreeCString(ctx, str);
+    return result;
+}
+
+static int js_json_module_init(JSContext *ctx, JSModuleDef *m)
+{
+    JSValue json = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, json, "encode",
+                      JS_NewCFunction(ctx, js_json_encode, "encode", 1));
+    JS_SetPropertyStr(ctx, json, "decode",
+                      JS_NewCFunction(ctx, js_json_decode, "decode", 1));
+    JS_SetModuleExport(ctx, m, "json", json);
+    return 0;
+}
+
+int hl_js_init_json_module(JSContext *ctx, HlJS *js)
+{
+    (void)js;
+    JSModuleDef *m = JS_NewCModule(ctx, "hull:json", js_json_module_init);
+    if (!m)
+        return -1;
+    JS_AddModuleExport(ctx, m, "json");
+    return 0;
+}
+
+/* ════════════════════════════════════════════════════════════════════
  * hull:log module (placeholder — full implementation needs hl_cap_db)
  *
  * log.info(msg)  → logs to stderr (and DB when available)
@@ -873,6 +936,10 @@ int hl_js_register_modules(HlJS *js)
         if (hl_js_init_db_module(js->ctx, js) != 0)
             return -1;
     }
+
+    /* Register hull:json module */
+    if (hl_js_init_json_module(js->ctx, js) != 0)
+        return -1;
 
     /* Register hull:time module */
     if (hl_js_init_time_module(js->ctx, js) != 0)

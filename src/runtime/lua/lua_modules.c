@@ -9,6 +9,7 @@
  */
 
 #include "hull/lua_runtime.h"
+#include "hull/hull_limits.h"
 #include "hull/hull_cap.h"
 
 #include "lua.h"
@@ -19,6 +20,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+
+/* ── Embedded stdlib (auto-generated registry of all stdlib .lua files) */
+
+#include "stdlib_lua_registry.h"
+
+#ifdef HL_APP_EMBEDDED
+#include "app_lua_registry.h"
+#endif
 
 /* ── Helper: retrieve HlLua from registry ─────────────────────────── */
 
@@ -484,8 +493,8 @@ static int lua_crypto_sha256(lua_State *L)
 static int lua_crypto_random(lua_State *L)
 {
     lua_Integer n = luaL_checkinteger(L, 1);
-    if (n <= 0 || n > 65536)
-        return luaL_error(L, "random bytes must be 1-65536");
+    if (n <= 0 || n > HL_RANDOM_MAX_BYTES)
+        return luaL_error(L, "random bytes must be 1-%d", HL_RANDOM_MAX_BYTES);
 
     uint8_t *buf = malloc((size_t)n);
     if (!buf)
@@ -512,9 +521,9 @@ static int lua_crypto_hash_password(lua_State *L)
     if (hl_cap_crypto_random(salt, sizeof(salt)) != 0)
         return luaL_error(L, "random failed");
 
-    /* PBKDF2-HMAC-SHA256, 100k iterations, 32-byte output */
+    /* PBKDF2-HMAC-SHA256, 32-byte output */
     uint8_t hash[32];
-    int iterations = 100000;
+    int iterations = HL_PBKDF2_ITERATIONS;
     if (hl_cap_crypto_pbkdf2(pw, pw_len, salt, sizeof(salt),
                                 iterations, hash, sizeof(hash)) != 0)
         return luaL_error(L, "pbkdf2 failed");
@@ -637,6 +646,366 @@ static int luaopen_hull_log(lua_State *L)
 {
     luaL_newlib(L, log_funcs);
     return 1;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * Custom require() — module loader with embedded + filesystem fallback
+ *
+ * Replaces Lua's package.require with a minimal custom version.
+ * Search order:
+ *   1. Cache (registry "__hull_loaded")
+ *   2. Embedded modules (registry "__hull_modules")
+ *   3. Filesystem (dev mode — relative requires from app_dir)
+ *   4. Error
+ *
+ * Module namespaces:
+ *   hull.*   — Hull stdlib wrappers (e.g. require('hull.json'))
+ *   vendor.* — Vendored third-party libs (e.g. require('vendor.json'))
+ *   ./path   — Relative to requiring module (filesystem or embedded app)
+ *   ../path  — Relative to requiring module (parent traversal)
+ * ════════════════════════════════════════════════════════════════════ */
+
+/* ── Path normalization helper ────────────────────────────────────── */
+
+/*
+ * Normalize a path in-place by collapsing `.` and `..` segments.
+ * Input:  "routes/../utils/./helper"
+ * Output: "utils/helper"
+ * Returns 0 on success, -1 if `..` escapes past root.
+ */
+static int normalize_path(char *path)
+{
+    /* Split into segments, process left-to-right */
+    char *segments[128];
+    int depth = 0;
+    int absolute = (path[0] == '/');
+
+    char *p = path;
+    while (*p) {
+        /* Skip slashes */
+        while (*p == '/')
+            p++;
+        if (*p == '\0')
+            break;
+
+        /* Find end of segment */
+        char *seg = p;
+        while (*p && *p != '/')
+            p++;
+        if (*p == '/') {
+            *p = '\0';
+            p++;
+        }
+
+        if (strcmp(seg, ".") == 0) {
+            continue; /* skip */
+        } else if (strcmp(seg, "..") == 0) {
+            if (depth > 0)
+                depth--;
+            else
+                return -1; /* escapes past root */
+        } else {
+            if (depth >= 128)
+                return -1;
+            segments[depth++] = seg;
+        }
+    }
+
+    /* Rebuild path */
+    char *out = path;
+    if (absolute)
+        *out++ = '/';
+    for (int i = 0; i < depth; i++) {
+        if (i > 0)
+            *out++ = '/';
+        size_t len = strlen(segments[i]);
+        memmove(out, segments[i], len);
+        out += len;
+    }
+    *out = '\0';
+
+    return 0;
+}
+
+/* ── Resolve relative module path ─────────────────────────────────── */
+
+/*
+ * Resolve a relative require path (starting with ./ or ../) against
+ * the caller's module path and app_dir.
+ *
+ * Returns 0 on success with `out` filled with the filesystem path.
+ * Returns -1 on error (path too long, escapes app_dir, etc.).
+ */
+static int resolve_module_path(lua_State *L, const char *name,
+                               const char *app_dir,
+                               char *out, size_t out_size)
+{
+    /* Get the caller's module path from registry */
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_current_module");
+    const char *caller = lua_tostring(L, -1);
+
+    char caller_dir[HL_MODULE_PATH_MAX];
+    if (caller) {
+        /* Extract directory from caller path */
+        const char *last_slash = strrchr(caller, '/');
+        if (last_slash) {
+            size_t dir_len = (size_t)(last_slash - caller);
+            if (dir_len >= sizeof(caller_dir)) {
+                lua_pop(L, 1);
+                return -1;
+            }
+            memcpy(caller_dir, caller, dir_len);
+            caller_dir[dir_len] = '\0';
+        } else {
+            /* No slash — caller is in the root */
+            caller_dir[0] = '.';
+            caller_dir[1] = '\0';
+        }
+    } else {
+        /* No caller context — use app_dir as base */
+        if (strlen(app_dir) >= sizeof(caller_dir)) {
+            lua_pop(L, 1);
+            return -1;
+        }
+        strncpy(caller_dir, app_dir, sizeof(caller_dir) - 1);
+        caller_dir[sizeof(caller_dir) - 1] = '\0';
+    }
+    lua_pop(L, 1); /* pop __hull_current_module */
+
+    /* Build joined path: caller_dir / name [.lua] */
+    const char *ext = "";
+    size_t name_len = strlen(name);
+    if (name_len < 4 || strcmp(name + name_len - 4, ".lua") != 0)
+        ext = ".lua";
+
+    char joined[HL_MODULE_PATH_MAX];
+    int n = snprintf(joined, sizeof(joined), "%s/%s%s",
+                     caller_dir, name, ext);
+    if (n < 0 || (size_t)n >= sizeof(joined))
+        return -1;
+
+    /* Normalize (collapse . and .. segments) */
+    if (normalize_path(joined) != 0)
+        return -1;
+
+    /* Security: verify the resolved path starts with app_dir.
+     * Build canonical: app_dir prefix must match. */
+    size_t app_dir_len = strlen(app_dir);
+    /* Strip trailing slash from app_dir for comparison */
+    while (app_dir_len > 0 && app_dir[app_dir_len - 1] == '/')
+        app_dir_len--;
+
+    /* For "." app_dir, any path without leading .. is valid
+     * (normalize_path already rejects escaping past root) */
+    if (!(app_dir_len == 1 && app_dir[0] == '.')) {
+        if (strncmp(joined, app_dir, app_dir_len) != 0 ||
+            (joined[app_dir_len] != '/' && joined[app_dir_len] != '\0'))
+            return -1; /* escapes above app_dir */
+    }
+
+    if (strlen(joined) >= out_size)
+        return -1;
+    memcpy(out, joined, strlen(joined) + 1);
+
+    return 0;
+}
+
+/* ── Execute and cache a loaded module chunk ──────────────────────── */
+
+/*
+ * Execute a loaded chunk, save/restore __hull_current_module context,
+ * cache the result, and leave the module value on the stack.
+ * `module_path` is the canonical path used for context and cache key.
+ * Returns 1 (number of Lua return values) on success.
+ * On error, calls lua_error (does not return).
+ */
+static int execute_and_cache_module(lua_State *L, const char *module_path)
+{
+    /* Save current module context */
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_current_module");
+    /* Stack: ... chunk, saved_module */
+
+    /* Set new module context */
+    lua_pushstring(L, module_path);
+    lua_setfield(L, LUA_REGISTRYINDEX, "__hull_current_module");
+
+    /* Execute chunk (it's below saved_module on the stack) */
+    lua_pushvalue(L, -2); /* copy chunk to top */
+    if (lua_pcall(L, 0, 1, 0) != LUA_OK) {
+        /* Restore context before propagating error */
+        lua_pushvalue(L, -2); /* push saved_module (now at -3) */
+        lua_setfield(L, LUA_REGISTRYINDEX, "__hull_current_module");
+        lua_remove(L, -2); /* remove saved_module */
+        lua_remove(L, -2); /* remove original chunk */
+        return lua_error(L);
+    }
+    /* Stack: ... chunk, saved_module, result */
+
+    /* Restore previous module context */
+    lua_pushvalue(L, -2); /* push saved_module */
+    lua_setfield(L, LUA_REGISTRYINDEX, "__hull_current_module");
+    lua_remove(L, -2); /* remove saved_module */
+    /* Stack: ... chunk, result */
+
+    /* If chunk returned nil, store true as sentinel */
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        lua_pushboolean(L, 1);
+    }
+
+    /* Cache the result in __hull_loaded */
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_loaded");
+    lua_pushvalue(L, -2);  /* push module result */
+    lua_setfield(L, -2, module_path);
+    lua_pop(L, 1); /* pop __hull_loaded */
+
+    /* Remove original chunk, leaving just the result */
+    lua_remove(L, -2);
+    return 1;
+}
+
+/* ── Main require() implementation ────────────────────────────────── */
+
+static int hl_lua_require(lua_State *L)
+{
+    const char *name = luaL_checkstring(L, 1);
+
+    /* 1. Check cache (registry "__hull_loaded") */
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_loaded");
+    lua_getfield(L, -1, name);
+    if (!lua_isnil(L, -1)) {
+        lua_remove(L, -2); /* remove __hull_loaded table */
+        return 1;          /* return cached module */
+    }
+    lua_pop(L, 2); /* pop nil + __hull_loaded */
+
+    /* 2. Look up in embedded modules table (registry "__hull_modules") */
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_modules");
+    lua_getfield(L, -1, name);
+    if (!lua_isnil(L, -1)) {
+        lua_remove(L, -2); /* remove __hull_modules table */
+        return execute_and_cache_module(L, name);
+    }
+    lua_pop(L, 2); /* pop nil + __hull_modules */
+
+    /* 3. Filesystem fallback (dev mode — relative requires) */
+    HlLua *lua = get_hl_lua(L);
+    if (lua && lua->app_dir &&
+        (name[0] == '.' || strchr(name, '/') != NULL)) {
+
+        char path[HL_MODULE_PATH_MAX];
+        if (resolve_module_path(L, name, lua->app_dir,
+                                path, sizeof(path)) == 0) {
+
+            /* Check cache by resolved canonical path */
+            lua_getfield(L, LUA_REGISTRYINDEX, "__hull_loaded");
+            lua_getfield(L, -1, path);
+            if (!lua_isnil(L, -1)) {
+                lua_remove(L, -2); /* remove __hull_loaded */
+                return 1;
+            }
+            lua_pop(L, 2); /* pop nil + __hull_loaded */
+
+            /* Read file from disk */
+            FILE *f = fopen(path, "rb");
+            if (f) {
+                fseek(f, 0, SEEK_END);
+                long size = ftell(f);
+                if (size < 0 || size > HL_MODULE_MAX_SIZE) {
+                    fclose(f);
+                    return luaL_error(L, "module too large: %s", path);
+                }
+                if (fseek(f, 0, SEEK_SET) != 0) {
+                    fclose(f);
+                    return luaL_error(L, "seek failed: %s", path);
+                }
+
+                char *buf = malloc((size_t)size);
+                if (!buf) {
+                    fclose(f);
+                    return luaL_error(L, "out of memory loading: %s", path);
+                }
+
+                size_t nread = fread(buf, 1, (size_t)size, f);
+                int read_err = ferror(f);
+                fclose(f);
+
+                if (read_err || nread != (size_t)size) {
+                    free(buf);
+                    return luaL_error(L, "read error: %s", path);
+                }
+
+                /* Compile the chunk */
+                if (luaL_loadbuffer(L, buf, nread, path) != LUA_OK) {
+                    free(buf);
+                    return lua_error(L); /* propagate compile error */
+                }
+                free(buf);
+
+                return execute_and_cache_module(L, path);
+            }
+        }
+    }
+
+    return luaL_error(L, "module not found: %s", name);
+}
+
+int hl_lua_register_stdlib(HlLua *lua)
+{
+    if (!lua || !lua->L)
+        return -1;
+
+    lua_State *L = lua->L;
+
+    /* Create __hull_loaded cache table */
+    lua_newtable(L);
+    lua_setfield(L, LUA_REGISTRYINDEX, "__hull_loaded");
+
+    /* Create __hull_modules table and populate with compiled chunks.
+     * Iterates the auto-generated hl_stdlib_lua_entries[] table —
+     * adding a new .lua file to stdlib/ requires no C code changes. */
+    lua_newtable(L);
+
+    for (const HlStdlibEntry *e = hl_stdlib_lua_entries; e->name; e++) {
+        if (luaL_loadbuffer(L, (const char *)e->data, e->len, e->name) != LUA_OK) {
+            fprintf(stderr, "hull: failed to load stdlib module '%s': %s\n",
+                    e->name, lua_tostring(L, -1));
+            lua_pop(L, 2); /* pop error + modules table */
+            return -1;
+        }
+        lua_setfield(L, -2, e->name);
+    }
+
+#ifdef HL_APP_EMBEDDED
+    for (const HlStdlibEntry *e = hl_app_lua_entries; e->name; e++) {
+        if (luaL_loadbuffer(L, (const char *)e->data, e->len, e->name) != LUA_OK) {
+            fprintf(stderr, "hull: failed to load app module '%s': %s\n",
+                    e->name, lua_tostring(L, -1));
+            lua_pop(L, 2); /* pop error + modules table */
+            return -1;
+        }
+        lua_setfield(L, -2, e->name);
+    }
+#endif
+
+    lua_setfield(L, LUA_REGISTRYINDEX, "__hull_modules");
+
+    /* Register require as a global function */
+    lua_pushcfunction(L, hl_lua_require);
+    lua_setglobal(L, "require");
+
+    /* Pre-load json as a global: call require('hull.json') internally */
+    lua_getglobal(L, "require");
+    lua_pushstring(L, "hull.json");
+    if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
+        fprintf(stderr, "hull: failed to pre-load json: %s\n",
+                lua_tostring(L, -1));
+        lua_pop(L, 1);
+        return -1;
+    }
+    lua_setglobal(L, "json");
+
+    return 0;
 }
 
 /* ════════════════════════════════════════════════════════════════════
