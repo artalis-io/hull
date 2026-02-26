@@ -1,6 +1,6 @@
 # Known Limitations
 
-All limits are defined in `include/hull/hull_limits.h` and can be overridden at compile time via `-D`.
+All limits are defined in `include/hull/limits.h` and can be overridden at compile time via `-D`.
 
 ## Module System
 
@@ -23,7 +23,7 @@ All limits are defined in `include/hull/hull_limits.h` and can be overridden at 
 |-------|-------|--------|-----------|
 | Max routes | 256 | `HL_MAX_ROUTES` | Static route allocation array; increase if app has more routes |
 | Default port | 3000 | `HL_DEFAULT_PORT` | Convention for development servers |
-| Default max connections | 64 | `HL_DEFAULT_MAX_CONN` | Keel connection pool size |
+| Default max connections | 256 | `HL_DEFAULT_MAX_CONN` | Keel connection pool size |
 | Default read timeout | 30 s | `HL_DEFAULT_READ_TIMEOUT_MS` | Idle connection timeout |
 
 ## Crypto
