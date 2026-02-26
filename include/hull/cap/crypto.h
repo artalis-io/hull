@@ -22,4 +22,10 @@ int hl_cap_crypto_ed25519_verify(const uint8_t *msg, size_t msg_len,
                                    const uint8_t sig[64],
                                    const uint8_t pubkey[32]);
 
+int hl_cap_crypto_ed25519_sign(const uint8_t *msg, size_t msg_len,
+                                 const uint8_t secret_key[64],
+                                 uint8_t out_sig[64]);
+
+int hl_cap_crypto_ed25519_keypair(uint8_t out_pk[32], uint8_t out_sk[64]);
+
 #endif /* HL_CAP_CRYPTO_H */

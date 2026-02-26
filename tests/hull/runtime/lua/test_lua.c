@@ -1057,4 +1057,83 @@ UTEST(lua_cap, db_not_available_without_config)
     cleanup_lua();
 }
 
+/* ── Manifest tests ────────────────────────────────────────────────── */
+
+#include "hull/manifest.h"
+
+UTEST(lua_runtime, manifest_not_declared)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+
+    HlManifest m;
+    int rc = hl_manifest_extract(lua_rt.L, &m);
+    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(m.present, 0);
+
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, manifest_basic)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+
+    /* Declare a manifest via app.manifest() */
+    const char *code =
+        "app.manifest({\n"
+        "  fs = { read = {'data/', 'config/'}, write = {'uploads/'} },\n"
+        "  env = {'PORT', 'DATABASE_URL'},\n"
+        "  hosts = {'api.stripe.com', 'api.sendgrid.com'},\n"
+        "})\n";
+    int rc = luaL_dostring(lua_rt.L, code);
+    ASSERT_EQ(rc, LUA_OK);
+
+    HlManifest m;
+    rc = hl_manifest_extract(lua_rt.L, &m);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(m.present, 1);
+
+    ASSERT_EQ(m.fs_read_count, 2);
+    ASSERT_STREQ(m.fs_read[0], "data/");
+    ASSERT_STREQ(m.fs_read[1], "config/");
+
+    ASSERT_EQ(m.fs_write_count, 1);
+    ASSERT_STREQ(m.fs_write[0], "uploads/");
+
+    ASSERT_EQ(m.env_count, 2);
+    ASSERT_STREQ(m.env[0], "PORT");
+    ASSERT_STREQ(m.env[1], "DATABASE_URL");
+
+    ASSERT_EQ(m.hosts_count, 2);
+    ASSERT_STREQ(m.hosts[0], "api.stripe.com");
+    ASSERT_STREQ(m.hosts[1], "api.sendgrid.com");
+
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, manifest_get_manifest)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+
+    const char *code =
+        "app.manifest({ env = {'FOO'} })\n"
+        "local m = app.get_manifest()\n"
+        "return m.env[1]\n";
+
+    if (luaL_dostring(lua_rt.L, code) == LUA_OK) {
+        const char *val = lua_tostring(lua_rt.L, -1);
+        ASSERT_STREQ(val, "FOO");
+        lua_pop(lua_rt.L, 1);
+    } else {
+        const char *err = lua_tostring(lua_rt.L, -1);
+        fprintf(stderr, "manifest_get_manifest error: %s\n", err ? err : "(nil)");
+        lua_pop(lua_rt.L, 1);
+        ASSERT_TRUE(0); /* force fail */
+    }
+
+    cleanup_lua();
+}
+
 UTEST_MAIN();

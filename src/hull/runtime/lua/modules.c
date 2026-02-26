@@ -31,9 +31,9 @@
 
 #include "stdlib_lua_registry.h"
 
-#ifdef HL_APP_EMBEDDED
-#include "app_lua_registry.h"
-#endif
+/* App entries: default empty in app_entries_default.c, overridden by
+ * generated app_registry.o when building with APP_DIR or hull build. */
+extern const HlStdlibEntry hl_app_lua_entries[];
 
 /* ── Helper: retrieve HlLua from registry ─────────────────────────── */
 
@@ -145,14 +145,34 @@ static int lua_app_config(lua_State *L)
     return 0;
 }
 
+/* app.manifest(tbl) — declare application capabilities */
+static int lua_app_manifest(lua_State *L)
+{
+    luaL_checktype(L, 1, LUA_TTABLE);
+    lua_pushvalue(L, 1);
+    lua_setfield(L, LUA_REGISTRYINDEX, "__hull_manifest");
+    return 0;
+}
+
+/* app.get_manifest() — retrieve manifest table (for build tools) */
+static int lua_app_get_manifest(lua_State *L)
+{
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_manifest");
+    if (lua_isnil(L, -1))
+        return 1; /* returns nil */
+    return 1;
+}
+
 static const luaL_Reg app_funcs[] = {
-    {"get",    lua_app_get},
-    {"post",   lua_app_post},
-    {"put",    lua_app_put},
-    {"del",    lua_app_del},
-    {"patch",  lua_app_patch},
-    {"use",    lua_app_use},
-    {"config", lua_app_config},
+    {"get",          lua_app_get},
+    {"post",         lua_app_post},
+    {"put",          lua_app_put},
+    {"del",          lua_app_del},
+    {"patch",        lua_app_patch},
+    {"use",          lua_app_use},
+    {"config",       lua_app_config},
+    {"manifest",     lua_app_manifest},
+    {"get_manifest", lua_app_get_manifest},
     {NULL, NULL}
 };
 
@@ -491,6 +511,9 @@ static int luaopen_hull_env(lua_State *L)
  * crypto.random(n)                   → string of n random bytes
  * crypto.hash_password(password)     → hash string
  * crypto.verify_password(pw, hash)   → boolean
+ * crypto.ed25519_keypair()           → pubkey_hex, secret_key_hex
+ * crypto.ed25519_sign(data, sk_hex)  → signature_hex
+ * crypto.ed25519_verify(data, sig_hex, pk_hex) → boolean
  * ════════════════════════════════════════════════════════════════════ */
 
 static int lua_crypto_sha256(lua_State *L)
@@ -617,11 +640,105 @@ static int lua_crypto_verify_password(lua_State *L)
     return 1;
 }
 
+/* ── Hex decode helper ─────────────────────────────────────────────── */
+
+static int hex_decode(const char *hex, size_t hex_len, uint8_t *out, size_t out_len)
+{
+    if (hex_len != out_len * 2)
+        return -1;
+    for (size_t i = 0; i < out_len; i++) {
+        unsigned int byte;
+        if (sscanf(hex + i * 2, "%2x", &byte) != 1)
+            return -1;
+        out[i] = (uint8_t)byte;
+    }
+    return 0;
+}
+
+/* ── Ed25519 bindings ──────────────────────────────────────────────── */
+
+/* crypto.ed25519_keypair() → pubkey_hex, secret_key_hex */
+static int lua_crypto_ed25519_keypair(lua_State *L)
+{
+    uint8_t pk[32], sk[64];
+    if (hl_cap_crypto_ed25519_keypair(pk, sk) != 0)
+        return luaL_error(L, "ed25519 keypair generation failed");
+
+    char pk_hex[65], sk_hex[129];
+    for (int i = 0; i < 32; i++)
+        snprintf(pk_hex + i * 2, 3, "%02x", pk[i]);
+    pk_hex[64] = '\0';
+    for (int i = 0; i < 64; i++)
+        snprintf(sk_hex + i * 2, 3, "%02x", sk[i]);
+    sk_hex[128] = '\0';
+
+    lua_pushstring(L, pk_hex);
+    lua_pushstring(L, sk_hex);
+    return 2;
+}
+
+/* crypto.ed25519_sign(data, secret_key_hex) → signature_hex */
+static int lua_crypto_ed25519_sign(lua_State *L)
+{
+    size_t data_len;
+    const char *data = luaL_checklstring(L, 1, &data_len);
+    size_t sk_hex_len;
+    const char *sk_hex = luaL_checklstring(L, 2, &sk_hex_len);
+
+    if (sk_hex_len != 128)
+        return luaL_error(L, "secret key must be 128 hex chars (64 bytes)");
+
+    uint8_t sk[64];
+    if (hex_decode(sk_hex, sk_hex_len, sk, 64) != 0)
+        return luaL_error(L, "invalid hex in secret key");
+
+    uint8_t sig[64];
+    if (hl_cap_crypto_ed25519_sign((const uint8_t *)data, data_len, sk, sig) != 0)
+        return luaL_error(L, "ed25519 sign failed");
+
+    char sig_hex[129];
+    for (int i = 0; i < 64; i++)
+        snprintf(sig_hex + i * 2, 3, "%02x", sig[i]);
+    sig_hex[128] = '\0';
+
+    lua_pushstring(L, sig_hex);
+    return 1;
+}
+
+/* crypto.ed25519_verify(data, signature_hex, pubkey_hex) → boolean */
+static int lua_crypto_ed25519_verify(lua_State *L)
+{
+    size_t data_len;
+    const char *data = luaL_checklstring(L, 1, &data_len);
+    size_t sig_hex_len;
+    const char *sig_hex = luaL_checklstring(L, 2, &sig_hex_len);
+    size_t pk_hex_len;
+    const char *pk_hex = luaL_checklstring(L, 3, &pk_hex_len);
+
+    if (sig_hex_len != 128)
+        return luaL_error(L, "signature must be 128 hex chars (64 bytes)");
+    if (pk_hex_len != 64)
+        return luaL_error(L, "public key must be 64 hex chars (32 bytes)");
+
+    uint8_t sig[64], pk[32];
+    if (hex_decode(sig_hex, sig_hex_len, sig, 64) != 0)
+        return luaL_error(L, "invalid hex in signature");
+    if (hex_decode(pk_hex, pk_hex_len, pk, 32) != 0)
+        return luaL_error(L, "invalid hex in public key");
+
+    int rc = hl_cap_crypto_ed25519_verify((const uint8_t *)data, data_len, sig, pk);
+    lua_pushboolean(L, rc == 0);
+    return 1;
+}
+
 static const luaL_Reg crypto_funcs[] = {
-    {"sha256",          lua_crypto_sha256},
-    {"random",          lua_crypto_random},
-    {"hash_password",   lua_crypto_hash_password},
-    {"verify_password", lua_crypto_verify_password},
+    {"sha256",            lua_crypto_sha256},
+    {"random",            lua_crypto_random},
+    {"hash_password",     lua_crypto_hash_password},
+    {"verify_password",   lua_crypto_verify_password},
+    {"ed25519_keypair",   lua_crypto_ed25519_keypair},
+    {"ed25519_sign",      lua_crypto_ed25519_sign},
+    {"ed25519_verify",    lua_crypto_ed25519_verify},
     {NULL, NULL}
 };
 
@@ -1019,7 +1136,7 @@ int hl_lua_register_stdlib(HlLua *lua)
         lua_setfield(L, -2, e->name);
     }
 
-#ifdef HL_APP_EMBEDDED
+    /* Load embedded app modules (if any — sentinel: first entry has name==NULL) */
     for (const HlStdlibEntry *e = hl_app_lua_entries; e->name; e++) {
         if (luaL_loadbuffer(L, (const char *)e->data, e->len, e->name) != LUA_OK) {
             log_error("[hull:c] failed to load app module '%s': %s",
@@ -1029,7 +1146,6 @@ int hl_lua_register_stdlib(HlLua *lua)
         }
         lua_setfield(L, -2, e->name);
     }
-#endif
 
     lua_setfield(L, LUA_REGISTRYINDEX, "__hull_modules");
 

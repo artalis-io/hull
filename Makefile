@@ -114,6 +114,55 @@ SH_ARENA_DIR    := $(VENDDIR)/sh_arena
 SH_ARENA_OBJ    := $(BUILDDIR)/sh_arena.o
 SH_ARENA_CFLAGS := -std=c11 -O2 -w
 
+# ── TweetNaCl (Ed25519 signatures) ─────────────────────────────────
+
+TWEETNACL_DIR    := $(VENDDIR)/tweetnacl
+TWEETNACL_OBJ    := $(BUILDDIR)/tweetnacl.o
+TWEETNACL_CFLAGS := -std=c11 -O2 -w
+
+# ── jart/pledge polyfill (Linux-only: seccomp + landlock) ──────────
+#
+# Provides real pledge()/unveil() on native Linux.
+# Cosmopolitan has these built-in; macOS uses no-op stubs.
+
+PLEDGE_DIR := $(VENDDIR)/pledge
+PLEDGE_CFLAGS := -std=c11 -O2 -w -D_GNU_SOURCE -I$(PLEDGE_DIR)
+
+ifeq ($(UNAME_S),Linux)
+ifndef COSMO
+PLEDGE_SRCS := \
+	$(PLEDGE_DIR)/libc/calls/pledge.c \
+	$(PLEDGE_DIR)/libc/calls/pledge-linux.c \
+	$(PLEDGE_DIR)/libc/calls/unveil.c \
+	$(PLEDGE_DIR)/libc/calls/parsepromises.c \
+	$(PLEDGE_DIR)/libc/calls/landlock_add_rule.c \
+	$(PLEDGE_DIR)/libc/calls/landlock_create_ruleset.c \
+	$(PLEDGE_DIR)/libc/calls/landlock_restrict_self.c \
+	$(PLEDGE_DIR)/libc/calls/commandv.c \
+	$(PLEDGE_DIR)/libc/calls/getcpucount.c \
+	$(PLEDGE_DIR)/libc/calls/islinux.c \
+	$(PLEDGE_DIR)/libc/intrin/promises.c \
+	$(PLEDGE_DIR)/libc/intrin/pthread_setcancelstate.c \
+	$(PLEDGE_DIR)/libc/elf/checkelfaddress.c \
+	$(PLEDGE_DIR)/libc/elf/getelfsegmentheaderaddress.c \
+	$(PLEDGE_DIR)/libc/str/classifypath.c \
+	$(PLEDGE_DIR)/libc/str/endswith.c \
+	$(PLEDGE_DIR)/libc/str/isabspath.c \
+	$(PLEDGE_DIR)/libc/fmt/joinpaths.c \
+	$(PLEDGE_DIR)/libc/fmt/sizetol.c \
+	$(PLEDGE_DIR)/libc/runtime/isdynamicexecutable.c \
+	$(PLEDGE_DIR)/libc/sysv/calls/ioprio_set.c \
+	$(PLEDGE_DIR)/libc/x/xdie.c \
+	$(PLEDGE_DIR)/libc/x/xjoinpaths.c \
+	$(PLEDGE_DIR)/libc/x/xmalloc.c \
+	$(PLEDGE_DIR)/libc/x/xrealloc.c \
+	$(PLEDGE_DIR)/libc/x/xstrcat.c \
+	$(PLEDGE_DIR)/libc/x/xstrdup.c
+PLEDGE_OBJS := $(patsubst $(PLEDGE_DIR)/%.c,$(BUILDDIR)/pledge_%.o,$(PLEDGE_SRCS))
+endif
+endif
+PLEDGE_OBJS ?=
+
 # ── Hull source files ───────────────────────────────────────────────
 
 # Capability sources (always compiled)
@@ -144,8 +193,13 @@ else
   CFLAGS    += -DHL_ENABLE_JS -DHL_ENABLE_LUA
 endif
 
-ALLOC_OBJ := $(BUILDDIR)/hull_alloc.o
-MAIN_OBJ  := $(BUILDDIR)/main.o
+ALLOC_OBJ      := $(BUILDDIR)/hull_alloc.o
+MANIFEST_OBJ   := $(BUILDDIR)/manifest.o
+SANDBOX_OBJ    := $(BUILDDIR)/sandbox.o
+TOOL_OBJ       := $(BUILDDIR)/tool.o
+BUILD_ASSET_OBJ := $(BUILDDIR)/build_assets.o
+MAIN_OBJ       := $(BUILDDIR)/main.o
+ENTRY_OBJ      := $(BUILDDIR)/entry.o
 
 # ── Stdlib embedding (xxd) ──────────────────────────────────────────
 #
@@ -198,7 +252,9 @@ STDLIB_LUA_HDRS += $(STDLIB_LUA_REGISTRY)
 # Module names use relative paths from APP_DIR with ./ prefix:
 #   myapp/routes/users.lua → "./routes/users"
 
+APP_ENTRIES_DEFAULT_OBJ := $(BUILDDIR)/app_entries_default.o
 APP_DIR ?=
+APP_EXTRA_OBJS := $(APP_ENTRIES_DEFAULT_OBJ)
 ifneq ($(APP_DIR),)
 APP_LUA_FILES := $(shell find $(APP_DIR) -name '*.lua' -not -path '*/tests/*' 2>/dev/null)
 
@@ -216,13 +272,17 @@ $(foreach f,$(APP_LUA_FILES),$(eval $(call APP_LUA_RULE,$(f))))
 
 APP_LUA_XXD_HDRS := $(APP_LUA_HDRS)
 
-$(APP_LUA_REGISTRY): $(APP_LUA_XXD_HDRS) | $(BUILDDIR)
+APP_LUA_REGISTRY_C := $(BUILDDIR)/app_lua_registry.c
+APP_LUA_REGISTRY_O := $(BUILDDIR)/app_lua_registry.o
+
+$(APP_LUA_REGISTRY_C): $(APP_LUA_XXD_HDRS) | $(BUILDDIR)
 	@echo "/* Auto-generated — do not edit */" > $@
 	@for hdr in $(APP_LUA_XXD_HDRS); do \
 		echo "#include \"$$(basename $$hdr)\""; \
 	done >> $@
 	@echo "" >> $@
-	@echo "static const HlStdlibEntry hl_app_lua_entries[] = {" >> $@
+	@echo "typedef struct { const char *name; const unsigned char *data; unsigned int len; } HlStdlibEntry;" >> $@
+	@echo "const HlStdlibEntry hl_app_lua_entries[] = {" >> $@
 	@for f in $(APP_LUA_FILES); do \
 		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
 		modname=$$(echo "$$f" | sed 's|^$(APP_DIR)/||; s|\.lua$$||'); \
@@ -231,25 +291,73 @@ $(APP_LUA_REGISTRY): $(APP_LUA_XXD_HDRS) | $(BUILDDIR)
 	@echo "    { 0, 0, 0 }" >> $@
 	@echo "};" >> $@
 
-APP_LUA_HDRS += $(APP_LUA_REGISTRY)
+$(APP_LUA_REGISTRY_O): $(APP_LUA_REGISTRY_C) | $(BUILDDIR)
+	$(CC) -std=c11 -O2 -w -I$(BUILDDIR) -c -o $@ $<
+
 STDLIB_LUA_HDRS += $(APP_LUA_HDRS)
-CFLAGS += -DHL_APP_EMBEDDED
+APP_EXTRA_OBJS := $(APP_LUA_REGISTRY_O)
 endif
+
+# App entries default (empty array — used when no APP_DIR)
+$(APP_ENTRIES_DEFAULT_OBJ): $(SRCDIR)/hull/app_entries_default.c | $(BUILDDIR)
+	$(CC) -std=c11 -O2 -w -c -o $@ $<
 
 # ── Include paths ───────────────────────────────────────────────────
 
-INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(SQLITE_DIR) -I$(LOG_DIR) -I$(SH_ARENA_DIR) -I$(BUILDDIR)
+INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(SQLITE_DIR) -I$(LOG_DIR) -I$(SH_ARENA_DIR) -I$(TWEETNACL_DIR) -I$(BUILDDIR)
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan e2e check analyze cppcheck bench coverage lint-lua lint-js lint
+.PHONY: all clean test debug msan e2e e2e-build e2e-sandbox check analyze cppcheck bench coverage lint-lua lint-js lint platform
 
 all: $(BUILDDIR)/hull
 
+# Platform static library — everything except entry.o and build_assets.o
+# Used by `hull build` to produce standalone app binaries.
+# Exports hull_main() (subcommand dispatch + server logic).
+PLATFORM_OBJS := $(CAP_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(MAIN_OBJ) $(TOOL_OBJ) $(VEND_OBJS) \
+	$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS)
+
+PLATFORM_LIB := $(BUILDDIR)/libhull_platform.a
+
+$(PLATFORM_LIB): $(PLATFORM_OBJS) $(KEEL_LIB) | $(BUILDDIR)
+	@rm -f $@
+	$(AR) rcs $@ $(PLATFORM_OBJS)
+	@# Merge keel objects into the platform archive
+	@tmpdir=$$(mktemp -d) && \
+		cd $$tmpdir && \
+		$(AR) x $(CURDIR)/$(KEEL_LIB) && \
+		$(AR) rcs $(CURDIR)/$@ *.o && \
+		rm -rf $$tmpdir
+	@# Record the CC used so hull build can auto-detect
+	@echo "$(CC)" > $(BUILDDIR)/platform_cc
+
+platform: $(PLATFORM_LIB)
+
+# ── Embedded build assets (distribution builds only) ────────────────
+# Build with: make EMBED_PLATFORM=1
+# This xxd's the platform .a + templates into build_assets.c
+EMBED_PLATFORM ?=
+ifneq ($(EMBED_PLATFORM),)
+EMBEDDED_PLATFORM_H := $(BUILDDIR)/embedded_platform.h
+EMBEDDED_TEMPLATES_H := $(BUILDDIR)/embedded_templates.h
+
+$(EMBEDDED_PLATFORM_H): $(PLATFORM_LIB) | $(BUILDDIR)
+	xxd -i $< | sed 's/build_libhull_platform_a/hl_embedded_platform_a/g' > $@
+
+$(EMBEDDED_TEMPLATES_H): templates/app_main.c templates/entry.h | $(BUILDDIR)
+	@echo "/* Auto-generated — do not edit */" > $@
+	@xxd -i templates/app_main.c | sed 's/templates_app_main_c/hl_embedded_app_main_c/g' >> $@
+	@xxd -i templates/entry.h | sed 's/templates_entry_h/hl_embedded_entry_h/g' >> $@
+
+CFLAGS += -DHL_BUILD_EMBEDDED
+$(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H)
+endif
+
 # Hull binary
-$(BUILDDIR)/hull: $(CAP_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MAIN_OBJ) $(VEND_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(KEEL_LIB)
-	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MAIN_OBJ) $(VEND_OBJS) \
-		$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(KEEL_LIB) -lm -lpthread
+$(BUILDDIR)/hull: $(CAP_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(VEND_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB)
+	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(VEND_OBJS) \
+		$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB) -lm -lpthread
 
 # Capability sources
 $(BUILDDIR)/cap_%.o: $(SRCDIR)/hull/cap/%.c | $(BUILDDIR)
@@ -267,8 +375,28 @@ $(BUILDDIR)/lua_rt_%.o: $(SRCDIR)/hull/runtime/lua/%.c $(STDLIB_LUA_HDRS) | $(BU
 $(ALLOC_OBJ): $(SRCDIR)/hull/alloc.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# Main
+# Manifest
+$(MANIFEST_OBJ): $(SRCDIR)/hull/manifest.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+# Sandbox (pledge/unveil enforcement)
+$(SANDBOX_OBJ): $(SRCDIR)/hull/sandbox.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+# Tool mode (keygen, build, verify, etc.)
+$(TOOL_OBJ): $(SRCDIR)/hull/tool.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+# Build assets (embedded platform lib — stub unless HL_BUILD_EMBEDDED=1)
+$(BUILD_ASSET_OBJ): $(SRCDIR)/hull/build_assets.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+# Main (hull_main — goes into platform .a)
 $(BUILDDIR)/main.o: $(SRCDIR)/hull/main.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+# Entry (thin main → hull_main trampoline — NOT in platform .a)
+$(ENTRY_OBJ): $(SRCDIR)/hull/entry.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # QuickJS sources (relaxed warnings)
@@ -290,6 +418,15 @@ $(LOG_OBJ): $(LOG_DIR)/log.c | $(BUILDDIR)
 # sh_arena (vendored, relaxed warnings)
 $(SH_ARENA_OBJ): $(SH_ARENA_DIR)/sh_arena.c | $(BUILDDIR)
 	$(CC) $(SH_ARENA_CFLAGS) -I$(SH_ARENA_DIR) -c -o $@ $<
+
+# TweetNaCl (vendored, relaxed warnings)
+$(TWEETNACL_OBJ): $(TWEETNACL_DIR)/tweetnacl.c | $(BUILDDIR)
+	$(CC) $(TWEETNACL_CFLAGS) -I$(TWEETNACL_DIR) -c -o $@ $<
+
+# jart/pledge polyfill (vendored, Linux only, relaxed warnings)
+# Flatten libc/calls/pledge.c → build/pledge_libc_calls_pledge.o
+$(BUILDDIR)/pledge_%.o: $(PLEDGE_DIR)/%.c | $(BUILDDIR)
+	$(CC) $(PLEDGE_CFLAGS) -c -o $@ $<
 
 $(BUILDDIR):
 	mkdir -p $(BUILDDIR)
@@ -319,8 +456,8 @@ TEST_BINS := $(addprefix $(BUILDDIR)/,$(notdir $(basename $(TEST_SRCS))))
 TEST_CAP_OBJS := $(CAP_OBJS)
 
 # Shared link deps for all tests
-TEST_COMMON_DEPS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(KEEL_LIB)
-TEST_COMMON_LIBS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) -lm -lpthread
+TEST_COMMON_DEPS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(KEEL_LIB)
+TEST_COMMON_LIBS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) -lm -lpthread
 
 # Capability tests (tests/hull/cap/)
 $(BUILDDIR)/test_%: $(TESTDIR)/hull/cap/test_%.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
@@ -334,13 +471,13 @@ $(BUILDDIR)/test_parse_size: $(TESTDIR)/hull/test_parse_size.c $(TEST_COMMON_DEP
 $(BUILDDIR)/test_js: $(TESTDIR)/hull/runtime/js/test_js.c $(TEST_COMMON_DEPS) $(JS_RT_OBJS) $(QJS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(TEST_CAP_OBJS) $(JS_RT_OBJS) $(ALLOC_OBJ) $(QJS_OBJS) \
-		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) -lm -lpthread
+		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) -lm -lpthread
 
-# Lua runtime test — needs Lua + Lua runtime objects + stdlib headers
-$(BUILDDIR)/test_lua: $(TESTDIR)/hull/runtime/lua/test_lua.c $(TEST_COMMON_DEPS) $(LUA_RT_OBJS) $(LUA_OBJS) $(STDLIB_LUA_HDRS) | $(BUILDDIR)
+# Lua runtime test — needs Lua + Lua runtime objects + stdlib headers + manifest
+$(BUILDDIR)/test_lua: $(TESTDIR)/hull/runtime/lua/test_lua.c $(TEST_COMMON_DEPS) $(MANIFEST_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(LUA_RT_OBJS) $(LUA_OBJS) $(STDLIB_LUA_HDRS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(TEST_CAP_OBJS) $(LUA_RT_OBJS) $(ALLOC_OBJ) $(LUA_OBJS) \
-		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) -lm -lpthread
+		$(TEST_CAP_OBJS) $(LUA_RT_OBJS) $(MANIFEST_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(ALLOC_OBJ) $(LUA_OBJS) \
+		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) -lm -lpthread
 
 test: $(TEST_BINS)
 	@echo "Running tests..."
@@ -390,6 +527,12 @@ msan:
 
 e2e: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e.sh
+
+e2e-build:
+	sh tests/e2e_build.sh
+
+e2e-sandbox: $(BUILDDIR)/hull
+	sh tests/e2e_sandbox.sh
 
 # ── Full check (sanitized build + test + e2e) ───────────────────────
 

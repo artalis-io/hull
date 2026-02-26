@@ -170,4 +170,88 @@ UTEST(hl_cap_crypto, pbkdf2_null_args)
     ASSERT_EQ(rc, -1);
 }
 
+/* ── Ed25519 tests ─────────────────────────────────────────────────── */
+
+UTEST(hl_cap_crypto, ed25519_keypair)
+{
+    uint8_t pk[32], sk[64];
+    int rc = hl_cap_crypto_ed25519_keypair(pk, sk);
+    ASSERT_EQ(rc, 0);
+
+    /* Public key should be non-zero */
+    int all_zero = 1;
+    for (int i = 0; i < 32; i++) {
+        if (pk[i] != 0) { all_zero = 0; break; }
+    }
+    ASSERT_EQ(all_zero, 0);
+
+    /* Last 32 bytes of sk should equal pk (TweetNaCl format) */
+    ASSERT_EQ(memcmp(sk + 32, pk, 32), 0);
+}
+
+UTEST(hl_cap_crypto, ed25519_sign_verify)
+{
+    uint8_t pk[32], sk[64];
+    hl_cap_crypto_ed25519_keypair(pk, sk);
+
+    const char *msg = "hello world";
+    uint8_t sig[64];
+    int rc = hl_cap_crypto_ed25519_sign((const uint8_t *)msg, strlen(msg),
+                                          sk, sig);
+    ASSERT_EQ(rc, 0);
+
+    /* Verify with correct key */
+    rc = hl_cap_crypto_ed25519_verify((const uint8_t *)msg, strlen(msg),
+                                        sig, pk);
+    ASSERT_EQ(rc, 0);
+}
+
+UTEST(hl_cap_crypto, ed25519_verify_wrong_key)
+{
+    uint8_t pk1[32], sk1[64];
+    uint8_t pk2[32], sk2[64];
+    hl_cap_crypto_ed25519_keypair(pk1, sk1);
+    hl_cap_crypto_ed25519_keypair(pk2, sk2);
+
+    const char *msg = "test message";
+    uint8_t sig[64];
+    hl_cap_crypto_ed25519_sign((const uint8_t *)msg, strlen(msg), sk1, sig);
+
+    /* Verify with wrong key should fail */
+    int rc = hl_cap_crypto_ed25519_verify((const uint8_t *)msg, strlen(msg),
+                                            sig, pk2);
+    ASSERT_EQ(rc, -1);
+}
+
+UTEST(hl_cap_crypto, ed25519_verify_tampered)
+{
+    uint8_t pk[32], sk[64];
+    hl_cap_crypto_ed25519_keypair(pk, sk);
+
+    const char *msg = "original message";
+    uint8_t sig[64];
+    hl_cap_crypto_ed25519_sign((const uint8_t *)msg, strlen(msg), sk, sig);
+
+    /* Tamper with message */
+    const char *tampered = "tampered message";
+    int rc = hl_cap_crypto_ed25519_verify((const uint8_t *)tampered,
+                                            strlen(tampered), sig, pk);
+    ASSERT_EQ(rc, -1);
+}
+
+UTEST(hl_cap_crypto, ed25519_null_args)
+{
+    uint8_t pk[32], sk[64], sig[64];
+    uint8_t msg[] = "test";
+
+    ASSERT_EQ(hl_cap_crypto_ed25519_keypair(NULL, sk), -1);
+    ASSERT_EQ(hl_cap_crypto_ed25519_keypair(pk, NULL), -1);
+    ASSERT_EQ(hl_cap_crypto_ed25519_sign(NULL, 4, sk, sig), -1);
+    ASSERT_EQ(hl_cap_crypto_ed25519_sign(msg, 4, NULL, sig), -1);
+    ASSERT_EQ(hl_cap_crypto_ed25519_sign(msg, 4, sk, NULL), -1);
+    ASSERT_EQ(hl_cap_crypto_ed25519_verify(NULL, 4, sig, pk), -1);
+    ASSERT_EQ(hl_cap_crypto_ed25519_verify(msg, 4, NULL, pk), -1);
+    ASSERT_EQ(hl_cap_crypto_ed25519_verify(msg, 4, sig, NULL), -1);
+}
+
 UTEST_MAIN();
