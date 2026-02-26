@@ -128,7 +128,7 @@ INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(SQLITE_DIR)
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan e2e check analyze cppcheck
+.PHONY: all clean test debug msan e2e check analyze cppcheck bench
 
 all: $(BUILDDIR)/hull
 
@@ -279,6 +279,11 @@ cppcheck:
 		-I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(SQLITE_DIR) -I$(KEEL_INC) \
 		$(SRCDIR)/main.c $(SRCDIR)/cap/*.c $(SRCDIR)/runtime/js/*.c \
 		$(SRCDIR)/runtime/lua/*.c
+
+# ── Benchmark ──────────────────────────────────────────────────────
+
+bench: $(BUILDDIR)/hull
+	RUNTIME=$(RUNTIME) sh bench.sh
 
 # ── Clean ───────────────────────────────────────────────────────────
 
