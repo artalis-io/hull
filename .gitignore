@@ -1,9 +1,10 @@
 # Build artifacts
+build/
 *.o
 *.a
 *.com
 *.exe
-hull
+/hull
 
 # Database
 *.db
