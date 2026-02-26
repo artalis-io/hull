@@ -8,9 +8,12 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#include "hull/js.h"
+#include "hull/runtime/js.h"
 #include "hull/limits.h"
-#include "hull/cap.h"
+#include "hull/cap/db.h"
+#include "hull/cap/time.h"
+#include "hull/cap/env.h"
+#include "hull/cap/crypto.h"
 #include "quickjs.h"
 
 #include "log.h"

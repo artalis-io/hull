@@ -8,7 +8,7 @@
  */
 
 #include "utest.h"
-#include "hull/cap.h"
+#include "hull/cap/db.h"
 #include <sqlite3.h>
 #include <string.h>
 #include <stdlib.h>

@@ -5,7 +5,7 @@
  */
 
 #include "utest.h"
-#include "hull/cap.h"
+#include "hull/cap/crypto.h"
 #include <string.h>
 #include <stdio.h>
 

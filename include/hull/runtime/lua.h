@@ -1,19 +1,17 @@
 /*
- * lua_runtime.h — Lua 5.4 runtime for Hull
+ * runtime/lua.h — Lua 5.4 runtime for Hull
  *
  * Manages Lua VM lifecycle: init, sandbox, module loader, and request dispatch.
- * Mirrors the QuickJS runtime interface (js_runtime.h).
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#ifndef HL_LUA_H
-#define HL_LUA_H
+#ifndef HL_RUNTIME_LUA_H
+#define HL_RUNTIME_LUA_H
 
 #include <stddef.h>
 #include <stdint.h>
 #include "hull/limits.h"
-#include "hull/cap.h"
 
 /* Forward declarations */
 typedef struct lua_State lua_State;
@@ -21,6 +19,10 @@ typedef struct KlRequest KlRequest;
 typedef struct KlResponse KlResponse;
 typedef struct SHArena SHArena;
 typedef struct HlAllocator HlAllocator;
+typedef struct sqlite3 sqlite3;
+typedef struct HlFsConfig HlFsConfig;
+typedef struct HlEnvConfig HlEnvConfig;
+typedef struct HlHttpConfig HlHttpConfig;
 
 /* ── Configuration ──────────────────────────────────────────────────── */
 
@@ -132,4 +134,4 @@ void hl_lua_make_request(lua_State *L, KlRequest *req);
  */
 void hl_lua_make_response(lua_State *L, KlResponse *res);
 
-#endif /* HL_LUA_H */
+#endif /* HL_RUNTIME_LUA_H */

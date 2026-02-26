@@ -1,5 +1,5 @@
 /*
- * js_runtime.h — QuickJS runtime for Hull
+ * runtime/js.h — QuickJS runtime for Hull
  *
  * Manages QuickJS VM lifecycle: init, sandbox, allocator integration,
  * interrupt handler, module loader, and request dispatch.
@@ -7,21 +7,24 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#ifndef HL_JS_H
-#define HL_JS_H
+#ifndef HL_RUNTIME_JS_H
+#define HL_RUNTIME_JS_H
 
 #include <stddef.h>
 #include <stdint.h>
 #include "hull/limits.h"
-#include "hull/cap.h"
 
-/* Forward declarations for types defined in other headers */
+/* Forward declarations */
 typedef struct JSRuntime JSRuntime;
 typedef struct JSContext JSContext;
 typedef struct KlRequest KlRequest;
 typedef struct KlResponse KlResponse;
 typedef struct SHArena SHArena;
 typedef struct HlAllocator HlAllocator;
+typedef struct sqlite3 sqlite3;
+typedef struct HlFsConfig HlFsConfig;
+typedef struct HlEnvConfig HlEnvConfig;
+typedef struct HlHttpConfig HlHttpConfig;
 
 /* ── Configuration ──────────────────────────────────────────────────── */
 
@@ -143,4 +146,4 @@ int hl_js_register_modules(HlJS *js);
  */
 void hl_js_dump_error(HlJS *js);
 
-#endif /* HL_JS_H */
+#endif /* HL_RUNTIME_JS_H */
