@@ -3,7 +3,7 @@
  *
  * Marshals Keel's KlRequest/KlResponse to Lua tables/userdata.
  * This file contains ONLY data marshaling — all enforcement logic
- * lives in hull_cap_* functions.
+ * lives in hl_cap_* functions.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -25,14 +25,14 @@
 
 /* ── Response metatable name ────────────────────────────────────────── */
 
-#define HULL_RESPONSE_MT "HullResponse"
+#define HL_RESPONSE_MT "HlResponse"
 
-/* ── Helper: retrieve HullLua from Lua registry ────────────────────── */
+/* ── Helper: retrieve HlLua from Lua registry ────────────────────── */
 
-static HullLua *get_hull_lua_from_L(lua_State *L)
+static HlLua *get_hl_lua_from_L(lua_State *L)
 {
     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_lua");
-    HullLua *lua = (HullLua *)lua_touserdata(L, -1);
+    HlLua *lua = (HlLua *)lua_touserdata(L, -1);
     lua_pop(L, 1);
     return lua;
 }
@@ -41,10 +41,10 @@ static HullLua *get_hull_lua_from_L(lua_State *L)
  * Copy body data into runtime-owned buffer so it survives until
  * Keel sends the response (kl_response_body borrows the pointer).
  */
-static const char *hull_lua_stash_body(lua_State *L, const char *data,
+static const char *hl_lua_stash_body(lua_State *L, const char *data,
                                         size_t len)
 {
-    HullLua *hlua = get_hull_lua_from_L(L);
+    HlLua *hlua = get_hl_lua_from_L(L);
     if (!hlua)
         return NULL;
     free(hlua->response_body);
@@ -70,7 +70,7 @@ static const char *hull_lua_stash_body(lua_State *L, const char *data,
  *     ctx     = {}
  *   }
  */
-void hull_lua_make_request(lua_State *L, KlRequest *req)
+void hl_lua_make_request(lua_State *L, KlRequest *req)
 {
     lua_newtable(L);
 
@@ -114,9 +114,17 @@ void hull_lua_make_request(lua_State *L, KlRequest *req)
     }
     lua_setfield(L, -2, "query");
 
-    /* params — route params are on KlConn, not KlRequest.
-     * TODO: pass params via req->ctx once Keel supports it. */
+    /* params — route params from Keel (e.g. :id → params.id) */
     lua_newtable(L);
+    for (int i = 0; i < req->num_params; i++) {
+        char name[256];
+        size_t nlen = req->params[i].name_len < 255
+                      ? req->params[i].name_len : 255;
+        memcpy(name, req->params[i].name, nlen);
+        name[nlen] = '\0';
+        lua_pushlstring(L, req->params[i].value, req->params[i].value_len);
+        lua_setfield(L, -2, name);
+    }
     lua_setfield(L, -2, "params");
 
     /* headers → table */
@@ -130,11 +138,17 @@ void hull_lua_make_request(lua_State *L, KlRequest *req)
     }
     lua_setfield(L, -2, "headers");
 
-    /* body */
-    if (req->body_reader)
-        lua_pushstring(L, "");
-    else
+    /* body — extract from buffer reader if available */
+    if (req->body_reader) {
+        const char *data;
+        size_t len = hl_cap_body_data(req->body_reader, &data);
+        if (len > 0)
+            lua_pushlstring(L, data, len);
+        else
+            lua_pushstring(L, "");
+    } else {
         lua_pushnil(L);
+    }
     lua_setfield(L, -2, "body");
 
     /* ctx — per-request context table (middleware → handler) */
@@ -156,7 +170,7 @@ void hull_lua_make_request(lua_State *L, KlRequest *req)
 
 static KlResponse *check_response(lua_State *L, int idx)
 {
-    KlResponse **pp = (KlResponse **)luaL_checkudata(L, idx, HULL_RESPONSE_MT);
+    KlResponse **pp = (KlResponse **)luaL_checkudata(L, idx, HL_RESPONSE_MT);
     return *pp;
 }
 
@@ -393,7 +407,7 @@ static int lua_res_json(lua_State *L)
 
     size_t json_len;
     const char *json_str = lua_tolstring(L, -1, &json_len);
-    const char *copy = hull_lua_stash_body(L, json_str, json_len);
+    const char *copy = hl_lua_stash_body(L, json_str, json_len);
     lua_pop(L, 1); /* pop JSON string */
     if (copy) {
         kl_response_header(res, "Content-Type", "application/json");
@@ -409,7 +423,7 @@ static int lua_res_html(lua_State *L)
     KlResponse *res = check_response(L, 1);
     size_t len;
     const char *html = luaL_checklstring(L, 2, &len);
-    const char *copy = hull_lua_stash_body(L, html, len);
+    const char *copy = hl_lua_stash_body(L, html, len);
     if (copy) {
         kl_response_header(res, "Content-Type", "text/html; charset=utf-8");
         kl_response_body(res, copy, len);
@@ -423,7 +437,7 @@ static int lua_res_text(lua_State *L)
     KlResponse *res = check_response(L, 1);
     size_t len;
     const char *text = luaL_checklstring(L, 2, &len);
-    const char *copy = hull_lua_stash_body(L, text, len);
+    const char *copy = hl_lua_stash_body(L, text, len);
     if (copy) {
         kl_response_header(res, "Content-Type", "text/plain; charset=utf-8");
         kl_response_body(res, copy, len);
@@ -460,7 +474,7 @@ static const luaL_Reg response_methods[] = {
 
 static void ensure_response_metatable(lua_State *L)
 {
-    if (luaL_newmetatable(L, HULL_RESPONSE_MT)) {
+    if (luaL_newmetatable(L, HL_RESPONSE_MT)) {
         /* First time — set up metatable */
         luaL_newlib(L, response_methods);
         lua_setfield(L, -2, "__index");
@@ -470,11 +484,11 @@ static void ensure_response_metatable(lua_State *L)
 
 /* ── Public: create Lua response userdata ───────────────────────────── */
 
-void hull_lua_make_response(lua_State *L, KlResponse *res)
+void hl_lua_make_response(lua_State *L, KlResponse *res)
 {
     ensure_response_metatable(L);
 
     KlResponse **pp = (KlResponse **)lua_newuserdata(L, sizeof(KlResponse *));
     *pp = res;
-    luaL_setmetatable(L, HULL_RESPONSE_MT);
+    luaL_setmetatable(L, HL_RESPONSE_MT);
 }

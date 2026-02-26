@@ -11,7 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-const char *hull_cap_env_get(const HullEnvConfig *cfg, const char *name)
+const char *hl_cap_env_get(const HlEnvConfig *cfg, const char *name)
 {
     if (!cfg || !name || !cfg->allowed)
         return NULL;

@@ -18,7 +18,7 @@
 
 /* ── Path validation ────────────────────────────────────────────────── */
 
-int hull_cap_fs_validate(const HullFsConfig *cfg, const char *path)
+int hl_cap_fs_validate(const HlFsConfig *cfg, const char *path)
 {
     if (!cfg || !path || !cfg->base_dir)
         return -1;
@@ -45,13 +45,6 @@ int hull_cap_fs_validate(const HullFsConfig *cfg, const char *path)
         if (!slash)
             break;
         p = slash + 1;
-    }
-
-    /* Reject null bytes (path traversal via null injection) */
-    if (memchr(path, '\0', strlen(path)) != NULL) {
-        /* strlen stops at first \0, so this is always "equal" —
-         * but the caller might pass a length separately in future.
-         * Belt and suspenders. */
     }
 
     /* Resolve the base directory (must exist) */
@@ -93,10 +86,10 @@ int hull_cap_fs_validate(const HullFsConfig *cfg, const char *path)
 
 /* ── Internal: build full path ──────────────────────────────────────── */
 
-static int build_path(const HullFsConfig *cfg, const char *path,
+static int build_path(const HlFsConfig *cfg, const char *path,
                       char *out, size_t out_size)
 {
-    if (hull_cap_fs_validate(cfg, path) != 0)
+    if (hl_cap_fs_validate(cfg, path) != 0)
         return -1;
 
     int n = snprintf(out, out_size, "%s/%s", cfg->base_dir, path);
@@ -108,7 +101,7 @@ static int build_path(const HullFsConfig *cfg, const char *path,
 
 /* ── Public API ─────────────────────────────────────────────────────── */
 
-int64_t hull_cap_fs_read(const HullFsConfig *cfg, const char *path,
+int64_t hl_cap_fs_read(const HlFsConfig *cfg, const char *path,
                          char *buf, size_t buf_size)
 {
     char full[PATH_MAX];
@@ -151,7 +144,7 @@ int64_t hull_cap_fs_read(const HullFsConfig *cfg, const char *path,
     return (int64_t)nread;
 }
 
-int hull_cap_fs_write(const HullFsConfig *cfg, const char *path,
+int hl_cap_fs_write(const HlFsConfig *cfg, const char *path,
                       const char *data, size_t len)
 {
     char full[PATH_MAX];
@@ -187,7 +180,7 @@ int hull_cap_fs_write(const HullFsConfig *cfg, const char *path,
     return 0;
 }
 
-int hull_cap_fs_exists(const HullFsConfig *cfg, const char *path)
+int hl_cap_fs_exists(const HlFsConfig *cfg, const char *path)
 {
     char full[PATH_MAX];
     if (build_path(cfg, path, full, sizeof(full)) != 0)
@@ -196,7 +189,7 @@ int hull_cap_fs_exists(const HullFsConfig *cfg, const char *path)
     return access(full, F_OK) == 0 ? 1 : 0;
 }
 
-int hull_cap_fs_delete(const HullFsConfig *cfg, const char *path)
+int hl_cap_fs_delete(const HlFsConfig *cfg, const char *path)
 {
     char full[PATH_MAX];
     if (build_path(cfg, path, full, sizeof(full)) != 0)

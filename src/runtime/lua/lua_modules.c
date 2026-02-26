@@ -2,7 +2,7 @@
  * lua_modules.c — hull.* built-in module implementations for Lua 5.4
  *
  * Each module is registered as a Lua library via luaL_newlib().
- * All capability calls go through hull_cap_* — no direct SQLite,
+ * All capability calls go through hl_cap_* — no direct SQLite,
  * filesystem, or network access from this file.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -20,12 +20,12 @@
 #include <string.h>
 #include <stdio.h>
 
-/* ── Helper: retrieve HullLua from registry ─────────────────────────── */
+/* ── Helper: retrieve HlLua from registry ─────────────────────────── */
 
-static HullLua *get_hull_lua(lua_State *L)
+static HlLua *get_hl_lua(lua_State *L)
 {
     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_lua");
-    HullLua *lua = (HullLua *)lua_touserdata(L, -1);
+    HlLua *lua = (HlLua *)lua_touserdata(L, -1);
     lua_pop(L, 1);
     return lua;
 }
@@ -155,14 +155,14 @@ static int luaopen_hull_app(lua_State *L)
  * db.last_id()           → last insert rowid
  * ════════════════════════════════════════════════════════════════════ */
 
-/* Callback context for building Lua result table from hull_cap_db_query */
+/* Callback context for building Lua result table from hl_cap_db_query */
 typedef struct {
     lua_State *L;
     int        table_idx; /* absolute stack index of result table */
     int        row_count;
 } LuaQueryCtx;
 
-static int lua_query_row_cb(void *opaque, HullColumn *cols, int ncols)
+static int lua_query_row_cb(void *opaque, HlColumn *cols, int ncols)
 {
     LuaQueryCtx *qc = (LuaQueryCtx *)opaque;
     qc->row_count++;
@@ -170,22 +170,22 @@ static int lua_query_row_cb(void *opaque, HullColumn *cols, int ncols)
     lua_newtable(qc->L);
     for (int i = 0; i < ncols; i++) {
         switch (cols[i].value.type) {
-        case HULL_TYPE_INT:
+        case HL_TYPE_INT:
             lua_pushinteger(qc->L, (lua_Integer)cols[i].value.i);
             break;
-        case HULL_TYPE_DOUBLE:
+        case HL_TYPE_DOUBLE:
             lua_pushnumber(qc->L, (lua_Number)cols[i].value.d);
             break;
-        case HULL_TYPE_TEXT:
+        case HL_TYPE_TEXT:
             lua_pushlstring(qc->L, cols[i].value.s, cols[i].value.len);
             break;
-        case HULL_TYPE_BLOB:
+        case HL_TYPE_BLOB:
             lua_pushlstring(qc->L, cols[i].value.s, cols[i].value.len);
             break;
-        case HULL_TYPE_BOOL:
+        case HL_TYPE_BOOL:
             lua_pushboolean(qc->L, cols[i].value.b);
             break;
-        case HULL_TYPE_NIL:
+        case HL_TYPE_NIL:
         default:
             lua_pushnil(qc->L);
             break;
@@ -197,9 +197,9 @@ static int lua_query_row_cb(void *opaque, HullColumn *cols, int ncols)
     return 0;
 }
 
-/* Marshal Lua table values to HullValue array for parameter binding */
-static int lua_to_hull_values(lua_State *L, int idx,
-                               HullValue **out_params, int *out_count)
+/* Marshal Lua table values to HlValue array for parameter binding */
+static int lua_to_hl_values(lua_State *L, int idx,
+                               HlValue **out_params, int *out_count)
 {
     *out_params = NULL;
     *out_count = 0;
@@ -213,10 +213,10 @@ static int lua_to_hull_values(lua_State *L, int idx,
         return 0;
 
     /* Overflow guard */
-    if ((size_t)len > SIZE_MAX / sizeof(HullValue))
+    if ((size_t)len > SIZE_MAX / sizeof(HlValue))
         return -1;
 
-    HullValue *params = calloc((size_t)len, sizeof(HullValue));
+    HlValue *params = calloc((size_t)len, sizeof(HlValue));
     if (!params)
         return -1;
 
@@ -227,28 +227,28 @@ static int lua_to_hull_values(lua_State *L, int idx,
         switch (t) {
         case LUA_TNUMBER:
             if (lua_isinteger(L, -1)) {
-                params[i].type = HULL_TYPE_INT;
+                params[i].type = HL_TYPE_INT;
                 params[i].i = (int64_t)lua_tointeger(L, -1);
             } else {
-                params[i].type = HULL_TYPE_DOUBLE;
+                params[i].type = HL_TYPE_DOUBLE;
                 params[i].d = (double)lua_tonumber(L, -1);
             }
             break;
         case LUA_TSTRING: {
             size_t slen;
             const char *s = lua_tolstring(L, -1, &slen);
-            params[i].type = HULL_TYPE_TEXT;
+            params[i].type = HL_TYPE_TEXT;
             params[i].s = s; /* valid while on Lua stack */
             params[i].len = slen;
             break;
         }
         case LUA_TBOOLEAN:
-            params[i].type = HULL_TYPE_BOOL;
+            params[i].type = HL_TYPE_BOOL;
             params[i].b = lua_toboolean(L, -1);
             break;
         case LUA_TNIL:
         default:
-            params[i].type = HULL_TYPE_NIL;
+            params[i].type = HL_TYPE_NIL;
             break;
         }
         /* Leave values on stack — they keep strings alive */
@@ -259,11 +259,11 @@ static int lua_to_hull_values(lua_State *L, int idx,
     return 0;
 }
 
-static void lua_free_hull_values(lua_State *L, HullValue *params, int count)
+static void lua_free_hl_values(lua_State *L, HlValue *params, int count)
 {
     if (!params)
         return;
-    /* Pop the values we left on the stack in lua_to_hull_values */
+    /* Pop the values we left on the stack in lua_to_hl_values */
     if (count > 0)
         lua_pop(L, count);
     free(params);
@@ -272,16 +272,16 @@ static void lua_free_hull_values(lua_State *L, HullValue *params, int count)
 /* db.query(sql, params?) */
 static int lua_db_query(lua_State *L)
 {
-    HullLua *lua = get_hull_lua(L);
+    HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->db)
         return luaL_error(L, "database not available");
 
     const char *sql = luaL_checkstring(L, 1);
 
-    HullValue *params = NULL;
+    HlValue *params = NULL;
     int nparams = 0;
     if (lua_gettop(L) >= 2 && !lua_isnil(L, 2)) {
-        if (lua_to_hull_values(L, 2, &params, &nparams) != 0)
+        if (lua_to_hl_values(L, 2, &params, &nparams) != 0)
             return luaL_error(L, "params must be a table");
     }
 
@@ -295,10 +295,10 @@ static int lua_db_query(lua_State *L)
         .row_count = 0,
     };
 
-    int rc = hull_cap_db_query(lua->db, sql, params, nparams,
+    int rc = hl_cap_db_query(lua->db, sql, params, nparams,
                                 lua_query_row_cb, &qc);
 
-    lua_free_hull_values(L, params, nparams);
+    lua_free_hl_values(L, params, nparams);
 
     if (rc != 0) {
         lua_pop(L, 1); /* pop result table */
@@ -311,22 +311,22 @@ static int lua_db_query(lua_State *L)
 /* db.exec(sql, params?) */
 static int lua_db_exec(lua_State *L)
 {
-    HullLua *lua = get_hull_lua(L);
+    HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->db)
         return luaL_error(L, "database not available");
 
     const char *sql = luaL_checkstring(L, 1);
 
-    HullValue *params = NULL;
+    HlValue *params = NULL;
     int nparams = 0;
     if (lua_gettop(L) >= 2 && !lua_isnil(L, 2)) {
-        if (lua_to_hull_values(L, 2, &params, &nparams) != 0)
+        if (lua_to_hl_values(L, 2, &params, &nparams) != 0)
             return luaL_error(L, "params must be a table");
     }
 
-    int rc = hull_cap_db_exec(lua->db, sql, params, nparams);
+    int rc = hl_cap_db_exec(lua->db, sql, params, nparams);
 
-    lua_free_hull_values(L, params, nparams);
+    lua_free_hl_values(L, params, nparams);
 
     if (rc < 0)
         return luaL_error(L, "exec failed: %s", sqlite3_errmsg(lua->db));
@@ -338,11 +338,11 @@ static int lua_db_exec(lua_State *L)
 /* db.last_id() */
 static int lua_db_last_id(lua_State *L)
 {
-    HullLua *lua = get_hull_lua(L);
+    HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->db)
         return luaL_error(L, "database not available");
 
-    lua_pushinteger(L, (lua_Integer)hull_cap_db_last_id(lua->db));
+    lua_pushinteger(L, (lua_Integer)hl_cap_db_last_id(lua->db));
     return 1;
 }
 
@@ -371,26 +371,26 @@ static int luaopen_hull_db(lua_State *L)
 
 static int lua_time_now(lua_State *L)
 {
-    lua_pushinteger(L, (lua_Integer)hull_cap_time_now());
+    lua_pushinteger(L, (lua_Integer)hl_cap_time_now());
     return 1;
 }
 
 static int lua_time_now_ms(lua_State *L)
 {
-    lua_pushinteger(L, (lua_Integer)hull_cap_time_now_ms());
+    lua_pushinteger(L, (lua_Integer)hl_cap_time_now_ms());
     return 1;
 }
 
 static int lua_time_clock(lua_State *L)
 {
-    lua_pushinteger(L, (lua_Integer)hull_cap_time_clock());
+    lua_pushinteger(L, (lua_Integer)hl_cap_time_clock());
     return 1;
 }
 
 static int lua_time_date(lua_State *L)
 {
     char buf[16];
-    if (hull_cap_time_date(buf, sizeof(buf)) != 0)
+    if (hl_cap_time_date(buf, sizeof(buf)) != 0)
         return luaL_error(L, "time.date() failed");
     lua_pushstring(L, buf);
     return 1;
@@ -399,7 +399,7 @@ static int lua_time_date(lua_State *L)
 static int lua_time_datetime(lua_State *L)
 {
     char buf[32];
-    if (hull_cap_time_datetime(buf, sizeof(buf)) != 0)
+    if (hl_cap_time_datetime(buf, sizeof(buf)) != 0)
         return luaL_error(L, "time.datetime() failed");
     lua_pushstring(L, buf);
     return 1;
@@ -428,12 +428,12 @@ static int luaopen_hull_time(lua_State *L)
 
 static int lua_env_get(lua_State *L)
 {
-    HullLua *lua = get_hull_lua(L);
+    HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->env_cfg)
         return luaL_error(L, "env not configured");
 
     const char *name = luaL_checkstring(L, 1);
-    const char *val = hull_cap_env_get(lua->env_cfg, name);
+    const char *val = hl_cap_env_get(lua->env_cfg, name);
 
     if (val)
         lua_pushstring(L, val);
@@ -468,7 +468,7 @@ static int lua_crypto_sha256(lua_State *L)
     const char *data = luaL_checklstring(L, 1, &len);
 
     uint8_t hash[32];
-    if (hull_cap_crypto_sha256(data, len, hash) != 0)
+    if (hl_cap_crypto_sha256(data, len, hash) != 0)
         return luaL_error(L, "sha256 failed");
 
     /* Convert to hex string */
@@ -491,7 +491,7 @@ static int lua_crypto_random(lua_State *L)
     if (!buf)
         return luaL_error(L, "out of memory");
 
-    if (hull_cap_crypto_random(buf, (size_t)n) != 0) {
+    if (hl_cap_crypto_random(buf, (size_t)n) != 0) {
         free(buf);
         return luaL_error(L, "random failed");
     }
@@ -509,25 +509,26 @@ static int lua_crypto_hash_password(lua_State *L)
 
     /* Generate 16-byte salt */
     uint8_t salt[16];
-    if (hull_cap_crypto_random(salt, sizeof(salt)) != 0)
+    if (hl_cap_crypto_random(salt, sizeof(salt)) != 0)
         return luaL_error(L, "random failed");
 
     /* PBKDF2-HMAC-SHA256, 100k iterations, 32-byte output */
     uint8_t hash[32];
     int iterations = 100000;
-    if (hull_cap_crypto_pbkdf2(pw, pw_len, salt, sizeof(salt),
+    if (hl_cap_crypto_pbkdf2(pw, pw_len, salt, sizeof(salt),
                                 iterations, hash, sizeof(hash)) != 0)
         return luaL_error(L, "pbkdf2 failed");
 
     /* Format: "pbkdf2:100000:salt_hex:hash_hex" */
-    char result[256];
-    char *p = result;
-    p += snprintf(p, sizeof(result), "pbkdf2:%d:", iterations);
+    char salt_hex[33], hash_hex[65];
     for (int i = 0; i < 16; i++)
-        p += snprintf(p, (size_t)(result + sizeof(result) - p), "%02x", salt[i]);
-    *p++ = ':';
+        snprintf(salt_hex + i * 2, 3, "%02x", salt[i]);
     for (int i = 0; i < 32; i++)
-        p += snprintf(p, (size_t)(result + sizeof(result) - p), "%02x", hash[i]);
+        snprintf(hash_hex + i * 2, 3, "%02x", hash[i]);
+
+    char result[128];
+    snprintf(result, sizeof(result), "pbkdf2:%d:%s:%s",
+             iterations, salt_hex, hash_hex);
 
     lua_pushstring(L, result);
     return 1;
@@ -561,7 +562,7 @@ static int lua_crypto_verify_password(lua_State *L)
 
     /* Recompute hash */
     uint8_t computed[32];
-    if (hull_cap_crypto_pbkdf2(pw, pw_len, salt, sizeof(salt),
+    if (hl_cap_crypto_pbkdf2(pw, pw_len, salt, sizeof(salt),
                                 iterations, computed, sizeof(computed)) != 0) {
         lua_pushboolean(L, 0);
         return 1;
@@ -639,11 +640,11 @@ static int luaopen_hull_log(lua_State *L)
 }
 
 /* ════════════════════════════════════════════════════════════════════
- * Module registry — called by hull_lua_init() to register all
+ * Module registry — called by hl_lua_init() to register all
  * hull.* built-in modules.
  * ════════════════════════════════════════════════════════════════════ */
 
-int hull_lua_register_modules(HullLua *lua)
+int hl_lua_register_modules(HlLua *lua)
 {
     if (!lua || !lua->L)
         return -1;

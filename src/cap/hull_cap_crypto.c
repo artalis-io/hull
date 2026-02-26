@@ -76,7 +76,7 @@ static void sha256_transform(uint32_t state[8], const uint8_t block[64])
     state[4] += e; state[5] += f; state[6] += g; state[7] += h;
 }
 
-int hull_cap_crypto_sha256(const void *data, size_t len, uint8_t out[32])
+int hl_cap_crypto_sha256(const void *data, size_t len, uint8_t out[32])
 {
     if (!data || !out)
         return -1;
@@ -133,7 +133,7 @@ int hull_cap_crypto_sha256(const void *data, size_t len, uint8_t out[32])
 
 /* ── Random bytes ───────────────────────────────────────────────────── */
 
-int hull_cap_crypto_random(void *buf, size_t len)
+int hl_cap_crypto_random(void *buf, size_t len)
 {
     if (!buf || len == 0)
         return -1;
@@ -166,16 +166,16 @@ int hull_cap_crypto_random(void *buf, size_t len)
 
 /* ── PBKDF2-HMAC-SHA256 ────────────────────────────────────────────── */
 
-static void hmac_sha256(const uint8_t *key, size_t key_len,
-                        const uint8_t *msg, size_t msg_len,
-                        uint8_t out[32])
+static int hmac_sha256(const uint8_t *key, size_t key_len,
+                       const uint8_t *msg, size_t msg_len,
+                       uint8_t out[32])
 {
     uint8_t k_ipad[64], k_opad[64];
     uint8_t tk[32];
 
     /* If key is longer than block size, hash it first */
     if (key_len > 64) {
-        hull_cap_crypto_sha256(key, key_len, tk);
+        hl_cap_crypto_sha256(key, key_len, tk);
         key = tk;
         key_len = 32;
     }
@@ -188,27 +188,25 @@ static void hmac_sha256(const uint8_t *key, size_t key_len,
     }
 
     /* inner hash: SHA256(k_ipad || msg) */
-    /* We need a streaming approach; use a buffer */
     size_t inner_len = 64 + msg_len;
     uint8_t *inner = malloc(inner_len);
-    if (!inner) {
-        memset(out, 0, 32);
-        return;
-    }
+    if (!inner)
+        return -1;
     memcpy(inner, k_ipad, 64);
     memcpy(inner + 64, msg, msg_len);
     uint8_t inner_hash[32];
-    hull_cap_crypto_sha256(inner, inner_len, inner_hash);
+    hl_cap_crypto_sha256(inner, inner_len, inner_hash);
     free(inner);
 
     /* outer hash: SHA256(k_opad || inner_hash) */
     uint8_t outer[64 + 32];
     memcpy(outer, k_opad, 64);
     memcpy(outer + 64, inner_hash, 32);
-    hull_cap_crypto_sha256(outer, 96, out);
+    hl_cap_crypto_sha256(outer, 96, out);
+    return 0;
 }
 
-int hull_cap_crypto_pbkdf2(const char *password, size_t pw_len,
+int hl_cap_crypto_pbkdf2(const char *password, size_t pw_len,
                            const uint8_t *salt, size_t salt_len,
                            int iterations,
                            uint8_t *out, size_t out_len)
@@ -237,13 +235,19 @@ int hull_cap_crypto_pbkdf2(const char *password, size_t pw_len,
         work[salt_len + 3] = (uint8_t)(block_num);
 
         uint8_t u[32], t[32];
-        hmac_sha256((const uint8_t *)password, pw_len,
-                    work, salt_len + 4, u);
+        if (hmac_sha256((const uint8_t *)password, pw_len,
+                        work, salt_len + 4, u) != 0) {
+            free(work);
+            return -1;
+        }
         memcpy(t, u, 32);
 
         for (int i = 1; i < iterations; i++) {
-            hmac_sha256((const uint8_t *)password, pw_len,
-                        u, 32, u);
+            if (hmac_sha256((const uint8_t *)password, pw_len,
+                            u, 32, u) != 0) {
+                free(work);
+                return -1;
+            }
             for (int j = 0; j < 32; j++)
                 t[j] ^= u[j];
         }
@@ -263,7 +267,7 @@ int hull_cap_crypto_pbkdf2(const char *password, size_t pw_len,
 
 /* ── Ed25519 verification ───────────────────────────────────────────── */
 
-int hull_cap_crypto_ed25519_verify(const uint8_t *msg, size_t msg_len,
+int hl_cap_crypto_ed25519_verify(const uint8_t *msg, size_t msg_len,
                                    const uint8_t sig[64],
                                    const uint8_t pubkey[32])
 {

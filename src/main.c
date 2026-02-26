@@ -5,16 +5,26 @@
  * Initializes the selected runtime, opens SQLite database, registers routes
  * with Keel, and enters the event loop.
  *
+ * Compile-time runtime selection:
+ *   -DHL_ENABLE_JS   — include QuickJS runtime
+ *   -DHL_ENABLE_LUA  — include Lua runtime
+ *   Both may be defined simultaneously (default).
+ *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#ifdef HL_ENABLE_JS
 #include "hull/js_runtime.h"
-#include "hull/lua_runtime.h"
-#include "hull/hull_cap.h"
 #include "quickjs.h"
+#endif
 
+#ifdef HL_ENABLE_LUA
+#include "hull/lua_runtime.h"
 #include "lua.h"
 #include "lauxlib.h"
+#endif
+
+#include "hull/hull_cap.h"
 
 #include <keel/keel.h>
 
@@ -24,33 +34,56 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* ── Route allocation tracking (freed on shutdown) ─────────────────── */
+
+#define MAX_ROUTES 256
+static void *route_allocs[MAX_ROUTES];
+static int   route_alloc_count = 0;
+
+static void *track_route_alloc(size_t size)
+{
+    void *p = malloc(size);
+    if (p && route_alloc_count < MAX_ROUTES)
+        route_allocs[route_alloc_count++] = p;
+    return p;
+}
+
+static void free_route_allocs(void)
+{
+    for (int i = 0; i < route_alloc_count; i++)
+        free(route_allocs[i]);
+    route_alloc_count = 0;
+}
+
 /* ── Runtime selection ──────────────────────────────────────────────── */
 
 typedef enum {
-    HULL_RUNTIME_LUA = 0,
-    HULL_RUNTIME_JS  = 1,
-} HullRuntimeType;
+    HL_RUNTIME_LUA = 0,
+    HL_RUNTIME_JS  = 1,
+} HlRuntimeType;
 
-static HullRuntimeType detect_runtime(const char *entry_point)
+static HlRuntimeType detect_runtime(const char *entry_point)
 {
     const char *ext = strrchr(entry_point, '.');
     if (ext && strcmp(ext, ".js") == 0)
-        return HULL_RUNTIME_JS;
-    return HULL_RUNTIME_LUA; /* default */
+        return HL_RUNTIME_JS;
+    return HL_RUNTIME_LUA; /* default */
 }
 
 /* ── JS handler bridge ──────────────────────────────────────────────── */
 
-typedef struct {
-    HullJS *js;
-    int     handler_id;
-} HullJSRoute;
+#ifdef HL_ENABLE_JS
 
-static void hull_js_keel_handler(KlRequest *req, KlResponse *res,
+typedef struct {
+    HlJS *js;
+    int     handler_id;
+} HlJSRoute;
+
+static void hl_js_keel_handler(KlRequest *req, KlResponse *res,
                                   void *user_data)
 {
-    HullJSRoute *route = (HullJSRoute *)user_data;
-    if (hull_js_dispatch(route->js, route->handler_id, req, res) != 0) {
+    HlJSRoute *route = (HlJSRoute *)user_data;
+    if (hl_js_dispatch(route->js, route->handler_id, req, res) != 0) {
         kl_response_status(res, 500);
         kl_response_header(res, "Content-Type", "text/plain");
         kl_response_body(res, "Internal Server Error", 21);
@@ -59,7 +92,7 @@ static void hull_js_keel_handler(KlRequest *req, KlResponse *res,
 
 /* ── Wire JS routes into Keel ───────────────────────────────────────── */
 
-static int wire_js_routes(HullJS *js, KlServer *server)
+static int wire_js_routes(HlJS *js, KlServer *server)
 {
     JSContext *ctx = js->ctx;
     JSValue global = JS_GetGlobalObject(ctx);
@@ -92,13 +125,13 @@ static int wire_js_routes(HullJS *js, KlServer *server)
         JS_ToInt32(ctx, &handler_id, id_val);
 
         if (method_str && pattern) {
-            /* Allocate route context (lives for duration of server) */
-            HullJSRoute *route = malloc(sizeof(HullJSRoute));
+            HlJSRoute *route = track_route_alloc(sizeof(HlJSRoute));
             if (route) {
                 route->js = js;
                 route->handler_id = handler_id;
                 kl_server_route(server, method_str, pattern,
-                                hull_js_keel_handler, route, NULL);
+                                hl_js_keel_handler, route,
+                                hl_cap_body_factory);
             }
         }
 
@@ -116,18 +149,22 @@ static int wire_js_routes(HullJS *js, KlServer *server)
     return 0;
 }
 
+#endif /* HL_ENABLE_JS */
+
 /* ── Lua handler bridge ─────────────────────────────────────────────── */
 
-typedef struct {
-    HullLua *lua;
-    int      handler_id;
-} HullLuaRoute;
+#ifdef HL_ENABLE_LUA
 
-static void hull_lua_keel_handler(KlRequest *req, KlResponse *res,
+typedef struct {
+    HlLua *lua;
+    int      handler_id;
+} HlLuaRoute;
+
+static void hl_lua_keel_handler(KlRequest *req, KlResponse *res,
                                    void *user_data)
 {
-    HullLuaRoute *route = (HullLuaRoute *)user_data;
-    if (hull_lua_dispatch(route->lua, route->handler_id, req, res) != 0) {
+    HlLuaRoute *route = (HlLuaRoute *)user_data;
+    if (hl_lua_dispatch(route->lua, route->handler_id, req, res) != 0) {
         kl_response_status(res, 500);
         kl_response_header(res, "Content-Type", "text/plain");
         kl_response_body(res, "Internal Server Error", 21);
@@ -136,7 +173,7 @@ static void hull_lua_keel_handler(KlRequest *req, KlResponse *res,
 
 /* ── Wire Lua routes into Keel ─────────────────────────────────────── */
 
-static int wire_lua_routes(HullLua *lua, KlServer *server)
+static int wire_lua_routes(HlLua *lua, KlServer *server)
 {
     lua_State *L = lua->L;
 
@@ -170,12 +207,13 @@ static int wire_lua_routes(HullLua *lua, KlServer *server)
         int handler_id = (int)lua_tointeger(L, -1);
 
         if (method_str && pattern) {
-            HullLuaRoute *route = malloc(sizeof(HullLuaRoute));
+            HlLuaRoute *route = track_route_alloc(sizeof(HlLuaRoute));
             if (route) {
                 route->lua = lua;
                 route->handler_id = handler_id;
                 kl_server_route(server, method_str, pattern,
-                                hull_lua_keel_handler, route, NULL);
+                                hl_lua_keel_handler, route,
+                                hl_cap_body_factory);
             }
         }
 
@@ -185,6 +223,23 @@ static int wire_lua_routes(HullLua *lua, KlServer *server)
 
     lua_pop(L, 1); /* __hull_route_defs table */
     return 0;
+}
+
+#endif /* HL_ENABLE_LUA */
+
+/* ── Auto-detect entry point ───────────────────────────────────────── */
+
+static const char *auto_detect_entry(void)
+{
+#ifdef HL_ENABLE_JS
+    FILE *f = fopen("app.js", "r");
+    if (f) { fclose(f); return "app.js"; }
+#endif
+#ifdef HL_ENABLE_LUA
+    FILE *f2 = fopen("app.lua", "r");
+    if (f2) { fclose(f2); return "app.lua"; }
+#endif
+    return NULL;
 }
 
 /* ── Usage ──────────────────────────────────────────────────────────── */
@@ -213,7 +268,13 @@ int main(int argc, char **argv)
     /* Parse arguments */
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
-            port = atoi(argv[++i]);
+            char *end;
+            long p = strtol(argv[++i], &end, 10);
+            if (*end != '\0' || p < 1 || p > 65535) {
+                fprintf(stderr, "hull: invalid port: %s\n", argv[i]);
+                return 1;
+            }
+            port = (int)p;
         } else if (strcmp(argv[i], "-b") == 0 && i + 1 < argc) {
             bind_addr = argv[++i];
         } else if (strcmp(argv[i], "-d") == 0 && i + 1 < argc) {
@@ -226,20 +287,8 @@ int main(int argc, char **argv)
         }
     }
 
-    if (!entry_point) {
-        /* Auto-detect: look for app.js, then app.lua */
-        FILE *f = fopen("app.js", "r");
-        if (f) {
-            fclose(f);
-            entry_point = "app.js";
-        } else {
-            f = fopen("app.lua", "r");
-            if (f) {
-                fclose(f);
-                entry_point = "app.lua";
-            }
-        }
-    }
+    if (!entry_point)
+        entry_point = auto_detect_entry();
 
     if (!entry_point) {
         fprintf(stderr, "hull: no entry point found (app.js or app.lua)\n");
@@ -247,7 +296,21 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    HullRuntimeType runtime = detect_runtime(entry_point);
+    HlRuntimeType runtime = detect_runtime(entry_point);
+
+    /* Validate that the requested runtime is compiled in */
+#ifndef HL_ENABLE_JS
+    if (runtime == HL_RUNTIME_JS) {
+        fprintf(stderr, "hull: QuickJS runtime not enabled in this build\n");
+        return 1;
+    }
+#endif
+#ifndef HL_ENABLE_LUA
+    if (runtime == HL_RUNTIME_LUA) {
+        fprintf(stderr, "hull: Lua runtime not enabled in this build\n");
+        return 1;
+    }
+#endif
 
     /* Open SQLite database */
     sqlite3 *db = NULL;
@@ -255,6 +318,7 @@ int main(int argc, char **argv)
     if (rc != SQLITE_OK) {
         fprintf(stderr, "hull: cannot open database %s: %s\n",
                 db_path, sqlite3_errmsg(db));
+        sqlite3_close(db);
         return 1;
     }
 
@@ -277,30 +341,31 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    if (runtime == HULL_RUNTIME_JS) {
+#ifdef HL_ENABLE_JS
+    if (runtime == HL_RUNTIME_JS) {
         /* ── QuickJS runtime ──────────────────────────────────── */
-        HullJSConfig js_cfg = HULL_JS_CONFIG_DEFAULT;
-        HullJS js;
+        HlJSConfig js_cfg = HL_JS_CONFIG_DEFAULT;
+        HlJS js;
 
         js.db = db;
 
-        if (hull_js_init(&js, &js_cfg) != 0) {
+        if (hl_js_init(&js, &js_cfg) != 0) {
             fprintf(stderr, "hull: QuickJS init failed\n");
             sqlite3_close(db);
             return 1;
         }
 
         /* Load and evaluate the app */
-        if (hull_js_load_app(&js, entry_point) != 0) {
+        if (hl_js_load_app(&js, entry_point) != 0) {
             fprintf(stderr, "hull: failed to load %s\n", entry_point);
-            hull_js_free(&js);
+            hl_js_free(&js);
             sqlite3_close(db);
             return 1;
         }
 
         /* Wire JS routes into Keel */
         if (wire_js_routes(&js, &server) != 0) {
-            hull_js_free(&js);
+            hl_js_free(&js);
             sqlite3_close(db);
             return 1;
         }
@@ -312,31 +377,35 @@ int main(int argc, char **argv)
         kl_server_run(&server);
 
         /* Cleanup */
-        hull_js_free(&js);
-    } else {
+        hl_js_free(&js);
+    }
+#endif
+
+#ifdef HL_ENABLE_LUA
+    if (runtime == HL_RUNTIME_LUA) {
         /* ── Lua runtime ─────────────────────────────────────── */
-        HullLuaConfig lua_cfg = HULL_LUA_CONFIG_DEFAULT;
-        HullLua lua;
+        HlLuaConfig lua_cfg = HL_LUA_CONFIG_DEFAULT;
+        HlLua lua;
 
         lua.db = db;
 
-        if (hull_lua_init(&lua, &lua_cfg) != 0) {
+        if (hl_lua_init(&lua, &lua_cfg) != 0) {
             fprintf(stderr, "hull: Lua init failed\n");
             sqlite3_close(db);
             return 1;
         }
 
         /* Load and execute the app */
-        if (hull_lua_load_app(&lua, entry_point) != 0) {
+        if (hl_lua_load_app(&lua, entry_point) != 0) {
             fprintf(stderr, "hull: failed to load %s\n", entry_point);
-            hull_lua_free(&lua);
+            hl_lua_free(&lua);
             sqlite3_close(db);
             return 1;
         }
 
         /* Wire Lua routes into Keel */
         if (wire_lua_routes(&lua, &server) != 0) {
-            hull_lua_free(&lua);
+            hl_lua_free(&lua);
             sqlite3_close(db);
             return 1;
         }
@@ -348,9 +417,11 @@ int main(int argc, char **argv)
         kl_server_run(&server);
 
         /* Cleanup */
-        hull_lua_free(&lua);
+        hl_lua_free(&lua);
     }
+#endif
 
+    free_route_allocs();
     kl_server_free(&server);
     sqlite3_close(db);
 

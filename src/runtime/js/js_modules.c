@@ -2,7 +2,7 @@
  * js_modules.c — hull:* built-in module implementations for QuickJS
  *
  * Each module is registered as a native C module via JS_NewCModule().
- * All capability calls go through hull_cap_* — no direct SQLite,
+ * All capability calls go through hl_cap_* — no direct SQLite,
  * filesystem, or network access from this file.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -211,7 +211,7 @@ static int js_app_module_init(JSContext *ctx, JSModuleDef *m)
     return 0;
 }
 
-int hull_js_init_app_module(JSContext *ctx, HullJS *js)
+int hl_js_init_app_module(JSContext *ctx, HlJS *js)
 {
     (void)js;
     JSModuleDef *m = JS_NewCModule(ctx, "hull:app", js_app_module_init);
@@ -229,14 +229,14 @@ int hull_js_init_app_module(JSContext *ctx, HullJS *js)
  * db.lastId()            → last insert rowid
  * ════════════════════════════════════════════════════════════════════ */
 
-/* Callback context for building JS result array from hull_cap_db_query */
+/* Callback context for building JS result array from hl_cap_db_query */
 typedef struct {
     JSContext *ctx;
     JSValue    array;
     int32_t    row_count;
 } JsQueryCtx;
 
-static int js_query_row_cb(void *opaque, HullColumn *cols, int ncols)
+static int js_query_row_cb(void *opaque, HlColumn *cols, int ncols)
 {
     JsQueryCtx *qc = (JsQueryCtx *)opaque;
 
@@ -244,25 +244,25 @@ static int js_query_row_cb(void *opaque, HullColumn *cols, int ncols)
     for (int i = 0; i < ncols; i++) {
         JSValue val;
         switch (cols[i].value.type) {
-        case HULL_TYPE_INT:
+        case HL_TYPE_INT:
             val = JS_NewInt64(qc->ctx, cols[i].value.i);
             break;
-        case HULL_TYPE_DOUBLE:
+        case HL_TYPE_DOUBLE:
             val = JS_NewFloat64(qc->ctx, cols[i].value.d);
             break;
-        case HULL_TYPE_TEXT:
+        case HL_TYPE_TEXT:
             val = JS_NewStringLen(qc->ctx, cols[i].value.s,
                                   cols[i].value.len);
             break;
-        case HULL_TYPE_BLOB:
+        case HL_TYPE_BLOB:
             val = JS_NewArrayBufferCopy(qc->ctx,
                                          (const uint8_t *)cols[i].value.s,
                                          cols[i].value.len);
             break;
-        case HULL_TYPE_BOOL:
+        case HL_TYPE_BOOL:
             val = JS_NewBool(qc->ctx, cols[i].value.b);
             break;
-        case HULL_TYPE_NIL:
+        case HL_TYPE_NIL:
         default:
             val = JS_NULL;
             break;
@@ -275,9 +275,9 @@ static int js_query_row_cb(void *opaque, HullColumn *cols, int ncols)
     return 0;
 }
 
-/* Marshal JS values to HullValue array for parameter binding */
-static int js_to_hull_values(JSContext *ctx, JSValueConst arr,
-                              HullValue **out_params, int *out_count)
+/* Marshal JS values to HlValue array for parameter binding */
+static int js_to_hl_values(JSContext *ctx, JSValueConst arr,
+                              HlValue **out_params, int *out_count)
 {
     *out_params = NULL;
     *out_count = 0;
@@ -297,10 +297,10 @@ static int js_to_hull_values(JSContext *ctx, JSValueConst arr,
         return 0;
 
     /* Overflow guard */
-    if ((size_t)len > SIZE_MAX / sizeof(HullValue))
+    if ((size_t)len > SIZE_MAX / sizeof(HlValue))
         return -1;
 
-    HullValue *params = js_mallocz(ctx, (size_t)len * sizeof(HullValue));
+    HlValue *params = js_mallocz(ctx, (size_t)len * sizeof(HlValue));
     if (!params)
         return -1;
 
@@ -310,32 +310,32 @@ static int js_to_hull_values(JSContext *ctx, JSValueConst arr,
 
         switch (tag) {
         case JS_TAG_INT:
-            params[i].type = HULL_TYPE_INT;
+            params[i].type = HL_TYPE_INT;
             params[i].i = JS_VALUE_GET_INT(v);
             break;
         case JS_TAG_FLOAT64: {
             double d;
             JS_ToFloat64(ctx, &d, v);
-            params[i].type = HULL_TYPE_DOUBLE;
+            params[i].type = HL_TYPE_DOUBLE;
             params[i].d = d;
             break;
         }
         case JS_TAG_STRING: {
             size_t slen;
             const char *s = JS_ToCStringLen(ctx, &slen, v);
-            params[i].type = HULL_TYPE_TEXT;
+            params[i].type = HL_TYPE_TEXT;
             params[i].s = s; /* kept alive until JS_FreeCString */
             params[i].len = slen;
             break;
         }
         case JS_TAG_BOOL:
-            params[i].type = HULL_TYPE_BOOL;
+            params[i].type = HL_TYPE_BOOL;
             params[i].b = JS_VALUE_GET_BOOL(v);
             break;
         case JS_TAG_NULL:
         case JS_TAG_UNDEFINED:
         default:
-            params[i].type = HULL_TYPE_NIL;
+            params[i].type = HL_TYPE_NIL;
             break;
         }
         JS_FreeValue(ctx, v);
@@ -346,13 +346,13 @@ static int js_to_hull_values(JSContext *ctx, JSValueConst arr,
     return 0;
 }
 
-static void js_free_hull_values(JSContext *ctx, HullValue *params, int count)
+static void js_free_hl_values(JSContext *ctx, HlValue *params, int count)
 {
     if (!params)
         return;
     /* Free any strings we borrowed via JS_ToCStringLen */
     for (int i = 0; i < count; i++) {
-        if (params[i].type == HULL_TYPE_TEXT && params[i].s)
+        if (params[i].type == HL_TYPE_TEXT && params[i].s)
             JS_FreeCString(ctx, params[i].s);
     }
     js_free(ctx, params);
@@ -363,7 +363,7 @@ static JSValue js_db_query(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
     (void)this_val;
-    HullJS *js = (HullJS *)JS_GetContextOpaque(ctx);
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     if (!js || !js->db)
         return JS_ThrowInternalError(ctx, "database not available");
 
@@ -374,10 +374,10 @@ static JSValue js_db_query(JSContext *ctx, JSValueConst this_val,
     if (!sql)
         return JS_EXCEPTION;
 
-    HullValue *params = NULL;
+    HlValue *params = NULL;
     int nparams = 0;
     if (argc >= 2) {
-        if (js_to_hull_values(ctx, argv[1], &params, &nparams) != 0) {
+        if (js_to_hl_values(ctx, argv[1], &params, &nparams) != 0) {
             JS_FreeCString(ctx, sql);
             return JS_ThrowTypeError(ctx, "params must be an array");
         }
@@ -389,10 +389,10 @@ static JSValue js_db_query(JSContext *ctx, JSValueConst this_val,
         .row_count = 0,
     };
 
-    int rc = hull_cap_db_query(js->db, sql, params, nparams,
+    int rc = hl_cap_db_query(js->db, sql, params, nparams,
                                js_query_row_cb, &qc);
 
-    js_free_hull_values(ctx, params, nparams);
+    js_free_hl_values(ctx, params, nparams);
     JS_FreeCString(ctx, sql);
 
     if (rc != 0) {
@@ -409,7 +409,7 @@ static JSValue js_db_exec(JSContext *ctx, JSValueConst this_val,
                            int argc, JSValueConst *argv)
 {
     (void)this_val;
-    HullJS *js = (HullJS *)JS_GetContextOpaque(ctx);
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     if (!js || !js->db)
         return JS_ThrowInternalError(ctx, "database not available");
 
@@ -420,18 +420,18 @@ static JSValue js_db_exec(JSContext *ctx, JSValueConst this_val,
     if (!sql)
         return JS_EXCEPTION;
 
-    HullValue *params = NULL;
+    HlValue *params = NULL;
     int nparams = 0;
     if (argc >= 2) {
-        if (js_to_hull_values(ctx, argv[1], &params, &nparams) != 0) {
+        if (js_to_hl_values(ctx, argv[1], &params, &nparams) != 0) {
             JS_FreeCString(ctx, sql);
             return JS_ThrowTypeError(ctx, "params must be an array");
         }
     }
 
-    int rc = hull_cap_db_exec(js->db, sql, params, nparams);
+    int rc = hl_cap_db_exec(js->db, sql, params, nparams);
 
-    js_free_hull_values(ctx, params, nparams);
+    js_free_hl_values(ctx, params, nparams);
     JS_FreeCString(ctx, sql);
 
     if (rc < 0)
@@ -446,11 +446,11 @@ static JSValue js_db_last_id(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv)
 {
     (void)this_val; (void)argc; (void)argv;
-    HullJS *js = (HullJS *)JS_GetContextOpaque(ctx);
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     if (!js || !js->db)
         return JS_ThrowInternalError(ctx, "database not available");
 
-    return JS_NewInt64(ctx, hull_cap_db_last_id(js->db));
+    return JS_NewInt64(ctx, hl_cap_db_last_id(js->db));
 }
 
 static int js_db_module_init(JSContext *ctx, JSModuleDef *m)
@@ -466,7 +466,7 @@ static int js_db_module_init(JSContext *ctx, JSModuleDef *m)
     return 0;
 }
 
-int hull_js_init_db_module(JSContext *ctx, HullJS *js)
+int hl_js_init_db_module(JSContext *ctx, HlJS *js)
 {
     (void)js;
     JSModuleDef *m = JS_NewCModule(ctx, "hull:db", js_db_module_init);
@@ -490,21 +490,21 @@ static JSValue js_time_now(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
     (void)this_val; (void)argc; (void)argv;
-    return JS_NewInt64(ctx, hull_cap_time_now());
+    return JS_NewInt64(ctx, hl_cap_time_now());
 }
 
 static JSValue js_time_now_ms(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv)
 {
     (void)this_val; (void)argc; (void)argv;
-    return JS_NewInt64(ctx, hull_cap_time_now_ms());
+    return JS_NewInt64(ctx, hl_cap_time_now_ms());
 }
 
 static JSValue js_time_clock(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv)
 {
     (void)this_val; (void)argc; (void)argv;
-    return JS_NewInt64(ctx, hull_cap_time_clock());
+    return JS_NewInt64(ctx, hl_cap_time_clock());
 }
 
 static JSValue js_time_date(JSContext *ctx, JSValueConst this_val,
@@ -512,7 +512,7 @@ static JSValue js_time_date(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val; (void)argc; (void)argv;
     char buf[16];
-    if (hull_cap_time_date(buf, sizeof(buf)) != 0)
+    if (hl_cap_time_date(buf, sizeof(buf)) != 0)
         return JS_ThrowInternalError(ctx, "time.date() failed");
     return JS_NewString(ctx, buf);
 }
@@ -522,7 +522,7 @@ static JSValue js_time_datetime(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val; (void)argc; (void)argv;
     char buf[32];
-    if (hull_cap_time_datetime(buf, sizeof(buf)) != 0)
+    if (hl_cap_time_datetime(buf, sizeof(buf)) != 0)
         return JS_ThrowInternalError(ctx, "time.datetime() failed");
     return JS_NewString(ctx, buf);
 }
@@ -544,7 +544,7 @@ static int js_time_module_init(JSContext *ctx, JSModuleDef *m)
     return 0;
 }
 
-int hull_js_init_time_module(JSContext *ctx, HullJS *js)
+int hl_js_init_time_module(JSContext *ctx, HlJS *js)
 {
     (void)js;
     JSModuleDef *m = JS_NewCModule(ctx, "hull:time", js_time_module_init);
@@ -564,7 +564,7 @@ static JSValue js_env_get(JSContext *ctx, JSValueConst this_val,
                            int argc, JSValueConst *argv)
 {
     (void)this_val;
-    HullJS *js = (HullJS *)JS_GetContextOpaque(ctx);
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     if (!js || !js->env_cfg)
         return JS_ThrowInternalError(ctx, "env not configured");
 
@@ -575,7 +575,7 @@ static JSValue js_env_get(JSContext *ctx, JSValueConst this_val,
     if (!name)
         return JS_EXCEPTION;
 
-    const char *val = hull_cap_env_get(js->env_cfg, name);
+    const char *val = hl_cap_env_get(js->env_cfg, name);
     JS_FreeCString(ctx, name);
 
     if (val)
@@ -592,7 +592,7 @@ static int js_env_module_init(JSContext *ctx, JSModuleDef *m)
     return 0;
 }
 
-int hull_js_init_env_module(JSContext *ctx, HullJS *js)
+int hl_js_init_env_module(JSContext *ctx, HlJS *js)
 {
     (void)js;
     JSModuleDef *m = JS_NewCModule(ctx, "hull:env", js_env_module_init);
@@ -624,7 +624,7 @@ static JSValue js_crypto_sha256(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
 
     uint8_t hash[32];
-    if (hull_cap_crypto_sha256(data, len, hash) != 0) {
+    if (hl_cap_crypto_sha256(data, len, hash) != 0) {
         JS_FreeCString(ctx, data);
         return JS_ThrowInternalError(ctx, "sha256 failed");
     }
@@ -657,7 +657,7 @@ static JSValue js_crypto_random(JSContext *ctx, JSValueConst this_val,
     if (!buf)
         return JS_EXCEPTION;
 
-    if (hull_cap_crypto_random(buf, (size_t)n) != 0) {
+    if (hl_cap_crypto_random(buf, (size_t)n) != 0) {
         js_free(ctx, buf);
         return JS_ThrowInternalError(ctx, "random failed");
     }
@@ -683,7 +683,7 @@ static JSValue js_crypto_hash_password(JSContext *ctx, JSValueConst this_val,
 
     /* Generate 16-byte salt */
     uint8_t salt[16];
-    if (hull_cap_crypto_random(salt, sizeof(salt)) != 0) {
+    if (hl_cap_crypto_random(salt, sizeof(salt)) != 0) {
         JS_FreeCString(ctx, pw);
         return JS_ThrowInternalError(ctx, "random failed");
     }
@@ -691,7 +691,7 @@ static JSValue js_crypto_hash_password(JSContext *ctx, JSValueConst this_val,
     /* PBKDF2-HMAC-SHA256, 100k iterations, 32-byte output */
     uint8_t hash[32];
     int iterations = 100000;
-    if (hull_cap_crypto_pbkdf2(pw, pw_len, salt, sizeof(salt),
+    if (hl_cap_crypto_pbkdf2(pw, pw_len, salt, sizeof(salt),
                                iterations, hash, sizeof(hash)) != 0) {
         JS_FreeCString(ctx, pw);
         return JS_ThrowInternalError(ctx, "pbkdf2 failed");
@@ -699,14 +699,15 @@ static JSValue js_crypto_hash_password(JSContext *ctx, JSValueConst this_val,
     JS_FreeCString(ctx, pw);
 
     /* Format: "pbkdf2:100000:salt_hex:hash_hex" */
-    char result[256];
-    char *p = result;
-    p += snprintf(p, sizeof(result), "pbkdf2:%d:", iterations);
+    char salt_hex[33], hash_hex[65];
     for (int i = 0; i < 16; i++)
-        p += snprintf(p, (size_t)(result + sizeof(result) - p), "%02x", salt[i]);
-    *p++ = ':';
+        snprintf(salt_hex + i * 2, 3, "%02x", salt[i]);
     for (int i = 0; i < 32; i++)
-        p += snprintf(p, (size_t)(result + sizeof(result) - p), "%02x", hash[i]);
+        snprintf(hash_hex + i * 2, 3, "%02x", hash[i]);
+
+    char result[128];
+    snprintf(result, sizeof(result), "pbkdf2:%d:%s:%s",
+             iterations, salt_hex, hash_hex);
 
     return JS_NewString(ctx, result);
 }
@@ -751,7 +752,7 @@ static JSValue js_crypto_verify_password(JSContext *ctx, JSValueConst this_val,
 
     /* Recompute hash */
     uint8_t computed[32];
-    if (hull_cap_crypto_pbkdf2(pw, pw_len, salt, sizeof(salt),
+    if (hl_cap_crypto_pbkdf2(pw, pw_len, salt, sizeof(salt),
                                iterations, computed, sizeof(computed)) != 0) {
         JS_FreeCString(ctx, pw);
         return JS_FALSE;
@@ -789,7 +790,7 @@ static int js_crypto_module_init(JSContext *ctx, JSModuleDef *m)
     return 0;
 }
 
-int hull_js_init_crypto_module(JSContext *ctx, HullJS *js)
+int hl_js_init_crypto_module(JSContext *ctx, HlJS *js)
 {
     (void)js;
     JSModuleDef *m = JS_NewCModule(ctx, "hull:crypto", js_crypto_module_init);
@@ -800,7 +801,7 @@ int hull_js_init_crypto_module(JSContext *ctx, HullJS *js)
 }
 
 /* ════════════════════════════════════════════════════════════════════
- * hull:log module (placeholder — full implementation needs hull_cap_db)
+ * hull:log module (placeholder — full implementation needs hl_cap_db)
  *
  * log.info(msg)  → logs to stderr (and DB when available)
  * log.warn(msg)
@@ -843,7 +844,7 @@ static int js_log_module_init(JSContext *ctx, JSModuleDef *m)
     return 0;
 }
 
-int hull_js_init_log_module(JSContext *ctx, HullJS *js)
+int hl_js_init_log_module(JSContext *ctx, HlJS *js)
 {
     (void)js;
     JSModuleDef *m = JS_NewCModule(ctx, "hull:log", js_log_module_init);
@@ -854,39 +855,39 @@ int hull_js_init_log_module(JSContext *ctx, HullJS *js)
 }
 
 /* ════════════════════════════════════════════════════════════════════
- * Module registry — called by hull_js_init() to register all
+ * Module registry — called by hl_js_init() to register all
  * hull:* built-in modules.
  * ════════════════════════════════════════════════════════════════════ */
 
-int hull_js_register_modules(HullJS *js)
+int hl_js_register_modules(HlJS *js)
 {
     if (!js || !js->ctx)
         return -1;
 
     /* Register hull:app module */
-    if (hull_js_init_app_module(js->ctx, js) != 0)
+    if (hl_js_init_app_module(js->ctx, js) != 0)
         return -1;
 
     /* Register hull:db module (only if database is available) */
     if (js->db) {
-        if (hull_js_init_db_module(js->ctx, js) != 0)
+        if (hl_js_init_db_module(js->ctx, js) != 0)
             return -1;
     }
 
     /* Register hull:time module */
-    if (hull_js_init_time_module(js->ctx, js) != 0)
+    if (hl_js_init_time_module(js->ctx, js) != 0)
         return -1;
 
     /* Register hull:env module */
-    if (hull_js_init_env_module(js->ctx, js) != 0)
+    if (hl_js_init_env_module(js->ctx, js) != 0)
         return -1;
 
     /* Register hull:crypto module */
-    if (hull_js_init_crypto_module(js->ctx, js) != 0)
+    if (hl_js_init_crypto_module(js->ctx, js) != 0)
         return -1;
 
     /* Register hull:log module */
-    if (hull_js_init_log_module(js->ctx, js) != 0)
+    if (hl_js_init_log_module(js->ctx, js) != 0)
         return -1;
 
     return 0;

@@ -7,8 +7,8 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#ifndef HULL_LUA_RUNTIME_H
-#define HULL_LUA_RUNTIME_H
+#ifndef HL_LUA_RUNTIME_H
+#define HL_LUA_RUNTIME_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -23,23 +23,23 @@ typedef struct KlResponse KlResponse;
 
 typedef struct {
     size_t  max_heap_bytes;       /* Lua heap limit (default: 64 MB) */
-} HullLuaConfig;
+} HlLuaConfig;
 
 /* Sensible defaults */
-#define HULL_LUA_CONFIG_DEFAULT {           \
+#define HL_LUA_CONFIG_DEFAULT {           \
     .max_heap_bytes = 64 * 1024 * 1024,     \
 }
 
 /* ── Runtime context ────────────────────────────────────────────────── */
 
-typedef struct HullLua {
+typedef struct HlLua {
     lua_State      *L;
 
     /* Capabilities (shared with JS runtime) */
     sqlite3        *db;
-    HullFsConfig   *fs_cfg;
-    HullEnvConfig  *env_cfg;
-    HullHttpConfig *http_cfg;
+    HlFsConfig   *fs_cfg;
+    HlEnvConfig  *env_cfg;
+    HlHttpConfig *http_cfg;
 
     /* Memory tracking */
     size_t          mem_used;
@@ -50,7 +50,7 @@ typedef struct HullLua {
 
     /* Per-request response body (strdup'd, freed after dispatch) */
     char           *response_body;
-} HullLua;
+} HlLua;
 
 /* ── Lifecycle ──────────────────────────────────────────────────────── */
 
@@ -60,14 +60,14 @@ typedef struct HullLua {
  *
  * Returns 0 on success, -1 on error.
  */
-int hull_lua_init(HullLua *lua, const HullLuaConfig *cfg);
+int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg);
 
 /*
  * Load and execute the application entry point (app.lua).
  * This registers routes, middleware, config, etc.
  * Returns 0 on success, -1 on error.
  */
-int hull_lua_load_app(HullLua *lua, const char *filename);
+int hl_lua_load_app(HlLua *lua, const char *filename);
 
 /*
  * Dispatch an HTTP request to the Lua handler that matched the route.
@@ -79,39 +79,39 @@ int hull_lua_load_app(HullLua *lua, const char *filename);
  *
  * Returns 0 on success, -1 on error.
  */
-int hull_lua_dispatch(HullLua *lua, int handler_id,
+int hl_lua_dispatch(HlLua *lua, int handler_id,
                        KlRequest *req, KlResponse *res);
 
 /*
  * Destroy the Lua runtime and free all resources.
  */
-void hull_lua_free(HullLua *lua);
+void hl_lua_free(HlLua *lua);
 
 /* ── Module registration ────────────────────────────────────────────── */
 
 /*
  * Register all hull.* built-in modules (app, db, time, env, crypto, log).
- * Called internally by hull_lua_init().
+ * Called internally by hl_lua_init().
  */
-int hull_lua_register_modules(HullLua *lua);
+int hl_lua_register_modules(HlLua *lua);
 
 /* ── Error reporting ────────────────────────────────────────────────── */
 
 /*
  * Print the current Lua error to stderr with stack trace.
  */
-void hull_lua_dump_error(HullLua *lua);
+void hl_lua_dump_error(HlLua *lua);
 
 /* ── Bindings (defined in lua_bindings.c) ───────────────────────────── */
 
 /*
  * Push a Lua table representing the HTTP request onto the stack.
  */
-void hull_lua_make_request(lua_State *L, KlRequest *req);
+void hl_lua_make_request(lua_State *L, KlRequest *req);
 
 /*
  * Push a Lua userdata representing the HTTP response onto the stack.
  */
-void hull_lua_make_response(lua_State *L, KlResponse *res);
+void hl_lua_make_response(lua_State *L, KlResponse *res);
 
-#endif /* HULL_LUA_RUNTIME_H */
+#endif /* HL_LUA_RUNTIME_H */

@@ -18,19 +18,19 @@
 
 /* ── Forward declarations for module init functions ─────────────────── */
 
-int hull_js_init_app_module(JSContext *ctx, HullJS *js);
-int hull_js_init_db_module(JSContext *ctx, HullJS *js);
-int hull_js_init_json_module(JSContext *ctx, HullJS *js);
-int hull_js_init_time_module(JSContext *ctx, HullJS *js);
-int hull_js_init_env_module(JSContext *ctx, HullJS *js);
-int hull_js_init_crypto_module(JSContext *ctx, HullJS *js);
-int hull_js_init_log_module(JSContext *ctx, HullJS *js);
+int hl_js_init_app_module(JSContext *ctx, HlJS *js);
+int hl_js_init_db_module(JSContext *ctx, HlJS *js);
+int hl_js_init_json_module(JSContext *ctx, HlJS *js);
+int hl_js_init_time_module(JSContext *ctx, HlJS *js);
+int hl_js_init_env_module(JSContext *ctx, HlJS *js);
+int hl_js_init_crypto_module(JSContext *ctx, HlJS *js);
+int hl_js_init_log_module(JSContext *ctx, HlJS *js);
 
 /* ── Interrupt handler (gas metering) ───────────────────────────────── */
 
-static int hull_js_interrupt_handler(JSRuntime *rt, void *opaque)
+static int hl_js_interrupt_handler(JSRuntime *rt, void *opaque)
 {
-    HullJS *js = (HullJS *)opaque;
+    HlJS *js = (HlJS *)opaque;
     js->instruction_count++;
     if (js->max_instructions > 0 &&
         js->instruction_count > js->max_instructions) {
@@ -45,7 +45,7 @@ static int hull_js_interrupt_handler(JSRuntime *rt, void *opaque)
  * Module name normalizer. For hull: prefix, return as-is.
  * For relative paths, resolve against the application root.
  */
-static char *hull_js_module_normalize(JSContext *ctx,
+static char *hl_js_module_normalize(JSContext *ctx,
                                        const char *base_name,
                                        const char *name, void *opaque)
 {
@@ -85,11 +85,11 @@ static char *hull_js_module_normalize(JSContext *ctx,
  * 1. hull:* prefix → built-in modules (registered at init time)
  * 2. Relative paths → load from filesystem (dev mode)
  */
-static JSModuleDef *hull_js_module_loader(JSContext *ctx,
+static JSModuleDef *hl_js_module_loader(JSContext *ctx,
                                            const char *module_name,
                                            void *opaque)
 {
-    HullJS *js = (HullJS *)opaque;
+    HlJS *js = (HlJS *)opaque;
 
     /* hull:* modules are pre-registered — QuickJS resolves them
      * automatically from the module registry. If we get here,
@@ -155,7 +155,7 @@ static JSModuleDef *hull_js_module_loader(JSContext *ctx,
 
 /* ── Sandbox: remove dangerous globals ──────────────────────────────── */
 
-static void hull_js_sandbox(JSContext *ctx)
+static void hl_js_sandbox(JSContext *ctx)
 {
     JSValue global = JS_GetGlobalObject(ctx);
 
@@ -190,7 +190,7 @@ static JSValue js_console_log(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-static void hull_js_add_console(JSContext *ctx)
+static void hl_js_add_console(JSContext *ctx)
 {
     JSValue global = JS_GetGlobalObject(ctx);
     JSValue console = JS_NewObject(ctx);
@@ -210,16 +210,16 @@ static void hull_js_add_console(JSContext *ctx)
 
 /* ── Public API ─────────────────────────────────────────────────────── */
 
-int hull_js_init(HullJS *js, const HullJSConfig *cfg)
+int hl_js_init(HlJS *js, const HlJSConfig *cfg)
 {
     if (!js || !cfg)
         return -1;
 
     /* Save caller-set fields before zeroing */
     sqlite3 *db = js->db;
-    HullFsConfig *fs_cfg = js->fs_cfg;
-    HullEnvConfig *env_cfg = js->env_cfg;
-    HullHttpConfig *http_cfg = js->http_cfg;
+    HlFsConfig *fs_cfg = js->fs_cfg;
+    HlEnvConfig *env_cfg = js->env_cfg;
+    HlHttpConfig *http_cfg = js->http_cfg;
 
     memset(js, 0, sizeof(*js));
 
@@ -241,11 +241,11 @@ int hull_js_init(HullJS *js, const HullJSConfig *cfg)
     JS_SetGCThreshold(js->rt, cfg->gc_threshold);
 
     /* Set interrupt handler for gas metering */
-    JS_SetInterruptHandler(js->rt, hull_js_interrupt_handler, js);
+    JS_SetInterruptHandler(js->rt, hl_js_interrupt_handler, js);
 
     /* Set module loader */
-    JS_SetModuleLoaderFunc(js->rt, hull_js_module_normalize,
-                           hull_js_module_loader, js);
+    JS_SetModuleLoaderFunc(js->rt, hl_js_module_normalize,
+                           hl_js_module_loader, js);
 
     /* Create context with selected intrinsics (NO eval) */
     js->ctx = JS_NewContextRaw(js->rt);
@@ -270,24 +270,24 @@ int hull_js_init(HullJS *js, const HullJSConfig *cfg)
     JS_AddIntrinsicPromise(js->ctx);
 
     /* Apply sandbox (remove eval global, etc.) */
-    hull_js_sandbox(js->ctx);
+    hl_js_sandbox(js->ctx);
 
     /* Add console polyfill */
-    hull_js_add_console(js->ctx);
+    hl_js_add_console(js->ctx);
 
-    /* Store HullJS pointer in context opaque for C functions to access */
+    /* Store HlJS pointer in context opaque for C functions to access */
     JS_SetContextOpaque(js->ctx, js);
 
     /* Register hull:* built-in modules */
-    if (hull_js_register_modules(js) != 0) {
-        hull_js_free(js);
+    if (hl_js_register_modules(js) != 0) {
+        hl_js_free(js);
         return -1;
     }
 
     return 0;
 }
 
-int hull_js_load_app(HullJS *js, const char *filename)
+int hl_js_load_app(HlJS *js, const char *filename)
 {
     if (!js || !js->ctx || !filename)
         return -1;
@@ -319,16 +319,22 @@ int hull_js_load_app(HullJS *js, const char *filename)
 
     /* Extract app directory from filename */
     char *app_dir = strdup(filename);
-    if (app_dir) {
-        char *last_slash = strrchr(app_dir, '/');
-        if (last_slash)
-            *last_slash = '\0';
-        else {
-            free(app_dir);
-            app_dir = strdup(".");
-        }
-        js->app_dir = app_dir;
+    if (!app_dir) {
+        free(buf);
+        return -1;
     }
+    char *last_slash = strrchr(app_dir, '/');
+    if (last_slash)
+        *last_slash = '\0';
+    else {
+        free(app_dir);
+        app_dir = strdup(".");
+        if (!app_dir) {
+            free(buf);
+            return -1;
+        }
+    }
+    js->app_dir = app_dir;
 
     /* Evaluate as ES module */
     JSValue val = JS_Eval(js->ctx, buf, nread, filename,
@@ -336,7 +342,7 @@ int hull_js_load_app(HullJS *js, const char *filename)
     free(buf);
 
     if (JS_IsException(val)) {
-        hull_js_dump_error(js);
+        hl_js_dump_error(js);
         return -1;
     }
     JS_FreeValue(js->ctx, val);
@@ -344,7 +350,7 @@ int hull_js_load_app(HullJS *js, const char *filename)
     return 0;
 }
 
-int hull_js_run_jobs(HullJS *js)
+int hl_js_run_jobs(HlJS *js)
 {
     if (!js || !js->ctx)
         return 0;
@@ -360,22 +366,26 @@ int hull_js_run_jobs(HullJS *js)
     return count;
 }
 
-void hull_js_gc(HullJS *js)
+void hl_js_gc(HlJS *js)
 {
     if (js && js->rt)
         JS_RunGC(js->rt);
 }
 
-void hull_js_reset_request(HullJS *js)
+void hl_js_reset_request(HlJS *js)
 {
     if (js)
         js->instruction_count = 0;
 }
 
-void hull_js_free(HullJS *js)
+void hl_js_free(HlJS *js)
 {
     if (!js)
         return;
+
+    /* Reset response class state for potential re-init */
+    extern void hl_js_reset_response_class(void);
+    hl_js_reset_response_class();
 
     if (js->ctx) {
         JS_FreeContext(js->ctx);
@@ -393,7 +403,7 @@ void hull_js_free(HullJS *js)
     js->response_body = NULL;
 }
 
-void hull_js_dump_error(HullJS *js)
+void hl_js_dump_error(HlJS *js)
 {
     if (!js || !js->ctx)
         return;
@@ -422,13 +432,13 @@ void hull_js_dump_error(HullJS *js)
 
 /* ── Request dispatch ───────────────────────────────────────────────── */
 
-int hull_js_dispatch(HullJS *js, int handler_id,
+int hl_js_dispatch(HlJS *js, int handler_id,
                      KlRequest *req, KlResponse *res)
 {
     if (!js || !js->ctx || !req || !res)
         return -1;
 
-    hull_js_reset_request(js);
+    hl_js_reset_request(js);
 
     /* Get the handler function from the route registry */
     JSValue global = JS_GetGlobalObject(js->ctx);
@@ -451,11 +461,11 @@ int hull_js_dispatch(HullJS *js, int handler_id,
 
     /* Build JS request and response objects */
     /* These are created by js_bindings.c functions */
-    extern JSValue hull_js_make_request(JSContext *ctx, KlRequest *req);
-    extern JSValue hull_js_make_response(JSContext *ctx, KlResponse *res);
+    extern JSValue hl_js_make_request(JSContext *ctx, KlRequest *req);
+    extern JSValue hl_js_make_response(JSContext *ctx, KlResponse *res);
 
-    JSValue js_req = hull_js_make_request(js->ctx, req);
-    JSValue js_res = hull_js_make_response(js->ctx, res);
+    JSValue js_req = hl_js_make_request(js->ctx, req);
+    JSValue js_res = hl_js_make_response(js->ctx, res);
 
     /* Call handler(req, res) */
     JSValue argv[2] = { js_req, js_res };
@@ -463,7 +473,7 @@ int hull_js_dispatch(HullJS *js, int handler_id,
 
     int result = 0;
     if (JS_IsException(ret)) {
-        hull_js_dump_error(js);
+        hl_js_dump_error(js);
         result = -1;
     }
 
@@ -474,7 +484,7 @@ int hull_js_dispatch(HullJS *js, int handler_id,
     JS_FreeValue(js->ctx, global);
 
     /* Run any pending microtasks */
-    hull_js_run_jobs(js);
+    hl_js_run_jobs(js);
 
     return result;
 }

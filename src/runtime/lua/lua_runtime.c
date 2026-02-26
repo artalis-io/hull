@@ -20,9 +20,9 @@
 
 /* ── Custom allocator with memory limit ─────────────────────────────── */
 
-static void *hull_lua_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
+static void *hl_lua_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 {
-    HullLua *lua = (HullLua *)ud;
+    HlLua *lua = (HlLua *)ud;
 
     if (nsize == 0) {
         /* Free */
@@ -55,7 +55,7 @@ static void *hull_lua_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 
 /* ── Sandbox: remove dangerous globals ──────────────────────────────── */
 
-static void hull_lua_sandbox(lua_State *L)
+static void hl_lua_sandbox(lua_State *L)
 {
     /* Remove dangerous globals */
     static const char *blocked[] = {
@@ -70,7 +70,7 @@ static void hull_lua_sandbox(lua_State *L)
 
 /* ── Print helper (mirrors console polyfill in JS) ──────────────────── */
 
-static int hull_lua_print(lua_State *L)
+static int hl_lua_print(lua_State *L)
 {
     int n = lua_gettop(L);
     for (int i = 1; i <= n; i++) {
@@ -87,15 +87,15 @@ static int hull_lua_print(lua_State *L)
 
 /* ── Public API ─────────────────────────────────────────────────────── */
 
-int hull_lua_init(HullLua *lua, const HullLuaConfig *cfg)
+int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
 {
     if (!lua || !cfg)
         return -1;
 
     /* Save caller-set fields before zeroing */
     sqlite3 *db = lua->db;
-    HullFsConfig *fs_cfg = lua->fs_cfg;
-    HullEnvConfig *env_cfg = lua->env_cfg;
+    HlFsConfig *fs_cfg = lua->fs_cfg;
+    HlEnvConfig *env_cfg = lua->env_cfg;
 
     memset(lua, 0, sizeof(*lua));
 
@@ -106,7 +106,7 @@ int hull_lua_init(HullLua *lua, const HullLuaConfig *cfg)
     lua->mem_limit = cfg->max_heap_bytes;
 
     /* Create Lua state with custom allocator */
-    lua->L = lua_newstate(hull_lua_alloc, lua);
+    lua->L = lua_newstate(hl_lua_alloc, lua);
     if (!lua->L)
         return -1;
 
@@ -125,53 +125,55 @@ int hull_lua_init(HullLua *lua, const HullLuaConfig *cfg)
     lua_pop(lua->L, 1);
 
     /* Apply sandbox — remove io, os, loadfile, dofile, load */
-    hull_lua_sandbox(lua->L);
+    hl_lua_sandbox(lua->L);
 
     /* Replace print with stderr version */
-    lua_pushcfunction(lua->L, hull_lua_print);
+    lua_pushcfunction(lua->L, hl_lua_print);
     lua_setglobal(lua->L, "print");
 
-    /* Store HullLua pointer in registry for C functions to access */
+    /* Store HlLua pointer in registry for C functions to access */
     lua_pushlightuserdata(lua->L, (void *)lua);
     lua_setfield(lua->L, LUA_REGISTRYINDEX, "__hull_lua");
 
     /* Register hull.* modules */
-    if (hull_lua_register_modules(lua) != 0) {
-        hull_lua_free(lua);
+    if (hl_lua_register_modules(lua) != 0) {
+        hl_lua_free(lua);
         return -1;
     }
 
     return 0;
 }
 
-int hull_lua_load_app(HullLua *lua, const char *filename)
+int hl_lua_load_app(HlLua *lua, const char *filename)
 {
     if (!lua || !lua->L || !filename)
         return -1;
 
     /* Extract app directory from filename */
     char *app_dir = strdup(filename);
-    if (app_dir) {
-        char *last_slash = strrchr(app_dir, '/');
-        if (last_slash)
-            *last_slash = '\0';
-        else {
-            free(app_dir);
-            app_dir = strdup(".");
-        }
-        lua->app_dir = app_dir;
+    if (!app_dir)
+        return -1;
+    char *last_slash = strrchr(app_dir, '/');
+    if (last_slash)
+        *last_slash = '\0';
+    else {
+        free(app_dir);
+        app_dir = strdup(".");
+        if (!app_dir)
+            return -1;
     }
+    lua->app_dir = app_dir;
 
     /* Load and execute the file */
     if (luaL_dofile(lua->L, filename) != LUA_OK) {
-        hull_lua_dump_error(lua);
+        hl_lua_dump_error(lua);
         return -1;
     }
 
     return 0;
 }
 
-int hull_lua_dispatch(HullLua *lua, int handler_id,
+int hl_lua_dispatch(HlLua *lua, int handler_id,
                        KlRequest *req, KlResponse *res)
 {
     if (!lua || !lua->L || !req || !res)
@@ -191,8 +193,8 @@ int hull_lua_dispatch(HullLua *lua, int handler_id,
     }
 
     /* Build request and response objects */
-    hull_lua_make_request(lua->L, req);
-    hull_lua_make_response(lua->L, res);
+    hl_lua_make_request(lua->L, req);
+    hl_lua_make_response(lua->L, res);
 
     /* Call handler(req, res) */
     if (lua_pcall(lua->L, 2, 0, 0) != LUA_OK) {
@@ -207,7 +209,7 @@ int hull_lua_dispatch(HullLua *lua, int handler_id,
     return 0;
 }
 
-void hull_lua_free(HullLua *lua)
+void hl_lua_free(HlLua *lua)
 {
     if (!lua)
         return;
@@ -224,7 +226,7 @@ void hull_lua_free(HullLua *lua)
     lua->response_body = NULL;
 }
 
-void hull_lua_dump_error(HullLua *lua)
+void hl_lua_dump_error(HlLua *lua)
 {
     if (!lua || !lua->L)
         return;

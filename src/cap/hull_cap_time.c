@@ -14,12 +14,12 @@
 /* Linux / POSIX */
 #endif
 
-int64_t hull_cap_time_now(void)
+int64_t hl_cap_time_now(void)
 {
     return (int64_t)time(NULL);
 }
 
-int64_t hull_cap_time_now_ms(void)
+int64_t hl_cap_time_now_ms(void)
 {
     struct timespec ts;
     if (clock_gettime(CLOCK_REALTIME, &ts) != 0)
@@ -27,7 +27,7 @@ int64_t hull_cap_time_now_ms(void)
     return (int64_t)ts.tv_sec * 1000 + (int64_t)ts.tv_nsec / 1000000;
 }
 
-int64_t hull_cap_time_clock(void)
+int64_t hl_cap_time_clock(void)
 {
     struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
@@ -35,7 +35,7 @@ int64_t hull_cap_time_clock(void)
     return (int64_t)ts.tv_sec * 1000 + (int64_t)ts.tv_nsec / 1000000;
 }
 
-int hull_cap_time_date(char *buf, size_t buf_size)
+int hl_cap_time_date(char *buf, size_t buf_size)
 {
     if (!buf || buf_size < 11)
         return -1;
@@ -53,7 +53,7 @@ int hull_cap_time_date(char *buf, size_t buf_size)
     return 0;
 }
 
-int hull_cap_time_datetime(char *buf, size_t buf_size)
+int hl_cap_time_datetime(char *buf, size_t buf_size)
 {
     if (!buf || buf_size < 21)
         return -1;

@@ -2,7 +2,7 @@
  * hull_cap_db.c — Shared database capability
  *
  * All SQLite access goes through these functions. Both Lua and JS
- * bindings call hull_cap_db_* — neither runtime touches SQLite directly.
+ * bindings call hl_cap_db_* — neither runtime touches SQLite directly.
  * Parameterized binding is the ONLY path; no string concatenation.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -13,33 +13,33 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ── Internal: bind HullValue array to a prepared statement ─────────── */
+/* ── Internal: bind HlValue array to a prepared statement ─────────── */
 
-static int bind_params(sqlite3_stmt *stmt, const HullValue *params, int n)
+static int bind_params(sqlite3_stmt *stmt, const HlValue *params, int n)
 {
     for (int i = 0; i < n; i++) {
         int rc;
         int idx = i + 1; /* SQLite params are 1-indexed */
 
         switch (params[i].type) {
-        case HULL_TYPE_NIL:
+        case HL_TYPE_NIL:
             rc = sqlite3_bind_null(stmt, idx);
             break;
-        case HULL_TYPE_INT:
+        case HL_TYPE_INT:
             rc = sqlite3_bind_int64(stmt, idx, params[i].i);
             break;
-        case HULL_TYPE_DOUBLE:
+        case HL_TYPE_DOUBLE:
             rc = sqlite3_bind_double(stmt, idx, params[i].d);
             break;
-        case HULL_TYPE_TEXT:
+        case HL_TYPE_TEXT:
             rc = sqlite3_bind_text(stmt, idx, params[i].s,
                                    (int)params[i].len, SQLITE_TRANSIENT);
             break;
-        case HULL_TYPE_BLOB:
+        case HL_TYPE_BLOB:
             rc = sqlite3_bind_blob(stmt, idx, params[i].s,
                                    (int)params[i].len, SQLITE_TRANSIENT);
             break;
-        case HULL_TYPE_BOOL:
+        case HL_TYPE_BOOL:
             rc = sqlite3_bind_int(stmt, idx, params[i].b ? 1 : 0);
             break;
         default:
@@ -52,41 +52,41 @@ static int bind_params(sqlite3_stmt *stmt, const HullValue *params, int n)
     return 0;
 }
 
-/* ── Internal: convert a column to HullValue ────────────────────────── */
+/* ── Internal: convert a column to HlValue ────────────────────────── */
 
-static void column_to_value(sqlite3_stmt *stmt, int col, HullValue *out)
+static void column_to_value(sqlite3_stmt *stmt, int col, HlValue *out)
 {
     switch (sqlite3_column_type(stmt, col)) {
     case SQLITE_INTEGER:
-        out->type = HULL_TYPE_INT;
+        out->type = HL_TYPE_INT;
         out->i    = sqlite3_column_int64(stmt, col);
         break;
     case SQLITE_FLOAT:
-        out->type = HULL_TYPE_DOUBLE;
+        out->type = HL_TYPE_DOUBLE;
         out->d    = sqlite3_column_double(stmt, col);
         break;
     case SQLITE_TEXT:
-        out->type = HULL_TYPE_TEXT;
+        out->type = HL_TYPE_TEXT;
         out->s    = (const char *)sqlite3_column_text(stmt, col);
         out->len  = (size_t)sqlite3_column_bytes(stmt, col);
         break;
     case SQLITE_BLOB:
-        out->type = HULL_TYPE_BLOB;
+        out->type = HL_TYPE_BLOB;
         out->s    = (const char *)sqlite3_column_blob(stmt, col);
         out->len  = (size_t)sqlite3_column_bytes(stmt, col);
         break;
     case SQLITE_NULL:
     default:
-        out->type = HULL_TYPE_NIL;
+        out->type = HL_TYPE_NIL;
         break;
     }
 }
 
 /* ── Public API ─────────────────────────────────────────────────────── */
 
-int hull_cap_db_query(sqlite3 *db, const char *sql,
-                      const HullValue *params, int nparams,
-                      HullRowCallback cb, void *ctx)
+int hl_cap_db_query(sqlite3 *db, const char *sql,
+                      const HlValue *params, int nparams,
+                      HlRowCallback cb, void *ctx)
 {
     if (!db || !sql || !cb)
         return -1;
@@ -110,20 +110,20 @@ int hull_cap_db_query(sqlite3 *db, const char *sql,
     }
 
     /* Stack-allocate columns for small result sets, heap for large */
-    HullColumn stack_cols[32];
-    HullValue  stack_vals[32];
-    HullColumn *cols = stack_cols;
-    HullValue  *vals = stack_vals;
+    HlColumn stack_cols[32];
+    HlValue  stack_vals[32];
+    HlColumn *cols = stack_cols;
+    HlValue  *vals = stack_vals;
 
     if (ncols > 32) {
         /* Overflow guard */
-        if ((size_t)ncols > SIZE_MAX / sizeof(HullColumn) ||
-            (size_t)ncols > SIZE_MAX / sizeof(HullValue)) {
+        if ((size_t)ncols > SIZE_MAX / sizeof(HlColumn) ||
+            (size_t)ncols > SIZE_MAX / sizeof(HlValue)) {
             sqlite3_finalize(stmt);
             return -1;
         }
-        cols = malloc((size_t)ncols * sizeof(HullColumn));
-        vals = malloc((size_t)ncols * sizeof(HullValue));
+        cols = malloc((size_t)ncols * sizeof(HlColumn));
+        vals = malloc((size_t)ncols * sizeof(HlValue));
         if (!cols || !vals) {
             free(cols);
             free(vals);
@@ -159,8 +159,8 @@ int hull_cap_db_query(sqlite3 *db, const char *sql,
     return result;
 }
 
-int hull_cap_db_exec(sqlite3 *db, const char *sql,
-                     const HullValue *params, int nparams)
+int hl_cap_db_exec(sqlite3 *db, const char *sql,
+                     const HlValue *params, int nparams)
 {
     if (!db || !sql)
         return -1;
@@ -186,7 +186,7 @@ int hull_cap_db_exec(sqlite3 *db, const char *sql,
     return sqlite3_changes(db);
 }
 
-int64_t hull_cap_db_last_id(sqlite3 *db)
+int64_t hl_cap_db_last_id(sqlite3 *db)
 {
     if (!db)
         return -1;

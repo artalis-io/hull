@@ -21,4 +21,19 @@ app.get("/health", function(req, res)
     res:json({ status = "ok", runtime = "lua", uptime = time.clock() })
 end)
 
+-- Echo body back as JSON
+app.post("/echo", function(req, res)
+    res:json({ body = req.body })
+end)
+
+-- Greet by route param
+app.get("/greet/:name", function(req, res)
+    res:json({ greeting = "Hello, " .. req.params.name .. "!" })
+end)
+
+-- Greet with body
+app.post("/greet/:name", function(req, res)
+    res:json({ greeting = "Hello, " .. req.params.name .. "!", body = req.body })
+end)
+
 log.info("Hello app loaded — routes registered")

@@ -3,7 +3,7 @@
  *
  * Marshals Keel's KlRequest/KlResponse to JS objects and back.
  * This file contains ONLY data marshaling — all enforcement logic
- * lives in hull_cap_* functions.
+ * lives in hl_cap_* functions.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -34,7 +34,7 @@
  *     ctx:     {}
  *   }
  */
-JSValue hull_js_make_request(JSContext *ctx, KlRequest *req)
+JSValue hl_js_make_request(JSContext *ctx, KlRequest *req)
 {
     JSValue obj = JS_NewObject(ctx);
 
@@ -79,9 +79,19 @@ JSValue hull_js_make_request(JSContext *ctx, KlRequest *req)
     }
     JS_SetPropertyStr(ctx, obj, "query", query_obj);
 
-    /* params — route params are on KlConn, not KlRequest.
-     * TODO: pass params via req->ctx once Keel supports it. */
-    JS_SetPropertyStr(ctx, obj, "params", JS_NewObject(ctx));
+    /* params — route params from Keel (e.g. :id → params.id) */
+    JSValue params_obj = JS_NewObject(ctx);
+    for (int i = 0; i < req->num_params; i++) {
+        char name[256];
+        size_t nlen = req->params[i].name_len < 255
+                      ? req->params[i].name_len : 255;
+        memcpy(name, req->params[i].name, nlen);
+        name[nlen] = '\0';
+        JS_SetPropertyStr(ctx, params_obj, name,
+            JS_NewStringLen(ctx, req->params[i].value,
+                            req->params[i].value_len));
+    }
+    JS_SetPropertyStr(ctx, obj, "params", params_obj);
 
     /* headers → object */
     JSValue headers_obj = JS_NewObject(ctx);
@@ -95,11 +105,15 @@ JSValue hull_js_make_request(JSContext *ctx, KlRequest *req)
     }
     JS_SetPropertyStr(ctx, obj, "headers", headers_obj);
 
-    /* body — as a string for now; JSON parsing happens in hull:json */
+    /* body — extract from buffer reader if available */
     if (req->body_reader) {
-        /* Try to get body from buffer reader */
-        /* TODO: support multipart, chunked, etc. */
-        JS_SetPropertyStr(ctx, obj, "body", JS_NewString(ctx, ""));
+        const char *data;
+        size_t len = hl_cap_body_data(req->body_reader, &data);
+        if (len > 0)
+            JS_SetPropertyStr(ctx, obj, "body",
+                              JS_NewStringLen(ctx, data, len));
+        else
+            JS_SetPropertyStr(ctx, obj, "body", JS_NewString(ctx, ""));
     } else {
         JS_SetPropertyStr(ctx, obj, "body", JS_NULL);
     }
@@ -129,10 +143,10 @@ JSValue hull_js_make_request(JSContext *ctx, KlRequest *req)
  * Copy body data into runtime-owned buffer so it survives until
  * Keel sends the response (kl_response_body borrows the pointer).
  */
-static const char *hull_js_stash_body(JSContext *ctx, const char *data,
+static const char *hl_js_stash_body(JSContext *ctx, const char *data,
                                        size_t len)
 {
-    HullJS *js = (HullJS *)JS_GetContextOpaque(ctx);
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     if (!js)
         return NULL;
     free(js->response_body);
@@ -145,23 +159,23 @@ static const char *hull_js_stash_body(JSContext *ctx, const char *data,
 }
 
 /* Class ID for response opaque data */
-static JSClassID hull_response_class_id;
+static JSClassID hl_response_class_id;
 
-static void hull_response_finalizer(JSRuntime *rt, JSValue val)
+static void hl_response_finalizer(JSRuntime *rt, JSValue val)
 {
     (void)rt;
     (void)val;
     /* KlResponse is owned by the connection pool, not by JS */
 }
 
-static JSClassDef hull_response_class = {
-    "HullResponse",
-    .finalizer = hull_response_finalizer,
+static JSClassDef hl_response_class = {
+    "HlResponse",
+    .finalizer = hl_response_finalizer,
 };
 
 static KlResponse *get_response(JSContext *ctx, JSValueConst this_val)
 {
-    return (KlResponse *)JS_GetOpaque(this_val, hull_response_class_id);
+    return (KlResponse *)JS_GetOpaque(this_val, hl_response_class_id);
 }
 
 /* res.status(code) */
@@ -226,7 +240,7 @@ static JSValue js_res_json(JSContext *ctx, JSValueConst this_val,
         const char *json_str = JS_ToCString(ctx, result);
         if (json_str) {
             size_t json_len = strlen(json_str);
-            const char *copy = hull_js_stash_body(ctx, json_str, json_len);
+            const char *copy = hl_js_stash_body(ctx, json_str, json_len);
             JS_FreeCString(ctx, json_str);
             if (copy) {
                 kl_response_header(res, "Content-Type", "application/json");
@@ -254,7 +268,7 @@ static JSValue js_res_html(JSContext *ctx, JSValueConst this_val,
     const char *html = JS_ToCString(ctx, argv[0]);
     if (html) {
         size_t html_len = strlen(html);
-        const char *copy = hull_js_stash_body(ctx, html, html_len);
+        const char *copy = hl_js_stash_body(ctx, html, html_len);
         JS_FreeCString(ctx, html);
         if (copy) {
             kl_response_header(res, "Content-Type", "text/html; charset=utf-8");
@@ -276,7 +290,7 @@ static JSValue js_res_text(JSContext *ctx, JSValueConst this_val,
     const char *text = JS_ToCString(ctx, argv[0]);
     if (text) {
         size_t text_len = strlen(text);
-        const char *copy = hull_js_stash_body(ctx, text, text_len);
+        const char *copy = hl_js_stash_body(ctx, text, text_len);
         JS_FreeCString(ctx, text);
         if (copy) {
             kl_response_header(res, "Content-Type", "text/plain; charset=utf-8");
@@ -312,16 +326,16 @@ static JSValue js_res_redirect(JSContext *ctx, JSValueConst this_val,
 
 /* ── Response class registration ────────────────────────────────────── */
 
-static int hull_js_response_class_registered = 0;
+static int hl_js_response_class_registered = 0;
 
-static int hull_js_ensure_response_class(JSContext *ctx)
+static int hl_js_ensure_response_class(JSContext *ctx)
 {
-    if (hull_js_response_class_registered)
+    if (hl_js_response_class_registered)
         return 0;
 
-    JS_NewClassID(&hull_response_class_id);
+    JS_NewClassID(&hl_response_class_id);
     JSRuntime *rt = JS_GetRuntime(ctx);
-    if (JS_NewClass(rt, hull_response_class_id, &hull_response_class) < 0)
+    if (JS_NewClass(rt, hl_response_class_id, &hl_response_class) < 0)
         return -1;
 
     /* Create prototype with methods */
@@ -339,21 +353,28 @@ static int hull_js_ensure_response_class(JSContext *ctx)
     JS_SetPropertyStr(ctx, proto, "redirect",
                       JS_NewCFunction(ctx, js_res_redirect, "redirect", 2));
 
-    JS_SetClassProto(ctx, hull_response_class_id, proto);
-    hull_js_response_class_registered = 1;
+    JS_SetClassProto(ctx, hl_response_class_id, proto);
+    hl_js_response_class_registered = 1;
 
     return 0;
 }
 
 /* ── Public: create JS request/response objects ─────────────────────── */
 
-JSValue hull_js_make_response(JSContext *ctx, KlResponse *res)
+JSValue hl_js_make_response(JSContext *ctx, KlResponse *res)
 {
-    hull_js_ensure_response_class(ctx);
+    hl_js_ensure_response_class(ctx);
 
-    JSValue obj = JS_NewObjectClass(ctx, (int)hull_response_class_id);
+    JSValue obj = JS_NewObjectClass(ctx, (int)hl_response_class_id);
     JS_SetOpaque(obj, res);
     return obj;
 }
 
-/* hull_js_register_modules is in js_modules.c */
+/*
+ * Reset response class registration state. Called from hl_js_free()
+ * so a subsequent hl_js_init() re-registers the class correctly.
+ */
+void hl_js_reset_response_class(void)
+{
+    hl_js_response_class_registered = 0;
+}
