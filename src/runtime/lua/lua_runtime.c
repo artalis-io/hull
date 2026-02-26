@@ -14,6 +14,8 @@
 #include "lualib.h"
 #include "lauxlib.h"
 
+#include <sh_arena.h>
+
 #include "log.h"
 
 #include <stdio.h>
@@ -149,6 +151,13 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
         return -1;
     }
 
+    /* Per-request scratch arena */
+    lua->scratch = sh_arena_create(HL_SCRATCH_SIZE);
+    if (!lua->scratch) {
+        hl_lua_free(lua);
+        return -1;
+    }
+
     return 0;
 }
 
@@ -182,6 +191,9 @@ int hl_lua_load_app(HlLua *lua, const char *filename)
         return -1;
     }
 
+    /* Reset scratch arena — startup module loads no longer needed */
+    sh_arena_reset(lua->scratch);
+
     return 0;
 }
 
@@ -190,6 +202,9 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
 {
     if (!lua || !lua->L || !req || !res)
         return -1;
+
+    /* Reset scratch arena for this request */
+    sh_arena_reset(lua->scratch);
 
     /* Get the handler function from the route registry */
     lua_getfield(lua->L, LUA_REGISTRYINDEX, "__hull_routes");
@@ -234,6 +249,8 @@ void hl_lua_free(HlLua *lua)
         free((void *)lua->app_dir);
         lua->app_dir = NULL;
     }
+    sh_arena_free(lua->scratch);
+    lua->scratch = NULL;
     free(lua->response_body);
     lua->response_body = NULL;
 }

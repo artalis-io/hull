@@ -19,6 +19,7 @@
 typedef struct lua_State lua_State;
 typedef struct KlRequest KlRequest;
 typedef struct KlResponse KlResponse;
+typedef struct SHArena SHArena;
 
 /* ── Configuration ──────────────────────────────────────────────────── */
 
@@ -48,6 +49,9 @@ typedef struct HlLua {
 
     /* Module search paths */
     const char     *app_dir;         /* application root directory */
+
+    /* Per-request scratch arena (reset between dispatches) */
+    SHArena        *scratch;
 
     /* Per-request response body (strdup'd, freed after dispatch) */
     char           *response_body;

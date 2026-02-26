@@ -34,6 +34,8 @@
 
 #include "log.h"
 
+#include <sh_arena.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -77,24 +79,19 @@ static void hl_keel_log_bridge(int level, const char *fmt, va_list ap,
     log_log(level, "keel", 0, "[keel] %s", buf);
 }
 
-/* ── Route allocation tracking (freed on shutdown) ─────────────────── */
+/* ── Route allocation arena (freed on shutdown) ────────────────────── */
 
-static void *route_allocs[HL_MAX_ROUTES];
-static int   route_alloc_count = 0;
+static SHArena *route_arena;
 
 static void *track_route_alloc(size_t size)
 {
-    void *p = malloc(size);
-    if (p && route_alloc_count < HL_MAX_ROUTES)
-        route_allocs[route_alloc_count++] = p;
-    return p;
+    return sh_arena_calloc(route_arena, 1, size);
 }
 
 static void free_route_allocs(void)
 {
-    for (int i = 0; i < route_alloc_count; i++)
-        free(route_allocs[i]);
-    route_alloc_count = 0;
+    sh_arena_free(route_arena);
+    route_arena = NULL;
 }
 
 /* ── Runtime selection ──────────────────────────────────────────────── */
@@ -384,6 +381,13 @@ int main(int argc, char **argv)
     log_set_level(log_level);
     log_set_quiet(true);  /* suppress default stderr callback */
     log_add_callback(hl_log_callback, stderr, log_level);
+
+    /* Create route allocation arena (256 routes × 64 bytes = 16KB) */
+    route_arena = sh_arena_create(HL_MAX_ROUTES * 64);
+    if (!route_arena) {
+        log_error("[hull:c] route arena allocation failed");
+        return 1;
+    }
 
     /* Open SQLite database */
     sqlite3 *db = NULL;

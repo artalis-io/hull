@@ -108,6 +108,12 @@ LOG_DIR    := $(VENDDIR)/log.c
 LOG_OBJ    := $(BUILDDIR)/log.o
 LOG_CFLAGS := -std=c11 -O2 -w -DLOG_USE_COLOR
 
+# ── sh_arena (vendored from otto) ────────────────────────────────────
+
+SH_ARENA_DIR    := $(VENDDIR)/sh_arena
+SH_ARENA_OBJ    := $(BUILDDIR)/sh_arena.o
+SH_ARENA_CFLAGS := -std=c11 -O2 -w
+
 # ── Hull source files ───────────────────────────────────────────────
 
 # Capability sources (always compiled)
@@ -231,7 +237,7 @@ endif
 
 # ── Include paths ───────────────────────────────────────────────────
 
-INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(SQLITE_DIR) -I$(LOG_DIR) -I$(BUILDDIR)
+INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(SQLITE_DIR) -I$(LOG_DIR) -I$(SH_ARENA_DIR) -I$(BUILDDIR)
 
 # ── Targets ─────────────────────────────────────────────────────────
 
@@ -240,9 +246,9 @@ INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(SQLITE_DIR) 
 all: $(BUILDDIR)/hull
 
 # Hull binary
-$(BUILDDIR)/hull: $(CAP_OBJS) $(RT_OBJS) $(MAIN_OBJ) $(VEND_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(KEEL_LIB)
+$(BUILDDIR)/hull: $(CAP_OBJS) $(RT_OBJS) $(MAIN_OBJ) $(VEND_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(KEEL_LIB)
 	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(RT_OBJS) $(MAIN_OBJ) $(VEND_OBJS) \
-		$(SQLITE_OBJ) $(LOG_OBJ) $(KEEL_LIB) -lm -lpthread
+		$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(KEEL_LIB) -lm -lpthread
 
 # Capability sources
 $(BUILDDIR)/cap_%.o: $(SRCDIR)/cap/%.c | $(BUILDDIR)
@@ -276,6 +282,10 @@ $(SQLITE_OBJ): $(SQLITE_DIR)/sqlite3.c | $(BUILDDIR)
 $(LOG_OBJ): $(LOG_DIR)/log.c | $(BUILDDIR)
 	$(CC) $(LOG_CFLAGS) -I$(LOG_DIR) -c -o $@ $<
 
+# sh_arena (vendored, relaxed warnings)
+$(SH_ARENA_OBJ): $(SH_ARENA_DIR)/sh_arena.c | $(BUILDDIR)
+	$(CC) $(SH_ARENA_CFLAGS) -I$(SH_ARENA_DIR) -c -o $@ $<
+
 $(BUILDDIR):
 	mkdir -p $(BUILDDIR)
 
@@ -308,21 +318,21 @@ TEST_JS_OBJS := $(JS_RT_OBJS)
 TEST_LUA_OBJS := $(LUA_RT_OBJS)
 
 # Default test rule (capability tests — Keel needed for body reader cap)
-$(BUILDDIR)/test_%: $(TESTDIR)/test_%.c $(TEST_CAP_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(KEEL_LIB) | $(BUILDDIR)
+$(BUILDDIR)/test_%: $(TESTDIR)/test_%.c $(TEST_CAP_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(KEEL_LIB) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_CAP_OBJS) \
-		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) -lm -lpthread
+		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) -lm -lpthread
 
 # JS runtime test — needs QuickJS + JS runtime objects + Keel
-$(BUILDDIR)/test_js_runtime: $(TESTDIR)/test_js_runtime.c $(TEST_CAP_OBJS) $(TEST_JS_OBJS) $(QJS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(KEEL_LIB) | $(BUILDDIR)
+$(BUILDDIR)/test_js_runtime: $(TESTDIR)/test_js_runtime.c $(TEST_CAP_OBJS) $(TEST_JS_OBJS) $(QJS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(KEEL_LIB) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(TEST_CAP_OBJS) $(TEST_JS_OBJS) $(QJS_OBJS) \
-		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) -lm -lpthread
+		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) -lm -lpthread
 
 # Lua runtime test — needs Lua + Lua runtime objects + Keel + stdlib headers
-$(BUILDDIR)/test_lua_runtime: $(TESTDIR)/test_lua_runtime.c $(TEST_CAP_OBJS) $(TEST_LUA_OBJS) $(LUA_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(KEEL_LIB) $(STDLIB_LUA_HDRS) | $(BUILDDIR)
+$(BUILDDIR)/test_lua_runtime: $(TESTDIR)/test_lua_runtime.c $(TEST_CAP_OBJS) $(TEST_LUA_OBJS) $(LUA_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(KEEL_LIB) $(STDLIB_LUA_HDRS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(TEST_CAP_OBJS) $(TEST_LUA_OBJS) $(LUA_OBJS) \
-		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) -lm -lpthread
+		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) -lm -lpthread
 
 test: $(TEST_BINS)
 	@echo "Running tests..."

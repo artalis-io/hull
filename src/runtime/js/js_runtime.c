@@ -13,6 +13,8 @@
 #include "hull/hull_cap.h"
 #include "quickjs.h"
 
+#include <sh_arena.h>
+
 #include "log.h"
 
 #include <stdio.h>
@@ -299,6 +301,13 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
         return -1;
     }
 
+    /* Per-request scratch arena */
+    js->scratch = sh_arena_create(HL_SCRATCH_SIZE);
+    if (!js->scratch) {
+        hl_js_free(js);
+        return -1;
+    }
+
     return 0;
 }
 
@@ -326,7 +335,11 @@ int hl_js_load_app(HlJS *js, const char *filename)
         return -1;
     }
 
-    char *buf = malloc((size_t)size + 1);
+    /* Save arena position — buffer is only needed until
+     * JS_Eval copies it into QuickJS bytecode. */
+    size_t arena_saved = js->scratch->used;
+
+    char *buf = sh_arena_alloc(js->scratch, (size_t)size + 1);
     if (!buf) {
         fclose(f);
         return -1;
@@ -335,7 +348,7 @@ int hl_js_load_app(HlJS *js, const char *filename)
     int read_err = ferror(f);
     fclose(f);
     if (read_err || nread != (size_t)size) {
-        free(buf);
+        js->scratch->used = arena_saved;
         return -1;
     }
     buf[nread] = '\0';
@@ -343,7 +356,7 @@ int hl_js_load_app(HlJS *js, const char *filename)
     /* Extract app directory from filename */
     char *app_dir = strdup(filename);
     if (!app_dir) {
-        free(buf);
+        js->scratch->used = arena_saved;
         return -1;
     }
     char *last_slash = strrchr(app_dir, '/');
@@ -353,7 +366,7 @@ int hl_js_load_app(HlJS *js, const char *filename)
         free(app_dir);
         app_dir = strdup(".");
         if (!app_dir) {
-            free(buf);
+            js->scratch->used = arena_saved;
             return -1;
         }
     }
@@ -362,13 +375,18 @@ int hl_js_load_app(HlJS *js, const char *filename)
     /* Evaluate as ES module */
     JSValue val = JS_Eval(js->ctx, buf, nread, filename,
                           JS_EVAL_TYPE_MODULE);
-    free(buf);
+
+    /* Reclaim file buffer — QuickJS owns the bytecode now */
+    js->scratch->used = arena_saved;
 
     if (JS_IsException(val)) {
         hl_js_dump_error(js);
         return -1;
     }
     JS_FreeValue(js->ctx, val);
+
+    /* Reset scratch arena — startup module loads no longer needed */
+    sh_arena_reset(js->scratch);
 
     return 0;
 }
@@ -397,8 +415,11 @@ void hl_js_gc(HlJS *js)
 
 void hl_js_reset_request(HlJS *js)
 {
-    if (js)
-        js->instruction_count = 0;
+    if (!js)
+        return;
+    js->instruction_count = 0;
+    if (js->scratch)
+        sh_arena_reset(js->scratch);
 }
 
 void hl_js_free(HlJS *js)
@@ -422,6 +443,8 @@ void hl_js_free(HlJS *js)
         free((void *)js->app_dir);
         js->app_dir = NULL;
     }
+    sh_arena_free(js->scratch);
+    js->scratch = NULL;
     free(js->response_body);
     js->response_body = NULL;
 }

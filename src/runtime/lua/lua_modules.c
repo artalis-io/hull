@@ -16,10 +16,11 @@
 #include "lualib.h"
 #include "lauxlib.h"
 
+#include <sh_arena.h>
+
 #include "log.h"
 
 #include <sqlite3.h>
-#include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -227,7 +228,11 @@ static int lua_to_hl_values(lua_State *L, int idx,
     if ((size_t)len > SIZE_MAX / sizeof(HlValue))
         return -1;
 
-    HlValue *params = calloc((size_t)len, sizeof(HlValue));
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->scratch)
+        return -1;
+
+    HlValue *params = sh_arena_calloc(lua->scratch, (size_t)len, sizeof(HlValue));
     if (!params)
         return -1;
 
@@ -274,10 +279,10 @@ static void lua_free_hl_values(lua_State *L, HlValue *params, int count)
 {
     if (!params)
         return;
-    /* Pop the values we left on the stack in lua_to_hl_values */
+    /* Pop the values we left on the stack in lua_to_hl_values.
+     * No free() — params live in the per-request scratch arena. */
     if (count > 0)
         lua_pop(L, count);
-    free(params);
 }
 
 /* db.query(sql, params?) */
@@ -510,17 +515,18 @@ static int lua_crypto_random(lua_State *L)
     if (n <= 0 || n > HL_RANDOM_MAX_BYTES)
         return luaL_error(L, "random bytes must be 1-%d", HL_RANDOM_MAX_BYTES);
 
-    uint8_t *buf = malloc((size_t)n);
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->scratch)
+        return luaL_error(L, "runtime not available");
+
+    uint8_t *buf = sh_arena_alloc(lua->scratch, (size_t)n);
     if (!buf)
         return luaL_error(L, "out of memory");
 
-    if (hl_cap_crypto_random(buf, (size_t)n) != 0) {
-        free(buf);
+    if (hl_cap_crypto_random(buf, (size_t)n) != 0)
         return luaL_error(L, "random failed");
-    }
 
     lua_pushlstring(L, (const char *)buf, (size_t)n);
-    free(buf);
     return 1;
 }
 
@@ -948,7 +954,11 @@ static int hl_lua_require(lua_State *L)
                     return luaL_error(L, "seek failed: %s", path);
                 }
 
-                char *buf = malloc((size_t)size);
+                /* Save arena position — buffer is only needed until
+                 * luaL_loadbuffer copies it into Lua bytecode. */
+                size_t arena_saved = lua->scratch->used;
+
+                char *buf = sh_arena_alloc(lua->scratch, (size_t)size);
                 if (!buf) {
                     fclose(f);
                     return luaL_error(L, "out of memory loading: %s", path);
@@ -959,16 +969,18 @@ static int hl_lua_require(lua_State *L)
                 fclose(f);
 
                 if (read_err || nread != (size_t)size) {
-                    free(buf);
+                    lua->scratch->used = arena_saved;
                     return luaL_error(L, "read error: %s", path);
                 }
 
-                /* Compile the chunk */
-                if (luaL_loadbuffer(L, buf, nread, path) != LUA_OK) {
-                    free(buf);
+                /* Compile the chunk — copies data into Lua bytecode */
+                int load_ok = luaL_loadbuffer(L, buf, nread, path) == LUA_OK;
+
+                /* Reclaim file buffer — Lua owns the bytecode now */
+                lua->scratch->used = arena_saved;
+
+                if (!load_ok)
                     return lua_error(L); /* propagate compile error */
-                }
-                free(buf);
 
                 return execute_and_cache_module(L, path);
             }
