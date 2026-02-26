@@ -28,11 +28,13 @@ typedef struct HlHttpConfig HlHttpConfig;
 
 typedef struct {
     size_t  max_heap_bytes;       /* Lua heap limit (default: 64 MB) */
+    int     sandbox;              /* 1 = sandbox (default), 0 = full access */
 } HlLuaConfig;
 
 /* Sensible defaults */
-#define HL_LUA_CONFIG_DEFAULT {           \
+#define HL_LUA_CONFIG_DEFAULT {             \
     .max_heap_bytes = HL_LUA_DEFAULT_HEAP,  \
+    .sandbox        = 1,                    \
 }
 
 /* ── Runtime context ────────────────────────────────────────────────── */

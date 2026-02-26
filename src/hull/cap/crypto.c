@@ -258,14 +258,95 @@ int hl_cap_crypto_pbkdf2(const char *password, size_t pw_len,
     return 0;
 }
 
-/* ── Ed25519 verification ───────────────────────────────────────────── */
+/* ── Ed25519 (via TweetNaCl) ─────────────────────────────────────────
+ *
+ * Only this file includes tweetnacl.h. All other code goes through
+ * the hl_cap_crypto_* API.
+ */
+
+#include "tweetnacl.h"
+
+/* TweetNaCl requires an external randombytes() implementation.
+ * We provide it via our existing hl_cap_crypto_random(). */
+void randombytes(unsigned char *buf, unsigned long long len)
+{
+    hl_cap_crypto_random(buf, (size_t)len);
+}
 
 int hl_cap_crypto_ed25519_verify(const uint8_t *msg, size_t msg_len,
                                    const uint8_t sig[64],
                                    const uint8_t pubkey[32])
 {
-    /* TODO: integrate TweetNaCl crypto_sign_ed25519_open() */
-    /* For now, return -1 (unimplemented) */
-    (void)msg; (void)msg_len; (void)sig; (void)pubkey;
-    return -1;
+    if (!msg || !sig || !pubkey)
+        return -1;
+
+    /* Guard against overflow: sm = sig(64) + msg */
+    if (msg_len > SIZE_MAX / 2)
+        return -1;
+
+    size_t sm_len = 64 + msg_len;
+    /* Stack-allocate for small messages, heap for large.
+     * m and sm must be separate buffers — crypto_sign_open overwrites
+     * m[32..63] with the pubkey, which would corrupt the signature in sm. */
+    uint8_t stack_buf[4160 * 2];
+    uint8_t *sm, *m;
+    int heap = (sm_len * 2 > sizeof(stack_buf));
+    if (heap) {
+        sm = malloc(sm_len * 2);
+        if (!sm) return -1;
+    } else {
+        sm = stack_buf;
+    }
+    m = sm + sm_len;
+
+    /* TweetNaCl expects signed message = sig || msg */
+    memcpy(sm, sig, 64);
+    memcpy(sm + 64, msg, msg_len);
+
+    unsigned long long mlen = 0;
+    int rc = crypto_sign_ed25519_open(m, &mlen, sm, (unsigned long long)sm_len,
+                                       pubkey);
+
+    if (heap)
+        free(sm);
+
+    return (rc == 0) ? 0 : -1;
+}
+
+int hl_cap_crypto_ed25519_sign(const uint8_t *msg, size_t msg_len,
+                                 const uint8_t secret_key[64],
+                                 uint8_t out_sig[64])
+{
+    if (!msg || !secret_key || !out_sig)
+        return -1;
+
+    /* Guard against overflow */
+    if (msg_len > SIZE_MAX / 2)
+        return -1;
+
+    size_t sm_len = 64 + msg_len;
+    uint8_t stack_sm[4160];
+    uint8_t *sm = (sm_len <= sizeof(stack_sm)) ? stack_sm : malloc(sm_len);
+    if (!sm)
+        return -1;
+
+    unsigned long long smlen = 0;
+    int rc = crypto_sign_ed25519(sm, &smlen, msg, (unsigned long long)msg_len,
+                                  secret_key);
+
+    if (rc == 0)
+        memcpy(out_sig, sm, 64); /* first 64 bytes are the signature */
+
+    if (sm != stack_sm)
+        free(sm);
+
+    return (rc == 0) ? 0 : -1;
+}
+
+int hl_cap_crypto_ed25519_keypair(uint8_t out_pk[32], uint8_t out_sk[64])
+{
+    if (!out_pk || !out_sk)
+        return -1;
+
+    return crypto_sign_ed25519_keypair(out_pk, out_sk);
 }

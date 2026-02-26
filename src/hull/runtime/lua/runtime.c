@@ -126,22 +126,27 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
     if (!lua->L)
         return -1;
 
-    /* Open safe standard libraries only */
-    luaL_requiref(lua->L, "_G", luaopen_base, 1);
-    lua_pop(lua->L, 1);
-    luaL_requiref(lua->L, LUA_TABLIBNAME, luaopen_table, 1);
-    lua_pop(lua->L, 1);
-    luaL_requiref(lua->L, LUA_STRLIBNAME, luaopen_string, 1);
-    lua_pop(lua->L, 1);
-    luaL_requiref(lua->L, LUA_MATHLIBNAME, luaopen_math, 1);
-    lua_pop(lua->L, 1);
-    luaL_requiref(lua->L, LUA_UTF8LIBNAME, luaopen_utf8, 1);
-    lua_pop(lua->L, 1);
-    luaL_requiref(lua->L, LUA_COLIBNAME, luaopen_coroutine, 1);
-    lua_pop(lua->L, 1);
+    if (cfg->sandbox) {
+        /* Open safe standard libraries only */
+        luaL_requiref(lua->L, "_G", luaopen_base, 1);
+        lua_pop(lua->L, 1);
+        luaL_requiref(lua->L, LUA_TABLIBNAME, luaopen_table, 1);
+        lua_pop(lua->L, 1);
+        luaL_requiref(lua->L, LUA_STRLIBNAME, luaopen_string, 1);
+        lua_pop(lua->L, 1);
+        luaL_requiref(lua->L, LUA_MATHLIBNAME, luaopen_math, 1);
+        lua_pop(lua->L, 1);
+        luaL_requiref(lua->L, LUA_UTF8LIBNAME, luaopen_utf8, 1);
+        lua_pop(lua->L, 1);
+        luaL_requiref(lua->L, LUA_COLIBNAME, luaopen_coroutine, 1);
+        lua_pop(lua->L, 1);
 
-    /* Apply sandbox — remove io, os, loadfile, dofile, load */
-    hl_lua_sandbox(lua->L);
+        /* Apply sandbox — remove io, os, loadfile, dofile, load */
+        hl_lua_sandbox(lua->L);
+    } else {
+        /* Tool mode: open all standard libraries (io, os, etc.) */
+        luaL_openlibs(lua->L);
+    }
 
     /* Replace print with stderr version */
     lua_pushcfunction(lua->L, hl_lua_print);

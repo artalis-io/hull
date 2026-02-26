@@ -27,7 +27,10 @@
 #include "hull/alloc.h"
 #include "hull/cap/body.h"
 #include "hull/limits.h"
+#include "hull/manifest.h"
 #include "hull/parse_size.h"
+#include "hull/sandbox.h"
+#include "hull/tool.h"
 
 #include <keel/keel.h>
 
@@ -302,9 +305,9 @@ static void usage(const char *prog)
             prog);
 }
 
-/* ── Main ───────────────────────────────────────────────────────────── */
+/* ── Server mode (default) ──────────────────────────────────────────── */
 
-int main(int argc, char **argv)
+static int hull_serve(int argc, char **argv)
 {
     int port = HL_DEFAULT_PORT;
     const char *bind_addr = "127.0.0.1";
@@ -498,8 +501,23 @@ int main(int argc, char **argv)
             goto cleanup_server;
         }
 
+        /* Extract manifest and configure capabilities */
+        HlManifest manifest;
+        if (hl_manifest_extract(lua.L, &manifest) == 0) {
+            log_info("[hull:c] manifest: fs_read=%d fs_write=%d env=%d hosts=%d",
+                     manifest.fs_read_count, manifest.fs_write_count,
+                     manifest.env_count, manifest.hosts_count);
+        }
+
         /* Wire Lua routes into Keel */
         if (wire_lua_routes(&lua, &server) != 0) {
+            hl_lua_free(&lua);
+            goto cleanup_server;
+        }
+
+        /* Apply kernel sandbox (pledge/unveil) from manifest */
+        if (hl_sandbox_apply(&manifest, db_path) != 0) {
+            log_error("[hull:c] sandbox enforcement failed");
             hl_lua_free(&lua);
             goto cleanup_server;
         }
@@ -525,4 +543,25 @@ cleanup_db:
     log_debug("[hull:c] peak memory: %zu bytes", hl_alloc_peak(&alloc));
 
     return ret;
+}
+
+/* ── Entry point with subcommand dispatch ──────────────────────────── */
+
+int hull_main(int argc, char **argv)
+{
+    if (argc >= 2) {
+        const char *cmd = argv[1];
+        if (strcmp(cmd, "keygen") == 0)
+            return hull_keygen(argc - 1, argv + 1);
+        if (strcmp(cmd, "build") == 0)
+            return hull_tool("hull.build", argc - 1, argv + 1, argv[0]);
+        if (strcmp(cmd, "verify") == 0)
+            return hull_tool("hull.verify", argc - 1, argv + 1, argv[0]);
+        if (strcmp(cmd, "inspect") == 0)
+            return hull_tool("hull.inspect", argc - 1, argv + 1, argv[0]);
+        if (strcmp(cmd, "manifest") == 0)
+            return hull_tool("hull.manifest", argc - 1, argv + 1, argv[0]);
+    }
+
+    return hull_serve(argc, argv);
 }
