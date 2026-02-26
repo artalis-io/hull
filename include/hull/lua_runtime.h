@@ -20,6 +20,7 @@ typedef struct lua_State lua_State;
 typedef struct KlRequest KlRequest;
 typedef struct KlResponse KlResponse;
 typedef struct SHArena SHArena;
+typedef struct HlAllocator HlAllocator;
 
 /* ── Configuration ──────────────────────────────────────────────────── */
 
@@ -43,18 +44,23 @@ typedef struct HlLua {
     HlEnvConfig  *env_cfg;
     HlHttpConfig *http_cfg;
 
-    /* Memory tracking */
+    /* Process-level tracking allocator (NULL = raw malloc) */
+    HlAllocator    *alloc;
+
+    /* Lua sub-limit tracking */
     size_t          mem_used;
     size_t          mem_limit;
 
     /* Module search paths */
     const char     *app_dir;         /* application root directory */
+    size_t          app_dir_size;    /* allocation size for tracked free */
 
     /* Per-request scratch arena (reset between dispatches) */
     SHArena        *scratch;
 
-    /* Per-request response body (strdup'd, freed after dispatch) */
+    /* Per-request response body (allocated via alloc, freed after dispatch) */
     char           *response_body;
+    size_t          response_body_size;
 } HlLua;
 
 /* ── Lifecycle ──────────────────────────────────────────────────────── */

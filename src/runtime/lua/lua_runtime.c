@@ -8,6 +8,7 @@
  */
 
 #include "hull/lua_runtime.h"
+#include "hull/hull_alloc.h"
 #include "hull/hull_cap.h"
 
 #include "lua.h"
@@ -29,23 +30,31 @@ static void *hl_lua_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
     HlLua *lua = (HlLua *)ud;
 
     if (nsize == 0) {
-        /* Free */
+        /* Free — osize is the real block size here */
         if (lua->mem_used >= osize)
             lua->mem_used -= osize;
         else
             lua->mem_used = 0;
-        free(ptr);
+        hl_alloc_free(lua->alloc, ptr, osize);
         return NULL;
     }
 
-    /* Check memory limit */
+    /* Check Lua sub-limit first */
     if (nsize > osize) {
         size_t delta = nsize - osize;
         if (lua->mem_limit > 0 && lua->mem_used + delta > lua->mem_limit)
             return NULL; /* allocation refused */
     }
 
-    void *new_ptr = realloc(ptr, nsize);
+    /* Route through tracking allocator.
+     * When ptr is NULL, osize is a Lua type hint (not a real size),
+     * so use malloc to avoid confusing the tracker. */
+    void *new_ptr;
+    if (ptr == NULL)
+        new_ptr = hl_alloc_malloc(lua->alloc, nsize);
+    else
+        new_ptr = hl_alloc_realloc(lua->alloc, ptr, osize, nsize);
+
     if (new_ptr) {
         if (nsize > osize)
             lua->mem_used += nsize - osize;
@@ -100,6 +109,7 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
     sqlite3 *db = lua->db;
     HlFsConfig *fs_cfg = lua->fs_cfg;
     HlEnvConfig *env_cfg = lua->env_cfg;
+    HlAllocator *alloc = lua->alloc;
 
     memset(lua, 0, sizeof(*lua));
 
@@ -107,6 +117,7 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
     lua->db = db;
     lua->fs_cfg = fs_cfg;
     lua->env_cfg = env_cfg;
+    lua->alloc = alloc;
     lua->mem_limit = cfg->max_heap_bytes;
 
     /* Create Lua state with custom allocator */
@@ -152,7 +163,7 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
     }
 
     /* Per-request scratch arena */
-    lua->scratch = sh_arena_create(HL_SCRATCH_SIZE);
+    lua->scratch = hl_arena_create(lua->alloc, HL_SCRATCH_SIZE);
     if (!lua->scratch) {
         hl_lua_free(lua);
         return -1;
@@ -167,19 +178,25 @@ int hl_lua_load_app(HlLua *lua, const char *filename)
         return -1;
 
     /* Extract app directory from filename */
-    char *app_dir = strdup(filename);
+    size_t fn_len = strlen(filename);
+    char *app_dir = hl_alloc_malloc(lua->alloc, fn_len + 1);
     if (!app_dir)
         return -1;
+    memcpy(app_dir, filename, fn_len + 1);
     char *last_slash = strrchr(app_dir, '/');
     if (last_slash)
         *last_slash = '\0';
     else {
-        free(app_dir);
-        app_dir = strdup(".");
+        hl_alloc_free(lua->alloc, app_dir, fn_len + 1);
+        app_dir = hl_alloc_malloc(lua->alloc, 2);
         if (!app_dir)
             return -1;
+        app_dir[0] = '.';
+        app_dir[1] = '\0';
+        fn_len = 1;
     }
     lua->app_dir = app_dir;
+    lua->app_dir_size = fn_len + 1;
 
     /* Set module context so requires from app entry point resolve correctly */
     lua_pushstring(lua->L, filename);
@@ -246,13 +263,18 @@ void hl_lua_free(HlLua *lua)
         lua->L = NULL;
     }
     if (lua->app_dir) {
-        free((void *)lua->app_dir);
+        hl_alloc_free(lua->alloc, (void *)lua->app_dir, lua->app_dir_size);
         lua->app_dir = NULL;
+        lua->app_dir_size = 0;
     }
-    sh_arena_free(lua->scratch);
+    hl_arena_free(lua->alloc, lua->scratch);
     lua->scratch = NULL;
-    free(lua->response_body);
-    lua->response_body = NULL;
+    if (lua->response_body) {
+        hl_alloc_free(lua->alloc, lua->response_body,
+                      lua->response_body_size);
+        lua->response_body = NULL;
+        lua->response_body_size = 0;
+    }
 }
 
 void hl_lua_dump_error(HlLua *lua)

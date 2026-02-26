@@ -21,6 +21,7 @@ typedef struct JSContext JSContext;
 typedef struct KlRequest KlRequest;
 typedef struct KlResponse KlResponse;
 typedef struct SHArena SHArena;
+typedef struct HlAllocator HlAllocator;
 
 /* ── Configuration ──────────────────────────────────────────────────── */
 
@@ -51,18 +52,23 @@ typedef struct HlJS {
     HlEnvConfig  *env_cfg;
     HlHttpConfig *http_cfg;
 
+    /* Process-level tracking allocator (NULL = raw malloc) */
+    HlAllocator    *alloc;
+
     /* Interrupt / gas metering */
     int64_t         instruction_count;
     int64_t         max_instructions;
 
     /* Module search paths */
     const char     *app_dir;         /* application root directory */
+    size_t          app_dir_size;    /* allocation size for tracked free */
 
     /* Per-request scratch arena (reset between dispatches) */
     SHArena        *scratch;
 
-    /* Per-request response body (strdup'd, freed after dispatch) */
+    /* Per-request response body (allocated via alloc, freed after dispatch) */
     char           *response_body;
+    size_t          response_body_size;
 } HlJS;
 
 /* ── Lifecycle ──────────────────────────────────────────────────────── */

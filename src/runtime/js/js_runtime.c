@@ -9,6 +9,7 @@
  */
 
 #include "hull/js_runtime.h"
+#include "hull/hull_alloc.h"
 #include "hull/hull_limits.h"
 #include "hull/hull_cap.h"
 #include "quickjs.h"
@@ -237,6 +238,7 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
     HlFsConfig *fs_cfg = js->fs_cfg;
     HlEnvConfig *env_cfg = js->env_cfg;
     HlHttpConfig *http_cfg = js->http_cfg;
+    HlAllocator *alloc = js->alloc;
 
     memset(js, 0, sizeof(*js));
 
@@ -245,6 +247,7 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
     js->fs_cfg = fs_cfg;
     js->env_cfg = env_cfg;
     js->http_cfg = http_cfg;
+    js->alloc = alloc;
     js->max_instructions = cfg->max_instructions;
 
     /* Create runtime (using default allocator for now;
@@ -302,7 +305,7 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
     }
 
     /* Per-request scratch arena */
-    js->scratch = sh_arena_create(HL_SCRATCH_SIZE);
+    js->scratch = hl_arena_create(js->alloc, HL_SCRATCH_SIZE);
     if (!js->scratch) {
         hl_js_free(js);
         return -1;
@@ -354,23 +357,29 @@ int hl_js_load_app(HlJS *js, const char *filename)
     buf[nread] = '\0';
 
     /* Extract app directory from filename */
-    char *app_dir = strdup(filename);
+    size_t fn_len = strlen(filename);
+    char *app_dir = hl_alloc_malloc(js->alloc, fn_len + 1);
     if (!app_dir) {
         js->scratch->used = arena_saved;
         return -1;
     }
+    memcpy(app_dir, filename, fn_len + 1);
     char *last_slash = strrchr(app_dir, '/');
     if (last_slash)
         *last_slash = '\0';
     else {
-        free(app_dir);
-        app_dir = strdup(".");
+        hl_alloc_free(js->alloc, app_dir, fn_len + 1);
+        app_dir = hl_alloc_malloc(js->alloc, 2);
         if (!app_dir) {
             js->scratch->used = arena_saved;
             return -1;
         }
+        app_dir[0] = '.';
+        app_dir[1] = '\0';
+        fn_len = 1;
     }
     js->app_dir = app_dir;
+    js->app_dir_size = fn_len + 1;
 
     /* Evaluate as ES module */
     JSValue val = JS_Eval(js->ctx, buf, nread, filename,
@@ -440,13 +449,18 @@ void hl_js_free(HlJS *js)
         js->rt = NULL;
     }
     if (js->app_dir) {
-        free((void *)js->app_dir);
+        hl_alloc_free(js->alloc, (void *)js->app_dir, js->app_dir_size);
         js->app_dir = NULL;
+        js->app_dir_size = 0;
     }
-    sh_arena_free(js->scratch);
+    hl_arena_free(js->alloc, js->scratch);
     js->scratch = NULL;
-    free(js->response_body);
-    js->response_body = NULL;
+    if (js->response_body) {
+        hl_alloc_free(js->alloc, js->response_body,
+                      js->response_body_size);
+        js->response_body = NULL;
+        js->response_body_size = 0;
+    }
 }
 
 void hl_js_dump_error(HlJS *js)
