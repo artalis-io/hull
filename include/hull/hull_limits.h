@@ -35,6 +35,7 @@
 
 /* ── Runtime memory ─────────────────────────────────────────────────── */
 
+#define HL_SCRATCH_SIZE       (HL_MODULE_MAX_SIZE + 256 * 1024) /* module load + request scratch */
 #define HL_LUA_DEFAULT_HEAP   (64 * 1024 * 1024) /* 64 MB */
 #define HL_JS_DEFAULT_HEAP    (64 * 1024 * 1024)  /* 64 MB */
 #define HL_JS_DEFAULT_STACK   (1 * 1024 * 1024)   /* 1 MB */

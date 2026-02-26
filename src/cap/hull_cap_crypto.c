@@ -188,15 +188,15 @@ static int hmac_sha256(const uint8_t *key, size_t key_len,
     }
 
     /* inner hash: SHA256(k_ipad || msg) */
-    size_t inner_len = 64 + msg_len;
-    uint8_t *inner = malloc(inner_len);
-    if (!inner)
+    /* Max msg_len: salt_len(64) + 4 = 68 from pbkdf2 → inner_len ≤ 132 */
+    if (msg_len > 68)
         return -1;
+    uint8_t inner[132];
+    size_t inner_len = 64 + msg_len;
     memcpy(inner, k_ipad, 64);
     memcpy(inner + 64, msg, msg_len);
     uint8_t inner_hash[32];
     hl_cap_crypto_sha256(inner, inner_len, inner_hash);
-    free(inner);
 
     /* outer hash: SHA256(k_opad || inner_hash) */
     uint8_t outer[64 + 32];
@@ -214,13 +214,11 @@ int hl_cap_crypto_pbkdf2(const char *password, size_t pw_len,
     if (!password || !salt || !out || iterations < 1 || out_len == 0)
         return -1;
 
-    /* Overflow guard */
-    if (salt_len > SIZE_MAX / 2)
+    /* Salt size guard — stack buffer is 68 bytes */
+    if (salt_len > 64)
         return -1;
 
-    uint8_t *work = malloc(salt_len + 4);
-    if (!work)
-        return -1;
+    uint8_t work[68];
 
     memcpy(work, salt, salt_len);
 
@@ -236,18 +234,14 @@ int hl_cap_crypto_pbkdf2(const char *password, size_t pw_len,
 
         uint8_t u[32], t[32];
         if (hmac_sha256((const uint8_t *)password, pw_len,
-                        work, salt_len + 4, u) != 0) {
-            free(work);
+                        work, salt_len + 4, u) != 0)
             return -1;
-        }
         memcpy(t, u, 32);
 
         for (int i = 1; i < iterations; i++) {
             if (hmac_sha256((const uint8_t *)password, pw_len,
-                            u, 32, u) != 0) {
-                free(work);
+                            u, 32, u) != 0)
                 return -1;
-            }
             for (int j = 0; j < 32; j++)
                 t[j] ^= u[j];
         }
@@ -261,7 +255,6 @@ int hl_cap_crypto_pbkdf2(const char *password, size_t pw_len,
         block_num++;
     }
 
-    free(work);
     return 0;
 }
 
