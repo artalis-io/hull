@@ -5,7 +5,7 @@
  */
 
 #include "utest.h"
-#include "hull/cap.h"
+#include "hull/cap/env.h"
 #include <stdlib.h>
 #include <string.h>
 

@@ -8,7 +8,7 @@
  */
 
 #include "utest.h"
-#include "hull/cap.h"
+#include "hull/cap/fs.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>

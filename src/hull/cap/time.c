@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#include "hull/cap.h"
+#include "hull/cap/time.h"
 #include <time.h>
 #include <stdio.h>
 

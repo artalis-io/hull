@@ -8,8 +8,8 @@
  */
 
 #include "utest.h"
-#include "hull/lua.h"
-#include "hull/cap.h"
+#include "hull/runtime/lua.h"
+#include "hull/cap/env.h"
 
 #include "lua.h"
 #include "lualib.h"

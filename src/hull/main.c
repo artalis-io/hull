@@ -14,18 +14,18 @@
  */
 
 #ifdef HL_ENABLE_JS
-#include "hull/js.h"
+#include "hull/runtime/js.h"
 #include "quickjs.h"
 #endif
 
 #ifdef HL_ENABLE_LUA
-#include "hull/lua.h"
+#include "hull/runtime/lua.h"
 #include "lua.h"
 #include "lauxlib.h"
 #endif
 
 #include "hull/alloc.h"
-#include "hull/cap.h"
+#include "hull/cap/body.h"
 #include "hull/limits.h"
 #include "hull/parse_size.h"
 

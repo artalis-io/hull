@@ -5,7 +5,7 @@
  */
 
 #include "utest.h"
-#include "hull/cap.h"
+#include "hull/cap/body.h"
 #include <keel/body_reader.h>
 #include <string.h>
 

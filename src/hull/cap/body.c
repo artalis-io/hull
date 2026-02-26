@@ -8,7 +8,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#include "hull/cap.h"
+#include "hull/cap/body.h"
 #include "hull/limits.h"
 #include <stddef.h>
 

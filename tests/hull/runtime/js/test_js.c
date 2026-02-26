@@ -8,8 +8,8 @@
  */
 
 #include "utest.h"
-#include "hull/js.h"
-#include "hull/cap.h"
+#include "hull/runtime/js.h"
+#include "hull/cap/env.h"
 #include "quickjs.h"
 
 #include <sqlite3.h>
