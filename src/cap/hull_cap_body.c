@@ -9,9 +9,8 @@
  */
 
 #include "hull/hull_cap.h"
+#include "hull/hull_limits.h"
 #include <stddef.h>
-
-#define HL_BODY_MAX_SIZE (1024 * 1024) /* 1 MB */
 
 KlBodyReader *hl_cap_body_factory(KlAllocator *alloc, const KlRequest *req,
                                   void *user_data)

@@ -267,6 +267,76 @@ UTEST(js_runtime, hull_app_module)
     cleanup_js();
 }
 
+/* ── JSON module tests ───────────────────────────────────────────────── */
+
+UTEST(js_runtime, hull_json_encode)
+{
+    init_js();
+
+    const char *code =
+        "import { json } from 'hull:json';\n"
+        "globalThis.__test_json = json.encode({a: 1, b: 'two'});\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    char *s = eval_str("globalThis.__test_json");
+    ASSERT_NE(s, NULL);
+    ASSERT_STREQ(s, "{\"a\":1,\"b\":\"two\"}");
+    free(s);
+
+    cleanup_js();
+}
+
+UTEST(js_runtime, hull_json_decode)
+{
+    init_js();
+
+    const char *code =
+        "import { json } from 'hull:json';\n"
+        "const t = json.decode('{\"x\":42}');\n"
+        "globalThis.__test_val = t.x;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    int result = eval_int("globalThis.__test_val");
+    ASSERT_EQ(result, 42);
+
+    cleanup_js();
+}
+
+UTEST(js_runtime, hull_json_roundtrip)
+{
+    init_js();
+
+    const char *code =
+        "import { json } from 'hull:json';\n"
+        "const original = {name: 'hull', count: 7};\n"
+        "const decoded = json.decode(json.encode(original));\n"
+        "globalThis.__test_rt = (decoded.name === 'hull' && decoded.count === 7) ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    int result = eval_int("globalThis.__test_rt");
+    ASSERT_EQ(result, 1);
+
+    cleanup_js();
+}
+
 /* ── GC test ────────────────────────────────────────────────────────── */
 
 UTEST(js_runtime, gc_runs)

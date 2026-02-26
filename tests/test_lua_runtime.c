@@ -15,9 +15,13 @@
 #include "lualib.h"
 #include "lauxlib.h"
 
+#include "hull/hull_limits.h"
+
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 /* ── Helpers ────────────────────────────────────────────────────────── */
 
@@ -325,6 +329,120 @@ UTEST(lua_runtime, double_free)
     hl_lua_free(&local_lua); /* should not crash */
 }
 
+/* ── Module loader tests ─────────────────────────────────────────────── */
+
+UTEST(lua_runtime, require_hull_json)
+{
+    init_lua();
+
+    /* require('hull.json') should return a table with encode/decode */
+    int result = eval_int(
+        "(function() local j = require('hull.json') "
+        "return type(j) == 'table' and type(j.encode) == 'function' "
+        "and type(j.decode) == 'function' and 1 or 0 end)()");
+    ASSERT_EQ(result, 1);
+
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, require_caches_module)
+{
+    init_lua();
+
+    /* require('hull.json') returns the same cached object on second call */
+    int result = eval_int(
+        "rawequal(require('hull.json'), require('hull.json')) and 1 or 0");
+    ASSERT_EQ(result, 1);
+
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, require_vendor_json)
+{
+    init_lua();
+
+    /* require('vendor.json') should work (internal vendor namespace) */
+    int result = eval_int(
+        "(function() local j = require('vendor.json') "
+        "return type(j) == 'table' and type(j.encode) == 'function' and 1 or 0 end)()");
+    ASSERT_EQ(result, 1);
+
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, require_nonexistent_errors)
+{
+    init_lua();
+
+    /* require('nonexistent') should raise an error */
+    int rc = luaL_dostring(lua_rt.L, "require('nonexistent')");
+    ASSERT_NE(rc, LUA_OK);
+
+    const char *err = lua_tostring(lua_rt.L, -1);
+    ASSERT_NE(err, NULL);
+    ASSERT_NE(strstr(err, "module not found"), NULL);
+    lua_pop(lua_rt.L, 1);
+
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, require_non_string_errors)
+{
+    init_lua();
+
+    /* require with non-string argument should error */
+    int rc = luaL_dostring(lua_rt.L, "require(42)");
+    ASSERT_NE(rc, LUA_OK);
+    lua_pop(lua_rt.L, 1);
+
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, json_global_available)
+{
+    init_lua();
+
+    /* json global should be available (pre-loaded) */
+    int result = eval_int(
+        "type(json) == 'table' and type(json.encode) == 'function' "
+        "and type(json.decode) == 'function' and 1 or 0");
+    ASSERT_EQ(result, 1);
+
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, json_encode_decode)
+{
+    init_lua();
+
+    /* json.encode and json.decode should work */
+    char *s = eval_str("json.encode({name='hull'})");
+    ASSERT_NE(s, NULL);
+    ASSERT_NE(strstr(s, "\"name\""), NULL);
+    ASSERT_NE(strstr(s, "\"hull\""), NULL);
+    free(s);
+
+    int result = eval_int(
+        "json.decode('{\"x\":42}').x");
+    ASSERT_EQ(result, 42);
+
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, json_roundtrip)
+{
+    init_lua();
+
+    int result = eval_int(
+        "(function() local t = {a=1, b='two'} "
+        "local s = json.encode(t) "
+        "local t2 = json.decode(s) "
+        "return t2.a == 1 and t2.b == 'two' and 1 or 0 end)()");
+    ASSERT_EQ(result, 1);
+
+    cleanup_lua();
+}
+
 /* ── Error reporting ────────────────────────────────────────────────── */
 
 UTEST(lua_runtime, error_reporting)
@@ -347,6 +465,343 @@ UTEST(lua_runtime, error_reporting)
     ASSERT_EQ(result, 7);
 
     cleanup_lua();
+}
+
+/* ── Filesystem require helpers ──────────────────────────────────────── */
+
+/* Write a string to a file */
+static void write_file(const char *path, const char *content)
+{
+    FILE *f = fopen(path, "w");
+    if (f) {
+        fputs(content, f);
+        fclose(f);
+    }
+}
+
+/* Recursively remove a directory (simple: 2-level max) */
+static void rm_rf(const char *dir)
+{
+    char path[1024];
+    /* Try to remove known test files and subdirs */
+    const char *names[] = {
+        "mod.lua", "bad.lua", "big.lua", "nilmod.lua",
+        "sub/b.lua", "sub", "c.lua", "sibling.lua",
+        NULL
+    };
+    for (int i = 0; names[i]; i++) {
+        snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
+        unlink(path);
+        rmdir(path);
+    }
+    rmdir(dir);
+}
+
+/* Init lua with app_dir set to a temp directory */
+static void init_lua_with_appdir(const char *app_dir)
+{
+    if (lua_initialized)
+        hl_lua_free(&lua_rt);
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    memset(&lua_rt, 0, sizeof(lua_rt));
+    int rc = hl_lua_init(&lua_rt, &cfg);
+    lua_initialized = (rc == 0);
+    if (lua_initialized && app_dir) {
+        lua_rt.app_dir = strdup(app_dir);
+        /* Set __hull_current_module to a dummy entry point in app_dir */
+        char entry[1024];
+        snprintf(entry, sizeof(entry), "%s/app.lua", app_dir);
+        lua_pushstring(lua_rt.L, entry);
+        lua_setfield(lua_rt.L, LUA_REGISTRYINDEX, "__hull_current_module");
+    }
+}
+
+/* ── Filesystem require tests ───────────────────────────────────────── */
+
+UTEST(lua_require_fs, basic)
+{
+    char tmpdir[] = "/tmp/hull_test_XXXXXX";
+    ASSERT_NE(mkdtemp(tmpdir), NULL);
+
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/mod.lua", tmpdir);
+    write_file(path, "return { answer = 42 }\n");
+
+    init_lua_with_appdir(tmpdir);
+    ASSERT_TRUE(lua_initialized);
+
+    int result = eval_int(
+        "(function() local m = require('./mod') "
+        "return m.answer end)()");
+    ASSERT_EQ(result, 42);
+
+    cleanup_lua();
+    rm_rf(tmpdir);
+}
+
+UTEST(lua_require_fs, lua_ext_auto)
+{
+    char tmpdir[] = "/tmp/hull_test_XXXXXX";
+    ASSERT_NE(mkdtemp(tmpdir), NULL);
+
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/mod.lua", tmpdir);
+    write_file(path, "return { val = 7 }\n");
+
+    init_lua_with_appdir(tmpdir);
+    ASSERT_TRUE(lua_initialized);
+
+    /* require('./mod') should auto-append .lua */
+    int result = eval_int(
+        "(function() local m = require('./mod') return m.val end)()");
+    ASSERT_EQ(result, 7);
+
+    cleanup_lua();
+    rm_rf(tmpdir);
+}
+
+UTEST(lua_require_fs, nested_relative)
+{
+    char tmpdir[] = "/tmp/hull_test_XXXXXX";
+    ASSERT_NE(mkdtemp(tmpdir), NULL);
+
+    /* Create sub directory */
+    char subdir[1024];
+    snprintf(subdir, sizeof(subdir), "%s/sub", tmpdir);
+    mkdir(subdir, 0755);
+
+    /* sub/b.lua requires ../c (caller-relative traversal within app_dir) */
+    char bpath[1024];
+    snprintf(bpath, sizeof(bpath), "%s/sub/b.lua", tmpdir);
+    write_file(bpath, "local c = require('../c')\nreturn { from_c = c.val }\n");
+
+    /* c.lua at app root */
+    char cpath[1024];
+    snprintf(cpath, sizeof(cpath), "%s/c.lua", tmpdir);
+    write_file(cpath, "return { val = 99 }\n");
+
+    init_lua_with_appdir(tmpdir);
+    ASSERT_TRUE(lua_initialized);
+
+    /* require('./sub/b') loads b.lua, which requires('../c') → c.lua */
+    int result = eval_int(
+        "(function() local b = require('./sub/b') return b.from_c end)()");
+    ASSERT_EQ(result, 99);
+
+    cleanup_lua();
+    rm_rf(tmpdir);
+}
+
+UTEST(lua_require_fs, cached)
+{
+    char tmpdir[] = "/tmp/hull_test_XXXXXX";
+    ASSERT_NE(mkdtemp(tmpdir), NULL);
+
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/mod.lua", tmpdir);
+    write_file(path, "return { x = 1 }\n");
+
+    init_lua_with_appdir(tmpdir);
+    ASSERT_TRUE(lua_initialized);
+
+    /* require('./mod') twice returns the same object (rawequal) */
+    int result = eval_int(
+        "rawequal(require('./mod'), require('./mod')) and 1 or 0");
+    ASSERT_EQ(result, 1);
+
+    cleanup_lua();
+    rm_rf(tmpdir);
+}
+
+UTEST(lua_require_fs, traversal_above_root)
+{
+    char tmpdir[] = "/tmp/hull_test_XXXXXX";
+    ASSERT_NE(mkdtemp(tmpdir), NULL);
+
+    init_lua_with_appdir(tmpdir);
+    ASSERT_TRUE(lua_initialized);
+
+    /* require('../../etc/passwd') should error — escapes above app_dir */
+    int rc = luaL_dostring(lua_rt.L, "require('../../etc/passwd')");
+    ASSERT_NE(rc, LUA_OK);
+
+    const char *err = lua_tostring(lua_rt.L, -1);
+    ASSERT_NE(err, NULL);
+    ASSERT_NE(strstr(err, "module not found"), NULL);
+    lua_pop(lua_rt.L, 1);
+
+    cleanup_lua();
+    rm_rf(tmpdir);
+}
+
+UTEST(lua_require_fs, traversal_within_ok)
+{
+    char tmpdir[] = "/tmp/hull_test_XXXXXX";
+    ASSERT_NE(mkdtemp(tmpdir), NULL);
+
+    /* Create sub directory and sibling file */
+    char subdir[1024];
+    snprintf(subdir, sizeof(subdir), "%s/sub", tmpdir);
+    mkdir(subdir, 0755);
+
+    char spath[1024];
+    snprintf(spath, sizeof(spath), "%s/sibling.lua", tmpdir);
+    write_file(spath, "return { ok = true }\n");
+
+    /* Set current module to sub/a.lua so ../sibling resolves within app_dir */
+    init_lua_with_appdir(tmpdir);
+    ASSERT_TRUE(lua_initialized);
+
+    /* Override current module to be inside sub/ */
+    char sub_entry[1024];
+    snprintf(sub_entry, sizeof(sub_entry), "%s/sub/a.lua", tmpdir);
+    lua_pushstring(lua_rt.L, sub_entry);
+    lua_setfield(lua_rt.L, LUA_REGISTRYINDEX, "__hull_current_module");
+
+    /* require('../sibling') from sub/a.lua → should resolve to sibling.lua */
+    int result = eval_int(
+        "(function() local s = require('../sibling') "
+        "return s.ok and 1 or 0 end)()");
+    ASSERT_EQ(result, 1);
+
+    cleanup_lua();
+    rm_rf(tmpdir);
+}
+
+UTEST(lua_require_fs, not_found)
+{
+    char tmpdir[] = "/tmp/hull_test_XXXXXX";
+    ASSERT_NE(mkdtemp(tmpdir), NULL);
+
+    init_lua_with_appdir(tmpdir);
+    ASSERT_TRUE(lua_initialized);
+
+    /* require('./nonexistent') should give clear error */
+    int rc = luaL_dostring(lua_rt.L, "require('./nonexistent')");
+    ASSERT_NE(rc, LUA_OK);
+
+    const char *err = lua_tostring(lua_rt.L, -1);
+    ASSERT_NE(err, NULL);
+    ASSERT_NE(strstr(err, "module not found"), NULL);
+    lua_pop(lua_rt.L, 1);
+
+    cleanup_lua();
+    rm_rf(tmpdir);
+}
+
+UTEST(lua_require_fs, no_appdir)
+{
+    /* Without app_dir set, filesystem fallback is skipped */
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+    ASSERT_TRUE(lua_rt.app_dir == NULL);
+
+    int rc = luaL_dostring(lua_rt.L, "require('./some_module')");
+    ASSERT_NE(rc, LUA_OK);
+
+    const char *err = lua_tostring(lua_rt.L, -1);
+    ASSERT_NE(err, NULL);
+    ASSERT_NE(strstr(err, "module not found"), NULL);
+    lua_pop(lua_rt.L, 1);
+
+    cleanup_lua();
+}
+
+UTEST(lua_require_fs, syntax_error)
+{
+    char tmpdir[] = "/tmp/hull_test_XXXXXX";
+    ASSERT_NE(mkdtemp(tmpdir), NULL);
+
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/bad.lua", tmpdir);
+    write_file(path, "return {{{BROKEN SYNTAX\n");
+
+    init_lua_with_appdir(tmpdir);
+    ASSERT_TRUE(lua_initialized);
+
+    /* require('./bad') should propagate Lua compile error */
+    int rc = luaL_dostring(lua_rt.L, "require('./bad')");
+    ASSERT_NE(rc, LUA_OK);
+
+    const char *err = lua_tostring(lua_rt.L, -1);
+    ASSERT_NE(err, NULL);
+    /* Lua compile errors mention the file name */
+    ASSERT_NE(strstr(err, "bad.lua"), NULL);
+    lua_pop(lua_rt.L, 1);
+
+    cleanup_lua();
+    rm_rf(tmpdir);
+}
+
+UTEST(lua_require_fs, returns_nil)
+{
+    char tmpdir[] = "/tmp/hull_test_XXXXXX";
+    ASSERT_NE(mkdtemp(tmpdir), NULL);
+
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/nilmod.lua", tmpdir);
+    write_file(path, "-- returns nil implicitly\n");
+
+    init_lua_with_appdir(tmpdir);
+    ASSERT_TRUE(lua_initialized);
+
+    /* Module that returns nil caches true sentinel */
+    int result = eval_int(
+        "(function() local m = require('./nilmod') "
+        "return m == true and 1 or 0 end)()");
+    ASSERT_EQ(result, 1);
+
+    cleanup_lua();
+    rm_rf(tmpdir);
+}
+
+UTEST(lua_require_fs, too_large)
+{
+    char tmpdir[] = "/tmp/hull_test_XXXXXX";
+    ASSERT_NE(mkdtemp(tmpdir), NULL);
+
+    /* Create a file that exceeds HL_MODULE_MAX_SIZE */
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/big.lua", tmpdir);
+    FILE *f = fopen(path, "w");
+    ASSERT_NE(f, NULL);
+    /* Write just past the limit — use fseek to create a sparse file */
+    fseek(f, HL_MODULE_MAX_SIZE + 1, SEEK_SET);
+    fputc('x', f);
+    fclose(f);
+
+    init_lua_with_appdir(tmpdir);
+    ASSERT_TRUE(lua_initialized);
+
+    int rc = luaL_dostring(lua_rt.L, "require('./big')");
+    ASSERT_NE(rc, LUA_OK);
+
+    const char *err = lua_tostring(lua_rt.L, -1);
+    ASSERT_NE(err, NULL);
+    ASSERT_NE(strstr(err, "too large"), NULL);
+    lua_pop(lua_rt.L, 1);
+
+    cleanup_lua();
+    rm_rf(tmpdir);
+}
+
+UTEST(lua_require_fs, embedded_still_first)
+{
+    char tmpdir[] = "/tmp/hull_test_XXXXXX";
+    ASSERT_NE(mkdtemp(tmpdir), NULL);
+
+    init_lua_with_appdir(tmpdir);
+    ASSERT_TRUE(lua_initialized);
+
+    /* Embedded hull.json is found before filesystem even when app_dir is set */
+    int result = eval_int(
+        "(function() local j = require('hull.json') "
+        "return type(j) == 'table' and type(j.encode) == 'function' "
+        "and 1 or 0 end)()");
+    ASSERT_EQ(result, 1);
+
+    cleanup_lua();
+    rm_rf(tmpdir);
 }
 
 UTEST_MAIN();

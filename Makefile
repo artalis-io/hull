@@ -129,9 +129,98 @@ endif
 
 MAIN_OBJ := $(BUILDDIR)/main.o
 
+# ── Stdlib embedding (xxd) ──────────────────────────────────────────
+#
+# All .lua files under stdlib/lua/ (excluding tests/) are converted to
+# C byte arrays at build time via xxd -i. Path separators are flattened
+# to underscores: stdlib/lua/vendor/json.lua → build/stdlib_lua_vendor_json.h
+
+STDLIB_LUA_FILES := $(shell find stdlib/lua -name '*.lua' -not -path '*/tests/*' 2>/dev/null)
+
+# Flatten path: stdlib/lua/vendor/json.lua → build/stdlib_lua_vendor_json.h
+stdlib_hdr = $(BUILDDIR)/$(subst /,_,$(patsubst stdlib/%.lua,stdlib_%.h,$(1)))
+STDLIB_LUA_HDRS := $(foreach f,$(STDLIB_LUA_FILES),$(call stdlib_hdr,$(f)))
+
+# Auto-generated registry: includes all xxd headers and builds a module table
+STDLIB_LUA_REGISTRY := $(BUILDDIR)/stdlib_lua_registry.h
+
+# Generate per-file xxd rules (avoids % matching directory separators)
+define STDLIB_LUA_RULE
+$(call stdlib_hdr,$(1)): $(1) | $(BUILDDIR)
+	xxd -i $$< > $$@
+endef
+$(foreach f,$(STDLIB_LUA_FILES),$(eval $(call STDLIB_LUA_RULE,$(f))))
+
+# Keep separate list of xxd-only headers (without the registry itself)
+STDLIB_LUA_XXD_HDRS := $(STDLIB_LUA_HDRS)
+
+# Generate the auto-registry header from discovered files
+$(STDLIB_LUA_REGISTRY): $(STDLIB_LUA_XXD_HDRS) | $(BUILDDIR)
+	@echo "/* Auto-generated — do not edit */" > $@
+	@for hdr in $(STDLIB_LUA_XXD_HDRS); do \
+		echo "#include \"$$(basename $$hdr)\""; \
+	done >> $@
+	@echo "" >> $@
+	@echo "typedef struct { const char *name; const unsigned char *data; unsigned int len; } HlStdlibEntry;" >> $@
+	@echo "static const HlStdlibEntry hl_stdlib_lua_entries[] = {" >> $@
+	@for f in $(STDLIB_LUA_FILES); do \
+		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
+		modname=$$(echo "$$f" | sed 's|^stdlib/lua/||; s|\.lua$$||; s|/|.|g'); \
+		echo "    { \"$$modname\", $${varname}, sizeof($${varname}) },"; \
+	done >> $@
+	@echo "    { 0, 0, 0 }" >> $@
+	@echo "};" >> $@
+
+STDLIB_LUA_HDRS += $(STDLIB_LUA_REGISTRY)
+
+# ── App code embedding (xxd) ─────────────────────────────────────────
+#
+# When APP_DIR is set (e.g. make APP_DIR=myapp), all .lua files under
+# APP_DIR are embedded into the binary using the same xxd pattern as stdlib.
+# Module names use relative paths from APP_DIR with ./ prefix:
+#   myapp/routes/users.lua → "./routes/users"
+
+APP_DIR ?=
+ifneq ($(APP_DIR),)
+APP_LUA_FILES := $(shell find $(APP_DIR) -name '*.lua' -not -path '*/tests/*' 2>/dev/null)
+
+# Flatten path: myapp/routes/users.lua → build/app_lua_routes_users.h
+app_hdr = $(BUILDDIR)/app_lua_$(subst /,_,$(patsubst $(APP_DIR)/%.lua,%.h,$(1)))
+APP_LUA_HDRS := $(foreach f,$(APP_LUA_FILES),$(call app_hdr,$(f)))
+
+APP_LUA_REGISTRY := $(BUILDDIR)/app_lua_registry.h
+
+define APP_LUA_RULE
+$(call app_hdr,$(1)): $(1) | $(BUILDDIR)
+	xxd -i $$< > $$@
+endef
+$(foreach f,$(APP_LUA_FILES),$(eval $(call APP_LUA_RULE,$(f))))
+
+APP_LUA_XXD_HDRS := $(APP_LUA_HDRS)
+
+$(APP_LUA_REGISTRY): $(APP_LUA_XXD_HDRS) | $(BUILDDIR)
+	@echo "/* Auto-generated — do not edit */" > $@
+	@for hdr in $(APP_LUA_XXD_HDRS); do \
+		echo "#include \"$$(basename $$hdr)\""; \
+	done >> $@
+	@echo "" >> $@
+	@echo "static const HlStdlibEntry hl_app_lua_entries[] = {" >> $@
+	@for f in $(APP_LUA_FILES); do \
+		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
+		modname=$$(echo "$$f" | sed 's|^$(APP_DIR)/||; s|\.lua$$||'); \
+		echo "    { \"./$$modname\", $${varname}, sizeof($${varname}) },"; \
+	done >> $@
+	@echo "    { 0, 0, 0 }" >> $@
+	@echo "};" >> $@
+
+APP_LUA_HDRS += $(APP_LUA_REGISTRY)
+STDLIB_LUA_HDRS += $(APP_LUA_HDRS)
+CFLAGS += -DHL_APP_EMBEDDED
+endif
+
 # ── Include paths ───────────────────────────────────────────────────
 
-INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(SQLITE_DIR)
+INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(SQLITE_DIR) -I$(BUILDDIR)
 
 # ── Targets ─────────────────────────────────────────────────────────
 
@@ -152,8 +241,8 @@ $(BUILDDIR)/cap_%.o: $(SRCDIR)/cap/%.c | $(BUILDDIR)
 $(BUILDDIR)/js_%.o: $(SRCDIR)/runtime/js/%.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# Lua runtime sources
-$(BUILDDIR)/lua_rt_%.o: $(SRCDIR)/runtime/lua/%.c | $(BUILDDIR)
+# Lua runtime sources (depend on generated stdlib headers)
+$(BUILDDIR)/lua_rt_%.o: $(SRCDIR)/runtime/lua/%.c $(STDLIB_LUA_HDRS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Main
@@ -214,8 +303,8 @@ $(BUILDDIR)/test_js_runtime: $(TESTDIR)/test_js_runtime.c $(TEST_CAP_OBJS) $(TES
 		$(TEST_CAP_OBJS) $(TEST_JS_OBJS) $(QJS_OBJS) \
 		$(KEEL_LIB) $(SQLITE_OBJ) -lm -lpthread
 
-# Lua runtime test — needs Lua + Lua runtime objects + Keel
-$(BUILDDIR)/test_lua_runtime: $(TESTDIR)/test_lua_runtime.c $(TEST_CAP_OBJS) $(TEST_LUA_OBJS) $(LUA_OBJS) $(SQLITE_OBJ) $(KEEL_LIB) | $(BUILDDIR)
+# Lua runtime test — needs Lua + Lua runtime objects + Keel + stdlib headers
+$(BUILDDIR)/test_lua_runtime: $(TESTDIR)/test_lua_runtime.c $(TEST_CAP_OBJS) $(TEST_LUA_OBJS) $(LUA_OBJS) $(SQLITE_OBJ) $(KEEL_LIB) $(STDLIB_LUA_HDRS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(TEST_CAP_OBJS) $(TEST_LUA_OBJS) $(LUA_OBJS) \
 		$(KEEL_LIB) $(SQLITE_OBJ) -lm -lpthread
