@@ -18,23 +18,23 @@
 
 /* ── Helpers ────────────────────────────────────────────────────────── */
 
-static HullJS js;
+static HlJS js;
 static int js_initialized = 0;
 
 static void init_js(void)
 {
     if (js_initialized)
-        hull_js_free(&js);
-    HullJSConfig cfg = HULL_JS_CONFIG_DEFAULT;
+        hl_js_free(&js);
+    HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
     memset(&js, 0, sizeof(js));
-    int rc = hull_js_init(&js, &cfg);
+    int rc = hl_js_init(&js, &cfg);
     js_initialized = (rc == 0);
 }
 
 static void cleanup_js(void)
 {
     if (js_initialized) {
-        hull_js_free(&js);
+        hl_js_free(&js);
         js_initialized = 0;
     }
 }
@@ -49,7 +49,7 @@ static char *eval_str(const char *code)
     JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
                           JS_EVAL_TYPE_GLOBAL);
     if (JS_IsException(val)) {
-        hull_js_dump_error(&js);
+        hl_js_dump_error(&js);
         return NULL;
     }
 
@@ -69,7 +69,7 @@ static int eval_int(const char *code)
     JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
                           JS_EVAL_TYPE_GLOBAL);
     if (JS_IsException(val)) {
-        hull_js_dump_error(&js);
+        hl_js_dump_error(&js);
         return -9999;
     }
 
@@ -83,16 +83,16 @@ static int eval_int(const char *code)
 
 UTEST(js_runtime, init_and_free)
 {
-    HullJSConfig cfg = HULL_JS_CONFIG_DEFAULT;
-    HullJS local_js;
+    HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
+    HlJS local_js;
     memset(&local_js, 0, sizeof(local_js));
 
-    int rc = hull_js_init(&local_js, &cfg);
+    int rc = hl_js_init(&local_js, &cfg);
     ASSERT_EQ(rc, 0);
     ASSERT_NE(local_js.rt, NULL);
     ASSERT_NE(local_js.ctx, NULL);
 
-    hull_js_free(&local_js);
+    hl_js_free(&local_js);
     ASSERT_EQ(local_js.rt, NULL);
     ASSERT_EQ(local_js.ctx, NULL);
 }
@@ -170,12 +170,12 @@ UTEST(js_runtime, no_std_module)
 
 UTEST(js_runtime, instruction_limit)
 {
-    HullJSConfig cfg = HULL_JS_CONFIG_DEFAULT;
+    HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
     cfg.max_instructions = 1000; /* very low limit */
-    HullJS limited_js;
+    HlJS limited_js;
     memset(&limited_js, 0, sizeof(limited_js));
 
-    int rc = hull_js_init(&limited_js, &cfg);
+    int rc = hl_js_init(&limited_js, &cfg);
     ASSERT_EQ(rc, 0);
 
     /* Infinite loop should be interrupted */
@@ -191,7 +191,7 @@ UTEST(js_runtime, instruction_limit)
     JSValue exc = JS_GetException(limited_js.ctx);
     JS_FreeValue(limited_js.ctx, exc);
 
-    hull_js_free(&limited_js);
+    hl_js_free(&limited_js);
 }
 
 /* ── Module tests ───────────────────────────────────────────────────── */
@@ -208,12 +208,12 @@ UTEST(js_runtime, hull_time_module)
     JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
                           JS_EVAL_TYPE_MODULE);
     if (JS_IsException(val))
-        hull_js_dump_error(&js);
+        hl_js_dump_error(&js);
     /* Module eval may return a promise or undefined — that's OK */
     JS_FreeValue(js.ctx, val);
 
     /* Run pending jobs (module initialization) */
-    hull_js_run_jobs(&js);
+    hl_js_run_jobs(&js);
 
     /* Check that the time was stored */
     int result = eval_int("typeof globalThis.__test_time === 'number' ? 1 : 0");
@@ -239,9 +239,9 @@ UTEST(js_runtime, hull_app_module)
     JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
                           JS_EVAL_TYPE_MODULE);
     if (JS_IsException(val))
-        hull_js_dump_error(&js);
+        hl_js_dump_error(&js);
     JS_FreeValue(js.ctx, val);
-    hull_js_run_jobs(&js);
+    hl_js_run_jobs(&js);
 
     /* Verify routes were registered */
     int count = eval_int(
@@ -277,7 +277,7 @@ UTEST(js_runtime, gc_runs)
     eval_int("for(var i = 0; i < 10000; i++) { var x = {a: i, b: 'test'}; } 1");
 
     /* GC should not crash */
-    hull_js_gc(&js);
+    hl_js_gc(&js);
 
     /* Still functional after GC */
     int result = eval_int("2 + 2");
@@ -308,7 +308,7 @@ UTEST(js_runtime, reset_request)
     init_js();
 
     js.instruction_count = 12345;
-    hull_js_reset_request(&js);
+    hl_js_reset_request(&js);
     ASSERT_EQ(js.instruction_count, 0);
 
     cleanup_js();
@@ -318,13 +318,13 @@ UTEST(js_runtime, reset_request)
 
 UTEST(js_runtime, double_free)
 {
-    HullJSConfig cfg = HULL_JS_CONFIG_DEFAULT;
-    HullJS local_js;
+    HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
+    HlJS local_js;
     memset(&local_js, 0, sizeof(local_js));
 
-    hull_js_init(&local_js, &cfg);
-    hull_js_free(&local_js);
-    hull_js_free(&local_js); /* should not crash */
+    hl_js_init(&local_js, &cfg);
+    hl_js_free(&local_js);
+    hl_js_free(&local_js); /* should not crash */
 }
 
 UTEST_MAIN();

@@ -6,6 +6,7 @@
 make              # build hull binary (requires Keel + SQLite)
 make test         # build and run all unit tests
 make debug        # debug build with ASan + UBSan (recompiles from clean)
+make check        # clean + ASan/UBSan build + test + e2e (full validation)
 make analyze      # Clang static analyzer (scan-build)
 make cppcheck     # cppcheck static analysis
 make clean        # remove all build artifacts
@@ -35,9 +36,9 @@ make clean        # remove all build artifacts
 
 Hull supports two runtimes: Lua 5.4 and QuickJS (ES2023 JavaScript). Only one is active per application — selected by entry point file extension (`.lua` or `.js`).
 
-### Shared C Capability API (`hull_cap_*`)
+### Shared C Capability API (`hl_cap_*`)
 
-All enforcement (path validation, host allowlists, SQL parameterization) lives in `hull_cap_*` functions. Both runtimes call these — neither touches SQLite, filesystem, or network directly.
+All enforcement (path validation, host allowlists, SQL parameterization) lives in `hl_cap_*` functions. Both runtimes call these — neither touches SQLite, filesystem, or network directly.
 
 | File | Purpose |
 |------|---------|
@@ -69,9 +70,9 @@ All enforcement (path validation, host allowlists, SQL parameterization) lives i
 ### Request Flow
 
 ```
-Browser → Keel HTTP → Route Match → hull_{js,lua}_dispatch() → Handler → KlResponse
+Browser → Keel HTTP → Route Match → hl_{js,lua}_dispatch() → Handler → KlResponse
                                           ↓
-                                   hull_cap_* API (shared C)
+                                   hl_cap_* API (shared C)
                                           ↓
                                    SQLite / FS / Crypto
 ```
@@ -80,15 +81,15 @@ Browser → Keel HTTP → Route Match → hull_{js,lua}_dispatch() → Handler �
 
 | Type | Header | Purpose |
 |------|--------|---------|
-| `HullValue` | `hull_cap.h` | Runtime-agnostic value (nil, int, double, text, blob, bool) |
-| `HullColumn` | `hull_cap.h` | Named column + value (from query results) |
-| `HullRowCallback` | `hull_cap.h` | Per-row callback for hull_cap_db_query() |
-| `HullFsConfig` | `hull_cap.h` | Filesystem config (base_dir for path validation) |
-| `HullEnvConfig` | `hull_cap.h` | Env config (allowlist of permitted variable names) |
-| `HullJS` | `js_runtime.h` | QuickJS runtime context (VM, capabilities, config) |
-| `HullJSConfig` | `js_runtime.h` | QuickJS config (heap, stack, instruction limits) |
-| `HullLua` | `lua_runtime.h` | Lua 5.4 runtime context (VM, capabilities, config) |
-| `HullLuaConfig` | `lua_runtime.h` | Lua config (heap limit) |
+| `HlValue` | `hull_cap.h` | Runtime-agnostic value (nil, int, double, text, blob, bool) |
+| `HlColumn` | `hull_cap.h` | Named column + value (from query results) |
+| `HlRowCallback` | `hull_cap.h` | Per-row callback for hl_cap_db_query() |
+| `HlFsConfig` | `hull_cap.h` | Filesystem config (base_dir for path validation) |
+| `HlEnvConfig` | `hull_cap.h` | Env config (allowlist of permitted variable names) |
+| `HlJS` | `js_runtime.h` | QuickJS runtime context (VM, capabilities, config) |
+| `HlJSConfig` | `js_runtime.h` | QuickJS config (heap, stack, instruction limits) |
+| `HlLua` | `lua_runtime.h` | Lua 5.4 runtime context (VM, capabilities, config) |
+| `HlLuaConfig` | `lua_runtime.h` | Lua config (heap limit) |
 
 ## Git
 
@@ -103,7 +104,7 @@ Browser → Keel HTTP → Route Match → hull_{js,lua}_dispatch() → Handler �
 - Integer overflow guards: check against `SIZE_MAX/2` before arithmetic
 - Error handling: return `-1` on failure, `0` on success (or positive value)
 - Resource cleanup: every `_init` has a corresponding `_free`
-- All SQLite access through `hull_cap_db_*` — never call sqlite3 directly from bindings
+- All SQLite access through `hl_cap_db_*` — never call sqlite3 directly from bindings
 
 ## Testing
 
@@ -158,15 +159,15 @@ The Lua runtime sandbox removes dangerous capabilities:
 2. Declare in `hull_cap.h`
 3. Add JS bindings in `js_modules.c`:
    - Static init function: `js_<name>_module_init()`
-   - Public init: `hull_js_init_<name>_module()`
-4. Register in `hull_js_register_modules()` at bottom of `js_modules.c`
+   - Public init: `hl_js_init_<name>_module()`
+4. Register in `hl_js_register_modules()` at bottom of `js_modules.c`
 
 ### Lua (hull.*)
-1. Same capability layer as JS (shared `hull_cap_*`)
+1. Same capability layer as JS (shared `hl_cap_*`)
 2. Add Lua bindings in `lua_modules.c`:
    - `luaL_Reg` array with function table
    - `luaopen_hull_<name>()` opener function
-3. Register in `hull_lua_register_modules()` at bottom of `lua_modules.c`
+3. Register in `hl_lua_register_modules()` at bottom of `lua_modules.c`
 
 ### Both
 5. Add tests in `tests/test_hull_cap_<name>.c`

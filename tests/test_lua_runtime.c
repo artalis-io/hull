@@ -21,23 +21,23 @@
 
 /* ── Helpers ────────────────────────────────────────────────────────── */
 
-static HullLua lua_rt;
+static HlLua lua_rt;
 static int lua_initialized = 0;
 
 static void init_lua(void)
 {
     if (lua_initialized)
-        hull_lua_free(&lua_rt);
-    HullLuaConfig cfg = HULL_LUA_CONFIG_DEFAULT;
+        hl_lua_free(&lua_rt);
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
     memset(&lua_rt, 0, sizeof(lua_rt));
-    int rc = hull_lua_init(&lua_rt, &cfg);
+    int rc = hl_lua_init(&lua_rt, &cfg);
     lua_initialized = (rc == 0);
 }
 
 static void cleanup_lua(void)
 {
     if (lua_initialized) {
-        hull_lua_free(&lua_rt);
+        hl_lua_free(&lua_rt);
         lua_initialized = 0;
     }
 }
@@ -91,15 +91,15 @@ static int eval_int(const char *code)
 
 UTEST(lua_runtime, init_and_free)
 {
-    HullLuaConfig cfg = HULL_LUA_CONFIG_DEFAULT;
-    HullLua local_lua;
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    HlLua local_lua;
     memset(&local_lua, 0, sizeof(local_lua));
 
-    int rc = hull_lua_init(&local_lua, &cfg);
+    int rc = hl_lua_init(&local_lua, &cfg);
     ASSERT_EQ(rc, 0);
     ASSERT_NE(local_lua.L, NULL);
 
-    hull_lua_free(&local_lua);
+    hl_lua_free(&local_lua);
     ASSERT_EQ(local_lua.L, NULL);
 }
 
@@ -316,13 +316,13 @@ UTEST(lua_runtime, safe_libs_available)
 
 UTEST(lua_runtime, double_free)
 {
-    HullLuaConfig cfg = HULL_LUA_CONFIG_DEFAULT;
-    HullLua local_lua;
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    HlLua local_lua;
     memset(&local_lua, 0, sizeof(local_lua));
 
-    hull_lua_init(&local_lua, &cfg);
-    hull_lua_free(&local_lua);
-    hull_lua_free(&local_lua); /* should not crash */
+    hl_lua_init(&local_lua, &cfg);
+    hl_lua_free(&local_lua);
+    hl_lua_free(&local_lua); /* should not crash */
 }
 
 /* ── Error reporting ────────────────────────────────────────────────── */

@@ -26,4 +26,19 @@ app.get("/health", (req, res) => {
     res.json({ status: "ok", runtime: "quickjs", uptime: time.clock() });
 });
 
+// Echo body back as JSON
+app.post("/echo", (req, res) => {
+    res.json({ body: req.body });
+});
+
+// Greet by route param
+app.get("/greet/:name", (req, res) => {
+    res.json({ greeting: "Hello, " + req.params.name + "!" });
+});
+
+// Greet with body
+app.post("/greet/:name", (req, res) => {
+    res.json({ greeting: "Hello, " + req.params.name + "!", body: req.body });
+});
+
 log.info("Hello app loaded — routes registered");

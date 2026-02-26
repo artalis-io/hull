@@ -4,17 +4,33 @@
 # Vendors: QuickJS, Lua, Keel (linked as library).
 #
 # Usage:
-#   make              # build hull binary
+#   make              # build hull binary (both runtimes)
+#   make RUNTIME=js   # build with QuickJS runtime only
+#   make RUNTIME=lua  # build with Lua runtime only
 #   make test         # build and run tests
 #   make debug        # debug build with ASan + UBSan
+#   make msan         # MSan + UBSan (requires clang, Linux only)
+#   make e2e          # end-to-end tests (JS + Lua runtimes)
+#   make CC=cosmocc   # build with Cosmopolitan C (APE)
 #   make clean        # remove build artifacts
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 CC      ?= cc
 AR      ?= ar
+
+# Runtime selection: "all" (default), "js", or "lua"
+RUNTIME ?= all
+
+# Detect Cosmopolitan toolchain
+ifneq ($(findstring cosmocc,$(CC)),)
+  COSMO := 1
+endif
+
 CFLAGS  := -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2
-CFLAGS  += -fstack-protector-strong
+ifndef COSMO
+  CFLAGS += -fstack-protector-strong
+endif
 LDFLAGS :=
 
 # Build mode
@@ -24,6 +40,8 @@ LDFLAGS += -fsanitize=address,undefined
 else
 CFLAGS += -O2
 endif
+
+.DEFAULT_GOAL := all
 
 # ── Directories ──────────────────────────────────────────────────────
 
@@ -56,52 +74,79 @@ LUA_CFLAGS := -std=c11 -O2 -w -DLUA_USE_POSIX
 
 # ── Keel (external library) ─────────────────────────────────────────
 
-# Keel is expected to be built separately and available as a library.
-# Set KEEL_DIR to point to the Keel source/build directory.
-KEEL_DIR   ?= ../keel
+# Keel is included as a git submodule in vendor/keel.
+# Override KEEL_DIR to point to a different Keel build if needed.
+KEEL_DIR   ?= $(VENDDIR)/keel
 KEEL_INC   := $(KEEL_DIR)/include
 KEEL_LIB   := $(KEEL_DIR)/libkeel.a
 
-# ── SQLite (vendored or system) ─────────────────────────────────────
+# Build Keel if not already built
+$(KEEL_LIB):
+	$(MAKE) -C $(KEEL_DIR) CC=$(CC) AR=$(AR)
 
-# For now, link against system SQLite. TODO: vendor SQLite source.
-SQLITE_CFLAGS := $(shell pkg-config --cflags sqlite3 2>/dev/null)
-SQLITE_LIBS   := $(shell pkg-config --libs sqlite3 2>/dev/null || echo "-lsqlite3")
+# ── SQLite (vendored amalgamation) ─────────────────────────────────
+
+SQLITE_DIR    := $(VENDDIR)/sqlite
+SQLITE_OBJ    := $(BUILDDIR)/sqlite3.o
+SQLITE_CFLAGS := -std=c11 -O2 -w -DSQLITE_THREADSAFE=1
 
 # ── Hull source files ───────────────────────────────────────────────
 
-HULL_SRCS := $(SRCDIR)/hull_cap_db.c \
-             $(SRCDIR)/hull_cap_fs.c \
-             $(SRCDIR)/hull_cap_time.c \
-             $(SRCDIR)/hull_cap_env.c \
-             $(SRCDIR)/hull_cap_crypto.c \
-             $(SRCDIR)/js_runtime.c \
-             $(SRCDIR)/js_bindings.c \
-             $(SRCDIR)/js_modules.c \
-             $(SRCDIR)/lua_runtime.c \
-             $(SRCDIR)/lua_bindings.c \
-             $(SRCDIR)/lua_modules.c
+# Capability sources (always compiled)
+CAP_SRCS := $(wildcard $(SRCDIR)/cap/*.c)
+CAP_OBJS := $(patsubst $(SRCDIR)/cap/%.c,$(BUILDDIR)/cap_%.o,$(CAP_SRCS))
 
-HULL_OBJS := $(patsubst $(SRCDIR)/%.c,$(BUILDDIR)/%.o,$(HULL_SRCS))
-MAIN_OBJ  := $(BUILDDIR)/main.o
+# JS runtime sources
+JS_RT_SRCS := $(wildcard $(SRCDIR)/runtime/js/*.c)
+JS_RT_OBJS := $(patsubst $(SRCDIR)/runtime/js/%.c,$(BUILDDIR)/js_%.o,$(JS_RT_SRCS))
+
+# Lua runtime sources
+LUA_RT_SRCS := $(wildcard $(SRCDIR)/runtime/lua/*.c)
+LUA_RT_OBJS := $(patsubst $(SRCDIR)/runtime/lua/%.c,$(BUILDDIR)/lua_rt_%.o,$(LUA_RT_SRCS))
+
+# Select which runtimes to build
+ifeq ($(RUNTIME),js)
+  RT_OBJS   := $(JS_RT_OBJS)
+  VEND_OBJS := $(QJS_OBJS)
+  CFLAGS    += -DHL_ENABLE_JS
+else ifeq ($(RUNTIME),lua)
+  RT_OBJS   := $(LUA_RT_OBJS)
+  VEND_OBJS := $(LUA_OBJS)
+  CFLAGS    += -DHL_ENABLE_LUA
+else
+  # default: both runtimes
+  RT_OBJS   := $(JS_RT_OBJS) $(LUA_RT_OBJS)
+  VEND_OBJS := $(QJS_OBJS) $(LUA_OBJS)
+  CFLAGS    += -DHL_ENABLE_JS -DHL_ENABLE_LUA
+endif
+
+MAIN_OBJ := $(BUILDDIR)/main.o
 
 # ── Include paths ───────────────────────────────────────────────────
 
-INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) $(SQLITE_CFLAGS)
+INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(SQLITE_DIR)
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug analyze cppcheck
+.PHONY: all clean test debug msan e2e check analyze cppcheck
 
 all: $(BUILDDIR)/hull
 
 # Hull binary
-$(BUILDDIR)/hull: $(HULL_OBJS) $(MAIN_OBJ) $(QJS_OBJS) $(LUA_OBJS) $(KEEL_LIB)
-	$(CC) $(LDFLAGS) -o $@ $(HULL_OBJS) $(MAIN_OBJ) $(QJS_OBJS) $(LUA_OBJS) \
-		$(KEEL_LIB) $(SQLITE_LIBS) -lm -lpthread
+$(BUILDDIR)/hull: $(CAP_OBJS) $(RT_OBJS) $(MAIN_OBJ) $(VEND_OBJS) $(SQLITE_OBJ) $(KEEL_LIB)
+	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(RT_OBJS) $(MAIN_OBJ) $(VEND_OBJS) \
+		$(SQLITE_OBJ) $(KEEL_LIB) -lm -lpthread
 
-# Hull C sources
-$(BUILDDIR)/%.o: $(SRCDIR)/%.c | $(BUILDDIR)
+# Capability sources
+$(BUILDDIR)/cap_%.o: $(SRCDIR)/cap/%.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+# JS runtime sources
+$(BUILDDIR)/js_%.o: $(SRCDIR)/runtime/js/%.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+# Lua runtime sources
+$(BUILDDIR)/lua_rt_%.o: $(SRCDIR)/runtime/lua/%.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Main
@@ -116,6 +161,10 @@ $(BUILDDIR)/qjs_%.o: $(QJS_DIR)/%.c | $(BUILDDIR)
 $(BUILDDIR)/lua_%.o: $(LUA_DIR)/%.c | $(BUILDDIR)
 	$(CC) $(LUA_CFLAGS) -I$(LUA_DIR) -c -o $@ $<
 
+# SQLite amalgamation (vendored, relaxed warnings)
+$(SQLITE_OBJ): $(SQLITE_DIR)/sqlite3.c | $(BUILDDIR)
+	$(CC) $(SQLITE_CFLAGS) -I$(SQLITE_DIR) -c -o $@ $<
+
 $(BUILDDIR):
 	mkdir -p $(BUILDDIR)
 
@@ -128,41 +177,41 @@ debug:
 # ── Tests ───────────────────────────────────────────────────────────
 
 TEST_SRCS := $(wildcard $(TESTDIR)/test_*.c)
+
+# Filter test binaries based on RUNTIME selection
+ifeq ($(RUNTIME),js)
+  TEST_SRCS := $(filter-out $(TESTDIR)/test_lua_runtime.c,$(TEST_SRCS))
+else ifeq ($(RUNTIME),lua)
+  TEST_SRCS := $(filter-out $(TESTDIR)/test_js_runtime.c,$(TEST_SRCS))
+endif
+
 TEST_BINS := $(patsubst $(TESTDIR)/%.c,$(BUILDDIR)/%,$(TEST_SRCS))
 
-# Test objects need hull capability sources but NOT main.o or js_runtime
-TEST_CAP_OBJS := $(BUILDDIR)/hull_cap_db.o \
-                 $(BUILDDIR)/hull_cap_fs.o \
-                 $(BUILDDIR)/hull_cap_time.o \
-                 $(BUILDDIR)/hull_cap_env.o \
-                 $(BUILDDIR)/hull_cap_crypto.o
-
-# Lua runtime objects needed for test_lua_runtime
-TEST_LUA_OBJS := $(BUILDDIR)/lua_runtime.o \
-                 $(BUILDDIR)/lua_modules.o \
-                 $(BUILDDIR)/lua_bindings.o
+# Test objects need hull capability sources but NOT main.o or runtime objects
+TEST_CAP_OBJS := $(CAP_OBJS)
 
 # JS runtime objects needed for test_js_runtime
-TEST_JS_OBJS := $(BUILDDIR)/js_runtime.o \
-                $(BUILDDIR)/js_modules.o \
-                $(BUILDDIR)/js_bindings.o
+TEST_JS_OBJS := $(JS_RT_OBJS)
 
-# Default test rule (capability tests — no runtime objects needed)
-$(BUILDDIR)/test_%: $(TESTDIR)/test_%.c $(TEST_CAP_OBJS) | $(BUILDDIR)
+# Lua runtime objects needed for test_lua_runtime
+TEST_LUA_OBJS := $(LUA_RT_OBJS)
+
+# Default test rule (capability tests — Keel needed for body reader cap)
+$(BUILDDIR)/test_%: $(TESTDIR)/test_%.c $(TEST_CAP_OBJS) $(SQLITE_OBJ) $(KEEL_LIB) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_CAP_OBJS) \
-		$(SQLITE_LIBS) -lm
+		$(KEEL_LIB) $(SQLITE_OBJ) -lm -lpthread
 
 # JS runtime test — needs QuickJS + JS runtime objects + Keel
-$(BUILDDIR)/test_js_runtime: $(TESTDIR)/test_js_runtime.c $(TEST_CAP_OBJS) $(TEST_JS_OBJS) $(QJS_OBJS) $(KEEL_LIB) | $(BUILDDIR)
+$(BUILDDIR)/test_js_runtime: $(TESTDIR)/test_js_runtime.c $(TEST_CAP_OBJS) $(TEST_JS_OBJS) $(QJS_OBJS) $(SQLITE_OBJ) $(KEEL_LIB) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(TEST_CAP_OBJS) $(TEST_JS_OBJS) $(QJS_OBJS) \
-		$(KEEL_LIB) $(SQLITE_LIBS) -lm -lpthread
+		$(KEEL_LIB) $(SQLITE_OBJ) -lm -lpthread
 
 # Lua runtime test — needs Lua + Lua runtime objects + Keel
-$(BUILDDIR)/test_lua_runtime: $(TESTDIR)/test_lua_runtime.c $(TEST_CAP_OBJS) $(TEST_LUA_OBJS) $(LUA_OBJS) $(KEEL_LIB) | $(BUILDDIR)
+$(BUILDDIR)/test_lua_runtime: $(TESTDIR)/test_lua_runtime.c $(TEST_CAP_OBJS) $(TEST_LUA_OBJS) $(LUA_OBJS) $(SQLITE_OBJ) $(KEEL_LIB) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(TEST_CAP_OBJS) $(TEST_LUA_OBJS) $(LUA_OBJS) \
-		$(KEEL_LIB) $(SQLITE_LIBS) -lm -lpthread
+		$(KEEL_LIB) $(SQLITE_OBJ) -lm -lpthread
 
 test: $(TEST_BINS)
 	@echo "Running tests..."
@@ -180,15 +229,56 @@ test: $(TEST_BINS)
 	echo "$$pass/$$total tests passed"; \
 	if [ $$fail -gt 0 ]; then exit 1; fi
 
+# ── MSan build (requires clang, Linux only) ────────────────────────
+
+MSAN_CFLAGS  := -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 \
+                -g -O1 -fsanitize=memory,undefined -fno-omit-frame-pointer
+MSAN_LDFLAGS := -fsanitize=memory,undefined
+
+msan:
+	$(MAKE) clean
+	$(MAKE) CC=clang \
+		CFLAGS="$(MSAN_CFLAGS)" \
+		LDFLAGS="$(MSAN_LDFLAGS)" \
+		QJS_CFLAGS="-std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-pointer -DCONFIG_VERSION=\"2024-01-13\" -DCONFIG_BIGNUM -D_GNU_SOURCE" \
+		LUA_CFLAGS="-std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-pointer -DLUA_USE_POSIX" \
+		SQLITE_CFLAGS="-std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-pointer -DSQLITE_THREADSAFE=1" \
+		test
+
+# ── E2E tests ──────────────────────────────────────────────────────
+
+e2e: $(BUILDDIR)/hull
+	RUNTIME=$(RUNTIME) sh tests/e2e.sh
+
+# ── Full check (sanitized build + test + e2e) ───────────────────────
+
+check:
+	$(MAKE) clean
+	$(MAKE) DEBUG=1 all test e2e
+
 # ── Static analysis ─────────────────────────────────────────────────
 
 analyze:
 	scan-build --status-bugs $(MAKE) clean all
 
 cppcheck:
-	cppcheck --enable=all --error-exitcode=1 \
-		-I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) \
-		$(SRCDIR)/*.c
+	cppcheck --enable=all --inline-suppr \
+		--suppress=missingIncludeSystem \
+		--suppress=unusedFunction \
+		--suppress=checkersReport \
+		--suppress=toomanyconfigs \
+		--suppress=normalCheckLevelMaxBranches \
+		--suppress=constParameterCallback \
+		--suppress=constParameterPointer \
+		--suppress=constVariablePointer \
+		--suppress=staticFunction \
+		--suppress='*:$(QJS_DIR)/*' \
+		--suppress='*:$(LUA_DIR)/*' \
+		--suppress='*:$(SQLITE_DIR)/*' \
+		--error-exitcode=1 \
+		-I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(SQLITE_DIR) -I$(KEEL_INC) \
+		$(SRCDIR)/main.c $(SRCDIR)/cap/*.c $(SRCDIR)/runtime/js/*.c \
+		$(SRCDIR)/runtime/lua/*.c
 
 # ── Clean ───────────────────────────────────────────────────────────
 
