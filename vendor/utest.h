@@ -171,7 +171,7 @@ UTEST_C_FUNC __declspec(dllimport) int __stdcall QueryPerformanceFrequency(
 
 #elif defined(__linux__) || defined(__FreeBSD__) || defined(__OpenBSD__) ||    \
     defined(__NetBSD__) || defined(__DragonFly__) || defined(__sun__) ||       \
-    defined(__HAIKU__)
+    defined(__HAIKU__) || defined(__COSMOPOLITAN__)
 /*
    slightly obscure include here - we need to include glibc's features.h, but
    we don't want to just include a header that might not be defined for other
@@ -349,7 +349,7 @@ static UTEST_INLINE utest_int64_t utest_ns(void) {
   return utest_mul_div(clock(), 1000000000, CLOCKS_PER_SEC);
 #elif defined(__linux__) || defined(__FreeBSD__) || defined(__OpenBSD__) ||    \
     defined(__NetBSD__) || defined(__DragonFly__) || defined(__sun__) ||       \
-    defined(__HAIKU__)
+    defined(__HAIKU__) || defined(__COSMOPOLITAN__)
   struct timespec ts;
 #if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L) &&              \
     !defined(__HAIKU__)

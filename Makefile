@@ -245,6 +245,8 @@ MSAN_LDFLAGS := -fsanitize=memory,undefined
 
 msan:
 	$(MAKE) clean
+	$(MAKE) -C $(KEEL_DIR) clean
+	$(MAKE) -C $(KEEL_DIR) CC=clang
 	$(MAKE) CC=clang \
 		CFLAGS="$(MSAN_CFLAGS)" \
 		LDFLAGS="$(MSAN_LDFLAGS)" \
@@ -267,7 +269,9 @@ check:
 # ── Static analysis ─────────────────────────────────────────────────
 
 analyze:
-	scan-build --status-bugs $(MAKE) clean all
+	$(MAKE) clean
+	$(MAKE) $(VEND_OBJS) $(SQLITE_OBJ) $(KEEL_LIB)
+	scan-build --status-bugs $(MAKE) $(CAP_OBJS) $(RT_OBJS) $(MAIN_OBJ) $(BUILDDIR)/hull
 
 cppcheck:
 	cppcheck --enable=all --inline-suppr \

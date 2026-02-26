@@ -89,12 +89,12 @@ UTEST(js_runtime, init_and_free)
 
     int rc = hl_js_init(&local_js, &cfg);
     ASSERT_EQ(rc, 0);
-    ASSERT_NE(local_js.rt, NULL);
-    ASSERT_NE(local_js.ctx, NULL);
+    ASSERT_TRUE(local_js.rt != NULL);
+    ASSERT_TRUE(local_js.ctx != NULL);
 
     hl_js_free(&local_js);
-    ASSERT_EQ(local_js.rt, NULL);
-    ASSERT_EQ(local_js.ctx, NULL);
+    ASSERT_TRUE(local_js.rt == NULL);
+    ASSERT_TRUE(local_js.ctx == NULL);
 }
 
 UTEST(js_runtime, basic_eval)

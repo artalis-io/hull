@@ -134,11 +134,15 @@ int64_t hl_cap_fs_read(const HlFsConfig *cfg, const char *path,
         return -1; /* buffer too small */
     }
 
-    rewind(f);
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return -1;
+    }
     size_t nread = fread(buf, 1, (size_t)size, f);
+    int read_err = ferror(f);
     fclose(f);
 
-    if (nread != (size_t)size)
+    if (read_err || nread != (size_t)size)
         return -1;
 
     return (int64_t)nread;
