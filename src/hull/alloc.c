@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#include "hull/hull_alloc.h"
+#include "hull/alloc.h"
 #include <sh_arena.h>
 #include <stdlib.h>
 

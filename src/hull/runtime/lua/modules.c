@@ -8,9 +8,9 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#include "hull/lua_runtime.h"
-#include "hull/hull_limits.h"
-#include "hull/hull_cap.h"
+#include "hull/lua.h"
+#include "hull/limits.h"
+#include "hull/cap.h"
 
 #include "lua.h"
 #include "lualib.h"

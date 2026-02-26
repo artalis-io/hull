@@ -7,13 +7,13 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#ifndef HL_JS_RUNTIME_H
-#define HL_JS_RUNTIME_H
+#ifndef HL_JS_H
+#define HL_JS_H
 
 #include <stddef.h>
 #include <stdint.h>
-#include "hull/hull_limits.h"
-#include "hull/hull_cap.h"
+#include "hull/limits.h"
+#include "hull/cap.h"
 
 /* Forward declarations for types defined in other headers */
 typedef struct JSRuntime JSRuntime;
@@ -143,4 +143,4 @@ int hl_js_register_modules(HlJS *js);
  */
 void hl_js_dump_error(HlJS *js);
 
-#endif /* HL_JS_RUNTIME_H */
+#endif /* HL_JS_H */

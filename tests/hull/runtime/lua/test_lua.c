@@ -8,14 +8,14 @@
  */
 
 #include "utest.h"
-#include "hull/lua_runtime.h"
-#include "hull/hull_cap.h"
+#include "hull/lua.h"
+#include "hull/cap.h"
 
 #include "lua.h"
 #include "lualib.h"
 #include "lauxlib.h"
 
-#include "hull/hull_limits.h"
+#include "hull/limits.h"
 
 #include <sqlite3.h>
 

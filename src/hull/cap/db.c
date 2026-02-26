@@ -8,8 +8,8 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#include "hull/hull_cap.h"
-#include "hull/hull_alloc.h"
+#include "hull/cap.h"
+#include "hull/alloc.h"
 #include <sqlite3.h>
 #include <stdlib.h>
 #include <string.h>

@@ -7,13 +7,13 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#ifndef HL_LUA_RUNTIME_H
-#define HL_LUA_RUNTIME_H
+#ifndef HL_LUA_H
+#define HL_LUA_H
 
 #include <stddef.h>
 #include <stdint.h>
-#include "hull/hull_limits.h"
-#include "hull/hull_cap.h"
+#include "hull/limits.h"
+#include "hull/cap.h"
 
 /* Forward declarations */
 typedef struct lua_State lua_State;
@@ -132,4 +132,4 @@ void hl_lua_make_request(lua_State *L, KlRequest *req);
  */
 void hl_lua_make_response(lua_State *L, KlResponse *res);
 
-#endif /* HL_LUA_RUNTIME_H */
+#endif /* HL_LUA_H */
