@@ -13,6 +13,8 @@
 #include "hull/hull_cap.h"
 #include "quickjs.h"
 
+#include "log.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -181,22 +183,21 @@ static void hl_js_sandbox(JSContext *ctx)
     JS_FreeValue(ctx, global);
 }
 
-/* ── Console polyfill (routes to stderr) ────────────────────────────── */
+/* ── Console polyfill (routes through rxi/log.c) ────────────────────── */
 
-static JSValue js_console_log(JSContext *ctx, JSValueConst this_val,
-                               int argc, JSValueConst *argv)
+static JSValue js_console_log_impl(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv, int magic)
 {
     (void)this_val;
+    static const int levels[] = { LOG_INFO, LOG_WARN, LOG_ERROR, LOG_INFO };
+    int level = (magic >= 0 && magic < 4) ? levels[magic] : LOG_INFO;
     for (int i = 0; i < argc; i++) {
-        if (i > 0)
-            fputc(' ', stderr);
         const char *str = JS_ToCString(ctx, argv[i]);
         if (str) {
-            fputs(str, stderr);
+            log_log(level, "js", 0, "[app] %s", str);
             JS_FreeCString(ctx, str);
         }
     }
-    fputc('\n', stderr);
     return JS_UNDEFINED;
 }
 
@@ -206,13 +207,17 @@ static void hl_js_add_console(JSContext *ctx)
     JSValue console = JS_NewObject(ctx);
 
     JS_SetPropertyStr(ctx, console, "log",
-                      JS_NewCFunction(ctx, js_console_log, "log", 1));
+        JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_console_log_impl,
+                             "log", 1, JS_CFUNC_generic_magic, 0));
     JS_SetPropertyStr(ctx, console, "warn",
-                      JS_NewCFunction(ctx, js_console_log, "warn", 1));
+        JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_console_log_impl,
+                             "warn", 1, JS_CFUNC_generic_magic, 1));
     JS_SetPropertyStr(ctx, console, "error",
-                      JS_NewCFunction(ctx, js_console_log, "error", 1));
+        JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_console_log_impl,
+                             "error", 1, JS_CFUNC_generic_magic, 2));
     JS_SetPropertyStr(ctx, console, "info",
-                      JS_NewCFunction(ctx, js_console_log, "info", 1));
+        JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_console_log_impl,
+                             "info", 1, JS_CFUNC_generic_magic, 3));
 
     JS_SetPropertyStr(ctx, global, "console", console);
     JS_FreeValue(ctx, global);
@@ -305,7 +310,7 @@ int hl_js_load_app(HlJS *js, const char *filename)
     /* Read the entry point file */
     FILE *f = fopen(filename, "rb");
     if (!f) {
-        fprintf(stderr, "hull: cannot open %s\n", filename);
+        log_error("[hull:c] cannot open %s", filename);
         return -1;
     }
 
@@ -313,7 +318,7 @@ int hl_js_load_app(HlJS *js, const char *filename)
     long size = ftell(f);
     if (size < 0 || size > HL_MODULE_MAX_SIZE) {
         fclose(f);
-        fprintf(stderr, "hull: %s too large\n", filename);
+        log_error("[hull:c] %s too large", filename);
         return -1;
     }
     if (fseek(f, 0, SEEK_SET) != 0) {
@@ -429,7 +434,7 @@ void hl_js_dump_error(HlJS *js)
     JSValue exception = JS_GetException(js->ctx);
     const char *str = JS_ToCString(js->ctx, exception);
     if (str) {
-        fprintf(stderr, "hull js error: %s\n", str);
+        log_error("[hull:c] js error: %s", str);
         JS_FreeCString(js->ctx, str);
     }
 
@@ -439,7 +444,7 @@ void hl_js_dump_error(HlJS *js)
         if (!JS_IsUndefined(stack)) {
             const char *stack_str = JS_ToCString(js->ctx, stack);
             if (stack_str) {
-                fprintf(stderr, "%s\n", stack_str);
+                log_error("[hull:c] %s", stack_str);
                 JS_FreeCString(js->ctx, stack_str);
             }
         }

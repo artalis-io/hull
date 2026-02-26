@@ -97,6 +97,12 @@ SQLITE_DIR    := $(VENDDIR)/sqlite
 SQLITE_OBJ    := $(BUILDDIR)/sqlite3.o
 SQLITE_CFLAGS := -std=c11 -O2 -w -DSQLITE_THREADSAFE=1
 
+# ── rxi/log.c ─────────────────────────────────────────────────────────
+
+LOG_DIR    := $(VENDDIR)/log.c
+LOG_OBJ    := $(BUILDDIR)/log.o
+LOG_CFLAGS := -std=c11 -O2 -w -DLOG_USE_COLOR
+
 # ── Hull source files ───────────────────────────────────────────────
 
 # Capability sources (always compiled)
@@ -220,7 +226,7 @@ endif
 
 # ── Include paths ───────────────────────────────────────────────────
 
-INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(SQLITE_DIR) -I$(BUILDDIR)
+INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(SQLITE_DIR) -I$(LOG_DIR) -I$(BUILDDIR)
 
 # ── Targets ─────────────────────────────────────────────────────────
 
@@ -229,9 +235,9 @@ INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(SQLITE_DIR) 
 all: $(BUILDDIR)/hull
 
 # Hull binary
-$(BUILDDIR)/hull: $(CAP_OBJS) $(RT_OBJS) $(MAIN_OBJ) $(VEND_OBJS) $(SQLITE_OBJ) $(KEEL_LIB)
+$(BUILDDIR)/hull: $(CAP_OBJS) $(RT_OBJS) $(MAIN_OBJ) $(VEND_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(KEEL_LIB)
 	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(RT_OBJS) $(MAIN_OBJ) $(VEND_OBJS) \
-		$(SQLITE_OBJ) $(KEEL_LIB) -lm -lpthread
+		$(SQLITE_OBJ) $(LOG_OBJ) $(KEEL_LIB) -lm -lpthread
 
 # Capability sources
 $(BUILDDIR)/cap_%.o: $(SRCDIR)/cap/%.c | $(BUILDDIR)
@@ -260,6 +266,10 @@ $(BUILDDIR)/lua_%.o: $(LUA_DIR)/%.c | $(BUILDDIR)
 # SQLite amalgamation (vendored, relaxed warnings)
 $(SQLITE_OBJ): $(SQLITE_DIR)/sqlite3.c | $(BUILDDIR)
 	$(CC) $(SQLITE_CFLAGS) -I$(SQLITE_DIR) -c -o $@ $<
+
+# rxi/log.c (vendored, relaxed warnings)
+$(LOG_OBJ): $(LOG_DIR)/log.c | $(BUILDDIR)
+	$(CC) $(LOG_CFLAGS) -I$(LOG_DIR) -c -o $@ $<
 
 $(BUILDDIR):
 	mkdir -p $(BUILDDIR)
@@ -293,21 +303,21 @@ TEST_JS_OBJS := $(JS_RT_OBJS)
 TEST_LUA_OBJS := $(LUA_RT_OBJS)
 
 # Default test rule (capability tests — Keel needed for body reader cap)
-$(BUILDDIR)/test_%: $(TESTDIR)/test_%.c $(TEST_CAP_OBJS) $(SQLITE_OBJ) $(KEEL_LIB) | $(BUILDDIR)
+$(BUILDDIR)/test_%: $(TESTDIR)/test_%.c $(TEST_CAP_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(KEEL_LIB) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_CAP_OBJS) \
-		$(KEEL_LIB) $(SQLITE_OBJ) -lm -lpthread
+		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) -lm -lpthread
 
 # JS runtime test — needs QuickJS + JS runtime objects + Keel
-$(BUILDDIR)/test_js_runtime: $(TESTDIR)/test_js_runtime.c $(TEST_CAP_OBJS) $(TEST_JS_OBJS) $(QJS_OBJS) $(SQLITE_OBJ) $(KEEL_LIB) | $(BUILDDIR)
+$(BUILDDIR)/test_js_runtime: $(TESTDIR)/test_js_runtime.c $(TEST_CAP_OBJS) $(TEST_JS_OBJS) $(QJS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(KEEL_LIB) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(TEST_CAP_OBJS) $(TEST_JS_OBJS) $(QJS_OBJS) \
-		$(KEEL_LIB) $(SQLITE_OBJ) -lm -lpthread
+		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) -lm -lpthread
 
 # Lua runtime test — needs Lua + Lua runtime objects + Keel + stdlib headers
-$(BUILDDIR)/test_lua_runtime: $(TESTDIR)/test_lua_runtime.c $(TEST_CAP_OBJS) $(TEST_LUA_OBJS) $(LUA_OBJS) $(SQLITE_OBJ) $(KEEL_LIB) $(STDLIB_LUA_HDRS) | $(BUILDDIR)
+$(BUILDDIR)/test_lua_runtime: $(TESTDIR)/test_lua_runtime.c $(TEST_CAP_OBJS) $(TEST_LUA_OBJS) $(LUA_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(KEEL_LIB) $(STDLIB_LUA_HDRS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(TEST_CAP_OBJS) $(TEST_LUA_OBJS) $(LUA_OBJS) \
-		$(KEEL_LIB) $(SQLITE_OBJ) -lm -lpthread
+		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) -lm -lpthread
 
 test: $(TEST_BINS)
 	@echo "Running tests..."
@@ -343,6 +353,8 @@ LUA_CFLAGS := -std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-pointe
               -DLUA_USE_POSIX
 SQLITE_CFLAGS := -std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-pointer \
                  -DSQLITE_THREADSAFE=1
+LOG_CFLAGS := -std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-pointer \
+              -DLOG_USE_COLOR
 endif
 
 msan:
@@ -366,7 +378,7 @@ check:
 
 analyze:
 	$(MAKE) clean
-	$(MAKE) $(VEND_OBJS) $(SQLITE_OBJ) $(KEEL_LIB)
+	$(MAKE) $(VEND_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(KEEL_LIB)
 	scan-build --status-bugs $(MAKE) $(CAP_OBJS) $(RT_OBJS) $(MAIN_OBJ) $(BUILDDIR)/hull
 
 cppcheck:
@@ -385,6 +397,7 @@ cppcheck:
 		--suppress='*:$(QJS_DIR)/*' \
 		--suppress='*:$(LUA_DIR)/*' \
 		--suppress='*:$(SQLITE_DIR)/*' \
+		--suppress='*:$(LOG_DIR)/*' \
 		--error-exitcode=1 \
 		-I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(SQLITE_DIR) -I$(KEEL_INC) \
 		$(SRCDIR)/main.c $(SRCDIR)/cap/*.c $(SRCDIR)/runtime/js/*.c \

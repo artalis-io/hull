@@ -14,6 +14,8 @@
 #include "lualib.h"
 #include "lauxlib.h"
 
+#include "log.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -208,8 +210,8 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
 
     /* Call handler(req, res) */
     if (lua_pcall(lua->L, 2, 0, 0) != LUA_OK) {
-        fprintf(stderr, "hull lua handler error: %s\n",
-                lua_tostring(lua->L, -1));
+        log_error("[hull:c] lua handler error: %s",
+                  lua_tostring(lua->L, -1));
         lua_pop(lua->L, 1); /* pop error message */
         lua_pop(lua->L, 1); /* pop routes table */
         return -1;
@@ -243,12 +245,12 @@ void hl_lua_dump_error(HlLua *lua)
 
     const char *msg = lua_tostring(lua->L, -1);
     if (msg)
-        fprintf(stderr, "hull lua error: %s\n", msg);
+        log_error("[hull:c] lua error: %s", msg);
 
     /* Try to get traceback */
     luaL_traceback(lua->L, lua->L, msg, 1);
     const char *tb = lua_tostring(lua->L, -1);
     if (tb && tb != msg)
-        fprintf(stderr, "%s\n", tb);
+        log_error("[hull:c] %s", tb);
     lua_pop(lua->L, 1); /* pop traceback */
 }

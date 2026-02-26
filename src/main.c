@@ -32,9 +32,50 @@
 
 #include <sqlite3.h>
 
+#include "log.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
+
+/* ── Logging ───────────────────────────────────────────────────────── */
+
+/* Custom log callback: suppresses file:line in release builds */
+static void hl_log_callback(log_Event *ev) {
+    char ts[16];
+    ts[strftime(ts, sizeof(ts), "%H:%M:%S", ev->time)] = '\0';
+
+    char msg[1024];
+    vsnprintf(msg, sizeof(msg), ev->fmt, ev->ap);
+
+#ifdef DEBUG
+    fprintf((FILE *)ev->udata, "%s %-5s %s:%d: %s\n",
+            ts, log_level_string(ev->level), ev->file, ev->line, msg);
+#else
+    fprintf((FILE *)ev->udata, "%s %-5s %s\n",
+            ts, log_level_string(ev->level), msg);
+#endif
+}
+
+static int hl_parse_log_level(const char *s) {
+    if (strcmp(s, "trace") == 0) return LOG_TRACE;
+    if (strcmp(s, "debug") == 0) return LOG_DEBUG;
+    if (strcmp(s, "info")  == 0) return LOG_INFO;
+    if (strcmp(s, "warn")  == 0) return LOG_WARN;
+    if (strcmp(s, "error") == 0) return LOG_ERROR;
+    if (strcmp(s, "fatal") == 0) return LOG_FATAL;
+    return -1;
+}
+
+/* Bridge: routes Keel KlLogFn through rxi/log.c with [keel] prefix */
+static void hl_keel_log_bridge(int level, const char *fmt, va_list ap,
+                                void *user_data) {
+    (void)user_data;
+    char buf[512];
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    log_log(level, "keel", 0, "[keel] %s", buf);
+}
 
 /* ── Route allocation tracking (freed on shutdown) ─────────────────── */
 
@@ -102,7 +143,7 @@ static int wire_js_routes(HlJS *js, KlServer *server)
     if (JS_IsUndefined(defs) || !JS_IsArray(ctx, defs)) {
         JS_FreeValue(ctx, defs);
         JS_FreeValue(ctx, global);
-        fprintf(stderr, "hull: no routes registered\n");
+        log_error("[hull:c] no routes registered");
         return -1;
     }
 
@@ -181,14 +222,14 @@ static int wire_lua_routes(HlLua *lua, KlServer *server)
     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_route_defs");
     if (!lua_istable(L, -1)) {
         lua_pop(L, 1);
-        fprintf(stderr, "hull: no routes registered\n");
+        log_error("[hull:c] no routes registered");
         return -1;
     }
 
     int count = (int)luaL_len(L, -1);
     if (count <= 0) {
         lua_pop(L, 1);
-        fprintf(stderr, "hull: no routes registered\n");
+        log_error("[hull:c] no routes registered");
         return -1;
     }
 
@@ -255,6 +296,7 @@ static void usage(const char *prog)
             "  -d FILE     SQLite database file (default: data.db)\n"
             "  -m SIZE     Runtime heap limit (default: 64m)\n"
             "  -s SIZE     JS stack size limit (default: 1m)\n"
+            "  -l LEVEL    Log level: trace|debug|info|warn|error|fatal (default: info)\n"
             "  -h          Show this help\n"
             "\n"
             "SIZE accepts optional suffix: k (KB), m (MB), g (GB).\n",
@@ -271,6 +313,7 @@ int main(int argc, char **argv)
     const char *entry_point = NULL;
     long heap_limit = 0;   /* 0 = use default */
     long stack_limit = 0;  /* 0 = use default */
+    int log_level = LOG_INFO;
 
     /* Parse arguments */
     for (int i = 1; i < argc; i++) {
@@ -296,6 +339,12 @@ int main(int argc, char **argv)
             stack_limit = hl_parse_size(argv[++i]);
             if (stack_limit <= 0) {
                 fprintf(stderr, "hull: invalid stack size: %s\n", argv[i]);
+                return 1;
+            }
+        } else if (strcmp(argv[i], "-l") == 0 && i + 1 < argc) {
+            log_level = hl_parse_log_level(argv[++i]);
+            if (log_level < 0) {
+                fprintf(stderr, "hull: invalid log level: %s\n", argv[i]);
                 return 1;
             }
         } else if (strcmp(argv[i], "-h") == 0) {
@@ -331,12 +380,17 @@ int main(int argc, char **argv)
     }
 #endif
 
+    /* Initialize logging */
+    log_set_level(log_level);
+    log_set_quiet(true);  /* suppress default stderr callback */
+    log_add_callback(hl_log_callback, stderr, log_level);
+
     /* Open SQLite database */
     sqlite3 *db = NULL;
     int rc = sqlite3_open(db_path, &db);
     if (rc != SQLITE_OK) {
-        fprintf(stderr, "hull: cannot open database %s: %s\n",
-                db_path, sqlite3_errmsg(db));
+        log_error("[hull:c] cannot open database %s: %s",
+                  db_path, sqlite3_errmsg(db));
         sqlite3_close(db);
         return 1;
     }
@@ -351,11 +405,13 @@ int main(int argc, char **argv)
         .bind_addr = bind_addr,
         .max_connections = HL_DEFAULT_MAX_CONN,
         .read_timeout_ms = HL_DEFAULT_READ_TIMEOUT_MS,
+        .log_fn = hl_keel_log_bridge,
+        .log_user_data = NULL,
     };
 
     KlServer server;
     if (kl_server_init(&server, &config) != 0) {
-        fprintf(stderr, "hull: server init failed\n");
+        log_error("[hull:c] server init failed");
         sqlite3_close(db);
         return 1;
     }
@@ -371,14 +427,14 @@ int main(int argc, char **argv)
         js.db = db;
 
         if (hl_js_init(&js, &js_cfg) != 0) {
-            fprintf(stderr, "hull: QuickJS init failed\n");
+            log_error("[hull:c] QuickJS init failed");
             sqlite3_close(db);
             return 1;
         }
 
         /* Load and evaluate the app */
         if (hl_js_load_app(&js, entry_point) != 0) {
-            fprintf(stderr, "hull: failed to load %s\n", entry_point);
+            log_error("[hull:c] failed to load %s", entry_point);
             hl_js_free(&js);
             sqlite3_close(db);
             return 1;
@@ -391,8 +447,8 @@ int main(int argc, char **argv)
             return 1;
         }
 
-        fprintf(stderr, "hull: listening on %s:%d (QuickJS runtime)\n",
-                bind_addr, port);
+        log_info("[hull:c] listening on %s:%d (QuickJS runtime)",
+                 bind_addr, port);
 
         /* Enter event loop */
         kl_server_run(&server);
@@ -412,14 +468,14 @@ int main(int argc, char **argv)
         lua.db = db;
 
         if (hl_lua_init(&lua, &lua_cfg) != 0) {
-            fprintf(stderr, "hull: Lua init failed\n");
+            log_error("[hull:c] Lua init failed");
             sqlite3_close(db);
             return 1;
         }
 
         /* Load and execute the app */
         if (hl_lua_load_app(&lua, entry_point) != 0) {
-            fprintf(stderr, "hull: failed to load %s\n", entry_point);
+            log_error("[hull:c] failed to load %s", entry_point);
             hl_lua_free(&lua);
             sqlite3_close(db);
             return 1;
@@ -432,8 +488,8 @@ int main(int argc, char **argv)
             return 1;
         }
 
-        fprintf(stderr, "hull: listening on %s:%d (Lua runtime)\n",
-                bind_addr, port);
+        log_info("[hull:c] listening on %s:%d (Lua runtime)",
+                 bind_addr, port);
 
         /* Enter event loop */
         kl_server_run(&server);

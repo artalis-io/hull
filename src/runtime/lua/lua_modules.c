@@ -16,6 +16,8 @@
 #include "lualib.h"
 #include "lauxlib.h"
 
+#include "log.h"
+
 #include <sqlite3.h>
 #include <stdlib.h>
 #include <string.h>
@@ -617,22 +619,36 @@ static int luaopen_hull_crypto(lua_State *L)
  * log.debug(msg)
  * ════════════════════════════════════════════════════════════════════ */
 
-static int lua_log_level(lua_State *L, const char *level)
+static int lua_log_level(lua_State *L, int level)
 {
+    /* Extract Lua caller's source location */
+    lua_Debug ar;
+    const char *src = "lua";
+    int line = 0;
+    if (lua_getstack(L, 1, &ar) && lua_getinfo(L, "Sl", &ar)) {
+        src = ar.short_src;
+        line = ar.currentline;
+    }
+
+    /* Detect stdlib vs app: embedded modules have "hull." or "vendor." source */
+    const char *tag = "[app]";
+    if (strncmp(src, "hull.", 5) == 0 || strncmp(src, "vendor.", 7) == 0)
+        tag = "[hull:lua]";
+
     int n = lua_gettop(L);
     for (int i = 1; i <= n; i++) {
         const char *s = luaL_tolstring(L, i, NULL);
         if (s)
-            fprintf(stderr, "[%s] %s\n", level, s);
-        lua_pop(L, 1); /* pop the string from luaL_tolstring */
+            log_log(level, src, line, "%s %s", tag, s);
+        lua_pop(L, 1);
     }
     return 0;
 }
 
-static int lua_log_info(lua_State *L)  { return lua_log_level(L, "INFO"); }
-static int lua_log_warn(lua_State *L)  { return lua_log_level(L, "WARN"); }
-static int lua_log_error(lua_State *L) { return lua_log_level(L, "ERROR"); }
-static int lua_log_debug(lua_State *L) { return lua_log_level(L, "DEBUG"); }
+static int lua_log_info(lua_State *L)  { return lua_log_level(L, LOG_INFO); }
+static int lua_log_warn(lua_State *L)  { return lua_log_level(L, LOG_WARN); }
+static int lua_log_error(lua_State *L) { return lua_log_level(L, LOG_ERROR); }
+static int lua_log_debug(lua_State *L) { return lua_log_level(L, LOG_DEBUG); }
 
 static const luaL_Reg log_funcs[] = {
     {"info",  lua_log_info},
@@ -968,8 +984,8 @@ int hl_lua_register_stdlib(HlLua *lua)
 
     for (const HlStdlibEntry *e = hl_stdlib_lua_entries; e->name; e++) {
         if (luaL_loadbuffer(L, (const char *)e->data, e->len, e->name) != LUA_OK) {
-            fprintf(stderr, "hull: failed to load stdlib module '%s': %s\n",
-                    e->name, lua_tostring(L, -1));
+            log_error("[hull:c] failed to load stdlib module '%s': %s",
+                      e->name, lua_tostring(L, -1));
             lua_pop(L, 2); /* pop error + modules table */
             return -1;
         }
@@ -979,8 +995,8 @@ int hl_lua_register_stdlib(HlLua *lua)
 #ifdef HL_APP_EMBEDDED
     for (const HlStdlibEntry *e = hl_app_lua_entries; e->name; e++) {
         if (luaL_loadbuffer(L, (const char *)e->data, e->len, e->name) != LUA_OK) {
-            fprintf(stderr, "hull: failed to load app module '%s': %s\n",
-                    e->name, lua_tostring(L, -1));
+            log_error("[hull:c] failed to load app module '%s': %s",
+                      e->name, lua_tostring(L, -1));
             lua_pop(L, 2); /* pop error + modules table */
             return -1;
         }
@@ -998,8 +1014,8 @@ int hl_lua_register_stdlib(HlLua *lua)
     lua_getglobal(L, "require");
     lua_pushstring(L, "hull.json");
     if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
-        fprintf(stderr, "hull: failed to pre-load json: %s\n",
-                lua_tostring(L, -1));
+        log_error("[hull:c] failed to pre-load json: %s",
+                  lua_tostring(L, -1));
         lua_pop(L, 1);
         return -1;
     }

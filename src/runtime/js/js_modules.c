@@ -13,6 +13,8 @@
 #include "hull/hull_cap.h"
 #include "quickjs.h"
 
+#include "log.h"
+
 #include <sqlite3.h>
 #include <string.h>
 #include <stdio.h>
@@ -875,16 +877,28 @@ static JSValue js_log_level(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv, int magic)
 {
     (void)this_val;
-    static const char *levels[] = { "INFO", "WARN", "ERROR", "DEBUG" };
-    const char *level = (magic >= 0 && magic < 4) ? levels[magic] : "LOG";
+    static const int levels[] = { LOG_INFO, LOG_WARN, LOG_ERROR, LOG_DEBUG };
+    int level = (magic >= 0 && magic < 4) ? levels[magic] : LOG_INFO;
+
+    /* Detect stdlib vs app: hull:* modules → [hull:js], else [app] */
+    const char *tag = "[app]";
+    const char *mod = NULL;
+    JSAtom mod_atom = JS_GetScriptOrModuleName(ctx, 1);
+    if (mod_atom != JS_ATOM_NULL) {
+        mod = JS_AtomToCString(ctx, mod_atom);
+        JS_FreeAtom(ctx, mod_atom);
+    }
+    if (mod && strncmp(mod, "hull:", 5) == 0)
+        tag = "[hull:js]";
 
     for (int i = 0; i < argc; i++) {
         const char *str = JS_ToCString(ctx, argv[i]);
         if (str) {
-            fprintf(stderr, "[%s] %s\n", level, str);
+            log_log(level, mod ? mod : "js", 0, "%s %s", tag, str);
             JS_FreeCString(ctx, str);
         }
     }
+    if (mod) JS_FreeCString(ctx, mod);
     return JS_UNDEFINED;
 }
 
