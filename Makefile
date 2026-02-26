@@ -25,11 +25,18 @@ RUNTIME ?= all
 # Detect Cosmopolitan toolchain
 ifneq ($(findstring cosmocc,$(CC)),)
   COSMO := 1
+  AR    := cosmoar
 endif
+
+# Platform detection
+UNAME_S := $(shell uname -s)
 
 CFLAGS  := -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2
 ifndef COSMO
   CFLAGS += -fstack-protector-strong
+  ifeq ($(UNAME_S),Linux)
+    CFLAGS += -D_DEFAULT_SOURCE
+  endif
 endif
 LDFLAGS :=
 
@@ -232,7 +239,8 @@ test: $(TEST_BINS)
 # ── MSan build (requires clang, Linux only) ────────────────────────
 
 MSAN_CFLAGS  := -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 \
-                -g -O1 -fsanitize=memory,undefined -fno-omit-frame-pointer
+                -g -O1 -fsanitize=memory,undefined -fno-omit-frame-pointer \
+                -D_DEFAULT_SOURCE
 MSAN_LDFLAGS := -fsanitize=memory,undefined
 
 msan:
