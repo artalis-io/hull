@@ -25,6 +25,8 @@
 #endif
 
 #include "hull/hull_cap.h"
+#include "hull/hull_limits.h"
+#include "hull/parse_size.h"
 
 #include <keel/keel.h>
 
@@ -36,14 +38,13 @@
 
 /* ── Route allocation tracking (freed on shutdown) ─────────────────── */
 
-#define MAX_ROUTES 256
-static void *route_allocs[MAX_ROUTES];
+static void *route_allocs[HL_MAX_ROUTES];
 static int   route_alloc_count = 0;
 
 static void *track_route_alloc(size_t size)
 {
     void *p = malloc(size);
-    if (p && route_alloc_count < MAX_ROUTES)
+    if (p && route_alloc_count < HL_MAX_ROUTES)
         route_allocs[route_alloc_count++] = p;
     return p;
 }
@@ -252,7 +253,11 @@ static void usage(const char *prog)
             "  -p PORT     Listen port (default: 3000)\n"
             "  -b ADDR     Bind address (default: 127.0.0.1)\n"
             "  -d FILE     SQLite database file (default: data.db)\n"
-            "  -h          Show this help\n",
+            "  -m SIZE     Runtime heap limit (default: 64m)\n"
+            "  -s SIZE     JS stack size limit (default: 1m)\n"
+            "  -h          Show this help\n"
+            "\n"
+            "SIZE accepts optional suffix: k (KB), m (MB), g (GB).\n",
             prog);
 }
 
@@ -260,10 +265,12 @@ static void usage(const char *prog)
 
 int main(int argc, char **argv)
 {
-    int port = 3000;
+    int port = HL_DEFAULT_PORT;
     const char *bind_addr = "127.0.0.1";
     const char *db_path = "data.db";
     const char *entry_point = NULL;
+    long heap_limit = 0;   /* 0 = use default */
+    long stack_limit = 0;  /* 0 = use default */
 
     /* Parse arguments */
     for (int i = 1; i < argc; i++) {
@@ -279,6 +286,18 @@ int main(int argc, char **argv)
             bind_addr = argv[++i];
         } else if (strcmp(argv[i], "-d") == 0 && i + 1 < argc) {
             db_path = argv[++i];
+        } else if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
+            heap_limit = hl_parse_size(argv[++i]);
+            if (heap_limit <= 0) {
+                fprintf(stderr, "hull: invalid heap size: %s\n", argv[i]);
+                return 1;
+            }
+        } else if (strcmp(argv[i], "-s") == 0 && i + 1 < argc) {
+            stack_limit = hl_parse_size(argv[++i]);
+            if (stack_limit <= 0) {
+                fprintf(stderr, "hull: invalid stack size: %s\n", argv[i]);
+                return 1;
+            }
         } else if (strcmp(argv[i], "-h") == 0) {
             usage(argv[0]);
             return 0;
@@ -330,8 +349,8 @@ int main(int argc, char **argv)
     KlConfig config = {
         .port = port,
         .bind_addr = bind_addr,
-        .max_connections = 64,
-        .read_timeout_ms = 30000,
+        .max_connections = HL_DEFAULT_MAX_CONN,
+        .read_timeout_ms = HL_DEFAULT_READ_TIMEOUT_MS,
     };
 
     KlServer server;
@@ -345,6 +364,8 @@ int main(int argc, char **argv)
     if (runtime == HL_RUNTIME_JS) {
         /* ── QuickJS runtime ──────────────────────────────────── */
         HlJSConfig js_cfg = HL_JS_CONFIG_DEFAULT;
+        if (heap_limit > 0)  js_cfg.max_heap_bytes  = (size_t)heap_limit;
+        if (stack_limit > 0) js_cfg.max_stack_bytes  = (size_t)stack_limit;
         HlJS js;
 
         js.db = db;
@@ -385,6 +406,7 @@ int main(int argc, char **argv)
     if (runtime == HL_RUNTIME_LUA) {
         /* ── Lua runtime ─────────────────────────────────────── */
         HlLuaConfig lua_cfg = HL_LUA_CONFIG_DEFAULT;
+        if (heap_limit > 0) lua_cfg.max_heap_bytes = (size_t)heap_limit;
         HlLua lua;
 
         lua.db = db;
