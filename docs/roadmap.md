@@ -1,5 +1,55 @@
 # Hull — Roadmap & Benchmarks
 
+## What's Built
+
+- Lua 5.4 + QuickJS runtimes with HTTP route dispatch
+- SQLite with parameterized queries (injection-proof)
+- Request body reading + route parameter extraction
+- Crypto: SHA-256, PBKDF2, random bytes, password hash/verify
+- Filesystem: sandboxed read/write/exists/delete
+- Time, env, logging modules
+- Keel HTTP server (epoll/kqueue/poll)
+- Cosmopolitan APE cross-platform builds
+- CI pipeline (Linux, macOS, ASan, MSan, static analysis, Cosmo) + benchmarks
+
+## Roadmap
+
+### High Impact — Unlocks Real Apps
+
+1. **JSON module** — `json.encode()` / `json.decode()`
+2. **HTTP client** — `http.get()` / `http.post()` (cap declared, not wired)
+3. **Session + CSRF** — cookie sessions, CSRF tokens
+4. **Template engine** — `{{ }}` HTML templates
+5. **Validation** — input schema validation
+6. **Rate limiting** — middleware
+7. **Static file serving** — `app.static("/public")`
+
+### Medium Impact — Production Features
+
+8. **Email** — SMTP / API providers (cap declared, not wired)
+9. **Search** — FTS5 wrapper
+10. **CSV** — RFC 4180 encode/decode
+11. **RBAC** — role-based access control
+12. **i18n** — locale detection + translations
+13. **PDF** — document builder
+14. **Multipart / file uploads**
+15. **WebSockets**
+16. **Scheduled tasks** — `app.every()`, `app.daily()`
+
+### Build Tool — The `hull` CLI
+
+17. `hull new`, `hull build`, `hull dev` (hot-reload), `hull test`
+18. App signing + verification (`hull build --sign`, `hull inspect`)
+19. License key system
+20. Database backup/restore
+21. `hull eject`
+
+### Advanced
+
+22. WASM compute plugins (WAMR)
+23. Database encryption at rest
+24. Background work / coroutines
+
 ## Benchmark Baseline
 
 Measured on GitHub Actions Ubuntu runner (2 threads, 50 connections, 5s duration via `wrk`).
