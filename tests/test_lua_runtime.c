@@ -97,10 +97,10 @@ UTEST(lua_runtime, init_and_free)
 
     int rc = hl_lua_init(&local_lua, &cfg);
     ASSERT_EQ(rc, 0);
-    ASSERT_NE(local_lua.L, NULL);
+    ASSERT_TRUE(local_lua.L != NULL);
 
     hl_lua_free(&local_lua);
-    ASSERT_EQ(local_lua.L, NULL);
+    ASSERT_TRUE(local_lua.L == NULL);
 }
 
 UTEST(lua_runtime, basic_eval)

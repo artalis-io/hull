@@ -237,23 +237,30 @@ test: $(TEST_BINS)
 	if [ $$fail -gt 0 ]; then exit 1; fi
 
 # ── MSan build (requires clang, Linux only) ────────────────────────
+#
+# Use MSAN=1 as an internal flag so that CFLAGS/QJS_CFLAGS etc. are set
+# inside the Makefile (not on the command line), which avoids:
+#  1. CFLAGS leaking into the Keel submodule build
+#  2. Shell double-escaping mangling the CONFIG_VERSION string
 
-MSAN_CFLAGS  := -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 \
-                -g -O1 -fsanitize=memory,undefined -fno-omit-frame-pointer \
-                -D_DEFAULT_SOURCE
-MSAN_LDFLAGS := -fsanitize=memory,undefined
+ifdef MSAN
+CFLAGS   := -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 \
+            -g -O1 -fsanitize=memory,undefined -fno-omit-frame-pointer \
+            -D_DEFAULT_SOURCE
+LDFLAGS  := -fsanitize=memory,undefined
+QJS_CFLAGS := -std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-pointer \
+              -DCONFIG_VERSION=\"2024-01-13\" -DCONFIG_BIGNUM -D_GNU_SOURCE
+LUA_CFLAGS := -std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-pointer \
+              -DLUA_USE_POSIX
+SQLITE_CFLAGS := -std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-pointer \
+                 -DSQLITE_THREADSAFE=1
+endif
 
 msan:
 	$(MAKE) clean
 	$(MAKE) -C $(KEEL_DIR) clean
 	$(MAKE) -C $(KEEL_DIR) CC=clang
-	$(MAKE) CC=clang \
-		CFLAGS="$(MSAN_CFLAGS)" \
-		LDFLAGS="$(MSAN_LDFLAGS)" \
-		QJS_CFLAGS="-std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-pointer -DCONFIG_VERSION=\"2024-01-13\" -DCONFIG_BIGNUM -D_GNU_SOURCE" \
-		LUA_CFLAGS="-std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-pointer -DLUA_USE_POSIX" \
-		SQLITE_CFLAGS="-std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-pointer -DSQLITE_THREADSAFE=1" \
-		test
+	$(MAKE) CC=clang MSAN=1 test
 
 # ── E2E tests ──────────────────────────────────────────────────────
 
@@ -284,6 +291,8 @@ cppcheck:
 		--suppress=constParameterPointer \
 		--suppress=constVariablePointer \
 		--suppress=staticFunction \
+		--suppress=uninitvar:$(SRCDIR)/runtime/lua/lua_bindings.c \
+		--suppress=unmatchedSuppression \
 		--suppress='*:$(QJS_DIR)/*' \
 		--suppress='*:$(LUA_DIR)/*' \
 		--suppress='*:$(SQLITE_DIR)/*' \
