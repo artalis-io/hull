@@ -48,6 +48,11 @@ else
 CFLAGS += -O2
 endif
 
+ifdef COVERAGE
+CFLAGS  += -g -O0 --coverage
+LDFLAGS += --coverage
+endif
+
 .DEFAULT_GOAL := all
 
 # ── Directories ──────────────────────────────────────────────────────
@@ -230,7 +235,7 @@ INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(SQLITE_DIR) 
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan e2e check analyze cppcheck bench
+.PHONY: all clean test debug msan e2e check analyze cppcheck bench coverage lint-lua lint-js lint
 
 all: $(BUILDDIR)/hull
 
@@ -407,6 +412,30 @@ cppcheck:
 
 bench: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh bench.sh
+
+# ── Code coverage ────────────────────────────────────────────────────
+
+coverage:
+	$(MAKE) clean
+	$(MAKE) COVERAGE=1 test
+	mkdir -p $(BUILDDIR)/coverage
+	lcov --capture --directory $(BUILDDIR) \
+		--include '$(CURDIR)/src/*' \
+		--output-file $(BUILDDIR)/coverage/coverage.info \
+		--ignore-errors mismatch
+	genhtml $(BUILDDIR)/coverage/coverage.info \
+		--output-directory $(BUILDDIR)/coverage/html
+	@echo "Coverage report: $(BUILDDIR)/coverage/html/index.html"
+
+# ── Linting ──────────────────────────────────────────────────────────
+
+lint-lua:
+	luacheck stdlib/lua/hull/ examples/ --config .luacheckrc
+
+lint-js:
+	biome check examples/ --config-path biome.json
+
+lint: lint-lua lint-js
 
 # ── Clean ───────────────────────────────────────────────────────────
 

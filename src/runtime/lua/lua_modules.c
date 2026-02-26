@@ -309,6 +309,18 @@ static int lua_db_query(lua_State *L)
     int rc = hl_cap_db_query(lua->db, sql, params, nparams,
                                 lua_query_row_cb, &qc);
 
+    /*
+     * lua_to_hl_values left nparams values on the stack (to keep string
+     * pointers alive during the query).  The result table sits on top of
+     * them.  Rotate it below the param values so lua_free_hl_values pops
+     * the right things.
+     *
+     * Before rotate: [... param_1 .. param_n result_table]
+     * After rotate:  [... result_table param_1 .. param_n]
+     */
+    if (nparams > 0)
+        lua_rotate(L, table_idx - nparams, 1);
+
     lua_free_hl_values(L, params, nparams);
 
     if (rc != 0) {
