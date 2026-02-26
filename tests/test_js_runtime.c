@@ -12,6 +12,8 @@
 #include "hull/hull_cap.h"
 #include "quickjs.h"
 
+#include <sqlite3.h>
+
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,6 +38,41 @@ static void cleanup_js(void)
     if (js_initialized) {
         hl_js_free(&js);
         js_initialized = 0;
+    }
+}
+
+/* Init JS with database and env capabilities for testing */
+static sqlite3 *test_db = NULL;
+static const char *env_allowed[] = { "HULL_TEST_VAR", NULL };
+static HlEnvConfig env_cfg = { .allowed = env_allowed, .count = 1 };
+
+static void init_js_with_caps(void)
+{
+    if (js_initialized)
+        hl_js_free(&js);
+    if (test_db) {
+        sqlite3_close(test_db);
+        test_db = NULL;
+    }
+
+    sqlite3_open(":memory:", &test_db);
+    HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
+    memset(&js, 0, sizeof(js));
+    js.db = test_db;
+    js.env_cfg = &env_cfg;
+    int rc = hl_js_init(&js, &cfg);
+    js_initialized = (rc == 0);
+}
+
+static void cleanup_js_caps(void)
+{
+    if (js_initialized) {
+        hl_js_free(&js);
+        js_initialized = 0;
+    }
+    if (test_db) {
+        sqlite3_close(test_db);
+        test_db = NULL;
     }
 }
 
@@ -395,6 +432,356 @@ UTEST(js_runtime, double_free)
     hl_js_init(&local_js, &cfg);
     hl_js_free(&local_js);
     hl_js_free(&local_js); /* should not crash */
+}
+
+/* ── Crypto tests ──────────────────────────────────────────────────── */
+
+UTEST(js_cap, crypto_sha256)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { crypto } from 'hull:crypto';\n"
+        "globalThis.__test_hash = crypto.sha256('hello');\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    char *hash = eval_str("globalThis.__test_hash");
+    ASSERT_NE(hash, NULL);
+    ASSERT_STREQ(hash,
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
+    free(hash);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_cap, crypto_random)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { crypto } from 'hull:crypto';\n"
+        "const buf = crypto.random(16);\n"
+        "globalThis.__test_rlen = buf.byteLength;\n"
+        "const buf2 = crypto.random(16);\n"
+        "const a = new Uint8Array(buf);\n"
+        "const b = new Uint8Array(buf2);\n"
+        "globalThis.__test_rdiffer = a.some((v, i) => v !== b[i]) ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    int len = eval_int("globalThis.__test_rlen");
+    ASSERT_EQ(len, 16);
+
+    int differ = eval_int("globalThis.__test_rdiffer");
+    ASSERT_EQ(differ, 1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_cap, crypto_hash_password)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { crypto } from 'hull:crypto';\n"
+        "globalThis.__test_ph = crypto.hashPassword('secret123');\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    char *hash = eval_str("globalThis.__test_ph");
+    ASSERT_NE(hash, NULL);
+    ASSERT_EQ(strncmp(hash, "pbkdf2:", 7), 0);
+    free(hash);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_cap, crypto_verify_password)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { crypto } from 'hull:crypto';\n"
+        "const h = crypto.hashPassword('mypass');\n"
+        "globalThis.__test_vp_ok = crypto.verifyPassword('mypass', h) ? 1 : 0;\n"
+        "globalThis.__test_vp_bad = crypto.verifyPassword('wrong', h) ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    int ok = eval_int("globalThis.__test_vp_ok");
+    ASSERT_EQ(ok, 1);
+
+    int bad = eval_int("globalThis.__test_vp_bad");
+    ASSERT_EQ(bad, 0);
+
+    cleanup_js_caps();
+}
+
+/* ── Log tests ─────────────────────────────────────────────────────── */
+
+UTEST(js_cap, log_functions_exist)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { log } from 'hull:log';\n"
+        "globalThis.__test_log_types = (\n"
+        "  typeof log.info === 'function' &&\n"
+        "  typeof log.warn === 'function' &&\n"
+        "  typeof log.error === 'function' &&\n"
+        "  typeof log.debug === 'function'\n"
+        ") ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    int result = eval_int("globalThis.__test_log_types");
+    ASSERT_EQ(result, 1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_cap, log_does_not_throw)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { log } from 'hull:log';\n"
+        "log.info('test info');\n"
+        "log.warn('test warn');\n"
+        "log.error('test error');\n"
+        "log.debug('test debug');\n"
+        "globalThis.__test_log_ok = 1;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    int is_exc = JS_IsException(val);
+    if (is_exc)
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_FALSE(is_exc);
+    int result = eval_int("globalThis.__test_log_ok");
+    ASSERT_EQ(result, 1);
+
+    cleanup_js_caps();
+}
+
+/* ── Env tests ─────────────────────────────────────────────────────── */
+
+UTEST(js_cap, env_get_allowed)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    setenv("HULL_TEST_VAR", "js_test_value", 1);
+
+    const char *code =
+        "import { env } from 'hull:env';\n"
+        "globalThis.__test_env = env.get('HULL_TEST_VAR');\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    char *v = eval_str("globalThis.__test_env");
+    ASSERT_NE(v, NULL);
+    ASSERT_STREQ(v, "js_test_value");
+    free(v);
+
+    unsetenv("HULL_TEST_VAR");
+    cleanup_js_caps();
+}
+
+UTEST(js_cap, env_get_blocked)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { env } from 'hull:env';\n"
+        "globalThis.__test_env_blocked = (env.get('PATH') === null) ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    int result = eval_int("globalThis.__test_env_blocked");
+    ASSERT_EQ(result, 1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_cap, env_get_nonexistent)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    unsetenv("HULL_TEST_VAR");
+
+    const char *code =
+        "import { env } from 'hull:env';\n"
+        "globalThis.__test_env_none = (env.get('HULL_TEST_VAR') === null) ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    int result = eval_int("globalThis.__test_env_none");
+    ASSERT_EQ(result, 1);
+
+    cleanup_js_caps();
+}
+
+/* ── DB tests ──────────────────────────────────────────────────────── */
+
+UTEST(js_cap, db_exec_and_query)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { db } from 'hull:db';\n"
+        "db.exec('CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)');\n"
+        "db.exec('INSERT INTO t (name) VALUES (?)', ['alice']);\n"
+        "const rows = db.query('SELECT name FROM t');\n"
+        "globalThis.__test_db_name = rows[0].name;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    char *name = eval_str("globalThis.__test_db_name");
+    ASSERT_NE(name, NULL);
+    ASSERT_STREQ(name, "alice");
+    free(name);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_cap, db_last_id)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { db } from 'hull:db';\n"
+        "db.exec('CREATE TABLE t2 (id INTEGER PRIMARY KEY, v TEXT)');\n"
+        "db.exec('INSERT INTO t2 (v) VALUES (?)', ['a']);\n"
+        "const id1 = db.lastId();\n"
+        "db.exec('INSERT INTO t2 (v) VALUES (?)', ['b']);\n"
+        "const id2 = db.lastId();\n"
+        "globalThis.__test_db_ids = (id2 > id1) ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    int result = eval_int("globalThis.__test_db_ids");
+    ASSERT_EQ(result, 1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_cap, db_parameterized_query)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { db } from 'hull:db';\n"
+        "db.exec('CREATE TABLE t3 (id INTEGER PRIMARY KEY, val INTEGER)');\n"
+        "db.exec('INSERT INTO t3 (val) VALUES (?)', [10]);\n"
+        "db.exec('INSERT INTO t3 (val) VALUES (?)', [20]);\n"
+        "db.exec('INSERT INTO t3 (val) VALUES (?)', [30]);\n"
+        "const rows = db.query('SELECT val FROM t3 WHERE val > ?', [15]);\n"
+        "globalThis.__test_db_pq = rows.length;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    int count = eval_int("globalThis.__test_db_pq");
+    ASSERT_EQ(count, 2);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_cap, db_not_available_without_config)
+{
+    /* Use default init (no db) — hull:db module should not be registered */
+    init_js();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { db } from 'hull:db';\n"
+        "globalThis.__test_db_avail = 1;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    int is_exc = JS_IsException(val);
+    if (is_exc) {
+        /* Expected — module not registered */
+        JSValue exc = JS_GetException(js.ctx);
+        JS_FreeValue(js.ctx, exc);
+    }
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    /* The import should have thrown */
+    ASSERT_TRUE(is_exc);
+
+    cleanup_js();
 }
 
 UTEST_MAIN();

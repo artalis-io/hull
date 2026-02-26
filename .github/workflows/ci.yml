@@ -130,6 +130,49 @@ jobs:
           echo "Response: $RESPONSE"
           echo "$RESPONSE" | grep -q '"ok"'
 
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install lcov
+        run: sudo apt-get update && sudo apt-get install -y lcov
+
+      - name: Generate coverage
+        timeout-minutes: 10
+        run: make coverage
+
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: build/coverage/html/
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install luacheck
+        run: sudo apt-get update && sudo apt-get install -y luarocks && sudo luarocks install luacheck
+
+      - name: Lua lint
+        run: make lint-lua
+
+      - name: Install Biome
+        run: curl -fsSL https://biomejs.dev/install.sh | sh && echo "$HOME/.biome/bin" >> $GITHUB_PATH
+
+      - name: JS lint
+        run: make lint-js
+
   benchmark:
     name: Benchmark (${{ matrix.runtime }})
     runs-on: ubuntu-latest

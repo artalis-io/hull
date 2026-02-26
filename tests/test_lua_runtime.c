@@ -17,6 +17,8 @@
 
 #include "hull/hull_limits.h"
 
+#include <sqlite3.h>
+
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,6 +45,41 @@ static void cleanup_lua(void)
     if (lua_initialized) {
         hl_lua_free(&lua_rt);
         lua_initialized = 0;
+    }
+}
+
+/* Init lua with database and env capabilities for testing */
+static sqlite3 *test_db = NULL;
+static const char *env_allowed[] = { "HULL_TEST_VAR", NULL };
+static HlEnvConfig env_cfg = { .allowed = env_allowed, .count = 1 };
+
+static void init_lua_with_caps(void)
+{
+    if (lua_initialized)
+        hl_lua_free(&lua_rt);
+    if (test_db) {
+        sqlite3_close(test_db);
+        test_db = NULL;
+    }
+
+    sqlite3_open(":memory:", &test_db);
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    memset(&lua_rt, 0, sizeof(lua_rt));
+    lua_rt.db = test_db;
+    lua_rt.env_cfg = &env_cfg;
+    int rc = hl_lua_init(&lua_rt, &cfg);
+    lua_initialized = (rc == 0);
+}
+
+static void cleanup_lua_caps(void)
+{
+    if (lua_initialized) {
+        hl_lua_free(&lua_rt);
+        lua_initialized = 0;
+    }
+    if (test_db) {
+        sqlite3_close(test_db);
+        test_db = NULL;
     }
 }
 
@@ -802,6 +839,222 @@ UTEST(lua_require_fs, embedded_still_first)
 
     cleanup_lua();
     rm_rf(tmpdir);
+}
+
+/* ── Crypto tests ──────────────────────────────────────────────────── */
+
+UTEST(lua_cap, crypto_sha256)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* SHA-256 of "hello" — known hash */
+    char *hash = eval_str("crypto.sha256('hello')");
+    ASSERT_NE(hash, NULL);
+    ASSERT_STREQ(hash,
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
+    free(hash);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_cap, crypto_random)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* crypto.random(16) returns a 16-byte string */
+    int len = eval_int("#crypto.random(16)");
+    ASSERT_EQ(len, 16);
+
+    /* Two calls should produce different values */
+    int differ = eval_int(
+        "crypto.random(16) ~= crypto.random(16) and 1 or 0");
+    ASSERT_EQ(differ, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_cap, crypto_hash_password)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    char *hash = eval_str("crypto.hash_password('secret123')");
+    ASSERT_NE(hash, NULL);
+    /* PBKDF2 format: starts with "pbkdf2:" */
+    ASSERT_EQ(strncmp(hash, "pbkdf2:", 7), 0);
+    free(hash);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_cap, crypto_verify_password)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* Correct password verifies */
+    int ok = eval_int(
+        "(function() "
+        "  local h = crypto.hash_password('mypass') "
+        "  return crypto.verify_password('mypass', h) and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    /* Wrong password fails */
+    int bad = eval_int(
+        "(function() "
+        "  local h = crypto.hash_password('mypass') "
+        "  return crypto.verify_password('wrong', h) and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(bad, 0);
+
+    cleanup_lua_caps();
+}
+
+/* ── Log tests ─────────────────────────────────────────────────────── */
+
+UTEST(lua_cap, log_functions_exist)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    int result = eval_int(
+        "type(log.info) == 'function' and "
+        "type(log.warn) == 'function' and "
+        "type(log.error) == 'function' and "
+        "type(log.debug) == 'function' and 1 or 0");
+    ASSERT_EQ(result, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_cap, log_does_not_error)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* Calling all four log functions should not raise a Lua error */
+    int rc = luaL_dostring(lua_rt.L,
+        "log.info('test info')\n"
+        "log.warn('test warn')\n"
+        "log.error('test error')\n"
+        "log.debug('test debug')\n");
+    ASSERT_EQ(rc, LUA_OK);
+
+    cleanup_lua_caps();
+}
+
+/* ── Env tests ─────────────────────────────────────────────────────── */
+
+UTEST(lua_cap, env_get_allowed)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    setenv("HULL_TEST_VAR", "test_value_123", 1);
+    char *val = eval_str("env.get('HULL_TEST_VAR')");
+    ASSERT_NE(val, NULL);
+    ASSERT_STREQ(val, "test_value_123");
+    free(val);
+    unsetenv("HULL_TEST_VAR");
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_cap, env_get_blocked)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* PATH is not in the allowlist — should return nil */
+    int result = eval_int("env.get('PATH') == nil and 1 or 0");
+    ASSERT_EQ(result, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_cap, env_get_nonexistent)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* HULL_TEST_VAR is allowed but not set — should return nil */
+    unsetenv("HULL_TEST_VAR");
+    int result = eval_int("env.get('HULL_TEST_VAR') == nil and 1 or 0");
+    ASSERT_EQ(result, 1);
+
+    cleanup_lua_caps();
+}
+
+/* ── DB tests ──────────────────────────────────────────────────────── */
+
+UTEST(lua_cap, db_exec_and_query)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    int result = eval_int(
+        "(function() "
+        "  db.exec('CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)') "
+        "  db.exec('INSERT INTO t (name) VALUES (?)', {'alice'}) "
+        "  local rows = db.query('SELECT name FROM t') "
+        "  return rows[1].name == 'alice' and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(result, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_cap, db_last_id)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    int result = eval_int(
+        "(function() "
+        "  db.exec('CREATE TABLE t2 (id INTEGER PRIMARY KEY, v TEXT)') "
+        "  db.exec('INSERT INTO t2 (v) VALUES (?)', {'a'}) "
+        "  local id1 = db.last_id() "
+        "  db.exec('INSERT INTO t2 (v) VALUES (?)', {'b'}) "
+        "  local id2 = db.last_id() "
+        "  return (id2 > id1) and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(result, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_cap, db_parameterized_query)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    int result = eval_int(
+        "(function() "
+        "  db.exec('CREATE TABLE t3 (id INTEGER PRIMARY KEY, val INTEGER)') "
+        "  db.exec('INSERT INTO t3 (val) VALUES (?)', {10}) "
+        "  db.exec('INSERT INTO t3 (val) VALUES (?)', {20}) "
+        "  db.exec('INSERT INTO t3 (val) VALUES (?)', {30}) "
+        "  local rows = db.query('SELECT val FROM t3 WHERE val > ?', {15}) "
+        "  return #rows == 2 and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(result, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_cap, db_not_available_without_config)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+
+    /* Without db set, the db global should be nil */
+    int result = eval_int("db == nil and 1 or 0");
+    ASSERT_EQ(result, 1);
+
+    cleanup_lua();
 }
 
 UTEST_MAIN();
