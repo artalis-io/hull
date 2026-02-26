@@ -1,0 +1,156 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+          - name: macOS
+            os: macos-latest
+
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Build
+        run: make
+
+      - name: Unit tests
+        timeout-minutes: 5
+        run: make test
+
+      - name: E2E tests
+        timeout-minutes: 2
+        run: make e2e
+
+  sanitizers:
+    name: ASan + UBSan
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Build and test with sanitizers
+        timeout-minutes: 10
+        run: |
+          make clean
+          make DEBUG=1 test
+
+  msan:
+    name: MSan + UBSan
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      - name: MSan test
+        timeout-minutes: 10
+        run: make msan
+
+  analyze:
+    name: Static Analysis
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-tools cppcheck
+
+      - name: scan-build
+        run: make analyze
+
+      - name: cppcheck
+        run: make cppcheck
+
+  cosmo:
+    name: Cosmopolitan (APE)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install cosmocc
+        run: |
+          mkdir -p /opt/cosmo
+          wget -qO /tmp/cosmocc.zip https://cosmo.zip/pub/cosmocc/cosmocc.zip
+          unzip -q -d /opt/cosmo /tmp/cosmocc.zip
+          rm /tmp/cosmocc.zip
+          echo "/opt/cosmo/bin" >> $GITHUB_PATH
+
+      - name: Build
+        run: make CC=cosmocc
+
+      - name: Unit tests
+        timeout-minutes: 5
+        run: make test CC=cosmocc
+
+      - name: E2E smoke test
+        run: |
+          ./build/hull -p 19852 -d /tmp/cosmo_e2e.db examples/hello/app.lua &
+          SERVER_PID=$!
+          trap "kill $SERVER_PID 2>/dev/null" EXIT
+
+          for i in 1 2 3 4 5; do
+            if curl -s http://127.0.0.1:19852/health >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.5
+          done
+
+          RESPONSE=$(curl -s http://127.0.0.1:19852/health)
+          echo "Response: $RESPONSE"
+          echo "$RESPONSE" | grep -q '"ok"'
+
+  benchmark:
+    name: Benchmark (${{ matrix.runtime }})
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+
+    strategy:
+      matrix:
+        runtime: [lua, js]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install wrk
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wrk
+
+      - name: Build
+        run: make
+
+      - name: Benchmark
+        run: RUNTIME=${{ matrix.runtime }} DURATION=5s CONNECTIONS=50 THREADS=2 sh bench.sh
