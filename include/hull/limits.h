@@ -25,7 +25,7 @@
 
 #define HL_MAX_ROUTES         256               /* Maximum route count */
 #define HL_DEFAULT_PORT       3000
-#define HL_DEFAULT_MAX_CONN   64
+#define HL_DEFAULT_MAX_CONN   256
 #define HL_DEFAULT_READ_TIMEOUT_MS 30000
 
 /* ── Crypto ─────────────────────────────────────────────────────────── */

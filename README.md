@@ -53,6 +53,12 @@ Six vendored C libraries, zero external dependencies. Built on [Cosmopolitan lib
 | [pledge/unveil](https://github.com/jart/pledge) | Kernel sandbox |
 | [WAMR](https://github.com/bytecodealliance/wasm-micro-runtime) | WebAssembly compute plugins *(optional)* |
 
+## Performance
+
+77,000–86,000 requests/sec on a single core with Lua or QuickJS scripting. ~15% overhead vs raw C (Keel baseline: 101,000 req/s). SQLite write-heavy routes sustain 19,000 req/s.
+
+See [docs/benchmark.md](docs/benchmark.md) for full results and methodology.
+
 ## Status
 
 Hull is in active development.
