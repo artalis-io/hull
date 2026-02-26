@@ -117,16 +117,16 @@ SH_ARENA_CFLAGS := -std=c11 -O2 -w
 # ── Hull source files ───────────────────────────────────────────────
 
 # Capability sources (always compiled)
-CAP_SRCS := $(wildcard $(SRCDIR)/cap/*.c)
-CAP_OBJS := $(patsubst $(SRCDIR)/cap/%.c,$(BUILDDIR)/cap_%.o,$(CAP_SRCS))
+CAP_SRCS := $(wildcard $(SRCDIR)/hull/cap/*.c)
+CAP_OBJS := $(patsubst $(SRCDIR)/hull/cap/%.c,$(BUILDDIR)/cap_%.o,$(CAP_SRCS))
 
 # JS runtime sources
-JS_RT_SRCS := $(wildcard $(SRCDIR)/runtime/js/*.c)
-JS_RT_OBJS := $(patsubst $(SRCDIR)/runtime/js/%.c,$(BUILDDIR)/js_%.o,$(JS_RT_SRCS))
+JS_RT_SRCS := $(wildcard $(SRCDIR)/hull/runtime/js/*.c)
+JS_RT_OBJS := $(patsubst $(SRCDIR)/hull/runtime/js/%.c,$(BUILDDIR)/js_%.o,$(JS_RT_SRCS))
 
 # Lua runtime sources
-LUA_RT_SRCS := $(wildcard $(SRCDIR)/runtime/lua/*.c)
-LUA_RT_OBJS := $(patsubst $(SRCDIR)/runtime/lua/%.c,$(BUILDDIR)/lua_rt_%.o,$(LUA_RT_SRCS))
+LUA_RT_SRCS := $(wildcard $(SRCDIR)/hull/runtime/lua/*.c)
+LUA_RT_OBJS := $(patsubst $(SRCDIR)/hull/runtime/lua/%.c,$(BUILDDIR)/lua_rt_%.o,$(LUA_RT_SRCS))
 
 # Select which runtimes to build
 ifeq ($(RUNTIME),js)
@@ -252,23 +252,23 @@ $(BUILDDIR)/hull: $(CAP_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MAIN_OBJ) $(VEND_OBJS) $
 		$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(KEEL_LIB) -lm -lpthread
 
 # Capability sources
-$(BUILDDIR)/cap_%.o: $(SRCDIR)/cap/%.c | $(BUILDDIR)
+$(BUILDDIR)/cap_%.o: $(SRCDIR)/hull/cap/%.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # JS runtime sources
-$(BUILDDIR)/js_%.o: $(SRCDIR)/runtime/js/%.c | $(BUILDDIR)
+$(BUILDDIR)/js_%.o: $(SRCDIR)/hull/runtime/js/%.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Lua runtime sources (depend on generated stdlib headers)
-$(BUILDDIR)/lua_rt_%.o: $(SRCDIR)/runtime/lua/%.c $(STDLIB_LUA_HDRS) | $(BUILDDIR)
+$(BUILDDIR)/lua_rt_%.o: $(SRCDIR)/hull/runtime/lua/%.c $(STDLIB_LUA_HDRS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Hull allocator
-$(ALLOC_OBJ): $(SRCDIR)/hull/hull_alloc.c | $(BUILDDIR)
+$(ALLOC_OBJ): $(SRCDIR)/hull/alloc.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Main
-$(BUILDDIR)/main.o: $(SRCDIR)/main.c | $(BUILDDIR)
+$(BUILDDIR)/main.o: $(SRCDIR)/hull/main.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # QuickJS sources (relaxed warnings)
@@ -302,41 +302,44 @@ debug:
 
 # ── Tests ───────────────────────────────────────────────────────────
 
-TEST_SRCS := $(wildcard $(TESTDIR)/test_*.c)
+# Discover all test sources under tests/hull/
+TEST_SRCS := $(shell find $(TESTDIR)/hull -name 'test_*.c')
 
 # Filter test binaries based on RUNTIME selection
 ifeq ($(RUNTIME),js)
-  TEST_SRCS := $(filter-out $(TESTDIR)/test_lua_runtime.c,$(TEST_SRCS))
+  TEST_SRCS := $(filter-out %/test_lua.c,$(TEST_SRCS))
 else ifeq ($(RUNTIME),lua)
-  TEST_SRCS := $(filter-out $(TESTDIR)/test_js_runtime.c,$(TEST_SRCS))
+  TEST_SRCS := $(filter-out %/test_js.c,$(TEST_SRCS))
 endif
 
-TEST_BINS := $(patsubst $(TESTDIR)/%.c,$(BUILDDIR)/%,$(TEST_SRCS))
+# Flatten test paths to build/ binaries: tests/hull/cap/test_body.c → build/test_body
+TEST_BINS := $(addprefix $(BUILDDIR)/,$(notdir $(basename $(TEST_SRCS))))
 
 # Test objects need hull capability sources but NOT main.o or runtime objects
 TEST_CAP_OBJS := $(CAP_OBJS)
 
-# JS runtime objects needed for test_js_runtime
-TEST_JS_OBJS := $(JS_RT_OBJS)
+# Shared link deps for all tests
+TEST_COMMON_DEPS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(KEEL_LIB)
+TEST_COMMON_LIBS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) -lm -lpthread
 
-# Lua runtime objects needed for test_lua_runtime
-TEST_LUA_OBJS := $(LUA_RT_OBJS)
+# Capability tests (tests/hull/cap/)
+$(BUILDDIR)/test_%: $(TESTDIR)/hull/cap/test_%.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_COMMON_LIBS)
 
-# Default test rule (capability tests — Keel needed for body reader cap)
-$(BUILDDIR)/test_%: $(TESTDIR)/test_%.c $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(KEEL_LIB) | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_CAP_OBJS) \
-		$(ALLOC_OBJ) $(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) -lm -lpthread
+# Top-level tests (tests/hull/)
+$(BUILDDIR)/test_parse_size: $(TESTDIR)/hull/test_parse_size.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_COMMON_LIBS)
 
-# JS runtime test — needs QuickJS + JS runtime objects + Keel
-$(BUILDDIR)/test_js_runtime: $(TESTDIR)/test_js_runtime.c $(TEST_CAP_OBJS) $(TEST_JS_OBJS) $(ALLOC_OBJ) $(QJS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(KEEL_LIB) | $(BUILDDIR)
+# JS runtime test — needs QuickJS + JS runtime objects
+$(BUILDDIR)/test_js: $(TESTDIR)/hull/runtime/js/test_js.c $(TEST_COMMON_DEPS) $(JS_RT_OBJS) $(QJS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(TEST_CAP_OBJS) $(TEST_JS_OBJS) $(ALLOC_OBJ) $(QJS_OBJS) \
+		$(TEST_CAP_OBJS) $(JS_RT_OBJS) $(ALLOC_OBJ) $(QJS_OBJS) \
 		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) -lm -lpthread
 
-# Lua runtime test — needs Lua + Lua runtime objects + Keel + stdlib headers
-$(BUILDDIR)/test_lua_runtime: $(TESTDIR)/test_lua_runtime.c $(TEST_CAP_OBJS) $(TEST_LUA_OBJS) $(ALLOC_OBJ) $(LUA_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(KEEL_LIB) $(STDLIB_LUA_HDRS) | $(BUILDDIR)
+# Lua runtime test — needs Lua + Lua runtime objects + stdlib headers
+$(BUILDDIR)/test_lua: $(TESTDIR)/hull/runtime/lua/test_lua.c $(TEST_COMMON_DEPS) $(LUA_RT_OBJS) $(LUA_OBJS) $(STDLIB_LUA_HDRS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(TEST_CAP_OBJS) $(TEST_LUA_OBJS) $(ALLOC_OBJ) $(LUA_OBJS) \
+		$(TEST_CAP_OBJS) $(LUA_RT_OBJS) $(ALLOC_OBJ) $(LUA_OBJS) \
 		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) -lm -lpthread
 
 test: $(TEST_BINS)
@@ -412,7 +415,7 @@ cppcheck:
 		--suppress=constParameterPointer \
 		--suppress=constVariablePointer \
 		--suppress=staticFunction \
-		--suppress=uninitvar:$(SRCDIR)/runtime/lua/lua_bindings.c \
+		--suppress=uninitvar:$(SRCDIR)/hull/runtime/lua/bindings.c \
 		--suppress=unmatchedSuppression \
 		--suppress='*:$(QJS_DIR)/*' \
 		--suppress='*:$(LUA_DIR)/*' \
@@ -420,8 +423,8 @@ cppcheck:
 		--suppress='*:$(LOG_DIR)/*' \
 		--error-exitcode=1 \
 		-I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(SQLITE_DIR) -I$(KEEL_INC) \
-		$(SRCDIR)/main.c $(SRCDIR)/hull/*.c $(SRCDIR)/cap/*.c \
-		$(SRCDIR)/runtime/js/*.c $(SRCDIR)/runtime/lua/*.c
+		$(SRCDIR)/hull/main.c $(SRCDIR)/hull/alloc.c $(SRCDIR)/hull/cap/*.c \
+		$(SRCDIR)/hull/runtime/js/*.c $(SRCDIR)/hull/runtime/lua/*.c
 
 # ── Benchmark ──────────────────────────────────────────────────────
 

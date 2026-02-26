@@ -5,7 +5,7 @@
  */
 
 #include "utest.h"
-#include "hull/hull_cap.h"
+#include "hull/cap.h"
 #include <string.h>
 #include <time.h>
 
