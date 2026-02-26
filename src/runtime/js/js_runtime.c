@@ -127,7 +127,11 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
         JS_ThrowReferenceError(ctx, "module too large: %s", module_name);
         return NULL;
     }
-    rewind(f);
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        JS_ThrowInternalError(ctx, "seek failed: %s", module_name);
+        return NULL;
+    }
 
     char *buf = js_malloc(ctx, (size_t)size + 1);
     if (!buf) {
@@ -135,7 +139,12 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
         return NULL;
     }
     size_t nread = fread(buf, 1, (size_t)size, f);
+    int read_err = ferror(f);
     fclose(f);
+    if (read_err || nread != (size_t)size) {
+        js_free(ctx, buf);
+        return NULL;
+    }
     buf[nread] = '\0';
 
     /* Compile as module */
@@ -306,7 +315,10 @@ int hl_js_load_app(HlJS *js, const char *filename)
         fprintf(stderr, "hull: %s too large\n", filename);
         return -1;
     }
-    rewind(f);
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return -1;
+    }
 
     char *buf = malloc((size_t)size + 1);
     if (!buf) {
@@ -314,7 +326,12 @@ int hl_js_load_app(HlJS *js, const char *filename)
         return -1;
     }
     size_t nread = fread(buf, 1, (size_t)size, f);
+    int read_err = ferror(f);
     fclose(f);
+    if (read_err || nread != (size_t)size) {
+        free(buf);
+        return -1;
+    }
     buf[nread] = '\0';
 
     /* Extract app directory from filename */
