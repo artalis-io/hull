@@ -6,7 +6,6 @@
 import { app } from "hull:app";
 import { db } from "hull:db";
 import { time } from "hull:time";
-import { crypto } from "hull:crypto";
 
 // Initialize database
 db.exec(`CREATE TABLE IF NOT EXISTS tasks (
@@ -17,7 +16,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS tasks (
 )`);
 
 // List all tasks
-app.get("/tasks", (req, res) => {
+app.get("/tasks", (_req, res) => {
     const tasks = db.query("SELECT * FROM tasks ORDER BY created_at DESC");
     res.json(tasks);
 });

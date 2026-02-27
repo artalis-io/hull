@@ -4,7 +4,7 @@
 -- Usage: hull build [options] [app_dir]
 --   --runtime lua|js|both  Runtime to include (default: lua)
 --   --sign <key_file>      Sign with Ed25519 private key
---   --cc <compiler>        C compiler to use (default: cc)
+--   --cc <compiler>        C compiler to use (default: cosmocc)
 --   --output <path>        Output binary path (default: app_dir/app)
 --
 -- SPDX-License-Identifier: AGPL-3.0-or-later
@@ -18,7 +18,7 @@ local function parse_args()
     local opts = {
         runtime = "lua",
         sign = nil,
-        cc = nil,         -- resolved after locating platform .a
+        cc = nil,         -- resolved from tool.cc (set by C, default cosmocc)
         output = nil,
         app_dir = ".",
     }
@@ -65,16 +65,9 @@ local function file_exists(path)
     return tool.file_exists(path)
 end
 
--- List .lua files recursively in a directory
+-- List .lua files recursively in a directory (using tool.find_files)
 local function find_lua_files(dir)
-    local files = {}
-    local output = tool.read('find "' .. dir .. '" -name "*.lua" -type f 2>/dev/null')
-    if output then
-        for line in output:gmatch("[^\n]+") do
-            files[#files + 1] = line
-        end
-    end
-    return files
+    return tool.find_files(dir, "*.lua")
 end
 
 -- ── xxd in Lua ───────────────────────────────────────────────────────
@@ -242,7 +235,7 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
         }
         for _, d in ipairs(dev_paths) do
             if file_exists(d .. "libhull_platform.a") then
-                tool.exec('cp "' .. d .. 'libhull_platform.a" "' .. platform_lib .. '"')
+                tool.copy(d .. "libhull_platform.a", platform_lib)
                 platform_dir = d
                 platform_extracted = true
                 break
@@ -253,21 +246,12 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
     if not platform_extracted then
         tool.stderr("hull build: cannot find libhull_platform.a\n")
         tool.stderr("hint: run `make platform` first, or use an embedded hull build\n")
-        tool.exec('rm -rf "' .. tmpdir .. '"')
+        tool.rmdir(tmpdir)
         tool.exit(1)
     end
 
-    -- Resolve CC: use platform_cc from build dir, or fall back to "cc"
-    local cc = opts.cc
-    if not cc and platform_dir then
-        local cc_data = read_file(platform_dir .. "platform_cc")
-        if cc_data then
-            cc = cc_data:match("^%s*(.-)%s*$")  -- trim whitespace
-        end
-    end
-    if not cc then
-        cc = "cc"
-    end
+    -- Resolve CC: use tool.cc (set by C from --cc flag, default cosmocc)
+    local cc = opts.cc or tool.cc or "cosmocc"
     if platform_dir then
         -- Validate: warn if user --cc doesn't match what platform was built with
         local cc_data = read_file(platform_dir .. "platform_cc")
@@ -279,30 +263,37 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
             end
         end
     end
-    local compile_cmd = string.format(
-        '%s -std=c11 -O2 -w -c -o "%s/app_registry.o" "%s/app_registry.c" && ' ..
-        '%s -std=c11 -O2 -w -c -o "%s/app_main.o" "%s/app_main.c"',
-        cc, tmpdir, tmpdir,
-        cc, tmpdir, tmpdir)
 
+    -- Compile
     print("hull build: compiling...")
-    local ok = tool.exec(compile_cmd)
+    local ok = tool.spawn({cc, "-std=c11", "-O2", "-w", "-c",
+                           "-o", tmpdir .. "/app_registry.o",
+                           tmpdir .. "/app_registry.c"})
     if not ok then
-        tool.stderr("hull build: compilation failed\n")
-        tool.exec('rm -rf "' .. tmpdir .. '"')
+        tool.stderr("hull build: compilation failed (app_registry.c)\n")
+        tool.rmdir(tmpdir)
+        tool.exit(1)
+    end
+
+    ok = tool.spawn({cc, "-std=c11", "-O2", "-w", "-c",
+                     "-o", tmpdir .. "/app_main.o",
+                     tmpdir .. "/app_main.c"})
+    if not ok then
+        tool.stderr("hull build: compilation failed (app_main.c)\n")
+        tool.rmdir(tmpdir)
         tool.exit(1)
     end
 
     -- Link
-    local link_cmd = string.format(
-        '%s -o "%s" "%s/app_main.o" "%s/app_registry.o" "%s/libhull_platform.a" -lm -lpthread',
-        cc, opts.output, tmpdir, tmpdir, tmpdir)
-
     print("hull build: linking...")
-    ok = tool.exec(link_cmd)
+    ok = tool.spawn({cc, "-o", opts.output,
+                     tmpdir .. "/app_main.o",
+                     tmpdir .. "/app_registry.o",
+                     tmpdir .. "/libhull_platform.a",
+                     "-lm", "-lpthread"})
     if not ok then
         tool.stderr("hull build: linking failed\n")
-        tool.exec('rm -rf "' .. tmpdir .. '"')
+        tool.rmdir(tmpdir)
         tool.exit(1)
     end
 
@@ -314,7 +305,7 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
     end
 
     -- Cleanup
-    tool.exec('rm -rf "' .. tmpdir .. '"')
+    tool.rmdir(tmpdir)
 end
 
 main()

@@ -17,12 +17,14 @@
 typedef struct lua_State lua_State;
 typedef struct KlRequest KlRequest;
 typedef struct KlResponse KlResponse;
+typedef struct KlRouter KlRouter;
 typedef struct SHArena SHArena;
 typedef struct HlAllocator HlAllocator;
 typedef struct sqlite3 sqlite3;
 typedef struct HlFsConfig HlFsConfig;
 typedef struct HlEnvConfig HlEnvConfig;
 typedef struct HlHttpConfig HlHttpConfig;
+typedef struct HlToolUnveilCtx HlToolUnveilCtx;
 
 /* ── Configuration ──────────────────────────────────────────────────── */
 
@@ -65,6 +67,9 @@ typedef struct HlLua {
     /* Per-request response body (allocated via alloc, freed after dispatch) */
     char           *response_body;
     size_t          response_body_size;
+
+    /* Tool-mode unveil context (NULL in sandbox mode) */
+    HlToolUnveilCtx *tool_unveil_ctx;
 } HlLua;
 
 /* ── Lifecycle ──────────────────────────────────────────────────────── */
@@ -135,5 +140,30 @@ void hl_lua_make_request(lua_State *L, KlRequest *req);
  * Push a Lua userdata representing the HTTP response onto the stack.
  */
 void hl_lua_make_response(lua_State *L, KlResponse *res);
+
+/* ── Route wiring ──────────────────────────────────────────────────── */
+
+/*
+ * Per-route context: associates a Keel route with a Lua handler.
+ */
+typedef struct {
+    HlLua *lua;
+    int     handler_id;
+} HlLuaRoute;
+
+/*
+ * Keel handler bridge: dispatches a request to the Lua handler.
+ */
+void hl_lua_keel_handler(KlRequest *req, KlResponse *res, void *user_data);
+
+/*
+ * Wire Lua routes from __hull_route_defs into a KlRouter.
+ * Allocates HlLuaRoute structs using malloc (caller must track).
+ *
+ * `alloc_fn` is called to allocate per-route context. Pass NULL to use malloc.
+ *
+ * Returns 0 on success, -1 on error.
+ */
+int hl_lua_wire_routes(HlLua *lua, KlRouter *router);
 
 #endif /* HL_RUNTIME_LUA_H */

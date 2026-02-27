@@ -1,14 +1,16 @@
 /*
  * tool.c — Tool mode: unsandboxed Lua VM for hull build tools
  *
- * Provides hull_tool() for running Lua stdlib modules with full
- * filesystem access, and hull_keygen() for Ed25519 key generation.
+ * Provides hull_tool() for running Lua stdlib modules with controlled
+ * process/filesystem access, and hull_keygen() for Ed25519 key generation.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
 #include "hull/tool.h"
 #include "hull/cap/crypto.h"
+#include "hull/cap/tool.h"
+#include "hull/sandbox.h"
 
 #ifdef HL_ENABLE_LUA
 #include "hull/runtime/lua.h"
@@ -69,6 +71,41 @@ int hull_keygen(int argc, char **argv)
 
 #ifdef HL_ENABLE_LUA
 
+/*
+ * Parse --cc option from argv, return compiler name (or NULL for default).
+ * Scans for "--cc" followed by a value.
+ */
+static const char *parse_cc_option(int argc, char **argv)
+{
+    for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "--cc") == 0 && i + 1 < argc)
+            return argv[i + 1];
+    }
+    return NULL;
+}
+
+/*
+ * Extract app_dir from argv (first positional arg not starting with '-').
+ * Returns "." if not found.
+ */
+static const char *parse_app_dir(int argc, char **argv)
+{
+    for (int i = 0; i < argc; i++) {
+        if (!argv[i]) continue;
+        if (argv[i][0] != '-')
+            return argv[i];
+        /* Skip --flag value pairs */
+        if (strcmp(argv[i], "--cc") == 0 ||
+            strcmp(argv[i], "--sign") == 0 ||
+            strcmp(argv[i], "--runtime") == 0 ||
+            strcmp(argv[i], "--output") == 0 ||
+            strcmp(argv[i], "-o") == 0) {
+            i++; /* skip value */
+        }
+    }
+    return ".";
+}
+
 int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
 {
     if (!module) {
@@ -76,19 +113,60 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
         return 1;
     }
 
-    /* Init unsandboxed Lua VM */
+    /* Parse --cc option for configurable compiler */
+    const char *cc = parse_cc_option(argc, argv);
+    if (!cc) cc = "cosmocc";
+
+    /* Validate compiler against allowlist */
+    if (hl_tool_check_allowlist(cc) != 0) {
+        fprintf(stderr, "hull: compiler '%s' not in allowlist\n", cc);
+        return 1;
+    }
+
+    /* Set up tool-mode unveil context */
+    const char *app_dir = parse_app_dir(argc, argv);
+    HlToolUnveilCtx unveil_ctx;
+
+    /* Derive platform directory from hull binary path */
+    const char *platform_dir = NULL;
+    char platform_buf[4096];
+    if (hull_exe) {
+        const char *slash = strrchr(hull_exe, '/');
+        if (slash) {
+            size_t len = (size_t)(slash - hull_exe + 1);
+            if (len < sizeof(platform_buf)) {
+                memcpy(platform_buf, hull_exe, len);
+                platform_buf[len] = '\0';
+                platform_dir = platform_buf;
+            }
+        }
+    }
+
+    hl_tool_sandbox_init(&unveil_ctx, app_dir, ".", platform_dir);
+
+    /* Init unsandboxed Lua VM with tool unveil context */
     HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
     cfg.sandbox = 0;
 
     HlLua lua;
     memset(&lua, 0, sizeof(lua));
+    lua.tool_unveil_ctx = &unveil_ctx;
+
     if (hl_lua_init(&lua, &cfg) != 0) {
         fprintf(stderr, "hull: Lua init failed\n");
         return 1;
     }
 
-    /* Pass CLI args as global `arg` table */
+    /* Set tool.cc in the tool global table */
     lua_State *L = lua.L;
+    lua_getglobal(L, "tool");
+    if (lua_istable(L, -1)) {
+        lua_pushstring(L, cc);
+        lua_setfield(L, -2, "cc");
+    }
+    lua_pop(L, 1);
+
+    /* Pass CLI args as global `arg` table */
     lua_newtable(L);
     for (int i = 0; i < argc; i++) {
         lua_pushstring(L, argv[i]);

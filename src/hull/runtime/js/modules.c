@@ -19,6 +19,7 @@
 #include "log.h"
 
 #include <sqlite3.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -709,6 +710,15 @@ static JSValue js_crypto_random(JSContext *ctx, JSValueConst this_val,
     return ab;
 }
 
+/* Hex nibble helper (no sscanf — Cosmopolitan compat) */
+static int hex_nibble(unsigned char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+    return -1;
+}
+
 /* crypto.hashPassword(password) → "pbkdf2:iterations:salt_hex:hash_hex" */
 static JSValue js_crypto_hash_password(JSContext *ctx, JSValueConst this_val,
                                         int argc, JSValueConst *argv)
@@ -770,31 +780,58 @@ static JSValue js_crypto_verify_password(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
     }
 
-    /* Parse "pbkdf2:iterations:salt_hex:hash_hex" */
-    int iterations = 0;
-    char salt_hex[33] = {0};
-    char hash_hex[65] = {0};
-
-    if (sscanf(stored, "pbkdf2:%d:%32[0-9a-f]:%64[0-9a-f]",
-               &iterations, salt_hex, hash_hex) != 3) {
+    /* Parse "pbkdf2:iterations:salt_hex:hash_hex" manually (no scansets
+     * — Cosmopolitan libc doesn't support sscanf %[...] scansets). */
+    if (strncmp(stored, "pbkdf2:", 7) != 0) {
         JS_FreeCString(ctx, pw);
         JS_FreeCString(ctx, stored);
         return JS_FALSE;
     }
+    const char *p = stored + 7;
+
+    char *end = NULL;
+    long iterations = strtol(p, &end, 10);
+    if (!end || *end != ':' || iterations <= 0) {
+        JS_FreeCString(ctx, pw);
+        JS_FreeCString(ctx, stored);
+        return JS_FALSE;
+    }
+    p = end + 1;
+
+    if (strlen(p) < 32 + 1 + 64 || p[32] != ':') {
+        JS_FreeCString(ctx, pw);
+        JS_FreeCString(ctx, stored);
+        return JS_FALSE;
+    }
+    char salt_hex[33];
+    memcpy(salt_hex, p, 32);
+    salt_hex[32] = '\0';
+    p += 33;
+
+    if (strlen(p) < 64) {
+        JS_FreeCString(ctx, pw);
+        JS_FreeCString(ctx, stored);
+        return JS_FALSE;
+    }
+    char hash_hex[65];
+    memcpy(hash_hex, p, 64);
+    hash_hex[64] = '\0';
+
     JS_FreeCString(ctx, stored);
 
-    /* Decode hex salt */
+    /* Decode hex salt (manual — sscanf %x broken on Cosmopolitan) */
     uint8_t salt[16];
     for (int i = 0; i < 16; i++) {
-        unsigned int byte;
-        sscanf(salt_hex + i * 2, "%2x", &byte);
-        salt[i] = (uint8_t)byte;
+        int hi = hex_nibble((unsigned char)salt_hex[i * 2]);
+        int lo = hex_nibble((unsigned char)salt_hex[i * 2 + 1]);
+        if (hi < 0 || lo < 0) { JS_FreeCString(ctx, pw); return JS_FALSE; }
+        salt[i] = (uint8_t)((hi << 4) | lo);
     }
 
     /* Recompute hash */
     uint8_t computed[32];
     if (hl_cap_crypto_pbkdf2(pw, pw_len, salt, sizeof(salt),
-                               iterations, computed, sizeof(computed)) != 0) {
+                               (int)iterations, computed, sizeof(computed)) != 0) {
         JS_FreeCString(ctx, pw);
         return JS_FALSE;
     }
@@ -803,9 +840,10 @@ static JSValue js_crypto_verify_password(JSContext *ctx, JSValueConst this_val,
     /* Decode stored hash and compare (constant-time) */
     uint8_t stored_hash[32];
     for (int i = 0; i < 32; i++) {
-        unsigned int byte;
-        sscanf(hash_hex + i * 2, "%2x", &byte);
-        stored_hash[i] = (uint8_t)byte;
+        int hi = hex_nibble((unsigned char)hash_hex[i * 2]);
+        int lo = hex_nibble((unsigned char)hash_hex[i * 2 + 1]);
+        if (hi < 0 || lo < 0) return JS_FALSE;
+        stored_hash[i] = (uint8_t)((hi << 4) | lo);
     }
 
     /* Constant-time comparison */

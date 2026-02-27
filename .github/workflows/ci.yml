@@ -176,7 +176,7 @@ jobs:
         run: make lint-lua
 
       - name: Install Biome
-        run: curl -fsSL https://biomejs.dev/install.sh | sh && echo "$HOME/.biome/bin" >> $GITHUB_PATH
+        run: npm install -g @biomejs/biome@1.9.4
 
       - name: JS lint
         run: make lint-js

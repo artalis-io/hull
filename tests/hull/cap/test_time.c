@@ -30,9 +30,9 @@ UTEST(hl_cap_time, clock_monotonic)
 {
     int64_t t1 = hl_cap_time_clock();
     /* Spin briefly */
-    volatile int x = 0;
+    volatile unsigned x = 0;
     for (int i = 0; i < 100000; i++)
-        x += i;
+        x += (unsigned)i;
     (void)x;
     int64_t t2 = hl_cap_time_clock();
     ASSERT_GE(t2, t1);
