@@ -19,6 +19,7 @@ typedef struct JSRuntime JSRuntime;
 typedef struct JSContext JSContext;
 typedef struct KlRequest KlRequest;
 typedef struct KlResponse KlResponse;
+typedef struct KlRouter KlRouter;
 typedef struct SHArena SHArena;
 typedef struct HlAllocator HlAllocator;
 typedef struct sqlite3 sqlite3;
@@ -145,5 +146,26 @@ int hl_js_register_modules(HlJS *js);
  * Call after any JS_IsException() check.
  */
 void hl_js_dump_error(HlJS *js);
+
+/* ── Route wiring ──────────────────────────────────────────────────── */
+
+/*
+ * Per-route context: associates a Keel route with a JS handler.
+ */
+typedef struct {
+    HlJS *js;
+    int    handler_id;
+} HlJSRoute;
+
+/*
+ * Keel handler bridge: dispatches a request to the JS handler.
+ */
+void hl_js_keel_handler(KlRequest *req, KlResponse *res, void *user_data);
+
+/*
+ * Wire JS routes from __hull_route_defs into a KlRouter.
+ * Returns 0 on success, -1 on error.
+ */
+int hl_js_wire_routes(HlJS *js, KlRouter *router);
 
 #endif /* HL_RUNTIME_JS_H */

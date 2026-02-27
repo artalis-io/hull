@@ -17,6 +17,10 @@
 #include "lualib.h"
 #include "lauxlib.h"
 
+#include <keel/router.h>
+#include <keel/response.h>
+#include <keel/request.h>
+
 #include <sh_arena.h>
 
 #include "log.h"
@@ -158,7 +162,7 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
         lua_pop(lua->L, 1);
         luaL_requiref(lua->L, LUA_COLIBNAME, luaopen_coroutine, 1);
         lua_pop(lua->L, 1);
-        hl_cap_tool_register(lua->L);
+        hl_cap_tool_register(lua->L, lua->tool_unveil_ctx);
     }
 
     /* Replace print with stderr version */
@@ -311,4 +315,67 @@ void hl_lua_dump_error(HlLua *lua)
     if (tb && tb != msg)
         log_error("[hull:c] %s", tb);
     lua_pop(lua->L, 1); /* pop traceback */
+}
+
+/* ── Route wiring ──────────────────────────────────────────────────── */
+
+void hl_lua_keel_handler(KlRequest *req, KlResponse *res, void *user_data)
+{
+    HlLuaRoute *route = (HlLuaRoute *)user_data;
+    if (hl_lua_dispatch(route->lua, route->handler_id, req, res) != 0) {
+        kl_response_status(res, 500);
+        kl_response_header(res, "Content-Type", "text/plain");
+        kl_response_body(res, "Internal Server Error", 21);
+    }
+}
+
+int hl_lua_wire_routes(HlLua *lua, KlRouter *router)
+{
+    lua_State *L = lua->L;
+
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_route_defs");
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        log_error("[hull:c] no routes registered");
+        return -1;
+    }
+
+    int count = (int)luaL_len(L, -1);
+    if (count <= 0) {
+        lua_pop(L, 1);
+        log_error("[hull:c] no routes registered");
+        return -1;
+    }
+
+    for (int i = 1; i <= count; i++) {
+        lua_rawgeti(L, -1, i);
+        if (!lua_istable(L, -1)) {
+            lua_pop(L, 1);
+            continue;
+        }
+
+        lua_getfield(L, -1, "method");
+        lua_getfield(L, -2, "pattern");
+        lua_getfield(L, -3, "handler_id");
+
+        const char *method_str = lua_tostring(L, -3);
+        const char *pattern = lua_tostring(L, -2);
+        int handler_id = (int)lua_tointeger(L, -1);
+
+        if (method_str && pattern) {
+            HlLuaRoute *route = malloc(sizeof(HlLuaRoute));
+            if (route) {
+                route->lua = lua;
+                route->handler_id = handler_id;
+                kl_router_add(router, method_str, pattern,
+                              hl_lua_keel_handler, route, NULL);
+            }
+        }
+
+        lua_pop(L, 3); /* method_str, pattern, handler_id */
+        lua_pop(L, 1); /* route def table */
+    }
+
+    lua_pop(L, 1); /* __hull_route_defs table */
+    return 0;
 }
