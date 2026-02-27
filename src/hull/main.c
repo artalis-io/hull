@@ -31,6 +31,7 @@
 #include "hull/manifest.h"
 #include "hull/parse_size.h"
 #include "hull/sandbox.h"
+#include "hull/signature.h"
 #include "hull/tool.h"
 
 #include <keel/keel.h>
@@ -258,14 +259,26 @@ static void usage(const char *prog)
     fprintf(stderr, "Usage: %s [options] <app.js|app.lua>\n"
             "\n"
             "Options:\n"
-            "  -p PORT     Listen port (default: 3000)\n"
-            "  -b ADDR     Bind address (default: 127.0.0.1)\n"
-            "  -d FILE     SQLite database file (default: data.db)\n"
-            "  -m SIZE     Runtime heap limit (default: 64m)\n"
-            "  -M SIZE     Process memory limit (default: unlimited)\n"
-            "  -s SIZE     JS stack size limit (default: 1m)\n"
-            "  -l LEVEL    Log level: trace|debug|info|warn|error|fatal (default: info)\n"
-            "  -h          Show this help\n"
+            "  -p PORT              Listen port (default: 3000)\n"
+            "  -b ADDR              Bind address (default: 127.0.0.1)\n"
+            "  -d FILE              SQLite database file (default: data.db)\n"
+            "  -m SIZE              Runtime heap limit (default: 64m)\n"
+            "  -M SIZE              Process memory limit (default: unlimited)\n"
+            "  -s SIZE              JS stack size limit (default: 1m)\n"
+            "  -l LEVEL             Log level: trace|debug|info|warn|error|fatal (default: info)\n"
+            "  --verify-sig PUBKEY  Verify app signature before startup\n"
+            "  -h                   Show this help\n"
+            "\n"
+            "Subcommands:\n"
+            "  keygen [prefix]      Generate Ed25519 keypair\n"
+            "  build [options] dir  Build standalone binary\n"
+            "  verify [dir]         Verify hull.sig signature\n"
+            "  inspect [dir]        Display app capabilities\n"
+            "  manifest [dir]       Extract app manifest\n"
+            "  test [options] dir   Run app tests\n"
+            "  new <name>           Scaffold new project\n"
+            "  dev [app] [options]  Hot-reload development server\n"
+            "  eject [dir] [-o out] Export standalone Makefile project\n"
             "\n"
             "SIZE accepts optional suffix: k (KB), m (MB), g (GB).\n",
             prog);
@@ -279,6 +292,7 @@ static int hull_serve(int argc, char **argv)
     const char *bind_addr = "127.0.0.1";
     const char *db_path = "data.db";
     const char *entry_point = NULL;
+    const char *verify_sig_path = NULL;
     long heap_limit = 0;    /* 0 = use default */
     long stack_limit = 0;   /* 0 = use default */
     long mem_limit = 0;     /* 0 = unlimited */
@@ -322,6 +336,8 @@ static int hull_serve(int argc, char **argv)
                 fprintf(stderr, "hull: invalid log level: %s\n", argv[i]);
                 return 1;
             }
+        } else if (strcmp(argv[i], "--verify-sig") == 0 && i + 1 < argc) {
+            verify_sig_path = argv[++i];
         } else if (strcmp(argv[i], "-h") == 0) {
             usage(argv[0]);
             return 0;
@@ -427,6 +443,16 @@ static int hull_serve(int argc, char **argv)
             goto cleanup_server;
         }
 
+        /* Verify app signature if requested */
+        if (verify_sig_path) {
+            if (hl_verify_startup(verify_sig_path, entry_point) != 0) {
+                log_error("[hull:c] signature verification failed — refusing to start");
+                hl_js_free(&js);
+                goto cleanup_server;
+            }
+            log_info("[hull:c] signature verified OK");
+        }
+
         /* Wire JS routes into Keel */
         if (wire_js_routes_server(&js, &server) != 0) {
             hl_js_free(&js);
@@ -482,6 +508,16 @@ static int hull_serve(int argc, char **argv)
             log_error("[hull:c] failed to load %s", entry_point);
             hl_lua_free(&lua);
             goto cleanup_server;
+        }
+
+        /* Verify app signature if requested */
+        if (verify_sig_path) {
+            if (hl_verify_startup(verify_sig_path, entry_point) != 0) {
+                log_error("[hull:c] signature verification failed — refusing to start");
+                hl_lua_free(&lua);
+                goto cleanup_server;
+            }
+            log_info("[hull:c] signature verified OK");
         }
 
         /* Extract manifest and configure capabilities */

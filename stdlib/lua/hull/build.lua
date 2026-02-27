@@ -125,7 +125,7 @@ local function generate_app_registry(app_dir, lua_files)
     return table.concat(parts, "\n")
 end
 
-local function sign_app(app_dir, lua_files, key_file)
+local function sign_app(app_dir, lua_files, key_file, extra_hashes)
     local key_data = read_file(key_file)
     if not key_data then
         tool.stderr("hull build: cannot read key file: " .. key_file .. "\n")
@@ -169,13 +169,28 @@ local function sign_app(app_dir, lua_files, key_file)
     local pk_hex = pk_data and pk_data:match("^(%x+)") or ""
 
     -- Write hull.sig
-    local hull_sig = json.encode({
+    local sig_table = {
         version = 1,
         files = file_hashes,
         manifest = manifest,
         signature = sig_hex,
         public_key = pk_hex,
-    })
+    }
+
+    -- Add platform/binary/trampoline hashes if provided
+    if extra_hashes then
+        if extra_hashes.platform_hash then
+            sig_table.platform_hash = extra_hashes.platform_hash
+        end
+        if extra_hashes.binary_hash then
+            sig_table.binary_hash = extra_hashes.binary_hash
+        end
+        if extra_hashes.trampoline_hash then
+            sig_table.trampoline_hash = extra_hashes.trampoline_hash
+        end
+    end
+
+    local hull_sig = json.encode(sig_table)
     write_file(app_dir .. "/hull.sig", hull_sig .. "\n")
     print("wrote " .. app_dir .. "/hull.sig")
 end
@@ -301,7 +316,24 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
 
     -- Sign if requested
     if opts.sign then
-        sign_app(opts.app_dir, lua_files, opts.sign)
+        local extra_hashes = {}
+
+        -- Compute platform_hash (SHA256 of libhull_platform.a)
+        local platform_data = read_file(platform_lib)
+        if platform_data then
+            extra_hashes.platform_hash = crypto.sha256(platform_data)
+        end
+
+        -- Compute trampoline_hash (SHA256 of app_main.c content)
+        extra_hashes.trampoline_hash = crypto.sha256(app_main)
+
+        -- Compute binary_hash (SHA256 of the linked output binary)
+        local binary_data = read_file(opts.output)
+        if binary_data then
+            extra_hashes.binary_hash = crypto.sha256(binary_data)
+        end
+
+        sign_app(opts.app_dir, lua_files, opts.sign, extra_hashes)
     end
 
     -- Cleanup
