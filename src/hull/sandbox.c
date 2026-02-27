@@ -25,7 +25,8 @@
 #if defined(__COSMOPOLITAN__)
 
 /* Cosmopolitan libc provides pledge() and unveil() natively. */
-#include <libc/calls/pledge.h>
+extern int pledge(const char *promises, const char *execpromises);
+extern int unveil(const char *path, const char *permissions);
 
 static int sb_supported(void) { return 1; }
 
