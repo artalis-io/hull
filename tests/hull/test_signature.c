@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <dirent.h>
 
 /* ── Helpers ──────────────────────────────────────────────────────── */
 
@@ -578,11 +579,27 @@ UTEST(hl_sig, canary_detection)
 
 /* ── Cleanup ──────────────────────────────────────────────────────── */
 
+/* Portable recursive delete (no shell dependency) */
+static int rmdir_recursive(const char *path)
+{
+    DIR *d = opendir(path);
+    if (!d) return unlink(path);
+
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
+            continue;
+        char child[512];
+        snprintf(child, sizeof(child), "%s/%s", path, ent->d_name);
+        rmdir_recursive(child);
+    }
+    closedir(d);
+    return rmdir(path);
+}
+
 UTEST(hl_sig, cleanup)
 {
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd), "rm -rf %s", test_dir);
-    int rc = system(cmd);
+    int rc = rmdir_recursive(test_dir);
     ASSERT_EQ(rc, 0);
 }
 
