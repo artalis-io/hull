@@ -553,6 +553,14 @@ SQLITE_CFLAGS := -std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-poi
                  -DSQLITE_THREADSAFE=1
 LOG_CFLAGS := -std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-pointer \
               -DLOG_USE_COLOR
+# Re-add runtime defines (the := above clobbers earlier += additions)
+ifeq ($(RUNTIME),js)
+  CFLAGS += -DHL_ENABLE_JS
+else ifeq ($(RUNTIME),lua)
+  CFLAGS += -DHL_ENABLE_LUA
+else
+  CFLAGS += -DHL_ENABLE_JS -DHL_ENABLE_LUA
+endif
 endif
 
 msan:
