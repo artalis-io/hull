@@ -14,7 +14,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* ── Hardcoded Artalis platform public key (from keys/artalis.pub) ── */
+/* ── Hardcoded gethull.dev platform public key (from keys/gethull.dev.pub) ── */
 /*
  * This is the trust root for platform signature verification.
  * Override at runtime with --platform-key <file>.

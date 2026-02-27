@@ -335,6 +335,12 @@ static int hull_serve(int argc, char **argv)
 #endif
     }
 
+    // cppcheck-suppress knownConditionTrueFalse
+    if (!rt || !rt->vt) {
+        log_error("[hull:c] no runtime available (compile with HL_ENABLE_LUA or HL_ENABLE_JS)");
+        goto cleanup_server;
+    }
+
     rt->db = db;
     rt->alloc = &alloc;
 

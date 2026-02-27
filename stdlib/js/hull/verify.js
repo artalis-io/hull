@@ -2,7 +2,7 @@
  * hull:verify — Verify app signature (dual-layer)
  *
  * Usage: hull verify [options] [app_dir]
- *   --platform-key <file>    Platform public key (default: hardcoded Artalis key)
+ *   --platform-key <file>    Platform public key (default: hardcoded gethull.dev key)
  *   --developer-key <file>   Developer public key (required for full verification)
  *
  * Reads package.sig (or hull.sig for backwards compat), verifies platform
@@ -13,7 +13,7 @@
 
 import { sha256, ed25519Verify } from "hull:crypto";
 
-const ARTALIS_PLATFORM_KEY = "0000000000000000000000000000000000000000000000000000000000000000";
+const GETHULL_DEV_PLATFORM_KEY = "0000000000000000000000000000000000000000000000000000000000000000";
 
 // Parse CLI args
 let appDir = ".";
@@ -66,7 +66,7 @@ let issues = 0;
 
 // ── Platform layer verification ────────────────────────────────────
 if (sig.platform?.signature && sig.platform?.public_key) {
-    const platformKeyHex = readKey(platformKeySource) ?? ARTALIS_PLATFORM_KEY;
+    const platformKeyHex = readKey(platformKeySource) ?? GETHULL_DEV_PLATFORM_KEY;
 
     if (sig.platform.public_key === platformKeyHex) {
         const platPayload = JSON.stringify(sig.platform.platforms);

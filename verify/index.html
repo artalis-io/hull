@@ -186,8 +186,8 @@ border:none;padding:0 4px;font-family:var(--sans)}
 (function() {
   "use strict";
 
-  // ── Hardcoded Artalis platform key ─────────────────────────────────
-  const ARTALIS_PLATFORM_KEY =
+  // ── Hardcoded gethull.dev platform key ──────────────────────────────
+  const GETHULL_DEV_PLATFORM_KEY =
     "0000000000000000000000000000000000000000000000000000000000000000";
 
   // ── State ──────────────────────────────────────────────────────────
@@ -246,7 +246,7 @@ border:none;padding:0 4px;font-family:var(--sans)}
     if (!sig.platform || !sig.platform.signature || !sig.platform.public_key)
       return { status: "missing" };
 
-    const platKey = platKeyOverride || ARTALIS_PLATFORM_KEY;
+    const platKey = platKeyOverride || GETHULL_DEV_PLATFORM_KEY;
     const keyMatch = sig.platform.public_key === platKey;
     const payload = canonicalStringify(sig.platform.platforms);
     let valid = false;
@@ -272,9 +272,9 @@ border:none;padding:0 4px;font-family:var(--sans)}
       }
     }
 
-    const isArtalis = sig.platform.public_key === ARTALIS_PLATFORM_KEY;
+    const isGethullDev = sig.platform.public_key === GETHULL_DEV_PLATFORM_KEY;
 
-    return { status: "present", valid, keyMatch, archs, canaryHex, isArtalis,
+    return { status: "present", valid, keyMatch, archs, canaryHex, isGethullDev,
              publicKey: sig.platform.public_key };
   }
 
@@ -390,9 +390,9 @@ border:none;padding:0 4px;font-family:var(--sans)}
     if (plat.status === "present") {
       checks++;
       if (plat.valid) {
-        if (plat.isArtalis && plat.keyMatch) {
+        if (plat.isGethullDev && plat.keyMatch) {
           addResult(platEl, "ok", "Platform Signature",
-            "VALID — Signed by Hull Platform (Artalis)");
+            "VALID — Signed by Hull Platform (gethull.dev)");
         } else if (plat.keyMatch) {
           addResult(platEl, "ok", "Platform Signature",
             "VALID — Signed by known platform key");
