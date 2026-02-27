@@ -140,10 +140,42 @@ Phase 7f: `hull test` subcommand ✓
 - [x] Refactored route wiring out of `main.c` into `runtime/lua.h` and `runtime/js.h`
 - [x] Unit tests: `tests/hull/cap/test_test.c` (planned)
 
-**Phase 8: Server-side Signature Verification**
-- [ ] Add `--verify-sig pubkey.pub` CLI flag to server mode
-- [ ] On startup: read `hull.sig`, verify Ed25519 against provided pubkey
-- [ ] Refuse to start if signature is invalid
+**Phase 8: Dual-Layer Signature Verification** ✓
+- [x] Dual-layer `package.sig` format: platform signature (inner) + app signature (outer)
+- [x] `--verify-sig pubkey.pub` CLI flag: verify both layers on startup, refuse to start if invalid
+- [x] Platform canary: `HULL_PLATFORM_CANARY` magic + integrity hash in binary
+- [x] Browser verifier (`verify/index.html`): offline Ed25519 + SHA-256, canary scanner
+- [x] `hull sign-platform` subcommand: sign platform libraries with per-arch hashes
+- [x] Platform public key pinning: hardcoded in CLI + browser tool
+
+**Phase 9: Trusted Rebuild Infrastructure**
+- [ ] Reproducible build verification service at `api.gethull.dev/ci/v1`
+- [ ] Build metadata attestation: `cc_version` + `flags` recorded in `package.sig`
+- [ ] Binary hash comparison: rebuild from source, compare against signed `binary_hash`
+- [ ] "Reproducible Build Verified" badge for passing apps
+- [ ] Self-hosted rebuild: run your own service, pin your own platform key
+
+Hull's architecture makes reproducible builds achievable now:
+
+1. **App developers cannot write C** — only Lua/JS source, HTML/CSS/JS static assets, WASM plugins
+2. **Platform binary is hash-pinned** — `platform.sig` locks the exact `libhull_platform.a` bytes
+3. **Trampoline is deterministic** — generated from template + app registry, hash in `package.sig`
+4. **Cosmopolitan produces deterministic output** — static linking, no ASLR, no timestamps
+5. **Build metadata is signed** — `cc_version` + `flags` in `package.sig`, attested by developer
+
+Trusted rebuild flow:
+```
+Developer submits: source files + manifest + signing key
+                            ↓
+api.gethull.dev/ci/v1:
+  1. Verify source hashes match package.sig
+  2. Rebuild with recorded cc_version + flags
+  3. Compare binary_hash
+  4. If match → "Reproducible Build Verified" badge
+  5. If mismatch → flag for investigation
+```
+
+A passing reproducible build check proves the developer **could not have** injected custom native code. The binary is provably just "Hull platform + declared source files."
 
 ### Build Tool — Future Enhancements
 

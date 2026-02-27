@@ -2,7 +2,7 @@
 -- hull.verify — Verify app signature (dual-layer)
 --
 -- Usage: hull verify [options] [app_dir]
---   --platform-key <file|url>   Platform public key (default: hardcoded Artalis key)
+--   --platform-key <file|url>   Platform public key (default: hardcoded gethull.dev key)
 --   --developer-key <file|url>  Developer public key (required for full verification)
 --
 -- Reads package.sig (or hull.sig for backwards compat), verifies platform
@@ -13,8 +13,8 @@
 
 local json = require("hull.json")
 
--- Hardcoded Artalis platform public key (from keys/artalis.pub)
-local ARTALIS_PLATFORM_KEY = "0000000000000000000000000000000000000000000000000000000000000000"
+-- Hardcoded gethull.dev platform public key (from keys/gethull.dev.pub)
+local GETHULL_DEV_PLATFORM_KEY = "0000000000000000000000000000000000000000000000000000000000000000"
 
 local function read_file(path)
     return tool.read_file(path)
@@ -93,7 +93,7 @@ local function main()
 
     -- ── Platform layer verification ────────────────────────────────
     if sig.platform and sig.platform.signature and sig.platform.public_key then
-        local platform_key_hex = read_key(opts.platform_key) or ARTALIS_PLATFORM_KEY
+        local platform_key_hex = read_key(opts.platform_key) or GETHULL_DEV_PLATFORM_KEY
 
         -- Check if platform key matches
         if sig.platform.public_key == platform_key_hex then
