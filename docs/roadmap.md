@@ -11,6 +11,12 @@
 - Keel HTTP server (epoll/kqueue/poll)
 - Cosmopolitan APE cross-platform builds
 - CI pipeline (Linux, macOS, ASan, MSan, static analysis, Cosmo) + benchmarks
+- Tool hardening: shell-free `tool.spawn` with compiler allowlist, `tool.find_files`, `tool.copy`, `tool.rmdir` with unveil path validation
+- Command module architecture: table-driven dispatcher (`src/hull/commands/`)
+- `hull test` subcommand: in-process test runner for Lua and JS apps (no TCP, direct router dispatch)
+- JS manifest parity: `app.manifest()` + sandbox enforcement for QuickJS apps
+- Cosmo sandbox test coverage: `sandbox_violation.c` compiles/runs under cosmocc
+- Self-build chain: `make self-build` proves hull→hull2→hull3 reproducibility
 
 ## Roadmap
 
@@ -90,31 +96,49 @@
 - [x] No-op on macOS (C-level validation handles it); native on Cosmopolitan builds
 - [x] E2E sandbox tests + standalone violation test for CI
 
-**Phase 7: Post-MVP Hardening**
+**Phase 7: Post-MVP Hardening** ✓
 
-Phase 7a: Cosmo sandbox test coverage
-- [ ] Add `__COSMOPOLITAN__` code path to `tests/sandbox_violation.c` (use cosmo's native `<libc/calls/pledge.h>`)
-- [ ] Refactor platform detection: `SANDBOX_SUPPORTED` + `HAS_PLEDGE_MODE` macros
-- [ ] Update `tests/e2e_sandbox.sh` to compile violation test with cosmocc (no polyfill objects needed)
+Phase 7a: Cosmo sandbox test coverage ✓
+- [x] Add `__COSMOPOLITAN__` code path to `tests/sandbox_violation.c` (extern decls for pledge/unveil)
+- [x] Refactor platform detection: `SANDBOX_SUPPORTED` + `HAS_PLEDGE_MODE` macros
+- [x] Update `tests/e2e_sandbox.sh` to compile violation test with cosmocc (no polyfill objects needed)
 
-Phase 7b: QuickJS manifest parity
-- [ ] Add `app.manifest(obj)` + `app.getManifest()` to JS `hull:app` module (`src/hull/runtime/js/modules.c`)
-- [ ] Add `hl_manifest_extract_js()` to `src/hull/manifest.c` — read `globalThis.__hull_manifest` into HlManifest
-- [ ] Wire manifest extraction + sandbox into `main.c` QuickJS path (after `wire_js_routes`, before event loop)
-- [ ] Unit tests in `tests/hull/runtime/js/test_js.c`, extend `e2e_sandbox.sh` for JS manifest app
+Phase 7b: QuickJS manifest parity ✓
+- [x] Add `app.manifest(obj)` + `app.getManifest()` to JS `hull:app` module (`src/hull/runtime/js/modules.c`)
+- [x] Add `hl_manifest_extract_js()` to `src/hull/manifest.c` — read `globalThis.__hull_manifest` into HlManifest
+- [x] Wire manifest extraction + sandbox into `main.c` QuickJS path (after `wire_js_routes`, before event loop)
+- [x] Unit tests in `tests/hull/runtime/js/test_js.c`, extend `e2e_sandbox.sh` for JS manifest app
 
-Phase 7c: Tool mode hardening — `hull.tool` module
-- [ ] Create `include/hull/cap/tool.h` + `src/hull/cap/tool.c` — explicit tool API:
-  - `tool.exec(cmd)` → `system()`, `tool.read(cmd)` → `popen()`, `tool.tmpdir()` → `mkdtemp()`
-  - `tool.read_file(path)`, `tool.write_file(path,data)`, `tool.file_exists(path)`
-  - `tool.stderr(msg)`, `tool.exit(code)`, `tool.loadfile(path)`
-- [ ] Modify `runtime.c` tool mode init: selective libs + `tool` global instead of `luaL_openlibs()`
-- [ ] Update all Lua tool scripts (`build.lua`, `manifest.lua`, `verify.lua`, `inspect.lua`) to use `tool.*`
+Phase 7c: Tool mode hardening ✓
+- [x] Shell-free `tool.spawn(argv)` with compiler allowlist (cc, gcc, clang, cosmocc, cosmoar, ar) — no `system()`/`popen()`
+- [x] `tool.find_files(dir, pattern)` — pure C recursive `opendir`/`fnmatch`, skips dotdirs/vendor/node_modules
+- [x] `tool.copy(src, dst)`, `tool.rmdir(path)` — pure C, no shell
+- [x] Unveil path validation on all filesystem tool functions (mandatory, not optional)
+- [x] Configurable compiler via `tool.cc` (default: `cosmocc`, overridable with `--cc`)
+- [x] Removed `tool.exec()` and `tool.read()` entirely
+- [x] Migrated `build.lua` to shell-free tool API
+- [x] Unit tests: `tests/hull/cap/test_tool.c` (allowlist, find_files, copy, rmdir, unveil enforcement)
 
-Phase 7d: Self-build test
-- [ ] Create `tests/fixtures/null_app/app.lua` (minimal fixture)
-- [ ] Add `make self-build` target: hull→hull2→hull3, verify keygen at each step
-- [ ] Add Step 13 to `tests/e2e_build.sh`: self-build chain test
+Phase 7d: Self-build test ✓
+- [x] Create `tests/fixtures/null_app/app.lua` (minimal fixture)
+- [x] Add `make self-build` target: hull→hull2→hull3, verify keygen at each step
+- [x] Add Step 13 to `tests/e2e_build.sh`: self-build chain test
+
+Phase 7e: Command module architecture ✓
+- [x] Table-driven dispatcher in `src/hull/commands/dispatch.c` — one line per command
+- [x] Each command in its own `.c`/`.h` under `src/hull/commands/` (keygen, build, verify, inspect, manifest, test)
+- [x] `hull_main()` reduced to `hl_command_dispatch()` + fallback to `hull_serve()`
+- [x] Unit tests: `tests/hull/commands/test_dispatch.c`
+
+Phase 7f: `hull test` subcommand ✓
+- [x] In-process test runner — no TCP, no pipes, direct `kl_router_match` + handler dispatch
+- [x] Supports both Lua (`test_*.lua`) and JS (`test_*.js`) test files
+- [x] Recursive test discovery via `hl_tool_find_files()`
+- [x] `test("desc", fn)` registration + `test.get/post/put/delete/patch` HTTP dispatch
+- [x] `test.eq(a, b)`, `test.ok(val)`, `test.err(fn, pattern)` assertions
+- [x] `:memory:` SQLite for test isolation
+- [x] Refactored route wiring out of `main.c` into `runtime/lua.h` and `runtime/js.h`
+- [x] Unit tests: `tests/hull/cap/test_test.c` (planned)
 
 **Phase 8: Server-side Signature Verification**
 - [ ] Add `--verify-sig pubkey.pub` CLI flag to server mode
@@ -125,7 +149,7 @@ Phase 7d: Self-build test
 
 - [ ] `hull new` — project scaffolding
 - [ ] `hull dev` — hot-reload development server
-- [ ] `hull test` — run app tests
+- [x] `hull test` — in-process test runner (Lua + JS)
 - [ ] License key system (Ed25519 offline verification)
 - [ ] Database backup/restore
 - [ ] `hull eject` — export to standalone Makefile project
