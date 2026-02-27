@@ -18,6 +18,7 @@
 #define HL_SANDBOX_H
 
 #include "hull/manifest.h"
+#include "hull/cap/tool.h"
 
 /*
  * Apply kernel sandbox based on manifest capabilities.
@@ -29,5 +30,22 @@
  * Returns 0 on success, -1 on error (logged).
  */
 int hl_sandbox_apply(const HlManifest *manifest, const char *db_path);
+
+/*
+ * Initialize tool-mode unveil context for `hull build`.
+ * Populates the HlToolUnveilCtx with allowed paths for build operations.
+ * Also calls kernel-level unveil() on supported platforms.
+ *
+ *   ctx           — tool unveil context to populate
+ *   app_dir       — application source directory (read)
+ *   output_dir    — directory for output binary (write/create)
+ *   platform_dir  — directory containing libhull_platform.a (read)
+ *
+ * Returns 0 on success, -1 on error.
+ */
+int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
+                         const char *app_dir,
+                         const char *output_dir,
+                         const char *platform_dir);
 
 #endif /* HL_SANDBOX_H */

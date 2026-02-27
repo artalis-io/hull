@@ -60,6 +60,75 @@ static int sb_supported(void) { return 0; }
 
 #endif /* platform dispatch */
 
+/* ── Tool-mode sandbox ─────────────────────────────────────────────── */
+
+int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
+                         const char *app_dir,
+                         const char *output_dir,
+                         const char *platform_dir)
+{
+    if (!ctx) return -1;
+
+    hl_tool_unveil_init(ctx);
+
+    /* App sources: read-only */
+    if (app_dir)
+        hl_tool_unveil_add(ctx, app_dir, "r");
+
+    /* Temp directory: read/write/create (build artifacts) */
+    hl_tool_unveil_add(ctx, "/tmp", "rwc");
+
+    /* System compilers and headers */
+    hl_tool_unveil_add(ctx, "/usr", "rx");
+
+#ifdef __linux__
+    hl_tool_unveil_add(ctx, "/lib", "r");
+    hl_tool_unveil_add(ctx, "/lib64", "r");
+#endif
+
+#ifdef __APPLE__
+    /* Homebrew compilers and Xcode CLT */
+    hl_tool_unveil_add(ctx, "/opt", "rx");
+    hl_tool_unveil_add(ctx, "/Library", "r");
+#endif
+
+    /* Output directory: write/create */
+    if (output_dir)
+        hl_tool_unveil_add(ctx, output_dir, "rwc");
+
+    /* Platform library: read */
+    if (platform_dir)
+        hl_tool_unveil_add(ctx, platform_dir, "r");
+
+    hl_tool_unveil_seal(ctx);
+
+    /* Also apply kernel-level unveil on supported platforms */
+    if (sb_supported()) {
+        if (app_dir)     unveil(app_dir, "r");
+        unveil("/tmp", "rwc");
+        unveil("/usr", "rx");
+#ifdef __linux__
+        unveil("/lib", "r");
+        unveil("/lib64", "r");
+#endif
+#ifdef __APPLE__
+        unveil("/opt", "rx");
+        unveil("/Library", "r");
+#endif
+        if (output_dir)   unveil(output_dir, "rwc");
+        if (platform_dir) unveil(platform_dir, "r");
+        unveil(NULL, NULL); /* seal */
+
+        /* Pledge for tool mode: needs proc + exec for fork/execvp */
+        pledge("stdio rpath wpath cpath proc exec fattr", NULL);
+    }
+
+    log_info("[sandbox] tool mode applied (%d unveiled paths)",
+             ctx->count);
+
+    return 0;
+}
+
 /* ── Public API ────────────────────────────────────────────────────── */
 
 int hl_sandbox_apply(const HlManifest *manifest, const char *db_path)

@@ -16,6 +16,10 @@
 #include "hull/cap/http.h"
 #include "quickjs.h"
 
+#include <keel/router.h>
+#include <keel/response.h>
+#include <keel/request.h>
+
 #include <sh_arena.h>
 
 #include "log.h"
@@ -549,4 +553,72 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     hl_js_run_jobs(js);
 
     return result;
+}
+
+/* ── Route wiring ──────────────────────────────────────────────────── */
+
+void hl_js_keel_handler(KlRequest *req, KlResponse *res, void *user_data)
+{
+    HlJSRoute *route = (HlJSRoute *)user_data;
+    if (hl_js_dispatch(route->js, route->handler_id, req, res) != 0) {
+        kl_response_status(res, 500);
+        kl_response_header(res, "Content-Type", "text/plain");
+        kl_response_body(res, "Internal Server Error", 21);
+    }
+}
+
+int hl_js_wire_routes(HlJS *js, KlRouter *router)
+{
+    JSContext *ctx = js->ctx;
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue defs = JS_GetPropertyStr(ctx, global, "__hull_route_defs");
+
+    if (JS_IsUndefined(defs) || !JS_IsArray(ctx, defs)) {
+        JS_FreeValue(ctx, defs);
+        JS_FreeValue(ctx, global);
+        log_error("[hull:c] no routes registered");
+        return -1;
+    }
+
+    JSValue len_val = JS_GetPropertyStr(ctx, defs, "length");
+    int32_t count = 0;
+    JS_ToInt32(ctx, &count, len_val);
+    JS_FreeValue(ctx, len_val);
+
+    for (int32_t i = 0; i < count; i++) {
+        JSValue def = JS_GetPropertyUint32(ctx, defs, (uint32_t)i);
+        if (JS_IsUndefined(def))
+            continue;
+
+        JSValue method_val = JS_GetPropertyStr(ctx, def, "method");
+        JSValue pattern_val = JS_GetPropertyStr(ctx, def, "pattern");
+        JSValue id_val = JS_GetPropertyStr(ctx, def, "handler_id");
+
+        const char *method_str = JS_ToCString(ctx, method_val);
+        const char *pattern = JS_ToCString(ctx, pattern_val);
+        int32_t handler_id = 0;
+        JS_ToInt32(ctx, &handler_id, id_val);
+
+        if (method_str && pattern) {
+            HlJSRoute *route = malloc(sizeof(HlJSRoute));
+            if (route) {
+                route->js = js;
+                route->handler_id = handler_id;
+                kl_router_add(router, method_str, pattern,
+                              hl_js_keel_handler, route, NULL);
+            }
+        }
+
+        if (pattern) JS_FreeCString(ctx, pattern);
+        if (method_str) JS_FreeCString(ctx, method_str);
+        JS_FreeValue(ctx, id_val);
+        JS_FreeValue(ctx, pattern_val);
+        JS_FreeValue(ctx, method_val);
+        JS_FreeValue(ctx, def);
+    }
+
+    JS_FreeValue(ctx, defs);
+    JS_FreeValue(ctx, global);
+
+    return 0;
 }
