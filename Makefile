@@ -370,9 +370,24 @@ PLATFORM_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OB
 
 PLATFORM_LIB := $(BUILDDIR)/libhull_platform.a
 
-$(PLATFORM_LIB): $(PLATFORM_OBJS) $(KEEL_LIB) | $(BUILDDIR)
+# Platform canary — embeds an integrity hash so the browser verifier can
+# detect whether the Hull platform is actually present in the binary.
+CANARY_C    := $(BUILDDIR)/platform_canary.c
+CANARY_OBJ  := $(BUILDDIR)/platform_canary.o
+CANARY_HASH := $(BUILDDIR)/platform_canary_hash
+
+$(CANARY_C): $(PLATFORM_OBJS) | $(BUILDDIR)
+	@hash=$$(cat $(sort $(PLATFORM_OBJS)) | shasum -a 256 | cut -d' ' -f1) && \
+	echo "$$hash" > $(CANARY_HASH) && \
+	bytes=$$(echo "$$hash" | fold -w2 | awk '{printf "%s0x%s",(NR>1?",":""),$$0}') && \
+	printf '/* Auto-generated platform canary — do not edit */\n#include <stdint.h>\nconst struct { char magic[24]; uint8_t integrity[32]; } hl_platform_canary = {\n    "HULL_PLATFORM_CANARY",\n    {%s}\n};\n' "$$bytes" > $@
+
+$(CANARY_OBJ): $(CANARY_C) | $(BUILDDIR)
+	$(CC) -std=c11 -O2 -w -c -o $@ $<
+
+$(PLATFORM_LIB): $(PLATFORM_OBJS) $(CANARY_OBJ) $(KEEL_LIB) | $(BUILDDIR)
 	@rm -f $@
-	$(AR) rcs $@ $(PLATFORM_OBJS)
+	$(AR) rcs $@ $(PLATFORM_OBJS) $(CANARY_OBJ)
 	@# Merge keel objects into the platform archive
 	@tmpdir=$$(mktemp -d) && \
 		cd $$tmpdir && \
