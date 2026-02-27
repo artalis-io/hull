@@ -122,13 +122,11 @@ static const char *dev_detect_entry(void)
 int hl_cmd_dev(int argc, char **argv, const char *hull_exe)
 {
     const char *entry_point = NULL;
-    int passthrough_start = -1;
 
     /* Parse args: first positional is the entry point, rest are passthrough */
     for (int i = 1; i < argc; i++) {
         if (argv[i][0] != '-') {
             entry_point = argv[i];
-            passthrough_start = i;
             break;
         }
         /* Pass through flags like -p, -b, -d etc. */

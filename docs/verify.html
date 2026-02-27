@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src https:">
+<title>Hull Signature Verifier</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#fafafa;--fg:#1a1a1a;--card:#fff;--border:#e0e0e0;--muted:#666;
+--green:#16a34a;--green-bg:#dcfce7;--yellow:#ca8a04;--yellow-bg:#fef9c3;
+--red:#dc2626;--red-bg:#fee2e2;--blue:#2563eb;--blue-bg:#dbeafe;
+--grey:#9ca3af;--grey-bg:#f3f4f6;--mono:"SF Mono","Fira Code","Cascadia Code",monospace;
+--sans:system-ui,-apple-system,sans-serif;--radius:8px}
+@media(prefers-color-scheme:dark){:root{--bg:#111;--fg:#e5e5e5;--card:#1a1a1a;
+--border:#333;--muted:#999;--green-bg:#052e16;--yellow-bg:#422006;--red-bg:#450a0a;
+--blue-bg:#172554;--grey-bg:#1f2937}}
+body{font-family:var(--sans);background:var(--bg);color:var(--fg);line-height:1.5;
+padding:1rem;max-width:800px;margin:0 auto}
+h1{font-size:1.4rem;font-weight:700;margin-bottom:0.25rem}
+.subtitle{color:var(--muted);font-size:0.85rem;margin-bottom:1.5rem}
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);
+padding:1rem;margin-bottom:1rem}
+.card h2{font-size:1rem;font-weight:600;margin-bottom:0.75rem}
+.drop-zone{border:2px dashed var(--border);border-radius:var(--radius);padding:2rem 1rem;
+text-align:center;cursor:pointer;transition:border-color 0.2s,background 0.2s;
+color:var(--muted);font-size:0.9rem}
+.drop-zone:hover,.drop-zone.drag-over{border-color:var(--blue);background:var(--blue-bg)}
+.drop-zone.loaded{border-color:var(--green);border-style:solid}
+.drop-zone input[type=file]{display:none}
+.row{display:flex;gap:0.75rem;flex-wrap:wrap}
+.row>*{flex:1;min-width:200px}
+.status-banner{padding:0.75rem 1rem;border-radius:var(--radius);font-weight:600;
+text-align:center;margin-bottom:1rem;display:none}
+.status-banner.pass{display:block;background:var(--green-bg);color:var(--green)}
+.status-banner.fail{display:block;background:var(--red-bg);color:var(--red)}
+.status-banner.warn{display:block;background:var(--yellow-bg);color:var(--yellow)}
+.result{margin:0.5rem 0;padding:0.5rem 0.75rem;border-radius:6px;font-size:0.85rem;
+font-family:var(--mono);word-break:break-all}
+.result.ok{background:var(--green-bg);color:var(--green)}
+.result.bad{background:var(--red-bg);color:var(--red)}
+.result.warn{background:var(--yellow-bg);color:var(--yellow)}
+.result.info{background:var(--grey-bg);color:var(--muted)}
+.result label{font-family:var(--sans);font-weight:600;display:block;margin-bottom:2px;
+font-size:0.8rem;text-transform:uppercase;letter-spacing:0.03em}
+.key-input{display:flex;gap:0.5rem;margin-top:0.5rem}
+.key-input input{flex:1;font-family:var(--mono);font-size:0.8rem;padding:0.4rem 0.6rem;
+border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--fg)}
+.key-input button{padding:0.4rem 0.8rem;border:1px solid var(--border);border-radius:6px;
+background:var(--card);color:var(--fg);cursor:pointer;font-size:0.8rem;white-space:nowrap}
+.key-input button:hover{background:var(--blue-bg);border-color:var(--blue)}
+details{margin-top:0.5rem}
+summary{cursor:pointer;font-size:0.85rem;color:var(--muted);padding:0.25rem 0}
+table{width:100%;border-collapse:collapse;font-size:0.8rem;margin-top:0.5rem}
+th,td{padding:0.35rem 0.5rem;text-align:left;border-bottom:1px solid var(--border)}
+th{font-weight:600;color:var(--muted);text-transform:uppercase;font-size:0.7rem;
+letter-spacing:0.05em}
+.cap-risk{font-weight:600;font-size:0.75rem;padding:2px 6px;border-radius:4px}
+.cap-risk.low{color:var(--green);background:var(--green-bg)}
+.cap-risk.med{color:var(--yellow);background:var(--yellow-bg)}
+.cap-risk.high{color:var(--red);background:var(--red-bg)}
+.file-hash{font-family:var(--mono);font-size:0.75rem;color:var(--muted)}
+.file-status{font-weight:600;font-size:0.75rem}
+.file-status.match{color:var(--green)}
+.file-status.mismatch{color:var(--red)}
+.file-status.pending{color:var(--grey)}
+.section-label{font-size:0.75rem;color:var(--muted);text-transform:uppercase;
+letter-spacing:0.05em;font-weight:600;margin:0.75rem 0 0.25rem}
+#results{display:none}
+.copy-btn{font-size:0.7rem;cursor:pointer;color:var(--blue);background:none;
+border:none;padding:0 4px;font-family:var(--sans)}
+.copy-btn:hover{text-decoration:underline}
+.trust-explainer{font-size:0.8rem;line-height:1.6;color:var(--muted)}
+.trust-explainer strong{color:var(--fg)}
+.trust-explainer ul{margin:0.5rem 0 0.5rem 1.2rem}
+</style>
+</head>
+<body>
+<h1>Hull Signature Verifier</h1>
+<p class="subtitle">All verification happens locally in your browser. No data is sent anywhere.</p>
+
+<div id="banner" class="status-banner"></div>
+
+<div class="row">
+  <div class="card">
+    <h2>1. Signature</h2>
+    <div class="drop-zone" id="sig-drop">
+      <p>Drop <strong>package.sig</strong> here</p>
+      <p style="font-size:0.75rem;margin-top:4px">(or hull.sig)</p>
+      <input type="file" id="sig-file" accept=".sig,.json">
+    </div>
+  </div>
+  <div class="card">
+    <h2>2. Binary (optional)</h2>
+    <div class="drop-zone" id="bin-drop">
+      <p>Drop <strong>APE binary</strong> here</p>
+      <p style="font-size:0.75rem;margin-top:4px">Verifies binary hash + canary</p>
+      <input type="file" id="bin-file">
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Developer Key</h2>
+  <p style="font-size:0.85rem;color:var(--muted)">
+    Provide the developer's public key to verify identity.
+  </p>
+  <div class="key-input">
+    <input type="text" id="dev-key" placeholder="Paste 64-hex key, drop .pub file, or paste URL">
+    <button id="dev-key-btn">Apply</button>
+  </div>
+  <div class="drop-zone" id="devkey-drop" style="margin-top:0.5rem;padding:1rem;font-size:0.8rem">
+    Or drop a <strong>.pub</strong> file here
+    <input type="file" id="devkey-file" accept=".pub,.txt">
+  </div>
+</div>
+
+<div id="results">
+  <div class="section-label">Platform Layer</div>
+  <div id="plat-results"></div>
+
+  <div class="section-label">Application Layer</div>
+  <div id="app-results"></div>
+
+  <div id="cap-section" style="display:none">
+    <div class="section-label">Capabilities</div>
+    <div id="cap-results"></div>
+  </div>
+
+  <div id="files-section" style="display:none">
+    <div class="section-label">Files</div>
+    <div id="file-results"></div>
+    <div class="card" style="margin-top:0.5rem">
+      <div class="drop-zone" id="src-drop" style="padding:1rem;font-size:0.8rem">
+        Drop <strong>source files</strong> to verify hashes
+        <input type="file" id="src-files" multiple>
+      </div>
+    </div>
+  </div>
+
+  <details style="margin-top:1rem">
+    <summary>Advanced: Override platform key</summary>
+    <div class="key-input" style="margin-top:0.5rem">
+      <input type="text" id="plat-key-override" placeholder="Paste 64-hex platform public key">
+      <button id="plat-key-btn">Apply</button>
+    </div>
+  </details>
+
+  <details style="margin-top:0.5rem">
+    <summary>Raw signature data</summary>
+    <pre id="raw-sig" style="font-size:0.7rem;overflow:auto;max-height:400px;
+      padding:0.75rem;background:var(--grey-bg);border-radius:6px;margin-top:0.5rem;
+      white-space:pre-wrap;word-break:break-all"></pre>
+  </details>
+
+  <details style="margin-top:0.5rem">
+    <summary>What does this prove?</summary>
+    <div class="trust-explainer" style="margin-top:0.5rem">
+      <ul>
+        <li><strong>Platform signature + key pin</strong> — Platform libraries are authentic,
+          signed by the known platform developer. Does NOT prove the binary actually uses them.</li>
+        <li><strong>Platform canary</strong> — Binary contains the Hull platform code (high
+          confidence). Raising the bar significantly — faking requires knowing the platform's
+          integrity hash. Not foolproof.</li>
+        <li><strong>App signature + key check</strong> — Binary + source + manifest + build
+          info are authentic, signed by the stated developer. Does NOT prove developer intent
+          is honest.</li>
+        <li><strong>Binary hash match</strong> — Uploaded file is the one that was signed.
+          Does NOT prove how it was built.</li>
+      </ul>
+      <p style="margin-top:0.5rem">
+        <strong>Future improvements:</strong> Reproducible builds (anyone can re-build
+        and compare binary_hash) and trusted build services (platform developer runs the build).
+      </p>
+    </div>
+  </details>
+</div>
+
+<!-- tweetnacl-js v1.0.3 (public domain) — minified, Ed25519 only subset inlined -->
+<script>
+/* tweetnacl-js v1.0.3 — public domain — https://tweetnacl.js.org */
+!function(r){"use strict";var t,n=new Uint8Array(16),e=new Uint8Array([9,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]),o=new Uint8Array(32),i=r.nacl={};function h(r,t){if(!r)throw new Error("nacl prng not set");r(t,t.length)}function a(r,t){return r<<t|r>>>32-t}function f(r,t,n,e){r[t]=n>>24&255,r[t+1]=n>>16&255,r[t+2]=n>>8&255,r[t+3]=255&n,r[t+4]=e>>24&255,r[t+5]=e>>16&255,r[t+6]=e>>8&255,r[t+7]=255&e}function s(){return[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}var u=new Float64Array([1]),c=new Float64Array([56129,1]),y=new Float64Array([30883,4953,19914,30187,55467,16705,2637,112,59544,30585,16505,36039,65139,11119,27886,20995]),l=new Float64Array([61785,9906,39828,60374,45398,33411,5274,224,53552,61171,33010,6542,64743,22239,55772,9222]),p=new Float64Array([54554,36645,11616,51542,42930,38547,21243,8612,22082,18989,62299,28174,60741,32694,26571,45119]);function v(){return s()}function b(r,t){var n;for(n=0;n<16;n++)if(r[n]!==t[n])return-1;return 0}function g(r,t,n,e){for(var o,i=255&r[t+0]|(255&r[t+1])<<8|(255&r[t+2])<<16|(255&r[t+3])<<24,h=255&n[e+0]|(255&n[e+1])<<8|(255&n[e+2])<<16|(255&n[e+3])<<24,f=0,s=0;s<32;s++){var u=r[t+s];o=(u^n[e+s])-1>>>8,f|=o&(u-n[e+s])}return(1&(f>>>8|i^h)-1)-1}function w(r,t,n,e){for(var o=0,i=0;i<e;i++)o|=r[t+i]^n[i];return(1&o-1>>>8)-1}function A(r,t,n,e){!function(r,t,n,e){for(var o,i=255&e[0]|(255&e[1])<<8|(255&e[2])<<16|(255&e[3])<<24,h=255&n[0]|(255&n[1])<<8|(255&n[2])<<16|(255&n[3])<<24,f=255&n[4]|(255&n[5])<<8|(255&n[6])<<16|(255&n[7])<<24,s=255&n[8]|(255&n[9])<<8|(255&n[10])<<16|(255&n[11])<<24,u=255&n[12]|(255&n[13])<<8|(255&n[14])<<16|(255&n[15])<<24,c=255&e[4]|(255&e[5])<<8|(255&e[6])<<16|(255&e[7])<<24,y=255&t[0]|(255&t[1])<<8|(255&t[2])<<16|(255&t[3])<<24,l=255&t[4]|(255&t[5])<<8|(255&t[6])<<16|(255&t[7])<<24,p=255&t[8]|(255&t[9])<<8|(255&t[10])<<16|(255&t[11])<<24,v=255&t[12]|(255&t[13])<<8|(255&t[14])<<16|(255&t[15])<<24,b=255&e[8]|(255&e[9])<<8|(255&e[10])<<16|(255&e[11])<<24,g=255&n[16]|(255&n[17])<<8|(255&n[18])<<16|(255&n[19])<<24,w=255&n[20]|(255&n[21])<<8|(255&n[22])<<16|(255&n[23])<<24,A=255&n[24]|(255&n[25])<<8|(255&n[26])<<16|(255&n[27])<<24,_=255&n[28]|(255&n[29])<<8|(255&n[30])<<16|(255&n[31])<<24,U=255&e[12]|(255&e[13])<<8|(255&e[14])<<16|(255&e[15])<<24,E=i,d=h,x=f,M=s,m=u,B=c,S=y,k=l,K=p,Y=v,L=b,T=g,z=w,R=A,P=_,N=U,O=0;O<20;O+=2)E^=(o=(z^=(o=(K^=(o=(m^=(o=E+z|0)<<7|o>>>25)+E|0)<<9|o>>>23)+m|0)<<13|o>>>19)+K|0)<<18|o>>>14,B^=(o=(d^=(o=(R^=(o=(Y^=(o=B+d|0)<<7|o>>>25)+B|0)<<9|o>>>23)+Y|0)<<13|o>>>19)+R|0)<<18|o>>>14,L^=(o=(S^=(o=(x^=(o=(P^=(o=L+S|0)<<7|o>>>25)+L|0)<<9|o>>>23)+P|0)<<13|o>>>19)+x|0)<<18|o>>>14,N^=(o=(T^=(o=(k^=(o=(M^=(o=N+T|0)<<7|o>>>25)+N|0)<<9|o>>>23)+M|0)<<13|o>>>19)+k|0)<<18|o>>>14,E^=(o=(M^=(o=(x^=(o=(d^=(o=E+M|0)<<7|o>>>25)+E|0)<<9|o>>>23)+d|0)<<13|o>>>19)+x|0)<<18|o>>>14,B^=(o=(m^=(o=(k^=(o=(S^=(o=B+m|0)<<7|o>>>25)+B|0)<<9|o>>>23)+S|0)<<13|o>>>19)+k|0)<<18|o>>>14,L^=(o=(Y^=(o=(K^=(o=(T^=(o=L+Y|0)<<7|o>>>25)+L|0)<<9|o>>>23)+T|0)<<13|o>>>19)+K|0)<<18|o>>>14,N^=(o=(P^=(o=(R^=(o=(z^=(o=N+P|0)<<7|o>>>25)+N|0)<<9|o>>>23)+z|0)<<13|o>>>19)+R|0)<<18|o>>>14;r[0]=E+i>>>0&255,r[1]=E+i>>>8&255,r[2]=E+i>>>16&255,r[3]=E+i>>>24&255,r[4]=B+c>>>0&255,r[5]=B+c>>>8&255,r[6]=B+c>>>16&255,r[7]=B+c>>>24&255,r[8]=L+b>>>0&255,r[9]=L+b>>>8&255,r[10]=L+b>>>16&255,r[11]=L+b>>>24&255,r[12]=N+U>>>0&255,r[13]=N+U>>>8&255,r[14]=N+U>>>16&255,r[15]=N+U>>>24&255,r[16]=S+y>>>0&255,r[17]=S+y>>>8&255,r[18]=S+y>>>16&255,r[19]=S+y>>>24&255,r[20]=k+l>>>0&255,r[21]=k+l>>>8&255,r[22]=k+l>>>16&255,r[23]=k+l>>>24&255,r[24]=K+p>>>0&255,r[25]=K+p>>>8&255,r[26]=K+p>>>16&255,r[27]=K+p>>>24&255,r[28]=Y+v>>>0&255,r[29]=Y+v>>>8&255,r[30]=Y+v>>>16&255,r[31]=Y+v>>>24&255,r[32]=m+u>>>0&255,r[33]=m+u>>>8&255,r[34]=m+u>>>16&255,r[35]=m+u>>>24&255,r[36]=d+h>>>0&255,r[37]=d+h>>>8&255,r[38]=d+h>>>16&255,r[39]=d+h>>>24&255,r[40]=x+f>>>0&255,r[41]=x+f>>>8&255,r[42]=x+f>>>16&255,r[43]=x+f>>>24&255,r[44]=M+s>>>0&255,r[45]=M+s>>>8&255,r[46]=M+s>>>16&255,r[47]=M+s>>>24&255,r[48]=T+g>>>0&255,r[49]=T+g>>>8&255,r[50]=T+g>>>16&255,r[51]=T+g>>>24&255,r[52]=z+w>>>0&255,r[53]=z+w>>>8&255,r[54]=z+w>>>16&255,r[55]=z+w>>>24&255,r[56]=R+A>>>0&255,r[57]=R+A>>>8&255,r[58]=R+A>>>16&255,r[59]=R+A>>>24&255,r[60]=P+_>>>0&255,r[61]=P+_>>>8&255,r[62]=P+_>>>16&255,r[63]=P+_>>>24&255}(r,t,n,e)}var _=new Uint8Array([101,120,112,97,110,100,32,51,50,45,98,121,116,101,32,107]);function U(r,t,n,e){!function(r,t,n,e){for(var o,i=255&e[0]|(255&e[1])<<8|(255&e[2])<<16|(255&e[3])<<24,h=255&n[0]|(255&n[1])<<8|(255&n[2])<<16|(255&n[3])<<24,f=255&n[4]|(255&n[5])<<8|(255&n[6])<<16|(255&n[7])<<24,s=255&n[8]|(255&n[9])<<8|(255&n[10])<<16|(255&n[11])<<24,u=255&n[12]|(255&n[13])<<8|(255&n[14])<<16|(255&n[15])<<24,c=255&e[4]|(255&e[5])<<8|(255&e[6])<<16|(255&e[7])<<24,y=255&t[0]|(255&t[1])<<8|(255&t[2])<<16|(255&t[3])<<24,l=255&t[4]|(255&t[5])<<8|(255&t[6])<<16|(255&t[7])<<24,p=255&t[8]|(255&t[9])<<8|(255&t[10])<<16|(255&t[11])<<24,v=255&t[12]|(255&t[13])<<8|(255&t[14])<<16|(255&t[15])<<24,b=255&e[8]|(255&e[9])<<8|(255&e[10])<<16|(255&e[11])<<24,g=255&n[16]|(255&n[17])<<8|(255&n[18])<<16|(255&n[19])<<24,w=255&n[20]|(255&n[21])<<8|(255&n[22])<<16|(255&n[23])<<24,A=255&n[24]|(255&n[25])<<8|(255&n[26])<<16|(255&n[27])<<24,_=255&n[28]|(255&n[29])<<8|(255&n[30])<<16|(255&n[31])<<24,U=255&e[12]|(255&e[13])<<8|(255&e[14])<<16|(255&e[15])<<24,E=0;E<20;E+=2)i^=(o=(w^=(o=(p^=(o=(u^=(o=i+w|0)<<7|o>>>25)+i|0)<<9|o>>>23)+u|0)<<13|o>>>19)+p|0)<<18|o>>>14,c^=(o=(h^=(o=(A^=(o=(v^=(o=c+h|0)<<7|o>>>25)+c|0)<<9|o>>>23)+v|0)<<13|o>>>19)+A|0)<<18|o>>>14,b^=(o=(y^=(o=(f^=(o=(_^=(o=b+y|0)<<7|o>>>25)+b|0)<<9|o>>>23)+_|0)<<13|o>>>19)+f|0)<<18|o>>>14,U^=(o=(g^=(o=(l^=(o=(s^=(o=U+g|0)<<7|o>>>25)+U|0)<<9|o>>>23)+s|0)<<13|o>>>19)+l|0)<<18|o>>>14,i^=(o=(s^=(o=(f^=(o=(h^=(o=i+s|0)<<7|o>>>25)+i|0)<<9|o>>>23)+h|0)<<13|o>>>19)+f|0)<<18|o>>>14,c^=(o=(u^=(o=(l^=(o=(y^=(o=c+u|0)<<7|o>>>25)+c|0)<<9|o>>>23)+y|0)<<13|o>>>19)+l|0)<<18|o>>>14,b^=(o=(v^=(o=(p^=(o=(g^=(o=b+v|0)<<7|o>>>25)+b|0)<<9|o>>>23)+g|0)<<13|o>>>19)+p|0)<<18|o>>>14,U^=(o=(_^=(o=(A^=(o=(w^=(o=U+_|0)<<7|o>>>25)+U|0)<<9|o>>>23)+w|0)<<13|o>>>19)+A|0)<<18|o>>>14;r[0]=i>>>0&255,r[1]=i>>>8&255,r[2]=i>>>16&255,r[3]=i>>>24&255,r[4]=c>>>0&255,r[5]=c>>>8&255,r[6]=c>>>16&255,r[7]=c>>>24&255,r[8]=b>>>0&255,r[9]=b>>>8&255,r[10]=b>>>16&255,r[11]=b>>>24&255,r[12]=U>>>0&255,r[13]=U>>>8&255,r[14]=U>>>16&255,r[15]=U>>>24&255,r[16]=y>>>0&255,r[17]=y>>>8&255,r[18]=y>>>16&255,r[19]=y>>>24&255,r[20]=l>>>0&255,r[21]=l>>>8&255,r[22]=l>>>16&255,r[23]=l>>>24&255,r[24]=p>>>0&255,r[25]=p>>>8&255,r[26]=p>>>16&255,r[27]=p>>>24&255,r[28]=v>>>0&255,r[29]=v>>>8&255,r[30]=v>>>16&255,r[31]=v>>>24&255}(r,t,n,e)}function E(r,t){var n=s(),e=s(),o=s(),i=s(),h=s(),a=s(),f=s();return Y(r[2],u),N(r[1],t),I(o,r[1]),F(i,o,c),C(o,o,r[2]),O(i,r[2],i),I(h,i),I(a,h),F(f,a,h),F(n,f,o),F(n,n,i),G(n,n),F(n,n,o),F(n,n,i),F(n,n,i),F(r[0],n,i),I(e,r[0]),F(e,e,i),R(e,o)&&F(r[0],r[0],l),I(e,r[0]),F(e,e,i),R(e,o)?-1:(P(r[0])===t[31]>>7&&C(r[0],v(),r[0]),F(r[3],r[0],r[1]),0)}function d(r,t){var n;for(n=0;n<16;n++)r[n]=0|t[n]}function x(r){var t,n,e=1;for(t=0;t<16;t++)n=r[t]+e+65535,e=Math.floor(n/65536),r[t]=n-65536*e;r[0]+=e-1+37*(e-1)}function M(r,t,n){for(var e,o=~(n-1),i=0;i<16;i++)e=o&(r[i]^t[i]),r[i]^=e,t[i]^=e}function m(r,t){var n,e,o,i=s(),h=s();for(n=0;n<16;n++)h[n]=t[n];for(x(h),x(h),x(h),e=0;e<2;e++){for(i[0]=h[0]-65517,n=1;n<15;n++)i[n]=h[n]-65535-(i[n-1]>>16&1),i[n-1]&=65535;i[15]=h[15]-32767-(i[14]>>16&1),o=i[15]>>16&1,i[14]&=65535,M(h,i,1-o)}for(n=0;n<16;n++)r[2*n]=255&h[n],r[2*n+1]=h[n]>>8}function B(r,t){var n=new Uint8Array(32),e=new Uint8Array(32);return m(n,r),m(e,t),w(n,0,e,0)}function S(r){var t=new Uint8Array(32);return m(t,r),1&t[0]}function k(r,t){var n;for(n=0;n<16;n++)r[n]=t[2*n]+(t[2*n+1]<<8);r[15]&=32767}function K(r,t,n){for(var e=0;e<16;e++)r[e]=t[e]+n[e]}function Y(r,t,n){for(var e=0;e<16;e++)r[e]=t[e]-n[e]}function L(r,t,n){var e,o,i=0,h=0,a=0,f=0,s=0,u=0,c=0,y=0,l=0,w=0,v=0,p=0,b=0,g=0,A=0,_=0,U=0,E=0,d=0,x=0,M=0,m=0,B=0,S=0,k=0,K=0,Y=0,L=0,T=0,z=0,R=0,P=n[0],N=n[1],O=n[2],C=n[3],F=n[4],I=n[5],Z=n[6],G=n[7],q=n[8],D=n[9],V=n[10],X=n[11],j=n[12],H=n[13],J=n[14],Q=n[15];i+=(e=t[0])*P,h+=e*N,a+=e*O,f+=e*C,s+=e*F,u+=e*I,c+=e*Z,y+=e*G,l+=e*q,w+=e*D,v+=e*V,p+=e*X,b+=e*j,g+=e*H,A+=e*J,_+=e*Q,h+=(e=t[1])*P,a+=e*N,f+=e*O,s+=e*C,u+=e*F,c+=e*I,y+=e*Z,l+=e*G,w+=e*q,v+=e*D,p+=e*V,b+=e*X,g+=e*j,A+=e*H,_+=e*J,U+=e*Q,a+=(e=t[2])*P,f+=e*N,s+=e*O,u+=e*C,c+=e*F,y+=e*I,l+=e*Z,w+=e*G,v+=e*q,p+=e*D,b+=e*V,g+=e*X,A+=e*j,_+=e*H,U+=e*J,E+=e*Q,f+=(e=t[3])*P,s+=e*N,u+=e*O,c+=e*C,y+=e*F,l+=e*I,w+=e*Z,v+=e*G,p+=e*q,b+=e*D,g+=e*V,A+=e*X,_+=e*j,U+=e*H,E+=e*J,d+=e*Q,s+=(e=t[4])*P,u+=e*N,c+=e*O,y+=e*C,l+=e*F,w+=e*I,v+=e*Z,p+=e*G,b+=e*q,g+=e*D,A+=e*V,_+=e*X,U+=e*j,E+=e*H,d+=e*J,x+=e*Q,u+=(e=t[5])*P,c+=e*N,y+=e*O,l+=e*C,w+=e*F,v+=e*I,p+=e*Z,b+=e*G,g+=e*q,A+=e*D,_+=e*V,U+=e*X,E+=e*j,d+=e*H,x+=e*J,M+=e*Q,c+=(e=t[6])*P,y+=e*N,l+=e*O,w+=e*C,v+=e*F,p+=e*I,b+=e*Z,g+=e*G,A+=e*q,_+=e*D,U+=e*V,E+=e*X,d+=e*j,x+=e*H,M+=e*J,m+=e*Q,y+=(e=t[7])*P,l+=e*N,w+=e*O,v+=e*C,p+=e*F,b+=e*I,g+=e*Z,A+=e*G,_+=e*q,U+=e*D,E+=e*V,d+=e*X,x+=e*j,M+=e*H,m+=e*J,B+=e*Q,l+=(e=t[8])*P,w+=e*N,v+=e*O,p+=e*C,b+=e*F,g+=e*I,A+=e*Z,_+=e*G,U+=e*q,E+=e*D,d+=e*V,x+=e*X,M+=e*j,m+=e*H,B+=e*J,S+=e*Q,w+=(e=t[9])*P,v+=e*N,p+=e*O,b+=e*C,g+=e*F,A+=e*I,_+=e*Z,U+=e*G,E+=e*q,d+=e*D,x+=e*V,M+=e*X,m+=e*j,B+=e*H,S+=e*J,k+=e*Q,v+=(e=t[10])*P,p+=e*N,b+=e*O,g+=e*C,A+=e*F,_+=e*I,U+=e*Z,E+=e*G,d+=e*q,x+=e*D,M+=e*V,m+=e*X,B+=e*j,S+=e*H,k+=e*J,K+=e*Q,p+=(e=t[11])*P,b+=e*N,g+=e*O,A+=e*C,_+=e*F,U+=e*I,E+=e*Z,d+=e*G,x+=e*q,M+=e*D,m+=e*V,B+=e*X,S+=e*j,k+=e*H,K+=e*J,Y+=e*Q,b+=(e=t[12])*P,g+=e*N,A+=e*O,_+=e*C,U+=e*F,E+=e*I,d+=e*Z,x+=e*G,M+=e*q,m+=e*D,B+=e*V,S+=e*X,k+=e*j,K+=e*H,Y+=e*J,L+=e*Q,g+=(e=t[13])*P,A+=e*N,_+=e*O,U+=e*C,E+=e*F,d+=e*I,x+=e*Z,M+=e*G,m+=e*q,B+=e*D,S+=e*V,k+=e*X,K+=e*j,Y+=e*H,L+=e*J,T+=e*Q,A+=(e=t[14])*P,_+=e*N,U+=e*O,E+=e*C,d+=e*F,x+=e*I,M+=e*Z,m+=e*G,B+=e*q,S+=e*D,k+=e*V,K+=e*X,Y+=e*j,L+=e*H,T+=e*J,z+=e*Q,_+=(e=t[15])*P,h+=38*(E+=e*O),a+=38*(d+=e*C),f+=38*(x+=e*F),s+=38*(M+=e*I),u+=38*(m+=e*Z),c+=38*(B+=e*G),y+=38*(S+=e*q),l+=38*(k+=e*D),w+=38*(K+=e*V),v+=38*(Y+=e*X),p+=38*(L+=e*j),b+=38*(T+=e*H),g+=38*(z+=e*J),A+=38*(R+=e*Q),i=(e=(i+=38*(U+=e*N))+(o=1)+65535)-65536*(o=Math.floor(e/65536)),h=(e=h+o+65535)-65536*(o=Math.floor(e/65536)),a=(e=a+o+65535)-65536*(o=Math.floor(e/65536)),f=(e=f+o+65535)-65536*(o=Math.floor(e/65536)),s=(e=s+o+65535)-65536*(o=Math.floor(e/65536)),u=(e=u+o+65535)-65536*(o=Math.floor(e/65536)),c=(e=c+o+65535)-65536*(o=Math.floor(e/65536)),y=(e=y+o+65535)-65536*(o=Math.floor(e/65536)),l=(e=l+o+65535)-65536*(o=Math.floor(e/65536)),w=(e=w+o+65535)-65536*(o=Math.floor(e/65536)),v=(e=v+o+65535)-65536*(o=Math.floor(e/65536)),p=(e=p+o+65535)-65536*(o=Math.floor(e/65536)),b=(e=b+o+65535)-65536*(o=Math.floor(e/65536)),g=(e=g+o+65535)-65536*(o=Math.floor(e/65536)),A=(e=A+o+65535)-65536*(o=Math.floor(e/65536)),_=(e=_+o+65535)-65536*(o=Math.floor(e/65536)),i=(e=(i+=o-1+37*(o-1))+(o=1)+65535)-65536*(o=Math.floor(e/65536)),h=(e=h+o+65535)-65536*(o=Math.floor(e/65536)),a=(e=a+o+65535)-65536*(o=Math.floor(e/65536)),f=(e=f+o+65535)-65536*(o=Math.floor(e/65536)),s=(e=s+o+65535)-65536*(o=Math.floor(e/65536)),u=(e=u+o+65535)-65536*(o=Math.floor(e/65536)),c=(e=c+o+65535)-65536*(o=Math.floor(e/65536)),y=(e=y+o+65535)-65536*(o=Math.floor(e/65536)),l=(e=l+o+65535)-65536*(o=Math.floor(e/65536)),w=(e=w+o+65535)-65536*(o=Math.floor(e/65536)),v=(e=v+o+65535)-65536*(o=Math.floor(e/65536)),p=(e=p+o+65535)-65536*(o=Math.floor(e/65536)),b=(e=b+o+65535)-65536*(o=Math.floor(e/65536)),g=(e=g+o+65535)-65536*(o=Math.floor(e/65536)),A=(e=A+o+65535)-65536*(o=Math.floor(e/65536)),_=(e=_+o+65535)-65536*(o=Math.floor(e/65536)),i+=o-1+37*(o-1),r[0]=i,r[1]=h,r[2]=a,r[3]=f,r[4]=s,r[5]=u,r[6]=c,r[7]=y,r[8]=l,r[9]=w,r[10]=v,r[11]=p,r[12]=b,r[13]=g,r[14]=A,r[15]=_}function T(r,t){L(r,t,t)}function z(r,t){var n,e=s();for(n=0;n<16;n++)e[n]=t[n];for(n=253;0<=n;n--)T(e,e),2!==n&&4!==n&&L(e,e,t);for(n=0;n<16;n++)r[n]=e[n]}function R(r,t){var n=new Uint8Array(32),e=new Uint8Array(32);return m(n,r),m(e,t),w(n,0,e,0)}function P(r){var t=new Uint8Array(32);return m(t,r),1&t[0]}function N(r,t){var n;for(n=0;n<16;n++)r[n]=t[2*n]+(t[2*n+1]<<8);r[15]&=32767}function O(r,t,n){for(var e=0;e<16;e++)r[e]=t[e]+n[e]}function C(r,t,n){for(var e=0;e<16;e++)r[e]=t[e]-n[e]}function F(r,t,n){L(r,t,n)}function I(r,t){L(r,t,t)}function Z(r,t){var n,e=s();for(n=0;n<16;n++)e[n]=t[n];for(n=253;0<=n;n--)I(e,e),2!==n&&4!==n&&F(e,e,t);for(n=0;n<16;n++)r[n]=e[n]}function G(r,t){var n,e=s();for(n=0;n<16;n++)e[n]=t[n];for(n=250;0<=n;n--)I(e,e),1!==n&&F(e,e,t);for(n=0;n<16;n++)r[n]=e[n]}var q=[1116352408,3609767458,1899447441,602891725,3049323471,3964484399,3921009573,2173295548,961987163,4081628472,1508970993,3053834265,2453635748,2937671579,2870763221,3664609560,3624381080,2734883394,310598401,1164996542,607225278,1323610764,1426881987,3590304994,1925078388,4068182383,2162078206,991336113,2614888103,633803317,3248222580,3479774868,3835390401,2666613458,4022224774,944711139,264347078,2341262773,604807628,2007800933,770255983,1495990901,1249150122,1856431235,1555081692,3175218132,1996064986,2198950837,2554220882,3999719339,2821834349,766784016,2952996808,2566594879,3210313671,3203337956,3336571891,1034457026,3584528711,2466948901,113926993,3758326383,338241895,168717936,666307205,1188179964,773529912,1546045734,1294757372,1522805485,1396182291,2643833823,1695183700,2343527390,1986661051,1014477480,2177026350,1206759142,2456956037,344077627,2730485921,1290863460,2820302411,3158454273,3259730800,3505952657,3345764771,106217008,3516065817,3606008344,3600352804,1432725776,4094571909,1467031594,275423344,851169720,430227734,3100823752,506948616,1363258195,659060556,3750685593,883997877,3785050280,958139571,3318307427,1322822218,3812723403,1537002063,2003034995,1747873779,3602036899,1955562222,1575990012,2024104815,1125592928,2227730452,2716904306,2361852424,442776044,2428436474,593698344,2756734187,3733110249,3204031479,2999351573,3329325298,3815920427,3391569614,3928383900,3515267271,566280711,3940187606,3454069534,4118630271,4000239992,116418474,1914138554,174292421,2731055270,289380356,3203993006,460393269,320620315,685471733,587496836,852142971,1086792851,1017036298,365543100,1126000580,2618297676,1288033470,3409855158,1501505948,4234509866,1607167915,987167468,1816402316,1246189591];function D(r,t,n,e){for(var o,i,h,s,u,c,y,l,p,v,b,g,w,A,_,U,E,d,x,M,m,B,S,k,K=new Int32Array(16),Y=new Int32Array(16),L=r[0],T=r[1],z=r[2],R=r[3],P=r[4],N=r[5],O=r[6],C=r[7],F=t[0],I=t[1],Z=t[2],G=t[3],X=t[4],j=t[5],H=t[6],J=t[7],Q=0;128<=e;){for(E=0;E<16;E++)d=8*E+Q,K[E]=n[d+0]<<24|n[d+1]<<16|n[d+2]<<8|n[d+3],Y[E]=n[d+4]<<24|n[d+5]<<16|n[d+6]<<8|n[d+7];for(E=0;E<80;E++)if(o=T,i=z,h=R,l=I,p=Z,v=G,M=65535&(x=J),m=x>>>16,B=65535&(d=C),S=d>>>16,M+=65535&(x=((b=X)>>>14|(s=P)<<18)^(X>>>18|P<<14)^(P>>>9|X<<23)),m+=x>>>16,B+=65535&(d=(P>>>14|X<<18)^(P>>>18|X<<14)^(X>>>9|P<<23)),S+=d>>>16,M+=65535&(x=X&(g=j)^~X&(w=H)),m+=x>>>16,B+=65535&(d=P&(u=N)^~P&(c=O)),S+=d>>>16,d=q[2*E],M+=65535&(x=q[2*E+1]),m+=x>>>16,B+=65535&d,S+=d>>>16,d=K[E%16],m+=(x=Y[E%16])>>>16,B+=65535&d,S+=d>>>16,B+=(m+=(M+=65535&x)>>>16)>>>16,M=65535&(x=_=65535&M|m<<16),m=x>>>16,B=65535&(d=A=65535&B|(S+=B>>>16)<<16),S=d>>>16,M+=65535&(x=(F>>>28|L<<4)^(L>>>2|F<<30)^(L>>>7|F<<25)),m+=x>>>16,B+=65535&(d=(L>>>28|F<<4)^(F>>>2|L<<30)^(F>>>7|L<<25)),S+=d>>>16,m+=(x=F&I^F&Z^I&Z)>>>16,B+=65535&(d=L&T^L&z^T&z),S+=d>>>16,y=65535&(B+=(m+=(M+=65535&x)>>>16)>>>16)|(S+=B>>>16)<<16,k=65535&M|m<<16,M=65535&(x=v),m=x>>>16,B=65535&(d=h),S=d>>>16,m+=(x=_)>>>16,B+=65535&(d=A),S+=d>>>16,T=L,z=o,R=i,P=h=65535&(B+=(m+=(M+=65535&x)>>>16)>>>16)|(S+=B>>>16)<<16,N=s,O=u,C=c,L=y,I=F,Z=l,G=p,X=v=65535&M|m<<16,j=b,H=g,J=w,F=k,E%16==15)for(d=0;d<16;d++)x=K[d],M=65535&(x=Y[d]),m=x>>>16,B=65535&(d2=K[d]),S=d2>>>16,d2=K[(d+9)%16],M+=65535&(x=Y[(d+9)%16]),m+=x>>>16,B+=65535&d2,S+=d2>>>16,A=K[(d+1)%16],M+=65535&(x=((_=Y[(d+1)%16])>>>1|A<<31)^(_>>>8|A<<24)^(_>>>7|A<<25)),m+=x>>>16,B+=65535&(d2=(A>>>1|_<<31)^(A>>>8|_<<24)^A>>>7),S+=d2>>>16,A=K[(d+14)%16],m+=(x=((_=Y[(d+14)%16])>>>19|A<<13)^(A>>>29|_<<3)^(_>>>6|A<<26))>>>16,B+=65535&(d2=(A>>>19|_<<13)^(_>>>29|A<<3)^A>>>6),S+=d2>>>16,S+=(B+=(m+=(M+=65535&x)>>>16)>>>16)>>>16,K[d]=65535&B|S<<16,Y[d]=65535&M|m<<16;M=65535&(x=F),m=x>>>16,B=65535&(d=L),S=d>>>16,d=r[0],m+=(x=t[0])>>>16,B+=65535&d,S+=d>>>16,S+=(B+=(m+=(M+=65535&x)>>>16)>>>16)>>>16,r[0]=L=65535&B|S<<16,t[0]=F=65535&M|m<<16,M=65535&(x=I),m=x>>>16,B=65535&(d=T),S=d>>>16,d=r[1],m+=(x=t[1])>>>16,B+=65535&d,S+=d>>>16,S+=(B+=(m+=(M+=65535&x)>>>16)>>>16)>>>16,r[1]=T=65535&B|S<<16,t[1]=I=65535&M|m<<16,M=65535&(x=Z),m=x>>>16,B=65535&(d=z),S=d>>>16,d=r[2],m+=(x=t[2])>>>16,B+=65535&d,S+=d>>>16,S+=(B+=(m+=(M+=65535&x)>>>16)>>>16)>>>16,r[2]=z=65535&B|S<<16,t[2]=Z=65535&M|m<<16,M=65535&(x=G),m=x>>>16,B=65535&(d=R),S=d>>>16,d=r[3],m+=(x=t[3])>>>16,B+=65535&d,S+=d>>>16,S+=(B+=(m+=(M+=65535&x)>>>16)>>>16)>>>16,r[3]=R=65535&B|S<<16,t[3]=G=65535&M|m<<16,M=65535&(x=X),m=x>>>16,B=65535&(d=P),S=d>>>16,d=r[4],m+=(x=t[4])>>>16,B+=65535&d,S+=d>>>16,S+=(B+=(m+=(M+=65535&x)>>>16)>>>16)>>>16,r[4]=P=65535&B|S<<16,t[4]=X=65535&M|m<<16,M=65535&(x=j),m=x>>>16,B=65535&(d=N),S=d>>>16,d=r[5],m+=(x=t[5])>>>16,B+=65535&d,S+=d>>>16,S+=(B+=(m+=(M+=65535&x)>>>16)>>>16)>>>16,r[5]=N=65535&B|S<<16,t[5]=j=65535&M|m<<16,M=65535&(x=H),m=x>>>16,B=65535&(d=O),S=d>>>16,d=r[6],m+=(x=t[6])>>>16,B+=65535&d,S+=d>>>16,S+=(B+=(m+=(M+=65535&x)>>>16)>>>16)>>>16,r[6]=O=65535&B|S<<16,t[6]=H=65535&M|m<<16,M=65535&(x=J),m=x>>>16,B=65535&(d=C),S=d>>>16,d=r[7],m+=(x=t[7])>>>16,B+=65535&d,S+=d>>>16,S+=(B+=(m+=(M+=65535&x)>>>16)>>>16)>>>16,r[7]=C=65535&B|S<<16,t[7]=J=65535&M|m<<16,Q+=128,e-=128}return r[0]=L,r[1]=T,r[2]=z,r[3]=R,r[4]=P,r[5]=N,r[6]=O,r[7]=C,t[0]=F,t[1]=I,t[2]=Z,t[3]=G,t[4]=X,t[5]=j,t[6]=H,t[7]=J,e}function V(r,t,n){var e,o=new Int32Array(8),i=new Int32Array(8),h=new Uint8Array(256),a=n;for(o[0]=1779033703,o[1]=3144134277,o[2]=1013904242,o[3]=2773480762,o[4]=1359893119,o[5]=2600822924,o[6]=528734635,o[7]=1541459225,i[0]=4089235720,i[1]=2227873595,i[2]=4271175723,i[3]=1595750129,i[4]=2917565137,i[5]=725511199,i[6]=4215389547,i[7]=327033209,D(o,i,t,n),n%=128,e=0;e<n;e++)h[e]=t[a-n+e];for(h[n]=128,h[(n=256-128*(n<112?1:0))-9]=0,f(h,n-8,a/536870912|0,a<<3),D(o,i,h,n),e=0;e<8;e++)f(r,8*e,o[e],i[e]);return 0}function X(r,t,n){var e=[s(),s(),s(),s()];d(e[0],u),d(e[1],p),d(e[2],u),F(e[3],u,p);var o,i=[s(),s(),s(),s()];for(o=255;0<=o;--o)M(e,i,n[o/8|0]>>(7&o)&1),j(i,e),j(e,e),M(e,i,n[o/8|0]>>(7&o)&1)}function j(r,t){var n=s(),e=s(),o=s(),i=s(),h=s(),a=s(),f=s();C(n,r[1],r[0]),C(f,t[1],t[0]),F(n,n,f),O(e,r[0],r[1]),O(f,t[0],t[1]),F(e,e,f),F(o,r[3],t[3]),F(o,o,y),F(i,r[2],t[2]),O(i,i,i),C(h,e,n),C(a,i,o),O(f,i,o),O(r[1],e,n),F(r[0],h,a),F(r[1],r[1],f),F(r[2],f,a),F(r[3],h,r[1])}function H(r,t){var n=[s(),s(),s(),s()];d(n[0],u),d(n[1],p),d(n[2],u),F(n[3],u,p),X(r,n,t)}function J(r,t){var n=s(),e=s(),o=s();Z(o,t[2]),F(n,t[0],o),F(e,t[1],o),m(r,e),r[31]^=S(n)<<7}var Q=new Float64Array([237,211,245,92,26,99,18,88,214,156,247,162,222,249,222,20,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,16]);function W(r,t){var n,e,o,i;for(e=63;32<=e;--e){for(n=0,o=e-32,i=e-12;o<i;++o)t[o]+=n-16*t[e]*Q[o-(e-32)],n=Math.floor((t[o]+128)/256),t[o]-=256*n;t[o]+=n,t[e]=0}for(o=n=0;o<32;o++)t[o]+=n-(t[31]>>4)*Q[o],n=t[o]>>8,t[o]&=255;for(o=0;o<32;o++)t[o]-=n*Q[o];for(e=0;e<32;e++)t[e+1]+=t[e]>>8,r[e]=255&t[e]}function $(r){var t,n=new Float64Array(64);for(t=0;t<64;t++)n[t]=r[t];for(t=0;t<64;t++)r[t]=0;W(r,n)}function rr(r,t,n,e){var o,i,a=new Uint8Array(64),f=new Uint8Array(64),s=new Uint8Array(64),u=new Float64Array(64),c=[v(),v(),v(),v()];V(a,e,32),a[0]&=248,a[31]&=127,a[31]|=64;var y=n+64;for(o=0;o<n;o++)r[64+o]=t[o];for(o=0;o<32;o++)r[32+o]=a[32+o];for(V(s,r.subarray(32),n+32),$(s),H(c,s),J(r,c),o=32;o<64;o++)r[o]=e[o];for(V(f,r,n+64),$(f),o=0;o<64;o++)u[o]=0;for(o=0;o<32;o++)u[o]=s[o];for(o=0;o<32;o++)for(i=0;i<32;i++)u[o+i]+=f[o]*a[i];return W(r.subarray(32),u),y}function tr(r,t,n,e){var o,i=new Uint8Array(32),h=[s(),s(),s(),s()],a=[s(),s(),s(),s()];if(n<64)return-1;if(E(a,e))return-1;for(o=0;o<n;o++)r[o]=t[o];for(o=0;o<32;o++)r[o+32]=e[o];if(V(i,r,n),$(i),X(h,a,i),H(a,t.subarray(32)),j(h,a),J(i,h),n-=64,w(t,0,i,0)){for(o=0;o<n;o++)r[o]=0;return-1}for(o=0;o<n;o++)r[o]=t[o+64];return n}i.sign=function(r,t){if(64!==t.length)throw new Error("bad secret key size");var n=new Uint8Array(64+r.length);return rr(n,r,r.length,t),n},i.sign.detached=function(r,t){for(var n=i.sign(r,t),e=new Uint8Array(64),o=0;o<e.length;o++)e[o]=n[o];return e},i.sign.detached.verify=function(r,t,n){if(64!==t.length)throw new Error("bad signature size");if(32!==n.length)throw new Error("bad public key size");var e,o=new Uint8Array(64+r.length),i=new Uint8Array(64+r.length);for(e=0;e<64;e++)o[e]=t[e];for(e=0;e<r.length;e++)o[e+64]=r[e];return 0<=tr(i,o,o.length,n)},i.sign.keyPair=function(){var r=new Uint8Array(32),t=new Uint8Array(64);return function(r,t,n){var e,o=new Uint8Array(64),i=[v(),v(),v(),v()];n||(n=new Uint8Array(32),h(n,32));V(o,n,32),o[0]&=248,o[31]&=127,o[31]|=64,H(i,o),J(r,i);for(e=0;e<32;e++)t[e+32]=r[e]}(r,t),{publicKey:r,secretKey:t}},i.sign.keyPair.fromSeed=function(r){if(32!==r.length)throw new Error("bad seed size");for(var t=new Uint8Array(32),n=new Uint8Array(64),e=0;e<32;e++)n[e]=r[e];return function(r,t,n){var e,o=new Uint8Array(64),i=[v(),v(),v(),v()];V(o,n,32),o[0]&=248,o[31]&=127,o[31]|=64,H(i,o),J(r,i);for(e=0;e<32;e++)t[e+32]=r[e]}(t,n,n),{publicKey:t,secretKey:n}},i.sign.publicKeyLength=32,i.sign.secretKeyLength=64,i.sign.signatureLength=64,i.setPRNG=function(r){h=r},function(){var r="undefined"!=typeof self?self.crypto||self.msCrypto:null;r&&r.getRandomValues?i.setPRNG(function(t,n){var e,o=new Uint8Array(n);for(e=0;e<n;e+=65536)r.getRandomValues(o.subarray(e,e+Math.min(n-e,65536)));for(e=0;e<n;e++)t[e]=o[e]}):typeof require<"u"&&(r=require("crypto"))&&r.randomBytes&&i.setPRNG(function(t,n){var e,o=r.randomBytes(n);for(e=0;e<n;e++)t[e]=o[e]})}()}("undefined"!=typeof module&&module.exports?module.exports:self.nacl=self.nacl||{});
+</script>
+
+<script>
+(function() {
+  "use strict";
+
+  // ── Hardcoded Artalis platform key ─────────────────────────────────
+  const ARTALIS_PLATFORM_KEY =
+    "0000000000000000000000000000000000000000000000000000000000000000";
+
+  // ── State ──────────────────────────────────────────────────────────
+  let pkg = null;           // parsed package.sig / hull.sig
+  let binaryBuf = null;     // ArrayBuffer of APE binary
+  let devKeyHex = null;     // developer public key (64 hex)
+  let platKeyOverride = null;
+  let uploadedFiles = {};   // name -> ArrayBuffer
+
+  // ── Helpers ────────────────────────────────────────────────────────
+  function hexToBytes(hex) {
+    const bytes = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < bytes.length; i++)
+      bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+    return bytes;
+  }
+
+  function bytesToHex(bytes) {
+    return Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  async function sha256hex(data) {
+    let buf;
+    if (typeof data === "string") {
+      buf = new TextEncoder().encode(data);
+    } else {
+      buf = data;
+    }
+    const hash = await crypto.subtle.digest("SHA-256", buf);
+    return bytesToHex(new Uint8Array(hash));
+  }
+
+  // Canonical JSON: sorted keys, compact, matches Lua json.encode
+  function canonicalStringify(value) {
+    if (value === null || value === undefined) return "null";
+    if (typeof value === "boolean" || typeof value === "number")
+      return JSON.stringify(value);
+    if (typeof value === "string") return JSON.stringify(value);
+    if (Array.isArray(value))
+      return "[" + value.map(canonicalStringify).join(",") + "]";
+    const keys = Object.keys(value).sort();
+    return "{" + keys.map(k =>
+      JSON.stringify(k) + ":" + canonicalStringify(value[k])
+    ).join(",") + "}";
+  }
+
+  function verifySignature(payloadStr, sigHex, pkHex) {
+    const msg = new TextEncoder().encode(payloadStr);
+    const sig = hexToBytes(sigHex);
+    const pk = hexToBytes(pkHex);
+    return nacl.sign.detached.verify(msg, sig, pk);
+  }
+
+  // ── Platform layer verification ────────────────────────────────────
+  function verifyPlatformLayer(sig) {
+    if (!sig.platform || !sig.platform.signature || !sig.platform.public_key)
+      return { status: "missing" };
+
+    const platKey = platKeyOverride || ARTALIS_PLATFORM_KEY;
+    const keyMatch = sig.platform.public_key === platKey;
+    const payload = canonicalStringify(sig.platform.platforms);
+    let valid = false;
+    try {
+      valid = verifySignature(payload, sig.platform.signature,
+                              sig.platform.public_key);
+    } catch (e) {
+      valid = false;
+    }
+
+    const archs = sig.platform.platforms
+      ? Object.keys(sig.platform.platforms).sort()
+      : [];
+
+    // Find canary hash from any platform entry
+    let canaryHex = null;
+    if (sig.platform.platforms) {
+      for (const arch of archs) {
+        if (sig.platform.platforms[arch].canary) {
+          canaryHex = sig.platform.platforms[arch].canary;
+          break;
+        }
+      }
+    }
+
+    const isArtalis = sig.platform.public_key === ARTALIS_PLATFORM_KEY;
+
+    return { status: "present", valid, keyMatch, archs, canaryHex, isArtalis,
+             publicKey: sig.platform.public_key };
+  }
+
+  // ── App layer verification ─────────────────────────────────────────
+  function verifyAppLayer(sig) {
+    if (!sig.signature || !sig.public_key || !sig.files)
+      return { status: "invalid" };
+
+    let payload;
+    if (sig.binary_hash) {
+      payload = canonicalStringify({
+        binary_hash: sig.binary_hash,
+        build: sig.build,
+        files: sig.files,
+        manifest: sig.manifest,
+        platform: sig.platform,
+        trampoline_hash: sig.trampoline_hash,
+      });
+    } else {
+      payload = canonicalStringify({
+        files: sig.files,
+        manifest: sig.manifest,
+      });
+    }
+
+    let valid = false;
+    try {
+      valid = verifySignature(payload, sig.signature, sig.public_key);
+    } catch (e) {
+      valid = false;
+    }
+
+    const keyMatch = devKeyHex ? sig.public_key === devKeyHex : null;
+
+    return {
+      status: "present", valid, keyMatch, publicKey: sig.public_key,
+      binaryHash: sig.binary_hash, build: sig.build,
+      trampolineHash: sig.trampoline_hash,
+    };
+  }
+
+  // ── Canary scanner ─────────────────────────────────────────────────
+  function scanCanary(binary, expectedCanaryHex) {
+    const marker = new TextEncoder().encode("HULL_PLATFORM_CANARY");
+    const view = new Uint8Array(binary);
+    for (let i = 0; i <= view.length - 24 - 32; i++) {
+      let match = true;
+      for (let j = 0; j < marker.length; j++) {
+        if (view[i + j] !== marker[j]) { match = false; break; }
+      }
+      if (match) {
+        // Magic field is 24 bytes, integrity hash follows
+        const integrity = view.slice(i + 24, i + 24 + 32);
+        const integrityHex = bytesToHex(integrity);
+        return {
+          found: true, integrity: integrityHex,
+          matches: expectedCanaryHex
+            ? integrityHex === expectedCanaryHex : null,
+        };
+      }
+    }
+    return { found: false };
+  }
+
+  // ── DOM helpers ────────────────────────────────────────────────────
+  function $(id) { return document.getElementById(id); }
+
+  function addResult(container, cls, label, text) {
+    const div = document.createElement("div");
+    div.className = "result " + cls;
+    div.innerHTML = "<label>" + esc(label) + "</label>" + esc(text);
+    container.appendChild(div);
+    return div;
+  }
+
+  function addResultHTML(container, cls, label, html) {
+    const div = document.createElement("div");
+    div.className = "result " + cls;
+    div.innerHTML = "<label>" + esc(label) + "</label>" + html;
+    container.appendChild(div);
+    return div;
+  }
+
+  function esc(s) {
+    return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;")
+      .replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  }
+
+  function copyBtn(text) {
+    return ' <button class="copy-btn" onclick="navigator.clipboard.writeText(\'' +
+      text.replace(/'/g, "\\'") + '\')">[Copy]</button>';
+  }
+
+  function truncKey(hex) {
+    return hex ? hex.substring(0, 16) + "..." : "?";
+  }
+
+  // ── Render ─────────────────────────────────────────────────────────
+  async function render() {
+    if (!pkg) { $("results").style.display = "none"; return; }
+    $("results").style.display = "block";
+
+    const platEl = $("plat-results");
+    const appEl = $("app-results");
+    platEl.innerHTML = "";
+    appEl.innerHTML = "";
+
+    let issues = 0;
+    let checks = 0;
+
+    // Platform layer
+    const plat = verifyPlatformLayer(pkg);
+    if (plat.status === "present") {
+      checks++;
+      if (plat.valid) {
+        if (plat.isArtalis && plat.keyMatch) {
+          addResult(platEl, "ok", "Platform Signature",
+            "VALID — Signed by Hull Platform (Artalis)");
+        } else if (plat.keyMatch) {
+          addResult(platEl, "ok", "Platform Signature",
+            "VALID — Signed by known platform key");
+        } else {
+          addResult(platEl, "warn", "Platform Signature",
+            "VALID — Unknown platform key (verify manually)");
+          issues++;
+        }
+      } else {
+        addResult(platEl, "bad", "Platform Signature", "INVALID");
+        issues++;
+      }
+
+      addResultHTML(platEl, "info", "Platform Key",
+        esc(truncKey(plat.publicKey)) + copyBtn(plat.publicKey));
+
+      if (plat.archs.length > 0) {
+        addResult(platEl, "info", "Architectures", plat.archs.join(", "));
+      }
+
+      // Canary check (if binary uploaded)
+      if (binaryBuf && plat.canaryHex) {
+        checks++;
+        const canary = scanCanary(binaryBuf, plat.canaryHex);
+        if (canary.found && canary.matches) {
+          addResult(platEl, "ok", "Platform Canary",
+            "FOUND — matches platform.sig");
+        } else if (canary.found && !canary.matches) {
+          addResult(platEl, "warn", "Platform Canary",
+            "FOUND — integrity mismatch (expected " +
+            truncKey(plat.canaryHex) + ", got " +
+            truncKey(canary.integrity) + ")");
+          issues++;
+        } else {
+          addResult(platEl, "warn", "Platform Canary",
+            "NOT FOUND — binary may not contain Hull platform");
+          issues++;
+        }
+      } else if (binaryBuf) {
+        addResult(platEl, "info", "Platform Canary",
+          "No canary hash in platform signature");
+      }
+    } else {
+      addResult(platEl, "info", "Platform Layer",
+        "Not present in signature");
+    }
+
+    // App layer
+    const app = verifyAppLayer(pkg);
+    checks++;
+    if (app.valid) {
+      if (app.keyMatch === true) {
+        addResult(appEl, "ok", "App Signature",
+          "VALID — Matches provided developer key");
+      } else if (app.keyMatch === false) {
+        addResult(appEl, "warn", "App Signature",
+          "VALID — Developer key MISMATCH");
+        issues++;
+      } else {
+        addResult(appEl, "ok", "App Signature",
+          "VALID — Provide developer key to verify identity");
+      }
+    } else {
+      addResult(appEl, "bad", "App Signature", "INVALID");
+      issues++;
+    }
+
+    addResultHTML(appEl, "info", "Developer Key",
+      esc(truncKey(app.publicKey)) + copyBtn(app.publicKey) +
+      (app.keyMatch === true ? " (matches provided key)" :
+       app.keyMatch === false ? " (MISMATCH with provided key)" :
+       " (provide key to verify)"));
+
+    // Binary hash check
+    if (binaryBuf && app.binaryHash) {
+      checks++;
+      const actualHash = await sha256hex(binaryBuf);
+      if (actualHash === app.binaryHash) {
+        addResult(appEl, "ok", "Binary Hash",
+          "MATCHES — " + truncKey(app.binaryHash));
+      } else {
+        addResult(appEl, "bad", "Binary Hash",
+          "MISMATCH — expected " + truncKey(app.binaryHash) +
+          ", got " + truncKey(actualHash));
+        issues++;
+      }
+    } else if (app.binaryHash) {
+      addResult(appEl, "info", "Binary Hash",
+        truncKey(app.binaryHash) + " (upload binary to verify)");
+    }
+
+    // Build info
+    if (app.build) {
+      addResult(appEl, "info", "Built With",
+        app.build.cc_version || app.build.cc || "unknown");
+      if (app.build.flags) {
+        addResult(appEl, "info", "Build Flags", app.build.flags);
+      }
+    }
+
+    // Capabilities
+    const capEl = $("cap-results");
+    capEl.innerHTML = "";
+    if (pkg.manifest) {
+      $("cap-section").style.display = "block";
+      const m = pkg.manifest;
+      let html = '<table><tr><th>Capability</th><th>Value</th><th>Risk</th></tr>';
+      if (m.fs && m.fs.read) {
+        html += '<tr><td>fs.read</td><td>' + esc(m.fs.read.join(", ")) +
+          '</td><td><span class="cap-risk low">low</span></td></tr>';
+      }
+      if (m.fs && m.fs.write) {
+        html += '<tr><td>fs.write</td><td>' + esc(m.fs.write.join(", ")) +
+          '</td><td><span class="cap-risk med">med</span></td></tr>';
+      }
+      if (m.env && m.env.length) {
+        html += '<tr><td>env</td><td>' + esc(m.env.join(", ")) +
+          '</td><td><span class="cap-risk med">med</span></td></tr>';
+      }
+      if (m.hosts && m.hosts.length) {
+        html += '<tr><td>hosts</td><td>' + esc(m.hosts.join(", ")) +
+          '</td><td><span class="cap-risk high">high</span></td></tr>';
+      }
+      html += '</table>';
+      capEl.innerHTML = html;
+    } else {
+      $("cap-section").style.display = "none";
+    }
+
+    // Files
+    const fileEl = $("file-results");
+    fileEl.innerHTML = "";
+    if (pkg.files) {
+      $("files-section").style.display = "block";
+      const names = Object.keys(pkg.files).sort();
+      let html = '<table><tr><th>File</th><th>Hash</th><th>Status</th></tr>';
+      for (const name of names) {
+        const expected = pkg.files[name];
+        let status = '<span class="file-status pending">-</span>';
+        if (uploadedFiles[name] !== undefined) {
+          const actual = await sha256hex(uploadedFiles[name]);
+          checks++;
+          if (actual === expected) {
+            status = '<span class="file-status match">MATCH</span>';
+          } else {
+            status = '<span class="file-status mismatch">MISMATCH</span>';
+            issues++;
+          }
+        }
+        html += '<tr><td>' + esc(name) + '</td><td class="file-hash">' +
+          esc(truncKey(expected)) + '</td><td>' + status + '</td></tr>';
+      }
+      html += '</table>';
+      fileEl.innerHTML = html;
+    } else {
+      $("files-section").style.display = "none";
+    }
+
+    // Raw sig data
+    $("raw-sig").textContent = JSON.stringify(pkg, null, 2);
+
+    // Banner
+    const banner = $("banner");
+    if (issues === 0 && checks > 0) {
+      banner.className = "status-banner pass";
+      banner.textContent = "ALL CHECKS PASSED (" + checks + " verified)";
+    } else if (issues > 0) {
+      banner.className = "status-banner fail";
+      banner.textContent = issues + " ISSUE(S) FOUND";
+    } else {
+      banner.className = "status-banner";
+    }
+  }
+
+  // ── Drop zone wiring ──────────────────────────────────────────────
+  function setupDrop(zoneId, fileId, handler) {
+    const zone = $(zoneId);
+    const input = $(fileId);
+
+    zone.addEventListener("click", function() { input.click(); });
+    input.addEventListener("change", function() {
+      if (input.files.length > 0) handler(input.files);
+    });
+    zone.addEventListener("dragover", function(e) {
+      e.preventDefault(); zone.classList.add("drag-over");
+    });
+    zone.addEventListener("dragleave", function() {
+      zone.classList.remove("drag-over");
+    });
+    zone.addEventListener("drop", function(e) {
+      e.preventDefault(); zone.classList.remove("drag-over");
+      if (e.dataTransfer.files.length > 0) handler(e.dataTransfer.files);
+    });
+  }
+
+  // Signature drop
+  setupDrop("sig-drop", "sig-file", async function(files) {
+    const text = await files[0].text();
+    try {
+      pkg = JSON.parse(text);
+    } catch (e) {
+      alert("Invalid JSON in signature file");
+      return;
+    }
+    $("sig-drop").classList.add("loaded");
+    $("sig-drop").querySelector("p").textContent = files[0].name + " loaded";
+    await render();
+  });
+
+  // Binary drop
+  setupDrop("bin-drop", "bin-file", async function(files) {
+    binaryBuf = await files[0].arrayBuffer();
+    $("bin-drop").classList.add("loaded");
+    $("bin-drop").querySelector("p").textContent = files[0].name + " loaded";
+    await render();
+  });
+
+  // Developer key drop
+  setupDrop("devkey-drop", "devkey-file", async function(files) {
+    const text = await files[0].text();
+    const match = text.match(/^([0-9a-fA-F]{64})/);
+    if (match) {
+      devKeyHex = match[1].toLowerCase();
+      $("dev-key").value = devKeyHex;
+      $("devkey-drop").classList.add("loaded");
+      await render();
+    } else {
+      alert("Could not find 64-hex key in file");
+    }
+  });
+
+  // Developer key paste/URL
+  $("dev-key-btn").addEventListener("click", async function() {
+    const val = $("dev-key").value.trim();
+    if (/^[0-9a-fA-F]{64}$/.test(val)) {
+      devKeyHex = val.toLowerCase();
+      await render();
+    } else if (val.startsWith("https://")) {
+      try {
+        const resp = await fetch(val);
+        const text = await resp.text();
+        const match = text.match(/^([0-9a-fA-F]{64})/);
+        if (match) {
+          devKeyHex = match[1].toLowerCase();
+          $("dev-key").value = devKeyHex;
+          await render();
+        } else {
+          alert("Could not find 64-hex key at URL");
+        }
+      } catch (e) {
+        alert("Failed to fetch URL: " + e.message);
+      }
+    } else {
+      alert("Enter a 64-hex key or https:// URL");
+    }
+  });
+
+  // Platform key override
+  $("plat-key-btn").addEventListener("click", async function() {
+    const val = $("plat-key-override").value.trim();
+    if (/^[0-9a-fA-F]{64}$/.test(val)) {
+      platKeyOverride = val.toLowerCase();
+      await render();
+    } else {
+      alert("Enter a 64-hex platform public key");
+    }
+  });
+
+  // Source file uploads
+  setupDrop("src-drop", "src-files", async function(files) {
+    for (const f of files) {
+      // Use just the filename (strip path)
+      const name = f.name;
+      uploadedFiles[name] = await f.arrayBuffer();
+    }
+    $("src-drop").classList.add("loaded");
+    await render();
+  });
+
+  // Allow Enter key on dev-key input
+  $("dev-key").addEventListener("keydown", function(e) {
+    if (e.key === "Enter") $("dev-key-btn").click();
+  });
+  $("plat-key-override").addEventListener("keydown", function(e) {
+    if (e.key === "Enter") $("plat-key-btn").click();
+  });
+})();
+</script>
+</body>
+</html>

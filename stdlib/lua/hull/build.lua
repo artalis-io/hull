@@ -125,7 +125,7 @@ local function generate_app_registry(app_dir, lua_files)
     return table.concat(parts, "\n")
 end
 
-local function sign_app(app_dir, lua_files, key_file, extra_hashes)
+local function sign_app(app_dir, lua_files, key_file, sign_ctx)
     local key_data = read_file(key_file)
     if not key_data then
         tool.stderr("hull build: cannot read key file: " .. key_file .. "\n")
@@ -136,6 +136,11 @@ local function sign_app(app_dir, lua_files, key_file, extra_hashes)
         tool.stderr("hull build: invalid key file format\n")
         tool.exit(1)
     end
+
+    -- Derive public key
+    local pk_file = key_file:gsub("%.key$", ".pub")
+    local pk_data = read_file(pk_file)
+    local pk_hex = pk_data and pk_data:match("^(%x+)") or ""
 
     -- Compute file hashes
     local file_hashes = {}
@@ -156,43 +161,60 @@ local function sign_app(app_dir, lua_files, key_file, extra_hashes)
         end
     end
 
-    -- Build payload and sign
-    local payload = json.encode({
+    -- Read platform.sig (required for --sign)
+    local platform = nil
+    if sign_ctx.platform_sig_path then
+        local psig_data = read_file(sign_ctx.platform_sig_path)
+        if psig_data then
+            platform = json.decode(psig_data)
+        end
+    end
+    if not platform then
+        tool.stderr("hull build: cannot read platform.sig (required for --sign)\n")
+        tool.stderr("hint: run `hull sign-platform <key>` first\n")
+        tool.exit(1)
+    end
+
+    -- Capture compiler version
+    local cc_version = nil
+    if sign_ctx.cc then
+        local ver_out = tool.spawn_read({sign_ctx.cc, "--version"})
+        if ver_out then
+            cc_version = ver_out:match("^([^\n]+)")
+        end
+    end
+
+    -- Build the signed payload (canonical JSON key order)
+    local payload_table = {
+        binary_hash = sign_ctx.binary_hash,
+        build = {
+            cc = sign_ctx.cc or "cosmocc",
+            cc_version = cc_version,
+            flags = "-std=c11 -O2",
+        },
         files = file_hashes,
         manifest = manifest,
-    })
+        platform = platform,
+        trampoline_hash = sign_ctx.trampoline_hash,
+    }
+    local payload = json.encode(payload_table)
     local sig_hex = crypto.ed25519_sign(payload, sk_hex)
 
-    -- Derive public key filename
-    local pk_file = key_file:gsub("%.key$", ".pub")
-    local pk_data = read_file(pk_file)
-    local pk_hex = pk_data and pk_data:match("^(%x+)") or ""
-
-    -- Write hull.sig
+    -- Write package.sig
     local sig_table = {
-        version = 1,
+        binary_hash = sign_ctx.binary_hash,
+        build = payload_table.build,
         files = file_hashes,
         manifest = manifest,
+        platform = platform,
+        trampoline_hash = sign_ctx.trampoline_hash,
         signature = sig_hex,
         public_key = pk_hex,
     }
 
-    -- Add platform/binary/trampoline hashes if provided
-    if extra_hashes then
-        if extra_hashes.platform_hash then
-            sig_table.platform_hash = extra_hashes.platform_hash
-        end
-        if extra_hashes.binary_hash then
-            sig_table.binary_hash = extra_hashes.binary_hash
-        end
-        if extra_hashes.trampoline_hash then
-            sig_table.trampoline_hash = extra_hashes.trampoline_hash
-        end
-    end
-
-    local hull_sig = json.encode(sig_table)
-    write_file(app_dir .. "/hull.sig", hull_sig .. "\n")
-    print("wrote " .. app_dir .. "/hull.sig")
+    local pkg_sig = json.encode(sig_table)
+    write_file(app_dir .. "/package.sig", pkg_sig .. "\n")
+    print("wrote " .. app_dir .. "/package.sig")
 end
 
 local function main()
@@ -316,24 +338,32 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
 
     -- Sign if requested
     if opts.sign then
-        local extra_hashes = {}
-
-        -- Compute platform_hash (SHA256 of libhull_platform.a)
-        local platform_data = read_file(platform_lib)
-        if platform_data then
-            extra_hashes.platform_hash = crypto.sha256(platform_data)
+        -- Find platform.sig alongside the platform library
+        local platform_sig_path = nil
+        if platform_dir then
+            platform_sig_path = platform_dir .. "platform.sig"
+        end
+        -- Also check tmpdir (extracted embedded builds)
+        if not platform_sig_path or not file_exists(platform_sig_path) then
+            if file_exists(tmpdir .. "/platform.sig") then
+                platform_sig_path = tmpdir .. "/platform.sig"
+            end
         end
 
-        -- Compute trampoline_hash (SHA256 of app_main.c content)
-        extra_hashes.trampoline_hash = crypto.sha256(app_main)
+        local sign_ctx = {
+            cc = cc,
+            binary_hash = nil,
+            trampoline_hash = crypto.sha256(app_main),
+            platform_sig_path = platform_sig_path,
+        }
 
         -- Compute binary_hash (SHA256 of the linked output binary)
         local binary_data = read_file(opts.output)
         if binary_data then
-            extra_hashes.binary_hash = crypto.sha256(binary_data)
+            sign_ctx.binary_hash = crypto.sha256(binary_data)
         end
 
-        sign_app(opts.app_dir, lua_files, opts.sign, extra_hashes)
+        sign_app(opts.app_dir, lua_files, opts.sign, sign_ctx)
     end
 
     -- Cleanup

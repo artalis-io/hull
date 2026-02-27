@@ -144,10 +144,6 @@ end
 
 -- ── File utilities ───────────────────────────────────────────────────
 
-local function read_file(path)
-    return tool.read_file(path)
-end
-
 local function write_file(path, data)
     return tool.write_file(path, data)
 end
