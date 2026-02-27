@@ -327,6 +327,7 @@ int hl_cmd_test(int argc, char **argv, const char *hull_exe)
     }
 
     int is_js = is_js_entry(entry);
+    (void)is_js; /* may be unused if runtime not compiled in */
 
 #ifdef HL_ENABLE_JS
     if (is_js)
