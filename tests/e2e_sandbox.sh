@@ -316,7 +316,7 @@ else
         fi
     else
         # Native Linux: link against pledge polyfill objects
-        PLEDGE_OBJS=$(find "$BUILDDIR" -name 'pledge_*.o' 2>/dev/null | tr '\n' ' ')
+        PLEDGE_OBJS=$(find "$BUILDDIR" -path '*/pledge*' -name '*.o' 2>/dev/null | tr '\n' ' ')
 
         if [ -z "$PLEDGE_OBJS" ]; then
             fail "pledge polyfill objects not found in $BUILDDIR"
