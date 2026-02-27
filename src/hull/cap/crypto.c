@@ -1,26 +1,25 @@
 /*
  * hull_cap_crypto.c — Shared crypto capability
  *
- * Wraps TweetNaCl / mbedTLS for hashing, random, key derivation,
- * and signature verification. Both Lua and JS bindings call these.
- *
- * For initial implementation, uses OS-provided crypto primitives.
- * Full TweetNaCl/mbedTLS integration added when those are vendored.
+ * Wraps TweetNaCl for hashing, random, key derivation, authenticated
+ * encryption, and signature verification. Both Lua and JS bindings
+ * call these.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
 #include "hull/cap/crypto.h"
+#include "tweetnacl.h"
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
 
-/* ── SHA-256 (minimal implementation) ───────────────────────────────── */
-
-/*
- * Minimal SHA-256 — will be replaced by mbedTLS or TweetNaCl when
- * those are vendored. This is a correct, portable implementation.
+/* ── SHA-256 ────────────────────────────────────────────────────────────
+ *
+ * TweetNaCl only implements SHA-512 — SHA-256 is declared in the header
+ * but not in tweetnacl.c. We keep this implementation because PBKDF2
+ * and HMAC-SHA256 require SHA-256 specifically.
  */
 
 static const uint32_t sha256_k[64] = {
@@ -89,14 +88,12 @@ int hl_cap_crypto_sha256(const void *data, size_t len, uint8_t out[32])
     const uint8_t *p = (const uint8_t *)data;
     size_t remaining = len;
 
-    /* Process full blocks */
     while (remaining >= 64) {
         sha256_transform(state, p);
         p += 64;
         remaining -= 64;
     }
 
-    /* Pad final block */
     uint8_t block[64];
     memset(block, 0, 64);
     memcpy(block, p, remaining);
@@ -107,7 +104,6 @@ int hl_cap_crypto_sha256(const void *data, size_t len, uint8_t out[32])
         memset(block, 0, 64);
     }
 
-    /* Append length in bits (big-endian) */
     uint64_t bits = (uint64_t)len * 8;
     block[56] = (uint8_t)(bits >> 56);
     block[57] = (uint8_t)(bits >> 48);
@@ -120,7 +116,6 @@ int hl_cap_crypto_sha256(const void *data, size_t len, uint8_t out[32])
 
     sha256_transform(state, block);
 
-    /* Write output (big-endian) */
     for (int i = 0; i < 8; i++) {
         out[i*4+0] = (uint8_t)(state[i] >> 24);
         out[i*4+1] = (uint8_t)(state[i] >> 16);
@@ -264,8 +259,6 @@ int hl_cap_crypto_pbkdf2(const char *password, size_t pw_len,
  * the hl_cap_crypto_* API.
  */
 
-#include "tweetnacl.h"
-
 /* TweetNaCl requires an external randombytes() implementation.
  * We provide it via our existing hl_cap_crypto_random(). */
 void randombytes(unsigned char *buf, unsigned long long len)
@@ -349,4 +342,264 @@ int hl_cap_crypto_ed25519_keypair(uint8_t out_pk[32], uint8_t out_sk[64])
         return -1;
 
     return crypto_sign_ed25519_keypair(out_pk, out_sk);
+}
+
+/* ── SHA-512 (via TweetNaCl) ────────────────────────────────────────── */
+
+int hl_cap_crypto_sha512(const void *data, size_t len, uint8_t out[64])
+{
+    if (!data || !out)
+        return -1;
+    return crypto_hash_sha512(out, (const unsigned char *)data,
+                              (unsigned long long)len);
+}
+
+/* ── HMAC-SHA512/256 authentication ──────────────────────────────────
+ *
+ * crypto_auth (HMAC-SHA512/256) is not implemented in our vendored
+ * TweetNaCl. We implement it using crypto_hash_sha512: compute
+ * HMAC-SHA512, then truncate to 32 bytes.
+ */
+
+static void hmac_sha512(const uint8_t *key, size_t key_len,
+                        const uint8_t *msg, size_t msg_len,
+                        uint8_t out[64])
+{
+    uint8_t k_ipad[128], k_opad[128];
+    uint8_t tk[64];
+
+    /* If key is longer than block size (128 for SHA-512), hash it */
+    if (key_len > 128) {
+        crypto_hash_sha512(tk, key, (unsigned long long)key_len);
+        key = tk;
+        key_len = 64;
+    }
+
+    memset(k_ipad, 0x36, 128);
+    memset(k_opad, 0x5c, 128);
+    for (size_t i = 0; i < key_len; i++) {
+        k_ipad[i] ^= key[i];
+        k_opad[i] ^= key[i];
+    }
+
+    /* inner = SHA512(k_ipad || msg) */
+    /* Allocate contiguous buffer for inner hash input */
+    size_t inner_len = 128 + msg_len;
+    uint8_t stack_inner[4224]; /* 128 + 4096 */
+    uint8_t *inner_buf = (inner_len <= sizeof(stack_inner)) ? stack_inner
+                                                             : malloc(inner_len);
+    if (!inner_buf) {
+        memset(out, 0, 64);
+        return;
+    }
+    memcpy(inner_buf, k_ipad, 128);
+    memcpy(inner_buf + 128, msg, msg_len);
+
+    uint8_t inner_hash[64];
+    crypto_hash_sha512(inner_hash, inner_buf, (unsigned long long)inner_len);
+
+    if (inner_buf != stack_inner) free(inner_buf);
+
+    /* outer = SHA512(k_opad || inner_hash) */
+    uint8_t outer_buf[128 + 64];
+    memcpy(outer_buf, k_opad, 128);
+    memcpy(outer_buf + 128, inner_hash, 64);
+    crypto_hash_sha512(out, outer_buf, 192);
+}
+
+int hl_cap_crypto_auth(const void *msg, size_t msg_len,
+                       const uint8_t key[32], uint8_t out[32])
+{
+    if (!msg || !key || !out)
+        return -1;
+
+    uint8_t full[64];
+    hmac_sha512(key, 32, (const uint8_t *)msg, msg_len, full);
+    memcpy(out, full, 32); /* truncate to 256 bits */
+    return 0;
+}
+
+int hl_cap_crypto_auth_verify(const uint8_t tag[32],
+                              const void *msg, size_t msg_len,
+                              const uint8_t key[32])
+{
+    if (!tag || !msg || !key)
+        return -1;
+
+    uint8_t computed[32];
+    hl_cap_crypto_auth(msg, msg_len, key, computed);
+
+    /* Constant-time comparison */
+    return crypto_verify_32(computed, tag);
+}
+
+/* ── Secret-key authenticated encryption (XSalsa20+Poly1305) ───────
+ *
+ * NaCl's crypto_secretbox requires ZEROBYTES (32) of leading zeros in
+ * the plaintext and produces BOXZEROBYTES (16) of leading zeros in the
+ * ciphertext. Our wrapper hides this padding from callers:
+ *   - Caller passes raw plaintext, gets msg_len + 16 output bytes
+ *   - Stack buffer for small messages, heap for large
+ */
+
+int hl_cap_crypto_secretbox(uint8_t *out, const void *msg, size_t msg_len,
+                            const uint8_t nonce[24], const uint8_t key[32])
+{
+    if (!out || !msg || !nonce || !key)
+        return -1;
+    if (msg_len > SIZE_MAX / 2)
+        return -1;
+
+    size_t padded_len = 32 + msg_len;
+    /* Single allocation for both padded plaintext and ciphertext */
+    uint8_t *heap = NULL;
+    uint8_t stack_buf[4096 * 2];
+    uint8_t *buf;
+    if (padded_len * 2 <= sizeof(stack_buf)) {
+        buf = stack_buf;
+    } else {
+        heap = malloc(padded_len * 2);
+        if (!heap) return -1;
+        buf = heap;
+    }
+    uint8_t *padded = buf;
+    uint8_t *ct = buf + padded_len;
+
+    memset(padded, 0, 32);
+    memcpy(padded + 32, msg, msg_len);
+
+    int rc = crypto_secretbox(ct, padded, (unsigned long long)padded_len,
+                              nonce, key);
+
+    if (rc == 0)
+        memcpy(out, ct + 16, msg_len + 16); /* skip BOXZEROBYTES */
+
+    free(heap);
+    return rc;
+}
+
+int hl_cap_crypto_secretbox_open(uint8_t *out, const void *ct, size_t ct_len,
+                                 const uint8_t nonce[24], const uint8_t key[32])
+{
+    if (!out || !ct || !nonce || !key)
+        return -1;
+    if (ct_len < 16 || ct_len > SIZE_MAX / 2)
+        return -1;
+
+    size_t padded_len = 16 + ct_len; /* prepend BOXZEROBYTES */
+    uint8_t *heap = NULL;
+    uint8_t stack_buf[4096 * 2];
+    uint8_t *buf;
+    if (padded_len * 2 <= sizeof(stack_buf)) {
+        buf = stack_buf;
+    } else {
+        heap = malloc(padded_len * 2);
+        if (!heap) return -1;
+        buf = heap;
+    }
+    uint8_t *padded_ct = buf;
+    uint8_t *padded_pt = buf + padded_len;
+
+    memset(padded_ct, 0, 16);
+    memcpy(padded_ct + 16, ct, ct_len);
+
+    int rc = crypto_secretbox_open(padded_pt, padded_ct,
+                                   (unsigned long long)padded_len,
+                                   nonce, key);
+
+    if (rc == 0)
+        memcpy(out, padded_pt + 32, ct_len - 16); /* skip ZEROBYTES */
+
+    free(heap);
+    return rc;
+}
+
+/* ── Public-key authenticated encryption (Curve25519+XSalsa20+Poly1305)
+ *
+ * Same ZEROBYTES padding pattern as secretbox.
+ */
+
+int hl_cap_crypto_box(uint8_t *out, const void *msg, size_t msg_len,
+                      const uint8_t nonce[24], const uint8_t pk[32],
+                      const uint8_t sk[32])
+{
+    if (!out || !msg || !nonce || !pk || !sk)
+        return -1;
+    if (msg_len > SIZE_MAX / 2)
+        return -1;
+
+    size_t padded_len = 32 + msg_len;
+    uint8_t *heap = NULL;
+    uint8_t stack_buf[4096 * 2];
+    uint8_t *buf;
+    if (padded_len * 2 <= sizeof(stack_buf)) {
+        buf = stack_buf;
+    } else {
+        heap = malloc(padded_len * 2);
+        if (!heap) return -1;
+        buf = heap;
+    }
+    uint8_t *padded = buf;
+    uint8_t *ct_buf = buf + padded_len;
+
+    memset(padded, 0, 32);
+    memcpy(padded + 32, msg, msg_len);
+
+    int rc = crypto_box(ct_buf, padded, (unsigned long long)padded_len,
+                        nonce, pk, sk);
+
+    if (rc == 0)
+        memcpy(out, ct_buf + 16, msg_len + 16); /* skip BOXZEROBYTES */
+
+    free(heap);
+    return rc;
+}
+
+int hl_cap_crypto_box_open(uint8_t *out, const void *ct, size_t ct_len,
+                           const uint8_t nonce[24], const uint8_t pk[32],
+                           const uint8_t sk[32])
+{
+    if (!out || !ct || !nonce || !pk || !sk)
+        return -1;
+    if (ct_len < 16 || ct_len > SIZE_MAX / 2)
+        return -1;
+
+    size_t padded_len = 16 + ct_len;
+    uint8_t *heap = NULL;
+    uint8_t stack_buf[4096 * 2];
+    uint8_t *buf;
+    if (padded_len * 2 <= sizeof(stack_buf)) {
+        buf = stack_buf;
+    } else {
+        heap = malloc(padded_len * 2);
+        if (!heap) return -1;
+        buf = heap;
+    }
+    uint8_t *padded_ct = buf;
+    uint8_t *padded_pt = buf + padded_len;
+
+    memset(padded_ct, 0, 16);
+    memcpy(padded_ct + 16, ct, ct_len);
+
+    int rc = crypto_box_open(padded_pt, padded_ct,
+                             (unsigned long long)padded_len,
+                             nonce, pk, sk);
+
+    if (rc == 0)
+        memcpy(out, padded_pt + 32, ct_len - 16); /* skip ZEROBYTES */
+
+    free(heap);
+    return rc;
+}
+
+int hl_cap_crypto_box_keypair(uint8_t out_pk[32], uint8_t out_sk[32])
+{
+    if (!out_pk || !out_sk)
+        return -1;
+
+    /* TweetNaCl's crypto_box_keypair is commented out in our vendored
+     * copy, so we implement it directly: random secret key + derive
+     * public key via Curve25519 base-point multiplication. */
+    hl_cap_crypto_random(out_sk, 32);
+    return crypto_scalarmult_base(out_pk, out_sk);
 }

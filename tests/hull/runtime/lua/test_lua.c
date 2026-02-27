@@ -65,8 +65,8 @@ static void init_lua_with_caps(void)
     sqlite3_open(":memory:", &test_db);
     HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
     memset(&lua_rt, 0, sizeof(lua_rt));
-    lua_rt.db = test_db;
-    lua_rt.env_cfg = &env_cfg;
+    lua_rt.base.db = test_db;
+    lua_rt.base.env_cfg = &env_cfg;
     int rc = hl_lua_init(&lua_rt, &cfg);
     lua_initialized = (rc == 0);
 }

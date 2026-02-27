@@ -9,6 +9,8 @@
 
 #include "hull/runtime/lua.h"
 #include "hull/alloc.h"
+#include "hull/manifest.h"
+#include "hull/cap/body.h"
 #include "hull/cap/fs.h"
 #include "hull/cap/env.h"
 #include "hull/cap/tool.h"
@@ -17,9 +19,7 @@
 #include "lualib.h"
 #include "lauxlib.h"
 
-#include <keel/router.h>
-#include <keel/response.h>
-#include <keel/request.h>
+#include <keel/keel.h>
 
 #include <sh_arena.h>
 
@@ -41,7 +41,7 @@ static void *hl_lua_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
             lua->mem_used -= osize;
         else
             lua->mem_used = 0;
-        hl_alloc_free(lua->alloc, ptr, osize);
+        hl_alloc_free(lua->base.alloc, ptr, osize);
         return NULL;
     }
 
@@ -57,9 +57,9 @@ static void *hl_lua_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
      * so use malloc to avoid confusing the tracker. */
     void *new_ptr;
     if (ptr == NULL)
-        new_ptr = hl_alloc_malloc(lua->alloc, nsize);
+        new_ptr = hl_alloc_malloc(lua->base.alloc, nsize);
     else
-        new_ptr = hl_alloc_realloc(lua->alloc, ptr, osize, nsize);
+        new_ptr = hl_alloc_realloc(lua->base.alloc, ptr, osize, nsize);
 
     if (new_ptr) {
         if (nsize > osize)
@@ -111,19 +111,13 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
     if (!lua || !cfg)
         return -1;
 
-    /* Save caller-set fields before zeroing */
-    sqlite3 *db = lua->db;
-    HlFsConfig *fs_cfg = lua->fs_cfg;
-    HlEnvConfig *env_cfg = lua->env_cfg;
-    HlAllocator *alloc = lua->alloc;
+    /* Save caller-set base fields before zeroing */
+    HlRuntime saved_base = lua->base;
 
     memset(lua, 0, sizeof(*lua));
 
-    /* Restore caller-set fields */
-    lua->db = db;
-    lua->fs_cfg = fs_cfg;
-    lua->env_cfg = env_cfg;
-    lua->alloc = alloc;
+    /* Restore caller-set base fields */
+    lua->base = saved_base;
     lua->mem_limit = cfg->max_heap_bytes;
 
     /* Create Lua state with custom allocator */
@@ -186,7 +180,7 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
     }
 
     /* Per-request scratch arena */
-    lua->scratch = hl_arena_create(lua->alloc, HL_SCRATCH_SIZE);
+    lua->scratch = hl_arena_create(lua->base.alloc, HL_SCRATCH_SIZE);
     if (!lua->scratch) {
         hl_lua_free(lua);
         return -1;
@@ -202,7 +196,7 @@ int hl_lua_load_app(HlLua *lua, const char *filename)
 
     /* Extract app directory from filename */
     size_t fn_len = strlen(filename);
-    char *app_dir = hl_alloc_malloc(lua->alloc, fn_len + 1);
+    char *app_dir = hl_alloc_malloc(lua->base.alloc, fn_len + 1);
     if (!app_dir)
         return -1;
     memcpy(app_dir, filename, fn_len + 1);
@@ -210,8 +204,8 @@ int hl_lua_load_app(HlLua *lua, const char *filename)
     if (last_slash)
         *last_slash = '\0';
     else {
-        hl_alloc_free(lua->alloc, app_dir, fn_len + 1);
-        app_dir = hl_alloc_malloc(lua->alloc, 2);
+        hl_alloc_free(lua->base.alloc, app_dir, fn_len + 1);
+        app_dir = hl_alloc_malloc(lua->base.alloc, 2);
         if (!app_dir)
             return -1;
         app_dir[0] = '.';
@@ -286,14 +280,14 @@ void hl_lua_free(HlLua *lua)
         lua->L = NULL;
     }
     if (lua->app_dir) {
-        hl_alloc_free(lua->alloc, (void *)lua->app_dir, lua->app_dir_size);
+        hl_alloc_free(lua->base.alloc, (void *)lua->app_dir, lua->app_dir_size);
         lua->app_dir = NULL;
         lua->app_dir_size = 0;
     }
-    hl_arena_free(lua->alloc, lua->scratch);
+    hl_arena_free(lua->base.alloc, lua->scratch);
     lua->scratch = NULL;
     if (lua->response_body) {
-        hl_alloc_free(lua->alloc, lua->response_body,
+        hl_alloc_free(lua->base.alloc, lua->response_body,
                       lua->response_body_size);
         lua->response_body = NULL;
         lua->response_body_size = 0;
@@ -379,3 +373,106 @@ int hl_lua_wire_routes(HlLua *lua, KlRouter *router)
     lua_pop(L, 1); /* __hull_route_defs table */
     return 0;
 }
+
+/* ── Server route wiring (with body reader factory) ────────────────── */
+
+int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
+                               void *(*alloc_fn)(size_t))
+{
+    lua_State *L = lua->L;
+
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_route_defs");
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        log_error("[hull:c] no routes registered");
+        return -1;
+    }
+
+    int count = (int)luaL_len(L, -1);
+    if (count <= 0) {
+        lua_pop(L, 1);
+        log_error("[hull:c] no routes registered");
+        return -1;
+    }
+
+    for (int i = 1; i <= count; i++) {
+        lua_rawgeti(L, -1, i);
+        if (!lua_istable(L, -1)) {
+            lua_pop(L, 1);
+            continue;
+        }
+
+        lua_getfield(L, -1, "method");
+        lua_getfield(L, -2, "pattern");
+        lua_getfield(L, -3, "handler_id");
+
+        const char *method_str = lua_tostring(L, -3);
+        const char *pattern = lua_tostring(L, -2);
+        int handler_id = (int)lua_tointeger(L, -1);
+
+        if (method_str && pattern) {
+            void *mem = alloc_fn ? alloc_fn(sizeof(HlLuaRoute))
+                                 : malloc(sizeof(HlLuaRoute));
+            HlLuaRoute *route = (HlLuaRoute *)mem;
+            if (route) {
+                route->lua = lua;
+                route->handler_id = handler_id;
+                kl_server_route(server, method_str, pattern,
+                                hl_lua_keel_handler, route,
+                                hl_cap_body_factory);
+            }
+        }
+
+        lua_pop(L, 3); /* method_str, pattern, handler_id */
+        lua_pop(L, 1); /* route def table */
+    }
+
+    lua_pop(L, 1); /* __hull_route_defs table */
+    return 0;
+}
+
+/* ── Vtable adapters ───────────────────────────────────────────────── */
+
+static int vt_lua_init(HlRuntime *rt, const void *config)
+{
+    return hl_lua_init((HlLua *)rt, (const HlLuaConfig *)config);
+}
+
+static int vt_lua_load_app(HlRuntime *rt, const char *filename)
+{
+    return hl_lua_load_app((HlLua *)rt, filename);
+}
+
+static int vt_lua_wire_routes_server(HlRuntime *rt, KlServer *server,
+                                      void *(*alloc_fn)(size_t))
+{
+    return hl_lua_wire_routes_server((HlLua *)rt, server, alloc_fn);
+}
+
+static int vt_lua_extract_manifest(HlRuntime *rt, HlManifest *out)
+{
+    HlLua *lua = (HlLua *)rt;
+    return hl_manifest_extract(lua->L, out);
+}
+
+static void vt_lua_free_manifest_strings(HlRuntime *rt, HlManifest *m)
+{
+    /* Lua manifest strings are owned by the Lua state — no-op */
+    (void)rt;
+    (void)m;
+}
+
+static void vt_lua_destroy(HlRuntime *rt)
+{
+    hl_lua_free((HlLua *)rt);
+}
+
+const HlRuntimeVtable hl_lua_vtable = {
+    .init                = vt_lua_init,
+    .load_app            = vt_lua_load_app,
+    .wire_routes_server  = vt_lua_wire_routes_server,
+    .extract_manifest    = vt_lua_extract_manifest,
+    .free_manifest_strings = vt_lua_free_manifest_strings,
+    .destroy             = vt_lua_destroy,
+    .name                = "Lua",
+};
