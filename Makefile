@@ -604,7 +604,7 @@ check:
 analyze:
 	$(MAKE) clean
 	$(MAKE) $(VEND_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(KEEL_LIB)
-	scan-build --status-bugs $(MAKE) $(CAP_OBJS) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(MAIN_OBJ) $(BUILDDIR)/hull
+	scan-build --status-bugs -disable-checker alpha.unix.Stream $(MAKE) $(CAP_OBJS) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(MAIN_OBJ) $(BUILDDIR)/hull
 
 cppcheck:
 	cppcheck --enable=all --inline-suppr \

@@ -350,6 +350,7 @@ int hl_tool_copy(const char *src, const char *dst,
     while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
         if (fwrite(buf, 1, n, out) != n) { ok = -1; break; }
     }
+    if (ferror(in)) ok = -1;
 
     fclose(in);
     fclose(out);
@@ -591,7 +592,12 @@ static int l_tool_read_file(lua_State *L)
     size_t n;
     while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
         luaL_addlstring(&b, buf, n);
+    int read_err = ferror(f);
     fclose(f);
+    if (read_err) {
+        lua_pushnil(L);
+        return 1;
+    }
     luaL_pushresult(&b);
     return 1;
 }

@@ -91,6 +91,7 @@ static const char *parse_cc_option(int argc, char **argv)
 static const char *parse_app_dir(int argc, char **argv)
 {
     for (int i = 0; i < argc; i++) {
+        if (!argv[i]) continue;
         if (argv[i][0] != '-')
             return argv[i];
         /* Skip --flag value pairs */
