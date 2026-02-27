@@ -801,7 +801,7 @@ UTEST(lua_require_fs, too_large)
     char path[1024];
     snprintf(path, sizeof(path), "%s/big.lua", tmpdir);
     FILE *f = fopen(path, "w");
-    ASSERT_NE(f, NULL);
+    ASSERT_TRUE(f != NULL);
     /* Write just past the limit — use fseek to create a sparse file */
     fseek(f, HL_MODULE_MAX_SIZE + 1, SEEK_SET);
     fputc('x', f);
