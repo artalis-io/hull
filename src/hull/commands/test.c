@@ -85,7 +85,7 @@ static int run_lua_tests(const char *app_dir, const char *entry)
     }
     sqlite3_exec(db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL);
     sqlite3_exec(db, "PRAGMA foreign_keys=ON", NULL, NULL, NULL);
-    lua.db = db;
+    lua.base.db = db;
 
     if (hl_lua_init(&lua, &cfg) != 0) {
         fprintf(stderr, "hull test: Lua init failed\n");
@@ -197,7 +197,7 @@ static int run_js_tests(const char *app_dir, const char *entry)
     }
     sqlite3_exec(db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL);
     sqlite3_exec(db, "PRAGMA foreign_keys=ON", NULL, NULL, NULL);
-    js.db = db;
+    js.base.db = db;
 
     if (hl_js_init(&js, &cfg) != 0) {
         fprintf(stderr, "hull test: QuickJS init failed\n");

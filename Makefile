@@ -256,6 +256,45 @@ $(STDLIB_LUA_REGISTRY): $(STDLIB_LUA_XXD_HDRS) | $(BUILDDIR)
 
 STDLIB_LUA_HDRS += $(STDLIB_LUA_REGISTRY)
 
+# ── JS stdlib embedding (xxd) ────────────────────────────────────────
+#
+# Mirror of the Lua pipeline for stdlib/js/**/*.js files.
+# Module names use colon separator: stdlib/js/hull/verify.js → hull:verify
+
+STDLIB_JS_FILES := $(shell find stdlib/js -name '*.js' -not -path '*/tests/*' 2>/dev/null)
+
+# Flatten path: stdlib/js/hull/verify.js → build/stdlib_js_hull_verify.h
+stdlib_js_hdr = $(BUILDDIR)/$(subst /,_,$(patsubst stdlib/%.js,stdlib_%.h,$(1)))
+STDLIB_JS_HDRS := $(foreach f,$(STDLIB_JS_FILES),$(call stdlib_js_hdr,$(f)))
+
+STDLIB_JS_REGISTRY := $(BUILDDIR)/stdlib_js_registry.h
+
+define STDLIB_JS_RULE
+$(call stdlib_js_hdr,$(1)): $(1) | $(BUILDDIR)
+	xxd -i $$< > $$@
+endef
+$(foreach f,$(STDLIB_JS_FILES),$(eval $(call STDLIB_JS_RULE,$(f))))
+
+STDLIB_JS_XXD_HDRS := $(STDLIB_JS_HDRS)
+
+$(STDLIB_JS_REGISTRY): $(STDLIB_JS_XXD_HDRS) | $(BUILDDIR)
+	@echo "/* Auto-generated — do not edit */" > $@
+	@for hdr in $(STDLIB_JS_XXD_HDRS); do \
+		echo "#include \"$$(basename $$hdr)\""; \
+	done >> $@
+	@echo "" >> $@
+	@echo "typedef struct { const char *name; const unsigned char *data; unsigned int len; } HlJsStdlibEntry;" >> $@
+	@echo "static const HlJsStdlibEntry hl_stdlib_js_entries[] = {" >> $@
+	@for f in $(STDLIB_JS_FILES); do \
+		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
+		modname=$$(echo "$$f" | sed 's|^stdlib/js/||; s|\.js$$||; s|/|:|g'); \
+		echo "    { \"$$modname\", $${varname}, sizeof($${varname}) },"; \
+	done >> $@
+	@echo "    { 0, 0, 0 }" >> $@
+	@echo "};" >> $@
+
+STDLIB_JS_HDRS += $(STDLIB_JS_REGISTRY)
+
 # ── App code embedding (xxd) ─────────────────────────────────────────
 #
 # When APP_DIR is set (e.g. make APP_DIR=myapp), all .lua files under
@@ -378,8 +417,8 @@ $(BUILDDIR)/cap_%.o: $(SRCDIR)/hull/cap/%.c | $(BUILDDIR)
 $(BUILDDIR)/cmd_%.o: $(SRCDIR)/hull/commands/%.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# JS runtime sources
-$(BUILDDIR)/js_%.o: $(SRCDIR)/hull/runtime/js/%.c | $(BUILDDIR)
+# JS runtime sources (depend on generated stdlib headers)
+$(BUILDDIR)/js_%.o: $(SRCDIR)/hull/runtime/js/%.c $(STDLIB_JS_HDRS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Lua runtime sources (depend on generated stdlib headers)

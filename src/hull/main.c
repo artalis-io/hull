@@ -15,17 +15,13 @@
 
 #ifdef HL_ENABLE_JS
 #include "hull/runtime/js.h"
-#include "quickjs.h"
 #endif
 
 #ifdef HL_ENABLE_LUA
 #include "hull/runtime/lua.h"
-#include "lua.h"
-#include "lauxlib.h"
 #endif
 
 #include "hull/alloc.h"
-#include "hull/cap/body.h"
 #include "hull/commands/dispatch.h"
 #include "hull/limits.h"
 #include "hull/manifest.h"
@@ -114,128 +110,6 @@ static HlRuntimeType detect_runtime(const char *entry_point)
         return HL_RUNTIME_JS;
     return HL_RUNTIME_LUA; /* default */
 }
-
-/*
- * Server-mode route wiring uses the public hl_*_wire_routes() from
- * the runtime headers + hl_*_keel_handler() as the Keel callback.
- * Route structs (HlLuaRoute/HlJSRoute) are allocated from the route arena.
- *
- * The runtime's wire_routes() uses kl_router_add() directly (for hull test).
- * Server mode uses kl_server_route() which also sets the body reader factory.
- * We provide server-specific wrappers below.
- */
-
-#ifdef HL_ENABLE_JS
-static int wire_js_routes_server(HlJS *js, KlServer *server)
-{
-    JSContext *ctx = js->ctx;
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue defs = JS_GetPropertyStr(ctx, global, "__hull_route_defs");
-
-    if (JS_IsUndefined(defs) || !JS_IsArray(ctx, defs)) {
-        JS_FreeValue(ctx, defs);
-        JS_FreeValue(ctx, global);
-        log_error("[hull:c] no routes registered");
-        return -1;
-    }
-
-    JSValue len_val = JS_GetPropertyStr(ctx, defs, "length");
-    int32_t count = 0;
-    JS_ToInt32(ctx, &count, len_val);
-    JS_FreeValue(ctx, len_val);
-
-    for (int32_t i = 0; i < count; i++) {
-        JSValue def = JS_GetPropertyUint32(ctx, defs, (uint32_t)i);
-        if (JS_IsUndefined(def))
-            continue;
-
-        JSValue method_val = JS_GetPropertyStr(ctx, def, "method");
-        JSValue pattern_val = JS_GetPropertyStr(ctx, def, "pattern");
-        JSValue id_val = JS_GetPropertyStr(ctx, def, "handler_id");
-
-        const char *method_str = JS_ToCString(ctx, method_val);
-        const char *pattern = JS_ToCString(ctx, pattern_val);
-        int32_t handler_id = 0;
-        JS_ToInt32(ctx, &handler_id, id_val);
-
-        if (method_str && pattern) {
-            HlJSRoute *route = track_route_alloc(sizeof(HlJSRoute));
-            if (route) {
-                route->js = js;
-                route->handler_id = handler_id;
-                kl_server_route(server, method_str, pattern,
-                                hl_js_keel_handler, route,
-                                hl_cap_body_factory);
-            }
-        }
-
-        if (pattern) JS_FreeCString(ctx, pattern);
-        if (method_str) JS_FreeCString(ctx, method_str);
-        JS_FreeValue(ctx, id_val);
-        JS_FreeValue(ctx, pattern_val);
-        JS_FreeValue(ctx, method_val);
-        JS_FreeValue(ctx, def);
-    }
-
-    JS_FreeValue(ctx, defs);
-    JS_FreeValue(ctx, global);
-    return 0;
-}
-#endif /* HL_ENABLE_JS */
-
-#ifdef HL_ENABLE_LUA
-static int wire_lua_routes_server(HlLua *lua, KlServer *server)
-{
-    lua_State *L = lua->L;
-
-    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_route_defs");
-    if (!lua_istable(L, -1)) {
-        lua_pop(L, 1);
-        log_error("[hull:c] no routes registered");
-        return -1;
-    }
-
-    int count = (int)luaL_len(L, -1);
-    if (count <= 0) {
-        lua_pop(L, 1);
-        log_error("[hull:c] no routes registered");
-        return -1;
-    }
-
-    for (int i = 1; i <= count; i++) {
-        lua_rawgeti(L, -1, i);
-        if (!lua_istable(L, -1)) {
-            lua_pop(L, 1);
-            continue;
-        }
-
-        lua_getfield(L, -1, "method");
-        lua_getfield(L, -2, "pattern");
-        lua_getfield(L, -3, "handler_id");
-
-        const char *method_str = lua_tostring(L, -3);
-        const char *pattern = lua_tostring(L, -2);
-        int handler_id = (int)lua_tointeger(L, -1);
-
-        if (method_str && pattern) {
-            HlLuaRoute *route = track_route_alloc(sizeof(HlLuaRoute));
-            if (route) {
-                route->lua = lua;
-                route->handler_id = handler_id;
-                kl_server_route(server, method_str, pattern,
-                                hl_lua_keel_handler, route,
-                                hl_cap_body_factory);
-            }
-        }
-
-        lua_pop(L, 3); /* method_str, pattern, handler_id */
-        lua_pop(L, 1); /* route def table */
-    }
-
-    lua_pop(L, 1); /* __hull_route_defs table */
-    return 0;
-}
-#endif /* HL_ENABLE_LUA */
 
 /* ── Auto-detect entry point ───────────────────────────────────────── */
 
@@ -420,138 +294,104 @@ static int hull_serve(int argc, char **argv)
         goto cleanup_db;
     }
 
+    /* ── Runtime vtable dispatch ─────────────────────────────────── */
+
+    union {
 #ifdef HL_ENABLE_JS
+        HlJS  js;
+#endif
+#ifdef HL_ENABLE_LUA
+        HlLua lua;
+#endif
+    } rt_storage;
+    memset(&rt_storage, 0, sizeof(rt_storage));
+
+    const void *rt_cfg = NULL;
+    HlRuntime *rt = NULL;
+
+#ifdef HL_ENABLE_JS
+    HlJSConfig js_cfg;
+#endif
+#ifdef HL_ENABLE_LUA
+    HlLuaConfig lua_cfg;
+#endif
+
     if (runtime == HL_RUNTIME_JS) {
-        /* ── QuickJS runtime ──────────────────────────────────── */
-        HlJSConfig js_cfg = HL_JS_CONFIG_DEFAULT;
+#ifdef HL_ENABLE_JS
+        js_cfg = (HlJSConfig)HL_JS_CONFIG_DEFAULT;
         if (heap_limit > 0)  js_cfg.max_heap_bytes  = (size_t)heap_limit;
         if (stack_limit > 0) js_cfg.max_stack_bytes  = (size_t)stack_limit;
-        HlJS js;
-
-        js.db = db;
-        js.alloc = &alloc;
-
-        if (hl_js_init(&js, &js_cfg) != 0) {
-            log_error("[hull:c] QuickJS init failed");
-            goto cleanup_server;
-        }
-
-        /* Load and evaluate the app */
-        if (hl_js_load_app(&js, entry_point) != 0) {
-            log_error("[hull:c] failed to load %s", entry_point);
-            hl_js_free(&js);
-            goto cleanup_server;
-        }
-
-        /* Verify app signature if requested */
-        if (verify_sig_path) {
-            if (hl_verify_startup(verify_sig_path, entry_point) != 0) {
-                log_error("[hull:c] signature verification failed — refusing to start");
-                hl_js_free(&js);
-                goto cleanup_server;
-            }
-            log_info("[hull:c] signature verified OK");
-        }
-
-        /* Wire JS routes into Keel */
-        if (wire_js_routes_server(&js, &server) != 0) {
-            hl_js_free(&js);
-            goto cleanup_server;
-        }
-
-        /* Extract manifest and configure capabilities */
-        HlManifest js_manifest;
-        if (hl_manifest_extract_js(js.ctx, &js_manifest) == 0) {
-            log_info("[hull:c] manifest: fs_read=%d fs_write=%d env=%d hosts=%d",
-                     js_manifest.fs_read_count, js_manifest.fs_write_count,
-                     js_manifest.env_count, js_manifest.hosts_count);
-        }
-
-        /* Apply kernel sandbox (pledge/unveil) from manifest */
-        if (hl_sandbox_apply(&js_manifest, db_path) != 0) {
-            log_error("[hull:c] sandbox enforcement failed");
-            hl_manifest_free_js_strings(js.ctx, &js_manifest);
-            hl_js_free(&js);
-            goto cleanup_server;
-        }
-        hl_manifest_free_js_strings(js.ctx, &js_manifest);
-
-        log_info("[hull:c] listening on %s:%d (QuickJS runtime)",
-                 bind_addr, port);
-
-        /* Enter event loop */
-        kl_server_run(&server);
-
-        /* Cleanup */
-        hl_js_free(&js);
-        ret = 0;
-    }
+        rt = &rt_storage.js.base;
+        rt->vt = &hl_js_vtable;
+        rt_cfg = &js_cfg;
 #endif
-
+    } else {
 #ifdef HL_ENABLE_LUA
-    if (runtime == HL_RUNTIME_LUA) {
-        /* ── Lua runtime ─────────────────────────────────────── */
-        HlLuaConfig lua_cfg = HL_LUA_CONFIG_DEFAULT;
+        lua_cfg = (HlLuaConfig)HL_LUA_CONFIG_DEFAULT;
         if (heap_limit > 0) lua_cfg.max_heap_bytes = (size_t)heap_limit;
-        HlLua lua;
-
-        lua.db = db;
-        lua.alloc = &alloc;
-
-        if (hl_lua_init(&lua, &lua_cfg) != 0) {
-            log_error("[hull:c] Lua init failed");
-            goto cleanup_server;
-        }
-
-        /* Load and execute the app */
-        if (hl_lua_load_app(&lua, entry_point) != 0) {
-            log_error("[hull:c] failed to load %s", entry_point);
-            hl_lua_free(&lua);
-            goto cleanup_server;
-        }
-
-        /* Verify app signature if requested */
-        if (verify_sig_path) {
-            if (hl_verify_startup(verify_sig_path, entry_point) != 0) {
-                log_error("[hull:c] signature verification failed — refusing to start");
-                hl_lua_free(&lua);
-                goto cleanup_server;
-            }
-            log_info("[hull:c] signature verified OK");
-        }
-
-        /* Extract manifest and configure capabilities */
-        HlManifest manifest;
-        if (hl_manifest_extract(lua.L, &manifest) == 0) {
-            log_info("[hull:c] manifest: fs_read=%d fs_write=%d env=%d hosts=%d",
-                     manifest.fs_read_count, manifest.fs_write_count,
-                     manifest.env_count, manifest.hosts_count);
-        }
-
-        /* Wire Lua routes into Keel */
-        if (wire_lua_routes_server(&lua, &server) != 0) {
-            hl_lua_free(&lua);
-            goto cleanup_server;
-        }
-
-        /* Apply kernel sandbox (pledge/unveil) from manifest */
-        if (hl_sandbox_apply(&manifest, db_path) != 0) {
-            log_error("[hull:c] sandbox enforcement failed");
-            hl_lua_free(&lua);
-            goto cleanup_server;
-        }
-
-        log_info("[hull:c] listening on %s:%d (Lua runtime)",
-                 bind_addr, port);
-
-        /* Enter event loop */
-        kl_server_run(&server);
-
-        /* Cleanup */
-        hl_lua_free(&lua);
-        ret = 0;
-    }
+        rt = &rt_storage.lua.base;
+        rt->vt = &hl_lua_vtable;
+        rt_cfg = &lua_cfg;
 #endif
+    }
+
+    rt->db = db;
+    rt->alloc = &alloc;
+
+    if (rt->vt->init(rt, rt_cfg) != 0) {
+        log_error("[hull:c] %s init failed", rt->vt->name);
+        goto cleanup_server;
+    }
+
+    /* Load and evaluate the app */
+    if (rt->vt->load_app(rt, entry_point) != 0) {
+        log_error("[hull:c] failed to load %s", entry_point);
+        rt->vt->destroy(rt);
+        goto cleanup_server;
+    }
+
+    /* Verify app signature if requested */
+    if (verify_sig_path) {
+        if (hl_verify_startup(verify_sig_path, entry_point) != 0) {
+            log_error("[hull:c] signature verification failed — refusing to start");
+            rt->vt->destroy(rt);
+            goto cleanup_server;
+        }
+        log_info("[hull:c] signature verified OK");
+    }
+
+    /* Wire routes into Keel */
+    if (rt->vt->wire_routes_server(rt, &server, track_route_alloc) != 0) {
+        rt->vt->destroy(rt);
+        goto cleanup_server;
+    }
+
+    /* Extract manifest and configure capabilities */
+    HlManifest manifest;
+    if (rt->vt->extract_manifest(rt, &manifest) == 0) {
+        log_info("[hull:c] manifest: fs_read=%d fs_write=%d env=%d hosts=%d",
+                 manifest.fs_read_count, manifest.fs_write_count,
+                 manifest.env_count, manifest.hosts_count);
+    }
+
+    /* Apply kernel sandbox (pledge/unveil) from manifest */
+    if (hl_sandbox_apply(&manifest, db_path) != 0) {
+        log_error("[hull:c] sandbox enforcement failed");
+        rt->vt->free_manifest_strings(rt, &manifest);
+        rt->vt->destroy(rt);
+        goto cleanup_server;
+    }
+    rt->vt->free_manifest_strings(rt, &manifest);
+
+    log_info("[hull:c] listening on %s:%d (%s runtime)",
+             bind_addr, port, rt->vt->name);
+
+    /* Enter event loop */
+    kl_server_run(&server);
+
+    /* Cleanup */
+    rt->vt->destroy(rt);
+    ret = 0;
 
 cleanup_server:
     kl_server_free(&server);

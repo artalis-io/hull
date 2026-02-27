@@ -313,7 +313,7 @@ static void lua_free_hl_values(lua_State *L, HlValue *params, int count)
 static int lua_db_query(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->db)
+    if (!lua || !lua->base.db)
         return luaL_error(L, "database not available");
 
     const char *sql = luaL_checkstring(L, 1);
@@ -335,8 +335,8 @@ static int lua_db_query(lua_State *L)
         .row_count = 0,
     };
 
-    int rc = hl_cap_db_query(lua->db, sql, params, nparams,
-                                lua_query_row_cb, &qc, lua->alloc);
+    int rc = hl_cap_db_query(lua->base.db, sql, params, nparams,
+                                lua_query_row_cb, &qc, lua->base.alloc);
 
     /*
      * lua_to_hl_values left nparams values on the stack (to keep string
@@ -354,7 +354,7 @@ static int lua_db_query(lua_State *L)
 
     if (rc != 0) {
         lua_pop(L, 1); /* pop result table */
-        return luaL_error(L, "query failed: %s", sqlite3_errmsg(lua->db));
+        return luaL_error(L, "query failed: %s", sqlite3_errmsg(lua->base.db));
     }
 
     return 1; /* result table already on stack */
@@ -364,7 +364,7 @@ static int lua_db_query(lua_State *L)
 static int lua_db_exec(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->db)
+    if (!lua || !lua->base.db)
         return luaL_error(L, "database not available");
 
     const char *sql = luaL_checkstring(L, 1);
@@ -376,12 +376,12 @@ static int lua_db_exec(lua_State *L)
             return luaL_error(L, "params must be a table");
     }
 
-    int rc = hl_cap_db_exec(lua->db, sql, params, nparams);
+    int rc = hl_cap_db_exec(lua->base.db, sql, params, nparams);
 
     lua_free_hl_values(L, params, nparams);
 
     if (rc < 0)
-        return luaL_error(L, "exec failed: %s", sqlite3_errmsg(lua->db));
+        return luaL_error(L, "exec failed: %s", sqlite3_errmsg(lua->base.db));
 
     lua_pushinteger(L, rc);
     return 1;
@@ -391,10 +391,10 @@ static int lua_db_exec(lua_State *L)
 static int lua_db_last_id(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->db)
+    if (!lua || !lua->base.db)
         return luaL_error(L, "database not available");
 
-    lua_pushinteger(L, (lua_Integer)hl_cap_db_last_id(lua->db));
+    lua_pushinteger(L, (lua_Integer)hl_cap_db_last_id(lua->base.db));
     return 1;
 }
 
@@ -481,11 +481,11 @@ static int luaopen_hull_time(lua_State *L)
 static int lua_env_get(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->env_cfg)
+    if (!lua || !lua->base.env_cfg)
         return luaL_error(L, "env not configured");
 
     const char *name = luaL_checkstring(L, 1);
-    const char *val = hl_cap_env_get(lua->env_cfg, name);
+    const char *val = hl_cap_env_get(lua->base.env_cfg, name);
 
     if (val)
         lua_pushstring(L, val);
@@ -770,14 +770,332 @@ static int lua_crypto_ed25519_verify(lua_State *L)
     return 1;
 }
 
+/* ── SHA-512 ───────────────────────────────────────────────────────── */
+
+/* crypto.sha512(data) → hex string (128 chars) */
+static int lua_crypto_sha512(lua_State *L)
+{
+    size_t len;
+    const char *data = luaL_checklstring(L, 1, &len);
+
+    uint8_t hash[64];
+    if (hl_cap_crypto_sha512(data, len, hash) != 0)
+        return luaL_error(L, "sha512 failed");
+
+    char hex[129];
+    for (int i = 0; i < 64; i++)
+        snprintf(hex + i * 2, 3, "%02x", hash[i]);
+    hex[128] = '\0';
+
+    lua_pushstring(L, hex);
+    return 1;
+}
+
+/* ── HMAC-SHA512/256 authentication ────────────────────────────────── */
+
+/* crypto.auth(msg, key_hex) → tag_hex (64 chars) */
+static int lua_crypto_auth(lua_State *L)
+{
+    size_t msg_len;
+    const char *msg = luaL_checklstring(L, 1, &msg_len);
+    size_t key_hex_len;
+    const char *key_hex = luaL_checklstring(L, 2, &key_hex_len);
+
+    if (key_hex_len != 64)
+        return luaL_error(L, "auth key must be 64 hex chars (32 bytes)");
+
+    uint8_t key[32];
+    if (hex_decode(key_hex, key_hex_len, key, 32) != 0)
+        return luaL_error(L, "invalid hex in auth key");
+
+    uint8_t tag[32];
+    if (hl_cap_crypto_auth(msg, msg_len, key, tag) != 0)
+        return luaL_error(L, "auth failed");
+
+    char hex[65];
+    for (int i = 0; i < 32; i++)
+        snprintf(hex + i * 2, 3, "%02x", tag[i]);
+    hex[64] = '\0';
+
+    lua_pushstring(L, hex);
+    return 1;
+}
+
+/* crypto.auth_verify(tag_hex, msg, key_hex) → boolean */
+static int lua_crypto_auth_verify(lua_State *L)
+{
+    size_t tag_hex_len;
+    const char *tag_hex = luaL_checklstring(L, 1, &tag_hex_len);
+    size_t msg_len;
+    const char *msg = luaL_checklstring(L, 2, &msg_len);
+    size_t key_hex_len;
+    const char *key_hex = luaL_checklstring(L, 3, &key_hex_len);
+
+    if (tag_hex_len != 64)
+        return luaL_error(L, "tag must be 64 hex chars (32 bytes)");
+    if (key_hex_len != 64)
+        return luaL_error(L, "auth key must be 64 hex chars (32 bytes)");
+
+    uint8_t tag[32], key[32];
+    if (hex_decode(tag_hex, tag_hex_len, tag, 32) != 0)
+        return luaL_error(L, "invalid hex in tag");
+    if (hex_decode(key_hex, key_hex_len, key, 32) != 0)
+        return luaL_error(L, "invalid hex in key");
+
+    int rc = hl_cap_crypto_auth_verify(tag, msg, msg_len, key);
+    lua_pushboolean(L, rc == 0);
+    return 1;
+}
+
+/* ── Secret-key authenticated encryption (XSalsa20+Poly1305) ──────── */
+
+/* crypto.secretbox(msg, nonce_hex, key_hex) → ciphertext_hex */
+static int lua_crypto_secretbox(lua_State *L)
+{
+    size_t msg_len;
+    const char *msg = luaL_checklstring(L, 1, &msg_len);
+    size_t nonce_hex_len;
+    const char *nonce_hex = luaL_checklstring(L, 2, &nonce_hex_len);
+    size_t key_hex_len;
+    const char *key_hex = luaL_checklstring(L, 3, &key_hex_len);
+
+    if (nonce_hex_len != 48)
+        return luaL_error(L, "nonce must be 48 hex chars (24 bytes)");
+    if (key_hex_len != 64)
+        return luaL_error(L, "key must be 64 hex chars (32 bytes)");
+
+    uint8_t nonce[24], key[32];
+    if (hex_decode(nonce_hex, nonce_hex_len, nonce, 24) != 0)
+        return luaL_error(L, "invalid hex in nonce");
+    if (hex_decode(key_hex, key_hex_len, key, 32) != 0)
+        return luaL_error(L, "invalid hex in key");
+
+    size_t ct_len = msg_len + HL_SECRETBOX_MACBYTES;
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->scratch)
+        return luaL_error(L, "runtime not available");
+
+    uint8_t *ct = sh_arena_alloc(lua->scratch, ct_len);
+    if (!ct)
+        return luaL_error(L, "out of memory");
+
+    if (hl_cap_crypto_secretbox(ct, msg, msg_len, nonce, key) != 0)
+        return luaL_error(L, "secretbox failed");
+
+    /* Convert to hex */
+    size_t hex_len = ct_len * 2 + 1;
+    char *hex = sh_arena_alloc(lua->scratch, hex_len);
+    if (!hex)
+        return luaL_error(L, "out of memory");
+
+    for (size_t i = 0; i < ct_len; i++)
+        snprintf(hex + i * 2, 3, "%02x", ct[i]);
+
+    lua_pushstring(L, hex);
+    return 1;
+}
+
+/* crypto.secretbox_open(ct_hex, nonce_hex, key_hex) → string or nil */
+static int lua_crypto_secretbox_open(lua_State *L)
+{
+    size_t ct_hex_len;
+    const char *ct_hex = luaL_checklstring(L, 1, &ct_hex_len);
+    size_t nonce_hex_len;
+    const char *nonce_hex = luaL_checklstring(L, 2, &nonce_hex_len);
+    size_t key_hex_len;
+    const char *key_hex = luaL_checklstring(L, 3, &key_hex_len);
+
+    if (ct_hex_len % 2 != 0)
+        return luaL_error(L, "ciphertext hex must have even length");
+    if (nonce_hex_len != 48)
+        return luaL_error(L, "nonce must be 48 hex chars (24 bytes)");
+    if (key_hex_len != 64)
+        return luaL_error(L, "key must be 64 hex chars (32 bytes)");
+
+    size_t ct_len = ct_hex_len / 2;
+    if (ct_len < HL_SECRETBOX_MACBYTES) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    uint8_t nonce[24], key[32];
+    if (hex_decode(nonce_hex, nonce_hex_len, nonce, 24) != 0)
+        return luaL_error(L, "invalid hex in nonce");
+    if (hex_decode(key_hex, key_hex_len, key, 32) != 0)
+        return luaL_error(L, "invalid hex in key");
+
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->scratch)
+        return luaL_error(L, "runtime not available");
+
+    uint8_t *ct = sh_arena_alloc(lua->scratch, ct_len);
+    if (!ct)
+        return luaL_error(L, "out of memory");
+    if (hex_decode(ct_hex, ct_hex_len, ct, ct_len) != 0)
+        return luaL_error(L, "invalid hex in ciphertext");
+
+    size_t msg_len = ct_len - HL_SECRETBOX_MACBYTES;
+    uint8_t *msg = sh_arena_alloc(lua->scratch, msg_len + 1);
+    if (!msg)
+        return luaL_error(L, "out of memory");
+
+    if (hl_cap_crypto_secretbox_open(msg, ct, ct_len, nonce, key) != 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    lua_pushlstring(L, (const char *)msg, msg_len);
+    return 1;
+}
+
+/* ── Public-key authenticated encryption (Curve25519+XSalsa20+Poly1305) */
+
+/* crypto.box(msg, nonce_hex, pk_hex, sk_hex) → ciphertext_hex */
+static int lua_crypto_box(lua_State *L)
+{
+    size_t msg_len;
+    const char *msg = luaL_checklstring(L, 1, &msg_len);
+    size_t nonce_hex_len;
+    const char *nonce_hex = luaL_checklstring(L, 2, &nonce_hex_len);
+    size_t pk_hex_len;
+    const char *pk_hex = luaL_checklstring(L, 3, &pk_hex_len);
+    size_t sk_hex_len;
+    const char *sk_hex = luaL_checklstring(L, 4, &sk_hex_len);
+
+    if (nonce_hex_len != 48)
+        return luaL_error(L, "nonce must be 48 hex chars (24 bytes)");
+    if (pk_hex_len != 64)
+        return luaL_error(L, "public key must be 64 hex chars (32 bytes)");
+    if (sk_hex_len != 64)
+        return luaL_error(L, "secret key must be 64 hex chars (32 bytes)");
+
+    uint8_t nonce[24], pk[32], sk[32];
+    if (hex_decode(nonce_hex, nonce_hex_len, nonce, 24) != 0)
+        return luaL_error(L, "invalid hex in nonce");
+    if (hex_decode(pk_hex, pk_hex_len, pk, 32) != 0)
+        return luaL_error(L, "invalid hex in public key");
+    if (hex_decode(sk_hex, sk_hex_len, sk, 32) != 0)
+        return luaL_error(L, "invalid hex in secret key");
+
+    size_t ct_len = msg_len + HL_BOX_MACBYTES;
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->scratch)
+        return luaL_error(L, "runtime not available");
+
+    uint8_t *ct = sh_arena_alloc(lua->scratch, ct_len);
+    if (!ct)
+        return luaL_error(L, "out of memory");
+
+    if (hl_cap_crypto_box(ct, msg, msg_len, nonce, pk, sk) != 0)
+        return luaL_error(L, "box failed");
+
+    size_t hex_len = ct_len * 2 + 1;
+    char *hex = sh_arena_alloc(lua->scratch, hex_len);
+    if (!hex)
+        return luaL_error(L, "out of memory");
+
+    for (size_t i = 0; i < ct_len; i++)
+        snprintf(hex + i * 2, 3, "%02x", ct[i]);
+
+    lua_pushstring(L, hex);
+    return 1;
+}
+
+/* crypto.box_open(ct_hex, nonce_hex, pk_hex, sk_hex) → string or nil */
+static int lua_crypto_box_open(lua_State *L)
+{
+    size_t ct_hex_len;
+    const char *ct_hex = luaL_checklstring(L, 1, &ct_hex_len);
+    size_t nonce_hex_len;
+    const char *nonce_hex = luaL_checklstring(L, 2, &nonce_hex_len);
+    size_t pk_hex_len;
+    const char *pk_hex = luaL_checklstring(L, 3, &pk_hex_len);
+    size_t sk_hex_len;
+    const char *sk_hex = luaL_checklstring(L, 4, &sk_hex_len);
+
+    if (ct_hex_len % 2 != 0)
+        return luaL_error(L, "ciphertext hex must have even length");
+    if (nonce_hex_len != 48)
+        return luaL_error(L, "nonce must be 48 hex chars (24 bytes)");
+    if (pk_hex_len != 64)
+        return luaL_error(L, "public key must be 64 hex chars (32 bytes)");
+    if (sk_hex_len != 64)
+        return luaL_error(L, "secret key must be 64 hex chars (32 bytes)");
+
+    size_t ct_len = ct_hex_len / 2;
+    if (ct_len < HL_BOX_MACBYTES) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    uint8_t nonce[24], pk[32], sk[32];
+    if (hex_decode(nonce_hex, nonce_hex_len, nonce, 24) != 0)
+        return luaL_error(L, "invalid hex in nonce");
+    if (hex_decode(pk_hex, pk_hex_len, pk, 32) != 0)
+        return luaL_error(L, "invalid hex in public key");
+    if (hex_decode(sk_hex, sk_hex_len, sk, 32) != 0)
+        return luaL_error(L, "invalid hex in secret key");
+
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->scratch)
+        return luaL_error(L, "runtime not available");
+
+    uint8_t *ct = sh_arena_alloc(lua->scratch, ct_len);
+    if (!ct)
+        return luaL_error(L, "out of memory");
+    if (hex_decode(ct_hex, ct_hex_len, ct, ct_len) != 0)
+        return luaL_error(L, "invalid hex in ciphertext");
+
+    size_t msg_len = ct_len - HL_BOX_MACBYTES;
+    uint8_t *msg = sh_arena_alloc(lua->scratch, msg_len + 1);
+    if (!msg)
+        return luaL_error(L, "out of memory");
+
+    if (hl_cap_crypto_box_open(msg, ct, ct_len, nonce, pk, sk) != 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    lua_pushlstring(L, (const char *)msg, msg_len);
+    return 1;
+}
+
+/* crypto.box_keypair() → pk_hex, sk_hex */
+static int lua_crypto_box_keypair(lua_State *L)
+{
+    uint8_t pk[32], sk[32];
+    if (hl_cap_crypto_box_keypair(pk, sk) != 0)
+        return luaL_error(L, "box keypair generation failed");
+
+    char pk_hex[65], sk_hex[65];
+    for (int i = 0; i < 32; i++)
+        snprintf(pk_hex + i * 2, 3, "%02x", pk[i]);
+    pk_hex[64] = '\0';
+    for (int i = 0; i < 32; i++)
+        snprintf(sk_hex + i * 2, 3, "%02x", sk[i]);
+    sk_hex[64] = '\0';
+
+    lua_pushstring(L, pk_hex);
+    lua_pushstring(L, sk_hex);
+    return 2;
+}
+
 static const luaL_Reg crypto_funcs[] = {
     {"sha256",            lua_crypto_sha256},
+    {"sha512",            lua_crypto_sha512},
     {"random",            lua_crypto_random},
     {"hash_password",     lua_crypto_hash_password},
     {"verify_password",   lua_crypto_verify_password},
     {"ed25519_keypair",   lua_crypto_ed25519_keypair},
     {"ed25519_sign",      lua_crypto_ed25519_sign},
     {"ed25519_verify",    lua_crypto_ed25519_verify},
+    {"auth",              lua_crypto_auth},
+    {"auth_verify",       lua_crypto_auth_verify},
+    {"secretbox",         lua_crypto_secretbox},
+    {"secretbox_open",    lua_crypto_secretbox_open},
+    {"box",               lua_crypto_box},
+    {"box_open",          lua_crypto_box_open},
+    {"box_keypair",       lua_crypto_box_keypair},
     {NULL, NULL}
 };
 
@@ -1223,7 +1541,7 @@ int hl_lua_register_modules(HlLua *lua)
     lua_setglobal(L, "app");
 
     /* Register hull.db (only if database is available) */
-    if (lua->db) {
+    if (lua->base.db) {
         luaL_requiref(L, "hull.db", luaopen_hull_db, 0);
         lua_setglobal(L, "db");
     }

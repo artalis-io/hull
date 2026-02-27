@@ -405,7 +405,7 @@ static JSValue js_db_query(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (!js || !js->db)
+    if (!js || !js->base.db)
         return JS_ThrowInternalError(ctx, "database not available");
 
     if (argc < 1)
@@ -430,8 +430,8 @@ static JSValue js_db_query(JSContext *ctx, JSValueConst this_val,
         .row_count = 0,
     };
 
-    int rc = hl_cap_db_query(js->db, sql, params, nparams,
-                               js_query_row_cb, &qc, js->alloc);
+    int rc = hl_cap_db_query(js->base.db, sql, params, nparams,
+                               js_query_row_cb, &qc, js->base.alloc);
 
     js_free_hl_values(ctx, params, nparams);
     JS_FreeCString(ctx, sql);
@@ -439,7 +439,7 @@ static JSValue js_db_query(JSContext *ctx, JSValueConst this_val,
     if (rc != 0) {
         JS_FreeValue(ctx, qc.array);
         return JS_ThrowInternalError(ctx, "query failed: %s",
-                                     sqlite3_errmsg(js->db));
+                                     sqlite3_errmsg(js->base.db));
     }
 
     return qc.array;
@@ -451,7 +451,7 @@ static JSValue js_db_exec(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (!js || !js->db)
+    if (!js || !js->base.db)
         return JS_ThrowInternalError(ctx, "database not available");
 
     if (argc < 1)
@@ -470,14 +470,14 @@ static JSValue js_db_exec(JSContext *ctx, JSValueConst this_val,
         }
     }
 
-    int rc = hl_cap_db_exec(js->db, sql, params, nparams);
+    int rc = hl_cap_db_exec(js->base.db, sql, params, nparams);
 
     js_free_hl_values(ctx, params, nparams);
     JS_FreeCString(ctx, sql);
 
     if (rc < 0)
         return JS_ThrowInternalError(ctx, "exec failed: %s",
-                                     sqlite3_errmsg(js->db));
+                                     sqlite3_errmsg(js->base.db));
 
     return JS_NewInt32(ctx, rc);
 }
@@ -488,10 +488,10 @@ static JSValue js_db_last_id(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val; (void)argc; (void)argv;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (!js || !js->db)
+    if (!js || !js->base.db)
         return JS_ThrowInternalError(ctx, "database not available");
 
-    return JS_NewInt64(ctx, hl_cap_db_last_id(js->db));
+    return JS_NewInt64(ctx, hl_cap_db_last_id(js->base.db));
 }
 
 static int js_db_module_init(JSContext *ctx, JSModuleDef *m)
@@ -606,7 +606,7 @@ static JSValue js_env_get(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (!js || !js->env_cfg)
+    if (!js || !js->base.env_cfg)
         return JS_ThrowInternalError(ctx, "env not configured");
 
     if (argc < 1)
@@ -616,7 +616,7 @@ static JSValue js_env_get(JSContext *ctx, JSValueConst this_val,
     if (!name)
         return JS_EXCEPTION;
 
-    const char *val = hl_cap_env_get(js->env_cfg, name);
+    const char *val = hl_cap_env_get(js->base.env_cfg, name);
     JS_FreeCString(ctx, name);
 
     if (val)
@@ -854,17 +854,575 @@ static JSValue js_crypto_verify_password(JSContext *ctx, JSValueConst this_val,
     return diff == 0 ? JS_TRUE : JS_FALSE;
 }
 
+/* ── Hex decode helper (no sscanf — Cosmopolitan compat) ──────────── */
+
+static int hex_decode(const char *hex, size_t hex_len, uint8_t *out, size_t out_len)
+{
+    if (hex_len != out_len * 2)
+        return -1;
+    for (size_t i = 0; i < out_len; i++) {
+        int hi = hex_nibble((unsigned char)hex[i * 2]);
+        int lo = hex_nibble((unsigned char)hex[i * 2 + 1]);
+        if (hi < 0 || lo < 0)
+            return -1;
+        out[i] = (uint8_t)((hi << 4) | lo);
+    }
+    return 0;
+}
+
+/* ── Ed25519 bindings ──────────────────────────────────────────────── */
+
+/* crypto.ed25519Keypair() → { publicKey: hex, secretKey: hex } */
+static JSValue js_crypto_ed25519_keypair(JSContext *ctx, JSValueConst this_val,
+                                          int argc, JSValueConst *argv)
+{
+    (void)this_val; (void)argc; (void)argv;
+
+    uint8_t pk[32], sk[64];
+    if (hl_cap_crypto_ed25519_keypair(pk, sk) != 0)
+        return JS_ThrowInternalError(ctx, "ed25519 keypair generation failed");
+
+    char pk_hex[65], sk_hex[129];
+    for (int i = 0; i < 32; i++)
+        snprintf(pk_hex + i * 2, 3, "%02x", pk[i]);
+    pk_hex[64] = '\0';
+    for (int i = 0; i < 64; i++)
+        snprintf(sk_hex + i * 2, 3, "%02x", sk[i]);
+    sk_hex[128] = '\0';
+
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "publicKey", JS_NewString(ctx, pk_hex));
+    JS_SetPropertyStr(ctx, obj, "secretKey", JS_NewString(ctx, sk_hex));
+    return obj;
+}
+
+/* crypto.ed25519Sign(data, secretKeyHex) → signatureHex */
+static JSValue js_crypto_ed25519_sign(JSContext *ctx, JSValueConst this_val,
+                                       int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 2)
+        return JS_ThrowTypeError(ctx, "crypto.ed25519Sign requires (data, secretKeyHex)");
+
+    size_t data_len;
+    const char *data = JS_ToCStringLen(ctx, &data_len, argv[0]);
+    if (!data) return JS_EXCEPTION;
+
+    size_t sk_hex_len;
+    const char *sk_hex = JS_ToCStringLen(ctx, &sk_hex_len, argv[1]);
+    if (!sk_hex) { JS_FreeCString(ctx, data); return JS_EXCEPTION; }
+
+    if (sk_hex_len != 128) {
+        JS_FreeCString(ctx, data);
+        JS_FreeCString(ctx, sk_hex);
+        return JS_ThrowTypeError(ctx, "secret key must be 128 hex chars (64 bytes)");
+    }
+
+    uint8_t sk[64];
+    if (hex_decode(sk_hex, sk_hex_len, sk, 64) != 0) {
+        JS_FreeCString(ctx, data);
+        JS_FreeCString(ctx, sk_hex);
+        return JS_ThrowTypeError(ctx, "invalid hex in secret key");
+    }
+    JS_FreeCString(ctx, sk_hex);
+
+    uint8_t sig[64];
+    if (hl_cap_crypto_ed25519_sign((const uint8_t *)data, data_len, sk, sig) != 0) {
+        JS_FreeCString(ctx, data);
+        return JS_ThrowInternalError(ctx, "ed25519 sign failed");
+    }
+    JS_FreeCString(ctx, data);
+
+    char sig_hex[129];
+    for (int i = 0; i < 64; i++)
+        snprintf(sig_hex + i * 2, 3, "%02x", sig[i]);
+    sig_hex[128] = '\0';
+
+    return JS_NewString(ctx, sig_hex);
+}
+
+/* crypto.ed25519Verify(data, sigHex, pubkeyHex) → boolean */
+static JSValue js_crypto_ed25519_verify(JSContext *ctx, JSValueConst this_val,
+                                         int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 3)
+        return JS_ThrowTypeError(ctx, "crypto.ed25519Verify requires (data, sigHex, pubkeyHex)");
+
+    size_t data_len;
+    const char *data = JS_ToCStringLen(ctx, &data_len, argv[0]);
+    if (!data) return JS_EXCEPTION;
+
+    size_t sig_hex_len;
+    const char *sig_hex = JS_ToCStringLen(ctx, &sig_hex_len, argv[1]);
+    if (!sig_hex) { JS_FreeCString(ctx, data); return JS_EXCEPTION; }
+
+    size_t pk_hex_len;
+    const char *pk_hex = JS_ToCStringLen(ctx, &pk_hex_len, argv[2]);
+    if (!pk_hex) {
+        JS_FreeCString(ctx, data);
+        JS_FreeCString(ctx, sig_hex);
+        return JS_EXCEPTION;
+    }
+
+    if (sig_hex_len != 128 || pk_hex_len != 64) {
+        JS_FreeCString(ctx, data);
+        JS_FreeCString(ctx, sig_hex);
+        JS_FreeCString(ctx, pk_hex);
+        return JS_FALSE;
+    }
+
+    uint8_t sig[64], pk[32];
+    if (hex_decode(sig_hex, sig_hex_len, sig, 64) != 0 ||
+        hex_decode(pk_hex, pk_hex_len, pk, 32) != 0) {
+        JS_FreeCString(ctx, data);
+        JS_FreeCString(ctx, sig_hex);
+        JS_FreeCString(ctx, pk_hex);
+        return JS_FALSE;
+    }
+
+    JS_FreeCString(ctx, sig_hex);
+    JS_FreeCString(ctx, pk_hex);
+
+    int rc = hl_cap_crypto_ed25519_verify((const uint8_t *)data, data_len, sig, pk);
+    JS_FreeCString(ctx, data);
+
+    return rc == 0 ? JS_TRUE : JS_FALSE;
+}
+
+/* ── SHA-512 ──────────────────────────────────────────────────────── */
+
+static JSValue js_crypto_sha512(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "crypto.sha512 requires (data)");
+
+    size_t len;
+    const char *data = JS_ToCStringLen(ctx, &len, argv[0]);
+    if (!data) return JS_EXCEPTION;
+
+    uint8_t hash[64];
+    if (hl_cap_crypto_sha512(data, len, hash) != 0) {
+        JS_FreeCString(ctx, data);
+        return JS_ThrowInternalError(ctx, "sha512 failed");
+    }
+    JS_FreeCString(ctx, data);
+
+    char hex[129];
+    for (int i = 0; i < 64; i++)
+        snprintf(hex + i * 2, 3, "%02x", hash[i]);
+    hex[128] = '\0';
+
+    return JS_NewString(ctx, hex);
+}
+
+/* ── HMAC-SHA512/256 auth ─────────────────────────────────────────── */
+
+/* crypto.auth(msg, keyHex) → hex */
+static JSValue js_crypto_auth(JSContext *ctx, JSValueConst this_val,
+                               int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 2)
+        return JS_ThrowTypeError(ctx, "crypto.auth requires (msg, keyHex)");
+
+    size_t msg_len;
+    const char *msg = JS_ToCStringLen(ctx, &msg_len, argv[0]);
+    if (!msg) return JS_EXCEPTION;
+
+    size_t key_hex_len;
+    const char *key_hex = JS_ToCStringLen(ctx, &key_hex_len, argv[1]);
+    if (!key_hex) { JS_FreeCString(ctx, msg); return JS_EXCEPTION; }
+
+    if (key_hex_len != 64) {
+        JS_FreeCString(ctx, msg);
+        JS_FreeCString(ctx, key_hex);
+        return JS_ThrowTypeError(ctx, "key must be 64 hex chars (32 bytes)");
+    }
+
+    uint8_t key[32];
+    if (hex_decode(key_hex, key_hex_len, key, 32) != 0) {
+        JS_FreeCString(ctx, msg);
+        JS_FreeCString(ctx, key_hex);
+        return JS_ThrowTypeError(ctx, "invalid hex in key");
+    }
+    JS_FreeCString(ctx, key_hex);
+
+    uint8_t tag[32];
+    hl_cap_crypto_auth(msg, msg_len, key, tag);
+    JS_FreeCString(ctx, msg);
+
+    char hex[65];
+    for (int i = 0; i < 32; i++)
+        snprintf(hex + i * 2, 3, "%02x", tag[i]);
+    hex[64] = '\0';
+
+    return JS_NewString(ctx, hex);
+}
+
+/* crypto.authVerify(tagHex, msg, keyHex) → boolean */
+static JSValue js_crypto_auth_verify(JSContext *ctx, JSValueConst this_val,
+                                      int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 3)
+        return JS_ThrowTypeError(ctx, "crypto.authVerify requires (tagHex, msg, keyHex)");
+
+    size_t tag_hex_len;
+    const char *tag_hex = JS_ToCStringLen(ctx, &tag_hex_len, argv[0]);
+    if (!tag_hex) return JS_EXCEPTION;
+
+    size_t msg_len;
+    const char *msg = JS_ToCStringLen(ctx, &msg_len, argv[1]);
+    if (!msg) { JS_FreeCString(ctx, tag_hex); return JS_EXCEPTION; }
+
+    size_t key_hex_len;
+    const char *key_hex = JS_ToCStringLen(ctx, &key_hex_len, argv[2]);
+    if (!key_hex) {
+        JS_FreeCString(ctx, tag_hex);
+        JS_FreeCString(ctx, msg);
+        return JS_EXCEPTION;
+    }
+
+    if (tag_hex_len != 64 || key_hex_len != 64) {
+        JS_FreeCString(ctx, tag_hex);
+        JS_FreeCString(ctx, msg);
+        JS_FreeCString(ctx, key_hex);
+        return JS_FALSE;
+    }
+
+    uint8_t tag[32], key[32];
+    if (hex_decode(tag_hex, tag_hex_len, tag, 32) != 0 ||
+        hex_decode(key_hex, key_hex_len, key, 32) != 0) {
+        JS_FreeCString(ctx, tag_hex);
+        JS_FreeCString(ctx, msg);
+        JS_FreeCString(ctx, key_hex);
+        return JS_FALSE;
+    }
+    JS_FreeCString(ctx, tag_hex);
+    JS_FreeCString(ctx, key_hex);
+
+    int rc = hl_cap_crypto_auth_verify(tag, msg, msg_len, key);
+    JS_FreeCString(ctx, msg);
+
+    return rc == 0 ? JS_TRUE : JS_FALSE;
+}
+
+/* ── Secretbox ────────────────────────────────────────────────────── */
+
+/* crypto.secretbox(msg, nonceHex, keyHex) → hex */
+static JSValue js_crypto_secretbox(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 3)
+        return JS_ThrowTypeError(ctx, "crypto.secretbox requires (msg, nonceHex, keyHex)");
+
+    size_t msg_len;
+    const char *msg = JS_ToCStringLen(ctx, &msg_len, argv[0]);
+    if (!msg) return JS_EXCEPTION;
+
+    size_t nonce_hex_len, key_hex_len;
+    const char *nonce_hex = JS_ToCStringLen(ctx, &nonce_hex_len, argv[1]);
+    const char *key_hex = JS_ToCStringLen(ctx, &key_hex_len, argv[2]);
+    if (!nonce_hex || !key_hex) {
+        JS_FreeCString(ctx, msg);
+        if (nonce_hex) JS_FreeCString(ctx, nonce_hex);
+        if (key_hex) JS_FreeCString(ctx, key_hex);
+        return JS_EXCEPTION;
+    }
+
+    if (nonce_hex_len != 48 || key_hex_len != 64) {
+        JS_FreeCString(ctx, msg);
+        JS_FreeCString(ctx, nonce_hex);
+        JS_FreeCString(ctx, key_hex);
+        return JS_ThrowTypeError(ctx, "nonce must be 48 hex (24 bytes), key 64 hex (32 bytes)");
+    }
+
+    uint8_t nonce[24], key[32];
+    if (hex_decode(nonce_hex, 48, nonce, 24) != 0 ||
+        hex_decode(key_hex, 64, key, 32) != 0) {
+        JS_FreeCString(ctx, msg);
+        JS_FreeCString(ctx, nonce_hex);
+        JS_FreeCString(ctx, key_hex);
+        return JS_ThrowTypeError(ctx, "invalid hex");
+    }
+    JS_FreeCString(ctx, nonce_hex);
+    JS_FreeCString(ctx, key_hex);
+
+    size_t ct_len = msg_len + HL_SECRETBOX_MACBYTES;
+    uint8_t *ct = js_malloc(ctx, ct_len);
+    if (!ct) { JS_FreeCString(ctx, msg); return JS_EXCEPTION; }
+
+    if (hl_cap_crypto_secretbox(ct, msg, msg_len, nonce, key) != 0) {
+        JS_FreeCString(ctx, msg);
+        js_free(ctx, ct);
+        return JS_ThrowInternalError(ctx, "secretbox failed");
+    }
+    JS_FreeCString(ctx, msg);
+
+    /* Hex encode */
+    char *hex = js_malloc(ctx, ct_len * 2 + 1);
+    if (!hex) { js_free(ctx, ct); return JS_EXCEPTION; }
+    for (size_t i = 0; i < ct_len; i++)
+        snprintf(hex + i * 2, 3, "%02x", ct[i]);
+    hex[ct_len * 2] = '\0';
+    js_free(ctx, ct);
+
+    JSValue result = JS_NewString(ctx, hex);
+    js_free(ctx, hex);
+    return result;
+}
+
+/* crypto.secretboxOpen(ctHex, nonceHex, keyHex) → string/null */
+static JSValue js_crypto_secretbox_open(JSContext *ctx, JSValueConst this_val,
+                                         int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 3)
+        return JS_ThrowTypeError(ctx, "crypto.secretboxOpen requires (ctHex, nonceHex, keyHex)");
+
+    size_t ct_hex_len;
+    const char *ct_hex = JS_ToCStringLen(ctx, &ct_hex_len, argv[0]);
+    if (!ct_hex) return JS_EXCEPTION;
+
+    size_t nonce_hex_len, key_hex_len;
+    const char *nonce_hex = JS_ToCStringLen(ctx, &nonce_hex_len, argv[1]);
+    const char *key_hex = JS_ToCStringLen(ctx, &key_hex_len, argv[2]);
+    if (!nonce_hex || !key_hex) {
+        JS_FreeCString(ctx, ct_hex);
+        if (nonce_hex) JS_FreeCString(ctx, nonce_hex);
+        if (key_hex) JS_FreeCString(ctx, key_hex);
+        return JS_EXCEPTION;
+    }
+
+    if (ct_hex_len % 2 != 0 || nonce_hex_len != 48 || key_hex_len != 64) {
+        JS_FreeCString(ctx, ct_hex);
+        JS_FreeCString(ctx, nonce_hex);
+        JS_FreeCString(ctx, key_hex);
+        return JS_NULL;
+    }
+
+    size_t ct_len = ct_hex_len / 2;
+    if (ct_len < HL_SECRETBOX_MACBYTES) {
+        JS_FreeCString(ctx, ct_hex);
+        JS_FreeCString(ctx, nonce_hex);
+        JS_FreeCString(ctx, key_hex);
+        return JS_NULL;
+    }
+
+    uint8_t nonce[24], key[32];
+    hex_decode(nonce_hex, 48, nonce, 24);
+    hex_decode(key_hex, 64, key, 32);
+    JS_FreeCString(ctx, nonce_hex);
+    JS_FreeCString(ctx, key_hex);
+
+    uint8_t *ct = js_malloc(ctx, ct_len);
+    if (!ct) { JS_FreeCString(ctx, ct_hex); return JS_EXCEPTION; }
+    hex_decode(ct_hex, ct_hex_len, ct, ct_len);
+    JS_FreeCString(ctx, ct_hex);
+
+    size_t pt_len = ct_len - HL_SECRETBOX_MACBYTES;
+    uint8_t *pt = js_malloc(ctx, pt_len + 1);
+    if (!pt) { js_free(ctx, ct); return JS_EXCEPTION; }
+
+    if (hl_cap_crypto_secretbox_open(pt, ct, ct_len, nonce, key) != 0) {
+        js_free(ctx, ct);
+        js_free(ctx, pt);
+        return JS_NULL;
+    }
+    js_free(ctx, ct);
+
+    JSValue result = JS_NewStringLen(ctx, (const char *)pt, pt_len);
+    js_free(ctx, pt);
+    return result;
+}
+
+/* ── Box (public-key encryption) ──────────────────────────────────── */
+
+/* crypto.box(msg, nonceHex, pkHex, skHex) → hex */
+static JSValue js_crypto_box(JSContext *ctx, JSValueConst this_val,
+                              int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 4)
+        return JS_ThrowTypeError(ctx, "crypto.box requires (msg, nonceHex, pkHex, skHex)");
+
+    size_t msg_len;
+    const char *msg = JS_ToCStringLen(ctx, &msg_len, argv[0]);
+    if (!msg) return JS_EXCEPTION;
+
+    size_t nh_len, pkh_len, skh_len;
+    const char *nh = JS_ToCStringLen(ctx, &nh_len, argv[1]);
+    const char *pkh = JS_ToCStringLen(ctx, &pkh_len, argv[2]);
+    const char *skh = JS_ToCStringLen(ctx, &skh_len, argv[3]);
+    if (!nh || !pkh || !skh) {
+        JS_FreeCString(ctx, msg);
+        if (nh) JS_FreeCString(ctx, nh);
+        if (pkh) JS_FreeCString(ctx, pkh);
+        if (skh) JS_FreeCString(ctx, skh);
+        return JS_EXCEPTION;
+    }
+
+    if (nh_len != 48 || pkh_len != 64 || skh_len != 64) {
+        JS_FreeCString(ctx, msg); JS_FreeCString(ctx, nh);
+        JS_FreeCString(ctx, pkh); JS_FreeCString(ctx, skh);
+        return JS_ThrowTypeError(ctx, "nonce 48 hex, pk/sk 64 hex each");
+    }
+
+    uint8_t nonce[24], pk[32], sk[32];
+    hex_decode(nh, 48, nonce, 24);
+    hex_decode(pkh, 64, pk, 32);
+    hex_decode(skh, 64, sk, 32);
+    JS_FreeCString(ctx, nh);
+    JS_FreeCString(ctx, pkh);
+    JS_FreeCString(ctx, skh);
+
+    size_t ct_len = msg_len + HL_BOX_MACBYTES;
+    uint8_t *ct = js_malloc(ctx, ct_len);
+    if (!ct) { JS_FreeCString(ctx, msg); return JS_EXCEPTION; }
+
+    if (hl_cap_crypto_box(ct, msg, msg_len, nonce, pk, sk) != 0) {
+        JS_FreeCString(ctx, msg);
+        js_free(ctx, ct);
+        return JS_ThrowInternalError(ctx, "box failed");
+    }
+    JS_FreeCString(ctx, msg);
+
+    char *hex = js_malloc(ctx, ct_len * 2 + 1);
+    if (!hex) { js_free(ctx, ct); return JS_EXCEPTION; }
+    for (size_t i = 0; i < ct_len; i++)
+        snprintf(hex + i * 2, 3, "%02x", ct[i]);
+    hex[ct_len * 2] = '\0';
+    js_free(ctx, ct);
+
+    JSValue result = JS_NewString(ctx, hex);
+    js_free(ctx, hex);
+    return result;
+}
+
+/* crypto.boxOpen(ctHex, nonceHex, pkHex, skHex) → string/null */
+static JSValue js_crypto_box_open(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 4)
+        return JS_ThrowTypeError(ctx, "crypto.boxOpen requires (ctHex, nonceHex, pkHex, skHex)");
+
+    size_t cth_len, nh_len, pkh_len, skh_len;
+    const char *cth = JS_ToCStringLen(ctx, &cth_len, argv[0]);
+    const char *nh = JS_ToCStringLen(ctx, &nh_len, argv[1]);
+    const char *pkh = JS_ToCStringLen(ctx, &pkh_len, argv[2]);
+    const char *skh = JS_ToCStringLen(ctx, &skh_len, argv[3]);
+    if (!cth || !nh || !pkh || !skh) {
+        if (cth) JS_FreeCString(ctx, cth);
+        if (nh) JS_FreeCString(ctx, nh);
+        if (pkh) JS_FreeCString(ctx, pkh);
+        if (skh) JS_FreeCString(ctx, skh);
+        return JS_EXCEPTION;
+    }
+
+    if (cth_len % 2 != 0 || nh_len != 48 || pkh_len != 64 || skh_len != 64) {
+        JS_FreeCString(ctx, cth); JS_FreeCString(ctx, nh);
+        JS_FreeCString(ctx, pkh); JS_FreeCString(ctx, skh);
+        return JS_NULL;
+    }
+
+    size_t ct_len = cth_len / 2;
+    if (ct_len < HL_BOX_MACBYTES) {
+        JS_FreeCString(ctx, cth); JS_FreeCString(ctx, nh);
+        JS_FreeCString(ctx, pkh); JS_FreeCString(ctx, skh);
+        return JS_NULL;
+    }
+
+    uint8_t nonce[24], pk[32], sk[32];
+    hex_decode(nh, 48, nonce, 24);
+    hex_decode(pkh, 64, pk, 32);
+    hex_decode(skh, 64, sk, 32);
+    JS_FreeCString(ctx, nh);
+    JS_FreeCString(ctx, pkh);
+    JS_FreeCString(ctx, skh);
+
+    uint8_t *ct = js_malloc(ctx, ct_len);
+    if (!ct) { JS_FreeCString(ctx, cth); return JS_EXCEPTION; }
+    hex_decode(cth, cth_len, ct, ct_len);
+    JS_FreeCString(ctx, cth);
+
+    size_t pt_len = ct_len - HL_BOX_MACBYTES;
+    uint8_t *pt = js_malloc(ctx, pt_len + 1);
+    if (!pt) { js_free(ctx, ct); return JS_EXCEPTION; }
+
+    if (hl_cap_crypto_box_open(pt, ct, ct_len, nonce, pk, sk) != 0) {
+        js_free(ctx, ct);
+        js_free(ctx, pt);
+        return JS_NULL;
+    }
+    js_free(ctx, ct);
+
+    JSValue result = JS_NewStringLen(ctx, (const char *)pt, pt_len);
+    js_free(ctx, pt);
+    return result;
+}
+
+/* crypto.boxKeypair() → { publicKey: hex, secretKey: hex } */
+static JSValue js_crypto_box_keypair(JSContext *ctx, JSValueConst this_val,
+                                      int argc, JSValueConst *argv)
+{
+    (void)this_val; (void)argc; (void)argv;
+
+    uint8_t pk[32], sk[32];
+    if (hl_cap_crypto_box_keypair(pk, sk) != 0)
+        return JS_ThrowInternalError(ctx, "box keypair generation failed");
+
+    char pk_hex[65], sk_hex[65];
+    for (int i = 0; i < 32; i++)
+        snprintf(pk_hex + i * 2, 3, "%02x", pk[i]);
+    pk_hex[64] = '\0';
+    for (int i = 0; i < 32; i++)
+        snprintf(sk_hex + i * 2, 3, "%02x", sk[i]);
+    sk_hex[64] = '\0';
+
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "publicKey", JS_NewString(ctx, pk_hex));
+    JS_SetPropertyStr(ctx, obj, "secretKey", JS_NewString(ctx, sk_hex));
+    return obj;
+}
+
 static int js_crypto_module_init(JSContext *ctx, JSModuleDef *m)
 {
     JSValue crypto = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, crypto, "sha256",
                       JS_NewCFunction(ctx, js_crypto_sha256, "sha256", 1));
+    JS_SetPropertyStr(ctx, crypto, "sha512",
+                      JS_NewCFunction(ctx, js_crypto_sha512, "sha512", 1));
     JS_SetPropertyStr(ctx, crypto, "random",
                       JS_NewCFunction(ctx, js_crypto_random, "random", 1));
     JS_SetPropertyStr(ctx, crypto, "hashPassword",
                       JS_NewCFunction(ctx, js_crypto_hash_password, "hashPassword", 1));
     JS_SetPropertyStr(ctx, crypto, "verifyPassword",
                       JS_NewCFunction(ctx, js_crypto_verify_password, "verifyPassword", 2));
+    JS_SetPropertyStr(ctx, crypto, "ed25519Keypair",
+                      JS_NewCFunction(ctx, js_crypto_ed25519_keypair, "ed25519Keypair", 0));
+    JS_SetPropertyStr(ctx, crypto, "ed25519Sign",
+                      JS_NewCFunction(ctx, js_crypto_ed25519_sign, "ed25519Sign", 2));
+    JS_SetPropertyStr(ctx, crypto, "ed25519Verify",
+                      JS_NewCFunction(ctx, js_crypto_ed25519_verify, "ed25519Verify", 3));
+    JS_SetPropertyStr(ctx, crypto, "auth",
+                      JS_NewCFunction(ctx, js_crypto_auth, "auth", 2));
+    JS_SetPropertyStr(ctx, crypto, "authVerify",
+                      JS_NewCFunction(ctx, js_crypto_auth_verify, "authVerify", 3));
+    JS_SetPropertyStr(ctx, crypto, "secretbox",
+                      JS_NewCFunction(ctx, js_crypto_secretbox, "secretbox", 3));
+    JS_SetPropertyStr(ctx, crypto, "secretboxOpen",
+                      JS_NewCFunction(ctx, js_crypto_secretbox_open, "secretboxOpen", 3));
+    JS_SetPropertyStr(ctx, crypto, "box",
+                      JS_NewCFunction(ctx, js_crypto_box, "box", 4));
+    JS_SetPropertyStr(ctx, crypto, "boxOpen",
+                      JS_NewCFunction(ctx, js_crypto_box_open, "boxOpen", 4));
+    JS_SetPropertyStr(ctx, crypto, "boxKeypair",
+                      JS_NewCFunction(ctx, js_crypto_box_keypair, "boxKeypair", 0));
     JS_SetModuleExport(ctx, m, "crypto", crypto);
     return 0;
 }
@@ -1021,7 +1579,7 @@ int hl_js_register_modules(HlJS *js)
         return -1;
 
     /* Register hull:db module (only if database is available) */
-    if (js->db) {
+    if (js->base.db) {
         if (hl_js_init_db_module(js->ctx, js) != 0)
             return -1;
     }

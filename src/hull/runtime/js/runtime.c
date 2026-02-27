@@ -11,14 +11,14 @@
 #include "hull/runtime/js.h"
 #include "hull/alloc.h"
 #include "hull/limits.h"
+#include "hull/manifest.h"
+#include "hull/cap/body.h"
 #include "hull/cap/fs.h"
 #include "hull/cap/env.h"
 #include "hull/cap/http.h"
 #include "quickjs.h"
 
-#include <keel/router.h>
-#include <keel/response.h>
-#include <keel/request.h>
+#include <keel/keel.h>
 
 #include <sh_arena.h>
 
@@ -27,6 +27,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* ── Embedded JS stdlib (auto-generated registry of all stdlib .js files) */
+
+#include "stdlib_js_registry.h"
 
 /* ── Forward declarations for module init functions ─────────────────── */
 
@@ -103,10 +107,23 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
 {
     HlJS *js = (HlJS *)opaque;
 
-    /* hull:* modules are pre-registered — QuickJS resolves them
-     * automatically from the module registry. If we get here,
-     * it means the module wasn't found in the registry. */
+    /* hull:* modules are pre-registered as native C modules — QuickJS
+     * resolves them automatically. If we get here, it wasn't found as
+     * a native module, so check the embedded JS stdlib registry. */
     if (strncmp(module_name, "hull:", 5) == 0) {
+        for (const HlJsStdlibEntry *e = hl_stdlib_js_entries; e->name; e++) {
+            if (strcmp(e->name, module_name) == 0) {
+                JSValue func = JS_Eval(ctx, (const char *)e->data, e->len,
+                                       module_name,
+                                       JS_EVAL_TYPE_MODULE |
+                                       JS_EVAL_FLAG_COMPILE_ONLY);
+                if (JS_IsException(func))
+                    return NULL;
+                JSModuleDef *m = (JSModuleDef *)JS_VALUE_GET_PTR(func);
+                JS_FreeValue(ctx, func);
+                return m;
+            }
+        }
         JS_ThrowReferenceError(ctx, "unknown hull module: %s", module_name);
         return NULL;
     }
@@ -239,21 +256,13 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
     if (!js || !cfg)
         return -1;
 
-    /* Save caller-set fields before zeroing */
-    sqlite3 *db = js->db;
-    HlFsConfig *fs_cfg = js->fs_cfg;
-    HlEnvConfig *env_cfg = js->env_cfg;
-    HlHttpConfig *http_cfg = js->http_cfg;
-    HlAllocator *alloc = js->alloc;
+    /* Save caller-set base fields before zeroing */
+    HlRuntime saved_base = js->base;
 
     memset(js, 0, sizeof(*js));
 
-    /* Restore caller-set fields */
-    js->db = db;
-    js->fs_cfg = fs_cfg;
-    js->env_cfg = env_cfg;
-    js->http_cfg = http_cfg;
-    js->alloc = alloc;
+    /* Restore caller-set base fields */
+    js->base = saved_base;
     js->max_instructions = cfg->max_instructions;
 
     /* Create runtime (using default allocator for now;
@@ -310,8 +319,14 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
         return -1;
     }
 
+    /* Register embedded JS stdlib modules */
+    if (hl_js_register_stdlib(js) != 0) {
+        hl_js_free(js);
+        return -1;
+    }
+
     /* Per-request scratch arena */
-    js->scratch = hl_arena_create(js->alloc, HL_SCRATCH_SIZE);
+    js->scratch = hl_arena_create(js->base.alloc, HL_SCRATCH_SIZE);
     if (!js->scratch) {
         hl_js_free(js);
         return -1;
@@ -364,7 +379,7 @@ int hl_js_load_app(HlJS *js, const char *filename)
 
     /* Extract app directory from filename */
     size_t fn_len = strlen(filename);
-    char *app_dir = hl_alloc_malloc(js->alloc, fn_len + 1);
+    char *app_dir = hl_alloc_malloc(js->base.alloc, fn_len + 1);
     if (!app_dir) {
         js->scratch->used = arena_saved;
         return -1;
@@ -374,8 +389,8 @@ int hl_js_load_app(HlJS *js, const char *filename)
     if (last_slash)
         *last_slash = '\0';
     else {
-        hl_alloc_free(js->alloc, app_dir, fn_len + 1);
-        app_dir = hl_alloc_malloc(js->alloc, 2);
+        hl_alloc_free(js->base.alloc, app_dir, fn_len + 1);
+        app_dir = hl_alloc_malloc(js->base.alloc, 2);
         if (!app_dir) {
             js->scratch->used = arena_saved;
             return -1;
@@ -455,14 +470,14 @@ void hl_js_free(HlJS *js)
         js->rt = NULL;
     }
     if (js->app_dir) {
-        hl_alloc_free(js->alloc, (void *)js->app_dir, js->app_dir_size);
+        hl_alloc_free(js->base.alloc, (void *)js->app_dir, js->app_dir_size);
         js->app_dir = NULL;
         js->app_dir_size = 0;
     }
-    hl_arena_free(js->alloc, js->scratch);
+    hl_arena_free(js->base.alloc, js->scratch);
     js->scratch = NULL;
     if (js->response_body) {
-        hl_alloc_free(js->alloc, js->response_body,
+        hl_alloc_free(js->base.alloc, js->response_body,
                       js->response_body_size);
         js->response_body = NULL;
         js->response_body_size = 0;
@@ -555,6 +570,22 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     return result;
 }
 
+/* ── Embedded JS stdlib registration ────────────────────────────────── */
+
+int hl_js_register_stdlib(HlJS *js)
+{
+    if (!js || !js->ctx)
+        return -1;
+
+    /* Embedded JS stdlib modules are loaded on-demand by the module
+     * loader (hl_js_module_loader checks hl_stdlib_js_entries[] for
+     * hull:* names not found as native C modules). No eager compilation
+     * needed — just verify the registry is accessible. */
+
+    (void)hl_stdlib_js_entries; /* ensure linked */
+    return 0;
+}
+
 /* ── Route wiring ──────────────────────────────────────────────────── */
 
 void hl_js_keel_handler(KlRequest *req, KlResponse *res, void *user_data)
@@ -622,3 +653,109 @@ int hl_js_wire_routes(HlJS *js, KlRouter *router)
 
     return 0;
 }
+
+/* ── Server route wiring (with body reader factory) ────────────────── */
+
+int hl_js_wire_routes_server(HlJS *js, KlServer *server,
+                              void *(*alloc_fn)(size_t))
+{
+    JSContext *ctx = js->ctx;
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue defs = JS_GetPropertyStr(ctx, global, "__hull_route_defs");
+
+    if (JS_IsUndefined(defs) || !JS_IsArray(ctx, defs)) {
+        JS_FreeValue(ctx, defs);
+        JS_FreeValue(ctx, global);
+        log_error("[hull:c] no routes registered");
+        return -1;
+    }
+
+    JSValue len_val = JS_GetPropertyStr(ctx, defs, "length");
+    int32_t count = 0;
+    JS_ToInt32(ctx, &count, len_val);
+    JS_FreeValue(ctx, len_val);
+
+    for (int32_t i = 0; i < count; i++) {
+        JSValue def = JS_GetPropertyUint32(ctx, defs, (uint32_t)i);
+        if (JS_IsUndefined(def))
+            continue;
+
+        JSValue method_val = JS_GetPropertyStr(ctx, def, "method");
+        JSValue pattern_val = JS_GetPropertyStr(ctx, def, "pattern");
+        JSValue id_val = JS_GetPropertyStr(ctx, def, "handler_id");
+
+        const char *method_str = JS_ToCString(ctx, method_val);
+        const char *pattern = JS_ToCString(ctx, pattern_val);
+        int32_t handler_id = 0;
+        JS_ToInt32(ctx, &handler_id, id_val);
+
+        if (method_str && pattern) {
+            void *mem = alloc_fn ? alloc_fn(sizeof(HlJSRoute))
+                                 : malloc(sizeof(HlJSRoute));
+            HlJSRoute *route = (HlJSRoute *)mem;
+            if (route) {
+                route->js = js;
+                route->handler_id = handler_id;
+                kl_server_route(server, method_str, pattern,
+                                hl_js_keel_handler, route,
+                                hl_cap_body_factory);
+            }
+        }
+
+        if (pattern) JS_FreeCString(ctx, pattern);
+        if (method_str) JS_FreeCString(ctx, method_str);
+        JS_FreeValue(ctx, id_val);
+        JS_FreeValue(ctx, pattern_val);
+        JS_FreeValue(ctx, method_val);
+        JS_FreeValue(ctx, def);
+    }
+
+    JS_FreeValue(ctx, defs);
+    JS_FreeValue(ctx, global);
+    return 0;
+}
+
+/* ── Vtable adapters ───────────────────────────────────────────────── */
+
+static int vt_js_init(HlRuntime *rt, const void *config)
+{
+    return hl_js_init((HlJS *)rt, (const HlJSConfig *)config);
+}
+
+static int vt_js_load_app(HlRuntime *rt, const char *filename)
+{
+    return hl_js_load_app((HlJS *)rt, filename);
+}
+
+static int vt_js_wire_routes_server(HlRuntime *rt, KlServer *server,
+                                     void *(*alloc_fn)(size_t))
+{
+    return hl_js_wire_routes_server((HlJS *)rt, server, alloc_fn);
+}
+
+static int vt_js_extract_manifest(HlRuntime *rt, HlManifest *out)
+{
+    HlJS *js = (HlJS *)rt;
+    return hl_manifest_extract_js(js->ctx, out);
+}
+
+static void vt_js_free_manifest_strings(HlRuntime *rt, HlManifest *m)
+{
+    HlJS *js = (HlJS *)rt;
+    hl_manifest_free_js_strings(js->ctx, m);
+}
+
+static void vt_js_destroy(HlRuntime *rt)
+{
+    hl_js_free((HlJS *)rt);
+}
+
+const HlRuntimeVtable hl_js_vtable = {
+    .init                = vt_js_init,
+    .load_app            = vt_js_load_app,
+    .wire_routes_server  = vt_js_wire_routes_server,
+    .extract_manifest    = vt_js_extract_manifest,
+    .free_manifest_strings = vt_js_free_manifest_strings,
+    .destroy             = vt_js_destroy,
+    .name                = "QuickJS",
+};

@@ -13,6 +13,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "hull/limits.h"
+#include "hull/runtime.h"
 
 /* Forward declarations */
 typedef struct JSRuntime JSRuntime;
@@ -21,11 +22,6 @@ typedef struct KlRequest KlRequest;
 typedef struct KlResponse KlResponse;
 typedef struct KlRouter KlRouter;
 typedef struct SHArena SHArena;
-typedef struct HlAllocator HlAllocator;
-typedef struct sqlite3 sqlite3;
-typedef struct HlFsConfig HlFsConfig;
-typedef struct HlEnvConfig HlEnvConfig;
-typedef struct HlHttpConfig HlHttpConfig;
 
 /* ── Configuration ──────────────────────────────────────────────────── */
 
@@ -47,17 +43,10 @@ typedef struct {
 /* ── Runtime context ────────────────────────────────────────────────── */
 
 typedef struct HlJS {
+    HlRuntime       base;          /* vtable + shared capabilities */
+
     JSRuntime      *rt;
     JSContext      *ctx;
-
-    /* Capabilities (shared with Lua runtime) */
-    sqlite3        *db;
-    HlFsConfig   *fs_cfg;
-    HlEnvConfig  *env_cfg;
-    HlHttpConfig *http_cfg;
-
-    /* Process-level tracking allocator (NULL = raw malloc) */
-    HlAllocator    *alloc;
 
     /* Interrupt / gas metering */
     int64_t         instruction_count;
@@ -74,6 +63,10 @@ typedef struct HlJS {
     char           *response_body;
     size_t          response_body_size;
 } HlJS;
+
+/* ── Vtable ────────────────────────────────────────────────────────── */
+
+extern const HlRuntimeVtable hl_js_vtable;
 
 /* ── Lifecycle ──────────────────────────────────────────────────────── */
 
@@ -139,6 +132,13 @@ void hl_js_free(HlJS *js);
  */
 int hl_js_register_modules(HlJS *js);
 
+/*
+ * Register embedded JS stdlib modules (from auto-generated registry).
+ * Populates the embedded module lookup table used by the module loader.
+ * Called internally by hl_js_init().
+ */
+int hl_js_register_stdlib(HlJS *js);
+
 /* ── Error reporting ────────────────────────────────────────────────── */
 
 /*
@@ -167,5 +167,13 @@ void hl_js_keel_handler(KlRequest *req, KlResponse *res, void *user_data);
  * Returns 0 on success, -1 on error.
  */
 int hl_js_wire_routes(HlJS *js, KlRouter *router);
+
+/*
+ * Wire JS routes into a KlServer (with body reader factory).
+ * `alloc_fn` allocates per-route context (pass NULL to use malloc).
+ * Returns 0 on success, -1 on error.
+ */
+int hl_js_wire_routes_server(HlJS *js, KlServer *server,
+                              void *(*alloc_fn)(size_t));
 
 #endif /* HL_RUNTIME_JS_H */

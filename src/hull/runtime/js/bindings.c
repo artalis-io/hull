@@ -152,12 +152,12 @@ static const char *hl_js_stash_body(JSContext *ctx, const char *data,
     if (!js)
         return NULL;
     if (js->response_body) {
-        hl_alloc_free(js->alloc, js->response_body,
+        hl_alloc_free(js->base.alloc, js->response_body,
                       js->response_body_size);
         js->response_body = NULL;
         js->response_body_size = 0;
     }
-    js->response_body = hl_alloc_malloc(js->alloc, len + 1);
+    js->response_body = hl_alloc_malloc(js->base.alloc, len + 1);
     if (!js->response_body)
         return NULL;
     js->response_body_size = len + 1;

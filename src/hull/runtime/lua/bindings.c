@@ -50,12 +50,12 @@ static const char *hl_lua_stash_body(lua_State *L, const char *data,
     if (!hlua)
         return NULL;
     if (hlua->response_body) {
-        hl_alloc_free(hlua->alloc, hlua->response_body,
+        hl_alloc_free(hlua->base.alloc, hlua->response_body,
                       hlua->response_body_size);
         hlua->response_body = NULL;
         hlua->response_body_size = 0;
     }
-    hlua->response_body = hl_alloc_malloc(hlua->alloc, len + 1);
+    hlua->response_body = hl_alloc_malloc(hlua->base.alloc, len + 1);
     if (!hlua->response_body)
         return NULL;
     hlua->response_body_size = len + 1;

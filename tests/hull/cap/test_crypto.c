@@ -254,4 +254,221 @@ UTEST(hl_cap_crypto, ed25519_null_args)
     ASSERT_EQ(hl_cap_crypto_ed25519_verify(msg, 4, sig, NULL), -1);
 }
 
+/* ── SHA-512 tests ──────────────────────────────────────────────────── */
+
+UTEST(hl_cap_crypto, sha512_empty)
+{
+    uint8_t hash[64];
+    int rc = hl_cap_crypto_sha512("", 0, hash);
+    ASSERT_EQ(rc, 0);
+
+    char hex[129];
+    hex_encode(hash, 64, hex);
+    ASSERT_STREQ(hex,
+        "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce"
+        "47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e");
+}
+
+UTEST(hl_cap_crypto, sha512_abc)
+{
+    uint8_t hash[64];
+    int rc = hl_cap_crypto_sha512("abc", 3, hash);
+    ASSERT_EQ(rc, 0);
+
+    char hex[129];
+    hex_encode(hash, 64, hex);
+    ASSERT_STREQ(hex,
+        "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a"
+        "2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f");
+}
+
+UTEST(hl_cap_crypto, sha512_null)
+{
+    uint8_t hash[64];
+    ASSERT_EQ(hl_cap_crypto_sha512(NULL, 0, hash), -1);
+    ASSERT_EQ(hl_cap_crypto_sha512("x", 1, NULL), -1);
+}
+
+/* ── HMAC-SHA512/256 auth tests ────────────────────────────────────── */
+
+UTEST(hl_cap_crypto, auth_roundtrip)
+{
+    uint8_t key[32];
+    memset(key, 0x42, 32);
+
+    const char *msg = "authenticate me";
+    uint8_t tag[32];
+
+    ASSERT_EQ(0, hl_cap_crypto_auth(msg, strlen(msg), key, tag));
+    ASSERT_EQ(0, hl_cap_crypto_auth_verify(tag, msg, strlen(msg), key));
+}
+
+UTEST(hl_cap_crypto, auth_wrong_key)
+{
+    uint8_t key[32], wrong_key[32];
+    memset(key, 0x42, 32);
+    memset(wrong_key, 0x43, 32);
+
+    const char *msg = "authenticate me";
+    uint8_t tag[32];
+
+    ASSERT_EQ(0, hl_cap_crypto_auth(msg, strlen(msg), key, tag));
+    ASSERT_NE(0, hl_cap_crypto_auth_verify(tag, msg, strlen(msg), wrong_key));
+}
+
+UTEST(hl_cap_crypto, auth_tampered)
+{
+    uint8_t key[32];
+    memset(key, 0x42, 32);
+
+    const char *msg = "authenticate me";
+    uint8_t tag[32];
+
+    ASSERT_EQ(0, hl_cap_crypto_auth(msg, strlen(msg), key, tag));
+    tag[0] ^= 0x01;
+    ASSERT_NE(0, hl_cap_crypto_auth_verify(tag, msg, strlen(msg), key));
+}
+
+UTEST(hl_cap_crypto, auth_null_guard)
+{
+    uint8_t key[32], tag[32];
+    memset(key, 0, 32);
+    ASSERT_EQ(-1, hl_cap_crypto_auth(NULL, 0, key, tag));
+    ASSERT_EQ(-1, hl_cap_crypto_auth("x", 1, NULL, tag));
+    ASSERT_EQ(-1, hl_cap_crypto_auth("x", 1, key, NULL));
+    ASSERT_EQ(-1, hl_cap_crypto_auth_verify(NULL, "x", 1, key));
+    ASSERT_EQ(-1, hl_cap_crypto_auth_verify(tag, NULL, 1, key));
+    ASSERT_EQ(-1, hl_cap_crypto_auth_verify(tag, "x", 1, NULL));
+}
+
+/* ── Secretbox tests ────────────────────────────────────────────────── */
+
+UTEST(hl_cap_crypto, secretbox_roundtrip)
+{
+    uint8_t key[32], nonce[24];
+    memset(key, 0xAA, 32);
+    memset(nonce, 0xBB, 24);
+
+    const char *msg = "secret message";
+    size_t msg_len = strlen(msg);
+    size_t ct_len = msg_len + HL_SECRETBOX_MACBYTES;
+
+    uint8_t ct[128], pt[128];
+
+    ASSERT_EQ(0, hl_cap_crypto_secretbox(ct, msg, msg_len, nonce, key));
+    ASSERT_EQ(0, hl_cap_crypto_secretbox_open(pt, ct, ct_len, nonce, key));
+    ASSERT_EQ(0, memcmp(pt, msg, msg_len));
+}
+
+UTEST(hl_cap_crypto, secretbox_wrong_key)
+{
+    uint8_t key[32], wrong_key[32], nonce[24];
+    memset(key, 0xAA, 32);
+    memset(wrong_key, 0xCC, 32);
+    memset(nonce, 0xBB, 24);
+
+    const char *msg = "secret message";
+    size_t msg_len = strlen(msg);
+    size_t ct_len = msg_len + HL_SECRETBOX_MACBYTES;
+
+    uint8_t ct[128], pt[128];
+
+    ASSERT_EQ(0, hl_cap_crypto_secretbox(ct, msg, msg_len, nonce, key));
+    ASSERT_NE(0, hl_cap_crypto_secretbox_open(pt, ct, ct_len, nonce, wrong_key));
+}
+
+UTEST(hl_cap_crypto, secretbox_tampered)
+{
+    uint8_t key[32], nonce[24];
+    memset(key, 0xAA, 32);
+    memset(nonce, 0xBB, 24);
+
+    const char *msg = "secret message";
+    size_t msg_len = strlen(msg);
+    size_t ct_len = msg_len + HL_SECRETBOX_MACBYTES;
+
+    uint8_t ct[128], pt[128];
+
+    ASSERT_EQ(0, hl_cap_crypto_secretbox(ct, msg, msg_len, nonce, key));
+    ct[0] ^= 0x01;
+    ASSERT_NE(0, hl_cap_crypto_secretbox_open(pt, ct, ct_len, nonce, key));
+}
+
+UTEST(hl_cap_crypto, secretbox_null_guard)
+{
+    uint8_t key[32], nonce[24], ct[32], pt[32];
+    memset(key, 0, 32);
+    memset(nonce, 0, 24);
+    ASSERT_EQ(-1, hl_cap_crypto_secretbox(NULL, "x", 1, nonce, key));
+    ASSERT_EQ(-1, hl_cap_crypto_secretbox_open(NULL, ct, 17, nonce, key));
+    ASSERT_EQ(-1, hl_cap_crypto_secretbox_open(pt, ct, 15, nonce, key));
+}
+
+/* ── Box (public-key encryption) tests ───────────────────────────────── */
+
+UTEST(hl_cap_crypto, box_roundtrip)
+{
+    uint8_t alice_pk[32], alice_sk[32];
+    uint8_t bob_pk[32], bob_sk[32];
+
+    ASSERT_EQ(0, hl_cap_crypto_box_keypair(alice_pk, alice_sk));
+    ASSERT_EQ(0, hl_cap_crypto_box_keypair(bob_pk, bob_sk));
+
+    uint8_t nonce[24];
+    hl_cap_crypto_random(nonce, 24);
+
+    const char *msg = "hello bob from alice";
+    size_t msg_len = strlen(msg);
+    size_t ct_len = msg_len + HL_BOX_MACBYTES;
+
+    uint8_t ct[128], pt[128];
+
+    ASSERT_EQ(0, hl_cap_crypto_box(ct, msg, msg_len, nonce, bob_pk, alice_sk));
+    ASSERT_EQ(0, hl_cap_crypto_box_open(pt, ct, ct_len, nonce, alice_pk, bob_sk));
+    ASSERT_EQ(0, memcmp(pt, msg, msg_len));
+}
+
+UTEST(hl_cap_crypto, box_wrong_key)
+{
+    uint8_t alice_pk[32], alice_sk[32];
+    uint8_t bob_pk[32], bob_sk[32];
+    uint8_t eve_pk[32], eve_sk[32];
+
+    ASSERT_EQ(0, hl_cap_crypto_box_keypair(alice_pk, alice_sk));
+    ASSERT_EQ(0, hl_cap_crypto_box_keypair(bob_pk, bob_sk));
+    ASSERT_EQ(0, hl_cap_crypto_box_keypair(eve_pk, eve_sk));
+
+    uint8_t nonce[24];
+    hl_cap_crypto_random(nonce, 24);
+
+    const char *msg = "hello bob";
+    size_t msg_len = strlen(msg);
+    size_t ct_len = msg_len + HL_BOX_MACBYTES;
+
+    uint8_t ct[128], pt[128];
+
+    ASSERT_EQ(0, hl_cap_crypto_box(ct, msg, msg_len, nonce, bob_pk, alice_sk));
+    ASSERT_NE(0, hl_cap_crypto_box_open(pt, ct, ct_len, nonce, alice_pk, eve_sk));
+}
+
+UTEST(hl_cap_crypto, box_null_guard)
+{
+    uint8_t pk[32], sk[32], nonce[24], ct[32], pt[32];
+    memset(pk, 0, 32);
+    memset(sk, 0, 32);
+    memset(nonce, 0, 24);
+    ASSERT_EQ(-1, hl_cap_crypto_box(NULL, "x", 1, nonce, pk, sk));
+    ASSERT_EQ(-1, hl_cap_crypto_box_open(NULL, ct, 17, nonce, pk, sk));
+    ASSERT_EQ(-1, hl_cap_crypto_box_open(pt, ct, 15, nonce, pk, sk));
+}
+
+UTEST(hl_cap_crypto, box_keypair_unique)
+{
+    uint8_t pk1[32], sk1[32], pk2[32], sk2[32];
+    ASSERT_EQ(0, hl_cap_crypto_box_keypair(pk1, sk1));
+    ASSERT_EQ(0, hl_cap_crypto_box_keypair(pk2, sk2));
+    ASSERT_NE(0, memcmp(pk1, pk2, 32));
+    ASSERT_NE(0, memcmp(sk1, sk2, 32));
+}
+
 UTEST_MAIN();
