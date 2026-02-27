@@ -6,6 +6,7 @@
 
 #include "hull/alloc.h"
 #include <sh_arena.h>
+#include <stdint.h>
 #include <stdlib.h>
 
 /* ── Tracked allocation functions ──────────────────────────────────── */

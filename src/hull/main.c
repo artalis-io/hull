@@ -26,6 +26,7 @@
 
 #include "hull/alloc.h"
 #include "hull/cap/body.h"
+#include "hull/commands/dispatch.h"
 #include "hull/limits.h"
 #include "hull/manifest.h"
 #include "hull/parse_size.h"
@@ -113,29 +114,18 @@ static HlRuntimeType detect_runtime(const char *entry_point)
     return HL_RUNTIME_LUA; /* default */
 }
 
-/* ── JS handler bridge ──────────────────────────────────────────────── */
+/*
+ * Server-mode route wiring uses the public hl_*_wire_routes() from
+ * the runtime headers + hl_*_keel_handler() as the Keel callback.
+ * Route structs (HlLuaRoute/HlJSRoute) are allocated from the route arena.
+ *
+ * The runtime's wire_routes() uses kl_router_add() directly (for hull test).
+ * Server mode uses kl_server_route() which also sets the body reader factory.
+ * We provide server-specific wrappers below.
+ */
 
 #ifdef HL_ENABLE_JS
-
-typedef struct {
-    HlJS *js;
-    int     handler_id;
-} HlJSRoute;
-
-static void hl_js_keel_handler(KlRequest *req, KlResponse *res,
-                                  void *user_data)
-{
-    HlJSRoute *route = (HlJSRoute *)user_data;
-    if (hl_js_dispatch(route->js, route->handler_id, req, res) != 0) {
-        kl_response_status(res, 500);
-        kl_response_header(res, "Content-Type", "text/plain");
-        kl_response_body(res, "Internal Server Error", 21);
-    }
-}
-
-/* ── Wire JS routes into Keel ───────────────────────────────────────── */
-
-static int wire_js_routes(HlJS *js, KlServer *server)
+static int wire_js_routes_server(HlJS *js, KlServer *server)
 {
     JSContext *ctx = js->ctx;
     JSValue global = JS_GetGlobalObject(ctx);
@@ -188,35 +178,12 @@ static int wire_js_routes(HlJS *js, KlServer *server)
 
     JS_FreeValue(ctx, defs);
     JS_FreeValue(ctx, global);
-
     return 0;
 }
-
 #endif /* HL_ENABLE_JS */
 
-/* ── Lua handler bridge ─────────────────────────────────────────────── */
-
 #ifdef HL_ENABLE_LUA
-
-typedef struct {
-    HlLua *lua;
-    int      handler_id;
-} HlLuaRoute;
-
-static void hl_lua_keel_handler(KlRequest *req, KlResponse *res,
-                                   void *user_data)
-{
-    HlLuaRoute *route = (HlLuaRoute *)user_data;
-    if (hl_lua_dispatch(route->lua, route->handler_id, req, res) != 0) {
-        kl_response_status(res, 500);
-        kl_response_header(res, "Content-Type", "text/plain");
-        kl_response_body(res, "Internal Server Error", 21);
-    }
-}
-
-/* ── Wire Lua routes into Keel ─────────────────────────────────────── */
-
-static int wire_lua_routes(HlLua *lua, KlServer *server)
+static int wire_lua_routes_server(HlLua *lua, KlServer *server)
 {
     lua_State *L = lua->L;
 
@@ -267,7 +234,6 @@ static int wire_lua_routes(HlLua *lua, KlServer *server)
     lua_pop(L, 1); /* __hull_route_defs table */
     return 0;
 }
-
 #endif /* HL_ENABLE_LUA */
 
 /* ── Auto-detect entry point ───────────────────────────────────────── */
@@ -462,7 +428,7 @@ static int hull_serve(int argc, char **argv)
         }
 
         /* Wire JS routes into Keel */
-        if (wire_js_routes(&js, &server) != 0) {
+        if (wire_js_routes_server(&js, &server) != 0) {
             hl_js_free(&js);
             goto cleanup_server;
         }
@@ -527,7 +493,7 @@ static int hull_serve(int argc, char **argv)
         }
 
         /* Wire Lua routes into Keel */
-        if (wire_lua_routes(&lua, &server) != 0) {
+        if (wire_lua_routes_server(&lua, &server) != 0) {
             hl_lua_free(&lua);
             goto cleanup_server;
         }
@@ -566,19 +532,9 @@ cleanup_db:
 
 int hull_main(int argc, char **argv)
 {
-    if (argc >= 2) {
-        const char *cmd = argv[1];
-        if (strcmp(cmd, "keygen") == 0)
-            return hull_keygen(argc - 1, argv + 1);
-        if (strcmp(cmd, "build") == 0)
-            return hull_tool("hull.build", argc - 1, argv + 1, argv[0]);
-        if (strcmp(cmd, "verify") == 0)
-            return hull_tool("hull.verify", argc - 1, argv + 1, argv[0]);
-        if (strcmp(cmd, "inspect") == 0)
-            return hull_tool("hull.inspect", argc - 1, argv + 1, argv[0]);
-        if (strcmp(cmd, "manifest") == 0)
-            return hull_tool("hull.manifest", argc - 1, argv + 1, argv[0]);
-    }
+    int rc = hl_command_dispatch(argc, argv);
+    if (rc != -1)
+        return rc;
 
     return hull_serve(argc, argv);
 }

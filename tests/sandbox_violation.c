@@ -29,7 +29,9 @@
 #if defined(__COSMOPOLITAN__)
 #define SANDBOX_SUPPORTED 1
 #define HAS_PLEDGE_MODE   0
-#include <libc/calls/pledge.h>
+/* Cosmopolitan libc provides pledge() and unveil() natively. */
+extern int pledge(const char *promises, const char *execpromises);
+extern int unveil(const char *path, const char *permissions);
 
 #elif defined(__linux__)
 #define SANDBOX_SUPPORTED 1
