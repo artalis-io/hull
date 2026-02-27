@@ -710,6 +710,15 @@ static JSValue js_crypto_random(JSContext *ctx, JSValueConst this_val,
     return ab;
 }
 
+/* Hex nibble helper (no sscanf — Cosmopolitan compat) */
+static int hex_nibble(unsigned char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+    return -1;
+}
+
 /* crypto.hashPassword(password) → "pbkdf2:iterations:salt_hex:hash_hex" */
 static JSValue js_crypto_hash_password(JSContext *ctx, JSValueConst this_val,
                                         int argc, JSValueConst *argv)
@@ -810,12 +819,13 @@ static JSValue js_crypto_verify_password(JSContext *ctx, JSValueConst this_val,
 
     JS_FreeCString(ctx, stored);
 
-    /* Decode hex salt */
+    /* Decode hex salt (manual — sscanf %x broken on Cosmopolitan) */
     uint8_t salt[16];
     for (int i = 0; i < 16; i++) {
-        unsigned int byte;
-        sscanf(salt_hex + i * 2, "%2x", &byte);
-        salt[i] = (uint8_t)byte;
+        int hi = hex_nibble((unsigned char)salt_hex[i * 2]);
+        int lo = hex_nibble((unsigned char)salt_hex[i * 2 + 1]);
+        if (hi < 0 || lo < 0) { JS_FreeCString(ctx, pw); return JS_FALSE; }
+        salt[i] = (uint8_t)((hi << 4) | lo);
     }
 
     /* Recompute hash */
@@ -830,9 +840,10 @@ static JSValue js_crypto_verify_password(JSContext *ctx, JSValueConst this_val,
     /* Decode stored hash and compare (constant-time) */
     uint8_t stored_hash[32];
     for (int i = 0; i < 32; i++) {
-        unsigned int byte;
-        sscanf(hash_hex + i * 2, "%2x", &byte);
-        stored_hash[i] = (uint8_t)byte;
+        int hi = hex_nibble((unsigned char)hash_hex[i * 2]);
+        int lo = hex_nibble((unsigned char)hash_hex[i * 2 + 1]);
+        if (hi < 0 || lo < 0) return JS_FALSE;
+        stored_hash[i] = (uint8_t)((hi << 4) | lo);
     }
 
     /* Constant-time comparison */

@@ -5,24 +5,24 @@
 
 import { app } from "hull:app";
 import { db } from "hull:db";
-import { time } from "hull:time";
 import { log } from "hull:log";
+import { time } from "hull:time";
 
 // Initialize database
 db.exec("CREATE TABLE IF NOT EXISTS visits (id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT, ts INTEGER)");
 
 // Routes
-app.get("/", (req, res) => {
+app.get("/", (_req, res) => {
     db.exec("INSERT INTO visits (path, ts) VALUES (?, ?)", ["/", time.now()]);
     res.json({ message: "Hello from Hull + QuickJS!", time: time.datetime() });
 });
 
-app.get("/visits", (req, res) => {
+app.get("/visits", (_req, res) => {
     const visits = db.query("SELECT * FROM visits ORDER BY id DESC LIMIT 20");
     res.json(visits);
 });
 
-app.get("/health", (req, res) => {
+app.get("/health", (_req, res) => {
     res.json({ status: "ok", runtime: "quickjs", uptime: time.clock() });
 });
 
@@ -33,12 +33,12 @@ app.post("/echo", (req, res) => {
 
 // Greet by route param
 app.get("/greet/:name", (req, res) => {
-    res.json({ greeting: "Hello, " + req.params.name + "!" });
+    res.json({ greeting: `Hello, ${req.params.name}!` });
 });
 
 // Greet with body
 app.post("/greet/:name", (req, res) => {
-    res.json({ greeting: "Hello, " + req.params.name + "!", body: req.body });
+    res.json({ greeting: `Hello, ${req.params.name}!`, body: req.body });
 });
 
 log.info("Hello app loaded — routes registered");

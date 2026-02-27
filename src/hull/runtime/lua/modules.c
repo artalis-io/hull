@@ -590,6 +590,16 @@ static int lua_crypto_hash_password(lua_State *L)
     return 1;
 }
 
+/* ── Hex nibble helper (no sscanf — Cosmopolitan compat) ──────────── */
+
+static int hex_nibble(unsigned char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+    return -1;
+}
+
 /* crypto.verify_password(password, hash_string) → boolean */
 static int lua_crypto_verify_password(lua_State *L)
 {
@@ -633,12 +643,13 @@ static int lua_crypto_verify_password(lua_State *L)
     memcpy(hash_hex, p, 64);
     hash_hex[64] = '\0';
 
-    /* Decode hex salt */
+    /* Decode hex salt (manual — sscanf %x broken on Cosmopolitan) */
     uint8_t salt[16];
     for (int i = 0; i < 16; i++) {
-        unsigned int byte;
-        sscanf(salt_hex + i * 2, "%2x", &byte);
-        salt[i] = (uint8_t)byte;
+        int hi = hex_nibble((unsigned char)salt_hex[i * 2]);
+        int lo = hex_nibble((unsigned char)salt_hex[i * 2 + 1]);
+        if (hi < 0 || lo < 0) { lua_pushboolean(L, 0); return 1; }
+        salt[i] = (uint8_t)((hi << 4) | lo);
     }
 
     /* Recompute hash */
@@ -652,9 +663,10 @@ static int lua_crypto_verify_password(lua_State *L)
     /* Decode stored hash and compare (constant-time) */
     uint8_t stored_hash[32];
     for (int i = 0; i < 32; i++) {
-        unsigned int byte;
-        sscanf(hash_hex + i * 2, "%2x", &byte);
-        stored_hash[i] = (uint8_t)byte;
+        int hi = hex_nibble((unsigned char)hash_hex[i * 2]);
+        int lo = hex_nibble((unsigned char)hash_hex[i * 2 + 1]);
+        if (hi < 0 || lo < 0) { lua_pushboolean(L, 0); return 1; }
+        stored_hash[i] = (uint8_t)((hi << 4) | lo);
     }
 
     /* Constant-time comparison */
@@ -666,17 +678,18 @@ static int lua_crypto_verify_password(lua_State *L)
     return 1;
 }
 
-/* ── Hex decode helper ─────────────────────────────────────────────── */
+/* ── Hex decode helper (no sscanf — Cosmopolitan compat) ──────────── */
 
 static int hex_decode(const char *hex, size_t hex_len, uint8_t *out, size_t out_len)
 {
     if (hex_len != out_len * 2)
         return -1;
     for (size_t i = 0; i < out_len; i++) {
-        unsigned int byte;
-        if (sscanf(hex + i * 2, "%2x", &byte) != 1)
+        int hi = hex_nibble((unsigned char)hex[i * 2]);
+        int lo = hex_nibble((unsigned char)hex[i * 2 + 1]);
+        if (hi < 0 || lo < 0)
             return -1;
-        out[i] = (uint8_t)byte;
+        out[i] = (uint8_t)((hi << 4) | lo);
     }
     return 0;
 }
