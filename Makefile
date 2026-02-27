@@ -448,6 +448,7 @@ $(TWEETNACL_OBJ): $(TWEETNACL_DIR)/tweetnacl.c | $(BUILDDIR)
 # jart/pledge polyfill (vendored, Linux only, relaxed warnings)
 # Flatten libc/calls/pledge.c → build/pledge_libc_calls_pledge.o
 $(BUILDDIR)/pledge_%.o: $(PLEDGE_DIR)/%.c | $(BUILDDIR)
+	@mkdir -p $(dir $@)
 	$(CC) $(PLEDGE_CFLAGS) -c -o $@ $<
 
 $(BUILDDIR):
