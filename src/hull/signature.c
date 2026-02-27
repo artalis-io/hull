@@ -1,10 +1,11 @@
 /*
  * signature.c — App signature verification (runtime)
  *
- * Reads hull.sig (JSON), extracts fields with targeted string scanning,
- * verifies Ed25519 signature, and checks file SHA-256 hashes.
+ * Reads package.sig (dual-layer JSON), extracts fields with targeted string
+ * scanning, verifies Ed25519 signatures for both platform and app layers,
+ * and checks file SHA-256 hashes.
  *
- * No full JSON parser needed — hull.sig has a fixed schema produced by
+ * No full JSON parser needed — package.sig has a fixed schema produced by
  * build.lua's json.encode(). We extract raw JSON fragments and string
  * fields by key scanning.
  *
@@ -62,9 +63,11 @@ static void hex_encode(const uint8_t *data, size_t len, char *out)
 
 /*
  * Find a JSON key in the form "key": and return a pointer to the
- * character after the colon. Only matches top-level keys (depth 0).
+ * character after the colon. Only matches keys at the given depth
+ * (default: top-level = depth 1, inside the outermost {}).
  */
-static const char *find_json_key(const char *json, const char *key)
+static const char *find_json_key_at(const char *json, const char *key,
+                                     int target_depth)
 {
     size_t klen = strlen(key);
     const char *p = json;
@@ -84,11 +87,9 @@ static const char *find_json_key(const char *json, const char *key)
         }
 
         if (*p == '"') {
-            /* Check if this is our key at depth 1 (inside the top-level object) */
-            if (depth == 1 &&
+            if (depth == target_depth &&
                 strncmp(p + 1, key, klen) == 0 &&
                 p[1 + klen] == '"') {
-                /* Found "key" — skip to colon */
                 const char *after = p + 1 + klen + 1;
                 while (*after == ' ' || *after == '\t' || *after == '\n' || *after == '\r')
                     after++;
@@ -110,6 +111,11 @@ static const char *find_json_key(const char *json, const char *key)
     }
 
     return NULL;
+}
+
+static const char *find_json_key(const char *json, const char *key)
+{
+    return find_json_key_at(json, key, 1);
 }
 
 /*
@@ -181,19 +187,6 @@ static char *extract_json_string(const char *start)
 }
 
 /*
- * Extract a JSON integer value.
- */
-static int extract_json_int(const char *start, int *out)
-{
-    if (!start || !out) return -1;
-    char *end;
-    long val = strtol(start, &end, 10);
-    if (end == start) return -1;
-    *out = (int)val;
-    return 0;
-}
-
-/*
  * Extract the raw JSON value at `start` — could be a string, object,
  * array, number, true, false, or null. Returns a strdup'd copy.
  */
@@ -235,56 +228,43 @@ static char *extract_raw_json_value(const char *start)
 
 /* ── Parse file entries from files_json ───────────────────────────── */
 
-/*
- * Parse {"filename":"hash",...} into HlSigFileEntry array.
- * files_json must point to a complete JSON object string.
- */
 static int parse_file_entries(const char *files_json,
                               HlSigFileEntry **out_entries,
                               size_t *out_count)
 {
     if (!files_json || files_json[0] != '{') return -1;
 
-    /* Count entries (number of ':' at depth 1) */
     size_t cap = 16;
     size_t count = 0;
     HlSigFileEntry *entries = calloc(cap, sizeof(HlSigFileEntry));
     if (!entries) return -1;
 
     const char *p = files_json + 1; /* skip '{' */
-    int in_string = 0;
 
     while (*p && *p != '}') {
-        /* Skip whitespace/commas */
         while (*p == ' ' || *p == ',' || *p == '\t' || *p == '\n' || *p == '\r')
             p++;
         if (*p == '}') break;
 
-        /* Expect "key" */
         if (*p != '"') { free(entries); return -1; }
         char *key = extract_json_string(p);
         if (!key) { free(entries); return -1; }
 
-        /* Advance past "key" */
-        p++; /* opening quote */
-        while (*p && !(*p == '"' && *(p - 1) != '\\')) p++;
-        if (*p == '"') p++; /* closing quote */
-
-        /* Skip : and whitespace */
-        while (*p == ' ' || *p == '\t' || *p == ':' || *p == '\n' || *p == '\r')
-            p++;
-
-        /* Expect "value" */
-        if (*p != '"') { free(key); free(entries); return -1; }
-        char *val = extract_json_string(p);
-        if (!val) { free(key); free(entries); return -1; }
-
-        /* Advance past "value" */
         p++;
         while (*p && !(*p == '"' && *(p - 1) != '\\')) p++;
         if (*p == '"') p++;
 
-        /* Store entry */
+        while (*p == ' ' || *p == '\t' || *p == ':' || *p == '\n' || *p == '\r')
+            p++;
+
+        if (*p != '"') { free(key); free(entries); return -1; }
+        char *val = extract_json_string(p);
+        if (!val) { free(key); free(entries); return -1; }
+
+        p++;
+        while (*p && !(*p == '"' && *(p - 1) != '\\')) p++;
+        if (*p == '"') p++;
+
         if (count >= cap) {
             if (cap > SIZE_MAX / (2 * sizeof(HlSigFileEntry))) {
                 free(key); free(val);
@@ -298,8 +278,6 @@ static int parse_file_entries(const char *files_json,
         entries[count].name = key;
         entries[count].hash_hex = val;
         count++;
-
-        (void)in_string;
     }
 
     *out_entries = entries;
@@ -310,6 +288,88 @@ fail:
     for (size_t i = 0; i < count; i++) {
         free(entries[i].name);
         free(entries[i].hash_hex);
+    }
+    free(entries);
+    return -1;
+}
+
+/* ── Parse platform entries from platforms_json ───────────────────── */
+
+static int parse_platform_entries(const char *platforms_json,
+                                   HlPlatformEntry **out_entries,
+                                   size_t *out_count)
+{
+    if (!platforms_json || platforms_json[0] != '{') return -1;
+
+    size_t cap = 4;
+    size_t count = 0;
+    HlPlatformEntry *entries = calloc(cap, sizeof(HlPlatformEntry));
+    if (!entries) return -1;
+
+    const char *p = platforms_json + 1;
+
+    while (*p && *p != '}') {
+        while (*p == ' ' || *p == ',' || *p == '\t' || *p == '\n' || *p == '\r')
+            p++;
+        if (*p == '}') break;
+
+        /* Arch key */
+        if (*p != '"') goto pfail;
+        char *arch = extract_json_string(p);
+        if (!arch) goto pfail;
+
+        /* Skip past key string */
+        p++;
+        while (*p && !(*p == '"' && *(p - 1) != '\\')) p++;
+        if (*p == '"') p++;
+        while (*p == ' ' || *p == '\t' || *p == ':' || *p == '\n' || *p == '\r')
+            p++;
+
+        /* Value is an object {hash:..., canary:...} */
+        if (*p != '{') { free(arch); goto pfail; }
+        char *obj = extract_json_value(p);
+        if (!obj) { free(arch); goto pfail; }
+
+        /* Skip past the object in the stream */
+        {
+            size_t objlen = strlen(obj);
+            p += objlen;
+        }
+
+        /* Extract hash and canary from the object */
+        const char *hv = find_json_key_at(obj, "hash", 1);
+        char *hash_hex = hv ? extract_json_string(hv) : NULL;
+
+        const char *cv = find_json_key_at(obj, "canary", 1);
+        char *canary_hex = cv ? extract_json_string(cv) : NULL;
+
+        free(obj);
+
+        if (count >= cap) {
+            if (cap > SIZE_MAX / (2 * sizeof(HlPlatformEntry))) {
+                free(arch); free(hash_hex); free(canary_hex);
+                goto pfail;
+            }
+            cap *= 2;
+            HlPlatformEntry *ne = realloc(entries, cap * sizeof(HlPlatformEntry));
+            if (!ne) { free(arch); free(hash_hex); free(canary_hex); goto pfail; }
+            entries = ne;
+        }
+        entries[count].arch = arch;
+        entries[count].hash_hex = hash_hex;
+        entries[count].canary_hex = canary_hex;
+        count++;
+    }
+
+    *out_entries = entries;
+    *out_count = count;
+    return 0;
+
+pfail:
+    for (size_t i = 0; i < count; i++) {
+        free(entries[i].arch);
+        free(entries[i].hash_hex);
+        free(entries[i].canary_hex);
     }
     free(entries);
     return -1;
@@ -342,41 +402,79 @@ int hl_sig_read(const char *sig_path, HlSignature *sig)
     fclose(f);
     data[nread] = '\0';
 
-    /* Extract top-level fields */
     const char *val;
 
-    /* version */
-    val = find_json_key(data, "version");
-    if (!val || extract_json_int(val, &sig->version) != 0) {
-        free(data);
-        return -1;
-    }
+    /* ── App-layer fields ─────────────────────────────────────── */
 
-    /* files (raw JSON object) */
+    /* binary_hash (optional for backwards compat, required in new format) */
+    val = find_json_key(data, "binary_hash");
+    if (val)
+        sig->binary_hash_hex = extract_json_string(val);
+
+    /* trampoline_hash (optional) */
+    val = find_json_key(data, "trampoline_hash");
+    if (val)
+        sig->trampoline_hash_hex = extract_json_string(val);
+
+    /* build (optional) */
+    val = find_json_key(data, "build");
+    if (val)
+        sig->build_json = extract_raw_json_value(val);
+
+    /* files (required) */
     val = find_json_key(data, "files");
-    if (!val) { free(data); return -1; }
+    if (!val) { free(data); hl_sig_free(sig); return -1; }
     sig->files_json = extract_raw_json_value(val);
     if (!sig->files_json) { free(data); hl_sig_free(sig); return -1; }
 
-    /* manifest (raw JSON — could be object, null, or absent) */
+    /* manifest (optional — could be object, null, or absent) */
     val = find_json_key(data, "manifest");
-    if (val) {
+    if (val)
         sig->manifest_json = extract_raw_json_value(val);
-        if (!sig->manifest_json) { free(data); hl_sig_free(sig); return -1; }
-    }
-    /* If absent, manifest_json stays NULL — meaning Lua's nil (key not encoded) */
 
-    /* signature */
+    /* signature (required) */
     val = find_json_key(data, "signature");
     if (!val) { free(data); hl_sig_free(sig); return -1; }
     sig->signature_hex = extract_json_string(val);
     if (!sig->signature_hex) { free(data); hl_sig_free(sig); return -1; }
 
-    /* public_key */
+    /* public_key (required) */
     val = find_json_key(data, "public_key");
     if (!val) { free(data); hl_sig_free(sig); return -1; }
     sig->public_key_hex = extract_json_string(val);
     if (!sig->public_key_hex) { free(data); hl_sig_free(sig); return -1; }
+
+    /* ── Platform layer (nested object) ───────────────────────── */
+
+    val = find_json_key(data, "platform");
+    if (val && *val == '{') {
+        char *platform_json = extract_json_value(val);
+        if (platform_json) {
+            /* Extract platform.platforms */
+            const char *pv = find_json_key_at(platform_json, "platforms", 1);
+            if (pv)
+                sig->platform.platforms_json = extract_raw_json_value(pv);
+
+            /* Extract platform.signature */
+            const char *sv = find_json_key_at(platform_json, "signature", 1);
+            if (sv)
+                sig->platform.signature_hex = extract_json_string(sv);
+
+            /* Extract platform.public_key */
+            const char *kv = find_json_key_at(platform_json, "public_key", 1);
+            if (kv)
+                sig->platform.public_key_hex = extract_json_string(kv);
+
+            /* Parse platform entries */
+            if (sig->platform.platforms_json) {
+                parse_platform_entries(sig->platform.platforms_json,
+                                       &sig->platform.entries,
+                                       &sig->platform.entry_count);
+            }
+
+            free(platform_json);
+        }
+    }
 
     free(data);
 
@@ -403,32 +501,83 @@ int hl_sig_verify(const HlSignature *sig, const uint8_t pubkey[32])
     if (hex_decode(sig->signature_hex, sig_hex_len, sig_bytes, 64) != 0)
         return -1;
 
-    /* Build canonical payload matching Lua's json.encode({files=..., manifest=...})
-     * - "files" sorts before "manifest" alphabetically (Lua's table.sort(keys))
-     * - If manifest is nil in Lua, the key is absent from the table,
-     *   so json.encode produces {"files":...} without manifest
-     * - If manifest is present, it's {"files":...,"manifest":...}
+    /*
+     * Build canonical payload. The new package.sig format signs:
+     *   {binary_hash, build, files, manifest, platform, trampoline_hash}
+     * Keys are in alphabetical order (canonical JSON).
+     *
+     * For backwards compatibility with old hull.sig (v1), detect by
+     * checking whether binary_hash is present.
      */
-    size_t files_len = strlen(sig->files_json);
     char *payload;
 
-    if (sig->manifest_json) {
-        /* Manifest present: {"files":...,"manifest":...} */
-        size_t manifest_len = strlen(sig->manifest_json);
-        size_t payload_len = 9 + files_len + 12 + manifest_len + 1;
-        payload = malloc(payload_len + 1);
-        if (!payload) return -1;
-        snprintf(payload, payload_len + 1,
-                 "{\"files\":%s,\"manifest\":%s}",
-                 sig->files_json, sig->manifest_json);
+    if (sig->binary_hash_hex) {
+        /* New package.sig format */
+        /* Reconstruct the platform object as raw JSON */
+        char *platform_json = NULL;
+        if (sig->platform.platforms_json &&
+            sig->platform.signature_hex &&
+            sig->platform.public_key_hex) {
+            size_t pj_len = 64 + strlen(sig->platform.platforms_json) +
+                            strlen(sig->platform.signature_hex) +
+                            strlen(sig->platform.public_key_hex);
+            platform_json = malloc(pj_len);
+            if (!platform_json) return -1;
+            snprintf(platform_json, pj_len,
+                     "{\"platforms\":%s,\"public_key\":\"%s\",\"signature\":\"%s\"}",
+                     sig->platform.platforms_json,
+                     sig->platform.public_key_hex,
+                     sig->platform.signature_hex);
+        }
+
+        /* Build the full canonical payload */
+        size_t bh_len = strlen(sig->binary_hash_hex);
+        size_t build_len = sig->build_json ? strlen(sig->build_json) : 4;
+        size_t files_len = strlen(sig->files_json);
+        size_t manifest_len = sig->manifest_json ? strlen(sig->manifest_json) : 4;
+        size_t plat_len = platform_json ? strlen(platform_json) : 4;
+        size_t th_len = sig->trampoline_hash_hex ? strlen(sig->trampoline_hash_hex) : 4;
+
+        size_t total = 128 + bh_len + build_len + files_len +
+                       manifest_len + plat_len + th_len;
+        payload = malloc(total);
+        if (!payload) { free(platform_json); return -1; }
+
+        snprintf(payload, total,
+                 "{\"binary_hash\":\"%s\","
+                 "\"build\":%s,"
+                 "\"files\":%s,"
+                 "\"manifest\":%s,"
+                 "\"platform\":%s,"
+                 "\"trampoline_hash\":\"%s\"}",
+                 sig->binary_hash_hex,
+                 sig->build_json ? sig->build_json : "null",
+                 sig->files_json,
+                 sig->manifest_json ? sig->manifest_json : "null",
+                 platform_json ? platform_json : "null",
+                 sig->trampoline_hash_hex ? sig->trampoline_hash_hex : "");
+
+        free(platform_json);
     } else {
-        /* Manifest absent (nil): {"files":...} */
-        size_t payload_len = 9 + files_len + 1;
-        payload = malloc(payload_len + 1);
-        if (!payload) return -1;
-        snprintf(payload, payload_len + 1,
-                 "{\"files\":%s}",
-                 sig->files_json);
+        /* Legacy hull.sig format: {"files":...,"manifest":...} */
+        size_t files_len = strlen(sig->files_json);
+
+        if (sig->manifest_json) {
+            size_t manifest_len = strlen(sig->manifest_json);
+            size_t payload_len = 9 + files_len + 12 + manifest_len + 1;
+            payload = malloc(payload_len + 1);
+            if (!payload) return -1;
+            snprintf(payload, payload_len + 1,
+                     "{\"files\":%s,\"manifest\":%s}",
+                     sig->files_json, sig->manifest_json);
+        } else {
+            size_t payload_len = 9 + files_len + 1;
+            payload = malloc(payload_len + 1);
+            if (!payload) return -1;
+            snprintf(payload, payload_len + 1,
+                     "{\"files\":%s}",
+                     sig->files_json);
+        }
     }
 
     /* Verify Ed25519 signature */
@@ -439,30 +588,45 @@ int hl_sig_verify(const HlSignature *sig, const uint8_t pubkey[32])
     return rc;
 }
 
+int hl_sig_verify_platform(const HlSignature *sig, const uint8_t pubkey[32])
+{
+    if (!sig || !pubkey) return -1;
+    if (!sig->platform.signature_hex || !sig->platform.platforms_json)
+        return -1;
+
+    /* Decode signature hex → 64 bytes */
+    size_t sig_hex_len = strlen(sig->platform.signature_hex);
+    if (sig_hex_len != 128) return -1;
+
+    uint8_t sig_bytes[64];
+    if (hex_decode(sig->platform.signature_hex, sig_hex_len, sig_bytes, 64) != 0)
+        return -1;
+
+    /* Payload is canonicalStringify(platforms) */
+    const char *payload = sig->platform.platforms_json;
+    size_t payload_len = strlen(payload);
+
+    return hl_cap_crypto_ed25519_verify(
+        (const uint8_t *)payload, payload_len, sig_bytes, pubkey);
+}
+
 int hl_sig_verify_files_embedded(const HlSignature *sig)
 {
     if (!sig || !sig->entries) return -1;
 
-    /* Build a lookup: for each sig entry, find matching embedded entry */
     for (size_t i = 0; i < sig->entry_count; i++) {
         const char *sig_name = sig->entries[i].name;
         const char *expected_hash = sig->entries[i].hash_hex;
 
-        /* Embedded entries use "./" prefix for relative paths.
-         * sig entries use bare relative paths (e.g. "app.lua").
-         * Try both: "./" + sig_name and bare sig_name. */
         const unsigned char *data = NULL;
         unsigned int data_len = 0;
         int found = 0;
 
         for (const HlStdlibEntry *e = hl_app_lua_entries; e->name; e++) {
-            /* Embedded uses "./app" for "app.lua", sig uses "app.lua" */
             const char *ename = e->name;
-            /* Skip "./" prefix */
             if (ename[0] == '.' && ename[1] == '/')
                 ename += 2;
 
-            /* Build expected module name from sig_name: strip .lua suffix */
             size_t slen = strlen(sig_name);
             size_t mlen = slen;
             if (slen > 4 && strcmp(sig_name + slen - 4, ".lua") == 0)
@@ -481,7 +645,6 @@ int hl_sig_verify_files_embedded(const HlSignature *sig)
             return -1;
         }
 
-        /* Compute SHA-256 */
         uint8_t hash[32];
         if (hl_cap_crypto_sha256(data, data_len, hash) != 0) return -1;
 
@@ -530,11 +693,9 @@ int hl_sig_verify_files_fs(const HlSignature *sig, const char *app_dir)
         const char *name = sig->entries[i].name;
         const char *expected_hash = sig->entries[i].hash_hex;
 
-        /* Build full path */
         char path[PATH_MAX];
         snprintf(path, sizeof(path), "%s/%s", app_dir, name);
 
-        /* Read file */
         FILE *f = fopen(path, "rb");
         if (!f) {
             log_error("[sig] cannot open file: %s", path);
@@ -545,7 +706,7 @@ int hl_sig_verify_files_fs(const HlSignature *sig, const char *app_dir)
         long fsize = ftell(f);
         fseek(f, 0, SEEK_SET);
 
-        if (fsize < 0 || fsize > 100 * 1024 * 1024) { /* max 100MB per file */
+        if (fsize < 0 || fsize > 100 * 1024 * 1024) {
             fclose(f);
             log_error("[sig] file too large: %s", path);
             return -1;
@@ -557,7 +718,6 @@ int hl_sig_verify_files_fs(const HlSignature *sig, const char *app_dir)
         size_t nread = fread(data, 1, (size_t)fsize, f);
         fclose(f);
 
-        /* Compute SHA-256 */
         uint8_t hash[32];
         if (hl_cap_crypto_sha256(data, nread, hash) != 0) {
             free(data);
@@ -581,10 +741,28 @@ int hl_sig_verify_files_fs(const HlSignature *sig, const char *app_dir)
 void hl_sig_free(HlSignature *sig)
 {
     if (!sig) return;
+    free(sig->binary_hash_hex);
+    free(sig->trampoline_hash_hex);
+    free(sig->build_json);
     free(sig->files_json);
     free(sig->manifest_json);
     free(sig->signature_hex);
     free(sig->public_key_hex);
+
+    /* Free platform layer */
+    if (sig->platform.entries) {
+        for (size_t i = 0; i < sig->platform.entry_count; i++) {
+            free(sig->platform.entries[i].arch);
+            free(sig->platform.entries[i].hash_hex);
+            free(sig->platform.entries[i].canary_hex);
+        }
+        free(sig->platform.entries);
+    }
+    free(sig->platform.platforms_json);
+    free(sig->platform.signature_hex);
+    free(sig->platform.public_key_hex);
+
+    /* Free file entries */
     if (sig->entries) {
         for (size_t i = 0; i < sig->entry_count; i++) {
             free(sig->entries[i].name);
@@ -601,7 +779,7 @@ int hl_verify_startup(const char *pubkey_path, const char *entry_point)
 {
     if (!pubkey_path || !entry_point) return -1;
 
-    /* 1. Read pubkey file (64 hex chars → 32 bytes) */
+    /* 1. Read developer pubkey file (64 hex chars → 32 bytes) */
     FILE *f = fopen(pubkey_path, "r");
     if (!f) {
         log_error("[sig] cannot open pubkey: %s", pubkey_path);
@@ -636,48 +814,93 @@ int hl_verify_startup(const char *pubkey_path, const char *entry_point)
         return -1;
     }
 
-    /* 2. Derive hull.sig path from entry_point directory */
-    char sig_path[PATH_MAX];
+    /* 2. Derive sig path from entry_point directory */
     const char *slash = strrchr(entry_point, '/');
+    char sig_path[PATH_MAX];
+
+    /* Try package.sig first, fall back to hull.sig for backwards compat */
     if (slash) {
         size_t dir_len = (size_t)(slash - entry_point);
-        snprintf(sig_path, sizeof(sig_path), "%.*s/hull.sig",
+        snprintf(sig_path, sizeof(sig_path), "%.*s/package.sig",
                  (int)dir_len, entry_point);
     } else {
-        snprintf(sig_path, sizeof(sig_path), "hull.sig");
+        snprintf(sig_path, sizeof(sig_path), "package.sig");
     }
 
-    /* 3. Read and parse hull.sig */
+    /* Fall back to hull.sig if package.sig doesn't exist */
+    FILE *test_f = fopen(sig_path, "r");
+    if (!test_f) {
+        if (slash) {
+            size_t dir_len = (size_t)(slash - entry_point);
+            snprintf(sig_path, sizeof(sig_path), "%.*s/hull.sig",
+                     (int)dir_len, entry_point);
+        } else {
+            snprintf(sig_path, sizeof(sig_path), "hull.sig");
+        }
+    } else {
+        fclose(test_f);
+    }
+
+    /* 3. Read and parse signature */
     HlSignature sig;
     if (hl_sig_read(sig_path, &sig) != 0) {
-        log_error("[sig] cannot read hull.sig: %s", sig_path);
+        log_error("[sig] cannot read signature: %s", sig_path);
         return -1;
     }
 
-    /* 4. Verify pubkey matches hull.sig public_key */
+    /* 4. Verify developer pubkey matches */
     if (sig.public_key_hex) {
         size_t hex_len = strlen(sig.public_key_hex);
         if (hex_len != 64 || strncmp(sig.public_key_hex, pk_hex, 64) != 0) {
-            log_error("[sig] pubkey mismatch: --verify-sig key differs from hull.sig");
+            log_error("[sig] pubkey mismatch: --verify-sig key differs from signature");
             hl_sig_free(&sig);
             return -1;
         }
     }
 
-    /* 5. Verify Ed25519 signature */
+    /* 5. Verify platform signature if present */
+    if (sig.platform.signature_hex && sig.platform.public_key_hex) {
+        /* Decode platform public key */
+        uint8_t platform_pk[32];
+        if (strlen(sig.platform.public_key_hex) == 64 &&
+            hex_decode(sig.platform.public_key_hex, 64, platform_pk, 32) == 0) {
+
+            /* Pin against compiled-in platform key */
+            uint8_t expected_pk[32];
+            if (hex_decode(HL_PLATFORM_PUBKEY_HEX, 64, expected_pk, 32) == 0) {
+                /* All-zeros means placeholder — skip pinning check */
+                int all_zero = 1;
+                for (int i = 0; i < 32; i++) {
+                    if (expected_pk[i] != 0) { all_zero = 0; break; }
+                }
+                if (!all_zero &&
+                    memcmp(platform_pk, expected_pk, 32) != 0) {
+                    log_error("[sig] platform key does not match compiled-in key");
+                    hl_sig_free(&sig);
+                    return -1;
+                }
+            }
+
+            if (hl_sig_verify_platform(&sig, platform_pk) != 0) {
+                log_error("[sig] platform signature verification failed");
+                hl_sig_free(&sig);
+                return -1;
+            }
+        }
+    }
+
+    /* 6. Verify app Ed25519 signature */
     if (hl_sig_verify(&sig, pubkey) != 0) {
         log_error("[sig] Ed25519 signature verification failed");
         hl_sig_free(&sig);
         return -1;
     }
 
-    /* 6. Verify file hashes: embedded or filesystem */
+    /* 7. Verify file hashes: embedded or filesystem */
     int rc;
     if (hl_app_lua_entries[0].name != NULL) {
-        /* Embedded mode */
         rc = hl_sig_verify_files_embedded(&sig);
     } else {
-        /* Filesystem mode — derive app_dir from entry_point */
         char app_dir[PATH_MAX];
         if (slash) {
             size_t dir_len = (size_t)(slash - entry_point);
