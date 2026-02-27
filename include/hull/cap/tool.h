@@ -45,6 +45,11 @@ void hl_tool_unveil_init(HlToolUnveilCtx *ctx);
 int hl_tool_unveil_add(HlToolUnveilCtx *ctx, const char *path, const char *perms);
 
 /*
+ * Free all strdup'd paths in the unveil context and reset to empty.
+ */
+void hl_tool_unveil_free(HlToolUnveilCtx *ctx);
+
+/*
  * Seal the unveil table — no more entries can be added.
  */
 void hl_tool_unveil_seal(HlToolUnveilCtx *ctx);

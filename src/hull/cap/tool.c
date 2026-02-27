@@ -78,6 +78,14 @@ int hl_tool_unveil_add(HlToolUnveilCtx *ctx, const char *path, const char *perms
     return 0;
 }
 
+void hl_tool_unveil_free(HlToolUnveilCtx *ctx)
+{
+    if (!ctx) return;
+    for (int i = 0; i < ctx->count; i++)
+        free((void *)ctx->entries[i].path);
+    memset(ctx, 0, sizeof(*ctx));
+}
+
 void hl_tool_unveil_seal(HlToolUnveilCtx *ctx)
 {
     if (ctx) ctx->sealed = 1;

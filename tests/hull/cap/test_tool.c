@@ -325,6 +325,7 @@ UTEST(tool, copy_path_validation)
 
     hl_tool_rmdir(tmpdir, NULL);
     free(tmpdir);
+    hl_tool_unveil_free(&ctx);
 }
 
 /* ── rmdir tests ──────────────────────────────────────────────────── */
@@ -369,6 +370,7 @@ UTEST(tool, rmdir_path_validation)
     ASSERT_EQ(hl_tool_rmdir(tmpdir, &ctx), 0);
 
     free(tmpdir);
+    hl_tool_unveil_free(&ctx);
 }
 
 /* ── Unveil context tests ─────────────────────────────────────────── */
@@ -384,6 +386,7 @@ UTEST(tool, unveil_init_and_add)
     /* On macOS /tmp → /private/tmp, so both paths are stored (count=2).
      * On Linux /tmp is real, so only one entry (count=1). */
     ASSERT_TRUE(ctx.count >= 1);
+    hl_tool_unveil_free(&ctx);
 }
 
 UTEST(tool, unveil_seal_prevents_add)
@@ -396,6 +399,7 @@ UTEST(tool, unveil_seal_prevents_add)
 
     /* Adding after seal should fail */
     ASSERT_EQ(hl_tool_unveil_add(&ctx, "/usr", "r"), -1);
+    hl_tool_unveil_free(&ctx);
 }
 
 UTEST(tool, unveil_check_allowed)
@@ -407,6 +411,7 @@ UTEST(tool, unveil_check_allowed)
 
     ASSERT_EQ(hl_tool_unveil_check(&ctx, "/tmp/foo/bar", 'r'), 0);
     ASSERT_EQ(hl_tool_unveil_check(&ctx, "/tmp/foo/bar", 'w'), 0);
+    hl_tool_unveil_free(&ctx);
 }
 
 UTEST(tool, unveil_check_denied)
@@ -422,6 +427,7 @@ UTEST(tool, unveil_check_denied)
 
     /* Path outside unveiled dirs denied */
     ASSERT_NE(hl_tool_unveil_check(&ctx, "/etc/passwd", 'r'), 0);
+    hl_tool_unveil_free(&ctx);
 }
 
 UTEST(tool, unveil_enforcement_find_files)
@@ -434,6 +440,7 @@ UTEST(tool, unveil_enforcement_find_files)
     /* Should fail — /etc is not unveiled */
     char **files = hl_tool_find_files("/etc", "*.conf", &ctx);
     ASSERT_TRUE(files == NULL);
+    hl_tool_unveil_free(&ctx);
 }
 
 UTEST(tool, find_files_null_args)
