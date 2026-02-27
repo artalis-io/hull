@@ -553,6 +553,8 @@ SQLITE_CFLAGS := -std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-poi
                  -DSQLITE_THREADSAFE=1
 LOG_CFLAGS := -std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-pointer \
               -DLOG_USE_COLOR
+SH_ARENA_CFLAGS := -std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-pointer
+TWEETNACL_CFLAGS := -std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-pointer
 # Re-add runtime defines (the := above clobbers earlier += additions)
 ifeq ($(RUNTIME),js)
   CFLAGS += -DHL_ENABLE_JS
@@ -603,7 +605,7 @@ check:
 
 analyze:
 	$(MAKE) clean
-	$(MAKE) $(VEND_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(KEEL_LIB)
+	$(MAKE) $(VEND_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB)
 	scan-build --status-bugs -disable-checker alpha.unix.Stream $(MAKE) $(CAP_OBJS) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(MAIN_OBJ) $(BUILDDIR)/hull
 
 cppcheck:
