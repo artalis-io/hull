@@ -176,7 +176,7 @@ jobs:
         run: make lint-lua
 
       - name: Install Biome
-        run: npm install -g @biomejs/biome
+        run: npm install -g @biomejs/biome@1.9.4
 
       - name: JS lint
         run: make lint-js

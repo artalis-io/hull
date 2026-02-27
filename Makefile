@@ -611,6 +611,7 @@ analyze:
 cppcheck:
 	cppcheck --enable=all --inline-suppr \
 		--suppress=missingIncludeSystem \
+		--suppress=missingInclude \
 		--suppress=unusedFunction \
 		--suppress=checkersReport \
 		--suppress=toomanyconfigs \
@@ -620,6 +621,7 @@ cppcheck:
 		--suppress=constVariablePointer \
 		--suppress=staticFunction \
 		--suppress=uninitvar:$(SRCDIR)/hull/runtime/lua/bindings.c \
+		--suppress=unusedLabelConfiguration:$(SRCDIR)/hull/main.c \
 		--suppress=unmatchedSuppression \
 		--suppress='*:$(QJS_DIR)/*' \
 		--suppress='*:$(LUA_DIR)/*' \

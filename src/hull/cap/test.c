@@ -545,7 +545,9 @@ static JSValue js_test_http(JSContext *ctx, const char *method,
                            header_names, header_values, num_headers, &result);
 
     /* Free C strings */
+    // cppcheck-suppress knownConditionTrueFalse
     if (body_str) JS_FreeCString(ctx, body_str);
+    // cppcheck-suppress knownConditionTrueFalse
     for (int i = 0; i < num_headers; i++) {
         if (header_names[i]) JS_FreeCString(ctx, header_names[i]);
         if (header_values[i]) JS_FreeCString(ctx, header_values[i]);

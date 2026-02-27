@@ -19,6 +19,7 @@
 #include "log.h"
 
 #include <sqlite3.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -770,17 +771,43 @@ static JSValue js_crypto_verify_password(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
     }
 
-    /* Parse "pbkdf2:iterations:salt_hex:hash_hex" */
-    int iterations = 0;
-    char salt_hex[33] = {0};
-    char hash_hex[65] = {0};
-
-    if (sscanf(stored, "pbkdf2:%d:%32[0-9a-f]:%64[0-9a-f]",
-               &iterations, salt_hex, hash_hex) != 3) {
+    /* Parse "pbkdf2:iterations:salt_hex:hash_hex" manually (no scansets
+     * — Cosmopolitan libc doesn't support sscanf %[...] scansets). */
+    if (strncmp(stored, "pbkdf2:", 7) != 0) {
         JS_FreeCString(ctx, pw);
         JS_FreeCString(ctx, stored);
         return JS_FALSE;
     }
+    const char *p = stored + 7;
+
+    char *end = NULL;
+    long iterations = strtol(p, &end, 10);
+    if (!end || *end != ':' || iterations <= 0) {
+        JS_FreeCString(ctx, pw);
+        JS_FreeCString(ctx, stored);
+        return JS_FALSE;
+    }
+    p = end + 1;
+
+    if (strlen(p) < 32 + 1 + 64 || p[32] != ':') {
+        JS_FreeCString(ctx, pw);
+        JS_FreeCString(ctx, stored);
+        return JS_FALSE;
+    }
+    char salt_hex[33];
+    memcpy(salt_hex, p, 32);
+    salt_hex[32] = '\0';
+    p += 33;
+
+    if (strlen(p) < 64) {
+        JS_FreeCString(ctx, pw);
+        JS_FreeCString(ctx, stored);
+        return JS_FALSE;
+    }
+    char hash_hex[65];
+    memcpy(hash_hex, p, 64);
+    hash_hex[64] = '\0';
+
     JS_FreeCString(ctx, stored);
 
     /* Decode hex salt */
@@ -794,7 +821,7 @@ static JSValue js_crypto_verify_password(JSContext *ctx, JSValueConst this_val,
     /* Recompute hash */
     uint8_t computed[32];
     if (hl_cap_crypto_pbkdf2(pw, pw_len, salt, sizeof(salt),
-                               iterations, computed, sizeof(computed)) != 0) {
+                               (int)iterations, computed, sizeof(computed)) != 0) {
         JS_FreeCString(ctx, pw);
         return JS_FALSE;
     }
