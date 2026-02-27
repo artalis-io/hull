@@ -82,14 +82,41 @@
 - [x] Rename `main()` → `hull_main()` (exported from platform .a); thin entry.c for hull binary
 - [x] Canonical JSON encoding (sorted keys) for deterministic signatures
 
-**Phase 6: pledge/unveil Sandbox**
-- [ ] Vendor cosmopolitan libc pledge/unveil polyfill for Linux (seccomp-bpf + landlock)
-- [ ] Create `include/hull/sandbox.h` + `src/hull/sandbox.c` — `hl_pledge()`, `hl_unveil()` wrappers
-- [ ] Derive pledge promises from manifest (fs → rpath/wpath, hosts → inet/dns)
-- [ ] Call unveil/pledge in `main.c` after manifest extraction, before event loop
-- [ ] No-op on macOS (C-level validation handles it); native on Cosmopolitan builds
+**Phase 6: pledge/unveil Sandbox** ✓
+- [x] Vendor jart/pledge polyfill for Linux (seccomp-bpf + landlock)
+- [x] Create `include/hull/sandbox.h` + `src/hull/sandbox.c` — platform-dispatching sandbox
+- [x] Derive pledge promises from manifest (fs → rpath/wpath, hosts → inet/dns)
+- [x] Call unveil/pledge in `main.c` after manifest extraction, before event loop
+- [x] No-op on macOS (C-level validation handles it); native on Cosmopolitan builds
+- [x] E2E sandbox tests + standalone violation test for CI
 
-**Phase 7: Server-side Signature Verification**
+**Phase 7: Post-MVP Hardening**
+
+Phase 7a: Cosmo sandbox test coverage
+- [ ] Add `__COSMOPOLITAN__` code path to `tests/sandbox_violation.c` (use cosmo's native `<libc/calls/pledge.h>`)
+- [ ] Refactor platform detection: `SANDBOX_SUPPORTED` + `HAS_PLEDGE_MODE` macros
+- [ ] Update `tests/e2e_sandbox.sh` to compile violation test with cosmocc (no polyfill objects needed)
+
+Phase 7b: QuickJS manifest parity
+- [ ] Add `app.manifest(obj)` + `app.getManifest()` to JS `hull:app` module (`src/hull/runtime/js/modules.c`)
+- [ ] Add `hl_manifest_extract_js()` to `src/hull/manifest.c` — read `globalThis.__hull_manifest` into HlManifest
+- [ ] Wire manifest extraction + sandbox into `main.c` QuickJS path (after `wire_js_routes`, before event loop)
+- [ ] Unit tests in `tests/hull/runtime/js/test_js.c`, extend `e2e_sandbox.sh` for JS manifest app
+
+Phase 7c: Tool mode hardening — `hull.tool` module
+- [ ] Create `include/hull/cap/tool.h` + `src/hull/cap/tool.c` — explicit tool API:
+  - `tool.exec(cmd)` → `system()`, `tool.read(cmd)` → `popen()`, `tool.tmpdir()` → `mkdtemp()`
+  - `tool.read_file(path)`, `tool.write_file(path,data)`, `tool.file_exists(path)`
+  - `tool.stderr(msg)`, `tool.exit(code)`, `tool.loadfile(path)`
+- [ ] Modify `runtime.c` tool mode init: selective libs + `tool` global instead of `luaL_openlibs()`
+- [ ] Update all Lua tool scripts (`build.lua`, `manifest.lua`, `verify.lua`, `inspect.lua`) to use `tool.*`
+
+Phase 7d: Self-build test
+- [ ] Create `tests/fixtures/null_app/app.lua` (minimal fixture)
+- [ ] Add `make self-build` target: hull→hull2→hull3, verify keygen at each step
+- [ ] Add Step 13 to `tests/e2e_build.sh`: self-build chain test
+
+**Phase 8: Server-side Signature Verification**
 - [ ] Add `--verify-sig pubkey.pub` CLI flag to server mode
 - [ ] On startup: read `hull.sig`, verify Ed25519 against provided pubkey
 - [ ] Refuse to start if signature is invalid
@@ -99,7 +126,6 @@
 - [ ] `hull new` — project scaffolding
 - [ ] `hull dev` — hot-reload development server
 - [ ] `hull test` — run app tests
-- [ ] `hull build --self` — self-hosting (rebuild hull from embedded source)
 - [ ] License key system (Ed25519 offline verification)
 - [ ] Database backup/restore
 - [ ] `hull eject` — export to standalone Makefile project
