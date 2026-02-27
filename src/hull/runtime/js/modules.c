@@ -153,6 +153,36 @@ static JSValue js_app_config(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+/* app.manifest(obj) — declare application capabilities */
+static JSValue js_app_manifest(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "app.manifest requires an object");
+
+    JSValue global = JS_GetGlobalObject(ctx);
+    JS_SetPropertyStr(ctx, global, "__hull_manifest", JS_DupValue(ctx, argv[0]));
+    JS_FreeValue(ctx, global);
+
+    return JS_UNDEFINED;
+}
+
+/* app.getManifest() — retrieve the stored manifest object */
+static JSValue js_app_get_manifest(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv)
+{
+    (void)this_val; (void)argc; (void)argv;
+
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue manifest = JS_GetPropertyStr(ctx, global, "__hull_manifest");
+    JS_FreeValue(ctx, global);
+
+    if (JS_IsUndefined(manifest))
+        return JS_NULL;
+    return manifest;
+}
+
 /* app.static(prefix, directory) — static file serving */
 static JSValue js_app_static(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv)
@@ -212,6 +242,10 @@ static int js_app_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_app_config, "config", 1));
     JS_SetPropertyStr(ctx, app, "static",
                       JS_NewCFunction(ctx, js_app_static, "static", 2));
+    JS_SetPropertyStr(ctx, app, "manifest",
+                      JS_NewCFunction(ctx, js_app_manifest, "manifest", 1));
+    JS_SetPropertyStr(ctx, app, "getManifest",
+                      JS_NewCFunction(ctx, js_app_get_manifest, "getManifest", 0));
 
     JS_SetModuleExport(ctx, m, "app", app);
     return 0;

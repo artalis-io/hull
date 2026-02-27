@@ -4,8 +4,9 @@
 # Tests:
 #   1. Hull with manifest logs "[sandbox] applied" (Linux/cosmo only)
 #   2. Hull without manifest logs "no manifest" (permissive)
-#   3. Hull still serves HTTP after sandbox applied
-#   4. Kernel enforcement: pledge/unveil violations blocked (Linux only)
+#   3. Manifest without hosts — no dns promise
+#   4. JS manifest app — sandbox applied (feature parity)
+#   5. Kernel enforcement: pledge/unveil violations blocked (Linux only)
 #
 # Usage: sh tests/e2e_sandbox.sh
 #        make e2e-sandbox
@@ -231,45 +232,115 @@ else
     fail "hull did not start with no-hosts manifest"
 fi
 
-# ── Test 4: Kernel enforcement (Linux only) ──────────────────────────
+# ── Test 4: JS manifest app — sandbox applied ────────────────────────
 
 echo ""
-echo "=== Test 4: Kernel enforcement (pledge/unveil violations) ==="
+echo "=== Test 4: JS manifest app — sandbox log ==="
+
+cat > "$WORKDIR/jsapp.js" << 'EOF'
+import { app } from 'hull:app';
+
+app.manifest({
+    fs: { read: ["/tmp"], write: ["/tmp"] },
+    env: ["PORT"],
+    hosts: ["example.com"],
+});
+
+app.get("/", (req, res) => {
+    res.json({status: "ok"});
+});
+
+app.get("/health", (req, res) => {
+    res.json({status: "ok"});
+});
+EOF
+
+LOGFILE4="$WORKDIR/hull_js_sandbox.log"
+"$HULL" -p 19883 -d "$WORKDIR/test4.db" "$WORKDIR/jsapp.js" >"$LOGFILE4" 2>&1 &
+SERVER_PID=$!
+
+if wait_for_server 19883; then
+    RESP=$(curl -s "http://127.0.0.1:19883/health")
+    check_contains "JS HTTP works after sandbox" "$RESP" "ok"
+
+    stop_server
+
+    LOG4=$(cat "$LOGFILE4")
+
+    if [ "$SANDBOX_EXPECTED" = "1" ]; then
+        check_contains "JS sandbox applied log" "$LOG4" "[sandbox] applied"
+        check_contains "JS sandbox mentions pledge" "$LOG4" "pledge:"
+        check_contains "JS sandbox dns promise (hosts declared)" "$LOG4" "dns"
+    else
+        check_contains "JS sandbox not available log" "$LOG4" "kernel sandbox not available"
+    fi
+else
+    stop_server
+    fail "hull did not start with JS manifest app"
+fi
+
+# ── Test 5: Kernel enforcement (Linux only) ──────────────────────────
+
+echo ""
+echo "=== Test 5: Kernel enforcement (pledge/unveil violations) ==="
 
 if [ "$UNAME_S" != "Linux" ]; then
     skip "kernel enforcement test — Linux only"
+elif [ ! -f "$SRCDIR/tests/sandbox_violation.c" ]; then
+    fail "sandbox_violation.c not found"
 else
-    # Compile the standalone violation test
-    # It links against the pledge polyfill objects
-    PLEDGE_OBJS=$(find "$BUILDDIR" -name 'pledge_*.o' 2>/dev/null | tr '\n' ' ')
+    CC="${CC:-cc}"
+    SANDBOX_TEST="$BUILDDIR/sandbox_test"
+    COMPILE_OK=0
 
-    if [ -z "$PLEDGE_OBJS" ]; then
-        fail "pledge polyfill objects not found in $BUILDDIR"
-    elif [ ! -f "$SRCDIR/tests/sandbox_violation.c" ]; then
-        fail "sandbox_violation.c not found"
-    else
-        CC="${CC:-cc}"
-        SANDBOX_TEST="$BUILDDIR/sandbox_test"
+    # Detect cosmocc: pledge/unveil are built-in, no polyfill needed
+    IS_COSMO=0
+    case "$CC" in
+        *cosmocc*) IS_COSMO=1 ;;
+    esac
+    if [ "$IS_COSMO" = "0" ] && [ -f "$BUILDDIR/platform_cc" ]; then
+        case "$(cat "$BUILDDIR/platform_cc" 2>/dev/null)" in
+            *cosmocc*) CC=cosmocc; IS_COSMO=1 ;;
+        esac
+    fi
 
+    if [ "$IS_COSMO" = "1" ]; then
+        # Cosmopolitan: pledge/unveil built-in, no polyfill objects needed
         if $CC -std=c11 -O2 -o "$SANDBOX_TEST" \
+                "$SRCDIR/tests/sandbox_violation.c" 2>"$WORKDIR/compile.log"; then
+            pass "sandbox_violation.c compiled (cosmocc)"
+            COMPILE_OK=1
+        else
+            COMPILE_ERR=$(cat "$WORKDIR/compile.log")
+            fail "sandbox_violation.c compilation failed (cosmocc): $COMPILE_ERR"
+        fi
+    else
+        # Native Linux: link against pledge polyfill objects
+        PLEDGE_OBJS=$(find "$BUILDDIR" -name 'pledge_*.o' 2>/dev/null | tr '\n' ' ')
+
+        if [ -z "$PLEDGE_OBJS" ]; then
+            fail "pledge polyfill objects not found in $BUILDDIR"
+        elif $CC -std=c11 -O2 -o "$SANDBOX_TEST" \
                 "$SRCDIR/tests/sandbox_violation.c" \
                 $PLEDGE_OBJS -lpthread 2>"$WORKDIR/compile.log"; then
             pass "sandbox_violation.c compiled"
-
-            # Run the test
-            ENFORCE_OUT=$("$SANDBOX_TEST" 2>&1); RC=$?
-            echo "$ENFORCE_OUT" | while IFS= read -r line; do
-                echo "    $line"
-            done
-
-            if [ "$RC" = "0" ]; then
-                pass "kernel enforcement tests passed"
-            else
-                fail "kernel enforcement tests failed (exit $RC)"
-            fi
+            COMPILE_OK=1
         else
             COMPILE_ERR=$(cat "$WORKDIR/compile.log")
             fail "sandbox_violation.c compilation failed: $COMPILE_ERR"
+        fi
+    fi
+
+    if [ "$COMPILE_OK" = "1" ]; then
+        ENFORCE_OUT=$("$SANDBOX_TEST" 2>&1); RC=$?
+        echo "$ENFORCE_OUT" | while IFS= read -r line; do
+            echo "    $line"
+        done
+
+        if [ "$RC" = "0" ]; then
+            pass "kernel enforcement tests passed"
+        else
+            fail "kernel enforcement tests failed (exit $RC)"
         fi
     fi
 fi

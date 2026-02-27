@@ -165,9 +165,10 @@ PLEDGE_OBJS ?=
 
 # ── Hull source files ───────────────────────────────────────────────
 
-# Capability sources (always compiled)
-CAP_SRCS := $(wildcard $(SRCDIR)/hull/cap/*.c)
+# Capability sources (always compiled, except cap/tool.c which needs Lua)
+CAP_SRCS := $(filter-out $(SRCDIR)/hull/cap/tool.c,$(wildcard $(SRCDIR)/hull/cap/*.c))
 CAP_OBJS := $(patsubst $(SRCDIR)/hull/cap/%.c,$(BUILDDIR)/cap_%.o,$(CAP_SRCS))
+CAP_TOOL_OBJ := $(BUILDDIR)/cap_tool.o
 
 # JS runtime sources
 JS_RT_SRCS := $(wildcard $(SRCDIR)/hull/runtime/js/*.c)
@@ -196,6 +197,10 @@ endif
 ALLOC_OBJ      := $(BUILDDIR)/hull_alloc.o
 MANIFEST_OBJ   := $(BUILDDIR)/manifest.o
 SANDBOX_OBJ    := $(BUILDDIR)/sandbox.o
+
+# Test-specific manifest objects (single runtime — avoids pulling Lua into JS tests and vice versa)
+MANIFEST_JS_OBJ  := $(BUILDDIR)/manifest_js_only.o
+MANIFEST_LUA_OBJ := $(BUILDDIR)/manifest_lua_only.o
 TOOL_OBJ       := $(BUILDDIR)/tool.o
 BUILD_ASSET_OBJ := $(BUILDDIR)/build_assets.o
 MAIN_OBJ       := $(BUILDDIR)/main.o
@@ -308,14 +313,14 @@ INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(SQLITE_DIR) 
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan e2e e2e-build e2e-sandbox check analyze cppcheck bench coverage lint-lua lint-js lint platform
+.PHONY: all clean test debug msan e2e e2e-build e2e-sandbox self-build check analyze cppcheck bench coverage lint-lua lint-js lint platform
 
 all: $(BUILDDIR)/hull
 
 # Platform static library — everything except entry.o and build_assets.o
 # Used by `hull build` to produce standalone app binaries.
 # Exports hull_main() (subcommand dispatch + server logic).
-PLATFORM_OBJS := $(CAP_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(MAIN_OBJ) $(TOOL_OBJ) $(VEND_OBJS) \
+PLATFORM_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(MAIN_OBJ) $(TOOL_OBJ) $(VEND_OBJS) \
 	$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS)
 
 PLATFORM_LIB := $(BUILDDIR)/libhull_platform.a
@@ -355,8 +360,8 @@ $(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H)
 endif
 
 # Hull binary
-$(BUILDDIR)/hull: $(CAP_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(VEND_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB)
-	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(VEND_OBJS) \
+$(BUILDDIR)/hull: $(CAP_OBJS) $(CAP_TOOL_OBJ) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(VEND_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB)
+	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(CAP_TOOL_OBJ) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(VEND_OBJS) \
 		$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB) -lm -lpthread
 
 # Capability sources
@@ -378,6 +383,14 @@ $(ALLOC_OBJ): $(SRCDIR)/hull/alloc.c | $(BUILDDIR)
 # Manifest
 $(MANIFEST_OBJ): $(SRCDIR)/hull/manifest.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+# Manifest (JS-only, for test_js — excludes Lua extraction to avoid Lua link deps)
+$(MANIFEST_JS_OBJ): $(SRCDIR)/hull/manifest.c | $(BUILDDIR)
+	$(CC) $(filter-out -DHL_ENABLE_LUA,$(CFLAGS)) $(INCLUDES) -c -o $@ $<
+
+# Manifest (Lua-only, for test_lua — excludes JS extraction to avoid QuickJS link deps)
+$(MANIFEST_LUA_OBJ): $(SRCDIR)/hull/manifest.c | $(BUILDDIR)
+	$(CC) $(filter-out -DHL_ENABLE_JS,$(CFLAGS)) $(INCLUDES) -c -o $@ $<
 
 # Sandbox (pledge/unveil enforcement)
 $(SANDBOX_OBJ): $(SRCDIR)/hull/sandbox.c | $(BUILDDIR)
@@ -467,16 +480,16 @@ $(BUILDDIR)/test_%: $(TESTDIR)/hull/cap/test_%.c $(TEST_COMMON_DEPS) | $(BUILDDI
 $(BUILDDIR)/test_parse_size: $(TESTDIR)/hull/test_parse_size.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_COMMON_LIBS)
 
-# JS runtime test — needs QuickJS + JS runtime objects
-$(BUILDDIR)/test_js: $(TESTDIR)/hull/runtime/js/test_js.c $(TEST_COMMON_DEPS) $(JS_RT_OBJS) $(QJS_OBJS) | $(BUILDDIR)
+# JS runtime test — needs QuickJS + JS runtime objects + manifest (JS-only to avoid Lua link deps)
+$(BUILDDIR)/test_js: $(TESTDIR)/hull/runtime/js/test_js.c $(TEST_COMMON_DEPS) $(MANIFEST_JS_OBJ) $(JS_RT_OBJS) $(QJS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(TEST_CAP_OBJS) $(JS_RT_OBJS) $(ALLOC_OBJ) $(QJS_OBJS) \
+		$(TEST_CAP_OBJS) $(JS_RT_OBJS) $(MANIFEST_JS_OBJ) $(ALLOC_OBJ) $(QJS_OBJS) \
 		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) -lm -lpthread
 
-# Lua runtime test — needs Lua + Lua runtime objects + stdlib headers + manifest
-$(BUILDDIR)/test_lua: $(TESTDIR)/hull/runtime/lua/test_lua.c $(TEST_COMMON_DEPS) $(MANIFEST_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(LUA_RT_OBJS) $(LUA_OBJS) $(STDLIB_LUA_HDRS) | $(BUILDDIR)
+# Lua runtime test — needs Lua + Lua runtime objects + stdlib headers + manifest (Lua-only) + cap_tool
+$(BUILDDIR)/test_lua: $(TESTDIR)/hull/runtime/lua/test_lua.c $(TEST_COMMON_DEPS) $(CAP_TOOL_OBJ) $(MANIFEST_LUA_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(LUA_RT_OBJS) $(LUA_OBJS) $(STDLIB_LUA_HDRS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(TEST_CAP_OBJS) $(LUA_RT_OBJS) $(MANIFEST_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(ALLOC_OBJ) $(LUA_OBJS) \
+		$(TEST_CAP_OBJS) $(CAP_TOOL_OBJ) $(LUA_RT_OBJS) $(MANIFEST_LUA_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(ALLOC_OBJ) $(LUA_OBJS) \
 		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) -lm -lpthread
 
 test: $(TEST_BINS)
@@ -533,6 +546,19 @@ e2e-build:
 
 e2e-sandbox: $(BUILDDIR)/hull
 	sh tests/e2e_sandbox.sh
+
+# ── Self-build (hull → hull2 → hull3 chain) ─────────────────────────
+
+self-build: $(BUILDDIR)/hull platform
+	@echo "=== Self-build: hull -> hull2 -> hull3 ==="
+	@TMPDIR=$$(mktemp -d) && \
+	$(BUILDDIR)/hull build -o "$$TMPDIR/hull2" tests/fixtures/null_app && \
+	"$$TMPDIR/hull2" keygen "$$TMPDIR/key" && test -f "$$TMPDIR/key.pub" && \
+	"$$TMPDIR/hull2" build -o "$$TMPDIR/hull3" tests/fixtures/null_app && \
+	"$$TMPDIR/hull3" keygen "$$TMPDIR/key2" && test -f "$$TMPDIR/key2.pub" && \
+	echo "PASS: self-build chain verified (hull -> hull2 -> hull3)" && \
+	rm -rf "$$TMPDIR" || \
+	(echo "FAIL: self-build chain" && rm -rf "$$TMPDIR" && exit 1)
 
 # ── Full check (sanitized build + test + e2e) ───────────────────────
 

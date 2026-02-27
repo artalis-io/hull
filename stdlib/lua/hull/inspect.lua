@@ -11,11 +11,7 @@
 local json = require("hull.json")
 
 local function read_file(path)
-    local f = io.open(path, "r")
-    if not f then return nil end
-    local data = f:read("*a")
-    f:close()
-    return data
+    return tool.read_file(path)
 end
 
 local function main()
@@ -24,14 +20,14 @@ local function main()
 
     local sig_data = read_file(sig_path)
     if not sig_data then
-        io.stderr:write("hull inspect: no hull.sig found in " .. app_dir .. "\n")
-        os.exit(1)
+        tool.stderr("hull inspect: no hull.sig found in " .. app_dir .. "\n")
+        tool.exit(1)
     end
 
     local sig = json.decode(sig_data)
     if not sig then
-        io.stderr:write("hull inspect: invalid hull.sig format\n")
-        os.exit(1)
+        tool.stderr("hull inspect: invalid hull.sig format\n")
+        tool.exit(1)
     end
 
     -- Display version

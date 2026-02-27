@@ -11,6 +11,7 @@
 #include "hull/alloc.h"
 #include "hull/cap/fs.h"
 #include "hull/cap/env.h"
+#include "hull/cap/tool.h"
 
 #include "lua.h"
 #include "lualib.h"
@@ -144,8 +145,20 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
         /* Apply sandbox — remove io, os, loadfile, dofile, load */
         hl_lua_sandbox(lua->L);
     } else {
-        /* Tool mode: open all standard libraries (io, os, etc.) */
-        luaL_openlibs(lua->L);
+        /* Tool mode: safe libs + hull.tool (no raw os/io) */
+        luaL_requiref(lua->L, "_G", luaopen_base, 1);
+        lua_pop(lua->L, 1);
+        luaL_requiref(lua->L, LUA_TABLIBNAME, luaopen_table, 1);
+        lua_pop(lua->L, 1);
+        luaL_requiref(lua->L, LUA_STRLIBNAME, luaopen_string, 1);
+        lua_pop(lua->L, 1);
+        luaL_requiref(lua->L, LUA_MATHLIBNAME, luaopen_math, 1);
+        lua_pop(lua->L, 1);
+        luaL_requiref(lua->L, LUA_UTF8LIBNAME, luaopen_utf8, 1);
+        lua_pop(lua->L, 1);
+        luaL_requiref(lua->L, LUA_COLIBNAME, luaopen_coroutine, 1);
+        lua_pop(lua->L, 1);
+        hl_cap_tool_register(lua->L);
     }
 
     /* Replace print with stderr version */

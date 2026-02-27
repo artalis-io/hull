@@ -9,6 +9,7 @@
 
 #include "utest.h"
 #include "hull/runtime/js.h"
+#include "hull/manifest.h"
 #include "hull/cap/env.h"
 #include "quickjs.h"
 
@@ -781,6 +782,130 @@ UTEST(js_cap, db_not_available_without_config)
     /* The import should have thrown */
     ASSERT_TRUE(is_exc);
 
+    cleanup_js();
+}
+
+/* ── Manifest tests ────────────────────────────────────────────────── */
+
+UTEST(js_cap, app_manifest_store_and_get)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.manifest({\n"
+        "  fs: { read: ['/tmp', '/data'], write: ['/uploads'] },\n"
+        "  env: ['PORT', 'DATABASE_URL'],\n"
+        "  hosts: ['api.stripe.com'],\n"
+        "});\n"
+        "const m = app.getManifest();\n"
+        "globalThis.__test_manifest_present = (m !== null) ? 1 : 0;\n"
+        "globalThis.__test_manifest_env_count = m.env.length;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    int present = eval_int("globalThis.__test_manifest_present");
+    ASSERT_EQ(present, 1);
+
+    int env_count = eval_int("globalThis.__test_manifest_env_count");
+    ASSERT_EQ(env_count, 2);
+
+    cleanup_js();
+}
+
+UTEST(js_cap, manifest_extract_js)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.manifest({\n"
+        "  fs: { read: ['/tmp', '/data'], write: ['/uploads'] },\n"
+        "  env: ['PORT', 'DATABASE_URL'],\n"
+        "  hosts: ['api.stripe.com', 'api.sendgrid.com'],\n"
+        "});\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    /* Extract manifest via C API */
+    HlManifest manifest;
+    int rc = hl_manifest_extract_js(js.ctx, &manifest);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(manifest.present, 1);
+
+    ASSERT_EQ(manifest.fs_read_count, 2);
+    ASSERT_STREQ(manifest.fs_read[0], "/tmp");
+    ASSERT_STREQ(manifest.fs_read[1], "/data");
+
+    ASSERT_EQ(manifest.fs_write_count, 1);
+    ASSERT_STREQ(manifest.fs_write[0], "/uploads");
+
+    ASSERT_EQ(manifest.env_count, 2);
+    ASSERT_STREQ(manifest.env[0], "PORT");
+    ASSERT_STREQ(manifest.env[1], "DATABASE_URL");
+
+    ASSERT_EQ(manifest.hosts_count, 2);
+    ASSERT_STREQ(manifest.hosts[0], "api.stripe.com");
+    ASSERT_STREQ(manifest.hosts[1], "api.sendgrid.com");
+
+    hl_manifest_free_js_strings(js.ctx, &manifest);
+    cleanup_js();
+}
+
+UTEST(js_cap, manifest_extract_js_no_manifest)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+
+    /* No app.manifest() called — extraction should fail */
+    HlManifest manifest;
+    int rc = hl_manifest_extract_js(js.ctx, &manifest);
+    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(manifest.present, 0);
+
+    cleanup_js();
+}
+
+UTEST(js_cap, manifest_extract_js_partial)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+
+    /* Manifest with only env — no fs or hosts */
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ env: ['PORT'] });\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    HlManifest manifest;
+    int rc = hl_manifest_extract_js(js.ctx, &manifest);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(manifest.present, 1);
+    ASSERT_EQ(manifest.fs_read_count, 0);
+    ASSERT_EQ(manifest.fs_write_count, 0);
+    ASSERT_EQ(manifest.env_count, 1);
+    ASSERT_STREQ(manifest.env[0], "PORT");
+    ASSERT_EQ(manifest.hosts_count, 0);
+
+    hl_manifest_free_js_strings(js.ctx, &manifest);
     cleanup_js();
 }
 
