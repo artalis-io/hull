@@ -54,4 +54,26 @@ typedef struct HlManifest {
  */
 int hl_manifest_extract(lua_State *L, HlManifest *out);
 
+#ifdef HL_ENABLE_JS
+
+/* Forward declaration */
+typedef struct JSContext JSContext;
+
+/*
+ * Extract manifest from globalThis.__hull_manifest in QuickJS.
+ * Populates `out` with string pointers from JS_ToCString
+ * (must be freed with hl_manifest_free_js_strings before ctx is destroyed).
+ *
+ * Returns 0 on success, -1 if no manifest was declared.
+ */
+int hl_manifest_extract_js(JSContext *ctx, HlManifest *out);
+
+/*
+ * Free JS_ToCString pointers stored in the manifest by
+ * hl_manifest_extract_js(). Call after sandbox is applied.
+ */
+void hl_manifest_free_js_strings(JSContext *ctx, HlManifest *m);
+
+#endif /* HL_ENABLE_JS */
+
 #endif /* HL_MANIFEST_H */

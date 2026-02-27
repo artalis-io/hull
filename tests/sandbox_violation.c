@@ -1,13 +1,20 @@
 /*
- * sandbox_violation.c — Verify kernel sandbox enforcement on Linux
+ * sandbox_violation.c — Verify kernel sandbox enforcement
  *
  * Standalone test program that directly exercises Landlock (unveil)
  * and pledge (seccomp) to prove kernel-level enforcement works.
  * Each test runs in a forked child so sandbox state is isolated.
  *
- * Compile (Linux only):
+ * Supports:
+ *   Cosmopolitan — pledge/unveil built into cosmo libc (KILL mode)
+ *   Linux        — jart/pledge polyfill (RETURN_EPERM mode)
+ *
+ * Compile (Linux):
  *   cc -std=c11 -O2 -o sandbox_test tests/sandbox_violation.c \
  *      build/pledge_*.o -lpthread
+ *
+ * Compile (Cosmopolitan):
+ *   cosmocc -std=c11 -O2 -o sandbox_test tests/sandbox_violation.c
  *
  * Usage: ./sandbox_test
  *
@@ -17,27 +24,42 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#ifdef __linux__
+/* ── Platform detection ────────────────────────────────────────────── */
 
-#include <errno.h>
-#include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/prctl.h>
-#include <sys/syscall.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <unistd.h>
+#if defined(__COSMOPOLITAN__)
+#define SANDBOX_SUPPORTED 1
+#define HAS_PLEDGE_MODE   0
+#include <libc/calls/pledge.h>
+
+#elif defined(__linux__)
+#define SANDBOX_SUPPORTED 1
+#define HAS_PLEDGE_MODE   1
 
 /* jart/pledge polyfill — linked from build/ objects */
 extern int pledge(const char *promises, const char *execpromises);
 extern int unveil(const char *path, const char *permissions);
 extern int __pledge_mode;
 
-/* Pledge mode flags */
 #define PLEDGE_PENALTY_RETURN_EPERM 0x0002
 #define PLEDGE_STDERR_LOGGING       0x0010
+
+#else
+#define SANDBOX_SUPPORTED 0
+#define HAS_PLEDGE_MODE   0
+#endif
+
+/* ── Test implementation (Linux + Cosmopolitan) ───────────────────── */
+
+#if SANDBOX_SUPPORTED
+
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 static int pass_count;
 static int fail_count;
@@ -180,10 +202,15 @@ static int test_pledge_child(void)
      * Pledge "stdio" only (very restrictive), then try to open
      * a file (requires "rpath" which we didn't pledge).
      *
-     * Use RETURN_EPERM mode so the child isn't killed — we can
-     * check errno instead.
+     * Linux (polyfill): use RETURN_EPERM mode so the child isn't
+     * killed — we can check errno instead.
+     *
+     * Cosmopolitan: uses KILL mode by default — parent detects
+     * signal death as enforcement.
      */
+#if HAS_PLEDGE_MODE
     __pledge_mode = PLEDGE_PENALTY_RETURN_EPERM | PLEDGE_STDERR_LOGGING;
+#endif
 
     if (pledge("stdio", NULL) != 0) {
         if (errno == ENOSYS) {
@@ -237,7 +264,7 @@ static void test_pledge(void)
             fail("pledge test exited with unexpected code");
         }
     } else if (WIFSIGNALED(status)) {
-        /* Process was killed — this happens with KILL_PROCESS mode.
+        /* Process was killed — this happens with KILL mode (Cosmopolitan).
          * Treat signal death as a pass (pledge enforced). */
         int sig = WTERMSIG(status);
         char buf[128];
@@ -252,7 +279,9 @@ static void test_pledge(void)
 
 static int test_pledge_allowed_child(void)
 {
+#if HAS_PLEDGE_MODE
     __pledge_mode = PLEDGE_PENALTY_RETURN_EPERM | PLEDGE_STDERR_LOGGING;
+#endif
 
     /* Pledge with rpath — reading should work */
     if (pledge("stdio rpath", NULL) != 0) {
@@ -319,14 +348,14 @@ int main(void)
     return fail_count > 0 ? 1 : 0;
 }
 
-#else /* not Linux */
+#else /* not Linux or Cosmopolitan */
 
 #include <stdio.h>
 
 int main(void)
 {
-    printf("sandbox_violation: SKIPPED (Linux only)\n");
+    printf("sandbox_violation: SKIPPED (requires Linux or Cosmopolitan)\n");
     return 0;
 }
 
-#endif /* __linux__ */
+#endif /* SANDBOX_SUPPORTED */

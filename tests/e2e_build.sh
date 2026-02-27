@@ -14,6 +14,7 @@
 #  10. Multi-file app builds and serves correctly
 #  11. Built binary has subcommand support (keygen, manifest, etc.)
 #  12. Error cases
+#  13. Self-build chain (hull → hull2 → hull3)
 #
 # Usage: sh tests/e2e_build.sh
 #        make e2e-build
@@ -416,6 +417,49 @@ check_exit "manifest without app.lua fails" 1 $RC
 # Sign with nonexistent key
 BUILD_OUT=$("$HULL" build --sign "/nonexistent/key.key" "$WORKDIR/myapp" 2>&1); RC=$?
 check_exit "build with bad key fails" 1 $RC
+
+# ── Step 13: Self-build chain (hull → hull2 → hull3) ─────────────────
+
+echo ""
+echo "=== Step 13: Self-build chain ==="
+
+# Create a minimal app for self-build test
+mkdir -p "$WORKDIR/nullapp"
+cat > "$WORKDIR/nullapp/app.lua" << 'APPEOF'
+app.get("/", function(req, res) res:json({status = "ok"}) end)
+APPEOF
+
+# hull → hull2
+BUILD_OUT=$("$HULL" build -o "$WORKDIR/hull2" "$WORKDIR/nullapp" 2>&1); RC=$?
+check_exit "self-build hull→hull2 exits 0" 0 $RC
+check_file_executable "hull2 exists and executable" "$WORKDIR/hull2"
+
+# hull2 keygen (verify subcommands work)
+if [ -x "$WORKDIR/hull2" ]; then
+    "$WORKDIR/hull2" keygen "$WORKDIR/sb_key" >/dev/null 2>&1; RC=$?
+    check_exit "hull2 keygen exits 0" 0 $RC
+    check_file_exists "hull2 keygen creates pubkey" "$WORKDIR/sb_key.pub"
+else
+    fail "hull2 not executable — skipping chain"
+fi
+
+# hull2 → hull3
+if [ -x "$WORKDIR/hull2" ]; then
+    BUILD_OUT=$("$WORKDIR/hull2" build -o "$WORKDIR/hull3" "$WORKDIR/nullapp" 2>&1); RC=$?
+    check_exit "self-build hull2→hull3 exits 0" 0 $RC
+    check_file_executable "hull3 exists and executable" "$WORKDIR/hull3"
+else
+    fail "hull2 not executable — skipping hull3 build"
+fi
+
+# hull3 keygen (verify the chain)
+if [ -x "$WORKDIR/hull3" ]; then
+    "$WORKDIR/hull3" keygen "$WORKDIR/sb_key2" >/dev/null 2>&1; RC=$?
+    check_exit "hull3 keygen exits 0" 0 $RC
+    check_file_exists "hull3 keygen creates pubkey" "$WORKDIR/sb_key2.pub"
+else
+    fail "hull3 not executable — skipping chain verification"
+fi
 
 # ── Summary ───────────────────────────────────────────────────────────
 

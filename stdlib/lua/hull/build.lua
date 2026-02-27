@@ -54,36 +54,25 @@ end
 -- ── File utilities ───────────────────────────────────────────────────
 
 local function read_file(path)
-    local f = io.open(path, "rb")
-    if not f then return nil end
-    local data = f:read("*a")
-    f:close()
-    return data
+    return tool.read_file(path)
 end
 
 local function write_file(path, data)
-    local f = io.open(path, "wb")
-    if not f then return false end
-    f:write(data)
-    f:close()
-    return true
+    return tool.write_file(path, data)
 end
 
 local function file_exists(path)
-    local f = io.open(path, "r")
-    if f then f:close() return true end
-    return false
+    return tool.file_exists(path)
 end
 
 -- List .lua files recursively in a directory
 local function find_lua_files(dir)
     local files = {}
-    local p = io.popen('find "' .. dir .. '" -name "*.lua" -type f 2>/dev/null')
-    if p then
-        for line in p:lines() do
+    local output = tool.read('find "' .. dir .. '" -name "*.lua" -type f 2>/dev/null')
+    if output then
+        for line in output:gmatch("[^\n]+") do
             files[#files + 1] = line
         end
-        p:close()
     end
     return files
 end
@@ -116,8 +105,8 @@ local function generate_app_registry(app_dir, lua_files)
     for _, path in ipairs(lua_files) do
         local data = read_file(path)
         if not data then
-            io.stderr:write("hull build: cannot read " .. path .. "\n")
-            os.exit(1)
+            tool.stderr("hull build: cannot read " .. path .. "\n")
+            tool.exit(1)
         end
 
         -- Relative path from app_dir
@@ -146,13 +135,13 @@ end
 local function sign_app(app_dir, lua_files, key_file)
     local key_data = read_file(key_file)
     if not key_data then
-        io.stderr:write("hull build: cannot read key file: " .. key_file .. "\n")
-        os.exit(1)
+        tool.stderr("hull build: cannot read key file: " .. key_file .. "\n")
+        tool.exit(1)
     end
     local sk_hex = key_data:match("^(%x+)")
     if not sk_hex or #sk_hex ~= 128 then
-        io.stderr:write("hull build: invalid key file format\n")
-        os.exit(1)
+        tool.stderr("hull build: invalid key file format\n")
+        tool.exit(1)
     end
 
     -- Compute file hashes
@@ -167,7 +156,7 @@ local function sign_app(app_dir, lua_files, key_file)
     local manifest = nil
     local entry = app_dir .. "/app.lua"
     if file_exists(entry) then
-        local chunk = loadfile(entry)
+        local chunk = tool.loadfile(entry)
         if chunk then
             pcall(chunk)
             manifest = app.get_manifest()
@@ -204,15 +193,14 @@ local function main()
     -- Find Lua files
     local lua_files = find_lua_files(opts.app_dir)
     if #lua_files == 0 then
-        io.stderr:write("hull build: no .lua files found in " .. opts.app_dir .. "\n")
-        os.exit(1)
+        tool.stderr("hull build: no .lua files found in " .. opts.app_dir .. "\n")
+        tool.exit(1)
     end
 
     print("hull build: " .. #lua_files .. " Lua file(s) from " .. opts.app_dir)
 
     -- Create temp directory
-    local tmpdir = os.tmpname() .. "_hull_build"
-    os.execute('mkdir -p "' .. tmpdir .. '"')
+    local tmpdir = tool.tmpdir()
 
     -- Generate app_registry.c
     local registry_c = generate_app_registry(opts.app_dir, lua_files)
@@ -254,7 +242,7 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
         }
         for _, d in ipairs(dev_paths) do
             if file_exists(d .. "libhull_platform.a") then
-                os.execute('cp "' .. d .. 'libhull_platform.a" "' .. platform_lib .. '"')
+                tool.exec('cp "' .. d .. 'libhull_platform.a" "' .. platform_lib .. '"')
                 platform_dir = d
                 platform_extracted = true
                 break
@@ -263,10 +251,10 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
     end
 
     if not platform_extracted then
-        io.stderr:write("hull build: cannot find libhull_platform.a\n")
-        io.stderr:write("hint: run `make platform` first, or use an embedded hull build\n")
-        os.execute('rm -rf "' .. tmpdir .. '"')
-        os.exit(1)
+        tool.stderr("hull build: cannot find libhull_platform.a\n")
+        tool.stderr("hint: run `make platform` first, or use an embedded hull build\n")
+        tool.exec('rm -rf "' .. tmpdir .. '"')
+        tool.exit(1)
     end
 
     -- Resolve CC: use platform_cc from build dir, or fall back to "cc"
@@ -286,7 +274,7 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
         if cc_data and opts.cc then
             local platform_cc = cc_data:match("^%s*(.-)%s*$")
             if platform_cc ~= opts.cc then
-                io.stderr:write("hull build: warning: --cc " .. opts.cc ..
+                tool.stderr("hull build: warning: --cc " .. opts.cc ..
                     " does not match platform (built with " .. platform_cc .. ")\n")
             end
         end
@@ -298,11 +286,11 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
         cc, tmpdir, tmpdir)
 
     print("hull build: compiling...")
-    local ok = os.execute(compile_cmd)
+    local ok = tool.exec(compile_cmd)
     if not ok then
-        io.stderr:write("hull build: compilation failed\n")
-        os.execute('rm -rf "' .. tmpdir .. '"')
-        os.exit(1)
+        tool.stderr("hull build: compilation failed\n")
+        tool.exec('rm -rf "' .. tmpdir .. '"')
+        tool.exit(1)
     end
 
     -- Link
@@ -311,11 +299,11 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
         cc, opts.output, tmpdir, tmpdir, tmpdir)
 
     print("hull build: linking...")
-    ok = os.execute(link_cmd)
+    ok = tool.exec(link_cmd)
     if not ok then
-        io.stderr:write("hull build: linking failed\n")
-        os.execute('rm -rf "' .. tmpdir .. '"')
-        os.exit(1)
+        tool.stderr("hull build: linking failed\n")
+        tool.exec('rm -rf "' .. tmpdir .. '"')
+        tool.exit(1)
     end
 
     print("hull build: wrote " .. opts.output)
@@ -326,7 +314,7 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
     end
 
     -- Cleanup
-    os.execute('rm -rf "' .. tmpdir .. '"')
+    tool.exec('rm -rf "' .. tmpdir .. '"')
 end
 
 main()

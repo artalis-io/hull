@@ -11,11 +11,7 @@
 local json = require("hull.json")
 
 local function read_file(path)
-    local f = io.open(path, "rb")
-    if not f then return nil end
-    local data = f:read("*a")
-    f:close()
-    return data
+    return tool.read_file(path)
 end
 
 local function main()
@@ -24,14 +20,14 @@ local function main()
 
     local sig_data = read_file(sig_path)
     if not sig_data then
-        io.stderr:write("hull verify: no hull.sig found in " .. app_dir .. "\n")
-        os.exit(1)
+        tool.stderr("hull verify: no hull.sig found in " .. app_dir .. "\n")
+        tool.exit(1)
     end
 
     local sig = json.decode(sig_data)
     if not sig or not sig.files or not sig.signature or not sig.public_key then
-        io.stderr:write("hull verify: invalid hull.sig format\n")
-        os.exit(1)
+        tool.stderr("hull verify: invalid hull.sig format\n")
+        tool.exit(1)
     end
 
     -- Recompute file hashes
@@ -56,17 +52,17 @@ local function main()
 
     -- Report file issues
     if #missing > 0 then
-        io.stderr:write("Missing files:\n")
+        tool.stderr("Missing files:\n")
         for _, name in ipairs(missing) do
-            io.stderr:write("  " .. name .. "\n")
+            tool.stderr("  " .. name .. "\n")
         end
     end
     if #mismatches > 0 then
-        io.stderr:write("Modified files:\n")
+        tool.stderr("Modified files:\n")
         for _, m in ipairs(mismatches) do
-            io.stderr:write("  " .. m.name .. "\n")
-            io.stderr:write("    expected: " .. m.expected .. "\n")
-            io.stderr:write("    actual:   " .. m.actual .. "\n")
+            tool.stderr("  " .. m.name .. "\n")
+            tool.stderr("    expected: " .. m.expected .. "\n")
+            tool.stderr("    actual:   " .. m.actual .. "\n")
         end
     end
 
@@ -78,13 +74,13 @@ local function main()
     local ok = crypto.ed25519_verify(payload, sig.signature, sig.public_key)
 
     if not ok then
-        io.stderr:write("hull verify: FAILED — signature is invalid\n")
-        os.exit(1)
+        tool.stderr("hull verify: FAILED — signature is invalid\n")
+        tool.exit(1)
     end
 
     if #missing > 0 or #mismatches > 0 then
-        io.stderr:write("hull verify: FAILED — files do not match signature\n")
-        os.exit(1)
+        tool.stderr("hull verify: FAILED — files do not match signature\n")
+        tool.exit(1)
     end
 
     print("hull verify: OK — all files verified, signature valid")

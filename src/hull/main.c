@@ -467,6 +467,23 @@ static int hull_serve(int argc, char **argv)
             goto cleanup_server;
         }
 
+        /* Extract manifest and configure capabilities */
+        HlManifest js_manifest;
+        if (hl_manifest_extract_js(js.ctx, &js_manifest) == 0) {
+            log_info("[hull:c] manifest: fs_read=%d fs_write=%d env=%d hosts=%d",
+                     js_manifest.fs_read_count, js_manifest.fs_write_count,
+                     js_manifest.env_count, js_manifest.hosts_count);
+        }
+
+        /* Apply kernel sandbox (pledge/unveil) from manifest */
+        if (hl_sandbox_apply(&js_manifest, db_path) != 0) {
+            log_error("[hull:c] sandbox enforcement failed");
+            hl_manifest_free_js_strings(js.ctx, &js_manifest);
+            hl_js_free(&js);
+            goto cleanup_server;
+        }
+        hl_manifest_free_js_strings(js.ctx, &js_manifest);
+
         log_info("[hull:c] listening on %s:%d (QuickJS runtime)",
                  bind_addr, port);
 

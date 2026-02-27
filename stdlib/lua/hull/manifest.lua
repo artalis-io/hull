@@ -14,9 +14,7 @@ local json = require("hull.json")
 local function find_entry(dir)
     -- Look for app.lua in the given directory
     local path = dir .. "/app.lua"
-    local f = io.open(path, "r")
-    if f then
-        f:close()
+    if tool.file_exists(path) then
         return path
     end
     return nil
@@ -27,28 +25,28 @@ local function main()
 
     local entry = find_entry(app_dir)
     if not entry then
-        io.stderr:write("hull manifest: no app.lua found in " .. app_dir .. "\n")
-        os.exit(1)
+        tool.stderr("hull manifest: no app.lua found in " .. app_dir .. "\n")
+        tool.exit(1)
     end
 
     -- Execute the app file to capture manifest
-    local chunk, err = loadfile(entry)
+    local chunk, err = tool.loadfile(entry)
     if not chunk then
-        io.stderr:write("hull manifest: " .. err .. "\n")
-        os.exit(1)
+        tool.stderr("hull manifest: " .. tostring(err) .. "\n")
+        tool.exit(1)
     end
 
     local ok, run_err = pcall(chunk)
     if not ok then
-        io.stderr:write("hull manifest: " .. tostring(run_err) .. "\n")
-        os.exit(1)
+        tool.stderr("hull manifest: " .. tostring(run_err) .. "\n")
+        tool.exit(1)
     end
 
     -- Retrieve the manifest
     local m = app.get_manifest()
     if not m then
-        io.stderr:write("hull manifest: no app.manifest() declared in " .. entry .. "\n")
-        os.exit(1)
+        tool.stderr("hull manifest: no app.manifest() declared in " .. entry .. "\n")
+        tool.exit(1)
     end
 
     -- Print as JSON
