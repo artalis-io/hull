@@ -357,6 +357,35 @@ int hl_tool_copy(const char *src, const char *dst,
     return ok;
 }
 
+/* ── Recursive directory creation ──────────────────────────────────── */
+
+int hl_tool_mkdir(const char *path, const HlToolUnveilCtx *ctx)
+{
+    if (!path) return -1;
+
+    if (ctx && hl_tool_unveil_check(ctx, path, 'w') != 0)
+        return -1;
+
+    /* Walk the path creating each component */
+    char buf[PATH_MAX];
+    size_t len = strlen(path);
+    if (len >= sizeof(buf)) return -1;
+    memcpy(buf, path, len + 1);
+
+    for (char *p = buf + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            if (mkdir(buf, 0755) != 0 && errno != EEXIST)
+                return -1;
+            *p = '/';
+        }
+    }
+    if (mkdir(buf, 0755) != 0 && errno != EEXIST)
+        return -1;
+
+    return 0;
+}
+
 /* ── Recursive directory removal ───────────────────────────────────── */
 
 static int rmdir_recurse(const char *path)
@@ -533,6 +562,18 @@ static int l_tool_copy(lua_State *L)
     return 1;
 }
 
+/* ── tool.mkdir(path) → bool ──────────────────────────────────────── */
+
+static int l_tool_mkdir(lua_State *L)
+{
+    const char *path = luaL_checkstring(L, 1);
+    HlToolUnveilCtx *ctx = get_unveil_ctx(L);
+
+    int rc = hl_tool_mkdir(path, ctx);
+    lua_pushboolean(L, rc == 0);
+    return 1;
+}
+
 /* ── tool.rmdir(path) → bool ──────────────────────────────────────── */
 
 static int l_tool_rmdir(lua_State *L)
@@ -674,6 +715,7 @@ static const luaL_Reg tool_funcs[] = {
     { "spawn_read",  l_tool_spawn_read },
     { "find_files",  l_tool_find_files },
     { "copy",        l_tool_copy },
+    { "mkdir",       l_tool_mkdir },
     { "rmdir",       l_tool_rmdir },
     { "tmpdir",      l_tool_tmpdir },
     { "exit",        l_tool_exit },

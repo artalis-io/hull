@@ -14,6 +14,9 @@
 #include "hull/commands/inspect.h"
 #include "hull/commands/manifest.h"
 #include "hull/commands/test.h"
+#include "hull/commands/new.h"
+#include "hull/commands/dev.h"
+#include "hull/commands/eject.h"
 
 #include <string.h>
 
@@ -26,6 +29,9 @@ static const HlCommand commands[] = {
     { "inspect",  hl_cmd_inspect },
     { "manifest", hl_cmd_manifest },
     { "test",     hl_cmd_test },
+    { "new",      hl_cmd_new },
+    { "dev",      hl_cmd_dev },
+    { "eject",    hl_cmd_eject },
     { NULL, NULL }  /* sentinel */
 };
 

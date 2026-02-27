@@ -461,6 +461,132 @@ else
     fail "hull3 not executable — skipping chain verification"
 fi
 
+# ── Step 14: --verify-sig (runtime signature verification) ─────────
+
+echo ""
+echo "=== Step 14: --verify-sig ==="
+
+# Start signed app with --verify-sig → should start and serve
+"$WORKDIR/myapp/myapp" --verify-sig "$WORKDIR/developer.pub" -p 19872 "$WORKDIR/myapp/app.lua" >/dev/null 2>&1 &
+SERVER_PID=$!
+
+if wait_for_server 19872; then
+    RESP=$(curl -s "http://127.0.0.1:19872/")
+    check_contains "--verify-sig serves OK" "$RESP" "hello from hull build"
+    pass "--verify-sig starts with valid sig"
+else
+    fail "--verify-sig did not start with valid sig"
+fi
+
+stop_server
+
+# Tamper with app.lua and try --verify-sig → should refuse
+cp "$WORKDIR/myapp/app.lua" "$WORKDIR/myapp/app.lua.bak"
+echo '-- tampered' >> "$WORKDIR/myapp/app.lua"
+
+"$WORKDIR/myapp/myapp" --verify-sig "$WORKDIR/developer.pub" -p 19873 "$WORKDIR/myapp/app.lua" >/dev/null 2>&1 &
+TPID=$!
+sleep 2
+
+# Server should have exited (refused to start)
+if kill -0 "$TPID" 2>/dev/null; then
+    fail "--verify-sig should refuse tampered app"
+    kill "$TPID" 2>/dev/null
+    wait "$TPID" 2>/dev/null
+else
+    wait "$TPID" 2>/dev/null
+    TEXIT=$?
+    if [ "$TEXIT" -ne 0 ]; then
+        pass "--verify-sig refuses tampered app (exit $TEXIT)"
+    else
+        fail "--verify-sig should exit non-zero for tampered app"
+    fi
+fi
+
+# Restore
+mv "$WORKDIR/myapp/app.lua.bak" "$WORKDIR/myapp/app.lua"
+
+# Test with wrong key → should refuse
+"$HULL" keygen "$WORKDIR/wrong_key" >/dev/null 2>&1
+"$WORKDIR/myapp/myapp" --verify-sig "$WORKDIR/wrong_key.pub" -p 19874 "$WORKDIR/myapp/app.lua" >/dev/null 2>&1 &
+TPID=$!
+sleep 2
+
+if kill -0 "$TPID" 2>/dev/null; then
+    fail "--verify-sig should refuse wrong key"
+    kill "$TPID" 2>/dev/null
+    wait "$TPID" 2>/dev/null
+else
+    wait "$TPID" 2>/dev/null
+    TEXIT=$?
+    if [ "$TEXIT" -ne 0 ]; then
+        pass "--verify-sig refuses wrong key (exit $TEXIT)"
+    else
+        fail "--verify-sig should exit non-zero for wrong key"
+    fi
+fi
+
+# ── Step 15: hull.sig enhanced fields (platform/binary/trampoline hashes) ──
+
+echo ""
+echo "=== Step 15: hull.sig enhanced fields ==="
+
+if [ -f "$WORKDIR/myapp/hull.sig" ]; then
+    SIG_CONTENT=$(cat "$WORKDIR/myapp/hull.sig")
+    check_contains "hull.sig has platform_hash" "$SIG_CONTENT" '"platform_hash"'
+    check_contains "hull.sig has binary_hash" "$SIG_CONTENT" '"binary_hash"'
+    check_contains "hull.sig has trampoline_hash" "$SIG_CONTENT" '"trampoline_hash"'
+fi
+
+# ── Step 16: hull new ──────────────────────────────────────────────
+
+echo ""
+echo "=== Step 16: hull new ==="
+
+"$HULL" new "$WORKDIR/newapp" >/dev/null 2>&1; RC=$?
+check_exit "hull new exits 0" 0 $RC
+check_file_exists "new app.lua exists" "$WORKDIR/newapp/app.lua"
+check_file_exists "new tests/ exists" "$WORKDIR/newapp/tests/test_app.lua"
+check_file_exists "new .gitignore exists" "$WORKDIR/newapp/.gitignore"
+
+# New app should serve
+"$HULL" -p 19875 "$WORKDIR/newapp/app.lua" >/dev/null 2>&1 &
+SERVER_PID=$!
+if wait_for_server 19875; then
+    RESP=$(curl -s "http://127.0.0.1:19875/")
+    check_contains "new app GET / ok" "$RESP" "ok"
+else
+    fail "new app did not start"
+fi
+stop_server
+
+# hull new with existing dir should fail
+"$HULL" new "$WORKDIR/newapp" >/dev/null 2>&1; RC=$?
+check_exit "hull new existing dir fails" 1 $RC
+
+# hull new with --runtime js
+"$HULL" new --runtime js "$WORKDIR/newapp_js" >/dev/null 2>&1; RC=$?
+check_exit "hull new --runtime js exits 0" 0 $RC
+check_file_exists "new app.js exists" "$WORKDIR/newapp_js/app.js"
+
+# ── Step 17: hull eject ────────────────────────────────────────────
+
+echo ""
+echo "=== Step 17: hull eject ==="
+
+# Build platform first (needed by eject)
+"$HULL" eject "$WORKDIR/myapp" -o "$WORKDIR/ejected" >/dev/null 2>&1; RC=$?
+check_exit "hull eject exits 0" 0 $RC
+check_file_exists "ejected Makefile exists" "$WORKDIR/ejected/Makefile"
+check_file_exists "ejected app_main.c exists" "$WORKDIR/ejected/src/app_main.c"
+check_file_exists "ejected gen_registry.sh exists" "$WORKDIR/ejected/scripts/gen_registry.sh"
+check_file_exists "ejected platform lib exists" "$WORKDIR/ejected/platform/libhull_platform.a"
+check_file_exists "ejected app.lua exists" "$WORKDIR/ejected/app/app.lua"
+
+# hull eject with existing dir should fail
+"$HULL" eject "$WORKDIR/myapp" -o "$WORKDIR/ejected" >/dev/null 2>&1; RC=$?
+check_exit "hull eject existing dir fails" 1 $RC
+
 # ── Summary ───────────────────────────────────────────────────────────
 
 echo ""

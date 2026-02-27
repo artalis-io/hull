@@ -101,6 +101,13 @@ int hl_tool_copy(const char *src, const char *dst,
                  const HlToolUnveilCtx *ctx);
 
 /*
+ * Create directories recursively (like mkdir -p).
+ * Validates path against unveil context if ctx is non-NULL.
+ * Returns 0 on success, -1 on error.
+ */
+int hl_tool_mkdir(const char *path, const HlToolUnveilCtx *ctx);
+
+/*
  * Recursively remove a directory tree.
  * Uses lstat (no symlink following). Validates path against unveil context.
  * Returns 0 on success, -1 on error.
@@ -119,6 +126,7 @@ int hl_tool_rmdir(const char *path, const HlToolUnveilCtx *ctx);
  *   tool.spawn_read(argv_table)   — spawn and capture stdout, return string|nil
  *   tool.find_files(dir, pattern) — recursive file search, return table
  *   tool.copy(src, dst)           — copy file, return bool
+ *   tool.mkdir(path)              — recursive mkdir, return bool
  *   tool.rmdir(path)              — recursive remove, return bool
  *   tool.tmpdir()                 — create temp directory, return path
  *   tool.exit(code)               — exit process
