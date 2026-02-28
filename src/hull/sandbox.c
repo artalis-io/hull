@@ -132,7 +132,8 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
 
 /* ── Public API ────────────────────────────────────────────────────── */
 
-int hl_sandbox_apply(const HlManifest *manifest, const char *db_path)
+int hl_sandbox_apply(const HlManifest *manifest, const char *db_path,
+                      const char *ca_bundle_path)
 {
     if (!manifest || !manifest->present) {
         log_info("[sandbox] no manifest — sandbox not applied");
@@ -167,6 +168,13 @@ int hl_sandbox_apply(const HlManifest *manifest, const char *db_path)
     if (db_path) {
         if (unveil(db_path, "rwc") != 0)
             log_warn("[sandbox] unveil failed for database: %s", db_path);
+    }
+
+    /* CA certificate bundle for HTTPS client verification */
+    if (ca_bundle_path) {
+        if (unveil(ca_bundle_path, "r") != 0)
+            log_warn("[sandbox] unveil failed for CA bundle: %s",
+                     ca_bundle_path);
     }
 
     /* Seal: no more unveil calls allowed */

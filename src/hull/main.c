@@ -22,6 +22,10 @@
 #endif
 
 #include "hull/alloc.h"
+#include "hull/cap/env.h"
+#include "hull/cap/http.h"
+
+#include <keel/tls_mbedtls.h>
 #include "hull/commands/dispatch.h"
 #include "hull/limits.h"
 #include "hull/manifest.h"
@@ -141,6 +145,7 @@ static void usage(const char *prog)
             "  -s SIZE              JS stack size limit (default: 1m)\n"
             "  -l LEVEL             Log level: trace|debug|info|warn|error|fatal (default: info)\n"
             "  --verify-sig PUBKEY  Verify app signature before startup\n"
+            "  --skip-ca-bundle     Skip TLS certificate verification (dev mode)\n"
             "  -h                   Show this help\n"
             "\n"
             "Subcommands:\n"
@@ -158,6 +163,23 @@ static void usage(const char *prog)
             prog);
 }
 
+/* ── CA bundle auto-detection ───────────────────────────────────────── */
+
+static const char *find_ca_bundle(void)
+{
+    static const char *paths[] = {
+        "/etc/ssl/cert.pem",                    /* macOS, Alpine */
+        "/etc/ssl/certs/ca-certificates.crt",   /* Debian/Ubuntu */
+        "/etc/pki/tls/certs/ca-bundle.crt",     /* RHEL/CentOS */
+        NULL,
+    };
+    for (const char **p = paths; *p; p++) {
+        FILE *f = fopen(*p, "r");
+        if (f) { fclose(f); return *p; }
+    }
+    return NULL;
+}
+
 /* ── Server mode (default) ──────────────────────────────────────────── */
 
 static int hull_serve(int argc, char **argv)
@@ -171,6 +193,7 @@ static int hull_serve(int argc, char **argv)
     long stack_limit = 0;   /* 0 = use default */
     long mem_limit = 0;     /* 0 = unlimited */
     int log_level = LOG_INFO;
+    int skip_ca_bundle = 0;
 
     /* Parse arguments */
     for (int i = 1; i < argc; i++) {
@@ -212,6 +235,8 @@ static int hull_serve(int argc, char **argv)
             }
         } else if (strcmp(argv[i], "--verify-sig") == 0 && i + 1 < argc) {
             verify_sig_path = argv[++i];
+        } else if (strcmp(argv[i], "--skip-ca-bundle") == 0) {
+            skip_ca_bundle = 1;
         } else if (strcmp(argv[i], "-h") == 0) {
             usage(argv[0]);
             return 0;
@@ -374,20 +399,67 @@ static int hull_serve(int argc, char **argv)
 
     /* Extract manifest and configure capabilities */
     HlManifest manifest;
+    memset(&manifest, 0, sizeof(manifest));
     if (rt->vt->extract_manifest(rt, &manifest) == 0) {
         log_info("[hull:c] manifest: fs_read=%d fs_write=%d env=%d hosts=%d",
                  manifest.fs_read_count, manifest.fs_write_count,
                  manifest.env_count, manifest.hosts_count);
     }
 
+    /* Wire env_cfg from manifest (if app declares env vars) */
+    HlEnvConfig env_cfg_storage = {0};
+    if (manifest.env_count > 0) {
+        env_cfg_storage.allowed = manifest.env;
+        env_cfg_storage.count   = manifest.env_count;
+        rt->env_cfg = &env_cfg_storage;
+    }
+
+    /* Wire http_cfg from manifest (if app declares hosts) */
+    HlHttpConfig http_cfg_storage = {0};
+    KlTlsConfig client_tls_config = {0};
+    KlTlsCtx *client_tls_ctx = NULL;
+    const char *ca_bundle_path = NULL;
+
+    if (manifest.hosts_count > 0) {
+        http_cfg_storage.allowed_hosts     = manifest.hosts;
+        http_cfg_storage.count             = manifest.hosts_count;
+        http_cfg_storage.timeout_ms        = HL_HTTP_DEFAULT_TIMEOUT_MS;
+        http_cfg_storage.max_response_size = HL_HTTP_DEFAULT_MAX_RESP;
+
+        /* Set up TLS client for HTTPS support */
+        if (skip_ca_bundle) {
+            log_warn("[hull:c] TLS certificate verification disabled (--skip-ca-bundle)");
+            client_tls_ctx = kl_tls_mbedtls_client_ctx_create(NULL);
+        } else {
+            ca_bundle_path = find_ca_bundle();
+            if (ca_bundle_path) {
+                log_info("[hull:c] using CA bundle: %s", ca_bundle_path);
+                client_tls_ctx = kl_tls_mbedtls_client_ctx_create(ca_bundle_path);
+            } else {
+                log_warn("[hull:c] no CA bundle found; HTTPS disabled "
+                         "(use --skip-ca-bundle for dev mode)");
+            }
+        }
+
+        if (client_tls_ctx) {
+            client_tls_config.ctx         = client_tls_ctx;
+            client_tls_config.factory     = (KlTlsFactory)kl_tls_mbedtls_create;
+            client_tls_config.ctx_destroy = (void (*)(KlTlsCtx *))kl_tls_mbedtls_ctx_destroy;
+            http_cfg_storage.tls          = &client_tls_config;
+        }
+
+        rt->http_cfg = &http_cfg_storage;
+    }
+
     /* Apply kernel sandbox (pledge/unveil) from manifest */
-    if (hl_sandbox_apply(&manifest, db_path) != 0) {
+    if (hl_sandbox_apply(&manifest, db_path, ca_bundle_path) != 0) {
         log_error("[hull:c] sandbox enforcement failed");
         rt->vt->free_manifest_strings(rt, &manifest);
         rt->vt->destroy(rt);
+        if (client_tls_ctx)
+            kl_tls_mbedtls_ctx_destroy(client_tls_ctx);
         goto cleanup_server;
     }
-    rt->vt->free_manifest_strings(rt, &manifest);
 
     log_info("[hull:c] listening on %s:%d (%s runtime)",
              bind_addr, port, rt->vt->name);
@@ -395,8 +467,12 @@ static int hull_serve(int argc, char **argv)
     /* Enter event loop */
     kl_server_run(&server);
 
-    /* Cleanup */
+    /* Cleanup — free manifest strings AFTER server stops
+     * (env_cfg and http_cfg reference them during runtime) */
+    rt->vt->free_manifest_strings(rt, &manifest);
     rt->vt->destroy(rt);
+    if (client_tls_ctx)
+        kl_tls_mbedtls_ctx_destroy(client_tls_ctx);
     ret = 0;
 
 cleanup_server:

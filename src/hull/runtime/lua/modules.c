@@ -13,6 +13,7 @@
 #include "hull/cap/db.h"
 #include "hull/cap/time.h"
 #include "hull/cap/env.h"
+#include "hull/cap/http.h"
 #include "hull/cap/crypto.h"
 
 #include "lua.h"
@@ -1106,6 +1107,265 @@ static int luaopen_hull_crypto(lua_State *L)
 }
 
 /* ════════════════════════════════════════════════════════════════════
+ * hull.http module
+ *
+ * http.request(method, url, opts?) → { status, body, headers }
+ * http.get(url, opts?)             → { status, body, headers }
+ * http.post(url, body, opts?)      → { status, body, headers }
+ * http.put(url, body, opts?)       → { status, body, headers }
+ * http.patch(url, body, opts?)     → { status, body, headers }
+ * http.delete(url, opts?)          → { status, body, headers }
+ * ════════════════════════════════════════════════════════════════════ */
+
+/* Parse optional headers table at stack index `idx` into HlHttpHeader array.
+ * Returns 0 on success. Caller must free the returned array. */
+static int lua_parse_http_headers(lua_State *L, int idx,
+                                     HlHttpHeader **out_headers, int *out_count,
+                                     SHArena *scratch)
+{
+    *out_headers = NULL;
+    *out_count = 0;
+
+    if (lua_isnoneornil(L, idx))
+        return 0;
+
+    if (!lua_istable(L, idx))
+        return -1;
+
+    /* Count entries */
+    int count = 0;
+    lua_pushnil(L);
+    while (lua_next(L, idx) != 0) {
+        count++;
+        lua_pop(L, 1); /* pop value, keep key */
+    }
+    if (count == 0)
+        return 0;
+
+    HlHttpHeader *hdrs = sh_arena_calloc(scratch, (size_t)count, sizeof(HlHttpHeader));
+    if (!hdrs)
+        return -1;
+
+    int i = 0;
+    lua_pushnil(L);
+    while (lua_next(L, idx) != 0) {
+        if (lua_isstring(L, -2) && lua_isstring(L, -1)) {
+            hdrs[i].name = lua_tostring(L, -2);
+            hdrs[i].value = lua_tostring(L, -1);
+            i++;
+        }
+        lua_pop(L, 1); /* pop value, keep key */
+    }
+
+    *out_headers = hdrs;
+    *out_count = i;
+    return 0;
+}
+
+/* Push HTTP response as Lua table: { status, body, headers } */
+static void lua_push_http_response(lua_State *L, HlHttpResponse *resp)
+{
+    lua_newtable(L);
+
+    lua_pushinteger(L, resp->status);
+    lua_setfield(L, -2, "status");
+
+    if (resp->body && resp->body_len > 0)
+        lua_pushlstring(L, resp->body, resp->body_len);
+    else
+        lua_pushstring(L, "");
+    lua_setfield(L, -2, "body");
+
+    /* Headers as { ["name"] = "value" } table */
+    lua_newtable(L);
+    for (int i = 0; i < resp->num_headers; i++) {
+        lua_pushstring(L, resp->headers[i].value);
+        /* Lowercase the header name for consistent access */
+        size_t nlen = strlen(resp->headers[i].name);
+        char *lower = sh_arena_alloc(
+            ((HlLua *)get_hl_lua(L))->scratch, nlen + 1);
+        if (lower) {
+            for (size_t j = 0; j < nlen; j++)
+                lower[j] = (char)((resp->headers[i].name[j] >= 'A' &&
+                                    resp->headers[i].name[j] <= 'Z')
+                    ? resp->headers[i].name[j] + 32
+                    : resp->headers[i].name[j]);
+            lower[nlen] = '\0';
+            lua_setfield(L, -2, lower);
+        } else {
+            lua_setfield(L, -2, resp->headers[i].name);
+        }
+    }
+    lua_setfield(L, -2, "headers");
+}
+
+/* http.request(method, url, opts?) */
+static int lua_http_request(lua_State *L)
+{
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->base.http_cfg)
+        return luaL_error(L, "http not configured (no hosts in manifest)");
+
+    const char *method = luaL_checkstring(L, 1);
+    const char *url = luaL_checkstring(L, 2);
+
+    const char *body = NULL;
+    size_t body_len = 0;
+    HlHttpHeader *headers = NULL;
+    int num_headers = 0;
+
+    /* Parse optional opts table at position 3 */
+    if (lua_istable(L, 3)) {
+        lua_getfield(L, 3, "body");
+        if (lua_isstring(L, -1))
+            body = lua_tolstring(L, -1, &body_len);
+        lua_pop(L, 1);
+
+        lua_getfield(L, 3, "headers");
+        if (lua_istable(L, -1)) {
+            int hdr_idx = lua_gettop(L);
+            if (lua_parse_http_headers(L, hdr_idx, &headers, &num_headers,
+                                        lua->scratch) != 0) {
+                lua_pop(L, 1);
+                return luaL_error(L, "invalid headers table");
+            }
+        }
+        lua_pop(L, 1);
+    }
+
+    HlHttpResponse resp;
+    int rc = hl_cap_http_request(lua->base.http_cfg, method, url,
+                                    headers, num_headers, body, body_len, &resp);
+    if (rc != 0)
+        return luaL_error(L, "http request failed");
+
+    lua_push_http_response(L, &resp);
+    hl_cap_http_free(&resp);
+    return 1;
+}
+
+/* http.get(url, opts?) */
+static int lua_http_get(lua_State *L)
+{
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->base.http_cfg)
+        return luaL_error(L, "http not configured (no hosts in manifest)");
+
+    const char *url = luaL_checkstring(L, 1);
+    HlHttpHeader *headers = NULL;
+    int num_headers = 0;
+
+    if (lua_istable(L, 2)) {
+        lua_getfield(L, 2, "headers");
+        if (lua_istable(L, -1)) {
+            int hdr_idx = lua_gettop(L);
+            lua_parse_http_headers(L, hdr_idx, &headers, &num_headers,
+                                    lua->scratch);
+        }
+        lua_pop(L, 1);
+    }
+
+    HlHttpResponse resp;
+    int rc = hl_cap_http_request(lua->base.http_cfg, "GET", url,
+                                    headers, num_headers, NULL, 0, &resp);
+    if (rc != 0)
+        return luaL_error(L, "http.get failed");
+
+    lua_push_http_response(L, &resp);
+    hl_cap_http_free(&resp);
+    return 1;
+}
+
+/* Helper for POST/PUT/PATCH: (url, body, opts?) */
+static int lua_http_body_method(lua_State *L, const char *method)
+{
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->base.http_cfg)
+        return luaL_error(L, "http not configured (no hosts in manifest)");
+
+    const char *url = luaL_checkstring(L, 1);
+    size_t body_len = 0;
+    const char *body = NULL;
+    if (lua_isstring(L, 2))
+        body = lua_tolstring(L, 2, &body_len);
+
+    HlHttpHeader *headers = NULL;
+    int num_headers = 0;
+
+    if (lua_istable(L, 3)) {
+        lua_getfield(L, 3, "headers");
+        if (lua_istable(L, -1)) {
+            int hdr_idx = lua_gettop(L);
+            lua_parse_http_headers(L, hdr_idx, &headers, &num_headers,
+                                    lua->scratch);
+        }
+        lua_pop(L, 1);
+    }
+
+    HlHttpResponse resp;
+    int rc = hl_cap_http_request(lua->base.http_cfg, method, url,
+                                    headers, num_headers, body, body_len, &resp);
+    if (rc != 0)
+        return luaL_error(L, "http.%s failed", method);
+
+    lua_push_http_response(L, &resp);
+    hl_cap_http_free(&resp);
+    return 1;
+}
+
+static int lua_http_post(lua_State *L)   { return lua_http_body_method(L, "POST"); }
+static int lua_http_put(lua_State *L)    { return lua_http_body_method(L, "PUT"); }
+static int lua_http_patch(lua_State *L)  { return lua_http_body_method(L, "PATCH"); }
+
+/* http.delete(url, opts?) — same signature as http.get */
+static int lua_http_delete(lua_State *L)
+{
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->base.http_cfg)
+        return luaL_error(L, "http not configured (no hosts in manifest)");
+
+    const char *url = luaL_checkstring(L, 1);
+    HlHttpHeader *headers = NULL;
+    int num_headers = 0;
+
+    if (lua_istable(L, 2)) {
+        lua_getfield(L, 2, "headers");
+        if (lua_istable(L, -1)) {
+            int hdr_idx = lua_gettop(L);
+            lua_parse_http_headers(L, hdr_idx, &headers, &num_headers,
+                                    lua->scratch);
+        }
+        lua_pop(L, 1);
+    }
+
+    HlHttpResponse resp;
+    int rc = hl_cap_http_request(lua->base.http_cfg, "DELETE", url,
+                                    headers, num_headers, NULL, 0, &resp);
+    if (rc != 0)
+        return luaL_error(L, "http.delete failed");
+
+    lua_push_http_response(L, &resp);
+    hl_cap_http_free(&resp);
+    return 1;
+}
+
+static const luaL_Reg http_funcs[] = {
+    {"request", lua_http_request},
+    {"get",     lua_http_get},
+    {"post",    lua_http_post},
+    {"put",     lua_http_put},
+    {"patch",   lua_http_patch},
+    {"delete",  lua_http_delete},
+    {NULL, NULL}
+};
+
+static int luaopen_hull_http(lua_State *L)
+{
+    luaL_newlib(L, http_funcs);
+    return 1;
+}
+
+/* ════════════════════════════════════════════════════════════════════
  * hull.log module
  *
  * log.info(msg)
@@ -1561,6 +1821,11 @@ int hl_lua_register_modules(HlLua *lua)
     /* Register hull.log */
     luaL_requiref(L, "hull.log", luaopen_hull_log, 0);
     lua_setglobal(L, "log");
+
+    /* Register hull.http — always available; per-function checks enforce
+     * that http_cfg is set (wired from manifest after load_app). */
+    luaL_requiref(L, "hull.http", luaopen_hull_http, 0);
+    lua_setglobal(L, "http");
 
     return 0;
 }

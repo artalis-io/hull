@@ -23,13 +23,15 @@
 /*
  * Apply kernel sandbox based on manifest capabilities.
  *
- *   manifest  — declared capabilities (may have present==0)
- *   db_path   — SQLite database path (always allowed rw)
+ *   manifest       — declared capabilities (may have present==0)
+ *   db_path        — SQLite database path (always allowed rw)
+ *   ca_bundle_path — CA certificate bundle (unveiled read-only, may be NULL)
  *
  * When manifest.present is false, no sandbox is applied (permissive).
  * Returns 0 on success, -1 on error (logged).
  */
-int hl_sandbox_apply(const HlManifest *manifest, const char *db_path);
+int hl_sandbox_apply(const HlManifest *manifest, const char *db_path,
+                      const char *ca_bundle_path);
 
 /*
  * Initialize tool-mode unveil context for `hull build`.
