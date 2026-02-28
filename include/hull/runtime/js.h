@@ -62,6 +62,15 @@ typedef struct HlJS {
     /* Per-request response body (allocated via alloc, freed after dispatch) */
     char           *response_body;
     size_t          response_body_size;
+
+    /* Per-runtime response class (avoids global statics) */
+    uint32_t        response_class_id;
+    int             response_class_registered;
+
+    /* Tracked route allocations (freed in hl_js_free) */
+    void          **routes;
+    size_t          route_count;
+    size_t          route_cap;
 } HlJS;
 
 /* ── Vtable ────────────────────────────────────────────────────────── */

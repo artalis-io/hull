@@ -457,9 +457,16 @@ void hl_js_free(HlJS *js)
     if (!js)
         return;
 
-    /* Reset response class state for potential re-init */
-    extern void hl_js_reset_response_class(void);
-    hl_js_reset_response_class();
+    /* Free tracked route allocations */
+    for (size_t i = 0; i < js->route_count; i++)
+        hl_alloc_free(js->base.alloc, js->routes[i], sizeof(HlJSRoute));
+    if (js->routes) {
+        hl_alloc_free(js->base.alloc, js->routes,
+                      js->route_cap * sizeof(void *));
+        js->routes = NULL;
+        js->route_count = 0;
+        js->route_cap = 0;
+    }
 
     if (js->ctx) {
         JS_FreeContext(js->ctx);
@@ -511,6 +518,25 @@ void hl_js_dump_error(HlJS *js)
     JS_FreeValue(js->ctx, exception);
 }
 
+/* ── Route tracking ────────────────────────────────────────────────── */
+
+static int hl_js_track_route(HlJS *js, void *route)
+{
+    if (js->route_count >= js->route_cap) {
+        size_t new_cap = js->route_cap ? js->route_cap * 2 : 8;
+        size_t old_sz = js->route_cap * sizeof(void *);
+        size_t new_sz = new_cap * sizeof(void *);
+        void **new_arr = hl_alloc_realloc(js->base.alloc,
+                                           js->routes, old_sz, new_sz);
+        if (!new_arr)
+            return -1;
+        js->routes = new_arr;
+        js->route_cap = new_cap;
+    }
+    js->routes[js->route_count++] = route;
+    return 0;
+}
+
 /* ── Request dispatch ───────────────────────────────────────────────── */
 
 int hl_js_dispatch(HlJS *js, int handler_id,
@@ -543,10 +569,10 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     /* Build JS request and response objects */
     /* These are created by js_bindings.c functions */
     extern JSValue hl_js_make_request(JSContext *ctx, KlRequest *req);
-    extern JSValue hl_js_make_response(JSContext *ctx, KlResponse *res);
+    extern JSValue hl_js_make_response(HlJS *js, KlResponse *res);
 
     JSValue js_req = hl_js_make_request(js->ctx, req);
-    JSValue js_res = hl_js_make_response(js->ctx, res);
+    JSValue js_res = hl_js_make_response(js, res);
 
     /* Call handler(req, res) */
     JSValue argv[2] = { js_req, js_res };
@@ -563,6 +589,13 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     JS_FreeValue(js->ctx, js_req);
     JS_FreeValue(js->ctx, handler);
     JS_FreeValue(js->ctx, global);
+
+    /* Free ctx if middleware set it */
+    if (req->ctx) {
+        size_t ctx_sz = strlen((char *)req->ctx) + 1;
+        hl_alloc_free(js->base.alloc, req->ctx, ctx_sz);
+        req->ctx = NULL;
+    }
 
     /* Run any pending microtasks */
     hl_js_run_jobs(js);
@@ -631,10 +664,12 @@ int hl_js_wire_routes(HlJS *js, KlRouter *router)
         JS_ToInt32(ctx, &handler_id, id_val);
 
         if (method_str && pattern) {
-            HlJSRoute *route = malloc(sizeof(HlJSRoute));
+            HlJSRoute *route = hl_alloc_malloc(js->base.alloc,
+                                                 sizeof(HlJSRoute));
             if (route) {
                 route->js = js;
                 route->handler_id = handler_id;
+                hl_js_track_route(js, route);
                 kl_router_add(router, method_str, pattern,
                               hl_js_keel_handler, route, NULL);
             }
@@ -659,6 +694,7 @@ int hl_js_wire_routes(HlJS *js, KlRouter *router)
 int hl_js_wire_routes_server(HlJS *js, KlServer *server,
                               void *(*alloc_fn)(size_t))
 {
+    (void)alloc_fn; /* routes always use Hull allocator */
     JSContext *ctx = js->ctx;
     JSValue global = JS_GetGlobalObject(ctx);
     JSValue defs = JS_GetPropertyStr(ctx, global, "__hull_route_defs");
@@ -690,12 +726,12 @@ int hl_js_wire_routes_server(HlJS *js, KlServer *server,
         JS_ToInt32(ctx, &handler_id, id_val);
 
         if (method_str && pattern) {
-            void *mem = alloc_fn ? alloc_fn(sizeof(HlJSRoute))
-                                 : malloc(sizeof(HlJSRoute));
-            HlJSRoute *route = (HlJSRoute *)mem;
+            HlJSRoute *route = hl_alloc_malloc(js->base.alloc,
+                                                 sizeof(HlJSRoute));
             if (route) {
                 route->js = js;
                 route->handler_id = handler_id;
+                hl_js_track_route(js, route);
                 kl_server_route(server, method_str, pattern,
                                 hl_js_keel_handler, route,
                                 hl_cap_body_factory);
@@ -735,12 +771,12 @@ int hl_js_wire_routes_server(HlJS *js, KlServer *server,
             JS_ToInt32(ctx, &handler_id, id_val);
 
             if (method_str && pattern) {
-                void *mem = alloc_fn ? alloc_fn(sizeof(HlJSRoute))
-                                     : malloc(sizeof(HlJSRoute));
-                HlJSRoute *mw_ctx = (HlJSRoute *)mem;
+                HlJSRoute *mw_ctx = hl_alloc_malloc(js->base.alloc,
+                                                      sizeof(HlJSRoute));
                 if (mw_ctx) {
                     mw_ctx->js = js;
                     mw_ctx->handler_id = handler_id;
+                    hl_js_track_route(js, mw_ctx);
                     kl_server_use(server, method_str, pattern,
                                   hl_js_keel_middleware, mw_ctx);
                 }
@@ -791,10 +827,10 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
 
     /* Build JS request and response objects */
     extern JSValue hl_js_make_request(JSContext *ctx, KlRequest *req);
-    extern JSValue hl_js_make_response(JSContext *ctx, KlResponse *res);
+    extern JSValue hl_js_make_response(HlJS *js, KlResponse *res);
 
     JSValue js_req = hl_js_make_request(js->ctx, req);
-    JSValue js_res = hl_js_make_response(js->ctx, res);
+    JSValue js_res = hl_js_make_response(js, res);
 
     /* Call handler(req, res) — capture return value */
     JSValue argv[2] = { js_req, js_res };
@@ -810,6 +846,33 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
         if (JS_ToInt32(js->ctx, &val, ret) == 0)
             result = val;
     }
+
+    /* Serialize req.ctx to JSON and store in req->ctx so the handler
+     * dispatch (or next middleware) can reconstruct it. */
+    JSValue ctx_val = JS_GetPropertyStr(js->ctx, js_req, "ctx");
+    if (JS_IsObject(ctx_val)) {
+        JSValue json_val = JS_JSONStringify(js->ctx, ctx_val, JS_UNDEFINED,
+                                             JS_UNDEFINED);
+        if (!JS_IsException(json_val) && JS_IsString(json_val)) {
+            const char *json_str = JS_ToCString(js->ctx, json_val);
+            size_t json_len = json_str ? strlen(json_str) : 0;
+            if (json_str && json_len > 2 && json_len < 65536) { /* skip empty "{}" */
+                if (req->ctx) {
+                    size_t old_sz = strlen((char *)req->ctx) + 1;
+                    hl_alloc_free(js->base.alloc, req->ctx, old_sz);
+                    req->ctx = NULL;
+                }
+                char *ctx_copy = hl_alloc_malloc(js->base.alloc, json_len + 1);
+                if (ctx_copy) {
+                    memcpy(ctx_copy, json_str, json_len + 1);
+                    req->ctx = ctx_copy;
+                }
+            }
+            if (json_str) JS_FreeCString(js->ctx, json_str);
+        }
+        JS_FreeValue(js->ctx, json_val);
+    }
+    JS_FreeValue(js->ctx, ctx_val);
 
     JS_FreeValue(js->ctx, ret);
     JS_FreeValue(js->ctx, js_res);

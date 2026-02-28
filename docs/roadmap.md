@@ -5,7 +5,7 @@
 - Lua 5.4 + QuickJS runtimes with HTTP route dispatch
 - SQLite with parameterized queries (injection-proof)
 - Request body reading + route parameter extraction
-- Crypto: SHA-256, PBKDF2, random bytes, password hash/verify, Ed25519 (sign/verify/keypair)
+- Crypto: SHA-256, SHA-512, PBKDF2, HMAC-SHA256, base64url, random bytes, password hash/verify, Ed25519 (sign/verify/keypair), secretbox, box
 - Filesystem: sandboxed read/write/exists/delete
 - Time, env, logging modules
 - Keel HTTP server (epoll/kqueue/poll)
@@ -15,6 +15,8 @@
 - Command module architecture: table-driven dispatcher (`src/hull/commands/`)
 - `hull test` subcommand: in-process test runner for Lua and JS apps (no TCP, direct router dispatch)
 - JS manifest parity: `app.manifest()` + sandbox enforcement for QuickJS apps
+- Middleware `req.ctx` persistence: JSON-serialized context passing between middleware and handlers
+- Auth stdlib: `hull.cookie`, `hull.session`, `hull.jwt`, `hull.csrf`, `hull.auth` (Lua + JS)
 - Cosmo sandbox test coverage: `sandbox_violation.c` compiles/runs under cosmocc
 - Self-build chain: `make self-build` proves hull→hull2→hull3 reproducibility
 
@@ -22,9 +24,9 @@
 
 ### High Impact — Unlocks Real Apps
 
-1. **JSON module** — `json.encode()` / `json.decode()`
+1. ~~**JSON module** — `json.encode()` / `json.decode()`~~ ✓
 2. **HTTP client** — `http.get()` / `http.post()` (cap declared, not wired)
-3. **Session + CSRF** — cookie sessions, CSRF tokens
+3. ~~**Session + CSRF** — cookie sessions, CSRF tokens~~ ✓ (hull.cookie, hull.session, hull.jwt, hull.csrf, hull.auth)
 4. **Template engine** — `{{ }}` HTML templates
 5. **Validation** — input schema validation
 6. **Rate limiting** — middleware

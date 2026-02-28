@@ -1357,4 +1357,313 @@ UTEST(lua_runtime, manifest_get_manifest)
     cleanup_lua();
 }
 
+/* ── HMAC-SHA256 / base64url tests ─────────────────────────────────── */
+
+UTEST(lua_cap, crypto_hmac_sha256)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* RFC 4231 Test Case 2: key="Jefe", data="what do ya want for nothing?" */
+    char *hmac = eval_str(
+        "crypto.hmac_sha256('what do ya want for nothing?', '4a656665')");
+    ASSERT_NE(hmac, NULL);
+    ASSERT_STREQ(hmac,
+        "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+    free(hmac);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_cap, crypto_base64url_roundtrip)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* Encode known value */
+    char *enc = eval_str("crypto.base64url_encode('Hello, World!')");
+    ASSERT_NE(enc, NULL);
+    ASSERT_STREQ(enc, "SGVsbG8sIFdvcmxkIQ");
+    free(enc);
+
+    /* Decode back */
+    char *dec = eval_str("crypto.base64url_decode('SGVsbG8sIFdvcmxkIQ')");
+    ASSERT_NE(dec, NULL);
+    ASSERT_STREQ(dec, "Hello, World!");
+    free(dec);
+
+    /* Roundtrip */
+    int ok = eval_int(
+        "(function() "
+        "  local orig = 'test data 123!@#' "
+        "  return crypto.base64url_decode(crypto.base64url_encode(orig)) == orig and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    /* Invalid input returns nil */
+    int is_nil = eval_int(
+        "crypto.base64url_decode('!!!invalid!!!') == nil and 1 or 0");
+    ASSERT_EQ(is_nil, 1);
+
+    cleanup_lua_caps();
+}
+
+/* ── hull.cookie tests ─────────────────────────────────────────────── */
+
+UTEST(lua_stdlib, cookie_parse)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local c = require('hull.cookie') "
+        "  local r = c.parse('session=abc; theme=dark') "
+        "  return r.session == 'abc' and r.theme == 'dark' and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    /* Empty string returns empty table */
+    int empty = eval_int(
+        "(function() "
+        "  local c = require('hull.cookie') "
+        "  local r = c.parse('') "
+        "  return next(r) == nil and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(empty, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, cookie_serialize)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* Default options: HttpOnly, Secure, SameSite=Lax, Path=/ */
+    char *cookie = eval_str(
+        "require('hull.cookie').serialize('sid', 'abc123')");
+    ASSERT_NE(cookie, NULL);
+    ASSERT_NE(strstr(cookie, "sid=abc123"), NULL);
+    ASSERT_NE(strstr(cookie, "HttpOnly"), NULL);
+    ASSERT_NE(strstr(cookie, "Secure"), NULL);
+    ASSERT_NE(strstr(cookie, "SameSite=Lax"), NULL);
+    ASSERT_NE(strstr(cookie, "Path=/"), NULL);
+    free(cookie);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, cookie_clear)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    char *cookie = eval_str(
+        "require('hull.cookie').clear('sid')");
+    ASSERT_NE(cookie, NULL);
+    ASSERT_NE(strstr(cookie, "sid="), NULL);
+    ASSERT_NE(strstr(cookie, "Max-Age=0"), NULL);
+    free(cookie);
+
+    cleanup_lua_caps();
+}
+
+/* ── hull.session tests ────────────────────────────────────────────── */
+
+UTEST(lua_stdlib, session_create_and_load)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local s = require('hull.session') "
+        "  s.init({ ttl = 3600 }) "
+        "  local id = s.create({ user_id = 42, email = 'test@example.com' }) "
+        "  if not id or #id ~= 64 then return 0 end "
+        "  local data = s.load(id) "
+        "  if not data then return 0 end "
+        "  return data.user_id == 42 and data.email == 'test@example.com' and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, session_destroy)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local s = require('hull.session') "
+        "  s.init() "
+        "  local id = s.create({ foo = 'bar' }) "
+        "  s.destroy(id) "
+        "  return s.load(id) == nil and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
+/* ── hull.jwt tests ────────────────────────────────────────────────── */
+
+UTEST(lua_stdlib, jwt_sign_and_verify)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local jwt = require('hull.jwt') "
+        "  local token = jwt.sign({ user_id = 1, exp = 3600 }, 'mysecret') "
+        "  if not token then return 0 end "
+        "  local payload = jwt.verify(token, 'mysecret') "
+        "  if not payload then return 0 end "
+        "  return payload.user_id == 1 and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, jwt_tampered_signature)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local jwt = require('hull.jwt') "
+        "  local token = jwt.sign({ user_id = 1, exp = 3600 }, 'mysecret') "
+        "  local payload, err = jwt.verify(token, 'wrongsecret') "
+        "  return payload == nil and err == 'invalid signature' and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, jwt_decode_without_verify)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local jwt = require('hull.jwt') "
+        "  local token = jwt.sign({ user_id = 99 }, 'secret') "
+        "  local payload = jwt.decode(token) "
+        "  return payload and payload.user_id == 99 and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, jwt_malformed_rejected)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local jwt = require('hull.jwt') "
+        "  local p, err = jwt.verify('not.a.valid.token', 'secret') "
+        "  return p == nil and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
+/* ── hull.csrf tests ───────────────────────────────────────────────── */
+
+UTEST(lua_stdlib, csrf_generate_and_verify)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local csrf = require('hull.csrf') "
+        "  local token = csrf.generate('session123', 'my_csrf_secret') "
+        "  if not token then return 0 end "
+        "  return csrf.verify(token, 'session123', 'my_csrf_secret') and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, csrf_wrong_session_rejected)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local csrf = require('hull.csrf') "
+        "  local token = csrf.generate('session123', 'secret') "
+        "  return csrf.verify(token, 'other_session', 'secret') and 0 or 1 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
+/* ── hull.auth tests (smoke test — modules load and expose API) ───── */
+
+UTEST(lua_cap, crypto_hmac_sha256_verify)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* Correct MAC → true */
+    int ok = eval_int(
+        "(function() "
+        "  local mac = crypto.hmac_sha256('what do ya want for nothing?', '4a656665') "
+        "  return crypto.hmac_sha256_verify('what do ya want for nothing?', '4a656665', mac) and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    /* Wrong MAC → false */
+    int bad_mac = eval_int(
+        "crypto.hmac_sha256_verify('what do ya want for nothing?', '4a656665', "
+        "  '0000000000000000000000000000000000000000000000000000000000000000') and 1 or 0");
+    ASSERT_EQ(bad_mac, 0);
+
+    /* Wrong key → false */
+    int bad_key = eval_int(
+        "(function() "
+        "  local mac = crypto.hmac_sha256('hello', '4a656665') "
+        "  return crypto.hmac_sha256_verify('hello', 'deadbeef', mac) and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(bad_key, 0);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, auth_module_loads)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local auth = require('hull.auth') "
+        "  return type(auth.session_middleware) == 'function' "
+        "     and type(auth.jwt_middleware) == 'function' "
+        "     and type(auth.login) == 'function' "
+        "     and type(auth.logout) == 'function' "
+        "     and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
 UTEST_MAIN();

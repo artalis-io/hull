@@ -15,6 +15,13 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+/* Compiler-safe memory zeroing that won't be optimized away */
+static void hull_secure_zero(void *p, size_t n)
+{
+    volatile unsigned char *vp = (volatile unsigned char *)p;
+    while (n--) *vp++ = 0;
+}
+
 /* ── SHA-256 ────────────────────────────────────────────────────────────
  *
  * TweetNaCl only implements SHA-512 — SHA-256 is declared in the header
@@ -159,14 +166,17 @@ int hl_cap_crypto_random(void *buf, size_t len)
 #endif
 }
 
-/* ── PBKDF2-HMAC-SHA256 ────────────────────────────────────────────── */
+/* ── HMAC-SHA256 ───────────────────────────────────────────────────── */
 
-static int hmac_sha256(const uint8_t *key, size_t key_len,
-                       const uint8_t *msg, size_t msg_len,
-                       uint8_t out[32])
+int hl_cap_crypto_hmac_sha256(const uint8_t *key, size_t key_len,
+                              const uint8_t *msg, size_t msg_len,
+                              uint8_t out[32])
 {
     uint8_t k_ipad[64], k_opad[64];
     uint8_t tk[32];
+
+    if (!key || !msg || !out)
+        return -1;
 
     /* If key is longer than block size, hash it first */
     if (key_len > 64) {
@@ -182,24 +192,184 @@ static int hmac_sha256(const uint8_t *key, size_t key_len,
         k_opad[i] ^= key[i];
     }
 
-    /* inner hash: SHA256(k_ipad || msg) */
-    /* Max msg_len: salt_len(64) + 4 = 68 from pbkdf2 → inner_len ≤ 132 */
-    if (msg_len > 68)
+    /* inner hash: SHA256(k_ipad || msg)
+     *
+     * Hybrid stack/heap pattern: use a ~4 KB stack buffer for small
+     * messages, falling back to malloc for larger inputs. The 4096-byte
+     * threshold keeps stack usage well under 1% of typical thread stacks
+     * (1-2 MiB on Linux/macOS, same for Cosmopolitan). This pattern
+     * repeats across all crypto functions in this file. */
+    if (msg_len > SIZE_MAX / 2) {
+        hull_secure_zero(k_ipad, sizeof(k_ipad));
+        hull_secure_zero(k_opad, sizeof(k_opad));
+        hull_secure_zero(tk, sizeof(tk));
         return -1;
-    uint8_t inner[132];
+    }
     size_t inner_len = 64 + msg_len;
-    memcpy(inner, k_ipad, 64);
-    memcpy(inner + 64, msg, msg_len);
+    uint8_t stack_inner[4160]; /* 64 + 4096 */
+    uint8_t *inner_buf = (inner_len <= sizeof(stack_inner)) ? stack_inner
+                                                             : malloc(inner_len);
+    if (!inner_buf) {
+        hull_secure_zero(k_ipad, sizeof(k_ipad));
+        hull_secure_zero(k_opad, sizeof(k_opad));
+        hull_secure_zero(tk, sizeof(tk));
+        return -1;
+    }
+    memcpy(inner_buf, k_ipad, 64);
+    memcpy(inner_buf + 64, msg, msg_len);
     uint8_t inner_hash[32];
-    hl_cap_crypto_sha256(inner, inner_len, inner_hash);
+    hl_cap_crypto_sha256(inner_buf, inner_len, inner_hash);
+    if (inner_buf != stack_inner) free(inner_buf);
 
     /* outer hash: SHA256(k_opad || inner_hash) */
     uint8_t outer[64 + 32];
     memcpy(outer, k_opad, 64);
     memcpy(outer + 64, inner_hash, 32);
     hl_cap_crypto_sha256(outer, 96, out);
+
+    hull_secure_zero(k_ipad, sizeof(k_ipad));
+    hull_secure_zero(k_opad, sizeof(k_opad));
+    hull_secure_zero(tk, sizeof(tk));
+    hull_secure_zero(inner_hash, sizeof(inner_hash));
     return 0;
 }
+
+/* ── HMAC-SHA256 verify (constant-time) ────────────────────────────── */
+
+int hl_cap_crypto_hmac_sha256_verify(const uint8_t *key, size_t key_len,
+                                      const uint8_t *msg, size_t msg_len,
+                                      const uint8_t expected[32])
+{
+    if (!key || !msg || !expected)
+        return -1;
+
+    uint8_t computed[32];
+    if (hl_cap_crypto_hmac_sha256(key, key_len, msg, msg_len, computed) != 0) {
+        hull_secure_zero(computed, sizeof(computed));
+        return -1;
+    }
+
+    /* Constant-time comparison: XOR-accumulate over all bytes.
+     * volatile prevents the compiler from short-circuiting. */
+    volatile uint8_t diff = 0;
+    for (int i = 0; i < 32; i++)
+        diff |= computed[i] ^ expected[i];
+
+    hull_secure_zero(computed, sizeof(computed));
+    return (diff == 0) ? 0 : -1;
+}
+
+/* ── Base64url encode/decode ───────────────────────────────────────── */
+
+static const char b64url_chars[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+int hl_cap_crypto_base64url_encode(const void *data, size_t len,
+                                   char *out, size_t out_size,
+                                   size_t *out_len)
+{
+    if (!data || !out || !out_len)
+        return -1;
+
+    /* Overflow guard before size calculation */
+    if (len > SIZE_MAX / 4)
+        return -1;
+
+    /* Calculate output length (no padding) */
+    size_t needed = ((len * 4) + 2) / 3;
+    if (needed >= out_size)
+        return -1;
+
+    const uint8_t *p = (const uint8_t *)data;
+    size_t i = 0, j = 0;
+
+    while (i + 2 < len) {
+        uint32_t v = ((uint32_t)p[i] << 16) | ((uint32_t)p[i+1] << 8) | p[i+2];
+        out[j++] = b64url_chars[(v >> 18) & 0x3f];
+        out[j++] = b64url_chars[(v >> 12) & 0x3f];
+        out[j++] = b64url_chars[(v >>  6) & 0x3f];
+        out[j++] = b64url_chars[ v        & 0x3f];
+        i += 3;
+    }
+
+    if (i < len) {
+        uint32_t v = (uint32_t)p[i] << 16;
+        if (i + 1 < len)
+            v |= (uint32_t)p[i+1] << 8;
+        out[j++] = b64url_chars[(v >> 18) & 0x3f];
+        out[j++] = b64url_chars[(v >> 12) & 0x3f];
+        if (i + 1 < len)
+            out[j++] = b64url_chars[(v >> 6) & 0x3f];
+    }
+
+    out[j] = '\0';
+    *out_len = j;
+    return 0;
+}
+
+static int b64url_decode_char(unsigned char c)
+{
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return 26 + (c - 'a');
+    if (c >= '0' && c <= '9') return 52 + (c - '0');
+    if (c == '-') return 62;
+    if (c == '_') return 63;
+    return -1;
+}
+
+int hl_cap_crypto_base64url_decode(const char *str, size_t str_len,
+                                   uint8_t *out, size_t out_size,
+                                   size_t *out_len)
+{
+    if (!str || !out || !out_len)
+        return -1;
+
+    /* Calculate expected output length */
+    size_t needed = (str_len * 3) / 4;
+    if (needed > out_size)
+        return -1;
+
+    size_t i = 0, j = 0;
+
+    while (i + 3 < str_len) {
+        int a = b64url_decode_char((unsigned char)str[i]);
+        int b = b64url_decode_char((unsigned char)str[i+1]);
+        int c = b64url_decode_char((unsigned char)str[i+2]);
+        int d = b64url_decode_char((unsigned char)str[i+3]);
+        if (a < 0 || b < 0 || c < 0 || d < 0)
+            return -1;
+        uint32_t v = ((uint32_t)a << 18) | ((uint32_t)b << 12) |
+                     ((uint32_t)c << 6) | (uint32_t)d;
+        out[j++] = (uint8_t)(v >> 16);
+        out[j++] = (uint8_t)(v >> 8);
+        out[j++] = (uint8_t)v;
+        i += 4;
+    }
+
+    size_t rem = str_len - i;
+    if (rem == 2) {
+        int a = b64url_decode_char((unsigned char)str[i]);
+        int b = b64url_decode_char((unsigned char)str[i+1]);
+        if (a < 0 || b < 0) return -1;
+        out[j++] = (uint8_t)(((uint32_t)a << 2) | ((uint32_t)b >> 4));
+    } else if (rem == 3) {
+        int a = b64url_decode_char((unsigned char)str[i]);
+        int b = b64url_decode_char((unsigned char)str[i+1]);
+        int c = b64url_decode_char((unsigned char)str[i+2]);
+        if (a < 0 || b < 0 || c < 0) return -1;
+        uint32_t v = ((uint32_t)a << 10) | ((uint32_t)b << 4) |
+                     ((uint32_t)c >> 2);
+        out[j++] = (uint8_t)(v >> 8);
+        out[j++] = (uint8_t)v;
+    } else if (rem == 1) {
+        return -1; /* invalid: 1 char remainder */
+    }
+
+    *out_len = j;
+    return 0;
+}
+
+/* ── PBKDF2-HMAC-SHA256 ────────────────────────────────────────────── */
 
 int hl_cap_crypto_pbkdf2(const char *password, size_t pw_len,
                            const uint8_t *salt, size_t salt_len,
@@ -228,15 +398,21 @@ int hl_cap_crypto_pbkdf2(const char *password, size_t pw_len,
         work[salt_len + 3] = (uint8_t)(block_num);
 
         uint8_t u[32], t[32];
-        if (hmac_sha256((const uint8_t *)password, pw_len,
-                        work, salt_len + 4, u) != 0)
+        if (hl_cap_crypto_hmac_sha256((const uint8_t *)password, pw_len,
+                        work, salt_len + 4, u) != 0) {
+            hull_secure_zero(u, sizeof(u));
+            hull_secure_zero(t, sizeof(t));
             return -1;
+        }
         memcpy(t, u, 32);
 
         for (int i = 1; i < iterations; i++) {
-            if (hmac_sha256((const uint8_t *)password, pw_len,
-                            u, 32, u) != 0)
+            if (hl_cap_crypto_hmac_sha256((const uint8_t *)password, pw_len,
+                            u, 32, u) != 0) {
+                hull_secure_zero(u, sizeof(u));
+                hull_secure_zero(t, sizeof(t));
                 return -1;
+            }
             for (int j = 0; j < 32; j++)
                 t[j] ^= u[j];
         }
@@ -245,6 +421,9 @@ int hl_cap_crypto_pbkdf2(const char *password, size_t pw_len,
         if (to_copy > 32)
             to_copy = 32;
         memcpy(out + offset, t, to_copy);
+
+        hull_secure_zero(u, sizeof(u));
+        hull_secure_zero(t, sizeof(t));
 
         offset += to_copy;
         block_num++;
@@ -361,9 +540,9 @@ int hl_cap_crypto_sha512(const void *data, size_t len, uint8_t out[64])
  * HMAC-SHA512, then truncate to 32 bytes.
  */
 
-static void hmac_sha512(const uint8_t *key, size_t key_len,
-                        const uint8_t *msg, size_t msg_len,
-                        uint8_t out[64])
+static int hmac_sha512(const uint8_t *key, size_t key_len,
+                       const uint8_t *msg, size_t msg_len,
+                       uint8_t out[64])
 {
     uint8_t k_ipad[128], k_opad[128];
     uint8_t tk[64];
@@ -389,8 +568,10 @@ static void hmac_sha512(const uint8_t *key, size_t key_len,
     uint8_t *inner_buf = (inner_len <= sizeof(stack_inner)) ? stack_inner
                                                              : malloc(inner_len);
     if (!inner_buf) {
-        memset(out, 0, 64);
-        return;
+        hull_secure_zero(k_ipad, sizeof(k_ipad));
+        hull_secure_zero(k_opad, sizeof(k_opad));
+        hull_secure_zero(tk, sizeof(tk));
+        return -1;
     }
     memcpy(inner_buf, k_ipad, 128);
     memcpy(inner_buf + 128, msg, msg_len);
@@ -405,6 +586,12 @@ static void hmac_sha512(const uint8_t *key, size_t key_len,
     memcpy(outer_buf, k_opad, 128);
     memcpy(outer_buf + 128, inner_hash, 64);
     crypto_hash_sha512(out, outer_buf, 192);
+
+    hull_secure_zero(k_ipad, sizeof(k_ipad));
+    hull_secure_zero(k_opad, sizeof(k_opad));
+    hull_secure_zero(tk, sizeof(tk));
+    hull_secure_zero(inner_hash, sizeof(inner_hash));
+    return 0;
 }
 
 int hl_cap_crypto_auth(const void *msg, size_t msg_len,
@@ -414,8 +601,10 @@ int hl_cap_crypto_auth(const void *msg, size_t msg_len,
         return -1;
 
     uint8_t full[64];
-    hmac_sha512(key, 32, (const uint8_t *)msg, msg_len, full);
+    if (hmac_sha512(key, 32, (const uint8_t *)msg, msg_len, full) != 0)
+        return -1;
     memcpy(out, full, 32); /* truncate to 256 bits */
+    hull_secure_zero(full, sizeof(full));
     return 0;
 }
 

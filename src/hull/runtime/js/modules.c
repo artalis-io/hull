@@ -24,6 +24,13 @@
 #include <string.h>
 #include <stdio.h>
 
+/* Compiler-safe memory zeroing that won't be optimized away */
+static void secure_zero(void *p, size_t n)
+{
+    volatile unsigned char *vp = (volatile unsigned char *)p;
+    while (n--) *vp++ = 0;
+}
+
 /* ════════════════════════════════════════════════════════════════════
  * hull:app module
  *
@@ -910,6 +917,8 @@ static JSValue js_crypto_ed25519_keypair(JSContext *ctx, JSValueConst this_val,
     JSValue obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, obj, "publicKey", JS_NewString(ctx, pk_hex));
     JS_SetPropertyStr(ctx, obj, "secretKey", JS_NewString(ctx, sk_hex));
+    secure_zero(sk, sizeof(sk));
+    secure_zero(sk_hex, sizeof(sk_hex));
     return obj;
 }
 
@@ -939,6 +948,7 @@ static JSValue js_crypto_ed25519_sign(JSContext *ctx, JSValueConst this_val,
     if (hex_decode(sk_hex, sk_hex_len, sk, 64) != 0) {
         JS_FreeCString(ctx, data);
         JS_FreeCString(ctx, sk_hex);
+        secure_zero(sk, sizeof(sk));
         return JS_ThrowTypeError(ctx, "invalid hex in secret key");
     }
     JS_FreeCString(ctx, sk_hex);
@@ -946,9 +956,11 @@ static JSValue js_crypto_ed25519_sign(JSContext *ctx, JSValueConst this_val,
     uint8_t sig[64];
     if (hl_cap_crypto_ed25519_sign((const uint8_t *)data, data_len, sk, sig) != 0) {
         JS_FreeCString(ctx, data);
+        secure_zero(sk, sizeof(sk));
         return JS_ThrowInternalError(ctx, "ed25519 sign failed");
     }
     JS_FreeCString(ctx, data);
+    secure_zero(sk, sizeof(sk));
 
     char sig_hex[129];
     for (int i = 0; i < 64; i++)
@@ -1404,7 +1416,181 @@ static JSValue js_crypto_box_keypair(JSContext *ctx, JSValueConst this_val,
     JSValue obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, obj, "publicKey", JS_NewString(ctx, pk_hex));
     JS_SetPropertyStr(ctx, obj, "secretKey", JS_NewString(ctx, sk_hex));
+    secure_zero(sk, sizeof(sk));
+    secure_zero(sk_hex, sizeof(sk_hex));
     return obj;
+}
+
+/* crypto.hmacSha256(data, keyHex) → hex string */
+static JSValue js_crypto_hmac_sha256(JSContext *ctx, JSValueConst this_val,
+                                      int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 2)
+        return JS_ThrowTypeError(ctx, "crypto.hmacSha256 requires (data, keyHex)");
+
+    size_t data_len;
+    const char *data = JS_ToCStringLen(ctx, &data_len, argv[0]);
+    if (!data) return JS_EXCEPTION;
+
+    size_t key_hex_len;
+    const char *key_hex = JS_ToCStringLen(ctx, &key_hex_len, argv[1]);
+    if (!key_hex) { JS_FreeCString(ctx, data); return JS_EXCEPTION; }
+
+    if (key_hex_len % 2 != 0 || key_hex_len == 0 || key_hex_len > 256) {
+        JS_FreeCString(ctx, data);
+        JS_FreeCString(ctx, key_hex);
+        return JS_ThrowTypeError(ctx, "key must be 1-128 bytes (2-256 hex chars)");
+    }
+
+    size_t key_len = key_hex_len / 2;
+    uint8_t key[128];
+    if (hex_decode(key_hex, key_hex_len, key, key_len) != 0) {
+        JS_FreeCString(ctx, data);
+        JS_FreeCString(ctx, key_hex);
+        return JS_ThrowTypeError(ctx, "invalid hex in key");
+    }
+    JS_FreeCString(ctx, key_hex);
+
+    uint8_t out[32];
+    if (hl_cap_crypto_hmac_sha256(key, key_len,
+                                  (const uint8_t *)data, data_len, out) != 0) {
+        JS_FreeCString(ctx, data);
+        secure_zero(key, sizeof(key));
+        return JS_ThrowInternalError(ctx, "hmacSha256 failed");
+    }
+    JS_FreeCString(ctx, data);
+    secure_zero(key, sizeof(key));
+
+    char hex[65];
+    for (int i = 0; i < 32; i++)
+        snprintf(hex + i * 2, 3, "%02x", out[i]);
+    hex[64] = '\0';
+
+    return JS_NewString(ctx, hex);
+}
+
+/* crypto.hmacSha256Verify(data, keyHex, expectedHex) → boolean */
+static JSValue js_crypto_hmac_sha256_verify(JSContext *ctx, JSValueConst this_val,
+                                             int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 3)
+        return JS_ThrowTypeError(ctx, "crypto.hmacSha256Verify requires (data, keyHex, expectedHex)");
+
+    size_t data_len;
+    const char *data = JS_ToCStringLen(ctx, &data_len, argv[0]);
+    if (!data) return JS_EXCEPTION;
+
+    size_t key_hex_len;
+    const char *key_hex = JS_ToCStringLen(ctx, &key_hex_len, argv[1]);
+    if (!key_hex) { JS_FreeCString(ctx, data); return JS_EXCEPTION; }
+
+    size_t expected_hex_len;
+    const char *expected_hex = JS_ToCStringLen(ctx, &expected_hex_len, argv[2]);
+    if (!expected_hex) {
+        JS_FreeCString(ctx, data);
+        JS_FreeCString(ctx, key_hex);
+        return JS_EXCEPTION;
+    }
+
+    if (key_hex_len % 2 != 0 || key_hex_len == 0 || key_hex_len > 256) {
+        JS_FreeCString(ctx, data);
+        JS_FreeCString(ctx, key_hex);
+        JS_FreeCString(ctx, expected_hex);
+        return JS_ThrowTypeError(ctx, "key must be 1-128 bytes (2-256 hex chars)");
+    }
+    if (expected_hex_len != 64) {
+        JS_FreeCString(ctx, data);
+        JS_FreeCString(ctx, key_hex);
+        JS_FreeCString(ctx, expected_hex);
+        return JS_ThrowTypeError(ctx, "expected mac must be 64 hex chars (32 bytes)");
+    }
+
+    size_t key_len = key_hex_len / 2;
+    uint8_t key[128];
+    if (hex_decode(key_hex, key_hex_len, key, key_len) != 0) {
+        JS_FreeCString(ctx, data);
+        JS_FreeCString(ctx, key_hex);
+        JS_FreeCString(ctx, expected_hex);
+        return JS_ThrowTypeError(ctx, "invalid hex in key");
+    }
+    JS_FreeCString(ctx, key_hex);
+
+    uint8_t expected[32];
+    if (hex_decode(expected_hex, expected_hex_len, expected, 32) != 0) {
+        JS_FreeCString(ctx, data);
+        JS_FreeCString(ctx, expected_hex);
+        secure_zero(key, sizeof(key));
+        return JS_ThrowTypeError(ctx, "invalid hex in expected mac");
+    }
+    JS_FreeCString(ctx, expected_hex);
+
+    int rc = hl_cap_crypto_hmac_sha256_verify(key, key_len,
+                                               (const uint8_t *)data, data_len,
+                                               expected);
+    JS_FreeCString(ctx, data);
+    secure_zero(key, sizeof(key));
+
+    return JS_NewBool(ctx, rc == 0);
+}
+
+/* crypto.base64urlEncode(data) → string (no padding) */
+static JSValue js_crypto_base64url_encode(JSContext *ctx, JSValueConst this_val,
+                                           int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "crypto.base64urlEncode requires (data)");
+
+    size_t len;
+    const char *data = JS_ToCStringLen(ctx, &len, argv[0]);
+    if (!data) return JS_EXCEPTION;
+
+    size_t out_size = ((len * 4) + 2) / 3 + 1;
+    char *out = js_malloc(ctx, out_size);
+    if (!out) { JS_FreeCString(ctx, data); return JS_EXCEPTION; }
+
+    size_t out_len;
+    if (hl_cap_crypto_base64url_encode(data, len, out, out_size, &out_len) != 0) {
+        JS_FreeCString(ctx, data);
+        js_free(ctx, out);
+        return JS_ThrowInternalError(ctx, "base64urlEncode failed");
+    }
+    JS_FreeCString(ctx, data);
+
+    JSValue result = JS_NewStringLen(ctx, out, out_len);
+    js_free(ctx, out);
+    return result;
+}
+
+/* crypto.base64urlDecode(str) → string or null on error */
+static JSValue js_crypto_base64url_decode(JSContext *ctx, JSValueConst this_val,
+                                           int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "crypto.base64urlDecode requires (str)");
+
+    size_t str_len;
+    const char *str = JS_ToCStringLen(ctx, &str_len, argv[0]);
+    if (!str) return JS_EXCEPTION;
+
+    size_t out_size = (str_len * 3) / 4 + 1;
+    uint8_t *out = js_malloc(ctx, out_size);
+    if (!out) { JS_FreeCString(ctx, str); return JS_EXCEPTION; }
+
+    size_t out_len;
+    if (hl_cap_crypto_base64url_decode(str, str_len, out, out_size, &out_len) != 0) {
+        JS_FreeCString(ctx, str);
+        js_free(ctx, out);
+        return JS_NULL;
+    }
+    JS_FreeCString(ctx, str);
+
+    JSValue result = JS_NewStringLen(ctx, (const char *)out, out_len);
+    js_free(ctx, out);
+    return result;
 }
 
 static int js_crypto_module_init(JSContext *ctx, JSModuleDef *m)
@@ -1440,6 +1626,14 @@ static int js_crypto_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_crypto_box_open, "boxOpen", 4));
     JS_SetPropertyStr(ctx, crypto, "boxKeypair",
                       JS_NewCFunction(ctx, js_crypto_box_keypair, "boxKeypair", 0));
+    JS_SetPropertyStr(ctx, crypto, "hmacSha256",
+                      JS_NewCFunction(ctx, js_crypto_hmac_sha256, "hmacSha256", 2));
+    JS_SetPropertyStr(ctx, crypto, "hmacSha256Verify",
+                      JS_NewCFunction(ctx, js_crypto_hmac_sha256_verify, "hmacSha256Verify", 3));
+    JS_SetPropertyStr(ctx, crypto, "base64urlEncode",
+                      JS_NewCFunction(ctx, js_crypto_base64url_encode, "base64urlEncode", 1));
+    JS_SetPropertyStr(ctx, crypto, "base64urlDecode",
+                      JS_NewCFunction(ctx, js_crypto_base64url_decode, "base64urlDecode", 1));
     JS_SetModuleExport(ctx, m, "crypto", crypto);
     return 0;
 }

@@ -263,10 +263,23 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
                   lua_tostring(lua->L, -1));
         lua_pop(lua->L, 1); /* pop error message */
         lua_pop(lua->L, 1); /* pop routes table */
+        /* Free ctx if middleware set it */
+        if (req->ctx) {
+            size_t ctx_sz = strlen((char *)req->ctx) + 1;
+            hl_alloc_free(lua->base.alloc, req->ctx, ctx_sz);
+            req->ctx = NULL;
+        }
         return -1;
     }
 
     lua_pop(lua->L, 1); /* pop routes table */
+
+    /* Free ctx if middleware set it */
+    if (req->ctx) {
+        size_t ctx_sz = strlen((char *)req->ctx) + 1;
+        hl_alloc_free(lua->base.alloc, req->ctx, ctx_sz);
+        req->ctx = NULL;
+    }
     return 0;
 }
 
@@ -274,6 +287,17 @@ void hl_lua_free(HlLua *lua)
 {
     if (!lua)
         return;
+
+    /* Free tracked route allocations */
+    for (size_t i = 0; i < lua->route_count; i++)
+        hl_alloc_free(lua->base.alloc, lua->routes[i], sizeof(HlLuaRoute));
+    if (lua->routes) {
+        hl_alloc_free(lua->base.alloc, lua->routes,
+                      lua->route_cap * sizeof(void *));
+        lua->routes = NULL;
+        lua->route_count = 0;
+        lua->route_cap = 0;
+    }
 
     if (lua->L) {
         lua_close(lua->L);
@@ -309,6 +333,25 @@ void hl_lua_dump_error(HlLua *lua)
     if (tb && tb != msg)
         log_error("[hull:c] %s", tb);
     lua_pop(lua->L, 1); /* pop traceback */
+}
+
+/* ── Route tracking ────────────────────────────────────────────────── */
+
+static int hl_lua_track_route(HlLua *lua, void *route)
+{
+    if (lua->route_count >= lua->route_cap) {
+        size_t new_cap = lua->route_cap ? lua->route_cap * 2 : 8;
+        size_t old_sz = lua->route_cap * sizeof(void *);
+        size_t new_sz = new_cap * sizeof(void *);
+        void **new_arr = hl_alloc_realloc(lua->base.alloc,
+                                           lua->routes, old_sz, new_sz);
+        if (!new_arr)
+            return -1;
+        lua->routes = new_arr;
+        lua->route_cap = new_cap;
+    }
+    lua->routes[lua->route_count++] = route;
+    return 0;
 }
 
 /* ── Route wiring ──────────────────────────────────────────────────── */
@@ -357,10 +400,12 @@ int hl_lua_wire_routes(HlLua *lua, KlRouter *router)
         int handler_id = (int)lua_tointeger(L, -1);
 
         if (method_str && pattern) {
-            HlLuaRoute *route = malloc(sizeof(HlLuaRoute));
+            HlLuaRoute *route = hl_alloc_malloc(lua->base.alloc,
+                                                  sizeof(HlLuaRoute));
             if (route) {
                 route->lua = lua;
                 route->handler_id = handler_id;
+                hl_lua_track_route(lua, route);
                 kl_router_add(router, method_str, pattern,
                               hl_lua_keel_handler, route, NULL);
             }
@@ -379,6 +424,7 @@ int hl_lua_wire_routes(HlLua *lua, KlRouter *router)
 int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
                                void *(*alloc_fn)(size_t))
 {
+    (void)alloc_fn; /* routes always use Hull allocator */
     lua_State *L = lua->L;
 
     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_route_defs");
@@ -411,12 +457,12 @@ int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
         int handler_id = (int)lua_tointeger(L, -1);
 
         if (method_str && pattern) {
-            void *mem = alloc_fn ? alloc_fn(sizeof(HlLuaRoute))
-                                 : malloc(sizeof(HlLuaRoute));
-            HlLuaRoute *route = (HlLuaRoute *)mem;
+            HlLuaRoute *route = hl_alloc_malloc(lua->base.alloc,
+                                                  sizeof(HlLuaRoute));
             if (route) {
                 route->lua = lua;
                 route->handler_id = handler_id;
+                hl_lua_track_route(lua, route);
                 kl_server_route(server, method_str, pattern,
                                 hl_lua_keel_handler, route,
                                 hl_cap_body_factory);
@@ -449,12 +495,12 @@ int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
             int handler_id = (int)lua_tointeger(L, -1);
 
             if (method_str && pattern) {
-                void *mem = alloc_fn ? alloc_fn(sizeof(HlLuaRoute))
-                                     : malloc(sizeof(HlLuaRoute));
-                HlLuaRoute *ctx = (HlLuaRoute *)mem;
+                HlLuaRoute *ctx = hl_alloc_malloc(lua->base.alloc,
+                                                    sizeof(HlLuaRoute));
                 if (ctx) {
                     ctx->lua = lua;
                     ctx->handler_id = handler_id;
+                    hl_lua_track_route(lua, ctx);
                     kl_server_use(server, method_str, pattern,
                                   hl_lua_keel_middleware, ctx);
                 }
@@ -497,12 +543,20 @@ int hl_lua_dispatch_middleware(HlLua *lua, int handler_id,
     hl_lua_make_request(lua->L, req);
     hl_lua_make_response(lua->L, res);
 
+    /* Save a reference to the req table in the registry so we can
+     * read ctx after pcall (which consumes the arguments). */
+    lua_pushvalue(lua->L, -2); /* copy req table */
+    lua_setfield(lua->L, LUA_REGISTRYINDEX, "__hull_mw_req");
+
     /* Call handler(req, res) — expect 1 return value */
     if (lua_pcall(lua->L, 2, 1, 0) != LUA_OK) {
         log_error("[hull:c] lua middleware error: %s",
                   lua_tostring(lua->L, -1));
         lua_pop(lua->L, 1); /* pop error message */
         lua_pop(lua->L, 1); /* pop routes table */
+        /* Clean up registry ref */
+        lua_pushnil(lua->L);
+        lua_setfield(lua->L, LUA_REGISTRYINDEX, "__hull_mw_req");
         return -1;
     }
 
@@ -513,6 +567,42 @@ int hl_lua_dispatch_middleware(HlLua *lua, int handler_id,
     else if (lua_isboolean(lua->L, -1))
         result = lua_toboolean(lua->L, -1) ? 1 : 0;
     lua_pop(lua->L, 1); /* pop return value */
+
+    /* Serialize req.ctx to JSON and store in req->ctx so the handler
+     * dispatch (or next middleware) can reconstruct it. */
+    lua_getfield(lua->L, LUA_REGISTRYINDEX, "__hull_mw_req");
+    lua_getfield(lua->L, -1, "ctx");
+    if (lua_istable(lua->L, -1)) {
+        lua_getglobal(lua->L, "json");
+        lua_getfield(lua->L, -1, "encode");
+        lua_pushvalue(lua->L, -3); /* push ctx table */
+        if (lua_pcall(lua->L, 1, 1, 0) == LUA_OK) {
+            size_t json_len;
+            const char *json_str = lua_tolstring(lua->L, -1, &json_len);
+            if (json_str && json_len > 2 && json_len < 65536) { /* skip empty "{}" */
+                if (req->ctx) {
+                    size_t old_sz = strlen((char *)req->ctx) + 1;
+                    hl_alloc_free(lua->base.alloc, req->ctx, old_sz);
+                    req->ctx = NULL;
+                }
+                char *ctx_copy = hl_alloc_malloc(lua->base.alloc, json_len + 1);
+                if (ctx_copy) {
+                    memcpy(ctx_copy, json_str, json_len + 1);
+                    req->ctx = ctx_copy;
+                }
+            }
+            lua_pop(lua->L, 1); /* pop json string */
+        } else {
+            lua_pop(lua->L, 1); /* pop error */
+        }
+        lua_pop(lua->L, 1); /* pop json table */
+    }
+    lua_pop(lua->L, 1); /* pop ctx table */
+    lua_pop(lua->L, 1); /* pop saved req table */
+
+    /* Clean up registry ref */
+    lua_pushnil(lua->L);
+    lua_setfield(lua->L, LUA_REGISTRYINDEX, "__hull_mw_req");
 
     lua_pop(lua->L, 1); /* pop routes table */
     return result;
