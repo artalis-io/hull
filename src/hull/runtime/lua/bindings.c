@@ -159,8 +159,28 @@ void hl_lua_make_request(lua_State *L, KlRequest *req)
     }
     lua_setfield(L, -2, "body");
 
-    /* ctx — per-request context table (middleware → handler) */
+    /* ctx — per-request context table (middleware → handler).
+     * If req->ctx carries a JSON string from a prior middleware dispatch,
+     * parse it and merge into the ctx table; otherwise start empty. */
     lua_newtable(L);
+    if (req->ctx) {
+        int ctx_idx = lua_absindex(L, -1);
+        const char *json_ctx = (const char *)req->ctx;
+        lua_getglobal(L, "json");
+        lua_getfield(L, -1, "decode");
+        lua_pushstring(L, json_ctx);
+        if (lua_pcall(L, 1, 1, 0) == LUA_OK && lua_istable(L, -1)) {
+            /* Merge decoded table into ctx */
+            lua_pushnil(L);
+            while (lua_next(L, -2) != 0) {
+                lua_pushvalue(L, -2); /* copy key */
+                lua_insert(L, -2);    /* stack: ..., key, key, value */
+                lua_settable(L, ctx_idx);  /* ctx[key] = value */
+            }
+        }
+        lua_pop(L, 1); /* pop decoded table or error */
+        lua_pop(L, 1); /* pop json table */
+    }
     lua_setfield(L, -2, "ctx");
 }
 

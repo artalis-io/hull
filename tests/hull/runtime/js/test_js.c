@@ -1131,4 +1131,384 @@ UTEST(js_middleware, order_preserved)
     cleanup_js();
 }
 
+/* ── HMAC-SHA256 / base64url tests ─────────────────────────────────── */
+
+UTEST(js_cap, crypto_hmac_sha256)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    /* RFC 4231 Test Case 2: key="Jefe", data="what do ya want for nothing?" */
+    const char *code =
+        "import { crypto } from 'hull:crypto';\n"
+        "globalThis.__test_hmac = crypto.hmacSha256("
+        "  'what do ya want for nothing?', '4a656665');\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    char *hmac = eval_str("globalThis.__test_hmac");
+    ASSERT_NE(hmac, NULL);
+    ASSERT_STREQ(hmac,
+        "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+    free(hmac);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_cap, crypto_base64url_roundtrip)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { crypto } from 'hull:crypto';\n"
+        "globalThis.__test_b64_enc = crypto.base64urlEncode('Hello, World!');\n"
+        "globalThis.__test_b64_dec = crypto.base64urlDecode('SGVsbG8sIFdvcmxkIQ');\n"
+        "const orig = 'test data 123!@#';\n"
+        "globalThis.__test_b64_rt = crypto.base64urlDecode(crypto.base64urlEncode(orig)) === orig ? 1 : 0;\n"
+        "globalThis.__test_b64_inv = crypto.base64urlDecode('!!!invalid!!!') === null ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    char *enc = eval_str("globalThis.__test_b64_enc");
+    ASSERT_NE(enc, NULL);
+    ASSERT_STREQ(enc, "SGVsbG8sIFdvcmxkIQ");
+    free(enc);
+
+    char *dec = eval_str("globalThis.__test_b64_dec");
+    ASSERT_NE(dec, NULL);
+    ASSERT_STREQ(dec, "Hello, World!");
+    free(dec);
+
+    ASSERT_EQ(eval_int("globalThis.__test_b64_rt"), 1);
+    ASSERT_EQ(eval_int("globalThis.__test_b64_inv"), 1);
+
+    cleanup_js_caps();
+}
+
+/* ── hull:cookie tests ─────────────────────────────────────────────── */
+
+UTEST(js_stdlib, cookie_parse)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { cookie } from 'hull:cookie';\n"
+        "const r = cookie.parse('session=abc; theme=dark');\n"
+        "globalThis.__test_cp = (r.session === 'abc' && r.theme === 'dark') ? 1 : 0;\n"
+        "const e = cookie.parse('');\n"
+        "globalThis.__test_ce = Object.keys(e).length === 0 ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__test_cp"), 1);
+    ASSERT_EQ(eval_int("globalThis.__test_ce"), 1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, cookie_serialize)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { cookie } from 'hull:cookie';\n"
+        "globalThis.__test_cs = cookie.serialize('sid', 'abc123');\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    char *cookie = eval_str("globalThis.__test_cs");
+    ASSERT_NE(cookie, NULL);
+    ASSERT_NE(strstr(cookie, "sid=abc123"), NULL);
+    ASSERT_NE(strstr(cookie, "HttpOnly"), NULL);
+    ASSERT_NE(strstr(cookie, "Secure"), NULL);
+    ASSERT_NE(strstr(cookie, "SameSite=Lax"), NULL);
+    ASSERT_NE(strstr(cookie, "Path=/"), NULL);
+    free(cookie);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, cookie_clear)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { cookie } from 'hull:cookie';\n"
+        "globalThis.__test_cc = cookie.clear('sid');\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    char *cookie = eval_str("globalThis.__test_cc");
+    ASSERT_NE(cookie, NULL);
+    ASSERT_NE(strstr(cookie, "sid="), NULL);
+    ASSERT_NE(strstr(cookie, "Max-Age=0"), NULL);
+    free(cookie);
+
+    cleanup_js_caps();
+}
+
+/* ── hull:session tests ────────────────────────────────────────────── */
+
+UTEST(js_stdlib, session_create_and_load)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { session } from 'hull:session';\n"
+        "session.init({ ttl: 3600 });\n"
+        "const id = session.create({ userId: 42, email: 'test@example.com' });\n"
+        "globalThis.__test_sid_len = id ? id.length : 0;\n"
+        "const data = session.load(id);\n"
+        "globalThis.__test_sl = (data && data.userId === 42 && data.email === 'test@example.com') ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__test_sid_len"), 64);
+    ASSERT_EQ(eval_int("globalThis.__test_sl"), 1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, session_destroy)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { session } from 'hull:session';\n"
+        "session.init();\n"
+        "const id = session.create({ foo: 'bar' });\n"
+        "session.destroy(id);\n"
+        "globalThis.__test_sd = session.load(id) === null ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__test_sd"), 1);
+
+    cleanup_js_caps();
+}
+
+/* ── hull:jwt tests ────────────────────────────────────────────────── */
+
+UTEST(js_stdlib, jwt_sign_and_verify)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { jwt } from 'hull:jwt';\n"
+        "const token = jwt.sign({ userId: 1, exp: 9999999999 }, 'mysecret');\n"
+        "globalThis.__test_jt = token ? 1 : 0;\n"
+        "const result = jwt.verify(token, 'mysecret');\n"
+        "globalThis.__test_jv = (result && typeof result === 'object' && result.userId === 1) ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__test_jt"), 1);
+    ASSERT_EQ(eval_int("globalThis.__test_jv"), 1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, jwt_tampered_signature)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { jwt } from 'hull:jwt';\n"
+        "const token = jwt.sign({ userId: 1, exp: 9999999999 }, 'mysecret');\n"
+        "const result = jwt.verify(token, 'wrongsecret');\n"
+        "globalThis.__test_jts = (Array.isArray(result) && result[0] === null && "
+        "  result[1] === 'invalid signature') ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__test_jts"), 1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, jwt_decode_without_verify)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { jwt } from 'hull:jwt';\n"
+        "const token = jwt.sign({ userId: 99 }, 'secret');\n"
+        "const payload = jwt.decode(token);\n"
+        "globalThis.__test_jd = (payload && payload.userId === 99) ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__test_jd"), 1);
+
+    cleanup_js_caps();
+}
+
+/* ── hull:csrf tests ───────────────────────────────────────────────── */
+
+UTEST(js_stdlib, csrf_generate_and_verify)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { csrf } from 'hull:csrf';\n"
+        "const token = csrf.generate('session123', 'my_csrf_secret');\n"
+        "globalThis.__test_cg = token ? 1 : 0;\n"
+        "globalThis.__test_cv = csrf.verify(token, 'session123', 'my_csrf_secret') ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__test_cg"), 1);
+    ASSERT_EQ(eval_int("globalThis.__test_cv"), 1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, csrf_wrong_session_rejected)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { csrf } from 'hull:csrf';\n"
+        "const token = csrf.generate('session123', 'secret');\n"
+        "globalThis.__test_cws = csrf.verify(token, 'other_session', 'secret') ? 0 : 1;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__test_cws"), 1);
+
+    cleanup_js_caps();
+}
+
+/* ── hull:auth tests (smoke test — modules load and expose API) ───── */
+
+UTEST(js_cap, crypto_hmac_sha256_verify)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { crypto } from 'hull:crypto';\n"
+        "const mac = crypto.hmacSha256('what do ya want for nothing?', '4a656665');\n"
+        "globalThis.__test_hv_ok = crypto.hmacSha256Verify('what do ya want for nothing?', '4a656665', mac) ? 1 : 0;\n"
+        "globalThis.__test_hv_bad_mac = crypto.hmacSha256Verify('what do ya want for nothing?', '4a656665', "
+        "  '0000000000000000000000000000000000000000000000000000000000000000') ? 1 : 0;\n"
+        "const mac2 = crypto.hmacSha256('hello', '4a656665');\n"
+        "globalThis.__test_hv_bad_key = crypto.hmacSha256Verify('hello', 'deadbeef', mac2) ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    /* Correct MAC → true */
+    ASSERT_EQ(eval_int("globalThis.__test_hv_ok"), 1);
+
+    /* Wrong MAC → false */
+    ASSERT_EQ(eval_int("globalThis.__test_hv_bad_mac"), 0);
+
+    /* Wrong key → false */
+    ASSERT_EQ(eval_int("globalThis.__test_hv_bad_key"), 0);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, auth_module_loads)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { auth } from 'hull:auth';\n"
+        "globalThis.__test_am = ("
+        "  typeof auth.sessionMiddleware === 'function' &&\n"
+        "  typeof auth.jwtMiddleware === 'function' &&\n"
+        "  typeof auth.login === 'function' &&\n"
+        "  typeof auth.logout === 'function'\n"
+        ") ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__test_am"), 1);
+
+    cleanup_js_caps();
+}
+
 UTEST_MAIN();

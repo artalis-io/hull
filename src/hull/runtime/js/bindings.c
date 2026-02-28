@@ -120,8 +120,21 @@ JSValue hl_js_make_request(JSContext *ctx, KlRequest *req)
         JS_SetPropertyStr(ctx, obj, "body", JS_NULL);
     }
 
-    /* ctx — per-request context object (middleware → handler) */
-    JS_SetPropertyStr(ctx, obj, "ctx", JS_NewObject(ctx));
+    /* ctx — per-request context object (middleware → handler).
+     * If req->ctx carries a JSON string from a prior middleware dispatch,
+     * parse it; otherwise start with an empty object. */
+    if (req->ctx) {
+        const char *json_ctx = (const char *)req->ctx;
+        JSValue parsed = JS_ParseJSON(ctx, json_ctx, strlen(json_ctx), "<ctx>");
+        if (JS_IsException(parsed)) {
+            JS_FreeValue(ctx, JS_GetException(ctx));
+            JS_SetPropertyStr(ctx, obj, "ctx", JS_NewObject(ctx));
+        } else {
+            JS_SetPropertyStr(ctx, obj, "ctx", parsed);
+        }
+    } else {
+        JS_SetPropertyStr(ctx, obj, "ctx", JS_NewObject(ctx));
+    }
 
     return obj;
 }
@@ -166,9 +179,6 @@ static const char *hl_js_stash_body(JSContext *ctx, const char *data,
     return js->response_body;
 }
 
-/* Class ID for response opaque data */
-static JSClassID hl_response_class_id;
-
 static void hl_response_finalizer(JSRuntime *rt, JSValue val)
 {
     (void)rt;
@@ -183,7 +193,8 @@ static JSClassDef hl_response_class = {
 
 static KlResponse *get_response(JSContext *ctx, JSValueConst this_val)
 {
-    return (KlResponse *)JS_GetOpaque(this_val, hl_response_class_id);
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    return (KlResponse *)JS_GetOpaque(this_val, (JSClassID)js->response_class_id);
 }
 
 /* res.status(code) */
@@ -334,55 +345,47 @@ static JSValue js_res_redirect(JSContext *ctx, JSValueConst this_val,
 
 /* ── Response class registration ────────────────────────────────────── */
 
-static int hl_js_response_class_registered = 0;
-
-static int hl_js_ensure_response_class(JSContext *ctx)
+static int hl_js_ensure_response_class(HlJS *js)
 {
-    if (hl_js_response_class_registered)
+    if (js->response_class_registered)
         return 0;
 
-    JS_NewClassID(&hl_response_class_id);
-    JSRuntime *rt = JS_GetRuntime(ctx);
-    if (JS_NewClass(rt, hl_response_class_id, &hl_response_class) < 0)
+    JSClassID class_id = 0;
+    JS_NewClassID(&class_id);
+    js->response_class_id = (uint32_t)class_id;
+
+    JSRuntime *rt = JS_GetRuntime(js->ctx);
+    if (JS_NewClass(rt, class_id, &hl_response_class) < 0)
         return -1;
 
     /* Create prototype with methods */
-    JSValue proto = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, proto, "status",
-                      JS_NewCFunction(ctx, js_res_status, "status", 1));
-    JS_SetPropertyStr(ctx, proto, "header",
-                      JS_NewCFunction(ctx, js_res_header, "header", 2));
-    JS_SetPropertyStr(ctx, proto, "json",
-                      JS_NewCFunction(ctx, js_res_json, "json", 2));
-    JS_SetPropertyStr(ctx, proto, "html",
-                      JS_NewCFunction(ctx, js_res_html, "html", 1));
-    JS_SetPropertyStr(ctx, proto, "text",
-                      JS_NewCFunction(ctx, js_res_text, "text", 1));
-    JS_SetPropertyStr(ctx, proto, "redirect",
-                      JS_NewCFunction(ctx, js_res_redirect, "redirect", 2));
+    JSValue proto = JS_NewObject(js->ctx);
+    JS_SetPropertyStr(js->ctx, proto, "status",
+                      JS_NewCFunction(js->ctx, js_res_status, "status", 1));
+    JS_SetPropertyStr(js->ctx, proto, "header",
+                      JS_NewCFunction(js->ctx, js_res_header, "header", 2));
+    JS_SetPropertyStr(js->ctx, proto, "json",
+                      JS_NewCFunction(js->ctx, js_res_json, "json", 2));
+    JS_SetPropertyStr(js->ctx, proto, "html",
+                      JS_NewCFunction(js->ctx, js_res_html, "html", 1));
+    JS_SetPropertyStr(js->ctx, proto, "text",
+                      JS_NewCFunction(js->ctx, js_res_text, "text", 1));
+    JS_SetPropertyStr(js->ctx, proto, "redirect",
+                      JS_NewCFunction(js->ctx, js_res_redirect, "redirect", 2));
 
-    JS_SetClassProto(ctx, hl_response_class_id, proto);
-    hl_js_response_class_registered = 1;
+    JS_SetClassProto(js->ctx, class_id, proto);
+    js->response_class_registered = 1;
 
     return 0;
 }
 
 /* ── Public: create JS request/response objects ─────────────────────── */
 
-JSValue hl_js_make_response(JSContext *ctx, KlResponse *res)
+JSValue hl_js_make_response(HlJS *js, KlResponse *res)
 {
-    hl_js_ensure_response_class(ctx);
+    hl_js_ensure_response_class(js);
 
-    JSValue obj = JS_NewObjectClass(ctx, (int)hl_response_class_id);
+    JSValue obj = JS_NewObjectClass(js->ctx, (int)js->response_class_id);
     JS_SetOpaque(obj, res);
     return obj;
-}
-
-/*
- * Reset response class registration state. Called from hl_js_free()
- * so a subsequent hl_js_init() re-registers the class correctly.
- */
-void hl_js_reset_response_class(void)
-{
-    hl_js_response_class_registered = 0;
 }

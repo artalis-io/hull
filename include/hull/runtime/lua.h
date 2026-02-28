@@ -57,6 +57,11 @@ typedef struct HlLua {
     char           *response_body;
     size_t          response_body_size;
 
+    /* Tracked route allocations (freed in hl_lua_free) */
+    void          **routes;
+    size_t          route_count;
+    size_t          route_cap;
+
     /* Tool-mode unveil context (NULL in sandbox mode) */
     HlToolUnveilCtx *tool_unveil_ctx;
 } HlLua;

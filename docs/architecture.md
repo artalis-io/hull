@@ -154,12 +154,16 @@ SQL is always a literal string from app code. Parameters are bound via SQLite's 
 All primitives backed by vendored TweetNaCl (770 lines, public domain):
 
 - SHA-256, SHA-512 (hashing)
+- HMAC-SHA256 (JWT/CSRF token signing)
+- Base64url encode/decode (JWT encoding, no padding)
 - PBKDF2 (key derivation)
 - Ed25519 sign/verify/keypair (signatures)
 - XSalsa20+Poly1305 secretbox (symmetric AEAD)
 - Curve25519 box (asymmetric encryption)
 - HMAC-SHA512/256 (authentication)
 - `/dev/urandom` random bytes
+
+Key material is zeroed from stack buffers after use via `hull_secure_zero()` (volatile memset, not optimizable away).
 
 ### Time (`cap/time.c`)
 
@@ -220,9 +224,15 @@ typedef struct {
 - Exceeding memory limit → NULL allocation → script error (not crash)
 
 **Request dispatch:**
-- KlRequest → Lua table (method, path, headers, body, params)
+- KlRequest → Lua table (method, path, headers, body, params, ctx)
 - Route handler called as Lua function (1-based index)
 - Return marshaled via KlResponse builder
+
+**Middleware context (`req.ctx`):**
+- Middleware can set `req.ctx.session`, `req.ctx.user`, etc.
+- After middleware returns, `req.ctx` is JSON-serialized and stored in `KlRequest.ctx` (void pointer)
+- Next middleware or handler deserializes and merges `req.ctx` into a fresh table
+- Size capped at 64KB to prevent unbounded allocation
 
 ### QuickJS
 
@@ -234,10 +244,14 @@ typedef struct {
 - GC threshold (default 256 KB)
 
 **Request dispatch:**
-- KlRequest → JS object
+- KlRequest → JS object (method, path, headers, body, params, ctx)
 - Route handler called as JS function
 - Microtask queue drained after each request (`hl_js_run_jobs`)
 - Instruction counter reset before each dispatch
+
+**Middleware context (`req.ctx`):**
+- Same serialization model as Lua — JSON round-trip through `KlRequest.ctx`
+- Auth middleware attaches `{ sessionId, session }` or `{ token, claims }` to ctx
 
 ---
 
@@ -248,6 +262,11 @@ Embedded Lua/JS modules in `stdlib/`:
 | Module | Purpose |
 |--------|---------|
 | `hull.json` | Canonical JSON encode/decode (sorted keys for deterministic signatures) |
+| `hull.cookie` | Cookie parsing (`parse`) and serialization (`serialize`, `clear`) with secure defaults |
+| `hull.session` | Server-side sessions backed by SQLite (create, load, update, destroy, cleanup) |
+| `hull.jwt` | JWT HS256 sign/verify/decode — constant-time signature comparison, no "none" algorithm |
+| `hull.csrf` | Stateless CSRF tokens via HMAC-SHA256 — generate, verify, middleware factory |
+| `hull.auth` | Authentication middleware factories — session auth, JWT Bearer auth, login/logout helpers |
 | `hull.build` | Full build pipeline: extract platform, collect files, generate trampoline, compile, link, sign |
 | `hull.verify` | Dual-layer signature verification (CLI tool) |
 | `hull.inspect` | Display capabilities + signature status |

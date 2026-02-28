@@ -13,6 +13,26 @@
 int hl_cap_crypto_sha256(const void *data, size_t len, uint8_t out[32]);
 int hl_cap_crypto_random(void *buf, size_t len);
 
+/* ── HMAC-SHA256 ─────────────────────────────────────────────────────── */
+
+int hl_cap_crypto_hmac_sha256(const uint8_t *key, size_t key_len,
+                              const uint8_t *msg, size_t msg_len,
+                              uint8_t out[32]);
+
+/* Constant-time HMAC-SHA256 verify. Returns 0 on match, -1 on mismatch. */
+int hl_cap_crypto_hmac_sha256_verify(const uint8_t *key, size_t key_len,
+                                      const uint8_t *msg, size_t msg_len,
+                                      const uint8_t expected[32]);
+
+/* ── Base64url encode/decode (no padding) ────────────────────────────── */
+
+int hl_cap_crypto_base64url_encode(const void *data, size_t len,
+                                   char *out, size_t out_size,
+                                   size_t *out_len);
+int hl_cap_crypto_base64url_decode(const char *str, size_t str_len,
+                                   uint8_t *out, size_t out_size,
+                                   size_t *out_len);
+
 int hl_cap_crypto_pbkdf2(const char *password, size_t pw_len,
                            const uint8_t *salt, size_t salt_len,
                            int iterations,
