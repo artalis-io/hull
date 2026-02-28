@@ -428,7 +428,108 @@ int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
     }
 
     lua_pop(L, 1); /* __hull_route_defs table */
+
+    /* Wire middleware from __hull_middleware */
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_middleware");
+    if (lua_istable(L, -1)) {
+        int mw_count = (int)luaL_len(L, -1);
+        for (int i = 1; i <= mw_count; i++) {
+            lua_rawgeti(L, -1, i);
+            if (!lua_istable(L, -1)) {
+                lua_pop(L, 1);
+                continue;
+            }
+
+            lua_getfield(L, -1, "method");
+            lua_getfield(L, -2, "pattern");
+            lua_getfield(L, -3, "handler_id");
+
+            const char *method_str = lua_tostring(L, -3);
+            const char *pattern = lua_tostring(L, -2);
+            int handler_id = (int)lua_tointeger(L, -1);
+
+            if (method_str && pattern) {
+                void *mem = alloc_fn ? alloc_fn(sizeof(HlLuaRoute))
+                                     : malloc(sizeof(HlLuaRoute));
+                HlLuaRoute *ctx = (HlLuaRoute *)mem;
+                if (ctx) {
+                    ctx->lua = lua;
+                    ctx->handler_id = handler_id;
+                    kl_server_use(server, method_str, pattern,
+                                  hl_lua_keel_middleware, ctx);
+                }
+            }
+
+            lua_pop(L, 3); /* method_str, pattern, handler_id */
+            lua_pop(L, 1); /* middleware entry table */
+        }
+    }
+    lua_pop(L, 1); /* __hull_middleware table */
+
     return 0;
+}
+
+/* ── Middleware dispatch ────────────────────────────────────────────── */
+
+int hl_lua_dispatch_middleware(HlLua *lua, int handler_id,
+                               KlRequest *req, KlResponse *res)
+{
+    if (!lua || !lua->L || !req || !res)
+        return -1;
+
+    /* Reset scratch arena for this middleware call */
+    sh_arena_reset(lua->scratch);
+
+    /* Get the handler function from the route registry */
+    lua_getfield(lua->L, LUA_REGISTRYINDEX, "__hull_routes");
+    if (!lua_istable(lua->L, -1)) {
+        lua_pop(lua->L, 1);
+        return -1;
+    }
+
+    lua_rawgeti(lua->L, -1, handler_id);
+    if (!lua_isfunction(lua->L, -1)) {
+        lua_pop(lua->L, 2); /* pop function + routes table */
+        return -1;
+    }
+
+    /* Build request and response objects */
+    hl_lua_make_request(lua->L, req);
+    hl_lua_make_response(lua->L, res);
+
+    /* Call handler(req, res) — expect 1 return value */
+    if (lua_pcall(lua->L, 2, 1, 0) != LUA_OK) {
+        log_error("[hull:c] lua middleware error: %s",
+                  lua_tostring(lua->L, -1));
+        lua_pop(lua->L, 1); /* pop error message */
+        lua_pop(lua->L, 1); /* pop routes table */
+        return -1;
+    }
+
+    /* Capture return value: 0 = continue, non-zero = short-circuit */
+    int result = 0;
+    if (lua_isnumber(lua->L, -1))
+        result = (int)lua_tointeger(lua->L, -1);
+    else if (lua_isboolean(lua->L, -1))
+        result = lua_toboolean(lua->L, -1) ? 1 : 0;
+    lua_pop(lua->L, 1); /* pop return value */
+
+    lua_pop(lua->L, 1); /* pop routes table */
+    return result;
+}
+
+int hl_lua_keel_middleware(KlRequest *req, KlResponse *res, void *user_data)
+{
+    HlLuaRoute *ctx = (HlLuaRoute *)user_data;
+    int rc = hl_lua_dispatch_middleware(ctx->lua, ctx->handler_id, req, res);
+    if (rc < 0) {
+        /* Middleware error — short-circuit with 500 */
+        kl_response_status(res, 500);
+        kl_response_header(res, "Content-Type", "text/plain");
+        kl_response_body(res, "Internal Server Error", 21);
+        return 1; /* short-circuit */
+    }
+    return rc;
 }
 
 /* ── Vtable adapters ───────────────────────────────────────────────── */

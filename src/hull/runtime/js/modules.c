@@ -114,7 +114,23 @@ static JSValue js_app_use(JSContext *ctx, JSValueConst this_val,
 
     JSValue global = JS_GetGlobalObject(ctx);
 
-    /* Store in __hull_middleware array */
+    /* Store handler in __hull_routes (same array as route handlers) */
+    JSValue routes = JS_GetPropertyStr(ctx, global, "__hull_routes");
+    if (JS_IsUndefined(routes)) {
+        routes = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, global, "__hull_routes", JS_DupValue(ctx, routes));
+    }
+
+    JSValue routes_len_val = JS_GetPropertyStr(ctx, routes, "length");
+    int32_t handler_id = 0;
+    JS_ToInt32(ctx, &handler_id, routes_len_val);
+    JS_FreeValue(ctx, routes_len_val);
+
+    JS_SetPropertyUint32(ctx, routes, (uint32_t)handler_id,
+                         JS_DupValue(ctx, argv[2]));
+    JS_FreeValue(ctx, routes);
+
+    /* Store in __hull_middleware array with handler_id */
     JSValue mw = JS_GetPropertyStr(ctx, global, "__hull_middleware");
     if (JS_IsUndefined(mw)) {
         mw = JS_NewArray(ctx);
@@ -129,7 +145,7 @@ static JSValue js_app_use(JSContext *ctx, JSValueConst this_val,
     JSValue entry = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, entry, "method", JS_NewString(ctx, method));
     JS_SetPropertyStr(ctx, entry, "pattern", JS_NewString(ctx, pattern));
-    JS_SetPropertyStr(ctx, entry, "handler", JS_DupValue(ctx, argv[2]));
+    JS_SetPropertyStr(ctx, entry, "handler_id", JS_NewInt32(ctx, handler_id));
     JS_SetPropertyUint32(ctx, mw, (uint32_t)idx, entry);
 
     JS_FreeValue(ctx, mw);

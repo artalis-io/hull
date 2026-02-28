@@ -15,6 +15,8 @@
 #include "lualib.h"
 #include "lauxlib.h"
 
+#include <keel/keel.h>
+
 #include "hull/limits.h"
 
 #include <sqlite3.h>
@@ -1108,6 +1110,225 @@ UTEST(lua_runtime, manifest_basic)
     ASSERT_EQ(m.hosts_count, 2);
     ASSERT_STREQ(m.hosts[0], "api.stripe.com");
     ASSERT_STREQ(m.hosts[1], "api.sendgrid.com");
+
+    cleanup_lua();
+}
+
+/* ── Middleware tests ────────────────────────────────────────────────── */
+
+UTEST(lua_middleware, registration_stores_handler_id)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+
+    int rc = luaL_dostring(lua_rt.L,
+        "app.use('*', '/*', function(req, res) return 0 end)\n");
+    ASSERT_EQ(rc, LUA_OK);
+
+    /* Verify middleware entry has handler_id (not handler function) */
+    lua_getfield(lua_rt.L, LUA_REGISTRYINDEX, "__hull_middleware");
+    ASSERT_TRUE(lua_istable(lua_rt.L, -1));
+    int mw_count = (int)luaL_len(lua_rt.L, -1);
+    ASSERT_EQ(mw_count, 1);
+
+    lua_rawgeti(lua_rt.L, -1, 1);
+    ASSERT_TRUE(lua_istable(lua_rt.L, -1));
+
+    lua_getfield(lua_rt.L, -1, "handler_id");
+    ASSERT_TRUE(lua_isinteger(lua_rt.L, -1));
+    int handler_id = (int)lua_tointeger(lua_rt.L, -1);
+    ASSERT_TRUE(handler_id > 0);
+    lua_pop(lua_rt.L, 1); /* handler_id */
+
+    lua_getfield(lua_rt.L, -1, "method");
+    ASSERT_STREQ(lua_tostring(lua_rt.L, -1), "*");
+    lua_pop(lua_rt.L, 1);
+
+    lua_getfield(lua_rt.L, -1, "pattern");
+    ASSERT_STREQ(lua_tostring(lua_rt.L, -1), "/*");
+    lua_pop(lua_rt.L, 1);
+
+    lua_pop(lua_rt.L, 1); /* entry table */
+    lua_pop(lua_rt.L, 1); /* middleware table */
+
+    /* Verify handler is in __hull_routes at the same index */
+    lua_getfield(lua_rt.L, LUA_REGISTRYINDEX, "__hull_routes");
+    ASSERT_TRUE(lua_istable(lua_rt.L, -1));
+    lua_rawgeti(lua_rt.L, -1, handler_id);
+    ASSERT_TRUE(lua_isfunction(lua_rt.L, -1));
+    lua_pop(lua_rt.L, 2); /* handler + routes table */
+
+    cleanup_lua();
+}
+
+UTEST(lua_middleware, handler_ids_do_not_collide_with_routes)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+
+    /* Register a route first, then middleware */
+    int rc = luaL_dostring(lua_rt.L,
+        "app.get('/test', function(req, res) end)\n"
+        "app.use('*', '/*', function(req, res) return 0 end)\n");
+    ASSERT_EQ(rc, LUA_OK);
+
+    /* Route gets handler_id=1, middleware gets handler_id=2 */
+    lua_getfield(lua_rt.L, LUA_REGISTRYINDEX, "__hull_route_defs");
+    lua_rawgeti(lua_rt.L, -1, 1);
+    lua_getfield(lua_rt.L, -1, "handler_id");
+    int route_id = (int)lua_tointeger(lua_rt.L, -1);
+    lua_pop(lua_rt.L, 3);
+
+    lua_getfield(lua_rt.L, LUA_REGISTRYINDEX, "__hull_middleware");
+    lua_rawgeti(lua_rt.L, -1, 1);
+    lua_getfield(lua_rt.L, -1, "handler_id");
+    int mw_id = (int)lua_tointeger(lua_rt.L, -1);
+    lua_pop(lua_rt.L, 3);
+
+    ASSERT_NE(route_id, mw_id);
+
+    /* Both should be valid function entries */
+    lua_getfield(lua_rt.L, LUA_REGISTRYINDEX, "__hull_routes");
+    lua_rawgeti(lua_rt.L, -1, route_id);
+    ASSERT_TRUE(lua_isfunction(lua_rt.L, -1));
+    lua_pop(lua_rt.L, 1);
+    lua_rawgeti(lua_rt.L, -1, mw_id);
+    ASSERT_TRUE(lua_isfunction(lua_rt.L, -1));
+    lua_pop(lua_rt.L, 2);
+
+    cleanup_lua();
+}
+
+UTEST(lua_middleware, dispatch_return_zero_continues)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+
+    int rc = luaL_dostring(lua_rt.L,
+        "app.use('*', '/*', function(req, res) return 0 end)\n");
+    ASSERT_EQ(rc, LUA_OK);
+
+    /* Get the handler_id */
+    lua_getfield(lua_rt.L, LUA_REGISTRYINDEX, "__hull_middleware");
+    lua_rawgeti(lua_rt.L, -1, 1);
+    lua_getfield(lua_rt.L, -1, "handler_id");
+    int handler_id = (int)lua_tointeger(lua_rt.L, -1);
+    lua_pop(lua_rt.L, 3);
+
+    /* Dispatch with stub request/response */
+    KlRequest req = {0};
+    KlResponse res = {0};
+    int result = hl_lua_dispatch_middleware(&lua_rt, handler_id, &req, &res);
+    ASSERT_EQ(result, 0);
+
+    cleanup_lua();
+}
+
+UTEST(lua_middleware, dispatch_return_nonzero_short_circuits)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+
+    int rc = luaL_dostring(lua_rt.L,
+        "app.use('*', '/*', function(req, res) return 1 end)\n");
+    ASSERT_EQ(rc, LUA_OK);
+
+    lua_getfield(lua_rt.L, LUA_REGISTRYINDEX, "__hull_middleware");
+    lua_rawgeti(lua_rt.L, -1, 1);
+    lua_getfield(lua_rt.L, -1, "handler_id");
+    int handler_id = (int)lua_tointeger(lua_rt.L, -1);
+    lua_pop(lua_rt.L, 3);
+
+    KlRequest req = {0};
+    KlResponse res = {0};
+    int result = hl_lua_dispatch_middleware(&lua_rt, handler_id, &req, &res);
+    ASSERT_EQ(result, 1);
+
+    cleanup_lua();
+}
+
+/* Track allocations from wire_routes_server to free them later */
+static void *wiring_allocs_lua[16];
+static int   wiring_alloc_count_lua;
+
+static void *tracking_alloc_lua(size_t size)
+{
+    void *p = malloc(size);
+    if (p && wiring_alloc_count_lua < 16)
+        wiring_allocs_lua[wiring_alloc_count_lua++] = p;
+    return p;
+}
+
+UTEST(lua_middleware, wiring_to_server)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+
+    /* Need at least one route for wire_routes_server to not fail */
+    int rc = luaL_dostring(lua_rt.L,
+        "app.get('/test', function(req, res) end)\n"
+        "app.use('*', '/*', function(req, res) return 0 end)\n"
+        "app.use('GET', '/api/*', function(req, res) return 0 end)\n");
+    ASSERT_EQ(rc, LUA_OK);
+
+    /* Create a minimal KlServer to wire into */
+    KlServer server;
+    KlConfig cfg = {
+        .port = 0,
+        .max_connections = 1,
+        .alloc = NULL,
+    };
+    kl_server_init(&server, &cfg);
+
+    wiring_alloc_count_lua = 0;
+    rc = hl_lua_wire_routes_server(&lua_rt, &server, tracking_alloc_lua);
+    ASSERT_EQ(rc, 0);
+
+    /* Verify middleware was registered */
+    ASSERT_EQ(server.router.mw_count, 2);
+
+    /* Free tracked allocations (route + middleware contexts) */
+    for (int i = 0; i < wiring_alloc_count_lua; i++)
+        free(wiring_allocs_lua[i]);
+
+    kl_server_free(&server);
+    cleanup_lua();
+}
+
+UTEST(lua_middleware, order_preserved)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+
+    /* Register two middlewares — order should be preserved */
+    int rc = luaL_dostring(lua_rt.L,
+        "app.use('*', '/*', function(req, res) return 0 end)\n"
+        "app.use('GET', '/api/*', function(req, res) return 0 end)\n");
+    ASSERT_EQ(rc, LUA_OK);
+
+    lua_getfield(lua_rt.L, LUA_REGISTRYINDEX, "__hull_middleware");
+    ASSERT_TRUE(lua_istable(lua_rt.L, -1));
+    ASSERT_EQ((int)luaL_len(lua_rt.L, -1), 2);
+
+    /* First middleware: method=*, pattern=/* */
+    lua_rawgeti(lua_rt.L, -1, 1);
+    lua_getfield(lua_rt.L, -1, "method");
+    ASSERT_STREQ(lua_tostring(lua_rt.L, -1), "*");
+    lua_pop(lua_rt.L, 1);
+    lua_getfield(lua_rt.L, -1, "pattern");
+    ASSERT_STREQ(lua_tostring(lua_rt.L, -1), "/*");
+    lua_pop(lua_rt.L, 2); /* pattern + entry */
+
+    /* Second middleware: method=GET, pattern=/api/* */
+    lua_rawgeti(lua_rt.L, -1, 2);
+    lua_getfield(lua_rt.L, -1, "method");
+    ASSERT_STREQ(lua_tostring(lua_rt.L, -1), "GET");
+    lua_pop(lua_rt.L, 1);
+    lua_getfield(lua_rt.L, -1, "pattern");
+    ASSERT_STREQ(lua_tostring(lua_rt.L, -1), "/api/*");
+    lua_pop(lua_rt.L, 2); /* pattern + entry */
+
+    lua_pop(lua_rt.L, 1); /* middleware table */
 
     cleanup_lua();
 }

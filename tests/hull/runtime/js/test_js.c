@@ -13,6 +13,8 @@
 #include "hull/cap/env.h"
 #include "quickjs.h"
 
+#include <keel/keel.h>
+
 #include <sqlite3.h>
 
 #include <string.h>
@@ -906,6 +908,226 @@ UTEST(js_cap, manifest_extract_js_partial)
     ASSERT_EQ(manifest.hosts_count, 0);
 
     hl_manifest_free_js_strings(js.ctx, &manifest);
+    cleanup_js();
+}
+
+/* ── Middleware tests ────────────────────────────────────────────────── */
+
+UTEST(js_middleware, registration_stores_handler_id)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.use('*', '/*', (req, res) => 0);\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    /* Verify __hull_middleware has handler_id */
+    int mw_count = eval_int(
+        "globalThis.__hull_middleware ? globalThis.__hull_middleware.length : 0");
+    ASSERT_EQ(mw_count, 1);
+
+    char *method = eval_str("globalThis.__hull_middleware[0].method");
+    ASSERT_NE(method, NULL);
+    ASSERT_STREQ(method, "*");
+    free(method);
+
+    char *pattern = eval_str("globalThis.__hull_middleware[0].pattern");
+    ASSERT_NE(pattern, NULL);
+    ASSERT_STREQ(pattern, "/*");
+    free(pattern);
+
+    int handler_id = eval_int("globalThis.__hull_middleware[0].handler_id");
+    ASSERT_TRUE(handler_id >= 0);
+
+    /* Verify handler is in __hull_routes */
+    int has_handler = eval_int(
+        "typeof globalThis.__hull_routes[globalThis.__hull_middleware[0].handler_id] === 'function' ? 1 : 0");
+    ASSERT_EQ(has_handler, 1);
+
+    cleanup_js();
+}
+
+UTEST(js_middleware, handler_ids_do_not_collide_with_routes)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.get('/test', (req, res) => {});\n"
+        "app.use('*', '/*', (req, res) => 0);\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    int route_id = eval_int("globalThis.__hull_route_defs[0].handler_id");
+    int mw_id = eval_int("globalThis.__hull_middleware[0].handler_id");
+    ASSERT_NE(route_id, mw_id);
+
+    /* Both should be valid function entries */
+    int route_fn = eval_int(
+        "typeof globalThis.__hull_routes[globalThis.__hull_route_defs[0].handler_id] === 'function' ? 1 : 0");
+    ASSERT_EQ(route_fn, 1);
+    int mw_fn = eval_int(
+        "typeof globalThis.__hull_routes[globalThis.__hull_middleware[0].handler_id] === 'function' ? 1 : 0");
+    ASSERT_EQ(mw_fn, 1);
+
+    cleanup_js();
+}
+
+UTEST(js_middleware, dispatch_return_zero_continues)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.use('*', '/*', (req, res) => 0);\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    int handler_id = eval_int("globalThis.__hull_middleware[0].handler_id");
+
+    KlRequest req = {0};
+    KlResponse res = {0};
+    int result = hl_js_dispatch_middleware(&js, handler_id, &req, &res);
+    ASSERT_EQ(result, 0);
+
+    cleanup_js();
+}
+
+UTEST(js_middleware, dispatch_return_nonzero_short_circuits)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.use('*', '/*', (req, res) => 1);\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    int handler_id = eval_int("globalThis.__hull_middleware[0].handler_id");
+
+    KlRequest req = {0};
+    KlResponse res = {0};
+    int result = hl_js_dispatch_middleware(&js, handler_id, &req, &res);
+    ASSERT_EQ(result, 1);
+
+    cleanup_js();
+}
+
+/* Track allocations from wire_routes_server to free them later */
+static void *wiring_allocs_js[16];
+static int   wiring_alloc_count_js;
+
+static void *tracking_alloc_js(size_t size)
+{
+    void *p = malloc(size);
+    if (p && wiring_alloc_count_js < 16)
+        wiring_allocs_js[wiring_alloc_count_js++] = p;
+    return p;
+}
+
+UTEST(js_middleware, wiring_to_server)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.get('/test', (req, res) => {});\n"
+        "app.use('*', '/*', (req, res) => 0);\n"
+        "app.use('GET', '/api/*', (req, res) => 0);\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    KlServer server;
+    KlConfig cfg = {
+        .port = 0,
+        .max_connections = 1,
+        .alloc = NULL,
+    };
+    kl_server_init(&server, &cfg);
+
+    wiring_alloc_count_js = 0;
+    int rc = hl_js_wire_routes_server(&js, &server, tracking_alloc_js);
+    ASSERT_EQ(rc, 0);
+
+    /* Verify middleware was registered */
+    ASSERT_EQ(server.router.mw_count, 2);
+
+    /* Free tracked allocations (route + middleware contexts) */
+    for (int i = 0; i < wiring_alloc_count_js; i++)
+        free(wiring_allocs_js[i]);
+
+    kl_server_free(&server);
+    cleanup_js();
+}
+
+UTEST(js_middleware, order_preserved)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.use('*', '/*', (req, res) => 0);\n"
+        "app.use('GET', '/api/*', (req, res) => 0);\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    int mw_count = eval_int("globalThis.__hull_middleware.length");
+    ASSERT_EQ(mw_count, 2);
+
+    char *m1 = eval_str("globalThis.__hull_middleware[0].method");
+    ASSERT_STREQ(m1, "*");
+    free(m1);
+
+    char *p1 = eval_str("globalThis.__hull_middleware[0].pattern");
+    ASSERT_STREQ(p1, "/*");
+    free(p1);
+
+    char *m2 = eval_str("globalThis.__hull_middleware[1].method");
+    ASSERT_STREQ(m2, "GET");
+    free(m2);
+
+    char *p2 = eval_str("globalThis.__hull_middleware[1].pattern");
+    ASSERT_STREQ(p2, "/api/*");
+    free(p2);
+
     cleanup_js();
 }
 
