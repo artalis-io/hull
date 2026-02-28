@@ -22,6 +22,7 @@
 #endif
 
 #include "hull/alloc.h"
+#include "hull/cap/db.h"
 #include "hull/cap/env.h"
 #include "hull/cap/http.h"
 
@@ -298,9 +299,15 @@ static int hull_serve(int argc, char **argv)
         goto cleanup_db;
     }
 
-    /* Enable WAL mode for concurrent access */
-    sqlite3_exec(db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL);
-    sqlite3_exec(db, "PRAGMA foreign_keys=ON", NULL, NULL, NULL);
+    /* Apply performance PRAGMAs (WAL, synchronous=NORMAL, mmap, etc.) */
+    if (hl_cap_db_init(db) != 0) {
+        log_error("[hull:c] database PRAGMA initialization failed");
+        goto cleanup_db;
+    }
+
+    /* Initialize prepared statement cache */
+    HlStmtCache stmt_cache;
+    hl_stmt_cache_init(&stmt_cache, db);
 
     /* Initialize Keel server */
     KlConfig config = {
@@ -367,6 +374,7 @@ static int hull_serve(int argc, char **argv)
     }
 
     rt->db = db;
+    rt->stmt_cache = &stmt_cache;
     rt->alloc = &alloc;
 
     if (rt->vt->init(rt, rt_cfg) != 0) {
@@ -478,6 +486,8 @@ static int hull_serve(int argc, char **argv)
 cleanup_server:
     kl_server_free(&server);
 cleanup_db:
+    hl_stmt_cache_destroy(&stmt_cache);
+    hl_cap_db_shutdown(db);
     sqlite3_close(db);
     free_route_allocs(&alloc);
 

@@ -336,7 +336,7 @@ static void lua_free_hl_values(lua_State *L, HlValue *params, int count)
 static int lua_db_query(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->base.db)
+    if (!lua || !lua->base.stmt_cache)
         return luaL_error(L, "database not available");
 
     const char *sql = luaL_checkstring(L, 1);
@@ -358,7 +358,7 @@ static int lua_db_query(lua_State *L)
         .row_count = 0,
     };
 
-    int rc = hl_cap_db_query(lua->base.db, sql, params, nparams,
+    int rc = hl_cap_db_query(lua->base.stmt_cache, sql, params, nparams,
                                 lua_query_row_cb, &qc, lua->base.alloc);
 
     /*
@@ -387,7 +387,7 @@ static int lua_db_query(lua_State *L)
 static int lua_db_exec(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->base.db)
+    if (!lua || !lua->base.stmt_cache)
         return luaL_error(L, "database not available");
 
     const char *sql = luaL_checkstring(L, 1);
@@ -399,7 +399,7 @@ static int lua_db_exec(lua_State *L)
             return luaL_error(L, "params must be a table");
     }
 
-    int rc = hl_cap_db_exec(lua->base.db, sql, params, nparams);
+    int rc = hl_cap_db_exec(lua->base.stmt_cache, sql, params, nparams);
 
     lua_free_hl_values(L, params, nparams);
 
@@ -421,10 +421,39 @@ static int lua_db_last_id(lua_State *L)
     return 1;
 }
 
+/* db.batch(fn) — execute fn() inside a transaction (BEGIN IMMEDIATE..COMMIT) */
+static int lua_db_batch(lua_State *L)
+{
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->base.db)
+        return luaL_error(L, "database not available");
+
+    luaL_checktype(L, 1, LUA_TFUNCTION);
+
+    if (hl_cap_db_begin(lua->base.db) != 0)
+        return luaL_error(L, "BEGIN failed: %s", sqlite3_errmsg(lua->base.db));
+
+    lua_pushvalue(L, 1); /* push the function */
+    int rc = lua_pcall(L, 0, 0, 0);
+
+    if (rc != LUA_OK) {
+        hl_cap_db_rollback(lua->base.db);
+        return lua_error(L); /* re-raise the error */
+    }
+
+    if (hl_cap_db_commit(lua->base.db) != 0) {
+        hl_cap_db_rollback(lua->base.db);
+        return luaL_error(L, "COMMIT failed: %s", sqlite3_errmsg(lua->base.db));
+    }
+
+    return 0;
+}
+
 static const luaL_Reg db_funcs[] = {
     {"query",   lua_db_query},
     {"exec",    lua_db_exec},
     {"last_id", lua_db_last_id},
+    {"batch",   lua_db_batch},
     {NULL, NULL}
 };
 
