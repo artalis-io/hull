@@ -429,7 +429,7 @@ static JSValue js_db_query(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (!js || !js->base.db)
+    if (!js || !js->base.stmt_cache)
         return JS_ThrowInternalError(ctx, "database not available");
 
     if (argc < 1)
@@ -454,7 +454,7 @@ static JSValue js_db_query(JSContext *ctx, JSValueConst this_val,
         .row_count = 0,
     };
 
-    int rc = hl_cap_db_query(js->base.db, sql, params, nparams,
+    int rc = hl_cap_db_query(js->base.stmt_cache, sql, params, nparams,
                                js_query_row_cb, &qc, js->base.alloc);
 
     js_free_hl_values(ctx, params, nparams);
@@ -475,7 +475,7 @@ static JSValue js_db_exec(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (!js || !js->base.db)
+    if (!js || !js->base.stmt_cache)
         return JS_ThrowInternalError(ctx, "database not available");
 
     if (argc < 1)
@@ -494,7 +494,7 @@ static JSValue js_db_exec(JSContext *ctx, JSValueConst this_val,
         }
     }
 
-    int rc = hl_cap_db_exec(js->base.db, sql, params, nparams);
+    int rc = hl_cap_db_exec(js->base.stmt_cache, sql, params, nparams);
 
     js_free_hl_values(ctx, params, nparams);
     JS_FreeCString(ctx, sql);
@@ -518,6 +518,39 @@ static JSValue js_db_last_id(JSContext *ctx, JSValueConst this_val,
     return JS_NewInt64(ctx, hl_cap_db_last_id(js->base.db));
 }
 
+/* db.batch(fn) — execute fn() inside a transaction (BEGIN IMMEDIATE..COMMIT) */
+static JSValue js_db_batch(JSContext *ctx, JSValueConst this_val,
+                            int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->base.db)
+        return JS_ThrowInternalError(ctx, "database not available");
+
+    if (argc < 1 || !JS_IsFunction(ctx, argv[0]))
+        return JS_ThrowTypeError(ctx, "db.batch requires a function argument");
+
+    if (hl_cap_db_begin(js->base.db) != 0)
+        return JS_ThrowInternalError(ctx, "BEGIN failed: %s",
+                                     sqlite3_errmsg(js->base.db));
+
+    JSValue result = JS_Call(ctx, argv[0], JS_UNDEFINED, 0, NULL);
+
+    if (JS_IsException(result)) {
+        hl_cap_db_rollback(js->base.db);
+        return result; /* propagate exception */
+    }
+    JS_FreeValue(ctx, result);
+
+    if (hl_cap_db_commit(js->base.db) != 0) {
+        hl_cap_db_rollback(js->base.db);
+        return JS_ThrowInternalError(ctx, "COMMIT failed: %s",
+                                     sqlite3_errmsg(js->base.db));
+    }
+
+    return JS_UNDEFINED;
+}
+
 static int js_db_module_init(JSContext *ctx, JSModuleDef *m)
 {
     JSValue db = JS_NewObject(ctx);
@@ -527,6 +560,8 @@ static int js_db_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_db_exec, "exec", 2));
     JS_SetPropertyStr(ctx, db, "lastId",
                       JS_NewCFunction(ctx, js_db_last_id, "lastId", 0));
+    JS_SetPropertyStr(ctx, db, "batch",
+                      JS_NewCFunction(ctx, js_db_batch, "batch", 1));
     JS_SetModuleExport(ctx, m, "db", db);
     return 0;
 }

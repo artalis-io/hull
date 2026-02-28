@@ -144,10 +144,29 @@ All paths must be relative and resolve within the declared base directory.
 
 ### Database (`cap/db.c`)
 
-- `hl_cap_db_query(db, sql, params, callback)` — SELECT with parameterized binding
-- `hl_cap_db_exec(db, sql, params)` — INSERT/UPDATE/DELETE with parameterized binding
+- `hl_cap_db_query(cache, sql, params, callback)` — SELECT with parameterized binding
+- `hl_cap_db_exec(cache, sql, params)` — INSERT/UPDATE/DELETE with parameterized binding
+- `hl_cap_db_begin/commit/rollback(db)` — explicit transaction control
+- `db.batch(fn)` — Lua/JS API wrapping fn() in BEGIN IMMEDIATE..COMMIT
 
 SQL is always a literal string from app code. Parameters are bound via SQLite's `sqlite3_bind_*` family. No string concatenation. SQL injection is structurally impossible.
+
+**Prepared statement cache**: A 32-entry LRU cache (`HlStmtCache`) avoids repeated `sqlite3_prepare_v2()` calls for hot queries. Statements are reused via `sqlite3_reset()` + `sqlite3_clear_bindings()`.
+
+**Performance PRAGMAs** (applied once at connection open via `hl_cap_db_init()`):
+
+| PRAGMA | Value | Rationale |
+|--------|-------|-----------|
+| journal_mode | WAL | Concurrent readers during writes |
+| synchronous | NORMAL | Sync on checkpoint only (safe in WAL mode) |
+| foreign_keys | ON | Referential integrity |
+| busy_timeout | 5000 | Wait 5s on lock contention |
+| cache_size | -16384 | 16 MB page cache (vs 2 MB default) |
+| temp_store | MEMORY | Temp tables in RAM |
+| mmap_size | 268435456 | Memory-map up to 256 MB for reads |
+| wal_autocheckpoint | 1000 | Checkpoint every ~4 MB of WAL |
+
+**Shutdown**: `hl_cap_db_shutdown()` runs `PRAGMA optimize` and `wal_checkpoint(TRUNCATE)` for clean state.
 
 ### Crypto (`cap/crypto.c`)
 

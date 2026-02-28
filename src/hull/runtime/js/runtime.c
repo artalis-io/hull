@@ -16,6 +16,7 @@
 #include "hull/cap/fs.h"
 #include "hull/cap/env.h"
 #include "hull/cap/http.h"
+#include "hull/cap/db.h"
 #include "quickjs.h"
 
 #include <keel/keel.h>
@@ -545,6 +546,9 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     if (!js || !js->ctx || !req || !res)
         return -1;
 
+    /* Guard: roll back any stale transaction left by a crashed handler */
+    hl_cap_db_guard_stale_txn(js->base.db);
+
     hl_js_reset_request(js);
 
     /* Get the handler function from the route registry */
@@ -803,6 +807,9 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
 {
     if (!js || !js->ctx || !req || !res)
         return -1;
+
+    /* Guard: roll back any stale transaction left by a crashed handler */
+    hl_cap_db_guard_stale_txn(js->base.db);
 
     hl_js_reset_request(js);
 

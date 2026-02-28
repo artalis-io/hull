@@ -16,10 +16,13 @@
 /* ── Test fixtures ──────────────────────────────────────────────────── */
 
 static sqlite3 *test_db = NULL;
+static HlStmtCache test_cache;
 
 static void setup_db(void)
 {
     sqlite3_open(":memory:", &test_db);
+    hl_cap_db_init(test_db);
+    hl_stmt_cache_init(&test_cache, test_db);
     sqlite3_exec(test_db,
         "CREATE TABLE users ("
         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -33,6 +36,8 @@ static void setup_db(void)
 static void teardown_db(void)
 {
     if (test_db) {
+        hl_stmt_cache_destroy(&test_cache);
+        hl_cap_db_shutdown(test_db);
         sqlite3_close(test_db);
         test_db = NULL;
     }
@@ -85,7 +90,7 @@ UTEST(hl_cap_db, exec_insert)
         { .type = HL_TYPE_DOUBLE, .d = 95.5 },
     };
 
-    int rc = hl_cap_db_exec(test_db,
+    int rc = hl_cap_db_exec(&test_cache,
         "INSERT INTO users (name, age, score) VALUES (?, ?, ?)",
         params, 3);
 
@@ -103,7 +108,7 @@ UTEST(hl_cap_db, exec_returns_changes)
         { .type = HL_TYPE_INT, .i = 30 },
         { .type = HL_TYPE_DOUBLE, .d = 95.5 },
     };
-    hl_cap_db_exec(test_db,
+    hl_cap_db_exec(&test_cache,
         "INSERT INTO users (name, age, score) VALUES (?, ?, ?)", p1, 3);
 
     HlValue p2[] = {
@@ -111,14 +116,14 @@ UTEST(hl_cap_db, exec_returns_changes)
         { .type = HL_TYPE_INT, .i = 25 },
         { .type = HL_TYPE_DOUBLE, .d = 87.0 },
     };
-    hl_cap_db_exec(test_db,
+    hl_cap_db_exec(&test_cache,
         "INSERT INTO users (name, age, score) VALUES (?, ?, ?)", p2, 3);
 
     /* Update all ages to 99 */
     HlValue p3[] = {
         { .type = HL_TYPE_INT, .i = 99 },
     };
-    int changes = hl_cap_db_exec(test_db,
+    int changes = hl_cap_db_exec(&test_cache,
         "UPDATE users SET age = ?", p3, 1);
 
     ASSERT_EQ(changes, 2);
@@ -135,11 +140,11 @@ UTEST(hl_cap_db, query_basic)
         { .type = HL_TYPE_INT, .i = 30 },
         { .type = HL_TYPE_DOUBLE, .d = 95.5 },
     };
-    hl_cap_db_exec(test_db,
+    hl_cap_db_exec(&test_cache,
         "INSERT INTO users (name, age, score) VALUES (?, ?, ?)", p1, 3);
 
     QueryResult result = { .count = 0 };
-    int rc = hl_cap_db_query(test_db,
+    int rc = hl_cap_db_query(&test_cache,
         "SELECT name, age, score FROM users", NULL, 0,
         collect_rows, &result, NULL);
 
@@ -161,7 +166,7 @@ UTEST(hl_cap_db, query_with_params)
         { .type = HL_TYPE_INT, .i = 30 },
         { .type = HL_TYPE_DOUBLE, .d = 95.5 },
     };
-    hl_cap_db_exec(test_db,
+    hl_cap_db_exec(&test_cache,
         "INSERT INTO users (name, age, score) VALUES (?, ?, ?)", p1, 3);
 
     HlValue p2[] = {
@@ -169,7 +174,7 @@ UTEST(hl_cap_db, query_with_params)
         { .type = HL_TYPE_INT, .i = 25 },
         { .type = HL_TYPE_DOUBLE, .d = 87.0 },
     };
-    hl_cap_db_exec(test_db,
+    hl_cap_db_exec(&test_cache,
         "INSERT INTO users (name, age, score) VALUES (?, ?, ?)", p2, 3);
 
     /* Query with param filter */
@@ -177,7 +182,7 @@ UTEST(hl_cap_db, query_with_params)
         { .type = HL_TYPE_INT, .i = 28 },
     };
     QueryResult result = { .count = 0 };
-    int rc = hl_cap_db_query(test_db,
+    int rc = hl_cap_db_query(&test_cache,
         "SELECT name, age, score FROM users WHERE age > ?",
         filter, 1, collect_rows, &result, NULL);
 
@@ -197,12 +202,12 @@ UTEST(hl_cap_db, query_null_param)
         { .type = HL_TYPE_NIL },
         { .type = HL_TYPE_DOUBLE, .d = 95.5 },
     };
-    int rc = hl_cap_db_exec(test_db,
+    int rc = hl_cap_db_exec(&test_cache,
         "INSERT INTO users (name, age, score) VALUES (?, ?, ?)", p1, 3);
     ASSERT_GE(rc, 0);
 
     QueryResult result = { .count = 0 };
-    rc = hl_cap_db_query(test_db,
+    rc = hl_cap_db_query(&test_cache,
         "SELECT name, age FROM users", NULL, 0,
         collect_rows, &result, NULL);
 
@@ -222,13 +227,13 @@ UTEST(hl_cap_db, last_id)
         { .type = HL_TYPE_INT, .i = 30 },
         { .type = HL_TYPE_DOUBLE, .d = 95.5 },
     };
-    hl_cap_db_exec(test_db,
+    hl_cap_db_exec(&test_cache,
         "INSERT INTO users (name, age, score) VALUES (?, ?, ?)", p, 3);
 
     int64_t id = hl_cap_db_last_id(test_db);
     ASSERT_EQ(id, 1);
 
-    hl_cap_db_exec(test_db,
+    hl_cap_db_exec(&test_cache,
         "INSERT INTO users (name, age, score) VALUES (?, ?, ?)", p, 3);
 
     id = hl_cap_db_last_id(test_db);
@@ -250,10 +255,10 @@ UTEST(hl_cap_db, null_sql)
 {
     setup_db();
 
-    int rc = hl_cap_db_query(test_db, NULL, NULL, 0, collect_rows, NULL, NULL);
+    int rc = hl_cap_db_query(&test_cache, NULL, NULL, 0, collect_rows, NULL, NULL);
     ASSERT_EQ(rc, -1);
 
-    rc = hl_cap_db_exec(test_db, NULL, NULL, 0);
+    rc = hl_cap_db_exec(&test_cache, NULL, NULL, 0);
     ASSERT_EQ(rc, -1);
 
     teardown_db();
@@ -264,7 +269,7 @@ UTEST(hl_cap_db, invalid_sql)
     setup_db();
 
     QueryResult result = { .count = 0 };
-    int rc = hl_cap_db_query(test_db,
+    int rc = hl_cap_db_query(&test_cache,
         "SELECT * FROM nonexistent_table", NULL, 0,
         collect_rows, &result, NULL);
     ASSERT_EQ(rc, -1);
@@ -282,18 +287,105 @@ UTEST(hl_cap_db, bool_param)
         { .type = HL_TYPE_BOOL, .b = 1 },
         { .type = HL_TYPE_DOUBLE, .d = 95.5 },
     };
-    int rc = hl_cap_db_exec(test_db,
+    int rc = hl_cap_db_exec(&test_cache,
         "INSERT INTO users (name, age, score) VALUES (?, ?, ?)", p, 3);
     ASSERT_GE(rc, 0);
 
     QueryResult result = { .count = 0 };
-    rc = hl_cap_db_query(test_db,
+    rc = hl_cap_db_query(&test_cache,
         "SELECT name, age FROM users", NULL, 0,
         collect_rows, &result, NULL);
 
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(result.count, 1);
     ASSERT_EQ(result.ages[0], 1); /* bool true → 1 */
+
+    teardown_db();
+}
+
+UTEST(hl_cap_db, transaction_commit)
+{
+    setup_db();
+
+    ASSERT_EQ(hl_cap_db_begin(test_db), 0);
+
+    HlValue p[] = {
+        { .type = HL_TYPE_TEXT, .s = "Alice", .len = 5 },
+        { .type = HL_TYPE_INT, .i = 30 },
+        { .type = HL_TYPE_DOUBLE, .d = 95.5 },
+    };
+    hl_cap_db_exec(&test_cache,
+        "INSERT INTO users (name, age, score) VALUES (?, ?, ?)", p, 3);
+    hl_cap_db_exec(&test_cache,
+        "INSERT INTO users (name, age, score) VALUES (?, ?, ?)", p, 3);
+
+    ASSERT_EQ(hl_cap_db_commit(test_db), 0);
+
+    /* Both rows should be visible */
+    QueryResult result = { .count = 0 };
+    hl_cap_db_query(&test_cache,
+        "SELECT name FROM users", NULL, 0,
+        collect_rows, &result, NULL);
+    ASSERT_EQ(result.count, 2);
+
+    teardown_db();
+}
+
+UTEST(hl_cap_db, transaction_rollback)
+{
+    setup_db();
+
+    ASSERT_EQ(hl_cap_db_begin(test_db), 0);
+
+    HlValue p[] = {
+        { .type = HL_TYPE_TEXT, .s = "Alice", .len = 5 },
+        { .type = HL_TYPE_INT, .i = 30 },
+        { .type = HL_TYPE_DOUBLE, .d = 95.5 },
+    };
+    hl_cap_db_exec(&test_cache,
+        "INSERT INTO users (name, age, score) VALUES (?, ?, ?)", p, 3);
+
+    ASSERT_EQ(hl_cap_db_rollback(test_db), 0);
+
+    /* Row should NOT be visible */
+    QueryResult result = { .count = 0 };
+    hl_cap_db_query(&test_cache,
+        "SELECT name FROM users", NULL, 0,
+        collect_rows, &result, NULL);
+    ASSERT_EQ(result.count, 0);
+
+    teardown_db();
+}
+
+UTEST(hl_cap_db, stmt_cache_reuse)
+{
+    setup_db();
+
+    /* Execute the same SQL twice — second should hit cache */
+    HlValue p1[] = {
+        { .type = HL_TYPE_TEXT, .s = "Alice", .len = 5 },
+        { .type = HL_TYPE_INT, .i = 30 },
+        { .type = HL_TYPE_DOUBLE, .d = 95.5 },
+    };
+    int rc1 = hl_cap_db_exec(&test_cache,
+        "INSERT INTO users (name, age, score) VALUES (?, ?, ?)", p1, 3);
+    ASSERT_GE(rc1, 0);
+
+    HlValue p2[] = {
+        { .type = HL_TYPE_TEXT, .s = "Bob", .len = 3 },
+        { .type = HL_TYPE_INT, .i = 25 },
+        { .type = HL_TYPE_DOUBLE, .d = 87.0 },
+    };
+    int rc2 = hl_cap_db_exec(&test_cache,
+        "INSERT INTO users (name, age, score) VALUES (?, ?, ?)", p2, 3);
+    ASSERT_GE(rc2, 0);
+
+    /* Verify both rows inserted */
+    QueryResult result = { .count = 0 };
+    hl_cap_db_query(&test_cache,
+        "SELECT name FROM users", NULL, 0,
+        collect_rows, &result, NULL);
+    ASSERT_EQ(result.count, 2);
 
     teardown_db();
 }

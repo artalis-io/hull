@@ -18,6 +18,7 @@ typedef struct HlFsConfig HlFsConfig;
 typedef struct HlEnvConfig HlEnvConfig;
 typedef struct HlHttpConfig HlHttpConfig;
 typedef struct HlManifest HlManifest;
+typedef struct HlStmtCache HlStmtCache;
 typedef struct sqlite3 sqlite3;
 typedef struct KlServer KlServer;
 
@@ -37,6 +38,7 @@ typedef struct HlRuntimeVtable {
 struct HlRuntime {
     const HlRuntimeVtable *vt;
     sqlite3      *db;
+    HlStmtCache  *stmt_cache;
     HlAllocator  *alloc;
     HlFsConfig   *fs_cfg;
     HlEnvConfig  *env_cfg;

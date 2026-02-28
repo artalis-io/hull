@@ -8,6 +8,7 @@
  */
 
 #include "hull/commands/test.h"
+#include "hull/cap/db.h"
 #include "hull/cap/tool.h"
 
 #ifdef HL_ENABLE_LUA
@@ -83,9 +84,11 @@ static int run_lua_tests(const char *app_dir, const char *entry)
         fprintf(stderr, "hull test: cannot open :memory: database\n");
         return 1;
     }
-    sqlite3_exec(db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL);
-    sqlite3_exec(db, "PRAGMA foreign_keys=ON", NULL, NULL, NULL);
+    hl_cap_db_init(db);
+    HlStmtCache lua_stmt_cache;
+    hl_stmt_cache_init(&lua_stmt_cache, db);
     lua.base.db = db;
+    lua.base.stmt_cache = &lua_stmt_cache;
 
     if (hl_lua_init(&lua, &cfg) != 0) {
         fprintf(stderr, "hull test: Lua init failed\n");
@@ -173,6 +176,8 @@ static int run_lua_tests(const char *app_dir, const char *entry)
     /* Cleanup */
     kl_router_free(&router);
     hl_lua_free(&lua);
+    hl_stmt_cache_destroy(&lua_stmt_cache);
+    hl_cap_db_shutdown(db);
     sqlite3_close(db);
 
     return failed > 0 ? 1 : 0;
@@ -195,9 +200,11 @@ static int run_js_tests(const char *app_dir, const char *entry)
         fprintf(stderr, "hull test: cannot open :memory: database\n");
         return 1;
     }
-    sqlite3_exec(db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL);
-    sqlite3_exec(db, "PRAGMA foreign_keys=ON", NULL, NULL, NULL);
+    hl_cap_db_init(db);
+    HlStmtCache js_stmt_cache;
+    hl_stmt_cache_init(&js_stmt_cache, db);
     js.base.db = db;
+    js.base.stmt_cache = &js_stmt_cache;
 
     if (hl_js_init(&js, &cfg) != 0) {
         fprintf(stderr, "hull test: QuickJS init failed\n");
@@ -300,6 +307,8 @@ static int run_js_tests(const char *app_dir, const char *entry)
 
     kl_router_free(&router);
     hl_js_free(&js);
+    hl_stmt_cache_destroy(&js_stmt_cache);
+    hl_cap_db_shutdown(db);
     sqlite3_close(db);
 
     return failed > 0 ? 1 : 0;
