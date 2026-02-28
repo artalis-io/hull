@@ -34,7 +34,7 @@ app.post("/tasks", function(req, res)
     end
     db.exec("INSERT INTO tasks (title, created_at) VALUES (?, ?)",
             { body.title, time.now() })
-    local id = db.lastId()
+    local id = db.last_id()
     res:status(201):json({ id = id, title = body.title, done = 0 })
 end)
 

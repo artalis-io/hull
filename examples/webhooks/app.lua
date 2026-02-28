@@ -112,7 +112,7 @@ app.post("/webhooks", function(req, res)
 
     db.exec("INSERT INTO webhooks (url, events, created_at) VALUES (?, ?, ?)",
             { url, events, time.now() })
-    local id = db.lastId()
+    local id = db.last_id()
 
     res:status(201):json({ id = id, url = url, events = events, active = 1 })
 end)
@@ -151,7 +151,7 @@ app.post("/events", function(req, res)
     -- Log the event
     db.exec("INSERT INTO event_log (event_type, payload, created_at) VALUES (?, ?, ?)",
             { event_type, payload_str, time.now() })
-    local event_id = db.lastId()
+    local event_id = db.last_id()
 
     -- Find matching webhooks
     local webhooks = db.query("SELECT * FROM webhooks WHERE active = 1")

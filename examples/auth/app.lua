@@ -66,7 +66,7 @@ app.post("/register", function(req, res)
     local hash = crypto.hash_password(password)
     db.exec("INSERT INTO users (email, password_hash, name, created_at) VALUES (?, ?, ?, ?)",
             { email, hash, name, time.now() })
-    local id = db.lastId()
+    local id = db.last_id()
 
     res:status(201):json({ id = id, email = email, name = name })
 end)

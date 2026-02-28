@@ -231,7 +231,7 @@ curl http://localhost:3000/webhooks/1/deliveries
 
 ### Unit tests (`hull test`)
 
-Each example has a `tests/test_app.lua` that runs in-process via Hull's built-in test framework — no TCP, no server startup, in-memory SQLite for isolation:
+Each example has both `tests/test_app.lua` and `tests/test_app.js` that run in-process via Hull's built-in test framework — no TCP, no server startup, in-memory SQLite for isolation. Running `hull test` on an example directory discovers and runs tests for both runtimes:
 
 ```bash
 hull test examples/hello/
@@ -258,6 +258,18 @@ test("description", function()
     test.ok(res.json.field)         -- truthiness
     test.err(fn, "pattern")         -- expected error
 end)
+```
+
+```javascript
+// JavaScript test API (test_app.js)
+test("description", () => {
+    const res = test.get("/path");
+    const res = test.post("/path", { body: '{"key":"value"}', headers: { ... } });
+
+    test.eq(res.status, 200);        // equality
+    test.ok(res.json.field);         // truthiness
+    test.err(() => { throw ... }, "pattern");  // expected error
+});
 ```
 
 `test.get/post/put/delete/patch` return `{ status, body, json }` where `json` is auto-decoded.

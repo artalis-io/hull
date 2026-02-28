@@ -91,20 +91,32 @@ static int test_dispatch(KlRouter *router, const char *method,
     for (int i = 0; i < num_params && i < KL_MAX_PARAMS; i++)
         req.params[i] = params[i];
 
-    /* Set headers */
+    /* Set headers — lowercase names to match llhttp parser behavior */
+    char lowered_names[KL_MAX_HEADERS][256];
     for (int i = 0; i < num_headers && i < KL_MAX_HEADERS; i++) {
-        req.headers[i].name = header_names[i];
-        req.headers[i].name_len = strlen(header_names[i]);
+        size_t nlen = strlen(header_names[i]);
+        if (nlen >= sizeof(lowered_names[0])) nlen = sizeof(lowered_names[0]) - 1;
+        for (size_t j = 0; j < nlen; j++) {
+            char c = header_names[i][j];
+            lowered_names[i][j] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+        }
+        lowered_names[i][nlen] = '\0';
+        req.headers[i].name = lowered_names[i];
+        req.headers[i].name_len = nlen;
         req.headers[i].value = header_values[i];
         req.headers[i].value_len = strlen(header_values[i]);
     }
     req.num_headers = num_headers;
 
-    /* Fake body reader if body provided */
-    KlBodyReader fake_body;
-    memset(&fake_body, 0, sizeof(fake_body));
+    /* Fake body reader if body provided — must be KlBufReader so that
+     * hl_cap_body_data() can cast and read .data/.len fields. */
+    KlBufReader fake_buf;
+    memset(&fake_buf, 0, sizeof(fake_buf));
     if (body_data && body_len > 0) {
-        req.body_reader = &fake_body;
+        fake_buf.data = (char *)body_data;
+        fake_buf.len = body_len;
+        fake_buf.cap = body_len;
+        req.body_reader = &fake_buf.base;
         req.content_length = body_len;
     }
 

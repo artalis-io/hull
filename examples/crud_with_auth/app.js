@@ -40,7 +40,7 @@ db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_user ON tasks (user_id)");
 
 // Load session on every request (optional — won't block unauthenticated)
 app.use("*", "/*", (req, _res) => {
-    const header = req.header("Cookie");
+    const header = req.headers["cookie"];
     if (!header) return 0;
 
     const cookies = cookie.parse(header);
