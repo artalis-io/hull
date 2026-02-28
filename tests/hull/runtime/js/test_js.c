@@ -10,6 +10,7 @@
 #include "utest.h"
 #include "hull/runtime/js.h"
 #include "hull/manifest.h"
+#include "hull/cap/db.h"
 #include "hull/cap/env.h"
 #include "quickjs.h"
 
@@ -46,6 +47,7 @@ static void cleanup_js(void)
 
 /* Init JS with database and env capabilities for testing */
 static sqlite3 *test_db = NULL;
+static HlStmtCache test_stmt_cache;
 static const char *env_allowed[] = { "HULL_TEST_VAR", NULL };
 static HlEnvConfig env_cfg = { .allowed = env_allowed, .count = 1 };
 
@@ -54,14 +56,18 @@ static void init_js_with_caps(void)
     if (js_initialized)
         hl_js_free(&js);
     if (test_db) {
+        hl_stmt_cache_destroy(&test_stmt_cache);
         sqlite3_close(test_db);
         test_db = NULL;
     }
 
     sqlite3_open(":memory:", &test_db);
+    hl_cap_db_init(test_db);
+    hl_stmt_cache_init(&test_stmt_cache, test_db);
     HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
     memset(&js, 0, sizeof(js));
     js.base.db = test_db;
+    js.base.stmt_cache = &test_stmt_cache;
     js.base.env_cfg = &env_cfg;
     int rc = hl_js_init(&js, &cfg);
     js_initialized = (rc == 0);
@@ -74,6 +80,7 @@ static void cleanup_js_caps(void)
         js_initialized = 0;
     }
     if (test_db) {
+        hl_stmt_cache_destroy(&test_stmt_cache);
         sqlite3_close(test_db);
         test_db = NULL;
     }

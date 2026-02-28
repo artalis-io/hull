@@ -14,6 +14,7 @@
 #include "hull/cap/fs.h"
 #include "hull/cap/env.h"
 #include "hull/cap/tool.h"
+#include "hull/cap/db.h"
 
 #include "lua.h"
 #include "lualib.h"
@@ -236,6 +237,9 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
 {
     if (!lua || !lua->L || !req || !res)
         return -1;
+
+    /* Guard: roll back any stale transaction left by a crashed handler */
+    hl_cap_db_guard_stale_txn(lua->base.db);
 
     /* Reset scratch arena for this request */
     sh_arena_reset(lua->scratch);
@@ -522,6 +526,9 @@ int hl_lua_dispatch_middleware(HlLua *lua, int handler_id,
 {
     if (!lua || !lua->L || !req || !res)
         return -1;
+
+    /* Guard: roll back any stale transaction left by a crashed handler */
+    hl_cap_db_guard_stale_txn(lua->base.db);
 
     /* Reset scratch arena for this middleware call */
     sh_arena_reset(lua->scratch);

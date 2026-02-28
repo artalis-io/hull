@@ -9,6 +9,7 @@
 
 #include "utest.h"
 #include "hull/runtime/lua.h"
+#include "hull/cap/db.h"
 #include "hull/cap/env.h"
 
 #include "lua.h"
@@ -52,6 +53,7 @@ static void cleanup_lua(void)
 
 /* Init lua with database and env capabilities for testing */
 static sqlite3 *test_db = NULL;
+static HlStmtCache test_stmt_cache;
 static const char *env_allowed[] = { "HULL_TEST_VAR", NULL };
 static HlEnvConfig env_cfg = { .allowed = env_allowed, .count = 1 };
 
@@ -60,14 +62,18 @@ static void init_lua_with_caps(void)
     if (lua_initialized)
         hl_lua_free(&lua_rt);
     if (test_db) {
+        hl_stmt_cache_destroy(&test_stmt_cache);
         sqlite3_close(test_db);
         test_db = NULL;
     }
 
     sqlite3_open(":memory:", &test_db);
+    hl_cap_db_init(test_db);
+    hl_stmt_cache_init(&test_stmt_cache, test_db);
     HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
     memset(&lua_rt, 0, sizeof(lua_rt));
     lua_rt.base.db = test_db;
+    lua_rt.base.stmt_cache = &test_stmt_cache;
     lua_rt.base.env_cfg = &env_cfg;
     int rc = hl_lua_init(&lua_rt, &cfg);
     lua_initialized = (rc == 0);
@@ -80,6 +86,7 @@ static void cleanup_lua_caps(void)
         lua_initialized = 0;
     }
     if (test_db) {
+        hl_stmt_cache_destroy(&test_stmt_cache);
         sqlite3_close(test_db);
         test_db = NULL;
     }
