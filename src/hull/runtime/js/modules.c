@@ -13,6 +13,7 @@
 #include "hull/cap/db.h"
 #include "hull/cap/time.h"
 #include "hull/cap/env.h"
+#include "hull/cap/http.h"
 #include "hull/cap/crypto.h"
 #include "quickjs.h"
 
@@ -1438,6 +1439,350 @@ int hl_js_init_crypto_module(JSContext *ctx, HlJS *js)
 }
 
 /* ════════════════════════════════════════════════════════════════════
+ * hull:http module
+ *
+ * http.request(method, url, opts?) → { status, body, headers }
+ * http.get(url, opts?)             → { status, body, headers }
+ * http.post(url, body, opts?)      → { status, body, headers }
+ * http.put(url, body, opts?)       → { status, body, headers }
+ * http.patch(url, body, opts?)     → { status, body, headers }
+ * http.del(url, opts?)             → { status, body, headers }
+ * ════════════════════════════════════════════════════════════════════ */
+
+/* Parse JS headers object { name: value } into HlHttpHeader array.
+ * Returns count. Caller must free with js_free_http_headers(). */
+static int js_parse_http_headers(JSContext *ctx, JSValueConst obj,
+                                    HlHttpHeader **out, int *out_count)
+{
+    *out = NULL;
+    *out_count = 0;
+
+    if (JS_IsUndefined(obj) || JS_IsNull(obj))
+        return 0;
+
+    /* Get property names */
+    JSPropertyEnum *props = NULL;
+    uint32_t prop_count = 0;
+    if (JS_GetOwnPropertyNames(ctx, &props, &prop_count, obj,
+                                JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) < 0)
+        return -1;
+
+    if (prop_count == 0) {
+        js_free(ctx, props);
+        return 0;
+    }
+
+    HlHttpHeader *hdrs = js_mallocz(ctx, prop_count * sizeof(HlHttpHeader));
+    if (!hdrs) {
+        for (uint32_t i = 0; i < prop_count; i++)
+            JS_FreeAtom(ctx, props[i].atom);
+        js_free(ctx, props);
+        return -1;
+    }
+
+    int count = 0;
+    for (uint32_t i = 0; i < prop_count; i++) {
+        const char *name = JS_AtomToCString(ctx, props[i].atom);
+        JSValue val = JS_GetProperty(ctx, obj, props[i].atom);
+        const char *value = JS_ToCString(ctx, val);
+        JS_FreeValue(ctx, val);
+
+        if (name && value) {
+            hdrs[count].name = name;
+            hdrs[count].value = value;
+            count++;
+        } else {
+            if (name) JS_FreeCString(ctx, name);
+            if (value) JS_FreeCString(ctx, value);
+        }
+        JS_FreeAtom(ctx, props[i].atom);
+    }
+    js_free(ctx, props);
+
+    *out = hdrs;
+    *out_count = count;
+    return 0;
+}
+
+static void js_free_http_headers(JSContext *ctx, HlHttpHeader *hdrs, int count)
+{
+    if (!hdrs) return;
+    for (int i = 0; i < count; i++) {
+        JS_FreeCString(ctx, hdrs[i].name);
+        JS_FreeCString(ctx, hdrs[i].value);
+    }
+    js_free(ctx, hdrs);
+}
+
+/* Push HTTP response as JS object: { status, body, headers } */
+static JSValue js_push_http_response(JSContext *ctx, HlHttpResponse *resp)
+{
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "status", JS_NewInt32(ctx, resp->status));
+
+    if (resp->body && resp->body_len > 0)
+        JS_SetPropertyStr(ctx, obj, "body",
+                          JS_NewStringLen(ctx, resp->body, resp->body_len));
+    else
+        JS_SetPropertyStr(ctx, obj, "body", JS_NewString(ctx, ""));
+
+    /* Headers as { "name": "value" } — lowercase names */
+    JSValue headers = JS_NewObject(ctx);
+    for (int i = 0; i < resp->num_headers; i++) {
+        /* Lowercase header name */
+        size_t nlen = strlen(resp->headers[i].name);
+        char *lower = js_malloc(ctx, nlen + 1);
+        if (lower) {
+            for (size_t j = 0; j < nlen; j++)
+                lower[j] = (char)((resp->headers[i].name[j] >= 'A' &&
+                                    resp->headers[i].name[j] <= 'Z')
+                    ? resp->headers[i].name[j] + 32
+                    : resp->headers[i].name[j]);
+            lower[nlen] = '\0';
+            JS_SetPropertyStr(ctx, headers, lower,
+                              JS_NewString(ctx, resp->headers[i].value));
+            js_free(ctx, lower);
+        } else {
+            JS_SetPropertyStr(ctx, headers, resp->headers[i].name,
+                              JS_NewString(ctx, resp->headers[i].value));
+        }
+    }
+    JS_SetPropertyStr(ctx, obj, "headers", headers);
+
+    return obj;
+}
+
+/* http.request(method, url, opts?) */
+static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->base.http_cfg)
+        return JS_ThrowInternalError(ctx, "http not configured (no hosts in manifest)");
+
+    if (argc < 2)
+        return JS_ThrowTypeError(ctx, "http.request requires (method, url, opts?)");
+
+    const char *method = JS_ToCString(ctx, argv[0]);
+    const char *url = JS_ToCString(ctx, argv[1]);
+    if (!method || !url) {
+        if (method) JS_FreeCString(ctx, method);
+        if (url) JS_FreeCString(ctx, url);
+        return JS_EXCEPTION;
+    }
+
+    const char *body = NULL;
+    size_t body_len = 0;
+    HlHttpHeader *headers = NULL;
+    int num_headers = 0;
+
+    /* Parse opts */
+    if (argc >= 3 && JS_IsObject(argv[2])) {
+        JSValue body_val = JS_GetPropertyStr(ctx, argv[2], "body");
+        if (JS_IsString(body_val))
+            body = JS_ToCStringLen(ctx, &body_len, body_val);
+        JS_FreeValue(ctx, body_val);
+
+        JSValue hdrs_val = JS_GetPropertyStr(ctx, argv[2], "headers");
+        if (JS_IsObject(hdrs_val))
+            js_parse_http_headers(ctx, hdrs_val, &headers, &num_headers);
+        JS_FreeValue(ctx, hdrs_val);
+    }
+
+    HlHttpResponse resp;
+    int rc = hl_cap_http_request(js->base.http_cfg, method, url,
+                                    headers, num_headers, body, body_len, &resp);
+
+    JS_FreeCString(ctx, method);
+    JS_FreeCString(ctx, url);
+    // cppcheck-suppress knownConditionTrueFalse
+    if (body) JS_FreeCString(ctx, body);
+    js_free_http_headers(ctx, headers, num_headers);
+
+    if (rc != 0)
+        return JS_ThrowInternalError(ctx, "http request failed");
+
+    JSValue result = js_push_http_response(ctx, &resp);
+    hl_cap_http_free(&resp);
+    return result;
+}
+
+/* http.get(url, opts?) */
+static JSValue js_http_get(JSContext *ctx, JSValueConst this_val,
+                            int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->base.http_cfg)
+        return JS_ThrowInternalError(ctx, "http not configured");
+
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "http.get requires (url, opts?)");
+
+    const char *url = JS_ToCString(ctx, argv[0]);
+    if (!url) return JS_EXCEPTION;
+
+    HlHttpHeader *headers = NULL;
+    int num_headers = 0;
+    if (argc >= 2 && JS_IsObject(argv[1])) {
+        JSValue hdrs_val = JS_GetPropertyStr(ctx, argv[1], "headers");
+        if (JS_IsObject(hdrs_val))
+            js_parse_http_headers(ctx, hdrs_val, &headers, &num_headers);
+        JS_FreeValue(ctx, hdrs_val);
+    }
+
+    HlHttpResponse resp;
+    int rc = hl_cap_http_request(js->base.http_cfg, "GET", url,
+                                    headers, num_headers, NULL, 0, &resp);
+    JS_FreeCString(ctx, url);
+    js_free_http_headers(ctx, headers, num_headers);
+
+    if (rc != 0)
+        return JS_ThrowInternalError(ctx, "http.get failed");
+
+    JSValue result = js_push_http_response(ctx, &resp);
+    hl_cap_http_free(&resp);
+    return result;
+}
+
+/* Helper for POST/PUT/PATCH: (url, body, opts?) */
+static JSValue js_http_body_method(JSContext *ctx, int argc, JSValueConst *argv,
+                                    const char *method_name)
+{
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->base.http_cfg)
+        return JS_ThrowInternalError(ctx, "http not configured");
+
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "http.%s requires (url, body?, opts?)",
+                                  method_name);
+
+    const char *url = JS_ToCString(ctx, argv[0]);
+    if (!url) return JS_EXCEPTION;
+
+    const char *body = NULL;
+    size_t body_len = 0;
+    if (argc >= 2 && JS_IsString(argv[1]))
+        body = JS_ToCStringLen(ctx, &body_len, argv[1]);
+
+    HlHttpHeader *headers = NULL;
+    int num_headers = 0;
+    if (argc >= 3 && JS_IsObject(argv[2])) {
+        JSValue hdrs_val = JS_GetPropertyStr(ctx, argv[2], "headers");
+        if (JS_IsObject(hdrs_val))
+            js_parse_http_headers(ctx, hdrs_val, &headers, &num_headers);
+        JS_FreeValue(ctx, hdrs_val);
+    }
+
+    HlHttpResponse resp;
+    int rc = hl_cap_http_request(js->base.http_cfg, method_name, url,
+                                    headers, num_headers, body, body_len, &resp);
+    JS_FreeCString(ctx, url);
+    // cppcheck-suppress knownConditionTrueFalse
+    if (body) JS_FreeCString(ctx, body);
+    js_free_http_headers(ctx, headers, num_headers);
+
+    if (rc != 0)
+        return JS_ThrowInternalError(ctx, "http.%s failed", method_name);
+
+    JSValue result = js_push_http_response(ctx, &resp);
+    hl_cap_http_free(&resp);
+    return result;
+}
+
+static JSValue js_http_post(JSContext *ctx, JSValueConst this_val,
+                             int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    return js_http_body_method(ctx, argc, argv, "POST");
+}
+
+static JSValue js_http_put(JSContext *ctx, JSValueConst this_val,
+                            int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    return js_http_body_method(ctx, argc, argv, "PUT");
+}
+
+static JSValue js_http_patch(JSContext *ctx, JSValueConst this_val,
+                              int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    return js_http_body_method(ctx, argc, argv, "PATCH");
+}
+
+/* http.del(url, opts?) — same as http.get but DELETE */
+static JSValue js_http_del(JSContext *ctx, JSValueConst this_val,
+                            int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->base.http_cfg)
+        return JS_ThrowInternalError(ctx, "http not configured");
+
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "http.del requires (url, opts?)");
+
+    const char *url = JS_ToCString(ctx, argv[0]);
+    if (!url) return JS_EXCEPTION;
+
+    HlHttpHeader *headers = NULL;
+    int num_headers = 0;
+    if (argc >= 2 && JS_IsObject(argv[1])) {
+        JSValue hdrs_val = JS_GetPropertyStr(ctx, argv[1], "headers");
+        if (JS_IsObject(hdrs_val))
+            js_parse_http_headers(ctx, hdrs_val, &headers, &num_headers);
+        JS_FreeValue(ctx, hdrs_val);
+    }
+
+    HlHttpResponse resp;
+    int rc = hl_cap_http_request(js->base.http_cfg, "DELETE", url,
+                                    headers, num_headers, NULL, 0, &resp);
+    JS_FreeCString(ctx, url);
+    js_free_http_headers(ctx, headers, num_headers);
+
+    if (rc != 0)
+        return JS_ThrowInternalError(ctx, "http.del failed");
+
+    JSValue result = js_push_http_response(ctx, &resp);
+    hl_cap_http_free(&resp);
+    return result;
+}
+
+static int js_http_module_init(JSContext *ctx, JSModuleDef *m)
+{
+    JSValue http = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, http, "request",
+                      JS_NewCFunction(ctx, js_http_request, "request", 3));
+    JS_SetPropertyStr(ctx, http, "get",
+                      JS_NewCFunction(ctx, js_http_get, "get", 2));
+    JS_SetPropertyStr(ctx, http, "post",
+                      JS_NewCFunction(ctx, js_http_post, "post", 3));
+    JS_SetPropertyStr(ctx, http, "put",
+                      JS_NewCFunction(ctx, js_http_put, "put", 3));
+    JS_SetPropertyStr(ctx, http, "patch",
+                      JS_NewCFunction(ctx, js_http_patch, "patch", 3));
+    JS_SetPropertyStr(ctx, http, "del",
+                      JS_NewCFunction(ctx, js_http_del, "del", 2));
+    /* Also expose as http["delete"] for JS compatibility */
+    JS_SetPropertyStr(ctx, http, "delete",
+                      JS_NewCFunction(ctx, js_http_del, "delete", 2));
+    JS_SetModuleExport(ctx, m, "http", http);
+    return 0;
+}
+
+int hl_js_init_http_module(JSContext *ctx, HlJS *js)
+{
+    (void)js;
+    JSModuleDef *m = JS_NewCModule(ctx, "hull:http", js_http_module_init);
+    if (!m)
+        return -1;
+    JS_AddModuleExport(ctx, m, "http");
+    return 0;
+}
+
+/* ════════════════════════════════════════════════════════════════════
  * hull:json module
  *
  * Wraps the built-in JSON.stringify/JSON.parse as:
@@ -1602,6 +1947,11 @@ int hl_js_register_modules(HlJS *js)
 
     /* Register hull:log module */
     if (hl_js_init_log_module(js->ctx, js) != 0)
+        return -1;
+
+    /* Register hull:http module — always available; per-function checks
+     * enforce that http_cfg is set (wired from manifest after load_app). */
+    if (hl_js_init_http_module(js->ctx, js) != 0)
         return -1;
 
     return 0;

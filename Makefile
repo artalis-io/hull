@@ -92,9 +92,22 @@ KEEL_DIR   ?= $(VENDDIR)/keel
 KEEL_INC   := $(KEEL_DIR)/include
 KEEL_LIB   := $(KEEL_DIR)/libkeel.a
 
-# Build Keel if not already built
-$(KEEL_LIB):
-	$(MAKE) -C $(KEEL_DIR) CC=$(CC) AR=$(AR)
+# Build Keel with mbedTLS backend
+$(KEEL_LIB): $(MBEDTLS_OBJS)
+	$(MAKE) -C $(KEEL_DIR) CC=$(CC) AR=$(AR) \
+		KEEL_TLS=mbedtls MBEDTLS_CONFIG_FILE=hull_config.h
+
+# ── mbedTLS (vendored) ─────────────────────────────────────────────
+
+MBEDTLS_DIR    := $(VENDDIR)/mbedtls
+MBEDTLS_SRCS   := $(wildcard $(MBEDTLS_DIR)/library/*.c)
+MBEDTLS_OBJS   := $(patsubst $(MBEDTLS_DIR)/library/%.c,$(BUILDDIR)/mbed_%.o,$(MBEDTLS_SRCS))
+MBEDTLS_CFLAGS := -std=c11 -O2 -w \
+	-I$(MBEDTLS_DIR)/include -I$(MBEDTLS_DIR)/library -I$(MBEDTLS_DIR) \
+	-DMBEDTLS_CONFIG_FILE='"hull_config.h"'
+
+$(BUILDDIR)/mbed_%.o: $(MBEDTLS_DIR)/library/%.c | $(BUILDDIR)
+	$(CC) $(MBEDTLS_CFLAGS) -c -o $@ $<
 
 # ── SQLite (vendored amalgamation) ─────────────────────────────────
 
@@ -354,18 +367,18 @@ $(APP_ENTRIES_DEFAULT_OBJ): $(SRCDIR)/hull/app_entries_default.c | $(BUILDDIR)
 
 # ── Include paths ───────────────────────────────────────────────────
 
-INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(SQLITE_DIR) -I$(LOG_DIR) -I$(SH_ARENA_DIR) -I$(TWEETNACL_DIR) -I$(BUILDDIR)
+INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(KEEL_DIR)/vendor/llhttp -I$(MBEDTLS_DIR)/include -I$(SQLITE_DIR) -I$(LOG_DIR) -I$(SH_ARENA_DIR) -I$(TWEETNACL_DIR) -I$(BUILDDIR)
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan e2e e2e-build e2e-sandbox self-build check analyze cppcheck bench coverage lint-lua lint-js lint platform
+.PHONY: all clean test debug msan e2e e2e-build e2e-http e2e-sandbox self-build check analyze cppcheck bench coverage lint-lua lint-js lint platform
 
 all: $(BUILDDIR)/hull
 
 # Platform static library — everything except entry.o and build_assets.o
 # Used by `hull build` to produce standalone app binaries.
 # Exports hull_main() (subcommand dispatch + server logic).
-PLATFORM_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(MAIN_OBJ) $(TOOL_OBJ) $(VEND_OBJS) \
+PLATFORM_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(MAIN_OBJ) $(TOOL_OBJ) $(VEND_OBJS) $(MBEDTLS_OBJS) \
 	$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS)
 
 PLATFORM_LIB := $(BUILDDIR)/libhull_platform.a
@@ -420,8 +433,8 @@ $(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H)
 endif
 
 # Hull binary
-$(BUILDDIR)/hull: $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(VEND_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB)
-	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(VEND_OBJS) \
+$(BUILDDIR)/hull: $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB)
+	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) \
 		$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB) -lm -lpthread
 
 # Capability sources
@@ -538,8 +551,8 @@ TEST_BINS := $(addprefix $(BUILDDIR)/,$(notdir $(basename $(TEST_SRCS))))
 TEST_CAP_OBJS := $(CAP_OBJS)
 
 # Shared link deps for all tests
-TEST_COMMON_DEPS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(KEEL_LIB)
-TEST_COMMON_LIBS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) -lm -lpthread
+TEST_COMMON_DEPS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(KEEL_LIB)
+TEST_COMMON_LIBS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(MBEDTLS_OBJS) $(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) -lm -lpthread
 
 # Capability tests (tests/hull/cap/)
 $(BUILDDIR)/test_%: $(TESTDIR)/hull/cap/test_%.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
@@ -642,6 +655,9 @@ e2e: $(BUILDDIR)/hull
 
 e2e-build:
 	sh tests/e2e_build.sh
+
+e2e-http: $(BUILDDIR)/hull
+	RUNTIME=$(RUNTIME) sh tests/e2e_http.sh
 
 e2e-sandbox: $(BUILDDIR)/hull
 	sh tests/e2e_sandbox.sh
