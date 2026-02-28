@@ -87,23 +87,26 @@ static int lua_app_route(lua_State *L, const char *method)
         lua_setfield(L, LUA_REGISTRYINDEX, "__hull_route_defs");
     }
 
-    /* Get current length of routes (next index = len + 1, 1-based) */
-    lua_Integer idx = (lua_Integer)luaL_len(L, -2) + 1;
+    /* Get next handler index from __hull_routes (may have gaps from middleware) */
+    lua_Integer handler_id = (lua_Integer)luaL_len(L, -2) + 1;
 
-    /* Store handler function in __hull_routes[idx] */
+    /* Store handler function in __hull_routes[handler_id] */
     /* Stack: routes_table, defs_table */
     lua_pushvalue(L, 2); /* push handler function */
-    lua_rawseti(L, -3, idx); /* routes[idx] = handler */
+    lua_rawseti(L, -3, handler_id); /* routes[handler_id] = handler */
 
-    /* Store route definition in __hull_route_defs[idx] */
+    /* Store route definition in __hull_route_defs — use contiguous index
+     * so that luaL_len always returns the correct count even when
+     * middleware was registered before routes. */
+    lua_Integer def_idx = (lua_Integer)luaL_len(L, -1) + 1;
     lua_newtable(L);
     lua_pushstring(L, method);
     lua_setfield(L, -2, "method");
     lua_pushstring(L, pattern);
     lua_setfield(L, -2, "pattern");
-    lua_pushinteger(L, idx);
+    lua_pushinteger(L, handler_id);
     lua_setfield(L, -2, "handler_id");
-    lua_rawseti(L, -2, idx); /* defs[idx] = def */
+    lua_rawseti(L, -2, def_idx); /* defs[def_idx] = def */
 
     lua_pop(L, 2); /* pop routes_table, defs_table */
     return 0;

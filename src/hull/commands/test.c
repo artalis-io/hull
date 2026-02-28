@@ -44,27 +44,6 @@ static void test_usage(void)
             "Discovers and runs test_*.[lua|js] files.\n");
 }
 
-/* ── Detect entry point ────────────────────────────────────────────── */
-
-static const char *detect_entry(const char *app_dir)
-{
-    static char buf[4096];
-
-    snprintf(buf, sizeof(buf), "%s/app.js", app_dir);
-    if (access(buf, F_OK) == 0) return buf;
-
-    snprintf(buf, sizeof(buf), "%s/app.lua", app_dir);
-    if (access(buf, F_OK) == 0) return buf;
-
-    return NULL;
-}
-
-static int is_js_entry(const char *entry)
-{
-    const char *ext = strrchr(entry, '.');
-    return ext && strcmp(ext, ".js") == 0;
-}
-
 #ifdef HL_ENABLE_LUA
 
 /* ── Lua test runner ───────────────────────────────────────────────── */
@@ -316,6 +295,24 @@ static int run_js_tests(const char *app_dir, const char *entry)
 
 #endif /* HL_ENABLE_JS */
 
+/* ── Detect entry points ──────────────────────────────────────────── */
+
+static const char *detect_lua_entry(const char *app_dir)
+{
+    static char lua_buf[4096];
+    snprintf(lua_buf, sizeof(lua_buf), "%s/app.lua", app_dir);
+    if (access(lua_buf, F_OK) == 0) return lua_buf;
+    return NULL;
+}
+
+static const char *detect_js_entry(const char *app_dir)
+{
+    static char js_buf[4096];
+    snprintf(js_buf, sizeof(js_buf), "%s/app.js", app_dir);
+    if (access(js_buf, F_OK) == 0) return js_buf;
+    return NULL;
+}
+
 /* ── Command entry point ───────────────────────────────────────────── */
 
 int hl_cmd_test(int argc, char **argv, const char *hull_exe)
@@ -326,28 +323,53 @@ int hl_cmd_test(int argc, char **argv, const char *hull_exe)
     if (argc >= 2 && argv[1][0] != '-')
         app_dir = argv[1];
 
-    /* Detect entry point */
-    const char *entry = detect_entry(app_dir);
-    if (!entry) {
+    const char *lua_entry = detect_lua_entry(app_dir);
+    const char *js_entry = detect_js_entry(app_dir);
+
+    if (!lua_entry && !js_entry) {
         fprintf(stderr, "hull test: no entry point found (app.js or app.lua) in %s\n",
                 app_dir);
         test_usage();
         return 1;
     }
 
-    int is_js = is_js_entry(entry);
-    (void)is_js; /* may be unused if runtime not compiled in */
+    int result = 0;
+    int ran_any = 0;
 
-#ifdef HL_ENABLE_JS
-    if (is_js)
-        return run_js_tests(app_dir, entry);
-#endif
-
+    /* Try Lua tests if app.lua exists and test_*.lua files are present */
 #ifdef HL_ENABLE_LUA
-    if (!is_js)
-        return run_lua_tests(app_dir, entry);
+    if (lua_entry) {
+        char **lua_tests = hl_tool_find_files(app_dir, "test_*.lua", NULL);
+        if (lua_tests && lua_tests[0]) {
+            ran_any = 1;
+            result |= run_lua_tests(app_dir, lua_entry);
+        }
+        if (lua_tests) {
+            for (char **fp = lua_tests; *fp; fp++) free(*fp);
+            free(lua_tests);
+        }
+    }
 #endif
 
-    fprintf(stderr, "hull test: runtime for %s not enabled in this build\n", entry);
-    return 1;
+    /* Try JS tests if app.js exists and test_*.js files are present */
+#ifdef HL_ENABLE_JS
+    if (js_entry) {
+        char **js_tests = hl_tool_find_files(app_dir, "test_*.js", NULL);
+        if (js_tests && js_tests[0]) {
+            ran_any = 1;
+            result |= run_js_tests(app_dir, js_entry);
+        }
+        if (js_tests) {
+            for (char **fp = js_tests; *fp; fp++) free(*fp);
+            free(js_tests);
+        }
+    }
+#endif
+
+    if (!ran_any) {
+        fprintf(stderr, "hull test: no test files found in %s\n", app_dir);
+        return 1;
+    }
+
+    return result;
 }

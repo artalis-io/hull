@@ -25,7 +25,7 @@ db.exec(
 
 // Middleware: extract and verify JWT on every request (optional — won't block)
 app.use("*", "/*", (req, _res) => {
-    const authHeader = req.header("Authorization");
+    const authHeader = req.headers["authorization"];
     if (!authHeader) return 0;
 
     const match = authHeader.match(/^[Bb]earer\s+(.+)$/);

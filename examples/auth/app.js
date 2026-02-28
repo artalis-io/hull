@@ -29,7 +29,7 @@ db.exec(
 // The JS sessionMiddleware doesn't have an "optional" flag, so we use a
 // lightweight custom middleware that attaches the session when present.
 app.use("*", "/*", (req, _res) => {
-    const header = req.header("Cookie");
+    const header = req.headers["cookie"];
     if (!header) return 0;
 
     const cookies = cookie.parse(header);

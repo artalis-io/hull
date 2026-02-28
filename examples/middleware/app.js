@@ -75,7 +75,7 @@ const CORS_HEADERS = "Content-Type, Authorization";
 const CORS_MAX_AGE = "86400";
 
 app.use("*", "/api/*", (req, res) => {
-    const origin = req.header("Origin");
+    const origin = req.headers["origin"];
     if (!origin) return 0;
 
     const allowed = CORS_ORIGINS.indexOf(origin) !== -1;

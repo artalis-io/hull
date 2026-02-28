@@ -192,7 +192,7 @@ app.get("/webhooks/:id/deliveries", (req, res) => {
 // ── Webhook receiver (verify incoming signatures) ───────────────────
 
 app.post("/webhooks/receive", (req, res) => {
-    const sigHeader = req.header("X-Webhook-Signature");
+    const sigHeader = req.headers["x-webhook-signature"];
     if (!sigHeader) {
         return res.status(401).json({ error: "missing signature" });
     }
