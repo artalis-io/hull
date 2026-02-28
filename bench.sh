@@ -85,6 +85,21 @@ run_bench() {
     wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" "$URL/greet/World"
     echo ""
 
+    # POST /echo — body parsing throughput
+    echo "--- POST /echo (body parsing) ---"
+    wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" -s bench_post.lua "$URL/echo"
+    echo ""
+
+    # GET /visits — DB read (SELECT query)
+    echo "--- GET /visits (DB read) ---"
+    wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" "$URL/visits"
+    echo ""
+
+    # POST /greet/World — route param + body parsing combined
+    echo "--- POST /greet/World (route param + body) ---"
+    wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" -s bench_post.lua "$URL/greet/World"
+    echo ""
+
     kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
     rm -rf "$TMPDIR"
