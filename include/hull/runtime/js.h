@@ -176,4 +176,17 @@ int hl_js_wire_routes(HlJS *js, KlRouter *router);
 int hl_js_wire_routes_server(HlJS *js, KlServer *server,
                               void *(*alloc_fn)(size_t));
 
+/*
+ * Dispatch a middleware call to the JS handler.
+ * Returns 0 (continue), positive (short-circuit), or -1 (error).
+ */
+int hl_js_dispatch_middleware(HlJS *js, int handler_id,
+                              KlRequest *req, KlResponse *res);
+
+/*
+ * Keel middleware bridge: dispatches a request to the JS middleware.
+ * Returns 0 (continue) or non-zero (short-circuit).
+ */
+int hl_js_keel_middleware(KlRequest *req, KlResponse *res, void *user_data);
+
 #endif /* HL_RUNTIME_JS_H */

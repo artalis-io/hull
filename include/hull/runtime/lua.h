@@ -167,4 +167,17 @@ int hl_lua_wire_routes(HlLua *lua, KlRouter *router);
 int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
                                void *(*alloc_fn)(size_t));
 
+/*
+ * Dispatch a middleware call to the Lua handler.
+ * Returns 0 (continue), positive (short-circuit), or -1 (error).
+ */
+int hl_lua_dispatch_middleware(HlLua *lua, int handler_id,
+                               KlRequest *req, KlResponse *res);
+
+/*
+ * Keel middleware bridge: dispatches a request to the Lua middleware.
+ * Returns 0 (continue) or non-zero (short-circuit).
+ */
+int hl_lua_keel_middleware(KlRequest *req, KlResponse *res, void *user_data);
+
 #endif /* HL_RUNTIME_LUA_H */

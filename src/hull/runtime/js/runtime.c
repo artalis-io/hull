@@ -711,8 +711,130 @@ int hl_js_wire_routes_server(HlJS *js, KlServer *server,
     }
 
     JS_FreeValue(ctx, defs);
+
+    /* Wire middleware from __hull_middleware */
+    JSValue mw = JS_GetPropertyStr(ctx, global, "__hull_middleware");
+    if (!JS_IsUndefined(mw) && JS_IsArray(ctx, mw)) {
+        JSValue mw_len_val = JS_GetPropertyStr(ctx, mw, "length");
+        int32_t mw_count = 0;
+        JS_ToInt32(ctx, &mw_count, mw_len_val);
+        JS_FreeValue(ctx, mw_len_val);
+
+        for (int32_t i = 0; i < mw_count; i++) {
+            JSValue entry = JS_GetPropertyUint32(ctx, mw, (uint32_t)i);
+            if (JS_IsUndefined(entry))
+                continue;
+
+            JSValue method_val = JS_GetPropertyStr(ctx, entry, "method");
+            JSValue pattern_val = JS_GetPropertyStr(ctx, entry, "pattern");
+            JSValue id_val = JS_GetPropertyStr(ctx, entry, "handler_id");
+
+            const char *method_str = JS_ToCString(ctx, method_val);
+            const char *pattern = JS_ToCString(ctx, pattern_val);
+            int32_t handler_id = 0;
+            JS_ToInt32(ctx, &handler_id, id_val);
+
+            if (method_str && pattern) {
+                void *mem = alloc_fn ? alloc_fn(sizeof(HlJSRoute))
+                                     : malloc(sizeof(HlJSRoute));
+                HlJSRoute *mw_ctx = (HlJSRoute *)mem;
+                if (mw_ctx) {
+                    mw_ctx->js = js;
+                    mw_ctx->handler_id = handler_id;
+                    kl_server_use(server, method_str, pattern,
+                                  hl_js_keel_middleware, mw_ctx);
+                }
+            }
+
+            if (pattern) JS_FreeCString(ctx, pattern);
+            if (method_str) JS_FreeCString(ctx, method_str);
+            JS_FreeValue(ctx, id_val);
+            JS_FreeValue(ctx, pattern_val);
+            JS_FreeValue(ctx, method_val);
+            JS_FreeValue(ctx, entry);
+        }
+    }
+    JS_FreeValue(ctx, mw);
+
     JS_FreeValue(ctx, global);
     return 0;
+}
+
+/* ── Middleware dispatch ────────────────────────────────────────────── */
+
+int hl_js_dispatch_middleware(HlJS *js, int handler_id,
+                              KlRequest *req, KlResponse *res)
+{
+    if (!js || !js->ctx || !req || !res)
+        return -1;
+
+    hl_js_reset_request(js);
+
+    /* Get the handler function from the route registry */
+    JSValue global = JS_GetGlobalObject(js->ctx);
+    JSValue routes = JS_GetPropertyStr(js->ctx, global, "__hull_routes");
+    if (JS_IsUndefined(routes) || !JS_IsArray(js->ctx, routes)) {
+        JS_FreeValue(js->ctx, routes);
+        JS_FreeValue(js->ctx, global);
+        return -1;
+    }
+
+    JSValue handler = JS_GetPropertyUint32(js->ctx, routes,
+                                            (uint32_t)handler_id);
+    JS_FreeValue(js->ctx, routes);
+
+    if (!JS_IsFunction(js->ctx, handler)) {
+        JS_FreeValue(js->ctx, handler);
+        JS_FreeValue(js->ctx, global);
+        return -1;
+    }
+
+    /* Build JS request and response objects */
+    extern JSValue hl_js_make_request(JSContext *ctx, KlRequest *req);
+    extern JSValue hl_js_make_response(JSContext *ctx, KlResponse *res);
+
+    JSValue js_req = hl_js_make_request(js->ctx, req);
+    JSValue js_res = hl_js_make_response(js->ctx, res);
+
+    /* Call handler(req, res) — capture return value */
+    JSValue argv[2] = { js_req, js_res };
+    JSValue ret = JS_Call(js->ctx, handler, JS_UNDEFINED, 2, argv);
+
+    int result = 0;
+    if (JS_IsException(ret)) {
+        hl_js_dump_error(js);
+        result = -1;
+    } else {
+        /* Capture return value: 0 = continue, non-zero = short-circuit */
+        int32_t val = 0;
+        if (JS_ToInt32(js->ctx, &val, ret) == 0)
+            result = val;
+    }
+
+    JS_FreeValue(js->ctx, ret);
+    JS_FreeValue(js->ctx, js_res);
+    JS_FreeValue(js->ctx, js_req);
+    JS_FreeValue(js->ctx, handler);
+    JS_FreeValue(js->ctx, global);
+
+    /* Run any pending microtasks */
+    hl_js_run_jobs(js);
+
+    return result;
+}
+
+int hl_js_keel_middleware(KlRequest *req, KlResponse *res, void *user_data)
+{
+    HlJSRoute *ctx = (HlJSRoute *)user_data;
+    int rc = hl_js_dispatch_middleware(ctx->js, ctx->handler_id, req, res);
+    if (rc < 0) {
+        /* Middleware error — short-circuit with 500 */
+        kl_response_status(res, 500);
+        kl_response_header(res, "Content-Type", "text/plain");
+        kl_response_body(res, "Internal Server Error", 21);
+        return 1; /* short-circuit */
+    }
+    return rc;
 }
 
 /* ── Vtable adapters ───────────────────────────────────────────────── */
