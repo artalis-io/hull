@@ -9,6 +9,7 @@
  */
 
 #include "hull/cap/tool.h"
+#include "hull/build_assets.h"
 
 #ifdef HL_ENABLE_LUA
 #include "lua.h"
@@ -708,22 +709,119 @@ static int l_tool_loadfile(lua_State *L)
     return 1; /* chunk function on stack */
 }
 
+/* ── tool.extract_platform(dir) → bool ─────────────────────────────── */
+
+static int l_tool_extract_platform(lua_State *L)
+{
+    const char *dir = luaL_checkstring(L, 1);
+    int rc = hl_build_extract_platform(dir);
+    lua_pushboolean(L, rc == 0);
+    return 1;
+}
+
+/* ── tool.extract_platform_cosmo(dir) → bool ───────────────────────── */
+/*
+ * Extract both arch-specific archives and set up the .aarch64/ directory
+ * layout that cosmocc expects:
+ *   dir/libhull_platform.a          ← x86_64
+ *   dir/.aarch64/libhull_platform.a ← aarch64
+ */
+
+static int l_tool_extract_platform_cosmo(lua_State *L)
+{
+    const char *dir = luaL_checkstring(L, 1);
+    HlToolUnveilCtx *ctx = get_unveil_ctx(L);
+
+    const HlEmbeddedPlatform *platforms = NULL;
+    int count = hl_build_get_platforms(&platforms);
+    if (count < 2 || !platforms) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    /* Extract x86_64 as dir/libhull_platform.a */
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/libhull_platform.a", dir);
+    const HlEmbeddedPlatform *x86 = NULL;
+    const HlEmbeddedPlatform *arm = NULL;
+
+    for (int i = 0; i < count; i++) {
+        if (strstr(platforms[i].arch, "x86_64"))
+            x86 = &platforms[i];
+        else if (strstr(platforms[i].arch, "aarch64"))
+            arm = &platforms[i];
+    }
+
+    if (!x86 || !arm) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    /* Write x86_64 archive */
+    FILE *f = fopen(path, "wb");
+    if (!f) { lua_pushboolean(L, 0); return 1; }
+    size_t w = fwrite(x86->data, 1, x86->len, f);
+    fclose(f);
+    if (w != x86->len) { lua_pushboolean(L, 0); return 1; }
+
+    /* Create .aarch64/ subdir */
+    char aarch64_dir[1024];
+    snprintf(aarch64_dir, sizeof(aarch64_dir), "%s/.aarch64", dir);
+    if (hl_tool_mkdir(aarch64_dir, ctx) != 0) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    /* Write aarch64 archive */
+    snprintf(path, sizeof(path), "%s/.aarch64/libhull_platform.a", dir);
+    f = fopen(path, "wb");
+    if (!f) { lua_pushboolean(L, 0); return 1; }
+    w = fwrite(arm->data, 1, arm->len, f);
+    fclose(f);
+    if (w != arm->len) { lua_pushboolean(L, 0); return 1; }
+
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+/* ── tool.platform_archs() → table | nil ───────────────────────────── */
+
+static int l_tool_platform_archs(lua_State *L)
+{
+    const HlEmbeddedPlatform *platforms = NULL;
+    int count = hl_build_get_platforms(&platforms);
+    if (count == 0 || !platforms) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    lua_newtable(L);
+    for (int i = 0; i < count; i++) {
+        lua_pushstring(L, platforms[i].arch);
+        lua_rawseti(L, -2, i + 1);
+    }
+    return 1;
+}
+
 /* ── Registration ──────────────────────────────────────────────────── */
 
 static const luaL_Reg tool_funcs[] = {
-    { "spawn",       l_tool_spawn },
-    { "spawn_read",  l_tool_spawn_read },
-    { "find_files",  l_tool_find_files },
-    { "copy",        l_tool_copy },
-    { "mkdir",       l_tool_mkdir },
-    { "rmdir",       l_tool_rmdir },
-    { "tmpdir",      l_tool_tmpdir },
-    { "exit",        l_tool_exit },
-    { "read_file",   l_tool_read_file },
-    { "write_file",  l_tool_write_file },
-    { "file_exists", l_tool_file_exists },
-    { "stderr",      l_tool_stderr },
-    { "loadfile",    l_tool_loadfile },
+    { "spawn",                  l_tool_spawn },
+    { "spawn_read",             l_tool_spawn_read },
+    { "find_files",             l_tool_find_files },
+    { "copy",                   l_tool_copy },
+    { "mkdir",                  l_tool_mkdir },
+    { "rmdir",                  l_tool_rmdir },
+    { "tmpdir",                 l_tool_tmpdir },
+    { "exit",                   l_tool_exit },
+    { "read_file",              l_tool_read_file },
+    { "write_file",             l_tool_write_file },
+    { "file_exists",            l_tool_file_exists },
+    { "stderr",                 l_tool_stderr },
+    { "loadfile",               l_tool_loadfile },
+    { "extract_platform",       l_tool_extract_platform },
+    { "extract_platform_cosmo", l_tool_extract_platform_cosmo },
+    { "platform_archs",         l_tool_platform_archs },
     { NULL, NULL }
 };
 

@@ -22,9 +22,11 @@ AR      ?= ar
 # Runtime selection: "all" (default), "js", or "lua"
 RUNTIME ?= all
 
-# Detect Cosmopolitan toolchain
-ifneq ($(findstring cosmocc,$(CC)),)
+# Detect Cosmopolitan toolchain (cosmocc, x86_64-unknown-cosmo-cc, etc.)
+ifneq ($(findstring cosmo,$(CC)),)
   COSMO := 1
+endif
+ifneq ($(findstring cosmocc,$(CC)),)
   AR    := cosmoar
 endif
 
@@ -371,7 +373,7 @@ INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(KEEL_DIR)/ve
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan e2e e2e-build e2e-http e2e-sandbox self-build check analyze cppcheck bench coverage lint-lua lint-js lint platform
+.PHONY: all clean test debug msan e2e e2e-build e2e-http e2e-sandbox self-build check analyze cppcheck bench coverage lint-lua lint-js lint platform platform-cosmo
 
 all: $(BUILDDIR)/hull
 
@@ -412,14 +414,60 @@ $(PLATFORM_LIB): $(PLATFORM_OBJS) $(CANARY_OBJ) $(KEEL_LIB) | $(BUILDDIR)
 
 platform: $(PLATFORM_LIB)
 
+# Multi-arch cosmo platform: build x86_64 and aarch64 archives
+COSMO_STAGE := .cosmo_staging
+
+platform-cosmo:
+	@rm -rf $(COSMO_STAGE) && mkdir -p $(COSMO_STAGE)
+	@echo "=== Building x86_64-cosmo platform ==="
+	$(MAKE) clean
+	$(MAKE) platform CC=x86_64-unknown-cosmo-cc AR=x86_64-unknown-cosmo-ar
+	cp $(BUILDDIR)/libhull_platform.a $(COSMO_STAGE)/libhull_platform.x86_64-cosmo.a
+	cp $(BUILDDIR)/platform_canary_hash $(COSMO_STAGE)/platform_canary_hash.x86_64-cosmo
+	@echo "=== Building aarch64-cosmo platform ==="
+	$(MAKE) clean
+	$(MAKE) platform CC=aarch64-unknown-cosmo-cc AR=aarch64-unknown-cosmo-ar
+	cp $(BUILDDIR)/libhull_platform.a $(COSMO_STAGE)/libhull_platform.aarch64-cosmo.a
+	cp $(BUILDDIR)/platform_canary_hash $(COSMO_STAGE)/platform_canary_hash.aarch64-cosmo
+	mkdir -p $(BUILDDIR)
+	cp $(COSMO_STAGE)/* $(BUILDDIR)/
+	echo "cosmocc" > $(BUILDDIR)/platform_cc
+	rm -rf $(COSMO_STAGE)
+
 # ── Embedded build assets (distribution builds only) ────────────────
-# Build with: make EMBED_PLATFORM=1
+# Build with: make EMBED_PLATFORM=1      (single-arch)
+#             make EMBED_PLATFORM=cosmo  (multi-arch cosmo)
 # This xxd's the platform .a + templates into build_assets.c
 EMBED_PLATFORM ?=
-ifneq ($(EMBED_PLATFORM),)
-EMBEDDED_PLATFORM_H := $(BUILDDIR)/embedded_platform.h
 EMBEDDED_TEMPLATES_H := $(BUILDDIR)/embedded_templates.h
+EMBEDDED_PLATFORM_H := $(BUILDDIR)/embedded_platform.h
 
+ifeq ($(EMBED_PLATFORM),cosmo)
+# Multi-arch cosmo embedding — xxd both archives + metadata table
+$(EMBEDDED_PLATFORM_H): $(BUILDDIR)/libhull_platform.x86_64-cosmo.a \
+                         $(BUILDDIR)/libhull_platform.aarch64-cosmo.a | $(BUILDDIR)
+	@echo "/* Auto-generated multi-arch — do not edit */" > $@
+	xxd -i $(BUILDDIR)/libhull_platform.x86_64-cosmo.a | \
+		sed 's/build_libhull_platform_x86_64_cosmo_a/hl_platform_x86_64_cosmo/g' >> $@
+	xxd -i $(BUILDDIR)/libhull_platform.aarch64-cosmo.a | \
+		sed 's/build_libhull_platform_aarch64_cosmo_a/hl_platform_aarch64_cosmo/g' >> $@
+	@echo "" >> $@
+	@echo "static const HlEmbeddedPlatform hl_embedded_platforms[] = {" >> $@
+	@echo '    { "x86_64-cosmo", hl_platform_x86_64_cosmo, sizeof(hl_platform_x86_64_cosmo) },' >> $@
+	@echo '    { "aarch64-cosmo", hl_platform_aarch64_cosmo, sizeof(hl_platform_aarch64_cosmo) },' >> $@
+	@echo "    { NULL, NULL, 0 }" >> $@
+	@echo "};" >> $@
+
+$(EMBEDDED_TEMPLATES_H): templates/app_main.c templates/entry.h | $(BUILDDIR)
+	@echo "/* Auto-generated — do not edit */" > $@
+	@xxd -i templates/app_main.c | sed 's/templates_app_main_c/hl_embedded_app_main_c/g' >> $@
+	@xxd -i templates/entry.h | sed 's/templates_entry_h/hl_embedded_entry_h/g' >> $@
+
+CFLAGS += -DHL_BUILD_EMBEDDED -DHL_BUILD_EMBEDDED_MULTIARCH
+$(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H)
+
+else ifneq ($(EMBED_PLATFORM),)
+# Single-arch embedding (existing behavior)
 $(EMBEDDED_PLATFORM_H): $(PLATFORM_LIB) | $(BUILDDIR)
 	xxd -i $< | sed 's/build_libhull_platform_a/hl_embedded_platform_a/g' > $@
 
