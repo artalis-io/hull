@@ -97,6 +97,12 @@ app.use("*", "/api/*", function(req, res)
     return 0
 end)
 
+-- OPTIONS route for CORS preflight (router requires a route to exist
+-- so middleware can run — the CORS middleware above handles the response)
+app.options("/api/items", function(_req, res)
+    res:status(204):text("")
+end)
+
 -- ── Routes ──────────────────────────────────────────────────────────
 
 app.get("/health", function(_req, res)
