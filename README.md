@@ -78,7 +78,7 @@ Cosmopolitan APE binaries run on Linux, macOS, Windows, FreeBSD, OpenBSD, and Ne
 ┌─────────────────────────────────────────────┐
 │  Application Code (Lua / JS)                │  ← Developer writes this
 ├─────────────────────────────────────────────┤
-│  Standard Library (stdlib/)                 │  ← json, session, jwt, csrf, auth
+│  Standard Library (stdlib/)                 │  ← cors, ratelimit, csrf, auth, jwt, session
 ├─────────────────────────────────────────────┤
 │  Runtimes (Lua 5.4 + QuickJS)              │  ← Sandboxed interpreters
 ├─────────────────────────────────────────────┤
@@ -94,6 +94,47 @@ Cosmopolitan APE binaries run on Linux, macOS, Windows, FreeBSD, OpenBSD, and Ne
 ```
 
 Each layer only talks to the one directly below it. Application code cannot bypass the capability layer.
+
+### Standard Library
+
+Hull ships a full set of middleware and utility modules for building secure backends:
+
+| Module | Lua | JS | Purpose |
+|--------|-----|-----|---------|
+| `cors` | `hull.cors` | `hull:cors` | CORS headers + preflight handling |
+| `ratelimit` | `hull.ratelimit` | `hull:ratelimit` | In-memory rate limiting with configurable windows |
+| `csrf` | `hull.csrf` | `hull:csrf` | Stateless CSRF token generation/verification |
+| `auth` | `hull.auth` | `hull:auth` | Session-based and JWT-based authentication middleware |
+| `session` | `hull.session` | `hull:session` | Server-side sessions backed by SQLite |
+| `cookie` | `hull.cookie` | `hull:cookie` | Cookie parse/serialize helpers |
+| `jwt` | `hull.jwt` | `hull:jwt` | JWT sign/verify (HMAC-SHA256) |
+| `json` | `hull.json` | (built-in) | JSON encode/decode |
+
+All middleware modules follow the same factory pattern: `module.middleware(opts)` returns a function `(req, res) -> 0|1` where `0` = continue, `1` = short-circuit.
+
+#### Backend Best Practices
+
+Recommended middleware stack for a typical API backend:
+
+```lua
+local cors = require("hull.cors")
+local ratelimit = require("hull.ratelimit")
+local auth = require("hull.auth")
+local session = require("hull.session")
+
+session.init()
+
+-- Order matters: rate limit → CORS → auth → routes
+app.use("*", "/api/*", ratelimit.middleware({ limit = 100, window = 60 }))
+app.use("*", "/api/*", cors.middleware({ origins = {"https://myapp.com"} }))
+app.use("*", "/api/*", auth.session_middleware({}))
+
+app.get("/api/me", function(req, res)
+    res:json({ user = req.ctx.session })
+end)
+```
+
+Key principles: rate limit before auth (reject early), CORS before auth (preflight must not require credentials), scope middleware to paths (`"/api/*"` not `"/*"`). See [examples/middleware/](examples/middleware/) and [CLAUDE.md](CLAUDE.md) for full API reference.
 
 ### Vendored Libraries
 

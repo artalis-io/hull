@@ -258,6 +258,140 @@ Key findings to be aware of:
 - Public Hull functions prefixed with `hl_` (capabilities: `hl_cap_*`, tools: `hl_tool_*`, commands: `hl_cmd_*`)
 - Keel functions prefixed with `kl_` (see vendor/keel/CLAUDE.md)
 
+## Stdlib Middleware
+
+### Middleware Factory Pattern
+
+All middleware modules follow the same contract:
+
+```lua
+local mod = require("hull.<module>")
+local mw = mod.middleware(opts)   -- factory returns a middleware function
+-- mw signature: function(req, res) -> 0 | 1
+--   0 = continue to next middleware / handler
+--   1 = short-circuit (response already sent)
+```
+
+Register with `app.use(method, pattern, mw)`:
+- `"*"` method = match any method
+- `"/*"` pattern = prefix match all paths
+- `"/api/*"` = prefix match under `/api/`
+
+### Module Reference
+
+| Module | Lua | JS | Purpose |
+|--------|-----|-----|---------|
+| `cors` | `hull.cors` | `hull:cors` | CORS headers + preflight handling |
+| `ratelimit` | `hull.ratelimit` | `hull:ratelimit` | In-memory rate limiting with configurable windows |
+| `csrf` | `hull.csrf` | `hull:csrf` | Stateless CSRF token generation/verification |
+| `auth` | `hull.auth` | `hull:auth` | Session-based and JWT-based authentication middleware |
+| `session` | `hull.session` | `hull:session` | Server-side sessions backed by SQLite |
+| `cookie` | `hull.cookie` | `hull:cookie` | Cookie parse/serialize helpers |
+| `jwt` | `hull.jwt` | `hull:jwt` | JWT sign/verify (HMAC-SHA256) |
+| `json` | `hull.json` | (built-in) | JSON encode/decode |
+
+### Module APIs
+
+**cors.middleware(opts)** — CORS headers + OPTIONS preflight.
+- `opts.origins` — list of allowed origins (default: `{"*"}`)
+- `opts.methods` — allowed methods string (default: `"GET, POST, PUT, DELETE, OPTIONS"`)
+- `opts.headers` — allowed headers string (default: `"Content-Type, Authorization"`)
+- `opts.credentials` — boolean, send `Access-Control-Allow-Credentials` (default: `false`)
+- `opts.max_age` — preflight cache seconds (default: `86400`)
+- Returns `1` on OPTIONS preflight (sends 204), `0` otherwise.
+
+**ratelimit.middleware(opts)** — Per-key request rate limiting (in-memory, resets on restart).
+- `opts.limit` — max requests per window (default: `60`)
+- `opts.window` — window in seconds (default: `60`)
+- `opts.key` — string or `function(req) -> string` (default: `"global"`)
+- Sets `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` headers.
+- Returns `1` on limit exceeded (sends 429 + JSON), `0` otherwise.
+
+**csrf.middleware(opts)** — Stateless CSRF protection using HMAC tokens.
+- `opts.secret` — HMAC secret (required)
+- `opts.session_key` — key in `req.ctx` for session ID (default: `"session_id"`) [Lua]
+- `opts.max_age` — max token age in seconds (default: `3600`)
+- `opts.header_name` — header to read token from (default: `"x-csrf-token"`)
+- `opts.field_name` — form field name (default: `"_csrf"`)
+- Safe methods (GET/HEAD/OPTIONS): generates token → `req.ctx.csrf_token`.
+- Unsafe methods: verifies token from header or form field.
+- Returns `1` on verification failure (sends 403 + JSON), `0` otherwise.
+- Helpers: `csrf.generate(session_id, secret)`, `csrf.verify(token, session_id, secret, max_age)`.
+
+**auth.session_middleware(opts)** — Session cookie authentication.
+- `opts.cookie_name` — session cookie name (default: `"hull_session"`)
+- `opts.optional` — continue without session (default: `false`)
+- `opts.login_path` — redirect here on failure instead of sending 401
+- Sets `req.ctx.session` and `req.ctx.session_id`.
+- Returns `1` on auth failure (sends 401 or redirect), `0` on success.
+
+**auth.jwt_middleware(opts)** — JWT Bearer token authentication.
+- `opts.secret` — HMAC-SHA256 secret (required)
+- `opts.optional` — continue without token (default: `false`)
+- Reads `Authorization: Bearer <token>` header.
+- Sets `req.ctx.user` (decoded payload).
+- Returns `1` on auth failure (sends 401 + JSON), `0` on success.
+
+**auth.login(req, res, user_data, opts)** — Creates session, sets cookie. Returns `session_id`.
+
+**auth.logout(req, res, opts)** — Destroys session, clears cookie.
+
+**session** — Server-side sessions backed by SQLite. Requires `session.init()` at startup.
+- `session.init(opts)` — creates `hull_sessions` table. `opts.ttl` = lifetime in seconds (default: `86400`).
+- `session.create(data)` → 64-char hex session ID.
+- `session.load(session_id)` → data table or nil. Auto-extends expiry.
+- `session.update(session_id, data)` — updates session data.
+- `session.destroy(session_id)` — deletes session.
+- `session.cleanup()` → count of deleted expired sessions.
+
+**cookie** — Cookie helpers (not middleware).
+- `cookie.parse(header)` → table `{ name = value, ... }`.
+- `cookie.serialize(name, value, opts)` → `Set-Cookie` header string.
+  - `opts.path` (default: `"/"`), `opts.httponly` (default: `true`), `opts.secure`, `opts.samesite` (default: `"Lax"`), `opts.max_age`, `opts.domain`.
+- `cookie.clear(name, opts)` → `Set-Cookie` header with `Max-Age=0`.
+
+**jwt** — JWT sign/verify (HS256 only, not middleware).
+- `jwt.sign(payload, secret)` → token string. Auto-sets `iat`.
+- `jwt.verify(token, secret)` → payload table, or `nil, "error reason"`.
+- `jwt.decode(token)` → payload table or nil (no signature check).
+
+### Recommended Middleware Stack
+
+Order matters — each middleware runs before the next:
+
+```lua
+local cors = require("hull.cors")
+local ratelimit = require("hull.ratelimit")
+local auth = require("hull.auth")
+local csrf = require("hull.csrf")
+local session = require("hull.session")
+
+session.init()  -- create hull_sessions table
+
+-- 1. Request ID (custom — assign unique ID early)
+-- 2. Logging (custom — log method, path, ID)
+-- 3. Rate limiting — reject abusive traffic before doing any work
+app.use("*", "/api/*", ratelimit.middleware({ limit = 60, window = 60 }))
+-- 4. CORS — must run before auth so preflight doesn't require credentials
+app.use("*", "/api/*", cors.middleware({ origins = { "https://myapp.com" } }))
+-- 5. Authentication — session or JWT
+app.use("*", "/api/*", auth.session_middleware({}))
+-- 6. CSRF — only for session-based apps (not needed with JWT Bearer)
+app.use("POST", "/api/*", csrf.middleware({ secret = "change-me" }))
+-- 7. Route handlers
+```
+
+### Best Practices
+
+- **Middleware order matters:** Rate limit before auth (reject early, save work). CORS before auth (preflight must not require credentials).
+- **Scope middleware to paths:** Use `"/api/*"` not `"/*"` for CORS and rate limiting. Public routes (health checks, static assets) shouldn't be rate limited or require auth.
+- **Use `req.ctx` for data passing:** Middleware stores data in `req.ctx` (e.g. `session_id`, `user`, `csrf_token`) for downstream handlers.
+- **CORS origins:** Always list explicit origins in production. Never use `"*"` with `credentials = true`.
+- **Rate limiting keys:** Default `"global"` key rate-limits all clients together. Use a key function for per-user limits: `key = function(req) return req.ctx.user_id or req.headers["x-forwarded-for"] or "anon" end`.
+- **CSRF is for cookies only:** Session/cookie auth needs CSRF protection. JWT Bearer auth does not (tokens aren't sent automatically by browsers).
+- **Session init at startup:** Call `session.init()` before registering routes — it creates the SQLite table.
+- **Lua vs JS differences:** The Lua and JS APIs are functionally equivalent but differ in naming conventions (snake_case vs camelCase) and some defaults. See the JS stdlib source for JS-specific option names.
+
 ## Testing
 
 Tests use Sheredom's utest.h. Each `tests/hull/*/test_*.c` is a standalone executable.
