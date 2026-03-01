@@ -95,9 +95,12 @@ KEEL_INC   := $(KEEL_DIR)/include
 KEEL_LIB   := $(KEEL_DIR)/libkeel.a
 
 # Build Keel with mbedTLS backend
+# Pass BACKEND=poll when cosmo is detected (arch-specific compilers
+# like x86_64-unknown-cosmo-cc don't trigger Keel's own cosmo detection)
 $(KEEL_LIB): $(MBEDTLS_OBJS)
 	$(MAKE) -C $(KEEL_DIR) CC=$(CC) AR=$(AR) \
-		KEEL_TLS=mbedtls MBEDTLS_CONFIG_FILE=hull_config.h
+		KEEL_TLS=mbedtls MBEDTLS_CONFIG_FILE=hull_config.h \
+		$(if $(COSMO),BACKEND=poll)
 
 # ── mbedTLS (vendored) ─────────────────────────────────────────────
 
@@ -616,10 +619,10 @@ $(BUILDDIR)/test_js: $(TESTDIR)/hull/runtime/js/test_js.c $(TEST_COMMON_DEPS) $(
 		$(TEST_CAP_OBJS) $(JS_RT_OBJS) $(MANIFEST_JS_OBJ) $(ALLOC_OBJ) $(QJS_OBJS) \
 		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) -lm -lpthread
 
-# Lua runtime test — needs Lua + Lua runtime objects + stdlib headers + manifest (Lua-only) + cap_tool
-$(BUILDDIR)/test_lua: $(TESTDIR)/hull/runtime/lua/test_lua.c $(TEST_COMMON_DEPS) $(CAP_TOOL_OBJ) $(MANIFEST_LUA_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(LUA_RT_OBJS) $(LUA_OBJS) $(STDLIB_LUA_HDRS) | $(BUILDDIR)
+# Lua runtime test — needs Lua + Lua runtime objects + stdlib headers + manifest (Lua-only) + cap_tool + build_assets
+$(BUILDDIR)/test_lua: $(TESTDIR)/hull/runtime/lua/test_lua.c $(TEST_COMMON_DEPS) $(CAP_TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MANIFEST_LUA_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(LUA_RT_OBJS) $(LUA_OBJS) $(STDLIB_LUA_HDRS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(TEST_CAP_OBJS) $(CAP_TOOL_OBJ) $(LUA_RT_OBJS) $(MANIFEST_LUA_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(ALLOC_OBJ) $(LUA_OBJS) \
+		$(TEST_CAP_OBJS) $(CAP_TOOL_OBJ) $(BUILD_ASSET_OBJ) $(LUA_RT_OBJS) $(MANIFEST_LUA_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(ALLOC_OBJ) $(LUA_OBJS) \
 		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) -lm -lpthread
 
 # Tool hardening test — cap/tool.c compiled without runtime flags (self-contained C functions)
