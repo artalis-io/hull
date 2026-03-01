@@ -1639,6 +1639,10 @@ static int lua_template_load_raw(lua_State *L)
 {
     const char *name = luaL_checkstring(L, 1);
 
+    /* Reject path traversal in template name */
+    if (strstr(name, "..") != NULL || name[0] == '/')
+        return luaL_error(L, "invalid template name: %s", name);
+
     /* 1. Search embedded template entries */
     for (const HlStdlibEntry *e = hl_app_template_entries; e->name; e++) {
         if (strcmp(e->name, name) == 0) {

@@ -77,7 +77,13 @@ function load(sessionId) {
         [now + sessionTtl, sessionId]
     );
 
-    return json.decode(rows[0].data);
+    const decoded = json.decode(rows[0].data);
+    if (decoded == null) {
+        // Corrupted session data — destroy and return null
+        db.exec("DELETE FROM hull_sessions WHERE id = ?", [sessionId]);
+        return null;
+    }
+    return decoded;
 }
 
 function update(sessionId, data) {

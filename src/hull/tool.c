@@ -62,6 +62,11 @@ int hull_keygen(int argc, char **argv)
     fprintf(f, "\n");
     fclose(f);
 
+    /* Zero secret key material before returning */
+    volatile uint8_t *p = sk;
+    for (size_t i = 0; i < sizeof(sk); i++)
+        p[i] = 0;
+
     printf("wrote %s (public key)\n", pk_file);
     printf("wrote %s (secret key — keep safe!)\n", sk_file);
     return 0;

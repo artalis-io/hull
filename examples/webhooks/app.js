@@ -9,6 +9,7 @@
 import { app } from "hull:app";
 import { crypto } from "hull:crypto";
 import { db } from "hull:db";
+import { env } from "hull:env";
 import { http } from "hull:http";
 import { log } from "hull:log";
 import { time } from "hull:time";
@@ -16,10 +17,10 @@ import { time } from "hull:time";
 // Manifest: allow outbound HTTP to localhost for webhook delivery
 app.manifest({
     hosts: ["127.0.0.1"],
-    env: [],
+    env: ["WEBHOOK_SECRET"],
 });
 
-const SIGNING_SECRET = "whsec_change-me-in-production";
+const SIGNING_SECRET = env.get("WEBHOOK_SECRET") || "whsec_change-me-in-production";
 
 // ── Schema ──────────────────────────────────────────────────────────
 
@@ -203,9 +204,16 @@ app.post("/webhooks/receive", (req, res) => {
     }
     const providedSig = sigHeader.substring(7);
 
-    // Compute expected signature and compare
+    // Compute expected signature and compare (constant-time)
     const expectedSig = signPayload(req.body);
-    if (providedSig !== expectedSig) {
+    if (providedSig.length !== expectedSig.length) {
+        return res.status(401).json({ error: "invalid signature" });
+    }
+    let diff = 0;
+    for (let i = 0; i < providedSig.length; i++) {
+        diff |= providedSig.charCodeAt(i) ^ expectedSig.charCodeAt(i);
+    }
+    if (diff !== 0) {
         return res.status(401).json({ error: "invalid signature" });
     }
 

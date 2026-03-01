@@ -30,6 +30,20 @@
 
 local template = {}
 
+-- ── Limits ──────────────────────────────────────────────────────────
+
+local MAX_INCLUDE_DEPTH  = 16
+local MAX_EXTENDS_DEPTH  = 8
+local MAX_CACHE_SIZE     = 1024
+
+-- ── Validation ──────────────────────────────────────────────────────
+
+local function validate_ident(s, context)
+    if not s:match("^[%a_][%w_]*$") then
+        error("invalid identifier in template " .. (context or "expression") .. ": " .. s)
+    end
+end
+
 -- ── HTML escape ──────────────────────────────────────────────────────
 
 local escape_map = {
@@ -385,11 +399,16 @@ local function apply_blocks(ast, overrides)
 end
 
 -- Resolve inheritance chain
-local function resolve_inheritance(ast, load_fn, visited)
+local function resolve_inheritance(ast, load_fn, visited, depth)
     visited = visited or {}
+    depth = depth or 0
     local parent_name = find_extends(ast)
     if not parent_name then
         return ast
+    end
+
+    if depth >= MAX_EXTENDS_DEPTH then
+        error("extends depth limit exceeded (max " .. MAX_EXTENDS_DEPTH .. ")")
     end
 
     if visited[parent_name] then
@@ -406,16 +425,29 @@ local function resolve_inheritance(ast, load_fn, visited)
     local parent_ast = parse(parent_tokens)
 
     -- Recursively resolve parent's inheritance
-    parent_ast = resolve_inheritance(parent_ast, load_fn, visited)
+    parent_ast = resolve_inheritance(parent_ast, load_fn, visited, depth + 1)
 
     -- Collect child blocks and apply to parent
     local child_blocks = collect_blocks(ast)
     return apply_blocks(parent_ast, child_blocks)
 end
 
+-- Clone a visited set (shallow copy)
+local function clone_set(t)
+    local copy = {}
+    for k, v in pairs(t) do copy[k] = v end
+    return copy
+end
+
 -- Resolve includes (inline)
-local function resolve_includes(ast, load_fn, visited)
+local function resolve_includes(ast, load_fn, visited, depth)
     visited = visited or {}
+    depth = depth or 0
+
+    if depth >= MAX_INCLUDE_DEPTH then
+        error("include depth limit exceeded (max " .. MAX_INCLUDE_DEPTH .. ")")
+    end
+
     local result = {}
     for _, node in ipairs(ast) do
         if node.kind == "include" then
@@ -430,31 +462,31 @@ local function resolve_includes(ast, load_fn, visited)
             end
             local inc_tokens = lex(source)
             local inc_ast = parse(inc_tokens)
-            inc_ast = resolve_includes(inc_ast, load_fn, visited)
+            inc_ast = resolve_includes(inc_ast, load_fn, visited, depth + 1)
             for _, inc_node in ipairs(inc_ast) do
                 result[#result + 1] = inc_node
             end
         elseif node.kind == "if" then
-            -- Resolve includes inside branches
+            -- Resolve includes inside branches (clone visited per branch)
             local new_branches = {}
             for _, branch in ipairs(node.branches) do
                 new_branches[#new_branches + 1] = {
                     cond = branch.cond,
                     negated = branch.negated,
-                    body = resolve_includes(branch.body, load_fn, visited)
+                    body = resolve_includes(branch.body, load_fn, clone_set(visited), depth + 1)
                 }
             end
-            local new_else = node.else_body and resolve_includes(node.else_body, load_fn, visited) or nil
+            local new_else = node.else_body and resolve_includes(node.else_body, load_fn, clone_set(visited), depth + 1) or nil
             result[#result + 1] = { kind = "if", branches = new_branches, else_body = new_else }
         elseif node.kind == "for" then
             result[#result + 1] = { kind = "for", var = node.var, expr = node.expr,
-                                     body = resolve_includes(node.body, load_fn, visited) }
+                                     body = resolve_includes(node.body, load_fn, visited, depth + 1) }
         elseif node.kind == "for_kv" then
             result[#result + 1] = { kind = "for_kv", key = node.key, val = node.val, expr = node.expr,
-                                     body = resolve_includes(node.body, load_fn, visited) }
+                                     body = resolve_includes(node.body, load_fn, visited, depth + 1) }
         elseif node.kind == "block" then
             result[#result + 1] = { kind = "block", name = node.name,
-                                     body = resolve_includes(node.body, load_fn, visited) }
+                                     body = resolve_includes(node.body, load_fn, visited, depth + 1) }
         else
             result[#result + 1] = node
         end
@@ -472,7 +504,11 @@ local function gen_dot_path(path, prefix, locals_set)
     prefix = prefix or "__d"
     local parts = {}
     for part in path:gmatch("[^.]+") do
+        validate_ident(part, "dot path '" .. path .. "'")
         parts[#parts + 1] = part
+    end
+    if #parts == 0 then
+        error("empty expression in template")
     end
 
     -- Check if first segment is a loop-local variable
@@ -522,10 +558,18 @@ local function gen_expr(expr_info, escaped, locals_set)
             -- Filter with argument
             local arg = f.arg:match("^%s*(.-)%s*$")
             -- Check if arg is a string literal
-            if arg:sub(1, 1) == '"' or arg:sub(1, 1) == "'" then
+            if arg:sub(1, 1) == '"' then
+                if not arg:match('^"[^"]*"$') then
+                    error("invalid filter argument (unbalanced quotes): " .. arg)
+                end
+                code = "__f." .. f.name .. "(" .. code .. ", " .. arg .. ")"
+            elseif arg:sub(1, 1) == "'" then
+                if not arg:match("^'[^']*'$") then
+                    error("invalid filter argument (unbalanced quotes): " .. arg)
+                end
                 code = "__f." .. f.name .. "(" .. code .. ", " .. arg .. ")"
             else
-                -- It's a variable reference
+                -- It's a variable reference — validated by gen_dot_path
                 code = "__f." .. f.name .. "(" .. code .. ", " .. gen_dot_path(arg, nil, locals_set) .. ")"
             end
         else
@@ -656,6 +700,8 @@ local function compile_source(source, name)
     return fn
 end
 
+local cache_count = 0
+
 --- Compile a named template (from embedded entries or filesystem).
 -- Returns a function(data) that renders the template.
 function template.compile(name)
@@ -668,8 +714,15 @@ function template.compile(name)
         error("template not found: " .. name)
     end
 
+    -- Evict cache if at capacity
+    if cache_count >= MAX_CACHE_SIZE then
+        cache = {}
+        cache_count = 0
+    end
+
     local fn = compile_source(source, name)
     cache[name] = fn
+    cache_count = cache_count + 1
     return fn
 end
 
@@ -689,6 +742,7 @@ end
 --- Clear the compiled function cache.
 function template.clear_cache()
     cache = {}
+    cache_count = 0
 end
 
 return template

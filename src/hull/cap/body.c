@@ -22,6 +22,8 @@ KlBodyReader *hl_cap_body_factory(KlAllocator *alloc, const KlRequest *req,
 
 size_t hl_cap_body_data(const KlBodyReader *reader, const char **out_data)
 {
+    if (!out_data)
+        return 0;
     if (!reader) {
         *out_data = NULL;
         return 0;

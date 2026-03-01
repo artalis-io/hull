@@ -30,6 +30,22 @@
 
 import { _template } from "hull:_template";
 
+// ── Limits ──────────────────────────────────────────────────────────
+
+const MAX_INCLUDE_DEPTH  = 16;
+const MAX_EXTENDS_DEPTH  = 8;
+const MAX_CACHE_SIZE     = 1024;
+
+// ── Validation ──────────────────────────────────────────────────────
+
+const IDENT_RE = /^[a-zA-Z_]\w*$/;
+
+function validateIdent(s, context) {
+    if (!IDENT_RE.test(s)) {
+        throw new Error("invalid identifier in template " + (context || "expression") + ": " + s);
+    }
+}
+
 // ── HTML escape ──────────────────────────────────────────────────────
 
 const escapeMap = {
@@ -277,10 +293,15 @@ function applyBlocks(ast, overrides) {
     return result;
 }
 
-function resolveInheritance(ast, loadFn, visited) {
+function resolveInheritance(ast, loadFn, visited, depth) {
     visited = visited || {};
+    depth = depth || 0;
     const parentName = findExtends(ast);
     if (!parentName) return ast;
+
+    if (depth >= MAX_EXTENDS_DEPTH) {
+        throw new Error("extends depth limit exceeded (max " + MAX_EXTENDS_DEPTH + ")");
+    }
 
     if (visited[parentName]) throw new Error("circular extends: " + parentName);
     visited[parentName] = true;
@@ -289,14 +310,24 @@ function resolveInheritance(ast, loadFn, visited) {
     if (parentSource == null) throw new Error("template not found: " + parentName);
 
     let parentAst = parse(lex(parentSource));
-    parentAst = resolveInheritance(parentAst, loadFn, visited);
+    parentAst = resolveInheritance(parentAst, loadFn, visited, depth + 1);
 
     const childBlocks = collectBlocks(ast);
     return applyBlocks(parentAst, childBlocks);
 }
 
-function resolveIncludes(ast, loadFn, visited) {
+function cloneSet(obj) {
+    return Object.assign({}, obj);
+}
+
+function resolveIncludes(ast, loadFn, visited, depth) {
     visited = visited || {};
+    depth = depth || 0;
+
+    if (depth >= MAX_INCLUDE_DEPTH) {
+        throw new Error("include depth limit exceeded (max " + MAX_INCLUDE_DEPTH + ")");
+    }
+
     const result = [];
     for (const node of ast) {
         if (node.kind === "include") {
@@ -305,24 +336,25 @@ function resolveIncludes(ast, loadFn, visited) {
             const source = loadFn(node.name);
             if (source == null) throw new Error("template not found: " + node.name);
             let incAst = parse(lex(source));
-            incAst = resolveIncludes(incAst, loadFn, visited);
+            incAst = resolveIncludes(incAst, loadFn, visited, depth + 1);
             for (const n of incAst) result.push(n);
         } else if (node.kind === "if") {
+            // Clone visited per branch so same partial can appear in mutually exclusive branches
             const newBranches = node.branches.map(b => ({
                 cond: b.cond, negated: b.negated,
-                body: resolveIncludes(b.body, loadFn, visited)
+                body: resolveIncludes(b.body, loadFn, cloneSet(visited), depth + 1)
             }));
-            const newElse = node.elseBody ? resolveIncludes(node.elseBody, loadFn, visited) : null;
+            const newElse = node.elseBody ? resolveIncludes(node.elseBody, loadFn, cloneSet(visited), depth + 1) : null;
             result.push({ kind: "if", branches: newBranches, elseBody: newElse });
         } else if (node.kind === "for") {
             result.push({ kind: "for", var: node.var, expr: node.expr,
-                          body: resolveIncludes(node.body, loadFn, visited) });
+                          body: resolveIncludes(node.body, loadFn, visited, depth + 1) });
         } else if (node.kind === "for_kv") {
             result.push({ kind: "for_kv", key: node.key, val: node.val, expr: node.expr,
-                          body: resolveIncludes(node.body, loadFn, visited) });
+                          body: resolveIncludes(node.body, loadFn, visited, depth + 1) });
         } else if (node.kind === "block") {
             result.push({ kind: "block", name: node.name,
-                          body: resolveIncludes(node.body, loadFn, visited) });
+                          body: resolveIncludes(node.body, loadFn, visited, depth + 1) });
         } else {
             result.push(node);
         }
@@ -339,6 +371,11 @@ function resolveIncludes(ast, loadFn, visited) {
 function genDotPath(path, prefix, localsSet) {
     prefix = prefix || "__d";
     const parts = path.split(".");
+
+    if (parts.length === 0) throw new Error("empty expression in template");
+    for (const p of parts) {
+        validateIdent(p, "dot path '" + path + "'");
+    }
 
     // Check if first segment is a loop-local variable
     if (localsSet && localsSet[parts[0]]) {
@@ -358,9 +395,18 @@ function genExpr(exprInfo, escaped, localsSet) {
             escaped = false;
         } else if (f.arg) {
             let arg = f.arg.trim();
-            if (arg[0] === '"' || arg[0] === "'") {
+            if (arg[0] === '"') {
+                if (!/^"[^"]*"$/.test(arg)) {
+                    throw new Error("invalid filter argument (unbalanced quotes): " + arg);
+                }
+                code = "__f." + f.name + "(" + code + ", " + arg + ")";
+            } else if (arg[0] === "'") {
+                if (!/^'[^']*'$/.test(arg)) {
+                    throw new Error("invalid filter argument (unbalanced quotes): " + arg);
+                }
                 code = "__f." + f.name + "(" + code + ", " + arg + ")";
             } else {
+                // Variable reference — validated by genDotPath
                 code = "__f." + f.name + "(" + code + ", " + genDotPath(arg, null, localsSet) + ")";
             }
         } else {
@@ -450,6 +496,7 @@ function codegen(ast) {
 // ── Compile + cache ─────────────────────────────────────────────────
 
 const cache = {};
+let cacheCount = 0;
 
 function loadRaw(name) {
     return _template.loadRaw(name);
@@ -471,8 +518,15 @@ function compile(name) {
     const source = loadRaw(name);
     if (source == null) throw new Error("template not found: " + name);
 
+    // Evict cache if at capacity
+    if (cacheCount >= MAX_CACHE_SIZE) {
+        for (const k in cache) delete cache[k];
+        cacheCount = 0;
+    }
+
     const fn = compileSource(source, name);
     cache[name] = fn;
+    cacheCount++;
     return fn;
 }
 
@@ -488,6 +542,7 @@ function renderString(source, data) {
 
 function clearCache() {
     for (const k in cache) delete cache[k];
+    cacheCount = 0;
 }
 
 const template = { render, renderString, compile, clearCache };

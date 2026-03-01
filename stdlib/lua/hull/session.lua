@@ -92,7 +92,13 @@ function session.load(session_id)
         { now, now + _ttl, session_id }
     )
 
-    return json.decode(row.data)
+    local decoded = json.decode(row.data)
+    if not decoded then
+        -- Corrupted session data — destroy and return nil
+        db.exec("DELETE FROM hull_sessions WHERE id = ?", { session_id })
+        return nil
+    end
+    return decoded
 end
 
 --- Replace session data for an existing session.
