@@ -2220,6 +2220,12 @@ static JSValue js_template_load_raw(JSContext *ctx, JSValueConst this_val,
     if (!name)
         return JS_EXCEPTION;
 
+    /* Reject path traversal in template name */
+    if (strstr(name, "..") != NULL || name[0] == '/') {
+        JS_FreeCString(ctx, name);
+        return JS_ThrowTypeError(ctx, "invalid template name");
+    }
+
     /* 1. Search embedded template entries */
     for (const HlStdlibEntry *e = hl_app_template_entries; e->name; e++) {
         if (strcmp(e->name, name) == 0) {

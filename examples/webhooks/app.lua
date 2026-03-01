@@ -9,10 +9,10 @@
 -- Manifest: allow outbound HTTP to localhost for webhook delivery
 app.manifest({
     hosts = {"127.0.0.1"},
-    env = {},
+    env = {"WEBHOOK_SECRET"},
 })
 
-local SIGNING_SECRET = "whsec_change-me-in-production"
+local SIGNING_SECRET = env.get("WEBHOOK_SECRET") or "whsec_change-me-in-production"
 
 -- ── Schema ──────────────────────────────────────────────────────────
 
@@ -204,9 +204,16 @@ app.post("/webhooks/receive", function(req, res)
         return res:status(401):json({ error = "invalid signature format" })
     end
 
-    -- Compute expected signature and compare
+    -- Compute expected signature and compare (constant-time)
     local expected_sig = sign_payload(req.body)
-    if provided_sig ~= expected_sig then
+    if #provided_sig ~= #expected_sig then
+        return res:status(401):json({ error = "invalid signature" })
+    end
+    local diff = 0
+    for i = 1, #provided_sig do
+        diff = diff | (string.byte(provided_sig, i) ~ string.byte(expected_sig, i))
+    end
+    if diff ~= 0 then
         return res:status(401):json({ error = "invalid signature" })
     end
 

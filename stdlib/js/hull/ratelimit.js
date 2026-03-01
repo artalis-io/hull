@@ -11,6 +11,17 @@
 
 import { time } from "hull:time";
 
+const MAX_BUCKETS = 10000;
+const SWEEP_INTERVAL = 100;
+
+function sweepExpired(buckets, window, now) {
+    for (const k in buckets) {
+        if ((now - buckets[k].windowStart) >= window) {
+            delete buckets[k];
+        }
+    }
+}
+
 function check(buckets, key, limit, window, now) {
     let bucket = buckets[key];
     if (!bucket || (now - bucket.windowStart) >= window) {
@@ -36,6 +47,7 @@ function middleware(opts) {
     const window = o.window !== undefined ? o.window : 60;
     let keyFn = o.key;
     const buckets = {};
+    let checkCount = 0;
 
     // Normalize key option into a function
     if (typeof keyFn !== "function") {
@@ -46,6 +58,13 @@ function middleware(opts) {
     return function ratelimitMiddleware(req, res) {
         const key = keyFn(req);
         const now = time.now();
+
+        // Periodic sweep of expired buckets to prevent unbounded growth
+        checkCount++;
+        if (checkCount % SWEEP_INTERVAL === 0) {
+            sweepExpired(buckets, window, now);
+        }
+
         const result = check(buckets, key, limit, window, now);
 
         res.header("X-RateLimit-Limit", String(limit));

@@ -27,7 +27,7 @@ local features = {
 app.get("/", function(req, res)
     local html = template.render("pages/home.html", {
         site_name    = "Hull Demo",
-        year         = os.date("%Y"),
+        year         = time.date():sub(1, 4),
         users        = users,
         features     = features,
         html_snippet = '<em>bold & "quoted"</em>',
@@ -38,7 +38,7 @@ end)
 app.get("/about", function(req, res)
     local html = template.render("pages/about.html", {
         site_name = "Hull Demo",
-        year      = os.date("%Y"),
+        year      = time.date():sub(1, 4),
         version   = "0.1.0",
     })
     res:html(html)

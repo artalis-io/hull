@@ -60,6 +60,24 @@ static int hl_js_interrupt_handler(JSRuntime *rt, void *opaque)
 /* ── Module loader ──────────────────────────────────────────────────── */
 
 /*
+ * Reject module names that contain path traversal sequences.
+ * Returns 0 if safe, -1 if the name contains ".." or is absolute.
+ */
+static int hl_js_validate_module_name(const char *name)
+{
+    /* Reject absolute paths */
+    if (name[0] == '/')
+        return -1;
+
+    /* Reject ".." anywhere in the path */
+    if (strstr(name, "..") != NULL)
+        return -1;
+
+    /* Reject embedded null bytes (shouldn't happen, but defense-in-depth) */
+    return 0;
+}
+
+/*
  * Module name normalizer. For hull: prefix, return as-is.
  * For relative paths, resolve against the application root.
  */
@@ -73,6 +91,12 @@ static char *hl_js_module_normalize(JSContext *ctx,
     /* hull:* modules are already normalized */
     if (strncmp(name, "hull:", 5) == 0)
         return js_strdup(ctx, name);
+
+    /* Reject path traversal */
+    if (hl_js_validate_module_name(name) != 0) {
+        JS_ThrowReferenceError(ctx, "invalid module path: %s", name);
+        return NULL;
+    }
 
     /* Relative paths: resolve against app directory */
     if (name[0] == '.') {
@@ -91,6 +115,14 @@ static char *hl_js_module_normalize(JSContext *ctx,
             memcpy(resolved, base_name, dir_len);
             resolved[dir_len] = '/';
             memcpy(resolved + dir_len + 1, name, name_len + 1);
+
+            /* Verify resolved path doesn't contain ".." after concatenation */
+            if (strstr(resolved, "..") != NULL) {
+                js_free(ctx, resolved);
+                JS_ThrowReferenceError(ctx, "invalid module path: %s", name);
+                return NULL;
+            }
+
             return resolved;
         }
     }
@@ -204,9 +236,13 @@ static void hl_js_sandbox(JSContext *ctx)
     JS_DeleteProperty(ctx, global, eval_atom, 0);
     JS_FreeAtom(ctx, eval_atom);
 
-    /* Remove Function constructor (prevents new Function("...")) */
-    /* We leave Function itself since it's needed internally,
-     * but the constructor is effectively neutered by removing eval */
+    /* Remove Function constructor — prevents new Function("...") code
+     * execution.  Removing eval alone is insufficient because the
+     * Function constructor can independently compile and execute
+     * arbitrary code strings. */
+    JSAtom fn_atom = JS_NewAtom(ctx, "Function");
+    JS_DeleteProperty(ctx, global, fn_atom, 0);
+    JS_FreeAtom(ctx, fn_atom);
 
     JS_FreeValue(ctx, global);
 }
