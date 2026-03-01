@@ -437,6 +437,7 @@ platform-cosmo:
 	cp $(BUILDDIR)/libhull_platform.a $(COSMO_STAGE)/libhull_platform.aarch64-cosmo.a
 	cp $(BUILDDIR)/platform_canary_hash $(COSMO_STAGE)/platform_canary_hash.aarch64-cosmo
 	$(MAKE) clean
+	$(MAKE) -C $(KEEL_DIR) clean
 	mkdir -p $(BUILDDIR)
 	cp $(COSMO_STAGE)/* $(BUILDDIR)/
 	echo "cosmocc" > $(BUILDDIR)/platform_cc
