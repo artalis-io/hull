@@ -247,14 +247,28 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
     local platform_extracted = false
     local platform_lib = tmpdir .. "/libhull_platform.a"
 
+    -- Resolve CC early (needed for cosmo detection)
+    local cc = opts.cc or tool.cc or "cosmocc"
+    local is_cosmo = cc:find("cosmocc") ~= nil
+
     -- Try to find platform library in known locations
-    -- 1. Check if build_assets has it embedded
-    local extract_ok = pcall(function()
-        local hull_build = require("hull.build_assets")
-        hull_build.extract_platform(tmpdir)
-    end)
-    if extract_ok and file_exists(platform_lib) then
-        platform_extracted = true
+    -- 1. Check if build_assets has it embedded (multi-arch cosmo)
+    if is_cosmo and tool.platform_archs then
+        local archs = tool.platform_archs()
+        if archs then
+            local ok = tool.extract_platform_cosmo(tmpdir)
+            if ok then
+                platform_extracted = true
+            end
+        end
+    end
+
+    -- 1b. Single-arch embedded extraction
+    if not platform_extracted and tool.extract_platform then
+        local ok = tool.extract_platform(tmpdir)
+        if ok and file_exists(platform_lib) then
+            platform_extracted = true
+        end
     end
 
     -- 2. Check build/ directory (development mode)
@@ -270,25 +284,58 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
             "build/",
             "../build/",
         }
-        for _, d in ipairs(dev_paths) do
-            if file_exists(d .. "libhull_platform.a") then
-                tool.copy(d .. "libhull_platform.a", platform_lib)
-                platform_dir = d
-                platform_extracted = true
-                break
+
+        if is_cosmo then
+            -- Look for multi-arch cosmo archives
+            for _, d in ipairs(dev_paths) do
+                local x86 = d .. "libhull_platform.x86_64-cosmo.a"
+                local arm = d .. "libhull_platform.aarch64-cosmo.a"
+                if file_exists(x86) and file_exists(arm) then
+                    tool.copy(x86, tmpdir .. "/libhull_platform.a")
+                    tool.mkdir(tmpdir .. "/.aarch64")
+                    tool.copy(arm, tmpdir .. "/.aarch64/libhull_platform.a")
+                    platform_dir = d
+                    platform_extracted = true
+                    break
+                end
+            end
+            if not platform_extracted then
+                -- Fallback: try single-arch archive (non-fat build)
+                for _, d in ipairs(dev_paths) do
+                    if file_exists(d .. "libhull_platform.a") then
+                        tool.copy(d .. "libhull_platform.a", platform_lib)
+                        platform_dir = d
+                        platform_extracted = true
+                        break
+                    end
+                end
+            end
+        else
+            -- Single-arch fallback (unchanged)
+            for _, d in ipairs(dev_paths) do
+                if file_exists(d .. "libhull_platform.a") then
+                    tool.copy(d .. "libhull_platform.a", platform_lib)
+                    platform_dir = d
+                    platform_extracted = true
+                    break
+                end
             end
         end
     end
 
     if not platform_extracted then
-        tool.stderr("hull build: cannot find libhull_platform.a\n")
-        tool.stderr("hint: run `make platform` first, or use an embedded hull build\n")
+        if is_cosmo then
+            tool.stderr("hull build: cannot find platform archives\n")
+            tool.stderr("hint: run `make platform-cosmo` first\n")
+        else
+            tool.stderr("hull build: cannot find libhull_platform.a\n")
+            tool.stderr("hint: run `make platform` first, or use an embedded hull build\n")
+        end
         tool.rmdir(tmpdir)
         tool.exit(1)
     end
 
-    -- Resolve CC: use tool.cc (set by C from --cc flag, default cosmocc)
-    local cc = opts.cc or tool.cc or "cosmocc"
+    -- Validate CC matches platform (cc already resolved above)
     if platform_dir then
         -- Validate: warn if user --cc doesn't match what platform was built with
         local cc_data = read_file(platform_dir .. "platform_cc")

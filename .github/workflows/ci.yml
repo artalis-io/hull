@@ -110,7 +110,10 @@ jobs:
           rm /tmp/cosmocc.zip
           echo "/opt/cosmo/bin" >> $GITHUB_PATH
 
-      - name: Build
+      - name: Build platform (multi-arch)
+        run: make platform-cosmo
+
+      - name: Build hull
         run: make CC=cosmocc
 
       - name: Unit tests

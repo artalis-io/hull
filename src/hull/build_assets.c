@@ -18,28 +18,86 @@
 #include "embedded_templates.h"
 #endif
 
+/* ── Helper: write data to a file ──────────────────────────────────── */
+
+#ifdef HL_BUILD_EMBEDDED
+static int write_blob(const char *path, const unsigned char *data, size_t len)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return -1;
+    size_t written = fwrite(data, 1, len, f);
+    fclose(f);
+    return (written == len) ? 0 : -1;
+}
+#endif
+
+/* ── Multi-arch platform API ───────────────────────────────────────── */
+
+int hl_build_get_platforms(const HlEmbeddedPlatform **out)
+{
+#ifdef HL_BUILD_EMBEDDED_MULTIARCH
+    if (!out)
+        return 0;
+    *out = hl_embedded_platforms;
+    /* Count entries (excluding sentinel) */
+    int n = 0;
+    while (hl_embedded_platforms[n].arch)
+        n++;
+    return n;
+#else
+    (void)out;
+    return 0;
+#endif
+}
+
+int hl_build_extract_platform_arch(const char *dir, const char *arch)
+{
+#ifdef HL_BUILD_EMBEDDED_MULTIARCH
+    if (!dir || !arch)
+        return -1;
+
+    for (int i = 0; hl_embedded_platforms[i].arch; i++) {
+        if (strcmp(hl_embedded_platforms[i].arch, arch) == 0) {
+            char path[1024];
+            snprintf(path, sizeof(path), "%s/libhull_platform.%s.a",
+                     dir, arch);
+            return write_blob(path, hl_embedded_platforms[i].data,
+                              hl_embedded_platforms[i].len);
+        }
+    }
+    return -1; /* arch not found */
+#else
+    (void)dir; (void)arch;
+    return -1;
+#endif
+}
+
+/* ── Single / backward-compat extraction ───────────────────────────── */
+
 int hl_build_extract_platform(const char *dir)
 {
-#ifdef HL_BUILD_EMBEDDED
+#ifdef HL_BUILD_EMBEDDED_MULTIARCH
+    /* Multi-arch: extract the first entry as libhull_platform.a */
+    if (!dir || !hl_embedded_platforms[0].arch)
+        return -1;
+
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/libhull_platform.a", dir);
+    return write_blob(path, hl_embedded_platforms[0].data,
+                      hl_embedded_platforms[0].len);
+#elif defined(HL_BUILD_EMBEDDED)
     if (!dir)
         return -1;
 
     char path[1024];
     snprintf(path, sizeof(path), "%s/libhull_platform.a", dir);
-
-    FILE *f = fopen(path, "wb");
-    if (!f)
-        return -1;
-
-    size_t written = fwrite(hl_embedded_platform_a,
-                            1, hl_embedded_platform_a_len, f);
-    fclose(f);
-
-    return (written == hl_embedded_platform_a_len) ? 0 : -1;
+    return write_blob(path, hl_embedded_platform_a,
+                      hl_embedded_platform_a_len);
 #else
     (void)dir;
     fprintf(stderr, "hull build: platform library not embedded in this build\n");
-    fprintf(stderr, "hint: rebuild hull with `make platform && make HL_BUILD_EMBEDDED=1`\n");
+    fprintf(stderr, "hint: rebuild hull with `make platform && make EMBED_PLATFORM=1`\n");
     return -1;
 #endif
 }
