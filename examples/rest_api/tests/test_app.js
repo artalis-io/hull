@@ -44,7 +44,7 @@ test("GET /tasks/:id returns single task", () => {
     });
     const id = create.json.id;
 
-    const res = test.get("/tasks/" + id);
+    const res = test.get(`/tasks/${id}`);
     test.eq(res.status, 200);
     test.eq(res.json.title, "Single task");
 });
@@ -61,7 +61,7 @@ test("PUT /tasks/:id updates a task", () => {
     });
     const id = create.json.id;
 
-    const res = test.put("/tasks/" + id, {
+    const res = test.put(`/tasks/${id}`, {
         body: '{"title":"Updated","done":true}',
         headers: { "Content-Type": "application/json" },
     });
@@ -84,12 +84,12 @@ test("DELETE /tasks/:id deletes a task", () => {
     });
     const id = create.json.id;
 
-    const res = test.delete("/tasks/" + id);
+    const res = test.delete(`/tasks/${id}`);
     test.eq(res.status, 200);
     test.eq(res.json.ok, true);
 
     // Confirm gone
-    const after = test.get("/tasks/" + id);
+    const after = test.get(`/tasks/${id}`);
     test.eq(after.status, 404);
 });
 

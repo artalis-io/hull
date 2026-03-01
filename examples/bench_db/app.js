@@ -24,7 +24,7 @@ if (count[0].n < 1000) {
     db.batch(() => {
         for (let i = 1; i <= 1000; i++) {
             db.exec("INSERT INTO events (kind, payload, ts) VALUES (?, ?, ?)",
-                    ["seed", "payload-" + i, 1700000000 + i]);
+                    ["seed", `payload-${i}`, 1700000000 + i]);
         }
     });
 }
@@ -52,7 +52,7 @@ app.post("/write-batch", (_req, res) => {
     db.batch(() => {
         for (let i = 1; i <= 10; i++) {
             db.exec("INSERT INTO events (kind, payload, ts) VALUES (?, ?, ?)",
-                    ["batch", "data-" + i, time.now()]);
+                    ["batch", `data-${i}`, time.now()]);
         }
     });
     res.json({ inserted: 10 });
