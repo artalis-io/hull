@@ -26,10 +26,6 @@ RUNTIME ?= all
 ifneq ($(findstring cosmo,$(CC)),)
   COSMO := 1
 endif
-ifneq ($(findstring cosmocc,$(CC)),)
-  AR    := cosmoar
-endif
-
 # Platform detection
 UNAME_S := $(shell uname -s)
 
