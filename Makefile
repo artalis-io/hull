@@ -95,12 +95,20 @@ KEEL_INC   := $(KEEL_DIR)/include
 KEEL_LIB   := $(KEEL_DIR)/libkeel.a
 
 # Build Keel with mbedTLS backend
-# Pass BACKEND=poll when cosmo is detected (arch-specific compilers
-# like x86_64-unknown-cosmo-cc don't trigger Keel's own cosmo detection)
+# Pass BACKEND=poll and COSMO=1 when cosmo is detected (arch-specific
+# compilers like x86_64-unknown-cosmo-cc don't trigger Keel's own detection)
 $(KEEL_LIB): $(MBEDTLS_OBJS)
 	$(MAKE) -C $(KEEL_DIR) CC=$(CC) AR=$(AR) \
 		KEEL_TLS=mbedtls MBEDTLS_CONFIG_FILE=hull_config.h \
-		$(if $(COSMO),BACKEND=poll)
+		$(if $(COSMO),BACKEND=poll COSMO=1)
+ifdef COSMO
+	@# Ensure .aarch64/ counterpart archive exists for cosmocc fat linking
+	@if [ ! -f $(KEEL_DIR)/.aarch64/libkeel.a ]; then \
+		mkdir -p $(KEEL_DIR)/.aarch64 && \
+		$(AR) rcs $(KEEL_DIR)/.aarch64/libkeel.a \
+			$$(find $(KEEL_DIR)/src/.aarch64 $(KEEL_DIR)/parsers/.aarch64 $(KEEL_DIR)/vendor/llhttp/.aarch64 -name '*.o' 2>/dev/null); \
+	fi
+endif
 
 # ── mbedTLS (vendored) ─────────────────────────────────────────────
 
