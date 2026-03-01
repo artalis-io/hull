@@ -358,7 +358,45 @@ $(APP_LUA_REGISTRY_O): $(APP_LUA_REGISTRY_C) | $(BUILDDIR)
 	$(CC) -std=c11 -O2 -w -I$(BUILDDIR) -c -o $@ $<
 
 STDLIB_LUA_HDRS += $(APP_LUA_HDRS)
+
+# ── Template embedding (*.html under APP_DIR/templates/) ──────────
+APP_TPL_FILES := $(shell find $(APP_DIR)/templates -name '*.html' 2>/dev/null)
+ifneq ($(APP_TPL_FILES),)
+app_tpl_hdr = $(BUILDDIR)/app_tpl_$(subst /,_,$(patsubst $(APP_DIR)/templates/%.html,%.h,$(1)))
+APP_TPL_HDRS := $(foreach f,$(APP_TPL_FILES),$(call app_tpl_hdr,$(f)))
+
+define APP_TPL_RULE
+$(call app_tpl_hdr,$(1)): $(1) | $(BUILDDIR)
+	xxd -i $$< > $$@
+endef
+$(foreach f,$(APP_TPL_FILES),$(eval $(call APP_TPL_RULE,$(f))))
+
+APP_TPL_REGISTRY_C := $(BUILDDIR)/app_tpl_registry.c
+APP_TPL_REGISTRY_O := $(BUILDDIR)/app_tpl_registry.o
+
+$(APP_TPL_REGISTRY_C): $(APP_TPL_HDRS) | $(BUILDDIR)
+	@echo "/* Auto-generated template entries — do not edit */" > $@
+	@for hdr in $(APP_TPL_HDRS); do \
+		echo "#include \"$$(basename $$hdr)\""; \
+	done >> $@
+	@echo "" >> $@
+	@echo "typedef struct { const char *name; const unsigned char *data; unsigned int len; } HlStdlibEntry;" >> $@
+	@echo "const HlStdlibEntry hl_app_template_entries[] = {" >> $@
+	@for f in $(APP_TPL_FILES); do \
+		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
+		tplname=$$(echo "$$f" | sed 's|^$(APP_DIR)/templates/||'); \
+		echo "    { \"$$tplname\", $${varname}, sizeof($${varname}) },"; \
+	done >> $@
+	@echo "    { 0, 0, 0 }" >> $@
+	@echo "};" >> $@
+
+$(APP_TPL_REGISTRY_O): $(APP_TPL_REGISTRY_C) | $(BUILDDIR)
+	$(CC) -std=c11 -O2 -w -I$(BUILDDIR) -c -o $@ $<
+
+APP_EXTRA_OBJS := $(APP_LUA_REGISTRY_O) $(APP_TPL_REGISTRY_O)
+else
 APP_EXTRA_OBJS := $(APP_LUA_REGISTRY_O)
+endif
 endif
 
 # App entries default (empty array — used when no APP_DIR)
@@ -371,7 +409,7 @@ INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(KEEL_DIR)/ve
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan e2e e2e-build e2e-http e2e-sandbox e2e-examples hull-test-examples self-build check analyze cppcheck bench coverage lint-lua lint-js lint platform platform-cosmo
+.PHONY: all clean test debug msan e2e e2e-build e2e-http e2e-sandbox e2e-examples e2e-templates hull-test-examples self-build check analyze cppcheck bench coverage lint-lua lint-js lint platform platform-cosmo
 
 all: $(BUILDDIR)/hull
 
@@ -611,9 +649,9 @@ $(BUILDDIR)/test_parse_size: $(TESTDIR)/hull/test_parse_size.c $(TEST_COMMON_DEP
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_COMMON_LIBS)
 
 # JS runtime test — needs QuickJS + JS runtime objects + manifest (JS-only to avoid Lua link deps)
-$(BUILDDIR)/test_js: $(TESTDIR)/hull/runtime/js/test_js.c $(TEST_COMMON_DEPS) $(MANIFEST_JS_OBJ) $(JS_RT_OBJS) $(QJS_OBJS) | $(BUILDDIR)
+$(BUILDDIR)/test_js: $(TESTDIR)/hull/runtime/js/test_js.c $(TEST_COMMON_DEPS) $(MANIFEST_JS_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(JS_RT_OBJS) $(QJS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(TEST_CAP_OBJS) $(JS_RT_OBJS) $(MANIFEST_JS_OBJ) $(ALLOC_OBJ) $(QJS_OBJS) \
+		$(TEST_CAP_OBJS) $(JS_RT_OBJS) $(MANIFEST_JS_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(ALLOC_OBJ) $(QJS_OBJS) \
 		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) -lm -lpthread
 
 # Lua runtime test — needs Lua + Lua runtime objects + stdlib headers + manifest (Lua-only) + cap_tool + build_assets
@@ -712,6 +750,9 @@ e2e-sandbox: $(BUILDDIR)/hull
 
 e2e-examples: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_examples.sh
+
+e2e-templates: $(BUILDDIR)/hull
+	RUNTIME=$(RUNTIME) sh tests/e2e_templates.sh
 
 hull-test-examples: $(BUILDDIR)/hull
 	@for dir in examples/hello examples/rest_api examples/bench_db examples/auth \

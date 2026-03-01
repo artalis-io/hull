@@ -17,3 +17,7 @@ typedef struct {
 const HlStdlibEntry hl_app_lua_entries[] = {
     { 0, 0, 0 }
 };
+
+const HlStdlibEntry hl_app_template_entries[] = {
+    { 0, 0, 0 }
+};

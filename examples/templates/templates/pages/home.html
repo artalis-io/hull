@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+
+{% block title %}Home — Hull Templates{% end %}
+
+{% block content %}
+<h1>Welcome to {{ site_name | default: "Hull" }}</h1>
+<p>This example demonstrates the Hull template engine with inheritance, includes, filters, and loops.</p>
+
+{% if users %}
+<h2>Users ({{ users | length }})</h2>
+<ul>
+    {% for user in users %}
+    <li>
+        <strong>{{ user.name | upper }}</strong>
+        {% if user.email %} — {{ user.email }}{% end %}
+    </li>
+    {% end %}
+</ul>
+{% else %}
+<p>No users found.</p>
+{% end %}
+
+{% if features %}
+<h2>Features</h2>
+<ul>
+    {% for feature in features %}
+    <li>{{ feature | trim }}</li>
+    {% end %}
+</ul>
+{% end %}
+
+<h2>Raw HTML Example</h2>
+<p>Escaped: {{ html_snippet }}</p>
+<p>Raw: {{{ html_snippet }}}</p>
+
+<h2>Data as JSON</h2>
+<pre>{{ users | json }}</pre>
+{% end %}

@@ -42,6 +42,7 @@ int hl_js_init_time_module(JSContext *ctx, HlJS *js);
 int hl_js_init_env_module(JSContext *ctx, HlJS *js);
 int hl_js_init_crypto_module(JSContext *ctx, HlJS *js);
 int hl_js_init_log_module(JSContext *ctx, HlJS *js);
+int hl_js_init_template_module(JSContext *ctx, HlJS *js);
 
 /* ── Interrupt handler (gas metering) ───────────────────────────────── */
 

@@ -51,6 +51,7 @@ static int is_app_file(const char *name)
     size_t len = strlen(name);
     if (len > 4 && strcmp(name + len - 4, ".lua") == 0) return 1;
     if (len > 3 && strcmp(name + len - 3, ".js") == 0) return 1;
+    if (len > 5 && strcmp(name + len - 5, ".html") == 0) return 1;
     return 0;
 }
 

@@ -2158,6 +2158,149 @@ int hl_js_init_log_module(JSContext *ctx, HlJS *js)
 }
 
 /* ════════════════════════════════════════════════════════════════════
+ * hull:_template module (internal — called only by hull:template stdlib)
+ *
+ * _template.compile(code, name?)   → compiled JS function
+ * _template.loadRaw(name)          → raw template string or null
+ * ════════════════════════════════════════════════════════════════════ */
+
+/* Template entries: raw HTML bytes, searched by _template.loadRaw().
+ * Default empty in app_entries_default.c, overridden when templates/ exists. */
+typedef struct {
+    const char *name;
+    const unsigned char *data;
+    unsigned int len;
+} HlStdlibEntry;
+
+extern const HlStdlibEntry hl_app_template_entries[];
+
+/* _template.compile(code, name?) — compile generated JS source to a function */
+static JSValue js_template_compile(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "_template.compile requires (code)");
+
+    size_t len;
+    const char *code = JS_ToCStringLen(ctx, &len, argv[0]);
+    if (!code)
+        return JS_EXCEPTION;
+
+    const char *name = "<template>";
+    if (argc >= 2 && JS_IsString(argv[1])) {
+        name = JS_ToCString(ctx, argv[1]);
+        if (!name) {
+            JS_FreeCString(ctx, code);
+            return JS_EXCEPTION;
+        }
+    }
+
+    /* Evaluate the IIFE source — returns a function */
+    JSValue result = JS_Eval(ctx, code, len, name,
+                              JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_STRICT);
+
+    if (argc >= 2 && JS_IsString(argv[1]))
+        JS_FreeCString(ctx, name);
+    JS_FreeCString(ctx, code);
+
+    return result;
+}
+
+/* _template.loadRaw(name) — load raw template bytes from embedded
+ * entries or filesystem fallback. Returns string or null. */
+static JSValue js_template_load_raw(JSContext *ctx, JSValueConst this_val,
+                                     int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "_template.loadRaw requires (name)");
+
+    const char *name = JS_ToCString(ctx, argv[0]);
+    if (!name)
+        return JS_EXCEPTION;
+
+    /* 1. Search embedded template entries */
+    for (const HlStdlibEntry *e = hl_app_template_entries; e->name; e++) {
+        if (strcmp(e->name, name) == 0) {
+            JSValue result = JS_NewStringLen(ctx, (const char *)e->data, e->len);
+            JS_FreeCString(ctx, name);
+            return result;
+        }
+    }
+
+    /* 2. Filesystem fallback (dev mode): app_dir/templates/<name> */
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (js && js->app_dir) {
+        char path[1024];
+        int n = snprintf(path, sizeof(path), "%s/templates/%s",
+                         js->app_dir, name);
+        if (n > 0 && (size_t)n < sizeof(path)) {
+            FILE *f = fopen(path, "rb");
+            if (f) {
+                fseek(f, 0, SEEK_END);
+                long size = ftell(f);
+                if (size < 0 || size > 1048576) { /* 1 MB limit */
+                    fclose(f);
+                    JS_FreeCString(ctx, name);
+                    return JS_ThrowInternalError(ctx, "template too large: %s", path);
+                }
+                if (fseek(f, 0, SEEK_SET) != 0) {
+                    fclose(f);
+                    JS_FreeCString(ctx, name);
+                    return JS_ThrowInternalError(ctx, "seek failed: %s", path);
+                }
+
+                char *buf = js_malloc(ctx, (size_t)size);
+                if (!buf) {
+                    fclose(f);
+                    JS_FreeCString(ctx, name);
+                    return JS_EXCEPTION;
+                }
+                size_t nread = fread(buf, 1, (size_t)size, f);
+                int read_err = ferror(f);
+                fclose(f);
+
+                if (read_err || nread != (size_t)size) {
+                    js_free(ctx, buf);
+                    JS_FreeCString(ctx, name);
+                    return JS_ThrowInternalError(ctx, "read error: %s", path);
+                }
+
+                JSValue result = JS_NewStringLen(ctx, buf, nread);
+                js_free(ctx, buf);
+                JS_FreeCString(ctx, name);
+                return result;
+            }
+        }
+    }
+
+    JS_FreeCString(ctx, name);
+    return JS_NULL;
+}
+
+static int js_template_module_init(JSContext *ctx, JSModuleDef *m)
+{
+    JSValue tpl = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, tpl, "compile",
+                      JS_NewCFunction(ctx, js_template_compile, "compile", 2));
+    JS_SetPropertyStr(ctx, tpl, "loadRaw",
+                      JS_NewCFunction(ctx, js_template_load_raw, "loadRaw", 1));
+    JS_SetModuleExport(ctx, m, "_template", tpl);
+    return 0;
+}
+
+int hl_js_init_template_module(JSContext *ctx, HlJS *js)
+{
+    (void)js;
+    JSModuleDef *m = JS_NewCModule(ctx, "hull:_template", js_template_module_init);
+    if (!m)
+        return -1;
+    JS_AddModuleExport(ctx, m, "_template");
+    return 0;
+}
+
+/* ════════════════════════════════════════════════════════════════════
  * Module registry — called by hl_js_init() to register all
  * hull:* built-in modules.
  * ════════════════════════════════════════════════════════════════════ */
@@ -2200,6 +2343,10 @@ int hl_js_register_modules(HlJS *js)
     /* Register hull:http module — always available; per-function checks
      * enforce that http_cfg is set (wired from manifest after load_app). */
     if (hl_js_init_http_module(js->ctx, js) != 0)
+        return -1;
+
+    /* Register hull:_template — internal bridge for hull:template stdlib */
+    if (hl_js_init_template_module(js->ctx, js) != 0)
         return -1;
 
     return 0;

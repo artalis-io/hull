@@ -70,6 +70,11 @@ local function find_lua_files(dir)
     return tool.find_files(dir, "*.lua")
 end
 
+-- List .html files recursively in a directory
+local function find_html_files(dir)
+    return tool.find_files(dir, "*.html")
+end
+
 -- ── xxd in Lua ───────────────────────────────────────────────────────
 
 local function xxd_data(varname, data)
@@ -116,6 +121,48 @@ local function generate_app_registry(app_dir, lua_files)
 
     parts[#parts + 1] = "typedef struct { const char *name; const unsigned char *data; unsigned int len; } HlStdlibEntry;"
     parts[#parts + 1] = "const HlStdlibEntry hl_app_lua_entries[] = {"
+    for _, e in ipairs(entries) do
+        parts[#parts + 1] = e
+    end
+    parts[#parts + 1] = "    { 0, 0, 0 }"
+    parts[#parts + 1] = "};"
+
+    return table.concat(parts, "\n")
+end
+
+local function generate_template_registry(app_dir, html_files)
+    local parts = {}
+    local entries = {}
+
+    parts[#parts + 1] = "/* Auto-generated template entries by hull build — do not edit */"
+    parts[#parts + 1] = ""
+
+    local templates_dir = app_dir .. "/templates/"
+    local templates_dir_len = #templates_dir
+
+    for _, path in ipairs(html_files) do
+        local data = read_file(path)
+        if not data then
+            tool.stderr("hull build: cannot read " .. path .. "\n")
+            tool.exit(1)
+        end
+
+        -- Relative path from templates/ dir (e.g. "pages/home.html", "base.html")
+        local rel = path:sub(templates_dir_len + 1)
+        local varname = "tpl_" .. rel:gsub("[/.]", "_")
+
+        parts[#parts + 1] = xxd_data(varname, data)
+        parts[#parts + 1] = ""
+
+        entries[#entries + 1] = string.format(
+            '    { "%s", %s, sizeof(%s) },', rel, varname, varname)
+    end
+
+    parts[#parts + 1] = "#ifndef HL_STDLIB_ENTRY_DEFINED"
+    parts[#parts + 1] = "#define HL_STDLIB_ENTRY_DEFINED"
+    parts[#parts + 1] = "typedef struct { const char *name; const unsigned char *data; unsigned int len; } HlStdlibEntry;"
+    parts[#parts + 1] = "#endif"
+    parts[#parts + 1] = "const HlStdlibEntry hl_app_template_entries[] = {"
     for _, e in ipairs(entries) do
         parts[#parts + 1] = e
     end
@@ -235,6 +282,18 @@ local function main()
     -- Generate app_registry.c
     local registry_c = generate_app_registry(opts.app_dir, lua_files)
     write_file(tmpdir .. "/app_registry.c", registry_c)
+
+    -- Generate template_registry.c (if templates/ dir exists)
+    local templates_dir = opts.app_dir .. "/templates"
+    local html_files = {}
+    if file_exists(templates_dir) then
+        html_files = find_html_files(templates_dir)
+    end
+    local template_registry_c = generate_template_registry(opts.app_dir, html_files)
+    write_file(tmpdir .. "/template_registry.c", template_registry_c)
+    if #html_files > 0 then
+        print("hull build: " .. #html_files .. " template(s) from " .. templates_dir)
+    end
 
     -- Generate app_main.c
     local app_main = [[
@@ -368,11 +427,21 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
         tool.exit(1)
     end
 
+    ok = tool.spawn({cc, "-std=c11", "-O2", "-w", "-c",
+                     "-o", tmpdir .. "/template_registry.o",
+                     tmpdir .. "/template_registry.c"})
+    if not ok then
+        tool.stderr("hull build: compilation failed (template_registry.c)\n")
+        tool.rmdir(tmpdir)
+        tool.exit(1)
+    end
+
     -- Link
     print("hull build: linking...")
     ok = tool.spawn({cc, "-o", opts.output,
                      tmpdir .. "/app_main.o",
                      tmpdir .. "/app_registry.o",
+                     tmpdir .. "/template_registry.o",
                      tmpdir .. "/libhull_platform.a",
                      "-lm", "-lpthread"})
     if not ok then

@@ -98,10 +98,19 @@ This is the primary threat model. Hull exists to make it possible to trust apps 
 
 - **Prevention:** `hl_cap_env_get()` checks against the manifest's `env` allowlist (max 32 entries). Undeclared variables return NULL.
 
+**Attack: Cross-site scripting (XSS) via template output**
+
+- **Prevention:** Hull's template engine (`hull.template`) HTML-escapes all `{{ }}` output by default. The five dangerous characters (`& < > " '`) are replaced with HTML entities. This prevents reflected and stored XSS from user-controlled data rendered into HTML templates.
+- **Remaining risk:** Raw output (`{{{ }}}`) and the `| raw` filter bypass escaping. Developers must only use raw output with trusted content. Templates don't escape for JavaScript string contexts (e.g. inline `<script>` blocks) — use `{{ var | json }}` to safely embed data in JS contexts.
+
+**Attack: Template injection (server-side template injection / SSTI)**
+
+- **Prevention:** Template compilation uses `luaL_loadbuffer` / `JS_Eval` in the C bridge, which is only callable from embedded stdlib code (not user application code). The code generator produces deterministic output from the AST — user data is never interpolated into the generated source code. User data flows through the `__d` (data) parameter at render time, not at compile time. There is no `eval()` or `load()` in the sandboxed runtimes.
+
 **Attack: Session hijacking via cookie theft**
 
 - **Prevention:** `hull.cookie` defaults to `HttpOnly=true`, `Secure=true`, `SameSite=Lax`. HttpOnly prevents JavaScript access (XSS-based theft). Secure prevents plaintext transmission. SameSite=Lax blocks cross-origin POST requests from carrying session cookies.
-- **Remaining risk:** Same-origin XSS can still read `req.ctx.session` data. Hull doesn't have built-in XSS output escaping (application responsibility).
+- **Remaining risk:** Same-origin XSS can still read `req.ctx.session` data. Hull's template engine (`hull.template`) auto-escapes all `{{ }}` output by default (`& < > " '` → HTML entities), which prevents most reflected and stored XSS vectors. Raw output via `{{{ }}}` or the `| raw` filter bypasses escaping and should only be used with trusted content.
 
 **Attack: CSRF — forged state-changing requests from another origin**
 

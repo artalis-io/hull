@@ -25,6 +25,7 @@
 - `hull.jwt` — JWT HS256 sign/verify/decode (no "none" algorithm, constant-time comparison)
 - `hull.csrf` — stateless CSRF tokens via HMAC-SHA256
 - `hull.auth` — authentication middleware factories (session auth, JWT Bearer auth)
+- `hull.template` — compile-once render-many HTML template engine with inheritance, includes, filters, auto-escaping
 
 ### Build & Deployment
 - `hull build` — compile Lua/JS apps into standalone binaries
@@ -56,7 +57,7 @@
 - ASan + UBSan, MSan + UBSan sanitizer runs
 - Static analysis (scan-build + cppcheck)
 - Code coverage
-- E2E tests for all 8 examples in both runtimes
+- E2E tests for all 9 examples in both runtimes + 40 template engine tests
 - Sandbox violation tests (Linux + Cosmo)
 - Benchmarks (Lua vs QuickJS, DB vs non-DB routes)
 
@@ -66,9 +67,10 @@
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Template engine (`{{ }}` HTML templates) | Planned | Server-side rendering |
+| CORS middleware | **Done** | `hull.cors` — configurable origins, preflight handling |
+| Template engine (`{{ }}` HTML templates) | **Done** | `hull.template` — inheritance, includes, filters, compiled & cached |
 | Input validation (schema-based) | Planned | Declarative field validation |
-| Rate limiting middleware | Planned | Token bucket or sliding window |
+| Rate limiting middleware | **Done** | `hull.ratelimit` — sliding window, per-key |
 | Static file serving (`app.static("/public")`) | Planned | With caching headers |
 | CSV encode/decode (RFC 4180) | Planned | Import/export |
 | FTS5 search wrapper | Planned | Full-text search stdlib |

@@ -108,6 +108,7 @@ Hull ships a full set of middleware and utility modules for building secure back
 | `session` | `hull.session` | `hull:session` | Server-side sessions backed by SQLite |
 | `cookie` | `hull.cookie` | `hull:cookie` | Cookie parse/serialize helpers |
 | `jwt` | `hull.jwt` | `hull:jwt` | JWT sign/verify (HMAC-SHA256) |
+| `template` | `hull.template` | `hull:template` | HTML template engine with inheritance, includes, filters |
 | `json` | `hull.json` | (built-in) | JSON encode/decode |
 
 All middleware modules follow the same factory pattern: `module.middleware(opts)` returns a function `(req, res) -> 0|1` where `0` = continue, `1` = short-circuit.
@@ -192,7 +193,7 @@ See [docs/benchmark.md](docs/benchmark.md) for methodology.
 
 ## Examples
 
-Eight example apps in both Lua and JavaScript:
+Ten example apps in both Lua and JavaScript:
 
 | Example | What it demonstrates |
 |---------|---------------------|
@@ -203,6 +204,8 @@ Eight example apps in both Lua and JavaScript:
 | [crud_with_auth](examples/crud_with_auth/) | Task CRUD with per-user isolation |
 | [middleware](examples/middleware/) | Request ID, logging, rate limiting, CORS |
 | [webhooks](examples/webhooks/) | Webhook delivery with HMAC-SHA256 signatures |
+| [templates](examples/templates/) | Template engine: inheritance, includes, filters |
+| [todo](examples/todo/) | Full CRUD todo app with HTML frontend (template engine) |
 | [bench_db](examples/bench_db/) | SQLite performance benchmarks |
 
 ```bash
@@ -231,6 +234,7 @@ Eight example apps in both Lua and JavaScript:
 make                    # build hull binary
 make test               # run 79 unit tests
 make e2e                # end-to-end tests (all examples, both runtimes)
+make e2e-templates      # template engine tests (40 tests, both runtimes)
 make debug              # ASan + UBSan build
 make msan               # MSan + UBSan (Linux clang only)
 make check              # full validation (clean + ASan + test + e2e)
