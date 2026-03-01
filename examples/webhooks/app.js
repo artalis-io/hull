@@ -7,11 +7,11 @@
 // and receive/verify incoming webhooks.
 
 import { app } from "hull:app";
+import { crypto } from "hull:crypto";
 import { db } from "hull:db";
+import { http } from "hull:http";
 import { log } from "hull:log";
 import { time } from "hull:time";
-import { crypto } from "hull:crypto";
-import { http } from "hull:http";
 
 // Manifest: allow outbound HTTP to localhost for webhook delivery
 app.manifest({
@@ -80,7 +80,7 @@ function deliverWebhook(webhook, eventType, payloadStr, eventId) {
             headers: {
                 "Content-Type": "application/json",
                 "X-Webhook-Event": eventType,
-                "X-Webhook-Signature": "sha256=" + sig,
+                "X-Webhook-Signature": `sha256=${sig}`,
             }
         });
         status = r.status;

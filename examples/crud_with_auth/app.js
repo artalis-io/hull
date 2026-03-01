@@ -4,13 +4,13 @@
 // Tasks API with session-based auth — each user only sees their own tasks
 
 import { app } from "hull:app";
+import { auth } from "hull:auth";
+import { cookie } from "hull:cookie";
+import { crypto } from "hull:crypto";
 import { db } from "hull:db";
 import { log } from "hull:log";
-import { time } from "hull:time";
-import { crypto } from "hull:crypto";
-import { cookie } from "hull:cookie";
 import { session } from "hull:session";
-import { auth } from "hull:auth";
+import { time } from "hull:time";
 
 // Initialize database
 session.init({ ttl: 3600 });
@@ -40,7 +40,7 @@ db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_user ON tasks (user_id)");
 
 // Load session on every request (optional — won't block unauthenticated)
 app.use("*", "/*", (req, _res) => {
-    const header = req.headers["cookie"];
+    const header = req.headers.cookie;
     if (!header) return 0;
 
     const cookies = cookie.parse(header);

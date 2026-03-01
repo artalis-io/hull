@@ -60,7 +60,7 @@ test("DELETE /webhooks/:id deletes a webhook", () => {
     });
     const id = create.json.id;
 
-    const res = test.delete("/webhooks/" + id);
+    const res = test.delete(`/webhooks/${id}`);
     test.eq(res.status, 200);
     test.eq(res.json.ok, true);
 });
