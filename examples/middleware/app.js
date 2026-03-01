@@ -6,6 +6,8 @@
 import { app } from "hull:app";
 import { log } from "hull:log";
 import { time } from "hull:time";
+import { cors } from "hull:cors";
+import { ratelimit } from "hull:ratelimit";
 
 // ── Request ID middleware ────────────────────────────────────────────
 // Assigns a unique ID to every request, available via req.ctx.request_id
@@ -31,69 +33,17 @@ app.use("*", "/*", (req, _res) => {
 });
 
 // ── Rate limiting middleware ─────────────────────────────────────────
-// Simple in-memory rate limiter: max 60 requests per minute per client.
-// Uses a sliding window approximation with per-second buckets.
-// NOTE: resets on server restart. For production, use a DB-backed limiter.
+// 60 requests per minute, keyed globally (demo).
 
-const RATE_WINDOW = 60;   // window in seconds
-const RATE_LIMIT = 60;    // max requests per window
-const rateBuckets = {};    // { [clientKey]: { count, windowStart } }
-
-app.use("*", "/api/*", (_req, res) => {
-    // In a real app, key by IP or API key. Here we use a fixed key for demo.
-    const key = "global";
-    const now = time.now();
-
-    let bucket = rateBuckets[key];
-    if (!bucket || (now - bucket.windowStart) >= RATE_WINDOW) {
-        rateBuckets[key] = { count: 1, windowStart: now };
-        bucket = rateBuckets[key];
-    } else {
-        bucket.count++;
-    }
-
-    const remaining = Math.max(0, RATE_LIMIT - bucket.count);
-
-    res.header("X-RateLimit-Limit", String(RATE_LIMIT));
-    res.header("X-RateLimit-Remaining", String(remaining));
-    res.header("X-RateLimit-Reset", String(bucket.windowStart + RATE_WINDOW));
-
-    if (bucket.count > RATE_LIMIT) {
-        res.status(429).json({ error: "rate limit exceeded", retry_after: RATE_WINDOW });
-        return 1;
-    }
-
-    return 0;
-});
+app.use("*", "/api/*", ratelimit.middleware({
+    limit: 60, window: 60,
+}));
 
 // ── CORS middleware ──────────────────────────────────────────────────
-// Manual CORS implementation: allows configurable origins, methods, headers.
 
-const CORS_ORIGINS = ["http://localhost:5173", "http://localhost:3001"];
-const CORS_METHODS = "GET, POST, PUT, DELETE, OPTIONS";
-const CORS_HEADERS = "Content-Type, Authorization";
-const CORS_MAX_AGE = "86400";
-
-app.use("*", "/api/*", (req, res) => {
-    const origin = req.headers.origin;
-    if (!origin) return 0;
-
-    const allowed = CORS_ORIGINS.indexOf(origin) !== -1;
-    if (!allowed) return 0;
-
-    res.header("Access-Control-Allow-Origin", origin);
-    res.header("Access-Control-Allow-Methods", CORS_METHODS);
-    res.header("Access-Control-Allow-Headers", CORS_HEADERS);
-    res.header("Access-Control-Max-Age", CORS_MAX_AGE);
-
-    // Handle preflight
-    if (req.method === "OPTIONS") {
-        res.status(204).text("");
-        return 1;
-    }
-
-    return 0;
-});
+app.use("*", "/api/*", cors.middleware({
+    origins: ["http://localhost:5173", "http://localhost:3001"],
+}));
 
 // OPTIONS route for CORS preflight (router requires a route to exist
 // so middleware can run — the CORS middleware above handles the response)
