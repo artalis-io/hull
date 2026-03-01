@@ -82,7 +82,7 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
     /* System compilers and headers */
     hl_tool_unveil_add(ctx, "/usr", "rx");
 
-#ifdef __linux__
+#if defined(__COSMOPOLITAN__) || defined(__linux__)
     hl_tool_unveil_add(ctx, "/lib", "r");
     hl_tool_unveil_add(ctx, "/lib64", "r");
 #endif
@@ -108,7 +108,7 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
         if (app_dir)     unveil(app_dir, "r");
         unveil("/tmp", "rwc");
         unveil("/usr", "rx");
-#ifdef __linux__
+#if defined(__COSMOPOLITAN__) || defined(__linux__)
         unveil("/lib", "r");
         unveil("/lib64", "r");
 #endif
