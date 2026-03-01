@@ -88,11 +88,17 @@ app.use("*", "/api/*", (req, res) => {
 
     // Handle preflight
     if (req.method === "OPTIONS") {
-        res.status(204).body("");
+        res.status(204).text("");
         return 1;
     }
 
     return 0;
+});
+
+// OPTIONS route for CORS preflight (router requires a route to exist
+// so middleware can run — the CORS middleware above handles the response)
+app.options("/api/items", (_req, res) => {
+    res.status(204).text("");
 });
 
 // ── Routes ──────────────────────────────────────────────────────────
