@@ -371,7 +371,7 @@ INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(KEEL_DIR)/ve
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan e2e e2e-build e2e-http e2e-sandbox self-build check analyze cppcheck bench coverage lint-lua lint-js lint platform platform-cosmo
+.PHONY: all clean test debug msan e2e e2e-build e2e-http e2e-sandbox e2e-examples hull-test-examples self-build check analyze cppcheck bench coverage lint-lua lint-js lint platform platform-cosmo
 
 all: $(BUILDDIR)/hull
 
@@ -709,6 +709,18 @@ e2e-http: $(BUILDDIR)/hull
 
 e2e-sandbox: $(BUILDDIR)/hull
 	sh tests/e2e_sandbox.sh
+
+e2e-examples: $(BUILDDIR)/hull
+	RUNTIME=$(RUNTIME) sh tests/e2e_examples.sh
+
+hull-test-examples: $(BUILDDIR)/hull
+	@for dir in examples/hello examples/rest_api examples/bench_db examples/auth \
+	            examples/jwt_api examples/crud_with_auth examples/middleware examples/webhooks; do \
+		echo "=== hull test $$dir ===" && \
+		output=$$($(BUILDDIR)/hull test "$$dir" 2>&1; true) && \
+		echo "$$output" && \
+		if echo "$$output" | grep -qE "[0-9]+ failed"; then exit 1; fi; \
+	done
 
 # ── Self-build (hull → hull2 → hull3 chain) ─────────────────────────
 
