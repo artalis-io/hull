@@ -286,6 +286,7 @@ Embedded Lua/JS modules in `stdlib/`:
 | `hull.jwt` | JWT HS256 sign/verify/decode — constant-time signature comparison, no "none" algorithm |
 | `hull.csrf` | Stateless CSRF tokens via HMAC-SHA256 — generate, verify, middleware factory |
 | `hull.auth` | Authentication middleware factories — session auth, JWT Bearer auth, login/logout helpers |
+| `hull.template` | Compile-once render-many HTML template engine — inheritance, includes, filters, auto-escaping |
 | `hull.build` | Full build pipeline: extract platform, collect files, generate trampoline, compile, link, sign |
 | `hull.verify` | Dual-layer signature verification (CLI tool) |
 | `hull.inspect` | Display capabilities + signature status |
@@ -293,6 +294,32 @@ Embedded Lua/JS modules in `stdlib/`:
 | `hull.sign_platform` | Sign platform libraries with per-arch hashes |
 
 Stdlib modules are compiled into the binary as byte arrays (auto-generated registry). They are resolved by the custom `require()` / module loader.
+
+### Template Compilation Pipeline
+
+The template engine (`hull.template`) compiles HTML templates to native runtime functions:
+
+```
+Template source (.html file or string)
+        ↓
+    Lexer — tokenize on {{ }}, {% %}, {{{ }}}, {# #}
+        ↓
+    Parser — recursive descent → AST
+        ↓
+    Inheritance resolver — extends → load parent → merge blocks
+        ↓
+    Include resolver — inline partial AST nodes
+        ↓
+    Code generator — AST → native Lua or JS source string
+        ↓
+    C bridge — luaL_loadbuffer (Lua) / JS_Eval (JS) → compiled function
+        ↓
+    Cache — keyed by template name, reused across requests
+```
+
+The C bridge functions (`_template._compile` / `_template._load_raw`) live in the runtime module loaders (`runtime/lua/modules.c`, `runtime/js/modules.c`). They use the same trust model as stdlib module loading — callable only from embedded stdlib code, not from user application code.
+
+Template files are embedded at build time as raw byte arrays in `hl_app_template_entries[]` (separate from `hl_app_lua_entries[]` which pre-compiles Lua bytecode). In dev mode, templates are loaded from `app_dir/templates/` on disk.
 
 ---
 

@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+
+{% block title %}About — Hull Templates{% end %}
+
+{% block content %}
+<h1>About</h1>
+<p>This is the <strong>{{ site_name | default: "Hull" }}</strong> template engine example.</p>
+
+<h2>Template Features</h2>
+<ul>
+    <li>Variable interpolation with HTML escaping: <code>{{ "{{ var }}" }}</code></li>
+    <li>Raw (unescaped) output: <code>{{{ "var" }}}</code></li>
+    <li>Filters: <code>upper</code>, <code>lower</code>, <code>trim</code>, <code>length</code>, <code>default</code>, <code>json</code></li>
+    <li>Conditionals: <code>if</code>, <code>elif</code>, <code>else</code></li>
+    <li>Loops: <code>for item in list</code>, <code>for key, val in obj</code></li>
+    <li>Template inheritance: <code>extends</code> + <code>block</code></li>
+    <li>Partials: <code>include</code></li>
+</ul>
+
+<p>Built with Hull version {{ version | default: "dev" }}.</p>
+{% end %}

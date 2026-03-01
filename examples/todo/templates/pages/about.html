@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+
+{% block title %}About — Todo App{% end %}
+
+{% block head_css %}
+        .about p { margin-bottom: 1rem; line-height: 1.6; }
+        .about code {
+            background: #e8e8e8;
+            padding: 0.15rem 0.4rem;
+            border-radius: 3px;
+            font-size: 0.9em;
+        }
+        .about ul { margin: 0.5rem 0 1rem 1.5rem; }
+        .about li { margin-bottom: 0.3rem; }
+{% end %}
+
+{% block content %}
+<div class="about">
+    <h1>About</h1>
+    <p>
+        A minimal todo app built with <strong>Hull</strong> &mdash; pure HTML forms,
+        server-side rendering with the Hull template engine, and SQLite for storage.
+    </p>
+    <p>No client-side JavaScript. Every action is a form POST with a redirect back.</p>
+
+    <h2>Stack</h2>
+    <ul>
+        <li><strong>Backend:</strong> Hull (Lua)</li>
+        <li><strong>Templates:</strong> <code>hull.template</code> with inheritance and includes</li>
+        <li><strong>Database:</strong> SQLite (via Hull <code>db</code> API)</li>
+        <li><strong>Frontend:</strong> Pure HTML + CSS, zero JS</li>
+    </ul>
+
+    <h2>Source</h2>
+    <p>See <code>examples/todo/</code> in the Hull repository.</p>
+</div>
+{% end %}

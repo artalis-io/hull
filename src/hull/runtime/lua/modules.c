@@ -44,6 +44,11 @@ static void secure_zero(void *p, size_t n)
  * generated app_registry.o when building with APP_DIR or hull build. */
 extern const HlStdlibEntry hl_app_lua_entries[];
 
+/* Template entries: raw HTML bytes (not compiled Lua), searched by
+ * _template._load_raw(). Default empty in app_entries_default.c,
+ * overridden by generated app_registry.o when templates/ exists. */
+extern const HlStdlibEntry hl_app_template_entries[];
+
 /* ── Helper: retrieve HlLua from registry ─────────────────────────── */
 
 static HlLua *get_hl_lua(lua_State *L)
@@ -1605,6 +1610,103 @@ static int luaopen_hull_log(lua_State *L)
 }
 
 /* ════════════════════════════════════════════════════════════════════
+ * hull._template module (internal — called only by stdlib hull.template)
+ *
+ * _template._compile(code)    → compiled Lua function
+ * _template._load_raw(name)   → raw template string or nil
+ * ════════════════════════════════════════════════════════════════════ */
+
+/* _template._compile(code) — compile generated Lua source to a function */
+static int lua_template_compile(lua_State *L)
+{
+    size_t len;
+    const char *code = luaL_checklstring(L, 1, &len);
+    const char *name = luaL_optstring(L, 2, "=template");
+
+    if (luaL_loadbuffer(L, code, len, name) != LUA_OK)
+        return lua_error(L); /* propagate compile error */
+
+    /* loadbuffer pushes a function — call it to get the inner function */
+    if (lua_pcall(L, 0, 1, 0) != LUA_OK)
+        return lua_error(L);
+
+    return 1; /* compiled function on stack */
+}
+
+/* _template._load_raw(name) — load raw template bytes from embedded
+ * entries or filesystem fallback. Returns string or nil. */
+static int lua_template_load_raw(lua_State *L)
+{
+    const char *name = luaL_checkstring(L, 1);
+
+    /* 1. Search embedded template entries */
+    for (const HlStdlibEntry *e = hl_app_template_entries; e->name; e++) {
+        if (strcmp(e->name, name) == 0) {
+            lua_pushlstring(L, (const char *)e->data, e->len);
+            return 1;
+        }
+    }
+
+    /* 2. Filesystem fallback (dev mode): app_dir/templates/<name> */
+    HlLua *lua = get_hl_lua(L);
+    if (lua && lua->app_dir) {
+        char path[HL_MODULE_PATH_MAX];
+        int n = snprintf(path, sizeof(path), "%s/templates/%s",
+                         lua->app_dir, name);
+        if (n > 0 && (size_t)n < sizeof(path)) {
+            FILE *f = fopen(path, "rb");
+            if (f) {
+                fseek(f, 0, SEEK_END);
+                long size = ftell(f);
+                if (size < 0 || size > HL_MODULE_MAX_SIZE) {
+                    fclose(f);
+                    return luaL_error(L, "template too large: %s", name);
+                }
+                if (fseek(f, 0, SEEK_SET) != 0) {
+                    fclose(f);
+                    return luaL_error(L, "seek failed: %s", name);
+                }
+
+                /* Use scratch arena — Lua copies the string */
+                size_t arena_saved = lua->scratch->used;
+                char *buf = sh_arena_alloc(lua->scratch, (size_t)size);
+                if (!buf) {
+                    fclose(f);
+                    return luaL_error(L, "out of memory loading: %s", name);
+                }
+                size_t nread = fread(buf, 1, (size_t)size, f);
+                int read_err = ferror(f);
+                fclose(f);
+
+                if (read_err || nread != (size_t)size) {
+                    lua->scratch->used = arena_saved;
+                    return luaL_error(L, "read error: %s", name);
+                }
+
+                lua_pushlstring(L, buf, nread);
+                lua->scratch->used = arena_saved;
+                return 1;
+            }
+        }
+    }
+
+    lua_pushnil(L);
+    return 1;
+}
+
+static const luaL_Reg template_funcs[] = {
+    {"_compile",  lua_template_compile},
+    {"_load_raw", lua_template_load_raw},
+    {NULL, NULL}
+};
+
+static int luaopen_hull_template_bridge(lua_State *L)
+{
+    luaL_newlib(L, template_funcs);
+    return 1;
+}
+
+/* ════════════════════════════════════════════════════════════════════
  * Custom require() — module loader with embedded + filesystem fallback
  *
  * Replaces Lua's package.require with a minimal custom version.
@@ -2011,6 +2113,10 @@ int hl_lua_register_modules(HlLua *lua)
      * that http_cfg is set (wired from manifest after load_app). */
     luaL_requiref(L, "hull.http", luaopen_hull_http, 0);
     lua_setglobal(L, "http");
+
+    /* Register hull._template — internal bridge for hull.template stdlib */
+    luaL_requiref(L, "hull._template", luaopen_hull_template_bridge, 0);
+    lua_setglobal(L, "_template");
 
     return 0;
 }

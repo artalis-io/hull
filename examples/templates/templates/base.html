@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Hull App{% end %}</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 800px; margin: 0 auto; padding: 2rem; }
+        nav { display: flex; gap: 1rem; margin-bottom: 2rem; padding-bottom: 1rem; border-bottom: 1px solid #ddd; }
+        nav a { text-decoration: none; color: #0066cc; }
+        nav a:hover { text-decoration: underline; }
+        footer { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #ddd; color: #666; font-size: 0.9rem; }
+    </style>
+</head>
+<body>
+    {% include "partials/nav.html" %}
+
+    <main>
+        {% block content %}{% end %}
+    </main>
+
+    <footer>
+        <p>Powered by Hull &mdash; {{ year }}</p>
+    </footer>
+</body>
+</html>

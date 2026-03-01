@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Todo{% end %}</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 2rem 1rem;
+            background: #f5f5f5;
+            color: #222;
+        }
+        nav {
+            display: flex;
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+            padding-bottom: 1rem;
+            border-bottom: 2px solid #e0e0e0;
+        }
+        nav a {
+            text-decoration: none;
+            color: #555;
+            font-weight: 500;
+        }
+        nav a:hover { color: #000; }
+        nav .brand {
+            font-weight: 700;
+            color: #000;
+            margin-right: auto;
+        }
+        h1 { margin-bottom: 1.5rem; }
+        footer {
+            margin-top: 3rem;
+            padding-top: 1rem;
+            border-top: 1px solid #ddd;
+            color: #999;
+            font-size: 0.85rem;
+        }
+        {% block head_css %}{% end %}
+    </style>
+</head>
+<body>
+    {% include "partials/nav.html" %}
+
+    <main>
+        {% block content %}{% end %}
+    </main>
+
+    <footer>
+        <p>Powered by Hull &mdash; {{ year }}</p>
+    </footer>
+</body>
+</html>

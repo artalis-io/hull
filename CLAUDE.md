@@ -56,7 +56,7 @@ vendor/                 # Vendored libraries (do not modify)
 tests/                  # Unit tests (test_*.c) and E2E scripts (e2e_*.sh)
   fixtures/             #   Test fixtures (null_app, etc.)
   hull/                 #   Hull-specific test suites
-examples/               # 8 example apps (hello, rest_api, auth, jwt_api, etc.)
+examples/               # 9 example apps (hello, rest_api, auth, jwt_api, todo, etc.)
 docs/                   # Architecture, security, roadmap, audit documentation
 templates/              # Build templates (app_main.c, entry.h)
 ```
@@ -288,6 +288,7 @@ Register with `app.use(method, pattern, mw)`:
 | `session` | `hull.session` | `hull:session` | Server-side sessions backed by SQLite |
 | `cookie` | `hull.cookie` | `hull:cookie` | Cookie parse/serialize helpers |
 | `jwt` | `hull.jwt` | `hull:jwt` | JWT sign/verify (HMAC-SHA256) |
+| `template` | `hull.template` | `hull:template` | HTML template engine with inheritance, includes, filters |
 | `json` | `hull.json` | (built-in) | JSON encode/decode |
 
 ### Module APIs
@@ -354,6 +355,50 @@ Register with `app.use(method, pattern, mw)`:
 - `jwt.sign(payload, secret)` → token string. Auto-sets `iat`.
 - `jwt.verify(token, secret)` → payload table, or `nil, "error reason"`.
 - `jwt.decode(token)` → payload table or nil (no signature check).
+
+**template** — HTML template engine with compile-once, render-many caching.
+
+```lua
+local template = require("hull.template")
+template.render("pages/home.html", data)       -- load + compile + render (cached)
+template.render_string(source, data)            -- compile from string + render
+template.compile("pages/home.html")             -- returns compiled function
+template.clear_cache()                          -- clear compiled function cache
+```
+
+Template syntax:
+- `{{ var }}` — HTML-escaped output
+- `{{ var.path }}` — dot path lookup (nil-safe)
+- `{{ var | filter }}` — pipe filter (`upper`, `lower`, `trim`, `length`, `default: value`, `json`, `raw`)
+- `{{{ var }}}` — raw (unescaped) output
+- `{% if var %}` / `{% elif var %}` / `{% else %}` / `{% end %}` — conditionals
+- `{% for item in list %}` / `{% for key, val in obj %}` — iteration
+- `{% block name %}` / `{% extends "parent.html" %}` — template inheritance
+- `{% include "partial.html" %}` — include partials
+- `{# comment #}` — stripped from output
+
+Templates are loaded from `app_dir/templates/` in dev mode. In built binaries, templates are embedded as byte arrays via `hull build` or `make APP_DIR=...`.
+
+**JS API** (camelCase):
+```javascript
+import { template } from "hull:template";
+template.render("pages/home.html", data);       // load + compile + render (cached)
+template.renderString(source, data);             // compile from string + render
+template.compile("pages/home.html");             // returns compiled function
+template.clearCache();                           // clear compiled function cache
+```
+
+**Template engine details:**
+- **Compilation:** Templates are parsed (lexer → recursive-descent parser → AST), then code-generated to native Lua/JS source and compiled via `luaL_loadbuffer` (Lua) or `JS_Eval` (JS). Compiled functions are cached — compile once, render many.
+- **XSS safety:** All `{{ }}` output is HTML-escaped by default (`& < > " '` → entities). Only `{{{ }}}` and `| raw` bypass escaping.
+- **Dot paths are nil-safe:** `{{ user.address.city }}` returns empty string if any intermediate is nil/undefined — no errors.
+- **For-loop variables are scoped:** Inside `{% for item in items %}`, `item` refers to the loop variable, not `data.item`.
+- **Lua truthiness caveat:** In Lua, empty tables `{}` and `0` are truthy. Use a boolean flag like `has_items = #items > 0` when checking emptiness in `{% if %}`.
+- **Filters:** `upper`, `lower`, `trim`, `length`, `default: "value"`, `json`, `raw`. Filters chain: `{{ name | trim | upper }}`.
+- **Inheritance:** `{% extends "base.html" %}` loads parent, child overrides `{% block name %}` content. Multi-level inheritance supported. Circular extends detected.
+- **Includes:** `{% include "partials/nav.html" %}` inlines the partial's AST. Included templates share the same data context.
+- **Template directory:** Place templates in `app_dir/templates/`. Names are relative paths (e.g. `"pages/home.html"`, `"partials/nav.html"`, `"base.html"`).
+- **CSP nonce:** No engine magic needed. Pass nonce as data: `template.render("page.html", { csp_nonce = nonce })`, use `<script nonce="{{ csp_nonce }}">` in template.
 
 ### Recommended Middleware Stack
 
@@ -422,9 +467,10 @@ make e2e                            # run all E2E tests (examples + build + sand
 | Script | What it tests |
 |--------|---------------|
 | `e2e_build.sh` | Build pipeline: platform build, app compilation, signing, self-build chain |
-| `e2e_examples.sh` | All 8 examples in both Lua and JS runtimes |
+| `e2e_examples.sh` | All 9 examples in both Lua and JS runtimes |
 | `e2e_http.sh` | HTTP routing, middleware, error handling |
 | `e2e_sandbox.sh` | Kernel sandbox enforcement (Linux + Cosmo) |
+| `e2e_templates.sh` | Template engine: 20 tests per runtime (text, vars, escaping, conditionals, loops, filters, inheritance, includes, XSS) |
 
 ## Runtime Sandboxes
 
