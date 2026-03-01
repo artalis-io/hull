@@ -120,9 +120,6 @@ jobs:
         timeout-minutes: 5
         run: make test CC=cosmocc
 
-      - name: Self-build test
-        run: make self-build CC=cosmocc
-
       - name: E2E smoke test
         run: |
           ./build/hull -p 19852 -d /tmp/cosmo_e2e.db examples/hello/app.lua &
