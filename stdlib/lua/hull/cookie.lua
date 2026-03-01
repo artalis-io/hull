@@ -35,7 +35,7 @@ function cookie.parse(header_string)
 end
 
 --- Serialize a cookie name/value pair with options into a Set-Cookie header value.
--- Defaults: HttpOnly=true, Secure=true, SameSite=Lax, Path=/
+-- Defaults: HttpOnly=true, Secure=false, SameSite=Lax, Path=/
 function cookie.serialize(name, value, opts)
     opts = opts or {}
 
@@ -55,9 +55,9 @@ function cookie.serialize(name, value, opts)
         parts[#parts + 1] = "HttpOnly"
     end
 
-    -- Secure (default true)
+    -- Secure (default false — set true when serving over HTTPS)
     local secure = opts.secure
-    if secure == nil then secure = true end
+    if secure == nil then secure = false end
     if secure then
         parts[#parts + 1] = "Secure"
     end

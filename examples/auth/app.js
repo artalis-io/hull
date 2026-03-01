@@ -4,13 +4,13 @@
 // Session-based auth API: register, login, logout, protected routes
 
 import { app } from "hull:app";
+import { auth } from "hull:auth";
+import { cookie } from "hull:cookie";
+import { crypto } from "hull:crypto";
 import { db } from "hull:db";
 import { log } from "hull:log";
-import { time } from "hull:time";
-import { crypto } from "hull:crypto";
-import { cookie } from "hull:cookie";
 import { session } from "hull:session";
-import { auth } from "hull:auth";
+import { time } from "hull:time";
 
 // Initialize database
 session.init({ ttl: 3600 });
@@ -29,7 +29,7 @@ db.exec(
 // The JS sessionMiddleware doesn't have an "optional" flag, so we use a
 // lightweight custom middleware that attaches the session when present.
 app.use("*", "/*", (req, _res) => {
-    const header = req.headers["cookie"];
+    const header = req.headers.cookie;
     if (!header) return 0;
 
     const cookies = cookie.parse(header);

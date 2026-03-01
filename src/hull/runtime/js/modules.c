@@ -260,6 +260,9 @@ static int js_app_module_init(JSContext *ctx, JSModuleDef *m)
     JS_SetPropertyStr(ctx, app, "patch",
         JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_app_route,
                              "patch", 2, JS_CFUNC_generic_magic, 4));
+    JS_SetPropertyStr(ctx, app, "options",
+        JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_app_route,
+                             "options", 2, JS_CFUNC_generic_magic, 6));
 
     JS_SetPropertyStr(ctx, app, "use",
                       JS_NewCFunction(ctx, js_app_use, "use", 3));

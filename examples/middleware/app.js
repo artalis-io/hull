@@ -15,7 +15,7 @@ let requestCounter = 0;
 
 app.use("*", "/*", (req, res) => {
     requestCounter++;
-    const id = time.now().toString(16) + "-" + requestCounter.toString(16);
+    const id = `${time.now().toString(16)}-${requestCounter.toString(16)}`;
     if (!req.ctx) req.ctx = {};
     req.ctx.request_id = id;
     res.header("X-Request-ID", id);
@@ -39,7 +39,7 @@ const RATE_WINDOW = 60;   // window in seconds
 const RATE_LIMIT = 60;    // max requests per window
 const rateBuckets = {};    // { [clientKey]: { count, windowStart } }
 
-app.use("*", "/api/*", (req, res) => {
+app.use("*", "/api/*", (_req, res) => {
     // In a real app, key by IP or API key. Here we use a fixed key for demo.
     const key = "global";
     const now = time.now();
@@ -75,7 +75,7 @@ const CORS_HEADERS = "Content-Type, Authorization";
 const CORS_MAX_AGE = "86400";
 
 app.use("*", "/api/*", (req, res) => {
-    const origin = req.headers["origin"];
+    const origin = req.headers.origin;
     if (!origin) return 0;
 
     const allowed = CORS_ORIGINS.indexOf(origin) !== -1;
@@ -88,11 +88,17 @@ app.use("*", "/api/*", (req, res) => {
 
     // Handle preflight
     if (req.method === "OPTIONS") {
-        res.status(204).body("");
+        res.status(204).text("");
         return 1;
     }
 
     return 0;
+});
+
+// OPTIONS route for CORS preflight (router requires a route to exist
+// so middleware can run — the CORS middleware above handles the response)
+app.options("/api/items", (_req, res) => {
+    res.status(204).text("");
 });
 
 // ── Routes ──────────────────────────────────────────────────────────

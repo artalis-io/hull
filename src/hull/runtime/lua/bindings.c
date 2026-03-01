@@ -135,13 +135,21 @@ void hl_lua_make_request(lua_State *L, KlRequest *req)
     }
     lua_setfield(L, -2, "params");
 
-    /* headers → table */
+    /* headers → table (names lowercased for case-insensitive lookup) */
     lua_newtable(L);
     for (int i = 0; i < req->num_headers; i++) {
         if (req->headers[i].name && req->headers[i].value) {
+            char hdr_name[256];
+            size_t nlen = req->headers[i].name_len;
+            if (nlen >= sizeof(hdr_name)) nlen = sizeof(hdr_name) - 1;
+            for (size_t j = 0; j < nlen; j++) {
+                unsigned char c = (unsigned char)req->headers[i].name[j];
+                hdr_name[j] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : (char)c;
+            }
+            lua_pushlstring(L, hdr_name, nlen);
             lua_pushlstring(L, req->headers[i].value,
                             req->headers[i].value_len);
-            lua_setfield(L, -2, req->headers[i].name);
+            lua_settable(L, -3);
         }
     }
     lua_setfield(L, -2, "headers");

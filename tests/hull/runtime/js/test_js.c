@@ -1250,7 +1250,7 @@ UTEST(js_stdlib, cookie_serialize)
     ASSERT_NE(cookie, NULL);
     ASSERT_NE(strstr(cookie, "sid=abc123"), NULL);
     ASSERT_NE(strstr(cookie, "HttpOnly"), NULL);
-    ASSERT_NE(strstr(cookie, "Secure"), NULL);
+    ASSERT_EQ(strstr(cookie, "Secure"), NULL);  /* default is false */
     ASSERT_NE(strstr(cookie, "SameSite=Lax"), NULL);
     ASSERT_NE(strstr(cookie, "Path=/"), NULL);
     free(cookie);
