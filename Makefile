@@ -91,26 +91,11 @@ KEEL_INC   := $(KEEL_DIR)/include
 KEEL_LIB   := $(KEEL_DIR)/libkeel.a
 
 # Build Keel with mbedTLS backend
-# Pass BACKEND=poll and COSMO=1 when cosmo is detected (arch-specific
-# compilers like x86_64-unknown-cosmo-cc don't trigger Keel's own detection)
+# Keel now detects the cosmo toolchain natively from CC and handles
+# poll backend, .aarch64/ archive creation, etc.
 $(KEEL_LIB): $(MBEDTLS_OBJS)
 	$(MAKE) -C $(KEEL_DIR) CC=$(CC) AR=$(AR) \
-		KEEL_TLS=mbedtls MBEDTLS_CONFIG_FILE=hull_config.h \
-		$(if $(COSMO),BACKEND=poll COSMO=1)
-ifdef COSMO
-	@# Ensure .aarch64/ counterpart archive exists for cosmocc fat linking
-	@echo "=== Checking for $(KEEL_DIR)/.aarch64/libkeel.a ==="
-	@if [ ! -f $(KEEL_DIR)/.aarch64/libkeel.a ]; then \
-		echo "=== Creating .aarch64/libkeel.a ===" && \
-		mkdir -p $(KEEL_DIR)/.aarch64 && \
-		OBJS=$$(find $(KEEL_DIR)/src/.aarch64 $(KEEL_DIR)/parsers/.aarch64 $(KEEL_DIR)/vendor/llhttp/.aarch64 -name '*.o' 2>/dev/null) && \
-		echo "=== Found objects: $$OBJS ===" && \
-		$(AR) rcs $(KEEL_DIR)/.aarch64/libkeel.a $$OBJS && \
-		echo "=== Created $(KEEL_DIR)/.aarch64/libkeel.a ==="; \
-	else \
-		echo "=== $(KEEL_DIR)/.aarch64/libkeel.a already exists ==="; \
-	fi
-endif
+		KEEL_TLS=mbedtls MBEDTLS_CONFIG_FILE=hull_config.h
 
 # ── mbedTLS (vendored) ─────────────────────────────────────────────
 
