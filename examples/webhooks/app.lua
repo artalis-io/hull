@@ -72,13 +72,13 @@ local function deliver_webhook(webhook, event_type, payload_str, event_id)
         })
     end)
 
-    local status = 0
-    local _resp_body = ""
+    local status, resp_body
     if ok and result then
         status = result.status
-        _resp_body = result.body or ""
+        resp_body = result.body or ""
     else
-        _resp_body = tostring(result)
+        status = 0
+        resp_body = tostring(result)
     end
 
     db.exec("INSERT INTO deliveries (webhook_id, event_id, status, response_body, created_at) VALUES (?, ?, ?, ?, ?)",
