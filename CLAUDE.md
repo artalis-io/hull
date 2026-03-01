@@ -3,93 +3,242 @@
 ## Build
 
 ```bash
-make              # build hull binary (requires Keel + SQLite)
-make test         # build and run all unit tests
-make debug        # debug build with ASan + UBSan (recompiles from clean)
-make check        # clean + ASan/UBSan build + test + e2e (full validation)
-make analyze      # Clang static analyzer (scan-build)
-make cppcheck     # cppcheck static analysis
-make clean        # remove all build artifacts
+make                    # build hull binary (epoll on Linux, kqueue on macOS)
+make test               # build and run all 79 unit tests
+make e2e                # end-to-end tests (all examples, both runtimes)
+make debug              # debug build with ASan + UBSan (recompiles from clean)
+make msan               # MSan + UBSan (Linux clang only)
+make check              # full validation: clean + ASan + test + e2e
+make analyze            # Clang static analyzer (scan-build)
+make cppcheck           # cppcheck static analysis
+make platform           # build libhull_platform.a (everything except main/build-tool code)
+make platform-cosmo     # build multi-arch cosmo platform archives (x86_64 + aarch64)
+make self-build         # reproducible build chain: hull → hull2 → hull3
+make CC=cosmocc         # build with Cosmopolitan (APE binary)
+make EMBED_PLATFORM=1   # embed platform library in hull binary (distribution mode)
+make EMBED_PLATFORM=cosmo  # embed multi-arch cosmo platform (distribution mode)
+make clean              # remove all build artifacts
 ```
 
 ### Dependencies
 
-- **Keel** (`../keel/`) — HTTP server library. Build it first with `make` in the keel directory.
-- **SQLite** — system SQLite3 or vendored. Currently linked via `pkg-config`.
-- **QuickJS** — vendored in `vendor/quickjs/` (Bellard's 2024-01-13 release).
-- **Lua 5.4** — vendored in `vendor/lua/` (5.4.7, excludes `lua.c`/`luac.c`).
+All vendored — no external dependencies:
+
+| Library | Location | Purpose |
+|---------|----------|---------|
+| Keel | `vendor/keel/` (git submodule) | HTTP server library |
+| Lua 5.4 | `vendor/lua/` | Application scripting |
+| QuickJS | `vendor/quickjs/` | ES2023 JavaScript runtime |
+| SQLite | `vendor/sqlite/` | Embedded database |
+| mbedTLS | `vendor/mbedtls/` | TLS client |
+| TweetNaCl | `vendor/tweetnacl/` | Ed25519 + NaCl crypto |
+| pledge/unveil | `vendor/pledge/` | Linux kernel sandbox polyfill |
+| log.c | `vendor/log.c/` | Logging |
+| sh_arena | `vendor/sh_arena/` | Arena allocator |
+| utest.h | `vendor/utest.h` | Unit test framework |
 
 ## Project Structure
 
-- `include/hull/` — Public headers (`hull_cap.h`, `js_runtime.h`, `lua_runtime.h`)
-- `src/` — Core source files
-- `vendor/quickjs/` — Vendored QuickJS engine (compiled with `-w`, no `-Werror`)
-- `vendor/lua/` — Vendored Lua 5.4 engine (compiled with `-w -DLUA_USE_POSIX`)
-- `vendor/utest.h` — Sheredom's utest.h test framework
-- `tests/` — Unit tests using utest.h
-- `examples/` — Example applications (`hello/app.js`, `hello/app.lua`)
-- `docs/` — Architecture documentation
+```
+include/hull/           # Public headers
+  cap/                  #   Capability module headers (db.h, fs.h, crypto.h, etc.)
+  commands/             #   Command headers (build.h, test.h, verify.h, etc.)
+  runtime/              #   Runtime headers (lua.h, js.h)
+src/hull/               # Core source
+  cap/                  #   Capability implementations (db.c, fs.c, crypto.c, http.c, tool.c, etc.)
+  commands/             #   Subcommand implementations (build.c, test.c, verify.c, etc.)
+  runtime/lua/          #   Lua 5.4 runtime (bindings.c, modules.c, runtime.c)
+  runtime/js/           #   QuickJS runtime (bindings.c, modules.c, runtime.c)
+stdlib/                 # Embedded standard library
+  lua/hull/             #   Lua modules (json, cookie, session, jwt, csrf, auth, build, verify, etc.)
+  js/hull/              #   JS modules (cookie, session, jwt, csrf, auth, verify)
+vendor/                 # Vendored libraries (do not modify)
+tests/                  # Unit tests (test_*.c) and E2E scripts (e2e_*.sh)
+  fixtures/             #   Test fixtures (null_app, etc.)
+  hull/                 #   Hull-specific test suites
+examples/               # 8 example apps (hello, rest_api, auth, jwt_api, etc.)
+docs/                   # Architecture, security, roadmap, audit documentation
+templates/              # Build templates (app_main.c, entry.h)
+```
 
 ## Architecture
 
+### System Layers
+
+```
+Application Code (Lua/JS)  →  Standard Library (stdlib/)
+        ↓
+Runtimes (Lua 5.4 / QuickJS)  →  Sandboxed interpreters
+        ↓
+Capability Layer (src/hull/cap/)  →  C enforcement boundary
+        ↓
+Hull Core (main.c, manifest.c, sandbox.c, signature.c)
+        ↓
+Keel HTTP Server (vendor/keel/)  →  Event loop + routing
+        ↓
+Kernel Sandbox (pledge + unveil)  →  OS enforcement
+```
+
+Each layer talks only to the one below it. Application code cannot bypass capabilities.
+
 ### Dual-Runtime Design
 
-Hull supports two runtimes: Lua 5.4 and QuickJS (ES2023 JavaScript). Only one is active per application — selected by entry point file extension (`.lua` or `.js`).
+Hull supports Lua 5.4 and QuickJS (ES2023). Only one is active per application — selected by entry point extension (`.lua` or `.js`). Both runtimes implement the same polymorphic vtable (`HlRuntimeVtable`) and call the same C capability functions.
 
-### Shared C Capability API (`hl_cap_*`)
+### Capability Layer (`hl_cap_*`)
 
-All enforcement (path validation, host allowlists, SQL parameterization) lives in `hl_cap_*` functions. Both runtimes call these — neither touches SQLite, filesystem, or network directly.
+All system access is mediated by C capability functions. Neither runtime touches SQLite, filesystem, or network directly.
 
-| File | Purpose |
-|------|---------|
-| `hull_cap.h` | Shared type definitions and function declarations |
-| `hull_cap_db.c` | SQLite query/exec with parameterized binding |
-| `hull_cap_fs.c` | Path-validated file I/O |
-| `hull_cap_crypto.c` | SHA-256, random, PBKDF2, Ed25519 verification |
-| `hull_cap_time.c` | Time functions (now, date, datetime, clock) |
-| `hull_cap_env.c` | Environment variable access with allowlist |
-
-### QuickJS Integration
-
-| File | Purpose |
-|------|---------|
-| `js_runtime.h` | QuickJS runtime types and lifecycle API |
-| `js_runtime.c` | QuickJS VM init, sandbox, interrupt handler, module loader |
-| `js_modules.c` | hull:* built-in module implementations (app, db, time, env, crypto, log) |
-| `js_bindings.c` | KlRequest/KlResponse ↔ JS object bridge |
-
-### Lua 5.4 Integration
-
-| File | Purpose |
-|------|---------|
-| `lua_runtime.h` | Lua runtime types and lifecycle API |
-| `lua_runtime.c` | Lua VM init, sandbox, custom allocator, module registration |
-| `lua_modules.c` | hull.* built-in modules (app, db, time, env, crypto, log) |
-| `lua_bindings.c` | KlRequest/KlResponse ↔ Lua table/userdata bridge |
+| Module | File | Key Functions |
+|--------|------|---------------|
+| Database | `cap/db.c` | `hl_cap_db_query()`, `hl_cap_db_exec()`, `hl_cap_db_begin/commit/rollback()` |
+| Filesystem | `cap/fs.c` | `hl_cap_fs_read()`, `hl_cap_fs_write()`, `hl_cap_fs_exists()`, `hl_cap_fs_delete()` |
+| Crypto | `cap/crypto.c` | SHA-256/512, HMAC, PBKDF2, Ed25519, secretbox, box, random |
+| HTTP client | `cap/http.c` | `hl_cap_http_request()` with host allowlist |
+| Environment | `cap/env.c` | `hl_cap_env_get()` with manifest allowlist |
+| Time | `cap/time.c` | `hl_cap_time_now()`, `_now_ms()`, `_clock()`, `_date()`, `_datetime()` |
+| Tool (build mode) | `cap/tool.c` | `hl_tool_spawn()`, `hl_tool_find_files()`, `hl_tool_copy()`, `hl_tool_mkdir()` |
+| Test | `cap/test.c` | In-process HTTP dispatch, assertions |
+| Body | `cap/body.c` | Request body handling |
 
 ### Request Flow
 
 ```
-Browser → Keel HTTP → Route Match → hl_{js,lua}_dispatch() → Handler → KlResponse
-                                          ↓
-                                   hl_cap_* API (shared C)
-                                          ↓
-                                   SQLite / FS / Crypto
+Client → Keel HTTP → Route Match → hl_{lua,js}_dispatch() → Handler → KlResponse
+                                           ↓
+                                    hl_cap_* API (shared C)
+                                           ↓
+                                    SQLite / FS / Crypto / HTTP
 ```
+
+### Command Dispatch
+
+Table-driven dispatcher in `src/hull/commands/dispatch.c`. 10 commands:
+
+```
+hull keygen | build | verify | inspect | manifest | test | new | dev | eject | sign-platform
+```
+
+Each command is a separate `.c`/`.h` under `src/hull/commands/`. Adding a new command = one line in the table + one source file.
+
+## Platform Builds
+
+### Standard Build (Linux/macOS)
+
+```bash
+make                    # builds build/hull
+make platform           # builds build/libhull_platform.a
+make EMBED_PLATFORM=1   # embeds platform in hull for distribution
+```
+
+### Cosmopolitan APE Build
+
+Cosmopolitan produces fat APE binaries that run on Linux, macOS, Windows, FreeBSD, OpenBSD, NetBSD from a single file.
+
+**How cosmocc works:**
+- `cosmocc` runs two separate link passes (x86_64 + aarch64), then combines with `apelink`
+- Uses `.aarch64/` directory convention: for every `foo.o`, a `.aarch64/foo.o` exists
+- Arch-specific tools: `x86_64-unknown-cosmo-cc`, `aarch64-unknown-cosmo-cc`
+
+**Multi-arch platform build:**
+
+```bash
+# Build both x86_64 and aarch64 platform archives
+make platform-cosmo
+
+# This creates:
+#   build/libhull_platform.x86_64-cosmo.a
+#   build/libhull_platform.aarch64-cosmo.a
+#   build/platform_cc  (contains "cosmocc")
+
+# Then build hull with cosmocc
+make CC=cosmocc
+```
+
+`platform-cosmo` internally:
+1. `make clean && make platform CC=x86_64-unknown-cosmo-cc` → copies to staging
+2. `make clean && make platform CC=aarch64-unknown-cosmo-cc` → copies to staging
+3. Cleans build artifacts, copies both archives to `build/`
+
+**Keel Cosmo detection:**
+- Keel's Makefile detects the cosmo toolchain via `ifneq ($(findstring cosmo,$(CC)),)`
+- Sets `COSMO=1`: forces poll backend, omits `-fstack-protector-strong`
+- Sets `COSMO_FAT=1` only when `CC=cosmocc`: creates `.aarch64/libkeel.a` counterpart
+- Uses plain `ar` (not `cosmoar` — cosmoar fails with recursive `.aarch64/` lookups)
+
+**hull build with cosmo:**
+- `build.lua` detects `is_cosmo = cc:find("cosmocc")`
+- Searches for both arch-specific archives in `build/` or hull binary directory
+- Copies `x86_64-cosmo.a` → `tmpdir/libhull_platform.a`
+- Copies `aarch64-cosmo.a` → `tmpdir/.aarch64/libhull_platform.a`
+- `cosmocc` automatically finds the `.aarch64/` counterpart during linking
+
+**Embedding for distribution:**
+```bash
+make platform-cosmo
+make CC=cosmocc EMBED_PLATFORM=cosmo  # embeds both arch archives
+```
+
+### CI Configuration
+
+The Cosmo CI job in `.github/workflows/ci.yml`:
+1. Installs cosmocc from `cosmo.zip/pub/cosmocc/cosmocc.zip`
+2. `make platform-cosmo` — builds both arch platform archives
+3. `make CC=cosmocc` — builds hull as APE binary
+4. `make test CC=cosmocc` — runs unit tests
+5. E2E smoke test + sandbox tests
+
+## Security
+
+### Manifest & Sandbox
+
+Apps declare capabilities via `app.manifest()`. After extraction, `hl_sandbox_apply()` in `sandbox.c`:
+1. `unveil(path, "r")` for each `fs.read` path
+2. `unveil(path, "rwc")` for each `fs.write` path
+3. `unveil(NULL, NULL)` — seal (no more paths)
+4. `pledge("stdio inet rpath wpath cpath flock [dns]")` — syscall filter
+
+Violation = SIGKILL on Linux/Cosmo. No-op on macOS (C-level validation only).
+
+### Capability Enforcement Invariants
+
+- **SQL injection impossible:** All DB access uses `sqlite3_bind_*` parameterized binding. SQL is always a literal string.
+- **Path traversal blocked:** `hl_cap_fs_validate()` rejects absolute paths, `..` components, symlink escapes via `realpath()` ancestor check. Plus kernel unveil.
+- **Host allowlist enforced:** `hl_cap_http_request()` validates target host against manifest's `hosts` array.
+- **Env allowlist enforced:** `hl_cap_env_get()` checks against manifest's `env` array (max 32 entries).
+- **No shell invocation:** Tool mode uses `hl_tool_spawn()` with compiler allowlist. No `system()`/`popen()`.
+- **Key material zeroed:** `hull_secure_zero()` (volatile memset) scrubs crypto material from stack buffers.
+
+### Signature System
+
+Dual-layer Ed25519:
+- **Platform layer (inner):** Signed by gethull.dev key. Proves platform library is authentic.
+- **App layer (outer):** Signed by developer key. Proves app hasn't been tampered with.
+
+See [docs/security.md](docs/security.md) for the full attack model.
+
+### Keel Audit
+
+Run `/c-audit` to perform a comprehensive C code audit on the Keel HTTP server library. The audit checks for memory safety, input validation, resource management, integer overflow, network security, dead code, and build hardening. Results are in [docs/keel_audit.md](docs/keel_audit.md).
+
+Key findings to be aware of:
+- WebSocket and HTTP/2 upgrade code has partial-write issues (C-2, H-3, H-4)
+- kqueue event_mod doesn't support READ|WRITE bitmask (C-1) — affects HTTP/2 on macOS
+- Private key material should be zeroed before free in tls_mbedtls.c (H-2)
 
 ## Key Types
 
 | Type | Header | Purpose |
 |------|--------|---------|
-| `HlValue` | `hull_cap.h` | Runtime-agnostic value (nil, int, double, text, blob, bool) |
-| `HlColumn` | `hull_cap.h` | Named column + value (from query results) |
-| `HlRowCallback` | `hull_cap.h` | Per-row callback for hl_cap_db_query() |
-| `HlFsConfig` | `hull_cap.h` | Filesystem config (base_dir for path validation) |
-| `HlEnvConfig` | `hull_cap.h` | Env config (allowlist of permitted variable names) |
-| `HlJS` | `js_runtime.h` | QuickJS runtime context (VM, capabilities, config) |
-| `HlJSConfig` | `js_runtime.h` | QuickJS config (heap, stack, instruction limits) |
-| `HlLua` | `lua_runtime.h` | Lua 5.4 runtime context (VM, capabilities, config) |
-| `HlLuaConfig` | `lua_runtime.h` | Lua config (heap limit) |
+| `HlValue` | `cap/types.h` | Runtime-agnostic value (nil, int, double, text, blob, bool) |
+| `HlColumn` | `cap/types.h` | Named column + value (query results) |
+| `HlRowCallback` | `cap/types.h` | Per-row callback for db_query() |
+| `HlManifest` | `manifest.h` | Declared capabilities (fs paths, env vars, hosts) |
+| `HlRuntime` | `runtime.h` | Polymorphic runtime context |
+| `HlRuntimeVtable` | `runtime.h` | Runtime interface (init, load, wire_routes, extract_manifest, destroy) |
+| `HlLua` | `runtime/lua.h` | Lua 5.4 context (VM, config, capabilities) |
+| `HlJS` | `runtime/js.h` | QuickJS context (VM, config, capabilities) |
+| `HlEmbeddedPlatform` | `build_assets.h` | Multi-arch embedded platform entry (arch, data, len) |
 
 ## Git
 
@@ -98,83 +247,104 @@ Browser → Keel HTTP → Route Match → hl_{js,lua}_dispatch() → Handler →
 
 ## Conventions
 
-- C11, compiled with `-Wall -Wextra -Wpedantic -Wshadow -Wformat=2`
-- `-fstack-protector-strong` for buffer overflow detection
-- Vendor code (QuickJS, Lua) compiled with `-w` (relaxed warnings)
+- C11, compiled with `-Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror`
+- `-fstack-protector-strong` for buffer overflow detection (not Cosmo)
+- Vendor code compiled with `-w` (relaxed warnings, no `-Werror`)
 - Integer overflow guards: check against `SIZE_MAX/2` before arithmetic
 - Error handling: return `-1` on failure, `0` on success (or positive value)
 - Resource cleanup: every `_init` has a corresponding `_free`
 - All SQLite access through `hl_cap_db_*` — never call sqlite3 directly from bindings
+- All filesystem access through `hl_cap_fs_*` — never call open/read/write directly from runtimes
+- Public Hull functions prefixed with `hl_` (capabilities: `hl_cap_*`, tools: `hl_tool_*`, commands: `hl_cmd_*`)
+- Keel functions prefixed with `kl_` (see vendor/keel/CLAUDE.md)
 
 ## Testing
 
-Tests use Sheredom's utest.h. Each `tests/test_*.c` is a standalone executable.
+Tests use Sheredom's utest.h. Each `tests/hull/*/test_*.c` is a standalone executable.
 
 ```bash
-make test                           # run all tests
-make DEBUG=1 test                   # run under ASan + UBSan
+make test                           # run all 79 unit tests
+make debug && make test             # run under ASan + UBSan
+make e2e                            # run all E2E tests (examples + build + sandbox)
 ./build/test_hull_cap_db            # run a single test suite
 ```
 
 ### Test Suites
 
 | Suite | Tests | What it covers |
-|-------|-------|----------------|
+|-------|------:|----------------|
 | `test_hull_cap_db` | 10 | SQLite query, exec, params, null, error handling |
 | `test_hull_cap_time` | 8 | Timestamps, date formatting, buffer bounds |
 | `test_hull_cap_env` | 7 | Allowlist enforcement, null safety |
-| `test_hull_cap_crypto` | 11 | SHA-256, random, PBKDF2, null safety |
+| `test_hull_cap_crypto` | 11 | SHA-256, random, PBKDF2, Ed25519, null safety |
 | `test_hull_cap_fs` | 14 | Path validation, read/write, traversal rejection |
 | `test_js_runtime` | 13 | QuickJS init, eval, sandbox, modules, GC, limits |
 | `test_lua_runtime` | 16 | Lua init, eval, sandbox, modules, GC, double-free |
 
-**Total: 79 tests**
+**Total: 79 unit tests** + E2E suites (`e2e_build.sh`, `e2e_examples.sh`, `e2e_http.sh`, `e2e_sandbox.sh`)
 
-## QuickJS Sandbox
+### E2E Tests
 
-The JS runtime sandbox removes dangerous capabilities:
+| Script | What it tests |
+|--------|---------------|
+| `e2e_build.sh` | Build pipeline: platform build, app compilation, signing, self-build chain |
+| `e2e_examples.sh` | All 8 examples in both Lua and JS runtimes |
+| `e2e_http.sh` | HTTP routing, middleware, error handling |
+| `e2e_sandbox.sh` | Kernel sandbox enforcement (Linux + Cosmo) |
 
-1. `eval()` global removed (C-level `JS_Eval` still works for host code)
-2. QuickJS `std` module NOT loaded (provides `os.*`, file I/O)
-3. QuickJS `os` module NOT loaded
-4. Memory limit enforced via `JS_SetMemoryLimit()`
-5. Instruction count interrupt handler for gas metering
-6. Only `hull:*` modules available — no filesystem, network, or process access from JS
+## Runtime Sandboxes
 
-## Lua Sandbox
+### QuickJS Sandbox
+1. `eval()` removed (C-level `JS_Eval` still works for host code)
+2. `std`/`os` modules NOT loaded
+3. Memory limit via `JS_SetMemoryLimit()` (64 MB default)
+4. Stack limit via `JS_SetMaxStackSize()` (1 MB default)
+5. Instruction-count interrupt handler for gas metering
+6. Only `hull:*` modules available
 
-The Lua runtime sandbox removes dangerous capabilities:
+### Lua Sandbox
+1. `io`/`os` libraries NOT loaded
+2. `loadfile`, `dofile`, `load` globals removed
+3. Memory limit via custom allocator with tracking (64 MB default)
+4. Only safe libs: base, table, string, math, utf8, coroutine
+5. Custom `require()` resolves only from embedded stdlib registry
+6. `hull.*` modules registered as globals
 
-1. `io` library NOT loaded — no file I/O from Lua
-2. `os` library NOT loaded — no OS access from Lua
-3. `loadfile`, `dofile`, `load` globals removed — no dynamic code loading
-4. Memory limit enforced via custom allocator with tracking
-5. Only safe libs loaded: base, table, string, math, utf8, coroutine
-6. `hull.*` modules registered as globals (app, db, time, env, crypto, log)
+## Adding a New Capability Module
 
-## Adding a New hull Module
+### 1. C Capability Layer
+- Create `src/hull/cap/<name>.c` and `include/hull/cap/<name>.h`
+- Implement `hl_cap_<name>_*()` functions with input validation
+- Add to Makefile `HULL_CAP_SRC` and `HULL_CAP_OBJ`
 
-### JavaScript (hull:*)
-1. Add capability functions to `hull_cap_*.c` (or new file)
-2. Declare in `hull_cap.h`
-3. Add JS bindings in `js_modules.c`:
-   - Static init function: `js_<name>_module_init()`
-   - Public init: `hl_js_init_<name>_module()`
-4. Register in `hl_js_register_modules()` at bottom of `js_modules.c`
+### 2. Lua Bindings
+- Add bindings in `src/hull/runtime/lua/modules.c`
+- `luaL_Reg` array + `luaopen_hull_<name>()` opener
+- Register in `hl_lua_register_modules()`
 
-### Lua (hull.*)
-1. Same capability layer as JS (shared `hl_cap_*`)
-2. Add Lua bindings in `lua_modules.c`:
-   - `luaL_Reg` array with function table
-   - `luaopen_hull_<name>()` opener function
-3. Register in `hl_lua_register_modules()` at bottom of `lua_modules.c`
+### 3. JavaScript Bindings
+- Add bindings in `src/hull/runtime/js/modules.c`
+- Init function + register in `hl_js_register_modules()`
 
-### Both
-5. Add tests in `tests/test_hull_cap_<name>.c`
+### 4. Tests
+- Unit tests in `tests/hull/cap/test_<name>.c`
+- Add to Makefile test discovery
+
+## Adding a New Subcommand
+
+1. Create `src/hull/commands/<name>.c` and `include/hull/commands/<name>.h`
+2. Implement `int hl_cmd_<name>(int argc, char **argv, const char *hull_path)`
+3. Add one line to the command table in `src/hull/commands/dispatch.c`
+4. Add Lua implementation in `stdlib/lua/hull/<name>.lua` if tool-mode command
 
 ## Debugging
 
 ```bash
-make debug          # clean + rebuild with -fsanitize=address,undefined -g -O0
-make DEBUG=1 test   # run tests under sanitizers
+make debug              # clean + rebuild with -fsanitize=address,undefined -g -O0
+make msan               # clean + rebuild with -fsanitize=memory,undefined (Linux clang)
+make test               # run tests under whichever sanitizer was built
 ```
+
+ASan catches: heap/stack buffer overflow, use-after-free, double-free, memory leaks.
+UBSan catches: signed overflow, null dereference, misaligned access, shift overflow.
+MSan catches: use of uninitialized memory.
