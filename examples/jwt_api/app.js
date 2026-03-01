@@ -4,11 +4,11 @@
 // Token-based auth API: register, login, protected routes using Bearer tokens
 
 import { app } from "hull:app";
+import { crypto } from "hull:crypto";
 import { db } from "hull:db";
+import { jwt } from "hull:jwt";
 import { log } from "hull:log";
 import { time } from "hull:time";
-import { crypto } from "hull:crypto";
-import { jwt } from "hull:jwt";
 
 const JWT_SECRET = "change-me-in-production";
 
@@ -25,7 +25,7 @@ db.exec(
 
 // Middleware: extract and verify JWT on every request (optional — won't block)
 app.use("*", "/*", (req, _res) => {
-    const authHeader = req.headers["authorization"];
+    const authHeader = req.headers.authorization;
     if (!authHeader) return 0;
 
     const match = authHeader.match(/^[Bb]earer\s+(.+)$/);

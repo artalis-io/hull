@@ -24,6 +24,36 @@
 
 /* ── Request object ─────────────────────────────────────────────────── */
 
+/* req.header(name) — case-insensitive header lookup.
+ * Since headers are already stored lowercase, this lowercases the
+ * input name and looks it up in req.headers. */
+static JSValue js_req_header(JSContext *ctx, JSValueConst this_val,
+                             int argc, JSValueConst *argv)
+{
+    if (argc < 1) return JS_UNDEFINED;
+    const char *name = JS_ToCString(ctx, argv[0]);
+    if (!name) return JS_UNDEFINED;
+
+    /* Lowercase the lookup key */
+    size_t len = strlen(name);
+    char lower[256];
+    if (len >= sizeof(lower)) len = sizeof(lower) - 1;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)name[i];
+        lower[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : (char)c;
+    }
+    lower[len] = '\0';
+    JS_FreeCString(ctx, name);
+
+    JSValue headers = JS_GetPropertyStr(ctx, this_val, "headers");
+    if (JS_IsUndefined(headers) || JS_IsNull(headers))
+        return JS_UNDEFINED;
+
+    JSValue val = JS_GetPropertyStr(ctx, headers, lower);
+    JS_FreeValue(ctx, headers);
+    return val;
+}
+
 /*
  * Build a JS object representing the HTTP request:
  *   {
@@ -95,12 +125,19 @@ JSValue hl_js_make_request(JSContext *ctx, KlRequest *req)
     }
     JS_SetPropertyStr(ctx, obj, "params", params_obj);
 
-    /* headers → object */
+    /* headers → object (names lowercased for case-insensitive lookup) */
     JSValue headers_obj = JS_NewObject(ctx);
     for (int i = 0; i < req->num_headers; i++) {
         if (req->headers[i].name && req->headers[i].value) {
-            JS_SetPropertyStr(ctx, headers_obj,
-                              req->headers[i].name,
+            char name_buf[256];
+            size_t nlen = req->headers[i].name_len;
+            if (nlen >= sizeof(name_buf)) nlen = sizeof(name_buf) - 1;
+            for (size_t j = 0; j < nlen; j++) {
+                unsigned char c = (unsigned char)req->headers[i].name[j];
+                name_buf[j] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : (char)c;
+            }
+            name_buf[nlen] = '\0';
+            JS_SetPropertyStr(ctx, headers_obj, name_buf,
                               JS_NewStringLen(ctx, req->headers[i].value,
                                               req->headers[i].value_len));
         }
@@ -135,6 +172,10 @@ JSValue hl_js_make_request(JSContext *ctx, KlRequest *req)
     } else {
         JS_SetPropertyStr(ctx, obj, "ctx", JS_NewObject(ctx));
     }
+
+    /* req.header(name) — convenience method for case-insensitive lookup */
+    JS_SetPropertyStr(ctx, obj, "header",
+                      JS_NewCFunction(ctx, js_req_header, "header", 1));
 
     return obj;
 }

@@ -34,7 +34,7 @@ local rate_window = 60   -- window in seconds
 local rate_limit = 60    -- max requests per window
 local rate_buckets = {}  -- { [client_key] = { count, window_start } }
 
-app.use("*", "/api/*", function(req, res)
+app.use("*", "/api/*", function(_req, res)
     -- In a real app, key by IP or API key. Here we use a fixed key for demo.
     local key = "global"
     local now = time.now()
@@ -95,6 +95,12 @@ app.use("*", "/api/*", function(req, res)
     end
 
     return 0
+end)
+
+-- OPTIONS route for CORS preflight (router requires a route to exist
+-- so middleware can run — the CORS middleware above handles the response)
+app.options("/api/items", function(_req, res)
+    res:status(204):text("")
 end)
 
 -- ── Routes ──────────────────────────────────────────────────────────

@@ -72,12 +72,12 @@ local function deliver_webhook(webhook, event_type, payload_str, event_id)
         })
     end)
 
-    local status = 0
-    local resp_body = ""
+    local status, resp_body
     if ok and result then
         status = result.status
         resp_body = result.body or ""
     else
+        status = 0
         resp_body = tostring(result)
     end
 

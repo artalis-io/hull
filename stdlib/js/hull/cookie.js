@@ -5,7 +5,7 @@
  * cookie.serialize(name, value, opts) -> Set-Cookie header string
  * cookie.clear(name, opts)          -> Set-Cookie header that expires the cookie
  *
- * Defaults: httpOnly=true, secure=true, sameSite="Lax", path="/"
+ * Defaults: httpOnly=true, secure=false, sameSite="Lax", path="/"
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -88,8 +88,8 @@ function serialize(name, value, opts) {
     if (httpOnly)
         str += "; HttpOnly";
 
-    // Secure (default: true)
-    const secure = o.secure !== undefined ? o.secure : true;
+    // Secure (default: false — set true when serving over HTTPS)
+    const secure = o.secure !== undefined ? o.secure : false;
     if (secure)
         str += "; Secure";
 

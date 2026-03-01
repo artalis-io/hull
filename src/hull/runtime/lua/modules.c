@@ -112,11 +112,12 @@ static int lua_app_route(lua_State *L, const char *method)
     return 0;
 }
 
-static int lua_app_get(lua_State *L)    { return lua_app_route(L, "GET"); }
-static int lua_app_post(lua_State *L)   { return lua_app_route(L, "POST"); }
-static int lua_app_put(lua_State *L)    { return lua_app_route(L, "PUT"); }
-static int lua_app_del(lua_State *L)    { return lua_app_route(L, "DELETE"); }
-static int lua_app_patch(lua_State *L)  { return lua_app_route(L, "PATCH"); }
+static int lua_app_get(lua_State *L)     { return lua_app_route(L, "GET"); }
+static int lua_app_post(lua_State *L)    { return lua_app_route(L, "POST"); }
+static int lua_app_put(lua_State *L)     { return lua_app_route(L, "PUT"); }
+static int lua_app_del(lua_State *L)     { return lua_app_route(L, "DELETE"); }
+static int lua_app_patch(lua_State *L)   { return lua_app_route(L, "PATCH"); }
+static int lua_app_options(lua_State *L) { return lua_app_route(L, "OPTIONS"); }
 
 /* app.use(method, pattern, handler) — middleware registration */
 static int lua_app_use(lua_State *L)
@@ -196,6 +197,7 @@ static const luaL_Reg app_funcs[] = {
     {"put",          lua_app_put},
     {"del",          lua_app_del},
     {"patch",        lua_app_patch},
+    {"options",      lua_app_options},
     {"use",          lua_app_use},
     {"config",       lua_app_config},
     {"manifest",     lua_app_manifest},
