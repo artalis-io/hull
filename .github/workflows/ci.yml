@@ -40,6 +40,14 @@ jobs:
         timeout-minutes: 2
         run: make e2e-sandbox
 
+      - name: Example E2E tests
+        timeout-minutes: 5
+        run: make e2e-examples
+
+      - name: hull test (examples)
+        timeout-minutes: 2
+        run: make hull-test-examples
+
   sanitizers:
     name: ASan + UBSan
     runs-on: ubuntu-latest
