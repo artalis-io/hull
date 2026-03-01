@@ -99,10 +99,16 @@ $(KEEL_LIB): $(MBEDTLS_OBJS)
 		$(if $(COSMO),BACKEND=poll COSMO=1)
 ifdef COSMO
 	@# Ensure .aarch64/ counterpart archive exists for cosmocc fat linking
+	@echo "=== Checking for $(KEEL_DIR)/.aarch64/libkeel.a ==="
 	@if [ ! -f $(KEEL_DIR)/.aarch64/libkeel.a ]; then \
+		echo "=== Creating .aarch64/libkeel.a ===" && \
 		mkdir -p $(KEEL_DIR)/.aarch64 && \
-		$(AR) rcs $(KEEL_DIR)/.aarch64/libkeel.a \
-			$$(find $(KEEL_DIR)/src/.aarch64 $(KEEL_DIR)/parsers/.aarch64 $(KEEL_DIR)/vendor/llhttp/.aarch64 -name '*.o' 2>/dev/null); \
+		OBJS=$$(find $(KEEL_DIR)/src/.aarch64 $(KEEL_DIR)/parsers/.aarch64 $(KEEL_DIR)/vendor/llhttp/.aarch64 -name '*.o' 2>/dev/null) && \
+		echo "=== Found objects: $$OBJS ===" && \
+		$(AR) rcs $(KEEL_DIR)/.aarch64/libkeel.a $$OBJS && \
+		echo "=== Created $(KEEL_DIR)/.aarch64/libkeel.a ==="; \
+	else \
+		echo "=== $(KEEL_DIR)/.aarch64/libkeel.a already exists ==="; \
 	fi
 endif
 
