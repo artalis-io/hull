@@ -326,10 +326,45 @@ Three supported compiler paths:
 - Lua 5.4 + QuickJS runtimes
 - All capability modules
 - SQLite
-- TweetNaCl
+- mbedTLS (TLS client)
+- TweetNaCl (Ed25519, NaCl crypto)
 - Sandbox (pledge/unveil polyfill)
 
 The platform library is signed separately (`platform.sig`) with the gethull.dev key.
+
+### Multi-Architecture Cosmopolitan Builds
+
+Cosmopolitan APE binaries are fat: they contain both x86_64 and aarch64 code. Building a fat platform archive requires two passes:
+
+```bash
+make platform-cosmo
+```
+
+This internally:
+1. `make platform CC=x86_64-unknown-cosmo-cc` → `libhull_platform.x86_64-cosmo.a`
+2. `make platform CC=aarch64-unknown-cosmo-cc` → `libhull_platform.aarch64-cosmo.a`
+3. Both archives are placed in `build/` alongside `platform_cc` (contains `"cosmocc"`)
+
+**At `hull build` time** (or dev mode), the build pipeline:
+- Detects cosmo mode from the compiler name
+- Finds both arch-specific archives in the hull binary directory or `build/`
+- Places x86_64 archive as `tmpdir/libhull_platform.a`
+- Places aarch64 archive as `tmpdir/.aarch64/libhull_platform.a`
+- `cosmocc` automatically resolves the `.aarch64/` counterpart during linking
+
+**Keel submodule integration:**
+- Keel detects any cosmo compiler via `ifneq ($(findstring cosmo,$(CC)),)` → sets `COSMO=1`
+- Only `CC=cosmocc` (fat compiler) sets `COSMO_FAT=1` → creates `.aarch64/libkeel.a`
+- Single-arch compilers (`x86_64-unknown-cosmo-cc`) skip `.aarch64/` archive creation
+- Plain `ar` is used instead of `cosmoar` (cosmoar fails with recursive `.aarch64/` lookups)
+
+**Embedding for distribution:**
+```bash
+make platform-cosmo
+make CC=cosmocc EMBED_PLATFORM=cosmo   # xxd both archives into embedded_platform.h
+```
+
+The embedded header contains `hl_embedded_platforms[]` — a self-describing metadata array with arch name, data pointer, and length for each platform archive.
 
 ---
 
