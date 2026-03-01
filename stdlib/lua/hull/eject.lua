@@ -168,6 +168,7 @@ local function main()
 
     -- Find platform library
     local platform_lib = nil
+    local platform_lib_arm = nil  -- aarch64 cosmo archive (if multi-arch)
     local hull_dir = ""
     if __hull_exe then
         hull_dir = __hull_exe:match("(.*/)" ) or ""
@@ -177,10 +178,25 @@ local function main()
         "build/",
         "../build/",
     }
+
+    -- Check for multi-arch cosmo archives first
     for _, d in ipairs(search_paths) do
-        if tool.file_exists(d .. "libhull_platform.a") then
-            platform_lib = d .. "libhull_platform.a"
+        local x86 = d .. "libhull_platform.x86_64-cosmo.a"
+        local arm = d .. "libhull_platform.aarch64-cosmo.a"
+        if tool.file_exists(x86) and tool.file_exists(arm) then
+            platform_lib = x86
+            platform_lib_arm = arm
             break
+        end
+    end
+
+    -- Fallback to single-arch archive
+    if not platform_lib then
+        for _, d in ipairs(search_paths) do
+            if tool.file_exists(d .. "libhull_platform.a") then
+                platform_lib = d .. "libhull_platform.a"
+                break
+            end
         end
     end
 
@@ -205,8 +221,14 @@ local function main()
     write_file(dir .. "/src/entry.h", gen_entry_h())
     write_file(dir .. "/scripts/gen_registry.sh", gen_registry_sh())
 
-    -- Copy platform library
-    tool.copy(platform_lib, dir .. "/platform/libhull_platform.a")
+    -- Copy platform library (multi-arch: x86_64 + .aarch64/ layout for cosmocc)
+    if platform_lib_arm then
+        tool.copy(platform_lib, dir .. "/platform/libhull_platform.a")
+        tool.mkdir(dir .. "/platform/.aarch64")
+        tool.copy(platform_lib_arm, dir .. "/platform/.aarch64/libhull_platform.a")
+    else
+        tool.copy(platform_lib, dir .. "/platform/libhull_platform.a")
+    end
 
     -- Copy app files, preserving directory structure
     for _, path in ipairs(files) do
@@ -228,6 +250,9 @@ local function main()
     print("  " .. dir .. "/src/entry.h")
     print("  " .. dir .. "/scripts/gen_registry.sh")
     print("  " .. dir .. "/platform/libhull_platform.a")
+    if platform_lib_arm then
+        print("  " .. dir .. "/platform/.aarch64/libhull_platform.a")
+    end
     for _, path in ipairs(files) do
         local rel = path:sub(#opts.app_dir + 2)
         print("  " .. dir .. "/app/" .. rel)

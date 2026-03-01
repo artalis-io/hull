@@ -135,6 +135,9 @@ int hl_tool_rmdir(const char *path, const HlToolUnveilCtx *ctx);
  *   tool.file_exists(path)        — check existence, return bool
  *   tool.stderr(msg)              — write to stderr
  *   tool.loadfile(path)           — load Lua chunk, return function or nil+err
+ *   tool.extract_platform(dir)    — extract embedded platform .a, return bool
+ *   tool.extract_platform_cosmo(dir) — extract multi-arch + .aarch64/ layout
+ *   tool.platform_archs()         — return table of embedded arch names or nil
  *   tool.cc                       — configured compiler (string field)
  *
  * The unveil context pointer is stored in the Lua registry for

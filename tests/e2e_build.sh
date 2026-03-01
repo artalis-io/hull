@@ -218,7 +218,7 @@ fi
 # Check binary size is reasonable (should be 1-10MB)
 if [ -f "$WORKDIR/myapp/myapp" ]; then
     SIZE=$(wc -c < "$WORKDIR/myapp/myapp" | tr -d ' ')
-    if [ "$SIZE" -gt 500000 ] && [ "$SIZE" -lt 10000000 ]; then
+    if [ "$SIZE" -gt 500000 ] && [ "$SIZE" -lt 20000000 ]; then
         pass "binary size reasonable (${SIZE} bytes)"
     else
         fail "binary size unexpected: $SIZE bytes"
