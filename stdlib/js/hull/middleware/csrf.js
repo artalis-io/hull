@@ -12,6 +12,7 @@
  */
 
 import { crypto } from "hull:crypto";
+import { cookie } from "hull:cookie";
 import { time } from "hull:time";
 
 function secretToHex(secret) {
@@ -82,6 +83,14 @@ function verify(token, sessionId, secret, maxAge) {
     return true;
 }
 
+function parseCookieSessionId(req, cookieName) {
+    const ck = req.header("Cookie");
+    if (!ck) return null;
+    const cookies = cookie.parse(ck);
+    const val = cookies[cookieName];
+    return val || null;
+}
+
 function middleware(opts) {
     const o = opts || {};
     const secret = o.secret;
@@ -95,39 +104,32 @@ function middleware(opts) {
         throw new Error("csrf.middleware requires opts.secret");
 
     return function(req, res) {
-        if (safeMethods[req.method])
-            return 0;
-
-        var sessionId = null;
-        var ck = req.header("Cookie");
-        if (ck) {
-            var parts = ck.split(";");
-            for (var j = 0; j < parts.length; j++) {
-                var p = parts[j].trim();
-                var eq = p.indexOf("=");
-                if (eq >= 0) {
-                    var n = p.substring(0, eq).trim();
-                    if (n === cookieName) {
-                        sessionId = p.substring(eq + 1).trim();
-                        break;
-                    }
-                }
+        if (safeMethods[req.method]) {
+            // Generate token on safe methods for templates
+            const sessionId = parseCookieSessionId(req, cookieName);
+            if (sessionId) {
+                if (!req.ctx) req.ctx = {};
+                req.ctx.csrf_token = generate(sessionId, secret);
             }
+            return 0;
         }
 
+        const sessionId = parseCookieSessionId(req, cookieName);
+
+        // CSRF only applies to authenticated sessions. Unauthenticated POST requests pass through — handlers must independently verify authentication.
         if (!sessionId)
             return 0;
 
-        var token = req.header(headerName);
+        let token = req.header(headerName);
         if (!token && req.body) {
-            var body = req.body;
-            var pairs = body.split("&");
-            for (var k = 0; k < pairs.length; k++) {
-                var eqIdx = pairs[k].indexOf("=");
+            const body = req.body;
+            const pairs = body.split("&");
+            for (let k = 0; k < pairs.length; k++) {
+                const eqIdx = pairs[k].indexOf("=");
                 if (eqIdx >= 0) {
-                    var key = pairs[k].substring(0, eqIdx);
+                    const key = pairs[k].substring(0, eqIdx);
                     if (key === fieldName) {
-                        token = pairs[k].substring(eqIdx + 1);
+                        token = decodeURIComponent(pairs[k].substring(eqIdx + 1));
                         break;
                     }
                 }

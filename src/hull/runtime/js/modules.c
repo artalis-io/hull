@@ -163,6 +163,66 @@ static JSValue js_app_use(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+/* app.usePost(method, pattern, fn) — register post-body middleware */
+static JSValue js_app_use_post(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 3)
+        return JS_ThrowTypeError(ctx, "app.usePost requires (method, pattern, handler)");
+
+    const char *method = JS_ToCString(ctx, argv[0]);
+    const char *pattern = JS_ToCString(ctx, argv[1]);
+    if (!method || !pattern || !JS_IsFunction(ctx, argv[2])) {
+        if (method) JS_FreeCString(ctx, method);
+        if (pattern) JS_FreeCString(ctx, pattern);
+        return JS_ThrowTypeError(ctx, "app.usePost requires (method, pattern, handler)");
+    }
+
+    JSValue global = JS_GetGlobalObject(ctx);
+
+    /* Store handler in __hull_routes (same array as route handlers) */
+    JSValue routes = JS_GetPropertyStr(ctx, global, "__hull_routes");
+    if (JS_IsUndefined(routes)) {
+        routes = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, global, "__hull_routes", JS_DupValue(ctx, routes));
+    }
+
+    JSValue routes_len_val = JS_GetPropertyStr(ctx, routes, "length");
+    int32_t handler_id = 0;
+    JS_ToInt32(ctx, &handler_id, routes_len_val);
+    JS_FreeValue(ctx, routes_len_val);
+
+    JS_SetPropertyUint32(ctx, routes, (uint32_t)handler_id,
+                         JS_DupValue(ctx, argv[2]));
+    JS_FreeValue(ctx, routes);
+
+    /* Store in __hull_post_middleware array with handler_id */
+    JSValue mw = JS_GetPropertyStr(ctx, global, "__hull_post_middleware");
+    if (JS_IsUndefined(mw)) {
+        mw = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, global, "__hull_post_middleware", JS_DupValue(ctx, mw));
+    }
+
+    JSValue len_val = JS_GetPropertyStr(ctx, mw, "length");
+    int32_t idx = 0;
+    JS_ToInt32(ctx, &idx, len_val);
+    JS_FreeValue(ctx, len_val);
+
+    JSValue entry = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, entry, "method", JS_NewString(ctx, method));
+    JS_SetPropertyStr(ctx, entry, "pattern", JS_NewString(ctx, pattern));
+    JS_SetPropertyStr(ctx, entry, "handler_id", JS_NewInt32(ctx, handler_id));
+    JS_SetPropertyUint32(ctx, mw, (uint32_t)idx, entry);
+
+    JS_FreeValue(ctx, mw);
+    JS_FreeValue(ctx, global);
+    JS_FreeCString(ctx, pattern);
+    JS_FreeCString(ctx, method);
+
+    return JS_UNDEFINED;
+}
+
 /* app.config(obj) — application configuration */
 static JSValue js_app_config(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv)
@@ -266,6 +326,8 @@ static int js_app_module_init(JSContext *ctx, JSModuleDef *m)
 
     JS_SetPropertyStr(ctx, app, "use",
                       JS_NewCFunction(ctx, js_app_use, "use", 3));
+    JS_SetPropertyStr(ctx, app, "usePost",
+                      JS_NewCFunction(ctx, js_app_use_post, "usePost", 3));
     JS_SetPropertyStr(ctx, app, "config",
                       JS_NewCFunction(ctx, js_app_config, "config", 1));
     JS_SetPropertyStr(ctx, app, "static",

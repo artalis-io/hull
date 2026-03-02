@@ -516,6 +516,43 @@ int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
     }
     lua_pop(L, 1); /* __hull_middleware table */
 
+    /* Wire post-body middleware from __hull_post_middleware */
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_post_middleware");
+    if (lua_istable(L, -1)) {
+        int post_mw_count = (int)luaL_len(L, -1);
+        for (int i = 1; i <= post_mw_count; i++) {
+            lua_rawgeti(L, -1, i);
+            if (!lua_istable(L, -1)) {
+                lua_pop(L, 1);
+                continue;
+            }
+
+            lua_getfield(L, -1, "method");
+            lua_getfield(L, -2, "pattern");
+            lua_getfield(L, -3, "handler_id");
+
+            const char *method_str = lua_tostring(L, -3);
+            const char *pattern = lua_tostring(L, -2);
+            int handler_id = (int)lua_tointeger(L, -1);
+
+            if (method_str && pattern) {
+                HlLuaRoute *ctx = hl_alloc_malloc(lua->base.alloc,
+                                                    sizeof(HlLuaRoute));
+                if (ctx) {
+                    ctx->lua = lua;
+                    ctx->handler_id = handler_id;
+                    hl_lua_track_route(lua, ctx);
+                    kl_server_use_post(server, method_str, pattern,
+                                       hl_lua_keel_middleware, ctx);
+                }
+            }
+
+            lua_pop(L, 3); /* method_str, pattern, handler_id */
+            lua_pop(L, 1); /* middleware entry table */
+        }
+    }
+    lua_pop(L, 1); /* __hull_post_middleware table */
+
     return 0;
 }
 

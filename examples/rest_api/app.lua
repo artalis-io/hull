@@ -43,7 +43,7 @@ app.put("/tasks/:id", function(req, res)
     local body = json.decode(req.body)
     local done = 0
     if body.done then done = 1 end
-    local changes = db.exec("UPDATE tasks SET title = ?, done = ? WHERE id = ?",
+    local changes = db.exec("UPDATE tasks SET title = COALESCE(?, title), done = ? WHERE id = ?",
                             { body.title, done, req.params.id })
     if changes == 0 then
         return res:status(404):json({ error = "task not found" })

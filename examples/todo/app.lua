@@ -53,9 +53,10 @@ local csrf_secret = to_hex(crypto.random(32))
 
 app.use("*", "/*", logger.middleware({ skip = {"/health"} }))
 app.use("*", "/*", auth.session_middleware({ optional = true }))
-app.use("*", "/*", csrf.middleware({ secret = csrf_secret }))
 app.use("POST", "/login", ratelimit.middleware({ limit = 10, window = 60 }))
 app.use("POST", "/register", ratelimit.middleware({ limit = 5, window = 60 }))
+-- CSRF needs body access → post-body middleware
+app.use_post("*", "/*", csrf.middleware({ secret = csrf_secret }))
 
 -- ── Helpers ─────────────────────────────────────────────────────────
 

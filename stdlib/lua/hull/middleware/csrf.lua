@@ -9,6 +9,15 @@
 
 local csrf = {}
 
+--- URL-decode a percent-encoded string (e.g. form body values).
+local function url_decode(s)
+    s = s:gsub("+", " ")
+    s = s:gsub("%%(%x%x)", function(hex)
+        return string.char(tonumber(hex, 16))
+    end)
+    return s
+end
+
 --- Convert a raw string to hex representation.
 local function str_to_hex(s)
     local hex = {}
@@ -19,6 +28,7 @@ local function str_to_hex(s)
 end
 
 --- Constant-time comparison of two strings.
+-- Note: length leak is acceptable — both inputs are always fixed-length HMAC outputs
 local function constant_time_compare(a, b)
     if #a ~= #b then return false end
     local diff = 0
@@ -132,7 +142,8 @@ function csrf.middleware(opts)
             return 0
         end
 
-        -- Get session ID from context — skip CSRF for unauthenticated users
+        -- CSRF only applies to authenticated sessions. Unauthenticated POST
+        -- requests pass through — handlers must independently verify authentication.
         local sid = req.ctx[session_key]
         if not sid then
             return 0
@@ -149,7 +160,7 @@ function csrf.middleware(opts)
                     local key = pair:sub(1, eq - 1)
                     local val = pair:sub(eq + 1)
                     if key == field_name then
-                        token = val
+                        token = url_decode(val)
                         break
                     end
                 end

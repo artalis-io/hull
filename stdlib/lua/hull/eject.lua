@@ -155,7 +155,7 @@ local function main()
 
     -- Verify app_dir has files
     local files = tool.find_files(opts.app_dir, "*.lua")
-    if #files == 0 then
+    if not files or #files == 0 then
         tool.stderr("hull eject: no .lua files found in " .. opts.app_dir .. "\n")
         tool.exit(1)
     end

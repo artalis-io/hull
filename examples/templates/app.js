@@ -7,6 +7,7 @@
  *       hull examples/templates/app.js
  */
 
+import { app } from "hull:app";
 import { template } from "hull:template";
 
 // Sample data

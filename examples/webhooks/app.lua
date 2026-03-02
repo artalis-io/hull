@@ -11,7 +11,8 @@ app.manifest({
     hosts = {"127.0.0.1"},
 })
 
-local SIGNING_SECRET = "whsec_change-me-in-production"
+local ok, val = pcall(env.get, "WEBHOOK_SECRET")
+local SIGNING_SECRET = (ok and val) or "whsec_change-me-in-production"
 
 -- ── Schema ──────────────────────────────────────────────────────────
 

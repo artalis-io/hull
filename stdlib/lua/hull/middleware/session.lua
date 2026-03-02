@@ -8,7 +8,8 @@
 
 local session = {}
 
--- Module-level TTL (seconds), default 24 hours
+-- Module-level TTL (seconds), default 24 hours.
+-- Singleton TTL — session.init() must be called exactly once per application.
 local _ttl = 86400
 
 --- Initialize the sessions table and configure TTL.

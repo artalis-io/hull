@@ -76,38 +76,10 @@ app.use("*", "/*", (req, _res) => {
     return 0;
 });
 
-// CSRF middleware for POST requests
-app.use("*", "/*", (req, res) => {
-    // Safe methods skip verification but generate token
-    if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") {
-        if (req.ctx?.sessionId) {
-            req.ctx.csrf_token = csrf.generate(req.ctx.sessionId, csrfSecret);
-        }
-        return 0;
-    }
-
-    // No session = no CSRF check (unauthenticated users)
-    const sessionId = req.ctx?.sessionId ?? null;
-    if (!sessionId) {
-        return 0;
-    }
-
-    // Look for token in header or body
-    let token = req.header("x-csrf-token");
-    if (!token && req.body && req.body._csrf) {
-        token = req.body._csrf;
-    }
-
-    if (!token || !csrf.verify(token, sessionId, csrfSecret, 3600)) {
-        res.status(403).json({ error: "csrf: invalid token" });
-        return 1;
-    }
-
-    return 0;
-});
-
 app.use("POST", "/login", ratelimit.middleware({ limit: 10, window: 60 }));
 app.use("POST", "/register", ratelimit.middleware({ limit: 5, window: 60 }));
+// CSRF needs body access → post-body middleware
+app.usePost("*", "/*", csrf.middleware({ secret: csrfSecret }));
 
 // ── Helpers ─────────────────────────────────────────────────────────
 

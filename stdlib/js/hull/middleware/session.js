@@ -27,6 +27,7 @@ function init(opts) {
         "  id TEXT PRIMARY KEY," +
         "  data TEXT NOT NULL," +
         "  created_at INTEGER NOT NULL," +
+        "  last_accessed INTEGER NOT NULL," +
         "  expires_at INTEGER NOT NULL" +
         ")"
     );
@@ -51,8 +52,8 @@ function create(data) {
     const encoded = json.encode(data || {});
 
     db.exec(
-        "INSERT INTO hull_sessions (id, data, created_at, expires_at) VALUES (?, ?, ?, ?)",
-        [id, encoded, now, expiresAt]
+        "INSERT INTO hull_sessions (id, data, created_at, last_accessed, expires_at) VALUES (?, ?, ?, ?, ?)",
+        [id, encoded, now, now, expiresAt]
     );
 
     return id;
@@ -64,17 +65,23 @@ function load(sessionId) {
 
     const now = time.now();
     const rows = db.query(
-        "SELECT data FROM hull_sessions WHERE id = ? AND expires_at > ?",
-        [sessionId, now]
+        "SELECT data, expires_at FROM hull_sessions WHERE id = ?",
+        [sessionId]
     );
 
     if (!rows || rows.length === 0)
         return null;
 
-    // Touch: extend expiration on access
+    // Check expiry
+    if (rows[0].expires_at <= now) {
+        db.exec("DELETE FROM hull_sessions WHERE id = ?", [sessionId]);
+        return null;
+    }
+
+    // Touch: update last_accessed and extend expiration
     db.exec(
-        "UPDATE hull_sessions SET expires_at = ? WHERE id = ?",
-        [now + sessionTtl, sessionId]
+        "UPDATE hull_sessions SET last_accessed = ?, expires_at = ? WHERE id = ?",
+        [now, now + sessionTtl, sessionId]
     );
 
     const decoded = json.decode(rows[0].data);
@@ -94,8 +101,8 @@ function update(sessionId, data) {
     const encoded = json.encode(data || {});
 
     const affected = db.exec(
-        "UPDATE hull_sessions SET data = ?, expires_at = ? WHERE id = ? AND expires_at > ?",
-        [encoded, now + sessionTtl, sessionId, now]
+        "UPDATE hull_sessions SET data = ?, last_accessed = ?, expires_at = ? WHERE id = ? AND expires_at > ?",
+        [encoded, now, now + sessionTtl, sessionId, now]
     );
 
     return affected > 0;

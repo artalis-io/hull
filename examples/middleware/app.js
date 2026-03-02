@@ -74,7 +74,12 @@ app.get("/api/items", (req, res) => {
 });
 
 app.post("/api/items", (req, res) => {
-    const body = JSON.parse(req.body);
+    let body;
+    try { body = JSON.parse(req.body); } catch (e) {
+        res.status(400);
+        res.json({ error: "invalid JSON" });
+        return;
+    }
     res.status(201).json({
         created: body,
         request_id: req.ctx ? req.ctx.request_id : null,

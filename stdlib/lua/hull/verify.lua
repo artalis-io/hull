@@ -24,6 +24,7 @@ local function read_key(source)
     if not source then return nil end
 
     -- URL fetch
+    -- WARNING: HTTPS key fetch trusts system CA store. Use local key files for high-security verification.
     if source:sub(1, 8) == "https://" then
         local data = tool.spawn_read({"curl", "-sfL", source})
         if data then
@@ -175,6 +176,12 @@ local function main()
     local mismatches = {}
     local missing = {}
     for name, expected_hash in pairs(sig.files) do
+        -- Path traversal defense: reject suspicious file names
+        if name:find("%.%.") or name:sub(1, 1) == "/" then
+            tool.stderr("  Suspicious file path: " .. name .. "\n")
+            issues = issues + 1
+            goto continue_files
+        end
         local path = app_dir .. "/" .. name
         local data = read_file(path)
         if not data then
@@ -189,6 +196,7 @@ local function main()
                 }
             end
         end
+        ::continue_files::
     end
 
     -- Report file issues

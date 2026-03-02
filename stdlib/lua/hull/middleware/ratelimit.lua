@@ -12,6 +12,7 @@
 local ratelimit = {}
 
 local SWEEP_INTERVAL = 100  -- sweep every N checks
+local MAX_BUCKETS = 10000   -- max unique keys before forced eviction
 
 --- Sweep expired buckets from the table.
 local function sweep_expired(buckets, window, now)
@@ -28,6 +29,19 @@ end
 function ratelimit.check(buckets, key, limit, window, now)
     local bucket = buckets[key]
     if not bucket or (now - bucket.window_start) >= window then
+        -- Cap check: prevent unbounded memory growth from unique keys
+        if not bucket then
+            local count = 0
+            for _ in pairs(buckets) do count = count + 1 end
+            if count >= MAX_BUCKETS then
+                sweep_expired(buckets, window, now)
+                count = 0
+                for _ in pairs(buckets) do count = count + 1 end
+                if count >= MAX_BUCKETS then
+                    return { allowed = false, remaining = 0, reset = now + window }
+                end
+            end
+        end
         buckets[key] = { count = 1, window_start = now }
         bucket = buckets[key]
     else

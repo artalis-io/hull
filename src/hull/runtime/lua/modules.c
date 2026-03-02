@@ -169,6 +169,51 @@ static int lua_app_use(lua_State *L)
     return 0;
 }
 
+/* app.use_post(method, pattern, fn) — register post-body middleware */
+static int lua_app_use_post(lua_State *L)
+{
+    const char *method = luaL_checkstring(L, 1);
+    const char *pattern = luaL_checkstring(L, 2);
+    luaL_checktype(L, 3, LUA_TFUNCTION);
+
+    /* Store handler in __hull_routes (same array as route handlers) */
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_routes");
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_pushvalue(L, -1);
+        lua_setfield(L, LUA_REGISTRYINDEX, "__hull_routes");
+    }
+
+    lua_Integer handler_id = (lua_Integer)luaL_len(L, -1) + 1;
+    lua_pushvalue(L, 3);
+    lua_rawseti(L, -2, handler_id);
+    lua_pop(L, 1); /* pop routes table */
+
+    /* Store middleware entry with handler_id in __hull_post_middleware */
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_post_middleware");
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_pushvalue(L, -1);
+        lua_setfield(L, LUA_REGISTRYINDEX, "__hull_post_middleware");
+    }
+
+    lua_Integer idx = (lua_Integer)luaL_len(L, -1) + 1;
+
+    lua_newtable(L);
+    lua_pushstring(L, method);
+    lua_setfield(L, -2, "method");
+    lua_pushstring(L, pattern);
+    lua_setfield(L, -2, "pattern");
+    lua_pushinteger(L, handler_id);
+    lua_setfield(L, -2, "handler_id");
+    lua_rawseti(L, -2, idx);
+
+    lua_pop(L, 1); /* pop post_middleware table */
+    return 0;
+}
+
 /* app.config(tbl) — application configuration */
 static int lua_app_config(lua_State *L)
 {
@@ -204,6 +249,7 @@ static const luaL_Reg app_funcs[] = {
     {"patch",        lua_app_patch},
     {"options",      lua_app_options},
     {"use",          lua_app_use},
+    {"use_post",     lua_app_use_post},
     {"config",       lua_app_config},
     {"manifest",     lua_app_manifest},
     {"get_manifest", lua_app_get_manifest},
