@@ -134,7 +134,9 @@ int hl_cmd_dev(int argc, char **argv, const char *hull_exe)
         if ((strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "-b") == 0 ||
              strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "-m") == 0 ||
              strcmp(argv[i], "-M") == 0 || strcmp(argv[i], "-s") == 0 ||
-             strcmp(argv[i], "-l") == 0) && i + 1 < argc) {
+             strcmp(argv[i], "-l") == 0 ||
+             strcmp(argv[i], "--tls-cert") == 0 ||
+             strcmp(argv[i], "--tls-key") == 0) && i + 1 < argc) {
             i++; /* skip value, will be collected below */
         }
     }

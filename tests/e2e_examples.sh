@@ -514,6 +514,63 @@ test_webhooks() {
     stop_server; rm -rf "$TMPDIR_WH"
 }
 
+# ── Todo (with auth) ─────────────────────────────────────────────────
+
+test_todo() {
+    LABEL=$1
+    PORT=$2
+    APP=$3
+
+    echo ""
+    echo "--- todo ($LABEL) port $PORT ---"
+
+    TMPDIR_TODO=$(mktemp -d)
+    COOKIE_JAR="$TMPDIR_TODO/cookies.txt"
+    start_server "$PORT" "$APP" "$TMPDIR_TODO/data.db"
+    if ! wait_for_server "$PORT"; then
+        fail "$LABEL todo — server startup"
+        stop_server; rm -rf "$TMPDIR_TODO"; return
+    fi
+
+    # Health check
+    RESP=$(curl -s "http://127.0.0.1:$PORT/health")
+    check_contains "$LABEL todo GET /health" "$RESP" '"ok"'
+
+    # Login page
+    STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT/login")
+    check_status "$LABEL todo GET /login" "$STATUS" "200"
+
+    # Register page
+    STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT/register")
+    check_status "$LABEL todo GET /register" "$STATUS" "200"
+
+    # Root redirects to login without session
+    STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT/")
+    check_status "$LABEL todo GET / no session" "$STATUS" "302"
+
+    # Register a user (form-encoded, CSRF not enforced on first POST from fresh session)
+    RESP=$(curl -s -c "$COOKIE_JAR" -w "\n%{http_code}" -X POST \
+           -d "name=Alice&email=alice%40test.com&password=secret1234&_csrf=bootstrap" \
+           "http://127.0.0.1:$PORT/register")
+    STATUS=$(echo "$RESP" | tail -1)
+    check_status "$LABEL todo POST /register" "$STATUS" "302"
+
+    # After register+login, GET / should return 200 (todo list)
+    PAGE=$(curl -s -b "$COOKIE_JAR" -c "$COOKIE_JAR" "http://127.0.0.1:$PORT/")
+    STATUS=$(curl -s -o /dev/null -w "%{http_code}" -b "$COOKIE_JAR" "http://127.0.0.1:$PORT/")
+    check_status "$LABEL todo GET / with session" "$STATUS" "200"
+
+    # Extract CSRF token from page
+    CSRF_TOKEN=$(echo "$PAGE" | grep -o 'name="_csrf" value="[^"]*"' | head -1 | sed 's/.*value="//;s/"//')
+
+    # Logout (with real CSRF token via header)
+    STATUS=$(curl -s -o /dev/null -w "%{http_code}" -b "$COOKIE_JAR" -X POST \
+             -H "x-csrf-token: $CSRF_TOKEN" "http://127.0.0.1:$PORT/logout")
+    check_status "$LABEL todo POST /logout" "$STATUS" "302"
+
+    stop_server; rm -rf "$TMPDIR_TODO"
+}
+
 # ── Run all example tests ────────────────────────────────────────────
 
 PORT_BASE=19870
@@ -530,6 +587,7 @@ if [ "$RUNTIME" != "js" ]; then
     test_crud_with_auth "lua" $((PORT_BASE + 5)) examples/crud_with_auth/app.lua
     test_middleware      "lua" $((PORT_BASE + 6)) examples/middleware/app.lua
     test_webhooks       "lua" $((PORT_BASE + 7)) examples/webhooks/app.lua
+    test_todo           "lua" $((PORT_BASE + 8)) examples/todo/app.lua
 fi
 
 if [ "$RUNTIME" != "lua" ]; then
@@ -541,6 +599,7 @@ if [ "$RUNTIME" != "lua" ]; then
     test_crud_with_auth "js" $((PORT_BASE + 15)) examples/crud_with_auth/app.js
     test_middleware      "js" $((PORT_BASE + 16)) examples/middleware/app.js
     test_webhooks       "js" $((PORT_BASE + 17)) examples/webhooks/app.js
+    test_todo           "js" $((PORT_BASE + 18)) examples/todo/app.js
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────

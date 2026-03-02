@@ -133,7 +133,9 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
 /* ── Public API ────────────────────────────────────────────────────── */
 
 int hl_sandbox_apply(const HlManifest *manifest, const char *db_path,
-                      const char *ca_bundle_path)
+                      const char *ca_bundle_path,
+                      const char *tls_cert_path,
+                      const char *tls_key_path)
 {
     if (!manifest || !manifest->present) {
         log_info("[sandbox] no manifest — sandbox not applied");
@@ -175,6 +177,18 @@ int hl_sandbox_apply(const HlManifest *manifest, const char *db_path,
         if (unveil(ca_bundle_path, "r") != 0)
             log_warn("[sandbox] unveil failed for CA bundle: %s",
                      ca_bundle_path);
+    }
+
+    /* TLS certificate and private key for HTTPS server */
+    if (tls_cert_path) {
+        if (unveil(tls_cert_path, "r") != 0)
+            log_warn("[sandbox] unveil failed for TLS cert: %s",
+                     tls_cert_path);
+    }
+    if (tls_key_path) {
+        if (unveil(tls_key_path, "r") != 0)
+            log_warn("[sandbox] unveil failed for TLS key: %s",
+                     tls_key_path);
     }
 
     /* Seal: no more unveil calls allowed */

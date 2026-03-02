@@ -132,11 +132,10 @@ function csrf.middleware(opts)
             return 0
         end
 
-        -- Get session ID from context
+        -- Get session ID from context — skip CSRF for unauthenticated users
         local sid = req.ctx[session_key]
         if not sid then
-            res:status(403):json({ error = "csrf: no session" })
-            return 1
+            return 0
         end
 
         -- Look for token in header first, then body field

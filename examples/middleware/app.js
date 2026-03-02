@@ -4,9 +4,9 @@
 // Demonstrates middleware chaining: request ID, logging, rate limiting, CORS
 
 import { app } from "hull:app";
-import { cors } from "hull:cors";
 import { log } from "hull:log";
-import { ratelimit } from "hull:ratelimit";
+import { cors } from "hull:middleware:cors";
+import { ratelimit } from "hull:middleware:ratelimit";
 import { time } from "hull:time";
 
 // ── Request ID middleware ────────────────────────────────────────────

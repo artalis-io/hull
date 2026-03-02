@@ -1,5 +1,13 @@
 <nav>
     <a class="brand" href="/">Todo</a>
+    {% if logged_in %}
     <a href="/">Tasks</a>
-    <a href="/about">About</a>
+    <form method="POST" action="/logout">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <button type="submit">Logout</button>
+    </form>
+    {% else %}
+    <a href="/login">Login</a>
+    <a href="/register">Register</a>
+    {% end %}
 </nav>

@@ -298,6 +298,6 @@ Every example has both `app.lua` and `app.js`. The APIs are identical except for
 | Globals | `app`, `db`, `time`, `log`, `json`, `crypto` are auto-injected | Must `import { app } from "hull:app"` etc. |
 | Method calls | `res:json(data)` (colon syntax) | `res.json(data)` (dot syntax) |
 | Tables/Objects | `{ key = "value" }` | `{ key: "value" }` |
-| Stdlib imports | `require("hull.session")` | `import { session } from "hull:session"` |
+| Stdlib imports | `require("hull.middleware.session")` | `import { session } from "hull:middleware:session"` |
 | Naming | `snake_case` — `hash_password` | `camelCase` — `hashPassword` |
 | Arrays | 1-indexed — `rows[1]` | 0-indexed — `rows[0]` |

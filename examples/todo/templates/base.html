@@ -17,6 +17,7 @@
         nav {
             display: flex;
             gap: 1.5rem;
+            align-items: center;
             margin-bottom: 2rem;
             padding-bottom: 1rem;
             border-bottom: 2px solid #e0e0e0;
@@ -32,7 +33,60 @@
             color: #000;
             margin-right: auto;
         }
+        nav form { display: inline; }
+        nav button {
+            background: none;
+            border: none;
+            color: #555;
+            font-weight: 500;
+            cursor: pointer;
+            font-size: inherit;
+            font-family: inherit;
+        }
+        nav button:hover { color: #000; }
         h1 { margin-bottom: 1.5rem; }
+        .form-group {
+            margin-bottom: 1rem;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 0.3rem;
+            font-weight: 500;
+        }
+        .form-group input {
+            width: 100%;
+            padding: 0.6rem 0.8rem;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            font-size: 1rem;
+        }
+        .form-group input:focus {
+            outline: none;
+            border-color: #666;
+        }
+        .btn {
+            padding: 0.6rem 1.2rem;
+            background: #222;
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            font-size: 1rem;
+            cursor: pointer;
+        }
+        .btn:hover { background: #444; }
+        .error-msg {
+            background: #fdecea;
+            color: #c62828;
+            padding: 0.6rem 0.8rem;
+            border-radius: 6px;
+            margin-bottom: 1rem;
+        }
+        .auth-link {
+            margin-top: 1rem;
+            font-size: 0.9rem;
+            color: #666;
+        }
+        .auth-link a { color: #222; }
         footer {
             margin-top: 3rem;
             padding-top: 1rem;

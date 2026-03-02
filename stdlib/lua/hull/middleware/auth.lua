@@ -8,7 +8,7 @@
 --
 
 local cookie = require("hull.cookie")
-local session = require("hull.session")
+local session = require("hull.middleware.session")
 local jwt_mod = require("hull.jwt")
 
 local auth = {}

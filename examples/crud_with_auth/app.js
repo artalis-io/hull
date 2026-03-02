@@ -4,12 +4,12 @@
 // Tasks API with session-based auth — each user only sees their own tasks
 
 import { app } from "hull:app";
-import { auth } from "hull:auth";
 import { cookie } from "hull:cookie";
 import { crypto } from "hull:crypto";
 import { db } from "hull:db";
 import { log } from "hull:log";
-import { session } from "hull:session";
+import { auth } from "hull:middleware:auth";
+import { session } from "hull:middleware:session";
 import { time } from "hull:time";
 
 // Initialize database

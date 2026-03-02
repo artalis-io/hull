@@ -281,11 +281,11 @@ Register with `app.use(method, pattern, mw)`:
 
 | Module | Lua | JS | Purpose |
 |--------|-----|-----|---------|
-| `cors` | `hull.cors` | `hull:cors` | CORS headers + preflight handling |
-| `ratelimit` | `hull.ratelimit` | `hull:ratelimit` | In-memory rate limiting with configurable windows |
-| `csrf` | `hull.csrf` | `hull:csrf` | Stateless CSRF token generation/verification |
-| `auth` | `hull.auth` | `hull:auth` | Session-based and JWT-based authentication middleware |
-| `session` | `hull.session` | `hull:session` | Server-side sessions backed by SQLite |
+| `cors` | `hull.middleware.cors` | `hull:middleware:cors` | CORS headers + preflight handling |
+| `ratelimit` | `hull.middleware.ratelimit` | `hull:middleware:ratelimit` | In-memory rate limiting with configurable windows |
+| `csrf` | `hull.middleware.csrf` | `hull:middleware:csrf` | Stateless CSRF token generation/verification |
+| `auth` | `hull.middleware.auth` | `hull:middleware:auth` | Session-based and JWT-based authentication middleware |
+| `session` | `hull.middleware.session` | `hull:middleware:session` | Server-side sessions backed by SQLite |
 | `cookie` | `hull.cookie` | `hull:cookie` | Cookie parse/serialize helpers |
 | `jwt` | `hull.jwt` | `hull:jwt` | JWT sign/verify (HMAC-SHA256) |
 | `template` | `hull.template` | `hull:template` | HTML template engine with inheritance, includes, filters |
@@ -405,11 +405,11 @@ template.clearCache();                           // clear compiled function cach
 Order matters — each middleware runs before the next:
 
 ```lua
-local cors = require("hull.cors")
-local ratelimit = require("hull.ratelimit")
-local auth = require("hull.auth")
-local csrf = require("hull.csrf")
-local session = require("hull.session")
+local cors = require("hull.middleware.cors")
+local ratelimit = require("hull.middleware.ratelimit")
+local auth = require("hull.middleware.auth")
+local csrf = require("hull.middleware.csrf")
+local session = require("hull.middleware.session")
 
 session.init()  -- create hull_sessions table
 

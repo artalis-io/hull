@@ -1,9 +1,11 @@
 <li class="todo-item {% if todo.done %}done{% end %}">
     <form method="POST" action="/toggle/{{ todo.id }}">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <button type="submit" class="toggle-btn">{% if todo.done %}&#10003;{% end %}</button>
     </form>
     <span class="title">{{ todo.title }}</span>
     <form method="POST" action="/delete/{{ todo.id }}">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <button type="submit" class="delete-btn">&times;</button>
     </form>
 </li>

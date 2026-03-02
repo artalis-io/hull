@@ -58,10 +58,8 @@ function verify(token, sessionId, secret, maxAge) {
     if (tsHex.length === 0 || mac.length === 0)
         return false;
 
-    // Recompute expected HMAC
     const expected = computeHmac(sessionId, tsHex, secret);
 
-    // Constant-time comparison
     if (mac.length !== expected.length)
         return false;
     let diff = 0;
@@ -70,7 +68,6 @@ function verify(token, sessionId, secret, maxAge) {
     if (diff !== 0)
         return false;
 
-    // Check age
     const ts = parseInt(tsHex, 16);
     if (isNaN(ts))
         return false;
@@ -80,7 +77,7 @@ function verify(token, sessionId, secret, maxAge) {
     if (now - ts > age)
         return false;
     if (ts > now + 60)
-        return false;  // reject tokens from the future (with 60s leeway)
+        return false;
 
     return true;
 }
@@ -92,44 +89,50 @@ function middleware(opts) {
     const cookieName = o.cookieName || "hull.sid";
     const headerName = o.headerName || "X-CSRF-Token";
     const fieldName = o.fieldName || "_csrf";
-    const safeMethods = { GET: true, HEAD: true, OPTIONS: true };
+    const safeMethods = { "GET": true, "HEAD": true, "OPTIONS": true };
 
     if (!secret)
         throw new Error("csrf.middleware requires opts.secret");
 
-    return function csrfMiddleware(req, res) {
-        // Skip safe methods
+    return function(req, res) {
         if (safeMethods[req.method])
             return 0;
 
-        // Extract session ID from cookie header
-        let sessionId = null;
-        const cookieHeader = req.header("Cookie");
-        if (cookieHeader) {
-            const pairs = cookieHeader.split(";");
-            for (let i = 0; i < pairs.length; i++) {
-                const pair = pairs[i].trim();
-                const eqIdx = pair.indexOf("=");
-                if (eqIdx >= 0) {
-                    const name = pair.substring(0, eqIdx).trim();
-                    if (name === cookieName) {
-                        sessionId = pair.substring(eqIdx + 1).trim();
+        var sessionId = null;
+        var ck = req.header("Cookie");
+        if (ck) {
+            var parts = ck.split(";");
+            for (var j = 0; j < parts.length; j++) {
+                var p = parts[j].trim();
+                var eq = p.indexOf("=");
+                if (eq >= 0) {
+                    var n = p.substring(0, eq).trim();
+                    if (n === cookieName) {
+                        sessionId = p.substring(eq + 1).trim();
                         break;
                     }
                 }
             }
         }
 
-        if (!sessionId) {
-            res.status(403);
-            res.json({ error: "CSRF validation failed: no session" });
-            return 1;
-        }
+        if (!sessionId)
+            return 0;
 
-        // Extract token from header or body field
-        let token = req.header(headerName);
-        if (!token && req.body && req.body[fieldName])
-            token = req.body[fieldName];
+        var token = req.header(headerName);
+        if (!token && req.body) {
+            var body = req.body;
+            var pairs = body.split("&");
+            for (var k = 0; k < pairs.length; k++) {
+                var eqIdx = pairs[k].indexOf("=");
+                if (eqIdx >= 0) {
+                    var key = pairs[k].substring(0, eqIdx);
+                    if (key === fieldName) {
+                        token = pairs[k].substring(eqIdx + 1);
+                        break;
+                    }
+                }
+            }
+        }
 
         if (!token) {
             res.status(403);

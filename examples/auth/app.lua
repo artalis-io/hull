@@ -3,8 +3,8 @@
 -- Run: hull app.lua -p 3000
 -- Session-based auth API: register, login, logout, protected routes
 
-local session = require("hull.session")
-local auth = require("hull.auth")
+local session = require("hull.middleware.session")
+local auth = require("hull.middleware.auth")
 
 -- Initialize database
 session.init({ ttl = 3600 })

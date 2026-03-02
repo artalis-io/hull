@@ -282,10 +282,10 @@ Embedded Lua/JS modules in `stdlib/`:
 |--------|---------|
 | `hull.json` | Canonical JSON encode/decode (sorted keys for deterministic signatures) |
 | `hull.cookie` | Cookie parsing (`parse`) and serialization (`serialize`, `clear`) with secure defaults |
-| `hull.session` | Server-side sessions backed by SQLite (create, load, update, destroy, cleanup) |
+| `hull.middleware.session` | Server-side sessions backed by SQLite (create, load, update, destroy, cleanup) |
 | `hull.jwt` | JWT HS256 sign/verify/decode — constant-time signature comparison, no "none" algorithm |
-| `hull.csrf` | Stateless CSRF tokens via HMAC-SHA256 — generate, verify, middleware factory |
-| `hull.auth` | Authentication middleware factories — session auth, JWT Bearer auth, login/logout helpers |
+| `hull.middleware.csrf` | Stateless CSRF tokens via HMAC-SHA256 — generate, verify, middleware factory |
+| `hull.middleware.auth` | Authentication middleware factories — session auth, JWT Bearer auth, login/logout helpers |
 | `hull.template` | Compile-once render-many HTML template engine — inheritance, includes, filters, auto-escaping |
 | `hull.build` | Full build pipeline: extract platform, collect files, generate trampoline, compile, link, sign |
 | `hull.verify` | Dual-layer signature verification (CLI tool) |

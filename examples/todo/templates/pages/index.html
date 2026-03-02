@@ -96,6 +96,7 @@
 <h1>My Todos</h1>
 
 <form class="add-form" method="POST" action="/add">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <input type="text" name="title" placeholder="What needs to be done?" required autofocus>
     <button type="submit">Add</button>
 </form>

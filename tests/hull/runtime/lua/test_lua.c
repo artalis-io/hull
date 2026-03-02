@@ -1476,7 +1476,7 @@ UTEST(lua_stdlib, cookie_clear)
     cleanup_lua_caps();
 }
 
-/* ── hull.session tests ────────────────────────────────────────────── */
+/* ── hull.middleware.session tests ─────────────────────────────────── */
 
 UTEST(lua_stdlib, session_create_and_load)
 {
@@ -1485,7 +1485,7 @@ UTEST(lua_stdlib, session_create_and_load)
 
     int ok = eval_int(
         "(function() "
-        "  local s = require('hull.session') "
+        "  local s = require('hull.middleware.session') "
         "  s.init({ ttl = 3600 }) "
         "  local id = s.create({ user_id = 42, email = 'test@example.com' }) "
         "  if not id or #id ~= 64 then return 0 end "
@@ -1505,7 +1505,7 @@ UTEST(lua_stdlib, session_destroy)
 
     int ok = eval_int(
         "(function() "
-        "  local s = require('hull.session') "
+        "  local s = require('hull.middleware.session') "
         "  s.init() "
         "  local id = s.create({ foo = 'bar' }) "
         "  s.destroy(id) "
@@ -1587,7 +1587,7 @@ UTEST(lua_stdlib, jwt_malformed_rejected)
     cleanup_lua_caps();
 }
 
-/* ── hull.csrf tests ───────────────────────────────────────────────── */
+/* ── hull.middleware.csrf tests ────────────────────────────────────── */
 
 UTEST(lua_stdlib, csrf_generate_and_verify)
 {
@@ -1596,7 +1596,7 @@ UTEST(lua_stdlib, csrf_generate_and_verify)
 
     int ok = eval_int(
         "(function() "
-        "  local csrf = require('hull.csrf') "
+        "  local csrf = require('hull.middleware.csrf') "
         "  local token = csrf.generate('session123', 'my_csrf_secret') "
         "  if not token then return 0 end "
         "  return csrf.verify(token, 'session123', 'my_csrf_secret') and 1 or 0 "
@@ -1613,7 +1613,7 @@ UTEST(lua_stdlib, csrf_wrong_session_rejected)
 
     int ok = eval_int(
         "(function() "
-        "  local csrf = require('hull.csrf') "
+        "  local csrf = require('hull.middleware.csrf') "
         "  local token = csrf.generate('session123', 'secret') "
         "  return csrf.verify(token, 'other_session', 'secret') and 0 or 1 "
         "end)()");
@@ -1622,7 +1622,7 @@ UTEST(lua_stdlib, csrf_wrong_session_rejected)
     cleanup_lua_caps();
 }
 
-/* ── hull.auth tests (smoke test — modules load and expose API) ───── */
+/* ── hull.middleware.auth tests (smoke — modules load and expose API) */
 
 UTEST(lua_cap, crypto_hmac_sha256_verify)
 {
@@ -1661,7 +1661,7 @@ UTEST(lua_stdlib, auth_module_loads)
 
     int ok = eval_int(
         "(function() "
-        "  local auth = require('hull.auth') "
+        "  local auth = require('hull.middleware.auth') "
         "  return type(auth.session_middleware) == 'function' "
         "     and type(auth.jwt_middleware) == 'function' "
         "     and type(auth.login) == 'function' "

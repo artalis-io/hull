@@ -756,7 +756,8 @@ e2e-templates: $(BUILDDIR)/hull
 
 hull-test-examples: $(BUILDDIR)/hull
 	@for dir in examples/hello examples/rest_api examples/bench_db examples/auth \
-	            examples/jwt_api examples/crud_with_auth examples/middleware examples/webhooks; do \
+	            examples/jwt_api examples/crud_with_auth examples/middleware examples/webhooks \
+	            examples/todo; do \
 		echo "=== hull test $$dir ===" && \
 		output=$$($(BUILDDIR)/hull test "$$dir" 2>&1; true) && \
 		echo "$$output" && \

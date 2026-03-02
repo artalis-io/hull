@@ -3,8 +3,8 @@
 -- Run: hull app.lua -p 3000
 -- Demonstrates middleware chaining: request ID, logging, rate limiting, CORS
 
-local cors = require("hull.cors")
-local ratelimit = require("hull.ratelimit")
+local cors = require("hull.middleware.cors")
+local ratelimit = require("hull.middleware.ratelimit")
 
 -- ── Request ID middleware ────────────────────────────────────────────
 -- Assigns a unique ID to every request, available via req.ctx.request_id

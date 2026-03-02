@@ -114,7 +114,7 @@ This is the primary threat model. Hull exists to make it possible to trust apps 
 
 **Attack: CSRF — forged state-changing requests from another origin**
 
-- **Prevention:** `hull.csrf` middleware generates HMAC-based tokens tied to the session ID and timestamp. State-changing methods (POST/PUT/DELETE/PATCH) require a valid CSRF token in the `X-CSRF-Token` header or `_csrf` form field. Tokens expire (default 1h). Safe methods (GET/HEAD/OPTIONS) are automatically skipped. Constant-time comparison prevents timing attacks.
+- **Prevention:** `hull.middleware.csrf` middleware generates HMAC-based tokens tied to the session ID and timestamp. State-changing methods (POST/PUT/DELETE/PATCH) require a valid CSRF token in the `X-CSRF-Token` header or `_csrf` form field. Tokens expire (default 1h). Safe methods (GET/HEAD/OPTIONS) are automatically skipped. Constant-time comparison prevents timing attacks.
 - **Remaining risk:** If the CSRF secret is leaked, tokens can be forged. The secret must be stored securely (e.g., `env.get("SECRET_KEY")`).
 
 **Attack: JWT token forgery**
@@ -124,7 +124,7 @@ This is the primary threat model. Hull exists to make it possible to trust apps 
 
 **Attack: Session fixation / brute-force session IDs**
 
-- **Prevention:** `hull.session` generates 32 random bytes (256-bit entropy) via `crypto.random()` for session IDs. IDs are hex-encoded (64 chars). Sessions are server-side (SQLite) with sliding expiry. Expired sessions are automatically pruned.
+- **Prevention:** `hull.middleware.session` generates 32 random bytes (256-bit entropy) via `crypto.random()` for session IDs. IDs are hex-encoded (64 chars). Sessions are server-side (SQLite) with sliding expiry. Expired sessions are automatically pruned.
 
 ### B. Malicious Third Party (MITM / CDN Compromise)
 
@@ -377,4 +377,4 @@ These are real, not theoretical:
 | No manifest = no kernel sandbox | Unsigned apps have reduced protection | Signature verification catches missing manifest |
 | 32-entry limit per manifest category | Large apps may hit ceiling | Sufficient for most production apps |
 | `req.ctx` uses raw malloc (not tracked) | ctx JSON bypasses runtime memory limits | Capped at 64KB; bounded by runtime heap indirectly |
-| HMAC-SHA256 binding returns hex string | Callers must use constant-time comparison | `hull.jwt` and `hull.csrf` stdlib use constant-time internally |
+| HMAC-SHA256 binding returns hex string | Callers must use constant-time comparison | `hull.jwt` and `hull.middleware.csrf` stdlib use constant-time internally |

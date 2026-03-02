@@ -10,7 +10,7 @@
  */
 
 import { cookie } from "hull:cookie";
-import { session } from "hull:session";
+import { session } from "hull:middleware:session";
 import { jwt } from "hull:jwt";
 import { time } from "hull:time";
 

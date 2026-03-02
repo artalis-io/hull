@@ -1283,7 +1283,7 @@ UTEST(js_stdlib, cookie_clear)
     cleanup_js_caps();
 }
 
-/* ── hull:session tests ────────────────────────────────────────────── */
+/* ── hull:middleware:session tests ─────────────────────────────────── */
 
 UTEST(js_stdlib, session_create_and_load)
 {
@@ -1291,7 +1291,7 @@ UTEST(js_stdlib, session_create_and_load)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
-        "import { session } from 'hull:session';\n"
+        "import { session } from 'hull:middleware:session';\n"
         "session.init({ ttl: 3600 });\n"
         "const id = session.create({ userId: 42, email: 'test@example.com' });\n"
         "globalThis.__test_sid_len = id ? id.length : 0;\n"
@@ -1317,7 +1317,7 @@ UTEST(js_stdlib, session_destroy)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
-        "import { session } from 'hull:session';\n"
+        "import { session } from 'hull:middleware:session';\n"
         "session.init();\n"
         "const id = session.create({ foo: 'bar' });\n"
         "session.destroy(id);\n"
@@ -1409,7 +1409,7 @@ UTEST(js_stdlib, jwt_decode_without_verify)
     cleanup_js_caps();
 }
 
-/* ── hull:csrf tests ───────────────────────────────────────────────── */
+/* ── hull:middleware:csrf tests ────────────────────────────────────── */
 
 UTEST(js_stdlib, csrf_generate_and_verify)
 {
@@ -1417,7 +1417,7 @@ UTEST(js_stdlib, csrf_generate_and_verify)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
-        "import { csrf } from 'hull:csrf';\n"
+        "import { csrf } from 'hull:middleware:csrf';\n"
         "const token = csrf.generate('session123', 'my_csrf_secret');\n"
         "globalThis.__test_cg = token ? 1 : 0;\n"
         "globalThis.__test_cv = csrf.verify(token, 'session123', 'my_csrf_secret') ? 1 : 0;\n";
@@ -1441,7 +1441,7 @@ UTEST(js_stdlib, csrf_wrong_session_rejected)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
-        "import { csrf } from 'hull:csrf';\n"
+        "import { csrf } from 'hull:middleware:csrf';\n"
         "const token = csrf.generate('session123', 'secret');\n"
         "globalThis.__test_cws = csrf.verify(token, 'other_session', 'secret') ? 0 : 1;\n";
 
@@ -1457,7 +1457,7 @@ UTEST(js_stdlib, csrf_wrong_session_rejected)
     cleanup_js_caps();
 }
 
-/* ── hull:auth tests (smoke test — modules load and expose API) ───── */
+/* ── hull:middleware:auth tests (smoke — modules load and expose API) */
 
 UTEST(js_cap, crypto_hmac_sha256_verify)
 {
@@ -1498,7 +1498,7 @@ UTEST(js_stdlib, auth_module_loads)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
-        "import { auth } from 'hull:auth';\n"
+        "import { auth } from 'hull:middleware:auth';\n"
         "globalThis.__test_am = ("
         "  typeof auth.sessionMiddleware === 'function' &&\n"
         "  typeof auth.jwtMiddleware === 'function' &&\n"

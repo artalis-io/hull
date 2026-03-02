@@ -26,12 +26,16 @@
  *   manifest       — declared capabilities (may have present==0)
  *   db_path        — SQLite database path (always allowed rw)
  *   ca_bundle_path — CA certificate bundle (unveiled read-only, may be NULL)
+ *   tls_cert_path  — TLS certificate file (unveiled read-only, may be NULL)
+ *   tls_key_path   — TLS private key file (unveiled read-only, may be NULL)
  *
  * When manifest.present is false, no sandbox is applied (permissive).
  * Returns 0 on success, -1 on error (logged).
  */
 int hl_sandbox_apply(const HlManifest *manifest, const char *db_path,
-                      const char *ca_bundle_path);
+                      const char *ca_bundle_path,
+                      const char *tls_cert_path,
+                      const char *tls_key_path);
 
 /*
  * Initialize tool-mode unveil context for `hull build`.

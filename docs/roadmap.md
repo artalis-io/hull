@@ -21,10 +21,10 @@
 ### Standard Library (Lua + JS)
 - `hull.json` — canonical JSON encode/decode (sorted keys for deterministic signatures)
 - `hull.cookie` — cookie parsing and serialization with secure defaults
-- `hull.session` — server-side SQLite-backed sessions with sliding expiry
+- `hull.middleware.session` — server-side SQLite-backed sessions with sliding expiry
 - `hull.jwt` — JWT HS256 sign/verify/decode (no "none" algorithm, constant-time comparison)
-- `hull.csrf` — stateless CSRF tokens via HMAC-SHA256
-- `hull.auth` — authentication middleware factories (session auth, JWT Bearer auth)
+- `hull.middleware.csrf` — stateless CSRF tokens via HMAC-SHA256
+- `hull.middleware.auth` — authentication middleware factories (session auth, JWT Bearer auth)
 - `hull.template` — compile-once render-many HTML template engine with inheritance, includes, filters, auto-escaping
 
 ### Build & Deployment
@@ -67,10 +67,10 @@
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| CORS middleware | **Done** | `hull.cors` — configurable origins, preflight handling |
+| CORS middleware | **Done** | `hull.middleware.cors` — configurable origins, preflight handling |
 | Template engine (`{{ }}` HTML templates) | **Done** | `hull.template` — inheritance, includes, filters, compiled & cached |
 | Input validation (schema-based) | Planned | Declarative field validation |
-| Rate limiting middleware | **Done** | `hull.ratelimit` — sliding window, per-key |
+| Rate limiting middleware | **Done** | `hull.middleware.ratelimit` — sliding window, per-key |
 | Static file serving (`app.static("/public")`) | Planned | With caching headers |
 | CSV encode/decode (RFC 4180) | Planned | Import/export |
 | FTS5 search wrapper | Planned | Full-text search stdlib |

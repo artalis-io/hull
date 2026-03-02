@@ -145,6 +145,8 @@ static void usage(const char *prog)
             "  -M SIZE              Process memory limit (default: unlimited)\n"
             "  -s SIZE              JS stack size limit (default: 1m)\n"
             "  -l LEVEL             Log level: trace|debug|info|warn|error|fatal (default: info)\n"
+            "  --tls-cert PATH      TLS certificate file (PEM)\n"
+            "  --tls-key PATH       TLS private key file (PEM)\n"
             "  --verify-sig PUBKEY  Verify app signature before startup\n"
             "  --skip-ca-bundle     Skip TLS certificate verification (dev mode)\n"
             "  -h                   Show this help\n"
@@ -195,6 +197,8 @@ static int hull_serve(int argc, char **argv)
     long mem_limit = 0;     /* 0 = unlimited */
     int log_level = LOG_INFO;
     int skip_ca_bundle = 0;
+    const char *tls_cert_path = NULL;
+    const char *tls_key_path = NULL;
 
     /* Parse arguments */
     for (int i = 1; i < argc; i++) {
@@ -234,6 +238,10 @@ static int hull_serve(int argc, char **argv)
                 fprintf(stderr, "hull: invalid log level: %s\n", argv[i]);
                 return 1;
             }
+        } else if (strcmp(argv[i], "--tls-cert") == 0 && i + 1 < argc) {
+            tls_cert_path = argv[++i];
+        } else if (strcmp(argv[i], "--tls-key") == 0 && i + 1 < argc) {
+            tls_key_path = argv[++i];
         } else if (strcmp(argv[i], "--verify-sig") == 0 && i + 1 < argc) {
             verify_sig_path = argv[++i];
         } else if (strcmp(argv[i], "--skip-ca-bundle") == 0) {
@@ -252,6 +260,12 @@ static int hull_serve(int argc, char **argv)
     if (!entry_point) {
         fprintf(stderr, "hull: no entry point found (app.js or app.lua)\n");
         usage(argv[0]);
+        return 1;
+    }
+
+    /* Validate TLS cert/key pair */
+    if ((tls_cert_path != NULL) != (tls_key_path != NULL)) {
+        fprintf(stderr, "hull: --tls-cert and --tls-key must be provided together\n");
         return 1;
     }
 
@@ -320,9 +334,29 @@ static int hull_serve(int argc, char **argv)
         .log_user_data = NULL,
     };
 
+    /* Set up server TLS if cert/key provided */
+    KlTlsConfig server_tls_config = {0};
+    KlTlsCtx *server_tls_ctx = NULL;
+
+    if (tls_cert_path && tls_key_path) {
+        server_tls_ctx = kl_tls_mbedtls_ctx_create(
+            tls_cert_path, tls_key_path, NULL, KL_MTLS_NONE);
+        if (!server_tls_ctx) {
+            log_error("[hull:c] failed to create server TLS context "
+                      "(cert=%s, key=%s)", tls_cert_path, tls_key_path);
+            goto cleanup_db;
+        }
+        server_tls_config.ctx         = server_tls_ctx;
+        server_tls_config.factory     = (KlTlsFactory)kl_tls_mbedtls_create;
+        server_tls_config.ctx_destroy = (void (*)(KlTlsCtx *))kl_tls_mbedtls_ctx_destroy;
+        config.tls = &server_tls_config;
+    }
+
     KlServer server;
     if (kl_server_init(&server, &config) != 0) {
         log_error("[hull:c] server init failed");
+        if (server_tls_ctx)
+            kl_tls_mbedtls_ctx_destroy(server_tls_ctx);
         goto cleanup_db;
     }
 
@@ -460,7 +494,8 @@ static int hull_serve(int argc, char **argv)
     }
 
     /* Apply kernel sandbox (pledge/unveil) from manifest */
-    if (hl_sandbox_apply(&manifest, db_path, ca_bundle_path) != 0) {
+    if (hl_sandbox_apply(&manifest, db_path, ca_bundle_path,
+                          tls_cert_path, tls_key_path) != 0) {
         log_error("[hull:c] sandbox enforcement failed");
         rt->vt->free_manifest_strings(rt, &manifest);
         rt->vt->destroy(rt);
@@ -469,7 +504,8 @@ static int hull_serve(int argc, char **argv)
         goto cleanup_server;
     }
 
-    log_info("[hull:c] listening on %s:%d (%s runtime)",
+    log_info("[hull:c] listening on %s://%s:%d (%s runtime)",
+             server_tls_ctx ? "https" : "http",
              bind_addr, port, rt->vt->name);
 
     /* Enter event loop */
@@ -481,6 +517,8 @@ static int hull_serve(int argc, char **argv)
     rt->vt->destroy(rt);
     if (client_tls_ctx)
         kl_tls_mbedtls_ctx_destroy(client_tls_ctx);
+    if (server_tls_ctx)
+        kl_tls_mbedtls_ctx_destroy(server_tls_ctx);
     ret = 0;
 
 cleanup_server:
