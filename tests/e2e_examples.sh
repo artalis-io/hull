@@ -563,9 +563,51 @@ test_todo() {
     # Extract CSRF token from page
     CSRF_TOKEN=$(echo "$PAGE" | grep -o 'name="_csrf" value="[^"]*"' | head -1 | sed 's/.*value="//;s/"//')
 
-    # Logout (with real CSRF token via header)
+    # Add a todo (CSRF in form body)
+    RESP=$(curl -s -b "$COOKIE_JAR" -c "$COOKIE_JAR" -w "\n%{http_code}" -X POST \
+           -d "title=Test+Todo&_csrf=$CSRF_TOKEN" \
+           "http://127.0.0.1:$PORT/add")
+    STATUS=$(echo "$RESP" | tail -1)
+    check_status "$LABEL todo POST /add" "$STATUS" "302"
+
+    # Verify todo appears on the list
+    PAGE=$(curl -s -b "$COOKIE_JAR" -c "$COOKIE_JAR" "http://127.0.0.1:$PORT/")
+    check_contains "$LABEL todo list has todo" "$PAGE" "Test Todo"
+
+    # Re-extract CSRF token for next operations
+    CSRF_TOKEN=$(echo "$PAGE" | grep -o 'name="_csrf" value="[^"]*"' | head -1 | sed 's/.*value="//;s/"//')
+
+    # Toggle the todo (extract todo ID from the form action)
+    TODO_ID=$(echo "$PAGE" | grep -o '/toggle/[0-9]*' | head -1 | sed 's|/toggle/||')
+    if [ -n "$TODO_ID" ]; then
+        RESP=$(curl -s -b "$COOKIE_JAR" -c "$COOKIE_JAR" -w "\n%{http_code}" -X POST \
+               -d "_csrf=$CSRF_TOKEN" \
+               "http://127.0.0.1:$PORT/toggle/$TODO_ID")
+        STATUS=$(echo "$RESP" | tail -1)
+        check_status "$LABEL todo POST /toggle" "$STATUS" "302"
+    fi
+
+    # Re-extract CSRF token
+    PAGE=$(curl -s -b "$COOKIE_JAR" -c "$COOKIE_JAR" "http://127.0.0.1:$PORT/")
+    CSRF_TOKEN=$(echo "$PAGE" | grep -o 'name="_csrf" value="[^"]*"' | head -1 | sed 's/.*value="//;s/"//')
+
+    # Delete the todo
+    DELETE_ID=$(echo "$PAGE" | grep -o '/delete/[0-9]*' | head -1 | sed 's|/delete/||')
+    if [ -n "$DELETE_ID" ]; then
+        RESP=$(curl -s -b "$COOKIE_JAR" -c "$COOKIE_JAR" -w "\n%{http_code}" -X POST \
+               -d "_csrf=$CSRF_TOKEN" \
+               "http://127.0.0.1:$PORT/delete/$DELETE_ID")
+        STATUS=$(echo "$RESP" | tail -1)
+        check_status "$LABEL todo POST /delete" "$STATUS" "302"
+    fi
+
+    # Re-extract CSRF token for logout
+    PAGE=$(curl -s -b "$COOKIE_JAR" -c "$COOKIE_JAR" "http://127.0.0.1:$PORT/")
+    CSRF_TOKEN=$(echo "$PAGE" | grep -o 'name="_csrf" value="[^"]*"' | head -1 | sed 's/.*value="//;s/"//')
+
+    # Logout (with CSRF token in form body)
     STATUS=$(curl -s -o /dev/null -w "%{http_code}" -b "$COOKIE_JAR" -X POST \
-             -H "x-csrf-token: $CSRF_TOKEN" "http://127.0.0.1:$PORT/logout")
+             -d "_csrf=$CSRF_TOKEN" "http://127.0.0.1:$PORT/logout")
     check_status "$LABEL todo POST /logout" "$STATUS" "302"
 
     stop_server; rm -rf "$TMPDIR_TODO"

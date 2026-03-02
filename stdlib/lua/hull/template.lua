@@ -561,10 +561,16 @@ local function gen_expr(expr_info, escaped, locals_set)
                 if not arg:match('^"[^"]*"$') then
                     error("invalid filter argument (unbalanced quotes): " .. arg)
                 end
+                if arg:find("\\") then
+                    error("invalid filter argument (backslash not allowed): " .. arg)
+                end
                 code = "__f." .. f.name .. "(" .. code .. ", " .. arg .. ")"
             elseif arg:sub(1, 1) == "'" then
                 if not arg:match("^'[^']*'$") then
                     error("invalid filter argument (unbalanced quotes): " .. arg)
+                end
+                if arg:find("\\") then
+                    error("invalid filter argument (backslash not allowed): " .. arg)
                 end
                 code = "__f." .. f.name .. "(" .. code .. ", " .. arg .. ")"
             else
@@ -646,22 +652,25 @@ local function codegen(ast)
 
             elseif node.kind == "for" then
                 emit("for _, " .. node.var .. " in ipairs(" .. gen_dot_path(node.expr, nil, locals_set) .. " or {}) do")
-                locals_set[node.var] = true
+                locals_set[node.var] = (locals_set[node.var] or 0) + 1
                 indent = indent + 1
                 gen_body(node.body)
                 indent = indent - 1
-                locals_set[node.var] = nil
+                locals_set[node.var] = locals_set[node.var] - 1
+                if locals_set[node.var] == 0 then locals_set[node.var] = nil end
                 emit("end")
 
             elseif node.kind == "for_kv" then
                 emit("for " .. node.key .. ", " .. node.val .. " in pairs(" .. gen_dot_path(node.expr, nil, locals_set) .. " or {}) do")
-                locals_set[node.key] = true
-                locals_set[node.val] = true
+                locals_set[node.key] = (locals_set[node.key] or 0) + 1
+                locals_set[node.val] = (locals_set[node.val] or 0) + 1
                 indent = indent + 1
                 gen_body(node.body)
                 indent = indent - 1
-                locals_set[node.key] = nil
-                locals_set[node.val] = nil
+                locals_set[node.key] = locals_set[node.key] - 1
+                if locals_set[node.key] == 0 then locals_set[node.key] = nil end
+                locals_set[node.val] = locals_set[node.val] - 1
+                if locals_set[node.val] == 0 then locals_set[node.val] = nil end
                 emit("end")
 
             elseif node.kind == "block" then

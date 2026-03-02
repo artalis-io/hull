@@ -55,7 +55,7 @@ function cookie.serialize(name, value, opts)
         parts[#parts + 1] = "HttpOnly"
     end
 
-    -- Secure (default false — set true when serving over HTTPS)
+    -- WARNING: Set secure=true in production (HTTPS). Default false for local dev only.
     local secure = opts.secure
     if secure == nil then secure = false end
     if secure then

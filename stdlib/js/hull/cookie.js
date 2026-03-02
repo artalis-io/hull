@@ -88,7 +88,7 @@ function serialize(name, value, opts) {
     if (httpOnly)
         str += "; HttpOnly";
 
-    // Secure (default: false — set true when serving over HTTPS)
+    // WARNING: Set secure=true in production (HTTPS). Default false for local dev only.
     const secure = o.secure !== undefined ? o.secure : false;
     if (secure)
         str += "; Secure";

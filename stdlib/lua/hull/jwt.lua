@@ -21,6 +21,7 @@ local function str_to_hex(s)
 end
 
 --- Constant-time comparison of two strings.
+-- Note: length leak is acceptable — both inputs are always fixed-length HMAC outputs
 local function constant_time_compare(a, b)
     if #a ~= #b then return false end
     local diff = 0

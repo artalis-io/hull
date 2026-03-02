@@ -9,6 +9,7 @@
 import { app } from "hull:app";
 import { crypto } from "hull:crypto";
 import { db } from "hull:db";
+import { env } from "hull:env";
 import { http } from "hull:http";
 import { log } from "hull:log";
 import { time } from "hull:time";
@@ -18,7 +19,8 @@ app.manifest({
     hosts: ["127.0.0.1"],
 });
 
-const SIGNING_SECRET = "whsec_change-me-in-production";
+let SIGNING_SECRET = "whsec_change-me-in-production";
+try { const v = env.get("WEBHOOK_SECRET"); if (v) SIGNING_SECRET = v; } catch (e) {}
 
 // ── Schema ──────────────────────────────────────────────────────────
 
@@ -102,9 +104,11 @@ app.get("/health", (_req, res) => {
 
 // Register a webhook
 app.post("/webhooks", (req, res) => {
-    const body = JSON.parse(req.body);
-    if (!body) {
-        return res.status(400).json({ error: "invalid JSON" });
+    let body;
+    try { body = JSON.parse(req.body); } catch (e) {
+        res.status(400);
+        res.json({ error: "invalid JSON" });
+        return;
     }
 
     const { url, events } = body;
@@ -140,9 +144,11 @@ app.del("/webhooks/:id", (req, res) => {
 
 // Fire an event — delivers to all matching active webhooks
 app.post("/events", (req, res) => {
-    const body = JSON.parse(req.body);
-    if (!body) {
-        return res.status(400).json({ error: "invalid JSON" });
+    let body;
+    try { body = JSON.parse(req.body); } catch (e) {
+        res.status(400);
+        res.json({ error: "invalid JSON" });
+        return;
     }
 
     const { event, data } = body;
@@ -215,7 +221,12 @@ app.post("/webhooks/receive", (req, res) => {
         return res.status(401).json({ error: "invalid signature" });
     }
 
-    const body = JSON.parse(req.body);
+    let body;
+    try { body = JSON.parse(req.body); } catch (e) {
+        res.status(400);
+        res.json({ error: "invalid JSON" });
+        return;
+    }
     log.info(`Webhook received: ${body ? body.event : "unknown"}`);
 
     res.json({ received: true, event: body ? body.event : null });

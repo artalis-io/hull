@@ -32,7 +32,12 @@ app.get("/tasks/:id", (req, res) => {
 
 // Create a task
 app.post("/tasks", (req, res) => {
-    const body = JSON.parse(req.body);
+    let body;
+    try { body = JSON.parse(req.body); } catch (e) {
+        res.status(400);
+        res.json({ error: "invalid JSON" });
+        return;
+    }
     if (!body.title) {
         return res.status(400).json({ error: "title is required" });
     }
@@ -44,7 +49,12 @@ app.post("/tasks", (req, res) => {
 
 // Update a task
 app.put("/tasks/:id", (req, res) => {
-    const body = JSON.parse(req.body);
+    let body;
+    try { body = JSON.parse(req.body); } catch (e) {
+        res.status(400);
+        res.json({ error: "invalid JSON" });
+        return;
+    }
     const changes = db.exec("UPDATE tasks SET title = ?, done = ? WHERE id = ?",
                             [body.title, body.done ? 1 : 0, req.params.id]);
     if (changes === 0) {

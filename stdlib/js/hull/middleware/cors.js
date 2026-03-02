@@ -25,7 +25,7 @@ function middleware(opts) {
     const maxAge = String(o.max_age !== undefined ? o.max_age : 86400);
 
     return function corsMiddleware(req, res) {
-        const origin = req.headers.origin;
+        const origin = req.header("Origin");
         if (!origin) return 0;
 
         if (!isAllowedOrigin(origin, origins)) return 0;

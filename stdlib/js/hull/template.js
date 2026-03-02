@@ -54,12 +54,13 @@ const escapeMap = {
     ">": "&gt;",
     '"': "&quot;",
     "'": "&#39;",
+    "`": "&#96;",
 };
 
 function htmlEscape(s) {
     if (s == null) return "";
     s = String(s);
-    return s.replace(/[&<>"']/g, (ch) => escapeMap[ch]);
+    return s.replace(/[&<>"'`]/g, (ch) => escapeMap[ch]);
 }
 
 // ── Built-in filters ────────────────────────────────────────────────
@@ -77,7 +78,7 @@ const filters = {
         if (val == null || val === false || val === "") return fallback ?? "";
         return val;
     },
-    json(val) { return JSON.stringify(val); },
+    json(val) { return JSON.stringify(val).replace(/</g, "\\u003c"); },
     raw(val) { return val; },
 };
 
@@ -266,7 +267,7 @@ function parse(tokens) {
 // ── Inheritance + include resolution ────────────────────────────────
 
 function collectBlocks(ast) {
-    const blocks = {};
+    const blocks = Object.create(null);
     for (const node of ast) {
         if (node.kind === "block") blocks[node.name] = node.body;
     }
@@ -294,7 +295,7 @@ function applyBlocks(ast, overrides) {
 }
 
 function resolveInheritance(ast, loadFn, visited, depth) {
-    visited = visited || {};
+    visited = visited || Object.create(null);
     depth = depth || 0;
     const parentName = findExtends(ast);
     if (!parentName) return ast;
@@ -321,7 +322,7 @@ function cloneSet(obj) {
 }
 
 function resolveIncludes(ast, loadFn, visited, depth) {
-    visited = visited || {};
+    visited = visited || Object.create(null);
     depth = depth || 0;
 
     if (depth >= MAX_INCLUDE_DEPTH) {
@@ -430,7 +431,7 @@ function jsQuote(s) {
 function codegen(ast) {
     const lines = [];
     let indent = 1;
-    const localsSet = {};  // track loop-local variable names
+    const localsSet = Object.create(null);  // track loop-local variable names
 
     function emit(line) {
         lines.push("  ".repeat(indent) + line);
@@ -495,7 +496,7 @@ function codegen(ast) {
 
 // ── Compile + cache ─────────────────────────────────────────────────
 
-const cache = {};
+const cache = Object.create(null);
 let cacheCount = 0;
 
 function loadRaw(name) {

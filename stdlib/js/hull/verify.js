@@ -131,6 +131,7 @@ const mismatches = [];
 const missing = [];
 const fileNames = Object.keys(sig.files);
 for (const name of fileNames) {
+    if (name.includes("..") || name.startsWith("/")) { issues++; tool.stderr("Suspicious file path: " + name + "\n"); continue; }
     const expected = sig.files[name];
     const path = `${appDir}/${name}`;
     const data = tool.readFile(path);

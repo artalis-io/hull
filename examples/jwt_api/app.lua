@@ -5,7 +5,8 @@
 
 local jwt = require("hull.jwt")
 
-local JWT_SECRET = "change-me-in-production"
+local ok, val = pcall(env.get, "JWT_SECRET")
+local JWT_SECRET = (ok and val) or "change-me-in-production"
 
 -- Initialize database
 db.exec([[CREATE TABLE IF NOT EXISTS users (

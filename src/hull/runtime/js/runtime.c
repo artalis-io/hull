@@ -833,6 +833,50 @@ int hl_js_wire_routes_server(HlJS *js, KlServer *server,
     }
     JS_FreeValue(ctx, mw);
 
+    /* Wire post-body middleware from __hull_post_middleware */
+    JSValue post_mw = JS_GetPropertyStr(ctx, global, "__hull_post_middleware");
+    if (!JS_IsUndefined(post_mw) && JS_IsArray(ctx, post_mw)) {
+        JSValue post_mw_len_val = JS_GetPropertyStr(ctx, post_mw, "length");
+        int32_t post_mw_count = 0;
+        JS_ToInt32(ctx, &post_mw_count, post_mw_len_val);
+        JS_FreeValue(ctx, post_mw_len_val);
+
+        for (int32_t i = 0; i < post_mw_count; i++) {
+            JSValue entry = JS_GetPropertyUint32(ctx, post_mw, (uint32_t)i);
+            if (JS_IsUndefined(entry))
+                continue;
+
+            JSValue method_val = JS_GetPropertyStr(ctx, entry, "method");
+            JSValue pattern_val = JS_GetPropertyStr(ctx, entry, "pattern");
+            JSValue id_val = JS_GetPropertyStr(ctx, entry, "handler_id");
+
+            const char *method_str = JS_ToCString(ctx, method_val);
+            const char *pattern = JS_ToCString(ctx, pattern_val);
+            int32_t handler_id = 0;
+            JS_ToInt32(ctx, &handler_id, id_val);
+
+            if (method_str && pattern) {
+                HlJSRoute *mw_ctx = hl_alloc_malloc(js->base.alloc,
+                                                      sizeof(HlJSRoute));
+                if (mw_ctx) {
+                    mw_ctx->js = js;
+                    mw_ctx->handler_id = handler_id;
+                    hl_js_track_route(js, mw_ctx);
+                    kl_server_use_post(server, method_str, pattern,
+                                       hl_js_keel_middleware, mw_ctx);
+                }
+            }
+
+            if (pattern) JS_FreeCString(ctx, pattern);
+            if (method_str) JS_FreeCString(ctx, method_str);
+            JS_FreeValue(ctx, id_val);
+            JS_FreeValue(ctx, pattern_val);
+            JS_FreeValue(ctx, method_val);
+            JS_FreeValue(ctx, entry);
+        }
+    }
+    JS_FreeValue(ctx, post_mw);
+
     JS_FreeValue(ctx, global);
     return 0;
 }

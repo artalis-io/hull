@@ -22,14 +22,23 @@ function logger.generate_id()
     return string.format("%x", _counter)
 end
 
+--- Sanitize a value for safe logfmt output (prevent log injection).
+local function sanitize_value(v)
+    v = v:gsub("\\", "\\\\")
+    v = v:gsub("\n", "\\n")
+    v = v:gsub("\r", "\\r")
+    v = v:gsub('"', '\\"')
+    return v
+end
+
 --- Format a list of {key, value} pairs into a logfmt line.
--- Values containing spaces are quoted.
+-- Values are sanitized and quoted when they contain special characters.
 function logger.format_line(entries)
     local parts = {}
     for _, entry in ipairs(entries) do
         local k = entry[1]
-        local v = tostring(entry[2])
-        if v:find(" ") then
+        local v = sanitize_value(tostring(entry[2]))
+        if v:find("[ =\"\n\r]") then
             parts[#parts + 1] = k .. '="' .. v .. '"'
         else
             parts[#parts + 1] = k .. "=" .. v

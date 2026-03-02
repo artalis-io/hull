@@ -21,12 +21,21 @@ function generateId() {
     return counter.toString(16);
 }
 
+function sanitizeValue(v) {
+    return v.replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/"/g, '\\"');
+}
+
+function needsQuoting(v) {
+    return v.indexOf(" ") >= 0 || v.indexOf("=") >= 0 || v.indexOf('"') >= 0 || v.indexOf("\n") >= 0 || v.indexOf("\r") >= 0;
+}
+
 function formatLine(entries) {
     const parts = [];
     for (let i = 0; i < entries.length; i++) {
         const k = entries[i][0];
-        const v = String(entries[i][1]);
-        if (v.indexOf(" ") >= 0) {
+        const raw = String(entries[i][1]);
+        const v = sanitizeValue(raw);
+        if (needsQuoting(raw)) {
             parts.push(k + '="' + v + '"');
         } else {
             parts.push(k + "=" + v);

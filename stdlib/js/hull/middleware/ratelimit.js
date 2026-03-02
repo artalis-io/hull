@@ -22,9 +22,22 @@ function sweepExpired(buckets, window, now) {
     }
 }
 
+function bucketCount(buckets) {
+    let n = 0;
+    for (const k in buckets) n++;
+    return n;
+}
+
 function check(buckets, key, limit, window, now) {
     let bucket = buckets[key];
     if (!bucket || (now - bucket.windowStart) >= window) {
+        // Enforce max-entries cap before creating a new bucket
+        if (!bucket && bucketCount(buckets) >= MAX_BUCKETS) {
+            sweepExpired(buckets, window, now);
+            if (bucketCount(buckets) >= MAX_BUCKETS) {
+                return { allowed: false, remaining: 0, reset: now + window };
+            }
+        }
         buckets[key] = { count: 1, windowStart: now };
         bucket = buckets[key];
     } else {
