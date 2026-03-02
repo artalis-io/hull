@@ -6,12 +6,11 @@
 import { app } from "hull:app";
 import { crypto } from "hull:crypto";
 import { db } from "hull:db";
-import { env } from "hull:env";
 import { jwt } from "hull:jwt";
 import { log } from "hull:log";
 import { time } from "hull:time";
 
-const JWT_SECRET = env.get("JWT_SECRET") || "change-me-in-production";
+const JWT_SECRET = "change-me-in-production";
 
 // Initialize database
 db.exec(

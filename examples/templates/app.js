@@ -24,7 +24,7 @@ const features = [
     "  Compiled & cached  ",
 ];
 
-app.get("/", (req, res) => {
+app.get("/", (_req, res) => {
     const html = template.render("pages/home.html", {
         site_name:    "Hull Demo",
         year:         new Date().getFullYear().toString(),
@@ -35,7 +35,7 @@ app.get("/", (req, res) => {
     res.html(html);
 });
 
-app.get("/about", (req, res) => {
+app.get("/about", (_req, res) => {
     const html = template.render("pages/about.html", {
         site_name: "Hull Demo",
         year:      new Date().getFullYear().toString(),
@@ -44,6 +44,6 @@ app.get("/about", (req, res) => {
     res.html(html);
 });
 
-app.get("/users", (req, res) => {
+app.get("/users", (_req, res) => {
     res.json(users);
 });
