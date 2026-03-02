@@ -51,9 +51,9 @@ Hull ships 10 subcommands for the full development lifecycle:
 ### Build Pipeline
 
 ```
-Source files (Lua/JS/HTML/CSS)
+Source files (Lua/JS/HTML/CSS/static assets)
         ↓
-hull build: collect → generate app_registry.c → compile → link → sign
+hull build: collect → generate registries (app, template, static) → compile → link → sign
         ↓
 Single binary + package.sig (Ed25519 signed)
 ```
@@ -112,6 +112,21 @@ Hull ships a full set of middleware and utility modules for building secure back
 | `json` | `hull.json` | (built-in) | JSON encode/decode |
 
 All middleware modules follow the same factory pattern: `module.middleware(opts)` returns a function `(req, res) -> 0|1` where `0` = continue, `1` = short-circuit.
+
+#### Static File Serving
+
+Place files in `static/` in your app directory — they're served at `/static/*` automatically.
+
+```
+myapp/
+  app.lua
+  static/
+    style.css       → GET /static/style.css
+    js/app.js       → GET /static/js/app.js
+    images/logo.png → GET /static/images/logo.png
+```
+
+In dev mode, files are read from disk with zero-copy sendfile and `Cache-Control: no-cache`. In built binaries (`hull build`), static files are embedded alongside Lua/template assets with `Cache-Control: public, max-age=86400`. ETag and 304 Not Modified are supported in both modes.
 
 #### Backend Best Practices
 
@@ -205,7 +220,7 @@ Ten example apps in both Lua and JavaScript:
 | [middleware](examples/middleware/) | Request ID, logging, rate limiting, CORS |
 | [webhooks](examples/webhooks/) | Webhook delivery with HMAC-SHA256 signatures |
 | [templates](examples/templates/) | Template engine: inheritance, includes, filters |
-| [todo](examples/todo/) | Full CRUD todo app with HTML frontend (template engine) |
+| [todo](examples/todo/) | Full CRUD todo app with HTML frontend (templates + static files) |
 | [bench_db](examples/bench_db/) | SQLite performance benchmarks |
 
 ```bash
