@@ -7,8 +7,8 @@
 //   GET /full    — inheritance + include + loop + filters + conditionals
 
 import { app } from "hull:app";
-import { template } from "hull:template";
 import { log } from "hull:log";
+import { template } from "hull:template";
 
 app.manifest({});
 

@@ -140,8 +140,8 @@ int hl_static_middleware(KlRequest *req, KlResponse *res, void *user_data)
     const char *rel = req->path + 8;
     size_t rel_len = req->path_len - 8;
 
-    /* Reject empty or unsafe paths */
-    if (rel_len == 0 || !path_is_safe(rel, rel_len))
+    /* Reject unsafe paths */
+    if (!path_is_safe(rel, rel_len))
         return 0;
 
     const char *mime = hl_static_mime_type(rel, rel_len);

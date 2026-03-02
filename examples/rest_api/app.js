@@ -35,7 +35,7 @@ app.get("/tasks/:id", (req, res) => {
 // Create a task
 app.post("/tasks", (req, res) => {
     let body;
-    try { body = JSON.parse(req.body); } catch (e) {
+    try { body = JSON.parse(req.body); } catch (_e) {
         res.status(400);
         res.json({ error: "invalid JSON" });
         return;
@@ -52,7 +52,7 @@ app.post("/tasks", (req, res) => {
 // Update a task
 app.put("/tasks/:id", (req, res) => {
     let body;
-    try { body = JSON.parse(req.body); } catch (e) {
+    try { body = JSON.parse(req.body); } catch (_e) {
         res.status(400);
         res.json({ error: "invalid JSON" });
         return;

@@ -16,7 +16,7 @@ app.manifest({
 });
 
 let JWT_SECRET = "change-me-in-production";
-try { const v = env.get("JWT_SECRET"); if (v) JWT_SECRET = v; } catch (e) {}
+try { const v = env.get("JWT_SECRET"); if (v) JWT_SECRET = v; } catch (_e) {}
 
 // Initialize database
 db.exec(

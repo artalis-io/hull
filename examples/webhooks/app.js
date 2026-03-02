@@ -21,7 +21,7 @@ app.manifest({
 });
 
 let SIGNING_SECRET = "whsec_change-me-in-production";
-try { const v = env.get("WEBHOOK_SECRET"); if (v) SIGNING_SECRET = v; } catch (e) {}
+try { const v = env.get("WEBHOOK_SECRET"); if (v) SIGNING_SECRET = v; } catch (_e) {}
 
 // ── Schema ──────────────────────────────────────────────────────────
 
@@ -87,7 +87,7 @@ function deliverWebhook(webhook, eventType, payloadStr, eventId) {
         });
         status = r.status;
         respBody = r.body || "";
-    } catch (e) {
+    } catch (_e) {
         respBody = e.message || String(e);
     }
 
@@ -106,7 +106,7 @@ app.get("/health", (_req, res) => {
 // Register a webhook
 app.post("/webhooks", (req, res) => {
     let body;
-    try { body = JSON.parse(req.body); } catch (e) {
+    try { body = JSON.parse(req.body); } catch (_e) {
         res.status(400);
         res.json({ error: "invalid JSON" });
         return;
@@ -146,7 +146,7 @@ app.del("/webhooks/:id", (req, res) => {
 // Fire an event — delivers to all matching active webhooks
 app.post("/events", (req, res) => {
     let body;
-    try { body = JSON.parse(req.body); } catch (e) {
+    try { body = JSON.parse(req.body); } catch (_e) {
         res.status(400);
         res.json({ error: "invalid JSON" });
         return;
@@ -223,7 +223,7 @@ app.post("/webhooks/receive", (req, res) => {
     }
 
     let body;
-    try { body = JSON.parse(req.body); } catch (e) {
+    try { body = JSON.parse(req.body); } catch (_e) {
         res.status(400);
         res.json({ error: "invalid JSON" });
         return;
