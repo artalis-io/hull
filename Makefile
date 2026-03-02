@@ -409,7 +409,7 @@ INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(KEEL_DIR)/ve
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan e2e e2e-build e2e-http e2e-sandbox e2e-examples e2e-templates hull-test-examples self-build check analyze cppcheck bench coverage lint-lua lint-js lint platform platform-cosmo
+.PHONY: all clean test debug msan e2e e2e-build e2e-http e2e-sandbox e2e-examples e2e-templates hull-test-examples self-build check analyze cppcheck bench bench-template coverage lint-lua lint-js lint platform platform-cosmo
 
 all: $(BUILDDIR)/hull
 
@@ -819,6 +819,9 @@ cppcheck:
 
 bench: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh bench/bench.sh
+
+bench-template: $(BUILDDIR)/hull
+	RUNTIME=$(RUNTIME) sh bench/bench_template.sh
 
 # ── Code coverage ────────────────────────────────────────────────────
 

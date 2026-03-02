@@ -216,3 +216,6 @@ jobs:
 
       - name: Benchmark
         run: RUNTIME=${{ matrix.runtime }} DURATION=5s CONNECTIONS=50 THREADS=2 sh bench/bench.sh
+
+      - name: Template Benchmark
+        run: RUNTIME=${{ matrix.runtime }} DURATION=5s CONNECTIONS=50 THREADS=2 sh bench/bench_template.sh

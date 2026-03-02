@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} — {{ user | upper }}{% end %}
+{% block content %}
+<h1>Welcome, {{ user }}</h1>
+<p>{{ count }} items</p>
+<table>
+{% for item in items %}
+<tr><td>{{ item.id }}</td><td>{{ item.name | upper }}</td>
+<td>{% if item.active %}Active{% else %}Inactive{% end %}</td></tr>
+{% end %}
+</table>
+{% end %}

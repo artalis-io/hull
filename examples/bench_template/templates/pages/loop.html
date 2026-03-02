@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<html>
+<head><title>{{ title }}</title></head>
+<body>
+<h1>{{ title }} ({{ count }})</h1>
+<ul>
+{% for item in items %}<li>{{ item.name }}{% if item.active %} *{% end %}</li>
+{% end %}
+</ul>
+</body>
+</html>

@@ -37,6 +37,21 @@ The biggest wins come from:
 2. `db.batch()` transaction wrapping — amortizes commit overhead across N operations (8x+ for batch writes)
 3. Prepared statement cache — eliminates repeated `sqlite3_prepare_v2()` for hot queries
 
+## Template Rendering
+
+Dedicated template benchmark (`bench/bench_template.sh`) measuring rendering throughput at increasing complexity. Data is prepared at startup so results isolate template overhead only.
+
+| Endpoint | Lua (req/s) | QuickJS (req/s) | Description |
+|----------|-------------|------------------|-------------|
+| GET /health | 70,393 | 57,570 | JSON baseline (no template) |
+| GET /simple | 69,457 | 43,907 | Variable substitution only |
+| GET /loop | 21,974 | 7,647 | 50-item loop + conditionals |
+| GET /full | 12,839 | 3,345 | Inheritance + include + loop + filters |
+
+Simple variable substitution is essentially free (~1% drop vs JSON in Lua). The cost scales with loop iterations and template features — the full-featured template (extends + include + 50-row loop + `upper` filter) is ~5.5x slower than simple in Lua and ~13x in JS.
+
+Even the heaviest template on the slowest runtime (3.3k req/s on QuickJS) handles 200k requests/minute — far more than enough for typical workloads. SQLite remains the bottleneck for any app doing real work.
+
 ## Keel (raw HTTP server) Baseline
 
 | Endpoint | req/s |
@@ -82,11 +97,12 @@ Hull delivers Go/Rust-tier throughput from a scripting language.
 ## Reproducing
 
 ```bash
-make                  # build hull
-sh bench/bench.sh           # run both Lua and JS benchmarks (HTTP routing)
-sh bench/bench_db.sh        # run SQLite performance benchmark
-RUNTIME=lua sh bench/bench.sh   # Lua only
-RUNTIME=js  sh bench/bench.sh   # JS only
+make                              # build hull
+sh bench/bench.sh                 # HTTP routing benchmark (Lua + JS)
+sh bench/bench_db.sh              # SQLite performance benchmark
+sh bench/bench_template.sh        # template rendering benchmark (Lua + JS)
+RUNTIME=lua sh bench/bench.sh     # Lua only
+RUNTIME=js  sh bench/bench.sh     # JS only
 ```
 
 Tunable environment variables:

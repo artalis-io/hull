@@ -1,0 +1,9 @@
+<!DOCTYPE html>
+<html>
+<head><title>{% block title %}App{% end %}</title></head>
+<body>
+{% include "partials/header.html" %}
+<main>{% block content %}{% end %}</main>
+<footer><p>&copy; {{ year }}</p></footer>
+</body>
+</html>
