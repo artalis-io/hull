@@ -48,6 +48,12 @@
 #include <string.h>
 #include <stdarg.h>
 
+/* ── Default Content-Security-Policy ───────────────────────────────── */
+
+#define HL_DEFAULT_CSP \
+    "default-src 'none'; style-src 'unsafe-inline'; " \
+    "img-src 'self'; form-action 'self'; frame-ancestors 'none'"
+
 /* ── Logging ───────────────────────────────────────────────────────── */
 
 /* Custom log callback: suppresses file:line in release builds */
@@ -448,6 +454,14 @@ static int hull_serve(int argc, char **argv)
                  manifest.env_count, manifest.hosts_count);
     }
 
+    /* Wire CSP policy to runtime.
+     * Default CSP is always active — even without app.manifest().
+     * Explicit csp="custom" overrides; csp=false disables. */
+    if (manifest.csp_set)
+        rt->csp_policy = manifest.csp;    /* custom or NULL (disabled) */
+    else
+        rt->csp_policy = HL_DEFAULT_CSP;  /* default */
+
     /* Wire env_cfg from manifest (if app declares env vars) */
     HlEnvConfig env_cfg_storage = {0};
     if (manifest.env_count > 0) {
@@ -493,8 +507,23 @@ static int hull_serve(int argc, char **argv)
         rt->http_cfg = &http_cfg_storage;
     }
 
+    /* Derive app directory from entry point for sandbox unveil */
+    char app_dir[4096];
+    {
+        const char *slash = strrchr(entry_point, '/');
+        if (slash) {
+            size_t len = (size_t)(slash - entry_point);
+            if (len >= sizeof(app_dir)) len = sizeof(app_dir) - 1;
+            memcpy(app_dir, entry_point, len);
+            app_dir[len] = '\0';
+        } else {
+            app_dir[0] = '.';
+            app_dir[1] = '\0';
+        }
+    }
+
     /* Apply kernel sandbox (pledge/unveil) from manifest */
-    if (hl_sandbox_apply(&manifest, db_path, ca_bundle_path,
+    if (hl_sandbox_apply(&manifest, app_dir, db_path, ca_bundle_path,
                           tls_cert_path, tls_key_path) != 0) {
         log_error("[hull:c] sandbox enforcement failed");
         rt->vt->free_manifest_strings(rt, &manifest);

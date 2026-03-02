@@ -18,6 +18,8 @@ import { session } from "hull:middleware:session";
 import { template } from "hull:template";
 import { time } from "hull:time";
 
+app.manifest({});  // sandbox: no fs, no env, no outbound HTTP; default CSP
+
 // ── Database setup ──────────────────────────────────────────────────
 
 session.init({ ttl: 3600 });

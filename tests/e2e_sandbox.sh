@@ -3,7 +3,7 @@
 #
 # Tests:
 #   1. Hull with manifest logs "[sandbox] applied" (Linux/cosmo only)
-#   2. Hull without manifest logs "no manifest" (permissive)
+#   2. Hull without manifest — default-deny sandbox still applied
 #   3. Manifest without hosts — no dns promise
 #   4. JS manifest app — sandbox applied (feature parity)
 #   5. Kernel enforcement: pledge/unveil violations blocked (Linux only)
@@ -160,10 +160,10 @@ else
     fail "hull did not start with manifest app"
 fi
 
-# ── Test 2: Hull without manifest — permissive ──────────────────────
+# ── Test 2: Hull without manifest — default-deny sandbox ────────────
 
 echo ""
-echo "=== Test 2: Hull without manifest — permissive ==="
+echo "=== Test 2: Hull without manifest — default-deny sandbox ==="
 
 cat > "$WORKDIR/nomanifest.lua" << 'EOF'
 app.get("/", function(req, res)
@@ -186,8 +186,12 @@ if wait_for_server 19881; then
     stop_server
 
     LOG2=$(cat "$LOGFILE2")
-    check_contains "no manifest log" "$LOG2" "no manifest"
-    check_not_contains "sandbox should NOT be applied" "$LOG2" "[sandbox] applied"
+    if [ "$SANDBOX_EXPECTED" = "1" ]; then
+        check_contains "sandbox applied (no manifest)" "$LOG2" "[sandbox] applied"
+        check_not_contains "no dns without manifest" "$LOG2" " dns"
+    else
+        check_contains "sandbox not available log" "$LOG2" "kernel sandbox not available"
+    fi
 else
     stop_server
     fail "hull did not start without manifest"

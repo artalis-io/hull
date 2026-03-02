@@ -72,7 +72,7 @@ The server startup sequence:
 8. Verify app signature if `--verify-sig` provided
 9. Wire routes from runtime into Keel router (`rt->vt->wire_routes_server`)
 10. Extract manifest from runtime (`rt->vt->extract_manifest`)
-11. Apply kernel sandbox based on manifest (`hl_sandbox_apply`)
+11. Apply kernel sandbox — always active, scoped by manifest (`hl_sandbox_apply`)
 12. Run Keel event loop
 
 ### Manifest Extraction (`manifest.c`)
@@ -91,11 +91,30 @@ Extraction reads the stored manifest table from the runtime:
 - **Lua:** `__hull_manifest` in Lua registry → `hl_manifest_extract()`
 - **QuickJS:** `globalThis.__hull_manifest` → `hl_manifest_extract_js()`
 
-Result: `HlManifest` struct with up to 32 entries per category (`fs_read`, `fs_write`, `env`, `hosts`).
+Result: `HlManifest` struct with up to 32 entries per category (`fs_read`, `fs_write`, `env`, `hosts`), plus optional `csp` policy string.
+
+`app.manifest()` is **one-shot** — calling it a second time raises a runtime error. The manifest is extracted into a C struct during startup, capabilities are wired from that struct, and the kernel sandbox is sealed. After sealing, the runtime-side registry key is irrelevant — C-level configs and kernel restrictions are immutable.
+
+### Content-Security-Policy (CSP)
+
+Hull injects a `Content-Security-Policy` header on every `res:html()` / `res.html()` response at the C level. This is wired from `HlRuntime.csp_policy` into the Lua and JS response bindings.
+
+**Default policy** (always active unless explicitly disabled):
+```
+default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; form-action 'self'; frame-ancestors 'none'
+```
+
+**Configuration via manifest:**
+- No `app.manifest()` → default CSP (secure by default)
+- `app.manifest({})` → default CSP
+- `app.manifest({ csp = "custom-policy" })` → custom policy
+- `app.manifest({ csp = false })` → CSP disabled (opt-out)
+
+CSP is injected in `lua_res_html()` (`runtime/lua/bindings.c`) and `js_res_html()` (`runtime/js/bindings.c`). Non-HTML responses (`res:json()`, `res:text()`) do not receive CSP headers.
 
 ### Sandbox Application (`sandbox.c`)
 
-After manifest extraction, `hl_sandbox_apply()` locks down the process:
+After manifest extraction, `hl_sandbox_apply()` always locks down the process (even without `app.manifest()`):
 
 | Step | Action | Effect |
 |------|--------|--------|
@@ -106,6 +125,8 @@ After manifest extraction, `hl_sandbox_apply()` locks down the process:
 | 5 | `pledge("stdio inet rpath wpath cpath flock [dns]")` | Syscall filter |
 
 After sealing, any attempt to access undeclared paths triggers SIGKILL (Linux/Cosmo) or returns ENOENT.
+
+The sandbox is **always applied**, even if `app.manifest()` is not called. An app without a manifest is sandboxed identically to `app.manifest({})` — only the database file and TLS certificate paths are accessible.
 
 ### Signature Verification (`signature.c`)
 

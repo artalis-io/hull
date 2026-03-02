@@ -8,6 +8,7 @@
 
 -- Manifest: allow outbound HTTP to localhost for webhook delivery
 app.manifest({
+    env = {"WEBHOOK_SECRET"},
     hosts = {"127.0.0.1"},
 })
 
@@ -62,7 +63,7 @@ end
 local function deliver_webhook(webhook, event_type, payload_str, event_id)
     local sig = sign_payload(payload_str)
 
-    local ok, result = pcall(function()
+    local send_ok, result = pcall(function()
         return http.post(webhook.url, payload_str, {
             headers = {
                 ["Content-Type"] = "application/json",
@@ -73,7 +74,7 @@ local function deliver_webhook(webhook, event_type, payload_str, event_id)
     end)
 
     local status, resp_body
-    if ok and result then
+    if send_ok and result then
         status = result.status
         resp_body = result.body or ""
     else

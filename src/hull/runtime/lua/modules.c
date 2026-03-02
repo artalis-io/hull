@@ -223,10 +223,17 @@ static int lua_app_config(lua_State *L)
     return 0;
 }
 
-/* app.manifest(tbl) — declare application capabilities */
+/* app.manifest(tbl) — declare application capabilities (one-shot) */
 static int lua_app_manifest(lua_State *L)
 {
     luaL_checktype(L, 1, LUA_TTABLE);
+
+    /* Reject second call — manifest is immutable once declared */
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_manifest");
+    if (!lua_isnil(L, -1))
+        return luaL_error(L, "app.manifest() can only be called once");
+    lua_pop(L, 1);
+
     lua_pushvalue(L, 1);
     lua_setfield(L, LUA_REGISTRYINDEX, "__hull_manifest");
     return 0;

@@ -89,6 +89,17 @@ int hl_manifest_extract(lua_State *L, HlManifest *out)
                                            out->hosts,
                                            HL_MANIFEST_MAX_HOSTS);
 
+    /* csp = "policy-string" or false */
+    lua_getfield(L, manifest_idx, "csp");
+    if (lua_isstring(L, -1)) {
+        out->csp = lua_tostring(L, -1);
+        out->csp_set = 1;
+    } else if (lua_isboolean(L, -1) && !lua_toboolean(L, -1)) {
+        out->csp = NULL;
+        out->csp_set = 1;  /* explicitly disabled */
+    }
+    lua_pop(L, 1);
+
     lua_pop(L, 1); /* pop manifest table */
     return 0;
 }
@@ -174,6 +185,17 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out)
                                               out->hosts,
                                               HL_MANIFEST_MAX_HOSTS);
 
+    /* csp = "policy-string" or false */
+    JSValue csp_val = JS_GetPropertyStr(ctx, manifest, "csp");
+    if (JS_IsString(csp_val)) {
+        out->csp = JS_ToCString(ctx, csp_val);
+        out->csp_set = 1;
+    } else if (JS_IsBool(csp_val) && !JS_ToBool(ctx, csp_val)) {
+        out->csp = NULL;
+        out->csp_set = 1;  /* explicitly disabled */
+    }
+    JS_FreeValue(ctx, csp_val);
+
     JS_FreeValue(ctx, manifest);
     return 0;
 }
@@ -191,6 +213,7 @@ void hl_manifest_free_js_strings(JSContext *ctx, HlManifest *m)
         if (m->env[i]) JS_FreeCString(ctx, m->env[i]);
     for (int i = 0; i < m->hosts_count; i++)
         if (m->hosts[i]) JS_FreeCString(ctx, m->hosts[i]);
+    if (m->csp) JS_FreeCString(ctx, m->csp);
 }
 
 #endif /* HL_ENABLE_JS */

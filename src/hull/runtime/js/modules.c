@@ -238,7 +238,7 @@ static JSValue js_app_config(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-/* app.manifest(obj) — declare application capabilities */
+/* app.manifest(obj) — declare application capabilities (one-shot) */
 static JSValue js_app_manifest(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv)
 {
@@ -246,7 +246,16 @@ static JSValue js_app_manifest(JSContext *ctx, JSValueConst this_val,
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "app.manifest requires an object");
 
+    /* Reject second call — manifest is immutable once declared */
     JSValue global = JS_GetGlobalObject(ctx);
+    JSValue existing = JS_GetPropertyStr(ctx, global, "__hull_manifest");
+    int already_set = !JS_IsUndefined(existing) && !JS_IsNull(existing);
+    JS_FreeValue(ctx, existing);
+    if (already_set) {
+        JS_FreeValue(ctx, global);
+        return JS_ThrowTypeError(ctx, "app.manifest() can only be called once");
+    }
+
     JS_SetPropertyStr(ctx, global, "__hull_manifest", JS_DupValue(ctx, argv[0]));
     JS_FreeValue(ctx, global);
 

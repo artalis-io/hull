@@ -9,6 +9,8 @@ import { cors } from "hull:middleware:cors";
 import { ratelimit } from "hull:middleware:ratelimit";
 import { time } from "hull:time";
 
+app.manifest({});
+
 // ── Request ID middleware ────────────────────────────────────────────
 // Assigns a unique ID to every request, available via req.ctx.request_id
 // and returned in the X-Request-ID response header.

@@ -8,6 +8,8 @@ import { db } from "hull:db";
 import { log } from "hull:log";
 import { time } from "hull:time";
 
+app.manifest({});
+
 // Initialize database
 db.exec("CREATE TABLE IF NOT EXISTS visits (id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT, ts INTEGER)");
 
