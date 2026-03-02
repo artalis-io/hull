@@ -1,4 +1,4 @@
-globals = { "app", "db", "time", "json", "crypto", "log", "env", "tool", "test", "http", "__hull_exe" }
+globals = { "app", "db", "time", "json", "crypto", "log", "env", "tool", "test", "http", "__hull_exe", "_template" }
 std = "lua54"
 exclude_files = { "stdlib/lua/vendor/", "vendor/" }
 max_line_length = false

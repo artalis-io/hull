@@ -11,7 +11,6 @@
 
 local ratelimit = {}
 
-local MAX_BUCKETS = 10000
 local SWEEP_INTERVAL = 100  -- sweep every N checks
 
 --- Sweep expired buckets from the table.

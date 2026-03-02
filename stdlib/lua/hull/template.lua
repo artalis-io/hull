@@ -263,7 +263,6 @@ local function parse_tag(tag)
 end
 
 local function parse(tokens)
-    local ast = {}
     local pos = 1
 
     local function parse_body(stop_kinds)
@@ -348,7 +347,7 @@ local function parse(tokens)
         return body, nil
     end
 
-    ast = parse_body(nil)
+    local ast = parse_body(nil)
     return ast
 end
 

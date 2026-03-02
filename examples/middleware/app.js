@@ -4,10 +4,10 @@
 // Demonstrates middleware chaining: request ID, logging, rate limiting, CORS
 
 import { app } from "hull:app";
-import { log } from "hull:log";
-import { time } from "hull:time";
 import { cors } from "hull:cors";
+import { log } from "hull:log";
 import { ratelimit } from "hull:ratelimit";
+import { time } from "hull:time";
 
 // ── Request ID middleware ────────────────────────────────────────────
 // Assigns a unique ID to every request, available via req.ctx.request_id

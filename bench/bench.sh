@@ -1,15 +1,17 @@
 #!/bin/sh
 # Hull benchmark — runs wrk against both Lua and JS runtimes
 #
-# Usage: sh bench.sh
-#        RUNTIME=lua sh bench.sh   # benchmark Lua only
-#        RUNTIME=js  sh bench.sh   # benchmark JS only
+# Usage: sh bench/bench.sh
+#        RUNTIME=lua sh bench/bench.sh   # benchmark Lua only
+#        RUNTIME=js  sh bench/bench.sh   # benchmark JS only
 #
 # Requires: build/hull already built, wrk and curl available
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 set -e
+
+cd "$(dirname "$0")/.."
 
 HULL=./build/hull
 THREADS=${THREADS:-4}
@@ -87,7 +89,7 @@ run_bench() {
 
     # POST /echo — body parsing throughput
     echo "--- POST /echo (body parsing) ---"
-    wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" -s bench_post.lua "$URL/echo"
+    wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" -s bench/bench_post.lua "$URL/echo"
     echo ""
 
     # GET /visits — DB read (SELECT query)
@@ -97,7 +99,7 @@ run_bench() {
 
     # POST /greet/World — route param + body parsing combined
     echo "--- POST /greet/World (route param + body) ---"
-    wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" -s bench_post.lua "$URL/greet/World"
+    wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" -s bench/bench_post.lua "$URL/greet/World"
     echo ""
 
     kill "$SERVER_PID" 2>/dev/null || true

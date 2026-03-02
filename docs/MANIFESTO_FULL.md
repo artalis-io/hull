@@ -12,7 +12,7 @@
 [Who Hull Is For](#who-hull-is-for) · [What Hull Is Not](#what-hull-is-not)
 
 **Architecture & Build**
-[Architecture](#architecture) · [Why C and Lua](#why-c-and-lua) · [Build System](#build-system) · [hull.com](#hullcom--the-build-tool) · [Licensing](#licensing) · [Security Model](#security-model) · [Database Encryption](#database-encryption-optional) · [Standard Library Reference](#standard-library-reference)
+[Architecture](#architecture) · [Why C, Lua, and JavaScript](#why-c-lua-and-javascript) · [Build System](#build-system) · [hull.com](#hullcom--the-build-tool) · [Licensing](#licensing) · [Security Model](#security-model) · [Database Encryption](#database-encryption-optional) · [Standard Library Reference](#standard-library-reference)
 
 **Platform Features**
 [Startup Sequence](#startup-sequence) · [Scheduled Tasks](#scheduled-tasks) · [Background Work](#background-work) · [Multi-Instance](#multi-instance) · [Application Updates](#application-updates) · [Email](#email) · [Secrets and API Keys](#secrets-and-api-keys) · [Logging](#logging) · [Authentication](#authentication) · [Development Mode](#development-mode) · [HTML Templating](#html-templating) · [PDF Generation](#pdf-generation) · [File Uploads](#file-uploads) · [Testing](#testing) · [App WebSockets](#app-websockets) · [CSV Export/Import](#csv-exportimport) · [Internationalization (i18n)](#internationalization-i18n) · [Full-Text Search](#full-text-search) · [Pagination](#pagination) · [Backup](#backup) · [Role-Based Access Control (RBAC)](#role-based-access-control-rbac) · [Data Validation](#data-validation) · [Rate Limiting](#rate-limiting)
@@ -35,7 +35,7 @@
 
 **Vision:** Make Software Great Again. A world where local-first, single-file applications are the default for tools that don't need the cloud. Where the person who uses the software owns the software — the binary, the data, the build pipeline, and the business outcome. Where an AI assistant and a single command produce a product, not a deployment problem.
 
-**The status quo is broken.** AI coding assistants solved one problem (you don't need to know how to code) and created another (you now depend on cloud infrastructure to run the result). Vibecoded apps are cloud apps by default — React + Node.js + Postgres + Vercel/AWS. The vibecoder swapped one dependency (coding skill) for another (the cloud). They don't own anything more than before — they just rent different things. Hull breaks this chain: the AI writes Lua instead of JavaScript, the output is a file instead of a deployment, and the developer owns the product instead of renting infrastructure to run it.
+**The status quo is broken.** AI coding assistants solved one problem (you don't need to know how to code) and created another (you now depend on cloud infrastructure to run the result). Vibecoded apps are cloud apps by default — React + Node.js + Postgres + Vercel/AWS. The vibecoder swapped one dependency (coding skill) for another (the cloud). They don't own anything more than before — they just rent different things. Hull breaks this chain: the AI writes Lua or JavaScript, the output is a file instead of a deployment, and the developer owns the product instead of renting infrastructure to run it.
 
 Three core beliefs:
 
@@ -61,12 +61,12 @@ Three core beliefs:
 
 - **Self-declaring apps** — every Hull app exposes the files, hosts, env vars, and resources it will access. The startup banner, `hull inspect`, and verify.gethull.dev show exactly what the app can touch. Hull helps you verify that what the app claims is what the app does.
 - **Defense in depth** — five independent layers (six with optional WAMR), each enforced separately:
-  1. **Lua sandbox** — `os.execute`, `io.popen`, `loadfile`, `dofile` removed from runtime entirely. Restricted `hull.fs.*` API with C-level path validation.
-  2. **C-level enforcement** — allowlist checks before every outbound connection and file access. Compiled code, not bypassable from Lua.
+  1. **Runtime sandboxes** — Lua: `os.execute`, `io.popen`, `loadfile`, `dofile` removed entirely. JS: `eval()`, `Function` constructor, `std`, `os` modules removed. Both: restricted to C-level capability APIs only.
+  2. **C-level enforcement** — allowlist checks before every outbound connection and file access. Compiled code, not bypassable from Lua or JS.
   3. **Allocator model** — Keel's `KlAllocator` vtable routes all allocations through a pluggable interface with `old_size`/`size` tracking on every realloc and free. Enables arena/pool allocation, bounded memory, and leak detection. No raw `malloc`/`free` anywhere in the codebase.
   4. **Kernel sandbox** — pledge/unveil syscall filtering on Linux (SECCOMP BPF + Landlock LSM) and OpenBSD (native). Cosmopolitan libc provides libc-level pledge/unveil emulation on Windows and other platforms where native kernel sandboxing is unavailable. The process physically cannot exceed its declared capabilities.
   5. **Digital signatures** — Ed25519 platform + app signatures prove the C layer is legitimate Hull and hasn't been tampered with.
-  6. **WASM sandbox** *(when WAMR is enabled)* — compute plugins run in WAMR's isolated linear memory with no I/O imports, gas-metered execution, and configurable memory/instruction caps. An additional isolation layer for compiled code that complements the Lua sandbox.
+  6. **WASM sandbox** *(when WAMR is enabled)* — compute plugins run in WAMR's isolated linear memory with no I/O imports, gas-metered execution, and configurable memory/instruction caps. An additional isolation layer for compiled code that complements the runtime sandboxes.
 - **Sanitizer-hardened C runtime** — Keel (Hull's HTTP server) is developed and tested under the full sanitizer suite:
   - **ASan** (AddressSanitizer) — heap/stack buffer overflow, use-after-free, double-free, memory leaks
   - **UBSan** (UndefinedBehaviorSanitizer) — signed overflow, null dereference, misaligned access, shift overflow
@@ -76,26 +76,26 @@ Three core beliefs:
 - **Static analysis** — Clang `scan-build` (static analyzer) and `cppcheck --enable=all` run on every commit. Both must exit clean with zero findings before merging.
 - **Fuzz-tested** — libFuzzer targets cover the primary attack surface (untrusted network input): HTTP parser + chunked decoder, multipart/form-data parser. Fuzz targets run with ASan + UBSan enabled. Corpus-driven, crash-reproducing, continuous.
 - **LLM-based C audit** — Claude Code's `c-audit` skill reviews Hull's C modules for memory safety, buffer handling, integer overflow, and undefined behavior. Automated review catches patterns that static analysis misses. Used during development, not as a replacement for traditional tools — as a layer on top.
-- **Lua-side quality** — Selene (Lua linter) and `luacheck` for static analysis of the Lua standard library. Hull's `hull test` framework runs the application test suite. LLM-friendly error output (file:line, stack trace, source context) enables AI-assisted debugging and review of Lua code.
-- **Auditable** — 6 vendored C libs (+1 optional), ~1,500 lines of binding code. One person can review in a day. The C attack surface is minimal.
+- **Stdlib quality** — Selene (Lua linter) and `luacheck` for static analysis of the Lua standard library. ESLint for the JavaScript standard library. Hull's `hull test` framework runs the application test suite. LLM-friendly error output (file:line, stack trace, source context) enables AI-assisted debugging and review.
+- **Auditable** — 7 vendored C libs (+1 optional). One person can review Hull's own C code in a day. The C attack surface is minimal.
 - **Zero supply chain risk** — no npm, no pip, no crates.io, no package managers, no transitive dependencies
 - **Encrypted at rest** — AES-256 database encryption, license-key-derived
 
 ### AI-First Development
 
-- **LLM-first dev experience** — Lua is small (~60 keywords), consistent, LLM-friendly
+- **Dual runtime — Lua and JavaScript** — write in whichever language you (or your AI) prefer. Lua is small (~60 keywords) and LLM-friendly. JavaScript (via QuickJS ES2023) is familiar to every web developer. Same API, same capabilities, same output binary. One app, one language — your choice.
 - **Works with any AI assistant** — Claude Code, OpenAI Codex, OpenCode, Cursor — anything that writes code
 - **Air-gapped development** — OpenCode + local model (minimax-m2.5, Llama, etc.) on your own hardware. Code never leaves your premises. Develop on M3 Ultra 512GB, fully offline.
-- **No frontier model dependency** — Hull doesn't require GPT-4 or Claude. Any model that generates Lua works. Run your own.
+- **No frontier model dependency** — Hull doesn't require GPT-4 or Claude. Any model that generates Lua or JavaScript works. Run your own.
 - **LLM-friendly errors** — file:line, stack trace, source context, request details piped to terminal
 - **LLM testing loop** — write, test, read output, fix, repeat — all in one terminal
-- **Vibecoded apps are NOT cloud apps** — Hull breaks the default pipeline where AI produces React + Node + Postgres + Vercel. With Hull, AI produces Lua and the output is a single file. The developer owns the output.
+- **Vibecoded apps are NOT cloud apps** — Hull breaks the default pipeline where AI produces React + Node + Postgres + Vercel. With Hull, AI produces Lua or JS and the output is a single file. The developer owns the output.
 
 ### Runtime
 
-- **Under 2 MB total binary** — Keel + Lua + SQLite + mbedTLS + TweetNaCl + pledge/unveil (under 2.5 MB with optional WAMR)
-- **Fast enough — and native speed when you need it.** Lua is 10-30x faster than Python and 5-10x faster than Ruby for application logic. For HTTP handlers, business logic, and database queries, Lua is never the bottleneck — I/O is. When you hit a wall on numerical computation, image processing, or CPU-bound workloads, optional WASM compute plugins (via WAMR) let you drop to near-native speed in C, Rust, or Zig — sandboxed, gas-metered, no I/O. Most Hull apps will never need WAMR. The ones that do get native performance without leaving the sandbox.
-- **Batteries included** — routing, auth, RBAC, email, CSV, i18n, FTS, PDF, templates, validation, rate limiting, WebSockets
+- **Under 2 MB total binary** — Keel + Lua + QuickJS + SQLite + mbedTLS + TweetNaCl + pledge/unveil (under 2.5 MB with optional WAMR)
+- **Fast enough — and native speed when you need it.** Both Lua and QuickJS are 10-30x faster than Python and 5-10x faster than Ruby for application logic. For HTTP handlers, business logic, and database queries, the scripting layer is never the bottleneck — I/O is. When you hit a wall on numerical computation, image processing, or CPU-bound workloads, optional WASM compute plugins (via WAMR) let you drop to near-native speed in C, Rust, or Zig — sandboxed, gas-metered, no I/O. Most Hull apps will never need WAMR. The ones that do get native performance without leaving the sandbox.
+- **Batteries included** — routing, auth, JWT, sessions, CSRF, templates, CORS, rate limiting, WebSockets
 - **Single-threaded event loop** — easy to reason about, no race conditions, no deadlocks
 - **Cooperative multitasking** — cron jobs, long-running batch, background tasks via Lua coroutines
 - **Runs everywhere** — Linux, macOS, Windows, FreeBSD, OpenBSD, NetBSD from one binary
@@ -122,7 +122,7 @@ The software industry spent 15 years pushing everything to the cloud. The result
 
 People want local tools they can control.
 
-Hull is a platform for building single-file, zero-dependency, run-anywhere applications. You write your backend logic in Lua, your frontend in HTML5/JS, your data lives in SQLite, and Hull compiles everything into one executable. No servers. No cloud. No npm. No pip. No Docker. No hosting. Just a file.
+Hull is a platform for building single-file, zero-dependency, run-anywhere applications. You write your backend logic in Lua or JavaScript, your frontend in HTML5/JS, your data lives in SQLite, and Hull compiles everything into one executable. No servers. No cloud. No npm. No pip. No Docker. No hosting. Just a file.
 
 ## The False Choice
 
@@ -139,9 +139,9 @@ Hull splits what Excel conflates:
 ```
 Excel:     data + logic + UI = one .xlsx file (everything coupled)
 
-Hull:      data    = SQLite    (queryable, relational, no corruption)
-           logic   = Lua       (version-controlled, testable, separate)
-           UI      = HTML5/JS  (forms, tables, charts, print layouts)
+Hull:      data    = SQLite       (queryable, relational, no corruption)
+           logic   = Lua or JS    (version-controlled, testable, separate)
+           UI      = HTML5/JS     (forms, tables, charts, print layouts)
 ```
 
 A bookkeeper using a Hull app doesn't know this separation exists. They see forms, tables, and buttons. But under the hood:
@@ -156,19 +156,20 @@ Hull is the third option nobody's offering: properly structured data that you st
 
 ## What Hull Is
 
-Hull is a self-contained application runtime that embeds six C libraries into a single binary, built on [Cosmopolitan libc](https://github.com/jart/cosmopolitan) for cross-platform APE binaries:
+Hull is a self-contained application runtime that embeds seven C libraries into a single binary, built on [Cosmopolitan libc](https://github.com/jart/cosmopolitan) for cross-platform APE binaries:
 
 | Component | Purpose | Size |
 |-----------|---------|------|
 | [Keel](https://github.com/artalis-io/keel) | HTTP server (epoll/kqueue/io_uring/poll) | ~60 KB |
-| [Lua 5.4](https://www.lua.org/) | Application scripting | ~280 KB |
+| [Lua 5.4](https://www.lua.org/) | Application scripting (Lua runtime) | ~280 KB |
+| [QuickJS](https://bellard.org/quickjs/) | Application scripting (JavaScript ES2023 runtime) | ~350 KB |
 | [SQLite](https://sqlite.org/) | Database | ~600 KB |
 | [mbedTLS](https://github.com/Mbed-TLS/mbedtls) | TLS client for external API calls | ~400 KB |
 | [TweetNaCl](https://tweetnacl.cr.yp.to/) | Ed25519 license key signatures | ~8 KB |
 | [pledge/unveil](https://github.com/jart/pledge) | Kernel sandbox (Justine Tunney's polyfill) | ~30 KB |
 | [WAMR](https://github.com/bytecodealliance/wasm-micro-runtime) | WebAssembly compute plugins *(optional)* | ~85 KB |
 
-Total: under 2 MB (under 2.5 MB with optional WAMR). Runs on Linux, macOS, Windows, FreeBSD, OpenBSD, NetBSD from a single binary via [Cosmopolitan C](https://github.com/jart/cosmopolitan) (Actually Portable Executable).
+Total: under 2 MB (under 2.5 MB with optional WAMR). Runs on Linux, macOS, Windows, FreeBSD, OpenBSD, NetBSD from a single binary via Cosmopolitan C (Actually Portable Executable).
 
 Hull is not a web framework. It is a platform for building local-first desktop applications that use an HTML5/JS frontend served to the user's browser. The user double-clicks a file, a browser tab opens, and they have a working application. Their data never leaves their machine.
 
@@ -178,7 +179,7 @@ Every design decision follows from one constraint: **the end user should be able
 
 **Single binary** because installation is "put file on computer." No installer, no runtime, no package manager, no PATH configuration, no admin privileges. Works from a USB stick. Works from Dropbox.
 
-**Lua** because it was designed for exactly this: embedding in a C host to add scripting. It's 280 KB, compiles everywhere, has a clean C API refined over 30 years, and LLMs generate correct Lua reliably. The alternative was QuickJS (JavaScript), but Lua is smaller, simpler to embed, and doesn't carry the expectation of npm and async/await that would confuse the mental model.
+**Dual runtime: Lua and JavaScript.** Hull ships both Lua 5.4 and QuickJS (ES2023). Each app picks one — `app.lua` or `app.js`. Lua was designed for embedding in C: 280 KB, clean C API refined over 30 years, LLMs generate it reliably. QuickJS brings JavaScript to the same model: 350 KB, ES2023 compliant, familiar to every web developer. Both share the same C capability layer, the same sandbox, the same stdlib API. The developer (or their AI) writes in whichever language they prefer — the output is the same single-file binary.
 
 **SQLite** because it's the most deployed database in the world, it's a single file, it works offline, it handles concurrent access via file locking, and backup is copying one file. No database server, no connection strings, no ports, no administration.
 
@@ -226,7 +227,7 @@ Today, every vibecoded project hits the same wall: **deployment.** The AI genera
 
 The core absurdity: a vibecoder who just wants to build a small tool for a small audience is funnelled into the same cloud infrastructure designed for applications serving millions. There is no middle ground between "runs on my laptop" and "deployed to the cloud."
 
-Hull is that middle ground. The AI writes Lua instead of JavaScript. The data lives in SQLite instead of Postgres. The frontend is HTML5/JS served from the binary instead of a CDN. And when it's done, `hull build --output myapp.com` produces a single file the vibecoder can share, sell, or put in Dropbox. No server. No hosting bill. No $49,000 surprise. No deployment step at all.
+Hull is that middle ground. The AI writes Lua or JavaScript — whichever it (or the developer) prefers. The data lives in SQLite instead of Postgres. The frontend is HTML5/JS served from the binary instead of a CDN. And when it's done, `hull build --output myapp.com` produces a single file the vibecoder can share, sell, or put in Dropbox. No server. No hosting bill. No $49,000 surprise. No deployment step at all.
 
 The code the AI generates is the product. Not a codebase that needs infrastructure to become a product — the actual, distributable, runnable product.
 
@@ -248,7 +249,7 @@ Non-developers (or developer-adjacent) using LLMs to build their own tools.
 
 **The pain:** They can describe what they want to an AI, but they can't deploy or distribute the result. The AI writes React + Node.js, and now they need to learn Docker, AWS, DNS, SSL, and CI/CD just to share what they built.
 
-**Why Hull:** The LLM writes Lua instead of JavaScript. `hull build` creates a binary. Zero technical knowledge required for distribution. The output is a file, not a deployment problem.
+**Why Hull:** The LLM writes Lua or JavaScript — no React, no Node, no deployment pipeline. `hull build` creates a binary. Zero technical knowledge required for distribution. The output is a file, not a deployment problem.
 
 **Air-gapped development:** Works with OpenCode + minimax-m2.5 on M3 Ultra 512GB — code never leaves your premises. Also works with Claude Code, OpenAI Codex, Cursor — if you're OK with cloud-based AI.
 
@@ -260,7 +261,7 @@ Small businesses trapped between Excel and SaaS.
 
 **The pain:** Excel corruption, version chaos, SaaS subscription costs, data sovereignty concerns, vendor lock-in, GDPR compliance headaches. They're paying monthly for tools they don't fully control, storing sensitive business data on servers they don't own. They need an inventory tracker, an appointment scheduler, an invoice generator, a job costing calculator — small apps that solve their daily lives. Each one is either an overengineered SaaS at $30/month/seat or a fragile spreadsheet one wrong click away from disaster.
 
-**Why Hull:** Own your data (single SQLite file). Own your tools (single binary). One-time purchase. Works offline. Encrypted database. Back up by copying a file. A vibecoder or local IT consultant describes the tool to an AI, `hull build` produces a file, and the business has software that works like enterprise software without the enterprise price tag or complexity.
+**Why Hull:** Own your data (single SQLite file). Own your tools (single binary). One-time purchase. Works offline. Encrypted database. Back up by copying a file. A vibecoder or local IT consultant describes the tool to an AI, writing Lua or JavaScript, `hull build` produces a file, and the business has software that works like enterprise software without the enterprise price tag or complexity.
 
 **The outcome:** Custom tools that replace spreadsheets and SaaS subscriptions, owned outright, backed up by copying a file. No IT department required.
 
@@ -296,14 +297,14 @@ Hull is a classic three-tier architecture — presentation, application logic, d
                        │ HTTP (localhost)
 ┌──────────────────────┴──────────────────────┐
 │              Application Layer               │
-│                    Lua                        │
+│                Lua or JavaScript              │
 │                                              │
 │  Routes, middleware, validation              │
 │  Business logic, calculations, rules         │
 │  Session management, auth                    │
 │  External API calls (NAV, SDI, etc.)         │
 └──────────────────────┬──────────────────────┘
-                       │ Lua ↔ C bindings
+                       │ Lua/JS ↔ C bindings
 ┌──────────────────────┴──────────────────────┐
 │                Data Layer                    │
 │                 SQLite                        │
@@ -318,7 +319,7 @@ All three layers packaged into a single binary by:
 
 ┌─────────────────────────────────────────────┐
 │             Platform Layer (C)               │
-│         Keel + Lua + SQLite + mbedTLS        │
+│    Keel + Lua + QuickJS + SQLite + mbedTLS   │
 │         + TweetNaCl + pledge/unveil          │
 │         + WAMR (optional WASM compute)       │
 │                                              │
@@ -334,111 +335,114 @@ This is the same three-tier pattern that enterprise software got right 20 years 
 | | C# 3-tier (2005) | Hull (2026) |
 |---|---|---|
 | Presentation | WinForms / WPF | HTML5/JS |
-| Application | C# / .NET | Lua |
+| Application | C# / .NET | Lua or JavaScript |
 | Data | SQL Server | SQLite |
 | Deployment | MSI installer + SQL Server + .NET runtime + IIS + days of IT work | Copy one file |
 | Binary size | ~200 MB + runtime | ~2 MB total |
 | Cross-platform | Windows only | Linux, macOS, Windows, BSDs |
 | Licensing | Per-seat Windows + SQL Server + Visual Studio | Ed25519 key in a text file |
-| Security | Windows ACLs | pledge/unveil, Lua sandbox, encrypted DB |
-| Change logic | Recompile C#, redeploy | Edit Lua file, refresh browser |
-| AI-buildable | No | Yes — LLMs generate Lua fluently |
+| Security | Windows ACLs | pledge/unveil, runtime sandboxes, encrypted DB |
+| Change logic | Recompile C#, redeploy | Edit Lua/JS file, refresh browser |
+| AI-buildable | No | Yes — LLMs generate Lua and JS fluently |
 
 Same proven pattern, 1/100th the weight, runs anywhere, buildable by an AI.
 
 ### Runtime (C layer)
 
-The C layer handles everything Lua cannot do:
+The C layer is organized into three subsystems: **capabilities** (C enforcement for all host APIs), **runtimes** (Lua and JS bindings), and **commands** (CLI tool subcommands).
 
-- **main.c** — startup sequence: parse arguments, open database, bind socket, open browser (if `--open`), apply pledge/unveil sandbox, initialize Lua, enter event loop
-- **lua_bindings.c** — bridge between Keel's `KlRequest`/`KlResponse` and Lua tables. Exposes request properties (method, path, headers, params, query, body) and response methods (status, header, json, html, file, redirect) to Lua
-- **lua_db.c** — bridge between SQLite and Lua. Exposes `db.query()` (returns rows as Lua tables), `db.exec()` (for mutations), prepared statement caching, migration runner. **SQL injection is structurally impossible:** all queries go through `sqlite3_prepare_v2` + `sqlite3_bind_*`. There is no string-concatenated SQL path exposed to Lua. The `?` parameter binding is the only way to pass values into queries
-- **lua_crypto.c** — bridge between TweetNaCl and Lua. Exposes signature verification, hashing. Used internally by the license system, available to application code
-- **license.c** — Ed25519 license key verification. Reads `license.key`, validates signature against the public key embedded at build time, extracts licensed modules and expiry date. Checks are scattered across multiple C functions to resist patching
-- **http_client.c** — minimal HTTPS client built on mbedTLS. Connects to declared API endpoints, POSTs data, reads responses. Enforces the `allowed_hosts` allowlist at the C layer before connecting — Lua code cannot bypass it
-- **smtp.c** — minimal SMTP client built on mbedTLS. Handles EHLO, STARTTLS, AUTH (PLAIN/LOGIN), and MIME multipart message construction. For on-premise and air-gapped environments that run their own mail servers. Subject to the same `allowed_hosts` enforcement as HTTP
-- **timer.c** — min-heap timer scheduler. Manages `app.every`, `app.daily`, `app.weekly`, `app.after` callbacks. Integrates with the event loop timeout to wake up at the right moment without polling
-- **task.c** — background task runner. Manages Lua coroutines spawned by `app.spawn`, resumes them between HTTP requests with a per-iteration time budget. Implements `app.yield` and `app.sleep`
-- **embed.c** — Hull's Lua standard library compiled into the binary as byte arrays. Loaded by a custom `require()` searcher before the filesystem loader, so the standard library is always available regardless of what files exist on disk
+**Capabilities** (`src/hull/cap/`) — the single gate through which both runtimes access system resources:
 
-### Standard Library (embedded Lua layer)
+- **db.c** — SQLite bridge. `db.query()` (returns rows), `db.exec()` (mutations), prepared statement cache, batch transactions. **SQL injection is structurally impossible:** all queries go through `sqlite3_prepare_v2` + `sqlite3_bind_*`. No string-concatenated SQL path exists.
+- **crypto.c** — TweetNaCl + mbedTLS bridge. SHA-256/512, HMAC, PBKDF2, Ed25519, XSalsa20+Poly1305, random bytes, password hash/verify.
+- **http.c** — outbound HTTPS client (mbedTLS). Enforces `allowed_hosts` allowlist at C layer before connecting — app code cannot bypass it.
+- **fs.c** — sandboxed filesystem. Read/write/exists/delete with path traversal rejection, symlink escape prevention.
+- **body.c** — request body reading, multipart/form-data parsing, chunked transfer-encoding decoding.
+- **env.c** — environment variable access with manifest-driven allowlist enforcement.
+- **time.c** — time primitives: now, now_ms, clock, date, datetime.
+- **tool.c** — build tool capabilities: Ed25519 keygen, file I/O for build artifacts.
+- **test.c** — test runner capabilities: request simulation, assertion helpers.
 
-These ship inside the binary. The user never manages them.
+**Runtimes** (`src/hull/runtime/`) — bridge between C capabilities and scripting languages:
 
-- **app** — route registration, middleware chain, static file serving, response helpers, lifecycle management
-- **db** — query helpers, migration runner, backup, pagination (`db.paginate`), transaction wrappers. All queries use parameterized binding (`?` placeholders) — no string-concatenated SQL path exists
-- **json** — JSON encode/decode (pure Lua)
-- **csv** — RFC 4180 CSV encode/decode. Handles quoted fields, embedded commas/newlines, separator auto-detection. ~150 lines
-- **email** — unified email API with provider abstraction (Postmark, SendGrid, SES, Resend, Mailgun, SMTP). `email.send()` works identically regardless of transport
-- **auth** — password hashing (`auth.hash_password`, `auth.verify_password`), secure token generation (`auth.random_token`). Wraps PBKDF2-HMAC-SHA256 from mbedTLS and `randombytes` from TweetNaCl
-- **rbac** — role-based access control. Role definitions, permission wildcards, `rbac.require()` middleware guard. Stores roles in SQLite
-- **log** — structured logging to SQLite (`log.info`, `log.warn`, `log.error`, `log.debug`). Auto-cleanup via built-in scheduled task
-- **i18n** — internationalization. Key-value string lookup with `${var}` interpolation, locale-aware number/date/currency formatting, `Accept-Language` detection. ~200 lines
-- **search** — SQLite FTS5 wrapper. Declarative index definition, automatic sync triggers, relevance-ranked results with highlighted snippets. ~80 lines
-- **template** — HTML template engine with `{{ }}` expressions (HTML-escaped), `{{{ }}}` raw output, `{% %}` Lua code blocks, and layout inheritance. ~150 lines
-- **pdf** — PDF document builder for business documents (text, tables, built-in fonts, page breaks, alignment). Pure Lua, ~500-600 lines, no C dependency
-- **test** — test framework for `hull test`. Request simulation (`t.get`, `t.post`), assertions (`t.equal`, `t.ok`, `t.match`), per-test database isolation
-- **valid** — input validation with schema declaration. Type checking, bounds, patterns, nested table validation, unknown field stripping. ~150 lines
-- **limit** — rate limiting middleware. Token bucket algorithm, per-route configuration, in-memory counters. ~80 lines
-- **session** — cookie-based sessions stored in SQLite
-- **csrf** — CSRF token generation and verification middleware
+- **lua/** — Lua 5.4 runtime integration. Exposes all capabilities as Lua functions/tables. Custom `require()` searcher loads embedded stdlib before filesystem.
+- **js/** — QuickJS runtime integration. Exposes same capabilities as ES2023 modules (`import { db } from "hull:db"`). Custom module loader with `hull:` prefix for stdlib.
 
-### User Code (filesystem Lua layer)
+**Commands** (`src/hull/commands/`) — CLI subcommands:
 
-The developer writes these. In development they live on the filesystem for hot-reload. In production they are embedded into the binary.
+- **dev.c** — development server with hot reload (watches `.lua`, `.js`, `.html` files)
+- **build.c** — production binary builder (embeds all app artifacts)
+- **test.c** — test runner (in-process, memory SQLite, both runtimes)
+- **new.c** — project scaffolding
+- **eject.c** — export to standalone Makefile project
+- **inspect.c** — display capabilities and signature status
+- **verify.c** — dual-layer Ed25519 signature verification
+- **keygen.c** — Ed25519 keypair generation
+- **sign_platform.c** — platform signature tool
+- **dispatch.c** — CLI argument routing to subcommands
+
+**Core** (`src/hull/`):
+
+- **main.c** — startup sequence: parse arguments, open database, bind socket, open browser (if `--open`), apply pledge/unveil sandbox, initialize runtime, enter event loop
+- **sandbox.c** — pledge/unveil application based on manifest declarations
+- **signature.c** — dual-layer Ed25519 signature verification (platform + app)
+- **manifest.c** — manifest parsing and capability declaration enforcement
+
+### Standard Library (embedded, dual-runtime)
+
+These ship inside the binary in both Lua and JavaScript versions. The same API surface is available in both runtimes. The user never manages them.
+
+- **json** — canonical JSON encode/decode with sorted keys for deterministic signatures
+- **cookie** — cookie parsing and serialization with secure defaults (HttpOnly, SameSite, Secure)
+- **session** — server-side sessions backed by SQLite with sliding TTL expiry
+- **jwt** — JWT HS256 sign/verify/decode. No "none" algorithm, constant-time signature comparison
+- **csrf** — stateless CSRF tokens via HMAC-SHA256
+- **auth** — authentication middleware factories: session auth, JWT Bearer auth
+- **cors** — CORS middleware with configurable origins, methods, headers, preflight handling
+- **ratelimit** — in-memory rate limiting middleware. Sliding window, per-key buckets, configurable limits
+- **template** — compile-once render-many HTML template engine. `{{ }}` HTML-escaped output, `{{{ }}}` raw output, `{% if/for/block/extends/include %}` control flow, filter pipes, layout inheritance and includes. Compiles to native Lua/JS functions via C bridge for performance.
+- **verify** — Ed25519 signature verification helpers
+
+### User Code (filesystem layer)
+
+The developer writes these in Lua or JavaScript — one language per app. In development they live on the filesystem for hot-reload. In production they are embedded into the binary.
 
 ```
 my-app/
-  app.lua             # entry point: routes, middleware, config
-  routes/
-    invoices.lua      # domain routes
-    customers.lua
-    settings.lua
-  middleware/
-    auth.lua          # custom middleware
-  modules/
-    nav_hu.lua        # external API integration
+  app.lua (or app.js) # entry point: routes, middleware, config
   templates/
-    layout.html       # base layout (nav, footer, head)
-    invoice.html      # invoice page template
-    invoice_list.html # invoice listing template
-    invoice_email.html# email body template
-  locales/
-    en.lua            # English strings
-    hu.lua            # Hungarian strings
-  migrations/
-    001_settings.sql  # database schema
-    002_invoices.sql
+    base.html          # base layout (nav, footer, head)
+    pages/home.html    # page template (extends base.html)
+    partials/nav.html  # include partial
   tests/
-    test_auth.lua     # test files (hull test)
-    test_invoices.lua
+    test_auth.lua      # test files (hull test)
   public/
-    index.html        # SPA frontend (if using SPA)
+    index.html         # SPA frontend (if using SPA)
     app.js
     style.css
 ```
 
 ### Resolution Order
 
-When Lua calls `require("something")`:
+When the runtime loads a module (`require()` in Lua, `import` in JS):
 
-1. **Compiled-in Hull standard library** (app, db, json, session, valid, csrf)
+1. **Compiled-in Hull standard library** (json, session, jwt, cors, etc.)
 2. **Compiled-in user modules** (only in production builds)
 3. **Filesystem** (development, or hot-patching production)
 
 This means development is live-reload from files, production is self-contained in the binary, and emergency patches can override embedded code by dropping a file next to the executable.
 
-## Why C and Lua
+## Why C, Lua, and JavaScript
 
-Hull is a C core with a Lua scripting layer. Not Rust. Not Go. Not TypeScript. Here's why.
+Hull is a C core with dual scripting runtimes: Lua 5.4 and QuickJS (JavaScript ES2023). Not Rust. Not Go. Not Node.js. Here's why.
 
 ### Why C for the runtime
 
 **Cosmopolitan requires C.** The entire "single binary, runs anywhere" capability comes from Cosmopolitan C. There is no Cosmopolitan Rust, no Cosmopolitan Go. APE binaries are a C toolchain feature. Choosing any other language for the runtime would mean giving up the core premise of the project.
 
-**The vendored libraries are C.** Lua is C. SQLite is C. mbedTLS is C. TweetNaCl is C. Keel is C. There is no FFI boundary, no marshalling overhead, no ABI compatibility layer. One compiler, one toolchain, one language, one binary. A Rust runtime wrapping five C libraries would spend more lines on `unsafe` FFI bindings than on actual logic.
+**The vendored libraries are C.** Lua is C. QuickJS is C. SQLite is C. mbedTLS is C. TweetNaCl is C. Keel is C. There is no FFI boundary, no marshalling overhead, no ABI compatibility layer. One compiler, one toolchain, one language, one binary. A Rust runtime wrapping six C libraries would spend more lines on `unsafe` FFI bindings than on actual logic.
 
-**The C surface is small.** Hull's own C code is ~1,500 lines — the binding layer between Lua and the vendored libraries. This is not a 100,000-line C codebase where memory safety is a daily concern. It's a thin integration layer where every allocation is visible, every buffer has a bound, and one person can audit the whole thing in a day. The risk profile of 1,500 lines of carefully written C is lower than the risk profile of pulling in a Rust async runtime with 200 transitive crates.
+**The C surface is small.** Hull's own C code is the capability layer and runtime bindings — a thin integration layer where every allocation is visible, every buffer has a bound, and one person can audit the whole thing in a day. The risk profile of carefully written C with sanitizer and static analysis coverage is lower than the risk profile of pulling in a Rust async runtime with 200 transitive crates.
 
 **C compiles in seconds.** A clean build of Hull takes under 3 seconds. A comparable Rust project with serde, tokio, hyper, rusqlite, and rlua would take 60-120 seconds. During development, this matters. When a vibecoder's AI assistant is iterating on the platform, sub-second rebuilds are a feature.
 
@@ -450,7 +454,7 @@ Rust's safety guarantees are real. For a large-team, high-churn application code
 
 **FFI defeats the safety model.** Hull's runtime is glue between C libraries. Every Lua API call crosses `unsafe`. Every SQLite call crosses `unsafe`. Every mbedTLS call crosses `unsafe`. The borrow checker protects the 10% of code between FFI boundaries while the 90% that does actual work is `unsafe` anyway.
 
-**Cargo is a supply chain.** Rust's package ecosystem is excellent for application development and problematic for a project whose security story is "six vendored libraries (plus one optional), readable in an afternoon." A Rust rewrite would pull in rusqlite (depends on libsqlite3-sys), rlua or mlua (depends on lua-src), rustls or native-tls, serde, tokio or async-std — each with its own transitive dependency tree. The auditable, zero-dependency property vanishes.
+**Cargo is a supply chain.** Rust's package ecosystem is excellent for application development and problematic for a project whose security story is "six vendored libraries, readable in an afternoon." A Rust rewrite would pull in rusqlite (depends on libsqlite3-sys), rlua or mlua (depends on lua-src), rustls or native-tls, serde, tokio or async-std — each with its own transitive dependency tree. The auditable, zero-dependency property vanishes.
 
 **Complexity budget.** Rust's type system, lifetime annotations, and trait bounds are powerful tools that consume cognitive budget. In Hull's C code, a Lua binding function is: get arguments from Lua stack, call C function, push results to Lua stack. In Rust it becomes: generic over lifetime parameters, wrapped in a `UserData` impl, with `FromLua`/`ToLua` trait bounds, error types converted through `From` impls. The code is safer. It's also 3x longer and harder for a new contributor (or an AI) to understand and modify.
 
@@ -464,15 +468,15 @@ Rust's safety guarantees are real. For a large-team, high-churn application code
 
 **Runtime overhead.** Go's garbage collector, goroutine scheduler, and runtime add ~10 MB to the binary and introduce GC pauses. Hull's total binary is under 2 MB with no GC.
 
-### Why not TypeScript / Bun / Deno
+### Why not Node.js / Bun / Deno
 
-**Runtime size.** Bun is ~50 MB. Deno is ~80 MB. Node is ~40 MB. Hull is under 2 MB. The JavaScript runtime alone is 20-40x larger than the entire Hull binary.
+**Runtime size.** Bun is ~50 MB. Deno is ~80 MB. Node is ~40 MB. Hull is under 2 MB. Any one of those JavaScript runtimes alone is 20-40x larger than the entire Hull binary.
 
 **No Cosmopolitan support.** These runtimes produce per-platform executables (or require installation).
 
-**Dependency culture.** The npm ecosystem normalises pulling in hundreds of packages for trivial functionality. A Hull application has zero dependencies beyond what's vendored in the binary. A typical Next.js project has 800+ transitive dependencies in `node_modules`. One malicious or compromised package in that tree undermines the entire security story.
+**Dependency culture.** The npm ecosystem normalises pulling in hundreds of packages for trivial functionality. Hull uses QuickJS for JavaScript — same language, same ES2023 features, but zero npm, zero `node_modules`. A Hull application has zero dependencies beyond what's vendored in the binary.
 
-**V8/JavaScriptCore are not auditable.** These JavaScript engines are millions of lines of C++. They are large, complex attack surfaces maintained by browser vendor teams with hundreds of engineers. Lua 5.4 is 30 files of ANSI C, maintained for 30 years, and genuinely auditable by a single person.
+**V8/JavaScriptCore are not auditable.** These JavaScript engines are millions of lines of C++. QuickJS is ~50 files of C, auditable by a small team. Lua 5.4 is 30 files of ANSI C. Both are dramatically smaller attack surfaces than V8.
 
 ### Why Lua for application code
 
@@ -488,7 +492,15 @@ Rust's safety guarantees are real. For a large-team, high-churn application code
 
 For Hull's workloads, Lua speed is irrelevant to overall performance. A typical request cycle is: parse HTTP (C, Keel), run a Lua handler (microseconds of Lua), query SQLite (C, milliseconds of disk I/O), format a JSON response (microseconds of Lua), send HTTP (C, Keel). The bottleneck is always I/O — SQLite queries, network writes, external API calls — never Lua execution. OpenResty proved this at scale: plain Lua (and LuaJIT) scripting inside Nginx handles millions of requests per second. Hull's local-first use case with 1-5 users is trivial by comparison.
 
-**The 1-indexed arrays are annoying.** Yes. Live with it.
+**The 1-indexed arrays are annoying.** Yes. Live with it. Or write JavaScript instead — Hull supports both.
+
+### Why both runtimes
+
+Hull started as Lua-only. QuickJS was added because JavaScript is the world's most widely known programming language. Every web developer knows it. Every LLM generates it fluently. Adding QuickJS (~350 KB, pure C, no dependencies, ES2023 compliant) nearly doubled Hull's potential developer audience at minimal binary size cost.
+
+Both runtimes share the same C capability layer — `db`, `crypto`, `http`, `fs`, `env`, `time` — exposed through identical APIs. The standard library modules (`session`, `jwt`, `csrf`, `auth`, `template`, etc.) are implemented in both languages with the same function signatures and behavior. An app written in Lua and an app written in JavaScript produce the same binary, use the same sandbox, and have the same security properties.
+
+The developer (or their AI) picks one language per app. There is no mixing — `app.lua` means Lua, `app.js` means JavaScript. This keeps the mental model simple while giving maximum flexibility in language choice.
 
 ## Build System
 
@@ -502,7 +514,7 @@ hull dev --open                 # same, but open browser automatically
 hull dev --port 9090            # custom port
 ```
 
-Lua files are loaded from the filesystem on each request (in dev mode). Change a file, refresh the browser, see the result. No restart, no compilation.
+Lua/JS files are loaded from the filesystem on each request (in dev mode). Change a file, refresh the browser, see the result. No restart, no compilation.
 
 ### Production Build
 
@@ -514,7 +526,7 @@ hull build --output myapp.com --sign developer.key   # + developer signature
 This:
 
 1. Verifies hull.com's own platform signature (ensures untampered C runtime)
-2. Scans the project directory for all Lua, SQL, template, locale, and static files
+2. Scans the project directory for all Lua/JS, template, and static files
 3. Stamps the verified Hull C runtime into a new APE binary
 4. Embeds all collected artifacts as byte arrays
 5. Optionally signs the app layer with the developer's Ed25519 key
@@ -524,13 +536,8 @@ This:
 ### What Gets Embedded
 
 ```
-app.lua              -> embedded
-routes/*.lua         -> embedded
-middleware/*.lua      -> embedded
-modules/*.lua        -> embedded
-templates/*.html     -> embedded
-locales/*.lua        -> embedded (i18n string tables)
-migrations/*.sql     -> embedded
+app.lua (or app.js)  -> embedded (entry point)
+templates/*.html     -> embedded (HTML templates)
 public/**            -> embedded (HTML, CSS, JS, images)
 ```
 
@@ -578,7 +585,8 @@ hull license activate KEY       # activate commercial license
 hull.com (APE binary, ~2 MB)
 ├── Hull C Runtime (signed by artalis-io)
 │   ├── Keel          # HTTP server
-│   ├── Lua 5.4       # scripting
+│   ├── Lua 5.4       # scripting (Lua runtime)
+│   ├── QuickJS        # scripting (JavaScript ES2023 runtime)
 │   ├── SQLite         # database
 │   ├── mbedTLS        # TLS
 │   ├── TweetNaCl      # signatures
@@ -594,7 +602,7 @@ hull.com (APE binary, ~2 MB)
 └── App Signature       # Ed25519 over Lua build tool layer
 ```
 
-Both layers are signed independently using the same dual-signature model described in the Security section. The platform signature proves the C runtime is the official Hull build. The app signature proves the build tool's Lua code is unmodified. hull.com eats its own dogfood.
+Both layers are signed independently using the same dual-signature model described in the Security section. The platform signature proves the C runtime is the official Hull build. The app signature proves the build tool's application code is unmodified. hull.com eats its own dogfood.
 
 ### The Build Guarantee
 
@@ -606,10 +614,8 @@ When you run `hull build`:
    → If verification fails: WARN (ejected copies may be unsigned)
 
 2. Collect project artifacts:
-   ├── app.lua + routes/*.lua + modules/*.lua    → Lua source or bytecode
+   ├── app.lua or app.js                         → entry point (source or bytecode)
    ├── templates/*.html                          → embedded strings
-   ├── locales/*.lua                             → embedded Lua tables
-   ├── migrations/*.sql                          → embedded SQL
    ├── public/*                                  → embedded static assets
    └── license.key (if exists)                   → embedded license
 
@@ -621,13 +627,13 @@ When you run `hull build`:
 
 5. If --sign key.pem: sign the app layer with developer's Ed25519 key
 
-6. If AGPL (no commercial license): embed Lua source (AGPL requires it)
-   If commercial: embed Lua bytecode (source optional via --include-source)
+6. If AGPL (no commercial license): embed source (AGPL requires it)
+   If commercial: embed bytecode (source optional via --include-source)
 
 7. Output: myapp.com (single APE binary, runs everywhere)
 ```
 
-The critical guarantee: **the Hull runtime in your built app is byte-identical to the signed runtime in hull.com.** `hull verify myapp.com` can confirm the platform layer is exactly the one artalis-io signed, regardless of what Lua code the developer embedded.
+The critical guarantee: **the Hull runtime in your built app is byte-identical to the signed runtime in hull.com.** `hull verify myapp.com` can confirm the platform layer is exactly the one artalis-io signed, regardless of what application code the developer embedded.
 
 ### Versioning
 
@@ -646,13 +652,9 @@ License:    Standard — expires 2027-03-15 (mark@artalis.io)
 ```bash
 $ hull new invoicing
 Created invoicing/
-  app.lua             # entry point with example route
-  migrations/
-    001_init.sql      # example schema
+  app.lua             # entry point with example route (or app.js)
   templates/
-    layout.html       # base layout
-  locales/
-    en.lua            # English strings
+    base.html         # base layout
   public/
     index.html        # SPA starter (or empty for server-rendered)
     style.css
@@ -764,12 +766,12 @@ A commercial license exempts the developer's Lua application layer from AGPL obl
 |---|---|---|
 | Build apps | Yes | Yes |
 | All features | Yes | Yes |
-| Distribute binaries | Yes, with Lua source | Yes, without source |
-| `hull inspect` shows | Security profile + Lua source | Security profile only (bytecode) |
+| Distribute binaries | Yes, with source | Yes, without source |
+| `hull inspect` shows | Security profile + source | Security profile only (bytecode) |
 | Startup banner | "Hull (AGPL-3.0)" | No branding requirement |
 | End users see source | Required (AGPL) | Not required |
 
-AGPL builds embed Lua source (the license requires it). Commercial builds embed Lua bytecode by default — the developer can opt in to including source with `hull build --include-source`.
+AGPL builds embed source code (the license requires it). Commercial builds embed bytecode by default — the developer can opt in to including source with `hull build --include-source`.
 
 ### How the License Key Works
 
@@ -825,109 +827,43 @@ Hull's security is layered:
 
 This is enforced by the operating system kernel. It is not a policy — it is a syscall-level guarantee. Hull vendors Justine Tunney's [pledge/unveil polyfill](https://github.com/jart/pledge) for Linux (SECCOMP BPF + Landlock LSM). On OpenBSD, native syscalls are used. On macOS and Windows, the sandbox is unavailable at the kernel level — the application runs without syscall restrictions, relying on OS-level permissions and application-layer safety instead. The strongest security posture is achieved on Linux and OpenBSD.
 
-**Supply chain** — six vendored C libraries (plus optional WAMR), all designed for embedding, all auditable. No package manager, no transitive dependencies, no lockfiles, no supply chain attacks. The entire dependency tree is readable in an afternoon.
+**Supply chain** — seven vendored C libraries (plus optional WAMR), all designed for embedding, all auditable. No package manager, no transitive dependencies, no lockfiles, no supply chain attacks. The entire dependency tree is readable in an afternoon.
 
-**SQL injection prevention** — all database access goes through parameterized queries at the C binding layer. Lua code cannot construct raw SQL that reaches SQLite without parameter binding.
+**SQL injection prevention** — all database access goes through parameterized queries at the C capability layer. Application code cannot construct raw SQL that reaches SQLite without parameter binding.
 
-**License verification in compiled C** — not in Lua scripts that can be trivially edited. Verification checks are distributed across multiple functions in the compiled binary.
+**License verification in compiled C** — not in scripts that can be trivially edited. Verification checks are distributed across multiple functions in the compiled binary.
 
-**Minimal, auditable C surface** — Hull's own C code (the binding layer, license verification, HTTP client, startup sequence) is roughly 1,500 lines. Not 150,000 — fifteen hundred. A single security auditor can read the entire codebase in a day. The vendored libraries (Keel, Lua, SQLite, mbedTLS, TweetNaCl — plus optional WAMR) are all established, battle-tested projects with decades of combined security scrutiny. Cosmopolitan libc provides the cross-platform runtime and libc-level pledge/unveil emulation on platforms without native kernel sandboxing. The total attack surface is small and enumerable.
+**Minimal, auditable C surface** — Hull's own C code (the capability layer, runtime bindings, CLI commands, sandbox, signatures) is a focused codebase. A single security auditor can read it in a day. The vendored libraries (Keel, Lua, QuickJS, SQLite, mbedTLS, TweetNaCl — plus optional WAMR) are all established, battle-tested projects with decades of combined security scrutiny. Cosmopolitan libc provides the cross-platform runtime and libc-level pledge/unveil emulation on platforms without native kernel sandboxing. The total attack surface is small and enumerable.
 
-**Lua sandbox and restricted file I/O** — Lua was designed to be embedded in hostile environments (game engines, network equipment, industrial controllers). The C host controls exactly which Lua standard library functions are available. Hull removes the entire `io` and `os` standard libraries, plus `loadfile` and `dofile`, from the Lua environment before any user code runs. These functions do not exist in the runtime — not deprecated, not blocked by policy, removed entirely.
+**Runtime sandboxes and restricted file I/O** — Both Lua and QuickJS were designed to be embedded in hostile environments. The C host controls exactly which APIs are available. Hull removes dangerous capabilities from both runtimes before any user code runs:
 
-In their place, Hull exposes a restricted file API implemented in compiled C. Every file operation validates the path against the application's declared data directory before touching the filesystem:
+- **Lua:** the entire `io` and `os` standard libraries, plus `loadfile`, `dofile`, and `load` are removed. Memory is capped via a custom allocator.
+- **JavaScript:** `eval()`, the `Function` constructor, and the `std`/`os` modules are removed. Memory is capped and instruction-count gas metering prevents infinite loops.
 
-```c
-// Hull's C layer — exposed to Lua as hull.fs.*
-// Every function resolves the path and checks it against the allowed directory
+These functions do not exist in the runtime — not deprecated, not blocked by policy, removed entirely.
 
-static int hull_fs_read(lua_State *L) {
-    const char *path = luaL_checkstring(L, 1);
-    char resolved[PATH_MAX];
-    if (!resolve_and_check(path, resolved, allowed_data_dir))
-        return luaL_error(L, "access denied: %s", path);
-    // safe — read and return contents
-    ...
-}
-
-static int hull_fs_write(lua_State *L) {
-    const char *path = luaL_checkstring(L, 1);
-    const char *data = luaL_checkstring(L, 2);
-    char resolved[PATH_MAX];
-    if (!resolve_and_check(path, resolved, allowed_data_dir))
-        return luaL_error(L, "access denied: %s", path);
-    // safe — write data
-    ...
-}
-
-static int hull_fs_exists(lua_State *L) { ... }   // path-checked
-static int hull_fs_delete(lua_State *L) { ... }   // path-checked
-static int hull_fs_list(lua_State *L)   { ... }   // path-checked
-```
-
-The `resolve_and_check` function resolves symlinks, rejects `..` traversal, and verifies the resolved absolute path starts with the allowed data directory. This is compiled C — Lua code cannot override, monkey-patch, or bypass it.
-
-Lua application code uses the restricted API:
-
-```lua
--- These work — path is inside the data directory
-local csv = hull.fs.read("exports/report.csv")
-hull.fs.write("exports/q4.csv", csv_data)
-local files = hull.fs.list("uploads/")
-
--- These fail — path resolves outside the data directory
-hull.fs.read("/etc/passwd")              -- error: access denied
-hull.fs.read("../../secrets.txt")        -- error: access denied
-hull.fs.write("/tmp/exfiltrated.db", d)  -- error: access denied
-```
+In their place, Hull exposes a restricted file API implemented in the C capability layer (`cap/fs.c`). Every file operation validates the path against the application's declared data directory before touching the filesystem. The `resolve_and_check` function resolves symlinks, rejects `..` traversal, and verifies the resolved absolute path starts with the allowed data directory. This is compiled C — application code in Lua or JavaScript cannot override, monkey-patch, or bypass it.
 
 File uploads from the browser arrive via HTTP POST (Keel handles this). File downloads go out as HTTP responses. The browser mediates all user-facing file selection — Hull never needs access to the user's general filesystem.
 
-This Lua sandbox is the **primary security layer on all platforms**, including macOS and Windows where pledge/unveil is not available at the kernel level. On Linux and OpenBSD, pledge/unveil provides a second, kernel-enforced layer — even if a bug in Hull's C code or the Lua VM itself were exploited, the kernel would still block unauthorized filesystem access.
+The runtime sandbox is the **primary security layer on all platforms**, including macOS and Windows where pledge/unveil is not available at the kernel level. On Linux and OpenBSD, pledge/unveil provides a second, kernel-enforced layer — even if a bug in Hull's C code or the scripting VM itself were exploited, the kernel would still block unauthorized filesystem access.
 
 ```
                 Linux/OpenBSD    macOS         Windows
                 ─────────────    ─────         ───────
-Lua sandbox:    active           active        active
-(C path check,  (same)           (same)
- io/os removed)
+Lua/JS sandbox: active           active        active
+(C capability    (same)           (same)
+ layer, removed
+ dangerous APIs)
 
 pledge/unveil:  active           —             —
 (kernel-level
  enforcement)
 ```
 
-The honest assessment: Linux with pledge/unveil is the most secure deployment. macOS and Windows with only the Lua sandbox are secure enough for the threat model — accidental file access, malicious Lua modules, path traversal bugs. You would need to exploit a vulnerability in Hull's own C code or the Lua VM to bypass the sandbox, at which point you have arbitrary code execution and no application-level sandbox of any kind would help.
+The honest assessment: Linux with pledge/unveil is the most secure deployment. macOS and Windows with only the runtime sandbox are secure enough for the threat model — accidental file access, malicious modules, path traversal bugs. You would need to exploit a vulnerability in Hull's own C code or the scripting VM to bypass the sandbox, at which point you have arbitrary code execution and no application-level sandbox of any kind would help.
 
-**Restricted network access** — Hull applications declare their network needs at build time. The C layer enforces a host allowlist — Lua code can only make outbound HTTP requests to explicitly declared endpoints:
-
-```lua
--- app.lua — declared at startup, before sandbox
-app.config({
-    allowed_hosts = {
-        "api.nav.gov.hu",        -- Hungarian tax authority
-        "fatturapa.gov.it",      -- Italian SDI
-    },
-})
-```
-
-The C-layer HTTP client checks every outbound request against this list before connecting:
-
-```c
-// http_client.c — compiled C, not bypassable from Lua
-static int hull_http_request(lua_State *L) {
-    const char *url = luaL_checkstring(L, 1);
-    char host[256];
-    if (parse_host(url, host, sizeof(host)) < 0)
-        return luaL_error(L, "invalid URL");
-
-    if (!is_allowed_host(host))
-        return luaL_error(L, "network access denied: %s", host);
-
-    // safe — proceed with mbedTLS connection
-    ...
-}
-```
+**Restricted network access** — Hull applications declare their network needs in a manifest. The C capability layer enforces a host allowlist — application code can only make outbound HTTP requests to explicitly declared endpoints. The C-layer HTTP client (`cap/http.c`) checks every outbound request against this list before connecting. This is compiled C — not bypassable from Lua or JavaScript.
 
 Three tiers of network access:
 
@@ -963,7 +899,7 @@ Sandbox: pledge(stdio rpath wpath) unveil(data.db:rw, public/:r)
 
 An invoicing app that shows `Network: OFFLINE` physically cannot phone home. An app that shows `Network: api.nav.gov.hu` can only reach the Hungarian tax authority. This is not a policy claim — it is what the kernel enforces.
 
-**2. Readable Lua source.** In development mode, all application logic is plain Lua files on disk — readable, searchable, auditable. In production builds, `hull inspect` always shows the security profile (sandbox declarations, network access, filesystem paths). For AGPL builds, it also extracts the full Lua source (required by the license). For commercial builds, source extraction is available only if the developer opted in with `--include-source`:
+**2. Readable source.** In development mode, all application logic is plain Lua or JavaScript files on disk — readable, searchable, auditable. In production builds, `hull inspect` always shows the security profile (sandbox declarations, network access, filesystem paths). For AGPL builds, it also extracts the full source (required by the license). For commercial builds, source extraction is available only if the developer opted in with `--include-source`:
 
 ```bash
 hull inspect myapp.com              # list embedded files + security profile
@@ -972,7 +908,7 @@ hull inspect myapp.com --extract    # extract all files to disk
 hull inspect myapp.com --security   # show only security profile (always works)
 ```
 
-Lua is a simple, readable language. A competent reviewer can read an entire Hull application's logic in an hour. This is not true of a minified React bundle or compiled Go binary.
+Both Lua and JavaScript are readable languages. A competent reviewer can read an entire Hull application's logic in an hour. This is not true of a minified React bundle or compiled Go binary.
 
 **3. Deterministic, reproducible builds.** Given the same source files and Hull version, `hull build` produces the same binary. A third party can verify that a distributed binary matches its claimed source:
 
@@ -985,7 +921,8 @@ This enables community-verified builds: the developer publishes source, anyone c
 
 **4. No hidden capabilities.** Hull applications cannot:
 - Load native code or shared libraries (no `ffi`, no `dlopen`)
-- Execute shell commands (no `os.execute`, no `io.popen` — removed from Lua)
+- Execute shell commands (`os.execute`/`io.popen` removed from Lua; `std`/`os` modules removed from JS)
+- Evaluate arbitrary code (`load` removed from Lua; `eval`/`Function` removed from JS)
 - Access files outside their declared directory (C-layer path validation + unveil)
 - Connect to undeclared network hosts (C-layer allowlist + pledge)
 - Spawn child processes (pledge blocks `exec`)
@@ -993,8 +930,8 @@ This enables community-verified builds: the developer publishes source, anyone c
 What the application *can* do is the union of its `allowed_hosts`, its `unveil` paths, and its `pledge` promises — all visible at startup and all kernel-enforced on Linux/OpenBSD.
 
 **5. Community review and trust signals.** Hull applications are small enough to review. The entire attack surface of a Hull app is:
-- ~500-2000 lines of Lua (the application logic)
-- The `app.lua` config (filesystem paths, network hosts, features)
+- ~500-2000 lines of Lua or JavaScript (the application logic)
+- The manifest (filesystem paths, network hosts, env vars)
 - The SQL migrations (database schema)
 
 This is reviewable by a single person in an afternoon. Open-source Hull apps can be community-audited. Commercial Hull apps can be reviewed by a customer's IT team before deployment. The small surface area makes meaningful code review practical — unlike a 200MB Electron app or a cloud SaaS where you can't see the code at all.
@@ -1003,7 +940,7 @@ This is reviewable by a single person in an afternoon. Open-source Hull apps can
 
 ### Platform Integrity — Verifying the C Layer
 
-Everything above assumes the Hull platform itself is honest — that the compiled C code actually enforces pledge/unveil, actually checks the host allowlist, actually restricts file I/O. But what if a malicious app developer forks Hull, guts the sandbox enforcement, and ships a binary that *looks* like Hull but doesn't enforce anything? `hull inspect` shows the Lua source, but it can't prove the C layer underneath is legitimate.
+Everything above assumes the Hull platform itself is honest — that the compiled C code actually enforces pledge/unveil, actually checks the host allowlist, actually restricts file I/O. But what if a malicious app developer forks Hull, guts the sandbox enforcement, and ships a binary that *looks* like Hull but doesn't enforce anything? `hull inspect` shows the application source, but it can't prove the C layer underneath is legitimate.
 
 This is the deepest trust problem. Checksums and hashes are not enough — they tell you the file hasn't been *corrupted*, not that it came from a *trusted source*. You need digital signatures: a cryptographic proof that ties a binary to the identity that produced it.
 
@@ -1025,7 +962,7 @@ Platform:  Hull v0.1.0
 Signed by: Hull Project (Ed25519: kl8x...q2m4)
 Signature: VALID — platform code matches official Hull v0.1.0 release
 
-App code:  3 Lua files, 2 migrations, 12 static assets
+App code:  3 source files, 2 migrations, 12 static assets
 App signer: unsigned (no developer signature)
 ```
 
@@ -1070,7 +1007,7 @@ This is the critical check. A user doesn't need to understand C code — they ru
 │                                             │
 │ ┌─────────────────────────────────────────┐ │
 │ │ Embedded App Code                       │ │
-│ │ Lua files, SQL migrations, HTML/JS/CSS  │ │
+│ │ Lua/JS files, templates, HTML/CSS/JS    │ │
 │ │ (not covered by platform signature —    │ │
 │ │  this is the developer's code)          │ │
 │ └─────────────────────────────────────────┘ │
@@ -1105,7 +1042,7 @@ Platform:  Hull v0.1.0
 Signed by: Hull Project (Ed25519: kl8x...q2m4)
 Signature: VALID — platform code matches official Hull v0.1.0 release
 
-App code:  3 Lua files, 2 migrations, 12 static assets
+App code:  3 source files, 2 migrations, 12 static assets
 App signer: Kovacs Software Kft. (Ed25519: m9p2...x7w1)
 Signature: VALID — binary matches developer signature
 ```
@@ -1125,12 +1062,12 @@ This signature is optional because many Hull use cases don't need it — an inte
 | Verification | `hull verify` checks automatically | `hull verify` checks if present |
 | Forgeable? | Only with Hull project's private key | Only with developer's private key |
 
-A forked Hull with the sandbox gutted would fail the platform signature check. A legitimate Hull with tampered Lua code would fail the developer signature check (if signed). Both checks are offline, instant, and use the same Ed25519 cryptography already vendored for licensing (TweetNaCl — no additional dependencies).
+A forked Hull with the sandbox gutted would fail the platform signature check. A legitimate Hull with tampered application code would fail the developer signature check (if signed). Both checks are offline, instant, and use the same Ed25519 cryptography already vendored for licensing (TweetNaCl — no additional dependencies).
 
 #### The audit chain
 
 ```
-Hull source code        ← open source, ~1,500 lines of C, auditable in a day
+Hull source code        ← open source, focused C codebase, auditable in a day
         │
         ▼
 Hull CI build           ← GitHub Actions, public logs, deterministic
@@ -1158,8 +1095,8 @@ The Hull project publishes a static, single-page HTML5 application at **verify.g
 1. Parses the binary structure to extract the platform attestation and app signature blocks
 2. Verifies the platform Ed25519 signature against the Hull project's public key (hardcoded in the page)
 3. Verifies the developer's Ed25519 signature if present
-4. Extracts and displays the embedded `app.lua` configuration — `allowed_hosts`, filesystem paths, pledge promises
-5. Lists all embedded files (Lua source, SQL migrations, static assets) with sizes
+4. Extracts and displays the embedded app configuration — `allowed_hosts`, filesystem paths, pledge promises
+5. Lists all embedded files (application source, SQL migrations, static assets) with sizes
 6. Shows a summary verdict
 
 ```
@@ -1213,7 +1150,7 @@ The Hull project publishes a static, single-page HTML5 application at **verify.g
 - **No installation required.** The user doesn't need Hull, a terminal, or any technical knowledge. They open a webpage and drop a file.
 - **No trust in the developer's website.** The verifier is hosted by the Hull project, not the app developer. The developer cannot tamper with the verification.
 - **No server.** The page is static HTML + JavaScript. The binary never leaves the browser — it's parsed client-side using the File API. No upload, no network call, no privacy concern. The page works offline once loaded.
-- **Readable source.** For AGPL builds (or commercial builds with `--include-source`), the [view] links display the embedded Lua files in the browser. A non-technical user's IT advisor can click through every file in the application without extracting anything. For commercial bytecode-only builds, the security profile is still fully visible.
+- **Readable source.** For AGPL builds (or commercial builds with `--include-source`), the [view] links display the embedded source files in the browser. A non-technical user's IT advisor can click through every file in the application without extracting anything. For commercial bytecode-only builds, the security profile is still fully visible.
 - **Shareable.** A user can screenshot or link to the verification result. "Before I install this, here's what it can access" becomes a normal part of evaluating software.
 
 The verifier page itself is open source, hosted on a CDN (GitHub Pages or Cloudflare Pages), and contains the Hull project's public key as a JavaScript constant. It could also be downloaded and run locally as a standalone HTML file — zero dependencies, works in any browser.
@@ -1227,11 +1164,11 @@ This closes the trust loop for non-technical users. You don't need to understand
 | | Hull | Electron | Go/Rust binary | SaaS |
 |---|---|---|---|---|
 | Can you read the app logic? | Yes, AGPL builds (`hull inspect`) | Minified JS, impractical | Compiled, no | No |
-| Can you verify the platform? | Yes (Ed25519 signature, 1,500 LOC) | No (millions of LOC in Chromium) | Partially (compiler is open, but 300 crates aren't all audited) | No |
+| Can you verify the platform? | Yes (Ed25519 signature, focused codebase) | No (millions of LOC in Chromium) | Partially (compiler is open, but 300 crates aren't all audited) | No |
 | Can you verify the author? | Yes (optional Ed25519 app signature) | Code signing (expensive, opaque CAs) | Code signing (same) | No |
 | Can you verify the build? | Yes (reproducible, CI-built, signed) | Theoretically (practically impossible) | Yes (reproducible builds possible) | No |
 | Can you see what it accesses? | Yes (startup banner, kernel-enforced) | No | No | No |
-| Supply chain deps | 6 vendored C libs (+1 optional) | 500-1,500 npm packages | 50-400 crates/modules | Unknown |
+| Supply chain deps | 7 vendored C libs (+1 optional) | 500-1,500 npm packages | 50-400 crates/modules | Unknown |
 | Can one person audit it? | Yes, in a day | No | No | No |
 | Cost to sign | Free (Ed25519 key pair) | $99-299/yr (Apple/MS certificates) | $99-299/yr (same) | N/A |
 
@@ -1264,7 +1201,7 @@ The license key contains a signed payload. A deterministic key derivation functi
 db_key = HKDF(license_payload, db_salt, "hull-db-encryption")
 ```
 
-Hull uses [SQLite3 Multiple Ciphers](https://github.com/nicedecisions/sqlcipher) or SQLite's built-in codec API to apply AES-256 encryption transparently. All reads and writes go through the encryption layer — Lua code and the application logic are completely unaware.
+Hull uses [SQLite3 Multiple Ciphers](https://github.com/nicedecisions/sqlcipher) or SQLite's built-in codec API to apply AES-256 encryption transparently. All reads and writes go through the encryption layer — Application code is completely unaware.
 
 ### What This Does NOT Do
 
@@ -1298,28 +1235,41 @@ When disabled (the default), the database is plain SQLite, readable by any SQLit
 
 ## Standard Library Reference
 
-Hull ships a batteries-included Lua standard library embedded in the binary. Detailed documentation for each platform feature follows in the sections below.
+Hull ships a batteries-included standard library embedded in the binary, implemented in both Lua and JavaScript.
 
-| Module | Purpose | Size |
-|--------|---------|------|
-| **app** | Route registration, middleware chain, static files, response helpers, lifecycle | core |
-| **db** | Query helpers, migrations, backup, pagination, transactions (parameterized only) | core |
-| **json** | JSON encode/decode | ~200 lines |
-| **csv** | RFC 4180 CSV encode/decode with separator auto-detection | ~150 lines |
-| **email** | Unified API with provider abstraction (Postmark, SendGrid, SES, Resend, Mailgun, SMTP) | ~300 lines |
-| **auth** | Password hashing (PBKDF2-HMAC-SHA256), secure token generation | ~100 lines |
-| **rbac** | Role-based access control, permission wildcards, middleware guard | ~150 lines |
-| **log** | Structured logging to SQLite + stdout, auto-cleanup | ~80 lines |
-| **i18n** | Internationalization, locale-aware formatting, language detection | ~200 lines |
-| **search** | SQLite FTS5 wrapper, declarative indexes, relevance ranking, highlighted snippets | ~80 lines |
-| **template** | HTML template engine with expressions, code blocks, layout inheritance | ~150 lines |
-| **pdf** | PDF document builder for business documents (text, tables, fonts, pages) | ~500 lines |
-| **test** | Test framework for \ with request simulation and DB isolation | ~200 lines |
-| **valid** | Input validation with schema declaration, type checking, sanitization | ~150 lines |
-| **limit** | Rate limiting middleware (token bucket algorithm) | ~80 lines |
-| **session** | Cookie-based sessions stored in SQLite | ~60 lines |
-| **csrf** | CSRF token generation and verification middleware | ~40 lines |
-| **plugin** | WASM compute plugin invocation (`plugin.call`, `plugin.preload`) *(optional, requires WAMR)* | C bridge |
+| Module | Purpose |
+|--------|---------|
+| **json** | Canonical JSON encode/decode (sorted keys for deterministic signatures) |
+| **cookie** | Cookie parsing and serialization with secure defaults |
+| **session** | Server-side sessions backed by SQLite with sliding expiry |
+| **jwt** | JWT HS256 sign/verify/decode (no "none" algorithm, constant-time comparison) |
+| **csrf** | Stateless CSRF tokens via HMAC-SHA256 |
+| **auth** | Authentication middleware factories (session auth, JWT Bearer auth) |
+| **cors** | CORS middleware with configurable origins, methods, headers, preflight |
+| **ratelimit** | In-memory rate limiting middleware (sliding window, per-key buckets) |
+| **template** | Compile-once render-many HTML template engine with inheritance, includes, filters |
+| **verify** | Ed25519 signature verification helpers |
+
+**C capability layer** (available to both Lua and JS apps):
+
+- **Database** — SQLite with WAL mode, parameterized queries, prepared statement cache, batch transactions
+- **Crypto** — SHA-256/512, HMAC, PBKDF2, Ed25519, XSalsa20+Poly1305, secretbox, random bytes, password hash/verify
+- **HTTP client** — outbound HTTP/HTTPS with host allowlist enforcement (mbedTLS)
+- **Filesystem** — sandboxed read/write/exists/delete with path traversal rejection
+- **Environment** — allowlist-enforced env var access
+- **Time** — now, now_ms, clock, date, datetime
+- **Body parsing** — request body reading, multipart/form-data, chunked transfer-encoding
+- **WebSockets** — text, binary, ping/pong, close
+- **HTTP/2** — h2c upgrade support
+
+**Build & deployment features:**
+
+- **Development Mode** — hot reload, LLM-friendly error output, access log
+- **Production Mode** — embedded assets, startup banner
+- **HTML Templating** — server-rendered templates with layout inheritance, includes, filters
+- **Testing** — in-process test runner, request simulation, per-test database isolation
+- **File Uploads** — multipart handling with configurable size limits
+- **Rate Limiting** — sliding window, per-key, configurable responses
 
 ## Startup Sequence
 
@@ -1334,14 +1284,14 @@ The order matters. Each step happens before the next, and the security boundary 
 6.  Open browser (if --open flag, requires fork+exec)
     ─── SANDBOX BOUNDARY ───
 7.  Apply pledge/unveil (no more exec, no filesystem beyond declared paths)
-8.  Initialize Lua runtime
+8.  Initialize runtime (Lua or QuickJS, based on app entry point)
 9.  Load embedded standard library
-10. Load application code (app.lua)
+10. Load application code (app.lua or app.js)
 11. Run database migrations
 12. Enter Keel event loop
 ```
 
-Everything above the sandbox boundary can access the full system. Everything below is restricted to exactly what the application declared. Lua code — including all user-written application logic — runs entirely within the sandbox.
+Everything above the sandbox boundary can access the full system. Everything below is restricted to exactly what the application declared. Application code — whether Lua or JavaScript — runs entirely within the sandbox.
 
 ## Scheduled Tasks
 
@@ -1419,7 +1369,7 @@ No threads. No signals. No external cron daemon. The event loop wakes up at the 
 
 ### Time Functions
 
-Hull removes the Lua `os` library (it contains `os.execute`, `os.remove`, `os.exit` — unsafe). Time functions are exposed selectively through the Hull namespace:
+Hull removes the `os` library from both runtimes (it contains dangerous functions like `os.execute`, `os.remove`, `os.exit`). Time functions are exposed selectively through the Hull namespace:
 
 ```lua
 hull.time.now()          -- unix timestamp (seconds)
@@ -1545,7 +1495,7 @@ The actual limit is computation that takes *minutes* while the server must remai
 
 The browser frontend (HTML5/JS) is not restricted by Hull's sandbox. JavaScript running in the browser tab can `fetch()` any URL the browser allows, subject to CORS — the same as any website. Even if the Hull backend is `Network: OFFLINE` with no `allowed_hosts`, the frontend JS can talk to external APIs directly (Stripe.js for payments, Google Maps for geocoding, OAuth redirect flows).
 
-However, the frontend can only access data that the Hull backend has served to it via HTTP responses. The backend can only access its own SQLite database, its declared data directory, and its declared network hosts. The browser cannot reach into the server's sandbox — it sees only what the server chose to send. A malicious frontend script could exfiltrate *application data the user is already viewing* to an external endpoint, but it cannot exfiltrate system files, other applications' data, or anything outside Hull's sandbox. This is visible in the Lua source (`hull inspect`) and frontend JS source (embedded in the binary, extractable and readable).
+However, the frontend can only access data that the Hull backend has served to it via HTTP responses. The backend can only access its own SQLite database, its declared data directory, and its declared network hosts. The browser cannot reach into the server's sandbox — it sees only what the server chose to send. A malicious frontend script could exfiltrate *application data the user is already viewing* to an external endpoint, but it cannot exfiltrate system files, other applications' data, or anything outside Hull's sandbox. This is visible in the application source (`hull inspect`) and frontend JS source (embedded in the binary, extractable and readable).
 
 ## Multi-Instance
 
@@ -1669,7 +1619,7 @@ email.send({
 })
 ```
 
-The `email` module translates `email.send()` into the correct HTTP API call for the configured provider. Adding a new provider is adding a Lua file — no C changes. The provider's host is declared in `allowed_hosts`, so the network allowlist and `hull verify` / verify.gethull.dev show exactly which email service the app uses.
+The `email` module translates `email.send()` into the correct HTTP API call for the configured provider. Adding a new provider is adding a module file — no C changes. The provider's host is declared in `allowed_hosts`, so the network allowlist and `hull verify` / verify.gethull.dev show exactly which email service the app uses.
 
 This works with scheduled tasks and background work:
 
@@ -1829,7 +1779,7 @@ hull build --output myapp.com --env POSTMARK_TOKEN=xxx
 
 **Hull does not phone home for secrets.** No Vault, no AWS Secrets Manager, no key management service. The secret is either in the environment, in the database, or in the binary. All local. All offline.
 
-**Hull does not read undeclared environment variables.** The application's `allowed_env` is its complete list. `hull.env("PATH")` returns `nil` unless `PATH` is in `allowed_env`. This is enforced in compiled C — Lua code cannot bypass it. The user's environment is private by default.
+**Hull does not read undeclared environment variables.** The application's `allowed_env` is its complete list. `hull.env("PATH")` returns `nil` unless `PATH` is in `allowed_env`. This is enforced in compiled C — application code cannot bypass it. The user's environment is private by default.
 
 **Hull does not log secrets.** The startup banner prints the variable *names* (e.g. `Env: POSTMARK_TOKEN`) but never prints values. The user can see *which* variables the app reads without the values being exposed in any log or display.
 
@@ -1902,7 +1852,7 @@ Default retention: 30 days. Configurable via `app.config({ log_retention_days = 
 
 ## Authentication
 
-Hull is not an auth framework. It provides cryptographic primitives in compiled C and a pattern in the Lua standard library. The developer assembles them for their specific needs.
+Hull is not an auth framework. It provides cryptographic primitives in compiled C and a pattern in the standard library. The developer assembles them for their specific needs.
 
 ### Password Hashing (C layer)
 
@@ -1940,7 +1890,7 @@ local short = auth.random_token(16)   -- 16 bytes → 32-char hex string
 
 ### The Auth Pattern
 
-Hull provides: password hashing (C layer), sessions (Lua stdlib), CSRF (Lua stdlib), middleware (Keel). The developer writes the login logic:
+Hull provides: password hashing (C layer), sessions (stdlib), CSRF (stdlib), middleware (Keel). The developer writes the login logic:
 
 ```lua
 local auth = require("auth")
@@ -1988,12 +1938,12 @@ app.post("/logout", function(req, res)
 end)
 ```
 
-~30 lines. No magic. No opinionated auth framework. The developer controls who can register, what roles exist, password requirements, lockout policy. Hull provides the hard parts that must be correct (hashing in compiled C with timing-safe comparison, cryptographic random, session management) and lets the developer write the easy parts that must be flexible (login flow, permissions model, UI) in Lua.
+~30 lines. No magic. No opinionated auth framework. The developer controls who can register, what roles exist, password requirements, lockout policy. Hull provides the hard parts that must be correct (hashing in compiled C with timing-safe comparison, cryptographic random, session management) and lets the developer write the easy parts that must be flexible (login flow, permissions model, UI) in Lua or JavaScript.
 
 ### What Hull Does NOT Provide
 
 - **No OAuth/OIDC provider** — that's a cloud integration. Use browser-side redirect flows if needed (the browser can `fetch()` anywhere)
-- **No JWT** — local apps don't need stateless tokens. Sessions in SQLite are simpler, revocable, and there's no distributed system to share tokens across
+- **JWT is optional** — the `jwt` stdlib module provides HS256 sign/verify/decode for apps that need stateless tokens (API auth, inter-service communication). For most local apps, SQLite-backed sessions are simpler and revocable
 - **No MFA built-in** — the developer can implement TOTP using the crypto primitives (HMAC from mbedTLS + `auth.random_token` for secret generation), but Hull doesn't ship a TOTP module
 - **No user management UI** — the developer builds this. User models are application-specific (roles, permissions, org structure). Hull provides the crypto, not the policy
 
@@ -2022,7 +1972,7 @@ app.config({
 
 ### LLM-Friendly Error Output
 
-When Lua code errors out, Hull catches it with `xpcall` and a custom error handler. The terminal output is designed to be parseable by both humans and LLMs:
+When application code errors out, Hull catches the error and formats it for both humans and LLMs:
 
 ```
 [ERROR] routes/invoices.lua:47: attempt to index a nil value (local 'customer')
@@ -2051,7 +2001,7 @@ In development mode, the same error also goes to the HTTP response — a debug e
 
 ### Hot Reload
 
-In development mode, Lua files are loaded from the filesystem on each request. Change a file, refresh the browser (or re-run `curl`), see the result. No restart, no recompilation, no build step.
+In development mode, Lua/JS files are loaded from the filesystem on each request. Change a file, refresh the browser (or re-run `curl`), see the result. No restart, no recompilation, no build step.
 
 ### Hull WebSocket — `/_hull/ws`
 
@@ -2063,7 +2013,7 @@ The `/_hull/ws` endpoint is active in both development and production, because s
 |---------|-----------|-------------|------------|---------|
 | Heartbeat | server→browser | yes | yes | Detect server crash/stop, show "disconnected" overlay |
 | Shutdown | server→browser | yes | yes | Clean "server stopped" message before connection drops |
-| App push | server→browser | yes | yes | Server-to-browser notifications from Lua code |
+| App push | server→browser | yes | yes | Server-to-browser notifications from application code |
 | File reload | server→browser | yes | no | Auto-refresh browser when source files change on disk |
 | Console error | browser→server | yes | no | Pipe JS errors/warnings to server terminal |
 
@@ -2093,7 +2043,7 @@ The injected JS reconnects automatically with exponential backoff. When the serv
 
 **Server shutdown.** When Hull shuts down cleanly (Ctrl-C, SIGTERM), it sends `{"type": "shutdown"}` before closing. The browser shows "Server stopped" instead of waiting for a timeout.
 
-**App push events (Lua → browser).** Lua code can push custom events to all connected browsers via `app.push()`. This is how background tasks and scheduled jobs communicate results to the UI without polling:
+**App push events (server → browser).** Application code can push custom events to all connected browsers via `app.push()`. This is how background tasks and scheduled jobs communicate results to the UI without polling:
 
 ```lua
 -- Backend: background task finishes, notify the browser
@@ -2262,7 +2212,7 @@ In production, all development instrumentation is stripped:
 |----------|-------------|------------|
 | `print()` | stdout (immediate) | redirected to `log.debug` or suppressed |
 | `log.*` | stdout + SQLite | SQLite only (configurable) |
-| Lua errors | terminal + HTTP response (debug page) | `log.error` in SQLite + generic HTTP 500 |
+| Script errors | terminal + HTTP response (debug page) | `log.error` in SQLite + generic HTTP 500 |
 | Access log | stdout (`[REQ]` lines) | `log.info` in SQLite |
 | Browser console proxy | active (JS errors piped to terminal via WebSocket) | disabled (no injection) |
 | `/_hull/ws` WebSocket | all messages (heartbeat, shutdown, push, reload, console) | heartbeat + shutdown + app push only |
@@ -2273,7 +2223,7 @@ In production, all development instrumentation is stripped:
 
 Not every Hull app is an SPA. Many apps — especially the ones vibecoders build — just want to return HTML from the server. A form submits, the page reloads with results. No JavaScript framework, no client-side state management, no build step. Traditional web development that LLMs generate fluently.
 
-Hull ships a template engine in the Lua stdlib (~150 lines). The syntax uses `{{ }}` for expressions and `{% %}` for Lua code — a pattern LLMs know well from Jinja2, Django, EJS, and ERB:
+Hull ships a template engine in the standard library. The syntax uses `{{ }}` for expressions and `{% %}` for control flow — a pattern LLMs know well from Jinja2, Django, EJS, and ERB. Templates work identically in both Lua and JavaScript apps:
 
 ```html
 <!-- templates/invoice.html -->
@@ -2314,7 +2264,7 @@ end)
 
 - `{{expr}}` — output, HTML-escaped by default (prevents XSS)
 - `{{{expr}}}` — raw output, no escaping (for trusted HTML)
-- `{% lua code %}` — execute Lua (loops, conditionals, variable assignment)
+- `{% code %}` — execute control flow (loops, conditionals, variable assignment)
 
 ### Layouts
 
@@ -2348,7 +2298,7 @@ The template engine renders the page template first, then injects the result int
 
 ### Template Resolution
 
-Templates are loaded from `templates/` in development (filesystem, hot-reload). In production, they're embedded in the binary alongside Lua files and static assets. Same resolution order as everything else in Hull.
+Templates are loaded from `templates/` in development (filesystem, hot-reload). In production, they're embedded in the binary alongside application source files and static assets. Same resolution order as everything else in Hull.
 
 ### SPA vs Server-Rendered — Not a Choice
 
@@ -2492,7 +2442,7 @@ One data model, four representations. The developer writes `load_invoice()` once
 
 ## File Uploads
 
-Hull exposes file uploads through `req.files`, populated by the C layer from Keel's multipart/form-data parser. No Lua-side parsing — the C layer handles RFC 2046 boundary detection, header extraction, and body accumulation before Lua ever sees the data.
+Hull exposes file uploads through `req.files`, populated by the C layer from Keel's multipart/form-data parser. No script-side parsing — the C layer handles RFC 2046 boundary detection, header extraction, and body accumulation before application code ever sees the data.
 
 ### Lua API
 
@@ -2518,7 +2468,7 @@ end)
 
 ### Limits
 
-Upload limits are declared in `app.config`, enforced by the C layer before Lua runs:
+Upload limits are declared in `app.config`, enforced by the C layer before application code runs:
 
 ```lua
 app.config = {
@@ -2535,7 +2485,7 @@ Exceeding any limit returns HTTP 413 (Payload Too Large) automatically. The hand
 1. Browser sends `multipart/form-data` POST
 2. Keel's C-layer multipart parser (`KlMultipartReader`) processes the stream
 3. Each part's headers and body are accumulated into `KlMultipartPart` structs
-4. `lua_bindings.c` converts the parts array into `req.files` — a Lua table of file objects
+4. The runtime binding layer converts the parts array into `req.files` — a table of file objects
 5. Handler receives fully-parsed files, no streaming or callbacks needed
 
 File storage uses `hull.fs.write()`, which is path-restricted by the sandbox. Files can only be written to directories the application has declared access to via unveil.
@@ -2679,7 +2629,7 @@ PASS  upload accepts valid file (1ms)
 
 ## App WebSockets
 
-Hull exposes Keel's WebSocket support to Lua with the same routing pattern as HTTP. The `/_hull/ws` connection handles platform-level events (heartbeat, shutdown, hot reload). App WebSockets are developer-defined endpoints for application-specific real-time communication.
+Hull exposes Keel's WebSocket support to application code with the same routing pattern as HTTP. The `/_hull/ws` connection handles platform-level events (heartbeat, shutdown, hot reload). App WebSockets are developer-defined endpoints for application-specific real-time communication.
 
 ### Lua API
 
@@ -2721,8 +2671,8 @@ The C layer handles:
 - WebSocket upgrade handshake (already in Keel)
 - Frame parsing, ping/pong, close frames (already in Keel)
 - Per-route connection list (new: tracks which connections belong to which `app.ws` route)
-- Calls into Lua for `on_open`, `on_message`, `on_close` events
-- Enforces connection and message size limits before Lua sees the data
+- Calls into the runtime for `on_open`, `on_message`, `on_close` events
+- Enforces connection and message size limits before application code sees the data
 
 ### Limits
 
@@ -3296,11 +3246,11 @@ Hull is honest about its constraints. These are known trade-offs, not bugs.
 
 **Concurrency.** Hull is single-threaded. SQLite serializes writes. Under real workloads with multiple concurrent users making writes, requests queue. For Hull's target use case — 1-5 simultaneous users running a local tool — this is not a bottleneck. SQLite handles tens of thousands of reads per second and hundreds of writes per second. If your workload needs concurrent writes from thousands of users, Hull is not the right tool (and you probably need a server, not a local app).
 
-**Lua ecosystem.** Lua's ecosystem is smaller than Python's, JavaScript's, or Rust's. There is no equivalent of npm or pip with hundreds of thousands of packages. Hull mitigates this by shipping a batteries-included standard library (routing, auth, RBAC, email, CSV, i18n, FTS, PDF, templates, validation, rate limiting, sessions, CSRF). For modules that don't touch restricted APIs (no `io`, no `os`, no `ffi`), pure Lua libraries work fine. The trade-off is intentional: a small, auditable ecosystem vs. a vast one with supply chain risk.
+**Ecosystem.** Hull deliberately avoids npm, pip, and other package managers. The standard library covers auth, JWT, sessions, CSRF, CORS, templates, and rate limiting. For Lua, pure Lua libraries that don't touch restricted APIs work fine. For JavaScript, standard ES2023 code works — but there is no `node_modules`, no npm, no CommonJS. The trade-off is intentional: a small, auditable ecosystem vs. a vast one with supply chain risk.
 
-**Performance.** Keel (Hull's HTTP server) is designed for performance — epoll/kqueue/io_uring, non-blocking I/O, pre-allocated connection pools. But Hull has not been formally benchmarked against other frameworks. For the target workload (local tool, 1-5 users), performance is not a concern. Benchmarks will be published when the platform is mature enough for them to be meaningful.
+**Performance.** Keel (Hull's HTTP server) is designed for performance — epoll/kqueue/io_uring, non-blocking I/O, pre-allocated connection pools. Benchmarks show Lua at ~100k req/s and QuickJS at ~52k req/s for non-DB routes, with Go/Rust-tier throughput for a scripting platform. For the target workload (local tool, 1-5 users), performance is never a concern.
 
-**Windows and macOS sandbox.** pledge/unveil provides kernel-enforced sandboxing on Linux (SECCOMP BPF + Landlock LSM) and OpenBSD (native syscalls). On macOS and Windows, native kernel sandboxing is unavailable — but Cosmopolitan libc provides libc-level pledge/unveil emulation that restricts the process at the C library layer, and the Lua sandbox (restricted stdlib, C-level path validation, network allowlist) provides application-level security on all platforms. The C attack surface is minimal (~1,500 lines of binding code). The strongest security posture requires Linux or OpenBSD. Windows App Container (available since Windows 8, default-deny for filesystem/network/registry/IPC) and macOS App Sandbox are viable future directions for platform-specific sandbox enforcement. Both are on the roadmap but not yet implemented.
+**Windows and macOS sandbox.** pledge/unveil provides kernel-enforced sandboxing on Linux (SECCOMP BPF + Landlock LSM) and OpenBSD (native syscalls). On macOS and Windows, native kernel sandboxing is unavailable — but Cosmopolitan libc provides libc-level pledge/unveil emulation, and the runtime sandbox (restricted stdlib, C-level path validation, network allowlist) provides application-level security on all platforms. The strongest security posture requires Linux or OpenBSD. Windows App Container (available since Windows 8, default-deny for filesystem/network/registry/IPC) and macOS App Sandbox are viable future directions for platform-specific sandbox enforcement. Both are on the roadmap but not yet implemented.
 
 **WASM plugins are optional and compute-only.** Most Hull apps don't need WAMR — Lua is fast enough for HTTP handlers, business logic, and database queries. When WAMR is enabled, plugins have no I/O capabilities — no filesystem, no network, no time, no random. They are pure functions: input bytes in, output bytes out. All I/O must go through Lua. This is by design — it preserves Lua as the single capability gate and keeps the security model auditable. If a plugin needs to read a file or call an API, Lua reads it and passes the data in.
 
@@ -3318,7 +3268,7 @@ But some workloads hit a wall: numerical computation, image processing, data tra
 
 **The full architecture is documented in [docs/wamr_architecture.md](wamr_architecture.md).** Key points:
 
-**Compute-only contract:** Plugins are pure functions — input bytes in, output bytes out. No WASI imports, no filesystem, no network, no time, no random, no ambient I/O of any kind. Lua remains the sole capability gate. All I/O goes through Lua; plugins only compute.
+**Compute-only contract:** Plugins are pure functions — input bytes in, output bytes out. No WASI imports, no filesystem, no network, no time, no random, no ambient I/O of any kind. The runtime remains the sole capability gate. All I/O goes through Lua or JavaScript; plugins only compute.
 
 **Lua API:**
 
@@ -3335,13 +3285,13 @@ plugin.preload("score")
 
 **Minimal ABI:** Plugins export a single `hull_process(input_ptr, input_len, output_ptr, output_max)` function. The only host import is `host_call(opcode, ptr, len)` — MVP supports LOG only. Binary framing is length-prefixed, format-agnostic (JSON, MessagePack, protobuf, raw bytes — plugin decides).
 
-**Resource limits:** Every invocation is bounded — instruction budget (gas metering via `WAMR_BUILD_INSTRUCTION_METERING`), memory cap per instance, max input/output size. When the gas budget is exhausted, WAMR returns an error and Lua gets a `"timeout"` string. No runaway computation.
+**Resource limits:** Every invocation is bounded — instruction budget (gas metering via `WAMR_BUILD_INSTRUCTION_METERING`), memory cap per instance, max input/output size. When the gas budget is exhausted, WAMR returns an error and the caller gets a `"timeout"` string. No runaway computation.
 
-**BYO language:** Write plugins in C/C++ (clang `--target=wasm32`), Rust (`wasm32-unknown-unknown`), Zig (`wasm32-freestanding`), or TinyGo. Compile to `.wasm`, place in `plugins/`, call from Lua. `hull build` embeds `.wasm` files into the APE binary alongside Lua and static assets.
+**BYO language:** Write plugins in C/C++ (clang `--target=wasm32`), Rust (`wasm32-unknown-unknown`), Zig (`wasm32-freestanding`), or TinyGo. Compile to `.wasm`, place in `plugins/`, call from Lua or JavaScript. `hull build` embeds `.wasm` files into the APE binary alongside application code and static assets.
 
 **Why WASM, not native code or LuaJIT:**
 
-- **Sandboxed by design.** WASM linear memory is isolated from host memory. No `ffi`, no `dlopen`, no escape hatches. The Lua sandbox restricts Lua; the WASM sandbox restricts compiled code.
+- **Sandboxed by design.** WASM linear memory is isolated from host memory. No `ffi`, no `dlopen`, no escape hatches. The runtime sandboxes restrict Lua and JavaScript; the WASM sandbox restricts compiled code.
 - **Portable.** Same `.wasm` file runs on every OS Hull supports. No per-platform compilation.
 - **Auditable.** Small, self-contained modules with typed export signatures. Easier to audit than native shared libraries.
 - **LuaJIT breaks the sandbox.** LuaJIT's FFI can call arbitrary C functions, which defeats Hull's security model. WASM maintains the sandbox while delivering native speed. LuaJIT may be offered as a future opt-in build flag for developers who accept the security trade-off.
@@ -3352,9 +3302,9 @@ plugin.preload("score")
 
 ### Mobile Frontend (iOS/Android)
 
-Hull currently produces desktop executables. The Lua + SQLite core could be embedded as a library in native iOS/Android apps, with the HTML5/JS frontend running in a platform webview (WKWebView on iOS, WebView on Android).
+Hull currently produces desktop executables. The Lua/QuickJS + SQLite core could be embedded as a library in native iOS/Android apps, with the HTML5/JS frontend running in a platform webview (WKWebView on iOS, WebView on Android).
 
-This would mean: write the backend logic once in Lua, share the SQLite database schema, and run the same application on desktop and mobile. The HTML5/JS frontend already works in mobile browsers — the missing piece is packaging.
+This would mean: write the backend logic once in Lua or JavaScript, share the SQLite database schema, and run the same application on desktop and mobile. The HTML5/JS frontend already works in mobile browsers — the missing piece is packaging.
 
 **Not a priority for v1.0.** Desktop is the focus. Mobile comes after the core platform is stable.
 
@@ -3370,7 +3320,7 @@ Combined with `SetProcessMitigationPolicy()` (which blocks dynamic code generati
 
 macOS App Sandbox provides filesystem, network, and IPC restrictions for sandboxed processes. Unlike pledge/unveil, it requires an entitlements plist and code signing.
 
-**Feasibility depends on Cosmopolitan APE compatibility with Apple's code signing.** If APE binaries can be code-signed with entitlements, App Sandbox becomes viable. If not, macOS remains on the Lua-sandbox-only security tier.
+**Feasibility depends on Cosmopolitan APE compatibility with Apple's code signing.** If APE binaries can be code-signed with entitlements, App Sandbox becomes viable. If not, macOS remains on the runtime-sandbox-only security tier.
 
 ### Benchmarks
 
@@ -3388,18 +3338,18 @@ Hull and Tauri solve overlapping problems but make fundamentally different trade
 
 | | Tauri | Hull |
 |---|---|---|
-| Backend language | Rust | Lua (scripted, hot-reloadable) |
+| Backend language | Rust | Lua or JavaScript (scripted, hot-reloadable) |
 | Frontend rendering | System webview (WKWebView, WebView2, WebKitGTK) | User's browser (any browser) |
 | Binary output | Per-platform (separate macOS, Windows, Linux builds) | Single APE binary (runs on all platforms) |
 | Database | None built-in (bring your own) | SQLite embedded, with migrations, encryption, FTS |
-| Dependencies | 200-400 crates from crates.io | 6 vendored C libraries (+1 optional), zero package manager |
+| Dependencies | 200-400 crates from crates.io | 7 vendored C libraries (+1 optional), zero package manager |
 | Build time | 60-120 seconds (Rust compilation) | Under 3 seconds (C compilation) |
 | Binary size | 5-15 MB (varies by platform and webview) | Under 2 MB (all platforms, all features) |
 | Sandbox | Inherits from OS webview sandbox | pledge/unveil (kernel-enforced on Linux/OpenBSD) |
 | Built-in licensing | No | Ed25519 license keys, offline verification |
 | Mobile support | Yes (Tauri v2 — iOS/Android via native webview) | No (desktop only, mobile on roadmap) |
-| LLM-friendliness | Rust is verbose and complex for LLMs | Lua is small (~60 keywords), LLMs generate it reliably |
-| App framework | Minimal (routing, IPC between Rust and JS) | Batteries included (auth, RBAC, email, CSV, i18n, FTS, PDF, sessions, validation) |
+| LLM-friendliness | Rust is verbose and complex for LLMs | Lua (~60 keywords) and JavaScript — LLMs generate both reliably |
+| App framework | Minimal (routing, IPC between Rust and JS) | Batteries included (auth, JWT, sessions, CSRF, CORS, templates, rate limiting) |
 | Distribution | Per-platform installers (.dmg, .msi, .deb) | Single file, no installer, no admin privileges |
 | Digital signatures | OS-level code signing ($99-299/year) | Ed25519 (free, self-managed, verify.gethull.dev) |
 
@@ -3413,16 +3363,16 @@ Hull and Tauri solve overlapping problems but make fundamentally different trade
 **Where Hull is stronger:**
 
 - **Single binary, all platforms.** One APE file runs on Linux, macOS, Windows, FreeBSD, OpenBSD, NetBSD. No per-platform build pipeline, no CI matrix, no platform-specific testing.
-- **Zero supply chain.** Six vendored C libraries vs. hundreds of crates. Auditable in a day vs. auditable in months.
-- **Built-in application framework.** Auth, database, migrations, email, PDF, CSV, i18n, search, sessions, validation, rate limiting, RBAC — all included. Tauri ships IPC and a webview; everything else is bring-your-own.
-- **AI-first development.** Lua is dramatically simpler than Rust for LLM code generation. A vibecoder can describe an app to an AI and get working Lua. Getting correct Rust with proper lifetime annotations and trait bounds from an AI is significantly harder.
+- **Zero supply chain.** Seven vendored C libraries vs. hundreds of crates. Auditable in a day vs. auditable in months.
+- **Built-in application framework.** Auth, database, JWT, sessions, CSRF, CORS, templates, rate limiting — all included. Tauri ships IPC and a webview; everything else is bring-your-own.
+- **AI-first development.** Lua and JavaScript are dramatically simpler than Rust for LLM code generation. A vibecoder can describe an app to an AI and get working code. Getting correct Rust with proper lifetime annotations and trait bounds from an AI is significantly harder.
 - **Agentic iteration speed.** AI-assisted development is a generate-test-fix loop: the LLM writes code, the tool compiles and runs it, reads the output, and iterates. This loop runs dozens to hundreds of times per feature. Rust's 60-120 second compile times make each iteration a minute-long wait — multiplied across hundreds of cycles, a single feature takes hours of wall-clock compilation time alone. Hull's C runtime compiles in under 3 seconds; Lua changes require zero compilation. The agentic loop runs at the speed of thought, not the speed of `cargo build`. For vibecoders who rely entirely on AI iteration, this isn't a minor inconvenience — it's the difference between building something in an afternoon and giving up after an hour of watching a progress bar.
 - **Built-in licensing and signatures.** Ed25519 license key verification and dual-signature verification built into the platform. Tauri has no built-in licensing.
-- **Hot reload.** Lua reloads on every request in dev mode. Tauri requires Rust recompilation for backend changes.
+- **Hot reload.** Lua/JS reloads on every request in dev mode. Tauri requires Rust recompilation for backend changes.
 
 **The deepest difference is philosophical, not technical.** Tauri does not focus on digital independence — and by design, it never will. Tauri is a framework for building desktop apps. It has no opinion on who owns the data, who controls distribution, or whether the user depends on cloud infrastructure. Hull's entire architecture is built around one premise: the person who uses the software should own everything about it — the binary, the data, the build pipeline, and the business outcome. This isn't a feature Hull adds on top; it's the reason Hull exists.
 
-Tauri is a framework for professional developers who know Rust and want to build cross-platform desktop apps. Hull is a platform for anyone — including vibecoders who don't know any programming language — who wants to build, distribute, and sell local-first applications. Tauri optimizes for developer power. Hull optimizes for digital independence.
+Tauri is a framework for professional developers who know Rust and want to build cross-platform desktop apps. Hull is a platform for anyone — including vibecoders who don't know any programming language — who wants to build, distribute, and sell local-first applications. Write in Lua or JavaScript, whichever comes naturally. Tauri optimizes for developer power. Hull optimizes for digital independence.
 
 ## How Hull Differs from Redbean
 
@@ -3435,13 +3385,14 @@ Hull takes the same single-binary thesis in a different direction:
 | | Redbean | Hull |
 |---|---|---|
 | Core identity | Web server with Lua scripting | Application platform with build tool |
-| Database | None built-in | SQLite embedded, with Lua bindings, migrations, and optional encryption |
+| Database | None built-in | SQLite embedded, with Lua/JS bindings, migrations, and optional encryption |
 | License model | ISC (permissive) | AGPL-3.0 + Commercial dual license |
 | App licensing | None | Ed25519 license key system for commercial app distribution |
 | Security | Cosmopolitan sandbox | pledge/unveil polyfill + Lua function restriction + encrypted database + digital signatures |
 | Build tool | Zip files appended to binary | `hull build` — signed build tool produces signed APE binaries, ejectable |
+| Scripting | Lua only | Lua and JavaScript (dual runtime) |
 | Target audience | Developers who want a portable web server | Vibecoders and developers who want to build and sell local-first applications |
-| Framework | Bring your own | Ships with routing, middleware, sessions, auth, RBAC, validation, i18n, search, CSV, email, PDF |
+| Framework | Bring your own | Ships with routing, middleware, sessions, auth, JWT, CSRF, CORS, templates, rate limiting |
 | Data protection | None | Optional AES-256 database encryption tied to license key |
 | Distribution model | Open source tool | Platform for building commercial products |
 
@@ -3455,7 +3406,7 @@ Hull's value proposition depends on the platform being maintained. What happens 
 
 **The code is AGPL.** The entire Hull source — C runtime, build tool, standard library — is open source under AGPL-3.0. Anyone can fork, build, and distribute Hull from source. The Makefile builds the entire platform from scratch without hull.com (`make CC=cosmocc`). No proprietary component exists that couldn't be rebuilt from the published source.
 
-**The dependencies are vendored.** All six core C libraries (plus optional WAMR) are included in the Hull repository. No external downloads, no package manager fetches, no URLs that could go offline. A git clone of the Hull repo contains everything needed to build the platform.
+**The dependencies are vendored.** All seven core C libraries (plus optional WAMR) are included in the Hull repository. No external downloads, no package manager fetches, no URLs that could go offline. A git clone of the Hull repo contains everything needed to build the platform.
 
 **The ejection path is permanent.** `hull eject` copies hull.com into the project. An ejected project is fully self-contained — it can build production binaries forever, even if hull.com's website, CDN, and every artalis-io server vanishes. The ejected binary is signed and functional indefinitely.
 
@@ -3472,51 +3423,59 @@ Hull's value proposition depends on the platform being maintained. What happens 
 
 ```
 hull/
-  src/
-    main.c               # startup, sandbox, arg parsing
-    lua_bindings.c        # Lua <-> Keel bridge
-    lua_db.c              # Lua <-> SQLite bridge (parameterized queries only)
-    lua_crypto.c          # Lua <-> TweetNaCl bridge
-    license.c             # Ed25519 license verification (platform + app)
-    http_client.c         # minimal HTTPS client (mbedTLS, allowlist-enforced)
-    smtp.c                # minimal SMTP client (STARTTLS via mbedTLS)
-    timer.c               # min-heap timer scheduler (app.every, app.daily, etc.)
-    task.c                # background task runner (app.spawn, app.yield, app.sleep)
-    embed.c               # embedded Lua standard library
-  lib/                    # standard library (embedded in binary)
-    app.lua               # routing, middleware, response helpers
-    db.lua                # query helpers, migrations, backup, pagination
-    json.lua              # JSON encode/decode
-    csv.lua               # RFC 4180 CSV encode/decode
-    email.lua             # unified email API (Postmark, SendGrid, SES, SMTP)
-    auth.lua              # password hashing, token generation, verify helpers
-    rbac.lua              # role-based access control + middleware guard
-    log.lua               # structured logging to SQLite + stdout
-    i18n.lua              # internationalization (string lookup, formatting)
-    search.lua            # SQLite FTS5 wrapper (index, query, rebuild)
-    template.lua          # HTML template engine ({{ }}, {% %}, layouts)
-    pdf.lua               # PDF document builder (text, tables, fonts)
-    test.lua              # test framework (hull test)
-    valid.lua             # input validation + schema declaration
-    limit.lua             # rate limiting middleware (token bucket)
-    session.lua           # cookie sessions in SQLite
-    csrf.lua              # CSRF middleware
-  tool/                   # hull.com build tool Lua layer (also embedded)
-    cli.lua               # command dispatch (new, dev, build, test, etc.)
-    scaffold.lua          # project templates for hull new
-    build.lua             # artifact collection, binary assembly, signing
-    dev.lua               # development server wrapper
-    verify.lua            # signature verification (hull verify, hull inspect)
+  src/hull/
+    main.c                  # startup, sandbox, arg parsing, event loop
+    sandbox.c               # pledge/unveil application from manifest
+    signature.c             # dual-layer Ed25519 signature verification
+    manifest.c              # manifest parsing and capability enforcement
+    cap/                    # C capability layer (shared by both runtimes)
+      db.c                  # SQLite bridge (parameterized queries only)
+      crypto.c              # TweetNaCl + mbedTLS crypto bridge
+      http.c                # outbound HTTPS client (allowlist-enforced)
+      fs.c                  # sandboxed filesystem (path traversal rejection)
+      body.c                # request body reader, multipart, chunked TE
+      env.c                 # environment variable access (allowlist-enforced)
+      time.c                # time primitives
+      tool.c                # build tool capabilities (keygen, file I/O)
+      test.c                # test runner capabilities
+    runtime/
+      lua/                  # Lua 5.4 runtime integration
+        modules.c           # Lua <-> C capability bindings, module loader
+      js/                   # QuickJS runtime integration
+        modules.c           # JS <-> C capability bindings, module loader
+        runtime.c           # JS sandbox, module normalization
+    commands/               # CLI subcommands
+      dev.c                 # development server with hot reload
+      build.c               # production binary builder
+      test.c                # test runner
+      new.c                 # project scaffolding
+      eject.c               # export to standalone project
+      inspect.c             # capability and signature display
+      verify.c              # signature verification
+      keygen.c              # Ed25519 keypair generation
+      sign_platform.c       # platform signature tool
+  stdlib/                   # standard library (embedded in binary)
+    lua/hull/               # Lua implementations
+      json.lua, cookie.lua, session.lua, jwt.lua, csrf.lua,
+      auth.lua, cors.lua, ratelimit.lua, template.lua, verify.lua,
+      build.lua, new.lua, eject.lua, inspect.lua, manifest.lua
+    js/hull/                # JavaScript implementations
+      auth.js, cookie.js, cors.js, csrf.js, jwt.js,
+      ratelimit.js, session.js, template.js, verify.js
   vendor/
-    keel/                 # HTTP server
-    lua/                  # Lua 5.4
-    sqlite/               # SQLite amalgamation
-    mbedtls/              # TLS client
-    tweetnacl/            # Ed25519 signatures
-    pledge/               # pledge/unveil polyfill (Justine Tunney)
-  Makefile                # bootstrap build (make CC=cosmocc → hull.com)
+    keel/                   # HTTP server (epoll/kqueue/io_uring/poll)
+    lua/                    # Lua 5.4
+    quickjs/                # QuickJS (JavaScript ES2023)
+    sqlite/                 # SQLite amalgamation
+    mbedtls/                # TLS client
+    tweetnacl/              # Ed25519 signatures
+    pledge/                 # pledge/unveil polyfill (Justine Tunney)
+  bench/                    # benchmark scripts (wrk-based)
+  examples/                 # example apps (Lua + JS versions)
+  tests/                    # E2E test scripts
+  Makefile                  # bootstrap build (make CC=cosmocc → hull.com)
   README.md
-  LICENSE                 # AGPL-3.0
+  LICENSE                   # AGPL-3.0
 ```
 
 ## Build
@@ -3587,7 +3546,7 @@ What we know qualitatively:
 - **Defense and government** — air-gapped networks are the norm, not the exception. Hull apps run offline, require no internet, no phone-home, no activation server. Data stays on classified networks. Zero supply chain dependencies means fewer items on the software bill of materials (SBOM). Kernel sandbox (pledge/unveil) provides provable containment. Single-binary distribution simplifies accreditation — one artifact to certify, not a dependency tree of thousands. Even development can be fully air-gapped: OpenCode + a local model (minimax-m2.5, Llama, etc.) on isolated hardware — source code never leaves the secure facility. No cloud IDE, no GitHub Copilot, no data exfiltration vector from the development pipeline itself.
 - **Medical and healthcare** — HIPAA, patient data sovereignty, and air-gapped clinical environments. Hull's encrypted SQLite database, offline operation, and self-declaring security model align with compliance requirements by design. A Hull app managing patient records on a clinic's local network never exposes data to the internet. Backup is copying a file. Development itself can be air-gapped — a hospital's internal dev team or contractor can build and iterate on Hull apps using a local LLM without patient data or source code ever touching an external network.
 - **Legal and financial** — client confidentiality, regulatory compliance (SOX, MiFID II), data residency requirements. Tools that handle sensitive financial data should not phone home to cloud servers. Hull's network allowlist and kernel sandbox make this provable.
-- **SMBs broadly** — the largest underserved market. Millions of small businesses run on Excel spreadsheets and manual processes because custom software meant hiring developers and paying for hosting. Hull makes it possible for a single person (or an AI) to build a tool that replaces a spreadsheet — inventory tracker, appointment scheduler, invoice generator, job costing calculator — and distribute it as a file. No IT department required.
+- **SMBs broadly** — the largest underserved market. Millions of small businesses run on Excel spreadsheets and manual processes because custom software meant hiring developers and paying for hosting. Hull makes it possible for a single person (or an AI) writing Lua or JavaScript to build a tool that replaces a spreadsheet — inventory tracker, appointment scheduler, invoice generator, job costing calculator — and distribute it as a file. No IT department required.
 
 ### Comparable Business Models
 
@@ -3618,7 +3577,7 @@ The moat is the ecosystem:
 - **Trust accumulation.** Every signed Hull binary, every verify.gethull.dev check, every AGPL application with visible source builds a trust network. Trust compounds over time and doesn't transfer to competitors.
 - **Community gravity.** AGPL means every Hull application is a showcase. Commercial license is the natural upgrade path. The more apps that exist, the more discoverable Hull becomes, the more developers build with it.
 - **Ejection as trust signal.** Developers stay because Hull is useful, not because they're locked in. `hull eject` means you can leave anytime. This paradoxically increases loyalty — people trust platforms that let them leave.
-- **Simplicity as durability.** Fewer than 10 moving parts means a 2-3 person team can maintain the entire platform. Competitors building on larger stacks need larger teams to maintain parity. Hull's simplicity is a structural cost advantage.
+- **Simplicity as durability.** Fewer than 10 moving parts means a 2-3 person team can maintain the entire platform, including both runtimes. Competitors building on larger stacks need larger teams to maintain parity. Hull's simplicity is a structural cost advantage.
 
 ### Why Invest Now
 
@@ -3626,9 +3585,9 @@ The moat is the ecosystem:
 2. **The timing window is narrow:** whoever builds the vibecoder→product pipeline first wins the category
 3. **Local-first is being driven by regulation, not just ideology** — GDPR, CCPA, EU Digital Markets Act
 4. **Supply chain attacks are front-page news** — organizations actively want fewer dependencies
-5. **Hull is the only platform combining:** AI-friendly scripting + single-binary distribution + kernel sandbox + zero supply chain + built-in licensing + digital signatures
+5. **Hull is the only platform combining:** AI-friendly dual-runtime scripting (Lua + JS) + single-binary distribution + kernel sandbox + zero supply chain + built-in licensing + digital signatures
 6. **Platform plays compound:** every app built on Hull increases the ecosystem value
-7. **Minimal burn:** 6 vendored C libraries (+1 optional) = small maintenance surface. A 2-3 person team can build and maintain Hull v1.0
+7. **Minimal burn:** 7 vendored C libraries (+1 optional) = small maintenance surface. A 2-3 person team can build and maintain Hull v1.0
 
 ### Path to Profitability
 
@@ -3643,7 +3602,7 @@ We don't project specific license numbers because the category is new and projec
 
 ## Philosophy
 
-Software should be an artifact you own, not a service you rent. Hull exists to make that possible for a class of applications that the industry forgot about: small, local, private, single-purpose tools that just work.
+Software should be an artifact you own, not a service you rent. Hull exists to make that possible — in Lua or JavaScript, your choice — for a class of applications that the industry forgot about: small, local, private, single-purpose tools that just work.
 
 No accounts. No subscriptions. No telemetry. No updates that break things. No Terms of Service. No "we're shutting down, export your data by Friday." Just a file on your computer that does what you need, for as long as you need it, answerable to nobody.
 

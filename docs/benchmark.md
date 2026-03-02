@@ -15,7 +15,7 @@ All benchmarks run on a single machine using [wrk](https://github.com/wg/wrk) wi
 
 ## SQLite Performance (Lua)
 
-Dedicated SQLite benchmark (`bench_db.sh`) measuring isolated workloads:
+Dedicated SQLite benchmark (`bench/bench_db.sh`) measuring isolated workloads:
 
 | Workload | req/s | rows/s | Avg Latency | Description |
 |----------|-------|--------|-------------|-------------|
@@ -83,10 +83,10 @@ Hull delivers Go/Rust-tier throughput from a scripting language.
 
 ```bash
 make                  # build hull
-sh bench.sh           # run both Lua and JS benchmarks (HTTP routing)
-sh bench_db.sh        # run SQLite performance benchmark
-RUNTIME=lua sh bench.sh   # Lua only
-RUNTIME=js  sh bench.sh   # JS only
+sh bench/bench.sh           # run both Lua and JS benchmarks (HTTP routing)
+sh bench/bench_db.sh        # run SQLite performance benchmark
+RUNTIME=lua sh bench/bench.sh   # Lua only
+RUNTIME=js  sh bench/bench.sh   # JS only
 ```
 
 Tunable environment variables:

@@ -9,10 +9,9 @@
 -- Manifest: allow outbound HTTP to localhost for webhook delivery
 app.manifest({
     hosts = {"127.0.0.1"},
-    env = {"WEBHOOK_SECRET"},
 })
 
-local SIGNING_SECRET = env.get("WEBHOOK_SECRET") or "whsec_change-me-in-production"
+local SIGNING_SECRET = "whsec_change-me-in-production"
 
 -- ── Schema ──────────────────────────────────────────────────────────
 

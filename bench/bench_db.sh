@@ -1,13 +1,15 @@
 #!/bin/sh
 # SQLite performance benchmark — measures read, write, and mixed workloads
 #
-# Usage: sh bench_db.sh
+# Usage: sh bench/bench_db.sh
 #
 # Requires: build/hull already built, wrk available
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 set -e
+
+cd "$(dirname "$0")/.."
 
 HULL=./build/hull
 THREADS=${THREADS:-4}
@@ -71,12 +73,12 @@ echo ""
 
 # 3. Write-heavy — single INSERT per request
 echo "--- POST /write (single INSERT) ---"
-wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" -s bench_post.lua "http://127.0.0.1:$PORT/write"
+wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" -s bench/bench_post.lua "http://127.0.0.1:$PORT/write"
 echo ""
 
 # 4. Write-batch — 10 INSERTs in a single transaction
 echo "--- POST /write-batch (10 INSERTs in txn) ---"
-wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" -s bench_post.lua "http://127.0.0.1:$PORT/write-batch"
+wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" -s bench/bench_post.lua "http://127.0.0.1:$PORT/write-batch"
 echo ""
 
 # 5. Mixed — 1 INSERT + 1 SELECT per request
