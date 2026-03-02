@@ -132,7 +132,8 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
 
 /* ── Public API ────────────────────────────────────────────────────── */
 
-int hl_sandbox_apply(const HlManifest *manifest, const char *db_path,
+int hl_sandbox_apply(const HlManifest *manifest, const char *app_dir,
+                      const char *db_path,
                       const char *ca_bundle_path,
                       const char *tls_cert_path,
                       const char *tls_key_path)
@@ -151,6 +152,15 @@ int hl_sandbox_apply(const HlManifest *manifest, const char *db_path,
 #endif
 
     /* ── Unveil: restrict filesystem visibility ─────────────── */
+
+    /* App directory: always readable (templates, static assets, source) */
+    if (app_dir) {
+        if (unveil(app_dir, "r") != 0)
+            log_warn("[sandbox] unveil failed for app dir: %s", app_dir);
+    }
+
+    /* /dev/urandom: needed by crypto.random and password hashing */
+    unveil("/dev/urandom", "r");
 
     for (int i = 0; i < manifest->fs_read_count; i++) {
         if (unveil(manifest->fs_read[i], "r") != 0)

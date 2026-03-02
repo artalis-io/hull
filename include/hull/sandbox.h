@@ -24,15 +24,18 @@
  * Apply kernel sandbox based on manifest capabilities.
  *
  *   manifest       — declared capabilities (may have present==0)
+ *   app_dir        — application directory (always unveiled read-only)
  *   db_path        — SQLite database path (always allowed rw)
  *   ca_bundle_path — CA certificate bundle (unveiled read-only, may be NULL)
  *   tls_cert_path  — TLS certificate file (unveiled read-only, may be NULL)
  *   tls_key_path   — TLS private key file (unveiled read-only, may be NULL)
  *
- * When manifest.present is false, no sandbox is applied (permissive).
+ * The sandbox always applies (default-deny).  The app directory is
+ * always unveiled for reading (templates, static assets, source files).
  * Returns 0 on success, -1 on error (logged).
  */
-int hl_sandbox_apply(const HlManifest *manifest, const char *db_path,
+int hl_sandbox_apply(const HlManifest *manifest, const char *app_dir,
+                      const char *db_path,
                       const char *ca_bundle_path,
                       const char *tls_cert_path,
                       const char *tls_key_path);
