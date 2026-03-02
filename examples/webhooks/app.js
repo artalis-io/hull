@@ -87,7 +87,7 @@ function deliverWebhook(webhook, eventType, payloadStr, eventId) {
         });
         status = r.status;
         respBody = r.body || "";
-    } catch (_e) {
+    } catch (e) {
         respBody = e.message || String(e);
     }
 
