@@ -6,6 +6,8 @@
 local cors = require("hull.middleware.cors")
 local ratelimit = require("hull.middleware.ratelimit")
 
+app.manifest({})
+
 -- ── Request ID middleware ────────────────────────────────────────────
 -- Assigns a unique ID to every request, available via req.ctx.request_id
 -- and returned in the X-Request-ID response header.

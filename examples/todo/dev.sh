@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Start the todo app in development mode (hot reload).
+# Start the todo app in development mode (hot reload + HTTPS).
 #
 # Usage: ./examples/todo/dev.sh
 #
@@ -18,12 +18,18 @@ if [ ! -x "$HULL" ]; then
     exit 1
 fi
 
-PORT="${PORT:-8080}"
-DB="${DB:-/tmp/todo.db}"
+# Generate self-signed certs if needed
+"$SCRIPT_DIR/gen-certs.sh"
 
-echo "Starting todo app in dev mode..."
-echo "  http://localhost:$PORT"
+PORT="${PORT:-8443}"
+DB="${DB:-/tmp/todo.db}"
+CERT="$SCRIPT_DIR/certs/cert.pem"
+KEY="$SCRIPT_DIR/certs/key.pem"
+
+echo "Starting todo app in dev mode (HTTPS)..."
+echo "  https://localhost:$PORT"
 echo "  Database: $DB"
 echo ""
 
-exec "$HULL" dev "$SCRIPT_DIR/app.lua" -p "$PORT" -d "$DB"
+exec "$HULL" dev "$SCRIPT_DIR/app.lua" -p "$PORT" -d "$DB" \
+    --tls-cert "$CERT" --tls-key "$KEY"

@@ -11,6 +11,10 @@ import { jwt } from "hull:jwt";
 import { log } from "hull:log";
 import { time } from "hull:time";
 
+app.manifest({
+    env: ["JWT_SECRET"],
+});
+
 let JWT_SECRET = "change-me-in-production";
 try { const v = env.get("JWT_SECRET"); if (v) JWT_SECRET = v; } catch (e) {}
 

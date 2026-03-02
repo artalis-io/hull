@@ -16,6 +16,7 @@ import { time } from "hull:time";
 
 // Manifest: allow outbound HTTP to localhost for webhook delivery
 app.manifest({
+    env: ["WEBHOOK_SECRET"],
     hosts: ["127.0.0.1"],
 });
 

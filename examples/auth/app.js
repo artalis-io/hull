@@ -12,6 +12,8 @@ import { auth } from "hull:middleware:auth";
 import { session } from "hull:middleware:session";
 import { time } from "hull:time";
 
+app.manifest({});
+
 // Initialize database
 session.init({ ttl: 3600 });
 

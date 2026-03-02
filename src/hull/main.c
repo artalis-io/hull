@@ -48,6 +48,12 @@
 #include <string.h>
 #include <stdarg.h>
 
+/* ── Default Content-Security-Policy ───────────────────────────────── */
+
+#define HL_DEFAULT_CSP \
+    "default-src 'none'; style-src 'unsafe-inline'; " \
+    "img-src 'self'; form-action 'self'; frame-ancestors 'none'"
+
 /* ── Logging ───────────────────────────────────────────────────────── */
 
 /* Custom log callback: suppresses file:line in release builds */
@@ -447,6 +453,14 @@ static int hull_serve(int argc, char **argv)
                  manifest.fs_read_count, manifest.fs_write_count,
                  manifest.env_count, manifest.hosts_count);
     }
+
+    /* Wire CSP policy to runtime.
+     * Default CSP is always active — even without app.manifest().
+     * Explicit csp="custom" overrides; csp=false disables. */
+    if (manifest.csp_set)
+        rt->csp_policy = manifest.csp;    /* custom or NULL (disabled) */
+    else
+        rt->csp_policy = HL_DEFAULT_CSP;  /* default */
 
     /* Wire env_cfg from manifest (if app declares env vars) */
     HlEnvConfig env_cfg_storage = {0};

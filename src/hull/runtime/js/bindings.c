@@ -211,6 +211,8 @@ static const char *hl_js_stash_body(JSContext *ctx, const char *data,
         js->response_body = NULL;
         js->response_body_size = 0;
     }
+    if (len >= SIZE_MAX)
+        return NULL;
     js->response_body = hl_alloc_malloc(js->base.alloc, len + 1);
     if (!js->response_body)
         return NULL;
@@ -331,7 +333,11 @@ static JSValue js_res_html(JSContext *ctx, JSValueConst this_val,
         const char *copy = hl_js_stash_body(ctx, html, html_len);
         JS_FreeCString(ctx, html);
         if (copy) {
+            HlJS *js_rt = (HlJS *)JS_GetContextOpaque(ctx);
             kl_response_header(res, "Content-Type", "text/html; charset=utf-8");
+            if (js_rt && js_rt->base.csp_policy)
+                kl_response_header(res, "Content-Security-Policy",
+                                   js_rt->base.csp_policy);
             kl_response_body(res, copy, html_len);
         }
     }

@@ -137,10 +137,8 @@ int hl_sandbox_apply(const HlManifest *manifest, const char *db_path,
                       const char *tls_cert_path,
                       const char *tls_key_path)
 {
-    if (!manifest || !manifest->present) {
-        log_info("[sandbox] no manifest — sandbox not applied");
+    if (!manifest)
         return 0;
-    }
 
     if (!sb_supported()) {
         log_info("[sandbox] kernel sandbox not available on this platform");

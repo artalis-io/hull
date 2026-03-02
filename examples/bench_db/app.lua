@@ -7,6 +7,8 @@
 --   GET  /mixed       — mixed: 1 INSERT + 1 SELECT (20 rows)
 --   GET  /health      — baseline (no DB)
 
+app.manifest({})
+
 -- Schema
 db.exec("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, payload TEXT, ts INTEGER NOT NULL)")
 db.exec("CREATE INDEX IF NOT EXISTS idx_events_ts ON events (ts DESC)")

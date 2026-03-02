@@ -3,6 +3,8 @@
 -- Run: hull app.lua -p 3000
 -- Visit: http://localhost:3000/
 
+app.manifest({})
+
 -- Initialize database
 db.exec("CREATE TABLE IF NOT EXISTS visits (id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT, ts INTEGER)")
 

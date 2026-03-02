@@ -21,20 +21,27 @@ if [ ! -x "$HULL" ]; then
     exit 1
 fi
 
-echo "Building todo app..."
-"$HULL" build -o "$OUTPUT" "$SCRIPT_DIR"
+echo "Building todo app (cosmocc)..."
+"$HULL" build --cc cosmocc -o "$OUTPUT" "$SCRIPT_DIR"
 
 echo ""
 echo "Built: $OUTPUT"
 ls -lh "$OUTPUT"
 
 if [ "${1:-}" = "--run" ]; then
-    PORT="${PORT:-8080}"
+    # Generate self-signed certs if needed
+    "$SCRIPT_DIR/gen-certs.sh"
+
+    PORT="${PORT:-8443}"
     DB="${DB:-/tmp/todo.db}"
+    CERT="$SCRIPT_DIR/certs/cert.pem"
+    KEY="$SCRIPT_DIR/certs/key.pem"
+
     echo ""
-    echo "Running todo app..."
-    echo "  http://localhost:$PORT"
+    echo "Running todo app (HTTPS)..."
+    echo "  https://localhost:$PORT"
     echo "  Database: $DB"
     echo ""
-    exec "$OUTPUT" -p "$PORT" -d "$DB"
+    exec "$OUTPUT" -p "$PORT" -d "$DB" \
+        --tls-cert "$CERT" --tls-key "$KEY"
 fi

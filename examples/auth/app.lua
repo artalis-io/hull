@@ -6,6 +6,8 @@
 local session = require("hull.middleware.session")
 local auth = require("hull.middleware.auth")
 
+app.manifest({})
+
 -- Initialize database
 session.init({ ttl = 3600 })
 

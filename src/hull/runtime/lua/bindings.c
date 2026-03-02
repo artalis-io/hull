@@ -55,6 +55,8 @@ static const char *hl_lua_stash_body(lua_State *L, const char *data,
         hlua->response_body = NULL;
         hlua->response_body_size = 0;
     }
+    if (len >= SIZE_MAX)
+        return NULL;
     hlua->response_body = hl_alloc_malloc(hlua->base.alloc, len + 1);
     if (!hlua->response_body)
         return NULL;
@@ -268,11 +270,15 @@ static int lua_res_json(lua_State *L)
 static int lua_res_html(lua_State *L)
 {
     KlResponse *res = check_response(L, 1);
+    HlLua *hlua = get_hl_lua_from_L(L);
     size_t len;
     const char *html = luaL_checklstring(L, 2, &len);
     const char *copy = hl_lua_stash_body(L, html, len);
     if (copy) {
         kl_response_header(res, "Content-Type", "text/html; charset=utf-8");
+        if (hlua && hlua->base.csp_policy)
+            kl_response_header(res, "Content-Security-Policy",
+                               hlua->base.csp_policy);
         kl_response_body(res, copy, len);
     }
     return 0;

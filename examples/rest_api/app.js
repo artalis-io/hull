@@ -7,6 +7,8 @@ import { app } from "hull:app";
 import { db } from "hull:db";
 import { time } from "hull:time";
 
+app.manifest({});
+
 // Initialize database
 db.exec(`CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

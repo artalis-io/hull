@@ -5,6 +5,10 @@
 
 local jwt = require("hull.jwt")
 
+app.manifest({
+    env = {"JWT_SECRET"},
+})
+
 local ok, val = pcall(env.get, "JWT_SECRET")
 local JWT_SECRET = (ok and val) or "change-me-in-production"
 

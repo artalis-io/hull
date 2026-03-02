@@ -43,6 +43,7 @@ struct HlRuntime {
     HlFsConfig   *fs_cfg;
     HlEnvConfig  *env_cfg;
     HlHttpConfig *http_cfg;
+    const char   *csp_policy;  /* CSP header value for HTML responses (NULL = none) */
 };
 
 #endif /* HL_RUNTIME_H */

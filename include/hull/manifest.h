@@ -39,6 +39,10 @@ typedef struct HlManifest {
     const char *hosts[HL_MANIFEST_MAX_HOSTS];
     int         hosts_count;
 
+    /* Content-Security-Policy for HTML responses */
+    const char *csp;        /* Custom CSP string (NULL if not set or disabled) */
+    int         csp_set;    /* 1 if app explicitly set csp key in manifest */
+
     /* Whether app.manifest() was called */
     int         present;
 } HlManifest;

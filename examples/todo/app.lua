@@ -14,6 +14,8 @@ local csrf     = require("hull.middleware.csrf")
 local ratelimit = require("hull.middleware.ratelimit")
 local logger   = require("hull.middleware.logger")
 
+app.manifest({})  -- sandbox: no fs, no env, no outbound HTTP; default CSP
+
 -- ── Database setup ──────────────────────────────────────────────────
 
 session.init({ ttl = 3600 })
