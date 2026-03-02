@@ -221,6 +221,7 @@ MANIFEST_JS_OBJ  := $(BUILDDIR)/manifest_js_only.o
 MANIFEST_LUA_OBJ := $(BUILDDIR)/manifest_lua_only.o
 TOOL_OBJ       := $(BUILDDIR)/tool.o
 SIG_OBJ        := $(BUILDDIR)/signature.o
+STATIC_OBJ     := $(BUILDDIR)/hull_static.o
 BUILD_ASSET_OBJ := $(BUILDDIR)/build_assets.o
 MAIN_OBJ       := $(BUILDDIR)/main.o
 ENTRY_OBJ      := $(BUILDDIR)/entry.o
@@ -393,9 +394,48 @@ $(APP_TPL_REGISTRY_C): $(APP_TPL_HDRS) | $(BUILDDIR)
 $(APP_TPL_REGISTRY_O): $(APP_TPL_REGISTRY_C) | $(BUILDDIR)
 	$(CC) -std=c11 -O2 -w -I$(BUILDDIR) -c -o $@ $<
 
-APP_EXTRA_OBJS := $(APP_LUA_REGISTRY_O) $(APP_TPL_REGISTRY_O)
+APP_EXTRA_OBJS_TPL := $(APP_LUA_REGISTRY_O) $(APP_TPL_REGISTRY_O)
 else
-APP_EXTRA_OBJS := $(APP_LUA_REGISTRY_O)
+APP_EXTRA_OBJS_TPL := $(APP_LUA_REGISTRY_O)
+endif
+
+# ── Static file embedding (all files under APP_DIR/static/) ──────────
+APP_STATIC_FILES := $(shell find $(APP_DIR)/static -type f 2>/dev/null)
+ifneq ($(APP_STATIC_FILES),)
+app_static_hdr = $(BUILDDIR)/app_static_$(subst /,_,$(patsubst $(APP_DIR)/static/%,%.h,$(1)))
+APP_STATIC_HDRS := $(foreach f,$(APP_STATIC_FILES),$(call app_static_hdr,$(f)))
+
+define APP_STATIC_RULE
+$(call app_static_hdr,$(1)): $(1) | $(BUILDDIR)
+	xxd -i $$< > $$@
+endef
+$(foreach f,$(APP_STATIC_FILES),$(eval $(call APP_STATIC_RULE,$(f))))
+
+APP_STATIC_REGISTRY_C := $(BUILDDIR)/app_static_registry.c
+APP_STATIC_REGISTRY_O := $(BUILDDIR)/app_static_registry.o
+
+$(APP_STATIC_REGISTRY_C): $(APP_STATIC_HDRS) | $(BUILDDIR)
+	@echo "/* Auto-generated static entries — do not edit */" > $@
+	@for hdr in $(APP_STATIC_HDRS); do \
+		echo "#include \"$$(basename $$hdr)\""; \
+	done >> $@
+	@echo "" >> $@
+	@echo "typedef struct { const char *name; const unsigned char *data; unsigned int len; } HlStdlibEntry;" >> $@
+	@echo "const HlStdlibEntry hl_app_static_entries[] = {" >> $@
+	@for f in $(APP_STATIC_FILES); do \
+		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
+		staticname=$$(echo "$$f" | sed 's|^$(APP_DIR)/static/||'); \
+		echo "    { \"$$staticname\", $${varname}, sizeof($${varname}) },"; \
+	done >> $@
+	@echo "    { 0, 0, 0 }" >> $@
+	@echo "};" >> $@
+
+$(APP_STATIC_REGISTRY_O): $(APP_STATIC_REGISTRY_C) | $(BUILDDIR)
+	$(CC) -std=c11 -O2 -w -I$(BUILDDIR) -c -o $@ $<
+
+APP_EXTRA_OBJS := $(APP_EXTRA_OBJS_TPL) $(APP_STATIC_REGISTRY_O)
+else
+APP_EXTRA_OBJS := $(APP_EXTRA_OBJS_TPL)
 endif
 endif
 
@@ -416,7 +456,7 @@ all: $(BUILDDIR)/hull
 # Platform static library — everything except entry.o and build_assets.o
 # Used by `hull build` to produce standalone app binaries.
 # Exports hull_main() (subcommand dispatch + server logic).
-PLATFORM_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(MAIN_OBJ) $(TOOL_OBJ) $(VEND_OBJS) $(MBEDTLS_OBJS) \
+PLATFORM_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MAIN_OBJ) $(TOOL_OBJ) $(VEND_OBJS) $(MBEDTLS_OBJS) \
 	$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS)
 
 PLATFORM_LIB := $(BUILDDIR)/libhull_platform.a
@@ -519,8 +559,8 @@ $(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H)
 endif
 
 # Hull binary
-$(BUILDDIR)/hull: $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB)
-	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) \
+$(BUILDDIR)/hull: $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB)
+	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) \
 		$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB) -lm -lpthread
 
 # Capability sources
@@ -561,6 +601,10 @@ $(SANDBOX_OBJ): $(SRCDIR)/hull/sandbox.c | $(BUILDDIR)
 
 # Signature verification
 $(SIG_OBJ): $(SRCDIR)/hull/signature.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+# Static file serving middleware
+$(STATIC_OBJ): $(SRCDIR)/hull/static.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Tool mode (keygen, build, verify, etc.)
@@ -669,9 +713,9 @@ $(BUILDDIR)/test_tool: $(TESTDIR)/hull/cap/test_tool.c $(CAP_TOOL_NONE_OBJ) | $(
 	$(CC) $(filter-out -DHL_ENABLE_LUA -DHL_ENABLE_JS,$(CFLAGS)) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(CAP_TOOL_NONE_OBJ)
 
 # Command dispatcher test — needs full command set (symbol resolution for command table)
-$(BUILDDIR)/test_dispatch: $(TESTDIR)/hull/commands/test_dispatch.c $(CMD_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(TOOL_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(TEST_COMMON_DEPS) $(RT_OBJS) $(VEND_OBJS) $(MANIFEST_OBJ) $(BUILD_ASSET_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(PLEDGE_OBJS) $(STDLIB_LUA_HDRS) | $(BUILDDIR)
+$(BUILDDIR)/test_dispatch: $(TESTDIR)/hull/commands/test_dispatch.c $(CMD_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(TOOL_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(TEST_COMMON_DEPS) $(RT_OBJS) $(VEND_OBJS) $(MANIFEST_OBJ) $(BUILD_ASSET_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(PLEDGE_OBJS) $(STDLIB_LUA_HDRS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(CMD_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(TOOL_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) \
+		$(CMD_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(TOOL_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) \
 		$(TEST_CAP_OBJS) $(RT_OBJS) $(MANIFEST_OBJ) $(BUILD_ASSET_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(ALLOC_OBJ) $(VEND_OBJS) \
 		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) -lm -lpthread
 
@@ -679,6 +723,11 @@ $(BUILDDIR)/test_dispatch: $(TESTDIR)/hull/commands/test_dispatch.c $(CMD_OBJS) 
 $(BUILDDIR)/test_signature: $(TESTDIR)/hull/test_signature.c $(SIG_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(SIG_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(TEST_COMMON_LIBS)
+
+# Static file serving test — needs static middleware + keel
+$(BUILDDIR)/test_static: $(TESTDIR)/hull/test_static.c $(STATIC_OBJ) $(TEST_COMMON_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
+		$(STATIC_OBJ) $(TEST_COMMON_LIBS)
 
 test: $(TEST_BINS)
 	@echo "Running tests..."
@@ -811,7 +860,7 @@ cppcheck:
 		--suppress='*:$(LOG_DIR)/*' \
 		--error-exitcode=1 \
 		-I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(SQLITE_DIR) -I$(KEEL_INC) \
-		$(SRCDIR)/hull/main.c $(SRCDIR)/hull/alloc.c $(SRCDIR)/hull/cap/*.c \
+		$(SRCDIR)/hull/main.c $(SRCDIR)/hull/alloc.c $(SRCDIR)/hull/static.c $(SRCDIR)/hull/cap/*.c \
 		$(SRCDIR)/hull/commands/*.c \
 		$(SRCDIR)/hull/runtime/js/*.c $(SRCDIR)/hull/runtime/lua/*.c
 

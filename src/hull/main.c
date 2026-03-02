@@ -33,6 +33,7 @@
 #include "hull/parse_size.h"
 #include "hull/sandbox.h"
 #include "hull/signature.h"
+#include "hull/static.h"
 #include "hull/tool.h"
 
 #include <keel/keel.h>
@@ -47,6 +48,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <sys/stat.h>
 
 /* ── Default Content-Security-Policy ───────────────────────────────── */
 
@@ -439,10 +441,45 @@ static int hull_serve(int argc, char **argv)
         log_info("[hull:c] signature verified OK");
     }
 
+    /* Derive app directory from entry point (needed for static files + sandbox) */
+    char app_dir[4096];
+    {
+        const char *slash = strrchr(entry_point, '/');
+        if (slash) {
+            size_t len = (size_t)(slash - entry_point);
+            if (len >= sizeof(app_dir)) len = sizeof(app_dir) - 1;
+            memcpy(app_dir, entry_point, len);
+            app_dir[len] = '\0';
+        } else {
+            app_dir[0] = '.';
+            app_dir[1] = '\0';
+        }
+    }
+
     /* Wire routes into Keel */
     if (rt->vt->wire_routes_server(rt, &server, track_route_alloc) != 0) {
         rt->vt->destroy(rt);
         goto cleanup_server;
+    }
+
+    /* Auto-register static file serving */
+    {
+        extern const HlStaticEntry hl_app_static_entries[];
+        int has_static = (hl_app_static_entries[0].name != NULL);
+        if (!has_static) {
+            char static_dir[4096];
+            snprintf(static_dir, sizeof(static_dir), "%s/static", app_dir);
+            struct stat sdir;
+            if (stat(static_dir, &sdir) == 0 && S_ISDIR(sdir.st_mode))
+                has_static = 1;
+        }
+        if (has_static) {
+            HlStaticCtx *sctx = track_route_alloc(sizeof(HlStaticCtx));
+            sctx->app_dir = app_dir;
+            sctx->entries = (const HlStaticEntry *)hl_app_static_entries;
+            kl_server_use(&server, "GET", "/static/*",
+                          hl_static_middleware, sctx);
+        }
     }
 
     /* Extract manifest and configure capabilities */
@@ -505,21 +542,6 @@ static int hull_serve(int argc, char **argv)
         }
 
         rt->http_cfg = &http_cfg_storage;
-    }
-
-    /* Derive app directory from entry point for sandbox unveil */
-    char app_dir[4096];
-    {
-        const char *slash = strrchr(entry_point, '/');
-        if (slash) {
-            size_t len = (size_t)(slash - entry_point);
-            if (len >= sizeof(app_dir)) len = sizeof(app_dir) - 1;
-            memcpy(app_dir, entry_point, len);
-            app_dir[len] = '\0';
-        } else {
-            app_dir[0] = '.';
-            app_dir[1] = '\0';
-        }
     }
 
     /* Apply kernel sandbox (pledge/unveil) from manifest */
