@@ -75,6 +75,11 @@ local function find_html_files(dir)
     return tool.find_files(dir, "*.html")
 end
 
+-- List all files recursively in a directory
+local function find_all_files(dir)
+    return tool.find_files(dir, "*")
+end
+
 -- ── xxd in Lua ───────────────────────────────────────────────────────
 
 local function xxd_data(varname, data)
@@ -163,6 +168,48 @@ local function generate_template_registry(app_dir, html_files)
     parts[#parts + 1] = "typedef struct { const char *name; const unsigned char *data; unsigned int len; } HlStdlibEntry;"
     parts[#parts + 1] = "#endif"
     parts[#parts + 1] = "const HlStdlibEntry hl_app_template_entries[] = {"
+    for _, e in ipairs(entries) do
+        parts[#parts + 1] = e
+    end
+    parts[#parts + 1] = "    { 0, 0, 0 }"
+    parts[#parts + 1] = "};"
+
+    return table.concat(parts, "\n")
+end
+
+local function generate_static_registry(app_dir, static_files)
+    local parts = {}
+    local entries = {}
+
+    parts[#parts + 1] = "/* Auto-generated static entries by hull build — do not edit */"
+    parts[#parts + 1] = ""
+
+    local static_dir = app_dir .. "/static/"
+    local static_dir_len = #static_dir
+
+    for _, path in ipairs(static_files) do
+        local data = read_file(path)
+        if not data then
+            tool.stderr("hull build: cannot read " .. path .. "\n")
+            tool.exit(1)
+        end
+
+        -- Relative path from static/ dir (e.g. "style.css", "js/app.js")
+        local rel = path:sub(static_dir_len + 1)
+        local varname = "static_" .. rel:gsub("[/.]", "_")
+
+        parts[#parts + 1] = xxd_data(varname, data)
+        parts[#parts + 1] = ""
+
+        entries[#entries + 1] = string.format(
+            '    { "%s", %s, sizeof(%s) },', rel, varname, varname)
+    end
+
+    parts[#parts + 1] = "#ifndef HL_STDLIB_ENTRY_DEFINED"
+    parts[#parts + 1] = "#define HL_STDLIB_ENTRY_DEFINED"
+    parts[#parts + 1] = "typedef struct { const char *name; const unsigned char *data; unsigned int len; } HlStdlibEntry;"
+    parts[#parts + 1] = "#endif"
+    parts[#parts + 1] = "const HlStdlibEntry hl_app_static_entries[] = {"
     for _, e in ipairs(entries) do
         parts[#parts + 1] = e
     end
@@ -293,6 +340,18 @@ local function main()
     write_file(tmpdir .. "/template_registry.c", template_registry_c)
     if #html_files > 0 then
         print("hull build: " .. #html_files .. " template(s) from " .. templates_dir)
+    end
+
+    -- Generate static_registry.c (if static/ dir exists)
+    local static_dir = opts.app_dir .. "/static"
+    local static_files = {}
+    if file_exists(static_dir) then
+        static_files = find_all_files(static_dir)
+    end
+    local static_registry_c = generate_static_registry(opts.app_dir, static_files)
+    write_file(tmpdir .. "/static_registry.c", static_registry_c)
+    if #static_files > 0 then
+        print("hull build: " .. #static_files .. " static file(s) from " .. static_dir)
     end
 
     -- Generate app_main.c
@@ -436,12 +495,22 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
         tool.exit(1)
     end
 
+    ok = tool.spawn({cc, "-std=c11", "-O2", "-w", "-c",
+                     "-o", tmpdir .. "/static_registry.o",
+                     tmpdir .. "/static_registry.c"})
+    if not ok then
+        tool.stderr("hull build: compilation failed (static_registry.c)\n")
+        tool.rmdir(tmpdir)
+        tool.exit(1)
+    end
+
     -- Link
     print("hull build: linking...")
     ok = tool.spawn({cc, "-o", opts.output,
                      tmpdir .. "/app_main.o",
                      tmpdir .. "/app_registry.o",
                      tmpdir .. "/template_registry.o",
+                     tmpdir .. "/static_registry.o",
                      tmpdir .. "/libhull_platform.a",
                      "-lm", "-lpthread"})
     if not ok then
