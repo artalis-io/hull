@@ -4,7 +4,7 @@
 
 ```bash
 make                    # build hull binary (epoll on Linux, kqueue on macOS)
-make test               # build and run all 79 unit tests
+make test               # build and run all unit tests
 make e2e                # end-to-end tests (all examples, both runtimes)
 make debug              # debug build with ASan + UBSan (recompiles from clean)
 make msan               # MSan + UBSan (Linux clang only)
@@ -49,6 +49,7 @@ src/hull/               # Core source
   commands/             #   Subcommand implementations (build.c, test.c, verify.c, etc.)
   runtime/lua/          #   Lua 5.4 runtime (bindings.c, modules.c, runtime.c)
   runtime/js/           #   QuickJS runtime (bindings.c, modules.c, runtime.c)
+  static.c              #   Static file serving middleware (/static/* convention)
 stdlib/                 # Embedded standard library
   lua/hull/             #   Lua modules (json, cookie, session, jwt, csrf, auth, build, verify, etc.)
   js/hull/              #   JS modules (cookie, session, jwt, csrf, auth, verify)
@@ -72,7 +73,7 @@ Runtimes (Lua 5.4 / QuickJS)  →  Sandboxed interpreters
         ↓
 Capability Layer (src/hull/cap/)  →  C enforcement boundary
         ↓
-Hull Core (main.c, manifest.c, sandbox.c, signature.c)
+Hull Core (main.c, manifest.c, sandbox.c, signature.c, static.c)
         ↓
 Keel HTTP Server (vendor/keel/)  →  Event loop + routing
         ↓
@@ -400,6 +401,24 @@ template.clearCache();                           // clear compiled function cach
 - **Template directory:** Place templates in `app_dir/templates/`. Names are relative paths (e.g. `"pages/home.html"`, `"partials/nav.html"`, `"base.html"`).
 - **CSP nonce:** No engine magic needed. Pass nonce as data: `template.render("page.html", { csp_nonce = nonce })`, use `<script nonce="{{ csp_nonce }}">` in template.
 
+### Static File Serving
+
+Convention-based: place files in `app_dir/static/`, they're served at `/static/*`.
+
+- **Dev mode:** Reads from disk via `kl_response_file()` (zero-copy sendfile). `Cache-Control: no-cache`.
+- **Build mode:** Files are embedded in the binary via `hl_app_static_entries[]`. `Cache-Control: public, max-age=86400`.
+- **ETag/304:** `W/"<size_hex>"` for embedded, `W/"<mtime_hex>-<size_hex>"` for filesystem. Returns 304 on `If-None-Match`.
+- **MIME types:** Extension-based lookup (21 types: html, css, js, json, png, jpg, svg, woff2, etc.). Default: `application/octet-stream`.
+- **Security:** Rejects `..` path traversal, null bytes, leading `/` in relative paths.
+- **Auto-detection:** Middleware is registered only when `static/` directory exists or embedded entries are present. User routes take priority (registered first).
+
+Implementation: `src/hull/static.c` + `include/hull/static.h`. Registered as a Keel pre-body middleware via `kl_server_use()`.
+
+Embedding paths:
+- `make APP_DIR=myapp` — Makefile discovers `APP_DIR/static/*`, generates `app_static_registry.c`
+- `hull build myapp` — `build.lua` discovers `static/`, generates `static_registry.c`
+- Both follow the same `HlStdlibEntry` array pattern as Lua/template embedding
+
 ### Recommended Middleware Stack
 
 Order matters — each middleware runs before the next:
@@ -442,7 +461,7 @@ app.use("POST", "/api/*", csrf.middleware({ secret = "change-me" }))
 Tests use Sheredom's utest.h. Each `tests/hull/*/test_*.c` is a standalone executable.
 
 ```bash
-make test                           # run all 79 unit tests
+make test                           # run all unit tests
 make debug && make test             # run under ASan + UBSan
 make e2e                            # run all E2E tests (examples + build + sandbox)
 ./build/test_hull_cap_db            # run a single test suite
@@ -459,8 +478,7 @@ make e2e                            # run all E2E tests (examples + build + sand
 | `test_hull_cap_fs` | 14 | Path validation, read/write, traversal rejection |
 | `test_js_runtime` | 13 | QuickJS init, eval, sandbox, modules, GC, limits |
 | `test_lua_runtime` | 16 | Lua init, eval, sandbox, modules, GC, double-free |
-
-**Total: 79 unit tests** + E2E suites (`e2e_build.sh`, `e2e_examples.sh`, `e2e_http.sh`, `e2e_sandbox.sh`)
+| `test_static` | 18 | MIME detection, path traversal, embedded lookup | + E2E suites (`e2e_build.sh`, `e2e_examples.sh`, `e2e_http.sh`, `e2e_sandbox.sh`)
 
 ### E2E Tests
 

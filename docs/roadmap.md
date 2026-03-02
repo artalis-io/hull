@@ -26,6 +26,7 @@
 - `hull.middleware.csrf` — stateless CSRF tokens via HMAC-SHA256
 - `hull.middleware.auth` — authentication middleware factories (session auth, JWT Bearer auth)
 - `hull.template` — compile-once render-many HTML template engine with inheritance, includes, filters, auto-escaping
+- Static file serving — convention-based (`static/` → `/static/*`), MIME detection, ETag/304, embedded in builds, zero-copy sendfile in dev
 
 ### Build & Deployment
 - `hull build` — compile Lua/JS apps into standalone binaries
@@ -71,7 +72,7 @@
 | Template engine (`{{ }}` HTML templates) | **Done** | `hull.template` — inheritance, includes, filters, compiled & cached |
 | Input validation (schema-based) | Planned | Declarative field validation |
 | Rate limiting middleware | **Done** | `hull.middleware.ratelimit` — sliding window, per-key |
-| Static file serving (`app.static("/public")`) | Planned | With caching headers |
+| Static file serving (`/static/*` convention) | **Done** | MIME detection, ETag/304, embedded in builds, zero-copy sendfile in dev |
 | CSV encode/decode (RFC 4180) | Planned | Import/export |
 | FTS5 search wrapper | Planned | Full-text search stdlib |
 | i18n (locale detection + translations) | Planned | Message bundles |
