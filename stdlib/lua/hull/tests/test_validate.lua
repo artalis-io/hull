@@ -187,7 +187,7 @@ test("email: no @ fails", function()
 end)
 
 test("email: no domain fails", function()
-    local ok, errors = validate.check({ e = "a@" }, { e = { email = true } })
+    local ok, _errors = validate.check({ e = "a@" }, { e = { email = true } })
     assert_eq(ok, false)
 end)
 

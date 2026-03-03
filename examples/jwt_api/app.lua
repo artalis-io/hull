@@ -10,8 +10,8 @@ app.manifest({
     env = {"JWT_SECRET"},
 })
 
-local ok, val = pcall(env.get, "JWT_SECRET")
-local JWT_SECRET = (ok and val) or "change-me-in-production"
+local _ok, _val = pcall(env.get, "JWT_SECRET")
+local JWT_SECRET = (_ok and _val) or "change-me-in-production"
 
 -- Middleware: extract and verify JWT on every request (optional — won't block)
 app.use("*", "/*", function(req, _res)
