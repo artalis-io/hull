@@ -1,4 +1,4 @@
-CREATE TABLE webhooks (
+CREATE TABLE IF NOT EXISTS webhooks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     url TEXT NOT NULL,
     events TEXT NOT NULL,
@@ -6,14 +6,14 @@ CREATE TABLE webhooks (
     created_at INTEGER
 );
 
-CREATE TABLE event_log (
+CREATE TABLE IF NOT EXISTS event_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     event_type TEXT NOT NULL,
     payload TEXT NOT NULL,
     created_at INTEGER
 );
 
-CREATE TABLE deliveries (
+CREATE TABLE IF NOT EXISTS deliveries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     webhook_id INTEGER NOT NULL,
     event_id INTEGER NOT NULL,
