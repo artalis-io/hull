@@ -10,6 +10,7 @@ import { env } from "hull:env";
 import { jwt } from "hull:jwt";
 import { log } from "hull:log";
 import { time } from "hull:time";
+import { validate } from "hull:validate";
 
 app.manifest({
     env: ["JWT_SECRET"],
@@ -55,17 +56,16 @@ app.post("/register", (req, res) => {
         return res.status(400).json({ error: "invalid JSON" });
     }
 
-    const { email, password, name } = body;
+    const [ok, errors] = validate.check(body, {
+        email:    { required: true },
+        password: { required: true, min: 8 },
+        name:     { required: true },
+    });
+    if (!ok) {
+        return res.status(400).json({ errors });
+    }
 
-    if (!email) {
-        return res.status(400).json({ error: "email is required" });
-    }
-    if (!password || password.length < 8) {
-        return res.status(400).json({ error: "password must be at least 8 characters" });
-    }
-    if (!name) {
-        return res.status(400).json({ error: "name is required" });
-    }
+    const { email, password, name } = body;
 
     const existing = db.query("SELECT id FROM users WHERE email = ?", [email]);
     if (existing.length > 0) {
@@ -87,10 +87,15 @@ app.post("/login", (req, res) => {
         return res.status(400).json({ error: "invalid JSON" });
     }
 
-    const { email, password } = body;
-    if (!email || !password) {
-        return res.status(400).json({ error: "email and password are required" });
+    const [ok, errors] = validate.check(body, {
+        email:    { required: true },
+        password: { required: true },
+    });
+    if (!ok) {
+        return res.status(400).json({ errors });
     }
+
+    const { email, password } = body;
 
     const rows = db.query("SELECT * FROM users WHERE email = ?", [email]);
     if (rows.length === 0) {

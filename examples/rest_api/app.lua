@@ -3,6 +3,8 @@
 -- Run: hull app.lua -p 3000
 -- CRUD API for managing tasks
 
+local validate = require("hull.validate")
+
 app.manifest({})
 
 -- List all tasks
@@ -23,8 +25,14 @@ end)
 -- Create a task
 app.post("/tasks", function(req, res)
     local body = json.decode(req.body)
-    if not body or not body.title then
-        return res:status(400):json({ error = "title is required" })
+    if not body then
+        return res:status(400):json({ error = "invalid JSON" })
+    end
+    local ok, errors = validate.check(body, {
+        title = { required = true },
+    })
+    if not ok then
+        return res:status(400):json({ errors = errors })
     end
     db.exec("INSERT INTO tasks (title, created_at) VALUES (?, ?)",
             { body.title, time.now() })

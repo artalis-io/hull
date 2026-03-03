@@ -46,7 +46,7 @@ endif
 
 prod:
 	$(MAKE) -j$(JOBS) -C $(REPO_ROOT) $(PLATFORM_TARGET)
-	$(MAKE) -j$(JOBS) -C $(REPO_ROOT) $(EMBED_FLAG)
+	$(MAKE) -j$(JOBS) -C $(REPO_ROOT) $(EMBED_FLAG) CC=cc AR=ar
 	$(HULL) build --cc $(CC) -o todo .
 
 # ── Run production binary ───────────────────────────────────────────

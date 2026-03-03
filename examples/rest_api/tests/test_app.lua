@@ -23,7 +23,7 @@ test("POST /tasks requires title", function()
         headers = { ["Content-Type"] = "application/json" },
     })
     test.eq(res.status, 400)
-    test.eq(res.json.error, "title is required")
+    test.ok(res.json.errors.title, "has title error")
 end)
 
 test("GET /tasks lists created tasks", function()

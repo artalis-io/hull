@@ -7,12 +7,14 @@
 -- Run:  hull dev examples/todo/app.lua -d /tmp/todo.db
 --
 
-local template = require("hull.template")
-local session  = require("hull.middleware.session")
-local auth     = require("hull.middleware.auth")
-local csrf     = require("hull.middleware.csrf")
+local template  = require("hull.template")
+local form      = require("hull.form")
+local validate  = require("hull.validate")
+local session   = require("hull.middleware.session")
+local auth      = require("hull.middleware.auth")
+local csrf      = require("hull.middleware.csrf")
 local ratelimit = require("hull.middleware.ratelimit")
-local logger   = require("hull.middleware.logger")
+local logger    = require("hull.middleware.logger")
 
 app.manifest({})  -- sandbox: no fs, no env, no outbound HTTP; default CSP
 
@@ -39,24 +41,6 @@ app.use("POST", "/register", ratelimit.middleware({ limit = 5, window = 60 }))
 app.use_post("*", "/*", csrf.middleware({ secret = csrf_secret }))
 
 -- ── Helpers ─────────────────────────────────────────────────────────
-
-local function parse_form(body)
-    local params = {}
-    if not body then return params end
-    for pair in body:gmatch("[^&]+") do
-        local k, v = pair:match("^([^=]*)=(.*)$")
-        if k then
-            k = k:gsub("+", " "):gsub("%%(%x%x)", function(h)
-                return string.char(tonumber(h, 16))
-            end)
-            v = v:gsub("+", " "):gsub("%%(%x%x)", function(h)
-                return string.char(tonumber(h, 16))
-            end)
-            params[k] = v
-        end
-    end
-    return params
-end
 
 local function require_session(req, res)
     if not req.ctx.session then
@@ -94,13 +78,18 @@ app.get("/register", function(req, res)
 end)
 
 app.post("/login", function(req, res)
-    local form = parse_form(req.body)
-    local email = form.email
-    local password = form.password
-
-    if not email or email == "" or not password or password == "" then
-        return res:html(render("pages/login.html", req, { error = "Email and password are required" }))
+    local params = form.parse(req.body)
+    local ok, errors = validate.check(params, {
+        email    = { required = true },
+        password = { required = true },
+    })
+    if not ok then
+        local msg = errors.email or errors.password
+        return res:html(render("pages/login.html", req, { error = msg }))
     end
+
+    local email = params.email
+    local password = params.password
 
     local rows = db.query("SELECT * FROM users WHERE email = ?", { email })
     if #rows == 0 then
@@ -117,20 +106,20 @@ app.post("/login", function(req, res)
 end)
 
 app.post("/register", function(req, res)
-    local form = parse_form(req.body)
-    local email = form.email
-    local password = form.password
-    local name = form.name
+    local params = form.parse(req.body)
+    local ok, errors = validate.check(params, {
+        email    = { required = true },
+        password = { required = true, min = 8 },
+        name     = { required = true },
+    })
+    if not ok then
+        local msg = errors.email or errors.password or errors.name
+        return res:html(render("pages/register.html", req, { error = msg }))
+    end
 
-    if not email or email == "" then
-        return res:html(render("pages/register.html", req, { error = "Email is required" }))
-    end
-    if not password or #password < 8 then
-        return res:html(render("pages/register.html", req, { error = "Password must be at least 8 characters" }))
-    end
-    if not name or name == "" then
-        return res:html(render("pages/register.html", req, { error = "Name is required" }))
-    end
+    local email = params.email
+    local password = params.password
+    local name = params.name
 
     local existing = db.query("SELECT id FROM users WHERE email = ?", { email })
     if #existing > 0 then
@@ -180,12 +169,15 @@ app.post("/add", function(req, res)
     local sess = require_session(req, res)
     if not sess then return end
 
-    local form = parse_form(req.body)
-    local title = form.title
-    if not title or #title == 0 then
+    local params = form.parse(req.body)
+    local ok, _errors = validate.check(params, {
+        title = { required = true },
+    })
+    if not ok then
         return res:redirect("/")
     end
 
+    local title = params.title
     if #title > 500 then title = title:sub(1, 500) end
 
     db.exec("INSERT INTO todos (user_id, title, created_at) VALUES (?, ?, ?)",
