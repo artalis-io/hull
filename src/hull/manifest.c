@@ -13,7 +13,21 @@
  */
 
 #include "hull/manifest.h"
+#include "log.h"
 #include <string.h>
+
+/* Reject CSP strings containing CR/LF to prevent CRLF header injection. */
+static int csp_is_valid(const char *s)
+{
+    if (!s) return 1;
+    for (const char *p = s; *p; p++) {
+        if (*p == '\r' || *p == '\n') {
+            log_warn("[manifest] CSP string contains CR/LF — rejected");
+            return 0;
+        }
+    }
+    return 1;
+}
 
 #ifdef HL_ENABLE_LUA
 #include "lua.h"
@@ -92,8 +106,12 @@ int hl_manifest_extract(lua_State *L, HlManifest *out)
     /* csp = "policy-string" or false */
     lua_getfield(L, manifest_idx, "csp");
     if (lua_isstring(L, -1)) {
-        out->csp = lua_tostring(L, -1);
-        out->csp_set = 1;
+        const char *csp_str = lua_tostring(L, -1);
+        if (csp_is_valid(csp_str)) {
+            out->csp = csp_str;
+            out->csp_set = 1;
+        }
+        /* invalid → csp_set stays 0, falls back to default */
     } else if (lua_isboolean(L, -1) && !lua_toboolean(L, -1)) {
         out->csp = NULL;
         out->csp_set = 1;  /* explicitly disabled */
@@ -188,8 +206,14 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out)
     /* csp = "policy-string" or false */
     JSValue csp_val = JS_GetPropertyStr(ctx, manifest, "csp");
     if (JS_IsString(csp_val)) {
-        out->csp = JS_ToCString(ctx, csp_val);
-        out->csp_set = 1;
+        const char *csp_str = JS_ToCString(ctx, csp_val);
+        if (csp_str && csp_is_valid(csp_str)) {
+            out->csp = csp_str;
+            out->csp_set = 1;
+        } else if (csp_str) {
+            JS_FreeCString(ctx, csp_str);
+            /* invalid → csp_set stays 0, falls back to default */
+        }
     } else if (JS_IsBool(csp_val) && !JS_ToBool(ctx, csp_val)) {
         out->csp = NULL;
         out->csp_set = 1;  /* explicitly disabled */

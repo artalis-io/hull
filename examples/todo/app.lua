@@ -22,7 +22,10 @@ local logger    = require("hull.middleware.logger")
 local cookie    = require("hull.cookie")
 local i18n      = require("hull.i18n")
 
-app.manifest({})  -- sandbox: no fs, no env, no outbound HTTP; default CSP
+app.manifest({
+    csp = "default-src 'none'; style-src 'self' 'unsafe-inline'; "
+       .. "img-src 'self'; form-action 'self'; frame-ancestors 'none'",
+})  -- sandbox: no fs, no env, no outbound HTTP; inline styles for templates
 
 -- ── i18n setup ─────────────────────────────────────────────────────
 
