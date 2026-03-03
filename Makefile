@@ -222,7 +222,8 @@ MANIFEST_LUA_OBJ := $(BUILDDIR)/manifest_lua_only.o
 TOOL_OBJ       := $(BUILDDIR)/tool.o
 SIG_OBJ        := $(BUILDDIR)/signature.o
 STATIC_OBJ     := $(BUILDDIR)/hull_static.o
-BUILD_ASSET_OBJ := $(BUILDDIR)/build_assets.o
+BUILD_ASSET_OBJ      := $(BUILDDIR)/build_assets.o
+BUILD_ASSET_STUB_OBJ := $(BUILDDIR)/build_assets_stub.o
 MAIN_OBJ       := $(BUILDDIR)/main.o
 ENTRY_OBJ      := $(BUILDDIR)/entry.o
 
@@ -456,7 +457,7 @@ all: $(BUILDDIR)/hull
 # Platform static library — everything except entry.o and build_assets.o
 # Used by `hull build` to produce standalone app binaries.
 # Exports hull_main() (subcommand dispatch + server logic).
-PLATFORM_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MAIN_OBJ) $(TOOL_OBJ) $(VEND_OBJS) $(MBEDTLS_OBJS) \
+PLATFORM_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MAIN_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(VEND_OBJS) $(MBEDTLS_OBJS) \
 	$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS)
 
 PLATFORM_LIB := $(BUILDDIR)/libhull_platform.a
@@ -497,11 +498,13 @@ platform-cosmo:
 	@rm -rf $(COSMO_STAGE) && mkdir -p $(COSMO_STAGE)
 	@echo "=== Building x86_64-cosmo platform ==="
 	$(MAKE) clean
+	$(MAKE) -C $(KEEL_DIR) clean
 	$(MAKE) platform CC=x86_64-unknown-cosmo-cc AR=x86_64-unknown-cosmo-ar
 	cp $(BUILDDIR)/libhull_platform.a $(COSMO_STAGE)/libhull_platform.x86_64-cosmo.a
 	cp $(BUILDDIR)/platform_canary_hash $(COSMO_STAGE)/platform_canary_hash.x86_64-cosmo
 	@echo "=== Building aarch64-cosmo platform ==="
 	$(MAKE) clean
+	$(MAKE) -C $(KEEL_DIR) clean
 	$(MAKE) platform CC=aarch64-unknown-cosmo-cc AR=aarch64-unknown-cosmo-ar
 	cp $(BUILDDIR)/libhull_platform.a $(COSMO_STAGE)/libhull_platform.aarch64-cosmo.a
 	cp $(BUILDDIR)/platform_canary_hash $(COSMO_STAGE)/platform_canary_hash.aarch64-cosmo
@@ -613,6 +616,10 @@ $(TOOL_OBJ): $(SRCDIR)/hull/tool.c | $(BUILDDIR)
 
 # Build assets (embedded platform lib — stub unless HL_BUILD_EMBEDDED=1)
 $(BUILD_ASSET_OBJ): $(SRCDIR)/hull/build_assets.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+# Build assets stub (no-op stubs for platform archive — satisfies cap_tool.o refs)
+$(BUILD_ASSET_STUB_OBJ): $(SRCDIR)/hull/build_assets_stub.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Main (hull_main — goes into platform .a)

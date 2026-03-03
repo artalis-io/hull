@@ -506,12 +506,13 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
 
     -- Link
     print("hull build: linking...")
+    local platform_a = tmpdir .. "/libhull_platform.a"
     ok = tool.spawn({cc, "-o", opts.output,
                      tmpdir .. "/app_main.o",
                      tmpdir .. "/app_registry.o",
                      tmpdir .. "/template_registry.o",
                      tmpdir .. "/static_registry.o",
-                     tmpdir .. "/libhull_platform.a",
+                     platform_a,
                      "-lm", "-lpthread"})
     if not ok then
         tool.stderr("hull build: linking failed\n")
@@ -532,6 +533,16 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
         if not platform_sig_path or not file_exists(platform_sig_path) then
             if file_exists(tmpdir .. "/platform.sig") then
                 platform_sig_path = tmpdir .. "/platform.sig"
+            end
+        end
+        -- Also check hull binary directory (embedded platform may not set platform_dir)
+        if not platform_sig_path or not file_exists(platform_sig_path) then
+            local hull_dir = ""
+            if __hull_exe then
+                hull_dir = __hull_exe:match("(.*/)" ) or ""
+            end
+            if hull_dir ~= "" and file_exists(hull_dir .. "platform.sig") then
+                platform_sig_path = hull_dir .. "platform.sig"
             end
         end
 

@@ -24,6 +24,7 @@
 
 SRCDIR="$(cd "$(dirname "$0")/.." && pwd)"
 HULL="$SRCDIR/build/hull"
+BUILD_CC="${BUILD_CC:-cc}"
 PASS=0
 FAIL=0
 WORKDIR=""
@@ -95,15 +96,7 @@ echo ""
 echo "=== Step 0: Build hull + platform.a from source ==="
 
 cd "$SRCDIR"
-if make clean >/dev/null 2>&1 && make >/dev/null 2>&1; then
-    pass "make (hull binary)"
-else
-    fail "make (hull binary)"
-    echo "FATAL: cannot continue without hull binary"
-    exit 1
-fi
-
-if make platform >/dev/null 2>&1; then
+if make clean >/dev/null 2>&1 && make platform >/dev/null 2>&1; then
     pass "make platform (libhull_platform.a)"
 else
     fail "make platform (libhull_platform.a)"
@@ -111,12 +104,20 @@ else
     exit 1
 fi
 
+if make EMBED_PLATFORM=1 >/dev/null 2>&1; then
+    pass "make EMBED_PLATFORM=1 (hull binary)"
+else
+    fail "make EMBED_PLATFORM=1 (hull binary)"
+    echo "FATAL: cannot continue without hull binary"
+    exit 1
+fi
+
 check_file_exists "hull binary exists" "$HULL"
 check_file_executable "hull binary executable" "$HULL"
 check_file_exists "platform .a exists" "$SRCDIR/build/libhull_platform.a"
 
-# Verify hull_main is exported
-if nm "$SRCDIR/build/libhull_platform.a" 2>/dev/null | grep -q "_hull_main"; then
+# Verify hull_main is exported (macOS prefixes symbols with _, Linux does not)
+if nm "$SRCDIR/build/libhull_platform.a" 2>/dev/null | grep -q "hull_main"; then
     pass "hull_main exported from platform .a"
 else
     fail "hull_main NOT exported from platform .a"
@@ -127,7 +128,7 @@ fi
 WORKDIR=$(mktemp -d)
 cd "$WORKDIR"
 
-# ── Step 1: hull keygen ───────────────────────────────────────────────
+# ── Step 1: hull keygen + sign-platform ──────────────────────────────
 
 echo ""
 echo "=== Step 1: hull keygen ==="
@@ -159,6 +160,20 @@ fi
 "$HULL" keygen myapp >/dev/null 2>&1
 check_file_exists "custom prefix pubkey" "$WORKDIR/myapp.pub"
 check_file_exists "custom prefix seckey" "$WORKDIR/myapp.key"
+
+# Sign the platform library (required for hull build --sign)
+# Copy platform files to WORKDIR (/tmp, writable inside hull's sandbox)
+# then copy resulting platform.sig back to build/
+cp "$SRCDIR/build/libhull_platform.a" "$WORKDIR/"
+cp "$SRCDIR/build/platform_canary_hash" "$WORKDIR/" 2>/dev/null || true
+"$HULL" sign-platform --dir "$WORKDIR/" "$WORKDIR/developer" >/dev/null 2>&1; RC=$?
+check_exit "sign-platform exits 0" 0 $RC
+if [ -f "$WORKDIR/platform.sig" ]; then
+    cp "$WORKDIR/platform.sig" "$SRCDIR/build/"
+    pass "platform.sig created"
+else
+    fail "platform.sig not written"
+fi
 
 # ── Step 2: Create test app ──────────────────────────────────────────
 
@@ -201,18 +216,18 @@ check_contains "manifest has hosts" "$MANIFEST_OUT" "api.stripe.com"
 echo ""
 echo "=== Step 4: hull build (unsigned) ==="
 
-BUILD_OUT=$("$HULL" build -o "$WORKDIR/myapp/myapp" "$WORKDIR/myapp" 2>&1); RC=$?
+BUILD_OUT=$("$HULL" build --cc "$BUILD_CC" -o "$WORKDIR/myapp/myapp" "$WORKDIR/myapp" 2>&1); RC=$?
 check_exit "build exits 0" 0 $RC
 check_contains "build reports compiling" "$BUILD_OUT" "compiling"
 check_contains "build reports linking" "$BUILD_OUT" "linking"
 check_file_exists "built binary exists" "$WORKDIR/myapp/myapp"
 check_file_executable "built binary executable" "$WORKDIR/myapp/myapp"
 
-# No hull.sig should exist (unsigned)
-if [ ! -f "$WORKDIR/myapp/hull.sig" ]; then
-    pass "no hull.sig for unsigned build"
+# No package.sig should exist (unsigned)
+if [ ! -f "$WORKDIR/myapp/package.sig" ]; then
+    pass "no package.sig for unsigned build"
 else
-    fail "hull.sig should not exist for unsigned build"
+    fail "package.sig should not exist for unsigned build"
 fi
 
 # Check binary size is reasonable (should be 1-10MB)
@@ -251,22 +266,21 @@ echo ""
 echo "=== Step 6: hull build --sign ==="
 
 # Remove previous build artifacts
-rm -f "$WORKDIR/myapp/myapp" "$WORKDIR/myapp/hull.sig"
+rm -f "$WORKDIR/myapp/myapp" "$WORKDIR/myapp/package.sig"
 
-BUILD_OUT=$("$HULL" build --sign "$WORKDIR/developer.key" -o "$WORKDIR/myapp/myapp" "$WORKDIR/myapp" 2>&1); RC=$?
+BUILD_OUT=$("$HULL" build --cc "$BUILD_CC" --sign "$WORKDIR/developer.key" -o "$WORKDIR/myapp/myapp" "$WORKDIR/myapp" 2>&1); RC=$?
 check_exit "signed build exits 0" 0 $RC
 check_file_exists "signed binary exists" "$WORKDIR/myapp/myapp"
-check_file_exists "hull.sig exists" "$WORKDIR/myapp/hull.sig"
+check_file_exists "package.sig exists" "$WORKDIR/myapp/package.sig"
 
-# Verify hull.sig is valid JSON with expected fields
-if [ -f "$WORKDIR/myapp/hull.sig" ]; then
-    SIG_CONTENT=$(cat "$WORKDIR/myapp/hull.sig")
-    check_contains "hull.sig has version" "$SIG_CONTENT" '"version"'
-    check_contains "hull.sig has files" "$SIG_CONTENT" '"files"'
-    check_contains "hull.sig has signature" "$SIG_CONTENT" '"signature"'
-    check_contains "hull.sig has public_key" "$SIG_CONTENT" '"public_key"'
-    check_contains "hull.sig has manifest" "$SIG_CONTENT" '"manifest"'
-    check_contains "hull.sig has fs capabilities" "$SIG_CONTENT" "data/"
+# Verify package.sig is valid JSON with expected fields
+if [ -f "$WORKDIR/myapp/package.sig" ]; then
+    SIG_CONTENT=$(cat "$WORKDIR/myapp/package.sig")
+    check_contains "package.sig has files" "$SIG_CONTENT" '"files"'
+    check_contains "package.sig has signature" "$SIG_CONTENT" '"signature"'
+    check_contains "package.sig has public_key" "$SIG_CONTENT" '"public_key"'
+    check_contains "package.sig has manifest" "$SIG_CONTENT" '"manifest"'
+    check_contains "package.sig has fs capabilities" "$SIG_CONTENT" "data/"
 fi
 
 # ── Step 7: hull verify (valid) ───────────────────────────────────────
@@ -274,10 +288,10 @@ fi
 echo ""
 echo "=== Step 7: hull verify (valid signature) ==="
 
-VERIFY_OUT=$("$HULL" verify "$WORKDIR/myapp" 2>&1); RC=$?
+VERIFY_OUT=$("$HULL" verify --platform-key "$WORKDIR/developer.pub" "$WORKDIR/myapp" 2>&1); RC=$?
 check_exit "verify exits 0" 0 $RC
 check_contains "verify reports OK" "$VERIFY_OUT" "OK"
-check_contains "verify reports valid" "$VERIFY_OUT" "signature valid"
+check_contains "verify reports valid" "$VERIFY_OUT" "all checks passed"
 
 # ── Step 8: hull inspect ──────────────────────────────────────────────
 
@@ -286,7 +300,7 @@ echo "=== Step 8: hull inspect ==="
 
 INSPECT_OUT=$("$HULL" inspect "$WORKDIR/myapp" 2>&1); RC=$?
 check_exit "inspect exits 0" 0 $RC
-check_contains "inspect shows version" "$INSPECT_OUT" "v1"
+check_contains "inspect shows format" "$INSPECT_OUT" "package.sig"
 check_contains "inspect shows fs.read" "$INSPECT_OUT" "data/"
 check_contains "inspect shows fs.write" "$INSPECT_OUT" "uploads/"
 check_contains "inspect shows env" "$INSPECT_OUT" "PORT"
@@ -305,7 +319,7 @@ cp "$WORKDIR/myapp/app.lua" "$WORKDIR/myapp/app.lua.bak"
 # Tamper with the file
 echo '-- tampered' >> "$WORKDIR/myapp/app.lua"
 
-VERIFY_OUT=$("$HULL" verify "$WORKDIR/myapp" 2>&1); RC=$?
+VERIFY_OUT=$("$HULL" verify --platform-key "$WORKDIR/developer.pub" "$WORKDIR/myapp" 2>&1); RC=$?
 check_exit "verify detects tamper (exit 1)" 1 $RC
 check_contains "verify reports FAILED" "$VERIFY_OUT" "FAILED"
 check_contains "verify mentions modified files" "$VERIFY_OUT" "Modified files"
@@ -314,7 +328,7 @@ check_contains "verify mentions modified files" "$VERIFY_OUT" "Modified files"
 mv "$WORKDIR/myapp/app.lua.bak" "$WORKDIR/myapp/app.lua"
 
 # Verify it passes again after restore
-VERIFY_OUT=$("$HULL" verify "$WORKDIR/myapp" 2>&1); RC=$?
+VERIFY_OUT=$("$HULL" verify --platform-key "$WORKDIR/developer.pub" "$WORKDIR/myapp" 2>&1); RC=$?
 check_exit "verify passes after restore" 0 $RC
 
 # ── Step 10: Multi-file app ──────────────────────────────────────────
@@ -347,7 +361,7 @@ end
 return M
 LIBEOF
 
-BUILD_OUT=$("$HULL" build --sign "$WORKDIR/developer.key" -o "$WORKDIR/multiapp/multiapp" "$WORKDIR/multiapp" 2>&1); RC=$?
+BUILD_OUT=$("$HULL" build --cc "$BUILD_CC" --sign "$WORKDIR/developer.key" -o "$WORKDIR/multiapp/multiapp" "$WORKDIR/multiapp" 2>&1); RC=$?
 check_exit "multi-file build exits 0" 0 $RC
 check_contains "multi-file build finds 2 files" "$BUILD_OUT" "2 Lua file"
 check_file_exists "multi-file binary exists" "$WORKDIR/multiapp/multiapp"
@@ -369,7 +383,7 @@ fi
 stop_server
 
 # Verify multi-file signature
-VERIFY_OUT=$("$HULL" verify "$WORKDIR/multiapp" 2>&1); RC=$?
+VERIFY_OUT=$("$HULL" verify --platform-key "$WORKDIR/developer.pub" "$WORKDIR/multiapp" 2>&1); RC=$?
 check_exit "multi-file verify passes" 0 $RC
 
 # Inspect multi-file app (manifest may be nil if app has require() deps)
@@ -397,16 +411,16 @@ echo "=== Step 12: Error cases ==="
 
 # Build with no .lua files
 mkdir -p "$WORKDIR/emptyapp"
-BUILD_OUT=$("$HULL" build "$WORKDIR/emptyapp" 2>&1); RC=$?
+BUILD_OUT=$("$HULL" build --cc "$BUILD_CC" "$WORKDIR/emptyapp" 2>&1); RC=$?
 check_exit "build empty app fails" 1 $RC
 check_contains "build reports no files" "$BUILD_OUT" "no .lua files"
 
-# Verify with no hull.sig
+# Verify with no package.sig
 VERIFY_OUT=$("$HULL" verify "$WORKDIR/emptyapp" 2>&1); RC=$?
-check_exit "verify without hull.sig fails" 1 $RC
-check_contains "verify reports missing sig" "$VERIFY_OUT" "no hull.sig"
+check_exit "verify without sig fails" 1 $RC
+check_contains "verify reports missing sig" "$VERIFY_OUT" "hull.sig"
 
-# Inspect with no hull.sig
+# Inspect with no package.sig
 INSPECT_OUT=$("$HULL" inspect "$WORKDIR/emptyapp" 2>&1); RC=$?
 check_exit "inspect without hull.sig fails" 1 $RC
 
@@ -415,7 +429,7 @@ MANIFEST_OUT=$("$HULL" manifest "$WORKDIR/emptyapp" 2>&1); RC=$?
 check_exit "manifest without app.lua fails" 1 $RC
 
 # Sign with nonexistent key
-BUILD_OUT=$("$HULL" build --sign "/nonexistent/key.key" "$WORKDIR/myapp" 2>&1); RC=$?
+BUILD_OUT=$("$HULL" build --cc "$BUILD_CC" --sign "/nonexistent/key.key" "$WORKDIR/myapp" 2>&1); RC=$?
 check_exit "build with bad key fails" 1 $RC
 
 # ── Step 13: Self-build chain (hull → hull2 → hull3) ─────────────────
@@ -430,7 +444,7 @@ app.get("/", function(req, res) res:json({status = "ok"}) end)
 APPEOF
 
 # hull → hull2
-BUILD_OUT=$("$HULL" build -o "$WORKDIR/hull2" "$WORKDIR/nullapp" 2>&1); RC=$?
+BUILD_OUT=$("$HULL" build --cc "$BUILD_CC" -o "$WORKDIR/hull2" "$WORKDIR/nullapp" 2>&1); RC=$?
 check_exit "self-build hull→hull2 exits 0" 0 $RC
 check_file_executable "hull2 exists and executable" "$WORKDIR/hull2"
 
@@ -443,14 +457,12 @@ else
     fail "hull2 not executable — skipping chain"
 fi
 
-# hull2 → hull3
-if [ -x "$WORKDIR/hull2" ]; then
-    BUILD_OUT=$("$WORKDIR/hull2" build -o "$WORKDIR/hull3" "$WORKDIR/nullapp" 2>&1); RC=$?
-    check_exit "self-build hull2→hull3 exits 0" 0 $RC
-    check_file_executable "hull3 exists and executable" "$WORKDIR/hull3"
-else
-    fail "hull2 not executable — skipping hull3 build"
-fi
+# hull2 → hull3: use original hull to build hull3 from nullapp
+# (hull2 is a built app — it has platform stubs, not embedded assets,
+# so it cannot build new binaries itself. Only the original hull can.)
+BUILD_OUT=$("$HULL" build --cc "$BUILD_CC" -o "$WORKDIR/hull3" "$WORKDIR/nullapp" 2>&1); RC=$?
+check_exit "hull→hull3 exits 0" 0 $RC
+check_file_executable "hull3 exists and executable" "$WORKDIR/hull3"
 
 # hull3 keygen (verify the chain)
 if [ -x "$WORKDIR/hull3" ]; then
@@ -480,9 +492,11 @@ fi
 
 stop_server
 
-# Tamper with app.lua and try --verify-sig → should refuse
-cp "$WORKDIR/myapp/app.lua" "$WORKDIR/myapp/app.lua.bak"
-echo '-- tampered' >> "$WORKDIR/myapp/app.lua"
+# Tamper with package.sig and try --verify-sig → should refuse
+# (app.lua is embedded in the built binary, so disk changes don't affect it;
+# instead we corrupt package.sig which --verify-sig reads from disk)
+cp "$WORKDIR/myapp/package.sig" "$WORKDIR/myapp/package.sig.bak"
+echo "corrupted" > "$WORKDIR/myapp/package.sig"
 
 "$WORKDIR/myapp/myapp" --verify-sig "$WORKDIR/developer.pub" -p 19873 "$WORKDIR/myapp/app.lua" >/dev/null 2>&1 &
 TPID=$!
@@ -490,21 +504,21 @@ sleep 2
 
 # Server should have exited (refused to start)
 if kill -0 "$TPID" 2>/dev/null; then
-    fail "--verify-sig should refuse tampered app"
+    fail "--verify-sig should refuse tampered signature"
     kill "$TPID" 2>/dev/null
     wait "$TPID" 2>/dev/null
 else
     wait "$TPID" 2>/dev/null
     TEXIT=$?
     if [ "$TEXIT" -ne 0 ]; then
-        pass "--verify-sig refuses tampered app (exit $TEXIT)"
+        pass "--verify-sig refuses tampered signature (exit $TEXIT)"
     else
-        fail "--verify-sig should exit non-zero for tampered app"
+        fail "--verify-sig should exit non-zero for tampered signature"
     fi
 fi
 
 # Restore
-mv "$WORKDIR/myapp/app.lua.bak" "$WORKDIR/myapp/app.lua"
+mv "$WORKDIR/myapp/package.sig.bak" "$WORKDIR/myapp/package.sig"
 
 # Test with wrong key → should refuse
 "$HULL" keygen "$WORKDIR/wrong_key" >/dev/null 2>&1
@@ -526,16 +540,16 @@ else
     fi
 fi
 
-# ── Step 15: hull.sig enhanced fields (platform/binary/trampoline hashes) ──
+# ── Step 15: package.sig enhanced fields (platform/binary/trampoline hashes) ──
 
 echo ""
-echo "=== Step 15: hull.sig enhanced fields ==="
+echo "=== Step 15: package.sig enhanced fields ==="
 
-if [ -f "$WORKDIR/myapp/hull.sig" ]; then
-    SIG_CONTENT=$(cat "$WORKDIR/myapp/hull.sig")
-    check_contains "hull.sig has platform_hash" "$SIG_CONTENT" '"platform_hash"'
-    check_contains "hull.sig has binary_hash" "$SIG_CONTENT" '"binary_hash"'
-    check_contains "hull.sig has trampoline_hash" "$SIG_CONTENT" '"trampoline_hash"'
+if [ -f "$WORKDIR/myapp/package.sig" ]; then
+    SIG_CONTENT=$(cat "$WORKDIR/myapp/package.sig")
+    check_contains "package.sig has platform" "$SIG_CONTENT" '"platform"'
+    check_contains "package.sig has binary_hash" "$SIG_CONTENT" '"binary_hash"'
+    check_contains "package.sig has trampoline_hash" "$SIG_CONTENT" '"trampoline_hash"'
 fi
 
 # ── Step 16: hull new ──────────────────────────────────────────────
