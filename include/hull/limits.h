@@ -27,6 +27,7 @@
 #define HL_DEFAULT_PORT       3000
 #define HL_DEFAULT_MAX_CONN   256
 #define HL_DEFAULT_READ_TIMEOUT_MS 30000
+#define HL_DEFAULT_DRAIN_TIMEOUT_MS 5000        /* 5s graceful shutdown */
 
 /* ── Crypto ─────────────────────────────────────────────────────────── */
 

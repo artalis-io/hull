@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}My Todos{% end %}
+{% block title %}{{ t.my_todos }}{% end %}
 
 {% block head_css %}
         .add-form {
@@ -93,12 +93,12 @@
 {% end %}
 
 {% block content %}
-<h1>My Todos</h1>
+<h1>{{ t.my_todos }}</h1>
 
 <form class="add-form" method="POST" action="/add">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-    <input type="text" name="title" placeholder="What needs to be done?" required autofocus>
-    <button type="submit">Add</button>
+    <input type="text" name="title" placeholder="{{ t.placeholder }}" required autofocus>
+    <button type="submit">{{ t.add }}</button>
 </form>
 
 {% if has_todos %}
@@ -109,11 +109,11 @@
 </ul>
 
 <div class="stats">
-    {{ remaining }} remaining &middot; {{ done_count }} completed &middot; {{ total }} total
+    {{ remaining }} {{ t.remaining }} &middot; {{ done_count }} {{ t.completed }} &middot; {{ total }} {{ t.total }}
 </div>
 {% else %}
 <div class="empty">
-    <p>No todos yet. Add one above!</p>
+    <p>{{ t.empty }}</p>
 </div>
 {% end %}
 {% end %}

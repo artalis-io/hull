@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="{{ lang }}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}Todo{% end %}</title>
+    <title>{% block title %}{{ t.site_title }}{% end %}</title>
     <link rel="stylesheet" href="/static/style.css">
     <style>
         {% block head_css %}{% end %}
@@ -17,7 +17,7 @@
     </main>
 
     <footer>
-        <p>Powered by Hull &mdash; {{ year }}</p>
+        <p>{{ t.powered_by }} &mdash; {{ year }}</p>
     </footer>
 </body>
 </html>

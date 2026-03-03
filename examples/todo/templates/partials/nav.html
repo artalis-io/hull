@@ -1,13 +1,16 @@
 <nav>
-    <a class="brand" href="/">Todo</a>
+    <a class="brand" href="/">{{ t.nav_brand }}</a>
     {% if logged_in %}
-    <a href="/">Tasks</a>
+    <a href="/">{{ t.nav_tasks }}</a>
     <form method="POST" action="/logout">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-        <button type="submit">Logout</button>
+        <button type="submit">{{ t.nav_logout }}</button>
     </form>
     {% else %}
-    <a href="/login">Login</a>
-    <a href="/register">Register</a>
+    <a href="/login">{{ t.nav_login }}</a>
+    <a href="/register">{{ t.nav_register }}</a>
     {% end %}
+    <span class="lang-switch">
+        <a href="/lang/en">{{ t.lang_en }}</a> | <a href="/lang/hu">{{ t.lang_hu }}</a>
+    </span>
 </nav>

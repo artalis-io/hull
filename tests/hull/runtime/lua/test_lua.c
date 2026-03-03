@@ -1774,4 +1774,86 @@ UTEST(lua_stdlib, validate_check_email)
     cleanup_lua();
 }
 
+/* ── hull.i18n tests ─────────────────────────────────────────────────── */
+
+UTEST(lua_stdlib, i18n_load_and_translate)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local i18n = require('hull.i18n') "
+        "  i18n.reset() "
+        "  i18n.load('en', { greeting = 'Hello', nav = { home = 'Home' } }) "
+        "  i18n.locale('en') "
+        "  return i18n.t('greeting') == 'Hello' "
+        "     and i18n.t('nav.home') == 'Home' "
+        "     and i18n.t('missing') == 'missing' "
+        "     and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua();
+}
+
+UTEST(lua_stdlib, i18n_interpolation)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local i18n = require('hull.i18n') "
+        "  i18n.reset() "
+        "  i18n.load('en', { total = 'Total: ${amount}' }) "
+        "  i18n.locale('en') "
+        "  return i18n.t('total', {amount = '42'}) == 'Total: 42' and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua();
+}
+
+UTEST(lua_stdlib, i18n_number_and_date)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local i18n = require('hull.i18n') "
+        "  i18n.reset() "
+        "  i18n.load('en', { format = { decimal_sep = '.', thousands_sep = ',', date_pattern = 'YYYY-MM-DD' } }) "
+        "  i18n.locale('en') "
+        "  return i18n.number(1500) == '1,500' "
+        "     and i18n.date(0) == '1970-01-01' "
+        "     and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua();
+}
+
+UTEST(lua_stdlib, i18n_detect)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local i18n = require('hull.i18n') "
+        "  i18n.reset() "
+        "  i18n.load('en', {}) "
+        "  i18n.load('hu', {}) "
+        "  return i18n.detect('hu,en;q=0.9') == 'hu' "
+        "     and i18n.detect('en-US') == 'en' "
+        "     and i18n.detect('ja') == nil "
+        "     and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua();
+}
+
 UTEST_MAIN();

@@ -1,8 +1,12 @@
 --
--- Todo App — full auth, CSRF, rate limiting, server-side rendered
+-- Todo App — full auth, CSRF, rate limiting, server-side rendered, i18n
 --
 -- A todo list with user authentication, sessions, CSRF protection,
--- and per-user data isolation. Pure HTML forms, no client-side JS.
+-- per-user data isolation, and English/Hungarian language support.
+-- Pure HTML forms, no client-side JS.
+--
+-- Graceful shutdown: Ctrl+C triggers drain mode (finishes in-flight
+-- requests within 5s). Second Ctrl+C stops immediately.
 --
 -- Run:  hull dev examples/todo/app.lua -d /tmp/todo.db
 --
@@ -15,8 +19,16 @@ local auth      = require("hull.middleware.auth")
 local csrf      = require("hull.middleware.csrf")
 local ratelimit = require("hull.middleware.ratelimit")
 local logger    = require("hull.middleware.logger")
+local cookie    = require("hull.cookie")
+local i18n      = require("hull.i18n")
 
 app.manifest({})  -- sandbox: no fs, no env, no outbound HTTP; default CSP
+
+-- ── i18n setup ─────────────────────────────────────────────────────
+
+i18n.load("en", require("./locales/en"))
+i18n.load("hu", require("./locales/hu"))
+i18n.locale("en")
 
 -- ── Session setup ──────────────────────────────────────────────────
 
@@ -35,6 +47,18 @@ local csrf_secret = to_hex(crypto.random(32))
 
 app.use("*", "/*", logger.middleware({ skip = {"/health"} }))
 app.use("*", "/*", auth.session_middleware({ optional = true }))
+
+-- Language detection middleware: cookie → Accept-Language → default "en"
+app.use("*", "/*", function(req, _res)
+    local cookies = cookie.parse(req.headers["cookie"] or "")
+    local lang = cookies["hull.lang"]
+    if not lang or (lang ~= "en" and lang ~= "hu") then
+        lang = i18n.detect(req.headers["accept-language"]) or "en"
+    end
+    i18n.locale(lang)
+    return 0
+end)
+
 app.use("POST", "/login", ratelimit.middleware({ limit = 10, window = 60 }))
 app.use("POST", "/register", ratelimit.middleware({ limit = 5, window = 60 }))
 -- CSRF needs body access → post-body middleware
@@ -50,12 +74,54 @@ local function require_session(req, res)
     return req.ctx.session
 end
 
+--- Build template context with translated strings.
 local function render(page, req, extra)
     extra = extra or {}
     extra.year = time.date():sub(1, 4)
     extra.csrf_token = req.ctx.csrf_token or ""
     extra.user = req.ctx.session
     extra.logged_in = req.ctx.session ~= nil
+    extra.lang = i18n.locale()
+
+    -- Inject translated strings as t.* for templates
+    extra.t = {
+        -- site
+        site_title    = i18n.t("site.title"),
+        powered_by    = i18n.t("site.powered_by"),
+        -- nav
+        nav_brand     = i18n.t("nav.brand"),
+        nav_tasks     = i18n.t("nav.tasks"),
+        nav_logout    = i18n.t("nav.logout"),
+        nav_login     = i18n.t("nav.login"),
+        nav_register  = i18n.t("nav.register"),
+        -- index
+        my_todos      = i18n.t("index.title"),
+        placeholder   = i18n.t("index.placeholder"),
+        add           = i18n.t("index.add"),
+        remaining     = i18n.t("index.remaining"),
+        completed     = i18n.t("index.completed"),
+        total         = i18n.t("index.total"),
+        empty         = i18n.t("index.empty"),
+        -- login
+        login_title   = i18n.t("login.page_title"),
+        login_email   = i18n.t("login.email"),
+        login_pass    = i18n.t("login.password"),
+        login_submit  = i18n.t("login.submit"),
+        no_account    = i18n.t("login.no_account"),
+        register_link = i18n.t("login.register_link"),
+        -- register
+        reg_title     = i18n.t("register.page_title"),
+        reg_name      = i18n.t("register.name"),
+        reg_email     = i18n.t("register.email"),
+        reg_pass      = i18n.t("register.password"),
+        reg_submit    = i18n.t("register.submit"),
+        has_account   = i18n.t("register.has_account"),
+        login_link    = i18n.t("register.login_link"),
+        -- language names
+        lang_en       = i18n.t("lang.en"),
+        lang_hu       = i18n.t("lang.hu"),
+    }
+
     return template.render(page, extra)
 end
 
@@ -63,6 +129,19 @@ end
 
 app.get("/health", function(_req, res)
     res:json({ status = "ok" })
+end)
+
+-- ── Language switch ─────────────────────────────────────────────────
+
+app.get("/lang/:code", function(req, res)
+    local code = req.params.code
+    if code ~= "en" and code ~= "hu" then code = "en" end
+    res:header("Set-Cookie", cookie.serialize("hull.lang", code, {
+        path = "/", max_age = 365 * 24 * 3600, httponly = false,
+    }))
+    -- Redirect back to referrer or home
+    local referer = req.headers["referer"]
+    res:redirect(referer or "/")
 end)
 
 -- ── Auth routes ─────────────────────────────────────────────────────
@@ -204,4 +283,4 @@ app.post("/delete/:id", function(req, res)
     res:redirect("/")
 end)
 
-log.info("Todo app loaded — routes registered")
+log.info("Todo app loaded — routes registered (en/hu i18n)")

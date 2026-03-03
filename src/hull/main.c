@@ -157,6 +157,7 @@ static void usage(const char *prog)
             "  --tls-cert PATH      TLS certificate file (PEM)\n"
             "  --tls-key PATH       TLS private key file (PEM)\n"
             "  --verify-sig PUBKEY  Verify app signature before startup\n"
+            "  --drain-timeout MS   Graceful shutdown drain timeout (default: 5000)\n"
             "  --no-migrate         Skip auto-run migrations on startup\n"
             "  --skip-ca-bundle     Skip TLS certificate verification (dev mode)\n"
             "  -h                   Show this help\n"
@@ -209,6 +210,7 @@ static int hull_serve(int argc, char **argv)
     int log_level = LOG_INFO;
     int no_migrate = 0;
     int skip_ca_bundle = 0;
+    int drain_timeout = HL_DEFAULT_DRAIN_TIMEOUT_MS;
     const char *tls_cert_path = NULL;
     const char *tls_key_path = NULL;
 
@@ -260,6 +262,14 @@ static int hull_serve(int argc, char **argv)
             no_migrate = 1;
         } else if (strcmp(argv[i], "--skip-ca-bundle") == 0) {
             skip_ca_bundle = 1;
+        } else if (strcmp(argv[i], "--drain-timeout") == 0 && i + 1 < argc) {
+            char *end;
+            long dt = strtol(argv[++i], &end, 10);
+            if (*end != '\0' || dt < 0 || dt > 300000) {
+                fprintf(stderr, "hull: invalid drain timeout: %s\n", argv[i]);
+                return 1;
+            }
+            drain_timeout = (int)dt;
         } else if (strcmp(argv[i], "-h") == 0) {
             usage(argv[0]);
             return 0;
@@ -369,6 +379,8 @@ static int hull_serve(int argc, char **argv)
         .bind_addr = bind_addr,
         .max_connections = HL_DEFAULT_MAX_CONN,
         .read_timeout_ms = HL_DEFAULT_READ_TIMEOUT_MS,
+        .install_signal_handlers = 1,
+        .drain_timeout_ms = drain_timeout,
         .alloc = &kl_alloc,
         .log_fn = hl_keel_log_bridge,
         .log_user_data = NULL,
@@ -578,6 +590,8 @@ static int hull_serve(int argc, char **argv)
 
     /* Enter event loop */
     kl_server_run(&server);
+
+    log_info("[hull:c] server stopped");
 
     /* Cleanup — free manifest strings AFTER server stops
      * (env_cfg and http_cfg reference them during runtime) */

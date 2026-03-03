@@ -1622,4 +1622,113 @@ UTEST(js_stdlib, validate_check_email)
     cleanup_js();
 }
 
+/* ── hull:i18n tests ─────────────────────────────────────────────────── */
+
+UTEST(js_stdlib, i18n_load_and_translate)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { i18n } from 'hull:i18n';\n"
+        "i18n.reset();\n"
+        "i18n.load('en', { greeting: 'Hello', nav: { home: 'Home' } });\n"
+        "i18n.locale('en');\n"
+        "globalThis.__test_i18n_t = (\n"
+        "  i18n.t('greeting') === 'Hello' &&\n"
+        "  i18n.t('nav.home') === 'Home' &&\n"
+        "  i18n.t('missing') === 'missing'\n"
+        ") ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__test_i18n_t"), 1);
+
+    cleanup_js();
+}
+
+UTEST(js_stdlib, i18n_interpolation)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { i18n } from 'hull:i18n';\n"
+        "i18n.reset();\n"
+        "i18n.load('en', { total: 'Total: ${amount}' });\n"
+        "i18n.locale('en');\n"
+        "globalThis.__test_i18n_interp = "
+        "  (i18n.t('total', { amount: '42' }) === 'Total: 42') ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__test_i18n_interp"), 1);
+
+    cleanup_js();
+}
+
+UTEST(js_stdlib, i18n_number_and_date)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { i18n } from 'hull:i18n';\n"
+        "i18n.reset();\n"
+        "i18n.load('en', { format: { decimalSep: '.', thousandsSep: ',', datePattern: 'YYYY-MM-DD' } });\n"
+        "i18n.locale('en');\n"
+        "globalThis.__test_i18n_num = (i18n.number(1500) === '1,500') ? 1 : 0;\n"
+        "globalThis.__test_i18n_date = (i18n.date(0) === '1970-01-01') ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__test_i18n_num"), 1);
+    ASSERT_EQ(eval_int("globalThis.__test_i18n_date"), 1);
+
+    cleanup_js();
+}
+
+UTEST(js_stdlib, i18n_detect)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { i18n } from 'hull:i18n';\n"
+        "i18n.reset();\n"
+        "i18n.load('en', {});\n"
+        "i18n.load('hu', {});\n"
+        "globalThis.__test_i18n_det = (\n"
+        "  i18n.detect('hu,en;q=0.9') === 'hu' &&\n"
+        "  i18n.detect('en-US') === 'en' &&\n"
+        "  i18n.detect('ja') === null\n"
+        ") ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__test_i18n_det"), 1);
+
+    cleanup_js();
+}
+
 UTEST_MAIN();
