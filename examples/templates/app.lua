@@ -9,6 +9,11 @@
 
 local template = require("hull.template")
 
+app.manifest({
+    csp = "default-src 'none'; style-src 'self' 'unsafe-inline'; "
+       .. "img-src 'self'; form-action 'self'; frame-ancestors 'none'",
+})
+
 -- Sample data
 local users = {
     { name = "Alice",   email = "alice@example.com" },

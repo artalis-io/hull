@@ -54,7 +54,7 @@
 /* ── Default Content-Security-Policy ───────────────────────────────── */
 
 #define HL_DEFAULT_CSP \
-    "default-src 'none'; style-src 'self' 'unsafe-inline'; " \
+    "default-src 'none'; style-src 'self'; " \
     "img-src 'self'; form-action 'self'; frame-ancestors 'none'"
 
 /* ── Logging ───────────────────────────────────────────────────────── */
@@ -293,7 +293,11 @@ static int hull_serve(int argc, char **argv)
         const char *slash = strrchr(entry_point, '/');
         if (slash) {
             size_t len = (size_t)(slash - entry_point);
-            if (len >= sizeof(app_dir)) len = sizeof(app_dir) - 1;
+            if (len >= sizeof(app_dir)) {
+                fprintf(stderr, "hull: entry point path too long (max %zu chars)\n",
+                        sizeof(app_dir) - 1);
+                return 1;
+            }
             memcpy(app_dir, entry_point, len);
             app_dir[len] = '\0';
         } else {
@@ -345,6 +349,10 @@ static int hull_serve(int argc, char **argv)
 
     /* Open SQLite database */
     sqlite3 *db = NULL;
+
+    HlStmtCache stmt_cache;
+    memset(&stmt_cache, 0, sizeof(stmt_cache));
+
     int rc = sqlite3_open(db_path, &db);
     if (rc != SQLITE_OK) {
         log_error("[hull:c] cannot open database %s: %s",
@@ -370,7 +378,6 @@ static int hull_serve(int argc, char **argv)
     }
 
     /* Initialize prepared statement cache */
-    HlStmtCache stmt_cache;
     hl_stmt_cache_init(&stmt_cache, db);
 
     /* Initialize Keel server */
@@ -468,14 +475,8 @@ static int hull_serve(int argc, char **argv)
         goto cleanup_server;
     }
 
-    /* Load and evaluate the app */
-    if (rt->vt->load_app(rt, entry_point) != 0) {
-        log_error("[hull:c] failed to load %s", entry_point);
-        rt->vt->destroy(rt);
-        goto cleanup_server;
-    }
-
-    /* Verify app signature if requested */
+    /* RT-01: Verify app signature BEFORE loading — malicious code never
+     * executes if verification fails. */
     if (verify_sig_path) {
         if (hl_verify_startup(verify_sig_path, entry_point) != 0) {
             log_error("[hull:c] signature verification failed — refusing to start");
@@ -485,30 +486,11 @@ static int hull_serve(int argc, char **argv)
         log_info("[hull:c] signature verified OK");
     }
 
-    /* Wire routes into Keel */
-    if (rt->vt->wire_routes_server(rt, &server, track_route_alloc) != 0) {
+    /* Load and evaluate the app */
+    if (rt->vt->load_app(rt, entry_point) != 0) {
+        log_error("[hull:c] failed to load %s", entry_point);
         rt->vt->destroy(rt);
         goto cleanup_server;
-    }
-
-    /* Auto-register static file serving */
-    {
-        extern const HlStaticEntry hl_app_static_entries[];
-        int has_static = (hl_app_static_entries[0].name != NULL);
-        if (!has_static) {
-            char static_dir[4096];
-            snprintf(static_dir, sizeof(static_dir), "%s/static", app_dir);
-            struct stat sdir;
-            if (stat(static_dir, &sdir) == 0 && S_ISDIR(sdir.st_mode))
-                has_static = 1;
-        }
-        if (has_static) {
-            HlStaticCtx *sctx = track_route_alloc(sizeof(HlStaticCtx));
-            sctx->app_dir = app_dir;
-            sctx->entries = (const HlStaticEntry *)hl_app_static_entries;
-            kl_server_use(&server, "GET", "/static/*",
-                          hl_static_middleware, sctx);
-        }
     }
 
     /* Extract manifest and configure capabilities */
@@ -573,7 +555,8 @@ static int hull_serve(int argc, char **argv)
         rt->http_cfg = &http_cfg_storage;
     }
 
-    /* Apply kernel sandbox (pledge/unveil) from manifest */
+    /* RT-04: Apply kernel sandbox BEFORE wiring routes — all route
+     * handlers execute inside sandbox constraints. */
     if (hl_sandbox_apply(&manifest, app_dir, db_path, ca_bundle_path,
                           tls_cert_path, tls_key_path) != 0) {
         log_error("[hull:c] sandbox enforcement failed");
@@ -582,6 +565,35 @@ static int hull_serve(int argc, char **argv)
         if (client_tls_ctx)
             kl_tls_mbedtls_ctx_destroy(client_tls_ctx);
         goto cleanup_server;
+    }
+
+    /* Wire routes into Keel (after sandbox is applied) */
+    if (rt->vt->wire_routes_server(rt, &server, track_route_alloc) != 0) {
+        rt->vt->free_manifest_strings(rt, &manifest);
+        rt->vt->destroy(rt);
+        if (client_tls_ctx)
+            kl_tls_mbedtls_ctx_destroy(client_tls_ctx);
+        goto cleanup_server;
+    }
+
+    /* Auto-register static file serving (after sandbox is applied) */
+    {
+        extern const HlStaticEntry hl_app_static_entries[];
+        int has_static = (hl_app_static_entries[0].name != NULL);
+        if (!has_static) {
+            char static_dir[4096];
+            snprintf(static_dir, sizeof(static_dir), "%s/static", app_dir);
+            struct stat sdir;
+            if (stat(static_dir, &sdir) == 0 && S_ISDIR(sdir.st_mode))
+                has_static = 1;
+        }
+        if (has_static) {
+            HlStaticCtx *sctx = track_route_alloc(sizeof(HlStaticCtx));
+            sctx->app_dir = app_dir;
+            sctx->entries = (const HlStaticEntry *)hl_app_static_entries;
+            kl_server_use(&server, "GET", "/static/*",
+                          hl_static_middleware, sctx);
+        }
     }
 
     log_info("[hull:c] listening on %s://%s:%d (%s runtime)",
