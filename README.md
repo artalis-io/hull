@@ -263,7 +263,7 @@ Ten example apps in both Lua and JavaScript:
 
 | Document | Content |
 |----------|---------|
-| [MANIFESTO.md](MANIFESTO.md) | Design philosophy, architecture, security model |
+| [MANIFESTO.md](docs/MANIFESTO.md) | Design philosophy, architecture, security model |
 | [docs/architecture.md](docs/architecture.md) | System layers, capability API, build pipeline |
 | [docs/security.md](docs/security.md) | Trust model, attack model, sandbox enforcement |
 | [docs/roadmap.md](docs/roadmap.md) | What's built, what's next |
@@ -299,4 +299,4 @@ Hull is in active development. All core features are implemented and tested acro
 
 AGPL-3.0. See [LICENSE](LICENSE).
 
-Commercial licenses available for closed-source distribution. See the [Licensing](MANIFESTO.md#licensing) section of the manifesto.
+Commercial licenses available for closed-source distribution. See the [Licensing](docs/MANIFESTO.md#licensing) section of the manifesto.
