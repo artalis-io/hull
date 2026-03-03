@@ -1,4 +1,4 @@
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     email         TEXT    UNIQUE NOT NULL,
     password_hash TEXT    NOT NULL,
@@ -6,7 +6,7 @@ CREATE TABLE users (
     created_at    INTEGER NOT NULL
 );
 
-CREATE TABLE todos (
+CREATE TABLE IF NOT EXISTS todos (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id    INTEGER NOT NULL REFERENCES users(id),
     title      TEXT    NOT NULL,
@@ -14,4 +14,4 @@ CREATE TABLE todos (
     created_at INTEGER NOT NULL
 );
 
-CREATE INDEX idx_todos_user ON todos (user_id);
+CREATE INDEX IF NOT EXISTS idx_todos_user ON todos (user_id);

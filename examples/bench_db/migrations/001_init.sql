@@ -1,8 +1,8 @@
-CREATE TABLE events (
+CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     kind TEXT NOT NULL,
     payload TEXT,
     ts INTEGER NOT NULL
 );
 
-CREATE INDEX idx_events_ts ON events (ts DESC);
+CREATE INDEX IF NOT EXISTS idx_events_ts ON events (ts DESC);
