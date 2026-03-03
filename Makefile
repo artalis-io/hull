@@ -915,3 +915,4 @@ lint: lint-lua lint-js
 
 clean:
 	rm -rf $(BUILDDIR)
+	@$(MAKE) -s -C $(KEEL_DIR) clean 2>/dev/null || true

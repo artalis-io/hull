@@ -9,6 +9,7 @@ import { app } from "hull:app";
 import { cookie } from "hull:cookie";
 import { crypto } from "hull:crypto";
 import { db } from "hull:db";
+import { form } from "hull:form";
 import { log } from "hull:log";
 import { auth } from "hull:middleware:auth";
 import { csrf } from "hull:middleware:csrf";
@@ -17,6 +18,7 @@ import { ratelimit } from "hull:middleware:ratelimit";
 import { session } from "hull:middleware:session";
 import { template } from "hull:template";
 import { time } from "hull:time";
+import { validate } from "hull:validate";
 
 app.manifest({});  // sandbox: no fs, no env, no outbound HTTP; default CSP
 
@@ -63,21 +65,6 @@ app.usePost("*", "/*", csrf.middleware({ secret: csrfSecret }));
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-function parseForm(body) {
-    const params = {};
-    if (!body) return params;
-    const pairs = body.split("&");
-    for (let i = 0; i < pairs.length; i++) {
-        const eqIdx = pairs[i].indexOf("=");
-        if (eqIdx >= 0) {
-            const k = decodeURIComponent(pairs[i].substring(0, eqIdx).replace(/\+/g, " "));
-            const v = decodeURIComponent(pairs[i].substring(eqIdx + 1).replace(/\+/g, " "));
-            params[k] = v;
-        }
-    }
-    return params;
-}
-
 function requireSession(req, res) {
     if (!req.ctx || !req.ctx.session) {
         res.redirect("/login");
@@ -118,13 +105,16 @@ app.get("/register", (req, res) => {
 });
 
 app.post("/login", (req, res) => {
-    const form = parseForm(req.body);
-    const email = form.email;
-    const password = form.password;
-
-    if (!email || !password) {
-        return res.html(render("pages/login.html", req, { error: "Email and password are required" }));
+    const params = form.parse(req.body);
+    const [ok, errors] = validate.check(params, {
+        email:    { required: true },
+        password: { required: true },
+    });
+    if (!ok) {
+        return res.html(render("pages/login.html", req, { error: errors.email || errors.password }));
     }
+
+    const { email, password } = params;
 
     const rows = db.query("SELECT * FROM users WHERE email = ?", [email]);
     if (rows.length === 0) {
@@ -141,20 +131,17 @@ app.post("/login", (req, res) => {
 });
 
 app.post("/register", (req, res) => {
-    const form = parseForm(req.body);
-    const email = form.email;
-    const password = form.password;
-    const name = form.name;
+    const params = form.parse(req.body);
+    const [ok, errors] = validate.check(params, {
+        email:    { required: true },
+        password: { required: true, min: 8 },
+        name:     { required: true },
+    });
+    if (!ok) {
+        return res.html(render("pages/register.html", req, { error: errors.email || errors.password || errors.name }));
+    }
 
-    if (!email) {
-        return res.html(render("pages/register.html", req, { error: "Email is required" }));
-    }
-    if (!password || password.length < 8) {
-        return res.html(render("pages/register.html", req, { error: "Password must be at least 8 characters" }));
-    }
-    if (!name) {
-        return res.html(render("pages/register.html", req, { error: "Name is required" }));
-    }
+    const { email, password, name } = params;
 
     const existing = db.query("SELECT id FROM users WHERE email = ?", [email]);
     if (existing.length > 0) {
@@ -204,12 +191,15 @@ app.post("/add", (req, res) => {
     const sess = requireSession(req, res);
     if (!sess) return;
 
-    const form = parseForm(req.body);
-    let title = form.title;
-    if (!title || title.length === 0) {
+    const params = form.parse(req.body);
+    const [titleOk] = validate.check(params, {
+        title: { required: true },
+    });
+    if (!titleOk) {
         return res.redirect("/");
     }
 
+    let title = params.title;
     if (title.length > 500) title = title.substring(0, 500);
 
     db.exec("INSERT INTO todos (user_id, title, created_at) VALUES (?, ?, ?)",

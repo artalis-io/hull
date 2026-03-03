@@ -6,6 +6,8 @@
 -- Register webhook endpoints, fire events that deliver to them,
 -- and receive/verify incoming webhooks.
 
+local validate = require("hull.validate")
+
 -- Manifest: allow outbound HTTP to localhost for webhook delivery
 app.manifest({
     env = {"WEBHOOK_SECRET"},
@@ -74,15 +76,16 @@ app.post("/webhooks", function(req, res)
         return res:status(400):json({ error = "invalid JSON" })
     end
 
-    local url = body.url
-    local events = body.events  -- comma-separated event types, e.g. "user.created,order.placed"
+    local ok, errors = validate.check(body, {
+        url    = { required = true },
+        events = { required = true },  -- comma-separated event types, e.g. "user.created,order.placed"
+    })
+    if not ok then
+        return res:status(400):json({ errors = errors })
+    end
 
-    if not url or url == "" then
-        return res:status(400):json({ error = "url is required" })
-    end
-    if not events or events == "" then
-        return res:status(400):json({ error = "events is required" })
-    end
+    local url = body.url
+    local events = body.events
 
     db.exec("INSERT INTO webhooks (url, events, created_at) VALUES (?, ?, ?)",
             { url, events, time.now() })
@@ -113,12 +116,15 @@ app.post("/events", function(req, res)
         return res:status(400):json({ error = "invalid JSON" })
     end
 
+    local ok, errors = validate.check(body, {
+        event = { required = true },
+    })
+    if not ok then
+        return res:status(400):json({ errors = errors })
+    end
+
     local event_type = body.event
     local data = body.data
-
-    if not event_type or event_type == "" then
-        return res:status(400):json({ error = "event is required" })
-    end
 
     local payload_str = json.encode({ event = event_type, data = data, timestamp = time.now() })
 

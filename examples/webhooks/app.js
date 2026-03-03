@@ -13,6 +13,7 @@ import { env } from "hull:env";
 import { http } from "hull:http";
 import { log } from "hull:log";
 import { time } from "hull:time";
+import { validate } from "hull:validate";
 
 // Manifest: allow outbound HTTP to localhost for webhook delivery
 app.manifest({
@@ -79,14 +80,15 @@ app.post("/webhooks", (req, res) => {
         return;
     }
 
-    const { url, events } = body;
+    const [ok, errors] = validate.check(body, {
+        url:    { required: true },
+        events: { required: true },
+    });
+    if (!ok) {
+        return res.status(400).json({ errors });
+    }
 
-    if (!url) {
-        return res.status(400).json({ error: "url is required" });
-    }
-    if (!events) {
-        return res.status(400).json({ error: "events is required" });
-    }
+    const { url, events } = body;
 
     db.exec("INSERT INTO webhooks (url, events, created_at) VALUES (?, ?, ?)",
             [url, events, time.now()]);
@@ -119,11 +121,14 @@ app.post("/events", (req, res) => {
         return;
     }
 
-    const { event, data } = body;
-
-    if (!event) {
-        return res.status(400).json({ error: "event is required" });
+    const [evOk, evErrors] = validate.check(body, {
+        event: { required: true },
+    });
+    if (!evOk) {
+        return res.status(400).json({ errors: evErrors });
     }
+
+    const { event, data } = body;
 
     const payloadStr = JSON.stringify({ event, data, timestamp: time.now() });
 

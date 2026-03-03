@@ -1673,4 +1673,105 @@ UTEST(lua_stdlib, auth_module_loads)
     cleanup_lua_caps();
 }
 
+/* ── hull.form tests ─────────────────────────────────────────────────── */
+
+UTEST(lua_stdlib, form_parse)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local form = require('hull.form') "
+        "  local r = form.parse('email=a%40b.com&pass=hello+world') "
+        "  return r.email == 'a@b.com' and r.pass == 'hello world' and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    /* Empty/nil returns empty table */
+    int empty = eval_int(
+        "(function() "
+        "  local form = require('hull.form') "
+        "  local r = form.parse('') "
+        "  return next(r) == nil and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(empty, 1);
+
+    cleanup_lua();
+}
+
+/* ── hull.validate tests ─────────────────────────────────────────────── */
+
+UTEST(lua_stdlib, validate_check_required)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local v = require('hull.validate') "
+        "  local ok, errors = v.check({}, { name = { required = true } }) "
+        "  return ok == false and errors.name == 'is required' and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    int pass = eval_int(
+        "(function() "
+        "  local v = require('hull.validate') "
+        "  local ok = v.check({ name = 'alice' }, { name = { required = true } }) "
+        "  return ok and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(pass, 1);
+
+    cleanup_lua();
+}
+
+UTEST(lua_stdlib, validate_check_min_max)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local v = require('hull.validate') "
+        "  local ok, errors = v.check({ pw = 'abc' }, { pw = { min = 8 } }) "
+        "  return ok == false and errors.pw == 'must be at least 8 characters' and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    int max_ok = eval_int(
+        "(function() "
+        "  local v = require('hull.validate') "
+        "  local ok, errors = v.check({ n = 'toolong' }, { n = { max = 3 } }) "
+        "  return ok == false and errors.n == 'must be at most 3 characters' and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(max_ok, 1);
+
+    cleanup_lua();
+}
+
+UTEST(lua_stdlib, validate_check_email)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local v = require('hull.validate') "
+        "  local ok = v.check({ e = 'a@b.com' }, { e = { email = true } }) "
+        "  return ok and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    int bad = eval_int(
+        "(function() "
+        "  local v = require('hull.validate') "
+        "  local ok, errors = v.check({ e = 'notanemail' }, { e = { email = true } }) "
+        "  return ok == false and errors.e == 'is not a valid email' and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(bad, 1);
+
+    cleanup_lua();
+}
+
 UTEST_MAIN();

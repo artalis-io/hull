@@ -6,6 +6,7 @@
 import { app } from "hull:app";
 import { db } from "hull:db";
 import { time } from "hull:time";
+import { validate } from "hull:validate";
 
 app.manifest({});
 
@@ -32,8 +33,11 @@ app.post("/tasks", (req, res) => {
         res.json({ error: "invalid JSON" });
         return;
     }
-    if (!body.title) {
-        return res.status(400).json({ error: "title is required" });
+    const [ok, errors] = validate.check(body, {
+        title: { required: true },
+    });
+    if (!ok) {
+        return res.status(400).json({ errors });
     }
     db.exec("INSERT INTO tasks (title, created_at) VALUES (?, ?)",
             [body.title, time.now()]);

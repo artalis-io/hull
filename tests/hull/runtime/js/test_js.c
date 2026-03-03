@@ -1518,4 +1518,108 @@ UTEST(js_stdlib, auth_module_loads)
     cleanup_js_caps();
 }
 
+/* ── hull:form tests ─────────────────────────────────────────────────── */
+
+UTEST(js_stdlib, form_parse)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { form } from 'hull:form';\n"
+        "const r = form.parse('email=a%40b.com&pass=hello+world');\n"
+        "globalThis.__test_fp = (r.email === 'a@b.com' && r.pass === 'hello world') ? 1 : 0;\n"
+        "const e = form.parse('');\n"
+        "globalThis.__test_fe = Object.keys(e).length === 0 ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__test_fp"), 1);
+    ASSERT_EQ(eval_int("globalThis.__test_fe"), 1);
+
+    cleanup_js();
+}
+
+/* ── hull:validate tests ─────────────────────────────────────────────── */
+
+UTEST(js_stdlib, validate_check_required)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { validate } from 'hull:validate';\n"
+        "const [ok1, err1] = validate.check({}, { name: { required: true } });\n"
+        "globalThis.__test_vr1 = (ok1 === false && err1.name === 'is required') ? 1 : 0;\n"
+        "const [ok2] = validate.check({ name: 'alice' }, { name: { required: true } });\n"
+        "globalThis.__test_vr2 = ok2 ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__test_vr1"), 1);
+    ASSERT_EQ(eval_int("globalThis.__test_vr2"), 1);
+
+    cleanup_js();
+}
+
+UTEST(js_stdlib, validate_check_min_max)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { validate } from 'hull:validate';\n"
+        "const [ok1, err1] = validate.check({ pw: 'abc' }, { pw: { min: 8 } });\n"
+        "globalThis.__test_vmm1 = (ok1 === false && err1.pw === 'must be at least 8 characters') ? 1 : 0;\n"
+        "const [ok2, err2] = validate.check({ n: 'toolong' }, { n: { max: 3 } });\n"
+        "globalThis.__test_vmm2 = (ok2 === false && err2.n === 'must be at most 3 characters') ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__test_vmm1"), 1);
+    ASSERT_EQ(eval_int("globalThis.__test_vmm2"), 1);
+
+    cleanup_js();
+}
+
+UTEST(js_stdlib, validate_check_email)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { validate } from 'hull:validate';\n"
+        "const [ok1] = validate.check({ e: 'a@b.com' }, { e: { email: true } });\n"
+        "globalThis.__test_ve1 = ok1 ? 1 : 0;\n"
+        "const [ok2, err2] = validate.check({ e: 'notanemail' }, { e: { email: true } });\n"
+        "globalThis.__test_ve2 = (ok2 === false && err2.e === 'is not a valid email') ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__test_ve1"), 1);
+    ASSERT_EQ(eval_int("globalThis.__test_ve2"), 1);
+
+    cleanup_js();
+}
+
 UTEST_MAIN();

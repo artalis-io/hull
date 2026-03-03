@@ -3,8 +3,9 @@
 -- Run: hull app.lua -p 3000
 -- Tasks API with session-based auth — each user only sees their own tasks
 
-local session = require("hull.middleware.session")
-local auth = require("hull.middleware.auth")
+local validate = require("hull.validate")
+local session  = require("hull.middleware.session")
+local auth     = require("hull.middleware.auth")
 
 app.manifest({})
 
@@ -36,19 +37,18 @@ app.post("/register", function(req, res)
         return res:status(400):json({ error = "invalid JSON" })
     end
 
+    local ok, errors = validate.check(body, {
+        email    = { required = true },
+        password = { required = true, min = 8 },
+        name     = { required = true },
+    })
+    if not ok then
+        return res:status(400):json({ errors = errors })
+    end
+
     local email = body.email
     local password = body.password
     local name = body.name
-
-    if not email or email == "" then
-        return res:status(400):json({ error = "email is required" })
-    end
-    if not password or #password < 8 then
-        return res:status(400):json({ error = "password must be at least 8 characters" })
-    end
-    if not name or name == "" then
-        return res:status(400):json({ error = "name is required" })
-    end
 
     local existing = db.query("SELECT id FROM users WHERE email = ?", { email })
     if #existing > 0 then
@@ -69,11 +69,16 @@ app.post("/login", function(req, res)
         return res:status(400):json({ error = "invalid JSON" })
     end
 
+    local ok, errors = validate.check(body, {
+        email    = { required = true },
+        password = { required = true },
+    })
+    if not ok then
+        return res:status(400):json({ errors = errors })
+    end
+
     local email = body.email
     local password = body.password
-    if not email or not password then
-        return res:status(400):json({ error = "email and password are required" })
-    end
 
     local rows = db.query("SELECT * FROM users WHERE email = ?", { email })
     if #rows == 0 then
@@ -142,8 +147,14 @@ app.post("/tasks", function(req, res)
     if not sess then return end
 
     local body = json.decode(req.body)
-    if not body or not body.title then
-        return res:status(400):json({ error = "title is required" })
+    if not body then
+        return res:status(400):json({ error = "invalid JSON" })
+    end
+    local ok, errors = validate.check(body, {
+        title = { required = true },
+    })
+    if not ok then
+        return res:status(400):json({ errors = errors })
     end
 
     db.exec("INSERT INTO tasks (user_id, title, created_at) VALUES (?, ?, ?)",

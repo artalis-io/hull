@@ -45,7 +45,7 @@ test("POST /register rejects short password", function()
         headers = { ["Content-Type"] = "application/json" },
     })
     test.eq(res.status, 400)
-    test.ok(res.json.error, "has error message")
+    test.ok(res.json.errors, "has errors")
 end)
 
 test("POST /register rejects missing email", function()
