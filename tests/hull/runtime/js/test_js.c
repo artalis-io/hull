@@ -1554,10 +1554,10 @@ UTEST(js_stdlib, validate_check_required)
 
     const char *code =
         "import { validate } from 'hull:validate';\n"
-        "const [ok1, err1] = validate.check({}, { name: { required: true } });\n"
-        "globalThis.__test_vr1 = (ok1 === false && err1.name === 'is required') ? 1 : 0;\n"
-        "const [ok2] = validate.check({ name: 'alice' }, { name: { required: true } });\n"
-        "globalThis.__test_vr2 = ok2 ? 1 : 0;\n";
+        "var r1 = validate.check({}, { name: { required: true } });\n"
+        "globalThis.__test_vr1 = (r1[0] === false && r1[1].name === 'is required') ? 1 : 0;\n"
+        "var r2 = validate.check({ name: 'alice' }, { name: { required: true } });\n"
+        "globalThis.__test_vr2 = r2[0] ? 1 : 0;\n";
 
     JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
                           JS_EVAL_TYPE_MODULE);
@@ -1579,10 +1579,10 @@ UTEST(js_stdlib, validate_check_min_max)
 
     const char *code =
         "import { validate } from 'hull:validate';\n"
-        "const [ok1, err1] = validate.check({ pw: 'abc' }, { pw: { min: 8 } });\n"
-        "globalThis.__test_vmm1 = (ok1 === false && err1.pw === 'must be at least 8 characters') ? 1 : 0;\n"
-        "const [ok2, err2] = validate.check({ n: 'toolong' }, { n: { max: 3 } });\n"
-        "globalThis.__test_vmm2 = (ok2 === false && err2.n === 'must be at most 3 characters') ? 1 : 0;\n";
+        "var r1 = validate.check({ pw: 'abc' }, { pw: { min: 8 } });\n"
+        "globalThis.__test_vmm1 = (r1[0] === false && r1[1].pw === 'must be at least 8 characters') ? 1 : 0;\n"
+        "var r2 = validate.check({ n: 'toolong' }, { n: { max: 3 } });\n"
+        "globalThis.__test_vmm2 = (r2[0] === false && r2[1].n === 'must be at most 3 characters') ? 1 : 0;\n";
 
     JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
                           JS_EVAL_TYPE_MODULE);
@@ -1604,10 +1604,10 @@ UTEST(js_stdlib, validate_check_email)
 
     const char *code =
         "import { validate } from 'hull:validate';\n"
-        "const [ok1] = validate.check({ e: 'a@b.com' }, { e: { email: true } });\n"
-        "globalThis.__test_ve1 = ok1 ? 1 : 0;\n"
-        "const [ok2, err2] = validate.check({ e: 'notanemail' }, { e: { email: true } });\n"
-        "globalThis.__test_ve2 = (ok2 === false && err2.e === 'is not a valid email') ? 1 : 0;\n";
+        "var r1 = validate.check({ e: 'a@b.com' }, { e: { email: true } });\n"
+        "globalThis.__test_ve1 = r1[0] ? 1 : 0;\n"
+        "var r2 = validate.check({ e: 'notanemail' }, { e: { email: true } });\n"
+        "globalThis.__test_ve2 = (r2[0] === false && r2[1].e === 'is not a valid email') ? 1 : 0;\n";
 
     JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
                           JS_EVAL_TYPE_MODULE);
