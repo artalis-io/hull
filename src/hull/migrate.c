@@ -173,7 +173,8 @@ static void migration_list_free(MigrationList *ml)
 {
     for (int i = 0; i < ml->count; i++) {
         free(ml->names[i]);
-        free(ml->sqls[i]);
+        if (ml->sqls)
+            free(ml->sqls[i]);
     }
     free(ml->names);
     free(ml->sqls);
