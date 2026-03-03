@@ -1248,7 +1248,7 @@ Hull ships a batteries-included standard library embedded in the binary, impleme
 
 **C capability layer** (available to both Lua and JS apps):
 
-- **Database** — SQLite with WAL mode, parameterized queries, prepared statement cache, batch transactions
+- **Database** — SQLite with WAL mode, parameterized queries, prepared statement cache, batch transactions, SQL migrations
 - **Crypto** — SHA-256/512, HMAC, PBKDF2, Ed25519, XSalsa20+Poly1305, secretbox, random bytes, password hash/verify
 - **HTTP client** — outbound HTTP/HTTPS with host allowlist enforcement (mbedTLS)
 - **Filesystem** — sandboxed read/write/exists/delete with path traversal rejection
@@ -1266,6 +1266,7 @@ Hull ships a batteries-included standard library embedded in the binary, impleme
 - **Testing** — in-process test runner, request simulation, per-test database isolation
 - **File Uploads** — multipart handling with configurable size limits
 - **Rate Limiting** — sliding window, per-key, configurable responses
+- **Database Migrations** — numbered SQL scripts, auto-run on startup, embedded in builds, `hull migrate` CLI
 
 ## Known Limitations
 

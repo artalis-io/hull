@@ -8,18 +8,8 @@ local auth = require("hull.middleware.auth")
 
 app.manifest({})
 
--- Initialize database
+-- Initialize sessions
 session.init({ ttl = 3600 })
-
-db.exec([[
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        email TEXT UNIQUE NOT NULL,
-        password_hash TEXT NOT NULL,
-        name TEXT NOT NULL,
-        created_at INTEGER
-    )
-]])
 
 -- Load session on every request (optional — won't block unauthenticated)
 app.use("*", "/*", auth.session_middleware({ optional = true }))

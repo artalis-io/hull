@@ -39,6 +39,9 @@
 - `hull keygen` — Ed25519 keypair generation
 - `hull sign-platform` — sign platform libraries with per-arch hashes
 - `hull manifest` — extract and print manifest as JSON
+- `hull migrate` — SQL migration runner (auto-run on startup, embedded in builds)
+- `hull migrate new` — migration scaffolding
+- `hull migrate status` — migration status display
 - Multi-arch Cosmopolitan APE builds (`make platform-cosmo`)
 - Self-build reproducibility chain (hull → hull2 → hull3)
 

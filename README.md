@@ -33,7 +33,7 @@ cd myapp
 
 ## Hull Tools
 
-Hull ships 10 subcommands for the full development lifecycle:
+Hull ships 13 subcommands for the full development lifecycle:
 
 | Command | Purpose |
 |---------|---------|
@@ -47,13 +47,16 @@ Hull ships 10 subcommands for the full development lifecycle:
 | `hull keygen <name>` | Generate Ed25519 signing keypair |
 | `hull sign-platform <key>` | Sign platform library with per-arch hashes |
 | `hull manifest <app>` | Extract and print manifest as JSON |
+| `hull migrate [app_dir]` | Run pending SQL migrations |
+| `hull migrate status` | Show migration status (applied/pending) |
+| `hull migrate new <name>` | Create a new numbered migration file |
 
 ### Build Pipeline
 
 ```
 Source files (Lua/JS/HTML/CSS/static assets)
         ↓
-hull build: collect → generate registries (app, template, static) → compile → link → sign
+hull build: collect → generate registries (app, template, static, migration) → compile → link → sign
         ↓
 Single binary + package.sig (Ed25519 signed)
 ```
@@ -112,6 +115,31 @@ Hull ships a full set of middleware and utility modules for building secure back
 | `json` | `hull.json` | (built-in) | JSON encode/decode |
 
 All middleware modules follow the same factory pattern: `module.middleware(opts)` returns a function `(req, res) -> 0|1` where `0` = continue, `1` = short-circuit.
+
+#### Database & Migrations
+
+Hull apps use SQLite with WAL mode, parameterized queries, and a prepared statement cache. Schema changes are managed through numbered SQL migration scripts.
+
+**Convention:** Place migration files in `migrations/` in your app directory, numbered sequentially:
+
+```
+myapp/
+  app.lua
+  migrations/
+    001_init.sql        ← creates initial tables
+    002_add_index.sql   ← adds an index
+    003_new_feature.sql ← adds a new table
+```
+
+Migrations run automatically on startup (opt out with `--no-migrate`). Each migration runs in a transaction, and the `_hull_migrations` table tracks which migrations have been applied.
+
+```bash
+hull migrate new add_tags        # creates migrations/002_add_tags.sql
+hull migrate                     # run pending migrations
+hull migrate status              # show applied/pending migrations
+```
+
+In built binaries (`hull build`), migration files are embedded alongside Lua/template/static assets. `hull test` runs migrations against an in-memory database.
 
 #### Static File Serving
 
@@ -212,16 +240,16 @@ Ten example apps in both Lua and JavaScript:
 
 | Example | What it demonstrates |
 |---------|---------------------|
-| [hello](examples/hello/) | Routing, query strings, route params, body echo |
-| [rest_api](examples/rest_api/) | CRUD API with JSON bodies |
-| [auth](examples/auth/) | Session-based authentication (register, login, logout) |
+| [hello](examples/hello/) | Routing, query strings, route params, DB visits |
+| [rest_api](examples/rest_api/) | CRUD API with JSON bodies and migrations |
+| [auth](examples/auth/) | Session-based authentication with migrations |
 | [jwt_api](examples/jwt_api/) | JWT Bearer authentication with refresh tokens |
-| [crud_with_auth](examples/crud_with_auth/) | Task CRUD with per-user isolation |
+| [crud_with_auth](examples/crud_with_auth/) | Task CRUD with per-user isolation and migrations |
 | [middleware](examples/middleware/) | Request ID, logging, rate limiting, CORS |
 | [webhooks](examples/webhooks/) | Webhook delivery with HMAC-SHA256 signatures |
 | [templates](examples/templates/) | Template engine: inheritance, includes, filters |
-| [todo](examples/todo/) | Full CRUD todo app with HTML frontend (templates + static files) |
-| [bench_db](examples/bench_db/) | SQLite performance benchmarks |
+| [todo](examples/todo/) | Full CRUD todo app with HTML frontend and migrations |
+| [bench_db](examples/bench_db/) | SQLite performance benchmarks with migrations |
 
 ```bash
 # Run an example
@@ -249,6 +277,7 @@ Ten example apps in both Lua and JavaScript:
 make                    # build hull binary
 make test               # run 79 unit tests
 make e2e                # end-to-end tests (all examples, both runtimes)
+make e2e-migrate        # migration system tests
 make e2e-templates      # template engine tests (40 tests, both runtimes)
 make debug              # ASan + UBSan build
 make msan               # MSan + UBSan (Linux clang only)

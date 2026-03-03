@@ -5,14 +5,6 @@
 
 app.manifest({})
 
--- Initialize database
-db.exec([[CREATE TABLE IF NOT EXISTS tasks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL,
-    done INTEGER DEFAULT 0,
-    created_at INTEGER
-)]])
-
 -- List all tasks
 app.get("/tasks", function(_req, res)
     local tasks = db.query("SELECT * FROM tasks ORDER BY created_at DESC")

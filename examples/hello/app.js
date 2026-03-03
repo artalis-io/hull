@@ -10,9 +10,6 @@ import { time } from "hull:time";
 
 app.manifest({});
 
-// Initialize database
-db.exec("CREATE TABLE IF NOT EXISTS visits (id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT, ts INTEGER)");
-
 // Routes
 app.get("/", (_req, res) => {
     db.exec("INSERT INTO visits (path, ts) VALUES (?, ?)", ["/", time.now()]);

@@ -15,33 +15,6 @@ app.manifest({
 local ok, val = pcall(env.get, "WEBHOOK_SECRET")
 local SIGNING_SECRET = (ok and val) or "whsec_change-me-in-production"
 
--- ── Schema ──────────────────────────────────────────────────────────
-
-db.exec([[CREATE TABLE IF NOT EXISTS webhooks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    url TEXT NOT NULL,
-    events TEXT NOT NULL,
-    active INTEGER DEFAULT 1,
-    created_at INTEGER
-)]])
-
-db.exec([[CREATE TABLE IF NOT EXISTS event_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_type TEXT NOT NULL,
-    payload TEXT NOT NULL,
-    created_at INTEGER
-)]])
-
-db.exec([[CREATE TABLE IF NOT EXISTS deliveries (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    webhook_id INTEGER NOT NULL,
-    event_id INTEGER NOT NULL,
-    status INTEGER,
-    response_body TEXT,
-    created_at INTEGER,
-    FOREIGN KEY (webhook_id) REFERENCES webhooks(id)
-)]])
-
 -- ── Helpers ─────────────────────────────────────────────────────────
 
 --- Convert a string to hex for use as HMAC key.

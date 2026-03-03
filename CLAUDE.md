@@ -57,7 +57,7 @@ vendor/                 # Vendored libraries (do not modify)
 tests/                  # Unit tests (test_*.c) and E2E scripts (e2e_*.sh)
   fixtures/             #   Test fixtures (null_app, etc.)
   hull/                 #   Hull-specific test suites
-examples/               # 9 example apps (hello, rest_api, auth, jwt_api, todo, etc.)
+examples/               # 10 example apps (hello, rest_api, auth, jwt_api, todo, etc.)
 docs/                   # Architecture, security, roadmap, audit documentation
 templates/              # Build templates (app_main.c, entry.h)
 ```
@@ -114,13 +114,33 @@ Client → Keel HTTP → Route Match → hl_{lua,js}_dispatch() → Handler → 
 
 ### Command Dispatch
 
-Table-driven dispatcher in `src/hull/commands/dispatch.c`. 10 commands:
+Table-driven dispatcher in `src/hull/commands/dispatch.c`. 11 commands:
 
 ```
-hull keygen | build | verify | inspect | manifest | test | new | dev | eject | sign-platform
+hull keygen | build | verify | inspect | manifest | test | new | dev | eject | sign-platform | migrate
 ```
 
 Each command is a separate `.c`/`.h` under `src/hull/commands/`. Adding a new command = one line in the table + one source file.
+
+### Migration System
+
+SQL migrations provide versioned schema management for SQLite databases.
+
+| Component | File | Purpose |
+|-----------|------|---------|
+| Migration runner | `src/hull/migrate.c`, `include/hull/migrate.h` | Core migration execution engine |
+| CLI command | `src/hull/commands/migrate.c` | `hull migrate` subcommand |
+| Scaffolding | `stdlib/lua/hull/migrate.lua` | `hull migrate new` template generation |
+| Auto-run (dev) | `main.c` | Runs pending migrations on startup |
+| Auto-run (test) | `test.c` | Runs migrations against `:memory:` database |
+| Embedding | `build.lua` | Embeds `migrations/*.sql` in built binaries |
+
+**Convention:** `migrations/*.sql` files numbered `001_`, `002_`, etc. Each runs in `BEGIN IMMEDIATE` / `COMMIT`. The `_hull_migrations` table tracks applied migrations (name + checksum + timestamp). Opt out with `--no-migrate`.
+
+**Commands:**
+- `hull migrate [app_dir]` — run pending migrations
+- `hull migrate status` — show applied/pending
+- `hull migrate new <name>` — create numbered migration file
 
 ## Platform Builds
 
@@ -489,6 +509,7 @@ make e2e                            # run all E2E tests (examples + build + sand
 | `e2e_http.sh` | HTTP routing, middleware, error handling |
 | `e2e_sandbox.sh` | Kernel sandbox enforcement (Linux + Cosmo) |
 | `e2e_templates.sh` | Template engine: 20 tests per runtime (text, vars, escaping, conditionals, loops, filters, inheritance, includes, XSS) |
+| `e2e_migrate.sh` | Migration system: apply, status, idempotency, embedding |
 
 ## Runtime Sandboxes
 

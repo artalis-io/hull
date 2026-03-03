@@ -1,0 +1,5 @@
+CREATE TABLE visits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    path TEXT,
+    ts INTEGER
+);

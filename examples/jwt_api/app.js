@@ -18,17 +18,6 @@ app.manifest({
 let JWT_SECRET = "change-me-in-production";
 try { const v = env.get("JWT_SECRET"); if (v) JWT_SECRET = v; } catch (_e) {}
 
-// Initialize database
-db.exec(
-    "CREATE TABLE IF NOT EXISTS users (" +
-    "  id INTEGER PRIMARY KEY AUTOINCREMENT," +
-    "  email TEXT UNIQUE NOT NULL," +
-    "  password_hash TEXT NOT NULL," +
-    "  name TEXT NOT NULL," +
-    "  created_at INTEGER" +
-    ")"
-);
-
 // Middleware: extract and verify JWT on every request (optional — won't block)
 app.use("*", "/*", (req, _res) => {
     const authHeader = req.headers.authorization;
