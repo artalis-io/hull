@@ -25,6 +25,7 @@
 #include "hull/cap/db.h"
 #include "hull/cap/env.h"
 #include "hull/cap/http.h"
+#include "hull/migrate.h"
 
 #include <keel/tls_mbedtls.h>
 #include "hull/commands/dispatch.h"
@@ -156,6 +157,7 @@ static void usage(const char *prog)
             "  --tls-cert PATH      TLS certificate file (PEM)\n"
             "  --tls-key PATH       TLS private key file (PEM)\n"
             "  --verify-sig PUBKEY  Verify app signature before startup\n"
+            "  --no-migrate         Skip auto-run migrations on startup\n"
             "  --skip-ca-bundle     Skip TLS certificate verification (dev mode)\n"
             "  -h                   Show this help\n"
             "\n"
@@ -168,6 +170,7 @@ static void usage(const char *prog)
             "  test [options] dir   Run app tests\n"
             "  new <name>           Scaffold new project\n"
             "  dev [app] [options]  Hot-reload development server\n"
+            "  migrate [subcommand] Run/status/create SQL migrations\n"
             "  eject [dir] [-o out] Export standalone Makefile project\n"
             "\n"
             "SIZE accepts optional suffix: k (KB), m (MB), g (GB).\n",
@@ -204,6 +207,7 @@ static int hull_serve(int argc, char **argv)
     long stack_limit = 0;   /* 0 = use default */
     long mem_limit = 0;     /* 0 = unlimited */
     int log_level = LOG_INFO;
+    int no_migrate = 0;
     int skip_ca_bundle = 0;
     const char *tls_cert_path = NULL;
     const char *tls_key_path = NULL;
@@ -252,6 +256,8 @@ static int hull_serve(int argc, char **argv)
             tls_key_path = argv[++i];
         } else if (strcmp(argv[i], "--verify-sig") == 0 && i + 1 < argc) {
             verify_sig_path = argv[++i];
+        } else if (strcmp(argv[i], "--no-migrate") == 0) {
+            no_migrate = 1;
         } else if (strcmp(argv[i], "--skip-ca-bundle") == 0) {
             skip_ca_bundle = 1;
         } else if (strcmp(argv[i], "-h") == 0) {
@@ -269,6 +275,21 @@ static int hull_serve(int argc, char **argv)
         fprintf(stderr, "hull: no entry point found (app.js or app.lua)\n");
         usage(argv[0]);
         return 1;
+    }
+
+    /* Derive app directory from entry point (needed for migrations + static files + sandbox) */
+    char app_dir[4096];
+    {
+        const char *slash = strrchr(entry_point, '/');
+        if (slash) {
+            size_t len = (size_t)(slash - entry_point);
+            if (len >= sizeof(app_dir)) len = sizeof(app_dir) - 1;
+            memcpy(app_dir, entry_point, len);
+            app_dir[len] = '\0';
+        } else {
+            app_dir[0] = '.';
+            app_dir[1] = '\0';
+        }
     }
 
     /* Validate TLS cert/key pair */
@@ -325,6 +346,17 @@ static int hull_serve(int argc, char **argv)
     if (hl_cap_db_init(db) != 0) {
         log_error("[hull:c] database PRAGMA initialization failed");
         goto cleanup_db;
+    }
+
+    /* Auto-run SQL migrations */
+    if (!no_migrate) {
+        int migrated = hl_migrate_run(db, app_dir);
+        if (migrated == HL_MIGRATE_ERR) {
+            log_error("[hull:c] migration failed — refusing to start");
+            goto cleanup_db;
+        }
+        if (migrated > 0)
+            log_info("[hull:c] applied %d migration(s)", migrated);
     }
 
     /* Initialize prepared statement cache */
@@ -439,21 +471,6 @@ static int hull_serve(int argc, char **argv)
             goto cleanup_server;
         }
         log_info("[hull:c] signature verified OK");
-    }
-
-    /* Derive app directory from entry point (needed for static files + sandbox) */
-    char app_dir[4096];
-    {
-        const char *slash = strrchr(entry_point, '/');
-        if (slash) {
-            size_t len = (size_t)(slash - entry_point);
-            if (len >= sizeof(app_dir)) len = sizeof(app_dir) - 1;
-            memcpy(app_dir, entry_point, len);
-            app_dir[len] = '\0';
-        } else {
-            app_dir[0] = '.';
-            app_dir[1] = '\0';
-        }
     }
 
     /* Wire routes into Keel */

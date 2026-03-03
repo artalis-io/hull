@@ -17,6 +17,7 @@
 #include "hull/commands/new.h"
 #include "hull/commands/dev.h"
 #include "hull/commands/eject.h"
+#include "hull/commands/migrate.h"
 #include "hull/commands/sign_platform.h"
 
 #include <string.h>
@@ -34,6 +35,7 @@ static const HlCommand commands[] = {
     { "dev",      hl_cmd_dev },
     { "eject",         hl_cmd_eject },
     { "sign-platform", hl_cmd_sign_platform },
+    { "migrate",       hl_cmd_migrate },
     { NULL, NULL }  /* sentinel */
 };
 

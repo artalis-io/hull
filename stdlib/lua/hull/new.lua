@@ -63,6 +63,10 @@ hull.sig
 build/
 ]]
 
+templates.migration_init = [[-- Migration: 001_init
+-- Add your initial schema here
+]]
+
 -- ── Argument parsing ─────────────────────────────────────────────────
 
 local function parse_args()
@@ -112,6 +116,7 @@ local function main()
     local dir = opts.name
     tool.mkdir(dir)
     tool.mkdir(dir .. "/tests")
+    tool.mkdir(dir .. "/migrations")
 
     -- Write app file
     local ext = runtime == "js" and ".js" or ".lua"
@@ -120,11 +125,13 @@ local function main()
 
     tool.write_file(dir .. "/app" .. ext, app_template)
     tool.write_file(dir .. "/tests/test_app" .. ext, test_template)
+    tool.write_file(dir .. "/migrations/001_init.sql", templates.migration_init)
     tool.write_file(dir .. "/.gitignore", templates.gitignore)
 
     print("hull new: created " .. dir .. "/")
     print("  " .. dir .. "/app" .. ext)
     print("  " .. dir .. "/tests/test_app" .. ext)
+    print("  " .. dir .. "/migrations/001_init.sql")
     print("  " .. dir .. "/.gitignore")
     print("")
     print("Next steps:")

@@ -25,3 +25,7 @@ const HlStdlibEntry hl_app_template_entries[] = {
 const HlStdlibEntry hl_app_static_entries[] = {
     { 0, 0, 0 }
 };
+
+const HlStdlibEntry hl_app_migration_entries[] = {
+    { 0, 0, 0 }
+};

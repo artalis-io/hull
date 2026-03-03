@@ -164,6 +164,24 @@ local function main()
         print("")
     end
 
+    -- ── Migrations ──────────────────────────────────────────────────
+    if sig.files then
+        local migration_names = {}
+        for name in pairs(sig.files) do
+            if name:match("^migrations/") then
+                migration_names[#migration_names + 1] = name
+            end
+        end
+        if #migration_names > 0 then
+            table.sort(migration_names)
+            print("Migrations (" .. #migration_names .. "):")
+            for _, name in ipairs(migration_names) do
+                print("  " .. name .. "  " .. sig.files[name])
+            end
+            print("")
+        end
+    end
+
     -- ── Files ──────────────────────────────────────────────────────
     if sig.files then
         local count = 0

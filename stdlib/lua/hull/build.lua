@@ -80,6 +80,13 @@ local function find_all_files(dir)
     return tool.find_files(dir, "*")
 end
 
+-- List .sql files in a directory (non-recursive, sorted)
+local function find_sql_files(dir)
+    local files = tool.find_files(dir, "*.sql")
+    table.sort(files)
+    return files
+end
+
 -- ── xxd in Lua ───────────────────────────────────────────────────────
 
 local function xxd_data(varname, data)
@@ -219,7 +226,49 @@ local function generate_static_registry(app_dir, static_files)
     return table.concat(parts, "\n")
 end
 
-local function sign_app(app_dir, lua_files, key_file, sign_ctx)
+local function generate_migration_registry(app_dir, sql_files)
+    local parts = {}
+    local entries = {}
+
+    parts[#parts + 1] = "/* Auto-generated migration entries by hull build — do not edit */"
+    parts[#parts + 1] = ""
+
+    local migrations_dir = app_dir .. "/migrations/"
+    local migrations_dir_len = #migrations_dir
+
+    for _, path in ipairs(sql_files) do
+        local data = read_file(path)
+        if not data then
+            tool.stderr("hull build: cannot read " .. path .. "\n")
+            tool.exit(1)
+        end
+
+        -- Relative path from migrations/ dir (e.g. "001_init.sql")
+        local rel = path:sub(migrations_dir_len + 1)
+        local varname = "migration_" .. rel:gsub("[/.]", "_")
+
+        parts[#parts + 1] = xxd_data(varname, data)
+        parts[#parts + 1] = ""
+
+        entries[#entries + 1] = string.format(
+            '    { "%s", %s, sizeof(%s) },', rel, varname, varname)
+    end
+
+    parts[#parts + 1] = "#ifndef HL_STDLIB_ENTRY_DEFINED"
+    parts[#parts + 1] = "#define HL_STDLIB_ENTRY_DEFINED"
+    parts[#parts + 1] = "typedef struct { const char *name; const unsigned char *data; unsigned int len; } HlStdlibEntry;"
+    parts[#parts + 1] = "#endif"
+    parts[#parts + 1] = "const HlStdlibEntry hl_app_migration_entries[] = {"
+    for _, e in ipairs(entries) do
+        parts[#parts + 1] = e
+    end
+    parts[#parts + 1] = "    { 0, 0, 0 }"
+    parts[#parts + 1] = "};"
+
+    return table.concat(parts, "\n")
+end
+
+local function sign_app(app_dir, lua_files, key_file, sign_ctx, migration_files)
     local key_data = read_file(key_file)
     if not key_data then
         tool.stderr("hull build: cannot read key file: " .. key_file .. "\n")
@@ -242,6 +291,15 @@ local function sign_app(app_dir, lua_files, key_file, sign_ctx)
         local data = read_file(path)
         local rel = path:sub(#app_dir + 2)
         file_hashes[rel] = crypto.sha256(data)
+    end
+
+    -- Include migration file hashes
+    if migration_files then
+        for _, path in ipairs(migration_files) do
+            local data = read_file(path)
+            local rel = path:sub(#app_dir + 2)
+            file_hashes[rel] = crypto.sha256(data)
+        end
     end
 
     -- Execute app to capture manifest
@@ -352,6 +410,18 @@ local function main()
     write_file(tmpdir .. "/static_registry.c", static_registry_c)
     if #static_files > 0 then
         print("hull build: " .. #static_files .. " static file(s) from " .. static_dir)
+    end
+
+    -- Generate migration_registry.c (if migrations/ dir exists)
+    local migrations_dir = opts.app_dir .. "/migrations"
+    local migration_files = {}
+    if file_exists(migrations_dir) then
+        migration_files = find_sql_files(migrations_dir)
+    end
+    local migration_registry_c = generate_migration_registry(opts.app_dir, migration_files)
+    write_file(tmpdir .. "/migration_registry.c", migration_registry_c)
+    if #migration_files > 0 then
+        print("hull build: " .. #migration_files .. " migration(s) from " .. migrations_dir)
     end
 
     -- Generate app_main.c
@@ -504,6 +574,15 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
         tool.exit(1)
     end
 
+    ok = tool.spawn({cc, "-std=c11", "-O2", "-w", "-c",
+                     "-o", tmpdir .. "/migration_registry.o",
+                     tmpdir .. "/migration_registry.c"})
+    if not ok then
+        tool.stderr("hull build: compilation failed (migration_registry.c)\n")
+        tool.rmdir(tmpdir)
+        tool.exit(1)
+    end
+
     -- Link
     print("hull build: linking...")
     local platform_a = tmpdir .. "/libhull_platform.a"
@@ -512,6 +591,7 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
                      tmpdir .. "/app_registry.o",
                      tmpdir .. "/template_registry.o",
                      tmpdir .. "/static_registry.o",
+                     tmpdir .. "/migration_registry.o",
                      platform_a,
                      "-lm", "-lpthread"})
     if not ok then
@@ -559,7 +639,7 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
             sign_ctx.binary_hash = crypto.sha256(binary_data)
         end
 
-        sign_app(opts.app_dir, lua_files, opts.sign, sign_ctx)
+        sign_app(opts.app_dir, lua_files, opts.sign, sign_ctx, migration_files)
     end
 
     -- Cleanup

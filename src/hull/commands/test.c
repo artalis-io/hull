@@ -10,6 +10,7 @@
 #include "hull/commands/test.h"
 #include "hull/cap/db.h"
 #include "hull/cap/tool.h"
+#include "hull/migrate.h"
 
 #ifdef HL_ENABLE_LUA
 #include "hull/runtime/lua.h"
@@ -64,6 +65,7 @@ static int run_lua_tests(const char *app_dir, const char *entry)
         return 1;
     }
     hl_cap_db_init(db);
+    hl_migrate_run(db, app_dir);
     HlStmtCache lua_stmt_cache;
     hl_stmt_cache_init(&lua_stmt_cache, db);
     lua.base.db = db;
@@ -180,6 +182,7 @@ static int run_js_tests(const char *app_dir, const char *entry)
         return 1;
     }
     hl_cap_db_init(db);
+    hl_migrate_run(db, app_dir);
     HlStmtCache js_stmt_cache;
     hl_stmt_cache_init(&js_stmt_cache, db);
     js.base.db = db;
