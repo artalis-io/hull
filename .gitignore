@@ -29,6 +29,10 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Cosmo build artifacts
+*.elf
+*.com.dbg
+
 # Environment
 .env
 .env.local
