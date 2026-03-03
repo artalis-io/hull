@@ -54,7 +54,7 @@
 /* ── Default Content-Security-Policy ───────────────────────────────── */
 
 #define HL_DEFAULT_CSP \
-    "default-src 'none'; style-src 'unsafe-inline'; " \
+    "default-src 'none'; style-src 'self' 'unsafe-inline'; " \
     "img-src 'self'; form-action 'self'; frame-ancestors 'none'"
 
 /* ── Logging ───────────────────────────────────────────────────────── */
