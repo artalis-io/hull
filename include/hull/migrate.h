@@ -20,8 +20,8 @@
 /*
  * Discover and apply pending SQL migrations.
  *
- * Checks hl_app_migration_entries[] first (embedded in built binaries).
- * If empty sentinel, scans app_dir/migrations/ for .sql files.
+ * Checks hl_app_entries[] for "migrations/" prefix (embedded in built binaries).
+ * If no migration entries found, scans app_dir/migrations/ for .sql files.
  * Migrations are sorted by filename and executed in order.
  * Each migration runs in its own BEGIN IMMEDIATE / COMMIT.
  *

@@ -87,7 +87,7 @@ int hl_sig_verify(const HlSignature *sig, const uint8_t pubkey[32]);
 int hl_sig_verify_platform(const HlSignature *sig, const uint8_t pubkey[32]);
 
 /*
- * Verify file hashes against embedded app entries (hl_app_lua_entries[]).
+ * Verify file hashes against embedded app entries (hl_app_entries[]).
  * Returns 0 if all files match, -1 on mismatch or missing files.
  */
 int hl_sig_verify_files_embedded(const HlSignature *sig);

@@ -18,15 +18,10 @@
 
 #include "log.h"
 
-/* ── Embedded entries (weak — overridden by hull build) ───────────── */
+/* ── Unified app entries (weak — overridden by hull build) ────────── */
 
-typedef struct {
-    const char         *name;
-    const unsigned char *data;
-    unsigned int         len;
-} HlStdlibEntry;
-
-extern const HlStdlibEntry hl_app_migration_entries[];
+#include "hull/entry.h"
+extern const HlEntry hl_app_entries[];
 
 /* ── Tracking table ───────────────────────────────────────────────── */
 
@@ -295,16 +290,25 @@ int hl_migrate_run(sqlite3 *db, const char *app_dir)
     if (ensure_tracking_table(db) != 0)
         return HL_MIGRATE_ERR;
 
-    /* Check embedded entries first */
-    int has_embedded = (hl_app_migration_entries[0].name != NULL);
+    /* Check for embedded migration entries (migrations/ prefix in unified array) */
+    int has_embedded = 0;
+    for (const HlEntry *e = hl_app_entries; e->name; e++) {
+        if (strncmp(e->name, "migrations/", 11) == 0) {
+            has_embedded = 1;
+            break;
+        }
+    }
 
     if (has_embedded) {
         int applied = 0;
-        for (const HlStdlibEntry *e = hl_app_migration_entries; e->name; e++) {
-            if (is_applied(db, e->name))
+        for (const HlEntry *e = hl_app_entries; e->name; e++) {
+            if (strncmp(e->name, "migrations/", 11) != 0)
+                continue;
+            const char *mig_name = e->name + 11; /* strip prefix */
+            if (is_applied(db, mig_name))
                 continue;
 
-            int rc = execute_migration(db, e->name,
+            int rc = execute_migration(db, mig_name,
                                        (const char *)e->data, e->len);
             if (rc < 0)
                 return HL_MIGRATE_ERR;
@@ -348,8 +352,14 @@ int hl_migrate_status(sqlite3 *db, const char *app_dir,
     if (ensure_tracking_table(db) != 0)
         return -1;
 
-    /* Check embedded entries first */
-    int has_embedded = (hl_app_migration_entries[0].name != NULL);
+    /* Check for embedded migration entries (migrations/ prefix in unified array) */
+    int has_embedded = 0;
+    for (const HlEntry *e = hl_app_entries; e->name; e++) {
+        if (strncmp(e->name, "migrations/", 11) == 0) {
+            has_embedded = 1;
+            break;
+        }
+    }
 
     /* Build list of migration names */
     int count = 0;
@@ -357,16 +367,26 @@ int hl_migrate_status(sqlite3 *db, const char *app_dir,
 
     if (has_embedded) {
         /* Count embedded entries */
-        for (const HlStdlibEntry *e = hl_app_migration_entries; e->name; e++)
-            count++;
+        for (const HlEntry *e = hl_app_entries; e->name; e++) {
+            if (strncmp(e->name, "migrations/", 11) == 0)
+                count++;
+        }
 
-        names = malloc((size_t)count * sizeof(char *));
+        if (count == 0) {
+            *out = NULL;
+            *out_count = 0;
+            return 0;
+        }
+
+        names = calloc((size_t)count, sizeof(char *));
         if (!names)
             return -1;
 
         int i = 0;
-        for (const HlStdlibEntry *e = hl_app_migration_entries; e->name; e++)
-            names[i++] = strdup(e->name);
+        for (const HlEntry *e = hl_app_entries; e->name; e++) {
+            if (strncmp(e->name, "migrations/", 11) == 0)
+                names[i++] = strdup(e->name + 11); /* strip prefix */
+        }
     } else {
         /* Discover from filesystem */
         MigrationList ml = {0};
@@ -378,7 +398,7 @@ int hl_migrate_status(sqlite3 *db, const char *app_dir,
         }
 
         count = ml.count;
-        names = malloc((size_t)count * sizeof(char *));
+        names = calloc((size_t)count, sizeof(char *));
         if (!names) {
             migration_list_free(&ml);
             return -1;

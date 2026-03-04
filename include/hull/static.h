@@ -10,20 +10,15 @@
 #ifndef HL_STATIC_H
 #define HL_STATIC_H
 
+#include "hull/entry.h"
+
 #include <keel/request.h>
 #include <keel/response.h>
 #include <stddef.h>
 
-/* Forward declaration — same struct used for lua/template/static entries */
 typedef struct {
-    const char *name;
-    const unsigned char *data;
-    unsigned int len;
-} HlStaticEntry;
-
-typedef struct {
-    const char *app_dir;            /* filesystem root (dev mode) */
-    const HlStaticEntry *entries;   /* embedded entries (build mode) */
+    const char *app_dir;          /* filesystem root (dev mode) */
+    const HlEntry *entries;       /* embedded entries (build mode) */
 } HlStaticCtx;
 
 /**
