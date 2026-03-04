@@ -19,6 +19,7 @@ typedef struct HlEnvConfig HlEnvConfig;
 typedef struct HlHttpConfig HlHttpConfig;
 typedef struct HlManifest HlManifest;
 typedef struct HlStmtCache HlStmtCache;
+typedef struct HlVfs HlVfs;
 typedef struct sqlite3 sqlite3;
 typedef struct KlServer KlServer;
 
@@ -44,6 +45,8 @@ struct HlRuntime {
     HlEnvConfig  *env_cfg;
     HlHttpConfig *http_cfg;
     const char   *csp_policy;  /* CSP header value for HTML responses (NULL = none) */
+    const HlVfs  *app_vfs;       /* app entries (embedded + dev fallback) */
+    const HlVfs  *platform_vfs;  /* stdlib entries (always embedded) */
 };
 
 #endif /* HL_RUNTIME_H */

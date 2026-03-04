@@ -29,15 +29,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ── Embedded JS stdlib (auto-generated registry of all stdlib .js files) */
-
-#include "stdlib_js_registry.h"
-
-/* Unified app entries: default empty in app_entries_default.c, overridden by
- * generated app_registry.o when building with APP_DIR or hull build.
- * Contains all file types; JS runtime filters by name prefix/extension. */
-#include "hull/entry.h"
-extern const HlEntry hl_app_entries[];
+/* VFS: O(log n) lookups into sorted entry arrays */
+#include "hull/vfs.h"
 
 /* ── Forward declarations for module init functions ─────────────────── */
 
@@ -151,8 +144,9 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
      * resolves them automatically. If we get here, it wasn't found as
      * a native module, so check the embedded JS stdlib registry. */
     if (strncmp(module_name, "hull:", 5) == 0) {
-        for (const HlEntry *e = hl_stdlib_js_entries; e->name; e++) {
-            if (strcmp(e->name, module_name) == 0) {
+        if (js->base.platform_vfs) {
+            const HlEntry *e = hl_vfs_find(js->base.platform_vfs, module_name);
+            if (e) {
                 JSValue func = JS_Eval(ctx, (const char *)e->data, e->len,
                                        module_name,
                                        JS_EVAL_TYPE_MODULE |
@@ -168,8 +162,8 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
         return NULL;
     }
 
-    /* Check embedded app JS modules (hull build / make APP_DIR) */
-    if (hl_app_entries[0].name) {
+    /* Check embedded app JS modules via VFS (hull build / make APP_DIR) */
+    if (js->base.app_vfs && js->base.app_vfs->count > 0) {
         /* The normalizer may prepend the app dir path to relative imports
          * (e.g. "examples/todo/./locales/en.json").  Embedded entries use
          * the canonical "./" form, so find that suffix. */
@@ -178,19 +172,17 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
         if (dot_slash)
             lookup = dot_slash + 1; /* points to "./" */
 
-        for (const HlEntry *e = hl_app_entries; e->name; e++) {
-            /* Skip non-module entries (templates/, static/, migrations/) */
-            if (e->name[0] != '.')
-                continue;
-            /* Skip Lua-only entries (no .js or .json extension) */
+        const HlEntry *e = hl_vfs_find(js->base.app_vfs, lookup);
+        if (!e && lookup != module_name)
+            e = hl_vfs_find(js->base.app_vfs, module_name);
+
+        if (e && e->name[0] == '.') {
+            /* Check it's a JS/JSON entry (not Lua-only) */
             size_t elen = strlen(e->name);
             int is_js = (elen >= 3 && strcmp(e->name + elen - 3, ".js") == 0);
             int is_json = (elen >= 5 && strcmp(e->name + elen - 5, ".json") == 0);
-            if (!is_js && !is_json)
-                continue;
 
-            if (strcmp(e->name, lookup) == 0 ||
-                strcmp(e->name, module_name) == 0) {
+            if (is_js || is_json) {
                 const char *src = (const char *)e->data;
                 size_t src_len = e->len;
                 char *buf = NULL;
@@ -229,9 +221,16 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
         return NULL;
     }
 
-    /* Build filesystem path */
+    /* Build filesystem path.  The normalizer resolves relative imports
+     * against the base module directory, which may prepend app_dir
+     * (e.g. "examples/todo/./locales/en.json").  Strip that prefix
+     * to avoid doubling when we prepend app_dir ourselves. */
+    const char *fs_name = module_name;
+    const char *dot_slash = strstr(module_name, "/./");
+    if (dot_slash)
+        fs_name = dot_slash + 1; /* points to "./" */
     char path[HL_MODULE_PATH_MAX];
-    int n = snprintf(path, sizeof(path), "%s/%s", js->app_dir, module_name);
+    int n = snprintf(path, sizeof(path), "%s/%s", js->app_dir, fs_name);
     if (n < 0 || (size_t)n >= sizeof(path)) {
         JS_ThrowReferenceError(ctx, "module path too long: %s", module_name);
         return NULL;
@@ -736,7 +735,7 @@ int hl_js_register_stdlib(HlJS *js)
      * hull:* names not found as native C modules). No eager compilation
      * needed — just verify the registry is accessible. */
 
-    (void)hl_stdlib_js_entries; /* ensure linked */
+    (void)js->base.platform_vfs; /* ensure linked */
     return 0;
 }
 

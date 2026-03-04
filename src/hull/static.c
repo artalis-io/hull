@@ -146,47 +146,42 @@ int hl_static_middleware(KlRequest *req, KlResponse *res, void *user_data)
 
     const char *mime = hl_static_mime_type(rel, rel_len);
 
-    /* ── Try embedded entries (build mode) ────────────────────────── */
-    if (ctx->entries) {
-        for (const HlEntry *e = ctx->entries; e->name; e++) {
-            /* Unified array: static entries have "static/" prefix */
-            const char *ename = e->name;
-            size_t ename_len = strlen(ename);
-            if (ename_len > 7 && strncmp(ename, "static/", 7) == 0) {
-                ename += 7;
-                ename_len -= 7;
-            }
-            if (ename_len == rel_len &&
-                memcmp(ename, rel, rel_len) == 0) {
-                /* ETag check */
-                char etag[64];
-                int elen = format_etag_embedded(etag, sizeof(etag), e->len);
-                if (elen > 0 && etag_matches(req, etag, (size_t)elen)) {
-                    kl_response_status(res, 304);
-                    kl_response_header(res, "ETag", etag);
-                    kl_response_body(res, NULL, 0);
-                    return 1;
-                }
+    /* Build the full VFS entry name: "static/" + rel */
+    char full_name[4096];
+    if (7 + rel_len >= sizeof(full_name))
+        return 0;
+    memcpy(full_name, "static/", 7);
+    memcpy(full_name + 7, rel, rel_len);
+    full_name[7 + rel_len] = '\0';
 
-                kl_response_status(res, 200);
-                kl_response_header(res, "Content-Type", mime);
-                kl_response_header(res, "Cache-Control", "public, max-age=86400");
-                if (elen > 0)
-                    kl_response_header(res, "ETag", etag);
-                kl_response_body(res, (const char *)e->data, e->len);
-                return 1;
-            }
+    /* ── Try embedded entries (build mode) ────────────────────────── */
+    const HlEntry *e = hl_vfs_find(ctx->vfs, full_name);
+    if (e) {
+        /* ETag check */
+        char etag[64];
+        int elen = format_etag_embedded(etag, sizeof(etag), e->len);
+        if (elen > 0 && etag_matches(req, etag, (size_t)elen)) {
+            kl_response_status(res, 304);
+            kl_response_header(res, "ETag", etag);
+            kl_response_body(res, NULL, 0);
+            return 1;
         }
+
+        kl_response_status(res, 200);
+        kl_response_header(res, "Content-Type", mime);
+        kl_response_header(res, "Cache-Control", "public, max-age=86400");
+        if (elen > 0)
+            kl_response_header(res, "ETag", etag);
+        kl_response_body(res, (const char *)e->data, e->len);
+        return 1;
     }
 
     /* ── Try filesystem (dev mode) ────────────────────────────────── */
-    if (ctx->app_dir) {
+    {
         char fpath[4096];
-        int n = snprintf(fpath, sizeof(fpath), "%s/static/", ctx->app_dir);
-        if (n < 0 || (size_t)n + rel_len >= sizeof(fpath))
+        int n = hl_vfs_path(ctx->vfs, full_name, fpath, sizeof(fpath));
+        if (n < 0)
             return 0;
-        memcpy(fpath + n, rel, rel_len);
-        fpath[n + (int)rel_len] = '\0';
 
         int fd = open(fpath, O_RDONLY);
         if (fd < 0)

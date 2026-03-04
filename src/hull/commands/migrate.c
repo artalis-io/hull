@@ -11,6 +11,7 @@
 
 #include "hull/commands/migrate.h"
 #include "hull/migrate.h"
+#include "hull/vfs.h"
 #include "hull/cap/db.h"
 #include "hull/tool.h"
 
@@ -50,7 +51,11 @@ static int cmd_run(const char *app_dir, const char *db_path)
 
     hl_cap_db_init(db);
 
-    int result = hl_migrate_run(db, app_dir);
+    extern const HlEntry hl_app_entries[];
+    HlVfs vfs;
+    hl_vfs_init(&vfs, hl_app_entries, app_dir);
+
+    int result = hl_migrate_run(db, &vfs);
 
     hl_cap_db_shutdown(db);
     sqlite3_close(db);
@@ -85,10 +90,14 @@ static int cmd_status(const char *app_dir, const char *db_path)
 
     hl_cap_db_init(db);
 
+    extern const HlEntry hl_app_entries[];
+    HlVfs vfs;
+    hl_vfs_init(&vfs, hl_app_entries, app_dir);
+
     HlMigrationStatus *entries = NULL;
     int count = 0;
 
-    int rc = hl_migrate_status(db, app_dir, &entries, &count);
+    int rc = hl_migrate_status(db, &vfs, &entries, &count);
 
     hl_cap_db_shutdown(db);
     sqlite3_close(db);

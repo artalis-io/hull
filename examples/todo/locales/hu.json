@@ -1,0 +1,50 @@
+{
+    "format": {
+        "decimalSep": ",",
+        "thousandsSep": " ",
+        "datePattern": "YYYY.MM.DD."
+    },
+    "site": {
+        "title": "Teendők",
+        "powered_by": "Hull hajtja"
+    },
+    "nav": {
+        "brand": "Teendők",
+        "tasks": "Feladatok",
+        "logout": "Kijelentkezés",
+        "login": "Bejelentkezés",
+        "register": "Regisztráció"
+    },
+    "index": {
+        "title": "Teendőim",
+        "placeholder": "Mi a következő teendő?",
+        "add": "Hozzáadás",
+        "remaining": "hátralévő",
+        "completed": "befejezett",
+        "total": "összesen",
+        "empty": "Még nincs teendő. Adj hozzá egyet!"
+    },
+    "login": {
+        "title": "Bejelentkezés",
+        "page_title": "Bejelentkezés",
+        "email": "E-mail",
+        "password": "Jelszó",
+        "submit": "Belépés",
+        "no_account": "Nincs még fiókod?",
+        "register_link": "Regisztráció"
+    },
+    "register": {
+        "title": "Regisztráció",
+        "page_title": "Regisztráció",
+        "name": "Név",
+        "email": "E-mail",
+        "password": "Jelszó",
+        "submit": "Regisztráció",
+        "has_account": "Már van fiókod?",
+        "login_link": "Bejelentkezés"
+    },
+    "lang": {
+        "en": "English",
+        "hu": "Magyar"
+    }
+}

@@ -9,6 +9,7 @@
  */
 
 #include "hull/migrate.h"
+#include "hull/vfs.h"
 
 #include <dirent.h>
 #include <stdint.h>
@@ -17,11 +18,6 @@
 #include <string.h>
 
 #include "log.h"
-
-/* ── Unified app entries (weak — overridden by hull build) ────────── */
-
-#include "hull/entry.h"
-extern const HlEntry hl_app_entries[];
 
 /* ── Tracking table ───────────────────────────────────────────────── */
 
@@ -178,10 +174,10 @@ static void migration_list_free(MigrationList *ml)
     ml->count = 0;
 }
 
-static int discover_fs_migrations(const char *app_dir, MigrationList *ml)
+static int discover_fs_migrations(const char *root_dir, MigrationList *ml)
 {
     char path[4096];
-    snprintf(path, sizeof(path), "%s/migrations", app_dir);
+    snprintf(path, sizeof(path), "%s/migrations", root_dir);
 
     DIR *dir = opendir(path);
     if (!dir)
@@ -243,7 +239,7 @@ static int discover_fs_migrations(const char *app_dir, MigrationList *ml)
     for (int i = 0; i < ml->count; i++) {
         char filepath[4096];
         snprintf(filepath, sizeof(filepath), "%s/migrations/%s",
-                 app_dir, ml->names[i]);
+                 root_dir, ml->names[i]);
 
         FILE *f = fopen(filepath, "r");
         if (!f) {
@@ -285,31 +281,24 @@ static int discover_fs_migrations(const char *app_dir, MigrationList *ml)
 
 /* ── Public API: run migrations ───────────────────────────────────── */
 
-int hl_migrate_run(sqlite3 *db, const char *app_dir)
+int hl_migrate_run(sqlite3 *db, const HlVfs *vfs)
 {
     if (ensure_tracking_table(db) != 0)
         return HL_MIGRATE_ERR;
 
-    /* Check for embedded migration entries (migrations/ prefix in unified array) */
-    int has_embedded = 0;
-    for (const HlEntry *e = hl_app_entries; e->name; e++) {
-        if (strncmp(e->name, "migrations/", 11) == 0) {
-            has_embedded = 1;
-            break;
-        }
-    }
+    /* Check for embedded migration entries via VFS prefix query */
+    const HlEntry *first = NULL;
+    size_t mig_count = hl_vfs_prefix(vfs, "migrations/", &first);
 
-    if (has_embedded) {
+    if (mig_count > 0) {
         int applied = 0;
-        for (const HlEntry *e = hl_app_entries; e->name; e++) {
-            if (strncmp(e->name, "migrations/", 11) != 0)
-                continue;
-            const char *mig_name = e->name + 11; /* strip prefix */
+        for (size_t i = 0; i < mig_count; i++) {
+            const char *mig_name = first[i].name + 11; /* strip "migrations/" */
             if (is_applied(db, mig_name))
                 continue;
 
             int rc = execute_migration(db, mig_name,
-                                       (const char *)e->data, e->len);
+                                       (const char *)first[i].data, first[i].len);
             if (rc < 0)
                 return HL_MIGRATE_ERR;
             applied += rc;
@@ -318,8 +307,11 @@ int hl_migrate_run(sqlite3 *db, const char *app_dir)
     }
 
     /* Fall back to filesystem discovery */
+    if (!vfs->root_dir)
+        return HL_MIGRATE_NO_DIR;
+
     MigrationList ml = {0};
-    int rc = discover_fs_migrations(app_dir, &ml);
+    int rc = discover_fs_migrations(vfs->root_dir, &ml);
     if (rc < 0)
         return HL_MIGRATE_NO_DIR;
 
@@ -346,51 +338,39 @@ int hl_migrate_run(sqlite3 *db, const char *app_dir)
 
 /* ── Public API: query status ─────────────────────────────────────── */
 
-int hl_migrate_status(sqlite3 *db, const char *app_dir,
+int hl_migrate_status(sqlite3 *db, const HlVfs *vfs,
                       HlMigrationStatus **out, int *out_count)
 {
     if (ensure_tracking_table(db) != 0)
         return -1;
 
-    /* Check for embedded migration entries (migrations/ prefix in unified array) */
-    int has_embedded = 0;
-    for (const HlEntry *e = hl_app_entries; e->name; e++) {
-        if (strncmp(e->name, "migrations/", 11) == 0) {
-            has_embedded = 1;
-            break;
-        }
-    }
+    /* Check for embedded migration entries via VFS prefix query */
+    const HlEntry *first = NULL;
+    size_t mig_count = hl_vfs_prefix(vfs, "migrations/", &first);
 
     /* Build list of migration names */
     int count = 0;
     char **names = NULL;
 
-    if (has_embedded) {
-        /* Count embedded entries */
-        for (const HlEntry *e = hl_app_entries; e->name; e++) {
-            if (strncmp(e->name, "migrations/", 11) == 0)
-                count++;
-        }
-
-        if (count == 0) {
-            *out = NULL;
-            *out_count = 0;
-            return 0;
-        }
+    if (mig_count > 0) {
+        count = (int)mig_count;
 
         names = calloc((size_t)count, sizeof(char *));
         if (!names)
             return -1;
 
-        int i = 0;
-        for (const HlEntry *e = hl_app_entries; e->name; e++) {
-            if (strncmp(e->name, "migrations/", 11) == 0)
-                names[i++] = strdup(e->name + 11); /* strip prefix */
-        }
+        for (int i = 0; i < count; i++)
+            names[i] = strdup(first[i].name + 11); /* strip "migrations/" */
     } else {
         /* Discover from filesystem */
+        if (!vfs->root_dir) {
+            *out = NULL;
+            *out_count = 0;
+            return 0;
+        }
+
         MigrationList ml = {0};
-        if (discover_fs_migrations(app_dir, &ml) < 0 || ml.count == 0) {
+        if (discover_fs_migrations(vfs->root_dir, &ml) < 0 || ml.count == 0) {
             *out = NULL;
             *out_count = 0;
             migration_list_free(&ml);

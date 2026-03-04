@@ -24,75 +24,15 @@ import { session } from "hull:middleware:session";
 import { template } from "hull:template";
 import { time } from "hull:time";
 import { validate } from "hull:validate";
+import en from "./locales/en.json";
+import hu from "./locales/hu.json";
 
-app.manifest({
-    csp: "default-src 'none'; style-src 'self' 'unsafe-inline'; "
-       + "img-src 'self'; form-action 'self'; frame-ancestors 'none'",
-});  // sandbox: no fs, no env, no outbound HTTP; inline styles for templates
+app.manifest({});  // sandbox: no fs, no env, no outbound HTTP; default CSP
 
 // ── i18n setup ─────────────────────────────────────────────────────
 
-i18n.load("en", {
-    format: {
-        decimalSep: ".", thousandsSep: ",", datePattern: "YYYY-MM-DD",
-    },
-    site: { title: "Todo", powered_by: "Powered by Hull" },
-    nav: {
-        brand: "Todo", tasks: "Tasks", logout: "Logout",
-        login: "Login", register: "Register",
-    },
-    index: {
-        title: "My Todos", placeholder: "What needs to be done?",
-        add: "Add", remaining: "remaining", completed: "completed",
-        total: "total", empty: "No todos yet. Add one above!",
-    },
-    login: {
-        title: "Login", page_title: "Login", email: "Email",
-        password: "Password", submit: "Login",
-        no_account: "Don't have an account?", register_link: "Register",
-    },
-    register: {
-        title: "Register", page_title: "Register", name: "Name",
-        email: "Email", password: "Password", submit: "Register",
-        has_account: "Already have an account?", login_link: "Login",
-    },
-    lang: { en: "English", hu: "Magyar" },
-});
-
-i18n.load("hu", {
-    format: {
-        decimalSep: ",", thousandsSep: " ", datePattern: "YYYY.MM.DD.",
-    },
-    site: { title: "Teend\u0151k", powered_by: "Hull hajtja" },
-    nav: {
-        brand: "Teend\u0151k", tasks: "Feladatok",
-        logout: "Kijelentkez\u00e9s", login: "Bejelentkez\u00e9s",
-        register: "Regisztr\u00e1ci\u00f3",
-    },
-    index: {
-        title: "Teend\u0151im",
-        placeholder: "Mi a k\u00f6vetkez\u0151 teend\u0151?",
-        add: "Hozz\u00e1ad\u00e1s", remaining: "h\u00e1tral\u00e9v\u0151",
-        completed: "befejezett", total: "\u00f6sszesen",
-        empty: "M\u00e9g nincs teend\u0151. Adj hozz\u00e1 egyet!",
-    },
-    login: {
-        title: "Bejelentkez\u00e9s", page_title: "Bejelentkez\u00e9s",
-        email: "E-mail", password: "Jelsz\u00f3",
-        submit: "Bel\u00e9p\u00e9s",
-        no_account: "Nincs m\u00e9g fi\u00f3kod?",
-        register_link: "Regisztr\u00e1ci\u00f3",
-    },
-    register: {
-        title: "Regisztr\u00e1ci\u00f3", page_title: "Regisztr\u00e1ci\u00f3",
-        name: "N\u00e9v", email: "E-mail", password: "Jelsz\u00f3",
-        submit: "Regisztr\u00e1ci\u00f3",
-        has_account: "M\u00e1r van fi\u00f3kod?",
-        login_link: "Bejelentkez\u00e9s",
-    },
-    lang: { en: "English", hu: "Magyar" },
-});
-
+i18n.load("en", en);
+i18n.load("hu", hu);
 i18n.locale("en");
 
 // ── Session setup ──────────────────────────────────────────────────
