@@ -148,9 +148,16 @@ int hl_static_middleware(KlRequest *req, KlResponse *res, void *user_data)
 
     /* ── Try embedded entries (build mode) ────────────────────────── */
     if (ctx->entries) {
-        for (const HlStaticEntry *e = ctx->entries; e->name; e++) {
-            if (strlen(e->name) == rel_len &&
-                memcmp(e->name, rel, rel_len) == 0) {
+        for (const HlEntry *e = ctx->entries; e->name; e++) {
+            /* Unified array: static entries have "static/" prefix */
+            const char *ename = e->name;
+            size_t ename_len = strlen(ename);
+            if (ename_len > 7 && strncmp(ename, "static/", 7) == 0) {
+                ename += 7;
+                ename_len -= 7;
+            }
+            if (ename_len == rel_len &&
+                memcmp(ename, rel, rel_len) == 0) {
                 /* ETag check */
                 char etag[64];
                 int elen = format_etag_embedded(etag, sizeof(etag), e->len);

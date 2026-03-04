@@ -260,8 +260,8 @@ $(STDLIB_LUA_REGISTRY): $(STDLIB_LUA_XXD_HDRS) | $(BUILDDIR)
 		echo "#include \"$$(basename $$hdr)\""; \
 	done >> $@
 	@echo "" >> $@
-	@echo "typedef struct { const char *name; const unsigned char *data; unsigned int len; } HlStdlibEntry;" >> $@
-	@echo "static const HlStdlibEntry hl_stdlib_lua_entries[] = {" >> $@
+	@echo "#include \"hull/entry.h\"" >> $@
+	@echo "static const HlEntry hl_stdlib_lua_entries[] = {" >> $@
 	@for f in $(STDLIB_LUA_FILES); do \
 		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
 		modname=$$(echo "$$f" | sed 's|^stdlib/lua/||; s|\.lua$$||; s|/|.|g'); \
@@ -299,8 +299,8 @@ $(STDLIB_JS_REGISTRY): $(STDLIB_JS_XXD_HDRS) | $(BUILDDIR)
 		echo "#include \"$$(basename $$hdr)\""; \
 	done >> $@
 	@echo "" >> $@
-	@echo "typedef struct { const char *name; const unsigned char *data; unsigned int len; } HlJsStdlibEntry;" >> $@
-	@echo "static const HlJsStdlibEntry hl_stdlib_js_entries[] = {" >> $@
+	@echo "#include \"hull/entry.h\"" >> $@
+	@echo "static const HlEntry hl_stdlib_js_entries[] = {" >> $@
 	@for f in $(STDLIB_JS_FILES); do \
 		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
 		modname=$$(echo "$$f" | sed 's|^stdlib/js/||; s|\.js$$||; s|/|:|g'); \
@@ -313,60 +313,60 @@ STDLIB_JS_HDRS += $(STDLIB_JS_REGISTRY)
 
 # ── App code embedding (xxd) ─────────────────────────────────────────
 #
-# When APP_DIR is set (e.g. make APP_DIR=myapp), all .lua files under
-# APP_DIR are embedded into the binary using the same xxd pattern as stdlib.
-# Module names use relative paths from APP_DIR with ./ prefix:
-#   myapp/routes/users.lua → "./routes/users"
+# When APP_DIR is set (e.g. make APP_DIR=myapp), all app files are
+# embedded into a single hl_app_entries[] array using xxd.
+# Naming conventions:
+#   .lua modules:    "./path" (no ext)       e.g. "./routes/users"
+#   .js modules:     "./path.js"             e.g. "./app.js"
+#   .json data:      "./path.json"           e.g. "./locales/en.json"
+#   templates:       "templates/path"        e.g. "templates/base.html"
+#   static files:    "static/path"           e.g. "static/style.css"
+#   migrations:      "migrations/path"       e.g. "migrations/001_init.sql"
 
 APP_ENTRIES_DEFAULT_OBJ := $(BUILDDIR)/app_entries_default.o
 APP_DIR ?=
 APP_EXTRA_OBJS := $(APP_ENTRIES_DEFAULT_OBJ)
 ifneq ($(APP_DIR),)
 APP_LUA_FILES := $(shell find $(APP_DIR) -name '*.lua' -not -path '*/tests/*' 2>/dev/null)
+APP_JS_FILES := $(shell find $(APP_DIR) -name '*.js' -not -path '*/tests/*' -not -path '*/static/*' -not -path '*/node_modules/*' 2>/dev/null)
+APP_JSON_FILES := $(shell find $(APP_DIR) -name '*.json' -not -path '*/tests/*' -not -path '*/static/*' -not -path '*/templates/*' 2>/dev/null)
+APP_TPL_FILES := $(shell find $(APP_DIR)/templates -name '*.html' 2>/dev/null)
+APP_STATIC_FILES := $(shell find $(APP_DIR)/static -type f 2>/dev/null)
+APP_MIGRATION_FILES := $(shell find $(APP_DIR)/migrations -name '*.sql' 2>/dev/null | sort)
 
-# Flatten path: myapp/routes/users.lua → build/app_lua_routes_users.h
-app_hdr = $(BUILDDIR)/app_lua_$(subst /,_,$(patsubst $(APP_DIR)/%.lua,%.h,$(1)))
-APP_LUA_HDRS := $(foreach f,$(APP_LUA_FILES),$(call app_hdr,$(f)))
+# xxd header paths per file type
+app_lua_hdr = $(BUILDDIR)/app_lua_$(subst /,_,$(patsubst $(APP_DIR)/%.lua,%.h,$(1)))
+app_js_hdr = $(BUILDDIR)/app_js_$(subst /,_,$(patsubst $(APP_DIR)/%.js,%.h,$(1)))
+app_json_hdr = $(BUILDDIR)/app_json_$(subst /,_,$(patsubst $(APP_DIR)/%.json,%.h,$(1)))
+app_tpl_hdr = $(BUILDDIR)/app_tpl_$(subst /,_,$(patsubst $(APP_DIR)/templates/%.html,%.h,$(1)))
+app_static_hdr = $(BUILDDIR)/app_static_$(subst /,_,$(patsubst $(APP_DIR)/static/%,%.h,$(1)))
+app_migration_hdr = $(BUILDDIR)/app_mig_$(subst /,_,$(patsubst $(APP_DIR)/migrations/%,%.h,$(1)))
 
-APP_LUA_REGISTRY := $(BUILDDIR)/app_lua_registry.h
+APP_LUA_HDRS := $(foreach f,$(APP_LUA_FILES),$(call app_lua_hdr,$(f)))
+APP_JS_HDRS := $(foreach f,$(APP_JS_FILES),$(call app_js_hdr,$(f)))
+APP_JSON_HDRS := $(foreach f,$(APP_JSON_FILES),$(call app_json_hdr,$(f)))
+APP_TPL_HDRS := $(foreach f,$(APP_TPL_FILES),$(call app_tpl_hdr,$(f)))
+APP_STATIC_HDRS := $(foreach f,$(APP_STATIC_FILES),$(call app_static_hdr,$(f)))
+APP_MIGRATION_HDRS := $(foreach f,$(APP_MIGRATION_FILES),$(call app_migration_hdr,$(f)))
 
+# xxd rules for each file type
 define APP_LUA_RULE
-$(call app_hdr,$(1)): $(1) | $(BUILDDIR)
+$(call app_lua_hdr,$(1)): $(1) | $(BUILDDIR)
 	xxd -i $$< > $$@
 endef
 $(foreach f,$(APP_LUA_FILES),$(eval $(call APP_LUA_RULE,$(f))))
 
-APP_LUA_XXD_HDRS := $(APP_LUA_HDRS)
+define APP_JS_RULE
+$(call app_js_hdr,$(1)): $(1) | $(BUILDDIR)
+	xxd -i $$< > $$@
+endef
+$(foreach f,$(APP_JS_FILES),$(eval $(call APP_JS_RULE,$(f))))
 
-APP_LUA_REGISTRY_C := $(BUILDDIR)/app_lua_registry.c
-APP_LUA_REGISTRY_O := $(BUILDDIR)/app_lua_registry.o
-
-$(APP_LUA_REGISTRY_C): $(APP_LUA_XXD_HDRS) | $(BUILDDIR)
-	@echo "/* Auto-generated — do not edit */" > $@
-	@for hdr in $(APP_LUA_XXD_HDRS); do \
-		echo "#include \"$$(basename $$hdr)\""; \
-	done >> $@
-	@echo "" >> $@
-	@echo "typedef struct { const char *name; const unsigned char *data; unsigned int len; } HlStdlibEntry;" >> $@
-	@echo "const HlStdlibEntry hl_app_lua_entries[] = {" >> $@
-	@for f in $(APP_LUA_FILES); do \
-		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
-		modname=$$(echo "$$f" | sed 's|^$(APP_DIR)/||; s|\.lua$$||'); \
-		echo "    { \"./$$modname\", $${varname}, sizeof($${varname}) },"; \
-	done >> $@
-	@echo "    { 0, 0, 0 }" >> $@
-	@echo "};" >> $@
-
-$(APP_LUA_REGISTRY_O): $(APP_LUA_REGISTRY_C) | $(BUILDDIR)
-	$(CC) -std=c11 -O2 -w -I$(BUILDDIR) -c -o $@ $<
-
-STDLIB_LUA_HDRS += $(APP_LUA_HDRS)
-
-# ── Template embedding (*.html under APP_DIR/templates/) ──────────
-APP_TPL_FILES := $(shell find $(APP_DIR)/templates -name '*.html' 2>/dev/null)
-ifneq ($(APP_TPL_FILES),)
-app_tpl_hdr = $(BUILDDIR)/app_tpl_$(subst /,_,$(patsubst $(APP_DIR)/templates/%.html,%.h,$(1)))
-APP_TPL_HDRS := $(foreach f,$(APP_TPL_FILES),$(call app_tpl_hdr,$(f)))
+define APP_JSON_RULE
+$(call app_json_hdr,$(1)): $(1) | $(BUILDDIR)
+	xxd -i $$< > $$@
+endef
+$(foreach f,$(APP_JSON_FILES),$(eval $(call APP_JSON_RULE,$(f))))
 
 define APP_TPL_RULE
 $(call app_tpl_hdr,$(1)): $(1) | $(BUILDDIR)
@@ -374,76 +374,75 @@ $(call app_tpl_hdr,$(1)): $(1) | $(BUILDDIR)
 endef
 $(foreach f,$(APP_TPL_FILES),$(eval $(call APP_TPL_RULE,$(f))))
 
-APP_TPL_REGISTRY_C := $(BUILDDIR)/app_tpl_registry.c
-APP_TPL_REGISTRY_O := $(BUILDDIR)/app_tpl_registry.o
-
-$(APP_TPL_REGISTRY_C): $(APP_TPL_HDRS) | $(BUILDDIR)
-	@echo "/* Auto-generated template entries — do not edit */" > $@
-	@for hdr in $(APP_TPL_HDRS); do \
-		echo "#include \"$$(basename $$hdr)\""; \
-	done >> $@
-	@echo "" >> $@
-	@echo "typedef struct { const char *name; const unsigned char *data; unsigned int len; } HlStdlibEntry;" >> $@
-	@echo "const HlStdlibEntry hl_app_template_entries[] = {" >> $@
-	@for f in $(APP_TPL_FILES); do \
-		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
-		tplname=$$(echo "$$f" | sed 's|^$(APP_DIR)/templates/||'); \
-		echo "    { \"$$tplname\", $${varname}, sizeof($${varname}) },"; \
-	done >> $@
-	@echo "    { 0, 0, 0 }" >> $@
-	@echo "};" >> $@
-
-$(APP_TPL_REGISTRY_O): $(APP_TPL_REGISTRY_C) | $(BUILDDIR)
-	$(CC) -std=c11 -O2 -w -I$(BUILDDIR) -c -o $@ $<
-
-APP_EXTRA_OBJS_TPL := $(APP_LUA_REGISTRY_O) $(APP_TPL_REGISTRY_O)
-else
-APP_EXTRA_OBJS_TPL := $(APP_LUA_REGISTRY_O)
-endif
-
-# ── Static file embedding (all files under APP_DIR/static/) ──────────
-APP_STATIC_FILES := $(shell find $(APP_DIR)/static -type f 2>/dev/null)
-ifneq ($(APP_STATIC_FILES),)
-app_static_hdr = $(BUILDDIR)/app_static_$(subst /,_,$(patsubst $(APP_DIR)/static/%,%.h,$(1)))
-APP_STATIC_HDRS := $(foreach f,$(APP_STATIC_FILES),$(call app_static_hdr,$(f)))
-
 define APP_STATIC_RULE
 $(call app_static_hdr,$(1)): $(1) | $(BUILDDIR)
 	xxd -i $$< > $$@
 endef
 $(foreach f,$(APP_STATIC_FILES),$(eval $(call APP_STATIC_RULE,$(f))))
 
-APP_STATIC_REGISTRY_C := $(BUILDDIR)/app_static_registry.c
-APP_STATIC_REGISTRY_O := $(BUILDDIR)/app_static_registry.o
+define APP_MIGRATION_RULE
+$(call app_migration_hdr,$(1)): $(1) | $(BUILDDIR)
+	xxd -i $$< > $$@
+endef
+$(foreach f,$(APP_MIGRATION_FILES),$(eval $(call APP_MIGRATION_RULE,$(f))))
 
-$(APP_STATIC_REGISTRY_C): $(APP_STATIC_HDRS) | $(BUILDDIR)
-	@echo "/* Auto-generated static entries — do not edit */" > $@
-	@for hdr in $(APP_STATIC_HDRS); do \
+APP_ALL_XXD_HDRS := $(APP_LUA_HDRS) $(APP_JS_HDRS) $(APP_JSON_HDRS) $(APP_TPL_HDRS) $(APP_STATIC_HDRS) $(APP_MIGRATION_HDRS)
+
+APP_REGISTRY_C := $(BUILDDIR)/app_registry.c
+APP_REGISTRY_O := $(BUILDDIR)/app_registry.o
+
+$(APP_REGISTRY_C): $(APP_ALL_XXD_HDRS) | $(BUILDDIR)
+	@echo "/* Auto-generated unified app registry — do not edit */" > $@
+	@for hdr in $(APP_ALL_XXD_HDRS); do \
 		echo "#include \"$$(basename $$hdr)\""; \
 	done >> $@
 	@echo "" >> $@
-	@echo "typedef struct { const char *name; const unsigned char *data; unsigned int len; } HlStdlibEntry;" >> $@
-	@echo "const HlStdlibEntry hl_app_static_entries[] = {" >> $@
+	@echo "#include \"hull/entry.h\"" >> $@
+	@echo "const HlEntry hl_app_entries[] = {" >> $@
+	@for f in $(APP_LUA_FILES); do \
+		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
+		modname=$$(echo "$$f" | sed 's|^$(APP_DIR)/||; s|\.lua$$||'); \
+		echo "    { \"./$$modname\", $${varname}, sizeof($${varname}) },"; \
+	done >> $@
+	@for f in $(APP_JS_FILES); do \
+		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
+		modname=$$(echo "$$f" | sed 's|^$(APP_DIR)/||'); \
+		echo "    { \"./$$modname\", $${varname}, sizeof($${varname}) },"; \
+	done >> $@
+	@for f in $(APP_JSON_FILES); do \
+		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
+		modname=$$(echo "$$f" | sed 's|^$(APP_DIR)/||'); \
+		echo "    { \"./$$modname\", $${varname}, sizeof($${varname}) },"; \
+	done >> $@
+	@for f in $(APP_TPL_FILES); do \
+		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
+		tplname=$$(echo "$$f" | sed 's|^$(APP_DIR)/||'); \
+		echo "    { \"$$tplname\", $${varname}, sizeof($${varname}) },"; \
+	done >> $@
 	@for f in $(APP_STATIC_FILES); do \
 		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
-		staticname=$$(echo "$$f" | sed 's|^$(APP_DIR)/static/||'); \
+		staticname=$$(echo "$$f" | sed 's|^$(APP_DIR)/||'); \
 		echo "    { \"$$staticname\", $${varname}, sizeof($${varname}) },"; \
+	done >> $@
+	@for f in $(APP_MIGRATION_FILES); do \
+		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
+		migname=$$(echo "$$f" | sed 's|^$(APP_DIR)/||'); \
+		echo "    { \"$$migname\", $${varname}, sizeof($${varname}) },"; \
 	done >> $@
 	@echo "    { 0, 0, 0 }" >> $@
 	@echo "};" >> $@
 
-$(APP_STATIC_REGISTRY_O): $(APP_STATIC_REGISTRY_C) | $(BUILDDIR)
-	$(CC) -std=c11 -O2 -w -I$(BUILDDIR) -c -o $@ $<
+$(APP_REGISTRY_O): $(APP_REGISTRY_C) | $(BUILDDIR)
+	$(CC) -std=c11 -O2 -w -I$(INCDIR) -I$(BUILDDIR) -c -o $@ $<
 
-APP_EXTRA_OBJS := $(APP_EXTRA_OBJS_TPL) $(APP_STATIC_REGISTRY_O)
-else
-APP_EXTRA_OBJS := $(APP_EXTRA_OBJS_TPL)
-endif
+STDLIB_LUA_HDRS += $(APP_LUA_HDRS)
+
+APP_EXTRA_OBJS := $(APP_REGISTRY_O)
 endif
 
 # App entries default (empty array — used when no APP_DIR)
-$(APP_ENTRIES_DEFAULT_OBJ): $(SRCDIR)/hull/app_entries_default.c | $(BUILDDIR)
-	$(CC) -std=c11 -O2 -w -c -o $@ $<
+$(APP_ENTRIES_DEFAULT_OBJ): $(SRCDIR)/hull/app_entries_default.c $(INCDIR)/hull/entry.h | $(BUILDDIR)
+	$(CC) -std=c11 -O2 -w -I$(INCDIR) -c -o $@ $<
 
 # ── Include paths ───────────────────────────────────────────────────
 

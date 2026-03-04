@@ -22,13 +22,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Embedded app entries (provided by app_entries_default.o or app_registry.o) */
-typedef struct {
-    const char *name;
-    const unsigned char *data;
-    unsigned int len;
-} HlStdlibEntry;
-extern const HlStdlibEntry hl_app_lua_entries[];
+/* Unified app entries (provided by app_entries_default.o or app_registry.o) */
+#include "hull/entry.h"
+extern const HlEntry hl_app_entries[];
 
 /* ── Hex utilities ────────────────────────────────────────────────── */
 
@@ -610,6 +606,52 @@ int hl_sig_verify_platform(const HlSignature *sig, const uint8_t pubkey[32])
         (const uint8_t *)payload, payload_len, sig_bytes, pubkey);
 }
 
+/* Search the unified entry array for a file matching sig_name.
+ * For .lua entries, the embedded name has the extension stripped,
+ * so we compare without it. Other extensions (.js, .json) are kept.
+ * Only checks module entries (those starting with "./"). */
+static int sig_find_in_entries(const char *sig_name,
+                               const unsigned char **out_data,
+                               unsigned int *out_len)
+{
+    size_t slen = strlen(sig_name);
+    size_t mlen = slen;
+    if (slen > 4 && strcmp(sig_name + slen - 4, ".lua") == 0)
+        mlen = slen - 4;
+
+    for (const HlEntry *e = hl_app_entries; e->name; e++) {
+        /* Only check module entries (start with "./") */
+        if (e->name[0] != '.')
+            continue;
+        const char *ename = e->name;
+        if (ename[0] == '.' && ename[1] == '/')
+            ename += 2;
+
+        if (strlen(ename) == mlen && strncmp(ename, sig_name, mlen) == 0) {
+            *out_data = e->data;
+            *out_len = e->len;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Check whether an embedded entry name matches any signature entry. */
+static int sig_entry_in_sig(const HlSignature *sig, const char *ename)
+{
+    for (size_t i = 0; i < sig->entry_count; i++) {
+        const char *sig_name = sig->entries[i].name;
+        size_t slen = strlen(sig_name);
+        size_t mlen = slen;
+        if (slen > 4 && strcmp(sig_name + slen - 4, ".lua") == 0)
+            mlen = slen - 4;
+
+        if (strlen(ename) == mlen && strncmp(ename, sig_name, mlen) == 0)
+            return 1;
+    }
+    return 0;
+}
+
 int hl_sig_verify_files_embedded(const HlSignature *sig)
 {
     if (!sig || !sig->entries) return -1;
@@ -620,27 +662,8 @@ int hl_sig_verify_files_embedded(const HlSignature *sig)
 
         const unsigned char *data = NULL;
         unsigned int data_len = 0;
-        int found = 0;
 
-        for (const HlStdlibEntry *e = hl_app_lua_entries; e->name; e++) {
-            const char *ename = e->name;
-            if (ename[0] == '.' && ename[1] == '/')
-                ename += 2;
-
-            size_t slen = strlen(sig_name);
-            size_t mlen = slen;
-            if (slen > 4 && strcmp(sig_name + slen - 4, ".lua") == 0)
-                mlen = slen - 4;
-
-            if (strlen(ename) == mlen && strncmp(ename, sig_name, mlen) == 0) {
-                data = e->data;
-                data_len = e->len;
-                found = 1;
-                break;
-            }
-        }
-
-        if (!found) {
+        if (!sig_find_in_entries(sig_name, &data, &data_len)) {
             log_error("[sig] file not found in binary: %s", sig_name);
             return -1;
         }
@@ -657,27 +680,18 @@ int hl_sig_verify_files_embedded(const HlSignature *sig)
         }
     }
 
-    /* Check for extra files in the binary not in the signature */
-    for (const HlStdlibEntry *e = hl_app_lua_entries; e->name; e++) {
+    /* Check for extra module files in the binary not in the signature */
+    for (const HlEntry *e = hl_app_entries; e->name; e++) {
+        /* Only check module entries (start with "./") */
+        if (e->name[0] != '.')
+            continue;
         const char *ename = e->name;
         if (ename[0] == '.' && ename[1] == '/')
             ename += 2;
 
-        int found = 0;
-        for (size_t i = 0; i < sig->entry_count; i++) {
-            const char *sig_name = sig->entries[i].name;
-            size_t slen = strlen(sig_name);
-            size_t mlen = slen;
-            if (slen > 4 && strcmp(sig_name + slen - 4, ".lua") == 0)
-                mlen = slen - 4;
-
-            if (strlen(ename) == mlen && strncmp(ename, sig_name, mlen) == 0) {
-                found = 1;
-                break;
-            }
-        }
-        if (!found) {
-            log_error("[sig] extra file in binary not in signature: %s", e->name);
+        if (!sig_entry_in_sig(sig, ename)) {
+            log_error("[sig] extra file in binary not in signature: %s",
+                      e->name);
             return -1;
         }
     }
@@ -898,7 +912,7 @@ int hl_verify_startup(const char *pubkey_path, const char *entry_point)
 
     /* 7. Verify file hashes: embedded or filesystem */
     int rc;
-    if (hl_app_lua_entries[0].name != NULL) {
+    if (hl_app_entries[0].name != NULL) {
         rc = hl_sig_verify_files_embedded(&sig);
     } else {
         char app_dir[PATH_MAX];

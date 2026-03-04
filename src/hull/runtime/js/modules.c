@@ -2235,15 +2235,9 @@ int hl_js_init_log_module(JSContext *ctx, HlJS *js)
  * _template.loadRaw(name)          → raw template string or null
  * ════════════════════════════════════════════════════════════════════ */
 
-/* Template entries: raw HTML bytes, searched by _template.loadRaw().
- * Default empty in app_entries_default.c, overridden when templates/ exists. */
-typedef struct {
-    const char *name;
-    const unsigned char *data;
-    unsigned int len;
-} HlStdlibEntry;
-
-extern const HlStdlibEntry hl_app_template_entries[];
+/* Unified app entries — template entries have "templates/" prefix. */
+#include "hull/entry.h"
+extern const HlEntry hl_app_entries[];
 
 /* _template.compile(code, name?) — compile generated JS source to a function */
 static JSValue js_template_compile(JSContext *ctx, JSValueConst this_val,
@@ -2297,9 +2291,11 @@ static JSValue js_template_load_raw(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "invalid template name");
     }
 
-    /* 1. Search embedded template entries */
-    for (const HlStdlibEntry *e = hl_app_template_entries; e->name; e++) {
-        if (strcmp(e->name, name) == 0) {
+    /* 1. Search embedded template entries (templates/ prefix in unified array) */
+    for (const HlEntry *e = hl_app_entries; e->name; e++) {
+        if (strncmp(e->name, "templates/", 10) != 0)
+            continue;
+        if (strcmp(e->name + 10, name) == 0) {
             JSValue result = JS_NewStringLen(ctx, (const char *)e->data, e->len);
             JS_FreeCString(ctx, name);
             return result;

@@ -578,8 +578,14 @@ static int hull_serve(int argc, char **argv)
 
     /* Auto-register static file serving (after sandbox is applied) */
     {
-        extern const HlStaticEntry hl_app_static_entries[];
-        int has_static = (hl_app_static_entries[0].name != NULL);
+        extern const HlEntry hl_app_entries[];
+        int has_static = 0;
+        for (const HlEntry *e = hl_app_entries; e->name; e++) {
+            if (strncmp(e->name, "static/", 7) == 0) {
+                has_static = 1;
+                break;
+            }
+        }
         if (!has_static) {
             char static_dir[4096];
             snprintf(static_dir, sizeof(static_dir), "%s/static", app_dir);
@@ -590,7 +596,7 @@ static int hull_serve(int argc, char **argv)
         if (has_static) {
             HlStaticCtx *sctx = track_route_alloc(sizeof(HlStaticCtx));
             sctx->app_dir = app_dir;
-            sctx->entries = (const HlStaticEntry *)hl_app_static_entries;
+            sctx->entries = hl_app_entries;
             kl_server_use(&server, "GET", "/static/*",
                           hl_static_middleware, sctx);
         }

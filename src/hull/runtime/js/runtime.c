@@ -33,6 +33,12 @@
 
 #include "stdlib_js_registry.h"
 
+/* Unified app entries: default empty in app_entries_default.c, overridden by
+ * generated app_registry.o when building with APP_DIR or hull build.
+ * Contains all file types; JS runtime filters by name prefix/extension. */
+#include "hull/entry.h"
+extern const HlEntry hl_app_entries[];
+
 /* ── Forward declarations for module init functions ─────────────────── */
 
 int hl_js_init_app_module(JSContext *ctx, HlJS *js);
@@ -145,7 +151,7 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
      * resolves them automatically. If we get here, it wasn't found as
      * a native module, so check the embedded JS stdlib registry. */
     if (strncmp(module_name, "hull:", 5) == 0) {
-        for (const HlJsStdlibEntry *e = hl_stdlib_js_entries; e->name; e++) {
+        for (const HlEntry *e = hl_stdlib_js_entries; e->name; e++) {
             if (strcmp(e->name, module_name) == 0) {
                 JSValue func = JS_Eval(ctx, (const char *)e->data, e->len,
                                        module_name,
@@ -160,6 +166,61 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
         }
         JS_ThrowReferenceError(ctx, "unknown hull module: %s", module_name);
         return NULL;
+    }
+
+    /* Check embedded app JS modules (hull build / make APP_DIR) */
+    if (hl_app_entries[0].name) {
+        /* The normalizer may prepend the app dir path to relative imports
+         * (e.g. "examples/todo/./locales/en.json").  Embedded entries use
+         * the canonical "./" form, so find that suffix. */
+        const char *lookup = module_name;
+        const char *dot_slash = strstr(module_name, "/./");
+        if (dot_slash)
+            lookup = dot_slash + 1; /* points to "./" */
+
+        for (const HlEntry *e = hl_app_entries; e->name; e++) {
+            /* Skip non-module entries (templates/, static/, migrations/) */
+            if (e->name[0] != '.')
+                continue;
+            /* Skip Lua-only entries (no .js or .json extension) */
+            size_t elen = strlen(e->name);
+            int is_js = (elen >= 3 && strcmp(e->name + elen - 3, ".js") == 0);
+            int is_json = (elen >= 5 && strcmp(e->name + elen - 5, ".json") == 0);
+            if (!is_js && !is_json)
+                continue;
+
+            if (strcmp(e->name, lookup) == 0 ||
+                strcmp(e->name, module_name) == 0) {
+                const char *src = (const char *)e->data;
+                size_t src_len = e->len;
+                char *buf = NULL;
+
+                /* JSON → wrap as export default JSON.parse(`...`) */
+                if (is_json) {
+                    const char *pfx = "export default JSON.parse(`";
+                    const char *sfx = "`);\n";
+                    size_t plen = strlen(pfx), slen = strlen(sfx);
+                    size_t wrap_len = plen + src_len + slen;
+                    buf = js_malloc(ctx, wrap_len + 1);
+                    if (!buf) return NULL;
+                    memcpy(buf, pfx, plen);
+                    memcpy(buf + plen, src, src_len);
+                    memcpy(buf + plen + src_len, sfx, slen + 1);
+                    src = buf;
+                    src_len = wrap_len;
+                }
+
+                JSValue func = JS_Eval(ctx, src, src_len, module_name,
+                                       JS_EVAL_TYPE_MODULE |
+                                       JS_EVAL_FLAG_COMPILE_ONLY);
+                if (buf) js_free(ctx, buf);
+                if (JS_IsException(func))
+                    return NULL;
+                JSModuleDef *m = (JSModuleDef *)JS_VALUE_GET_PTR(func);
+                JS_FreeValue(ctx, func);
+                return m;
+            }
+        }
     }
 
     /* Load from filesystem (development mode) */
@@ -209,6 +270,25 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
         return NULL;
     }
     buf[nread] = '\0';
+
+    /* JSON file → wrap as: export default JSON.parse(`...`) */
+    size_t mname_len = strlen(module_name);
+    if (mname_len >= 5 &&
+        strcmp(module_name + mname_len - 5, ".json") == 0) {
+        const char *prefix = "export default JSON.parse(`";
+        const char *suffix = "`);\n";
+        size_t prefix_len = strlen(prefix);
+        size_t suffix_len = strlen(suffix);
+        size_t wrap_len = prefix_len + nread + suffix_len;
+        char *wrap = js_malloc(ctx, wrap_len + 1);
+        if (!wrap) { js_free(ctx, buf); return NULL; }
+        memcpy(wrap, prefix, prefix_len);
+        memcpy(wrap + prefix_len, buf, nread);
+        memcpy(wrap + prefix_len + nread, suffix, suffix_len + 1);
+        js_free(ctx, buf);
+        buf = wrap;
+        nread = wrap_len;
+    }
 
     /* Compile as module */
     JSValue func = JS_Eval(ctx, buf, nread, module_name,

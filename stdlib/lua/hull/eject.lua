@@ -85,7 +85,7 @@ typedef struct {
     const char *name;
     const unsigned char *data;
     unsigned int len;
-} HlStdlibEntry;
+} HlEntry;
 
 #endif /* HL_ENTRY_H */
 ]]
@@ -127,8 +127,8 @@ for f in $FILES; do
 done
 
 # Emit registry table
-echo "typedef struct { const char *name; const unsigned char *data; unsigned int len; } HlStdlibEntry;"
-echo "const HlStdlibEntry hl_app_lua_entries[] = {"
+echo '#include "entry.h"'
+echo "const HlEntry hl_app_entries[] = {"
 
 for f in $FILES; do
     varname=$(echo "$f" | sed 's/[\/.]/_/g')

@@ -50,7 +50,7 @@ int hl_build_extract_platform_arch(const char *dir, const char *arch);
 int hl_build_get_template(const char **data, size_t *len);
 
 /*
- * Get the embedded HlStdlibEntry type definition header.
+ * Get the embedded HlEntry type definition header.
  * Sets *data and *len. Returns 0 on success.
  */
 int hl_build_get_entry_header(const char **data, size_t *len);

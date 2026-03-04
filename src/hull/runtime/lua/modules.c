@@ -40,14 +40,11 @@ static void secure_zero(void *p, size_t n)
 
 #include "stdlib_lua_registry.h"
 
-/* App entries: default empty in app_entries_default.c, overridden by
- * generated app_registry.o when building with APP_DIR or hull build. */
-extern const HlStdlibEntry hl_app_lua_entries[];
-
-/* Template entries: raw HTML bytes (not compiled Lua), searched by
- * _template._load_raw(). Default empty in app_entries_default.c,
- * overridden by generated app_registry.o when templates/ exists. */
-extern const HlStdlibEntry hl_app_template_entries[];
+/* Unified app entries: default empty in app_entries_default.c, overridden by
+ * generated app_registry.o when building with APP_DIR or hull build.
+ * Contains all file types; consumers filter by name prefix/extension. */
+#include "hull/entry.h"
+extern const HlEntry hl_app_entries[];
 
 /* ── Helper: retrieve HlLua from registry ─────────────────────────── */
 
@@ -1696,9 +1693,11 @@ static int lua_template_load_raw(lua_State *L)
     if (strstr(name, "..") != NULL || name[0] == '/')
         return luaL_error(L, "invalid template name: %s", name);
 
-    /* 1. Search embedded template entries */
-    for (const HlStdlibEntry *e = hl_app_template_entries; e->name; e++) {
-        if (strcmp(e->name, name) == 0) {
+    /* 1. Search embedded template entries (templates/ prefix in unified array) */
+    for (const HlEntry *e = hl_app_entries; e->name; e++) {
+        if (strncmp(e->name, "templates/", 10) != 0)
+            continue;
+        if (strcmp(e->name + 10, name) == 0) {
             lua_pushlstring(L, (const char *)e->data, e->len);
             return 1;
         }
@@ -1890,7 +1889,9 @@ static int resolve_module_path(lua_State *L, const char *name,
     /* Build joined path: caller_dir / name [.lua] */
     const char *ext = "";
     size_t name_len = strlen(name);
-    if (name_len < 4 || strcmp(name + name_len - 4, ".lua") != 0)
+    int has_lua = (name_len >= 4 && strcmp(name + name_len - 4, ".lua") == 0);
+    int has_json = (name_len >= 5 && strcmp(name + name_len - 5, ".json") == 0);
+    if (!has_lua && !has_json)
         ext = ".lua";
 
     char joined[HL_MODULE_PATH_MAX];
@@ -1999,6 +2000,28 @@ static int hl_lua_require(lua_State *L)
     lua_getfield(L, -1, name);
     if (!lua_isnil(L, -1)) {
         lua_remove(L, -2); /* remove __hull_modules table */
+
+        /* JSON embedded module → decode raw string with json.decode()
+         * Only for relative paths (./) — not stdlib like "hull.json" */
+        size_t nlen = strlen(name);
+        if (name[0] == '.' && name[1] == '/' &&
+            nlen >= 5 && strcmp(name + nlen - 5, ".json") == 0) {
+            lua_getglobal(L, "json");
+            lua_getfield(L, -1, "decode");
+            lua_remove(L, -2); /* remove json table */
+            lua_pushvalue(L, -2); /* push the JSON string */
+            lua_remove(L, -3); /* remove original string */
+            if (lua_pcall(L, 1, 1, 0) != LUA_OK)
+                return lua_error(L);
+
+            /* Cache in __hull_loaded */
+            lua_getfield(L, LUA_REGISTRYINDEX, "__hull_loaded");
+            lua_pushvalue(L, -2);
+            lua_setfield(L, -2, name);
+            lua_pop(L, 1); /* pop __hull_loaded */
+            return 1;
+        }
+
         return execute_and_cache_module(L, name);
     }
     lua_pop(L, 2); /* pop nil + __hull_modules */
@@ -2054,6 +2077,27 @@ static int hl_lua_require(lua_State *L)
                     return luaL_error(L, "read error: %s", path);
                 }
 
+                /* JSON file → decode with json.decode() instead of
+                 * compiling as Lua bytecode */
+                size_t path_len = strlen(path);
+                if (path_len >= 5 &&
+                    strcmp(path + path_len - 5, ".json") == 0) {
+                    lua_getglobal(L, "json");
+                    lua_getfield(L, -1, "decode");
+                    lua_remove(L, -2); /* remove json table */
+                    lua_pushlstring(L, buf, nread);
+                    lua->scratch->used = arena_saved;
+                    if (lua_pcall(L, 1, 1, 0) != LUA_OK)
+                        return lua_error(L);
+
+                    /* Cache in __hull_loaded */
+                    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_loaded");
+                    lua_pushvalue(L, -2);
+                    lua_setfield(L, -2, path);
+                    lua_pop(L, 1); /* pop __hull_loaded */
+                    return 1;
+                }
+
                 /* Compile the chunk — copies data into Lua bytecode */
                 int load_ok = luaL_loadbuffer(L, buf, nread, path) == LUA_OK;
 
@@ -2087,7 +2131,7 @@ int hl_lua_register_stdlib(HlLua *lua)
      * adding a new .lua file to stdlib/ requires no C code changes. */
     lua_newtable(L);
 
-    for (const HlStdlibEntry *e = hl_stdlib_lua_entries; e->name; e++) {
+    for (const HlEntry *e = hl_stdlib_lua_entries; e->name; e++) {
         if (luaL_loadbuffer(L, (const char *)e->data, e->len, e->name) != LUA_OK) {
             log_error("[hull:c] failed to load stdlib module '%s': %s",
                       e->name, lua_tostring(L, -1));
@@ -2097,13 +2141,24 @@ int hl_lua_register_stdlib(HlLua *lua)
         lua_setfield(L, -2, e->name);
     }
 
-    /* Load embedded app modules (if any — sentinel: first entry has name==NULL) */
-    for (const HlStdlibEntry *e = hl_app_lua_entries; e->name; e++) {
-        if (luaL_loadbuffer(L, (const char *)e->data, e->len, e->name) != LUA_OK) {
-            log_error("[hull:c] failed to load app module '%s': %s",
-                      e->name, lua_tostring(L, -1));
-            lua_pop(L, 2); /* pop error + modules table */
-            return -1;
+    /* Load embedded app modules (if any — skip non-Lua entries) */
+    for (const HlEntry *e = hl_app_entries; e->name; e++) {
+        size_t nlen = strlen(e->name);
+        /* Skip JS modules (.js) and non-module entries (templates/, static/, migrations/) */
+        if (nlen >= 3 && strcmp(e->name + nlen - 3, ".js") == 0)
+            continue;
+        if (e->name[0] != '.')
+            continue;  /* module entries start with "./" */
+        if (nlen >= 5 && strcmp(e->name + nlen - 5, ".json") == 0) {
+            /* JSON data — store as raw string, decoded on first require() */
+            lua_pushlstring(L, (const char *)e->data, e->len);
+        } else {
+            if (luaL_loadbuffer(L, (const char *)e->data, e->len, e->name) != LUA_OK) {
+                log_error("[hull:c] failed to load app module '%s': %s",
+                          e->name, lua_tostring(L, -1));
+                lua_pop(L, 2); /* pop error + modules table */
+                return -1;
+            }
         }
         lua_setfield(L, -2, e->name);
     }

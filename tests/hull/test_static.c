@@ -102,7 +102,7 @@ static KlRequest make_request(const char *method, const char *path)
 UTEST(static_serve, path_traversal_dotdot)
 {
     /* Path with .. should not match any file */
-    static const HlStaticEntry entries[] = {
+    static const HlEntry entries[] = {
         { "secret.txt", (const unsigned char *)"secret", 6 },
         { NULL, NULL, 0 },
     };
@@ -119,7 +119,7 @@ UTEST(static_serve, path_traversal_dotdot)
 UTEST(static_serve, path_traversal_middle)
 {
     /* Path with /../ in the middle should be rejected */
-    static const HlStaticEntry entries[] = {
+    static const HlEntry entries[] = {
         { "secret.txt", (const unsigned char *)"secret", 6 },
         { NULL, NULL, 0 },
     };
@@ -138,7 +138,7 @@ UTEST(static_serve, path_traversal_middle)
 UTEST(static_serve, embedded_found)
 {
     static const unsigned char css_data[] = "body { color: red; }";
-    static const HlStaticEntry entries[] = {
+    static const HlEntry entries[] = {
         { "style.css", css_data, sizeof(css_data) - 1 },
         { NULL, NULL, 0 },
     };
@@ -164,7 +164,7 @@ UTEST(static_serve, embedded_found)
 UTEST(static_serve, embedded_not_found)
 {
     static const unsigned char css_data[] = "body {}";
-    static const HlStaticEntry entries[] = {
+    static const HlEntry entries[] = {
         { "style.css", css_data, sizeof(css_data) - 1 },
         { NULL, NULL, 0 },
     };
@@ -198,7 +198,7 @@ UTEST(static_serve, non_static_path)
 UTEST(static_serve, post_method_skipped)
 {
     static const unsigned char data[] = "x";
-    static const HlStaticEntry entries[] = {
+    static const HlEntry entries[] = {
         { "style.css", data, 1 },
         { NULL, NULL, 0 },
     };
