@@ -25,6 +25,7 @@
 #include "hull/cap/db.h"
 #include "hull/cap/env.h"
 #include "hull/cap/http.h"
+#include "hull/cap/smtp.h"
 #include "hull/migrate.h"
 #include "hull/vfs.h"
 
@@ -563,6 +564,16 @@ static int hull_serve(int argc, char **argv)
         }
 
         rt->http_cfg = &http_cfg_storage;
+    }
+
+    /* Wire smtp_cfg — shares same host allowlist and TLS context as HTTP */
+    HlSmtpConfig smtp_cfg_storage = {0};
+    if (manifest.hosts_count > 0) {
+        smtp_cfg_storage.allowed_hosts = manifest.hosts;
+        smtp_cfg_storage.host_count    = manifest.hosts_count;
+        smtp_cfg_storage.timeout_ms    = HL_SMTP_DEFAULT_TIMEOUT_MS;
+        smtp_cfg_storage.tls           = client_tls_ctx ? &client_tls_config : NULL;
+        rt->smtp_cfg = &smtp_cfg_storage;
     }
 
     /* RT-04: Apply kernel sandbox BEFORE wiring routes — all route
