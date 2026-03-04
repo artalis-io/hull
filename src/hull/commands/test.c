@@ -68,8 +68,10 @@ static int run_lua_tests(const char *app_dir, const char *entry)
     hl_cap_db_init(db);
 
     extern const HlEntry hl_app_entries[];
-    HlVfs app_vfs;
+    extern const HlEntry hl_stdlib_entries[];
+    HlVfs app_vfs, platform_vfs;
     hl_vfs_init(&app_vfs, hl_app_entries, app_dir);
+    hl_vfs_init(&platform_vfs, hl_stdlib_entries, NULL);
     hl_migrate_run(db, &app_vfs);
 
     HlStmtCache lua_stmt_cache;
@@ -77,6 +79,7 @@ static int run_lua_tests(const char *app_dir, const char *entry)
     lua.base.db = db;
     lua.base.stmt_cache = &lua_stmt_cache;
     lua.base.app_vfs = &app_vfs;
+    lua.base.platform_vfs = &platform_vfs;
 
     if (hl_lua_init(&lua, &cfg) != 0) {
         fprintf(stderr, "hull test: Lua init failed\n");
@@ -191,8 +194,10 @@ static int run_js_tests(const char *app_dir, const char *entry)
     hl_cap_db_init(db);
 
     extern const HlEntry hl_app_entries[];
-    HlVfs app_vfs;
+    extern const HlEntry hl_stdlib_entries[];
+    HlVfs app_vfs, platform_vfs;
     hl_vfs_init(&app_vfs, hl_app_entries, app_dir);
+    hl_vfs_init(&platform_vfs, hl_stdlib_entries, NULL);
     hl_migrate_run(db, &app_vfs);
 
     HlStmtCache js_stmt_cache;
@@ -200,6 +205,7 @@ static int run_js_tests(const char *app_dir, const char *entry)
     js.base.db = db;
     js.base.stmt_cache = &js_stmt_cache;
     js.base.app_vfs = &app_vfs;
+    js.base.platform_vfs = &platform_vfs;
 
     if (hl_js_init(&js, &cfg) != 0) {
         fprintf(stderr, "hull test: QuickJS init failed\n");
