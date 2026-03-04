@@ -340,7 +340,7 @@ Template source (.html file or string)
 
 The C bridge functions (`_template._compile` / `_template._load_raw`) live in the runtime module loaders (`runtime/lua/modules.c`, `runtime/js/modules.c`). They use the same trust model as stdlib module loading — callable only from embedded stdlib code, not from user application code.
 
-Template files are embedded at build time as raw byte arrays in `hl_app_template_entries[]` (separate from `hl_app_lua_entries[]` which pre-compiles Lua bytecode). In dev mode, templates are loaded from `app_dir/templates/` on disk.
+Template files are embedded at build time as raw byte arrays in the unified `hl_app_entries[]` array (with `templates/` prefix). In dev mode, templates are loaded from `app_dir/templates/` on disk.
 
 ---
 

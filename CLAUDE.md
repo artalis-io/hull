@@ -426,7 +426,7 @@ template.clearCache();                           // clear compiled function cach
 Convention-based: place files in `app_dir/static/`, they're served at `/static/*`.
 
 - **Dev mode:** Reads from disk via `kl_response_file()` (zero-copy sendfile). `Cache-Control: no-cache`.
-- **Build mode:** Files are embedded in the binary via `hl_app_static_entries[]`. `Cache-Control: public, max-age=86400`.
+- **Build mode:** Files are embedded in the binary via `hl_app_entries[]` (with `static/` prefix). `Cache-Control: public, max-age=86400`.
 - **ETag/304:** `W/"<size_hex>"` for embedded, `W/"<mtime_hex>-<size_hex>"` for filesystem. Returns 304 on `If-None-Match`.
 - **MIME types:** Extension-based lookup (21 types: html, css, js, json, png, jpg, svg, woff2, etc.). Default: `application/octet-stream`.
 - **Security:** Rejects `..` path traversal, null bytes, leading `/` in relative paths.
@@ -437,7 +437,7 @@ Implementation: `src/hull/static.c` + `include/hull/static.h`. Registered as a K
 Embedding paths:
 - `make APP_DIR=myapp` — Makefile discovers `APP_DIR/static/*`, generates `app_static_registry.c`
 - `hull build myapp` — `build.lua` discovers `static/`, generates `static_registry.c`
-- Both follow the same `HlStdlibEntry` array pattern as Lua/template embedding
+- Both follow the same `HlEntry` array pattern as Lua/template embedding
 
 ### Recommended Middleware Stack
 
