@@ -335,9 +335,17 @@ Register with `app.use(method, pattern, mw)`:
 | `csrf` | `hull.middleware.csrf` | `hull:middleware:csrf` | Stateless CSRF token generation/verification |
 | `auth` | `hull.middleware.auth` | `hull:middleware:auth` | Session-based and JWT-based authentication middleware |
 | `session` | `hull.middleware.session` | `hull:middleware:session` | Server-side sessions backed by SQLite |
+| `logger` | `hull.middleware.logger` | `hull:middleware:logger` | Request logging with logfmt output and request IDs |
+| `transaction` | `hull.middleware.transaction` | `hull:middleware:transaction` | Wraps handlers in `db.batch()` (BEGIN IMMEDIATE..COMMIT) |
+| `idempotency` | `hull.middleware.idempotency` | `hull:middleware:idempotency` | Idempotency-Key middleware with response caching |
+| `outbox` | `hull.middleware.outbox` | `hull:middleware:outbox` | Transactional outbox for reliable side-effect delivery |
+| `inbox` | `hull.middleware.inbox` | `hull:middleware:inbox` | Inbox deduplication for incoming events/webhooks |
 | `cookie` | `hull.cookie` | `hull:cookie` | Cookie parse/serialize helpers |
 | `jwt` | `hull.jwt` | `hull:jwt` | JWT sign/verify (HMAC-SHA256) |
 | `template` | `hull.template` | `hull:template` | HTML template engine with inheritance, includes, filters |
+| `validate` | `hull.validate` | `hull:validate` | Declarative input validation with schema rules |
+| `form` | `hull.form` | `hull:form` | URL-encoded form body parsing |
+| `i18n` | `hull.i18n` | `hull:i18n` | Internationalization: locale detection, translations, formatting |
 | `json` | `hull.json` | (built-in) | JSON encode/decode |
 
 ### Module APIs
@@ -404,6 +412,70 @@ Register with `app.use(method, pattern, mw)`:
 - `jwt.sign(payload, secret)` → token string. Auto-sets `iat`.
 - `jwt.verify(token, secret)` → payload table, or `nil, "error reason"`.
 - `jwt.decode(token)` → payload table or nil (no signature check).
+
+**logger.middleware(opts)** — Request logging with logfmt output and auto-assigned request IDs.
+- `opts.skip` — list of paths to skip (exact match, e.g. `{"/health"}`)
+- `opts.include_headers` — list of header names to include in log line
+- Sets `X-Request-ID` response header and `req.ctx.request_id`.
+- Helpers: `logger.generate_id()`, `logger.format_line(entries)`, `logger.should_skip(path, skip_list)`.
+- Returns `0` (always continues).
+
+**validate.check(data, schema)** — Declarative input validation.
+- `schema` maps field names to rule tables.
+- Rules: `required`, `trim`, `type` (`"string"`, `"number"`, `"integer"`, `"boolean"`), `min`, `max`, `pattern`, `oneof`, `email`, `fn` (custom validator), `message` (custom error).
+- `min`/`max` apply to string length or numeric value depending on field type.
+- Returns `(ok, errors)` where `errors` maps field names to error strings.
+
+**form.parse(body)** — URL-encoded form body parsing.
+- Decodes `application/x-www-form-urlencoded` format.
+- Handles `+` → space and `%XX` percent-encoding. Last value wins for duplicates.
+- Returns table `{ field_name = value, ... }` (empty table for nil/empty input).
+
+**i18n** — Internationalization: locale detection, message bundles, formatting.
+- `i18n.load(name, tbl)` — register a locale with translations and format rules.
+- `i18n.locale(name?)` — get or set the active locale.
+- `i18n.t(key, params?)` → translated string. Supports `${variable}` interpolation and dot-path keys.
+- `i18n.number(n)` → formatted number (locale-specific decimal/thousands separators).
+- `i18n.date(timestamp)` → formatted date string.
+- `i18n.currency(amount, code)` → formatted currency string (symbol + locale rules).
+- `i18n.detect(accept_language_header)` → best matching locale name or nil.
+
+**transaction** — Wraps handlers in SQLite transactions.
+- `transaction.middleware()` — post-body middleware that sets `req.ctx._txn = true` for downstream use.
+- `transaction.run(fn)` — wraps `fn` in `db.batch()` (BEGIN IMMEDIATE → fn() → COMMIT, ROLLBACK on error).
+- `transaction.try(fn)` → `(ok, err)` — like `run` but returns error instead of throwing.
+
+**idempotency** — Idempotency-Key middleware with response caching.
+- `idempotency.init(opts)` — creates `_hull_idempotency_keys` table. `opts.ttl` = key lifetime in seconds (default: `86400`).
+- `idempotency.middleware(opts)` — post-body middleware intercepting POST (configurable via `opts.methods`).
+  - `opts.header_name` — header to read key from (default: `"idempotency-key"`).
+  - `opts.get_principal` — `function(req) -> string` for per-user scoping (default: `"__anon"`).
+  - Cache hit + same fingerprint → returns cached response (handler skipped).
+  - Cache hit + different fingerprint → returns 409 Conflict.
+  - Fingerprint: `SHA-256(method + path + body)`.
+- `idempotency.respond(req, res, status, data)` — sends response and caches it for replay.
+- `idempotency.complete(req)` — marks key as processed without caching response body.
+- `idempotency.cleanup()` → count of deleted expired keys.
+
+**outbox** — Transactional outbox for reliable side-effect delivery.
+- `outbox.init(opts)` — creates `_hull_outbox` table. `opts.max_attempts` (default: `5`).
+- `outbox.enqueue(opts)` — enqueue a delivery (call inside a transaction).
+  - `opts.kind` — delivery type (e.g. `"webhook"`, `"email"`).
+  - `opts.destination` — target URL or address.
+  - `opts.payload` — payload string.
+  - `opts.headers` — JSON-encoded headers (optional).
+  - `opts.idempotency_key` — dedup key for delivery (optional).
+- `outbox.flush(opts)` — deliver pending items. Exponential backoff (`2^attempt * 10s`, capped at 1hr).
+- `outbox.middleware()` — sets `req.ctx._outbox_flush = true` for auto-flush.
+- `outbox.stats()` → `{ pending, delivered, failed }` counts.
+- `outbox.cleanup(max_age)` — delete old delivered items.
+
+**inbox** — Inbox deduplication for incoming events/webhooks.
+- `inbox.init(opts)` — creates `_hull_inbox_processed` table. `opts.ttl` = record lifetime (default: `86400`).
+- `inbox.is_duplicate(message_id, source?)` → boolean. Default source: `"default"`.
+- `inbox.mark_processed(message_id, source?, opts?)` — record as processed.
+- `inbox.check_and_mark(message_id, source?, opts?)` → boolean (true = duplicate, false = new + marked).
+- `inbox.cleanup()` → count of deleted expired records.
 
 **template** — HTML template engine with compile-once, render-many caching.
 
@@ -473,25 +545,36 @@ Embedding paths:
 Order matters — each middleware runs before the next:
 
 ```lua
-local cors = require("hull.middleware.cors")
-local ratelimit = require("hull.middleware.ratelimit")
-local auth = require("hull.middleware.auth")
-local csrf = require("hull.middleware.csrf")
-local session = require("hull.middleware.session")
+local cors        = require("hull.middleware.cors")
+local ratelimit   = require("hull.middleware.ratelimit")
+local auth        = require("hull.middleware.auth")
+local csrf        = require("hull.middleware.csrf")
+local session     = require("hull.middleware.session")
+local logger      = require("hull.middleware.logger")
+local transaction = require("hull.middleware.transaction")
+local idempotency = require("hull.middleware.idempotency")
 
-session.init()  -- create hull_sessions table
+session.init()       -- create hull_sessions table
+idempotency.init()   -- create _hull_idempotency_keys table
 
--- 1. Request ID (custom — assign unique ID early)
--- 2. Logging (custom — log method, path, ID)
--- 3. Rate limiting — reject abusive traffic before doing any work
+-- Pre-body middleware (runs before body is read)
+-- 1. Logging — assign request ID, log method + path
+app.use("*", "/*", logger.middleware({ skip = {"/health"} }))
+-- 2. Rate limiting — reject abusive traffic before doing any work
 app.use("*", "/api/*", ratelimit.middleware({ limit = 60, window = 60 }))
--- 4. CORS — must run before auth so preflight doesn't require credentials
+-- 3. CORS — must run before auth so preflight doesn't require credentials
 app.use("*", "/api/*", cors.middleware({ origins = { "https://myapp.com" } }))
--- 5. Authentication — session or JWT
+-- 4. Authentication — session or JWT
 app.use("*", "/api/*", auth.session_middleware({}))
--- 6. CSRF — only for session-based apps (not needed with JWT Bearer)
-app.use("POST", "/api/*", csrf.middleware({ secret = "change-me" }))
--- 7. Route handlers
+
+-- Post-body middleware (runs after body is read)
+-- 5. CSRF — needs body for form token (session-based apps only, not JWT)
+app.use_post("*", "/*", csrf.middleware({ secret = "change-me" }))
+-- 6. Transaction — wrap mutations in BEGIN IMMEDIATE..COMMIT
+app.use_post("POST", "/api/*", transaction.middleware())
+-- 7. Idempotency — cache POST responses by Idempotency-Key header
+app.use_post("POST", "/api/*", idempotency.middleware())
+-- 8. Route handlers
 ```
 
 ### Best Practices

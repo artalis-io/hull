@@ -25,6 +25,14 @@
 - `hull.jwt` — JWT HS256 sign/verify/decode (no "none" algorithm, constant-time comparison)
 - `hull.middleware.csrf` — stateless CSRF tokens via HMAC-SHA256
 - `hull.middleware.auth` — authentication middleware factories (session auth, JWT Bearer auth)
+- `hull.middleware.logger` — request logging with logfmt output and auto-assigned request IDs
+- `hull.middleware.transaction` — wraps handlers in SQLite BEGIN IMMEDIATE..COMMIT
+- `hull.middleware.idempotency` — Idempotency-Key middleware with response caching and fingerprinting
+- `hull.middleware.outbox` — transactional outbox for reliable webhook/HTTP delivery with exponential backoff
+- `hull.middleware.inbox` — inbox deduplication for incoming events/webhooks
+- `hull.validate` — declarative input validation with schema rules
+- `hull.form` — URL-encoded form body parsing
+- `hull.i18n` — internationalization with locale detection, message bundles, formatting helpers
 - `hull.template` — compile-once render-many HTML template engine with inheritance, includes, filters, auto-escaping
 - Static file serving — convention-based (`static/` → `/static/*`), MIME detection, ETag/304, embedded in builds, zero-copy sendfile in dev
 
@@ -61,7 +69,7 @@
 - ASan + UBSan, MSan + UBSan sanitizer runs
 - Static analysis (scan-build + cppcheck)
 - Code coverage
-- E2E tests for all 9 examples in both runtimes + 40 template engine tests
+- E2E tests for all 9 examples in both runtimes + 40 template engine tests + stdlib middleware tests
 - Sandbox violation tests (Linux + Cosmo)
 - Benchmarks (Lua vs QuickJS, DB vs non-DB routes)
 
@@ -76,11 +84,16 @@
 | Input validation (schema-based) | **Done** | `hull.validate` — declarative field validation |
 | Rate limiting middleware | **Done** | `hull.middleware.ratelimit` — sliding window, per-key |
 | Static file serving (`/static/*` convention) | **Done** | MIME detection, ETag/304, embedded in builds, zero-copy sendfile in dev |
+| i18n (locale detection + translations) | **Done** | `hull.i18n` — locale detection, message bundles, format helpers |
+| Request logging middleware | **Done** | `hull.middleware.logger` — logfmt output, request IDs |
+| Transaction middleware | **Done** | `hull.middleware.transaction` — BEGIN IMMEDIATE..COMMIT wrappers |
+| Idempotency-Key middleware | **Done** | `hull.middleware.idempotency` — response caching, fingerprinting, 409 on mismatch |
+| Transactional outbox | **Done** | `hull.middleware.outbox` — reliable delivery with exponential backoff |
+| Inbox deduplication | **Done** | `hull.middleware.inbox` — incoming event dedup with TTL |
 | CSV encode/decode (RFC 4180) | Planned | Import/export |
 | FTS5 search wrapper | Planned | Full-text search stdlib |
-| i18n (locale detection + translations) | **Done** | `hull.i18n` — locale detection, message bundles, format helpers |
 | RBAC (role-based access control) | Planned | Permission middleware |
-| Email (SMTP / API) | Planned | Outbound notifications |
+| Email (SMTP / API) | In progress | Outbound notifications (C cap + stdlib) |
 | License key system | Planned | Ed25519 offline verification for commercial distribution |
 
 ### Future — Advanced Features

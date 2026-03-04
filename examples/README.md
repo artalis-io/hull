@@ -206,7 +206,7 @@ curl http://localhost:3000/api/debug
 
 ### webhooks
 
-Webhook delivery and receipt with HMAC-SHA256 signatures. Register webhook URLs, fire events that deliver to them, and receive/verify incoming webhooks.
+Webhook delivery and receipt with HMAC-SHA256 signatures, transactional outbox, idempotency, and inbox deduplication. Register webhook URLs, fire events that deliver to them via the outbox, and receive/verify incoming webhooks.
 
 ```bash
 ./build/hull -p 3000 examples/webhooks/app.lua
@@ -216,15 +216,30 @@ curl -X POST http://localhost:3000/webhooks \
   -H 'Content-Type: application/json' \
   -d '{"url":"http://127.0.0.1:3000/webhooks/receive","events":"user.created,order.placed"}'
 
-# Fire an event (delivers to matching webhooks with HMAC signature)
+# Fire an event (atomically inserts event + enqueues outbox deliveries)
 curl -X POST http://localhost:3000/events \
   -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: evt-123' \
   -d '{"event":"user.created","data":{"user_id":1}}'
 
-# List webhooks, events, deliveries
+# List webhooks, events, outbox stats
 curl http://localhost:3000/webhooks
 curl http://localhost:3000/events
+curl http://localhost:3000/outbox/stats
 curl http://localhost:3000/webhooks/1/deliveries
+```
+
+### todo
+
+Full-featured todo app with user authentication, CSRF protection, rate limiting, server-side rendering with HTML templates, and English/Hungarian i18n support. Pure HTML forms, no client-side JS.
+
+```bash
+./build/hull dev examples/todo/app.lua -d /tmp/todo.db
+
+# Open in browser
+open http://localhost:3000
+# Register → Login → Manage todos
+# Switch language via /lang/hu or /lang/en
 ```
 
 ## Testing Examples
@@ -242,6 +257,7 @@ hull test examples/jwt_api/
 hull test examples/crud_with_auth/
 hull test examples/middleware/
 hull test examples/webhooks/
+hull test examples/todo/
 ```
 
 The test API:
