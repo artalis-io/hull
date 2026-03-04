@@ -73,12 +73,12 @@
 |---------|--------|-------|
 | CORS middleware | **Done** | `hull.middleware.cors` — configurable origins, preflight handling |
 | Template engine (`{{ }}` HTML templates) | **Done** | `hull.template` — inheritance, includes, filters, compiled & cached |
-| Input validation (schema-based) | Planned | Declarative field validation |
+| Input validation (schema-based) | **Done** | `hull.validate` — declarative field validation |
 | Rate limiting middleware | **Done** | `hull.middleware.ratelimit` — sliding window, per-key |
 | Static file serving (`/static/*` convention) | **Done** | MIME detection, ETag/304, embedded in builds, zero-copy sendfile in dev |
 | CSV encode/decode (RFC 4180) | Planned | Import/export |
 | FTS5 search wrapper | Planned | Full-text search stdlib |
-| i18n (locale detection + translations) | Planned | Message bundles |
+| i18n (locale detection + translations) | **Done** | `hull.i18n` — locale detection, message bundles, format helpers |
 | RBAC (role-based access control) | Planned | Permission middleware |
 | Email (SMTP / API) | Planned | Outbound notifications |
 | License key system | Planned | Ed25519 offline verification for commercial distribution |

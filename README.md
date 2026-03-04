@@ -269,6 +269,7 @@ Ten example apps in both Lua and JavaScript:
 | [docs/roadmap.md](docs/roadmap.md) | What's built, what's next |
 | [docs/benchmark.md](docs/benchmark.md) | Performance methodology and results |
 | [docs/keel_audit.md](docs/keel_audit.md) | Keel HTTP server C code audit report |
+| [docs/ASSESSMENT.md](docs/ASSESSMENT.md) | Platform assessment, scaling path, strategic positioning |
 | [CLAUDE.md](CLAUDE.md) | Development guide for contributors |
 
 ## Building Hull
