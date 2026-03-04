@@ -413,7 +413,7 @@ echo "=== Step 12: Error cases ==="
 mkdir -p "$WORKDIR/emptyapp"
 BUILD_OUT=$("$HULL" build --cc "$BUILD_CC" "$WORKDIR/emptyapp" 2>&1); RC=$?
 check_exit "build empty app fails" 1 $RC
-check_contains "build reports no files" "$BUILD_OUT" "no .lua files"
+check_contains "build reports no files" "$BUILD_OUT" "no .lua or .js files"
 
 # Verify with no package.sig
 VERIFY_OUT=$("$HULL" verify "$WORKDIR/emptyapp" 2>&1); RC=$?

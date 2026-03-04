@@ -372,6 +372,12 @@ int hl_migrate_status(sqlite3 *db, const char *app_dir,
                 count++;
         }
 
+        if (count == 0) {
+            *out = NULL;
+            *out_count = 0;
+            return 0;
+        }
+
         names = malloc((size_t)count * sizeof(char *));
         if (!names)
             return -1;
