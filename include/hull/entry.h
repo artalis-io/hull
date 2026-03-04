@@ -1,11 +1,10 @@
 /*
  * entry.h — HlEntry type definition for generated registries
  *
- * Canonical struct for all embedded file arrays: app modules (Lua, JS,
+ * Canonical struct for all embedded file arrays: app modules (JS, Lua,
  * JSON), templates, static assets, migrations, and stdlib entries.
  *
- * Included by generated registry .c files and by source files that
- * reference the extern entry arrays.
+ * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
 #ifndef HL_ENTRY_H
