@@ -115,7 +115,7 @@ UTEST(hl_cap_crypto, pbkdf2_basic)
 
     int rc = hl_cap_crypto_pbkdf2(pw, strlen(pw),
                                     salt, sizeof(salt),
-                                    1, out, sizeof(out));
+                                    100000, out, sizeof(out));
     ASSERT_EQ(rc, 0);
 
     /* Verify output is non-zero */
@@ -136,9 +136,9 @@ UTEST(hl_cap_crypto, pbkdf2_deterministic)
     uint8_t out1[32], out2[32];
 
     hl_cap_crypto_pbkdf2(pw, strlen(pw), salt, sizeof(salt),
-                           10, out1, sizeof(out1));
+                           100000, out1, sizeof(out1));
     hl_cap_crypto_pbkdf2(pw, strlen(pw), salt, sizeof(salt),
-                           10, out2, sizeof(out2));
+                           100000, out2, sizeof(out2));
 
     ASSERT_EQ(memcmp(out1, out2, 32), 0);
 }
@@ -149,9 +149,9 @@ UTEST(hl_cap_crypto, pbkdf2_different_passwords)
     uint8_t out1[32], out2[32];
 
     hl_cap_crypto_pbkdf2("password1", 9, salt, sizeof(salt),
-                           10, out1, sizeof(out1));
+                           100000, out1, sizeof(out1));
     hl_cap_crypto_pbkdf2("password2", 9, salt, sizeof(salt),
-                           10, out2, sizeof(out2));
+                           100000, out2, sizeof(out2));
 
     ASSERT_NE(memcmp(out1, out2, 32), 0);
 }
@@ -162,11 +162,11 @@ UTEST(hl_cap_crypto, pbkdf2_null_args)
     uint8_t out[32];
 
     int rc = hl_cap_crypto_pbkdf2(NULL, 0, salt, sizeof(salt),
-                                    10, out, sizeof(out));
+                                    100000, out, sizeof(out));
     ASSERT_EQ(rc, -1);
 
     rc = hl_cap_crypto_pbkdf2("pw", 2, NULL, 0,
-                                10, out, sizeof(out));
+                                100000, out, sizeof(out));
     ASSERT_EQ(rc, -1);
 }
 

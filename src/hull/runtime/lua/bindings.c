@@ -139,11 +139,12 @@ void hl_lua_make_request(lua_State *L, KlRequest *req)
 
     /* headers → table (names lowercased for case-insensitive lookup) */
     lua_newtable(L);
+    lua_checkstack(L, 3); /* key + value + table */
     for (int i = 0; i < req->num_headers; i++) {
         if (req->headers[i].name && req->headers[i].value) {
             char hdr_name[256];
             size_t nlen = req->headers[i].name_len;
-            if (nlen >= sizeof(hdr_name)) nlen = sizeof(hdr_name) - 1;
+            if (nlen >= sizeof(hdr_name)) continue; /* skip oversized */
             for (size_t j = 0; j < nlen; j++) {
                 unsigned char c = (unsigned char)req->headers[i].name[j];
                 hdr_name[j] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : (char)c;

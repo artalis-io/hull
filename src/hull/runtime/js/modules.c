@@ -927,7 +927,7 @@ static JSValue js_crypto_verify_password(JSContext *ctx, JSValueConst this_val,
 
     char *end = NULL;
     long iterations = strtol(p, &end, 10);
-    if (!end || *end != ':' || iterations <= 0) {
+    if (!end || *end != ':' || iterations < 100000) {
         JS_FreeCString(ctx, pw);
         JS_FreeCString(ctx, stored);
         return JS_FALSE;

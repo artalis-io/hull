@@ -14,6 +14,10 @@
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
+#if defined(__linux__) && !defined(__COSMOPOLITAN__)
+#include <sys/random.h>
+#include <errno.h>
+#endif
 
 /* Compiler-safe memory zeroing that won't be optimized away */
 static void hull_secure_zero(void *p, size_t n)
@@ -144,8 +148,22 @@ int hl_cap_crypto_random(void *buf, size_t len)
     /* macOS: arc4random_buf is always available and non-failing */
     arc4random_buf(buf, len);
     return 0;
+#elif defined(__linux__) && !defined(__COSMOPOLITAN__)
+    /* Linux: getrandom(2) — no fd, blocks until pool is seeded */
+    uint8_t *p = (uint8_t *)buf;
+    size_t remaining = len;
+    while (remaining > 0) {
+        ssize_t n = getrandom(p, remaining, 0);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        p += n;
+        remaining -= (size_t)n;
+    }
+    return 0;
 #else
-    /* Linux / POSIX: read from /dev/urandom */
+    /* POSIX fallback: /dev/urandom */
     int fd = open("/dev/urandom", O_RDONLY);
     if (fd < 0)
         return -1;
@@ -376,7 +394,7 @@ int hl_cap_crypto_pbkdf2(const char *password, size_t pw_len,
                            int iterations,
                            uint8_t *out, size_t out_len)
 {
-    if (!password || !salt || !out || iterations < 1 || out_len == 0)
+    if (!password || !salt || !out || iterations < 100000 || out_len == 0)
         return -1;
 
     /* Salt size guard — stack buffer is 68 bytes */

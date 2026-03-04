@@ -11,6 +11,7 @@
 #include "hull/cap/db.h"
 #include "hull/alloc.h"
 #include <sqlite3.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -158,10 +159,12 @@ static int bind_params(sqlite3_stmt *stmt, const HlValue *params, int n)
             rc = sqlite3_bind_double(stmt, idx, params[i].d);
             break;
         case HL_TYPE_TEXT:
+            if (params[i].len > (size_t)INT_MAX) return -1;
             rc = sqlite3_bind_text(stmt, idx, params[i].s,
                                    (int)params[i].len, SQLITE_TRANSIENT);
             break;
         case HL_TYPE_BLOB:
+            if (params[i].len > (size_t)INT_MAX) return -1;
             rc = sqlite3_bind_blob(stmt, idx, params[i].s,
                                    (int)params[i].len, SQLITE_TRANSIENT);
             break;

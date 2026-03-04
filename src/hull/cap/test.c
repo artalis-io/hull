@@ -92,10 +92,10 @@ static int test_dispatch(KlRouter *router, const char *method,
         req.params[i] = params[i];
 
     /* Set headers — lowercase names to match llhttp parser behavior */
-    char lowered_names[KL_MAX_HEADERS][256];
+    char lowered_names[KL_MAX_HEADERS][64];
     for (int i = 0; i < num_headers && i < KL_MAX_HEADERS; i++) {
         size_t nlen = strlen(header_names[i]);
-        if (nlen >= sizeof(lowered_names[0])) nlen = sizeof(lowered_names[0]) - 1;
+        if (nlen >= sizeof(lowered_names[0])) continue; /* skip oversized */
         for (size_t j = 0; j < nlen; j++) {
             char c = header_names[i][j];
             lowered_names[i][j] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;

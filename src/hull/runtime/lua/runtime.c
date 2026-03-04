@@ -270,10 +270,10 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
                   lua_tostring(lua->L, -1));
         lua_pop(lua->L, 1); /* pop error message */
         lua_pop(lua->L, 1); /* pop routes table */
-        /* Free ctx if middleware set it */
+        /* Free ctx if middleware set it (size stored in prefix) */
         if (req->ctx) {
-            size_t ctx_sz = strlen((char *)req->ctx) + 1;
-            hl_alloc_free(lua->base.alloc, req->ctx, ctx_sz);
+            size_t *block = (size_t *)req->ctx - 1;
+            hl_alloc_free(lua->base.alloc, block, sizeof(size_t) + block[0]);
             req->ctx = NULL;
         }
         return -1;
@@ -281,10 +281,10 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
 
     lua_pop(lua->L, 1); /* pop routes table */
 
-    /* Free ctx if middleware set it */
+    /* Free ctx if middleware set it (size stored in prefix) */
     if (req->ctx) {
-        size_t ctx_sz = strlen((char *)req->ctx) + 1;
-        hl_alloc_free(lua->base.alloc, req->ctx, ctx_sz);
+        size_t *block = (size_t *)req->ctx - 1;
+        hl_alloc_free(lua->base.alloc, block, sizeof(size_t) + block[0]);
         req->ctx = NULL;
     }
     return 0;
@@ -340,6 +340,7 @@ void hl_lua_dump_error(HlLua *lua)
     if (tb && tb != msg)
         log_error("[hull:c] %s", tb);
     lua_pop(lua->L, 1); /* pop traceback */
+    lua_pop(lua->L, 1); /* pop original error message */
 }
 
 /* ── Route tracking ────────────────────────────────────────────────── */
@@ -414,9 +415,12 @@ int hl_lua_wire_routes(HlLua *lua, KlRouter *router)
             if (route) {
                 route->lua = lua;
                 route->handler_id = handler_id;
-                hl_lua_track_route(lua, route);
-                kl_router_add(router, method_str, pattern,
-                              hl_lua_keel_handler, route, NULL);
+                if (hl_lua_track_route(lua, route) != 0) {
+                    hl_alloc_free(lua->base.alloc, route, sizeof(HlLuaRoute));
+                } else {
+                    kl_router_add(router, method_str, pattern,
+                                  hl_lua_keel_handler, route, NULL);
+                }
             }
         }
 
@@ -471,10 +475,13 @@ int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
             if (route) {
                 route->lua = lua;
                 route->handler_id = handler_id;
-                hl_lua_track_route(lua, route);
-                kl_server_route(server, method_str, pattern,
-                                hl_lua_keel_handler, route,
-                                hl_cap_body_factory);
+                if (hl_lua_track_route(lua, route) != 0) {
+                    hl_alloc_free(lua->base.alloc, route, sizeof(HlLuaRoute));
+                } else {
+                    kl_server_route(server, method_str, pattern,
+                                    hl_lua_keel_handler, route,
+                                    hl_cap_body_factory);
+                }
             }
         }
 
@@ -509,9 +516,12 @@ int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
                 if (ctx) {
                     ctx->lua = lua;
                     ctx->handler_id = handler_id;
-                    hl_lua_track_route(lua, ctx);
-                    kl_server_use(server, method_str, pattern,
-                                  hl_lua_keel_middleware, ctx);
+                    if (hl_lua_track_route(lua, ctx) != 0) {
+                        hl_alloc_free(lua->base.alloc, ctx, sizeof(HlLuaRoute));
+                    } else {
+                        kl_server_use(server, method_str, pattern,
+                                      hl_lua_keel_middleware, ctx);
+                    }
                 }
             }
 
@@ -546,9 +556,12 @@ int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
                 if (ctx) {
                     ctx->lua = lua;
                     ctx->handler_id = handler_id;
-                    hl_lua_track_route(lua, ctx);
-                    kl_server_use_post(server, method_str, pattern,
-                                       hl_lua_keel_middleware, ctx);
+                    if (hl_lua_track_route(lua, ctx) != 0) {
+                        hl_alloc_free(lua->base.alloc, ctx, sizeof(HlLuaRoute));
+                    } else {
+                        kl_server_use_post(server, method_str, pattern,
+                                           hl_lua_keel_middleware, ctx);
+                    }
                 }
             }
 
@@ -619,6 +632,7 @@ int hl_lua_dispatch_middleware(HlLua *lua, int handler_id,
 
     /* Serialize req.ctx to JSON and store in req->ctx so the handler
      * dispatch (or next middleware) can reconstruct it. */
+    lua_checkstack(lua->L, 6);
     lua_getfield(lua->L, LUA_REGISTRYINDEX, "__hull_mw_req");
     lua_getfield(lua->L, -1, "ctx");
     if (lua_istable(lua->L, -1)) {
@@ -630,14 +644,18 @@ int hl_lua_dispatch_middleware(HlLua *lua, int handler_id,
             const char *json_str = lua_tolstring(lua->L, -1, &json_len);
             if (json_str && json_len > 2 && json_len < 65536) { /* skip empty "{}" */
                 if (req->ctx) {
-                    size_t old_sz = strlen((char *)req->ctx) + 1;
-                    hl_alloc_free(lua->base.alloc, req->ctx, old_sz);
+                    size_t *old_block = (size_t *)req->ctx - 1;
+                    hl_alloc_free(lua->base.alloc, old_block,
+                                  sizeof(size_t) + old_block[0]);
                     req->ctx = NULL;
                 }
-                char *ctx_copy = hl_alloc_malloc(lua->base.alloc, json_len + 1);
-                if (ctx_copy) {
-                    memcpy(ctx_copy, json_str, json_len + 1);
-                    req->ctx = ctx_copy;
+                size_t alloc_sz = json_len + 1;
+                size_t *block = hl_alloc_malloc(lua->base.alloc,
+                                                sizeof(size_t) + alloc_sz);
+                if (block) {
+                    block[0] = alloc_sz;
+                    memcpy(block + 1, json_str, alloc_sz);
+                    req->ctx = (char *)(block + 1);
                 }
             }
             lua_pop(lua->L, 1); /* pop json string */
