@@ -61,18 +61,25 @@ int hl_tool_unveil_add(HlToolUnveilCtx *ctx, const char *path, const char *perms
     char *dup = strdup(use_path);
     if (!dup) return -1;
 
+    char *perms_dup = strdup(perms);
+    if (!perms_dup) { free(dup); return -1; }
+
     ctx->entries[ctx->count].path = dup;
-    ctx->entries[ctx->count].perms = perms;
+    ctx->entries[ctx->count].perms = perms_dup;
     ctx->count++;
 
     /* If resolved path differs (e.g. /tmp → /private/tmp on macOS),
      * also store the original path for prefix matching */
     if (resolved_differs && ctx->count < HL_TOOL_MAX_UNVEILED) {
         char *dup_orig = strdup(path);
-        if (dup_orig) {
+        char *perms_dup2 = strdup(perms);
+        if (dup_orig && perms_dup2) {
             ctx->entries[ctx->count].path = dup_orig;
-            ctx->entries[ctx->count].perms = perms;
+            ctx->entries[ctx->count].perms = perms_dup2;
             ctx->count++;
+        } else {
+            free(dup_orig);
+            free(perms_dup2);
         }
     }
 
@@ -82,8 +89,10 @@ int hl_tool_unveil_add(HlToolUnveilCtx *ctx, const char *path, const char *perms
 void hl_tool_unveil_free(HlToolUnveilCtx *ctx)
 {
     if (!ctx) return;
-    for (int i = 0; i < ctx->count; i++)
+    for (int i = 0; i < ctx->count; i++) {
         free((void *)ctx->entries[i].path);
+        free((void *)ctx->entries[i].perms);
+    }
     memset(ctx, 0, sizeof(*ctx));
 }
 

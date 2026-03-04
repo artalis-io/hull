@@ -452,8 +452,8 @@ int hl_cap_crypto_ed25519_verify(const uint8_t *msg, size_t msg_len,
     if (!msg || !sig || !pubkey)
         return -1;
 
-    /* Guard against overflow: sm = sig(64) + msg */
-    if (msg_len > SIZE_MAX / 2)
+    /* Guard against overflow: sm_len = 64 + msg_len, need sm_len * 2 */
+    if (msg_len > SIZE_MAX / 2 - 64)
         return -1;
 
     size_t sm_len = 64 + msg_len;
@@ -563,6 +563,8 @@ static int hmac_sha512(const uint8_t *key, size_t key_len,
 
     /* inner = SHA512(k_ipad || msg) */
     /* Allocate contiguous buffer for inner hash input */
+    if (msg_len > SIZE_MAX - 128)
+        return -1;
     size_t inner_len = 128 + msg_len;
     uint8_t stack_inner[4224]; /* 128 + 4096 */
     uint8_t *inner_buf = (inner_len <= sizeof(stack_inner)) ? stack_inner
@@ -636,7 +638,7 @@ int hl_cap_crypto_secretbox(uint8_t *out, const void *msg, size_t msg_len,
 {
     if (!out || !msg || !nonce || !key)
         return -1;
-    if (msg_len > SIZE_MAX / 2)
+    if (msg_len > SIZE_MAX / 2 - 32)
         return -1;
 
     size_t padded_len = 32 + msg_len;
@@ -672,7 +674,7 @@ int hl_cap_crypto_secretbox_open(uint8_t *out, const void *ct, size_t ct_len,
 {
     if (!out || !ct || !nonce || !key)
         return -1;
-    if (ct_len < 16 || ct_len > SIZE_MAX / 2)
+    if (ct_len < 16 || ct_len > SIZE_MAX / 2 - 16)
         return -1;
 
     size_t padded_len = 16 + ct_len; /* prepend BOXZEROBYTES */
@@ -714,7 +716,7 @@ int hl_cap_crypto_box(uint8_t *out, const void *msg, size_t msg_len,
 {
     if (!out || !msg || !nonce || !pk || !sk)
         return -1;
-    if (msg_len > SIZE_MAX / 2)
+    if (msg_len > SIZE_MAX / 2 - 32)
         return -1;
 
     size_t padded_len = 32 + msg_len;
@@ -750,7 +752,7 @@ int hl_cap_crypto_box_open(uint8_t *out, const void *ct, size_t ct_len,
 {
     if (!out || !ct || !nonce || !pk || !sk)
         return -1;
-    if (ct_len < 16 || ct_len > SIZE_MAX / 2)
+    if (ct_len < 16 || ct_len > SIZE_MAX / 2 - 16)
         return -1;
 
     size_t padded_len = 16 + ct_len;

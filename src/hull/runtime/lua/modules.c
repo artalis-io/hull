@@ -981,6 +981,8 @@ static int lua_crypto_secretbox(lua_State *L)
     if (hex_decode(key_hex, key_hex_len, key, 32) != 0)
         return luaL_error(L, "invalid hex in key");
 
+    if (msg_len > SIZE_MAX - HL_SECRETBOX_MACBYTES)
+        return luaL_error(L, "message too large");
     size_t ct_len = msg_len + HL_SECRETBOX_MACBYTES;
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->scratch)
@@ -994,6 +996,8 @@ static int lua_crypto_secretbox(lua_State *L)
         return luaL_error(L, "secretbox failed");
 
     /* Convert to hex */
+    if (ct_len > SIZE_MAX / 2)
+        return luaL_error(L, "ciphertext too large");
     size_t hex_len = ct_len * 2 + 1;
     char *hex = sh_arena_alloc(lua->scratch, hex_len);
     if (!hex)
@@ -1088,6 +1092,8 @@ static int lua_crypto_box(lua_State *L)
     if (hex_decode(sk_hex, sk_hex_len, sk, 32) != 0)
         return luaL_error(L, "invalid hex in secret key");
 
+    if (msg_len > SIZE_MAX - HL_BOX_MACBYTES)
+        return luaL_error(L, "message too large");
     size_t ct_len = msg_len + HL_BOX_MACBYTES;
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->scratch)
@@ -1100,6 +1106,8 @@ static int lua_crypto_box(lua_State *L)
     if (hl_cap_crypto_box(ct, msg, msg_len, nonce, pk, sk) != 0)
         return luaL_error(L, "box failed");
 
+    if (ct_len > SIZE_MAX / 2)
+        return luaL_error(L, "ciphertext too large");
     size_t hex_len = ct_len * 2 + 1;
     char *hex = sh_arena_alloc(lua->scratch, hex_len);
     if (!hex)
@@ -1268,6 +1276,8 @@ static int lua_crypto_base64url_encode(lua_State *L)
     size_t len;
     const char *data = luaL_checklstring(L, 1, &len);
 
+    if (len > SIZE_MAX / 4)
+        return luaL_error(L, "input too large for base64url");
     size_t out_size = ((len * 4) + 2) / 3 + 1;
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->scratch)

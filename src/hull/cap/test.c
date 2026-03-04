@@ -781,6 +781,15 @@ void hl_cap_test_register_js(JSContext *ctx, KlRouter *router, HlJS *js)
     JS_FreeValue(ctx, global);
 }
 
+void hl_cap_test_free_js(JSContext *ctx)
+{
+    HlJSTestState *state = get_js_test_state(ctx);
+    if (!state) return;
+    JS_FreeValue(ctx, state->cases);
+    state->cases = JS_UNDEFINED;
+    js_free(ctx, state);
+}
+
 void hl_cap_test_clear_js(JSContext *ctx)
 {
     HlJSTestState *state = get_js_test_state(ctx);

@@ -216,9 +216,10 @@ ALLOC_OBJ      := $(BUILDDIR)/hull_alloc.o
 MANIFEST_OBJ   := $(BUILDDIR)/manifest.o
 SANDBOX_OBJ    := $(BUILDDIR)/sandbox.o
 
-# Test-specific manifest objects (single runtime — avoids pulling Lua into JS tests and vice versa)
+# Test-specific objects (single runtime — avoids pulling Lua into JS tests and vice versa)
 MANIFEST_JS_OBJ  := $(BUILDDIR)/manifest_js_only.o
 MANIFEST_LUA_OBJ := $(BUILDDIR)/manifest_lua_only.o
+CAP_TEST_JS_OBJ  := $(BUILDDIR)/cap_test_js_only.o
 TOOL_OBJ       := $(BUILDDIR)/tool.o
 SIG_OBJ        := $(BUILDDIR)/signature.o
 STATIC_OBJ     := $(BUILDDIR)/hull_static.o
@@ -582,6 +583,10 @@ $(MANIFEST_OBJ): $(SRCDIR)/hull/manifest.c | $(BUILDDIR)
 $(MANIFEST_JS_OBJ): $(SRCDIR)/hull/manifest.c | $(BUILDDIR)
 	$(CC) $(filter-out -DHL_ENABLE_LUA,$(CFLAGS)) $(INCLUDES) -c -o $@ $<
 
+# cap/test.c (JS-only, for test_js — excludes Lua bindings to avoid Lua link deps)
+$(CAP_TEST_JS_OBJ): $(SRCDIR)/hull/cap/test.c | $(BUILDDIR)
+	$(CC) $(filter-out -DHL_ENABLE_LUA,$(CFLAGS)) $(INCLUDES) -c -o $@ $<
+
 # Manifest (Lua-only, for test_lua — excludes JS extraction to avoid QuickJS link deps)
 $(MANIFEST_LUA_OBJ): $(SRCDIR)/hull/manifest.c | $(BUILDDIR)
 	$(CC) $(filter-out -DHL_ENABLE_JS,$(CFLAGS)) $(INCLUDES) -c -o $@ $<
@@ -696,9 +701,9 @@ $(BUILDDIR)/test_parse_size: $(TESTDIR)/hull/test_parse_size.c $(TEST_COMMON_DEP
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_COMMON_LIBS)
 
 # JS runtime test — needs QuickJS + JS runtime objects + manifest (JS-only to avoid Lua link deps)
-$(BUILDDIR)/test_js: $(TESTDIR)/hull/runtime/js/test_js.c $(TEST_COMMON_DEPS) $(MANIFEST_JS_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(JS_RT_OBJS) $(QJS_OBJS) | $(BUILDDIR)
+$(BUILDDIR)/test_js: $(TESTDIR)/hull/runtime/js/test_js.c $(TEST_COMMON_DEPS) $(MANIFEST_JS_OBJ) $(CAP_TEST_JS_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(JS_RT_OBJS) $(QJS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(TEST_CAP_OBJS) $(JS_RT_OBJS) $(MANIFEST_JS_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(ALLOC_OBJ) $(QJS_OBJS) \
+		$(TEST_CAP_OBJS) $(CAP_TEST_JS_OBJ) $(JS_RT_OBJS) $(MANIFEST_JS_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(ALLOC_OBJ) $(QJS_OBJS) \
 		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) -lm -lpthread
 
 # Lua runtime test — needs Lua + Lua runtime objects + manifest (Lua-only) + cap_tool + build_assets

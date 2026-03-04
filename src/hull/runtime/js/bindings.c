@@ -430,7 +430,8 @@ static int hl_js_ensure_response_class(HlJS *js)
 
 JSValue hl_js_make_response(HlJS *js, KlResponse *res)
 {
-    hl_js_ensure_response_class(js);
+    if (hl_js_ensure_response_class(js) != 0)
+        return JS_ThrowInternalError(js->ctx, "failed to register Response class");
 
     JSValue obj = JS_NewObjectClass(js->ctx, (int)js->response_class_id);
     JS_SetOpaque(obj, res);

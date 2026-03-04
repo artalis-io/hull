@@ -452,6 +452,33 @@ UTEST(js_runtime, double_free)
     hl_js_free(&local_js); /* should not crash */
 }
 
+UTEST(js_runtime, free_after_modules_no_gc_leak)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.get('/a', (req, res) => {});\n"
+        "app.post('/b', (req, res) => {});\n"
+        "app.manifest({ env: ['FOO'] });\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    /* Verify globals are populated */
+    int routes = eval_int(
+        "globalThis.__hull_route_defs ? globalThis.__hull_route_defs.length : 0");
+    ASSERT_EQ(routes, 2);
+
+    /* hl_js_free must clean up all globals without GC assertion */
+    cleanup_js();
+}
+
 /* ── Crypto tests ──────────────────────────────────────────────────── */
 
 UTEST(js_cap, crypto_sha256)
