@@ -15,8 +15,8 @@
 │  Hull Capability Layer (src/hull/cap/)              │  ← C enforcement boundary
 │  fs, db, crypto, time, env, body, http, tool, test  │
 ├─────────────────────────────────────────────────────┤
-│  Hull Core (src/hull/)                              │  ← Manifest, sandbox, sig
-│  manifest.c, sandbox.c, signature.c, main.c         │
+│  Hull Core (src/hull/)                              │  ← Manifest, sandbox, sig, VFS
+│  manifest.c, sandbox.c, signature.c, vfs.c, main.c  │
 ├─────────────────────────────────────────────────────┤
 │  Keel HTTP Server (vendor/keel/)                    │  ← Event loop + routing
 │  epoll/kqueue/poll, router, connection pool          │
@@ -127,6 +127,15 @@ After manifest extraction, `hl_sandbox_apply()` always locks down the process (e
 After sealing, any attempt to access undeclared paths triggers SIGKILL (Linux/Cosmo) or returns ENOENT.
 
 The sandbox is **always applied**, even if `app.manifest()` is not called. An app without a manifest is sandboxed identically to `app.manifest({})` — only the database file and TLS certificate paths are accessible.
+
+### Virtual Filesystem (`vfs.c`)
+
+All embedded file lookups go through the unified VFS module. Two `HlVfs` instances are created at startup:
+
+- **`app_vfs`** — sorted `hl_app_entries[]` + `app_dir` for filesystem fallback. Used by static serving, templates, migrations, app modules, signature verification.
+- **`platform_vfs`** — sorted `hl_stdlib_entries[]`, no filesystem fallback. Used by Lua/JS stdlib module loading.
+
+The VFS provides O(log n) binary search (`hl_vfs_find`) for exact lookups and prefix queries (`hl_vfs_prefix`) for discovering all entries under a path like `migrations/` or `static/`. Entry arrays must be sorted by name in C `strcmp` order at build time.
 
 ### Signature Verification (`signature.c`)
 
@@ -314,7 +323,7 @@ Embedded Lua/JS modules in `stdlib/`:
 | `hull.manifest` | Extract and print manifest as JSON |
 | `hull.sign_platform` | Sign platform libraries with per-arch hashes |
 
-Stdlib modules are compiled into the binary as byte arrays (auto-generated registry). They are resolved by the custom `require()` / module loader.
+Stdlib modules are compiled into the binary as byte arrays in the sorted `hl_stdlib_entries[]` registry. They are resolved by the custom `require()` / module loader via `hl_vfs_find(platform_vfs, module_name)`.
 
 ### Template Compilation Pipeline
 
@@ -340,7 +349,7 @@ Template source (.html file or string)
 
 The C bridge functions (`_template._compile` / `_template._load_raw`) live in the runtime module loaders (`runtime/lua/modules.c`, `runtime/js/modules.c`). They use the same trust model as stdlib module loading — callable only from embedded stdlib code, not from user application code.
 
-Template files are embedded at build time as raw byte arrays in the unified `hl_app_entries[]` array (with `templates/` prefix). In dev mode, templates are loaded from `app_dir/templates/` on disk.
+Template files are embedded at build time as raw byte arrays in the sorted `hl_app_entries[]` array (with `templates/` prefix) and looked up via `hl_vfs_find(app_vfs, "templates/name")`. In dev mode, templates are loaded from `app_dir/templates/` on disk.
 
 ---
 
@@ -361,7 +370,7 @@ Three supported compiler paths:
 1. Extract `libhull_platform.a` from embedded assets
 2. Extract `app_main.c` template
 3. Collect app source files (Lua/JS/HTML/CSS)
-4. Generate `app_registry.c` — xxd byte arrays of all app files
+4. Generate sorted `app_registry.c` — xxd byte arrays of all app files (sorted by name for VFS binary search)
 5. Generate `app_main.c` from template + route registry
 6. Compile `app_main.c` + `app_registry.c` with selected compiler
 7. Link against `libhull_platform.a`

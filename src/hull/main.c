@@ -26,6 +26,7 @@
 #include "hull/cap/env.h"
 #include "hull/cap/http.h"
 #include "hull/migrate.h"
+#include "hull/vfs.h"
 
 #include <keel/tls_mbedtls.h>
 #include "hull/commands/dispatch.h"
@@ -306,6 +307,13 @@ static int hull_serve(int argc, char **argv)
         }
     }
 
+    /* Initialize VFS instances for sorted entry lookup */
+    extern const HlEntry hl_app_entries[];
+    extern const HlEntry hl_stdlib_entries[];
+    HlVfs app_vfs, platform_vfs;
+    hl_vfs_init(&app_vfs, hl_app_entries, app_dir);
+    hl_vfs_init(&platform_vfs, hl_stdlib_entries, NULL);
+
     /* Validate TLS cert/key pair */
     if ((tls_cert_path != NULL) != (tls_key_path != NULL)) {
         fprintf(stderr, "hull: --tls-cert and --tls-key must be provided together\n");
@@ -368,7 +376,7 @@ static int hull_serve(int argc, char **argv)
 
     /* Auto-run SQL migrations */
     if (!no_migrate) {
-        int migrated = hl_migrate_run(db, app_dir);
+        int migrated = hl_migrate_run(db, &app_vfs);
         if (migrated == HL_MIGRATE_ERR) {
             log_error("[hull:c] migration failed — refusing to start");
             goto cleanup_db;
@@ -469,6 +477,8 @@ static int hull_serve(int argc, char **argv)
     rt->db = db;
     rt->stmt_cache = &stmt_cache;
     rt->alloc = &alloc;
+    rt->app_vfs = &app_vfs;
+    rt->platform_vfs = &platform_vfs;
 
     if (rt->vt->init(rt, rt_cfg) != 0) {
         log_error("[hull:c] %s init failed", rt->vt->name);
@@ -478,7 +488,7 @@ static int hull_serve(int argc, char **argv)
     /* RT-01: Verify app signature BEFORE loading — malicious code never
      * executes if verification fails. */
     if (verify_sig_path) {
-        if (hl_verify_startup(verify_sig_path, entry_point) != 0) {
+        if (hl_verify_startup(verify_sig_path, entry_point, &app_vfs) != 0) {
             log_error("[hull:c] signature verification failed — refusing to start");
             rt->vt->destroy(rt);
             goto cleanup_server;
@@ -578,14 +588,7 @@ static int hull_serve(int argc, char **argv)
 
     /* Auto-register static file serving (after sandbox is applied) */
     {
-        extern const HlEntry hl_app_entries[];
-        int has_static = 0;
-        for (const HlEntry *e = hl_app_entries; e->name; e++) {
-            if (strncmp(e->name, "static/", 7) == 0) {
-                has_static = 1;
-                break;
-            }
-        }
+        int has_static = hl_vfs_has_prefix(&app_vfs, "static/");
         if (!has_static) {
             char static_dir[4096];
             snprintf(static_dir, sizeof(static_dir), "%s/static", app_dir);
@@ -595,8 +598,7 @@ static int hull_serve(int argc, char **argv)
         }
         if (has_static) {
             HlStaticCtx *sctx = track_route_alloc(sizeof(HlStaticCtx));
-            sctx->app_dir = app_dir;
-            sctx->entries = hl_app_entries;
+            sctx->vfs = &app_vfs;
             kl_server_use(&server, "GET", "/static/*",
                           hl_static_middleware, sctx);
         }

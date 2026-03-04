@@ -36,15 +36,8 @@ static void secure_zero(void *p, size_t n)
     while (n--) *vp++ = 0;
 }
 
-/* ── Embedded stdlib (auto-generated registry of all stdlib .lua files) */
-
-#include "stdlib_lua_registry.h"
-
-/* Unified app entries: default empty in app_entries_default.c, overridden by
- * generated app_registry.o when building with APP_DIR or hull build.
- * Contains all file types; consumers filter by name prefix/extension. */
-#include "hull/entry.h"
-extern const HlEntry hl_app_entries[];
+/* VFS: O(log n) lookups into sorted entry arrays */
+#include "hull/vfs.h"
 
 /* ── Helper: retrieve HlLua from registry ─────────────────────────── */
 
@@ -1693,18 +1686,21 @@ static int lua_template_load_raw(lua_State *L)
     if (strstr(name, "..") != NULL || name[0] == '/')
         return luaL_error(L, "invalid template name: %s", name);
 
-    /* 1. Search embedded template entries (templates/ prefix in unified array) */
-    for (const HlEntry *e = hl_app_entries; e->name; e++) {
-        if (strncmp(e->name, "templates/", 10) != 0)
-            continue;
-        if (strcmp(e->name + 10, name) == 0) {
-            lua_pushlstring(L, (const char *)e->data, e->len);
-            return 1;
+    /* 1. Search embedded template entries via VFS */
+    HlLua *lua = get_hl_lua(L);
+    if (lua && lua->base.app_vfs) {
+        char tpl_name[1024];
+        int n = snprintf(tpl_name, sizeof(tpl_name), "templates/%s", name);
+        if (n > 0 && (size_t)n < sizeof(tpl_name)) {
+            const HlEntry *e = hl_vfs_find(lua->base.app_vfs, tpl_name);
+            if (e) {
+                lua_pushlstring(L, (const char *)e->data, e->len);
+                return 1;
+            }
         }
     }
 
     /* 2. Filesystem fallback (dev mode): app_dir/templates/<name> */
-    HlLua *lua = get_hl_lua(L);
     if (lua && lua->app_dir) {
         char path[HL_MODULE_PATH_MAX];
         int n = snprintf(path, sizeof(path), "%s/templates/%s",
@@ -2127,40 +2123,47 @@ int hl_lua_register_stdlib(HlLua *lua)
     lua_setfield(L, LUA_REGISTRYINDEX, "__hull_loaded");
 
     /* Create __hull_modules table and populate with compiled chunks.
-     * Iterates the auto-generated hl_stdlib_lua_entries[] table —
-     * adding a new .lua file to stdlib/ requires no C code changes. */
+     * Iterates the platform VFS entries, skipping JS modules
+     * (colon-separated names) — adding a new .lua file requires no C changes. */
     lua_newtable(L);
 
-    for (const HlEntry *e = hl_stdlib_lua_entries; e->name; e++) {
-        if (luaL_loadbuffer(L, (const char *)e->data, e->len, e->name) != LUA_OK) {
-            log_error("[hull:c] failed to load stdlib module '%s': %s",
-                      e->name, lua_tostring(L, -1));
-            lua_pop(L, 2); /* pop error + modules table */
-            return -1;
-        }
-        lua_setfield(L, -2, e->name);
-    }
-
-    /* Load embedded app modules (if any — skip non-Lua entries) */
-    for (const HlEntry *e = hl_app_entries; e->name; e++) {
-        size_t nlen = strlen(e->name);
-        /* Skip JS modules (.js) and non-module entries (templates/, static/, migrations/) */
-        if (nlen >= 3 && strcmp(e->name + nlen - 3, ".js") == 0)
-            continue;
-        if (e->name[0] != '.')
-            continue;  /* module entries start with "./" */
-        if (nlen >= 5 && strcmp(e->name + nlen - 5, ".json") == 0) {
-            /* JSON data — store as raw string, decoded on first require() */
-            lua_pushlstring(L, (const char *)e->data, e->len);
-        } else {
+    if (lua->base.platform_vfs) {
+        for (size_t i = 0; i < lua->base.platform_vfs->count; i++) {
+            const HlEntry *e = &lua->base.platform_vfs->entries[i];
+            if (strchr(e->name, ':')) continue; /* skip JS modules */
             if (luaL_loadbuffer(L, (const char *)e->data, e->len, e->name) != LUA_OK) {
-                log_error("[hull:c] failed to load app module '%s': %s",
+                log_error("[hull:c] failed to load stdlib module '%s': %s",
                           e->name, lua_tostring(L, -1));
                 lua_pop(L, 2); /* pop error + modules table */
                 return -1;
             }
+            lua_setfield(L, -2, e->name);
         }
-        lua_setfield(L, -2, e->name);
+    }
+
+    /* Load embedded app modules (if any — skip non-Lua entries) */
+    if (lua->base.app_vfs) {
+        for (size_t i = 0; i < lua->base.app_vfs->count; i++) {
+            const HlEntry *e = &lua->base.app_vfs->entries[i];
+            size_t nlen = strlen(e->name);
+            /* Skip JS modules (.js) and non-module entries (templates/, static/, migrations/) */
+            if (nlen >= 3 && strcmp(e->name + nlen - 3, ".js") == 0)
+                continue;
+            if (e->name[0] != '.')
+                continue;  /* module entries start with "./" */
+            if (nlen >= 5 && strcmp(e->name + nlen - 5, ".json") == 0) {
+                /* JSON data — store as raw string, decoded on first require() */
+                lua_pushlstring(L, (const char *)e->data, e->len);
+            } else {
+                if (luaL_loadbuffer(L, (const char *)e->data, e->len, e->name) != LUA_OK) {
+                    log_error("[hull:c] failed to load app module '%s': %s",
+                              e->name, lua_tostring(L, -1));
+                    lua_pop(L, 2); /* pop error + modules table */
+                    return -1;
+                }
+            }
+            lua_setfield(L, -2, e->name);
+        }
     }
 
     lua_setfield(L, LUA_REGISTRYINDEX, "__hull_modules");
@@ -2169,16 +2172,19 @@ int hl_lua_register_stdlib(HlLua *lua)
     lua_pushcfunction(L, hl_lua_require);
     lua_setglobal(L, "require");
 
-    /* Pre-load json as a global: call require('hull.json') internally */
-    lua_getglobal(L, "require");
-    lua_pushstring(L, "hull.json");
-    if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
-        log_error("[hull:c] failed to pre-load json: %s",
-                  lua_tostring(L, -1));
-        lua_pop(L, 1);
-        return -1;
+    /* Pre-load json as a global: call require('hull.json') internally.
+     * Skip if no platform VFS is available (bare init without stdlib). */
+    if (lua->base.platform_vfs) {
+        lua_getglobal(L, "require");
+        lua_pushstring(L, "hull.json");
+        if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
+            log_error("[hull:c] failed to pre-load json: %s",
+                      lua_tostring(L, -1));
+            lua_pop(L, 1);
+            return -1;
+        }
+        lua_setglobal(L, "json");
     }
-    lua_setglobal(L, "json");
 
     return 0;
 }

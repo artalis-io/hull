@@ -9,6 +9,7 @@
 
 #include "utest.h"
 #include "hull/runtime/lua.h"
+#include "hull/vfs.h"
 #include "hull/cap/db.h"
 #include "hull/cap/env.h"
 
@@ -32,13 +33,17 @@
 
 static HlLua lua_rt;
 static int lua_initialized = 0;
+static HlVfs platform_vfs;
 
 static void init_lua(void)
 {
+    extern const HlEntry hl_stdlib_entries[];
+    hl_vfs_init(&platform_vfs, hl_stdlib_entries, NULL);
     if (lua_initialized)
         hl_lua_free(&lua_rt);
     HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
     memset(&lua_rt, 0, sizeof(lua_rt));
+    lua_rt.base.platform_vfs = &platform_vfs;
     int rc = hl_lua_init(&lua_rt, &cfg);
     lua_initialized = (rc == 0);
 }
@@ -59,6 +64,8 @@ static HlEnvConfig env_cfg = { .allowed = env_allowed, .count = 1 };
 
 static void init_lua_with_caps(void)
 {
+    extern const HlEntry hl_stdlib_entries[];
+    hl_vfs_init(&platform_vfs, hl_stdlib_entries, NULL);
     if (lua_initialized)
         hl_lua_free(&lua_rt);
     if (test_db) {
@@ -75,6 +82,7 @@ static void init_lua_with_caps(void)
     lua_rt.base.db = test_db;
     lua_rt.base.stmt_cache = &test_stmt_cache;
     lua_rt.base.env_cfg = &env_cfg;
+    lua_rt.base.platform_vfs = &platform_vfs;
     int rc = hl_lua_init(&lua_rt, &cfg);
     lua_initialized = (rc == 0);
 }
@@ -546,10 +554,13 @@ static void rm_rf(const char *dir)
 /* Init lua with app_dir set to a temp directory */
 static void init_lua_with_appdir(const char *app_dir)
 {
+    extern const HlEntry hl_stdlib_entries[];
+    hl_vfs_init(&platform_vfs, hl_stdlib_entries, NULL);
     if (lua_initialized)
         hl_lua_free(&lua_rt);
     HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
     memset(&lua_rt, 0, sizeof(lua_rt));
+    lua_rt.base.platform_vfs = &platform_vfs;
     int rc = hl_lua_init(&lua_rt, &cfg);
     lua_initialized = (rc == 0);
     if (lua_initialized && app_dir) {

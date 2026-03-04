@@ -370,7 +370,7 @@ hull verify [--platform-key <file|url>] [--developer-key <file|url>] [app_dir]
 - Checks on every startup before accepting connections
 - Platform key pinned at compile time (`HL_PLATFORM_PUBKEY_HEX`)
 - Verifies both signature layers
-- Verifies file hashes against embedded entries
+- Verifies file hashes against embedded entries via VFS (O(log n) lookup)
 - Refuses to start if any check fails
 
 ---

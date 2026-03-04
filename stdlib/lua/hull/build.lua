@@ -198,6 +198,14 @@ local function generate_app_registry(app_dir, files)
         add_file(path, rel, "migration_")
     end
 
+    -- Sort entries by name for O(log n) binary search in HlVfs
+    table.sort(entries, function(a, b)
+        -- Extract entry name from '    { "name", ...' format
+        local na = a:match('"([^"]+)"')
+        local nb = b:match('"([^"]+)"')
+        return (na or "") < (nb or "")
+    end)
+
     parts[#parts + 1] = '#include "entry.h"'
     parts[#parts + 1] = "const HlEntry hl_app_entries[] = {"
     for _, e in ipairs(entries) do

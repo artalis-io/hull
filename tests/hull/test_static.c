@@ -6,6 +6,7 @@
 
 #include "utest.h"
 #include "hull/static.h"
+#include "hull/vfs.h"
 
 #include <keel/allocator.h>
 #include <keel/request.h>
@@ -103,10 +104,12 @@ UTEST(static_serve, path_traversal_dotdot)
 {
     /* Path with .. should not match any file */
     static const HlEntry entries[] = {
-        { "secret.txt", (const unsigned char *)"secret", 6 },
+        { "static/secret.txt", (const unsigned char *)"secret", 6 },
         { NULL, NULL, 0 },
     };
-    HlStaticCtx ctx = { .app_dir = NULL, .entries = entries };
+    HlVfs vfs;
+    hl_vfs_init(&vfs, entries, NULL);
+    HlStaticCtx ctx = { .vfs = &vfs };
 
     KlRequest req = make_request("GET", "/static/../etc/passwd");
     KlResponse res;
@@ -120,10 +123,12 @@ UTEST(static_serve, path_traversal_middle)
 {
     /* Path with /../ in the middle should be rejected */
     static const HlEntry entries[] = {
-        { "secret.txt", (const unsigned char *)"secret", 6 },
+        { "static/secret.txt", (const unsigned char *)"secret", 6 },
         { NULL, NULL, 0 },
     };
-    HlStaticCtx ctx = { .app_dir = NULL, .entries = entries };
+    HlVfs vfs;
+    hl_vfs_init(&vfs, entries, NULL);
+    HlStaticCtx ctx = { .vfs = &vfs };
 
     KlRequest req = make_request("GET", "/static/sub/../secret.txt");
     KlResponse res;
@@ -139,12 +144,15 @@ UTEST(static_serve, embedded_found)
 {
     static const unsigned char css_data[] = "body { color: red; }";
     static const HlEntry entries[] = {
-        { "style.css", css_data, sizeof(css_data) - 1 },
+        { "static/style.css", css_data, sizeof(css_data) - 1 },
         { NULL, NULL, 0 },
     };
 
+    HlVfs vfs;
+    hl_vfs_init(&vfs, entries, NULL);
+
     KlAllocator alloc = kl_allocator_default();
-    HlStaticCtx ctx = { .app_dir = NULL, .entries = entries };
+    HlStaticCtx ctx = { .vfs = &vfs };
 
     KlRequest req = make_request("GET", "/static/style.css");
     KlResponse res;
@@ -165,12 +173,15 @@ UTEST(static_serve, embedded_not_found)
 {
     static const unsigned char css_data[] = "body {}";
     static const HlEntry entries[] = {
-        { "style.css", css_data, sizeof(css_data) - 1 },
+        { "static/style.css", css_data, sizeof(css_data) - 1 },
         { NULL, NULL, 0 },
     };
 
+    HlVfs vfs;
+    hl_vfs_init(&vfs, entries, NULL);
+
     KlAllocator alloc = kl_allocator_default();
-    HlStaticCtx ctx = { .app_dir = NULL, .entries = entries };
+    HlStaticCtx ctx = { .vfs = &vfs };
 
     KlRequest req = make_request("GET", "/static/missing.css");
     KlResponse res;
@@ -185,7 +196,10 @@ UTEST(static_serve, embedded_not_found)
 
 UTEST(static_serve, non_static_path)
 {
-    HlStaticCtx ctx = { .app_dir = NULL, .entries = NULL };
+    static const HlEntry empty[] = { { NULL, NULL, 0 } };
+    HlVfs vfs;
+    hl_vfs_init(&vfs, empty, NULL);
+    HlStaticCtx ctx = { .vfs = &vfs };
 
     KlRequest req = make_request("GET", "/api/users");
     KlResponse res;
@@ -199,10 +213,12 @@ UTEST(static_serve, post_method_skipped)
 {
     static const unsigned char data[] = "x";
     static const HlEntry entries[] = {
-        { "style.css", data, 1 },
+        { "static/style.css", data, 1 },
         { NULL, NULL, 0 },
     };
-    HlStaticCtx ctx = { .app_dir = NULL, .entries = entries };
+    HlVfs vfs;
+    hl_vfs_init(&vfs, entries, NULL);
+    HlStaticCtx ctx = { .vfs = &vfs };
 
     KlRequest req = make_request("POST", "/static/style.css");
     KlResponse res;

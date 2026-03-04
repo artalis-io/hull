@@ -10,6 +10,7 @@
 #include "utest.h"
 #include "hull/runtime/js.h"
 #include "hull/manifest.h"
+#include "hull/vfs.h"
 #include "hull/cap/db.h"
 #include "hull/cap/env.h"
 #include "quickjs.h"
@@ -26,13 +27,17 @@
 
 static HlJS js;
 static int js_initialized = 0;
+static HlVfs platform_vfs;
 
 static void init_js(void)
 {
     if (js_initialized)
         hl_js_free(&js);
+    extern const HlEntry hl_stdlib_entries[];
+    hl_vfs_init(&platform_vfs, hl_stdlib_entries, NULL);
     HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
     memset(&js, 0, sizeof(js));
+    js.base.platform_vfs = &platform_vfs;
     int rc = hl_js_init(&js, &cfg);
     js_initialized = (rc == 0);
 }
@@ -53,6 +58,8 @@ static HlEnvConfig env_cfg = { .allowed = env_allowed, .count = 1 };
 
 static void init_js_with_caps(void)
 {
+    extern const HlEntry hl_stdlib_entries[];
+    hl_vfs_init(&platform_vfs, hl_stdlib_entries, NULL);
     if (js_initialized)
         hl_js_free(&js);
     if (test_db) {
@@ -69,6 +76,7 @@ static void init_js_with_caps(void)
     js.base.db = test_db;
     js.base.stmt_cache = &test_stmt_cache;
     js.base.env_cfg = &env_cfg;
+    js.base.platform_vfs = &platform_vfs;
     int rc = hl_js_init(&js, &cfg);
     js_initialized = (rc == 0);
 }

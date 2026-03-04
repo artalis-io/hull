@@ -22,15 +22,12 @@ local logger    = require("hull.middleware.logger")
 local cookie    = require("hull.cookie")
 local i18n      = require("hull.i18n")
 
-app.manifest({
-    csp = "default-src 'none'; style-src 'self' 'unsafe-inline'; "
-       .. "img-src 'self'; form-action 'self'; frame-ancestors 'none'",
-})  -- sandbox: no fs, no env, no outbound HTTP; inline styles for templates
+app.manifest({})  -- sandbox: no fs, no env, no outbound HTTP; default CSP
 
 -- ── i18n setup ─────────────────────────────────────────────────────
 
-i18n.load("en", require("./locales/en"))
-i18n.load("hu", require("./locales/hu"))
+i18n.load("en", require("./locales/en.json"))
+i18n.load("hu", require("./locales/hu.json"))
 i18n.locale("en")
 
 -- ── Session setup ──────────────────────────────────────────────────

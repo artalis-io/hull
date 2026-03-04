@@ -56,7 +56,7 @@ Hull ships 13 subcommands for the full development lifecycle:
 ```
 Source files (Lua/JS/HTML/CSS/static assets)
         ↓
-hull build: collect → generate registries (app, template, static, migration) → compile → link → sign
+hull build: collect → generate sorted registry (hl_app_entries[]) → compile → link → sign
         ↓
 Single binary + package.sig (Ed25519 signed)
 ```
@@ -88,7 +88,7 @@ Cosmopolitan APE binaries run on Linux, macOS, Windows, FreeBSD, OpenBSD, and Ne
 │  Capability Layer (src/hull/cap/)           │  ← C enforcement boundary
 │  fs, db, crypto, time, env, http, tool      │
 ├─────────────────────────────────────────────┤
-│  Hull Core                                  │  ← Manifest, sandbox, signatures
+│  Hull Core                                  │  ← Manifest, sandbox, signatures, VFS
 ├─────────────────────────────────────────────┤
 │  Keel HTTP Server (vendor/keel/)            │  ← Event loop + routing
 ├─────────────────────────────────────────────┤
@@ -154,7 +154,7 @@ myapp/
     images/logo.png → GET /static/images/logo.png
 ```
 
-In dev mode, files are read from disk with zero-copy sendfile and `Cache-Control: no-cache`. In built binaries (`hull build`), static files are embedded alongside Lua/template assets with `Cache-Control: public, max-age=86400`. ETag and 304 Not Modified are supported in both modes.
+In dev mode, files are read from disk with zero-copy sendfile and `Cache-Control: no-cache`. In built binaries (`hull build`), static files are embedded in the unified `hl_app_entries[]` array and looked up via the VFS module (O(log n) binary search). `Cache-Control: public, max-age=86400`. ETag and 304 Not Modified are supported in both modes.
 
 #### Backend Best Practices
 
@@ -275,7 +275,7 @@ Ten example apps in both Lua and JavaScript:
 
 ```bash
 make                    # build hull binary
-make test               # run 79 unit tests
+make test               # run 344 unit tests
 make e2e                # end-to-end tests (all examples, both runtimes)
 make e2e-migrate        # migration system tests
 make e2e-templates      # template engine tests (40 tests, both runtimes)
