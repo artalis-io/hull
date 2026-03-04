@@ -49,6 +49,7 @@ src/hull/               # Core source
   commands/             #   Subcommand implementations (build.c, test.c, verify.c, etc.)
   runtime/lua/          #   Lua 5.4 runtime (bindings.c, modules.c, runtime.c)
   runtime/js/           #   QuickJS runtime (bindings.c, modules.c, runtime.c)
+  vfs.c                 #   Unified Virtual Filesystem (O(log n) binary search over HlEntry arrays)
   static.c              #   Static file serving middleware (/static/* convention)
 stdlib/                 # Embedded standard library
   lua/hull/             #   Lua modules (json, cookie, session, jwt, csrf, auth, build, verify, etc.)
@@ -73,7 +74,7 @@ Runtimes (Lua 5.4 / QuickJS)  →  Sandboxed interpreters
         ↓
 Capability Layer (src/hull/cap/)  →  C enforcement boundary
         ↓
-Hull Core (main.c, manifest.c, sandbox.c, signature.c, static.c)
+Hull Core (main.c, manifest.c, sandbox.c, signature.c, static.c, vfs.c)
         ↓
 Keel HTTP Server (vendor/keel/)  →  Event loop + routing
         ↓
@@ -128,7 +129,7 @@ SQL migrations provide versioned schema management for SQLite databases.
 
 | Component | File | Purpose |
 |-----------|------|---------|
-| Migration runner | `src/hull/migrate.c`, `include/hull/migrate.h` | Core migration execution engine |
+| Migration runner | `src/hull/migrate.c`, `include/hull/migrate.h` | Core migration execution engine (uses VFS prefix query) |
 | CLI command | `src/hull/commands/migrate.c` | `hull migrate` subcommand |
 | Scaffolding | `stdlib/lua/hull/migrate.lua` | `hull migrate new` template generation |
 | Auto-run (dev) | `main.c` | Runs pending migrations on startup |
@@ -141,6 +142,32 @@ SQL migrations provide versioned schema management for SQLite databases.
 - `hull migrate [app_dir]` — run pending migrations
 - `hull migrate status` — show applied/pending
 - `hull migrate new <name>` — create numbered migration file
+
+### Virtual Filesystem (VFS)
+
+All embedded file lookups go through a unified VFS module (`src/hull/vfs.c`, `include/hull/vfs.h`). Two VFS instances are created at startup:
+
+| Instance | Entries | root_dir | Used by |
+|----------|---------|----------|---------|
+| `app_vfs` | `hl_app_entries[]` | `app_dir` | templates, static, migrations, app modules, signature |
+| `platform_vfs` | `hl_stdlib_entries[]` | NULL | Lua/JS stdlib module loading |
+
+Both are stored in `HlRuntime` and accessible to all consumers.
+
+**API:**
+- `hl_vfs_find(vfs, name)` — O(log n) exact lookup (binary search)
+- `hl_vfs_prefix(vfs, prefix, &first)` — O(log n) prefix query (returns count + pointer to first match)
+- `hl_vfs_has_prefix(vfs, prefix)` — O(log n) prefix existence check
+- `hl_vfs_path(vfs, name, buf, size)` — filesystem path construction (`root_dir/name`)
+
+**Build-time requirement:** Entry arrays must be sorted by name in C `strcmp` order (the Makefile uses `LC_ALL=C sort`). `hl_vfs_init()` debug-asserts sorted order.
+
+**Consumers:**
+- Static serving: `hl_vfs_find(vfs, "static/style.css")`
+- Migrations: `hl_vfs_prefix(vfs, "migrations/", &first)`
+- Templates: `hl_vfs_find(vfs, "templates/base.html")`
+- Module loading: `hl_vfs_find(vfs, "hull:cookie")` (JS), `hl_vfs_find(vfs, "hull.json")` (Lua)
+- Signature: `hl_vfs_find(vfs, "./app.lua")` for hash verification
 
 ## Platform Builds
 
@@ -259,6 +286,7 @@ Key findings to be aware of:
 | `HlRuntimeVtable` | `runtime.h` | Runtime interface (init, load, wire_routes, extract_manifest, destroy) |
 | `HlLua` | `runtime/lua.h` | Lua 5.4 context (VM, config, capabilities) |
 | `HlJS` | `runtime/js.h` | QuickJS context (VM, config, capabilities) |
+| `HlVfs` | `vfs.h` | Unified VFS: sorted HlEntry array with O(log n) find, prefix query, path construction |
 | `HlEmbeddedPlatform` | `build_assets.h` | Multi-arch embedded platform entry (arch, data, len) |
 
 ## Git
@@ -426,18 +454,19 @@ template.clearCache();                           // clear compiled function cach
 Convention-based: place files in `app_dir/static/`, they're served at `/static/*`.
 
 - **Dev mode:** Reads from disk via `kl_response_file()` (zero-copy sendfile). `Cache-Control: no-cache`.
-- **Build mode:** Files are embedded in the binary via `hl_app_entries[]` (with `static/` prefix). `Cache-Control: public, max-age=86400`.
+- **Build mode:** Files are embedded in the binary via `hl_app_entries[]` (with `static/` prefix) and looked up via VFS (`hl_vfs_find`). `Cache-Control: public, max-age=86400`.
 - **ETag/304:** `W/"<size_hex>"` for embedded, `W/"<mtime_hex>-<size_hex>"` for filesystem. Returns 304 on `If-None-Match`.
 - **MIME types:** Extension-based lookup (21 types: html, css, js, json, png, jpg, svg, woff2, etc.). Default: `application/octet-stream`.
 - **Security:** Rejects `..` path traversal, null bytes, leading `/` in relative paths.
-- **Auto-detection:** Middleware is registered only when `static/` directory exists or embedded entries are present. User routes take priority (registered first).
+- **Auto-detection:** Middleware is registered only when `hl_vfs_has_prefix(app_vfs, "static/")` returns true or `static/` directory exists on disk. User routes take priority (registered first).
 
-Implementation: `src/hull/static.c` + `include/hull/static.h`. Registered as a Keel pre-body middleware via `kl_server_use()`.
+Implementation: `src/hull/static.c` + `include/hull/static.h`. Uses `HlVfs` for O(log n) embedded lookup. Registered as a Keel pre-body middleware via `kl_server_use()`.
 
 Embedding paths:
-- `make APP_DIR=myapp` — Makefile discovers `APP_DIR/static/*`, generates `app_static_registry.c`
-- `hull build myapp` — `build.lua` discovers `static/`, generates `static_registry.c`
-- Both follow the same `HlEntry` array pattern as Lua/template embedding
+- `make APP_DIR=myapp` — Makefile discovers all app files, generates sorted `app_registry.c` with single `hl_app_entries[]`
+- `hull build myapp` — `build.lua` discovers all files, generates sorted `app_registry.c`
+- All file types share one `HlEntry` array, sorted by name (`LC_ALL=C sort`), disambiguated by naming convention: `./` (modules), `templates/`, `static/`, `migrations/`
+- At runtime, consumers use `HlVfs` for O(log n) lookups instead of O(n) linear scans
 
 ### Recommended Middleware Stack
 
@@ -498,7 +527,10 @@ make e2e                            # run all E2E tests (examples + build + sand
 | `test_hull_cap_fs` | 14 | Path validation, read/write, traversal rejection |
 | `test_js_runtime` | 13 | QuickJS init, eval, sandbox, modules, GC, limits |
 | `test_lua_runtime` | 16 | Lua init, eval, sandbox, modules, GC, double-free |
-| `test_static` | 18 | MIME detection, path traversal, embedded lookup | + E2E suites (`e2e_build.sh`, `e2e_examples.sh`, `e2e_http.sh`, `e2e_sandbox.sh`)
+| `test_static` | 18 | MIME detection, path traversal, embedded VFS lookup |
+| `test_vfs` | 19 | Binary search find, prefix queries, path construction, empty VFS |
+
+\+ E2E suites (`e2e_build.sh`, `e2e_examples.sh`, `e2e_http.sh`, `e2e_sandbox.sh`)
 
 ### E2E Tests
 

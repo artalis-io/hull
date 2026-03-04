@@ -225,6 +225,7 @@ STATIC_OBJ     := $(BUILDDIR)/hull_static.o
 BUILD_ASSET_OBJ      := $(BUILDDIR)/build_assets.o
 BUILD_ASSET_STUB_OBJ := $(BUILDDIR)/build_assets_stub.o
 MIGRATE_OBJ    := $(BUILDDIR)/migrate.o
+VFS_OBJ        := $(BUILDDIR)/vfs.o
 MAIN_OBJ       := $(BUILDDIR)/main.o
 ENTRY_OBJ      := $(BUILDDIR)/entry.o
 
@@ -240,9 +241,6 @@ STDLIB_LUA_FILES := $(shell find stdlib/lua -name '*.lua' -not -path '*/tests/*'
 stdlib_hdr = $(BUILDDIR)/$(subst /,_,$(patsubst stdlib/%.lua,stdlib_%.h,$(1)))
 STDLIB_LUA_HDRS := $(foreach f,$(STDLIB_LUA_FILES),$(call stdlib_hdr,$(f)))
 
-# Auto-generated registry: includes all xxd headers and builds a module table
-STDLIB_LUA_REGISTRY := $(BUILDDIR)/stdlib_lua_registry.h
-
 # Generate per-file xxd rules (avoids % matching directory separators)
 define STDLIB_LUA_RULE
 $(call stdlib_hdr,$(1)): $(1) | $(BUILDDIR)
@@ -250,27 +248,7 @@ $(call stdlib_hdr,$(1)): $(1) | $(BUILDDIR)
 endef
 $(foreach f,$(STDLIB_LUA_FILES),$(eval $(call STDLIB_LUA_RULE,$(f))))
 
-# Keep separate list of xxd-only headers (without the registry itself)
 STDLIB_LUA_XXD_HDRS := $(STDLIB_LUA_HDRS)
-
-# Generate the auto-registry header from discovered files
-$(STDLIB_LUA_REGISTRY): $(STDLIB_LUA_XXD_HDRS) | $(BUILDDIR)
-	@echo "/* Auto-generated — do not edit */" > $@
-	@for hdr in $(STDLIB_LUA_XXD_HDRS); do \
-		echo "#include \"$$(basename $$hdr)\""; \
-	done >> $@
-	@echo "" >> $@
-	@echo "#include \"hull/entry.h\"" >> $@
-	@echo "static const HlEntry hl_stdlib_lua_entries[] = {" >> $@
-	@for f in $(STDLIB_LUA_FILES); do \
-		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
-		modname=$$(echo "$$f" | sed 's|^stdlib/lua/||; s|\.lua$$||; s|/|.|g'); \
-		echo "    { \"$$modname\", $${varname}, sizeof($${varname}) },"; \
-	done >> $@
-	@echo "    { 0, 0, 0 }" >> $@
-	@echo "};" >> $@
-
-STDLIB_LUA_HDRS += $(STDLIB_LUA_REGISTRY)
 
 # ── JS stdlib embedding (xxd) ────────────────────────────────────────
 #
@@ -283,8 +261,6 @@ STDLIB_JS_FILES := $(shell find stdlib/js -name '*.js' -not -path '*/tests/*' 2>
 stdlib_js_hdr = $(BUILDDIR)/$(subst /,_,$(patsubst stdlib/%.js,stdlib_%.h,$(1)))
 STDLIB_JS_HDRS := $(foreach f,$(STDLIB_JS_FILES),$(call stdlib_js_hdr,$(f)))
 
-STDLIB_JS_REGISTRY := $(BUILDDIR)/stdlib_js_registry.h
-
 define STDLIB_JS_RULE
 $(call stdlib_js_hdr,$(1)): $(1) | $(BUILDDIR)
 	xxd -i $$< > $$@
@@ -293,23 +269,37 @@ $(foreach f,$(STDLIB_JS_FILES),$(eval $(call STDLIB_JS_RULE,$(f))))
 
 STDLIB_JS_XXD_HDRS := $(STDLIB_JS_HDRS)
 
-$(STDLIB_JS_REGISTRY): $(STDLIB_JS_XXD_HDRS) | $(BUILDDIR)
-	@echo "/* Auto-generated — do not edit */" > $@
-	@for hdr in $(STDLIB_JS_XXD_HDRS); do \
+# ── Unified stdlib registry (.c compiled once, linked by both runtimes) ──
+#
+# Merges Lua (dot names) and JS (colon names) into a single hl_stdlib_entries[].
+# Runtimes filter at load time: strchr(name, ':') → JS, else Lua.
+
+STDLIB_REGISTRY_C := $(BUILDDIR)/stdlib_registry.c
+STDLIB_REGISTRY_O := $(BUILDDIR)/stdlib_registry.o
+
+$(STDLIB_REGISTRY_C): $(STDLIB_LUA_XXD_HDRS) $(STDLIB_JS_XXD_HDRS) | $(BUILDDIR)
+	@echo "/* Auto-generated unified stdlib registry — do not edit */" > $@
+	@for hdr in $(STDLIB_LUA_XXD_HDRS) $(STDLIB_JS_XXD_HDRS); do \
 		echo "#include \"$$(basename $$hdr)\""; \
 	done >> $@
 	@echo "" >> $@
 	@echo "#include \"hull/entry.h\"" >> $@
-	@echo "static const HlEntry hl_stdlib_js_entries[] = {" >> $@
-	@for f in $(STDLIB_JS_FILES); do \
+	@echo "const HlEntry hl_stdlib_entries[] = {" >> $@
+	@( for f in $(STDLIB_LUA_FILES); do \
+		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
+		modname=$$(echo "$$f" | sed 's|^stdlib/lua/||; s|\.lua$$||; s|/|.|g'); \
+		echo "$$modname	    { \"$$modname\", $${varname}, sizeof($${varname}) },"; \
+	done; \
+	for f in $(STDLIB_JS_FILES); do \
 		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
 		modname=$$(echo "$$f" | sed 's|^stdlib/js/||; s|\.js$$||; s|/|:|g'); \
-		echo "    { \"$$modname\", $${varname}, sizeof($${varname}) },"; \
-	done >> $@
+		echo "$$modname	    { \"$$modname\", $${varname}, sizeof($${varname}) },"; \
+	done ) | LC_ALL=C sort | cut -f2- >> $@
 	@echo "    { 0, 0, 0 }" >> $@
 	@echo "};" >> $@
 
-STDLIB_JS_HDRS += $(STDLIB_JS_REGISTRY)
+$(STDLIB_REGISTRY_O): $(STDLIB_REGISTRY_C) | $(BUILDDIR)
+	$(CC) -std=c11 -O2 -w -I$(INCDIR) -I$(BUILDDIR) -c -o $@ $<
 
 # ── App code embedding (xxd) ─────────────────────────────────────────
 #
@@ -399,43 +389,41 @@ $(APP_REGISTRY_C): $(APP_ALL_XXD_HDRS) | $(BUILDDIR)
 	@echo "" >> $@
 	@echo "#include \"hull/entry.h\"" >> $@
 	@echo "const HlEntry hl_app_entries[] = {" >> $@
-	@for f in $(APP_LUA_FILES); do \
+	@( for f in $(APP_LUA_FILES); do \
 		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
 		modname=$$(echo "$$f" | sed 's|^$(APP_DIR)/||; s|\.lua$$||'); \
-		echo "    { \"./$$modname\", $${varname}, sizeof($${varname}) },"; \
-	done >> $@
-	@for f in $(APP_JS_FILES); do \
+		echo "./$$modname	    { \"./$$modname\", $${varname}, sizeof($${varname}) },"; \
+	done; \
+	for f in $(APP_JS_FILES); do \
 		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
 		modname=$$(echo "$$f" | sed 's|^$(APP_DIR)/||'); \
-		echo "    { \"./$$modname\", $${varname}, sizeof($${varname}) },"; \
-	done >> $@
-	@for f in $(APP_JSON_FILES); do \
+		echo "./$$modname	    { \"./$$modname\", $${varname}, sizeof($${varname}) },"; \
+	done; \
+	for f in $(APP_JSON_FILES); do \
 		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
 		modname=$$(echo "$$f" | sed 's|^$(APP_DIR)/||'); \
-		echo "    { \"./$$modname\", $${varname}, sizeof($${varname}) },"; \
-	done >> $@
-	@for f in $(APP_TPL_FILES); do \
+		echo "./$$modname	    { \"./$$modname\", $${varname}, sizeof($${varname}) },"; \
+	done; \
+	for f in $(APP_TPL_FILES); do \
 		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
 		tplname=$$(echo "$$f" | sed 's|^$(APP_DIR)/||'); \
-		echo "    { \"$$tplname\", $${varname}, sizeof($${varname}) },"; \
-	done >> $@
-	@for f in $(APP_STATIC_FILES); do \
+		echo "$$tplname	    { \"$$tplname\", $${varname}, sizeof($${varname}) },"; \
+	done; \
+	for f in $(APP_STATIC_FILES); do \
 		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
 		staticname=$$(echo "$$f" | sed 's|^$(APP_DIR)/||'); \
-		echo "    { \"$$staticname\", $${varname}, sizeof($${varname}) },"; \
-	done >> $@
-	@for f in $(APP_MIGRATION_FILES); do \
+		echo "$$staticname	    { \"$$staticname\", $${varname}, sizeof($${varname}) },"; \
+	done; \
+	for f in $(APP_MIGRATION_FILES); do \
 		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
 		migname=$$(echo "$$f" | sed 's|^$(APP_DIR)/||'); \
-		echo "    { \"$$migname\", $${varname}, sizeof($${varname}) },"; \
-	done >> $@
+		echo "$$migname	    { \"$$migname\", $${varname}, sizeof($${varname}) },"; \
+	done ) | LC_ALL=C sort | cut -f2- >> $@
 	@echo "    { 0, 0, 0 }" >> $@
 	@echo "};" >> $@
 
 $(APP_REGISTRY_O): $(APP_REGISTRY_C) | $(BUILDDIR)
 	$(CC) -std=c11 -O2 -w -I$(INCDIR) -I$(BUILDDIR) -c -o $@ $<
-
-STDLIB_LUA_HDRS += $(APP_LUA_HDRS)
 
 APP_EXTRA_OBJS := $(APP_REGISTRY_O)
 endif
@@ -457,7 +445,7 @@ all: $(BUILDDIR)/hull
 # Platform static library — everything except entry.o and build_assets.o
 # Used by `hull build` to produce standalone app binaries.
 # Exports hull_main() (subcommand dispatch + server logic).
-PLATFORM_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(MAIN_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(VEND_OBJS) $(MBEDTLS_OBJS) \
+PLATFORM_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(MAIN_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(STDLIB_REGISTRY_O) $(VEND_OBJS) $(MBEDTLS_OBJS) \
 	$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS)
 
 PLATFORM_LIB := $(BUILDDIR)/libhull_platform.a
@@ -562,8 +550,8 @@ $(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H)
 endif
 
 # Hull binary
-$(BUILDDIR)/hull: $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB)
-	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) \
+$(BUILDDIR)/hull: $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB)
+	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(VEND_OBJS) $(MBEDTLS_OBJS) \
 		$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB) -lm -lpthread
 
 # Capability sources
@@ -574,12 +562,12 @@ $(BUILDDIR)/cap_%.o: $(SRCDIR)/hull/cap/%.c | $(BUILDDIR)
 $(BUILDDIR)/cmd_%.o: $(SRCDIR)/hull/commands/%.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# JS runtime sources (depend on generated stdlib headers)
-$(BUILDDIR)/js_%.o: $(SRCDIR)/hull/runtime/js/%.c $(STDLIB_JS_HDRS) | $(BUILDDIR)
+# JS runtime sources
+$(BUILDDIR)/js_%.o: $(SRCDIR)/hull/runtime/js/%.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# Lua runtime sources (depend on generated stdlib headers)
-$(BUILDDIR)/lua_rt_%.o: $(SRCDIR)/hull/runtime/lua/%.c $(STDLIB_LUA_HDRS) | $(BUILDDIR)
+# Lua runtime sources
+$(BUILDDIR)/lua_rt_%.o: $(SRCDIR)/hull/runtime/lua/%.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Hull allocator
@@ -612,6 +600,10 @@ $(STATIC_OBJ): $(SRCDIR)/hull/static.c | $(BUILDDIR)
 
 # Migration runner
 $(MIGRATE_OBJ): $(SRCDIR)/hull/migrate.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+# Virtual filesystem (sorted entry lookup)
+$(VFS_OBJ): $(SRCDIR)/hull/vfs.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Tool mode (keygen, build, verify, etc.)
@@ -704,15 +696,15 @@ $(BUILDDIR)/test_parse_size: $(TESTDIR)/hull/test_parse_size.c $(TEST_COMMON_DEP
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_COMMON_LIBS)
 
 # JS runtime test — needs QuickJS + JS runtime objects + manifest (JS-only to avoid Lua link deps)
-$(BUILDDIR)/test_js: $(TESTDIR)/hull/runtime/js/test_js.c $(TEST_COMMON_DEPS) $(MANIFEST_JS_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(JS_RT_OBJS) $(QJS_OBJS) | $(BUILDDIR)
+$(BUILDDIR)/test_js: $(TESTDIR)/hull/runtime/js/test_js.c $(TEST_COMMON_DEPS) $(MANIFEST_JS_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(JS_RT_OBJS) $(QJS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(TEST_CAP_OBJS) $(JS_RT_OBJS) $(MANIFEST_JS_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(ALLOC_OBJ) $(QJS_OBJS) \
+		$(TEST_CAP_OBJS) $(JS_RT_OBJS) $(MANIFEST_JS_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(ALLOC_OBJ) $(QJS_OBJS) \
 		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) -lm -lpthread
 
-# Lua runtime test — needs Lua + Lua runtime objects + stdlib headers + manifest (Lua-only) + cap_tool + build_assets
-$(BUILDDIR)/test_lua: $(TESTDIR)/hull/runtime/lua/test_lua.c $(TEST_COMMON_DEPS) $(CAP_TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MANIFEST_LUA_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(LUA_RT_OBJS) $(LUA_OBJS) $(STDLIB_LUA_HDRS) | $(BUILDDIR)
+# Lua runtime test — needs Lua + Lua runtime objects + manifest (Lua-only) + cap_tool + build_assets
+$(BUILDDIR)/test_lua: $(TESTDIR)/hull/runtime/lua/test_lua.c $(TEST_COMMON_DEPS) $(CAP_TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MANIFEST_LUA_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(LUA_RT_OBJS) $(LUA_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(TEST_CAP_OBJS) $(CAP_TOOL_OBJ) $(BUILD_ASSET_OBJ) $(LUA_RT_OBJS) $(MANIFEST_LUA_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(ALLOC_OBJ) $(LUA_OBJS) \
+		$(TEST_CAP_OBJS) $(CAP_TOOL_OBJ) $(BUILD_ASSET_OBJ) $(LUA_RT_OBJS) $(MANIFEST_LUA_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(ALLOC_OBJ) $(LUA_OBJS) \
 		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) -lm -lpthread
 
 # Tool hardening test — cap/tool.c compiled without runtime flags (self-contained C functions)
@@ -724,21 +716,25 @@ $(BUILDDIR)/test_tool: $(TESTDIR)/hull/cap/test_tool.c $(CAP_TOOL_NONE_OBJ) | $(
 	$(CC) $(filter-out -DHL_ENABLE_LUA -DHL_ENABLE_JS,$(CFLAGS)) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(CAP_TOOL_NONE_OBJ)
 
 # Command dispatcher test — needs full command set (symbol resolution for command table)
-$(BUILDDIR)/test_dispatch: $(TESTDIR)/hull/commands/test_dispatch.c $(CMD_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(TOOL_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(TEST_COMMON_DEPS) $(RT_OBJS) $(VEND_OBJS) $(MANIFEST_OBJ) $(BUILD_ASSET_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(PLEDGE_OBJS) $(STDLIB_LUA_HDRS) | $(BUILDDIR)
+$(BUILDDIR)/test_dispatch: $(TESTDIR)/hull/commands/test_dispatch.c $(CMD_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(TOOL_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(TEST_COMMON_DEPS) $(RT_OBJS) $(VEND_OBJS) $(MANIFEST_OBJ) $(BUILD_ASSET_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(PLEDGE_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(CMD_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(TOOL_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) \
-		$(TEST_CAP_OBJS) $(RT_OBJS) $(MANIFEST_OBJ) $(BUILD_ASSET_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(ALLOC_OBJ) $(VEND_OBJS) \
+		$(CMD_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(TOOL_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) \
+		$(TEST_CAP_OBJS) $(RT_OBJS) $(MANIFEST_OBJ) $(BUILD_ASSET_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(ALLOC_OBJ) $(VEND_OBJS) \
 		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) -lm -lpthread
 
-# Signature verification test — needs crypto + app_entries_default
-$(BUILDDIR)/test_signature: $(TESTDIR)/hull/test_signature.c $(SIG_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(TEST_COMMON_DEPS) | $(BUILDDIR)
+# Signature verification test — needs crypto + app_entries_default + vfs
+$(BUILDDIR)/test_signature: $(TESTDIR)/hull/test_signature.c $(SIG_OBJ) $(VFS_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(SIG_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(TEST_COMMON_LIBS)
+		$(SIG_OBJ) $(VFS_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(TEST_COMMON_LIBS)
 
-# Static file serving test — needs static middleware + keel
-$(BUILDDIR)/test_static: $(TESTDIR)/hull/test_static.c $(STATIC_OBJ) $(TEST_COMMON_DEPS) | $(BUILDDIR)
+# Static file serving test — needs static middleware + vfs + keel
+$(BUILDDIR)/test_static: $(TESTDIR)/hull/test_static.c $(STATIC_OBJ) $(VFS_OBJ) $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(STATIC_OBJ) $(TEST_COMMON_LIBS)
+		$(STATIC_OBJ) $(VFS_OBJ) $(TEST_COMMON_LIBS)
+
+# VFS test — standalone module, no runtime deps
+$(BUILDDIR)/test_vfs: $(TESTDIR)/hull/test_vfs.c $(VFS_OBJ) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(VFS_OBJ)
 
 test: $(TEST_BINS)
 	@echo "Running tests..."

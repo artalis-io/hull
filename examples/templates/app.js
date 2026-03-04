@@ -10,10 +10,7 @@
 import { app } from "hull:app";
 import { template } from "hull:template";
 
-app.manifest({
-    csp: "default-src 'none'; style-src 'self' 'unsafe-inline'; "
-       + "img-src 'self'; form-action 'self'; frame-ancestors 'none'",
-});
+app.manifest({});
 
 // Sample data
 const users = [

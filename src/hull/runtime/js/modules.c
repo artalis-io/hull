@@ -2235,9 +2235,8 @@ int hl_js_init_log_module(JSContext *ctx, HlJS *js)
  * _template.loadRaw(name)          → raw template string or null
  * ════════════════════════════════════════════════════════════════════ */
 
-/* Unified app entries — template entries have "templates/" prefix. */
-#include "hull/entry.h"
-extern const HlEntry hl_app_entries[];
+/* VFS: O(log n) lookups into sorted entry arrays */
+#include "hull/vfs.h"
 
 /* _template.compile(code, name?) — compile generated JS source to a function */
 static JSValue js_template_compile(JSContext *ctx, JSValueConst this_val,
@@ -2291,19 +2290,22 @@ static JSValue js_template_load_raw(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "invalid template name");
     }
 
-    /* 1. Search embedded template entries (templates/ prefix in unified array) */
-    for (const HlEntry *e = hl_app_entries; e->name; e++) {
-        if (strncmp(e->name, "templates/", 10) != 0)
-            continue;
-        if (strcmp(e->name + 10, name) == 0) {
-            JSValue result = JS_NewStringLen(ctx, (const char *)e->data, e->len);
-            JS_FreeCString(ctx, name);
-            return result;
+    /* 1. Search embedded template entries via VFS */
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (js && js->base.app_vfs) {
+        char tpl_name[1024];
+        int tpl_n = snprintf(tpl_name, sizeof(tpl_name), "templates/%s", name);
+        if (tpl_n > 0 && (size_t)tpl_n < sizeof(tpl_name)) {
+            const HlEntry *e = hl_vfs_find(js->base.app_vfs, tpl_name);
+            if (e) {
+                JSValue result = JS_NewStringLen(ctx, (const char *)e->data, e->len);
+                JS_FreeCString(ctx, name);
+                return result;
+            }
         }
     }
 
     /* 2. Filesystem fallback (dev mode): app_dir/templates/<name> */
-    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     if (js && js->app_dir) {
         char path[1024];
         int n = snprintf(path, sizeof(path), "%s/templates/%s",
