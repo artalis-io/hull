@@ -155,15 +155,18 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
     HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
     cfg.sandbox = 0;
 
-    /* Init platform VFS for stdlib module loading */
+    /* Init VFS instances for module loading */
     extern const HlEntry hl_stdlib_entries[];
-    HlVfs platform_vfs;
+    extern const HlEntry hl_app_entries[];
+    HlVfs platform_vfs, app_vfs;
     hl_vfs_init(&platform_vfs, hl_stdlib_entries, NULL);
+    hl_vfs_init(&app_vfs, hl_app_entries, app_dir);
 
     HlLua lua;
     memset(&lua, 0, sizeof(lua));
     lua.tool_unveil_ctx = &unveil_ctx;
     lua.base.platform_vfs = &platform_vfs;
+    lua.base.app_vfs = &app_vfs;
 
     if (hl_lua_init(&lua, &cfg) != 0) {
         fprintf(stderr, "hull: Lua init failed\n");
