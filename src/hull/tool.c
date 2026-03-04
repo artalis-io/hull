@@ -11,6 +11,8 @@
 #include "hull/cap/crypto.h"
 #include "hull/cap/tool.h"
 #include "hull/sandbox.h"
+#include "hull/vfs.h"
+#include "hull/entry.h"
 
 #ifdef HL_ENABLE_LUA
 #include "hull/runtime/lua.h"
@@ -153,9 +155,15 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
     HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
     cfg.sandbox = 0;
 
+    /* Init platform VFS for stdlib module loading */
+    extern const HlEntry hl_stdlib_entries[];
+    HlVfs platform_vfs;
+    hl_vfs_init(&platform_vfs, hl_stdlib_entries, NULL);
+
     HlLua lua;
     memset(&lua, 0, sizeof(lua));
     lua.tool_unveil_ctx = &unveil_ctx;
+    lua.base.platform_vfs = &platform_vfs;
 
     if (hl_lua_init(&lua, &cfg) != 0) {
         fprintf(stderr, "hull: Lua init failed\n");
