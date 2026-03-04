@@ -17,6 +17,7 @@
 #include "hull/cap/env.h"
 #include "hull/cap/http.h"
 #include "hull/cap/db.h"
+#include "hull/cap/test.h"
 #include "quickjs.h"
 
 #include <keel/keel.h>
@@ -41,6 +42,7 @@ int hl_js_init_time_module(JSContext *ctx, HlJS *js);
 int hl_js_init_env_module(JSContext *ctx, HlJS *js);
 int hl_js_init_crypto_module(JSContext *ctx, HlJS *js);
 int hl_js_init_log_module(JSContext *ctx, HlJS *js);
+int hl_js_init_smtp_module(JSContext *ctx, HlJS *js);
 int hl_js_init_template_module(JSContext *ctx, HlJS *js);
 
 /* ── Interrupt handler (gas metering) ───────────────────────────────── */
@@ -586,6 +588,26 @@ void hl_js_free(HlJS *js)
     }
 
     if (js->ctx) {
+        /* Free test state opaque data before deleting globals */
+        hl_cap_test_free_js(js->ctx);
+
+        /* Delete hull internal globals so GC can collect them */
+        JSValue global = JS_GetGlobalObject(js->ctx);
+        static const char *hull_globals[] = {
+            "console",
+            "__hull_routes", "__hull_route_defs",
+            "__hull_middleware", "__hull_post_middleware",
+            "__hull_config", "__hull_manifest", "__hull_statics",
+            "__hull_test_state", "test",
+        };
+        for (size_t i = 0; i < sizeof(hull_globals)/sizeof(hull_globals[0]); i++) {
+            JSAtom atom = JS_NewAtom(js->ctx, hull_globals[i]);
+            JS_DeleteProperty(js->ctx, global, atom, 0);
+            JS_FreeAtom(js->ctx, atom);
+        }
+        JS_FreeValue(js->ctx, global);
+        JS_RunGC(js->rt);
+
         JS_FreeContext(js->ctx);
         js->ctx = NULL;
     }
@@ -641,6 +663,8 @@ static int hl_js_track_route(HlJS *js, void *route)
 {
     if (js->route_count >= js->route_cap) {
         size_t new_cap = js->route_cap ? js->route_cap * 2 : 8;
+        if (new_cap < js->route_cap || new_cap > SIZE_MAX / sizeof(void *))
+            return -1; /* overflow */
         size_t old_sz = js->route_cap * sizeof(void *);
         size_t new_sz = new_cap * sizeof(void *);
         void **new_arr = hl_alloc_realloc(js->base.alloc,

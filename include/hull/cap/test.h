@@ -47,6 +47,7 @@ void hl_cap_test_run_lua(lua_State *L, int *total, int *passed, int *failed);
 #ifdef HL_ENABLE_JS
 
 void hl_cap_test_register_js(JSContext *ctx, KlRouter *router, HlJS *js);
+void hl_cap_test_free_js(JSContext *ctx);
 void hl_cap_test_clear_js(JSContext *ctx);
 void hl_cap_test_run_js(JSContext *ctx, int *total, int *passed, int *failed);
 

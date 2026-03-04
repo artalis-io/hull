@@ -92,7 +92,13 @@ static int build_path(const HlFsConfig *cfg, const char *path,
     if (hl_cap_fs_validate(cfg, path) != 0)
         return -1;
 
-    int n = snprintf(out, out_size, "%s/%s", cfg->base_dir, path);
+    /* Use resolved base_dir to avoid TOCTOU with symlinks.
+     * hl_cap_fs_validate already verified base_dir resolves. */
+    char resolved_base[PATH_MAX];
+    if (realpath(cfg->base_dir, resolved_base) == NULL)
+        return -1;
+
+    int n = snprintf(out, out_size, "%s/%s", resolved_base, path);
     if (n < 0 || (size_t)n >= out_size)
         return -1;
 

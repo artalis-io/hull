@@ -46,16 +46,19 @@ static void *hl_lua_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
         return NULL;
     }
 
+    /* When ptr is NULL (new allocation), Lua passes a type-hint enum
+     * (0–8) in osize, not a real size. Use 0 for tracking. */
+    size_t effective_osize = (ptr == NULL) ? 0 : osize;
+
     /* Check Lua sub-limit first */
-    if (nsize > osize) {
-        size_t delta = nsize - osize;
+    if (nsize > effective_osize) {
+        size_t delta = nsize - effective_osize;
         if (lua->mem_limit > 0 && lua->mem_used + delta > lua->mem_limit)
             return NULL; /* allocation refused */
     }
 
     /* Route through tracking allocator.
-     * When ptr is NULL, osize is a Lua type hint (not a real size),
-     * so use malloc to avoid confusing the tracker. */
+     * When ptr is NULL, use malloc to avoid confusing the tracker. */
     void *new_ptr;
     if (ptr == NULL)
         new_ptr = hl_alloc_malloc(lua->base.alloc, nsize);
@@ -63,10 +66,10 @@ static void *hl_lua_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
         new_ptr = hl_alloc_realloc(lua->base.alloc, ptr, osize, nsize);
 
     if (new_ptr) {
-        if (nsize > osize)
-            lua->mem_used += nsize - osize;
-        else if (lua->mem_used >= osize - nsize)
-            lua->mem_used -= osize - nsize;
+        if (nsize > effective_osize)
+            lua->mem_used += nsize - effective_osize;
+        else if (lua->mem_used >= effective_osize - nsize)
+            lua->mem_used -= effective_osize - nsize;
         else
             lua->mem_used = 0;
     }
@@ -345,6 +348,8 @@ static int hl_lua_track_route(HlLua *lua, void *route)
 {
     if (lua->route_count >= lua->route_cap) {
         size_t new_cap = lua->route_cap ? lua->route_cap * 2 : 8;
+        if (new_cap < lua->route_cap || new_cap > SIZE_MAX / sizeof(void *))
+            return -1; /* overflow */
         size_t old_sz = lua->route_cap * sizeof(void *);
         size_t new_sz = new_cap * sizeof(void *);
         void **new_arr = hl_alloc_realloc(lua->base.alloc,
