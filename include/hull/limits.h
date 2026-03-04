@@ -42,6 +42,13 @@
 #define HL_HTTP_DEFAULT_MAX_RESP   (4 * 1024 * 1024)   /* 4 MB max response body */
 #define HL_HTTP_RECV_BUF_SIZE      8192                /* Response recv buffer */
 
+/* ── SMTP client ───────────────────────────────────────────────────── */
+
+#define HL_SMTP_RECV_BUF_SIZE      1024                /* SMTP response line buffer */
+#define HL_SMTP_SEND_BUF_SIZE      1024                /* SMTP command buffer */
+#define HL_SMTP_DEFAULT_TIMEOUT_MS 30000               /* Connect/send/recv timeout */
+#define HL_SMTP_MAX_MSG_SIZE       (10 * 1024 * 1024)  /* 10 MB max formatted message */
+
 /* ── Runtime memory ─────────────────────────────────────────────────── */
 
 #define HL_SCRATCH_SIZE       (HL_MODULE_MAX_SIZE + 256 * 1024) /* module load + request scratch */

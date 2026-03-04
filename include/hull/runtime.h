@@ -17,6 +17,7 @@ typedef struct HlAllocator HlAllocator;
 typedef struct HlFsConfig HlFsConfig;
 typedef struct HlEnvConfig HlEnvConfig;
 typedef struct HlHttpConfig HlHttpConfig;
+typedef struct HlSmtpConfig HlSmtpConfig;
 typedef struct HlManifest HlManifest;
 typedef struct HlStmtCache HlStmtCache;
 typedef struct HlVfs HlVfs;
@@ -44,6 +45,7 @@ struct HlRuntime {
     HlFsConfig   *fs_cfg;
     HlEnvConfig  *env_cfg;
     HlHttpConfig *http_cfg;
+    HlSmtpConfig *smtp_cfg;
     const char   *csp_policy;  /* CSP header value for HTML responses (NULL = none) */
     const HlVfs  *app_vfs;       /* app entries (embedded + dev fallback) */
     const HlVfs  *platform_vfs;  /* stdlib entries (always embedded) */
