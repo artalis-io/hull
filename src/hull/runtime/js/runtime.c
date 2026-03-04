@@ -221,9 +221,16 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
         return NULL;
     }
 
-    /* Build filesystem path */
+    /* Build filesystem path.  The normalizer resolves relative imports
+     * against the base module directory, which may prepend app_dir
+     * (e.g. "examples/todo/./locales/en.json").  Strip that prefix
+     * to avoid doubling when we prepend app_dir ourselves. */
+    const char *fs_name = module_name;
+    const char *dot_slash = strstr(module_name, "/./");
+    if (dot_slash)
+        fs_name = dot_slash + 1; /* points to "./" */
     char path[HL_MODULE_PATH_MAX];
-    int n = snprintf(path, sizeof(path), "%s/%s", js->app_dir, module_name);
+    int n = snprintf(path, sizeof(path), "%s/%s", js->app_dir, fs_name);
     if (n < 0 || (size_t)n >= sizeof(path)) {
         JS_ThrowReferenceError(ctx, "module path too long: %s", module_name);
         return NULL;
