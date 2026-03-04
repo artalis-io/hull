@@ -14,6 +14,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Forward declaration */
+typedef struct HlVfs HlVfs;
+
 /* ── Hardcoded gethull.dev platform public key (from keys/gethull.dev.pub) ── */
 /*
  * This is the trust root for platform signature verification.
@@ -87,10 +90,10 @@ int hl_sig_verify(const HlSignature *sig, const uint8_t pubkey[32]);
 int hl_sig_verify_platform(const HlSignature *sig, const uint8_t pubkey[32]);
 
 /*
- * Verify file hashes against embedded app entries (hl_app_entries[]).
+ * Verify file hashes against embedded app entries via VFS.
  * Returns 0 if all files match, -1 on mismatch or missing files.
  */
-int hl_sig_verify_files_embedded(const HlSignature *sig);
+int hl_sig_verify_files_embedded(const HlSignature *sig, const HlVfs *vfs);
 
 /*
  * Verify file hashes against filesystem files in app_dir.
@@ -109,9 +112,11 @@ void hl_sig_free(HlSignature *sig);
  *
  * `pubkey_path` — path to the developer .pub file (64 hex chars)
  * `entry_point` — path to the app entry point (used to derive sig location)
+ * `app_vfs`     — app VFS for embedded entry lookup
  *
  * Returns 0 on success, -1 on any verification failure.
  */
-int hl_verify_startup(const char *pubkey_path, const char *entry_point);
+int hl_verify_startup(const char *pubkey_path, const char *entry_point,
+                      const HlVfs *app_vfs);
 
 #endif /* HL_SIGNATURE_H */

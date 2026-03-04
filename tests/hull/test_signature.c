@@ -6,6 +6,7 @@
 
 #include "utest.h"
 #include "hull/signature.h"
+#include "hull/vfs.h"
 #include "hull/cap/crypto.h"
 
 #include <stdio.h>
@@ -515,7 +516,11 @@ UTEST(hl_sig, verify_startup_good)
     char entry_point[512];
     snprintf(entry_point, sizeof(entry_point), "%s/app.lua", test_dir);
 
-    int rc = hl_verify_startup(pk_path, entry_point);
+    extern const HlEntry hl_app_entries[];
+    HlVfs app_vfs;
+    hl_vfs_init(&app_vfs, hl_app_entries, test_dir);
+
+    int rc = hl_verify_startup(pk_path, entry_point, &app_vfs);
     ASSERT_EQ(rc, 0);
 }
 
@@ -535,7 +540,11 @@ UTEST(hl_sig, verify_startup_bad_key)
     char entry_point[512];
     snprintf(entry_point, sizeof(entry_point), "%s/app.lua", test_dir);
 
-    int rc = hl_verify_startup(pk_path, entry_point);
+    extern const HlEntry hl_app_entries[];
+    HlVfs app_vfs;
+    hl_vfs_init(&app_vfs, hl_app_entries, test_dir);
+
+    int rc = hl_verify_startup(pk_path, entry_point, &app_vfs);
     ASSERT_EQ(rc, -1);
 }
 

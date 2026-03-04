@@ -127,8 +127,8 @@ function i18n.number(n)
     if type(n) ~= "number" then return tostring(n) end
 
     local fmt = locales[active] and locales[active].format
-    local dec_sep = fmt and fmt.decimal_sep or "."
-    local thou_sep = fmt and fmt.thousands_sep or ","
+    local dec_sep = fmt and (fmt.decimalSep or fmt.decimal_sep) or "."
+    local thou_sep = fmt and (fmt.thousandsSep or fmt.thousands_sep) or ","
 
     local negative = n < 0
     if negative then n = -n end
@@ -157,7 +157,7 @@ function i18n.date(timestamp)
     if type(timestamp) ~= "number" then return tostring(timestamp) end
 
     local fmt = locales[active] and locales[active].format
-    local pattern = fmt and fmt.date_pattern or "YYYY-MM-DD"
+    local pattern = fmt and (fmt.datePattern or fmt.date_pattern) or "YYYY-MM-DD"
 
     local dt = epoch_to_utc(timestamp)
     local result = pattern
@@ -188,8 +188,8 @@ function i18n.currency(amount, code)
     local rounded = math.floor(amount * 10^digits + 0.5) / 10^digits
 
     -- Format the number part
-    local dec_sep = fmt.decimal_sep or "."
-    local thou_sep = fmt.thousands_sep or ","
+    local dec_sep = fmt.decimalSep or fmt.decimal_sep or "."
+    local thou_sep = fmt.thousandsSep or fmt.thousands_sep or ","
 
     local int_part = math.floor(rounded)
     local frac_part = rounded - int_part

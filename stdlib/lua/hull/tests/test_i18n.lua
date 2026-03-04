@@ -34,9 +34,9 @@ end
 
 local en = {
     format = {
-        decimal_sep = ".",
-        thousands_sep = ",",
-        date_pattern = "YYYY-MM-DD",
+        decimalSep = ".",
+        thousandsSep = ",",
+        datePattern = "YYYY-MM-DD",
         currency = {
             USD = { symbol = "$", position = "before", decimal_digits = 2 },
             EUR = { symbol = "\xe2\x82\xac", position = "before", decimal_digits = 2 },
@@ -56,9 +56,9 @@ local en = {
 
 local hu = {
     format = {
-        decimal_sep = ",",
-        thousands_sep = " ",
-        date_pattern = "YYYY.MM.DD.",
+        decimalSep = ",",
+        thousandsSep = " ",
+        datePattern = "YYYY.MM.DD.",
         currency = {
             HUF = { symbol = "Ft", position = "after", decimal_digits = 0 },
             EUR = { symbol = "\xe2\x82\xac", position = "before", decimal_digits = 2 },

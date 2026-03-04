@@ -10,15 +10,14 @@
 #ifndef HL_STATIC_H
 #define HL_STATIC_H
 
-#include "hull/entry.h"
+#include "hull/vfs.h"
 
 #include <keel/request.h>
 #include <keel/response.h>
 #include <stddef.h>
 
 typedef struct {
-    const char *app_dir;          /* filesystem root (dev mode) */
-    const HlEntry *entries;       /* embedded entries (build mode) */
+    const HlVfs *vfs;             /* unified VFS: embedded + filesystem */
 } HlStaticCtx;
 
 /**
