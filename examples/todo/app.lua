@@ -11,16 +11,17 @@
 -- Run:  hull dev examples/todo/app.lua -d /tmp/todo.db
 --
 
-local template  = require("hull.template")
-local form      = require("hull.form")
-local validate  = require("hull.validate")
-local session   = require("hull.middleware.session")
-local auth      = require("hull.middleware.auth")
-local csrf      = require("hull.middleware.csrf")
-local ratelimit = require("hull.middleware.ratelimit")
-local logger    = require("hull.middleware.logger")
-local cookie    = require("hull.cookie")
-local i18n      = require("hull.i18n")
+local template    = require("hull.template")
+local form        = require("hull.form")
+local validate    = require("hull.validate")
+local session     = require("hull.middleware.session")
+local auth        = require("hull.middleware.auth")
+local csrf        = require("hull.middleware.csrf")
+local ratelimit   = require("hull.middleware.ratelimit")
+local logger      = require("hull.middleware.logger")
+local transaction = require("hull.middleware.transaction")
+local cookie      = require("hull.cookie")
+local i18n        = require("hull.i18n")
 
 app.manifest({})  -- sandbox: no fs, no env, no outbound HTTP; default CSP
 
@@ -63,6 +64,9 @@ app.use("POST", "/login", ratelimit.middleware({ limit = 10, window = 60 }))
 app.use("POST", "/register", ratelimit.middleware({ limit = 5, window = 60 }))
 -- CSRF needs body access → post-body middleware
 app.use_post("*", "/*", csrf.middleware({ secret = csrf_secret }))
+-- Wrap POST mutations in BEGIN IMMEDIATE..COMMIT for atomicity
+-- (e.g., register's check+insert becomes atomic, preventing TOCTOU races)
+app.use_post("POST", "/*", transaction.middleware())
 
 -- ── Helpers ─────────────────────────────────────────────────────────
 
@@ -200,15 +204,24 @@ app.post("/register", function(req, res)
     local password = params.password
     local name = params.name
 
-    local existing = db.query("SELECT id FROM users WHERE email = ?", { email })
-    if #existing > 0 then
-        return res:html(render("pages/register.html", req, { error = "Email already registered" }))
-    end
-
+    -- Wrap check+insert in a transaction to prevent TOCTOU race on email uniqueness
     local hash = crypto.hash_password(password)
-    db.exec("INSERT INTO users (email, password_hash, name, created_at) VALUES (?, ?, ?, ?)",
-            { email, hash, name, time.now() })
-    local user_id = db.last_id()
+    local user_id
+    local ok_txn, txn_err = transaction.try(function()
+        local existing = db.query("SELECT id FROM users WHERE email = ?", { email })
+        if #existing > 0 then
+            error("Email already registered")
+        end
+        db.exec("INSERT INTO users (email, password_hash, name, created_at) VALUES (?, ?, ?, ?)",
+                { email, hash, name, time.now() })
+        user_id = db.last_id()
+    end)
+
+    if not ok_txn then
+        local msg = tostring(txn_err):match("Email already registered") and "Email already registered"
+                    or "Registration failed"
+        return res:html(render("pages/register.html", req, { error = msg }))
+    end
 
     auth.login(req, res, { user_id = user_id, email = email, name = name })
     res:redirect("/")
