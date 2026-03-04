@@ -378,7 +378,7 @@ int hl_migrate_status(sqlite3 *db, const char *app_dir,
             return 0;
         }
 
-        names = malloc((size_t)count * sizeof(char *));
+        names = calloc((size_t)count, sizeof(char *));
         if (!names)
             return -1;
 
@@ -398,7 +398,7 @@ int hl_migrate_status(sqlite3 *db, const char *app_dir,
         }
 
         count = ml.count;
-        names = malloc((size_t)count * sizeof(char *));
+        names = calloc((size_t)count, sizeof(char *));
         if (!names) {
             migration_list_free(&ml);
             return -1;
