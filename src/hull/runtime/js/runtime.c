@@ -189,19 +189,46 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
                 size_t src_len = e->len;
                 char *buf = NULL;
 
-                /* JSON → wrap as export default JSON.parse(`...`) */
+                /* JSON → wrap as export default JSON.parse(`...`)
+                 * Escape \, ` and ${ so the template literal passes
+                 * the original JSON bytes through to JSON.parse. */
                 if (is_json) {
                     const char *pfx = "export default JSON.parse(`";
                     const char *sfx = "`);\n";
                     size_t plen = strlen(pfx), slen = strlen(sfx);
-                    size_t wrap_len = plen + src_len + slen;
+
+                    /* Count chars that need a backslash prefix */
+                    size_t extra = 0;
+                    for (size_t k = 0; k < src_len; k++) {
+                        if (src[k] == '\\' || src[k] == '`')
+                            extra++;
+                        else if (src[k] == '$' && k + 1 < src_len &&
+                                 src[k + 1] == '{')
+                            extra++;
+                    }
+
+                    size_t wrap_len = plen + src_len + extra + slen;
                     buf = js_malloc(ctx, wrap_len + 1);
                     if (!buf) return NULL;
                     memcpy(buf, pfx, plen);
-                    memcpy(buf + plen, src, src_len);
-                    memcpy(buf + plen + src_len, sfx, slen + 1);
+
+                    size_t pos = plen;
+                    for (size_t k = 0; k < src_len; k++) {
+                        if (src[k] == '\\' || src[k] == '`') {
+                            buf[pos++] = '\\';
+                            buf[pos++] = src[k];
+                        } else if (src[k] == '$' && k + 1 < src_len &&
+                                   src[k + 1] == '{') {
+                            buf[pos++] = '\\';
+                            buf[pos++] = '$';
+                        } else {
+                            buf[pos++] = src[k];
+                        }
+                    }
+
+                    memcpy(buf + pos, sfx, slen + 1);
                     src = buf;
-                    src_len = wrap_len;
+                    src_len = pos + slen;
                 }
 
                 JSValue func = JS_Eval(ctx, src, src_len, module_name,
@@ -734,10 +761,10 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     JS_FreeValue(js->ctx, handler);
     JS_FreeValue(js->ctx, global);
 
-    /* Free ctx if middleware set it */
+    /* Free ctx if middleware set it (size stored in prefix) */
     if (req->ctx) {
-        size_t ctx_sz = strlen((char *)req->ctx) + 1;
-        hl_alloc_free(js->base.alloc, req->ctx, ctx_sz);
+        size_t *block = (size_t *)req->ctx - 1;
+        hl_alloc_free(js->base.alloc, block, sizeof(size_t) + block[0]);
         req->ctx = NULL;
     }
 
@@ -1049,14 +1076,19 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
             size_t json_len = json_str ? strlen(json_str) : 0;
             if (json_str && json_len > 2 && json_len < 65536) { /* skip empty "{}" */
                 if (req->ctx) {
-                    size_t old_sz = strlen((char *)req->ctx) + 1;
-                    hl_alloc_free(js->base.alloc, req->ctx, old_sz);
+                    size_t *old_block = (size_t *)req->ctx - 1;
+                    hl_alloc_free(js->base.alloc, old_block,
+                                  sizeof(size_t) + old_block[0]);
                     req->ctx = NULL;
                 }
-                char *ctx_copy = hl_alloc_malloc(js->base.alloc, json_len + 1);
-                if (ctx_copy) {
-                    memcpy(ctx_copy, json_str, json_len + 1);
-                    req->ctx = ctx_copy;
+                /* Prepend size_t length for safe deallocation */
+                size_t alloc_sz = json_len + 1;
+                size_t *block = hl_alloc_malloc(js->base.alloc,
+                                                sizeof(size_t) + alloc_sz);
+                if (block) {
+                    block[0] = alloc_sz;
+                    memcpy(block + 1, json_str, alloc_sz);
+                    req->ctx = (char *)(block + 1);
                 }
             }
             if (json_str) JS_FreeCString(js->ctx, json_str);

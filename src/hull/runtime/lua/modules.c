@@ -280,6 +280,8 @@ static int lua_query_row_cb(void *opaque, HlColumn *cols, int ncols)
     qc->row_count++;
 
     lua_newtable(qc->L);
+    if (!lua_checkstack(qc->L, ncols + 2))
+        return -1;
     for (int i = 0; i < ncols; i++) {
         switch (cols[i].value.type) {
         case HL_TYPE_INT:
@@ -723,7 +725,7 @@ static int lua_crypto_verify_password(lua_State *L)
     /* Parse iterations */
     char *end = NULL;
     long iterations = strtol(p, &end, 10);
-    if (!end || *end != ':' || iterations <= 0) {
+    if (!end || *end != ':' || iterations < 100000) {
         lua_pushboolean(L, 0);
         return 1;
     }
@@ -1393,9 +1395,18 @@ static int lua_parse_http_headers(lua_State *L, int idx,
     lua_pushnil(L);
     while (lua_next(L, idx) != 0) {
         if (lua_isstring(L, -2) && lua_isstring(L, -1)) {
-            hdrs[i].name = lua_tostring(L, -2);
-            hdrs[i].value = lua_tostring(L, -1);
-            i++;
+            size_t nlen, vlen;
+            const char *n = lua_tolstring(L, -2, &nlen);
+            const char *v = lua_tolstring(L, -1, &vlen);
+            char *nc = sh_arena_alloc(scratch, nlen + 1);
+            char *vc = sh_arena_alloc(scratch, vlen + 1);
+            if (nc && vc) {
+                memcpy(nc, n, nlen + 1);
+                memcpy(vc, v, vlen + 1);
+                hdrs[i].name = nc;
+                hdrs[i].value = vc;
+                i++;
+            }
         }
         lua_pop(L, 1); /* pop value, keep key */
     }
