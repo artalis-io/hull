@@ -2,8 +2,8 @@
 -- Run: hull test examples/webhooks/
 --
 -- Note: outbound HTTP delivery will fail in test mode (no actual server to
--- call), but webhook registration, listing, and signature verification
--- can be tested.
+-- call), but webhook registration, listing, signature verification, and
+-- outbox queueing can be tested.
 
 test("GET /health returns ok", function()
     local res = test.get("/health")
@@ -80,7 +80,7 @@ test("POST /events requires event field", function()
     test.eq(res.status, 400)
 end)
 
-test("POST /events creates event and returns deliveries", function()
+test("POST /events creates event and enqueues deliveries", function()
     -- Register a webhook first
     test.post("/webhooks", {
         body = '{"url":"http://127.0.0.1:9999/outbox-test","events":"order.placed"}',
@@ -93,12 +93,22 @@ test("POST /events creates event and returns deliveries", function()
     })
     test.eq(res.status, 200)
     test.ok(res.json.event_id, "has event_id")
-    test.ok(res.json.deliveries ~= nil, "has deliveries")
+    test.ok(res.json.webhooks_queued ~= nil, "has webhooks_queued")
+    test.ok(res.json.webhooks_queued > 0, "queued at least one webhook")
 end)
 
 test("GET /events returns event log", function()
     local res = test.get("/events")
     test.eq(res.status, 200)
+end)
+
+-- ── Outbox ──────────────────────────────────────────────────────────
+
+test("GET /outbox/stats returns delivery stats", function()
+    local res = test.get("/outbox/stats")
+    test.eq(res.status, 200)
+    test.ok(res.json.pending ~= nil or res.json.delivered ~= nil or res.json.failed ~= nil,
+            "has state counts")
 end)
 
 -- ── Webhook receiver (signature verification) ──────────────────────

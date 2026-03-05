@@ -3,15 +3,20 @@
 // Run: hull app.js -p 3000
 // Webhook delivery and receipt with HMAC-SHA256 signatures
 //
-// Register webhook endpoints, fire events that deliver to them,
-// and receive/verify incoming webhooks.
+// Features:
+//   - Transactional outbox: event insert + delivery enqueue are atomic
+//   - Inbox deduplication: incoming webhook receipts are deduplicated
+//   - Idempotency keys: POST /events supports Idempotency-Key header
+//   - Retry with exponential backoff via outbox.flush()
 
 import { app } from "hull:app";
 import { crypto } from "hull:crypto";
 import { db } from "hull:db";
 import { env } from "hull:env";
-import { http } from "hull:http";
 import { log } from "hull:log";
+import { idempotency } from "hull:middleware:idempotency";
+import { inbox } from "hull:middleware:inbox";
+import { outbox } from "hull:middleware:outbox";
 import { time } from "hull:time";
 import { validate } from "hull:validate";
 
@@ -23,6 +28,17 @@ app.manifest({
 
 let SIGNING_SECRET = "whsec_change-me-in-production";
 try { const v = env.get("WEBHOOK_SECRET"); if (v) SIGNING_SECRET = v; } catch (_e) {}
+
+// ── Initialize middleware tables ──────────────────────────────────────
+
+idempotency.init({ ttl: 86400 });
+outbox.init({ maxAttempts: 5 });
+inbox.init({ ttl: 604800 });  // 7 days
+
+// ── Post-body middleware ──────────────────────────────────────────────
+
+// Idempotency on POST /events (the critical non-idempotent endpoint)
+app.usePost("POST", "/events", idempotency.middleware());
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -37,32 +53,6 @@ const SECRET_HEX = secretToHex(SIGNING_SECRET);
 
 function signPayload(payloadStr) {
     return crypto.hmacSha256(payloadStr, SECRET_HEX);
-}
-
-function deliverWebhook(webhook, eventType, payloadStr, eventId) {
-    const sig = signPayload(payloadStr);
-
-    let status = 0;
-    let respBody = "";
-
-    try {
-        const r = http.post(webhook.url, payloadStr, {
-            headers: {
-                "Content-Type": "application/json",
-                "X-Webhook-Event": eventType,
-                "X-Webhook-Signature": `sha256=${sig}`,
-            }
-        });
-        status = r.status;
-        respBody = r.body || "";
-    } catch (e) {
-        respBody = e.message || String(e);
-    }
-
-    db.exec("INSERT INTO deliveries (webhook_id, event_id, status, response_body, created_at) VALUES (?, ?, ?, ?, ?)",
-            [webhook.id, eventId, status, respBody, time.now()]);
-
-    return status;
 }
 
 // ── Routes ──────────────────────────────────────────────────────────
@@ -112,7 +102,7 @@ app.del("/webhooks/:id", (req, res) => {
     res.json({ ok: true });
 });
 
-// Fire an event — delivers to all matching active webhooks
+// Fire an event — atomically inserts event + enqueues deliveries via outbox
 app.post("/events", (req, res) => {
     let body;
     try { body = JSON.parse(req.body); } catch (_e) {
@@ -131,27 +121,61 @@ app.post("/events", (req, res) => {
     const { event, data } = body;
 
     const payloadStr = JSON.stringify({ event, data, timestamp: time.now() });
+    const sig = signPayload(payloadStr);
 
-    // Log the event
-    db.exec("INSERT INTO event_log (event_type, payload, created_at) VALUES (?, ?, ?)",
-            [event, payloadStr, time.now()]);
-    const eventId = db.lastId();
+    let eventId;
+    let queuedCount = 0;
 
-    // Find matching webhooks
-    const webhooks = db.query("SELECT * FROM webhooks WHERE active = 1");
-    const results = [];
+    // Atomically: insert event + enqueue outbox deliveries in one transaction
+    db.batch(() => {
+        // Log the event
+        db.exec("INSERT INTO event_log (event_type, payload, created_at) VALUES (?, ?, ?)",
+                [event, payloadStr, time.now()]);
+        eventId = db.lastId();
 
-    for (let i = 0; i < webhooks.length; i++) {
-        const wh = webhooks[i];
-        // Check if webhook subscribes to this event type
-        const subscribed = wh.events.split(",").map(s => s.trim());
-        if (subscribed.indexOf(event) !== -1 || subscribed.indexOf("*") !== -1) {
-            const status = deliverWebhook(wh, event, payloadStr, eventId);
-            results.push({ webhook_id: wh.id, url: wh.url, status });
+        // Find matching webhooks and enqueue deliveries
+        const webhooks = db.query("SELECT * FROM webhooks WHERE active = 1");
+
+        for (let i = 0; i < webhooks.length; i++) {
+            const wh = webhooks[i];
+            // Check if webhook subscribes to this event type
+            const subscribed = wh.events.split(",").map(s => s.trim());
+            if (subscribed.indexOf(event) !== -1 || subscribed.indexOf("*") !== -1) {
+                outbox.enqueue({
+                    kind: "webhook",
+                    destination: wh.url,
+                    payload: payloadStr,
+                    headers: JSON.stringify({
+                        "Content-Type": "application/json",
+                        "X-Webhook-Event": event,
+                        "X-Webhook-Signature": `sha256=${sig}`,
+                    }),
+                    idempotencyKey: `evt-${eventId}-wh-${wh.id}`,
+                });
+                queuedCount++;
+            }
         }
-    }
+    });
 
-    res.json({ event_id: eventId, deliveries: results });
+    // Respond (cached by idempotency middleware if key was provided)
+    idempotency.respond(req, res, 200, {
+        event_id: eventId,
+        webhooks_queued: queuedCount,
+    });
+
+    // Flush outbox: deliver enqueued webhooks (after commit)
+    outbox.flush();
+});
+
+// Manually trigger outbox flush (for crash recovery or cron)
+app.post("/outbox/flush", (_req, res) => {
+    const result = outbox.flush();
+    res.json(result);
+});
+
+// Outbox stats
+app.get("/outbox/stats", (_req, res) => {
+    res.json(outbox.stats());
 });
 
 // List events
@@ -160,14 +184,21 @@ app.get("/events", (_req, res) => {
     res.json(rows);
 });
 
-// List deliveries for a webhook
+// List deliveries for a webhook (from outbox)
 app.get("/webhooks/:id/deliveries", (req, res) => {
-    const rows = db.query("SELECT id, event_id, status, response_body, created_at FROM deliveries WHERE webhook_id = ? ORDER BY id DESC LIMIT 50",
-                          [req.params.id]);
+    const wh = db.query("SELECT url FROM webhooks WHERE id = ?", [req.params.id]);
+    if (!wh || wh.length === 0) {
+        return res.status(404).json({ error: "webhook not found" });
+    }
+    const rows = db.query(
+        "SELECT id, state, attempts, last_error, created_at, delivered_at " +
+        "FROM _hull_outbox WHERE destination = ? ORDER BY id DESC LIMIT 50",
+        [wh[0].url]
+    );
     res.json(rows);
 });
 
-// ── Webhook receiver (verify incoming signatures) ───────────────────
+// ── Webhook receiver (verify incoming signatures + inbox dedupe) ─────
 
 app.post("/webhooks/receive", (req, res) => {
     const sigHeader = req.headers["x-webhook-signature"];
@@ -194,15 +225,25 @@ app.post("/webhooks/receive", (req, res) => {
         return res.status(401).json({ error: "invalid signature" });
     }
 
-    let body;
-    try { body = JSON.parse(req.body); } catch (_e) {
+    let bodyData;
+    try { bodyData = JSON.parse(req.body); } catch (_e) {
         res.status(400);
         res.json({ error: "invalid JSON" });
         return;
     }
-    log.info(`Webhook received: ${body ? body.event : "unknown"}`);
+    const eventName = bodyData ? bodyData.event : "unknown";
 
-    res.json({ received: true, event: body ? body.event : null });
+    // Inbox deduplication: use webhook event header as message ID
+    const eventIdHeader = req.header("x-webhook-event-id");
+    if (eventIdHeader) {
+        if (inbox.checkAndMark(eventIdHeader, "webhook")) {
+            log.info(`Webhook duplicate skipped: ${eventName} (id=${eventIdHeader})`);
+            return res.json({ received: true, duplicate: true });
+        }
+    }
+
+    log.info(`Webhook received: ${eventName}`);
+    res.json({ received: true, event: eventName });
 });
 
-log.info("Webhooks example loaded — routes registered");
+log.info("Webhooks example loaded — routes registered (outbox + inbox + idempotency)");

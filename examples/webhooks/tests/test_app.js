@@ -2,8 +2,8 @@
 // Run: hull test examples/webhooks/
 //
 // Note: outbound HTTP delivery will fail in test mode (no actual server to
-// call), but webhook registration, listing, and signature verification
-// on the receive endpoint can be tested.
+// call), but webhook registration, listing, signature verification, and
+// outbox queueing can be tested.
 
 test("GET /health returns ok", () => {
     const res = test.get("/health");
@@ -80,9 +80,37 @@ test("POST /events requires event field", () => {
     test.eq(res.status, 400);
 });
 
+test("POST /events creates event and enqueues deliveries", () => {
+    // Register a webhook first
+    test.post("/webhooks", {
+        body: '{"url":"http://127.0.0.1:9999/outbox-test","events":"order.placed"}',
+        headers: { "Content-Type": "application/json" },
+    });
+
+    const res = test.post("/events", {
+        body: '{"event":"order.placed","data":{"id":1}}',
+        headers: { "Content-Type": "application/json" },
+    });
+    test.eq(res.status, 200);
+    test.ok(res.json.event_id, "has event_id");
+    test.ok(res.json.webhooks_queued !== undefined, "has webhooks_queued");
+    test.ok(res.json.webhooks_queued > 0, "queued at least one webhook");
+});
+
 test("GET /events returns event log", () => {
     const res = test.get("/events");
     test.eq(res.status, 200);
+});
+
+// ── Outbox ──────────────────────────────────────────────────────────
+
+test("GET /outbox/stats returns delivery stats", () => {
+    const res = test.get("/outbox/stats");
+    test.eq(res.status, 200);
+    test.ok(
+        res.json.pending !== undefined || res.json.delivered !== undefined || res.json.failed !== undefined,
+        "has state counts"
+    );
 });
 
 // ── Webhook receiver (signature verification) ──────────────────────

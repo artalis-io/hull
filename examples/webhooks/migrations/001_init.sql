@@ -12,13 +12,3 @@ CREATE TABLE IF NOT EXISTS event_log (
     payload TEXT NOT NULL,
     created_at INTEGER
 );
-
-CREATE TABLE IF NOT EXISTS deliveries (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    webhook_id INTEGER NOT NULL,
-    event_id INTEGER NOT NULL,
-    status INTEGER,
-    response_body TEXT,
-    created_at INTEGER,
-    FOREIGN KEY (webhook_id) REFERENCES webhooks(id)
-);
