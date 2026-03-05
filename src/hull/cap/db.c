@@ -263,14 +263,23 @@ int hl_cap_db_query(HlStmtCache *cache, const char *sql,
         }
     }
 
-    /* Populate column names (stable for lifetime of stmt) */
-    for (int i = 0; i < ncols; i++) {
-        cols[i].name = sqlite3_column_name(stmt, i);
-    }
-
     int result = 0;
     int rc;
+    int names_populated = 0;
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        /*
+         * Populate column names AFTER the first sqlite3_step().
+         *
+         * sqlite3_column_name() pointers are invalidated if the statement
+         * is auto-recompiled on the first step — which happens when bound
+         * parameters affect the query plan (e.g. LIMIT ?).  Fetching names
+         * after step guarantees the pointers remain valid until reset.
+         */
+        if (!names_populated) {
+            for (int i = 0; i < ncols; i++)
+                cols[i].name = sqlite3_column_name(stmt, i);
+            names_populated = 1;
+        }
         for (int i = 0; i < ncols; i++) {
             column_to_value(stmt, i, &vals[i]);
             cols[i].value = vals[i];
