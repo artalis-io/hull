@@ -16,6 +16,7 @@
 #include "hull/cap/http.h"
 #include "hull/cap/smtp.h"
 #include "hull/cap/crypto.h"
+#include "hull/cap/fs.h"
 #include "quickjs.h"
 
 #include "log.h"
@@ -2524,8 +2525,8 @@ static JSValue js_template_load_raw(JSContext *ctx, JSValueConst this_val,
     if (!name)
         return JS_EXCEPTION;
 
-    /* Reject path traversal in template name */
-    if (strstr(name, "..") != NULL || name[0] == '/') {
+    /* Quick-reject for both VFS and filesystem paths */
+    if (name[0] == '/' || name[0] == '\0') {
         JS_FreeCString(ctx, name);
         return JS_ThrowTypeError(ctx, "invalid template name");
     }
@@ -2533,7 +2534,7 @@ static JSValue js_template_load_raw(JSContext *ctx, JSValueConst this_val,
     /* 1. Search embedded template entries via VFS */
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     if (js && js->base.app_vfs) {
-        char tpl_name[1024];
+        char tpl_name[HL_MODULE_PATH_MAX];
         int tpl_n = snprintf(tpl_name, sizeof(tpl_name), "templates/%s", name);
         if (tpl_n > 0 && (size_t)tpl_n < sizeof(tpl_name)) {
             const HlEntry *e = hl_vfs_find(js->base.app_vfs, tpl_name);
@@ -2547,7 +2548,18 @@ static JSValue js_template_load_raw(JSContext *ctx, JSValueConst this_val,
 
     /* 2. Filesystem fallback (dev mode): app_dir/templates/<name> */
     if (js && js->app_dir) {
-        char path[1024];
+        /* Validate template path is confined to app_dir */
+        HlFsConfig tpl_cfg = { .base_dir = js->app_dir,
+                                .base_len = strlen(js->app_dir) };
+        char tpl_rel[HL_MODULE_PATH_MAX];
+        int rn = snprintf(tpl_rel, sizeof(tpl_rel), "templates/%s", name);
+        if (rn < 0 || (size_t)rn >= sizeof(tpl_rel) ||
+            hl_cap_fs_validate(&tpl_cfg, tpl_rel) != 0) {
+            JS_FreeCString(ctx, name);
+            return JS_ThrowTypeError(ctx, "invalid template name");
+        }
+
+        char path[HL_MODULE_PATH_MAX];
         int n = snprintf(path, sizeof(path), "%s/templates/%s",
                          js->app_dir, name);
         if (n > 0 && (size_t)n < sizeof(path)) {

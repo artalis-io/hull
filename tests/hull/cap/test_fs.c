@@ -191,4 +191,19 @@ UTEST(hl_cap_fs, read_rejects_traversal)
     teardown_fs();
 }
 
+UTEST(hl_cap_fs, validate_rejects_symlink_escape)
+{
+    setup_fs();
+    /* Create a symlink inside test_dir pointing to /tmp */
+    char link_path[512];
+    snprintf(link_path, sizeof(link_path), "%s/escape", test_dir);
+    symlink("/tmp", link_path);
+
+    /* Accessing via symlink should be rejected */
+    ASSERT_EQ(hl_cap_fs_validate(&test_cfg, "escape/some_file"), -1);
+
+    unlink(link_path);
+    teardown_fs();
+}
+
 UTEST_MAIN();
