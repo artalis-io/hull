@@ -3,10 +3,16 @@
 -- Run: hull app.lua -p 3000
 -- Webhook delivery and receipt with HMAC-SHA256 signatures
 --
--- Register webhook endpoints, fire events that deliver to them,
--- and receive/verify incoming webhooks.
+-- Features:
+--   - Transactional outbox: event insert + delivery enqueue are atomic
+--   - Inbox deduplication: incoming webhook receipts are deduplicated
+--   - Idempotency keys: POST /events supports Idempotency-Key header
+--   - Retry with exponential backoff via outbox.flush()
 
-local validate = require("hull.validate")
+local validate    = require("hull.validate")
+local idempotency = require("hull.middleware.idempotency")
+local outbox      = require("hull.middleware.outbox")
+local inbox       = require("hull.middleware.inbox")
 
 -- Manifest: allow outbound HTTP to localhost for webhook delivery
 app.manifest({
@@ -16,6 +22,17 @@ app.manifest({
 
 local _ok, _val = pcall(env.get, "WEBHOOK_SECRET")
 local SIGNING_SECRET = (_ok and _val) or "whsec_change-me-in-production"
+
+-- ── Initialize middleware tables ──────────────────────────────────────
+
+idempotency.init({ ttl = 86400 })
+outbox.init({ max_attempts = 5 })
+inbox.init({ ttl = 604800 })  -- 7 days
+
+-- ── Post-body middleware ──────────────────────────────────────────────
+
+-- Idempotency on POST /events (the critical non-idempotent endpoint)
+app.use_post("POST", "/events", idempotency.middleware())
 
 -- ── Helpers ─────────────────────────────────────────────────────────
 
@@ -33,39 +50,6 @@ local SECRET_HEX = str_to_hex(SIGNING_SECRET)
 --- Sign a payload string with HMAC-SHA256, return hex signature.
 local function sign_payload(payload_str)
     return crypto.hmac_sha256(payload_str, SECRET_HEX)
-end
-
---- Deliver a webhook to a registered endpoint.
---- Returns the HTTP status code (0 on connection error).
-local function deliver_webhook(webhook, event_type, payload_str, event_id)
-    local sig = sign_payload(payload_str)
-
-    local status = 0
-    local response_body
-
-    local send_ok, result = pcall(function()
-        return http.post(webhook.url, payload_str, {
-            headers = {
-                ["Content-Type"] = "application/json",
-                ["X-Webhook-Event"] = event_type,
-                ["X-Webhook-Signature"] = "sha256=" .. sig,
-            },
-        })
-    end)
-
-    if send_ok and result then
-        status = result.status or 0
-        response_body = result.body or ""
-    else
-        response_body = tostring(result)
-    end
-
-    db.exec(
-        "INSERT INTO deliveries (webhook_id, event_id, status, response_body, created_at) VALUES (?, ?, ?, ?, ?)",
-        { webhook.id, event_id, status, response_body, time.now() }
-    )
-
-    return status
 end
 
 -- ── Routes ──────────────────────────────────────────────────────────
@@ -114,7 +98,7 @@ app.del("/webhooks/:id", function(req, res)
     res:json({ ok = true })
 end)
 
--- Fire an event — delivers to all matching active webhooks
+-- Fire an event — atomically inserts event + enqueues deliveries via outbox
 app.post("/events", function(req, res)
     local body = json.decode(req.body)
     if not body then
@@ -132,34 +116,68 @@ app.post("/events", function(req, res)
     local data = body.data
 
     local payload_str = json.encode({ event = event_type, data = data, timestamp = time.now() })
+    local sig = sign_payload(payload_str)
 
-    -- Log the event
-    db.exec("INSERT INTO event_log (event_type, payload, created_at) VALUES (?, ?, ?)",
-            { event_type, payload_str, time.now() })
-    local event_id = db.last_id()
+    local event_id
+    local queued_count = 0
 
-    -- Find matching webhooks and deliver
-    local webhooks = db.query("SELECT * FROM webhooks WHERE active = 1")
-    local results = {}
+    -- Atomically: insert event + enqueue outbox deliveries in one transaction
+    db.batch(function()
+        -- Log the event
+        db.exec("INSERT INTO event_log (event_type, payload, created_at) VALUES (?, ?, ?)",
+                { event_type, payload_str, time.now() })
+        event_id = db.last_id()
 
-    for _, wh in ipairs(webhooks) do
-        -- Check if webhook subscribes to this event type
-        local match = false
-        for evt in wh.events:gmatch("[^,]+") do
-            local trimmed = evt:match("^%s*(.-)%s*$")
-            if trimmed == event_type or trimmed == "*" then
-                match = true
-                break
+        -- Find matching webhooks and enqueue deliveries
+        local webhooks = db.query("SELECT * FROM webhooks WHERE active = 1")
+
+        for _, wh in ipairs(webhooks) do
+            -- Check if webhook subscribes to this event type
+            local match = false
+            for evt in wh.events:gmatch("[^,]+") do
+                local trimmed = evt:match("^%s*(.-)%s*$")
+                if trimmed == event_type or trimmed == "*" then
+                    match = true
+                    break
+                end
+            end
+
+            if match then
+                outbox.enqueue({
+                    kind = "webhook",
+                    destination = wh.url,
+                    payload = payload_str,
+                    headers = json.encode({
+                        ["Content-Type"] = "application/json",
+                        ["X-Webhook-Event"] = event_type,
+                        ["X-Webhook-Signature"] = "sha256=" .. sig,
+                    }),
+                    idempotency_key = "evt-" .. event_id .. "-wh-" .. wh.id,
+                })
+                queued_count = queued_count + 1
             end
         end
+    end)
 
-        if match then
-            local status = deliver_webhook(wh, event_type, payload_str, event_id)
-            results[#results + 1] = { webhook_id = wh.id, url = wh.url, status = status }
-        end
-    end
+    -- Respond (cached by idempotency middleware if key was provided)
+    idempotency.respond(req, res, 200, {
+        event_id = event_id,
+        webhooks_queued = queued_count,
+    })
 
-    res:json({ event_id = event_id, deliveries = results })
+    -- Flush outbox: deliver enqueued webhooks (after commit)
+    outbox.flush()
+end)
+
+-- Manually trigger outbox flush (for crash recovery or cron)
+app.post("/outbox/flush", function(_req, res)
+    local result = outbox.flush()
+    res:json(result)
+end)
+
+-- Outbox stats
+app.get("/outbox/stats", function(_req, res)
+    res:json(outbox.stats())
 end)
 
 -- List events
@@ -168,14 +186,20 @@ app.get("/events", function(_req, res)
     res:json(rows)
 end)
 
--- List deliveries for a webhook
+-- List deliveries for a webhook (from outbox)
 app.get("/webhooks/:id/deliveries", function(req, res)
-    local rows = db.query("SELECT id, event_id, status, response_body, created_at FROM deliveries WHERE webhook_id = ? ORDER BY id DESC LIMIT 50",
-                          { req.params.id })
+    local wh = db.query("SELECT url FROM webhooks WHERE id = ?", { req.params.id })
+    if #wh == 0 then
+        return res:status(404):json({ error = "webhook not found" })
+    end
+    local rows = db.query(
+        "SELECT id, state, attempts, last_error, created_at, delivered_at FROM _hull_outbox WHERE destination = ? ORDER BY id DESC LIMIT 50",
+        { wh[1].url }
+    )
     res:json(rows)
 end)
 
--- ── Webhook receiver (verify incoming signatures) ───────────────────
+-- ── Webhook receiver (verify incoming signatures + inbox dedupe) ─────
 
 app.post("/webhooks/receive", function(req, res)
     local sig_header = req.headers["x-webhook-signature"]
@@ -205,8 +229,17 @@ app.post("/webhooks/receive", function(req, res)
     local body_data = json.decode(req.body)
     local event_name = body_data and body_data.event or "unknown"
 
+    -- Inbox deduplication: use webhook event header as message ID
+    local event_id_header = req.headers["x-webhook-event-id"]
+    if event_id_header then
+        if inbox.check_and_mark(event_id_header, "webhook") then
+            log.info(string.format("Webhook duplicate skipped: %s (id=%s)", event_name, event_id_header))
+            return res:json({ received = true, duplicate = true })
+        end
+    end
+
     log.info(string.format("Webhook received: %s", event_name))
     res:json({ received = true, event = event_name })
 end)
 
-log.info("Webhooks example loaded — routes registered")
+log.info("Webhooks example loaded — routes registered (outbox + inbox + idempotency)")

@@ -489,7 +489,7 @@ test_webhooks() {
            -d '{"event":"user.created","data":{"user_id":1}}' \
            "http://127.0.0.1:$PORT/events")
     check_contains "$LABEL webhooks POST /events event_id" "$RESP" '"event_id"'
-    check_contains "$LABEL webhooks POST /events deliveries" "$RESP" '"deliveries"'
+    check_contains "$LABEL webhooks POST /events webhooks_queued" "$RESP" '"webhooks_queued"'
 
     # List events
     RESP=$(curl -s "http://127.0.0.1:$PORT/events")
