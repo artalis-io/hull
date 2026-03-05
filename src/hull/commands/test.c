@@ -148,7 +148,8 @@ static int run_lua_tests(const char *app_dir, const char *entry)
 
         /* Execute registered test cases */
         int file_total = 0, file_passed = 0, file_failed = 0;
-        hl_cap_test_run_lua(lua.L, &file_total, &file_passed, &file_failed);
+        hl_cap_test_run_lua(lua.L, &file_total, &file_passed, &file_failed,
+                            stdout, NULL, 0);
 
         total += file_total;
         passed += file_passed;
@@ -291,7 +292,8 @@ static int run_js_tests(const char *app_dir, const char *entry)
         JS_FreeValue(js.ctx, result);
 
         int file_total = 0, file_passed = 0, file_failed = 0;
-        hl_cap_test_run_js(js.ctx, &file_total, &file_passed, &file_failed);
+        hl_cap_test_run_js(js.ctx, &file_total, &file_passed, &file_failed,
+                           stdout, NULL, 0);
 
         total += file_total;
         passed += file_passed;

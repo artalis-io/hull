@@ -52,6 +52,8 @@
 #include <string.h>
 #include <stdarg.h>
 #include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
 
 /* ── Default Content-Security-Policy ───────────────────────────────── */
 
@@ -212,6 +214,7 @@ static int hull_serve(int argc, char **argv)
     int log_level = LOG_INFO;
     int no_migrate = 0;
     int skip_ca_bundle = 0;
+    int agent_mode = 0;
     int drain_timeout = HL_DEFAULT_DRAIN_TIMEOUT_MS;
     const char *tls_cert_path = NULL;
     const char *tls_key_path = NULL;
@@ -264,6 +267,8 @@ static int hull_serve(int argc, char **argv)
             no_migrate = 1;
         } else if (strcmp(argv[i], "--skip-ca-bundle") == 0) {
             skip_ca_bundle = 1;
+        } else if (strcmp(argv[i], "--agent") == 0) {
+            agent_mode = 1;
         } else if (strcmp(argv[i], "--drain-timeout") == 0 && i + 1 < argc) {
             char *end;
             long dt = strtol(argv[++i], &end, 10);
@@ -500,8 +505,27 @@ static int hull_serve(int argc, char **argv)
     /* Load and evaluate the app */
     if (rt->vt->load_app(rt, entry_point) != 0) {
         log_error("[hull:c] failed to load %s", entry_point);
+        if (agent_mode) {
+            char err_dir[4096], err_path[4096];
+            snprintf(err_dir, sizeof(err_dir), "%s/.hull", app_dir);
+            mkdir(err_dir, 0755);
+            snprintf(err_path, sizeof(err_path), "%s/.hull/last_error.json", app_dir);
+            FILE *ef = fopen(err_path, "w");
+            if (ef) {
+                fprintf(ef, "{\"error\":\"failed to load %s\",\"timestamp\":%ld}\n",
+                        entry_point, (long)time(NULL));
+                fclose(ef);
+            }
+        }
         rt->vt->destroy(rt);
         goto cleanup_server;
+    }
+
+    /* Clear previous error file on successful load */
+    if (agent_mode) {
+        char err_path[4096];
+        snprintf(err_path, sizeof(err_path), "%s/.hull/last_error.json", app_dir);
+        unlink(err_path);
     }
 
     /* Extract manifest and configure capabilities */

@@ -96,6 +96,134 @@
 | Email (SMTP / API) | In progress | Outbound notifications (C cap + stdlib) |
 | License key system | Planned | Ed25519 offline verification for commercial distribution |
 
+### Agent Platform — AI-Native Development Tooling
+
+Hull treats agentic coding environments (Claude Code, Codex, OpenCode, Cursor, Ollama-based harnesses) as first-class citizens. The agent platform provides machine-readable tooling, dynamic context management, and a structured feedback loop so AI agents can rapidly prototype, test, and deploy Hull applications.
+
+**Architecture:**
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                     Agent Environments                        │
+│  Claude Code │ Codex │ OpenCode │ Cursor │ Ollama+harness    │
+└──────┬───────┴───┬───┴────┬─────┴────┬───┴────┬──────────────┘
+       │           │        │          │        │
+       │      ┌────┴────┐   │    ┌─────┴─────┐  │
+       │      │ MCP srv │   │    │.cursorrules│  │
+       │      │ (stdio/ │   │    │ codex.md   │  │
+       │      │  SSE)   │   │    └────────────┘  │
+       │      └────┬────┘   │                    │
+       │           │        │                    │
+  ┌────┴───────────┴────────┴────────────────────┴──────┐
+  │              hull agent <subcommand> --json          │  CLI layer
+  └──────────────────────┬───────────────────────────────┘
+                         │
+  ┌──────────────────────┴───────────────────────────────┐
+  │                 Agent Core (C library)                │
+  │                                                      │
+  │  context()    routes()     request()    render()      │
+  │  db_schema()  db_query()   logs()       errors()     │
+  │  test()       status()     scaffold()   build()      │
+  │  migrate()    monitor()    manifest()                │
+  └──────────────────────┬───────────────────────────────┘
+                         │
+  ┌──────────────────────┴───────────────────────────────┐
+  │              Hull Runtime (existing)                  │
+  │  hull dev │ hull test │ hull build │ SQLite │ Lua/JS  │
+  └──────────────────────────────────────────────────────┘
+```
+
+Common agent core with dual interface: CLI JSON mode for frontier models, MCP server for mid-range local models. Zero logic duplication — both call the same C functions.
+
+#### Phase 1: Foundation (agent core + CLI) — In Progress
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| `hull agent status` | Planned | Dev server state, PID, port, last reload result, uptime |
+| `hull agent errors` | Planned | Structured errors from `.hull/last_error.json` sidecar |
+| `hull agent routes` | Planned | List registered routes as JSON (method, pattern, middleware) |
+| `hull agent request` | Planned | HTTP request to dev server with JSON response |
+| `hull agent db schema` | Planned | Introspect current DB tables, columns, types, PKs |
+| `hull agent db query` | Planned | Read-only query on dev DB with JSON output |
+| `hull agent test` | Planned | Structured test results (passed, failed, failure details) |
+| `hull dev --agent` | Planned | Write structured errors/status to `.hull/` sidecar files |
+| `AGENTS.md` | Planned | Comprehensive agent development guide |
+
+#### Phase 2: Context + Render
+
+Dynamic context system — `hull agent context` assembles task-relevant documentation on demand, sized for the model's context window.
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| `hull agent context --task=T --level=L` | Planned | Dynamic docs: domains (auth, db, middleware, etc.) × levels (minimal/compact/full) |
+| `hull render` | Planned | Offline template rendering without running server |
+| `agents/context/*.md` | Planned | Per-domain knowledge files consumed by context system |
+| `--model-size` auto-selection | Planned | Auto-select context level based on model size (7B→minimal, 70B→compact, frontier→full) |
+
+Context levels:
+
+| Level | Size | Target Models |
+|-------|------|---------------|
+| `minimal` | ~1K tokens | Small local (7–14B): API signatures, one-liner patterns |
+| `compact` | ~4K tokens | Mid-range local (30–70B): signatures + patterns + gotchas + one example |
+| `full` | ~12K tokens | Frontier (Claude, GPT-4): comprehensive with multiple examples, edge cases |
+
+#### Phase 3: MCP Server + Agent Configs
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| `hull mcp serve` | Planned | stdio MCP server wrapping agent core (Claude Code, Cursor) |
+| `hull mcp serve --sse` | Planned | SSE transport for network-accessible agents |
+| `.cursorrules` | Planned | Cursor/Windsurf agent rules |
+| `codex.md` | Planned | Codex-specific instructions |
+| `.opencode.yml` | Planned | OpenCode config with MCP server reference |
+| Updated `CLAUDE.md` | Planned | MCP server setup, hull agent commands |
+
+#### Phase 4: Lifecycle + Monitoring
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| `hull agent scaffold` | Planned | Project scaffolding from templates with structured output |
+| `hull agent build` | Planned | Structured build output (binary path, size, platform) |
+| `hull agent migrate` | Planned | Structured migration status/apply |
+| `/_hull/agent/*` endpoints | Planned | Opt-in diagnostic endpoints in deployed apps (health, schema, logs, errors, stats) |
+| `hull agent monitor` | Planned | Query deployed app diagnostics |
+
+#### Phase 5: Model Distillation
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| MCP trace recording | Planned | Record tool-use traces from frontier models developing Hull apps |
+| Hull development benchmark | Planned | Task suite: scaffold API, add auth, debug migration, implement outbox, fix vuln |
+| LoRA fine-tuning pipeline | Planned | Fine-tune Qwen/Llama on Hull-specific traces (~5K–10K examples) |
+| Evaluation harness | Planned | Benchmark score per model: tool selection accuracy, API recall, pattern adherence |
+| Context optimization | Planned | Test minimum viable context per task per model size |
+
+**Agentic Workflow Design:**
+
+```
+Bootstrap → Scaffold → Develop (tight loop) → Validate → Deploy → Monitor
+    │            │            │                    │          │         │
+    ▼            ▼            ▼                    ▼          ▼         ▼
+ context()   scaffold()   status()            request()   build()   monitor()
+                          errors()            render()    migrate()
+                          routes()            test()
+                          db_schema()
+```
+
+Every step produces machine-readable JSON output. The agent never parses human-formatted text. `hull dev --agent` writes structured sidecar files (`.hull/last_error.json`, `.hull/status.json`) for the develop loop.
+
+**Supported Environments:**
+
+| Environment | Interface | Context Strategy |
+|-------------|-----------|------------------|
+| Claude Code | CLAUDE.md + CLI + MCP | Full context (~20K tokens) |
+| Codex | codex.md + CLI | Full context |
+| OpenCode | .opencode.yml + MCP | Compact context + MCP tool schemas |
+| Cursor/Windsurf | .cursorrules + MCP | Compact context |
+| Ollama (local 70B) | CLI or MCP | Compact context (~4K tokens) |
+| Ollama (local 7–14B) | MCP (structured tools) | Minimal context (~1K tokens) |
+
 ### Future — Advanced Features
 
 | Feature | Status | Notes |

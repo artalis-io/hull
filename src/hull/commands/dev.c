@@ -23,6 +23,34 @@
 #include <unistd.h>
 #include <limits.h>
 
+/* ── Agent sidecar file helpers ───────────────────────────────────── */
+
+static void agent_ensure_dir(const char *app_dir)
+{
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/.hull", app_dir);
+    mkdir(path, 0755);
+}
+
+static void agent_write_dev_json(const char *app_dir, int port, pid_t pid)
+{
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/.hull/dev.json", app_dir);
+
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    fprintf(f, "{\"port\":%d,\"pid\":%d,\"started_at\":%ld}\n",
+            port, (int)pid, (long)time(NULL));
+    fclose(f);
+}
+
+static void agent_remove_dev_json(const char *app_dir)
+{
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/.hull/dev.json", app_dir);
+    unlink(path);
+}
+
 /* ── Signal handling ──────────────────────────────────────────────── */
 
 static volatile sig_atomic_t dev_child_pid = 0;
@@ -123,9 +151,15 @@ static const char *dev_detect_entry(void)
 int hl_cmd_dev(int argc, char **argv, const char *hull_exe)
 {
     const char *entry_point = NULL;
+    int agent_mode = 0;
+    int port = 3000;
 
     /* Parse args: first positional is the entry point, rest are passthrough */
     for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--agent") == 0) {
+            agent_mode = 1;
+            continue;
+        }
         if (argv[i][0] != '-') {
             entry_point = argv[i];
             break;
@@ -137,6 +171,12 @@ int hl_cmd_dev(int argc, char **argv, const char *hull_exe)
              strcmp(argv[i], "-l") == 0 ||
              strcmp(argv[i], "--tls-cert") == 0 ||
              strcmp(argv[i], "--tls-key") == 0) && i + 1 < argc) {
+            if (strcmp(argv[i], "-p") == 0) {
+                char *end;
+                long p = strtol(argv[i + 1], &end, 10);
+                if (*end == '\0' && p > 0 && p <= 65535)
+                    port = (int)p;
+            }
             i++; /* skip value, will be collected below */
         }
     }
@@ -180,6 +220,9 @@ int hl_cmd_dev(int argc, char **argv, const char *hull_exe)
 
     fprintf(stderr, "[hull:dev] watching %s for changes...\n", app_dir);
 
+    if (agent_mode)
+        agent_ensure_dir(app_dir);
+
     int ret = 0;
 
     for (;;) {
@@ -205,6 +248,9 @@ int hl_cmd_dev(int argc, char **argv, const char *hull_exe)
         }
 
         dev_child_pid = pid;
+
+        if (agent_mode)
+            agent_write_dev_json(app_dir, port, pid);
 
         /* Record baseline mtime */
         time_t baseline = scan_mtime(app_dir);
@@ -259,6 +305,9 @@ int hl_cmd_dev(int argc, char **argv, const char *hull_exe)
 
         /* Loop back and restart */
     }
+
+    if (agent_mode)
+        agent_remove_dev_json(app_dir);
 
     free(child_argv);
     return ret;

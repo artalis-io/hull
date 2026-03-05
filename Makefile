@@ -818,6 +818,9 @@ e2e-migrate: $(BUILDDIR)/hull
 e2e-templates: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_templates.sh
 
+e2e-agent: $(BUILDDIR)/hull
+	RUNTIME=$(RUNTIME) sh tests/e2e_agent.sh
+
 hull-test-examples: $(BUILDDIR)/hull
 	@for dir in examples/hello examples/rest_api examples/bench_db examples/auth \
 	            examples/jwt_api examples/crud_with_auth examples/middleware examples/webhooks \
