@@ -156,7 +156,8 @@ app.get("/lang/:code", (req, res) => {
         path: "/", maxAge: 365 * 24 * 3600, httpOnly: false,
     }));
     const referer = req.headers.referer;
-    res.redirect(referer || "/");
+    const target = referer?.startsWith("/") ? referer : "/";
+    res.redirect(target);
 });
 
 // ── Auth routes ─────────────────────────────────────────────────────

@@ -551,6 +551,9 @@ local function gen_expr(expr_info, escaped, locals_set)
 
     -- Apply filter chain
     for _, f in ipairs(expr_info.filters) do
+        if f.name ~= "raw" and not filters[f.name] then
+            error("unknown template filter: " .. f.name)
+        end
         if f.name == "raw" then
             escaped = false
         elseif f.arg then

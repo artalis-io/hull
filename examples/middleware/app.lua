@@ -72,7 +72,10 @@ app.get("/api/items", function(req, res)
 end)
 
 app.post("/api/items", function(req, res)
-    local body = json.decode(req.body)
+    local decode_ok, body = pcall(json.decode, req.body)
+    if not decode_ok or not body then
+        return res:status(400):json({ error = "invalid JSON" })
+    end
     res:status(201):json({
         created = body,
         request_id = req.ctx.request_id,

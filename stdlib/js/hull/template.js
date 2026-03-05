@@ -392,6 +392,9 @@ function genExpr(exprInfo, escaped, localsSet) {
     let code = genDotPath(exprInfo.var, null, localsSet);
 
     for (const f of exprInfo.filters) {
+        if (f.name !== "raw" && !filters[f.name]) {
+            throw new Error("unknown template filter: " + f.name);
+        }
         if (f.name === "raw") {
             escaped = false;
         } else if (f.arg) {

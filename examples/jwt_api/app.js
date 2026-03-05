@@ -16,8 +16,10 @@ app.manifest({
     env: ["JWT_SECRET"],
 });
 
+// env.get() is unavailable at load time (env_cfg wired after manifest extraction),
+// so fall back to a dev default.  Set JWT_SECRET in production.
 let JWT_SECRET = "change-me-in-production";
-try { const v = env.get("JWT_SECRET"); if (v) JWT_SECRET = v; } catch (_e) {}
+try { const v = env.get("JWT_SECRET"); if (v) JWT_SECRET = v; } catch (_e) { /* env not ready */ }
 
 // Middleware: extract and verify JWT on every request (optional — won't block)
 app.use("*", "/*", (req, _res) => {
@@ -30,7 +32,8 @@ app.use("*", "/*", (req, _res) => {
     const result = jwt.verify(match[1], JWT_SECRET);
     // jwt.verify returns payload on success, [null, "reason"] on failure
     if (!Array.isArray(result)) {
-        req.ctx = { user: result };
+        if (!req.ctx) req.ctx = {};
+        req.ctx.user = result;
     }
     return 0;
 });
@@ -51,7 +54,8 @@ app.get("/health", (_req, res) => {
 
 // Register
 app.post("/register", (req, res) => {
-    const body = JSON.parse(req.body);
+    let body;
+    try { body = JSON.parse(req.body); } catch (_e) { body = null; }
     if (!body) {
         return res.status(400).json({ error: "invalid JSON" });
     }
@@ -67,22 +71,33 @@ app.post("/register", (req, res) => {
 
     const { email, password, name } = body;
 
-    const existing = db.query("SELECT id FROM users WHERE email = ?", [email]);
-    if (existing.length > 0) {
-        return res.status(409).json({ error: "email already registered" });
-    }
-
+    // Atomic check+insert to prevent TOCTOU race on email uniqueness
     const hash = crypto.hashPassword(password);
-    db.exec("INSERT INTO users (email, password_hash, name, created_at) VALUES (?, ?, ?, ?)",
-            [email, hash, name, time.now()]);
-    const id = db.lastId();
+    let id;
+    try {
+        db.batch(() => {
+            const existing = db.query("SELECT id FROM users WHERE email = ?", [email]);
+            if (existing.length > 0) {
+                throw new Error("email already registered");
+            }
+            db.exec("INSERT INTO users (email, password_hash, name, created_at) VALUES (?, ?, ?, ?)",
+                    [email, hash, name, time.now()]);
+            id = db.lastId();
+        });
+    } catch (e) {
+        if (String(e).includes("email already registered")) {
+            return res.status(409).json({ error: "email already registered" });
+        }
+        return res.status(500).json({ error: "registration failed" });
+    }
 
     res.status(201).json({ id, email, name });
 });
 
 // Login — returns JWT token
 app.post("/login", (req, res) => {
-    const body = JSON.parse(req.body);
+    let body;
+    try { body = JSON.parse(req.body); } catch (_e) { body = null; }
     if (!body) {
         return res.status(400).json({ error: "invalid JSON" });
     }

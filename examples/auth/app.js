@@ -30,7 +30,9 @@ app.use("*", "/*", (req, _res) => {
     if (sessionId) {
         const data = session.load(sessionId);
         if (data) {
-            req.ctx = { sessionId, session: data };
+            if (!req.ctx) req.ctx = {};
+            req.ctx.sessionId = sessionId;
+            req.ctx.session = data;
         }
     }
     return 0;
@@ -52,7 +54,8 @@ app.get("/health", (_req, res) => {
 
 // Register
 app.post("/register", (req, res) => {
-    const body = JSON.parse(req.body);
+    let body;
+    try { body = JSON.parse(req.body); } catch (_e) { body = null; }
     if (!body) {
         return res.status(400).json({ error: "invalid JSON" });
     }
@@ -68,23 +71,33 @@ app.post("/register", (req, res) => {
 
     const { email, password, name } = body;
 
-    // Check uniqueness
-    const existing = db.query("SELECT id FROM users WHERE email = ?", [email]);
-    if (existing.length > 0) {
-        return res.status(409).json({ error: "email already registered" });
-    }
-
+    // Atomic check+insert to prevent TOCTOU race on email uniqueness
     const hash = crypto.hashPassword(password);
-    db.exec("INSERT INTO users (email, password_hash, name, created_at) VALUES (?, ?, ?, ?)",
-            [email, hash, name, time.now()]);
-    const id = db.lastId();
+    let id;
+    try {
+        db.batch(() => {
+            const existing = db.query("SELECT id FROM users WHERE email = ?", [email]);
+            if (existing.length > 0) {
+                throw new Error("email already registered");
+            }
+            db.exec("INSERT INTO users (email, password_hash, name, created_at) VALUES (?, ?, ?, ?)",
+                    [email, hash, name, time.now()]);
+            id = db.lastId();
+        });
+    } catch (e) {
+        if (String(e).includes("email already registered")) {
+            return res.status(409).json({ error: "email already registered" });
+        }
+        return res.status(500).json({ error: "registration failed" });
+    }
 
     res.status(201).json({ id, email, name });
 });
 
 // Login
 app.post("/login", (req, res) => {
-    const body = JSON.parse(req.body);
+    let body;
+    try { body = JSON.parse(req.body); } catch (_e) { body = null; }
     if (!body) {
         return res.status(400).json({ error: "invalid JSON" });
     }

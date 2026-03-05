@@ -70,10 +70,9 @@ function sessionMiddleware(opts) {
         }
 
         // Attach session data to request context for downstream handlers
-        req.ctx = {
-            sessionId: sessionId,
-            session: data
-        };
+        if (!req.ctx) req.ctx = {};
+        req.ctx.sessionId = sessionId;
+        req.ctx.session = data;
 
         return 0;
     };
@@ -119,10 +118,9 @@ function jwtMiddleware(opts) {
         }
 
         // Attach decoded payload to request context
-        req.ctx = {
-            token: token,
-            claims: result
-        };
+        if (!req.ctx) req.ctx = {};
+        req.ctx.token = token;
+        req.ctx.claims = result;
 
         return 0;
     };

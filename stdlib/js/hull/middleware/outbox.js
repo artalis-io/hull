@@ -25,6 +25,7 @@
  */
 
 import { db } from "hull:db";
+import { http } from "hull:http";
 import { time } from "hull:time";
 import { json } from "hull:json";
 

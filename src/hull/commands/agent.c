@@ -322,6 +322,7 @@ static int agent_routes_js(const char *app_dir, const char *entry)
     } while (0)
 
     printf("{\"runtime\":\"js\",\"routes\":[");
+    // cppcheck-suppress nullPointer
     EXTRACT_ARRAY("__hull_route_defs", NULL, 0);
     printf("],\"middleware\":[");
 
