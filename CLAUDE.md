@@ -115,13 +115,29 @@ Client → Keel HTTP → Route Match → hl_{lua,js}_dispatch() → Handler → 
 
 ### Command Dispatch
 
-Table-driven dispatcher in `src/hull/commands/dispatch.c`. 11 commands:
+Table-driven dispatcher in `src/hull/commands/dispatch.c`. 12 commands:
 
 ```
-hull keygen | build | verify | inspect | manifest | test | new | dev | eject | sign-platform | migrate
+hull keygen | build | verify | inspect | manifest | test | new | dev | eject | sign-platform | migrate | agent
 ```
 
 Each command is a separate `.c`/`.h` under `src/hull/commands/`. Adding a new command = one line in the table + one source file.
+
+### Agent Tooling (`hull agent`)
+
+Machine-readable introspection for AI coding agents. All output is JSON to stdout.
+
+```bash
+hull agent routes [app_dir]              # list routes + middleware
+hull agent db schema [app_dir] [-d path] # introspect DB schema
+hull agent db query "SQL" [app_dir]      # run read-only SQL query
+hull agent request METHOD PATH [opts]    # HTTP request to dev server
+hull agent status [app_dir] [-p port]    # check dev server status
+hull agent errors [app_dir]              # structured errors from last reload
+hull agent test [app_dir]                # run tests with JSON output
+```
+
+`hull dev --agent` enables sidecar files: `.hull/dev.json` (port, PID) on start, `.hull/last_error.json` on load failure. See [AGENTS.md](AGENTS.md) for the full agent development guide.
 
 ### Migration System
 

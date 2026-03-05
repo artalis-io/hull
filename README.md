@@ -1,14 +1,14 @@
 # Hull
 
-Local-first application platform. Single binary, zero dependencies, runs anywhere.
+Agent-native, local-first application platform. Single binary, zero dependencies, runs anywhere.
 
-Write backend logic in Lua or JavaScript, frontend in HTML5, data in SQLite. `hull build` produces a single portable executable — under 2 MB — that runs on Linux, macOS, Windows, FreeBSD, OpenBSD, and NetBSD.
+Write backend logic in Lua or JavaScript, frontend in HTML5, data in SQLite. `hull build` produces a single portable executable — under 2 MB — that runs on Linux, macOS, Windows, FreeBSD, OpenBSD, and NetBSD. AI coding agents get structured JSON access to routes, schema, tests, and HTTP responses through the built-in `hull agent` command — no plugins, no MCP servers, no configuration.
 
 ## Why
 
-AI coding assistants solved code generation. But the output is always the same: a React frontend, a Node.js backend, a Postgres database, and a cloud deployment problem. Hull is the missing piece. The AI writes Lua, `hull build` produces a single file. That file is the product. No cloud. No hosting. No dependencies.
+AI coding agents solved code generation. But the output is always the same: a React frontend, a Node.js backend, a Postgres database, and a cloud deployment problem. Hull is the missing piece. The agent writes Lua, `hull build` produces a single file. That file is the product. No cloud. No hosting. No dependencies.
 
-Six vendored C libraries. One build command. One file. That's the entire stack.
+Six vendored C libraries. One build command. One file. That's the entire stack. Works out of the box with [Claude Code](#claude-code), [Codex CLI](#openai-codex-cli), [OpenCode](#opencode), and any agent that can run shell commands.
 
 ## Quick Start
 
@@ -33,7 +33,7 @@ cd myapp
 
 ## Hull Tools
 
-Hull ships 13 subcommands for the full development lifecycle:
+Hull ships 14 subcommands for the full development lifecycle:
 
 | Command | Purpose |
 |---------|---------|
@@ -41,6 +41,7 @@ Hull ships 13 subcommands for the full development lifecycle:
 | `hull dev <app>` | Development server with hot reload |
 | `hull build -o <out> <dir>` | Compile app into a standalone binary |
 | `hull test <dir>` | In-process test runner (no TCP, memory SQLite) |
+| `hull agent <subcommand>` | [AI agent interface](#using-hull-with-ai-agents) — routes, schema, tests, requests as JSON |
 | `hull inspect <dir>` | Display declared capabilities and signature status |
 | `hull verify [--developer-key <key>]` | Verify Ed25519 signatures and file integrity |
 | `hull eject <dir>` | Export to a standalone Makefile project |
@@ -271,6 +272,238 @@ Ten example apps in both Lua and JavaScript:
 | [docs/keel_audit.md](docs/keel_audit.md) | Keel HTTP server C code audit report |
 | [docs/ASSESSMENT.md](docs/ASSESSMENT.md) | Platform assessment, scaling path, strategic positioning |
 | [CLAUDE.md](CLAUDE.md) | Development guide for contributors |
+| [AGENTS.md](AGENTS.md) | Agent development guide (hull agent CLI, patterns, stdlib) |
+
+## Using Hull with AI Agents
+
+Hull treats AI coding agents as first-class developers. The `hull agent` command provides 7 machine-readable (JSON) subcommands that give agents structured access to routes, database schema, test results, server status, and HTTP responses — no screen-scraping or log parsing required.
+
+```
+hull agent routes [app_dir]              # list routes + middleware as JSON
+hull agent db schema [app_dir] [-d path] # introspect database tables and columns
+hull agent db query "SQL" [app_dir]      # run read-only SQL query, get rows as JSON
+hull agent request METHOD PATH [opts]    # HTTP request → structured response
+hull agent status [app_dir] [-p port]    # check if dev server is running
+hull agent errors [app_dir]              # structured errors from last reload
+hull agent test [app_dir]                # run tests, get per-test pass/fail as JSON
+```
+
+Combined with `hull dev --agent` (which writes `.hull/dev.json` and `.hull/last_error.json` as sidecar files), this gives agents a complete feedback loop: edit code, check for errors, run tests, inspect the database, make HTTP requests — all with structured output.
+
+### Agent Development Workflow
+
+The workflow is the same regardless of which AI coding tool you use:
+
+```
+1. hull new myapp && cd myapp        # scaffold project
+2. hull dev --agent app.lua          # start dev server (hot-reload + sidecar files)
+3. Agent edits code                  # dev server auto-reloads
+4. hull agent status .               # did the reload succeed?
+5. hull agent errors .               # if not, what broke?
+6. hull agent test .                 # run tests, check results
+7. hull agent request GET /health    # verify endpoint behavior
+8. hull agent db schema .            # inspect current schema
+9. hull build -o myapp .             # build standalone binary
+```
+
+Steps 3–8 repeat in a tight loop. The agent writes code, checks its work, and iterates — all through structured JSON interfaces.
+
+### Claude Code
+
+Claude Code reads [CLAUDE.md](CLAUDE.md) automatically on session start. Hull ships both `CLAUDE.md` (contributor guide with build commands, conventions, and API reference) and `AGENTS.md` (agent-specific guide with `hull agent` usage, app patterns, and stdlib reference). No additional configuration needed.
+
+**Setup:**
+
+```bash
+# Install Claude Code
+npm install -g @anthropic-ai/claude-code
+
+# Start working on a Hull project
+cd myapp
+claude
+```
+
+Claude Code discovers the project structure through `CLAUDE.md` and uses its built-in Bash tool to run `hull` commands. It reads `AGENTS.md` when it needs agent-specific patterns.
+
+**Example session:**
+
+```
+You: Create a task management API with CRUD endpoints and tests
+
+Claude Code:
+  1. Reads CLAUDE.md/AGENTS.md for Hull conventions
+  2. Creates migrations/001_init.sql (tasks table)
+  3. Writes app.lua with GET/POST/PUT/DELETE /tasks routes
+  4. Writes tests/test_app.lua
+  5. Runs: hull agent test .              → checks all tests pass
+  6. Runs: hull agent routes .            → verifies route registration
+  7. Runs: hull agent db schema .         → confirms schema matches expectations
+```
+
+**Optional: Custom skills** for repeated workflows. Create `.claude/skills/deploy/SKILL.md`:
+
+```yaml
+---
+name: deploy
+description: Build and deploy the Hull app
+---
+1. Run `hull agent test .` — abort if any tests fail
+2. Run `hull build -o app .` to produce a standalone binary
+3. Show the user the binary path and size
+```
+
+Then invoke with `/deploy` in Claude Code.
+
+### OpenAI Codex CLI
+
+Codex CLI reads `AGENTS.md` automatically (it's the [open standard](https://agents.md/) for agent instructions, supported by 60,000+ projects). Hull ships `AGENTS.md` with complete `hull agent` documentation, app patterns, and stdlib reference.
+
+**Setup:**
+
+```bash
+# Install Codex CLI
+npm install -g @openai/codex
+
+# Start working on a Hull project
+cd myapp
+codex
+```
+
+Codex reads `AGENTS.md` on session start and runs `hull` commands through its shell tool.
+
+**Optional: Project config** at `.codex/config.toml` for project-specific settings:
+
+```toml
+# .codex/config.toml
+project_doc_max_bytes = 65536
+```
+
+**Optional: Read CLAUDE.md too** — Codex can be configured to read additional instruction files:
+
+```toml
+# .codex/config.toml
+project_doc_fallback_filenames = ["CLAUDE.md"]
+```
+
+### OpenCode
+
+OpenCode reads both `AGENTS.md` (primary) and `CLAUDE.md` (fallback) automatically. Hull ships both, so no configuration is needed.
+
+**Setup:**
+
+```bash
+# Install OpenCode
+curl -fsSL https://opencode.ai/install | bash
+
+# Start working on a Hull project
+cd myapp
+opencode
+```
+
+**Optional: Custom commands** at `.opencode/commands/test.md`:
+
+```yaml
+---
+description: Run Hull tests and show results
+---
+Run `hull agent test .` and analyze the results.
+If any tests fail, read the failing test file and the relevant app code,
+then fix the issue. Re-run tests until all pass.
+```
+
+Then invoke with `/test` in OpenCode.
+
+### What Agents See
+
+Every `hull agent` subcommand returns structured JSON. Here's what a typical agent interaction looks like:
+
+```bash
+$ hull agent routes .
+```
+```json
+{
+  "runtime": "lua",
+  "routes": [
+    {"method": "GET", "pattern": "/health"},
+    {"method": "GET", "pattern": "/tasks"},
+    {"method": "POST", "pattern": "/tasks"},
+    {"method": "GET", "pattern": "/tasks/:id"},
+    {"method": "DELETE", "pattern": "/tasks/:id"}
+  ],
+  "middleware": [
+    {"method": "*", "pattern": "/api/*", "phase": "pre"}
+  ]
+}
+```
+
+```bash
+$ hull agent test .
+```
+```json
+{
+  "runtime": "lua",
+  "files": [
+    {
+      "name": "test_app.lua",
+      "tests": [
+        {"name": "GET /health returns ok", "status": "pass"},
+        {"name": "POST /tasks creates task", "status": "pass"},
+        {"name": "DELETE /tasks/:id removes task", "status": "fail",
+         "error": "expected 204 got 200"}
+      ]
+    }
+  ],
+  "total": 3, "passed": 2, "failed": 1
+}
+```
+
+The agent reads the structured error, opens the relevant handler, fixes the status code, and re-runs the test — all without human intervention.
+
+```bash
+$ hull agent db schema .
+```
+```json
+{
+  "tables": [
+    {
+      "name": "tasks",
+      "columns": [
+        {"name": "id", "type": "INTEGER", "pk": true},
+        {"name": "title", "type": "TEXT", "notnull": true},
+        {"name": "done", "type": "INTEGER", "default": "0"},
+        {"name": "created_at", "type": "INTEGER"}
+      ]
+    }
+  ]
+}
+```
+
+```bash
+$ hull agent request POST /tasks -d '{"title":"Buy milk"}' -H 'Content-Type: application/json'
+```
+```json
+{
+  "status": 201,
+  "elapsed_ms": 3,
+  "headers": {"Content-Type": "application/json", "Content-Length": "42"},
+  "body": "{\"id\":1,\"title\":\"Buy milk\",\"done\":0}"
+}
+```
+
+### Deploy
+
+```bash
+# Build standalone binary (embeds app + stdlib + SQLite + HTTP server)
+hull build -o myapp .
+
+# The binary is the product — no runtime, no dependencies
+./myapp -p 8080 -d /data/app.db
+
+# Cross-platform (Linux, macOS, Windows, FreeBSD, OpenBSD, NetBSD)
+hull build -o myapp . CC=cosmocc
+```
+
+The agent workflow for deployment: run `hull agent test .` to verify all tests pass, then `hull build -o myapp .` to produce the binary. The output is a single file under 2 MB. Copy it anywhere and run it.
 
 ## Building Hull
 

@@ -409,7 +409,8 @@ void hl_cap_test_clear_lua(lua_State *L)
     lua_setfield(L, LUA_REGISTRYINDEX, TEST_CASES_KEY);
 }
 
-void hl_cap_test_run_lua(lua_State *L, int *total, int *passed, int *failed)
+void hl_cap_test_run_lua(lua_State *L, int *total, int *passed, int *failed,
+                         FILE *out, HlTestCaseResult *results, int max_results)
 {
     *total = 0;
     *passed = 0;
@@ -431,15 +432,31 @@ void hl_cap_test_run_lua(lua_State *L, int *total, int *passed, int *failed)
 
         lua_getfield(L, -1, "fn");
 
+        int idx = *total;
         (*total)++;
         int rc = lua_pcall(L, 0, 0, 0);
         if (rc == LUA_OK) {
-            printf("  PASS  %s\n", desc ? desc : "(unnamed)");
+            if (out)
+                fprintf(out, "  PASS  %s\n", desc ? desc : "(unnamed)");
+            if (results && idx < max_results) {
+                snprintf(results[idx].name, sizeof(results[idx].name),
+                         "%s", desc ? desc : "(unnamed)");
+                results[idx].passed = 1;
+                results[idx].error[0] = '\0';
+            }
             (*passed)++;
         } else {
             const char *err = lua_tostring(L, -1);
-            printf("  FAIL  %s\n    %s\n", desc ? desc : "(unnamed)",
-                   err ? err : "unknown error");
+            if (out)
+                fprintf(out, "  FAIL  %s\n    %s\n", desc ? desc : "(unnamed)",
+                       err ? err : "unknown error");
+            if (results && idx < max_results) {
+                snprintf(results[idx].name, sizeof(results[idx].name),
+                         "%s", desc ? desc : "(unnamed)");
+                results[idx].passed = 0;
+                snprintf(results[idx].error, sizeof(results[idx].error),
+                         "%s", err ? err : "unknown error");
+            }
             lua_pop(L, 1); /* pop error */
             (*failed)++;
         }
@@ -799,7 +816,8 @@ void hl_cap_test_clear_js(JSContext *ctx)
     state->cases = JS_NewArray(ctx);
 }
 
-void hl_cap_test_run_js(JSContext *ctx, int *total, int *passed, int *failed)
+void hl_cap_test_run_js(JSContext *ctx, int *total, int *passed, int *failed,
+                        FILE *out, HlTestCaseResult *results, int max_results)
 {
     *total = 0;
     *passed = 0;
@@ -820,6 +838,7 @@ void hl_cap_test_run_js(JSContext *ctx, int *total, int *passed, int *failed)
 
         const char *desc = JS_ToCString(ctx, desc_val);
 
+        int idx = *total;
         (*total)++;
         JSValue ret = JS_Call(ctx, fn, JS_UNDEFINED, 0, NULL);
 
@@ -827,14 +846,29 @@ void hl_cap_test_run_js(JSContext *ctx, int *total, int *passed, int *failed)
             JSValue exc = JS_GetException(ctx);
             JSValue msg_val = JS_GetPropertyStr(ctx, exc, "message");
             const char *msg = JS_ToCString(ctx, msg_val);
-            printf("  FAIL  %s\n    %s\n", desc ? desc : "(unnamed)",
-                   msg ? msg : "unknown error");
+            if (out)
+                fprintf(out, "  FAIL  %s\n    %s\n", desc ? desc : "(unnamed)",
+                       msg ? msg : "unknown error");
+            if (results && idx < max_results) {
+                snprintf(results[idx].name, sizeof(results[idx].name),
+                         "%s", desc ? desc : "(unnamed)");
+                results[idx].passed = 0;
+                snprintf(results[idx].error, sizeof(results[idx].error),
+                         "%s", msg ? msg : "unknown error");
+            }
             if (msg) JS_FreeCString(ctx, msg);
             JS_FreeValue(ctx, msg_val);
             JS_FreeValue(ctx, exc);
             (*failed)++;
         } else {
-            printf("  PASS  %s\n", desc ? desc : "(unnamed)");
+            if (out)
+                fprintf(out, "  PASS  %s\n", desc ? desc : "(unnamed)");
+            if (results && idx < max_results) {
+                snprintf(results[idx].name, sizeof(results[idx].name),
+                         "%s", desc ? desc : "(unnamed)");
+                results[idx].passed = 1;
+                results[idx].error[0] = '\0';
+            }
             (*passed)++;
         }
 

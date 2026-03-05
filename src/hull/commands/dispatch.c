@@ -19,6 +19,7 @@
 #include "hull/commands/eject.h"
 #include "hull/commands/migrate.h"
 #include "hull/commands/sign_platform.h"
+#include "hull/commands/agent.h"
 
 #include <string.h>
 
@@ -36,6 +37,7 @@ static const HlCommand commands[] = {
     { "eject",         hl_cmd_eject },
     { "sign-platform", hl_cmd_sign_platform },
     { "migrate",       hl_cmd_migrate },
+    { "agent",         hl_cmd_agent },
     { NULL, NULL }  /* sentinel */
 };
 
