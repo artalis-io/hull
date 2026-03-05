@@ -41,7 +41,7 @@ local function deliver_webhook(webhook, event_type, payload_str, event_id)
     local sig = sign_payload(payload_str)
 
     local status = 0
-    local resp_body = ""
+    local response_body
 
     local send_ok, result = pcall(function()
         return http.post(webhook.url, payload_str, {
@@ -55,14 +55,14 @@ local function deliver_webhook(webhook, event_type, payload_str, event_id)
 
     if send_ok and result then
         status = result.status or 0
-        resp_body = result.body or ""
+        response_body = result.body or ""
     else
-        resp_body = tostring(result)
+        response_body = tostring(result)
     end
 
     db.exec(
         "INSERT INTO deliveries (webhook_id, event_id, status, response_body, created_at) VALUES (?, ?, ?, ?, ?)",
-        { webhook.id, event_id, status, resp_body, time.now() }
+        { webhook.id, event_id, status, response_body, time.now() }
     )
 
     return status

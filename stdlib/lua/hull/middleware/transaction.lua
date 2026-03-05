@@ -18,10 +18,8 @@ local transaction = {}
 
 --- Create a post-body middleware that wraps the downstream handler in db.batch().
 -- opts.on_error: optional function(req, res, err) called on rollback (default: 500 JSON)
-function transaction.middleware(opts)
-    opts = opts or {}
-
-    return function(req, res)
+function transaction.middleware(_opts)
+    return function(req, _res)
         -- Store the original handler result in ctx so the transaction wrapper
         -- can propagate it. The actual wrapping happens via db.batch():
         -- BEGIN IMMEDIATE is acquired, handler runs, COMMIT on success,
