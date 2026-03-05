@@ -16,6 +16,7 @@
 #include "hull/cap/http.h"
 #include "hull/cap/smtp.h"
 #include "hull/cap/crypto.h"
+#include "hull/cap/fs.h"
 
 #include "lua.h"
 #include "lualib.h"
@@ -1874,14 +1875,14 @@ static int lua_template_load_raw(lua_State *L)
 {
     const char *name = luaL_checkstring(L, 1);
 
-    /* Reject path traversal in template name */
-    if (strstr(name, "..") != NULL || name[0] == '/')
+    /* Quick-reject for both VFS and filesystem paths */
+    if (name[0] == '/' || name[0] == '\0')
         return luaL_error(L, "invalid template name: %s", name);
 
     /* 1. Search embedded template entries via VFS */
     HlLua *lua = get_hl_lua(L);
     if (lua && lua->base.app_vfs) {
-        char tpl_name[1024];
+        char tpl_name[HL_MODULE_PATH_MAX];
         int n = snprintf(tpl_name, sizeof(tpl_name), "templates/%s", name);
         if (n > 0 && (size_t)n < sizeof(tpl_name)) {
             const HlEntry *e = hl_vfs_find(lua->base.app_vfs, tpl_name);
@@ -1894,6 +1895,15 @@ static int lua_template_load_raw(lua_State *L)
 
     /* 2. Filesystem fallback (dev mode): app_dir/templates/<name> */
     if (lua && lua->app_dir) {
+        /* Validate template path is confined to app_dir */
+        HlFsConfig tpl_cfg = { .base_dir = lua->app_dir,
+                                .base_len = strlen(lua->app_dir) };
+        char tpl_rel[HL_MODULE_PATH_MAX];
+        int rn = snprintf(tpl_rel, sizeof(tpl_rel), "templates/%s", name);
+        if (rn < 0 || (size_t)rn >= sizeof(tpl_rel) ||
+            hl_cap_fs_validate(&tpl_cfg, tpl_rel) != 0)
+            return luaL_error(L, "invalid template name: %s", name);
+
         char path[HL_MODULE_PATH_MAX];
         int n = snprintf(path, sizeof(path), "%s/templates/%s",
                          lua->app_dir, name);
