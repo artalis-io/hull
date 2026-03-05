@@ -20,7 +20,6 @@ local transaction = {}
 -- opts.on_error: optional function(req, res, err) called on rollback (default: 500 JSON)
 function transaction.middleware(opts)
     opts = opts or {}
-    local on_error = opts.on_error
 
     return function(req, res)
         -- Store the original handler result in ctx so the transaction wrapper

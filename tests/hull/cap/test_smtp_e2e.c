@@ -275,9 +275,9 @@ UTEST(smtp_e2e, plain_send)
     ASSERT_TRUE(strstr(m.data_buf, "Hello, World!") != NULL);
 }
 
-/* ── 2. AUTH PLAIN ───────────────────────────────────────────────── */
+/* ── 2. AUTH PLAIN rejected without TLS ──────────────────────────── */
 
-UTEST(smtp_e2e, auth_plain)
+UTEST(smtp_e2e, auth_plain_rejected_without_tls)
 {
     MockSmtp m;
     ASSERT_EQ(0, mock_smtp_start(&m));
@@ -303,12 +303,12 @@ UTEST(smtp_e2e, auth_plain)
         .content_type = "text/plain",
     };
 
-    ASSERT_EQ(0, hl_cap_smtp_send(&cfg, &msg));
+    /* AUTH PLAIN must be rejected when TLS is not active */
+    ASSERT_EQ(-1, hl_cap_smtp_send(&cfg, &msg));
     mock_smtp_stop(&m);
 
-    /* \0user\0pass → base64 "AHVzZXIAcGFzcw==" */
-    ASSERT_EQ(0, strcmp(m.auth_plain, "AHVzZXIAcGFzcw=="));
-    ASSERT_TRUE(m.quit_seen);
+    /* Credentials should NOT have been sent */
+    ASSERT_EQ(0, strcmp(m.auth_plain, ""));
 }
 
 /* ── 3. CC recipients ────────────────────────────────────────────── */

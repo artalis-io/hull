@@ -27,7 +27,6 @@
 local outbox = {}
 
 local _max_attempts = 5
-local _flush_after_request = false
 
 --- Initialize the outbox table.
 -- opts.max_attempts: max delivery attempts before marking failed (default 5)
@@ -37,10 +36,6 @@ function outbox.init(opts)
     if opts.max_attempts then
         _max_attempts = opts.max_attempts
     end
-    if opts.flush_after_request ~= nil then
-        _flush_after_request = opts.flush_after_request
-    end
-
     db.exec([[
         CREATE TABLE IF NOT EXISTS _hull_outbox (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,

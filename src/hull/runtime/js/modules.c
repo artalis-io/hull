@@ -2266,7 +2266,7 @@ static JSValue js_smtp_send(JSContext *ctx, JSValueConst this_val,
     JS_FreeValue(ctx, v_cc);
 
     /* Build result early for validation errors */
-    JSValue result = JS_UNDEFINED;
+    JSValue result;
 
     if (!host || !from || !to || !subject || !body) {
         result = JS_NewObject(ctx);
