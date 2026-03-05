@@ -1458,13 +1458,13 @@ UTEST(lua_stdlib, cookie_serialize)
     init_lua_with_caps();
     ASSERT_TRUE(lua_initialized);
 
-    /* Default options: HttpOnly, SameSite=Lax, Path=/ (Secure defaults false) */
+    /* Default options: HttpOnly, Secure, SameSite=Lax, Path=/ */
     char *cookie = eval_str(
         "require('hull.cookie').serialize('sid', 'abc123')");
     ASSERT_NE(cookie, NULL);
     ASSERT_NE(strstr(cookie, "sid=abc123"), NULL);
     ASSERT_NE(strstr(cookie, "HttpOnly"), NULL);
-    ASSERT_EQ(strstr(cookie, "Secure"), NULL);
+    ASSERT_NE(strstr(cookie, "Secure"), NULL);
     ASSERT_NE(strstr(cookie, "SameSite=Lax"), NULL);
     ASSERT_NE(strstr(cookie, "Path=/"), NULL);
     free(cookie);

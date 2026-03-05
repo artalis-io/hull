@@ -57,8 +57,8 @@ end)
 -- Create a task
 app.post("/tasks", function(req, res)
     detect_lang(req)
-    local body = json.decode(req.body)
-    if not body then
+    local decode_ok, body = pcall(json.decode, req.body)
+    if not decode_ok or not body then
         return res:status(400):json({ error = i18n.t("error.invalid_json") })
     end
     local ok, errors = validate.check(body, {
@@ -76,8 +76,8 @@ end)
 -- Update a task
 app.put("/tasks/:id", function(req, res)
     detect_lang(req)
-    local body = json.decode(req.body)
-    if not body then
+    local decode_ok, body = pcall(json.decode, req.body)
+    if not decode_ok or not body then
         return res:status(400):json({ error = i18n.t("error.invalid_json") })
     end
     local done = 0

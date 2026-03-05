@@ -31,6 +31,7 @@ function middleware(opts) {
         if (!isAllowedOrigin(origin, origins)) return 0;
 
         res.header("Access-Control-Allow-Origin", origin);
+        res.header("Vary", "Origin");
         res.header("Access-Control-Allow-Methods", methods);
         res.header("Access-Control-Allow-Headers", headers);
         res.header("Access-Control-Max-Age", maxAge);

@@ -149,10 +149,17 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
         if (js->base.platform_vfs) {
             const HlEntry *e = hl_vfs_find(js->base.platform_vfs, module_name);
             if (e) {
-                JSValue func = JS_Eval(ctx, (const char *)e->data, e->len,
+                /* QuickJS lexer requires a '\0' sentinel after the
+                 * source buffer; xxd arrays lack one, so copy. */
+                char *src = js_malloc(ctx, (size_t)e->len + 1);
+                if (!src) return NULL;
+                memcpy(src, e->data, e->len);
+                src[e->len] = '\0';
+                JSValue func = JS_Eval(ctx, src, e->len,
                                        module_name,
                                        JS_EVAL_TYPE_MODULE |
                                        JS_EVAL_FLAG_COMPILE_ONLY);
+                js_free(ctx, src);
                 if (JS_IsException(func))
                     return NULL;
                 JSModuleDef *m = (JSModuleDef *)JS_VALUE_GET_PTR(func);
@@ -188,6 +195,18 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
                 const char *src = (const char *)e->data;
                 size_t src_len = e->len;
                 char *buf = NULL;
+
+                /* QuickJS lexer requires a '\0' sentinel after the
+                 * source buffer; xxd arrays lack one, so copy for
+                 * plain JS files. JSON wrapping below already
+                 * null-terminates via the suffix copy. */
+                if (is_js && !is_json) {
+                    buf = js_malloc(ctx, src_len + 1);
+                    if (!buf) return NULL;
+                    memcpy(buf, src, src_len);
+                    buf[src_len] = '\0';
+                    src = buf;
+                }
 
                 /* JSON → wrap as export default JSON.parse(`...`)
                  * Escape \, ` and ${ so the template literal passes

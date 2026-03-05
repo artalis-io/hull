@@ -20,6 +20,8 @@ app.manifest({
     hosts = {"127.0.0.1"},
 })
 
+-- env.get() is unavailable at load time (env_cfg wired after manifest extraction),
+-- so fall back to a dev default.  Set WEBHOOK_SECRET in production.
 local _ok, _val = pcall(env.get, "WEBHOOK_SECRET")
 local SIGNING_SECRET = (_ok and _val) or "whsec_change-me-in-production"
 
@@ -60,8 +62,8 @@ end)
 
 -- Register a webhook
 app.post("/webhooks", function(req, res)
-    local body = json.decode(req.body)
-    if not body then
+    local decode_ok, body = pcall(json.decode, req.body)
+    if not decode_ok or not body then
         return res:status(400):json({ error = "invalid JSON" })
     end
 
@@ -100,8 +102,8 @@ end)
 
 -- Fire an event — atomically inserts event + enqueues deliveries via outbox
 app.post("/events", function(req, res)
-    local body = json.decode(req.body)
-    if not body then
+    local decode_ok, body = pcall(json.decode, req.body)
+    if not decode_ok or not body then
         return res:status(400):json({ error = "invalid JSON" })
     end
 
@@ -226,8 +228,8 @@ app.post("/webhooks/receive", function(req, res)
         return res:status(401):json({ error = "invalid signature" })
     end
 
-    local body_data = json.decode(req.body)
-    local event_name = body_data and body_data.event or "unknown"
+    local bd_ok, body_data = pcall(json.decode, req.body)
+    local event_name = (bd_ok and body_data) and body_data.event or "unknown"
 
     -- Inbox deduplication: use webhook event header as message ID
     local event_id_header = req.headers["x-webhook-event-id"]

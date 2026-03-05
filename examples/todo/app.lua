@@ -143,9 +143,10 @@ app.get("/lang/:code", function(req, res)
     res:header("Set-Cookie", cookie.serialize("hull.lang", code, {
         path = "/", max_age = 365 * 24 * 3600, httponly = false,
     }))
-    -- Redirect back to referrer or home
+    -- Redirect back to referrer or home (validate to prevent open redirect)
     local referer = req.headers["referer"]
-    res:redirect(referer or "/")
+    local target = (referer and referer:sub(1, 1) == "/") and referer or "/"
+    res:redirect(target)
 end)
 
 -- ── Auth routes ─────────────────────────────────────────────────────

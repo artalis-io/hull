@@ -9,7 +9,7 @@
  */
 
 function decodePart(s) {
-    var decoded = s.split("+").join(" ");
+    const decoded = s.split("+").join(" ");
     try { return decodeURIComponent(decoded); }
     catch (e) { return decoded; }
 }

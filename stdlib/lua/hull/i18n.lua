@@ -237,7 +237,7 @@ function i18n.detect(header_or_req)
         local base = entry.lang:match("^([%w]+)")
         if base then
             for name, _ in pairs(locales) do
-                if name:match("^" .. base) then return name end
+                if name:sub(1, #base) == base then return name end
             end
         end
     end

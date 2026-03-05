@@ -41,6 +41,7 @@ function cors.middleware(opts)
         if not cors.is_allowed_origin(origin, origins) then return 0 end
 
         res:header("Access-Control-Allow-Origin", origin)
+        res:header("Vary", "Origin")
         res:header("Access-Control-Allow-Methods", methods)
         res:header("Access-Control-Allow-Headers", headers)
         res:header("Access-Control-Max-Age", max_age)

@@ -32,8 +32,8 @@ end)
 -- ── Auth routes ─────────────────────────────────────────────────────
 
 app.post("/register", function(req, res)
-    local body = json.decode(req.body)
-    if not body then
+    local decode_ok, body = pcall(json.decode, req.body)
+    if not decode_ok or not body then
         return res:status(400):json({ error = "invalid JSON" })
     end
 
@@ -50,22 +50,34 @@ app.post("/register", function(req, res)
     local password = body.password
     local name = body.name
 
-    local existing = db.query("SELECT id FROM users WHERE email = ?", { email })
-    if #existing > 0 then
-        return res:status(409):json({ error = "email already registered" })
-    end
-
+    -- Atomic check+insert to prevent TOCTOU race on email uniqueness
     local hash = crypto.hash_password(password)
-    db.exec("INSERT INTO users (email, password_hash, name, created_at) VALUES (?, ?, ?, ?)",
-            { email, hash, name, time.now() })
-    local id = db.last_id()
+    local id
+    local ok_txn, txn_err = pcall(function()
+        db.batch(function()
+            local existing = db.query("SELECT id FROM users WHERE email = ?", { email })
+            if #existing > 0 then
+                error("email already registered")
+            end
+            db.exec("INSERT INTO users (email, password_hash, name, created_at) VALUES (?, ?, ?, ?)",
+                    { email, hash, name, time.now() })
+            id = db.last_id()
+        end)
+    end)
+
+    if not ok_txn then
+        if tostring(txn_err):match("email already registered") then
+            return res:status(409):json({ error = "email already registered" })
+        end
+        return res:status(500):json({ error = "registration failed" })
+    end
 
     res:status(201):json({ id = id, email = email, name = name })
 end)
 
 app.post("/login", function(req, res)
-    local body = json.decode(req.body)
-    if not body then
+    local decode_ok, body = pcall(json.decode, req.body)
+    if not decode_ok or not body then
         return res:status(400):json({ error = "invalid JSON" })
     end
 
@@ -146,8 +158,8 @@ app.post("/tasks", function(req, res)
     local sess = require_session(req, res)
     if not sess then return end
 
-    local body = json.decode(req.body)
-    if not body then
+    local decode_ok, body = pcall(json.decode, req.body)
+    if not decode_ok or not body then
         return res:status(400):json({ error = "invalid JSON" })
     end
     local ok, errors = validate.check(body, {
@@ -169,8 +181,8 @@ app.put("/tasks/:id", function(req, res)
     local sess = require_session(req, res)
     if not sess then return end
 
-    local body = json.decode(req.body)
-    if not body then
+    local decode_ok, body = pcall(json.decode, req.body)
+    if not decode_ok or not body then
         return res:status(400):json({ error = "invalid JSON" })
     end
 

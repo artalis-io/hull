@@ -26,8 +26,10 @@ app.manifest({
     hosts: ["127.0.0.1"],
 });
 
+// env.get() is unavailable at load time (env_cfg wired after manifest extraction),
+// so fall back to a dev default.  Set WEBHOOK_SECRET in production.
 let SIGNING_SECRET = "whsec_change-me-in-production";
-try { const v = env.get("WEBHOOK_SECRET"); if (v) SIGNING_SECRET = v; } catch (_e) {}
+try { const v = env.get("WEBHOOK_SECRET"); if (v) SIGNING_SECRET = v; } catch (_e) { /* env not ready */ }
 
 // ── Initialize middleware tables ──────────────────────────────────────
 
