@@ -39,7 +39,7 @@ function getSmtpCfg() {
     if (smtpCfg) return smtpCfg;
     smtpCfg = {
         host: envGet("SMTP_HOST", "localhost"),
-        port: parseInt(envGet("SMTP_PORT", "587"), 10),
+        port: Number.parseInt(envGet("SMTP_PORT", "587"), 10),
         user: envGet("SMTP_USER", undefined),
         pass: envGet("SMTP_PASS", undefined),
         from: envGet("SMTP_FROM", "noreply@example.com"),
