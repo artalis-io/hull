@@ -14,8 +14,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Forward declaration */
+/* Forward declarations */
 typedef struct HlVfs HlVfs;
+typedef struct SHArena SHArena;
+typedef struct ShJsonValue ShJsonValue;
 
 /* ── Hardcoded gethull.dev platform public key (from keys/gethull.dev.pub) ── */
 /*
@@ -28,35 +30,39 @@ typedef struct HlVfs HlVfs;
 /* ── Platform signature (inner layer) ─────────────────────────────── */
 
 typedef struct {
-    char *arch;         /* e.g. "x86_64-cosmo" */
-    char *hash_hex;     /* SHA-256 of platform library */
-    char *canary_hex;   /* SHA-256 of platform canary integrity */
+    const char *arch;         /* e.g. "x86_64-cosmo" */
+    const char *hash_hex;     /* SHA-256 of platform library */
+    const char *canary_hex;   /* SHA-256 of platform canary integrity */
 } HlPlatformEntry;
 
 typedef struct {
     HlPlatformEntry *entries;
     size_t entry_count;
-    char *platforms_json;   /* raw JSON for the platforms object */
-    char *signature_hex;    /* 128 hex chars */
-    char *public_key_hex;   /* 64 hex chars */
+    ShJsonValue *platforms_value;  /* parsed DOM for canonical reconstruction */
+    const char *signature_hex;    /* 128 hex chars */
+    const char *public_key_hex;   /* 64 hex chars */
 } HlPlatformSig;
 
 /* ── Parsed package.sig ───────────────────────────────────────────── */
 
 typedef struct {
-    char *name;       /* relative path (e.g. "app.lua") */
-    char *hash_hex;   /* 64-char hex SHA-256 */
+    const char *name;       /* relative path (e.g. "app.lua") */
+    const char *hash_hex;   /* 64-char hex SHA-256 */
 } HlSigFileEntry;
 
 typedef struct {
+    SHArena *arena;  /* lifetime: all const char* and ShJsonValue* live here */
+
     /* Application layer fields */
-    char *binary_hash_hex;      /* SHA-256 of the APE binary */
-    char *trampoline_hash_hex;  /* SHA-256 of app_main.c */
-    char *build_json;           /* raw JSON for "build" object */
-    char *files_json;           /* raw JSON for "files" object (canonical) */
-    char *manifest_json;        /* raw JSON for "manifest" (may be "null") */
-    char *signature_hex;        /* 128 hex chars — app developer's sig */
-    char *public_key_hex;       /* 64 hex chars — app developer's pk */
+    const char *binary_hash_hex;      /* SHA-256 of the APE binary */
+    const char *trampoline_hash_hex;  /* SHA-256 of app_main.c */
+    const char *signature_hex;        /* 128 hex chars — app developer's sig */
+    const char *public_key_hex;       /* 64 hex chars — app developer's pk */
+
+    /* Parsed DOM nodes for canonical JSON reconstruction in verify */
+    ShJsonValue *build_value;         /* "build" object (or NULL) */
+    ShJsonValue *files_value;         /* "files" object (required) */
+    ShJsonValue *manifest_value;      /* "manifest" value (may be null/absent) */
 
     /* Platform layer (nested) */
     HlPlatformSig platform;

@@ -22,6 +22,7 @@
 #endif
 
 #include "hull/alloc.h"
+#include "hull/cap/audit.h"
 #include "hull/cap/db.h"
 #include "hull/cap/env.h"
 #include "hull/cap/http.h"
@@ -164,6 +165,7 @@ static void usage(const char *prog)
             "  --drain-timeout MS   Graceful shutdown drain timeout (default: 5000)\n"
             "  --no-migrate         Skip auto-run migrations on startup\n"
             "  --skip-ca-bundle     Skip TLS certificate verification (dev mode)\n"
+            "  --audit              Enable capability audit logging (JSON to stderr)\n"
             "  -h                   Show this help\n"
             "\n"
             "Subcommands:\n"
@@ -269,6 +271,8 @@ static int hull_serve(int argc, char **argv)
             skip_ca_bundle = 1;
         } else if (strcmp(argv[i], "--agent") == 0) {
             agent_mode = 1;
+        } else if (strcmp(argv[i], "--audit") == 0) {
+            hl_audit_enabled = 1;
         } else if (strcmp(argv[i], "--drain-timeout") == 0 && i + 1 < argc) {
             char *end;
             long dt = strtol(argv[++i], &end, 10);
@@ -283,6 +287,13 @@ static int hull_serve(int argc, char **argv)
         } else if (argv[i][0] != '-') {
             entry_point = argv[i];
         }
+    }
+
+    /* Check HULL_AUDIT env var */
+    {
+        const char *audit_env = getenv("HULL_AUDIT");
+        if (audit_env && strcmp(audit_env, "1") == 0)
+            hl_audit_enabled = 1;
     }
 
     if (!entry_point)

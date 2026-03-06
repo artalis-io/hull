@@ -1,13 +1,9 @@
 /*
  * signature.c — App signature verification (runtime)
  *
- * Reads package.sig (dual-layer JSON), extracts fields with targeted string
- * scanning, verifies Ed25519 signatures for both platform and app layers,
- * and checks file SHA-256 hashes.
- *
- * No full JSON parser needed — package.sig has a fixed schema produced by
- * build.lua's json.encode(). We extract raw JSON fragments and string
- * fields by key scanning.
+ * Reads package.sig (dual-layer JSON) using sh_json arena-allocated parser,
+ * verifies Ed25519 signatures for both platform and app layers, and checks
+ * file SHA-256 hashes.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -16,6 +12,9 @@
 #include "hull/cap/crypto.h"
 
 #include "log.h"
+
+#include <sh_json.h>
+#include <sh_arena.h>
 
 #include <limits.h>
 #include <stdio.h>
@@ -54,320 +53,51 @@ static void hex_encode(const uint8_t *data, size_t len, char *out)
         snprintf(out + i * 2, 3, "%02x", data[i]);
 }
 
-/* ── JSON extraction helpers ──────────────────────────────────────── */
+/* ── Recursive JSON value serializer ─────────────────────────────── */
 
 /*
- * Find a JSON key in the form "key": and return a pointer to the
- * character after the colon. Only matches keys at the given depth
- * (default: top-level = depth 1, inside the outermost {}).
+ * Serialize an ShJsonValue to a ShJsonWriter (canonical form).
+ * Used by verify functions to reconstruct the signed payload.
+ * Writes "null" for NULL values.
  */
-static const char *find_json_key_at(const char *json, const char *key,
-                                     int target_depth)
+static void sig_write_value(ShJsonWriter *w, const ShJsonValue *v)
 {
-    size_t klen = strlen(key);
-    const char *p = json;
-    int depth = 0;
-    int in_string = 0;
+    if (!v) { sh_json_write_null(w); return; }
 
-    while (*p) {
-        if (in_string) {
-            if (*p == '\\') {
-                p++;
-                if (*p) p++;
-                continue;
-            }
-            if (*p == '"') in_string = 0;
-            p++;
-            continue;
-        }
-
-        if (*p == '"') {
-            if (depth == target_depth &&
-                strncmp(p + 1, key, klen) == 0 &&
-                p[1 + klen] == '"') {
-                const char *after = p + 1 + klen + 1;
-                while (*after == ' ' || *after == '\t' || *after == '\n' || *after == '\r')
-                    after++;
-                if (*after == ':') {
-                    after++;
-                    while (*after == ' ' || *after == '\t' || *after == '\n' || *after == '\r')
-                        after++;
-                    return after;
-                }
-            }
-            in_string = 1;
-            p++;
-            continue;
-        }
-
-        if (*p == '{' || *p == '[') depth++;
-        else if (*p == '}' || *p == ']') depth--;
-        p++;
+    switch (v->type) {
+    case SH_JSON_NULL:
+        sh_json_write_null(w);
+        break;
+    case SH_JSON_BOOL:
+        sh_json_write_bool(w, v->u.bool_val);
+        break;
+    case SH_JSON_NUMBER: {
+        double d = v->u.num_val;
+        int64_t i = (int64_t)d;
+        if (d == (double)i && d >= -9007199254740992.0 && d <= 9007199254740992.0)
+            sh_json_write_int(w, i);
+        else
+            sh_json_write_double(w, d);
+        break;
     }
-
-    return NULL;
-}
-
-static const char *find_json_key(const char *json, const char *key)
-{
-    return find_json_key_at(json, key, 1);
-}
-
-/*
- * Extract a JSON object/array starting at `start` (which points to '{' or '[').
- * Returns a strdup'd copy of the balanced substring, or NULL on error.
- */
-static char *extract_json_value(const char *start)
-{
-    if (!start) return NULL;
-
-    char open = *start;
-    char close_ch;
-    if (open == '{') close_ch = '}';
-    else if (open == '[') close_ch = ']';
-    else return NULL;
-
-    int depth = 0;
-    int in_string = 0;
-    const char *p = start;
-
-    while (*p) {
-        if (in_string) {
-            if (*p == '\\') { p++; if (*p) p++; continue; }
-            if (*p == '"') in_string = 0;
-            p++;
-            continue;
+    case SH_JSON_STRING:
+        sh_json_write_string_n(w, v->u.string_val.str, v->u.string_val.len);
+        break;
+    case SH_JSON_ARRAY:
+        sh_json_write_array_start(w);
+        for (size_t i = 0; i < v->u.array_val.count; i++)
+            sig_write_value(w, v->u.array_val.items[i]);
+        sh_json_write_array_end(w);
+        break;
+    case SH_JSON_OBJECT:
+        sh_json_write_object_start(w);
+        for (size_t i = 0; i < v->u.object_val.count; i++) {
+            sh_json_write_key(w, v->u.object_val.members[i].key);
+            sig_write_value(w, v->u.object_val.members[i].value);
         }
-
-        if (*p == '"') { in_string = 1; p++; continue; }
-        if (*p == open) depth++;
-        else if (*p == close_ch) {
-            depth--;
-            if (depth == 0) {
-                size_t len = (size_t)(p - start + 1);
-                char *result = malloc(len + 1);
-                if (!result) return NULL;
-                memcpy(result, start, len);
-                result[len] = '\0';
-                return result;
-            }
-        }
-        p++;
+        sh_json_write_object_end(w);
+        break;
     }
-
-    return NULL; /* unbalanced */
-}
-
-/*
- * Extract a JSON string value: "value" → strdup'd "value" (without quotes).
- * `start` must point to the opening '"'.
- */
-static char *extract_json_string(const char *start)
-{
-    if (!start || *start != '"') return NULL;
-
-    const char *p = start + 1;
-    while (*p && *p != '"') {
-        if (*p == '\\') { p++; if (!*p) return NULL; }
-        p++;
-    }
-    if (*p != '"') return NULL;
-
-    size_t len = (size_t)(p - start - 1);
-    char *result = malloc(len + 1);
-    if (!result) return NULL;
-    memcpy(result, start + 1, len);
-    result[len] = '\0';
-    return result;
-}
-
-/*
- * Extract the raw JSON value at `start` — could be a string, object,
- * array, number, true, false, or null. Returns a strdup'd copy.
- */
-static char *extract_raw_json_value(const char *start)
-{
-    if (!start) return NULL;
-
-    if (*start == '{' || *start == '[')
-        return extract_json_value(start);
-
-    if (*start == '"') {
-        /* Find closing quote (accounting for escapes) */
-        const char *p = start + 1;
-        while (*p && *p != '"') {
-            if (*p == '\\') { p++; if (!*p) return NULL; }
-            p++;
-        }
-        if (*p != '"') return NULL;
-        size_t len = (size_t)(p - start + 1);
-        char *result = malloc(len + 1);
-        if (!result) return NULL;
-        memcpy(result, start, len);
-        result[len] = '\0';
-        return result;
-    }
-
-    /* Number, true, false, null — scan to delimiter */
-    const char *p = start;
-    while (*p && *p != ',' && *p != '}' && *p != ']' &&
-           *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r')
-        p++;
-    size_t len = (size_t)(p - start);
-    char *result = malloc(len + 1);
-    if (!result) return NULL;
-    memcpy(result, start, len);
-    result[len] = '\0';
-    return result;
-}
-
-/* ── Parse file entries from files_json ───────────────────────────── */
-
-static int parse_file_entries(const char *files_json,
-                              HlSigFileEntry **out_entries,
-                              size_t *out_count)
-{
-    if (!files_json || files_json[0] != '{') return -1;
-
-    size_t cap = 16;
-    size_t count = 0;
-    HlSigFileEntry *entries = calloc(cap, sizeof(HlSigFileEntry));
-    if (!entries) return -1;
-
-    const char *p = files_json + 1; /* skip '{' */
-
-    while (*p && *p != '}') {
-        while (*p == ' ' || *p == ',' || *p == '\t' || *p == '\n' || *p == '\r')
-            p++;
-        if (*p == '}') break;
-
-        if (*p != '"') { free(entries); return -1; }
-        char *key = extract_json_string(p);
-        if (!key) { free(entries); return -1; }
-
-        p++;
-        while (*p && !(*p == '"' && *(p - 1) != '\\')) p++;
-        if (*p == '"') p++;
-
-        while (*p == ' ' || *p == '\t' || *p == ':' || *p == '\n' || *p == '\r')
-            p++;
-
-        if (*p != '"') { free(key); free(entries); return -1; }
-        char *val = extract_json_string(p);
-        if (!val) { free(key); free(entries); return -1; }
-
-        p++;
-        while (*p && !(*p == '"' && *(p - 1) != '\\')) p++;
-        if (*p == '"') p++;
-
-        if (count >= cap) {
-            if (cap > SIZE_MAX / (2 * sizeof(HlSigFileEntry))) {
-                free(key); free(val);
-                goto fail;
-            }
-            cap *= 2;
-            HlSigFileEntry *ne = realloc(entries, cap * sizeof(HlSigFileEntry));
-            if (!ne) { free(key); free(val); goto fail; }
-            entries = ne;
-        }
-        entries[count].name = key;
-        entries[count].hash_hex = val;
-        count++;
-    }
-
-    *out_entries = entries;
-    *out_count = count;
-    return 0;
-
-fail:
-    for (size_t i = 0; i < count; i++) {
-        free(entries[i].name);
-        free(entries[i].hash_hex);
-    }
-    free(entries);
-    return -1;
-}
-
-/* ── Parse platform entries from platforms_json ───────────────────── */
-
-static int parse_platform_entries(const char *platforms_json,
-                                   HlPlatformEntry **out_entries,
-                                   size_t *out_count)
-{
-    if (!platforms_json || platforms_json[0] != '{') return -1;
-
-    size_t cap = 4;
-    size_t count = 0;
-    HlPlatformEntry *entries = calloc(cap, sizeof(HlPlatformEntry));
-    if (!entries) return -1;
-
-    const char *p = platforms_json + 1;
-
-    while (*p && *p != '}') {
-        while (*p == ' ' || *p == ',' || *p == '\t' || *p == '\n' || *p == '\r')
-            p++;
-        if (*p == '}') break;
-
-        /* Arch key */
-        if (*p != '"') goto pfail;
-        char *arch = extract_json_string(p);
-        if (!arch) goto pfail;
-
-        /* Skip past key string */
-        p++;
-        while (*p && !(*p == '"' && *(p - 1) != '\\')) p++;
-        if (*p == '"') p++;
-        while (*p == ' ' || *p == '\t' || *p == ':' || *p == '\n' || *p == '\r')
-            p++;
-
-        /* Value is an object {hash:..., canary:...} */
-        if (*p != '{') { free(arch); goto pfail; }
-        char *obj = extract_json_value(p);
-        if (!obj) { free(arch); goto pfail; }
-
-        /* Skip past the object in the stream */
-        {
-            size_t objlen = strlen(obj);
-            p += objlen;
-        }
-
-        /* Extract hash and canary from the object */
-        const char *hv = find_json_key_at(obj, "hash", 1);
-        char *hash_hex = hv ? extract_json_string(hv) : NULL;
-
-        const char *cv = find_json_key_at(obj, "canary", 1);
-        char *canary_hex = cv ? extract_json_string(cv) : NULL;
-
-        free(obj);
-
-        if (count >= cap) {
-            if (cap > SIZE_MAX / (2 * sizeof(HlPlatformEntry))) {
-                free(arch); free(hash_hex); free(canary_hex);
-                goto pfail;
-            }
-            cap *= 2;
-            HlPlatformEntry *ne = realloc(entries, cap * sizeof(HlPlatformEntry));
-            if (!ne) { free(arch); free(hash_hex); free(canary_hex); goto pfail; }
-            entries = ne;
-        }
-        entries[count].arch = arch;
-        entries[count].hash_hex = hash_hex;
-        entries[count].canary_hex = canary_hex;
-        count++;
-    }
-
-    *out_entries = entries;
-    *out_count = count;
-    return 0;
-
-pfail:
-    for (size_t i = 0; i < count; i++) {
-        free(entries[i].arch);
-        free(entries[i].hash_hex);
-        free(entries[i].canary_hex);
-    }
-    free(entries);
-    return -1;
 }
 
 /* ── Public API ────────────────────────────────────────────────────── */
@@ -397,86 +127,103 @@ int hl_sig_read(const char *sig_path, HlSignature *sig)
     fclose(f);
     data[nread] = '\0';
 
-    const char *val;
+    /* Parse JSON into arena-allocated DOM.
+     * Arena needs ~6x input for nodes + strings + alignment padding. */
+    size_t arena_size = nread * 8;
+    if (arena_size < 4096) arena_size = 4096;
+    SHArena *arena = sh_arena_create(arena_size);
+    if (!arena) { free(data); return -1; }
+
+    ShJsonValue *root;
+    if (sh_json_parse(data, nread, arena, &root) != SH_JSON_OK) {
+        sh_arena_free(arena);
+        free(data);
+        return -1;
+    }
+    free(data);
+
+    sig->arena = arena;
 
     /* ── App-layer fields ─────────────────────────────────────── */
 
-    /* binary_hash (optional for backwards compat, required in new format) */
-    val = find_json_key(data, "binary_hash");
-    if (val)
-        sig->binary_hash_hex = extract_json_string(val);
+    sig->binary_hash_hex = sh_json_as_string(
+        sh_json_get(root, "binary_hash"), NULL);
+    sig->trampoline_hash_hex = sh_json_as_string(
+        sh_json_get(root, "trampoline_hash"), NULL);
+    sig->signature_hex = sh_json_as_string(
+        sh_json_get(root, "signature"), NULL);
+    sig->public_key_hex = sh_json_as_string(
+        sh_json_get(root, "public_key"), NULL);
 
-    /* trampoline_hash (optional) */
-    val = find_json_key(data, "trampoline_hash");
-    if (val)
-        sig->trampoline_hash_hex = extract_json_string(val);
+    /* Parsed DOM nodes for canonical reconstruction in verify */
+    sig->build_value = sh_json_get(root, "build");
+    sig->files_value = sh_json_get(root, "files");
+    sig->manifest_value = sh_json_get(root, "manifest");
 
-    /* build (optional) */
-    val = find_json_key(data, "build");
-    if (val)
-        sig->build_json = extract_raw_json_value(val);
-
-    /* files (required) */
-    val = find_json_key(data, "files");
-    if (!val) { free(data); hl_sig_free(sig); return -1; }
-    sig->files_json = extract_raw_json_value(val);
-    if (!sig->files_json) { free(data); hl_sig_free(sig); return -1; }
-
-    /* manifest (optional — could be object, null, or absent) */
-    val = find_json_key(data, "manifest");
-    if (val)
-        sig->manifest_json = extract_raw_json_value(val);
-
-    /* signature (required) */
-    val = find_json_key(data, "signature");
-    if (!val) { free(data); hl_sig_free(sig); return -1; }
-    sig->signature_hex = extract_json_string(val);
-    if (!sig->signature_hex) { free(data); hl_sig_free(sig); return -1; }
-
-    /* public_key (required) */
-    val = find_json_key(data, "public_key");
-    if (!val) { free(data); hl_sig_free(sig); return -1; }
-    sig->public_key_hex = extract_json_string(val);
-    if (!sig->public_key_hex) { free(data); hl_sig_free(sig); return -1; }
+    /* Required fields */
+    if (!sig->signature_hex || !sig->public_key_hex || !sig->files_value) {
+        hl_sig_free(sig);
+        return -1;
+    }
 
     /* ── Platform layer (nested object) ───────────────────────── */
 
-    val = find_json_key(data, "platform");
-    if (val && *val == '{') {
-        char *platform_json = extract_json_value(val);
-        if (platform_json) {
-            /* Extract platform.platforms */
-            const char *pv = find_json_key_at(platform_json, "platforms", 1);
-            if (pv)
-                sig->platform.platforms_json = extract_raw_json_value(pv);
+    ShJsonValue *platform = sh_json_get(root, "platform");
+    if (platform && sh_json_type(platform) == SH_JSON_OBJECT) {
+        ShJsonValue *platforms = sh_json_get(platform, "platforms");
+        sig->platform.platforms_value = platforms;
+        sig->platform.signature_hex = sh_json_as_string(
+            sh_json_get(platform, "signature"), NULL);
+        sig->platform.public_key_hex = sh_json_as_string(
+            sh_json_get(platform, "public_key"), NULL);
 
-            /* Extract platform.signature */
-            const char *sv = find_json_key_at(platform_json, "signature", 1);
-            if (sv)
-                sig->platform.signature_hex = extract_json_string(sv);
-
-            /* Extract platform.public_key */
-            const char *kv = find_json_key_at(platform_json, "public_key", 1);
-            if (kv)
-                sig->platform.public_key_hex = extract_json_string(kv);
-
-            /* Parse platform entries */
-            if (sig->platform.platforms_json) {
-                parse_platform_entries(sig->platform.platforms_json,
-                                       &sig->platform.entries,
-                                       &sig->platform.entry_count);
+        /* Parse platform entries from DOM */
+        if (platforms && sh_json_type(platforms) == SH_JSON_OBJECT) {
+            size_t n = platforms->u.object_val.count;
+            if (n > 0 && n <= SIZE_MAX / sizeof(HlPlatformEntry)) {
+                sig->platform.entries = calloc(n, sizeof(HlPlatformEntry));
+                if (sig->platform.entries) {
+                    sig->platform.entry_count = n;
+                    for (size_t i = 0; i < n; i++) {
+                        const ShJsonMember *m =
+                            &platforms->u.object_val.members[i];
+                        sig->platform.entries[i].arch = m->key;
+                        sig->platform.entries[i].hash_hex =
+                            sh_json_as_string(
+                                sh_json_get(m->value, "hash"), NULL);
+                        sig->platform.entries[i].canary_hex =
+                            sh_json_as_string(
+                                sh_json_get(m->value, "canary"), NULL);
+                    }
+                }
             }
-
-            free(platform_json);
         }
     }
 
-    free(data);
-
-    /* Parse file entries from files_json */
-    if (parse_file_entries(sig->files_json, &sig->entries, &sig->entry_count) != 0) {
+    /* Parse file entries from DOM */
+    if (sig->files_value->type != SH_JSON_OBJECT) {
         hl_sig_free(sig);
         return -1;
+    }
+
+    size_t nfiles = sig->files_value->u.object_val.count;
+    if (nfiles > 0) {
+        if (nfiles > SIZE_MAX / sizeof(HlSigFileEntry)) {
+            hl_sig_free(sig);
+            return -1;
+        }
+        sig->entries = calloc(nfiles, sizeof(HlSigFileEntry));
+        if (!sig->entries) {
+            hl_sig_free(sig);
+            return -1;
+        }
+        sig->entry_count = nfiles;
+        for (size_t i = 0; i < nfiles; i++) {
+            const ShJsonMember *m =
+                &sig->files_value->u.object_val.members[i];
+            sig->entries[i].name = m->key;
+            sig->entries[i].hash_hex = sh_json_as_string(m->value, NULL);
+        }
     }
 
     return 0;
@@ -485,7 +232,7 @@ int hl_sig_read(const char *sig_path, HlSignature *sig)
 int hl_sig_verify(const HlSignature *sig, const uint8_t pubkey[32])
 {
     if (!sig || !pubkey) return -1;
-    if (!sig->signature_hex || !sig->files_json)
+    if (!sig->signature_hex || !sig->files_value)
         return -1;
 
     /* Decode signature hex → 64 bytes */
@@ -497,96 +244,87 @@ int hl_sig_verify(const HlSignature *sig, const uint8_t pubkey[32])
         return -1;
 
     /*
-     * Build canonical payload. The new package.sig format signs:
-     *   {binary_hash, build, files, manifest, platform, trampoline_hash}
-     * Keys are in alphabetical order (canonical JSON).
+     * Build canonical payload using ShJsonWriter.
+     *
+     * New format signs: {binary_hash, build, files, manifest, platform,
+     *                    trampoline_hash}
+     * Keys in alphabetical order (canonical JSON).
      *
      * For backwards compatibility with old hull.sig (v1), detect by
      * checking whether binary_hash is present.
      */
-    char *payload;
+    ShJsonBuf jb;
+    sh_json_buf_init(&jb);
+    ShJsonWriter w;
+    sh_json_writer_init(&w, sh_json_buf_write, &jb);
 
     if (sig->binary_hash_hex) {
         /* New package.sig format */
-        /* Reconstruct the platform object as raw JSON */
-        char *platform_json = NULL;
-        if (sig->platform.platforms_json &&
+        sh_json_write_object_start(&w);
+
+        sh_json_write_kv_string(&w, "binary_hash", sig->binary_hash_hex);
+
+        sh_json_write_key(&w, "build");
+        sig_write_value(&w, sig->build_value);
+
+        sh_json_write_key(&w, "files");
+        sig_write_value(&w, sig->files_value);
+
+        sh_json_write_key(&w, "manifest");
+        sig_write_value(&w, sig->manifest_value);
+
+        sh_json_write_key(&w, "platform");
+        if (sig->platform.platforms_value &&
             sig->platform.signature_hex &&
             sig->platform.public_key_hex) {
-            size_t pj_len = 64 + strlen(sig->platform.platforms_json) +
-                            strlen(sig->platform.signature_hex) +
-                            strlen(sig->platform.public_key_hex);
-            platform_json = malloc(pj_len);
-            if (!platform_json) return -1;
-            snprintf(platform_json, pj_len,
-                     "{\"platforms\":%s,\"public_key\":\"%s\",\"signature\":\"%s\"}",
-                     sig->platform.platforms_json,
-                     sig->platform.public_key_hex,
-                     sig->platform.signature_hex);
-        }
-
-        /* Build the full canonical payload */
-        size_t bh_len = strlen(sig->binary_hash_hex);
-        size_t build_len = sig->build_json ? strlen(sig->build_json) : 4;
-        size_t files_len = strlen(sig->files_json);
-        size_t manifest_len = sig->manifest_json ? strlen(sig->manifest_json) : 4;
-        size_t plat_len = platform_json ? strlen(platform_json) : 4;
-        size_t th_len = sig->trampoline_hash_hex ? strlen(sig->trampoline_hash_hex) : 4;
-
-        size_t total = 128 + bh_len + build_len + files_len +
-                       manifest_len + plat_len + th_len;
-        payload = malloc(total);
-        if (!payload) { free(platform_json); return -1; }
-
-        snprintf(payload, total,
-                 "{\"binary_hash\":\"%s\","
-                 "\"build\":%s,"
-                 "\"files\":%s,"
-                 "\"manifest\":%s,"
-                 "\"platform\":%s,"
-                 "\"trampoline_hash\":\"%s\"}",
-                 sig->binary_hash_hex,
-                 sig->build_json ? sig->build_json : "null",
-                 sig->files_json,
-                 sig->manifest_json ? sig->manifest_json : "null",
-                 platform_json ? platform_json : "null",
-                 sig->trampoline_hash_hex ? sig->trampoline_hash_hex : "");
-
-        free(platform_json);
-    } else {
-        /* Legacy hull.sig format: {"files":...,"manifest":...} */
-        size_t files_len = strlen(sig->files_json);
-
-        if (sig->manifest_json) {
-            size_t manifest_len = strlen(sig->manifest_json);
-            size_t payload_len = 9 + files_len + 12 + manifest_len + 1;
-            payload = malloc(payload_len + 1);
-            if (!payload) return -1;
-            snprintf(payload, payload_len + 1,
-                     "{\"files\":%s,\"manifest\":%s}",
-                     sig->files_json, sig->manifest_json);
+            sh_json_write_object_start(&w);
+            sh_json_write_key(&w, "platforms");
+            sig_write_value(&w, sig->platform.platforms_value);
+            sh_json_write_kv_string(&w, "public_key",
+                                    sig->platform.public_key_hex);
+            sh_json_write_kv_string(&w, "signature",
+                                    sig->platform.signature_hex);
+            sh_json_write_object_end(&w);
         } else {
-            size_t payload_len = 9 + files_len + 1;
-            payload = malloc(payload_len + 1);
-            if (!payload) return -1;
-            snprintf(payload, payload_len + 1,
-                     "{\"files\":%s}",
-                     sig->files_json);
+            sh_json_write_null(&w);
         }
+
+        sh_json_write_kv_string(&w, "trampoline_hash",
+            sig->trampoline_hash_hex ? sig->trampoline_hash_hex : "");
+
+        sh_json_write_object_end(&w);
+    } else {
+        /* Legacy hull.sig format: {"files":...} or {"files":...,"manifest":...} */
+        sh_json_write_object_start(&w);
+
+        sh_json_write_key(&w, "files");
+        sig_write_value(&w, sig->files_value);
+
+        if (sig->manifest_value) {
+            sh_json_write_key(&w, "manifest");
+            sig_write_value(&w, sig->manifest_value);
+        }
+
+        sh_json_write_object_end(&w);
+    }
+
+    if (sh_json_writer_error(&w) || !jb.buf) {
+        sh_json_buf_free(&jb);
+        return -1;
     }
 
     /* Verify Ed25519 signature */
     int rc = hl_cap_crypto_ed25519_verify(
-        (const uint8_t *)payload, strlen(payload), sig_bytes, pubkey);
+        (const uint8_t *)jb.buf, jb.len, sig_bytes, pubkey);
 
-    free(payload);
+    sh_json_buf_free(&jb);
     return rc;
 }
 
 int hl_sig_verify_platform(const HlSignature *sig, const uint8_t pubkey[32])
 {
     if (!sig || !pubkey) return -1;
-    if (!sig->platform.signature_hex || !sig->platform.platforms_json)
+    if (!sig->platform.signature_hex || !sig->platform.platforms_value)
         return -1;
 
     /* Decode signature hex → 64 bytes */
@@ -597,12 +335,23 @@ int hl_sig_verify_platform(const HlSignature *sig, const uint8_t pubkey[32])
     if (hex_decode(sig->platform.signature_hex, sig_hex_len, sig_bytes, 64) != 0)
         return -1;
 
-    /* Payload is canonicalStringify(platforms) */
-    const char *payload = sig->platform.platforms_json;
-    size_t payload_len = strlen(payload);
+    /* Serialize platforms value to canonical JSON */
+    ShJsonBuf jb;
+    sh_json_buf_init(&jb);
+    ShJsonWriter w;
+    sh_json_writer_init(&w, sh_json_buf_write, &jb);
+    sig_write_value(&w, sig->platform.platforms_value);
 
-    return hl_cap_crypto_ed25519_verify(
-        (const uint8_t *)payload, payload_len, sig_bytes, pubkey);
+    if (sh_json_writer_error(&w) || !jb.buf) {
+        sh_json_buf_free(&jb);
+        return -1;
+    }
+
+    int rc = hl_cap_crypto_ed25519_verify(
+        (const uint8_t *)jb.buf, jb.len, sig_bytes, pubkey);
+
+    sh_json_buf_free(&jb);
+    return rc;
 }
 
 /* Search the VFS for a file matching sig_name.
@@ -757,35 +506,15 @@ int hl_sig_verify_files_fs(const HlSignature *sig, const char *app_dir)
 void hl_sig_free(HlSignature *sig)
 {
     if (!sig) return;
-    free(sig->binary_hash_hex);
-    free(sig->trampoline_hash_hex);
-    free(sig->build_json);
-    free(sig->files_json);
-    free(sig->manifest_json);
-    free(sig->signature_hex);
-    free(sig->public_key_hex);
 
-    /* Free platform layer */
-    if (sig->platform.entries) {
-        for (size_t i = 0; i < sig->platform.entry_count; i++) {
-            free(sig->platform.entries[i].arch);
-            free(sig->platform.entries[i].hash_hex);
-            free(sig->platform.entries[i].canary_hex);
-        }
-        free(sig->platform.entries);
-    }
-    free(sig->platform.platforms_json);
-    free(sig->platform.signature_hex);
-    free(sig->platform.public_key_hex);
+    /* Free calloc'd entry arrays (entries point into arena) */
+    free(sig->platform.entries);
+    free(sig->entries);
 
-    /* Free file entries */
-    if (sig->entries) {
-        for (size_t i = 0; i < sig->entry_count; i++) {
-            free(sig->entries[i].name);
-            free(sig->entries[i].hash_hex);
-        }
-        free(sig->entries);
-    }
+    /* Free arena — all parsed strings and DOM nodes live here */
+    if (sig->arena)
+        sh_arena_free(sig->arena);
+
     memset(sig, 0, sizeof(*sig));
 }
 

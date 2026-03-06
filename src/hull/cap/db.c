@@ -9,6 +9,7 @@
  */
 
 #include "hull/cap/db.h"
+#include "hull/cap/audit.h"
 #include "hull/alloc.h"
 #include <sqlite3.h>
 #include <limits.h>
@@ -297,6 +298,16 @@ int hl_cap_db_query(HlStmtCache *cache, const char *sql,
     }
 
     sqlite3_reset(stmt);
+
+    {
+        ShJsonWriter w = hl_audit_begin("db.query");
+        size_t sql_len = strlen(sql);
+        sh_json_write_key(&w, "sql");
+        sh_json_write_string_n(&w, sql, sql_len < 512 ? sql_len : 512);
+        sh_json_write_kv_int(&w, "nparams", nparams);
+        sh_json_write_kv_int(&w, "result", result);
+        hl_audit_end(&w);
+    }
     return result;
 }
 
@@ -320,10 +331,22 @@ int hl_cap_db_exec(HlStmtCache *cache, const char *sql,
     int rc = sqlite3_step(stmt);
     sqlite3_reset(stmt);
 
+    int result;
     if (rc != SQLITE_DONE && rc != SQLITE_ROW)
-        return -1;
+        result = -1;
+    else
+        result = sqlite3_changes(cache->db);
 
-    return sqlite3_changes(cache->db);
+    {
+        ShJsonWriter w = hl_audit_begin("db.exec");
+        size_t sql_len = strlen(sql);
+        sh_json_write_key(&w, "sql");
+        sh_json_write_string_n(&w, sql, sql_len < 512 ? sql_len : 512);
+        sh_json_write_kv_int(&w, "nparams", nparams);
+        sh_json_write_kv_int(&w, "result", result);
+        hl_audit_end(&w);
+    }
+    return result;
 }
 
 int64_t hl_cap_db_last_id(sqlite3 *db)
