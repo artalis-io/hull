@@ -180,12 +180,16 @@ Run tests with structured JSON output (per-file, per-test results).
 ### 1. Start Dev Server
 
 ```bash
-hull dev --agent app.lua -p 3000
+hull dev --agent --audit app.lua -p 3000
 ```
 
 The `--agent` flag enables:
 - `.hull/dev.json` — written on start (port, PID, timestamp), removed on stop
 - `.hull/last_error.json` — written on app load failure, cleared on success
+
+The `--audit` flag enables:
+- Structured JSON logging of every capability call (db, fs, http, env, tool, smtp) to stderr
+- Zero overhead when disabled — single branch on a global flag
 
 ### 2. Develop (Tight Loop)
 
@@ -494,6 +498,37 @@ req.ctx             -- middleware context table (session, user, csrf_token, etc.
 9. **Template auto-escaping** — `{{ var }}` HTML-escapes. Use `{{{ var }}}` for raw HTML only when safe.
 
 10. **Static files at `/static/*`** — put files in `static/` directory. They're auto-detected and served.
+
+## Audit Logging
+
+Hull logs every capability call as structured JSON to stderr when `--audit` is passed or `HULL_AUDIT=1` is set. This gives agents full visibility into what the app actually does at runtime.
+
+```bash
+# Start dev server with audit logging
+hull dev --agent --audit app.lua -p 3000
+
+# Or enable via environment variable
+HULL_AUDIT=1 hull dev --agent app.lua -p 3000
+```
+
+Example audit output (one JSON object per line on stderr):
+
+```
+{"ts":"2026-03-06T14:23:01Z","cap":"db.query","sql":"SELECT * FROM tasks WHERE id = ?","nparams":1,"result":0}
+{"ts":"2026-03-06T14:23:01Z","cap":"fs.read","path":"uploads/file.txt","bytes":4096}
+{"ts":"2026-03-06T14:23:02Z","cap":"http.request","method":"POST","url":"https://api.example.com","status":200,"result":0}
+{"ts":"2026-03-06T14:23:02Z","cap":"env.get","name":"DATABASE_URL","result":"ok"}
+{"ts":"2026-03-06T14:23:03Z","cap":"smtp.send","host":"smtp.example.com","from":"noreply@app.com","to":"user@example.com","subject":"Welcome","result":0}
+{"ts":"2026-03-06T14:23:04Z","cap":"tool.spawn","cmd":"cc","exit_code":0}
+```
+
+Every capability module is instrumented: `db.query`, `db.exec`, `fs.read`, `fs.write`, `fs.delete`, `http.request`, `env.get`, `tool.spawn`, `smtp.send`. SQL queries are truncated to 512 bytes. Passwords and secrets are never logged.
+
+**Use cases for agents:**
+- **Debugging failed requests:** See exactly which DB queries ran, what files were accessed, which HTTP calls were made
+- **Verifying security:** Confirm that capability enforcement is working (denied access shows `"result":"denied"`)
+- **Performance investigation:** Identify which capability calls a slow endpoint makes
+- **Understanding app behavior:** Trace the full sequence of operations for any request
 
 ## Build & Deploy
 

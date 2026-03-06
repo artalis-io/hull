@@ -48,6 +48,7 @@ Hull ships 14 subcommands for the full development lifecycle:
 | `hull keygen <name>` | Generate Ed25519 signing keypair |
 | `hull sign-platform <key>` | Sign platform library with per-arch hashes |
 | `hull manifest <app>` | Extract and print manifest as JSON |
+| `hull <app> --audit` | Enable capability audit logging (JSON to stderr) |
 | `hull migrate [app_dir]` | Run pending SQL migrations |
 | `hull migrate status` | Show migration status (applied/pending) |
 | `hull migrate new <name>` | Create a new numbered migration file |
@@ -87,7 +88,7 @@ Cosmopolitan APE binaries run on Linux, macOS, Windows, FreeBSD, OpenBSD, and Ne
 │  Runtimes (Lua 5.4 + QuickJS)              │  ← Sandboxed interpreters
 ├─────────────────────────────────────────────┤
 │  Capability Layer (src/hull/cap/)           │  ← C enforcement boundary
-│  fs, db, crypto, time, env, http, tool      │
+│  fs, db, crypto, time, env, http, tool      │  ← audit logging (--audit)
 ├─────────────────────────────────────────────┤
 │  Hull Core                                  │  ← Manifest, sandbox, signatures, VFS
 ├─────────────────────────────────────────────┤
@@ -223,6 +224,29 @@ app.manifest({
 
 See [docs/security.md](docs/security.md) for the full attack model and [docs/architecture.md](docs/architecture.md) for implementation details.
 
+### Audit Logging
+
+Hull can log every capability call (database queries, file I/O, HTTP requests, env access) as structured JSON to stderr. Off by default for zero overhead.
+
+```bash
+# Enable via CLI flag
+hull app.lua --audit
+
+# Or via environment variable
+HULL_AUDIT=1 hull app.lua
+```
+
+Each line is a self-contained JSON object with a UTC timestamp and the capability name:
+
+```
+{"ts":"2026-03-06T14:23:01Z","cap":"db.query","sql":"SELECT * FROM tasks WHERE id = ?","nparams":1,"result":0}
+{"ts":"2026-03-06T14:23:01Z","cap":"fs.read","path":"uploads/file.txt","bytes":4096}
+{"ts":"2026-03-06T14:23:02Z","cap":"http.request","method":"POST","url":"https://api.example.com","status":200,"result":0}
+{"ts":"2026-03-06T14:23:02Z","cap":"env.get","name":"DATABASE_URL","result":"ok"}
+```
+
+When disabled (default), the audit check is a single branch on a global flag — zero escaping, formatting, or I/O.
+
 ## Performance
 
 77,000–86,000 requests/sec on a single core. ~15% overhead vs raw C (Keel baseline: 101,000 req/s). SQLite write-heavy routes sustain 19,000 req/s.
@@ -296,7 +320,7 @@ The workflow is the same regardless of which AI coding tool you use:
 
 ```
 1. hull new myapp && cd myapp        # scaffold project
-2. hull dev --agent app.lua          # start dev server (hot-reload + sidecar files)
+2. hull dev --agent --audit app.lua  # start dev server (hot-reload + audit logging)
 3. Agent edits code                  # dev server auto-reloads
 4. hull agent status .               # did the reload succeed?
 5. hull agent errors .               # if not, what broke?
