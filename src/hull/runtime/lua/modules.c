@@ -389,14 +389,31 @@ static void lua_free_hl_values(lua_State *L, HlValue *params, int count)
         lua_pop(L, count);
 }
 
-/* db.query(sql, params?) */
-static int lua_db_query(lua_State *L)
+/* Check if the immediate Lua caller is a stdlib module (chunk name starts
+ * with "hull.").  User modules start with "./" — so a simple prefix check
+ * is sufficient.  Returns 1 for stdlib, 0 for user code. */
+static int lua_is_stdlib_caller(lua_State *L)
+{
+    lua_Debug ar;
+    /* level 0 = this C function, level 1 = Lua caller */
+    if (lua_getstack(L, 1, &ar) == 0)
+        return 0;
+    if (lua_getinfo(L, "S", &ar) == 0)
+        return 0;
+    return ar.source && strncmp(ar.source, "hull.", 5) == 0;
+}
+
+/* db.query implementation */
+static int lua_db_query_impl(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->base.stmt_cache)
         return luaL_error(L, "database not available");
 
     const char *sql = luaL_checkstring(L, 1);
+
+    if (!lua_is_stdlib_caller(L) && hl_cap_db_check_namespace(sql) != 0)
+        return luaL_error(L, "access denied: _hull_* tables are reserved");
 
     HlValue *params = NULL;
     int nparams = 0;
@@ -440,14 +457,17 @@ static int lua_db_query(lua_State *L)
     return 1; /* result table already on stack */
 }
 
-/* db.exec(sql, params?) */
-static int lua_db_exec(lua_State *L)
+/* db.exec implementation */
+static int lua_db_exec_impl(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->base.stmt_cache)
         return luaL_error(L, "database not available");
 
     const char *sql = luaL_checkstring(L, 1);
+
+    if (!lua_is_stdlib_caller(L) && hl_cap_db_check_namespace(sql) != 0)
+        return luaL_error(L, "access denied: _hull_* tables are reserved");
 
     HlValue *params = NULL;
     int nparams = 0;
@@ -466,6 +486,9 @@ static int lua_db_exec(lua_State *L)
     lua_pushinteger(L, rc);
     return 1;
 }
+
+static int lua_db_query(lua_State *L) { return lua_db_query_impl(L); }
+static int lua_db_exec(lua_State *L) { return lua_db_exec_impl(L); }
 
 /* db.last_id() */
 static int lua_db_last_id(lua_State *L)

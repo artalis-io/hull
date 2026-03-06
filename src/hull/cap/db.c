@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 /* ── Prepared statement cache ──────────────────────────────────────── */
 
@@ -388,4 +389,18 @@ void hl_cap_db_guard_stale_txn(sqlite3 *db)
         fprintf(stderr, "[hull:c] rolling back stale transaction from previous request\n");
         sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
     }
+}
+
+/* ── Namespace protection ──────────────────────────────────────────── */
+
+int hl_cap_db_check_namespace(const char *sql)
+{
+    if (!sql)
+        return -1;
+    for (const char *p = sql; *p; p++) {
+        if ((*p == '_' || *p == 'H' || *p == 'h') &&
+            strncasecmp(p, "_hull_", 6) == 0)
+            return -1;
+    }
+    return 0;
 }
