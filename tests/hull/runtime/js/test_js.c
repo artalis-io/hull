@@ -831,6 +831,113 @@ UTEST(js_cap, db_not_available_without_config)
     cleanup_js();
 }
 
+/* ── DB namespace protection tests ──────────────────────────────────── */
+
+UTEST(js_cap, db_namespace_blocks_hull_tables)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { db } from 'hull:db';\n"
+        "try {\n"
+        "  db.exec('CREATE TABLE _hull_test (id INT)');\n"
+        "  globalThis.__test_ns_block = 0;\n"
+        "} catch (e) {\n"
+        "  globalThis.__test_ns_block = String(e).includes('reserved') ? 1 : 0;\n"
+        "}\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    int result = eval_int("globalThis.__test_ns_block");
+    ASSERT_EQ(result, 1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_cap, db_namespace_blocks_hull_query)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { db } from 'hull:db';\n"
+        "try {\n"
+        "  db.query('SELECT * FROM _hull_outbox');\n"
+        "  globalThis.__test_ns_qblock = 0;\n"
+        "} catch (e) {\n"
+        "  globalThis.__test_ns_qblock = String(e).includes('reserved') ? 1 : 0;\n"
+        "}\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    int result = eval_int("globalThis.__test_ns_qblock");
+    ASSERT_EQ(result, 1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_cap, db_namespace_no_internal_bypass)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    /* db._exec and db._query must not exist — no bypass possible */
+    const char *code =
+        "import { db } from 'hull:db';\n"
+        "globalThis.__test_ns_nobypass = "
+        "  (db._exec === undefined && db._query === undefined) ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    int result = eval_int("globalThis.__test_ns_nobypass");
+    ASSERT_EQ(result, 1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_cap, db_namespace_allows_normal_tables)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { db } from 'hull:db';\n"
+        "db.exec('CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)');\n"
+        "db.exec('INSERT INTO users (name) VALUES (?)', ['alice']);\n"
+        "const rows = db.query('SELECT name FROM users');\n"
+        "globalThis.__test_ns_normal = rows[0].name;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    char *name = eval_str("globalThis.__test_ns_normal");
+    ASSERT_NE(name, NULL);
+    ASSERT_STREQ(name, "alice");
+    free(name);
+
+    cleanup_js_caps();
+}
+
 /* ── Manifest tests ────────────────────────────────────────────────── */
 
 UTEST(js_cap, app_manifest_store_and_get)

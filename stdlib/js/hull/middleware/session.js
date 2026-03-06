@@ -1,7 +1,7 @@
 /*
  * hull:session -- Server-side sessions backed by SQLite
  *
- * session.init(opts)          - creates hull_sessions table, opts.ttl default 86400
+ * session.init(opts)          - creates _hull_sessions table, opts.ttl default 86400
  * session.create(data)        - returns session_id (64-char hex)
  * session.load(sessionId)     - returns data object or null
  * session.update(sessionId, data) - boolean
@@ -23,7 +23,7 @@ function init(opts) {
     sessionTtl = o.ttl !== undefined ? o.ttl : 86400;
 
     db.exec(
-        "CREATE TABLE IF NOT EXISTS hull_sessions (" +
+        "CREATE TABLE IF NOT EXISTS _hull_sessions (" +
         "  id TEXT PRIMARY KEY," +
         "  data TEXT NOT NULL," +
         "  created_at INTEGER NOT NULL," +
@@ -32,8 +32,8 @@ function init(opts) {
         ")"
     );
     db.exec(
-        "CREATE INDEX IF NOT EXISTS idx_hull_sessions_expires " +
-        "ON hull_sessions(expires_at)"
+        "CREATE INDEX IF NOT EXISTS idx__hull_sessions_expires " +
+        "ON _hull_sessions(expires_at)"
     );
 }
 
@@ -52,7 +52,7 @@ function create(data) {
     const encoded = json.encode(data || {});
 
     db.exec(
-        "INSERT INTO hull_sessions (id, data, created_at, last_accessed, expires_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO _hull_sessions (id, data, created_at, last_accessed, expires_at) VALUES (?, ?, ?, ?, ?)",
         [id, encoded, now, now, expiresAt]
     );
 
@@ -65,7 +65,7 @@ function load(sessionId) {
 
     const now = time.now();
     const rows = db.query(
-        "SELECT data, expires_at FROM hull_sessions WHERE id = ?",
+        "SELECT data, expires_at FROM _hull_sessions WHERE id = ?",
         [sessionId]
     );
 
@@ -74,20 +74,20 @@ function load(sessionId) {
 
     // Check expiry
     if (rows[0].expires_at <= now) {
-        db.exec("DELETE FROM hull_sessions WHERE id = ?", [sessionId]);
+        db.exec("DELETE FROM _hull_sessions WHERE id = ?", [sessionId]);
         return null;
     }
 
     // Touch: update last_accessed and extend expiration
     db.exec(
-        "UPDATE hull_sessions SET last_accessed = ?, expires_at = ? WHERE id = ?",
+        "UPDATE _hull_sessions SET last_accessed = ?, expires_at = ? WHERE id = ?",
         [now, now + sessionTtl, sessionId]
     );
 
     const decoded = json.decode(rows[0].data);
     if (decoded == null) {
         // Corrupted session data — destroy and return null
-        db.exec("DELETE FROM hull_sessions WHERE id = ?", [sessionId]);
+        db.exec("DELETE FROM _hull_sessions WHERE id = ?", [sessionId]);
         return null;
     }
     return decoded;
@@ -101,7 +101,7 @@ function update(sessionId, data) {
     const encoded = json.encode(data || {});
 
     const affected = db.exec(
-        "UPDATE hull_sessions SET data = ?, last_accessed = ?, expires_at = ? WHERE id = ? AND expires_at > ?",
+        "UPDATE _hull_sessions SET data = ?, last_accessed = ?, expires_at = ? WHERE id = ? AND expires_at > ?",
         [encoded, now, now + sessionTtl, sessionId, now]
     );
 
@@ -113,7 +113,7 @@ function destroy(sessionId) {
         return false;
 
     const affected = db.exec(
-        "DELETE FROM hull_sessions WHERE id = ?",
+        "DELETE FROM _hull_sessions WHERE id = ?",
         [sessionId]
     );
 
@@ -123,7 +123,7 @@ function destroy(sessionId) {
 function cleanup() {
     const now = time.now();
     return db.exec(
-        "DELETE FROM hull_sessions WHERE expires_at <= ?",
+        "DELETE FROM _hull_sessions WHERE expires_at <= ?",
         [now]
     );
 }
