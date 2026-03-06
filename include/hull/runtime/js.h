@@ -33,11 +33,11 @@ typedef struct {
 } HlJSConfig;
 
 /* Sensible defaults */
-#define HL_JS_CONFIG_DEFAULT {        \
-    .max_heap_bytes   = HL_JS_DEFAULT_HEAP,  \
-    .max_stack_bytes  = HL_JS_DEFAULT_STACK, \
-    .max_instructions = 0,                   \
-    .gc_threshold     = HL_JS_GC_THRESHOLD,  \
+#define HL_JS_CONFIG_DEFAULT {                   \
+    .max_heap_bytes   = HL_JS_DEFAULT_HEAP,      \
+    .max_stack_bytes  = HL_JS_DEFAULT_STACK,      \
+    .max_instructions = HL_DEFAULT_INSTRUCTIONS,  \
+    .gc_threshold     = HL_JS_GC_THRESHOLD,       \
 }
 
 /* ── Runtime context ────────────────────────────────────────────────── */

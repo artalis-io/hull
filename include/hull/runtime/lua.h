@@ -27,12 +27,14 @@ typedef struct HlToolUnveilCtx HlToolUnveilCtx;
 typedef struct {
     size_t  max_heap_bytes;       /* Lua heap limit (default: 64 MB) */
     int     sandbox;              /* 1 = sandbox (default), 0 = full access */
+    int64_t max_instructions;     /* 0 = unlimited (default: 100M) */
 } HlLuaConfig;
 
 /* Sensible defaults */
-#define HL_LUA_CONFIG_DEFAULT {             \
-    .max_heap_bytes = HL_LUA_DEFAULT_HEAP,  \
-    .sandbox        = 1,                    \
+#define HL_LUA_CONFIG_DEFAULT {                      \
+    .max_heap_bytes   = HL_LUA_DEFAULT_HEAP,         \
+    .sandbox          = 1,                           \
+    .max_instructions = HL_DEFAULT_INSTRUCTIONS,     \
 }
 
 /* ── Runtime context ────────────────────────────────────────────────── */
@@ -45,6 +47,7 @@ typedef struct HlLua {
     /* Lua sub-limit tracking */
     size_t          mem_used;
     size_t          mem_limit;
+    int64_t         max_instructions;  /* 0 = no limit */
 
     /* Module search paths */
     const char     *app_dir;         /* application root directory */

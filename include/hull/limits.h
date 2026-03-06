@@ -57,4 +57,8 @@
 #define HL_JS_DEFAULT_STACK   (1 * 1024 * 1024)   /* 1 MB */
 #define HL_JS_GC_THRESHOLD    (256 * 1024)         /* 256 KB */
 
+/* ── Instruction limits ────────────────────────────────────────────── */
+
+#define HL_DEFAULT_INSTRUCTIONS (100 * 1000 * 1000) /* 100M per handler */
+
 #endif /* HL_LIMITS_H */

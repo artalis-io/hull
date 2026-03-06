@@ -48,6 +48,7 @@ Hull ships 14 subcommands for the full development lifecycle:
 | `hull keygen <name>` | Generate Ed25519 signing keypair |
 | `hull sign-platform <key>` | Sign platform library with per-arch hashes |
 | `hull manifest <app>` | Extract and print manifest as JSON |
+| `hull <app> --max-instructions N` | Set per-request instruction limit (default: 100M) |
 | `hull <app> --audit` | Enable capability audit logging (JSON to stderr) |
 | `hull migrate [app_dir]` | Run pending SQL migrations |
 | `hull migrate status` | Show migration status (applied/pending) |
