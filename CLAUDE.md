@@ -35,6 +35,7 @@ All vendored — no external dependencies:
 | pledge/unveil | `vendor/pledge/` | Linux kernel sandbox polyfill |
 | log.c | `vendor/log.c/` | Logging |
 | sh_arena | `vendor/sh_arena/` | Arena allocator |
+| sh_json | `vendor/sh_json/` | Streaming JSON writer + arena-based parser |
 | utest.h | `vendor/utest.h` | Unit test framework |
 
 ## Project Structure
@@ -102,6 +103,7 @@ All system access is mediated by C capability functions. Neither runtime touches
 | Tool (build mode) | `cap/tool.c` | `hl_tool_spawn()`, `hl_tool_find_files()`, `hl_tool_copy()`, `hl_tool_mkdir()` |
 | Test | `cap/test.c` | In-process HTTP dispatch, assertions |
 | Body | `cap/body.c` | Request body handling |
+| Audit | `cap/audit.c` | Structured capability audit logging (JSON to stderr) |
 
 ### Request Flow
 
@@ -119,6 +121,7 @@ Table-driven dispatcher in `src/hull/commands/dispatch.c`. 12 commands:
 
 ```
 hull keygen | build | verify | inspect | manifest | test | new | dev | eject | sign-platform | migrate | agent
+Runtime flags: --audit (capability audit logging), --agent (sidecar files), --no-migrate, --skip-ca-bundle
 ```
 
 Each command is a separate `.c`/`.h` under `src/hull/commands/`. Adding a new command = one line in the table + one source file.
@@ -272,6 +275,7 @@ Violation = SIGKILL on Linux/Cosmo. No-op on macOS (C-level validation only).
 - **Env allowlist enforced:** `hl_cap_env_get()` checks against manifest's `env` array (max 32 entries).
 - **No shell invocation:** Tool mode uses `hl_tool_spawn()` with compiler allowlist. No `system()`/`popen()`.
 - **Key material zeroed:** `hull_secure_zero()` (volatile memset) scrubs crypto material from stack buffers.
+- **Audit logging:** `--audit` flag or `HULL_AUDIT=1` env var enables structured JSON logging of all capability calls to stderr. Off by default (zero overhead — single branch on `hl_audit_enabled` global). Uses `ShJsonWriter` for streaming output with proper escaping. No heap allocation.
 
 ### Signature System
 
