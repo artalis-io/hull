@@ -191,6 +191,8 @@ The `--audit` flag enables:
 - Structured JSON logging of every capability call (db, fs, http, env, tool, smtp) to stderr
 - Zero overhead when disabled — single branch on a global flag
 
+The `--max-instructions N` flag (or `HULL_MAX_INSTRUCTIONS` env var) overrides the per-request instruction limit (default: 100M). Both Lua and JS handlers are terminated if they exceed this budget.
+
 ### 2. Develop (Tight Loop)
 
 ```

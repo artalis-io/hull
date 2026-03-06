@@ -275,6 +275,7 @@ Violation = SIGKILL on Linux/Cosmo. No-op on macOS (C-level validation only).
 - **Env allowlist enforced:** `hl_cap_env_get()` checks against manifest's `env` array (max 32 entries).
 - **No shell invocation:** Tool mode uses `hl_tool_spawn()` with compiler allowlist. No `system()`/`popen()`.
 - **Key material zeroed:** `hull_secure_zero()` (volatile memset) scrubs crypto material from stack buffers.
+- **Instruction limits:** Both Lua and JS runtimes enforce per-request instruction limits (default 100M). Lua uses `lua_sethook(LUA_MASKCOUNT)`, JS uses `JS_SetInterruptHandler`. Override with `--max-instructions N` or `HULL_MAX_INSTRUCTIONS` env var.
 - **Audit logging:** `--audit` flag or `HULL_AUDIT=1` env var enables structured JSON logging of all capability calls to stderr. Off by default (zero overhead — single branch on `hl_audit_enabled` global). Uses `ShJsonWriter` for streaming output with proper escaping. No heap allocation.
 
 ### Signature System
@@ -660,9 +661,10 @@ make e2e                            # run all E2E tests (examples + build + sand
 1. `io`/`os` libraries NOT loaded
 2. `loadfile`, `dofile`, `load` globals removed
 3. Memory limit via custom allocator with tracking (64 MB default)
-4. Only safe libs: base, table, string, math, utf8, coroutine
-5. Custom `require()` resolves only from embedded stdlib registry
-6. `hull.*` modules registered as globals
+4. Instruction-count hook for gas metering (`lua_sethook(LUA_MASKCOUNT)`, 100M default)
+5. Only safe libs: base, table, string, math, utf8, coroutine
+6. Custom `require()` resolves only from embedded stdlib registry
+7. `hull.*` modules registered as globals
 
 ## Adding a New Capability Module
 

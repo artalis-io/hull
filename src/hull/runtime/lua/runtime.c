@@ -30,6 +30,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* ── Instruction limit hook ─────────────────────────────────────────── */
+
+static void hl_lua_instruction_hook(lua_State *L, lua_Debug *ar)
+{
+    (void)ar;
+    luaL_error(L, "instruction limit exceeded");
+}
+
 /* ── Custom allocator with memory limit ─────────────────────────────── */
 
 static void *hl_lua_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
@@ -123,11 +131,18 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
     /* Restore caller-set base fields */
     lua->base = saved_base;
     lua->mem_limit = cfg->max_heap_bytes;
+    lua->max_instructions = cfg->max_instructions;
 
     /* Create Lua state with custom allocator */
     lua->L = lua_newstate(hl_lua_alloc, lua);
     if (!lua->L)
         return -1;
+
+    /* Arm instruction limit hook */
+    if (lua->max_instructions > 0) {
+        lua_sethook(lua->L, hl_lua_instruction_hook, LUA_MASKCOUNT,
+                    (int)lua->max_instructions);
+    }
 
     if (cfg->sandbox) {
         /* Open safe standard libraries only */
@@ -243,6 +258,11 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
 
     /* Guard: roll back any stale transaction left by a crashed handler */
     hl_cap_db_guard_stale_txn(lua->base.db);
+
+    /* Re-arm instruction limit for this request */
+    if (lua->max_instructions > 0)
+        lua_sethook(lua->L, hl_lua_instruction_hook, LUA_MASKCOUNT,
+                    (int)lua->max_instructions);
 
     /* Reset scratch arena for this request */
     sh_arena_reset(lua->scratch);
@@ -584,6 +604,11 @@ int hl_lua_dispatch_middleware(HlLua *lua, int handler_id,
 
     /* Guard: roll back any stale transaction left by a crashed handler */
     hl_cap_db_guard_stale_txn(lua->base.db);
+
+    /* Re-arm instruction limit for this middleware call */
+    if (lua->max_instructions > 0)
+        lua_sethook(lua->L, hl_lua_instruction_hook, LUA_MASKCOUNT,
+                    (int)lua->max_instructions);
 
     /* Reset scratch arena for this middleware call */
     sh_arena_reset(lua->scratch);

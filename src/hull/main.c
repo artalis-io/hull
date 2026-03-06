@@ -165,6 +165,7 @@ static void usage(const char *prog)
             "  --drain-timeout MS   Graceful shutdown drain timeout (default: 5000)\n"
             "  --no-migrate         Skip auto-run migrations on startup\n"
             "  --skip-ca-bundle     Skip TLS certificate verification (dev mode)\n"
+            "  --max-instructions N Set runtime instruction limit per request (default: 100m)\n"
             "  --audit              Enable capability audit logging (JSON to stderr)\n"
             "  -h                   Show this help\n"
             "\n"
@@ -213,6 +214,7 @@ static int hull_serve(int argc, char **argv)
     long heap_limit = 0;    /* 0 = use default */
     long stack_limit = 0;   /* 0 = use default */
     long mem_limit = 0;     /* 0 = unlimited */
+    long instruction_limit = 0; /* 0 = use default */
     int log_level = LOG_INFO;
     int no_migrate = 0;
     int skip_ca_bundle = 0;
@@ -273,6 +275,13 @@ static int hull_serve(int argc, char **argv)
             agent_mode = 1;
         } else if (strcmp(argv[i], "--audit") == 0) {
             hl_audit_enabled = 1;
+        } else if (strcmp(argv[i], "--max-instructions") == 0 && i + 1 < argc) {
+            char *end;
+            instruction_limit = strtol(argv[++i], &end, 10);
+            if (*end != '\0' || instruction_limit < 0) {
+                fprintf(stderr, "hull: invalid instruction limit: %s\n", argv[i]);
+                return 1;
+            }
         } else if (strcmp(argv[i], "--drain-timeout") == 0 && i + 1 < argc) {
             char *end;
             long dt = strtol(argv[++i], &end, 10);
@@ -294,6 +303,17 @@ static int hull_serve(int argc, char **argv)
         const char *audit_env = getenv("HULL_AUDIT");
         if (audit_env && strcmp(audit_env, "1") == 0)
             hl_audit_enabled = 1;
+    }
+
+    /* Check HULL_MAX_INSTRUCTIONS env var */
+    if (instruction_limit == 0) {
+        const char *il_env = getenv("HULL_MAX_INSTRUCTIONS");
+        if (il_env) {
+            char *end;
+            long val = strtol(il_env, &end, 10);
+            if (*end == '\0' && val >= 0)
+                instruction_limit = val;
+        }
     }
 
     if (!entry_point)
@@ -469,8 +489,9 @@ static int hull_serve(int argc, char **argv)
     if (runtime == HL_RUNTIME_JS) {
 #ifdef HL_ENABLE_JS
         js_cfg = (HlJSConfig)HL_JS_CONFIG_DEFAULT;
-        if (heap_limit > 0)  js_cfg.max_heap_bytes  = (size_t)heap_limit;
-        if (stack_limit > 0) js_cfg.max_stack_bytes  = (size_t)stack_limit;
+        if (heap_limit > 0)        js_cfg.max_heap_bytes   = (size_t)heap_limit;
+        if (stack_limit > 0)       js_cfg.max_stack_bytes   = (size_t)stack_limit;
+        if (instruction_limit > 0) js_cfg.max_instructions  = instruction_limit;
         rt = &rt_storage.js.base;
         rt->vt = &hl_js_vtable;
         rt_cfg = &js_cfg;
@@ -478,7 +499,8 @@ static int hull_serve(int argc, char **argv)
     } else {
 #ifdef HL_ENABLE_LUA
         lua_cfg = (HlLuaConfig)HL_LUA_CONFIG_DEFAULT;
-        if (heap_limit > 0) lua_cfg.max_heap_bytes = (size_t)heap_limit;
+        if (heap_limit > 0)        lua_cfg.max_heap_bytes   = (size_t)heap_limit;
+        if (instruction_limit > 0) lua_cfg.max_instructions  = instruction_limit;
         rt = &rt_storage.lua.base;
         rt->vt = &hl_lua_vtable;
         rt_cfg = &lua_cfg;

@@ -521,6 +521,56 @@ UTEST(lua_runtime, error_reporting)
     cleanup_lua();
 }
 
+/* ── Instruction limit tests ─────────────────────────────────────────── */
+
+UTEST(lua_runtime, instruction_limit_catches_infinite_loop)
+{
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    cfg.max_instructions = 1000; /* very low limit */
+    HlLua limited_lua;
+    memset(&limited_lua, 0, sizeof(limited_lua));
+
+    int rc = hl_lua_init(&limited_lua, &cfg);
+    ASSERT_EQ(rc, 0);
+
+    /* Infinite loop should be interrupted */
+    rc = luaL_dostring(limited_lua.L, "while true do end");
+    ASSERT_NE(rc, LUA_OK);
+
+    /* Error message should mention instruction limit */
+    const char *err = lua_tostring(limited_lua.L, -1);
+    ASSERT_NE(err, NULL);
+    ASSERT_NE(strstr(err, "instruction limit"), NULL);
+    lua_pop(limited_lua.L, 1);
+
+    /* VM should still be functional after the error */
+    rc = luaL_dostring(limited_lua.L, "return 1 + 1");
+    ASSERT_EQ(rc, LUA_OK);
+    int result = (int)lua_tointeger(limited_lua.L, -1);
+    ASSERT_EQ(result, 2);
+    lua_pop(limited_lua.L, 1);
+
+    hl_lua_free(&limited_lua);
+}
+
+UTEST(lua_runtime, instruction_limit_unlimited_allows_long_code)
+{
+    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
+    cfg.max_instructions = 0; /* unlimited */
+    HlLua unlimited_lua;
+    memset(&unlimited_lua, 0, sizeof(unlimited_lua));
+
+    int rc = hl_lua_init(&unlimited_lua, &cfg);
+    ASSERT_EQ(rc, 0);
+
+    /* 10K-iteration loop should complete without error */
+    rc = luaL_dostring(unlimited_lua.L,
+        "local sum = 0; for i = 1, 10000 do sum = sum + i end");
+    ASSERT_EQ(rc, LUA_OK);
+
+    hl_lua_free(&unlimited_lua);
+}
+
 /* ── Filesystem require helpers ──────────────────────────────────────── */
 
 /* Write a string to a file */
