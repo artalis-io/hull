@@ -112,7 +112,7 @@ VFS init → detect runtime → open SQLite → PRAGMA journal_mode=WAL
 
 ## 4. v0 → v1 Roadmap
 
-### Milestone 1: Patch Critical Gaps (1-2 days)
+### Milestone 1: Patch Critical Gaps (1-2 days) ✅ DONE
 
 **Template path traversal fix:**
 - `src/hull/runtime/lua/modules.c:~1895` — Replace `snprintf + fopen` with `hl_cap_fs_validate(app_dir, name, "templates")` before opening
@@ -123,7 +123,9 @@ VFS init → detect runtime → open SQLite → PRAGMA journal_mode=WAL
 - `stdlib/lua/hull/middleware/session.lua` — Error if secret is the default in production mode (when `env.get("HULL_ENV") == "production"`)
 - Same for JS variant
 
-### Milestone 2: Audit Logging (2-3 days)
+> Completed in `2091c05` — template loader now uses `hl_cap_fs_validate()` with `realpath()` ancestor check. E2e tests cover path traversal, `..` components, and XSS escaping.
+
+### Milestone 2: Audit Logging (2-3 days) ✅ DONE
 
 **Add `hl_audit_log()` function:**
 - `src/hull/cap/audit.c` (new) — `hl_audit_log(category, action, detail_json)`
@@ -131,12 +133,16 @@ VFS init → detect runtime → open SQLite → PRAGMA journal_mode=WAL
 - Output: structured JSON to stderr (same channel as `log.*`)
 - Gated by `--audit` flag or `HULL_AUDIT=1` env var (off by default for perf)
 
-### Milestone 3: Lua Gas Metering (1 day)
+> Completed in `c10bc9a` — structured audit logging via `hl_audit_log()` in `cap/audit.c`. All capability calls instrumented. Gated by `--audit` / `HULL_AUDIT=1`. Documentation in `a5710ec`.
+
+### Milestone 3: Lua Gas Metering (1 day) ✅ DONE
 
 **Add instruction-count interrupt to Lua runtime:**
 - `src/hull/runtime/lua/runtime.c` — `lua_sethook(L, hook_fn, LUA_MASKCOUNT, max_instructions)`
 - Default: 100M instructions per handler invocation (same order as JS's `HL_JS_MAX_INSTRUCTIONS`)
 - Hook function calls `luaL_error(L, "instruction limit exceeded")`
+
+> Completed in `7dcab16` — Lua uses `lua_sethook(LUA_MASKCOUNT)`, JS uses `JS_SetInterruptHandler`. Unified 100M default, configurable via `--max-instructions N` or `HULL_MAX_INSTRUCTIONS` env var.
 
 ### Milestone 4: macOS Sandbox (2-3 days)
 
@@ -145,12 +151,14 @@ VFS init → detect runtime → open SQLite → PRAGMA journal_mode=WAL
 - Profile: deny default, allow network (inet), allow file reads for app_dir + unveiled paths, allow file writes for DB + fs_write paths
 - Fallback: if `sandbox_init` unavailable, log warning (not silent no-op)
 
-### Milestone 5: DB Namespace Protection (1 day)
+### Milestone 5: DB Namespace Protection (1 day) ✅ DONE
 
 **Block direct access to `_hull_*` tables:**
 - `src/hull/cap/db.c` — In `hl_cap_db_exec()` and `hl_cap_db_query()`, scan SQL for `_hull_` table references; reject unless called from stdlib (internal flag)
 - Stdlib middleware calls use an internal variant that bypasses the check
 - This prevents user code from `DROP TABLE _hull_outbox` or reading `_hull_sessions`
+
+> Completed in `6bf5581` — `hl_cap_db_check_namespace()` blocks user SQL referencing `_hull_*` tables. Uses call-stack inspection (Lua `lua_getinfo` / JS `JS_GetScriptOrModuleName`) so stdlib transparently bypasses — no internal API exposed. Also renamed `hull_sessions` → `_hull_sessions` for consistency.
 
 ### Milestone 6: Pre-Load Sandbox (1-2 days)
 
