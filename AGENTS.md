@@ -30,7 +30,7 @@ Application Code (Lua or JS)
         ↓
 Capability Layer (C)          # enforces security boundaries
         ↓
-    db.query() / db.exec()    # SQLite (WAL mode, parameterized)
+    db.query() / db.exec()    # SQLite (WAL mode, parameterized, _hull_* tables blocked)
     fs.read() / fs.write()    # sandboxed filesystem
     crypto.sha256() / etc.    # cryptographic primitives
     http.get() / http.post()  # outbound HTTP (host allowlist)
@@ -438,7 +438,7 @@ end)
 -- Both inserts succeed or both roll back
 ```
 
-All queries are parameterized (no SQL injection possible). SQLite is in WAL mode with prepared statement caching.
+All queries are parameterized (no SQL injection possible). SQLite is in WAL mode with prepared statement caching. Tables prefixed with `_hull_` are reserved for internal middleware and cannot be accessed via `db.exec()`/`db.query()` — attempts will raise an error.
 
 ## Response API
 

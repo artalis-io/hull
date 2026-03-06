@@ -390,4 +390,31 @@ UTEST(hl_cap_db, stmt_cache_reuse)
     teardown_db();
 }
 
+/* ── Namespace check tests ──────────────────────────────────────────── */
+
+UTEST(hl_cap_db, namespace_check_blocks_hull_tables)
+{
+    ASSERT_EQ(hl_cap_db_check_namespace("SELECT * FROM _hull_outbox"), -1);
+    ASSERT_EQ(hl_cap_db_check_namespace("DROP TABLE _hull_migrations"), -1);
+    ASSERT_EQ(hl_cap_db_check_namespace("INSERT INTO _HULL_OUTBOX VALUES(1)"), -1);
+    ASSERT_EQ(hl_cap_db_check_namespace("SELECT * FROM users"), 0);
+    ASSERT_EQ(hl_cap_db_check_namespace("SELECT * FROM hull_data"), 0);
+    ASSERT_EQ(hl_cap_db_check_namespace(NULL), -1);
+}
+
+UTEST(hl_cap_db, namespace_check_case_insensitive)
+{
+    ASSERT_EQ(hl_cap_db_check_namespace("SELECT * FROM _Hull_Outbox"), -1);
+    ASSERT_EQ(hl_cap_db_check_namespace("SELECT * FROM _HULL_sessions"), -1);
+    ASSERT_EQ(hl_cap_db_check_namespace("CREATE TABLE _hull_test (id INT)"), -1);
+}
+
+UTEST(hl_cap_db, namespace_check_allows_normal_tables)
+{
+    ASSERT_EQ(hl_cap_db_check_namespace("CREATE TABLE users (id INT)"), 0);
+    ASSERT_EQ(hl_cap_db_check_namespace("SELECT * FROM orders"), 0);
+    ASSERT_EQ(hl_cap_db_check_namespace("INSERT INTO items VALUES (1)"), 0);
+    ASSERT_EQ(hl_cap_db_check_namespace(""), 0);
+}
+
 UTEST_MAIN();

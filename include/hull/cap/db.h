@@ -56,4 +56,7 @@ int hl_cap_db_rollback(sqlite3 *db);
  * Safe to call unconditionally before each request dispatch. */
 void hl_cap_db_guard_stale_txn(sqlite3 *db);
 
+/* Namespace protection: reject SQL referencing _hull_* tables */
+int hl_cap_db_check_namespace(const char *sql);
+
 #endif /* HL_CAP_DB_H */

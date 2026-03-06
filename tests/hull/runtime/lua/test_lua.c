@@ -1127,6 +1127,72 @@ UTEST(lua_cap, db_not_available_without_config)
     cleanup_lua();
 }
 
+/* ── DB namespace protection tests ──────────────────────────────────── */
+
+UTEST(lua_cap, db_namespace_blocks_hull_tables)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    int result = eval_int(
+        "(function() "
+        "  local ok, err = pcall(db.exec, 'CREATE TABLE _hull_test (id INT)') "
+        "  if not ok and string.find(tostring(err), 'reserved') then return 1 end "
+        "  return 0 "
+        "end)()");
+    ASSERT_EQ(result, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_cap, db_namespace_blocks_hull_query)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    int result = eval_int(
+        "(function() "
+        "  local ok, err = pcall(db.query, 'SELECT * FROM _hull_outbox') "
+        "  if not ok and string.find(tostring(err), 'reserved') then return 1 end "
+        "  return 0 "
+        "end)()");
+    ASSERT_EQ(result, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_cap, db_namespace_no_internal_bypass)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* db._exec and db._query must not exist — no bypass possible */
+    int result = eval_int(
+        "(function() "
+        "  return (db._exec == nil and db._query == nil) and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(result, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_cap, db_namespace_allows_normal_tables)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    int result = eval_int(
+        "(function() "
+        "  db.exec('CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)') "
+        "  db.exec('INSERT INTO users (name) VALUES (?)', {'alice'}) "
+        "  local rows = db.query('SELECT name FROM users') "
+        "  return rows[1].name == 'alice' and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(result, 1);
+
+    cleanup_lua_caps();
+}
+
 /* ── Manifest tests ────────────────────────────────────────────────── */
 
 #include "hull/manifest.h"

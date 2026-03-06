@@ -502,9 +502,29 @@ static void js_free_hl_values(JSContext *ctx, HlValue *params, int count)
     js_free(ctx, params);
 }
 
-/* db.query(sql, params?) */
-static JSValue js_db_query(JSContext *ctx, JSValueConst this_val,
-                            int argc, JSValueConst *argv)
+/* Check if the immediate JS caller is a stdlib module (module name starts
+ * with "hull:").  User modules start with "./" — so a simple prefix check
+ * is sufficient.  Returns 1 for stdlib, 0 for user code.
+ *
+ * n_stack_levels=1 skips the C function stack frame (level 0) to reach
+ * the JS caller's frame. */
+static int js_is_stdlib_caller(JSContext *ctx)
+{
+    JSAtom name = JS_GetScriptOrModuleName(ctx, 1);
+    if (name == JS_ATOM_NULL)
+        return 0;
+    const char *str = JS_AtomToCString(ctx, name);
+    JS_FreeAtom(ctx, name);
+    if (!str)
+        return 0;
+    int is_stdlib = (strncmp(str, "hull:", 5) == 0);
+    JS_FreeCString(ctx, str);
+    return is_stdlib;
+}
+
+/* db.query implementation */
+static JSValue js_db_query_impl(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv)
 {
     (void)this_val;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
@@ -517,6 +537,12 @@ static JSValue js_db_query(JSContext *ctx, JSValueConst this_val,
     const char *sql = JS_ToCString(ctx, argv[0]);
     if (!sql)
         return JS_EXCEPTION;
+
+    if (!js_is_stdlib_caller(ctx) && hl_cap_db_check_namespace(sql) != 0) {
+        JS_FreeCString(ctx, sql);
+        return JS_ThrowInternalError(ctx,
+            "access denied: _hull_* tables are reserved");
+    }
 
     HlValue *params = NULL;
     int nparams = 0;
@@ -548,9 +574,9 @@ static JSValue js_db_query(JSContext *ctx, JSValueConst this_val,
     return qc.array;
 }
 
-/* db.exec(sql, params?) */
-static JSValue js_db_exec(JSContext *ctx, JSValueConst this_val,
-                           int argc, JSValueConst *argv)
+/* db.exec implementation */
+static JSValue js_db_exec_impl(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv)
 {
     (void)this_val;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
@@ -563,6 +589,12 @@ static JSValue js_db_exec(JSContext *ctx, JSValueConst this_val,
     const char *sql = JS_ToCString(ctx, argv[0]);
     if (!sql)
         return JS_EXCEPTION;
+
+    if (!js_is_stdlib_caller(ctx) && hl_cap_db_check_namespace(sql) != 0) {
+        JS_FreeCString(ctx, sql);
+        return JS_ThrowInternalError(ctx,
+            "access denied: _hull_* tables are reserved");
+    }
 
     HlValue *params = NULL;
     int nparams = 0;
@@ -584,6 +616,14 @@ static JSValue js_db_exec(JSContext *ctx, JSValueConst this_val,
 
     return JS_NewInt32(ctx, rc);
 }
+
+static JSValue js_db_query(JSContext *ctx, JSValueConst this_val,
+                            int argc, JSValueConst *argv)
+{ return js_db_query_impl(ctx, this_val, argc, argv); }
+
+static JSValue js_db_exec(JSContext *ctx, JSValueConst this_val,
+                           int argc, JSValueConst *argv)
+{ return js_db_exec_impl(ctx, this_val, argc, argv); }
 
 /* db.lastId() */
 static JSValue js_db_last_id(JSContext *ctx, JSValueConst this_val,
