@@ -127,6 +127,12 @@ SH_ARENA_DIR    := $(VENDDIR)/sh_arena
 SH_ARENA_OBJ    := $(BUILDDIR)/sh_arena.o
 SH_ARENA_CFLAGS := -std=c11 -O2 -w
 
+# ── sh_json (vendored from otto) ──────────────────────────────────────
+
+SH_JSON_DIR    := $(VENDDIR)/sh_json
+SH_JSON_OBJ    := $(BUILDDIR)/sh_json.o
+SH_JSON_CFLAGS := -std=c11 -O2 -w
+
 # ── TweetNaCl (Ed25519 signatures) ─────────────────────────────────
 
 TWEETNACL_DIR    := $(VENDDIR)/tweetnacl
@@ -435,7 +441,7 @@ $(APP_ENTRIES_DEFAULT_OBJ): $(SRCDIR)/hull/app_entries_default.c $(INCDIR)/hull/
 
 # ── Include paths ───────────────────────────────────────────────────
 
-INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(KEEL_DIR)/vendor/llhttp -I$(MBEDTLS_DIR)/include -I$(SQLITE_DIR) -I$(LOG_DIR) -I$(SH_ARENA_DIR) -I$(TWEETNACL_DIR) -I$(BUILDDIR)
+INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(KEEL_DIR)/vendor/llhttp -I$(MBEDTLS_DIR)/include -I$(SQLITE_DIR) -I$(LOG_DIR) -I$(SH_ARENA_DIR) -I$(SH_JSON_DIR) -I$(TWEETNACL_DIR) -I$(BUILDDIR)
 
 # ── Targets ─────────────────────────────────────────────────────────
 
@@ -447,7 +453,7 @@ all: $(BUILDDIR)/hull
 # Used by `hull build` to produce standalone app binaries.
 # Exports hull_main() (subcommand dispatch + server logic).
 PLATFORM_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(MAIN_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(STDLIB_REGISTRY_O) $(VEND_OBJS) $(MBEDTLS_OBJS) \
-	$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS)
+	$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS)
 
 PLATFORM_LIB := $(BUILDDIR)/libhull_platform.a
 
@@ -551,9 +557,9 @@ $(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H)
 endif
 
 # Hull binary
-$(BUILDDIR)/hull: $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB)
+$(BUILDDIR)/hull: $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB)
 	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(VEND_OBJS) $(MBEDTLS_OBJS) \
-		$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB) -lm -lpthread
+		$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB) -lm -lpthread
 
 # Capability sources
 $(BUILDDIR)/cap_%.o: $(SRCDIR)/hull/cap/%.c | $(BUILDDIR)
@@ -651,6 +657,10 @@ $(LOG_OBJ): $(LOG_DIR)/log.c | $(BUILDDIR)
 $(SH_ARENA_OBJ): $(SH_ARENA_DIR)/sh_arena.c | $(BUILDDIR)
 	$(CC) $(SH_ARENA_CFLAGS) -I$(SH_ARENA_DIR) -c -o $@ $<
 
+# sh_json (vendored, relaxed warnings)
+$(SH_JSON_OBJ): $(SH_JSON_DIR)/sh_json.c | $(BUILDDIR)
+	$(CC) $(SH_JSON_CFLAGS) -I$(SH_JSON_DIR) -I$(SH_ARENA_DIR) -c -o $@ $<
+
 # TweetNaCl (vendored, relaxed warnings)
 $(TWEETNACL_OBJ): $(TWEETNACL_DIR)/tweetnacl.c | $(BUILDDIR)
 	$(CC) $(TWEETNACL_CFLAGS) -I$(TWEETNACL_DIR) -c -o $@ $<
@@ -689,8 +699,8 @@ TEST_BINS := $(addprefix $(BUILDDIR)/,$(notdir $(basename $(TEST_SRCS))))
 TEST_CAP_OBJS := $(CAP_OBJS)
 
 # Shared link deps for all tests
-TEST_COMMON_DEPS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(KEEL_LIB)
-TEST_COMMON_LIBS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(MBEDTLS_OBJS) $(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) -lm -lpthread
+TEST_COMMON_DEPS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(KEEL_LIB)
+TEST_COMMON_LIBS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(MBEDTLS_OBJS) $(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) -lm -lpthread
 
 # Capability tests (tests/hull/cap/)
 $(BUILDDIR)/test_%: $(TESTDIR)/hull/cap/test_%.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
@@ -704,28 +714,28 @@ $(BUILDDIR)/test_parse_size: $(TESTDIR)/hull/test_parse_size.c $(TEST_COMMON_DEP
 $(BUILDDIR)/test_js: $(TESTDIR)/hull/runtime/js/test_js.c $(TEST_COMMON_DEPS) $(MANIFEST_JS_OBJ) $(CAP_TEST_JS_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(JS_RT_OBJS) $(QJS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(TEST_CAP_OBJS) $(CAP_TEST_JS_OBJ) $(JS_RT_OBJS) $(MANIFEST_JS_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(ALLOC_OBJ) $(QJS_OBJS) \
-		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) -lm -lpthread
+		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) -lm -lpthread
 
 # Lua runtime test — needs Lua + Lua runtime objects + manifest (Lua-only) + cap_tool + build_assets
 $(BUILDDIR)/test_lua: $(TESTDIR)/hull/runtime/lua/test_lua.c $(TEST_COMMON_DEPS) $(CAP_TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MANIFEST_LUA_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(LUA_RT_OBJS) $(LUA_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(TEST_CAP_OBJS) $(CAP_TOOL_OBJ) $(BUILD_ASSET_OBJ) $(LUA_RT_OBJS) $(MANIFEST_LUA_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(ALLOC_OBJ) $(LUA_OBJS) \
-		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) -lm -lpthread
+		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) -lm -lpthread
 
 # Tool hardening test — cap/tool.c compiled without runtime flags (self-contained C functions)
 CAP_TOOL_NONE_OBJ := $(BUILDDIR)/cap_tool_none.o
 $(CAP_TOOL_NONE_OBJ): $(SRCDIR)/hull/cap/tool.c | $(BUILDDIR)
 	$(CC) $(filter-out -DHL_ENABLE_LUA -DHL_ENABLE_JS,$(CFLAGS)) $(INCLUDES) -c -o $@ $<
 
-$(BUILDDIR)/test_tool: $(TESTDIR)/hull/cap/test_tool.c $(CAP_TOOL_NONE_OBJ) | $(BUILDDIR)
-	$(CC) $(filter-out -DHL_ENABLE_LUA -DHL_ENABLE_JS,$(CFLAGS)) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(CAP_TOOL_NONE_OBJ)
+$(BUILDDIR)/test_tool: $(TESTDIR)/hull/cap/test_tool.c $(CAP_TOOL_NONE_OBJ) $(BUILDDIR)/cap_audit.o $(SH_JSON_OBJ) $(SH_ARENA_OBJ) | $(BUILDDIR)
+	$(CC) $(filter-out -DHL_ENABLE_LUA -DHL_ENABLE_JS,$(CFLAGS)) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(CAP_TOOL_NONE_OBJ) $(BUILDDIR)/cap_audit.o $(SH_JSON_OBJ) $(SH_ARENA_OBJ)
 
 # Command dispatcher test — needs full command set (symbol resolution for command table)
 $(BUILDDIR)/test_dispatch: $(TESTDIR)/hull/commands/test_dispatch.c $(CMD_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(TOOL_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(TEST_COMMON_DEPS) $(RT_OBJS) $(VEND_OBJS) $(MANIFEST_OBJ) $(BUILD_ASSET_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(PLEDGE_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(CMD_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(TOOL_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) \
 		$(TEST_CAP_OBJS) $(RT_OBJS) $(MANIFEST_OBJ) $(BUILD_ASSET_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(ALLOC_OBJ) $(VEND_OBJS) \
-		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) -lm -lpthread
+		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) -lm -lpthread
 
 # Signature verification test — needs crypto + app_entries_default + vfs
 $(BUILDDIR)/test_signature: $(TESTDIR)/hull/test_signature.c $(SIG_OBJ) $(VFS_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(TEST_COMMON_DEPS) | $(BUILDDIR)
@@ -778,6 +788,7 @@ SQLITE_CFLAGS := -std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-poi
 LOG_CFLAGS := -std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-pointer \
               -DLOG_USE_COLOR
 SH_ARENA_CFLAGS := -std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-pointer
+SH_JSON_CFLAGS := -std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-pointer
 TWEETNACL_CFLAGS := -std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-pointer
 # Re-add runtime defines (the := above clobbers earlier += additions)
 ifeq ($(RUNTIME),js)
@@ -854,7 +865,7 @@ check:
 
 analyze:
 	$(MAKE) clean
-	$(MAKE) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB)
+	$(MAKE) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB)
 	scan-build --status-bugs -disable-checker alpha.unix.Stream $(MAKE) $(CAP_OBJS) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(MAIN_OBJ) $(BUILDDIR)/hull
 
 cppcheck:

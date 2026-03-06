@@ -9,6 +9,7 @@
  */
 
 #include "hull/cap/smtp.h"
+#include "hull/cap/audit.h"
 #include "hull/limits.h"
 
 #include <keel/allocator.h>
@@ -527,6 +528,12 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg)
     /* Check host allowlist */
     if (hl_smtp_check_host(cfg, msg->host) != 0) {
         log_warn("smtp: host '%s' not in allowlist", msg->host);
+        ShJsonWriter w = hl_audit_begin("smtp.send");
+        sh_json_write_kv_string(&w, "host", msg->host);
+        sh_json_write_kv_string(&w, "from", msg->from);
+        sh_json_write_kv_string(&w, "to", msg->to);
+        sh_json_write_kv_string(&w, "result", "denied");
+        hl_audit_end(&w);
         return -1;
     }
 
@@ -715,5 +722,15 @@ cleanup:
         tls->destroy(tls);
     }
     close(fd);
+
+    {
+        ShJsonWriter w = hl_audit_begin("smtp.send");
+        sh_json_write_kv_string(&w, "host", msg->host);
+        sh_json_write_kv_string(&w, "from", msg->from);
+        sh_json_write_kv_string(&w, "to", msg->to);
+        sh_json_write_kv_string(&w, "subject", msg->subject);
+        sh_json_write_kv_int(&w, "result", ret);
+        hl_audit_end(&w);
+    }
     return ret;
 }

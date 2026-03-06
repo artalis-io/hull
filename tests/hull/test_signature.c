@@ -194,21 +194,21 @@ UTEST(hl_sig, read_valid)
     int rc = hl_sig_read(sig_path, &sig);
     ASSERT_EQ(rc, 0);
 
-    ASSERT_NE(sig.files_json, (char *)NULL);
-    ASSERT_NE(sig.signature_hex, (char *)NULL);
-    ASSERT_NE(sig.public_key_hex, (char *)NULL);
-    ASSERT_NE(sig.binary_hash_hex, (char *)NULL);
-    ASSERT_NE(sig.trampoline_hash_hex, (char *)NULL);
-    ASSERT_NE(sig.build_json, (char *)NULL);
+    ASSERT_TRUE(sig.files_value != NULL);
+    ASSERT_TRUE(sig.signature_hex != NULL);
+    ASSERT_TRUE(sig.public_key_hex != NULL);
+    ASSERT_TRUE(sig.binary_hash_hex != NULL);
+    ASSERT_TRUE(sig.trampoline_hash_hex != NULL);
+    ASSERT_TRUE(sig.build_value != NULL);
     ASSERT_EQ((int)strlen(sig.signature_hex), 128);
     ASSERT_EQ((int)strlen(sig.public_key_hex), 64);
     ASSERT_TRUE(sig.entry_count > 0);
     ASSERT_STREQ(sig.entries[0].name, "app.lua");
 
     /* Platform layer */
-    ASSERT_NE(sig.platform.platforms_json, (char *)NULL);
-    ASSERT_NE(sig.platform.signature_hex, (char *)NULL);
-    ASSERT_NE(sig.platform.public_key_hex, (char *)NULL);
+    ASSERT_TRUE(sig.platform.platforms_value != NULL);
+    ASSERT_TRUE(sig.platform.signature_hex != NULL);
+    ASSERT_TRUE(sig.platform.public_key_hex != NULL);
     ASSERT_TRUE(sig.platform.entry_count > 0);
     ASSERT_STREQ(sig.platform.entries[0].arch, "x86_64-cosmo");
 
@@ -283,8 +283,9 @@ UTEST(hl_sig, verify_bad_sig)
     HlSignature sig;
     ASSERT_EQ(hl_sig_read(sig_path, &sig), 0);
 
-    /* Tamper with the signature */
-    sig.signature_hex[0] = (sig.signature_hex[0] == 'a') ? 'b' : 'a';
+    /* Tamper with the signature (cast away const for test only) */
+    ((char *)sig.signature_hex)[0] =
+        (sig.signature_hex[0] == 'a') ? 'b' : 'a';
 
     int rc = hl_sig_verify(&sig, test_pk);
     ASSERT_EQ(rc, -1);
@@ -333,8 +334,8 @@ UTEST(hl_sig, verify_platform_tampered_sig)
     HlSignature sig;
     ASSERT_EQ(hl_sig_read(sig_path, &sig), 0);
 
-    /* Tamper with platform signature */
-    sig.platform.signature_hex[0] =
+    /* Tamper with platform signature (cast away const for test only) */
+    ((char *)sig.platform.signature_hex)[0] =
         (sig.platform.signature_hex[0] == 'a') ? 'b' : 'a';
 
     int rc = hl_sig_verify_platform(&sig, plat_pk);
@@ -487,7 +488,7 @@ UTEST(hl_sig, legacy_no_manifest)
 
     HlSignature sig;
     ASSERT_EQ(hl_sig_read(sig_path, &sig), 0);
-    ASSERT_TRUE(sig.manifest_json == NULL);
+    ASSERT_TRUE(sig.manifest_value == NULL);
 
     int rc = hl_sig_verify(&sig, test_pk);
     ASSERT_EQ(rc, 0);

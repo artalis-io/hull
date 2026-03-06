@@ -8,6 +8,7 @@
  */
 
 #include "hull/cap/http.h"
+#include "hull/cap/audit.h"
 #include "hull/cap/http_parser.h"
 #include "hull/limits.h"
 
@@ -465,8 +466,14 @@ int hl_cap_http_request(const HlHttpConfig *cfg,
         return -1;
 
     /* Check host allowlist */
-    if (hl_http_check_host(cfg, parsed.host, parsed.host_len) != 0)
+    if (hl_http_check_host(cfg, parsed.host, parsed.host_len) != 0) {
+        ShJsonWriter w = hl_audit_begin("http.request");
+        sh_json_write_kv_string(&w, "method", method);
+        sh_json_write_kv_string(&w, "url", url);
+        sh_json_write_kv_string(&w, "result", "denied");
+        hl_audit_end(&w);
         return -1;
+    }
 
     /* HTTPS requires TLS config */
     KlTlsConfig *tls_cfg = (KlTlsConfig *)cfg->tls;
@@ -511,6 +518,15 @@ cleanup:
     if (ret != 0)
         hl_cap_http_free(resp);
 
+    {
+        ShJsonWriter w = hl_audit_begin("http.request");
+        sh_json_write_kv_string(&w, "method", method);
+        sh_json_write_kv_string(&w, "url", url);
+        if (ret == 0)
+            sh_json_write_kv_int(&w, "status", resp->status);
+        sh_json_write_kv_int(&w, "result", ret);
+        hl_audit_end(&w);
+    }
     return ret;
 }
 

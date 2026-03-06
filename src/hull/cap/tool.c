@@ -9,6 +9,7 @@
  */
 
 #include "hull/cap/tool.h"
+#include "hull/cap/audit.h"
 #include "hull/build_assets.h"
 
 #ifdef HL_ENABLE_LUA
@@ -163,7 +164,13 @@ int hl_tool_check_allowlist(const char *binary)
 int hl_tool_spawn(const char *const argv[])
 {
     if (!argv || !argv[0]) return -1;
-    if (hl_tool_check_allowlist(argv[0]) != 0) return -1;
+    if (hl_tool_check_allowlist(argv[0]) != 0) {
+        ShJsonWriter w = hl_audit_begin("tool.spawn");
+        sh_json_write_kv_string(&w, "cmd", argv[0]);
+        sh_json_write_kv_string(&w, "result", "denied");
+        hl_audit_end(&w);
+        return -1;
+    }
 
     pid_t pid = fork();
     if (pid < 0) return -1;
@@ -178,15 +185,27 @@ int hl_tool_spawn(const char *const argv[])
     int status;
     if (waitpid(pid, &status, 0) < 0) return -1;
 
-    if (WIFEXITED(status))
-        return WEXITSTATUS(status);
-    return -1;
+    int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+
+    {
+        ShJsonWriter w = hl_audit_begin("tool.spawn");
+        sh_json_write_kv_string(&w, "cmd", argv[0]);
+        sh_json_write_kv_int(&w, "exit_code", exit_code);
+        hl_audit_end(&w);
+    }
+    return exit_code;
 }
 
 char *hl_tool_spawn_read(const char *const argv[], size_t *out_len)
 {
     if (!argv || !argv[0]) return NULL;
-    if (hl_tool_check_allowlist(argv[0]) != 0) return NULL;
+    if (hl_tool_check_allowlist(argv[0]) != 0) {
+        ShJsonWriter w = hl_audit_begin("tool.spawn_read");
+        sh_json_write_kv_string(&w, "cmd", argv[0]);
+        sh_json_write_kv_string(&w, "result", "denied");
+        hl_audit_end(&w);
+        return NULL;
+    }
 
     int pipefd[2];
     if (pipe(pipefd) < 0) return NULL;

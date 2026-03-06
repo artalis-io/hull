@@ -8,6 +8,7 @@
  */
 
 #include "hull/cap/fs.h"
+#include "hull/cap/audit.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -110,56 +111,72 @@ static int build_path(const HlFsConfig *cfg, const char *path,
 int64_t hl_cap_fs_read(const HlFsConfig *cfg, const char *path,
                          char *buf, size_t buf_size)
 {
+    int64_t result = -1;
+
     char full[PATH_MAX];
     if (build_path(cfg, path, full, sizeof(full)) != 0)
-        return -1;
+        goto audit;
 
     FILE *f = fopen(full, "rb");
     if (!f)
-        return -1;
+        goto audit;
 
     /* Get file size */
     if (fseek(f, 0, SEEK_END) != 0) {
         fclose(f);
-        return -1;
+        goto audit;
     }
     long size = ftell(f);
     if (size < 0) {
         fclose(f);
-        return -1;
+        goto audit;
     }
 
     /* If buf is NULL, just return the size */
     if (!buf) {
         fclose(f);
-        return (int64_t)size;
+        result = (int64_t)size;
+        goto audit;
     }
 
     if ((size_t)size > buf_size) {
         fclose(f);
-        return -1; /* buffer too small */
+        goto audit; /* buffer too small */
     }
 
     if (fseek(f, 0, SEEK_SET) != 0) {
         fclose(f);
-        return -1;
+        goto audit;
     }
     size_t nread = fread(buf, 1, (size_t)size, f);
     int read_err = ferror(f);
     fclose(f);
 
     if (read_err || nread != (size_t)size)
-        return -1;
+        goto audit;
 
-    return (int64_t)nread;
+    result = (int64_t)nread;
+
+audit:
+    {
+        ShJsonWriter w = hl_audit_begin("fs.read");
+        sh_json_write_kv_string(&w, "path", path);
+        if (result >= 0)
+            sh_json_write_kv_int(&w, "bytes", result);
+        sh_json_write_kv_int(&w, "result", result >= 0 ? 0 : -1);
+        hl_audit_end(&w);
+    }
+    return result;
 }
 
 int hl_cap_fs_write(const HlFsConfig *cfg, const char *path,
                       const char *data, size_t len)
 {
+    int result = -1;
+
     char full[PATH_MAX];
     if (build_path(cfg, path, full, sizeof(full)) != 0)
-        return -1;
+        goto audit;
 
     /* Create parent directories if needed */
     char tmp[PATH_MAX];
@@ -174,20 +191,32 @@ int hl_cap_fs_write(const HlFsConfig *cfg, const char *path,
         }
     }
 
-    FILE *f = fopen(full, "wb");
-    if (!f)
-        return -1;
+    {
+        FILE *f = fopen(full, "wb");
+        if (!f)
+            goto audit;
 
-    if (len > 0 && data) {
-        size_t written = fwrite(data, 1, len, f);
-        if (written != len) {
-            fclose(f);
-            return -1;
+        if (len > 0 && data) {
+            size_t written = fwrite(data, 1, len, f);
+            if (written != len) {
+                fclose(f);
+                goto audit;
+            }
         }
+
+        fclose(f);
+        result = 0;
     }
 
-    fclose(f);
-    return 0;
+audit:
+    {
+        ShJsonWriter w = hl_audit_begin("fs.write");
+        sh_json_write_kv_string(&w, "path", path);
+        sh_json_write_kv_int(&w, "len", (int64_t)len);
+        sh_json_write_kv_int(&w, "result", result);
+        hl_audit_end(&w);
+    }
+    return result;
 }
 
 int hl_cap_fs_exists(const HlFsConfig *cfg, const char *path)
@@ -201,12 +230,23 @@ int hl_cap_fs_exists(const HlFsConfig *cfg, const char *path)
 
 int hl_cap_fs_delete(const HlFsConfig *cfg, const char *path)
 {
+    int result = -1;
+
     char full[PATH_MAX];
     if (build_path(cfg, path, full, sizeof(full)) != 0)
-        return -1;
+        goto audit;
 
     if (unlink(full) != 0)
-        return -1;
+        goto audit;
 
-    return 0;
+    result = 0;
+
+audit:
+    {
+        ShJsonWriter w = hl_audit_begin("fs.delete");
+        sh_json_write_kv_string(&w, "path", path);
+        sh_json_write_kv_int(&w, "result", result);
+        hl_audit_end(&w);
+    }
+    return result;
 }
