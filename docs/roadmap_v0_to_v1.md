@@ -56,7 +56,7 @@ VFS init → detect runtime → open SQLite → PRAGMA journal_mode=WAL
 | **R3** | **High** | `load_app()` runs pre-sandbox | `main.c:~580` | User code executes during module load with no pledge/unveil; Lua `os.execute` is removed but JS `import()` could potentially load before sandbox |
 | **R4** | **High** | No memory/CPU limits (Lua) | `runtime/lua/runtime.c` | Lua runtime has a custom allocator with `max_memory` but no instruction-count gas metering (JS has it via `JS_SetInterruptHandler`); infinite loops in Lua block the server |
 | **R5** | **High** | DB is a single shared handle | `cap/db.c`, `main.c` | All requests share one `hl_db` SQLite handle; no per-tenant isolation; a malicious app can `DROP TABLE` any Hull internal table (`_hull_*`) |
-| **R6** | **High** | `tool.exec()` grants shell access | `cap/tool.c` | Subprocess execution — even with manifest gating — is an escape hatch from the capability model; command injection if args aren't sanitized |
+| **R6** | **High** | `tool.exec()` grants shell access | `cap/tool.c` | Subprocess execution — even with manifest gating — is an escape hatch from the capability model; command injection if args aren't sanitized. **Mitigated:** allowlist rejects non-versioned suffixes; dangerous compiler flags (`-load`, `-fplugin`, `-Xlinker`, `-Wl,`, `@`) blocked; Lua argv type-validated; audit logs full argv. |
 | **R7** | **Medium** | No audit log for capability use | All `cap/*.c` | No structured logging when `env.get()`, `http.fetch()`, `fs.read()`, `db.exec()` are called; impossible to reconstruct what a tool did post-incident |
 | **R8** | **Medium** | Outbox delivers outside transaction | `stdlib/lua/hull/middleware/outbox.lua` | `outbox.flush()` is called after `db.batch()` commits — delivery failures after commit leave inconsistent state (mitigated by retry, but not transactional) |
 | **R9** | **Medium** | Session secret is static default | `stdlib/lua/hull/middleware/session.lua` | Falls back to `"hull-session-secret-change-me"` if no env var; same across all instances |
@@ -247,7 +247,7 @@ hl_sandbox_apply_run(&sandbox_cfg);  // full runtime sandbox
 
 **`src/hull/cap/http.c`** — Audit logging hook point; also consider response-size limits on outbound fetches
 
-**`src/hull/cap/tool.c`** — Review argument sanitization; consider denying shell metacharacters in exec args
+**`src/hull/cap/tool.c`** — ~~Review argument sanitization; consider denying shell metacharacters in exec args~~ **Done.** Allowlist tightened to reject non-versioned suffixes (e.g. `cc-evil`); dangerous compiler flags rejected (`-load`, `-fplugin`, `-Xlinker`, `-Wl,`, `@response`); Lua argv validated for non-string elements; audit logs now include full argv array.
 
 **`stdlib/lua/hull/middleware/outbox.lua`** — Document that delivery is best-effort post-commit; consider adding a `flush_sync()` variant that returns delivery results
 
