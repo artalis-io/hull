@@ -2,7 +2,7 @@
 
 ## One sentence
 
-Hull turns AI-generated code into self-contained, distributable, local-first products — no cloud, no hosting, no dependencies.
+Hull is a secure, capability-limited runtime that turns AI-generated code into self-contained, distributable, local-first products — sandboxed by default, no cloud, no hosting, no dependencies.
 
 ## The problem
 
@@ -16,9 +16,13 @@ Hull is that piece.
 
 ## The product
 
-Hull is a local-first application platform. The developer writes backend logic in Lua, frontend in HTML5/JS, data in SQLite. `hull build` compiles everything into a single portable executable — under 2 MB — that runs on Linux, macOS, Windows, FreeBSD, OpenBSD, and NetBSD.
+Hull is a secure, capability-limited runtime for local-first applications. It is not a do-everything framework — it is a sandboxed environment where AI-generated code runs inside declared capability boundaries. The app states what it can access (files, hosts, environment variables), and the kernel enforces it. The agent writes the code; Hull constrains what that code can do.
+
+The developer writes backend logic in Lua or JavaScript, frontend in HTML5/JS, data in SQLite. `hull build` compiles everything into a single portable executable — under 2 MB — that runs on Linux, macOS, Windows, FreeBSD, OpenBSD, and NetBSD.
 
 Six vendored C libraries (plus an optional seventh — WAMR — for WASM compute plugins). Zero external dependencies. No package manager. No runtime installation. No cloud. The user double-clicks a file and has a working application. Their data never leaves their machine.
+
+In a world where AI writes the code, the runtime must be the trust boundary. Unrestricted frameworks assume trusted code — Hull assumes untrusted code and proves containment. This is the architectural difference: Hull apps can't exfiltrate data, can't access undeclared files, can't connect to undeclared hosts. Not by policy — by kernel enforcement.
 
 Hull ships batteries included: routing, authentication, RBAC, email, CSV import/export, internationalization, full-text search, PDF generation, HTML templates, input validation, rate limiting, WebSockets, sessions, CSRF protection. A vibecoder describes an invoicing app to an AI, the AI writes Lua, `hull build` produces a file. That file is the product.
 
@@ -32,13 +36,17 @@ Three forces are converging:
 
 **3. Supply chain security is a board-level concern.** SolarWinds, Log4j, xz-utils. "How many dependencies does this have?" is a question executives ask now. Hull's answer — six (plus one optional), all vendored, all auditable in a day — is the strongest possible position.
 
+**4. AI-generated code is untrusted code.** When an AI writes an application, nobody has read every line. The vibecoder described what they wanted — they didn't audit what they got. Traditional frameworks assume the developer trusts the code they wrote. Hull assumes the opposite: the code is untrusted, and the runtime must prove containment. This is a new requirement that didn't exist before AI coding — and no existing framework addresses it.
+
 The timing window is narrow. Whoever builds the vibecoder-to-product pipeline first accumulates the trust, community, and ecosystem that defines the category. This is a land grab.
 
 ## The economics
 
 Hull's cost structure is unusually favorable for a software business.
 
-**Revenue model:** Commercial licenses. One-time purchase, not subscription.
+**Revenue model:** Two streams — one-time licenses and recurring platform services.
+
+**Stream 1: Commercial licenses.** One-time purchase.
 
 | Tier | Price | Target |
 |------|-------|--------|
@@ -52,9 +60,29 @@ Update renewals ($49-149/year) provide optional recurring revenue.
 
 **COGS: ~$0 per license.** A license is an Ed25519-signed key file delivered as a download. No infrastructure per customer. No activation server. No hosting obligation — customers run Hull on their own machines.
 
-**Gross margin: ~95%.** Costs are salaries, CI, and CDN for downloads/docs. These are fixed. Adding the 10,000th customer costs the same as adding the 10th.
+**Stream 2: Hosted platform services.** Recurring, optional, complementary to local-first.
 
-**Break-even is low.** A 2-3 person team with near-zero COGS needs hundreds of licenses — not thousands — to cover costs. At $99-499 per license, the math works early.
+| Service | What it does | Why it can't be local |
+|---------|-------------|----------------------|
+| **Hull Build** | Hosted `hull build` — upload source, download a signed binary | Cross-compilation requires cosmocc toolchain; convenience for vibecoders who don't want to install a C compiler |
+| **Hull Verify** | Binary integrity verification (verify.gethull.dev) | Trust anchor must be independent of the binary being verified |
+| **Hull Sync** | Encrypted mailbox relay for multi-user Hull apps | Local-first apps need a rendezvous point for multi-device/multi-user sync; zero-knowledge — the server relays encrypted payloads it cannot read |
+
+These services are optional. Every Hull app works without them. `hull eject` gives you the build toolchain locally. Sync can be replaced by any file-sharing mechanism. The services are convenience and infrastructure — not a dependency. This is the critical distinction: customers can stop paying and their apps keep working. That's not SaaS. That's a service.
+
+**Pricing (planned):**
+
+| Service | Price | Model |
+|---------|-------|-------|
+| Hull Build | Free tier (5 builds/month) + $9/month unlimited | Usage-based with cap |
+| Hull Verify | Free | Trust infrastructure, not a revenue line |
+| Hull Sync | $5/month per user | Per-user; covers encrypted storage and relay |
+
+**Why this matters:** License revenue is front-loaded — a spike at each release, then a trough. Platform services provide steady monthly recurring revenue that smooths the curve. Together, the two streams give Hull both the high-margin economics of one-time sales and the predictability of recurring revenue — without the ethical contradiction of locking customers into infrastructure they can't leave.
+
+**Gross margin: ~95%.** Costs are salaries, CI, CDN for downloads/docs, and modest infrastructure for hosted services. These are largely fixed. Adding the 10,000th customer costs the same as adding the 10th.
+
+**Break-even is low.** A 2-3 person team with near-zero COGS needs hundreds of licenses — not thousands — to cover costs. At $99-499 per license plus platform services, the math works early.
 
 **Expansion:** Enterprise contracts ($2,000-10,000/year) for compliance documentation and priority support. Hull Marketplace (curated app directory, 15% commission). Training and certification. Migration consulting (Excel/SaaS to Hull).
 
@@ -85,6 +113,8 @@ The moat is the ecosystem:
 **Ejection as trust signal.** `hull eject` copies the build tool into the project. Developers can leave anytime. This paradoxically increases loyalty — people trust platforms that let them leave. No lock-in means the platform must earn retention through value, which is exactly the kind of retention that lasts.
 
 **Simplicity as structural advantage.** Six vendored C libraries (plus one optional). A 2-3 person team maintains the entire platform. Competitors building on larger stacks need larger teams for parity. Hull's simplicity is a cost advantage that compounds.
+
+**Platform services as non-coercive lock-in.** Hull Build, Hull Verify, and Hull Sync create value without creating dependency. Every service is optional and replaceable. But once a developer is building with hosted `hull build`, verifying with verify.gethull.dev, and syncing with Hull Sync, switching costs are real — not because we lock them in, but because the integrated experience is better than the alternatives. This is the same dynamic that makes GitHub sticky despite git being decentralized.
 
 ## Comparables
 
@@ -142,7 +172,7 @@ Small team, low burn, high leverage. The platform's simplicity is intentional �
 
 - Hull v1.0 development (C runtime, Lua standard library, build tool)
 - gethull.dev website and documentation
-- verify.gethull.dev (web-based binary verification tool)
+- Hosted platform services (Hull Build, Hull Verify, Hull Sync)
 - Initial community building and developer relations
 - First enterprise pilot engagements (defense/medical verticals)
 
