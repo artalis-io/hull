@@ -329,6 +329,13 @@ static int hull_serve(int argc, char **argv)
         return 1;
     }
 
+    /* Resolve entry point to absolute path.  This ensures app_dir (derived
+     * below) is also absolute, so realpath() inside the sandbox doesn't need
+     * to stat the CWD — which may be outside the sandbox's allowed paths. */
+    char entry_abs[4096];
+    if (realpath(entry_point, entry_abs) != NULL)
+        entry_point = entry_abs;
+
     /* Derive app directory from entry point (needed for migrations + static files + sandbox) */
     char app_dir[4096];
     {

@@ -2588,15 +2588,19 @@ static JSValue js_template_load_raw(JSContext *ctx, JSValueConst this_val,
 
     /* 2. Filesystem fallback (dev mode): app_dir/templates/<name> */
     if (js && js->app_dir) {
-        /* Validate template path is confined to app_dir */
-        HlFsConfig tpl_cfg = { .base_dir = js->app_dir,
-                                .base_len = strlen(js->app_dir) };
-        char tpl_rel[HL_MODULE_PATH_MAX];
-        int rn = snprintf(tpl_rel, sizeof(tpl_rel), "templates/%s", name);
-        if (rn < 0 || (size_t)rn >= sizeof(tpl_rel) ||
-            hl_cap_fs_validate(&tpl_cfg, tpl_rel) != 0) {
-            JS_FreeCString(ctx, name);
-            return JS_ThrowTypeError(ctx, "invalid template name");
+        /* Reject ".." components to prevent path traversal (R1 fix).
+         * We use string-level validation rather than realpath() because
+         * the OS sandbox may block stat() on parent directories. */
+        const char *p = name;
+        while (*p) {
+            if (p[0] == '.' && p[1] == '.' &&
+                (p[2] == '/' || p[2] == '\0')) {
+                JS_FreeCString(ctx, name);
+                return JS_ThrowTypeError(ctx, "invalid template name");
+            }
+            const char *slash = strchr(p, '/');
+            if (!slash) break;
+            p = slash + 1;
         }
 
         char path[HL_MODULE_PATH_MAX];
