@@ -1,4 +1,4 @@
-# Hull — Local-First Application Platform
+# Hull — Secure Runtime for Agent-Native, Local-First Applications
 
 ## Contents
 
@@ -20,13 +20,16 @@
 
 **Vision:** Make Software Great Again. A world where local-first, single-file applications are the default for tools that don't need the cloud. Where the person who uses the software owns the software — the binary, the data, the build pipeline, and the business outcome. Where an AI assistant and a single command produce a product, not a deployment problem.
 
-**The status quo is broken.** AI coding assistants solved one problem (you don't need to know how to code) and created another (you now depend on cloud infrastructure to run the result). Vibecoded apps are cloud apps by default — React + Node.js + Postgres + Vercel/AWS. The vibecoder swapped one dependency (coding skill) for another (the cloud). They don't own anything more than before — they just rent different things. Hull breaks this chain: the AI writes Lua or JavaScript, the output is a file instead of a deployment, and the developer owns the product instead of renting infrastructure to run it.
+**The status quo is broken.** AI coding assistants solved one problem (you don't need to know how to code) and created two others: you now depend on cloud infrastructure to run the result, and nobody has verified what the AI-generated code actually does. Vibecoded apps are cloud apps by default — React + Node.js + Postgres + Vercel/AWS. The vibecoder swapped one dependency (coding skill) for two others (cloud infrastructure and blind trust in generated code). They don't own anything more than before — they just rent different things and hope the AI didn't introduce something they wouldn't have written themselves.
 
-Three core beliefs:
+Hull breaks this chain: the AI writes Lua or JavaScript, the output is a file instead of a deployment, and the runtime constrains what that code can do. The developer owns the product. The user can verify its boundaries.
+
+Four core beliefs:
 
 1. Software should be an artifact you own, not a service you rent
 2. Data should live where the owner lives — on their machine, encrypted, backed up by copying a file
 3. Building software should be as easy as describing what you want — and the result should be yours
+4. When AI writes the code, the runtime must be the trust boundary — not the developer's ability to audit every line
 
 ## Key Selling Points
 
@@ -103,9 +106,11 @@ Three core beliefs:
 
 The software industry spent 15 years pushing everything to the cloud. The result: subscription fatigue, vendor lock-in, privacy erosion, applications that stop working when the internet goes down, and products that vanish when startups die.
 
-People want local tools they can control.
+Now AI is writing the code — and nobody is asking what that code can do once it's running. Traditional frameworks assume trusted code written by developers who understand every line. That assumption is gone. The vibecoder describes what they want, the AI produces hundreds of lines, and the result runs with full system access. This is not a hypothetical risk — it's the default behavior of every major framework.
 
-Hull is a platform for building single-file, zero-dependency, run-anywhere applications. You write your backend logic in Lua or JavaScript, your frontend in HTML5/JS, your data lives in SQLite, and Hull compiles everything into one executable. No servers. No cloud. No npm. No pip. No Docker. No hosting. Just a file.
+People want local tools they can control. And in a world where AI writes the code, they need a runtime that proves what the code can and cannot do.
+
+Hull is a secure, capability-limited runtime for building single-file, zero-dependency, run-anywhere applications. You write your backend logic in Lua or JavaScript, your frontend in HTML5/JS, your data lives in SQLite, and Hull compiles everything into one executable. The app declares its capabilities in a manifest — files, hosts, environment variables — and the kernel enforces those boundaries. No servers. No cloud. No npm. No pip. No Docker. No hosting. No unconstrained access. Just a file that does what it says and nothing more.
 
 ## The False Choice
 
@@ -139,7 +144,7 @@ Hull is the third option nobody's offering: properly structured data that you st
 
 ## What Hull Is
 
-Hull is a self-contained application runtime that embeds seven C libraries into a single binary, built on [Cosmopolitan libc](https://github.com/jart/cosmopolitan) for cross-platform APE binaries:
+Hull is a secure, capability-limited application runtime that embeds seven C libraries into a single binary, built on [Cosmopolitan libc](https://github.com/jart/cosmopolitan) for cross-platform APE binaries. It is not a general-purpose framework — it is a sandboxed environment where application code runs inside declared capability boundaries enforced by the kernel.
 
 | Component | Purpose | Size |
 |-----------|---------|------|
@@ -154,7 +159,7 @@ Hull is a self-contained application runtime that embeds seven C libraries into 
 
 Total: under 2 MB (under 2.5 MB with optional WAMR). Runs on Linux, macOS, Windows, FreeBSD, OpenBSD, NetBSD from a single binary via Cosmopolitan C (Actually Portable Executable).
 
-Hull is not a web framework. It is a platform for building local-first desktop applications that use an HTML5/JS frontend served to the user's browser. The user double-clicks a file, a browser tab opens, and they have a working application. Their data never leaves their machine.
+Hull is not a web framework. It is not a do-everything platform. It is a deliberately constrained runtime for building local-first desktop applications that use an HTML5/JS frontend served to the user's browser. The constraints are the feature — they guarantee that the application can only do what it declared. The user double-clicks a file, a browser tab opens, and they have a working application. Their data never leaves their machine. The app physically cannot access anything beyond its declared boundaries.
 
 ## Why It Works This Way
 
@@ -182,6 +187,8 @@ There is currently no way for a non-technical person to get a custom local appli
 
 There is currently no way for a developer (or an AI coding assistant) to produce a single file that is a complete, self-contained, database-backed application with a web UI that runs on any operating system.
 
+And there is currently no runtime that treats AI-generated code as untrusted by default — that constrains the code to declared capabilities and proves containment to the end user. Every existing framework gives the application full system access and trusts the developer to have written safe code. When the developer is an AI and the user is a vibecoder who can't audit the output, that trust model is broken.
+
 The closest alternatives and why they fall short:
 
 **Electron** — produces local apps with web UIs, but each one is 200+ MB because it bundles an entire Chromium browser. Requires per-platform builds. No built-in database. No security sandboxing. Chromium alone pulls in hundreds of third-party dependencies — any one of which is a supply-chain attack vector. The `node_modules` tree for a typical Electron app contains 500-1,500 packages from thousands of maintainers. A single compromised dependency (event-stream, ua-parser-js, colors.js — all real incidents) can exfiltrate data from every app that includes it. The attack surface is too large for any team to audit.
@@ -194,13 +201,13 @@ The closest alternatives and why they fall short:
 
 **Traditional web frameworks (Express, Django, Rails, Laravel)** — require runtime installation, package managers, database servers, and hosting. Designed for cloud deployment, not local-first applications. Every one of these stacks depends on a package manager ecosystem (npm, pip, composer, bundler) with the same supply-chain risks as Electron and Rust/Go, plus the operational attack surface of a production server.
 
-Hull fills the gap: **a complete application runtime in under 2 MB that produces a single file containing an HTTP server, a scripting engine, a database, and a web UI, runnable on any operating system, with kernel-enforced security, requiring zero installation.** Optional WASM compute plugins add ~85 KB for apps that need native-speed computation.
+Hull fills the gap: **a secure, capability-limited application runtime in under 2 MB that produces a single file containing an HTTP server, a scripting engine, a database, and a web UI, runnable on any operating system, with kernel-enforced capability boundaries, requiring zero installation.** The app declares what it can access. The kernel enforces it. The user can verify it. No other runtime does all three. Optional WASM compute plugins add ~85 KB for apps that need native-speed computation.
 
 ## The Vibecoding Problem
 
-AI coding assistants (Claude Code, Cursor, OpenCode) have made it possible for anyone to build software by describing what they want in natural language. But there's a gap between "the AI wrote my code" and "someone can use my application."
+AI coding assistants (Claude Code, Cursor, OpenCode) have made it possible for anyone to build software by describing what they want in natural language. But there are two gaps between "the AI wrote my code" and "someone can use my application": **deployment** and **trust.**
 
-Today, every vibecoded project hits the same wall: **deployment.** The AI generates a React frontend and a Node.js backend. Now what? The vibecoder must learn about hosting, DNS, SSL certificates, database servers, environment variables, CI/CD pipelines, and monthly billing. They're forced to choose between:
+Today, every vibecoded project hits the same walls. The AI generates a React frontend and a Node.js backend. Now what? The vibecoder must learn about hosting, DNS, SSL certificates, database servers, environment variables, CI/CD pipelines, and monthly billing. They're forced to choose between:
 
 - **Own your infrastructure (AWS, GCP, DigitalOcean)** — EC2 instances, RDS databases, load balancers, S3 buckets, IAM roles, security groups, CloudWatch alerts. A simple CRUD app becomes a distributed systems problem with a $50-200/month floor.
 
@@ -210,9 +217,11 @@ Today, every vibecoded project hits the same wall: **deployment.** The AI genera
 
 The core absurdity: a vibecoder who just wants to build a small tool for a small audience is funnelled into the same cloud infrastructure designed for applications serving millions. There is no middle ground between "runs on my laptop" and "deployed to the cloud."
 
-Hull is that middle ground. The AI writes Lua or JavaScript — whichever it (or the developer) prefers. The data lives in SQLite instead of Postgres. The frontend is HTML5/JS served from the binary instead of a CDN. And when it's done, `hull build --output myapp.com` produces a single file the vibecoder can share, sell, or put in Dropbox. No server. No hosting bill. No $49,000 surprise. No deployment step at all.
+And even if the deployment problem is solved, there's a second gap: **trust.** The vibecoder described what they wanted. The AI produced hundreds of lines of code. Nobody read every line. Traditional frameworks assume the developer trusts the code they wrote — but the vibecoder didn't write it, and they can't audit it. The result runs with full system access: file system, network, environment variables, everything. If the AI hallucinated an outbound HTTP call, added an overly broad file glob, or introduced a dependency that phones home, the vibecoder would never know. No existing framework treats this as a problem.
 
-The code the AI generates is the product. Not a codebase that needs infrastructure to become a product — the actual, distributable, runnable product.
+Hull closes both gaps. The AI writes Lua or JavaScript — whichever it (or the developer) prefers. The data lives in SQLite instead of Postgres. The frontend is HTML5/JS served from the binary instead of a CDN. The app declares its capabilities in a manifest, and the kernel enforces them — so even if the AI-generated code tries to access undeclared files or connect to undeclared hosts, it physically cannot. And when it's done, `hull build --output myapp.com` produces a single file the vibecoder can share, sell, or put in Dropbox. No server. No hosting bill. No $49,000 surprise. No deployment step at all. No unconstrained code.
+
+The code the AI generates is the product. Not a codebase that needs infrastructure to become a product — the actual, distributable, runnable, sandboxed product.
 
 ## Who Hull Is For
 
@@ -256,7 +265,7 @@ All three groups share a need: **turn application logic into a self-contained, d
 
 **Hull is not a web framework.** It is a local application runtime that uses HTTP as its UI transport. The browser is the display layer, not the deployment target.
 
-**Hull is not a cloud platform.** There are no hosted services, no managed databases, no deployment pipelines. The application runs on the user's machine and nowhere else.
+**Hull is not a cloud platform.** The application runs on the user's machine. Optional hosted services (Hull Build, Hull Verify, Hull Sync) provide convenience — hosted compilation, binary integrity verification, encrypted multi-user relay — but every one is replaceable and ejectable. No managed databases. No deployment pipelines. No lock-in.
 
 **Hull is not a general-purpose server.** It is optimized for single-user or small-team local use. It does not include load balancing, horizontal scaling, caching layers, or message queues.
 
