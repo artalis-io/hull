@@ -111,6 +111,85 @@ UTEST(tool, allowlist_reject_empty)
     ASSERT_NE(hl_tool_check_allowlist(""), 0);
 }
 
+UTEST(tool, allowlist_reject_cc_evil)
+{
+    ASSERT_NE(hl_tool_check_allowlist("cc-evil"), 0);
+}
+
+UTEST(tool, allowlist_reject_ar_malicious)
+{
+    ASSERT_NE(hl_tool_check_allowlist("ar-malicious"), 0);
+}
+
+UTEST(tool, allowlist_reject_clang_backdoor)
+{
+    ASSERT_NE(hl_tool_check_allowlist("clang-backdoor"), 0);
+}
+
+UTEST(tool, allowlist_reject_evil_cc)
+{
+    ASSERT_NE(hl_tool_check_allowlist("evil-cc"), 0);
+}
+
+UTEST(tool, allowlist_reject_cross_cc)
+{
+    ASSERT_NE(hl_tool_check_allowlist("x86_64-unknown-cosmo-cc"), 0);
+}
+
+UTEST(tool, allowlist_accept_gcc_12)
+{
+    ASSERT_EQ(hl_tool_check_allowlist("gcc-12"), 0);
+}
+
+UTEST(tool, allowlist_accept_clang_18)
+{
+    ASSERT_EQ(hl_tool_check_allowlist("clang-18"), 0);
+}
+
+/* ── Dangerous flag validation tests ──────────────────────────────── */
+
+UTEST(tool, validate_reject_load)
+{
+    const char *argv[] = { "cc", "-load", "evil.so", NULL };
+    ASSERT_NE(hl_tool_validate_args(argv), 0);
+}
+
+UTEST(tool, validate_reject_fplugin)
+{
+    const char *argv[] = { "cc", "-fplugin=evil.so", NULL };
+    ASSERT_NE(hl_tool_validate_args(argv), 0);
+}
+
+UTEST(tool, validate_reject_fplugin_separate)
+{
+    const char *argv[] = { "cc", "-fplugin", "evil.so", NULL };
+    ASSERT_NE(hl_tool_validate_args(argv), 0);
+}
+
+UTEST(tool, validate_reject_xlinker)
+{
+    const char *argv[] = { "cc", "-Xlinker", "-rpath", NULL };
+    ASSERT_NE(hl_tool_validate_args(argv), 0);
+}
+
+UTEST(tool, validate_reject_wl)
+{
+    const char *argv[] = { "cc", "-Wl,-rpath,/evil", NULL };
+    ASSERT_NE(hl_tool_validate_args(argv), 0);
+}
+
+UTEST(tool, validate_reject_response_file)
+{
+    const char *argv[] = { "cc", "@commands.txt", NULL };
+    ASSERT_NE(hl_tool_validate_args(argv), 0);
+}
+
+UTEST(tool, validate_accept_normal)
+{
+    const char *argv[] = { "cc", "-std=c11", "-O2", "-c", "-o", "out.o", "main.c", NULL };
+    ASSERT_EQ(hl_tool_validate_args(argv), 0);
+}
+
 /* ── Spawn tests ──────────────────────────────────────────────────── */
 
 UTEST(tool, spawn_reject_disallowed)

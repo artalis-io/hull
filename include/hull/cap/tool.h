@@ -85,6 +85,13 @@ char *hl_tool_spawn_read(const char *const argv[], size_t *out_len);
 int hl_tool_check_allowlist(const char *binary);
 
 /*
+ * Validate argv for dangerous compiler flags that can execute arbitrary code.
+ * Rejects: -load, -fplugin, -fplugin=, -Xlinker, -Wl,, @response_file.
+ * Returns 0 if clean, -1 if a dangerous flag is found.
+ */
+int hl_tool_validate_args(const char *const argv[]);
+
+/*
  * Recursively find files matching a glob pattern.
  * Skips dotfiles/dirs, node_modules, vendor.
  * Returns a NULL-terminated array of strdup'd paths (caller frees each + array).

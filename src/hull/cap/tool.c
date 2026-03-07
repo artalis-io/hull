@@ -151,7 +151,9 @@ int hl_tool_check_allowlist(const char *binary)
         if (strncmp(base, *p, plen) == 0) {
             /* Exact match or versioned variant (e.g. clang-18, gcc-12) */
             char next = base[plen];
-            if (next == '\0' || next == '-')
+            if (next == '\0')
+                return 0;
+            if (next == '-' && base[plen + 1] >= '0' && base[plen + 1] <= '9')
                 return 0;
         }
     }
@@ -159,14 +161,36 @@ int hl_tool_check_allowlist(const char *binary)
     return -1;
 }
 
+/* ── Dangerous flag validation ─────────────────────────────────────── */
+
+int hl_tool_validate_args(const char *const argv[])
+{
+    if (!argv) return -1;
+    for (int i = 1; argv[i]; i++) {
+        const char *a = argv[i];
+        if (strcmp(a, "-load") == 0)          return -1; /* Clang plugin */
+        if (strcmp(a, "-fplugin") == 0)       return -1; /* GCC plugin */
+        if (strncmp(a, "-fplugin=", 9) == 0)  return -1; /* GCC plugin= */
+        if (strcmp(a, "-Xlinker") == 0)       return -1; /* linker pass */
+        if (strncmp(a, "-Wl,", 4) == 0)       return -1; /* linker pass */
+        if (a[0] == '@')                       return -1; /* response file */
+    }
+    return 0;
+}
+
 /* ── Process spawning ──────────────────────────────────────────────── */
 
 int hl_tool_spawn(const char *const argv[])
 {
     if (!argv || !argv[0]) return -1;
-    if (hl_tool_check_allowlist(argv[0]) != 0) {
+    if (hl_tool_check_allowlist(argv[0]) != 0 ||
+        hl_tool_validate_args(argv) != 0) {
         ShJsonWriter w = hl_audit_begin("tool.spawn");
-        sh_json_write_kv_string(&w, "cmd", argv[0]);
+        sh_json_write_key(&w, "argv");
+        sh_json_write_array_start(&w);
+        for (int i = 0; argv[i]; i++)
+            sh_json_write_string(&w, argv[i]);
+        sh_json_write_array_end(&w);
         sh_json_write_kv_string(&w, "result", "denied");
         hl_audit_end(&w);
         return -1;
@@ -189,7 +213,11 @@ int hl_tool_spawn(const char *const argv[])
 
     {
         ShJsonWriter w = hl_audit_begin("tool.spawn");
-        sh_json_write_kv_string(&w, "cmd", argv[0]);
+        sh_json_write_key(&w, "argv");
+        sh_json_write_array_start(&w);
+        for (int i = 0; argv[i]; i++)
+            sh_json_write_string(&w, argv[i]);
+        sh_json_write_array_end(&w);
         sh_json_write_kv_int(&w, "exit_code", exit_code);
         hl_audit_end(&w);
     }
@@ -199,9 +227,14 @@ int hl_tool_spawn(const char *const argv[])
 char *hl_tool_spawn_read(const char *const argv[], size_t *out_len)
 {
     if (!argv || !argv[0]) return NULL;
-    if (hl_tool_check_allowlist(argv[0]) != 0) {
+    if (hl_tool_check_allowlist(argv[0]) != 0 ||
+        hl_tool_validate_args(argv) != 0) {
         ShJsonWriter w = hl_audit_begin("tool.spawn_read");
-        sh_json_write_kv_string(&w, "cmd", argv[0]);
+        sh_json_write_key(&w, "argv");
+        sh_json_write_array_start(&w);
+        for (int i = 0; argv[i]; i++)
+            sh_json_write_string(&w, argv[i]);
+        sh_json_write_array_end(&w);
         sh_json_write_kv_string(&w, "result", "denied");
         hl_audit_end(&w);
         return NULL;
@@ -497,6 +530,10 @@ static int l_tool_spawn(lua_State *L)
     for (int i = 1; i <= n; i++) {
         lua_rawgeti(L, 1, i);
         argv[i - 1] = lua_tostring(L, -1);
+        if (!argv[i - 1]) {
+            free(argv);
+            return luaL_error(L, "tool.spawn: argument %d must be a string", i);
+        }
         lua_pop(L, 1);
     }
     argv[n] = NULL;
@@ -535,6 +572,10 @@ static int l_tool_spawn_read(lua_State *L)
     for (int i = 1; i <= n; i++) {
         lua_rawgeti(L, 1, i);
         argv[i - 1] = lua_tostring(L, -1);
+        if (!argv[i - 1]) {
+            free(argv);
+            return luaL_error(L, "tool.spawn_read: argument %d must be a string", i);
+        }
         lua_pop(L, 1);
     }
     argv[n] = NULL;
