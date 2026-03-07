@@ -79,7 +79,7 @@ Hull Core (main.c, manifest.c, sandbox.c, signature.c, static.c, vfs.c)
         ↓
 Keel HTTP Server (vendor/keel/)  →  Event loop + routing
         ↓
-Kernel Sandbox (pledge + unveil)  →  OS enforcement
+Kernel Sandbox (pledge/unveil/seatbelt)  →  OS enforcement
 ```
 
 Each layer talks only to the one below it. Application code cannot bypass capabilities.
@@ -121,7 +121,7 @@ Table-driven dispatcher in `src/hull/commands/dispatch.c`. 12 commands:
 
 ```
 hull keygen | build | verify | inspect | manifest | test | new | dev | eject | sign-platform | migrate | agent
-Runtime flags: --audit (capability audit logging), --agent (sidecar files), --no-migrate, --skip-ca-bundle
+Runtime flags: --audit (capability audit logging), --agent (sidecar files), --no-migrate, --no-sandbox, --skip-ca-bundle
 ```
 
 Each command is a separate `.c`/`.h` under `src/hull/commands/`. Adding a new command = one line in the table + one source file.
@@ -261,15 +261,13 @@ The Cosmo CI job in `.github/workflows/ci.yml`:
 
 Two-phase sandbox in `sandbox.c`:
 
-**Phase 1** — `hl_sandbox_apply_pledge()`: Called before `load_app()`. Pledges `stdio inet rpath wpath cpath flock dns unveil` — blocks `exec`, `proc`, `fork` during module loading. No unveil calls yet (manifest paths unknown), but the `unveil` promise is retained so phase 2 can call `unveil()`.
+**Phase 1** — `hl_sandbox_apply_pledge()`: Called before `load_app()`. On Linux/Cosmo, pledges `stdio inet rpath wpath cpath flock dns unveil` — blocks `exec`, `proc`, `fork` during module loading. On macOS, phase 1 is a no-op (Seatbelt's `sandbox_init` is irreversible, so the full profile is applied in phase 2).
 
-**Phase 2** — `hl_sandbox_apply()`: Called after manifest extraction. Unveils specific paths, seals filesystem, optionally narrows pledge (removes `dns` if no outbound HTTP).
-1. `unveil(path, "r")` for each `fs.read` path
-2. `unveil(path, "rwc")` for each `fs.write` path
-3. `unveil(NULL, NULL)` — seal (no more paths)
-4. `pledge("stdio inet rpath wpath cpath flock [dns]")` — syscall filter
+**Phase 2** — `hl_sandbox_apply()`: Called after manifest extraction. Platform-specific enforcement:
+- **Linux/Cosmo:** Unveils specific paths, seals filesystem, applies pledge syscall filter
+- **macOS:** Builds dynamic SBPL profile from manifest, applies via `sandbox_init_with_parameters()`. Deny-default with selective allows for app_dir, db files, manifest paths, network.
 
-Phase 1 promises are a superset of phase 2 (pledge can only narrow). Violation = SIGKILL on Linux/Cosmo. No-op on macOS (C-level validation only).
+Violation = SIGABRT on OpenBSD, SIGKILL on Linux/Cosmo, EPERM on macOS. `--no-sandbox` flag disables kernel enforcement for debugging.
 
 ### Capability Enforcement Invariants
 
@@ -648,7 +646,7 @@ make e2e                            # run all E2E tests (examples + build + sand
 | `e2e_build.sh` | Build pipeline: platform build, app compilation, signing, self-build chain |
 | `e2e_examples.sh` | All 9 examples in both Lua and JS runtimes |
 | `e2e_http.sh` | HTTP routing, middleware, error handling |
-| `e2e_sandbox.sh` | Kernel sandbox enforcement (Linux + Cosmo) |
+| `e2e_sandbox.sh` | Kernel sandbox enforcement (OpenBSD + Linux + macOS + Cosmo) |
 | `e2e_templates.sh` | Template engine: 20 tests per runtime (text, vars, escaping, conditionals, loops, filters, inheritance, includes, XSS) |
 | `e2e_migrate.sh` | Migration system: apply, status, idempotency, embedding |
 

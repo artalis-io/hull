@@ -1,13 +1,15 @@
 /*
  * sandbox_violation.c — Verify kernel sandbox enforcement
  *
- * Standalone test program that directly exercises Landlock (unveil)
- * and pledge (seccomp) to prove kernel-level enforcement works.
+ * Standalone test program that directly exercises OS-level sandbox
+ * mechanisms to prove kernel-level enforcement works.
  * Each test runs in a forked child so sandbox state is isolated.
  *
  * Supports:
+ *   OpenBSD      — native pledge/unveil (KILL mode)
  *   Cosmopolitan — pledge/unveil built into cosmo libc (KILL mode)
  *   Linux        — jart/pledge polyfill (RETURN_EPERM mode)
+ *   macOS        — Seatbelt sandbox_init_with_parameters
  *
  * Compile (Linux):
  *   cc -std=c11 -O2 -o sandbox_test tests/sandbox_violation.c \
@@ -16,10 +18,13 @@
  * Compile (Cosmopolitan):
  *   cosmocc -std=c11 -O2 -o sandbox_test tests/sandbox_violation.c
  *
+ * Compile (macOS):
+ *   cc -std=c11 -O2 -o sandbox_test tests/sandbox_violation.c
+ *
  * Usage: ./sandbox_test
  *
  * Returns 0 if all tests pass, 1 if any fail.
- * Skips gracefully if kernel doesn't support Landlock/seccomp.
+ * Skips gracefully if kernel doesn't support the sandbox mechanism.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -29,13 +34,22 @@
 #if defined(__COSMOPOLITAN__)
 #define SANDBOX_SUPPORTED 1
 #define HAS_PLEDGE_MODE   0
+#define HAS_SEATBELT      0
 /* Cosmopolitan libc provides pledge() and unveil() natively. */
 extern int pledge(const char *promises, const char *execpromises);
 extern int unveil(const char *path, const char *permissions);
 
+#elif defined(__OpenBSD__)
+#define SANDBOX_SUPPORTED 1
+#define HAS_PLEDGE_MODE   0
+#define HAS_SEATBELT      0
+/* OpenBSD: pledge/unveil are native system calls in <unistd.h>. */
+#include <unistd.h>
+
 #elif defined(__linux__)
 #define SANDBOX_SUPPORTED 1
 #define HAS_PLEDGE_MODE   1
+#define HAS_SEATBELT      0
 
 /* jart/pledge polyfill — linked from build/ objects */
 extern int pledge(const char *promises, const char *execpromises);
@@ -45,9 +59,23 @@ extern int __pledge_mode;
 #define PLEDGE_PENALTY_RETURN_EPERM 0x0002
 #define PLEDGE_STDERR_LOGGING       0x0010
 
+#elif defined(__APPLE__)
+#define SANDBOX_SUPPORTED 1
+#define HAS_PLEDGE_MODE   0
+#define HAS_SEATBELT      1
+
+#include <stdint.h>
+#include <stdlib.h> /* free (for sandbox error strings) */
+
+extern int sandbox_init_with_parameters(const char *profile,
+                                         uint64_t flags,
+                                         const char **parameters,
+                                         char **errorbuf);
+
 #else
 #define SANDBOX_SUPPORTED 0
 #define HAS_PLEDGE_MODE   0
+#define HAS_SEATBELT      0
 #endif
 
 /* ── Test implementation (Linux + Cosmopolitan) ───────────────────── */
@@ -77,6 +105,10 @@ static void fail(const char *msg)
     printf("  FAIL: %s\n", msg);
     fail_count++;
 }
+
+/* ── Tests 1-3: pledge/unveil enforcement (Linux + Cosmopolitan) ─── */
+
+#if !HAS_SEATBELT
 
 /* ── Test 1: Landlock unveil enforcement ──────────────────────────── */
 
@@ -337,13 +369,179 @@ static void test_pledge_allowed(void)
     }
 }
 
+#endif /* !HAS_SEATBELT */
+
+/* ── Test 4: Seatbelt deny-all enforcement (macOS only) ──────────── */
+
+#if HAS_SEATBELT
+
+static int test_seatbelt_deny_child(void)
+{
+    /* Apply a deny-all Seatbelt profile, then try to open a file */
+    const char *profile =
+        "(version 1)\n"
+        "(deny default)\n"
+        "(allow file-read* (subpath \"/System/Library\")"
+        " (subpath \"/usr/lib\"))\n"
+        "(allow file-map-executable (subpath \"/System/Library\")"
+        " (subpath \"/usr/lib\"))\n"
+        "(allow sysctl-read)\n";
+
+    const char *params[] = { NULL };
+    char *errorbuf = NULL;
+
+    if (sandbox_init_with_parameters(profile, 0, params, &errorbuf) != 0) {
+        fprintf(stderr, "sandbox_init failed: %s\n",
+                errorbuf ? errorbuf : "unknown");
+        if (errorbuf) free(errorbuf);
+        _exit(2);
+    }
+
+    /* Try to open /etc/hosts — should be blocked */
+    int fd = open("/etc/hosts", O_RDONLY);
+    if (fd >= 0) {
+        close(fd);
+        _exit(1); /* FAIL: access was NOT blocked */
+    }
+
+    if (errno == EPERM || errno == EACCES) {
+        _exit(0); /* PASS: Seatbelt blocked access */
+    }
+
+    fprintf(stderr, "open(\"/etc/hosts\"): %s (expected EPERM/EACCES)\n",
+            strerror(errno));
+    _exit(2);
+}
+
+static void test_seatbelt_deny(void)
+{
+    printf("\n=== Seatbelt deny-all enforcement ===\n");
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        fail("fork failed");
+        return;
+    }
+
+    if (pid == 0)
+        test_seatbelt_deny_child();
+
+    int status;
+    waitpid(pid, &status, 0);
+
+    if (WIFEXITED(status)) {
+        int code = WEXITSTATUS(status);
+        if (code == 0) {
+            pass("seatbelt blocked access to /etc/hosts");
+        } else if (code == 1) {
+            fail("seatbelt did NOT block access — not enforcing");
+        } else {
+            fail("seatbelt deny test exited with unexpected code");
+        }
+    } else if (WIFSIGNALED(status)) {
+        char buf[128];
+        snprintf(buf, sizeof(buf),
+                 "seatbelt deny test killed by signal %d", WTERMSIG(status));
+        fail(buf);
+    }
+}
+
+/* ── Test 5: Seatbelt allows permitted paths ─────────────────────── */
+
+static int test_seatbelt_allow_child(void)
+{
+    /* Allow /tmp for reading + writing.
+     * On macOS, /tmp → /private/tmp (symlink).  Seatbelt resolves
+     * symlinks before matching, so we must use the real path. */
+    char real_tmp[256];
+    if (!realpath("/tmp", real_tmp)) {
+        fprintf(stderr, "realpath(\"/tmp\") failed\n");
+        _exit(2);
+    }
+
+    const char *profile =
+        "(version 1)\n"
+        "(deny default)\n"
+        "(allow file-read* (subpath \"/System/Library\")"
+        " (subpath \"/usr/lib\")"
+        " (subpath (param \"ALLOWED\")))\n"
+        "(allow file-write* (subpath (param \"ALLOWED\")))\n"
+        "(allow file-map-executable (subpath \"/System/Library\")"
+        " (subpath \"/usr/lib\"))\n"
+        "(allow sysctl-read)\n";
+
+    const char *params[] = { "ALLOWED", real_tmp, NULL };
+    char *errorbuf = NULL;
+
+    if (sandbox_init_with_parameters(profile, 0, params, &errorbuf) != 0) {
+        fprintf(stderr, "sandbox_init failed: %s\n",
+                errorbuf ? errorbuf : "unknown");
+        if (errorbuf) free(errorbuf);
+        _exit(2);
+    }
+
+    /* Create and read a file in /tmp (allowed).
+     * Must use resolved path — Seatbelt resolves symlinks. */
+    char test_path[512];
+    snprintf(test_path, sizeof(test_path),
+             "%s/hull_seatbelt_test.txt", real_tmp);
+    const char *path = test_path;
+    int wfd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (wfd < 0) {
+        fprintf(stderr, "write open failed: %s\n", strerror(errno));
+        _exit(1);
+    }
+    write(wfd, "test", 4);
+    close(wfd);
+
+    int rfd = open(path, O_RDONLY);
+    if (rfd < 0) {
+        fprintf(stderr, "read open failed: %s\n", strerror(errno));
+        _exit(1);
+    }
+    close(rfd);
+
+    unlink(path);
+    _exit(0);
+}
+
+static void test_seatbelt_allow(void)
+{
+    printf("\n=== Seatbelt allows permitted paths ===\n");
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        fail("fork failed");
+        return;
+    }
+
+    if (pid == 0)
+        test_seatbelt_allow_child();
+
+    int status;
+    waitpid(pid, &status, 0);
+
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        pass("seatbelt allowed access to /tmp (permitted path)");
+    } else {
+        fail("seatbelt blocked access to /tmp (should be allowed)");
+    }
+}
+
+#endif /* HAS_SEATBELT */
+
 /* ── Main ─────────────────────────────────────────────────────────── */
 
 int main(void)
 {
+#if HAS_SEATBELT
+    test_seatbelt_deny();
+    test_seatbelt_allow();
+#else
     test_unveil();
     test_pledge();
     test_pledge_allowed();
+#endif
 
     int total = pass_count + fail_count;
     printf("\n%d/%d sandbox violation tests passed\n", pass_count, total);
@@ -356,7 +554,7 @@ int main(void)
 
 int main(void)
 {
-    printf("sandbox_violation: SKIPPED (requires Linux or Cosmopolitan)\n");
+    printf("sandbox_violation: SKIPPED (requires OpenBSD, Linux, macOS, or Cosmopolitan)\n");
     return 0;
 }
 

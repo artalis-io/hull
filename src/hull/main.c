@@ -167,6 +167,7 @@ static void usage(const char *prog)
             "  --skip-ca-bundle     Skip TLS certificate verification (dev mode)\n"
             "  --max-instructions N Set runtime instruction limit per request (default: 100m)\n"
             "  --audit              Enable capability audit logging (JSON to stderr)\n"
+            "  --no-sandbox         Disable kernel sandbox (dev/debug only)\n"
             "  -h                   Show this help\n"
             "\n"
             "Subcommands:\n"
@@ -217,6 +218,7 @@ static int hull_serve(int argc, char **argv)
     long instruction_limit = 0; /* 0 = use default */
     int log_level = LOG_INFO;
     int no_migrate = 0;
+    int no_sandbox = 0;
     int skip_ca_bundle = 0;
     int agent_mode = 0;
     int drain_timeout = HL_DEFAULT_DRAIN_TIMEOUT_MS;
@@ -269,6 +271,8 @@ static int hull_serve(int argc, char **argv)
             verify_sig_path = argv[++i];
         } else if (strcmp(argv[i], "--no-migrate") == 0) {
             no_migrate = 1;
+        } else if (strcmp(argv[i], "--no-sandbox") == 0) {
+            no_sandbox = 1;
         } else if (strcmp(argv[i], "--skip-ca-bundle") == 0) {
             skip_ca_bundle = 1;
         } else if (strcmp(argv[i], "--agent") == 0) {
@@ -536,10 +540,12 @@ static int hull_serve(int argc, char **argv)
     }
 
     /* Phase 1 sandbox: block exec/proc/fork before loading user code */
-    if (hl_sandbox_apply_pledge() != 0) {
-        log_error("[hull:c] failed to apply phase 1 sandbox");
-        rt->vt->destroy(rt);
-        goto cleanup_server;
+    if (!no_sandbox) {
+        if (hl_sandbox_apply_pledge() != 0) {
+            log_error("[hull:c] failed to apply phase 1 sandbox");
+            rt->vt->destroy(rt);
+            goto cleanup_server;
+        }
     }
 
     /* Load and evaluate the app (runs under phase 1 pledge) */
@@ -642,14 +648,18 @@ static int hull_serve(int argc, char **argv)
 
     /* RT-04: Apply kernel sandbox BEFORE wiring routes — all route
      * handlers execute inside sandbox constraints. */
-    if (hl_sandbox_apply(&manifest, app_dir, db_path, ca_bundle_path,
-                          tls_cert_path, tls_key_path) != 0) {
-        log_error("[hull:c] sandbox enforcement failed");
-        rt->vt->free_manifest_strings(rt, &manifest);
-        rt->vt->destroy(rt);
-        if (client_tls_ctx)
-            kl_tls_mbedtls_ctx_destroy(client_tls_ctx);
-        goto cleanup_server;
+    if (!no_sandbox) {
+        if (hl_sandbox_apply(&manifest, app_dir, db_path, ca_bundle_path,
+                              tls_cert_path, tls_key_path) != 0) {
+            log_error("[hull:c] sandbox enforcement failed");
+            rt->vt->free_manifest_strings(rt, &manifest);
+            rt->vt->destroy(rt);
+            if (client_tls_ctx)
+                kl_tls_mbedtls_ctx_destroy(client_tls_ctx);
+            goto cleanup_server;
+        }
+    } else {
+        log_warn("[hull:c] kernel sandbox disabled (--no-sandbox)");
     }
 
     /* Wire routes into Keel (after sandbox is applied) */

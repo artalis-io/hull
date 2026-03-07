@@ -102,15 +102,23 @@ WORKDIR=$(mktemp -d)
 # Detect platform capabilities
 UNAME_S=$(uname -s)
 SANDBOX_EXPECTED=0
+SANDBOX_TYPE=""
 if [ "$UNAME_S" = "Linux" ]; then
     SANDBOX_EXPECTED=1
+    SANDBOX_TYPE="pledge"
+elif [ "$UNAME_S" = "Darwin" ]; then
+    SANDBOX_EXPECTED=1
+    SANDBOX_TYPE="seatbelt"
+elif [ "$UNAME_S" = "OpenBSD" ]; then
+    SANDBOX_EXPECTED=1
+    SANDBOX_TYPE="pledge"
 fi
 # Cosmopolitan binaries report Linux on Linux, so check if hull was built
 # with cosmocc by looking for the APE magic or platform_cc marker
 if [ -f "$BUILDDIR/platform_cc" ]; then
     PLATFORM_CC=$(cat "$BUILDDIR/platform_cc" 2>/dev/null)
     case "$PLATFORM_CC" in
-        *cosmocc*) SANDBOX_EXPECTED=1 ;;
+        *cosmocc*) SANDBOX_EXPECTED=1; SANDBOX_TYPE="pledge" ;;
     esac
 fi
 
@@ -151,8 +159,13 @@ if wait_for_server 19880; then
 
     if [ "$SANDBOX_EXPECTED" = "1" ]; then
         check_contains "sandbox applied log" "$LOG" "[sandbox] applied"
-        check_contains "sandbox mentions pledge" "$LOG" "pledge:"
-        check_contains "sandbox dns promise (hosts declared)" "$LOG" "dns"
+        if [ "$SANDBOX_TYPE" = "seatbelt" ]; then
+            check_contains "sandbox mentions seatbelt" "$LOG" "seatbelt:"
+            check_contains "sandbox network-outbound (hosts declared)" "$LOG" "network-outbound"
+        else
+            check_contains "sandbox mentions pledge" "$LOG" "pledge:"
+            check_contains "sandbox dns promise (hosts declared)" "$LOG" "dns"
+        fi
     else
         check_contains "sandbox not available log" "$LOG" "kernel sandbox not available"
     fi
@@ -189,7 +202,11 @@ if wait_for_server 19881; then
     LOG2=$(cat "$LOGFILE2")
     if [ "$SANDBOX_EXPECTED" = "1" ]; then
         check_contains "sandbox applied (no manifest)" "$LOG2" "[sandbox] applied"
-        check_not_contains "no dns without manifest" "$LOG2" " dns"
+        if [ "$SANDBOX_TYPE" = "seatbelt" ]; then
+            check_not_contains "no network-outbound without manifest" "$LOG2" "network-outbound"
+        else
+            check_not_contains "no dns without manifest" "$LOG2" " dns"
+        fi
     else
         check_contains "sandbox not available log" "$LOG2" "kernel sandbox not available"
     fi
@@ -228,7 +245,11 @@ if wait_for_server 19882; then
     LOG3=$(cat "$LOGFILE3")
     if [ "$SANDBOX_EXPECTED" = "1" ]; then
         check_contains "sandbox applied (no hosts)" "$LOG3" "[sandbox] applied"
-        check_not_contains "no dns promise without hosts" "$LOG3" " dns"
+        if [ "$SANDBOX_TYPE" = "seatbelt" ]; then
+            check_not_contains "no network-outbound without hosts" "$LOG3" "network-outbound"
+        else
+            check_not_contains "no dns promise without hosts" "$LOG3" " dns"
+        fi
     else
         skip "dns promise check — no kernel sandbox on this platform"
     fi
@@ -274,8 +295,13 @@ if wait_for_server 19883; then
 
     if [ "$SANDBOX_EXPECTED" = "1" ]; then
         check_contains "JS sandbox applied log" "$LOG4" "[sandbox] applied"
-        check_contains "JS sandbox mentions pledge" "$LOG4" "pledge:"
-        check_contains "JS sandbox dns promise (hosts declared)" "$LOG4" "dns"
+        if [ "$SANDBOX_TYPE" = "seatbelt" ]; then
+            check_contains "JS sandbox mentions seatbelt" "$LOG4" "seatbelt:"
+            check_contains "JS sandbox network-outbound (hosts declared)" "$LOG4" "network-outbound"
+        else
+            check_contains "JS sandbox mentions pledge" "$LOG4" "pledge:"
+            check_contains "JS sandbox dns promise (hosts declared)" "$LOG4" "dns"
+        fi
     else
         check_contains "JS sandbox not available log" "$LOG4" "kernel sandbox not available"
     fi
@@ -299,11 +325,19 @@ if wait_for_server 19884; then
     LOG5=$(cat "$LOGFILE5")
 
     if [ "$SANDBOX_EXPECTED" = "1" ]; then
-        check_contains "phase 1 pledge log" "$LOG5" "phase 1 pledge applied"
+        if [ "$SANDBOX_TYPE" = "seatbelt" ]; then
+            check_contains "phase 1 skipped log" "$LOG5" "phase 1 skipped"
+        else
+            check_contains "phase 1 pledge log" "$LOG5" "phase 1 pledge applied"
+        fi
         check_contains "phase 2 sandbox log" "$LOG5" "[sandbox] applied"
 
-        # Verify phase 1 appears before phase 2 (line-number ordering)
-        P1_LINE=$(grep -n "phase 1 pledge applied" "$LOGFILE5" | head -1 | cut -d: -f1)
+        # Verify phase 1 log appears before phase 2 (line-number ordering)
+        if [ "$SANDBOX_TYPE" = "seatbelt" ]; then
+            P1_LINE=$(grep -n "phase 1 skipped" "$LOGFILE5" | head -1 | cut -d: -f1)
+        else
+            P1_LINE=$(grep -n "phase 1 pledge applied" "$LOGFILE5" | head -1 | cut -d: -f1)
+        fi
         P2_LINE=$(grep -n "\[sandbox\] applied" "$LOGFILE5" | head -1 | cut -d: -f1)
         if [ -n "$P1_LINE" ] && [ -n "$P2_LINE" ] && [ "$P1_LINE" -lt "$P2_LINE" ]; then
             pass "phase 1 before phase 2 (line $P1_LINE < $P2_LINE)"
@@ -321,10 +355,10 @@ fi
 # ── Test 6: Kernel enforcement (Linux only) ──────────────────────────
 
 echo ""
-echo "=== Test 6: Kernel enforcement (pledge/unveil violations) ==="
+echo "=== Test 6: Kernel enforcement (sandbox violations) ==="
 
-if [ "$UNAME_S" != "Linux" ]; then
-    skip "kernel enforcement test — Linux only"
+if [ "$UNAME_S" != "Linux" ] && [ "$UNAME_S" != "Darwin" ] && [ "$UNAME_S" != "OpenBSD" ]; then
+    skip "kernel enforcement test — Linux/macOS/OpenBSD only"
 elif [ ! -f "$SRCDIR/tests/sandbox_violation.c" ]; then
     fail "sandbox_violation.c not found"
 else
@@ -352,6 +386,26 @@ else
         else
             COMPILE_ERR=$(cat "$WORKDIR/compile.log")
             fail "sandbox_violation.c compilation failed (cosmocc): $COMPILE_ERR"
+        fi
+    elif [ "$UNAME_S" = "Darwin" ]; then
+        # macOS: link against system sandbox framework
+        if $CC -std=c11 -O2 -o "$SANDBOX_TEST" \
+                "$SRCDIR/tests/sandbox_violation.c" 2>"$WORKDIR/compile.log"; then
+            pass "sandbox_violation.c compiled (macOS)"
+            COMPILE_OK=1
+        else
+            COMPILE_ERR=$(cat "$WORKDIR/compile.log")
+            fail "sandbox_violation.c compilation failed (macOS): $COMPILE_ERR"
+        fi
+    elif [ "$UNAME_S" = "OpenBSD" ]; then
+        # OpenBSD: pledge/unveil are native — no extra libs needed
+        if $CC -std=c11 -O2 -o "$SANDBOX_TEST" \
+                "$SRCDIR/tests/sandbox_violation.c" 2>"$WORKDIR/compile.log"; then
+            pass "sandbox_violation.c compiled (OpenBSD)"
+            COMPILE_OK=1
+        else
+            COMPILE_ERR=$(cat "$WORKDIR/compile.log")
+            fail "sandbox_violation.c compilation failed (OpenBSD): $COMPILE_ERR"
         fi
     else
         # Native Linux: link against pledge polyfill objects
