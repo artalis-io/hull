@@ -6,7 +6,8 @@
 #   2. Hull without manifest — default-deny sandbox still applied
 #   3. Manifest without hosts — no dns promise
 #   4. JS manifest app — sandbox applied (feature parity)
-#   5. Kernel enforcement: pledge/unveil violations blocked (Linux only)
+#   5. Phase 1 pledge — applied before load_app, before phase 2
+#   6. Kernel enforcement: pledge/unveil violations blocked (Linux only)
 #
 # Usage: sh tests/e2e_sandbox.sh
 #        make e2e-sandbox
@@ -283,10 +284,44 @@ else
     fail "hull did not start with JS manifest app"
 fi
 
-# ── Test 5: Kernel enforcement (Linux only) ──────────────────────────
+# ── Test 5: Phase 1 pledge — log appears before load_app ──────────────
 
 echo ""
-echo "=== Test 5: Kernel enforcement (pledge/unveil violations) ==="
+echo "=== Test 5: Phase 1 pledge — applied before load_app ==="
+
+LOGFILE5="$WORKDIR/hull_phase1.log"
+"$HULL" -p 19884 -d "$WORKDIR/test5.db" "$WORKDIR/app.lua" >"$LOGFILE5" 2>&1 &
+SERVER_PID=$!
+
+if wait_for_server 19884; then
+    stop_server
+
+    LOG5=$(cat "$LOGFILE5")
+
+    if [ "$SANDBOX_EXPECTED" = "1" ]; then
+        check_contains "phase 1 pledge log" "$LOG5" "phase 1 pledge applied"
+        check_contains "phase 2 sandbox log" "$LOG5" "[sandbox] applied"
+
+        # Verify phase 1 appears before phase 2 (line-number ordering)
+        P1_LINE=$(grep -n "phase 1 pledge applied" "$LOGFILE5" | head -1 | cut -d: -f1)
+        P2_LINE=$(grep -n "\[sandbox\] applied" "$LOGFILE5" | head -1 | cut -d: -f1)
+        if [ -n "$P1_LINE" ] && [ -n "$P2_LINE" ] && [ "$P1_LINE" -lt "$P2_LINE" ]; then
+            pass "phase 1 before phase 2 (line $P1_LINE < $P2_LINE)"
+        else
+            fail "phase 1 should appear before phase 2 (got $P1_LINE vs $P2_LINE)"
+        fi
+    else
+        check_contains "phase 1 not available log" "$LOG5" "kernel sandbox not available"
+    fi
+else
+    stop_server
+    fail "hull did not start for phase 1 test"
+fi
+
+# ── Test 6: Kernel enforcement (Linux only) ──────────────────────────
+
+echo ""
+echo "=== Test 6: Kernel enforcement (pledge/unveil violations) ==="
 
 if [ "$UNAME_S" != "Linux" ]; then
     skip "kernel enforcement test — Linux only"

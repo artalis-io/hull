@@ -61,6 +61,28 @@ static int sb_supported(void) { return 0; }
 
 #endif /* platform dispatch */
 
+/* ── Phase 1: pre-load pledge ──────────────────────────────────────── */
+
+int hl_sandbox_apply_pledge(void)
+{
+    if (!sb_supported()) {
+        log_info("[sandbox] kernel sandbox not available on this platform");
+        return 0;
+    }
+
+#ifdef __linux__
+    __pledge_mode = 0x0001 | 0x0010; /* KILL_PROCESS | STDERR_LOGGING */
+#endif
+
+    if (pledge("stdio inet rpath wpath cpath flock dns unveil", NULL) != 0) {
+        log_error("[sandbox] phase 1 pledge failed");
+        return -1;
+    }
+
+    log_info("[sandbox] phase 1 pledge applied (exec/proc/fork blocked)");
+    return 0;
+}
+
 /* ── Tool-mode sandbox ─────────────────────────────────────────────── */
 
 int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,

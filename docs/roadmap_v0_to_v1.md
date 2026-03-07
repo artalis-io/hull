@@ -160,13 +160,14 @@ VFS init → detect runtime → open SQLite → PRAGMA journal_mode=WAL
 
 > Completed in `6bf5581` — `hl_cap_db_check_namespace()` blocks user SQL referencing `_hull_*` tables. Uses call-stack inspection (Lua `lua_getinfo` / JS `JS_GetScriptOrModuleName`) so stdlib transparently bypasses — no internal API exposed. Also renamed `hull_sessions` → `_hull_sessions` for consistency.
 
-### Milestone 6: Pre-Load Sandbox (1-2 days)
+### Milestone 6: Pre-Load Sandbox (1-2 days) ✅ DONE
 
 **Apply minimal sandbox before `load_app()`:**
-- `src/hull/main.c:~580` — Before `load_app()`, apply a "load phase" pledge/unveil that allows:
-  - `stdio rpath` (read app files, no network, no exec, no write)
-- After manifest extraction, upgrade to full runtime pledge
-- Requires splitting `hl_sandbox_apply()` into two phases: `hl_sandbox_apply_load()` and `hl_sandbox_apply_run()`
+- Two-phase sandbox: `hl_sandbox_apply_pledge()` (phase 1) before `load_app()`, existing `hl_sandbox_apply()` (phase 2) after manifest extraction
+- Phase 1 pledges `stdio inet rpath wpath cpath flock dns` — blocks `exec`, `proc`, `fork` during module loading
+- Phase 2 unchanged: unveils manifest-derived paths, seals filesystem, optionally narrows pledge
+
+> Completed — `hl_sandbox_apply_pledge()` in `sandbox.c`, called from `main.c` before `load_app()`. E2E test verifies phase ordering.
 
 ---
 
