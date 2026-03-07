@@ -27,9 +27,11 @@
   - `tool.c` — `tool.exec()` for subprocess invocation (manifest-gated)
 - **Manifest layer** — `app.manifest({env, hosts, fs_read, fs_write, smtp, tools})` declared in user code; extracted post-load; configures capability gates
 - **Sandbox layer** — OS-level confinement (`src/hull/sandbox.c`):
+  - **OpenBSD:** native `pledge()` + `unveil()`
   - **Linux:** seccomp-bpf (via jart/pledge polyfill) + Landlock (via unveil polyfill)
-  - **Cosmopolitan:** native `pledge()` + `unveil()`
-  - **macOS/other:** **no-op stubs** — zero kernel enforcement
+  - **Cosmopolitan:** native `pledge()` + `unveil()` (built into cosmo libc)
+  - **macOS:** Seatbelt (`sandbox_init_with_parameters`)
+  - **other:** no-op stubs (C-level cap validation only)
 - **Server layer** — Keel (`vendor/keel/`) — epoll/kqueue/poll HTTP server with connection pool, router, TLS vtable, two-phase middleware
 
 **Lifecycle (main.c):**
@@ -144,12 +146,14 @@ VFS init → detect runtime → open SQLite → PRAGMA journal_mode=WAL
 
 > Completed in `7dcab16` — Lua uses `lua_sethook(LUA_MASKCOUNT)`, JS uses `JS_SetInterruptHandler`. Unified 100M default, configurable via `--max-instructions N` or `HULL_MAX_INSTRUCTIONS` env var.
 
-### Milestone 4: macOS Sandbox (2-3 days)
+### Milestone 4: macOS Sandbox (2-3 days) ✅ DONE
 
 **Implement `sandbox_init(2)` backend:**
 - `src/hull/sandbox.c` — Replace macOS no-op with Seatbelt profile
 - Profile: deny default, allow network (inet), allow file reads for app_dir + unveiled paths, allow file writes for DB + fs_write paths
-- Fallback: if `sandbox_init` unavailable, log warning (not silent no-op)
+- `--no-sandbox` flag for development/debugging escape hatch
+
+> Completed — `sandbox_init_with_parameters()` applies dynamic SBPL profile built from manifest. Path values passed via parameter substitution. Phase 1 is a no-op on macOS (sandbox_init is irreversible). E2E tests and sandbox_violation tests extended for macOS.
 
 ### Milestone 5: DB Namespace Protection (1 day) ✅ DONE
 

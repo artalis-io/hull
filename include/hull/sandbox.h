@@ -7,9 +7,11 @@
  * the manifest declares.
  *
  * Platform support:
+ *   OpenBSD      — native pledge + unveil
  *   Cosmopolitan — pledge + unveil (built-in)
- *   Linux 5.13+  — Landlock (unveil), seccomp future
- *   macOS/other  — no-op (C-level cap validation is the defense)
+ *   Linux 5.13+  — Landlock (unveil), seccomp-bpf (pledge)
+ *   macOS        — Seatbelt (sandbox_init_with_parameters)
+ *   other        — no-op (C-level cap validation is the defense)
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
