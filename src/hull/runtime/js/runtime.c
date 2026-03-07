@@ -45,6 +45,11 @@ int hl_js_init_log_module(JSContext *ctx, HlJS *js);
 int hl_js_init_smtp_module(JSContext *ctx, HlJS *js);
 int hl_js_init_template_module(JSContext *ctx, HlJS *js);
 
+/* ── Forward declarations for binding helpers (defined in bindings.c) ─ */
+
+JSValue hl_js_make_request(JSContext *ctx, KlRequest *req);
+JSValue hl_js_make_response(HlJS *js, KlResponse *res);
+
 /* ── Interrupt handler (gas metering) ───────────────────────────────── */
 
 static int hl_js_interrupt_handler(JSRuntime *rt, void *opaque)
@@ -318,7 +323,9 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
     }
     buf[nread] = '\0';
 
-    /* JSON file → wrap as: export default JSON.parse(`...`) */
+    /* JSON file → wrap as: export default JSON.parse(`...`)
+     * Escape \, ` and ${ so the template literal passes the original
+     * JSON bytes through to JSON.parse (same logic as embedded path). */
     size_t mname_len = strlen(module_name);
     if (mname_len >= 5 &&
         strcmp(module_name + mname_len - 5, ".json") == 0) {
@@ -326,15 +333,39 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
         const char *suffix = "`);\n";
         size_t prefix_len = strlen(prefix);
         size_t suffix_len = strlen(suffix);
-        size_t wrap_len = prefix_len + nread + suffix_len;
+
+        /* Count chars that need a backslash prefix */
+        size_t extra = 0;
+        for (size_t k = 0; k < nread; k++) {
+            if (buf[k] == '\\' || buf[k] == '`')
+                extra++;
+            else if (buf[k] == '$' && k + 1 < nread && buf[k + 1] == '{')
+                extra++;
+        }
+
+        size_t wrap_len = prefix_len + nread + extra + suffix_len;
         char *wrap = js_malloc(ctx, wrap_len + 1);
         if (!wrap) { js_free(ctx, buf); return NULL; }
         memcpy(wrap, prefix, prefix_len);
-        memcpy(wrap + prefix_len, buf, nread);
-        memcpy(wrap + prefix_len + nread, suffix, suffix_len + 1);
+
+        size_t pos = prefix_len;
+        for (size_t k = 0; k < nread; k++) {
+            if (buf[k] == '\\' || buf[k] == '`') {
+                wrap[pos++] = '\\';
+                wrap[pos++] = buf[k];
+            } else if (buf[k] == '$' && k + 1 < nread &&
+                       buf[k + 1] == '{') {
+                wrap[pos++] = '\\';
+                wrap[pos++] = '$';
+            } else {
+                wrap[pos++] = buf[k];
+            }
+        }
+
+        memcpy(wrap + pos, suffix, suffix_len + 1);
         js_free(ctx, buf);
         buf = wrap;
-        nread = wrap_len;
+        nread = pos + suffix_len;
     }
 
     /* Compile as module */
@@ -757,10 +788,6 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     }
 
     /* Build JS request and response objects */
-    /* These are created by js_bindings.c functions */
-    extern JSValue hl_js_make_request(JSContext *ctx, KlRequest *req);
-    extern JSValue hl_js_make_response(HlJS *js, KlResponse *res);
-
     JSValue js_req = hl_js_make_request(js->ctx, req);
     JSValue js_res = hl_js_make_response(js, res);
 
@@ -1063,9 +1090,6 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
     }
 
     /* Build JS request and response objects */
-    extern JSValue hl_js_make_request(JSContext *ctx, KlRequest *req);
-    extern JSValue hl_js_make_response(HlJS *js, KlResponse *res);
-
     JSValue js_req = hl_js_make_request(js->ctx, req);
     JSValue js_res = hl_js_make_response(js, res);
 
