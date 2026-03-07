@@ -60,7 +60,7 @@ VFS init → detect runtime → open SQLite → PRAGMA journal_mode=WAL
 | **R7** | **Medium** | No audit log for capability use | All `cap/*.c` | No structured logging when `env.get()`, `http.fetch()`, `fs.read()`, `db.exec()` are called; impossible to reconstruct what a tool did post-incident. **Resolved:** all cap modules instrumented with structured JSON audit logging (M2). |
 | **R8** | **Medium** | Outbox delivers outside transaction | `stdlib/lua/hull/middleware/outbox.lua` | `outbox.flush()` is called after `db.batch()` commits — delivery failures after commit leave inconsistent state (mitigated by retry, but not transactional). **Documented:** module header describes post-commit best-effort delivery model. |
 | **R9** | **Medium** | Session secret is static default | `stdlib/lua/hull/middleware/session.lua` | Falls back to `"hull-session-secret-change-me"` if no env var; same across all instances |
-| **R10** | **Medium** | No request-size limit in Keel | `vendor/keel/` | Body size limit is per-route via `KlBufReader.max_size`, but no global default; routes without explicit body readers accept unbounded bodies |
+| **R10** | **Resolved** | No request-size limit in Keel | `vendor/keel/` | `KlConfig.max_body_size` enforces a server-wide limit on the discard path (default 1 MB). Routes with body readers control their own limits via `max_size`. |
 
 ---
 
