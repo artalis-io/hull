@@ -21,7 +21,16 @@
 #include "hull/cap/tool.h"
 
 /*
- * Apply kernel sandbox based on manifest capabilities.
+ * Phase 1: pledge-only sandbox (no unveil) — blocks exec/proc/fork.
+ * Call before load_app() to limit syscalls during module loading.
+ * On unsupported platforms, logs a warning and returns 0.
+ *
+ * Returns 0 on success, -1 on error (logged).
+ */
+int hl_sandbox_apply_pledge(void);
+
+/*
+ * Phase 2: full sandbox based on manifest capabilities.
  *
  *   manifest       — declared capabilities (may have present==0)
  *   app_dir        — application directory (always unveiled read-only)

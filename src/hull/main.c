@@ -535,7 +535,14 @@ static int hull_serve(int argc, char **argv)
         log_info("[hull:c] signature verified OK");
     }
 
-    /* Load and evaluate the app */
+    /* Phase 1 sandbox: block exec/proc/fork before loading user code */
+    if (hl_sandbox_apply_pledge() != 0) {
+        log_error("[hull:c] failed to apply phase 1 sandbox");
+        rt->vt->destroy(rt);
+        goto cleanup_server;
+    }
+
+    /* Load and evaluate the app (runs under phase 1 pledge) */
     if (rt->vt->load_app(rt, entry_point) != 0) {
         log_error("[hull:c] failed to load %s", entry_point);
         if (agent_mode) {

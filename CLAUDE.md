@@ -259,13 +259,17 @@ The Cosmo CI job in `.github/workflows/ci.yml`:
 
 ### Manifest & Sandbox
 
-Apps declare capabilities via `app.manifest()`. After extraction, `hl_sandbox_apply()` in `sandbox.c`:
+Two-phase sandbox in `sandbox.c`:
+
+**Phase 1** — `hl_sandbox_apply_pledge()`: Called before `load_app()`. Pledges `stdio inet rpath wpath cpath flock dns unveil` — blocks `exec`, `proc`, `fork` during module loading. No unveil calls yet (manifest paths unknown), but the `unveil` promise is retained so phase 2 can call `unveil()`.
+
+**Phase 2** — `hl_sandbox_apply()`: Called after manifest extraction. Unveils specific paths, seals filesystem, optionally narrows pledge (removes `dns` if no outbound HTTP).
 1. `unveil(path, "r")` for each `fs.read` path
 2. `unveil(path, "rwc")` for each `fs.write` path
 3. `unveil(NULL, NULL)` — seal (no more paths)
 4. `pledge("stdio inet rpath wpath cpath flock [dns]")` — syscall filter
 
-Violation = SIGKILL on Linux/Cosmo. No-op on macOS (C-level validation only).
+Phase 1 promises are a superset of phase 2 (pledge can only narrow). Violation = SIGKILL on Linux/Cosmo. No-op on macOS (C-level validation only).
 
 ### Capability Enforcement Invariants
 
