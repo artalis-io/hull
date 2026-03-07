@@ -1,12 +1,16 @@
 # Hull
 
-Agent-native, local-first application platform. Single binary, zero dependencies, runs anywhere.
+A secure, capability-limited runtime for agent-native, local-first applications. Single binary, zero dependencies, runs anywhere.
+
+Hull is not a do-everything framework. It's a sandboxed runtime where AI-generated code runs inside declared capability boundaries — the app states what it can access (files, hosts, env vars), and the kernel enforces it. The agent writes the code; Hull constrains what that code can do.
 
 Write backend logic in Lua or JavaScript, frontend in HTML5, data in SQLite. `hull build` produces a single portable executable — under 2 MB — that runs on Linux, macOS, Windows, FreeBSD, OpenBSD, and NetBSD. AI coding agents get structured JSON access to routes, schema, tests, and HTTP responses through the built-in `hull agent` command — no plugins, no MCP servers, no configuration.
 
 ## Why
 
-AI coding agents solved code generation. But the output is always the same: a React frontend, a Node.js backend, a Postgres database, and a cloud deployment problem. Hull is the missing piece. The agent writes Lua, `hull build` produces a single file. That file is the product. No cloud. No hosting. No dependencies.
+AI coding agents solved code generation. But they created two new problems: **deployment** (the output is always React + Node + Postgres + cloud) and **trust** (who verifies what AI-generated code actually does?).
+
+Hull solves both. The agent writes Lua or JavaScript, `hull build` produces a single file. That file is the product — no cloud, no hosting, no dependencies. And because Hull apps declare their capabilities in a manifest enforced by the kernel, the user knows exactly what the app can touch. In a world where AI writes the code, the runtime must be the trust boundary. Hull is that boundary.
 
 Six vendored C libraries. One build command. One file. That's the entire stack. Works out of the box with [Claude Code](#claude-code), [Codex CLI](#openai-codex-cli), [OpenCode](#opencode), and any agent that can run shell commands.
 
