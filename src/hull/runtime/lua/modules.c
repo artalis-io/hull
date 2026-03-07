@@ -718,6 +718,9 @@ static int lua_crypto_hash_password(lua_State *L)
     snprintf(result, sizeof(result), "pbkdf2:%d:%s:%s",
              iterations, salt_hex, hash_hex);
 
+    secure_zero(hash, sizeof(hash));
+    secure_zero(salt, sizeof(salt));
+
     lua_pushstring(L, result);
     return 1;
 }
@@ -805,6 +808,10 @@ static int lua_crypto_verify_password(lua_State *L)
     volatile uint8_t diff = 0;
     for (int i = 0; i < 32; i++)
         diff |= computed[i] ^ stored_hash[i];
+
+    secure_zero(computed, sizeof(computed));
+    secure_zero(stored_hash, sizeof(stored_hash));
+    secure_zero(salt, sizeof(salt));
 
     lua_pushboolean(L, diff == 0);
     return 1;

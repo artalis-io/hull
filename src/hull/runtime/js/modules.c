@@ -938,6 +938,9 @@ static JSValue js_crypto_hash_password(JSContext *ctx, JSValueConst this_val,
     snprintf(result, sizeof(result), "pbkdf2:%d:%s:%s",
              iterations, salt_hex, hash_hex);
 
+    secure_zero(hash, sizeof(hash));
+    secure_zero(salt, sizeof(salt));
+
     return JS_NewString(ctx, result);
 }
 
@@ -1028,6 +1031,10 @@ static JSValue js_crypto_verify_password(JSContext *ctx, JSValueConst this_val,
     volatile uint8_t diff = 0;
     for (int i = 0; i < 32; i++)
         diff |= computed[i] ^ stored_hash[i];
+
+    secure_zero(computed, sizeof(computed));
+    secure_zero(stored_hash, sizeof(stored_hash));
+    secure_zero(salt, sizeof(salt));
 
     return diff == 0 ? JS_TRUE : JS_FALSE;
 }
