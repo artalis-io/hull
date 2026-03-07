@@ -56,10 +56,10 @@ VFS init → detect runtime → open SQLite → PRAGMA journal_mode=WAL
 | **R3** | **High** | `load_app()` runs pre-sandbox | `main.c:~580` | User code executes during module load with no pledge/unveil; Lua `os.execute` is removed but JS `import()` could potentially load before sandbox. **Resolved:** phase 1 pledge applied before `load_app()` blocks exec/proc/fork during module loading (M6). |
 | **R4** | **High** | No memory/CPU limits (Lua) | `runtime/lua/runtime.c` | Lua runtime has a custom allocator with `max_memory` but no instruction-count gas metering (JS has it via `JS_SetInterruptHandler`); infinite loops in Lua block the server. **Resolved:** `lua_sethook(LUA_MASKCOUNT)` with 100M instruction limit, configurable via `--max-instructions` (M3). |
 | **R5** | **High** | DB is a single shared handle | `cap/db.c`, `main.c` | All requests share one `hl_db` SQLite handle; no per-tenant isolation; a malicious app can `DROP TABLE` any Hull internal table (`_hull_*`). **Mitigated:** `hl_cap_db_check_namespace()` blocks user SQL referencing `_hull_*` tables; stdlib bypasses via call-stack inspection (M5). |
-| **R6** | **High** | `tool.exec()` grants shell access | `cap/tool.c` | Subprocess execution — even with manifest gating — is an escape hatch from the capability model; command injection if args aren't sanitized. **Mitigated:** allowlist rejects non-versioned suffixes; dangerous compiler flags (`-load`, `-fplugin`, `-Xlinker`, `-Wl,`, `@`) blocked; Lua argv type-validated; audit logs full argv. |
-| **R7** | **Medium** | No audit log for capability use | All `cap/*.c` | No structured logging when `env.get()`, `http.fetch()`, `fs.read()`, `db.exec()` are called; impossible to reconstruct what a tool did post-incident. **Resolved:** all cap modules instrumented with structured JSON audit logging (M2). |
+| **R6** | **Resolved** | `tool.exec()` grants shell access | `cap/tool.c` | Subprocess execution — even with manifest gating — is an escape hatch from the capability model; command injection if args aren't sanitized. **Resolved:** allowlist rejects non-versioned suffixes; dangerous compiler flags (`-load`, `-fplugin`, `-Xlinker`, `-Wl,`, `@`) blocked; Lua argv type-validated; audit logs full argv. |
+| **R7** | **Resolved** | No audit log for capability use | All `cap/*.c` | No structured logging when `env.get()`, `http.fetch()`, `fs.read()`, `db.exec()` are called; impossible to reconstruct what a tool did post-incident. **Resolved:** all cap modules instrumented with structured JSON audit logging (M2). |
 | **R8** | **Medium** | Outbox delivers outside transaction | `stdlib/lua/hull/middleware/outbox.lua` | `outbox.flush()` is called after `db.batch()` commits — delivery failures after commit leave inconsistent state (mitigated by retry, but not transactional). **Documented:** module header describes post-commit best-effort delivery model. |
-| **R9** | **Medium** | Session secret is static default | `stdlib/lua/hull/middleware/session.lua` | Falls back to `"hull-session-secret-change-me"` if no env var; same across all instances |
+| **R9** | **Resolved** | Session secret is static default | `stdlib/lua/hull/middleware/session.lua` | Not applicable: session middleware uses 64-char cryptographic random IDs (no shared secret). CSRF middleware requires an explicit `opts.secret` — errors if missing. "change-me" strings exist only in example apps. |
 | **R10** | **Resolved** | No request-size limit in Keel | `vendor/keel/` | `KlConfig.max_body_size` enforces a server-wide limit on the discard path (default 1 MB). Routes with body readers control their own limits via `max_size`. |
 
 ---
@@ -251,7 +251,7 @@ hl_sandbox_apply_run(&sandbox_cfg);  // full runtime sandbox
 
 **`stdlib/lua/hull/middleware/outbox.lua`** — ~~Document that delivery is best-effort post-commit~~ **Done.** Module header documents post-commit, best-effort delivery model. `flush_sync()` variant remains a future consideration.
 
-**`stdlib/lua/hull/middleware/session.lua`** / **`stdlib/js/hull/middleware/session.js`** — Reject default secret in production mode
+**`stdlib/lua/hull/middleware/session.lua`** / **`stdlib/js/hull/middleware/session.js`** — ~~Reject default secret in production mode~~ **N/A.** Session middleware uses cryptographic random IDs, not a shared secret. CSRF middleware requires explicit `opts.secret`.
 
 ---
 
