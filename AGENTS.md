@@ -1,6 +1,6 @@
 # Hull — Agent Development Guide
 
-Hull treats AI coding agents as first-class development tools. This document covers everything an agent needs to build, test, debug, and deploy Hull applications.
+Hull is a capability-secure, local-first runtime for programmable tools and workflows. It provides structured JSON interfaces for AI coding agents, but also works for human developers and automated services. This document covers everything an agent needs to build, test, debug, and deploy Hull applications.
 
 ## Quick Start
 
@@ -39,6 +39,8 @@ Keel HTTP Server (C)          # epoll/kqueue event loop
         ↓
 Kernel Sandbox                # pledge+unveil (Linux), C-level (macOS)
 ```
+
+WASM compute plugins (planned) will add a data-plane layer for CPU-intensive computation. See `docs/wamr_architecture.md`.
 
 Each app is a single file (`app.lua` or `app.js`) with optional:
 - `migrations/*.sql` — database schema (auto-run on startup)
@@ -415,6 +417,9 @@ Undeclared capabilities are blocked. An empty manifest `{}` means no filesystem,
 | `template` | `require("hull.template")` | `import { template } from "hull:template"` | HTML templates |
 | `form` | `require("hull.form")` | `import { form } from "hull:form"` | Form parsing |
 | `cookie` | `require("hull.cookie")` | `import { cookie } from "hull:cookie"` | Cookie helpers |
+| `csv` | `require("hull.csv")` | `import { csv } from "hull:csv"` | CSV parse/encode (RFC 4180) |
+| `search` | `require("hull.search")` | `import { search } from "hull:search"` | Full-text search (SQLite FTS5) |
+| `rbac` | `require("hull.middleware.rbac")` | `import { rbac } from "hull:middleware:rbac"` | Role-based access control |
 | `i18n` | `require("hull.i18n")` | `import { i18n } from "hull:i18n"` | Translations |
 
 ## Database API

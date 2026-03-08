@@ -84,6 +84,15 @@ Kernel Sandbox (pledge/unveil/seatbelt)  →  OS enforcement
 
 Each layer talks only to the one below it. Application code cannot bypass capabilities.
 
+### Orchestration vs Compute
+
+Hull separates control-plane orchestration from data-plane computation:
+
+- **Orchestration (Lua/JS):** Request handling, routing, middleware, database queries, template rendering. Runs in sandboxed Lua 5.4 or QuickJS interpreters with capability-mediated system access.
+- **Compute (WASM, planned):** CPU-intensive data processing (scoring, transformation, deduplication). Runs in WAMR's isolated linear memory with no I/O imports, gas-metered execution, and configurable memory caps. See `docs/wamr_architecture.md`.
+
+This separation means orchestration code has full capability access (mediated by the C layer), while compute plugins are pure functions with no side effects.
+
 ### Dual-Runtime Design
 
 Hull supports Lua 5.4 and QuickJS (ES2023). Only one is active per application — selected by entry point extension (`.lua` or `.js`). Both runtimes implement the same polymorphic vtable (`HlRuntimeVtable`) and call the same C capability functions.
@@ -370,6 +379,9 @@ Register with `app.use(method, pattern, mw)`:
 | `validate` | `hull.validate` | `hull:validate` | Declarative input validation with schema rules |
 | `form` | `hull.form` | `hull:form` | URL-encoded form body parsing |
 | `i18n` | `hull.i18n` | `hull:i18n` | Internationalization: locale detection, translations, formatting |
+| `csv` | `hull.csv` | `hull:csv` | CSV parse/encode (RFC 4180) |
+| `search` | `hull.search` | `hull:search` | Full-text search (SQLite FTS5) |
+| `rbac` | `hull.middleware.rbac` | `hull:middleware:rbac` | Role-based access control |
 | `json` | `hull.json` | (built-in) | JSON encode/decode |
 
 ### Module APIs
@@ -544,6 +556,35 @@ template.clearCache();                           // clear compiled function cach
 - **Includes:** `{% include "partials/nav.html" %}` inlines the partial's AST. Included templates share the same data context.
 - **Template directory:** Place templates in `app_dir/templates/`. Names are relative paths (e.g. `"pages/home.html"`, `"partials/nav.html"`, `"base.html"`).
 - **CSP nonce:** No engine magic needed. Pass nonce as data: `template.render("page.html", { csp_nonce = nonce })`, use `<script nonce="{{ csp_nonce }}">` in template.
+
+**csv.parse(text, opts?)** — Parse CSV text (RFC 4180).
+- `opts.headers` — first row is header; returns objects (default: `false`)
+- `opts.separator` — field delimiter (default: `","`)
+- Returns array of row arrays, or row objects if `headers = true`.
+
+**csv.encode(rows, opts?)** — Encode rows as CSV text.
+- `opts.headers` — rows are objects; emit header row (default: `false`)
+- `opts.separator` — field delimiter (default: `","`)
+- Returns CSV string.
+
+**search** — Full-text search backed by SQLite FTS5.
+- `search.create_index(name, columns, opts?)` — Create FTS5 virtual table.
+- `search.index(name, id, fields)` — Insert/replace document.
+- `search.remove(name, id)` — Delete document.
+- `search.query(name, query, opts?)` — Full-text search. Returns `{id, rank}` array.
+  - `opts.limit` (default: 20), `opts.offset` (default: 0)
+- `search.reindex(name, source_table, opts?)` — Bulk re-index from table.
+- `search.drop_index(name)` — Drop FTS5 table.
+
+**rbac** — Role-based access control backed by SQLite.
+- `rbac.init()` — creates `_hull_roles`, `_hull_permissions`, `_hull_role_permissions`, `_hull_user_roles` tables.
+- `rbac.define_role(name, permissions?)` — create role with optional permissions.
+- `rbac.assign(user_id, role)` / `rbac.revoke(user_id, role)` — manage user roles.
+- `rbac.roles(user_id)` → array of role names.
+- `rbac.has_role(user_id, role)` → boolean.
+- `rbac.has_permission(user_id, permission)` → boolean.
+- `rbac.require_role(role)` → middleware function (403 on denial).
+- `rbac.require_permission(perm)` → middleware function (403 on denial).
 
 ### Static File Serving
 
