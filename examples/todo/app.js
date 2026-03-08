@@ -381,9 +381,8 @@ app.get("/export", (req, res) => {
     }
 
     const out = csv.encode(todos, { headers: true });
-    res.header("Content-Type", "text/csv");
     res.header("Content-Disposition", "attachment; filename=\"todos.csv\"");
-    res.body(out);
+    res.text(out);
 });
 
 // ── Admin dashboard (RBAC-protected) ──────────────────────────────

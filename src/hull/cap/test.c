@@ -16,6 +16,8 @@
 #include <keel/allocator.h>
 #include <keel/body_reader.h>
 
+#include "hull/alloc.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,6 +44,7 @@ static int test_dispatch(KlRouter *router, const char *method,
                          const char *path, const char *body_data,
                          size_t body_len, const char **header_names,
                          const char **header_values, int num_headers,
+                         const char *ctx_json, HlAllocator *hl_alloc,
                          HlTestResult *result)
 {
     if (!router || !method || !path || !result) return -1;
@@ -118,6 +121,22 @@ static int test_dispatch(KlRouter *router, const char *method,
         fake_buf.cap = body_len;
         req.body_reader = &fake_buf.base;
         req.content_length = body_len;
+    }
+
+    /* Inject context if provided (parsed as JSON by Lua/JS bindings).
+     * The runtime dispatcher frees req.ctx using a tagged-allocation layout:
+     *   [size_t: alloc_sz][char[alloc_sz]: json\0]
+     * with req->ctx pointing past the size prefix. Allocate through the
+     * same tracked allocator the runtime uses for balanced accounting. */
+    if (ctx_json) {
+        size_t json_len = strlen(ctx_json);
+        size_t alloc_sz = json_len + 1;
+        size_t *block = hl_alloc_malloc(hl_alloc, sizeof(size_t) + alloc_sz);
+        if (block) {
+            block[0] = alloc_sz;
+            memcpy(block + 1, ctx_json, alloc_sz);
+            req.ctx = (char *)(block + 1);
+        }
     }
 
     /* Build response */
@@ -220,6 +239,7 @@ static int l_test_http(lua_State *L, const char *method)
     const char *header_names[KL_MAX_HEADERS];
     const char *header_values[KL_MAX_HEADERS];
     int num_headers = 0;
+    const char *ctx_json = NULL;
 
     if (lua_istable(L, 2)) {
         /* opts.body */
@@ -242,12 +262,40 @@ static int l_test_http(lua_State *L, const char *method)
             }
         }
         lua_pop(L, 1);
+
+        /* opts.ctx — JSON-encode to pass through as req.ctx.
+         * The encoded string must remain on the Lua stack (anchored)
+         * until after test_dispatch() returns. */
+        lua_getfield(L, 2, "ctx");
+        if (lua_istable(L, -1)) {
+            lua_getglobal(L, "json");
+            if (lua_istable(L, -1)) {
+                lua_getfield(L, -1, "encode");
+                lua_pushvalue(L, -3); /* push ctx table */
+                if (lua_pcall(L, 1, 1, 0) == LUA_OK && lua_isstring(L, -1)) {
+                    ctx_json = lua_tostring(L, -1);
+                    /* Stack: ... ctx_tbl, json_mod, json_str
+                     * Remove json_mod and ctx_tbl, leave json_str anchored */
+                    lua_remove(L, -2); /* remove json_mod */
+                    lua_remove(L, -2); /* remove ctx_tbl */
+                } else {
+                    lua_pop(L, 1); /* pop error */
+                    lua_pop(L, 1); /* pop json module */
+                    lua_pop(L, 1); /* pop ctx table */
+                }
+            } else {
+                lua_pop(L, 1); /* pop non-table json */
+                lua_pop(L, 1); /* pop ctx table */
+            }
+        } else {
+            lua_pop(L, 1); /* pop non-table opts.ctx */
+        }
     }
 
     HlTestResult result;
     if (test_dispatch(router, method, path, body_str, body_len,
                       header_names, header_values, num_headers,
-                      &result) != 0) {
+                      ctx_json, lua->base.alloc, &result) != 0) {
         return luaL_error(L, "test dispatch failed");
     }
 
@@ -539,6 +587,7 @@ static JSValue js_test_http(JSContext *ctx, const char *method,
     const char *header_names[KL_MAX_HEADERS];
     const char *header_values[KL_MAX_HEADERS];
     int num_headers = 0;
+    const char *ctx_json = NULL;
 
     /* Parse opts (arg 1) */
     if (argc >= 2 && JS_IsObject(argv[1])) {
@@ -567,13 +616,26 @@ static JSValue js_test_http(JSContext *ctx, const char *method,
             }
         }
         JS_FreeValue(ctx, hdrs_val);
+
+        /* opts.ctx — JSON-stringify to pass through as req.ctx */
+        JSValue ctx_val = JS_GetPropertyStr(ctx, argv[1], "ctx");
+        if (JS_IsObject(ctx_val)) {
+            JSValue json_val = JS_JSONStringify(ctx, ctx_val, JS_UNDEFINED, JS_UNDEFINED);
+            if (JS_IsString(json_val))
+                ctx_json = JS_ToCString(ctx, json_val);
+            JS_FreeValue(ctx, json_val);
+        }
+        JS_FreeValue(ctx, ctx_val);
     }
 
     HlTestResult result;
     int rc = test_dispatch(state->router, method, path, body_str, body_len,
-                           header_names, header_values, num_headers, &result);
+                           header_names, header_values, num_headers,
+                           ctx_json, state->js->base.alloc, &result);
 
     /* Free C strings */
+    // cppcheck-suppress knownConditionTrueFalse
+    if (ctx_json) JS_FreeCString(ctx, ctx_json);
     // cppcheck-suppress knownConditionTrueFalse
     if (body_str) JS_FreeCString(ctx, body_str);
     // cppcheck-suppress knownConditionTrueFalse

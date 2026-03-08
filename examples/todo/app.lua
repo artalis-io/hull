@@ -380,9 +380,8 @@ app.get("/export", function(req, res)
     end
 
     local out = csv.encode(todos, { headers = true })
-    res:header("Content-Type", "text/csv")
     res:header("Content-Disposition", "attachment; filename=\"todos.csv\"")
-    res:body(out)
+    res:text(out)
 end)
 
 -- ── Admin dashboard (RBAC-protected) ──────────────────────────────
