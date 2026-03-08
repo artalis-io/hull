@@ -13,7 +13,8 @@
         "tasks": "Tasks",
         "logout": "Logout",
         "login": "Login",
-        "register": "Register"
+        "register": "Register",
+        "admin": "Admin"
     },
     "index": {
         "title": "My Todos",
@@ -22,7 +23,12 @@
         "remaining": "remaining",
         "completed": "completed",
         "total": "total",
-        "empty": "No todos yet. Add one above!"
+        "empty": "No todos yet. Add one above!",
+        "search_placeholder": "Search todos...",
+        "search": "Search",
+        "clear_search": "Clear",
+        "export_csv": "Export CSV",
+        "no_results": "No matching todos found."
     },
     "login": {
         "title": "Login",
@@ -46,5 +52,15 @@
     "lang": {
         "en": "English",
         "hu": "Magyar"
+    },
+    "admin": {
+        "title": "Admin Dashboard",
+        "name": "Name",
+        "email": "Email",
+        "todos": "Todos",
+        "role": "Role",
+        "joined": "Joined",
+        "no_users": "No users yet.",
+        "total_users": "users total"
     }
 }

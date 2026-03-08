@@ -2,6 +2,9 @@
     <a class="brand" href="/">{{ t.nav_brand }}</a>
     {% if logged_in %}
     <a href="/">{{ t.nav_tasks }}</a>
+    {% if is_admin %}
+    <a href="/admin">{{ t.nav_admin }}</a>
+    {% end %}
     <form method="POST" action="/logout">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <button type="submit">{{ t.nav_logout }}</button>

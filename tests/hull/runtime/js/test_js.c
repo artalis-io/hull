@@ -1951,4 +1951,305 @@ UTEST(js_stdlib, email_api_key_required)
     cleanup_js();
 }
 
+/* ── hull:csv tests ──────────────────────────────────────────────────── */
+
+UTEST(js_stdlib, csv_parse_basic)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { csv } from 'hull:csv';\n"
+        "const rows = csv.parse('a,b,c\\n1,2,3\\n');\n"
+        "globalThis.__test_cpb = (rows.length === 2 && rows[0][0] === 'a' && rows[1][2] === '3') ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__test_cpb"), 1);
+
+    cleanup_js();
+}
+
+UTEST(js_stdlib, csv_parse_headers)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { csv } from 'hull:csv';\n"
+        "const rows = csv.parse('name,age\\nalice,30\\n', { headers: true });\n"
+        "globalThis.__test_cph = (rows.length === 1 && rows[0].name === 'alice' && rows[0].age === '30') ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__test_cph"), 1);
+
+    cleanup_js();
+}
+
+UTEST(js_stdlib, csv_parse_quoted)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { csv } from 'hull:csv';\n"
+        "const rows = csv.parse('\"a,b\",c\\n');\n"
+        "globalThis.__test_cpq = (rows[0][0] === 'a,b' && rows[0][1] === 'c') ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__test_cpq"), 1);
+
+    cleanup_js();
+}
+
+UTEST(js_stdlib, csv_encode_basic)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { csv } from 'hull:csv';\n"
+        "globalThis.__test_ceb = csv.encode([['a','b','c'],['1','2','3']]);\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    char *s = eval_str("globalThis.__test_ceb");
+    ASSERT_NE(s, NULL);
+    ASSERT_STREQ(s, "a,b,c\n1,2,3\n");
+    free(s);
+
+    cleanup_js();
+}
+
+UTEST(js_stdlib, csv_encode_headers)
+{
+    init_js();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { csv } from 'hull:csv';\n"
+        "const result = csv.encode([{name:'alice', age:'30'}], { headers: true });\n"
+        "const rows = csv.parse(result, { headers: true });\n"
+        "globalThis.__test_ceh = (rows.length === 1 && rows[0].name === 'alice') ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__test_ceh"), 1);
+
+    cleanup_js();
+}
+
+/* ── hull:search tests ───────────────────────────────────────────────── */
+
+UTEST(js_stdlib, search_create_and_query)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { search } from 'hull:search';\n"
+        "search.createIndex('test_articles', ['title', 'body']);\n"
+        "search.index('test_articles', '1', {title: 'Hello World', body: 'Test article about searching'});\n"
+        "search.index('test_articles', '2', {title: 'JS Guide', body: 'Learn JavaScript programming'});\n"
+        "const results = search.query('test_articles', 'javascript');\n"
+        "globalThis.__test_scq = (results.length === 1 && results[0].id === '2') ? 1 : 0;\n"
+        "search.dropIndex('test_articles');\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__test_scq"), 1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, search_remove)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { search } from 'hull:search';\n"
+        "search.createIndex('test_rm', ['title']);\n"
+        "search.index('test_rm', '1', {title: 'hello'});\n"
+        "search.index('test_rm', '2', {title: 'world'});\n"
+        "search.remove('test_rm', '1');\n"
+        "const results = search.query('test_rm', 'hello');\n"
+        "globalThis.__test_srm = (results.length === 0) ? 1 : 0;\n"
+        "search.dropIndex('test_rm');\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__test_srm"), 1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, search_snippet)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { search } from 'hull:search';\n"
+        "search.createIndex('test_snip', ['title', 'content']);\n"
+        "search.index('test_snip', '1', {title: 'Guide', content: 'A comprehensive guide to searching'});\n"
+        "const results = search.query('test_snip', 'guide', {\n"
+        "  snippet: { column: 2, tokens: 10, before: '<b>', after: '</b>' }\n"
+        "});\n"
+        "globalThis.__test_ssn = (results.length >= 1) ? 1 : 0;\n"
+        "search.dropIndex('test_snip');\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__test_ssn"), 1);
+
+    cleanup_js_caps();
+}
+
+/* ── hull:middleware:rbac tests ───────────────────────────────────────── */
+
+UTEST(js_stdlib, rbac_init_and_assign)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { rbac } from 'hull:middleware:rbac';\n"
+        "rbac.init();\n"
+        "rbac.defineRole('admin');\n"
+        "rbac.definePermission('users.read');\n"
+        "rbac.grant('admin', 'users.read');\n"
+        "rbac.assign('user1', 'admin');\n"
+        "globalThis.__test_ria = 1;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__test_ria"), 1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, rbac_has_role)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { rbac } from 'hull:middleware:rbac';\n"
+        "rbac.init();\n"
+        "rbac.defineRole('admin');\n"
+        "rbac.assign('user1', 'admin');\n"
+        "globalThis.__test_rhr = (rbac.hasRole('user1', 'admin') === true &&\n"
+        "  rbac.hasRole('user1', 'editor') === false) ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__test_rhr"), 1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, rbac_has_permission)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { rbac } from 'hull:middleware:rbac';\n"
+        "rbac.init();\n"
+        "rbac.defineRole('admin');\n"
+        "rbac.definePermission('users.read');\n"
+        "rbac.definePermission('users.write');\n"
+        "rbac.grant('admin', 'users.read');\n"
+        "rbac.assign('user1', 'admin');\n"
+        "globalThis.__test_rhp = (rbac.hasPermission('user1', 'users.read') === true &&\n"
+        "  rbac.hasPermission('user1', 'users.write') === false) ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__test_rhp"), 1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, rbac_middleware_deny)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { rbac } from 'hull:middleware:rbac';\n"
+        "rbac.init();\n"
+        "const mw = rbac.requireRole('admin');\n"
+        "globalThis.__test_rmd = (typeof mw === 'function') ? 1 : 0;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__test_rmd"), 1);
+
+    cleanup_js_caps();
+}
+
 UTEST_MAIN();

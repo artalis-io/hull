@@ -1,4 +1,4 @@
--- Tests for todo example (with auth)
+-- Tests for todo example (with auth, search, csv, rbac)
 -- Run: hull test examples/todo/
 --
 -- Note: middleware registered via app.use() does not run during hull test
@@ -65,5 +65,19 @@ test("POST /delete/1 redirects to /login without session", function()
         body = "_csrf=fake",
         headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
     })
+    test.eq(res.status, 302)
+end)
+
+-- ── CSV export ──────────────────────────────────────────────────────
+
+test("GET /export redirects to /login without session", function()
+    local res = test.get("/export")
+    test.eq(res.status, 302)
+end)
+
+-- ── Admin dashboard ─────────────────────────────────────────────────
+
+test("GET /admin redirects to /login without session", function()
+    local res = test.get("/admin")
     test.eq(res.status, 302)
 end)

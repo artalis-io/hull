@@ -1983,4 +1983,232 @@ UTEST(lua_stdlib, i18n_detect)
     cleanup_lua();
 }
 
+/* ── hull.csv tests ──────────────────────────────────────────────────── */
+
+UTEST(lua_stdlib, csv_parse_basic)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local csv = require('hull.csv') "
+        "  local rows = csv.parse('a,b,c\\n1,2,3\\n') "
+        "  return #rows == 2 and rows[1][1] == 'a' and rows[2][3] == '3' and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua();
+}
+
+UTEST(lua_stdlib, csv_parse_headers)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local csv = require('hull.csv') "
+        "  local rows = csv.parse('name,age\\nalice,30\\n', { headers = true }) "
+        "  return #rows == 1 and rows[1].name == 'alice' and rows[1].age == '30' and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua();
+}
+
+UTEST(lua_stdlib, csv_parse_quoted)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local csv = require('hull.csv') "
+        "  local rows = csv.parse('\"a,b\",c\\n') "
+        "  return rows[1][1] == 'a,b' and rows[1][2] == 'c' and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua();
+}
+
+UTEST(lua_stdlib, csv_encode_basic)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+
+    char *s = eval_str(
+        "require('hull.csv').encode({{'a','b','c'},{'1','2','3'}})");
+    ASSERT_NE(s, NULL);
+    ASSERT_STREQ(s, "a,b,c\n1,2,3\n");
+    free(s);
+
+    cleanup_lua();
+}
+
+UTEST(lua_stdlib, csv_encode_headers)
+{
+    init_lua();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local csv = require('hull.csv') "
+        "  local result = csv.encode({{name='alice', age='30'}}, { headers = true }) "
+        "  local rows = csv.parse(result, { headers = true }) "
+        "  return #rows == 1 and rows[1].name == 'alice' and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua();
+}
+
+/* ── hull.search tests ───────────────────────────────────────────────── */
+
+UTEST(lua_stdlib, search_create_and_query)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local s = require('hull.search') "
+        "  s.create_index('test_articles', {'title', 'body'}) "
+        "  s.index('test_articles', '1', {title='Hello World', body='Test article about searching'}) "
+        "  s.index('test_articles', '2', {title='Lua Guide', body='Learn Lua programming'}) "
+        "  local results = s.query('test_articles', 'lua') "
+        "  local ok = #results == 1 and results[1].id == '2' "
+        "  s.drop_index('test_articles') "
+        "  return ok and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, search_remove)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local s = require('hull.search') "
+        "  s.create_index('test_rm', {'title'}) "
+        "  s.index('test_rm', '1', {title='hello'}) "
+        "  s.index('test_rm', '2', {title='world'}) "
+        "  s.remove('test_rm', '1') "
+        "  local results = s.query('test_rm', 'hello') "
+        "  local ok = #results == 0 "
+        "  s.drop_index('test_rm') "
+        "  return ok and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, search_snippet)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local s = require('hull.search') "
+        "  s.create_index('test_snip', {'title', 'content'}) "
+        "  s.index('test_snip', '1', {title='Guide', content='A comprehensive guide to searching'}) "
+        "  local results = s.query('test_snip', 'guide', { "
+        "    snippet = { column = 2, tokens = 10, before = '<b>', after = '</b>' } "
+        "  }) "
+        "  local ok = #results >= 1 "
+        "  s.drop_index('test_snip') "
+        "  return ok and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
+/* ── hull.middleware.rbac tests ───────────────────────────────────────── */
+
+UTEST(lua_stdlib, rbac_init_and_assign)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local rbac = require('hull.middleware.rbac') "
+        "  rbac.init() "
+        "  rbac.define_role('admin') "
+        "  rbac.define_permission('users.read') "
+        "  rbac.grant('admin', 'users.read') "
+        "  rbac.assign('user1', 'admin') "
+        "  return 1 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, rbac_has_role)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local rbac = require('hull.middleware.rbac') "
+        "  rbac.init() "
+        "  rbac.define_role('admin') "
+        "  rbac.assign('user1', 'admin') "
+        "  return rbac.has_role('user1', 'admin') and "
+        "         not rbac.has_role('user1', 'editor') and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, rbac_has_permission)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local rbac = require('hull.middleware.rbac') "
+        "  rbac.init() "
+        "  rbac.define_role('admin') "
+        "  rbac.define_permission('users.read') "
+        "  rbac.define_permission('users.write') "
+        "  rbac.grant('admin', 'users.read') "
+        "  rbac.assign('user1', 'admin') "
+        "  return rbac.has_permission('user1', 'users.read') and "
+        "         not rbac.has_permission('user1', 'users.write') and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, rbac_middleware_deny)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local rbac = require('hull.middleware.rbac') "
+        "  rbac.init() "
+        "  local mw = rbac.require_role('admin') "
+        "  return type(mw) == 'function' and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
 UTEST_MAIN();

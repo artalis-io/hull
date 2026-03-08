@@ -175,6 +175,63 @@ footer {
     color: #aaa;
 }
 
+/* ── Search form ──────────────────────────────────────────────────── */
+.search-form {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+}
+.search-form input[type="text"] {
+    flex: 1;
+    padding: 0.5rem 0.8rem;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    font-size: 0.9rem;
+}
+.search-form input[type="text"]:focus {
+    outline: none;
+    border-color: #666;
+}
+.search-form button {
+    padding: 0.5rem 1rem;
+    background: #555;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    cursor: pointer;
+}
+.search-form button:hover { background: #333; }
+.clear-search {
+    padding: 0.5rem 0.8rem;
+    color: #888;
+    font-size: 0.9rem;
+    text-decoration: none;
+    display: flex;
+    align-items: center;
+}
+.clear-search:hover { color: #444; }
+
+/* ── Admin dashboard ──────────────────────────────────────────────── */
+.admin-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 1.5rem;
+}
+.admin-table th, .admin-table td {
+    text-align: left;
+    padding: 0.6rem 0.8rem;
+    border-bottom: 1px solid #e0e0e0;
+}
+.admin-table th {
+    font-weight: 600;
+    color: #555;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+.admin-table tr:hover { background: #f0f0f0; }
+
 /* ── About page ───────────────────────────────────────────────────── */
 .about p { margin-bottom: 1rem; line-height: 1.6; }
 .about code {

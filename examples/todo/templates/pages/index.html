@@ -5,6 +5,14 @@
 {% block content %}
 <h1>{{ t.my_todos }}</h1>
 
+<form class="search-form" method="GET" action="/">
+    <input type="text" name="q" placeholder="{{ t.search_placeholder }}" value="{{ search_query }}">
+    <button type="submit">{{ t.search_btn }}</button>
+    {% if searching %}
+    <a href="/" class="clear-search">{{ t.clear_search }}</a>
+    {% end %}
+</form>
+
 <form class="add-form" method="POST" action="/add">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <input type="text" name="title" placeholder="{{ t.placeholder }}" required autofocus>
@@ -20,10 +28,15 @@
 
 <div class="stats">
     {{ remaining }} {{ t.remaining }} &middot; {{ done_count }} {{ t.completed }} &middot; {{ total }} {{ t.total }}
+    &middot; <a href="/export">{{ t.export_csv }}</a>
 </div>
 {% else %}
 <div class="empty">
+    {% if searching %}
+    <p>{{ t.no_results }}</p>
+    {% else %}
     <p>{{ t.empty }}</p>
+    {% end %}
 </div>
 {% end %}
 {% end %}

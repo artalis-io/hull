@@ -12,6 +12,7 @@
 import { app } from "hull:app";
 import { cookie } from "hull:cookie";
 import { crypto } from "hull:crypto";
+import { csv } from "hull:csv";
 import { db } from "hull:db";
 import { form } from "hull:form";
 import { i18n } from "hull:i18n";
@@ -20,7 +21,9 @@ import { auth } from "hull:middleware:auth";
 import { csrf } from "hull:middleware:csrf";
 import { logger } from "hull:middleware:logger";
 import { ratelimit } from "hull:middleware:ratelimit";
+import { rbac } from "hull:middleware:rbac";
 import { session } from "hull:middleware:session";
+import { search } from "hull:search";
 import { template } from "hull:template";
 import { time } from "hull:time";
 import { validate } from "hull:validate";
@@ -38,6 +41,17 @@ i18n.locale("en");
 // ── Session setup ──────────────────────────────────────────────────
 
 session.init({ ttl: 3600 });
+
+// ── RBAC setup ────────────────────────────────────────────────────
+
+rbac.init();
+rbac.defineRole("user", ["todos.manage"]);
+rbac.defineRole("admin", ["todos.manage", "admin.dashboard"]);
+
+// ── Search index ──────────────────────────────────────────────────
+
+search.createIndex("todos", ["title"]);
+search.reindex("todos", "todos", { columns: { title: "title" }, idColumn: "id" });
 
 // ── CSRF secret ─────────────────────────────────────────────────────
 
@@ -104,6 +118,10 @@ function render(page, req, extra) {
     ctx.user = req.ctx?.session ?? null;
     ctx.logged_in = !!req.ctx?.session;
     ctx.lang = i18n.locale();
+    ctx.is_admin = false;
+    if (req.ctx?.session) {
+        ctx.is_admin = rbac.hasRole(String(req.ctx.session.user_id), "admin");
+    }
 
     // Inject translated strings as t.* for templates
     ctx.t = {
@@ -136,6 +154,22 @@ function render(page, req, extra) {
         login_link:    i18n.t("register.login_link"),
         lang_en:       i18n.t("lang.en"),
         lang_hu:       i18n.t("lang.hu"),
+        // search & export
+        search_placeholder: i18n.t("index.search_placeholder"),
+        search_btn:    i18n.t("index.search"),
+        clear_search:  i18n.t("index.clear_search"),
+        export_csv:    i18n.t("index.export_csv"),
+        // admin
+        nav_admin:     i18n.t("nav.admin"),
+        admin_title:   i18n.t("admin.title"),
+        admin_name:    i18n.t("admin.name"),
+        admin_email:   i18n.t("admin.email"),
+        admin_todos:   i18n.t("admin.todos"),
+        admin_role:    i18n.t("admin.role"),
+        admin_joined:  i18n.t("admin.joined"),
+        admin_no_users: i18n.t("admin.no_users"),
+        admin_total_users: i18n.t("admin.total_users"),
+        no_results:    i18n.t("index.no_results"),
     };
 
     return template.render(page, ctx);
@@ -225,6 +259,13 @@ app.post("/register", (req, res) => {
             [email, hash, name, time.now()]);
     const userId = db.lastId();
 
+    // Assign RBAC roles (first user gets admin)
+    rbac.assign(String(userId), "user");
+    const userCount = db.query("SELECT COUNT(*) as cnt FROM users");
+    if (userCount[0].cnt === 1) {
+        rbac.assign(String(userId), "admin");
+    }
+
     auth.login(req, res, { user_id: userId, email: email, name: name });
     res.redirect("/");
 });
@@ -240,9 +281,30 @@ app.get("/", (req, res) => {
     const sess = requireSession(req, res);
     if (!sess) return;
 
-    const todos = db.query(
-        "SELECT * FROM todos WHERE user_id = ? ORDER BY created_at DESC",
-        [sess.user_id]);
+    const q = req.query?.q || null;
+    let todos;
+
+    if (q && q !== "") {
+        let results;
+        try {
+            results = search.query("todos", q, { limit: 100 });
+        } catch (_e) {
+            results = [];
+        }
+        if (results.length > 0) {
+            const ids = results.map(r => r.id);
+            const placeholders = ids.map(() => "?").join(",");
+            const params = [...ids, sess.user_id];
+            todos = db.query(
+                `SELECT * FROM todos WHERE id IN (${placeholders}) AND user_id = ? ORDER BY created_at DESC`, params);
+        } else {
+            todos = [];
+        }
+    } else {
+        todos = db.query(
+            "SELECT * FROM todos WHERE user_id = ? ORDER BY created_at DESC",
+            [sess.user_id]);
+    }
 
     let doneCount = 0;
     for (let i = 0; i < todos.length; i++) {
@@ -256,6 +318,8 @@ app.get("/", (req, res) => {
         total: todos.length,
         done_count: doneCount,
         remaining: todos.length - doneCount,
+        search_query: q || "",
+        searching: q != null && q !== "",
     }));
 });
 
@@ -276,6 +340,8 @@ app.post("/add", (req, res) => {
 
     db.exec("INSERT INTO todos (user_id, title, created_at) VALUES (?, ?, ?)",
             [sess.user_id, title, time.now()]);
+    const todoId = db.lastId();
+    search.index("todos", todoId, { title: title });
     res.redirect("/");
 });
 
@@ -293,9 +359,64 @@ app.post("/delete/:id", (req, res) => {
     const sess = requireSession(req, res);
     if (!sess) return;
 
+    const todoId = Number.parseInt(req.params.id);
     db.exec("DELETE FROM todos WHERE id = ? AND user_id = ?",
-            [Number.parseInt(req.params.id), sess.user_id]);
+            [todoId, sess.user_id]);
+    search.remove("todos", todoId);
     res.redirect("/");
 });
 
-log.info("Todo app loaded — routes registered (en/hu i18n)");
+// ── CSV export ────────────────────────────────────────────────────
+
+app.get("/export", (req, res) => {
+    const sess = requireSession(req, res);
+    if (!sess) return;
+
+    const todos = db.query(
+        "SELECT title, done, created_at FROM todos WHERE user_id = ? ORDER BY created_at DESC",
+        [sess.user_id]);
+
+    for (let i = 0; i < todos.length; i++) {
+        todos[i].done = todos[i].done === 1 ? "yes" : "no";
+    }
+
+    const out = csv.encode(todos, { headers: true });
+    res.header("Content-Type", "text/csv");
+    res.header("Content-Disposition", "attachment; filename=\"todos.csv\"");
+    res.body(out);
+});
+
+// ── Admin dashboard (RBAC-protected) ──────────────────────────────
+
+app.get("/admin", (req, res) => {
+    const sess = requireSession(req, res);
+    if (!sess) return;
+
+    if (!rbac.hasRole(String(sess.user_id), "admin")) {
+        res.status(403);
+        res.json({ error: "forbidden" });
+        return;
+    }
+
+    const users = db.query(
+        "SELECT u.id, u.name, u.email, u.created_at, " +
+        "COUNT(t.id) as todo_count " +
+        "FROM users u " +
+        "LEFT JOIN todos t ON t.user_id = u.id " +
+        "GROUP BY u.id " +
+        "ORDER BY u.created_at DESC"
+    );
+
+    for (let i = 0; i < users.length; i++) {
+        const roles = rbac.roles(String(users[i].id));
+        users[i].role = roles.length > 0 ? roles.join(", ") : "none";
+    }
+
+    res.html(render("pages/admin.html", req, {
+        users: users,
+        has_users: users.length > 0,
+        user_count: users.length,
+    }));
+});
+
+log.info("Todo app loaded — routes registered (en/hu i18n, csv, search, rbac)");

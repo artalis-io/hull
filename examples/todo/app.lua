@@ -22,6 +22,9 @@ local logger      = require("hull.middleware.logger")
 local transaction = require("hull.middleware.transaction")
 local cookie      = require("hull.cookie")
 local i18n        = require("hull.i18n")
+local csv         = require("hull.csv")
+local search      = require("hull.search")
+local rbac        = require("hull.middleware.rbac")
 
 app.manifest({})  -- sandbox: no fs, no env, no outbound HTTP; default CSP
 
@@ -34,6 +37,17 @@ i18n.locale("en")
 -- ── Session setup ──────────────────────────────────────────────────
 
 session.init({ ttl = 3600 })
+
+-- ── RBAC setup ────────────────────────────────────────────────────
+
+rbac.init()
+rbac.define_role("user", {"todos.manage"})
+rbac.define_role("admin", {"todos.manage", "admin.dashboard"})
+
+-- ── Search index ──────────────────────────────────────────────────
+
+search.create_index("todos", {"title"})
+search.reindex("todos", "todos", { columns = {title = "title"}, id_column = "id" })
 
 -- ── CSRF secret ─────────────────────────────────────────────────────
 
@@ -86,6 +100,10 @@ local function render(page, req, extra)
     extra.user = req.ctx.session
     extra.logged_in = req.ctx.session ~= nil
     extra.lang = i18n.locale()
+    extra.is_admin = false
+    if req.ctx.session then
+        extra.is_admin = rbac.has_role(tostring(req.ctx.session.user_id), "admin")
+    end
 
     -- Inject translated strings as t.* for templates
     extra.t = {
@@ -124,6 +142,22 @@ local function render(page, req, extra)
         -- language names
         lang_en       = i18n.t("lang.en"),
         lang_hu       = i18n.t("lang.hu"),
+        -- search & export
+        search_placeholder = i18n.t("index.search_placeholder"),
+        search_btn    = i18n.t("index.search"),
+        clear_search  = i18n.t("index.clear_search"),
+        export_csv    = i18n.t("index.export_csv"),
+        -- admin
+        nav_admin     = i18n.t("nav.admin"),
+        admin_title   = i18n.t("admin.title"),
+        admin_name    = i18n.t("admin.name"),
+        admin_email   = i18n.t("admin.email"),
+        admin_todos   = i18n.t("admin.todos"),
+        admin_role    = i18n.t("admin.role"),
+        admin_joined  = i18n.t("admin.joined"),
+        admin_no_users = i18n.t("admin.no_users"),
+        admin_total_users = i18n.t("admin.total_users"),
+        no_results    = i18n.t("index.no_results"),
     }
 
     return template.render(page, extra)
@@ -224,6 +258,13 @@ app.post("/register", function(req, res)
         return res:html(render("pages/register.html", req, { error = msg }))
     end
 
+    -- Assign RBAC roles (first user gets admin)
+    rbac.assign(tostring(user_id), "user")
+    local user_count = db.query("SELECT COUNT(*) as cnt FROM users")
+    if user_count[1].cnt == 1 then
+        rbac.assign(tostring(user_id), "admin")
+    end
+
     auth.login(req, res, { user_id = user_id, email = email, name = name })
     res:redirect("/")
 end)
@@ -239,9 +280,30 @@ app.get("/", function(req, res)
     local sess = require_session(req, res)
     if not sess then return end
 
-    local todos = db.query(
-        "SELECT * FROM todos WHERE user_id = ? ORDER BY created_at DESC",
-        { sess.user_id })
+    local q = req.query and req.query.q or nil
+    local todos
+
+    if q and q ~= "" then
+        local ok_q, results = pcall(search.query, "todos", q, { limit = 100 })
+        if ok_q and #results > 0 then
+            local ids = {}
+            local placeholders = {}
+            for _, r in ipairs(results) do
+                ids[#ids + 1] = r.id
+                placeholders[#placeholders + 1] = "?"
+            end
+            ids[#ids + 1] = sess.user_id
+            todos = db.query(
+                "SELECT * FROM todos WHERE id IN (" .. table.concat(placeholders, ",") ..
+                ") AND user_id = ? ORDER BY created_at DESC", ids)
+        else
+            todos = {}
+        end
+    else
+        todos = db.query(
+            "SELECT * FROM todos WHERE user_id = ? ORDER BY created_at DESC",
+            { sess.user_id })
+    end
 
     local done_count = 0
     for _, t in ipairs(todos) do
@@ -255,6 +317,8 @@ app.get("/", function(req, res)
         total      = #todos,
         done_count = done_count,
         remaining  = #todos - done_count,
+        search_query = q or "",
+        searching  = q ~= nil and q ~= "",
     }))
 end)
 
@@ -275,6 +339,8 @@ app.post("/add", function(req, res)
 
     db.exec("INSERT INTO todos (user_id, title, created_at) VALUES (?, ?, ?)",
             { sess.user_id, title, time.now() })
+    local todo_id = db.last_id()
+    search.index("todos", todo_id, { title = title })
     res:redirect("/")
 end)
 
@@ -292,9 +358,63 @@ app.post("/delete/:id", function(req, res)
     local sess = require_session(req, res)
     if not sess then return end
 
+    local todo_id = tonumber(req.params.id)
     db.exec("DELETE FROM todos WHERE id = ? AND user_id = ?",
-            { tonumber(req.params.id), sess.user_id })
+            { todo_id, sess.user_id })
+    search.remove("todos", todo_id)
     res:redirect("/")
 end)
 
-log.info("Todo app loaded — routes registered (en/hu i18n)")
+-- ── CSV export ────────────────────────────────────────────────────
+
+app.get("/export", function(req, res)
+    local sess = require_session(req, res)
+    if not sess then return end
+
+    local todos = db.query(
+        "SELECT title, done, created_at FROM todos WHERE user_id = ? ORDER BY created_at DESC",
+        { sess.user_id })
+
+    for _, t in ipairs(todos) do
+        t.done = t.done == 1 and "yes" or "no"
+    end
+
+    local out = csv.encode(todos, { headers = true })
+    res:header("Content-Type", "text/csv")
+    res:header("Content-Disposition", "attachment; filename=\"todos.csv\"")
+    res:body(out)
+end)
+
+-- ── Admin dashboard (RBAC-protected) ──────────────────────────────
+
+app.get("/admin", function(req, res)
+    local sess = require_session(req, res)
+    if not sess then return end
+
+    if not rbac.has_role(tostring(sess.user_id), "admin") then
+        res:status(403):json({ error = "forbidden" })
+        return
+    end
+
+    local users = db.query([[
+        SELECT u.id, u.name, u.email, u.created_at,
+               COUNT(t.id) as todo_count
+        FROM users u
+        LEFT JOIN todos t ON t.user_id = u.id
+        GROUP BY u.id
+        ORDER BY u.created_at DESC
+    ]])
+
+    for _, u in ipairs(users) do
+        local roles = rbac.roles(tostring(u.id))
+        u.role = #roles > 0 and table.concat(roles, ", ") or "none"
+    end
+
+    res:html(render("pages/admin.html", req, {
+        users = users,
+        has_users = #users > 0,
+        user_count = #users,
+    }))
+end)
+
+log.info("Todo app loaded — routes registered (en/hu i18n, csv, search, rbac)")

@@ -113,7 +113,7 @@ $(BUILDDIR)/mbed_%.o: $(MBEDTLS_DIR)/library/%.c | $(BUILDDIR)
 
 SQLITE_DIR    := $(VENDDIR)/sqlite
 SQLITE_OBJ    := $(BUILDDIR)/sqlite3.o
-SQLITE_CFLAGS := -std=c11 -O2 -w -DSQLITE_THREADSAFE=1
+SQLITE_CFLAGS := -std=c11 -O2 -w -DSQLITE_THREADSAFE=1 -DSQLITE_ENABLE_FTS5
 
 # ── rxi/log.c ─────────────────────────────────────────────────────────
 
@@ -784,7 +784,7 @@ QJS_CFLAGS := -std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-pointe
 LUA_CFLAGS := -std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-pointer \
               -DLUA_USE_POSIX
 SQLITE_CFLAGS := -std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-pointer \
-                 -DSQLITE_THREADSAFE=1
+                 -DSQLITE_THREADSAFE=1 -DSQLITE_ENABLE_FTS5
 LOG_CFLAGS := -std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-pointer \
               -DLOG_USE_COLOR
 SH_ARENA_CFLAGS := -std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-pointer

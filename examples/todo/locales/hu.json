@@ -13,7 +13,8 @@
         "tasks": "Feladatok",
         "logout": "Kijelentkezés",
         "login": "Bejelentkezés",
-        "register": "Regisztráció"
+        "register": "Regisztráció",
+        "admin": "Admin"
     },
     "index": {
         "title": "Teendőim",
@@ -22,7 +23,12 @@
         "remaining": "hátralévő",
         "completed": "befejezett",
         "total": "összesen",
-        "empty": "Még nincs teendő. Adj hozzá egyet!"
+        "empty": "Még nincs teendő. Adj hozzá egyet!",
+        "search_placeholder": "Keresés a teendők között...",
+        "search": "Keresés",
+        "clear_search": "Törlés",
+        "export_csv": "CSV letöltés",
+        "no_results": "Nincs találat."
     },
     "login": {
         "title": "Bejelentkezés",
@@ -46,5 +52,15 @@
     "lang": {
         "en": "English",
         "hu": "Magyar"
+    },
+    "admin": {
+        "title": "Adminisztráció",
+        "name": "Név",
+        "email": "E-mail",
+        "todos": "Teendők",
+        "role": "Szerepkör",
+        "joined": "Csatlakozott",
+        "no_users": "Még nincs felhasználó.",
+        "total_users": "felhasználó összesen"
     }
 }

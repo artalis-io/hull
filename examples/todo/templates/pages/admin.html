@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+
+{% block title %}{{ t.admin_title }} — {{ t.site_title }}{% end %}
+
+{% block content %}
+<h1>{{ t.admin_title }}</h1>
+
+{% if has_users %}
+<table class="admin-table">
+    <thead>
+        <tr>
+            <th>{{ t.admin_name }}</th>
+            <th>{{ t.admin_email }}</th>
+            <th>{{ t.admin_todos }}</th>
+            <th>{{ t.admin_role }}</th>
+            <th>{{ t.admin_joined }}</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for u in users %}
+        <tr>
+            <td>{{ u.name }}</td>
+            <td>{{ u.email }}</td>
+            <td>{{ u.todo_count }}</td>
+            <td>{{ u.role }}</td>
+            <td>{{ u.created_at }}</td>
+        </tr>
+        {% end %}
+    </tbody>
+</table>
+<div class="stats">{{ user_count }} {{ t.admin_total_users }}</div>
+{% else %}
+<div class="empty">
+    <p>{{ t.admin_no_users }}</p>
+</div>
+{% end %}
+{% end %}
