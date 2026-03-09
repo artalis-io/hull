@@ -30,6 +30,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Forward declaration for hull async cont (defined in lua/async.c) */
+extern int luaopen_hull_hull(lua_State *L);
+
 /* ── Instruction limit hook ─────────────────────────────────────────── */
 
 static void hl_lua_instruction_hook(lua_State *L, lua_Debug *ar)
@@ -267,37 +270,85 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     /* Reset scratch arena for this request */
     sh_arena_reset(lua->scratch);
 
+    /* Set per-request async context (for hull.sleep / http.get access) */
+    lua->active_conn = (KlConn *)req->_server_ctx;
+
     /* Get the handler function from the route registry */
     lua_getfield(lua->L, LUA_REGISTRYINDEX, "__hull_routes");
     if (!lua_istable(lua->L, -1)) {
         lua_pop(lua->L, 1);
+        lua->active_conn = NULL;
         return -1;
     }
 
     lua_rawgeti(lua->L, -1, handler_id);
     if (!lua_isfunction(lua->L, -1)) {
         lua_pop(lua->L, 2); /* pop function + routes table */
+        lua->active_conn = NULL;
         return -1;
     }
 
-    /* Build request and response objects */
-    hl_lua_make_request(lua->L, req);
-    hl_lua_make_response(lua->L, res);
+    /* Create coroutine for this handler invocation */
+    lua_State *co = lua_newthread(lua->L);
+    int thread_ref = luaL_ref(lua->L, LUA_REGISTRYINDEX);
 
-    /* Call handler(req, res) */
-    if (lua_pcall(lua->L, 2, 0, 0) != LUA_OK) {
-        log_error("[hull:c] lua handler error: %s",
-                  lua_tostring(lua->L, -1));
-        lua_pop(lua->L, 1); /* pop error message */
+    /* Move handler function from main state to coroutine */
+    lua_xmove(lua->L, co, 1);
+
+    /* Build request and response objects on the coroutine stack */
+    hl_lua_make_request(co, req);
+    hl_lua_make_response(co, res);
+
+    /* Set coroutine state for async C functions */
+    lua->active_co = co;
+    lua->active_thread_ref = thread_ref;
+
+    /* Re-arm instruction hook on coroutine */
+    if (lua->max_instructions > 0)
+        lua_sethook(co, hl_lua_instruction_hook, LUA_MASKCOUNT,
+                    (int)lua->max_instructions);
+
+    /* Resume coroutine: handler(req, res) */
+    int nres = 0;
+    int status = lua_resume(co, lua->L, 2, &nres);
+
+    if (status == LUA_OK) {
+        /* Synchronous completion — same as lua_pcall path */
+        luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
+        lua->active_thread_ref = LUA_NOREF;
+        lua->active_co = NULL;
+        lua->active_conn = NULL;
+
+        /* Pop any return values and routes table */
+        if (nres > 0)
+            lua_settop(co, 0);
         lua_pop(lua->L, 1); /* pop routes table */
+
         /* Free ctx if middleware set it (size stored in prefix) */
         if (req->ctx) {
             size_t *block = (size_t *)req->ctx - 1;
             hl_alloc_free(lua->base.alloc, block, sizeof(size_t) + block[0]);
             req->ctx = NULL;
         }
-        return -1;
+        return 0;
     }
+
+    if (status == LUA_YIELD) {
+        /* Handler yielded — connection is suspended.
+         * Don't clean up coroutine ref, don't free ctx.
+         * kl_async_suspend already removed client FD from event loop.
+         * Routes table stays on main state stack — cleaned up on resume. */
+        lua_pop(lua->L, 1); /* pop routes table */
+        return 1; /* signal: handler suspended */
+    }
+
+    /* Error */
+    log_error("[hull:c] lua handler error: %s",
+              lua_tostring(co, -1));
+    luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
+    lua->active_thread_ref = LUA_NOREF;
+    lua->active_co = NULL;
+    lua->active_conn = NULL;
 
     lua_pop(lua->L, 1); /* pop routes table */
 
@@ -307,7 +358,7 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
         hl_alloc_free(lua->base.alloc, block, sizeof(size_t) + block[0]);
         req->ctx = NULL;
     }
-    return 0;
+    return -1;
 }
 
 void hl_lua_free(HlLua *lua)
@@ -389,11 +440,14 @@ static int hl_lua_track_route(HlLua *lua, void *route)
 void hl_lua_keel_handler(KlRequest *req, KlResponse *res, void *user_data)
 {
     HlLuaRoute *route = (HlLuaRoute *)user_data;
-    if (hl_lua_dispatch(route->lua, route->handler_id, req, res) != 0) {
+    int rc = hl_lua_dispatch(route->lua, route->handler_id, req, res);
+    if (rc < 0) {
+        /* Error — write 500 response */
         kl_response_status(res, 500);
         kl_response_header(res, "Content-Type", "text/plain");
         kl_response_body(res, "Internal Server Error", 21);
     }
+    /* rc == 1 → handler suspended, conn_process checks SUSPENDED state */
 }
 
 int hl_lua_wire_routes(HlLua *lua, KlRouter *router)
@@ -459,6 +513,9 @@ int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
 {
     (void)alloc_fn; /* routes always use Hull allocator */
     lua_State *L = lua->L;
+
+    /* Store server for async operations (hull.sleep, http.get, etc.) */
+    lua->server = server;
 
     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_route_defs");
     if (!lua_istable(L, -1)) {

@@ -574,6 +574,11 @@ test_todo() {
     PAGE=$(curl -s -b "$COOKIE_JAR" -c "$COOKIE_JAR" "http://127.0.0.1:$PORT/")
     check_contains "$LABEL todo list has todo" "$PAGE" "Test Todo"
 
+    # Stats endpoint (async http.fetch to own /health)
+    RESP=$(curl -s -b "$COOKIE_JAR" "http://127.0.0.1:$PORT/api/stats")
+    check_contains "$LABEL todo GET /api/stats todo_count" "$RESP" '"todo_count"'
+    check_contains "$LABEL todo GET /api/stats healthy" "$RESP" '"server_healthy"'
+
     # Re-extract CSRF token for next operations
     CSRF_TOKEN=$(echo "$PAGE" | grep -o 'name="_csrf" value="[^"]*"' | head -1 | sed 's/.*value="//;s/"//')
 
@@ -613,6 +618,44 @@ test_todo() {
     stop_server; rm -rf "$TMPDIR_TODO"
 }
 
+# ── Async HTTP ───────────────────────────────────────────────────────
+
+test_async_http() {
+    LABEL=$1
+    PORT=$2
+    APP=$3
+
+    echo ""
+    echo "--- async_http ($LABEL) port $PORT ---"
+
+    TMPDIR_ASYNC=$(mktemp -d)
+    start_server "$PORT" "$APP" "$TMPDIR_ASYNC/data.db"
+    if ! wait_for_server "$PORT"; then
+        fail "$LABEL async_http — server startup"
+        stop_server; rm -rf "$TMPDIR_ASYNC"; return
+    fi
+
+    # Health check
+    RESP=$(curl -s "http://127.0.0.1:$PORT/health")
+    check_contains "$LABEL async_http GET /health" "$RESP" '"ok"'
+
+    # Sleep (async primitive)
+    RESP=$(curl -s "http://127.0.0.1:$PORT/sleep")
+    check_contains "$LABEL async_http GET /sleep" "$RESP" '"slept"'
+
+    # Async fetch (non-blocking HTTP to self)
+    RESP=$(curl -s "http://127.0.0.1:$PORT/async-fetch")
+    check_contains "$LABEL async_http GET /async-fetch mode" "$RESP" '"async"'
+    check_contains "$LABEL async_http GET /async-fetch status" "$RESP" '"status"'
+
+    # Async POST
+    RESP=$(curl -s "http://127.0.0.1:$PORT/async-post")
+    check_contains "$LABEL async_http GET /async-post mode" "$RESP" '"async"'
+    check_contains "$LABEL async_http GET /async-post body" "$RESP" '"body"'
+
+    stop_server; rm -rf "$TMPDIR_ASYNC"
+}
+
 # ── Run all example tests ────────────────────────────────────────────
 
 PORT_BASE=19870
@@ -630,6 +673,7 @@ if [ "$RUNTIME" != "js" ]; then
     test_middleware      "lua" $((PORT_BASE + 6)) examples/middleware/app.lua
     test_webhooks       "lua" $((PORT_BASE + 7)) examples/webhooks/app.lua
     test_todo           "lua" $((PORT_BASE + 8)) examples/todo/app.lua
+    test_async_http     "lua" $((PORT_BASE + 9)) examples/async_http/app.lua
 fi
 
 if [ "$RUNTIME" != "lua" ]; then
@@ -642,6 +686,7 @@ if [ "$RUNTIME" != "lua" ]; then
     test_middleware      "js" $((PORT_BASE + 16)) examples/middleware/app.js
     test_webhooks       "js" $((PORT_BASE + 17)) examples/webhooks/app.js
     test_todo           "js" $((PORT_BASE + 18)) examples/todo/app.js
+    test_async_http     "js" $((PORT_BASE + 19)) examples/async_http/app.js
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────

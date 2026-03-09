@@ -26,7 +26,7 @@ local csv         = require("hull.csv")
 local search      = require("hull.search")
 local rbac        = require("hull.middleware.rbac")
 
-app.manifest({})  -- sandbox: no fs, no env, no outbound HTTP; default CSP
+app.manifest({ hosts = {"127.0.0.1"} })  -- allow self-fetch for /api/stats
 
 -- ── i18n setup ─────────────────────────────────────────────────────
 
@@ -167,6 +167,21 @@ end
 
 app.get("/health", function(_req, res)
     res:json({ status = "ok" })
+end)
+
+-- Stats endpoint: uses async http.fetch() to check own health
+app.get("/api/stats", function(req, res)
+    local sess = require_session(req, res)
+    if not sess then return end
+
+    local port = req.headers["host"]:match(":(%d+)$") or "3000"
+    local health = http.fetch("GET", "http://127.0.0.1:" .. port .. "/health")
+    local count = db.query("SELECT COUNT(*) as n FROM todos WHERE user_id = ?",
+                           { sess.user_id })
+    res:json({
+        todo_count = count[1].n,
+        server_healthy = health.status == 200,
+    })
 end)
 
 -- ── Language switch ─────────────────────────────────────────────────

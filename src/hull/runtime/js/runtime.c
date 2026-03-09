@@ -33,6 +33,11 @@
 /* VFS: O(log n) lookups into sorted entry arrays */
 #include "hull/vfs.h"
 
+/* ── Forward declarations ───────────────────────────────────────────── */
+
+/* Defined in js/async.c — registers hull global (sleep, etc.) */
+extern void hl_js_add_hull_global(JSContext *ctx);
+
 /* ── Forward declarations for module init functions ─────────────────── */
 
 int hl_js_init_app_module(JSContext *ctx, HlJS *js);
@@ -506,6 +511,9 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
     /* Add console polyfill */
     hl_js_add_console(js->ctx);
 
+    /* Add hull global (sleep, etc.) */
+    hl_js_add_hull_global(js->ctx);
+
     /* Store HlJS pointer in context opaque for C functions to access */
     JS_SetContextOpaque(js->ctx, js);
 
@@ -671,11 +679,11 @@ void hl_js_free(HlJS *js)
         /* Delete hull internal globals so GC can collect them */
         JSValue global = JS_GetGlobalObject(js->ctx);
         static const char *hull_globals[] = {
-            "console",
+            "console", "hull",
             "__hull_routes", "__hull_route_defs",
             "__hull_middleware", "__hull_post_middleware",
             "__hull_config", "__hull_manifest", "__hull_statics",
-            "__hull_test_state", "test",
+            "__hull_test_state", "__hull_async_promise", "test",
         };
         for (size_t i = 0; i < sizeof(hull_globals)/sizeof(hull_globals[0]); i++) {
             JSAtom atom = JS_NewAtom(js->ctx, hull_globals[i]);
@@ -768,12 +776,16 @@ int hl_js_dispatch(HlJS *js, int handler_id,
 
     hl_js_reset_request(js);
 
+    /* Set per-request async context (for hull.sleep / http.get access) */
+    js->active_conn = (KlConn *)req->_server_ctx;
+
     /* Get the handler function from the route registry */
     JSValue global = JS_GetGlobalObject(js->ctx);
     JSValue routes = JS_GetPropertyStr(js->ctx, global, "__hull_routes");
     if (JS_IsUndefined(routes) || !JS_IsArray(js->ctx, routes)) {
         JS_FreeValue(js->ctx, routes);
         JS_FreeValue(js->ctx, global);
+        js->active_conn = NULL;
         return -1;
     }
 
@@ -784,6 +796,7 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     if (!JS_IsFunction(js->ctx, handler)) {
         JS_FreeValue(js->ctx, handler);
         JS_FreeValue(js->ctx, global);
+        js->active_conn = NULL;
         return -1;
     }
 
@@ -799,6 +812,14 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     if (JS_IsException(ret)) {
         hl_js_dump_error(js);
         result = -1;
+    } else if (JS_PromiseState(js->ctx, ret) == JS_PROMISE_PENDING) {
+        /* Async handler — connection already suspended by hull.sleep
+         * or similar async call. Store the outer handler promise so
+         * the resume callback can check when the handler completes. */
+        JS_SetPropertyStr(js->ctx, global, "__hull_async_promise",
+                          JS_DupValue(js->ctx, ret));
+        js->async_pending = 1;
+        result = 1; /* signal: handler suspended */
     }
 
     JS_FreeValue(js->ctx, ret);
@@ -807,11 +828,15 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     JS_FreeValue(js->ctx, handler);
     JS_FreeValue(js->ctx, global);
 
-    /* Free ctx if middleware set it (size stored in prefix) */
-    if (req->ctx) {
-        size_t *block = (size_t *)req->ctx - 1;
-        hl_alloc_free(js->base.alloc, block, sizeof(size_t) + block[0]);
-        req->ctx = NULL;
+    if (result != 1) {
+        /* Sync path — clean up middleware ctx */
+        js->active_conn = NULL;
+
+        if (req->ctx) {
+            size_t *block = (size_t *)req->ctx - 1;
+            hl_alloc_free(js->base.alloc, block, sizeof(size_t) + block[0]);
+            req->ctx = NULL;
+        }
     }
 
     /* Run any pending microtasks */
@@ -841,11 +866,14 @@ int hl_js_register_stdlib(HlJS *js)
 void hl_js_keel_handler(KlRequest *req, KlResponse *res, void *user_data)
 {
     HlJSRoute *route = (HlJSRoute *)user_data;
-    if (hl_js_dispatch(route->js, route->handler_id, req, res) != 0) {
+    int rc = hl_js_dispatch(route->js, route->handler_id, req, res);
+    if (rc < 0) {
         kl_response_status(res, 500);
         kl_response_header(res, "Content-Type", "text/plain");
         kl_response_body(res, "Internal Server Error", 21);
     }
+    /* rc == 1: handler suspended — don't write response.
+     * Keel checks conn->state == KL_CONN_SUSPENDED and returns. */
 }
 
 int hl_js_wire_routes(HlJS *js, KlRouter *router)
@@ -912,6 +940,7 @@ int hl_js_wire_routes_server(HlJS *js, KlServer *server,
                               void *(*alloc_fn)(size_t))
 {
     (void)alloc_fn; /* routes always use Hull allocator */
+    js->server = server; /* store for async operations (hull.sleep, etc.) */
     JSContext *ctx = js->ctx;
     JSValue global = JS_GetGlobalObject(ctx);
     JSValue defs = JS_GetPropertyStr(ctx, global, "__hull_route_defs");

@@ -14,6 +14,7 @@
 #include "hull/cap/time.h"
 #include "hull/cap/env.h"
 #include "hull/cap/http.h"
+#include "hull/cap/http_async.h"
 #include "hull/cap/smtp.h"
 #include "hull/cap/crypto.h"
 #include "hull/cap/fs.h"
@@ -40,6 +41,9 @@ static void secure_zero(void *p, size_t n)
 
 /* VFS: O(log n) lookups into sorted entry arrays */
 #include "hull/vfs.h"
+
+/* Forward declaration for hull async module (defined in lua/async.c) */
+extern int luaopen_hull_hull(lua_State *L);
 
 /* ── Helper: retrieve HlLua from registry ─────────────────────────── */
 
@@ -1635,6 +1639,64 @@ static int lua_http_delete(lua_State *L)
     return 1;
 }
 
+/* http.fetch(method, url, opts?) — async non-blocking HTTP request.
+ * Yields the coroutine; event loop drives socket I/O via KlWatcher.
+ * Returns { status, body, headers } on resume. */
+static int lua_http_fetch(lua_State *L)
+{
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->base.http_cfg)
+        return luaL_error(L, "http not configured (no hosts in manifest)");
+    if (!lua->server || !lua->active_conn)
+        return luaL_error(L, "http.fetch() can only be called from a request handler");
+
+    const char *method = luaL_checkstring(L, 1);
+    const char *url = luaL_checkstring(L, 2);
+
+    const char *body = NULL;
+    size_t body_len = 0;
+    HlHttpHeader *headers = NULL;
+    int num_headers = 0;
+
+    /* Parse optional opts table at position 3 */
+    if (lua_istable(L, 3)) {
+        lua_getfield(L, 3, "body");
+        if (lua_isstring(L, -1))
+            body = lua_tolstring(L, -1, &body_len);
+        lua_pop(L, 1);
+
+        lua_getfield(L, 3, "headers");
+        if (lua_istable(L, -1)) {
+            int hdr_idx = lua_gettop(L);
+            lua_parse_http_headers(L, hdr_idx, &headers, &num_headers,
+                                    lua->scratch);
+        }
+        lua_pop(L, 1);
+    }
+
+    /* Start the async HTTP request — creates socket, watcher, async ctx,
+     * and suspends the inbound connection */
+    HlHttpClient *client = hl_async_http_start(
+        lua->server, lua->active_conn, lua->base.alloc,
+        lua->base.http_cfg, method, url, headers, num_headers, body, body_len);
+    if (!client)
+        return luaL_error(L, "http.fetch: failed to start request");
+
+    /* Wire the Lua continuation */
+    extern HlAsyncCont *hl_lua_async_cont_create(HlLua *lua, HlAllocator *alloc);
+    HlAsyncCont *cont = hl_lua_async_cont_create(lua, lua->base.alloc);
+    if (!cont) {
+        /* Connection was already suspended — we can't easily undo that.
+         * The cancel callback will clean up when the connection times out. */
+        return luaL_error(L, "http.fetch: out of memory");
+    }
+    client->async_ctx->cont = cont;
+
+    /* Yield the coroutine — on resume, the driver result (HlHttpClient*)
+     * will be pushed onto the stack by lua_push_async_http_response */
+    return lua_yieldk(L, 0, 0, NULL);
+}
+
 static const luaL_Reg http_funcs[] = {
     {"request", lua_http_request},
     {"get",     lua_http_get},
@@ -1642,6 +1704,7 @@ static const luaL_Reg http_funcs[] = {
     {"put",     lua_http_put},
     {"patch",   lua_http_patch},
     {"delete",  lua_http_delete},
+    {"fetch",   lua_http_fetch},
     {NULL, NULL}
 };
 
@@ -2476,6 +2539,10 @@ int hl_lua_register_modules(HlLua *lua)
     /* Register hull._template — internal bridge for hull.template stdlib */
     luaL_requiref(L, "hull._template", luaopen_hull_template_bridge, 0);
     lua_setglobal(L, "_template");
+
+    /* Register hull global (hull.sleep, hull.gather, etc.) */
+    luaL_requiref(L, "hull.hull", luaopen_hull_hull, 0);
+    lua_setglobal(L, "hull");
 
     return 0;
 }

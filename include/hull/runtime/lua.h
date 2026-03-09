@@ -19,6 +19,8 @@ typedef struct lua_State lua_State;
 typedef struct KlRequest KlRequest;
 typedef struct KlResponse KlResponse;
 typedef struct KlRouter KlRouter;
+typedef struct KlServer KlServer;
+typedef struct KlConn KlConn;
 typedef struct SHArena SHArena;
 typedef struct HlToolUnveilCtx HlToolUnveilCtx;
 
@@ -67,6 +69,12 @@ typedef struct HlLua {
 
     /* Tool-mode unveil context (NULL in sandbox mode) */
     HlToolUnveilCtx *tool_unveil_ctx;
+
+    /* Per-request async state (set during dispatch, cleared after) */
+    KlServer   *server;             /* set once during wire_routes_server */
+    KlConn     *active_conn;        /* current connection (per dispatch) */
+    int         active_thread_ref;  /* registry ref to coroutine (LUA_NOREF = none) */
+    lua_State  *active_co;          /* coroutine state (NULL = none) */
 } HlLua;
 
 /* ── Vtable ────────────────────────────────────────────────────────── */

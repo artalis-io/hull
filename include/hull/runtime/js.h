@@ -21,6 +21,8 @@ typedef struct JSContext JSContext;
 typedef struct KlRequest KlRequest;
 typedef struct KlResponse KlResponse;
 typedef struct KlRouter KlRouter;
+typedef struct KlServer KlServer;
+typedef struct KlConn KlConn;
 typedef struct SHArena SHArena;
 
 /* ── Configuration ──────────────────────────────────────────────────── */
@@ -71,6 +73,11 @@ typedef struct HlJS {
     void          **routes;
     size_t          route_count;
     size_t          route_cap;
+
+    /* Per-request async state (set during dispatch, cleared after) */
+    KlServer       *server;          /* set once during wire_routes_server */
+    KlConn         *active_conn;     /* current connection (per dispatch) */
+    int             async_pending;   /* 1 = handler returned pending Promise */
 } HlJS;
 
 /* ── Vtable ────────────────────────────────────────────────────────── */

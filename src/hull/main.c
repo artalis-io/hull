@@ -41,6 +41,7 @@
 #include "hull/tool.h"
 
 #include <keel/keel.h>
+#include <keel/thread_pool.h>
 
 #include <sqlite3.h>
 
@@ -475,6 +476,16 @@ static int hull_serve(int argc, char **argv)
         goto cleanup_db;
     }
 
+    /* Create thread pool for async work (db queries, file I/O) */
+    KlThreadPoolConfig tp_cfg = {
+        .num_workers    = HL_THREAD_POOL_WORKERS,
+        .queue_capacity = HL_THREAD_POOL_CAPACITY,
+        .alloc          = &kl_alloc,
+    };
+    KlThreadPool *thread_pool = kl_thread_pool_create(&server, &tp_cfg);
+    /* thread_pool may be NULL if creation fails — non-fatal, async work
+     * will simply be unavailable */
+
     /* ── Runtime vtable dispatch ─────────────────────────────────── */
 
     union {
@@ -527,6 +538,7 @@ static int hull_serve(int argc, char **argv)
     rt->db = db;
     rt->stmt_cache = &stmt_cache;
     rt->alloc = &alloc;
+    rt->thread_pool = thread_pool;
     rt->app_vfs = &app_vfs;
     rt->platform_vfs = &platform_vfs;
 
@@ -704,6 +716,11 @@ static int hull_serve(int argc, char **argv)
     kl_server_run(&server);
 
     log_info("[hull:c] server stopped");
+
+    /* Free thread pool BEFORE server — join workers, drain queues while
+     * server infrastructure (connections, event loop) is still valid */
+    if (thread_pool)
+        kl_thread_pool_free(thread_pool);
 
     /* Cleanup — free manifest strings AFTER server stops
      * (env_cfg and http_cfg reference them during runtime) */

@@ -35,7 +35,7 @@ Capability Layer (C)          # enforces security boundaries
     crypto.sha256() / etc.    # cryptographic primitives
     http.get() / http.post()  # outbound HTTP (host allowlist)
         ↓
-Keel HTTP Server (C)          # epoll/kqueue event loop
+Keel HTTP Server (C)          # epoll/kqueue event loop + async + thread pool
         ↓
 Kernel Sandbox                # pledge+unveil (Linux), C-level (macOS)
 ```

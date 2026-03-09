@@ -26,7 +26,7 @@ All vendored — no external dependencies:
 
 | Library | Location | Purpose |
 |---------|----------|---------|
-| Keel | `vendor/keel/` (git submodule) | HTTP server library |
+| Keel | `vendor/keel/` (git submodule) | HTTP server library (async primitives, thread pool) |
 | Lua 5.4 | `vendor/lua/` | Application scripting |
 | QuickJS | `vendor/quickjs/` | ES2023 JavaScript runtime |
 | SQLite | `vendor/sqlite/` | Embedded database |
@@ -77,7 +77,7 @@ Capability Layer (src/hull/cap/)  →  C enforcement boundary
         ↓
 Hull Core (main.c, manifest.c, sandbox.c, signature.c, static.c, vfs.c)
         ↓
-Keel HTTP Server (vendor/keel/)  →  Event loop + routing
+Keel HTTP Server (vendor/keel/)  →  Event loop + routing + async + thread pool
         ↓
 Kernel Sandbox (pledge/unveil/seatbelt)  →  OS enforcement
 ```

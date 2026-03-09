@@ -36,6 +36,7 @@
 
 /* ── HTTP client ────────────────────────────────────────────────────── */
 
+#define HL_HTTP_HOSTNAME_MAX       256                  /* Max hostname for SNI (NUL-terminated) */
 #define HL_HTTP_REQ_BUF_SIZE       4096                /* Outbound request header buffer */
 #define HL_HTTP_MAX_REQ_HEADERS    64                  /* Max outbound request headers */
 #define HL_HTTP_DEFAULT_TIMEOUT_MS 30000               /* Connect/send/recv timeout */
@@ -48,6 +49,11 @@
 #define HL_SMTP_SEND_BUF_SIZE      1024                /* SMTP command buffer */
 #define HL_SMTP_DEFAULT_TIMEOUT_MS 30000               /* Connect/send/recv timeout */
 #define HL_SMTP_MAX_MSG_SIZE       (10 * 1024 * 1024)  /* 10 MB max formatted message */
+
+/* ── Thread pool ───────────────────────────────────────────────────── */
+
+#define HL_THREAD_POOL_WORKERS     4                   /* Default worker thread count */
+#define HL_THREAD_POOL_CAPACITY    64                  /* Default work queue capacity */
 
 /* ── Runtime memory ─────────────────────────────────────────────────── */
 

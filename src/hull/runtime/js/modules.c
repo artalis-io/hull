@@ -14,6 +14,8 @@
 #include "hull/cap/time.h"
 #include "hull/cap/env.h"
 #include "hull/cap/http.h"
+#include "hull/cap/http_async.h"
+#include "hull/async.h"
 #include "hull/cap/smtp.h"
 #include "hull/cap/crypto.h"
 #include "hull/cap/fs.h"
@@ -2156,6 +2158,87 @@ static JSValue js_http_del(JSContext *ctx, JSValueConst this_val,
     return result;
 }
 
+/* http.fetch(method, url, opts?) — async non-blocking HTTP request.
+ * Returns a Promise; event loop drives socket I/O via KlWatcher.
+ * Resolves with { status, body, headers }. */
+static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
+                              int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->base.http_cfg)
+        return JS_ThrowInternalError(ctx, "http not configured (no hosts in manifest)");
+    if (!js->server || !js->active_conn)
+        return JS_ThrowInternalError(ctx,
+            "http.fetch() can only be called from a request handler");
+
+    if (argc < 2)
+        return JS_ThrowTypeError(ctx, "http.fetch requires (method, url, opts?)");
+
+    const char *method = JS_ToCString(ctx, argv[0]);
+    const char *url = JS_ToCString(ctx, argv[1]);
+    if (!method || !url) {
+        if (method) JS_FreeCString(ctx, method);
+        if (url) JS_FreeCString(ctx, url);
+        return JS_EXCEPTION;
+    }
+
+    const char *body = NULL;
+    size_t body_len = 0;
+    HlHttpHeader *headers = NULL;
+    int num_headers = 0;
+
+    /* Parse opts */
+    if (argc >= 3 && JS_IsObject(argv[2])) {
+        JSValue body_val = JS_GetPropertyStr(ctx, argv[2], "body");
+        if (JS_IsString(body_val))
+            body = JS_ToCStringLen(ctx, &body_len, body_val);
+        JS_FreeValue(ctx, body_val);
+
+        JSValue hdrs_val = JS_GetPropertyStr(ctx, argv[2], "headers");
+        if (JS_IsObject(hdrs_val))
+            js_parse_http_headers(ctx, hdrs_val, &headers, &num_headers);
+        JS_FreeValue(ctx, hdrs_val);
+    }
+
+    /* Start async HTTP */
+    HlHttpClient *client = hl_async_http_start(
+        js->server, js->active_conn, js->base.alloc,
+        js->base.http_cfg, method, url, headers, num_headers, body, body_len);
+
+    JS_FreeCString(ctx, method);
+    JS_FreeCString(ctx, url);
+    // cppcheck-suppress knownConditionTrueFalse
+    if (body) JS_FreeCString(ctx, body);
+    js_free_http_headers(ctx, headers, num_headers);
+
+    if (!client)
+        return JS_ThrowInternalError(ctx, "http.fetch: failed to start request");
+
+    /* Create Promise */
+    JSValue resolving_funcs[2];
+    JSValue promise = JS_NewPromiseCapability(ctx, resolving_funcs);
+    if (JS_IsException(promise))
+        return JS_EXCEPTION;
+
+    /* Create JS continuation */
+    extern HlAsyncCont *hl_js_async_cont_create(HlJS *js,
+        JSValue resolve, JSValue reject, HlAllocator *alloc);
+    HlAsyncCont *cont = hl_js_async_cont_create(js,
+                                                  resolving_funcs[0],
+                                                  resolving_funcs[1],
+                                                  js->base.alloc);
+    if (!cont) {
+        JS_FreeValue(ctx, resolving_funcs[0]);
+        JS_FreeValue(ctx, resolving_funcs[1]);
+        JS_FreeValue(ctx, promise);
+        return JS_ThrowInternalError(ctx, "http.fetch: out of memory");
+    }
+    client->async_ctx->cont = cont;
+
+    return promise;
+}
+
 static int js_http_module_init(JSContext *ctx, JSModuleDef *m)
 {
     JSValue http = JS_NewObject(ctx);
@@ -2174,6 +2257,8 @@ static int js_http_module_init(JSContext *ctx, JSModuleDef *m)
     /* Also expose as http["delete"] for JS compatibility */
     JS_SetPropertyStr(ctx, http, "delete",
                       JS_NewCFunction(ctx, js_http_del, "delete", 2));
+    JS_SetPropertyStr(ctx, http, "fetch",
+                      JS_NewCFunction(ctx, js_http_fetch, "fetch", 3));
     JS_SetModuleExport(ctx, m, "http", http);
     return 0;
 }
