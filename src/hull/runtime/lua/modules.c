@@ -18,6 +18,8 @@
 #include "hull/cap/smtp.h"
 #include "hull/cap/crypto.h"
 #include "hull/cap/fs.h"
+#include "hull/async.h"
+#include "hull/worker_db.h"
 
 #include "lua.h"
 #include "lualib.h"
@@ -541,9 +543,180 @@ static const luaL_Reg db_funcs[] = {
     {NULL, NULL}
 };
 
+/* ── db.async.query / db.async.exec ─────────────────────────────────── */
+
+/* push_result callback: convert HlWorkerDbOp result to Lua table */
+static void lua_push_worker_db_result(lua_State *L, void *driver)
+{
+    HlWorkerDbOp *op = (HlWorkerDbOp *)driver;
+
+    if (op->error) {
+        lua_newtable(L);
+        lua_pushstring(L, op->error_msg);
+        lua_setfield(L, -2, "error");
+        return;
+    }
+
+    if (op->kind == HL_WORK_DB_EXEC) {
+        lua_newtable(L);
+        lua_pushinteger(L, op->exec_changes);
+        lua_setfield(L, -2, "changes");
+        lua_pushinteger(L, (lua_Integer)op->last_id);
+        lua_setfield(L, -2, "last_id");
+        return;
+    }
+
+    /* HL_WORK_DB_QUERY — array of row tables */
+    HlDbResult *r = &op->result;
+    lua_createtable(L, r->nrows, 0);
+
+    for (int row = 0; row < r->nrows; row++) {
+        lua_createtable(L, 0, r->ncols);
+        HlDbValue *vals = &r->values[row * r->ncols];
+        for (int col = 0; col < r->ncols; col++) {
+            switch (vals[col].type) {
+            case HL_TYPE_INT:
+                lua_pushinteger(L, (lua_Integer)vals[col].i);
+                break;
+            case HL_TYPE_DOUBLE:
+                lua_pushnumber(L, vals[col].d);
+                break;
+            case HL_TYPE_TEXT:
+            case HL_TYPE_BLOB:
+                lua_pushlstring(L, vals[col].s, vals[col].len);
+                break;
+            case HL_TYPE_NIL:
+            default:
+                lua_pushnil(L);
+                break;
+            }
+            lua_setfield(L, -2, r->col_names[col]);
+        }
+        lua_rawseti(L, -2, row + 1);
+    }
+}
+
+/* Common implementation for db.async.query and db.async.exec */
+static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
+{
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->base.thread_pool)
+        return luaL_error(L, "db.async not available (no thread pool)");
+    if (!lua->server || !lua->active_conn)
+        return luaL_error(L, "db.async can only be called from a request handler");
+
+    const char *sql = luaL_checkstring(L, 1);
+
+    if (!lua_is_stdlib_caller(L) && hl_cap_db_check_namespace(sql) != 0)
+        return luaL_error(L, "access denied: _hull_* tables are reserved");
+
+    /* Parse params */
+    HlValue *params = NULL;
+    int nparams = 0;
+    if (lua_gettop(L) >= 2 && !lua_isnil(L, 2)) {
+        if (lua_to_hl_values(L, 2, &params, &nparams) != 0)
+            return luaL_error(L, "params must be a table");
+    }
+
+    /* Allocate op */
+    HlWorkerDbOp *op = calloc(1, sizeof(HlWorkerDbOp));
+    if (!op) {
+        lua_free_hl_values(L, params, nparams);
+        return luaL_error(L, "db.async: out of memory");
+    }
+
+    op->kind = kind;
+    op->server = lua->server;
+    op->alloc = lua->base.alloc;
+    op->sql = strdup(sql);
+    if (!op->sql) {
+        lua_free_hl_values(L, params, nparams);
+        free(op);
+        return luaL_error(L, "db.async: out of memory");
+    }
+
+    /* Deep-copy params (they need to outlive this stack frame) */
+    if (nparams > 0) {
+        op->params = hl_deep_copy_params(params, nparams);
+        op->nparams = nparams;
+        if (!op->params) {
+            lua_free_hl_values(L, params, nparams);
+            free(op->sql);
+            free(op);
+            return luaL_error(L, "db.async: out of memory");
+        }
+    }
+    lua_free_hl_values(L, params, nparams);
+
+    /* Create async ctx */
+    HlAsyncCtx *ctx = hl_async_ctx_create(lua->server, lua->base.alloc);
+    if (!ctx) {
+        hl_worker_db_op_free(op);
+        free(op);
+        return luaL_error(L, "db.async: out of memory");
+    }
+
+    /* Create Lua continuation */
+    extern HlAsyncCont *hl_lua_async_cont_create(HlLua *, HlAllocator *,
+                                                   HlLuaPushResultFn);
+    HlAsyncCont *cont = hl_lua_async_cont_create(lua, lua->base.alloc,
+                                                   lua_push_worker_db_result);
+    if (!cont) {
+        hl_worker_db_op_free(op);
+        free(op);
+        hl_async_ctx_free(ctx);
+        return luaL_error(L, "db.async: out of memory");
+    }
+    ctx->cont = cont;
+    ctx->driver = op;
+    ctx->free_driver = hl_worker_db_op_free_all;
+    ctx->op.on_cancel = hl_worker_db_async_cancel;
+
+    op->async_ctx = ctx;
+    op->cancelled = 0;
+
+    /* Submit to thread pool */
+    if (hl_worker_db_submit(lua->base.thread_pool, op) != 0) {
+        ctx->cont->destroy(ctx->cont);
+        hl_worker_db_op_free(op);
+        free(op);
+        hl_async_ctx_free(ctx);
+        return luaL_error(L, "db.async: thread pool full");
+    }
+
+    /* Suspend the connection */
+    if (kl_async_suspend(lua->server, lua->active_conn, &ctx->op) < 0) {
+        op->cancelled = 1;
+        ctx->cont->cancel(ctx->cont);
+        ctx->cont->destroy(ctx->cont);
+        ctx->cont = NULL;
+        return luaL_error(L, "db.async: failed to suspend connection");
+    }
+
+    return lua_yieldk(L, 0, 0, NULL);
+}
+
+static int lua_db_async_query(lua_State *L)
+{
+    return lua_db_async_common(L, HL_WORK_DB_QUERY);
+}
+
+static int lua_db_async_exec(lua_State *L)
+{
+    return lua_db_async_common(L, HL_WORK_DB_EXEC);
+}
+
+static const luaL_Reg db_async_funcs[] = {
+    {"query", lua_db_async_query},
+    {"exec",  lua_db_async_exec},
+    {NULL, NULL}
+};
+
 static int luaopen_hull_db(lua_State *L)
 {
     luaL_newlib(L, db_funcs);
+    luaL_newlib(L, db_async_funcs);
+    lua_setfield(L, -2, "async");
     return 1;
 }
 
@@ -1639,6 +1812,43 @@ static int lua_http_delete(lua_State *L)
     return 1;
 }
 
+/* ── Push async HTTP response onto Lua stack ──────────────────────── */
+
+static void lua_push_async_http_response(lua_State *L, void *driver)
+{
+    HlHttpClient *client = (HlHttpClient *)driver;
+    HlHttpResponse *resp = &client->resp;
+
+    lua_newtable(L);
+
+    lua_pushinteger(L, resp->status);
+    lua_setfield(L, -2, "status");
+
+    if (resp->body && resp->body_len > 0)
+        lua_pushlstring(L, resp->body, resp->body_len);
+    else
+        lua_pushstring(L, "");
+    lua_setfield(L, -2, "body");
+
+    /* Headers as { ["name"] = "value" } — lowercase names */
+    lua_newtable(L);
+    for (int i = 0; i < resp->num_headers; i++) {
+        const char *name = resp->headers[i].name;
+        size_t nlen = strlen(name);
+        luaL_Buffer buf;
+        luaL_buffinit(L, &buf);
+        for (size_t j = 0; j < nlen; j++) {
+            char ch = (name[j] >= 'A' && name[j] <= 'Z')
+                        ? (char)(name[j] + 32) : name[j];
+            luaL_addchar(&buf, ch);
+        }
+        luaL_pushresult(&buf);
+        lua_pushstring(L, resp->headers[i].value);
+        lua_settable(L, -3);
+    }
+    lua_setfield(L, -2, "headers");
+}
+
 /* http.fetch(method, url, opts?) — async non-blocking HTTP request.
  * Yields the coroutine; event loop drives socket I/O via KlWatcher.
  * Returns { status, body, headers } on resume. */
@@ -1683,8 +1893,10 @@ static int lua_http_fetch(lua_State *L)
         return luaL_error(L, "http.fetch: failed to start request");
 
     /* Wire the Lua continuation */
-    extern HlAsyncCont *hl_lua_async_cont_create(HlLua *lua, HlAllocator *alloc);
-    HlAsyncCont *cont = hl_lua_async_cont_create(lua, lua->base.alloc);
+    extern HlAsyncCont *hl_lua_async_cont_create(HlLua *lua, HlAllocator *alloc,
+                                                   HlLuaPushResultFn push_result);
+    HlAsyncCont *cont = hl_lua_async_cont_create(lua, lua->base.alloc,
+                                                   lua_push_async_http_response);
     if (!cont) {
         /* Connection was already suspended — we can't easily undo that.
          * The cancel callback will clean up when the connection times out. */
@@ -1696,6 +1908,63 @@ static int lua_http_fetch(lua_State *L)
      * will be pushed onto the stack by lua_push_async_http_response */
     return lua_yieldk(L, 0, 0, NULL);
 }
+
+/* ── http.async.* — async HTTP convenience methods ─────────────────── */
+
+/* http.async.request(method, url, opts?) — same as http.fetch */
+static int lua_http_async_request(lua_State *L)
+{
+    return lua_http_fetch(L);
+}
+
+/* Helper: insert method string at position 1 and delegate to lua_http_fetch.
+ * Caller's args are (url, ...) → becomes (method, url, ...) */
+static int lua_http_async_method(lua_State *L, const char *method)
+{
+    lua_pushstring(L, method);
+    lua_insert(L, 1);
+    return lua_http_fetch(L);
+}
+
+/* http.async.get(url, opts?) */
+static int lua_http_async_get(lua_State *L)
+{
+    return lua_http_async_method(L, "GET");
+}
+
+/* http.async.post(url, body, opts?) */
+static int lua_http_async_post(lua_State *L)
+{
+    return lua_http_async_method(L, "POST");
+}
+
+/* http.async.put(url, body, opts?) */
+static int lua_http_async_put(lua_State *L)
+{
+    return lua_http_async_method(L, "PUT");
+}
+
+/* http.async.patch(url, body, opts?) */
+static int lua_http_async_patch(lua_State *L)
+{
+    return lua_http_async_method(L, "PATCH");
+}
+
+/* http.async.delete(url, opts?) */
+static int lua_http_async_delete(lua_State *L)
+{
+    return lua_http_async_method(L, "DELETE");
+}
+
+static const luaL_Reg http_async_funcs[] = {
+    {"request", lua_http_async_request},
+    {"get",     lua_http_async_get},
+    {"post",    lua_http_async_post},
+    {"put",     lua_http_async_put},
+    {"patch",   lua_http_async_patch},
+    {"delete",  lua_http_async_delete},
+    {NULL, NULL}
+};
 
 static const luaL_Reg http_funcs[] = {
     {"request", lua_http_request},
@@ -1711,6 +1980,11 @@ static const luaL_Reg http_funcs[] = {
 static int luaopen_hull_http(lua_State *L)
 {
     luaL_newlib(L, http_funcs);
+
+    /* http.async sub-table */
+    luaL_newlib(L, http_async_funcs);
+    lua_setfield(L, -2, "async");
+
     return 1;
 }
 
@@ -2054,6 +2328,274 @@ static const luaL_Reg template_funcs[] = {
 static int luaopen_hull_template_bridge(lua_State *L)
 {
     luaL_newlib(L, template_funcs);
+    return 1;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * hull.worker module
+ *
+ * worker.dispatch(fn, ctx) — dispatch fn to a worker thread
+ * ════════════════════════════════════════════════════════════════════ */
+
+/* Deep-copy a Lua table (string keys only, flat) to an HlKV array.
+ * Caller owns the returned array (free with hl_kv_free). */
+static int lua_table_to_kv(lua_State *L, int idx, HlKV **out_kvs, int *out_count)
+{
+    *out_kvs = NULL;
+    *out_count = 0;
+
+    if (lua_isnoneornil(L, idx))
+        return 0;
+
+    luaL_checktype(L, idx, LUA_TTABLE);
+
+    /* Count string keys */
+    int count = 0;
+    lua_pushnil(L);
+    while (lua_next(L, idx) != 0) {
+        if (lua_type(L, -2) == LUA_TSTRING) count++;
+        lua_pop(L, 1);
+    }
+    if (count == 0)
+        return 0;
+
+    HlKV *kvs = calloc((size_t)count, sizeof(HlKV));
+    if (!kvs)
+        return -1;
+
+    int i = 0;
+    lua_pushnil(L);
+    while (lua_next(L, idx) != 0) {
+        if (lua_type(L, -2) != LUA_TSTRING) {
+            lua_pop(L, 1);
+            continue;
+        }
+        kvs[i].key = strdup(lua_tostring(L, -2));
+        int vt = lua_type(L, -1);
+        switch (vt) {
+        case LUA_TBOOLEAN:
+            kvs[i].value.type = HL_TYPE_BOOL;
+            kvs[i].value.b = lua_toboolean(L, -1);
+            break;
+        case LUA_TNUMBER:
+            if (lua_isinteger(L, -1)) {
+                kvs[i].value.type = HL_TYPE_INT;
+                kvs[i].value.i = (int64_t)lua_tointeger(L, -1);
+            } else {
+                kvs[i].value.type = HL_TYPE_DOUBLE;
+                kvs[i].value.d = (double)lua_tonumber(L, -1);
+            }
+            break;
+        case LUA_TSTRING: {
+            size_t slen;
+            const char *sv = lua_tolstring(L, -1, &slen);
+            kvs[i].value.type = HL_TYPE_TEXT;
+            kvs[i].value.s = malloc(slen + 1);
+            if (kvs[i].value.s) {
+                memcpy((void *)kvs[i].value.s, sv, slen);
+                ((char *)kvs[i].value.s)[slen] = '\0';
+                kvs[i].value.len = slen;
+            }
+            break;
+        }
+        default:
+            kvs[i].value.type = HL_TYPE_NIL;
+            break;
+        }
+        i++;
+        lua_pop(L, 1);
+    }
+
+    *out_kvs = kvs;
+    *out_count = i;
+    return 0;
+}
+
+/* Bytecode writer callback for lua_dump */
+typedef struct {
+    uint8_t *buf;
+    size_t   len;
+    size_t   cap;
+} LuaBytecodeWriter;
+
+static int lua_bytecode_writer(lua_State *L, const void *p, size_t sz, void *ud)
+{
+    (void)L;
+    LuaBytecodeWriter *bw = (LuaBytecodeWriter *)ud;
+    if (bw->len + sz > bw->cap) {
+        size_t new_cap = bw->cap ? bw->cap * 2 : 4096;
+        while (new_cap < bw->len + sz)
+            new_cap *= 2;
+        uint8_t *nb = realloc(bw->buf, new_cap);
+        if (!nb) return 1;
+        bw->buf = nb;
+        bw->cap = new_cap;
+    }
+    memcpy(bw->buf + bw->len, p, sz);
+    bw->len += sz;
+    return 0;
+}
+
+/* push_result callback: convert HlLuaWorkerDispatchOp result to Lua value */
+static void lua_push_worker_dispatch_result(lua_State *L, void *driver)
+{
+    HlLuaWorkerDispatchOp *op = (HlLuaWorkerDispatchOp *)driver;
+
+    if (op->error) {
+        lua_newtable(L);
+        lua_pushstring(L, op->error_msg);
+        lua_setfield(L, -2, "error");
+        return;
+    }
+
+    switch (op->result_kind) {
+    case 0: /* nil */
+        lua_pushnil(L);
+        break;
+    case 1: /* bool */
+        lua_pushboolean(L, op->result_bool);
+        break;
+    case 2: /* int */
+        lua_pushinteger(L, (lua_Integer)op->result_int);
+        break;
+    case 3: /* double */
+        lua_pushnumber(L, (lua_Number)op->result_double);
+        break;
+    case 4: /* string */
+        lua_pushlstring(L, op->result_str, op->result_str_len);
+        break;
+    case 5: /* table */
+        lua_createtable(L, 0, op->result_count);
+        for (int i = 0; i < op->result_count; i++) {
+            switch (op->result_kvs[i].value.type) {
+            case HL_TYPE_INT:
+                lua_pushinteger(L, (lua_Integer)op->result_kvs[i].value.i);
+                break;
+            case HL_TYPE_DOUBLE:
+                lua_pushnumber(L, (lua_Number)op->result_kvs[i].value.d);
+                break;
+            case HL_TYPE_TEXT:
+                lua_pushlstring(L, op->result_kvs[i].value.s,
+                                op->result_kvs[i].value.len);
+                break;
+            case HL_TYPE_BOOL:
+                lua_pushboolean(L, op->result_kvs[i].value.b);
+                break;
+            default:
+                lua_pushnil(L);
+                break;
+            }
+            lua_setfield(L, -2, op->result_kvs[i].key);
+        }
+        break;
+    default:
+        lua_pushnil(L);
+        break;
+    }
+}
+
+/* worker.dispatch(fn, ctx) — serialize fn + ctx, submit to thread pool */
+static int lua_worker_dispatch(lua_State *L)
+{
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->base.thread_pool)
+        return luaL_error(L, "worker.dispatch not available (no thread pool)");
+    if (!lua->server || !lua->active_conn)
+        return luaL_error(L, "worker.dispatch can only be called from a request handler");
+
+    luaL_checktype(L, 1, LUA_TFUNCTION);
+
+    /* Serialize function to bytecode via lua_dump */
+    LuaBytecodeWriter bw = {0};
+    lua_pushvalue(L, 1); /* push function copy for dump */
+    int dump_rc = lua_dump(L, lua_bytecode_writer, &bw, 0);
+    lua_pop(L, 1); /* pop function copy */
+    if (dump_rc != 0 || !bw.buf) {
+        free(bw.buf);
+        return luaL_error(L, "worker.dispatch: cannot serialize function (C functions not allowed)");
+    }
+
+    /* Deep-copy ctx table */
+    HlKV *ctx_kvs = NULL;
+    int ctx_count = 0;
+    if (lua_gettop(L) >= 2 && !lua_isnil(L, 2)) {
+        if (lua_table_to_kv(L, 2, &ctx_kvs, &ctx_count) != 0) {
+            free(bw.buf);
+            return luaL_error(L, "worker.dispatch: failed to serialize ctx table");
+        }
+    }
+
+    /* Allocate dispatch op */
+    HlLuaWorkerDispatchOp *op = calloc(1, sizeof(HlLuaWorkerDispatchOp));
+    if (!op) {
+        free(bw.buf);
+        hl_kv_free(ctx_kvs, ctx_count);
+        return luaL_error(L, "worker.dispatch: out of memory");
+    }
+
+    op->server = lua->server;
+    op->alloc = lua->base.alloc;
+    op->bytecode = bw.buf;
+    op->bytecode_len = bw.len;
+    op->ctx_kvs = ctx_kvs;
+    op->ctx_count = ctx_count;
+
+    /* Create async ctx */
+    HlAsyncCtx *actx = hl_async_ctx_create(lua->server, lua->base.alloc);
+    if (!actx) {
+        hl_lua_worker_dispatch_op_free(op);
+        free(op);
+        return luaL_error(L, "worker.dispatch: out of memory");
+    }
+
+    /* Create Lua continuation */
+    extern HlAsyncCont *hl_lua_async_cont_create(HlLua *, HlAllocator *,
+                                                   HlLuaPushResultFn);
+    HlAsyncCont *cont = hl_lua_async_cont_create(lua, lua->base.alloc,
+                                                   lua_push_worker_dispatch_result);
+    if (!cont) {
+        hl_lua_worker_dispatch_op_free(op);
+        free(op);
+        hl_async_ctx_free(actx);
+        return luaL_error(L, "worker.dispatch: out of memory");
+    }
+    actx->cont = cont;
+    actx->driver = op;
+    actx->free_driver = hl_lua_worker_dispatch_op_free_all;
+    actx->op.on_cancel = hl_lua_worker_dispatch_cancel;
+
+    op->async_ctx = actx;
+    op->cancelled = 0;
+
+    /* Submit to thread pool */
+    if (hl_lua_worker_dispatch_submit(lua->base.thread_pool, op) != 0) {
+        actx->cont->destroy(actx->cont);
+        hl_lua_worker_dispatch_op_free(op);
+        free(op);
+        hl_async_ctx_free(actx);
+        return luaL_error(L, "worker.dispatch: thread pool full");
+    }
+
+    /* Suspend the connection */
+    if (kl_async_suspend(lua->server, lua->active_conn, &actx->op) < 0) {
+        op->cancelled = 1;
+        actx->cont->cancel(actx->cont);
+        actx->cont->destroy(actx->cont);
+        actx->cont = NULL;
+        return luaL_error(L, "worker.dispatch: failed to suspend connection");
+    }
+
+    return lua_yieldk(L, 0, 0, NULL);
+}
+
+static const luaL_Reg worker_funcs[] = {
+    {"dispatch", lua_worker_dispatch},
+    {NULL, NULL}
+};
+
+static int luaopen_hull_worker(lua_State *L)
+{
+    luaL_newlib(L, worker_funcs);
     return 1;
 }
 
@@ -2539,6 +3081,12 @@ int hl_lua_register_modules(HlLua *lua)
     /* Register hull._template — internal bridge for hull.template stdlib */
     luaL_requiref(L, "hull._template", luaopen_hull_template_bridge, 0);
     lua_setglobal(L, "_template");
+
+    /* Register hull.worker (only if thread pool is available) */
+    if (lua->base.thread_pool) {
+        luaL_requiref(L, "hull.worker", luaopen_hull_worker, 0);
+        lua_setglobal(L, "worker");
+    }
 
     /* Register hull global (hull.sleep, hull.gather, etc.) */
     luaL_requiref(L, "hull.hull", luaopen_hull_hull, 0);

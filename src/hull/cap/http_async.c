@@ -414,10 +414,12 @@ HlHttpClient *hl_async_http_start(KlServer *server, KlConn *conn,
         return NULL;
     }
 
-    /* HTTPS requires TLS */
+    /* HTTPS requires TLS; plain HTTP must not use TLS */
     KlTlsConfig *tls_cfg = (KlTlsConfig *)http_cfg->tls;
     if (parsed.is_https && !tls_cfg)
         return NULL;
+    if (!parsed.is_https)
+        tls_cfg = NULL;
 
     int timeout_ms = http_cfg->timeout_ms > 0 ? http_cfg->timeout_ms
                                                 : HL_HTTP_DEFAULT_TIMEOUT_MS;
@@ -511,9 +513,9 @@ HlHttpClient *hl_async_http_start(KlServer *server, KlConn *conn,
     /* Copy hostname for TLS SNI */
     memcpy(c->host_buf, host_buf, parsed.host_len + 1);
 
-    /* Create response parser */
-    KlAllocator kl_alloc = kl_allocator_default();
-    c->parser = hl_http_parser_llhttp(max_resp, &kl_alloc);
+    /* Create response parser — allocator stored in struct, not on stack */
+    c->kl_alloc = kl_allocator_default();
+    c->parser = hl_http_parser_llhttp(max_resp, &c->kl_alloc);
     if (!c->parser) {
         close(fd);
         hl_alloc_free(alloc, req_buf, req_len);
@@ -537,9 +539,7 @@ HlHttpClient *hl_async_http_start(KlServer *server, KlConn *conn,
     c->async_ctx = ctx;
 
     /* Register watcher — WRITE for connect completion (or immediate send) */
-    KlEventMask mask = (c->state == HL_HCLIENT_CONNECTING) ? KL_EVENT_WRITE
-                                                            : KL_EVENT_WRITE;
-    if (kl_watcher_add(server, fd, mask, on_event, c) != 0) {
+    if (kl_watcher_add(server, fd, KL_EVENT_WRITE, on_event, c) != 0) {
         c->fd = -1; /* prevent double-close in free_client */
         hl_async_ctx_free(ctx);
         c->parser->destroy(c->parser);

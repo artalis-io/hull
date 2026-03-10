@@ -9,7 +9,6 @@
  */
 
 #include "hull/runtime/lua.h"
-#include "hull/alloc.h"
 #include "hull/limits.h"
 #include "hull/cap/body.h"
 
@@ -37,33 +36,6 @@ static HlLua *get_hl_lua_from_L(lua_State *L)
     HlLua *lua = (HlLua *)lua_touserdata(L, -1);
     lua_pop(L, 1);
     return lua;
-}
-
-/*
- * Copy body data into runtime-owned buffer so it survives until
- * Keel sends the response (kl_response_body borrows the pointer).
- */
-static const char *hl_lua_stash_body(lua_State *L, const char *data,
-                                        size_t len)
-{
-    HlLua *hlua = get_hl_lua_from_L(L);
-    if (!hlua)
-        return NULL;
-    if (hlua->response_body) {
-        hl_alloc_free(hlua->base.alloc, hlua->response_body,
-                      hlua->response_body_size);
-        hlua->response_body = NULL;
-        hlua->response_body_size = 0;
-    }
-    if (len >= SIZE_MAX)
-        return NULL;
-    hlua->response_body = hl_alloc_malloc(hlua->base.alloc, len + 1);
-    if (!hlua->response_body)
-        return NULL;
-    hlua->response_body_size = len + 1;
-    memcpy(hlua->response_body, data, len);
-    hlua->response_body[len] = '\0';
-    return hlua->response_body;
 }
 
 /* ── Request object ─────────────────────────────────────────────────── */
@@ -256,13 +228,10 @@ static int lua_res_json(lua_State *L)
 
     size_t json_len;
     const char *json_str = lua_tolstring(L, -1, &json_len);
-    const char *copy = hl_lua_stash_body(L, json_str, json_len);
+    kl_response_header(res, "Content-Type", "application/json");
+    kl_response_body_copy(res, json_str, json_len);
     lua_pop(L, 1); /* pop JSON string */
     lua_pop(L, 1); /* pop json table */
-    if (copy) {
-        kl_response_header(res, "Content-Type", "application/json");
-        kl_response_body(res, copy, json_len);
-    }
 
     return 0;
 }
@@ -274,14 +243,11 @@ static int lua_res_html(lua_State *L)
     HlLua *hlua = get_hl_lua_from_L(L);
     size_t len;
     const char *html = luaL_checklstring(L, 2, &len);
-    const char *copy = hl_lua_stash_body(L, html, len);
-    if (copy) {
-        kl_response_header(res, "Content-Type", "text/html; charset=utf-8");
-        if (hlua && hlua->base.csp_policy)
-            kl_response_header(res, "Content-Security-Policy",
-                               hlua->base.csp_policy);
-        kl_response_body(res, copy, len);
-    }
+    kl_response_header(res, "Content-Type", "text/html; charset=utf-8");
+    if (hlua && hlua->base.csp_policy)
+        kl_response_header(res, "Content-Security-Policy",
+                           hlua->base.csp_policy);
+    kl_response_body_copy(res, html, len);
     return 0;
 }
 
@@ -291,11 +257,8 @@ static int lua_res_text(lua_State *L)
     KlResponse *res = check_response(L, 1);
     size_t len;
     const char *text = luaL_checklstring(L, 2, &len);
-    const char *copy = hl_lua_stash_body(L, text, len);
-    if (copy) {
-        kl_response_header(res, "Content-Type", "text/plain; charset=utf-8");
-        kl_response_body(res, copy, len);
-    }
+    kl_response_header(res, "Content-Type", "text/plain; charset=utf-8");
+    kl_response_body_copy(res, text, len);
     return 0;
 }
 

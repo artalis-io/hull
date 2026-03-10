@@ -10,7 +10,6 @@
 #include "hull/runtime/js.h"
 #include "hull/async.h"
 #include "hull/alloc.h"
-#include "hull/cap/http_async.h"
 
 #include "quickjs.h"
 
@@ -20,12 +19,17 @@
 
 /* ── HlJsAsyncCont ─────────────────────────────────────────────────── */
 
+typedef JSValue (*HlJsPushResultFn)(JSContext *ctx, void *driver);
+
 typedef struct HlJsAsyncCont {
-    HlAsyncCont  base;       /* vtable — must be first member */
-    HlJS        *js;         /* runtime instance */
-    JSValue      resolve;    /* Promise resolve function */
-    JSValue      reject;     /* Promise reject function */
-    HlAllocator *alloc;
+    HlAsyncCont       base;         /* vtable — must be first member */
+    HlJS             *js;           /* runtime instance */
+    JSValue           resolve;      /* Promise resolve function */
+    JSValue           reject;       /* Promise reject function */
+    HlAllocator      *alloc;
+    HlJsPushResultFn  push_result;  /* NULL = no result (sleep) */
+    KlConn           *conn;         /* connection to resume */
+    JSValue           handler_promise; /* outer handler promise */
 } HlJsAsyncCont;
 
 /*
@@ -34,21 +38,29 @@ typedef struct HlJsAsyncCont {
  *   FULFILLED → KL_CONN_SENDING (handler completed)
  *   PENDING   → KL_CONN_SUSPENDED (handler re-yielded, new op active)
  *   REJECTED  → KL_CONN_SENDING (500 response written)
+ *
+ * The connection and handler promise are stored per-continuation
+ * rather than in the HlJS singleton.  This allows multiple connections
+ * to be suspended concurrently (e.g., self-fetch: the original connection
+ * is suspended for the async HTTP response, while the server-side
+ * connection for /api/slow can also suspend for hull.sleep).
  */
-static JSValue js_push_async_http_response(JSContext *ctx, void *driver);
-
 static void hl_js_async_resume(HlAsyncCont *self, void *driver)
 {
     HlJsAsyncCont *jc = (HlJsAsyncCont *)self;
     HlJS *js = jc->js;
-    KlConn *conn = js->active_conn;
+    KlConn *conn = jc->conn;
     JSContext *ctx = js->ctx;
 
     if (!conn || !ctx) return;
 
+    /* Restore per-request context so C functions called during resume
+     * (e.g., another http.async.get) can find the active connection */
+    js->active_conn = conn;
+
     /* Resolve the inner promise with the driver result */
-    if (driver) {
-        JSValue result = js_push_async_http_response(ctx, driver);
+    if (driver && jc->push_result) {
+        JSValue result = jc->push_result(ctx, driver);
         JSValue ret = JS_Call(ctx, jc->resolve, JS_UNDEFINED, 1, &result);
         JS_FreeValue(ctx, ret);
         JS_FreeValue(ctx, result);
@@ -66,21 +78,17 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
     /* Drain microtasks — this continues the handler past the await */
     hl_js_run_jobs(js);
 
-    /* Check outer handler promise state */
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue promise = JS_GetPropertyStr(ctx, global, "__hull_async_promise");
-
-    JSPromiseStateEnum state = JS_PromiseState(ctx, promise);
+    /* Check outer handler promise state (per-continuation ref) */
+    JSPromiseStateEnum state = JS_PromiseState(ctx, jc->handler_promise);
 
     if (state == JS_PROMISE_FULFILLED) {
         /* Handler completed — clean up, set SENDING */
-        JS_FreeValue(ctx, promise);
-
-        JSAtom atom = JS_NewAtom(ctx, "__hull_async_promise");
-        JS_DeleteProperty(ctx, global, atom, 0);
-        JS_FreeAtom(ctx, atom);
+        JS_FreeValue(ctx, jc->handler_promise);
+        jc->handler_promise = JS_UNDEFINED;
+        jc->conn = NULL;
 
         js->async_pending = 0;
+        js->active_conn = NULL;
 
         if (conn->res.body_mode == KL_BODY_STREAM) {
             conn->state = KL_CONN_CLOSED;
@@ -89,19 +97,19 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
         }
     } else if (state == JS_PROMISE_REJECTED) {
         /* Handler error — extract message, write 500 */
-        JSValue result = JS_PromiseResult(ctx, promise);
+        JSValue result = JS_PromiseResult(ctx, jc->handler_promise);
         const char *msg = JS_ToCString(ctx, result);
         log_error("[hull:c] async js handler error: %s",
                   msg ? msg : "(unknown)");
         if (msg) JS_FreeCString(ctx, msg);
         JS_FreeValue(ctx, result);
-        JS_FreeValue(ctx, promise);
 
-        JSAtom atom = JS_NewAtom(ctx, "__hull_async_promise");
-        JS_DeleteProperty(ctx, global, atom, 0);
-        JS_FreeAtom(ctx, atom);
+        JS_FreeValue(ctx, jc->handler_promise);
+        jc->handler_promise = JS_UNDEFINED;
+        jc->conn = NULL;
 
         js->async_pending = 0;
+        js->active_conn = NULL;
 
         kl_response_status(&conn->res, 500);
         kl_response_header(&conn->res, "Content-Type", "text/plain");
@@ -110,11 +118,17 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
     } else {
         /* PENDING — handler re-yielded (another async op in flight).
          * conn->state already set to KL_CONN_SUSPENDED by kl_async_suspend
-         * inside the new hull.sleep/http call. */
-        JS_FreeValue(ctx, promise);
+         * inside the new hull.sleep/http call.
+         * Transfer handler promise to the new continuation. */
+        if (js->last_async_cont) {
+            HlJsAsyncCont *new_jc = (HlJsAsyncCont *)js->last_async_cont;
+            new_jc->handler_promise = JS_DupValue(ctx, jc->handler_promise);
+            js->last_async_cont = NULL;
+        }
+        JS_FreeValue(ctx, jc->handler_promise);
+        jc->handler_promise = JS_UNDEFINED;
+        jc->conn = NULL;
     }
-
-    JS_FreeValue(ctx, global);
 }
 
 /*
@@ -133,15 +147,12 @@ static void hl_js_async_cancel(HlAsyncCont *self)
     jc->resolve = JS_UNDEFINED;
     jc->reject = JS_UNDEFINED;
 
-    /* Delete the outer handler promise */
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSAtom atom = JS_NewAtom(ctx, "__hull_async_promise");
-    JS_DeleteProperty(ctx, global, atom, 0);
-    JS_FreeAtom(ctx, atom);
-    JS_FreeValue(ctx, global);
-
-    js->async_pending = 0;
-    js->active_conn = NULL;
+    /* Free the per-continuation handler promise */
+    if (!JS_IsUndefined(jc->handler_promise)) {
+        JS_FreeValue(ctx, jc->handler_promise);
+        jc->handler_promise = JS_UNDEFINED;
+    }
+    jc->conn = NULL;
 }
 
 /*
@@ -157,11 +168,14 @@ static void hl_js_async_destroy(HlAsyncCont *self)
 /*
  * Create a JS async continuation. Takes ownership of resolve/reject
  * JSValues (caller must not free them).
+ * push_result: called on resume to convert driver result to JSValue.
+ *              NULL for sleep (no result to push).
  */
 HlAsyncCont *hl_js_async_cont_create(HlJS *js,
                                               JSValue resolve,
                                               JSValue reject,
-                                              HlAllocator *alloc)
+                                              HlAllocator *alloc,
+                                              JSValue (*push_result)(JSContext *, void *))
 {
     HlJsAsyncCont *jc = hl_alloc_malloc(alloc, sizeof(HlJsAsyncCont));
     if (!jc) return NULL;
@@ -169,53 +183,35 @@ HlAsyncCont *hl_js_async_cont_create(HlJS *js,
     jc->base.resume  = hl_js_async_resume;
     jc->base.cancel  = hl_js_async_cancel;
     jc->base.destroy = hl_js_async_destroy;
-    jc->js      = js;
-    jc->resolve = resolve;
-    jc->reject  = reject;
-    jc->alloc   = alloc;
+    jc->js          = js;
+    jc->resolve     = resolve;
+    jc->reject      = reject;
+    jc->alloc       = alloc;
+    jc->push_result = push_result;
+
+    /* Capture per-request connection so multiple connections can be
+     * suspended concurrently without clobbering each other.
+     * handler_promise is set later by dispatch (two-step wiring). */
+    jc->conn            = js->active_conn;
+    jc->handler_promise = JS_UNDEFINED;
+
+    /* Store pointer so dispatch/resume can wire handler_promise */
+    js->last_async_cont = jc;
 
     return &jc->base;
 }
 
-/* ── Push async HTTP response into JS ─────────────────────────────── */
-
-static JSValue js_push_async_http_response(JSContext *ctx, void *driver)
+/*
+ * Set the outer handler promise on a continuation.
+ * Called by hl_js_dispatch after detecting a PENDING handler return,
+ * since the handler promise only exists after JS_Call returns.
+ */
+void hl_js_async_cont_set_handler_promise(HlAsyncCont *cont,
+                                            JSContext *ctx,
+                                            JSValue promise)
 {
-    HlHttpClient *client = (HlHttpClient *)driver;
-    HlHttpResponse *resp = &client->resp;
-
-    JSValue obj = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, obj, "status", JS_NewInt32(ctx, resp->status));
-
-    if (resp->body && resp->body_len > 0)
-        JS_SetPropertyStr(ctx, obj, "body",
-                          JS_NewStringLen(ctx, resp->body, resp->body_len));
-    else
-        JS_SetPropertyStr(ctx, obj, "body", JS_NewString(ctx, ""));
-
-    /* Headers as { "name": "value" } — lowercase names */
-    JSValue headers = JS_NewObject(ctx);
-    for (int i = 0; i < resp->num_headers; i++) {
-        size_t nlen = strlen(resp->headers[i].name);
-        char *lower = js_malloc(ctx, nlen + 1);
-        if (lower) {
-            for (size_t j = 0; j < nlen; j++)
-                lower[j] = (char)((resp->headers[i].name[j] >= 'A' &&
-                                    resp->headers[i].name[j] <= 'Z')
-                    ? resp->headers[i].name[j] + 32
-                    : resp->headers[i].name[j]);
-            lower[nlen] = '\0';
-            JS_SetPropertyStr(ctx, headers, lower,
-                              JS_NewString(ctx, resp->headers[i].value));
-            js_free(ctx, lower);
-        } else {
-            JS_SetPropertyStr(ctx, headers, resp->headers[i].name,
-                              JS_NewString(ctx, resp->headers[i].value));
-        }
-    }
-    JS_SetPropertyStr(ctx, obj, "headers", headers);
-
-    return obj;
+    HlJsAsyncCont *jc = (HlJsAsyncCont *)cont;
+    jc->handler_promise = JS_DupValue(ctx, promise);
 }
 
 /* ── hull.sleep(ms) ───────────────────────────────────────────────── */
@@ -261,11 +257,13 @@ static JSValue js_hull_sleep(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
     }
 
-    /* Create JS continuation — takes ownership of resolve/reject */
+    /* Create JS continuation — takes ownership of resolve/reject.
+     * No push_result — sleep has no return value. */
     HlAsyncCont *cont = hl_js_async_cont_create(js,
                                                   resolving_funcs[0],
                                                   resolving_funcs[1],
-                                                  js->base.alloc);
+                                                  js->base.alloc,
+                                                  NULL);
     if (!cont) {
         JS_FreeValue(ctx, resolving_funcs[0]);
         JS_FreeValue(ctx, resolving_funcs[1]);

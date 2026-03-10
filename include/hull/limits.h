@@ -55,6 +55,10 @@
 #define HL_THREAD_POOL_WORKERS     4                   /* Default worker thread count */
 #define HL_THREAD_POOL_CAPACITY    64                  /* Default work queue capacity */
 
+/* ── Worker ─────────────────────────────────────────────────────────── */
+
+#define HL_WORKER_ERR_SIZE         256                  /* Worker error message buffer */
+
 /* ── Runtime memory ─────────────────────────────────────────────────── */
 
 #define HL_SCRATCH_SIZE       (HL_MODULE_MAX_SIZE + 256 * 1024) /* module load + request scratch */

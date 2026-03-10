@@ -22,6 +22,7 @@
 #endif
 
 #include "hull/alloc.h"
+#include "hull/worker_db.h"
 #include "hull/cap/audit.h"
 #include "hull/cap/db.h"
 #include "hull/cap/env.h"
@@ -483,6 +484,8 @@ static int hull_serve(int argc, char **argv)
         .alloc          = &kl_alloc,
     };
     KlThreadPool *thread_pool = kl_thread_pool_create(&server, &tp_cfg);
+    if (!thread_pool)
+        log_warn("[hull:c] thread pool creation failed — async work unavailable");
     /* thread_pool may be NULL if creation fails — non-fatal, async work
      * will simply be unavailable */
 
@@ -541,6 +544,11 @@ static int hull_serve(int argc, char **argv)
     rt->thread_pool = thread_pool;
     rt->app_vfs = &app_vfs;
     rt->platform_vfs = &platform_vfs;
+    rt->db_path = db_path;
+
+    /* Initialize worker DB capability (per-worker SQLite connections) */
+    if (db_path)
+        hl_worker_db_init(db_path);
 
     if (rt->vt->init(rt, rt_cfg) != 0) {
         log_error("[hull:c] %s init failed", rt->vt->name);

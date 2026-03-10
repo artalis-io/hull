@@ -9,6 +9,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 /* Forward declarations for vendor types */
 typedef struct sqlite3 sqlite3;
@@ -41,5 +42,25 @@ typedef struct {
     const char *name;
     HlValue   value;
 } HlColumn;
+
+/* Key-value pair for deep-copying tables/objects across threads.
+ * Keys and string values are heap-owned. */
+typedef struct {
+    char    *key;       /* heap-owned key string */
+    HlValue  value;     /* strings in value are heap-owned */
+} HlKV;
+
+/* Free an array of HlKV (keys, string values, and the array itself). */
+static inline void hl_kv_free(HlKV *kvs, int count)
+{
+    if (!kvs) return;
+    for (int i = 0; i < count; i++) {
+        free(kvs[i].key);
+        if ((kvs[i].value.type == HL_TYPE_TEXT ||
+             kvs[i].value.type == HL_TYPE_BLOB) && kvs[i].value.s)
+            free((void *)kvs[i].value.s);
+    }
+    free(kvs);
+}
 
 #endif /* HL_CAP_TYPES_H */

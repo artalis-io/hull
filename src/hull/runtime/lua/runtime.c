@@ -189,6 +189,12 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
     lua_pushlightuserdata(lua->L, (void *)lua);
     lua_setfield(lua->L, LUA_REGISTRYINDEX, "__hull_lua");
 
+    /* Register worker VM init hooks (e.g. db.* for worker.dispatch).
+     * Must happen before modules are registered since module init may
+     * trigger worker VM creation. */
+    if (lua->base.db)
+        hl_lua_worker_db_init();
+
     /* Register hull.* C modules */
     if (hl_lua_register_modules(lua) != 0) {
         hl_lua_free(lua);
@@ -388,12 +394,6 @@ void hl_lua_free(HlLua *lua)
     }
     hl_arena_free(lua->base.alloc, lua->scratch);
     lua->scratch = NULL;
-    if (lua->response_body) {
-        hl_alloc_free(lua->base.alloc, lua->response_body,
-                      lua->response_body_size);
-        lua->response_body = NULL;
-        lua->response_body_size = 0;
-    }
 }
 
 void hl_lua_dump_error(HlLua *lua)

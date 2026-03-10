@@ -653,6 +653,14 @@ test_async_http() {
     check_contains "$LABEL async_http GET /async-post mode" "$RESP" '"async"'
     check_contains "$LABEL async_http GET /async-post body" "$RESP" '"body"'
 
+    # Async DB (offloads query to thread pool)
+    RESP=$(curl -s "http://127.0.0.1:$PORT/async-db")
+    check_contains "$LABEL async_http GET /async-db" "$RESP" '"result"'
+
+    # Worker dispatch (runs function on worker thread with own VM)
+    RESP=$(curl -s "http://127.0.0.1:$PORT/worker-dispatch")
+    check_contains "$LABEL async_http GET /worker-dispatch" "$RESP" '"count"'
+
     stop_server; rm -rf "$TMPDIR_ASYNC"
 }
 

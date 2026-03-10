@@ -182,14 +182,14 @@ app.get("/health", (_req, res) => {
     res.json({ status: "ok" });
 });
 
-// Stats endpoint: uses async http.fetch() to check own health
+// Stats endpoint: uses http.async.get() to check own health
 app.get("/api/stats", async (req, res) => {
     const sess = requireSession(req, res);
     if (!sess) return;
 
     const host = req.headers.host || "127.0.0.1:3000";
     const port = host.split(":")[1] || "3000";
-    const health = await http.fetch("GET", "http://127.0.0.1:" + port + "/health");
+    const health = await http.async.get(`http://127.0.0.1:${port}/health`);
     const count = db.query("SELECT COUNT(*) as n FROM todos WHERE user_id = ?",
                            [sess.user_id]);
     res.json({

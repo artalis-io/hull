@@ -109,7 +109,7 @@ local function deliver_item(item)
         end
 
         local send_ok, result = pcall(function()
-            return http.post(item.destination, item.payload, {
+            return http.async.post(item.destination, item.payload, {
                 headers = req_headers
             })
         end)

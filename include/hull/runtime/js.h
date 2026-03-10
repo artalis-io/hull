@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include "hull/limits.h"
 #include "hull/runtime.h"
+#include "hull/cap/types.h"
 
 /* Forward declarations */
 typedef struct JSRuntime JSRuntime;
@@ -23,7 +24,11 @@ typedef struct KlResponse KlResponse;
 typedef struct KlRouter KlRouter;
 typedef struct KlServer KlServer;
 typedef struct KlConn KlConn;
+typedef struct KlAsyncOp KlAsyncOp;
+typedef struct KlThreadPool KlThreadPool;
 typedef struct SHArena SHArena;
+typedef struct HlAsyncCtx HlAsyncCtx;
+typedef struct HlAllocator HlAllocator;
 
 /* ── Configuration ──────────────────────────────────────────────────── */
 
@@ -61,10 +66,6 @@ typedef struct HlJS {
     /* Per-request scratch arena (reset between dispatches) */
     SHArena        *scratch;
 
-    /* Per-request response body (allocated via alloc, freed after dispatch) */
-    char           *response_body;
-    size_t          response_body_size;
-
     /* Per-runtime response class (avoids global statics) */
     uint32_t        response_class_id;
     int             response_class_registered;
@@ -78,6 +79,7 @@ typedef struct HlJS {
     KlServer       *server;          /* set once during wire_routes_server */
     KlConn         *active_conn;     /* current connection (per dispatch) */
     int             async_pending;   /* 1 = handler returned pending Promise */
+    void           *last_async_cont; /* last-created HlJsAsyncCont (for handler_promise wiring) */
 } HlJS;
 
 /* ── Vtable ────────────────────────────────────────────────────────── */
@@ -204,5 +206,58 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
  * Returns 0 (continue) or non-zero (short-circuit).
  */
 int hl_js_keel_middleware(KlRequest *req, KlResponse *res, void *user_data);
+
+/* ── Worker dispatch ────────────────────────────────────────────────── */
+
+/* Init hook: called when creating a per-worker JS VM.
+ * Use to register modules (e.g. db.*) into the worker environment. */
+typedef int (*HlJsWorkerInitFn)(JSContext *ctx);
+
+/* Register an init hook for worker JS VMs. Call before workers spawn. */
+void hl_js_worker_register_init(HlJsWorkerInitFn fn);
+
+/* Worker dispatch operation — runtime-specific, submitted to thread pool. */
+typedef struct HlJsWorkerDispatchOp {
+    HlAsyncCtx   *async_ctx;
+    HlAllocator  *alloc;
+    KlServer     *server;
+
+    /* Input (deep-copied, owned) */
+    char         *fn_source;        /* function source text from fn.toString() */
+    size_t        fn_source_len;
+    HlKV         *ctx_kvs;
+    int           ctx_count;
+
+    /* Output (set by worker thread) */
+    int           result_kind;       /* 0=nil,1=bool,2=int,3=double,4=text,5=table */
+    int64_t       result_int;
+    double        result_double;
+    int           result_bool;
+    char         *result_str;        /* owned */
+    size_t        result_str_len;
+    HlKV         *result_kvs;       /* owned, for table result */
+    int           result_count;
+
+    int           error;
+    char          error_msg[HL_WORKER_ERR_SIZE];
+    int           cancelled;
+} HlJsWorkerDispatchOp;
+
+/* Submit a worker.dispatch operation to the thread pool.
+ * Returns 0 on success, -1 on error. */
+int hl_js_worker_dispatch_submit(KlThreadPool *pool,
+                                   HlJsWorkerDispatchOp *op);
+
+/* Free resources owned by a dispatch op (fn_source, kvs, result). */
+void hl_js_worker_dispatch_op_free(HlJsWorkerDispatchOp *op);
+
+/* Free dispatch op struct and all owned data (for use as free_driver). */
+void hl_js_worker_dispatch_op_free_all(void *ptr);
+
+/* KlAsyncOp on_cancel handler for worker.dispatch operations. */
+void hl_js_worker_dispatch_cancel(KlAsyncOp *op, void *user_data);
+
+/* Wire db.* module into worker JS VMs. Call during runtime init. */
+void hl_js_worker_db_init(void);
 
 #endif /* HL_RUNTIME_JS_H */

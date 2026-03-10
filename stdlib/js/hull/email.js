@@ -1,7 +1,8 @@
 // hull:email — Outbound email with provider dispatch
 //
 // Supports direct SMTP and API providers (Postmark, SendGrid, Resend).
-// SMTP goes through the C smtp.send() binding; API providers use http.post().
+// SMTP goes through the C smtp.send() binding; API providers use http.async.post()
+// (non-blocking).
 //
 // Usage:
 //   import email from "hull:email";
@@ -52,7 +53,7 @@ providers.smtp = function(opts) {
     });
 };
 
-providers.postmark = function(opts) {
+providers.postmark = async function(opts) {
     if (!opts.api_key)
         return { ok: false, error: "postmark: api_key required" };
 
@@ -70,7 +71,7 @@ providers.postmark = function(opts) {
     else
         payload.TextBody = opts.body;
 
-    const resp = http.post(
+    const resp = await http.async.post(
         "https://api.postmarkapp.com/email",
         json.encode(payload),
         {
@@ -86,7 +87,7 @@ providers.postmark = function(opts) {
     return { ok: false, error: "postmark: " + (resp.body || "unknown error") };
 };
 
-providers.sendgrid = function(opts) {
+providers.sendgrid = async function(opts) {
     if (!opts.api_key)
         return { ok: false, error: "sendgrid: api_key required" };
 
@@ -102,7 +103,7 @@ providers.sendgrid = function(opts) {
     if (opts.reply_to)
         payload.reply_to = { email: opts.reply_to };
 
-    const resp = http.post(
+    const resp = await http.async.post(
         "https://api.sendgrid.com/v3/mail/send",
         json.encode(payload),
         {
@@ -117,7 +118,7 @@ providers.sendgrid = function(opts) {
     return { ok: false, error: "sendgrid: " + (resp.body || "unknown error") };
 };
 
-providers.resend = function(opts) {
+providers.resend = async function(opts) {
     if (!opts.api_key)
         return { ok: false, error: "resend: api_key required" };
 
@@ -133,7 +134,7 @@ providers.resend = function(opts) {
     if (opts.reply_to) payload.reply_to = opts.reply_to;
     if (opts.cc) payload.cc = opts.cc;
 
-    const resp = http.post(
+    const resp = await http.async.post(
         "https://api.resend.com/emails",
         json.encode(payload),
         {
@@ -148,7 +149,7 @@ providers.resend = function(opts) {
     return { ok: false, error: "resend: " + (resp.body || "unknown error") };
 };
 
-email.send = function(opts) {
+email.send = async function(opts) {
     if (!opts) return { ok: false, error: "opts required" };
     if (!opts.from) return { ok: false, error: "from required" };
     if (!opts.to) return { ok: false, error: "to required" };
@@ -159,7 +160,7 @@ email.send = function(opts) {
     const fn = providers[provider];
     if (!fn)
         return { ok: false, error: "unknown provider: " + String(provider) };
-    return fn(opts);
+    return await fn(opts);
 };
 
 export default email;

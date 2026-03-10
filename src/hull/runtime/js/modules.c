@@ -19,6 +19,7 @@
 #include "hull/cap/smtp.h"
 #include "hull/cap/crypto.h"
 #include "hull/cap/fs.h"
+#include "hull/worker_db.h"
 #include "quickjs.h"
 
 #include "log.h"
@@ -672,6 +673,211 @@ static JSValue js_db_batch(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+/* ── db.async.query / db.async.exec ─────────────────────────────────── */
+
+/* push_result callback: convert HlWorkerDbOp result to JSValue */
+static JSValue js_push_worker_db_result(JSContext *ctx, void *driver)
+{
+    HlWorkerDbOp *op = (HlWorkerDbOp *)driver;
+
+    if (op->error) {
+        JSValue obj = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, obj, "error",
+                          JS_NewString(ctx, op->error_msg));
+        return obj;
+    }
+
+    if (op->kind == HL_WORK_DB_EXEC) {
+        JSValue obj = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, obj, "changes",
+                          JS_NewInt32(ctx, op->exec_changes));
+        JS_SetPropertyStr(ctx, obj, "lastId",
+                          JS_NewInt64(ctx, op->last_id));
+        return obj;
+    }
+
+    /* HL_WORK_DB_QUERY — array of row objects */
+    HlDbResult *r = &op->result;
+    JSValue arr = JS_NewArray(ctx);
+
+    for (int row = 0; row < r->nrows; row++) {
+        JSValue obj = JS_NewObject(ctx);
+        HlDbValue *vals = &r->values[row * r->ncols];
+        for (int col = 0; col < r->ncols; col++) {
+            JSValue v;
+            switch (vals[col].type) {
+            case HL_TYPE_INT:
+                v = JS_NewInt64(ctx, vals[col].i);
+                break;
+            case HL_TYPE_DOUBLE:
+                v = JS_NewFloat64(ctx, vals[col].d);
+                break;
+            case HL_TYPE_TEXT:
+            case HL_TYPE_BLOB:
+                v = JS_NewStringLen(ctx, vals[col].s, vals[col].len);
+                break;
+            case HL_TYPE_NIL:
+            default:
+                v = JS_NULL;
+                break;
+            }
+            JS_SetPropertyStr(ctx, obj, r->col_names[col], v);
+        }
+        JS_SetPropertyUint32(ctx, arr, (uint32_t)row, obj);
+    }
+
+    return arr;
+}
+
+/* Common implementation for db.async.query and db.async.exec */
+static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv,
+                                   HlWorkerDbKind kind)
+{
+    (void)this_val;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->base.thread_pool)
+        return JS_ThrowInternalError(ctx,
+            "db.async not available (no thread pool)");
+    if (!js->server || !js->active_conn)
+        return JS_ThrowInternalError(ctx,
+            "db.async can only be called from a request handler");
+
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "db.async requires (sql, params?)");
+
+    const char *sql = JS_ToCString(ctx, argv[0]);
+    if (!sql)
+        return JS_EXCEPTION;
+
+    if (!js_is_stdlib_caller(ctx) && hl_cap_db_check_namespace(sql) != 0) {
+        JS_FreeCString(ctx, sql);
+        return JS_ThrowInternalError(ctx,
+            "access denied: _hull_* tables are reserved");
+    }
+
+    /* Parse params */
+    HlValue *params = NULL;
+    int nparams = 0;
+    if (argc >= 2) {
+        if (js_to_hl_values(ctx, argv[1], &params, &nparams) != 0) {
+            JS_FreeCString(ctx, sql);
+            return JS_ThrowTypeError(ctx, "params must be an array");
+        }
+    }
+
+    /* Allocate op */
+    HlWorkerDbOp *op = calloc(1, sizeof(HlWorkerDbOp));
+    if (!op) {
+        js_free_hl_values(ctx, params, nparams);
+        JS_FreeCString(ctx, sql);
+        return JS_ThrowInternalError(ctx, "db.async: out of memory");
+    }
+
+    op->kind = kind;
+    op->server = js->server;
+    op->alloc = js->base.alloc;
+    op->sql = strdup(sql);
+    JS_FreeCString(ctx, sql);
+    if (!op->sql) {
+        js_free_hl_values(ctx, params, nparams);
+        free(op);
+        return JS_ThrowInternalError(ctx, "db.async: out of memory");
+    }
+
+    /* Deep-copy params */
+    if (nparams > 0) {
+        op->params = hl_deep_copy_params(params, nparams);
+        op->nparams = nparams;
+        if (!op->params) {
+            js_free_hl_values(ctx, params, nparams);
+            free(op->sql);
+            free(op);
+            return JS_ThrowInternalError(ctx, "db.async: out of memory");
+        }
+    }
+    js_free_hl_values(ctx, params, nparams);
+
+    /* Create async ctx */
+    HlAsyncCtx *actx = hl_async_ctx_create(js->server, js->base.alloc);
+    if (!actx) {
+        hl_worker_db_op_free(op);
+        free(op);
+        return JS_ThrowInternalError(ctx, "db.async: out of memory");
+    }
+
+    /* Create Promise */
+    JSValue resolving_funcs[2];
+    JSValue promise = JS_NewPromiseCapability(ctx, resolving_funcs);
+    if (JS_IsException(promise)) {
+        hl_worker_db_op_free(op);
+        free(op);
+        hl_async_ctx_free(actx);
+        return JS_EXCEPTION;
+    }
+
+    /* Create JS continuation */
+    extern HlAsyncCont *hl_js_async_cont_create(HlJS *js,
+        JSValue resolve, JSValue reject, HlAllocator *alloc,
+        JSValue (*push_result)(JSContext *, void *));
+    HlAsyncCont *cont = hl_js_async_cont_create(js,
+                                                  resolving_funcs[0],
+                                                  resolving_funcs[1],
+                                                  js->base.alloc,
+                                                  js_push_worker_db_result);
+    if (!cont) {
+        JS_FreeValue(ctx, resolving_funcs[0]);
+        JS_FreeValue(ctx, resolving_funcs[1]);
+        JS_FreeValue(ctx, promise);
+        hl_worker_db_op_free(op);
+        free(op);
+        hl_async_ctx_free(actx);
+        return JS_ThrowInternalError(ctx, "db.async: out of memory");
+    }
+    actx->cont = cont;
+    actx->driver = op;
+    actx->free_driver = hl_worker_db_op_free_all;
+    actx->op.on_cancel = hl_worker_db_async_cancel;
+
+    op->async_ctx = actx;
+    op->cancelled = 0;
+
+    /* Submit to thread pool */
+    if (hl_worker_db_submit(js->base.thread_pool, op) != 0) {
+        actx->cont->destroy(actx->cont);
+        hl_worker_db_op_free(op);
+        free(op);
+        hl_async_ctx_free(actx);
+        JS_FreeValue(ctx, promise);
+        return JS_ThrowInternalError(ctx, "db.async: thread pool full");
+    }
+
+    /* Suspend the connection */
+    if (kl_async_suspend(js->server, js->active_conn, &actx->op) < 0) {
+        op->cancelled = 1;
+        actx->cont->cancel(actx->cont);
+        actx->cont->destroy(actx->cont);
+        actx->cont = NULL;
+        JS_FreeValue(ctx, promise);
+        return JS_ThrowInternalError(ctx,
+            "db.async: failed to suspend connection");
+    }
+
+    return promise;
+}
+
+static JSValue js_db_async_query(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv)
+{
+    return js_db_async_common(ctx, this_val, argc, argv, HL_WORK_DB_QUERY);
+}
+
+static JSValue js_db_async_exec(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv)
+{
+    return js_db_async_common(ctx, this_val, argc, argv, HL_WORK_DB_EXEC);
+}
+
 static int js_db_module_init(JSContext *ctx, JSModuleDef *m)
 {
     JSValue db = JS_NewObject(ctx);
@@ -683,6 +889,15 @@ static int js_db_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_db_last_id, "lastId", 0));
     JS_SetPropertyStr(ctx, db, "batch",
                       JS_NewCFunction(ctx, js_db_batch, "batch", 1));
+
+    /* db.async sub-object */
+    JSValue async_obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, async_obj, "query",
+                      JS_NewCFunction(ctx, js_db_async_query, "query", 2));
+    JS_SetPropertyStr(ctx, async_obj, "exec",
+                      JS_NewCFunction(ctx, js_db_async_exec, "exec", 2));
+    JS_SetPropertyStr(ctx, db, "async", async_obj);
+
     JS_SetModuleExport(ctx, m, "db", db);
     return 0;
 }
@@ -2158,6 +2373,47 @@ static JSValue js_http_del(JSContext *ctx, JSValueConst this_val,
     return result;
 }
 
+/* ── Push async HTTP response into JS ─────────────────────────────── */
+
+static JSValue js_push_async_http_response(JSContext *ctx, void *driver)
+{
+    HlHttpClient *client = (HlHttpClient *)driver;
+    HlHttpResponse *resp = &client->resp;
+
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "status", JS_NewInt32(ctx, resp->status));
+
+    if (resp->body && resp->body_len > 0)
+        JS_SetPropertyStr(ctx, obj, "body",
+                          JS_NewStringLen(ctx, resp->body, resp->body_len));
+    else
+        JS_SetPropertyStr(ctx, obj, "body", JS_NewString(ctx, ""));
+
+    /* Headers as { "name": "value" } — lowercase names */
+    JSValue headers = JS_NewObject(ctx);
+    for (int i = 0; i < resp->num_headers; i++) {
+        size_t nlen = strlen(resp->headers[i].name);
+        char *lower = js_malloc(ctx, nlen + 1);
+        if (lower) {
+            for (size_t j = 0; j < nlen; j++)
+                lower[j] = (char)((resp->headers[i].name[j] >= 'A' &&
+                                    resp->headers[i].name[j] <= 'Z')
+                    ? resp->headers[i].name[j] + 32
+                    : resp->headers[i].name[j]);
+            lower[nlen] = '\0';
+            JS_SetPropertyStr(ctx, headers, lower,
+                              JS_NewString(ctx, resp->headers[i].value));
+            js_free(ctx, lower);
+        } else {
+            JS_SetPropertyStr(ctx, headers, resp->headers[i].name,
+                              JS_NewString(ctx, resp->headers[i].value));
+        }
+    }
+    JS_SetPropertyStr(ctx, obj, "headers", headers);
+
+    return obj;
+}
+
 /* http.fetch(method, url, opts?) — async non-blocking HTTP request.
  * Returns a Promise; event loop drives socket I/O via KlWatcher.
  * Resolves with { status, body, headers }. */
@@ -2223,11 +2479,13 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
 
     /* Create JS continuation */
     extern HlAsyncCont *hl_js_async_cont_create(HlJS *js,
-        JSValue resolve, JSValue reject, HlAllocator *alloc);
+        JSValue resolve, JSValue reject, HlAllocator *alloc,
+        JSValue (*push_result)(JSContext *, void *));
     HlAsyncCont *cont = hl_js_async_cont_create(js,
                                                   resolving_funcs[0],
                                                   resolving_funcs[1],
-                                                  js->base.alloc);
+                                                  js->base.alloc,
+                                                  js_push_async_http_response);
     if (!cont) {
         JS_FreeValue(ctx, resolving_funcs[0]);
         JS_FreeValue(ctx, resolving_funcs[1]);
@@ -2238,6 +2496,89 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
 
     return promise;
 }
+
+/* ── http.async.* — async HTTP convenience methods ─────────────────── */
+
+/* http.async.request(method, url, opts?) — same as http.fetch */
+static JSValue js_http_async_request(JSContext *ctx, JSValueConst this_val,
+                                      int argc, JSValueConst *argv)
+{
+    return js_http_fetch(ctx, this_val, argc, argv);
+}
+
+/* Helper: build args array with method prepended, delegate to js_http_fetch.
+ * For GET/DELETE: (url, opts?) → ("METHOD", url, opts?)
+ * For POST/PUT/PATCH: (url, body, opts?) → ("METHOD", url, {body, headers}) */
+static JSValue js_http_async_no_body(JSContext *ctx, JSValueConst this_val,
+                                      const char *method,
+                                      int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    /* Build: fetch(method, url, opts?) */
+    JSValue method_val = JS_NewString(ctx, method);
+    JSValue args[3];
+    args[0] = method_val;
+    int nargs = 1;
+    for (int i = 0; i < argc && nargs < 3; i++)
+        args[nargs++] = argv[i];
+
+    JSValue result = js_http_fetch(ctx, JS_UNDEFINED, nargs, args);
+    JS_FreeValue(ctx, method_val);
+    return result;
+}
+
+static JSValue js_http_async_with_body(JSContext *ctx, JSValueConst this_val,
+                                        const char *method,
+                                        int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    /* Build: fetch(method, url, {body, headers})
+     * Caller args: (url, body, opts?)
+     * fetch args: (method, url, {body=body, headers=opts.headers}) */
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "http.async.%s requires (url, body?, opts?)",
+                                 method);
+
+    JSValue method_val = JS_NewString(ctx, method);
+
+    /* Build opts object merging body into it */
+    JSValue opts = JS_NewObject(ctx);
+    if (argc >= 2 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1]))
+        JS_SetPropertyStr(ctx, opts, "body", JS_DupValue(ctx, argv[1]));
+    if (argc >= 3 && JS_IsObject(argv[2])) {
+        JSValue hdrs = JS_GetPropertyStr(ctx, argv[2], "headers");
+        if (!JS_IsUndefined(hdrs))
+            JS_SetPropertyStr(ctx, opts, "headers", hdrs);
+        else
+            JS_FreeValue(ctx, hdrs);
+    }
+
+    JSValue args[3] = { method_val, argv[0], opts };
+    JSValue result = js_http_fetch(ctx, JS_UNDEFINED, 3, args);
+    JS_FreeValue(ctx, method_val);
+    JS_FreeValue(ctx, opts);
+    return result;
+}
+
+static JSValue js_http_async_get(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv)
+{ return js_http_async_no_body(ctx, this_val, "GET", argc, argv); }
+
+static JSValue js_http_async_post(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv)
+{ return js_http_async_with_body(ctx, this_val, "POST", argc, argv); }
+
+static JSValue js_http_async_put(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv)
+{ return js_http_async_with_body(ctx, this_val, "PUT", argc, argv); }
+
+static JSValue js_http_async_patch(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv)
+{ return js_http_async_with_body(ctx, this_val, "PATCH", argc, argv); }
+
+static JSValue js_http_async_delete(JSContext *ctx, JSValueConst this_val,
+                                     int argc, JSValueConst *argv)
+{ return js_http_async_no_body(ctx, this_val, "DELETE", argc, argv); }
 
 static int js_http_module_init(JSContext *ctx, JSModuleDef *m)
 {
@@ -2259,6 +2600,23 @@ static int js_http_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_http_del, "delete", 2));
     JS_SetPropertyStr(ctx, http, "fetch",
                       JS_NewCFunction(ctx, js_http_fetch, "fetch", 3));
+
+    /* http.async sub-object */
+    JSValue async_obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, async_obj, "request",
+                      JS_NewCFunction(ctx, js_http_async_request, "request", 3));
+    JS_SetPropertyStr(ctx, async_obj, "get",
+                      JS_NewCFunction(ctx, js_http_async_get, "get", 2));
+    JS_SetPropertyStr(ctx, async_obj, "post",
+                      JS_NewCFunction(ctx, js_http_async_post, "post", 3));
+    JS_SetPropertyStr(ctx, async_obj, "put",
+                      JS_NewCFunction(ctx, js_http_async_put, "put", 3));
+    JS_SetPropertyStr(ctx, async_obj, "patch",
+                      JS_NewCFunction(ctx, js_http_async_patch, "patch", 3));
+    JS_SetPropertyStr(ctx, async_obj, "delete",
+                      JS_NewCFunction(ctx, js_http_async_delete, "delete", 2));
+    JS_SetPropertyStr(ctx, http, "async", async_obj);
+
     JS_SetModuleExport(ctx, m, "http", http);
     return 0;
 }
@@ -2764,6 +3122,304 @@ int hl_js_init_template_module(JSContext *ctx, HlJS *js)
 }
 
 /* ════════════════════════════════════════════════════════════════════
+ * hull:worker module
+ *
+ * worker.dispatch(fn, ctx) — dispatch fn to a worker thread
+ * ════════════════════════════════════════════════════════════════════ */
+
+/* Deep-copy a JS object (own string properties only, flat) to HlKV array. */
+static int js_object_to_kv(JSContext *ctx, JSValueConst obj,
+                            HlKV **out_kvs, int *out_count)
+{
+    *out_kvs = NULL;
+    *out_count = 0;
+
+    if (JS_IsNull(obj) || JS_IsUndefined(obj))
+        return 0;
+
+    JSPropertyEnum *tab = NULL;
+    uint32_t tab_len = 0;
+    if (JS_GetOwnPropertyNames(ctx, &tab, &tab_len, obj,
+                                JS_GPN_STRING_MASK |
+                                JS_GPN_ENUM_ONLY) < 0)
+        return -1;
+
+    if (tab_len == 0) {
+        js_free(ctx, tab);
+        return 0;
+    }
+
+    HlKV *kvs = calloc(tab_len, sizeof(HlKV));
+    if (!kvs) {
+        for (uint32_t i = 0; i < tab_len; i++)
+            JS_FreeAtom(ctx, tab[i].atom);
+        js_free(ctx, tab);
+        return -1;
+    }
+
+    int count = 0;
+    for (uint32_t i = 0; i < tab_len; i++) {
+        const char *key = JS_AtomToCString(ctx, tab[i].atom);
+        if (!key) {
+            JS_FreeAtom(ctx, tab[i].atom);
+            continue;
+        }
+
+        kvs[count].key = strdup(key);
+        JS_FreeCString(ctx, key);
+
+        JSValue val = JS_GetProperty(ctx, obj, tab[i].atom);
+        JS_FreeAtom(ctx, tab[i].atom);
+
+        if (JS_IsBool(val)) {
+            kvs[count].value.type = HL_TYPE_BOOL;
+            kvs[count].value.b = JS_ToBool(ctx, val);
+        } else if (JS_IsNumber(val)) {
+            double d;
+            JS_ToFloat64(ctx, &d, val);
+            if (d == (double)(int64_t)d && d >= -9007199254740992.0 &&
+                d <= 9007199254740992.0) {
+                kvs[count].value.type = HL_TYPE_INT;
+                kvs[count].value.i = (int64_t)d;
+            } else {
+                kvs[count].value.type = HL_TYPE_DOUBLE;
+                kvs[count].value.d = d;
+            }
+        } else if (JS_IsString(val)) {
+            size_t slen;
+            const char *sv = JS_ToCStringLen(ctx, &slen, val);
+            kvs[count].value.type = HL_TYPE_TEXT;
+            if (sv) {
+                kvs[count].value.s = malloc(slen + 1);
+                if (kvs[count].value.s) {
+                    memcpy((void *)kvs[count].value.s, sv, slen);
+                    ((char *)kvs[count].value.s)[slen] = '\0';
+                    kvs[count].value.len = slen;
+                }
+                JS_FreeCString(ctx, sv);
+            }
+        } else {
+            kvs[count].value.type = HL_TYPE_NIL;
+        }
+        JS_FreeValue(ctx, val);
+        count++;
+    }
+    js_free(ctx, tab);
+
+    *out_kvs = kvs;
+    *out_count = count;
+    return 0;
+}
+
+/* push_result callback: convert HlJsWorkerDispatchOp result to JSValue */
+static JSValue js_push_worker_dispatch_result(JSContext *ctx, void *driver)
+{
+    HlJsWorkerDispatchOp *op = (HlJsWorkerDispatchOp *)driver;
+
+    if (op->error) {
+        JSValue obj = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, obj, "error",
+                          JS_NewString(ctx, op->error_msg));
+        return obj;
+    }
+
+    switch (op->result_kind) {
+    case 0: /* nil */
+        return JS_NULL;
+    case 1: /* bool */
+        return JS_NewBool(ctx, op->result_bool);
+    case 2: /* int */
+        return JS_NewInt64(ctx, op->result_int);
+    case 3: /* double */
+        return JS_NewFloat64(ctx, op->result_double);
+    case 4: /* string */
+        return JS_NewStringLen(ctx, op->result_str, op->result_str_len);
+    case 5: { /* table/object */
+        JSValue obj = JS_NewObject(ctx);
+        for (int i = 0; i < op->result_count; i++) {
+            JSValue val;
+            switch (op->result_kvs[i].value.type) {
+            case HL_TYPE_INT:
+                val = JS_NewInt64(ctx, op->result_kvs[i].value.i);
+                break;
+            case HL_TYPE_DOUBLE:
+                val = JS_NewFloat64(ctx, op->result_kvs[i].value.d);
+                break;
+            case HL_TYPE_TEXT:
+                val = JS_NewStringLen(ctx, op->result_kvs[i].value.s,
+                                     op->result_kvs[i].value.len);
+                break;
+            case HL_TYPE_BOOL:
+                val = JS_NewBool(ctx, op->result_kvs[i].value.b);
+                break;
+            default:
+                val = JS_NULL;
+                break;
+            }
+            JS_SetPropertyStr(ctx, obj, op->result_kvs[i].key, val);
+        }
+        return obj;
+    }
+    default:
+        return JS_NULL;
+    }
+}
+
+/* worker.dispatch(fn, ctx) — serialize fn + ctx, submit to thread pool */
+static JSValue js_worker_dispatch(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->base.thread_pool)
+        return JS_ThrowInternalError(ctx,
+            "worker.dispatch not available (no thread pool)");
+    if (!js->server || !js->active_conn)
+        return JS_ThrowInternalError(ctx,
+            "worker.dispatch can only be called from a request handler");
+
+    if (argc < 1 || !JS_IsFunction(ctx, argv[0]))
+        return JS_ThrowTypeError(ctx,
+            "worker.dispatch requires (fn, ctx?)");
+
+    /* Get function source text via fn.toString() */
+    JSValue fn_str = JS_ToString(ctx, argv[0]);
+    if (JS_IsException(fn_str))
+        return JS_ThrowInternalError(ctx,
+            "worker.dispatch: cannot serialize function");
+    size_t src_len = 0;
+    const char *src_cstr = JS_ToCStringLen(ctx, &src_len, fn_str);
+    JS_FreeValue(ctx, fn_str);
+    if (!src_cstr)
+        return JS_ThrowInternalError(ctx,
+            "worker.dispatch: cannot serialize function");
+
+    /* Deep-copy ctx object */
+    HlKV *ctx_kvs = NULL;
+    int ctx_count = 0;
+    if (argc >= 2 && !JS_IsNull(argv[1]) && !JS_IsUndefined(argv[1])) {
+        if (js_object_to_kv(ctx, argv[1], &ctx_kvs, &ctx_count) != 0) {
+            JS_FreeCString(ctx, src_cstr);
+            return JS_ThrowInternalError(ctx,
+                "worker.dispatch: failed to serialize ctx object");
+        }
+    }
+
+    /* Allocate dispatch op */
+    HlJsWorkerDispatchOp *op = calloc(1, sizeof(HlJsWorkerDispatchOp));
+    if (!op) {
+        JS_FreeCString(ctx, src_cstr);
+        hl_kv_free(ctx_kvs, ctx_count);
+        return JS_ThrowInternalError(ctx, "worker.dispatch: out of memory");
+    }
+
+    op->server = js->server;
+    op->alloc = js->base.alloc;
+    /* Copy source text (JS_ToCStringLen returns js_malloc'd memory) */
+    op->fn_source = malloc(src_len + 1);
+    if (!op->fn_source) {
+        JS_FreeCString(ctx, src_cstr);
+        hl_kv_free(ctx_kvs, ctx_count);
+        free(op);
+        return JS_ThrowInternalError(ctx, "worker.dispatch: out of memory");
+    }
+    memcpy(op->fn_source, src_cstr, src_len);
+    op->fn_source[src_len] = '\0';
+    op->fn_source_len = src_len;
+    JS_FreeCString(ctx, src_cstr);
+
+    op->ctx_kvs = ctx_kvs;
+    op->ctx_count = ctx_count;
+
+    /* Create async ctx */
+    HlAsyncCtx *actx = hl_async_ctx_create(js->server, js->base.alloc);
+    if (!actx) {
+        hl_js_worker_dispatch_op_free(op);
+        free(op);
+        return JS_ThrowInternalError(ctx, "worker.dispatch: out of memory");
+    }
+
+    /* Create Promise */
+    JSValue resolving_funcs[2];
+    JSValue promise = JS_NewPromiseCapability(ctx, resolving_funcs);
+    if (JS_IsException(promise)) {
+        hl_js_worker_dispatch_op_free(op);
+        free(op);
+        hl_async_ctx_free(actx);
+        return JS_EXCEPTION;
+    }
+
+    /* Create JS continuation */
+    extern HlAsyncCont *hl_js_async_cont_create(HlJS *js,
+        JSValue resolve, JSValue reject, HlAllocator *alloc,
+        JSValue (*push_result)(JSContext *, void *));
+    HlAsyncCont *cont = hl_js_async_cont_create(js,
+                                                  resolving_funcs[0],
+                                                  resolving_funcs[1],
+                                                  js->base.alloc,
+                                                  js_push_worker_dispatch_result);
+    if (!cont) {
+        JS_FreeValue(ctx, resolving_funcs[0]);
+        JS_FreeValue(ctx, resolving_funcs[1]);
+        JS_FreeValue(ctx, promise);
+        hl_js_worker_dispatch_op_free(op);
+        free(op);
+        hl_async_ctx_free(actx);
+        return JS_ThrowInternalError(ctx, "worker.dispatch: out of memory");
+    }
+    actx->cont = cont;
+    actx->driver = op;
+    actx->free_driver = hl_js_worker_dispatch_op_free_all;
+    actx->op.on_cancel = hl_js_worker_dispatch_cancel;
+
+    op->async_ctx = actx;
+    op->cancelled = 0;
+
+    /* Submit to thread pool */
+    if (hl_js_worker_dispatch_submit(js->base.thread_pool, op) != 0) {
+        actx->cont->destroy(actx->cont);
+        hl_js_worker_dispatch_op_free(op);
+        free(op);
+        hl_async_ctx_free(actx);
+        JS_FreeValue(ctx, promise);
+        return JS_ThrowInternalError(ctx,
+            "worker.dispatch: thread pool full");
+    }
+
+    /* Suspend the connection */
+    if (kl_async_suspend(js->server, js->active_conn, &actx->op) < 0) {
+        op->cancelled = 1;
+        actx->cont->cancel(actx->cont);
+        actx->cont->destroy(actx->cont);
+        actx->cont = NULL;
+        JS_FreeValue(ctx, promise);
+        return JS_ThrowInternalError(ctx,
+            "worker.dispatch: failed to suspend connection");
+    }
+
+    return promise;
+}
+
+static int js_worker_module_init(JSContext *ctx, JSModuleDef *m)
+{
+    JSValue worker = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, worker, "dispatch",
+                      JS_NewCFunction(ctx, js_worker_dispatch, "dispatch", 2));
+    JS_SetModuleExport(ctx, m, "worker", worker);
+    return 0;
+}
+
+int hl_js_init_worker_module(JSContext *ctx, HlJS *js)
+{
+    (void)js;
+    JSModuleDef *m = JS_NewCModule(ctx, "hull:worker", js_worker_module_init);
+    if (!m)
+        return -1;
+    JS_AddModuleExport(ctx, m, "worker");
+    return 0;
+}
+
+/* ════════════════════════════════════════════════════════════════════
  * Module registry — called by hl_js_init() to register all
  * hull:* built-in modules.
  * ════════════════════════════════════════════════════════════════════ */
@@ -2816,6 +3472,12 @@ int hl_js_register_modules(HlJS *js)
     /* Register hull:_template — internal bridge for hull:template stdlib */
     if (hl_js_init_template_module(js->ctx, js) != 0)
         return -1;
+
+    /* Register hull:worker module (only if thread pool is available) */
+    if (js->base.thread_pool) {
+        if (hl_js_init_worker_module(js->ctx, js) != 0)
+            return -1;
+    }
 
     return 0;
 }

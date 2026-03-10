@@ -51,6 +51,7 @@ struct HlRuntime {
     const HlVfs  *app_vfs;       /* app entries (embedded + dev fallback) */
     const HlVfs  *platform_vfs;  /* stdlib entries (always embedded) */
     KlThreadPool *thread_pool;   /* worker pool for async work (NULL if not created) */
+    const char   *db_path;       /* SQLite file path (borrowed, for worker connections) */
 };
 
 #endif /* HL_RUNTIME_H */

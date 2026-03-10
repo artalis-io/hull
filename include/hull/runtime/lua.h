@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include "hull/limits.h"
 #include "hull/runtime.h"
+#include "hull/cap/types.h"
 
 /* Forward declarations */
 typedef struct lua_State lua_State;
@@ -21,8 +22,11 @@ typedef struct KlResponse KlResponse;
 typedef struct KlRouter KlRouter;
 typedef struct KlServer KlServer;
 typedef struct KlConn KlConn;
+typedef struct KlAsyncOp KlAsyncOp;
+typedef struct KlThreadPool KlThreadPool;
 typedef struct SHArena SHArena;
 typedef struct HlToolUnveilCtx HlToolUnveilCtx;
+typedef struct HlAsyncCtx HlAsyncCtx;
 
 /* ── Configuration ──────────────────────────────────────────────────── */
 
@@ -58,10 +62,6 @@ typedef struct HlLua {
     /* Per-request scratch arena (reset between dispatches) */
     SHArena        *scratch;
 
-    /* Per-request response body (allocated via alloc, freed after dispatch) */
-    char           *response_body;
-    size_t          response_body_size;
-
     /* Tracked route allocations (freed in hl_lua_free) */
     void          **routes;
     size_t          route_count;
@@ -76,6 +76,68 @@ typedef struct HlLua {
     int         active_thread_ref;  /* registry ref to coroutine (LUA_NOREF = none) */
     lua_State  *active_co;          /* coroutine state (NULL = none) */
 } HlLua;
+
+/* ── Async push_result callback ─────────────────────────────────────── */
+
+/*
+ * Callback that pushes a driver result onto the Lua coroutine stack
+ * on async resume. Each driver type provides its own implementation.
+ * NULL = no result (e.g. hull.sleep).
+ */
+typedef void (*HlLuaPushResultFn)(lua_State *L, void *driver);
+
+/* ── Worker dispatch ────────────────────────────────────────────────── */
+
+/* Init hook: called when creating a per-worker Lua VM.
+ * Use to register modules (e.g. db.*) into the worker environment. */
+typedef int (*HlLuaWorkerInitFn)(lua_State *L);
+
+/* Register an init hook for worker Lua VMs. Call before workers spawn. */
+void hl_lua_worker_register_init(HlLuaWorkerInitFn fn);
+
+/* Worker dispatch operation — runtime-specific, submitted to thread pool. */
+typedef struct HlLuaWorkerDispatchOp {
+    HlAsyncCtx   *async_ctx;
+    HlAllocator  *alloc;
+    KlServer     *server;
+
+    /* Input (deep-copied, owned) */
+    uint8_t      *bytecode;
+    size_t        bytecode_len;
+    HlKV         *ctx_kvs;
+    int           ctx_count;
+
+    /* Output (set by worker thread) */
+    int           result_kind;       /* 0=nil,1=bool,2=int,3=double,4=text,5=table */
+    int64_t       result_int;
+    double        result_double;
+    int           result_bool;
+    char         *result_str;        /* owned */
+    size_t        result_str_len;
+    HlKV         *result_kvs;       /* owned, for table result */
+    int           result_count;
+
+    int           error;
+    char          error_msg[HL_WORKER_ERR_SIZE];
+    int           cancelled;
+} HlLuaWorkerDispatchOp;
+
+/* Submit a worker.dispatch operation to the thread pool.
+ * Returns 0 on success, -1 on error. */
+int hl_lua_worker_dispatch_submit(KlThreadPool *pool,
+                                   HlLuaWorkerDispatchOp *op);
+
+/* Free resources owned by a dispatch op (bytecode, kvs, result). */
+void hl_lua_worker_dispatch_op_free(HlLuaWorkerDispatchOp *op);
+
+/* Free dispatch op struct and all owned data (for use as free_driver). */
+void hl_lua_worker_dispatch_op_free_all(void *ptr);
+
+/* KlAsyncOp on_cancel handler for worker.dispatch operations. */
+void hl_lua_worker_dispatch_cancel(KlAsyncOp *op, void *user_data);
+
+/* Wire db.* module into worker Lua VMs. Call during runtime init. */
+void hl_lua_worker_db_init(void);
 
 /* ── Vtable ────────────────────────────────────────────────────────── */
 

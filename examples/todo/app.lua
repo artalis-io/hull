@@ -169,13 +169,13 @@ app.get("/health", function(_req, res)
     res:json({ status = "ok" })
 end)
 
--- Stats endpoint: uses async http.fetch() to check own health
+-- Stats endpoint: uses http.async.get() to check own health
 app.get("/api/stats", function(req, res)
     local sess = require_session(req, res)
     if not sess then return end
 
     local port = req.headers["host"]:match(":(%d+)$") or "3000"
-    local health = http.fetch("GET", "http://127.0.0.1:" .. port .. "/health")
+    local health = http.async.get("http://127.0.0.1:" .. port .. "/health")
     local count = db.query("SELECT COUNT(*) as n FROM todos WHERE user_id = ?",
                            { sess.user_id })
     res:json({

@@ -9,7 +9,6 @@
  */
 
 #include "hull/runtime/js.h"
-#include "hull/alloc.h"
 #include "hull/limits.h"
 #include "hull/cap/body.h"
 #include "quickjs.h"
@@ -198,33 +197,6 @@ JSValue hl_js_make_request(JSContext *ctx, KlRequest *req)
  *   res.redirect(url, code) → HTTP redirect
  */
 
-/*
- * Copy body data into runtime-owned buffer so it survives until
- * Keel sends the response (kl_response_body borrows the pointer).
- */
-static const char *hl_js_stash_body(JSContext *ctx, const char *data,
-                                       size_t len)
-{
-    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (!js)
-        return NULL;
-    if (js->response_body) {
-        hl_alloc_free(js->base.alloc, js->response_body,
-                      js->response_body_size);
-        js->response_body = NULL;
-        js->response_body_size = 0;
-    }
-    if (len >= SIZE_MAX)
-        return NULL;
-    js->response_body = hl_alloc_malloc(js->base.alloc, len + 1);
-    if (!js->response_body)
-        return NULL;
-    js->response_body_size = len + 1;
-    memcpy(js->response_body, data, len);
-    js->response_body[len] = '\0';
-    return js->response_body;
-}
-
 static void hl_response_finalizer(JSRuntime *rt, JSValue val)
 {
     (void)rt;
@@ -305,12 +277,9 @@ static JSValue js_res_json(JSContext *ctx, JSValueConst this_val,
         const char *json_str = JS_ToCString(ctx, result);
         if (json_str) {
             size_t json_len = strlen(json_str);
-            const char *copy = hl_js_stash_body(ctx, json_str, json_len);
+            kl_response_header(res, "Content-Type", "application/json");
+            kl_response_body_copy(res, json_str, json_len);
             JS_FreeCString(ctx, json_str);
-            if (copy) {
-                kl_response_header(res, "Content-Type", "application/json");
-                kl_response_body(res, copy, json_len);
-            }
         }
     }
 
@@ -333,16 +302,13 @@ static JSValue js_res_html(JSContext *ctx, JSValueConst this_val,
     const char *html = JS_ToCString(ctx, argv[0]);
     if (html) {
         size_t html_len = strlen(html);
-        const char *copy = hl_js_stash_body(ctx, html, html_len);
+        HlJS *js_rt = (HlJS *)JS_GetContextOpaque(ctx);
+        kl_response_header(res, "Content-Type", "text/html; charset=utf-8");
+        if (js_rt && js_rt->base.csp_policy)
+            kl_response_header(res, "Content-Security-Policy",
+                               js_rt->base.csp_policy);
+        kl_response_body_copy(res, html, html_len);
         JS_FreeCString(ctx, html);
-        if (copy) {
-            HlJS *js_rt = (HlJS *)JS_GetContextOpaque(ctx);
-            kl_response_header(res, "Content-Type", "text/html; charset=utf-8");
-            if (js_rt && js_rt->base.csp_policy)
-                kl_response_header(res, "Content-Security-Policy",
-                                   js_rt->base.csp_policy);
-            kl_response_body(res, copy, html_len);
-        }
     }
 
     return JS_UNDEFINED;
@@ -359,12 +325,9 @@ static JSValue js_res_text(JSContext *ctx, JSValueConst this_val,
     const char *text = JS_ToCString(ctx, argv[0]);
     if (text) {
         size_t text_len = strlen(text);
-        const char *copy = hl_js_stash_body(ctx, text, text_len);
+        kl_response_header(res, "Content-Type", "text/plain; charset=utf-8");
+        kl_response_body_copy(res, text, text_len);
         JS_FreeCString(ctx, text);
-        if (copy) {
-            kl_response_header(res, "Content-Type", "text/plain; charset=utf-8");
-            kl_response_body(res, copy, text_len);
-        }
     }
 
     return JS_UNDEFINED;

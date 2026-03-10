@@ -57,6 +57,7 @@ typedef struct HlHttpClient {
     char               host_buf[HL_HTTP_HOSTNAME_MAX]; /* NUL-terminated for SNI */
 
     HlAllocator       *alloc;
+    KlAllocator        kl_alloc;     /* stored (not stack), parser points here */
 } HlHttpClient;
 
 /*

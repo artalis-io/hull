@@ -9,6 +9,7 @@
  */
 
 #include "hull/runtime/js.h"
+#include "hull/async.h"
 #include "hull/alloc.h"
 #include "hull/limits.h"
 #include "hull/manifest.h"
@@ -517,6 +518,12 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
     /* Store HlJS pointer in context opaque for C functions to access */
     JS_SetContextOpaque(js->ctx, js);
 
+    /* Register worker VM init hooks (e.g. db.* for worker.dispatch).
+     * Must happen before modules are registered since module init may
+     * trigger worker VM creation. */
+    if (js->base.db)
+        hl_js_worker_db_init();
+
     /* Register hull:* built-in modules */
     if (hl_js_register_modules(js) != 0) {
         hl_js_free(js);
@@ -707,12 +714,6 @@ void hl_js_free(HlJS *js)
     }
     hl_arena_free(js->base.alloc, js->scratch);
     js->scratch = NULL;
-    if (js->response_body) {
-        hl_alloc_free(js->base.alloc, js->response_body,
-                      js->response_body_size);
-        js->response_body = NULL;
-        js->response_body_size = 0;
-    }
 }
 
 void hl_js_dump_error(HlJS *js)
@@ -778,6 +779,7 @@ int hl_js_dispatch(HlJS *js, int handler_id,
 
     /* Set per-request async context (for hull.sleep / http.get access) */
     js->active_conn = (KlConn *)req->_server_ctx;
+    js->last_async_cont = NULL;
 
     /* Get the handler function from the route registry */
     JSValue global = JS_GetGlobalObject(js->ctx);
@@ -814,12 +816,30 @@ int hl_js_dispatch(HlJS *js, int handler_id,
         result = -1;
     } else if (JS_PromiseState(js->ctx, ret) == JS_PROMISE_PENDING) {
         /* Async handler — connection already suspended by hull.sleep
-         * or similar async call. Store the outer handler promise so
-         * the resume callback can check when the handler completes. */
-        JS_SetPropertyStr(js->ctx, global, "__hull_async_promise",
-                          JS_DupValue(js->ctx, ret));
+         * or similar async call. Store the outer handler promise on
+         * the continuation (per-connection, not global) so the resume
+         * callback can check when the handler completes. */
+        extern void hl_js_async_cont_set_handler_promise(
+            HlAsyncCont *cont, JSContext *ctx, JSValue promise);
+        if (js->last_async_cont) {
+            hl_js_async_cont_set_handler_promise(
+                (HlAsyncCont *)js->last_async_cont,
+                js->ctx, ret);
+            js->last_async_cont = NULL;
+        }
         js->async_pending = 1;
         result = 1; /* signal: handler suspended */
+    } else if (JS_PromiseState(js->ctx, ret) == JS_PROMISE_REJECTED) {
+        /* Async handler threw before its first await — the Promise is
+         * immediately rejected (not an exception).  Log and return -1
+         * so the caller writes a 500 response. */
+        JSValue err = JS_PromiseResult(js->ctx, ret);
+        const char *msg = JS_ToCString(js->ctx, err);
+        log_error("[hull:c] async handler rejected: %s",
+                  msg ? msg : "(unknown)");
+        if (msg) JS_FreeCString(js->ctx, msg);
+        JS_FreeValue(js->ctx, err);
+        result = -1;
     }
 
     JS_FreeValue(js->ctx, ret);

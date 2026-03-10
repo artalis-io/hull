@@ -102,17 +102,16 @@ static int sb_supported(void) { return 1; }
  */
 
 #define SEATBELT_PROFILE_SIZE  8192
-#define SEATBELT_MAX_PARAMS    256  /* key-value pairs + NULL terminator */
+#define SEATBELT_MAX_PARAMS    256   /* key-value pairs + NULL terminator */
+#define SEATBELT_PATH_SIZE     4096  /* max path length for resolved paths */
 
 /* Scratch buffers for derived paths (stack-allocated in caller) */
 typedef struct {
-    char db_wal[4096];
-    char db_shm[4096];
-    char db_journal[4096];
+    char db_dir[SEATBELT_PATH_SIZE];
     char fs_read_keys[HL_MANIFEST_MAX_PATHS][16];    /* "FS_R_0" .. "FS_R_31" */
-    char fs_write_keys[HL_MANIFEST_MAX_PATHS][16];    /* "FS_W_0" .. "FS_W_31" */
-    char fs_read_real[HL_MANIFEST_MAX_PATHS][4096];   /* resolved fs_read paths */
-    char fs_write_real[HL_MANIFEST_MAX_PATHS][4096];  /* resolved fs_write paths */
+    char fs_write_keys[HL_MANIFEST_MAX_PATHS][16];   /* "FS_W_0" .. "FS_W_31" */
+    char fs_read_real[HL_MANIFEST_MAX_PATHS][SEATBELT_PATH_SIZE];
+    char fs_write_real[HL_MANIFEST_MAX_PATHS][SEATBELT_PATH_SIZE];
 } SeatbeltScratch;
 
 /*
@@ -163,6 +162,11 @@ static int seatbelt_build_profile(const HlManifest *manifest,
     SBPL_LIT("(version 1)\n");
     SBPL_LIT("(deny default)\n\n");
 
+    /* stat()/lstat() on any path — kernel needs this to traverse parent
+     * directories (e.g. /private, /private/var) when opening files inside
+     * allowed subpaths.  Only exposes metadata, not file content. */
+    SBPL_LIT("(allow file-read-metadata)\n\n");
+
     /* ── System frameworks (dyld, libc, libsystem) ──────────── */
 
     SBPL_LIT("; System frameworks and libraries\n"
@@ -200,24 +204,20 @@ static int seatbelt_build_profile(const HlManifest *manifest,
     /* ── SQLite database (4 file variants) ──────────────────── */
 
     if (db_path) {
-        snprintf(scratch->db_wal, sizeof(scratch->db_wal),
-                 "%s-wal", db_path);
-        snprintf(scratch->db_shm, sizeof(scratch->db_shm),
-                 "%s-shm", db_path);
-        snprintf(scratch->db_journal, sizeof(scratch->db_journal),
-                 "%s-journal", db_path);
+        /* Extract parent directory — SQLite needs the dir for locking/fsync,
+         * and subpath covers the db file plus WAL/SHM/journal variants */
+        snprintf(scratch->db_dir, sizeof(scratch->db_dir), "%s", db_path);
+        char *slash = strrchr(scratch->db_dir, '/');
+        if (slash && slash != scratch->db_dir)
+            *slash = '\0';
+        else
+            snprintf(scratch->db_dir, sizeof(scratch->db_dir), ".");
 
-        PARAM_ADD("DB_PATH", db_path);
-        PARAM_ADD("DB_WAL", scratch->db_wal);
-        PARAM_ADD("DB_SHM", scratch->db_shm);
-        PARAM_ADD("DB_JOURNAL", scratch->db_journal);
+        PARAM_ADD("DB_DIR", scratch->db_dir);
 
-        SBPL_LIT("; SQLite database files\n"
+        SBPL_LIT("; SQLite database directory (covers db, WAL, SHM, journal)\n"
                  "(allow file-read* file-write*\n"
-                 "    (literal (param \"DB_PATH\"))\n"
-                 "    (literal (param \"DB_WAL\"))\n"
-                 "    (literal (param \"DB_SHM\"))\n"
-                 "    (literal (param \"DB_JOURNAL\")))\n\n");
+                 "    (subpath (param \"DB_DIR\")))\n\n");
     }
 
     /* ── Manifest fs_read[] paths ───────────────────────────── */
@@ -451,7 +451,7 @@ int hl_sandbox_apply(const HlManifest *manifest, const char *app_dir,
         /* Resolve symlinks — Seatbelt matches against real paths.
          * e.g. /tmp → /private/tmp on macOS.  Fall back to original
          * if realpath fails (path may not exist yet). */
-        char real_app[4096], real_db[4096];
+        char real_app[SEATBELT_PATH_SIZE], real_db[SEATBELT_PATH_SIZE];
         const char *resolved_app = app_dir;
         const char *resolved_db = db_path;
 

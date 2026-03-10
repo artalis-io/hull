@@ -1,7 +1,8 @@
 -- hull.email — Outbound email with provider dispatch
 --
 -- Supports direct SMTP and API providers (Postmark, SendGrid, Resend).
--- SMTP goes through the C smtp.send() binding; API providers use http.post().
+-- SMTP goes through the C smtp.send() binding; API providers use http.async.post()
+-- (non-blocking).
 --
 -- Usage:
 --   local email = require("hull.email")
@@ -71,7 +72,7 @@ function providers.postmark(opts)
         payload.TextBody = opts.body
     end
 
-    local resp = http.post(
+    local resp = http.async.post(
         "https://api.postmarkapp.com/email",
         json.encode(payload),
         {
@@ -106,7 +107,7 @@ function providers.sendgrid(opts)
         payload.reply_to = { email = opts.reply_to }
     end
 
-    local resp = http.post(
+    local resp = http.async.post(
         "https://api.sendgrid.com/v3/mail/send",
         json.encode(payload),
         {
@@ -140,7 +141,7 @@ function providers.resend(opts)
     if opts.reply_to then payload.reply_to = opts.reply_to end
     if opts.cc then payload.cc = opts.cc end
 
-    local resp = http.post(
+    local resp = http.async.post(
         "https://api.resend.com/emails",
         json.encode(payload),
         {

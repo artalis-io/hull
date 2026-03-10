@@ -105,7 +105,7 @@ app.del("/webhooks/:id", (req, res) => {
 });
 
 // Fire an event — atomically inserts event + enqueues deliveries via outbox
-app.post("/events", (req, res) => {
+app.post("/events", async (req, res) => {
     let body;
     try { body = JSON.parse(req.body); } catch (_e) {
         res.status(400);
@@ -166,12 +166,12 @@ app.post("/events", (req, res) => {
     });
 
     // Flush outbox: deliver enqueued webhooks (after commit)
-    outbox.flush();
+    await outbox.flush();
 });
 
 // Manually trigger outbox flush (for crash recovery or cron)
-app.post("/outbox/flush", (_req, res) => {
-    const result = outbox.flush();
+app.post("/outbox/flush", async (_req, res) => {
+    const result = await outbox.flush();
     res.json(result);
 });
 

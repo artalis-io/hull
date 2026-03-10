@@ -107,7 +107,7 @@ function enqueue(opts) {
  * Attempt to deliver a single outbox item.
  * @returns {[boolean, string|null]} [success, errorMessage]
  */
-function deliverItem(item) {
+async function deliverItem(item) {
     if (item.kind === "webhook" || item.kind === "http") {
         let reqHeaders = {};
         if (item.headers) {
@@ -116,7 +116,7 @@ function deliverItem(item) {
         }
 
         try {
-            const result = http.post(item.destination, item.payload, {
+            const result = await http.async.post(item.destination, item.payload, {
                 headers: reqHeaders
             });
             if (result && result.status >= 200 && result.status < 300)
@@ -145,7 +145,7 @@ function backoffDelay(attempt) {
  * @param {Object} opts - Options: limit (max items, default 50)
  * @returns {{ delivered: number, failed: number, retried: number }}
  */
-function flush(opts) {
+async function flush(opts) {
     const o = opts || {};
     const limit = o.limit || 50;
     const now = time.now();
@@ -160,7 +160,7 @@ function flush(opts) {
 
     for (let i = 0; i < items.length; i++) {
         const item = items[i];
-        const [ok, err] = deliverItem(item);
+        const [ok, err] = await deliverItem(item);
 
         if (ok) {
             db.exec(
@@ -204,9 +204,9 @@ function middleware() {
 /**
  * Flush if the request was marked for it.
  */
-function flushIfNeeded(req) {
+async function flushIfNeeded(req) {
     if (req.ctx && req.ctx._outbox_flush)
-        flush();
+        await flush();
 }
 
 /**
