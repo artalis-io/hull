@@ -1626,7 +1626,7 @@ static int lua_parse_http_headers(lua_State *L, int idx,
 }
 
 /* Push HTTP response as Lua table: { status, body, headers } */
-static void lua_push_http_response(lua_State *L, HlHttpResponse *resp)
+static void lua_push_http_response(lua_State *L, const KlClientResponse *resp)
 {
     lua_newtable(L);
 
@@ -1696,14 +1696,14 @@ static int lua_http_request(lua_State *L)
         lua_pop(L, 1);
     }
 
-    HlHttpResponse resp;
+    KlClientResponse resp;
     int rc = hl_cap_http_request(lua->base.http_cfg, method, url,
                                     headers, num_headers, body, body_len, &resp);
     if (rc != 0)
         return luaL_error(L, "http request failed");
 
     lua_push_http_response(L, &resp);
-    hl_cap_http_free(&resp);
+    kl_client_response_free(&resp);
     return 1;
 }
 
@@ -1728,14 +1728,14 @@ static int lua_http_get(lua_State *L)
         lua_pop(L, 1);
     }
 
-    HlHttpResponse resp;
+    KlClientResponse resp;
     int rc = hl_cap_http_request(lua->base.http_cfg, "GET", url,
                                     headers, num_headers, NULL, 0, &resp);
     if (rc != 0)
         return luaL_error(L, "http.get failed");
 
     lua_push_http_response(L, &resp);
-    hl_cap_http_free(&resp);
+    kl_client_response_free(&resp);
     return 1;
 }
 
@@ -1765,14 +1765,14 @@ static int lua_http_body_method(lua_State *L, const char *method)
         lua_pop(L, 1);
     }
 
-    HlHttpResponse resp;
+    KlClientResponse resp;
     int rc = hl_cap_http_request(lua->base.http_cfg, method, url,
                                     headers, num_headers, body, body_len, &resp);
     if (rc != 0)
         return luaL_error(L, "http.%s failed", method);
 
     lua_push_http_response(L, &resp);
-    hl_cap_http_free(&resp);
+    kl_client_response_free(&resp);
     return 1;
 }
 
@@ -1801,14 +1801,14 @@ static int lua_http_delete(lua_State *L)
         lua_pop(L, 1);
     }
 
-    HlHttpResponse resp;
+    KlClientResponse resp;
     int rc = hl_cap_http_request(lua->base.http_cfg, "DELETE", url,
                                     headers, num_headers, NULL, 0, &resp);
     if (rc != 0)
         return luaL_error(L, "http.delete failed");
 
     lua_push_http_response(L, &resp);
-    hl_cap_http_free(&resp);
+    kl_client_response_free(&resp);
     return 1;
 }
 
@@ -1816,8 +1816,12 @@ static int lua_http_delete(lua_State *L)
 
 static void lua_push_async_http_response(lua_State *L, void *driver)
 {
-    HlHttpClient *client = (HlHttpClient *)driver;
-    HlHttpResponse *resp = &client->resp;
+    KlClient *client = (KlClient *)driver;
+    const KlClientResponse *resp = kl_client_response(client);
+    if (!resp) {
+        lua_pushnil(L);
+        return;
+    }
 
     lua_newtable(L);
 
@@ -1884,12 +1888,12 @@ static int lua_http_fetch(lua_State *L)
         lua_pop(L, 1);
     }
 
-    /* Start the async HTTP request — creates socket, watcher, async ctx,
-     * and suspends the inbound connection */
-    HlHttpClient *client = hl_async_http_start(
+    /* Start the async HTTP request — checks allowlist, creates KlClient,
+     * creates HlAsyncCtx, and suspends the inbound connection */
+    HlAsyncCtx *ctx = hl_async_http_start(
         lua->server, lua->active_conn, lua->base.alloc,
         lua->base.http_cfg, method, url, headers, num_headers, body, body_len);
-    if (!client)
+    if (!ctx)
         return luaL_error(L, "http.fetch: failed to start request");
 
     /* Wire the Lua continuation */
@@ -1902,9 +1906,9 @@ static int lua_http_fetch(lua_State *L)
          * The cancel callback will clean up when the connection times out. */
         return luaL_error(L, "http.fetch: out of memory");
     }
-    client->async_ctx->cont = cont;
+    ctx->cont = cont;
 
-    /* Yield the coroutine — on resume, the driver result (HlHttpClient*)
+    /* Yield the coroutine — on resume, the driver result (KlClient*)
      * will be pushed onto the stack by lua_push_async_http_response */
     return lua_yieldk(L, 0, 0, NULL);
 }

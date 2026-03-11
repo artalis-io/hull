@@ -34,15 +34,6 @@
 #define HL_RANDOM_MAX_BYTES   65536             /* crypto.random() max */
 #define HL_PBKDF2_ITERATIONS  100000
 
-/* ── HTTP client ────────────────────────────────────────────────────── */
-
-#define HL_HTTP_HOSTNAME_MAX       256                  /* Max hostname for SNI (NUL-terminated) */
-#define HL_HTTP_REQ_BUF_SIZE       4096                /* Outbound request header buffer */
-#define HL_HTTP_MAX_REQ_HEADERS    64                  /* Max outbound request headers */
-#define HL_HTTP_DEFAULT_TIMEOUT_MS 30000               /* Connect/send/recv timeout */
-#define HL_HTTP_DEFAULT_MAX_RESP   (4 * 1024 * 1024)   /* 4 MB max response body */
-#define HL_HTTP_RECV_BUF_SIZE      8192                /* Response recv buffer */
-
 /* ── SMTP client ───────────────────────────────────────────────────── */
 
 #define HL_SMTP_RECV_BUF_SIZE      1024                /* SMTP response line buffer */

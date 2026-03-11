@@ -483,7 +483,7 @@ static int hull_serve(int argc, char **argv)
         .queue_capacity = HL_THREAD_POOL_CAPACITY,
         .alloc          = &kl_alloc,
     };
-    KlThreadPool *thread_pool = kl_thread_pool_create(&server, &tp_cfg);
+    KlThreadPool *thread_pool = kl_thread_pool_create(&server.ev, &tp_cfg);
     if (!thread_pool)
         log_warn("[hull:c] thread pool creation failed — async work unavailable");
     /* thread_pool may be NULL if creation fails — non-fatal, async work
@@ -635,8 +635,8 @@ static int hull_serve(int argc, char **argv)
     if (manifest.hosts_count > 0) {
         http_cfg_storage.allowed_hosts     = manifest.hosts;
         http_cfg_storage.count             = manifest.hosts_count;
-        http_cfg_storage.timeout_ms        = HL_HTTP_DEFAULT_TIMEOUT_MS;
-        http_cfg_storage.max_response_size = HL_HTTP_DEFAULT_MAX_RESP;
+        http_cfg_storage.timeout_ms        = KL_CLIENT_DEFAULT_TIMEOUT_MS;
+        http_cfg_storage.max_response_size = KL_CLIENT_DEFAULT_MAX_RESP;
 
         /* Set up TLS client for HTTPS support */
         if (skip_ca_bundle) {

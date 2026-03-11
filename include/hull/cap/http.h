@@ -1,9 +1,8 @@
 /*
  * cap/http.h — HTTP client capability with host allowlist
  *
- * Provides synchronous outbound HTTP requests with configurable
- * host allowlists, timeouts, response size limits, and optional
- * TLS support via Keel's KlTls vtable.
+ * Thin wrapper around Keel's HTTP client (keel/client.h) that adds
+ * host allowlist checking and audit logging.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -11,22 +10,10 @@
 #ifndef HL_CAP_HTTP_H
 #define HL_CAP_HTTP_H
 
-#include <stddef.h>
+#include <keel/client.h>
 
-/* Forward declaration — avoid pulling in keel/tls.h */
-typedef struct {
-    void    *ctx;
-    void    *factory;
-    void   (*ctx_destroy)(void *ctx);
-} HlTlsBridge;
-
-/**
- * @brief Single HTTP header (name: value).
- */
-typedef struct HlHttpHeader {
-    const char *name;
-    const char *value;
-} HlHttpHeader;
+/* Backward-compatible typedef — Hull code uses HlHttpHeader for request headers */
+typedef KlClientHeader HlHttpHeader;
 
 /**
  * @brief HTTP client configuration.
@@ -36,23 +23,13 @@ typedef struct HlHttpConfig {
     int              count;            /**< Number of allowed hosts */
     int              timeout_ms;       /**< Connect/send/recv timeout (default: 30000) */
     size_t           max_response_size;/**< Max response body bytes (default: 4 MB) */
-    void            *tls;             /**< KlTlsConfig* for HTTPS — NULL = no HTTPS */
+    KlTlsConfig     *tls;             /**< KlTlsConfig* for HTTPS — NULL = no HTTPS */
 } HlHttpConfig;
-
-/**
- * @brief HTTP response (owned — caller must call hl_cap_http_free).
- */
-typedef struct HlHttpResponse {
-    int           status;              /**< HTTP status code */
-    char         *body;                /**< Response body (heap-allocated, NUL-terminated) */
-    size_t        body_len;            /**< Body length in bytes */
-    HlHttpHeader *headers;             /**< Response headers (heap-allocated array) */
-    int           num_headers;         /**< Number of response headers */
-} HlHttpResponse;
 
 /**
  * @brief Perform a synchronous HTTP request.
  *
+ * Checks host allowlist, audits, then delegates to kl_client_request().
  * Blocks until the response is received, an error occurs, or timeout.
  *
  * @param cfg      HTTP client configuration (host allowlist, timeouts, TLS).
@@ -62,39 +39,16 @@ typedef struct HlHttpResponse {
  * @param num_headers Number of request headers.
  * @param body     Request body (may be NULL).
  * @param body_len Request body length.
- * @param resp     Output: populated on success. Caller must call hl_cap_http_free().
+ * @param resp     Output: populated on success. Caller must call kl_client_response_free().
  * @return 0 on success, -1 on error.
  */
 int hl_cap_http_request(const HlHttpConfig *cfg,
                         const char *method, const char *url,
                         const HlHttpHeader *headers, int num_headers,
                         const char *body, size_t body_len,
-                        HlHttpResponse *resp);
-
-/**
- * @brief Free response resources.
- */
-void hl_cap_http_free(HlHttpResponse *resp);
+                        KlClientResponse *resp);
 
 /* ── Internal helpers (exposed for unit testing) ─────────────────── */
-
-/**
- * @brief Parsed URL components (points into original URL string).
- */
-typedef struct {
-    int         is_https;
-    const char *host;
-    size_t      host_len;
-    int         port;
-    const char *path;      /**< Includes leading '/' and query string */
-    size_t      path_len;
-} HlParsedUrl;
-
-/**
- * @brief Parse a URL into components.
- * @return 0 on success, -1 on error.
- */
-int hl_http_parse_url(const char *url, HlParsedUrl *out);
 
 /**
  * @brief Check if a hostname is in the allowlist.

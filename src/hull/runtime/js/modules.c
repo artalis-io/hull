@@ -2138,7 +2138,7 @@ static void js_free_http_headers(JSContext *ctx, HlHttpHeader *hdrs, int count)
 }
 
 /* Push HTTP response as JS object: { status, body, headers } */
-static JSValue js_push_http_response(JSContext *ctx, HlHttpResponse *resp)
+static JSValue js_push_http_response(JSContext *ctx, const KlClientResponse *resp)
 {
     JSValue obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, obj, "status", JS_NewInt32(ctx, resp->status));
@@ -2213,7 +2213,7 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, hdrs_val);
     }
 
-    HlHttpResponse resp;
+    KlClientResponse resp;
     int rc = hl_cap_http_request(js->base.http_cfg, method, url,
                                     headers, num_headers, body, body_len, &resp);
 
@@ -2227,7 +2227,7 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "http request failed");
 
     JSValue result = js_push_http_response(ctx, &resp);
-    hl_cap_http_free(&resp);
+    kl_client_response_free(&resp);
     return result;
 }
 
@@ -2255,7 +2255,7 @@ static JSValue js_http_get(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, hdrs_val);
     }
 
-    HlHttpResponse resp;
+    KlClientResponse resp;
     int rc = hl_cap_http_request(js->base.http_cfg, "GET", url,
                                     headers, num_headers, NULL, 0, &resp);
     JS_FreeCString(ctx, url);
@@ -2265,7 +2265,7 @@ static JSValue js_http_get(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "http.get failed");
 
     JSValue result = js_push_http_response(ctx, &resp);
-    hl_cap_http_free(&resp);
+    kl_client_response_free(&resp);
     return result;
 }
 
@@ -2298,7 +2298,7 @@ static JSValue js_http_body_method(JSContext *ctx, int argc, JSValueConst *argv,
         JS_FreeValue(ctx, hdrs_val);
     }
 
-    HlHttpResponse resp;
+    KlClientResponse resp;
     int rc = hl_cap_http_request(js->base.http_cfg, method_name, url,
                                     headers, num_headers, body, body_len, &resp);
     JS_FreeCString(ctx, url);
@@ -2310,7 +2310,7 @@ static JSValue js_http_body_method(JSContext *ctx, int argc, JSValueConst *argv,
         return JS_ThrowInternalError(ctx, "http.%s failed", method_name);
 
     JSValue result = js_push_http_response(ctx, &resp);
-    hl_cap_http_free(&resp);
+    kl_client_response_free(&resp);
     return result;
 }
 
@@ -2359,7 +2359,7 @@ static JSValue js_http_del(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, hdrs_val);
     }
 
-    HlHttpResponse resp;
+    KlClientResponse resp;
     int rc = hl_cap_http_request(js->base.http_cfg, "DELETE", url,
                                     headers, num_headers, NULL, 0, &resp);
     JS_FreeCString(ctx, url);
@@ -2369,7 +2369,7 @@ static JSValue js_http_del(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "http.del failed");
 
     JSValue result = js_push_http_response(ctx, &resp);
-    hl_cap_http_free(&resp);
+    kl_client_response_free(&resp);
     return result;
 }
 
@@ -2377,8 +2377,10 @@ static JSValue js_http_del(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_push_async_http_response(JSContext *ctx, void *driver)
 {
-    HlHttpClient *client = (HlHttpClient *)driver;
-    HlHttpResponse *resp = &client->resp;
+    KlClient *client = (KlClient *)driver;
+    const KlClientResponse *resp = kl_client_response(client);
+    if (!resp)
+        return JS_UNDEFINED;
 
     JSValue obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, obj, "status", JS_NewInt32(ctx, resp->status));
@@ -2457,8 +2459,8 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, hdrs_val);
     }
 
-    /* Start async HTTP */
-    HlHttpClient *client = hl_async_http_start(
+    /* Start async HTTP — checks allowlist, creates KlClient, suspends conn */
+    HlAsyncCtx *async_ctx = hl_async_http_start(
         js->server, js->active_conn, js->base.alloc,
         js->base.http_cfg, method, url, headers, num_headers, body, body_len);
 
@@ -2468,7 +2470,7 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
     if (body) JS_FreeCString(ctx, body);
     js_free_http_headers(ctx, headers, num_headers);
 
-    if (!client)
+    if (!async_ctx)
         return JS_ThrowInternalError(ctx, "http.fetch: failed to start request");
 
     /* Create Promise */
@@ -2492,7 +2494,7 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, promise);
         return JS_ThrowInternalError(ctx, "http.fetch: out of memory");
     }
-    client->async_ctx->cont = cont;
+    async_ctx->cont = cont;
 
     return promise;
 }
