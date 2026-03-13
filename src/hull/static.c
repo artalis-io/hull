@@ -163,7 +163,7 @@ int hl_static_middleware(KlRequest *req, KlResponse *res, void *user_data)
         if (elen > 0 && etag_matches(req, etag, (size_t)elen)) {
             kl_response_status(res, 304);
             kl_response_header(res, "ETag", etag);
-            kl_response_body(res, NULL, 0);
+            kl_response_body_borrow(res, NULL, 0);
             return 1;
         }
 
@@ -172,7 +172,7 @@ int hl_static_middleware(KlRequest *req, KlResponse *res, void *user_data)
         kl_response_header(res, "Cache-Control", "public, max-age=86400");
         if (elen > 0)
             kl_response_header(res, "ETag", etag);
-        kl_response_body(res, (const char *)e->data, e->len);
+        kl_response_body_borrow(res, (const char *)e->data, e->len);
         return 1;
     }
 
@@ -200,7 +200,7 @@ int hl_static_middleware(KlRequest *req, KlResponse *res, void *user_data)
             close(fd);
             kl_response_status(res, 304);
             kl_response_header(res, "ETag", etag);
-            kl_response_body(res, NULL, 0);
+            kl_response_body_borrow(res, NULL, 0);
             return 1;
         }
 

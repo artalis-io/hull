@@ -273,7 +273,7 @@ static int lua_res_redirect(lua_State *L)
 
     kl_response_status(res, code);
     kl_response_header(res, "Location", url);
-    kl_response_body(res, "", 0);
+    kl_response_body_borrow(res, "", 0);
     return 0;
 }
 

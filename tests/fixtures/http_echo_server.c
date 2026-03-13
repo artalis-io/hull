@@ -90,7 +90,7 @@ static void head_handler(KlRequest *req, KlResponse *res, void *ctx)
     kl_response_status(res, 200);
     kl_response_header(res, "Content-Type", "application/json");
     kl_response_header(res, "X-Echo-Method", "HEAD");
-    kl_response_body(res, "{}", 2);
+    kl_response_body_borrow(res, "{}", 2);
 }
 
 int main(int argc, char **argv)

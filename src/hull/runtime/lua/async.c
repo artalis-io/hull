@@ -108,7 +108,7 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
 
         kl_response_status(&conn->res, 500);
         kl_response_header(&conn->res, "Content-Type", "text/plain");
-        kl_response_body(&conn->res, "Internal Server Error", 21);
+        kl_response_body_borrow(&conn->res, "Internal Server Error", 21);
         conn->state = KL_CONN_SENDING;
     }
 }
