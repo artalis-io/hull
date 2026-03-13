@@ -64,11 +64,13 @@ static void on_keel_client_done(KlClient *client, void *user_data)
         hl_audit_end(&w);
     } else {
         /* Error — free client, set driver NULL */
+        KlError err = kl_client_last_error(client);
         ctx->driver = NULL;
         kl_client_free(client);
 
         /* Audit failure */
         ShJsonWriter w = hl_audit_begin("http.fetch");
+        sh_json_write_kv_string(&w, "error", kl_strerror(err));
         sh_json_write_kv_int(&w, "result", -1);
         hl_audit_end(&w);
     }

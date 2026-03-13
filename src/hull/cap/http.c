@@ -11,6 +11,7 @@
 #include "hull/cap/audit.h"
 
 #include <keel/allocator.h>
+#include <keel/error.h>
 #include <keel/url.h>
 
 #include <string.h>
@@ -84,6 +85,8 @@ int hl_cap_http_request(const HlHttpConfig *cfg,
         sh_json_write_kv_string(&w, "url", url);
         if (rc == 0)
             sh_json_write_kv_int(&w, "status", resp->status);
+        else
+            sh_json_write_kv_string(&w, "error", kl_strerror(resp->error));
         sh_json_write_kv_int(&w, "result", rc);
         hl_audit_end(&w);
     }

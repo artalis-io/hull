@@ -471,7 +471,8 @@ static int hull_serve(int argc, char **argv)
 
     KlServer server;
     if (kl_server_init(&server, &config) != 0) {
-        log_error("[hull:c] server init failed");
+        log_error("[hull:c] server init failed: %s",
+                  kl_strerror(server.last_error));
         if (server_tls_ctx)
             kl_tls_mbedtls_ctx_destroy(server_tls_ctx);
         goto cleanup_db;
@@ -485,7 +486,8 @@ static int hull_serve(int argc, char **argv)
     };
     KlThreadPool *thread_pool = kl_thread_pool_create(&server.ev, &tp_cfg);
     if (!thread_pool)
-        log_warn("[hull:c] thread pool creation failed — async work unavailable");
+        log_warn("[hull:c] thread pool creation failed: %s — async work unavailable",
+                 kl_strerror(server.ev.last_error));
     /* thread_pool may be NULL if creation fails — non-fatal, async work
      * will simply be unavailable */
 
@@ -721,7 +723,9 @@ static int hull_serve(int argc, char **argv)
              bind_addr, port, rt->vt->name);
 
     /* Enter event loop */
-    kl_server_run(&server);
+    if (kl_server_run(&server) < 0)
+        log_error("[hull:c] server exited with error: %s",
+                  kl_strerror(server.last_error));
 
     log_info("[hull:c] server stopped");
 

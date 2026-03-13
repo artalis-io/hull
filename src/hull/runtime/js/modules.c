@@ -2224,7 +2224,8 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
     js_free_http_headers(ctx, headers, num_headers);
 
     if (rc != 0)
-        return JS_ThrowInternalError(ctx, "http request failed");
+        return JS_ThrowInternalError(ctx, "http request failed: %s",
+                                      kl_strerror(resp.error));
 
     JSValue result = js_push_http_response(ctx, &resp);
     kl_client_response_free(&resp);
@@ -2262,7 +2263,8 @@ static JSValue js_http_get(JSContext *ctx, JSValueConst this_val,
     js_free_http_headers(ctx, headers, num_headers);
 
     if (rc != 0)
-        return JS_ThrowInternalError(ctx, "http.get failed");
+        return JS_ThrowInternalError(ctx, "http.get failed: %s",
+                                      kl_strerror(resp.error));
 
     JSValue result = js_push_http_response(ctx, &resp);
     kl_client_response_free(&resp);
@@ -2307,7 +2309,8 @@ static JSValue js_http_body_method(JSContext *ctx, int argc, JSValueConst *argv,
     js_free_http_headers(ctx, headers, num_headers);
 
     if (rc != 0)
-        return JS_ThrowInternalError(ctx, "http.%s failed", method_name);
+        return JS_ThrowInternalError(ctx, "http.%s failed: %s",
+                                      method_name, kl_strerror(resp.error));
 
     JSValue result = js_push_http_response(ctx, &resp);
     kl_client_response_free(&resp);
@@ -2366,7 +2369,8 @@ static JSValue js_http_del(JSContext *ctx, JSValueConst this_val,
     js_free_http_headers(ctx, headers, num_headers);
 
     if (rc != 0)
-        return JS_ThrowInternalError(ctx, "http.del failed");
+        return JS_ThrowInternalError(ctx, "http.del failed: %s",
+                                      kl_strerror(resp.error));
 
     JSValue result = js_push_http_response(ctx, &resp);
     kl_client_response_free(&resp);

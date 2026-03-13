@@ -1700,7 +1700,8 @@ static int lua_http_request(lua_State *L)
     int rc = hl_cap_http_request(lua->base.http_cfg, method, url,
                                     headers, num_headers, body, body_len, &resp);
     if (rc != 0)
-        return luaL_error(L, "http request failed");
+        return luaL_error(L, "http request failed: %s",
+                          kl_strerror(resp.error));
 
     lua_push_http_response(L, &resp);
     kl_client_response_free(&resp);
@@ -1732,7 +1733,7 @@ static int lua_http_get(lua_State *L)
     int rc = hl_cap_http_request(lua->base.http_cfg, "GET", url,
                                     headers, num_headers, NULL, 0, &resp);
     if (rc != 0)
-        return luaL_error(L, "http.get failed");
+        return luaL_error(L, "http.get failed: %s", kl_strerror(resp.error));
 
     lua_push_http_response(L, &resp);
     kl_client_response_free(&resp);
@@ -1769,7 +1770,8 @@ static int lua_http_body_method(lua_State *L, const char *method)
     int rc = hl_cap_http_request(lua->base.http_cfg, method, url,
                                     headers, num_headers, body, body_len, &resp);
     if (rc != 0)
-        return luaL_error(L, "http.%s failed", method);
+        return luaL_error(L, "http.%s failed: %s", method,
+                          kl_strerror(resp.error));
 
     lua_push_http_response(L, &resp);
     kl_client_response_free(&resp);
@@ -1805,7 +1807,8 @@ static int lua_http_delete(lua_State *L)
     int rc = hl_cap_http_request(lua->base.http_cfg, "DELETE", url,
                                     headers, num_headers, NULL, 0, &resp);
     if (rc != 0)
-        return luaL_error(L, "http.delete failed");
+        return luaL_error(L, "http.delete failed: %s",
+                          kl_strerror(resp.error));
 
     lua_push_http_response(L, &resp);
     kl_client_response_free(&resp);
