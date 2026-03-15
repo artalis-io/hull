@@ -457,7 +457,7 @@ static int hull_serve(int argc, char **argv)
 
     if (tls_cert_path && tls_key_path) {
         server_tls_ctx = kl_tls_mbedtls_ctx_create(
-            tls_cert_path, tls_key_path, NULL, KL_MTLS_NONE);
+            tls_cert_path, tls_key_path, NULL, KL_MTLS_NONE, &kl_alloc);
         if (!server_tls_ctx) {
             log_error("[hull:c] failed to create server TLS context "
                       "(cert=%s, key=%s)", tls_cert_path, tls_key_path);
@@ -643,12 +643,12 @@ static int hull_serve(int argc, char **argv)
         /* Set up TLS client for HTTPS support */
         if (skip_ca_bundle) {
             log_warn("[hull:c] TLS certificate verification disabled (--skip-ca-bundle)");
-            client_tls_ctx = kl_tls_mbedtls_client_ctx_create(NULL);
+            client_tls_ctx = kl_tls_mbedtls_client_ctx_create(NULL, &kl_alloc);
         } else {
             ca_bundle_path = find_ca_bundle();
             if (ca_bundle_path) {
                 log_info("[hull:c] using CA bundle: %s", ca_bundle_path);
-                client_tls_ctx = kl_tls_mbedtls_client_ctx_create(ca_bundle_path);
+                client_tls_ctx = kl_tls_mbedtls_client_ctx_create(ca_bundle_path, &kl_alloc);
             } else {
                 log_warn("[hull:c] no CA bundle found; HTTPS disabled "
                          "(use --skip-ca-bundle for dev mode)");
