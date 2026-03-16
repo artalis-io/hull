@@ -242,6 +242,30 @@ open http://localhost:3000
 # Switch language via /lang/hu or /lang/en
 ```
 
+### cors_manifest
+
+CORS via `app.manifest()` configuration — no middleware code needed. Keel registers CORS headers automatically. Also demonstrates `server.stats()` for live connection counts.
+
+```bash
+./build/hull -p 3000 examples/cors_manifest/app.lua
+
+# Health check
+curl http://localhost:3000/health
+
+# API with CORS (try from allowed origin)
+curl -H 'Origin: http://localhost:5173' http://localhost:3000/api/data
+
+# CORS preflight
+curl -X OPTIONS -H 'Origin: http://localhost:5173' \
+  -H 'Access-Control-Request-Method: POST' \
+  http://localhost:3000/api/data
+
+# Create data
+curl -X POST http://localhost:3000/api/data \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"test"}'
+```
+
 ## Testing Examples
 
 ### Unit tests (`hull test`)
@@ -258,6 +282,7 @@ hull test examples/crud_with_auth/
 hull test examples/middleware/
 hull test examples/webhooks/
 hull test examples/todo/
+hull test examples/cors_manifest/
 ```
 
 The test API:

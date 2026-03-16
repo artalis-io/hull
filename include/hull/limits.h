@@ -50,6 +50,10 @@
 
 #define HL_WORKER_ERR_SIZE         256                  /* Worker error message buffer */
 
+/* ── Compression ───────────────────────────────────────────────────── */
+
+#define HL_COMPRESS_MIN_SIZE  860                  /* Gzip break-even threshold (bytes) */
+
 /* ── Runtime memory ─────────────────────────────────────────────────── */
 
 #define HL_SCRATCH_SIZE       (HL_MODULE_MAX_SIZE + 256 * 1024) /* module load + request scratch */

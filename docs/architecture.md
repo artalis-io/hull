@@ -45,6 +45,10 @@ Keel (`vendor/keel/`) is an independent C11 HTTP server library. Hull uses it as
 - Response builder: buffered (writev), sendfile, or streaming chunked
 - Body reader vtable: pluggable readers for multipart, buffered, etc.
 - TLS transport vtable (bring-your-own backend)
+- HTTP client connection pooling (keep-alive reuse by host:port:tls)
+- Automatic redirect following (3xx, up to 10 hops, RFC 7231)
+- Pluggable response compression (gzip via miniz)
+- Server stats API (`kl_server_stats`)
 
 **What Keel does NOT do:**
 - No application logic
@@ -72,8 +76,11 @@ The server startup sequence:
 8. Verify app signature if `--verify-sig` provided
 9. Wire routes from runtime into Keel router (`rt->vt->wire_routes_server`)
 10. Extract manifest from runtime (`rt->vt->extract_manifest`)
-11. Apply kernel sandbox — always active, scoped by manifest (`hl_sandbox_apply`)
-12. Run Keel event loop
+11. Create client connection pool (if `hosts` declared)
+12. Initialize compression config (gzip via miniz, unless `--no-compress`)
+13. Register CORS middleware (if manifest declares `cors`)
+14. Apply kernel sandbox — always active, scoped by manifest (`hl_sandbox_apply`)
+15. Run Keel event loop
 
 ### Manifest Extraction (`manifest.c`)
 
@@ -83,7 +90,13 @@ The manifest declares what the app needs:
 app.manifest({
     fs = { read = {"data/"}, write = {"data/uploads/"} },
     env = {"PORT", "DATABASE_URL"},
-    hosts = {"api.stripe.com"}
+    hosts = {"api.stripe.com"},
+    cors = {
+        origins = {"https://myapp.com"},
+        methods = "GET, POST, PUT, DELETE",
+        credentials = true,
+        max_age = 86400,
+    },
 })
 ```
 
@@ -91,7 +104,7 @@ Extraction reads the stored manifest table from the runtime:
 - **Lua:** `__hull_manifest` in Lua registry → `hl_manifest_extract()`
 - **QuickJS:** `globalThis.__hull_manifest` → `hl_manifest_extract_js()`
 
-Result: `HlManifest` struct with up to 32 entries per category (`fs_read`, `fs_write`, `env`, `hosts`), plus optional `csp` policy string.
+Result: `HlManifest` struct with up to 32 entries per category (`fs_read`, `fs_write`, `env`, `hosts`), optional `csp` policy string, and optional `cors` configuration (origins, methods, headers, credentials, max_age).
 
 `app.manifest()` is **one-shot** — calling it a second time raises a runtime error. The manifest is extracted into a C struct during startup, capabilities are wired from that struct, and the kernel sandbox is sealed. After sealing, the runtime-side registry key is irrelevant — C-level configs and kernel restrictions are immutable.
 

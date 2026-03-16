@@ -551,7 +551,66 @@ int hl_js_load_app(HlJS *js, const char *filename)
     if (!js || !js->ctx || !filename)
         return -1;
 
-    /* Read the entry point file */
+    /* Extract app directory from filename (needed regardless of source) */
+    size_t fn_len = strlen(filename);
+    char *app_dir = hl_alloc_malloc(js->base.alloc, fn_len + 1);
+    if (!app_dir)
+        return -1;
+    memcpy(app_dir, filename, fn_len + 1);
+    char *last_slash = strrchr(app_dir, '/');
+    if (last_slash)
+        *last_slash = '\0';
+    else {
+        hl_alloc_free(js->base.alloc, app_dir, fn_len + 1);
+        app_dir = hl_alloc_malloc(js->base.alloc, 2);
+        if (!app_dir)
+            return -1;
+        app_dir[0] = '.';
+        app_dir[1] = '\0';
+        fn_len = 1;
+    }
+    js->app_dir = app_dir;
+    js->app_dir_size = fn_len + 1;
+
+    /* Try embedded VFS entry first (hull build binaries).
+     * Convert filename to VFS name: "./basename"
+     * e.g. "app.js" → "./app.js", "/path/to/app.js" → "./app.js" */
+    if (js->base.app_vfs && js->base.app_vfs->count > 0) {
+        const char *base = strrchr(filename, '/');
+        base = base ? base + 1 : filename;
+        char vfs_name[256];
+        size_t blen = strlen(base);
+        if (blen + 3 <= sizeof(vfs_name)) {
+            vfs_name[0] = '.';
+            vfs_name[1] = '/';
+            memcpy(vfs_name + 2, base, blen + 1);
+
+            const HlEntry *e = hl_vfs_find(js->base.app_vfs, vfs_name);
+            if (e) {
+                /* QuickJS lexer requires '\0' sentinel */
+                size_t arena_saved = js->scratch->used;
+                char *buf = sh_arena_alloc(js->scratch, (size_t)e->len + 1);
+                if (!buf)
+                    return -1;
+                memcpy(buf, e->data, e->len);
+                buf[e->len] = '\0';
+
+                JSValue val = JS_Eval(js->ctx, buf, e->len, filename,
+                                      JS_EVAL_TYPE_MODULE);
+                js->scratch->used = arena_saved;
+
+                if (JS_IsException(val)) {
+                    hl_js_dump_error(js);
+                    return -1;
+                }
+                JS_FreeValue(js->ctx, val);
+                sh_arena_reset(js->scratch);
+                return 0;
+            }
+        }
+    }
+
+    /* Load from filesystem (development mode) */
     FILE *f = fopen(filename, "rb");
     if (!f) {
         log_error("[hull:c] cannot open %s", filename);
@@ -587,31 +646,6 @@ int hl_js_load_app(HlJS *js, const char *filename)
         return -1;
     }
     buf[nread] = '\0';
-
-    /* Extract app directory from filename */
-    size_t fn_len = strlen(filename);
-    char *app_dir = hl_alloc_malloc(js->base.alloc, fn_len + 1);
-    if (!app_dir) {
-        js->scratch->used = arena_saved;
-        return -1;
-    }
-    memcpy(app_dir, filename, fn_len + 1);
-    char *last_slash = strrchr(app_dir, '/');
-    if (last_slash)
-        *last_slash = '\0';
-    else {
-        hl_alloc_free(js->base.alloc, app_dir, fn_len + 1);
-        app_dir = hl_alloc_malloc(js->base.alloc, 2);
-        if (!app_dir) {
-            js->scratch->used = arena_saved;
-            return -1;
-        }
-        app_dir[0] = '.';
-        app_dir[1] = '\0';
-        fn_len = 1;
-    }
-    js->app_dir = app_dir;
-    js->app_dir_size = fn_len + 1;
 
     /* Evaluate as ES module */
     JSValue val = JS_Eval(js->ctx, buf, nread, filename,

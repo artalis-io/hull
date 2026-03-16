@@ -15,8 +15,7 @@
 
 #include <stddef.h>
 
-/* Gzip overhead break-even — below this, compression wastes bytes */
-#define HL_COMPRESS_MIN_SIZE 860
+#include "limits.h" /* HL_COMPRESS_MIN_SIZE */
 
 /*
  * Compress response body if the client accepts gzip and the body

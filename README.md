@@ -62,6 +62,12 @@ Hull ships 14 subcommands for the full development lifecycle:
 | `hull manifest <app>` | Extract and print manifest as JSON |
 | `hull <app> --max-instructions N` | Set per-request instruction limit (default: 100M) |
 | `hull <app> --audit` | Enable capability audit logging (JSON to stderr) |
+| `hull <app> --max-connections N` | Max concurrent connections (default: 256) |
+| `hull <app> --body-max-size SIZE` | Max request body size (default: 1m) |
+| `hull <app> --read-timeout MS` | Read timeout in milliseconds (default: 30000) |
+| `hull <app> --workers N` | Thread pool worker count (default: 4) |
+| `hull <app> --queue-capacity N` | Thread pool queue capacity (default: 64) |
+| `hull <app> --no-compress` | Disable gzip response compression |
 | `hull migrate [app_dir]` | Run pending SQL migrations |
 | `hull migrate status` | Show migration status (applied/pending) |
 | `hull migrate new <name>` | Create a new numbered migration file |
@@ -108,6 +114,7 @@ Cosmopolitan APE binaries run on Linux, macOS, Windows, FreeBSD, OpenBSD, and Ne
 │  Hull Core                                  │  ← Manifest, sandbox, signatures, VFS
 ├─────────────────────────────────────────────┤
 │  Keel HTTP Server (vendor/keel/)            │  ← Event loop + routing + async + thread pool
+│                                             │  ← gzip compression + client connection pool
 ├─────────────────────────────────────────────┤
 │  Kernel Sandbox (pledge + unveil)           │  ← OS enforcement
 └─────────────────────────────────────────────┘
@@ -198,7 +205,7 @@ app.get("/api/me", function(req, res)
 end)
 ```
 
-Key principles: rate limit before auth (reject early), CORS before auth (preflight must not require credentials), scope middleware to paths (`"/api/*"` not `"/*"`). See [examples/middleware/](examples/middleware/) and [CLAUDE.md](CLAUDE.md) for full API reference.
+Key principles: rate limit before auth (reject early), CORS before auth (preflight must not require credentials), scope middleware to paths (`"/api/*"` not `"/*"`). For simple CORS needs, use `cors` in `app.manifest()` — it registers Keel-level CORS middleware automatically. Use the stdlib `hull.middleware.cors` for per-route or conditional CORS logic. See [examples/middleware/](examples/middleware/) and [CLAUDE.md](CLAUDE.md) for full API reference.
 
 ### Vendored Libraries
 
@@ -210,6 +217,7 @@ Key principles: rate limit before auth (reject early), CORS before auth (preflig
 | [SQLite](https://sqlite.org/) | Embedded database (WAL mode, parameterized queries) |
 | [mbedTLS](https://github.com/Mbed-TLS/mbedtls) | TLS client for outbound HTTPS |
 | [TweetNaCl](https://tweetnacl.cr.yp.to/) | Ed25519 signatures, XSalsa20+Poly1305, Curve25519 |
+| [miniz](https://github.com/richgel999/miniz) | gzip compression (response compression, client decompression) |
 | [pledge/unveil](https://github.com/jart/pledge) | Kernel sandbox (Linux seccomp/landlock) |
 
 ## Security Model
@@ -220,7 +228,12 @@ Hull apps declare a manifest of exactly what they can access — files, hosts, e
 app.manifest({
     fs = { read = {"data/"}, write = {"data/uploads/"} },
     env = {"PORT", "DATABASE_URL"},
-    hosts = {"api.stripe.com"}
+    hosts = {"api.stripe.com"},
+    cors = {
+        origins = {"https://myapp.com"},
+        methods = "GET, POST, PUT, DELETE",
+        credentials = true,
+    },
 })
 ```
 
@@ -277,9 +290,25 @@ When disabled (default), the audit check is a single branch on a global flag —
 
 See [docs/benchmark.md](docs/benchmark.md) for methodology.
 
+## Server Tuning
+
+- **Response Compression** — gzip via miniz, automatic for bodies >= 860 bytes when `Accept-Encoding: gzip`. Disable with `--no-compress`.
+- **Connection Pooling** — Outbound HTTP reuses TCP+TLS connections (32 pool, 4 per host, 60s idle). Automatic when `hosts` declared in manifest.
+- **Redirect Following** — 3xx redirects followed automatically (up to 10 hops). Cross-origin auth headers stripped per RFC 7231.
+- **Server Stats** — `server.stats()` (Lua) / `server.stats()` (JS) returns `{active_connections, max_connections, async_suspended, listen_paused}`.
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--max-connections N` | 256 | Max concurrent connections |
+| `--body-max-size SIZE` | 1m | Max request body size |
+| `--read-timeout MS` | 30000 | Read timeout (milliseconds) |
+| `--workers N` | 4 | Thread pool worker count |
+| `--queue-capacity N` | 64 | Thread pool queue capacity |
+| `--no-compress` | enabled | Disable gzip response compression |
+
 ## Examples
 
-Ten example apps in both Lua and JavaScript:
+Fourteen example apps in both Lua and JavaScript:
 
 | Example | What it demonstrates |
 |---------|---------------------|
@@ -288,11 +317,15 @@ Ten example apps in both Lua and JavaScript:
 | [auth](examples/auth/) | Session-based authentication with migrations |
 | [jwt_api](examples/jwt_api/) | JWT Bearer authentication with refresh tokens |
 | [crud_with_auth](examples/crud_with_auth/) | Task CRUD with per-user isolation and migrations |
-| [middleware](examples/middleware/) | Request ID, logging, rate limiting, CORS |
+| [middleware](examples/middleware/) | Request ID, logging, rate limiting, CORS, server stats |
 | [webhooks](examples/webhooks/) | Webhook delivery with HMAC-SHA256 signatures |
 | [templates](examples/templates/) | Template engine: inheritance, includes, filters |
 | [todo](examples/todo/) | Full CRUD todo app with HTML frontend and migrations |
 | [bench_db](examples/bench_db/) | SQLite performance benchmarks with migrations |
+| [async_http](examples/async_http/) | Non-blocking HTTP requests via event loop |
+| [bench_template](examples/bench_template/) | Template engine performance benchmarks |
+| [email](examples/email/) | SMTP email sending with templates |
+| [cors_manifest](examples/cors_manifest/) | CORS via manifest + server stats API |
 
 ```bash
 # Run an example

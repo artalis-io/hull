@@ -141,6 +141,20 @@ static HlRuntimeType detect_runtime(const char *entry_point)
 
 static const char *auto_detect_entry(void)
 {
+    /* Check embedded app entries first (hull build binaries) */
+    extern const HlEntry hl_app_entries[];
+    for (int i = 0; hl_app_entries[i].name; i++) {
+#ifdef HL_ENABLE_JS
+        if (strcmp(hl_app_entries[i].name, "./app.js") == 0)
+            return "app.js";
+#endif
+#ifdef HL_ENABLE_LUA
+        if (strcmp(hl_app_entries[i].name, "./app") == 0)
+            return "app.lua";
+#endif
+    }
+
+    /* Filesystem fallback (development mode) */
 #ifdef HL_ENABLE_JS
     FILE *f = fopen("app.js", "r");
     if (f) { fclose(f); return "app.js"; }
@@ -149,6 +163,7 @@ static const char *auto_detect_entry(void)
     FILE *f2 = fopen("app.lua", "r");
     if (f2) { fclose(f2); return "app.lua"; }
 #endif
+
     return NULL;
 }
 

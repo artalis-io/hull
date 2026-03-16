@@ -247,7 +247,39 @@ int hl_lua_load_app(HlLua *lua, const char *filename)
     lua_pushstring(lua->L, filename);
     lua_setfield(lua->L, LUA_REGISTRYINDEX, "__hull_current_module");
 
-    /* Load and execute the file */
+    /* Try embedded VFS entry first (hull build binaries).
+     * Convert filename to VFS name: basename without .lua, prepended with ./
+     * e.g. "app.lua" → "./app", "/path/to/app.lua" → "./app" */
+    lua_getfield(lua->L, LUA_REGISTRYINDEX, "__hull_modules");
+    if (lua_istable(lua->L, -1)) {
+        const char *base = strrchr(filename, '/');
+        base = base ? base + 1 : filename;
+        char vfs_name[256];
+        size_t blen = strlen(base);
+        if (blen >= 4 && strcmp(base + blen - 4, ".lua") == 0)
+            blen -= 4;
+        if (blen + 3 <= sizeof(vfs_name)) {
+            vfs_name[0] = '.';
+            vfs_name[1] = '/';
+            memcpy(vfs_name + 2, base, blen);
+            vfs_name[2 + blen] = '\0';
+
+            lua_getfield(lua->L, -1, vfs_name);
+            if (!lua_isnil(lua->L, -1)) {
+                lua_remove(lua->L, -2); /* remove __hull_modules */
+                if (lua_pcall(lua->L, 0, 0, 0) != LUA_OK) {
+                    hl_lua_dump_error(lua);
+                    return -1;
+                }
+                sh_arena_reset(lua->scratch);
+                return 0;
+            }
+            lua_pop(lua->L, 1); /* pop nil */
+        }
+    }
+    lua_pop(lua->L, 1); /* pop __hull_modules (or non-table) */
+
+    /* Load and execute from filesystem (development mode) */
     if (luaL_dofile(lua->L, filename) != LUA_OK) {
         hl_lua_dump_error(lua);
         return -1;

@@ -18,7 +18,7 @@ ENTRY     := app.lua
 CC        := cc
 JOBS      := $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 
-.PHONY: dev prod run test certs clean
+.PHONY: dev prod run test certs clean check-cosmo
 
 # ── Dev server (hot reload + HTTPS) ─────────────────────────────────
 
@@ -44,10 +44,21 @@ else
   EMBED_FLAG      := EMBED_PLATFORM=1
 endif
 
-prod:
+prod: check-cosmo
 	$(MAKE) -j$(JOBS) -C $(REPO_ROOT) $(PLATFORM_TARGET)
 	$(MAKE) -j$(JOBS) -C $(REPO_ROOT) $(EMBED_FLAG) CC=cc AR=ar
 	$(HULL) build --cc $(CC) -o todo .
+
+check-cosmo:
+ifneq (,$(findstring cosmo,$(CC)))
+	@command -v x86_64-unknown-cosmo-cc >/dev/null 2>&1 || \
+		{ echo "error: cosmocc toolchain not found in PATH"; \
+		  echo ""; \
+		  echo "  export PATH=\"\$$HOME/cosmocc/bin:\$$PATH\""; \
+		  echo ""; \
+		  echo "See the Cosmo Builds section in README.md for setup instructions."; \
+		  exit 1; }
+endif
 
 # ── Run production binary ───────────────────────────────────────────
 

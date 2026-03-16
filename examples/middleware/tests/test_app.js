@@ -37,3 +37,9 @@ test("GET /api/debug returns debug info", () => {
     test.eq(res.status, 200);
     test.ok(res.json.total_requests !== undefined, "has total_requests");
 });
+
+test("GET /api/stats returns server stats", () => {
+    const res = test.get("/api/stats");
+    test.eq(res.status, 200);
+    test.ok(res.json.maxConnections !== undefined, "has maxConnections");
+});

@@ -90,4 +90,14 @@ app.get("/api/debug", function(req, res)
     })
 end)
 
+-- Server stats (live connection counts)
+app.get("/api/stats", function(_req, res)
+    local ok, stats = pcall(server.stats)
+    if ok then
+        res:json(stats)
+    else
+        res:json({ active_connections = 0, max_connections = 0 })
+    end
+end)
+
 log.info("Middleware example loaded — routes registered")

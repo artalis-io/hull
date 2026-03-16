@@ -15,7 +15,7 @@ make dev ENTRY=app.js       # JS backend
 
 ```bash
 make prod                   # native production binary
-make prod CC=cosmocc        # portable APE binary (runs on Linux + macOS + Windows)
+make prod CC=cosmocc        # portable APE binary (requires cosmocc in PATH, see below)
 make run                    # run the production binary
 make run ENTRY=app.js       # run with JS backend
 ```
@@ -44,20 +44,20 @@ make run ENTRY=app.js       # run with JS backend
 
 [Cosmopolitan](https://cosmo.zip) produces Actually Portable Executable (APE) binaries that run on Linux, macOS, Windows, and BSDs from a single file.
 
+**Prerequisite:** The full `~/cosmocc/bin` directory must be in your PATH — the build uses `x86_64-unknown-cosmo-cc` and `aarch64-unknown-cosmo-cc` directly, not just the `cosmocc` wrapper.
+
 ```bash
 # Install cosmocc (one-time)
 mkdir -p ~/cosmocc && cd ~/cosmocc
 curl -sLO https://cosmo.zip/pub/cosmocc/cosmocc.zip && unzip cosmocc.zip
 
-# Add to PATH (also add to ~/.zshrc or ~/.bashrc)
+# Add to PATH (add to ~/.zshrc or ~/.bashrc to persist)
 export PATH="$HOME/cosmocc/bin:$PATH"
 
 # Clean build (recommended for first cosmo build)
 make -C ../.. clean && make -C ../../vendor/keel clean
 make prod CC=cosmocc
 ```
-
-The `platform-cosmo` target uses `x86_64-unknown-cosmo-cc` and `aarch64-unknown-cosmo-cc` directly, so the full `~/cosmocc/bin` must be in PATH — not just `cosmocc` itself.
 
 A clean build is recommended when switching between native and cosmo compilers to avoid stale object files from a different toolchain.
 

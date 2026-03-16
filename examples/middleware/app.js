@@ -7,6 +7,7 @@ import { app } from "hull:app";
 import { log } from "hull:log";
 import { cors } from "hull:middleware:cors";
 import { ratelimit } from "hull:middleware:ratelimit";
+import { server } from "hull:server";
 import { time } from "hull:time";
 
 app.manifest({});
@@ -94,6 +95,15 @@ app.get("/api/debug", (req, res) => {
         request_id: req.ctx ? req.ctx.request_id : null,
         total_requests: requestCounter,
     });
+});
+
+// Server stats (live connection counts)
+app.get("/api/stats", (_req, res) => {
+    let stats;
+    try { stats = server.stats(); } catch (_e) {
+        stats = { activeConnections: 0, maxConnections: 0 };
+    }
+    res.json(stats);
 });
 
 log.info("Middleware example loaded — routes registered");
