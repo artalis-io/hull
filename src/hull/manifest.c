@@ -118,6 +118,37 @@ int hl_manifest_extract(lua_State *L, HlManifest *out)
     }
     lua_pop(L, 1);
 
+    /* cors = { origins = {...}, methods = "...", headers = "...",
+     *          credentials = true, max_age = 86400 } */
+    lua_getfield(L, manifest_idx, "cors");
+    if (lua_istable(L, -1)) {
+        int cors_idx = lua_gettop(L);
+        out->cors_set = 1;
+        out->cors_origin_count = read_string_array(L, cors_idx, "origins",
+                                                     out->cors_origins,
+                                                     HL_MANIFEST_MAX_CORS_ORIGINS);
+        lua_getfield(L, cors_idx, "methods");
+        if (lua_isstring(L, -1))
+            out->cors_methods = lua_tostring(L, -1);
+        lua_pop(L, 1);
+
+        lua_getfield(L, cors_idx, "headers");
+        if (lua_isstring(L, -1))
+            out->cors_headers = lua_tostring(L, -1);
+        lua_pop(L, 1);
+
+        lua_getfield(L, cors_idx, "credentials");
+        if (lua_isboolean(L, -1))
+            out->cors_credentials = lua_toboolean(L, -1);
+        lua_pop(L, 1);
+
+        lua_getfield(L, cors_idx, "max_age");
+        if (lua_isinteger(L, -1))
+            out->cors_max_age = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 1); /* pop cors */
+
     lua_pop(L, 1); /* pop manifest table */
     return 0;
 }
@@ -220,6 +251,40 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out)
     }
     JS_FreeValue(ctx, csp_val);
 
+    /* cors = { origins: [...], methods: "...", headers: "...",
+     *          credentials: true, maxAge: 86400 } */
+    JSValue cors_val = JS_GetPropertyStr(ctx, manifest, "cors");
+    if (!JS_IsUndefined(cors_val) && !JS_IsNull(cors_val)) {
+        out->cors_set = 1;
+        out->cors_origin_count = read_js_string_array(ctx, cors_val, "origins",
+                                                        out->cors_origins,
+                                                        HL_MANIFEST_MAX_CORS_ORIGINS);
+
+        JSValue methods_val = JS_GetPropertyStr(ctx, cors_val, "methods");
+        if (JS_IsString(methods_val))
+            out->cors_methods = JS_ToCString(ctx, methods_val);
+        JS_FreeValue(ctx, methods_val);
+
+        JSValue headers_val = JS_GetPropertyStr(ctx, cors_val, "headers");
+        if (JS_IsString(headers_val))
+            out->cors_headers = JS_ToCString(ctx, headers_val);
+        JS_FreeValue(ctx, headers_val);
+
+        JSValue creds_val = JS_GetPropertyStr(ctx, cors_val, "credentials");
+        if (JS_IsBool(creds_val))
+            out->cors_credentials = JS_ToBool(ctx, creds_val);
+        JS_FreeValue(ctx, creds_val);
+
+        JSValue age_val = JS_GetPropertyStr(ctx, cors_val, "maxAge");
+        if (JS_IsNumber(age_val)) {
+            int32_t age = 0;
+            JS_ToInt32(ctx, &age, age_val);
+            out->cors_max_age = age;
+        }
+        JS_FreeValue(ctx, age_val);
+    }
+    JS_FreeValue(ctx, cors_val);
+
     JS_FreeValue(ctx, manifest);
     return 0;
 }
@@ -238,6 +303,10 @@ void hl_manifest_free_js_strings(JSContext *ctx, HlManifest *m)
     for (int i = 0; i < m->hosts_count; i++)
         if (m->hosts[i]) JS_FreeCString(ctx, m->hosts[i]);
     if (m->csp) JS_FreeCString(ctx, m->csp);
+    for (int i = 0; i < m->cors_origin_count; i++)
+        if (m->cors_origins[i]) JS_FreeCString(ctx, m->cors_origins[i]);
+    if (m->cors_methods) JS_FreeCString(ctx, m->cors_methods);
+    if (m->cors_headers) JS_FreeCString(ctx, m->cors_headers);
 }
 
 #endif /* HL_ENABLE_JS */

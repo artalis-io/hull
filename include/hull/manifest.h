@@ -21,6 +21,7 @@ typedef struct lua_State lua_State;
 #define HL_MANIFEST_MAX_PATHS  32
 #define HL_MANIFEST_MAX_ENVS   32
 #define HL_MANIFEST_MAX_HOSTS  32
+#define HL_MANIFEST_MAX_CORS_ORIGINS 16
 
 /* ── Manifest struct ───────────────────────────────────────────────── */
 
@@ -42,6 +43,15 @@ typedef struct HlManifest {
     /* Content-Security-Policy for HTML responses */
     const char *csp;        /* Custom CSP string (NULL if not set or disabled) */
     int         csp_set;    /* 1 if app explicitly set csp key in manifest */
+
+    /* CORS configuration */
+    const char *cors_origins[HL_MANIFEST_MAX_CORS_ORIGINS];
+    int         cors_origin_count;
+    const char *cors_methods;     /* NULL = Keel default */
+    const char *cors_headers;     /* NULL = Keel default */
+    int         cors_credentials; /* 0 or 1 */
+    int         cors_max_age;     /* 0 = Keel default (86400) */
+    int         cors_set;         /* 1 if cors key present in manifest */
 
     /* Whether app.manifest() was called */
     int         present;

@@ -11,7 +11,9 @@
 #include "hull/cap/audit.h"
 
 #include <keel/allocator.h>
+#include <keel/client_pool.h>
 #include <keel/error.h>
+#include <keel/redirect.h>
 #include <keel/url.h>
 
 #include <string.h>
@@ -70,13 +72,32 @@ int hl_cap_http_request(const HlHttpConfig *cfg,
         .timeout_ms        = cfg->timeout_ms,
         .max_response_size = cfg->max_response_size,
         .tls               = cfg->tls,
+        .decompress        = cfg->decompress,
     };
 
-    /* Delegate to Keel */
+    /* Delegate to Keel — prefer redirect+pooled > redirect > pooled > plain */
     KlAllocator alloc = kl_allocator_default();
-    int rc = kl_client_request(&alloc, &kl_cfg, method, url,
+    int rc;
+    if (cfg->follow_redirects) {
+        KlRedirectConfig redir = { .max_redirects = cfg->max_redirects };
+        if (cfg->pool)
+            rc = kl_redirect_request_pooled(cfg->pool, &alloc, &kl_cfg, &redir,
+                                             method, url,
+                                             (const KlClientHeader *)headers,
+                                             num_headers, body, body_len, resp);
+        else
+            rc = kl_redirect_request(&alloc, &kl_cfg, &redir, method, url,
+                                      (const KlClientHeader *)headers,
+                                      num_headers, body, body_len, resp);
+    } else if (cfg->pool) {
+        rc = kl_client_request_pooled(cfg->pool, &alloc, &kl_cfg, method, url,
+                                       (const KlClientHeader *)headers,
+                                       num_headers, body, body_len, resp);
+    } else {
+        rc = kl_client_request(&alloc, &kl_cfg, method, url,
                                 (const KlClientHeader *)headers, num_headers,
                                 body, body_len, resp);
+    }
 
     /* Audit */
     {

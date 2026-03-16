@@ -78,6 +78,7 @@ typedef struct HlJS {
     /* Per-request async state (set during dispatch, cleared after) */
     KlServer       *server;          /* set once during wire_routes_server */
     KlConn         *active_conn;     /* current connection (per dispatch) */
+    KlRequest      *active_req;      /* current request (for compression check) */
     int             async_pending;   /* 1 = handler returned pending Promise */
     void           *last_async_cont; /* last-created HlJsAsyncCont (for handler_promise wiring) */
 } HlJS;

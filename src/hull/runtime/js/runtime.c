@@ -779,6 +779,7 @@ int hl_js_dispatch(HlJS *js, int handler_id,
 
     /* Set per-request async context (for hull.sleep / http.get access) */
     js->active_conn = kl_request_conn(req);
+    js->active_req = req;
     js->last_async_cont = NULL;
 
     /* Get the handler function from the route registry */
@@ -788,6 +789,7 @@ int hl_js_dispatch(HlJS *js, int handler_id,
         JS_FreeValue(js->ctx, routes);
         JS_FreeValue(js->ctx, global);
         js->active_conn = NULL;
+        js->active_req = NULL;
         return -1;
     }
 
@@ -799,6 +801,7 @@ int hl_js_dispatch(HlJS *js, int handler_id,
         JS_FreeValue(js->ctx, handler);
         JS_FreeValue(js->ctx, global);
         js->active_conn = NULL;
+        js->active_req = NULL;
         return -1;
     }
 
@@ -851,6 +854,7 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     if (result != 1) {
         /* Sync path — clean up middleware ctx */
         js->active_conn = NULL;
+        js->active_req = NULL;
 
         if (req->ctx) {
             size_t *block = (size_t *)req->ctx - 1;

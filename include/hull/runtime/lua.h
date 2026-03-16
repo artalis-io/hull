@@ -73,6 +73,7 @@ typedef struct HlLua {
     /* Per-request async state (set during dispatch, cleared after) */
     KlServer   *server;             /* set once during wire_routes_server */
     KlConn     *active_conn;        /* current connection (per dispatch) */
+    KlRequest  *active_req;         /* current request (for compression check) */
     int         active_thread_ref;  /* registry ref to coroutine (LUA_NOREF = none) */
     lua_State  *active_co;          /* coroutine state (NULL = none) */
 } HlLua;

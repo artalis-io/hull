@@ -21,6 +21,8 @@
 #include "hull/async.h"
 #include "hull/worker_db.h"
 
+#include <keel/server.h>
+
 #include "lua.h"
 #include "lualib.h"
 #include "lauxlib.h"
@@ -1819,8 +1821,7 @@ static int lua_http_delete(lua_State *L)
 
 static void lua_push_async_http_response(lua_State *L, void *driver)
 {
-    KlClient *client = (KlClient *)driver;
-    const KlClientResponse *resp = kl_client_response(client);
+    const KlClientResponse *resp = hl_http_async_response(driver);
     if (!resp) {
         lua_pushnil(L);
         return;
@@ -1911,7 +1912,7 @@ static int lua_http_fetch(lua_State *L)
     }
     ctx->cont = cont;
 
-    /* Yield the coroutine — on resume, the driver result (KlClient*)
+    /* Yield the coroutine — on resume, the driver result
      * will be pushed onto the stack by lua_push_async_http_response */
     return lua_yieldk(L, 0, 0, NULL);
 }
@@ -2607,6 +2608,46 @@ static int luaopen_hull_worker(lua_State *L)
 }
 
 /* ════════════════════════════════════════════════════════════════════
+ * hull.server — Server stats
+ * ════════════════════════════════════════════════════════════════════ */
+
+/* server.stats() → { active_connections, max_connections, async_suspended,
+ *                     listen_paused } */
+static int lua_server_stats(lua_State *L)
+{
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_lua");
+    HlLua *lua = (HlLua *)lua_touserdata(L, -1);
+    lua_pop(L, 1);
+    if (!lua || !lua->server)
+        return luaL_error(L, "server.stats: server not available");
+
+    KlServerStats stats;
+    kl_server_stats(lua->server, &stats);
+
+    lua_newtable(L);
+    lua_pushinteger(L, stats.active_connections);
+    lua_setfield(L, -2, "active_connections");
+    lua_pushinteger(L, stats.max_connections);
+    lua_setfield(L, -2, "max_connections");
+    lua_pushinteger(L, stats.async_suspended);
+    lua_setfield(L, -2, "async_suspended");
+    lua_pushboolean(L, stats.listen_paused);
+    lua_setfield(L, -2, "listen_paused");
+    return 1;
+}
+
+static const luaL_Reg server_funcs[] = {
+    {"stats", lua_server_stats},
+    {NULL, NULL}
+};
+
+static int luaopen_hull_server(lua_State *L)
+{
+    luaL_newlib(L, server_funcs);
+    return 1;
+}
+
+/* ════════════════════════════════════════════════════════════════════
  * Custom require() — module loader with embedded + filesystem fallback
  *
  * Replaces Lua's package.require with a minimal custom version.
@@ -3094,6 +3135,10 @@ int hl_lua_register_modules(HlLua *lua)
         luaL_requiref(L, "hull.worker", luaopen_hull_worker, 0);
         lua_setglobal(L, "worker");
     }
+
+    /* Register hull.server (always available) */
+    luaL_requiref(L, "hull.server", luaopen_hull_server, 0);
+    lua_setglobal(L, "server");
 
     /* Register hull global (hull.sleep, hull.gather, etc.) */
     luaL_requiref(L, "hull.hull", luaopen_hull_hull, 0);

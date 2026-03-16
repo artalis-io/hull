@@ -12,6 +12,9 @@
 
 #include <keel/client.h>
 
+/* Forward declarations for optional modules */
+typedef struct KlClientPool KlClientPool;
+
 /* Backward-compatible typedef — Hull code uses HlHttpHeader for request headers */
 typedef KlClientHeader HlHttpHeader;
 
@@ -24,6 +27,10 @@ typedef struct HlHttpConfig {
     int              timeout_ms;       /**< Connect/send/recv timeout (default: 30000) */
     size_t           max_response_size;/**< Max response body bytes (default: 4 MB) */
     KlTlsConfig     *tls;             /**< KlTlsConfig* for HTTPS — NULL = no HTTPS */
+    KlClientPool    *pool;             /**< Connection pool (NULL = no pooling) */
+    int              follow_redirects; /**< 1 = follow 3xx redirects (default) */
+    int              max_redirects;    /**< Max redirect hops (0 = Keel default 10) */
+    KlDecompressConfig *decompress;    /**< Response decompression (NULL = disabled) */
 } HlHttpConfig;
 
 /**

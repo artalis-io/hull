@@ -11,6 +11,7 @@
 #include "hull/runtime/js.h"
 #include "hull/limits.h"
 #include "hull/cap/body.h"
+#include "hull/compress.h"
 #include "quickjs.h"
 
 #include <keel/request.h>
@@ -277,8 +278,11 @@ static JSValue js_res_json(JSContext *ctx, JSValueConst this_val,
         const char *json_str = JS_ToCString(ctx, result);
         if (json_str) {
             size_t json_len = strlen(json_str);
+            HlJS *js_rt = (HlJS *)JS_GetContextOpaque(ctx);
             kl_response_header(res, "Content-Type", "application/json");
-            kl_response_body_copy(res, json_str, json_len);
+            hl_maybe_compress(js_rt ? js_rt->active_req : NULL, res,
+                              js_rt ? js_rt->base.compress : NULL,
+                              json_str, json_len);
             JS_FreeCString(ctx, json_str);
         }
     }
@@ -307,7 +311,9 @@ static JSValue js_res_html(JSContext *ctx, JSValueConst this_val,
         if (js_rt && js_rt->base.csp_policy)
             kl_response_header(res, "Content-Security-Policy",
                                js_rt->base.csp_policy);
-        kl_response_body_copy(res, html, html_len);
+        hl_maybe_compress(js_rt ? js_rt->active_req : NULL, res,
+                          js_rt ? js_rt->base.compress : NULL,
+                          html, html_len);
         JS_FreeCString(ctx, html);
     }
 
@@ -325,8 +331,11 @@ static JSValue js_res_text(JSContext *ctx, JSValueConst this_val,
     const char *text = JS_ToCString(ctx, argv[0]);
     if (text) {
         size_t text_len = strlen(text);
+        HlJS *js_rt = (HlJS *)JS_GetContextOpaque(ctx);
         kl_response_header(res, "Content-Type", "text/plain; charset=utf-8");
-        kl_response_body_copy(res, text, text_len);
+        hl_maybe_compress(js_rt ? js_rt->active_req : NULL, res,
+                          js_rt ? js_rt->base.compress : NULL,
+                          text, text_len);
         JS_FreeCString(ctx, text);
     }
 

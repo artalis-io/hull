@@ -24,7 +24,6 @@ typedef struct HlVfs HlVfs;
 typedef struct sqlite3 sqlite3;
 typedef struct KlServer KlServer;
 typedef struct KlThreadPool KlThreadPool;
-
 typedef struct HlRuntime HlRuntime;
 
 typedef struct HlRuntimeVtable {
@@ -52,6 +51,7 @@ struct HlRuntime {
     const HlVfs  *platform_vfs;  /* stdlib entries (always embedded) */
     KlThreadPool *thread_pool;   /* worker pool for async work (NULL if not created) */
     const char   *db_path;       /* SQLite file path (borrowed, for worker connections) */
+    struct KlCompressConfig *compress;  /* response compression config (NULL = disabled) */
 };
 
 #endif /* HL_RUNTIME_H */

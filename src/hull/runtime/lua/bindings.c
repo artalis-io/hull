@@ -11,6 +11,7 @@
 #include "hull/runtime/lua.h"
 #include "hull/limits.h"
 #include "hull/cap/body.h"
+#include "hull/compress.h"
 
 #include "lua.h"
 #include "lualib.h"
@@ -210,6 +211,7 @@ static int lua_res_header(lua_State *L)
 static int lua_res_json(lua_State *L)
 {
     KlResponse *res = check_response(L, 1);
+    HlLua *hlua = get_hl_lua_from_L(L);
 
     /* Optional status code */
     if (lua_gettop(L) >= 3) {
@@ -229,7 +231,9 @@ static int lua_res_json(lua_State *L)
     size_t json_len;
     const char *json_str = lua_tolstring(L, -1, &json_len);
     kl_response_header(res, "Content-Type", "application/json");
-    kl_response_body_copy(res, json_str, json_len);
+    hl_maybe_compress(hlua ? hlua->active_req : NULL, res,
+                      hlua ? hlua->base.compress : NULL,
+                      json_str, json_len);
     lua_pop(L, 1); /* pop JSON string */
     lua_pop(L, 1); /* pop json table */
 
@@ -247,7 +251,9 @@ static int lua_res_html(lua_State *L)
     if (hlua && hlua->base.csp_policy)
         kl_response_header(res, "Content-Security-Policy",
                            hlua->base.csp_policy);
-    kl_response_body_copy(res, html, len);
+    hl_maybe_compress(hlua ? hlua->active_req : NULL, res,
+                      hlua ? hlua->base.compress : NULL,
+                      html, len);
     return 0;
 }
 
@@ -255,10 +261,13 @@ static int lua_res_html(lua_State *L)
 static int lua_res_text(lua_State *L)
 {
     KlResponse *res = check_response(L, 1);
+    HlLua *hlua = get_hl_lua_from_L(L);
     size_t len;
     const char *text = luaL_checklstring(L, 2, &len);
     kl_response_header(res, "Content-Type", "text/plain; charset=utf-8");
-    kl_response_body_copy(res, text, len);
+    hl_maybe_compress(hlua ? hlua->active_req : NULL, res,
+                      hlua ? hlua->base.compress : NULL,
+                      text, len);
     return 0;
 }
 

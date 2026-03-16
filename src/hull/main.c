@@ -28,6 +28,10 @@
 #include "hull/cap/env.h"
 #include "hull/cap/http.h"
 #include "hull/cap/smtp.h"
+
+#include <keel/client_pool.h>
+#include <keel/compress_miniz.h>
+#include <keel/decompress_miniz.h>
 #include "hull/migrate.h"
 #include "hull/vfs.h"
 
@@ -41,6 +45,7 @@
 #include "hull/static.h"
 #include "hull/tool.h"
 
+#include <keel/cors.h>
 #include <keel/keel.h>
 #include <keel/thread_pool.h>
 
@@ -169,6 +174,12 @@ static void usage(const char *prog)
             "  --skip-ca-bundle     Skip TLS certificate verification (dev mode)\n"
             "  --max-instructions N Set runtime instruction limit per request (default: 100m)\n"
             "  --audit              Enable capability audit logging (JSON to stderr)\n"
+            "  --max-connections N  Max concurrent connections (default: 256)\n"
+            "  --body-max-size SIZE Max request body size (default: 1m)\n"
+            "  --read-timeout MS    Read timeout in milliseconds (default: 30000)\n"
+            "  --workers N          Thread pool worker count (default: 4)\n"
+            "  --queue-capacity N   Thread pool queue capacity (default: 64)\n"
+            "  --no-compress        Disable response compression\n"
             "  --no-sandbox         Disable kernel sandbox (dev/debug only)\n"
             "  -h                   Show this help\n"
             "\n"
@@ -221,9 +232,15 @@ static int hull_serve(int argc, char **argv)
     int log_level = LOG_INFO;
     int no_migrate = 0;
     int no_sandbox = 0;
+    int no_compress = 0;
     int skip_ca_bundle = 0;
     int agent_mode = 0;
     int drain_timeout = HL_DEFAULT_DRAIN_TIMEOUT_MS;
+    int max_connections = 0;  /* 0 = use default */
+    long body_max_size = 0;   /* 0 = use default */
+    int read_timeout = 0;     /* 0 = use default */
+    int num_workers = 0;      /* 0 = use default */
+    int queue_capacity = 0;   /* 0 = use default */
     const char *tls_cert_path = NULL;
     const char *tls_key_path = NULL;
 
@@ -275,6 +292,8 @@ static int hull_serve(int argc, char **argv)
             no_migrate = 1;
         } else if (strcmp(argv[i], "--no-sandbox") == 0) {
             no_sandbox = 1;
+        } else if (strcmp(argv[i], "--no-compress") == 0) {
+            no_compress = 1;
         } else if (strcmp(argv[i], "--skip-ca-bundle") == 0) {
             skip_ca_bundle = 1;
         } else if (strcmp(argv[i], "--agent") == 0) {
@@ -288,6 +307,44 @@ static int hull_serve(int argc, char **argv)
                 fprintf(stderr, "hull: invalid instruction limit: %s\n", argv[i]);
                 return 1;
             }
+        } else if (strcmp(argv[i], "--max-connections") == 0 && i + 1 < argc) {
+            char *end;
+            long v = strtol(argv[++i], &end, 10);
+            if (*end != '\0' || v < 1 || v > 100000) {
+                fprintf(stderr, "hull: invalid max-connections: %s\n", argv[i]);
+                return 1;
+            }
+            max_connections = (int)v;
+        } else if (strcmp(argv[i], "--body-max-size") == 0 && i + 1 < argc) {
+            body_max_size = hl_parse_size(argv[++i]);
+            if (body_max_size <= 0) {
+                fprintf(stderr, "hull: invalid body-max-size: %s\n", argv[i]);
+                return 1;
+            }
+        } else if (strcmp(argv[i], "--read-timeout") == 0 && i + 1 < argc) {
+            char *end;
+            long v = strtol(argv[++i], &end, 10);
+            if (*end != '\0' || v < 0 || v > 600000) {
+                fprintf(stderr, "hull: invalid read-timeout: %s\n", argv[i]);
+                return 1;
+            }
+            read_timeout = (int)v;
+        } else if (strcmp(argv[i], "--workers") == 0 && i + 1 < argc) {
+            char *end;
+            long v = strtol(argv[++i], &end, 10);
+            if (*end != '\0' || v < 1 || v > 128) {
+                fprintf(stderr, "hull: invalid workers: %s\n", argv[i]);
+                return 1;
+            }
+            num_workers = (int)v;
+        } else if (strcmp(argv[i], "--queue-capacity") == 0 && i + 1 < argc) {
+            char *end;
+            long v = strtol(argv[++i], &end, 10);
+            if (*end != '\0' || v < 1 || v > 10000) {
+                fprintf(stderr, "hull: invalid queue-capacity: %s\n", argv[i]);
+                return 1;
+            }
+            queue_capacity = (int)v;
         } else if (strcmp(argv[i], "--drain-timeout") == 0 && i + 1 < argc) {
             char *end;
             long dt = strtol(argv[++i], &end, 10);
@@ -442,8 +499,9 @@ static int hull_serve(int argc, char **argv)
     KlConfig config = {
         .port = port,
         .bind_addr = bind_addr,
-        .max_connections = HL_DEFAULT_MAX_CONN,
-        .read_timeout_ms = HL_DEFAULT_READ_TIMEOUT_MS,
+        .max_connections = max_connections > 0 ? max_connections : HL_DEFAULT_MAX_CONN,
+        .read_timeout_ms = read_timeout > 0 ? read_timeout : HL_DEFAULT_READ_TIMEOUT_MS,
+        .max_body_size = body_max_size > 0 ? (size_t)body_max_size : HL_BODY_MAX_SIZE,
         .install_signal_handlers = 1,
         .drain_timeout_ms = drain_timeout,
         .alloc = &kl_alloc,
@@ -480,8 +538,8 @@ static int hull_serve(int argc, char **argv)
 
     /* Create thread pool for async work (db queries, file I/O) */
     KlThreadPoolConfig tp_cfg = {
-        .num_workers    = HL_THREAD_POOL_WORKERS,
-        .queue_capacity = HL_THREAD_POOL_CAPACITY,
+        .num_workers    = num_workers > 0 ? num_workers : HL_THREAD_POOL_WORKERS,
+        .queue_capacity = queue_capacity > 0 ? queue_capacity : HL_THREAD_POOL_CAPACITY,
         .alloc          = &kl_alloc,
     };
     KlThreadPool *thread_pool = kl_thread_pool_create(&server.ev, &tp_cfg);
@@ -490,6 +548,34 @@ static int hull_serve(int argc, char **argv)
                  kl_strerror(server.ev.last_error));
     /* thread_pool may be NULL if creation fails — non-fatal, async work
      * will simply be unavailable */
+
+    /* Create client connection pool for HTTP keep-alive reuse */
+    KlClientPool client_pool;
+    int cpool_ok = kl_cpool_init(&client_pool, NULL, &kl_alloc, &server.ev);
+    if (cpool_ok != 0)
+        log_warn("[hull:c] client pool creation failed — connection reuse disabled");
+
+    /* Create compression context for server responses and client decompression */
+    KlCompressCtx *comp_ctx = NULL;
+    KlCompressConfig compress_cfg = {0};
+    KlDecompressConfig decompress_cfg = {0};
+
+    if (!no_compress) {
+        comp_ctx = kl_compress_miniz_ctx_create(6, &kl_alloc);
+        if (comp_ctx) {
+            compress_cfg.ctx = comp_ctx;
+            compress_cfg.factory = (KlCompressFactory)kl_compress_miniz_create;
+            compress_cfg.ctx_destroy =
+                (void (*)(KlCompressCtx *))kl_compress_miniz_ctx_destroy;
+            config.compress = &compress_cfg;
+
+            decompress_cfg.ctx = comp_ctx;
+            decompress_cfg.factory =
+                (KlDecompressFactory)kl_decompress_miniz_create;
+        } else {
+            log_warn("[hull:c] compression init failed — responses uncompressed");
+        }
+    }
 
     /* ── Runtime vtable dispatch ─────────────────────────────────── */
 
@@ -547,6 +633,8 @@ static int hull_serve(int argc, char **argv)
     rt->app_vfs = &app_vfs;
     rt->platform_vfs = &platform_vfs;
     rt->db_path = db_path;
+    if (comp_ctx)
+        rt->compress = &compress_cfg;
 
     /* Initialize worker DB capability (per-worker SQLite connections) */
     if (db_path)
@@ -662,6 +750,15 @@ static int hull_serve(int argc, char **argv)
             http_cfg_storage.tls          = &client_tls_config;
         }
 
+        /* Enable connection pooling and redirect following */
+        if (cpool_ok == 0)
+            http_cfg_storage.pool = &client_pool;
+        http_cfg_storage.follow_redirects = 1;
+
+        /* Enable client-side response decompression */
+        if (comp_ctx)
+            http_cfg_storage.decompress = &decompress_cfg;
+
         rt->http_cfg = &http_cfg_storage;
     }
 
@@ -689,6 +786,24 @@ static int hull_serve(int argc, char **argv)
         }
     } else {
         log_warn("[hull:c] kernel sandbox disabled (--no-sandbox)");
+    }
+
+    /* Register CORS middleware from manifest (before routes) */
+    KlCorsConfig cors_cfg;
+    if (manifest.cors_set) {
+        kl_cors_init(&cors_cfg);
+        for (int i = 0; i < manifest.cors_origin_count; i++)
+            kl_cors_add_origin(&cors_cfg, manifest.cors_origins[i]);
+        if (manifest.cors_methods)
+            cors_cfg.allowed_methods = manifest.cors_methods;
+        if (manifest.cors_headers)
+            cors_cfg.allowed_headers = manifest.cors_headers;
+        cors_cfg.allow_credentials = manifest.cors_credentials;
+        if (manifest.cors_max_age > 0)
+            cors_cfg.max_age_seconds = manifest.cors_max_age;
+        kl_server_use(&server, "*", "/*", kl_cors_middleware, &cors_cfg);
+        log_info("[hull:c] CORS enabled (%d origin(s))",
+                 manifest.cors_origin_count);
     }
 
     /* Wire routes into Keel (after sandbox is applied) */
@@ -733,6 +848,14 @@ static int hull_serve(int argc, char **argv)
      * server infrastructure (connections, event loop) is still valid */
     if (thread_pool)
         kl_thread_pool_free(thread_pool);
+
+    /* Free client connection pool (closes idle connections) */
+    if (cpool_ok == 0)
+        kl_cpool_free(&client_pool);
+
+    /* Free compression context (shared by compress + decompress) */
+    if (comp_ctx)
+        kl_compress_miniz_ctx_destroy(comp_ctx);
 
     /* Cleanup — free manifest strings AFTER server stops
      * (env_cfg and http_cfg reference them during runtime) */

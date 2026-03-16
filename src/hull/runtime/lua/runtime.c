@@ -278,12 +278,14 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
 
     /* Set per-request async context (for hull.sleep / http.get access) */
     lua->active_conn = kl_request_conn(req);
+    lua->active_req = req;
 
     /* Get the handler function from the route registry */
     lua_getfield(lua->L, LUA_REGISTRYINDEX, "__hull_routes");
     if (!lua_istable(lua->L, -1)) {
         lua_pop(lua->L, 1);
         lua->active_conn = NULL;
+        lua->active_req = NULL;
         return -1;
     }
 
@@ -291,6 +293,7 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     if (!lua_isfunction(lua->L, -1)) {
         lua_pop(lua->L, 2); /* pop function + routes table */
         lua->active_conn = NULL;
+        lua->active_req = NULL;
         return -1;
     }
 
@@ -324,6 +327,7 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
         lua->active_thread_ref = LUA_NOREF;
         lua->active_co = NULL;
         lua->active_conn = NULL;
+        lua->active_req = NULL;
 
         /* Pop any return values and routes table */
         if (nres > 0)
@@ -355,6 +359,7 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     lua->active_thread_ref = LUA_NOREF;
     lua->active_co = NULL;
     lua->active_conn = NULL;
+    lua->active_req = NULL;
 
     lua_pop(lua->L, 1); /* pop routes table */
 
