@@ -597,12 +597,11 @@ static void hl_lua_timer_trampoline(void *user_data)
     lua_pop(lua->L, 1); /* pop __hull_timers */
 
     /* Re-arm instruction limit for this callback */
-    if (lua->max_instructions > 0)
+    if (lua->max_instructions > 0) {
         lua_sethook(co, NULL, 0, 0); /* clear first */
-
-    if (lua->max_instructions > 0)
         lua_sethook(co, hl_lua_instruction_hook, LUA_MASKCOUNT,
                     INSTR_COUNT(lua->max_instructions));
+    }
 
     int nres = 0;
     int status = lua_resume(co, lua->L, 0, &nres);

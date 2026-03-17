@@ -31,7 +31,7 @@ let cancelCount = 0;
 app.every(200, () => {
     cancelCount++;
     db.exec("INSERT INTO heartbeat (ts, source) VALUES (?, ?)",
-            [time.nowMs(), "cancel-" + cancelCount]);
+            [time.nowMs(), `cancel-${cancelCount}`]);
     if (cancelCount >= 3) {
         return false;  // stop the timer
     }
