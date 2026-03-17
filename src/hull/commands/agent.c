@@ -632,12 +632,16 @@ static int cmd_request(int argc, char **argv)
 
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
-            port = atoi(argv[++i]);
+            port = (int)strtol(argv[++i], NULL, 10);
         } else if (strcmp(argv[i], "-d") == 0 && i + 1 < argc) {
             body = argv[++i];
         } else if (strcmp(argv[i], "-H") == 0 && i + 1 < argc) {
             if (header_count < 32)
                 headers[header_count++] = argv[++i];
+            else {
+                ++i; /* consume the argument */
+                fprintf(stderr, "hull agent: max 32 headers, ignoring: %s\n", argv[i]);
+            }
         }
     }
 
@@ -742,7 +746,7 @@ static int cmd_request(int argc, char **argv)
 
     if (resp_len > 12) {
         char *sp = memchr(resp_buf, ' ', 12);
-        if (sp) status = atoi(sp + 1);
+        if (sp) status = (int)strtol(sp + 1, NULL, 10);
     }
 
     const char *resp_body = header_end + 4;
@@ -806,7 +810,7 @@ static int cmd_status(int argc, char **argv)
 
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "-p") == 0 && i + 1 < argc)
-            port = atoi(argv[++i]);
+            port = (int)strtol(argv[++i], NULL, 10);
         else if (argv[i][0] != '-')
             app_dir = argv[i];
     }
@@ -825,7 +829,7 @@ static int cmd_status(int argc, char **argv)
         /* Extract port from JSON (simple parse) */
         const char *port_key = strstr(buf, "\"port\":");
         if (port_key) {
-            int p = atoi(port_key + 7);
+            int p = (int)strtol(port_key + 7, NULL, 10);
             if (p > 0) port = p;
         }
     }

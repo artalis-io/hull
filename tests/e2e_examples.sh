@@ -664,6 +664,50 @@ test_async_http() {
     stop_server; rm -rf "$TMPDIR_ASYNC"
 }
 
+# ── Timers ────────────────────────────────────────────────────────────
+
+test_timers() {
+    LABEL=$1
+    PORT=$2
+    APP=$3
+
+    echo ""
+    echo "--- timers ($LABEL) port $PORT ---"
+
+    TMPDIR_TIMERS=$(mktemp -d)
+    start_server "$PORT" "$APP" "$TMPDIR_TIMERS/data.db"
+    if ! wait_for_server "$PORT"; then
+        fail "$LABEL timers — server startup"
+        stop_server; rm -rf "$TMPDIR_TIMERS"; return
+    fi
+
+    # Health check
+    RESP=$(curl -s "http://127.0.0.1:$PORT/health")
+    check_contains "$LABEL timers GET /health" "$RESP" '"ok"'
+
+    # Wait for timers to fire (500ms every-timer + 200ms cancel-timer)
+    sleep 2
+
+    # Check that the every-timer has inserted heartbeats
+    RESP=$(curl -s "http://127.0.0.1:$PORT/counter")
+    check_contains "$LABEL timers every-timer fired" "$RESP" '"every"'
+
+    # Check that the cancel-timer ran exactly 3 times then stopped
+    check_contains "$LABEL timers cancel-1 fired" "$RESP" '"cancel-1"'
+    check_contains "$LABEL timers cancel-3 fired" "$RESP" '"cancel-3"'
+
+    # Verify cancel-timer stopped: count should be exactly 3
+    # (cancel-1, cancel-2, cancel-3 — each with count 1)
+    RESP=$(curl -s "http://127.0.0.1:$PORT/heartbeats")
+    # Should NOT have cancel-4 (timer self-cancelled after 3)
+    case "$RESP" in
+        *'"cancel-4"'*) fail "$LABEL timers cancel-timer should have stopped at 3" ;;
+        *)              pass "$LABEL timers cancel-timer stopped at 3" ;;
+    esac
+
+    stop_server; rm -rf "$TMPDIR_TIMERS"
+}
+
 # ── Run all example tests ────────────────────────────────────────────
 
 PORT_BASE=19870
@@ -682,6 +726,7 @@ if [ "$RUNTIME" != "js" ]; then
     test_webhooks       "lua" $((PORT_BASE + 7)) examples/webhooks/app.lua
     test_todo           "lua" $((PORT_BASE + 8)) examples/todo/app.lua
     test_async_http     "lua" $((PORT_BASE + 9)) examples/async_http/app.lua
+    test_timers         "lua" $((PORT_BASE + 20)) examples/timers/app.lua
 fi
 
 if [ "$RUNTIME" != "lua" ]; then
@@ -695,6 +740,7 @@ if [ "$RUNTIME" != "lua" ]; then
     test_webhooks       "js" $((PORT_BASE + 17)) examples/webhooks/app.js
     test_todo           "js" $((PORT_BASE + 18)) examples/todo/app.js
     test_async_http     "js" $((PORT_BASE + 19)) examples/async_http/app.js
+    test_timers         "js" $((PORT_BASE + 21)) examples/timers/app.js
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────

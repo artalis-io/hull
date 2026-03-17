@@ -169,8 +169,11 @@ end
 
 --- Middleware factory: require the user to have a role (or any of several roles).
 -- role_or_roles: a string (single role) or table (array of roles, user needs at least one)
+-- opts.get_user_id: optional function(req) -> user_id (default: req.ctx.session.user_id)
 -- Returns a middleware function.
-function rbac.require_role(role_or_roles)
+function rbac.require_role(role_or_roles, opts)
+    opts = opts or {}
+    local get_user_id = opts.get_user_id
     local roles_list
     if type(role_or_roles) == "string" then
         roles_list = { role_or_roles }
@@ -179,13 +182,17 @@ function rbac.require_role(role_or_roles)
     end
 
     return function(req, res)
-        local session = req.ctx.session
-        if not session or not session.user_id then
-            res:status(403):json({ error = "forbidden" })
+        local user_id
+        if get_user_id then
+            user_id = get_user_id(req)
+        else
+            local session = req.ctx and req.ctx.session
+            user_id = session and session.user_id
+        end
+        if not user_id then
+            res:status(401):json({ error = "authentication required" })
             return 1
         end
-
-        local user_id = session.user_id
 
         for _, role in ipairs(roles_list) do
             if rbac.has_role(user_id, role) then
@@ -200,8 +207,11 @@ end
 
 --- Middleware factory: require the user to have a permission (or any of several).
 -- perm_or_perms: a string (single permission) or table (array, user needs at least one)
+-- opts.get_user_id: optional function(req) -> user_id (default: req.ctx.session.user_id)
 -- Returns a middleware function.
-function rbac.require_permission(perm_or_perms)
+function rbac.require_permission(perm_or_perms, opts)
+    opts = opts or {}
+    local get_user_id = opts.get_user_id
     local perms_list
     if type(perm_or_perms) == "string" then
         perms_list = { perm_or_perms }
@@ -210,13 +220,17 @@ function rbac.require_permission(perm_or_perms)
     end
 
     return function(req, res)
-        local session = req.ctx.session
-        if not session or not session.user_id then
-            res:status(403):json({ error = "forbidden" })
+        local user_id
+        if get_user_id then
+            user_id = get_user_id(req)
+        else
+            local session = req.ctx and req.ctx.session
+            user_id = session and session.user_id
+        end
+        if not user_id then
+            res:status(401):json({ error = "authentication required" })
             return 1
         end
-
-        local user_id = session.user_id
 
         for _, perm in ipairs(perms_list) do
             if rbac.has_permission(user_id, perm) then

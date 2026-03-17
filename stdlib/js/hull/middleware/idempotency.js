@@ -178,13 +178,18 @@ function middleware(opts) {
             }
         }
 
-        // Insert in-flight record
-        db.exec(
-            "INSERT INTO _hull_idempotency_keys " +
+        // Insert in-flight record (OR IGNORE prevents race with concurrent request)
+        const inserted = db.exec(
+            "INSERT OR IGNORE INTO _hull_idempotency_keys " +
             "(key, principal_id, fingerprint, endpoint, state, created_at, expires_at) " +
             "VALUES (?, ?, ?, ?, 'inflight', ?, ?)",
             [key, principalId, fingerprint, endpoint, now, now + ttl]
         );
+        if (inserted === 0) {
+            res.status(409);
+            res.json({ error: "request with this idempotency key is already in progress" });
+            return 1;
+        }
 
         // Store key info in context for respond() to use
         req.ctx._idem_key = key;

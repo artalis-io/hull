@@ -93,7 +93,10 @@ static void on_redirect_done(KlRedirectClient *rc, void *user_data)
         hl_audit_end(&w);
     }
 
-    kl_async_complete(ctx->server, &ctx->op);
+    if (ctx->detached)
+        hl_async_ctx_resume_detached(ctx);
+    else
+        kl_async_complete(ctx->server, &ctx->op);
 }
 
 /* ── KlClient on_done callback (no-redirect path) ───────────────── */
@@ -122,7 +125,10 @@ static void on_keel_client_done(KlClient *client, void *user_data)
         hl_audit_end(&w);
     }
 
-    kl_async_complete(ctx->server, &ctx->op);
+    if (ctx->detached)
+        hl_async_ctx_resume_detached(ctx);
+    else
+        kl_async_complete(ctx->server, &ctx->op);
 }
 
 /* ── Deadline timeout ────────────────────────────────────────────── */
@@ -139,7 +145,10 @@ static void on_http_deadline(KlAsyncOp *op, void *user_data)
         ctx->free_driver(ctx->driver);
     ctx->driver = NULL;
 
-    kl_async_complete(ctx->server, &ctx->op);
+    if (ctx->detached)
+        hl_async_ctx_resume_detached(ctx);
+    else
+        kl_async_complete(ctx->server, &ctx->op);
 }
 
 /* ── Public API ──────────────────────────────────────────────────── */
@@ -151,7 +160,7 @@ HlAsyncCtx *hl_async_http_start(KlServer *server, KlConn *conn,
                                   const HlHttpHeader *headers, int num_headers,
                                   const char *body, size_t body_len)
 {
-    if (!server || !conn || !http_cfg || !method || !url)
+    if (!server || !http_cfg || !method || !url)
         return NULL;
 
     /* Parse URL for allowlist check */
@@ -243,13 +252,19 @@ HlAsyncCtx *hl_async_http_start(KlServer *server, KlConn *conn,
         ctx->driver = kl_client;
     }
 
-    /* Suspend the inbound connection */
-    if (kl_async_suspend(server, conn, &ctx->op) < 0) {
-        if (ctx->free_driver)
-            ctx->free_driver(ctx->driver);
-        ctx->driver = NULL;
-        hl_async_ctx_free(ctx);
-        return NULL;
+    if (conn) {
+        /* Attached mode: suspend the inbound connection */
+        ctx->detached = 0;
+        if (kl_async_suspend(server, conn, &ctx->op) < 0) {
+            if (ctx->free_driver)
+                ctx->free_driver(ctx->driver);
+            ctx->driver = NULL;
+            hl_async_ctx_free(ctx);
+            return NULL;
+        }
+    } else {
+        /* Detached mode (timer callback): no connection to suspend */
+        ctx->detached = 1;
     }
 
     return ctx;

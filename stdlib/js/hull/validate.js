@@ -92,6 +92,8 @@ function check(data, schema) {
 
         // 6. pattern
         if (rules.pattern) {
+            if (typeof rules.pattern === "string" && rules.pattern.length > 1000)
+                throw new Error("validate: pattern too long (max 1000 chars)");
             const re = (rules.pattern instanceof RegExp) ? rules.pattern : new RegExp(rules.pattern);
             if (typeof value !== "string" || !re.test(value))
                 err = customMsg || "does not match the required pattern";

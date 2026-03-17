@@ -32,6 +32,7 @@ function csv.parse(text, opts)
     local sep   = opts.separator or ","
     local quote = opts.quote or '"'
     local use_headers = opts.headers or false
+    local max_rows = opts.max_rows or 100000
 
     local rows = {}
     local row = {}
@@ -42,6 +43,9 @@ function csv.parse(text, opts)
     local i = 1
 
     while i <= len do
+        if #rows >= max_rows then
+            error("csv.parse: exceeded max_rows limit (" .. max_rows .. ")")
+        end
         local c = text:sub(i, i)
 
         if state == STATE_FIELD_START then

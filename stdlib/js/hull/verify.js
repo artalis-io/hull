@@ -56,7 +56,12 @@ if (!sigData) {
     tool.exit(1);
 }
 
-const sig = JSON.parse(sigData);
+let sig;
+try { sig = JSON.parse(sigData); }
+catch (e) {
+    tool.stderr("hull verify: invalid JSON in signature file\n");
+    tool.exit(1);
+}
 if (!sig || !sig.files || !sig.signature || !sig.public_key) {
     tool.stderr("hull verify: invalid signature format\n");
     tool.exit(1);

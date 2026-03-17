@@ -34,7 +34,18 @@
 - `hull.form` — URL-encoded form body parsing
 - `hull.i18n` — internationalization with locale detection, message bundles, formatting helpers
 - `hull.template` — compile-once render-many HTML template engine with inheritance, includes, filters, auto-escaping
+- `hull.csv` — CSV parse/encode (RFC 4180)
+- `hull.search` — full-text search (SQLite FTS5)
+- `hull.middleware.rbac` — role-based access control
+- `hull.middleware.cors` — CORS headers + preflight handling
+- `hull.middleware.ratelimit` — in-memory rate limiting with configurable windows
 - Static file serving — convention-based (`static/` → `/static/*`), MIME detection, ETag/304, embedded in builds, zero-copy sendfile in dev
+
+### Background Work
+- `app.every(ms, fn)` — repeating interval timers with full async support (sleep, HTTP fetch, DB)
+- `app.daily("HH:MM", fn, opts)` — daily wall-clock timers (UTC or local)
+- Self-cancellation via `return false`, error-resilient (logs + reschedules), one-invocation-at-a-time guard
+- Detached async mode — timer callbacks use `kl_timer_add` instead of `kl_async_suspend` for connectionless operation
 
 ### Build & Deployment
 - `hull build` — compile Lua/JS apps into standalone binaries
@@ -69,7 +80,7 @@
 - ASan + UBSan, MSan + UBSan sanitizer runs
 - Static analysis (scan-build + cppcheck)
 - Code coverage
-- E2E tests for all 9 examples in both runtimes + 40 template engine tests + stdlib middleware tests
+- E2E tests for all 11 examples in both runtimes + 40 template engine tests + stdlib middleware tests
 - Sandbox violation tests (Linux + Cosmo)
 - Benchmarks (Lua vs QuickJS, DB vs non-DB routes)
 
@@ -90,10 +101,10 @@
 | Idempotency-Key middleware | **Done** | `hull.middleware.idempotency` — response caching, fingerprinting, 409 on mismatch |
 | Transactional outbox | **Done** | `hull.middleware.outbox` — reliable delivery with exponential backoff |
 | Inbox deduplication | **Done** | `hull.middleware.inbox` — incoming event dedup with TTL |
-| CSV encode/decode (RFC 4180) | Planned | Import/export |
-| FTS5 search wrapper | Planned | Full-text search stdlib |
-| RBAC (role-based access control) | Planned | Permission middleware |
-| Email (SMTP / API) | In progress | Outbound notifications (C cap + stdlib) |
+| CSV encode/decode (RFC 4180) | **Done** | `hull.csv` — RFC 4180 parse/encode |
+| FTS5 search wrapper | **Done** | `hull.search` — full-text search backed by SQLite FTS5 |
+| RBAC (role-based access control) | **Done** | `hull.middleware.rbac` — role/permission middleware |
+| Email (SMTP / API) | **Done** | Outbound SMTP via C capability + stdlib |
 | License key system | Planned | Ed25519 offline verification for commercial distribution |
 
 ### Agent Platform — AI-Native Development Tooling
@@ -135,19 +146,19 @@ Hull treats agentic coding environments (Claude Code, Codex, OpenCode, Cursor, O
 
 Common agent core with dual interface: CLI JSON mode for frontier models, MCP server for mid-range local models. Zero logic duplication — both call the same C functions.
 
-#### Phase 1: Foundation (agent core + CLI) — In Progress
+#### Phase 1: Foundation (agent core + CLI) — Done
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| `hull agent status` | Planned | Dev server state, PID, port, last reload result, uptime |
-| `hull agent errors` | Planned | Structured errors from `.hull/last_error.json` sidecar |
-| `hull agent routes` | Planned | List registered routes as JSON (method, pattern, middleware) |
-| `hull agent request` | Planned | HTTP request to dev server with JSON response |
-| `hull agent db schema` | Planned | Introspect current DB tables, columns, types, PKs |
-| `hull agent db query` | Planned | Read-only query on dev DB with JSON output |
-| `hull agent test` | Planned | Structured test results (passed, failed, failure details) |
-| `hull dev --agent` | Planned | Write structured errors/status to `.hull/` sidecar files |
-| `AGENTS.md` | Planned | Comprehensive agent development guide |
+| `hull agent status` | **Done** | Dev server state, PID, port, last reload result, uptime |
+| `hull agent errors` | **Done** | Structured errors from `.hull/last_error.json` sidecar |
+| `hull agent routes` | **Done** | List registered routes as JSON (method, pattern, middleware) |
+| `hull agent request` | **Done** | HTTP request to dev server with JSON response |
+| `hull agent db schema` | **Done** | Introspect current DB tables, columns, types, PKs |
+| `hull agent db query` | **Done** | Read-only query on dev DB with JSON output |
+| `hull agent test` | **Done** | Structured test results (passed, failed, failure details) |
+| `hull dev --agent` | **Done** | Write structured errors/status to `.hull/` sidecar files |
+| `AGENTS.md` | **Done** | Comprehensive agent development guide |
 
 #### Phase 2: Context + Render
 
@@ -230,8 +241,8 @@ Every step produces machine-readable JSON output. The agent never parses human-f
 |---------|--------|-------|
 | WASM compute plugins (WAMR) | Architecture designed | Sandboxed, gas-metered, no I/O — pure computation |
 | Database encryption at rest | Planned | SQLite SEE or custom VFS |
-| Background work / coroutines | Planned | `app.every()`, `app.daily()` |
-| Compression (gzip/zstd) | [Plan](compression_plan.md) | Response compression middleware |
+| Background work / timers | **Done** | `app.every()`, `app.daily()` — async-capable repeating timers |
+| Compression (gzip/zstd) | **Done** | Keel-integrated response compression |
 | ETag support | [Plan](etag_plan.md) | Conditional request handling |
 | HTTP/2 full support | [Plan](http2_plan.md) | Currently h2c upgrade only |
 | PDF document builder | Planned | Report generation |

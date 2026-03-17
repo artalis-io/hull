@@ -32,16 +32,16 @@ function middleware(opts) {
 
         res.header("Access-Control-Allow-Origin", origin);
         res.header("Vary", "Origin");
-        res.header("Access-Control-Allow-Methods", methods);
-        res.header("Access-Control-Allow-Headers", headers);
-        res.header("Access-Control-Max-Age", maxAge);
 
         if (credentials) {
             res.header("Access-Control-Allow-Credentials", "true");
         }
 
-        // Handle preflight
+        // Preflight: send method/header/max-age headers + 204
         if (req.method === "OPTIONS") {
+            res.header("Access-Control-Allow-Methods", methods);
+            res.header("Access-Control-Allow-Headers", headers);
+            res.header("Access-Control-Max-Age", maxAge);
             res.status(204).text("");
             return 1;
         }

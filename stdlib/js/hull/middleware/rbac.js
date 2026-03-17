@@ -159,17 +159,19 @@ function hasAnyPermission(userId, permList) {
     return false;
 }
 
-function requireRole(roleOrRoles) {
+function requireRole(roleOrRoles, opts) {
     const isList = Array.isArray(roleOrRoles);
+    const getUserId = (opts && opts.getUserId) || null;
 
     return function requireRoleMw(req, res) {
-        if (!req.ctx || !req.ctx.session || !req.ctx.session.user_id) {
-            res.status(403);
-            res.json({ error: "forbidden" });
+        const userId = getUserId
+            ? getUserId(req)
+            : (req.ctx && req.ctx.session && req.ctx.session.user_id);
+        if (!userId) {
+            res.status(401);
+            res.json({ error: "authentication required" });
             return 1;
         }
-
-        const userId = req.ctx.session.user_id;
         const allowed = isList
             ? hasAnyRole(userId, roleOrRoles)
             : hasRole(userId, roleOrRoles);
@@ -184,17 +186,19 @@ function requireRole(roleOrRoles) {
     };
 }
 
-function requirePermission(permOrPerms) {
+function requirePermission(permOrPerms, opts) {
     const isList = Array.isArray(permOrPerms);
+    const getUserId = (opts && opts.getUserId) || null;
 
     return function requirePermissionMw(req, res) {
-        if (!req.ctx || !req.ctx.session || !req.ctx.session.user_id) {
-            res.status(403);
-            res.json({ error: "forbidden" });
+        const userId = getUserId
+            ? getUserId(req)
+            : (req.ctx && req.ctx.session && req.ctx.session.user_id);
+        if (!userId) {
+            res.status(401);
+            res.json({ error: "authentication required" });
             return 1;
         }
-
-        const userId = req.ctx.session.user_id;
         const allowed = isList
             ? hasAnyPermission(userId, permOrPerms)
             : hasPermission(userId, permOrPerms);

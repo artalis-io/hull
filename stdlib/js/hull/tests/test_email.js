@@ -2,7 +2,7 @@
 //
 // Tests field validation and provider dispatch (no network I/O).
 
-import email from "hull:email";
+import { email } from "hull:email";
 
 let pass = 0;
 let fail = 0;

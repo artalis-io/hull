@@ -40,6 +40,9 @@ end
 
 --- Generate a CSRF token for the given session ID and secret.
 -- Returns "hex_timestamp.hmac_hex"
+-- Note: token is scoped to session + time window, not to a specific endpoint.
+-- A valid token generated on any page can be used on any endpoint within
+-- the same session and max_age window. This is standard CSRF practice.
 function csrf.generate(session_id, secret)
     local ts = tostring(time.now())
     local ts_hex = str_to_hex(ts)

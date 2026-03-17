@@ -120,7 +120,7 @@ static int db_result_grow(HlDbResult *r)
     int new_cap = r->capacity ? r->capacity * 2 : 16;
     if (new_cap > 100000) return -1; /* sanity cap */
     HlDbValue *nv = realloc(r->values,
-                             (size_t)(new_cap * r->ncols) * sizeof(HlDbValue));
+                             (size_t)new_cap * (size_t)r->ncols * sizeof(HlDbValue));
     if (!nv) return -1;
     r->values = nv;
     r->capacity = new_cap;

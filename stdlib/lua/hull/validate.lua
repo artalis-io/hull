@@ -29,7 +29,7 @@ function validate.check(data, schema)
         local err = nil
         local custom_msg = rules.message
 
-        -- 1. trim (mutates in-place, not an error)
+        -- 1. trim (mutates data[field] in-place — caller's table is modified)
         if rules.trim and type(value) == "string" then
             value = value:match("^%s*(.-)%s*$")
             data[field] = value

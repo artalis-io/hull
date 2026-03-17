@@ -233,6 +233,148 @@ static JSValue js_app_use_post(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+/* app.every(interval_ms, handler) — repeating timer */
+static JSValue js_app_every(JSContext *ctx, JSValueConst this_val,
+                             int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 2)
+        return JS_ThrowTypeError(ctx, "app.every requires (interval_ms, handler)");
+
+    int64_t interval_ms;
+    if (JS_ToInt64(ctx, &interval_ms, argv[0]) != 0)
+        return JS_EXCEPTION;
+
+    if (interval_ms < 100)
+        return JS_ThrowRangeError(ctx, "app.every() minimum interval is 100ms");
+
+    if (!JS_IsFunction(ctx, argv[1]))
+        return JS_ThrowTypeError(ctx, "app.every requires a function handler");
+
+    JSValue global = JS_GetGlobalObject(ctx);
+
+    /* Store handler in __hull_timers */
+    JSValue timers = JS_GetPropertyStr(ctx, global, "__hull_timers");
+    if (JS_IsUndefined(timers)) {
+        timers = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, global, "__hull_timers", JS_DupValue(ctx, timers));
+    }
+
+    JSValue len_val = JS_GetPropertyStr(ctx, timers, "length");
+    int32_t handler_id = 0;
+    JS_ToInt32(ctx, &handler_id, len_val);
+    JS_FreeValue(ctx, len_val);
+
+    JS_SetPropertyUint32(ctx, timers, (uint32_t)handler_id,
+                         JS_DupValue(ctx, argv[1]));
+    JS_FreeValue(ctx, timers);
+
+    /* Store timer def in __hull_timer_defs */
+    JSValue defs = JS_GetPropertyStr(ctx, global, "__hull_timer_defs");
+    if (JS_IsUndefined(defs)) {
+        defs = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, global, "__hull_timer_defs", JS_DupValue(ctx, defs));
+    }
+
+    JSValue defs_len_val = JS_GetPropertyStr(ctx, defs, "length");
+    int32_t idx = 0;
+    JS_ToInt32(ctx, &idx, defs_len_val);
+    JS_FreeValue(ctx, defs_len_val);
+
+    JSValue entry = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, entry, "type", JS_NewString(ctx, "every"));
+    JS_SetPropertyStr(ctx, entry, "interval_ms", JS_NewInt64(ctx, interval_ms));
+    JS_SetPropertyStr(ctx, entry, "handler_id", JS_NewInt32(ctx, handler_id));
+    JS_SetPropertyUint32(ctx, defs, (uint32_t)idx, entry);
+
+    JS_FreeValue(ctx, defs);
+    JS_FreeValue(ctx, global);
+
+    return JS_UNDEFINED;
+}
+
+/* app.daily(time_str, handler [, opts]) — daily timer at HH:MM */
+static JSValue js_app_daily(JSContext *ctx, JSValueConst this_val,
+                             int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 2)
+        return JS_ThrowTypeError(ctx, "app.daily requires (time_str, handler)");
+
+    const char *time_str = JS_ToCString(ctx, argv[0]);
+    if (!time_str)
+        return JS_EXCEPTION;
+
+    /* Character-level validation, no sscanf */
+    int bad_fmt = (strlen(time_str) != 5 || time_str[2] != ':' ||
+        time_str[0] < '0' || time_str[0] > '9' ||
+        time_str[1] < '0' || time_str[1] > '9' ||
+        time_str[3] < '0' || time_str[3] > '9' ||
+        time_str[4] < '0' || time_str[4] > '9');
+    int hour = bad_fmt ? -1 : (time_str[0] - '0') * 10 + (time_str[1] - '0');
+    int minute = bad_fmt ? -1 : (time_str[3] - '0') * 10 + (time_str[4] - '0');
+    if (bad_fmt || hour > 23 || minute > 59) {
+        JS_FreeCString(ctx, time_str);
+        return JS_ThrowRangeError(ctx, "app.daily() requires time in HH:MM format");
+    }
+    JS_FreeCString(ctx, time_str);
+
+    if (!JS_IsFunction(ctx, argv[1]))
+        return JS_ThrowTypeError(ctx, "app.daily requires a function handler");
+
+    /* Check opts for localtime */
+    int use_localtime = 0;
+    if (argc >= 3 && JS_IsObject(argv[2])) {
+        JSValue lt_val = JS_GetPropertyStr(ctx, argv[2], "localtime");
+        if (JS_IsBool(lt_val))
+            use_localtime = JS_ToBool(ctx, lt_val);
+        JS_FreeValue(ctx, lt_val);
+    }
+
+    JSValue global = JS_GetGlobalObject(ctx);
+
+    /* Store handler in __hull_timers */
+    JSValue timers = JS_GetPropertyStr(ctx, global, "__hull_timers");
+    if (JS_IsUndefined(timers)) {
+        timers = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, global, "__hull_timers", JS_DupValue(ctx, timers));
+    }
+
+    JSValue len_val = JS_GetPropertyStr(ctx, timers, "length");
+    int32_t handler_id = 0;
+    JS_ToInt32(ctx, &handler_id, len_val);
+    JS_FreeValue(ctx, len_val);
+
+    JS_SetPropertyUint32(ctx, timers, (uint32_t)handler_id,
+                         JS_DupValue(ctx, argv[1]));
+    JS_FreeValue(ctx, timers);
+
+    /* Store timer def in __hull_timer_defs */
+    JSValue defs = JS_GetPropertyStr(ctx, global, "__hull_timer_defs");
+    if (JS_IsUndefined(defs)) {
+        defs = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, global, "__hull_timer_defs", JS_DupValue(ctx, defs));
+    }
+
+    JSValue defs_len_val = JS_GetPropertyStr(ctx, defs, "length");
+    int32_t idx = 0;
+    JS_ToInt32(ctx, &idx, defs_len_val);
+    JS_FreeValue(ctx, defs_len_val);
+
+    JSValue entry = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, entry, "type", JS_NewString(ctx, "daily"));
+    JS_SetPropertyStr(ctx, entry, "hour", JS_NewInt32(ctx, hour));
+    JS_SetPropertyStr(ctx, entry, "minute", JS_NewInt32(ctx, minute));
+    JS_SetPropertyStr(ctx, entry, "localtime", JS_NewBool(ctx, use_localtime));
+    JS_SetPropertyStr(ctx, entry, "handler_id", JS_NewInt32(ctx, handler_id));
+    JS_SetPropertyUint32(ctx, defs, (uint32_t)idx, entry);
+
+    JS_FreeValue(ctx, defs);
+    JS_FreeValue(ctx, global);
+
+    return JS_UNDEFINED;
+}
+
 /* app.config(obj) — application configuration */
 static JSValue js_app_config(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv)
@@ -347,6 +489,10 @@ static int js_app_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_app_use, "use", 3));
     JS_SetPropertyStr(ctx, app, "usePost",
                       JS_NewCFunction(ctx, js_app_use_post, "usePost", 3));
+    JS_SetPropertyStr(ctx, app, "every",
+                      JS_NewCFunction(ctx, js_app_every, "every", 2));
+    JS_SetPropertyStr(ctx, app, "daily",
+                      JS_NewCFunction(ctx, js_app_daily, "daily", 3));
     JS_SetPropertyStr(ctx, app, "config",
                       JS_NewCFunction(ctx, js_app_config, "config", 1));
     JS_SetPropertyStr(ctx, app, "static",

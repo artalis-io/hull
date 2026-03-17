@@ -46,6 +46,10 @@ function parse(headerString) {
 function serialize(name, value, opts) {
     if (!name || typeof name !== "string")
         throw new Error("cookie name is required");
+    if (/[=;,\s\x00-\x1f\x7f]/.test(name))
+        throw new Error("cookie name contains invalid characters");
+    if (value !== null && value !== undefined && /[\x00-\x1f\x7f;]/.test(String(value)))
+        throw new Error("cookie value contains invalid characters");
 
     const o = opts || {};
 
@@ -64,8 +68,11 @@ function serialize(name, value, opts) {
         str += "; Path=" + path;
 
     // Domain
-    if (o.domain)
+    if (o.domain) {
+        if (!/^[a-zA-Z0-9._-]+$/.test(o.domain))
+            throw new Error("cookie: invalid domain");
         str += "; Domain=" + o.domain;
+    }
 
     // MaxAge
     if (o.maxAge !== undefined && o.maxAge !== null) {

@@ -19,13 +19,19 @@ end
 --- Parse a URL-encoded form body into a key-value table.
 -- "email=a%40b.com&pass=hello+world" -> { email = "a@b.com", pass = "hello world" }
 -- Last value wins for duplicate keys. Returns {} for nil/empty/non-string input.
-function form.parse(body)
+function form.parse(body, opts)
     local result = {}
     if not body or type(body) ~= "string" or body == "" then
         return result
     end
 
+    local max_fields = (opts and opts.max_fields) or 1000
+    local field_count = 0
     for pair in body:gmatch("[^&]+") do
+        field_count = field_count + 1
+        if field_count > max_fields then
+            error("form.parse: exceeded max_fields limit (" .. max_fields .. ")")
+        end
         local eq = pair:find("=", 1, true)
         if eq then
             local key = pair:sub(1, eq - 1)

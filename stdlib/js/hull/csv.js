@@ -18,6 +18,7 @@ function parse(text, opts) {
     const sep = (opts && opts.separator) || ",";
     const quo = (opts && opts.quote) || '"';
     const useHeaders = !!(opts && opts.headers);
+    const maxRows = (opts && opts.maxRows) || 100000;
 
     const rows = [];
     let row = [];
@@ -27,6 +28,8 @@ function parse(text, opts) {
     const len = text.length;
 
     while (i < len) {
+        if (rows.length >= maxRows)
+            throw new Error("csv.parse: exceeded maxRows limit (" + maxRows + ")");
         const ch = text[i];
 
         if (inQuoted) {

@@ -233,11 +233,17 @@ function i18n.detect(header_or_req)
         if base and locales[base] then return base end
     end
     -- Try base language match for all entries (second pass)
+    -- Match "en" to "en-GB" but not "end" or "encyclopedia"
     for _, entry in ipairs(entries) do
         local base = entry.lang:match("^([%w]+)")
         if base then
             for name, _ in pairs(locales) do
-                if name:sub(1, #base) == base then return name end
+                if name == base or
+                   (name:sub(1, #base) == base and
+                    (name:sub(#base + 1, #base + 1) == "-" or
+                     name:sub(#base + 1, #base + 1) == "_")) then
+                    return name
+                end
             end
         end
     end

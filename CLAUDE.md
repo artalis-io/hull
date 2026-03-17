@@ -653,6 +653,64 @@ app.use_post("POST", "/api/*", idempotency.middleware())
 - **Session init at startup:** Call `session.init()` before registering routes — it creates the SQLite table.
 - **Lua vs JS differences:** The Lua and JS APIs are functionally equivalent but differ in naming conventions (snake_case vs camelCase) and some defaults. See the JS stdlib source for JS-specific option names.
 
+### Background Timers
+
+`app.every()` and `app.daily()` register repeating timer callbacks that run on the event loop thread. Timer callbacks support the full async runtime (`hull.sleep()`, `http.fetch()`, `db.*`).
+
+**Lua:**
+```lua
+-- Repeating interval (milliseconds, minimum 100ms)
+app.every(5000, function()
+    session.cleanup()
+end)
+
+-- Async operations work inside timers
+app.every(30000, function()
+    outbox.flush()  -- makes HTTP requests
+end)
+
+-- Return false to self-cancel
+app.every(1000, function()
+    local pending = outbox.flush()
+    if pending == 0 then return false end
+end)
+
+-- Daily at wall-clock time (UTC by default)
+app.daily("02:00", function()
+    outbox.cleanup(86400 * 30)
+end)
+
+-- Daily at local time
+app.daily("02:00", function()
+    inbox.cleanup()
+end, { localtime = true })
+```
+
+**JavaScript:**
+```javascript
+app.every(5000, () => { session.cleanup(); });
+
+app.every(30000, async () => { await outbox.flush(); });
+
+app.every(1000, () => {
+    const pending = outbox.flush();
+    if (pending === 0) return false;  // self-cancel
+});
+
+app.daily("02:00", () => { outbox.cleanup(86400 * 30); });
+app.daily("02:00", () => { inbox.cleanup(); }, { localtime: true });
+```
+
+**Constraints:**
+- Minimum interval: 100ms (enforced, prevents tight loops)
+- No `req`/`res` — these are background tasks, not request handlers
+- Errors are logged but don't stop the timer (re-schedules regardless)
+- One invocation at a time — if a callback is still running (async yield), the next tick is deferred
+- Return `false` to stop the repeating timer
+- `app.daily("HH:MM")` defaults to UTC. Pass `{ localtime = true }` for local time
+
+**Implementation:** Timer callbacks fire via Keel's `kl_timer_add` min-heap. Self-re-adding callbacks give repeating behavior. Async operations use "detached" mode — `HlAsyncCtx` with `detached=1` resumes via `hl_async_ctx_resume_detached()` instead of `kl_async_complete()`.
+
 ## Testing
 
 Tests use Sheredom's utest.h. Each `tests/hull/*/test_*.c` is a standalone executable.

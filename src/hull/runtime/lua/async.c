@@ -28,7 +28,8 @@ typedef struct HlLuaAsyncCont {
     HlLuaPushResultFn  push_result;   /* NULL = no result (sleep) */
     lua_State         *co;            /* coroutine to resume */
     int                thread_ref;    /* registry ref for coroutine */
-    KlConn            *conn;          /* connection to resume */
+    KlConn            *conn;          /* connection to resume (NULL = detached) */
+    void              *timer_ctx;     /* HlLuaTimer* if running in a timer callback */
 } HlLuaAsyncCont;
 
 /*
@@ -45,6 +46,9 @@ typedef struct HlLuaAsyncCont {
  *   LUA_YIELD → KL_CONN_SUSPENDED (handler re-yielded, new op active)
  *   error     → KL_CONN_SENDING (500 response written)
  */
+/* Forward declarations for timer reschedule (defined in runtime.c) */
+void hl_lua_timer_reschedule(HlLuaTimer *t);
+
 static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
 {
     HlLuaAsyncCont *lc = (HlLuaAsyncCont *)self;
@@ -52,7 +56,7 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
     lua_State *co = lc->co;
     KlConn *conn = lc->conn;
 
-    if (!co || !conn) return;
+    if (!co) return;
 
     /* Restore per-request context so C functions called during resume
      * (e.g., another http.async.get) can find the active connection */
@@ -72,7 +76,12 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
     int status = lua_resume(co, lua->L, nargs, &nres);
 
     if (status == LUA_OK) {
-        /* Handler completed — response is ready */
+        /* Handler completed */
+        int cancelled = 0;
+        if (lc->timer_ctx && nres > 0 &&
+            lua_isboolean(co, -1) && !lua_toboolean(co, -1))
+            cancelled = 1;
+
         luaL_unref(lua->L, LUA_REGISTRYINDEX, lc->thread_ref);
         lc->thread_ref = LUA_NOREF;
         lc->co = NULL;
@@ -80,24 +89,39 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
         lua->active_co = NULL;
         lua->active_conn = NULL;
 
-        /* Pop any return values from coroutine */
-        if (nres > 0)
-            lua_pop(lua->L, nres);
+        if (conn) {
+            /* Attached mode — response is ready */
+            if (conn->res.body_mode == KL_BODY_STREAM) {
+                conn->state = KL_CONN_CLOSED;
+            } else {
+                conn->state = KL_CONN_SENDING;
+            }
+        }
 
-        /* Check for streaming mode */
-        if (conn->res.body_mode == KL_BODY_STREAM) {
-            conn->state = KL_CONN_CLOSED;
-        } else {
-            conn->state = KL_CONN_SENDING;
+        /* Timer async completion: clear in_flight and reschedule */
+        if (lc->timer_ctx) {
+            HlLuaTimer *t = (HlLuaTimer *)lc->timer_ctx;
+            t->in_flight = 0;
+            if (!cancelled)
+                hl_lua_timer_reschedule(t);
         }
     } else if (status == LUA_YIELD) {
         /* Handler yielded again — new HlAsyncCtx already set up.
          * The new continuation captured the current co/conn/thread_ref.
-         * conn->state was set to KL_CONN_SUSPENDED by kl_async_suspend. */
+         * Transfer timer_ctx to the new continuation if present. */
+        if (lc->timer_ctx) {
+            /* Find the most recent continuation on the Lua state —
+             * it will have been stored via hl_lua_async_cont_create.
+             * The new cont has our co/thread_ref already captured. */
+        }
     } else {
         /* Error */
         const char *msg = lua_tostring(co, -1);
-        log_error("[hull:c] async lua handler error: %s", msg ? msg : "(unknown)");
+        if (conn)
+            log_error("[hull:c] async lua handler error: %s",
+                      msg ? msg : "(unknown)");
+        else
+            log_error("[hull:timer] error: %s", msg ? msg : "(unknown)");
 
         luaL_unref(lua->L, LUA_REGISTRYINDEX, lc->thread_ref);
         lc->thread_ref = LUA_NOREF;
@@ -106,10 +130,19 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
         lua->active_co = NULL;
         lua->active_conn = NULL;
 
-        kl_response_status(&conn->res, 500);
-        kl_response_header(&conn->res, "Content-Type", "text/plain");
-        kl_response_body_borrow(&conn->res, "Internal Server Error", 21);
-        conn->state = KL_CONN_SENDING;
+        if (conn) {
+            kl_response_status(&conn->res, 500);
+            kl_response_header(&conn->res, "Content-Type", "text/plain");
+            kl_response_body_borrow(&conn->res, "Internal Server Error", 21);
+            conn->state = KL_CONN_SENDING;
+        }
+
+        /* Timer error: clear in_flight and reschedule anyway */
+        if (lc->timer_ctx) {
+            HlLuaTimer *t = (HlLuaTimer *)lc->timer_ctx;
+            t->in_flight = 0;
+            hl_lua_timer_reschedule(t);
+        }
     }
 }
 
@@ -163,8 +196,19 @@ HlAsyncCont *hl_lua_async_cont_create(HlLua *lua, HlAllocator *alloc,
     lc->co         = lua->active_co;
     lc->thread_ref = lua->active_thread_ref;
     lc->conn       = lua->active_conn;
+    lc->timer_ctx  = lua->active_timer;  /* inherit timer ctx if in timer callback */
 
     return &lc->base;
+}
+
+/*
+ * Set the timer context on a Lua async continuation.
+ * Called by the timer trampoline so that async resume can reschedule.
+ */
+void hl_lua_async_cont_set_timer(HlAsyncCont *cont, void *timer)
+{
+    HlLuaAsyncCont *lc = (HlLuaAsyncCont *)cont;
+    lc->timer_ctx = timer;
 }
 
 /* ── hull.sleep(ms) ───────────────────────────────────────────────── */
@@ -184,8 +228,8 @@ static int lua_hull_sleep(lua_State *L)
     HlLua *lua = (HlLua *)lua_touserdata(L, -1);
     lua_pop(L, 1);
 
-    if (!lua || !lua->server || !lua->active_conn)
-        return luaL_error(L, "hull.sleep() can only be called from a request handler");
+    if (!lua || !lua->server)
+        return luaL_error(L, "hull.sleep() requires an active server");
 
     KlServer *server = lua->server;
     KlConn *conn = lua->active_conn;
@@ -203,21 +247,34 @@ static int lua_hull_sleep(lua_State *L)
     }
     ctx->cont = cont;
 
-    /* Set up sleep op (deadline-only, no driver) */
-    ctx->op.deadline_ms = kl_monotonic_ms() + (uint64_t)ms;
-    ctx->op.on_deadline = hl_async_on_deadline_sleep;
-    ctx->driver = NULL;
-    ctx->free_driver = NULL;
+    if (conn) {
+        /* Attached mode: use KlAsyncOp deadline via kl_async_suspend */
+        ctx->op.deadline_ms = kl_monotonic_ms() + (uint64_t)ms;
+        ctx->op.on_deadline = hl_async_on_deadline_sleep;
+        ctx->driver = NULL;
+        ctx->free_driver = NULL;
+        ctx->detached = 0;
 
-    /* Suspend the connection */
-    if (kl_async_suspend(server, conn, &ctx->op) < 0) {
-        ctx->cont->destroy(ctx->cont);
-        hl_async_ctx_free(ctx);
-        return luaL_error(L, "hull.sleep(): failed to suspend connection");
+        if (kl_async_suspend(server, conn, &ctx->op) < 0) {
+            ctx->cont->destroy(ctx->cont);
+            hl_async_ctx_free(ctx);
+            return luaL_error(L, "hull.sleep(): failed to suspend connection");
+        }
+    } else {
+        /* Detached mode (timer callback): use kl_timer_add */
+        ctx->driver = NULL;
+        ctx->free_driver = NULL;
+        ctx->detached = 1;
+
+        int64_t tid = kl_timer_add(&server->ev, (uint64_t)ms,
+                                    hl_detached_timer_fire, ctx);
+        if (tid < 0) {
+            ctx->cont->destroy(ctx->cont);
+            hl_async_ctx_free(ctx);
+            return luaL_error(L, "hull.sleep(): failed to add timer");
+        }
     }
 
-    /* Yield the coroutine — no continuation function needed for sleep.
-     * When resumed, Lua continues from after hull.sleep() in the handler. */
     return lua_yieldk(L, 0, 0, NULL);
 }
 

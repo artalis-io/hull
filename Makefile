@@ -32,6 +32,9 @@ UNAME_S := $(shell uname -s)
 CFLAGS  := -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2
 ifndef COSMO
   CFLAGS += -fstack-protector-strong
+  ifndef DEBUG
+    CFLAGS += -D_FORTIFY_SOURCE=2
+  endif
   ifeq ($(UNAME_S),Linux)
     CFLAGS += -D_DEFAULT_SOURCE
   endif
@@ -858,7 +861,7 @@ e2e-agent: $(BUILDDIR)/hull
 hull-test-examples: $(BUILDDIR)/hull
 	@for dir in examples/hello examples/rest_api examples/bench_db examples/auth \
 	            examples/jwt_api examples/crud_with_auth examples/middleware examples/webhooks \
-	            examples/todo; do \
+	            examples/todo examples/timers; do \
 		echo "=== hull test $$dir ===" && \
 		output=$$($(BUILDDIR)/hull test "$$dir" 2>&1; true) && \
 		echo "$$output" && \

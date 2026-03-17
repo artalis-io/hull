@@ -1883,7 +1883,7 @@ UTEST(js_stdlib, email_validation)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
-        "import email from 'hull:email';\n"
+        "import { email } from 'hull:email';\n"
         "var r1 = await email.send(null);\n"
         "globalThis.__test_ev1 = (r1.ok === false && r1.error === 'opts required') ? 1 : 0;\n"
         "var r2 = await email.send({ to: 'x@y.com', subject: 's', body: 'b' });\n"
@@ -1911,7 +1911,7 @@ UTEST(js_stdlib, email_unknown_provider)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
-        "import email from 'hull:email';\n"
+        "import { email } from 'hull:email';\n"
         "var r = await email.send({ provider: 'foo', from: 'a@b.com', "
         "to: 'c@d.com', subject: 's', body: 'b' });\n"
         "globalThis.__test_eup = (r.ok === false && r.error.indexOf('unknown provider') >= 0) ? 1 : 0;\n";
@@ -1934,7 +1934,7 @@ UTEST(js_stdlib, email_api_key_required)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
-        "import email from 'hull:email';\n"
+        "import { email } from 'hull:email';\n"
         "var r = await email.send({ provider: 'postmark', from: 'a@b.com', "
         "to: 'c@d.com', subject: 's', body: 'b' });\n"
         "globalThis.__test_eak = (r.ok === false && r.error.indexOf('api_key required') >= 0) ? 1 : 0;\n";

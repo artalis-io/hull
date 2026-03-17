@@ -30,6 +30,20 @@ typedef struct SHArena SHArena;
 typedef struct HlAsyncCtx HlAsyncCtx;
 typedef struct HlAllocator HlAllocator;
 
+/* ── Timer context ─────────────────────────────────────────────────── */
+
+typedef struct HlJSTimer {
+    struct HlJS *js;
+    int         handler_id;    /* index into __hull_timers */
+    int64_t     interval_ms;   /* repeat interval (or recomputed for daily) */
+    int64_t     timer_id;      /* kl_timer_add return, for cancellation */
+    int         daily;         /* 1 = daily timer */
+    int         localtime;     /* 1 = local time, 0 = UTC */
+    int         hour;          /* for daily: target hour */
+    int         minute;        /* for daily: target minute */
+    int         in_flight;     /* 1 = callback currently running (async) */
+} HlJSTimer;
+
 /* ── Configuration ──────────────────────────────────────────────────── */
 
 typedef struct {
@@ -75,12 +89,21 @@ typedef struct HlJS {
     size_t          route_count;
     size_t          route_cap;
 
+    /* Tracked timer allocations (freed in hl_js_free) */
+    void          **timers;
+    size_t          timer_count;
+    size_t          timer_cap;
+
     /* Per-request async state (set during dispatch, cleared after) */
     KlServer       *server;          /* set once during wire_routes_server */
     KlConn         *active_conn;     /* current connection (per dispatch) */
     KlRequest      *active_req;      /* current request (for compression check) */
     int             async_pending;   /* 1 = handler returned pending Promise */
     void           *last_async_cont; /* last-created HlJsAsyncCont (for handler_promise wiring) */
+
+    /* Timer callback context: if non-NULL, hl_js_async_cont_create
+     * will wire timer_ctx on the new continuation. */
+    void           *active_timer;    /* HlJSTimer* during timer callback */
 } HlJS;
 
 /* ── Vtable ────────────────────────────────────────────────────────── */

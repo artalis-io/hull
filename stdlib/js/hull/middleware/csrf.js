@@ -15,10 +15,15 @@ import { crypto } from "hull:crypto";
 import { cookie } from "hull:cookie";
 import { time } from "hull:time";
 
+// Secret must be ASCII-only; charCodeAt returns 16-bit code units
+// for non-ASCII which would produce inconsistent HMAC keys.
 function secretToHex(secret) {
     let hex = "";
-    for (let i = 0; i < secret.length; i++)
-        hex += secret.charCodeAt(i).toString(16).padStart(2, "0");
+    for (let i = 0; i < secret.length; i++) {
+        const c = secret.charCodeAt(i);
+        if (c > 127) throw new Error("secret must be ASCII-only");
+        hex += c.toString(16).padStart(2, "0");
+    }
     return hex;
 }
 
@@ -98,6 +103,7 @@ function middleware(opts) {
     const cookieName = o.cookieName || "hull.sid";
     const headerName = o.headerName || "X-CSRF-Token";
     const fieldName = o.fieldName || "_csrf";
+    const requireSession = o.requireSession || false;
     const safeMethods = { "GET": true, "HEAD": true, "OPTIONS": true };
 
     if (!secret)
@@ -116,9 +122,16 @@ function middleware(opts) {
 
         const sessionId = parseCookieSessionId(req, cookieName);
 
-        // CSRF only applies to authenticated sessions. Unauthenticated POST requests pass through — handlers must independently verify authentication.
-        if (!sessionId)
+        // CSRF only applies to authenticated sessions by default.
+        // Set requireSession: true to reject unauthenticated unsafe requests.
+        if (!sessionId) {
+            if (requireSession) {
+                res.status(403);
+                res.json({ error: "csrf: session required for unsafe methods" });
+                return 1;
+            }
             return 0;
+        }
 
         let token = req.header(headerName);
         if (!token && req.body) {

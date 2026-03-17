@@ -67,6 +67,10 @@ function session.load(session_id)
     if not session_id or session_id == "" then
         return nil
     end
+    -- Validate format: must be 64-char hex (from generate_id)
+    if #session_id ~= 64 or not session_id:match("^%x+$") then
+        return nil
+    end
 
     local now = time.now()
     local rows = db.query(

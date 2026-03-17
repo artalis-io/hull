@@ -135,9 +135,7 @@ async function deliverItem(item) {
  * 2^attempt * 10 seconds, capped at 1 hour.
  */
 function backoffDelay(attempt) {
-    let delay = Math.pow(2, attempt) * 10;
-    if (delay > 3600) delay = 3600;
-    return delay;
+    return Math.min((1 << attempt) * 10, 3600);
 }
 
 /**

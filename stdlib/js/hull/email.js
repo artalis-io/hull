@@ -5,7 +5,7 @@
 // (non-blocking).
 //
 // Usage:
-//   import email from "hull:email";
+//   import { email } from "hull:email";
 //   const result = email.send({
 //       provider: "smtp",            // or "postmark", "sendgrid", "resend"
 //       from: "app@example.com",
@@ -163,4 +163,4 @@ email.send = async function(opts) {
     return await fn(opts);
 };
 
-export default email;
+export { email };

@@ -11,6 +11,10 @@ local jwt = {}
 -- Pre-computed base64url encoding of {"alg":"HS256","typ":"JWT"}
 local HEADER_B64 = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
 
+-- Threshold for distinguishing relative exp (seconds from now) from absolute
+-- Unix timestamps. Values below this (~May 2033) are treated as relative.
+local EXP_RELATIVE_THRESHOLD = 2e9
+
 --- Convert a raw string to hex representation.
 local function str_to_hex(s)
     local hex = {}
@@ -63,8 +67,8 @@ function jwt.sign(payload, secret)
         claims.iat = time.now()
     end
 
-    -- If exp < 2e9, treat as relative (seconds from now)
-    if claims.exp and claims.exp < 2e9 then
+    -- If exp < threshold, treat as relative (seconds from now)
+    if claims.exp and claims.exp < EXP_RELATIVE_THRESHOLD then
         claims.exp = time.now() + claims.exp
     end
 
@@ -80,10 +84,12 @@ end
 
 --- Verify a JWT token and return the payload table on success.
 -- Returns nil, "error reason" on failure.
-function jwt.verify(token, secret)
+-- opts.require_exp: if true, reject tokens without an exp claim.
+function jwt.verify(token, secret, opts)
     if not token or not secret then
         return nil, "token and secret are required"
     end
+    opts = opts or {}
 
     -- Split token into parts
     local parts = {}
@@ -129,6 +135,15 @@ function jwt.verify(token, secret)
     if payload.exp then
         if time.now() >= payload.exp then
             return nil, "token expired"
+        end
+    elseif opts.require_exp then
+        return nil, "token missing required exp claim"
+    end
+
+    -- Check not-before
+    if payload.nbf then
+        if time.now() < payload.nbf then
+            return nil, "token not yet valid"
         end
     end
 

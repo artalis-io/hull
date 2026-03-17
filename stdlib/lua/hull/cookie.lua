@@ -39,6 +39,15 @@ end
 function cookie.serialize(name, value, opts)
     opts = opts or {}
 
+    -- Validate cookie name (RFC 6265 token)
+    if not name or name == "" or name:find("[%c;= ,]") then
+        error("cookie: invalid cookie name")
+    end
+    -- Reject control characters and semicolons in value
+    if value and value:find("[%c;]") then
+        error("cookie: invalid cookie value")
+    end
+
     local parts = { name .. "=" .. (value or "") }
 
     -- Path (default "/")
@@ -76,6 +85,9 @@ function cookie.serialize(name, value, opts)
 
     -- Domain
     if opts.domain then
+        if not opts.domain:match("^[a-zA-Z0-9%.%-]+$") then
+            error("cookie: invalid domain")
+        end
         parts[#parts + 1] = "Domain=" .. opts.domain
     end
 

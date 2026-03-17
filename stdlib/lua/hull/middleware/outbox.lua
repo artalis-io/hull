@@ -144,6 +144,9 @@ end
 --- Flush pending outbox items. Delivers items where next_attempt_at <= now.
 -- opts.limit: max items to process per flush (default 50)
 -- Returns { delivered = N, failed = N, retried = N }
+-- Note: delivery is at-least-once. If the process crashes after delivering
+-- an item but before updating its state, the item will be re-delivered.
+-- Design receivers to be idempotent (use inbox deduplication).
 function outbox.flush(opts)
     opts = opts or {}
     local limit = opts.limit or 50

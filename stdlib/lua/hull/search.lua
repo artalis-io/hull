@@ -64,6 +64,9 @@ function search.create_index(name, columns, opts)
     fts_opts[#fts_opts + 1] = col_list
 
     local tokenize = opts.tokenize or "unicode61"
+    if not tokenize:match("^[a-zA-Z0-9_ ]+$") then
+        error("search: invalid tokenize option (must match [a-zA-Z0-9_ ]+)")
+    end
     fts_opts[#fts_opts + 1] = "tokenize='" .. tokenize .. "'"
 
     if opts.content then

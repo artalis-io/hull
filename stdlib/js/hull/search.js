@@ -13,8 +13,8 @@
 
 import { db } from "hull:db";
 
-var IDENT_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
-var TABLE_PREFIX = "_hull_fts_";
+const IDENT_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+const TABLE_PREFIX = "_hull_fts_";
 
 /**
  * Validate an identifier (table name, column name).
@@ -49,21 +49,23 @@ function createIndex(name, columns, opts) {
     if (!Array.isArray(columns) || columns.length === 0)
         throw new Error("columns must be a non-empty array");
 
-    for (var i = 0; i < columns.length; i++)
+    for (let i = 0; i < columns.length; i++)
         validateIdent(columns[i], "column name");
 
-    var o = opts || {};
-    var table = ftsTable(name);
+    const o = opts || {};
+    const table = ftsTable(name);
 
     // Build column list: id + user columns
-    var colDefs = "id";
-    for (var j = 0; j < columns.length; j++)
+    let colDefs = "id";
+    for (let j = 0; j < columns.length; j++)
         colDefs += ", " + columns[j];
 
     // FTS5 options
-    var ftsOpts = "";
+    let ftsOpts = "";
 
-    var tokenize = o.tokenize || "unicode61";
+    const tokenize = o.tokenize || "unicode61";
+    if (!/^[a-zA-Z0-9_ ]+$/.test(tokenize))
+        throw new Error("search: invalid tokenize option (must match [a-zA-Z0-9_ ]+)");
     ftsOpts += ", tokenize=\"" + tokenize + "\"";
 
     if (o.content) {
@@ -107,21 +109,21 @@ function index(name, id, fields) {
     if (!fields || typeof fields !== "object")
         throw new Error("fields must be an object");
 
-    var keys = Object.keys(fields);
+    let keys = Object.keys(fields);
     if (keys.length === 0)
         throw new Error("fields must have at least one column");
 
-    for (var i = 0; i < keys.length; i++)
+    for (let i = 0; i < keys.length; i++)
         validateIdent(keys[i], "field name");
 
-    var table = ftsTable(name);
+    const table = ftsTable(name);
 
     // Build INSERT OR REPLACE with column names in DDL, values parameterized
-    var colList = "id";
-    var placeholders = "?";
-    var values = [id];
+    let colList = "id";
+    let placeholders = "?";
+    let values = [id];
 
-    for (var j = 0; j < keys.length; j++) {
+    for (let j = 0; j < keys.length; j++) {
         colList += ", " + keys[j];
         placeholders += ", ?";
         values.push(fields[keys[j]] != null ? String(fields[keys[j]]) : "");
@@ -171,60 +173,56 @@ function query(name, q, opts) {
     if (typeof q !== "string" || q.length === 0)
         throw new Error("query string is required");
 
-    var o = opts || {};
-    var table = ftsTable(name);
-    var limit = o.limit !== undefined ? o.limit : 20;
-    var offset = o.offset !== undefined ? o.offset : 0;
+    const o = opts || {};
+    const table = ftsTable(name);
+    let limit = o.limit !== undefined ? o.limit : 20;
+    let offset = o.offset !== undefined ? o.offset : 0;
 
-    // Build SELECT columns
-    var selectCols = "id, rank";
+    // Build SELECT columns and collect snippet/highlight params
+    let selectCols = "id, rank";
+    let snippetParams = null;
+    let highlightParams = null;
 
-    // Add snippet() if requested
     if (o.snippet) {
-        var s = o.snippet;
-        var sCol = s.column !== undefined ? s.column : 0;
-        var sBefore = s.before || "<b>";
-        var sAfter = s.after || "</b>";
-        var sEllipsis = s.ellipsis || "...";
-        var sTokens = s.tokens !== undefined ? s.tokens : 32;
+        const s = o.snippet;
+        const sCol = s.column !== undefined ? s.column : 0;
+        const sBefore = s.before || "<b>";
+        const sAfter = s.after || "</b>";
+        const sEllipsis = s.ellipsis || "...";
+        const sTokens = s.tokens !== undefined ? s.tokens : 32;
         selectCols += ", snippet(" + table + ", " + sCol +
             ", ?, ?, ?, ?) AS snippet";
+        snippetParams = [sBefore, sAfter, sEllipsis, sTokens];
     }
 
-    // Add highlight() if requested
     if (o.highlight) {
-        var h = o.highlight;
-        var hCol = h.column !== undefined ? h.column : 0;
-        var hBefore = h.before || "<b>";
-        var hAfter = h.after || "</b>";
+        const h = o.highlight;
+        const hCol = h.column !== undefined ? h.column : 0;
+        const hBefore = h.before || "<b>";
+        const hAfter = h.after || "</b>";
         selectCols += ", highlight(" + table + ", " + hCol +
             ", ?, ?) AS highlight";
+        highlightParams = [hBefore, hAfter];
     }
 
-    // ORDER BY
-    var orderBy = "rank";
+    let orderBy = "rank";
     if (o.order === "rowid")
         orderBy = "rowid";
 
-    var sql = "SELECT " + selectCols + " FROM " + table +
+    const sql = "SELECT " + selectCols + " FROM " + table +
         " WHERE " + table + " MATCH ? ORDER BY " + orderBy +
         " LIMIT ? OFFSET ?";
 
-    // Build parameter array
-    var params = [];
+    // Build parameter array (snippet/highlight params first, in SELECT order)
+    const params = [];
 
-    // Snippet parameters come first (in SELECT order)
-    if (o.snippet) {
-        params.push(sBefore);
-        params.push(sAfter);
-        params.push(sEllipsis);
-        params.push(sTokens);
-    }
+    if (snippetParams)
+        for (let k = 0; k < snippetParams.length; k++)
+            params.push(snippetParams[k]);
 
-    if (o.highlight) {
-        params.push(hBefore);
-        params.push(hAfter);
-    }
+    if (highlightParams)
+        for (let k = 0; k < highlightParams.length; k++)
+            params.push(highlightParams[k]);
 
     // MATCH parameter
     params.push(q);
@@ -247,29 +245,29 @@ function reindex(name, sourceTable, opts) {
     validateIdent(name, "index name");
     validateIdent(sourceTable, "source table name");
 
-    var o = opts || {};
-    var idCol = o.idColumn || "id";
+    const o = opts || {};
+    let idCol = o.idColumn || "id";
     validateIdent(idCol, "id column name");
 
-    var table = ftsTable(name);
+    const table = ftsTable(name);
 
     // Determine column mapping
-    var columnMap = o.columns || {};
-    var ftsColumns = Object.keys(columnMap);
+    let columnMap = o.columns || {};
+    let ftsColumns = Object.keys(columnMap);
 
     if (ftsColumns.length === 0)
         throw new Error("opts.columns is required: maps FTS columns to source columns");
 
     // Validate all column names
-    for (var i = 0; i < ftsColumns.length; i++) {
+    for (let i = 0; i < ftsColumns.length; i++) {
         validateIdent(ftsColumns[i], "FTS column name");
         validateIdent(columnMap[ftsColumns[i]], "source column name");
     }
 
     // Build INSERT ... SELECT
-    var ftsColList = "id";
-    var srcColList = idCol;
-    for (var j = 0; j < ftsColumns.length; j++) {
+    let ftsColList = "id";
+    let srcColList = idCol;
+    for (let j = 0; j < ftsColumns.length; j++) {
         ftsColList += ", " + ftsColumns[j];
         srcColList += ", " + columnMap[ftsColumns[j]];
     }

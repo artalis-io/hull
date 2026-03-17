@@ -26,7 +26,7 @@ local function read_key(source)
     -- URL fetch
     -- WARNING: HTTPS key fetch trusts system CA store. Use local key files for high-security verification.
     if source:sub(1, 8) == "https://" then
-        local data = tool.spawn_read({"curl", "-sfL", source})
+        local data = tool.spawn_read({"curl", "-sfL", "--proto", "=https", source})
         if data then
             return data:match("^(%x+)")
         end

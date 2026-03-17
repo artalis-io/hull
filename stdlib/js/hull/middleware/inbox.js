@@ -107,10 +107,15 @@ function markProcessed(messageId, source, opts) {
  * processed), false if new (and marks it as processed).
  */
 function checkAndMark(messageId, source, opts) {
-    if (isDuplicate(messageId, source))
-        return true;
-    markProcessed(messageId, source, opts);
-    return false;
+    let isDup = false;
+    db.batch(function() {
+        if (isDuplicate(messageId, source)) {
+            isDup = true;
+            return;
+        }
+        markProcessed(messageId, source, opts);
+    });
+    return isDup;
 }
 
 /**

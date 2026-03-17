@@ -14,12 +14,15 @@ function decodePart(s) {
     catch (e) { return decoded; }
 }
 
-function parse(body) {
-    const result = {};
+function parse(body, opts) {
+    const result = Object.create(null);
     if (!body || typeof body !== "string" || body.length === 0)
         return result;
 
+    const maxFields = (opts && opts.maxFields) || 1000;
     const pairs = body.split("&");
+    if (pairs.length > maxFields)
+        throw new Error("form.parse: exceeded maxFields limit (" + maxFields + ")");
     for (let i = 0; i < pairs.length; i++) {
         const pair = pairs[i];
         if (pair.length === 0) continue;

@@ -101,11 +101,15 @@ end
 --- (already processed), false if it's new (and marks it as processed).
 -- This is the common pattern: check + mark atomically.
 function inbox.check_and_mark(message_id, source, opts)
-    if inbox.is_duplicate(message_id, source) then
-        return true
-    end
-    inbox.mark_processed(message_id, source, opts)
-    return false
+    local is_dup = false
+    db.batch(function()
+        if inbox.is_duplicate(message_id, source) then
+            is_dup = true
+            return
+        end
+        inbox.mark_processed(message_id, source, opts)
+    end)
+    return is_dup
 end
 
 --- Delete expired inbox records. Returns number of deleted rows.

@@ -172,6 +172,14 @@ function email.send(opts)
     if not opts.subject then return { ok = false, error = "subject required" } end
     if not opts.body then return { ok = false, error = "body required" } end
 
+    -- Basic email format validation
+    if not opts.from:match("^[^%s@]+@[^%s@]+%.[^%s@]+$") then
+        return { ok = false, error = "invalid from address" }
+    end
+    if not opts.to:match("^[^%s@]+@[^%s@]+%.[^%s@]+$") then
+        return { ok = false, error = "invalid to address" }
+    end
+
     local provider = opts.provider or "smtp"
     local fn = providers[provider]
     if not fn then

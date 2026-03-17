@@ -63,6 +63,7 @@ typedef struct HlAsyncCtx {
     HlAsyncCont *cont;          /* Lua, JS, or any future runtime */
 
     HlAllocator *alloc;
+    int          detached;      /* 1 = no connection (timer callback) */
 } HlAsyncCtx;
 
 /*
@@ -85,5 +86,18 @@ void hl_async_ctx_free(HlAsyncCtx *ctx);
  * Calls kl_async_complete() to resume the handler.
  */
 void hl_async_on_deadline_sleep(KlAsyncOp *op, void *user_data);
+
+/*
+ * Resume a detached async context (no connection).
+ * Calls cont->resume, cleans up driver and cont, frees ctx.
+ * Used by timer callbacks and other connectionless async operations.
+ */
+void hl_async_ctx_resume_detached(HlAsyncCtx *ctx);
+
+/*
+ * Timer callback for detached sleep: fires hl_async_ctx_resume_detached.
+ * Used as the KlTimerFn for hull.sleep() in timer callbacks.
+ */
+void hl_detached_timer_fire(void *user_data);
 
 #endif /* HL_ASYNC_H */

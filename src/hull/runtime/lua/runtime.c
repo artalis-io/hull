@@ -33,6 +33,18 @@
 /* Forward declaration for hull async cont (defined in lua/async.c) */
 extern int luaopen_hull_hull(lua_State *L);
 
+/* Forward declarations for timer support (async.c) */
+typedef struct HlAsyncCont HlAsyncCont;
+extern HlAsyncCont *hl_lua_async_cont_create(HlLua *lua, HlAllocator *alloc,
+                                              HlLuaPushResultFn push_result);
+extern void hl_lua_async_cont_set_timer(HlAsyncCont *cont, void *timer);
+
+#include <time.h>
+#include <limits.h>
+
+/* Clamp int64_t instruction count to int for lua_sethook */
+#define INSTR_COUNT(x) ((x) > INT_MAX ? INT_MAX : (int)(x))
+
 /* ── Instruction limit hook ─────────────────────────────────────────── */
 
 static void hl_lua_instruction_hook(lua_State *L, lua_Debug *ar)
@@ -144,7 +156,7 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
     /* Arm instruction limit hook */
     if (lua->max_instructions > 0) {
         lua_sethook(lua->L, hl_lua_instruction_hook, LUA_MASKCOUNT,
-                    (int)lua->max_instructions);
+                    INSTR_COUNT(lua->max_instructions));
     }
 
     if (cfg->sandbox) {
@@ -303,7 +315,7 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     /* Re-arm instruction limit for this request */
     if (lua->max_instructions > 0)
         lua_sethook(lua->L, hl_lua_instruction_hook, LUA_MASKCOUNT,
-                    (int)lua->max_instructions);
+                    INSTR_COUNT(lua->max_instructions));
 
     /* Reset scratch arena for this request */
     sh_arena_reset(lua->scratch);
@@ -347,7 +359,7 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     /* Re-arm instruction hook on coroutine */
     if (lua->max_instructions > 0)
         lua_sethook(co, hl_lua_instruction_hook, LUA_MASKCOUNT,
-                    (int)lua->max_instructions);
+                    INSTR_COUNT(lua->max_instructions));
 
     /* Resume coroutine: handler(req, res) */
     int nres = 0;
@@ -408,6 +420,21 @@ void hl_lua_free(HlLua *lua)
 {
     if (!lua)
         return;
+
+    /* Cancel and free tracked timers */
+    for (size_t i = 0; i < lua->timer_count; i++) {
+        HlLuaTimer *t = (HlLuaTimer *)lua->timers[i];
+        if (t->timer_id >= 0 && lua->server)
+            kl_timer_cancel(&lua->server->ev, t->timer_id);
+        hl_alloc_free(lua->base.alloc, t, sizeof(HlLuaTimer));
+    }
+    if (lua->timers) {
+        hl_alloc_free(lua->base.alloc, lua->timers,
+                      lua->timer_cap * sizeof(void *));
+        lua->timers = NULL;
+        lua->timer_count = 0;
+        lua->timer_cap = 0;
+    }
 
     /* Free tracked route allocations */
     for (size_t i = 0; i < lua->route_count; i++)
@@ -470,6 +497,149 @@ static int hl_lua_track_route(HlLua *lua, void *route)
     }
     lua->routes[lua->route_count++] = route;
     return 0;
+}
+
+/* ── Timer support ─────────────────────────────────────────────────── */
+
+static void hl_lua_timer_trampoline(void *user_data);
+
+static int64_t hl_compute_daily_delay_ms(int hour, int minute, int use_local)
+{
+    time_t now = time(NULL);
+    struct tm now_tm;
+    if (use_local)
+        localtime_r(&now, &now_tm);
+    else
+        gmtime_r(&now, &now_tm);
+
+    /* Compute seconds since midnight for current time */
+    int64_t now_secs = now_tm.tm_hour * 3600 + now_tm.tm_min * 60 + now_tm.tm_sec;
+    int64_t target_secs = hour * 3600 + minute * 60;
+
+    int64_t delta = target_secs - now_secs;
+    if (delta <= 0)
+        delta += 86400; /* next day */
+
+    return delta * 1000;
+}
+
+static int hl_lua_track_timer(HlLua *lua, void *timer)
+{
+    if (lua->timer_count >= lua->timer_cap) {
+        size_t new_cap = lua->timer_cap ? lua->timer_cap * 2 : 4;
+        if (new_cap < lua->timer_cap || new_cap > SIZE_MAX / sizeof(void *))
+            return -1;
+        size_t old_sz = lua->timer_cap * sizeof(void *);
+        size_t new_sz = new_cap * sizeof(void *);
+        void **new_arr = hl_alloc_realloc(lua->base.alloc,
+                                           lua->timers, old_sz, new_sz);
+        if (!new_arr)
+            return -1;
+        lua->timers = new_arr;
+        lua->timer_cap = new_cap;
+    }
+    lua->timers[lua->timer_count++] = timer;
+    return 0;
+}
+
+void hl_lua_timer_reschedule(HlLuaTimer *t)
+{
+    HlLua *lua = t->lua;
+    int64_t delay_ms;
+
+    if (t->daily)
+        delay_ms = hl_compute_daily_delay_ms(t->hour, t->minute, t->localtime);
+    else
+        delay_ms = t->interval_ms;
+
+    t->timer_id = kl_timer_add(&lua->server->ev, (uint64_t)delay_ms,
+                                hl_lua_timer_trampoline, t);
+    if (t->timer_id < 0)
+        log_error("[hull:timer] failed to reschedule timer (handler_id=%d)",
+                  t->handler_id);
+}
+
+static void hl_lua_timer_trampoline(void *user_data)
+{
+    HlLuaTimer *t = (HlLuaTimer *)user_data;
+    HlLua *lua = t->lua;
+
+    /* Skip if previous invocation still in flight (async) */
+    if (t->in_flight) {
+        t->timer_id = kl_timer_add(&lua->server->ev, 1000,
+                                    hl_lua_timer_trampoline, t);
+        return;
+    }
+
+    t->in_flight = 1;
+
+    /* Reset scratch arena + guard stale txn */
+    sh_arena_reset(lua->scratch);
+    hl_cap_db_guard_stale_txn(lua->base.db);
+
+    /* Clear per-request state (no connection) */
+    lua->active_conn = NULL;
+    lua->active_req = NULL;
+    lua->active_thread_ref = LUA_NOREF;
+    lua->active_co = NULL;
+    lua->active_timer = t;
+
+    /* Create coroutine for this timer invocation */
+    lua_State *co = lua_newthread(lua->L);
+    int thread_ref = luaL_ref(lua->L, LUA_REGISTRYINDEX);
+    lua->active_co = co;
+    lua->active_thread_ref = thread_ref;
+
+    /* Look up handler */
+    lua_getfield(lua->L, LUA_REGISTRYINDEX, "__hull_timers");
+    lua_rawgeti(lua->L, -1, t->handler_id);
+    lua_xmove(lua->L, co, 1);
+    lua_pop(lua->L, 1); /* pop __hull_timers */
+
+    /* Re-arm instruction limit for this callback */
+    if (lua->max_instructions > 0)
+        lua_sethook(co, NULL, 0, 0); /* clear first */
+
+    if (lua->max_instructions > 0)
+        lua_sethook(co, hl_lua_instruction_hook, LUA_MASKCOUNT,
+                    INSTR_COUNT(lua->max_instructions));
+
+    int nres = 0;
+    int status = lua_resume(co, lua->L, 0, &nres);
+
+    if (status == LUA_OK) {
+        /* Synchronous completion */
+        int cancelled = 0;
+        if (nres > 0 && lua_isboolean(co, -1) && !lua_toboolean(co, -1))
+            cancelled = 1;
+
+        luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
+        lua->active_thread_ref = LUA_NOREF;
+        lua->active_co = NULL;
+        lua->active_timer = NULL;
+        t->in_flight = 0;
+
+        if (!cancelled)
+            hl_lua_timer_reschedule(t);
+    } else if (status == LUA_YIELD) {
+        /* Handler yielded (async op in flight).
+         * The continuation was created by the yielding function and
+         * already has timer_ctx wired (via lua->active_timer).
+         * When async completes, hl_lua_async_resume will clear
+         * in_flight and reschedule. Nothing to do here. */
+    } else {
+        /* Error — log, reschedule anyway */
+        const char *err = lua_tostring(co, -1);
+        log_error("[hull:timer] %s", err ? err : "unknown error");
+        luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
+        lua->active_thread_ref = LUA_NOREF;
+        lua->active_co = NULL;
+        lua->active_timer = NULL;
+        t->in_flight = 0;
+        hl_lua_timer_reschedule(t);
+    }
+
+    lua->active_timer = NULL;
 }
 
 /* ── Route wiring ──────────────────────────────────────────────────── */
@@ -685,6 +855,76 @@ int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
     }
     lua_pop(L, 1); /* __hull_post_middleware table */
 
+    /* Wire timers from __hull_timer_defs */
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_timer_defs");
+    if (lua_istable(L, -1)) {
+        int timer_count = (int)luaL_len(L, -1);
+        for (int i = 1; i <= timer_count; i++) {
+            lua_rawgeti(L, -1, i);
+            if (!lua_istable(L, -1)) {
+                lua_pop(L, 1);
+                continue;
+            }
+
+            lua_getfield(L, -1, "type");
+            lua_getfield(L, -2, "handler_id");
+
+            const char *type_str = lua_tostring(L, -2);
+            int handler_id = (int)lua_tointeger(L, -1);
+            lua_pop(L, 2); /* type, handler_id */
+
+            if (!type_str) {
+                lua_pop(L, 1);
+                continue;
+            }
+
+            HlLuaTimer *t = hl_alloc_malloc(lua->base.alloc,
+                                              sizeof(HlLuaTimer));
+            if (!t) {
+                lua_pop(L, 1);
+                continue;
+            }
+
+            memset(t, 0, sizeof(*t));
+            t->lua = lua;
+            t->handler_id = handler_id;
+
+            int64_t delay_ms;
+            if (strcmp(type_str, "daily") == 0) {
+                lua_getfield(L, -1, "hour");
+                lua_getfield(L, -2, "minute");
+                lua_getfield(L, -3, "localtime");
+                t->hour = (int)lua_tointeger(L, -3);
+                t->minute = (int)lua_tointeger(L, -2);
+                t->localtime = lua_toboolean(L, -1);
+                t->daily = 1;
+                lua_pop(L, 3);
+
+                delay_ms = hl_compute_daily_delay_ms(t->hour, t->minute,
+                                                      t->localtime);
+                t->interval_ms = 0; /* recomputed each time */
+            } else {
+                lua_getfield(L, -1, "interval_ms");
+                t->interval_ms = (int64_t)lua_tointeger(L, -1);
+                lua_pop(L, 1);
+                t->daily = 0;
+                delay_ms = t->interval_ms;
+            }
+
+            t->timer_id = kl_timer_add(&server->ev, (uint64_t)delay_ms,
+                                        hl_lua_timer_trampoline, t);
+            if (t->timer_id < 0) {
+                hl_alloc_free(lua->base.alloc, t, sizeof(HlLuaTimer));
+                lua_pop(L, 1);
+                continue;
+            }
+
+            hl_lua_track_timer(lua, t);
+            lua_pop(L, 1); /* timer def table */
+        }
+    }
+    lua_pop(L, 1); /* __hull_timer_defs table */
+
     return 0;
 }
 
@@ -702,7 +942,7 @@ int hl_lua_dispatch_middleware(HlLua *lua, int handler_id,
     /* Re-arm instruction limit for this middleware call */
     if (lua->max_instructions > 0)
         lua_sethook(lua->L, hl_lua_instruction_hook, LUA_MASKCOUNT,
-                    (int)lua->max_instructions);
+                    INSTR_COUNT(lua->max_instructions));
 
     /* Reset scratch arena for this middleware call */
     sh_arena_reset(lua->scratch);

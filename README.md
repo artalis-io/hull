@@ -139,9 +139,41 @@ Hull ships a full set of middleware and utility modules for building secure back
 | `csv` | `hull.csv` | `hull:csv` | CSV parse/encode (RFC 4180) |
 | `search` | `hull.search` | `hull:search` | Full-text search (SQLite FTS5) |
 | `rbac` | `hull.middleware.rbac` | `hull:middleware:rbac` | Role-based access control |
+| `logger` | `hull.middleware.logger` | `hull:middleware:logger` | Request logging with logfmt output and request IDs |
+| `transaction` | `hull.middleware.transaction` | `hull:middleware:transaction` | Wraps handlers in SQLite BEGIN IMMEDIATE..COMMIT |
+| `idempotency` | `hull.middleware.idempotency` | `hull:middleware:idempotency` | Idempotency-Key middleware with response caching |
+| `outbox` | `hull.middleware.outbox` | `hull:middleware:outbox` | Transactional outbox for reliable webhook delivery |
+| `inbox` | `hull.middleware.inbox` | `hull:middleware:inbox` | Inbox deduplication for incoming events/webhooks |
+| `validate` | `hull.validate` | `hull:validate` | Declarative input validation with schema rules |
+| `form` | `hull.form` | `hull:form` | URL-encoded form body parsing |
+| `i18n` | `hull.i18n` | `hull:i18n` | Internationalization: locale detection, translations, formatting |
 | `json` | `hull.json` | (built-in) | JSON encode/decode |
 
 All middleware modules follow the same factory pattern: `module.middleware(opts)` returns a function `(req, res) -> 0|1` where `0` = continue, `1` = short-circuit.
+
+#### Background Timers
+
+`app.every(ms, fn)` and `app.daily("HH:MM", fn)` register repeating background callbacks. Timer callbacks run on the event loop thread with full async support — `hull.sleep()`, `http.fetch()`, and `db.*` all work inside timers.
+
+```lua
+-- Flush outbox every 30 seconds
+app.every(30000, function()
+    outbox.flush()
+end)
+
+-- Clean up expired sessions daily at 2am UTC
+app.daily("02:00", function()
+    session.cleanup()
+end)
+
+-- Return false to self-cancel
+app.every(1000, function()
+    local pending = outbox.flush()
+    if pending == 0 then return false end
+end)
+```
+
+Minimum interval: 100ms. Errors are logged but don't stop the timer. One invocation at a time — if a callback is still running (async yield), the next tick is deferred.
 
 #### Database & Migrations
 
@@ -308,7 +340,7 @@ See [docs/benchmark.md](docs/benchmark.md) for methodology.
 
 ## Examples
 
-Fourteen example apps in both Lua and JavaScript:
+Fifteen example apps in both Lua and JavaScript:
 
 | Example | What it demonstrates |
 |---------|---------------------|
@@ -323,6 +355,7 @@ Fourteen example apps in both Lua and JavaScript:
 | [todo](examples/todo/) | Full CRUD todo app with HTML frontend and migrations |
 | [bench_db](examples/bench_db/) | SQLite performance benchmarks with migrations |
 | [async_http](examples/async_http/) | Non-blocking HTTP requests via event loop |
+| [timers](examples/timers/) | Background timers with `app.every()` and self-cancellation |
 | [bench_template](examples/bench_template/) | Template engine performance benchmarks |
 | [email](examples/email/) | SMTP email sending with templates |
 | [cors_manifest](examples/cors_manifest/) | CORS via manifest + server stats API |

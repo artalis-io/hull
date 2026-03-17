@@ -42,16 +42,16 @@ function cors.middleware(opts)
 
         res:header("Access-Control-Allow-Origin", origin)
         res:header("Vary", "Origin")
-        res:header("Access-Control-Allow-Methods", methods)
-        res:header("Access-Control-Allow-Headers", headers)
-        res:header("Access-Control-Max-Age", max_age)
 
         if credentials then
             res:header("Access-Control-Allow-Credentials", "true")
         end
 
-        -- Handle preflight
+        -- Preflight: send method/header/max-age headers + 204
         if req.method == "OPTIONS" then
+            res:header("Access-Control-Allow-Methods", methods)
+            res:header("Access-Control-Allow-Headers", headers)
+            res:header("Access-Control-Max-Age", max_age)
             res:status(204):text("")
             return 1
         end

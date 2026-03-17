@@ -214,6 +214,122 @@ static int lua_app_use_post(lua_State *L)
     return 0;
 }
 
+/* app.every(interval_ms, handler) — repeating timer */
+static int lua_app_every(lua_State *L)
+{
+    lua_Integer interval_ms = luaL_checkinteger(L, 1);
+    luaL_checktype(L, 2, LUA_TFUNCTION);
+
+    if (interval_ms < 100)
+        return luaL_error(L, "app.every() minimum interval is 100ms");
+
+    /* Store handler in __hull_timers registry table */
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_timers");
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_pushvalue(L, -1);
+        lua_setfield(L, LUA_REGISTRYINDEX, "__hull_timers");
+    }
+
+    lua_Integer handler_id = (lua_Integer)luaL_len(L, -1) + 1;
+    lua_pushvalue(L, 2);
+    lua_rawseti(L, -2, handler_id);
+    lua_pop(L, 1); /* pop timers table */
+
+    /* Store timer def in __hull_timer_defs */
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_timer_defs");
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_pushvalue(L, -1);
+        lua_setfield(L, LUA_REGISTRYINDEX, "__hull_timer_defs");
+    }
+
+    lua_Integer idx = (lua_Integer)luaL_len(L, -1) + 1;
+
+    lua_newtable(L);
+    lua_pushstring(L, "every");
+    lua_setfield(L, -2, "type");
+    lua_pushinteger(L, interval_ms);
+    lua_setfield(L, -2, "interval_ms");
+    lua_pushinteger(L, handler_id);
+    lua_setfield(L, -2, "handler_id");
+    lua_rawseti(L, -2, idx);
+
+    lua_pop(L, 1); /* pop timer_defs table */
+    return 0;
+}
+
+/* app.daily(time_str, handler [, opts]) — daily timer at HH:MM */
+static int lua_app_daily(lua_State *L)
+{
+    const char *time_str = luaL_checkstring(L, 1);
+    luaL_checktype(L, 2, LUA_TFUNCTION);
+
+    /* Parse "HH:MM" — character-level validation, no sscanf */
+    if (strlen(time_str) != 5 || time_str[2] != ':' ||
+        time_str[0] < '0' || time_str[0] > '9' ||
+        time_str[1] < '0' || time_str[1] > '9' ||
+        time_str[3] < '0' || time_str[3] > '9' ||
+        time_str[4] < '0' || time_str[4] > '9')
+        return luaL_error(L, "app.daily() requires time in HH:MM format");
+    int hour = (time_str[0] - '0') * 10 + (time_str[1] - '0');
+    int minute = (time_str[3] - '0') * 10 + (time_str[4] - '0');
+    if (hour > 23 || minute > 59)
+        return luaL_error(L, "app.daily() requires time in HH:MM format");
+
+    /* Check opts table for localtime */
+    int use_localtime = 0;
+    if (lua_istable(L, 3)) {
+        lua_getfield(L, 3, "localtime");
+        if (lua_isboolean(L, -1))
+            use_localtime = lua_toboolean(L, -1);
+        lua_pop(L, 1);
+    }
+
+    /* Store handler in __hull_timers registry table */
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_timers");
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_pushvalue(L, -1);
+        lua_setfield(L, LUA_REGISTRYINDEX, "__hull_timers");
+    }
+
+    lua_Integer handler_id = (lua_Integer)luaL_len(L, -1) + 1;
+    lua_pushvalue(L, 2);
+    lua_rawseti(L, -2, handler_id);
+    lua_pop(L, 1); /* pop timers table */
+
+    /* Store timer def in __hull_timer_defs */
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_timer_defs");
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_pushvalue(L, -1);
+        lua_setfield(L, LUA_REGISTRYINDEX, "__hull_timer_defs");
+    }
+
+    lua_Integer idx = (lua_Integer)luaL_len(L, -1) + 1;
+
+    lua_newtable(L);
+    lua_pushstring(L, "daily");
+    lua_setfield(L, -2, "type");
+    lua_pushinteger(L, hour);
+    lua_setfield(L, -2, "hour");
+    lua_pushinteger(L, minute);
+    lua_setfield(L, -2, "minute");
+    lua_pushboolean(L, use_localtime);
+    lua_setfield(L, -2, "localtime");
+    lua_pushinteger(L, handler_id);
+    lua_setfield(L, -2, "handler_id");
+    lua_rawseti(L, -2, idx);
+
+    lua_pop(L, 1); /* pop timer_defs table */
+    return 0;
+}
+
 /* app.config(tbl) — application configuration */
 static int lua_app_config(lua_State *L)
 {
@@ -257,6 +373,8 @@ static const luaL_Reg app_funcs[] = {
     {"options",      lua_app_options},
     {"use",          lua_app_use},
     {"use_post",     lua_app_use_post},
+    {"every",        lua_app_every},
+    {"daily",        lua_app_daily},
     {"config",       lua_app_config},
     {"manifest",     lua_app_manifest},
     {"get_manifest", lua_app_get_manifest},

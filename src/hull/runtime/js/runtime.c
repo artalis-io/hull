@@ -39,6 +39,14 @@
 /* Defined in js/async.c — registers hull global (sleep, etc.) */
 extern void hl_js_add_hull_global(JSContext *ctx);
 
+/* Defined in js/async.c — sets handler promise and timer ctx on continuation */
+extern void hl_js_async_cont_set_handler_promise(HlAsyncCont *cont,
+                                                   JSContext *ctx,
+                                                   JSValue promise);
+extern void hl_js_async_cont_set_timer(HlAsyncCont *cont, void *timer);
+
+#include <time.h>
+
 /* ── Forward declarations for module init functions ─────────────────── */
 
 int hl_js_init_app_module(JSContext *ctx, HlJS *js);
@@ -702,6 +710,21 @@ void hl_js_free(HlJS *js)
     if (!js)
         return;
 
+    /* Cancel and free tracked timers */
+    for (size_t i = 0; i < js->timer_count; i++) {
+        HlJSTimer *t = (HlJSTimer *)js->timers[i];
+        if (t->timer_id >= 0 && js->server)
+            kl_timer_cancel(&js->server->ev, t->timer_id);
+        hl_alloc_free(js->base.alloc, t, sizeof(HlJSTimer));
+    }
+    if (js->timers) {
+        hl_alloc_free(js->base.alloc, js->timers,
+                      js->timer_cap * sizeof(void *));
+        js->timers = NULL;
+        js->timer_count = 0;
+        js->timer_cap = 0;
+    }
+
     /* Free tracked route allocations */
     for (size_t i = 0; i < js->route_count; i++)
         hl_alloc_free(js->base.alloc, js->routes[i], sizeof(HlJSRoute));
@@ -725,6 +748,7 @@ void hl_js_free(HlJS *js)
             "__hull_middleware", "__hull_post_middleware",
             "__hull_config", "__hull_manifest", "__hull_statics",
             "__hull_test_state", "__hull_async_promise", "test",
+            "__hull_timers", "__hull_timer_defs",
         };
         for (size_t i = 0; i < sizeof(hull_globals)/sizeof(hull_globals[0]); i++) {
             JSAtom atom = JS_NewAtom(js->ctx, hull_globals[i]);
@@ -775,6 +799,172 @@ void hl_js_dump_error(HlJS *js)
         JS_FreeValue(js->ctx, stack);
     }
     JS_FreeValue(js->ctx, exception);
+}
+
+/* ── Timer support ─────────────────────────────────────────────────── */
+
+static void hl_js_timer_trampoline(void *user_data);
+
+static int64_t hl_js_compute_daily_delay_ms(int hour, int minute, int use_local)
+{
+    time_t now = time(NULL);
+    struct tm now_tm;
+    if (use_local)
+        localtime_r(&now, &now_tm);
+    else
+        gmtime_r(&now, &now_tm);
+
+    int64_t now_secs = now_tm.tm_hour * 3600 + now_tm.tm_min * 60 + now_tm.tm_sec;
+    int64_t target_secs = hour * 3600 + minute * 60;
+
+    int64_t delta = target_secs - now_secs;
+    if (delta <= 0)
+        delta += 86400;
+
+    return delta * 1000;
+}
+
+static int hl_js_track_timer(HlJS *js, void *timer)
+{
+    if (js->timer_count >= js->timer_cap) {
+        size_t new_cap = js->timer_cap ? js->timer_cap * 2 : 4;
+        if (new_cap < js->timer_cap || new_cap > SIZE_MAX / sizeof(void *))
+            return -1;
+        size_t old_sz = js->timer_cap * sizeof(void *);
+        size_t new_sz = new_cap * sizeof(void *);
+        void **new_arr = hl_alloc_realloc(js->base.alloc,
+                                           js->timers, old_sz, new_sz);
+        if (!new_arr)
+            return -1;
+        js->timers = new_arr;
+        js->timer_cap = new_cap;
+    }
+    js->timers[js->timer_count++] = timer;
+    return 0;
+}
+
+void hl_js_timer_reschedule(HlJSTimer *t)
+{
+    HlJS *js = t->js;
+    int64_t delay_ms;
+
+    if (t->daily)
+        delay_ms = hl_js_compute_daily_delay_ms(t->hour, t->minute, t->localtime);
+    else
+        delay_ms = t->interval_ms;
+
+    t->timer_id = kl_timer_add(&js->server->ev, (uint64_t)delay_ms,
+                                hl_js_timer_trampoline, t);
+    if (t->timer_id < 0)
+        log_error("[hull:timer] failed to reschedule timer (handler_id=%d)",
+                  t->handler_id);
+}
+
+static void hl_js_timer_trampoline(void *user_data)
+{
+    HlJSTimer *t = (HlJSTimer *)user_data;
+    HlJS *js = t->js;
+    JSContext *ctx = js->ctx;
+
+    /* Skip if previous invocation still in flight (async) */
+    if (t->in_flight) {
+        t->timer_id = kl_timer_add(&js->server->ev, 1000,
+                                    hl_js_timer_trampoline, t);
+        return;
+    }
+
+    t->in_flight = 1;
+
+    /* Reset scratch arena + guard stale txn */
+    sh_arena_reset(js->scratch);
+    hl_cap_db_guard_stale_txn(js->base.db);
+
+    /* Clear per-request state (no connection) */
+    js->active_conn = NULL;
+    js->active_req = NULL;
+    js->last_async_cont = NULL;
+    js->async_pending = 0;
+    js->active_timer = t;
+
+    /* Reset instruction counter */
+    js->instruction_count = 0;
+
+    /* Look up handler */
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue timers = JS_GetPropertyStr(ctx, global, "__hull_timers");
+    JSValue handler = JS_GetPropertyUint32(ctx, timers, (uint32_t)t->handler_id);
+    JS_FreeValue(ctx, timers);
+    JS_FreeValue(ctx, global);
+
+    if (!JS_IsFunction(ctx, handler)) {
+        JS_FreeValue(ctx, handler);
+        t->in_flight = 0;
+        js->active_timer = NULL;
+        hl_js_timer_reschedule(t);
+        return;
+    }
+
+    /* Call handler() */
+    JSValue ret = JS_Call(ctx, handler, JS_UNDEFINED, 0, NULL);
+    JS_FreeValue(ctx, handler);
+
+    if (JS_IsException(ret)) {
+        JSValue exception = JS_GetException(ctx);
+        const char *msg = JS_ToCString(ctx, exception);
+        log_error("[hull:timer] %s", msg ? msg : "unknown error");
+        if (msg) JS_FreeCString(ctx, msg);
+        JS_FreeValue(ctx, exception);
+        JS_FreeValue(ctx, ret);
+        t->in_flight = 0;
+        js->active_timer = NULL;
+        hl_js_timer_reschedule(t);
+        return;
+    }
+
+    JSPromiseStateEnum state = JS_PromiseState(ctx, ret);
+
+    if (state == JS_PROMISE_PENDING) {
+        /* Async handler — wire handler_promise on the continuation */
+        if (js->last_async_cont) {
+            hl_js_async_cont_set_handler_promise(
+                (HlAsyncCont *)js->last_async_cont, ctx, ret);
+            js->last_async_cont = NULL;
+        }
+        /* Timer ctx was already set via js->active_timer at cont creation */
+        JS_FreeValue(ctx, ret);
+        /* in_flight stays 1; cleared when async resume completes */
+        js->active_timer = NULL;
+        return;
+    }
+
+    /* Synchronous completion */
+    int cancelled = 0;
+    if (state == JS_PROMISE_FULFILLED) {
+        JSValue result = JS_PromiseResult(ctx, ret);
+        if (JS_IsBool(result) && JS_ToBool(ctx, result) == 0)
+            cancelled = 1;
+        JS_FreeValue(ctx, result);
+    } else if (state == JS_PROMISE_REJECTED) {
+        JSValue result = JS_PromiseResult(ctx, ret);
+        const char *msg = JS_ToCString(ctx, result);
+        log_error("[hull:timer] %s", msg ? msg : "unknown error");
+        if (msg) JS_FreeCString(ctx, msg);
+        JS_FreeValue(ctx, result);
+    } else {
+        /* Sync return (not a promise) — check for false */
+        if (JS_IsBool(ret) && JS_ToBool(ctx, ret) == 0)
+            cancelled = 1;
+    }
+
+    /* Drain microtasks */
+    hl_js_run_jobs(js);
+
+    JS_FreeValue(ctx, ret);
+    t->in_flight = 0;
+    js->active_timer = NULL;
+
+    if (!cancelled)
+        hl_js_timer_reschedule(t);
 }
 
 /* ── Route tracking ────────────────────────────────────────────────── */
@@ -1139,6 +1329,91 @@ int hl_js_wire_routes_server(HlJS *js, KlServer *server,
         }
     }
     JS_FreeValue(ctx, post_mw);
+
+    /* Wire timers from __hull_timer_defs */
+    JSValue timer_defs = JS_GetPropertyStr(ctx, global, "__hull_timer_defs");
+    if (!JS_IsUndefined(timer_defs) && JS_IsArray(ctx, timer_defs)) {
+        JSValue td_len_val = JS_GetPropertyStr(ctx, timer_defs, "length");
+        int32_t td_count = 0;
+        JS_ToInt32(ctx, &td_count, td_len_val);
+        JS_FreeValue(ctx, td_len_val);
+
+        for (int32_t i = 0; i < td_count; i++) {
+            JSValue def = JS_GetPropertyUint32(ctx, timer_defs, (uint32_t)i);
+            if (JS_IsUndefined(def))
+                continue;
+
+            JSValue type_val = JS_GetPropertyStr(ctx, def, "type");
+            JSValue id_val = JS_GetPropertyStr(ctx, def, "handler_id");
+
+            const char *type_str = JS_ToCString(ctx, type_val);
+            int32_t handler_id = 0;
+            JS_ToInt32(ctx, &handler_id, id_val);
+
+            if (!type_str) {
+                JS_FreeValue(ctx, id_val);
+                JS_FreeValue(ctx, type_val);
+                JS_FreeValue(ctx, def);
+                continue;
+            }
+
+            HlJSTimer *t = hl_alloc_malloc(js->base.alloc,
+                                             sizeof(HlJSTimer));
+            if (!t) {
+                JS_FreeCString(ctx, type_str);
+                JS_FreeValue(ctx, id_val);
+                JS_FreeValue(ctx, type_val);
+                JS_FreeValue(ctx, def);
+                continue;
+            }
+
+            memset(t, 0, sizeof(*t));
+            t->js = js;
+            t->handler_id = handler_id;
+
+            int64_t delay_ms;
+            if (strcmp(type_str, "daily") == 0) {
+                JSValue hour_val = JS_GetPropertyStr(ctx, def, "hour");
+                JSValue min_val = JS_GetPropertyStr(ctx, def, "minute");
+                JSValue lt_val = JS_GetPropertyStr(ctx, def, "localtime");
+                int32_t th = 0, tm = 0;
+                JS_ToInt32(ctx, &th, hour_val);
+                JS_ToInt32(ctx, &tm, min_val);
+                t->hour = th;
+                t->minute = tm;
+                t->localtime = JS_ToBool(ctx, lt_val);
+                JS_FreeValue(ctx, hour_val);
+                JS_FreeValue(ctx, min_val);
+                JS_FreeValue(ctx, lt_val);
+                t->daily = 1;
+                delay_ms = hl_js_compute_daily_delay_ms(t->hour, t->minute,
+                                                         t->localtime);
+                t->interval_ms = 0;
+            } else {
+                JSValue iv_val = JS_GetPropertyStr(ctx, def, "interval_ms");
+                int64_t iv = 0;
+                JS_ToInt64(ctx, &iv, iv_val);
+                JS_FreeValue(ctx, iv_val);
+                t->interval_ms = iv;
+                t->daily = 0;
+                delay_ms = iv;
+            }
+
+            t->timer_id = kl_timer_add(&server->ev, (uint64_t)delay_ms,
+                                        hl_js_timer_trampoline, t);
+            if (t->timer_id < 0) {
+                hl_alloc_free(js->base.alloc, t, sizeof(HlJSTimer));
+            } else {
+                hl_js_track_timer(js, t);
+            }
+
+            JS_FreeCString(ctx, type_str);
+            JS_FreeValue(ctx, id_val);
+            JS_FreeValue(ctx, type_val);
+            JS_FreeValue(ctx, def);
+        }
+    }
+    JS_FreeValue(ctx, timer_defs);
 
     JS_FreeValue(ctx, global);
     return 0;

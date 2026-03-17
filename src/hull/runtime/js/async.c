@@ -28,8 +28,9 @@ typedef struct HlJsAsyncCont {
     JSValue           reject;       /* Promise reject function */
     HlAllocator      *alloc;
     HlJsPushResultFn  push_result;  /* NULL = no result (sleep) */
-    KlConn           *conn;         /* connection to resume */
+    KlConn           *conn;         /* connection to resume (NULL = detached) */
     JSValue           handler_promise; /* outer handler promise */
+    void             *timer_ctx;    /* HlJSTimer* if running in a timer callback */
 } HlJsAsyncCont;
 
 /*
@@ -45,6 +46,9 @@ typedef struct HlJsAsyncCont {
  * is suspended for the async HTTP response, while the server-side
  * connection for /api/slow can also suspend for hull.sleep).
  */
+/* Forward declarations for timer reschedule (defined in runtime.c) */
+void hl_js_timer_reschedule(HlJSTimer *t);
+
 static void hl_js_async_resume(HlAsyncCont *self, void *driver)
 {
     HlJsAsyncCont *jc = (HlJsAsyncCont *)self;
@@ -52,7 +56,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
     KlConn *conn = jc->conn;
     JSContext *ctx = js->ctx;
 
-    if (!conn || !ctx) return;
+    if (!ctx) return;
 
     /* Restore per-request context so C functions called during resume
      * (e.g., another http.async.get) can find the active connection */
@@ -82,7 +86,15 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
     JSPromiseStateEnum state = JS_PromiseState(ctx, jc->handler_promise);
 
     if (state == JS_PROMISE_FULFILLED) {
-        /* Handler completed — clean up, set SENDING */
+        /* Handler completed — clean up */
+        int cancelled = 0;
+        if (jc->timer_ctx) {
+            JSValue result = JS_PromiseResult(ctx, jc->handler_promise);
+            if (JS_IsBool(result) && JS_ToBool(ctx, result) == 0)
+                cancelled = 1;
+            JS_FreeValue(ctx, result);
+        }
+
         JS_FreeValue(ctx, jc->handler_promise);
         jc->handler_promise = JS_UNDEFINED;
         jc->conn = NULL;
@@ -90,17 +102,30 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
         js->async_pending = 0;
         js->active_conn = NULL;
 
-        if (conn->res.body_mode == KL_BODY_STREAM) {
-            conn->state = KL_CONN_CLOSED;
-        } else {
-            conn->state = KL_CONN_SENDING;
+        if (conn) {
+            if (conn->res.body_mode == KL_BODY_STREAM) {
+                conn->state = KL_CONN_CLOSED;
+            } else {
+                conn->state = KL_CONN_SENDING;
+            }
+        }
+
+        /* Timer async completion: clear in_flight and reschedule */
+        if (jc->timer_ctx) {
+            HlJSTimer *t = (HlJSTimer *)jc->timer_ctx;
+            t->in_flight = 0;
+            if (!cancelled)
+                hl_js_timer_reschedule(t);
         }
     } else if (state == JS_PROMISE_REJECTED) {
         /* Handler error — extract message, write 500 */
         JSValue result = JS_PromiseResult(ctx, jc->handler_promise);
         const char *msg = JS_ToCString(ctx, result);
-        log_error("[hull:c] async js handler error: %s",
-                  msg ? msg : "(unknown)");
+        if (conn)
+            log_error("[hull:c] async js handler error: %s",
+                      msg ? msg : "(unknown)");
+        else
+            log_error("[hull:timer] error: %s", msg ? msg : "(unknown)");
         if (msg) JS_FreeCString(ctx, msg);
         JS_FreeValue(ctx, result);
 
@@ -111,18 +136,27 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
         js->async_pending = 0;
         js->active_conn = NULL;
 
-        kl_response_status(&conn->res, 500);
-        kl_response_header(&conn->res, "Content-Type", "text/plain");
-        kl_response_body_borrow(&conn->res, "Internal Server Error", 21);
-        conn->state = KL_CONN_SENDING;
+        if (conn) {
+            kl_response_status(&conn->res, 500);
+            kl_response_header(&conn->res, "Content-Type", "text/plain");
+            kl_response_body_borrow(&conn->res, "Internal Server Error", 21);
+            conn->state = KL_CONN_SENDING;
+        }
+
+        /* Timer error: clear in_flight and reschedule anyway */
+        if (jc->timer_ctx) {
+            HlJSTimer *t = (HlJSTimer *)jc->timer_ctx;
+            t->in_flight = 0;
+            hl_js_timer_reschedule(t);
+        }
     } else {
         /* PENDING — handler re-yielded (another async op in flight).
-         * conn->state already set to KL_CONN_SUSPENDED by kl_async_suspend
-         * inside the new hull.sleep/http call.
-         * Transfer handler promise to the new continuation. */
+         * Transfer handler promise and timer_ctx to the new continuation. */
         if (js->last_async_cont) {
             HlJsAsyncCont *new_jc = (HlJsAsyncCont *)js->last_async_cont;
             new_jc->handler_promise = JS_DupValue(ctx, jc->handler_promise);
+            new_jc->timer_ctx = jc->timer_ctx;
+            jc->timer_ctx = NULL;
             js->last_async_cont = NULL;
         }
         JS_FreeValue(ctx, jc->handler_promise);
@@ -194,6 +228,7 @@ HlAsyncCont *hl_js_async_cont_create(HlJS *js,
      * handler_promise is set later by dispatch (two-step wiring). */
     jc->conn            = js->active_conn;
     jc->handler_promise = JS_UNDEFINED;
+    jc->timer_ctx       = js->active_timer;  /* inherit timer ctx if in timer callback */
 
     /* Store pointer so dispatch/resume can wire handler_promise */
     js->last_async_cont = jc;
@@ -221,6 +256,16 @@ void hl_js_async_cont_set_handler_promise(HlAsyncCont *cont,
  * Uses KlAsyncOp deadline (no driver, no FD). The Keel deadline sweep
  * fires hl_async_on_deadline_sleep, which calls kl_async_complete.
  */
+/*
+ * Set the timer context on a JS async continuation.
+ * Called by the timer trampoline so that async resume can reschedule.
+ */
+void hl_js_async_cont_set_timer(HlAsyncCont *cont, void *timer)
+{
+    HlJsAsyncCont *jc = (HlJsAsyncCont *)cont;
+    jc->timer_ctx = timer;
+}
+
 static JSValue js_hull_sleep(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv)
 {
@@ -237,9 +282,9 @@ static JSValue js_hull_sleep(JSContext *ctx, JSValueConst this_val,
         return JS_UNDEFINED; /* no-op for zero/negative */
 
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (!js || !js->server || !js->active_conn)
+    if (!js || !js->server)
         return JS_ThrowInternalError(ctx,
-            "hull.sleep() can only be called from a request handler");
+            "hull.sleep() requires an active server");
 
     KlServer *server = js->server;
     KlConn *conn = js->active_conn;
@@ -272,20 +317,35 @@ static JSValue js_hull_sleep(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "hull.sleep(): out of memory");
     }
     actx->cont = cont;
-
-    /* Set up sleep op (deadline-only, no driver) */
-    actx->op.deadline_ms = kl_monotonic_ms() + (uint64_t)ms;
-    actx->op.on_deadline = hl_async_on_deadline_sleep;
     actx->driver = NULL;
     actx->free_driver = NULL;
 
-    /* Suspend the connection */
-    if (kl_async_suspend(server, conn, &actx->op) < 0) {
-        actx->cont->destroy(actx->cont);
-        hl_async_ctx_free(actx);
-        JS_FreeValue(ctx, promise);
-        return JS_ThrowInternalError(ctx,
-            "hull.sleep(): failed to suspend connection");
+    if (conn) {
+        /* Attached mode: use KlAsyncOp deadline via kl_async_suspend */
+        actx->op.deadline_ms = kl_monotonic_ms() + (uint64_t)ms;
+        actx->op.on_deadline = hl_async_on_deadline_sleep;
+        actx->detached = 0;
+
+        if (kl_async_suspend(server, conn, &actx->op) < 0) {
+            actx->cont->destroy(actx->cont);
+            hl_async_ctx_free(actx);
+            JS_FreeValue(ctx, promise);
+            return JS_ThrowInternalError(ctx,
+                "hull.sleep(): failed to suspend connection");
+        }
+    } else {
+        /* Detached mode (timer callback): use kl_timer_add */
+        actx->detached = 1;
+
+        int64_t tid = kl_timer_add(&server->ev, (uint64_t)ms,
+                                    hl_detached_timer_fire, actx);
+        if (tid < 0) {
+            actx->cont->destroy(actx->cont);
+            hl_async_ctx_free(actx);
+            JS_FreeValue(ctx, promise);
+            return JS_ThrowInternalError(ctx,
+                "hull.sleep(): failed to add timer");
+        }
     }
 
     return promise;

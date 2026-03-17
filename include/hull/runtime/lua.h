@@ -28,6 +28,20 @@ typedef struct SHArena SHArena;
 typedef struct HlToolUnveilCtx HlToolUnveilCtx;
 typedef struct HlAsyncCtx HlAsyncCtx;
 
+/* ── Timer context ─────────────────────────────────────────────────── */
+
+typedef struct HlLuaTimer {
+    struct HlLua *lua;
+    int         handler_id;    /* index into __hull_timers */
+    int64_t     interval_ms;   /* repeat interval (or recomputed for daily) */
+    int64_t     timer_id;      /* kl_timer_add return, for cancellation */
+    int         daily;         /* 1 = daily timer */
+    int         localtime;     /* 1 = local time, 0 = UTC */
+    int         hour;          /* for daily: target hour */
+    int         minute;        /* for daily: target minute */
+    int         in_flight;     /* 1 = callback currently running (async) */
+} HlLuaTimer;
+
 /* ── Configuration ──────────────────────────────────────────────────── */
 
 typedef struct {
@@ -70,12 +84,21 @@ typedef struct HlLua {
     /* Tool-mode unveil context (NULL in sandbox mode) */
     HlToolUnveilCtx *tool_unveil_ctx;
 
+    /* Tracked timer allocations (freed in hl_lua_free) */
+    void          **timers;
+    size_t          timer_count;
+    size_t          timer_cap;
+
     /* Per-request async state (set during dispatch, cleared after) */
     KlServer   *server;             /* set once during wire_routes_server */
     KlConn     *active_conn;        /* current connection (per dispatch) */
     KlRequest  *active_req;         /* current request (for compression check) */
     int         active_thread_ref;  /* registry ref to coroutine (LUA_NOREF = none) */
     lua_State  *active_co;          /* coroutine state (NULL = none) */
+
+    /* Timer callback context: if non-NULL, hl_lua_async_cont_create
+     * will wire timer_ctx on the new continuation. */
+    void       *active_timer;       /* HlLuaTimer* during timer callback */
 } HlLua;
 
 /* ── Async push_result callback ─────────────────────────────────────── */

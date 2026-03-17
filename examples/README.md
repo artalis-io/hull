@@ -242,6 +242,23 @@ open http://localhost:3000
 # Switch language via /lang/hu or /lang/en
 ```
 
+### timers
+
+Background timers with `app.every()` and `app.daily()`. A repeating timer inserts heartbeat rows into the database every 500ms, and a self-cancelling timer counts to 3 then stops. Demonstrates timer lifecycle, self-cancellation via `return false`, and timer access to the full capability layer (db, time).
+
+```bash
+./build/hull -p 3000 examples/timers/app.lua
+
+# Health check
+curl http://localhost:3000/health
+
+# Wait a few seconds, then check heartbeats
+curl http://localhost:3000/heartbeats
+
+# Heartbeat counts by source (every-timer keeps going, cancel-timer stops at 3)
+curl http://localhost:3000/counter
+```
+
 ### cors_manifest
 
 CORS via `app.manifest()` configuration — no middleware code needed. Keel registers CORS headers automatically. Also demonstrates `server.stats()` for live connection counts.
@@ -282,6 +299,7 @@ hull test examples/crud_with_auth/
 hull test examples/middleware/
 hull test examples/webhooks/
 hull test examples/todo/
+hull test examples/timers/
 hull test examples/cors_manifest/
 ```
 

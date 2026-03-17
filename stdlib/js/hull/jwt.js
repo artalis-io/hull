@@ -15,6 +15,10 @@ import { json } from "hull:json";
 // Pre-computed base64url of {"alg":"HS256","typ":"JWT"}
 const HEADER_B64 = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
 
+// Length leak is acceptable: both inputs are always base64url of
+// 32-byte HMAC-SHA256 output (43 chars), so lengths always match
+// for well-formed tokens. A truncated signature fails the length
+// check but reveals no useful information.
 function constantTimeCompare(a, b) {
     if (a.length !== b.length) return false;
     let diff = 0;
@@ -23,6 +27,8 @@ function constantTimeCompare(a, b) {
     return diff === 0;
 }
 
+// Secret must be ASCII-only; charCodeAt returns 16-bit code units
+// for non-ASCII which would produce inconsistent HMAC keys.
 function secretToHex(secret) {
     let hex = "";
     for (let i = 0; i < secret.length; i++)
@@ -66,7 +72,7 @@ function verify(token, secret) {
     if (!secret || typeof secret !== "string")
         return [null, "secret is required"];
 
-    const parts = token.split(".");
+    const parts = token.split(".", 4);
     if (parts.length !== 3)
         return [null, "malformed token"];
 
@@ -115,7 +121,7 @@ function decode(token) {
     if (!token || typeof token !== "string")
         return null;
 
-    const parts = token.split(".");
+    const parts = token.split(".", 4);
     if (parts.length !== 3)
         return null;
 

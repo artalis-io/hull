@@ -62,6 +62,9 @@ function create(data) {
 function load(sessionId) {
     if (!sessionId || typeof sessionId !== "string")
         return null;
+    // Validate format: must be 64-char hex (from create)
+    if (sessionId.length !== 64 || !/^[0-9a-f]+$/.test(sessionId))
+        return null;
 
     const now = time.now();
     const rows = db.query(

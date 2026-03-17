@@ -126,7 +126,9 @@ function idempotency.middleware(opts)
                 db.exec("DELETE FROM _hull_idempotency_keys WHERE principal_id = ? AND key = ?",
                         { principal_id, key })
             else
-                -- Fingerprint mismatch: different request body with same key
+                -- Fingerprint mismatch: different request body with same key.
+                -- Standard string compare is acceptable here — fingerprints are
+                -- SHA-256 hashes (not secrets), so timing leaks are not exploitable.
                 if row.fingerprint ~= fingerprint then
                     res:status(409):json({
                         error = "idempotency key already used with different request body"
@@ -171,11 +173,18 @@ function idempotency.middleware(opts)
             end
         end
 
-        -- Insert in-flight record
-        db.exec(
-            "INSERT INTO _hull_idempotency_keys (key, principal_id, fingerprint, endpoint, state, created_at, expires_at) VALUES (?, ?, ?, ?, 'inflight', ?, ?)",
+        -- Insert in-flight record (OR IGNORE prevents race with concurrent request)
+        local inserted = db.exec(
+            "INSERT OR IGNORE INTO _hull_idempotency_keys (key, principal_id, fingerprint, endpoint, state, created_at, expires_at) VALUES (?, ?, ?, ?, 'inflight', ?, ?)",
             { key, principal_id, fingerprint, endpoint, now, now + ttl }
         )
+        if inserted == 0 then
+            -- Another request claimed this key between our SELECT and INSERT
+            res:status(409):json({
+                error = "request with this idempotency key is already in progress"
+            })
+            return 1
+        end
 
         -- Store key info in context for idempotency.respond() to use
         req.ctx._idem_key = key

@@ -86,3 +86,21 @@ void hl_async_on_deadline_sleep(KlAsyncOp *op, void *user_data)
      * kl_async_complete calls op->on_resume, which resumes the handler. */
     kl_async_complete(ctx->server, op);
 }
+
+void hl_async_ctx_resume_detached(HlAsyncCtx *ctx)
+{
+    if (!ctx || !ctx->cont) return;
+
+    ctx->cont->resume(ctx->cont, ctx->driver);
+
+    if (ctx->free_driver && ctx->driver)
+        ctx->free_driver(ctx->driver);
+    ctx->cont->destroy(ctx->cont);
+    hl_alloc_free(ctx->alloc, ctx, sizeof(HlAsyncCtx));
+}
+
+void hl_detached_timer_fire(void *user_data)
+{
+    HlAsyncCtx *ctx = (HlAsyncCtx *)user_data;
+    hl_async_ctx_resume_detached(ctx);
+}
