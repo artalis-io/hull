@@ -37,6 +37,7 @@
 
 #include <keel/tls_mbedtls.h>
 #include "hull/commands/dispatch.h"
+#include "hull/agent_api.h"
 #include "hull/limits.h"
 #include "hull/manifest.h"
 #include "hull/parse_size.h"
@@ -250,6 +251,7 @@ static int hull_serve(int argc, char **argv)
     int no_compress = 0;
     int skip_ca_bundle = 0;
     int agent_mode = 0;
+    int agent_api_mode = 0;
     int drain_timeout = HL_DEFAULT_DRAIN_TIMEOUT_MS;
     int max_connections = 0;  /* 0 = use default */
     long body_max_size = 0;   /* 0 = use default */
@@ -313,6 +315,8 @@ static int hull_serve(int argc, char **argv)
             skip_ca_bundle = 1;
         } else if (strcmp(argv[i], "--agent") == 0) {
             agent_mode = 1;
+        } else if (strcmp(argv[i], "--agent-api") == 0) {
+            agent_api_mode = 1;
         } else if (strcmp(argv[i], "--audit") == 0) {
             hl_audit_enabled = 1;
         } else if (strcmp(argv[i], "--max-instructions") == 0 && i + 1 < argc) {
@@ -847,6 +851,11 @@ static int hull_serve(int argc, char **argv)
                           hl_static_middleware, sctx);
         }
     }
+
+    /* Register agent diagnostic endpoints (opt-in via --agent-api) */
+    HlAgentApiCtx agent_api_ctx = { .app_dir = app_dir, .db_path = db_path };
+    if (agent_api_mode)
+        hl_agent_api_register(&server, &agent_api_ctx);
 
     log_info("[hull:c] listening on %s://%s:%d (%s runtime)",
              server_tls_ctx ? "https" : "http",

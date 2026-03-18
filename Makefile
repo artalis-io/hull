@@ -243,6 +243,8 @@ BUILD_ASSET_OBJ      := $(BUILDDIR)/build_assets.o
 BUILD_ASSET_STUB_OBJ := $(BUILDDIR)/build_assets_stub.o
 MIGRATE_OBJ    := $(BUILDDIR)/migrate.o
 VFS_OBJ        := $(BUILDDIR)/vfs.o
+AGENT_LIB_OBJ := $(BUILDDIR)/agent_lib.o
+AGENT_API_OBJ  := $(BUILDDIR)/agent_api.o
 MAIN_OBJ       := $(BUILDDIR)/main.o
 ENTRY_OBJ      := $(BUILDDIR)/entry.o
 
@@ -286,17 +288,36 @@ $(foreach f,$(STDLIB_JS_FILES),$(eval $(call STDLIB_JS_RULE,$(f))))
 
 STDLIB_JS_XXD_HDRS := $(STDLIB_JS_HDRS)
 
+# ── Context doc embedding (xxd) ───────────────────────────────────────
+#
+# Markdown docs in stdlib/context/*.md are embedded for hull agent context.
+# Names use context: prefix: stdlib/context/auth.md → context:auth
+
+CONTEXT_FILES := $(wildcard stdlib/context/*.md)
+
+context_hdr = $(BUILDDIR)/$(subst /,_,$(patsubst stdlib/context/%.md,context_%.h,$(1)))
+CONTEXT_HDRS := $(foreach f,$(CONTEXT_FILES),$(call context_hdr,$(f)))
+
+define CONTEXT_RULE
+$(call context_hdr,$(1)): $(1) | $(BUILDDIR)
+	xxd -i $$< > $$@
+endef
+$(foreach f,$(CONTEXT_FILES),$(eval $(call CONTEXT_RULE,$(f))))
+
+CONTEXT_XXD_HDRS := $(CONTEXT_HDRS)
+
 # ── Unified stdlib registry (.c compiled once, linked by both runtimes) ──
 #
-# Merges Lua (dot names) and JS (colon names) into a single hl_stdlib_entries[].
+# Merges Lua (dot names), JS (colon names), and context docs into
+# a single hl_stdlib_entries[].
 # Runtimes filter at load time: strchr(name, ':') → JS, else Lua.
 
 STDLIB_REGISTRY_C := $(BUILDDIR)/stdlib_registry.c
 STDLIB_REGISTRY_O := $(BUILDDIR)/stdlib_registry.o
 
-$(STDLIB_REGISTRY_C): $(STDLIB_LUA_XXD_HDRS) $(STDLIB_JS_XXD_HDRS) | $(BUILDDIR)
+$(STDLIB_REGISTRY_C): $(STDLIB_LUA_XXD_HDRS) $(STDLIB_JS_XXD_HDRS) $(CONTEXT_XXD_HDRS) | $(BUILDDIR)
 	@echo "/* Auto-generated unified stdlib registry — do not edit */" > $@
-	@for hdr in $(STDLIB_LUA_XXD_HDRS) $(STDLIB_JS_XXD_HDRS); do \
+	@for hdr in $(STDLIB_LUA_XXD_HDRS) $(STDLIB_JS_XXD_HDRS) $(CONTEXT_XXD_HDRS); do \
 		echo "#include \"$$(basename $$hdr)\""; \
 	done >> $@
 	@echo "" >> $@
@@ -311,6 +332,11 @@ $(STDLIB_REGISTRY_C): $(STDLIB_LUA_XXD_HDRS) $(STDLIB_JS_XXD_HDRS) | $(BUILDDIR)
 		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
 		modname=$$(echo "$$f" | sed 's|^stdlib/js/||; s|\.js$$||; s|/|:|g'); \
 		echo "$$modname	    { \"$$modname\", $${varname}, sizeof($${varname}) },"; \
+	done; \
+	for f in $(CONTEXT_FILES); do \
+		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
+		modname=$$(echo "$$f" | sed 's|^stdlib/context/||; s|\.md$$||'); \
+		echo "context:$$modname	    { \"context:$$modname\", $${varname}, sizeof($${varname}) },"; \
 	done ) | LC_ALL=C sort | cut -f2- >> $@
 	@echo "    { 0, 0, 0 }" >> $@
 	@echo "};" >> $@
@@ -455,14 +481,14 @@ INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(KEEL_DIR)/ve
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan e2e e2e-build e2e-http e2e-sandbox e2e-examples e2e-migrate e2e-templates hull-test-examples self-build check analyze cppcheck bench bench-template coverage lint-lua lint-js lint platform platform-cosmo
+.PHONY: all clean test debug msan e2e e2e-build e2e-http e2e-sandbox e2e-examples e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api hull-test-examples self-build check analyze cppcheck bench bench-template coverage lint-lua lint-js lint platform platform-cosmo
 
 all: $(BUILDDIR)/hull
 
 # Platform static library — everything except entry.o and build_assets.o
 # Used by `hull build` to produce standalone app binaries.
 # Exports hull_main() (subcommand dispatch + server logic).
-PLATFORM_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(MAIN_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(STDLIB_REGISTRY_O) $(VEND_OBJS) $(MBEDTLS_OBJS) \
+PLATFORM_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(MAIN_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(STDLIB_REGISTRY_O) $(VEND_OBJS) $(MBEDTLS_OBJS) \
 	$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS)
 
 PLATFORM_LIB := $(BUILDDIR)/libhull_platform.a
@@ -567,8 +593,8 @@ $(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H)
 endif
 
 # Hull binary
-$(BUILDDIR)/hull: $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB)
-	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(VEND_OBJS) $(MBEDTLS_OBJS) \
+$(BUILDDIR)/hull: $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB)
+	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(VEND_OBJS) $(MBEDTLS_OBJS) \
 		$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB) -lm -lpthread
 
 # Capability sources
@@ -641,6 +667,14 @@ $(MIGRATE_OBJ): $(SRCDIR)/hull/migrate.c | $(BUILDDIR)
 
 # Virtual filesystem (sorted entry lookup)
 $(VFS_OBJ): $(SRCDIR)/hull/vfs.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+# Agent library (shared by CLI, MCP, HTTP endpoints)
+$(AGENT_LIB_OBJ): $(SRCDIR)/hull/agent_lib.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+# Agent API (diagnostic HTTP endpoints)
+$(AGENT_API_OBJ): $(SRCDIR)/hull/agent_api.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Tool mode (keygen, build, verify, etc.)
@@ -757,9 +791,9 @@ $(BUILDDIR)/test_tool: $(TESTDIR)/hull/cap/test_tool.c $(CAP_TOOL_NONE_OBJ) $(BU
 	$(CC) $(filter-out -DHL_ENABLE_LUA -DHL_ENABLE_JS,$(CFLAGS)) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(CAP_TOOL_NONE_OBJ) $(BUILDDIR)/cap_audit.o $(SH_JSON_OBJ) $(SH_ARENA_OBJ)
 
 # Command dispatcher test — needs full command set (symbol resolution for command table)
-$(BUILDDIR)/test_dispatch: $(TESTDIR)/hull/commands/test_dispatch.c $(CMD_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(TOOL_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(TEST_COMMON_DEPS) $(RT_OBJS) $(VEND_OBJS) $(MANIFEST_OBJ) $(BUILD_ASSET_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(PLEDGE_OBJS) | $(BUILDDIR)
+$(BUILDDIR)/test_dispatch: $(TESTDIR)/hull/commands/test_dispatch.c $(CMD_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(TOOL_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TEST_COMMON_DEPS) $(RT_OBJS) $(VEND_OBJS) $(MANIFEST_OBJ) $(BUILD_ASSET_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(PLEDGE_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(CMD_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(TOOL_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) \
+		$(CMD_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(TOOL_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) \
 		$(TEST_CAP_OBJS) $(RT_OBJS) $(MANIFEST_OBJ) $(BUILD_ASSET_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(VEND_OBJS) \
 		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) -lm -lpthread
 
@@ -858,6 +892,15 @@ e2e-templates: $(BUILDDIR)/hull
 e2e-agent: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_agent.sh
 
+e2e-context: $(BUILDDIR)/hull
+	sh tests/e2e_context.sh
+
+e2e-mcp: $(BUILDDIR)/hull
+	sh tests/e2e_mcp.sh
+
+e2e-agent-api: $(BUILDDIR)/hull
+	RUNTIME=$(RUNTIME) sh tests/e2e_agent_api.sh
+
 hull-test-examples: $(BUILDDIR)/hull
 	@for dir in examples/hello examples/rest_api examples/bench_db examples/auth \
 	            examples/jwt_api examples/crud_with_auth examples/middleware examples/webhooks \
@@ -916,7 +959,7 @@ cppcheck:
 		--suppress='*:$(LOG_DIR)/*' \
 		--error-exitcode=1 \
 		-I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(SQLITE_DIR) -I$(KEEL_INC) \
-		$(SRCDIR)/hull/main.c $(SRCDIR)/hull/alloc.c $(SRCDIR)/hull/static.c $(SRCDIR)/hull/cap/*.c \
+		$(SRCDIR)/hull/main.c $(SRCDIR)/hull/alloc.c $(SRCDIR)/hull/static.c $(SRCDIR)/hull/agent_lib.c $(SRCDIR)/hull/agent_api.c $(SRCDIR)/hull/cap/*.c \
 		$(SRCDIR)/hull/commands/*.c \
 		$(SRCDIR)/hull/runtime/js/*.c $(SRCDIR)/hull/runtime/lua/*.c
 
