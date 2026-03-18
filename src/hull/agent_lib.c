@@ -55,6 +55,7 @@ typedef struct {
     HlRuntime       *rt;
 
     /* Storage — large enough for either runtime */
+    // cppcheck-suppress unusedStructMember
     union {
 #ifdef HL_ENABLE_LUA
         HlLua lua;
@@ -87,27 +88,22 @@ static int agent_ctx_init(const char *app_dir, AgentCtx *ctx)
 {
     memset(ctx, 0, sizeof(*ctx));
 
-    char lua_buf[4096], js_buf[4096];
-    const char *lua_entry = NULL, *js_entry = NULL;
+    char entry_buf[4096];
     const char *entry = NULL;
 
 #ifdef HL_ENABLE_LUA
-    lua_entry = detect_entry(app_dir, "lua", lua_buf, sizeof(lua_buf));
+    entry = detect_entry(app_dir, "lua", entry_buf, sizeof(entry_buf));
+    if (entry) ctx->is_lua = 1;
 #endif
 #ifdef HL_ENABLE_JS
-    js_entry = detect_entry(app_dir, "js", js_buf, sizeof(js_buf));
+    if (!entry) {
+        entry = detect_entry(app_dir, "js", entry_buf, sizeof(entry_buf));
+        if (entry) ctx->is_lua = 0;
+    }
 #endif
 
-    /* Prefer Lua if both exist */
-    if (lua_entry) {
-        ctx->is_lua = 1;
-        entry = lua_entry;
-    } else if (js_entry) {
-        ctx->is_lua = 0;
-        entry = js_entry;
-    } else {
-        return -1;
-    }
+    // cppcheck-suppress knownConditionTrueFalse
+    if (!entry) return -1;
 
     /* Open :memory: DB with migrations */
     if (sqlite3_open(":memory:", &ctx->db) != SQLITE_OK)
@@ -402,6 +398,7 @@ static int agent_routes_js(AgentCtx *ctx, ShJsonWriter *w)
 int hl_agent_routes(const char *app_dir, ShJsonBuf *out)
 {
     AgentCtx ctx;
+    // cppcheck-suppress knownConditionTrueFalse
     if (agent_ctx_init(app_dir, &ctx) != 0)
         return write_error(out, "no entry point found");
 
@@ -1104,28 +1101,33 @@ static int agent_test_js(const char *app_dir, const char *entry, ShJsonBuf *out)
 
 int hl_agent_test(const char *app_dir, ShJsonBuf *out)
 {
-    char lua_buf[4096], js_buf[4096];
-    const char *lua_entry = NULL, *js_entry = NULL;
+    char entry_buf[4096];
+    const char *entry = NULL;
+    int is_lua = 0;
 
 #ifdef HL_ENABLE_LUA
-    lua_entry = detect_entry(app_dir, "lua", lua_buf, sizeof(lua_buf));
+    entry = detect_entry(app_dir, "lua", entry_buf, sizeof(entry_buf));
+    if (entry) is_lua = 1;
 #endif
 #ifdef HL_ENABLE_JS
-    js_entry = detect_entry(app_dir, "js", js_buf, sizeof(js_buf));
+    if (!entry)
+        entry = detect_entry(app_dir, "js", entry_buf, sizeof(entry_buf));
 #endif
 
-    if (!lua_entry && !js_entry)
+    // cppcheck-suppress knownConditionTrueFalse
+    if (!entry)
         return write_error(out, "no entry point found");
 
 #ifdef HL_ENABLE_LUA
-    if (lua_entry)
-        return agent_test_lua(app_dir, lua_entry, out);
+    if (is_lua)
+        return agent_test_lua(app_dir, entry, out);
 #endif
 #ifdef HL_ENABLE_JS
-    if (js_entry)
-        return agent_test_js(app_dir, js_entry, out);
+    if (!is_lua)
+        return agent_test_js(app_dir, entry, out);
 #endif
 
+    (void)is_lua;
     return write_error(out, "no runtime available");
 }
 
