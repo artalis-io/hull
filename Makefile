@@ -185,10 +185,12 @@ WAMR_MREMAP_SRC    :=
 endif
 
 ifdef COSMO
-# Cosmopolitan: use Linux platform init + dummy reloc (interpreter only for cosmo)
-WAMR_PLATFORM_INIT := $(WAMR_SHARED)/platform/linux/platform_init.c
-WAMR_PLATFORM_HDR  := $(WAMR_SHARED)/platform/linux
+# Cosmopolitan: use WAMR's native cosmo platform support
+WAMR_PLATFORM_INIT := $(WAMR_SHARED)/platform/cosmopolitan/platform_init.c
+WAMR_PLATFORM_HDR  := $(WAMR_SHARED)/platform/cosmopolitan
 WAMR_ARCH_RELOC    := $(WAMR_IWASM)/aot/arch/aot_reloc_x86_64.c
+WAMR_ARCH_DEFS     := -DWASM_HAVE_MREMAP=0
+WAMR_MREMAP_SRC    := $(WAMR_SHARED)/platform/common/memory/mremap.c
 endif
 
 WAMR_SRCS := \
@@ -1096,7 +1098,7 @@ check:
 
 analyze:
 	$(MAKE) clean
-	$(MAKE) $(VEND_OBJS) $(MBEDTLS_OBJS) $(MINIZ_OBJ) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB)
+	$(MAKE) $(VEND_OBJS) $(MBEDTLS_OBJS) $(MINIZ_OBJ) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(WAMR_OBJS) $(KEEL_LIB)
 	scan-build --status-bugs -disable-checker alpha.unix.Stream $(MAKE) $(CAP_OBJS) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(MAIN_OBJ) $(BUILDDIR)/hull
 
 cppcheck:
