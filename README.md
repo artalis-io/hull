@@ -328,8 +328,8 @@ WASM plugins run in isolated linear memory with no I/O. The overhead vs native C
 
 | Mode | Compute-intensive | Memory-intensive | Notes |
 |------|------------------:|------------------:|-------|
-| **Interpreter** | ~85x | ~87x | Classic interpreter with gas metering |
-| **AOT** | ~1.2x | ~2.3x | Pre-compiled with `wamrc -O3` |
+| **Fast interpreter** | ~54x | ~37x | Fast-interp with gas metering |
+| **AOT** | ~1.2x | ~1.9x | Pre-compiled with `wamrc -O3` |
 
 Measured on Apple M-series (aarch64, -O2) with large inputs (4 MB) where per-call setup is amortized. Compute workload: iterative hash compression (64 rounds/block, integer ALU + rotations). Memory workload: histogram + counting sort (3-pass over input, scattered writes).
 

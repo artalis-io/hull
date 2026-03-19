@@ -94,9 +94,9 @@ end
 
 -- Find wamrc binary: check PATH, then build/, then hull binary dir
 local function find_wamrc()
-    -- Check PATH (spawn_read returns empty string on exec failure, so check length)
+    -- Check PATH
     local out = tool.spawn_read({"wamrc", "--version"})
-    if out and #out > 0 then return "wamrc" end
+    if out then return "wamrc" end
 
     -- Check build/ directory (next to hull binary build output)
     if file_exists("build/wamrc") then return "./build/wamrc" end

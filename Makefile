@@ -204,7 +204,7 @@ WAMR_SRCS := \
 	$(WAMR_IWASM)/common/wasm_runtime_common.c \
 	$(WAMR_IWASM)/common/wasm_shared_memory.c \
 	$(WAMR_IWASM)/common/arch/invokeNative_general.c \
-	$(WAMR_IWASM)/interpreter/wasm_interp_classic.c \
+	$(WAMR_IWASM)/interpreter/wasm_interp_fast.c \
 	$(WAMR_IWASM)/interpreter/wasm_loader.c \
 	$(WAMR_IWASM)/interpreter/wasm_runtime.c \
 	$(WAMR_IWASM)/aot/aot_intrinsic.c \
@@ -240,7 +240,7 @@ WAMR_OBJS := $(patsubst $(WAMR_DIR)/%.c,$(BUILDDIR)/wamr_%.o,$(WAMR_SRCS))
 
 WAMR_CFLAGS := -std=c11 -O2 -w $(WAMR_ARCH_DEFS) \
 	-DWASM_ENABLE_INTERP=1 \
-	-DWASM_ENABLE_FAST_INTERP=0 \
+	-DWASM_ENABLE_FAST_INTERP=1 \
 	-DWASM_ENABLE_AOT=1 \
 	-DWASM_ENABLE_WASI=0 \
 	-DWASM_ENABLE_MULTI_MODULE=0 \

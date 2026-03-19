@@ -286,6 +286,12 @@ char *hl_tool_spawn_read(const char *const argv[], size_t *out_len)
     int status;
     waitpid(pid, &status, 0);
 
+    /* Return NULL if child failed (exec not found, non-zero exit) */
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        free(buf);
+        return NULL;
+    }
+
     /* Null-terminate */
     char *result = realloc(buf, len + 1);
     if (!result) result = buf;

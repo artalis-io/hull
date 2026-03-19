@@ -338,7 +338,7 @@ int main(int argc, char **argv)
            "Linux",
 #endif
            arch_suffix());
-    printf("WAMR modes: classic interpreter (gas metered) + AOT (if available)\n");
+    printf("WAMR modes: fast interpreter (gas metered) + AOT (if available)\n");
     printf("Iterations: %d (warmup: %d)\n", iters, WARMUP_ITERS);
 
     /* Load WASM modules from files */
