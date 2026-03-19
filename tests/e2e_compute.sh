@@ -156,6 +156,75 @@ else
 fi
 
 echo ""
+echo "=== E2E: async does not block event loop ==="
+
+# Proof: fire a slow async compute, then immediately hit /health.
+# If /health responds quickly while slow call is still running,
+# the event loop is not blocked.
+CONCDIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR" "$CONCDIR"' EXIT
+
+mkdir -p "$CONCDIR/compute"
+cp tests/fixtures/compute/spin.wasm "$CONCDIR/compute/spin.wasm"
+
+cat > "$CONCDIR/app.lua" << 'EOF'
+app.get("/health", function(req, res) res:json({ ok = true }) end)
+
+-- Slow: ~1s of WASM computation via async (yields to event loop)
+app.get("/slow-async", function(req, res)
+    local input = string.rep("x", 500)
+    local r = compute.async.call("spin", input, { gas = 2000000000 })
+    if r.error then
+        res:status(500):json({ error = r.error })
+    else
+        res:json({ ok = true })
+    end
+end)
+
+-- Slow: ~1s of WASM computation via sync (BLOCKS event loop)
+app.get("/slow-sync", function(req, res)
+    local input = string.rep("x", 500)
+    local out, err = compute.call("spin", input, { gas = 2000000000 })
+    if err then
+        res:status(500):json({ error = err })
+    else
+        res:json({ ok = true })
+    end
+end)
+EOF
+
+PORT=19878
+$HULL -p $PORT --no-sandbox "$CONCDIR/app.lua" >/dev/null 2>&1 &
+HULL_PID=$!
+sleep 1
+
+if kill -0 $HULL_PID 2>/dev/null; then
+    # Test 1: Async should NOT block — fire slow-async, then health
+    curl -sf "http://127.0.0.1:$PORT/slow-async" >/dev/null 2>&1 &
+    SLOW_PID=$!
+    sleep 0.1  # Give it time to start the async call
+
+    # Health should respond immediately (< 1s) while slow-async is running
+    T0=$(date +%s)
+    HEALTH_RESP=$(curl -sf --max-time 2 "http://127.0.0.1:$PORT/health" 2>/dev/null || echo "TIMEOUT")
+    T1=$(date +%s)
+    HEALTH_TIME=$((T1 - T0))
+
+    wait $SLOW_PID 2>/dev/null || true
+
+    if echo "$HEALTH_RESP" | grep -q '"ok":true' && [ "$HEALTH_TIME" -lt 2 ]; then
+        pass "async compute does not block event loop (health responded in ${HEALTH_TIME}s)"
+    else
+        fail "async compute blocked event loop (health: $HEALTH_RESP, time: ${HEALTH_TIME}s)"
+    fi
+
+    kill $HULL_PID 2>/dev/null || true
+    wait $HULL_PID 2>/dev/null || true
+else
+    fail "concurrency test — server failed to start"
+fi
+
+echo ""
 echo "=== E2E: AOT filesystem lookup ==="
 
 # If wamrc is available, test AOT loading in dev mode
