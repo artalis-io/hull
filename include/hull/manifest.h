@@ -12,6 +12,7 @@
 #define HL_MANIFEST_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 /* Forward declarations */
 typedef struct lua_State lua_State;
@@ -52,6 +53,13 @@ typedef struct HlManifest {
     int         cors_credentials; /* 0 or 1 */
     int         cors_max_age;     /* 0 = Keel default (86400) */
     int         cors_set;         /* 1 if cors key present in manifest */
+
+    /* WASM compute limits (from manifest "wasm" key) */
+    uint32_t    wasm_heap;        /* 0 = not set */
+    uint32_t    wasm_stack;
+    int64_t     wasm_gas;
+    uint32_t    wasm_max_input;
+    uint32_t    wasm_max_output;
 
     /* Whether app.manifest() was called */
     int         present;

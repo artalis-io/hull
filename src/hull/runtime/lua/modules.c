@@ -3204,8 +3204,145 @@ int hl_lua_register_stdlib(HlLua *lua)
  * compute.preload(name) -> true, err
  * ════════════════════════════════════════════════════════════════════ */
 
+/* ════════════════════════════════════════════════════════════════════
+ * hull.fs module — filesystem capabilities
+ *
+ * fs.mmap(path) -> MappedBuffer userdata
+ * ════════════════════════════════════════════════════════════════════ */
+
+#include "hull/cap/fs.h"
+
+#define HL_MMAP_MT "HlMappedBuffer"
+
+static int lua_fs_mmap(lua_State *L)
+{
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->base.fs_cfg)
+        return luaL_error(L, "fs.mmap: not available (declare fs_read in manifest)");
+
+    const char *path = luaL_checkstring(L, 1);
+
+    HlMappedBuffer *buf = hl_cap_fs_mmap(lua->base.fs_cfg, path);
+    if (!buf) {
+        lua_pushnil(L);
+        lua_pushstring(L, "mmap failed");
+        return 2;
+    }
+
+    HlMappedBuffer **pp = lua_newuserdata(L, sizeof(HlMappedBuffer *));
+    *pp = buf;
+    luaL_setmetatable(L, HL_MMAP_MT);
+    return 1;
+}
+
+static HlMappedBuffer *check_mmap(lua_State *L, int idx)
+{
+    HlMappedBuffer **pp = luaL_checkudata(L, idx, HL_MMAP_MT);
+    if (!pp || !*pp)
+        luaL_error(L, "invalid mapped buffer");
+    return *pp;
+}
+
+static int lua_mmap_len(lua_State *L)
+{
+    HlMappedBuffer *buf = check_mmap(L, 1);
+    lua_pushinteger(L, buf->closed ? 0 : (lua_Integer)buf->len);
+    return 1;
+}
+
+static int lua_mmap_close(lua_State *L)
+{
+    HlMappedBuffer **pp = luaL_checkudata(L, 1, HL_MMAP_MT);
+    if (pp && *pp) {
+        hl_cap_fs_munmap(*pp);
+        *pp = NULL;
+    }
+    return 0;
+}
+
+static int lua_mmap_gc(lua_State *L)
+{
+    return lua_mmap_close(L);
+}
+
+static int lua_mmap_tostring(lua_State *L)
+{
+    HlMappedBuffer **pp = luaL_checkudata(L, 1, HL_MMAP_MT);
+    if (pp && *pp && !(*pp)->closed)
+        lua_pushfstring(L, "MappedBuffer(%d bytes)", (int)(*pp)->len);
+    else
+        lua_pushliteral(L, "MappedBuffer(closed)");
+    return 1;
+}
+
+static void lua_register_mmap_metatable(lua_State *L)
+{
+    static const luaL_Reg mmap_methods[] = {
+        {"len",   lua_mmap_len},
+        {"close", lua_mmap_close},
+        {NULL, NULL}
+    };
+
+    luaL_newmetatable(L, HL_MMAP_MT);
+
+    /* __index = methods table */
+    luaL_newlib(L, mmap_methods);
+    lua_setfield(L, -2, "__index");
+
+    /* __gc for automatic cleanup */
+    lua_pushcfunction(L, lua_mmap_gc);
+    lua_setfield(L, -2, "__gc");
+
+    /* __close for Lua 5.4 to-be-closed variables */
+    lua_pushcfunction(L, lua_mmap_close);
+    lua_setfield(L, -2, "__close");
+
+    /* __tostring */
+    lua_pushcfunction(L, lua_mmap_tostring);
+    lua_setfield(L, -2, "__tostring");
+
+    /* __len */
+    lua_pushcfunction(L, lua_mmap_len);
+    lua_setfield(L, -2, "__len");
+
+    lua_pop(L, 1); /* pop metatable */
+}
+
+static const luaL_Reg fs_funcs[] = {
+    {"mmap", lua_fs_mmap},
+    {NULL, NULL}
+};
+
+static int luaopen_hull_fs(lua_State *L)
+{
+    lua_register_mmap_metatable(L);
+    luaL_newlib(L, fs_funcs);
+    return 1;
+}
+
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/wasm.h"
+
+/* Clamp per-call opts to runtime ceiling (three-tier: per-call ≤ CLI/manifest ≤ compile-time) */
+static void wasm_clamp_opts(HlWasmCallOpts *opts, const HlRuntime *base)
+{
+    #define CLAMP_U32(field) do { \
+        if (base->wasm_config.field && \
+            (!opts->field || opts->field > base->wasm_config.field)) \
+            opts->field = base->wasm_config.field; \
+    } while(0)
+
+    CLAMP_U32(max_input);
+    CLAMP_U32(max_output);
+    CLAMP_U32(heap_size);
+    CLAMP_U32(stack_size);
+
+    if (base->wasm_config.gas &&
+        (!opts->gas || opts->gas > base->wasm_config.gas))
+        opts->gas = base->wasm_config.gas;
+
+    #undef CLAMP_U32
+}
 
 /* compute.call(name, input, opts?) -> output_string | nil, error_string | nil */
 static int lua_compute_call(lua_State *L)
@@ -3220,8 +3357,17 @@ static int lua_compute_call(lua_State *L)
 #endif
 
     const char *name = luaL_checkstring(L, 1);
+    const void *input;
     size_t input_len = 0;
-    const char *input = luaL_checklstring(L, 2, &input_len);
+
+    /* Accept string or MappedBuffer as input */
+    HlMappedBuffer **mmap_pp = luaL_testudata(L, 2, HL_MMAP_MT);
+    if (mmap_pp && *mmap_pp && !(*mmap_pp)->closed) {
+        input = (*mmap_pp)->addr;
+        input_len = (*mmap_pp)->len;
+    } else {
+        input = luaL_checklstring(L, 2, &input_len);
+    }
 
     HlWasmCallOpts opts = {0};
 
@@ -3252,6 +3398,8 @@ static int lua_compute_call(lua_State *L)
             opts.gas = lua_tointeger(L, -1);
         lua_pop(L, 1);
     }
+
+    wasm_clamp_opts(&opts, &lua->base);
 
     void *output = NULL;
     size_t output_len = 0;
@@ -3339,8 +3487,16 @@ static int lua_compute_async_call(lua_State *L)
 #endif
 
     const char *name = luaL_checkstring(L, 1);
+    const void *input;
     size_t input_len = 0;
-    const char *input = luaL_checklstring(L, 2, &input_len);
+
+    HlMappedBuffer **mmap_pp = luaL_testudata(L, 2, HL_MMAP_MT);
+    if (mmap_pp && *mmap_pp && !(*mmap_pp)->closed) {
+        input = (*mmap_pp)->addr;
+        input_len = (*mmap_pp)->len;
+    } else {
+        input = luaL_checklstring(L, 2, &input_len);
+    }
 
     /* Parse opts */
     HlWasmCallOpts opts = {0};
@@ -3365,6 +3521,8 @@ static int lua_compute_async_call(lua_State *L)
         if (lua_isinteger(L, -1)) opts.gas = lua_tointeger(L, -1);
         lua_pop(L, 1);
     }
+
+    wasm_clamp_opts(&opts, &lua->base);
 
     /* Resolve module on event loop thread (cache is not thread-safe for writes) */
     HlWasmModule *mod = NULL;
@@ -3540,6 +3698,12 @@ int hl_lua_register_modules(HlLua *lua)
     /* Register hull global (hull.sleep, hull.gather, etc.) */
     luaL_requiref(L, "hull.hull", luaopen_hull_hull, 0);
     lua_setglobal(L, "hull");
+
+    /* Register hull.fs (only if filesystem is available) */
+    if (lua->base.fs_cfg) {
+        luaL_requiref(L, "hull.fs", luaopen_hull_fs, 0);
+        lua_setglobal(L, "fs");
+    }
 
 #ifdef HL_ENABLE_WASM
     /* Register hull.compute (only if WASM runtime is available) */

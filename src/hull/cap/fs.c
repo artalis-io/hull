@@ -12,7 +12,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
 #include <limits.h>
@@ -249,4 +251,60 @@ audit:
         hl_audit_end(&w);
     }
     return result;
+}
+
+/* ── Memory-mapped file ────────────────────────────────────────────── */
+
+HlMappedBuffer *hl_cap_fs_mmap(const HlFsConfig *cfg, const char *path)
+{
+    HlMappedBuffer *buf = NULL;
+
+    char full[PATH_MAX];
+    if (build_path(cfg, path, full, sizeof(full)) != 0)
+        goto audit;
+
+    int fd = open(full, O_RDONLY);
+    if (fd < 0)
+        goto audit;
+
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size <= 0) {
+        close(fd);
+        goto audit;
+    }
+
+    void *addr = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd); /* mapping survives close */
+
+    if (addr == MAP_FAILED)
+        goto audit;
+
+    buf = malloc(sizeof(HlMappedBuffer));
+    if (!buf) {
+        munmap(addr, (size_t)st.st_size);
+        goto audit;
+    }
+
+    buf->addr = addr;
+    buf->len = (size_t)st.st_size;
+    buf->closed = 0;
+
+audit:
+    {
+        ShJsonWriter w = hl_audit_begin("fs.mmap");
+        sh_json_write_kv_string(&w, "path", path);
+        sh_json_write_kv_int(&w, "size", buf ? (int64_t)buf->len : -1);
+        hl_audit_end(&w);
+    }
+    return buf;
+}
+
+void hl_cap_fs_munmap(HlMappedBuffer *buf)
+{
+    if (!buf) return;
+    if (!buf->closed && buf->addr) {
+        munmap(buf->addr, buf->len);
+        buf->closed = 1;
+    }
+    free(buf);
 }

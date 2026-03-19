@@ -3632,7 +3632,133 @@ static int hl_js_init_server_module(JSContext *ctx, HlJS *js)
  * ════════════════════════════════════════════════════════════════════ */
 
 #ifdef HL_ENABLE_WASM
+/* ════════════════════════════════════════════════════════════════════
+ * hull:fs module — filesystem capabilities
+ *
+ * fs.mmap(path) -> opaque MappedBuffer object
+ * ════════════════════════════════════════════════════════════════════ */
+
+#include "hull/cap/fs.h"
+
+static JSClassID js_mmap_class_id;
+
+static void js_mmap_finalizer(JSRuntime *rt, JSValue val)
+{
+    (void)rt;
+    HlMappedBuffer *buf = JS_GetOpaque(val, js_mmap_class_id);
+    if (buf) hl_cap_fs_munmap(buf);
+}
+
+static JSClassDef js_mmap_class = {
+    "MappedBuffer",
+    .finalizer = js_mmap_finalizer,
+};
+
+static JSValue js_mmap_close(JSContext *ctx, JSValueConst this_val,
+                             int argc, JSValueConst *argv)
+{
+    (void)argc; (void)argv;
+    HlMappedBuffer *buf = JS_GetOpaque2(ctx, this_val, js_mmap_class_id);
+    if (buf) {
+        hl_cap_fs_munmap(buf);
+        JS_SetOpaque(this_val, NULL);
+    }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_mmap_get_length(JSContext *ctx, JSValueConst this_val)
+{
+    HlMappedBuffer *buf = JS_GetOpaque2(ctx, this_val, js_mmap_class_id);
+    if (!buf || buf->closed) return JS_NewInt32(ctx, 0);
+    return JS_NewInt64(ctx, (int64_t)buf->len);
+}
+
+static JSValue js_fs_mmap(JSContext *ctx, JSValueConst this_val,
+                          int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->base.fs_cfg)
+        return JS_ThrowInternalError(ctx, "fs.mmap: not available (declare fs_read in manifest)");
+
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "fs.mmap requires (path)");
+
+    const char *path = JS_ToCString(ctx, argv[0]);
+    if (!path) return JS_EXCEPTION;
+
+    HlMappedBuffer *buf = hl_cap_fs_mmap(js->base.fs_cfg, path);
+    JS_FreeCString(ctx, path);
+
+    if (!buf)
+        return JS_ThrowInternalError(ctx, "fs.mmap: failed to map file");
+
+    JSValue obj = JS_NewObjectClass(ctx, (int)js_mmap_class_id);
+    if (JS_IsException(obj)) {
+        hl_cap_fs_munmap(buf);
+        return JS_EXCEPTION;
+    }
+    JS_SetOpaque(obj, buf);
+    return obj;
+}
+
+static int js_fs_module_init(JSContext *ctx, JSModuleDef *m)
+{
+    JSValue fs = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, fs, "mmap",
+                      JS_NewCFunction(ctx, js_fs_mmap, "mmap", 1));
+    JS_SetModuleExport(ctx, m, "fs", fs);
+    return 0;
+}
+
+static int hl_js_init_fs_module(JSContext *ctx, HlJS *js)
+{
+    /* Register MappedBuffer class */
+    JS_NewClassID(&js_mmap_class_id);
+    JS_NewClass(JS_GetRuntime(ctx), js_mmap_class_id, &js_mmap_class);
+
+    /* Set prototype with close() method and length getter */
+    JSValue proto = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, proto, "close",
+                      JS_NewCFunction(ctx, js_mmap_close, "close", 0));
+
+    JSAtom length_atom = JS_NewAtom(ctx, "length");
+    JS_DefinePropertyGetSet(ctx, proto, length_atom,
+                            JS_NewCFunction(ctx, (JSCFunction *)js_mmap_get_length, "length", 0),
+                            JS_UNDEFINED, 0);
+    JS_FreeAtom(ctx, length_atom);
+
+    JS_SetClassProto(ctx, js_mmap_class_id, proto);
+
+    (void)js;
+    JSModuleDef *m = JS_NewCModule(ctx, "hull:fs", js_fs_module_init);
+    if (!m) return -1;
+    JS_AddModuleExport(ctx, m, "fs");
+    return 0;
+}
+
 #include "hull/cap/wasm.h"
+
+/* Clamp per-call opts to runtime ceiling */
+static void js_wasm_clamp_opts(HlWasmCallOpts *opts, const HlRuntime *base)
+{
+    #define CLAMP_U32(field) do { \
+        if (base->wasm_config.field && \
+            (!opts->field || opts->field > base->wasm_config.field)) \
+            opts->field = base->wasm_config.field; \
+    } while(0)
+
+    CLAMP_U32(max_input);
+    CLAMP_U32(max_output);
+    CLAMP_U32(heap_size);
+    CLAMP_U32(stack_size);
+
+    if (base->wasm_config.gas &&
+        (!opts->gas || opts->gas > base->wasm_config.gas))
+        opts->gas = base->wasm_config.gas;
+
+    #undef CLAMP_U32
+}
 
 static JSValue js_compute_call(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv)
@@ -3649,20 +3775,27 @@ static JSValue js_compute_call(JSContext *ctx, JSValueConst this_val,
     if (!name)
         return JS_EXCEPTION;
 
-    /* Input can be a string or ArrayBuffer */
+    /* Input can be a string, ArrayBuffer, or MappedBuffer */
     size_t input_len = 0;
     const uint8_t *input = NULL;
     int input_is_string = 0;
 
-    input = JS_GetArrayBuffer(ctx, &input_len, argv[1]);
-    if (!input) {
-        /* Try as string */
-        input = (const uint8_t *)JS_ToCStringLen(ctx, &input_len, argv[1]);
+    /* Check for MappedBuffer first */
+    HlMappedBuffer *mmap_buf = JS_GetOpaque2(ctx, argv[1], js_mmap_class_id);
+    if (mmap_buf && !mmap_buf->closed) {
+        input = (const uint8_t *)mmap_buf->addr;
+        input_len = mmap_buf->len;
+    } else {
+        input = JS_GetArrayBuffer(ctx, &input_len, argv[1]);
         if (!input) {
-            JS_FreeCString(ctx, name);
-            return JS_ThrowTypeError(ctx, "compute.call: input must be a string or ArrayBuffer");
+            /* Try as string */
+            input = (const uint8_t *)JS_ToCStringLen(ctx, &input_len, argv[1]);
+            if (!input) {
+                JS_FreeCString(ctx, name);
+                return JS_ThrowTypeError(ctx, "compute.call: input must be a string, ArrayBuffer, or MappedBuffer");
+            }
+            input_is_string = 1;
         }
-        input_is_string = 1;
     }
 
     HlWasmCallOpts opts = {0};
@@ -3701,6 +3834,8 @@ static JSValue js_compute_call(JSContext *ctx, JSValueConst this_val,
         }
         JS_FreeValue(ctx, val);
     }
+
+    js_wasm_clamp_opts(&opts, &js->base);
 
     void *output = NULL;
     size_t output_len = 0;
@@ -3830,6 +3965,8 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
         if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.gas = v; }
         JS_FreeValue(ctx, val);
     }
+
+    js_wasm_clamp_opts(&opts, &js->base);
 
     /* Resolve module on event loop thread */
     int rc = hl_cap_wasm_load(js->base.wasm_cache, name,
@@ -4038,6 +4175,12 @@ int hl_js_register_modules(HlJS *js)
     /* Register hull:server module (always available) */
     if (hl_js_init_server_module(js->ctx, js) != 0)
         return -1;
+
+    /* Register hull:fs module (only if filesystem is available) */
+    if (js->base.fs_cfg) {
+        if (hl_js_init_fs_module(js->ctx, js) != 0)
+            return -1;
+    }
 
 #ifdef HL_ENABLE_WASM
     /* Register hull:compute module (only if WASM runtime is available) */

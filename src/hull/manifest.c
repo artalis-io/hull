@@ -149,6 +149,28 @@ int hl_manifest_extract(lua_State *L, HlManifest *out)
     }
     lua_pop(L, 1); /* pop cors */
 
+    /* wasm = { heap = N, stack = N, gas = N, max_input = N, max_output = N } */
+    lua_getfield(L, manifest_idx, "wasm");
+    if (lua_istable(L, -1)) {
+        int wasm_idx = lua_gettop(L);
+        lua_getfield(L, wasm_idx, "heap");
+        if (lua_isinteger(L, -1)) out->wasm_heap = (uint32_t)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        lua_getfield(L, wasm_idx, "stack");
+        if (lua_isinteger(L, -1)) out->wasm_stack = (uint32_t)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        lua_getfield(L, wasm_idx, "gas");
+        if (lua_isinteger(L, -1)) out->wasm_gas = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        lua_getfield(L, wasm_idx, "max_input");
+        if (lua_isinteger(L, -1)) out->wasm_max_input = (uint32_t)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        lua_getfield(L, wasm_idx, "max_output");
+        if (lua_isinteger(L, -1)) out->wasm_max_output = (uint32_t)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 1); /* pop wasm */
+
     lua_pop(L, 1); /* pop manifest table */
     return 0;
 }
@@ -284,6 +306,29 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out)
         JS_FreeValue(ctx, age_val);
     }
     JS_FreeValue(ctx, cors_val);
+
+    /* wasm: { heap, stack, gas, maxInput, maxOutput } */
+    JSValue wasm_val = JS_GetPropertyStr(ctx, manifest, "wasm");
+    if (!JS_IsUndefined(wasm_val) && !JS_IsNull(wasm_val)) {
+        JSValue v;
+        int64_t iv;
+        v = JS_GetPropertyStr(ctx, wasm_val, "heap");
+        if (!JS_IsUndefined(v)) { JS_ToInt64(ctx, &iv, v); out->wasm_heap = (uint32_t)iv; }
+        JS_FreeValue(ctx, v);
+        v = JS_GetPropertyStr(ctx, wasm_val, "stack");
+        if (!JS_IsUndefined(v)) { JS_ToInt64(ctx, &iv, v); out->wasm_stack = (uint32_t)iv; }
+        JS_FreeValue(ctx, v);
+        v = JS_GetPropertyStr(ctx, wasm_val, "gas");
+        if (!JS_IsUndefined(v)) { JS_ToInt64(ctx, &iv, v); out->wasm_gas = iv; }
+        JS_FreeValue(ctx, v);
+        v = JS_GetPropertyStr(ctx, wasm_val, "maxInput");
+        if (!JS_IsUndefined(v)) { JS_ToInt64(ctx, &iv, v); out->wasm_max_input = (uint32_t)iv; }
+        JS_FreeValue(ctx, v);
+        v = JS_GetPropertyStr(ctx, wasm_val, "maxOutput");
+        if (!JS_IsUndefined(v)) { JS_ToInt64(ctx, &iv, v); out->wasm_max_output = (uint32_t)iv; }
+        JS_FreeValue(ctx, v);
+    }
+    JS_FreeValue(ctx, wasm_val);
 
     JS_FreeValue(ctx, manifest);
     return 0;

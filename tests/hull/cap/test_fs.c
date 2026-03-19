@@ -206,4 +206,47 @@ UTEST(hl_cap_fs, validate_rejects_symlink_escape)
     teardown_fs();
 }
 
+/* ── mmap tests ─────────────────────────────────────────────────────── */
+
+UTEST(hl_cap_fs, mmap_basic)
+{
+    setup_fs();
+
+    /* Write a test file */
+    const char *data = "hello mmap world";
+    ASSERT_EQ(hl_cap_fs_write(&test_cfg, "mmap_test.txt", data, strlen(data)), 0);
+
+    /* mmap it */
+    HlMappedBuffer *buf = hl_cap_fs_mmap(&test_cfg, "mmap_test.txt");
+    ASSERT_NE(buf, NULL);
+    ASSERT_EQ(buf->len, strlen(data));
+    ASSERT_EQ(buf->closed, 0);
+    ASSERT_EQ(memcmp(buf->addr, data, strlen(data)), 0);
+
+    hl_cap_fs_munmap(buf);
+    teardown_fs();
+}
+
+UTEST(hl_cap_fs, mmap_path_traversal)
+{
+    setup_fs();
+    ASSERT_EQ(hl_cap_fs_mmap(&test_cfg, "../etc/passwd"), NULL);
+    ASSERT_EQ(hl_cap_fs_mmap(&test_cfg, "/etc/passwd"), NULL);
+    teardown_fs();
+}
+
+UTEST(hl_cap_fs, mmap_nonexistent)
+{
+    setup_fs();
+    ASSERT_EQ(hl_cap_fs_mmap(&test_cfg, "no_such_file.txt"), NULL);
+    teardown_fs();
+}
+
+UTEST(hl_cap_fs, mmap_null_safe)
+{
+    ASSERT_EQ(hl_cap_fs_mmap(NULL, "test.txt"), NULL);
+    ASSERT_EQ(hl_cap_fs_mmap(&test_cfg, NULL), NULL);
+    hl_cap_fs_munmap(NULL); /* should not crash */
+}
+
 UTEST_MAIN();

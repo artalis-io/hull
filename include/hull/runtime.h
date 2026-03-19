@@ -55,6 +55,13 @@ struct HlRuntime {
     struct KlCompressConfig *compress;  /* response compression config (NULL = disabled) */
 #ifdef HL_ENABLE_WASM
     HlWasmCache *wasm_cache;           /* WAMR compute module cache (NULL if disabled) */
+    struct {
+        uint32_t heap_size;   /* ceiling: 0 = use compile-time default */
+        uint32_t stack_size;
+        int64_t  gas;
+        uint32_t max_input;
+        uint32_t max_output;
+    } wasm_config;                     /* three-tier resolved limits (CLI > manifest > defaults) */
 #endif
 };
 

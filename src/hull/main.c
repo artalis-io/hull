@@ -26,6 +26,7 @@
 #include "hull/cap/audit.h"
 #include "hull/cap/db.h"
 #include "hull/cap/env.h"
+#include "hull/cap/fs.h"
 #include "hull/cap/http.h"
 #include "hull/cap/smtp.h"
 
@@ -248,6 +249,8 @@ static int hull_serve(int argc, char **argv)
     long stack_limit = 0;   /* 0 = use default */
     long mem_limit = 0;     /* 0 = unlimited */
     long instruction_limit = 0; /* 0 = use default */
+    long wasm_heap = 0, wasm_stack = 0, wasm_max_input = 0, wasm_max_output = 0;
+    long long wasm_gas = 0;
     int log_level = LOG_INFO;
     int no_migrate = 0;
     int no_sandbox = 0;
@@ -375,6 +378,17 @@ static int hull_serve(int argc, char **argv)
                 return 1;
             }
             drain_timeout = (int)dt;
+        } else if (strcmp(argv[i], "--wasm-heap") == 0 && i + 1 < argc) {
+            wasm_heap = hl_parse_size(argv[++i]);
+        } else if (strcmp(argv[i], "--wasm-stack") == 0 && i + 1 < argc) {
+            wasm_stack = hl_parse_size(argv[++i]);
+        } else if (strcmp(argv[i], "--wasm-gas") == 0 && i + 1 < argc) {
+            char *end;
+            wasm_gas = strtoll(argv[++i], &end, 10);
+        } else if (strcmp(argv[i], "--wasm-max-input") == 0 && i + 1 < argc) {
+            wasm_max_input = hl_parse_size(argv[++i]);
+        } else if (strcmp(argv[i], "--wasm-max-output") == 0 && i + 1 < argc) {
+            wasm_max_output = hl_parse_size(argv[++i]);
         } else if (strcmp(argv[i], "-h") == 0) {
             usage(argv[0]);
             return 0;
@@ -738,6 +752,46 @@ static int hull_serve(int argc, char **argv)
         rt->csp_policy = manifest.csp;    /* custom or NULL (disabled) */
     else
         rt->csp_policy = HL_DEFAULT_CSP;  /* default */
+
+#ifdef HL_ENABLE_WASM
+    /* Resolve three-tier WASM config: CLI > manifest > compile-time defaults.
+     * Zero = not set (fall through to compile-time default at call time). */
+    {
+        uint32_t wh = manifest.wasm_heap;
+        uint32_t ws = manifest.wasm_stack;
+        int64_t  wg = manifest.wasm_gas;
+        uint32_t wi = manifest.wasm_max_input;
+        uint32_t wo = manifest.wasm_max_output;
+
+        /* CLI overrides manifest (operator > developer) */
+        if (wasm_heap > 0)       wh = (uint32_t)wasm_heap;
+        if (wasm_stack > 0)      ws = (uint32_t)wasm_stack;
+        if (wasm_gas > 0)        wg = (int64_t)wasm_gas;
+        if (wasm_max_input > 0)  wi = (uint32_t)wasm_max_input;
+        if (wasm_max_output > 0) wo = (uint32_t)wasm_max_output;
+
+        /* Clamp to compile-time maximums */
+        if (wh > (uint32_t)HL_WASM_MAX_HEAP)  wh = (uint32_t)HL_WASM_MAX_HEAP;
+        if (ws > (uint32_t)HL_WASM_MAX_STACK) ws = (uint32_t)HL_WASM_MAX_STACK;
+        if (wg > HL_WASM_MAX_GAS)             wg = HL_WASM_MAX_GAS;
+        if (wi > (uint32_t)HL_WASM_MAX_IO_SIZE) wi = (uint32_t)HL_WASM_MAX_IO_SIZE;
+        if (wo > (uint32_t)HL_WASM_MAX_IO_SIZE) wo = (uint32_t)HL_WASM_MAX_IO_SIZE;
+
+        rt->wasm_config.heap_size  = wh;
+        rt->wasm_config.stack_size = ws;
+        rt->wasm_config.gas        = wg;
+        rt->wasm_config.max_input  = wi;
+        rt->wasm_config.max_output = wo;
+    }
+#endif
+
+    /* Wire fs_cfg from manifest (if app declares fs.read paths) */
+    HlFsConfig fs_cfg_storage = {0};
+    if (manifest.fs_read_count > 0) {
+        fs_cfg_storage.base_dir = app_dir;
+        fs_cfg_storage.base_len = strlen(app_dir);
+        rt->fs_cfg = &fs_cfg_storage;
+    }
 
     /* Wire env_cfg from manifest (if app declares env vars) */
     HlEnvConfig env_cfg_storage = {0};
