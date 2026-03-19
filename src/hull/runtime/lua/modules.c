@@ -3238,8 +3238,10 @@ static int lua_fs_mmap(lua_State *L)
 static HlMappedBuffer *check_mmap(lua_State *L, int idx)
 {
     HlMappedBuffer **pp = luaL_checkudata(L, idx, HL_MMAP_MT);
-    if (!pp || !*pp)
+    if (!pp || !*pp) {
         luaL_error(L, "invalid mapped buffer");
+        return NULL; /* unreachable — satisfies static analysis */
+    }
     return *pp;
 }
 

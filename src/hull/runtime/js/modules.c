@@ -3666,8 +3666,10 @@ static JSValue js_mmap_close(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-static JSValue js_mmap_get_length(JSContext *ctx, JSValueConst this_val)
+static JSValue js_mmap_get_length(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv)
 {
+    (void)argc; (void)argv;
     HlMappedBuffer *buf = JS_GetOpaque2(ctx, this_val, js_mmap_class_id);
     if (!buf || buf->closed) return JS_NewInt32(ctx, 0);
     return JS_NewInt64(ctx, (int64_t)buf->len);
@@ -3724,7 +3726,7 @@ static int hl_js_init_fs_module(JSContext *ctx, HlJS *js)
 
     JSAtom length_atom = JS_NewAtom(ctx, "length");
     JS_DefinePropertyGetSet(ctx, proto, length_atom,
-                            JS_NewCFunction(ctx, (JSCFunction *)js_mmap_get_length, "length", 0),
+                            JS_NewCFunction(ctx, js_mmap_get_length, "length", 0),
                             JS_UNDEFINED, 0);
     JS_FreeAtom(ctx, length_atom);
 
