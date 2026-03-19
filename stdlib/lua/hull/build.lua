@@ -492,7 +492,7 @@ typedef struct {
                         tool.mkdir(tmpdir .. "/compute")
 
                         print("hull build: AOT " .. rel .. " -> " .. arch)
-                        local ok, rc = tool.spawn({wamrc, "--target=" .. arch, "-o", aot_path, wasm_path})
+                        local ok = tool.spawn({wamrc, "--target=" .. arch, "-o", aot_path, wasm_path})
                         if ok then
                             compute_aot[#compute_aot + 1] = {
                                 path = aot_path,
