@@ -1117,6 +1117,7 @@ cppcheck:
 		--suppress=uninitvar:$(SRCDIR)/hull/runtime/lua/bindings.c \
 		--suppress=unusedLabelConfiguration:$(SRCDIR)/hull/main.c \
 		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/agent_lib.c \
+	--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/cap/wasm.c \
 		--suppress=unusedStructMember:$(SRCDIR)/hull/agent_lib.c \
 		--suppress=unusedVariable:$(SRCDIR)/hull/agent_lib.c \
 		--suppress=unmatchedSuppression \

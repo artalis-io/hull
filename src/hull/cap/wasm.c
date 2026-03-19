@@ -181,7 +181,7 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
         return HL_WASM_ERR_INTERNAL;
 
     if (validate_module_name(name) != 0) {
-        log_error("[wasm] invalid module name '%s'", name ? name : "(null)");
+        log_error("[wasm] invalid module name '%s'", name);
         return HL_WASM_ERR_NOT_FOUND;
     }
 
