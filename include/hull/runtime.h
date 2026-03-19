@@ -21,6 +21,7 @@ typedef struct HlSmtpConfig HlSmtpConfig;
 typedef struct HlManifest HlManifest;
 typedef struct HlStmtCache HlStmtCache;
 typedef struct HlVfs HlVfs;
+typedef struct HlWasmCache HlWasmCache;
 typedef struct sqlite3 sqlite3;
 typedef struct KlServer KlServer;
 typedef struct KlThreadPool KlThreadPool;
@@ -52,6 +53,9 @@ struct HlRuntime {
     KlThreadPool *thread_pool;   /* worker pool for async work (NULL if not created) */
     const char   *db_path;       /* SQLite file path (borrowed, for worker connections) */
     struct KlCompressConfig *compress;  /* response compression config (NULL = disabled) */
+#ifdef HL_ENABLE_WASM
+    HlWasmCache *wasm_cache;           /* WAMR compute module cache (NULL if disabled) */
+#endif
 };
 
 #endif /* HL_RUNTIME_H */

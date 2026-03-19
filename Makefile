@@ -145,6 +145,143 @@ TWEETNACL_DIR    := $(VENDDIR)/tweetnacl
 TWEETNACL_OBJ    := $(BUILDDIR)/tweetnacl.o
 TWEETNACL_CFLAGS := -std=c11 -O2 -w
 
+# ── WAMR (WebAssembly Micro Runtime — compute-only) ──────────────
+#
+# Optional 7th vendored C library. Provides near-native WASM execution
+# for CPU-intensive compute plugins. No WASI, no I/O.
+# Disable with: make HL_ENABLE_WASM=0
+
+HL_ENABLE_WASM ?= 1
+
+ifeq ($(HL_ENABLE_WASM),1)
+CFLAGS += -DHL_ENABLE_WASM
+
+WAMR_DIR     := $(VENDDIR)/wamr
+WAMR_CORE    := $(WAMR_DIR)/core
+WAMR_IWASM   := $(WAMR_CORE)/iwasm
+WAMR_SHARED  := $(WAMR_CORE)/shared
+
+# Platform-specific arch reloc + platform_init
+ifeq ($(UNAME_S),Darwin)
+WAMR_PLATFORM_INIT := $(WAMR_SHARED)/platform/darwin/platform_init.c
+WAMR_PLATFORM_HDR  := $(WAMR_SHARED)/platform/darwin
+WAMR_ARCH_RELOC    := $(WAMR_IWASM)/aot/arch/aot_reloc_aarch64.c
+WAMR_ARCH_DEFS     := -DBUILD_TARGET=\"AARCH64\" -DWASM_HAVE_MREMAP=0
+WAMR_MREMAP_SRC    := $(WAMR_SHARED)/platform/common/memory/mremap.c
+  ifeq ($(shell uname -m),x86_64)
+    WAMR_ARCH_RELOC := $(WAMR_IWASM)/aot/arch/aot_reloc_x86_64.c
+    WAMR_ARCH_DEFS  := -DWASM_HAVE_MREMAP=0
+  endif
+else
+WAMR_PLATFORM_INIT := $(WAMR_SHARED)/platform/linux/platform_init.c
+WAMR_PLATFORM_HDR  := $(WAMR_SHARED)/platform/linux
+WAMR_ARCH_RELOC    := $(WAMR_IWASM)/aot/arch/aot_reloc_x86_64.c
+WAMR_ARCH_DEFS     := -DWASM_HAVE_MREMAP=1 -D_GNU_SOURCE
+WAMR_MREMAP_SRC    :=
+  ifeq ($(shell uname -m),aarch64)
+    WAMR_ARCH_RELOC := $(WAMR_IWASM)/aot/arch/aot_reloc_aarch64.c
+    WAMR_ARCH_DEFS  += -DBUILD_TARGET=\"AARCH64\"
+  endif
+endif
+
+ifdef COSMO
+# Cosmopolitan: use Linux platform init + dummy reloc (interpreter only for cosmo)
+WAMR_PLATFORM_INIT := $(WAMR_SHARED)/platform/linux/platform_init.c
+WAMR_PLATFORM_HDR  := $(WAMR_SHARED)/platform/linux
+WAMR_ARCH_RELOC    := $(WAMR_IWASM)/aot/arch/aot_reloc_x86_64.c
+endif
+
+WAMR_SRCS := \
+	$(WAMR_IWASM)/common/wasm_application.c \
+	$(WAMR_IWASM)/common/wasm_blocking_op.c \
+	$(WAMR_IWASM)/common/wasm_c_api.c \
+	$(WAMR_IWASM)/common/wasm_exec_env.c \
+	$(WAMR_IWASM)/common/wasm_loader_common.c \
+	$(WAMR_IWASM)/common/wasm_memory.c \
+	$(WAMR_IWASM)/common/wasm_native.c \
+	$(WAMR_IWASM)/common/wasm_runtime_common.c \
+	$(WAMR_IWASM)/common/wasm_shared_memory.c \
+	$(WAMR_IWASM)/common/arch/invokeNative_general.c \
+	$(WAMR_IWASM)/interpreter/wasm_interp_classic.c \
+	$(WAMR_IWASM)/interpreter/wasm_loader.c \
+	$(WAMR_IWASM)/interpreter/wasm_runtime.c \
+	$(WAMR_IWASM)/aot/aot_intrinsic.c \
+	$(WAMR_IWASM)/aot/aot_loader.c \
+	$(WAMR_IWASM)/aot/aot_runtime.c \
+	$(WAMR_ARCH_RELOC) \
+	$(WAMR_SHARED)/platform/common/posix/posix_blocking_op.c \
+	$(WAMR_SHARED)/platform/common/posix/posix_malloc.c \
+	$(WAMR_SHARED)/platform/common/posix/posix_memmap.c \
+	$(WAMR_SHARED)/platform/common/posix/posix_sleep.c \
+	$(WAMR_SHARED)/platform/common/posix/posix_thread.c \
+	$(WAMR_SHARED)/platform/common/posix/posix_time.c \
+	$(WAMR_PLATFORM_INIT) \
+	$(WAMR_SHARED)/mem-alloc/mem_alloc.c \
+	$(WAMR_SHARED)/mem-alloc/ems/ems_alloc.c \
+	$(WAMR_SHARED)/mem-alloc/ems/ems_gc.c \
+	$(WAMR_SHARED)/mem-alloc/ems/ems_hmu.c \
+	$(WAMR_SHARED)/mem-alloc/ems/ems_kfc.c \
+	$(WAMR_MREMAP_SRC) \
+	$(WAMR_SHARED)/utils/bh_assert.c \
+	$(WAMR_SHARED)/utils/bh_bitmap.c \
+	$(WAMR_SHARED)/utils/bh_common.c \
+	$(WAMR_SHARED)/utils/bh_hashmap.c \
+	$(WAMR_SHARED)/utils/bh_leb128.c \
+	$(WAMR_SHARED)/utils/bh_list.c \
+	$(WAMR_SHARED)/utils/bh_log.c \
+	$(WAMR_SHARED)/utils/bh_queue.c \
+	$(WAMR_SHARED)/utils/bh_vector.c \
+	$(WAMR_SHARED)/utils/runtime_timer.c
+
+# Flatten WAMR paths to build/ (replace / with _ in the subpath)
+WAMR_OBJS := $(patsubst $(WAMR_DIR)/%.c,$(BUILDDIR)/wamr_%.o,$(WAMR_SRCS))
+
+WAMR_CFLAGS := -std=c11 -O2 -w $(WAMR_ARCH_DEFS) \
+	-DWASM_ENABLE_INTERP=1 \
+	-DWASM_ENABLE_FAST_INTERP=0 \
+	-DWASM_ENABLE_AOT=1 \
+	-DWASM_ENABLE_WASI=0 \
+	-DWASM_ENABLE_MULTI_MODULE=0 \
+	-DWASM_ENABLE_THREAD_MGR=0 \
+	-DWASM_ENABLE_LIBC_BUILTIN=0 \
+	-DWASM_ENABLE_LIBC_WASI=0 \
+	-DWASM_ENABLE_BULK_MEMORY=1 \
+	-DWASM_ENABLE_BULK_MEMORY_OPT=1 \
+	-DWASM_ENABLE_REF_TYPES=0 \
+	-DWASM_ENABLE_SIMD=0 \
+	-DWASM_ENABLE_MINI_LOADER=0 \
+	-DWASM_ENABLE_SHARED_MEMORY=0 \
+	-DWASM_ENABLE_MEMORY_PROFILING=0 \
+	-DWASM_ENABLE_MEMORY_TRACING=0 \
+	-DWASM_ENABLE_PERF_PROFILING=0 \
+	-DWASM_ENABLE_GC=0 \
+	-DWASM_ENABLE_STRINGREF=0 \
+	-DWASM_ENABLE_EXCE_HANDLING=0 \
+	-DWASM_ENABLE_TAGS=0 \
+	-DWASM_ENABLE_INSTRUCTION_METERING=1 \
+	-DBH_MALLOC=wasm_runtime_malloc \
+	-DBH_FREE=wasm_runtime_free \
+	-I$(WAMR_IWASM)/include \
+	-I$(WAMR_IWASM)/common \
+	-I$(WAMR_IWASM)/interpreter \
+	-I$(WAMR_IWASM)/aot \
+	-I$(WAMR_SHARED)/include \
+	-I$(WAMR_SHARED)/platform/include \
+	-I$(WAMR_SHARED)/platform/common/posix \
+	-I$(WAMR_PLATFORM_HDR) \
+	-I$(WAMR_SHARED)/utils \
+	-I$(WAMR_SHARED)/mem-alloc \
+	-I$(WAMR_CORE)
+
+# WAMR include path for hull source
+WAMR_INC := -I$(WAMR_IWASM)/include
+
+else
+# WASM disabled
+WAMR_OBJS :=
+WAMR_INC  :=
+endif
+
 # ── jart/pledge polyfill (Linux-only: seccomp + landlock) ──────────
 #
 # Provides real pledge()/unveil() on native Linux.
@@ -366,6 +503,7 @@ APP_JSON_FILES := $(shell find $(APP_DIR) -name '*.json' -not -path '*/tests/*' 
 APP_TPL_FILES := $(shell find $(APP_DIR)/templates -name '*.html' 2>/dev/null)
 APP_STATIC_FILES := $(shell find $(APP_DIR)/static -type f 2>/dev/null)
 APP_MIGRATION_FILES := $(shell find $(APP_DIR)/migrations -name '*.sql' 2>/dev/null | sort)
+APP_COMPUTE_FILES := $(shell find $(APP_DIR)/compute \( -name '*.wasm' -o -name '*.aot.*' \) 2>/dev/null)
 
 # xxd header paths per file type
 app_lua_hdr = $(BUILDDIR)/app_lua_$(subst /,_,$(patsubst $(APP_DIR)/%.lua,%.h,$(1)))
@@ -374,6 +512,7 @@ app_json_hdr = $(BUILDDIR)/app_json_$(subst /,_,$(patsubst $(APP_DIR)/%.json,%.h
 app_tpl_hdr = $(BUILDDIR)/app_tpl_$(subst /,_,$(patsubst $(APP_DIR)/templates/%.html,%.h,$(1)))
 app_static_hdr = $(BUILDDIR)/app_static_$(subst /,_,$(patsubst $(APP_DIR)/static/%,%.h,$(1)))
 app_migration_hdr = $(BUILDDIR)/app_mig_$(subst /,_,$(patsubst $(APP_DIR)/migrations/%,%.h,$(1)))
+app_compute_hdr = $(BUILDDIR)/app_compute_$(subst /,_,$(patsubst $(APP_DIR)/compute/%,%.h,$(1)))
 
 APP_LUA_HDRS := $(foreach f,$(APP_LUA_FILES),$(call app_lua_hdr,$(f)))
 APP_JS_HDRS := $(foreach f,$(APP_JS_FILES),$(call app_js_hdr,$(f)))
@@ -381,6 +520,7 @@ APP_JSON_HDRS := $(foreach f,$(APP_JSON_FILES),$(call app_json_hdr,$(f)))
 APP_TPL_HDRS := $(foreach f,$(APP_TPL_FILES),$(call app_tpl_hdr,$(f)))
 APP_STATIC_HDRS := $(foreach f,$(APP_STATIC_FILES),$(call app_static_hdr,$(f)))
 APP_MIGRATION_HDRS := $(foreach f,$(APP_MIGRATION_FILES),$(call app_migration_hdr,$(f)))
+APP_COMPUTE_HDRS := $(foreach f,$(APP_COMPUTE_FILES),$(call app_compute_hdr,$(f)))
 
 # xxd rules for each file type
 define APP_LUA_RULE
@@ -419,7 +559,13 @@ $(call app_migration_hdr,$(1)): $(1) | $(BUILDDIR)
 endef
 $(foreach f,$(APP_MIGRATION_FILES),$(eval $(call APP_MIGRATION_RULE,$(f))))
 
-APP_ALL_XXD_HDRS := $(APP_LUA_HDRS) $(APP_JS_HDRS) $(APP_JSON_HDRS) $(APP_TPL_HDRS) $(APP_STATIC_HDRS) $(APP_MIGRATION_HDRS)
+define APP_COMPUTE_RULE
+$(call app_compute_hdr,$(1)): $(1) | $(BUILDDIR)
+	xxd -i $$< > $$@
+endef
+$(foreach f,$(APP_COMPUTE_FILES),$(eval $(call APP_COMPUTE_RULE,$(f))))
+
+APP_ALL_XXD_HDRS := $(APP_LUA_HDRS) $(APP_JS_HDRS) $(APP_JSON_HDRS) $(APP_TPL_HDRS) $(APP_STATIC_HDRS) $(APP_MIGRATION_HDRS) $(APP_COMPUTE_HDRS)
 
 APP_REGISTRY_C := $(BUILDDIR)/app_registry.c
 APP_REGISTRY_O := $(BUILDDIR)/app_registry.o
@@ -461,6 +607,11 @@ $(APP_REGISTRY_C): $(APP_ALL_XXD_HDRS) | $(BUILDDIR)
 		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
 		migname=$$(echo "$$f" | sed 's|^$(APP_DIR)/||'); \
 		echo "$$migname	    { \"$$migname\", $${varname}, sizeof($${varname}) },"; \
+	done; \
+	for f in $(APP_COMPUTE_FILES); do \
+		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
+		computename=$$(echo "$$f" | sed 's|^$(APP_DIR)/||'); \
+		echo "$$computename	    { \"$$computename\", $${varname}, sizeof($${varname}) },"; \
 	done ) | LC_ALL=C sort | cut -f2- >> $@
 	@echo "    { 0, 0, 0 }" >> $@
 	@echo "};" >> $@
@@ -477,7 +628,7 @@ $(APP_ENTRIES_DEFAULT_OBJ): $(SRCDIR)/hull/app_entries_default.c $(INCDIR)/hull/
 
 # ── Include paths ───────────────────────────────────────────────────
 
-INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(KEEL_DIR)/vendor/llhttp -I$(MBEDTLS_DIR)/include -I$(SQLITE_DIR) -I$(LOG_DIR) -I$(SH_ARENA_DIR) -I$(SH_JSON_DIR) -I$(TWEETNACL_DIR) -I$(BUILDDIR)
+INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(KEEL_DIR)/vendor/llhttp -I$(MBEDTLS_DIR)/include -I$(SQLITE_DIR) -I$(LOG_DIR) -I$(SH_ARENA_DIR) -I$(SH_JSON_DIR) -I$(TWEETNACL_DIR) -I$(BUILDDIR) $(WAMR_INC)
 
 # ── Targets ─────────────────────────────────────────────────────────
 
@@ -488,7 +639,7 @@ all: $(BUILDDIR)/hull
 # Platform static library — everything except entry.o and build_assets.o
 # Used by `hull build` to produce standalone app binaries.
 # Exports hull_main() (subcommand dispatch + server logic).
-PLATFORM_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(MAIN_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(STDLIB_REGISTRY_O) $(VEND_OBJS) $(MBEDTLS_OBJS) \
+PLATFORM_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(MAIN_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) \
 	$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS)
 
 PLATFORM_LIB := $(BUILDDIR)/libhull_platform.a
@@ -593,8 +744,8 @@ $(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H)
 endif
 
 # Hull binary
-$(BUILDDIR)/hull: $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB)
-	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(VEND_OBJS) $(MBEDTLS_OBJS) \
+$(BUILDDIR)/hull: $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB)
+	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) \
 		$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB) -lm -lpthread
 
 # Capability sources
@@ -731,6 +882,14 @@ $(BUILDDIR)/pledge_%.o: $(PLEDGE_DIR)/%.c | $(BUILDDIR)
 	@mkdir -p $(dir $@)
 	$(CC) $(PLEDGE_CFLAGS) -c -o $@ $<
 
+# WAMR (vendored, relaxed warnings)
+# Flatten vendor/wamr/core/iwasm/... → build/wamr_core_iwasm_...
+ifeq ($(HL_ENABLE_WASM),1)
+$(BUILDDIR)/wamr_%.o: $(WAMR_DIR)/%.c | $(BUILDDIR)
+	@mkdir -p $(dir $@)
+	$(CC) $(WAMR_CFLAGS) -c -o $@ $<
+endif
+
 $(BUILDDIR):
 	mkdir -p $(BUILDDIR)
 
@@ -759,8 +918,8 @@ TEST_BINS := $(addprefix $(BUILDDIR)/,$(notdir $(basename $(TEST_SRCS))))
 TEST_CAP_OBJS := $(CAP_OBJS)
 
 # Shared link deps for all tests
-TEST_COMMON_DEPS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(KEEL_LIB)
-TEST_COMMON_LIBS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(MBEDTLS_OBJS) $(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) -lm -lpthread
+TEST_COMMON_DEPS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(VFS_OBJ) $(WAMR_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(KEEL_LIB)
+TEST_COMMON_LIBS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(VFS_OBJ) $(WAMR_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) -lm -lpthread
 
 # Capability tests (tests/hull/cap/)
 $(BUILDDIR)/test_%: $(TESTDIR)/hull/cap/test_%.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
@@ -773,13 +932,13 @@ $(BUILDDIR)/test_parse_size: $(TESTDIR)/hull/test_parse_size.c $(TEST_COMMON_DEP
 # JS runtime test — needs QuickJS + JS runtime objects + manifest (JS-only to avoid Lua link deps)
 $(BUILDDIR)/test_js: $(TESTDIR)/hull/runtime/js/test_js.c $(TEST_COMMON_DEPS) $(MANIFEST_JS_OBJ) $(CAP_TEST_JS_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(JS_RT_OBJS) $(QJS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(TEST_CAP_OBJS) $(CAP_TEST_JS_OBJ) $(JS_RT_OBJS) $(MANIFEST_JS_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(QJS_OBJS) \
+		$(TEST_CAP_OBJS) $(CAP_TEST_JS_OBJ) $(JS_RT_OBJS) $(MANIFEST_JS_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WAMR_OBJS) $(QJS_OBJS) \
 		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) -lm -lpthread
 
 # Lua runtime test — needs Lua + Lua runtime objects + manifest (Lua-only) + cap_tool + build_assets
 $(BUILDDIR)/test_lua: $(TESTDIR)/hull/runtime/lua/test_lua.c $(TEST_COMMON_DEPS) $(CAP_TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MANIFEST_LUA_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(LUA_RT_OBJS) $(LUA_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(TEST_CAP_OBJS) $(CAP_TOOL_OBJ) $(BUILD_ASSET_OBJ) $(LUA_RT_OBJS) $(MANIFEST_LUA_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(LUA_OBJS) \
+		$(TEST_CAP_OBJS) $(CAP_TOOL_OBJ) $(BUILD_ASSET_OBJ) $(LUA_RT_OBJS) $(MANIFEST_LUA_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WAMR_OBJS) $(LUA_OBJS) \
 		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) -lm -lpthread
 
 # Tool hardening test — cap/tool.c compiled without runtime flags (self-contained C functions)
@@ -794,18 +953,18 @@ $(BUILDDIR)/test_tool: $(TESTDIR)/hull/cap/test_tool.c $(CAP_TOOL_NONE_OBJ) $(BU
 $(BUILDDIR)/test_dispatch: $(TESTDIR)/hull/commands/test_dispatch.c $(CMD_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(TOOL_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TEST_COMMON_DEPS) $(RT_OBJS) $(VEND_OBJS) $(MANIFEST_OBJ) $(BUILD_ASSET_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(PLEDGE_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(CMD_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(TOOL_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) \
-		$(TEST_CAP_OBJS) $(RT_OBJS) $(MANIFEST_OBJ) $(BUILD_ASSET_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(VEND_OBJS) \
+		$(TEST_CAP_OBJS) $(RT_OBJS) $(MANIFEST_OBJ) $(BUILD_ASSET_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WAMR_OBJS) $(VEND_OBJS) \
 		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) -lm -lpthread
 
 # Signature verification test — needs crypto + app_entries_default + vfs
-$(BUILDDIR)/test_signature: $(TESTDIR)/hull/test_signature.c $(SIG_OBJ) $(VFS_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(TEST_COMMON_DEPS) | $(BUILDDIR)
+$(BUILDDIR)/test_signature: $(TESTDIR)/hull/test_signature.c $(SIG_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(SIG_OBJ) $(VFS_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(TEST_COMMON_LIBS)
+		$(SIG_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(TEST_COMMON_LIBS)
 
 # Static file serving test — needs static middleware + vfs + keel
-$(BUILDDIR)/test_static: $(TESTDIR)/hull/test_static.c $(STATIC_OBJ) $(VFS_OBJ) $(TEST_COMMON_DEPS) | $(BUILDDIR)
+$(BUILDDIR)/test_static: $(TESTDIR)/hull/test_static.c $(STATIC_OBJ) $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(STATIC_OBJ) $(VFS_OBJ) $(TEST_COMMON_LIBS)
+		$(STATIC_OBJ) $(TEST_COMMON_LIBS)
 
 # VFS test — standalone module, no runtime deps
 $(BUILDDIR)/test_vfs: $(TESTDIR)/hull/test_vfs.c $(VFS_OBJ) | $(BUILDDIR)
@@ -857,6 +1016,9 @@ else ifeq ($(RUNTIME),lua)
   CFLAGS += -DHL_ENABLE_LUA
 else
   CFLAGS += -DHL_ENABLE_JS -DHL_ENABLE_LUA
+endif
+ifeq ($(HL_ENABLE_WASM),1)
+  CFLAGS += -DHL_ENABLE_WASM
 endif
 endif
 

@@ -3624,6 +3624,163 @@ static int hl_js_init_server_module(JSContext *ctx, HlJS *js)
 }
 
 /* ════════════════════════════════════════════════════════════════════
+ * hull:compute module — WASM compute plugins
+ *
+ * compute.call(name, input, opts?) -> output (Uint8Array)
+ * compute.preload(name) -> true
+ * ════════════════════════════════════════════════════════════════════ */
+
+#ifdef HL_ENABLE_WASM
+#include "hull/cap/wasm.h"
+
+static JSValue js_compute_call(JSContext *ctx, JSValueConst this_val,
+                               int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->base.wasm_cache)
+        return JS_ThrowInternalError(ctx, "compute.call: WASM runtime not initialized");
+
+    if (argc < 2)
+        return JS_ThrowTypeError(ctx, "compute.call requires (name, input [, opts])");
+
+    const char *name = JS_ToCString(ctx, argv[0]);
+    if (!name)
+        return JS_EXCEPTION;
+
+    /* Input can be a string or ArrayBuffer */
+    size_t input_len = 0;
+    const uint8_t *input = NULL;
+    int input_is_string = 0;
+
+    input = JS_GetArrayBuffer(ctx, &input_len, argv[1]);
+    if (!input) {
+        /* Try as string */
+        input = (const uint8_t *)JS_ToCStringLen(ctx, &input_len, argv[1]);
+        if (!input) {
+            JS_FreeCString(ctx, name);
+            return JS_ThrowTypeError(ctx, "compute.call: input must be a string or ArrayBuffer");
+        }
+        input_is_string = 1;
+    }
+
+    HlWasmCallOpts opts = {0};
+
+    /* Parse opts object if provided */
+    if (argc > 2 && JS_IsObject(argv[2])) {
+        JSValue val;
+
+        val = JS_GetPropertyStr(ctx, argv[2], "maxInput");
+        if (!JS_IsUndefined(val)) {
+            int64_t v; JS_ToInt64(ctx, &v, val); opts.max_input = (uint32_t)v;
+        }
+        JS_FreeValue(ctx, val);
+
+        val = JS_GetPropertyStr(ctx, argv[2], "maxOutput");
+        if (!JS_IsUndefined(val)) {
+            int64_t v; JS_ToInt64(ctx, &v, val); opts.max_output = (uint32_t)v;
+        }
+        JS_FreeValue(ctx, val);
+
+        val = JS_GetPropertyStr(ctx, argv[2], "heap");
+        if (!JS_IsUndefined(val)) {
+            int64_t v; JS_ToInt64(ctx, &v, val); opts.heap_size = (uint32_t)v;
+        }
+        JS_FreeValue(ctx, val);
+
+        val = JS_GetPropertyStr(ctx, argv[2], "stack");
+        if (!JS_IsUndefined(val)) {
+            int64_t v; JS_ToInt64(ctx, &v, val); opts.stack_size = (uint32_t)v;
+        }
+        JS_FreeValue(ctx, val);
+
+        val = JS_GetPropertyStr(ctx, argv[2], "gas");
+        if (!JS_IsUndefined(val)) {
+            int64_t v; JS_ToInt64(ctx, &v, val); opts.gas = v;
+        }
+        JS_FreeValue(ctx, val);
+    }
+
+    void *output = NULL;
+    size_t output_len = 0;
+    const char *err_msg = NULL;
+
+    int rc = hl_cap_wasm_call(js->base.wasm_cache, name,
+                               input, input_len,
+                               &output, &output_len,
+                               &opts, NULL, NULL,
+                               js->base.app_vfs,
+                               js->base.app_vfs ? js->base.app_vfs->root_dir : NULL,
+                               &err_msg);
+
+    if (input_is_string)
+        JS_FreeCString(ctx, (const char *)input);
+    JS_FreeCString(ctx, name);
+
+    if (rc != 0)
+        return JS_ThrowInternalError(ctx, "compute.call: %s",
+                                     err_msg ? err_msg : "unknown error");
+
+    /* Return result as ArrayBuffer */
+    if (output && output_len > 0) {
+        JSValue ab = JS_NewArrayBufferCopy(ctx, output, output_len);
+        free(output);
+        return ab;
+    }
+    free(output);
+    return JS_NewArrayBufferCopy(ctx, NULL, 0);
+}
+
+static JSValue js_compute_preload(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->base.wasm_cache)
+        return JS_ThrowInternalError(ctx, "compute.preload: WASM runtime not initialized");
+
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "compute.preload requires (name)");
+
+    const char *name = JS_ToCString(ctx, argv[0]);
+    if (!name)
+        return JS_EXCEPTION;
+
+    int rc = hl_cap_wasm_load(js->base.wasm_cache, name,
+                               js->base.app_vfs,
+                               js->base.app_vfs ? js->base.app_vfs->root_dir : NULL);
+    JS_FreeCString(ctx, name);
+
+    if (rc != 0)
+        return JS_ThrowInternalError(ctx, "compute.preload: %s",
+                                     rc == HL_WASM_ERR_NOT_FOUND ? "not_found" : "load_failed");
+
+    return JS_TRUE;
+}
+
+static int js_compute_module_init(JSContext *ctx, JSModuleDef *m)
+{
+    JSValue compute = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, compute, "call",
+                      JS_NewCFunction(ctx, js_compute_call, "call", 3));
+    JS_SetPropertyStr(ctx, compute, "preload",
+                      JS_NewCFunction(ctx, js_compute_preload, "preload", 1));
+    JS_SetModuleExport(ctx, m, "compute", compute);
+    return 0;
+}
+
+static int hl_js_init_compute_module(JSContext *ctx, HlJS *js)
+{
+    (void)js;
+    JSModuleDef *m = JS_NewCModule(ctx, "hull:compute", js_compute_module_init);
+    if (!m)
+        return -1;
+    JS_AddModuleExport(ctx, m, "compute");
+    return 0;
+}
+#endif /* HL_ENABLE_WASM */
+
+/* ════════════════════════════════════════════════════════════════════
  * Module registry — called by hl_js_init() to register all
  * hull:* built-in modules.
  * ════════════════════════════════════════════════════════════════════ */
@@ -3686,6 +3843,14 @@ int hl_js_register_modules(HlJS *js)
     /* Register hull:server module (always available) */
     if (hl_js_init_server_module(js->ctx, js) != 0)
         return -1;
+
+#ifdef HL_ENABLE_WASM
+    /* Register hull:compute module (only if WASM runtime is available) */
+    if (js->base.wasm_cache) {
+        if (hl_js_init_compute_module(js->ctx, js) != 0)
+            return -1;
+    }
+#endif
 
     return 0;
 }

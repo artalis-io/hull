@@ -198,6 +198,12 @@ local function generate_app_registry(app_dir, files)
         add_file(path, rel, "migration_")
     end
 
+    -- Compute modules: "compute/path" (relative from app_dir)
+    for _, path in ipairs(files.compute or {}) do
+        local rel = path:sub(#app_dir + 2) -- e.g. "compute/score.wasm"
+        add_file(path, rel, "compute_")
+    end
+
     -- Sort entries by name for O(log n) binary search in HlVfs
     table.sort(entries, function(a, b)
         -- Extract entry name from '    { "name", ...' format
@@ -385,14 +391,31 @@ typedef struct {
         print("hull build: " .. #migration_files .. " migration(s) from " .. migrations_dir)
     end
 
+    local compute_dir = opts.app_dir .. "/compute"
+    local compute_files = {}
+    if file_exists(compute_dir) then
+        local wasm = tool.find_files(compute_dir, "*.wasm")
+        for _, f in ipairs(wasm) do
+            compute_files[#compute_files + 1] = f
+        end
+        local aot = tool.find_files(compute_dir, "*.aot.*")
+        for _, f in ipairs(aot) do
+            compute_files[#compute_files + 1] = f
+        end
+    end
+    if #compute_files > 0 then
+        print("hull build: " .. #compute_files .. " compute module(s) from " .. compute_dir)
+    end
+
     -- Generate unified app_registry.c
     local registry_c = generate_app_registry(opts.app_dir, {
-        lua    = lua_files,
-        js     = js_files,
-        json   = json_files,
-        html   = html_files,
-        static = static_files,
-        sql    = migration_files,
+        lua     = lua_files,
+        js      = js_files,
+        json    = json_files,
+        html    = html_files,
+        static  = static_files,
+        sql     = migration_files,
+        compute = compute_files,
     })
     write_file(tmpdir .. "/app_registry.c", registry_c)
 

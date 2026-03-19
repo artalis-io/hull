@@ -12,6 +12,9 @@
 #include "hull/cap/tool.h"
 #include "hull/migrate.h"
 #include "hull/vfs.h"
+#ifdef HL_ENABLE_WASM
+#include "hull/cap/wasm.h"
+#endif
 
 #ifdef HL_ENABLE_LUA
 #include "hull/runtime/lua.h"
@@ -80,6 +83,12 @@ static int run_lua_tests(const char *app_dir, const char *entry)
     lua.base.stmt_cache = &lua_stmt_cache;
     lua.base.app_vfs = &app_vfs;
     lua.base.platform_vfs = &platform_vfs;
+
+#ifdef HL_ENABLE_WASM
+    HlWasmCache wasm_cache;
+    if (hl_cap_wasm_init(&wasm_cache) == 0)
+        lua.base.wasm_cache = &wasm_cache;
+#endif
 
     if (hl_lua_init(&lua, &cfg) != 0) {
         fprintf(stderr, "hull test: Lua init failed\n");
@@ -168,6 +177,10 @@ static int run_lua_tests(const char *app_dir, const char *entry)
     /* Cleanup */
     kl_router_free(&router);
     hl_lua_free(&lua);
+#ifdef HL_ENABLE_WASM
+    if (lua.base.wasm_cache)
+        hl_cap_wasm_destroy(lua.base.wasm_cache);
+#endif
     hl_stmt_cache_destroy(&lua_stmt_cache);
     hl_cap_db_shutdown(db);
     sqlite3_close(db);
@@ -207,6 +220,12 @@ static int run_js_tests(const char *app_dir, const char *entry)
     js.base.stmt_cache = &js_stmt_cache;
     js.base.app_vfs = &app_vfs;
     js.base.platform_vfs = &platform_vfs;
+
+#ifdef HL_ENABLE_WASM
+    HlWasmCache js_wasm_cache;
+    if (hl_cap_wasm_init(&js_wasm_cache) == 0)
+        js.base.wasm_cache = &js_wasm_cache;
+#endif
 
     if (hl_js_init(&js, &cfg) != 0) {
         fprintf(stderr, "hull test: QuickJS init failed\n");
@@ -310,6 +329,10 @@ static int run_js_tests(const char *app_dir, const char *entry)
 
     kl_router_free(&router);
     hl_js_free(&js);
+#ifdef HL_ENABLE_WASM
+    if (js.base.wasm_cache)
+        hl_cap_wasm_destroy(js.base.wasm_cache);
+#endif
     hl_stmt_cache_destroy(&js_stmt_cache);
     hl_cap_db_shutdown(db);
     sqlite3_close(db);

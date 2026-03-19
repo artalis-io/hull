@@ -3197,6 +3197,125 @@ int hl_lua_register_stdlib(HlLua *lua)
 }
 
 /* ════════════════════════════════════════════════════════════════════
+ * hull.compute module — WASM compute plugins
+ *
+ * compute.call(name, input, opts?) -> output, err
+ * compute.preload(name) -> true, err
+ * ════════════════════════════════════════════════════════════════════ */
+
+#ifdef HL_ENABLE_WASM
+#include "hull/cap/wasm.h"
+
+/* compute.call(name, input, opts?) -> output_string | nil, error_string | nil */
+static int lua_compute_call(lua_State *L)
+{
+    HlLua *lua = get_hl_lua(L);
+    if (!lua)
+        return luaL_error(L, "compute.call: runtime not available");
+
+#ifdef HL_ENABLE_WASM
+    if (!lua->base.wasm_cache)
+        return luaL_error(L, "compute.call: WASM runtime not initialized");
+#endif
+
+    const char *name = luaL_checkstring(L, 1);
+    size_t input_len = 0;
+    const char *input = luaL_checklstring(L, 2, &input_len);
+
+    HlWasmCallOpts opts = {0};
+
+    /* Parse opts table if provided */
+    if (lua_istable(L, 3)) {
+        lua_getfield(L, 3, "max_input");
+        if (lua_isinteger(L, -1))
+            opts.max_input = (uint32_t)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+
+        lua_getfield(L, 3, "max_output");
+        if (lua_isinteger(L, -1))
+            opts.max_output = (uint32_t)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+
+        lua_getfield(L, 3, "heap");
+        if (lua_isinteger(L, -1))
+            opts.heap_size = (uint32_t)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+
+        lua_getfield(L, 3, "stack");
+        if (lua_isinteger(L, -1))
+            opts.stack_size = (uint32_t)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+
+        lua_getfield(L, 3, "gas");
+        if (lua_isinteger(L, -1))
+            opts.gas = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+    }
+
+    void *output = NULL;
+    size_t output_len = 0;
+    const char *err_msg = NULL;
+
+    int rc = hl_cap_wasm_call(lua->base.wasm_cache, name,
+                               input, input_len,
+                               &output, &output_len,
+                               &opts, NULL, NULL,
+                               lua->base.app_vfs,
+                               lua->base.app_vfs ? lua->base.app_vfs->root_dir : NULL,
+                               &err_msg);
+
+    if (rc != 0) {
+        lua_pushnil(L);
+        lua_pushstring(L, err_msg ? err_msg : "unknown_error");
+        return 2;
+    }
+
+    if (output && output_len > 0)
+        lua_pushlstring(L, (const char *)output, output_len);
+    else
+        lua_pushlstring(L, "", 0);
+    lua_pushnil(L);
+
+    free(output);
+    return 2;
+}
+
+/* compute.preload(name) -> true | nil, error_string */
+static int lua_compute_preload(lua_State *L)
+{
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->base.wasm_cache)
+        return luaL_error(L, "compute.preload: WASM runtime not initialized");
+
+    const char *name = luaL_checkstring(L, 1);
+
+    int rc = hl_cap_wasm_load(lua->base.wasm_cache, name,
+                               lua->base.app_vfs,
+                               lua->base.app_vfs ? lua->base.app_vfs->root_dir : NULL);
+    if (rc != 0) {
+        lua_pushnil(L);
+        lua_pushstring(L, rc == HL_WASM_ERR_NOT_FOUND ? "not_found" : "load_failed");
+        return 2;
+    }
+
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+static const luaL_Reg compute_funcs[] = {
+    {"call",    lua_compute_call},
+    {"preload", lua_compute_preload},
+    {NULL, NULL}
+};
+
+static int luaopen_hull_compute(lua_State *L)
+{
+    luaL_newlib(L, compute_funcs);
+    return 1;
+}
+#endif /* HL_ENABLE_WASM */
+
+/* ════════════════════════════════════════════════════════════════════
  * Module registry — called by hl_lua_init() to register all
  * hull.* built-in modules.
  * ════════════════════════════════════════════════════════════════════ */
@@ -3261,6 +3380,14 @@ int hl_lua_register_modules(HlLua *lua)
     /* Register hull global (hull.sleep, hull.gather, etc.) */
     luaL_requiref(L, "hull.hull", luaopen_hull_hull, 0);
     lua_setglobal(L, "hull");
+
+#ifdef HL_ENABLE_WASM
+    /* Register hull.compute (only if WASM runtime is available) */
+    if (lua->base.wasm_cache) {
+        luaL_requiref(L, "hull.compute", luaopen_hull_compute, 0);
+        lua_setglobal(L, "compute");
+    }
+#endif
 
     return 0;
 }

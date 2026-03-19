@@ -1,3 +1,6 @@
 [submodule "vendor/keel"]
 	path = vendor/keel
 	url = https://github.com/artalis-io/keel.git
+[submodule "vendor/wamr"]
+	path = vendor/wamr
+	url = https://github.com/bytecodealliance/wasm-micro-runtime.git

@@ -45,6 +45,9 @@
 #include "hull/signature.h"
 #include "hull/static.h"
 #include "hull/tool.h"
+#ifdef HL_ENABLE_WASM
+#include "hull/cap/wasm.h"
+#endif
 
 #include <keel/cors.h>
 #include <keel/keel.h>
@@ -655,6 +658,15 @@ static int hull_serve(int argc, char **argv)
     if (comp_ctx)
         rt->compress = &compress_cfg;
 
+#ifdef HL_ENABLE_WASM
+    /* Initialize WAMR compute runtime */
+    static HlWasmCache wasm_cache;
+    if (hl_cap_wasm_init(&wasm_cache) == 0)
+        rt->wasm_cache = &wasm_cache;
+    else
+        log_warn("[hull:c] WAMR init failed — compute.call() unavailable");
+#endif
+
     /* Initialize worker DB capability (per-worker SQLite connections) */
     if (db_path)
         hl_worker_db_init(db_path);
@@ -880,6 +892,11 @@ static int hull_serve(int argc, char **argv)
     /* Free compression context (shared by compress + decompress) */
     if (comp_ctx)
         kl_compress_miniz_ctx_destroy(comp_ctx);
+
+#ifdef HL_ENABLE_WASM
+    if (rt->wasm_cache)
+        hl_cap_wasm_destroy(rt->wasm_cache);
+#endif
 
     /* Cleanup — free manifest strings AFTER server stops
      * (env_cfg and http_cfg reference them during runtime) */

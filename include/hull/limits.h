@@ -66,4 +66,16 @@
 
 #define HL_DEFAULT_INSTRUCTIONS (100 * 1000 * 1000) /* 100M per handler */
 
+/* ── WASM compute limits ───────────────────────────────────────────── */
+
+#define HL_WASM_DEFAULT_HEAP       (256 * 1024)            /* 256 KB */
+#define HL_WASM_MAX_HEAP           (64 * 1024 * 1024)      /* 64 MB */
+#define HL_WASM_DEFAULT_STACK      (64 * 1024)             /* 64 KB */
+#define HL_WASM_MAX_STACK          (1 * 1024 * 1024)       /* 1 MB */
+#define HL_WASM_DEFAULT_MAX_INPUT  (64 * 1024)             /* 64 KB */
+#define HL_WASM_DEFAULT_MAX_OUTPUT (64 * 1024)             /* 64 KB */
+#define HL_WASM_MAX_IO_SIZE        (16 * 1024 * 1024)      /* 16 MB */
+#define HL_WASM_DEFAULT_GAS        (10 * 1000 * 1000)      /* 10M instructions */
+#define HL_WASM_MAX_GAS            (1000 * 1000 * 1000LL)  /* 1B instructions */
+
 #endif /* HL_LIMITS_H */

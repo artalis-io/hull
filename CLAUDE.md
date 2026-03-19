@@ -36,6 +36,7 @@ All vendored — no external dependencies:
 | log.c | `vendor/log.c/` | Logging |
 | sh_arena | `vendor/sh_arena/` | Arena allocator |
 | sh_json | `vendor/sh_json/` | Streaming JSON writer + arena-based parser |
+| WAMR | `vendor/wamr/` (git submodule) | WebAssembly Micro Runtime (compute plugins) |
 | utest.h | `vendor/utest.h` | Unit test framework |
 
 ## Project Structure
@@ -59,7 +60,7 @@ vendor/                 # Vendored libraries (do not modify)
 tests/                  # Unit tests (test_*.c) and E2E scripts (e2e_*.sh)
   fixtures/             #   Test fixtures (null_app, etc.)
   hull/                 #   Hull-specific test suites
-examples/               # 10 example apps (hello, rest_api, auth, jwt_api, todo, etc.)
+examples/               # 11 example apps (hello, rest_api, auth, jwt_api, todo, compute, etc.)
 docs/                   # Architecture, security, roadmap, audit documentation
 templates/              # Build templates (app_main.c, entry.h)
 ```
@@ -112,6 +113,7 @@ All system access is mediated by C capability functions. Neither runtime touches
 | Tool (build mode) | `cap/tool.c` | `hl_tool_spawn()`, `hl_tool_find_files()`, `hl_tool_copy()`, `hl_tool_mkdir()` |
 | Test | `cap/test.c` | In-process HTTP dispatch, assertions |
 | Body | `cap/body.c` | Request body handling |
+| WASM compute | `cap/wasm.c` | `hl_cap_wasm_init()`, `_load()`, `_call()` — WAMR compute plugins |
 | Audit | `cap/audit.c` | Structured capability audit logging (JSON to stderr) |
 
 ### Request Flow
@@ -711,6 +713,51 @@ app.daily("02:00", () => { inbox.cleanup(); }, { localtime: true });
 
 **Implementation:** Timer callbacks fire via Keel's `kl_timer_add` min-heap. Self-re-adding callbacks give repeating behavior. Async operations use "detached" mode — `HlAsyncCtx` with `detached=1` resumes via `hl_async_ctx_resume_detached()` instead of `kl_async_complete()`.
 
+### WASM Compute Plugins
+
+Hull supports compute-only WASM plugins for CPU-intensive pure functions. Plugins have no I/O — they transform input bytes to output bytes inside isolated WASM linear memory with gas-metered execution.
+
+**Directory convention:** Place `.wasm` files in `app_dir/compute/`. Module name = filename without extension (e.g. `compute/score.wasm` → `"score"`).
+
+**Lua API:**
+```lua
+-- Synchronous call (gas-limited, blocking)
+local output, err = compute.call("score", input_bytes, {
+    max_input  = 64 * 1024,    -- 64 KB (optional, has defaults)
+    max_output = 64 * 1024,    -- 64 KB
+    gas        = 10000000,     -- 10M instructions
+    heap       = 256 * 1024,   -- 256 KB WASM heap
+})
+if err then
+    -- err: "not_found", "gas_exhausted", "output_too_small",
+    --       "input_too_large", "call_failed", "internal_error"
+end
+
+-- Preload module into cache
+compute.preload("score")
+```
+
+**JavaScript API:**
+```javascript
+import { compute } from "hull:compute";
+
+// Input: string or ArrayBuffer. Output: ArrayBuffer.
+const output = compute.call("score", inputBytes, {
+    maxInput: 64 * 1024,
+    maxOutput: 64 * 1024,
+    gas: 10000000,
+});
+compute.preload("score");
+```
+
+**Plugin ABI:** Plugins must export `hull_process(in_ptr, in_len, out_ptr, out_max) -> bytes_written` and optionally `hull_version() -> int`. Single import: `env.host_call(opcode, ptr, len) -> int` (LOG=0x01, CALLBACK=0x10).
+
+**Build:** `hull build` embeds `compute/*.wasm` and `compute/*.aot.*` files into the binary. The Makefile `APP_DIR` mode also embeds compute files.
+
+**Configuration:** Controlled by `HL_ENABLE_WASM` (default: 1). Disable with `make HL_ENABLE_WASM=0`. WAMR adds ~256 KB to the binary.
+
+**Architecture:** See `docs/wamr_architecture.md` for the full design document.
+
 ## Testing
 
 Tests use Sheredom's utest.h. Each `tests/hull/*/test_*.c` is a standalone executable.
@@ -735,6 +782,7 @@ make e2e                            # run all E2E tests (examples + build + sand
 | `test_lua_runtime` | 16 | Lua init, eval, sandbox, modules, GC, double-free |
 | `test_static` | 18 | MIME detection, path traversal, embedded VFS lookup |
 | `test_vfs` | 19 | Binary search find, prefix queries, path construction, empty VFS |
+| `test_wasm` | 9 | WAMR init/destroy, module load, echo call, gas exhaustion, limits |
 
 \+ E2E suites (`e2e_build.sh`, `e2e_examples.sh`, `e2e_http.sh`, `e2e_sandbox.sh`)
 
@@ -748,6 +796,7 @@ make e2e                            # run all E2E tests (examples + build + sand
 | `e2e_sandbox.sh` | Kernel sandbox enforcement (OpenBSD + Linux + macOS + Cosmo) |
 | `e2e_templates.sh` | Template engine: 20 tests per runtime (text, vars, escaping, conditionals, loops, filters, inheritance, includes, XSS) |
 | `e2e_migrate.sh` | Migration system: apply, status, idempotency, embedding |
+| `e2e_compute.sh` | WASM compute: compute.call() from Lua + JS, preload, error handling |
 
 ## Runtime Sandboxes
 
