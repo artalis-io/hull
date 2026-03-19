@@ -20,6 +20,7 @@
 #include "hull/cap/crypto.h"
 #include "hull/cap/fs.h"
 #include "hull/worker_db.h"
+#include "hull/worker_wasm.h"
 
 #include <keel/server.h>
 #include "quickjs.h"
@@ -3758,6 +3759,193 @@ static JSValue js_compute_preload(JSContext *ctx, JSValueConst this_val,
     return JS_TRUE;
 }
 
+/* ── compute.async.call (Promise-based, thread pool dispatch) ──────── */
+
+static JSValue js_push_worker_wasm_result(JSContext *ctx, void *driver)
+{
+    HlWorkerWasmOp *op = (HlWorkerWasmOp *)driver;
+
+    if (op->error)
+        return JS_ThrowInternalError(ctx, "compute.async.call: %s", op->error_msg);
+
+    if (op->output && op->output_len > 0)
+        return JS_NewArrayBufferCopy(ctx, (const uint8_t *)op->output, op->output_len);
+
+    return JS_NewArrayBufferCopy(ctx, NULL, 0);
+}
+
+static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
+                                     int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->base.thread_pool)
+        return JS_ThrowInternalError(ctx, "compute.async not available (no thread pool)");
+    if (!js->server || !js->active_conn)
+        return JS_ThrowInternalError(ctx, "compute.async can only be called from a request handler");
+    if (!js->base.wasm_cache)
+        return JS_ThrowInternalError(ctx, "compute.async.call: WASM runtime not initialized");
+
+    if (argc < 2)
+        return JS_ThrowTypeError(ctx, "compute.async.call requires (name, input [, opts])");
+
+    const char *name = JS_ToCString(ctx, argv[0]);
+    if (!name)
+        return JS_EXCEPTION;
+
+    /* Get input (string or ArrayBuffer) */
+    const uint8_t *input = NULL;
+    size_t input_len = 0;
+    int input_is_string = 0;
+    size_t ab_len;
+    input = JS_GetArrayBuffer(ctx, &ab_len, argv[1]);
+    if (input) {
+        input_len = ab_len;
+    } else {
+        input = (const uint8_t *)JS_ToCStringLen(ctx, &input_len, argv[1]);
+        if (!input) {
+            JS_FreeCString(ctx, name);
+            return JS_ThrowTypeError(ctx, "compute.async.call: input must be a string or ArrayBuffer");
+        }
+        input_is_string = 1;
+    }
+
+    /* Parse opts */
+    HlWasmCallOpts opts = {0};
+    if (argc > 2 && JS_IsObject(argv[2])) {
+        JSValue val;
+        val = JS_GetPropertyStr(ctx, argv[2], "maxInput");
+        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.max_input = (uint32_t)v; }
+        JS_FreeValue(ctx, val);
+        val = JS_GetPropertyStr(ctx, argv[2], "maxOutput");
+        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.max_output = (uint32_t)v; }
+        JS_FreeValue(ctx, val);
+        val = JS_GetPropertyStr(ctx, argv[2], "heap");
+        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.heap_size = (uint32_t)v; }
+        JS_FreeValue(ctx, val);
+        val = JS_GetPropertyStr(ctx, argv[2], "stack");
+        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.stack_size = (uint32_t)v; }
+        JS_FreeValue(ctx, val);
+        val = JS_GetPropertyStr(ctx, argv[2], "gas");
+        if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.gas = v; }
+        JS_FreeValue(ctx, val);
+    }
+
+    /* Resolve module on event loop thread */
+    int rc = hl_cap_wasm_load(js->base.wasm_cache, name,
+                               js->base.app_vfs,
+                               js->base.app_vfs ? js->base.app_vfs->root_dir : NULL);
+    if (rc != 0) {
+        if (input_is_string) JS_FreeCString(ctx, (const char *)input);
+        JS_FreeCString(ctx, name);
+        return JS_ThrowInternalError(ctx, "compute.async.call: %s",
+                                     rc == HL_WASM_ERR_NOT_FOUND ? "not_found" : "load_failed");
+    }
+
+    void *module = NULL;
+    for (int i = 0; i < js->base.wasm_cache->count; i++) {
+        if (strcmp(js->base.wasm_cache->modules[i].name, name) == 0) {
+            module = js->base.wasm_cache->modules[i].module;
+            break;
+        }
+    }
+
+    /* Allocate op */
+    HlWorkerWasmOp *op = calloc(1, sizeof(HlWorkerWasmOp));
+    if (!op) {
+        if (input_is_string) JS_FreeCString(ctx, (const char *)input);
+        JS_FreeCString(ctx, name);
+        return JS_ThrowInternalError(ctx, "compute.async.call: out of memory");
+    }
+
+    op->server = js->server;
+    op->module = module;
+    snprintf(op->name, sizeof(op->name), "%s", name);
+    op->opts = opts;
+
+    /* Deep-copy input */
+    if (input_len > 0) {
+        op->input = malloc(input_len);
+        if (!op->input) {
+            if (input_is_string) JS_FreeCString(ctx, (const char *)input);
+            JS_FreeCString(ctx, name);
+            free(op);
+            return JS_ThrowInternalError(ctx, "compute.async.call: out of memory");
+        }
+        memcpy(op->input, input, input_len);
+    }
+    op->input_len = input_len;
+
+    if (input_is_string) JS_FreeCString(ctx, (const char *)input);
+    JS_FreeCString(ctx, name);
+
+    /* Create async ctx */
+    HlAsyncCtx *actx = hl_async_ctx_create(js->server, js->base.alloc);
+    if (!actx) {
+        hl_worker_wasm_op_free(op);
+        free(op);
+        return JS_ThrowInternalError(ctx, "compute.async.call: out of memory");
+    }
+
+    /* Create Promise */
+    JSValue resolving_funcs[2];
+    JSValue promise = JS_NewPromiseCapability(ctx, resolving_funcs);
+    if (JS_IsException(promise)) {
+        hl_worker_wasm_op_free(op);
+        free(op);
+        hl_async_ctx_free(actx);
+        return JS_EXCEPTION;
+    }
+
+    /* Create JS continuation */
+    extern HlAsyncCont *hl_js_async_cont_create(HlJS *js,
+        JSValue resolve, JSValue reject, HlAllocator *alloc,
+        JSValue (*push_result)(JSContext *, void *));
+    HlAsyncCont *cont = hl_js_async_cont_create(js,
+                                                  resolving_funcs[0],
+                                                  resolving_funcs[1],
+                                                  js->base.alloc,
+                                                  js_push_worker_wasm_result);
+    if (!cont) {
+        JS_FreeValue(ctx, resolving_funcs[0]);
+        JS_FreeValue(ctx, resolving_funcs[1]);
+        JS_FreeValue(ctx, promise);
+        hl_worker_wasm_op_free(op);
+        free(op);
+        hl_async_ctx_free(actx);
+        return JS_ThrowInternalError(ctx, "compute.async.call: out of memory");
+    }
+    actx->cont = cont;
+    actx->driver = op;
+    actx->free_driver = hl_worker_wasm_op_free_all;
+    actx->op.on_cancel = hl_worker_wasm_async_cancel;
+
+    op->async_ctx = actx;
+    op->cancelled = 0;
+
+    /* Submit to thread pool */
+    if (hl_worker_wasm_submit(js->base.thread_pool, op) != 0) {
+        actx->cont->destroy(actx->cont);
+        hl_worker_wasm_op_free(op);
+        free(op);
+        hl_async_ctx_free(actx);
+        JS_FreeValue(ctx, promise);
+        return JS_ThrowInternalError(ctx, "compute.async.call: thread pool full");
+    }
+
+    /* Suspend connection */
+    if (kl_async_suspend(js->server, js->active_conn, &actx->op) < 0) {
+        op->cancelled = 1;
+        actx->cont->cancel(actx->cont);
+        actx->cont->destroy(actx->cont);
+        actx->cont = NULL;
+        JS_FreeValue(ctx, promise);
+        return JS_ThrowInternalError(ctx, "compute.async.call: failed to suspend");
+    }
+
+    return promise;
+}
+
 static int js_compute_module_init(JSContext *ctx, JSModuleDef *m)
 {
     JSValue compute = JS_NewObject(ctx);
@@ -3765,6 +3953,13 @@ static int js_compute_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_compute_call, "call", 3));
     JS_SetPropertyStr(ctx, compute, "preload",
                       JS_NewCFunction(ctx, js_compute_preload, "preload", 1));
+
+    /* compute.async sub-object */
+    JSValue async_obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, async_obj, "call",
+                      JS_NewCFunction(ctx, js_compute_async_call, "call", 3));
+    JS_SetPropertyStr(ctx, compute, "async", async_obj);
+
     JS_SetModuleExport(ctx, m, "compute", compute);
     return 0;
 }

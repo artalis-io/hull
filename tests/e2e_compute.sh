@@ -113,6 +113,49 @@ else
 fi
 
 echo ""
+echo "=== E2E: compute.async.call (Lua) ==="
+
+# Async requires a live HTTP request context (thread pool + connection)
+ASYNCDIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR" "$ASYNCDIR"' EXIT
+
+mkdir -p "$ASYNCDIR/compute"
+cp tests/fixtures/compute/echo.wasm "$ASYNCDIR/compute/echo.wasm"
+
+cat > "$ASYNCDIR/app.lua" << 'EOF'
+app.get("/async-echo", function(req, res)
+    local r = compute.async.call("echo", "hello async")
+    if r.error then
+        res:json({ error = r.error })
+    else
+        res:json({ result = r.result })
+    end
+end)
+EOF
+
+# Start server in background (direct mode, not hull dev)
+PORT=19876
+$HULL -p $PORT --no-sandbox "$ASYNCDIR/app.lua" >/dev/null 2>&1 &
+HULL_PID=$!
+sleep 1
+
+if kill -0 $HULL_PID 2>/dev/null; then
+    RESP=$(curl -sf "http://127.0.0.1:$PORT/async-echo" 2>/dev/null || echo "CURL_FAIL")
+    kill $HULL_PID 2>/dev/null || true
+    wait $HULL_PID 2>/dev/null || true
+
+    if echo "$RESP" | grep -q '"result":"hello async"'; then
+        pass "compute.async.call (Lua)"
+    else
+        fail "compute.async.call (Lua) — response: $RESP"
+    fi
+else
+    fail "compute.async.call (Lua) — server failed to start"
+    kill $HULL_PID 2>/dev/null || true
+    wait $HULL_PID 2>/dev/null || true
+fi
+
+echo ""
 echo "=== E2E: AOT filesystem lookup ==="
 
 # If wamrc is available, test AOT loading in dev mode

@@ -20,6 +20,7 @@
 #include "hull/cap/fs.h"
 #include "hull/async.h"
 #include "hull/worker_db.h"
+#include "hull/worker_wasm.h"
 
 #include <keel/server.h>
 
@@ -3302,15 +3303,174 @@ static int lua_compute_preload(lua_State *L)
     return 1;
 }
 
+/* ── compute.async.call ─────────────────────────────────────────────── */
+
+/* push_result callback: convert HlWorkerWasmOp result to Lua table
+ * Returns single table: { result = "output" } or { error = "msg" }
+ * Matches db.async pattern (single return value from yield). */
+static void lua_push_worker_wasm_result(lua_State *L, void *driver)
+{
+    HlWorkerWasmOp *op = (HlWorkerWasmOp *)driver;
+
+    lua_newtable(L);
+    if (op->error) {
+        lua_pushstring(L, op->error_msg);
+        lua_setfield(L, -2, "error");
+    } else {
+        if (op->output && op->output_len > 0)
+            lua_pushlstring(L, (const char *)op->output, op->output_len);
+        else
+            lua_pushlstring(L, "", 0);
+        lua_setfield(L, -2, "result");
+    }
+}
+
+static int lua_compute_async_call(lua_State *L)
+{
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->base.thread_pool)
+        return luaL_error(L, "compute.async not available (no thread pool)");
+    if (!lua->server || !lua->active_conn)
+        return luaL_error(L, "compute.async can only be called from a request handler");
+
+#ifdef HL_ENABLE_WASM
+    if (!lua->base.wasm_cache)
+        return luaL_error(L, "compute.async.call: WASM runtime not initialized");
+#endif
+
+    const char *name = luaL_checkstring(L, 1);
+    size_t input_len = 0;
+    const char *input = luaL_checklstring(L, 2, &input_len);
+
+    /* Parse opts */
+    HlWasmCallOpts opts = {0};
+    if (lua_istable(L, 3)) {
+        lua_getfield(L, 3, "max_input");
+        if (lua_isinteger(L, -1)) opts.max_input = (uint32_t)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+
+        lua_getfield(L, 3, "max_output");
+        if (lua_isinteger(L, -1)) opts.max_output = (uint32_t)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+
+        lua_getfield(L, 3, "heap");
+        if (lua_isinteger(L, -1)) opts.heap_size = (uint32_t)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+
+        lua_getfield(L, 3, "stack");
+        if (lua_isinteger(L, -1)) opts.stack_size = (uint32_t)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+
+        lua_getfield(L, 3, "gas");
+        if (lua_isinteger(L, -1)) opts.gas = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+    }
+
+    /* Resolve module on event loop thread (cache is not thread-safe for writes) */
+    HlWasmModule *mod = NULL;
+    {
+        int rc = hl_cap_wasm_load(lua->base.wasm_cache, name,
+                                   lua->base.app_vfs,
+                                   lua->base.app_vfs ? lua->base.app_vfs->root_dir : NULL);
+        if (rc != 0)
+            return luaL_error(L, "compute.async.call: %s",
+                              rc == HL_WASM_ERR_NOT_FOUND ? "not_found" : "load_failed");
+        /* Find the cached module */
+        for (int i = 0; i < lua->base.wasm_cache->count; i++) {
+            if (strcmp(lua->base.wasm_cache->modules[i].name, name) == 0) {
+                mod = &lua->base.wasm_cache->modules[i];
+                break;
+            }
+        }
+        if (!mod)
+            return luaL_error(L, "compute.async.call: internal error");
+    }
+
+    /* Allocate worker op */
+    HlWorkerWasmOp *op = calloc(1, sizeof(HlWorkerWasmOp));
+    if (!op)
+        return luaL_error(L, "compute.async.call: out of memory");
+
+    op->server = lua->server;
+    op->module = mod->module;
+    snprintf(op->name, sizeof(op->name), "%s", name);
+    op->opts = opts;
+
+    /* Deep-copy input (Lua string lives on GC heap) */
+    if (input_len > 0) {
+        op->input = malloc(input_len);
+        if (!op->input) {
+            free(op);
+            return luaL_error(L, "compute.async.call: out of memory");
+        }
+        memcpy(op->input, input, input_len);
+    }
+    op->input_len = input_len;
+
+    /* Create async ctx */
+    HlAsyncCtx *ctx = hl_async_ctx_create(lua->server, lua->base.alloc);
+    if (!ctx) {
+        hl_worker_wasm_op_free(op);
+        free(op);
+        return luaL_error(L, "compute.async.call: out of memory");
+    }
+
+    /* Create Lua continuation */
+    extern HlAsyncCont *hl_lua_async_cont_create(HlLua *, HlAllocator *,
+                                                   HlLuaPushResultFn);
+    HlAsyncCont *cont = hl_lua_async_cont_create(lua, lua->base.alloc,
+                                                   lua_push_worker_wasm_result);
+    if (!cont) {
+        hl_worker_wasm_op_free(op);
+        free(op);
+        hl_async_ctx_free(ctx);
+        return luaL_error(L, "compute.async.call: out of memory");
+    }
+    ctx->cont = cont;
+    ctx->driver = op;
+    ctx->free_driver = hl_worker_wasm_op_free_all;
+    ctx->op.on_cancel = hl_worker_wasm_async_cancel;
+
+    op->async_ctx = ctx;
+    op->cancelled = 0;
+
+    /* Submit to thread pool */
+    if (hl_worker_wasm_submit(lua->base.thread_pool, op) != 0) {
+        ctx->cont->destroy(ctx->cont);
+        hl_worker_wasm_op_free(op);
+        free(op);
+        hl_async_ctx_free(ctx);
+        return luaL_error(L, "compute.async.call: thread pool full");
+    }
+
+    /* Suspend connection and yield */
+    if (kl_async_suspend(lua->server, lua->active_conn, &ctx->op) < 0) {
+        op->cancelled = 1;
+        ctx->cont->cancel(ctx->cont);
+        ctx->cont->destroy(ctx->cont);
+        ctx->cont = NULL;
+        return luaL_error(L, "compute.async.call: failed to suspend connection");
+    }
+
+    return lua_yieldk(L, 0, 0, NULL);
+}
+
 static const luaL_Reg compute_funcs[] = {
     {"call",    lua_compute_call},
     {"preload", lua_compute_preload},
     {NULL, NULL}
 };
 
+static const luaL_Reg compute_async_funcs[] = {
+    {"call", lua_compute_async_call},
+    {NULL, NULL}
+};
+
 static int luaopen_hull_compute(lua_State *L)
 {
     luaL_newlib(L, compute_funcs);
+    luaL_newlib(L, compute_async_funcs);
+    lua_setfield(L, -2, "async");  /* compute.async = {...} */
     return 1;
 }
 #endif /* HL_ENABLE_WASM */
