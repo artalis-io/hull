@@ -21,6 +21,8 @@ local function parse_args()
         cc = nil,         -- resolved from tool.cc (set by C, default cosmocc)
         output = nil,
         app_dir = ".",
+        aot = true,       -- AOT compile WASM modules (--no-aot to disable)
+        target = nil,     -- cross-compilation target arch (e.g. "x86_64", "aarch64")
     }
 
     local i = 1
@@ -38,6 +40,11 @@ local function parse_args()
         elseif a == "--output" or a == "-o" then
             i = i + 1
             opts.output = arg[i]
+        elseif a == "--no-aot" then
+            opts.aot = false
+        elseif a == "--target" then
+            i = i + 1
+            opts.target = arg[i]
         elseif a:sub(1, 1) ~= "-" then
             opts.app_dir = a
         end
@@ -83,6 +90,39 @@ local function find_json_files(dir)
         end
     end
     return result
+end
+
+-- Find wamrc binary: check PATH, then build/, then hull binary dir
+local function find_wamrc()
+    -- Check PATH (spawn_read returns empty string on exec failure, so check length)
+    local out = tool.spawn_read({"wamrc", "--version"})
+    if out and #out > 0 then return "wamrc" end
+
+    -- Check build/ directory (next to hull binary build output)
+    if file_exists("build/wamrc") then return "./build/wamrc" end
+
+    -- Check hull binary directory (for embedded/installed builds)
+    if __hull_exe then
+        local hull_dir = __hull_exe:match("(.*/)")
+        if hull_dir and file_exists(hull_dir .. "wamrc") then
+            return hull_dir .. "wamrc"
+        end
+    end
+
+    return nil
+end
+
+-- Detect target architecture from compiler toolchain
+local function detect_target_arch(cc)
+    if cc:find("aarch64") then return "aarch64" end
+    if cc:find("arm64") then return "aarch64" end
+    if cc:find("x86_64") then return "x86_64" end
+    local out = tool.spawn_read({cc, "-dumpmachine"})
+    if out then
+        if out:find("aarch64") or out:find("arm64") then return "aarch64" end
+        if out:find("x86_64") or out:find("amd64") then return "x86_64" end
+    end
+    return nil
 end
 
 -- List .js files recursively in a directory (excludes static/, templates/, node_modules/)
@@ -202,6 +242,18 @@ local function generate_app_registry(app_dir, files)
     for _, path in ipairs(files.compute or {}) do
         local rel = path:sub(#app_dir + 2) -- e.g. "compute/score.wasm"
         add_file(path, rel, "compute_")
+    end
+
+    -- AOT-compiled compute modules (generated in tmpdir, explicit entry names)
+    for _, item in ipairs(files.compute_aot or {}) do
+        local data = read_file(item.path)
+        if data then
+            local varname = "aot_" .. item.entry_name:gsub("[/.]", "_")
+            parts[#parts + 1] = xxd_data(varname, data)
+            parts[#parts + 1] = ""
+            entries[#entries + 1] = string.format(
+                '    { "%s", %s, sizeof(%s) },', item.entry_name, varname, varname)
+        end
     end
 
     -- Sort entries by name for O(log n) binary search in HlVfs
@@ -407,15 +459,72 @@ typedef struct {
         print("hull build: " .. #compute_files .. " compute module(s) from " .. compute_dir)
     end
 
+    -- Resolve CC early (needed for AOT arch detection below)
+    local cc = opts.cc or tool.cc or "cosmocc"
+    local is_cosmo = cc:find("cosmocc") ~= nil
+
+    -- AOT compile WASM modules if wamrc is available
+    local compute_aot = {} -- {path=..., entry_name=...} for generated AOT files
+    local wasm_only = {}
+    for _, f in ipairs(compute_files) do
+        if f:match("%.wasm$") then wasm_only[#wasm_only + 1] = f end
+    end
+
+    if opts.aot and #wasm_only > 0 then
+        local wamrc = find_wamrc()
+        if wamrc then
+            local targets = {}
+            if opts.target then
+                targets = { opts.target }
+            elseif is_cosmo then
+                targets = { "x86_64", "aarch64" }
+            else
+                local arch = detect_target_arch(cc)
+                if arch then targets = { arch } end
+            end
+
+            if #targets > 0 then
+                for _, wasm_path in ipairs(wasm_only) do
+                    local rel = wasm_path:sub(#opts.app_dir + 2) -- e.g. "compute/score.wasm"
+                    for _, arch in ipairs(targets) do
+                        local aot_name = rel:gsub("%.wasm$", ".aot." .. arch) -- "compute/score.aot.x86_64"
+                        local aot_path = tmpdir .. "/" .. aot_name
+                        tool.mkdir(tmpdir .. "/compute")
+
+                        print("hull build: AOT " .. rel .. " -> " .. arch)
+                        local ok, rc = tool.spawn({wamrc, "--target=" .. arch, "-o", aot_path, wasm_path})
+                        if ok then
+                            compute_aot[#compute_aot + 1] = {
+                                path = aot_path,
+                                entry_name = aot_name,
+                            }
+                        else
+                            print("hull build: warning: AOT failed for " .. rel ..
+                                  " (target " .. arch .. ")")
+                        end
+                    end
+                end
+                if #compute_aot > 0 then
+                    print("hull build: " .. #compute_aot .. " AOT module(s) compiled")
+                end
+            else
+                print("hull build: warning: cannot detect target arch, skipping AOT")
+            end
+        else
+            print("hull build: wamrc not found, skipping AOT (install with: make wamrc)")
+        end
+    end
+
     -- Generate unified app_registry.c
     local registry_c = generate_app_registry(opts.app_dir, {
-        lua     = lua_files,
-        js      = js_files,
-        json    = json_files,
-        html    = html_files,
-        static  = static_files,
-        sql     = migration_files,
-        compute = compute_files,
+        lua         = lua_files,
+        js          = js_files,
+        json        = json_files,
+        html        = html_files,
+        static      = static_files,
+        sql         = migration_files,
+        compute     = compute_files,
+        compute_aot = compute_aot,
     })
     write_file(tmpdir .. "/app_registry.c", registry_c)
 
@@ -429,10 +538,6 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
     -- Extract platform library (if embedded)
     local platform_extracted = false
     local platform_lib = tmpdir .. "/libhull_platform.a"
-
-    -- Resolve CC early (needed for cosmo detection)
-    local cc = opts.cc or tool.cc or "cosmocc"
-    local is_cosmo = cc:find("cosmocc") ~= nil
 
     -- Try to find platform library in known locations
     -- 1. Check if build_assets has it embedded (multi-arch cosmo)

@@ -17,6 +17,8 @@ make self-build         # reproducible build chain: hull → hull2 → hull3
 make CC=cosmocc         # build with Cosmopolitan (APE binary)
 make EMBED_PLATFORM=1   # embed platform library in hull binary (distribution mode)
 make EMBED_PLATFORM=cosmo  # embed multi-arch cosmo platform (distribution mode)
+make wamrc              # build WAMR AOT compiler (requires cmake + LLVM)
+make bench-wasm         # WASM compute benchmark (native vs interpreter vs AOT)
 make clean              # remove all build artifacts
 ```
 
@@ -752,7 +754,20 @@ compute.preload("score");
 
 **Plugin ABI:** Plugins must export `hull_process(in_ptr, in_len, out_ptr, out_max) -> bytes_written` and optionally `hull_version() -> int`. Single import: `env.host_call(opcode, ptr, len) -> int` (LOG=0x01, CALLBACK=0x10).
 
-**Build:** `hull build` embeds `compute/*.wasm` and `compute/*.aot.*` files into the binary. The Makefile `APP_DIR` mode also embeds compute files.
+**Build & AOT:** `hull build` embeds `compute/*.wasm` files and auto-compiles them to AOT if `wamrc` is available. AOT modules are embedded alongside `.wasm` files; at runtime, AOT is preferred over interpreter.
+
+```bash
+make wamrc                         # build AOT compiler (one-time, requires cmake + LLVM)
+hull build myapp                   # auto-AOT compiles compute/*.wasm during build
+hull build myapp --no-aot          # skip AOT compilation
+hull build myapp --target=x86_64   # cross-compile AOT for different arch
+```
+
+For cosmocc builds, both x86_64 and aarch64 AOT files are generated automatically.
+
+**Dev mode AOT:** In `hull dev`, place pre-compiled `.aot.<arch>` files next to `.wasm` files in `compute/` and they'll be loaded automatically (four-tier lookup: VFS AOT → VFS WASM → filesystem AOT → filesystem WASM).
+
+**wamrc build:** `make wamrc` builds the WAMR AOT compiler from `vendor/wamr/wamr-compiler`. Requires cmake and LLVM (`brew install llvm` on macOS, `apt install llvm` on Linux). Override LLVM path: `make wamrc WAMRC_CMAKE_FLAGS="-DLLVM_DIR=/path/to/llvm/cmake"`. Output: `build/wamrc`.
 
 **Configuration:** Controlled by `HL_ENABLE_WASM` (default: 1). Disable with `make HL_ENABLE_WASM=0`. WAMR adds ~256 KB to the binary.
 

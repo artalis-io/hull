@@ -232,7 +232,35 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
         }
     }
 
-    /* 3. Filesystem fallback: <app_dir>/compute/<name>.wasm */
+    /* 3. Filesystem AOT: <app_dir>/compute/<name>.aot.<arch> */
+    if (!buf && app_dir && arch) {
+        char path[4096];
+        snprintf(path, sizeof(path), "%s/compute/%s.aot.%s", app_dir, name, arch);
+        FILE *f = fopen(path, "rb");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long fsize = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            if (fsize > 0 && fsize < (long)HL_WASM_MAX_IO_SIZE) {
+                buf = malloc((size_t)fsize);
+                if (buf) {
+                    size_t nr = fread(buf, 1, (size_t)fsize, f);
+                    if (nr == (size_t)fsize) {
+                        buf_len = (uint32_t)fsize;
+                        is_aot = 1;
+                        log_debug("[wasm] loaded AOT module '%s' from disk (%u bytes)",
+                                  name, buf_len);
+                    } else {
+                        free(buf);
+                        buf = NULL;
+                    }
+                }
+            }
+            fclose(f);
+        }
+    }
+
+    /* 4. Filesystem WASM fallback: <app_dir>/compute/<name>.wasm */
     if (!buf && app_dir) {
         char path[4096];
         snprintf(path, sizeof(path), "%s/compute/%s.wasm", app_dir, name);

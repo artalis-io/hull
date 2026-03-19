@@ -634,7 +634,7 @@ INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(KEEL_DIR)/ve
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan e2e e2e-build e2e-http e2e-sandbox e2e-examples e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api hull-test-examples self-build check analyze cppcheck bench bench-template coverage lint-lua lint-js lint platform platform-cosmo
+.PHONY: all clean test debug msan e2e e2e-build e2e-http e2e-sandbox e2e-examples e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm wamrc coverage lint-lua lint-js lint platform platform-cosmo
 
 all: $(BUILDDIR)/hull
 
@@ -698,6 +698,27 @@ platform-cosmo:
 	cp $(COSMO_STAGE)/* $(BUILDDIR)/
 	echo "cosmocc" > $(BUILDDIR)/platform_cc
 	rm -rf $(COSMO_STAGE)
+
+# ── wamrc AOT compiler ──────────────────────────────────────────────
+#
+# Build the WAMR AOT compiler from vendor/wamr/wamr-compiler.
+# Requires: cmake, LLVM (brew install llvm on macOS, apt install llvm on Linux).
+# Output: build/wamrc
+# Override LLVM path: make wamrc WAMRC_CMAKE_FLAGS="-DLLVM_DIR=/path/to/llvm/cmake"
+
+WAMRC_BUILD_DIR := $(BUILDDIR)/wamrc-build
+
+wamrc: | $(BUILDDIR)
+	@echo "=== Building wamrc AOT compiler ==="
+	@mkdir -p $(WAMRC_BUILD_DIR)
+	@cd $(WAMRC_BUILD_DIR) && cmake $(CURDIR)/$(WAMR_DIR)/wamr-compiler \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DWAMR_BUILD_WITH_CUSTOM_LLVM=1 \
+		-DWASM_ENABLE_INSTRUCTION_METERING=1 \
+		$(WAMRC_CMAKE_FLAGS) 2>&1 | tail -5
+	@$(MAKE) -C $(WAMRC_BUILD_DIR) -j$$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4) 2>&1 | tail -3
+	@cp $(WAMRC_BUILD_DIR)/wamrc $(BUILDDIR)/wamrc
+	@echo "=== wamrc built: $(BUILDDIR)/wamrc ==="
 
 # ── Embedded build assets (distribution builds only) ────────────────
 # Build with: make EMBED_PLATFORM=1      (single-arch)
@@ -1138,6 +1159,17 @@ bench: $(BUILDDIR)/hull
 
 bench-template: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh bench/bench_template.sh
+
+BENCH_WASM_SRCS := bench/wasm/bench_wasm.c \
+	bench/wasm/workloads/compute_hash_native.c \
+	bench/wasm/workloads/mem_histogram_native.c
+
+$(BUILDDIR)/bench_wasm: $(BENCH_WASM_SRCS) $(TEST_COMMON_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ibench/wasm/workloads -o $@ \
+		$(BENCH_WASM_SRCS) $(TEST_COMMON_LIBS)
+
+bench-wasm: $(BUILDDIR)/bench_wasm
+	$(BUILDDIR)/bench_wasm
 
 # ── Code coverage ────────────────────────────────────────────────────
 

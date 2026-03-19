@@ -40,12 +40,13 @@ Keel HTTP Server (C)          # epoll/kqueue event loop + async + thread pool
 Kernel Sandbox                # pledge+unveil (Linux), C-level (macOS)
 ```
 
-WASM compute plugins (planned) will add a data-plane layer for CPU-intensive computation. See `docs/wamr_architecture.md`.
+WASM compute plugins provide a sandboxed data-plane layer for CPU-intensive computation. Plugins are pure functions (no I/O) that run in isolated WASM linear memory with gas metering. Place `.wasm` files in `compute/`, call via `compute.call("name", input)` from Lua/JS. `hull build` auto-compiles to AOT when `wamrc` is available (~1.2x native speed vs ~85x for interpreter). See `docs/wamr_architecture.md`.
 
 Each app is a single file (`app.lua` or `app.js`) with optional:
 - `migrations/*.sql` — database schema (auto-run on startup)
 - `templates/*.html` — server-side templates
 - `static/*` — served at `/static/*`
+- `compute/*.wasm` — WASM compute plugins (auto-AOT compiled during `hull build`)
 - `tests/test_*.lua` or `tests/test_*.js` — test files
 
 ## Runtime Selection

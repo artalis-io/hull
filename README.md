@@ -102,7 +102,7 @@ Cosmopolitan APE binaries run on Linux, macOS, Windows, FreeBSD, OpenBSD, and Ne
 ┌─────────────────────────────────────────────┐
 │  Application Code (Lua / JS)                │  ← Developer writes this
 ├─────────────────────────────────────────────┤
-│  WASM Compute Plugins (planned)             │  ← Sandboxed data-plane computation
+│  WASM Compute Plugins (WAMR)                │  ← Sandboxed data-plane computation
 ├─────────────────────────────────────────────┤
 │  Standard Library (stdlib/)                 │  ← cors, ratelimit, csrf, auth, jwt, session
 ├─────────────────────────────────────────────┤
@@ -321,6 +321,27 @@ When disabled (default), the audit check is a single branch on a global flag —
 | GET /greet/:name (params) | 102,204 req/s | 57,405 req/s |
 
 See [docs/benchmark.md](docs/benchmark.md) for methodology.
+
+### WASM Compute Overhead
+
+WASM plugins run in isolated linear memory with no I/O. The overhead vs native C depends on execution mode:
+
+| Mode | Compute-intensive | Memory-intensive | Notes |
+|------|------------------:|------------------:|-------|
+| **Interpreter** | ~85x | ~87x | Classic interpreter with gas metering |
+| **AOT** | ~1.2x | ~2.3x | Pre-compiled with `wamrc -O3` |
+
+Measured on Apple M-series (aarch64, -O2) with large inputs (4 MB) where per-call setup is amortized. Compute workload: iterative hash compression (64 rounds/block, integer ALU + rotations). Memory workload: histogram + counting sort (3-pass over input, scattered writes).
+
+AOT compilation is automatic during `hull build` when `wamrc` is available. Per-call setup overhead (~50 µs) dominates at small input sizes; at 4 MB+ inputs the ratios above reflect steady-state throughput.
+
+```bash
+make wamrc                         # one-time: build AOT compiler (requires LLVM)
+make bench-wasm                    # run benchmarks (interpreter + AOT if .aot files present)
+hull build myapp                   # auto-AOT compiles compute/*.wasm during build
+hull build myapp --no-aot          # skip AOT, interpreter only
+hull build myapp --target=x86_64   # cross-compile AOT for different arch
+```
 
 ## Server Tuning
 

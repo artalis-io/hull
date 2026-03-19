@@ -135,7 +135,7 @@ int hl_tool_unveil_check(const HlToolUnveilCtx *ctx, const char *path, char need
 /* ── Compiler allowlist ────────────────────────────────────────────── */
 
 static const char *allowed_prefixes[] = {
-    "cc", "gcc", "clang", "cosmocc", "cosmoar", "ar", NULL
+    "cc", "gcc", "clang", "cosmocc", "cosmoar", "ar", "wamrc", NULL
 };
 
 int hl_tool_check_allowlist(const char *binary)
