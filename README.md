@@ -324,7 +324,7 @@ See [docs/benchmark.md](docs/benchmark.md) for methodology.
 
 ### WASM Compute Overhead
 
-WASM plugins run in isolated linear memory with no I/O. The overhead vs native C depends on execution mode:
+WASM plugins run in isolated linear memory with no I/O. Both sync (`compute.call()`) and async (`compute.async.call()`) APIs are available — async yields to the event loop so other requests are served during execution. The overhead vs native C depends on execution mode:
 
 | Mode | Compute-intensive | Memory-intensive | Notes |
 |------|------------------:|------------------:|-------|

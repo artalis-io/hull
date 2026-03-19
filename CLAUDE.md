@@ -735,6 +735,11 @@ if err then
     --       "input_too_large", "call_failed", "internal_error"
 end
 
+-- Async call (yields to event loop, request handler only)
+-- Dispatches WASM execution to thread pool. Other requests served while running.
+local r = compute.async.call("score", input_bytes, opts)
+-- r.result = output string on success, r.error = error string on failure
+
 -- Preload module into cache
 compute.preload("score")
 ```
@@ -743,14 +748,20 @@ compute.preload("score")
 ```javascript
 import { compute } from "hull:compute";
 
-// Input: string or ArrayBuffer. Output: ArrayBuffer.
+// Sync: Input: string or ArrayBuffer. Output: ArrayBuffer.
 const output = compute.call("score", inputBytes, {
     maxInput: 64 * 1024,
     maxOutput: 64 * 1024,
     gas: 10000000,
 });
+
+// Async: returns Promise. Dispatches to thread pool.
+const buf = await compute.async.call("score", inputBytes, opts);
+
 compute.preload("score");
 ```
+
+**Sync vs Async:** Use `compute.call()` for fast/small computations (sub-ms) and in tests/timers. Use `compute.async.call()` in request handlers for expensive computations — it yields to the event loop so other requests are served concurrently. The async variant follows the same pattern as `db.async.query()`.
 
 **Plugin ABI:** Plugins must export `hull_process(in_ptr, in_len, out_ptr, out_max) -> bytes_written` and optionally `hull_version() -> int`. Single import: `env.host_call(opcode, ptr, len) -> int` (LOG=0x01, CALLBACK=0x10).
 
