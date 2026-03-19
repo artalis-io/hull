@@ -259,6 +259,25 @@ curl http://localhost:3000/heartbeats
 curl http://localhost:3000/counter
 ```
 
+### compute
+
+WASM compute plugins — offload CPU-intensive work to sandboxed WASM modules. Demonstrates sync `compute.call()` for fast operations and async `compute.async.call()` for expensive computations that yield to the event loop.
+
+```bash
+./build/hull -p 3000 examples/compute/app.lua
+
+# Sync echo (blocks handler, good for fast calls)
+curl http://localhost:3000/echo?text=hello
+
+# Sync score (returns a 0-100 score byte)
+curl http://localhost:3000/score?text=hello
+
+# Async echo (yields to event loop, other requests served during WASM execution)
+curl http://localhost:3000/async-echo?text=hello
+
+curl http://localhost:3000/health
+```
+
 ### cors_manifest
 
 CORS via `app.manifest()` configuration — no middleware code needed. Keel registers CORS headers automatically. Also demonstrates `server.stats()` for live connection counts.
@@ -301,6 +320,7 @@ hull test examples/webhooks/
 hull test examples/todo/
 hull test examples/timers/
 hull test examples/cors_manifest/
+hull test examples/compute/
 ```
 
 The test API:

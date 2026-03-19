@@ -710,6 +710,42 @@ test_timers() {
 
 # ── Run all example tests ────────────────────────────────────────────
 
+# ── compute ──────────────────────────────────────────────────────────
+
+test_compute() {
+    LABEL=$1
+    PORT=$2
+    APP=$3
+
+    echo ""
+    echo "--- compute ($LABEL) port $PORT ---"
+
+    TMPDIR_COMPUTE=$(mktemp -d)
+    start_server "$PORT" "$APP" "$TMPDIR_COMPUTE/data.db"
+    if ! wait_for_server "$PORT"; then
+        fail "$LABEL compute — server startup"
+        return
+    fi
+
+    # Sync echo
+    RESP=$(curl -s "http://127.0.0.1:$PORT/echo?text=hello")
+    check_contains "$LABEL compute GET /echo" "$RESP" '"output":"hello"'
+    check_contains "$LABEL compute GET /echo match" "$RESP" '"match":true'
+
+    # Sync score
+    RESP=$(curl -s "http://127.0.0.1:$PORT/score?text=test")
+    check_contains "$LABEL compute GET /score text" "$RESP" '"text":"test"'
+    check_contains "$LABEL compute GET /score has score" "$RESP" '"score"'
+
+    # Async echo
+    RESP=$(curl -s "http://127.0.0.1:$PORT/async-echo?text=async")
+    check_contains "$LABEL compute GET /async-echo" "$RESP" '"output":"async"'
+    check_contains "$LABEL compute GET /async-echo match" "$RESP" '"match":true'
+
+    stop_server
+    rm -rf "$TMPDIR_COMPUTE"
+}
+
 PORT_BASE=19870
 
 echo ""
@@ -727,6 +763,7 @@ if [ "$RUNTIME" != "js" ]; then
     test_todo           "lua" $((PORT_BASE + 8)) examples/todo/app.lua
     test_async_http     "lua" $((PORT_BASE + 9)) examples/async_http/app.lua
     test_timers         "lua" $((PORT_BASE + 20)) examples/timers/app.lua
+    test_compute        "lua" $((PORT_BASE + 22)) examples/compute/app.lua
 fi
 
 if [ "$RUNTIME" != "lua" ]; then
