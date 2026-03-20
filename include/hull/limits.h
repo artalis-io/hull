@@ -67,15 +67,28 @@
 #define HL_DEFAULT_INSTRUCTIONS (100 * 1000 * 1000) /* 100M per handler */
 
 /* ── WASM compute limits ───────────────────────────────────────────── */
+/* All maximums are #ifndef-guarded so Makefile -D can override them.  */
 
-#define HL_WASM_DEFAULT_HEAP       (256 * 1024)            /* 256 KB */
-#define HL_WASM_MAX_HEAP           (64 * 1024 * 1024)      /* 64 MB */
+#define HL_WASM_DEFAULT_HEAP       (2 * 1024 * 1024)       /* 2 MB */
+#ifndef HL_WASM_MAX_HEAP
+#define HL_WASM_MAX_HEAP           (4U * 1024 * 1024 * 1024 - 1) /* ~4 GB (uint32_t max) */
+#endif
 #define HL_WASM_DEFAULT_STACK      (64 * 1024)             /* 64 KB */
-#define HL_WASM_MAX_STACK          (1 * 1024 * 1024)       /* 1 MB */
-#define HL_WASM_DEFAULT_MAX_INPUT  (64 * 1024)             /* 64 KB */
-#define HL_WASM_DEFAULT_MAX_OUTPUT (64 * 1024)             /* 64 KB */
-#define HL_WASM_MAX_IO_SIZE        (16 * 1024 * 1024)      /* 16 MB */
+#ifndef HL_WASM_MAX_STACK
+#define HL_WASM_MAX_STACK          (8 * 1024 * 1024)       /* 8 MB */
+#endif
+#ifndef HL_WASM_DEFAULT_MAX_INPUT
+#define HL_WASM_DEFAULT_MAX_INPUT  (1 * 1024 * 1024)       /* 1 MB */
+#endif
+#ifndef HL_WASM_DEFAULT_MAX_OUTPUT
+#define HL_WASM_DEFAULT_MAX_OUTPUT (1 * 1024 * 1024)       /* 1 MB */
+#endif
+#ifndef HL_WASM_MAX_IO_SIZE
+#define HL_WASM_MAX_IO_SIZE        (256 * 1024 * 1024)     /* 256 MB */
+#endif
 #define HL_WASM_DEFAULT_GAS        (10 * 1000 * 1000)      /* 10M instructions */
-#define HL_WASM_MAX_GAS            (1000 * 1000 * 1000LL)  /* 1B instructions */
+#ifndef HL_WASM_MAX_GAS
+#define HL_WASM_MAX_GAS            (100LL * 1000 * 1000 * 1000) /* 100B instructions */
+#endif
 
 #endif /* HL_LIMITS_H */

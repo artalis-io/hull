@@ -6,8 +6,11 @@
  *   2. WAMR classic interpreter (.wasm)
  *   3. WAMR AOT (.aot pre-compiled, if available)
  *
- * Two workloads: compute-intensive hash compression, memory-intensive counting sort.
- * Three input sizes: 64 B, 4 KB, 64 KB.
+ * Four workloads:
+ *   - compute_hash: compute-intensive hash compression
+ *   - mem_histogram: memory-intensive counting sort
+ *   - simd_dot_product: SIMD128 f32 dot product (scalar vs SIMD)
+ *   - simd_matmul: SIMD128 f32 matrix multiply (scalar vs SIMD)
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -20,6 +23,8 @@
 #include "hull/entry.h"
 #include "compute_hash_native.h"
 #include "mem_histogram_native.h"
+#include "simd_dot_product_native.h"
+#include "simd_matmul_native.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,7 +36,7 @@
 
 #define DEFAULT_ITERS   1000
 #define WARMUP_ITERS    10
-#define MAX_OUTPUT      (8 * 1024 * 1024)
+#define MAX_OUTPUT      (16 * 1024 * 1024)
 
 /* ── Timing ────────────────────────────────────────────────────────── */
 
@@ -285,6 +290,252 @@ static void run_workload(const char *workload_name,
     }
 }
 
+/* ── SIMD workload runner ──────────────────────────────────────────── */
+
+/* Generate dot product input: [n:u32] [a: n×f32] [b: n×f32] */
+static uint8_t *generate_dot_input(uint32_t n, size_t *out_len)
+{
+    size_t len = 4 + (size_t)n * 4 * 2;
+    uint8_t *buf = malloc(len);
+    *(uint32_t *)buf = n;
+
+    float *a = (float *)(buf + 4);
+    float *b = (float *)(buf + 4 + n * 4);
+
+    /* Deterministic pseudo-random floats in [-1, 1] */
+    uint32_t x = 12345;
+    for (uint32_t i = 0; i < n; i++) {
+        x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+        a[i] = (float)(int32_t)x / (float)INT32_MAX;
+        x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+        b[i] = (float)(int32_t)x / (float)INT32_MAX;
+    }
+    *out_len = len;
+    return buf;
+}
+
+/* Generate matmul input: [dim:u32] [A: dim×dim×f32] [B: dim×dim×f32] */
+static uint8_t *generate_matmul_input(uint32_t dim, size_t *out_len)
+{
+    size_t elems = (size_t)dim * dim;
+    size_t len = 4 + elems * 4 * 2;
+    uint8_t *buf = malloc(len);
+    *(uint32_t *)buf = dim;
+
+    float *A = (float *)(buf + 4);
+    float *B = (float *)(buf + 4 + elems * 4);
+
+    uint32_t x = 67890;
+    for (size_t i = 0; i < elems; i++) {
+        x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+        A[i] = (float)(int32_t)x / (float)INT32_MAX;
+        x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+        B[i] = (float)(int32_t)x / (float)INT32_MAX;
+    }
+    *out_len = len;
+    return buf;
+}
+
+/* Approximate float comparison for outputs (native vs WASM rounding diffs).
+ * Uses byte-level comparison: tries as f64 first (for dot product output),
+ * then falls back to f32 element comparison (for matmul output).
+ * Tolerances are generous because SIMD f32x4 accumulation order differs
+ * from scalar f64 accumulation, causing measurable drift on large vectors. */
+static int approx_equal_float(const void *a, const void *b, size_t len)
+{
+    /* Try exact match first */
+    if (memcmp(a, b, len) == 0)
+        return 1;
+
+    /* Try as f64 array (dot product: 8 bytes = 1 f64) */
+    if (len % sizeof(double) == 0) {
+        const double *da = (const double *)a;
+        const double *db = (const double *)b;
+        size_t n = len / sizeof(double);
+        int ok = 1;
+        for (size_t i = 0; i < n; i++) {
+            double diff = da[i] - db[i];
+            if (diff < 0) diff = -diff;
+            double mag = da[i] < 0 ? -da[i] : da[i];
+            /* Relative tolerance 1e-3, absolute tolerance 1e-4 */
+            if (diff > 1e-4 && diff > mag * 1e-3) {
+                ok = 0;
+                break;
+            }
+        }
+        if (ok) return 1;
+    }
+
+    /* Try as f32 array (matmul output) */
+    if (len % sizeof(float) == 0) {
+        const float *fa = (const float *)a;
+        const float *fb = (const float *)b;
+        size_t n = len / sizeof(float);
+        for (size_t i = 0; i < n; i++) {
+            float diff = fa[i] - fb[i];
+            if (diff < 0) diff = -diff;
+            float mag = fa[i] < 0 ? -fa[i] : fa[i];
+            /* Relative tolerance 1e-3, absolute tolerance 1e-4 */
+            if (diff > 1e-4f && diff > mag * 1e-3f)
+                return 0;
+        }
+        return 1;
+    }
+
+    return 0;
+}
+
+/* bench_wasm variant that uses approximate float comparison */
+static void bench_wasm_approx(const char *label, HlWasmCache *cache,
+                               const char *module_name,
+                               const uint8_t *input, size_t input_len,
+                               int iters, uint64_t *samples,
+                               const uint8_t *ref_output, size_t ref_len,
+                               int64_t gas,
+                               const HlVfs *vfs)
+{
+    HlWasmCallOpts opts = {0};
+    opts.max_input = MAX_OUTPUT;
+    opts.max_output = MAX_OUTPUT;
+    opts.heap_size = 32 * 1024 * 1024;
+    opts.gas = gas;
+
+    /* Warm up */
+    for (int i = 0; i < WARMUP_ITERS; i++) {
+        void *out = NULL;
+        size_t out_len = 0;
+        const char *err = NULL;
+        hl_cap_wasm_call(cache, module_name,
+                         input, input_len, &out, &out_len,
+                         &opts, NULL, NULL, vfs, NULL, &err);
+        free(out);
+    }
+
+    /* Verify correctness against native reference (approximate) */
+    {
+        void *out = NULL;
+        size_t out_len = 0;
+        const char *err = NULL;
+        int rc = hl_cap_wasm_call(cache, module_name,
+                                  input, input_len, &out, &out_len,
+                                  &opts, NULL, NULL, vfs, NULL, &err);
+        if (rc != 0) {
+            fprintf(stderr, "ERROR: %s call failed: %s\n",
+                    label, err ? err : "unknown");
+            free(out);
+            return;
+        }
+        if (out_len != ref_len || !approx_equal_float(out, ref_output, ref_len)) {
+            fprintf(stderr, "ERROR: %s output mismatch! "
+                    "native=%zu bytes, wasm=%zu bytes\n",
+                    label, ref_len, out_len);
+            free(out);
+            return;
+        }
+        free(out);
+    }
+
+    /* Timed iterations */
+    for (int i = 0; i < iters; i++) {
+        void *out = NULL;
+        size_t out_len = 0;
+        const char *err = NULL;
+        uint64_t t0 = now_ns();
+        hl_cap_wasm_call(cache, module_name,
+                         input, input_len, &out, &out_len,
+                         &opts, NULL, NULL, vfs, NULL, &err);
+        uint64_t t1 = now_ns();
+        samples[i] = t1 - t0;
+        free(out);
+    }
+}
+
+/*
+ * Run SIMD benchmark: native vs scalar WASM (interp+AOT) vs SIMD WASM (AOT only).
+ *
+ * SIMD .wasm modules use v128 types which the WAMR interpreter rejects
+ * (needs SIMDe, not vendored). SIMD is only benchmarked via AOT where
+ * WAMR compiles SIMD opcodes to native SSE4.1/NEON instructions.
+ */
+static void run_simd_workload(const char *workload_name,
+                              NativeFn native_fn,
+                              const char *scalar_module,
+                              const char *scalar_aot_module,
+                              const char *simd_aot_module,
+                              HlWasmCache *cache,
+                              const HlVfs *vfs,
+                              const uint8_t *input, size_t input_len,
+                              const char *size_label,
+                              int iters)
+{
+    uint64_t *samples = malloc((size_t)iters * sizeof(uint64_t));
+    uint8_t *ref_output = malloc(MAX_OUTPUT);
+    size_t ref_len = 0;
+
+    printf("\n--- %s (%s) ---\n", workload_name, size_label);
+
+    /* Native */
+    bench_native("Native", native_fn, input, input_len,
+                 iters, samples, ref_output, &ref_len);
+    Stats s_native = compute_stats(samples, iters);
+    print_stats("Native:", &s_native);
+    double native_ref = s_native.mean > 0.1 ? s_native.mean : 0.1;
+
+    /* Scalar WASM interpreter (no SIMD opcodes — works in interpreter) */
+    bench_wasm_approx("Scalar/interp", cache, scalar_module,
+                      input, input_len, iters, samples,
+                      ref_output, ref_len, HL_WASM_MAX_GAS, vfs);
+    Stats s_scalar = compute_stats(samples, iters);
+    print_stats("Scalar:", &s_scalar);
+
+    /* Scalar AOT */
+    Stats s_scalar_aot = {0};
+    int have_scalar_aot = 0;
+    if (scalar_aot_module) {
+        int rc = hl_cap_wasm_load(cache, scalar_aot_module, vfs, NULL);
+        if (rc == 0) {
+            bench_wasm_approx("Scalar/AOT", cache, scalar_aot_module,
+                              input, input_len, iters, samples,
+                              ref_output, ref_len, HL_WASM_MAX_GAS, vfs);
+            s_scalar_aot = compute_stats(samples, iters);
+            print_stats("Scalar AOT:", &s_scalar_aot);
+            have_scalar_aot = 1;
+        }
+    }
+
+    /* SIMD AOT only (interpreter can't load v128 types without SIMDe) */
+    Stats s_simd_aot = {0};
+    int have_simd_aot = 0;
+    if (simd_aot_module) {
+        int rc = hl_cap_wasm_load(cache, simd_aot_module, vfs, NULL);
+        if (rc == 0) {
+            bench_wasm_approx("SIMD/AOT", cache, simd_aot_module,
+                              input, input_len, iters, samples,
+                              ref_output, ref_len, HL_WASM_MAX_GAS, vfs);
+            s_simd_aot = compute_stats(samples, iters);
+            print_stats("SIMD AOT:", &s_simd_aot);
+            have_simd_aot = 1;
+        }
+    }
+
+    /* Summary */
+    printf("  Overhead vs native:  %.1fx scalar-interp", s_scalar.mean / native_ref);
+    if (have_scalar_aot)
+        printf("  %.1fx scalar-AOT", s_scalar_aot.mean / native_ref);
+    if (have_simd_aot)
+        printf("  %.1fx simd-AOT", s_simd_aot.mean / native_ref);
+    else
+        printf("  (SIMD AOT not available — build with: make -C bench/wasm/workloads aot)");
+    printf("\n");
+
+    if (have_scalar_aot && have_simd_aot && s_scalar_aot.mean > 0.1)
+        printf("  SIMD speedup vs scalar AOT:  %.2fx\n",
+               s_scalar_aot.mean / s_simd_aot.mean);
+
+    free(ref_output);
+    free(samples);
+}
+
 /* ── Embedded WASM modules ─────────────────────────────────────────── */
 
 /* These are #include'd as byte arrays from the compiled .wasm files */
@@ -341,112 +592,115 @@ int main(int argc, char **argv)
     printf("WAMR modes: fast interpreter (gas metered) + AOT (if available)\n");
     printf("Iterations: %d (warmup: %d)\n", iters, WARMUP_ITERS);
 
-    /* Load WASM modules from files */
-    FILE *f;
-    uint8_t *hash_wasm = NULL, *hist_wasm = NULL;
-    uint32_t hash_wasm_len = 0, hist_wasm_len = 0;
-    uint8_t *hash_aot = NULL, *hist_aot = NULL;
-    uint32_t hash_aot_len = 0, hist_aot_len = 0;
+    /* ── Load WASM modules from files ─────────────────────────────── */
 
-    /* Read compute_hash.wasm */
-    f = fopen("bench/wasm/workloads/compute_hash.wasm", "rb");
-    if (!f) f = fopen("workloads/compute_hash.wasm", "rb");
-    if (f) {
-        fseek(f, 0, SEEK_END);
-        hash_wasm_len = (uint32_t)ftell(f);
-        fseek(f, 0, SEEK_SET);
-        hash_wasm = malloc(hash_wasm_len);
-        if (fread(hash_wasm, 1, hash_wasm_len, f) != hash_wasm_len) {
-            free(hash_wasm); hash_wasm = NULL; hash_wasm_len = 0;
-        }
-        fclose(f);
-    }
+    /* Module descriptor: tracks loaded bytes + length */
+    typedef struct { uint8_t *data; uint32_t len; } WasmBuf;
 
-    /* Read mem_histogram.wasm */
-    f = fopen("bench/wasm/workloads/mem_histogram.wasm", "rb");
-    if (!f) f = fopen("workloads/mem_histogram.wasm", "rb");
-    if (f) {
-        fseek(f, 0, SEEK_END);
-        hist_wasm_len = (uint32_t)ftell(f);
-        fseek(f, 0, SEEK_SET);
-        hist_wasm = malloc(hist_wasm_len);
-        if (fread(hist_wasm, 1, hist_wasm_len, f) != hist_wasm_len) {
-            free(hist_wasm); hist_wasm = NULL; hist_wasm_len = 0;
-        }
-        fclose(f);
-    }
+    /* Helper: load a file into a WasmBuf. Tries two path prefixes. */
+    #define LOAD_FILE(buf, basename) do { \
+        FILE *_f = fopen("bench/wasm/workloads/" basename, "rb"); \
+        if (!_f) _f = fopen("workloads/" basename, "rb"); \
+        if (_f) { \
+            fseek(_f, 0, SEEK_END); \
+            (buf).len = (uint32_t)ftell(_f); \
+            fseek(_f, 0, SEEK_SET); \
+            (buf).data = malloc((buf).len); \
+            if (fread((buf).data, 1, (buf).len, _f) != (buf).len) { \
+                free((buf).data); (buf).data = NULL; (buf).len = 0; \
+            } \
+            fclose(_f); \
+        } \
+    } while (0)
 
-    if (!hash_wasm || !hist_wasm) {
+    /* Helper: load AOT file with arch suffix */
+    #define LOAD_AOT(buf, basename) do { \
+        char _p[512]; \
+        snprintf(_p, sizeof(_p), "bench/wasm/workloads/" basename ".%s", arch_suffix()); \
+        FILE *_f = fopen(_p, "rb"); \
+        if (!_f) { \
+            snprintf(_p, sizeof(_p), "workloads/" basename ".%s", arch_suffix()); \
+            _f = fopen(_p, "rb"); \
+        } \
+        if (_f) { \
+            fseek(_f, 0, SEEK_END); \
+            (buf).len = (uint32_t)ftell(_f); \
+            fseek(_f, 0, SEEK_SET); \
+            (buf).data = malloc((buf).len); \
+            if (fread((buf).data, 1, (buf).len, _f) != (buf).len) { \
+                free((buf).data); (buf).data = NULL; (buf).len = 0; \
+            } \
+            fclose(_f); \
+        } \
+    } while (0)
+
+    /* Original workloads */
+    WasmBuf hash_wasm = {0}, hist_wasm = {0};
+    WasmBuf hash_aot = {0}, hist_aot = {0};
+
+    LOAD_FILE(hash_wasm, "compute_hash.wasm");
+    LOAD_FILE(hist_wasm, "mem_histogram.wasm");
+    LOAD_AOT(hash_aot, "compute_hash.aot");
+    LOAD_AOT(hist_aot, "mem_histogram.aot");
+
+    if (!hash_wasm.data || !hist_wasm.data) {
         fprintf(stderr, "ERROR: cannot load .wasm files from bench/wasm/workloads/\n");
-        free(hash_wasm);
-        free(hist_wasm);
+        free(hash_wasm.data);
+        free(hist_wasm.data);
         return 1;
     }
 
-    /* Try loading AOT files: compute_hash.aot.<arch>, mem_histogram.aot.<arch> */
-    char aot_path[512];
+    /* SIMD workloads: scalar .wasm for interpreter, SIMD only via AOT */
+    WasmBuf dot_scalar = {0}, mat_scalar = {0};
+    WasmBuf dot_scalar_aot = {0}, dot_simd_aot = {0};
+    WasmBuf mat_scalar_aot = {0}, mat_simd_aot = {0};
 
-    snprintf(aot_path, sizeof(aot_path),
-             "bench/wasm/workloads/compute_hash.aot.%s", arch_suffix());
-    f = fopen(aot_path, "rb");
-    if (!f) {
-        snprintf(aot_path, sizeof(aot_path),
-                 "workloads/compute_hash.aot.%s", arch_suffix());
-        f = fopen(aot_path, "rb");
-    }
-    if (f) {
-        fseek(f, 0, SEEK_END);
-        hash_aot_len = (uint32_t)ftell(f);
-        fseek(f, 0, SEEK_SET);
-        hash_aot = malloc(hash_aot_len);
-        if (fread(hash_aot, 1, hash_aot_len, f) != hash_aot_len) {
-            free(hash_aot); hash_aot = NULL; hash_aot_len = 0;
-        }
-        fclose(f);
-    }
+    LOAD_FILE(dot_scalar, "simd_dot_product.wasm");
+    LOAD_FILE(mat_scalar, "simd_matmul.wasm");
+    LOAD_AOT(dot_scalar_aot, "simd_dot_product.aot");
+    LOAD_AOT(dot_simd_aot, "simd_dot_product_simd.aot");
+    LOAD_AOT(mat_scalar_aot, "simd_matmul.aot");
+    LOAD_AOT(mat_simd_aot, "simd_matmul_simd.aot");
 
-    snprintf(aot_path, sizeof(aot_path),
-             "bench/wasm/workloads/mem_histogram.aot.%s", arch_suffix());
-    f = fopen(aot_path, "rb");
-    if (!f) {
-        snprintf(aot_path, sizeof(aot_path),
-                 "workloads/mem_histogram.aot.%s", arch_suffix());
-        f = fopen(aot_path, "rb");
-    }
-    if (f) {
-        fseek(f, 0, SEEK_END);
-        hist_aot_len = (uint32_t)ftell(f);
-        fseek(f, 0, SEEK_SET);
-        hist_aot = malloc(hist_aot_len);
-        if (fread(hist_aot, 1, hist_aot_len, f) != hist_aot_len) {
-            free(hist_aot); hist_aot = NULL; hist_aot_len = 0;
-        }
-        fclose(f);
-    }
+    int have_simd = (dot_scalar.data && mat_scalar.data);
+    if (!have_simd)
+        printf("Note: SIMD workloads not found — run 'make' in bench/wasm/workloads/\n");
 
-    /* Build VFS entries */
-    int entry_count = 2; /* interp modules */
-    if (hash_aot) entry_count++;
-    if (hist_aot) entry_count++;
+    /* ── Build VFS entries ─────────────────────────────────────────── */
 
-    HlEntry *entries = calloc((size_t)(entry_count + 1), sizeof(HlEntry));
+    /* Max entries: 2 original + 4 SIMD interp + up to 6 AOT = 12, +1 sentinel */
+    HlEntry entries[16];
     int ei = 0;
 
-    /* Entries must be sorted by name (strcmp order) */
-    if (hash_aot) {
-        static char hash_aot_name[64];
-        snprintf(hash_aot_name, sizeof(hash_aot_name),
-                 "compute/compute_hash_aot.aot.%s", arch_suffix());
-        entries[ei++] = (HlEntry){ hash_aot_name, hash_aot, hash_aot_len };
-    }
-    entries[ei++] = (HlEntry){ "compute/compute_hash_interp.wasm", hash_wasm, hash_wasm_len };
-    if (hist_aot) {
-        static char hist_aot_name[64];
-        snprintf(hist_aot_name, sizeof(hist_aot_name),
-                 "compute/mem_histogram_aot.aot.%s", arch_suffix());
-        entries[ei++] = (HlEntry){ hist_aot_name, hist_aot, hist_aot_len };
-    }
-    entries[ei++] = (HlEntry){ "compute/mem_histogram_interp.wasm", hist_wasm, hist_wasm_len };
+    #define ADD_VFS(vfs_name, buf) do { \
+        if ((buf).data) \
+            entries[ei++] = (HlEntry){ (vfs_name), (buf).data, (buf).len }; \
+    } while (0)
+
+    /* VFS names for AOT need arch suffix — use static buffers */
+    static char aot_names[8][80];
+    #define ADD_AOT_VFS(base, buf, idx) do { \
+        if ((buf).data) { \
+            snprintf(aot_names[idx], sizeof(aot_names[idx]), \
+                     "compute/" base ".aot.%s", arch_suffix()); \
+            entries[ei++] = (HlEntry){ aot_names[idx], (buf).data, (buf).len }; \
+        } \
+    } while (0)
+
+    /* Original workloads */
+    ADD_AOT_VFS("compute_hash_aot", hash_aot, 0);
+    ADD_VFS("compute/compute_hash_interp.wasm", hash_wasm);
+    ADD_AOT_VFS("mem_histogram_aot", hist_aot, 1);
+    ADD_VFS("compute/mem_histogram_interp.wasm", hist_wasm);
+
+    /* SIMD workloads (scalar .wasm for interpreter, SIMD .aot only) */
+    ADD_AOT_VFS("simd_dot_product_aot", dot_scalar_aot, 2);
+    ADD_VFS("compute/simd_dot_product_interp.wasm", dot_scalar);
+    ADD_AOT_VFS("simd_dot_product_simd_aot", dot_simd_aot, 3);
+    ADD_AOT_VFS("simd_matmul_aot", mat_scalar_aot, 4);
+    ADD_VFS("compute/simd_matmul_interp.wasm", mat_scalar);
+    ADD_AOT_VFS("simd_matmul_simd_aot", mat_simd_aot, 5);
+
     entries[ei] = (HlEntry){ 0, 0, 0 };
 
     /* Sort entries by name for VFS binary search */
@@ -474,29 +728,91 @@ int main(int argc, char **argv)
     hl_cap_wasm_load(&cache, "compute_hash_interp", &vfs, NULL);
     hl_cap_wasm_load(&cache, "mem_histogram_interp", &vfs, NULL);
 
-    if (hash_aot) printf("AOT: compute_hash loaded (%u bytes)\n", hash_aot_len);
-    else          printf("AOT: compute_hash not available\n");
-    if (hist_aot) printf("AOT: mem_histogram loaded (%u bytes)\n", hist_aot_len);
-    else          printf("AOT: mem_histogram not available\n");
+    if (hash_aot.data) printf("AOT: compute_hash loaded (%u bytes)\n", hash_aot.len);
+    else               printf("AOT: compute_hash not available\n");
+    if (hist_aot.data) printf("AOT: mem_histogram loaded (%u bytes)\n", hist_aot.len);
+    else               printf("AOT: mem_histogram not available\n");
 
-    /* Run workloads */
+    /* ── Run original workloads ────────────────────────────────────── */
+
     run_workload("compute_hash", compute_hash_native,
                  "compute_hash_interp",
-                 hash_aot ? "compute_hash_aot" : NULL,
+                 hash_aot.data ? "compute_hash_aot" : NULL,
                  &cache, &vfs, iters);
 
     run_workload("mem_histogram", mem_histogram_native,
                  "mem_histogram_interp",
-                 hist_aot ? "mem_histogram_aot" : NULL,
+                 hist_aot.data ? "mem_histogram_aot" : NULL,
                  &cache, &vfs, iters);
+
+    /* ── Run SIMD workloads ────────────────────────────────────────── */
+
+    if (have_simd) {
+        /* Pre-load scalar interpreter modules */
+        hl_cap_wasm_load(&cache, "simd_dot_product_interp", &vfs, NULL);
+        hl_cap_wasm_load(&cache, "simd_matmul_interp", &vfs, NULL);
+
+        if (dot_scalar_aot.data) printf("AOT: dot_product scalar loaded\n");
+        if (dot_simd_aot.data)   printf("AOT: dot_product SIMD loaded\n");
+        if (mat_scalar_aot.data) printf("AOT: matmul scalar loaded\n");
+        if (mat_simd_aot.data)   printf("AOT: matmul SIMD loaded\n");
+
+        printf("\n=== SIMD128 Benchmarks ===\n");
+        printf("(SIMD modules require AOT — interpreter only runs scalar variant)\n");
+
+        /* Dot product: vector sizes 1K, 4K, 16K, 64K elements */
+        static const struct { const char *label; uint32_t n; } dot_sizes[] = {
+            { "1K elems (8 KB)",     1024 },
+            { "4K elems (32 KB)",    4096 },
+            { "16K elems (128 KB)",  16384 },
+            { "64K elems (512 KB)",  65536 },
+        };
+        for (int si = 0; si < (int)(sizeof(dot_sizes)/sizeof(dot_sizes[0])); si++) {
+            size_t input_len;
+            uint8_t *input = generate_dot_input(dot_sizes[si].n, &input_len);
+            run_simd_workload("simd_dot_product",
+                              simd_dot_product_native,
+                              "simd_dot_product_interp",
+                              dot_scalar_aot.data ? "simd_dot_product_aot" : NULL,
+                              dot_simd_aot.data ? "simd_dot_product_simd_aot" : NULL,
+                              &cache, &vfs,
+                              input, input_len, dot_sizes[si].label, iters);
+            free(input);
+        }
+
+        /* Matmul: matrix sizes 8×8, 16×16, 32×32, 64×64 */
+        static const struct { const char *label; uint32_t dim; } mat_sizes[] = {
+            { "8x8 (512 B)",     8 },
+            { "16x16 (2 KB)",    16 },
+            { "32x32 (8 KB)",    32 },
+            { "64x64 (32 KB)",   64 },
+        };
+        for (int si = 0; si < (int)(sizeof(mat_sizes)/sizeof(mat_sizes[0])); si++) {
+            size_t input_len;
+            uint8_t *input = generate_matmul_input(mat_sizes[si].dim, &input_len);
+            run_simd_workload("simd_matmul",
+                              simd_matmul_native,
+                              "simd_matmul_interp",
+                              mat_scalar_aot.data ? "simd_matmul_aot" : NULL,
+                              mat_simd_aot.data ? "simd_matmul_simd_aot" : NULL,
+                              &cache, &vfs,
+                              input, input_len, mat_sizes[si].label, iters);
+            free(input);
+        }
+    }
 
     /* Cleanup */
     hl_cap_wasm_destroy(&cache);
-    free(entries);
-    free(hash_wasm);
-    free(hist_wasm);
-    free(hash_aot);
-    free(hist_aot);
+    free(hash_wasm.data);
+    free(hist_wasm.data);
+    free(hash_aot.data);
+    free(hist_aot.data);
+    free(dot_scalar.data);
+    free(mat_scalar.data);
+    free(dot_scalar_aot.data);
+    free(dot_simd_aot.data);
+    free(mat_scalar_aot.data);
+    free(mat_simd_aot.data);
 
     printf("\nDone.\n");
     return 0;

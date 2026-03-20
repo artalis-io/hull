@@ -156,6 +156,17 @@ HL_ENABLE_WASM ?= 1
 ifeq ($(HL_ENABLE_WASM),1)
 CFLAGS += -DHL_ENABLE_WASM
 
+# User-configurable WASM ceilings (override: make HL_WASM_MAX_HEAP_MB=512)
+ifneq ($(HL_WASM_MAX_HEAP_MB),)
+CFLAGS += '-DHL_WASM_MAX_HEAP=((uint32_t)$(HL_WASM_MAX_HEAP_MB)*1024*1024)'
+endif
+ifneq ($(HL_WASM_MAX_STACK_MB),)
+CFLAGS += '-DHL_WASM_MAX_STACK=((uint32_t)$(HL_WASM_MAX_STACK_MB)*1024*1024)'
+endif
+ifneq ($(HL_WASM_MAX_IO_MB),)
+CFLAGS += '-DHL_WASM_MAX_IO_SIZE=((uint32_t)$(HL_WASM_MAX_IO_MB)*1024*1024)'
+endif
+
 WAMR_DIR     := $(VENDDIR)/wamr
 WAMR_CORE    := $(WAMR_DIR)/core
 WAMR_IWASM   := $(WAMR_CORE)/iwasm
@@ -250,7 +261,7 @@ WAMR_CFLAGS := -std=c11 -O2 -w $(WAMR_ARCH_DEFS) \
 	-DWASM_ENABLE_BULK_MEMORY=1 \
 	-DWASM_ENABLE_BULK_MEMORY_OPT=1 \
 	-DWASM_ENABLE_REF_TYPES=0 \
-	-DWASM_ENABLE_SIMD=0 \
+	-DWASM_ENABLE_SIMD=1 \
 	-DWASM_ENABLE_MINI_LOADER=0 \
 	-DWASM_ENABLE_SHARED_MEMORY=0 \
 	-DWASM_ENABLE_MEMORY_PROFILING=0 \
@@ -1167,7 +1178,9 @@ bench-template: $(BUILDDIR)/hull
 
 BENCH_WASM_SRCS := bench/wasm/bench_wasm.c \
 	bench/wasm/workloads/compute_hash_native.c \
-	bench/wasm/workloads/mem_histogram_native.c
+	bench/wasm/workloads/mem_histogram_native.c \
+	bench/wasm/workloads/simd_dot_product_native.c \
+	bench/wasm/workloads/simd_matmul_native.c
 
 $(BUILDDIR)/bench_wasm: $(BENCH_WASM_SRCS) $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ibench/wasm/workloads -o $@ \
