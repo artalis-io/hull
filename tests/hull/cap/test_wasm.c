@@ -883,6 +883,279 @@ UTEST(hl_cap_wasm, gas_clamping_edge_cases)
     hl_cap_wasm_destroy(&cache);
 }
 
+/* ── Large allocation tests ─────────────────────────────────────────── */
+
+/* Helper: generate deterministic input of given size and verify echo output.
+ * Uses a simple PRNG to avoid allocating a second buffer for comparison —
+ * we regenerate the expected bytes and compare in chunks. */
+static uint32_t large_xorshift(uint32_t x)
+{
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    return x;
+}
+
+static void fill_deterministic(uint8_t *buf, size_t len, uint32_t seed)
+{
+    uint32_t state = seed;
+    size_t i = 0;
+    /* Fill in 4-byte chunks */
+    for (; i + 4 <= len; i += 4) {
+        state = large_xorshift(state);
+        memcpy(buf + i, &state, 4);
+    }
+    /* Remaining bytes */
+    if (i < len) {
+        state = large_xorshift(state);
+        memcpy(buf + i, &state, len - i);
+    }
+}
+
+static int verify_deterministic(const uint8_t *buf, size_t len, uint32_t seed)
+{
+    uint32_t state = seed;
+    size_t i = 0;
+    for (; i + 4 <= len; i += 4) {
+        state = large_xorshift(state);
+        uint32_t expected;
+        memcpy(&expected, buf + i, 4);
+        if (expected != state) return 0;
+    }
+    if (i < len) {
+        state = large_xorshift(state);
+        uint8_t tmp[4];
+        memcpy(tmp, &state, 4);
+        if (memcmp(buf + i, tmp, len - i) != 0) return 0;
+    }
+    return 1;
+}
+
+UTEST(hl_cap_wasm, large_heap_instantiation)
+{
+    /* Verify that a 256 MB WASM heap can be instantiated and used.
+     * This proves the raised HL_WASM_MAX_HEAP limit works end-to-end. */
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    HlWasmCallOpts opts = {0};
+    opts.heap_size  = 256 * 1024 * 1024;  /* 256 MB */
+    opts.max_input  = 1024;
+    opts.max_output = 1024;
+
+    const char *input = "large heap test";
+    size_t input_len = strlen(input);
+    void *output = NULL;
+    size_t output_len = 0;
+    const char *err = NULL;
+
+    int rc = hl_cap_wasm_call(&cache, "echo",
+                               input, input_len,
+                               &output, &output_len,
+                               &opts, NULL, NULL,
+                               &vfs, NULL, NULL, &err);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(output_len, input_len);
+    ASSERT_NE(output, NULL);
+    ASSERT_EQ(memcmp(output, input, input_len), 0);
+
+    free(output);
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(hl_cap_wasm, large_io_32mb)
+{
+    /* Pass 32 MB through echo.wasm with a 128 MB heap.
+     * Validates the full clamping chain and WASM linear memory
+     * allocation for inputs well above the old 4 MB test ceiling. */
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    size_t io_size = 32 * 1024 * 1024;  /* 32 MB */
+    uint8_t *input = malloc(io_size);
+    ASSERT_NE(input, NULL);
+    fill_deterministic(input, io_size, 0xDEADBEEF);
+
+    HlWasmCallOpts opts = {0};
+    opts.heap_size  = 128 * 1024 * 1024;  /* 128 MB — room for in + out */
+    opts.max_input  = (uint32_t)io_size;
+    opts.max_output = (uint32_t)io_size;
+
+    void *output = NULL;
+    size_t output_len = 0;
+    const char *err = NULL;
+
+    int rc = hl_cap_wasm_call(&cache, "echo",
+                               input, io_size,
+                               &output, &output_len,
+                               &opts, NULL, NULL,
+                               &vfs, NULL, NULL, &err);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(output_len, io_size);
+    ASSERT_NE(output, NULL);
+    /* Verify byte-exact match using deterministic pattern */
+    ASSERT_TRUE(verify_deterministic(output, output_len, 0xDEADBEEF));
+
+    free(output);
+    free(input);
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(hl_cap_wasm, large_io_128mb)
+{
+    /* Pass 128 MB through echo.wasm with a 512 MB heap.
+     * Exercises the full path near the HL_WASM_MAX_IO_SIZE (256 MB) limit. */
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    size_t io_size = 128 * 1024 * 1024;  /* 128 MB */
+    uint8_t *input = malloc(io_size);
+    ASSERT_NE(input, NULL);
+    fill_deterministic(input, io_size, 0xCAFEBABE);
+
+    HlWasmCallOpts opts = {0};
+    opts.heap_size  = 512 * 1024 * 1024;  /* 512 MB — room for in + out */
+    opts.max_input  = (uint32_t)io_size;
+    opts.max_output = (uint32_t)io_size;
+
+    void *output = NULL;
+    size_t output_len = 0;
+    const char *err = NULL;
+
+    int rc = hl_cap_wasm_call(&cache, "echo",
+                               input, io_size,
+                               &output, &output_len,
+                               &opts, NULL, NULL,
+                               &vfs, NULL, NULL, &err);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(output_len, io_size);
+    ASSERT_NE(output, NULL);
+    ASSERT_TRUE(verify_deterministic(output, output_len, 0xCAFEBABE));
+
+    free(output);
+    free(input);
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(hl_cap_wasm, io_size_clamping)
+{
+    /* Verify that max_input/max_output beyond HL_WASM_MAX_IO_SIZE
+     * gets silently clamped — the call should succeed with clamped limits. */
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    HlWasmCallOpts opts = {0};
+    /* Request 512 MB I/O — exceeds HL_WASM_MAX_IO_SIZE (256 MB).
+     * Should be silently clamped to 256 MB. Heap must be large enough
+     * for the clamped output buffer allocation in WASM linear memory. */
+    opts.max_input  = 512 * 1024 * 1024;
+    opts.max_output = 512 * 1024 * 1024;
+    opts.heap_size  = 768 * 1024 * 1024;  /* room for clamped 256 MB out */
+
+    const char *input = "clamp test";
+    size_t input_len = strlen(input);
+    void *output = NULL;
+    size_t output_len = 0;
+    const char *err = NULL;
+
+    int rc = hl_cap_wasm_call(&cache, "echo",
+                               input, input_len,
+                               &output, &output_len,
+                               &opts, NULL, NULL,
+                               &vfs, NULL, NULL, &err);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(output_len, input_len);
+    ASSERT_EQ(memcmp(output, input, input_len), 0);
+
+    free(output);
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(hl_cap_wasm, heap_size_clamping)
+{
+    /* Request heap > HL_WASM_MAX_HEAP — should be silently clamped. */
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    HlWasmCallOpts opts = {0};
+    /* UINT32_MAX heap — exceeds HL_WASM_MAX_HEAP, clamped to ~4GB.
+     * WAMR may fail to allocate 4GB, so we accept either success or
+     * a graceful INTERNAL error. The point is: no crash, no truncation. */
+    opts.heap_size = UINT32_MAX;
+    opts.max_input = 1024;
+    opts.max_output = 1024;
+
+    const char *input = "huge heap";
+    void *output = NULL;
+    size_t output_len = 0;
+    const char *err = NULL;
+
+    int rc = hl_cap_wasm_call(&cache, "echo",
+                               input, strlen(input),
+                               &output, &output_len,
+                               &opts, NULL, NULL,
+                               &vfs, NULL, NULL, &err);
+    /* Either succeeds (system has enough memory) or fails gracefully */
+    if (rc == 0) {
+        ASSERT_EQ(output_len, strlen(input));
+        ASSERT_EQ(memcmp(output, input, strlen(input)), 0);
+    } else {
+        /* Graceful failure — not a crash */
+        ASSERT_EQ(rc, HL_WASM_ERR_INTERNAL);
+    }
+
+    free(output);
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(hl_cap_wasm, input_exceeds_clamped_max)
+{
+    /* Set max_input to 16 bytes, then pass 32 bytes.
+     * Even though the user could set max_input higher, with the small
+     * limit in place, the call must reject the oversized input. */
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    HlWasmCallOpts opts = {0};
+    opts.max_input = 16;
+
+    char input[32];
+    memset(input, 'A', sizeof(input));
+    void *output = NULL;
+    size_t output_len = 0;
+    const char *err = NULL;
+
+    int rc = hl_cap_wasm_call(&cache, "echo",
+                               input, sizeof(input),
+                               &output, &output_len,
+                               &opts, NULL, NULL,
+                               &vfs, NULL, NULL, &err);
+    ASSERT_EQ(rc, HL_WASM_ERR_INPUT);
+    ASSERT_NE(err, NULL);
+    ASSERT_STREQ(err, "input_too_large");
+    ASSERT_EQ(output, NULL);
+
+    hl_cap_wasm_destroy(&cache);
+}
+
 #else /* !HL_ENABLE_WASM */
 
 UTEST(hl_cap_wasm, disabled_placeholder)
