@@ -761,12 +761,13 @@ int main(int argc, char **argv)
         printf("\n=== SIMD128 Benchmarks ===\n");
         printf("(SIMD modules require AOT — interpreter only runs scalar variant)\n");
 
-        /* Dot product: vector sizes 1K, 4K, 16K, 64K elements */
+        /* Dot product: vector sizes from 1K to 1M elements.
+         * Small sizes are overhead-dominated; large sizes show SIMD benefit. */
         static const struct { const char *label; uint32_t n; } dot_sizes[] = {
-            { "1K elems (8 KB)",     1024 },
-            { "4K elems (32 KB)",    4096 },
-            { "16K elems (128 KB)",  16384 },
-            { "64K elems (512 KB)",  65536 },
+            { "1K elems (8 KB)",       1024 },
+            { "16K elems (128 KB)",    16384 },
+            { "256K elems (2 MB)",     262144 },
+            { "1M elems (8 MB)",       1048576 },
         };
         for (int si = 0; si < (int)(sizeof(dot_sizes)/sizeof(dot_sizes[0])); si++) {
             size_t input_len;
@@ -781,12 +782,13 @@ int main(int argc, char **argv)
             free(input);
         }
 
-        /* Matmul: matrix sizes 8×8, 16×16, 32×32, 64×64 */
+        /* Matmul: matrix sizes up to 256×256.
+         * Small sizes are overhead-dominated; ≥128 shows SIMD benefit. */
         static const struct { const char *label; uint32_t dim; } mat_sizes[] = {
-            { "8x8 (512 B)",     8 },
-            { "16x16 (2 KB)",    16 },
-            { "32x32 (8 KB)",    32 },
-            { "64x64 (32 KB)",   64 },
+            { "16x16 (2 KB)",     16 },
+            { "64x64 (32 KB)",    64 },
+            { "128x128 (128 KB)", 128 },
+            { "256x256 (512 KB)", 256 },
         };
         for (int si = 0; si < (int)(sizeof(mat_sizes)/sizeof(mat_sizes[0])); si++) {
             size_t input_len;
