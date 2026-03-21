@@ -29,6 +29,9 @@ Thumbs.db
 .vscode/
 .idea/
 
+# AOT compiled WASM modules
+*.aot.*
+
 # Cosmo build artifacts
 *.elf
 *.com.dbg
