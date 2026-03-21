@@ -15,6 +15,7 @@
 #include "hull/cap/wasm.h"
 #include "hull/cap/wasm_buffer.h"
 #include "hull/limits.h"
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -52,7 +53,7 @@ typedef struct HlWorkerWasmOp {
     int            error;         /* 0 = success */
     int            error_code;    /* HL_WASM_ERR_* */
     char           error_msg[HL_WORKER_ERR_SIZE];
-    int            cancelled;
+    atomic_int     cancelled;
 } HlWorkerWasmOp;
 
 /* Submit a compute.async.call operation to the thread pool.

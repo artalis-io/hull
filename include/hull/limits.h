@@ -71,7 +71,7 @@
 
 #define HL_WASM_DEFAULT_HEAP       (2 * 1024 * 1024)       /* 2 MB */
 #ifndef HL_WASM_MAX_HEAP
-#define HL_WASM_MAX_HEAP           (4U * 1024 * 1024 * 1024 - 1) /* ~4 GB (uint32_t max) */
+#define HL_WASM_MAX_HEAP           ((uint32_t)0xFFFFFFFF) /* ~4 GB (uint32_t max) */
 #endif
 #define HL_WASM_DEFAULT_STACK      (64 * 1024)             /* 64 KB */
 #ifndef HL_WASM_MAX_STACK

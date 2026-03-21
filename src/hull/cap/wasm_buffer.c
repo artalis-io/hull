@@ -65,7 +65,7 @@ HlWasmBuffer *hl_wasm_buffer_create_wasm(
     uint32_t heap_size, uint32_t stack_size,
     HlAllocator *alloc)
 {
-    if (!inst || !native_ptr) return NULL;
+    if (!inst || !exec_env || !module || !cache || !native_ptr) return NULL;
 
     HlWasmBuffer *buf = hl_alloc_calloc(alloc, 1, sizeof(*buf));
     if (!buf) return NULL;

@@ -63,7 +63,7 @@ static void wasm_done_fn(void *ud)
 {
     HlWorkerWasmOp *op = (HlWorkerWasmOp *)ud;
 
-    if (op->cancelled) {
+    if (atomic_load(&op->cancelled)) {
         HlAsyncCtx *ctx = op->async_ctx;
         hl_worker_wasm_op_free(op);
         free(op);
@@ -128,7 +128,7 @@ void hl_worker_wasm_async_cancel(KlAsyncOp *kl_op, void *user_data)
     HlAsyncCtx *ctx = (HlAsyncCtx *)user_data;
     HlWorkerWasmOp *op = (HlWorkerWasmOp *)ctx->driver;
 
-    op->cancelled = 1;
+    atomic_store(&op->cancelled, 1);
 
     if (ctx->cont) {
         ctx->cont->cancel(ctx->cont);

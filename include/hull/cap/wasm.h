@@ -15,6 +15,8 @@
 
 #ifdef HL_ENABLE_WASM
 
+#include "hull/limits.h"
+
 #include <stddef.h>
 #include <stdint.h>
 #include <pthread.h>
@@ -24,10 +26,6 @@ struct HlVfs;
 typedef struct HlAllocator HlAllocator;
 
 /* ── Instance pool ─────────────────────────────────────────────────── */
-
-#ifndef HL_WASM_POOL_MAX
-#define HL_WASM_POOL_MAX 8
-#endif
 
 typedef struct {
     void    *instance;      /* wasm_module_inst_t */
@@ -66,11 +64,13 @@ typedef struct HlWasmCache {
 /* ── Call options ──────────────────────────────────────────────────── */
 
 typedef struct {
-    uint32_t max_input;     /* default: 1 MB, max: 16 MB */
-    uint32_t max_output;    /* default: 1 MB, max: 16 MB */
-    uint32_t heap_size;     /* default: 1 MB, max: 64 MB */
-    uint32_t stack_size;    /* default: 64 KB, max: 1 MB */
-    int64_t  gas;           /* default: 10M, max: 1B instructions */
+    uint32_t max_input;     /* default: 1 MB, max: 256 MB */
+    uint32_t max_output;    /* default: 1 MB, max: 256 MB */
+    uint32_t heap_size;     /* default: 2 MB, max: ~4 GB */
+    uint32_t stack_size;    /* default: 64 KB, max: 8 MB */
+    int64_t  gas;           /* default: 10M, max: 100B instructions.
+                             * WAMR's API takes int, so values > INT_MAX
+                             * (~2.1B) are clamped with a log warning. */
 } HlWasmCallOpts;
 
 /* ── Callback support ──────────────────────────────────────────────── */

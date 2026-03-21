@@ -18,6 +18,7 @@
 #include "log.h"
 #include "wasm_export.h"
 
+#include <assert.h>
 #include <inttypes.h>
 #include <limits.h>
 #include <pthread.h>
@@ -26,6 +27,8 @@
 #include <string.h>
 
 _Static_assert(sizeof(uint32_t) == 4, "WASM32 ABI requires 4-byte uint32_t");
+_Static_assert(HL_WASM_CALLBACK_BUF_SIZE <= 65536,
+               "callback buffer must fit on stack (max 64 KB)");
 
 /* ── Architecture suffix for AOT lookup ────────────────────────────── */
 
@@ -83,13 +86,16 @@ static int32_t host_call_handler(wasm_exec_env_t exec_env,
 
         uint32_t cb_id_u = (uint32_t)data[0] | ((uint32_t)data[1] << 8)
                          | ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
+        if (cb_id_u > (uint32_t)INT_MAX)
+            return -1;
         int cb_id = (int)cb_id_u;
         const void *cb_in = data + 4;
         size_t cb_in_len = (size_t)(len - 4);
 
-        /* Fixed-size stack buffer is appropriate because callbacks are
-         * synchronous, run on the calling thread, and large data should
-         * use the WASM I/O buffers directly. */
+        /* Callback receives input from WASM and returns a status code.
+         * out_buf is provided for future use (host→guest data return)
+         * but is not currently copied back to WASM linear memory —
+         * only the integer return value is visible to the guest. */
         char out_buf[HL_WASM_CALLBACK_BUF_SIZE];
         int rc = tl_host_ctx.fn(cb_id, cb_in, cb_in_len,
                                 out_buf, sizeof(out_buf), tl_host_ctx.ctx);
@@ -114,7 +120,7 @@ static int validate_module_name(const char *name)
     if (strlen(name) > 255)
         return -1;
     for (const char *p = name; *p; p++) {
-        if (*p == '/' || *p == '\\' || *p == '\0')
+        if (*p == '/' || *p == '\\')
             return -1;
     }
     if (name[0] == '.')
@@ -231,7 +237,11 @@ int hl_cap_wasm_init(HlWasmCache *cache)
         return -1;
     }
 
-    pthread_mutex_init(&cache->pool_mutex, NULL);
+    if (pthread_mutex_init(&cache->pool_mutex, NULL) != 0) {
+        log_error("[wasm] mutex init failed");
+        wasm_runtime_destroy();
+        return -1;
+    }
     cache->initialized = 1;
     log_debug("[wasm] WAMR runtime initialized");
     return 0;
@@ -322,8 +332,8 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
     /* 3. Filesystem AOT: <app_dir>/compute/<name>.aot.<arch> */
     if (!buf && app_dir && arch) {
         char path[4096];
-        snprintf(path, sizeof(path), "%s/compute/%s.aot.%s", app_dir, name, arch);
-        FILE *f = fopen(path, "rb");
+        int n = snprintf(path, sizeof(path), "%s/compute/%s.aot.%s", app_dir, name, arch);
+        FILE *f = (n > 0 && (size_t)n < sizeof(path)) ? fopen(path, "rb") : NULL;
         if (f) {
             fseek(f, 0, SEEK_END);
             long fsize = ftell(f);
@@ -351,8 +361,8 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
     /* 4. Filesystem WASM fallback: <app_dir>/compute/<name>.wasm */
     if (!buf && app_dir) {
         char path[4096];
-        snprintf(path, sizeof(path), "%s/compute/%s.wasm", app_dir, name);
-        FILE *f = fopen(path, "rb");
+        int n = snprintf(path, sizeof(path), "%s/compute/%s.wasm", app_dir, name);
+        FILE *f = (n > 0 && (size_t)n < sizeof(path)) ? fopen(path, "rb") : NULL;
         if (f) {
             fseek(f, 0, SEEK_END);
             long fsize = ftell(f);
@@ -419,6 +429,9 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
      * doing the (unlocked) wasm_runtime_load + ABI probe above. */
     if (cache_find(cache, name)) {
         pthread_mutex_unlock(&cache->pool_mutex);
+        /* WAMR ownership: wasm_runtime_load borrows buf; wasm_runtime_unload
+         * releases the module but does NOT free buf — caller retains ownership.
+         * Both unload and free are required here. */
         wasm_runtime_unload(module);
         free(buf);
         return 0;
@@ -549,15 +562,24 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
         hl_audit_end(&w);
     }
 
-    /* Lazy-load module */
-    HlWasmModule *mod = cache_find(cache, name);
+    /* Lazy-load module.  The initial cache_find is under pool_mutex to
+     * prevent torn reads if another thread is concurrently in
+     * hl_cap_wasm_load (which writes cache entries under the same lock). */
+    HlWasmModule *mod = NULL;
+    {
+        pthread_mutex_lock(&cache->pool_mutex);
+        mod = cache_find(cache, name);
+        pthread_mutex_unlock(&cache->pool_mutex);
+    }
     if (!mod) {
         int rc = hl_cap_wasm_load(cache, name, app_vfs, app_dir);
         if (rc != 0) {
             if (err_msg) *err_msg = (rc == HL_WASM_ERR_NOT_FOUND) ? err_not_found : err_load;
             return rc;
         }
+        pthread_mutex_lock(&cache->pool_mutex);
         mod = cache_find(cache, name);
+        pthread_mutex_unlock(&cache->pool_mutex);
         if (!mod) {
             if (err_msg) *err_msg = err_internal;
             return HL_WASM_ERR_INTERNAL;
@@ -647,6 +669,8 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
     /* WASM32 ABI: hull_process arguments are uint32_t. wasm_runtime_module_malloc
      * returns uint64_t but values are guaranteed ≤ UINT32_MAX for WASM32 modules
      * (linear memory is 32-bit addressable). Narrowing cast is intentional. */
+    assert(wasm_in_ptr <= UINT32_MAX);
+    assert(wasm_out_ptr <= UINT32_MAX);
     uint32_t argv[4] = {
         (uint32_t)wasm_in_ptr,
         (uint32_t)input_len,
