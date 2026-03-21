@@ -163,15 +163,18 @@ int32_t hull_version(void);  // Returns ABI version (1 for MVP)
 | -3 | Invalid input |
 | -4 | Internal plugin error |
 
-### Size limits (configurable per-plugin via opts table)
+### Size limits (configurable per-call, per-manifest, and at compile time)
 
-| Limit | Default | Max |
-|-------|---------|-----|
-| Input size | 1 MB | 16 MB |
-| Output size | 1 MB | 16 MB |
-| WASM heap | 1 MB | 64 MB |
-| WASM stack | 64 KB | 1 MB |
-| Instruction budget | 10M | 1B |
+| Limit | Default | Max | CLI flag |
+|-------|---------|-----|----------|
+| Input size | 1 MB | 256 MB | `--wasm-max-input` |
+| Output size | 1 MB | 256 MB | `--wasm-max-output` |
+| WASM heap | 2 MB | ~4 GB | `--wasm-heap` |
+| WASM stack | 64 KB | 8 MB | `--wasm-stack` |
+| Instruction budget | 10M | 100B | `--wasm-gas` |
+
+Three-tier resolution: **per-call opts > CLI/manifest ceiling > compile-time default**.
+Compile-time maximums are `#ifndef`-guarded — override via `make HL_WASM_MAX_HEAP_MB=512`.
 
 ## E) Resource Limiting & Non-Blocking Execution
 
@@ -374,6 +377,71 @@ Run with `hull test` — same test framework as all other Hull tests.
 11. Write tests: valid plugin, gas exhaustion, memory limit, oversized I/O, missing export, ABI version check
 12. Write minimal example plugins in C and Rust
 13. Update docs
+
+## I) SIMD128 Support
+
+WAMR is built with `-DWASM_ENABLE_SIMD=1`, enabling 128-bit SIMD vector operations.
+
+**Compiler flags for plugins:**
+- C/C++: `clang --target=wasm32 -msimd128 -O2`
+- Rust: `#[target_feature(enable = "simd128")]`
+- Zig: `-mcpu=generic+simd128`
+
+**Execution modes:**
+- **AOT (recommended):** WAMR maps WASM SIMD to native instructions — SSE4.1 on x86_64, NEON on aarch64. Near-native vector throughput.
+- **Interpreter:** Cannot load modules with `v128` types (graceful `HL_WASM_ERR_LOAD`, no crash). SIMDe vendoring would enable interpreter SIMD but is not yet done.
+
+**Performance (aarch64 AOT benchmarks):**
+- Dot product 1M elements: SIMD AOT 4.5× native, scalar AOT 5.0× → **1.12× SIMD speedup**
+- Matmul 256×256: SIMD AOT **0.94× native** (faster than scalar C), **1.11× SIMD speedup**
+- SIMD benefit is modest (~1.1×) for these workloads due to memory bandwidth limits and gather overhead in the matmul inner loop. Workloads with better data locality (image filters, FFT) will see larger gains.
+
+**Plugin example with SIMD:**
+```c
+#include <wasm_simd128.h>
+
+int32_t hull_process(const void *in, int32_t in_len, void *out, int32_t out_max) {
+    v128_t sum = wasm_f32x4_splat(0.0f);
+    const float *data = (const float *)in;
+    for (int i = 0; i < in_len / 16; i++) {
+        v128_t v = wasm_v128_load(&data[i * 4]);
+        sum = wasm_f32x4_add(sum, v);
+    }
+    wasm_v128_store(out, sum);
+    return 16;
+}
+```
+
+## J) Instance Pooling
+
+Every `compute.call()` previously created a fresh WASM instance (~2.5ms allocation). Instance pooling reuses instances between calls, amortizing instantiation to near-zero.
+
+- Per-module pool of `(instance, exec_env, process_fn)` tuples, keyed by `(heap_size, stack_size)`
+- Pool max: `HL_WASM_POOL_MAX` (default 8) per module
+- Instances with heap > `HL_WASM_POOL_HEAP_THRESHOLD` (4 MB) are never pooled
+- Failed calls destroy the instance — never pooled
+- Single `pthread_mutex_t` guards all pool operations; WASM execution is outside the lock
+- Linear memory is not reset between calls (safe: compute plugins are pure functions)
+
+## K) Zero-Copy Output Buffers
+
+`HlWasmBuffer` wraps compute output without copying. Three backing kinds:
+
+| Kind | Backing | Use case |
+|------|---------|----------|
+| OWNED | `malloc`'d bytes | Default, non-poolable instances |
+| MMAP | Kernel mapping via `fs.mmap` | Large file input |
+| WASM | Pointer into pooled instance linear memory | Zero-copy chaining |
+
+Opt in via `{ buffer = true }` in `compute.call()` / `compute.async.call()`:
+
+```lua
+local buf = compute.call("transform", input, { buffer = true })
+local output = buf:bytes()   -- materialize to string
+buf:close()                  -- explicit release (or GC)
+```
+
+WASM-backed buffers keep the pooled instance checked out until `close()` / GC. Non-poolable instances eagerly copy to OWNED.
 
 ## Future Extensions (post-MVP)
 

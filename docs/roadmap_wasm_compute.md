@@ -59,18 +59,21 @@ these automatically. In AOT mode, WAMR maps WASM SIMD to native SSE4.1
     large sizes; matmul SIMD has B-column gather overhead
   - Interpreter cannot load v128 modules (graceful HL_WASM_ERR_LOAD, no crash)
 
-- [ ] **Update `wamrc` build**
-  - Ensure `make wamrc` produces a compiler that supports SIMD output
-  - May need LLVM with vector extension support (should be default)
+- [x] **wamrc SIMD output verified**
+  - x86_64 Linux CI (scan-build + unit tests) compiles and runs SIMD modules
+  - aarch64 macOS local: SIMD AOT modules produce correct output
+  - `wamrc --enable-simd` is already part of the AOT build pipeline
 
-- [ ] **Cosmopolitan / cross-arch testing**
-  - SIMD AOT is arch-specific — verify both x86_64 and aarch64 AOT
-    work correctly under cosmocc fat binary builds
-  - Interpreter SIMD fallback is graceful failure (not crash)
+- [x] **Cosmopolitan / cross-arch SIMD testing**
+  - `e2e-compute` added to Cosmo CI job — validates compute.call on x86_64
+    under cosmocc fat binary (APE)
+  - Unit tests include SIMD interpreter fallback test (graceful error)
+  - aarch64 AOT verified locally; x86_64 AOT verified via Linux CI
 
-- [ ] **Update docs**
-  - `docs/wamr_architecture.md`: document SIMD support
-  - `CLAUDE.md`: note SIMD is enabled, mention compiler flags
+- [x] **Docs updated**
+  - `docs/wamr_architecture.md`: SIMD128 section (compiler flags, AOT mapping,
+    benchmark results), instance pooling, zero-copy buffers, updated size limits
+  - `CLAUDE.md`: SIMD, pooling, memory limits notes in WASM section
 
 ### Risk
 
@@ -112,8 +115,11 @@ compile-time ceiling should be tunable for different deployment contexts
   - `HL_WASM_DEFAULT_MAX_INPUT`: 64 KB → 1 MB
   - `HL_WASM_DEFAULT_MAX_OUTPUT`: 64 KB → 1 MB
 
-- [ ] **Update CLI flag parsing**
-  - `--wasm-heap` parser: accept suffixed values (`512M`, `2G`)
+- [x] **CLI flag parsing**
+  - `--wasm-heap`, `--wasm-stack`, `--wasm-gas`, `--wasm-max-input`,
+    `--wasm-max-output` all implemented with `hl_parse_size()` (k/m/g suffixes)
+  - Three-tier resolution: CLI > manifest > compile-time defaults
+  - Documented in `hull -h` help text
 
 - [x] **Test with large allocations**
   - 256 MB heap instantiation: succeeds (33ms)

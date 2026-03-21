@@ -1102,6 +1102,9 @@ e2e-mcp: $(BUILDDIR)/hull
 e2e-agent-api: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_agent_api.sh
 
+e2e-compute: $(BUILDDIR)/hull
+	sh tests/e2e_compute.sh
+
 hull-test-examples: $(BUILDDIR)/hull
 	@for dir in examples/hello examples/rest_api examples/bench_db examples/auth \
 	            examples/jwt_api examples/crud_with_auth examples/middleware examples/webhooks \
