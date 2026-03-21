@@ -10,6 +10,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Forward declaration */
+typedef struct HlAllocator HlAllocator;
+
 typedef struct HlFsConfig {
     const char *base_dir;
     size_t      base_len;
@@ -30,15 +33,17 @@ int hl_cap_fs_delete(const HlFsConfig *cfg, const char *path);
 /* ── Memory-mapped file buffer ─────────────────────────────────────── */
 
 typedef struct HlMappedBuffer {
-    void   *addr;       /* mmap'd region (PROT_READ, MAP_PRIVATE) */
-    size_t  len;        /* mapping length */
-    int     closed;     /* 1 = already munmap'd */
+    void         *addr;       /* mmap'd region (PROT_READ, MAP_PRIVATE) */
+    size_t        len;        /* mapping length */
+    int           closed;     /* 1 = already munmap'd */
+    HlAllocator  *alloc;      /* tracked allocator (NULL = raw malloc) */
 } HlMappedBuffer;
 
 /* Memory-map a file for read-only access. Path is validated via hl_cap_fs_validate().
  * Returns heap-allocated HlMappedBuffer on success, NULL on failure.
  * Caller must call hl_cap_fs_munmap() when done. */
-HlMappedBuffer *hl_cap_fs_mmap(const HlFsConfig *cfg, const char *path);
+HlMappedBuffer *hl_cap_fs_mmap(const HlFsConfig *cfg, const char *path,
+                                HlAllocator *alloc);
 
 /* Unmap and free a mapped buffer. Safe to call multiple times (idempotent). */
 void hl_cap_fs_munmap(HlMappedBuffer *buf);

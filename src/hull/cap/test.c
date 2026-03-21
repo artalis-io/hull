@@ -159,7 +159,7 @@ static int test_dispatch(KlRouter *router, const char *method,
      * Caller is responsible for cleanup. We copy what we need. */
     /* Actually, body points into runtime-managed memory, so we copy it. */
     if (res.body && res.body_len > 0) {
-        char *body_copy = malloc(res.body_len + 1);
+        char *body_copy = hl_alloc_malloc(hl_alloc, res.body_len + 1);
         if (body_copy) {
             memcpy(body_copy, res.body, res.body_len);
             body_copy[res.body_len] = '\0';
@@ -328,7 +328,8 @@ static int l_test_http(lua_State *L, const char *method)
             }
         }
 
-        free((void *)result.body);
+        hl_alloc_free(lua->base.alloc, (void *)result.body,
+                      result.body_len + 1);
     }
 
     return 1;
@@ -667,7 +668,8 @@ static JSValue js_test_http(JSContext *ctx, const char *method,
             JS_FreeValue(ctx, json_str);
         }
 
-        free((void *)result.body);
+        hl_alloc_free(state->js->base.alloc, (void *)result.body,
+                      result.body_len + 1);
     }
 
     return obj;

@@ -9,6 +9,7 @@
  */
 
 #include "hull/runtime/lua.h"
+#include "hull/alloc.h"
 #include "hull/limits.h"
 #include "hull/cap/db.h"
 #include "hull/cap/time.h"
@@ -3222,7 +3223,7 @@ static int lua_fs_mmap(lua_State *L)
 
     const char *path = luaL_checkstring(L, 1);
 
-    HlMappedBuffer *buf = hl_cap_fs_mmap(lua->base.fs_cfg, path);
+    HlMappedBuffer *buf = hl_cap_fs_mmap(lua->base.fs_cfg, path, lua->base.alloc);
     if (!buf) {
         lua_pushnil(L);
         lua_pushstring(L, "mmap failed");
@@ -3324,6 +3325,122 @@ static int luaopen_hull_fs(lua_State *L)
 
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/wasm.h"
+#include "hull/cap/wasm_buffer.h"
+
+#define HL_WASM_BUF_MT "HlWasmBuffer"
+
+/* ── WasmBuffer metatable ─────────────────────────────────────────── */
+
+static HlWasmBuffer *check_wasm_buf(lua_State *L, int idx)
+{
+    HlWasmBuffer **pp = luaL_testudata(L, idx, HL_WASM_BUF_MT);
+    if (!pp || !*pp) return NULL;
+    return *pp;
+}
+
+static int lua_wasm_buf_len(lua_State *L)
+{
+    HlWasmBuffer *buf = check_wasm_buf(L, 1);
+    lua_pushinteger(L, buf ? (lua_Integer)hl_wasm_buffer_len(buf) : 0);
+    return 1;
+}
+
+static int lua_wasm_buf_bytes(lua_State *L)
+{
+    HlWasmBuffer *buf = check_wasm_buf(L, 1);
+    if (!buf || buf->closed) {
+        lua_pushnil(L);
+        return 1;
+    }
+    const void *data = hl_wasm_buffer_data(buf);
+    size_t len = hl_wasm_buffer_len(buf);
+    if (data && len > 0)
+        lua_pushlstring(L, (const char *)data, len);
+    else
+        lua_pushlstring(L, "", 0);
+    return 1;
+}
+
+static int lua_wasm_buf_close(lua_State *L)
+{
+    HlWasmBuffer **pp = luaL_testudata(L, 1, HL_WASM_BUF_MT);
+    if (pp && *pp) {
+        HlAllocator *a = (*pp)->alloc;
+        hl_wasm_buffer_destroy(*pp);
+        hl_alloc_free(a, *pp, sizeof(HlWasmBuffer));
+        *pp = NULL;
+    }
+    return 0;
+}
+
+static int lua_wasm_buf_gc(lua_State *L)
+{
+    return lua_wasm_buf_close(L);
+}
+
+static int lua_wasm_buf_tostring(lua_State *L)
+{
+    HlWasmBuffer *buf = check_wasm_buf(L, 1);
+    if (!buf || buf->closed)
+        lua_pushstring(L, "WasmBuffer(closed)");
+    else
+        lua_pushfstring(L, "WasmBuffer(%d)", (int)buf->len);
+    return 1;
+}
+
+static void lua_register_wasm_buf_metatable(lua_State *L)
+{
+    static const luaL_Reg methods[] = {
+        {"len",   lua_wasm_buf_len},
+        {"bytes", lua_wasm_buf_bytes},
+        {"close", lua_wasm_buf_close},
+        {NULL, NULL}
+    };
+
+    luaL_newmetatable(L, HL_WASM_BUF_MT);
+
+    /* __index = methods table */
+    luaL_newlib(L, methods);
+    lua_setfield(L, -2, "__index");
+
+    lua_pushcfunction(L, lua_wasm_buf_gc);
+    lua_setfield(L, -2, "__gc");
+
+    lua_pushcfunction(L, lua_wasm_buf_close);
+    lua_setfield(L, -2, "__close");
+
+    lua_pushcfunction(L, lua_wasm_buf_tostring);
+    lua_setfield(L, -2, "__tostring");
+
+    lua_pushcfunction(L, lua_wasm_buf_len);
+    lua_setfield(L, -2, "__len");
+
+    lua_pop(L, 1); /* pop metatable */
+}
+
+/* Helper: push an HlWasmBuffer* as Lua userdata. Takes ownership of buf. */
+static void lua_push_wasm_buffer(lua_State *L, HlWasmBuffer *buf)
+{
+    HlWasmBuffer **pp = lua_newuserdata(L, sizeof(HlWasmBuffer *));
+    *pp = buf;
+    luaL_setmetatable(L, HL_WASM_BUF_MT);
+}
+
+/* compute.buffer(string) -> WasmBuffer(OWNED) */
+static int lua_compute_buffer(lua_State *L)
+{
+    size_t len = 0;
+    const char *str = luaL_checklstring(L, 1, &len);
+
+    HlLua *lua_ctx = get_hl_lua(L);
+    HlWasmBuffer *buf = hl_wasm_buffer_create_owned(str, len,
+                                                      lua_ctx ? lua_ctx->base.alloc : NULL);
+    if (!buf)
+        return luaL_error(L, "compute.buffer: out of memory");
+
+    lua_push_wasm_buffer(L, buf);
+    return 1;
+}
 
 /* Clamp per-call opts to runtime ceiling (three-tier: per-call ≤ CLI/manifest ≤ compile-time) */
 static void wasm_clamp_opts(HlWasmCallOpts *opts, const HlRuntime *base)
@@ -3362,16 +3479,23 @@ static int lua_compute_call(lua_State *L)
     const void *input;
     size_t input_len = 0;
 
-    /* Accept string or MappedBuffer as input */
-    HlMappedBuffer **mmap_pp = luaL_testudata(L, 2, HL_MMAP_MT);
-    if (mmap_pp && *mmap_pp && !(*mmap_pp)->closed) {
-        input = (*mmap_pp)->addr;
-        input_len = (*mmap_pp)->len;
+    /* Accept WasmBuffer, MappedBuffer, or string as input */
+    HlWasmBuffer *wbuf_in = check_wasm_buf(L, 2);
+    if (wbuf_in && !wbuf_in->closed) {
+        input = hl_wasm_buffer_data(wbuf_in);
+        input_len = hl_wasm_buffer_len(wbuf_in);
     } else {
-        input = luaL_checklstring(L, 2, &input_len);
+        HlMappedBuffer **mmap_pp = luaL_testudata(L, 2, HL_MMAP_MT);
+        if (mmap_pp && *mmap_pp && !(*mmap_pp)->closed) {
+            input = (*mmap_pp)->addr;
+            input_len = (*mmap_pp)->len;
+        } else {
+            input = luaL_checklstring(L, 2, &input_len);
+        }
     }
 
     HlWasmCallOpts opts = {0};
+    int want_buffer = 0;
 
     /* Parse opts table if provided */
     if (lua_istable(L, 3)) {
@@ -3399,10 +3523,37 @@ static int lua_compute_call(lua_State *L)
         if (lua_isinteger(L, -1))
             opts.gas = lua_tointeger(L, -1);
         lua_pop(L, 1);
+
+        lua_getfield(L, 3, "buffer");
+        if (lua_toboolean(L, -1))
+            want_buffer = 1;
+        lua_pop(L, 1);
     }
 
     wasm_clamp_opts(&opts, &lua->base);
 
+    if (want_buffer) {
+        HlWasmBuffer *out_buf = NULL;
+        const char *err_msg = NULL;
+
+        int rc = hl_cap_wasm_call_buf(lua->base.wasm_cache, name,
+                                       input, input_len,
+                                       &out_buf, &opts, NULL, NULL,
+                                       lua->base.app_vfs,
+                                       lua->base.app_vfs ? lua->base.app_vfs->root_dir : NULL,
+                                       lua->base.alloc, &err_msg);
+        if (rc != 0) {
+            lua_pushnil(L);
+            lua_pushstring(L, err_msg ? err_msg : "unknown_error");
+            return 2;
+        }
+
+        lua_push_wasm_buffer(L, out_buf);
+        lua_pushnil(L);
+        return 2;
+    }
+
+    /* Non-buffer path (original behavior) */
     void *output = NULL;
     size_t output_len = 0;
     const char *err_msg = NULL;
@@ -3413,7 +3564,7 @@ static int lua_compute_call(lua_State *L)
                                &opts, NULL, NULL,
                                lua->base.app_vfs,
                                lua->base.app_vfs ? lua->base.app_vfs->root_dir : NULL,
-                               &err_msg);
+                               lua->base.alloc, &err_msg);
 
     if (rc != 0) {
         lua_pushnil(L);
@@ -3427,7 +3578,7 @@ static int lua_compute_call(lua_State *L)
         lua_pushlstring(L, "", 0);
     lua_pushnil(L);
 
-    free(output);
+    hl_alloc_free(lua->base.alloc, output, output_len);
     return 2;
 }
 
@@ -3466,6 +3617,11 @@ static void lua_push_worker_wasm_result(lua_State *L, void *driver)
     if (op->error) {
         lua_pushstring(L, op->error_msg);
         lua_setfield(L, -2, "error");
+    } else if (op->output_buf) {
+        /* Buffer mode: push WasmBuffer userdata, transfer ownership */
+        lua_push_wasm_buffer(L, op->output_buf);
+        op->output_buf = NULL; /* prevent hl_worker_wasm_op_free from destroying */
+        lua_setfield(L, -2, "result");
     } else {
         if (op->output && op->output_len > 0)
             lua_pushlstring(L, (const char *)op->output, op->output_len);
@@ -3492,16 +3648,24 @@ static int lua_compute_async_call(lua_State *L)
     const void *input;
     size_t input_len = 0;
 
-    HlMappedBuffer **mmap_pp = luaL_testudata(L, 2, HL_MMAP_MT);
-    if (mmap_pp && *mmap_pp && !(*mmap_pp)->closed) {
-        input = (*mmap_pp)->addr;
-        input_len = (*mmap_pp)->len;
+    /* Accept WasmBuffer, MappedBuffer, or string as input */
+    HlWasmBuffer *wbuf_in = check_wasm_buf(L, 2);
+    if (wbuf_in && !wbuf_in->closed) {
+        input = hl_wasm_buffer_data(wbuf_in);
+        input_len = hl_wasm_buffer_len(wbuf_in);
     } else {
-        input = luaL_checklstring(L, 2, &input_len);
+        HlMappedBuffer **mmap_pp = luaL_testudata(L, 2, HL_MMAP_MT);
+        if (mmap_pp && *mmap_pp && !(*mmap_pp)->closed) {
+            input = (*mmap_pp)->addr;
+            input_len = (*mmap_pp)->len;
+        } else {
+            input = luaL_checklstring(L, 2, &input_len);
+        }
     }
 
     /* Parse opts */
     HlWasmCallOpts opts = {0};
+    int want_buffer = 0;
     if (lua_istable(L, 3)) {
         lua_getfield(L, 3, "max_input");
         if (lua_isinteger(L, -1)) opts.max_input = (uint32_t)lua_tointeger(L, -1);
@@ -3522,12 +3686,15 @@ static int lua_compute_async_call(lua_State *L)
         lua_getfield(L, 3, "gas");
         if (lua_isinteger(L, -1)) opts.gas = lua_tointeger(L, -1);
         lua_pop(L, 1);
+
+        lua_getfield(L, 3, "buffer");
+        if (lua_toboolean(L, -1)) want_buffer = 1;
+        lua_pop(L, 1);
     }
 
     wasm_clamp_opts(&opts, &lua->base);
 
-    /* Resolve module on event loop thread (cache is not thread-safe for writes) */
-    HlWasmModule *mod = NULL;
+    /* Pre-load module on event loop thread (cache writes are not thread-safe) */
     {
         int rc = hl_cap_wasm_load(lua->base.wasm_cache, name,
                                    lua->base.app_vfs,
@@ -3535,15 +3702,6 @@ static int lua_compute_async_call(lua_State *L)
         if (rc != 0)
             return luaL_error(L, "compute.async.call: %s",
                               rc == HL_WASM_ERR_NOT_FOUND ? "not_found" : "load_failed");
-        /* Find the cached module */
-        for (int i = 0; i < lua->base.wasm_cache->count; i++) {
-            if (strcmp(lua->base.wasm_cache->modules[i].name, name) == 0) {
-                mod = &lua->base.wasm_cache->modules[i];
-                break;
-            }
-        }
-        if (!mod)
-            return luaL_error(L, "compute.async.call: internal error");
     }
 
     /* Allocate worker op */
@@ -3552,10 +3710,13 @@ static int lua_compute_async_call(lua_State *L)
         return luaL_error(L, "compute.async.call: out of memory");
 
     op->server = lua->server;
-    op->module = mod->module;
     op->wasm_cache = lua->base.wasm_cache;
+    op->app_vfs = lua->base.app_vfs;
+    op->app_dir = lua->base.app_vfs ? lua->base.app_vfs->root_dir : NULL;
+    op->alloc = lua->base.alloc;
     snprintf(op->name, sizeof(op->name), "%s", name);
     op->opts = opts;
+    op->want_buffer = want_buffer;
 
     /* Deep-copy input (Lua string lives on GC heap) */
     if (input_len > 0) {
@@ -3619,6 +3780,7 @@ static int lua_compute_async_call(lua_State *L)
 static const luaL_Reg compute_funcs[] = {
     {"call",    lua_compute_call},
     {"preload", lua_compute_preload},
+    {"buffer",  lua_compute_buffer},
     {NULL, NULL}
 };
 
@@ -3629,6 +3791,7 @@ static const luaL_Reg compute_async_funcs[] = {
 
 static int luaopen_hull_compute(lua_State *L)
 {
+    lua_register_wasm_buf_metatable(L);
     luaL_newlib(L, compute_funcs);
     luaL_newlib(L, compute_async_funcs);
     lua_setfield(L, -2, "async");  /* compute.async = {...} */

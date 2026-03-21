@@ -91,6 +91,11 @@
 #define HL_WASM_MAX_GAS            (100LL * 1000 * 1000 * 1000) /* 100B instructions */
 #endif
 
+/* ── WASM host_call buffer ────────────────────────────────────────── */
+#ifndef HL_WASM_CALLBACK_BUF_SIZE
+#define HL_WASM_CALLBACK_BUF_SIZE  4096  /* host_call CALLBACK output (stack) */
+#endif
+
 /* ── WASM instance pool ───────────────────────────────────────────── */
 #ifndef HL_WASM_POOL_MAX
 #define HL_WASM_POOL_MAX            8

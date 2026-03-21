@@ -20,17 +20,19 @@
 
 /* ── Prepared statement cache ──────────────────────────────────────── */
 
-void hl_stmt_cache_init(HlStmtCache *cache, sqlite3 *db)
+void hl_stmt_cache_init(HlStmtCache *cache, sqlite3 *db, HlAllocator *alloc)
 {
     memset(cache, 0, sizeof(*cache));
     cache->db = db;
+    cache->alloc = alloc;
 }
 
 void hl_stmt_cache_destroy(HlStmtCache *cache)
 {
     for (int i = 0; i < cache->count; i++) {
         sqlite3_finalize(cache->entries[i].stmt);
-        free((void *)cache->entries[i].sql);
+        hl_alloc_free(cache->alloc, (void *)cache->entries[i].sql,
+                      cache->entries[i].sql_len + 1);
     }
     cache->count = 0;
 }
@@ -64,7 +66,8 @@ static sqlite3_stmt *cache_get(HlStmtCache *cache, const char *sql)
     /* Evict oldest (LRU) if cache is full */
     if (cache->count >= HL_STMT_CACHE_SIZE) {
         sqlite3_finalize(cache->entries[0].stmt);
-        free((void *)cache->entries[0].sql);
+        hl_alloc_free(cache->alloc, (void *)cache->entries[0].sql,
+                      cache->entries[0].sql_len + 1);
         for (int j = 0; j < cache->count - 1; j++)
             cache->entries[j] = cache->entries[j + 1];
         cache->count--;
@@ -72,15 +75,16 @@ static sqlite3_stmt *cache_get(HlStmtCache *cache, const char *sql)
 
     /* Copy SQL string for cache ownership */
     size_t sql_len = strlen(sql);
-    char *sql_copy = malloc(sql_len + 1);
+    char *sql_copy = hl_alloc_malloc(cache->alloc, sql_len + 1);
     if (!sql_copy) {
         sqlite3_finalize(stmt);
         return NULL;
     }
     memcpy(sql_copy, sql, sql_len + 1);
 
-    cache->entries[cache->count].sql  = sql_copy;
-    cache->entries[cache->count].stmt = stmt;
+    cache->entries[cache->count].sql     = sql_copy;
+    cache->entries[cache->count].sql_len = sql_len;
+    cache->entries[cache->count].stmt    = stmt;
     cache->count++;
 
     return stmt;

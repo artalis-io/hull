@@ -266,8 +266,16 @@ static int discover_fs_migrations(const char *root_dir, MigrationList *ml)
         }
 
         if (flen > 0) {
-            size_t read = fread(sql, 1, (size_t)flen, f);
-            sql[read] = '\0';
+            size_t nread = fread(sql, 1, (size_t)flen, f);
+            if (nread != (size_t)flen) {
+                free(sql);
+                fclose(f);
+                migration_list_free(ml);
+                log_error("[migrate] short read on %s (%zu/%ld bytes)",
+                          ml->names[i], nread, flen);
+                return -1;
+            }
+            sql[flen] = '\0';
         } else {
             sql[0] = '\0';
         }

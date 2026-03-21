@@ -155,6 +155,40 @@ calls, amortizing instantiation cost to near-zero for repeated calls.
 
 ---
 
+## Phase 2.6 — HlWasmBuffer (Zero-Copy Output)
+
+**Goal:** Eliminate redundant memcpy round-trips between WASM linear memory,
+host buffers, and Lua/JS string allocations. Enable zero-copy chaining of
+compute calls.
+
+**Status:** Complete.
+
+**Design:** `HlWasmBuffer` is a managed buffer handle backed by one of three
+kinds: OWNED (malloc'd bytes), MMAP (kernel mapping via `fs.mmap`), or WASM
+(pointer into pooled WASM instance linear memory). For WASM-backed buffers,
+the pooled instance stays checked out — `pool_release` is deferred to
+`hl_wasm_buffer_destroy()`. Non-poolable instances (heap > 4MB threshold or
+pool full) eagerly copy to OWNED so the instance can be destroyed.
+
+**API:** Opt-in via `{ buffer = true }` (Lua) / `{ buffer: true }` (JS) in
+`compute.call` and `compute.async.call`. Returns a WasmBuffer userdata/object
+with `buf:bytes()` / `buf.bytes()` to materialize to string/ArrayBuffer, and
+`buf:close()` / `buf.close()` for explicit release (GC handles it otherwise).
+`compute.buffer(str)` creates an OWNED buffer from a string for use as input.
+
+**Files changed:**
+- `include/hull/cap/wasm_buffer.h`: `HlWasmBuffer` struct, `HlWasmBufKind` enum, C API
+- `src/hull/cap/wasm_buffer.c`: All `hl_wasm_buffer_*` implementations
+- `include/hull/cap/wasm.h`: `hl_cap_wasm_call_buf()`, `hl_wasm_pool_release()` exports
+- `src/hull/cap/wasm.c`: `hl_wasm_pool_release()` (renamed from static), `hl_cap_wasm_call_buf()`
+- `include/hull/worker_wasm.h`: `want_buffer`, `output_buf` fields
+- `src/hull/worker_wasm.c`: Buffer-mode path in async worker
+- `src/hull/runtime/{lua,js}/modules.c`: WasmBuffer metatable/class, input detection, buffer option
+- `tests/hull/cap/test_wasm_buffer.c`: 12 unit tests
+- `tests/e2e_compute.sh`: Buffer-mode E2E tests for Lua and JS
+
+---
+
 ## Phase 3 — Memory64
 
 **Goal:** Enable 64-bit WASM memory addressing, allowing >4 GB linear memory.

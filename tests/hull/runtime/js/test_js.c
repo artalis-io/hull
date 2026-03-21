@@ -70,7 +70,7 @@ static void init_js_with_caps(void)
 
     sqlite3_open(":memory:", &test_db);
     hl_cap_db_init(test_db);
-    hl_stmt_cache_init(&test_stmt_cache, test_db);
+    hl_stmt_cache_init(&test_stmt_cache, test_db, NULL);
     HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
     memset(&js, 0, sizeof(js));
     js.base.db = test_db;

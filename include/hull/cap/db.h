@@ -9,22 +9,27 @@
 
 #include "hull/cap/types.h"
 
+/* Forward declaration */
+typedef struct HlAllocator HlAllocator;
+
 /* ── Prepared statement cache ──────────────────────────────────────── */
 
 #define HL_STMT_CACHE_SIZE 32
 
 typedef struct {
     const char     *sql;     /* SQL text (owned copy) */
+    size_t          sql_len; /* strlen(sql), tracked for alloc accounting */
     sqlite3_stmt   *stmt;    /* compiled statement */
 } HlStmtCacheEntry;
 
 typedef struct HlStmtCache {
     sqlite3           *db;
+    HlAllocator       *alloc;
     HlStmtCacheEntry   entries[HL_STMT_CACHE_SIZE];
     int                count;
 } HlStmtCache;
 
-void hl_stmt_cache_init(HlStmtCache *cache, sqlite3 *db);
+void hl_stmt_cache_init(HlStmtCache *cache, sqlite3 *db, HlAllocator *alloc);
 void hl_stmt_cache_destroy(HlStmtCache *cache);
 
 /* ── Database initialization ───────────────────────────────────────── */

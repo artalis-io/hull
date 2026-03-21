@@ -8,6 +8,7 @@
 #include <sh_arena.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 /* ── Tracked allocation functions ──────────────────────────────────── */
 
@@ -25,6 +26,22 @@ void *hl_alloc_malloc(HlAllocator *a, size_t size)
         if (a->used > a->peak)
             a->peak = a->used;
     }
+    return p;
+}
+
+void *hl_alloc_calloc(HlAllocator *a, size_t count, size_t size)
+{
+    if (!a)
+        return calloc(count, size);
+
+    /* Overflow-safe: check count * size before multiplying */
+    if (count > 0 && size > SIZE_MAX / count)
+        return NULL;
+
+    size_t total = count * size;
+    void *p = hl_alloc_malloc(a, total);
+    if (p)
+        memset(p, 0, total);
     return p;
 }
 

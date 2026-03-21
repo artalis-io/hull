@@ -8,6 +8,7 @@
  */
 
 #include "hull/cap/fs.h"
+#include "hull/alloc.h"
 #include "hull/cap/audit.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -255,7 +256,8 @@ audit:
 
 /* ── Memory-mapped file ────────────────────────────────────────────── */
 
-HlMappedBuffer *hl_cap_fs_mmap(const HlFsConfig *cfg, const char *path)
+HlMappedBuffer *hl_cap_fs_mmap(const HlFsConfig *cfg, const char *path,
+                                HlAllocator *alloc)
 {
     HlMappedBuffer *buf = NULL;
 
@@ -279,7 +281,7 @@ HlMappedBuffer *hl_cap_fs_mmap(const HlFsConfig *cfg, const char *path)
     if (addr == MAP_FAILED)
         goto audit;
 
-    buf = malloc(sizeof(HlMappedBuffer));
+    buf = hl_alloc_malloc(alloc, sizeof(HlMappedBuffer));
     if (!buf) {
         munmap(addr, (size_t)st.st_size);
         goto audit;
@@ -288,6 +290,7 @@ HlMappedBuffer *hl_cap_fs_mmap(const HlFsConfig *cfg, const char *path)
     buf->addr = addr;
     buf->len = (size_t)st.st_size;
     buf->closed = 0;
+    buf->alloc = alloc;
 
 audit:
     {
@@ -306,5 +309,5 @@ void hl_cap_fs_munmap(HlMappedBuffer *buf)
         munmap(buf->addr, buf->len);
         buf->closed = 1;
     }
-    free(buf);
+    hl_alloc_free(buf->alloc, buf, sizeof(HlMappedBuffer));
 }

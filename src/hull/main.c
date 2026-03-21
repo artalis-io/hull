@@ -529,7 +529,7 @@ static int hull_serve(int argc, char **argv)
     }
 
     /* Initialize prepared statement cache */
-    hl_stmt_cache_init(&stmt_cache, db);
+    hl_stmt_cache_init(&stmt_cache, db, &alloc);
 
     /* Initialize Keel server */
     KlConfig config = {

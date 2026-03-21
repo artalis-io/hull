@@ -86,7 +86,7 @@ HlWorkerDb *hl_worker_db_get(void)
         return NULL;
     }
 
-    hl_stmt_cache_init(&wdb->cache, wdb->db);
+    hl_stmt_cache_init(&wdb->cache, wdb->db, NULL);
     pthread_setspecific(worker_db_key, wdb);
     return wdb;
 }

@@ -13,6 +13,7 @@
 #ifdef HL_ENABLE_WASM
 
 #include "hull/cap/wasm.h"
+#include "hull/cap/wasm_buffer.h"
 #include "hull/limits.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -20,6 +21,7 @@
 /* Forward declarations */
 typedef struct HlAsyncCtx HlAsyncCtx;
 typedef struct HlAllocator HlAllocator;
+struct HlVfs;
 typedef struct KlServer KlServer;
 typedef struct KlThreadPool KlThreadPool;
 typedef struct KlAsyncOp KlAsyncOp;
@@ -31,16 +33,22 @@ typedef struct HlWorkerWasmOp {
     KlServer      *server;
 
     /* Input (deep-copied, owned by this struct) */
-    void          *module;        /* wasm_module_t (borrowed from cache, immutable) */
     void          *wasm_cache;    /* HlWasmCache* for pool operations */
+    const struct HlVfs *app_vfs;  /* app VFS for module loading (borrowed) */
+    const char    *app_dir;       /* app directory for filesystem fallback (borrowed) */
     char           name[256];     /* module name (for logging) */
     void          *input;         /* deep-copied input bytes */
     size_t         input_len;
     HlWasmCallOpts opts;          /* value-copied options */
+    HlAllocator   *alloc;         /* tracked allocator for output (NULL = raw malloc) */
+
+    /* Buffer mode */
+    int            want_buffer;   /* 1 = return HlWasmBuffer instead of raw bytes */
 
     /* Output (set by worker thread) */
-    void          *output;        /* malloc'd result buffer */
+    void          *output;        /* malloc'd result buffer (when !want_buffer) */
     size_t         output_len;
+    HlWasmBuffer  *output_buf;    /* non-NULL when buffer mode requested */
     int            error;         /* 0 = success */
     int            error_code;    /* HL_WASM_ERR_* */
     char           error_msg[HL_WORKER_ERR_SIZE];

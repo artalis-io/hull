@@ -9,6 +9,7 @@
  */
 
 #include "hull/runtime/js.h"
+#include "hull/alloc.h"
 #include "hull/limits.h"
 #include "hull/cap/db.h"
 #include "hull/cap/time.h"
@@ -3689,7 +3690,7 @@ static JSValue js_fs_mmap(JSContext *ctx, JSValueConst this_val,
     const char *path = JS_ToCString(ctx, argv[0]);
     if (!path) return JS_EXCEPTION;
 
-    HlMappedBuffer *buf = hl_cap_fs_mmap(js->base.fs_cfg, path);
+    HlMappedBuffer *buf = hl_cap_fs_mmap(js->base.fs_cfg, path, js->base.alloc);
     JS_FreeCString(ctx, path);
 
     if (!buf)
@@ -3740,6 +3741,126 @@ static int hl_js_init_fs_module(JSContext *ctx, HlJS *js)
 }
 
 #include "hull/cap/wasm.h"
+#include "hull/cap/wasm_buffer.h"
+
+/* ── WasmBuffer JS class ──────────────────────────────────────────── */
+
+static JSClassID js_wasm_buf_class_id;
+
+static void js_wasm_buf_finalizer(JSRuntime *rt, JSValue val)
+{
+    (void)rt;
+    HlWasmBuffer *buf = JS_GetOpaque(val, js_wasm_buf_class_id);
+    if (buf) {
+        HlAllocator *a = buf->alloc;
+        hl_wasm_buffer_destroy(buf);
+        hl_alloc_free(a, buf, sizeof(HlWasmBuffer));
+    }
+}
+
+static JSClassDef js_wasm_buf_class = {
+    "WasmBuffer",
+    .finalizer = js_wasm_buf_finalizer,
+};
+
+static JSValue js_wasm_buf_close(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv)
+{
+    (void)argc; (void)argv;
+    HlWasmBuffer *buf = JS_GetOpaque2(ctx, this_val, js_wasm_buf_class_id);
+    if (buf) {
+        HlAllocator *a = buf->alloc;
+        hl_wasm_buffer_destroy(buf);
+        hl_alloc_free(a, buf, sizeof(HlWasmBuffer));
+        JS_SetOpaque(this_val, NULL);
+    }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_wasm_buf_bytes(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv)
+{
+    (void)argc; (void)argv;
+    HlWasmBuffer *buf = JS_GetOpaque2(ctx, this_val, js_wasm_buf_class_id);
+    if (!buf || buf->closed)
+        return JS_NULL;
+    const void *data = hl_wasm_buffer_data(buf);
+    size_t len = hl_wasm_buffer_len(buf);
+    if (data && len > 0)
+        return JS_NewArrayBufferCopy(ctx, (const uint8_t *)data, len);
+    return JS_NewArrayBufferCopy(ctx, NULL, 0);
+}
+
+static JSValue js_wasm_buf_get_length(JSContext *ctx, JSValueConst this_val,
+                                       int argc, JSValueConst *argv)
+{
+    (void)argc; (void)argv;
+    HlWasmBuffer *buf = JS_GetOpaque2(ctx, this_val, js_wasm_buf_class_id);
+    if (!buf || buf->closed) return JS_NewInt32(ctx, 0);
+    return JS_NewInt64(ctx, (int64_t)hl_wasm_buffer_len(buf));
+}
+
+/* Helper: wrap HlWasmBuffer* as JS object. Takes ownership. */
+static JSValue js_push_wasm_buffer(JSContext *ctx, HlWasmBuffer *buf)
+{
+    JSValue obj = JS_NewObjectClass(ctx, (int)js_wasm_buf_class_id);
+    if (JS_IsException(obj)) {
+        HlAllocator *a = buf->alloc;
+        hl_wasm_buffer_destroy(buf);
+        hl_alloc_free(a, buf, sizeof(HlWasmBuffer));
+        return JS_EXCEPTION;
+    }
+    JS_SetOpaque(obj, buf);
+    return obj;
+}
+
+static JSValue js_compute_buffer(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "compute.buffer requires (input)");
+
+    size_t len = 0;
+    const uint8_t *data = JS_GetArrayBuffer(ctx, &len, argv[0]);
+    int is_string = 0;
+    if (!data) {
+        data = (const uint8_t *)JS_ToCStringLen(ctx, &len, argv[0]);
+        if (!data)
+            return JS_ThrowTypeError(ctx, "compute.buffer: input must be a string or ArrayBuffer");
+        is_string = 1;
+    }
+
+    HlJS *js_ctx = (HlJS *)JS_GetContextOpaque(ctx);
+    HlWasmBuffer *buf = hl_wasm_buffer_create_owned(data, len,
+                                                      js_ctx ? js_ctx->base.alloc : NULL);
+    if (is_string) JS_FreeCString(ctx, (const char *)data);
+
+    if (!buf)
+        return JS_ThrowInternalError(ctx, "compute.buffer: out of memory");
+
+    return js_push_wasm_buffer(ctx, buf);
+}
+
+static void js_register_wasm_buf_class(JSContext *ctx)
+{
+    JS_NewClassID(&js_wasm_buf_class_id);
+    JS_NewClass(JS_GetRuntime(ctx), js_wasm_buf_class_id, &js_wasm_buf_class);
+
+    JSValue proto = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, proto, "close",
+                      JS_NewCFunction(ctx, js_wasm_buf_close, "close", 0));
+    JS_SetPropertyStr(ctx, proto, "bytes",
+                      JS_NewCFunction(ctx, js_wasm_buf_bytes, "bytes", 0));
+
+    JSAtom length_atom = JS_NewAtom(ctx, "length");
+    JS_DefinePropertyGetSet(ctx, proto, length_atom,
+                            JS_NewCFunction(ctx, js_wasm_buf_get_length, "length", 0),
+                            JS_UNDEFINED, 0);
+    JS_FreeAtom(ctx, length_atom);
+
+    JS_SetClassProto(ctx, js_wasm_buf_class_id, proto);
+}
 
 /* Clamp per-call opts to runtime ceiling */
 static void js_wasm_clamp_opts(HlWasmCallOpts *opts, const HlRuntime *base)
@@ -3777,30 +3898,38 @@ static JSValue js_compute_call(JSContext *ctx, JSValueConst this_val,
     if (!name)
         return JS_EXCEPTION;
 
-    /* Input can be a string, ArrayBuffer, or MappedBuffer */
+    /* Input can be a string, ArrayBuffer, WasmBuffer, or MappedBuffer */
     size_t input_len = 0;
     const uint8_t *input = NULL;
     int input_is_string = 0;
 
-    /* Check for MappedBuffer first */
-    HlMappedBuffer *mmap_buf = JS_GetOpaque2(ctx, argv[1], js_mmap_class_id);
-    if (mmap_buf && !mmap_buf->closed) {
-        input = (const uint8_t *)mmap_buf->addr;
-        input_len = mmap_buf->len;
+    /* Check for WasmBuffer first */
+    HlWasmBuffer *wbuf_in = JS_GetOpaque2(ctx, argv[1], js_wasm_buf_class_id);
+    if (wbuf_in && !wbuf_in->closed) {
+        input = (const uint8_t *)hl_wasm_buffer_data(wbuf_in);
+        input_len = hl_wasm_buffer_len(wbuf_in);
     } else {
-        input = JS_GetArrayBuffer(ctx, &input_len, argv[1]);
-        if (!input) {
-            /* Try as string */
-            input = (const uint8_t *)JS_ToCStringLen(ctx, &input_len, argv[1]);
+        /* Check for MappedBuffer */
+        HlMappedBuffer *mmap_buf = JS_GetOpaque2(ctx, argv[1], js_mmap_class_id);
+        if (mmap_buf && !mmap_buf->closed) {
+            input = (const uint8_t *)mmap_buf->addr;
+            input_len = mmap_buf->len;
+        } else {
+            input = JS_GetArrayBuffer(ctx, &input_len, argv[1]);
             if (!input) {
-                JS_FreeCString(ctx, name);
-                return JS_ThrowTypeError(ctx, "compute.call: input must be a string, ArrayBuffer, or MappedBuffer");
+                /* Try as string */
+                input = (const uint8_t *)JS_ToCStringLen(ctx, &input_len, argv[1]);
+                if (!input) {
+                    JS_FreeCString(ctx, name);
+                    return JS_ThrowTypeError(ctx, "compute.call: input must be a string, ArrayBuffer, WasmBuffer, or MappedBuffer");
+                }
+                input_is_string = 1;
             }
-            input_is_string = 1;
         }
     }
 
     HlWasmCallOpts opts = {0};
+    int want_buffer = 0;
 
     /* Parse opts object if provided */
     if (argc > 2 && JS_IsObject(argv[2])) {
@@ -3835,10 +3964,36 @@ static JSValue js_compute_call(JSContext *ctx, JSValueConst this_val,
             int64_t v; JS_ToInt64(ctx, &v, val); opts.gas = v;
         }
         JS_FreeValue(ctx, val);
+
+        val = JS_GetPropertyStr(ctx, argv[2], "buffer");
+        if (JS_ToBool(ctx, val)) want_buffer = 1;
+        JS_FreeValue(ctx, val);
     }
 
     js_wasm_clamp_opts(&opts, &js->base);
 
+    if (want_buffer) {
+        HlWasmBuffer *out_buf = NULL;
+        const char *err_msg = NULL;
+
+        int rc = hl_cap_wasm_call_buf(js->base.wasm_cache, name,
+                                       input, input_len,
+                                       &out_buf, &opts, NULL, NULL,
+                                       js->base.app_vfs,
+                                       js->base.app_vfs ? js->base.app_vfs->root_dir : NULL,
+                                       js->base.alloc, &err_msg);
+
+        if (input_is_string) JS_FreeCString(ctx, (const char *)input);
+        JS_FreeCString(ctx, name);
+
+        if (rc != 0)
+            return JS_ThrowInternalError(ctx, "compute.call: %s",
+                                         err_msg ? err_msg : "unknown error");
+
+        return js_push_wasm_buffer(ctx, out_buf);
+    }
+
+    /* Non-buffer path (original behavior) */
     void *output = NULL;
     size_t output_len = 0;
     const char *err_msg = NULL;
@@ -3849,7 +4004,7 @@ static JSValue js_compute_call(JSContext *ctx, JSValueConst this_val,
                                &opts, NULL, NULL,
                                js->base.app_vfs,
                                js->base.app_vfs ? js->base.app_vfs->root_dir : NULL,
-                               &err_msg);
+                               js->base.alloc, &err_msg);
 
     if (input_is_string)
         JS_FreeCString(ctx, (const char *)input);
@@ -3862,10 +4017,10 @@ static JSValue js_compute_call(JSContext *ctx, JSValueConst this_val,
     /* Return result as ArrayBuffer */
     if (output && output_len > 0) {
         JSValue ab = JS_NewArrayBufferCopy(ctx, output, output_len);
-        free(output);
+        hl_alloc_free(js->base.alloc, output, output_len);
         return ab;
     }
-    free(output);
+    hl_alloc_free(js->base.alloc, output, output_len);
     return JS_NewArrayBufferCopy(ctx, NULL, 0);
 }
 
@@ -3905,6 +4060,13 @@ static JSValue js_push_worker_wasm_result(JSContext *ctx, void *driver)
     if (op->error)
         return JS_ThrowInternalError(ctx, "compute.async.call: %s", op->error_msg);
 
+    if (op->output_buf) {
+        /* Buffer mode: wrap as WasmBuffer, transfer ownership */
+        HlWasmBuffer *buf = op->output_buf;
+        op->output_buf = NULL; /* prevent hl_worker_wasm_op_free from destroying */
+        return js_push_wasm_buffer(ctx, buf);
+    }
+
     if (op->output && op->output_len > 0)
         return JS_NewArrayBufferCopy(ctx, (const uint8_t *)op->output, op->output_len);
 
@@ -3930,25 +4092,33 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
     if (!name)
         return JS_EXCEPTION;
 
-    /* Get input (string or ArrayBuffer) */
+    /* Get input (string, ArrayBuffer, or WasmBuffer) */
     const uint8_t *input = NULL;
     size_t input_len = 0;
     int input_is_string = 0;
-    size_t ab_len;
-    input = JS_GetArrayBuffer(ctx, &ab_len, argv[1]);
-    if (input) {
-        input_len = ab_len;
+
+    HlWasmBuffer *wbuf_in = JS_GetOpaque2(ctx, argv[1], js_wasm_buf_class_id);
+    if (wbuf_in && !wbuf_in->closed) {
+        input = (const uint8_t *)hl_wasm_buffer_data(wbuf_in);
+        input_len = hl_wasm_buffer_len(wbuf_in);
     } else {
-        input = (const uint8_t *)JS_ToCStringLen(ctx, &input_len, argv[1]);
-        if (!input) {
-            JS_FreeCString(ctx, name);
-            return JS_ThrowTypeError(ctx, "compute.async.call: input must be a string or ArrayBuffer");
+        size_t ab_len;
+        input = JS_GetArrayBuffer(ctx, &ab_len, argv[1]);
+        if (input) {
+            input_len = ab_len;
+        } else {
+            input = (const uint8_t *)JS_ToCStringLen(ctx, &input_len, argv[1]);
+            if (!input) {
+                JS_FreeCString(ctx, name);
+                return JS_ThrowTypeError(ctx, "compute.async.call: input must be a string, ArrayBuffer, or WasmBuffer");
+            }
+            input_is_string = 1;
         }
-        input_is_string = 1;
     }
 
     /* Parse opts */
     HlWasmCallOpts opts = {0};
+    int want_buffer = 0;
     if (argc > 2 && JS_IsObject(argv[2])) {
         JSValue val;
         val = JS_GetPropertyStr(ctx, argv[2], "maxInput");
@@ -3966,11 +4136,14 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
         val = JS_GetPropertyStr(ctx, argv[2], "gas");
         if (!JS_IsUndefined(val)) { int64_t v; JS_ToInt64(ctx, &v, val); opts.gas = v; }
         JS_FreeValue(ctx, val);
+        val = JS_GetPropertyStr(ctx, argv[2], "buffer");
+        if (JS_ToBool(ctx, val)) want_buffer = 1;
+        JS_FreeValue(ctx, val);
     }
 
     js_wasm_clamp_opts(&opts, &js->base);
 
-    /* Resolve module on event loop thread */
+    /* Pre-load module on event loop thread (cache writes are not thread-safe) */
     int rc = hl_cap_wasm_load(js->base.wasm_cache, name,
                                js->base.app_vfs,
                                js->base.app_vfs ? js->base.app_vfs->root_dir : NULL);
@@ -3979,14 +4152,6 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
         JS_FreeCString(ctx, name);
         return JS_ThrowInternalError(ctx, "compute.async.call: %s",
                                      rc == HL_WASM_ERR_NOT_FOUND ? "not_found" : "load_failed");
-    }
-
-    void *module = NULL;
-    for (int i = 0; i < js->base.wasm_cache->count; i++) {
-        if (strcmp(js->base.wasm_cache->modules[i].name, name) == 0) {
-            module = js->base.wasm_cache->modules[i].module;
-            break;
-        }
     }
 
     /* Allocate op */
@@ -3998,10 +4163,13 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
     }
 
     op->server = js->server;
-    op->module = module;
     op->wasm_cache = js->base.wasm_cache;
+    op->app_vfs = js->base.app_vfs;
+    op->app_dir = js->base.app_vfs ? js->base.app_vfs->root_dir : NULL;
+    op->alloc = js->base.alloc;
     snprintf(op->name, sizeof(op->name), "%s", name);
     op->opts = opts;
+    op->want_buffer = want_buffer;
 
     /* Deep-copy input */
     if (input_len > 0) {
@@ -4093,6 +4261,8 @@ static int js_compute_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_compute_call, "call", 3));
     JS_SetPropertyStr(ctx, compute, "preload",
                       JS_NewCFunction(ctx, js_compute_preload, "preload", 1));
+    JS_SetPropertyStr(ctx, compute, "buffer",
+                      JS_NewCFunction(ctx, js_compute_buffer, "buffer", 1));
 
     /* compute.async sub-object */
     JSValue async_obj = JS_NewObject(ctx);
@@ -4107,6 +4277,7 @@ static int js_compute_module_init(JSContext *ctx, JSModuleDef *m)
 static int hl_js_init_compute_module(JSContext *ctx, HlJS *js)
 {
     (void)js;
+    js_register_wasm_buf_class(ctx);
     JSModuleDef *m = JS_NewCModule(ctx, "hull:compute", js_compute_module_init);
     if (!m)
         return -1;

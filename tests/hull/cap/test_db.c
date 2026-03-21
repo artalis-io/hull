@@ -22,7 +22,7 @@ static void setup_db(void)
 {
     sqlite3_open(":memory:", &test_db);
     hl_cap_db_init(test_db);
-    hl_stmt_cache_init(&test_cache, test_db);
+    hl_stmt_cache_init(&test_cache, test_db, NULL);
     sqlite3_exec(test_db,
         "CREATE TABLE users ("
         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"

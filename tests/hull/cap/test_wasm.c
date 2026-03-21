@@ -12,6 +12,8 @@
 #include "hull/limits.h"
 #include "hull/vfs.h"
 #include "hull/entry.h"
+#include <limits.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -86,7 +88,7 @@ UTEST(hl_cap_wasm, call_echo)
                                input, input_len,
                                &output, &output_len,
                                NULL, NULL, NULL,
-                               &vfs, NULL, &err);
+                               &vfs, NULL, NULL, &err);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(output_len, input_len);
     ASSERT_NE(output, NULL);
@@ -112,7 +114,7 @@ UTEST(hl_cap_wasm, call_empty_input)
                                "", 0,
                                &output, &output_len,
                                NULL, NULL, NULL,
-                               &vfs, NULL, &err);
+                               &vfs, NULL, NULL, &err);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(output_len, (size_t)0);
 
@@ -136,7 +138,7 @@ UTEST(hl_cap_wasm, module_not_found)
                                "x", 1,
                                &output, &output_len,
                                NULL, NULL, NULL,
-                               &vfs, NULL, &err);
+                               &vfs, NULL, NULL, &err);
     ASSERT_EQ(rc, HL_WASM_ERR_NOT_FOUND);
     ASSERT_NE(err, NULL);
     ASSERT_STREQ(err, "not_found");
@@ -165,7 +167,7 @@ UTEST(hl_cap_wasm, input_size_limit)
                                "0123456789", 10,
                                &output, &output_len,
                                &opts, NULL, NULL,
-                               &vfs, NULL, &err);
+                               &vfs, NULL, NULL, &err);
     ASSERT_EQ(rc, HL_WASM_ERR_INPUT);
     ASSERT_NE(err, NULL);
     ASSERT_STREQ(err, "input_too_large");
@@ -193,7 +195,7 @@ UTEST(hl_cap_wasm, gas_exhaustion)
                                "hello", 5,
                                &output, &output_len,
                                &opts, NULL, NULL,
-                               &vfs, NULL, &err);
+                               &vfs, NULL, NULL, &err);
     /* Gas exhaustion should cause a call failure */
     ASSERT_NE(rc, 0);
 
@@ -226,7 +228,7 @@ UTEST(hl_cap_wasm, null_safety)
 
     const char *err = NULL;
     ASSERT_EQ(hl_cap_wasm_call(NULL, "x", "y", 1, NULL, NULL,
-                                NULL, NULL, NULL, NULL, NULL, &err),
+                                NULL, NULL, NULL, NULL, NULL, NULL, &err),
               HL_WASM_ERR_INTERNAL);
 
     hl_cap_wasm_destroy(&cache);
@@ -247,7 +249,7 @@ UTEST(hl_cap_wasm, path_traversal_rejected)
     /* Slash in name — path traversal */
     int rc = hl_cap_wasm_call(&cache, "../../../etc/passwd",
                                "x", 1, &output, &output_len,
-                               NULL, NULL, NULL, &vfs, NULL, &err);
+                               NULL, NULL, NULL, &vfs, NULL, NULL, &err);
     ASSERT_EQ(rc, HL_WASM_ERR_NOT_FOUND);
     ASSERT_EQ(output, NULL);
 
@@ -255,21 +257,21 @@ UTEST(hl_cap_wasm, path_traversal_rejected)
     err = NULL;
     rc = hl_cap_wasm_call(&cache, "..\\secret",
                            "x", 1, &output, &output_len,
-                           NULL, NULL, NULL, &vfs, NULL, &err);
+                           NULL, NULL, NULL, &vfs, NULL, NULL, &err);
     ASSERT_EQ(rc, HL_WASM_ERR_NOT_FOUND);
 
     /* Dot-prefixed name */
     err = NULL;
     rc = hl_cap_wasm_call(&cache, ".hidden",
                            "x", 1, &output, &output_len,
-                           NULL, NULL, NULL, &vfs, NULL, &err);
+                           NULL, NULL, NULL, &vfs, NULL, NULL, &err);
     ASSERT_EQ(rc, HL_WASM_ERR_NOT_FOUND);
 
     /* Simple slash */
     err = NULL;
     rc = hl_cap_wasm_call(&cache, "sub/module",
                            "x", 1, &output, &output_len,
-                           NULL, NULL, NULL, &vfs, NULL, &err);
+                           NULL, NULL, NULL, &vfs, NULL, NULL, &err);
     ASSERT_EQ(rc, HL_WASM_ERR_NOT_FOUND);
 
     /* Also check load path */
@@ -303,7 +305,7 @@ UTEST(hl_cap_wasm, overlong_name_rejected)
 
     int rc = hl_cap_wasm_call(&cache, long_name,
                                "x", 1, &output, &output_len,
-                               NULL, NULL, NULL, &vfs, NULL, &err);
+                               NULL, NULL, NULL, &vfs, NULL, NULL, &err);
     ASSERT_EQ(rc, HL_WASM_ERR_NOT_FOUND);
     ASSERT_EQ(output, NULL);
 
@@ -324,7 +326,7 @@ UTEST(hl_cap_wasm, empty_name_rejected)
 
     int rc = hl_cap_wasm_call(&cache, "",
                                "x", 1, &output, &output_len,
-                               NULL, NULL, NULL, NULL, NULL, &err);
+                               NULL, NULL, NULL, NULL, NULL, NULL, &err);
     ASSERT_EQ(rc, HL_WASM_ERR_NOT_FOUND);
 
     hl_cap_wasm_destroy(&cache);
@@ -376,7 +378,7 @@ UTEST(hl_cap_wasm, call_with_custom_opts)
                                input, input_len,
                                &output, &output_len,
                                &opts, NULL, NULL,
-                               &vfs, NULL, &err);
+                               &vfs, NULL, NULL, &err);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(output_len, input_len);
     ASSERT_NE(output, NULL);
@@ -407,7 +409,7 @@ UTEST(hl_cap_wasm, pool_reuse)
                                input, input_len,
                                &output, &output_len,
                                NULL, NULL, NULL,
-                               &vfs, NULL, &err);
+                               &vfs, NULL, NULL, &err);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(output_len, input_len);
     ASSERT_EQ(memcmp(output, input, input_len), 0);
@@ -421,7 +423,7 @@ UTEST(hl_cap_wasm, pool_reuse)
                            input, input_len,
                            &output, &output_len,
                            NULL, NULL, NULL,
-                           &vfs, NULL, &err);
+                           &vfs, NULL, NULL, &err);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(output_len, input_len);
     ASSERT_EQ(memcmp(output, input, input_len), 0);
@@ -450,7 +452,7 @@ UTEST(hl_cap_wasm, pool_stress)
                                    input, input_len,
                                    &output, &output_len,
                                    NULL, NULL, NULL,
-                                   &vfs, NULL, &err);
+                                   &vfs, NULL, NULL, &err);
         ASSERT_EQ(rc, 0);
         ASSERT_EQ(output_len, input_len);
         free(output);
@@ -479,7 +481,7 @@ UTEST(hl_cap_wasm, pool_error_no_reuse)
                                "hello", 5,
                                &output, &output_len,
                                &bad_opts, NULL, NULL,
-                               &vfs, NULL, &err);
+                               &vfs, NULL, NULL, &err);
     ASSERT_NE(rc, 0);
     free(output);
 
@@ -491,7 +493,7 @@ UTEST(hl_cap_wasm, pool_error_no_reuse)
                            "hello", 5,
                            &output, &output_len,
                            NULL, NULL, NULL,
-                           &vfs, NULL, &err);
+                           &vfs, NULL, NULL, &err);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(output_len, (size_t)5);
     ASSERT_EQ(memcmp(output, "hello", 5), 0);
@@ -526,7 +528,7 @@ UTEST(hl_cap_wasm, pool_size_mismatch)
                                input, input_len,
                                &output, &output_len,
                                &opts1, NULL, NULL,
-                               &vfs, NULL, &err);
+                               &vfs, NULL, NULL, &err);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(output_len, input_len);
     free(output);
@@ -545,7 +547,7 @@ UTEST(hl_cap_wasm, pool_size_mismatch)
                            input, input_len,
                            &output, &output_len,
                            &opts2, NULL, NULL,
-                           &vfs, NULL, &err);
+                           &vfs, NULL, NULL, &err);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(output_len, input_len);
     free(output);
@@ -565,7 +567,7 @@ UTEST(hl_cap_wasm, call_uninitialized_cache)
 
     int rc = hl_cap_wasm_call(&cache, "echo",
                                "x", 1, &output, &output_len,
-                               NULL, NULL, NULL, NULL, NULL, &err);
+                               NULL, NULL, NULL, NULL, NULL, NULL, &err);
     ASSERT_EQ(rc, HL_WASM_ERR_INTERNAL);
     ASSERT_NE(err, NULL);
     ASSERT_STREQ(err, "internal_error");
@@ -573,6 +575,174 @@ UTEST(hl_cap_wasm, call_uninitialized_cache)
     /* Load on uninitialized cache */
     ASSERT_EQ(hl_cap_wasm_load(&cache, "echo", NULL, NULL),
               HL_WASM_ERR_INTERNAL);
+}
+
+/* ── TC-1: Concurrent module loading (TS-2 regression) ─────────────── */
+
+typedef struct {
+    HlWasmCache *cache;
+    HlVfs       *vfs;
+    int          rc;
+} ConcurrentLoadArg;
+
+static void *concurrent_load_thread(void *arg)
+{
+    ConcurrentLoadArg *a = (ConcurrentLoadArg *)arg;
+    const char *input = "concurrent";
+    size_t input_len = strlen(input);
+    void *output = NULL;
+    size_t output_len = 0;
+    const char *err = NULL;
+
+    a->rc = hl_cap_wasm_call(a->cache, "echo",
+                              input, input_len,
+                              &output, &output_len,
+                              NULL, NULL, NULL,
+                              a->vfs, NULL, NULL, &err);
+    if (a->rc == 0) {
+        if (output_len != input_len || memcmp(output, input, input_len) != 0)
+            a->rc = -99;
+    }
+    free(output);
+    return NULL;
+}
+
+UTEST(hl_cap_wasm, concurrent_load)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    #define NUM_THREADS 8
+    pthread_t threads[NUM_THREADS];
+    ConcurrentLoadArg args[NUM_THREADS];
+
+    for (int i = 0; i < NUM_THREADS; i++) {
+        args[i].cache = &cache;
+        args[i].vfs = &vfs;
+        args[i].rc = -1;
+        pthread_create(&threads[i], NULL, concurrent_load_thread, &args[i]);
+    }
+
+    for (int i = 0; i < NUM_THREADS; i++)
+        pthread_join(threads[i], NULL);
+
+    /* All threads should succeed */
+    for (int i = 0; i < NUM_THREADS; i++)
+        ASSERT_EQ(args[i].rc, 0);
+
+    /* Module should be cached exactly once */
+    ASSERT_EQ(cache.count, 1);
+    #undef NUM_THREADS
+
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* ── TC-2: Callback provided but not invoked ───────────────────────── */
+
+static int test_callback_fn(int id, const void *in, size_t in_len,
+                             void *out_buf, size_t out_max, void *user_data)
+{
+    (void)id; (void)in; (void)in_len; (void)out_buf; (void)out_max;
+    /* Mark that callback was invoked */
+    int *called = (int *)user_data;
+    *called = 1;
+    return 0;
+}
+
+UTEST(hl_cap_wasm, callback_not_invoked)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    int callback_called = 0;
+    const char *input = "callback test";
+    size_t input_len = strlen(input);
+    void *output = NULL;
+    size_t output_len = 0;
+    const char *err = NULL;
+
+    /* Provide a callback, but echo.wasm never invokes host_call(CALLBACK) */
+    int rc = hl_cap_wasm_call(&cache, "echo",
+                               input, input_len,
+                               &output, &output_len,
+                               NULL, test_callback_fn, &callback_called,
+                               &vfs, NULL, NULL, &err);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(callback_called, 0);
+    ASSERT_EQ(output_len, input_len);
+    ASSERT_NE(output, NULL);
+    ASSERT_EQ(memcmp(output, input, input_len), 0);
+
+    free(output);
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* ── TC-3: Gas clamping edge cases ─────────────────────────────────── */
+
+UTEST(hl_cap_wasm, gas_clamping_edge_cases)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    const char *input = "gas";
+    size_t input_len = strlen(input);
+    void *output = NULL;
+    size_t output_len = 0;
+    const char *err = NULL;
+    int rc;
+
+    /* gas = INT_MAX — should succeed (not clamped) */
+    HlWasmCallOpts opts1 = {0};
+    opts1.gas = INT_MAX;
+    rc = hl_cap_wasm_call(&cache, "echo",
+                           input, input_len,
+                           &output, &output_len,
+                           &opts1, NULL, NULL,
+                           &vfs, NULL, NULL, &err);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(output_len, input_len);
+    free(output);
+
+    /* gas = HL_WASM_MAX_GAS — should succeed (accepted as-is) */
+    output = NULL;
+    output_len = 0;
+    err = NULL;
+    HlWasmCallOpts opts2 = {0};
+    opts2.gas = HL_WASM_MAX_GAS;
+    rc = hl_cap_wasm_call(&cache, "echo",
+                           input, input_len,
+                           &output, &output_len,
+                           &opts2, NULL, NULL,
+                           &vfs, NULL, NULL, &err);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(output_len, input_len);
+    free(output);
+
+    /* gas = HL_WASM_MAX_GAS + 1 — silently clamped, echo is fast so succeeds */
+    output = NULL;
+    output_len = 0;
+    err = NULL;
+    HlWasmCallOpts opts3 = {0};
+    opts3.gas = HL_WASM_MAX_GAS + 1;
+    rc = hl_cap_wasm_call(&cache, "echo",
+                           input, input_len,
+                           &output, &output_len,
+                           &opts3, NULL, NULL,
+                           &vfs, NULL, NULL, &err);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(output_len, input_len);
+    free(output);
+
+    hl_cap_wasm_destroy(&cache);
 }
 
 #else /* !HL_ENABLE_WASM */

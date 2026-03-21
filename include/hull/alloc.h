@@ -38,6 +38,7 @@ static inline void hl_alloc_init(HlAllocator *a, size_t limit)
 /* Tracked allocation functions.
  * If 'a' is NULL, falls back to raw malloc/realloc/free. */
 void *hl_alloc_malloc(HlAllocator *a, size_t size);
+void *hl_alloc_calloc(HlAllocator *a, size_t count, size_t size);
 void *hl_alloc_realloc(HlAllocator *a, void *ptr,
                        size_t old_size, size_t new_size);
 void  hl_alloc_free(HlAllocator *a, void *ptr, size_t size);

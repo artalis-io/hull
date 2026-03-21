@@ -21,6 +21,7 @@
 
 /* Forward declarations */
 struct HlVfs;
+typedef struct HlAllocator HlAllocator;
 
 /* ── Instance pool ─────────────────────────────────────────────────── */
 
@@ -97,6 +98,9 @@ typedef int (*HlWasmCallbackFn)(int id, const void *in, size_t in_len,
 #define HL_WASM_ERR_LOAD       -6
 #define HL_WASM_ERR_ABI        -7
 
+/* Forward declaration */
+struct HlWasmBuffer;
+
 /* ── API ───────────────────────────────────────────────────────────── */
 
 /**
@@ -145,7 +149,34 @@ int hl_cap_wasm_call(HlWasmCache *cache, const char *name,
                      const HlWasmCallOpts *opts,
                      HlWasmCallbackFn callback_fn, void *callback_ctx,
                      const struct HlVfs *app_vfs, const char *app_dir,
-                     const char **err_msg);
+                     HlAllocator *alloc, const char **err_msg);
+
+/**
+ * Call a WASM compute module, returning output as an HlWasmBuffer.
+ *
+ * Same as hl_cap_wasm_call but returns zero-copy HlWasmBuffer instead of
+ * malloc'd bytes. When the instance is poolable (success && heap <= threshold),
+ * the buffer holds the instance checked out (WASM kind). Otherwise, output is
+ * copied to an OWNED buffer and the instance is released immediately.
+ *
+ * Caller must call hl_wasm_buffer_destroy() on the returned buffer.
+ */
+int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
+                         const void *input, size_t input_len,
+                         struct HlWasmBuffer **output_buf,
+                         const HlWasmCallOpts *opts,
+                         HlWasmCallbackFn callback_fn, void *callback_ctx,
+                         const struct HlVfs *app_vfs, const char *app_dir,
+                         HlAllocator *alloc, const char **err_msg);
+
+/**
+ * Return an instance to the pool, or destroy it.
+ * Exported for use by wasm_buffer.c when destroying WASM-backed buffers.
+ */
+void hl_wasm_pool_release(HlWasmCache *cache, HlWasmModule *mod,
+                          void *inst, void *exec_env, void *process_fn,
+                          uint32_t heap_size, uint32_t stack_size,
+                          int success);
 
 #endif /* HL_ENABLE_WASM */
 #endif /* HL_CAP_WASM_H */

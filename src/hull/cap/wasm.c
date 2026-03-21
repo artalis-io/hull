@@ -10,17 +10,22 @@
 #ifdef HL_ENABLE_WASM
 
 #include "hull/cap/wasm.h"
+#include "hull/cap/wasm_buffer.h"
+#include "hull/alloc.h"
 #include "hull/cap/audit.h"
 #include "hull/limits.h"
 #include "hull/vfs.h"
 #include "log.h"
 #include "wasm_export.h"
 
+#include <inttypes.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+_Static_assert(sizeof(uint32_t) == 4, "WASM32 ABI requires 4-byte uint32_t");
 
 /* ── Architecture suffix for AOT lookup ────────────────────────────── */
 
@@ -40,7 +45,6 @@ static const char *wasm_arch_suffix(void)
 typedef struct {
     HlWasmCallbackFn fn;
     void            *ctx;
-    void            *module_inst; /* wasm_module_inst_t for addr conversion */
 } HlHostCallCtx;
 
 static _Thread_local HlHostCallCtx tl_host_ctx;
@@ -83,10 +87,14 @@ static int32_t host_call_handler(wasm_exec_env_t exec_env,
         const void *cb_in = data + 4;
         size_t cb_in_len = (size_t)(len - 4);
 
-        /* Allocate output buffer in WASM memory for callback result */
-        char out_buf[4096];
+        /* Fixed-size stack buffer is appropriate because callbacks are
+         * synchronous, run on the calling thread, and large data should
+         * use the WASM I/O buffers directly. */
+        char out_buf[HL_WASM_CALLBACK_BUF_SIZE];
         int rc = tl_host_ctx.fn(cb_id, cb_in, cb_in_len,
                                 out_buf, sizeof(out_buf), tl_host_ctx.ctx);
+        if (rc < 0 || (uint32_t)rc > HL_WASM_CALLBACK_BUF_SIZE)
+            return -1;
         return (int32_t)rc;
     }
 
@@ -167,12 +175,14 @@ static int pool_acquire(HlWasmCache *cache, HlWasmModule *mod,
 
 /* Return an instance to the pool, or destroy it.
  * Only pools on success, small heaps, and when pool isn't full. */
-static void pool_release(HlWasmCache *cache, HlWasmModule *mod,
-                         wasm_module_inst_t inst, wasm_exec_env_t exec_env,
-                         wasm_function_inst_t process_fn,
-                         uint32_t heap_size, uint32_t stack_size,
-                         int success)
+void hl_wasm_pool_release(HlWasmCache *cache, HlWasmModule *mod,
+                          void *inst_v, void *exec_env_v, void *process_fn_v,
+                          uint32_t heap_size, uint32_t stack_size,
+                          int success)
 {
+    wasm_module_inst_t inst = (wasm_module_inst_t)inst_v;
+    wasm_exec_env_t exec_env = (wasm_exec_env_t)exec_env_v;
+
     if (success && heap_size <= HL_WASM_POOL_HEAP_THRESHOLD) {
         pthread_mutex_lock(&cache->pool_mutex);
         HlWasmPool *pool = &mod->pool;
@@ -180,9 +190,9 @@ static void pool_release(HlWasmCache *cache, HlWasmModule *mod,
             /* Clear any stale exception before returning to pool */
             wasm_runtime_clear_exception(inst);
             HlWasmPoolEntry *e = &pool->entries[pool->count++];
-            e->instance   = inst;
-            e->exec_env   = exec_env;
-            e->process_fn = process_fn;
+            e->instance   = inst_v;
+            e->exec_env   = exec_env_v;
+            e->process_fn = process_fn_v;
             e->heap_size  = heap_size;
             e->stack_size = stack_size;
             pthread_mutex_unlock(&cache->pool_mutex);
@@ -190,6 +200,8 @@ static void pool_release(HlWasmCache *cache, HlWasmModule *mod,
         }
         pthread_mutex_unlock(&cache->pool_mutex);
     }
+    /* process_fn is owned by the instance — no separate cleanup needed */
+    (void)process_fn_v;
     wasm_runtime_destroy_exec_env(exec_env);
     wasm_runtime_deinstantiate(inst);
 }
@@ -278,6 +290,7 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
         snprintf(aot_name, sizeof(aot_name), "compute/%s.aot.%s", name, arch);
         const HlEntry *e = hl_vfs_find(app_vfs, aot_name);
         if (e && e->data && e->len > 0) {
+            /* Raw malloc required: wasm_runtime_load takes ownership and calls free() */
             buf = malloc(e->len);
             if (buf) {
                 memcpy(buf, e->data, e->len);
@@ -295,6 +308,7 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
         snprintf(wasm_name, sizeof(wasm_name), "compute/%s.wasm", name);
         const HlEntry *e = hl_vfs_find(app_vfs, wasm_name);
         if (e && e->data && e->len > 0) {
+            /* Raw malloc required: wasm_runtime_load takes ownership and calls free() */
             buf = malloc(e->len);
             if (buf) {
                 memcpy(buf, e->data, e->len);
@@ -315,6 +329,7 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
             long fsize = ftell(f);
             fseek(f, 0, SEEK_SET);
             if (fsize > 0 && fsize < (long)HL_WASM_MAX_IO_SIZE) {
+                /* Raw malloc required: wasm_runtime_load takes ownership and calls free() */
                 buf = malloc((size_t)fsize);
                 if (buf) {
                     size_t nr = fread(buf, 1, (size_t)fsize, f);
@@ -343,6 +358,7 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
             long fsize = ftell(f);
             fseek(f, 0, SEEK_SET);
             if (fsize > 0 && fsize < (long)HL_WASM_MAX_IO_SIZE) {
+                /* Raw malloc required: wasm_runtime_load takes ownership and calls free() */
                 buf = malloc((size_t)fsize);
                 if (buf) {
                     size_t nr = fread(buf, 1, (size_t)fsize, f);
@@ -375,6 +391,47 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
         return HL_WASM_ERR_LOAD;
     }
 
+    /* Probe ABI version before taking the lock */
+    uint32_t abi_version = 0;
+    {
+        wasm_module_inst_t tmp_inst = wasm_runtime_instantiate(
+            module, 8192, 8192, error_buf, sizeof(error_buf));
+        if (tmp_inst) {
+            wasm_function_inst_t ver_fn = wasm_runtime_lookup_function(
+                tmp_inst, "hull_version");
+            if (ver_fn) {
+                wasm_exec_env_t env = wasm_runtime_create_exec_env(tmp_inst, 8192);
+                if (env) {
+                    uint32_t argv[1] = {0};
+                    if (wasm_runtime_call_wasm(env, ver_fn, 0, argv))
+                        abi_version = argv[0];
+                    wasm_runtime_destroy_exec_env(env);
+                }
+            }
+            wasm_runtime_deinstantiate(tmp_inst);
+        }
+    }
+
+    /* TS-2: Mutex-protect cache insertion to prevent concurrent duplicate loads */
+    pthread_mutex_lock(&cache->pool_mutex);
+
+    /* Double-check: another thread may have loaded this module while we were
+     * doing the (unlocked) wasm_runtime_load + ABI probe above. */
+    if (cache_find(cache, name)) {
+        pthread_mutex_unlock(&cache->pool_mutex);
+        wasm_runtime_unload(module);
+        free(buf);
+        return 0;
+    }
+
+    if (cache->count >= HL_WASM_CACHE_MAX) {
+        pthread_mutex_unlock(&cache->pool_mutex);
+        log_error("[wasm] module cache full (max %d)", HL_WASM_CACHE_MAX);
+        wasm_runtime_unload(module);
+        free(buf);
+        return HL_WASM_ERR_INTERNAL;
+    }
+
     /* Add to cache */
     HlWasmModule *cached = &cache->modules[cache->count];
     snprintf(cached->name, sizeof(cached->name), "%s", name);
@@ -382,33 +439,17 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
     cached->wasm_buf = buf;
     cached->wasm_buf_len = buf_len;
     cached->is_aot = is_aot;
-
-    /* Check hull_version export */
-    cached->abi_version = 0;
-    wasm_module_inst_t tmp_inst = wasm_runtime_instantiate(
-        module, 8192, 8192, error_buf, sizeof(error_buf));
-    if (tmp_inst) {
-        wasm_function_inst_t ver_fn = wasm_runtime_lookup_function(
-            tmp_inst, "hull_version");
-        if (ver_fn) {
-            wasm_exec_env_t env = wasm_runtime_create_exec_env(tmp_inst, 8192);
-            if (env) {
-                uint32_t argv[1] = {0};
-                if (wasm_runtime_call_wasm(env, ver_fn, 0, argv))
-                    cached->abi_version = argv[0];
-                wasm_runtime_destroy_exec_env(env);
-            }
-        }
-        wasm_runtime_deinstantiate(tmp_inst);
-    }
-
+    cached->abi_version = abi_version;
     cache->count++;
+
+    pthread_mutex_unlock(&cache->pool_mutex);
+
     log_info("[wasm] cached module '%s' (abi=%u, aot=%d)",
              name, cached->abi_version, is_aot);
     return 0;
 }
 
-/* ── Call module ────────────────────────────────────────────────────── */
+/* ── Call module (thin wrapper over call_buf) ──────────────────────── */
 
 int hl_cap_wasm_call(HlWasmCache *cache, const char *name,
                      const void *input, size_t input_len,
@@ -416,7 +457,49 @@ int hl_cap_wasm_call(HlWasmCache *cache, const char *name,
                      const HlWasmCallOpts *opts,
                      HlWasmCallbackFn callback_fn, void *callback_ctx,
                      const struct HlVfs *app_vfs, const char *app_dir,
-                     const char **err_msg)
+                     HlAllocator *alloc, const char **err_msg)
+{
+    if (!output || !output_len) {
+        if (err_msg) *err_msg = "internal_error";
+        return HL_WASM_ERR_INTERNAL;
+    }
+    *output = NULL;
+    *output_len = 0;
+
+    HlWasmBuffer *buf = NULL;
+    int rc = hl_cap_wasm_call_buf(cache, name, input, input_len,
+                                   &buf, opts, callback_fn, callback_ctx,
+                                   app_vfs, app_dir, alloc, err_msg);
+    if (rc != HL_WASM_OK)
+        return rc;
+
+    if (buf) {
+        size_t buf_len = hl_wasm_buffer_len(buf);
+        if (buf_len > 0) {
+            *output = hl_wasm_buffer_materialize(buf, output_len, alloc);
+            hl_wasm_buffer_destroy(buf);
+            hl_alloc_free(alloc, buf, sizeof(*buf));
+            if (!*output) {
+                if (err_msg) *err_msg = "internal_error";
+                return HL_WASM_ERR_INTERNAL;
+            }
+        } else {
+            hl_wasm_buffer_destroy(buf);
+            hl_alloc_free(alloc, buf, sizeof(*buf));
+        }
+    }
+    return HL_WASM_OK;
+}
+
+/* ── Call module (buffer output) ───────────────────────────────────── */
+
+int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
+                         const void *input, size_t input_len,
+                         HlWasmBuffer **output_buf,
+                         const HlWasmCallOpts *opts,
+                         HlWasmCallbackFn callback_fn, void *callback_ctx,
+                         const struct HlVfs *app_vfs, const char *app_dir,
+                         HlAllocator *alloc, const char **err_msg)
 {
     static const char *err_internal  = "internal_error";
     static const char *err_not_found = "not_found";
@@ -427,7 +510,7 @@ int hl_cap_wasm_call(HlWasmCache *cache, const char *name,
     static const char *err_no_export = "no_hull_process_export";
     static const char *err_call      = "call_failed";
 
-    if (!cache || !cache->initialized || !name || !output || !output_len) {
+    if (!cache || !cache->initialized || !name || !output_buf) {
         if (err_msg) *err_msg = err_internal;
         return HL_WASM_ERR_INTERNAL;
     }
@@ -437,8 +520,7 @@ int hl_cap_wasm_call(HlWasmCache *cache, const char *name,
         return HL_WASM_ERR_NOT_FOUND;
     }
 
-    *output = NULL;
-    *output_len = 0;
+    *output_buf = NULL;
 
     /* Apply defaults */
     uint32_t max_input  = opts && opts->max_input  ? opts->max_input  : HL_WASM_DEFAULT_MAX_INPUT;
@@ -462,7 +544,7 @@ int hl_cap_wasm_call(HlWasmCache *cache, const char *name,
 
     /* Audit log */
     if (hl_audit_enabled) {
-        ShJsonWriter w = hl_audit_begin("compute.call");
+        ShJsonWriter w = hl_audit_begin("compute.call_buf");
         sh_json_write_kv_string(&w, "module", name);
         hl_audit_end(&w);
     }
@@ -490,7 +572,6 @@ int hl_cap_wasm_call(HlWasmCache *cache, const char *name,
                                  &inst, &exec_env, &process_fn);
 
     if (!from_pool) {
-        /* Fresh instantiation */
         char error_buf[256];
         inst = wasm_runtime_instantiate(
             (wasm_module_t)mod->module, stack_size, heap_size,
@@ -522,6 +603,8 @@ int hl_cap_wasm_call(HlWasmCache *cache, const char *name,
 
     /* Set instruction count limit (gas metering) */
     if (gas > 0) {
+        if (gas > INT_MAX)
+            log_warn("[wasm] gas %" PRId64 " exceeds INT_MAX, clamped", gas);
         int gas_int = (gas > INT_MAX) ? INT_MAX : (int)gas;
         wasm_runtime_set_instruction_count_limit(exec_env, gas_int);
     }
@@ -534,7 +617,7 @@ int hl_cap_wasm_call(HlWasmCache *cache, const char *name,
         if (!wasm_in_ptr || !native_in) {
             log_error("[wasm] failed to allocate input buffer (%zu bytes)", input_len);
             if (err_msg) *err_msg = err_internal;
-            pool_release(cache, mod, inst, exec_env, process_fn,
+            hl_wasm_pool_release(cache, mod, inst, exec_env, process_fn,
                          heap_size, stack_size, 0);
             return HL_WASM_ERR_INTERNAL;
         }
@@ -550,7 +633,7 @@ int hl_cap_wasm_call(HlWasmCache *cache, const char *name,
             log_error("[wasm] failed to allocate output buffer (%u bytes)", max_output);
             if (err_msg) *err_msg = err_internal;
             if (wasm_in_ptr) wasm_runtime_module_free(inst, wasm_in_ptr);
-            pool_release(cache, mod, inst, exec_env, process_fn,
+            hl_wasm_pool_release(cache, mod, inst, exec_env, process_fn,
                          heap_size, stack_size, 0);
             return HL_WASM_ERR_INTERNAL;
         }
@@ -560,9 +643,10 @@ int hl_cap_wasm_call(HlWasmCache *cache, const char *name,
     HlHostCallCtx saved_ctx = tl_host_ctx;
     tl_host_ctx.fn = callback_fn;
     tl_host_ctx.ctx = callback_ctx;
-    tl_host_ctx.module_inst = inst;
 
-    /* Call hull_process(in_ptr, in_len, out_ptr, out_max) -> bytes_written */
+    /* WASM32 ABI: hull_process arguments are uint32_t. wasm_runtime_module_malloc
+     * returns uint64_t but values are guaranteed ≤ UINT32_MAX for WASM32 modules
+     * (linear memory is 32-bit addressable). Narrowing cast is intentional. */
     uint32_t argv[4] = {
         (uint32_t)wasm_in_ptr,
         (uint32_t)input_len,
@@ -581,7 +665,7 @@ int hl_cap_wasm_call(HlWasmCache *cache, const char *name,
                       exception ? exception : "unknown");
             if (err_msg) *err_msg = err_call;
         }
-        goto cleanup_bufs;
+        goto cleanup_bufs_err;
     }
 
     /* Get return value (bytes written or error code) */
@@ -595,33 +679,49 @@ int hl_cap_wasm_call(HlWasmCache *cache, const char *name,
             if (err_msg) *err_msg = err_call;
             ret = HL_WASM_ERR_INTERNAL;
         }
-        goto cleanup_bufs;
+        goto cleanup_bufs_err;
     }
 
-    /* Copy output back to caller */
-    if (result > 0 && (uint32_t)result <= max_output) {
-        void *out = malloc((size_t)result);
-        if (!out) {
-            if (err_msg) *err_msg = err_internal;
-            goto cleanup_bufs;
-        }
-        memcpy(out, native_out, (size_t)result);
-        *output = out;
-        *output_len = (size_t)result;
-    }
-
-    ret = HL_WASM_OK;
-
-cleanup_bufs:
-    /* Restore previous callback context (reentry-safe) */
+    /* Free input allocation — no longer needed */
     tl_host_ctx = saved_ctx;
+    if (wasm_in_ptr) wasm_runtime_module_free(inst, wasm_in_ptr);
+    wasm_in_ptr = 0;
 
+    /* Create output buffer */
+    if (result > 0 && (uint32_t)result <= max_output) {
+        int poolable = (heap_size <= HL_WASM_POOL_HEAP_THRESHOLD);
+        if (poolable) {
+            /* Zero-copy: wrap WASM linear memory, keep instance checked out */
+            *output_buf = hl_wasm_buffer_create_wasm(
+                inst, exec_env, process_fn, mod, cache,
+                wasm_out_ptr, native_out, (size_t)result,
+                heap_size, stack_size, alloc);
+            if (*output_buf)
+                return HL_WASM_OK; /* instance stays checked out */
+            /* RL-1: When hl_wasm_buffer_create_wasm fails, we fall through to the
+             * non-poolable path which properly frees wasm_out_ptr and releases
+             * the instance via hl_wasm_pool_release below. */
+        }
+        /* Non-poolable or alloc failure: copy output, release instance */
+        *output_buf = hl_wasm_buffer_create_owned(native_out, (size_t)result, alloc);
+    } else {
+        /* Zero-length output */
+        *output_buf = hl_wasm_buffer_create_owned(NULL, 0, alloc);
+    }
+
+    if (wasm_out_ptr) wasm_runtime_module_free(inst, wasm_out_ptr);
+    int ok = (*output_buf != NULL);
+    hl_wasm_pool_release(cache, mod, inst, exec_env, process_fn,
+                 heap_size, stack_size, ok);
+
+    return ok ? HL_WASM_OK : HL_WASM_ERR_INTERNAL;
+
+cleanup_bufs_err:
+    tl_host_ctx = saved_ctx;
     if (wasm_in_ptr)  wasm_runtime_module_free(inst, wasm_in_ptr);
     if (wasm_out_ptr) wasm_runtime_module_free(inst, wasm_out_ptr);
-
-    /* Return to pool on success, destroy on error */
-    pool_release(cache, mod, inst, exec_env, process_fn,
-                 heap_size, stack_size, ret == HL_WASM_OK);
+    hl_wasm_pool_release(cache, mod, inst, exec_env, process_fn,
+                 heap_size, stack_size, 0);
     return ret;
 }
 

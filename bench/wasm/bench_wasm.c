@@ -18,6 +18,7 @@
 #ifdef HL_ENABLE_WASM
 
 #include "hull/cap/wasm.h"
+#include "hull/cap/wasm_buffer.h"
 #include "hull/limits.h"
 #include "hull/vfs.h"
 #include "hull/entry.h"
@@ -168,7 +169,7 @@ static void bench_wasm(const char *label, HlWasmCache *cache,
         const char *err = NULL;
         hl_cap_wasm_call(cache, module_name,
                          input, input_len, &out, &out_len,
-                         &opts, NULL, NULL, vfs, NULL, &err);
+                         &opts, NULL, NULL, vfs, NULL, NULL, &err);
         free(out);
     }
 
@@ -179,7 +180,7 @@ static void bench_wasm(const char *label, HlWasmCache *cache,
         const char *err = NULL;
         int rc = hl_cap_wasm_call(cache, module_name,
                                   input, input_len, &out, &out_len,
-                                  &opts, NULL, NULL, vfs, NULL, &err);
+                                  &opts, NULL, NULL, vfs, NULL, NULL, &err);
         if (rc != 0) {
             fprintf(stderr, "ERROR: %s call failed: %s\n",
                     label, err ? err : "unknown");
@@ -204,7 +205,7 @@ static void bench_wasm(const char *label, HlWasmCache *cache,
         uint64_t t0 = now_ns();
         hl_cap_wasm_call(cache, module_name,
                          input, input_len, &out, &out_len,
-                         &opts, NULL, NULL, vfs, NULL, &err);
+                         &opts, NULL, NULL, vfs, NULL, NULL, &err);
         uint64_t t1 = now_ns();
         samples[i] = t1 - t0;
         free(out);
@@ -407,7 +408,7 @@ static void bench_wasm_approx(const char *label, HlWasmCache *cache,
         const char *err = NULL;
         hl_cap_wasm_call(cache, module_name,
                          input, input_len, &out, &out_len,
-                         &opts, NULL, NULL, vfs, NULL, &err);
+                         &opts, NULL, NULL, vfs, NULL, NULL, &err);
         free(out);
     }
 
@@ -418,7 +419,7 @@ static void bench_wasm_approx(const char *label, HlWasmCache *cache,
         const char *err = NULL;
         int rc = hl_cap_wasm_call(cache, module_name,
                                   input, input_len, &out, &out_len,
-                                  &opts, NULL, NULL, vfs, NULL, &err);
+                                  &opts, NULL, NULL, vfs, NULL, NULL, &err);
         if (rc != 0) {
             fprintf(stderr, "ERROR: %s call failed: %s\n",
                     label, err ? err : "unknown");
@@ -443,7 +444,7 @@ static void bench_wasm_approx(const char *label, HlWasmCache *cache,
         uint64_t t0 = now_ns();
         hl_cap_wasm_call(cache, module_name,
                          input, input_len, &out, &out_len,
-                         &opts, NULL, NULL, vfs, NULL, &err);
+                         &opts, NULL, NULL, vfs, NULL, NULL, &err);
         uint64_t t1 = now_ns();
         samples[i] = t1 - t0;
         free(out);
@@ -859,14 +860,14 @@ int main(int argc, char **argv)
                 for (int i = 0; i < WARMUP_ITERS; i++) {
                     void *out = NULL; size_t ol = 0; const char *err = NULL;
                     hl_cap_wasm_call(bc, interp_mod, inp, sz, &out, &ol,
-                                     &opts, NULL, NULL, &vfs, NULL, &err);
+                                     &opts, NULL, NULL, &vfs, NULL, NULL, &err);
                     free(out);
                 }
                 for (int i = 0; i < pool_iters; i++) {
                     void *out = NULL; size_t ol = 0; const char *err = NULL;
                     uint64_t t0 = now_ns();
                     hl_cap_wasm_call(bc, interp_mod, inp, sz, &out, &ol,
-                                     &opts, NULL, NULL, &vfs, NULL, &err);
+                                     &opts, NULL, NULL, &vfs, NULL, NULL, &err);
                     s_unp[i] = now_ns() - t0;
                     free(out);
                 }
@@ -889,13 +890,13 @@ int main(int argc, char **argv)
                 /* Prime */
                 { void *out = NULL; size_t ol = 0; const char *err = NULL;
                   hl_cap_wasm_call(bc, interp_mod, inp, sz, &out, &ol,
-                                   &opts, NULL, NULL, &vfs, NULL, &err);
+                                   &opts, NULL, NULL, &vfs, NULL, NULL, &err);
                   free(out); }
                 for (int i = 0; i < pool_iters; i++) {
                     void *out = NULL; size_t ol = 0; const char *err = NULL;
                     uint64_t t0 = now_ns();
                     hl_cap_wasm_call(bc, interp_mod, inp, sz, &out, &ol,
-                                     &opts, NULL, NULL, &vfs, NULL, &err);
+                                     &opts, NULL, NULL, &vfs, NULL, NULL, &err);
                     s_pol[i] = now_ns() - t0;
                     free(out);
                 }
@@ -915,13 +916,13 @@ int main(int argc, char **argv)
                 /* Prime */
                 { void *out = NULL; size_t ol = 0; const char *err = NULL;
                   hl_cap_wasm_call(bc, aot_mod, inp, sz, &out, &ol,
-                                   &opts, NULL, NULL, &vfs, NULL, &err);
+                                   &opts, NULL, NULL, &vfs, NULL, NULL, &err);
                   free(out); }
                 for (int i = 0; i < pool_iters; i++) {
                     void *out = NULL; size_t ol = 0; const char *err = NULL;
                     uint64_t t0 = now_ns();
                     hl_cap_wasm_call(bc, aot_mod, inp, sz, &out, &ol,
-                                     &opts, NULL, NULL, &vfs, NULL, &err);
+                                     &opts, NULL, NULL, &vfs, NULL, NULL, &err);
                     s_aot[i] = now_ns() - t0;
                     free(out);
                 }
@@ -947,6 +948,196 @@ int main(int argc, char **argv)
         free(s_unp);
         free(s_pol);
         free(s_aot);
+    }
+
+    /* ── Buffer mode: string vs buffer single call ─────────────────── */
+
+    printf("\n=== Buffer Mode: String vs Zero-Copy (mem_histogram) ===\n");
+    printf("Compares output handling: string (malloc+memcpy+free) vs HlWasmBuffer.\n");
+    printf("Both use pooled instances. Buffer defers instance return to destroy.\n\n");
+
+    {
+        const char *mod = "mem_histogram_interp";
+        int buf_iters = 100;
+        uint64_t *s_str = malloc((size_t)buf_iters * sizeof(uint64_t));
+        uint64_t *s_buf = malloc((size_t)buf_iters * sizeof(uint64_t));
+
+        static const struct { const char *label; size_t size; } buf_sizes[] = {
+            { "4 KB",    4096 },
+            { "64 KB",   65536 },
+            { "256 KB",  262144 },
+            { "1 MB",    1048576 },
+        };
+        int n_buf_sizes = (int)(sizeof(buf_sizes) / sizeof(buf_sizes[0]));
+
+        for (int si = 0; si < n_buf_sizes; si++) {
+            size_t sz = buf_sizes[si].size;
+            uint8_t *inp = malloc(sz);
+            generate_input(inp, sz, 42);
+
+            uint32_t pooled_heap = (uint32_t)(sz * 4 + 64 * 1024);
+            if (pooled_heap < HL_WASM_DEFAULT_HEAP) pooled_heap = HL_WASM_DEFAULT_HEAP;
+            if (pooled_heap > HL_WASM_POOL_HEAP_THRESHOLD)
+                pooled_heap = HL_WASM_POOL_HEAP_THRESHOLD;
+
+            HlWasmCallOpts opts = {0};
+            opts.max_input  = (uint32_t)(sz + 1024);
+            opts.max_output = (uint32_t)(sz + 1024);
+            opts.heap_size  = pooled_heap;
+            opts.gas        = HL_WASM_MAX_GAS;
+
+            printf("--- %s ---\n", buf_sizes[si].label);
+
+            /* Prime pool */
+            { void *out = NULL; size_t ol = 0; const char *err = NULL;
+              hl_cap_wasm_call(&cache, mod, inp, sz, &out, &ol,
+                               &opts, NULL, NULL, &vfs, NULL, NULL, &err);
+              free(out); }
+
+            /* String mode (original) */
+            for (int i = 0; i < buf_iters; i++) {
+                void *out = NULL; size_t ol = 0; const char *err = NULL;
+                uint64_t t0 = now_ns();
+                hl_cap_wasm_call(&cache, mod, inp, sz, &out, &ol,
+                                 &opts, NULL, NULL, &vfs, NULL, NULL, &err);
+                s_str[i] = now_ns() - t0;
+                free(out);
+            }
+            Stats st_str = compute_stats(s_str, buf_iters);
+            print_stats("String:", &st_str);
+
+            /* Buffer mode */
+            for (int i = 0; i < buf_iters; i++) {
+                HlWasmBuffer *out_buf = NULL; const char *err = NULL;
+                uint64_t t0 = now_ns();
+                hl_cap_wasm_call_buf(&cache, mod, inp, sz, &out_buf,
+                                     &opts, NULL, NULL, &vfs, NULL, NULL, &err);
+                s_buf[i] = now_ns() - t0;
+                hl_wasm_buffer_destroy(out_buf);
+                free(out_buf);
+            }
+            Stats st_buf = compute_stats(s_buf, buf_iters);
+            print_stats("Buffer:", &st_buf);
+
+            double ratio = st_str.mean > 0.1 ? st_buf.mean / st_str.mean : 0;
+            printf("  Buffer/String ratio: %.2fx (%.1fus saved per call)\n\n",
+                   ratio, (st_str.mean - st_buf.mean) / 1000.0);
+
+            free(inp);
+        }
+
+        free(s_str);
+        free(s_buf);
+    }
+
+    /* ── Chain benchmark: 3-step pipeline string vs buffer ────────── */
+
+    printf("\n=== Chain Benchmark: 3-Step Pipeline (mem_histogram) ===\n");
+    printf("Pipeline: call→call→call with output of each feeding the next.\n");
+    printf("String mode: materialize to malloc'd bytes between each call.\n");
+    printf("Buffer mode: pass HlWasmBuffer data pointer directly (zero-copy read).\n\n");
+
+    {
+        const char *mod = "mem_histogram_interp";
+        int chain_iters = 100;
+        uint64_t *s_str = malloc((size_t)chain_iters * sizeof(uint64_t));
+        uint64_t *s_buf = malloc((size_t)chain_iters * sizeof(uint64_t));
+
+        static const struct { const char *label; size_t size; } chain_sizes[] = {
+            { "4 KB",    4096 },
+            { "64 KB",   65536 },
+            { "256 KB",  262144 },
+        };
+        int n_chain_sizes = (int)(sizeof(chain_sizes) / sizeof(chain_sizes[0]));
+
+        for (int si = 0; si < n_chain_sizes; si++) {
+            size_t sz = chain_sizes[si].size;
+            uint8_t *inp = malloc(sz);
+            generate_input(inp, sz, 42);
+
+            uint32_t pooled_heap = (uint32_t)(sz * 4 + 64 * 1024);
+            if (pooled_heap < HL_WASM_DEFAULT_HEAP) pooled_heap = HL_WASM_DEFAULT_HEAP;
+            if (pooled_heap > HL_WASM_POOL_HEAP_THRESHOLD)
+                pooled_heap = HL_WASM_POOL_HEAP_THRESHOLD;
+
+            HlWasmCallOpts opts = {0};
+            opts.max_input  = (uint32_t)(sz + 1024);
+            opts.max_output = (uint32_t)(sz + 1024);
+            opts.heap_size  = pooled_heap;
+            opts.gas        = HL_WASM_MAX_GAS;
+
+            printf("--- %s (×3 chain) ---\n", chain_sizes[si].label);
+
+            /* Prime pool with enough instances for chaining */
+            for (int p = 0; p < 3; p++) {
+                void *out = NULL; size_t ol = 0; const char *err = NULL;
+                hl_cap_wasm_call(&cache, mod, inp, sz, &out, &ol,
+                                 &opts, NULL, NULL, &vfs, NULL, NULL, &err);
+                free(out);
+            }
+
+            /* String mode chain: call→malloc+memcpy→call→malloc+memcpy→call */
+            for (int i = 0; i < chain_iters; i++) {
+                uint64_t t0 = now_ns();
+
+                void *out1 = NULL; size_t ol1 = 0; const char *err = NULL;
+                hl_cap_wasm_call(&cache, mod, inp, sz, &out1, &ol1,
+                                 &opts, NULL, NULL, &vfs, NULL, NULL, &err);
+
+                void *out2 = NULL; size_t ol2 = 0; err = NULL;
+                hl_cap_wasm_call(&cache, mod, out1, ol1, &out2, &ol2,
+                                 &opts, NULL, NULL, &vfs, NULL, NULL, &err);
+                free(out1);
+
+                void *out3 = NULL; size_t ol3 = 0; err = NULL;
+                hl_cap_wasm_call(&cache, mod, out2, ol2, &out3, &ol3,
+                                 &opts, NULL, NULL, &vfs, NULL, NULL, &err);
+                free(out2);
+
+                s_str[i] = now_ns() - t0;
+                free(out3);
+            }
+            Stats st_str = compute_stats(s_str, chain_iters);
+            print_stats("String:", &st_str);
+
+            /* Buffer mode chain: call_buf→read data ptr→call_buf→read data ptr→call_buf */
+            for (int i = 0; i < chain_iters; i++) {
+                uint64_t t0 = now_ns();
+
+                HlWasmBuffer *buf1 = NULL; const char *err = NULL;
+                hl_cap_wasm_call_buf(&cache, mod, inp, sz, &buf1,
+                                     &opts, NULL, NULL, &vfs, NULL, NULL, &err);
+
+                HlWasmBuffer *buf2 = NULL; err = NULL;
+                hl_cap_wasm_call_buf(&cache, mod,
+                                     hl_wasm_buffer_data(buf1),
+                                     hl_wasm_buffer_len(buf1),
+                                     &buf2, &opts, NULL, NULL, &vfs, NULL, NULL, &err);
+                hl_wasm_buffer_destroy(buf1); free(buf1);
+
+                HlWasmBuffer *buf3 = NULL; err = NULL;
+                hl_cap_wasm_call_buf(&cache, mod,
+                                     hl_wasm_buffer_data(buf2),
+                                     hl_wasm_buffer_len(buf2),
+                                     &buf3, &opts, NULL, NULL, &vfs, NULL, NULL, &err);
+                hl_wasm_buffer_destroy(buf2); free(buf2);
+
+                s_buf[i] = now_ns() - t0;
+                hl_wasm_buffer_destroy(buf3); free(buf3);
+            }
+            Stats st_buf = compute_stats(s_buf, chain_iters);
+            print_stats("Buffer:", &st_buf);
+
+            double ratio = st_str.mean > 0.1 ? st_buf.mean / st_str.mean : 0;
+            double saved = (st_str.mean - st_buf.mean) / 1000.0;
+            printf("  Buffer/String ratio: %.2fx (%.1fus saved per 3-step chain)\n\n",
+                   ratio, saved);
+
+            free(inp);
+        }
+
+        free(s_str);
+        free(s_buf);
     }
 
     /* Cleanup */

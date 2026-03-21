@@ -298,5 +298,118 @@ else
 fi
 
 echo ""
+echo "=== E2E: compute.call buffer mode (Lua) ==="
+
+BUFDIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR" "$AOTDIR" "$NOAOT_DIR" "$BUFDIR"' EXIT
+
+mkdir -p "$BUFDIR/compute"
+cp tests/fixtures/compute/echo.wasm "$BUFDIR/compute/echo.wasm"
+
+cat > "$BUFDIR/app.lua" << 'EOF'
+app.get("/health", function(req, res) res:json({ ok = true }) end)
+EOF
+
+mkdir -p "$BUFDIR/tests"
+cat > "$BUFDIR/tests/test_buffer.lua" << 'EOF'
+test("compute.call buffer mode", function()
+    local buf, err = compute.call("echo", "hello buffer", { buffer = true })
+    assert(not err, "err: " .. tostring(err))
+    assert(buf, "expected buffer")
+    assert(buf:len() == 12, "len: " .. tostring(buf:len()))
+    assert(buf:bytes() == "hello buffer", "mismatch: " .. tostring(buf:bytes()))
+    buf:close()
+    assert(buf:bytes() == nil, "expected nil after close")
+end)
+
+test("compute.call buffer chaining", function()
+    local buf1, err = compute.call("echo", "chain", { buffer = true })
+    assert(not err, "err: " .. tostring(err))
+    local buf2, err2 = compute.call("echo", buf1, { buffer = true })
+    assert(not err2, "err2: " .. tostring(err2))
+    assert(buf2:bytes() == "chain", "chain mismatch: " .. tostring(buf2:bytes()))
+    buf2:close()
+    buf1:close()
+end)
+
+test("compute.buffer from string", function()
+    local buf = compute.buffer("test input")
+    assert(buf, "expected buffer")
+    assert(buf:len() == 10, "len: " .. tostring(buf:len()))
+    -- Use as input to compute.call
+    local out, err = compute.call("echo", buf)
+    assert(not err, "err: " .. tostring(err))
+    assert(out == "test input", "mismatch: " .. tostring(out))
+    buf:close()
+end)
+EOF
+
+OUTPUT=$($HULL test "$BUFDIR" 2>&1) || true
+echo "$OUTPUT"
+if echo "$OUTPUT" | grep -qE "0 failed|tests passed$"; then
+    pass "Lua buffer mode tests"
+else
+    fail "Lua buffer mode tests"
+fi
+
+echo ""
+echo "=== E2E: compute.call buffer mode (JS) ==="
+
+rm -f "$BUFDIR/app.lua" "$BUFDIR/tests/test_buffer.lua"
+
+cat > "$BUFDIR/app.js" << 'JSEOF'
+import { app } from "hull:app";
+app.get("/health", (req, res) => { res.json({ ok: true }); });
+JSEOF
+
+cat > "$BUFDIR/tests/test_buffer.js" << 'JSEOF'
+import { compute } from "hull:compute";
+
+test("compute.call buffer mode", () => {
+    const buf = compute.call("echo", "hello buffer", { buffer: true });
+    test.eq(buf.length, 12);
+    const ab = buf.bytes();
+    const bytes = new Uint8Array(ab);
+    let result = "";
+    for (let i = 0; i < bytes.length; i++) result += String.fromCharCode(bytes[i]);
+    test.eq(result, "hello buffer");
+    buf.close();
+    test.eq(buf.bytes(), null);
+});
+
+test("compute.call buffer chaining", () => {
+    const buf1 = compute.call("echo", "chain", { buffer: true });
+    const buf2 = compute.call("echo", buf1, { buffer: true });
+    const ab = buf2.bytes();
+    const bytes = new Uint8Array(ab);
+    let result = "";
+    for (let i = 0; i < bytes.length; i++) result += String.fromCharCode(bytes[i]);
+    test.eq(result, "chain");
+    buf2.close();
+    buf1.close();
+});
+
+test("compute.buffer from string", () => {
+    const buf = compute.buffer("test input");
+    test.eq(buf.length, 10);
+    // Use as input to compute.call (non-buffer mode)
+    const out = compute.call("echo", buf);
+    const bytes = new Uint8Array(out);
+    let result = "";
+    for (let i = 0; i < bytes.length; i++) result += String.fromCharCode(bytes[i]);
+    test.eq(result, "test input");
+    buf.close();
+});
+JSEOF
+
+OUTPUT=$($HULL test "$BUFDIR" 2>&1) || true
+echo "$OUTPUT"
+if echo "$OUTPUT" | grep -qE "0 failed|tests passed$"; then
+    pass "JS buffer mode tests"
+else
+    fail "JS buffer mode tests"
+fi
+
+echo ""
 echo "=== Results: $PASS/$TOTAL passed ==="
 if [ $FAIL -gt 0 ]; then exit 1; fi

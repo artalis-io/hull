@@ -116,7 +116,7 @@ static int agent_ctx_init(const char *app_dir, AgentCtx *ctx)
     hl_vfs_init(&ctx->platform_vfs, hl_stdlib_entries, NULL);
     hl_migrate_run(ctx->db, &ctx->app_vfs);
 
-    hl_stmt_cache_init(&ctx->stmt_cache, ctx->db);
+    hl_stmt_cache_init(&ctx->stmt_cache, ctx->db, NULL);
 
 #ifdef HL_ENABLE_LUA
     if (ctx->is_lua) {
@@ -839,7 +839,7 @@ static int agent_test_lua(const char *app_dir, const char *entry, ShJsonBuf *out
     hl_vfs_init(&ctx.platform_vfs, hl_stdlib_entries, NULL);
     hl_migrate_run(ctx.db, &ctx.app_vfs);
 
-    hl_stmt_cache_init(&ctx.stmt_cache, ctx.db);
+    hl_stmt_cache_init(&ctx.stmt_cache, ctx.db, NULL);
 
     HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
     cfg.sandbox = 1;
@@ -960,7 +960,7 @@ static int agent_test_js(const char *app_dir, const char *entry, ShJsonBuf *out)
     hl_vfs_init(&ctx.platform_vfs, hl_stdlib_entries, NULL);
     hl_migrate_run(ctx.db, &ctx.app_vfs);
 
-    hl_stmt_cache_init(&ctx.stmt_cache, ctx.db);
+    hl_stmt_cache_init(&ctx.stmt_cache, ctx.db, NULL);
 
     HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
     HlJS *js = &ctx.rt_storage.js;

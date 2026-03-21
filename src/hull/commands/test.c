@@ -78,7 +78,7 @@ static int run_lua_tests(const char *app_dir, const char *entry)
     hl_migrate_run(db, &app_vfs);
 
     HlStmtCache lua_stmt_cache;
-    hl_stmt_cache_init(&lua_stmt_cache, db);
+    hl_stmt_cache_init(&lua_stmt_cache, db, NULL);
     lua.base.db = db;
     lua.base.stmt_cache = &lua_stmt_cache;
     lua.base.app_vfs = &app_vfs;
@@ -215,7 +215,7 @@ static int run_js_tests(const char *app_dir, const char *entry)
     hl_migrate_run(db, &app_vfs);
 
     HlStmtCache js_stmt_cache;
-    hl_stmt_cache_init(&js_stmt_cache, db);
+    hl_stmt_cache_init(&js_stmt_cache, db, NULL);
     js.base.db = db;
     js.base.stmt_cache = &js_stmt_cache;
     js.base.app_vfs = &app_vfs;

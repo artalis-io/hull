@@ -217,7 +217,7 @@ UTEST(hl_cap_fs, mmap_basic)
     ASSERT_EQ(hl_cap_fs_write(&test_cfg, "mmap_test.txt", data, strlen(data)), 0);
 
     /* mmap it */
-    HlMappedBuffer *buf = hl_cap_fs_mmap(&test_cfg, "mmap_test.txt");
+    HlMappedBuffer *buf = hl_cap_fs_mmap(&test_cfg, "mmap_test.txt", NULL);
     ASSERT_NE(buf, NULL);
     ASSERT_EQ(buf->len, strlen(data));
     ASSERT_EQ(buf->closed, 0);
@@ -230,22 +230,22 @@ UTEST(hl_cap_fs, mmap_basic)
 UTEST(hl_cap_fs, mmap_path_traversal)
 {
     setup_fs();
-    ASSERT_EQ(hl_cap_fs_mmap(&test_cfg, "../etc/passwd"), NULL);
-    ASSERT_EQ(hl_cap_fs_mmap(&test_cfg, "/etc/passwd"), NULL);
+    ASSERT_EQ(hl_cap_fs_mmap(&test_cfg, "../etc/passwd", NULL), NULL);
+    ASSERT_EQ(hl_cap_fs_mmap(&test_cfg, "/etc/passwd", NULL), NULL);
     teardown_fs();
 }
 
 UTEST(hl_cap_fs, mmap_nonexistent)
 {
     setup_fs();
-    ASSERT_EQ(hl_cap_fs_mmap(&test_cfg, "no_such_file.txt"), NULL);
+    ASSERT_EQ(hl_cap_fs_mmap(&test_cfg, "no_such_file.txt", NULL), NULL);
     teardown_fs();
 }
 
 UTEST(hl_cap_fs, mmap_null_safe)
 {
-    ASSERT_EQ(hl_cap_fs_mmap(NULL, "test.txt"), NULL);
-    ASSERT_EQ(hl_cap_fs_mmap(&test_cfg, NULL), NULL);
+    ASSERT_EQ(hl_cap_fs_mmap(NULL, "test.txt", NULL), NULL);
+    ASSERT_EQ(hl_cap_fs_mmap(&test_cfg, NULL, NULL), NULL);
     hl_cap_fs_munmap(NULL); /* should not crash */
 }
 
