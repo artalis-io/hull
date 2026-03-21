@@ -685,7 +685,6 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
     /* Free input allocation — no longer needed */
     tl_host_ctx = saved_ctx;
     if (wasm_in_ptr) wasm_runtime_module_free(inst, wasm_in_ptr);
-    wasm_in_ptr = 0;
 
     /* Create output buffer */
     if (result > 0 && (uint32_t)result <= max_output) {
