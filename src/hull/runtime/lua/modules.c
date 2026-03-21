@@ -3553,6 +3553,7 @@ static int lua_compute_async_call(lua_State *L)
 
     op->server = lua->server;
     op->module = mod->module;
+    op->wasm_cache = lua->base.wasm_cache;
     snprintf(op->name, sizeof(op->name), "%s", name);
     op->opts = opts;
 

@@ -17,9 +17,29 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <pthread.h>
 
 /* Forward declarations */
 struct HlVfs;
+
+/* ── Instance pool ─────────────────────────────────────────────────── */
+
+#ifndef HL_WASM_POOL_MAX
+#define HL_WASM_POOL_MAX 8
+#endif
+
+typedef struct {
+    void    *instance;      /* wasm_module_inst_t */
+    void    *exec_env;      /* wasm_exec_env_t */
+    void    *process_fn;    /* wasm_function_inst_t (cached hull_process) */
+    uint32_t heap_size;
+    uint32_t stack_size;
+} HlWasmPoolEntry;
+
+typedef struct {
+    HlWasmPoolEntry entries[HL_WASM_POOL_MAX];
+    int count;
+} HlWasmPool;
 
 /* ── Module cache ──────────────────────────────────────────────────── */
 
@@ -32,12 +52,14 @@ typedef struct {
     uint32_t wasm_buf_len;
     int      is_aot;
     uint32_t abi_version;
+    HlWasmPool pool;       /* per-module instance pool */
 } HlWasmModule;
 
 typedef struct HlWasmCache {
     HlWasmModule modules[HL_WASM_CACHE_MAX];
     int          count;
     int          initialized;
+    pthread_mutex_t pool_mutex; /* guards all pool operations */
 } HlWasmCache;
 
 /* ── Call options ──────────────────────────────────────────────────── */

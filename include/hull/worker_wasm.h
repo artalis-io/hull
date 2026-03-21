@@ -32,6 +32,7 @@ typedef struct HlWorkerWasmOp {
 
     /* Input (deep-copied, owned by this struct) */
     void          *module;        /* wasm_module_t (borrowed from cache, immutable) */
+    void          *wasm_cache;    /* HlWasmCache* for pool operations */
     char           name[256];     /* module name (for logging) */
     void          *input;         /* deep-copied input bytes */
     size_t         input_len;

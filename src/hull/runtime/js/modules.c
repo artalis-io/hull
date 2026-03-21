@@ -3999,6 +3999,7 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
 
     op->server = js->server;
     op->module = module;
+    op->wasm_cache = js->base.wasm_cache;
     snprintf(op->name, sizeof(op->name), "%s", name);
     op->opts = opts;
 

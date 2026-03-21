@@ -91,4 +91,12 @@
 #define HL_WASM_MAX_GAS            (100LL * 1000 * 1000 * 1000) /* 100B instructions */
 #endif
 
+/* ── WASM instance pool ───────────────────────────────────────────── */
+#ifndef HL_WASM_POOL_MAX
+#define HL_WASM_POOL_MAX            8
+#endif
+#ifndef HL_WASM_POOL_HEAP_THRESHOLD
+#define HL_WASM_POOL_HEAP_THRESHOLD (4 * 1024 * 1024)   /* 4 MB */
+#endif
+
 #endif /* HL_LIMITS_H */

@@ -386,6 +386,173 @@ UTEST(hl_cap_wasm, call_with_custom_opts)
     hl_cap_wasm_destroy(&cache);
 }
 
+/* ── Pool tests ────────────────────────────────────────────────────── */
+
+UTEST(hl_cap_wasm, pool_reuse)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    /* First call: cold instantiation */
+    const char *input = "pool test";
+    size_t input_len = strlen(input);
+    void *output = NULL;
+    size_t output_len = 0;
+    const char *err = NULL;
+
+    int rc = hl_cap_wasm_call(&cache, "echo",
+                               input, input_len,
+                               &output, &output_len,
+                               NULL, NULL, NULL,
+                               &vfs, NULL, &err);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(output_len, input_len);
+    ASSERT_EQ(memcmp(output, input, input_len), 0);
+    free(output);
+
+    /* Second call: should reuse pooled instance */
+    output = NULL;
+    output_len = 0;
+    err = NULL;
+    rc = hl_cap_wasm_call(&cache, "echo",
+                           input, input_len,
+                           &output, &output_len,
+                           NULL, NULL, NULL,
+                           &vfs, NULL, &err);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(output_len, input_len);
+    ASSERT_EQ(memcmp(output, input, input_len), 0);
+    free(output);
+
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(hl_cap_wasm, pool_stress)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    const char *input = "stress";
+    size_t input_len = strlen(input);
+
+    for (int i = 0; i < 100; i++) {
+        void *output = NULL;
+        size_t output_len = 0;
+        const char *err = NULL;
+
+        int rc = hl_cap_wasm_call(&cache, "echo",
+                                   input, input_len,
+                                   &output, &output_len,
+                                   NULL, NULL, NULL,
+                                   &vfs, NULL, &err);
+        ASSERT_EQ(rc, 0);
+        ASSERT_EQ(output_len, input_len);
+        free(output);
+    }
+
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(hl_cap_wasm, pool_error_no_reuse)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    /* Gas-exhausted call — instance should NOT be pooled */
+    HlWasmCallOpts bad_opts = {0};
+    bad_opts.gas = 1;
+
+    void *output = NULL;
+    size_t output_len = 0;
+    const char *err = NULL;
+
+    int rc = hl_cap_wasm_call(&cache, "echo",
+                               "hello", 5,
+                               &output, &output_len,
+                               &bad_opts, NULL, NULL,
+                               &vfs, NULL, &err);
+    ASSERT_NE(rc, 0);
+    free(output);
+
+    /* Normal call should still work (fresh instance) */
+    output = NULL;
+    output_len = 0;
+    err = NULL;
+    rc = hl_cap_wasm_call(&cache, "echo",
+                           "hello", 5,
+                           &output, &output_len,
+                           NULL, NULL, NULL,
+                           &vfs, NULL, &err);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(output_len, (size_t)5);
+    ASSERT_EQ(memcmp(output, "hello", 5), 0);
+    free(output);
+
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(hl_cap_wasm, pool_size_mismatch)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    const char *input = "mismatch";
+    size_t input_len = strlen(input);
+
+    /* Call with heap_size = 1 MB */
+    HlWasmCallOpts opts1 = {0};
+    opts1.max_input  = 1024;
+    opts1.max_output = 1024;
+    opts1.heap_size  = 1 * 1024 * 1024;
+    opts1.stack_size = 32 * 1024;
+
+    void *output = NULL;
+    size_t output_len = 0;
+    const char *err = NULL;
+
+    int rc = hl_cap_wasm_call(&cache, "echo",
+                               input, input_len,
+                               &output, &output_len,
+                               &opts1, NULL, NULL,
+                               &vfs, NULL, &err);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(output_len, input_len);
+    free(output);
+
+    /* Call with different heap_size = 2 MB — pool miss, fresh instance */
+    HlWasmCallOpts opts2 = {0};
+    opts2.max_input  = 1024;
+    opts2.max_output = 1024;
+    opts2.heap_size  = 2 * 1024 * 1024;
+    opts2.stack_size = 32 * 1024;
+
+    output = NULL;
+    output_len = 0;
+    err = NULL;
+    rc = hl_cap_wasm_call(&cache, "echo",
+                           input, input_len,
+                           &output, &output_len,
+                           &opts2, NULL, NULL,
+                           &vfs, NULL, &err);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(output_len, input_len);
+    free(output);
+
+    hl_cap_wasm_destroy(&cache);
+}
+
 UTEST(hl_cap_wasm, call_uninitialized_cache)
 {
     HlWasmCache cache;

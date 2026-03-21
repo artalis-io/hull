@@ -801,6 +801,154 @@ int main(int argc, char **argv)
         }
     }
 
+    /* ── Native C vs WASM: total execution time across input sizes ── */
+
+    printf("\n=== Native C vs WASM: Total Execution Time (compute_hash) ===\n");
+    printf("All times include computation + per-call overhead.\n");
+    printf("Native C   = direct function call (no isolation).\n");
+    printf("Unpooled   = fresh WASM instance per call (heap > pool threshold).\n");
+    printf("Pooled     = WASM instance reuse (interpreter, gas metered).\n");
+    printf("Pooled AOT = WASM instance reuse (AOT compiled, gas metered).\n\n");
+
+    {
+        HlWasmCache *bc = &cache;
+        const char *interp_mod = "compute_hash_interp";
+        const char *aot_mod = hash_aot.data ? "compute_hash_aot" : NULL;
+
+        static const struct { const char *label; size_t size; } pool_sizes[] = {
+            { "64 B",    64 },
+            { "1 KB",    1024 },
+            { "4 KB",    4096 },
+            { "64 KB",   65536 },
+            { "256 KB",  262144 },
+        };
+        int n_pool_sizes = (int)(sizeof(pool_sizes) / sizeof(pool_sizes[0]));
+
+        int pool_iters = 100;
+        uint64_t *s_nat = malloc((size_t)pool_iters * sizeof(uint64_t));
+        uint64_t *s_unp = malloc((size_t)pool_iters * sizeof(uint64_t));
+        uint64_t *s_pol = malloc((size_t)pool_iters * sizeof(uint64_t));
+        uint64_t *s_aot = malloc((size_t)pool_iters * sizeof(uint64_t));
+        uint8_t *nat_out = malloc(MAX_OUTPUT);
+
+        for (int si = 0; si < n_pool_sizes; si++) {
+            size_t sz = pool_sizes[si].size;
+            uint8_t *inp = malloc(sz);
+            generate_input(inp, sz, 42);
+
+            printf("--- %s ---\n", pool_sizes[si].label);
+
+            /* Native C */
+            for (int i = 0; i < WARMUP_ITERS; i++)
+                compute_hash_native(inp, sz, nat_out, MAX_OUTPUT);
+            for (int i = 0; i < pool_iters; i++) {
+                uint64_t t0 = now_ns();
+                compute_hash_native(inp, sz, nat_out, MAX_OUTPUT);
+                s_nat[i] = now_ns() - t0;
+            }
+            Stats st_nat = compute_stats(s_nat, pool_iters);
+            print_stats("Native C:", &st_nat);
+
+            /* Unpooled: 32 MB heap > threshold → no pooling */
+            {
+                HlWasmCallOpts opts = {0};
+                opts.max_input  = (uint32_t)(sz + 1024);
+                opts.max_output = (uint32_t)(sz + 1024);
+                opts.heap_size  = 32 * 1024 * 1024;
+                opts.gas        = HL_WASM_MAX_GAS;
+                for (int i = 0; i < WARMUP_ITERS; i++) {
+                    void *out = NULL; size_t ol = 0; const char *err = NULL;
+                    hl_cap_wasm_call(bc, interp_mod, inp, sz, &out, &ol,
+                                     &opts, NULL, NULL, &vfs, NULL, &err);
+                    free(out);
+                }
+                for (int i = 0; i < pool_iters; i++) {
+                    void *out = NULL; size_t ol = 0; const char *err = NULL;
+                    uint64_t t0 = now_ns();
+                    hl_cap_wasm_call(bc, interp_mod, inp, sz, &out, &ol,
+                                     &opts, NULL, NULL, &vfs, NULL, &err);
+                    s_unp[i] = now_ns() - t0;
+                    free(out);
+                }
+                Stats st_unp = compute_stats(s_unp, pool_iters);
+                print_stats("Unpooled:", &st_unp);
+            }
+
+            /* Pooled interpreter: heap must fit input + output + overhead.
+             * Stay under pool threshold (4 MB) so pooling kicks in. */
+            uint32_t pooled_heap = (uint32_t)(sz * 4 + 64 * 1024);
+            if (pooled_heap < HL_WASM_DEFAULT_HEAP) pooled_heap = HL_WASM_DEFAULT_HEAP;
+            if (pooled_heap > HL_WASM_POOL_HEAP_THRESHOLD)
+                pooled_heap = HL_WASM_POOL_HEAP_THRESHOLD;
+            {
+                HlWasmCallOpts opts = {0};
+                opts.max_input  = (uint32_t)(sz + 1024);
+                opts.max_output = (uint32_t)(sz + 1024);
+                opts.heap_size  = pooled_heap;
+                opts.gas        = HL_WASM_MAX_GAS;
+                /* Prime */
+                { void *out = NULL; size_t ol = 0; const char *err = NULL;
+                  hl_cap_wasm_call(bc, interp_mod, inp, sz, &out, &ol,
+                                   &opts, NULL, NULL, &vfs, NULL, &err);
+                  free(out); }
+                for (int i = 0; i < pool_iters; i++) {
+                    void *out = NULL; size_t ol = 0; const char *err = NULL;
+                    uint64_t t0 = now_ns();
+                    hl_cap_wasm_call(bc, interp_mod, inp, sz, &out, &ol,
+                                     &opts, NULL, NULL, &vfs, NULL, &err);
+                    s_pol[i] = now_ns() - t0;
+                    free(out);
+                }
+                Stats st_pol = compute_stats(s_pol, pool_iters);
+                print_stats("Pooled:", &st_pol);
+            }
+
+            /* Pooled AOT */
+            Stats st_aot = {0};
+            int got_aot = 0;
+            if (aot_mod) {
+                HlWasmCallOpts opts = {0};
+                opts.max_input  = (uint32_t)(sz + 1024);
+                opts.max_output = (uint32_t)(sz + 1024);
+                opts.heap_size  = pooled_heap;
+                opts.gas        = HL_WASM_MAX_GAS;
+                /* Prime */
+                { void *out = NULL; size_t ol = 0; const char *err = NULL;
+                  hl_cap_wasm_call(bc, aot_mod, inp, sz, &out, &ol,
+                                   &opts, NULL, NULL, &vfs, NULL, &err);
+                  free(out); }
+                for (int i = 0; i < pool_iters; i++) {
+                    void *out = NULL; size_t ol = 0; const char *err = NULL;
+                    uint64_t t0 = now_ns();
+                    hl_cap_wasm_call(bc, aot_mod, inp, sz, &out, &ol,
+                                     &opts, NULL, NULL, &vfs, NULL, &err);
+                    s_aot[i] = now_ns() - t0;
+                    free(out);
+                }
+                st_aot = compute_stats(s_aot, pool_iters);
+                print_stats("Pooled AOT:", &st_aot);
+                got_aot = 1;
+            }
+
+            double nb = st_nat.mean > 0.1 ? st_nat.mean : 0.1;
+            Stats st_unp2 = compute_stats(s_unp, pool_iters);
+            Stats st_pol2 = compute_stats(s_pol, pool_iters);
+            printf("  vs native:  %.1fx unpooled  %.1fx pooled",
+                   st_unp2.mean / nb, st_pol2.mean / nb);
+            if (got_aot)
+                printf("  %.1fx pooled-AOT", st_aot.mean / nb);
+            printf("\n\n");
+
+            free(inp);
+        }
+
+        free(nat_out);
+        free(s_nat);
+        free(s_unp);
+        free(s_pol);
+        free(s_aot);
+    }
+
     /* Cleanup */
     hl_cap_wasm_destroy(&cache);
     free(hash_wasm.data);

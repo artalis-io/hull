@@ -124,6 +124,37 @@ Memory64 (Phase 3) is required for >4 GB.
 
 ---
 
+## Phase 2.5 — Instance Pooling
+
+**Goal:** Eliminate per-call WASM instantiation overhead by reusing instances.
+
+**Status:** Complete.
+
+Every `compute.call` previously created a fresh WASM instance (~2.5ms allocation
+overhead), used it, then destroyed it. Instance pooling reuses instances between
+calls, amortizing instantiation cost to near-zero for repeated calls.
+
+### Design
+
+- Per-module pool of `(instance, exec_env, process_fn)` tuples, keyed by `(heap_size, stack_size)`
+- Pool max size: `HL_WASM_POOL_MAX` (default 8) per module
+- Instances with heap > `HL_WASM_POOL_HEAP_THRESHOLD` (4 MB) are never pooled
+- Failed calls (gas exhaustion, call failure) destroy the instance — never pooled
+- Single `pthread_mutex_t` guards all pool operations; WASM execution outside lock
+- No API changes — `compute.call` and `compute.async.call` work identically
+- Linear memory contents are not reset (safe because compute plugins are pure functions)
+
+### Files Changed
+
+- `include/hull/limits.h`: Pool constants (`HL_WASM_POOL_MAX`, `HL_WASM_POOL_HEAP_THRESHOLD`)
+- `include/hull/cap/wasm.h`: `HlWasmPoolEntry`, `HlWasmPool` types; pool in `HlWasmModule`; mutex in `HlWasmCache`
+- `src/hull/cap/wasm.c`: `pool_acquire()`, `pool_release()`, `pool_drain()` statics; modified init/destroy/call
+- `include/hull/worker_wasm.h`: `wasm_cache` field in `HlWorkerWasmOp`
+- `src/hull/worker_wasm.c`: Pool acquire/release in async worker path
+- `src/hull/runtime/{lua,js}/modules.c`: Wire `wasm_cache` pointer to async ops
+
+---
+
 ## Phase 3 — Memory64
 
 **Goal:** Enable 64-bit WASM memory addressing, allowing >4 GB linear memory.

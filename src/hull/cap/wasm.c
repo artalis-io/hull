@@ -17,6 +17,7 @@
 #include "wasm_export.h"
 
 #include <limits.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -124,6 +125,75 @@ static HlWasmModule *cache_find(HlWasmCache *cache, const char *name)
     return NULL;
 }
 
+/* ── Instance pool ─────────────────────────────────────────────────── */
+
+/* Drain all pooled instances for a module. Caller must hold pool_mutex. */
+static void pool_drain(HlWasmPool *pool)
+{
+    for (int i = 0; i < pool->count; i++) {
+        HlWasmPoolEntry *e = &pool->entries[i];
+        wasm_runtime_destroy_exec_env((wasm_exec_env_t)e->exec_env);
+        wasm_runtime_deinstantiate((wasm_module_inst_t)e->instance);
+    }
+    pool->count = 0;
+}
+
+/* Try to acquire a pooled instance matching (heap_size, stack_size).
+ * Returns 1 and fills out_inst/out_env/out_fn on hit, 0 on miss. */
+static int pool_acquire(HlWasmCache *cache, HlWasmModule *mod,
+                        uint32_t heap_size, uint32_t stack_size,
+                        wasm_module_inst_t *out_inst,
+                        wasm_exec_env_t *out_env,
+                        wasm_function_inst_t *out_fn)
+{
+    pthread_mutex_lock(&cache->pool_mutex);
+    HlWasmPool *pool = &mod->pool;
+    for (int i = 0; i < pool->count; i++) {
+        HlWasmPoolEntry *e = &pool->entries[i];
+        if (e->heap_size == heap_size && e->stack_size == stack_size) {
+            *out_inst = (wasm_module_inst_t)e->instance;
+            *out_env  = (wasm_exec_env_t)e->exec_env;
+            *out_fn   = (wasm_function_inst_t)e->process_fn;
+            /* Swap-remove */
+            pool->entries[i] = pool->entries[pool->count - 1];
+            pool->count--;
+            pthread_mutex_unlock(&cache->pool_mutex);
+            return 1;
+        }
+    }
+    pthread_mutex_unlock(&cache->pool_mutex);
+    return 0;
+}
+
+/* Return an instance to the pool, or destroy it.
+ * Only pools on success, small heaps, and when pool isn't full. */
+static void pool_release(HlWasmCache *cache, HlWasmModule *mod,
+                         wasm_module_inst_t inst, wasm_exec_env_t exec_env,
+                         wasm_function_inst_t process_fn,
+                         uint32_t heap_size, uint32_t stack_size,
+                         int success)
+{
+    if (success && heap_size <= HL_WASM_POOL_HEAP_THRESHOLD) {
+        pthread_mutex_lock(&cache->pool_mutex);
+        HlWasmPool *pool = &mod->pool;
+        if (pool->count < HL_WASM_POOL_MAX) {
+            /* Clear any stale exception before returning to pool */
+            wasm_runtime_clear_exception(inst);
+            HlWasmPoolEntry *e = &pool->entries[pool->count++];
+            e->instance   = inst;
+            e->exec_env   = exec_env;
+            e->process_fn = process_fn;
+            e->heap_size  = heap_size;
+            e->stack_size = stack_size;
+            pthread_mutex_unlock(&cache->pool_mutex);
+            return;
+        }
+        pthread_mutex_unlock(&cache->pool_mutex);
+    }
+    wasm_runtime_destroy_exec_env(exec_env);
+    wasm_runtime_deinstantiate(inst);
+}
+
 /* ── Init / Destroy ────────────────────────────────────────────────── */
 
 int hl_cap_wasm_init(HlWasmCache *cache)
@@ -149,6 +219,7 @@ int hl_cap_wasm_init(HlWasmCache *cache)
         return -1;
     }
 
+    pthread_mutex_init(&cache->pool_mutex, NULL);
     cache->initialized = 1;
     log_debug("[wasm] WAMR runtime initialized");
     return 0;
@@ -161,6 +232,7 @@ void hl_cap_wasm_destroy(HlWasmCache *cache)
 
     for (int i = 0; i < cache->count; i++) {
         HlWasmModule *m = &cache->modules[i];
+        pool_drain(&m->pool);
         if (m->module)
             wasm_runtime_unload((wasm_module_t)m->module);
         free(m->wasm_buf);
@@ -168,6 +240,7 @@ void hl_cap_wasm_destroy(HlWasmCache *cache)
     cache->count = 0;
     cache->initialized = 0;
 
+    pthread_mutex_destroy(&cache->pool_mutex);
     wasm_runtime_destroy();
     log_debug("[wasm] WAMR runtime destroyed");
 }
@@ -409,36 +482,43 @@ int hl_cap_wasm_call(HlWasmCache *cache, const char *name,
         }
     }
 
-    /* Instantiate with configured limits */
-    char error_buf[256];
-    wasm_module_inst_t inst = wasm_runtime_instantiate(
-        (wasm_module_t)mod->module, stack_size, heap_size,
-        error_buf, sizeof(error_buf));
-    if (!inst) {
-        log_error("[wasm] instantiate '%s' failed: %s", name, error_buf);
-        if (err_msg) *err_msg = err_internal;
-        return HL_WASM_ERR_INTERNAL;
+    /* Try to acquire from instance pool */
+    wasm_module_inst_t inst = NULL;
+    wasm_exec_env_t exec_env = NULL;
+    wasm_function_inst_t process_fn = NULL;
+    int from_pool = pool_acquire(cache, mod, heap_size, stack_size,
+                                 &inst, &exec_env, &process_fn);
+
+    if (!from_pool) {
+        /* Fresh instantiation */
+        char error_buf[256];
+        inst = wasm_runtime_instantiate(
+            (wasm_module_t)mod->module, stack_size, heap_size,
+            error_buf, sizeof(error_buf));
+        if (!inst) {
+            log_error("[wasm] instantiate '%s' failed: %s", name, error_buf);
+            if (err_msg) *err_msg = err_internal;
+            return HL_WASM_ERR_INTERNAL;
+        }
+
+        process_fn = wasm_runtime_lookup_function(inst, "hull_process");
+        if (!process_fn) {
+            log_error("[wasm] module '%s' missing hull_process export", name);
+            if (err_msg) *err_msg = err_no_export;
+            wasm_runtime_deinstantiate(inst);
+            return HL_WASM_ERR_NOT_FOUND;
+        }
+
+        exec_env = wasm_runtime_create_exec_env(inst, stack_size);
+        if (!exec_env) {
+            log_error("[wasm] failed to create exec env for '%s'", name);
+            if (err_msg) *err_msg = err_internal;
+            wasm_runtime_deinstantiate(inst);
+            return HL_WASM_ERR_INTERNAL;
+        }
     }
 
     int ret = HL_WASM_ERR_INTERNAL;
-
-    /* Lookup hull_process export */
-    wasm_function_inst_t process_fn = wasm_runtime_lookup_function(
-        inst, "hull_process");
-    if (!process_fn) {
-        log_error("[wasm] module '%s' missing hull_process export", name);
-        if (err_msg) *err_msg = err_no_export;
-        ret = HL_WASM_ERR_NOT_FOUND;
-        goto cleanup;
-    }
-
-    /* Create execution environment */
-    wasm_exec_env_t exec_env = wasm_runtime_create_exec_env(inst, stack_size);
-    if (!exec_env) {
-        log_error("[wasm] failed to create exec env for '%s'", name);
-        if (err_msg) *err_msg = err_internal;
-        goto cleanup;
-    }
 
     /* Set instruction count limit (gas metering) */
     if (gas > 0) {
@@ -454,8 +534,9 @@ int hl_cap_wasm_call(HlWasmCache *cache, const char *name,
         if (!wasm_in_ptr || !native_in) {
             log_error("[wasm] failed to allocate input buffer (%zu bytes)", input_len);
             if (err_msg) *err_msg = err_internal;
-            wasm_runtime_destroy_exec_env(exec_env);
-            goto cleanup;
+            pool_release(cache, mod, inst, exec_env, process_fn,
+                         heap_size, stack_size, 0);
+            return HL_WASM_ERR_INTERNAL;
         }
         memcpy(native_in, input, input_len);
     }
@@ -469,8 +550,9 @@ int hl_cap_wasm_call(HlWasmCache *cache, const char *name,
             log_error("[wasm] failed to allocate output buffer (%u bytes)", max_output);
             if (err_msg) *err_msg = err_internal;
             if (wasm_in_ptr) wasm_runtime_module_free(inst, wasm_in_ptr);
-            wasm_runtime_destroy_exec_env(exec_env);
-            goto cleanup;
+            pool_release(cache, mod, inst, exec_env, process_fn,
+                         heap_size, stack_size, 0);
+            return HL_WASM_ERR_INTERNAL;
         }
     }
 
@@ -536,10 +618,10 @@ cleanup_bufs:
 
     if (wasm_in_ptr)  wasm_runtime_module_free(inst, wasm_in_ptr);
     if (wasm_out_ptr) wasm_runtime_module_free(inst, wasm_out_ptr);
-    wasm_runtime_destroy_exec_env(exec_env);
 
-cleanup:
-    wasm_runtime_deinstantiate(inst);
+    /* Return to pool on success, destroy on error */
+    pool_release(cache, mod, inst, exec_env, process_fn,
+                 heap_size, stack_size, ret == HL_WASM_OK);
     return ret;
 }
 
