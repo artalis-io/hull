@@ -62,10 +62,15 @@ int hl_wasm_rebuild_chain(HlWasmModule *mod)
         return 0;
     }
 
+    /* Address space ceiling depends on module memory width.
+     * WASM32: UINT32_MAX, Memory64: UINT64_MAX.
+     * WAMR places shared heaps at the high end of the address space. */
+    int is_mem64 = mod->is_memory64;
+    uint64_t addr_ceil = is_mem64 ? UINT64_MAX : (uint64_t)UINT32_MAX;
+
     /* For a single segment, no chaining needed — just create the heap */
     if (sd->count == 1) {
-        sd->segments[0].wasm_addr =
-            (uint32_t)(UINT32_MAX - sd->segments[0].alloc_size + 1);
+        sd->segments[0].wasm_addr = addr_ceil - sd->segments[0].alloc_size + 1;
         sd->chain_head = sd->segments[0].shared_heap;
         return 0;
     }
@@ -86,14 +91,12 @@ int hl_wasm_rebuild_chain(HlWasmModule *mod)
 
     sd->chain_head = chain;
 
-    /* Read back WASM addresses from the chain.
-     * After chaining, each heap's start_off_mem32 is set by WAMR.
-     * WAMR uses alloc_size (page-aligned) for heap mapping, so addresses
-     * must be computed with alloc_size, not logical data size. */
-    uint64_t addr = (uint64_t)UINT32_MAX + 1;
+    /* Compute WASM addresses from the ceiling downward.
+     * WAMR uses alloc_size (page-aligned) for heap mapping. */
+    uint64_t addr = addr_ceil + 1;
     for (int i = sd->count - 1; i >= 0; i--) {
         addr -= sd->segments[i].alloc_size;
-        sd->segments[i].wasm_addr = (uint32_t)addr;
+        sd->segments[i].wasm_addr = addr;
     }
 
     return 0;

@@ -213,9 +213,27 @@ static const unsigned char shared_read_wasm[] = {
 };
 static const unsigned int shared_read_wasm_len = 306;
 
+/* Pre-compiled echo64.wasm (136 bytes) — Memory64 echo module */
+static const unsigned char echo64_wasm[] = {
+  0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x14, 0x03, 0x60,
+  0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7f, 0x60, 0x04, 0x7e, 0x7e, 0x7e, 0x7e,
+  0x01, 0x7f, 0x60, 0x00, 0x01, 0x7f, 0x02, 0x11, 0x01, 0x03, 0x65, 0x6e,
+  0x76, 0x09, 0x68, 0x6f, 0x73, 0x74, 0x5f, 0x63, 0x61, 0x6c, 0x6c, 0x00,
+  0x00, 0x03, 0x03, 0x02, 0x01, 0x02, 0x05, 0x03, 0x01, 0x04, 0x01, 0x07,
+  0x28, 0x03, 0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00, 0x0c,
+  0x68, 0x75, 0x6c, 0x6c, 0x5f, 0x70, 0x72, 0x6f, 0x63, 0x65, 0x73, 0x73,
+  0x00, 0x01, 0x0c, 0x68, 0x75, 0x6c, 0x6c, 0x5f, 0x76, 0x65, 0x72, 0x73,
+  0x69, 0x6f, 0x6e, 0x00, 0x02, 0x0a, 0x21, 0x02, 0x1a, 0x00, 0x20, 0x01,
+  0x20, 0x03, 0x56, 0x04, 0x40, 0x41, 0x7e, 0x0f, 0x0b, 0x20, 0x02, 0x20,
+  0x00, 0x20, 0x01, 0xfc, 0x0a, 0x00, 0x00, 0x20, 0x01, 0xa7, 0x0b, 0x04,
+  0x00, 0x41, 0x01, 0x0b
+};
+static const unsigned int echo64_wasm_len = 136;
+
 /* VFS with embedded WASM modules for testing (sorted by name) */
 static const HlEntry test_entries[] = {
     { "compute/echo.wasm", echo_wasm, echo_wasm_len },
+    { "compute/echo64.wasm", echo64_wasm, echo64_wasm_len },
     { "compute/kv_store.wasm", kv_store_wasm, kv_store_wasm_len },
     { "compute/shared_read.wasm", shared_read_wasm, shared_read_wasm_len },
     { "compute/simd_dot.wasm", simd_dot_wasm, simd_dot_wasm_len },
@@ -2014,6 +2032,96 @@ UTEST(hl_cap_wasm, shared_data_concurrent_calls)
 
         free(output); free(msg);
     }
+
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* ── Memory64 tests ────────────────────────────────────────────────── */
+
+UTEST(hl_cap_wasm, memory64_detection)
+{
+    /* echo64.wasm has Memory64 flag. Load it and verify detection. */
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    int rc = hl_cap_wasm_load(&cache, "echo64", &vfs, NULL);
+#if WASM_ENABLE_MEMORY64 != 0
+    /* With Memory64 enabled, module loads and is_memory64 is detected */
+    ASSERT_EQ(rc, 0);
+
+    pthread_mutex_lock(&cache.pool_mutex);
+    HlWasmModule *mod = NULL;
+    for (int i = 0; i < cache.count; i++) {
+        if (strcmp(cache.modules[i].name, "echo64") == 0) {
+            mod = &cache.modules[i];
+            break;
+        }
+    }
+    pthread_mutex_unlock(&cache.pool_mutex);
+
+    ASSERT_NE(mod, NULL);
+    ASSERT_EQ(mod->is_memory64, 1);
+    ASSERT_EQ(mod->is_aot, 0);
+#else
+    /* Without Memory64, loader may reject the module */
+    (void)rc;
+#endif
+
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(hl_cap_wasm, memory64_rejects_interpreter)
+{
+    /* Non-AOT Memory64 module should be rejected at call time */
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+#if WASM_ENABLE_MEMORY64 != 0
+    void *output = NULL;
+    size_t output_len = 0;
+    const char *err = NULL;
+
+    int rc = hl_cap_wasm_call(&cache, "echo64",
+                               "test", 4, &output, &output_len,
+                               NULL, NULL, NULL, &vfs, NULL, NULL, &err);
+    ASSERT_NE(rc, 0);
+    ASSERT_NE(err, NULL);
+    ASSERT_STREQ(err, "memory64_requires_aot");
+    free(output);
+#endif
+
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(hl_cap_wasm, wasm32_not_memory64)
+{
+    /* Regular echo.wasm should NOT be detected as Memory64 */
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    ASSERT_EQ(hl_cap_wasm_load(&cache, "echo", &vfs, NULL), 0);
+
+    pthread_mutex_lock(&cache.pool_mutex);
+    HlWasmModule *mod = NULL;
+    for (int i = 0; i < cache.count; i++) {
+        if (strcmp(cache.modules[i].name, "echo") == 0) {
+            mod = &cache.modules[i];
+            break;
+        }
+    }
+    pthread_mutex_unlock(&cache.pool_mutex);
+
+    ASSERT_NE(mod, NULL);
+    ASSERT_EQ(mod->is_memory64, 0);
 
     hl_cap_wasm_destroy(&cache);
 }

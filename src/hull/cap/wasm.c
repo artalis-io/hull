@@ -124,10 +124,18 @@ static int32_t host_call_handler(wasm_exec_env_t exec_env,
         /* ptr >= 0: segment index */
         if (ptr < 0 || ptr >= sd->count)
             return 0;
+        /* len=0: address low 32 bits, len=1: size low 32 bits,
+         * len=2: address high 32 bits, len=3: size high 32 bits.
+         * WASM32 plugins only need len=0/1 (high bits are zero).
+         * Memory64 plugins use len=2/3 for full 64-bit values. */
         if (len == 0)
-            return (int32_t)sd->segments[ptr].wasm_addr;
+            return (int32_t)(uint32_t)sd->segments[ptr].wasm_addr;
         if (len == 1)
-            return (int32_t)sd->segments[ptr].size;
+            return (int32_t)(uint32_t)sd->segments[ptr].size;
+        if (len == 2)
+            return (int32_t)(uint32_t)(sd->segments[ptr].wasm_addr >> 32);
+        if (len == 3)
+            return (int32_t)(uint32_t)(sd->segments[ptr].size >> 32);
         return -1;
     }
 

@@ -112,6 +112,50 @@ local function find_wamrc()
     return nil
 end
 
+-- Detect if a WASM binary uses Memory64 (64-bit memory addressing).
+-- Checks the memory section (ID 5) limits flags for bit 2 (0x04).
+local function is_memory64_wasm(path)
+    local f = io.open(path, "rb")
+    if not f then return false end
+    local data = f:read("*a")
+    f:close()
+    if #data < 8 then return false end
+    -- Skip 8-byte WASM header, then scan sections
+    local pos = 9  -- 1-indexed
+    while pos <= #data do
+        local section_id = data:byte(pos)
+        pos = pos + 1
+        -- Decode LEB128 section size
+        local size = 0
+        local shift = 0
+        repeat
+            if pos > #data then return false end
+            local b = data:byte(pos)
+            pos = pos + 1
+            size = size + ((b % 128) * (2 ^ shift))
+            shift = shift + 7
+        until b < 128
+        if section_id == 5 then  -- Memory section
+            -- First byte in section is count (LEB128), then limits flags
+            if pos > #data then return false end
+            local count_b = data:byte(pos)  -- usually 1
+            if count_b < 1 then return false end
+            -- Skip count LEB128
+            repeat
+                if pos > #data then return false end
+                local b = data:byte(pos)
+                pos = pos + 1
+            until b < 128
+            -- Now at limits flags byte
+            if pos > #data then return false end
+            local flags = data:byte(pos)
+            return (flags % 8) >= 4  -- bit 2 = Memory64
+        end
+        pos = pos + size
+    end
+    return false
+end
+
 -- Detect target architecture from compiler toolchain
 local function detect_target_arch(cc)
     if cc:find("aarch64") then return "aarch64" end
@@ -491,8 +535,14 @@ typedef struct {
                         local aot_path = tmpdir .. "/" .. aot_name
                         tool.mkdir(tmpdir .. "/compute")
 
-                        print("hull build: AOT " .. rel .. " -> " .. arch)
-                        local ok = tool.spawn({wamrc, "--target=" .. arch, "-o", aot_path, wasm_path})
+                        local mem64 = is_memory64_wasm(wasm_path)
+                        local wamrc_args = {wamrc, "--target=" .. arch, "-o", aot_path, wasm_path}
+                        if mem64 then
+                            table.insert(wamrc_args, 3, "--enable-memory64")
+                        end
+                        print("hull build: AOT " .. rel .. " -> " .. arch ..
+                              (mem64 and " (memory64)" or ""))
+                        local ok = tool.spawn(wamrc_args)
                         if ok then
                             compute_aot[#compute_aot + 1] = {
                                 path = aot_path,
