@@ -25,6 +25,8 @@
 struct HlVfs;
 typedef struct HlAllocator HlAllocator;
 
+#include <stdatomic.h>
+
 /* ── Instance pool ─────────────────────────────────────────────────── */
 
 typedef struct {
@@ -40,6 +42,26 @@ typedef struct {
     int count;
 } HlWasmPool;
 
+/* ── Shared data segments ──────────────────────────────────────────── */
+
+/* One named data segment within a module's shared data */
+typedef struct HlWasmDataSegment {
+    char     name[64];       /* segment name (e.g. "graph", "landmarks") */
+    void    *shared_heap;    /* wasm_shared_heap_t for this segment */
+    void    *host_addr;      /* native pointer to data start */
+    size_t   size;           /* logical data size in bytes (visible to WASM) */
+    size_t   alloc_size;     /* page-aligned mmap size (for munmap) */
+    uint32_t wasm_addr;      /* WASM-space start address (computed on chain) */
+    int      is_mmap;        /* 1 = pre_alloc'd (caller owns backing), 0 = we own */
+} HlWasmDataSegment;
+
+/* All shared data for a module — segments chained into one shared heap */
+typedef struct HlWasmSharedData {
+    HlWasmDataSegment segments[HL_WASM_MAX_DATA_SEGMENTS];
+    int               count;            /* number of active segments */
+    void             *chain_head;       /* wasm_shared_heap_t chain head (for attach) */
+} HlWasmSharedData;
+
 /* ── Module cache ──────────────────────────────────────────────────── */
 
 #define HL_WASM_CACHE_MAX 64
@@ -52,6 +74,7 @@ typedef struct {
     int      is_aot;
     uint32_t abi_version;
     HlWasmPool pool;       /* per-module instance pool */
+    HlWasmSharedData *shared_data;  /* NULL until compute.data() called */
 } HlWasmModule;
 
 typedef struct HlWasmCache {
@@ -73,6 +96,12 @@ typedef struct {
                              * (~2.1B) are clamped with a log warning. */
 } HlWasmCallOpts;
 
+/* Clamp call options to configured maximums (CLI > manifest > defaults).
+ * cfg_* fields are ceilings — 0 means "use compile-time default". */
+void hl_cap_wasm_clamp_opts(HlWasmCallOpts *opts,
+                             uint32_t cfg_max_input, uint32_t cfg_max_output,
+                             uint32_t cfg_heap, uint32_t cfg_stack, int64_t cfg_gas);
+
 /* ── Callback support ──────────────────────────────────────────────── */
 
 /*
@@ -84,8 +113,9 @@ typedef int (*HlWasmCallbackFn)(int id, const void *in, size_t in_len,
 
 /* ── host_call opcodes ─────────────────────────────────────────────── */
 
-#define HL_WASM_OP_LOG      0x01
-#define HL_WASM_OP_CALLBACK 0x10
+#define HL_WASM_OP_LOG       0x01
+#define HL_WASM_OP_DATA_INFO 0x02
+#define HL_WASM_OP_CALLBACK  0x10
 
 /* ── Error codes ───────────────────────────────────────────────────── */
 
@@ -100,6 +130,25 @@ typedef int (*HlWasmCallbackFn)(int id, const void *in, size_t in_len,
 
 /* Forward declaration */
 struct HlWasmBuffer;
+
+/* ── Persistent WASM instance ──────────────────────────────────────── */
+
+typedef struct HlWasmInstance {
+    void        *instance;      /* wasm_module_inst_t */
+    void        *exec_env;      /* wasm_exec_env_t */
+    void        *process_fn;    /* wasm_function_inst_t */
+    HlWasmModule *module;       /* borrowed from cache */
+    HlWasmCache  *cache;        /* borrowed */
+    char         name[256];
+    uint32_t     heap_size;     /* immutable after creation */
+    uint32_t     stack_size;    /* immutable after creation */
+    int64_t      default_gas;   /* 0 = use HL_WASM_DEFAULT_GAS */
+    uint32_t     default_max_input;
+    uint32_t     default_max_output;
+    int          closed;
+    atomic_int   busy;          /* 1 = async call in flight */
+    HlAllocator *alloc;
+} HlWasmInstance;
 
 /* ── API ───────────────────────────────────────────────────────────── */
 
@@ -177,6 +226,95 @@ void hl_wasm_pool_release(HlWasmCache *cache, HlWasmModule *mod,
                           void *inst, void *exec_env, void *process_fn,
                           uint32_t heap_size, uint32_t stack_size,
                           int success);
+
+/* ── Persistent instance API ───────────────────────────────────────── */
+
+/**
+ * Create a persistent WASM instance. Not pooled — exclusively owned by caller.
+ * Linear memory is preserved across calls. Caller must destroy when done.
+ *
+ * @param cache    Module cache (must be initialized)
+ * @param name     Module name (e.g. "model" -> compute/model.wasm)
+ * @param opts     Instance options (heap, stack, default gas) — NULL for defaults
+ * @param app_vfs  App VFS for module loading
+ * @param app_dir  App directory for filesystem fallback
+ * @param alloc    Allocator (NULL = raw malloc)
+ * @param err_msg  Output: static error string on failure
+ * @return New instance, or NULL on error
+ */
+HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
+                                             const char *name,
+                                             const HlWasmCallOpts *opts,
+                                             const struct HlVfs *app_vfs,
+                                             const char *app_dir,
+                                             HlAllocator *alloc,
+                                             const char **err_msg);
+
+/**
+ * Call hull_process on a persistent instance.
+ * Gas resets per call. I/O is allocated/freed in linear memory per call
+ * but the instance (globals, heap, data segments) persists.
+ *
+ * @param inst       Persistent instance
+ * @param input      Input bytes
+ * @param input_len  Input length
+ * @param output     Output: caller-freed buffer
+ * @param output_len Output: bytes written
+ * @param opts       Per-call overrides (gas, max_input, max_output) — NULL for instance defaults
+ * @param cb_fn      Optional callback
+ * @param cb_ctx     Callback context
+ * @param err_msg    Output: static error string on failure
+ * @return 0 on success, negative error code on failure
+ */
+int hl_cap_wasm_instance_call(HlWasmInstance *inst,
+                               const void *input, size_t input_len,
+                               void **output, size_t *output_len,
+                               const HlWasmCallOpts *opts,
+                               HlWasmCallbackFn cb_fn, void *cb_ctx,
+                               HlAllocator *alloc, const char **err_msg);
+
+/**
+ * Call hull_process on a persistent instance, returning HlWasmBuffer.
+ * Always returns OWNED buffer (instance is persistent, not checked out).
+ */
+int hl_cap_wasm_instance_call_buf(HlWasmInstance *inst,
+                                   const void *input, size_t input_len,
+                                   struct HlWasmBuffer **output_buf,
+                                   const HlWasmCallOpts *opts,
+                                   HlWasmCallbackFn cb_fn, void *cb_ctx,
+                                   HlAllocator *alloc, const char **err_msg);
+
+/**
+ * Destroy a persistent instance. NULL-safe, idempotent (closed flag).
+ * If busy (async in-flight), logs a warning and does not destroy.
+ */
+void hl_cap_wasm_instance_destroy(HlWasmInstance *inst);
+
+/* ── Shared data API ──────────────────────────────────────────────── */
+
+/**
+ * Load a named data segment for a module.
+ *
+ * segment_name=NULL + data=NULL: remove all segments for module.
+ * segment_name!=NULL + data=NULL: remove that segment.
+ * segment_name!=NULL + data!=NULL: add/replace that segment.
+ *
+ * pre_alloc non-NULL: zero-copy (caller owns backing memory, e.g. mmap'd).
+ * Drains instance pool on any change.
+ *
+ * @return 0 on success, -1 on error
+ */
+int hl_cap_wasm_data_load(HlWasmCache *cache, const char *module_name,
+                           const char *segment_name,
+                           const void *data, size_t data_len,
+                           void *pre_alloc,
+                           const struct HlVfs *app_vfs, const char *app_dir,
+                           const char **err_msg);
+
+/**
+ * Remove all shared data for a module.
+ */
+void hl_cap_wasm_data_unload(HlWasmCache *cache, const char *module_name);
 
 #endif /* HL_ENABLE_WASM */
 #endif /* HL_CAP_WASM_H */

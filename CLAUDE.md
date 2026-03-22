@@ -742,6 +742,9 @@ local r = compute.async.call("score", input_bytes, opts)
 
 -- Preload module into cache
 compute.preload("score")
+
+-- Create a WasmBuffer from a string (for zero-copy chaining)
+local buf = compute.buffer("input data")
 ```
 
 **JavaScript API:**
@@ -759,11 +762,39 @@ const output = compute.call("score", inputBytes, {
 const buf = await compute.async.call("score", inputBytes, opts);
 
 compute.preload("score");
+
+// Create a WasmBuffer from a string (for zero-copy chaining)
+const buf = compute.buffer("input data");
 ```
 
 **Sync vs Async:** Use `compute.call()` for fast/small computations (sub-ms) and in tests/timers. Use `compute.async.call()` in request handlers for expensive computations — it yields to the event loop so other requests are served concurrently. The async variant follows the same pattern as `db.async.query()`.
 
-**Plugin ABI:** Plugins must export `hull_process(in_ptr, in_len, out_ptr, out_max) -> bytes_written` and optionally `hull_version() -> int`. Single import: `env.host_call(opcode, ptr, len) -> int` (LOG=0x01, CALLBACK=0x10).
+**Shared data segments** — `compute.data()` loads named read-only data segments that all instances of a module can read at native speed via WAMR shared heaps:
+
+```lua
+-- Lua: load named segments for a module
+compute.data("routing", "graph", graph_bytes)       -- segment 0
+compute.data("routing", "landmarks", fs.mmap("landmarks.bin"))  -- zero-copy
+compute.data("routing", "grid", nil)                -- remove segment
+compute.data("routing", nil)                        -- remove all segments
+-- Use normally — segments auto-attached to every instance
+local out = compute.call("routing", query)
+```
+
+```javascript
+// JS
+compute.data("routing", "graph", graphBytes);
+compute.data("routing", null);                      // remove all
+```
+
+WASM plugins query segments via `host_call(0x02, segment_id, sub)`:
+- `host_call(0x02, seg_id, 0)` → WASM address of segment (0 if not loaded)
+- `host_call(0x02, seg_id, 1)` → size of segment
+- `host_call(0x02, -1, 0)` → total segment count
+
+Segments are page-aligned mmap regions in the high end of WASM32 address space. Up to 16 segments per module, 3 GB total. Adding/removing segments drains the instance pool.
+
+**Plugin ABI:** Plugins must export `hull_process(in_ptr, in_len, out_ptr, out_max) -> bytes_written` and optionally `hull_version() -> int`. Single import: `env.host_call(opcode, ptr, len) -> int` (LOG=0x01, DATA_INFO=0x02, CALLBACK=0x10).
 
 **Build & AOT:** `hull build` embeds `compute/*.wasm` files and auto-compiles them to AOT if `wamrc` is available. AOT modules are embedded alongside `.wasm` files; at runtime, AOT is preferred over interpreter.
 
@@ -785,6 +816,8 @@ For cosmocc builds, both x86_64 and aarch64 AOT files are generated automaticall
 **SIMD128:** Enabled (`-DWASM_ENABLE_SIMD=1`). Compile plugins with `-msimd128` (C) or `#[target_feature(enable = "simd128")]` (Rust). AOT maps to native SSE4.1/NEON. Interpreter cannot load v128 modules (graceful error).
 
 **Instance pooling:** Reuses WASM instances across `compute.call()` invocations (pool max 8 per module, heap ≤ 4 MB). Reduces per-call overhead from ~2.5ms to near-zero.
+
+**Persistent instances:** `compute.instance(name, opts?)` creates a long-lived WASM instance that retains linear memory across calls. Not pooled — exclusively owned until `close()` or GC. Supports sync (`inst:call`/`inst.call`), async (`inst.async:call`/`inst.async.call`), and buffer mode. Gas resets per call; heap/stack are immutable. Use for stateful workloads (ML weights, pre-built indexes) where per-call instantiation cost is too high.
 
 **Memory limits:** Configurable at three tiers — per-call opts, CLI flags (`--wasm-heap 512M`), and compile-time (`make HL_WASM_MAX_HEAP_MB=512`). Default: 2 MB heap, 1 MB I/O. Max: ~4 GB heap, 256 MB I/O.
 
@@ -814,7 +847,7 @@ make e2e                            # run all E2E tests (examples + build + sand
 | `test_lua_runtime` | 16 | Lua init, eval, sandbox, modules, GC, double-free |
 | `test_static` | 18 | MIME detection, path traversal, embedded VFS lookup |
 | `test_vfs` | 19 | Binary search find, prefix queries, path construction, empty VFS |
-| `test_wasm` | 9 | WAMR init/destroy, module load, echo call, gas exhaustion, limits |
+| `test_wasm` | 47 | WAMR init/destroy, module load, echo call, gas exhaustion, limits, pools, persistent instances, shared data segments |
 
 \+ E2E suites (`e2e_build.sh`, `e2e_examples.sh`, `e2e_http.sh`, `e2e_sandbox.sh`)
 

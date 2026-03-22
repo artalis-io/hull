@@ -9,11 +9,13 @@
 #ifdef HL_ENABLE_WASM
 
 #include "hull/cap/wasm.h"
+#include "hull/cap/wasm_buffer.h"
 #include "hull/limits.h"
 #include "hull/vfs.h"
 #include "hull/entry.h"
 #include <limits.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -116,9 +118,106 @@ static const unsigned char simd_dot_wasm[] = {
 };
 static const unsigned int simd_dot_wasm_len = 906;
 
-/* VFS with embedded echo.wasm and SIMD module for testing */
+/* Pre-compiled kv_store.wasm (674 bytes) — stateful key-value store.
+ * Opcodes: 0x01=LOAD, 0x02=GET, 0x03=COUNT.
+ * State persists in WASM globals across calls on persistent instances. */
+static const unsigned char kv_store_wasm[] = {
+  0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x14, 0x03, 0x60,
+  0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7f, 0x60, 0x04, 0x7f, 0x7f, 0x7f, 0x7f,
+  0x01, 0x7f, 0x60, 0x00, 0x01, 0x7f, 0x02, 0x11, 0x01, 0x03, 0x65, 0x6e,
+  0x76, 0x09, 0x68, 0x6f, 0x73, 0x74, 0x5f, 0x63, 0x61, 0x6c, 0x6c, 0x00,
+  0x00, 0x03, 0x03, 0x02, 0x01, 0x02, 0x05, 0x03, 0x01, 0x00, 0x10, 0x06,
+  0x14, 0x03, 0x7f, 0x01, 0x41, 0x80, 0x80, 0x04, 0x0b, 0x7f, 0x01, 0x41,
+  0x00, 0x0b, 0x7f, 0x01, 0x41, 0x80, 0x80, 0x04, 0x0b, 0x07, 0x28, 0x03,
+  0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00, 0x0c, 0x68, 0x75,
+  0x6c, 0x6c, 0x5f, 0x70, 0x72, 0x6f, 0x63, 0x65, 0x73, 0x73, 0x00, 0x01,
+  0x0c, 0x68, 0x75, 0x6c, 0x6c, 0x5f, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6f,
+  0x6e, 0x00, 0x02, 0x0a, 0xa4, 0x04, 0x02, 0x9c, 0x04, 0x01, 0x0e, 0x7f,
+  0x20, 0x01, 0x41, 0x01, 0x49, 0x04, 0x40, 0x41, 0x7f, 0x0f, 0x0b, 0x20,
+  0x00, 0x2d, 0x00, 0x00, 0x21, 0x04, 0x20, 0x04, 0x41, 0x01, 0x46, 0x04,
+  0x40, 0x20, 0x01, 0x41, 0x05, 0x49, 0x04, 0x40, 0x41, 0x7f, 0x0f, 0x0b,
+  0x20, 0x00, 0x41, 0x01, 0x6a, 0x28, 0x02, 0x00, 0x21, 0x06, 0x41, 0x00,
+  0x24, 0x01, 0x23, 0x00, 0x24, 0x02, 0x23, 0x00, 0x21, 0x09, 0x41, 0x05,
+  0x21, 0x05, 0x41, 0x00, 0x21, 0x0a, 0x02, 0x40, 0x03, 0x40, 0x20, 0x0a,
+  0x20, 0x06, 0x4f, 0x0d, 0x01, 0x20, 0x05, 0x41, 0x04, 0x6a, 0x20, 0x01,
+  0x4b, 0x04, 0x40, 0x0c, 0x02, 0x0b, 0x20, 0x00, 0x20, 0x05, 0x6a, 0x28,
+  0x02, 0x00, 0x21, 0x07, 0x20, 0x05, 0x41, 0x04, 0x6a, 0x21, 0x05, 0x20,
+  0x09, 0x20, 0x07, 0x36, 0x02, 0x00, 0x20, 0x09, 0x41, 0x04, 0x6a, 0x21,
+  0x09, 0x20, 0x07, 0x41, 0x00, 0x4b, 0x04, 0x40, 0x20, 0x09, 0x20, 0x00,
+  0x20, 0x05, 0x6a, 0x20, 0x07, 0xfc, 0x0a, 0x00, 0x00, 0x0b, 0x20, 0x09,
+  0x20, 0x07, 0x6a, 0x21, 0x09, 0x20, 0x05, 0x20, 0x07, 0x6a, 0x21, 0x05,
+  0x20, 0x05, 0x41, 0x04, 0x6a, 0x20, 0x01, 0x4b, 0x04, 0x40, 0x0c, 0x02,
+  0x0b, 0x20, 0x00, 0x20, 0x05, 0x6a, 0x28, 0x02, 0x00, 0x21, 0x08, 0x20,
+  0x05, 0x41, 0x04, 0x6a, 0x21, 0x05, 0x20, 0x09, 0x20, 0x08, 0x36, 0x02,
+  0x00, 0x20, 0x09, 0x41, 0x04, 0x6a, 0x21, 0x09, 0x20, 0x08, 0x41, 0x00,
+  0x4b, 0x04, 0x40, 0x20, 0x09, 0x20, 0x00, 0x20, 0x05, 0x6a, 0x20, 0x08,
+  0xfc, 0x0a, 0x00, 0x00, 0x0b, 0x20, 0x09, 0x20, 0x08, 0x6a, 0x21, 0x09,
+  0x20, 0x05, 0x20, 0x08, 0x6a, 0x21, 0x05, 0x23, 0x01, 0x41, 0x01, 0x6a,
+  0x24, 0x01, 0x20, 0x0a, 0x41, 0x01, 0x6a, 0x21, 0x0a, 0x0c, 0x00, 0x0b,
+  0x0b, 0x20, 0x09, 0x24, 0x02, 0x20, 0x03, 0x41, 0x04, 0x49, 0x04, 0x40,
+  0x41, 0x7e, 0x0f, 0x0b, 0x20, 0x02, 0x23, 0x01, 0x36, 0x02, 0x00, 0x41,
+  0x04, 0x0f, 0x0b, 0x20, 0x04, 0x41, 0x02, 0x46, 0x04, 0x40, 0x20, 0x00,
+  0x41, 0x01, 0x6a, 0x21, 0x10, 0x20, 0x01, 0x41, 0x01, 0x6b, 0x21, 0x11,
+  0x23, 0x00, 0x21, 0x0b, 0x41, 0x00, 0x21, 0x0a, 0x02, 0x40, 0x03, 0x40,
+  0x20, 0x0a, 0x23, 0x01, 0x4f, 0x0d, 0x01, 0x20, 0x0b, 0x23, 0x02, 0x4f,
+  0x0d, 0x01, 0x20, 0x0b, 0x28, 0x02, 0x00, 0x21, 0x0c, 0x20, 0x0b, 0x41,
+  0x04, 0x6a, 0x21, 0x0b, 0x20, 0x0c, 0x20, 0x11, 0x46, 0x04, 0x40, 0x41,
+  0x01, 0x21, 0x0e, 0x41, 0x00, 0x21, 0x0f, 0x02, 0x40, 0x03, 0x40, 0x20,
+  0x0f, 0x20, 0x0c, 0x4f, 0x0d, 0x01, 0x20, 0x0b, 0x20, 0x0f, 0x6a, 0x2d,
+  0x00, 0x00, 0x20, 0x10, 0x20, 0x0f, 0x6a, 0x2d, 0x00, 0x00, 0x47, 0x04,
+  0x40, 0x41, 0x00, 0x21, 0x0e, 0x0c, 0x02, 0x0b, 0x20, 0x0f, 0x41, 0x01,
+  0x6a, 0x21, 0x0f, 0x0c, 0x00, 0x0b, 0x0b, 0x20, 0x0e, 0x04, 0x40, 0x20,
+  0x0b, 0x20, 0x0c, 0x6a, 0x21, 0x0b, 0x20, 0x0b, 0x28, 0x02, 0x00, 0x21,
+  0x0d, 0x20, 0x0b, 0x41, 0x04, 0x6a, 0x21, 0x0b, 0x20, 0x0d, 0x20, 0x03,
+  0x4b, 0x04, 0x40, 0x41, 0x7e, 0x0f, 0x0b, 0x20, 0x0d, 0x41, 0x00, 0x4b,
+  0x04, 0x40, 0x20, 0x02, 0x20, 0x0b, 0x20, 0x0d, 0xfc, 0x0a, 0x00, 0x00,
+  0x0b, 0x20, 0x0d, 0x0f, 0x0b, 0x0b, 0x20, 0x0b, 0x20, 0x0c, 0x6a, 0x21,
+  0x0b, 0x20, 0x0b, 0x28, 0x02, 0x00, 0x21, 0x0d, 0x20, 0x0b, 0x41, 0x04,
+  0x6a, 0x21, 0x0b, 0x20, 0x0b, 0x20, 0x0d, 0x6a, 0x21, 0x0b, 0x20, 0x0a,
+  0x41, 0x01, 0x6a, 0x21, 0x0a, 0x0c, 0x00, 0x0b, 0x0b, 0x41, 0x00, 0x0f,
+  0x0b, 0x20, 0x04, 0x41, 0x03, 0x46, 0x04, 0x40, 0x20, 0x03, 0x41, 0x04,
+  0x49, 0x04, 0x40, 0x41, 0x7e, 0x0f, 0x0b, 0x20, 0x02, 0x23, 0x01, 0x36,
+  0x02, 0x00, 0x41, 0x04, 0x0f, 0x0b, 0x41, 0x7f, 0x0b, 0x04, 0x00, 0x41,
+  0x01, 0x0b
+};
+static const unsigned int kv_store_wasm_len = 674;
+
+/* Pre-compiled shared_read.wasm (306 bytes) — reads from shared heap via host_call */
+static const unsigned char shared_read_wasm[] = {
+  0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x14, 0x03, 0x60,
+  0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7f, 0x60, 0x04, 0x7f, 0x7f, 0x7f, 0x7f,
+  0x01, 0x7f, 0x60, 0x00, 0x01, 0x7f, 0x02, 0x11, 0x01, 0x03, 0x65, 0x6e,
+  0x76, 0x09, 0x68, 0x6f, 0x73, 0x74, 0x5f, 0x63, 0x61, 0x6c, 0x6c, 0x00,
+  0x00, 0x03, 0x03, 0x02, 0x01, 0x02, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07,
+  0x28, 0x03, 0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00, 0x0c,
+  0x68, 0x75, 0x6c, 0x6c, 0x5f, 0x70, 0x72, 0x6f, 0x63, 0x65, 0x73, 0x73,
+  0x00, 0x01, 0x0c, 0x68, 0x75, 0x6c, 0x6c, 0x5f, 0x76, 0x65, 0x72, 0x73,
+  0x69, 0x6f, 0x6e, 0x00, 0x02, 0x0a, 0xca, 0x01, 0x02, 0xc2, 0x01, 0x01,
+  0x07, 0x7f, 0x20, 0x01, 0x41, 0x01, 0x49, 0x04, 0x40, 0x41, 0x7f, 0x0f,
+  0x0b, 0x20, 0x00, 0x2d, 0x00, 0x00, 0x21, 0x04, 0x20, 0x04, 0x41, 0xff,
+  0x01, 0x46, 0x04, 0x40, 0x41, 0x02, 0x41, 0x7f, 0x41, 0x00, 0x10, 0x00,
+  0x21, 0x07, 0x20, 0x03, 0x41, 0x04, 0x49, 0x04, 0x40, 0x41, 0x7e, 0x0f,
+  0x0b, 0x20, 0x02, 0x20, 0x07, 0x36, 0x02, 0x00, 0x41, 0x04, 0x0f, 0x0b,
+  0x20, 0x01, 0x41, 0x09, 0x49, 0x04, 0x40, 0x41, 0x7f, 0x0f, 0x0b, 0x20,
+  0x00, 0x41, 0x01, 0x6a, 0x28, 0x02, 0x00, 0x21, 0x05, 0x20, 0x00, 0x41,
+  0x05, 0x6a, 0x28, 0x02, 0x00, 0x21, 0x06, 0x41, 0x02, 0x20, 0x04, 0x41,
+  0x00, 0x10, 0x00, 0x21, 0x08, 0x20, 0x08, 0x45, 0x04, 0x40, 0x41, 0x00,
+  0x0f, 0x0b, 0x41, 0x02, 0x20, 0x04, 0x41, 0x01, 0x10, 0x00, 0x21, 0x09,
+  0x20, 0x05, 0x20, 0x06, 0x6a, 0x20, 0x09, 0x4b, 0x04, 0x40, 0x41, 0x7f,
+  0x0f, 0x0b, 0x20, 0x06, 0x20, 0x03, 0x4b, 0x04, 0x40, 0x41, 0x7e, 0x0f,
+  0x0b, 0x41, 0x00, 0x21, 0x0a, 0x02, 0x40, 0x03, 0x40, 0x20, 0x0a, 0x20,
+  0x06, 0x4f, 0x0d, 0x01, 0x20, 0x02, 0x20, 0x0a, 0x6a, 0x20, 0x08, 0x20,
+  0x05, 0x6a, 0x20, 0x0a, 0x6a, 0x2d, 0x00, 0x00, 0x3a, 0x00, 0x00, 0x20,
+  0x0a, 0x41, 0x01, 0x6a, 0x21, 0x0a, 0x0c, 0x00, 0x0b, 0x0b, 0x20, 0x06,
+  0x0b, 0x04, 0x00, 0x41, 0x01, 0x0b
+};
+static const unsigned int shared_read_wasm_len = 306;
+
+/* VFS with embedded WASM modules for testing (sorted by name) */
 static const HlEntry test_entries[] = {
     { "compute/echo.wasm", echo_wasm, echo_wasm_len },
+    { "compute/kv_store.wasm", kv_store_wasm, kv_store_wasm_len },
+    { "compute/shared_read.wasm", shared_read_wasm, shared_read_wasm_len },
     { "compute/simd_dot.wasm", simd_dot_wasm, simd_dot_wasm_len },
     { 0, 0, 0 }
 };
@@ -1152,6 +1251,769 @@ UTEST(hl_cap_wasm, input_exceeds_clamped_max)
     ASSERT_NE(err, NULL);
     ASSERT_STREQ(err, "input_too_large");
     ASSERT_EQ(output, NULL);
+
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* ── Persistent instance tests ──────────────────────────────────────── */
+
+UTEST(hl_cap_wasm, instance_create_destroy)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    const char *err = NULL;
+    HlWasmInstance *pi = hl_cap_wasm_instance_create(
+        &cache, "echo", NULL, &vfs, NULL, NULL, &err);
+    ASSERT_NE(pi, NULL);
+    ASSERT_STREQ(pi->name, "echo");
+    ASSERT_EQ(pi->closed, 0);
+
+    hl_cap_wasm_instance_destroy(pi);
+    /* pi is freed — don't touch it */
+
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(hl_cap_wasm, instance_call_echo)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    const char *err = NULL;
+    HlWasmInstance *pi = hl_cap_wasm_instance_create(
+        &cache, "echo", NULL, &vfs, NULL, NULL, &err);
+    ASSERT_NE(pi, NULL);
+
+    void *output = NULL;
+    size_t output_len = 0;
+    int rc = hl_cap_wasm_instance_call(pi, "hello", 5,
+                                        &output, &output_len,
+                                        NULL, NULL, NULL, NULL, &err);
+    ASSERT_EQ(rc, HL_WASM_OK);
+    ASSERT_EQ(output_len, (size_t)5);
+    ASSERT_EQ(memcmp(output, "hello", 5), 0);
+    free(output);
+
+    hl_cap_wasm_instance_destroy(pi);
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(hl_cap_wasm, instance_repeated_calls)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    const char *err = NULL;
+    HlWasmInstance *pi = hl_cap_wasm_instance_create(
+        &cache, "echo", NULL, &vfs, NULL, NULL, &err);
+    ASSERT_NE(pi, NULL);
+
+    /* 100 calls on the same instance */
+    for (int i = 0; i < 100; i++) {
+        void *output = NULL;
+        size_t output_len = 0;
+        int rc = hl_cap_wasm_instance_call(pi, "test", 4,
+                                            &output, &output_len,
+                                            NULL, NULL, NULL, NULL, &err);
+        ASSERT_EQ(rc, HL_WASM_OK);
+        ASSERT_EQ(output_len, (size_t)4);
+        ASSERT_EQ(memcmp(output, "test", 4), 0);
+        free(output);
+    }
+
+    hl_cap_wasm_instance_destroy(pi);
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(hl_cap_wasm, instance_gas_recovery)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    const char *err = NULL;
+    HlWasmInstance *pi = hl_cap_wasm_instance_create(
+        &cache, "echo", NULL, &vfs, NULL, NULL, &err);
+    ASSERT_NE(pi, NULL);
+
+    /* Gas = 1 should fail */
+    HlWasmCallOpts low_gas = {0};
+    low_gas.gas = 1;
+    void *output = NULL;
+    size_t output_len = 0;
+    int rc = hl_cap_wasm_instance_call(pi, "x", 1,
+                                        &output, &output_len,
+                                        &low_gas, NULL, NULL, NULL, &err);
+    ASSERT_NE(rc, HL_WASM_OK);
+
+    /* Now with normal gas — should succeed (instance reusable) */
+    HlWasmCallOpts normal_gas = {0};
+    normal_gas.gas = 10000000;
+    output = NULL;
+    output_len = 0;
+    err = NULL;
+    rc = hl_cap_wasm_instance_call(pi, "recover", 7,
+                                    &output, &output_len,
+                                    &normal_gas, NULL, NULL, NULL, &err);
+    ASSERT_EQ(rc, HL_WASM_OK);
+    ASSERT_EQ(output_len, (size_t)7);
+    ASSERT_EQ(memcmp(output, "recover", 7), 0);
+    free(output);
+
+    hl_cap_wasm_instance_destroy(pi);
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(hl_cap_wasm, instance_closed_rejects)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    const char *err = NULL;
+    HlWasmInstance *pi = hl_cap_wasm_instance_create(
+        &cache, "echo", NULL, &vfs, NULL, NULL, &err);
+    ASSERT_NE(pi, NULL);
+
+    /* Close it, then try to call */
+    pi->closed = 1;
+    void *output = NULL;
+    size_t output_len = 0;
+    int rc = hl_cap_wasm_instance_call(pi, "x", 1,
+                                        &output, &output_len,
+                                        NULL, NULL, NULL, NULL, &err);
+    ASSERT_NE(rc, HL_WASM_OK);
+    ASSERT_NE(err, NULL);
+    ASSERT_STREQ(err, "instance_closed");
+
+    /* Clean up without destroy (already logically closed, but not freed) */
+    pi->closed = 0; /* undo for proper destroy */
+    hl_cap_wasm_instance_destroy(pi);
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(hl_cap_wasm, instance_not_found)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    const char *err = NULL;
+    HlWasmInstance *pi = hl_cap_wasm_instance_create(
+        &cache, "nonexistent", NULL, &vfs, NULL, NULL, &err);
+    ASSERT_EQ(pi, NULL);
+    ASSERT_NE(err, NULL);
+    ASSERT_STREQ(err, "not_found");
+
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(hl_cap_wasm, instance_call_buf)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    const char *err = NULL;
+    HlWasmInstance *pi = hl_cap_wasm_instance_create(
+        &cache, "echo", NULL, &vfs, NULL, NULL, &err);
+    ASSERT_NE(pi, NULL);
+
+    HlWasmBuffer *buf = NULL;
+    int rc = hl_cap_wasm_instance_call_buf(pi, "buftest", 7,
+                                            &buf, NULL, NULL, NULL,
+                                            NULL, &err);
+    ASSERT_EQ(rc, HL_WASM_OK);
+    ASSERT_NE(buf, NULL);
+    ASSERT_EQ(hl_wasm_buffer_len(buf), (size_t)7);
+    ASSERT_EQ(memcmp(hl_wasm_buffer_data(buf), "buftest", 7), 0);
+
+    hl_wasm_buffer_destroy(buf);
+    free(buf);
+
+    hl_cap_wasm_instance_destroy(pi);
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(hl_cap_wasm, instance_busy_rejects)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    const char *err = NULL;
+    HlWasmInstance *pi = hl_cap_wasm_instance_create(
+        &cache, "echo", NULL, &vfs, NULL, NULL, &err);
+    ASSERT_NE(pi, NULL);
+
+    /* Manually set busy */
+    atomic_store(&pi->busy, 1);
+
+    void *output = NULL;
+    size_t output_len = 0;
+    err = NULL;
+    int rc = hl_cap_wasm_instance_call(pi, "x", 1,
+                                        &output, &output_len,
+                                        NULL, NULL, NULL, NULL, &err);
+    ASSERT_NE(rc, HL_WASM_OK);
+    ASSERT_NE(err, NULL);
+    ASSERT_STREQ(err, "instance_busy");
+
+    atomic_store(&pi->busy, 0);
+    hl_cap_wasm_instance_destroy(pi);
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* ── Stateful kv_store tests ──────────────────────────────────────── */
+
+/* Helper: build a LOAD message for kv_store.
+ * Format: [0x01] [count:u32] [key_len:u32 key... val_len:u32 val...]... */
+static uint8_t *build_kv_load(int count, const char **keys, const char **vals,
+                               size_t *out_len)
+{
+    /* Calculate total size */
+    size_t total = 1 + 4; /* opcode + count */
+    for (int i = 0; i < count; i++)
+        total += 4 + strlen(keys[i]) + 4 + strlen(vals[i]);
+
+    uint8_t *buf = malloc(total);
+    if (!buf) return NULL;
+
+    uint8_t *p = buf;
+    *p++ = 0x01; /* LOAD opcode */
+    uint32_t cnt = (uint32_t)count;
+    memcpy(p, &cnt, 4); p += 4;
+
+    for (int i = 0; i < count; i++) {
+        uint32_t klen = (uint32_t)strlen(keys[i]);
+        memcpy(p, &klen, 4); p += 4;
+        memcpy(p, keys[i], klen); p += klen;
+        uint32_t vlen = (uint32_t)strlen(vals[i]);
+        memcpy(p, &vlen, 4); p += 4;
+        memcpy(p, vals[i], vlen); p += vlen;
+    }
+
+    *out_len = total;
+    return buf;
+}
+
+/* Helper: build a GET message: [0x02] [key bytes] */
+static uint8_t *build_kv_get(const char *key, size_t *out_len)
+{
+    size_t klen = strlen(key);
+    *out_len = 1 + klen;
+    uint8_t *buf = malloc(*out_len);
+    if (!buf) return NULL;
+    buf[0] = 0x02;
+    memcpy(buf + 1, key, klen);
+    return buf;
+}
+
+/* Helper: build a COUNT message: [0x03] */
+static uint8_t *build_kv_count(size_t *out_len)
+{
+    *out_len = 1;
+    uint8_t *buf = malloc(1);
+    if (!buf) return NULL;
+    buf[0] = 0x03;
+    return buf;
+}
+
+UTEST(hl_cap_wasm, instance_kv_store_stateful)
+{
+    /* This test proves persistent instances retain state across calls:
+     * 1. Create persistent kv_store instance
+     * 2. LOAD 3 key-value pairs
+     * 3. GET each key → verify correct value returned
+     * 4. COUNT → verify 3
+     * 5. GET missing key → verify 0 bytes returned */
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    const char *err = NULL;
+    HlWasmInstance *pi = hl_cap_wasm_instance_create(
+        &cache, "kv_store", NULL, &vfs, NULL, NULL, &err);
+    ASSERT_NE(pi, NULL);
+
+    /* LOAD 3 entries */
+    const char *keys[] = { "name", "lang", "version" };
+    const char *vals[] = { "hull", "c11", "1.0.0" };
+    size_t load_len;
+    uint8_t *load_msg = build_kv_load(3, keys, vals, &load_len);
+    ASSERT_NE(load_msg, NULL);
+
+    void *output = NULL;
+    size_t output_len = 0;
+    int rc = hl_cap_wasm_instance_call(pi, load_msg, load_len,
+                                        &output, &output_len,
+                                        NULL, NULL, NULL, NULL, &err);
+    ASSERT_EQ(rc, HL_WASM_OK);
+    ASSERT_EQ(output_len, (size_t)4);
+    uint32_t loaded_count;
+    memcpy(&loaded_count, output, 4);
+    ASSERT_EQ(loaded_count, (uint32_t)3);
+    free(output);
+    free(load_msg);
+
+    /* GET "name" → "hull" */
+    size_t get_len;
+    uint8_t *get_msg = build_kv_get("name", &get_len);
+    output = NULL; output_len = 0; err = NULL;
+    rc = hl_cap_wasm_instance_call(pi, get_msg, get_len,
+                                    &output, &output_len,
+                                    NULL, NULL, NULL, NULL, &err);
+    ASSERT_EQ(rc, HL_WASM_OK);
+    ASSERT_EQ(output_len, (size_t)4);
+    ASSERT_EQ(memcmp(output, "hull", 4), 0);
+    free(output);
+    free(get_msg);
+
+    /* GET "lang" → "c11" */
+    get_msg = build_kv_get("lang", &get_len);
+    output = NULL; output_len = 0; err = NULL;
+    rc = hl_cap_wasm_instance_call(pi, get_msg, get_len,
+                                    &output, &output_len,
+                                    NULL, NULL, NULL, NULL, &err);
+    ASSERT_EQ(rc, HL_WASM_OK);
+    ASSERT_EQ(output_len, (size_t)3);
+    ASSERT_EQ(memcmp(output, "c11", 3), 0);
+    free(output);
+    free(get_msg);
+
+    /* GET "version" → "1.0.0" */
+    get_msg = build_kv_get("version", &get_len);
+    output = NULL; output_len = 0; err = NULL;
+    rc = hl_cap_wasm_instance_call(pi, get_msg, get_len,
+                                    &output, &output_len,
+                                    NULL, NULL, NULL, NULL, &err);
+    ASSERT_EQ(rc, HL_WASM_OK);
+    ASSERT_EQ(output_len, (size_t)5);
+    ASSERT_EQ(memcmp(output, "1.0.0", 5), 0);
+    free(output);
+    free(get_msg);
+
+    /* COUNT → 3 */
+    size_t count_len;
+    uint8_t *count_msg = build_kv_count(&count_len);
+    output = NULL; output_len = 0; err = NULL;
+    rc = hl_cap_wasm_instance_call(pi, count_msg, count_len,
+                                    &output, &output_len,
+                                    NULL, NULL, NULL, NULL, &err);
+    ASSERT_EQ(rc, HL_WASM_OK);
+    ASSERT_EQ(output_len, (size_t)4);
+    uint32_t count;
+    memcpy(&count, output, 4);
+    ASSERT_EQ(count, (uint32_t)3);
+    free(output);
+    free(count_msg);
+
+    /* GET missing key → 0 bytes */
+    get_msg = build_kv_get("missing", &get_len);
+    output = NULL; output_len = 0; err = NULL;
+    rc = hl_cap_wasm_instance_call(pi, get_msg, get_len,
+                                    &output, &output_len,
+                                    NULL, NULL, NULL, NULL, &err);
+    ASSERT_EQ(rc, HL_WASM_OK);
+    ASSERT_EQ(output_len, (size_t)0);
+    free(output);
+    free(get_msg);
+
+    hl_cap_wasm_instance_destroy(pi);
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(hl_cap_wasm, instance_kv_store_unpooled_loses_state)
+{
+    /* Proves that unpooled calls do NOT retain state:
+     * LOAD data with one call, then GET with a fresh call → not found.
+     * Uses heap > pool threshold (4 MB) to force fresh instance per call.
+     * This is the contrast case showing why persistent instances matter. */
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    /* Use large heap to bypass instance pool */
+    HlWasmCallOpts opts = {0};
+    opts.heap_size = 8 * 1024 * 1024; /* 8 MB > 4 MB pool threshold */
+
+    /* LOAD via unpooled call */
+    const char *keys[] = { "key1" };
+    const char *vals[] = { "val1" };
+    size_t load_len;
+    uint8_t *load_msg = build_kv_load(1, keys, vals, &load_len);
+
+    void *output = NULL;
+    size_t output_len = 0;
+    const char *err = NULL;
+    int rc = hl_cap_wasm_call(&cache, "kv_store",
+                               load_msg, load_len,
+                               &output, &output_len,
+                               &opts, NULL, NULL, &vfs, NULL, NULL, &err);
+    ASSERT_EQ(rc, HL_WASM_OK);
+    free(output);
+    free(load_msg);
+
+    /* GET via unpooled call — fresh instance, state lost */
+    size_t get_len;
+    uint8_t *get_msg = build_kv_get("key1", &get_len);
+    output = NULL; output_len = 0; err = NULL;
+    rc = hl_cap_wasm_call(&cache, "kv_store",
+                           get_msg, get_len,
+                           &output, &output_len,
+                           &opts, NULL, NULL, &vfs, NULL, NULL, &err);
+    ASSERT_EQ(rc, HL_WASM_OK);
+    /* Key not found because fresh instance has no state */
+    ASSERT_EQ(output_len, (size_t)0);
+    free(output);
+    free(get_msg);
+
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* ── Shared data tests ─────────────────────────────────────────────── */
+
+/* Helper: build shared_read input message.
+ * segment_id, offset (u32 LE), length (u32 LE) = 9 bytes total.
+ * For count query: segment_id=0xFF, 0 bytes for offset/length. */
+static uint8_t *build_shared_read_msg(int segment_id, uint32_t offset,
+                                       uint32_t length, size_t *out_len)
+{
+    if (segment_id == 0xFF) {
+        *out_len = 1;
+        uint8_t *buf = malloc(1);
+        buf[0] = 0xFF;
+        return buf;
+    }
+    *out_len = 9;
+    uint8_t *buf = malloc(9);
+    buf[0] = (uint8_t)segment_id;
+    memcpy(buf + 1, &offset, 4);
+    memcpy(buf + 5, &length, 4);
+    return buf;
+}
+
+UTEST(hl_cap_wasm, shared_data_load_unload)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    const char *err = NULL;
+    const char data[] = "hello shared world";
+
+    /* Load a segment */
+    int rc = hl_cap_wasm_data_load(&cache, "shared_read", "seg0",
+                                    data, sizeof(data) - 1, NULL,
+                                    &vfs, NULL, &err);
+    ASSERT_EQ(rc, 0);
+
+    /* Verify shared_data is set on module */
+    HlWasmModule *mod = NULL;
+    pthread_mutex_lock(&cache.pool_mutex);
+    for (int i = 0; i < cache.count; i++) {
+        if (strcmp(cache.modules[i].name, "shared_read") == 0) {
+            mod = &cache.modules[i];
+            break;
+        }
+    }
+    pthread_mutex_unlock(&cache.pool_mutex);
+    ASSERT_NE(mod, NULL);
+    ASSERT_NE(mod->shared_data, NULL);
+    ASSERT_EQ(mod->shared_data->count, 1);
+
+    /* Unload all */
+    hl_cap_wasm_data_unload(&cache, "shared_read");
+    ASSERT_EQ(mod->shared_data, NULL);
+
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(hl_cap_wasm, shared_data_call_reads)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    const char *err = NULL;
+    const char data[] = "ABCDEFGHIJ";  /* 10 bytes */
+
+    int rc = hl_cap_wasm_data_load(&cache, "shared_read", "seg0",
+                                    data, 10, NULL, &vfs, NULL, &err);
+    ASSERT_EQ(rc, 0);
+
+    /* Read 5 bytes starting at offset 2 from segment 0 */
+    size_t msg_len;
+    uint8_t *msg = build_shared_read_msg(0, 2, 5, &msg_len);
+    void *output = NULL;
+    size_t output_len = 0;
+
+    rc = hl_cap_wasm_call(&cache, "shared_read",
+                           msg, msg_len, &output, &output_len,
+                           NULL, NULL, NULL, &vfs, NULL, NULL, &err);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(output_len, (size_t)5);
+    ASSERT_EQ(memcmp(output, "CDEFG", 5), 0);
+
+    free(output);
+    free(msg);
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(hl_cap_wasm, shared_data_multi_segment)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    const char *err = NULL;
+    const char data_a[] = "AAAA";  /* 4 bytes */
+    const char data_b[] = "BBBBBB";  /* 6 bytes */
+    const char data_c[] = "CC";  /* 2 bytes */
+
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", "a",
+              data_a, 4, NULL, &vfs, NULL, &err), 0);
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", "b",
+              data_b, 6, NULL, &vfs, NULL, &err), 0);
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", "c",
+              data_c, 2, NULL, &vfs, NULL, &err), 0);
+
+    /* Read all bytes from each segment */
+    for (int seg = 0; seg < 3; seg++) {
+        const char *expected[] = { "AAAA", "BBBBBB", "CC" };
+        size_t expected_len[] = { 4, 6, 2 };
+
+        size_t msg_len;
+        uint8_t *msg = build_shared_read_msg(seg, 0,
+                        (uint32_t)expected_len[seg], &msg_len);
+        void *output = NULL;
+        size_t output_len = 0;
+
+        int rc = hl_cap_wasm_call(&cache, "shared_read",
+                                   msg, msg_len, &output, &output_len,
+                                   NULL, NULL, NULL, &vfs, NULL, NULL, &err);
+        ASSERT_EQ(rc, 0);
+        ASSERT_EQ(output_len, expected_len[seg]);
+        ASSERT_EQ(memcmp(output, expected[seg], expected_len[seg]), 0);
+
+        free(output);
+        free(msg);
+    }
+
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(hl_cap_wasm, shared_data_replace_segment)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    const char *err = NULL;
+    const char data1[] = "OLD_DATA";
+    const char data2[] = "NEW";
+
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", "x",
+              data1, 8, NULL, &vfs, NULL, &err), 0);
+
+    /* Replace with new data */
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", "x",
+              data2, 3, NULL, &vfs, NULL, &err), 0);
+
+    /* Read from replaced segment */
+    size_t msg_len;
+    uint8_t *msg = build_shared_read_msg(0, 0, 3, &msg_len);
+    void *output = NULL;
+    size_t output_len = 0;
+
+    int rc = hl_cap_wasm_call(&cache, "shared_read",
+                               msg, msg_len, &output, &output_len,
+                               NULL, NULL, NULL, &vfs, NULL, NULL, &err);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(output_len, (size_t)3);
+    ASSERT_EQ(memcmp(output, "NEW", 3), 0);
+
+    free(output);
+    free(msg);
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(hl_cap_wasm, shared_data_remove_segment)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    const char *err = NULL;
+    const char data1[] = "AAAA";
+    const char data2[] = "BBBB";
+
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", "a",
+              data1, 4, NULL, &vfs, NULL, &err), 0);
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", "b",
+              data2, 4, NULL, &vfs, NULL, &err), 0);
+
+    /* Remove segment "a" */
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", "a",
+              NULL, 0, NULL, &vfs, NULL, &err), 0);
+
+    /* Segment count should be 1 */
+    size_t msg_len;
+    uint8_t *msg = build_shared_read_msg(0xFF, 0, 0, &msg_len);
+    void *output = NULL;
+    size_t output_len = 0;
+
+    int rc = hl_cap_wasm_call(&cache, "shared_read",
+                               msg, msg_len, &output, &output_len,
+                               NULL, NULL, NULL, &vfs, NULL, NULL, &err);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(output_len, (size_t)4);
+    uint32_t count;
+    memcpy(&count, output, 4);
+    ASSERT_EQ(count, (uint32_t)1);
+
+    /* Remaining segment (now at index 0) should be "BBBB" */
+    free(output); free(msg);
+    msg = build_shared_read_msg(0, 0, 4, &msg_len);
+    output = NULL; output_len = 0;
+    rc = hl_cap_wasm_call(&cache, "shared_read",
+                           msg, msg_len, &output, &output_len,
+                           NULL, NULL, NULL, &vfs, NULL, NULL, &err);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(output_len, (size_t)4);
+    ASSERT_EQ(memcmp(output, "BBBB", 4), 0);
+
+    free(output); free(msg);
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(hl_cap_wasm, shared_data_no_data)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    const char *err = NULL;
+
+    /* Call shared_read without loading any data — should return 0 */
+    size_t msg_len;
+    uint8_t *msg = build_shared_read_msg(0, 0, 4, &msg_len);
+    void *output = NULL;
+    size_t output_len = 0;
+
+    int rc = hl_cap_wasm_call(&cache, "shared_read",
+                               msg, msg_len, &output, &output_len,
+                               NULL, NULL, NULL, &vfs, NULL, NULL, &err);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(output_len, (size_t)0);  /* base == 0, returns 0 */
+
+    free(output); free(msg);
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(hl_cap_wasm, shared_data_segment_count)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    const char *err = NULL;
+    const char d[] = "X";
+
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", "s0",
+              d, 1, NULL, &vfs, NULL, &err), 0);
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", "s1",
+              d, 1, NULL, &vfs, NULL, &err), 0);
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", "s2",
+              d, 1, NULL, &vfs, NULL, &err), 0);
+
+    /* Count query */
+    size_t msg_len;
+    uint8_t *msg = build_shared_read_msg(0xFF, 0, 0, &msg_len);
+    void *output = NULL;
+    size_t output_len = 0;
+
+    int rc = hl_cap_wasm_call(&cache, "shared_read",
+                               msg, msg_len, &output, &output_len,
+                               NULL, NULL, NULL, &vfs, NULL, NULL, &err);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(output_len, (size_t)4);
+    uint32_t count;
+    memcpy(&count, output, 4);
+    ASSERT_EQ(count, (uint32_t)3);
+
+    free(output); free(msg);
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(hl_cap_wasm, shared_data_concurrent_calls)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    const char *err = NULL;
+    const char data[] = "CONCURRENT_TEST_DATA";  /* 20 bytes */
+
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", "seg0",
+              data, 20, NULL, &vfs, NULL, &err), 0);
+
+    /* Multiple sequential calls from same cache — simulates pool usage */
+    for (int i = 0; i < 10; i++) {
+        size_t msg_len;
+        uint8_t *msg = build_shared_read_msg(0, 0, 20, &msg_len);
+        void *output = NULL;
+        size_t output_len = 0;
+
+        int rc = hl_cap_wasm_call(&cache, "shared_read",
+                                   msg, msg_len, &output, &output_len,
+                                   NULL, NULL, NULL, &vfs, NULL, NULL, &err);
+        ASSERT_EQ(rc, 0);
+        ASSERT_EQ(output_len, (size_t)20);
+        ASSERT_EQ(memcmp(output, data, 20), 0);
+
+        free(output); free(msg);
+    }
 
     hl_cap_wasm_destroy(&cache);
 }

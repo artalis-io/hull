@@ -104,4 +104,12 @@
 #define HL_WASM_POOL_HEAP_THRESHOLD (4 * 1024 * 1024)   /* 4 MB */
 #endif
 
+/* ── WASM shared data ────────────────────────────────────────────── */
+#ifndef HL_WASM_MAX_SHARED_DATA
+#define HL_WASM_MAX_SHARED_DATA  ((uint32_t)(3UL * 1024 * 1024 * 1024))  /* 3 GB total */
+#endif
+#ifndef HL_WASM_MAX_DATA_SEGMENTS
+#define HL_WASM_MAX_DATA_SEGMENTS 16
+#endif
+
 #endif /* HL_LIMITS_H */

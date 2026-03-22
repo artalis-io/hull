@@ -214,7 +214,6 @@ WAMR_SRCS := \
 	$(WAMR_IWASM)/common/wasm_native.c \
 	$(WAMR_IWASM)/common/wasm_runtime_common.c \
 	$(WAMR_IWASM)/common/wasm_shared_memory.c \
-	$(WAMR_IWASM)/common/arch/invokeNative_general.c \
 	$(WAMR_IWASM)/interpreter/wasm_interp_fast.c \
 	$(WAMR_IWASM)/interpreter/wasm_loader.c \
 	$(WAMR_IWASM)/interpreter/wasm_runtime.c \
@@ -244,10 +243,26 @@ WAMR_SRCS := \
 	$(WAMR_SHARED)/utils/bh_log.c \
 	$(WAMR_SHARED)/utils/bh_queue.c \
 	$(WAMR_SHARED)/utils/bh_vector.c \
-	$(WAMR_SHARED)/utils/runtime_timer.c
+	$(WAMR_SHARED)/utils/runtime_timer.c \
+	$(WAMR_IWASM)/libraries/shared-heap/shared_heap_wrapper.c
 
 # Flatten WAMR paths to build/ (replace / with _ in the subpath)
 WAMR_OBJS := $(patsubst $(WAMR_DIR)/%.c,$(BUILDDIR)/wamr_%.o,$(WAMR_SRCS))
+
+# Native invoker: arm64 macOS needs assembly version (generic C invoker
+# mangles arguments on arm64 calling convention). Other platforms use generic.
+WAMR_INVOKE_OBJ := $(BUILDDIR)/wamr_invoke_native.o
+ifeq ($(UNAME_S),Darwin)
+  ifneq ($(shell uname -m),x86_64)
+    WAMR_INVOKE_SRC := $(WAMR_IWASM)/common/arch/invokeNative_osx_universal.s
+    WAMR_INVOKE_FLAGS := -DBH_PLATFORM_DARWIN -DWASM_ENABLE_SIMD=1
+  else
+    WAMR_INVOKE_SRC := $(WAMR_IWASM)/common/arch/invokeNative_general.c
+  endif
+else
+  WAMR_INVOKE_SRC := $(WAMR_IWASM)/common/arch/invokeNative_general.c
+endif
+WAMR_OBJS += $(WAMR_INVOKE_OBJ)
 
 WAMR_CFLAGS := -std=c11 -O2 -w $(WAMR_ARCH_DEFS) \
 	-DWASM_ENABLE_INTERP=1 \
@@ -264,6 +279,7 @@ WAMR_CFLAGS := -std=c11 -O2 -w $(WAMR_ARCH_DEFS) \
 	-DWASM_ENABLE_SIMD=1 \
 	-DWASM_ENABLE_MINI_LOADER=0 \
 	-DWASM_ENABLE_SHARED_MEMORY=0 \
+	-DWASM_ENABLE_SHARED_HEAP=1 \
 	-DWASM_ENABLE_MEMORY_PROFILING=0 \
 	-DWASM_ENABLE_MEMORY_TRACING=0 \
 	-DWASM_ENABLE_PERF_PROFILING=0 \
@@ -927,6 +943,8 @@ ifeq ($(HL_ENABLE_WASM),1)
 $(BUILDDIR)/wamr_%.o: $(WAMR_DIR)/%.c | $(BUILDDIR)
 	@mkdir -p $(dir $@)
 	$(CC) $(WAMR_CFLAGS) -c -o $@ $<
+$(WAMR_INVOKE_OBJ): $(WAMR_INVOKE_SRC) | $(BUILDDIR)
+	$(CC) $(WAMR_INVOKE_FLAGS) -c -o $@ $<
 endif
 
 $(BUILDDIR):

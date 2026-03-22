@@ -411,5 +411,319 @@ else
 fi
 
 echo ""
+echo "=== E2E: stateful persistent instance (Lua) ==="
+
+PERSISTDIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR" "$AOTDIR" "$NOAOT_DIR" "$BUFDIR" "$PERSISTDIR"' EXIT
+
+mkdir -p "$PERSISTDIR/compute"
+cp tests/fixtures/compute/echo.wasm "$PERSISTDIR/compute/echo.wasm"
+cp tests/fixtures/compute/kv_store.wasm "$PERSISTDIR/compute/kv_store.wasm"
+
+cat > "$PERSISTDIR/app.lua" << 'EOF'
+app.get("/health", function(req, res) res:json({ ok = true }) end)
+EOF
+
+mkdir -p "$PERSISTDIR/tests"
+cat > "$PERSISTDIR/tests/test_persistent.lua" << 'EOF'
+test("compute.instance create and call", function()
+    local inst, err = compute.instance("echo")
+    assert(inst, "create failed: " .. tostring(err))
+    assert(inst:name() == "echo", "name: " .. tostring(inst:name()))
+    assert(not inst:closed(), "should not be closed")
+
+    local out, err2 = inst:call("hello persistent")
+    assert(not err2, "call err: " .. tostring(err2))
+    assert(out == "hello persistent", "mismatch: " .. tostring(out))
+    inst:close()
+    assert(inst:closed(), "should be closed")
+end)
+
+test("compute.instance repeated calls", function()
+    local inst = compute.instance("echo")
+    for i = 1, 10 do
+        local out = inst:call("call " .. tostring(i))
+        assert(out == "call " .. tostring(i))
+    end
+    inst:close()
+end)
+
+test("compute.instance gas recovery", function()
+    local inst = compute.instance("echo")
+    -- gas=1 should fail
+    local out, err = inst:call("x", { gas = 1 })
+    assert(out == nil, "should fail with low gas")
+    assert(err, "should have error")
+
+    -- Normal gas should succeed (reusable after exhaustion)
+    local out2, err2 = inst:call("recover", { gas = 10000000 })
+    assert(not err2, "recovery err: " .. tostring(err2))
+    assert(out2 == "recover", "mismatch: " .. tostring(out2))
+    inst:close()
+end)
+
+test("compute.instance not found", function()
+    local inst, err = compute.instance("nonexistent")
+    assert(inst == nil, "should be nil")
+    assert(err == "not_found", "err: " .. tostring(err))
+end)
+
+test("compute.instance buffer mode", function()
+    local inst = compute.instance("echo")
+    local buf, err = inst:call("buf test", { buffer = true })
+    assert(not err, "err: " .. tostring(err))
+    assert(buf:len() == 8, "len: " .. tostring(buf:len()))
+    assert(buf:bytes() == "buf test", "mismatch: " .. tostring(buf:bytes()))
+    buf:close()
+    inst:close()
+end)
+
+-- Stateful kv_store: load once, query many times
+test("kv_store: persistent state across calls", function()
+    local inst = compute.instance("kv_store")
+
+    -- Build LOAD message: opcode(1) + count(u32) + entries...
+    -- 2 entries: "name"="hull", "ver"="1.0"
+    local function u32(n)
+        return string.char(n % 256, math.floor(n/256) % 256,
+                           math.floor(n/65536) % 256, math.floor(n/16777216) % 256)
+    end
+    local load_msg = "\x01" .. u32(2)
+        .. u32(4) .. "name" .. u32(4) .. "hull"
+        .. u32(3) .. "ver"  .. u32(3) .. "1.0"
+    local out, err = inst:call(load_msg)
+    assert(not err, "load err: " .. tostring(err))
+    assert(#out == 4, "expected 4 bytes for count")
+
+    -- GET "name" → "hull"
+    local out2, err2 = inst:call("\x02name")
+    assert(not err2, "get err: " .. tostring(err2))
+    assert(out2 == "hull", "expected 'hull', got: " .. tostring(out2))
+
+    -- GET "ver" → "1.0"
+    local out3, err3 = inst:call("\x02ver")
+    assert(not err3, "get err: " .. tostring(err3))
+    assert(out3 == "1.0", "expected '1.0', got: " .. tostring(out3))
+
+    -- GET missing → empty
+    local out4 = inst:call("\x02nope")
+    assert(out4 == "", "expected empty for missing key")
+
+    -- COUNT → 2
+    local out5 = inst:call("\x03")
+    assert(#out5 == 4, "expected 4 bytes for count")
+
+    inst:close()
+end)
+
+-- Proves pooled calls lose state (fresh instance each time)
+test("kv_store: pooled calls lose state", function()
+    local function u32(n)
+        return string.char(n % 256, math.floor(n/256) % 256,
+                           math.floor(n/65536) % 256, math.floor(n/16777216) % 256)
+    end
+    -- LOAD via pooled call (large heap to avoid pool reuse)
+    local load_msg = "\x01" .. u32(1) .. u32(3) .. "foo" .. u32(3) .. "bar"
+    local out, err = compute.call("kv_store", load_msg, { heap = 8 * 1024 * 1024 })
+    assert(not err, "load err: " .. tostring(err))
+
+    -- GET via fresh pooled call — state is gone
+    local out2, err2 = compute.call("kv_store", "\x02foo", { heap = 8 * 1024 * 1024 })
+    assert(not err2, "get err: " .. tostring(err2))
+    assert(out2 == "", "pooled call should NOT retain state, got: " .. tostring(out2))
+end)
+EOF
+
+OUTPUT=$($HULL test "$PERSISTDIR" 2>&1) || true
+echo "$OUTPUT"
+if echo "$OUTPUT" | grep -qE "0 failed|tests passed$"; then
+    pass "Lua persistent instance tests"
+else
+    fail "Lua persistent instance tests"
+fi
+
+echo ""
+echo "=== E2E: persistent instance (JS) ==="
+
+rm -f "$PERSISTDIR/app.lua" "$PERSISTDIR/tests/test_persistent.lua"
+
+cat > "$PERSISTDIR/app.js" << 'JSEOF'
+import { app } from "hull:app";
+app.get("/health", (req, res) => { res.json({ ok: true }); });
+JSEOF
+
+cat > "$PERSISTDIR/tests/test_persistent.js" << 'JSEOF'
+import { compute } from "hull:compute";
+
+function ab2str(ab) {
+    const bytes = new Uint8Array(ab);
+    let result = "";
+    for (let i = 0; i < bytes.length; i++) result += String.fromCharCode(bytes[i]);
+    return result;
+}
+
+test("compute.instance create and call", () => {
+    const inst = compute.instance("echo");
+    test.eq(inst.name, "echo");
+    test.eq(inst.closed, false);
+
+    const out = inst.call("hello persistent");
+    test.eq(ab2str(out), "hello persistent");
+    inst.close();
+    test.eq(inst.closed, true);
+});
+
+test("compute.instance repeated calls", () => {
+    const inst = compute.instance("echo");
+    for (let i = 1; i <= 10; i++) {
+        const msg = "call " + i;
+        const out = inst.call(msg);
+        test.eq(ab2str(out), msg);
+    }
+    inst.close();
+});
+
+test("compute.instance not found", () => {
+    let threw = false;
+    try {
+        compute.instance("nonexistent");
+    } catch (e) {
+        threw = true;
+    }
+    test.eq(threw, true);
+});
+
+test("compute.instance buffer mode", () => {
+    const inst = compute.instance("echo");
+    const buf = inst.call("buf test", { buffer: true });
+    test.eq(buf.length, 8);
+    test.eq(ab2str(buf.bytes()), "buf test");
+    buf.close();
+    inst.close();
+});
+JSEOF
+
+OUTPUT=$($HULL test "$PERSISTDIR" 2>&1) || true
+echo "$OUTPUT"
+if echo "$OUTPUT" | grep -qE "0 failed|tests passed$"; then
+    pass "JS persistent instance tests"
+else
+    fail "JS persistent instance tests"
+fi
+
+echo ""
+echo "=== E2E: compute.data shared data (Lua) ==="
+
+SHAREDDIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR" "$AOTDIR" "$NOAOT_DIR" "$BUFDIR" "$PERSISTDIR" "$SHAREDDIR"' EXIT
+
+mkdir -p "$SHAREDDIR/compute"
+cp tests/fixtures/compute/shared_read.wasm "$SHAREDDIR/compute/shared_read.wasm"
+
+cat > "$SHAREDDIR/app.lua" << 'EOF'
+app.get("/health", function(req, res) res:json({ ok = true }) end)
+EOF
+
+mkdir -p "$SHAREDDIR/tests"
+cat > "$SHAREDDIR/tests/test_shared.lua" << 'EOF'
+test("compute.data single segment", function()
+    -- Load data into shared_read module
+    local ok, err = compute.data("shared_read", "seg0", "ABCDEFGHIJ")
+    assert(ok, "data load failed: " .. tostring(err))
+
+    -- Read 5 bytes at offset 2 from segment 0
+    local function u32(n)
+        return string.char(n % 256, math.floor(n/256) % 256,
+                           math.floor(n/65536) % 256, math.floor(n/16777216) % 256)
+    end
+    local msg = "\x00" .. u32(2) .. u32(5)
+    local out, err2 = compute.call("shared_read", msg)
+    assert(not err2, "call err: " .. tostring(err2))
+    assert(out == "CDEFG", "expected CDEFG, got: " .. tostring(out))
+
+    -- Count query
+    local count_msg = "\xFF"
+    local out2 = compute.call("shared_read", count_msg)
+    assert(#out2 == 4, "expected 4 bytes for count")
+
+    -- Clean up
+    compute.data("shared_read", nil)
+end)
+
+test("compute.data multi-segment", function()
+    compute.data("shared_read", "a", "AAAA")
+    compute.data("shared_read", "b", "BBBBBB")
+
+    local function u32(n)
+        return string.char(n % 256, math.floor(n/256) % 256,
+                           math.floor(n/65536) % 256, math.floor(n/16777216) % 256)
+    end
+
+    -- Read all of segment 0 ("AAAA")
+    local out = compute.call("shared_read", "\x00" .. u32(0) .. u32(4))
+    assert(out == "AAAA", "seg 0: " .. tostring(out))
+
+    -- Read all of segment 1 ("BBBBBB")
+    local out2 = compute.call("shared_read", "\x01" .. u32(0) .. u32(6))
+    assert(out2 == "BBBBBB", "seg 1: " .. tostring(out2))
+
+    compute.data("shared_read", nil)
+end)
+EOF
+
+OUTPUT=$($HULL test "$SHAREDDIR" 2>&1) || true
+echo "$OUTPUT"
+if echo "$OUTPUT" | grep -qE "0 failed|tests passed$"; then
+    pass "Lua shared data tests"
+else
+    fail "Lua shared data tests"
+fi
+
+echo ""
+echo "=== E2E: compute.data shared data (JS) ==="
+
+rm -f "$SHAREDDIR/app.lua" "$SHAREDDIR/tests/test_shared.lua"
+
+cat > "$SHAREDDIR/app.js" << 'JSEOF'
+import { app } from "hull:app";
+app.get("/health", (req, res) => { res.json({ ok: true }); });
+JSEOF
+
+cat > "$SHAREDDIR/tests/test_shared.js" << 'JSEOF'
+import { compute } from "hull:compute";
+
+function ab2str(ab) {
+    const bytes = new Uint8Array(ab);
+    let result = "";
+    for (let i = 0; i < bytes.length; i++) result += String.fromCharCode(bytes[i]);
+    return result;
+}
+
+test("compute.data single segment", () => {
+    compute.data("shared_read", "seg0", "ABCDEFGHIJ");
+
+    // Build read message: seg=0, offset=2, length=5
+    const msg = new Uint8Array(9);
+    msg[0] = 0;
+    const dv = new DataView(msg.buffer);
+    dv.setUint32(1, 2, true);
+    dv.setUint32(5, 5, true);
+
+    const out = compute.call("shared_read", msg.buffer);
+    test.eq(ab2str(out), "CDEFG");
+
+    compute.data("shared_read", null);
+});
+JSEOF
+
+OUTPUT=$($HULL test "$SHAREDDIR" 2>&1) || true
+echo "$OUTPUT"
+if echo "$OUTPUT" | grep -qE "0 failed|tests passed$"; then
+    pass "JS shared data tests"
+else
+    fail "JS shared data tests"
+fi
+
+echo ""
 echo "=== Results: $PASS/$TOTAL passed ==="
 if [ $FAIL -gt 0 ]; then exit 1; fi

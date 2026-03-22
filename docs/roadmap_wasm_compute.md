@@ -453,7 +453,9 @@ capability that doesn't block the WASM improvements.
 
 ---
 
-## Phase 5 — Persistent WASM Instances (Future)
+## Phase 5a — Persistent WASM Instances ✅
+
+**Status:** Complete.
 
 **Goal:** Long-lived WASM instances that retain state across calls.
 
@@ -461,25 +463,91 @@ capability that doesn't block the WASM improvements.
 statistics) pay a high cost re-instantiating per call. A persistent instance
 amortizes setup over many invocations.
 
+### API
+
+**Lua:**
 ```lua
--- Hypothetical API
-local inst = compute.instance("model", { heap = 2 * 1024 * 1024 * 1024 })
-inst:call("load_weights", weights_data)       -- one-time setup
-local result = inst:call("predict", input)    -- fast repeated calls
-inst:close()                                  -- explicit cleanup
+local inst, err = compute.instance("model", {
+    heap = 256 * 1024 * 1024,   -- immutable after creation
+    stack = 64 * 1024,           -- immutable after creation
+    gas = 100000000,             -- default gas per call (overridable)
+})
+
+local output, err = inst:call(input)
+local output, err = inst:call(input, { gas = 50000000 })
+local buf, err = inst:call(input, { buffer = true })
+local r = inst:async_call(input)  -- yields to event loop
+
+inst:name()    -- "model"
+inst:closed()  -- false
+inst:close()   -- explicit cleanup (or GC)
 ```
 
-### Considerations
+**JavaScript:**
+```javascript
+const inst = compute.instance("model", {
+    heap: 256 * 1024 * 1024,
+    gas: 100000000,
+});
 
-- Breaks the "fresh instance per call" isolation model — document the
-  tradeoff (performance vs isolation)
-- Needs lifecycle management: create, use, close, GC/finalizer
-- Memory isn't reset between calls — module is responsible for its own state
-- Gas metering resets per `call()` invocation
-- Thread safety: instance pinned to one thread, or mutex-guarded
-- Pairs well with Memory64 for large model weights
+const output = inst.call(input);
+const buf = inst.call(input, { buffer: true });
+const output2 = await inst.async.call(input);
 
-### Not yet planned in detail — depends on real-world demand from Phases 1-3.
+inst.name;    // "model" (getter)
+inst.closed;  // false (getter)
+inst.close();
+```
+
+### Key properties
+
+- Instance NOT pooled — exclusively owned by userdata until close/GC
+- Linear memory preserved across calls (globals, heap, data segments)
+- Gas reset per call
+- `heap`/`stack` immutable; `gas`/`max_input`/`max_output`/`buffer` overridable per call
+- Exceptions cleared at start of each call (reusable after gas exhaustion)
+- Supports sync and async dispatch
+- Instance has `busy` flag — async dispatch while in-flight returns error
+
+### Tradeoffs
+
+- Breaks the "fresh instance per call" isolation model — module is responsible
+  for its own state management
+- Memory isn't reset between calls
+- Single-threaded: one instance can only be used by one caller at a time
+
+---
+
+## Phase 5b — Shared WASM Data via WAMR Shared Heaps ✅
+
+**Goal:** Load named data segments that multiple WASM instances read concurrently
+at native speed via WAMR's shared heap feature. Enables multi-GB read-only
+datasets (spatial indexes, CSR graphs) for tile servers and routing engines.
+
+**Implementation:** `compute.data(module, segment, data)` API loads named segments
+backed by page-aligned mmap regions. WAMR shared heaps chain segments into
+contiguous high-address WASM32 space. WASM plugins query segments via
+`host_call(0x02, segment_id, sub)` and read at native speed via normal `i32.load`.
+
+### Key properties
+
+- **Per-module, multi-segment**: up to 16 named segments per module
+- **Auto-attach**: every `compute.call()` / `compute.instance()` gets all segments
+- **Concurrent reads**: multiple thread pool workers read the same backing memory
+- **Zero-copy mmap**: `fs.mmap()` + `compute.data()` avoids copying multi-GB files
+- **Named segments**: plugin queries by index via `host_call(0x02, segment_id, 0/1)`
+- **Replaceable**: adding/removing segments drains pool and rebuilds chain
+- **WASM32 limit**: ~3 GB total across all segments
+
+### Files changed
+
+- `Makefile`: `WASM_ENABLE_SHARED_HEAP=1`, `shared_heap_wrapper.c`, platform-specific `invokeNative`
+- `include/hull/cap/wasm.h`: `HlWasmDataSegment`, `HlWasmSharedData`, `hl_cap_wasm_data_load/unload()`
+- `include/hull/limits.h`: `HL_WASM_MAX_SHARED_DATA`, `HL_WASM_MAX_DATA_SEGMENTS`
+- `src/hull/cap/wasm.c`: shared heap creation, chaining, attach, host_call opcode 0x02
+- `src/hull/runtime/lua/modules.c`: `compute.data()` Lua binding
+- `src/hull/runtime/js/modules.c`: `compute.data()` JS binding
+- 8 unit tests + 2 E2E tests (Lua + JS)
 
 ---
 
@@ -490,13 +558,14 @@ Phase 1 (SIMD128)  ────────────────────�
                                           ├──→  Phase 3 (Memory64)
 Phase 2 (Memory Limits)  ────────────────┘          │
                                                      │
-                                          Phase 5 (Persistent Instances)
+                                          Phase 5a (Persistent) ✅ ──→ Phase 5b (Shared Data) ✅
 
 Phase 4 (GPU/WebGPU)  ── independent, start after Phase 3
 ```
 
 Phases 1 and 2 can proceed in parallel. Phase 3 depends on the type
-widening done in Phase 2. Phase 4 is independent. Phase 5 is future.
+widening done in Phase 2. Phase 4 is independent. Phase 5a is complete;
+Phase 5b is complete.
 
 ---
 
@@ -508,4 +577,5 @@ widening done in Phase 2. Phase 4 is independent. Phase 5 is future.
 | 2 | `compute.call` with 2 GB heap, 100 MB input works correctly |
 | 3 | Memory64 module with 6 GB heap runs under AOT |
 | 4 | GPU matmul 10× faster than WASM SIMD matmul for 4096×4096 |
-| 5 | Persistent instance amortizes load time over 1000+ calls |
+| 5a | Persistent instance amortizes load time over 1000+ calls ✅ |
+| 5b | Shared data segments readable from pooled + persistent instances ✅ |
