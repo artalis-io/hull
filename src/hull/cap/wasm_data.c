@@ -146,19 +146,19 @@ void hl_wasm_attach_shared_heap(void *inst, void *chain_head)
 /* ── Option clamping ───────────────────────────────────────────────── */
 
 void hl_cap_wasm_clamp_opts(HlWasmCallOpts *opts,
-                             uint32_t cfg_max_input, uint32_t cfg_max_output,
+                             uint64_t cfg_max_input, uint64_t cfg_max_output,
                              uint32_t cfg_heap, uint32_t cfg_stack, int64_t cfg_gas)
 {
     if (!opts) return;
-    #define CLAMP_U32(field, cfg) do { \
+    #define CLAMP_VAL(field, cfg) do { \
         if ((cfg) && (!(opts->field) || (opts->field) > (cfg))) \
             opts->field = (cfg); \
     } while(0)
-    CLAMP_U32(max_input,  cfg_max_input);
-    CLAMP_U32(max_output, cfg_max_output);
-    CLAMP_U32(heap_size,  cfg_heap);
-    CLAMP_U32(stack_size, cfg_stack);
-    #undef CLAMP_U32
+    CLAMP_VAL(max_input,  cfg_max_input);
+    CLAMP_VAL(max_output, cfg_max_output);
+    CLAMP_VAL(heap_size,  cfg_heap);
+    CLAMP_VAL(stack_size, cfg_stack);
+    #undef CLAMP_VAL
     if (cfg_gas && (!opts->gas || opts->gas > cfg_gas))
         opts->gas = cfg_gas;
 }

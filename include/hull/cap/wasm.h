@@ -51,7 +51,7 @@ typedef struct HlWasmDataSegment {
     void    *host_addr;      /* native pointer to data start */
     size_t   size;           /* logical data size in bytes (visible to WASM) */
     size_t   alloc_size;     /* page-aligned mmap size (for munmap) */
-    uint32_t wasm_addr;      /* WASM-space start address (computed on chain) */
+    uint64_t wasm_addr;      /* WASM-space start address (computed on chain) */
     int      is_mmap;        /* 1 = pre_alloc'd (caller owns backing), 0 = we own */
 } HlWasmDataSegment;
 
@@ -72,6 +72,7 @@ typedef struct {
     uint8_t *wasm_buf;      /* owned buffer passed to wasm_runtime_load */
     uint32_t wasm_buf_len;
     int      is_aot;
+    int      is_memory64;  /* 1 = Memory64 module (i64 addresses) */
     uint32_t abi_version;
     HlWasmPool pool;       /* per-module instance pool */
     HlWasmSharedData *shared_data;  /* NULL until compute.data() called */
@@ -88,8 +89,8 @@ typedef struct HlWasmCache {
 /* ── Call options ──────────────────────────────────────────────────── */
 
 typedef struct {
-    uint32_t max_input;     /* default: 1 MB, max: 256 MB */
-    uint32_t max_output;    /* default: 1 MB, max: 256 MB */
+    uint64_t max_input;     /* default: 1 MB, max: 16 GB (Memory64) / 256 MB (WASM32) */
+    uint64_t max_output;    /* default: 1 MB, max: 16 GB (Memory64) / 256 MB (WASM32) */
     uint32_t heap_size;     /* default: 2 MB, max: ~4 GB */
     uint32_t stack_size;    /* default: 64 KB, max: 8 MB */
     int64_t  gas;           /* default: 10M, max: 100B instructions.
@@ -100,7 +101,7 @@ typedef struct {
 /* Clamp call options to configured maximums (CLI > manifest > defaults).
  * cfg_* fields are ceilings — 0 means "use compile-time default". */
 void hl_cap_wasm_clamp_opts(HlWasmCallOpts *opts,
-                             uint32_t cfg_max_input, uint32_t cfg_max_output,
+                             uint64_t cfg_max_input, uint64_t cfg_max_output,
                              uint32_t cfg_heap, uint32_t cfg_stack, int64_t cfg_gas);
 
 /* ── Callback support ──────────────────────────────────────────────── */
@@ -144,8 +145,8 @@ typedef struct HlWasmInstance {
     uint32_t     heap_size;     /* immutable after creation */
     uint32_t     stack_size;    /* immutable after creation */
     int64_t      default_gas;   /* 0 = use HL_WASM_DEFAULT_GAS */
-    uint32_t     default_max_input;
-    uint32_t     default_max_output;
+    uint64_t     default_max_input;
+    uint64_t     default_max_output;
     int          closed;
     atomic_int   busy;          /* 1 = async call in flight */
     HlAllocator *alloc;

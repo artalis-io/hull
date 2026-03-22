@@ -19,6 +19,13 @@
 #include "log.h"
 #include "wasm_export.h"
 
+/* Internal WAMR header for Memory64 detection (is_memory64 on WASMMemoryInstance).
+ * Not part of the public API but needed to detect 64-bit memory modules.
+ * Path is relative to -I$(WAMR_IWASM)/include set in Makefile. */
+#if WASM_ENABLE_MEMORY64 != 0
+#include "../interpreter/wasm_runtime.h"
+#endif
+
 #include <assert.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -434,8 +441,9 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
         return HL_WASM_ERR_LOAD;
     }
 
-    /* Probe ABI version before taking the lock */
+    /* Probe ABI version and Memory64 flag before taking the lock */
     uint32_t abi_version = 0;
+    int detected_memory64 = 0;
     {
         wasm_module_inst_t tmp_inst = wasm_runtime_instantiate(
             module, 8192, 8192, error_buf, sizeof(error_buf));
@@ -451,6 +459,13 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
                     wasm_runtime_destroy_exec_env(env);
                 }
             }
+#if WASM_ENABLE_MEMORY64 != 0
+            /* Detect Memory64 via internal WAMR API */
+            WASMMemoryInstance *mem = wasm_get_default_memory(
+                (WASMModuleInstance *)tmp_inst);
+            if (mem && mem->is_memory64)
+                detected_memory64 = 1;
+#endif
             wasm_runtime_deinstantiate(tmp_inst);
         }
     }
@@ -485,6 +500,7 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
     cached->wasm_buf = buf;
     cached->wasm_buf_len = buf_len;
     cached->is_aot = is_aot;
+    cached->is_memory64 = detected_memory64;
     cached->abi_version = abi_version;
     if (pthread_mutex_init(&cached->mutex, NULL) != 0) {
         pthread_mutex_unlock(&cache->pool_mutex);
@@ -497,8 +513,8 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
 
     pthread_mutex_unlock(&cache->pool_mutex);
 
-    log_info("[wasm] cached module '%s' (abi=%u, aot=%d)",
-             name, cached->abi_version, is_aot);
+    log_info("[wasm] cached module '%s' (abi=%u, aot=%d, mem64=%d)",
+             name, cached->abi_version, is_aot, detected_memory64);
     return 0;
 }
 
@@ -576,15 +592,15 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
     *output_buf = NULL;
 
     /* Apply defaults */
-    uint32_t max_input  = opts && opts->max_input  ? opts->max_input  : HL_WASM_DEFAULT_MAX_INPUT;
-    uint32_t max_output = opts && opts->max_output  ? opts->max_output : HL_WASM_DEFAULT_MAX_OUTPUT;
+    uint64_t max_input  = opts && opts->max_input  ? opts->max_input  : HL_WASM_DEFAULT_MAX_INPUT;
+    uint64_t max_output = opts && opts->max_output  ? opts->max_output : HL_WASM_DEFAULT_MAX_OUTPUT;
     uint32_t heap_size  = opts && opts->heap_size   ? opts->heap_size  : HL_WASM_DEFAULT_HEAP;
     uint32_t stack_size = opts && opts->stack_size   ? opts->stack_size : HL_WASM_DEFAULT_STACK;
     int64_t  gas        = opts && opts->gas          ? opts->gas        : HL_WASM_DEFAULT_GAS;
 
-    /* Clamp to maximums */
-    if (max_input > HL_WASM_MAX_IO_SIZE)   max_input = HL_WASM_MAX_IO_SIZE;
-    if (max_output > HL_WASM_MAX_IO_SIZE)  max_output = HL_WASM_MAX_IO_SIZE;
+    /* Clamp to maximums (I/O limits widened for Memory64 after module detection) */
+    if (max_input > HL_WASM64_MAX_IO_SIZE)   max_input = HL_WASM64_MAX_IO_SIZE;
+    if (max_output > HL_WASM64_MAX_IO_SIZE)  max_output = HL_WASM64_MAX_IO_SIZE;
     if (heap_size > (uint32_t)HL_WASM_MAX_HEAP) heap_size = (uint32_t)HL_WASM_MAX_HEAP;
     if (stack_size > (uint32_t)HL_WASM_MAX_STACK) stack_size = (uint32_t)HL_WASM_MAX_STACK;
     if (gas > HL_WASM_MAX_GAS)             gas = HL_WASM_MAX_GAS;
@@ -624,6 +640,18 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
             if (err_msg) *err_msg = err_internal;
             return HL_WASM_ERR_INTERNAL;
         }
+    }
+
+    /* Memory64 modules require AOT (fast interpreter doesn't support Memory64) */
+    if (mod->is_memory64 && !mod->is_aot) {
+        if (err_msg) *err_msg = "memory64_requires_aot";
+        return HL_WASM_ERR_LOAD;
+    }
+
+    /* Tighten I/O clamp for WASM32 modules */
+    if (!mod->is_memory64) {
+        if (max_input > HL_WASM_MAX_IO_SIZE)   max_input = HL_WASM_MAX_IO_SIZE;
+        if (max_output > HL_WASM_MAX_IO_SIZE)  max_output = HL_WASM_MAX_IO_SIZE;
     }
 
     /* Try to acquire from instance pool.
@@ -714,19 +742,28 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
     tl_host_ctx.ctx = callback_ctx;
     tl_host_ctx.shared_data = sd_snapshot;
 
-    /* WASM32 ABI: hull_process arguments are uint32_t. wasm_runtime_module_malloc
-     * returns uint64_t but values are guaranteed ≤ UINT32_MAX for WASM32 modules
-     * (linear memory is 32-bit addressable). Narrowing cast is intentional. */
-    assert(wasm_in_ptr <= UINT32_MAX);
-    assert(wasm_out_ptr <= UINT32_MAX);
-    uint32_t argv[4] = {
-        (uint32_t)wasm_in_ptr,
-        (uint32_t)input_len,
-        (uint32_t)wasm_out_ptr,
-        max_output,
-    };
+    /* Call hull_process with the appropriate ABI.
+     * WASM32: hull_process(i32, i32, i32, i32) -> i32 = 4 argv cells
+     * Memory64: hull_process(i64, i64, i64, i64) -> i32 = 8 argv cells (2 per i64) */
+    uint32_t argv[9]; /* max 8 cells + 1 for result */
+    int argc;
+    if (mod->is_memory64) {
+        argv[0] = (uint32_t)(wasm_in_ptr);        argv[1] = (uint32_t)(wasm_in_ptr >> 32);
+        argv[2] = (uint32_t)(input_len);           argv[3] = (uint32_t)((uint64_t)input_len >> 32);
+        argv[4] = (uint32_t)(wasm_out_ptr);        argv[5] = (uint32_t)(wasm_out_ptr >> 32);
+        argv[6] = (uint32_t)(max_output);          argv[7] = (uint32_t)(max_output >> 32);
+        argc = 8;
+    } else {
+        assert(wasm_in_ptr <= UINT32_MAX);
+        assert(wasm_out_ptr <= UINT32_MAX);
+        argv[0] = (uint32_t)wasm_in_ptr;
+        argv[1] = (uint32_t)input_len;
+        argv[2] = (uint32_t)wasm_out_ptr;
+        argv[3] = (uint32_t)max_output;
+        argc = 4;
+    }
 
-    if (!wasm_runtime_call_wasm(exec_env, process_fn, 4, argv)) {
+    if (!wasm_runtime_call_wasm(exec_env, process_fn, (uint32_t)argc, argv)) {
         const char *exception = wasm_runtime_get_exception(inst);
         if (exception && strstr(exception, "instruction count")) {
             log_warn("[wasm] gas exhausted for '%s'", name);
@@ -953,18 +990,22 @@ int hl_cap_wasm_instance_call_buf(HlWasmInstance *pi,
     }
 
     /* Resolve per-call opts → instance defaults → global defaults */
-    uint32_t max_input  = opts && opts->max_input  ? opts->max_input
+    uint64_t max_input  = opts && opts->max_input  ? opts->max_input
                         : pi->default_max_input    ? pi->default_max_input
                         : HL_WASM_DEFAULT_MAX_INPUT;
-    uint32_t max_output = opts && opts->max_output  ? opts->max_output
+    uint64_t max_output = opts && opts->max_output  ? opts->max_output
                         : pi->default_max_output    ? pi->default_max_output
                         : HL_WASM_DEFAULT_MAX_OUTPUT;
     int64_t  gas        = opts && opts->gas          ? opts->gas
                         : pi->default_gas            ? pi->default_gas
                         : HL_WASM_DEFAULT_GAS;
 
-    if (max_input > HL_WASM_MAX_IO_SIZE)  max_input = HL_WASM_MAX_IO_SIZE;
-    if (max_output > HL_WASM_MAX_IO_SIZE) max_output = HL_WASM_MAX_IO_SIZE;
+    {
+        uint64_t io_max = (pi->module && pi->module->is_memory64)
+                        ? HL_WASM64_MAX_IO_SIZE : HL_WASM_MAX_IO_SIZE;
+        if (max_input > io_max)  max_input = io_max;
+        if (max_output > io_max) max_output = io_max;
+    }
     if (gas > HL_WASM_MAX_GAS)            gas = HL_WASM_MAX_GAS;
 
     if (input_len > max_input) {
@@ -1026,16 +1067,26 @@ int hl_cap_wasm_instance_call_buf(HlWasmInstance *pi,
     }
     tl_host_ctx.shared_data = pi_sd;
 
-    assert(wasm_in_ptr <= UINT32_MAX);
-    assert(wasm_out_ptr <= UINT32_MAX);
-    uint32_t argv[4] = {
-        (uint32_t)wasm_in_ptr,
-        (uint32_t)input_len,
-        (uint32_t)wasm_out_ptr,
-        max_output,
-    };
+    int is_mem64 = pi->module ? pi->module->is_memory64 : 0;
+    uint32_t argv[9];
+    int argc_call;
+    if (is_mem64) {
+        argv[0] = (uint32_t)(wasm_in_ptr);        argv[1] = (uint32_t)(wasm_in_ptr >> 32);
+        argv[2] = (uint32_t)(input_len);           argv[3] = (uint32_t)((uint64_t)input_len >> 32);
+        argv[4] = (uint32_t)(wasm_out_ptr);        argv[5] = (uint32_t)(wasm_out_ptr >> 32);
+        argv[6] = (uint32_t)(max_output);          argv[7] = (uint32_t)(max_output >> 32);
+        argc_call = 8;
+    } else {
+        assert(wasm_in_ptr <= UINT32_MAX);
+        assert(wasm_out_ptr <= UINT32_MAX);
+        argv[0] = (uint32_t)wasm_in_ptr;
+        argv[1] = (uint32_t)input_len;
+        argv[2] = (uint32_t)wasm_out_ptr;
+        argv[3] = (uint32_t)max_output;
+        argc_call = 4;
+    }
 
-    if (!wasm_runtime_call_wasm(exec_env, process_fn, 4, argv)) {
+    if (!wasm_runtime_call_wasm(exec_env, process_fn, (uint32_t)argc_call, argv)) {
         const char *exception = wasm_runtime_get_exception(inst);
         if (exception && strstr(exception, "instruction count")) {
             if (err_msg) *err_msg = err_gas;

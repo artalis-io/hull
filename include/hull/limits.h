@@ -84,7 +84,10 @@
 #define HL_WASM_DEFAULT_MAX_OUTPUT (1 * 1024 * 1024)       /* 1 MB */
 #endif
 #ifndef HL_WASM_MAX_IO_SIZE
-#define HL_WASM_MAX_IO_SIZE        (256 * 1024 * 1024)     /* 256 MB */
+#define HL_WASM_MAX_IO_SIZE        ((uint64_t)256 * 1024 * 1024)  /* 256 MB (WASM32) */
+#endif
+#ifndef HL_WASM64_MAX_IO_SIZE
+#define HL_WASM64_MAX_IO_SIZE      ((uint64_t)16 * 1024 * 1024 * 1024)  /* 16 GB (Memory64) */
 #endif
 #define HL_WASM_DEFAULT_GAS        (10 * 1000 * 1000)      /* 10M instructions */
 #ifndef HL_WASM_MAX_GAS

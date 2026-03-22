@@ -59,8 +59,8 @@ struct HlRuntime {
         uint32_t heap_size;   /* ceiling: 0 = use compile-time default */
         uint32_t stack_size;
         int64_t  gas;
-        uint32_t max_input;
-        uint32_t max_output;
+        uint64_t max_input;
+        uint64_t max_output;
     } wasm_config;                     /* three-tier resolved limits (CLI > manifest > defaults) */
 #endif
 };
