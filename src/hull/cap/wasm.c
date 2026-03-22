@@ -11,6 +11,7 @@
 
 #include "hull/cap/wasm.h"
 #include "hull/cap/wasm_buffer.h"
+#include "hull/cap/wasm_data.h"
 #include "hull/alloc.h"
 #include "hull/cap/audit.h"
 #include "hull/limits.h"
@@ -25,8 +26,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
-#include <unistd.h>
 
 _Static_assert(sizeof(uint32_t) == 4, "WASM32 ABI requires 4-byte uint32_t");
 _Static_assert(HL_WASM_CALLBACK_BUF_SIZE <= 65536,
@@ -162,8 +161,8 @@ static HlWasmModule *cache_find(HlWasmCache *cache, const char *name)
 
 /* ── Instance pool ─────────────────────────────────────────────────── */
 
-/* Drain all pooled instances for a module. Caller must hold pool_mutex. */
-static void pool_drain(HlWasmPool *pool)
+/* Drain all pooled instances for a module. Caller must hold mod->mutex. */
+void hl_wasm_pool_drain(HlWasmPool *pool)
 {
     for (int i = 0; i < pool->count; i++) {
         HlWasmPoolEntry *e = &pool->entries[i];
@@ -175,8 +174,8 @@ static void pool_drain(HlWasmPool *pool)
 
 /* Try to acquire a pooled instance matching (heap_size, stack_size).
  * Returns 1 and fills out_inst/out_env/out_fn on hit, 0 on miss.
- * Always snapshots shared data pointers under the mutex for thread safety. */
-static int pool_acquire(HlWasmCache *cache, HlWasmModule *mod,
+ * Always snapshots shared data pointers under mod->mutex for thread safety. */
+static int pool_acquire(HlWasmModule *mod,
                         uint32_t heap_size, uint32_t stack_size,
                         wasm_module_inst_t *out_inst,
                         wasm_exec_env_t *out_env,
@@ -184,7 +183,7 @@ static int pool_acquire(HlWasmCache *cache, HlWasmModule *mod,
                         const HlWasmSharedData **out_sd,
                         void **out_chain_head)
 {
-    pthread_mutex_lock(&cache->pool_mutex);
+    pthread_mutex_lock(&mod->mutex);
     /* Snapshot shared data under the lock */
     *out_sd = mod->shared_data;
     *out_chain_head = mod->shared_data ? mod->shared_data->chain_head : NULL;
@@ -198,11 +197,11 @@ static int pool_acquire(HlWasmCache *cache, HlWasmModule *mod,
             /* Swap-remove */
             pool->entries[i] = pool->entries[pool->count - 1];
             pool->count--;
-            pthread_mutex_unlock(&cache->pool_mutex);
+            pthread_mutex_unlock(&mod->mutex);
             return 1;
         }
     }
-    pthread_mutex_unlock(&cache->pool_mutex);
+    pthread_mutex_unlock(&mod->mutex);
     return 0;
 }
 
@@ -213,11 +212,12 @@ void hl_wasm_pool_release(HlWasmCache *cache, HlWasmModule *mod,
                           uint32_t heap_size, uint32_t stack_size,
                           int success)
 {
+    (void)cache;
     wasm_module_inst_t inst = (wasm_module_inst_t)inst_v;
     wasm_exec_env_t exec_env = (wasm_exec_env_t)exec_env_v;
 
     if (success && heap_size <= HL_WASM_POOL_HEAP_THRESHOLD) {
-        pthread_mutex_lock(&cache->pool_mutex);
+        pthread_mutex_lock(&mod->mutex);
         HlWasmPool *pool = &mod->pool;
         if (pool->count < HL_WASM_POOL_MAX) {
             /* Clear any stale exception before returning to pool */
@@ -228,407 +228,15 @@ void hl_wasm_pool_release(HlWasmCache *cache, HlWasmModule *mod,
             e->process_fn = process_fn_v;
             e->heap_size  = heap_size;
             e->stack_size = stack_size;
-            pthread_mutex_unlock(&cache->pool_mutex);
+            pthread_mutex_unlock(&mod->mutex);
             return;
         }
-        pthread_mutex_unlock(&cache->pool_mutex);
+        pthread_mutex_unlock(&mod->mutex);
     }
     /* process_fn is owned by the instance — no separate cleanup needed */
     (void)process_fn_v;
     wasm_runtime_destroy_exec_env(exec_env);
     wasm_runtime_deinstantiate(inst);
-}
-
-/* ── Shared data helpers ───────────────────────────────────────────── */
-
-/* Rebuild the WAMR shared heap chain from segment array.
- * Must be called under pool_mutex. Drains pool. */
-static int rebuild_chain(HlWasmModule *mod)
-{
-    HlWasmSharedData *sd = mod->shared_data;
-    if (!sd || sd->count == 0) {
-        sd->chain_head = NULL;
-        return 0;
-    }
-
-    /* For a single segment, no chaining needed — just create the heap */
-    if (sd->count == 1) {
-        sd->segments[0].wasm_addr =
-            (uint32_t)(UINT32_MAX - sd->segments[0].alloc_size + 1);
-        sd->chain_head = sd->segments[0].shared_heap;
-        return 0;
-    }
-
-    /* Chain from right to left: last segment is highest address.
-     * chain(head, body) puts body at higher addresses. */
-    wasm_shared_heap_t chain = (wasm_shared_heap_t)sd->segments[sd->count - 1].shared_heap;
-
-    for (int i = sd->count - 2; i >= 0; i--) {
-        chain = wasm_runtime_chain_shared_heaps(
-            (wasm_shared_heap_t)sd->segments[i].shared_heap, chain);
-        if (!chain) {
-            log_error("[wasm] failed to chain shared heaps");
-            sd->chain_head = NULL;
-            return -1;
-        }
-    }
-
-    sd->chain_head = chain;
-
-    /* Read back WASM addresses from the chain.
-     * After chaining, each heap's start_off_mem32 is set by WAMR.
-     * We can read it back via a temporary attach to a dummy instance,
-     * but it's simpler to compute: last segment ends at UINT32_MAX,
-     * and each prior segment is placed contiguously before it. */
-    /* WAMR uses alloc_size (page-aligned) for heap mapping, so addresses
-     * must be computed with alloc_size, not logical data size. */
-    uint64_t addr = (uint64_t)UINT32_MAX + 1;
-    for (int i = sd->count - 1; i >= 0; i--) {
-        addr -= sd->segments[i].alloc_size;
-        sd->segments[i].wasm_addr = (uint32_t)addr;
-    }
-
-    return 0;
-}
-
-/* Free a single segment's resources (heap + backing if owned). */
-static void free_segment(HlWasmDataSegment *seg)
-{
-    /* shared_heap is destroyed by wasm_runtime_destroy() globally,
-     * but we need to unchain first. For individual removal, we just
-     * NULL out the pointer — WAMR cleans up on runtime destroy. */
-    if (!seg->is_mmap && seg->host_addr) {
-        munmap(seg->host_addr, seg->alloc_size);
-        seg->host_addr = NULL;
-    }
-    seg->shared_heap = NULL;
-    seg->size = 0;
-    seg->wasm_addr = 0;
-    seg->name[0] = '\0';
-}
-
-/* Free all shared data for a module. Caller holds pool_mutex. */
-static void free_shared_data(HlWasmModule *mod)
-{
-    if (!mod->shared_data)
-        return;
-
-    HlWasmSharedData *sd = mod->shared_data;
-
-    /* Unchain all heaps first */
-    if (sd->chain_head && sd->count > 1) {
-        wasm_runtime_unchain_shared_heaps(
-            (wasm_shared_heap_t)sd->chain_head, true);
-    }
-
-    for (int i = 0; i < sd->count; i++)
-        free_segment(&sd->segments[i]);
-
-    sd->count = 0;
-    sd->chain_head = NULL;
-    free(sd);
-    mod->shared_data = NULL;
-}
-
-/* Attach shared data chain to a WASM instance.
- * sd and chain_head must be snapshotted under pool_mutex. */
-static void attach_shared_heap(wasm_module_inst_t inst, void *chain_head)
-{
-    if (chain_head) {
-        if (!wasm_runtime_attach_shared_heap(
-                inst, (wasm_shared_heap_t)chain_head)) {
-            log_error("[wasm] failed to attach shared heap to instance");
-        }
-    }
-}
-
-/* ── Option clamping ───────────────────────────────────────────────── */
-
-void hl_cap_wasm_clamp_opts(HlWasmCallOpts *opts,
-                             uint32_t cfg_max_input, uint32_t cfg_max_output,
-                             uint32_t cfg_heap, uint32_t cfg_stack, int64_t cfg_gas)
-{
-    if (!opts) return;
-    #define CLAMP_U32(field, cfg) do { \
-        if ((cfg) && (!(opts->field) || (opts->field) > (cfg))) \
-            opts->field = (cfg); \
-    } while(0)
-    CLAMP_U32(max_input,  cfg_max_input);
-    CLAMP_U32(max_output, cfg_max_output);
-    CLAMP_U32(heap_size,  cfg_heap);
-    CLAMP_U32(stack_size, cfg_stack);
-    #undef CLAMP_U32
-    if (cfg_gas && (!opts->gas || opts->gas > cfg_gas))
-        opts->gas = cfg_gas;
-}
-
-/* ── Shared data public API ─────────────────────────────────────────── */
-
-int hl_cap_wasm_data_load(HlWasmCache *cache, const char *module_name,
-                           const char *segment_name,
-                           const void *data, size_t data_len,
-                           void *pre_alloc,
-                           const struct HlVfs *app_vfs, const char *app_dir,
-                           const char **err_msg)
-{
-    static const char *err_internal  = "internal_error";
-    static const char *err_not_found = "not_found";
-    static const char *err_too_many  = "too_many_segments";
-    static const char *err_too_large = "data_too_large";
-
-    if (!cache || !cache->initialized || !module_name) {
-        if (err_msg) *err_msg = err_internal;
-        return -1;
-    }
-    if (validate_module_name(module_name) != 0) {
-        if (err_msg) *err_msg = err_not_found;
-        return -1;
-    }
-
-    /* Lazy-load the module */
-    HlWasmModule *mod = NULL;
-    {
-        pthread_mutex_lock(&cache->pool_mutex);
-        mod = cache_find(cache, module_name);
-        pthread_mutex_unlock(&cache->pool_mutex);
-    }
-    if (!mod) {
-        int rc = hl_cap_wasm_load(cache, module_name, app_vfs, app_dir);
-        if (rc != 0) {
-            if (err_msg) *err_msg = (rc == HL_WASM_ERR_NOT_FOUND) ? err_not_found : err_internal;
-            return -1;
-        }
-        pthread_mutex_lock(&cache->pool_mutex);
-        mod = cache_find(cache, module_name);
-        pthread_mutex_unlock(&cache->pool_mutex);
-        if (!mod) {
-            if (err_msg) *err_msg = err_internal;
-            return -1;
-        }
-    }
-
-    pthread_mutex_lock(&cache->pool_mutex);
-
-    /* Case 1: segment_name==NULL && data==NULL → remove all segments */
-    if (!segment_name && !data) {
-        pool_drain(&mod->pool);
-        free_shared_data(mod);
-        pthread_mutex_unlock(&cache->pool_mutex);
-        log_debug("[wasm] removed all shared data for '%s'", module_name);
-        return 0;
-    }
-
-    /* From here, segment_name must be non-NULL */
-    if (!segment_name) {
-        pthread_mutex_unlock(&cache->pool_mutex);
-        if (err_msg) *err_msg = err_internal;
-        return -1;
-    }
-
-    /* Case 2: segment_name!=NULL && data==NULL → remove that segment */
-    if (!data) {
-        if (mod->shared_data) {
-            HlWasmSharedData *sd = mod->shared_data;
-            for (int i = 0; i < sd->count; i++) {
-                if (strcmp(sd->segments[i].name, segment_name) == 0) {
-                    /* Unchain before removing */
-                    if (sd->chain_head && sd->count > 1) {
-                        wasm_runtime_unchain_shared_heaps(
-                            (wasm_shared_heap_t)sd->chain_head, true);
-                        sd->chain_head = NULL;
-                    }
-                    free_segment(&sd->segments[i]);
-                    /* Compact: shift remaining segments */
-                    for (int j = i; j < sd->count - 1; j++)
-                        sd->segments[j] = sd->segments[j + 1];
-                    sd->count--;
-                    memset(&sd->segments[sd->count], 0, sizeof(HlWasmDataSegment));
-
-                    pool_drain(&mod->pool);
-                    if (sd->count > 0)
-                        rebuild_chain(mod);
-                    else {
-                        free(sd);
-                        mod->shared_data = NULL;
-                    }
-                    pthread_mutex_unlock(&cache->pool_mutex);
-                    log_debug("[wasm] removed segment '%s' from '%s'",
-                              segment_name, module_name);
-                    return 0;
-                }
-            }
-        }
-        /* Segment not found — OK, nothing to remove */
-        pthread_mutex_unlock(&cache->pool_mutex);
-        return 0;
-    }
-
-    /* Case 3: segment_name!=NULL && data!=NULL → add/replace segment */
-    if (data_len == 0 || data_len > HL_WASM_MAX_SHARED_DATA) {
-        pthread_mutex_unlock(&cache->pool_mutex);
-        if (err_msg) *err_msg = err_too_large;
-        return -1;
-    }
-
-    /* Allocate shared_data struct if needed */
-    if (!mod->shared_data) {
-        mod->shared_data = calloc(1, sizeof(HlWasmSharedData));
-        if (!mod->shared_data) {
-            pthread_mutex_unlock(&cache->pool_mutex);
-            if (err_msg) *err_msg = err_internal;
-            return -1;
-        }
-    }
-    HlWasmSharedData *sd = mod->shared_data;
-
-    /* Find existing segment to replace, or add new */
-    int slot = -1;
-    for (int i = 0; i < sd->count; i++) {
-        if (strcmp(sd->segments[i].name, segment_name) == 0) {
-            slot = i;
-            break;
-        }
-    }
-
-    if (slot < 0) {
-        /* New segment — check limits */
-        if (sd->count >= HL_WASM_MAX_DATA_SEGMENTS) {
-            pthread_mutex_unlock(&cache->pool_mutex);
-            if (err_msg) *err_msg = err_too_many;
-            return -1;
-        }
-        slot = sd->count;
-    }
-
-    /* Validate total size across all segments */
-    uint64_t total = data_len;
-    for (int i = 0; i < sd->count; i++) {
-        if (i != slot)
-            total += sd->segments[i].size;
-    }
-    if (total > HL_WASM_MAX_SHARED_DATA) {
-        pthread_mutex_unlock(&cache->pool_mutex);
-        if (err_msg) *err_msg = err_too_large;
-        return -1;
-    }
-
-    /* Unchain existing chain before modifying */
-    if (sd->chain_head && sd->count > 1) {
-        wasm_runtime_unchain_shared_heaps(
-            (wasm_shared_heap_t)sd->chain_head, true);
-        sd->chain_head = NULL;
-    }
-
-    /* Free old segment at slot if replacing */
-    if (slot < sd->count && sd->segments[slot].shared_heap)
-        free_segment(&sd->segments[slot]);
-
-    /* Create backing memory.
-     * WAMR requires pre_allocated_addr regions to be page-aligned in size.
-     * We always mmap to ensure page-alignment, even for pre_alloc (which
-     * we copy into the page-aligned region). */
-    long page_size = sysconf(_SC_PAGESIZE);
-    if (page_size <= 0) page_size = 4096;
-    size_t alloc_size = (data_len + (size_t)page_size - 1) & ~((size_t)page_size - 1);
-    if (alloc_size == 0) alloc_size = (size_t)page_size;
-
-    void *backing = NULL;
-    int is_mmap_backing = 0;
-    if (pre_alloc) {
-        /* For pre_alloc, check if already page-aligned in size */
-        if (data_len == alloc_size) {
-            backing = pre_alloc;
-            is_mmap_backing = 1;
-        } else {
-            /* Need to copy to page-aligned region */
-            backing = mmap(NULL, alloc_size, PROT_READ | PROT_WRITE,
-                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-            if (backing == MAP_FAILED) {
-                pthread_mutex_unlock(&cache->pool_mutex);
-                if (err_msg) *err_msg = err_internal;
-                return -1;
-            }
-            memcpy(backing, pre_alloc, data_len);
-            is_mmap_backing = 0;  /* we own this copy */
-        }
-    } else {
-        /* mmap anonymous region + memcpy */
-        backing = mmap(NULL, alloc_size, PROT_READ | PROT_WRITE,
-                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (backing == MAP_FAILED) {
-            pthread_mutex_unlock(&cache->pool_mutex);
-            if (err_msg) *err_msg = err_internal;
-            return -1;
-        }
-        memcpy(backing, data, data_len);
-    }
-
-    /* Create WAMR shared heap with pre-allocated backing */
-    SharedHeapInitArgs heap_args;
-    memset(&heap_args, 0, sizeof(heap_args));
-    heap_args.size = (uint32_t)alloc_size;
-    heap_args.pre_allocated_addr = backing;
-
-    wasm_shared_heap_t heap = wasm_runtime_create_shared_heap(&heap_args);
-    if (!heap) {
-        if (!is_mmap_backing)
-            munmap(backing, alloc_size);
-        pthread_mutex_unlock(&cache->pool_mutex);
-        if (err_msg) *err_msg = err_internal;
-        log_error("[wasm] failed to create shared heap for segment '%s' (%zu bytes)",
-                  segment_name, data_len);
-        return -1;
-    }
-
-    /* Fill segment slot */
-    HlWasmDataSegment *seg = &sd->segments[slot];
-    snprintf(seg->name, sizeof(seg->name), "%s", segment_name);
-    seg->shared_heap = heap;
-    seg->host_addr = backing;
-    seg->size = data_len;       /* logical size visible to WASM */
-    seg->alloc_size = alloc_size; /* page-aligned size for munmap */
-    seg->is_mmap = is_mmap_backing;
-
-    if (slot == sd->count)
-        sd->count++;
-
-    /* Rebuild chain and drain pool */
-    pool_drain(&mod->pool);
-    int chain_rc = rebuild_chain(mod);
-
-    if (chain_rc != 0) {
-        /* Rollback: remove the segment we just added */
-        free_segment(seg);
-        if (slot == sd->count - 1)
-            sd->count--;
-        if (sd->count == 0) {
-            free(sd);
-            mod->shared_data = NULL;
-        }
-        pthread_mutex_unlock(&cache->pool_mutex);
-        if (err_msg) *err_msg = err_internal;
-        return -1;
-    }
-
-    pthread_mutex_unlock(&cache->pool_mutex);
-
-    log_debug("[wasm] loaded segment '%s' for '%s' (%zu bytes, mmap=%d)",
-              segment_name, module_name, data_len, is_mmap_backing);
-    return 0;
-}
-
-void hl_cap_wasm_data_unload(HlWasmCache *cache, const char *module_name)
-{
-    if (!cache || !cache->initialized || !module_name)
-        return;
-
-    pthread_mutex_lock(&cache->pool_mutex);
-    HlWasmModule *mod = cache_find(cache, module_name);
-    if (mod) {
-        pool_drain(&mod->pool);
-        free_shared_data(mod);
-    }
-    pthread_mutex_unlock(&cache->pool_mutex);
 }
 
 /* ── Init / Destroy ────────────────────────────────────────────────── */
@@ -674,11 +282,14 @@ void hl_cap_wasm_destroy(HlWasmCache *cache)
     pthread_mutex_lock(&cache->pool_mutex);
     for (int i = 0; i < cache->count; i++) {
         HlWasmModule *m = &cache->modules[i];
-        pool_drain(&m->pool);
-        free_shared_data(m);
+        pthread_mutex_lock(&m->mutex);
+        hl_wasm_pool_drain(&m->pool);
+        hl_wasm_free_shared_data(m);
         if (m->module)
             wasm_runtime_unload((wasm_module_t)m->module);
         free(m->wasm_buf);
+        pthread_mutex_unlock(&m->mutex);
+        pthread_mutex_destroy(&m->mutex);
     }
     cache->count = 0;
     cache->initialized = 0;
@@ -875,6 +486,13 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
     cached->wasm_buf_len = buf_len;
     cached->is_aot = is_aot;
     cached->abi_version = abi_version;
+    if (pthread_mutex_init(&cached->mutex, NULL) != 0) {
+        pthread_mutex_unlock(&cache->pool_mutex);
+        log_error("[wasm] per-module mutex init failed for '%s'", name);
+        wasm_runtime_unload(module);
+        free(buf);
+        return HL_WASM_ERR_INTERNAL;
+    }
     cache->count++;
 
     pthread_mutex_unlock(&cache->pool_mutex);
@@ -1015,7 +633,7 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
     wasm_function_inst_t process_fn = NULL;
     const HlWasmSharedData *sd_snapshot = NULL;
     void *chain_head_snapshot = NULL;
-    int from_pool = pool_acquire(cache, mod, heap_size, stack_size,
+    int from_pool = pool_acquire(mod, heap_size, stack_size,
                                  &inst, &exec_env, &process_fn,
                                  &sd_snapshot, &chain_head_snapshot);
 
@@ -1048,7 +666,7 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
     }
 
     /* Attach shared data (snapshotted under mutex) */
-    attach_shared_heap(inst, chain_head_snapshot);
+    hl_wasm_attach_shared_heap(inst, chain_head_snapshot);
 
     int ret = HL_WASM_ERR_INTERNAL;
 
@@ -1210,14 +828,12 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
     if (heap_size > (uint32_t)HL_WASM_MAX_HEAP)  heap_size = (uint32_t)HL_WASM_MAX_HEAP;
     if (stack_size > (uint32_t)HL_WASM_MAX_STACK) stack_size = (uint32_t)HL_WASM_MAX_STACK;
 
-    /* Lazy-load module + snapshot shared data under mutex */
+    /* Lazy-load module + snapshot shared data under mod->mutex */
     HlWasmModule *mod = NULL;
     void *chain_head_snapshot = NULL;
     {
         pthread_mutex_lock(&cache->pool_mutex);
         mod = cache_find(cache, name);
-        if (mod && mod->shared_data)
-            chain_head_snapshot = mod->shared_data->chain_head;
         pthread_mutex_unlock(&cache->pool_mutex);
     }
     if (!mod) {
@@ -1228,13 +844,18 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
         }
         pthread_mutex_lock(&cache->pool_mutex);
         mod = cache_find(cache, name);
-        if (mod && mod->shared_data)
-            chain_head_snapshot = mod->shared_data->chain_head;
         pthread_mutex_unlock(&cache->pool_mutex);
         if (!mod) {
             if (err_msg) *err_msg = err_internal;
             return NULL;
         }
+    }
+    /* Snapshot shared data under per-module mutex */
+    {
+        pthread_mutex_lock(&mod->mutex);
+        if (mod->shared_data)
+            chain_head_snapshot = mod->shared_data->chain_head;
+        pthread_mutex_unlock(&mod->mutex);
     }
 
     /* Instantiate — NOT from pool, this is exclusively owned */
@@ -1265,7 +886,7 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
     }
 
     /* Attach shared data (snapshotted under mutex) */
-    attach_shared_heap(inst, chain_head_snapshot);
+    hl_wasm_attach_shared_heap(inst, chain_head_snapshot);
 
     /* Allocate struct */
     HlWasmInstance *pi = alloc ? hl_alloc_calloc(alloc, 1, sizeof(*pi))
@@ -1396,12 +1017,12 @@ int hl_cap_wasm_instance_call_buf(HlWasmInstance *pi,
     tl_host_ctx.fn = callback_fn;
     tl_host_ctx.ctx = callback_ctx;
     /* Persistent instance's shared data was attached at creation time.
-     * Read shared_data under cache mutex for thread safety. */
+     * Read shared_data under per-module mutex for thread safety. */
     const HlWasmSharedData *pi_sd = NULL;
-    if (pi->module && pi->cache) {
-        pthread_mutex_lock(&pi->cache->pool_mutex);
+    if (pi->module) {
+        pthread_mutex_lock(&pi->module->mutex);
         pi_sd = pi->module->shared_data;
-        pthread_mutex_unlock(&pi->cache->pool_mutex);
+        pthread_mutex_unlock(&pi->module->mutex);
     }
     tl_host_ctx.shared_data = pi_sd;
 

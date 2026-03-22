@@ -75,13 +75,14 @@ typedef struct {
     uint32_t abi_version;
     HlWasmPool pool;       /* per-module instance pool */
     HlWasmSharedData *shared_data;  /* NULL until compute.data() called */
+    pthread_mutex_t mutex;  /* guards pool + shared_data for this module */
 } HlWasmModule;
 
 typedef struct HlWasmCache {
     HlWasmModule modules[HL_WASM_CACHE_MAX];
     int          count;
     int          initialized;
-    pthread_mutex_t pool_mutex; /* guards all pool operations */
+    pthread_mutex_t pool_mutex; /* guards cache-level operations (module insertion/lookup) */
 } HlWasmCache;
 
 /* ── Call options ──────────────────────────────────────────────────── */
@@ -217,6 +218,11 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
                          HlWasmCallbackFn callback_fn, void *callback_ctx,
                          const struct HlVfs *app_vfs, const char *app_dir,
                          HlAllocator *alloc, const char **err_msg);
+
+/**
+ * Drain all pooled instances for a module. Caller must hold mod->mutex.
+ */
+void hl_wasm_pool_drain(HlWasmPool *pool);
 
 /**
  * Return an instance to the pool, or destroy it.

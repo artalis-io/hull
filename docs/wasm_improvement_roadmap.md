@@ -89,7 +89,7 @@ to the shared implementation via thin wrappers.
 
 ---
 
-## 8. Split shared data into wasm_data.c
+## 8. Split shared data into wasm_data.c ✅
 
 **Where:** `wasm.c` — ~250 lines of segment/chain/mmap management
 
@@ -97,15 +97,12 @@ to the shared implementation via thin wrappers.
 chain building, segment lifecycle) is mixed with call dispatch. Different lifecycle
 and locking semantics.
 
-**Fix:** Extract to `src/hull/cap/wasm_data.c` + `include/hull/cap/wasm_data.h`.
-Keep the public API (`hl_cap_wasm_data_load/unload`) and move helpers
-(rebuild_chain, free_segment, free_shared_data, attach_shared_heap) there.
-
-**Status:** Not started
+**Fix:** Extracted to `src/hull/cap/wasm_data.c` + `include/hull/cap/wasm_data.h`.
+Public API and internal helpers moved. `hl_wasm_pool_drain` exported from wasm.c.
 
 ---
 
-## 9. Per-module mutex (pool_mutex contention)
+## 9. Per-module mutex (pool_mutex contention) ✅
 
 **Where:** `wasm.c` — single `cache->pool_mutex`
 
@@ -113,11 +110,8 @@ Keep the public API (`hl_cap_wasm_data_load/unload`) and move helpers
 per-module shared data. Loading shared data for module A blocks pool acquisition
 for module B.
 
-**Fix:** Add `pthread_mutex_t mutex` to `HlWasmModule`. Use cache-level mutex only
-for cache insertion (already brief). Use per-module mutex for pool and shared data
-operations. Reduces contention under concurrent multi-module workloads.
-
-**Status:** Not started
+**Fix:** Added `pthread_mutex_t mutex` to `HlWasmModule`. `cache->pool_mutex` now
+only guards module insertion/lookup. Per-module mutex guards pool and shared data.
 
 ---
 
