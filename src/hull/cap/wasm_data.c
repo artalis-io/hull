@@ -57,7 +57,9 @@ static HlWasmModule *cache_find(HlWasmCache *cache, const char *name)
 int hl_wasm_rebuild_chain(HlWasmModule *mod)
 {
     HlWasmSharedData *sd = mod->shared_data;
-    if (!sd || sd->count == 0) {
+    if (!sd)
+        return 0;
+    if (sd->count == 0) {
         sd->chain_head = NULL;
         return 0;
     }
@@ -70,6 +72,7 @@ int hl_wasm_rebuild_chain(HlWasmModule *mod)
 
     /* For a single segment, no chaining needed — just create the heap */
     if (sd->count == 1) {
+        if (sd->segments[0].alloc_size == 0) return -1;
         sd->segments[0].wasm_addr = addr_ceil - sd->segments[0].alloc_size + 1;
         sd->chain_head = sd->segments[0].shared_heap;
         return 0;
@@ -92,11 +95,14 @@ int hl_wasm_rebuild_chain(HlWasmModule *mod)
     sd->chain_head = chain;
 
     /* Compute WASM addresses from the ceiling downward.
-     * WAMR uses alloc_size (page-aligned) for heap mapping. */
-    uint64_t addr = addr_ceil + 1;
+     * WAMR uses alloc_size (page-aligned) for heap mapping.
+     * Last segment ends at addr_ceil. Work backwards without overflow:
+     * addr_ceil - alloc_size + 1 gives the start of the last segment. */
+    uint64_t next_start = addr_ceil;
     for (int i = sd->count - 1; i >= 0; i--) {
-        addr -= sd->segments[i].alloc_size;
-        sd->segments[i].wasm_addr = addr;
+        sd->segments[i].wasm_addr = next_start - sd->segments[i].alloc_size + 1;
+        if (i > 0)
+            next_start = sd->segments[i].wasm_addr - 1;
     }
 
     return 0;
@@ -108,6 +114,10 @@ void hl_wasm_free_segment(HlWasmDataSegment *seg)
         munmap(seg->host_addr, seg->alloc_size);
         seg->host_addr = NULL;
     }
+    /* WAMR has no public API to destroy individual shared heaps.
+     * The WASMSharedHeap struct (~64 bytes) is freed globally on
+     * wasm_runtime_destroy(). For pre-allocated heaps (our case),
+     * WAMR does not own the backing memory — we freed it above. */
     seg->shared_heap = NULL;
     seg->size = 0;
     seg->wasm_addr = 0;
@@ -179,6 +189,7 @@ int hl_cap_wasm_data_load(HlWasmCache *cache, const char *module_name,
     static const char *err_not_found = "not_found";
     static const char *err_too_many  = "too_many_segments";
     static const char *err_too_large = "data_too_large";
+    static const char *err_bad_name  = "segment_name_too_long";
 
     if (!cache || !cache->initialized || !module_name) {
         if (err_msg) *err_msg = err_internal;
@@ -226,6 +237,13 @@ int hl_cap_wasm_data_load(HlWasmCache *cache, const char *module_name,
     if (!segment_name) {
         pthread_mutex_unlock(&mod->mutex);
         if (err_msg) *err_msg = err_internal;
+        return -1;
+    }
+
+    /* Validate segment name length (must fit in HlWasmDataSegment.name[64]) */
+    if (strlen(segment_name) >= 64) {
+        pthread_mutex_unlock(&mod->mutex);
+        if (err_msg) *err_msg = err_bad_name;
         return -1;
     }
 
@@ -328,7 +346,9 @@ int hl_cap_wasm_data_load(HlWasmCache *cache, const char *module_name,
         hl_wasm_free_segment(&sd->segments[slot]);
 
     /* Create backing memory.
-     * WAMR requires pre_allocated_addr regions to be page-aligned in size. */
+     * WAMR requires pre_allocated_addr regions to be page-aligned in size.
+     * If pre_alloc is provided but data_len is not page-aligned, we copy
+     * into a new page-aligned mmap region (not zero-copy in that case). */
     long page_size = sysconf(_SC_PAGESIZE);
     if (page_size <= 0) page_size = 4096;
     size_t alloc_size = (data_len + (size_t)page_size - 1) & ~((size_t)page_size - 1);
@@ -362,7 +382,15 @@ int hl_cap_wasm_data_load(HlWasmCache *cache, const char *module_name,
         memcpy(backing, data, data_len);
     }
 
-    /* Create WAMR shared heap with pre-allocated backing */
+    /* Create WAMR shared heap with pre-allocated backing.
+     * SharedHeapInitArgs.size is uint32_t — guard against overflow. */
+    if (alloc_size > UINT32_MAX) {
+        if (!is_mmap_backing)
+            munmap(backing, alloc_size);
+        pthread_mutex_unlock(&mod->mutex);
+        if (err_msg) *err_msg = err_too_large;
+        return -1;
+    }
     SharedHeapInitArgs heap_args;
     memset(&heap_args, 0, sizeof(heap_args));
     heap_args.size = (uint32_t)alloc_size;

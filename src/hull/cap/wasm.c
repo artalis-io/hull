@@ -328,14 +328,9 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
         return HL_WASM_ERR_NOT_FOUND;
     }
 
-    /* Already cached? */
-    if (cache_find(cache, name))
-        return 0;
-
-    if (cache->count >= HL_WASM_CACHE_MAX) {
-        log_error("[wasm] module cache full (max %d)", HL_WASM_CACHE_MAX);
-        return HL_WASM_ERR_INTERNAL;
-    }
+    /* Skip early unlocked cache_find / count check — the authoritative
+     * double-check happens under pool_mutex at the insertion point below.
+     * Unlocked reads of cache->count and modules[] are data races under C11. */
 
     uint8_t *buf = NULL;
     uint32_t buf_len = 0;
@@ -386,7 +381,8 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
             fseek(f, 0, SEEK_END);
             long fsize = ftell(f);
             fseek(f, 0, SEEK_SET);
-            if (fsize > 0 && fsize < (long)HL_WASM_MAX_IO_SIZE) {
+            if (fsize > 0 && (uint64_t)fsize < HL_WASM_MAX_IO_SIZE
+                && (uint64_t)fsize <= UINT32_MAX) {
                 /* Raw malloc required: wasm_runtime_load takes ownership and calls free() */
                 buf = malloc((size_t)fsize);
                 if (buf) {
@@ -415,7 +411,8 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
             fseek(f, 0, SEEK_END);
             long fsize = ftell(f);
             fseek(f, 0, SEEK_SET);
-            if (fsize > 0 && fsize < (long)HL_WASM_MAX_IO_SIZE) {
+            if (fsize > 0 && (uint64_t)fsize < HL_WASM_MAX_IO_SIZE
+                && (uint64_t)fsize <= UINT32_MAX) {
                 /* Raw malloc required: wasm_runtime_load takes ownership and calls free() */
                 buf = malloc((size_t)fsize);
                 if (buf) {
@@ -735,7 +732,7 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
     if (max_output > 0) {
         wasm_out_ptr = wasm_runtime_module_malloc(inst, (uint64_t)max_output, &native_out);
         if (!wasm_out_ptr || !native_out) {
-            log_error("[wasm] failed to allocate output buffer (%u bytes)", max_output);
+            log_error("[wasm] failed to allocate output buffer (%" PRIu64 " bytes)", max_output);
             if (err_msg) *err_msg = err_internal;
             if (wasm_in_ptr) wasm_runtime_module_free(inst, wasm_in_ptr);
             hl_wasm_pool_release(cache, mod, inst, exec_env, process_fn,
@@ -762,8 +759,11 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
         argv[6] = (uint32_t)(max_output);          argv[7] = (uint32_t)(max_output >> 32);
         argc = 8;
     } else {
-        assert(wasm_in_ptr <= UINT32_MAX);
-        assert(wasm_out_ptr <= UINT32_MAX);
+        /* WASM32: addresses guaranteed ≤ UINT32_MAX by module_malloc */
+        if (wasm_in_ptr > UINT32_MAX || wasm_out_ptr > UINT32_MAX) {
+            if (err_msg) *err_msg = err_internal;
+            goto cleanup_bufs_err;
+        }
         argv[0] = (uint32_t)wasm_in_ptr;
         argv[1] = (uint32_t)input_len;
         argv[2] = (uint32_t)wasm_out_ptr;
@@ -1085,8 +1085,10 @@ int hl_cap_wasm_instance_call_buf(HlWasmInstance *pi,
         argv[6] = (uint32_t)(max_output);          argv[7] = (uint32_t)(max_output >> 32);
         argc_call = 8;
     } else {
-        assert(wasm_in_ptr <= UINT32_MAX);
-        assert(wasm_out_ptr <= UINT32_MAX);
+        if (wasm_in_ptr > UINT32_MAX || wasm_out_ptr > UINT32_MAX) {
+            if (err_msg) *err_msg = err_internal;
+            goto cleanup_bufs_err;
+        }
         argv[0] = (uint32_t)wasm_in_ptr;
         argv[1] = (uint32_t)input_len;
         argv[2] = (uint32_t)wasm_out_ptr;
