@@ -719,7 +719,7 @@ CANARY_OBJ  := $(BUILDDIR)/platform_canary.o
 CANARY_HASH := $(BUILDDIR)/platform_canary_hash
 
 $(CANARY_C): $(PLATFORM_OBJS) | $(BUILDDIR)
-	@hash=$$(cat $(sort $(PLATFORM_OBJS)) | shasum -a 256 | cut -d' ' -f1) && \
+	@hash=$$(cat $(sort $(PLATFORM_OBJS)) | $(SHA256CMD) | cut -d' ' -f1) && \
 	echo "$$hash" > $(CANARY_HASH) && \
 	bytes=$$(echo "$$hash" | fold -w2 | awk '{printf "%s0x%s",(NR>1?",":""),$$0}') && \
 	printf '/* Auto-generated platform canary — do not edit */\n#include <stdint.h>\nconst struct { char magic[24]; uint8_t integrity[32]; } hl_platform_canary = {\n    "HULL_PLATFORM_CANARY",\n    {%s}\n};\n' "$$bytes" > $@
@@ -1304,6 +1304,9 @@ WGPU_SHA256_macos_x86_64  := 660fe9be59b555ec1d7c839e5cf8b6c71762938af61ab444a7a
 WGPU_SHA256_linux_x86_64  := 271481ef76fbf3ea09631a6079e9493636ecf813cd9c92306c44a1a452991ba1
 WGPU_SHA256_linux_aarch64  := a2f22248200997b69373273b10d50a58164f6ed840877289f3e46bff317b134e
 
+# SHA-256 helper (portable: macOS uses shasum, Linux uses sha256sum)
+SHA256CMD := $(shell command -v sha256sum 2>/dev/null || echo "$(SHA256CMD)")
+
 # Detect platform for wgpu-native download
 WGPU_OS := $(shell uname -s | tr A-Z a-z | sed 's/darwin/macos/')
 WGPU_ARCH := $(shell uname -m | sed 's/arm64/aarch64/')
@@ -1326,7 +1329,7 @@ fetch-wgpu:
 		fi; \
 		curl -sL -o /tmp/$(WGPU_ZIP) "$(WGPU_URL)"; \
 		echo "Verifying SHA-256..."; \
-		ACTUAL=$$(shasum -a 256 /tmp/$(WGPU_ZIP) | cut -d' ' -f1); \
+		ACTUAL=$$($(SHA256CMD) /tmp/$(WGPU_ZIP) | cut -d' ' -f1); \
 		if [ "$$ACTUAL" != "$(WGPU_EXPECTED_SHA)" ]; then \
 			echo "ERROR: SHA-256 mismatch!"; \
 			echo "  expected: $(WGPU_EXPECTED_SHA)"; \
@@ -1357,7 +1360,7 @@ fetch-cosmocc:
 		echo "=== Fetching cosmocc $(COSMOCC_VERSION) to $(COSMOCC_DIR) ==="; \
 		curl -sL -o /tmp/cosmocc.zip "$(COSMOCC_URL)"; \
 		echo "Verifying SHA-256..."; \
-		ACTUAL=$$(shasum -a 256 /tmp/cosmocc.zip | cut -d' ' -f1); \
+		ACTUAL=$$($(SHA256CMD) /tmp/cosmocc.zip | cut -d' ' -f1); \
 		if [ "$$ACTUAL" != "$(COSMOCC_SHA256)" ]; then \
 			echo "ERROR: SHA-256 mismatch!"; \
 			echo "  expected: $(COSMOCC_SHA256)"; \

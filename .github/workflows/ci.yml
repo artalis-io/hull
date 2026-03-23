@@ -143,11 +143,7 @@ jobs:
 
       - name: Install cosmocc
         run: |
-          mkdir -p /opt/cosmo
-          wget -qO /tmp/cosmocc.zip https://cosmo.zip/pub/cosmocc/cosmocc-4.0.2.zip
-          echo "85b8c37a406d862e656ad4ec14be9f6ce474c1b436b9615e91a55208aced3f44  /tmp/cosmocc.zip" | sha256sum -c -
-          unzip -q -d /opt/cosmo /tmp/cosmocc.zip
-          rm /tmp/cosmocc.zip
+          COSMOCC_DIR=/opt/cosmo make fetch-cosmocc
           echo "/opt/cosmo/bin" >> $GITHUB_PATH
 
       - name: Build platform (multi-arch)
@@ -175,6 +171,33 @@ jobs:
       - name: hull test (examples)
         timeout-minutes: 2
         run: make hull-test-examples CC=cosmocc
+
+  gpu:
+    name: GPU Compute (macOS Metal)
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Fetch wgpu-native
+        run: make fetch-wgpu
+
+      - name: Build with GPU
+        run: make HL_ENABLE_GPU=1
+
+      - name: Unit tests (GPU)
+        timeout-minutes: 5
+        run: make test HL_ENABLE_GPU=1
+
+      - name: E2E tests
+        timeout-minutes: 2
+        run: make e2e HL_ENABLE_GPU=1
+
+      - name: Compute E2E tests
+        timeout-minutes: 2
+        run: make e2e-compute HL_ENABLE_GPU=1
 
   coverage:
     name: Code Coverage
