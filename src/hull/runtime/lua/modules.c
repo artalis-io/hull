@@ -4310,7 +4310,7 @@ static int luaopen_hull_compute(lua_State *L)
 
 static HlGpuCtx *lua_get_gpu_ctx(lua_State *L)
 {
-    lua_getfield(L, LUA_REGISTRYINDEX, "hull_lua");
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_lua");
     HlLua *lua = (HlLua *)lua_touserdata(L, -1);
     lua_pop(L, 1);
     return lua ? lua->base.gpu_ctx : NULL;
