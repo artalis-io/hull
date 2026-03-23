@@ -315,14 +315,22 @@ endif
 # ── wgpu-native (GPU compute — optional) ─────────────────────────
 #
 # Optional GPU compute backend. Disabled by default.
-# Enable with: make HL_ENABLE_GPU=1 WGPU_LIB_DIR=/path/to/wgpu-native/lib
+# Enable with: make HL_ENABLE_GPU=1
+#   - Auto-detects vendor/wgpu/libwgpu_native.a if present
+#   - Or specify: make HL_ENABLE_GPU=1 WGPU_LIB_DIR=/path/to/lib
+#   - Fetch automatically: make fetch-wgpu && make HL_ENABLE_GPU=1
 
 HL_ENABLE_GPU ?= 0
 
 ifeq ($(HL_ENABLE_GPU),1)
   CFLAGS += -DHL_ENABLE_GPU -I$(VENDDIR)/wgpu
+  # Auto-detect vendor/wgpu if WGPU_LIB_DIR not specified
   ifndef WGPU_LIB_DIR
-    $(error HL_ENABLE_GPU=1 requires WGPU_LIB_DIR=/path/to/wgpu-native/lib)
+    ifneq (,$(wildcard $(VENDDIR)/wgpu/libwgpu_native.a))
+      WGPU_LIB_DIR := $(VENDDIR)/wgpu
+    else
+      $(error HL_ENABLE_GPU=1 requires wgpu-native. Run: make fetch-wgpu)
+    endif
   endif
   WGPU_LIB := $(WGPU_LIB_DIR)/libwgpu_native.a
   ifeq ($(UNAME_S),Darwin)
@@ -1286,6 +1294,72 @@ lint-js:
 	biome check examples/ --config-path biome.json
 
 lint: lint-lua lint-js
+
+# ── Dependency fetching ──────────────────────────────────────────────
+
+# wgpu-native v27.0.4.0 — GPU compute backend
+WGPU_VERSION := v27.0.4.0
+WGPU_SHA256_macos_aarch64 := 15367c26fdbe6892db35007d39f3883593384e777360b70e6bd704cb5dedde53
+WGPU_SHA256_macos_x86_64  := 660fe9be59b555ec1d7c839e5cf8b6c71762938af61ab444a7a58dd87970dba2
+WGPU_SHA256_linux_x86_64  := 271481ef76fbf3ea09631a6079e9493636ecf813cd9c92306c44a1a452991ba1
+WGPU_SHA256_linux_aarch64  := a2f22248200997b69373273b10d50a58164f6ed840877289f3e46bff317b134e
+
+# Detect platform for wgpu-native download
+WGPU_OS := $(shell uname -s | tr A-Z a-z | sed 's/darwin/macos/')
+WGPU_ARCH := $(shell uname -m | sed 's/arm64/aarch64/')
+WGPU_PLATFORM := $(WGPU_OS)-$(WGPU_ARCH)
+WGPU_ZIP := wgpu-$(WGPU_PLATFORM)-release.zip
+WGPU_URL := https://github.com/gfx-rs/wgpu-native/releases/download/$(WGPU_VERSION)/$(WGPU_ZIP)
+WGPU_EXPECTED_SHA := $(WGPU_SHA256_$(subst -,_,$(WGPU_PLATFORM)))
+
+.PHONY: fetch-wgpu fetch-cosmocc
+
+fetch-wgpu:
+	@if [ -f $(VENDDIR)/wgpu/libwgpu_native.a ]; then \
+		echo "wgpu-native already present at $(VENDDIR)/wgpu/"; \
+	else \
+		echo "=== Fetching wgpu-native $(WGPU_VERSION) for $(WGPU_PLATFORM) ==="; \
+		if [ -z "$(WGPU_EXPECTED_SHA)" ]; then \
+			echo "ERROR: unsupported platform $(WGPU_PLATFORM)"; \
+			echo "Supported: macos-aarch64, macos-x86_64, linux-x86_64, linux-aarch64"; \
+			exit 1; \
+		fi; \
+		curl -sL -o /tmp/$(WGPU_ZIP) "$(WGPU_URL)"; \
+		echo "Verifying SHA-256..."; \
+		ACTUAL=$$(shasum -a 256 /tmp/$(WGPU_ZIP) | cut -d' ' -f1); \
+		if [ "$$ACTUAL" != "$(WGPU_EXPECTED_SHA)" ]; then \
+			echo "ERROR: SHA-256 mismatch!"; \
+			echo "  expected: $(WGPU_EXPECTED_SHA)"; \
+			echo "  actual:   $$ACTUAL"; \
+			rm -f /tmp/$(WGPU_ZIP); \
+			exit 1; \
+		fi; \
+		echo "SHA-256 OK"; \
+		mkdir -p $(VENDDIR)/wgpu; \
+		unzip -o -j /tmp/$(WGPU_ZIP) "lib/libwgpu_native.a" -d $(VENDDIR)/wgpu/; \
+		unzip -o -j /tmp/$(WGPU_ZIP) "include/webgpu/webgpu.h" -d $(VENDDIR)/wgpu/; \
+		unzip -o -j /tmp/$(WGPU_ZIP) "include/webgpu/wgpu.h" -d $(VENDDIR)/wgpu/; \
+		rm -f /tmp/$(WGPU_ZIP); \
+		echo "=== wgpu-native $(WGPU_VERSION) installed to $(VENDDIR)/wgpu/ ==="; \
+		ls -lh $(VENDDIR)/wgpu/libwgpu_native.a; \
+	fi
+
+# Cosmopolitan cosmocc — portable C compiler (rolling release, no stable hash)
+COSMOCC_URL := https://cosmo.zip/pub/cosmocc/cosmocc.zip
+COSMOCC_DIR ?= /opt/cosmo
+
+fetch-cosmocc:
+	@if command -v cosmocc >/dev/null 2>&1; then \
+		echo "cosmocc already installed: $$(which cosmocc)"; \
+	else \
+		echo "=== Fetching cosmocc to $(COSMOCC_DIR) ==="; \
+		curl -sL -o /tmp/cosmocc.zip "$(COSMOCC_URL)"; \
+		mkdir -p $(COSMOCC_DIR); \
+		unzip -q -o /tmp/cosmocc.zip -d $(COSMOCC_DIR); \
+		rm -f /tmp/cosmocc.zip; \
+		echo "=== cosmocc installed to $(COSMOCC_DIR)/bin/cosmocc ==="; \
+		echo "Add to PATH: export PATH=$(COSMOCC_DIR)/bin:\$$PATH"; \
+	fi
 
 # ── Clean ───────────────────────────────────────────────────────────
 
