@@ -22,6 +22,7 @@ typedef struct HlManifest HlManifest;
 typedef struct HlStmtCache HlStmtCache;
 typedef struct HlVfs HlVfs;
 typedef struct HlWasmCache HlWasmCache;
+typedef struct HlGpuCtx HlGpuCtx;
 typedef struct sqlite3 sqlite3;
 typedef struct KlServer KlServer;
 typedef struct KlThreadPool KlThreadPool;
@@ -62,6 +63,9 @@ struct HlRuntime {
         uint64_t max_input;
         uint64_t max_output;
     } wasm_config;                     /* three-tier resolved limits (CLI > manifest > defaults) */
+#endif
+#ifdef HL_ENABLE_GPU
+    HlGpuCtx *gpu_ctx;                /* GPU compute context (NULL if disabled) */
 #endif
 };
 

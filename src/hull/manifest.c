@@ -171,6 +171,16 @@ int hl_manifest_extract(lua_State *L, HlManifest *out)
     }
     lua_pop(L, 1); /* pop wasm */
 
+    /* gpu = true */
+    lua_getfield(L, manifest_idx, "gpu");
+    out->gpu = lua_toboolean(L, -1);
+    lua_pop(L, 1);
+
+    /* compute = true */
+    lua_getfield(L, manifest_idx, "compute");
+    out->compute = lua_toboolean(L, -1);
+    lua_pop(L, 1);
+
     lua_pop(L, 1); /* pop manifest table */
     return 0;
 }
@@ -329,6 +339,18 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out)
         JS_FreeValue(ctx, v);
     }
     JS_FreeValue(ctx, wasm_val);
+
+    /* gpu: true */
+    JSValue gpu_val = JS_GetPropertyStr(ctx, manifest, "gpu");
+    if (JS_IsBool(gpu_val))
+        out->gpu = JS_ToBool(ctx, gpu_val);
+    JS_FreeValue(ctx, gpu_val);
+
+    /* compute: true */
+    JSValue compute_val = JS_GetPropertyStr(ctx, manifest, "compute");
+    if (JS_IsBool(compute_val))
+        out->compute = JS_ToBool(ctx, compute_val);
+    JS_FreeValue(ctx, compute_val);
 
     JS_FreeValue(ctx, manifest);
     return 0;

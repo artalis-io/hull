@@ -1142,6 +1142,156 @@ int main(int argc, char **argv)
         free(s_buf);
     }
 
+    /* ── Stateful Workload: Persistent Instance vs Fresh-per-call ─── */
+
+    printf("\n=== Stateful Workload: Persistent vs Fresh (kv_store) ===\n");
+    printf("Simulates: load N entries once, then query 1000 times.\n");
+    printf("Persistent = load once, query many (state preserved).\n");
+    printf("Fresh/call = load + query every call (state lost, must reload).\n\n");
+
+    /* Load kv_store module from filesystem fixture */
+    {
+        int kv_rc = hl_cap_wasm_load(&cache, "kv_store", &vfs, "tests/fixtures");
+        if (kv_rc != 0) {
+            /* Try alternate path */
+            kv_rc = hl_cap_wasm_load(&cache, "kv_store", &vfs, NULL);
+        }
+
+        if (kv_rc == 0) {
+            static const int entry_counts[] = { 10, 100, 1000 };
+            static const char *entry_labels[] = { "10 entries", "100 entries", "1000 entries" };
+            int n_entry_tests = 3;
+            int query_iters = 1000;
+
+            for (int ei = 0; ei < n_entry_tests; ei++) {
+                int n_entries = entry_counts[ei];
+                printf("--- %s ---\n", entry_labels[ei]);
+
+                /* Build LOAD message: [0x01][count:u32][entries...] */
+                /* Keys: "key_0000" .. "key_NNNN", Values: 32 bytes each */
+                size_t load_size = 1 + 4; /* opcode + count */
+                for (int i = 0; i < n_entries; i++)
+                    load_size += 4 + 8 + 4 + 32; /* key_len + "key_NNNN" + val_len + 32 bytes */
+
+                uint8_t *load_msg = malloc(load_size);
+                if (!load_msg) continue;
+                uint8_t *p = load_msg;
+                *p++ = 0x01;
+                uint32_t cnt = (uint32_t)n_entries;
+                memcpy(p, &cnt, 4); p += 4;
+                for (int i = 0; i < n_entries; i++) {
+                    uint32_t klen = 8;
+                    memcpy(p, &klen, 4); p += 4;
+                    snprintf((char *)p, 9, "key_%04d", i); p += 8;
+                    uint32_t vlen = 32;
+                    memcpy(p, &vlen, 4); p += 4;
+                    generate_input(p, 32, (uint32_t)(42 + i)); p += 32;
+                }
+
+                /* Build a GET message for a middle key */
+                char target_key[16];
+                snprintf(target_key, sizeof(target_key), "key_%04d", n_entries / 2);
+                size_t get_size = 1 + 8;
+                uint8_t *get_msg = malloc(get_size);
+                if (!get_msg) { free(load_msg); continue; }
+                get_msg[0] = 0x02;
+                memcpy(get_msg + 1, target_key, 8);
+
+                /* Build combined LOAD+GET message for "fresh per call" mode */
+                /* We concatenate: do a load call then a get call (2 calls per iteration) */
+
+                uint64_t *s_persist = malloc((size_t)query_iters * sizeof(uint64_t));
+                uint64_t *s_fresh = malloc((size_t)query_iters * sizeof(uint64_t));
+                if (!s_persist || !s_fresh) {
+                    free(load_msg); free(get_msg);
+                    free(s_persist); free(s_fresh);
+                    continue;
+                }
+
+                /* ── Persistent: load once, query N times ────────── */
+                HlWasmCallOpts pi_opts = {0};
+                pi_opts.gas = HL_WASM_MAX_GAS;
+                const char *err = NULL;
+                HlWasmInstance *pi = hl_cap_wasm_instance_create(
+                    &cache, "kv_store", &pi_opts, &vfs, NULL, NULL, &err);
+
+                if (pi) {
+                    /* Load data once */
+                    void *out = NULL; size_t ol = 0;
+                    hl_cap_wasm_instance_call(pi, load_msg, load_size,
+                                              &out, &ol, NULL, NULL, NULL, NULL, &err);
+                    free(out);
+
+                    /* Warmup queries */
+                    for (int i = 0; i < WARMUP_ITERS; i++) {
+                        out = NULL; ol = 0;
+                        hl_cap_wasm_instance_call(pi, get_msg, get_size,
+                                                  &out, &ol, NULL, NULL, NULL, NULL, &err);
+                        free(out);
+                    }
+
+                    /* Timed queries */
+                    for (int i = 0; i < query_iters; i++) {
+                        out = NULL; ol = 0;
+                        uint64_t t0 = now_ns();
+                        hl_cap_wasm_instance_call(pi, get_msg, get_size,
+                                                  &out, &ol, NULL, NULL, NULL, NULL, &err);
+                        s_persist[i] = now_ns() - t0;
+                        free(out);
+                    }
+                    Stats st_p = compute_stats(s_persist, query_iters);
+                    print_stats("Persistent:", &st_p);
+                    hl_cap_wasm_instance_destroy(pi);
+                }
+
+                /* ── Fresh per call: load + query every time ─────── */
+                /* Use large heap to force fresh instance each time */
+                {
+                    HlWasmCallOpts opts = {0};
+                    opts.heap_size = 8 * 1024 * 1024; /* > pool threshold */
+                    opts.gas = HL_WASM_MAX_GAS;
+
+                    /* Warmup */
+                    for (int i = 0; i < WARMUP_ITERS; i++) {
+                        void *out = NULL; size_t ol = 0;
+                        hl_cap_wasm_call(&cache, "kv_store", load_msg, load_size,
+                                         &out, &ol, &opts, NULL, NULL, &vfs, NULL, NULL, &err);
+                        free(out);
+                    }
+
+                    /* Timed: load + query per iteration */
+                    for (int i = 0; i < query_iters; i++) {
+                        void *out1 = NULL; size_t ol1 = 0;
+                        void *out2 = NULL; size_t ol2 = 0;
+                        uint64_t t0 = now_ns();
+                        /* Load (fresh instance) */
+                        hl_cap_wasm_call(&cache, "kv_store", load_msg, load_size,
+                                         &out1, &ol1, &opts, NULL, NULL, &vfs, NULL, NULL, &err);
+                        /* Query (another fresh instance — data gone, but measures the cost) */
+                        hl_cap_wasm_call(&cache, "kv_store", get_msg, get_size,
+                                         &out2, &ol2, &opts, NULL, NULL, &vfs, NULL, NULL, &err);
+                        s_fresh[i] = now_ns() - t0;
+                        free(out1);
+                        free(out2);
+                    }
+                    Stats st_f = compute_stats(s_fresh, query_iters);
+                    print_stats("Fresh/call:", &st_f);
+
+                    Stats st_pe = compute_stats(s_persist, query_iters);
+                    double speedup = st_f.mean > 0.1 ? st_f.mean / st_pe.mean : 0;
+                    printf("  Speedup: %.1fx (persistent query vs fresh load+query)\n\n", speedup);
+                }
+
+                free(load_msg);
+                free(get_msg);
+                free(s_persist);
+                free(s_fresh);
+            }
+        } else {
+            printf("  SKIP: kv_store.wasm not found\n\n");
+        }
+    }
+
     /* Cleanup */
     hl_cap_wasm_destroy(&cache);
     free(hash_wasm.data);

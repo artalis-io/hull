@@ -312,6 +312,35 @@ WAMR_OBJS :=
 WAMR_INC  :=
 endif
 
+# ── wgpu-native (GPU compute — optional) ─────────────────────────
+#
+# Optional GPU compute backend. Disabled by default.
+# Enable with: make HL_ENABLE_GPU=1 WGPU_LIB_DIR=/path/to/wgpu-native/lib
+
+HL_ENABLE_GPU ?= 0
+
+ifeq ($(HL_ENABLE_GPU),1)
+  CFLAGS += -DHL_ENABLE_GPU -I$(VENDDIR)/wgpu
+  ifndef WGPU_LIB_DIR
+    $(error HL_ENABLE_GPU=1 requires WGPU_LIB_DIR=/path/to/wgpu-native/lib)
+  endif
+  WGPU_LIB := $(WGPU_LIB_DIR)/libwgpu_native.a
+  ifeq ($(UNAME_S),Darwin)
+    WGPU_FRAMEWORKS := -framework Metal -framework QuartzCore -framework CoreGraphics -framework Foundation
+  else
+    WGPU_FRAMEWORKS := -lvulkan
+  endif
+  # GPU is not compatible with Cosmopolitan builds
+  ifdef COSMO
+    $(error GPU compute is not compatible with Cosmopolitan builds)
+  endif
+  WORKER_GPU_OBJ := $(BUILDDIR)/worker_gpu.o
+else
+  WORKER_GPU_OBJ :=
+  WGPU_LIB :=
+  WGPU_FRAMEWORKS :=
+endif
+
 # ── jart/pledge polyfill (Linux-only: seccomp + landlock) ──────────
 #
 # Provides real pledge()/unveil() on native Linux.
@@ -663,14 +692,14 @@ INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(KEEL_DIR)/ve
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan e2e e2e-build e2e-http e2e-sandbox e2e-examples e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm wamrc coverage lint-lua lint-js lint platform platform-cosmo
+.PHONY: all clean test debug msan e2e e2e-build e2e-http e2e-sandbox e2e-examples e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-gpu wamrc coverage lint-lua lint-js lint platform platform-cosmo
 
 all: $(BUILDDIR)/hull
 
 # Platform static library — everything except entry.o and build_assets.o
 # Used by `hull build` to produce standalone app binaries.
 # Exports hull_main() (subcommand dispatch + server logic).
-PLATFORM_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(MAIN_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) \
+PLATFORM_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(MAIN_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) \
 	$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS)
 
 PLATFORM_LIB := $(BUILDDIR)/libhull_platform.a
@@ -796,9 +825,9 @@ $(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H)
 endif
 
 # Hull binary
-$(BUILDDIR)/hull: $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB)
-	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) \
-		$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB) -lm -lpthread
+$(BUILDDIR)/hull: $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB)
+	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MAIN_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) \
+		$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB) $(WGPU_LIB) $(WGPU_FRAMEWORKS) -lm -lpthread
 
 # Capability sources
 $(BUILDDIR)/cap_%.o: $(SRCDIR)/hull/cap/%.c | $(BUILDDIR)
@@ -839,6 +868,12 @@ $(WORKER_DB_OBJ): $(SRCDIR)/hull/worker_db.c | $(BUILDDIR)
 # Worker WASM (runtime-agnostic WASM thread pool dispatch)
 $(WORKER_WASM_OBJ): $(SRCDIR)/hull/worker_wasm.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) $(WAMR_CFLAGS) -c -o $@ $<
+
+# Worker GPU (runtime-agnostic GPU thread pool dispatch)
+ifeq ($(HL_ENABLE_GPU),1)
+$(WORKER_GPU_OBJ): $(SRCDIR)/hull/worker_gpu.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+endif
 
 # Manifest
 $(MANIFEST_OBJ): $(SRCDIR)/hull/manifest.c | $(BUILDDIR)
@@ -976,8 +1011,8 @@ TEST_BINS := $(addprefix $(BUILDDIR)/,$(notdir $(basename $(TEST_SRCS))))
 TEST_CAP_OBJS := $(CAP_OBJS)
 
 # Shared link deps for all tests
-TEST_COMMON_DEPS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(VFS_OBJ) $(WAMR_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(KEEL_LIB)
-TEST_COMMON_LIBS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(VFS_OBJ) $(WAMR_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) -lm -lpthread
+TEST_COMMON_DEPS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(VFS_OBJ) $(WAMR_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(KEEL_LIB)
+TEST_COMMON_LIBS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(VFS_OBJ) $(WAMR_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(WGPU_LIB) $(WGPU_FRAMEWORKS) -lm -lpthread
 
 # Capability tests (tests/hull/cap/)
 $(BUILDDIR)/test_%: $(TESTDIR)/hull/cap/test_%.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
@@ -990,14 +1025,14 @@ $(BUILDDIR)/test_parse_size: $(TESTDIR)/hull/test_parse_size.c $(TEST_COMMON_DEP
 # JS runtime test — needs QuickJS + JS runtime objects + manifest (JS-only to avoid Lua link deps)
 $(BUILDDIR)/test_js: $(TESTDIR)/hull/runtime/js/test_js.c $(TEST_COMMON_DEPS) $(MANIFEST_JS_OBJ) $(CAP_TEST_JS_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(JS_RT_OBJS) $(QJS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(TEST_CAP_OBJS) $(CAP_TEST_JS_OBJ) $(JS_RT_OBJS) $(MANIFEST_JS_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WAMR_OBJS) $(QJS_OBJS) \
-		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) -lm -lpthread
+		$(TEST_CAP_OBJS) $(CAP_TEST_JS_OBJ) $(JS_RT_OBJS) $(MANIFEST_JS_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(WAMR_OBJS) $(QJS_OBJS) \
+		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(WGPU_LIB) $(WGPU_FRAMEWORKS) -lm -lpthread
 
 # Lua runtime test — needs Lua + Lua runtime objects + manifest (Lua-only) + cap_tool + build_assets
 $(BUILDDIR)/test_lua: $(TESTDIR)/hull/runtime/lua/test_lua.c $(TEST_COMMON_DEPS) $(CAP_TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MANIFEST_LUA_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(LUA_RT_OBJS) $(LUA_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(TEST_CAP_OBJS) $(CAP_TOOL_OBJ) $(BUILD_ASSET_OBJ) $(LUA_RT_OBJS) $(MANIFEST_LUA_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WAMR_OBJS) $(LUA_OBJS) \
-		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) -lm -lpthread
+		$(TEST_CAP_OBJS) $(CAP_TOOL_OBJ) $(BUILD_ASSET_OBJ) $(LUA_RT_OBJS) $(MANIFEST_LUA_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(WAMR_OBJS) $(LUA_OBJS) \
+		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(WGPU_LIB) $(WGPU_FRAMEWORKS) -lm -lpthread
 
 # Tool hardening test — cap/tool.c compiled without runtime flags (self-contained C functions)
 CAP_TOOL_NONE_OBJ := $(BUILDDIR)/cap_tool_none.o
@@ -1011,8 +1046,8 @@ $(BUILDDIR)/test_tool: $(TESTDIR)/hull/cap/test_tool.c $(CAP_TOOL_NONE_OBJ) $(BU
 $(BUILDDIR)/test_dispatch: $(TESTDIR)/hull/commands/test_dispatch.c $(CMD_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(TOOL_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TEST_COMMON_DEPS) $(RT_OBJS) $(VEND_OBJS) $(MANIFEST_OBJ) $(BUILD_ASSET_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(PLEDGE_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(CMD_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(TOOL_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) \
-		$(TEST_CAP_OBJS) $(RT_OBJS) $(MANIFEST_OBJ) $(BUILD_ASSET_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WAMR_OBJS) $(VEND_OBJS) \
-		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) -lm -lpthread
+		$(TEST_CAP_OBJS) $(RT_OBJS) $(MANIFEST_OBJ) $(BUILD_ASSET_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(WAMR_OBJS) $(VEND_OBJS) \
+		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(WGPU_LIB) $(WGPU_FRAMEWORKS) -lm -lpthread
 
 # Signature verification test — needs crypto + app_entries_default + vfs
 $(BUILDDIR)/test_signature: $(TESTDIR)/hull/test_signature.c $(SIG_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(TEST_COMMON_DEPS) | $(BUILDDIR)
@@ -1077,6 +1112,9 @@ else
 endif
 ifeq ($(HL_ENABLE_WASM),1)
   CFLAGS += -DHL_ENABLE_WASM
+endif
+ifeq ($(HL_ENABLE_GPU),1)
+  CFLAGS += -DHL_ENABLE_GPU -I$(VENDDIR)/wgpu
 endif
 endif
 
@@ -1210,6 +1248,20 @@ $(BUILDDIR)/bench_wasm: $(BENCH_WASM_SRCS) $(TEST_COMMON_DEPS) | $(BUILDDIR)
 
 bench-wasm: $(BUILDDIR)/bench_wasm
 	$(BUILDDIR)/bench_wasm
+
+# GPU vs WASM vs native benchmark (requires HL_ENABLE_GPU=1)
+BENCH_GPU_ARCH := $(shell uname -m | sed 's/arm64/aarch64/')
+BENCH_GPU_AOT  := bench/gpu/cosine.aot.$(BENCH_GPU_ARCH)
+
+$(BENCH_GPU_AOT): bench/gpu/cosine.wasm $(BUILDDIR)/wamrc
+	$(BUILDDIR)/wamrc -o $@ $<
+
+$(BUILDDIR)/bench_gpu: bench/gpu/bench_gpu.c $(TEST_COMMON_DEPS) $(BENCH_GPU_AOT) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -Ibench/gpu -o $@ \
+		bench/gpu/bench_gpu.c $(TEST_COMMON_LIBS)
+
+bench-gpu: $(BUILDDIR)/bench_gpu
+	$(BUILDDIR)/bench_gpu
 
 # ── Code coverage ────────────────────────────────────────────────────
 

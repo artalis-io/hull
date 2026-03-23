@@ -19,6 +19,8 @@ make EMBED_PLATFORM=1   # embed platform library in hull binary (distribution mo
 make EMBED_PLATFORM=cosmo  # embed multi-arch cosmo platform (distribution mode)
 make wamrc              # build WAMR AOT compiler (requires cmake + LLVM)
 make bench-wasm         # WASM compute benchmark (native vs interpreter vs AOT)
+make HL_ENABLE_GPU=1 WGPU_LIB_DIR=vendor/wgpu  # build with GPU compute (wgpu-native)
+make bench-gpu HL_ENABLE_GPU=1 WGPU_LIB_DIR=vendor/wgpu  # GPU vs WASM vs native benchmark
 make clean              # remove all build artifacts
 ```
 
@@ -39,6 +41,7 @@ All vendored — no external dependencies:
 | sh_arena | `vendor/sh_arena/` | Arena allocator |
 | sh_json | `vendor/sh_json/` | Streaming JSON writer + arena-based parser |
 | WAMR | `vendor/wamr/` (git submodule) | WebAssembly Micro Runtime (compute plugins) |
+| wgpu-native | `vendor/wgpu/` | GPU compute backend (optional, `HL_ENABLE_GPU=1`) |
 | utest.h | `vendor/utest.h` | Unit test framework |
 
 ## Project Structure
@@ -116,6 +119,7 @@ All system access is mediated by C capability functions. Neither runtime touches
 | Test | `cap/test.c` | In-process HTTP dispatch, assertions |
 | Body | `cap/body.c` | Request body handling |
 | WASM compute | `cap/wasm.c` | `hl_cap_wasm_init()`, `_load()`, `_call()` — WAMR compute plugins |
+| GPU compute | `cap/gpu.c`, `cap/gpu_wgpu.c` | `hl_cap_gpu_init()`, `_compile()`, `_dispatch()` — wgpu-native compute shaders |
 | Audit | `cap/audit.c` | Structured capability audit logging (JSON to stderr) |
 
 ### Request Flow
@@ -324,6 +328,7 @@ Key findings to be aware of:
 | `HlLua` | `runtime/lua.h` | Lua 5.4 context (VM, config, capabilities) |
 | `HlJS` | `runtime/js.h` | QuickJS context (VM, config, capabilities) |
 | `HlVfs` | `vfs.h` | Unified VFS: sorted HlEntry array with O(log n) find, prefix query, path construction |
+| `HlGpuCtx` | `cap/gpu.h` | GPU compute context: backend vtable, device array, pipeline/buffer caches |
 | `HlEmbeddedPlatform` | `build_assets.h` | Multi-arch embedded platform entry (arch, data, len) |
 
 ## Git
@@ -825,6 +830,64 @@ For cosmocc builds, both x86_64 and aarch64 AOT files are generated automaticall
 
 **Architecture:** See `docs/wamr_architecture.md` for the full design document.
 
+### GPU Compute (wgpu-native)
+
+Hull supports GPU compute shaders via wgpu-native (Vulkan/Metal/DX12). Disabled by default. Enable with `make HL_ENABLE_GPU=1 WGPU_LIB_DIR=vendor/wgpu`.
+
+**Manifest declaration:** Apps must declare `gpu: true` in their manifest to access the `gpu` global. Apps without a manifest get GPU access by default (backward compat).
+
+```lua
+app.manifest({ gpu = true })
+```
+
+**Lua API:**
+```lua
+gpu.available()                        -- boolean
+gpu.devices()                          -- { {id=0, name="Apple M1"}, ... }
+gpu.compile(name, wgsl)                -- compile WGSL shader (cached)
+gpu.dispatch(name, opts)               -- run shader, return output
+gpu.async.dispatch(name, opts)         -- async (yields to event loop)
+gpu.buffer(name, data)                 -- create/write persistent buffer
+gpu.buffer(name, nil)                  -- destroy buffer
+gpu.buffer_read(name)                  -- read buffer back to host
+```
+
+**JavaScript API:**
+```javascript
+import { gpu } from "hull:gpu";
+gpu.available()                        // boolean
+gpu.devices()                          // [{id, name}, ...]
+gpu.compile(name, wgsl)                // compile WGSL shader
+gpu.dispatch(name, opts)               // ArrayBuffer output
+gpu.async.dispatch(name, opts)         // Promise<ArrayBuffer>
+gpu.buffer(name, data)                 // create/write (ArrayBuffer or string)
+gpu.buffer(name, null)                 // destroy
+gpu.bufferRead(name)                   // ArrayBuffer
+```
+
+**Dispatch options:**
+```lua
+gpu.dispatch("shader_name", {
+    uniforms = packed_binary,          -- binding 0 (16-byte aligned)
+    buffers = {
+        { data = bytes, usage = "read" },       -- binding 1
+        { name = "persistent", usage = "read" }, -- binding 2 (named buffer)
+        { size = N, usage = "readwrite" },       -- binding 3 (output)
+    },
+    workgroups = { x = 64, y = 1, z = 1 },
+    output = 3,                        -- 1-indexed buffer to read back (Lua)
+    device = -1,                       -- -1 = default device
+})
+```
+
+**Binding layout:** Uniforms at binding 0 (if present), storage buffers at binding 1..N. WGSL shader `@binding()` annotations must match.
+
+**Sandbox:** When `manifest.gpu` is set:
+- macOS: allows `iokit-open` and `com.apple.MTLCompilerService` mach-lookup
+- Linux: unveils `/dev/dri` (rw) and `/proc/self` (r)
+
+**Build:** Requires wgpu-native static library. Download from [gfx-rs/wgpu-native releases](https://github.com/gfx-rs/wgpu-native/releases) and place in `vendor/wgpu/`. macOS links Metal + QuartzCore + CoreGraphics + Foundation frameworks; Linux links `-lvulkan`.
+
 ## Testing
 
 Tests use Sheredom's utest.h. Each `tests/hull/*/test_*.c` is a standalone executable.
@@ -850,6 +913,7 @@ make e2e                            # run all E2E tests (examples + build + sand
 | `test_static` | 18 | MIME detection, path traversal, embedded VFS lookup |
 | `test_vfs` | 19 | Binary search find, prefix queries, path construction, empty VFS |
 | `test_wasm` | 47 | WAMR init/destroy, module load, echo call, gas exhaustion, limits, pools, persistent instances, shared data segments |
+| `test_gpu` | 13 | GPU init/destroy, device enumeration, shader compile (valid + invalid WGSL), dispatch with data doubling, persistent buffer roundtrip (real GPU tests skip if no adapter) |
 
 \+ E2E suites (`e2e_build.sh`, `e2e_examples.sh`, `e2e_http.sh`, `e2e_sandbox.sh`)
 

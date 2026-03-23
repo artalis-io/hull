@@ -124,6 +124,47 @@ app.get("/from-buffer", function(req, res)
     })
 end)
 
+-- Persistent instance: load once, call many times with preserved linear memory.
+-- No pool overhead, no re-instantiation. Great for stateful workloads.
+local echo_inst = compute.instance("echo")
+
+app.get("/persistent", function(req, res)
+    local input = req.query.text or "persistent"
+    local output, err = echo_inst:call(input)
+    if err then
+        res:status(500):json({ error = err })
+        return
+    end
+    res:json({
+        input = input,
+        output = output,
+        match = (input == output),
+    })
+end)
+
+-- Persistent async: yields to event loop while WASM runs on thread pool.
+app.get("/persistent-async", function(req, res)
+    local input = req.query.text or "async persistent"
+    local r = echo_inst:async_call(input)
+    if r.error then
+        res:status(500):json({ error = r.error })
+        return
+    end
+    res:json({
+        input = input,
+        output = r.result,
+        match = (input == r.result),
+    })
+end)
+
+-- Persistent instance info
+app.get("/persistent-info", function(req, res)
+    res:json({
+        name = echo_inst:name(),
+        closed = echo_inst:closed(),
+    })
+end)
+
 app.get("/health", function(req, res)
     res:json({ ok = true })
 end)

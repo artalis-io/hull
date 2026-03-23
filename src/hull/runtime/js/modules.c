@@ -4814,6 +4814,650 @@ static int hl_js_init_compute_module(JSContext *ctx, HlJS *js)
 #endif /* HL_ENABLE_WASM */
 
 /* ════════════════════════════════════════════════════════════════════
+ * hull:gpu module — GPU compute (wgpu-native)
+ *
+ * gpu.available() -> boolean
+ * gpu.devices() -> [{id, name}, ...]
+ * gpu.compile(name, wgsl) -> true
+ * gpu.dispatch(name, opts) -> ArrayBuffer
+ * gpu.async.dispatch(name, opts) -> Promise<ArrayBuffer>
+ * gpu.buffer(name, data, opts?) -> true
+ * gpu.buffer(name, null) -> destroy
+ * gpu.bufferRead(name) -> ArrayBuffer
+ * ════════════════════════════════════════════════════════════════════ */
+
+#ifdef HL_ENABLE_GPU
+#include "hull/cap/gpu.h"
+#include "hull/worker_gpu.h"
+
+static HlGpuCtx *js_get_gpu_ctx(JSContext *ctx)
+{
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue hull_opaque = JS_GetPropertyStr(ctx, global, "__hull_js");
+    HlJS *js = (HlJS *)JS_GetOpaque(hull_opaque, 1);
+    JS_FreeValue(ctx, hull_opaque);
+    JS_FreeValue(ctx, global);
+    return js ? js->base.gpu_ctx : NULL;
+}
+
+static JSValue js_gpu_available(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv)
+{
+    (void)this_val; (void)argc; (void)argv;
+    HlGpuCtx *gpu = js_get_gpu_ctx(ctx);
+    return JS_NewBool(ctx, hl_cap_gpu_available(gpu));
+}
+
+static JSValue js_gpu_devices(JSContext *ctx, JSValueConst this_val,
+                              int argc, JSValueConst *argv)
+{
+    (void)this_val; (void)argc; (void)argv;
+    HlGpuCtx *gpu = js_get_gpu_ctx(ctx);
+    int count = hl_cap_gpu_device_count(gpu);
+    JSValue arr = JS_NewArray(ctx);
+    for (int i = 0; i < count; i++) {
+        JSValue obj = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, obj, "id", JS_NewInt32(ctx, i));
+        JS_SetPropertyStr(ctx, obj, "name",
+                          JS_NewString(ctx, hl_cap_gpu_device_name(gpu, i)));
+        JS_SetPropertyUint32(ctx, arr, (uint32_t)i, obj);
+    }
+    return arr;
+}
+
+static JSValue js_gpu_compile(JSContext *ctx, JSValueConst this_val,
+                              int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 2)
+        return JS_ThrowTypeError(ctx, "gpu.compile requires name and wgsl");
+
+    HlGpuCtx *gpu = js_get_gpu_ctx(ctx);
+    const char *name = JS_ToCString(ctx, argv[0]);
+    if (!name) return JS_EXCEPTION;
+
+    size_t wgsl_len;
+    const char *wgsl = JS_ToCStringLen(ctx, &wgsl_len, argv[1]);
+    if (!wgsl) { JS_FreeCString(ctx, name); return JS_EXCEPTION; }
+
+    int rc = hl_cap_gpu_compile(gpu, -1, name, wgsl, wgsl_len);
+    JS_FreeCString(ctx, name);
+    JS_FreeCString(ctx, wgsl);
+
+    if (rc != HL_GPU_OK)
+        return JS_ThrowInternalError(ctx, "gpu.compile failed: shader_error");
+
+    return JS_TRUE;
+}
+
+static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
+                               int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 2)
+        return JS_ThrowTypeError(ctx, "gpu.dispatch requires name and opts");
+
+    HlGpuCtx *gpu = js_get_gpu_ctx(ctx);
+    if (!gpu)
+        return JS_ThrowInternalError(ctx, "gpu not available");
+
+    const char *name = JS_ToCString(ctx, argv[0]);
+    if (!name) return JS_EXCEPTION;
+
+    HlGpuDispatchOpts opts;
+    memset(&opts, 0, sizeof(opts));
+    opts.device = -1;
+
+    JSValue opts_val = argv[1];
+
+    /* Parse device */
+    JSValue dev_val = JS_GetPropertyStr(ctx, opts_val, "device");
+    if (!JS_IsUndefined(dev_val)) {
+        int32_t d;
+        JS_ToInt32(ctx, &d, dev_val);
+        opts.device = d;
+    }
+    JS_FreeValue(ctx, dev_val);
+
+    /* Parse workgroups */
+    JSValue wg_val = JS_GetPropertyStr(ctx, opts_val, "workgroups");
+    if (JS_IsObject(wg_val)) {
+        JSValue xv = JS_GetPropertyStr(ctx, wg_val, "x");
+        JSValue yv = JS_GetPropertyStr(ctx, wg_val, "y");
+        JSValue zv = JS_GetPropertyStr(ctx, wg_val, "z");
+        uint32_t x = 1, y = 1, z = 1;
+        JS_ToUint32(ctx, &x, xv);
+        JS_ToUint32(ctx, &y, yv);
+        JS_ToUint32(ctx, &z, zv);
+        opts.workgroups.x = x;
+        opts.workgroups.y = y;
+        opts.workgroups.z = z;
+        JS_FreeValue(ctx, xv);
+        JS_FreeValue(ctx, yv);
+        JS_FreeValue(ctx, zv);
+    }
+    JS_FreeValue(ctx, wg_val);
+
+    /* Parse output buffer index (0-indexed in JS) */
+    JSValue out_val = JS_GetPropertyStr(ctx, opts_val, "output");
+    if (!JS_IsUndefined(out_val)) {
+        int32_t o;
+        JS_ToInt32(ctx, &o, out_val);
+        opts.output_buffer = o;
+    }
+    JS_FreeValue(ctx, out_val);
+
+    /* Parse uniforms (string or ArrayBuffer) */
+    const char *uni_str = NULL;  /* non-NULL if JS_ToCStringLen was used */
+    JSValue uni_val = JS_GetPropertyStr(ctx, opts_val, "uniforms");
+    if (!JS_IsUndefined(uni_val) && !JS_IsNull(uni_val)) {
+        size_t uni_len;
+        uint8_t *uni_ab = JS_GetArrayBuffer(ctx, &uni_len, uni_val);
+        if (uni_ab) {
+            opts.uniforms = uni_ab;
+            opts.uniforms_len = uni_len;
+        } else {
+            uni_str = JS_ToCStringLen(ctx, &uni_len, uni_val);
+            if (uni_str) {
+                opts.uniforms = uni_str;
+                opts.uniforms_len = uni_len;
+            }
+        }
+    }
+    JS_FreeValue(ctx, uni_val);
+
+    /* Parse buffers array */
+    HlGpuBufferDesc bufs[16];
+    memset(bufs, 0, sizeof(bufs));
+    int buf_count = 0;
+    /* Keep JS string refs alive until after dispatch */
+    const char *buf_name_strs[16] = {0};
+    const char *buf_data_strs[16] = {0};
+
+    JSValue bufs_val = JS_GetPropertyStr(ctx, opts_val, "buffers");
+    if (JS_IsArray(ctx, bufs_val)) {
+        JSValue len_val = JS_GetPropertyStr(ctx, bufs_val, "length");
+        int32_t len = 0;
+        JS_ToInt32(ctx, &len, len_val);
+        JS_FreeValue(ctx, len_val);
+        if (len > 16) len = 16;
+
+        for (int32_t i = 0; i < len; i++) {
+            JSValue elem = JS_GetPropertyUint32(ctx, bufs_val, (uint32_t)i);
+            if (JS_IsObject(elem)) {
+                JSValue nv = JS_GetPropertyStr(ctx, elem, "name");
+                if (JS_IsString(nv)) {
+                    buf_name_strs[buf_count] = JS_ToCString(ctx, nv);
+                    bufs[buf_count].name = buf_name_strs[buf_count];
+                }
+                JS_FreeValue(ctx, nv);
+
+                JSValue dv = JS_GetPropertyStr(ctx, elem, "data");
+                if (!JS_IsUndefined(dv) && !JS_IsNull(dv)) {
+                    size_t dlen;
+                    uint8_t *dab = JS_GetArrayBuffer(ctx, &dlen, dv);
+                    if (dab) {
+                        bufs[buf_count].data = dab;
+                        bufs[buf_count].size = dlen;
+                    } else {
+                        buf_data_strs[buf_count] = JS_ToCStringLen(ctx, &dlen, dv);
+                        if (buf_data_strs[buf_count]) {
+                            bufs[buf_count].data = buf_data_strs[buf_count];
+                            bufs[buf_count].size = dlen;
+                        }
+                    }
+                }
+                JS_FreeValue(ctx, dv);
+
+                JSValue sv = JS_GetPropertyStr(ctx, elem, "size");
+                if (!JS_IsUndefined(sv)) {
+                    int64_t sz;
+                    JS_ToInt64(ctx, &sz, sv);
+                    bufs[buf_count].size = (size_t)sz;
+                }
+                JS_FreeValue(ctx, sv);
+
+                JSValue uv = JS_GetPropertyStr(ctx, elem, "usage");
+                if (JS_IsString(uv)) {
+                    const char *us = JS_ToCString(ctx, uv);
+                    if (us) {
+                        if (strcmp(us, "read") == 0)
+                            bufs[buf_count].usage = HL_GPU_USAGE_READ;
+                        else if (strcmp(us, "write") == 0)
+                            bufs[buf_count].usage = HL_GPU_USAGE_WRITE;
+                        else if (strcmp(us, "readwrite") == 0)
+                            bufs[buf_count].usage = HL_GPU_USAGE_READWRITE;
+                        JS_FreeCString(ctx, us);
+                    }
+                }
+                JS_FreeValue(ctx, uv);
+
+                bufs[buf_count].binding = -1;
+                buf_count++;
+            }
+            JS_FreeValue(ctx, elem);
+        }
+    }
+    JS_FreeValue(ctx, bufs_val);
+
+    opts.buffers = bufs;
+    opts.buffer_count = buf_count;
+
+    void *output = NULL;
+    size_t output_len = 0;
+    const char *err_msg = NULL;
+
+    int rc = hl_cap_gpu_dispatch(gpu, name, &opts,
+                                 &output, &output_len, &err_msg);
+
+    /* Free uniform string if we used JS_ToCStringLen */
+    if (uni_str) JS_FreeCString(ctx, uni_str);
+
+    /* Free buffer name/data strings */
+    for (int i = 0; i < buf_count; i++) {
+        if (buf_name_strs[i]) JS_FreeCString(ctx, buf_name_strs[i]);
+        if (buf_data_strs[i]) JS_FreeCString(ctx, buf_data_strs[i]);
+    }
+
+    JS_FreeCString(ctx, name);
+
+    if (rc != HL_GPU_OK)
+        return JS_ThrowInternalError(ctx, "gpu.dispatch: %s",
+                                     err_msg ? err_msg : "dispatch_failed");
+
+    JSValue ab = JS_NewArrayBufferCopy(ctx, (const uint8_t *)output, output_len);
+    free(output);
+    return ab;
+}
+
+static JSValue js_gpu_buffer(JSContext *ctx, JSValueConst this_val,
+                             int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 2)
+        return JS_ThrowTypeError(ctx, "gpu.buffer requires name and data/null");
+
+    HlGpuCtx *gpu = js_get_gpu_ctx(ctx);
+    if (!gpu)
+        return JS_ThrowInternalError(ctx, "gpu not available");
+
+    const char *name = JS_ToCString(ctx, argv[0]);
+    if (!name) return JS_EXCEPTION;
+
+    int device = -1;
+
+    /* null = destroy */
+    if (JS_IsNull(argv[1])) {
+        hl_cap_gpu_buffer_destroy(gpu, device, name);
+        JS_FreeCString(ctx, name);
+        return JS_TRUE;
+    }
+
+    /* Get data from string or ArrayBuffer */
+    size_t data_len;
+    uint8_t *data = JS_GetArrayBuffer(ctx, &data_len, argv[1]);
+    const char *str_data = NULL;
+    if (!data) {
+        str_data = JS_ToCStringLen(ctx, &data_len, argv[1]);
+        if (!str_data) { JS_FreeCString(ctx, name); return JS_EXCEPTION; }
+        data = (uint8_t *)str_data;
+    }
+
+    size_t offset = 0;
+    if (argc > 2 && JS_IsObject(argv[2])) {
+        JSValue off_val = JS_GetPropertyStr(ctx, argv[2], "offset");
+        if (!JS_IsUndefined(off_val)) {
+            int64_t o;
+            JS_ToInt64(ctx, &o, off_val);
+            offset = (size_t)o;
+        }
+        JS_FreeValue(ctx, off_val);
+        JSValue dev_val = JS_GetPropertyStr(ctx, argv[2], "device");
+        if (!JS_IsUndefined(dev_val)) {
+            int32_t d;
+            JS_ToInt32(ctx, &d, dev_val);
+            device = d;
+        }
+        JS_FreeValue(ctx, dev_val);
+    }
+
+    int rc = hl_cap_gpu_buffer_write(gpu, device, name, data, data_len, offset);
+    if (rc == HL_GPU_ERR_NOT_FOUND) {
+        rc = hl_cap_gpu_buffer_create(gpu, device, name,
+                                      data_len, HL_GPU_USAGE_READWRITE);
+        if (rc == HL_GPU_OK)
+            rc = hl_cap_gpu_buffer_write(gpu, device, name,
+                                         data, data_len, 0);
+    }
+
+    if (str_data) JS_FreeCString(ctx, str_data);
+    JS_FreeCString(ctx, name);
+
+    if (rc != HL_GPU_OK)
+        return JS_ThrowInternalError(ctx, "gpu.buffer failed");
+
+    return JS_TRUE;
+}
+
+static JSValue js_gpu_buffer_read(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "gpu.bufferRead requires name");
+
+    HlGpuCtx *gpu = js_get_gpu_ctx(ctx);
+    if (!gpu)
+        return JS_ThrowInternalError(ctx, "gpu not available");
+
+    const char *name = JS_ToCString(ctx, argv[0]);
+    if (!name) return JS_EXCEPTION;
+
+    int device = -1;
+    void *data = NULL;
+    size_t len = 0;
+
+    int rc = hl_cap_gpu_buffer_read(gpu, device, name, &data, &len);
+    JS_FreeCString(ctx, name);
+
+    if (rc != HL_GPU_OK)
+        return JS_ThrowInternalError(ctx, "gpu.bufferRead failed");
+
+    JSValue ab = JS_NewArrayBufferCopy(ctx, (const uint8_t *)data, len);
+    free(data);
+    return ab;
+}
+
+/* push_result callback: convert HlWorkerGpuOp result to JS value */
+static JSValue js_push_worker_gpu_result(JSContext *ctx, void *driver)
+{
+    HlWorkerGpuOp *op = (HlWorkerGpuOp *)driver;
+    if (op->error)
+        return JS_ThrowInternalError(ctx, "gpu.async.dispatch: %s", op->error_msg);
+    if (op->output && op->output_len > 0)
+        return JS_NewArrayBufferCopy(ctx, (const uint8_t *)op->output, op->output_len);
+    return JS_NewArrayBufferCopy(ctx, NULL, 0);
+}
+
+/* Async dispatch — submits GPU work to thread pool, returns Promise */
+static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
+                                      int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->base.thread_pool)
+        return JS_ThrowInternalError(ctx, "gpu.async not available (no thread pool)");
+    if (!js->server || !js->active_conn)
+        return JS_ThrowInternalError(ctx, "gpu.async can only be called from a request handler");
+    if (!js->base.gpu_ctx)
+        return JS_ThrowInternalError(ctx, "gpu.async.dispatch: GPU not initialized");
+
+    if (argc < 2)
+        return JS_ThrowTypeError(ctx, "gpu.async.dispatch requires name and opts");
+
+    const char *name = JS_ToCString(ctx, argv[0]);
+    if (!name) return JS_EXCEPTION;
+
+    /* Parse opts */
+    HlGpuDispatchOpts opts;
+    memset(&opts, 0, sizeof(opts));
+    opts.device = -1;
+
+    JSValue opts_val = argv[1];
+
+    JSValue dev_val = JS_GetPropertyStr(ctx, opts_val, "device");
+    if (!JS_IsUndefined(dev_val)) { int32_t d; JS_ToInt32(ctx, &d, dev_val); opts.device = d; }
+    JS_FreeValue(ctx, dev_val);
+
+    JSValue wg_val = JS_GetPropertyStr(ctx, opts_val, "workgroups");
+    if (JS_IsObject(wg_val)) {
+        JSValue xv = JS_GetPropertyStr(ctx, wg_val, "x");
+        JSValue yv = JS_GetPropertyStr(ctx, wg_val, "y");
+        JSValue zv = JS_GetPropertyStr(ctx, wg_val, "z");
+        uint32_t x = 1, y = 1, z = 1;
+        JS_ToUint32(ctx, &x, xv); JS_ToUint32(ctx, &y, yv); JS_ToUint32(ctx, &z, zv);
+        opts.workgroups.x = x; opts.workgroups.y = y; opts.workgroups.z = z;
+        JS_FreeValue(ctx, xv); JS_FreeValue(ctx, yv); JS_FreeValue(ctx, zv);
+    }
+    JS_FreeValue(ctx, wg_val);
+
+    JSValue out_val = JS_GetPropertyStr(ctx, opts_val, "output");
+    if (!JS_IsUndefined(out_val)) { int32_t o; JS_ToInt32(ctx, &o, out_val); opts.output_buffer = o; }
+    JS_FreeValue(ctx, out_val);
+
+    /* Deep-copy uniforms */
+    void *uni_copy = NULL;
+    size_t uni_len = 0;
+    JSValue uni_val = JS_GetPropertyStr(ctx, opts_val, "uniforms");
+    if (!JS_IsUndefined(uni_val) && !JS_IsNull(uni_val)) {
+        uint8_t *uni_ab = JS_GetArrayBuffer(ctx, &uni_len, uni_val);
+        if (uni_ab && uni_len > 0) {
+            uni_copy = malloc(uni_len);
+            if (uni_copy) memcpy(uni_copy, uni_ab, uni_len);
+        } else {
+            const char *uni_str = JS_ToCStringLen(ctx, &uni_len, uni_val);
+            if (uni_str) {
+                if (uni_len > 0) {
+                    uni_copy = malloc(uni_len);
+                    if (uni_copy) memcpy(uni_copy, uni_str, uni_len);
+                }
+                JS_FreeCString(ctx, uni_str);
+            }
+        }
+    }
+    JS_FreeValue(ctx, uni_val);
+
+    /* Deep-copy buffers */
+    int buf_count = 0;
+    HlGpuBufferDesc *buf_descs = NULL;
+    void **buf_data_ptrs = NULL;
+
+    JSValue bufs_val = JS_GetPropertyStr(ctx, opts_val, "buffers");
+    if (JS_IsArray(ctx, bufs_val)) {
+        JSValue len_val = JS_GetPropertyStr(ctx, bufs_val, "length");
+        int32_t len = 0;
+        JS_ToInt32(ctx, &len, len_val);
+        JS_FreeValue(ctx, len_val);
+        if (len > 16) len = 16;
+        if (len > 0) {
+            buf_descs = calloc((size_t)len, sizeof(HlGpuBufferDesc));
+            buf_data_ptrs = calloc((size_t)len, sizeof(void *));
+            if (!buf_descs || !buf_data_ptrs) {
+                free(buf_descs); free(buf_data_ptrs); free(uni_copy);
+                JS_FreeValue(ctx, bufs_val);
+                JS_FreeCString(ctx, name);
+                return JS_ThrowInternalError(ctx, "gpu.async.dispatch: out of memory");
+            }
+            for (int32_t i = 0; i < len; i++) {
+                JSValue elem = JS_GetPropertyUint32(ctx, bufs_val, (uint32_t)i);
+                if (JS_IsObject(elem)) {
+                    /* Deep-copy buffer name for thread safety */
+                    JSValue nv = JS_GetPropertyStr(ctx, elem, "name");
+                    if (JS_IsString(nv)) {
+                        size_t nlen;
+                        const char *ns = JS_ToCStringLen(ctx, &nlen, nv);
+                        if (ns && nlen > 0 && nlen < HL_GPU_NAME_MAX) {
+                            char *ncopy = malloc(nlen + 1);
+                            if (ncopy) {
+                                memcpy(ncopy, ns, nlen);
+                                ncopy[nlen] = '\0';
+                                buf_descs[buf_count].name = ncopy;
+                            }
+                        }
+                        if (ns) JS_FreeCString(ctx, ns);
+                    }
+                    JS_FreeValue(ctx, nv);
+
+                    JSValue dv = JS_GetPropertyStr(ctx, elem, "data");
+                    if (!JS_IsUndefined(dv) && !JS_IsNull(dv)) {
+                        size_t dlen;
+                        uint8_t *dab = JS_GetArrayBuffer(ctx, &dlen, dv);
+                        if (dab && dlen > 0) {
+                            buf_data_ptrs[buf_count] = malloc(dlen);
+                            if (buf_data_ptrs[buf_count]) {
+                                memcpy(buf_data_ptrs[buf_count], dab, dlen);
+                                buf_descs[buf_count].data = buf_data_ptrs[buf_count];
+                                buf_descs[buf_count].size = dlen;
+                            }
+                        } else {
+                            const char *ds = JS_ToCStringLen(ctx, &dlen, dv);
+                            if (ds) {
+                                if (dlen > 0) {
+                                    buf_data_ptrs[buf_count] = malloc(dlen);
+                                    if (buf_data_ptrs[buf_count]) {
+                                        memcpy(buf_data_ptrs[buf_count], ds, dlen);
+                                        buf_descs[buf_count].data = buf_data_ptrs[buf_count];
+                                        buf_descs[buf_count].size = dlen;
+                                    }
+                                }
+                                JS_FreeCString(ctx, ds);
+                            }
+                        }
+                    }
+                    JS_FreeValue(ctx, dv);
+
+                    JSValue sv = JS_GetPropertyStr(ctx, elem, "size");
+                    if (!JS_IsUndefined(sv)) { int64_t sz; JS_ToInt64(ctx, &sz, sv); buf_descs[buf_count].size = (size_t)sz; }
+                    JS_FreeValue(ctx, sv);
+
+                    JSValue uv = JS_GetPropertyStr(ctx, elem, "usage");
+                    if (JS_IsString(uv)) {
+                        const char *us = JS_ToCString(ctx, uv);
+                        if (us) {
+                            if (strcmp(us, "read") == 0) buf_descs[buf_count].usage = HL_GPU_USAGE_READ;
+                            else if (strcmp(us, "write") == 0) buf_descs[buf_count].usage = HL_GPU_USAGE_WRITE;
+                            else if (strcmp(us, "readwrite") == 0) buf_descs[buf_count].usage = HL_GPU_USAGE_READWRITE;
+                            JS_FreeCString(ctx, us);
+                        }
+                    }
+                    JS_FreeValue(ctx, uv);
+
+                    buf_descs[buf_count].binding = -1;
+                    buf_count++;
+                }
+                JS_FreeValue(ctx, elem);
+            }
+        }
+    }
+    JS_FreeValue(ctx, bufs_val);
+
+    /* Allocate worker op */
+    HlWorkerGpuOp *op = calloc(1, sizeof(HlWorkerGpuOp));
+    if (!op) {
+        for (int i = 0; i < buf_count; i++) free(buf_data_ptrs[i]);
+        free(buf_data_ptrs); free(buf_descs); free(uni_copy);
+        JS_FreeCString(ctx, name);
+        return JS_ThrowInternalError(ctx, "gpu.async.dispatch: out of memory");
+    }
+
+    op->server = js->server;
+    op->gpu_ctx = js->base.gpu_ctx;
+    snprintf(op->shader_name, sizeof(op->shader_name), "%s", name);
+    op->opts = opts;
+    op->buffers = buf_descs;
+    op->buffer_data = buf_data_ptrs;
+    op->buffer_count = buf_count;
+    op->uniforms = uni_copy;
+    op->uniforms_len = uni_len;
+
+    JS_FreeCString(ctx, name);
+
+    /* Create async ctx */
+    HlAsyncCtx *actx = hl_async_ctx_create(js->server, js->base.alloc);
+    if (!actx) {
+        hl_worker_gpu_op_free(op); free(op);
+        return JS_ThrowInternalError(ctx, "gpu.async.dispatch: out of memory");
+    }
+
+    /* Create Promise */
+    JSValue resolving_funcs[2];
+    JSValue promise = JS_NewPromiseCapability(ctx, resolving_funcs);
+    if (JS_IsException(promise)) {
+        hl_worker_gpu_op_free(op); free(op); hl_async_ctx_free(actx);
+        return JS_EXCEPTION;
+    }
+
+    extern HlAsyncCont *hl_js_async_cont_create(HlJS *js,
+        JSValue resolve, JSValue reject, HlAllocator *alloc,
+        JSValue (*push_result)(JSContext *, void *));
+    HlAsyncCont *cont = hl_js_async_cont_create(js,
+                                                  resolving_funcs[0],
+                                                  resolving_funcs[1],
+                                                  js->base.alloc,
+                                                  js_push_worker_gpu_result);
+    if (!cont) {
+        JS_FreeValue(ctx, resolving_funcs[0]);
+        JS_FreeValue(ctx, resolving_funcs[1]);
+        JS_FreeValue(ctx, promise);
+        hl_worker_gpu_op_free(op); free(op); hl_async_ctx_free(actx);
+        return JS_ThrowInternalError(ctx, "gpu.async.dispatch: out of memory");
+    }
+    actx->cont = cont;
+    actx->driver = op;
+    actx->free_driver = hl_worker_gpu_op_free_all;
+    actx->op.on_cancel = hl_worker_gpu_async_cancel;
+
+    op->async_ctx = actx;
+    atomic_store(&op->cancelled, 0);
+
+    if (hl_worker_gpu_submit(js->base.thread_pool, op) != 0) {
+        actx->cont->destroy(actx->cont);
+        hl_worker_gpu_op_free(op); free(op); hl_async_ctx_free(actx);
+        JS_FreeValue(ctx, promise);
+        return JS_ThrowInternalError(ctx, "gpu.async.dispatch: thread pool full");
+    }
+
+    if (kl_async_suspend(js->server, js->active_conn, &actx->op) < 0) {
+        atomic_store(&op->cancelled, 1);
+        actx->cont->cancel(actx->cont);
+        actx->cont->destroy(actx->cont);
+        actx->cont = NULL;
+        JS_FreeValue(ctx, promise);
+        return JS_ThrowInternalError(ctx, "gpu.async.dispatch: failed to suspend");
+    }
+
+    return promise;
+}
+
+static int js_gpu_module_init(JSContext *ctx, JSModuleDef *m)
+{
+    JSValue gpu = JS_NewObject(ctx);
+
+    JS_SetPropertyStr(ctx, gpu, "available",
+                      JS_NewCFunction(ctx, js_gpu_available, "available", 0));
+    JS_SetPropertyStr(ctx, gpu, "devices",
+                      JS_NewCFunction(ctx, js_gpu_devices, "devices", 0));
+    JS_SetPropertyStr(ctx, gpu, "compile",
+                      JS_NewCFunction(ctx, js_gpu_compile, "compile", 2));
+    JS_SetPropertyStr(ctx, gpu, "dispatch",
+                      JS_NewCFunction(ctx, js_gpu_dispatch, "dispatch", 2));
+    JS_SetPropertyStr(ctx, gpu, "buffer",
+                      JS_NewCFunction(ctx, js_gpu_buffer, "buffer", 3));
+    JS_SetPropertyStr(ctx, gpu, "bufferRead",
+                      JS_NewCFunction(ctx, js_gpu_buffer_read, "bufferRead", 1));
+
+    /* gpu.async sub-object */
+    JSValue async_obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, async_obj, "dispatch",
+                      JS_NewCFunction(ctx, js_gpu_async_dispatch, "dispatch", 2));
+    JS_SetPropertyStr(ctx, gpu, "async", async_obj);
+
+    JS_SetModuleExport(ctx, m, "gpu", gpu);
+    return 0;
+}
+
+static int hl_js_init_gpu_module(JSContext *ctx, HlJS *js)
+{
+    (void)js;
+    JSModuleDef *m = JS_NewCModule(ctx, "hull:gpu", js_gpu_module_init);
+    if (!m)
+        return -1;
+    JS_AddModuleExport(ctx, m, "gpu");
+    return 0;
+}
+#endif /* HL_ENABLE_GPU */
+
+/* ════════════════════════════════════════════════════════════════════
  * Module registry — called by hl_js_init() to register all
  * hull:* built-in modules.
  * ════════════════════════════════════════════════════════════════════ */
@@ -4887,6 +5531,14 @@ int hl_js_register_modules(HlJS *js)
     /* Register hull:compute module (only if WASM runtime is available) */
     if (js->base.wasm_cache) {
         if (hl_js_init_compute_module(js->ctx, js) != 0)
+            return -1;
+    }
+#endif
+
+#ifdef HL_ENABLE_GPU
+    /* Register hull:gpu module (only if GPU context is available) */
+    if (js->base.gpu_ctx) {
+        if (hl_js_init_gpu_module(js->ctx, js) != 0)
             return -1;
     }
 #endif

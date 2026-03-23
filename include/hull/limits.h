@@ -115,4 +115,22 @@
 #define HL_WASM_MAX_DATA_SEGMENTS 16
 #endif
 
+/* ── GPU compute limits ────────────────────────────────────────────── */
+
+#ifndef HL_GPU_MAX_DEVICES
+#define HL_GPU_MAX_DEVICES       8
+#endif
+#ifndef HL_GPU_PIPELINE_MAX
+#define HL_GPU_PIPELINE_MAX      64
+#endif
+#ifndef HL_GPU_BUFFER_MAX
+#define HL_GPU_BUFFER_MAX        256
+#endif
+#ifndef HL_GPU_NAME_MAX
+#define HL_GPU_NAME_MAX          256
+#endif
+#ifndef HL_GPU_MAX_DISPATCH_SIZE
+#define HL_GPU_MAX_DISPATCH_SIZE (256 * 1024 * 1024)  /* 256 MB */
+#endif
+
 #endif /* HL_LIMITS_H */

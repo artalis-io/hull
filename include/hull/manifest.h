@@ -61,6 +61,10 @@ typedef struct HlManifest {
     uint32_t    wasm_max_input;
     uint32_t    wasm_max_output;
 
+    /* Capability flags */
+    int         gpu;              /* 1 if app declares gpu: true */
+    int         compute;          /* 1 if app declares compute: true */
+
     /* Whether app.manifest() was called */
     int         present;
 } HlManifest;

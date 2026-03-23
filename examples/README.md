@@ -278,6 +278,28 @@ curl http://localhost:3000/async-echo?text=hello
 curl http://localhost:3000/health
 ```
 
+### gpu_search
+
+GPU-accelerated vector similarity search using WGSL compute shaders. Index embedding vectors on the GPU, then query for nearest neighbors via cosine similarity. Demonstrates `gpu.compile()`, `gpu.buffer()`, and `gpu.dispatch()` with uniforms, persistent buffers, and workgroup dispatch.
+
+Requires GPU build: `make HL_ENABLE_GPU=1 WGPU_LIB_DIR=vendor/wgpu`
+
+```bash
+./build/hull -p 3000 --no-sandbox examples/gpu_search/app.lua
+
+# Check GPU availability and devices
+curl http://localhost:3000/health
+
+# Index 3 vectors of dimension 4
+curl -X POST http://localhost:3000/index \
+  -d '{"dimensions":4,"vectors":[[1,0,0,0],[0,1,0,0],[0.7,0.7,0,0]]}'
+
+# Search: find top-2 most similar to [0.8, 0.6, 0, 0]
+curl -X POST http://localhost:3000/search \
+  -d '{"query":[0.8,0.6,0,0],"k":2}'
+# Returns: [0.7,0.7,0,0] (score ~0.98) and [1,0,0,0] (score ~0.8)
+```
+
 ### cors_manifest
 
 CORS via `app.manifest()` configuration — no middleware code needed. Keel registers CORS headers automatically. Also demonstrates `server.stats()` for live connection counts.

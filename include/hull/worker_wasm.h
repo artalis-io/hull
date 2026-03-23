@@ -43,6 +43,9 @@ typedef struct HlWorkerWasmOp {
     HlWasmCallOpts opts;          /* value-copied options */
     HlAllocator   *alloc;         /* tracked allocator for output (NULL = raw malloc) */
 
+    /* Persistent instance mode (NULL = use pooled call) */
+    HlWasmInstance *persistent_inst;
+
     /* Buffer mode */
     int            want_buffer;   /* 1 = return HlWasmBuffer instead of raw bytes */
 

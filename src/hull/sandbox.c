@@ -285,6 +285,15 @@ static int seatbelt_build_profile(const HlManifest *manifest,
              "    \"com.apple.logd\"\n"
              "    \"com.apple.diagnosticd\"))\n\n");
 
+    /* ── GPU compute (Metal) ─────────────────────────────────── */
+
+    if (manifest->gpu) {
+        SBPL_LIT("; GPU compute (Metal)\n"
+                 "(allow iokit-open)\n"
+                 "(allow mach-lookup (global-name\n"
+                 "    \"com.apple.MTLCompilerService\"))\n\n");
+    }
+
     /* ── Signals, sysctl ────────────────────────────────────── */
 
     SBPL_LIT("; Signals and sysctl\n"
@@ -538,6 +547,14 @@ int hl_sandbox_apply(const HlManifest *manifest, const char *app_dir,
         if (unveil(tls_key_path, "r") != 0)
             log_warn("[sandbox] unveil failed for TLS key: %s",
                      tls_key_path);
+    }
+
+    /* GPU compute (Vulkan) */
+    if (manifest->gpu) {
+        if (unveil("/dev/dri", "rw") != 0)
+            log_warn("[sandbox] unveil failed for /dev/dri");
+        if (unveil("/proc/self", "r") != 0)
+            log_warn("[sandbox] unveil failed for /proc/self");
     }
 
     /* Seal: no more unveil calls allowed */

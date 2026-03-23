@@ -49,6 +49,9 @@
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/wasm.h"
 #endif
+#ifdef HL_ENABLE_GPU
+#include "hull/cap/gpu.h"
+#endif
 
 #include <keel/cors.h>
 #include <keel/keel.h>
@@ -209,6 +212,9 @@ static void usage(const char *prog)
             "  --wasm-max-input SIZE  Max compute input size (default: 1m, max: 256m)\n"
             "  --wasm-max-output SIZE Max compute output size (default: 1m, max: 256m)\n"
             "\n"
+            "GPU compute options:\n"
+            "  --gpu-device N       Default GPU device index (default: 0)\n"
+            "\n"
             "  -h                   Show this help\n"
             "\n"
             "Subcommands:\n"
@@ -259,6 +265,7 @@ static int hull_serve(int argc, char **argv)
     long instruction_limit = 0; /* 0 = use default */
     long wasm_heap = 0, wasm_stack = 0, wasm_max_input = 0, wasm_max_output = 0;
     long long wasm_gas = 0;
+    int gpu_device = -1;  /* -1 = auto (default device 0) */
     int log_level = LOG_INFO;
     int no_migrate = 0;
     int no_sandbox = 0;
@@ -397,6 +404,14 @@ static int hull_serve(int argc, char **argv)
             wasm_max_input = hl_parse_size(argv[++i]);
         } else if (strcmp(argv[i], "--wasm-max-output") == 0 && i + 1 < argc) {
             wasm_max_output = hl_parse_size(argv[++i]);
+        } else if (strcmp(argv[i], "--gpu-device") == 0 && i + 1 < argc) {
+            char *end;
+            long v = strtol(argv[++i], &end, 10);
+            if (*end != '\0' || v < 0 || v > 15) {
+                fprintf(stderr, "hull: invalid gpu-device: %s\n", argv[i]);
+                return 1;
+            }
+            gpu_device = (int)v;
         } else if (strcmp(argv[i], "-h") == 0) {
             usage(argv[0]);
             return 0;
@@ -681,12 +696,34 @@ static int hull_serve(int argc, char **argv)
         rt->compress = &compress_cfg;
 
 #ifdef HL_ENABLE_WASM
-    /* Initialize WAMR compute runtime */
+    /* Initialize WAMR compute runtime and wire to rt immediately so
+     * module registration in init() can see it.  If the manifest later
+     * declares compute: false, we NULL it out before route wiring. */
     static HlWasmCache wasm_cache;
-    if (hl_cap_wasm_init(&wasm_cache) == 0)
+    static int wasm_cache_ok = 0;
+    if (hl_cap_wasm_init(&wasm_cache) == 0) {
+        wasm_cache_ok = 1;
         rt->wasm_cache = &wasm_cache;
-    else
+    } else {
         log_warn("[hull:c] WAMR init failed — compute.call() unavailable");
+    }
+#endif
+
+#ifdef HL_ENABLE_GPU
+    /* Initialize GPU compute runtime and wire to rt immediately so
+     * module registration in init() can see it.  If the manifest later
+     * declares gpu: false, we NULL it out before route wiring. */
+    static HlGpuCtx gpu_ctx;
+    static int gpu_ctx_ok = 0;
+    if (hl_cap_gpu_init(&gpu_ctx, &hl_gpu_backend_wgpu) == HL_GPU_OK
+        && hl_cap_gpu_available(&gpu_ctx)) {
+        if (gpu_device >= 0 && gpu_device < gpu_ctx.device_count)
+            gpu_ctx.default_device = gpu_device;
+        gpu_ctx_ok = 1;
+        rt->gpu_ctx = &gpu_ctx;
+    } else {
+        log_info("[hull:c] GPU compute unavailable — gpu.* disabled");
+    }
 #endif
 
     /* Initialize worker DB capability (per-worker SQLite connections) */
@@ -762,6 +799,13 @@ static int hull_serve(int argc, char **argv)
         rt->csp_policy = HL_DEFAULT_CSP;  /* default */
 
 #ifdef HL_ENABLE_WASM
+    /* Revoke WASM if manifest is present but doesn't declare compute: true.
+     * Already wired above; only revoke when manifest explicitly omits it. */
+    if (wasm_cache_ok && manifest.present && !manifest.compute) {
+        rt->wasm_cache = NULL;
+        log_info("[hull:c] compute not declared in manifest — compute.* disabled");
+    }
+
     /* Resolve three-tier WASM config: CLI > manifest > compile-time defaults.
      * Zero = not set (fall through to compile-time default at call time). */
     {
@@ -790,6 +834,15 @@ static int hull_serve(int argc, char **argv)
         rt->wasm_config.gas        = wg;
         rt->wasm_config.max_input  = wi;
         rt->wasm_config.max_output = wo;
+    }
+#endif
+
+#ifdef HL_ENABLE_GPU
+    /* Revoke GPU if manifest is present but doesn't declare gpu: true.
+     * Already wired above; only revoke when manifest explicitly omits it. */
+    if (gpu_ctx_ok && manifest.present && !manifest.gpu) {
+        rt->gpu_ctx = NULL;
+        log_info("[hull:c] gpu not declared in manifest — gpu.* disabled");
     }
 #endif
 
@@ -955,15 +1008,21 @@ static int hull_serve(int argc, char **argv)
     if (comp_ctx)
         kl_compress_miniz_ctx_destroy(comp_ctx);
 
-#ifdef HL_ENABLE_WASM
-    if (rt->wasm_cache)
-        hl_cap_wasm_destroy(rt->wasm_cache);
-#endif
-
     /* Cleanup — free manifest strings AFTER server stops
      * (env_cfg and http_cfg reference them during runtime) */
     rt->vt->free_manifest_strings(rt, &manifest);
     rt->vt->destroy(rt);
+
+    /* Destroy WASM cache AFTER runtime destroy — GC finalizers
+     * (WasmBuffer WASM-kind and WasmInstance) need WAMR alive */
+#ifdef HL_ENABLE_WASM
+    if (wasm_cache_ok)
+        hl_cap_wasm_destroy(&wasm_cache);
+#endif
+#ifdef HL_ENABLE_GPU
+    if (gpu_ctx_ok)
+        hl_cap_gpu_destroy(&gpu_ctx);
+#endif
     if (client_tls_ctx)
         kl_tls_mbedtls_ctx_destroy(client_tls_ctx);
     if (server_tls_ctx)

@@ -29,24 +29,42 @@
 static void wasm_work_fn(void *ud)
 {
     HlWorkerWasmOp *op = (HlWorkerWasmOp *)ud;
-    HlWasmCache *cache = (HlWasmCache *)op->wasm_cache;
     const char *err_msg = NULL;
     int rc;
 
-    if (op->want_buffer) {
-        rc = hl_cap_wasm_call_buf(cache, op->name,
+    if (op->persistent_inst) {
+        /* Persistent instance mode */
+        if (op->want_buffer) {
+            rc = hl_cap_wasm_instance_call_buf(op->persistent_inst,
+                                                op->input, op->input_len,
+                                                &op->output_buf, &op->opts,
+                                                NULL, NULL,
+                                                op->alloc, &err_msg);
+        } else {
+            rc = hl_cap_wasm_instance_call(op->persistent_inst,
+                                            op->input, op->input_len,
+                                            &op->output, &op->output_len,
+                                            &op->opts, NULL, NULL,
+                                            op->alloc, &err_msg);
+        }
+    } else {
+        /* Pooled call mode */
+        HlWasmCache *cache = (HlWasmCache *)op->wasm_cache;
+        if (op->want_buffer) {
+            rc = hl_cap_wasm_call_buf(cache, op->name,
+                                       op->input, op->input_len,
+                                       &op->output_buf, &op->opts,
+                                       NULL, NULL,
+                                       op->app_vfs, op->app_dir,
+                                       op->alloc, &err_msg);
+        } else {
+            rc = hl_cap_wasm_call(cache, op->name,
                                    op->input, op->input_len,
-                                   &op->output_buf, &op->opts,
-                                   NULL, NULL,
+                                   &op->output, &op->output_len,
+                                   &op->opts, NULL, NULL,
                                    op->app_vfs, op->app_dir,
                                    op->alloc, &err_msg);
-    } else {
-        rc = hl_cap_wasm_call(cache, op->name,
-                               op->input, op->input_len,
-                               &op->output, &op->output_len,
-                               &op->opts, NULL, NULL,
-                               op->app_vfs, op->app_dir,
-                               op->alloc, &err_msg);
+        }
     }
 
     if (rc != HL_WASM_OK) {
@@ -62,6 +80,10 @@ static void wasm_work_fn(void *ud)
 static void wasm_done_fn(void *ud)
 {
     HlWorkerWasmOp *op = (HlWorkerWasmOp *)ud;
+
+    /* Clear busy flag for persistent instances (event loop thread) */
+    if (op->persistent_inst)
+        atomic_store(&op->persistent_inst->busy, 0);
 
     if (atomic_load(&op->cancelled)) {
         HlAsyncCtx *ctx = op->async_ctx;
@@ -79,6 +101,11 @@ static void wasm_done_fn(void *ud)
 static void wasm_cancel_fn(void *ud)
 {
     HlWorkerWasmOp *op = (HlWorkerWasmOp *)ud;
+
+    /* Clear busy flag for persistent instances */
+    if (op->persistent_inst)
+        atomic_store(&op->persistent_inst->busy, 0);
+
     HlAsyncCtx *ctx = op->async_ctx;
     hl_worker_wasm_op_free(op);
     free(op);

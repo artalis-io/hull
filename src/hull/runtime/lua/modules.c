@@ -4292,6 +4292,487 @@ static int luaopen_hull_compute(lua_State *L)
 #endif /* HL_ENABLE_WASM */
 
 /* ════════════════════════════════════════════════════════════════════
+ * hull.gpu module — GPU compute (wgpu-native)
+ *
+ * gpu.available() -> boolean
+ * gpu.devices() -> { {id=0, name="..."}, ... }
+ * gpu.compile(name, wgsl) -> true, err
+ * gpu.dispatch(name, opts) -> output, err
+ * gpu.async.dispatch(name, opts) -> {result=..., error=...}
+ * gpu.buffer(name, data, opts?) -> true, err
+ * gpu.buffer(name, nil) -> destroy
+ * gpu.buffer_read(name) -> data, err
+ * ════════════════════════════════════════════════════════════════════ */
+
+#ifdef HL_ENABLE_GPU
+#include "hull/cap/gpu.h"
+#include "hull/worker_gpu.h"
+
+static HlGpuCtx *lua_get_gpu_ctx(lua_State *L)
+{
+    lua_getfield(L, LUA_REGISTRYINDEX, "hull_lua");
+    HlLua *lua = (HlLua *)lua_touserdata(L, -1);
+    lua_pop(L, 1);
+    return lua ? lua->base.gpu_ctx : NULL;
+}
+
+static int l_gpu_available(lua_State *L)
+{
+    HlGpuCtx *ctx = lua_get_gpu_ctx(L);
+    lua_pushboolean(L, hl_cap_gpu_available(ctx));
+    return 1;
+}
+
+static int l_gpu_devices(lua_State *L)
+{
+    HlGpuCtx *ctx = lua_get_gpu_ctx(L);
+    int count = hl_cap_gpu_device_count(ctx);
+    lua_createtable(L, count, 0);
+    for (int i = 0; i < count; i++) {
+        lua_createtable(L, 0, 2);
+        lua_pushinteger(L, i);
+        lua_setfield(L, -2, "id");
+        lua_pushstring(L, hl_cap_gpu_device_name(ctx, i));
+        lua_setfield(L, -2, "name");
+        lua_rawseti(L, -2, i + 1);
+    }
+    return 1;
+}
+
+static int l_gpu_compile(lua_State *L)
+{
+    HlGpuCtx *ctx = lua_get_gpu_ctx(L);
+    const char *name = luaL_checkstring(L, 1);
+    size_t wgsl_len;
+    const char *wgsl = luaL_checklstring(L, 2, &wgsl_len);
+
+    int device = -1;
+    if (lua_istable(L, 3)) {
+        lua_getfield(L, 3, "device");
+        if (!lua_isnil(L, -1))
+            device = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+    }
+
+    int rc = hl_cap_gpu_compile(ctx, device, name, wgsl, wgsl_len);
+    if (rc != HL_GPU_OK) {
+        lua_pushnil(L);
+        lua_pushstring(L, "shader_error");
+        return 2;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int l_gpu_dispatch(lua_State *L)
+{
+    HlGpuCtx *ctx = lua_get_gpu_ctx(L);
+    const char *name = luaL_checkstring(L, 1);
+    luaL_checktype(L, 2, LUA_TTABLE);
+
+    HlGpuDispatchOpts opts;
+    memset(&opts, 0, sizeof(opts));
+    opts.device = -1;
+
+    /* Parse device */
+    lua_getfield(L, 2, "device");
+    if (!lua_isnil(L, -1))
+        opts.device = (int)lua_tointeger(L, -1);
+    lua_pop(L, 1);
+
+    /* Parse workgroups */
+    lua_getfield(L, 2, "workgroups");
+    if (lua_istable(L, -1)) {
+        lua_getfield(L, -1, "x");
+        opts.workgroups.x = (uint32_t)luaL_optinteger(L, -1, 1);
+        lua_pop(L, 1);
+        lua_getfield(L, -1, "y");
+        opts.workgroups.y = (uint32_t)luaL_optinteger(L, -1, 1);
+        lua_pop(L, 1);
+        lua_getfield(L, -1, "z");
+        opts.workgroups.z = (uint32_t)luaL_optinteger(L, -1, 1);
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 1);
+
+    /* Parse output buffer index (1-indexed in Lua) */
+    lua_getfield(L, 2, "output");
+    opts.output_buffer = (int)luaL_optinteger(L, -1, 0) - 1;
+    lua_pop(L, 1);
+
+    /* Parse uniforms */
+    lua_getfield(L, 2, "uniforms");
+    if (lua_isstring(L, -1)) {
+        opts.uniforms = lua_tolstring(L, -1, &opts.uniforms_len);
+    }
+    lua_pop(L, 1);
+
+    /* Parse buffers */
+    lua_getfield(L, 2, "buffers");
+    int buf_count = 0;
+    HlGpuBufferDesc bufs[16];
+    memset(bufs, 0, sizeof(bufs));
+    if (lua_istable(L, -1)) {
+        buf_count = (int)lua_rawlen(L, -1);
+        if (buf_count > 16) buf_count = 16;
+        for (int i = 0; i < buf_count; i++) {
+            lua_rawgeti(L, -1, i + 1);
+            if (lua_istable(L, -1)) {
+                lua_getfield(L, -1, "name");
+                bufs[i].name = lua_tostring(L, -1);
+                lua_pop(L, 1);
+
+                lua_getfield(L, -1, "data");
+                if (lua_isstring(L, -1))
+                    bufs[i].data = lua_tolstring(L, -1, &bufs[i].size);
+                lua_pop(L, 1);
+
+                lua_getfield(L, -1, "size");
+                if (!lua_isnil(L, -1))
+                    bufs[i].size = (size_t)lua_tointeger(L, -1);
+                lua_pop(L, 1);
+
+                lua_getfield(L, -1, "usage");
+                const char *usage = lua_tostring(L, -1);
+                if (usage) {
+                    if (strcmp(usage, "read") == 0)
+                        bufs[i].usage = HL_GPU_USAGE_READ;
+                    else if (strcmp(usage, "write") == 0)
+                        bufs[i].usage = HL_GPU_USAGE_WRITE;
+                    else if (strcmp(usage, "readwrite") == 0)
+                        bufs[i].usage = HL_GPU_USAGE_READWRITE;
+                }
+                lua_pop(L, 1);
+
+                bufs[i].binding = -1;
+            }
+            lua_pop(L, 1);
+        }
+    }
+    lua_pop(L, 1);
+
+    opts.buffers = bufs;
+    opts.buffer_count = buf_count;
+
+    void *output = NULL;
+    size_t output_len = 0;
+    const char *err_msg = NULL;
+
+    int rc = hl_cap_gpu_dispatch(ctx, name, &opts,
+                                 &output, &output_len, &err_msg);
+    if (rc != HL_GPU_OK) {
+        lua_pushnil(L);
+        lua_pushstring(L, err_msg ? err_msg : "dispatch_failed");
+        return 2;
+    }
+
+    lua_pushlstring(L, (const char *)output, output_len);
+    free(output);
+    return 1;
+}
+
+static int l_gpu_buffer(lua_State *L)
+{
+    HlGpuCtx *ctx = lua_get_gpu_ctx(L);
+    const char *name = luaL_checkstring(L, 1);
+
+    int device = -1;
+    size_t offset = 0;
+    if (lua_istable(L, 3)) {
+        lua_getfield(L, 3, "device");
+        if (!lua_isnil(L, -1)) device = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        lua_getfield(L, 3, "offset");
+        if (!lua_isnil(L, -1)) offset = (size_t)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+    }
+
+    /* nil = destroy */
+    if (lua_isnil(L, 2)) {
+        hl_cap_gpu_buffer_destroy(ctx, device, name);
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+
+    /* string = create/write */
+    size_t data_len;
+    const char *data = luaL_checklstring(L, 2, &data_len);
+
+    /* Try to write to existing buffer first */
+    int rc = hl_cap_gpu_buffer_write(ctx, device, name, data, data_len, offset);
+    if (rc == HL_GPU_ERR_NOT_FOUND) {
+        /* Create new buffer */
+        rc = hl_cap_gpu_buffer_create(ctx, device, name,
+                                      data_len, HL_GPU_USAGE_READWRITE);
+        if (rc == HL_GPU_OK)
+            rc = hl_cap_gpu_buffer_write(ctx, device, name,
+                                         data, data_len, 0);
+    }
+
+    if (rc != HL_GPU_OK) {
+        lua_pushnil(L);
+        lua_pushstring(L, "buffer_error");
+        return 2;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int l_gpu_buffer_read(lua_State *L)
+{
+    HlGpuCtx *ctx = lua_get_gpu_ctx(L);
+    const char *name = luaL_checkstring(L, 1);
+
+    int device = -1;
+    if (lua_istable(L, 2)) {
+        lua_getfield(L, 2, "device");
+        if (!lua_isnil(L, -1)) device = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+    }
+
+    void *data = NULL;
+    size_t len = 0;
+    int rc = hl_cap_gpu_buffer_read(ctx, device, name, &data, &len);
+    if (rc != HL_GPU_OK) {
+        lua_pushnil(L);
+        lua_pushstring(L, "buffer_read_error");
+        return 2;
+    }
+
+    lua_pushlstring(L, (const char *)data, len);
+    free(data);
+    return 1;
+}
+
+/* push_result callback: convert HlWorkerGpuOp result to Lua table */
+static void lua_push_worker_gpu_result(lua_State *L, void *driver)
+{
+    HlWorkerGpuOp *op = (HlWorkerGpuOp *)driver;
+    lua_newtable(L);
+    if (op->error) {
+        lua_pushstring(L, op->error_msg);
+        lua_setfield(L, -2, "error");
+    } else {
+        if (op->output && op->output_len > 0)
+            lua_pushlstring(L, (const char *)op->output, op->output_len);
+        else
+            lua_pushlstring(L, "", 0);
+        lua_setfield(L, -2, "result");
+    }
+}
+
+/* Async dispatch — submits GPU work to thread pool */
+static int l_gpu_async_dispatch(lua_State *L)
+{
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->base.thread_pool)
+        return luaL_error(L, "gpu.async not available (no thread pool)");
+    if (!lua->server || !lua->active_conn)
+        return luaL_error(L, "gpu.async can only be called from a request handler");
+    if (!lua->base.gpu_ctx)
+        return luaL_error(L, "gpu.async.dispatch: GPU not initialized");
+
+    const char *name = luaL_checkstring(L, 1);
+    luaL_checktype(L, 2, LUA_TTABLE);
+
+    /* Parse opts (same as sync dispatch) */
+    HlGpuDispatchOpts opts;
+    memset(&opts, 0, sizeof(opts));
+    opts.device = -1;
+
+    lua_getfield(L, 2, "device");
+    if (!lua_isnil(L, -1)) opts.device = (int)lua_tointeger(L, -1);
+    lua_pop(L, 1);
+
+    lua_getfield(L, 2, "workgroups");
+    if (lua_istable(L, -1)) {
+        lua_getfield(L, -1, "x");
+        opts.workgroups.x = (uint32_t)luaL_optinteger(L, -1, 1);
+        lua_pop(L, 1);
+        lua_getfield(L, -1, "y");
+        opts.workgroups.y = (uint32_t)luaL_optinteger(L, -1, 1);
+        lua_pop(L, 1);
+        lua_getfield(L, -1, "z");
+        opts.workgroups.z = (uint32_t)luaL_optinteger(L, -1, 1);
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 1);
+
+    lua_getfield(L, 2, "output");
+    opts.output_buffer = (int)luaL_optinteger(L, -1, 0) - 1;
+    lua_pop(L, 1);
+
+    /* Parse and deep-copy uniforms */
+    void *uni_copy = NULL;
+    size_t uni_len = 0;
+    lua_getfield(L, 2, "uniforms");
+    if (lua_isstring(L, -1)) {
+        const char *uni = lua_tolstring(L, -1, &uni_len);
+        if (uni && uni_len > 0) {
+            uni_copy = malloc(uni_len);
+            if (uni_copy)
+                memcpy(uni_copy, uni, uni_len);
+            else
+                uni_len = 0; /* prevent NULL-with-nonzero-len */
+        }
+    }
+    lua_pop(L, 1);
+
+    /* Parse and deep-copy buffers */
+    int buf_count = 0;
+    HlGpuBufferDesc *buf_descs = NULL;
+    void **buf_data_ptrs = NULL;
+
+    lua_getfield(L, 2, "buffers");
+    if (lua_istable(L, -1)) {
+        buf_count = (int)lua_rawlen(L, -1);
+        if (buf_count > 16) buf_count = 16;
+        if (buf_count > 0) {
+            buf_descs = calloc((size_t)buf_count, sizeof(HlGpuBufferDesc));
+            buf_data_ptrs = calloc((size_t)buf_count, sizeof(void *));
+            if (!buf_descs || !buf_data_ptrs) {
+                free(buf_descs); free(buf_data_ptrs); free(uni_copy);
+                lua_pop(L, 1);
+                return luaL_error(L, "gpu.async.dispatch: out of memory");
+            }
+            for (int i = 0; i < buf_count; i++) {
+                lua_rawgeti(L, -1, i + 1);
+                if (lua_istable(L, -1)) {
+                    /* Deep-copy buffer name — Lua strings are GC'd after yield */
+                    lua_getfield(L, -1, "name");
+                    if (lua_isstring(L, -1)) {
+                        size_t nlen;
+                        const char *nstr = lua_tolstring(L, -1, &nlen);
+                        if (nstr && nlen > 0 && nlen < HL_GPU_NAME_MAX) {
+                            char *ncopy = malloc(nlen + 1);
+                            if (ncopy) {
+                                memcpy(ncopy, nstr, nlen);
+                                ncopy[nlen] = '\0';
+                                buf_descs[i].name = ncopy;
+                            }
+                        }
+                    }
+                    lua_pop(L, 1);
+
+                    lua_getfield(L, -1, "data");
+                    if (lua_isstring(L, -1)) {
+                        size_t dlen;
+                        const char *d = lua_tolstring(L, -1, &dlen);
+                        if (d && dlen > 0) {
+                            buf_data_ptrs[i] = malloc(dlen);
+                            if (buf_data_ptrs[i]) {
+                                memcpy(buf_data_ptrs[i], d, dlen);
+                                buf_descs[i].data = buf_data_ptrs[i];
+                                buf_descs[i].size = dlen;
+                            }
+                        }
+                    }
+                    lua_pop(L, 1);
+
+                    lua_getfield(L, -1, "size");
+                    if (!lua_isnil(L, -1))
+                        buf_descs[i].size = (size_t)lua_tointeger(L, -1);
+                    lua_pop(L, 1);
+
+                    lua_getfield(L, -1, "usage");
+                    const char *us = lua_tostring(L, -1);
+                    if (us) {
+                        if (strcmp(us, "read") == 0) buf_descs[i].usage = HL_GPU_USAGE_READ;
+                        else if (strcmp(us, "write") == 0) buf_descs[i].usage = HL_GPU_USAGE_WRITE;
+                        else if (strcmp(us, "readwrite") == 0) buf_descs[i].usage = HL_GPU_USAGE_READWRITE;
+                    }
+                    lua_pop(L, 1);
+                    buf_descs[i].binding = -1;
+                }
+                lua_pop(L, 1);
+            }
+        }
+    }
+    lua_pop(L, 1);
+
+    /* Allocate worker op */
+    HlWorkerGpuOp *op = calloc(1, sizeof(HlWorkerGpuOp));
+    if (!op) {
+        for (int i = 0; i < buf_count; i++) free(buf_data_ptrs[i]);
+        free(buf_data_ptrs); free(buf_descs); free(uni_copy);
+        return luaL_error(L, "gpu.async.dispatch: out of memory");
+    }
+
+    op->server = lua->server;
+    op->gpu_ctx = lua->base.gpu_ctx;
+    snprintf(op->shader_name, sizeof(op->shader_name), "%s", name);
+    op->opts = opts;
+    op->buffers = buf_descs;
+    op->buffer_data = buf_data_ptrs;
+    op->buffer_count = buf_count;
+    op->uniforms = uni_copy;
+    op->uniforms_len = uni_len;
+
+    /* Create async ctx */
+    HlAsyncCtx *actx = hl_async_ctx_create(lua->server, lua->base.alloc);
+    if (!actx) {
+        hl_worker_gpu_op_free(op); free(op);
+        return luaL_error(L, "gpu.async.dispatch: out of memory");
+    }
+
+    extern HlAsyncCont *hl_lua_async_cont_create(HlLua *, HlAllocator *,
+                                                   HlLuaPushResultFn);
+    HlAsyncCont *cont = hl_lua_async_cont_create(lua, lua->base.alloc,
+                                                   lua_push_worker_gpu_result);
+    if (!cont) {
+        hl_worker_gpu_op_free(op); free(op); hl_async_ctx_free(actx);
+        return luaL_error(L, "gpu.async.dispatch: out of memory");
+    }
+    actx->cont = cont;
+    actx->driver = op;
+    actx->free_driver = hl_worker_gpu_op_free_all;
+    actx->op.on_cancel = hl_worker_gpu_async_cancel;
+
+    op->async_ctx = actx;
+    atomic_store(&op->cancelled, 0);
+
+    if (hl_worker_gpu_submit(lua->base.thread_pool, op) != 0) {
+        actx->cont->destroy(actx->cont);
+        hl_worker_gpu_op_free(op); free(op); hl_async_ctx_free(actx);
+        return luaL_error(L, "gpu.async.dispatch: thread pool full");
+    }
+
+    if (kl_async_suspend(lua->server, lua->active_conn, &actx->op) < 0) {
+        atomic_store(&op->cancelled, 1);
+        actx->cont->cancel(actx->cont);
+        actx->cont->destroy(actx->cont);
+        actx->cont = NULL;
+        return luaL_error(L, "gpu.async.dispatch: failed to suspend connection");
+    }
+
+    return lua_yieldk(L, 0, 0, NULL);
+}
+
+static const luaL_Reg gpu_funcs[] = {
+    {"available",    l_gpu_available},
+    {"devices",      l_gpu_devices},
+    {"compile",      l_gpu_compile},
+    {"dispatch",     l_gpu_dispatch},
+    {"buffer",       l_gpu_buffer},
+    {"buffer_read",  l_gpu_buffer_read},
+    {NULL, NULL}
+};
+
+static const luaL_Reg gpu_async_funcs[] = {
+    {"dispatch", l_gpu_async_dispatch},
+    {NULL, NULL}
+};
+
+static int luaopen_hull_gpu(lua_State *L)
+{
+    luaL_newlib(L, gpu_funcs);
+    luaL_newlib(L, gpu_async_funcs);
+    lua_setfield(L, -2, "async");  /* gpu.async = {...} */
+    return 1;
+}
+#endif /* HL_ENABLE_GPU */
+
+/* ════════════════════════════════════════════════════════════════════
  * Module registry — called by hl_lua_init() to register all
  * hull.* built-in modules.
  * ════════════════════════════════════════════════════════════════════ */
@@ -4368,6 +4849,14 @@ int hl_lua_register_modules(HlLua *lua)
     if (lua->base.wasm_cache) {
         luaL_requiref(L, "hull.compute", luaopen_hull_compute, 0);
         lua_setglobal(L, "compute");
+    }
+#endif
+
+#ifdef HL_ENABLE_GPU
+    /* Register hull.gpu (only if GPU context is available) */
+    if (lua->base.gpu_ctx) {
+        luaL_requiref(L, "hull.gpu", luaopen_hull_gpu, 0);
+        lua_setglobal(L, "gpu");
     }
 #endif
 
