@@ -1344,20 +1344,32 @@ fetch-wgpu:
 		ls -lh $(VENDDIR)/wgpu/libwgpu_native.a; \
 	fi
 
-# Cosmopolitan cosmocc — portable C compiler (rolling release, no stable hash)
-COSMOCC_URL := https://cosmo.zip/pub/cosmocc/cosmocc.zip
+# Cosmopolitan cosmocc 4.0.2 — portable C compiler
+COSMOCC_VERSION := 4.0.2
+COSMOCC_SHA256 := 85b8c37a406d862e656ad4ec14be9f6ce474c1b436b9615e91a55208aced3f44
+COSMOCC_URL := https://cosmo.zip/pub/cosmocc/cosmocc-$(COSMOCC_VERSION).zip
 COSMOCC_DIR ?= /opt/cosmo
 
 fetch-cosmocc:
 	@if command -v cosmocc >/dev/null 2>&1; then \
 		echo "cosmocc already installed: $$(which cosmocc)"; \
 	else \
-		echo "=== Fetching cosmocc to $(COSMOCC_DIR) ==="; \
+		echo "=== Fetching cosmocc $(COSMOCC_VERSION) to $(COSMOCC_DIR) ==="; \
 		curl -sL -o /tmp/cosmocc.zip "$(COSMOCC_URL)"; \
+		echo "Verifying SHA-256..."; \
+		ACTUAL=$$(shasum -a 256 /tmp/cosmocc.zip | cut -d' ' -f1); \
+		if [ "$$ACTUAL" != "$(COSMOCC_SHA256)" ]; then \
+			echo "ERROR: SHA-256 mismatch!"; \
+			echo "  expected: $(COSMOCC_SHA256)"; \
+			echo "  actual:   $$ACTUAL"; \
+			rm -f /tmp/cosmocc.zip; \
+			exit 1; \
+		fi; \
+		echo "SHA-256 OK"; \
 		mkdir -p $(COSMOCC_DIR); \
 		unzip -q -o /tmp/cosmocc.zip -d $(COSMOCC_DIR); \
 		rm -f /tmp/cosmocc.zip; \
-		echo "=== cosmocc installed to $(COSMOCC_DIR)/bin/cosmocc ==="; \
+		echo "=== cosmocc $(COSMOCC_VERSION) installed to $(COSMOCC_DIR)/bin/cosmocc ==="; \
 		echo "Add to PATH: export PATH=$(COSMOCC_DIR)/bin:\$$PATH"; \
 	fi
 

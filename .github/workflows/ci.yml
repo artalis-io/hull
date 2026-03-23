@@ -144,7 +144,8 @@ jobs:
       - name: Install cosmocc
         run: |
           mkdir -p /opt/cosmo
-          wget -qO /tmp/cosmocc.zip https://cosmo.zip/pub/cosmocc/cosmocc.zip
+          wget -qO /tmp/cosmocc.zip https://cosmo.zip/pub/cosmocc/cosmocc-4.0.2.zip
+          echo "85b8c37a406d862e656ad4ec14be9f6ce474c1b436b9615e91a55208aced3f44  /tmp/cosmocc.zip" | sha256sum -c -
           unzip -q -d /opt/cosmo /tmp/cosmocc.zip
           rm /tmp/cosmocc.zip
           echo "/opt/cosmo/bin" >> $GITHUB_PATH
