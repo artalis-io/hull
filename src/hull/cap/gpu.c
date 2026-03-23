@@ -248,6 +248,85 @@ int hl_cap_gpu_dispatch(HlGpuCtx *ctx, const char *shader_name,
     return rc;
 }
 
+/* ── Pipeline (multi-stage dispatch) ────────────────────────────────── */
+
+int hl_cap_gpu_pipeline(HlGpuCtx *ctx, const HlGpuPipelineOpts *opts,
+                         HlGpuPipelineResult *result, const char **err_msg)
+{
+    static const char *err_internal = "internal_error";
+
+    if (!ctx || !opts || !result || !opts->stages) {
+        if (err_msg) *err_msg = err_internal;
+        return HL_GPU_ERR_INTERNAL;
+    }
+    if (opts->stage_count <= 0 || opts->stage_count > HL_GPU_MAX_PIPELINE_STAGES) {
+        if (err_msg) *err_msg = "invalid_stage_count";
+        return HL_GPU_ERR_DISPATCH;
+    }
+    if (ctx->device_count == 0) {
+        if (err_msg) *err_msg = "gpu_not_available";
+        return HL_GPU_ERR_NOT_AVAILABLE;
+    }
+
+    int dev_idx = resolve_device(ctx, opts->device);
+    if (dev_idx < 0 || dev_idx >= ctx->device_count) {
+        if (err_msg) *err_msg = "invalid_device";
+        return HL_GPU_ERR_DEVICE;
+    }
+
+    HlGpuDevice *dev = &ctx->devices[dev_idx];
+    pthread_mutex_lock(&dev->mutex);
+
+    /* Look up all shader pipelines (fail fast) */
+    HlGpuPipeline *pipelines[HL_GPU_MAX_PIPELINE_STAGES];
+    for (int i = 0; i < opts->stage_count; i++) {
+        if (!opts->stages[i].shader) {
+            pthread_mutex_unlock(&dev->mutex);
+            if (err_msg) *err_msg = "stage_missing_shader";
+            return HL_GPU_ERR_INTERNAL;
+        }
+        pipelines[i] = find_pipeline(dev, opts->stages[i].shader);
+        if (!pipelines[i]) {
+            pthread_mutex_unlock(&dev->mutex);
+            if (err_msg) *err_msg = "shader_not_found";
+            return HL_GPU_ERR_NOT_FOUND;
+        }
+    }
+
+    if (!ctx->backend->dispatch_pipeline) {
+        pthread_mutex_unlock(&dev->mutex);
+        if (err_msg) *err_msg = "pipeline_not_supported";
+        return HL_GPU_ERR_INTERNAL;
+    }
+
+    memset(result, 0, sizeof(*result));
+
+    int rc = ctx->backend->dispatch_pipeline(
+        dev->backend_device, pipelines, opts->stage_count, opts,
+        dev->buffers, dev->buffer_count, result, err_msg);
+
+    pthread_mutex_unlock(&dev->mutex);
+
+    if (hl_audit_enabled) {
+        ShJsonWriter w = hl_audit_begin("gpu.pipeline");
+        sh_json_write_kv_int(&w, "stages", opts->stage_count);
+        sh_json_write_kv_int(&w, "outputs", result->count);
+        sh_json_write_kv_int(&w, "device", dev_idx);
+        sh_json_write_kv_int(&w, "rc", rc);
+        hl_audit_end(&w);
+    }
+
+    return rc;
+}
+
+void hl_cap_gpu_pipeline_result_free(HlGpuPipelineResult *result)
+{
+    if (!result) return;
+    for (int i = 0; i < result->count; i++)
+        free(result->data[i]);
+    memset(result, 0, sizeof(*result));
+}
+
 /* ── Persistent buffers ────────────────────────────────────────────── */
 
 int hl_cap_gpu_buffer_create(HlGpuCtx *ctx, int device, const char *name,

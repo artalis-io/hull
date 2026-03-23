@@ -132,5 +132,14 @@
 #ifndef HL_GPU_MAX_DISPATCH_SIZE
 #define HL_GPU_MAX_DISPATCH_SIZE (256 * 1024 * 1024)  /* 256 MB */
 #endif
+#ifndef HL_GPU_MAX_PIPELINE_STAGES
+#define HL_GPU_MAX_PIPELINE_STAGES  16
+#endif
+#ifndef HL_GPU_MAX_PIPELINE_BUFFERS
+#define HL_GPU_MAX_PIPELINE_BUFFERS 64  /* total across all stages */
+#endif
+#ifndef HL_GPU_MAX_PIPELINE_OUTPUTS
+#define HL_GPU_MAX_PIPELINE_OUTPUTS 8
+#endif
 
 #endif /* HL_LIMITS_H */

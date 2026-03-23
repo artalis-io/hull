@@ -238,6 +238,80 @@ UTEST(hull_cap_gpu, persistent_buffer_roundtrip)
     hl_cap_gpu_destroy(&ctx);
 }
 
+UTEST(hull_cap_gpu, pipeline_two_stage)
+{
+    HlGpuCtx ctx;
+    if (!gpu_test_init(&ctx)) { ASSERT_TRUE(1); return; }
+
+    /* Stage 1: double each u32
+     * Stage 2: add 10 to each u32
+     * Combined: input * 2 + 10 */
+    const char *double_wgsl =
+        "@group(0) @binding(0) var<storage, read_write> data: array<u32>;\n"
+        "@compute @workgroup_size(1)\n"
+        "fn main(@builtin(global_invocation_id) id: vec3<u32>) {\n"
+        "    data[id.x] = data[id.x] * 2u;\n"
+        "}\n";
+    const char *add10_wgsl =
+        "@group(0) @binding(0) var<storage, read_write> data: array<u32>;\n"
+        "@compute @workgroup_size(1)\n"
+        "fn main(@builtin(global_invocation_id) id: vec3<u32>) {\n"
+        "    data[id.x] = data[id.x] + 10u;\n"
+        "}\n";
+
+    int rc = hl_cap_gpu_compile(&ctx, -1, "pipe_double",
+                                 double_wgsl, strlen(double_wgsl));
+    ASSERT_EQ(HL_GPU_OK, rc);
+    rc = hl_cap_gpu_compile(&ctx, -1, "pipe_add10",
+                             add10_wgsl, strlen(add10_wgsl));
+    ASSERT_EQ(HL_GPU_OK, rc);
+
+    /* Input: [1, 2, 3, 4] → double → [2, 4, 6, 8] → add10 → [12, 14, 16, 18] */
+    uint32_t input[4] = {1, 2, 3, 4};
+
+    HlGpuBufferDesc bufs_s1[] = {
+        { .name = "data", .data = input, .size = sizeof(input),
+          .usage = HL_GPU_USAGE_READWRITE, .binding = -1 },
+    };
+    HlGpuBufferDesc bufs_s2[] = {
+        { .name = "data", .usage = HL_GPU_USAGE_READWRITE, .binding = -1 },
+    };
+
+    HlGpuPipelineStage stages[] = {
+        { .shader = "pipe_double", .buffers = bufs_s1, .buffer_count = 1,
+          .workgroups = {4, 1, 1} },
+        { .shader = "pipe_add10", .buffers = bufs_s2, .buffer_count = 1,
+          .workgroups = {4, 1, 1} },
+    };
+
+    HlGpuPipelineOutput outputs[] = { { .stage = 1, .buffer = 0 } };
+
+    HlGpuPipelineOpts opts = {
+        .stages = stages,
+        .stage_count = 2,
+        .outputs = outputs,
+        .output_count = 1,
+        .device = -1,
+    };
+
+    HlGpuPipelineResult result;
+    const char *err_msg = NULL;
+    rc = hl_cap_gpu_pipeline(&ctx, &opts, &result, &err_msg);
+    ASSERT_EQ(HL_GPU_OK, rc);
+    ASSERT_EQ(1, result.count);
+    ASSERT_TRUE(result.data[0] != NULL);
+    ASSERT_EQ(sizeof(input), result.len[0]);
+
+    uint32_t *out = (uint32_t *)result.data[0];
+    ASSERT_EQ((uint32_t)12, out[0]);  /* 1*2+10 */
+    ASSERT_EQ((uint32_t)14, out[1]);  /* 2*2+10 */
+    ASSERT_EQ((uint32_t)16, out[2]);  /* 3*2+10 */
+    ASSERT_EQ((uint32_t)18, out[3]);  /* 4*2+10 */
+
+    hl_cap_gpu_pipeline_result_free(&result);
+    hl_cap_gpu_destroy(&ctx);
+}
+
 #else /* !HL_ENABLE_GPU */
 
 UTEST(hull_cap_gpu, disabled_placeholder)

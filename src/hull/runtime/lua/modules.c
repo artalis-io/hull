@@ -4748,18 +4748,235 @@ static int l_gpu_async_dispatch(lua_State *L)
     return lua_yieldk(L, 0, 0, NULL);
 }
 
+/* ── gpu.pipeline() ─────────────────────────────────────────────── */
+
+/*
+ * Parse a pipeline stages array from Lua table.
+ * Returns stage_count on success, -1 on error.
+ * Stages and buffer descs are written into caller-provided arrays.
+ */
+static int parse_pipeline_stages(lua_State *L, int tbl_idx,
+                                  HlGpuPipelineStage *stages, int max_stages,
+                                  HlGpuBufferDesc *all_bufs, int max_bufs,
+                                  int *total_bufs)
+{
+    int stage_count = (int)lua_rawlen(L, tbl_idx);
+    if (stage_count > max_stages) stage_count = max_stages;
+    int buf_offset = 0;
+
+    for (int s = 0; s < stage_count; s++) {
+        lua_rawgeti(L, tbl_idx, s + 1);
+        if (!lua_istable(L, -1)) { lua_pop(L, 1); continue; }
+
+        memset(&stages[s], 0, sizeof(stages[s]));
+
+        /* shader (required) */
+        lua_getfield(L, -1, "shader");
+        stages[s].shader = lua_tostring(L, -1);
+        lua_pop(L, 1);
+
+        /* workgroups */
+        lua_getfield(L, -1, "workgroups");
+        if (lua_istable(L, -1)) {
+            lua_getfield(L, -1, "x");
+            stages[s].workgroups.x = (uint32_t)luaL_optinteger(L, -1, 1);
+            lua_pop(L, 1);
+            lua_getfield(L, -1, "y");
+            stages[s].workgroups.y = (uint32_t)luaL_optinteger(L, -1, 1);
+            lua_pop(L, 1);
+            lua_getfield(L, -1, "z");
+            stages[s].workgroups.z = (uint32_t)luaL_optinteger(L, -1, 1);
+            lua_pop(L, 1);
+        }
+        lua_pop(L, 1);
+
+        /* uniforms */
+        lua_getfield(L, -1, "uniforms");
+        if (lua_isstring(L, -1))
+            stages[s].uniforms = lua_tolstring(L, -1, &stages[s].uniforms_len);
+        lua_pop(L, 1);
+
+        /* buffers */
+        lua_getfield(L, -1, "buffers");
+        if (lua_istable(L, -1)) {
+            int bc = (int)lua_rawlen(L, -1);
+            if (bc > 16) bc = 16;
+            if (buf_offset + bc > max_bufs) bc = max_bufs - buf_offset;
+            stages[s].buffers = &all_bufs[buf_offset];
+            stages[s].buffer_count = bc;
+            for (int b = 0; b < bc; b++) {
+                memset(&all_bufs[buf_offset + b], 0, sizeof(HlGpuBufferDesc));
+                lua_rawgeti(L, -1, b + 1);
+                if (lua_istable(L, -1)) {
+                    lua_getfield(L, -1, "name");
+                    all_bufs[buf_offset + b].name = lua_tostring(L, -1);
+                    lua_pop(L, 1);
+                    lua_getfield(L, -1, "data");
+                    if (lua_isstring(L, -1))
+                        all_bufs[buf_offset + b].data = lua_tolstring(L, -1,
+                            &all_bufs[buf_offset + b].size);
+                    lua_pop(L, 1);
+                    lua_getfield(L, -1, "size");
+                    if (!lua_isnil(L, -1))
+                        all_bufs[buf_offset + b].size = (size_t)lua_tointeger(L, -1);
+                    lua_pop(L, 1);
+                    lua_getfield(L, -1, "usage");
+                    const char *us = lua_tostring(L, -1);
+                    if (us) {
+                        if (strcmp(us, "read") == 0)
+                            all_bufs[buf_offset + b].usage = HL_GPU_USAGE_READ;
+                        else if (strcmp(us, "write") == 0)
+                            all_bufs[buf_offset + b].usage = HL_GPU_USAGE_WRITE;
+                        else if (strcmp(us, "readwrite") == 0)
+                            all_bufs[buf_offset + b].usage = HL_GPU_USAGE_READWRITE;
+                    }
+                    lua_pop(L, 1);
+                    all_bufs[buf_offset + b].binding = -1;
+                }
+                lua_pop(L, 1);
+            }
+            buf_offset += bc;
+        }
+        lua_pop(L, 1); /* pop buffers */
+        lua_pop(L, 1); /* pop stage table */
+    }
+
+    *total_bufs = buf_offset;
+    return stage_count;
+}
+
+static int l_gpu_pipeline(lua_State *L)
+{
+    HlGpuCtx *ctx = lua_get_gpu_ctx(L);
+    luaL_checktype(L, 1, LUA_TTABLE); /* stages array */
+
+    /* Parse stages */
+    HlGpuPipelineStage stages[HL_GPU_MAX_PIPELINE_STAGES];
+    HlGpuBufferDesc all_bufs[HL_GPU_MAX_PIPELINE_BUFFERS];
+    int total_bufs = 0;
+    int stage_count = parse_pipeline_stages(L, 1, stages,
+        HL_GPU_MAX_PIPELINE_STAGES, all_bufs, HL_GPU_MAX_PIPELINE_BUFFERS,
+        &total_bufs);
+
+    if (stage_count <= 0) {
+        lua_pushnil(L);
+        lua_pushstring(L, "empty_pipeline");
+        return 2;
+    }
+
+    /* Parse opts (second argument, optional) */
+    HlGpuPipelineOutput outputs[HL_GPU_MAX_PIPELINE_OUTPUTS];
+    int output_count = 0;
+    int device = -1;
+
+    if (lua_istable(L, 2)) {
+        lua_getfield(L, 2, "device");
+        if (!lua_isnil(L, -1)) device = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+
+        /* outputs = { {stage=1, buffer=1}, {stage=2, buffer=1} } (1-indexed) */
+        lua_getfield(L, 2, "outputs");
+        if (lua_istable(L, -1)) {
+            output_count = (int)lua_rawlen(L, -1);
+            if (output_count > HL_GPU_MAX_PIPELINE_OUTPUTS)
+                output_count = HL_GPU_MAX_PIPELINE_OUTPUTS;
+            for (int i = 0; i < output_count; i++) {
+                lua_rawgeti(L, -1, i + 1);
+                if (lua_istable(L, -1)) {
+                    lua_getfield(L, -1, "stage");
+                    outputs[i].stage = (int)luaL_optinteger(L, -1, stage_count) - 1;
+                    lua_pop(L, 1);
+                    lua_getfield(L, -1, "buffer");
+                    outputs[i].buffer = (int)luaL_optinteger(L, -1, 1) - 1;
+                    lua_pop(L, 1);
+                }
+                lua_pop(L, 1);
+            }
+        }
+        lua_pop(L, 1);
+    }
+
+    HlGpuPipelineOpts opts = {
+        .stages = stages,
+        .stage_count = stage_count,
+        .outputs = output_count > 0 ? outputs : NULL,
+        .output_count = output_count,
+        .device = device,
+    };
+
+    HlGpuPipelineResult result;
+    const char *err_msg = NULL;
+    int rc = hl_cap_gpu_pipeline(ctx, &opts, &result, &err_msg);
+
+    if (rc != HL_GPU_OK) {
+        lua_pushnil(L);
+        lua_pushstring(L, err_msg ? err_msg : "pipeline_failed");
+        return 2;
+    }
+
+    /* Return table of results */
+    if (result.count == 1) {
+        /* Single output: return as string directly */
+        lua_pushlstring(L, (const char *)result.data[0], result.len[0]);
+        hl_cap_gpu_pipeline_result_free(&result);
+        return 1;
+    }
+
+    lua_createtable(L, result.count, 0);
+    for (int i = 0; i < result.count; i++) {
+        lua_pushlstring(L, (const char *)result.data[i], result.len[i]);
+        lua_rawseti(L, -2, i + 1);
+    }
+    hl_cap_gpu_pipeline_result_free(&result);
+    return 1;
+}
+
+/* Async pipeline — submits to thread pool */
+static void lua_push_worker_gpu_pipeline_result(lua_State *L, void *driver)
+{
+    HlWorkerGpuOp *op = (HlWorkerGpuOp *)driver;
+    lua_newtable(L);
+    if (op->error) {
+        lua_pushstring(L, op->error_msg);
+        lua_setfield(L, -2, "error");
+    } else if (op->output && op->output_len > 0) {
+        /* For pipeline results, output contains concatenated results
+         * with a header: [count:i32] [len0:i32] [len1:i32] ... [data0] [data1] ...
+         * But for simplicity, we reuse the same worker op as dispatch,
+         * which only supports single output. For multi-output pipeline async,
+         * we'd need a new op type. For now, return single result. */
+        lua_pushlstring(L, (const char *)op->output, op->output_len);
+        lua_setfield(L, -2, "result");
+    } else {
+        lua_pushlstring(L, "", 0);
+        lua_setfield(L, -2, "result");
+    }
+}
+
+static int l_gpu_async_pipeline(lua_State *L)
+{
+    /* For async pipeline, we reuse the sync path on the worker thread.
+     * This is simpler than deep-copying all stage data for the worker.
+     * The worker calls hl_cap_gpu_pipeline() which handles everything. */
+    /* For now, fall back to sync — proper async would need a new
+     * HlWorkerGpuPipelineOp with deep-copied stages. */
+    return l_gpu_pipeline(L);
+}
+
 static const luaL_Reg gpu_funcs[] = {
     {"available",    l_gpu_available},
     {"devices",      l_gpu_devices},
     {"compile",      l_gpu_compile},
     {"dispatch",     l_gpu_dispatch},
+    {"pipeline",     l_gpu_pipeline},
     {"buffer",       l_gpu_buffer},
     {"buffer_read",  l_gpu_buffer_read},
     {NULL, NULL}
 };
 
 static const luaL_Reg gpu_async_funcs[] = {
-    {"dispatch", l_gpu_async_dispatch},
+    {"dispatch",  l_gpu_async_dispatch},
+    {"pipeline",  l_gpu_async_pipeline},
     {NULL, NULL}
 };
 

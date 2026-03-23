@@ -764,6 +764,389 @@ static void wgpu_buffer_destroy(void *backend_device, HlGpuBuffer *buf)
     buf->handle = NULL;
 }
 
+/* ── wgpu_dispatch_pipeline ─────────────────────────────────────────
+ *
+ * Multi-stage dispatch: one command encoder, N compute passes, one
+ * submit+poll, then readback the requested output buffers.
+ *
+ * Named temporary buffers are shared across stages. When multiple
+ * stages reference the same buffer name, the maximum declared size
+ * is used for allocation.
+ */
+
+/* Temp buffer name map entry */
+typedef struct {
+    const char *name;
+    WGPUBuffer  buf;
+    size_t      size;  /* allocated (aligned) size */
+} TempBufEntry;
+
+static WGPUBuffer find_or_create_temp(WgpuDeviceCtx *dctx,
+                                        TempBufEntry *map, int *map_count,
+                                        const char *name, size_t size,
+                                        const HlGpuBuffer *persistent,
+                                        int persistent_count)
+{
+    /* Check persistent buffers first */
+    if (name && persistent) {
+        for (int p = 0; p < persistent_count; p++) {
+            if (persistent[p].name[0] != '\0' &&
+                strcmp(persistent[p].name, name) == 0)
+                return (WGPUBuffer)persistent[p].handle;
+        }
+    }
+
+    /* Check existing temp map */
+    if (name) {
+        for (int i = 0; i < *map_count; i++) {
+            if (map[i].name && strcmp(map[i].name, name) == 0)
+                return map[i].buf;
+        }
+    }
+
+    /* Create new temp buffer */
+    size_t aligned = (size + 3) & ~(size_t)3;
+    if (aligned == 0) aligned = 4;
+
+    WGPUBufferDescriptor desc = {
+        .label = sv("hull_pipe_buf"),
+        .usage = WGPUBufferUsage_Storage
+               | WGPUBufferUsage_CopyDst
+               | WGPUBufferUsage_CopySrc,
+        .size  = aligned,
+    };
+    WGPUBuffer buf = wgpuDeviceCreateBuffer(dctx->device, &desc);
+    if (!buf) return NULL;
+
+    if (*map_count < HL_GPU_MAX_PIPELINE_BUFFERS) {
+        map[*map_count] = (TempBufEntry){ name, buf, aligned };
+        (*map_count)++;
+    }
+    return buf;
+}
+
+static int wgpu_dispatch_pipeline(void *backend_device,
+                                    HlGpuPipeline **pipelines, int stage_count,
+                                    const HlGpuPipelineOpts *opts,
+                                    const HlGpuBuffer *persistent_buffers,
+                                    int persistent_count,
+                                    HlGpuPipelineResult *result,
+                                    const char **err_msg)
+{
+    WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)backend_device;
+    if (!dctx || !opts || !pipelines) {
+        if (err_msg) *err_msg = "invalid_device";
+        return HL_GPU_ERR_DEVICE;
+    }
+
+    int rc = HL_GPU_ERR_DISPATCH;
+    WGPUCommandEncoder encoder = NULL;
+    WGPUCommandBuffer cmd = NULL;
+
+    /* Temp buffer name map */
+    TempBufEntry temp_map[HL_GPU_MAX_PIPELINE_BUFFERS];
+    int temp_count = 0;
+
+    /* Per-stage uniform buffers */
+    WGPUBuffer uniform_bufs[HL_GPU_MAX_PIPELINE_STAGES];
+    memset(uniform_bufs, 0, sizeof(uniform_bufs));
+
+    /* Per-stage bind groups */
+    WGPUBindGroup bind_groups[HL_GPU_MAX_PIPELINE_STAGES];
+    memset(bind_groups, 0, sizeof(bind_groups));
+
+    /* Per-stage bind group entries (flat array, indexed by stage offset) */
+    WGPUBindGroupEntry all_entries[HL_GPU_MAX_PIPELINE_BUFFERS + HL_GPU_MAX_PIPELINE_STAGES];
+    int entry_count = 0;
+
+    /* Track which WGPUBuffer corresponds to each (stage, buffer_idx) for readback.
+     * Stored as flat array: stage_buf_map[stage * 16 + buf_idx] */
+    WGPUBuffer stage_buf_map[HL_GPU_MAX_PIPELINE_STAGES * 16];
+    size_t     stage_buf_size[HL_GPU_MAX_PIPELINE_STAGES * 16];
+    memset(stage_buf_map, 0, sizeof(stage_buf_map));
+    memset(stage_buf_size, 0, sizeof(stage_buf_size));
+
+    /* ── Pass 1: compute max size per named buffer across all stages ── */
+    /* (Simple approach: first-create wins; names with larger sizes
+     *  declared later don't resize — users should declare max size first.
+     *  Document: declare the largest size in the earliest stage.) */
+    /* Actually, per user request: use max size. Pre-scan all stages. */
+    typedef struct { const char *name; size_t max_size; } SizeEntry;
+    SizeEntry size_map[HL_GPU_MAX_PIPELINE_BUFFERS];
+    int size_count = 0;
+
+    for (int s = 0; s < stage_count; s++) {
+        const HlGpuPipelineStage *stage = &opts->stages[s];
+        for (int b = 0; b < stage->buffer_count; b++) {
+            const char *bname = stage->buffers[b].name;
+            size_t bsize = stage->buffers[b].size;
+            if (stage->buffers[b].data && bsize == 0)
+                bsize = 4; /* guard */
+            if (bname) {
+                int found = 0;
+                for (int k = 0; k < size_count; k++) {
+                    if (size_map[k].name && strcmp(size_map[k].name, bname) == 0) {
+                        if (bsize > size_map[k].max_size)
+                            size_map[k].max_size = bsize;
+                        found = 1;
+                        break;
+                    }
+                }
+                if (!found && size_count < HL_GPU_MAX_PIPELINE_BUFFERS) {
+                    size_map[size_count++] = (SizeEntry){ bname, bsize };
+                }
+            }
+        }
+    }
+
+    /* ── Pass 2: create buffers, upload data, build bind groups ──── */
+
+    for (int s = 0; s < stage_count; s++) {
+        const HlGpuPipelineStage *stage = &opts->stages[s];
+        int has_uniforms = (stage->uniforms && stage->uniforms_len > 0);
+        int binding_offset = has_uniforms ? 1 : 0;
+        int total_bindings = stage->buffer_count + binding_offset;
+
+        if (entry_count + total_bindings > (int)(sizeof(all_entries) / sizeof(all_entries[0]))) {
+            if (err_msg) *err_msg = "too_many_bindings";
+            goto cleanup;
+        }
+
+        WGPUBindGroupEntry *entries = &all_entries[entry_count];
+
+        /* Uniform buffer */
+        if (has_uniforms) {
+            size_t usize = (stage->uniforms_len + 15) & ~(size_t)15;
+            WGPUBufferDescriptor ub_desc = {
+                .label = sv("hull_pipe_uni"),
+                .usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst,
+                .size  = usize,
+            };
+            uniform_bufs[s] = wgpuDeviceCreateBuffer(dctx->device, &ub_desc);
+            if (!uniform_bufs[s]) {
+                if (err_msg) *err_msg = "uniform_buffer_create_failed";
+                goto cleanup;
+            }
+            wgpuQueueWriteBuffer(dctx->queue, uniform_bufs[s], 0,
+                                  stage->uniforms, stage->uniforms_len);
+            entries[0] = (WGPUBindGroupEntry){
+                .binding = 0, .buffer = uniform_bufs[s],
+                .offset = 0, .size = usize,
+            };
+        }
+
+        /* Storage buffers */
+        if (stage->buffer_count > 0 && !stage->buffers) {
+            if (err_msg) *err_msg = "buffers_pointer_null";
+            goto cleanup;
+        }
+
+        for (int b = 0; b < stage->buffer_count; b++) {
+            const HlGpuBufferDesc *desc = &stage->buffers[b];
+
+            /* Determine allocation size (max across stages for named buffers) */
+            size_t alloc_size = desc->size;
+            if (desc->name) {
+                for (int k = 0; k < size_count; k++) {
+                    if (size_map[k].name && strcmp(size_map[k].name, desc->name) == 0) {
+                        alloc_size = size_map[k].max_size;
+                        break;
+                    }
+                }
+            }
+            if (alloc_size == 0 && desc->data) alloc_size = 4;
+
+            WGPUBuffer gpu_buf = find_or_create_temp(
+                dctx, temp_map, &temp_count,
+                desc->name, alloc_size,
+                persistent_buffers, persistent_count);
+            if (!gpu_buf) {
+                if (err_msg) *err_msg = "buffer_create_failed";
+                goto cleanup;
+            }
+
+            /* Upload data if this is the first declaration with data */
+            if (desc->data && desc->size > 0)
+                wgpuQueueWriteBuffer(dctx->queue, gpu_buf, 0,
+                                      desc->data, desc->size);
+
+            /* Track for readback */
+            if (s < HL_GPU_MAX_PIPELINE_STAGES && b < 16) {
+                size_t aligned = (alloc_size + 3) & ~(size_t)3;
+                if (aligned == 0) aligned = 4;
+                stage_buf_map[s * 16 + b] = gpu_buf;
+                stage_buf_size[s * 16 + b] = aligned;
+            }
+
+            entries[b + binding_offset] = (WGPUBindGroupEntry){
+                .binding = (uint32_t)(b + binding_offset),
+                .buffer = gpu_buf, .offset = 0,
+                .size = (uint64_t)(((alloc_size + 3) & ~(size_t)3) > 0 ?
+                         (alloc_size + 3) & ~(size_t)3 : 4),
+            };
+        }
+
+        /* Get bind group layout (lazy) */
+        WGPUBindGroupLayout layout = (WGPUBindGroupLayout)pipelines[s]->bind_group_layout;
+        if (!layout && total_bindings > 0) {
+            layout = wgpuComputePipelineGetBindGroupLayout(
+                (WGPUComputePipeline)pipelines[s]->handle, 0);
+            if (!layout) {
+                if (err_msg) *err_msg = "bind_group_layout_failed";
+                goto cleanup;
+            }
+            pipelines[s]->bind_group_layout = layout;
+        }
+
+        if (total_bindings > 0 && layout) {
+            WGPUBindGroupDescriptor bg_desc = {
+                .label = sv("hull_pipe_bg"),
+                .layout = layout,
+                .entryCount = (size_t)total_bindings,
+                .entries = entries,
+            };
+            bind_groups[s] = wgpuDeviceCreateBindGroup(dctx->device, &bg_desc);
+            if (!bind_groups[s]) {
+                if (err_msg) *err_msg = "bind_group_create_failed";
+                goto cleanup;
+            }
+        }
+
+        entry_count += total_bindings;
+    }
+
+    /* ── Encode all compute passes in one command encoder ──────── */
+
+    {
+        WGPUCommandEncoderDescriptor enc_desc = {
+            .label = sv("hull_pipeline_enc"),
+        };
+        encoder = wgpuDeviceCreateCommandEncoder(dctx->device, &enc_desc);
+        if (!encoder) {
+            if (err_msg) *err_msg = "encoder_create_failed";
+            goto cleanup;
+        }
+
+        for (int s = 0; s < stage_count; s++) {
+            const HlGpuPipelineStage *stage = &opts->stages[s];
+
+            WGPUComputePassDescriptor pass_desc = {
+                .label = sv("hull_pipe_pass"),
+            };
+            WGPUComputePassEncoder pass =
+                wgpuCommandEncoderBeginComputePass(encoder, &pass_desc);
+            if (!pass) {
+                if (err_msg) *err_msg = "compute_pass_create_failed";
+                goto cleanup;
+            }
+            wgpuComputePassEncoderSetPipeline(
+                pass, (WGPUComputePipeline)pipelines[s]->handle);
+            if (bind_groups[s])
+                wgpuComputePassEncoderSetBindGroup(pass, 0, bind_groups[s], 0, NULL);
+            wgpuComputePassEncoderDispatchWorkgroups(
+                pass,
+                stage->workgroups.x > 0 ? stage->workgroups.x : 1,
+                stage->workgroups.y > 0 ? stage->workgroups.y : 1,
+                stage->workgroups.z > 0 ? stage->workgroups.z : 1);
+            wgpuComputePassEncoderEnd(pass);
+            wgpuComputePassEncoderRelease(pass);
+        }
+
+        WGPUCommandBufferDescriptor cmd_desc = {
+            .label = sv("hull_pipeline_cmd"),
+        };
+        cmd = wgpuCommandEncoderFinish(encoder, &cmd_desc);
+        if (!cmd) {
+            if (err_msg) *err_msg = "command_buffer_create_failed";
+            goto cleanup;
+        }
+    }
+
+    /* ── Single submit + poll ──────────────────────────────────── */
+
+    wgpuQueueSubmit(dctx->queue, 1, &cmd);
+    wgpuDevicePoll(dctx->device, 1, NULL);
+
+    /* ── Readback requested outputs ────────────────────────────── */
+
+    {
+        /* Default: last stage's first buffer */
+        HlGpuPipelineOutput default_out = {
+            .stage = stage_count - 1, .buffer = 0,
+        };
+        const HlGpuPipelineOutput *outs = opts->outputs;
+        int out_count = opts->output_count;
+        if (out_count <= 0 || !outs) {
+            outs = &default_out;
+            out_count = 1;
+        }
+        if (out_count > HL_GPU_MAX_PIPELINE_OUTPUTS)
+            out_count = HL_GPU_MAX_PIPELINE_OUTPUTS;
+
+        result->count = out_count;
+        for (int i = 0; i < out_count; i++) {
+            int os = outs[i].stage;
+            int ob = outs[i].buffer;
+            if (os < 0 || os >= stage_count || ob < 0 || ob >= 16) {
+                if (err_msg) *err_msg = "output_index_out_of_range";
+                goto cleanup;
+            }
+            WGPUBuffer out_buf = stage_buf_map[os * 16 + ob];
+            size_t out_size = stage_buf_size[os * 16 + ob];
+            if (!out_buf || out_size == 0) {
+                if (err_msg) *err_msg = "output_buffer_not_found";
+                goto cleanup;
+            }
+
+            rc = readback_buffer(dctx, out_buf, out_size,
+                                  &result->data[i], &result->len[i]);
+            if (rc != HL_GPU_OK) {
+                if (err_msg) *err_msg = "readback_failed";
+                goto cleanup;
+            }
+        }
+        rc = HL_GPU_OK;
+    }
+
+cleanup:
+    if (cmd) wgpuCommandBufferRelease(cmd);
+    if (encoder) wgpuCommandEncoderRelease(encoder);
+    for (int s = 0; s < stage_count; s++) {
+        if (bind_groups[s]) wgpuBindGroupRelease(bind_groups[s]);
+        if (uniform_bufs[s]) {
+            wgpuBufferDestroy(uniform_bufs[s]);
+            wgpuBufferRelease(uniform_bufs[s]);
+        }
+    }
+    /* Destroy temp buffers (but not persistent ones) */
+    for (int i = 0; i < temp_count; i++) {
+        if (temp_map[i].buf) {
+            /* Check it's not a persistent buffer before destroying */
+            int is_persistent = 0;
+            if (temp_map[i].name && persistent_buffers) {
+                for (int p = 0; p < persistent_count; p++) {
+                    if (persistent_buffers[p].name[0] != '\0' &&
+                        strcmp(persistent_buffers[p].name, temp_map[i].name) == 0) {
+                        is_persistent = 1;
+                        break;
+                    }
+                }
+            }
+            if (!is_persistent) {
+                wgpuBufferDestroy(temp_map[i].buf);
+                wgpuBufferRelease(temp_map[i].buf);
+            }
+        }
+    }
+    if (rc != HL_GPU_OK) {
+        /* Free any partial readback results */
+        for (int i = 0; i < result->count; i++)
+            free(result->data[i]);
+        memset(result, 0, sizeof(*result));
+    }
+    return rc;
+}
+
 /* ── Backend vtable ────────────────────────────────────────────────── */
 
 const HlGpuBackend hl_gpu_backend_wgpu = {
@@ -774,6 +1157,7 @@ const HlGpuBackend hl_gpu_backend_wgpu = {
     .compile           = wgpu_compile,
     .pipeline_destroy  = wgpu_pipeline_destroy,
     .dispatch          = wgpu_dispatch,
+    .dispatch_pipeline = wgpu_dispatch_pipeline,
     .buffer_create     = wgpu_buffer_create,
     .buffer_write      = wgpu_buffer_write,
     .buffer_read       = wgpu_buffer_read,

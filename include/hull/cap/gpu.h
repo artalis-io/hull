@@ -90,6 +90,46 @@ typedef struct HlGpuDevice {
     pthread_mutex_t mutex;
 } HlGpuDevice;
 
+/* ── Pipeline (multi-stage dispatch) ───────────────────────────────── */
+
+/*
+ * A pipeline stage: one compute shader dispatch with its own buffers,
+ * uniforms, and workgroup dimensions.
+ *
+ * Buffers are shared across stages by name: the first stage to declare
+ * a named buffer creates it (using the maximum size declared across all
+ * stages). Subsequent stages referencing the same name reuse the buffer.
+ */
+typedef struct HlGpuPipelineStage {
+    const char      *shader;          /* compiled shader name (required) */
+    HlGpuBufferDesc *buffers;
+    int              buffer_count;
+    HlGpuWorkgroups  workgroups;
+    const void      *uniforms;
+    size_t           uniforms_len;
+} HlGpuPipelineStage;
+
+/* Output descriptor: which buffer to read back after pipeline execution */
+typedef struct HlGpuPipelineOutput {
+    int stage;     /* stage index (0-based) */
+    int buffer;    /* buffer index within that stage (0-based) */
+} HlGpuPipelineOutput;
+
+typedef struct HlGpuPipelineOpts {
+    HlGpuPipelineStage *stages;
+    int                  stage_count;
+    HlGpuPipelineOutput *outputs;     /* buffers to read back */
+    int                  output_count; /* 0 = read last stage's first buffer */
+    int                  device;       /* -1 = default */
+} HlGpuPipelineOpts;
+
+/* Pipeline result: array of readback buffers */
+typedef struct HlGpuPipelineResult {
+    void   *data[HL_GPU_MAX_PIPELINE_OUTPUTS];
+    size_t  len[HL_GPU_MAX_PIPELINE_OUTPUTS];
+    int     count;
+} HlGpuPipelineResult;
+
 /* ── Backend vtable ──────────────────────────────────────────────── */
 
 typedef struct HlGpuBackend {
@@ -114,6 +154,15 @@ typedef struct HlGpuBackend {
                       const HlGpuBuffer *persistent_buffers, int persistent_count,
                       void **output, size_t *output_len,
                       const char **err_msg);
+
+    /* Multi-stage pipeline dispatch (NULL = not supported) */
+    int   (*dispatch_pipeline)(void *backend_device,
+                                HlGpuPipeline **pipelines, int stage_count,
+                                const HlGpuPipelineOpts *opts,
+                                const HlGpuBuffer *persistent_buffers,
+                                int persistent_count,
+                                HlGpuPipelineResult *result,
+                                const char **err_msg);
 
     int   (*buffer_create)(void *backend_device, const char *name,
                            size_t size, int usage, HlGpuBuffer *out);
@@ -153,6 +202,13 @@ int hl_cap_gpu_dispatch(HlGpuCtx *ctx, const char *shader_name,
                         const HlGpuDispatchOpts *opts,
                         void **output, size_t *output_len,
                         const char **err_msg);
+
+/* Pipeline (multi-stage dispatch) */
+int hl_cap_gpu_pipeline(HlGpuCtx *ctx, const HlGpuPipelineOpts *opts,
+                         HlGpuPipelineResult *result, const char **err_msg);
+
+/* Free all data pointers in a pipeline result */
+void hl_cap_gpu_pipeline_result_free(HlGpuPipelineResult *result);
 
 /* Persistent buffers (per-device) */
 int  hl_cap_gpu_buffer_create(HlGpuCtx *ctx, int device, const char *name,

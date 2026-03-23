@@ -5419,6 +5419,225 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
     return promise;
 }
 
+/* ── gpu.pipeline() ──────────────────────────────────────────────── */
+
+static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "gpu.pipeline requires stages array");
+
+    HlGpuCtx *gpu = js_get_gpu_ctx(ctx);
+    if (!gpu) return JS_ThrowInternalError(ctx, "gpu not available");
+
+    if (!JS_IsArray(ctx, argv[0]))
+        return JS_ThrowTypeError(ctx, "gpu.pipeline: first arg must be array");
+
+    /* Parse stages */
+    JSValue len_val = JS_GetPropertyStr(ctx, argv[0], "length");
+    int32_t stage_count = 0;
+    JS_ToInt32(ctx, &stage_count, len_val);
+    JS_FreeValue(ctx, len_val);
+    if (stage_count <= 0 || stage_count > HL_GPU_MAX_PIPELINE_STAGES)
+        return JS_ThrowRangeError(ctx, "gpu.pipeline: invalid stage count");
+
+    HlGpuPipelineStage stages[HL_GPU_MAX_PIPELINE_STAGES];
+    HlGpuBufferDesc all_bufs[HL_GPU_MAX_PIPELINE_BUFFERS];
+    memset(stages, 0, sizeof(stages));
+    memset(all_bufs, 0, sizeof(all_bufs));
+    int buf_offset = 0;
+
+    /* Track JS strings for cleanup */
+    const char *js_strings[256];
+    int js_string_count = 0;
+
+    #define JS_TRACK_STR(s) do { \
+        if ((s) && js_string_count < 256) js_strings[js_string_count++] = (s); \
+    } while (0)
+
+    for (int32_t s = 0; s < stage_count; s++) {
+        JSValue stage_val = JS_GetPropertyUint32(ctx, argv[0], (uint32_t)s);
+        if (!JS_IsObject(stage_val)) { JS_FreeValue(ctx, stage_val); continue; }
+
+        /* shader */
+        JSValue sv2 = JS_GetPropertyStr(ctx, stage_val, "shader");
+        stages[s].shader = JS_ToCString(ctx, sv2);
+        JS_TRACK_STR(stages[s].shader);
+        JS_FreeValue(ctx, sv2);
+
+        /* workgroups */
+        JSValue wg = JS_GetPropertyStr(ctx, stage_val, "workgroups");
+        if (JS_IsObject(wg)) {
+            JSValue xv = JS_GetPropertyStr(ctx, wg, "x");
+            JSValue yv = JS_GetPropertyStr(ctx, wg, "y");
+            JSValue zv = JS_GetPropertyStr(ctx, wg, "z");
+            uint32_t x = 1, y = 1, z = 1;
+            JS_ToUint32(ctx, &x, xv); JS_ToUint32(ctx, &y, yv); JS_ToUint32(ctx, &z, zv);
+            stages[s].workgroups = (HlGpuWorkgroups){ x, y, z };
+            JS_FreeValue(ctx, xv); JS_FreeValue(ctx, yv); JS_FreeValue(ctx, zv);
+        }
+        JS_FreeValue(ctx, wg);
+
+        /* uniforms */
+        JSValue uni = JS_GetPropertyStr(ctx, stage_val, "uniforms");
+        if (!JS_IsUndefined(uni) && !JS_IsNull(uni)) {
+            size_t ulen;
+            uint8_t *uab = JS_GetArrayBuffer(ctx, &ulen, uni);
+            if (uab) {
+                stages[s].uniforms = uab;
+                stages[s].uniforms_len = ulen;
+            } else {
+                const char *us = JS_ToCStringLen(ctx, &ulen, uni);
+                if (us) {
+                    stages[s].uniforms = us;
+                    stages[s].uniforms_len = ulen;
+                    JS_TRACK_STR(us);
+                }
+            }
+        }
+        JS_FreeValue(ctx, uni);
+
+        /* buffers */
+        JSValue bufs_val = JS_GetPropertyStr(ctx, stage_val, "buffers");
+        if (JS_IsArray(ctx, bufs_val)) {
+            JSValue blen_val = JS_GetPropertyStr(ctx, bufs_val, "length");
+            int32_t bc = 0;
+            JS_ToInt32(ctx, &bc, blen_val);
+            JS_FreeValue(ctx, blen_val);
+            if (bc > 16) bc = 16;
+            if (buf_offset + bc > HL_GPU_MAX_PIPELINE_BUFFERS)
+                bc = HL_GPU_MAX_PIPELINE_BUFFERS - buf_offset;
+
+            stages[s].buffers = &all_bufs[buf_offset];
+            stages[s].buffer_count = bc;
+
+            for (int32_t b = 0; b < bc; b++) {
+                JSValue elem = JS_GetPropertyUint32(ctx, bufs_val, (uint32_t)b);
+                if (JS_IsObject(elem)) {
+                    JSValue nv = JS_GetPropertyStr(ctx, elem, "name");
+                    if (JS_IsString(nv)) {
+                        all_bufs[buf_offset + b].name = JS_ToCString(ctx, nv);
+                        JS_TRACK_STR(all_bufs[buf_offset + b].name);
+                    }
+                    JS_FreeValue(ctx, nv);
+
+                    JSValue dv = JS_GetPropertyStr(ctx, elem, "data");
+                    if (!JS_IsUndefined(dv) && !JS_IsNull(dv)) {
+                        size_t dlen;
+                        uint8_t *dab = JS_GetArrayBuffer(ctx, &dlen, dv);
+                        if (dab) {
+                            all_bufs[buf_offset + b].data = dab;
+                            all_bufs[buf_offset + b].size = dlen;
+                        } else {
+                            const char *ds = JS_ToCStringLen(ctx, &dlen, dv);
+                            if (ds) {
+                                all_bufs[buf_offset + b].data = ds;
+                                all_bufs[buf_offset + b].size = dlen;
+                                JS_TRACK_STR(ds);
+                            }
+                        }
+                    }
+                    JS_FreeValue(ctx, dv);
+
+                    JSValue szv = JS_GetPropertyStr(ctx, elem, "size");
+                    if (!JS_IsUndefined(szv)) {
+                        int64_t sz; JS_ToInt64(ctx, &sz, szv);
+                        all_bufs[buf_offset + b].size = (size_t)sz;
+                    }
+                    JS_FreeValue(ctx, szv);
+
+                    all_bufs[buf_offset + b].binding = -1;
+                }
+                JS_FreeValue(ctx, elem);
+            }
+            buf_offset += bc;
+        }
+        JS_FreeValue(ctx, bufs_val);
+        JS_FreeValue(ctx, stage_val);
+    }
+
+    /* Parse opts (second argument) */
+    HlGpuPipelineOutput outputs[HL_GPU_MAX_PIPELINE_OUTPUTS];
+    int output_count = 0;
+    int device = -1;
+
+    if (argc > 1 && JS_IsObject(argv[1])) {
+        JSValue dv = JS_GetPropertyStr(ctx, argv[1], "device");
+        if (!JS_IsUndefined(dv)) { int32_t d; JS_ToInt32(ctx, &d, dv); device = d; }
+        JS_FreeValue(ctx, dv);
+
+        /* outputs: [{stage: 0, buffer: 0}, ...] (0-indexed) */
+        JSValue ov = JS_GetPropertyStr(ctx, argv[1], "outputs");
+        if (JS_IsArray(ctx, ov)) {
+            JSValue olen = JS_GetPropertyStr(ctx, ov, "length");
+            JS_ToInt32(ctx, &output_count, olen);
+            JS_FreeValue(ctx, olen);
+            if (output_count > HL_GPU_MAX_PIPELINE_OUTPUTS)
+                output_count = HL_GPU_MAX_PIPELINE_OUTPUTS;
+            for (int i = 0; i < output_count; i++) {
+                JSValue oe = JS_GetPropertyUint32(ctx, ov, (uint32_t)i);
+                outputs[i].stage = 0; outputs[i].buffer = 0;
+                if (JS_IsObject(oe)) {
+                    JSValue sv3 = JS_GetPropertyStr(ctx, oe, "stage");
+                    JSValue bv = JS_GetPropertyStr(ctx, oe, "buffer");
+                    int32_t si = 0, bi = 0;
+                    JS_ToInt32(ctx, &si, sv3); JS_ToInt32(ctx, &bi, bv);
+                    outputs[i].stage = si; outputs[i].buffer = bi;
+                    JS_FreeValue(ctx, sv3); JS_FreeValue(ctx, bv);
+                }
+                JS_FreeValue(ctx, oe);
+            }
+        }
+        JS_FreeValue(ctx, ov);
+    }
+
+    HlGpuPipelineOpts opts = {
+        .stages = stages,
+        .stage_count = stage_count,
+        .outputs = output_count > 0 ? outputs : NULL,
+        .output_count = output_count,
+        .device = device,
+    };
+
+    HlGpuPipelineResult result;
+    const char *err_msg = NULL;
+    int rc = hl_cap_gpu_pipeline(gpu, &opts, &result, &err_msg);
+
+    /* Free tracked JS strings */
+    for (int i = 0; i < js_string_count; i++)
+        JS_FreeCString(ctx, js_strings[i]);
+    #undef JS_TRACK_STR
+
+    if (rc != HL_GPU_OK)
+        return JS_ThrowInternalError(ctx, "gpu.pipeline: %s",
+                                     err_msg ? err_msg : "failed");
+
+    /* Return single ArrayBuffer or array of ArrayBuffers */
+    if (result.count == 1) {
+        JSValue ab = JS_NewArrayBufferCopy(ctx, (const uint8_t *)result.data[0],
+                                            result.len[0]);
+        hl_cap_gpu_pipeline_result_free(&result);
+        return ab;
+    }
+
+    JSValue arr = JS_NewArray(ctx);
+    for (int i = 0; i < result.count; i++) {
+        JS_SetPropertyUint32(ctx, arr, (uint32_t)i,
+            JS_NewArrayBufferCopy(ctx, (const uint8_t *)result.data[i],
+                                   result.len[i]));
+    }
+    hl_cap_gpu_pipeline_result_free(&result);
+    return arr;
+}
+
+/* Async pipeline — falls back to sync for now */
+static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
+                                      int argc, JSValueConst *argv)
+{
+    return js_gpu_pipeline(ctx, this_val, argc, argv);
+}
+
 static int js_gpu_module_init(JSContext *ctx, JSModuleDef *m)
 {
     JSValue gpu = JS_NewObject(ctx);
@@ -5431,6 +5650,8 @@ static int js_gpu_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_gpu_compile, "compile", 2));
     JS_SetPropertyStr(ctx, gpu, "dispatch",
                       JS_NewCFunction(ctx, js_gpu_dispatch, "dispatch", 2));
+    JS_SetPropertyStr(ctx, gpu, "pipeline",
+                      JS_NewCFunction(ctx, js_gpu_pipeline, "pipeline", 2));
     JS_SetPropertyStr(ctx, gpu, "buffer",
                       JS_NewCFunction(ctx, js_gpu_buffer, "buffer", 3));
     JS_SetPropertyStr(ctx, gpu, "bufferRead",
@@ -5440,6 +5661,8 @@ static int js_gpu_module_init(JSContext *ctx, JSModuleDef *m)
     JSValue async_obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, async_obj, "dispatch",
                       JS_NewCFunction(ctx, js_gpu_async_dispatch, "dispatch", 2));
+    JS_SetPropertyStr(ctx, async_obj, "pipeline",
+                      JS_NewCFunction(ctx, js_gpu_async_pipeline, "pipeline", 2));
     JS_SetPropertyStr(ctx, gpu, "async", async_obj);
 
     JS_SetModuleExport(ctx, m, "gpu", gpu);
