@@ -5093,14 +5093,22 @@ static JSValue js_gpu_buffer(JSContext *ctx, JSValueConst this_val,
         return JS_TRUE;
     }
 
-    /* Get data from string or ArrayBuffer */
-    size_t data_len;
-    uint8_t *data = JS_GetArrayBuffer(ctx, &data_len, argv[1]);
+    /* Get data from MappedBuffer, ArrayBuffer, or string */
+    size_t data_len = 0;
+    const uint8_t *data = NULL;
     const char *str_data = NULL;
-    if (!data) {
-        str_data = JS_ToCStringLen(ctx, &data_len, argv[1]);
-        if (!str_data) { JS_FreeCString(ctx, name); return JS_EXCEPTION; }
-        data = (uint8_t *)str_data;
+
+    HlMappedBuffer *mmap_buf = JS_GetOpaque2(ctx, argv[1], js_mmap_class_id);
+    if (mmap_buf && !mmap_buf->closed) {
+        data = (const uint8_t *)mmap_buf->addr;
+        data_len = mmap_buf->len;
+    } else {
+        data = JS_GetArrayBuffer(ctx, &data_len, argv[1]);
+        if (!data) {
+            str_data = JS_ToCStringLen(ctx, &data_len, argv[1]);
+            if (!str_data) { JS_FreeCString(ctx, name); return JS_EXCEPTION; }
+            data = (const uint8_t *)str_data;
+        }
     }
 
     size_t offset = 0;
@@ -5744,11 +5752,10 @@ int hl_js_register_modules(HlJS *js)
     if (hl_js_init_server_module(js->ctx, js) != 0)
         return -1;
 
-    /* Register hull:fs module (only if filesystem is available) */
-    if (js->base.fs_cfg) {
-        if (hl_js_init_fs_module(js->ctx, js) != 0)
-            return -1;
-    }
+    /* Register hull:fs module — always available; per-function checks
+     * enforce that fs_cfg is set (wired from manifest after load_app). */
+    if (hl_js_init_fs_module(js->ctx, js) != 0)
+        return -1;
 
 #ifdef HL_ENABLE_WASM
     /* Register hull:compute module (only if WASM runtime is available) */
