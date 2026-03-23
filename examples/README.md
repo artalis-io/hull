@@ -300,6 +300,24 @@ curl -X POST http://localhost:3000/search \
 # Returns: [0.7,0.7,0,0] (score ~0.98) and [1,0,0,0] (score ~0.8)
 ```
 
+### gpu_pipeline
+
+Multi-stage GPU compute pipeline — chains normalize → weight → reduce into a single GPU command buffer submission. Demonstrates `gpu.pipeline()` with shared named buffers, per-stage uniforms, and the performance advantage over multiple `gpu.dispatch()` calls (2.4x speedup for 3-stage pipeline).
+
+Requires GPU build: `make HL_ENABLE_GPU=1 WGPU_LIB_DIR=vendor/wgpu`
+
+```bash
+./build/hull -p 3000 --no-sandbox examples/gpu_pipeline/app.lua
+
+# Score items through 3-stage GPU pipeline
+curl -X POST http://localhost:3000/score \
+  -d '{"items":[[80,150,3],[60,200,1],[95,50,5]],"weights":[0.5,0.3,0.2]}'
+
+# Compare pipeline (1 submit) vs 3x dispatch (3 submits)
+curl http://localhost:3000/compare
+# Returns: { dispatch_3x_ms: 9.5, pipeline_ms: 3.9, speedup: 2.4 }
+```
+
 ### cors_manifest
 
 CORS via `app.manifest()` configuration — no middleware code needed. Keel registers CORS headers automatically. Also demonstrates `server.stats()` for live connection counts.

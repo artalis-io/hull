@@ -31,9 +31,10 @@ Application Code (Lua or JS)
 Capability Layer (C)          # enforces security boundaries
         ↓
     db.query() / db.exec()    # SQLite (WAL mode, parameterized, _hull_* tables blocked)
-    fs.read() / fs.write()    # sandboxed filesystem
+    fs.read() / fs.mmap()     # sandboxed filesystem (mmap → GPU zero-copy)
     crypto.sha256() / etc.    # cryptographic primitives
     http.get() / http.post()  # outbound HTTP (host allowlist)
+    gpu.dispatch() / pipeline # GPU compute (wgpu-native, optional)
         ↓
 Keel HTTP Server (C)          # epoll/kqueue event loop + async + thread pool
         ↓
@@ -41,6 +42,8 @@ Kernel Sandbox                # pledge+unveil (Linux), C-level (macOS)
 ```
 
 WASM compute plugins provide a sandboxed data-plane layer for CPU-intensive computation. Plugins are pure functions (no I/O) that run in isolated WASM linear memory with gas metering. Place `.wasm` files in `compute/`, call via `compute.call("name", input)` (sync) or `compute.async.call("name", input)` (async, yields to event loop) from Lua/JS. `hull build` auto-compiles to AOT when `wamrc` is available (~1.2x native speed vs ~54x for fast interpreter). See `docs/wamr_architecture.md`.
+
+GPU compute shaders (optional, `HL_ENABLE_GPU=1`) provide massively parallel data processing via wgpu-native (Metal/Vulkan/DX12). Write WGSL shaders inline, compile once with `gpu.compile("name", wgsl)`, dispatch with `gpu.dispatch("name", opts)`. Chain multiple shaders with `gpu.pipeline(stages, opts)` for single-submission execution. Persistent buffers (`gpu.buffer()`) keep data on GPU across requests. `fs.mmap()` data can be passed directly to GPU buffers (zero-copy disk→GPU). Declare `gpu: true` in manifest.
 
 Each app is a single file (`app.lua` or `app.js`) with optional:
 - `migrations/*.sql` — database schema (auto-run on startup)
@@ -402,6 +405,8 @@ Undeclared capabilities are blocked. An empty manifest `{}` means no filesystem,
 | `log` | `log` (global) | `import { log } from "hull:log"` | Logging |
 | `env` | `env` (global) | `import { env } from "hull:env"` | Environment vars |
 | `fs` | `fs` (global) | `import { fs } from "hull:fs"` | Sandboxed filesystem |
+| `gpu` | `gpu` (global) | `import { gpu } from "hull:gpu"` | GPU compute (wgpu-native, requires `HL_ENABLE_GPU=1`) |
+| `compute` | `compute` (global) | `import { compute } from "hull:compute"` | WASM compute plugins |
 | `http` | `http` (global) | `import { http } from "hull:http"` | HTTP client |
 | `validate` | `require("hull.validate")` | `import { validate } from "hull:validate"` | Input validation |
 | `session` | `require("hull.middleware.session")` | `import { session } from "hull:middleware:session"` | Server sessions |

@@ -104,12 +104,14 @@ Cosmopolitan APE binaries run on Linux, macOS, Windows, FreeBSD, OpenBSD, and Ne
 ├─────────────────────────────────────────────┤
 │  WASM Compute Plugins (WAMR)                │  ← Sandboxed data-plane computation
 ├─────────────────────────────────────────────┤
+│  GPU Compute Shaders (wgpu-native)          │  ← Parallel data processing (optional)
+├─────────────────────────────────────────────┤
 │  Standard Library (stdlib/)                 │  ← cors, ratelimit, csrf, auth, jwt, session
 ├─────────────────────────────────────────────┤
 │  Runtimes (Lua 5.4 + QuickJS)              │  ← Sandboxed interpreters
 ├─────────────────────────────────────────────┤
 │  Capability Layer (src/hull/cap/)           │  ← C enforcement boundary
-│  fs, db, crypto, time, env, http, tool      │  ← audit logging (--audit)
+│  fs, db, crypto, time, env, http, gpu, tool │  ← audit logging (--audit)
 ├─────────────────────────────────────────────┤
 │  Hull Core                                  │  ← Manifest, sandbox, signatures, VFS
 ├─────────────────────────────────────────────┤
@@ -343,6 +345,25 @@ hull build myapp --no-aot          # skip AOT, interpreter only
 hull build myapp --target=x86_64   # cross-compile AOT for different arch
 ```
 
+### GPU Compute Performance
+
+GPU compute (optional, `HL_ENABLE_GPU=1`) uses wgpu-native for massively parallel workloads via WGSL compute shaders. GPU latency is constant regardless of data size — the crossover vs WASM AOT depends on the workload's parallelism.
+
+**Cosine similarity benchmark** (128-dim vectors, Apple M1 Max):
+
+| Vectors | Native C | WASM AOT | GPU | GPU vs AOT |
+|---------|----------|----------|-----|------------|
+| 64 | 7 µs | 7 µs | 2,630 µs | 0.0x |
+| 1K | 118 µs | 108 µs | 2,630 µs | 0.0x |
+| 16K | 1,830 µs | 2,534 µs | 2,629 µs | 1.0x |
+| 64K | 7,270 µs | 10,969 µs | 2,653 µs | **4.1x** |
+
+GPU is 4x faster than AOT at 64K vectors. Use `gpu.pipeline()` to chain multiple shaders in a single submission — 2.4x faster than separate `gpu.dispatch()` calls for multi-stage compute.
+
+```bash
+make bench-gpu HL_ENABLE_GPU=1 WGPU_LIB_DIR=vendor/wgpu   # GPU vs WASM vs native benchmark
+```
+
 ## Server Tuning
 
 - **Response Compression** — gzip via miniz, automatic for bodies >= 860 bytes when `Accept-Encoding: gzip`. Disable with `--no-compress`.
@@ -361,7 +382,7 @@ hull build myapp --target=x86_64   # cross-compile AOT for different arch
 
 ## Examples
 
-Fifteen example apps in both Lua and JavaScript:
+Example apps in both Lua and JavaScript:
 
 | Example | What it demonstrates |
 |---------|---------------------|
@@ -380,6 +401,8 @@ Fifteen example apps in both Lua and JavaScript:
 | [bench_template](examples/bench_template/) | Template engine performance benchmarks |
 | [email](examples/email/) | SMTP email sending with templates |
 | [cors_manifest](examples/cors_manifest/) | CORS via manifest + server stats API |
+| [gpu_search](examples/gpu_search/) | GPU vector similarity search (dispatch + persistent buffers) |
+| [gpu_pipeline](examples/gpu_pipeline/) | Multi-stage GPU pipeline (normalize → weight → reduce) |
 
 ```bash
 # Run an example

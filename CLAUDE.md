@@ -832,7 +832,7 @@ For cosmocc builds, both x86_64 and aarch64 AOT files are generated automaticall
 
 ### GPU Compute (wgpu-native)
 
-Hull supports GPU compute shaders via wgpu-native (Vulkan/Metal/DX12). Disabled by default. Enable with `make HL_ENABLE_GPU=1 WGPU_LIB_DIR=vendor/wgpu`.
+Hull supports GPU compute shaders via wgpu-native v27 (Vulkan/Metal/DX12). Disabled by default. Enable with `make HL_ENABLE_GPU=1 WGPU_LIB_DIR=vendor/wgpu`.
 
 **Manifest declaration:** Apps must declare `gpu: true` in their manifest to access the `gpu` global. Apps without a manifest get GPU access by default (backward compat).
 
@@ -844,10 +844,12 @@ app.manifest({ gpu = true })
 ```lua
 gpu.available()                        -- boolean
 gpu.devices()                          -- { {id=0, name="Apple M1"}, ... }
-gpu.compile(name, wgsl)                -- compile WGSL shader (cached)
-gpu.dispatch(name, opts)               -- run shader, return output
-gpu.async.dispatch(name, opts)         -- async (yields to event loop)
-gpu.buffer(name, data)                 -- create/write persistent buffer
+gpu.compile(name, wgsl)                -- compile WGSL shader (cached, idempotent)
+gpu.dispatch(name, opts)               -- run shader, return output (string)
+gpu.pipeline(stages, opts)             -- multi-stage dispatch, single submission
+gpu.async.dispatch(name, opts)         -- async dispatch (yields to event loop)
+gpu.async.pipeline(stages, opts)       -- async pipeline
+gpu.buffer(name, data)                 -- create/write persistent buffer (string or MappedBuffer)
 gpu.buffer(name, nil)                  -- destroy buffer
 gpu.buffer_read(name)                  -- read buffer back to host
 ```
@@ -859,8 +861,10 @@ gpu.available()                        // boolean
 gpu.devices()                          // [{id, name}, ...]
 gpu.compile(name, wgsl)                // compile WGSL shader
 gpu.dispatch(name, opts)               // ArrayBuffer output
+gpu.pipeline(stages, opts)             // multi-stage, ArrayBuffer or Array<ArrayBuffer>
 gpu.async.dispatch(name, opts)         // Promise<ArrayBuffer>
-gpu.buffer(name, data)                 // create/write (ArrayBuffer or string)
+gpu.async.pipeline(stages, opts)       // Promise
+gpu.buffer(name, data)                 // create/write (ArrayBuffer, MappedBuffer, or string)
 gpu.buffer(name, null)                 // destroy
 gpu.bufferRead(name)                   // ArrayBuffer
 ```
@@ -880,13 +884,73 @@ gpu.dispatch("shader_name", {
 })
 ```
 
-**Binding layout:** Uniforms at binding 0 (if present), storage buffers at binding 1..N. WGSL shader `@binding()` annotations must match.
+**Pipeline (multi-stage dispatch):**
+```lua
+-- Single command buffer submission, single poll, single readback.
+-- Named buffers are shared across stages (max declared size allocated).
+local out = gpu.pipeline({
+    { shader = "normalize", buffers = {{ name = "data", data = input }}, workgroups = {x=64} },
+    { shader = "score",     buffers = {{ name = "data" }, { name = "results", size = N*4 }},
+                            uniforms = params, workgroups = {x=64} },
+    { shader = "top_k",     buffers = {{ name = "results" }}, workgroups = {x=1} },
+}, {
+    outputs = { { stage = 3, buffer = 1 } },  -- 1-indexed (Lua)
+    device = -1,
+})
+-- Single output: returns string. Multiple outputs: returns table of strings.
+```
+```javascript
+// JS: 0-indexed outputs
+const out = gpu.pipeline([
+    { shader: "normalize", buffers: [{ name: "data", data: buf }], workgroups: {x:64} },
+    { shader: "score",     buffers: [{ name: "data" }, { name: "results", size: N*4 }],
+                           uniforms: paramsBuf, workgroups: {x:64} },
+    { shader: "top_k",     buffers: [{ name: "results" }], workgroups: {x:1} },
+], { outputs: [{ stage: 2, buffer: 0 }] });
+// Single output: ArrayBuffer. Multiple outputs: Array<ArrayBuffer>.
+```
+
+**Buffer sharing in pipelines:** Named buffers are created once and reused across stages. When multiple stages reference the same buffer name with different sizes, the maximum declared size is allocated. First stage with `data` uploads initial content; subsequent stages reuse the existing buffer. Persistent buffers (created via `gpu.buffer()`) participate by name.
+
+**Memory-mapped file input (fs.mmap → GPU):**
+```lua
+-- Zero-copy: disk → mmap → GPU buffer (no Lua string intermediary)
+app.manifest({ gpu = true, fs = { read = {"embeddings.bin"} } })
+
+local mapped = fs.mmap("embeddings.bin")  -- mmap'd pointer
+gpu.buffer("vectors", mapped)              -- pointer → wgpuQueueWriteBuffer directly
+mapped:close()
+
+-- Also works inline in dispatch/pipeline buffers:
+local out = gpu.dispatch("search", {
+    buffers = {{ data = mapped, size = mapped:len() }},
+    workgroups = { x = 1024 },
+    output = 1,
+})
+```
+
+`gpu.buffer()`, `gpu.dispatch()`, and `gpu.pipeline()` all accept `MappedBuffer` (from `fs.mmap()`) as buffer data in both Lua and JS. This avoids copying large datasets through the scripting runtime.
+
+**Binding layout:** Uniforms at binding 0 (if present), storage buffers at binding 1..N. WGSL shader `@binding()` annotations must match this auto-layout.
+
+**Async dispatch:** `gpu.async.dispatch()` and `gpu.async.pipeline()` submit GPU work to the thread pool and yield to the event loop (Lua coroutine / JS Promise). Other requests are served while the GPU is working. Deep-copies all buffer data for thread safety.
 
 **Sandbox:** When `manifest.gpu` is set:
 - macOS: allows `iokit-open` and `com.apple.MTLCompilerService` mach-lookup
 - Linux: unveils `/dev/dri` (rw) and `/proc/self` (r)
 
-**Build:** Requires wgpu-native static library. Download from [gfx-rs/wgpu-native releases](https://github.com/gfx-rs/wgpu-native/releases) and place in `vendor/wgpu/`. macOS links Metal + QuartzCore + CoreGraphics + Foundation frameworks; Linux links `-lvulkan`.
+**Performance (Apple M1 Max, cosine similarity on 128-dim vectors):**
+
+| Vectors | Native C | WASM AOT | GPU | GPU vs AOT |
+|---------|----------|----------|-----|------------|
+| 64 | 7 µs | 7 µs | 2,630 µs | 0.0x |
+| 1K | 118 µs | 108 µs | 2,630 µs | 0.0x |
+| 16K | 1,830 µs | 2,534 µs | 2,629 µs | 1.0x |
+| 64K | 7,270 µs | 10,969 µs | 2,653 µs | **4.1x** |
+
+GPU latency is constant ~2.6ms (dominated by submit+poll overhead). Crossover vs AOT at ~16K vectors. Use GPU for large parallel workloads; use WASM AOT for small sequential ones.
+
+**Build:** Requires wgpu-native static library. Download from [gfx-rs/wgpu-native releases](https://github.com/gfx-rs/wgpu-native/releases) and place in `vendor/wgpu/`. macOS links Metal + QuartzCore + CoreGraphics + Foundation frameworks; Linux links `-lvulkan`. Not compatible with Cosmopolitan builds.
 
 ## Testing
 
