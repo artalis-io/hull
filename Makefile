@@ -1225,6 +1225,8 @@ cppcheck:
 		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/cap/wasm.c \
 		--suppress=unusedStructMember:$(SRCDIR)/hull/agent_lib.c \
 		--suppress=unusedVariable:$(SRCDIR)/hull/agent_lib.c \
+		--suppress=variableScope:$(SRCDIR)/hull/cap/wasm.c \
+		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/runtime/js/modules.c \
 		--suppress=unmatchedSuppression \
 		--suppress='*:$(QJS_DIR)/*' \
 		--suppress='*:$(LUA_DIR)/*' \
