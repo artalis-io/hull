@@ -971,19 +971,20 @@ static int wgpu_dispatch_pipeline(void *backend_device,
                 wgpuQueueWriteBuffer(dctx->queue, gpu_buf, 0,
                                       desc->data, desc->size);
 
+            size_t buf_aligned = alloc_size <= SIZE_MAX - 3
+                ? (alloc_size + 3) & ~(size_t)3 : alloc_size;
+            if (buf_aligned == 0) buf_aligned = 4;
+
             /* Track for readback */
             if (s < HL_GPU_MAX_PIPELINE_STAGES && b < 16) {
-                size_t aligned = alloc_size <= SIZE_MAX - 3
-                    ? (alloc_size + 3) & ~(size_t)3 : alloc_size;
-                if (aligned == 0) aligned = 4;
                 stage_buf_map[s * 16 + b] = gpu_buf;
-                stage_buf_size[s * 16 + b] = aligned;
+                stage_buf_size[s * 16 + b] = buf_aligned;
             }
 
             entries[b + binding_offset] = (WGPUBindGroupEntry){
                 .binding = (uint32_t)(b + binding_offset),
                 .buffer = gpu_buf, .offset = 0,
-                .size = aligned > 0 ? (uint64_t)aligned : 4,
+                .size = (uint64_t)buf_aligned,
             };
         }
 
