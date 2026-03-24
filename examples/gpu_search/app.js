@@ -66,7 +66,7 @@ let dimensions = 0;
 let vectorCount = 0;
 
 // Health check
-app.get("/health", (req, res) => {
+app.get("/health", (_req, res) => {
     res.json({
         ok: true,
         gpu: gpu.available(),
@@ -76,7 +76,7 @@ app.get("/health", (req, res) => {
 });
 
 // List GPU devices
-app.get("/devices", (req, res) => {
+app.get("/devices", (_req, res) => {
     res.json(gpu.devices());
 });
 

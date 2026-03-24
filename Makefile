@@ -988,7 +988,7 @@ $(BUILDDIR)/wamr_%.o: $(WAMR_DIR)/%.c | $(BUILDDIR)
 	@mkdir -p $(dir $@)
 	$(CC) $(WAMR_CFLAGS) -c -o $@ $<
 $(WAMR_INVOKE_OBJ): $(WAMR_INVOKE_SRC) | $(BUILDDIR)
-	$(CC) $(WAMR_INVOKE_FLAGS) -c -o $@ $<
+	$(CC) $(WAMR_CFLAGS) $(WAMR_INVOKE_FLAGS) -c -o $@ $<
 endif
 
 $(BUILDDIR):
