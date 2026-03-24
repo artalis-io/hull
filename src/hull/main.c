@@ -265,7 +265,9 @@ static int hull_serve(int argc, char **argv)
     long instruction_limit = 0; /* 0 = use default */
     long wasm_heap = 0, wasm_stack = 0, wasm_max_input = 0, wasm_max_output = 0;
     long long wasm_gas = 0;
+#ifdef HL_ENABLE_GPU
     int gpu_device = -1;  /* -1 = auto (default device 0) */
+#endif
     int log_level = LOG_INFO;
     int no_migrate = 0;
     int no_sandbox = 0;
@@ -404,6 +406,7 @@ static int hull_serve(int argc, char **argv)
             wasm_max_input = hl_parse_size(argv[++i]);
         } else if (strcmp(argv[i], "--wasm-max-output") == 0 && i + 1 < argc) {
             wasm_max_output = hl_parse_size(argv[++i]);
+#ifdef HL_ENABLE_GPU
         } else if (strcmp(argv[i], "--gpu-device") == 0 && i + 1 < argc) {
             char *end;
             long v = strtol(argv[++i], &end, 10);
@@ -412,6 +415,7 @@ static int hull_serve(int argc, char **argv)
                 return 1;
             }
             gpu_device = (int)v;
+#endif
         } else if (strcmp(argv[i], "-h") == 0) {
             usage(argv[0]);
             return 0;

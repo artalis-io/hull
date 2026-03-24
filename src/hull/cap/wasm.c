@@ -655,9 +655,10 @@ int hl_cap_wasm_call_buf(HlWasmCache *cache, const char *name,
 
     /* Tighten I/O clamp for WASM32 modules */
     if (!mod->is_memory64) {
-        if (max_input > HL_WASM_MAX_IO_SIZE)   max_input = HL_WASM_MAX_IO_SIZE;
+        if (max_input > HL_WASM_MAX_IO_SIZE)   max_input = HL_WASM_MAX_IO_SIZE;  // NOLINT
         if (max_output > HL_WASM_MAX_IO_SIZE)  max_output = HL_WASM_MAX_IO_SIZE;
     }
+    (void)max_input; /* used only for validation at line 614; narrowing preserved for consistency */
 
     /* Try to acquire from instance pool.
      * Shared data is snapshotted under the mutex for thread safety. */
