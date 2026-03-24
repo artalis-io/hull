@@ -758,6 +758,8 @@ local buf = compute.buffer("input data")
 ```javascript
 import { compute } from "hull:compute";
 
+compute.available()                    // boolean
+
 // Sync: Input: string or ArrayBuffer. Output: ArrayBuffer.
 const output = compute.call("score", inputBytes, {
     maxInput: 64 * 1024,
@@ -1008,7 +1010,54 @@ local out = gpu.dispatch("search", {
 
 GPU latency is constant ~2.6ms (dominated by submit+poll overhead). Crossover vs AOT at ~16K vectors. Use GPU for large parallel workloads; use WASM AOT for small sequential ones.
 
-**Build:** Requires wgpu-native static library. Download from [gfx-rs/wgpu-native releases](https://github.com/gfx-rs/wgpu-native/releases) and place in `vendor/wgpu/`. macOS links Metal + QuartzCore + CoreGraphics + Foundation frameworks; Linux links `-lvulkan`. Not compatible with Cosmopolitan builds.
+**GPU timeout:** Dispatches time out after 5 seconds (configurable via `HL_GPU_TIMEOUT_MS` at compile time). Returns `HL_GPU_ERR_TIMEOUT`. Prevents infinite hangs from shader bugs. Applies to `dispatch`, `pipeline`, and `buffer_copy`.
+
+**Build:** `make fetch-wgpu` downloads and SHA-256 verifies wgpu-native. Then `make HL_ENABLE_GPU=1` auto-detects `vendor/wgpu/`. macOS links Metal + QuartzCore + CoreGraphics + Foundation; Linux links `-lvulkan`. Not compatible with Cosmopolitan builds.
+
+### Unified Buffer Protocol
+
+All compute and GPU functions accept any buffer type as input via the unified buffer protocol (`HlBufferView` in `include/hull/buffer.h`):
+
+| Type | Source | Lua | JS |
+|------|--------|-----|-----|
+| String | Literals, `string.pack` | Default | N/A |
+| ArrayBuffer | JS typed arrays | N/A | Default |
+| MappedBuffer | `fs.mmap(path)` | Userdata | Object |
+| WasmBuffer | `compute.call(name, input, { buffer = true })` | Userdata | Object |
+
+All four types are accepted by `compute.call()`, `compute.segment()`, `gpu.buffer()`, `gpu.dispatch()` buffer data, and `gpu.pipeline()` buffer data. This enables zero-copy data flow:
+
+```lua
+-- Disk → GPU (zero-copy via mmap)
+local mapped = fs.mmap("embeddings.bin")
+gpu.buffer("vectors", mapped)
+mapped:close()
+
+-- WASM → GPU (zero-copy via WasmBuffer)
+local processed = compute.call("preprocess", raw_data, { buffer = true })
+gpu.buffer("features", processed)  -- WasmBuffer accepted directly
+```
+
+C helper functions:
+- **Lua:** `lua_get_buffer(L, idx, &view)` — extracts `HlBufferView` from any buffer type at stack index
+- **JS:** `js_get_buffer(ctx, val, &view, &str, &needs_free)` — same for JS values
+
+### Compute API Harmonization
+
+WASM and GPU compute share symmetric naming where the concepts align:
+
+| Concept | WASM (`compute.*`) | GPU (`gpu.*`) |
+|---------|-------------------|---------------|
+| Availability | `compute.available()` | `gpu.available()` |
+| Load from file | `compute.load(name)` | `gpu.load(name)` |
+| Execute | `compute.call(name, input)` | `gpu.dispatch(name, opts)` |
+| Async execute | `compute.async.call(...)` | `gpu.async.dispatch(...)` |
+| Persistent state | `compute.instance(name)` | `gpu.buffer(name, data)` |
+| Shared data | `compute.segment(mod, seg, data)` | `gpu.buffer(name, data)` |
+| Input types | string, WasmBuffer, MappedBuffer | string, WasmBuffer, MappedBuffer |
+| Execution limits | Gas metering (per-instruction) | Timeout (5s wall clock) |
+
+Intentionally different: `call` vs `dispatch` (function call vs hardware dispatch), `instance` vs `buffer` (retained linear memory vs GPU storage), `segment` vs `buffer` (read-only shared heap vs read/write GPU buffer).
 
 ## Testing
 

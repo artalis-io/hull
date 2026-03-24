@@ -355,6 +355,8 @@ GPU compute (optional, `HL_ENABLE_GPU=1`) uses wgpu-native for massively paralle
 - **GPU-side copy** — copy between persistent buffers without CPU roundtrip (`gpu.buffer_copy()`)
 - **Zero-copy disk→GPU** — `fs.mmap()` data passes directly to GPU buffers
 - **Shader files** — `gpu.load("name")` reads `shaders/<name>.wgsl` for dev iteration
+- **GPU timeout** — 5-second deadline prevents shader hangs (`HL_GPU_TIMEOUT_MS`)
+- **Unified buffer protocol** — WASM and GPU accept the same input types (string, MappedBuffer, WasmBuffer) for zero-copy data flow between disk, WASM, and GPU
 
 **Performance** (cosine similarity, 128-dim vectors, Apple M1 Max):
 
