@@ -47,6 +47,20 @@ static void secure_zero(void *p, size_t n)
 
 /* VFS: O(log n) lookups into sorted entry arrays */
 #include "hull/vfs.h"
+#include "hull/buffer.h"
+
+/*
+ * Extract a buffer view from a Lua value at stack index `idx`.
+ * Accepts: string, MappedBuffer (HL_MMAP_MT), WasmBuffer.
+ * Returns 1 on success (fills out->data and out->len), 0 if not a buffer type.
+ * The data pointer is borrowed — valid only while the Lua value is alive.
+ *
+ * Note: MappedBuffer and WasmBuffer checks are conditional on the
+ * corresponding metatables being registered. If HL_ENABLE_WASM is off,
+ * WasmBuffer is not checked.
+ */
+static int lua_get_buffer(lua_State *L, int idx, HlBufferView *out);
+/* Defined after MappedBuffer/WasmBuffer types are declared below */
 
 /* Forward declaration for hull async module (defined in lua/async.c) */
 extern int luaopen_hull_hull(lua_State *L);
@@ -4299,6 +4313,34 @@ static int luaopen_hull_compute(lua_State *L)
 }
 #endif /* HL_ENABLE_WASM */
 
+/* ── Unified buffer protocol ──────────────────────────────────────── */
+
+static int lua_get_buffer(lua_State *L, int idx, HlBufferView *out)
+{
+    /* Try Lua string first (most common) */
+    if (lua_isstring(L, idx)) {
+        out->data = lua_tolstring(L, idx, &out->len);
+        return 1;
+    }
+    /* Try MappedBuffer */
+    HlMappedBuffer **mp = luaL_testudata(L, idx, HL_MMAP_MT);
+    if (mp && *mp && !(*mp)->closed) {
+        out->data = (*mp)->addr;
+        out->len = (*mp)->len;
+        return 1;
+    }
+#ifdef HL_ENABLE_WASM
+    /* Try WasmBuffer */
+    HlWasmBuffer *wb = check_wasm_buf(L, idx);
+    if (wb && !wb->closed) {
+        out->data = hl_wasm_buffer_data(wb);
+        out->len = hl_wasm_buffer_len(wb);
+        return 1;
+    }
+#endif
+    return 0; /* not a buffer type */
+}
+
 /* ════════════════════════════════════════════════════════════════════
  * hull.gpu module — GPU compute (wgpu-native)
  *
@@ -4500,13 +4542,11 @@ static int l_gpu_dispatch(lua_State *L)
                 lua_pop(L, 1);
 
                 lua_getfield(L, -1, "data");
-                if (lua_isstring(L, -1)) {
-                    bufs[i].data = lua_tolstring(L, -1, &bufs[i].size);
-                } else {
-                    HlMappedBuffer **mp = luaL_testudata(L, -1, HL_MMAP_MT);
-                    if (mp && *mp && !(*mp)->closed) {
-                        bufs[i].data = (*mp)->addr;
-                        bufs[i].size = (*mp)->len;
+                {
+                    HlBufferView bv;
+                    if (lua_get_buffer(L, -1, &bv)) {
+                        bufs[i].data = bv.data;
+                        bufs[i].size = bv.len;
                     }
                 }
                 lua_pop(L, 1);
@@ -4586,16 +4626,12 @@ static int l_gpu_buffer(lua_State *L)
         return 1;
     }
 
-    /* Accept string, MappedBuffer, or WasmBuffer */
-    const void *data;
-    size_t data_len;
-    HlMappedBuffer **mmap_pp = luaL_testudata(L, 2, HL_MMAP_MT);
-    if (mmap_pp && *mmap_pp && !(*mmap_pp)->closed) {
-        data = (*mmap_pp)->addr;
-        data_len = (*mmap_pp)->len;
-    } else {
-        data = luaL_checklstring(L, 2, &data_len);
-    }
+    /* Accept any buffer type (string, MappedBuffer, WasmBuffer) */
+    HlBufferView bv;
+    if (!lua_get_buffer(L, 2, &bv))
+        return luaL_error(L, "gpu.buffer: data must be a string, MappedBuffer, or WasmBuffer");
+    const void *data = bv.data;
+    size_t data_len = bv.len;
 
     /* Try to write to existing buffer first */
     int rc = hl_cap_gpu_buffer_write(ctx, device, name, data, data_len, offset);
@@ -4792,16 +4828,10 @@ static int l_gpu_async_dispatch(lua_State *L)
 
                     lua_getfield(L, -1, "data");
                     {
-                        const void *d = NULL;
-                        size_t dlen = 0;
-                        if (lua_isstring(L, -1)) {
-                            d = lua_tolstring(L, -1, &dlen);
-                        } else {
-                            HlMappedBuffer **mp = luaL_testudata(L, -1, HL_MMAP_MT);
-                            if (mp && *mp && !(*mp)->closed) {
-                                d = (*mp)->addr; dlen = (*mp)->len;
-                            }
-                        }
+                        HlBufferView bv = {0};
+                        lua_get_buffer(L, -1, &bv);
+                        const void *d = bv.data;
+                        size_t dlen = bv.len;
                         if (d && dlen > 0) {
                             buf_data_ptrs[i] = malloc(dlen);
                             if (buf_data_ptrs[i]) {
@@ -4956,14 +4986,11 @@ static int parse_pipeline_stages(lua_State *L, int tbl_idx,
                     all_bufs[buf_offset + b].name = lua_tostring(L, -1);
                     lua_pop(L, 1);
                     lua_getfield(L, -1, "data");
-                    if (lua_isstring(L, -1)) {
-                        all_bufs[buf_offset + b].data = lua_tolstring(L, -1,
-                            &all_bufs[buf_offset + b].size);
-                    } else {
-                        HlMappedBuffer **mp = luaL_testudata(L, -1, HL_MMAP_MT);
-                        if (mp && *mp && !(*mp)->closed) {
-                            all_bufs[buf_offset + b].data = (*mp)->addr;
-                            all_bufs[buf_offset + b].size = (*mp)->len;
+                    {
+                        HlBufferView bv;
+                        if (lua_get_buffer(L, -1, &bv)) {
+                            all_bufs[buf_offset + b].data = bv.data;
+                            all_bufs[buf_offset + b].size = bv.len;
                         }
                     }
                     lua_pop(L, 1);

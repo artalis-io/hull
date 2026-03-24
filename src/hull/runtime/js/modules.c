@@ -4823,6 +4823,62 @@ static int hl_js_init_compute_module(JSContext *ctx, HlJS *js)
 }
 #endif /* HL_ENABLE_WASM */
 
+/* ── Unified buffer protocol (JS) ─────────────────────────────────── */
+
+#include "hull/buffer.h"
+
+/*
+ * Extract a buffer view from a JS value. Tries (in order):
+ * MappedBuffer → WasmBuffer → ArrayBuffer → string.
+ * Sets *str_needs_free = 1 if the data came from JS_ToCStringLen
+ * (caller must JS_FreeCString). Returns 1 on success, 0 on failure.
+ */
+static int js_get_buffer(JSContext *ctx, JSValueConst val,
+                          HlBufferView *out, const char **str_out,
+                          int *str_needs_free)
+{
+    *str_needs_free = 0;
+    *str_out = NULL;
+
+    /* MappedBuffer */
+    HlMappedBuffer *mb = JS_GetOpaque2(ctx, val, js_mmap_class_id);
+    if (mb && !mb->closed) {
+        out->data = mb->addr;
+        out->len = mb->len;
+        return 1;
+    }
+#ifdef HL_ENABLE_WASM
+    /* WasmBuffer — js_wasm_buf_class_id is static in this file */
+    {
+        HlWasmBuffer *wb = JS_GetOpaque2(ctx, val, js_wasm_buf_class_id);
+        if (wb && !wb->closed) {
+            out->data = hl_wasm_buffer_data(wb);
+            out->len = hl_wasm_buffer_len(wb);
+            return 1;
+        }
+    }
+#endif
+    /* ArrayBuffer */
+    size_t ab_len;
+    uint8_t *ab = JS_GetArrayBuffer(ctx, &ab_len, val);
+    if (ab) {
+        out->data = ab;
+        out->len = ab_len;
+        return 1;
+    }
+    /* String (caller must free) */
+    size_t slen;
+    const char *s = JS_ToCStringLen(ctx, &slen, val);
+    if (s) {
+        out->data = s;
+        out->len = slen;
+        *str_out = s;
+        *str_needs_free = 1;
+        return 1;
+    }
+    return 0;
+}
+
 /* ════════════════════════════════════════════════════════════════════
  * hull:gpu module — GPU compute (wgpu-native)
  *
@@ -5180,23 +5236,16 @@ static JSValue js_gpu_buffer(JSContext *ctx, JSValueConst this_val,
         return JS_TRUE;
     }
 
-    /* Get data from MappedBuffer, ArrayBuffer, or string */
-    size_t data_len = 0;
-    const uint8_t *data = NULL;
+    /* Get data from any buffer type (MappedBuffer, WasmBuffer, ArrayBuffer, string) */
+    HlBufferView bv;
     const char *str_data = NULL;
-
-    HlMappedBuffer *mmap_buf = JS_GetOpaque2(ctx, argv[1], js_mmap_class_id);
-    if (mmap_buf && !mmap_buf->closed) {
-        data = (const uint8_t *)mmap_buf->addr;
-        data_len = mmap_buf->len;
-    } else {
-        data = JS_GetArrayBuffer(ctx, &data_len, argv[1]);
-        if (!data) {
-            str_data = JS_ToCStringLen(ctx, &data_len, argv[1]);
-            if (!str_data) { JS_FreeCString(ctx, name); return JS_EXCEPTION; }
-            data = (const uint8_t *)str_data;
-        }
+    int str_needs_free = 0;
+    if (!js_get_buffer(ctx, argv[1], &bv, &str_data, &str_needs_free)) {
+        JS_FreeCString(ctx, name);
+        return JS_ThrowTypeError(ctx, "gpu.buffer: data must be a buffer type");
     }
+    const uint8_t *data = (const uint8_t *)bv.data;
+    size_t data_len = bv.len;
 
     size_t offset = 0;
     if (argc > 2 && JS_IsObject(argv[2])) {
