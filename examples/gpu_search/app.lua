@@ -60,7 +60,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 -- Compile shader at startup
 if gpu.available() then
-    local ok, err = gpu.compile("cosine_similarity", SHADER)
+    local _, err = gpu.compile("cosine_similarity", SHADER)
     if err then
         log.error("shader compile failed: " .. err)
     end
@@ -109,7 +109,7 @@ app.post("/index", function(req, res)
     local data = table.concat(parts)
 
     -- Upload to persistent GPU buffer
-    local ok, err = gpu.buffer("candidates", data)
+    local _, err = gpu.buffer("candidates", data)
     if err then
         res:status(500):json({ error = err })
         return
