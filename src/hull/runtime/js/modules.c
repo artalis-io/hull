@@ -4938,9 +4938,14 @@ static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
     }
     JS_FreeValue(ctx, wg_val);
 
-    /* Parse output buffer index (0-indexed in JS) */
+    /* Parse output buffer index (0-indexed in JS).
+     * output = N     → read back buffer N
+     * output = false → fire-and-forget (skip readback)
+     * output absent  → default to 0 (backward compat) */
     JSValue out_val = JS_GetPropertyStr(ctx, opts_val, "output");
-    if (!JS_IsUndefined(out_val)) {
+    if (JS_IsBool(out_val) && !JS_ToBool(ctx, out_val)) {
+        opts.output_buffer = HL_GPU_OUTPUT_NONE;
+    } else if (!JS_IsUndefined(out_val)) {
         int32_t o;
         JS_ToInt32(ctx, &o, out_val);
         opts.output_buffer = o;
@@ -5047,8 +5052,12 @@ static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
     size_t output_len = 0;
     const char *err_msg = NULL;
 
+    /* Fire-and-forget: pass NULL output pointers */
+    void **out_ptr = (opts.output_buffer >= 0) ? &output : NULL;
+    size_t *out_len_ptr = (opts.output_buffer >= 0) ? &output_len : NULL;
+
     int rc = hl_cap_gpu_dispatch(gpu, name, &opts,
-                                 &output, &output_len, &err_msg);
+                                 out_ptr, out_len_ptr, &err_msg);
 
     /* Free uniform string if we used JS_ToCStringLen */
     if (uni_str) JS_FreeCString(ctx, uni_str);
@@ -5065,9 +5074,12 @@ static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "gpu.dispatch: %s",
                                      err_msg ? err_msg : "dispatch_failed");
 
-    JSValue ab = JS_NewArrayBufferCopy(ctx, (const uint8_t *)output, output_len);
-    free(output);
-    return ab;
+    if (output) {
+        JSValue ab = JS_NewArrayBufferCopy(ctx, (const uint8_t *)output, output_len);
+        free(output);
+        return ab;
+    }
+    return JS_TRUE; /* fire-and-forget */
 }
 
 static JSValue js_gpu_buffer(JSContext *ctx, JSValueConst this_val,
@@ -5174,6 +5186,55 @@ static JSValue js_gpu_buffer_read(JSContext *ctx, JSValueConst this_val,
     JSValue ab = JS_NewArrayBufferCopy(ctx, (const uint8_t *)data, len);
     free(data);
     return ab;
+}
+
+static JSValue js_gpu_buffer_copy(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 2)
+        return JS_ThrowTypeError(ctx, "gpu.bufferCopy requires src and dst");
+
+    HlGpuCtx *gpu = js_get_gpu_ctx(ctx);
+    if (!gpu)
+        return JS_ThrowInternalError(ctx, "gpu not available");
+
+    const char *src = JS_ToCString(ctx, argv[0]);
+    if (!src) return JS_EXCEPTION;
+    const char *dst = JS_ToCString(ctx, argv[1]);
+    if (!dst) { JS_FreeCString(ctx, src); return JS_EXCEPTION; }
+
+    size_t src_offset = 0, dst_offset = 0, size = 0;
+    int device = -1;
+
+    if (argc > 2 && JS_IsObject(argv[2])) {
+        JSValue v;
+        v = JS_GetPropertyStr(ctx, argv[2], "srcOffset");
+        if (!JS_IsUndefined(v)) { int64_t x; JS_ToInt64(ctx, &x, v); src_offset = (size_t)x; }
+        JS_FreeValue(ctx, v);
+        v = JS_GetPropertyStr(ctx, argv[2], "dstOffset");
+        if (!JS_IsUndefined(v)) { int64_t x; JS_ToInt64(ctx, &x, v); dst_offset = (size_t)x; }
+        JS_FreeValue(ctx, v);
+        v = JS_GetPropertyStr(ctx, argv[2], "size");
+        if (!JS_IsUndefined(v)) { int64_t x; JS_ToInt64(ctx, &x, v); size = (size_t)x; }
+        JS_FreeValue(ctx, v);
+        v = JS_GetPropertyStr(ctx, argv[2], "device");
+        if (!JS_IsUndefined(v)) { int32_t d; JS_ToInt32(ctx, &d, v); device = d; }
+        JS_FreeValue(ctx, v);
+    }
+
+    int rc = hl_cap_gpu_buffer_copy(gpu, device, src, dst,
+                                     src_offset, dst_offset, size);
+    JS_FreeCString(ctx, src);
+    JS_FreeCString(ctx, dst);
+
+    if (rc != HL_GPU_OK)
+        return JS_ThrowInternalError(ctx, "gpu.bufferCopy: %s",
+                   rc == HL_GPU_ERR_NOT_FOUND ? "buffer_not_found"
+                 : rc == HL_GPU_ERR_BUFFER ? "out_of_bounds"
+                 : "copy_failed");
+
+    return JS_TRUE;
 }
 
 /* push_result callback: convert HlWorkerGpuOp result to JS value */
@@ -5664,6 +5725,8 @@ static int js_gpu_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_gpu_buffer, "buffer", 3));
     JS_SetPropertyStr(ctx, gpu, "bufferRead",
                       JS_NewCFunction(ctx, js_gpu_buffer_read, "bufferRead", 1));
+    JS_SetPropertyStr(ctx, gpu, "bufferCopy",
+                      JS_NewCFunction(ctx, js_gpu_buffer_copy, "bufferCopy", 3));
 
     /* gpu.async sub-object */
     JSValue async_obj = JS_NewObject(ctx);

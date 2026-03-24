@@ -567,8 +567,19 @@ static int wgpu_dispatch(void *backend_device, HlGpuPipeline *pipeline,
         }
 
         uint32_t binding = (uint32_t)(i + binding_offset);
-        uint64_t buf_size_aligned = desc->size <= SIZE_MAX - 3
-            ? (uint64_t)((desc->size + 3) & ~(size_t)3) : (uint64_t)desc->size;
+        /* Use persistent buffer's size when desc->size is 0 (name-only ref) */
+        size_t effective_size = desc->size;
+        if (effective_size == 0 && desc->name && persistent_buffers) {
+            for (int p = 0; p < persistent_count; p++) {
+                if (persistent_buffers[p].name[0] != '\0' &&
+                    strcmp(persistent_buffers[p].name, desc->name) == 0) {
+                    effective_size = persistent_buffers[p].size;
+                    break;
+                }
+            }
+        }
+        uint64_t buf_size_aligned = effective_size <= SIZE_MAX - 3
+            ? (uint64_t)((effective_size + 3) & ~(size_t)3) : (uint64_t)effective_size;
         if (buf_size_aligned == 0)
             buf_size_aligned = 4;
 
@@ -655,11 +666,10 @@ static int wgpu_dispatch(void *backend_device, HlGpuPipeline *pipeline,
     wgpuQueueSubmit(dctx->queue, 1, &cmd);
     wgpuDevicePoll(dctx->device, 1, NULL);
 
-    /* ── Output readback ───────────────────────────────────── */
+    /* ── Output readback (skip for fire-and-forget) ──────── */
 
-    {
+    if (output && output_len && opts->output_buffer >= 0) {
         int out_idx = opts->output_buffer;
-        if (out_idx < 0) out_idx = 0;
         if (out_idx >= opts->buffer_count ||
             out_idx + binding_offset >= total_bindings) {
             if (err_msg) *err_msg = "output_buffer_index_out_of_range";
@@ -672,6 +682,8 @@ static int wgpu_dispatch(void *backend_device, HlGpuPipeline *pipeline,
         rc = readback_buffer(dctx, out_buf, out_size, output, output_len);
         if (rc != HL_GPU_OK && err_msg)
             *err_msg = "readback_failed";
+    } else {
+        rc = HL_GPU_OK; /* fire-and-forget: compute done, no readback */
     }
 
 cleanup:
@@ -1149,6 +1161,41 @@ cleanup:
     return rc;
 }
 
+/* ── wgpu_buffer_copy ──────────────────────────────────────────────── */
+
+static int wgpu_buffer_copy(void *backend_device,
+                             HlGpuBuffer *src, HlGpuBuffer *dst,
+                             size_t src_offset, size_t dst_offset, size_t size)
+{
+    WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)backend_device;
+    if (!dctx || !src || !dst || !src->handle || !dst->handle)
+        return HL_GPU_ERR_BUFFER;
+
+    WGPUCommandEncoderDescriptor enc_desc = { .label = sv("hull_copy_enc") };
+    WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(
+        dctx->device, &enc_desc);
+    if (!encoder)
+        return HL_GPU_ERR_INTERNAL;
+
+    wgpuCommandEncoderCopyBufferToBuffer(encoder,
+        (WGPUBuffer)src->handle, src_offset,
+        (WGPUBuffer)dst->handle, dst_offset, size);
+
+    WGPUCommandBufferDescriptor cmd_desc = { .label = sv("hull_copy_cmd") };
+    WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(encoder, &cmd_desc);
+    if (!cmd) {
+        wgpuCommandEncoderRelease(encoder);
+        return HL_GPU_ERR_INTERNAL;
+    }
+
+    wgpuQueueSubmit(dctx->queue, 1, &cmd);
+    wgpuDevicePoll(dctx->device, 1, NULL);
+
+    wgpuCommandBufferRelease(cmd);
+    wgpuCommandEncoderRelease(encoder);
+    return HL_GPU_OK;
+}
+
 /* ── Backend vtable ────────────────────────────────────────────────── */
 
 const HlGpuBackend hl_gpu_backend_wgpu = {
@@ -1160,6 +1207,7 @@ const HlGpuBackend hl_gpu_backend_wgpu = {
     .pipeline_destroy  = wgpu_pipeline_destroy,
     .dispatch          = wgpu_dispatch,
     .dispatch_pipeline = wgpu_dispatch_pipeline,
+    .buffer_copy       = wgpu_buffer_copy,
     .buffer_create     = wgpu_buffer_create,
     .buffer_write      = wgpu_buffer_write,
     .buffer_read       = wgpu_buffer_read,

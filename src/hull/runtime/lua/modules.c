@@ -4395,9 +4395,16 @@ static int l_gpu_dispatch(lua_State *L)
     }
     lua_pop(L, 1);
 
-    /* Parse output buffer index (1-indexed in Lua) */
+    /* Parse output buffer index (1-indexed in Lua).
+     * output = N   → read back buffer N (1-indexed)
+     * output = false → fire-and-forget (skip readback)
+     * output absent → default to buffer 1 (backward compat) */
     lua_getfield(L, 2, "output");
-    opts.output_buffer = (int)luaL_optinteger(L, -1, 0) - 1;
+    if (lua_isboolean(L, -1) && !lua_toboolean(L, -1)) {
+        opts.output_buffer = HL_GPU_OUTPUT_NONE;
+    } else {
+        opts.output_buffer = (int)luaL_optinteger(L, -1, 1) - 1;
+    }
     lua_pop(L, 1);
 
     /* Parse uniforms */
@@ -4465,16 +4472,24 @@ static int l_gpu_dispatch(lua_State *L)
     size_t output_len = 0;
     const char *err_msg = NULL;
 
+    /* Fire-and-forget: pass NULL output pointers */
+    void **out_ptr = (opts.output_buffer >= 0) ? &output : NULL;
+    size_t *out_len_ptr = (opts.output_buffer >= 0) ? &output_len : NULL;
+
     int rc = hl_cap_gpu_dispatch(ctx, name, &opts,
-                                 &output, &output_len, &err_msg);
+                                 out_ptr, out_len_ptr, &err_msg);
     if (rc != HL_GPU_OK) {
         lua_pushnil(L);
         lua_pushstring(L, err_msg ? err_msg : "dispatch_failed");
         return 2;
     }
 
-    lua_pushlstring(L, (const char *)output, output_len);
-    free(output);
+    if (output) {
+        lua_pushlstring(L, (const char *)output, output_len);
+        free(output);
+    } else {
+        lua_pushboolean(L, 1); /* fire-and-forget: return true */
+    }
     return 1;
 }
 
@@ -4555,6 +4570,43 @@ static int l_gpu_buffer_read(lua_State *L)
 
     lua_pushlstring(L, (const char *)data, len);
     free(data);
+    return 1;
+}
+
+static int l_gpu_buffer_copy(lua_State *L)
+{
+    HlGpuCtx *ctx = lua_get_gpu_ctx(L);
+    const char *src = luaL_checkstring(L, 1);
+    const char *dst = luaL_checkstring(L, 2);
+
+    size_t src_offset = 0, dst_offset = 0, size = 0;
+    int device = -1;
+
+    if (lua_istable(L, 3)) {
+        lua_getfield(L, 3, "src_offset");
+        src_offset = (size_t)luaL_optinteger(L, -1, 0);
+        lua_pop(L, 1);
+        lua_getfield(L, 3, "dst_offset");
+        dst_offset = (size_t)luaL_optinteger(L, -1, 0);
+        lua_pop(L, 1);
+        lua_getfield(L, 3, "size");
+        size = (size_t)luaL_optinteger(L, -1, 0);
+        lua_pop(L, 1);
+        lua_getfield(L, 3, "device");
+        if (!lua_isnil(L, -1)) device = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+    }
+
+    int rc = hl_cap_gpu_buffer_copy(ctx, device, src, dst,
+                                     src_offset, dst_offset, size);
+    if (rc != HL_GPU_OK) {
+        lua_pushnil(L);
+        lua_pushstring(L, rc == HL_GPU_ERR_NOT_FOUND ? "buffer_not_found"
+                       : rc == HL_GPU_ERR_BUFFER ? "out_of_bounds"
+                       : "copy_failed");
+        return 2;
+    }
+    lua_pushboolean(L, 1);
     return 1;
 }
 
@@ -5000,6 +5052,7 @@ static const luaL_Reg gpu_funcs[] = {
     {"pipeline",     l_gpu_pipeline},
     {"buffer",       l_gpu_buffer},
     {"buffer_read",  l_gpu_buffer_read},
+    {"buffer_copy",  l_gpu_buffer_copy},
     {NULL, NULL}
 };
 

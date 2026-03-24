@@ -200,10 +200,11 @@ int hl_cap_gpu_dispatch(HlGpuCtx *ctx, const char *shader_name,
     static const char *err_no_dev = "invalid_device";
     static const char *err_no_shader = "shader_not_found";
 
-    if (!ctx || !shader_name || !opts || !output || !output_len) {
+    if (!ctx || !shader_name || !opts) {
         if (err_msg) *err_msg = "internal_error";
         return HL_GPU_ERR_INTERNAL;
     }
+    /* output/output_len may be NULL for fire-and-forget (output_buffer == -1) */
 
     if (ctx->device_count == 0) {
         if (err_msg) *err_msg = err_no_gpu;
@@ -450,6 +451,73 @@ void hl_cap_gpu_buffer_destroy(HlGpuCtx *ctx, int device, const char *name)
     }
 
     pthread_mutex_unlock(&dev->mutex);
+}
+
+/* ── GPU-side buffer copy ──────────────────────────────────────────── */
+
+int hl_cap_gpu_buffer_copy(HlGpuCtx *ctx, int device,
+                            const char *src_name, const char *dst_name,
+                            size_t src_offset, size_t dst_offset, size_t size)
+{
+    if (!ctx || !src_name || !dst_name)
+        return HL_GPU_ERR_INTERNAL;
+    if (ctx->device_count == 0)
+        return HL_GPU_ERR_NOT_AVAILABLE;
+
+    int dev_idx = resolve_device(ctx, device);
+    if (dev_idx < 0 || dev_idx >= ctx->device_count)
+        return HL_GPU_ERR_DEVICE;
+
+    HlGpuDevice *dev = &ctx->devices[dev_idx];
+    pthread_mutex_lock(&dev->mutex);
+
+    HlGpuBuffer *src = find_buffer(dev, src_name);
+    HlGpuBuffer *dst = find_buffer(dev, dst_name);
+    if (!src || !dst) {
+        pthread_mutex_unlock(&dev->mutex);
+        return HL_GPU_ERR_NOT_FOUND;
+    }
+
+    /* size=0 means full copy from src_offset */
+    size_t copy_size = size;
+    if (copy_size == 0) {
+        if (src_offset >= src->size) {
+            pthread_mutex_unlock(&dev->mutex);
+            return HL_GPU_ERR_BUFFER;
+        }
+        copy_size = src->size - src_offset;
+    }
+
+    /* Bounds checks */
+    if (src_offset > src->size || copy_size > src->size - src_offset
+        || dst_offset > dst->size || copy_size > dst->size - dst_offset) {
+        pthread_mutex_unlock(&dev->mutex);
+        return HL_GPU_ERR_BUFFER;
+    }
+
+    /* Align to 4 bytes (WebGPU requirement for copy operations) */
+    copy_size = (copy_size + 3) & ~(size_t)3;
+
+    if (!ctx->backend->buffer_copy) {
+        pthread_mutex_unlock(&dev->mutex);
+        return HL_GPU_ERR_INTERNAL;
+    }
+
+    int rc = ctx->backend->buffer_copy(dev->backend_device,
+                                        src, dst,
+                                        src_offset, dst_offset, copy_size);
+    pthread_mutex_unlock(&dev->mutex);
+
+    if (hl_audit_enabled) {
+        ShJsonWriter w = hl_audit_begin("gpu.buffer_copy");
+        sh_json_write_kv_string(&w, "src", src_name);
+        sh_json_write_kv_string(&w, "dst", dst_name);
+        sh_json_write_kv_int(&w, "size", (int)copy_size);
+        sh_json_write_kv_int(&w, "rc", rc);
+        hl_audit_end(&w);
+    }
+
+    return rc;
 }
 
 #endif /* HL_ENABLE_GPU */

@@ -36,6 +36,9 @@
 
 /* ── Buffer usage flags ────────────────────────────────────────────── */
 
+/* Fire-and-forget sentinel: skip readback when output_buffer == this */
+#define HL_GPU_OUTPUT_NONE      -1
+
 #define HL_GPU_USAGE_READ       0x01
 #define HL_GPU_USAGE_WRITE      0x02
 #define HL_GPU_USAGE_READWRITE  0x03
@@ -164,6 +167,11 @@ typedef struct HlGpuBackend {
                                 HlGpuPipelineResult *result,
                                 const char **err_msg);
 
+    /* GPU-side buffer copy (NULL = not supported) */
+    int   (*buffer_copy)(void *backend_device,
+                          HlGpuBuffer *src, HlGpuBuffer *dst,
+                          size_t src_offset, size_t dst_offset, size_t size);
+
     int   (*buffer_create)(void *backend_device, const char *name,
                            size_t size, int usage, HlGpuBuffer *out);
     int   (*buffer_write)(void *backend_device, HlGpuBuffer *buf,
@@ -218,6 +226,9 @@ int  hl_cap_gpu_buffer_write(HlGpuCtx *ctx, int device, const char *name,
 int  hl_cap_gpu_buffer_read(HlGpuCtx *ctx, int device, const char *name,
                             void **data, size_t *len);
 void hl_cap_gpu_buffer_destroy(HlGpuCtx *ctx, int device, const char *name);
+int  hl_cap_gpu_buffer_copy(HlGpuCtx *ctx, int device,
+                             const char *src_name, const char *dst_name,
+                             size_t src_offset, size_t dst_offset, size_t size);
 
 /* Backend selection (defined in gpu_wgpu.c) */
 extern const HlGpuBackend hl_gpu_backend_wgpu;
