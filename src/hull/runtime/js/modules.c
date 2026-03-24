@@ -3629,7 +3629,7 @@ static int hl_js_init_server_module(JSContext *ctx, HlJS *js)
  * hull:compute module — WASM compute plugins
  *
  * compute.call(name, input, opts?) -> output (Uint8Array)
- * compute.preload(name) -> true
+ * compute.load(name) -> true
  * ════════════════════════════════════════════════════════════════════ */
 
 #ifdef HL_ENABLE_WASM
@@ -4012,16 +4012,16 @@ static JSValue js_compute_call(JSContext *ctx, JSValueConst this_val,
     return JS_NewArrayBufferCopy(ctx, NULL, 0);
 }
 
-static JSValue js_compute_preload(JSContext *ctx, JSValueConst this_val,
+static JSValue js_compute_load(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv)
 {
     (void)this_val;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     if (!js || !js->base.wasm_cache)
-        return JS_ThrowInternalError(ctx, "compute.preload: WASM runtime not initialized");
+        return JS_ThrowInternalError(ctx, "compute.load: WASM runtime not initialized");
 
     if (argc < 1)
-        return JS_ThrowTypeError(ctx, "compute.preload requires (name)");
+        return JS_ThrowTypeError(ctx, "compute.load requires (name)");
 
     const char *name = JS_ToCString(ctx, argv[0]);
     if (!name)
@@ -4033,7 +4033,7 @@ static JSValue js_compute_preload(JSContext *ctx, JSValueConst this_val,
     JS_FreeCString(ctx, name);
 
     if (rc != 0)
-        return JS_ThrowInternalError(ctx, "compute.preload: %s",
+        return JS_ThrowInternalError(ctx, "compute.load: %s",
                                      rc == HL_WASM_ERR_NOT_FOUND ? "not_found" : "load_failed");
 
     return JS_TRUE;
@@ -4672,23 +4672,23 @@ static JSValue js_compute_instance(JSContext *ctx, JSValueConst this_val,
     return js_push_wasm_instance(ctx, pi);
 }
 
-/* compute.data(module, segment, data) */
-static JSValue js_compute_data(JSContext *ctx, JSValueConst this_val,
+/* compute.segment(module, segment, data) */
+static JSValue js_compute_segment(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv)
 {
     (void)this_val;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     if (!js || !js->base.wasm_cache)
-        return JS_ThrowInternalError(ctx, "compute.data: WASM runtime not initialized");
+        return JS_ThrowInternalError(ctx, "compute.segment: WASM runtime not initialized");
 
     if (argc < 2)
-        return JS_ThrowTypeError(ctx, "compute.data requires (module, segment [, data])");
+        return JS_ThrowTypeError(ctx, "compute.segment requires (module, segment [, data])");
 
     const char *module_name = JS_ToCString(ctx, argv[0]);
     if (!module_name)
         return JS_EXCEPTION;
 
-    /* compute.data(module, null) → remove all */
+    /* compute.segment(module, null) → remove all */
     if (JS_IsNull(argv[1]) || JS_IsUndefined(argv[1])) {
         const char *err_msg = NULL;
         int rc = hl_cap_wasm_data_load(js->base.wasm_cache, module_name,
@@ -4698,7 +4698,7 @@ static JSValue js_compute_data(JSContext *ctx, JSValueConst this_val,
                                         &err_msg);
         JS_FreeCString(ctx, module_name);
         if (rc != 0)
-            return JS_ThrowInternalError(ctx, "compute.data: %s",
+            return JS_ThrowInternalError(ctx, "compute.segment: %s",
                                          err_msg ? err_msg : "unknown error");
         return JS_TRUE;
     }
@@ -4709,7 +4709,7 @@ static JSValue js_compute_data(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
     }
 
-    /* compute.data(module, segment, null/undefined) → remove segment */
+    /* compute.segment(module, segment, null/undefined) → remove segment */
     if (argc < 3 || JS_IsNull(argv[2]) || JS_IsUndefined(argv[2])) {
         const char *err_msg = NULL;
         int rc = hl_cap_wasm_data_load(js->base.wasm_cache, module_name,
@@ -4720,12 +4720,12 @@ static JSValue js_compute_data(JSContext *ctx, JSValueConst this_val,
         JS_FreeCString(ctx, module_name);
         JS_FreeCString(ctx, segment_name);
         if (rc != 0)
-            return JS_ThrowInternalError(ctx, "compute.data: %s",
+            return JS_ThrowInternalError(ctx, "compute.segment: %s",
                                          err_msg ? err_msg : "unknown error");
         return JS_TRUE;
     }
 
-    /* compute.data(module, segment, data) → add/replace */
+    /* compute.segment(module, segment, data) → add/replace */
     const void *data = NULL;
     size_t data_len = 0;
     void *pre_alloc = NULL;
@@ -4753,7 +4753,7 @@ static JSValue js_compute_data(JSContext *ctx, JSValueConst this_val,
             } else {
                 JS_FreeCString(ctx, module_name);
                 JS_FreeCString(ctx, segment_name);
-                return JS_ThrowTypeError(ctx, "compute.data: data must be a string, ArrayBuffer, or MappedBuffer");
+                return JS_ThrowTypeError(ctx, "compute.segment: data must be a string, ArrayBuffer, or MappedBuffer");
             }
         }
     }
@@ -4771,24 +4771,34 @@ static JSValue js_compute_data(JSContext *ctx, JSValueConst this_val,
     JS_FreeCString(ctx, segment_name);
 
     if (rc != 0)
-        return JS_ThrowInternalError(ctx, "compute.data: %s",
+        return JS_ThrowInternalError(ctx, "compute.segment: %s",
                                      err_msg ? err_msg : "unknown error");
     return JS_TRUE;
+}
+
+static JSValue js_compute_available(JSContext *ctx, JSValueConst this_val,
+                                     int argc, JSValueConst *argv)
+{
+    (void)this_val; (void)argc; (void)argv;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    return JS_NewBool(ctx, js && js->base.wasm_cache != NULL);
 }
 
 static int js_compute_module_init(JSContext *ctx, JSModuleDef *m)
 {
     JSValue compute = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, compute, "available",
+                      JS_NewCFunction(ctx, js_compute_available, "available", 0));
     JS_SetPropertyStr(ctx, compute, "call",
                       JS_NewCFunction(ctx, js_compute_call, "call", 3));
-    JS_SetPropertyStr(ctx, compute, "preload",
-                      JS_NewCFunction(ctx, js_compute_preload, "preload", 1));
+    JS_SetPropertyStr(ctx, compute, "load",
+                      JS_NewCFunction(ctx, js_compute_load, "load", 1));
     JS_SetPropertyStr(ctx, compute, "buffer",
                       JS_NewCFunction(ctx, js_compute_buffer, "buffer", 1));
     JS_SetPropertyStr(ctx, compute, "instance",
                       JS_NewCFunction(ctx, js_compute_instance, "instance", 2));
-    JS_SetPropertyStr(ctx, compute, "data",
-                      JS_NewCFunction(ctx, js_compute_data, "data", 3));
+    JS_SetPropertyStr(ctx, compute, "segment",
+                      JS_NewCFunction(ctx, js_compute_segment, "segment", 3));
 
     /* compute.async sub-object */
     JSValue async_obj = JS_NewObject(ctx);

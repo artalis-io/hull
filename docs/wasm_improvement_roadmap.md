@@ -30,7 +30,7 @@ without holding pool_mutex. Race with in-flight `hl_wasm_pool_release()`.
 
 ---
 
-## 3. MappedBuffer GC pin in Lua compute.data ✅
+## 3. MappedBuffer GC pin in Lua compute.segment ✅
 
 **Where:** `lua/modules.c` — `lua_compute_data()`
 
@@ -55,7 +55,7 @@ shared_data struct if empty. Return error with mutex still held (no unlock gap).
 
 ---
 
-## 5. JS compute.data missing MappedBuffer support ✅
+## 5. JS compute.segment missing MappedBuffer support ✅
 
 **Where:** `js/modules.c` — `js_compute_data()`
 

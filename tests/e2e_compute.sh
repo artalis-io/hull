@@ -51,8 +51,8 @@ test("compute.call not found", function()
     assert(err == "not_found")
 end)
 
-test("compute.preload", function()
-    local ok, err = compute.preload("echo")
+test("compute.load", function()
+    local ok, err = compute.load("echo")
     assert(ok, "preload failed: " .. tostring(err))
 end)
 
@@ -98,8 +98,8 @@ test("compute.call echo", () => {
     test.eq(result, "hello");
 });
 
-test("compute.preload", () => {
-    const ok = compute.preload("echo");
+test("compute.load", () => {
+    const ok = compute.load("echo");
     test.eq(ok, true);
 });
 JSEOF
@@ -624,7 +624,7 @@ EOF
 mkdir -p "$PROBEDIR/tests"
 cat > "$PROBEDIR/tests/test_probe.lua" << 'EOF'
 test("shared heap probe", function()
-    local ok, err = compute.data("shared_read", "seg0", "ABCDEFGHIJ")
+    local ok, err = compute.segment("shared_read", "seg0", "ABCDEFGHIJ")
     assert(ok, "load failed: " .. tostring(err))
     local function u32(n)
         return string.char(n % 256, math.floor(n/256) % 256,
@@ -632,7 +632,7 @@ test("shared heap probe", function()
     end
     local out = compute.call("shared_read", "\x00" .. u32(2) .. u32(5))
     assert(out == "CDEFG", "shared heap data not readable")
-    compute.data("shared_read", nil)
+    compute.segment("shared_read", nil)
 end)
 EOF
 PROBE_OUT=$($HULL test "$PROBEDIR" 2>&1) || true
@@ -643,11 +643,11 @@ if echo "$PROBE_OUT" | grep -qE "0 failed|tests passed$"; then
     echo "  Shared heap works on this platform"
     SHARED_HEAP_OK=1
 else
-    echo "  NOTE: WAMR shared heap not functional — skipping compute.data tests"
+    echo "  NOTE: WAMR shared heap not functional — skipping compute.segment tests"
 fi
 
 echo ""
-echo "=== E2E: compute.data shared data (Lua) ==="
+echo "=== E2E: compute.segment shared data (Lua) ==="
 
 SHAREDDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR" "$AOTDIR" "$NOAOT_DIR" "$BUFDIR" "$PERSISTDIR" "$SHAREDDIR"' EXIT
@@ -661,9 +661,9 @@ EOF
 
 mkdir -p "$SHAREDDIR/tests"
 cat > "$SHAREDDIR/tests/test_shared.lua" << 'EOF'
-test("compute.data single segment", function()
+test("compute.segment single segment", function()
     -- Load data into shared_read module
-    local ok, err = compute.data("shared_read", "seg0", "ABCDEFGHIJ")
+    local ok, err = compute.segment("shared_read", "seg0", "ABCDEFGHIJ")
     assert(ok, "data load failed: " .. tostring(err))
 
     -- Read 5 bytes at offset 2 from segment 0
@@ -682,12 +682,12 @@ test("compute.data single segment", function()
     assert(#out2 == 4, "expected 4 bytes for count")
 
     -- Clean up
-    compute.data("shared_read", nil)
+    compute.segment("shared_read", nil)
 end)
 
-test("compute.data multi-segment", function()
-    compute.data("shared_read", "a", "AAAA")
-    compute.data("shared_read", "b", "BBBBBB")
+test("compute.segment multi-segment", function()
+    compute.segment("shared_read", "a", "AAAA")
+    compute.segment("shared_read", "b", "BBBBBB")
 
     local function u32(n)
         return string.char(n % 256, math.floor(n/256) % 256,
@@ -702,7 +702,7 @@ test("compute.data multi-segment", function()
     local out2 = compute.call("shared_read", "\x01" .. u32(0) .. u32(6))
     assert(out2 == "BBBBBB", "seg 1: " .. tostring(out2))
 
-    compute.data("shared_read", nil)
+    compute.segment("shared_read", nil)
 end)
 EOF
 
@@ -720,7 +720,7 @@ else
 fi
 
 echo ""
-echo "=== E2E: compute.data shared data (JS) ==="
+echo "=== E2E: compute.segment shared data (JS) ==="
 
 rm -f "$SHAREDDIR/app.lua" "$SHAREDDIR/tests/test_shared.lua"
 
@@ -739,8 +739,8 @@ function ab2str(ab) {
     return result;
 }
 
-test("compute.data single segment", () => {
-    compute.data("shared_read", "seg0", "ABCDEFGHIJ");
+test("compute.segment single segment", () => {
+    compute.segment("shared_read", "seg0", "ABCDEFGHIJ");
 
     // Build read message: seg=0, offset=2, length=5
     const msg = new Uint8Array(9);
@@ -752,7 +752,7 @@ test("compute.data single segment", () => {
     const out = compute.call("shared_read", msg.buffer);
     test.eq(ab2str(out), "CDEFG");
 
-    compute.data("shared_read", null);
+    compute.segment("shared_read", null);
 });
 JSEOF
 

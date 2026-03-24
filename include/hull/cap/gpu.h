@@ -33,6 +33,7 @@
 #define HL_GPU_ERR_READBACK      -6
 #define HL_GPU_ERR_NOT_FOUND     -7
 #define HL_GPU_ERR_DEVICE        -8
+#define HL_GPU_ERR_TIMEOUT       -9
 
 /* ── Buffer usage flags ────────────────────────────────────────────── */
 

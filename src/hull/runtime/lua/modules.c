@@ -3202,7 +3202,7 @@ int hl_lua_register_stdlib(HlLua *lua)
  * hull.compute module — WASM compute plugins
  *
  * compute.call(name, input, opts?) -> output, err
- * compute.preload(name) -> true, err
+ * compute.load(name) -> true, err
  * ════════════════════════════════════════════════════════════════════ */
 
 /* ════════════════════════════════════════════════════════════════════
@@ -3570,12 +3570,12 @@ static int lua_compute_call(lua_State *L)
     return 2;
 }
 
-/* compute.preload(name) -> true | nil, error_string */
-static int lua_compute_preload(lua_State *L)
+/* compute.load(name) -> true | nil, error_string */
+static int lua_compute_load(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->base.wasm_cache)
-        return luaL_error(L, "compute.preload: WASM runtime not initialized");
+        return luaL_error(L, "compute.load: WASM runtime not initialized");
 
     const char *name = luaL_checkstring(L, 1);
 
@@ -4141,21 +4141,21 @@ static int lua_compute_instance(lua_State *L)
     return 1;
 }
 
-/* compute.data(module, segment, data)
- * compute.data(module, segment, nil) -- remove segment
- * compute.data(module, nil)          -- remove all segments
+/* compute.segment(module, segment, data)
+ * compute.segment(module, segment, nil) -- remove segment
+ * compute.segment(module, nil)          -- remove all segments
  */
-static int lua_compute_data(lua_State *L)
+static int lua_compute_segment(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
     if (!lua)
-        return luaL_error(L, "compute.data: runtime not available");
+        return luaL_error(L, "compute.segment: runtime not available");
     if (!lua->base.wasm_cache)
-        return luaL_error(L, "compute.data: WASM runtime not initialized");
+        return luaL_error(L, "compute.segment: WASM runtime not initialized");
 
     const char *module_name = luaL_checkstring(L, 1);
 
-    /* compute.data(module, nil) → remove all */
+    /* compute.segment(module, nil) → remove all */
     if (lua_gettop(L) < 3 && lua_isnil(L, 2)) {
         const char *err_msg = NULL;
         int rc = hl_cap_wasm_data_load(lua->base.wasm_cache, module_name,
@@ -4178,7 +4178,7 @@ static int lua_compute_data(lua_State *L)
 
     const char *segment_name = luaL_checkstring(L, 2);
 
-    /* compute.data(module, segment, nil) → remove segment */
+    /* compute.segment(module, segment, nil) → remove segment */
     if (lua_isnil(L, 3) || lua_isnoneornil(L, 3)) {
         const char *err_msg = NULL;
         int rc = hl_cap_wasm_data_load(lua->base.wasm_cache, module_name,
@@ -4204,7 +4204,7 @@ static int lua_compute_data(lua_State *L)
         return 1;
     }
 
-    /* compute.data(module, segment, data) → add/replace */
+    /* compute.segment(module, segment, data) → add/replace */
     const void *data = NULL;
     size_t data_len = 0;
     void *pre_alloc = NULL;
@@ -4221,7 +4221,7 @@ static int lua_compute_data(lua_State *L)
             pre_alloc = (*mmap_pp)->addr;
             has_mmap_ref = 1;
         } else {
-            return luaL_error(L, "compute.data: data must be a string or MappedBuffer");
+            return luaL_error(L, "compute.segment: data must be a string or MappedBuffer");
         }
     }
 
@@ -4266,12 +4266,20 @@ static int lua_compute_data(lua_State *L)
     return 1;
 }
 
+static int lua_compute_available(lua_State *L)
+{
+    HlLua *lua = get_hl_lua(L);
+    lua_pushboolean(L, lua && lua->base.wasm_cache != NULL);
+    return 1;
+}
+
 static const luaL_Reg compute_funcs[] = {
+    {"available", lua_compute_available},
     {"call",     lua_compute_call},
-    {"preload",  lua_compute_preload},
+    {"load",     lua_compute_load},
     {"buffer",   lua_compute_buffer},
     {"instance", lua_compute_instance},
-    {"data",     lua_compute_data},
+    {"segment",  lua_compute_segment},
     {NULL, NULL}
 };
 

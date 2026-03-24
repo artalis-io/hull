@@ -524,7 +524,7 @@ inst.close();
 at native speed via WAMR's shared heap feature. Enables multi-GB read-only
 datasets (spatial indexes, CSR graphs) for tile servers and routing engines.
 
-**Implementation:** `compute.data(module, segment, data)` API loads named segments
+**Implementation:** `compute.segment(module, segment, data)` API loads named segments
 backed by page-aligned mmap regions. WAMR shared heaps chain segments into
 contiguous high-address WASM32 space. WASM plugins query segments via
 `host_call(0x02, segment_id, sub)` and read at native speed via normal `i32.load`.
@@ -534,7 +534,7 @@ contiguous high-address WASM32 space. WASM plugins query segments via
 - **Per-module, multi-segment**: up to 16 named segments per module
 - **Auto-attach**: every `compute.call()` / `compute.instance()` gets all segments
 - **Concurrent reads**: multiple thread pool workers read the same backing memory
-- **Zero-copy mmap**: `fs.mmap()` + `compute.data()` avoids copying multi-GB files
+- **Zero-copy mmap**: `fs.mmap()` + `compute.segment()` avoids copying multi-GB files
 - **Named segments**: plugin queries by index via `host_call(0x02, segment_id, 0/1)`
 - **Replaceable**: adding/removing segments drains pool and rebuilds chain
 - **WASM32 limit**: ~3 GB total across all segments
@@ -545,8 +545,8 @@ contiguous high-address WASM32 space. WASM plugins query segments via
 - `include/hull/cap/wasm.h`: `HlWasmDataSegment`, `HlWasmSharedData`, `hl_cap_wasm_data_load/unload()`
 - `include/hull/limits.h`: `HL_WASM_MAX_SHARED_DATA`, `HL_WASM_MAX_DATA_SEGMENTS`
 - `src/hull/cap/wasm.c`: shared heap creation, chaining, attach, host_call opcode 0x02
-- `src/hull/runtime/lua/modules.c`: `compute.data()` Lua binding
-- `src/hull/runtime/js/modules.c`: `compute.data()` JS binding
+- `src/hull/runtime/lua/modules.c`: `compute.segment()` Lua binding
+- `src/hull/runtime/js/modules.c`: `compute.segment()` JS binding
 - 8 unit tests + 2 E2E tests (Lua + JS)
 
 ---

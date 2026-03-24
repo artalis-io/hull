@@ -728,6 +728,8 @@ Hull supports compute-only WASM plugins for CPU-intensive pure functions. Plugin
 
 **Lua API:**
 ```lua
+compute.available()                     -- boolean (WASM runtime initialized?)
+
 -- Synchronous call (gas-limited, blocking)
 local output, err = compute.call("score", input_bytes, {
     max_input  = 64 * 1024,    -- 64 KB (optional, has defaults)
@@ -746,7 +748,7 @@ local r = compute.async.call("score", input_bytes, opts)
 -- r.result = output string on success, r.error = error string on failure
 
 -- Preload module into cache
-compute.preload("score")
+compute.load("score")
 
 -- Create a WasmBuffer from a string (for zero-copy chaining)
 local buf = compute.buffer("input data")
@@ -766,7 +768,7 @@ const output = compute.call("score", inputBytes, {
 // Async: returns Promise. Dispatches to thread pool.
 const buf = await compute.async.call("score", inputBytes, opts);
 
-compute.preload("score");
+compute.load("score");
 
 // Create a WasmBuffer from a string (for zero-copy chaining)
 const buf = compute.buffer("input data");
@@ -774,22 +776,22 @@ const buf = compute.buffer("input data");
 
 **Sync vs Async:** Use `compute.call()` for fast/small computations (sub-ms) and in tests/timers. Use `compute.async.call()` in request handlers for expensive computations — it yields to the event loop so other requests are served concurrently. The async variant follows the same pattern as `db.async.query()`.
 
-**Shared data segments** — `compute.data()` loads named read-only data segments that all instances of a module can read at native speed via WAMR shared heaps:
+**Shared data segments** — `compute.segment()` loads named read-only data segments that all instances of a module can read at native speed via WAMR shared heaps:
 
 ```lua
 -- Lua: load named segments for a module
-compute.data("routing", "graph", graph_bytes)       -- segment 0
-compute.data("routing", "landmarks", fs.mmap("landmarks.bin"))  -- zero-copy
-compute.data("routing", "grid", nil)                -- remove segment
-compute.data("routing", nil)                        -- remove all segments
+compute.segment("routing", "graph", graph_bytes)       -- segment 0
+compute.segment("routing", "landmarks", fs.mmap("landmarks.bin"))  -- zero-copy
+compute.segment("routing", "grid", nil)                -- remove segment
+compute.segment("routing", nil)                        -- remove all segments
 -- Use normally — segments auto-attached to every instance
 local out = compute.call("routing", query)
 ```
 
 ```javascript
 // JS
-compute.data("routing", "graph", graphBytes);
-compute.data("routing", null);                      // remove all
+compute.segment("routing", "graph", graphBytes);
+compute.segment("routing", null);                      // remove all
 ```
 
 WASM plugins query segments via `host_call(0x02, segment_id, sub)`:

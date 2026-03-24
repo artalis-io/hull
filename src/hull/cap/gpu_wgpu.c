@@ -18,6 +18,40 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* ── GPU dispatch timeout (milliseconds, 0 = no timeout) ───────────── */
+
+#ifndef HL_GPU_TIMEOUT_MS
+#define HL_GPU_TIMEOUT_MS 5000  /* 5 seconds default */
+#endif
+
+#include <time.h>
+
+static uint64_t gpu_now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+
+/* Poll device until work completes or timeout expires.
+ * Returns 0 on success, -1 on timeout. */
+static int gpu_poll_with_timeout(WGPUDevice device, uint32_t timeout_ms)
+{
+    if (timeout_ms == 0) {
+        wgpuDevicePoll(device, 1, NULL);
+        return 0;
+    }
+    uint64_t deadline = gpu_now_ms() + timeout_ms;
+    for (;;) {
+        WGPUBool done = wgpuDevicePoll(device, 0, NULL);
+        if (done) return 0;
+        if (gpu_now_ms() >= deadline) return -1;
+        /* Brief yield to avoid busy-spin */
+        struct timespec ts = { 0, 100000 }; /* 100 µs */
+        nanosleep(&ts, NULL);
+    }
+}
+
 /* ── Helper: C string → WGPUStringView ─────────────────────────────── */
 
 static WGPUStringView sv(const char *s)
@@ -661,10 +695,14 @@ static int wgpu_dispatch(void *backend_device, HlGpuPipeline *pipeline,
         }
     }
 
-    /* ── Submit + poll ─────────────────────────────────────── */
+    /* ── Submit + poll (with timeout) ─────────────────────── */
 
     wgpuQueueSubmit(dctx->queue, 1, &cmd);
-    wgpuDevicePoll(dctx->device, 1, NULL);
+    if (gpu_poll_with_timeout(dctx->device, HL_GPU_TIMEOUT_MS) != 0) {
+        if (err_msg) *err_msg = "gpu_timeout";
+        rc = HL_GPU_ERR_TIMEOUT;
+        goto cleanup;
+    }
 
     /* ── Output readback (skip for fire-and-forget) ──────── */
 
@@ -1087,10 +1125,14 @@ static int wgpu_dispatch_pipeline(void *backend_device,
         }
     }
 
-    /* ── Single submit + poll ──────────────────────────────────── */
+    /* ── Single submit + poll (with timeout) ─────────────────── */
 
     wgpuQueueSubmit(dctx->queue, 1, &cmd);
-    wgpuDevicePoll(dctx->device, 1, NULL);
+    if (gpu_poll_with_timeout(dctx->device, HL_GPU_TIMEOUT_MS) != 0) {
+        if (err_msg) *err_msg = "gpu_timeout";
+        rc = HL_GPU_ERR_TIMEOUT;
+        goto cleanup;
+    }
 
     /* ── Readback requested outputs (skip for fire-and-forget) ── */
 
@@ -1202,11 +1244,11 @@ static int wgpu_buffer_copy(void *backend_device,
     }
 
     wgpuQueueSubmit(dctx->queue, 1, &cmd);
-    wgpuDevicePoll(dctx->device, 1, NULL);
+    int poll_rc = gpu_poll_with_timeout(dctx->device, HL_GPU_TIMEOUT_MS);
 
     wgpuCommandBufferRelease(cmd);
     wgpuCommandEncoderRelease(encoder);
-    return HL_GPU_OK;
+    return poll_rc == 0 ? HL_GPU_OK : HL_GPU_ERR_TIMEOUT;
 }
 
 /* ── Backend vtable ────────────────────────────────────────────────── */
