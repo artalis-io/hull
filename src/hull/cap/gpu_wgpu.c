@@ -567,7 +567,8 @@ static int wgpu_dispatch(void *backend_device, HlGpuPipeline *pipeline,
         }
 
         uint32_t binding = (uint32_t)(i + binding_offset);
-        uint64_t buf_size_aligned = (uint64_t)((desc->size + 3) & ~(size_t)3);
+        uint64_t buf_size_aligned = desc->size <= SIZE_MAX - 3
+            ? (uint64_t)((desc->size + 3) & ~(size_t)3) : (uint64_t)desc->size;
         if (buf_size_aligned == 0)
             buf_size_aligned = 4;
 
@@ -805,7 +806,7 @@ static WGPUBuffer find_or_create_temp(WgpuDeviceCtx *dctx,
     }
 
     /* Create new temp buffer */
-    size_t aligned = (size + 3) & ~(size_t)3;
+    size_t aligned = size <= SIZE_MAX - 3 ? (size + 3) & ~(size_t)3 : size;
     if (aligned == 0) aligned = 4;
 
     WGPUBufferDescriptor desc = {
@@ -972,7 +973,8 @@ static int wgpu_dispatch_pipeline(void *backend_device,
 
             /* Track for readback */
             if (s < HL_GPU_MAX_PIPELINE_STAGES && b < 16) {
-                size_t aligned = (alloc_size + 3) & ~(size_t)3;
+                size_t aligned = alloc_size <= SIZE_MAX - 3
+                    ? (alloc_size + 3) & ~(size_t)3 : alloc_size;
                 if (aligned == 0) aligned = 4;
                 stage_buf_map[s * 16 + b] = gpu_buf;
                 stage_buf_size[s * 16 + b] = aligned;
@@ -981,8 +983,7 @@ static int wgpu_dispatch_pipeline(void *backend_device,
             entries[b + binding_offset] = (WGPUBindGroupEntry){
                 .binding = (uint32_t)(b + binding_offset),
                 .buffer = gpu_buf, .offset = 0,
-                .size = (uint64_t)(((alloc_size + 3) & ~(size_t)3) > 0 ?
-                         (alloc_size + 3) & ~(size_t)3 : 4),
+                .size = aligned > 0 ? (uint64_t)aligned : 4,
             };
         }
 
