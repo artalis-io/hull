@@ -345,11 +345,18 @@ hull build myapp --no-aot          # skip AOT, interpreter only
 hull build myapp --target=x86_64   # cross-compile AOT for different arch
 ```
 
-### GPU Compute Performance
+### GPU Compute
 
-GPU compute (optional, `HL_ENABLE_GPU=1`) uses wgpu-native for massively parallel workloads via WGSL compute shaders. GPU latency is constant regardless of data size — the crossover vs WASM AOT depends on the workload's parallelism.
+GPU compute (optional, `HL_ENABLE_GPU=1`) uses wgpu-native for massively parallel workloads via WGSL compute shaders. Features:
 
-**Cosine similarity benchmark** (128-dim vectors, Apple M1 Max):
+- **Dispatch + Pipeline** — single or multi-stage shader execution with shared named buffers
+- **Persistent buffers** — keep data GPU-resident across requests (`gpu.buffer()`)
+- **Fire-and-forget** — update GPU buffers in-place without readback (`output = false`)
+- **GPU-side copy** — copy between persistent buffers without CPU roundtrip (`gpu.buffer_copy()`)
+- **Zero-copy disk→GPU** — `fs.mmap()` data passes directly to GPU buffers
+- **Shader files** — `gpu.load("name")` reads `shaders/<name>.wgsl` for dev iteration
+
+**Performance** (cosine similarity, 128-dim vectors, Apple M1 Max):
 
 | Vectors | Native C | WASM AOT | GPU | GPU vs AOT |
 |---------|----------|----------|-----|------------|
@@ -358,10 +365,12 @@ GPU compute (optional, `HL_ENABLE_GPU=1`) uses wgpu-native for massively paralle
 | 16K | 1,830 µs | 2,534 µs | 2,629 µs | 1.0x |
 | 64K | 7,270 µs | 10,969 µs | 2,653 µs | **4.1x** |
 
-GPU is 4x faster than AOT at 64K vectors. Use `gpu.pipeline()` to chain multiple shaders in a single submission — 2.4x faster than separate `gpu.dispatch()` calls for multi-stage compute.
+GPU latency is constant ~2.6ms. Use `gpu.pipeline()` for multi-stage compute (2.4x faster than separate dispatches). Use fire-and-forget for index updates that don't need results returned.
 
 ```bash
-make bench-gpu HL_ENABLE_GPU=1 WGPU_LIB_DIR=vendor/wgpu   # GPU vs WASM vs native benchmark
+make fetch-wgpu                                            # download wgpu-native (SHA-256 verified)
+make HL_ENABLE_GPU=1                                       # build with GPU
+make bench-gpu HL_ENABLE_GPU=1                             # GPU vs WASM vs native benchmark
 ```
 
 ## Server Tuning

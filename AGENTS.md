@@ -43,13 +43,14 @@ Kernel Sandbox                # pledge+unveil (Linux), C-level (macOS)
 
 WASM compute plugins provide a sandboxed data-plane layer for CPU-intensive computation. Plugins are pure functions (no I/O) that run in isolated WASM linear memory with gas metering. Place `.wasm` files in `compute/`, call via `compute.call("name", input)` (sync) or `compute.async.call("name", input)` (async, yields to event loop) from Lua/JS. `hull build` auto-compiles to AOT when `wamrc` is available (~1.2x native speed vs ~54x for fast interpreter). See `docs/wamr_architecture.md`.
 
-GPU compute shaders (optional, `HL_ENABLE_GPU=1`) provide massively parallel data processing via wgpu-native (Metal/Vulkan/DX12). Write WGSL shaders inline, compile once with `gpu.compile("name", wgsl)`, dispatch with `gpu.dispatch("name", opts)`. Chain multiple shaders with `gpu.pipeline(stages, opts)` for single-submission execution. Persistent buffers (`gpu.buffer()`) keep data on GPU across requests. `fs.mmap()` data can be passed directly to GPU buffers (zero-copy disk→GPU). Declare `gpu: true` in manifest.
+GPU compute shaders (optional, `HL_ENABLE_GPU=1`) provide massively parallel data processing via wgpu-native (Metal/Vulkan/DX12). Compile shaders inline with `gpu.compile("name", wgsl)` or load from files with `gpu.load("name")` (reads `shaders/<name>.wgsl`). Dispatch with `gpu.dispatch("name", opts)` or chain multiple shaders with `gpu.pipeline(stages, opts)` for single-submission execution. Persistent buffers (`gpu.buffer()`) keep data on GPU across requests. Fire-and-forget mode (`output = false`) updates GPU buffers in-place without readback. `gpu.buffer_copy()` copies between GPU buffers without CPU roundtrip. `fs.mmap()` data passes directly to GPU buffers (zero-copy disk→GPU). Declare `gpu: true` in manifest.
 
 Each app is a single file (`app.lua` or `app.js`) with optional:
 - `migrations/*.sql` — database schema (auto-run on startup)
 - `templates/*.html` — server-side templates
 - `static/*` — served at `/static/*`
 - `compute/*.wasm` — WASM compute plugins (auto-AOT compiled during `hull build`)
+- `shaders/*.wgsl` — GPU compute shaders (loaded via `gpu.load()`)
 - `tests/test_*.lua` or `tests/test_*.js` — test files
 
 ## Runtime Selection

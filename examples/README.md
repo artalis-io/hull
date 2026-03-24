@@ -280,9 +280,9 @@ curl http://localhost:3000/health
 
 ### gpu_search
 
-GPU-accelerated vector similarity search using WGSL compute shaders. Index embedding vectors on the GPU, then query for nearest neighbors via cosine similarity. Demonstrates `gpu.compile()`, `gpu.buffer()`, and `gpu.dispatch()` with uniforms, persistent buffers, and workgroup dispatch.
+GPU-accelerated vector similarity search using WGSL compute shaders. Index embedding vectors on the GPU, then query for nearest neighbors via cosine similarity. Demonstrates `gpu.compile()`, `gpu.buffer()`, `gpu.dispatch()` with uniforms, persistent buffers, and workgroup dispatch.
 
-Requires GPU build: `make HL_ENABLE_GPU=1 WGPU_LIB_DIR=vendor/wgpu`
+Requires GPU build: `make fetch-wgpu && make HL_ENABLE_GPU=1`
 
 ```bash
 ./build/hull -p 3000 --no-sandbox examples/gpu_search/app.lua
@@ -297,14 +297,19 @@ curl -X POST http://localhost:3000/index \
 # Search: find top-2 most similar to [0.8, 0.6, 0, 0]
 curl -X POST http://localhost:3000/search \
   -d '{"query":[0.8,0.6,0,0],"k":2}'
-# Returns: [0.7,0.7,0,0] (score ~0.98) and [1,0,0,0] (score ~0.8)
 ```
+
+**Key GPU features demonstrated:**
+- `gpu.compile(name, wgsl)` — compile WGSL shader once at startup
+- `gpu.buffer(name, data)` — persistent GPU buffer for indexed vectors
+- `gpu.dispatch(name, opts)` — dispatch with uniforms, workgroups, readback
+- `app.manifest({ gpu = true })` — capability declaration
 
 ### gpu_pipeline
 
-Multi-stage GPU compute pipeline — chains normalize → weight → reduce into a single GPU command buffer submission. Demonstrates `gpu.pipeline()` with shared named buffers, per-stage uniforms, and the performance advantage over multiple `gpu.dispatch()` calls (2.4x speedup for 3-stage pipeline).
+Multi-stage GPU compute pipeline — chains normalize → weight → reduce into a single GPU command buffer submission. Demonstrates `gpu.pipeline()` with shared named buffers, per-stage uniforms, fire-and-forget mode, and the performance advantage over multiple `gpu.dispatch()` calls (2.4x speedup for 3-stage pipeline).
 
-Requires GPU build: `make HL_ENABLE_GPU=1 WGPU_LIB_DIR=vendor/wgpu`
+Requires GPU build: `make fetch-wgpu && make HL_ENABLE_GPU=1`
 
 ```bash
 ./build/hull -p 3000 --no-sandbox examples/gpu_pipeline/app.lua
@@ -317,6 +322,14 @@ curl -X POST http://localhost:3000/score \
 curl http://localhost:3000/compare
 # Returns: { dispatch_3x_ms: 9.5, pipeline_ms: 3.9, speedup: 2.4 }
 ```
+
+**Key GPU features demonstrated:**
+- `gpu.load(name)` — load WGSL from `shaders/<name>.wgsl` (dev iteration)
+- `gpu.pipeline(stages, opts)` — multi-stage in single submission
+- `gpu.pipeline(stages, { output = false })` — fire-and-forget (in-place update)
+- Named buffer sharing across pipeline stages
+- `gpu.buffer_copy(src, dst)` — GPU-side buffer copy without CPU roundtrip
+- `fs.mmap()` → `gpu.buffer()` — zero-copy disk→GPU data loading
 
 ### cors_manifest
 

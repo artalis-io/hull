@@ -845,13 +845,17 @@ app.manifest({ gpu = true })
 gpu.available()                        -- boolean
 gpu.devices()                          -- { {id=0, name="Apple M1"}, ... }
 gpu.compile(name, wgsl)                -- compile WGSL shader (cached, idempotent)
+gpu.load(name)                         -- load + compile shaders/<name>.wgsl from disk/VFS
 gpu.dispatch(name, opts)               -- run shader, return output (string)
+gpu.dispatch(name, { output = false }) -- fire-and-forget (no readback, returns true)
 gpu.pipeline(stages, opts)             -- multi-stage dispatch, single submission
+gpu.pipeline(stages, { output = false }) -- fire-and-forget pipeline
 gpu.async.dispatch(name, opts)         -- async dispatch (yields to event loop)
 gpu.async.pipeline(stages, opts)       -- async pipeline
 gpu.buffer(name, data)                 -- create/write persistent buffer (string or MappedBuffer)
 gpu.buffer(name, nil)                  -- destroy buffer
 gpu.buffer_read(name)                  -- read buffer back to host
+gpu.buffer_copy(src, dst, opts?)       -- GPU-side buffer copy (no CPU roundtrip)
 ```
 
 **JavaScript API:**
@@ -860,13 +864,17 @@ import { gpu } from "hull:gpu";
 gpu.available()                        // boolean
 gpu.devices()                          // [{id, name}, ...]
 gpu.compile(name, wgsl)                // compile WGSL shader
+gpu.load(name)                         // load + compile shaders/<name>.wgsl
 gpu.dispatch(name, opts)               // ArrayBuffer output
+gpu.dispatch(name, { output: false })  // fire-and-forget (returns true)
 gpu.pipeline(stages, opts)             // multi-stage, ArrayBuffer or Array<ArrayBuffer>
+gpu.pipeline(stages, { output: false })// fire-and-forget pipeline
 gpu.async.dispatch(name, opts)         // Promise<ArrayBuffer>
 gpu.async.pipeline(stages, opts)       // Promise
 gpu.buffer(name, data)                 // create/write (ArrayBuffer, MappedBuffer, or string)
 gpu.buffer(name, null)                 // destroy
 gpu.bufferRead(name)                   // ArrayBuffer
+gpu.bufferCopy(src, dst, opts?)        // GPU-side buffer copy
 ```
 
 **Dispatch options:**
@@ -908,6 +916,54 @@ const out = gpu.pipeline([
     { shader: "top_k",     buffers: [{ name: "results" }], workgroups: {x:1} },
 ], { outputs: [{ stage: 2, buffer: 0 }] });
 // Single output: ArrayBuffer. Multiple outputs: Array<ArrayBuffer>.
+```
+
+**Fire-and-forget dispatch:** Set `output = false` to skip readback. The shader executes and persistent buffers are updated in-place, but no data is returned to the host. Returns `true` on success. Works with both `gpu.dispatch()` and `gpu.pipeline()`.
+
+```lua
+-- Update embeddings in-place on GPU (no readback)
+gpu.dispatch("normalize", {
+    buffers = {{ name = "embeddings" }},
+    workgroups = { x = 1024 },
+    output = false,
+})
+-- Pipeline fire-and-forget: double → triple in-place
+gpu.pipeline({
+    { shader = "double", buffers = {{ name = "data" }}, workgroups = {x=64} },
+    { shader = "triple", buffers = {{ name = "data" }}, workgroups = {x=64} },
+}, { output = false })
+```
+
+**GPU-side buffer copy:** Copy between persistent GPU buffers without CPU roundtrip.
+
+```lua
+gpu.buffer_copy("source", "dest")                           -- full copy
+gpu.buffer_copy("source", "dest", { size = 1024 })          -- partial
+gpu.buffer_copy("source", "dest", {
+    src_offset = 0, dst_offset = 512, size = 256,           -- with offsets
+})
+```
+
+**Shader loading from files:** `gpu.load(name)` reads `shaders/<name>.wgsl` from disk (dev mode) or VFS (built binaries) and compiles it. Enables shader iteration without modifying app code.
+
+```lua
+-- shaders/score.wgsl on disk
+gpu.load("score")                     -- reads + compiles shaders/score.wgsl
+-- equivalent to: gpu.compile("score", <file contents>)
+```
+
+**Directory convention:**
+```
+myapp/
+  app.lua
+  shaders/             ← WGSL compute shaders (gpu.load)
+    normalize.wgsl
+    score.wgsl
+  compute/             ← WASM plugins (compute.call)
+    echo.wasm
+  templates/           ← HTML templates
+  static/              ← Static assets
+  migrations/          ← SQL migrations
 ```
 
 **Buffer sharing in pipelines:** Named buffers are created once and reused across stages. When multiple stages reference the same buffer name with different sizes, the maximum declared size is allocated. First stage with `data` uploads initial content; subsequent stages reuse the existing buffer. Persistent buffers (created via `gpu.buffer()`) participate by name.
