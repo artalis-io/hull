@@ -1222,7 +1222,7 @@ cppcheck:
 		--suppress=uninitvar:$(SRCDIR)/hull/runtime/lua/bindings.c \
 		--suppress=unusedLabelConfiguration:$(SRCDIR)/hull/main.c \
 		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/agent_lib.c \
-	--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/cap/wasm.c \
+		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/cap/wasm.c \
 		--suppress=unusedStructMember:$(SRCDIR)/hull/agent_lib.c \
 		--suppress=unusedVariable:$(SRCDIR)/hull/agent_lib.c \
 		--suppress=unmatchedSuppression \
@@ -1234,7 +1234,7 @@ cppcheck:
 		-I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(SQLITE_DIR) -I$(KEEL_INC) \
 		$(SRCDIR)/hull/main.c $(SRCDIR)/hull/alloc.c $(SRCDIR)/hull/static.c $(SRCDIR)/hull/agent_lib.c $(SRCDIR)/hull/agent_api.c $(SRCDIR)/hull/cap/*.c \
 		$(SRCDIR)/hull/commands/*.c \
-		$(SRCDIR)/hull/runtime/js/*.c $(SRCDIR)/hull/runtime/lua/*.c
+		$(SRCDIR)/hull/runtime/js/*.c $(SRCDIR)/hull/runtime/lua/*.c 2>&1
 
 # ── Benchmark ──────────────────────────────────────────────────────
 
