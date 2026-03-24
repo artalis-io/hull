@@ -957,13 +957,24 @@ static int wgpu_dispatch_pipeline(void *backend_device,
         for (int b = 0; b < stage->buffer_count; b++) {
             const HlGpuBufferDesc *desc = &stage->buffers[b];
 
-            /* Determine allocation size (max across stages for named buffers) */
+            /* Determine allocation size (max across stages for named buffers,
+             * falling back to persistent buffer's actual size) */
             size_t alloc_size = desc->size;
             if (desc->name) {
                 for (int k = 0; k < size_count; k++) {
                     if (size_map[k].name && strcmp(size_map[k].name, desc->name) == 0) {
                         alloc_size = size_map[k].max_size;
                         break;
+                    }
+                }
+                /* Fall back to persistent buffer's actual size */
+                if (alloc_size == 0 && persistent_buffers) {
+                    for (int p = 0; p < persistent_count; p++) {
+                        if (persistent_buffers[p].name[0] != '\0' &&
+                            strcmp(persistent_buffers[p].name, desc->name) == 0) {
+                            alloc_size = persistent_buffers[p].size;
+                            break;
+                        }
                     }
                 }
             }
@@ -1081,9 +1092,11 @@ static int wgpu_dispatch_pipeline(void *backend_device,
     wgpuQueueSubmit(dctx->queue, 1, &cmd);
     wgpuDevicePoll(dctx->device, 1, NULL);
 
-    /* ── Readback requested outputs ────────────────────────────── */
+    /* ── Readback requested outputs (skip for fire-and-forget) ── */
 
-    {
+    if (opts->output_count == HL_GPU_OUTPUT_NONE) {
+        rc = HL_GPU_OK;  /* fire-and-forget: compute done */
+    } else {
         /* Default: last stage's first buffer */
         HlGpuPipelineOutput default_out = {
             .stage = stage_count - 1, .buffer = 0,
@@ -1120,7 +1133,7 @@ static int wgpu_dispatch_pipeline(void *backend_device,
             }
         }
         rc = HL_GPU_OK;
-    }
+    } /* end of readback block */
 
 cleanup:
     if (cmd) wgpuCommandBufferRelease(cmd);

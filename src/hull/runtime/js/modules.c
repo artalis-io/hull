@@ -4865,6 +4865,71 @@ static JSValue js_gpu_devices(JSContext *ctx, JSValueConst this_val,
     return arr;
 }
 
+/* Load WGSL shader from shaders/<name>.wgsl (VFS or disk) */
+static JSValue js_gpu_load(JSContext *ctx, JSValueConst this_val,
+                            int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "gpu.load requires name");
+
+    HlGpuCtx *gpu = js_get_gpu_ctx(ctx);
+    if (!gpu) return JS_ThrowInternalError(ctx, "gpu not available");
+
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    const char *name = JS_ToCString(ctx, argv[0]);
+    if (!name) return JS_EXCEPTION;
+
+    char vfs_name[512];
+    snprintf(vfs_name, sizeof(vfs_name), "shaders/%s.wgsl", name);
+    const HlEntry *entry = NULL;
+    if (js && js->base.app_vfs)
+        entry = hl_vfs_find(js->base.app_vfs, vfs_name);
+
+    const char *wgsl = NULL;
+    size_t wgsl_len = 0;
+    char *file_buf = NULL;
+
+    if (entry && entry->data) {
+        wgsl = (const char *)entry->data;
+        wgsl_len = entry->len;
+    } else if (js && js->base.app_vfs && js->base.app_vfs->root_dir) {
+        char path[4096];
+        snprintf(path, sizeof(path), "%s/shaders/%s.wgsl",
+                 js->base.app_vfs->root_dir, name);
+        FILE *f = fopen(path, "r");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long flen = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            if (flen > 0 && flen < 10 * 1024 * 1024) {
+                file_buf = malloc((size_t)flen + 1);
+                if (file_buf && fread(file_buf, 1, (size_t)flen, f) == (size_t)flen) {
+                    file_buf[flen] = '\0';
+                    wgsl = file_buf;
+                    wgsl_len = (size_t)flen;
+                }
+            }
+            fclose(f);
+        }
+    }
+
+    if (!wgsl) {
+        free(file_buf);
+        JS_FreeCString(ctx, name);
+        return JS_ThrowInternalError(ctx, "gpu.load: shader '%s' not found in shaders/", name);
+    }
+
+    int rc = hl_cap_gpu_compile(gpu, -1, name, wgsl, wgsl_len);
+    free(file_buf);
+    JS_FreeCString(ctx, name);
+
+    if (rc != HL_GPU_OK)
+        return JS_ThrowInternalError(ctx, "gpu.load: shader_error");
+
+    return JS_TRUE;
+}
+
 static JSValue js_gpu_compile(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv)
 {
@@ -5636,9 +5701,15 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
         if (!JS_IsUndefined(dv)) { int32_t d; JS_ToInt32(ctx, &d, dv); device = d; }
         JS_FreeValue(ctx, dv);
 
+        /* output: false → fire-and-forget pipeline */
+        JSValue out_flag = JS_GetPropertyStr(ctx, argv[1], "output");
+        if (JS_IsBool(out_flag) && !JS_ToBool(ctx, out_flag))
+            output_count = HL_GPU_OUTPUT_NONE;
+        JS_FreeValue(ctx, out_flag);
+
         /* outputs: [{stage: 0, buffer: 0}, ...] (0-indexed) */
         JSValue ov = JS_GetPropertyStr(ctx, argv[1], "outputs");
-        if (JS_IsArray(ctx, ov)) {
+        if (output_count != HL_GPU_OUTPUT_NONE && JS_IsArray(ctx, ov)) {
             JSValue olen = JS_GetPropertyStr(ctx, ov, "length");
             JS_ToInt32(ctx, &output_count, olen);
             JS_FreeValue(ctx, olen);
@@ -5682,6 +5753,10 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "gpu.pipeline: %s",
                                      err_msg ? err_msg : "failed");
 
+    /* Fire-and-forget: return true */
+    if (result.count == 0)
+        return JS_TRUE;
+
     /* Return single ArrayBuffer or array of ArrayBuffers */
     if (result.count == 1) {
         JSValue ab = JS_NewArrayBufferCopy(ctx, (const uint8_t *)result.data[0],
@@ -5717,6 +5792,8 @@ static int js_gpu_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_gpu_devices, "devices", 0));
     JS_SetPropertyStr(ctx, gpu, "compile",
                       JS_NewCFunction(ctx, js_gpu_compile, "compile", 2));
+    JS_SetPropertyStr(ctx, gpu, "load",
+                      JS_NewCFunction(ctx, js_gpu_load, "load", 1));
     JS_SetPropertyStr(ctx, gpu, "dispatch",
                       JS_NewCFunction(ctx, js_gpu_dispatch, "dispatch", 2));
     JS_SetPropertyStr(ctx, gpu, "pipeline",

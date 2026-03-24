@@ -4339,6 +4339,68 @@ static int l_gpu_devices(lua_State *L)
     return 1;
 }
 
+/* Load WGSL shader from shaders/<name>.wgsl (VFS or disk) */
+static int l_gpu_load(lua_State *L)
+{
+    HlGpuCtx *ctx = lua_get_gpu_ctx(L);
+    const char *name = luaL_checkstring(L, 1);
+    HlLua *lua = get_hl_lua(L);
+
+    /* Try VFS first: shaders/<name>.wgsl */
+    char vfs_name[512];
+    snprintf(vfs_name, sizeof(vfs_name), "shaders/%s.wgsl", name);
+    const HlEntry *entry = NULL;
+    if (lua && lua->base.app_vfs)
+        entry = hl_vfs_find(lua->base.app_vfs, vfs_name);
+
+    const char *wgsl = NULL;
+    size_t wgsl_len = 0;
+    char *file_buf = NULL;
+
+    if (entry && entry->data) {
+        wgsl = (const char *)entry->data;
+        wgsl_len = entry->len;
+    } else if (lua && lua->base.app_vfs && lua->base.app_vfs->root_dir) {
+        /* Try filesystem: <app_dir>/shaders/<name>.wgsl */
+        char path[4096];
+        snprintf(path, sizeof(path), "%s/shaders/%s.wgsl",
+                 lua->base.app_vfs->root_dir, name);
+        FILE *f = fopen(path, "r");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long flen = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            if (flen > 0 && flen < 10 * 1024 * 1024) {
+                file_buf = malloc((size_t)flen + 1);
+                if (file_buf && fread(file_buf, 1, (size_t)flen, f) == (size_t)flen) {
+                    file_buf[flen] = '\0';
+                    wgsl = file_buf;
+                    wgsl_len = (size_t)flen;
+                }
+            }
+            fclose(f);
+        }
+    }
+
+    if (!wgsl) {
+        free(file_buf);
+        lua_pushnil(L);
+        lua_pushfstring(L, "shader '%s' not found in shaders/", name);
+        return 2;
+    }
+
+    int rc = hl_cap_gpu_compile(ctx, -1, name, wgsl, wgsl_len);
+    free(file_buf);
+
+    if (rc != HL_GPU_OK) {
+        lua_pushnil(L);
+        lua_pushstring(L, "shader_error");
+        return 2;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
 static int l_gpu_compile(lua_State *L)
 {
     HlGpuCtx *ctx = lua_get_gpu_ctx(L);
@@ -4955,9 +5017,15 @@ static int l_gpu_pipeline(lua_State *L)
         if (!lua_isnil(L, -1)) device = (int)lua_tointeger(L, -1);
         lua_pop(L, 1);
 
+        /* output = false → fire-and-forget pipeline (no readback) */
+        lua_getfield(L, 2, "output");
+        if (lua_isboolean(L, -1) && !lua_toboolean(L, -1))
+            output_count = HL_GPU_OUTPUT_NONE;
+        lua_pop(L, 1);
+
         /* outputs = { {stage=1, buffer=1}, {stage=2, buffer=1} } (1-indexed) */
         lua_getfield(L, 2, "outputs");
-        if (lua_istable(L, -1)) {
+        if (output_count != HL_GPU_OUTPUT_NONE && lua_istable(L, -1)) {
             output_count = (int)lua_rawlen(L, -1);
             if (output_count > HL_GPU_MAX_PIPELINE_OUTPUTS)
                 output_count = HL_GPU_MAX_PIPELINE_OUTPUTS;
@@ -4993,6 +5061,12 @@ static int l_gpu_pipeline(lua_State *L)
         lua_pushnil(L);
         lua_pushstring(L, err_msg ? err_msg : "pipeline_failed");
         return 2;
+    }
+
+    /* Fire-and-forget: return true */
+    if (result.count == 0) {
+        lua_pushboolean(L, 1);
+        return 1;
     }
 
     /* Return table of results */
@@ -5048,6 +5122,7 @@ static const luaL_Reg gpu_funcs[] = {
     {"available",    l_gpu_available},
     {"devices",      l_gpu_devices},
     {"compile",      l_gpu_compile},
+    {"load",         l_gpu_load},
     {"dispatch",     l_gpu_dispatch},
     {"pipeline",     l_gpu_pipeline},
     {"buffer",       l_gpu_buffer},
