@@ -288,6 +288,12 @@ local function generate_app_registry(app_dir, files)
         add_file(path, rel, "compute_")
     end
 
+    -- WGSL shaders: "shaders/name.wgsl" (relative from app_dir)
+    for _, path in ipairs(files.shaders or {}) do
+        local rel = path:sub(#app_dir + 2) -- e.g. "shaders/score.wgsl"
+        add_file(path, rel, "shader_")
+    end
+
     -- AOT-compiled compute modules (generated in tmpdir, explicit entry names)
     for _, item in ipairs(files.compute_aot or {}) do
         local data = read_file(item.path)
@@ -503,6 +509,15 @@ typedef struct {
         print("hull build: " .. #compute_files .. " compute module(s) from " .. compute_dir)
     end
 
+    local shaders_dir = opts.app_dir .. "/shaders"
+    local shader_files = {}
+    if file_exists(shaders_dir) then
+        shader_files = tool.find_files(shaders_dir, "*.wgsl")
+    end
+    if #shader_files > 0 then
+        print("hull build: " .. #shader_files .. " shader(s) from " .. shaders_dir)
+    end
+
     -- Resolve CC early (needed for AOT arch detection below)
     local cc = opts.cc or tool.cc or "cosmocc"
     local is_cosmo = cc:find("cosmocc") ~= nil
@@ -575,6 +590,7 @@ typedef struct {
         sql         = migration_files,
         compute     = compute_files,
         compute_aot = compute_aot,
+        shaders     = shader_files,
     })
     write_file(tmpdir .. "/app_registry.c", registry_c)
 

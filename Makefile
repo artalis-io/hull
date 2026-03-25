@@ -572,6 +572,7 @@ APP_TPL_FILES := $(shell find $(APP_DIR)/templates -name '*.html' 2>/dev/null)
 APP_STATIC_FILES := $(shell find $(APP_DIR)/static -type f 2>/dev/null)
 APP_MIGRATION_FILES := $(shell find $(APP_DIR)/migrations -name '*.sql' 2>/dev/null | sort)
 APP_COMPUTE_FILES := $(shell find $(APP_DIR)/compute \( -name '*.wasm' -o -name '*.aot.*' \) 2>/dev/null)
+APP_SHADER_FILES := $(shell find $(APP_DIR)/shaders -name '*.wgsl' 2>/dev/null)
 
 # xxd header paths per file type
 app_lua_hdr = $(BUILDDIR)/app_lua_$(subst /,_,$(patsubst $(APP_DIR)/%.lua,%.h,$(1)))
@@ -581,6 +582,7 @@ app_tpl_hdr = $(BUILDDIR)/app_tpl_$(subst /,_,$(patsubst $(APP_DIR)/templates/%.
 app_static_hdr = $(BUILDDIR)/app_static_$(subst /,_,$(patsubst $(APP_DIR)/static/%,%.h,$(1)))
 app_migration_hdr = $(BUILDDIR)/app_mig_$(subst /,_,$(patsubst $(APP_DIR)/migrations/%,%.h,$(1)))
 app_compute_hdr = $(BUILDDIR)/app_compute_$(subst /,_,$(patsubst $(APP_DIR)/compute/%,%.h,$(1)))
+app_shader_hdr = $(BUILDDIR)/app_shader_$(subst /,_,$(patsubst $(APP_DIR)/shaders/%,%.h,$(1)))
 
 APP_LUA_HDRS := $(foreach f,$(APP_LUA_FILES),$(call app_lua_hdr,$(f)))
 APP_JS_HDRS := $(foreach f,$(APP_JS_FILES),$(call app_js_hdr,$(f)))
@@ -589,6 +591,7 @@ APP_TPL_HDRS := $(foreach f,$(APP_TPL_FILES),$(call app_tpl_hdr,$(f)))
 APP_STATIC_HDRS := $(foreach f,$(APP_STATIC_FILES),$(call app_static_hdr,$(f)))
 APP_MIGRATION_HDRS := $(foreach f,$(APP_MIGRATION_FILES),$(call app_migration_hdr,$(f)))
 APP_COMPUTE_HDRS := $(foreach f,$(APP_COMPUTE_FILES),$(call app_compute_hdr,$(f)))
+APP_SHADER_HDRS := $(foreach f,$(APP_SHADER_FILES),$(call app_shader_hdr,$(f)))
 
 # xxd rules for each file type
 define APP_LUA_RULE
@@ -633,7 +636,13 @@ $(call app_compute_hdr,$(1)): $(1) | $(BUILDDIR)
 endef
 $(foreach f,$(APP_COMPUTE_FILES),$(eval $(call APP_COMPUTE_RULE,$(f))))
 
-APP_ALL_XXD_HDRS := $(APP_LUA_HDRS) $(APP_JS_HDRS) $(APP_JSON_HDRS) $(APP_TPL_HDRS) $(APP_STATIC_HDRS) $(APP_MIGRATION_HDRS) $(APP_COMPUTE_HDRS)
+define APP_SHADER_RULE
+$(call app_shader_hdr,$(1)): $(1) | $(BUILDDIR)
+	xxd -i $$< > $$@
+endef
+$(foreach f,$(APP_SHADER_FILES),$(eval $(call APP_SHADER_RULE,$(f))))
+
+APP_ALL_XXD_HDRS := $(APP_LUA_HDRS) $(APP_JS_HDRS) $(APP_JSON_HDRS) $(APP_TPL_HDRS) $(APP_STATIC_HDRS) $(APP_MIGRATION_HDRS) $(APP_COMPUTE_HDRS) $(APP_SHADER_HDRS)
 
 APP_REGISTRY_C := $(BUILDDIR)/app_registry.c
 APP_REGISTRY_O := $(BUILDDIR)/app_registry.o
@@ -680,6 +689,11 @@ $(APP_REGISTRY_C): $(APP_ALL_XXD_HDRS) | $(BUILDDIR)
 		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
 		computename=$$(echo "$$f" | sed 's|^$(APP_DIR)/||'); \
 		echo "$$computename	    { \"$$computename\", $${varname}, sizeof($${varname}) },"; \
+	done; \
+	for f in $(APP_SHADER_FILES); do \
+		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
+		shadername=$$(echo "$$f" | sed 's|^$(APP_DIR)/||'); \
+		echo "$$shadername	    { \"$$shadername\", $${varname}, sizeof($${varname}) },"; \
 	done ) | LC_ALL=C sort | cut -f2- >> $@
 	@echo "    { 0, 0, 0 }" >> $@
 	@echo "};" >> $@
