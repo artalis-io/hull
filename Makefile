@@ -249,16 +249,24 @@ WAMR_SRCS := \
 # Flatten WAMR paths to build/ (replace / with _ in the subpath)
 WAMR_OBJS := $(patsubst $(WAMR_DIR)/%.c,$(BUILDDIR)/wamr_%.o,$(WAMR_SRCS))
 
-# Native invoker: arm64 macOS needs assembly version (generic C invoker
-# mangles arguments on arm64 calling convention). Other platforms use generic.
+# Native invoker: 64-bit platforms require platform-specific assembly invokers.
+# The generic C invoker (invokeNative_general.c) only works on 32-bit platforms
+# because it passes argv[] as uint32 values, but 64-bit wasm_runtime_invoke_native
+# packs arguments into uint64 slots. Using the generic invoker on 64-bit causes
+# argument mangling (pointer split across two params, shifted integer args).
+# When SIMD is enabled, float register slots are 128-bit (v128), so the assembly
+# invoker must use the _simd variant to match the buffer layout.
 WAMR_INVOKE_OBJ := $(BUILDDIR)/wamr_invoke_native.o
 ifeq ($(UNAME_S),Darwin)
-  ifneq ($(shell uname -m),x86_64)
-    WAMR_INVOKE_SRC := $(WAMR_IWASM)/common/arch/invokeNative_osx_universal.s
-    WAMR_INVOKE_FLAGS := -DBH_PLATFORM_DARWIN -DWASM_ENABLE_SIMD=1
-  else
-    WAMR_INVOKE_SRC := $(WAMR_IWASM)/common/arch/invokeNative_general.c
-  endif
+  WAMR_INVOKE_SRC := $(WAMR_IWASM)/common/arch/invokeNative_osx_universal.s
+  WAMR_INVOKE_FLAGS := -DBH_PLATFORM_DARWIN -DWASM_ENABLE_SIMD=1
+else ifneq ($(findstring cosmo,$(CC)),)
+  # Cosmopolitan: use generic invoker (cosmo handles ABI translation)
+  WAMR_INVOKE_SRC := $(WAMR_IWASM)/common/arch/invokeNative_general.c
+else ifeq ($(shell uname -m),x86_64)
+  WAMR_INVOKE_SRC := $(WAMR_IWASM)/common/arch/invokeNative_em64_simd.s
+else ifeq ($(shell uname -m),aarch64)
+  WAMR_INVOKE_SRC := $(WAMR_IWASM)/common/arch/invokeNative_aarch64_simd.s
 else
   WAMR_INVOKE_SRC := $(WAMR_IWASM)/common/arch/invokeNative_general.c
 endif
