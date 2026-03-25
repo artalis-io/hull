@@ -152,7 +152,7 @@ end)
 
 app.get("/query", function(req, res)
     -- Fire-and-forget: double the indexed data in-place
-    local ok, err = gpu.dispatch("double", {
+    local _, err = gpu.dispatch("double", {
         buffers = {{ name = "indexed_data" }},
         workgroups = { x = 1 },
         output = false,
