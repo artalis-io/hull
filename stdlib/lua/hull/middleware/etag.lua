@@ -23,7 +23,8 @@ local MAX_BODY_SIZE = 1024 * 1024  -- 1 MB: skip ETag for larger responses
 -- Returns W/"<first 16 hex chars of SHA-256>"
 function etag.compute(body)
     if not body or #body == 0 then return nil end
-    local hash = crypto.sha256(body)
+    local ok, hash = pcall(crypto.sha256, body)
+    if not ok or not hash then return nil end
     return 'W/"' .. hash:sub(1, 16) .. '"'
 end
 

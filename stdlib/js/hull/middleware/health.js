@@ -12,9 +12,12 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-import { db } from "hull:db";
 import { time } from "hull:time";
 import { server } from "hull:server";
+
+/* db module is optional — not all apps use a database.
+ * We try to import it but fall back gracefully. */
+let _dbMod = null;
 
 const _checks = {};
 let _startTime = null;
@@ -32,15 +35,15 @@ function runChecks(opts) {
     const results = {};
     let allOk = true;
 
-    // DB check
-    if (o.dbCheck !== false && db) {
+    // DB check (db module may not be available if app has no database)
+    if (o.dbCheck !== false && _dbMod) {
         const t0 = time.clock();
         try {
-            db.query("SELECT 1");
-            const latency = Math.round((time.clock() - t0) * 1000 * 10) / 10;
+            _dbMod.query("SELECT 1");
+            const latency = Math.round((time.clock() - t0) * 10) / 10;
             results.db = { status: "ok", latency_ms: latency };
         } catch (e) {
-            const latency = Math.round((time.clock() - t0) * 1000 * 10) / 10;
+            const latency = Math.round((time.clock() - t0) * 10) / 10;
             results.db = { status: "fail", error: String(e), latency_ms: latency };
             allOk = false;
         }
@@ -51,7 +54,7 @@ function runChecks(opts) {
         const t0 = time.clock();
         try {
             const result = _checks[name]();
-            const latency = Math.round((time.clock() - t0) * 1000 * 10) / 10;
+            const latency = Math.round((time.clock() - t0) * 10) / 10;
             if (result === false) {
                 results[name] = { status: "fail", error: "check returned false", latency_ms: latency };
                 allOk = false;
@@ -59,7 +62,7 @@ function runChecks(opts) {
                 results[name] = { status: "ok", latency_ms: latency };
             }
         } catch (e) {
-            const latency = Math.round((time.clock() - t0) * 1000 * 10) / 10;
+            const latency = Math.round((time.clock() - t0) * 10) / 10;
             results[name] = { status: "fail", error: String(e), latency_ms: latency };
             allOk = false;
         }
@@ -68,11 +71,18 @@ function runChecks(opts) {
     return { checks: results, allOk };
 }
 
+function setDb(dbModule) {
+    _dbMod = dbModule;
+}
+
 function middleware(opts) {
     const o = opts || {};
     const pathHealth = o.pathHealth || "/health";
     const pathReady = o.pathReady || "/ready";
     const doDbCheck = o.dbCheck !== false;
+
+    /* Accept db module via opts for apps that have a database */
+    if (o.db) _dbMod = o.db;
 
     if (_startTime === null) {
         _startTime = time.now();
@@ -115,5 +125,5 @@ function middleware(opts) {
     };
 }
 
-const health = { register, unregister, runChecks, middleware };
+const health = { register, unregister, runChecks, middleware, setDb };
 export { health };

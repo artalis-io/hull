@@ -40,7 +40,7 @@ function health.run_checks(opts)
     if opts.db_check ~= false and db then
         local t0 = time.clock()
         local ok, err = pcall(db.query, "SELECT 1")
-        local latency = math.floor((time.clock() - t0) * 1000 * 10 + 0.5) / 10
+        local latency = math.floor((time.clock() - t0) * 10 + 0.5) / 10
         if ok then
             results.db = { status = "ok", latency_ms = latency }
         else
@@ -53,7 +53,7 @@ function health.run_checks(opts)
     for name, fn in pairs(_checks) do
         local t0 = time.clock()
         local ok, err = pcall(fn)
-        local latency = math.floor((time.clock() - t0) * 1000 * 10 + 0.5) / 10
+        local latency = math.floor((time.clock() - t0) * 10 + 0.5) / 10
         if ok and err ~= false then
             results[name] = { status = "ok", latency_ms = latency }
         else
