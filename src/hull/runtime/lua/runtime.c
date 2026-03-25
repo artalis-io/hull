@@ -733,6 +733,79 @@ int hl_lua_wire_routes(HlLua *lua, KlRouter *router)
     }
 
     lua_pop(L, 1); /* __hull_route_defs table */
+
+    /* Wire pre-body middleware from __hull_middleware */
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_middleware");
+    if (lua_istable(L, -1)) {
+        int mw_count = (int)luaL_len(L, -1);
+        for (int i = 1; i <= mw_count; i++) {
+            lua_rawgeti(L, -1, i);
+            if (!lua_istable(L, -1)) { lua_pop(L, 1); continue; }
+
+            lua_getfield(L, -1, "method");
+            lua_getfield(L, -2, "pattern");
+            lua_getfield(L, -3, "handler_id");
+
+            const char *mw_method = lua_tostring(L, -3);
+            const char *mw_pattern = lua_tostring(L, -2);
+            int mw_handler_id = (int)lua_tointeger(L, -1);
+
+            if (mw_method && mw_pattern) {
+                HlLuaRoute *ctx = hl_alloc_malloc(lua->base.alloc,
+                                                    sizeof(HlLuaRoute));
+                if (ctx) {
+                    ctx->lua = lua;
+                    ctx->handler_id = mw_handler_id;
+                    if (hl_lua_track_route(lua, ctx) != 0)
+                        hl_alloc_free(lua->base.alloc, ctx, sizeof(HlLuaRoute));
+                    else
+                        kl_router_use(router, mw_method, mw_pattern,
+                                      hl_lua_keel_middleware, ctx);
+                }
+            }
+
+            lua_pop(L, 3);
+            lua_pop(L, 1);
+        }
+    }
+    lua_pop(L, 1);
+
+    /* Wire post-body middleware from __hull_post_middleware */
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_post_middleware");
+    if (lua_istable(L, -1)) {
+        int post_mw_count = (int)luaL_len(L, -1);
+        for (int i = 1; i <= post_mw_count; i++) {
+            lua_rawgeti(L, -1, i);
+            if (!lua_istable(L, -1)) { lua_pop(L, 1); continue; }
+
+            lua_getfield(L, -1, "method");
+            lua_getfield(L, -2, "pattern");
+            lua_getfield(L, -3, "handler_id");
+
+            const char *mw_method = lua_tostring(L, -3);
+            const char *mw_pattern = lua_tostring(L, -2);
+            int mw_handler_id = (int)lua_tointeger(L, -1);
+
+            if (mw_method && mw_pattern) {
+                HlLuaRoute *ctx = hl_alloc_malloc(lua->base.alloc,
+                                                    sizeof(HlLuaRoute));
+                if (ctx) {
+                    ctx->lua = lua;
+                    ctx->handler_id = mw_handler_id;
+                    if (hl_lua_track_route(lua, ctx) != 0)
+                        hl_alloc_free(lua->base.alloc, ctx, sizeof(HlLuaRoute));
+                    else
+                        kl_router_use_post(router, mw_method, mw_pattern,
+                                           hl_lua_keel_middleware, ctx);
+                }
+            }
+
+            lua_pop(L, 3);
+            lua_pop(L, 1);
+        }
+    }
+    lua_pop(L, 1);
+
     return 0;
 }
 

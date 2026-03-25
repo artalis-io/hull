@@ -83,8 +83,14 @@ static int l_test_http(lua_State *L, const char *method)
     const char *header_values[KL_MAX_HEADERS];
     int num_headers = 0;
     const char *ctx_json = NULL;
+    int run_middleware = 0;
 
     if (lua_istable(L, 2)) {
+        /* opts.middleware */
+        lua_getfield(L, 2, "middleware");
+        if (lua_toboolean(L, -1))
+            run_middleware = 1;
+        lua_pop(L, 1);
         /* opts.body */
         lua_getfield(L, 2, "body");
         if (lua_isstring(L, -1))
@@ -138,7 +144,8 @@ static int l_test_http(lua_State *L, const char *method)
     HlTestResult result;
     if (hl_cap_test_dispatch(router, method, path, body_str, body_len,
                       header_names, header_values, num_headers,
-                      ctx_json, lua->base.alloc, &result) != 0) {
+                      ctx_json, lua->base.alloc, run_middleware,
+                      &result) != 0) {
         return luaL_error(L, "test dispatch failed");
     }
 

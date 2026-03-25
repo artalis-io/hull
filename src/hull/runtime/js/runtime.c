@@ -1200,6 +1200,89 @@ int hl_js_wire_routes(HlJS *js, KlRouter *router)
     }
 
     JS_FreeValue(ctx, defs);
+
+    /* Wire pre-body middleware from __hull_middleware */
+    JSValue mw_arr = JS_GetPropertyStr(ctx, global, "__hull_middleware");
+    if (JS_IsArray(ctx, mw_arr)) {
+        JSValue mw_len = JS_GetPropertyStr(ctx, mw_arr, "length");
+        int32_t mw_count = 0;
+        JS_ToInt32(ctx, &mw_count, mw_len);
+        JS_FreeValue(ctx, mw_len);
+
+        for (int32_t i = 0; i < mw_count; i++) {
+            JSValue entry = JS_GetPropertyUint32(ctx, mw_arr, (uint32_t)i);
+            if (JS_IsUndefined(entry)) continue;
+
+            JSValue m_val = JS_GetPropertyStr(ctx, entry, "method");
+            JSValue p_val = JS_GetPropertyStr(ctx, entry, "pattern");
+            JSValue id_val = JS_GetPropertyStr(ctx, entry, "handler_id");
+
+            const char *m = JS_ToCString(ctx, m_val);
+            const char *p = JS_ToCString(ctx, p_val);
+            int32_t hid = 0;
+            JS_ToInt32(ctx, &hid, id_val);
+
+            if (m && p) {
+                HlJSRoute *r = hl_alloc_malloc(js->base.alloc, sizeof(HlJSRoute));
+                if (r) {
+                    r->js = js;
+                    r->handler_id = hid;
+                    hl_js_track_route(js, r);
+                    kl_router_use(router, m, p, hl_js_keel_middleware, r);
+                }
+            }
+
+            if (p) JS_FreeCString(ctx, p);
+            if (m) JS_FreeCString(ctx, m);
+            JS_FreeValue(ctx, id_val);
+            JS_FreeValue(ctx, p_val);
+            JS_FreeValue(ctx, m_val);
+            JS_FreeValue(ctx, entry);
+        }
+    }
+    JS_FreeValue(ctx, mw_arr);
+
+    /* Wire post-body middleware from __hull_post_middleware */
+    JSValue post_arr = JS_GetPropertyStr(ctx, global, "__hull_post_middleware");
+    if (JS_IsArray(ctx, post_arr)) {
+        JSValue post_len = JS_GetPropertyStr(ctx, post_arr, "length");
+        int32_t post_count = 0;
+        JS_ToInt32(ctx, &post_count, post_len);
+        JS_FreeValue(ctx, post_len);
+
+        for (int32_t i = 0; i < post_count; i++) {
+            JSValue entry = JS_GetPropertyUint32(ctx, post_arr, (uint32_t)i);
+            if (JS_IsUndefined(entry)) continue;
+
+            JSValue m_val = JS_GetPropertyStr(ctx, entry, "method");
+            JSValue p_val = JS_GetPropertyStr(ctx, entry, "pattern");
+            JSValue id_val = JS_GetPropertyStr(ctx, entry, "handler_id");
+
+            const char *m = JS_ToCString(ctx, m_val);
+            const char *p = JS_ToCString(ctx, p_val);
+            int32_t hid = 0;
+            JS_ToInt32(ctx, &hid, id_val);
+
+            if (m && p) {
+                HlJSRoute *r = hl_alloc_malloc(js->base.alloc, sizeof(HlJSRoute));
+                if (r) {
+                    r->js = js;
+                    r->handler_id = hid;
+                    hl_js_track_route(js, r);
+                    kl_router_use_post(router, m, p, hl_js_keel_middleware, r);
+                }
+            }
+
+            if (p) JS_FreeCString(ctx, p);
+            if (m) JS_FreeCString(ctx, m);
+            JS_FreeValue(ctx, id_val);
+            JS_FreeValue(ctx, p_val);
+            JS_FreeValue(ctx, m_val);
+            JS_FreeValue(ctx, entry);
+        }
+    }
+    JS_FreeValue(ctx, post_arr);
+
     JS_FreeValue(ctx, global);
 
     return 0;

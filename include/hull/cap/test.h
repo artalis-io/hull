@@ -50,6 +50,7 @@ int hl_cap_test_dispatch(KlRouter *router, const char *method,
                          size_t body_len, const char **header_names,
                          const char **header_values, int num_headers,
                          const char *ctx_json, HlAllocator *hl_alloc,
+                         int run_middleware,
                          HlTestResult *result);
 
 /* ── Lua bindings ──────────────────────────────────────────────────── */

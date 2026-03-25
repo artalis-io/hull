@@ -81,9 +81,15 @@ static JSValue js_test_http(JSContext *ctx, const char *method,
     const char *header_values[KL_MAX_HEADERS];
     int num_headers = 0;
     const char *ctx_json = NULL;
+    int run_middleware = 0;
 
     /* Parse opts (arg 1) */
     if (argc >= 2 && JS_IsObject(argv[1])) {
+        /* opts.middleware */
+        JSValue mw_val = JS_GetPropertyStr(ctx, argv[1], "middleware");
+        if (JS_ToBool(ctx, mw_val))
+            run_middleware = 1;
+        JS_FreeValue(ctx, mw_val);
         JSValue body_val = JS_GetPropertyStr(ctx, argv[1], "body");
         if (JS_IsString(body_val))
             body_str = JS_ToCStringLen(ctx, &body_len, body_val);
@@ -124,7 +130,8 @@ static JSValue js_test_http(JSContext *ctx, const char *method,
     HlTestResult result;
     int rc = hl_cap_test_dispatch(state->router, method, path, body_str, body_len,
                            header_names, header_values, num_headers,
-                           ctx_json, state->js->base.alloc, &result);
+                           ctx_json, state->js->base.alloc, run_middleware,
+                           &result);
 
     /* Free C strings */
     // cppcheck-suppress knownConditionTrueFalse

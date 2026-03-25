@@ -32,6 +32,7 @@ int hl_cap_test_dispatch(KlRouter *router, const char *method,
                          size_t body_len, const char **header_names,
                          const char **header_values, int num_headers,
                          const char *ctx_json, HlAllocator *hl_alloc,
+                         int run_middleware,
                          HlTestResult *result)
 {
     if (!router || !method || !path || !result) return -1;
@@ -58,7 +59,7 @@ int hl_cap_test_dispatch(KlRouter *router, const char *method,
                                         path, path_len,
                                         &matched, params, &num_params);
 
-    if (match_status != 200 || !matched) {
+    if (!run_middleware && (match_status != 200 || !matched)) {
         result->status = match_status;
         return 0;
     }
@@ -135,9 +136,24 @@ int hl_cap_test_dispatch(KlRouter *router, const char *method,
     if (kl_response_init(&res, &alloc) != 0) return -1;
     res.conn_fd = -1; /* no actual connection */
 
-    /* Dispatch handler */
-    matched->handler(&req, &res, matched->user_data);
+    /* Run middleware chain if requested */
+    if (run_middleware) {
+        int mw_rc = kl_router_run_middleware(router, &req, &res);
+        if (mw_rc != 0)
+            goto extract_result; /* middleware short-circuited */
 
+        mw_rc = kl_router_run_post_middleware(router, &req, &res);
+        if (mw_rc != 0)
+            goto extract_result; /* post-body middleware short-circuited */
+    }
+
+    /* Dispatch handler (skip if route didn't match) */
+    if (match_status == 200 && matched)
+        matched->handler(&req, &res, matched->user_data);
+    else
+        kl_response_status(&res, match_status);
+
+extract_result:
     /* Extract results */
     result->status = res.status;
     result->body = res.body;
