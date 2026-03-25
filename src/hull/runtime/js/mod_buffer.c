@@ -1,0 +1,73 @@
+/*
+ * mod_buffer.c — Unified buffer protocol + shared class ID definitions
+ *
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ */
+
+#include "mod_buffer.h"
+
+#ifdef HL_ENABLE_WASM
+#include "hull/cap/wasm_buffer.h"
+#endif
+
+/* ── Shared class ID definitions ─────────────────────────────────── */
+
+JSClassID js_mmap_class_id;
+
+#ifdef HL_ENABLE_WASM
+JSClassID js_wasm_buf_class_id;
+#endif
+
+/* ── Unified buffer protocol (JS) ─────────────────────────────────── */
+
+/*
+ * Extract a buffer view from a JS value. Tries (in order):
+ * MappedBuffer -> WasmBuffer -> ArrayBuffer -> string.
+ * Sets *str_needs_free = 1 if the data came from JS_ToCStringLen
+ * (caller must JS_FreeCString). Returns 1 on success, 0 on failure.
+ */
+int js_get_buffer(JSContext *ctx, JSValueConst val,
+                  HlBufferView *out, const char **str_out,
+                  int *str_needs_free)
+{
+    *str_needs_free = 0;
+    *str_out = NULL;
+
+    /* MappedBuffer */
+    HlMappedBuffer *mb = JS_GetOpaque2(ctx, val, js_mmap_class_id);
+    if (mb && !mb->closed) {
+        out->data = mb->addr;
+        out->len = mb->len;
+        return 1;
+    }
+#ifdef HL_ENABLE_WASM
+    /* WasmBuffer — js_wasm_buf_class_id is defined in this file */
+    {
+        HlWasmBuffer *wb = JS_GetOpaque2(ctx, val, js_wasm_buf_class_id);
+        if (wb && !wb->closed) {
+            out->data = hl_wasm_buffer_data(wb);
+            out->len = hl_wasm_buffer_len(wb);
+            return 1;
+        }
+    }
+#endif
+    /* ArrayBuffer */
+    size_t ab_len;
+    uint8_t *ab = JS_GetArrayBuffer(ctx, &ab_len, val);
+    if (ab) {
+        out->data = ab;
+        out->len = ab_len;
+        return 1;
+    }
+    /* String (caller must free) */
+    size_t slen;
+    const char *s = JS_ToCStringLen(ctx, &slen, val);
+    if (s) {
+        out->data = s;
+        out->len = slen;
+        *str_out = s;
+        *str_needs_free = 1;
+        return 1;
+    }
+    return 0;
+}
