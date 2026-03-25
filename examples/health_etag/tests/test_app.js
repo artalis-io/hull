@@ -1,9 +1,8 @@
 // Tests for health check + ETag middleware
 // Run: hull test examples/health_etag
 
-import { health } from "hull:middleware:health";
 import { etag } from "hull:middleware:etag";
-import { db } from "hull:db";
+import { health } from "hull:middleware:health";
 
 // ═══════════════════════════════════════════════════════════════════
 // Health Check Tests
@@ -62,13 +61,13 @@ test("GET /api/items returns ETag header", () => {
     const res = test.get("/api/items");
     test.eq(res.status, 200);
     test.ok(res.json.items, "has items");
-    const tag = res.headers["etag"];
+    const tag = res.headers.etag;
     test.ok(tag, "has ETag header");
 });
 
 test("GET /api/items with matching If-None-Match returns 304", () => {
     const res1 = test.get("/api/items");
-    const tag = res1.headers["etag"];
+    const tag = res1.headers.etag;
     test.ok(tag, "first request has ETag");
 
     const res2 = test.get("/api/items", {
@@ -88,12 +87,12 @@ test("GET /api/items with wrong If-None-Match returns 200", () => {
 test("GET /api/greeting returns ETag", () => {
     const res = test.get("/api/greeting?name=Test");
     test.eq(res.status, 200);
-    test.ok(res.headers["etag"], "has ETag");
+    test.ok(res.headers.etag, "has ETag");
 });
 
 test("ETag changes when data changes", () => {
     const res1 = test.get("/api/items");
-    const tag1 = res1.headers["etag"];
+    const tag1 = res1.headers.etag;
 
     test.post("/api/items", {
         body: '{"name":"JSItem"}',
@@ -101,7 +100,7 @@ test("ETag changes when data changes", () => {
     });
 
     const res2 = test.get("/api/items");
-    const tag2 = res2.headers["etag"];
+    const tag2 = res2.headers.etag;
 
     test.ok(tag1 !== tag2, "ETag changed after data modification");
 });

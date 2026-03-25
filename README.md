@@ -149,6 +149,8 @@ Hull ships a full set of middleware and utility modules for building secure back
 | `validate` | `hull.validate` | `hull:validate` | Declarative input validation with schema rules |
 | `form` | `hull.form` | `hull:form` | URL-encoded form body parsing |
 | `i18n` | `hull.i18n` | `hull:i18n` | Internationalization: locale detection, translations, formatting |
+| `health` | `hull.middleware.health` | `hull:middleware:health` | Health check + readiness endpoints |
+| `etag` | `hull.middleware.etag` | `hull:middleware:etag` | ETag response helpers with 304 Not Modified |
 | `json` | `hull.json` | (built-in) | JSON encode/decode |
 
 All middleware modules follow the same factory pattern: `module.middleware(opts)` returns a function `(req, res) -> 0|1` where `0` = continue, `1` = short-circuit.

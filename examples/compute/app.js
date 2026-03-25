@@ -63,10 +63,10 @@ app.get("/persistent-async", async (req, res) => {
 });
 
 // Persistent instance info
-app.get("/persistent-info", (req, res) => {
+app.get("/persistent-info", (_req, res) => {
     res.json({ name: echoInst.name, closed: echoInst.closed });
 });
 
-app.get("/health", (req, res) => {
+app.get("/health", (_req, res) => {
     res.json({ ok: true });
 });

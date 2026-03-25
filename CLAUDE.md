@@ -391,6 +391,8 @@ Register with `app.use(method, pattern, mw)`:
 | `csv` | `hull.csv` | `hull:csv` | CSV parse/encode (RFC 4180) |
 | `search` | `hull.search` | `hull:search` | Full-text search (SQLite FTS5) |
 | `rbac` | `hull.middleware.rbac` | `hull:middleware:rbac` | Role-based access control |
+| `health` | `hull.middleware.health` | `hull:middleware:health` | Health check + readiness endpoints |
+| `etag` | `hull.middleware.etag` | `hull:middleware:etag` | ETag response helpers with 304 Not Modified |
 | `json` | `hull.json` | (built-in) | JSON encode/decode |
 
 ### Module APIs
@@ -595,6 +597,26 @@ template.clearCache();                           // clear compiled function cach
 - `rbac.require_role(role)` → middleware function (403 on denial).
 - `rbac.require_permission(perm)` → middleware function (403 on denial).
 
+**health** — Liveness (`/health`) and readiness (`/ready`) endpoints with DB ping, custom checks, and server stats.
+- `health.register(name, fn)` — register a custom health check. `fn()` returns `true` or `false`.
+- `health.unregister(name)` — remove a registered check.
+- `health.run_checks(opts)` → `{ checks, all_ok }`. `opts.db_check` (default: `true`).
+- `health.middleware(opts)` — returns middleware that intercepts `/health` and `/ready`.
+  - `opts.path_health` — liveness path (default: `"/health"`). Returns `{ status: "ok", uptime }`.
+  - `opts.path_ready` — readiness path (default: `"/ready"`). Returns status, checks, uptime, server stats.
+  - `opts.db_check` — include DB ping (default: `true`).
+  - Returns `1` on health/ready paths, `0` otherwise (passes through to next handler).
+  - Readiness returns 503 if any check fails.
+- **JS only:** `health.setDb(dbModule)` — pass the db module explicitly (ES modules can't conditionally import). Also accepts `opts.db` in middleware options.
+
+**etag** — ETag response helpers. Not a middleware — provides wrapper functions for route handlers.
+- `etag.json(req, res, data, status?)` — send JSON response with ETag. Sends 304 if `If-None-Match` matches.
+- `etag.text(req, res, text, status?)` — same for text responses.
+- `etag.html(req, res, html, status?)` — same for HTML responses.
+- `etag.compute(body)` → `W/"<first 16 hex chars of SHA-256>"` or `nil`.
+- `etag.matches(req, tag)` → boolean. Checks `If-None-Match` header (comma-separated, `*` wildcard).
+- Only computes ETags for GET/HEAD requests. Skips bodies > 1 MB.
+
 ### Static File Serving
 
 Convention-based: place files in `app_dir/static/`, they're served at `/static/*`.
@@ -625,6 +647,8 @@ local auth        = require("hull.middleware.auth")
 local csrf        = require("hull.middleware.csrf")
 local session     = require("hull.middleware.session")
 local logger      = require("hull.middleware.logger")
+local health      = require("hull.middleware.health")
+local etag        = require("hull.middleware.etag")
 local transaction = require("hull.middleware.transaction")
 local idempotency = require("hull.middleware.idempotency")
 
@@ -632,6 +656,8 @@ session.init()       -- create hull_sessions table
 idempotency.init()   -- create _hull_idempotency_keys table
 
 -- Pre-body middleware (runs before body is read)
+-- 0. Health checks — /health (liveness) and /ready (readiness)
+app.use("GET", "/*", health.middleware())
 -- 1. Logging — assign request ID, log method + path
 app.use("*", "/*", logger.middleware({ skip = {"/health"} }))
 -- 2. Rate limiting — reject abusive traffic before doing any work
@@ -648,7 +674,11 @@ app.use_post("*", "/*", csrf.middleware({ secret = "change-me" }))
 app.use_post("POST", "/api/*", transaction.middleware())
 -- 7. Idempotency — cache POST responses by Idempotency-Key header
 app.use_post("POST", "/api/*", idempotency.middleware())
--- 8. Route handlers
+-- 8. Route handlers — use etag.json() instead of res:json() for ETag support
+app.get("/api/items", function(req, res)
+    local items = db.query("SELECT * FROM items")
+    etag.json(req, res, { items = items })
+end)
 ```
 
 ### Best Practices

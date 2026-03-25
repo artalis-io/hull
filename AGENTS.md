@@ -430,6 +430,8 @@ Undeclared capabilities are blocked. An empty manifest `{}` means no filesystem,
 | `search` | `require("hull.search")` | `import { search } from "hull:search"` | Full-text search (SQLite FTS5) |
 | `rbac` | `require("hull.middleware.rbac")` | `import { rbac } from "hull:middleware:rbac"` | Role-based access control |
 | `i18n` | `require("hull.i18n")` | `import { i18n } from "hull:i18n"` | Translations |
+| `health` | `require("hull.middleware.health")` | `import { health } from "hull:middleware:health"` | Health check + readiness endpoints |
+| `etag` | `require("hull.middleware.etag")` | `import { etag } from "hull:middleware:etag"` | ETag response helpers |
 
 ## Database API
 

@@ -2,9 +2,9 @@
 //
 // Demonstrates hull:middleware:health and hull:middleware:etag
 
-import { health } from "hull:middleware:health";
-import { etag } from "hull:middleware:etag";
 import { db } from "hull:db";
+import { etag } from "hull:middleware:etag";
+import { health } from "hull:middleware:health";
 
 // Register a custom health check
 health.register("app_ready", () => true);
