@@ -5213,6 +5213,7 @@ static int l_gpu_async_pipeline(lua_State *L)
 
     /* Parse opts */
     HlGpuPipelineOutput outputs[HL_GPU_MAX_PIPELINE_OUTPUTS];
+    memset(outputs, 0, sizeof(outputs));
     int output_count = 0;
     int device = -1;
     if (lua_istable(L, 2)) {
