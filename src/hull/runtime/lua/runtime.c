@@ -8,6 +8,7 @@
  */
 
 #include "hull/runtime/lua.h"
+#include "hull/reqctx.h"
 #include "hull/alloc.h"
 #include "hull/manifest.h"
 #include "hull/cap/body.h"
@@ -26,6 +27,7 @@
 
 #include "log.h"
 
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -309,6 +311,9 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     if (!lua || !lua->L || !req || !res)
         return -1;
 
+    assert(lua->dispatch_depth == 0 && "re-entrant dispatch");
+    lua->dispatch_depth++;
+
     /* Guard: roll back any stale transaction left by a crashed handler */
     hl_cap_db_guard_stale_txn(lua->base.db);
 
@@ -372,16 +377,21 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
         lua->active_co = NULL;
         lua->active_conn = NULL;
         lua->active_req = NULL;
+        lua->dispatch_depth--;
 
         /* Pop any return values and routes table */
         if (nres > 0)
             lua_settop(co, 0);
         lua_pop(lua->L, 1); /* pop routes table */
 
-        /* Free ctx if middleware set it (size stored in prefix) */
+        /* Free ctx if middleware set it */
         if (req->ctx) {
-            size_t *block = (size_t *)req->ctx - 1;
-            hl_alloc_free(lua->base.alloc, block, sizeof(size_t) + block[0]);
+            HlReqCtx *rctx = (HlReqCtx *)req->ctx;
+            if (rctx->kind == HL_REQCTX_LUA_REF)
+                luaL_unref(lua->L, LUA_REGISTRYINDEX, rctx->lua_ref);
+            else if (rctx->kind == HL_REQCTX_JSON)
+                hl_alloc_free(lua->base.alloc, rctx->json.data, rctx->json.len + 1);
+            hl_alloc_free(lua->base.alloc, rctx, sizeof(HlReqCtx));
             req->ctx = NULL;
         }
         return 0;
@@ -390,6 +400,7 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     if (status == LUA_YIELD) {
         /* Handler yielded — connection is suspended.
          * Don't clean up coroutine ref, don't free ctx.
+         * dispatch_depth stays at 1 — decremented on async resume.
          * kl_async_suspend already removed client FD from event loop.
          * Routes table stays on main state stack — cleaned up on resume. */
         lua_pop(lua->L, 1); /* pop routes table */
@@ -404,13 +415,18 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     lua->active_co = NULL;
     lua->active_conn = NULL;
     lua->active_req = NULL;
+    lua->dispatch_depth--;
 
     lua_pop(lua->L, 1); /* pop routes table */
 
-    /* Free ctx if middleware set it (size stored in prefix) */
+    /* Free ctx if middleware set it */
     if (req->ctx) {
-        size_t *block = (size_t *)req->ctx - 1;
-        hl_alloc_free(lua->base.alloc, block, sizeof(size_t) + block[0]);
+        HlReqCtx *rctx = (HlReqCtx *)req->ctx;
+        if (rctx->kind == HL_REQCTX_LUA_REF)
+            luaL_unref(lua->L, LUA_REGISTRYINDEX, rctx->lua_ref);
+        else if (rctx->kind == HL_REQCTX_JSON)
+            hl_alloc_free(lua->base.alloc, rctx->json.data, rctx->json.len + 1);
+        hl_alloc_free(lua->base.alloc, rctx, sizeof(HlReqCtx));
         req->ctx = NULL;
     }
     return -1;
@@ -577,6 +593,9 @@ static void hl_lua_timer_trampoline(void *user_data)
     sh_arena_reset(lua->scratch);
     hl_cap_db_guard_stale_txn(lua->base.db);
 
+    assert(lua->dispatch_depth == 0 && "timer fired during active dispatch");
+    lua->dispatch_depth++;
+
     /* Clear per-request state (no connection) */
     lua->active_conn = NULL;
     lua->active_req = NULL;
@@ -616,6 +635,7 @@ static void hl_lua_timer_trampoline(void *user_data)
         lua->active_thread_ref = LUA_NOREF;
         lua->active_co = NULL;
         lua->active_timer = NULL;
+        lua->dispatch_depth--;
         t->in_flight = 0;
 
         if (!cancelled)
@@ -624,6 +644,7 @@ static void hl_lua_timer_trampoline(void *user_data)
         /* Handler yielded (async op in flight).
          * The continuation was created by the yielding function and
          * already has timer_ctx wired (via lua->active_timer).
+         * dispatch_depth stays at 1 — decremented on async resume.
          * When async completes, hl_lua_async_resume will clear
          * in_flight and reschedule. Nothing to do here. */
     } else {
@@ -634,6 +655,7 @@ static void hl_lua_timer_trampoline(void *user_data)
         lua->active_thread_ref = LUA_NOREF;
         lua->active_co = NULL;
         lua->active_timer = NULL;
+        lua->dispatch_depth--;
         t->in_flight = 0;
         hl_lua_timer_reschedule(t);
     }
@@ -988,41 +1010,35 @@ int hl_lua_dispatch_middleware(HlLua *lua, int handler_id,
         result = lua_toboolean(lua->L, -1) ? 1 : 0;
     lua_pop(lua->L, 1); /* pop return value */
 
-    /* Serialize req.ctx to JSON and store in req->ctx so the handler
-     * dispatch (or next middleware) can reconstruct it. */
-    lua_checkstack(lua->L, 6);
+    /* Store req.ctx as a Lua registry ref so the next middleware
+     * or handler can retrieve the table directly (no JSON round-trip). */
+    lua_checkstack(lua->L, 4);
     lua_getfield(lua->L, LUA_REGISTRYINDEX, "__hull_mw_req");
     lua_getfield(lua->L, -1, "ctx");
     if (lua_istable(lua->L, -1)) {
-        lua_getglobal(lua->L, "json");
-        lua_getfield(lua->L, -1, "encode");
-        lua_pushvalue(lua->L, -3); /* push ctx table */
-        if (lua_pcall(lua->L, 1, 1, 0) == LUA_OK) {
-            size_t json_len;
-            const char *json_str = lua_tolstring(lua->L, -1, &json_len);
-            if (json_str && json_len > 2 && json_len < 65536) { /* skip empty "{}" */
-                if (req->ctx) {
-                    size_t *old_block = (size_t *)req->ctx - 1;
-                    hl_alloc_free(lua->base.alloc, old_block,
-                                  sizeof(size_t) + old_block[0]);
-                    req->ctx = NULL;
-                }
-                size_t alloc_sz = json_len + 1;
-                size_t *block = hl_alloc_malloc(lua->base.alloc,
-                                                sizeof(size_t) + alloc_sz);
-                if (block) {
-                    block[0] = alloc_sz;
-                    memcpy(block + 1, json_str, alloc_sz);
-                    req->ctx = (char *)(block + 1);
-                }
-            }
-            lua_pop(lua->L, 1); /* pop json string */
-        } else {
-            lua_pop(lua->L, 1); /* pop error */
+        /* Free previous ctx if any */
+        if (req->ctx) {
+            HlReqCtx *old = (HlReqCtx *)req->ctx;
+            if (old->kind == HL_REQCTX_LUA_REF)
+                luaL_unref(lua->L, LUA_REGISTRYINDEX, old->lua_ref);
+            else if (old->kind == HL_REQCTX_JSON)
+                hl_alloc_free(lua->base.alloc, old->json.data, old->json.len + 1);
+            hl_alloc_free(lua->base.alloc, old, sizeof(HlReqCtx));
+            req->ctx = NULL;
         }
-        lua_pop(lua->L, 1); /* pop json table */
+        /* Create registry ref to the ctx table */
+        int ref = luaL_ref(lua->L, LUA_REGISTRYINDEX);
+        HlReqCtx *rctx = hl_alloc_malloc(lua->base.alloc, sizeof(HlReqCtx));
+        if (rctx) {
+            rctx->kind = HL_REQCTX_LUA_REF;
+            rctx->lua_ref = ref;
+            req->ctx = rctx;
+        } else {
+            luaL_unref(lua->L, LUA_REGISTRYINDEX, ref);
+        }
+    } else {
+        lua_pop(lua->L, 1); /* pop non-table ctx */
     }
-    lua_pop(lua->L, 1); /* pop ctx table */
     lua_pop(lua->L, 1); /* pop saved req table */
 
     /* Clean up registry ref */

@@ -101,6 +101,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
 
         js->async_pending = 0;
         js->active_conn = NULL;
+        js->dispatch_depth--;
 
         if (conn) {
             if (conn->res.body_mode == KL_BODY_STREAM) {
@@ -135,6 +136,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
 
         js->async_pending = 0;
         js->active_conn = NULL;
+        js->dispatch_depth--;
 
         if (conn) {
             kl_response_status(&conn->res, 500);

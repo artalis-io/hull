@@ -19,6 +19,7 @@
 #include <keel/body_reader.h>
 
 #include "hull/alloc.h"
+#include "hull/reqctx.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -110,18 +111,21 @@ int hl_cap_test_dispatch(KlRouter *router, const char *method,
     }
 
     /* Inject context if provided (parsed as JSON by Lua/JS bindings).
-     * The runtime dispatcher frees req.ctx using a tagged-allocation layout:
-     *   [size_t: alloc_sz][char[alloc_sz]: json\0]
-     * with req->ctx pointing past the size prefix. Allocate through the
-     * same tracked allocator the runtime uses for balanced accounting. */
+     * Allocate an HlReqCtx with kind=JSON so the runtime can parse it.
+     * The runtime dispatcher frees req.ctx via HlReqCtx kind dispatch. */
     if (ctx_json) {
         size_t json_len = strlen(ctx_json);
-        size_t alloc_sz = json_len + 1;
-        size_t *block = hl_alloc_malloc(hl_alloc, sizeof(size_t) + alloc_sz);
-        if (block) {
-            block[0] = alloc_sz;
-            memcpy(block + 1, ctx_json, alloc_sz);
-            req.ctx = (char *)(block + 1);
+        HlReqCtx *rctx = hl_alloc_malloc(hl_alloc, sizeof(HlReqCtx));
+        if (rctx) {
+            rctx->kind = HL_REQCTX_JSON;
+            rctx->json.data = hl_alloc_malloc(hl_alloc, json_len + 1);
+            if (rctx->json.data) {
+                memcpy(rctx->json.data, ctx_json, json_len + 1);
+                rctx->json.len = json_len;
+                req.ctx = rctx;
+            } else {
+                hl_alloc_free(hl_alloc, rctx, sizeof(HlReqCtx));
+            }
         }
     }
 

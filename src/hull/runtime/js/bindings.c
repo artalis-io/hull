@@ -9,10 +9,14 @@
  */
 
 #include "hull/runtime/js.h"
+#include "hull/reqctx.h"
 #include "hull/limits.h"
 #include "hull/cap/body.h"
 #include "hull/compress.h"
 #include "quickjs.h"
+
+_Static_assert(sizeof(JSValue) <= sizeof(((HlReqCtx *)0)->js_val_bytes),
+               "JSValue too large for HlReqCtx.js_val_bytes");
 
 #include <keel/request.h>
 #include <keel/response.h>
@@ -161,16 +165,28 @@ JSValue hl_js_make_request(JSContext *ctx, KlRequest *req)
     }
 
     /* ctx — per-request context object (middleware → handler).
-     * If req->ctx carries a JSON string from a prior middleware dispatch,
-     * parse it; otherwise start with an empty object. */
+     * If req->ctx carries a native JS ref, retrieve it directly;
+     * if it carries a JSON string (from test dispatch), parse it;
+     * otherwise start with an empty object. */
     if (req->ctx) {
-        const char *json_ctx = (const char *)req->ctx;
-        JSValue parsed = JS_ParseJSON(ctx, json_ctx, strlen(json_ctx), "<ctx>");
-        if (JS_IsException(parsed)) {
-            JS_FreeValue(ctx, JS_GetException(ctx));
-            JS_SetPropertyStr(ctx, obj, "ctx", JS_NewObject(ctx));
+        HlReqCtx *rctx = (HlReqCtx *)req->ctx;
+        if (rctx->kind == HL_REQCTX_JS_VAL) {
+            /* Native JS object — reconstruct JSValue from stored bytes */
+            JSValue val;
+            memcpy(&val, rctx->js_val_bytes, sizeof(val));
+            JS_SetPropertyStr(ctx, obj, "ctx", JS_DupValue(ctx, val));
+        } else if (rctx->kind == HL_REQCTX_JSON) {
+            /* JSON string (from test dispatch) — parse it */
+            JSValue parsed = JS_ParseJSON(ctx, rctx->json.data,
+                                          rctx->json.len, "<ctx>");
+            if (JS_IsException(parsed)) {
+                JS_FreeValue(ctx, JS_GetException(ctx));
+                JS_SetPropertyStr(ctx, obj, "ctx", JS_NewObject(ctx));
+            } else {
+                JS_SetPropertyStr(ctx, obj, "ctx", parsed);
+            }
         } else {
-            JS_SetPropertyStr(ctx, obj, "ctx", parsed);
+            JS_SetPropertyStr(ctx, obj, "ctx", JS_NewObject(ctx));
         }
     } else {
         JS_SetPropertyStr(ctx, obj, "ctx", JS_NewObject(ctx));

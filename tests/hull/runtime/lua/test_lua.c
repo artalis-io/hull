@@ -9,6 +9,7 @@
 
 #include "utest.h"
 #include "hull/runtime/lua.h"
+#include "hull/reqctx.h"
 #include "hull/vfs.h"
 #include "hull/cap/db.h"
 #include "hull/cap/env.h"
@@ -54,6 +55,19 @@ static void cleanup_lua(void)
         hl_lua_free(&lua_rt);
         lua_initialized = 0;
     }
+}
+
+/* Free HlReqCtx stored on req->ctx by middleware dispatch */
+static void free_lua_req_ctx(KlRequest *req)
+{
+    if (!req->ctx) return;
+    HlReqCtx *rctx = (HlReqCtx *)req->ctx;
+    if (rctx->kind == HL_REQCTX_LUA_REF && lua_initialized)
+        luaL_unref(lua_rt.L, LUA_REGISTRYINDEX, rctx->lua_ref);
+    else if (rctx->kind == HL_REQCTX_JSON)
+        free(rctx->json.data);
+    free(rctx);
+    req->ctx = NULL;
 }
 
 /* Init lua with database and env capabilities for testing */
@@ -1355,6 +1369,7 @@ UTEST(lua_middleware, dispatch_return_zero_continues)
     int result = hl_lua_dispatch_middleware(&lua_rt, handler_id, &req, &res);
     ASSERT_EQ(result, 0);
 
+    free_lua_req_ctx(&req);
     cleanup_lua();
 }
 
@@ -1378,6 +1393,7 @@ UTEST(lua_middleware, dispatch_return_nonzero_short_circuits)
     int result = hl_lua_dispatch_middleware(&lua_rt, handler_id, &req, &res);
     ASSERT_EQ(result, 1);
 
+    free_lua_req_ctx(&req);
     cleanup_lua();
 }
 

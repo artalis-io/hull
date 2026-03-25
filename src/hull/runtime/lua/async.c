@@ -88,6 +88,7 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
         lua->active_thread_ref = LUA_NOREF;
         lua->active_co = NULL;
         lua->active_conn = NULL;
+        lua->dispatch_depth--;
 
         if (conn) {
             /* Attached mode — response is ready */
@@ -108,6 +109,7 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
     } else if (status == LUA_YIELD) {
         /* Handler yielded again — new HlAsyncCtx already set up.
          * The new continuation captured the current co/conn/thread_ref.
+         * dispatch_depth stays elevated — decremented on final resume.
          * Transfer timer_ctx to the new continuation if present. */
         if (lc->timer_ctx) {
             /* Find the most recent continuation on the Lua state —
@@ -129,6 +131,7 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
         lua->active_thread_ref = LUA_NOREF;
         lua->active_co = NULL;
         lua->active_conn = NULL;
+        lua->dispatch_depth--;
 
         if (conn) {
             kl_response_status(&conn->res, 500);

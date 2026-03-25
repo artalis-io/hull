@@ -9,6 +9,7 @@
  */
 
 #include "hull/runtime/lua.h"
+#include "hull/reqctx.h"
 #include "hull/limits.h"
 #include "hull/cap/body.h"
 #include "hull/compress.h"
@@ -144,26 +145,37 @@ void hl_lua_make_request(lua_State *L, KlRequest *req)
     lua_setfield(L, -2, "body");
 
     /* ctx — per-request context table (middleware → handler).
-     * If req->ctx carries a JSON string from a prior middleware dispatch,
-     * parse it and merge into the ctx table; otherwise start empty. */
-    lua_newtable(L);
+     * If req->ctx carries a native Lua ref, retrieve it directly;
+     * if it carries a JSON string (from test dispatch), parse it;
+     * otherwise start with an empty table. */
     if (req->ctx) {
-        int ctx_idx = lua_absindex(L, -1);
-        const char *json_ctx = (const char *)req->ctx;
-        lua_getglobal(L, "json");
-        lua_getfield(L, -1, "decode");
-        lua_pushstring(L, json_ctx);
-        if (lua_pcall(L, 1, 1, 0) == LUA_OK && lua_istable(L, -1)) {
-            /* Merge decoded table into ctx */
-            lua_pushnil(L);
-            while (lua_next(L, -2) != 0) {
-                lua_pushvalue(L, -2); /* copy key */
-                lua_insert(L, -2);    /* stack: ..., key, key, value */
-                lua_settable(L, ctx_idx);  /* ctx[key] = value */
+        HlReqCtx *rctx = (HlReqCtx *)req->ctx;
+        if (rctx->kind == HL_REQCTX_LUA_REF) {
+            /* Native Lua table — retrieve directly from registry */
+            lua_rawgeti(L, LUA_REGISTRYINDEX, rctx->lua_ref);
+        } else if (rctx->kind == HL_REQCTX_JSON) {
+            /* JSON string (from test dispatch) — parse it */
+            lua_newtable(L);
+            int ctx_idx = lua_absindex(L, -1);
+            lua_getglobal(L, "json");
+            lua_getfield(L, -1, "decode");
+            lua_pushstring(L, rctx->json.data);
+            if (lua_pcall(L, 1, 1, 0) == LUA_OK && lua_istable(L, -1)) {
+                /* Merge decoded table into ctx */
+                lua_pushnil(L);
+                while (lua_next(L, -2) != 0) {
+                    lua_pushvalue(L, -2); /* copy key */
+                    lua_insert(L, -2);    /* stack: ..., key, key, value */
+                    lua_settable(L, ctx_idx);  /* ctx[key] = value */
+                }
             }
+            lua_pop(L, 1); /* pop decoded table or error */
+            lua_pop(L, 1); /* pop json table */
+        } else {
+            lua_newtable(L); /* unknown kind — empty ctx */
         }
-        lua_pop(L, 1); /* pop decoded table or error */
-        lua_pop(L, 1); /* pop json table */
+    } else {
+        lua_newtable(L);
     }
     lua_setfield(L, -2, "ctx");
 }

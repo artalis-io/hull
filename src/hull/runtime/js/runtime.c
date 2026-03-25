@@ -9,6 +9,7 @@
  */
 
 #include "hull/runtime/js.h"
+#include "hull/reqctx.h"
 #include "hull/async.h"
 #include "hull/alloc.h"
 #include "hull/limits.h"
@@ -27,6 +28,7 @@
 
 #include "log.h"
 
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -879,6 +881,9 @@ static void hl_js_timer_trampoline(void *user_data)
     sh_arena_reset(js->scratch);
     hl_cap_db_guard_stale_txn(js->base.db);
 
+    assert(js->dispatch_depth == 0 && "timer fired during active dispatch");
+    js->dispatch_depth++;
+
     /* Clear per-request state (no connection) */
     js->active_conn = NULL;
     js->active_req = NULL;
@@ -917,6 +922,7 @@ static void hl_js_timer_trampoline(void *user_data)
         JS_FreeValue(ctx, ret);
         t->in_flight = 0;
         js->active_timer = NULL;
+        js->dispatch_depth--;
         hl_js_timer_reschedule(t);
         return;
     }
@@ -932,7 +938,8 @@ static void hl_js_timer_trampoline(void *user_data)
         }
         /* Timer ctx was already set via js->active_timer at cont creation */
         JS_FreeValue(ctx, ret);
-        /* in_flight stays 1; cleared when async resume completes */
+        /* in_flight stays 1; dispatch_depth stays elevated.
+         * Both cleared when async resume completes. */
         js->active_timer = NULL;
         return;
     }
@@ -962,6 +969,7 @@ static void hl_js_timer_trampoline(void *user_data)
     JS_FreeValue(ctx, ret);
     t->in_flight = 0;
     js->active_timer = NULL;
+    js->dispatch_depth--;
 
     if (!cancelled)
         hl_js_timer_reschedule(t);
@@ -995,6 +1003,9 @@ int hl_js_dispatch(HlJS *js, int handler_id,
 {
     if (!js || !js->ctx || !req || !res)
         return -1;
+
+    assert(js->dispatch_depth == 0 && "re-entrant dispatch");
+    js->dispatch_depth++;
 
     /* Guard: roll back any stale transaction left by a crashed handler */
     hl_cap_db_guard_stale_txn(js->base.db);
@@ -1079,13 +1090,23 @@ int hl_js_dispatch(HlJS *js, int handler_id,
         /* Sync path — clean up middleware ctx */
         js->active_conn = NULL;
         js->active_req = NULL;
+        js->dispatch_depth--;
 
         if (req->ctx) {
-            size_t *block = (size_t *)req->ctx - 1;
-            hl_alloc_free(js->base.alloc, block, sizeof(size_t) + block[0]);
+            HlReqCtx *rctx = (HlReqCtx *)req->ctx;
+            if (rctx->kind == HL_REQCTX_JS_VAL) {
+                JSValue val;
+                memcpy(&val, rctx->js_val_bytes, sizeof(val));
+                JS_FreeValue(js->ctx, val);
+            } else if (rctx->kind == HL_REQCTX_JSON) {
+                hl_alloc_free(js->base.alloc, rctx->json.data, rctx->json.len + 1);
+            }
+            hl_alloc_free(js->base.alloc, rctx, sizeof(HlReqCtx));
             req->ctx = NULL;
         }
     }
+    /* result == 1: handler suspended, dispatch_depth stays elevated
+     * until async resume completes */
 
     /* Run any pending microtasks */
     hl_js_run_jobs(js);
@@ -1470,35 +1491,31 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
             result = val;
     }
 
-    /* Serialize req.ctx to JSON and store in req->ctx so the handler
-     * dispatch (or next middleware) can reconstruct it. */
+    /* Store req.ctx as a JS value ref so the next middleware
+     * or handler can retrieve the object directly (no JSON round-trip). */
     JSValue ctx_val = JS_GetPropertyStr(js->ctx, js_req, "ctx");
     if (JS_IsObject(ctx_val)) {
-        JSValue json_val = JS_JSONStringify(js->ctx, ctx_val, JS_UNDEFINED,
-                                             JS_UNDEFINED);
-        if (!JS_IsException(json_val) && JS_IsString(json_val)) {
-            const char *json_str = JS_ToCString(js->ctx, json_val);
-            size_t json_len = json_str ? strlen(json_str) : 0;
-            if (json_str && json_len > 2 && json_len < 65536) { /* skip empty "{}" */
-                if (req->ctx) {
-                    size_t *old_block = (size_t *)req->ctx - 1;
-                    hl_alloc_free(js->base.alloc, old_block,
-                                  sizeof(size_t) + old_block[0]);
-                    req->ctx = NULL;
-                }
-                /* Prepend size_t length for safe deallocation */
-                size_t alloc_sz = json_len + 1;
-                size_t *block = hl_alloc_malloc(js->base.alloc,
-                                                sizeof(size_t) + alloc_sz);
-                if (block) {
-                    block[0] = alloc_sz;
-                    memcpy(block + 1, json_str, alloc_sz);
-                    req->ctx = (char *)(block + 1);
-                }
+        /* Free previous ctx if any */
+        if (req->ctx) {
+            HlReqCtx *old = (HlReqCtx *)req->ctx;
+            if (old->kind == HL_REQCTX_JS_VAL) {
+                JSValue old_val;
+                memcpy(&old_val, old->js_val_bytes, sizeof(old_val));
+                JS_FreeValue(js->ctx, old_val);
+            } else if (old->kind == HL_REQCTX_JSON) {
+                hl_alloc_free(js->base.alloc, old->json.data, old->json.len + 1);
             }
-            if (json_str) JS_FreeCString(js->ctx, json_str);
+            hl_alloc_free(js->base.alloc, old, sizeof(HlReqCtx));
+            req->ctx = NULL;
         }
-        JS_FreeValue(js->ctx, json_val);
+        /* Store native JS value */
+        HlReqCtx *rctx = hl_alloc_malloc(js->base.alloc, sizeof(HlReqCtx));
+        if (rctx) {
+            rctx->kind = HL_REQCTX_JS_VAL;
+            JSValue dup = JS_DupValue(js->ctx, ctx_val);
+            memcpy(rctx->js_val_bytes, &dup, sizeof(dup));
+            req->ctx = rctx;
+        }
     }
     JS_FreeValue(js->ctx, ctx_val);
 

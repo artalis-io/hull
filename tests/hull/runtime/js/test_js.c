@@ -9,6 +9,7 @@
 
 #include "utest.h"
 #include "hull/runtime/js.h"
+#include "hull/reqctx.h"
 #include "hull/manifest.h"
 #include "hull/vfs.h"
 #include "hull/cap/db.h"
@@ -48,6 +49,22 @@ static void cleanup_js(void)
         hl_js_free(&js);
         js_initialized = 0;
     }
+}
+
+/* Free HlReqCtx stored on req->ctx by middleware dispatch */
+static void free_req_ctx(KlRequest *req)
+{
+    if (!req->ctx) return;
+    HlReqCtx *rctx = (HlReqCtx *)req->ctx;
+    if (rctx->kind == HL_REQCTX_JS_VAL && js_initialized) {
+        JSValue val;
+        memcpy(&val, rctx->js_val_bytes, sizeof(val));
+        JS_FreeValue(js.ctx, val);
+    } else if (rctx->kind == HL_REQCTX_JSON) {
+        free(rctx->json.data);
+    }
+    free(rctx);
+    req->ctx = NULL;
 }
 
 /* Init JS with database and env capabilities for testing */
@@ -1161,6 +1178,7 @@ UTEST(js_middleware, dispatch_return_zero_continues)
     int result = hl_js_dispatch_middleware(&js, handler_id, &req, &res);
     ASSERT_EQ(result, 0);
 
+    free_req_ctx(&req);
     cleanup_js();
 }
 
@@ -1187,6 +1205,7 @@ UTEST(js_middleware, dispatch_return_nonzero_short_circuits)
     int result = hl_js_dispatch_middleware(&js, handler_id, &req, &res);
     ASSERT_EQ(result, 1);
 
+    free_req_ctx(&req);
     cleanup_js();
 }
 
