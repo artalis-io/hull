@@ -130,6 +130,17 @@ static void free_route_allocs(HlAllocator *a)
     route_arena = NULL;
 }
 
+/* ── WASM/GPU statics (persist across hull_serve calls) ────────────── */
+
+#ifdef HL_ENABLE_WASM
+static HlWasmCache wasm_cache;
+static int wasm_cache_ok = 0;
+#endif
+#ifdef HL_ENABLE_GPU
+static HlGpuCtx gpu_ctx;
+static int gpu_ctx_ok = 0;
+#endif
+
 /* ── Runtime selection ──────────────────────────────────────────────── */
 
 typedef enum {
@@ -491,217 +502,46 @@ static void hl_resolve_wasm_config(HlRuntime *rt, const HlManifest *manifest,
 #endif
 }
 
-/* ── Server mode (default) ──────────────────────────────────────────── */
+/* ── Server state (persists for server lifetime) ──────────────────── */
 
-static int hull_serve(int argc, char **argv)
-{
-    HlServeConfig cfg = HL_SERVE_CONFIG_DEFAULT;
+typedef struct {
+    /* Configuration (parsed from CLI + env) */
+    HlServeConfig        cfg;
 
-    int rc = hl_parse_serve_args(argc, argv, &cfg);
-    if (rc != 0) return rc < 0 ? 1 : 0; /* -1 = error, 1 = help shown */
+    /* Entry point resolution */
+    const char          *entry_point;  /* may alias entry_abs or argv string */
+    char                 entry_abs[4096];
+    char                 app_dir[4096];
 
-    const char *entry_point = cfg.entry_point;
+    /* VFS instances */
+    HlVfs                app_vfs;
+    HlVfs                platform_vfs;
 
-    if (!entry_point)
-        entry_point = auto_detect_entry();
+    /* Runtime type + detected runtime */
+    HlRuntimeType        runtime;
 
-    if (!entry_point) {
-        fprintf(stderr, "hull: no entry point found (app.js or app.lua)\n");
-        usage(argv[0]);
-        return 1;
-    }
+    /* Logging + allocator (must outlive everything) */
+    HlAllocator          alloc;
+    KlAllocator          kl_alloc;
 
-    /* Resolve entry point to absolute path.  This ensures app_dir (derived
-     * below) is also absolute, so realpath() inside the sandbox doesn't need
-     * to stat the CWD — which may be outside the sandbox's allowed paths. */
-    char entry_abs[4096];
-    if (realpath(entry_point, entry_abs) != NULL)
-        entry_point = entry_abs;
+    /* Database */
+    sqlite3             *db;
+    HlStmtCache          stmt_cache;
 
-    /* Derive app directory from entry point (needed for migrations + static files + sandbox) */
-    char app_dir[4096];
-    {
-        const char *slash = strrchr(entry_point, '/');
-        if (slash) {
-            size_t len = (size_t)(slash - entry_point);
-            if (len >= sizeof(app_dir)) {
-                fprintf(stderr, "hull: entry point path too long (max %zu chars)\n",
-                        sizeof(app_dir) - 1);
-                return 1;
-            }
-            memcpy(app_dir, entry_point, len);
-            app_dir[len] = '\0';
-        } else {
-            app_dir[0] = '.';
-            app_dir[1] = '\0';
-        }
-    }
+    /* Server + TLS */
+    KlServer             server;
+    KlTlsConfig          server_tls_config;
+    KlTlsCtx            *server_tls_ctx;
 
-    /* Initialize VFS instances for sorted entry lookup */
-    extern const HlEntry hl_app_entries[];
-    extern const HlEntry hl_stdlib_entries[];
-    HlVfs app_vfs, platform_vfs;
-    hl_vfs_init(&app_vfs, hl_app_entries, app_dir);
-    hl_vfs_init(&platform_vfs, hl_stdlib_entries, NULL);
+    /* Infrastructure (thread pool, client pool, compression) */
+    KlThreadPool        *thread_pool;
+    KlClientPool         client_pool;
+    int                  cpool_ok;
+    KlCompressCtx       *comp_ctx;
+    KlCompressConfig     compress_cfg;
+    KlDecompressConfig   decompress_cfg;
 
-    /* Validate TLS cert/key pair */
-    if ((cfg.tls_cert_path != NULL) != (cfg.tls_key_path != NULL)) {
-        fprintf(stderr, "hull: --tls-cert and --tls-key must be provided together\n");
-        return 1;
-    }
-
-    HlRuntimeType runtime = detect_runtime(entry_point);
-
-    /* Validate that the requested runtime is compiled in */
-#ifndef HL_ENABLE_JS
-    if (runtime == HL_RUNTIME_JS) {
-        fprintf(stderr, "hull: QuickJS runtime not enabled in this build\n");
-        return 1;
-    }
-#endif
-#ifndef HL_ENABLE_LUA
-    if (runtime == HL_RUNTIME_LUA) {
-        fprintf(stderr, "hull: Lua runtime not enabled in this build\n");
-        return 1;
-    }
-#endif
-
-    /* Initialize logging */
-    log_set_level(cfg.log_level);
-    log_set_quiet(true);  /* suppress default stderr callback */
-    log_add_callback(hl_log_callback, stderr, cfg.log_level);
-
-    /* Initialize tracking allocator */
-    HlAllocator alloc;
-    hl_alloc_init(&alloc, (size_t)cfg.mem_limit);
-    KlAllocator kl_alloc = hl_alloc_kl(&alloc);
-
-    int ret = 1;
-
-    /* Create route allocation arena (256 routes x 64 bytes = 16KB) */
-    route_arena = hl_arena_create(&alloc, HL_MAX_ROUTES * 64);
-    if (!route_arena) {
-        log_error("[hull:c] route arena allocation failed");
-        return 1;
-    }
-
-    /* Open SQLite database */
-    sqlite3 *db = NULL;
-
-    HlStmtCache stmt_cache;
-    memset(&stmt_cache, 0, sizeof(stmt_cache));
-
-    int dbrc = sqlite3_open(cfg.db_path, &db);
-    if (dbrc != SQLITE_OK) {
-        log_error("[hull:c] cannot open database %s: %s",
-                  cfg.db_path, sqlite3_errmsg(db));
-        goto cleanup_db;
-    }
-
-    /* Apply performance PRAGMAs (WAL, synchronous=NORMAL, mmap, etc.) */
-    if (hl_cap_db_init(db) != 0) {
-        log_error("[hull:c] database PRAGMA initialization failed");
-        goto cleanup_db;
-    }
-
-    /* Auto-run SQL migrations */
-    if (!cfg.no_migrate) {
-        int migrated = hl_migrate_run(db, &app_vfs);
-        if (migrated == HL_MIGRATE_ERR) {
-            log_error("[hull:c] migration failed — refusing to start");
-            goto cleanup_db;
-        }
-        if (migrated > 0)
-            log_info("[hull:c] applied %d migration(s)", migrated);
-    }
-
-    /* Initialize prepared statement cache */
-    hl_stmt_cache_init(&stmt_cache, db, &alloc);
-
-    /* Initialize Keel server */
-    KlConfig config = {
-        .port = cfg.port,
-        .bind_addr = cfg.bind_addr,
-        .max_connections = cfg.max_connections > 0 ? cfg.max_connections : HL_DEFAULT_MAX_CONN,
-        .read_timeout_ms = cfg.read_timeout > 0 ? cfg.read_timeout : HL_DEFAULT_READ_TIMEOUT_MS,
-        .max_body_size = cfg.body_max_size > 0 ? (size_t)cfg.body_max_size : HL_BODY_MAX_SIZE,
-        .install_signal_handlers = 1,
-        .drain_timeout_ms = cfg.drain_timeout,
-        .alloc = &kl_alloc,
-        .log_fn = hl_keel_log_bridge,
-        .log_user_data = NULL,
-    };
-
-    /* Set up server TLS if cert/key provided */
-    KlTlsConfig server_tls_config = {0};
-    KlTlsCtx *server_tls_ctx = NULL;
-
-    if (cfg.tls_cert_path && cfg.tls_key_path) {
-        server_tls_ctx = kl_tls_mbedtls_ctx_create(
-            cfg.tls_cert_path, cfg.tls_key_path, NULL, KL_MTLS_NONE, &kl_alloc);
-        if (!server_tls_ctx) {
-            log_error("[hull:c] failed to create server TLS context "
-                      "(cert=%s, key=%s)", cfg.tls_cert_path, cfg.tls_key_path);
-            goto cleanup_db;
-        }
-        server_tls_config.ctx         = server_tls_ctx;
-        server_tls_config.factory     = (KlTlsFactory)kl_tls_mbedtls_create;
-        server_tls_config.ctx_destroy = (void (*)(KlTlsCtx *))kl_tls_mbedtls_ctx_destroy;
-        config.tls = &server_tls_config;
-    }
-
-    KlServer server;
-    if (kl_server_init(&server, &config) != 0) {
-        log_error("[hull:c] server init failed: %s",
-                  kl_strerror(server.last_error));
-        if (server_tls_ctx)
-            kl_tls_mbedtls_ctx_destroy(server_tls_ctx);
-        goto cleanup_db;
-    }
-
-    /* Create thread pool for async work (db queries, file I/O) */
-    KlThreadPoolConfig tp_cfg = {
-        .num_workers    = cfg.num_workers > 0 ? cfg.num_workers : HL_THREAD_POOL_WORKERS,
-        .queue_capacity = cfg.queue_capacity > 0 ? cfg.queue_capacity : HL_THREAD_POOL_CAPACITY,
-        .alloc          = &kl_alloc,
-    };
-    KlThreadPool *thread_pool = kl_thread_pool_create(&server.ev, &tp_cfg);
-    if (!thread_pool)
-        log_warn("[hull:c] thread pool creation failed: %s — async work unavailable",
-                 kl_strerror(server.ev.last_error));
-    /* thread_pool may be NULL if creation fails — non-fatal, async work
-     * will simply be unavailable */
-
-    /* Create client connection pool for HTTP keep-alive reuse */
-    KlClientPool client_pool;
-    int cpool_ok = kl_cpool_init(&client_pool, NULL, &kl_alloc, &server.ev);
-    if (cpool_ok != 0)
-        log_warn("[hull:c] client pool creation failed — connection reuse disabled");
-
-    /* Create compression context for server responses and client decompression */
-    KlCompressCtx *comp_ctx = NULL;
-    KlCompressConfig compress_cfg = {0};
-    KlDecompressConfig decompress_cfg = {0};
-
-    if (!cfg.no_compress) {
-        comp_ctx = kl_compress_miniz_ctx_create(6, &kl_alloc);
-        if (comp_ctx) {
-            compress_cfg.ctx = comp_ctx;
-            compress_cfg.factory = (KlCompressFactory)kl_compress_miniz_create;
-            compress_cfg.ctx_destroy =
-                (void (*)(KlCompressCtx *))kl_compress_miniz_ctx_destroy;
-            config.compress = &compress_cfg;
-
-            decompress_cfg.ctx = comp_ctx;
-            decompress_cfg.factory =
-                (KlDecompressFactory)kl_decompress_miniz_create;
-        } else {
-            log_warn("[hull:c] compression init failed — responses uncompressed");
-        }
-    }
-
-    /* ── Runtime vtable dispatch ─────────────────────────────────── */
-
+    /* Runtime vtable dispatch */
     union {
 #ifdef HL_ENABLE_JS
         HlJS  js;
@@ -710,64 +550,343 @@ static int hull_serve(int argc, char **argv)
         HlLua lua;
 #endif
     } rt_storage;
-    memset(&rt_storage, 0, sizeof(rt_storage));
-
-    const void *rt_cfg = NULL;
-    HlRuntime *rt = NULL;
-
+    const void          *rt_cfg;
+    HlRuntime           *rt;
 #ifdef HL_ENABLE_JS
-    HlJSConfig js_cfg;
+    HlJSConfig           js_cfg;
 #endif
 #ifdef HL_ENABLE_LUA
-    HlLuaConfig lua_cfg;
+    HlLuaConfig          lua_cfg;
 #endif
 
-    if (runtime == HL_RUNTIME_JS) {
+    /* Manifest + wired capability configs */
+    HlManifest           manifest;
+    HlFsConfig           fs_cfg_storage;
+    HlEnvConfig          env_cfg_storage;
+    HlHttpConfig         http_cfg_storage;
+    HlSmtpConfig         smtp_cfg_storage;
+    KlTlsConfig          client_tls_config;
+    KlTlsCtx            *client_tls_ctx;
+    const char           *ca_bundle_path;
+
+    /* Agent API context */
+    HlAgentApiCtx        agent_api_ctx;
+
+    /* Init flags for cleanup ordering */
+    int                  db_open;      /* sqlite3_open succeeded */
+    int                  server_init;  /* kl_server_init succeeded */
+    int                  rt_init;      /* rt->vt->init() succeeded */
+    int                  app_loaded;   /* rt->vt->load_app() succeeded */
+    int                  manifest_extracted; /* extract_manifest called */
+} HlServerState;
+
+/* ── Phase functions ─────────────────────────────────────────────────
+ *
+ * Each phase receives HlServerState *s and returns 0 on success, -1 on
+ * error (or a positive value for special cases like help).  The phases
+ * must run in the order listed — later phases depend on earlier ones.
+ *
+ * Ordering constraints documented at each phase.
+ * ─────────────────────────────────────────────────────────────────── */
+
+/* Phase 1: Parse CLI args into s->cfg.
+ * Returns 0 on success, -1 on parse error, 1 if help was shown. */
+static int hl_serve_parse_args(HlServerState *s, int argc, char **argv)
+{
+    s->cfg = (HlServeConfig)HL_SERVE_CONFIG_DEFAULT;
+    int rc = hl_parse_serve_args(argc, argv, &s->cfg);
+    return rc; /* 0 = ok, -1 = error, 1 = help shown */
+}
+
+/* Phase 2: Resolve entry_point to absolute path, derive app_dir.
+ * Depends on: parse_args (s->cfg.entry_point). */
+static int hl_serve_resolve_entry(HlServerState *s, const char *argv0)
+{
+    s->entry_point = s->cfg.entry_point;
+
+    if (!s->entry_point)
+        s->entry_point = auto_detect_entry();
+
+    if (!s->entry_point) {
+        fprintf(stderr, "hull: no entry point found (app.js or app.lua)\n");
+        usage(argv0);
+        return -1;
+    }
+
+    /* Resolve entry point to absolute path.  This ensures app_dir (derived
+     * below) is also absolute, so realpath() inside the sandbox doesn't need
+     * to stat the CWD — which may be outside the sandbox's allowed paths. */
+    if (realpath(s->entry_point, s->entry_abs) != NULL)
+        s->entry_point = s->entry_abs;
+
+    /* Derive app directory from entry point (needed for migrations + static files + sandbox) */
+    {
+        const char *slash = strrchr(s->entry_point, '/');
+        if (slash) {
+            size_t len = (size_t)(slash - s->entry_point);
+            if (len >= sizeof(s->app_dir)) {
+                fprintf(stderr, "hull: entry point path too long (max %zu chars)\n",
+                        sizeof(s->app_dir) - 1);
+                return -1;
+            }
+            memcpy(s->app_dir, s->entry_point, len);
+            s->app_dir[len] = '\0';
+        } else {
+            s->app_dir[0] = '.';
+            s->app_dir[1] = '\0';
+        }
+    }
+
+    return 0;
+}
+
+/* Phase 3: Initialize app_vfs + platform_vfs from entry arrays.
+ * Depends on: resolve_entry (s->app_dir). */
+static void hl_serve_init_vfs(HlServerState *s)
+{
+    extern const HlEntry hl_app_entries[];
+    extern const HlEntry hl_stdlib_entries[];
+    hl_vfs_init(&s->app_vfs, hl_app_entries, s->app_dir);
+    hl_vfs_init(&s->platform_vfs, hl_stdlib_entries, NULL);
+}
+
+/* Phase 4: Validate TLS pair, detect and check runtime type.
+ * Depends on: parse_args (TLS paths), resolve_entry (entry_point). */
+static int hl_serve_validate_config(HlServerState *s)
+{
+    /* Validate TLS cert/key pair */
+    if ((s->cfg.tls_cert_path != NULL) != (s->cfg.tls_key_path != NULL)) {
+        fprintf(stderr, "hull: --tls-cert and --tls-key must be provided together\n");
+        return -1;
+    }
+
+    s->runtime = detect_runtime(s->entry_point);
+
+    /* Validate that the requested runtime is compiled in */
+#ifndef HL_ENABLE_JS
+    if (s->runtime == HL_RUNTIME_JS) {
+        fprintf(stderr, "hull: QuickJS runtime not enabled in this build\n");
+        return -1;
+    }
+#endif
+#ifndef HL_ENABLE_LUA
+    if (s->runtime == HL_RUNTIME_LUA) {
+        fprintf(stderr, "hull: Lua runtime not enabled in this build\n");
+        return -1;
+    }
+#endif
+
+    return 0;
+}
+
+/* Phase 5: Set log level, init tracking allocator, create route arena.
+ * Depends on: parse_args (log_level, mem_limit). */
+static int hl_serve_init_logging(HlServerState *s)
+{
+    log_set_level(s->cfg.log_level);
+    log_set_quiet(true);  /* suppress default stderr callback */
+    log_add_callback(hl_log_callback, stderr, s->cfg.log_level);
+
+    /* Initialize tracking allocator */
+    hl_alloc_init(&s->alloc, (size_t)s->cfg.mem_limit);
+    s->kl_alloc = hl_alloc_kl(&s->alloc);
+
+    /* Create route allocation arena (256 routes x 64 bytes = 16KB) */
+    route_arena = hl_arena_create(&s->alloc, HL_MAX_ROUTES * 64);
+    if (!route_arena) {
+        log_error("[hull:c] route arena allocation failed");
+        return -1;
+    }
+
+    return 0;
+}
+
+/* Phase 6: Open SQLite, apply PRAGMAs, run migrations, init stmt cache.
+ * Depends on: init_logging (allocator), init_vfs (app_vfs for migrations). */
+static int hl_serve_init_db(HlServerState *s)
+{
+    memset(&s->stmt_cache, 0, sizeof(s->stmt_cache));
+
+    int dbrc = sqlite3_open(s->cfg.db_path, &s->db);
+    if (dbrc != SQLITE_OK) {
+        log_error("[hull:c] cannot open database %s: %s",
+                  s->cfg.db_path, sqlite3_errmsg(s->db));
+        return -1;
+    }
+    s->db_open = 1;
+
+    /* Apply performance PRAGMAs (WAL, synchronous=NORMAL, mmap, etc.) */
+    if (hl_cap_db_init(s->db) != 0) {
+        log_error("[hull:c] database PRAGMA initialization failed");
+        return -1;
+    }
+
+    /* Auto-run SQL migrations */
+    if (!s->cfg.no_migrate) {
+        int migrated = hl_migrate_run(s->db, &s->app_vfs);
+        if (migrated == HL_MIGRATE_ERR) {
+            log_error("[hull:c] migration failed — refusing to start");
+            return -1;
+        }
+        if (migrated > 0)
+            log_info("[hull:c] applied %d migration(s)", migrated);
+    }
+
+    /* Initialize prepared statement cache */
+    hl_stmt_cache_init(&s->stmt_cache, s->db, &s->alloc);
+
+    return 0;
+}
+
+/* Phase 7: Create KlServer with optional TLS.
+ * Depends on: init_logging (kl_alloc), parse_args (port, bind, TLS paths). */
+static int hl_serve_init_server(HlServerState *s)
+{
+    KlConfig config = {
+        .port = s->cfg.port,
+        .bind_addr = s->cfg.bind_addr,
+        .max_connections = s->cfg.max_connections > 0 ? s->cfg.max_connections : HL_DEFAULT_MAX_CONN,
+        .read_timeout_ms = s->cfg.read_timeout > 0 ? s->cfg.read_timeout : HL_DEFAULT_READ_TIMEOUT_MS,
+        .max_body_size = s->cfg.body_max_size > 0 ? (size_t)s->cfg.body_max_size : HL_BODY_MAX_SIZE,
+        .install_signal_handlers = 1,
+        .drain_timeout_ms = s->cfg.drain_timeout,
+        .alloc = &s->kl_alloc,
+        .log_fn = hl_keel_log_bridge,
+        .log_user_data = NULL,
+    };
+
+    /* Set up server TLS if cert/key provided */
+    memset(&s->server_tls_config, 0, sizeof(s->server_tls_config));
+    s->server_tls_ctx = NULL;
+
+    if (s->cfg.tls_cert_path && s->cfg.tls_key_path) {
+        s->server_tls_ctx = kl_tls_mbedtls_ctx_create(
+            s->cfg.tls_cert_path, s->cfg.tls_key_path, NULL, KL_MTLS_NONE, &s->kl_alloc);
+        if (!s->server_tls_ctx) {
+            log_error("[hull:c] failed to create server TLS context "
+                      "(cert=%s, key=%s)", s->cfg.tls_cert_path, s->cfg.tls_key_path);
+            return -1;
+        }
+        s->server_tls_config.ctx         = s->server_tls_ctx;
+        s->server_tls_config.factory     = (KlTlsFactory)kl_tls_mbedtls_create;
+        s->server_tls_config.ctx_destroy = (void (*)(KlTlsCtx *))kl_tls_mbedtls_ctx_destroy;
+        config.tls = &s->server_tls_config;
+    }
+
+    if (kl_server_init(&s->server, &config) != 0) {
+        log_error("[hull:c] server init failed: %s",
+                  kl_strerror(s->server.last_error));
+        if (s->server_tls_ctx) {
+            kl_tls_mbedtls_ctx_destroy(s->server_tls_ctx);
+            s->server_tls_ctx = NULL;
+        }
+        return -1;
+    }
+    s->server_init = 1;
+
+    return 0;
+}
+
+/* Phase 8: Thread pool, client pool, compression (all non-fatal).
+ * Depends on: init_server (server.ev for thread pool + client pool). */
+static void hl_serve_init_infra(HlServerState *s)
+{
+    /* Create thread pool for async work (db queries, file I/O) */
+    KlThreadPoolConfig tp_cfg = {
+        .num_workers    = s->cfg.num_workers > 0 ? s->cfg.num_workers : HL_THREAD_POOL_WORKERS,
+        .queue_capacity = s->cfg.queue_capacity > 0 ? s->cfg.queue_capacity : HL_THREAD_POOL_CAPACITY,
+        .alloc          = &s->kl_alloc,
+    };
+    s->thread_pool = kl_thread_pool_create(&s->server.ev, &tp_cfg);
+    if (!s->thread_pool)
+        log_warn("[hull:c] thread pool creation failed: %s — async work unavailable",
+                 kl_strerror(s->server.ev.last_error));
+    /* thread_pool may be NULL if creation fails — non-fatal, async work
+     * will simply be unavailable */
+
+    /* Create client connection pool for HTTP keep-alive reuse */
+    s->cpool_ok = kl_cpool_init(&s->client_pool, NULL, &s->kl_alloc, &s->server.ev);
+    if (s->cpool_ok != 0)
+        log_warn("[hull:c] client pool creation failed — connection reuse disabled");
+
+    /* Create compression context for server responses and client decompression */
+    s->comp_ctx = NULL;
+    memset(&s->compress_cfg, 0, sizeof(s->compress_cfg));
+    memset(&s->decompress_cfg, 0, sizeof(s->decompress_cfg));
+
+    if (!s->cfg.no_compress) {
+        s->comp_ctx = kl_compress_miniz_ctx_create(6, &s->kl_alloc);
+        if (s->comp_ctx) {
+            s->compress_cfg.ctx = s->comp_ctx;
+            s->compress_cfg.factory = (KlCompressFactory)kl_compress_miniz_create;
+            s->compress_cfg.ctx_destroy =
+                (void (*)(KlCompressCtx *))kl_compress_miniz_ctx_destroy;
+            /* Note: config is local to init_server, but compress_cfg is used
+             * by the runtime for client-side decompression.  The server's
+             * KlConfig.compress is only read during kl_server_init, which has
+             * already returned.  We wire rt->compress below instead. */
+
+            s->decompress_cfg.ctx = s->comp_ctx;
+            s->decompress_cfg.factory =
+                (KlDecompressFactory)kl_decompress_miniz_create;
+        } else {
+            log_warn("[hull:c] compression init failed — responses uncompressed");
+        }
+    }
+}
+
+/* Phase 9: Wire capabilities to runtime, initialize runtime (rt->vt->init).
+ * Depends on: init_server, init_infra (thread_pool, comp_ctx), init_db. */
+static int hl_serve_init_runtime(HlServerState *s)
+{
+    memset(&s->rt_storage, 0, sizeof(s->rt_storage));
+    s->rt_cfg = NULL;
+    s->rt = NULL;
+
+    if (s->runtime == HL_RUNTIME_JS) {
 #ifdef HL_ENABLE_JS
-        js_cfg = (HlJSConfig)HL_JS_CONFIG_DEFAULT;
-        if (cfg.heap_limit > 0)        js_cfg.max_heap_bytes   = (size_t)cfg.heap_limit;
-        if (cfg.stack_limit > 0)       js_cfg.max_stack_bytes   = (size_t)cfg.stack_limit;
-        if (cfg.instruction_limit > 0) js_cfg.max_instructions  = cfg.instruction_limit;
-        rt = &rt_storage.js.base;
-        rt->vt = &hl_js_vtable;
-        rt_cfg = &js_cfg;
+        s->js_cfg = (HlJSConfig)HL_JS_CONFIG_DEFAULT;
+        if (s->cfg.heap_limit > 0)        s->js_cfg.max_heap_bytes   = (size_t)s->cfg.heap_limit;
+        if (s->cfg.stack_limit > 0)       s->js_cfg.max_stack_bytes   = (size_t)s->cfg.stack_limit;
+        if (s->cfg.instruction_limit > 0) s->js_cfg.max_instructions  = s->cfg.instruction_limit;
+        s->rt = &s->rt_storage.js.base;
+        s->rt->vt = &hl_js_vtable;
+        s->rt_cfg = &s->js_cfg;
 #endif
     } else {
 #ifdef HL_ENABLE_LUA
-        lua_cfg = (HlLuaConfig)HL_LUA_CONFIG_DEFAULT;
-        if (cfg.heap_limit > 0)        lua_cfg.max_heap_bytes   = (size_t)cfg.heap_limit;
-        if (cfg.instruction_limit > 0) lua_cfg.max_instructions  = cfg.instruction_limit;
-        rt = &rt_storage.lua.base;
-        rt->vt = &hl_lua_vtable;
-        rt_cfg = &lua_cfg;
+        s->lua_cfg = (HlLuaConfig)HL_LUA_CONFIG_DEFAULT;
+        if (s->cfg.heap_limit > 0)        s->lua_cfg.max_heap_bytes   = (size_t)s->cfg.heap_limit;
+        if (s->cfg.instruction_limit > 0) s->lua_cfg.max_instructions  = s->cfg.instruction_limit;
+        s->rt = &s->rt_storage.lua.base;
+        s->rt->vt = &hl_lua_vtable;
+        s->rt_cfg = &s->lua_cfg;
 #endif
     }
 
     // cppcheck-suppress knownConditionTrueFalse
-    if (!rt || !rt->vt) {
+    if (!s->rt || !s->rt->vt) {
         log_error("[hull:c] no runtime available (compile with HL_ENABLE_LUA or HL_ENABLE_JS)");
-        goto cleanup_server;
+        return -1;
     }
 
-    rt->db = db;
-    rt->stmt_cache = &stmt_cache;
-    rt->alloc = &alloc;
-    rt->thread_pool = thread_pool;
-    rt->app_vfs = &app_vfs;
-    rt->platform_vfs = &platform_vfs;
-    rt->db_path = cfg.db_path;
-    if (comp_ctx)
-        rt->compress = &compress_cfg;
+    s->rt->db = s->db;
+    s->rt->stmt_cache = &s->stmt_cache;
+    s->rt->alloc = &s->alloc;
+    s->rt->thread_pool = s->thread_pool;
+    s->rt->app_vfs = &s->app_vfs;
+    s->rt->platform_vfs = &s->platform_vfs;
+    s->rt->db_path = s->cfg.db_path;
+    if (s->comp_ctx)
+        s->rt->compress = &s->compress_cfg;
 
 #ifdef HL_ENABLE_WASM
     /* Initialize WAMR compute runtime and wire to rt immediately so
      * module registration in init() can see it.  If the manifest later
      * declares compute: false, we NULL it out before route wiring. */
-    static HlWasmCache wasm_cache;
-    static int wasm_cache_ok = 0;
     if (hl_cap_wasm_init(&wasm_cache) == 0) {
         wasm_cache_ok = 1;
-        rt->wasm_cache = &wasm_cache;
+        s->rt->wasm_cache = &wasm_cache;
     } else {
         log_warn("[hull:c] WAMR init failed — compute.call() unavailable");
     }
@@ -777,195 +896,212 @@ static int hull_serve(int argc, char **argv)
     /* Initialize GPU compute runtime and wire to rt immediately so
      * module registration in init() can see it.  If the manifest later
      * declares gpu: false, we NULL it out before route wiring. */
-    static HlGpuCtx gpu_ctx;
-    static int gpu_ctx_ok = 0;
     if (hl_cap_gpu_init(&gpu_ctx, &hl_gpu_backend_wgpu) == HL_GPU_OK
         && hl_cap_gpu_available(&gpu_ctx)) {
-        if (cfg.gpu_device >= 0 && cfg.gpu_device < gpu_ctx.device_count)
-            gpu_ctx.default_device = cfg.gpu_device;
+        if (s->cfg.gpu_device >= 0 && s->cfg.gpu_device < gpu_ctx.device_count)
+            gpu_ctx.default_device = s->cfg.gpu_device;
         gpu_ctx_ok = 1;
-        rt->gpu_ctx = &gpu_ctx;
+        s->rt->gpu_ctx = &gpu_ctx;
     } else {
         log_info("[hull:c] GPU compute unavailable — gpu.* disabled");
     }
 #endif
 
     /* Initialize worker DB capability (per-worker SQLite connections) */
-    if (cfg.db_path)
-        hl_worker_db_init(cfg.db_path);
+    if (s->cfg.db_path)
+        hl_worker_db_init(s->cfg.db_path);
 
-    if (rt->vt->init(rt, rt_cfg) != 0) {
-        log_error("[hull:c] %s init failed", rt->vt->name);
-        goto cleanup_server;
+    if (s->rt->vt->init(s->rt, s->rt_cfg) != 0) {
+        log_error("[hull:c] %s init failed", s->rt->vt->name);
+        return -1;
     }
+    s->rt_init = 1;
 
+    return 0;
+}
+
+/* Phase 10: Verify signature, apply phase-1 sandbox, load app code.
+ * Depends on: init_runtime (rt must be initialized). */
+static int hl_serve_load_app(HlServerState *s)
+{
     /* RT-01: Verify app signature BEFORE loading — malicious code never
      * executes if verification fails. */
-    if (cfg.verify_sig_path) {
-        if (hl_verify_startup(cfg.verify_sig_path, entry_point, &app_vfs) != 0) {
+    if (s->cfg.verify_sig_path) {
+        if (hl_verify_startup(s->cfg.verify_sig_path, s->entry_point, &s->app_vfs) != 0) {
             log_error("[hull:c] signature verification failed — refusing to start");
-            rt->vt->destroy(rt);
-            goto cleanup_server;
+            return -1;
         }
         log_info("[hull:c] signature verified OK");
     }
 
     /* Phase 1 sandbox: block exec/proc/fork before loading user code */
-    if (!cfg.no_sandbox) {
+    if (!s->cfg.no_sandbox) {
         if (hl_sandbox_apply_pledge() != 0) {
             log_error("[hull:c] failed to apply phase 1 sandbox");
-            rt->vt->destroy(rt);
-            goto cleanup_server;
+            return -1;
         }
     }
 
     /* Load and evaluate the app (runs under phase 1 pledge) */
-    if (rt->vt->load_app(rt, entry_point) != 0) {
-        log_error("[hull:c] failed to load %s", entry_point);
-        if (cfg.agent_mode) {
+    if (s->rt->vt->load_app(s->rt, s->entry_point) != 0) {
+        log_error("[hull:c] failed to load %s", s->entry_point);
+        if (s->cfg.agent_mode) {
             char err_dir[4096], err_path[4096];
-            snprintf(err_dir, sizeof(err_dir), "%s/.hull", app_dir);
+            snprintf(err_dir, sizeof(err_dir), "%s/.hull", s->app_dir);
             mkdir(err_dir, 0755);
-            snprintf(err_path, sizeof(err_path), "%s/.hull/last_error.json", app_dir);
+            snprintf(err_path, sizeof(err_path), "%s/.hull/last_error.json", s->app_dir);
             FILE *ef = fopen(err_path, "w");
             if (ef) {
                 fprintf(ef, "{\"error\":\"failed to load %s\",\"timestamp\":%ld}\n",
-                        entry_point, (long)time(NULL));
+                        s->entry_point, (long)time(NULL));
                 fclose(ef);
             }
         }
-        rt->vt->destroy(rt);
-        goto cleanup_server;
+        return -1;
     }
+    s->app_loaded = 1;
 
     /* Clear previous error file on successful load */
-    if (cfg.agent_mode) {
+    if (s->cfg.agent_mode) {
         char err_path[4096];
-        snprintf(err_path, sizeof(err_path), "%s/.hull/last_error.json", app_dir);
+        snprintf(err_path, sizeof(err_path), "%s/.hull/last_error.json", s->app_dir);
         unlink(err_path);
     }
 
+    return 0;
+}
+
+/* Phase 11: Extract manifest, wire caps, phase-2 sandbox, CORS, routes,
+ * static, agent API, run event loop, post-run cleanup.
+ * Depends on: load_app (app code loaded). WASM/GPU destroy happens here
+ * on the success path only — not on error gotos. */
+static int hl_serve_wire_and_start(HlServerState *s)
+{
     /* Extract manifest and configure capabilities */
-    HlManifest manifest;
-    memset(&manifest, 0, sizeof(manifest));
-    if (rt->vt->extract_manifest(rt, &manifest) == 0) {
+    memset(&s->manifest, 0, sizeof(s->manifest));
+    if (s->rt->vt->extract_manifest(s->rt, &s->manifest) == 0) {
+        s->manifest_extracted = 1;
         log_info("[hull:c] manifest: fs_read=%d fs_write=%d env=%d hosts=%d",
-                 manifest.fs_read_count, manifest.fs_write_count,
-                 manifest.env_count, manifest.hosts_count);
+                 s->manifest.fs_read_count, s->manifest.fs_write_count,
+                 s->manifest.env_count, s->manifest.hosts_count);
     }
 
     /* Wire CSP policy to runtime.
      * Default CSP is always active — even without app.manifest().
      * Explicit csp="custom" overrides; csp=false disables. */
-    if (manifest.csp_set)
-        rt->csp_policy = manifest.csp;    /* custom or NULL (disabled) */
+    if (s->manifest.csp_set)
+        s->rt->csp_policy = s->manifest.csp;    /* custom or NULL (disabled) */
     else
-        rt->csp_policy = HL_DEFAULT_CSP;  /* default */
+        s->rt->csp_policy = HL_DEFAULT_CSP;  /* default */
 
 #ifdef HL_ENABLE_WASM
     /* Revoke WASM if manifest is present but doesn't declare compute: true.
      * Already wired above; only revoke when manifest explicitly omits it. */
-    if (wasm_cache_ok && manifest.present && !manifest.compute) {
-        rt->wasm_cache = NULL;
+    if (wasm_cache_ok && s->manifest.present && !s->manifest.compute) {
+        s->rt->wasm_cache = NULL;
         log_info("[hull:c] compute not declared in manifest — compute.* disabled");
     }
 
     /* Resolve three-tier WASM config: CLI > manifest > compile-time defaults */
-    hl_resolve_wasm_config(rt, &manifest, &cfg);
+    hl_resolve_wasm_config(s->rt, &s->manifest, &s->cfg);
 #endif
 
 #ifdef HL_ENABLE_GPU
     /* Revoke GPU if manifest is present but doesn't declare gpu: true.
      * Already wired above; only revoke when manifest explicitly omits it. */
-    if (gpu_ctx_ok && manifest.present && !manifest.gpu) {
-        rt->gpu_ctx = NULL;
+    if (gpu_ctx_ok && s->manifest.present && !s->manifest.gpu) {
+        s->rt->gpu_ctx = NULL;
         log_info("[hull:c] gpu not declared in manifest — gpu.* disabled");
     }
 #endif
 
     /* Wire fs_cfg from manifest (if app declares fs.read paths) */
-    HlFsConfig fs_cfg_storage = {0};
-    if (manifest.fs_read_count > 0) {
-        fs_cfg_storage.base_dir = app_dir;
-        fs_cfg_storage.base_len = strlen(app_dir);
-        rt->fs_cfg = &fs_cfg_storage;
+    memset(&s->fs_cfg_storage, 0, sizeof(s->fs_cfg_storage));
+    if (s->manifest.fs_read_count > 0) {
+        s->fs_cfg_storage.base_dir = s->app_dir;
+        s->fs_cfg_storage.base_len = strlen(s->app_dir);
+        s->rt->fs_cfg = &s->fs_cfg_storage;
     }
 
     /* Wire env_cfg from manifest (if app declares env vars) */
-    HlEnvConfig env_cfg_storage = {0};
-    if (manifest.env_count > 0) {
-        env_cfg_storage.allowed = manifest.env;
-        env_cfg_storage.count   = manifest.env_count;
-        rt->env_cfg = &env_cfg_storage;
+    memset(&s->env_cfg_storage, 0, sizeof(s->env_cfg_storage));
+    if (s->manifest.env_count > 0) {
+        s->env_cfg_storage.allowed = s->manifest.env;
+        s->env_cfg_storage.count   = s->manifest.env_count;
+        s->rt->env_cfg = &s->env_cfg_storage;
     }
 
     /* Wire http_cfg from manifest (if app declares hosts) */
-    HlHttpConfig http_cfg_storage = {0};
-    KlTlsConfig client_tls_config = {0};
-    KlTlsCtx *client_tls_ctx = NULL;
-    const char *ca_bundle_path = NULL;
+    memset(&s->http_cfg_storage, 0, sizeof(s->http_cfg_storage));
+    memset(&s->client_tls_config, 0, sizeof(s->client_tls_config));
+    s->client_tls_ctx = NULL;
+    s->ca_bundle_path = NULL;
 
-    if (manifest.hosts_count > 0) {
-        http_cfg_storage.allowed_hosts     = manifest.hosts;
-        http_cfg_storage.count             = manifest.hosts_count;
-        http_cfg_storage.timeout_ms        = KL_CLIENT_DEFAULT_TIMEOUT_MS;
-        http_cfg_storage.max_response_size = KL_CLIENT_DEFAULT_MAX_RESP;
+    if (s->manifest.hosts_count > 0) {
+        s->http_cfg_storage.allowed_hosts     = s->manifest.hosts;
+        s->http_cfg_storage.count             = s->manifest.hosts_count;
+        s->http_cfg_storage.timeout_ms        = KL_CLIENT_DEFAULT_TIMEOUT_MS;
+        s->http_cfg_storage.max_response_size = KL_CLIENT_DEFAULT_MAX_RESP;
 
         /* Set up TLS client for HTTPS support */
-        if (cfg.skip_ca_bundle) {
+        if (s->cfg.skip_ca_bundle) {
             log_warn("[hull:c] TLS certificate verification disabled (--skip-ca-bundle)");
-            client_tls_ctx = kl_tls_mbedtls_client_ctx_create(NULL, &kl_alloc);
+            s->client_tls_ctx = kl_tls_mbedtls_client_ctx_create(NULL, &s->kl_alloc);
         } else {
-            ca_bundle_path = find_ca_bundle();
-            if (ca_bundle_path) {
-                log_info("[hull:c] using CA bundle: %s", ca_bundle_path);
-                client_tls_ctx = kl_tls_mbedtls_client_ctx_create(ca_bundle_path, &kl_alloc);
+            s->ca_bundle_path = find_ca_bundle();
+            if (s->ca_bundle_path) {
+                log_info("[hull:c] using CA bundle: %s", s->ca_bundle_path);
+                s->client_tls_ctx = kl_tls_mbedtls_client_ctx_create(s->ca_bundle_path, &s->kl_alloc);
             } else {
                 log_warn("[hull:c] no CA bundle found; HTTPS disabled "
                          "(use --skip-ca-bundle for dev mode)");
             }
         }
 
-        if (client_tls_ctx) {
-            client_tls_config.ctx         = client_tls_ctx;
-            client_tls_config.factory     = (KlTlsFactory)kl_tls_mbedtls_create;
-            client_tls_config.ctx_destroy = (void (*)(KlTlsCtx *))kl_tls_mbedtls_ctx_destroy;
-            http_cfg_storage.tls          = &client_tls_config;
+        if (s->client_tls_ctx) {
+            s->client_tls_config.ctx         = s->client_tls_ctx;
+            s->client_tls_config.factory     = (KlTlsFactory)kl_tls_mbedtls_create;
+            s->client_tls_config.ctx_destroy = (void (*)(KlTlsCtx *))kl_tls_mbedtls_ctx_destroy;
+            s->http_cfg_storage.tls          = &s->client_tls_config;
         }
 
         /* Enable connection pooling and redirect following */
-        if (cpool_ok == 0)
-            http_cfg_storage.pool = &client_pool;
-        http_cfg_storage.follow_redirects = 1;
+        if (s->cpool_ok == 0)
+            s->http_cfg_storage.pool = &s->client_pool;
+        s->http_cfg_storage.follow_redirects = 1;
 
         /* Enable client-side response decompression */
-        if (comp_ctx)
-            http_cfg_storage.decompress = &decompress_cfg;
+        if (s->comp_ctx)
+            s->http_cfg_storage.decompress = &s->decompress_cfg;
 
-        rt->http_cfg = &http_cfg_storage;
+        s->rt->http_cfg = &s->http_cfg_storage;
     }
 
     /* Wire smtp_cfg — shares same host allowlist and TLS context as HTTP */
-    HlSmtpConfig smtp_cfg_storage = {0};
-    if (manifest.hosts_count > 0) {
-        smtp_cfg_storage.allowed_hosts = manifest.hosts;
-        smtp_cfg_storage.host_count    = manifest.hosts_count;
-        smtp_cfg_storage.timeout_ms    = HL_SMTP_DEFAULT_TIMEOUT_MS;
-        smtp_cfg_storage.tls           = client_tls_ctx ? &client_tls_config : NULL;
-        rt->smtp_cfg = &smtp_cfg_storage;
+    memset(&s->smtp_cfg_storage, 0, sizeof(s->smtp_cfg_storage));
+    if (s->manifest.hosts_count > 0) {
+        s->smtp_cfg_storage.allowed_hosts = s->manifest.hosts;
+        s->smtp_cfg_storage.host_count    = s->manifest.hosts_count;
+        s->smtp_cfg_storage.timeout_ms    = HL_SMTP_DEFAULT_TIMEOUT_MS;
+        s->smtp_cfg_storage.tls           = s->client_tls_ctx ? &s->client_tls_config : NULL;
+        s->rt->smtp_cfg = &s->smtp_cfg_storage;
     }
 
     /* RT-04: Apply kernel sandbox BEFORE wiring routes — all route
      * handlers execute inside sandbox constraints. */
-    if (!cfg.no_sandbox) {
-        if (hl_sandbox_apply(&manifest, app_dir, cfg.db_path, ca_bundle_path,
-                              cfg.tls_cert_path, cfg.tls_key_path) != 0) {
+    if (!s->cfg.no_sandbox) {
+        if (hl_sandbox_apply(&s->manifest, s->app_dir, s->cfg.db_path, s->ca_bundle_path,
+                              s->cfg.tls_cert_path, s->cfg.tls_key_path) != 0) {
             log_error("[hull:c] sandbox enforcement failed");
-            rt->vt->free_manifest_strings(rt, &manifest);
-            rt->vt->destroy(rt);
-            if (client_tls_ctx)
-                kl_tls_mbedtls_ctx_destroy(client_tls_ctx);
-            goto cleanup_server;
+            s->rt->vt->free_manifest_strings(s->rt, &s->manifest);
+            s->manifest_extracted = 0;
+            s->rt->vt->destroy(s->rt);
+            s->rt_init = 0;
+            if (s->client_tls_ctx) {
+                kl_tls_mbedtls_ctx_destroy(s->client_tls_ctx);
+                s->client_tls_ctx = NULL;
+            }
+            return -1;
         }
     } else {
         log_warn("[hull:c] kernel sandbox disabled (--no-sandbox)");
@@ -973,82 +1109,96 @@ static int hull_serve(int argc, char **argv)
 
     /* Register CORS middleware from manifest (before routes) */
     KlCorsConfig cors_cfg;
-    if (manifest.cors_set) {
+    if (s->manifest.cors_set) {
         kl_cors_init(&cors_cfg);
-        for (int i = 0; i < manifest.cors_origin_count; i++)
-            kl_cors_add_origin(&cors_cfg, manifest.cors_origins[i]);
-        if (manifest.cors_methods)
-            cors_cfg.allowed_methods = manifest.cors_methods;
-        if (manifest.cors_headers)
-            cors_cfg.allowed_headers = manifest.cors_headers;
-        cors_cfg.allow_credentials = manifest.cors_credentials;
-        if (manifest.cors_max_age > 0)
-            cors_cfg.max_age_seconds = manifest.cors_max_age;
-        kl_server_use(&server, "*", "/*", kl_cors_middleware, &cors_cfg);
+        for (int i = 0; i < s->manifest.cors_origin_count; i++)
+            kl_cors_add_origin(&cors_cfg, s->manifest.cors_origins[i]);
+        if (s->manifest.cors_methods)
+            cors_cfg.allowed_methods = s->manifest.cors_methods;
+        if (s->manifest.cors_headers)
+            cors_cfg.allowed_headers = s->manifest.cors_headers;
+        cors_cfg.allow_credentials = s->manifest.cors_credentials;
+        if (s->manifest.cors_max_age > 0)
+            cors_cfg.max_age_seconds = s->manifest.cors_max_age;
+        kl_server_use(&s->server, "*", "/*", kl_cors_middleware, &cors_cfg);
         log_info("[hull:c] CORS enabled (%d origin(s))",
-                 manifest.cors_origin_count);
+                 s->manifest.cors_origin_count);
     }
 
     /* Wire routes into Keel (after sandbox is applied) */
-    if (rt->vt->wire_routes_server(rt, &server, track_route_alloc) != 0) {
-        rt->vt->free_manifest_strings(rt, &manifest);
-        rt->vt->destroy(rt);
-        if (client_tls_ctx)
-            kl_tls_mbedtls_ctx_destroy(client_tls_ctx);
-        goto cleanup_server;
+    if (s->rt->vt->wire_routes_server(s->rt, &s->server, track_route_alloc) != 0) {
+        s->rt->vt->free_manifest_strings(s->rt, &s->manifest);
+        s->manifest_extracted = 0;
+        s->rt->vt->destroy(s->rt);
+        s->rt_init = 0;
+        if (s->client_tls_ctx) {
+            kl_tls_mbedtls_ctx_destroy(s->client_tls_ctx);
+            s->client_tls_ctx = NULL;
+        }
+        return -1;
     }
 
     /* Auto-register static file serving (after sandbox is applied) */
     {
-        int has_static = hl_vfs_has_prefix(&app_vfs, "static/");
+        int has_static = hl_vfs_has_prefix(&s->app_vfs, "static/");
         if (!has_static) {
             char static_dir[4096];
-            snprintf(static_dir, sizeof(static_dir), "%s/static", app_dir);
+            snprintf(static_dir, sizeof(static_dir), "%s/static", s->app_dir);
             struct stat sdir;
             if (stat(static_dir, &sdir) == 0 && S_ISDIR(sdir.st_mode))
                 has_static = 1;
         }
         if (has_static) {
             HlStaticCtx *sctx = track_route_alloc(sizeof(HlStaticCtx));
-            sctx->vfs = &app_vfs;
-            kl_server_use(&server, "GET", "/static/*",
+            sctx->vfs = &s->app_vfs;
+            kl_server_use(&s->server, "GET", "/static/*",
                           hl_static_middleware, sctx);
         }
     }
 
     /* Register agent diagnostic endpoints (opt-in via --agent-api) */
-    HlAgentApiCtx agent_api_ctx = { .app_dir = app_dir, .db_path = cfg.db_path };
-    if (cfg.agent_api_mode)
-        hl_agent_api_register(&server, &agent_api_ctx);
+    s->agent_api_ctx = (HlAgentApiCtx){ .app_dir = s->app_dir, .db_path = s->cfg.db_path };
+    if (s->cfg.agent_api_mode)
+        hl_agent_api_register(&s->server, &s->agent_api_ctx);
 
     log_info("[hull:c] listening on %s://%s:%d (%s runtime)",
-             server_tls_ctx ? "https" : "http",
-             cfg.bind_addr, cfg.port, rt->vt->name);
+             s->server_tls_ctx ? "https" : "http",
+             s->cfg.bind_addr, s->cfg.port, s->rt->vt->name);
 
     /* Enter event loop */
-    if (kl_server_run(&server) < 0)
+    if (kl_server_run(&s->server) < 0)
         log_error("[hull:c] server exited with error: %s",
-                  kl_strerror(server.last_error));
+                  kl_strerror(s->server.last_error));
 
     log_info("[hull:c] server stopped");
 
     /* Free thread pool BEFORE server — join workers, drain queues while
      * server infrastructure (connections, event loop) is still valid */
-    if (thread_pool)
-        kl_thread_pool_free(thread_pool);
+    if (s->thread_pool) {
+        kl_thread_pool_free(s->thread_pool);
+        s->thread_pool = NULL;
+    }
 
     /* Free client connection pool (closes idle connections) */
-    if (cpool_ok == 0)
-        kl_cpool_free(&client_pool);
+    if (s->cpool_ok == 0) {
+        kl_cpool_free(&s->client_pool);
+        s->cpool_ok = -1; /* mark freed */
+    }
 
     /* Free compression context (shared by compress + decompress) */
-    if (comp_ctx)
-        kl_compress_miniz_ctx_destroy(comp_ctx);
+    if (s->comp_ctx) {
+        kl_compress_miniz_ctx_destroy(s->comp_ctx);
+        s->comp_ctx = NULL;
+    }
 
     /* Cleanup — free manifest strings AFTER server stops
      * (env_cfg and http_cfg reference them during runtime) */
-    rt->vt->free_manifest_strings(rt, &manifest);
-    rt->vt->destroy(rt);
+    if (s->manifest_extracted) {
+        s->rt->vt->free_manifest_strings(s->rt, &s->manifest);
+        s->manifest_extracted = 0;
+    }
+    s->rt->vt->destroy(s->rt);
+    s->rt_init = 0;
 
     /* Destroy WASM cache AFTER runtime destroy — GC finalizers
      * (WasmBuffer WASM-kind and WasmInstance) need WAMR alive */
@@ -1060,22 +1210,109 @@ static int hull_serve(int argc, char **argv)
     if (gpu_ctx_ok)
         hl_cap_gpu_destroy(&gpu_ctx);
 #endif
-    if (client_tls_ctx)
-        kl_tls_mbedtls_ctx_destroy(client_tls_ctx);
-    if (server_tls_ctx)
-        kl_tls_mbedtls_ctx_destroy(server_tls_ctx);
-    ret = 0;
+    if (s->client_tls_ctx) {
+        kl_tls_mbedtls_ctx_destroy(s->client_tls_ctx);
+        s->client_tls_ctx = NULL;
+    }
+    if (s->server_tls_ctx) {
+        kl_tls_mbedtls_ctx_destroy(s->server_tls_ctx);
+        s->server_tls_ctx = NULL;
+    }
 
-cleanup_server:
-    kl_server_free(&server);
-cleanup_db:
-    hl_stmt_cache_destroy(&stmt_cache);
-    hl_cap_db_shutdown(db);
-    sqlite3_close(db);
-    free_route_allocs(&alloc);
+    return 0; /* success */
+}
 
-    log_debug("[hull:c] peak memory: %zu bytes", hl_alloc_peak(&alloc));
+/* ── Cleanup (checks init flags before freeing) ──────────────────────
+ * Called on any failure path.  Tears down resources in reverse init
+ * order, checking flags to avoid double-free or use-before-init.
+ * WASM/GPU are NOT destroyed here — they're only destroyed on the
+ * success path (in hl_serve_wire_and_start, after kl_server_run). */
+static void hl_serve_cleanup(HlServerState *s)
+{
+    /* Destroy runtime if init succeeded but wire_and_start didn't finish */
+    if (s->rt_init) {
+        if (s->manifest_extracted)
+            s->rt->vt->free_manifest_strings(s->rt, &s->manifest);
+        s->rt->vt->destroy(s->rt);
+    }
 
+    /* Free thread pool BEFORE server */
+    if (s->thread_pool)
+        kl_thread_pool_free(s->thread_pool);
+
+    /* Free client connection pool */
+    if (s->cpool_ok == 0)
+        kl_cpool_free(&s->client_pool);
+
+    /* Free compression context */
+    if (s->comp_ctx)
+        kl_compress_miniz_ctx_destroy(s->comp_ctx);
+
+    /* Free client TLS context */
+    if (s->client_tls_ctx)
+        kl_tls_mbedtls_ctx_destroy(s->client_tls_ctx);
+
+    /* Free server TLS context (if server init failed after TLS ctx create) */
+    if (s->server_tls_ctx)
+        kl_tls_mbedtls_ctx_destroy(s->server_tls_ctx);
+
+    if (s->server_init)
+        kl_server_free(&s->server);
+
+    hl_stmt_cache_destroy(&s->stmt_cache);
+    if (s->db_open) {
+        hl_cap_db_shutdown(s->db);
+        sqlite3_close(s->db);
+    }
+
+    free_route_allocs(&s->alloc);
+
+    log_debug("[hull:c] peak memory: %zu bytes", hl_alloc_peak(&s->alloc));
+}
+
+/* ── Server mode (default) ──────────────────────────────────────────── */
+
+static int hull_serve(int argc, char **argv)
+{
+    HlServerState s;
+    memset(&s, 0, sizeof(s));
+
+    /* Phase 1: parse CLI args */
+    int rc = hl_serve_parse_args(&s, argc, argv);
+    if (rc != 0) return rc < 0 ? 1 : 0; /* -1 = error, 1 = help shown */
+
+    /* Phase 2: resolve entry point + app_dir */
+    if (hl_serve_resolve_entry(&s, argv[0]) != 0) return 1;
+
+    /* Phase 3: init VFS */
+    hl_serve_init_vfs(&s);
+
+    /* Phase 4: validate TLS pair, detect runtime */
+    if (hl_serve_validate_config(&s) != 0) return 1;
+
+    /* Phase 5: logging, allocator, route arena */
+    if (hl_serve_init_logging(&s) != 0) return 1;
+
+    /* Phase 6: SQLite open, PRAGMAs, migrations, stmt cache */
+    if (hl_serve_init_db(&s) != 0) { hl_serve_cleanup(&s); return 1; }
+
+    /* Phase 7: Keel server + TLS */
+    if (hl_serve_init_server(&s) != 0) { hl_serve_cleanup(&s); return 1; }
+
+    /* Phase 8: thread pool, client pool, compression (non-fatal) */
+    hl_serve_init_infra(&s);
+
+    /* Phase 9: runtime vtable, WASM/GPU, rt->vt->init() */
+    if (hl_serve_init_runtime(&s) != 0) { hl_serve_cleanup(&s); return 1; }
+
+    /* Phase 10: signature verify, phase-1 sandbox, load app */
+    if (hl_serve_load_app(&s) != 0) { hl_serve_cleanup(&s); return 1; }
+
+    /* Phase 11: manifest, caps, phase-2 sandbox, routes, event loop */
+    int ret = hl_serve_wire_and_start(&s) == 0 ? 0 : 1;
+
+    /* Final cleanup (handles any resources not freed by wire_and_start) */
+    hl_serve_cleanup(&s);
     return ret;
 }
 
