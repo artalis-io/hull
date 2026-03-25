@@ -5911,7 +5911,10 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
         /* Shader name (deep-copy) */
         JSValue sv2 = JS_GetPropertyStr(ctx, stage_val, "shader");
         const char *sname = JS_ToCString(ctx, sv2);
-        if (sname) { op->stages[s].shader = strdup(sname); JS_FreeCString(ctx, sname); }
+        if (sname) {
+            op->stages[s].shader = strdup(sname); /* NULL on OOM → pipeline returns error */
+            JS_FreeCString(ctx, sname);
+        }
         JS_FreeValue(ctx, sv2);
 
         /* Workgroups */
