@@ -20,6 +20,7 @@ typedef struct JSContext JSContext;
 typedef struct KlRouter KlRouter;
 typedef struct HlLua HlLua;
 typedef struct HlJS HlJS;
+typedef struct HlAllocator HlAllocator;
 
 /* ── Test result collection ─────────────────────────────────────────── */
 
@@ -29,6 +30,27 @@ typedef struct {
     int  passed;       /* 1 = pass, 0 = fail */
     char error[1024];  /* error message if failed, empty if passed */
 } HlTestCaseResult;
+
+/* ── Shared dispatch result ─────────────────────────────────────────── */
+
+typedef struct {
+    int status;
+    const char *body;
+    size_t body_len;
+    const char *hdr_buf;
+    size_t hdr_len;
+} HlTestResult;
+
+/*
+ * Build a KlRequest on the stack, match a route, dispatch the handler,
+ * and return response info. Used by both Lua and JS bindings.
+ */
+int hl_cap_test_dispatch(KlRouter *router, const char *method,
+                         const char *path, const char *body_data,
+                         size_t body_len, const char **header_names,
+                         const char **header_values, int num_headers,
+                         const char *ctx_json, HlAllocator *hl_alloc,
+                         HlTestResult *result);
 
 /* ── Lua bindings ──────────────────────────────────────────────────── */
 

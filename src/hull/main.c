@@ -250,177 +250,187 @@ static const char *find_ca_bundle(void)
     return NULL;
 }
 
-/* ── Server mode (default) ──────────────────────────────────────────── */
+/* ── Server configuration (parsed from CLI + env) ──────────────────── */
 
-static int hull_serve(int argc, char **argv)
+typedef struct {
+    int port;
+    const char *bind_addr;
+    const char *db_path;
+    const char *entry_point;
+    const char *verify_sig_path;
+    const char *tls_cert_path;
+    const char *tls_key_path;
+    long heap_limit;
+    long stack_limit;
+    long mem_limit;
+    long instruction_limit;
+    long wasm_heap, wasm_stack, wasm_max_input, wasm_max_output;
+    long long wasm_gas;
+    int gpu_device;
+    int log_level;
+    int no_migrate;
+    int no_sandbox;
+    int no_compress;
+    int skip_ca_bundle;
+    int agent_mode;
+    int agent_api_mode;
+    int drain_timeout;
+    int max_connections;
+    long body_max_size;
+    int read_timeout;
+    int num_workers;
+    int queue_capacity;
+} HlServeConfig;
+
+#define HL_SERVE_CONFIG_DEFAULT { \
+    .port = HL_DEFAULT_PORT, \
+    .bind_addr = "127.0.0.1", \
+    .db_path = "data.db", \
+    .gpu_device = -1, \
+    .log_level = LOG_INFO, \
+    .drain_timeout = HL_DEFAULT_DRAIN_TIMEOUT_MS, \
+}
+
+/* ── Argument parsing ──────────────────────────────────────────────── */
+
+static int hl_parse_serve_args(int argc, char **argv, HlServeConfig *cfg)
 {
-    int port = HL_DEFAULT_PORT;
-    const char *bind_addr = "127.0.0.1";
-    const char *db_path = "data.db";
-    const char *entry_point = NULL;
-    const char *verify_sig_path = NULL;
-    long heap_limit = 0;    /* 0 = use default */
-    long stack_limit = 0;   /* 0 = use default */
-    long mem_limit = 0;     /* 0 = unlimited */
-    long instruction_limit = 0; /* 0 = use default */
-    long wasm_heap = 0, wasm_stack = 0, wasm_max_input = 0, wasm_max_output = 0;
-    long long wasm_gas = 0;
-#ifdef HL_ENABLE_GPU
-    int gpu_device = -1;  /* -1 = auto (default device 0) */
-#endif
-    int log_level = LOG_INFO;
-    int no_migrate = 0;
-    int no_sandbox = 0;
-    int no_compress = 0;
-    int skip_ca_bundle = 0;
-    int agent_mode = 0;
-    int agent_api_mode = 0;
-    int drain_timeout = HL_DEFAULT_DRAIN_TIMEOUT_MS;
-    int max_connections = 0;  /* 0 = use default */
-    long body_max_size = 0;   /* 0 = use default */
-    int read_timeout = 0;     /* 0 = use default */
-    int num_workers = 0;      /* 0 = use default */
-    int queue_capacity = 0;   /* 0 = use default */
-    const char *tls_cert_path = NULL;
-    const char *tls_key_path = NULL;
-
-    /* Parse arguments */
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
             char *end;
             long p = strtol(argv[++i], &end, 10);
             if (*end != '\0' || p < 1 || p > 65535) {
                 fprintf(stderr, "hull: invalid port: %s\n", argv[i]);
-                return 1;
+                return -1;
             }
-            port = (int)p;
+            cfg->port = (int)p;
         } else if (strcmp(argv[i], "-b") == 0 && i + 1 < argc) {
-            bind_addr = argv[++i];
+            cfg->bind_addr = argv[++i];
         } else if (strcmp(argv[i], "-d") == 0 && i + 1 < argc) {
-            db_path = argv[++i];
+            cfg->db_path = argv[++i];
         } else if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
-            heap_limit = hl_parse_size(argv[++i]);
-            if (heap_limit <= 0) {
+            cfg->heap_limit = hl_parse_size(argv[++i]);
+            if (cfg->heap_limit <= 0) {
                 fprintf(stderr, "hull: invalid heap size: %s\n", argv[i]);
-                return 1;
+                return -1;
             }
         } else if (strcmp(argv[i], "-M") == 0 && i + 1 < argc) {
-            mem_limit = hl_parse_size(argv[++i]);
-            if (mem_limit <= 0) {
+            cfg->mem_limit = hl_parse_size(argv[++i]);
+            if (cfg->mem_limit <= 0) {
                 fprintf(stderr, "hull: invalid memory limit: %s\n", argv[i]);
-                return 1;
+                return -1;
             }
         } else if (strcmp(argv[i], "-s") == 0 && i + 1 < argc) {
-            stack_limit = hl_parse_size(argv[++i]);
-            if (stack_limit <= 0) {
+            cfg->stack_limit = hl_parse_size(argv[++i]);
+            if (cfg->stack_limit <= 0) {
                 fprintf(stderr, "hull: invalid stack size: %s\n", argv[i]);
-                return 1;
+                return -1;
             }
         } else if (strcmp(argv[i], "-l") == 0 && i + 1 < argc) {
-            log_level = hl_parse_log_level(argv[++i]);
-            if (log_level < 0) {
+            cfg->log_level = hl_parse_log_level(argv[++i]);
+            if (cfg->log_level < 0) {
                 fprintf(stderr, "hull: invalid log level: %s\n", argv[i]);
-                return 1;
+                return -1;
             }
         } else if (strcmp(argv[i], "--tls-cert") == 0 && i + 1 < argc) {
-            tls_cert_path = argv[++i];
+            cfg->tls_cert_path = argv[++i];
         } else if (strcmp(argv[i], "--tls-key") == 0 && i + 1 < argc) {
-            tls_key_path = argv[++i];
+            cfg->tls_key_path = argv[++i];
         } else if (strcmp(argv[i], "--verify-sig") == 0 && i + 1 < argc) {
-            verify_sig_path = argv[++i];
+            cfg->verify_sig_path = argv[++i];
         } else if (strcmp(argv[i], "--no-migrate") == 0) {
-            no_migrate = 1;
+            cfg->no_migrate = 1;
         } else if (strcmp(argv[i], "--no-sandbox") == 0) {
-            no_sandbox = 1;
+            cfg->no_sandbox = 1;
         } else if (strcmp(argv[i], "--no-compress") == 0) {
-            no_compress = 1;
+            cfg->no_compress = 1;
         } else if (strcmp(argv[i], "--skip-ca-bundle") == 0) {
-            skip_ca_bundle = 1;
+            cfg->skip_ca_bundle = 1;
         } else if (strcmp(argv[i], "--agent") == 0) {
-            agent_mode = 1;
+            cfg->agent_mode = 1;
         } else if (strcmp(argv[i], "--agent-api") == 0) {
-            agent_api_mode = 1;
+            cfg->agent_api_mode = 1;
         } else if (strcmp(argv[i], "--audit") == 0) {
             hl_audit_enabled = 1;
         } else if (strcmp(argv[i], "--max-instructions") == 0 && i + 1 < argc) {
             char *end;
-            instruction_limit = strtol(argv[++i], &end, 10);
-            if (*end != '\0' || instruction_limit < 0) {
+            cfg->instruction_limit = strtol(argv[++i], &end, 10);
+            if (*end != '\0' || cfg->instruction_limit < 0) {
                 fprintf(stderr, "hull: invalid instruction limit: %s\n", argv[i]);
-                return 1;
+                return -1;
             }
         } else if (strcmp(argv[i], "--max-connections") == 0 && i + 1 < argc) {
             char *end;
             long v = strtol(argv[++i], &end, 10);
             if (*end != '\0' || v < 1 || v > 100000) {
                 fprintf(stderr, "hull: invalid max-connections: %s\n", argv[i]);
-                return 1;
+                return -1;
             }
-            max_connections = (int)v;
+            cfg->max_connections = (int)v;
         } else if (strcmp(argv[i], "--body-max-size") == 0 && i + 1 < argc) {
-            body_max_size = hl_parse_size(argv[++i]);
-            if (body_max_size <= 0) {
+            cfg->body_max_size = hl_parse_size(argv[++i]);
+            if (cfg->body_max_size <= 0) {
                 fprintf(stderr, "hull: invalid body-max-size: %s\n", argv[i]);
-                return 1;
+                return -1;
             }
         } else if (strcmp(argv[i], "--read-timeout") == 0 && i + 1 < argc) {
             char *end;
             long v = strtol(argv[++i], &end, 10);
             if (*end != '\0' || v < 0 || v > 600000) {
                 fprintf(stderr, "hull: invalid read-timeout: %s\n", argv[i]);
-                return 1;
+                return -1;
             }
-            read_timeout = (int)v;
+            cfg->read_timeout = (int)v;
         } else if (strcmp(argv[i], "--workers") == 0 && i + 1 < argc) {
             char *end;
             long v = strtol(argv[++i], &end, 10);
             if (*end != '\0' || v < 1 || v > 128) {
                 fprintf(stderr, "hull: invalid workers: %s\n", argv[i]);
-                return 1;
+                return -1;
             }
-            num_workers = (int)v;
+            cfg->num_workers = (int)v;
         } else if (strcmp(argv[i], "--queue-capacity") == 0 && i + 1 < argc) {
             char *end;
             long v = strtol(argv[++i], &end, 10);
             if (*end != '\0' || v < 1 || v > 10000) {
                 fprintf(stderr, "hull: invalid queue-capacity: %s\n", argv[i]);
-                return 1;
+                return -1;
             }
-            queue_capacity = (int)v;
+            cfg->queue_capacity = (int)v;
         } else if (strcmp(argv[i], "--drain-timeout") == 0 && i + 1 < argc) {
             char *end;
             long dt = strtol(argv[++i], &end, 10);
             if (*end != '\0' || dt < 0 || dt > 300000) {
                 fprintf(stderr, "hull: invalid drain timeout: %s\n", argv[i]);
-                return 1;
+                return -1;
             }
-            drain_timeout = (int)dt;
+            cfg->drain_timeout = (int)dt;
         } else if (strcmp(argv[i], "--wasm-heap") == 0 && i + 1 < argc) {
-            wasm_heap = hl_parse_size(argv[++i]);
+            cfg->wasm_heap = hl_parse_size(argv[++i]);
         } else if (strcmp(argv[i], "--wasm-stack") == 0 && i + 1 < argc) {
-            wasm_stack = hl_parse_size(argv[++i]);
+            cfg->wasm_stack = hl_parse_size(argv[++i]);
         } else if (strcmp(argv[i], "--wasm-gas") == 0 && i + 1 < argc) {
             char *end;
-            wasm_gas = strtoll(argv[++i], &end, 10);
+            cfg->wasm_gas = strtoll(argv[++i], &end, 10);
         } else if (strcmp(argv[i], "--wasm-max-input") == 0 && i + 1 < argc) {
-            wasm_max_input = hl_parse_size(argv[++i]);
+            cfg->wasm_max_input = hl_parse_size(argv[++i]);
         } else if (strcmp(argv[i], "--wasm-max-output") == 0 && i + 1 < argc) {
-            wasm_max_output = hl_parse_size(argv[++i]);
+            cfg->wasm_max_output = hl_parse_size(argv[++i]);
 #ifdef HL_ENABLE_GPU
         } else if (strcmp(argv[i], "--gpu-device") == 0 && i + 1 < argc) {
             char *end;
             long v = strtol(argv[++i], &end, 10);
             if (*end != '\0' || v < 0 || v > 15) {
                 fprintf(stderr, "hull: invalid gpu-device: %s\n", argv[i]);
-                return 1;
+                return -1;
             }
-            gpu_device = (int)v;
+            cfg->gpu_device = (int)v;
 #endif
         } else if (strcmp(argv[i], "-h") == 0) {
             usage(argv[0]);
-            return 0;
+            return 1; /* signal help shown, exit 0 */
         } else if (argv[i][0] != '-') {
-            entry_point = argv[i];
+            cfg->entry_point = argv[i];
         }
     }
 
@@ -432,15 +442,65 @@ static int hull_serve(int argc, char **argv)
     }
 
     /* Check HULL_MAX_INSTRUCTIONS env var */
-    if (instruction_limit == 0) {
+    if (cfg->instruction_limit == 0) {
         const char *il_env = getenv("HULL_MAX_INSTRUCTIONS");
         if (il_env) {
             char *end;
             long val = strtol(il_env, &end, 10);
             if (*end == '\0' && val >= 0)
-                instruction_limit = val;
+                cfg->instruction_limit = val;
         }
     }
+
+    return 0;
+}
+
+/* ── Manifest processing ──────────────────────────────────────────── */
+
+static void hl_resolve_wasm_config(HlRuntime *rt, const HlManifest *manifest,
+                                    const HlServeConfig *cfg)
+{
+#ifdef HL_ENABLE_WASM
+    uint32_t wh = manifest->wasm_heap;
+    uint32_t ws = manifest->wasm_stack;
+    int64_t  wg = manifest->wasm_gas;
+    uint32_t wi = manifest->wasm_max_input;
+    uint32_t wo = manifest->wasm_max_output;
+
+    /* CLI overrides manifest (operator > developer) */
+    if (cfg->wasm_heap > 0)       wh = (uint32_t)cfg->wasm_heap;
+    if (cfg->wasm_stack > 0)      ws = (uint32_t)cfg->wasm_stack;
+    if (cfg->wasm_gas > 0)        wg = (int64_t)cfg->wasm_gas;
+    if (cfg->wasm_max_input > 0)  wi = (uint32_t)cfg->wasm_max_input;
+    if (cfg->wasm_max_output > 0) wo = (uint32_t)cfg->wasm_max_output;
+
+    /* Clamp to compile-time maximums */
+    if (wh > (uint32_t)HL_WASM_MAX_HEAP)  wh = (uint32_t)HL_WASM_MAX_HEAP;
+    if (ws > (uint32_t)HL_WASM_MAX_STACK) ws = (uint32_t)HL_WASM_MAX_STACK;
+    if (wg > HL_WASM_MAX_GAS)             wg = HL_WASM_MAX_GAS;
+    if (wi > (uint32_t)HL_WASM_MAX_IO_SIZE) wi = (uint32_t)HL_WASM_MAX_IO_SIZE;
+    if (wo > (uint32_t)HL_WASM_MAX_IO_SIZE) wo = (uint32_t)HL_WASM_MAX_IO_SIZE;
+
+    rt->wasm_config.heap_size  = wh;
+    rt->wasm_config.stack_size = ws;
+    rt->wasm_config.gas        = wg;
+    rt->wasm_config.max_input  = wi;
+    rt->wasm_config.max_output = wo;
+#else
+    (void)rt; (void)manifest; (void)cfg;
+#endif
+}
+
+/* ── Server mode (default) ──────────────────────────────────────────── */
+
+static int hull_serve(int argc, char **argv)
+{
+    HlServeConfig cfg = HL_SERVE_CONFIG_DEFAULT;
+
+    int rc = hl_parse_serve_args(argc, argv, &cfg);
+    if (rc != 0) return rc < 0 ? 1 : 0; /* -1 = error, 1 = help shown */
+
+    const char *entry_point = cfg.entry_point;
 
     if (!entry_point)
         entry_point = auto_detect_entry();
@@ -485,7 +545,7 @@ static int hull_serve(int argc, char **argv)
     hl_vfs_init(&platform_vfs, hl_stdlib_entries, NULL);
 
     /* Validate TLS cert/key pair */
-    if ((tls_cert_path != NULL) != (tls_key_path != NULL)) {
+    if ((cfg.tls_cert_path != NULL) != (cfg.tls_key_path != NULL)) {
         fprintf(stderr, "hull: --tls-cert and --tls-key must be provided together\n");
         return 1;
     }
@@ -507,13 +567,13 @@ static int hull_serve(int argc, char **argv)
 #endif
 
     /* Initialize logging */
-    log_set_level(log_level);
+    log_set_level(cfg.log_level);
     log_set_quiet(true);  /* suppress default stderr callback */
-    log_add_callback(hl_log_callback, stderr, log_level);
+    log_add_callback(hl_log_callback, stderr, cfg.log_level);
 
     /* Initialize tracking allocator */
     HlAllocator alloc;
-    hl_alloc_init(&alloc, (size_t)mem_limit);
+    hl_alloc_init(&alloc, (size_t)cfg.mem_limit);
     KlAllocator kl_alloc = hl_alloc_kl(&alloc);
 
     int ret = 1;
@@ -531,10 +591,10 @@ static int hull_serve(int argc, char **argv)
     HlStmtCache stmt_cache;
     memset(&stmt_cache, 0, sizeof(stmt_cache));
 
-    int rc = sqlite3_open(db_path, &db);
-    if (rc != SQLITE_OK) {
+    int dbrc = sqlite3_open(cfg.db_path, &db);
+    if (dbrc != SQLITE_OK) {
         log_error("[hull:c] cannot open database %s: %s",
-                  db_path, sqlite3_errmsg(db));
+                  cfg.db_path, sqlite3_errmsg(db));
         goto cleanup_db;
     }
 
@@ -545,7 +605,7 @@ static int hull_serve(int argc, char **argv)
     }
 
     /* Auto-run SQL migrations */
-    if (!no_migrate) {
+    if (!cfg.no_migrate) {
         int migrated = hl_migrate_run(db, &app_vfs);
         if (migrated == HL_MIGRATE_ERR) {
             log_error("[hull:c] migration failed — refusing to start");
@@ -560,13 +620,13 @@ static int hull_serve(int argc, char **argv)
 
     /* Initialize Keel server */
     KlConfig config = {
-        .port = port,
-        .bind_addr = bind_addr,
-        .max_connections = max_connections > 0 ? max_connections : HL_DEFAULT_MAX_CONN,
-        .read_timeout_ms = read_timeout > 0 ? read_timeout : HL_DEFAULT_READ_TIMEOUT_MS,
-        .max_body_size = body_max_size > 0 ? (size_t)body_max_size : HL_BODY_MAX_SIZE,
+        .port = cfg.port,
+        .bind_addr = cfg.bind_addr,
+        .max_connections = cfg.max_connections > 0 ? cfg.max_connections : HL_DEFAULT_MAX_CONN,
+        .read_timeout_ms = cfg.read_timeout > 0 ? cfg.read_timeout : HL_DEFAULT_READ_TIMEOUT_MS,
+        .max_body_size = cfg.body_max_size > 0 ? (size_t)cfg.body_max_size : HL_BODY_MAX_SIZE,
         .install_signal_handlers = 1,
-        .drain_timeout_ms = drain_timeout,
+        .drain_timeout_ms = cfg.drain_timeout,
         .alloc = &kl_alloc,
         .log_fn = hl_keel_log_bridge,
         .log_user_data = NULL,
@@ -576,12 +636,12 @@ static int hull_serve(int argc, char **argv)
     KlTlsConfig server_tls_config = {0};
     KlTlsCtx *server_tls_ctx = NULL;
 
-    if (tls_cert_path && tls_key_path) {
+    if (cfg.tls_cert_path && cfg.tls_key_path) {
         server_tls_ctx = kl_tls_mbedtls_ctx_create(
-            tls_cert_path, tls_key_path, NULL, KL_MTLS_NONE, &kl_alloc);
+            cfg.tls_cert_path, cfg.tls_key_path, NULL, KL_MTLS_NONE, &kl_alloc);
         if (!server_tls_ctx) {
             log_error("[hull:c] failed to create server TLS context "
-                      "(cert=%s, key=%s)", tls_cert_path, tls_key_path);
+                      "(cert=%s, key=%s)", cfg.tls_cert_path, cfg.tls_key_path);
             goto cleanup_db;
         }
         server_tls_config.ctx         = server_tls_ctx;
@@ -601,8 +661,8 @@ static int hull_serve(int argc, char **argv)
 
     /* Create thread pool for async work (db queries, file I/O) */
     KlThreadPoolConfig tp_cfg = {
-        .num_workers    = num_workers > 0 ? num_workers : HL_THREAD_POOL_WORKERS,
-        .queue_capacity = queue_capacity > 0 ? queue_capacity : HL_THREAD_POOL_CAPACITY,
+        .num_workers    = cfg.num_workers > 0 ? cfg.num_workers : HL_THREAD_POOL_WORKERS,
+        .queue_capacity = cfg.queue_capacity > 0 ? cfg.queue_capacity : HL_THREAD_POOL_CAPACITY,
         .alloc          = &kl_alloc,
     };
     KlThreadPool *thread_pool = kl_thread_pool_create(&server.ev, &tp_cfg);
@@ -623,7 +683,7 @@ static int hull_serve(int argc, char **argv)
     KlCompressConfig compress_cfg = {0};
     KlDecompressConfig decompress_cfg = {0};
 
-    if (!no_compress) {
+    if (!cfg.no_compress) {
         comp_ctx = kl_compress_miniz_ctx_create(6, &kl_alloc);
         if (comp_ctx) {
             compress_cfg.ctx = comp_ctx;
@@ -665,9 +725,9 @@ static int hull_serve(int argc, char **argv)
     if (runtime == HL_RUNTIME_JS) {
 #ifdef HL_ENABLE_JS
         js_cfg = (HlJSConfig)HL_JS_CONFIG_DEFAULT;
-        if (heap_limit > 0)        js_cfg.max_heap_bytes   = (size_t)heap_limit;
-        if (stack_limit > 0)       js_cfg.max_stack_bytes   = (size_t)stack_limit;
-        if (instruction_limit > 0) js_cfg.max_instructions  = instruction_limit;
+        if (cfg.heap_limit > 0)        js_cfg.max_heap_bytes   = (size_t)cfg.heap_limit;
+        if (cfg.stack_limit > 0)       js_cfg.max_stack_bytes   = (size_t)cfg.stack_limit;
+        if (cfg.instruction_limit > 0) js_cfg.max_instructions  = cfg.instruction_limit;
         rt = &rt_storage.js.base;
         rt->vt = &hl_js_vtable;
         rt_cfg = &js_cfg;
@@ -675,8 +735,8 @@ static int hull_serve(int argc, char **argv)
     } else {
 #ifdef HL_ENABLE_LUA
         lua_cfg = (HlLuaConfig)HL_LUA_CONFIG_DEFAULT;
-        if (heap_limit > 0)        lua_cfg.max_heap_bytes   = (size_t)heap_limit;
-        if (instruction_limit > 0) lua_cfg.max_instructions  = instruction_limit;
+        if (cfg.heap_limit > 0)        lua_cfg.max_heap_bytes   = (size_t)cfg.heap_limit;
+        if (cfg.instruction_limit > 0) lua_cfg.max_instructions  = cfg.instruction_limit;
         rt = &rt_storage.lua.base;
         rt->vt = &hl_lua_vtable;
         rt_cfg = &lua_cfg;
@@ -695,7 +755,7 @@ static int hull_serve(int argc, char **argv)
     rt->thread_pool = thread_pool;
     rt->app_vfs = &app_vfs;
     rt->platform_vfs = &platform_vfs;
-    rt->db_path = db_path;
+    rt->db_path = cfg.db_path;
     if (comp_ctx)
         rt->compress = &compress_cfg;
 
@@ -721,8 +781,8 @@ static int hull_serve(int argc, char **argv)
     static int gpu_ctx_ok = 0;
     if (hl_cap_gpu_init(&gpu_ctx, &hl_gpu_backend_wgpu) == HL_GPU_OK
         && hl_cap_gpu_available(&gpu_ctx)) {
-        if (gpu_device >= 0 && gpu_device < gpu_ctx.device_count)
-            gpu_ctx.default_device = gpu_device;
+        if (cfg.gpu_device >= 0 && cfg.gpu_device < gpu_ctx.device_count)
+            gpu_ctx.default_device = cfg.gpu_device;
         gpu_ctx_ok = 1;
         rt->gpu_ctx = &gpu_ctx;
     } else {
@@ -731,8 +791,8 @@ static int hull_serve(int argc, char **argv)
 #endif
 
     /* Initialize worker DB capability (per-worker SQLite connections) */
-    if (db_path)
-        hl_worker_db_init(db_path);
+    if (cfg.db_path)
+        hl_worker_db_init(cfg.db_path);
 
     if (rt->vt->init(rt, rt_cfg) != 0) {
         log_error("[hull:c] %s init failed", rt->vt->name);
@@ -741,8 +801,8 @@ static int hull_serve(int argc, char **argv)
 
     /* RT-01: Verify app signature BEFORE loading — malicious code never
      * executes if verification fails. */
-    if (verify_sig_path) {
-        if (hl_verify_startup(verify_sig_path, entry_point, &app_vfs) != 0) {
+    if (cfg.verify_sig_path) {
+        if (hl_verify_startup(cfg.verify_sig_path, entry_point, &app_vfs) != 0) {
             log_error("[hull:c] signature verification failed — refusing to start");
             rt->vt->destroy(rt);
             goto cleanup_server;
@@ -751,7 +811,7 @@ static int hull_serve(int argc, char **argv)
     }
 
     /* Phase 1 sandbox: block exec/proc/fork before loading user code */
-    if (!no_sandbox) {
+    if (!cfg.no_sandbox) {
         if (hl_sandbox_apply_pledge() != 0) {
             log_error("[hull:c] failed to apply phase 1 sandbox");
             rt->vt->destroy(rt);
@@ -762,7 +822,7 @@ static int hull_serve(int argc, char **argv)
     /* Load and evaluate the app (runs under phase 1 pledge) */
     if (rt->vt->load_app(rt, entry_point) != 0) {
         log_error("[hull:c] failed to load %s", entry_point);
-        if (agent_mode) {
+        if (cfg.agent_mode) {
             char err_dir[4096], err_path[4096];
             snprintf(err_dir, sizeof(err_dir), "%s/.hull", app_dir);
             mkdir(err_dir, 0755);
@@ -779,7 +839,7 @@ static int hull_serve(int argc, char **argv)
     }
 
     /* Clear previous error file on successful load */
-    if (agent_mode) {
+    if (cfg.agent_mode) {
         char err_path[4096];
         snprintf(err_path, sizeof(err_path), "%s/.hull/last_error.json", app_dir);
         unlink(err_path);
@@ -810,35 +870,8 @@ static int hull_serve(int argc, char **argv)
         log_info("[hull:c] compute not declared in manifest — compute.* disabled");
     }
 
-    /* Resolve three-tier WASM config: CLI > manifest > compile-time defaults.
-     * Zero = not set (fall through to compile-time default at call time). */
-    {
-        uint32_t wh = manifest.wasm_heap;
-        uint32_t ws = manifest.wasm_stack;
-        int64_t  wg = manifest.wasm_gas;
-        uint32_t wi = manifest.wasm_max_input;
-        uint32_t wo = manifest.wasm_max_output;
-
-        /* CLI overrides manifest (operator > developer) */
-        if (wasm_heap > 0)       wh = (uint32_t)wasm_heap;
-        if (wasm_stack > 0)      ws = (uint32_t)wasm_stack;
-        if (wasm_gas > 0)        wg = (int64_t)wasm_gas;
-        if (wasm_max_input > 0)  wi = (uint32_t)wasm_max_input;
-        if (wasm_max_output > 0) wo = (uint32_t)wasm_max_output;
-
-        /* Clamp to compile-time maximums */
-        if (wh > (uint32_t)HL_WASM_MAX_HEAP)  wh = (uint32_t)HL_WASM_MAX_HEAP;
-        if (ws > (uint32_t)HL_WASM_MAX_STACK) ws = (uint32_t)HL_WASM_MAX_STACK;
-        if (wg > HL_WASM_MAX_GAS)             wg = HL_WASM_MAX_GAS;
-        if (wi > (uint32_t)HL_WASM_MAX_IO_SIZE) wi = (uint32_t)HL_WASM_MAX_IO_SIZE;
-        if (wo > (uint32_t)HL_WASM_MAX_IO_SIZE) wo = (uint32_t)HL_WASM_MAX_IO_SIZE;
-
-        rt->wasm_config.heap_size  = wh;
-        rt->wasm_config.stack_size = ws;
-        rt->wasm_config.gas        = wg;
-        rt->wasm_config.max_input  = wi;
-        rt->wasm_config.max_output = wo;
-    }
+    /* Resolve three-tier WASM config: CLI > manifest > compile-time defaults */
+    hl_resolve_wasm_config(rt, &manifest, &cfg);
 #endif
 
 #ifdef HL_ENABLE_GPU
@@ -879,7 +912,7 @@ static int hull_serve(int argc, char **argv)
         http_cfg_storage.max_response_size = KL_CLIENT_DEFAULT_MAX_RESP;
 
         /* Set up TLS client for HTTPS support */
-        if (skip_ca_bundle) {
+        if (cfg.skip_ca_bundle) {
             log_warn("[hull:c] TLS certificate verification disabled (--skip-ca-bundle)");
             client_tls_ctx = kl_tls_mbedtls_client_ctx_create(NULL, &kl_alloc);
         } else {
@@ -924,9 +957,9 @@ static int hull_serve(int argc, char **argv)
 
     /* RT-04: Apply kernel sandbox BEFORE wiring routes — all route
      * handlers execute inside sandbox constraints. */
-    if (!no_sandbox) {
-        if (hl_sandbox_apply(&manifest, app_dir, db_path, ca_bundle_path,
-                              tls_cert_path, tls_key_path) != 0) {
+    if (!cfg.no_sandbox) {
+        if (hl_sandbox_apply(&manifest, app_dir, cfg.db_path, ca_bundle_path,
+                              cfg.tls_cert_path, cfg.tls_key_path) != 0) {
             log_error("[hull:c] sandbox enforcement failed");
             rt->vt->free_manifest_strings(rt, &manifest);
             rt->vt->destroy(rt);
@@ -984,13 +1017,13 @@ static int hull_serve(int argc, char **argv)
     }
 
     /* Register agent diagnostic endpoints (opt-in via --agent-api) */
-    HlAgentApiCtx agent_api_ctx = { .app_dir = app_dir, .db_path = db_path };
-    if (agent_api_mode)
+    HlAgentApiCtx agent_api_ctx = { .app_dir = app_dir, .db_path = cfg.db_path };
+    if (cfg.agent_api_mode)
         hl_agent_api_register(&server, &agent_api_ctx);
 
     log_info("[hull:c] listening on %s://%s:%d (%s runtime)",
              server_tls_ctx ? "https" : "http",
-             bind_addr, port, rt->vt->name);
+             cfg.bind_addr, cfg.port, rt->vt->name);
 
     /* Enter event loop */
     if (kl_server_run(&server) < 0)

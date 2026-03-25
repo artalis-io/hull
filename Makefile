@@ -394,11 +394,11 @@ PLEDGE_OBJS ?=
 
 # ── Hull source files ───────────────────────────────────────────────
 
-# Capability sources (always compiled, except cap/tool.c and cap/test.c which need runtimes)
-CAP_SRCS := $(filter-out $(SRCDIR)/hull/cap/tool.c $(SRCDIR)/hull/cap/test.c,$(wildcard $(SRCDIR)/hull/cap/*.c))
+# Capability sources (always compiled, except cap/tool.c and cap/test_*.c which need runtimes)
+CAP_SRCS := $(filter-out $(SRCDIR)/hull/cap/tool.c $(SRCDIR)/hull/cap/test.c $(SRCDIR)/hull/cap/test_lua.c $(SRCDIR)/hull/cap/test_js.c,$(wildcard $(SRCDIR)/hull/cap/*.c))
 CAP_OBJS := $(patsubst $(SRCDIR)/hull/cap/%.c,$(BUILDDIR)/cap_%.o,$(CAP_SRCS))
 CAP_TOOL_OBJ := $(BUILDDIR)/cap_tool.o
-CAP_TEST_OBJ := $(BUILDDIR)/cap_test.o
+CAP_TEST_OBJ := $(BUILDDIR)/cap_test.o $(BUILDDIR)/cap_test_lua.o $(BUILDDIR)/cap_test_js.o
 
 # JS runtime sources
 JS_RT_SRCS := $(wildcard $(SRCDIR)/hull/runtime/js/*.c)
@@ -440,7 +440,7 @@ SANDBOX_OBJ    := $(BUILDDIR)/sandbox.o
 # Test-specific objects (single runtime — avoids pulling Lua into JS tests and vice versa)
 MANIFEST_JS_OBJ  := $(BUILDDIR)/manifest_js_only.o
 MANIFEST_LUA_OBJ := $(BUILDDIR)/manifest_lua_only.o
-CAP_TEST_JS_OBJ  := $(BUILDDIR)/cap_test_js_only.o
+CAP_TEST_JS_OBJ  := $(BUILDDIR)/cap_test_dispatch.o $(BUILDDIR)/cap_test_js_only.o
 TOOL_OBJ       := $(BUILDDIR)/tool.o
 SIG_OBJ        := $(BUILDDIR)/signature.o
 STATIC_OBJ     := $(BUILDDIR)/hull_static.o
@@ -905,9 +905,13 @@ $(MANIFEST_OBJ): $(SRCDIR)/hull/manifest.c | $(BUILDDIR)
 $(MANIFEST_JS_OBJ): $(SRCDIR)/hull/manifest.c | $(BUILDDIR)
 	$(CC) $(filter-out -DHL_ENABLE_LUA,$(CFLAGS)) $(INCLUDES) -c -o $@ $<
 
-# cap/test.c (JS-only, for test_js — excludes Lua bindings to avoid Lua link deps)
-$(CAP_TEST_JS_OBJ): $(SRCDIR)/hull/cap/test.c | $(BUILDDIR)
+# cap/test_js.c (JS-only, for test_js — excludes Lua bindings to avoid Lua link deps)
+$(BUILDDIR)/cap_test_js_only.o: $(SRCDIR)/hull/cap/test_js.c | $(BUILDDIR)
 	$(CC) $(filter-out -DHL_ENABLE_LUA,$(CFLAGS)) $(INCLUDES) -c -o $@ $<
+
+# cap/test.c (shared dispatch — no runtime deps, used by both runtimes)
+$(BUILDDIR)/cap_test_dispatch.o: $(SRCDIR)/hull/cap/test.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Manifest (Lua-only, for test_lua — excludes JS extraction to avoid QuickJS link deps)
 $(MANIFEST_LUA_OBJ): $(SRCDIR)/hull/manifest.c | $(BUILDDIR)
