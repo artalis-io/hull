@@ -5835,14 +5835,287 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
 }
 
 /* Async pipeline — falls back to sync for now */
-/* JS async pipeline — sync fallback for now.
- * The Lua version has full deep-copy async. JS version needs the same
- * treatment but with JS string lifetime management (JS_ToCString tracking).
- * TODO: implement proper JS async pipeline with deep-copy. */
+/* JS async pipeline — deep-copy all stage data, submit to thread pool */
 static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
                                       int argc, JSValueConst *argv)
 {
-    return js_gpu_pipeline(ctx, this_val, argc, argv);
+    (void)this_val;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->base.thread_pool)
+        return JS_ThrowInternalError(ctx, "gpu.async not available (no thread pool)");
+    if (!js->server || !js->active_conn)
+        return JS_ThrowInternalError(ctx, "gpu.async can only be called from a request handler");
+    if (!js->base.gpu_ctx)
+        return JS_ThrowInternalError(ctx, "gpu.async.pipeline: GPU not initialized");
+    if (argc < 1 || !JS_IsArray(ctx, argv[0]))
+        return JS_ThrowTypeError(ctx, "gpu.async.pipeline requires stages array");
+
+    /* Parse stage count */
+    JSValue len_val = JS_GetPropertyStr(ctx, argv[0], "length");
+    int32_t stage_count = 0;
+    JS_ToInt32(ctx, &stage_count, len_val);
+    JS_FreeValue(ctx, len_val);
+    if (stage_count <= 0 || stage_count > HL_GPU_MAX_PIPELINE_STAGES)
+        return JS_ThrowRangeError(ctx, "gpu.async.pipeline: invalid stage count");
+
+    /* Allocate worker op */
+    HlWorkerGpuOp *op = calloc(1, sizeof(HlWorkerGpuOp));
+    if (!op) return JS_ThrowInternalError(ctx, "gpu.async.pipeline: out of memory");
+
+    op->server = js->server;
+    op->gpu_ctx = js->base.gpu_ctx;
+    op->is_pipeline = 1;
+    op->stage_count = stage_count;
+
+    op->stages = calloc((size_t)stage_count, sizeof(HlGpuPipelineStage));
+    op->stage_uniforms = calloc((size_t)stage_count, sizeof(void *));
+    if (!op->stages || !op->stage_uniforms) {
+        hl_worker_gpu_op_free(op); free(op);
+        return JS_ThrowInternalError(ctx, "gpu.async.pipeline: out of memory");
+    }
+
+    /* Count total buffers across all stages for flat allocation */
+    int total_bufs = 0;
+    for (int32_t s = 0; s < stage_count; s++) {
+        JSValue sv = JS_GetPropertyUint32(ctx, argv[0], (uint32_t)s);
+        if (JS_IsObject(sv)) {
+            JSValue bv = JS_GetPropertyStr(ctx, sv, "buffers");
+            if (JS_IsArray(ctx, bv)) {
+                JSValue bl = JS_GetPropertyStr(ctx, bv, "length");
+                int32_t bc = 0; JS_ToInt32(ctx, &bc, bl);
+                JS_FreeValue(ctx, bl);
+                if (bc > 16) bc = 16;
+                total_bufs += bc;
+            }
+            JS_FreeValue(ctx, bv);
+        }
+        JS_FreeValue(ctx, sv);
+    }
+
+    if (total_bufs > 0) {
+        op->buffers = calloc((size_t)total_bufs, sizeof(HlGpuBufferDesc));
+        op->buffer_data = calloc((size_t)total_bufs, sizeof(void *));
+        if (!op->buffers || !op->buffer_data) {
+            hl_worker_gpu_op_free(op); free(op);
+            return JS_ThrowInternalError(ctx, "gpu.async.pipeline: out of memory");
+        }
+        op->buffer_count = total_bufs;
+    }
+
+    /* Deep-copy each stage */
+    int buf_off = 0;
+    for (int32_t s = 0; s < stage_count; s++) {
+        JSValue stage_val = JS_GetPropertyUint32(ctx, argv[0], (uint32_t)s);
+        if (!JS_IsObject(stage_val)) { JS_FreeValue(ctx, stage_val); continue; }
+
+        /* Shader name (deep-copy) */
+        JSValue sv2 = JS_GetPropertyStr(ctx, stage_val, "shader");
+        const char *sname = JS_ToCString(ctx, sv2);
+        if (sname) { op->stages[s].shader = strdup(sname); JS_FreeCString(ctx, sname); }
+        JS_FreeValue(ctx, sv2);
+
+        /* Workgroups */
+        JSValue wg = JS_GetPropertyStr(ctx, stage_val, "workgroups");
+        if (JS_IsObject(wg)) {
+            JSValue xv = JS_GetPropertyStr(ctx, wg, "x");
+            JSValue yv = JS_GetPropertyStr(ctx, wg, "y");
+            JSValue zv = JS_GetPropertyStr(ctx, wg, "z");
+            uint32_t x = 1, y = 1, z = 1;
+            JS_ToUint32(ctx, &x, xv); JS_ToUint32(ctx, &y, yv); JS_ToUint32(ctx, &z, zv);
+            op->stages[s].workgroups = (HlGpuWorkgroups){ x, y, z };
+            JS_FreeValue(ctx, xv); JS_FreeValue(ctx, yv); JS_FreeValue(ctx, zv);
+        }
+        JS_FreeValue(ctx, wg);
+
+        /* Per-stage uniforms (deep-copy) */
+        JSValue uni = JS_GetPropertyStr(ctx, stage_val, "uniforms");
+        if (!JS_IsUndefined(uni) && !JS_IsNull(uni)) {
+            size_t ulen;
+            uint8_t *uab = JS_GetArrayBuffer(ctx, &ulen, uni);
+            if (uab && ulen > 0) {
+                op->stage_uniforms[s] = malloc(ulen);
+                if (op->stage_uniforms[s]) {
+                    memcpy(op->stage_uniforms[s], uab, ulen);
+                    op->stages[s].uniforms_len = ulen;
+                }
+            } else {
+                const char *us = JS_ToCStringLen(ctx, &ulen, uni);
+                if (us && ulen > 0) {
+                    op->stage_uniforms[s] = malloc(ulen);
+                    if (op->stage_uniforms[s]) {
+                        memcpy(op->stage_uniforms[s], us, ulen);
+                        op->stages[s].uniforms_len = ulen;
+                    }
+                }
+                if (us) JS_FreeCString(ctx, us);
+            }
+        }
+        JS_FreeValue(ctx, uni);
+
+        /* Buffers (deep-copy) */
+        JSValue bufs_val = JS_GetPropertyStr(ctx, stage_val, "buffers");
+        if (JS_IsArray(ctx, bufs_val)) {
+            JSValue blen = JS_GetPropertyStr(ctx, bufs_val, "length");
+            int32_t bc = 0; JS_ToInt32(ctx, &bc, blen);
+            JS_FreeValue(ctx, blen);
+            if (bc > 16) bc = 16;
+            op->stages[s].buffer_count = bc;
+
+            for (int32_t b = 0; b < bc && buf_off < total_bufs; b++) {
+                JSValue elem = JS_GetPropertyUint32(ctx, bufs_val, (uint32_t)b);
+                if (JS_IsObject(elem)) {
+                    /* Name (deep-copy) */
+                    JSValue nv = JS_GetPropertyStr(ctx, elem, "name");
+                    if (JS_IsString(nv)) {
+                        const char *ns = JS_ToCString(ctx, nv);
+                        if (ns) { op->buffers[buf_off].name = strdup(ns); JS_FreeCString(ctx, ns); }
+                    }
+                    JS_FreeValue(ctx, nv);
+
+                    /* Data (deep-copy) */
+                    JSValue dv = JS_GetPropertyStr(ctx, elem, "data");
+                    if (!JS_IsUndefined(dv) && !JS_IsNull(dv)) {
+                        size_t dlen;
+                        uint8_t *dab = JS_GetArrayBuffer(ctx, &dlen, dv);
+                        if (dab && dlen > 0) {
+                            op->buffer_data[buf_off] = malloc(dlen);
+                            if (op->buffer_data[buf_off]) {
+                                memcpy(op->buffer_data[buf_off], dab, dlen);
+                                op->buffers[buf_off].data = op->buffer_data[buf_off];
+                                op->buffers[buf_off].size = dlen;
+                            }
+                        } else {
+                            const char *ds = JS_ToCStringLen(ctx, &dlen, dv);
+                            if (ds) {
+                                if (dlen > 0) {
+                                    op->buffer_data[buf_off] = malloc(dlen);
+                                    if (op->buffer_data[buf_off]) {
+                                        memcpy(op->buffer_data[buf_off], ds, dlen);
+                                        op->buffers[buf_off].data = op->buffer_data[buf_off];
+                                        op->buffers[buf_off].size = dlen;
+                                    }
+                                }
+                                JS_FreeCString(ctx, ds);
+                            }
+                        }
+                    }
+                    JS_FreeValue(ctx, dv);
+
+                    /* Size override */
+                    JSValue szv = JS_GetPropertyStr(ctx, elem, "size");
+                    if (!JS_IsUndefined(szv)) {
+                        int64_t sz; JS_ToInt64(ctx, &sz, szv);
+                        op->buffers[buf_off].size = (size_t)sz;
+                    }
+                    JS_FreeValue(ctx, szv);
+                    op->buffers[buf_off].binding = -1;
+                }
+                JS_FreeValue(ctx, elem);
+                buf_off++;
+            }
+        }
+        JS_FreeValue(ctx, bufs_val);
+        JS_FreeValue(ctx, stage_val);
+    }
+
+    /* Parse opts (second argument) */
+    op->pipe_opts.device = -1;
+    if (argc > 1 && JS_IsObject(argv[1])) {
+        JSValue dv = JS_GetPropertyStr(ctx, argv[1], "device");
+        if (!JS_IsUndefined(dv)) { int32_t d; JS_ToInt32(ctx, &d, dv); op->pipe_opts.device = d; }
+        JS_FreeValue(ctx, dv);
+
+        /* output: false → fire-and-forget */
+        JSValue of = JS_GetPropertyStr(ctx, argv[1], "output");
+        if (JS_IsBool(of) && !JS_ToBool(ctx, of))
+            op->pipe_opts.output_count = HL_GPU_OUTPUT_NONE;
+        JS_FreeValue(ctx, of);
+
+        /* outputs array */
+        JSValue ov = JS_GetPropertyStr(ctx, argv[1], "outputs");
+        if (op->pipe_opts.output_count != HL_GPU_OUTPUT_NONE && JS_IsArray(ctx, ov)) {
+            JSValue olen = JS_GetPropertyStr(ctx, ov, "length");
+            int32_t oc = 0; JS_ToInt32(ctx, &oc, olen);
+            JS_FreeValue(ctx, olen);
+            if (oc > HL_GPU_MAX_PIPELINE_OUTPUTS) oc = HL_GPU_MAX_PIPELINE_OUTPUTS;
+            if (oc > 0) {
+                op->pipe_outputs = calloc((size_t)oc, sizeof(HlGpuPipelineOutput));
+                if (op->pipe_outputs) {
+                    op->pipe_opts.output_count = oc;
+                    op->pipe_opts.outputs = op->pipe_outputs;
+                    for (int i = 0; i < oc; i++) {
+                        JSValue oe = JS_GetPropertyUint32(ctx, ov, (uint32_t)i);
+                        if (JS_IsObject(oe)) {
+                            JSValue sv3 = JS_GetPropertyStr(ctx, oe, "stage");
+                            JSValue bv2 = JS_GetPropertyStr(ctx, oe, "buffer");
+                            int32_t si = 0, bi = 0;
+                            JS_ToInt32(ctx, &si, sv3); JS_ToInt32(ctx, &bi, bv2);
+                            op->pipe_outputs[i].stage = si;
+                            op->pipe_outputs[i].buffer = bi;
+                            JS_FreeValue(ctx, sv3); JS_FreeValue(ctx, bv2);
+                        }
+                        JS_FreeValue(ctx, oe);
+                    }
+                }
+            }
+        }
+        JS_FreeValue(ctx, ov);
+    }
+
+    /* Create async ctx + Promise + continuation */
+    HlAsyncCtx *actx = hl_async_ctx_create(js->server, js->base.alloc);
+    if (!actx) {
+        hl_worker_gpu_op_free(op); free(op);
+        return JS_ThrowInternalError(ctx, "gpu.async.pipeline: out of memory");
+    }
+
+    JSValue resolving_funcs[2];
+    JSValue promise = JS_NewPromiseCapability(ctx, resolving_funcs);
+    if (JS_IsException(promise)) {
+        hl_worker_gpu_op_free(op); free(op); hl_async_ctx_free(actx);
+        return JS_EXCEPTION;
+    }
+
+    extern HlAsyncCont *hl_js_async_cont_create(HlJS *js,
+        JSValue resolve, JSValue reject, HlAllocator *alloc,
+        JSValue (*push_result)(JSContext *, void *));
+    HlAsyncCont *cont = hl_js_async_cont_create(js,
+                                                  resolving_funcs[0],
+                                                  resolving_funcs[1],
+                                                  js->base.alloc,
+                                                  js_push_worker_gpu_result);
+    if (!cont) {
+        JS_FreeValue(ctx, resolving_funcs[0]);
+        JS_FreeValue(ctx, resolving_funcs[1]);
+        JS_FreeValue(ctx, promise);
+        hl_worker_gpu_op_free(op); free(op); hl_async_ctx_free(actx);
+        return JS_ThrowInternalError(ctx, "gpu.async.pipeline: out of memory");
+    }
+    actx->cont = cont;
+    actx->driver = op;
+    actx->free_driver = hl_worker_gpu_op_free_all;
+    actx->op.on_cancel = hl_worker_gpu_async_cancel;
+
+    op->async_ctx = actx;
+    atomic_store(&op->cancelled, 0);
+
+    if (hl_worker_gpu_submit(js->base.thread_pool, op) != 0) {
+        actx->cont->destroy(actx->cont);
+        hl_worker_gpu_op_free(op); free(op); hl_async_ctx_free(actx);
+        JS_FreeValue(ctx, promise);
+        return JS_ThrowInternalError(ctx, "gpu.async.pipeline: thread pool full");
+    }
+
+    if (kl_async_suspend(js->server, js->active_conn, &actx->op) < 0) {
+        atomic_store(&op->cancelled, 1);
+        actx->cont->cancel(actx->cont);
+        actx->cont->destroy(actx->cont);
+        actx->cont = NULL;
+        JS_FreeValue(ctx, promise);
+        return JS_ThrowInternalError(ctx, "gpu.async.pipeline: failed to suspend");
+    }
+
+    return promise;
 }
 
 static int js_gpu_module_init(JSContext *ctx, JSModuleDef *m)
