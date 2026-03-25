@@ -331,6 +331,32 @@ curl http://localhost:3000/compare
 - `gpu.buffer_copy(src, dst)` — GPU-side buffer copy without CPU roundtrip
 - `fs.mmap()` → `gpu.buffer()` — zero-copy disk→GPU data loading
 
+### compute_gpu_chain
+
+WASM→GPU zero-copy data flow — WASM preprocesses data, outputs a WasmBuffer, which passes directly to GPU dispatch without copying through a Lua string. Demonstrates the unified buffer protocol for chaining compute backends.
+
+Requires GPU + WASM build: `make fetch-wgpu && make HL_ENABLE_GPU=1`
+
+```bash
+./build/hull -p 3000 --no-sandbox examples/compute_gpu_chain/app.lua
+
+# WASM preprocess → GPU double
+curl -X POST http://localhost:3000/chain \
+  -d '{"values":[1,2,3,4,5,6,7,8]}'
+# Returns: [2,4,6,8,10,12,14,16]
+
+# Index via WASM → persistent GPU buffer, then query
+curl -X POST http://localhost:3000/index -d '{"values":[10,20,30]}'
+curl http://localhost:3000/query
+# Returns: [20,40,60] (doubled in-place via fire-and-forget)
+```
+
+**Key features demonstrated:**
+- `compute.call(name, input, { buffer = true })` → WasmBuffer output
+- WasmBuffer passed directly to `gpu.dispatch()` and `gpu.buffer()` (unified buffer protocol)
+- `gpu.dispatch({ output = false })` — fire-and-forget in-place update
+- WASM + GPU in the same app with `app.manifest({ gpu = true, compute = true })`
+
 ### cors_manifest
 
 CORS via `app.manifest()` configuration — no middleware code needed. Keel registers CORS headers automatically. Also demonstrates `server.stats()` for live connection counts.

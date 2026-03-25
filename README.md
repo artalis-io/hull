@@ -414,6 +414,7 @@ Example apps in both Lua and JavaScript:
 | [cors_manifest](examples/cors_manifest/) | CORS via manifest + server stats API |
 | [gpu_search](examples/gpu_search/) | GPU vector similarity search (dispatch + persistent buffers) |
 | [gpu_pipeline](examples/gpu_pipeline/) | Multi-stage GPU pipeline (normalize → weight → reduce) |
+| [compute_gpu_chain](examples/compute_gpu_chain/) | WASM→GPU zero-copy data flow (unified buffer protocol) |
 
 ```bash
 # Run an example

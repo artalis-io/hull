@@ -5145,12 +5145,172 @@ static void lua_push_worker_gpu_pipeline_result(lua_State *L, void *driver)
 
 static int l_gpu_async_pipeline(lua_State *L)
 {
-    /* For async pipeline, we reuse the sync path on the worker thread.
-     * This is simpler than deep-copying all stage data for the worker.
-     * The worker calls hl_cap_gpu_pipeline() which handles everything. */
-    /* For now, fall back to sync — proper async would need a new
-     * HlWorkerGpuPipelineOp with deep-copied stages. */
-    return l_gpu_pipeline(L);
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->base.thread_pool)
+        return luaL_error(L, "gpu.async not available (no thread pool)");
+    if (!lua->server || !lua->active_conn)
+        return luaL_error(L, "gpu.async can only be called from a request handler");
+    if (!lua->base.gpu_ctx)
+        return luaL_error(L, "gpu.async.pipeline: GPU not initialized");
+
+    luaL_checktype(L, 1, LUA_TTABLE);
+
+    /* Parse stages (same as sync) */
+    HlGpuPipelineStage stages[HL_GPU_MAX_PIPELINE_STAGES];
+    HlGpuBufferDesc all_bufs[HL_GPU_MAX_PIPELINE_BUFFERS];
+    int total_bufs = 0;
+    int stage_count = parse_pipeline_stages(L, 1, stages,
+        HL_GPU_MAX_PIPELINE_STAGES, all_bufs, HL_GPU_MAX_PIPELINE_BUFFERS,
+        &total_bufs);
+    if (stage_count <= 0)
+        return luaL_error(L, "gpu.async.pipeline: empty pipeline");
+
+    /* Parse opts */
+    HlGpuPipelineOutput outputs[HL_GPU_MAX_PIPELINE_OUTPUTS];
+    int output_count = 0;
+    int device = -1;
+    if (lua_istable(L, 2)) {
+        lua_getfield(L, 2, "device");
+        if (!lua_isnil(L, -1)) device = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        lua_getfield(L, 2, "output");
+        if (lua_isboolean(L, -1) && !lua_toboolean(L, -1))
+            output_count = HL_GPU_OUTPUT_NONE;
+        lua_pop(L, 1);
+        lua_getfield(L, 2, "outputs");
+        if (output_count != HL_GPU_OUTPUT_NONE && lua_istable(L, -1)) {
+            output_count = (int)lua_rawlen(L, -1);
+            if (output_count > HL_GPU_MAX_PIPELINE_OUTPUTS)
+                output_count = HL_GPU_MAX_PIPELINE_OUTPUTS;
+            for (int i = 0; i < output_count; i++) {
+                lua_rawgeti(L, -1, i + 1);
+                if (lua_istable(L, -1)) {
+                    lua_getfield(L, -1, "stage");
+                    outputs[i].stage = (int)luaL_optinteger(L, -1, stage_count) - 1;
+                    lua_pop(L, 1);
+                    lua_getfield(L, -1, "buffer");
+                    outputs[i].buffer = (int)luaL_optinteger(L, -1, 1) - 1;
+                    lua_pop(L, 1);
+                }
+                lua_pop(L, 1);
+            }
+        }
+        lua_pop(L, 1);
+    }
+
+    /* Deep-copy into worker op */
+    HlWorkerGpuOp *op = calloc(1, sizeof(HlWorkerGpuOp));
+    if (!op) return luaL_error(L, "gpu.async.pipeline: out of memory");
+
+    op->server = lua->server;
+    op->gpu_ctx = lua->base.gpu_ctx;
+    op->is_pipeline = 1;
+    op->stage_count = stage_count;
+    op->pipe_opts.device = device;
+    op->pipe_opts.output_count = output_count;
+
+    /* Deep-copy output specs */
+    if (output_count > 0) {
+        op->pipe_outputs = calloc((size_t)output_count, sizeof(HlGpuPipelineOutput));
+        if (op->pipe_outputs)
+            memcpy(op->pipe_outputs, outputs, (size_t)output_count * sizeof(HlGpuPipelineOutput));
+        op->pipe_opts.outputs = op->pipe_outputs;
+    }
+
+    /* Deep-copy stages */
+    op->stages = calloc((size_t)stage_count, sizeof(HlGpuPipelineStage));
+    op->stage_uniforms = calloc((size_t)stage_count, sizeof(void *));
+    if (!op->stages || !op->stage_uniforms) {
+        hl_worker_gpu_op_free(op); free(op);
+        return luaL_error(L, "gpu.async.pipeline: out of memory");
+    }
+
+    /* Deep-copy buffer descs and data */
+    if (total_bufs > 0) {
+        op->buffers = calloc((size_t)total_bufs, sizeof(HlGpuBufferDesc));
+        op->buffer_data = calloc((size_t)total_bufs, sizeof(void *));
+        if (!op->buffers || !op->buffer_data) {
+            hl_worker_gpu_op_free(op); free(op);
+            return luaL_error(L, "gpu.async.pipeline: out of memory");
+        }
+        op->buffer_count = total_bufs;
+    }
+
+    int buf_off = 0;
+    for (int s = 0; s < stage_count; s++) {
+        /* Deep-copy shader name */
+        if (stages[s].shader)
+            op->stages[s].shader = strdup(stages[s].shader);
+        op->stages[s].workgroups = stages[s].workgroups;
+        op->stages[s].buffer_count = stages[s].buffer_count;
+
+        /* Deep-copy per-stage uniforms */
+        if (stages[s].uniforms && stages[s].uniforms_len > 0) {
+            op->stage_uniforms[s] = malloc(stages[s].uniforms_len);
+            if (op->stage_uniforms[s]) {
+                memcpy(op->stage_uniforms[s], stages[s].uniforms, stages[s].uniforms_len);
+                op->stages[s].uniforms_len = stages[s].uniforms_len;
+            }
+        }
+
+        /* Deep-copy buffer descs + data for this stage */
+        for (int b = 0; b < stages[s].buffer_count && buf_off < total_bufs; b++) {
+            const HlGpuBufferDesc *src = &all_bufs[buf_off];
+            HlGpuBufferDesc *dst = &op->buffers[buf_off];
+            dst->size = src->size;
+            dst->usage = src->usage;
+            dst->binding = src->binding;
+            if (src->name)
+                dst->name = strdup(src->name);
+            if (src->data && src->size > 0) {
+                op->buffer_data[buf_off] = malloc(src->size);
+                if (op->buffer_data[buf_off]) {
+                    memcpy(op->buffer_data[buf_off], src->data, src->size);
+                    dst->data = op->buffer_data[buf_off];
+                }
+            }
+            buf_off++;
+        }
+    }
+
+    /* Create async ctx */
+    HlAsyncCtx *actx = hl_async_ctx_create(lua->server, lua->base.alloc);
+    if (!actx) {
+        hl_worker_gpu_op_free(op); free(op);
+        return luaL_error(L, "gpu.async.pipeline: out of memory");
+    }
+
+    extern HlAsyncCont *hl_lua_async_cont_create(HlLua *, HlAllocator *,
+                                                   HlLuaPushResultFn);
+    HlAsyncCont *cont = hl_lua_async_cont_create(lua, lua->base.alloc,
+                                                   lua_push_worker_gpu_pipeline_result);
+    if (!cont) {
+        hl_worker_gpu_op_free(op); free(op); hl_async_ctx_free(actx);
+        return luaL_error(L, "gpu.async.pipeline: out of memory");
+    }
+    actx->cont = cont;
+    actx->driver = op;
+    actx->free_driver = hl_worker_gpu_op_free_all;
+    actx->op.on_cancel = hl_worker_gpu_async_cancel;
+
+    op->async_ctx = actx;
+    atomic_store(&op->cancelled, 0);
+
+    if (hl_worker_gpu_submit(lua->base.thread_pool, op) != 0) {
+        actx->cont->destroy(actx->cont);
+        hl_worker_gpu_op_free(op); free(op); hl_async_ctx_free(actx);
+        return luaL_error(L, "gpu.async.pipeline: thread pool full");
+    }
+
+    if (kl_async_suspend(lua->server, lua->active_conn, &actx->op) < 0) {
+        atomic_store(&op->cancelled, 1);
+        actx->cont->cancel(actx->cont);
+        actx->cont->destroy(actx->cont);
+        actx->cont = NULL;
+        return luaL_error(L, "gpu.async.pipeline: failed to suspend");
+    }
+
+    return lua_yieldk(L, 0, 0, NULL);
 }
 
 static const luaL_Reg gpu_funcs[] = {

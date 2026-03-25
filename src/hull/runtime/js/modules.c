@@ -5835,6 +5835,10 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
 }
 
 /* Async pipeline — falls back to sync for now */
+/* JS async pipeline — sync fallback for now.
+ * The Lua version has full deep-copy async. JS version needs the same
+ * treatment but with JS string lifetime management (JS_ToCString tracking).
+ * TODO: implement proper JS async pipeline with deep-copy. */
 static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
                                       int argc, JSValueConst *argv)
 {

@@ -28,15 +28,51 @@ static void gpu_work_fn(void *ud)
 {
     HlWorkerGpuOp *op = (HlWorkerGpuOp *)ud;
     const char *err_msg = NULL;
+    int rc;
 
-    /* Wire the deep-copied buffer descs into opts */
-    op->opts.buffers = op->buffers;
-    op->opts.buffer_count = op->buffer_count;
-    op->opts.uniforms = op->uniforms;
-    op->opts.uniforms_len = op->uniforms_len;
+    if (op->is_pipeline) {
+        /* Wire deep-copied stages and buffers into pipeline opts */
+        op->pipe_opts.stages = op->stages;
+        op->pipe_opts.stage_count = op->stage_count;
+        if (op->pipe_outputs)
+            op->pipe_opts.outputs = op->pipe_outputs;
 
-    int rc = hl_cap_gpu_dispatch(op->gpu_ctx, op->shader_name, &op->opts,
-                                 &op->output, &op->output_len, &err_msg);
+        /* Wire per-stage buffers and uniforms */
+        int buf_off = 0;
+        for (int s = 0; s < op->stage_count; s++) {
+            if (op->stages[s].buffer_count > 0) {
+                op->stages[s].buffers = &op->buffers[buf_off];
+                buf_off += op->stages[s].buffer_count;
+            }
+            if (op->stage_uniforms && op->stage_uniforms[s]) {
+                op->stages[s].uniforms = op->stage_uniforms[s];
+            }
+        }
+
+        rc = hl_cap_gpu_pipeline(op->gpu_ctx, &op->pipe_opts,
+                                  &op->pipe_result, &err_msg);
+        /* For single-output pipelines, copy to output/output_len for
+         * the standard push_result callback */
+        if (rc == HL_GPU_OK && op->pipe_result.count == 1) {
+            op->output = op->pipe_result.data[0];
+            op->output_len = op->pipe_result.len[0];
+            op->pipe_result.data[0] = NULL; /* transfer ownership */
+            op->pipe_result.count = 0;
+        }
+    } else {
+        /* Wire the deep-copied buffer descs into opts */
+        op->opts.buffers = op->buffers;
+        op->opts.buffer_count = op->buffer_count;
+        op->opts.uniforms = op->uniforms;
+        op->opts.uniforms_len = op->uniforms_len;
+
+        /* Fire-and-forget: pass NULL output pointers */
+        void **out_ptr = (op->opts.output_buffer >= 0) ? &op->output : NULL;
+        size_t *out_len_ptr = (op->opts.output_buffer >= 0) ? &op->output_len : NULL;
+
+        rc = hl_cap_gpu_dispatch(op->gpu_ctx, op->shader_name, &op->opts,
+                                 out_ptr, out_len_ptr, &err_msg);
+    }
 
     if (rc != HL_GPU_OK) {
         op->error = 1;
@@ -109,6 +145,23 @@ void hl_worker_gpu_op_free(HlWorkerGpuOp *op)
 
     free(op->uniforms);
     op->uniforms = NULL;
+
+    /* Pipeline-specific cleanup */
+    if (op->stage_uniforms) {
+        for (int s = 0; s < op->stage_count; s++)
+            free(op->stage_uniforms[s]);
+        free(op->stage_uniforms);
+        op->stage_uniforms = NULL;
+    }
+    if (op->stages) {
+        for (int s = 0; s < op->stage_count; s++)
+            free((void *)op->stages[s].shader);
+        free(op->stages);
+        op->stages = NULL;
+    }
+    free(op->pipe_outputs);
+    op->pipe_outputs = NULL;
+    hl_cap_gpu_pipeline_result_free(&op->pipe_result);
 
     free(op->output);
     op->output = NULL;

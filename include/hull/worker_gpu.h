@@ -32,19 +32,30 @@ typedef struct HlWorkerGpuOp {
 
     /* Input */
     HlGpuCtx      *gpu_ctx;          /* GPU context (borrowed) */
+    int             is_pipeline;      /* 0 = dispatch, 1 = pipeline */
+
+    /* Dispatch mode (is_pipeline == 0) */
     char            shader_name[HL_GPU_NAME_MAX];
     HlGpuDispatchOpts opts;           /* value-copied options */
 
-    /* Inline buffer descriptors (deep-copied) */
+    /* Pipeline mode (is_pipeline == 1) */
+    HlGpuPipelineOpts pipe_opts;      /* value-copied */
+    HlGpuPipelineStage *stages;       /* deep-copied stage array */
+    int              stage_count;
+    HlGpuPipelineOutput *pipe_outputs;/* deep-copied output specs */
+    void           **stage_uniforms;  /* deep-copied per-stage uniforms */
+
+    /* Shared: inline buffer descriptors (deep-copied) */
     HlGpuBufferDesc *buffers;         /* deep-copied buffer descs */
     void           **buffer_data;     /* deep-copied inline data pointers */
     int              buffer_count;
-    void            *uniforms;        /* deep-copied uniform data */
+    void            *uniforms;        /* deep-copied uniform data (dispatch only) */
     size_t           uniforms_len;
 
     /* Output (set by worker thread) */
     void          *output;
     size_t         output_len;
+    HlGpuPipelineResult pipe_result;  /* pipeline multi-output */
     int            error;
     int            error_code;
     char           error_msg[HL_WORKER_ERR_SIZE];
