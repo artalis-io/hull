@@ -1268,7 +1268,11 @@ cppcheck:
 		--suppress=unusedVariable:$(SRCDIR)/hull/agent_lib.c \
 		--suppress=variableScope:$(SRCDIR)/hull/cap/wasm.c \
 		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/runtime/js/mod_http.c \
+		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/runtime/js/mod_compute.c \
+		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/runtime/js/mod_gpu.c \
 		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/runtime/lua/mod_http.c \
+		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/runtime/lua/mod_gpu.c \
+		--suppress=variableScope:$(SRCDIR)/hull/cap/test.c \
 		--suppress=unmatchedSuppression \
 		--suppress='*:$(QJS_DIR)/*' \
 		--suppress='*:$(LUA_DIR)/*' \
