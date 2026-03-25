@@ -155,15 +155,23 @@ static int test_dispatch(KlRouter *router, const char *method,
     result->hdr_buf = res.hdr_buf;
     result->hdr_len = res.hdr_len;
 
-    /* Don't free response yet — caller reads the body pointer.
-     * Caller is responsible for cleanup. We copy what we need. */
-    /* Actually, body points into runtime-managed memory, so we copy it. */
+    /* Copy body and headers before freeing response (kl_response_free
+     * frees hdr_buf). Body points into runtime-managed memory. */
     if (res.body && res.body_len > 0) {
         char *body_copy = hl_alloc_malloc(hl_alloc, res.body_len + 1);
         if (body_copy) {
             memcpy(body_copy, res.body, res.body_len);
             body_copy[res.body_len] = '\0';
             result->body = body_copy;
+        }
+    }
+    if (res.hdr_buf && res.hdr_len > 0) {
+        char *hdr_copy = hl_alloc_malloc(hl_alloc, res.hdr_len + 1);
+        if (hdr_copy) {
+            memcpy(hdr_copy, res.hdr_buf, res.hdr_len);
+            hdr_copy[res.hdr_len] = '\0';
+            result->hdr_buf = hdr_copy;
+            result->hdr_len = res.hdr_len;
         }
     }
 
@@ -330,6 +338,41 @@ static int l_test_http(lua_State *L, const char *method)
 
         hl_alloc_free(lua->base.alloc, (void *)result.body,
                       result.body_len + 1);
+    }
+
+    /* Parse response headers into a table */
+    if (result.hdr_buf && result.hdr_len > 0) {
+        lua_newtable(L);
+        const char *p = result.hdr_buf;
+        const char *end = p + result.hdr_len;
+        while (p < end) {
+            const char *colon = memchr(p, ':', (size_t)(end - p));
+            if (!colon) break;
+            const char *eol = memchr(colon, '\r', (size_t)(end - colon));
+            if (!eol) eol = memchr(colon, '\n', (size_t)(end - colon));
+            if (!eol) eol = end;
+            /* Skip ": " after colon */
+            const char *val = colon + 1;
+            while (val < eol && *val == ' ') val++;
+            /* Push lowercase header name as key */
+            size_t name_len = (size_t)(colon - p);
+            char *lower = (char *)hl_alloc_malloc(lua->base.alloc, name_len + 1);
+            if (lower) {
+                for (size_t i = 0; i < name_len; i++)
+                    lower[i] = (char)(p[i] >= 'A' && p[i] <= 'Z' ? p[i] + 32 : p[i]);
+                lower[name_len] = '\0';
+                lua_pushlstring(L, lower, name_len);
+                lua_pushlstring(L, val, (size_t)(eol - val));
+                lua_settable(L, -3);
+                hl_alloc_free(lua->base.alloc, lower, name_len + 1);
+            }
+            /* Advance past \r\n */
+            p = eol;
+            while (p < end && (*p == '\r' || *p == '\n')) p++;
+        }
+        lua_setfield(L, -2, "headers");
+        hl_alloc_free(lua->base.alloc, (void *)result.hdr_buf,
+                      result.hdr_len + 1);
     }
 
     return 1;
@@ -670,6 +713,37 @@ static JSValue js_test_http(JSContext *ctx, const char *method,
 
         hl_alloc_free(state->js->base.alloc, (void *)result.body,
                       result.body_len + 1);
+    }
+
+    /* Parse response headers into an object */
+    if (result.hdr_buf && result.hdr_len > 0) {
+        JSValue hdrs = JS_NewObject(ctx);
+        const char *p = result.hdr_buf;
+        const char *end = p + result.hdr_len;
+        while (p < end) {
+            const char *colon = memchr(p, ':', (size_t)(end - p));
+            if (!colon) break;
+            const char *eol = memchr(colon, '\r', (size_t)(end - colon));
+            if (!eol) eol = memchr(colon, '\n', (size_t)(end - colon));
+            if (!eol) eol = end;
+            const char *val = colon + 1;
+            while (val < eol && *val == ' ') val++;
+            /* Lowercase header name */
+            size_t name_len = (size_t)(colon - p);
+            char lower[256];
+            if (name_len < sizeof(lower)) {
+                for (size_t i = 0; i < name_len; i++)
+                    lower[i] = (char)(p[i] >= 'A' && p[i] <= 'Z' ? p[i] + 32 : p[i]);
+                lower[name_len] = '\0';
+                JS_SetPropertyStr(ctx, hdrs, lower,
+                    JS_NewStringLen(ctx, val, (size_t)(eol - val)));
+            }
+            p = eol;
+            while (p < end && (*p == '\r' || *p == '\n')) p++;
+        }
+        JS_SetPropertyStr(ctx, obj, "headers", hdrs);
+        hl_alloc_free(state->js->base.alloc, (void *)result.hdr_buf,
+                      result.hdr_len + 1);
     }
 
     return obj;

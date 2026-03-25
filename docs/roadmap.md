@@ -269,11 +269,11 @@ The [Keel C audit](keel_audit.md) identified issues to address upstream:
 
 | Priority | Issue | Impact |
 |----------|-------|--------|
-| Critical | kqueue READ\|WRITE bitmask (C-1) | HTTP/2 broken on macOS |
-| Critical | WebSocket partial writes (C-2) | Frame corruption on non-blocking sockets |
-| High | Protocol upgrade partial writes (H-3, H-4) | 101 response corruption |
-| High | Private key material not zeroed (H-2) | Key residue in heap |
-| High | writev_all busy-spin on EAGAIN (H-5) | Event loop starvation |
+| Critical | ~~kqueue READ\|WRITE bitmask (C-1)~~ | **Resolved** in Keel upstream |
+| Critical | ~~WebSocket partial writes (C-2)~~ | **Resolved** in Keel upstream |
+| High | ~~Protocol upgrade partial writes (H-3, H-4)~~ | **Resolved** in Keel upstream |
+| High | ~~Private key material not zeroed (H-2)~~ | **Resolved** in Keel upstream |
+| High | ~~writev_all busy-spin on EAGAIN (H-5)~~ | **Resolved** in Keel upstream |
 | Medium | Add WebSocket fuzz target | Attack surface coverage gap |
 
 ## Benchmark Baseline
