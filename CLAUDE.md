@@ -951,10 +951,12 @@ gpu.buffer_copy("source", "dest", {
 **Shader loading from files:** `gpu.load(name)` reads `shaders/<name>.wgsl` from disk (dev mode) or VFS (built binaries) and compiles it. Enables shader iteration without modifying app code.
 
 ```lua
--- shaders/score.wgsl on disk
+-- shaders/score.wgsl on disk (dev mode) or embedded (built binary)
 gpu.load("score")                     -- reads + compiles shaders/score.wgsl
 -- equivalent to: gpu.compile("score", <file contents>)
 ```
+
+**Shader embedding in builds:** `hull build` and `make APP_DIR=` automatically discover and embed `shaders/*.wgsl` files into the binary via the VFS, just like `templates/`, `static/`, `compute/`, and `migrations/`. `gpu.load()` checks VFS first, then falls back to disk — so shaders work identically in dev mode and built binaries.
 
 **Directory convention:**
 ```

@@ -52,7 +52,7 @@ Each app is a single file (`app.lua` or `app.js`) with optional:
 - `templates/*.html` — server-side templates
 - `static/*` — served at `/static/*`
 - `compute/*.wasm` — WASM compute plugins (auto-AOT compiled during `hull build`)
-- `shaders/*.wgsl` — GPU compute shaders (loaded via `gpu.load()`)
+- `shaders/*.wgsl` — GPU compute shaders (embedded by `hull build`, loaded via `gpu.load()`)
 - `tests/test_*.lua` or `tests/test_*.js` — test files
 
 ## Runtime Selection
