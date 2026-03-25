@@ -37,6 +37,22 @@ HlWasmBuffer *hl_wasm_buffer_create_owned(const void *src, size_t len,
     return buf;
 }
 
+/* ── ADOPTED (take ownership of malloc'd pointer) ────────────────── */
+
+HlWasmBuffer *hl_wasm_buffer_create_adopted(void *data, size_t len,
+                                              HlAllocator *alloc)
+{
+    HlWasmBuffer *buf = hl_alloc_calloc(alloc, 1, sizeof(*buf));
+    if (!buf) return NULL;
+
+    buf->kind  = HL_WASM_BUF_OWNED;
+    buf->len   = len;
+    buf->alloc = alloc;
+    buf->data  = data;
+    buf->u.owned.alloc = data; /* free(data) on destroy */
+    return buf;
+}
+
 /* ── MMAP ─────────────────────────────────────────────────────────── */
 
 HlWasmBuffer *hl_wasm_buffer_create_mmap(HlMappedBuffer *mbuf,

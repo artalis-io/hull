@@ -86,7 +86,47 @@ app.post("/chain", function(req, res)
     })
 end)
 
--- POST /chain-persistent — WASM → persistent GPU buffer → dispatch
+-- POST /roundtrip — WASM → GPU → WASM (full zero-copy chain)
+app.post("/roundtrip", function(req, res)
+    local body = json.decode(req.body)
+    if not body or not body.values then
+        res:status(400):json({ error = "need values array" })
+        return
+    end
+
+    local parts = {}
+    for _, v in ipairs(body.values) do
+        parts[#parts + 1] = string.pack("I4", math.floor(v))
+    end
+    local packed = table.concat(parts)
+    local count = #body.values
+
+    -- Step 1: WASM preprocess → WasmBuffer (zero-copy out)
+    local step1 = compute.call("echo", packed, { buffer = true })
+
+    -- Step 2: GPU compute → WasmBuffer (zero-copy in AND out)
+    local step2 = gpu.dispatch("double", {
+        buffers = {{ data = step1, size = count * 4 }},
+        workgroups = { x = math.ceil(count / 64) },
+        output = 1,
+        buffer = true,  -- return WasmBuffer for WASM chaining
+    })
+
+    -- Step 3: WASM postprocess → string (final output)
+    local step3 = compute.call("echo", step2)
+
+    local results = {}
+    for i = 1, count do
+        results[i] = string.unpack("I4", step3, (i - 1) * 4 + 1)
+    end
+    res:json({
+        input = body.values,
+        output = results,
+        pipeline = "wasm → gpu → wasm (zero-copy)",
+    })
+end)
+
+-- POST /index — WASM → persistent GPU buffer → dispatch
 -- Demonstrates keeping WASM output on GPU across requests
 app.post("/index", function(req, res)
     local body = json.decode(req.body)

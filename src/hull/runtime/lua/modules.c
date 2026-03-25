@@ -4519,6 +4519,12 @@ static int l_gpu_dispatch(lua_State *L)
     }
     lua_pop(L, 1);
 
+    /* buffer = true → return WasmBuffer instead of string (zero-copy GPU→WASM) */
+    int want_buffer = 0;
+    lua_getfield(L, 2, "buffer");
+    if (lua_toboolean(L, -1)) want_buffer = 1;
+    lua_pop(L, 1);
+
     /* Parse uniforms */
     lua_getfield(L, 2, "uniforms");
     if (lua_isstring(L, -1)) {
@@ -4595,8 +4601,26 @@ static int l_gpu_dispatch(lua_State *L)
     }
 
     if (output) {
-        lua_pushlstring(L, (const char *)output, output_len);
-        free(output);
+#ifdef HL_ENABLE_WASM
+        if (want_buffer) {
+            /* Zero-copy: transfer malloc'd output to WasmBuffer */
+            HlLua *lua_ctx = get_hl_lua(L);
+            HlWasmBuffer *wbuf = hl_wasm_buffer_create_adopted(
+                output, output_len, lua_ctx ? lua_ctx->base.alloc : NULL);
+            if (wbuf) {
+                lua_push_wasm_buffer(L, wbuf);
+            } else {
+                /* Fallback: copy to string if buffer creation fails */
+                lua_pushlstring(L, (const char *)output, output_len);
+                free(output);
+            }
+        } else
+#endif
+        {
+            (void)want_buffer;
+            lua_pushlstring(L, (const char *)output, output_len);
+            free(output);
+        }
     } else {
         lua_pushboolean(L, 1); /* fire-and-forget: return true */
     }
@@ -5080,6 +5104,14 @@ static int l_gpu_pipeline(lua_State *L)
         lua_pop(L, 1);
     }
 
+    /* buffer = true → return WasmBuffer for GPU→WASM chaining */
+    int pipe_want_buffer = 0;
+    if (lua_istable(L, 2)) {
+        lua_getfield(L, 2, "buffer");
+        if (lua_toboolean(L, -1)) pipe_want_buffer = 1;
+        lua_pop(L, 1);
+    }
+
     HlGpuPipelineOpts opts = {
         .stages = stages,
         .stage_count = stage_count,
@@ -5106,7 +5138,21 @@ static int l_gpu_pipeline(lua_State *L)
 
     /* Return table of results */
     if (result.count == 1) {
-        /* Single output: return as string directly */
+#ifdef HL_ENABLE_WASM
+        if (pipe_want_buffer) {
+            HlLua *lua_ctx = get_hl_lua(L);
+            HlWasmBuffer *wbuf = hl_wasm_buffer_create_adopted(
+                result.data[0], result.len[0],
+                lua_ctx ? lua_ctx->base.alloc : NULL);
+            if (wbuf) {
+                result.data[0] = NULL; /* ownership transferred */
+                hl_cap_gpu_pipeline_result_free(&result);
+                lua_push_wasm_buffer(L, wbuf);
+                return 1;
+            }
+        }
+#endif
+        (void)pipe_want_buffer;
         lua_pushlstring(L, (const char *)result.data[0], result.len[0]);
         hl_cap_gpu_pipeline_result_free(&result);
         return 1;

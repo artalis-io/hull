@@ -75,6 +75,14 @@ HlWasmBuffer *hl_wasm_buffer_create_mmap(HlMappedBuffer *mbuf,
                                           HlAllocator *alloc);
 
 /**
+ * Create a buffer that takes ownership of a malloc'd pointer.
+ * Does NOT copy — the buffer will free(data) on destroy.
+ * data must have been allocated with malloc/calloc (not HlAllocator).
+ */
+HlWasmBuffer *hl_wasm_buffer_create_adopted(void *data, size_t len,
+                                              HlAllocator *alloc);
+
+/**
  * Create a buffer backed by WASM instance linear memory.
  * The instance stays checked out until hl_wasm_buffer_destroy().
  */
