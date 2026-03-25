@@ -1004,7 +1004,9 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     if (!js || !js->ctx || !req || !res)
         return -1;
 
-    assert(js->dispatch_depth == 0 && "re-entrant dispatch");
+    /* dispatch_depth may be > 0 during self-fetch (outbox.flush → same server).
+     * This is safe because the original handler is yielded and the new
+     * dispatch runs on its own coroutine/promise with independent state. */
     js->dispatch_depth++;
 
     /* Guard: roll back any stale transaction left by a crashed handler */

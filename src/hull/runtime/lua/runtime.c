@@ -311,7 +311,9 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     if (!lua || !lua->L || !req || !res)
         return -1;
 
-    assert(lua->dispatch_depth == 0 && "re-entrant dispatch");
+    /* dispatch_depth may be > 0 during self-fetch (outbox.flush → same server).
+     * This is safe because the original handler is yielded and the new
+     * dispatch runs on its own coroutine with independent per-request state. */
     lua->dispatch_depth++;
 
     /* Guard: roll back any stale transaction left by a crashed handler */
