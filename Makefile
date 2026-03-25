@@ -260,9 +260,18 @@ WAMR_INVOKE_OBJ := $(BUILDDIR)/wamr_invoke_native.o
 ifeq ($(UNAME_S),Darwin)
   WAMR_INVOKE_SRC := $(WAMR_IWASM)/common/arch/invokeNative_osx_universal.s
   WAMR_INVOKE_FLAGS := -DBH_PLATFORM_DARWIN -DWASM_ENABLE_SIMD=1
-else ifneq ($(findstring cosmo,$(CC)),)
-  # Cosmopolitan: use generic invoker (cosmo handles ABI translation)
-  WAMR_INVOKE_SRC := $(WAMR_IWASM)/common/arch/invokeNative_general.c
+else ifeq ($(notdir $(CC)),cosmocc)
+  # Cosmopolitan fat binary: need arch-specific assembly invokers for both
+  # x86_64 and aarch64. The generic C invoker mangles 64-bit arguments.
+  # cosmocc links two architectures; we compile each with the arch-specific
+  # compiler and place the aarch64 object in build/.aarch64/ per convention.
+  WAMR_INVOKE_SRC := $(WAMR_IWASM)/common/arch/invokeNative_em64_simd.s
+  WAMR_INVOKE_SRC_ARM64 := $(WAMR_IWASM)/common/arch/invokeNative_aarch64_simd.s
+  WAMR_INVOKE_OBJ_ARM64 := $(BUILDDIR)/.aarch64/wamr_invoke_native.o
+else ifneq ($(findstring x86_64-unknown-cosmo,$(CC)),)
+  WAMR_INVOKE_SRC := $(WAMR_IWASM)/common/arch/invokeNative_em64_simd.s
+else ifneq ($(findstring aarch64-unknown-cosmo,$(CC)),)
+  WAMR_INVOKE_SRC := $(WAMR_IWASM)/common/arch/invokeNative_aarch64_simd.s
 else ifeq ($(shell uname -m),x86_64)
   WAMR_INVOKE_SRC := $(WAMR_IWASM)/common/arch/invokeNative_em64_simd.s
 else ifeq ($(shell uname -m),aarch64)
@@ -1014,7 +1023,13 @@ $(BUILDDIR)/wamr_%.o: $(WAMR_DIR)/%.c | $(BUILDDIR)
 	@mkdir -p $(dir $@)
 	$(CC) $(WAMR_CFLAGS) -c -o $@ $<
 $(WAMR_INVOKE_OBJ): $(WAMR_INVOKE_SRC) | $(BUILDDIR)
+ifeq ($(notdir $(CC)),cosmocc)
+	x86_64-unknown-cosmo-cc $(WAMR_CFLAGS) $(WAMR_INVOKE_FLAGS) -c -o $@ $<
+	@mkdir -p $(BUILDDIR)/.aarch64
+	aarch64-unknown-cosmo-cc $(WAMR_CFLAGS) $(WAMR_INVOKE_FLAGS) -c -o $(WAMR_INVOKE_OBJ_ARM64) $(WAMR_INVOKE_SRC_ARM64)
+else
 	$(CC) $(WAMR_CFLAGS) $(WAMR_INVOKE_FLAGS) -c -o $@ $<
+endif
 endif
 
 $(BUILDDIR):
