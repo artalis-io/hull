@@ -92,7 +92,7 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
         if (entry) ctx->is_lua = 1;
 #endif
 #ifdef HL_ENABLE_JS
-        if (!entry) {
+        if (!entry) { /* cppcheck-suppress identicalInnerCondition ; JS fallback after Lua */
             entry = detect_entry(opts->app_dir, "js", entry_buf, sizeof(entry_buf));
             if (entry) ctx->is_lua = 0;
         }
