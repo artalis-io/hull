@@ -50,6 +50,7 @@ const HlVfs  *hl_app_context_app_vfs(HlAppContext *ctx);
 const HlVfs  *hl_app_context_platform_vfs(HlAppContext *ctx);
 HlStmtCache  *hl_app_context_stmt_cache(HlAppContext *ctx);
 int           hl_app_context_is_lua(HlAppContext *ctx);
+const char   *hl_app_context_app_dir(HlAppContext *ctx);
 
 #ifdef HL_ENABLE_LUA
 struct HlLua;

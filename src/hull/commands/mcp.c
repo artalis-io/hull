@@ -10,6 +10,7 @@
 
 #include "hull/commands/mcp.h"
 #include "hull/agent_lib.h"
+#include "hull/app_context.h"
 
 #include <sh_json.h>
 #include <sh_arena.h>
@@ -72,6 +73,9 @@ static const char SCHEMA_MIGRATE[] =
     "\"description\":\"Application directory (default: .)\"},"
     "\"db_path\":{\"type\":\"string\",\"description\":\"Database file path\"}}}";
 
+static const char SCHEMA_RELOAD[] =
+    "{\"type\":\"object\",\"properties\":{}}";
+
 typedef struct {
     const char *name;
     const char *description;
@@ -97,6 +101,8 @@ static const McpTool mcp_tools[] = {
                               SCHEMA_CONTEXT },
     { "hull_migrate_status", "Show migration status",
                               SCHEMA_MIGRATE },
+    { "hull_reload",         "Reload application context (after code changes)",
+                              SCHEMA_RELOAD },
     { NULL, NULL, NULL }
 };
 
@@ -266,29 +272,41 @@ static void handle_tools_list(FILE *fp, const ShJsonValue *id)
 }
 
 static void handle_tools_call(FILE *fp, const ShJsonValue *id,
-                              const ShJsonValue *params, const char *app_dir)
+                              const ShJsonValue *params, const char *app_dir,
+                              HlAppContext **warm_ctx_ptr)
 {
     const char *tool_name = sh_json_as_string(
         sh_json_get(params, "name"), "");
     const ShJsonValue *args = sh_json_get(params, "arguments");
+
+    HlAppContext *warm_ctx = warm_ctx_ptr ? *warm_ctx_ptr : NULL;
 
     ShJsonBuf agent_out;
     sh_json_buf_init(&agent_out);
 
     if (strcmp(tool_name, "hull_routes") == 0) {
         const char *dir = sh_json_as_string(sh_json_get(args, "app_dir"), app_dir);
-        hl_agent_routes(dir, &agent_out);
+        if (warm_ctx && strcmp(dir, app_dir) == 0)
+            hl_agent_routes_ctx(warm_ctx, &agent_out);
+        else
+            hl_agent_routes(dir, &agent_out);
 
     } else if (strcmp(tool_name, "hull_db_schema") == 0) {
         const char *dir = sh_json_as_string(sh_json_get(args, "app_dir"), app_dir);
         const char *db = sh_json_as_string(sh_json_get(args, "db_path"), NULL);
-        hl_agent_db_schema(dir, db, &agent_out);
+        if (warm_ctx && strcmp(dir, app_dir) == 0)
+            hl_agent_db_schema_ctx(warm_ctx, db, &agent_out);
+        else
+            hl_agent_db_schema(dir, db, &agent_out);
 
     } else if (strcmp(tool_name, "hull_db_query") == 0) {
         const char *dir = sh_json_as_string(sh_json_get(args, "app_dir"), app_dir);
         const char *db = sh_json_as_string(sh_json_get(args, "db_path"), NULL);
         const char *sql = sh_json_as_string(sh_json_get(args, "sql"), NULL);
-        hl_agent_db_query(dir, db, sql, &agent_out);
+        if (warm_ctx && strcmp(dir, app_dir) == 0)
+            hl_agent_db_query_ctx(warm_ctx, db, sql, &agent_out);
+        else
+            hl_agent_db_query(dir, db, sql, &agent_out);
 
     } else if (strcmp(tool_name, "hull_request") == 0) {
         const char *method = sh_json_as_string(sh_json_get(args, "method"), "GET");
@@ -308,7 +326,10 @@ static void handle_tools_call(FILE *fp, const ShJsonValue *id,
 
     } else if (strcmp(tool_name, "hull_test") == 0) {
         const char *dir = sh_json_as_string(sh_json_get(args, "app_dir"), app_dir);
-        hl_agent_test(dir, &agent_out);
+        if (warm_ctx && strcmp(dir, app_dir) == 0)
+            hl_agent_test_ctx(warm_ctx, &agent_out);
+        else
+            hl_agent_test(dir, &agent_out);
 
     } else if (strcmp(tool_name, "hull_context") == 0) {
         const char *task = sh_json_as_string(sh_json_get(args, "task"), NULL);
@@ -318,7 +339,26 @@ static void handle_tools_call(FILE *fp, const ShJsonValue *id,
     } else if (strcmp(tool_name, "hull_migrate_status") == 0) {
         const char *dir = sh_json_as_string(sh_json_get(args, "app_dir"), app_dir);
         const char *db = sh_json_as_string(sh_json_get(args, "db_path"), NULL);
-        hl_agent_migrate_status(dir, db, &agent_out);
+        if (warm_ctx && strcmp(dir, app_dir) == 0)
+            hl_agent_migrate_status_ctx(warm_ctx, db, &agent_out);
+        else
+            hl_agent_migrate_status(dir, db, &agent_out);
+
+    } else if (strcmp(tool_name, "hull_reload") == 0) {
+        if (warm_ctx_ptr) {
+            if (*warm_ctx_ptr) {
+                hl_app_context_free(*warm_ctx_ptr);
+                *warm_ctx_ptr = NULL;
+            }
+            HlAppContextOpts opts = { .app_dir = app_dir };
+            if (hl_app_context_init(warm_ctx_ptr, &opts) != 0)
+                *warm_ctx_ptr = NULL;
+        }
+        ShJsonWriter w;
+        sh_json_writer_init(&w, sh_json_buf_write, &agent_out);
+        sh_json_write_object_start(&w);
+        sh_json_write_kv_bool(&w, "ok", warm_ctx_ptr && *warm_ctx_ptr);
+        sh_json_write_object_end(&w);
 
     } else {
         sh_json_buf_free(&agent_out);
@@ -344,8 +384,17 @@ int hl_cmd_mcp(int argc, char **argv, const char *hull_exe)
             app_dir = argv[i] + 10;
     }
 
+    /* Initialize warm context for reuse across tool calls */
+    HlAppContext *warm_ctx = NULL;
+    HlAppContextOpts ctx_opts = { .app_dir = app_dir };
+    if (hl_app_context_init(&warm_ctx, &ctx_opts) != 0)
+        warm_ctx = NULL;  /* fallback to per-call init */
+
     char *line_buf = malloc(MCP_MAX_LINE);
-    if (!line_buf) return 1;
+    if (!line_buf) {
+        hl_app_context_free(warm_ctx);
+        return 1;
+    }
 
     while (fgets(line_buf, MCP_MAX_LINE, stdin)) {
         /* Skip empty lines */
@@ -377,7 +426,7 @@ int hl_cmd_mcp(int argc, char **argv, const char *hull_exe)
         } else if (strcmp(method, "tools/list") == 0) {
             handle_tools_list(stdout, id);
         } else if (strcmp(method, "tools/call") == 0) {
-            handle_tools_call(stdout, id, params, app_dir);
+            handle_tools_call(stdout, id, params, app_dir, &warm_ctx);
         } else {
             /* Only send error for methods with an id (requests, not notifications) */
             if (id && !sh_json_is_null(id))
@@ -387,6 +436,7 @@ int hl_cmd_mcp(int argc, char **argv, const char *hull_exe)
         sh_arena_free(arena);
     }
 
+    hl_app_context_free(warm_ctx);
     free(line_buf);
     return 0;
 }

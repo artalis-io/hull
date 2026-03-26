@@ -275,6 +275,11 @@ int hl_app_context_is_lua(HlAppContext *ctx)
     return ctx ? ctx->is_lua : 0;
 }
 
+const char *hl_app_context_app_dir(HlAppContext *ctx)
+{
+    return ctx ? ctx->app_vfs.root_dir : NULL;
+}
+
 #ifdef HL_ENABLE_LUA
 HlLua *hl_app_context_lua(HlAppContext *ctx)
 {

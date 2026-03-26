@@ -277,12 +277,8 @@ int hl_agent_routes(const char *app_dir, ShJsonBuf *out)
 
 /* ── hl_agent_db_schema ────────────────────────────────────────────── */
 
-int hl_agent_db_schema(const char *app_dir, const char *db_path, ShJsonBuf *out)
+static int db_schema_impl(sqlite3 *db, int close_db, ShJsonBuf *out)
 {
-    sqlite3 *db = open_app_db(app_dir, db_path);
-    if (!db)
-        return write_error(out, "cannot open database");
-
     ShJsonWriter w;
     sh_json_writer_init(&w, sh_json_buf_write, out);
     sh_json_write_object_start(&w);
@@ -340,27 +336,41 @@ int hl_agent_db_schema(const char *app_dir, const char *db_path, ShJsonBuf *out)
 
     sh_json_write_array_end(&w);
     sh_json_write_object_end(&w);
-    sqlite3_close(db);
+    if (close_db) sqlite3_close(db);
     return 0;
+}
+
+int hl_agent_db_schema_ctx(HlAppContext *ctx, const char *db_path, ShJsonBuf *out)
+{
+    if (db_path) {
+        /* Explicit db_path: open a separate read-only connection */
+        sqlite3 *db = open_app_db(hl_app_context_app_dir(ctx), db_path);
+        if (!db)
+            return write_error(out, "cannot open database");
+        return db_schema_impl(db, 1, out);
+    }
+    /* No db_path: use the context's :memory: database */
+    return db_schema_impl(hl_app_context_db(ctx), 0, out);
+}
+
+int hl_agent_db_schema(const char *app_dir, const char *db_path, ShJsonBuf *out)
+{
+    sqlite3 *db = open_app_db(app_dir, db_path);
+    if (!db)
+        return write_error(out, "cannot open database");
+    return db_schema_impl(db, 1, out);
 }
 
 /* ── hl_agent_db_query ─────────────────────────────────────────────── */
 
-int hl_agent_db_query(const char *app_dir, const char *db_path,
-                      const char *sql, ShJsonBuf *out)
+static int db_query_impl(sqlite3 *db, int close_db, const char *sql,
+                          ShJsonBuf *out)
 {
-    if (!sql)
-        return write_error(out, "SQL argument required");
-
-    sqlite3 *db = open_app_db(app_dir, db_path);
-    if (!db)
-        return write_error(out, "cannot open database");
-
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
         int ret = write_error(out, sqlite3_errmsg(db));
-        sqlite3_close(db);
+        if (close_db) sqlite3_close(db);
         return ret;
     }
 
@@ -418,8 +428,35 @@ int hl_agent_db_query(const char *app_dir, const char *db_path,
 
     sh_json_write_object_end(&w);
     sqlite3_finalize(stmt);
-    sqlite3_close(db);
+    if (close_db) sqlite3_close(db);
     return 0;
+}
+
+int hl_agent_db_query_ctx(HlAppContext *ctx, const char *db_path,
+                          const char *sql, ShJsonBuf *out)
+{
+    if (!sql)
+        return write_error(out, "SQL argument required");
+
+    if (db_path) {
+        sqlite3 *db = open_app_db(hl_app_context_app_dir(ctx), db_path);
+        if (!db)
+            return write_error(out, "cannot open database");
+        return db_query_impl(db, 1, sql, out);
+    }
+    return db_query_impl(hl_app_context_db(ctx), 0, sql, out);
+}
+
+int hl_agent_db_query(const char *app_dir, const char *db_path,
+                      const char *sql, ShJsonBuf *out)
+{
+    if (!sql)
+        return write_error(out, "SQL argument required");
+
+    sqlite3 *db = open_app_db(app_dir, db_path);
+    if (!db)
+        return write_error(out, "cannot open database");
+    return db_query_impl(db, 1, sql, out);
 }
 
 /* ── hl_agent_request ──────────────────────────────────────────────── */
@@ -693,14 +730,10 @@ static const char *detect_entry(const char *app_dir, const char *ext,
 }
 
 #ifdef HL_ENABLE_LUA
-static int agent_test_lua(const char *app_dir, const char *entry, ShJsonBuf *out)
+static int agent_test_lua_ctx(HlAppContext *ctx, ShJsonBuf *out)
 {
-    HlAppContext *ctx = NULL;
-    HlAppContextOpts opts = { .app_dir = app_dir, .entry_point = entry };
-    if (hl_app_context_init(&ctx, &opts) != 0)
-        return write_error(out, "Lua init failed");
-
     HlLua *lua = hl_app_context_lua(ctx);
+    const char *app_dir = hl_app_context_app_dir(ctx);
 
     KlAllocator alloc = kl_allocator_default();
     KlRouter router;
@@ -708,7 +741,6 @@ static int agent_test_lua(const char *app_dir, const char *entry, ShJsonBuf *out
 
     if (hl_lua_wire_routes(lua, &router) != 0) {
         kl_router_free(&router);
-        hl_app_context_free(ctx);
         return write_error(out, "no routes registered");
     }
 
@@ -718,7 +750,6 @@ static int agent_test_lua(const char *app_dir, const char *entry, ShJsonBuf *out
     if (!test_files || !test_files[0]) {
         if (test_files) free(test_files);
         kl_router_free(&router);
-        hl_app_context_free(ctx);
         return write_error(out, "no test files found");
     }
 
@@ -778,20 +809,15 @@ static int agent_test_lua(const char *app_dir, const char *entry, ShJsonBuf *out
     sh_json_write_object_end(&w);
 
     kl_router_free(&router);
-    hl_app_context_free(ctx);
     return grand_failed > 0 ? 1 : 0;
 }
 #endif
 
 #ifdef HL_ENABLE_JS
-static int agent_test_js(const char *app_dir, const char *entry, ShJsonBuf *out)
+static int agent_test_js_ctx(HlAppContext *ctx, ShJsonBuf *out)
 {
-    HlAppContext *ctx = NULL;
-    HlAppContextOpts opts = { .app_dir = app_dir, .entry_point = entry };
-    if (hl_app_context_init(&ctx, &opts) != 0)
-        return write_error(out, "QuickJS init failed");
-
     HlJS *js = hl_app_context_js(ctx);
+    const char *app_dir = hl_app_context_app_dir(ctx);
 
     KlAllocator alloc = kl_allocator_default();
     KlRouter router;
@@ -799,7 +825,6 @@ static int agent_test_js(const char *app_dir, const char *entry, ShJsonBuf *out)
 
     if (hl_js_wire_routes(js, &router) != 0) {
         kl_router_free(&router);
-        hl_app_context_free(ctx);
         return write_error(out, "no routes registered");
     }
 
@@ -809,7 +834,6 @@ static int agent_test_js(const char *app_dir, const char *entry, ShJsonBuf *out)
     if (!test_files || !test_files[0]) {
         if (test_files) free(test_files);
         kl_router_free(&router);
-        hl_app_context_free(ctx);
         return write_error(out, "no test files found");
     }
 
@@ -904,20 +928,32 @@ static int agent_test_js(const char *app_dir, const char *entry, ShJsonBuf *out)
     sh_json_write_object_end(&w);
 
     kl_router_free(&router);
-    hl_app_context_free(ctx);
     return grand_failed > 0 ? 1 : 0;
 }
 #endif
+
+int hl_agent_test_ctx(HlAppContext *ctx, ShJsonBuf *out)
+{
+#ifdef HL_ENABLE_LUA
+    if (hl_app_context_is_lua(ctx))
+        return agent_test_lua_ctx(ctx, out);
+#endif
+#ifdef HL_ENABLE_JS
+    if (!hl_app_context_is_lua(ctx))
+        return agent_test_js_ctx(ctx, out);
+#endif
+
+    (void)ctx;
+    return write_error(out, "no runtime available");
+}
 
 int hl_agent_test(const char *app_dir, ShJsonBuf *out)
 {
     char entry_buf[4096];
     const char *entry = NULL;
-    int is_lua = 0;
 
 #ifdef HL_ENABLE_LUA
     entry = detect_entry(app_dir, "lua", entry_buf, sizeof(entry_buf));
-    if (entry) is_lua = 1;
 #endif
 #ifdef HL_ENABLE_JS
     if (!entry)
@@ -928,17 +964,14 @@ int hl_agent_test(const char *app_dir, ShJsonBuf *out)
     if (!entry)
         return write_error(out, "no entry point found");
 
-#ifdef HL_ENABLE_LUA
-    if (is_lua)
-        return agent_test_lua(app_dir, entry, out);
-#endif
-#ifdef HL_ENABLE_JS
-    if (!is_lua)
-        return agent_test_js(app_dir, entry, out);
-#endif
+    HlAppContext *ctx = NULL;
+    HlAppContextOpts opts = { .app_dir = app_dir, .entry_point = entry };
+    if (hl_app_context_init(&ctx, &opts) != 0)
+        return write_error(out, "runtime init failed");
 
-    (void)is_lua;
-    return write_error(out, "no runtime available");
+    int rc = hl_agent_test_ctx(ctx, out);
+    hl_app_context_free(ctx);
+    return rc;
 }
 
 /* ── Phase 2: hl_agent_context ─────────────────────────────────────── */
@@ -1041,22 +1074,14 @@ int hl_agent_context(const char *task, const char *level, ShJsonBuf *out)
 
 /* ── Phase 4: hl_agent_migrate_status ──────────────────────────────── */
 
-int hl_agent_migrate_status(const char *app_dir, const char *db_path,
-                            ShJsonBuf *out)
+static int migrate_status_impl(sqlite3 *db, int close_db, const HlVfs *vfs,
+                                ShJsonBuf *out)
 {
-    sqlite3 *db = open_app_db(app_dir, db_path);
-    if (!db)
-        return write_error(out, "cannot open database");
-
-    extern const HlEntry hl_app_entries[];
-    HlVfs app_vfs;
-    hl_vfs_init(&app_vfs, hl_app_entries, app_dir);
-
     HlMigrationStatus *entries = NULL;
     int count = 0;
-    int rc = hl_migrate_status(db, &app_vfs, &entries, &count);
+    int rc = hl_migrate_status(db, vfs, &entries, &count);
     if (rc != 0) {
-        sqlite3_close(db);
+        if (close_db) sqlite3_close(db);
         return write_error(out, "failed to query migration status");
     }
 
@@ -1084,6 +1109,33 @@ int hl_agent_migrate_status(const char *app_dir, const char *db_path,
     sh_json_write_object_end(&w);
 
     hl_migrate_status_free(entries, count);
-    sqlite3_close(db);
+    if (close_db) sqlite3_close(db);
     return 0;
+}
+
+int hl_agent_migrate_status_ctx(HlAppContext *ctx, const char *db_path,
+                                ShJsonBuf *out)
+{
+    if (db_path) {
+        sqlite3 *db = open_app_db(hl_app_context_app_dir(ctx), db_path);
+        if (!db)
+            return write_error(out, "cannot open database");
+        return migrate_status_impl(db, 1, hl_app_context_app_vfs(ctx), out);
+    }
+    return migrate_status_impl(hl_app_context_db(ctx), 0,
+                               hl_app_context_app_vfs(ctx), out);
+}
+
+int hl_agent_migrate_status(const char *app_dir, const char *db_path,
+                            ShJsonBuf *out)
+{
+    sqlite3 *db = open_app_db(app_dir, db_path);
+    if (!db)
+        return write_error(out, "cannot open database");
+
+    extern const HlEntry hl_app_entries[];
+    HlVfs app_vfs;
+    hl_vfs_init(&app_vfs, hl_app_entries, app_dir);
+
+    return migrate_status_impl(db, 1, &app_vfs, out);
 }
