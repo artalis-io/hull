@@ -1271,6 +1271,8 @@ cppcheck:
 		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/cap/wasm.c \
 		--suppress=unusedStructMember:$(SRCDIR)/hull/agent_lib.c \
 		--suppress=unusedVariable:$(SRCDIR)/hull/agent_lib.c \
+		--suppress=unusedStructMember:$(SRCDIR)/hull/app_context.c \
+		--suppress=unusedVariable:$(SRCDIR)/hull/app_context.c \
 		--suppress=variableScope:$(SRCDIR)/hull/cap/wasm.c \
 		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/runtime/js/mod_http.c \
 		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/runtime/js/mod_compute.c \
