@@ -121,14 +121,16 @@ typedef int (*HlWasmCallbackFn)(int id, const void *in, size_t in_len,
 
 /* ── Error codes ───────────────────────────────────────────────────── */
 
-#define HL_WASM_OK              0
-#define HL_WASM_ERR_NOT_FOUND  -1
-#define HL_WASM_ERR_GAS        -2
-#define HL_WASM_ERR_OUTPUT     -3
-#define HL_WASM_ERR_INPUT      -4
-#define HL_WASM_ERR_INTERNAL   -5
-#define HL_WASM_ERR_LOAD       -6
-#define HL_WASM_ERR_ABI        -7
+typedef enum {
+    HL_WASM_OK             =  0,
+    HL_WASM_ERR_NOT_FOUND  = -1,
+    HL_WASM_ERR_GAS        = -2,
+    HL_WASM_ERR_OUTPUT     = -3,
+    HL_WASM_ERR_INPUT      = -4,
+    HL_WASM_ERR_INTERNAL   = -5,
+    HL_WASM_ERR_LOAD       = -6,
+    HL_WASM_ERR_ABI        = -7,
+} HlWasmError;
 
 /* Forward declaration */
 struct HlWasmBuffer;

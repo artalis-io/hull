@@ -12,6 +12,17 @@
 /* Forward declaration */
 typedef struct HlAllocator HlAllocator;
 
+/* ── Error codes ─────────────────────────────────────────────────────── */
+
+typedef enum {
+    HL_DB_OK           =  0,
+    HL_DB_ERR_PREPARE  = -1,
+    HL_DB_ERR_BIND     = -2,
+    HL_DB_ERR_EXEC     = -3,
+    HL_DB_ERR_BUSY     = -4,
+    HL_DB_ERR_DENIED   = -5,
+} HlDbError;
+
 /* ── Prepared statement cache ──────────────────────────────────────── */
 
 #define HL_STMT_CACHE_SIZE 32

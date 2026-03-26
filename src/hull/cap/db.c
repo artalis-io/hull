@@ -225,23 +225,23 @@ int hl_cap_db_query(HlStmtCache *cache, const char *sql,
                     HlAllocator *alloc)
 {
     if (!cache || !sql || !cb)
-        return -1;
+        return HL_DB_ERR_PREPARE;
 
     sqlite3_stmt *stmt = cache_get(cache, sql);
     if (!stmt)
-        return -1;
+        return HL_DB_ERR_PREPARE;
 
     if (nparams > 0 && params) {
         if (bind_params(stmt, params, nparams) != 0) {
             sqlite3_reset(stmt);
-            return -1;
+            return HL_DB_ERR_BIND;
         }
     }
 
     int ncols = sqlite3_column_count(stmt);
     if (ncols <= 0) {
         sqlite3_reset(stmt);
-        return -1;
+        return HL_DB_ERR_PREPARE;
     }
 
     /* Stack-allocate columns for small result sets, heap for large */
@@ -255,7 +255,7 @@ int hl_cap_db_query(HlStmtCache *cache, const char *sql,
         if ((size_t)ncols > SIZE_MAX / sizeof(HlColumn) ||
             (size_t)ncols > SIZE_MAX / sizeof(HlValue)) {
             sqlite3_reset(stmt);
-            return -1;
+            return HL_DB_ERR_EXEC;
         }
         size_t cols_size = (size_t)ncols * sizeof(HlColumn);
         size_t vals_size = (size_t)ncols * sizeof(HlValue);
@@ -265,11 +265,11 @@ int hl_cap_db_query(HlStmtCache *cache, const char *sql,
             hl_alloc_free(alloc, cols, cols_size);
             hl_alloc_free(alloc, vals, vals_size);
             sqlite3_reset(stmt);
-            return -1;
+            return HL_DB_ERR_EXEC;
         }
     }
 
-    int result = 0;
+    int result = HL_DB_OK;
     int rc;
     int names_populated = 0;
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
@@ -295,7 +295,7 @@ int hl_cap_db_query(HlStmtCache *cache, const char *sql,
     }
 
     if (rc != SQLITE_DONE && rc != SQLITE_ROW)
-        result = -1;
+        result = (rc == SQLITE_BUSY) ? HL_DB_ERR_BUSY : HL_DB_ERR_EXEC;
 
     if (cols != stack_cols) {
         hl_alloc_free(alloc, cols, (size_t)ncols * sizeof(HlColumn));
@@ -320,16 +320,16 @@ int hl_cap_db_exec(HlStmtCache *cache, const char *sql,
                    const HlValue *params, int nparams)
 {
     if (!cache || !sql)
-        return -1;
+        return HL_DB_ERR_PREPARE;
 
     sqlite3_stmt *stmt = cache_get(cache, sql);
     if (!stmt)
-        return -1;
+        return HL_DB_ERR_PREPARE;
 
     if (nparams > 0 && params) {
         if (bind_params(stmt, params, nparams) != 0) {
             sqlite3_reset(stmt);
-            return -1;
+            return HL_DB_ERR_BIND;
         }
     }
 
@@ -338,7 +338,7 @@ int hl_cap_db_exec(HlStmtCache *cache, const char *sql,
 
     int result;
     if (rc != SQLITE_DONE && rc != SQLITE_ROW)
-        result = -1;
+        result = (rc == SQLITE_BUSY) ? HL_DB_ERR_BUSY : HL_DB_ERR_EXEC;
     else
         result = sqlite3_changes(cache->db);
 
@@ -366,25 +366,29 @@ int64_t hl_cap_db_last_id(sqlite3 *db)
 int hl_cap_db_begin(sqlite3 *db)
 {
     if (!db)
-        return -1;
-    return sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL)
-               == SQLITE_OK ? 0 : -1;
+        return HL_DB_ERR_EXEC;
+    int rc = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
+    if (rc == SQLITE_OK)    return HL_DB_OK;
+    if (rc == SQLITE_BUSY)  return HL_DB_ERR_BUSY;
+    return HL_DB_ERR_EXEC;
 }
 
 int hl_cap_db_commit(sqlite3 *db)
 {
     if (!db)
-        return -1;
-    return sqlite3_exec(db, "COMMIT", NULL, NULL, NULL)
-               == SQLITE_OK ? 0 : -1;
+        return HL_DB_ERR_EXEC;
+    int rc = sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
+    if (rc == SQLITE_OK)    return HL_DB_OK;
+    if (rc == SQLITE_BUSY)  return HL_DB_ERR_BUSY;
+    return HL_DB_ERR_EXEC;
 }
 
 int hl_cap_db_rollback(sqlite3 *db)
 {
     if (!db)
-        return -1;
+        return HL_DB_ERR_EXEC;
     return sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL)
-               == SQLITE_OK ? 0 : -1;
+               == SQLITE_OK ? HL_DB_OK : HL_DB_ERR_EXEC;
 }
 
 void hl_cap_db_guard_stale_txn(sqlite3 *db)
@@ -400,11 +404,11 @@ void hl_cap_db_guard_stale_txn(sqlite3 *db)
 int hl_cap_db_check_namespace(const char *sql)
 {
     if (!sql)
-        return -1;
+        return HL_DB_ERR_DENIED;
     for (const char *p = sql; *p; p++) {
         if ((*p == '_' || *p == 'H' || *p == 'h') &&
             strncasecmp(p, "_hull_", 6) == 0)
-            return -1;
+            return HL_DB_ERR_DENIED;
     }
-    return 0;
+    return HL_DB_OK;
 }

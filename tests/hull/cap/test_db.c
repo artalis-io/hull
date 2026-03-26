@@ -245,10 +245,10 @@ UTEST(hl_cap_db, last_id)
 UTEST(hl_cap_db, null_db)
 {
     int rc = hl_cap_db_query(NULL, "SELECT 1", NULL, 0, collect_rows, NULL, NULL);
-    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(rc, HL_DB_ERR_PREPARE);
 
     rc = hl_cap_db_exec(NULL, "SELECT 1", NULL, 0);
-    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(rc, HL_DB_ERR_PREPARE);
 }
 
 UTEST(hl_cap_db, null_sql)
@@ -256,10 +256,10 @@ UTEST(hl_cap_db, null_sql)
     setup_db();
 
     int rc = hl_cap_db_query(&test_cache, NULL, NULL, 0, collect_rows, NULL, NULL);
-    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(rc, HL_DB_ERR_PREPARE);
 
     rc = hl_cap_db_exec(&test_cache, NULL, NULL, 0);
-    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(rc, HL_DB_ERR_PREPARE);
 
     teardown_db();
 }
@@ -272,7 +272,7 @@ UTEST(hl_cap_db, invalid_sql)
     int rc = hl_cap_db_query(&test_cache,
         "SELECT * FROM nonexistent_table", NULL, 0,
         collect_rows, &result, NULL);
-    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(rc, HL_DB_ERR_PREPARE);
 
     teardown_db();
 }
@@ -394,27 +394,27 @@ UTEST(hl_cap_db, stmt_cache_reuse)
 
 UTEST(hl_cap_db, namespace_check_blocks_hull_tables)
 {
-    ASSERT_EQ(hl_cap_db_check_namespace("SELECT * FROM _hull_outbox"), -1);
-    ASSERT_EQ(hl_cap_db_check_namespace("DROP TABLE _hull_migrations"), -1);
-    ASSERT_EQ(hl_cap_db_check_namespace("INSERT INTO _HULL_OUTBOX VALUES(1)"), -1);
-    ASSERT_EQ(hl_cap_db_check_namespace("SELECT * FROM users"), 0);
-    ASSERT_EQ(hl_cap_db_check_namespace("SELECT * FROM hull_data"), 0);
-    ASSERT_EQ(hl_cap_db_check_namespace(NULL), -1);
+    ASSERT_EQ(hl_cap_db_check_namespace("SELECT * FROM _hull_outbox"), HL_DB_ERR_DENIED);
+    ASSERT_EQ(hl_cap_db_check_namespace("DROP TABLE _hull_migrations"), HL_DB_ERR_DENIED);
+    ASSERT_EQ(hl_cap_db_check_namespace("INSERT INTO _HULL_OUTBOX VALUES(1)"), HL_DB_ERR_DENIED);
+    ASSERT_EQ(hl_cap_db_check_namespace("SELECT * FROM users"), HL_DB_OK);
+    ASSERT_EQ(hl_cap_db_check_namespace("SELECT * FROM hull_data"), HL_DB_OK);
+    ASSERT_EQ(hl_cap_db_check_namespace(NULL), HL_DB_ERR_DENIED);
 }
 
 UTEST(hl_cap_db, namespace_check_case_insensitive)
 {
-    ASSERT_EQ(hl_cap_db_check_namespace("SELECT * FROM _Hull_Outbox"), -1);
-    ASSERT_EQ(hl_cap_db_check_namespace("SELECT * FROM _HULL_sessions"), -1);
-    ASSERT_EQ(hl_cap_db_check_namespace("CREATE TABLE _hull_test (id INT)"), -1);
+    ASSERT_EQ(hl_cap_db_check_namespace("SELECT * FROM _Hull_Outbox"), HL_DB_ERR_DENIED);
+    ASSERT_EQ(hl_cap_db_check_namespace("SELECT * FROM _HULL_sessions"), HL_DB_ERR_DENIED);
+    ASSERT_EQ(hl_cap_db_check_namespace("CREATE TABLE _hull_test (id INT)"), HL_DB_ERR_DENIED);
 }
 
 UTEST(hl_cap_db, namespace_check_allows_normal_tables)
 {
-    ASSERT_EQ(hl_cap_db_check_namespace("CREATE TABLE users (id INT)"), 0);
-    ASSERT_EQ(hl_cap_db_check_namespace("SELECT * FROM orders"), 0);
-    ASSERT_EQ(hl_cap_db_check_namespace("INSERT INTO items VALUES (1)"), 0);
-    ASSERT_EQ(hl_cap_db_check_namespace(""), 0);
+    ASSERT_EQ(hl_cap_db_check_namespace("CREATE TABLE users (id INT)"), HL_DB_OK);
+    ASSERT_EQ(hl_cap_db_check_namespace("SELECT * FROM orders"), HL_DB_OK);
+    ASSERT_EQ(hl_cap_db_check_namespace("INSERT INTO items VALUES (1)"), HL_DB_OK);
+    ASSERT_EQ(hl_cap_db_check_namespace(""), HL_DB_OK);
 }
 
 UTEST_MAIN();

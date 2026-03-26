@@ -24,16 +24,18 @@
 
 /* ── Error codes ───────────────────────────────────────────────────── */
 
-#define HL_GPU_OK                0
-#define HL_GPU_ERR_NOT_AVAILABLE -1
-#define HL_GPU_ERR_SHADER        -2
-#define HL_GPU_ERR_DISPATCH      -3
-#define HL_GPU_ERR_BUFFER        -4
-#define HL_GPU_ERR_INTERNAL      -5
-#define HL_GPU_ERR_READBACK      -6
-#define HL_GPU_ERR_NOT_FOUND     -7
-#define HL_GPU_ERR_DEVICE        -8
-#define HL_GPU_ERR_TIMEOUT       -9
+typedef enum {
+    HL_GPU_OK                =  0,
+    HL_GPU_ERR_NOT_AVAILABLE = -1,
+    HL_GPU_ERR_SHADER        = -2,
+    HL_GPU_ERR_DISPATCH      = -3,
+    HL_GPU_ERR_BUFFER        = -4,
+    HL_GPU_ERR_INTERNAL      = -5,
+    HL_GPU_ERR_READBACK      = -6,
+    HL_GPU_ERR_NOT_FOUND     = -7,
+    HL_GPU_ERR_DEVICE        = -8,
+    HL_GPU_ERR_TIMEOUT       = -9,
+} HlGpuError;
 
 /* ── Buffer usage flags ────────────────────────────────────────────── */
 
