@@ -7,6 +7,8 @@
 #ifndef HL_COMMANDS_MANIFEST_H
 #define HL_COMMANDS_MANIFEST_H
 
-int hl_cmd_manifest(int argc, char **argv, const char *hull_exe);
+#include "hull/commands/dispatch.h"
+
+int hl_cmd_manifest(int argc, char **argv, const HlCommandEnv *env);
 
 #endif /* HL_COMMANDS_MANIFEST_H */

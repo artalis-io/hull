@@ -9,7 +9,7 @@
 #include "hull/commands/inspect.h"
 #include "hull/tool.h"
 
-int hl_cmd_inspect(int argc, char **argv, const char *hull_exe)
+int hl_cmd_inspect(int argc, char **argv, const HlCommandEnv *env)
 {
-    return hull_tool("hull.inspect", argc, argv, hull_exe);
+    return hull_tool("hull.inspect", argc, argv, env->hull_exe);
 }

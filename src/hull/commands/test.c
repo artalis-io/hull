@@ -264,11 +264,9 @@ static const char *detect_js_entry(const char *app_dir)
 
 /* ── Command entry point ───────────────────────────────────────────── */
 
-int hl_cmd_test(int argc, char **argv, const char *hull_exe)
+int hl_cmd_test(int argc, char **argv, const HlCommandEnv *env)
 {
-    (void)hull_exe;
-
-    const char *app_dir = ".";
+    const char *app_dir = env->app_dir;
     if (argc >= 2 && argv[1][0] != '-')
         app_dir = argv[1];
 

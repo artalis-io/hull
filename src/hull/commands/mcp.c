@@ -372,11 +372,10 @@ static void handle_tools_call(FILE *fp, const ShJsonValue *id,
 
 /* ── Main loop ─────────────────────────────────────────────────────── */
 
-int hl_cmd_mcp(int argc, char **argv, const char *hull_exe)
+int hl_cmd_mcp(int argc, char **argv, const HlCommandEnv *env)
 {
-    (void)hull_exe;
-
-    const char *app_dir = ".";
+    /* Use env->app_dir as default; allow local --app-dir override */
+    const char *app_dir = env->app_dir;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--app-dir") == 0 && i + 1 < argc)
             app_dir = argv[++i];

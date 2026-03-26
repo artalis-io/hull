@@ -9,7 +9,7 @@
 #include "hull/commands/new.h"
 #include "hull/tool.h"
 
-int hl_cmd_new(int argc, char **argv, const char *hull_exe)
+int hl_cmd_new(int argc, char **argv, const HlCommandEnv *env)
 {
-    return hull_tool("hull.new", argc, argv, hull_exe);
+    return hull_tool("hull.new", argc, argv, env->hull_exe);
 }

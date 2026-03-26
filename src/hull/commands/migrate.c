@@ -128,9 +128,9 @@ static int cmd_status(const char *app_dir, const char *db_path)
 
 /* ── Command entry point ──────────────────────────────────────────── */
 
-int hl_cmd_migrate(int argc, char **argv, const char *hull_exe)
+int hl_cmd_migrate(int argc, char **argv, const HlCommandEnv *env)
 {
-    const char *app_dir = ".";
+    const char *app_dir = env->app_dir;
     const char *db_path = "data.db";
     const char *subcmd = NULL;
 
@@ -157,7 +157,7 @@ int hl_cmd_migrate(int argc, char **argv, const char *hull_exe)
 
     /* Dispatch to Lua for 'new' subcommand */
     if (subcmd && strcmp(subcmd, "new") == 0)
-        return hull_tool("hull.migrate", argc, argv, hull_exe);
+        return hull_tool("hull.migrate", argc, argv, env->hull_exe);
 
     /* Status subcommand */
     if (subcmd && strcmp(subcmd, "status") == 0)

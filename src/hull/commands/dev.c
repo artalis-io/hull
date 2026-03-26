@@ -151,8 +151,9 @@ static const char *dev_detect_entry(void)
 
 /* ── Main ─────────────────────────────────────────────────────────── */
 
-int hl_cmd_dev(int argc, char **argv, const char *hull_exe)
+int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
 {
+    const char *hull_exe = env->hull_exe;
     const char *entry_point = NULL;
     int agent_mode = 0;
     int port = 3000;

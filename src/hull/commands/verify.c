@@ -9,7 +9,7 @@
 #include "hull/commands/verify.h"
 #include "hull/tool.h"
 
-int hl_cmd_verify(int argc, char **argv, const char *hull_exe)
+int hl_cmd_verify(int argc, char **argv, const HlCommandEnv *env)
 {
-    return hull_tool("hull.verify", argc, argv, hull_exe);
+    return hull_tool("hull.verify", argc, argv, env->hull_exe);
 }

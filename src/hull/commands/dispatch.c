@@ -4,6 +4,9 @@
  * Central command table + dispatch function. Adding a new subcommand
  * means adding one line to the table and one .c/.h file.
  *
+ * Global flags (--app-dir, --verbose, --json) are parsed before the
+ * subcommand name and passed to handlers via HlCommandEnv.
+ *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
@@ -50,10 +53,32 @@ int hl_command_dispatch(int argc, char **argv)
     if (argc < 2)
         return -1;
 
-    const char *name = argv[1];
+    HlCommandEnv env = { .hull_exe = argv[0], .app_dir = "." };
+
+    /* Scan for global flags before the subcommand */
+    int cmd_idx = 1;
+    while (cmd_idx < argc && argv[cmd_idx][0] == '-') {
+        if (strcmp(argv[cmd_idx], "--app-dir") == 0 && cmd_idx + 1 < argc) {
+            env.app_dir = argv[++cmd_idx];
+        } else if (strncmp(argv[cmd_idx], "--app-dir=", 10) == 0) {
+            env.app_dir = argv[cmd_idx] + 10;
+        } else if (strcmp(argv[cmd_idx], "--verbose") == 0) {
+            env.verbose = 1;
+        } else if (strcmp(argv[cmd_idx], "--json") == 0) {
+            env.json_output = 1;
+        } else {
+            break;  /* unknown flag — stop scanning */
+        }
+        cmd_idx++;
+    }
+
+    if (cmd_idx >= argc)
+        return -1;
+
+    const char *name = argv[cmd_idx];
     for (const HlCommand *cmd = commands; cmd->name; cmd++) {
         if (strcmp(name, cmd->name) == 0)
-            return cmd->handler(argc - 1, argv + 1, argv[0]);
+            return cmd->handler(argc - cmd_idx, argv + cmd_idx, &env);
     }
 
     return -1;

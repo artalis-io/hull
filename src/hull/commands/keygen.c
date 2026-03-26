@@ -9,8 +9,8 @@
 #include "hull/commands/keygen.h"
 #include "hull/tool.h"
 
-int hl_cmd_keygen(int argc, char **argv, const char *hull_exe)
+int hl_cmd_keygen(int argc, char **argv, const HlCommandEnv *env)
 {
-    (void)hull_exe;
+    (void)env;
     return hull_keygen(argc, argv);
 }

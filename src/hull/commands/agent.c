@@ -182,9 +182,9 @@ static int cmd_errors(int argc, char **argv)
     return output_result(&out, rc);
 }
 
-static int cmd_test(int argc, char **argv, const char *hull_exe)
+static int cmd_test(int argc, char **argv, const HlCommandEnv *env)
 {
-    (void)hull_exe;
+    (void)env;
     const char *app_dir = ".";
     if (argc >= 1 && argv[0][0] != '-')
         app_dir = argv[0];
@@ -268,7 +268,7 @@ static void agent_usage(void)
 
 /* ── Command entry point ──────────────────────────────────────────── */
 
-int hl_cmd_agent(int argc, char **argv, const char *hull_exe)
+int hl_cmd_agent(int argc, char **argv, const HlCommandEnv *env)
 {
     if (argc < 2) {
         agent_usage();
@@ -290,7 +290,7 @@ int hl_cmd_agent(int argc, char **argv, const char *hull_exe)
     if (strcmp(sub, "errors") == 0)
         return cmd_errors(sub_argc, sub_argv);
     if (strcmp(sub, "test") == 0)
-        return cmd_test(sub_argc, sub_argv, hull_exe);
+        return cmd_test(sub_argc, sub_argv, env);
     if (strcmp(sub, "context") == 0)
         return cmd_context(sub_argc, sub_argv);
     if (strcmp(sub, "migrate") == 0)

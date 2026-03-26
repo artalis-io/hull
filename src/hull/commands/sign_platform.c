@@ -9,7 +9,7 @@
 #include "hull/commands/sign_platform.h"
 #include "hull/tool.h"
 
-int hl_cmd_sign_platform(int argc, char **argv, const char *hull_exe)
+int hl_cmd_sign_platform(int argc, char **argv, const HlCommandEnv *env)
 {
-    return hull_tool("hull.sign_platform", argc, argv, hull_exe);
+    return hull_tool("hull.sign_platform", argc, argv, env->hull_exe);
 }
