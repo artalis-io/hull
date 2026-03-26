@@ -46,15 +46,17 @@ local function generate_id()
 end
 
 --- Create a new session with the given data table.
+-- opts.ttl: override module-level TTL for this session (optional)
 -- Returns the session ID (64-char hex string).
-function session.create(data)
+function session.create(data, opts)
     local id = generate_id()
     local now = time.now()
+    local ttl = (opts and opts.ttl) or _ttl
     local encoded = json.encode(data or {})
 
     db.exec(
         "INSERT INTO _hull_sessions (id, data, created_at, last_accessed, expires_at) VALUES (?, ?, ?, ?, ?)",
-        { id, encoded, now, now, now + _ttl }
+        { id, encoded, now, now, now + ttl }
     )
 
     return id
@@ -63,7 +65,8 @@ end
 --- Load a session by ID.
 -- Returns the data table, or nil if the session does not exist or is expired.
 -- Updates last_accessed and extends expiry on successful load.
-function session.load(session_id)
+-- opts.ttl: override module-level TTL for expiry extension (optional)
+function session.load(session_id, opts)
     if not session_id or session_id == "" then
         return nil
     end
@@ -92,9 +95,10 @@ function session.load(session_id)
     end
 
     -- Update last_accessed and extend expiry
+    local ttl = (opts and opts.ttl) or _ttl
     db.exec(
         "UPDATE _hull_sessions SET last_accessed = ?, expires_at = ? WHERE id = ?",
-        { now, now + _ttl, session_id }
+        { now, now + ttl, session_id }
     )
 
     local decoded = json.decode(row.data)
@@ -107,17 +111,19 @@ function session.load(session_id)
 end
 
 --- Replace session data for an existing session.
-function session.update(session_id, data)
+-- opts.ttl: override module-level TTL for expiry extension (optional)
+function session.update(session_id, data, opts)
     if not session_id or session_id == "" then
         return
     end
 
     local now = time.now()
+    local ttl = (opts and opts.ttl) or _ttl
     local encoded = json.encode(data or {})
 
     db.exec(
         "UPDATE _hull_sessions SET data = ?, last_accessed = ?, expires_at = ? WHERE id = ?",
-        { encoded, now, now + _ttl, session_id }
+        { encoded, now, now + ttl, session_id }
     )
 end
 

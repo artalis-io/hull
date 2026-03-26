@@ -45,21 +45,29 @@ function generateId() {
     return id;
 }
 
-function create(data) {
+/**
+ * Create a new session with the given data.
+ * opts.ttl: override module-level TTL for this session (optional)
+ */
+function create(data, opts) {
     const id = generateId();
     const now = time.now();
-    const expiresAt = now + sessionTtl;
+    const ttl = (opts && opts.ttl !== undefined) ? opts.ttl : sessionTtl;
     const encoded = json.encode(data || {});
 
     db.exec(
         "INSERT INTO _hull_sessions (id, data, created_at, last_accessed, expires_at) VALUES (?, ?, ?, ?, ?)",
-        [id, encoded, now, now, expiresAt]
+        [id, encoded, now, now, now + ttl]
     );
 
     return id;
 }
 
-function load(sessionId) {
+/**
+ * Load a session by ID.
+ * opts.ttl: override module-level TTL for expiry extension (optional)
+ */
+function load(sessionId, opts) {
     if (!sessionId || typeof sessionId !== "string")
         return null;
     // Validate format: must be 64-char hex (from create)
@@ -82,9 +90,10 @@ function load(sessionId) {
     }
 
     // Touch: update last_accessed and extend expiration
+    const ttl = (opts && opts.ttl !== undefined) ? opts.ttl : sessionTtl;
     db.exec(
         "UPDATE _hull_sessions SET last_accessed = ?, expires_at = ? WHERE id = ?",
-        [now, now + sessionTtl, sessionId]
+        [now, now + ttl, sessionId]
     );
 
     const decoded = json.decode(rows[0].data);
@@ -96,16 +105,21 @@ function load(sessionId) {
     return decoded;
 }
 
-function update(sessionId, data) {
+/**
+ * Replace session data for an existing session.
+ * opts.ttl: override module-level TTL for expiry extension (optional)
+ */
+function update(sessionId, data, opts) {
     if (!sessionId || typeof sessionId !== "string")
         return false;
 
     const now = time.now();
+    const ttl = (opts && opts.ttl !== undefined) ? opts.ttl : sessionTtl;
     const encoded = json.encode(data || {});
 
     const affected = db.exec(
         "UPDATE _hull_sessions SET data = ?, last_accessed = ?, expires_at = ? WHERE id = ? AND expires_at > ?",
-        [encoded, now, now + sessionTtl, sessionId, now]
+        [encoded, now, now + ttl, sessionId, now]
     );
 
     return affected > 0;
