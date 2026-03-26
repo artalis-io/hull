@@ -1159,14 +1159,7 @@ static int vt_lua_wire_routes_server(HlRuntime *rt, KlServer *server,
 static int vt_lua_extract_manifest(HlRuntime *rt, HlManifest *out)
 {
     HlLua *lua = (HlLua *)rt;
-    return hl_manifest_extract(lua->L, out);
-}
-
-static void vt_lua_free_manifest_strings(HlRuntime *rt, HlManifest *m)
-{
-    /* Lua manifest strings are owned by the Lua state — no-op */
-    (void)rt;
-    (void)m;
+    return hl_manifest_extract(lua->L, out, lua->base.alloc);
 }
 
 static void vt_lua_destroy(HlRuntime *rt)
@@ -1179,7 +1172,6 @@ const HlRuntimeVtable hl_lua_vtable = {
     .load_app            = vt_lua_load_app,
     .wire_routes_server  = vt_lua_wire_routes_server,
     .extract_manifest    = vt_lua_extract_manifest,
-    .free_manifest_strings = vt_lua_free_manifest_strings,
     .destroy             = vt_lua_destroy,
     .name                = "Lua",
 };

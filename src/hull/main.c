@@ -1093,7 +1093,7 @@ static int hl_serve_wire_and_start(HlServerState *s)
         if (hl_sandbox_apply(&s->manifest, s->app_dir, s->cfg.db_path, s->ca_bundle_path,
                               s->cfg.tls_cert_path, s->cfg.tls_key_path) != 0) {
             log_error("[hull:c] sandbox enforcement failed");
-            s->rt->vt->free_manifest_strings(s->rt, &s->manifest);
+            hl_manifest_free(&s->manifest);
             s->manifest_extracted = 0;
             s->rt->vt->destroy(s->rt);
             s->rt_init = 0;
@@ -1127,7 +1127,7 @@ static int hl_serve_wire_and_start(HlServerState *s)
 
     /* Wire routes into Keel (after sandbox is applied) */
     if (s->rt->vt->wire_routes_server(s->rt, &s->server, track_route_alloc) != 0) {
-        s->rt->vt->free_manifest_strings(s->rt, &s->manifest);
+        hl_manifest_free(&s->manifest);
         s->manifest_extracted = 0;
         s->rt->vt->destroy(s->rt);
         s->rt_init = 0;
@@ -1194,7 +1194,7 @@ static int hl_serve_wire_and_start(HlServerState *s)
     /* Cleanup — free manifest strings AFTER server stops
      * (env_cfg and http_cfg reference them during runtime) */
     if (s->manifest_extracted) {
-        s->rt->vt->free_manifest_strings(s->rt, &s->manifest);
+        hl_manifest_free(&s->manifest);
         s->manifest_extracted = 0;
     }
     s->rt->vt->destroy(s->rt);
@@ -1232,7 +1232,7 @@ static void hl_serve_cleanup(HlServerState *s)
     /* Destroy runtime if init succeeded but wire_and_start didn't finish */
     if (s->rt_init) {
         if (s->manifest_extracted)
-            s->rt->vt->free_manifest_strings(s->rt, &s->manifest);
+            hl_manifest_free(&s->manifest);
         s->rt->vt->destroy(s->rt);
     }
 

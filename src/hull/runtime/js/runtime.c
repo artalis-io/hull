@@ -1651,13 +1651,7 @@ static int vt_js_wire_routes_server(HlRuntime *rt, KlServer *server,
 static int vt_js_extract_manifest(HlRuntime *rt, HlManifest *out)
 {
     HlJS *js = (HlJS *)rt;
-    return hl_manifest_extract_js(js->ctx, out);
-}
-
-static void vt_js_free_manifest_strings(HlRuntime *rt, HlManifest *m)
-{
-    HlJS *js = (HlJS *)rt;
-    hl_manifest_free_js_strings(js->ctx, m);
+    return hl_manifest_extract_js(js->ctx, out, js->base.alloc);
 }
 
 static void vt_js_destroy(HlRuntime *rt)
@@ -1670,7 +1664,6 @@ const HlRuntimeVtable hl_js_vtable = {
     .load_app            = vt_js_load_app,
     .wire_routes_server  = vt_js_wire_routes_server,
     .extract_manifest    = vt_js_extract_manifest,
-    .free_manifest_strings = vt_js_free_manifest_strings,
     .destroy             = vt_js_destroy,
     .name                = "QuickJS",
 };

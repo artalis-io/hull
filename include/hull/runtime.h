@@ -34,7 +34,6 @@ typedef struct HlRuntimeVtable {
     int   (*wire_routes_server)(HlRuntime *rt, KlServer *server,
                                 void *(*alloc_fn)(size_t));
     int   (*extract_manifest)(HlRuntime *rt, HlManifest *out);
-    void  (*free_manifest_strings)(HlRuntime *rt, HlManifest *m);
     void  (*destroy)(HlRuntime *rt);
     const char *name;
 } HlRuntimeVtable;

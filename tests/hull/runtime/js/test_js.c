@@ -1011,7 +1011,7 @@ UTEST(js_cap, manifest_extract_js)
 
     /* Extract manifest via C API */
     HlManifest manifest;
-    int rc = hl_manifest_extract_js(js.ctx, &manifest);
+    int rc = hl_manifest_extract_js(js.ctx, &manifest, NULL);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(manifest.present, 1);
 
@@ -1030,7 +1030,7 @@ UTEST(js_cap, manifest_extract_js)
     ASSERT_STREQ(manifest.hosts[0], "api.stripe.com");
     ASSERT_STREQ(manifest.hosts[1], "api.sendgrid.com");
 
-    hl_manifest_free_js_strings(js.ctx, &manifest);
+    hl_manifest_free(&manifest);
     cleanup_js();
 }
 
@@ -1041,7 +1041,7 @@ UTEST(js_cap, manifest_extract_js_no_manifest)
 
     /* No app.manifest() called — extraction should fail */
     HlManifest manifest;
-    int rc = hl_manifest_extract_js(js.ctx, &manifest);
+    int rc = hl_manifest_extract_js(js.ctx, &manifest, NULL);
     ASSERT_EQ(rc, -1);
     ASSERT_EQ(manifest.present, 0);
 
@@ -1066,7 +1066,7 @@ UTEST(js_cap, manifest_extract_js_partial)
     hl_js_run_jobs(&js);
 
     HlManifest manifest;
-    int rc = hl_manifest_extract_js(js.ctx, &manifest);
+    int rc = hl_manifest_extract_js(js.ctx, &manifest, NULL);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(manifest.present, 1);
     ASSERT_EQ(manifest.fs_read_count, 0);
@@ -1075,7 +1075,7 @@ UTEST(js_cap, manifest_extract_js_partial)
     ASSERT_STREQ(manifest.env[0], "PORT");
     ASSERT_EQ(manifest.hosts_count, 0);
 
-    hl_manifest_free_js_strings(js.ctx, &manifest);
+    hl_manifest_free(&manifest);
     cleanup_js();
 }
 

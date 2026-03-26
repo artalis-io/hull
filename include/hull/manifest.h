@@ -1,9 +1,12 @@
 /*
  * manifest.h — Application manifest declaration and extraction
  *
- * Apps declare capabilities via app.manifest({...}) in Lua.
- * This module extracts the manifest from the Lua registry into
+ * Apps declare capabilities via app.manifest({...}).
+ * This module extracts the manifest from the runtime state into
  * a C struct for cap config wiring and signing.
+ *
+ * All strings in HlManifest are Hull-owned copies (allocated via
+ * the stored allocator). Call hl_manifest_free() to release them.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -16,6 +19,7 @@
 
 /* Forward declarations */
 typedef struct lua_State lua_State;
+typedef struct HlAllocator HlAllocator;
 
 /* ── Limits ────────────────────────────────────────────────────────── */
 
@@ -27,6 +31,9 @@ typedef struct lua_State lua_State;
 /* ── Manifest struct ───────────────────────────────────────────────── */
 
 typedef struct HlManifest {
+    /* Allocator used for all owned strings (NULL = use raw malloc/free) */
+    HlAllocator *alloc;
+
     /* Filesystem capabilities */
     const char *fs_read[HL_MANIFEST_MAX_PATHS];
     int         fs_read_count;
@@ -73,12 +80,16 @@ typedef struct HlManifest {
 
 /*
  * Extract manifest from Lua registry key "__hull_manifest".
- * Populates `out` with string pointers into the Lua state
- * (valid as long as the Lua state is alive).
- *
+ * All strings are copied into Hull-owned allocations via `alloc`.
  * Returns 0 on success, -1 if no manifest was declared.
  */
-int hl_manifest_extract(lua_State *L, HlManifest *out);
+int hl_manifest_extract(lua_State *L, HlManifest *out, HlAllocator *alloc);
+
+/*
+ * Free all owned strings in the manifest.
+ * Safe to call on a zeroed or partially-populated manifest.
+ */
+void hl_manifest_free(HlManifest *m);
 
 #ifdef HL_ENABLE_JS
 
@@ -87,18 +98,10 @@ typedef struct JSContext JSContext;
 
 /*
  * Extract manifest from globalThis.__hull_manifest in QuickJS.
- * Populates `out` with string pointers from JS_ToCString
- * (must be freed with hl_manifest_free_js_strings before ctx is destroyed).
- *
+ * All strings are copied into Hull-owned allocations via `alloc`.
  * Returns 0 on success, -1 if no manifest was declared.
  */
-int hl_manifest_extract_js(JSContext *ctx, HlManifest *out);
-
-/*
- * Free JS_ToCString pointers stored in the manifest by
- * hl_manifest_extract_js(). Call after sandbox is applied.
- */
-void hl_manifest_free_js_strings(JSContext *ctx, HlManifest *m);
+int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc);
 
 #endif /* HL_ENABLE_JS */
 
