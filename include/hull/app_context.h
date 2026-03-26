@@ -2,8 +2,8 @@
  * app_context.h — Reusable application context for commands
  *
  * Consolidates VFS + DB + runtime initialization shared by
- * test, agent, and MCP commands. Each consumer creates an
- * HlAppContext instead of duplicating the init sequence.
+ * test, agent, MCP commands, and the main server. Each consumer
+ * creates an HlAppContext instead of duplicating the init sequence.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -12,6 +12,7 @@
 #define HL_APP_CONTEXT_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 /* Forward declarations */
 typedef struct sqlite3 sqlite3;
@@ -20,6 +21,9 @@ typedef struct HlRuntime HlRuntime;
 typedef struct HlVfs HlVfs;
 typedef struct HlStmtCache HlStmtCache;
 typedef struct HlWasmCache HlWasmCache;
+typedef struct HlGpuCtx HlGpuCtx;
+typedef struct KlThreadPool KlThreadPool;
+struct KlCompressConfig;
 
 typedef struct {
     const char   *app_dir;        /* required */
@@ -28,15 +32,43 @@ typedef struct {
     int           no_migrate;     /* 1 = skip migrations */
     int           sandbox;        /* 1 = sandboxed runtime (default) */
     HlAllocator  *alloc;          /* NULL = use raw malloc */
+
+    /* Server-specific runtime wiring (all optional, NULL/0 = not used) */
+    KlThreadPool             *thread_pool;      /* wired to rt->thread_pool */
+    const char               *worker_db_path;   /* for hl_worker_db_init */
+    struct KlCompressConfig  *compress;         /* wired to rt->compress */
+
+    /* CLI limit overrides (0 = use defaults) */
+    long          heap_limit;
+    long          stack_limit;       /* JS only */
+    long          instruction_limit;
+
+    /* External WASM/GPU caches (server owns these, context just wires them) */
+    HlWasmCache  *wasm_cache;       /* NULL = init internal cache */
+    HlGpuCtx     *gpu_ctx;          /* NULL = no GPU */
+    int           gpu_device;       /* -1 = default */
+
+    /* Deferred loading: 1 = init runtime but don't load app.
+     * Use hl_app_context_load() to load app code later. */
+    int           no_load;
 } HlAppContextOpts;
 
 typedef struct HlAppContext HlAppContext;
 
 /*
  * Initialize an app context: open DB, init VFS, create runtime, load app.
+ * If opts->no_load is set, runtime is initialized but app is not loaded —
+ * call hl_app_context_load() separately.
  * Returns 0 on success, -1 on error.
  */
 int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts);
+
+/*
+ * Load app code into an already-initialized context.
+ * Only needed when opts->no_load was set during init.
+ * Returns 0 on success, -1 on error.
+ */
+int hl_app_context_load(HlAppContext *ctx, const char *entry_point);
 
 /*
  * Free all resources. Safe to call on NULL. Idempotent.
