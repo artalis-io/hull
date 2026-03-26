@@ -135,7 +135,7 @@ int hl_tool_unveil_check(const HlToolUnveilCtx *ctx, const char *path, char need
 /* ── Compiler allowlist ────────────────────────────────────────────── */
 
 static const char *allowed_prefixes[] = {
-    "cc", "gcc", "clang", "cosmocc", "cosmoar", "ar", "wamrc", NULL
+    "cc", "gcc", "clang", "cosmocc", "cosmoar", "ar", "wamrc", "hull", NULL
 };
 
 int hl_tool_check_allowlist(const char *binary)
@@ -172,7 +172,8 @@ int hl_tool_validate_args(const char *const argv[])
         if (strcmp(a, "-fplugin") == 0)       return -1; /* GCC plugin */
         if (strncmp(a, "-fplugin=", 9) == 0)  return -1; /* GCC plugin= */
         if (strcmp(a, "-Xlinker") == 0)       return -1; /* linker pass */
-        if (strncmp(a, "-Wl,", 4) == 0)       return -1; /* linker pass */
+        if (strncmp(a, "-Wl,", 4) == 0 &&
+            strncmp(a, "-Wl,--", 6) != 0)     return -1; /* linker pass (allow --named flags) */
         if (a[0] == '@')                       return -1; /* response file */
     }
     return 0;
