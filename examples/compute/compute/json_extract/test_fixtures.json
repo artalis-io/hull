@@ -1,0 +1,4 @@
+[
+    {"name": "empty input", "input": "", "expect_status": -3},
+    {"name": "too short", "input": "x", "expect_status": -3}
+]

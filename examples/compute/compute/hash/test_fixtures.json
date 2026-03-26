@@ -1,0 +1,6 @@
+[
+    {"name": "hash hello", "input": "hello", "expect_status": 0},
+    {"name": "hash empty", "input": "", "expect_status": 0},
+    {"name": "hash abc", "input": "abc", "expect_status": 0},
+    {"name": "hash single byte", "input": "x", "expect_status": 0}
+]

@@ -1,0 +1,6 @@
+[
+    {"name": "four bytes", "input": "dcba", "expect_status": 0},
+    {"name": "eight bytes", "input": "hgfedcba", "expect_status": 0},
+    {"name": "empty input", "input": "", "expect_status": 0},
+    {"name": "odd length rejects", "input": "abc", "expect_status": -3}
+]
