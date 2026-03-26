@@ -1013,6 +1013,19 @@ static int hl_serve_wire_and_start(HlServerState *s)
         s->rt->gpu_ctx = NULL;
         log_info("[hull:c] gpu not declared in manifest — gpu.* disabled");
     }
+    /* Apply per-device allowlist if manifest declares specific devices */
+    if (gpu_ctx_ok && s->manifest.present && s->manifest.gpu &&
+        s->manifest.gpu_device_count > 0) {
+        gpu_ctx.device_restriction = 1;
+        memset(gpu_ctx.allowed_devices, 0, sizeof(gpu_ctx.allowed_devices));
+        for (int i = 0; i < s->manifest.gpu_device_count; i++) {
+            int d = s->manifest.gpu_devices[i];
+            if (d >= 0 && d < gpu_ctx.device_count)
+                gpu_ctx.allowed_devices[d] = 1;
+        }
+        log_info("[hull:c] gpu device restriction: %d of %d devices allowed",
+                 s->manifest.gpu_device_count, gpu_ctx.device_count);
+    }
 #endif
 
     /* Wire fs_cfg from manifest (if app declares fs.read paths) */

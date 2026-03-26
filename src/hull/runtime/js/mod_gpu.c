@@ -204,6 +204,15 @@ static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
     }
     JS_FreeValue(ctx, out_val);
 
+    /* Parse timeout */
+    JSValue timeout_val = JS_GetPropertyStr(ctx, opts_val, "timeout");
+    if (!JS_IsUndefined(timeout_val)) {
+        uint32_t t = 0;
+        JS_ToUint32(ctx, &t, timeout_val);
+        opts.timeout_ms = t;
+    }
+    JS_FreeValue(ctx, timeout_val);
+
     /* Parse uniforms (string or ArrayBuffer) */
     const char *uni_str = NULL;  /* non-NULL if JS_ToCStringLen was used */
     JSValue uni_val = JS_GetPropertyStr(ctx, opts_val, "uniforms");
@@ -538,6 +547,14 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
     JSValue out_val = JS_GetPropertyStr(ctx, opts_val, "output");
     if (!JS_IsUndefined(out_val)) { int32_t o; JS_ToInt32(ctx, &o, out_val); opts.output_buffer = o; }
     JS_FreeValue(ctx, out_val);
+
+    JSValue async_timeout_val = JS_GetPropertyStr(ctx, opts_val, "timeout");
+    if (!JS_IsUndefined(async_timeout_val)) {
+        uint32_t t = 0;
+        JS_ToUint32(ctx, &t, async_timeout_val);
+        opts.timeout_ms = t;
+    }
+    JS_FreeValue(ctx, async_timeout_val);
 
     /* Deep-copy uniforms */
     void *uni_copy = NULL;
@@ -875,6 +892,7 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
     HlGpuPipelineOutput outputs[HL_GPU_MAX_PIPELINE_OUTPUTS];
     int output_count = 0;
     int device = -1;
+    uint32_t pipe_timeout_ms = 0;
 
     if (argc > 1 && JS_IsObject(argv[1])) {
         JSValue dv = JS_GetPropertyStr(ctx, argv[1], "device");
@@ -910,6 +928,14 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
             }
         }
         JS_FreeValue(ctx, ov);
+
+        JSValue tv = JS_GetPropertyStr(ctx, argv[1], "timeout");
+        if (!JS_IsUndefined(tv)) {
+            uint32_t t = 0;
+            JS_ToUint32(ctx, &t, tv);
+            pipe_timeout_ms = t;
+        }
+        JS_FreeValue(ctx, tv);
     }
 
     HlGpuPipelineOpts opts = {
@@ -918,6 +944,7 @@ static JSValue js_gpu_pipeline(JSContext *ctx, JSValueConst this_val,
         .outputs = output_count > 0 ? outputs : NULL,
         .output_count = output_count,
         .device = device,
+        .timeout_ms = pipe_timeout_ms,
     };
 
     HlGpuPipelineResult result;
@@ -1184,6 +1211,14 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
             }
         }
         JS_FreeValue(ctx, ov);
+
+        JSValue tv = JS_GetPropertyStr(ctx, argv[1], "timeout");
+        if (!JS_IsUndefined(tv)) {
+            uint32_t t = 0;
+            JS_ToUint32(ctx, &t, tv);
+            op->pipe_opts.timeout_ms = t;
+        }
+        JS_FreeValue(ctx, tv);
     }
 
     /* Create async ctx + Promise + continuation */

@@ -21,12 +21,16 @@
 
 /* ── Helpers ───────────────────────────────────────────────────────── */
 
-/* Resolve device index: -1 means default device */
+/* Resolve device index: -1 means default device.
+ * Returns -1 if the device is out of range or restricted by allowlist. */
 static int resolve_device(HlGpuCtx *ctx, int device)
 {
-    if (device < 0)
-        return ctx->default_device;
-    return device;
+    int idx = (device < 0) ? ctx->default_device : device;
+    if (idx < 0 || idx >= ctx->device_count)
+        return -1;
+    if (ctx->device_restriction && !ctx->allowed_devices[idx])
+        return -1;
+    return idx;
 }
 
 /* Find pipeline by name in a device (linear scan — small N) */

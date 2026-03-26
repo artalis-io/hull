@@ -196,6 +196,12 @@ static int l_gpu_dispatch(lua_State *L)
     }
     lua_pop(L, 1);
 
+    /* Parse timeout */
+    lua_getfield(L, 2, "timeout");
+    if (!lua_isnil(L, -1))
+        opts.timeout_ms = (uint32_t)lua_tointeger(L, -1);
+    lua_pop(L, 1);
+
     /* buffer = true -> return WasmBuffer instead of string (zero-copy GPU->WASM) */
     int want_buffer = 0;
     lua_getfield(L, 2, "buffer");
@@ -473,6 +479,11 @@ static int l_gpu_async_dispatch(lua_State *L)
 
     lua_getfield(L, 2, "output");
     opts.output_buffer = (int)luaL_optinteger(L, -1, 0) - 1;
+    lua_pop(L, 1);
+
+    lua_getfield(L, 2, "timeout");
+    if (!lua_isnil(L, -1))
+        opts.timeout_ms = (uint32_t)lua_tointeger(L, -1);
     lua_pop(L, 1);
 
     /* Parse and deep-copy uniforms */
@@ -783,9 +794,14 @@ static int l_gpu_pipeline(lua_State *L)
 
     /* buffer = true -> return WasmBuffer for GPU->WASM chaining */
     int pipe_want_buffer = 0;
+    uint32_t pipe_timeout_ms = 0;
     if (lua_istable(L, 2)) {
         lua_getfield(L, 2, "buffer");
         if (lua_toboolean(L, -1)) pipe_want_buffer = 1;
+        lua_pop(L, 1);
+        lua_getfield(L, 2, "timeout");
+        if (!lua_isnil(L, -1))
+            pipe_timeout_ms = (uint32_t)lua_tointeger(L, -1);
         lua_pop(L, 1);
     }
 
@@ -795,6 +811,7 @@ static int l_gpu_pipeline(lua_State *L)
         .outputs = output_count > 0 ? outputs : NULL,
         .output_count = output_count,
         .device = device,
+        .timeout_ms = pipe_timeout_ms,
     };
 
     HlGpuPipelineResult result;
@@ -888,6 +905,7 @@ static int l_gpu_async_pipeline(lua_State *L)
     memset(outputs, 0, sizeof(outputs));
     int output_count = 0;
     int device = -1;
+    uint32_t pipe_timeout_ms = 0;
     if (lua_istable(L, 2)) {
         lua_getfield(L, 2, "device");
         if (!lua_isnil(L, -1)) device = (int)lua_tointeger(L, -1);
@@ -915,6 +933,10 @@ static int l_gpu_async_pipeline(lua_State *L)
             }
         }
         lua_pop(L, 1);
+        lua_getfield(L, 2, "timeout");
+        if (!lua_isnil(L, -1))
+            pipe_timeout_ms = (uint32_t)lua_tointeger(L, -1);
+        lua_pop(L, 1);
     }
 
     /* Deep-copy into worker op */
@@ -926,6 +948,7 @@ static int l_gpu_async_pipeline(lua_State *L)
     op->is_pipeline = 1;
     op->stage_count = stage_count;
     op->pipe_opts.device = device;
+    op->pipe_opts.timeout_ms = pipe_timeout_ms;
     op->pipe_opts.output_count = output_count;
 
     /* Deep-copy output specs */

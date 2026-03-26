@@ -551,8 +551,20 @@ int hl_sandbox_apply(const HlManifest *manifest, const char *app_dir,
 
     /* GPU compute (Vulkan) */
     if (manifest->gpu) {
-        if (unveil("/dev/dri", "rw") != 0)
-            log_warn("[sandbox] unveil failed for /dev/dri");
+        if (manifest->gpu_device_count > 0) {
+            /* Unveil only specific render nodes for allowed devices */
+            for (int i = 0; i < manifest->gpu_device_count; i++) {
+                char node[64];
+                snprintf(node, sizeof(node), "/dev/dri/renderD%d",
+                         128 + manifest->gpu_devices[i]);
+                if (unveil(node, "rw") != 0)
+                    log_warn("[sandbox] unveil failed for %s", node);
+            }
+        } else {
+            /* No device restriction — unveil all of /dev/dri */
+            if (unveil("/dev/dri", "rw") != 0)
+                log_warn("[sandbox] unveil failed for /dev/dri");
+        }
         if (unveil("/proc/self", "r") != 0)
             log_warn("[sandbox] unveil failed for /proc/self");
     }

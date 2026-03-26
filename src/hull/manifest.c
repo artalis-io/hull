@@ -221,9 +221,24 @@ int hl_manifest_extract(lua_State *L, HlManifest *out, HlAllocator *alloc)
     }
     lua_pop(L, 1); /* pop wasm */
 
-    /* gpu = true */
+    /* gpu = true  OR  gpu = { devices = {0, 1} } */
     lua_getfield(L, manifest_idx, "gpu");
-    out->gpu = lua_toboolean(L, -1);
+    if (lua_istable(L, -1)) {
+        out->gpu = 1;
+        lua_getfield(L, -1, "devices");
+        if (lua_istable(L, -1)) {
+            int len = (int)luaL_len(L, -1);
+            for (int i = 1; i <= len && out->gpu_device_count < HL_GPU_MAX_DEVICES; i++) {
+                lua_rawgeti(L, -1, i);
+                if (lua_isinteger(L, -1))
+                    out->gpu_devices[out->gpu_device_count++] = (int)lua_tointeger(L, -1);
+                lua_pop(L, 1);
+            }
+        }
+        lua_pop(L, 1); /* pop devices */
+    } else {
+        out->gpu = lua_toboolean(L, -1);
+    }
     lua_pop(L, 1);
 
     /* compute = true */
@@ -401,10 +416,30 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
     }
     JS_FreeValue(ctx, wasm_val);
 
-    /* gpu: true */
+    /* gpu: true  OR  gpu: { devices: [0, 1] } */
     JSValue gpu_val = JS_GetPropertyStr(ctx, manifest, "gpu");
-    if (JS_IsBool(gpu_val))
+    if (JS_IsObject(gpu_val) && !JS_IsNull(gpu_val)) {
+        out->gpu = 1;
+        JSValue devs = JS_GetPropertyStr(ctx, gpu_val, "devices");
+        if (JS_IsArray(ctx, devs)) {
+            JSValue len_val = JS_GetPropertyStr(ctx, devs, "length");
+            int32_t len = 0;
+            JS_ToInt32(ctx, &len, len_val);
+            JS_FreeValue(ctx, len_val);
+            for (int32_t i = 0; i < len && out->gpu_device_count < HL_GPU_MAX_DEVICES; i++) {
+                JSValue elem = JS_GetPropertyUint32(ctx, devs, (uint32_t)i);
+                if (JS_IsNumber(elem)) {
+                    int32_t d = 0;
+                    JS_ToInt32(ctx, &d, elem);
+                    out->gpu_devices[out->gpu_device_count++] = d;
+                }
+                JS_FreeValue(ctx, elem);
+            }
+        }
+        JS_FreeValue(ctx, devs);
+    } else if (JS_IsBool(gpu_val)) {
         out->gpu = JS_ToBool(ctx, gpu_val);
+    }
     JS_FreeValue(ctx, gpu_val);
 
     /* compute: true */

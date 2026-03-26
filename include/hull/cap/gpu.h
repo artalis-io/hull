@@ -68,6 +68,7 @@ typedef struct HlGpuDispatchOpts {
     size_t           uniforms_len;
     int              output_buffer;   /* index to read back */
     int              device;          /* -1 = default device */
+    uint32_t         timeout_ms;     /* 0 = default (HL_GPU_TIMEOUT_MS), min 10ms */
 } HlGpuDispatchOpts;
 
 /* Cached compiled pipeline */
@@ -127,6 +128,7 @@ typedef struct HlGpuPipelineOpts {
     HlGpuPipelineOutput *outputs;     /* buffers to read back */
     int                  output_count; /* 0 = read last stage's first buffer */
     int                  device;       /* -1 = default */
+    uint32_t             timeout_ms;  /* 0 = default (HL_GPU_TIMEOUT_MS), min 10ms */
 } HlGpuPipelineOpts;
 
 /* Pipeline result: array of readback buffers */
@@ -191,6 +193,8 @@ typedef struct HlGpuCtx {
     HlGpuDevice         devices[HL_GPU_MAX_DEVICES];
     int                  device_count;
     int                  default_device;
+    int                  allowed_devices[HL_GPU_MAX_DEVICES]; /* 1 = allowed */
+    int                  device_restriction;  /* 1 = allowlist active */
 } HlGpuCtx;
 
 /* ── Public API ────────────────────────────────────────────────────── */

@@ -17,6 +17,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "hull/limits.h"
+
 /* Forward declarations */
 typedef struct lua_State lua_State;
 typedef struct HlAllocator HlAllocator;
@@ -69,7 +71,9 @@ typedef struct HlManifest {
     uint32_t    wasm_max_output;
 
     /* Capability flags */
-    int         gpu;              /* 1 if app declares gpu: true */
+    int         gpu;              /* 1 if app declares gpu: true or gpu: {...} */
+    int         gpu_devices[HL_GPU_MAX_DEVICES]; /* allowed device indices */
+    int         gpu_device_count; /* 0 = all devices allowed (backward compat) */
     int         compute;          /* 1 if app declares compute: true */
 
     /* Whether app.manifest() was called */

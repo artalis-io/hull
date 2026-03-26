@@ -697,11 +697,15 @@ static int wgpu_dispatch(void *backend_device, HlGpuPipeline *pipeline,
 
     /* ── Submit + poll (with timeout) ─────────────────────── */
 
-    wgpuQueueSubmit(dctx->queue, 1, &cmd);
-    if (gpu_poll_with_timeout(dctx->device, HL_GPU_TIMEOUT_MS) != 0) {
-        if (err_msg) *err_msg = "gpu_timeout";
-        rc = HL_GPU_ERR_TIMEOUT;
-        goto cleanup;
+    {
+        uint32_t timeout = (opts->timeout_ms > 0) ? opts->timeout_ms : HL_GPU_TIMEOUT_MS;
+        if (timeout < 10) timeout = 10;  /* floor: 10ms */
+        wgpuQueueSubmit(dctx->queue, 1, &cmd);
+        if (gpu_poll_with_timeout(dctx->device, timeout) != 0) {
+            if (err_msg) *err_msg = "gpu_timeout";
+            rc = HL_GPU_ERR_TIMEOUT;
+            goto cleanup;
+        }
     }
 
     /* ── Output readback (skip for fire-and-forget) ──────── */
@@ -1127,11 +1131,15 @@ static int wgpu_dispatch_pipeline(void *backend_device,
 
     /* ── Single submit + poll (with timeout) ─────────────────── */
 
-    wgpuQueueSubmit(dctx->queue, 1, &cmd);
-    if (gpu_poll_with_timeout(dctx->device, HL_GPU_TIMEOUT_MS) != 0) {
-        if (err_msg) *err_msg = "gpu_timeout";
-        rc = HL_GPU_ERR_TIMEOUT;
-        goto cleanup;
+    {
+        uint32_t timeout = (opts->timeout_ms > 0) ? opts->timeout_ms : HL_GPU_TIMEOUT_MS;
+        if (timeout < 10) timeout = 10;  /* floor: 10ms */
+        wgpuQueueSubmit(dctx->queue, 1, &cmd);
+        if (gpu_poll_with_timeout(dctx->device, timeout) != 0) {
+            if (err_msg) *err_msg = "gpu_timeout";
+            rc = HL_GPU_ERR_TIMEOUT;
+            goto cleanup;
+        }
     }
 
     /* ── Readback requested outputs (skip for fire-and-forget) ── */
