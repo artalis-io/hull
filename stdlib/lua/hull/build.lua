@@ -398,7 +398,7 @@ local function sign_app(app_dir, key_file, sign_ctx, files)
     local payload_table = {
         binary_hash = sign_ctx.binary_hash,
         build = {
-            cc = sign_ctx.cc or "cosmocc",
+            cc = sign_ctx.cc or tool.default_cc or "cosmocc",
             cc_version = cc_version,
             flags = "-std=c11 -O2",
         },
@@ -519,7 +519,7 @@ typedef struct {
     end
 
     -- Resolve CC early (needed for AOT arch detection below)
-    local cc = opts.cc or tool.cc or "cosmocc"
+    local cc = opts.cc or tool.cc or tool.default_cc or "cosmocc"
     local is_cosmo = cc:find("cosmocc") ~= nil
 
     -- AOT compile WASM modules if wamrc is available

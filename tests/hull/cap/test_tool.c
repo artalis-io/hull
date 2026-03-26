@@ -6,6 +6,7 @@
 
 #include "utest.h"
 #include "hull/cap/tool.h"
+#include "hull/compilers.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -53,6 +54,11 @@ UTEST(tool, allowlist_accept_clang)
 UTEST(tool, allowlist_accept_cosmocc)
 {
     ASSERT_EQ(hl_tool_check_allowlist("cosmocc"), 0);
+}
+
+UTEST(tool, allowlist_accepts_default_cc)
+{
+    ASSERT_EQ(hl_tool_check_allowlist(HL_DEFAULT_CC), 0);
 }
 
 UTEST(tool, allowlist_accept_ar)

@@ -8,6 +8,7 @@
  */
 
 #include "hull/tool.h"
+#include "hull/compilers.h"
 #include "hull/cap/crypto.h"
 #include "hull/cap/tool.h"
 #include "hull/sandbox.h"
@@ -122,7 +123,7 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
 
     /* Parse --cc option for configurable compiler */
     const char *cc = parse_cc_option(argc, argv);
-    if (!cc) cc = "cosmocc";
+    if (!cc) cc = HL_DEFAULT_CC;
 
     /* Validate compiler against allowlist */
     if (hl_tool_check_allowlist(cc) != 0) {
@@ -173,12 +174,14 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
         return 1;
     }
 
-    /* Set tool.cc in the tool global table */
+    /* Set tool.cc and tool.default_cc in the tool global table */
     lua_State *L = lua.L;
     lua_getglobal(L, "tool");
     if (lua_istable(L, -1)) {
         lua_pushstring(L, cc);
         lua_setfield(L, -2, "cc");
+        lua_pushstring(L, HL_DEFAULT_CC);
+        lua_setfield(L, -2, "default_cc");
     }
     lua_pop(L, 1);
 
