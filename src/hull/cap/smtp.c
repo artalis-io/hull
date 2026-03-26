@@ -516,18 +516,24 @@ static int smtp_validate_message(const HlSmtpMessage *msg)
 
 /* ── Public API ──────────────────────────────────────────────────── */
 
-int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg)
+int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
+                     const char **err_msg)
 {
-    if (!cfg || !msg)
+    if (!cfg || !msg) {
+        if (err_msg) *err_msg = "invalid_args";
         return -1;
+    }
 
     /* Validate message fields */
-    if (smtp_validate_message(msg) != 0)
+    if (smtp_validate_message(msg) != 0) {
+        if (err_msg) *err_msg = "validation_failed";
         return -1;
+    }
 
     /* Check host allowlist */
     if (hl_smtp_check_host(cfg, msg->host) != 0) {
         log_warn("smtp: host '%s' not in allowlist", msg->host);
+        if (err_msg) *err_msg = "host_not_allowed";
         ShJsonWriter w = hl_audit_begin("smtp.send");
         sh_json_write_kv_string(&w, "host", msg->host);
         sh_json_write_kv_string(&w, "from", msg->from);
@@ -547,6 +553,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg)
     int fd = smtp_connect(msg->host, msg->port, timeout_ms);
     if (fd < 0) {
         log_warn("smtp: connect to %s:%d failed", msg->host, msg->port);
+        if (err_msg) *err_msg = "connect_failed";
         return -1;
     }
 
@@ -559,11 +566,13 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg)
     if (msg->use_tls == 2) {
         if (!tls_cfg) {
             log_warn("smtp: implicit TLS requested but no TLS config");
+            if (err_msg) *err_msg = "tls_config_missing";
             goto cleanup;
         }
         tls = smtp_tls_handshake(fd, tls_cfg, msg->host, timeout_ms);
         if (!tls) {
             log_warn("smtp: implicit TLS handshake failed");
+            if (err_msg) *err_msg = "tls_handshake_failed";
             goto cleanup;
         }
     }
@@ -572,39 +581,47 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg)
     int code = smtp_read_response(fd, tls, resp, (int)sizeof(resp), timeout_ms);
     if (code != 220) {
         log_warn("smtp: expected 220 greeting, got %d", code);
+        if (err_msg) *err_msg = "greeting_failed";
         goto cleanup;
     }
 
     /* EHLO */
     snprintf(cmd, sizeof(cmd), "EHLO localhost\r\n");
     code = smtp_send_command(fd, tls, cmd, 250, timeout_ms);
-    if (code < 0)
+    if (code < 0) {
+        if (err_msg) *err_msg = "ehlo_failed";
         goto cleanup;
+    }
 
     /* STARTTLS (if requested and not already implicit TLS) */
     if (msg->use_tls == 1 && !tls) {
         if (!tls_cfg) {
             log_warn("smtp: STARTTLS requested but no TLS config");
+            if (err_msg) *err_msg = "tls_config_missing";
             goto cleanup;
         }
 
         code = smtp_send_command(fd, tls, "STARTTLS\r\n", 220, timeout_ms);
         if (code < 0) {
             log_warn("smtp: STARTTLS rejected");
+            if (err_msg) *err_msg = "starttls_rejected";
             goto cleanup;
         }
 
         tls = smtp_tls_handshake(fd, tls_cfg, msg->host, timeout_ms);
         if (!tls) {
             log_warn("smtp: STARTTLS handshake failed");
+            if (err_msg) *err_msg = "tls_handshake_failed";
             goto cleanup;
         }
 
         /* Re-EHLO after TLS upgrade */
         snprintf(cmd, sizeof(cmd), "EHLO localhost\r\n");
         code = smtp_send_command(fd, tls, cmd, 250, timeout_ms);
-        if (code < 0)
+        if (code < 0) {
+            if (err_msg) *err_msg = "ehlo_failed";
             goto cleanup;
+        }
     }
 
     /* AUTH PLAIN (if credentials provided) */
@@ -613,6 +630,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg)
         if (!tls) {
             log_warn("smtp: AUTH PLAIN requires TLS — refusing to send "
                      "credentials in plaintext (set use_tls=1 or 2)");
+            if (err_msg) *err_msg = "auth_requires_tls";
             goto cleanup;
         }
 
@@ -623,6 +641,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg)
 
         if (plain_len > 1024) {
             log_warn("smtp: AUTH PLAIN credentials too long");
+            if (err_msg) *err_msg = "auth_credentials_too_long";
             goto cleanup;
         }
 
@@ -637,6 +656,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg)
                                             b64, (int)sizeof(b64));
         if (b64_len < 0) {
             log_warn("smtp: AUTH PLAIN base64 encode failed");
+            if (err_msg) *err_msg = "auth_encode_failed";
             goto cleanup;
         }
 
@@ -644,6 +664,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg)
         code = smtp_send_command(fd, tls, cmd, 235, timeout_ms);
         if (code < 0) {
             log_warn("smtp: AUTH PLAIN failed");
+            if (err_msg) *err_msg = "auth_failed";
             goto cleanup;
         }
     }
@@ -651,29 +672,37 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg)
     /* MAIL FROM */
     snprintf(cmd, sizeof(cmd), "MAIL FROM:<%s>\r\n", msg->from);
     code = smtp_send_command(fd, tls, cmd, 250, timeout_ms);
-    if (code < 0)
+    if (code < 0) {
+        if (err_msg) *err_msg = "mail_from_failed";
         goto cleanup;
+    }
 
     /* RCPT TO — primary recipient */
     snprintf(cmd, sizeof(cmd), "RCPT TO:<%s>\r\n", msg->to);
     code = smtp_send_command(fd, tls, cmd, 250, timeout_ms);
-    if (code < 0)
+    if (code < 0) {
+        if (err_msg) *err_msg = "rcpt_to_failed";
         goto cleanup;
+    }
 
     /* RCPT TO — CC recipients */
     if (msg->cc) {
         for (int i = 0; i < msg->cc_count; i++) {
             snprintf(cmd, sizeof(cmd), "RCPT TO:<%s>\r\n", msg->cc[i]);
             code = smtp_send_command(fd, tls, cmd, 250, timeout_ms);
-            if (code < 0)
+            if (code < 0) {
+                if (err_msg) *err_msg = "rcpt_to_failed";
                 goto cleanup;
+            }
         }
     }
 
     /* DATA */
     code = smtp_send_command(fd, tls, "DATA\r\n", 354, timeout_ms);
-    if (code < 0)
+    if (code < 0) {
+        if (err_msg) *err_msg = "data_failed";
         goto cleanup;
+    }
 
     /* Format and send the message */
     {
@@ -687,6 +716,7 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg)
         char *msg_buf = kl_malloc(&alloc, msg_size);
         if (!msg_buf) {
             log_warn("smtp: message buffer allocation failed");
+            if (err_msg) *err_msg = "alloc_failed";
             goto cleanup;
         }
 
@@ -694,12 +724,14 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg)
         if (msg_len < 0) {
             kl_free(&alloc, msg_buf, msg_size);
             log_warn("smtp: message formatting failed");
+            if (err_msg) *err_msg = "format_failed";
             goto cleanup;
         }
 
         /* Send formatted message */
         if (smtp_send_raw(fd, tls, msg_buf, (size_t)msg_len, timeout_ms) != 0) {
             kl_free(&alloc, msg_buf, msg_size);
+            if (err_msg) *err_msg = "send_failed";
             goto cleanup;
         }
 
@@ -708,8 +740,10 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg)
 
     /* End DATA with \r\n.\r\n */
     code = smtp_send_command(fd, tls, ".\r\n", 250, timeout_ms);
-    if (code < 0)
+    if (code < 0) {
+        if (err_msg) *err_msg = "data_end_failed";
         goto cleanup;
+    }
 
     /* QUIT */
     smtp_send_command(fd, tls, "QUIT\r\n", 221, timeout_ms);

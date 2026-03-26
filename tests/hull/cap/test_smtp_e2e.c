@@ -253,7 +253,7 @@ UTEST(smtp_e2e, plain_send)
         .content_type = "text/plain",
     };
 
-    ASSERT_EQ(0, hl_cap_smtp_send(&cfg, &msg));
+    ASSERT_EQ(0, hl_cap_smtp_send(&cfg, &msg, NULL));
     mock_smtp_stop(&m);
 
     /* EHLO hostname */
@@ -304,7 +304,7 @@ UTEST(smtp_e2e, auth_plain_rejected_without_tls)
     };
 
     /* AUTH PLAIN must be rejected when TLS is not active */
-    ASSERT_EQ(-1, hl_cap_smtp_send(&cfg, &msg));
+    ASSERT_EQ(-1, hl_cap_smtp_send(&cfg, &msg, NULL));
     mock_smtp_stop(&m);
 
     /* Credentials should NOT have been sent */
@@ -339,7 +339,7 @@ UTEST(smtp_e2e, cc_recipients)
         .content_type = "text/plain",
     };
 
-    ASSERT_EQ(0, hl_cap_smtp_send(&cfg, &msg));
+    ASSERT_EQ(0, hl_cap_smtp_send(&cfg, &msg, NULL));
     mock_smtp_stop(&m);
 
     /* 1 primary + 2 CC = 3 RCPT TO commands */
@@ -380,7 +380,7 @@ UTEST(smtp_e2e, reply_to_and_html)
         .content_type = "text/html",
     };
 
-    ASSERT_EQ(0, hl_cap_smtp_send(&cfg, &msg));
+    ASSERT_EQ(0, hl_cap_smtp_send(&cfg, &msg, NULL));
     mock_smtp_stop(&m);
 
     ASSERT_TRUE(strstr(m.data_buf,
@@ -416,7 +416,7 @@ UTEST(smtp_e2e, dot_stuffing)
         .content_type = "text/plain",
     };
 
-    ASSERT_EQ(0, hl_cap_smtp_send(&cfg, &msg));
+    ASSERT_EQ(0, hl_cap_smtp_send(&cfg, &msg, NULL));
     mock_smtp_stop(&m);
 
     /* Find body after header/body separator */
@@ -468,7 +468,7 @@ UTEST(smtp_e2e, connection_refused)
         .content_type = "text/plain",
     };
 
-    ASSERT_EQ(-1, hl_cap_smtp_send(&cfg, &msg));
+    ASSERT_EQ(-1, hl_cap_smtp_send(&cfg, &msg, NULL));
 }
 
 /* ── 7. RCPT TO rejected (550) ───────────────────────────────────── */
@@ -497,7 +497,7 @@ UTEST(smtp_e2e, rcpt_rejected)
         .content_type = "text/plain",
     };
 
-    ASSERT_EQ(-1, hl_cap_smtp_send(&cfg, &msg));
+    ASSERT_EQ(-1, hl_cap_smtp_send(&cfg, &msg, NULL));
     mock_smtp_stop(&m);
 }
 
@@ -524,7 +524,7 @@ UTEST(smtp_e2e, host_not_allowed)
         .content_type = "text/plain",
     };
 
-    ASSERT_EQ(-1, hl_cap_smtp_send(&cfg, &msg));
+    ASSERT_EQ(-1, hl_cap_smtp_send(&cfg, &msg, NULL));
 }
 
 UTEST_MAIN();

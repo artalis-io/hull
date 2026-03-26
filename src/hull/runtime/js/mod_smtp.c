@@ -159,7 +159,8 @@ static JSValue js_smtp_send(JSContext *ctx, JSValueConst this_val,
         .content_type = content_type,
     };
 
-    int rc = hl_cap_smtp_send(js->base.smtp_cfg, &msg);
+    const char *err_msg = NULL;
+    int rc = hl_cap_smtp_send(js->base.smtp_cfg, &msg, &err_msg);
 
     result = JS_NewObject(ctx);
     if (rc == 0) {
@@ -167,7 +168,8 @@ static JSValue js_smtp_send(JSContext *ctx, JSValueConst this_val,
     } else {
         JS_SetPropertyStr(ctx, result, "ok", JS_FALSE);
         JS_SetPropertyStr(ctx, result, "error",
-                          JS_NewString(ctx, "smtp send failed"));
+                          JS_NewString(ctx, err_msg ? err_msg
+                                                    : "smtp send failed"));
     }
 
 cleanup:

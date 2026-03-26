@@ -22,18 +22,25 @@
 
 /* ── Path validation ────────────────────────────────────────────────── */
 
-int hl_cap_fs_validate(const HlFsConfig *cfg, const char *path)
+int hl_cap_fs_validate(const HlFsConfig *cfg, const char *path,
+                       const char **err_msg)
 {
-    if (!cfg || !path || !cfg->base_dir)
+    if (!cfg || !path || !cfg->base_dir) {
+        if (err_msg) *err_msg = "invalid_args";
         return -1;
+    }
 
     /* Reject empty path */
-    if (path[0] == '\0')
+    if (path[0] == '\0') {
+        if (err_msg) *err_msg = "empty_path";
         return -1;
+    }
 
     /* Reject absolute paths */
-    if (path[0] == '/')
+    if (path[0] == '/') {
+        if (err_msg) *err_msg = "absolute_path";
         return -1;
+    }
 
     /* Reject ".." components — walk the path */
     const char *p = path;
@@ -41,8 +48,10 @@ int hl_cap_fs_validate(const HlFsConfig *cfg, const char *path)
         /* Check for ".." at start or after "/" */
         if (p[0] == '.' && p[1] == '.') {
             /* Must be followed by '/' or '\0' to be a component */
-            if (p[2] == '/' || p[2] == '\0')
+            if (p[2] == '/' || p[2] == '\0') {
+                if (err_msg) *err_msg = "path_traversal";
                 return -1;
+            }
         }
         /* Advance to next component */
         const char *slash = strchr(p, '/');
@@ -53,14 +62,18 @@ int hl_cap_fs_validate(const HlFsConfig *cfg, const char *path)
 
     /* Resolve the base directory (must exist) */
     char resolved_base[PATH_MAX];
-    if (realpath(cfg->base_dir, resolved_base) == NULL)
+    if (realpath(cfg->base_dir, resolved_base) == NULL) {
+        if (err_msg) *err_msg = "validate_failed";
         return -1; /* base dir must exist */
+    }
 
     /* Build full path */
     char full[PATH_MAX];
     int n = snprintf(full, sizeof(full), "%s/%s", resolved_base, path);
-    if (n < 0 || (size_t)n >= sizeof(full))
+    if (n < 0 || (size_t)n >= sizeof(full)) {
+        if (err_msg) *err_msg = "validate_failed";
         return -1;
+    }
 
     /* Walk up the path to find the deepest existing ancestor,
      * resolve it, and verify it's under base_dir. */
@@ -71,19 +84,25 @@ int hl_cap_fs_validate(const HlFsConfig *cfg, const char *path)
     char resolved[PATH_MAX];
     while (realpath(probe, resolved) == NULL) {
         char *slash = strrchr(probe, '/');
-        if (!slash || slash == probe)
+        if (!slash || slash == probe) {
+            if (err_msg) *err_msg = "validate_failed";
             return -1; /* exhausted all ancestors */
+        }
         *slash = '\0';
     }
 
     /* Verify the resolved ancestor starts with resolved base */
     size_t base_len = strlen(resolved_base);
-    if (strncmp(resolved, resolved_base, base_len) != 0)
+    if (strncmp(resolved, resolved_base, base_len) != 0) {
+        if (err_msg) *err_msg = "symlink_escape";
         return -1;
+    }
 
     /* Must be followed by '/' or be exactly the base dir */
-    if (resolved[base_len] != '/' && resolved[base_len] != '\0')
+    if (resolved[base_len] != '/' && resolved[base_len] != '\0') {
+        if (err_msg) *err_msg = "symlink_escape";
         return -1;
+    }
 
     return 0;
 }
@@ -91,20 +110,24 @@ int hl_cap_fs_validate(const HlFsConfig *cfg, const char *path)
 /* ── Internal: build full path ──────────────────────────────────────── */
 
 static int build_path(const HlFsConfig *cfg, const char *path,
-                      char *out, size_t out_size)
+                      char *out, size_t out_size, const char **err_msg)
 {
-    if (hl_cap_fs_validate(cfg, path) != 0)
+    if (hl_cap_fs_validate(cfg, path, err_msg) != 0)
         return -1;
 
     /* Use resolved base_dir to avoid TOCTOU with symlinks.
      * hl_cap_fs_validate already verified base_dir resolves. */
     char resolved_base[PATH_MAX];
-    if (realpath(cfg->base_dir, resolved_base) == NULL)
+    if (realpath(cfg->base_dir, resolved_base) == NULL) {
+        if (err_msg) *err_msg = "validate_failed";
         return -1;
+    }
 
     int n = snprintf(out, out_size, "%s/%s", resolved_base, path);
-    if (n < 0 || (size_t)n >= out_size)
+    if (n < 0 || (size_t)n >= out_size) {
+        if (err_msg) *err_msg = "validate_failed";
         return -1;
+    }
 
     return 0;
 }
@@ -112,26 +135,31 @@ static int build_path(const HlFsConfig *cfg, const char *path,
 /* ── Public API ─────────────────────────────────────────────────────── */
 
 int64_t hl_cap_fs_read(const HlFsConfig *cfg, const char *path,
-                         char *buf, size_t buf_size)
+                         char *buf, size_t buf_size,
+                         const char **err_msg)
 {
     int64_t result = -1;
 
     char full[PATH_MAX];
-    if (build_path(cfg, path, full, sizeof(full)) != 0)
+    if (build_path(cfg, path, full, sizeof(full), err_msg) != 0)
         goto audit;
 
     FILE *f = fopen(full, "rb");
-    if (!f)
+    if (!f) {
+        if (err_msg) *err_msg = "open_failed";
         goto audit;
+    }
 
     /* Get file size */
     if (fseek(f, 0, SEEK_END) != 0) {
         fclose(f);
+        if (err_msg) *err_msg = "read_failed";
         goto audit;
     }
     long size = ftell(f);
     if (size < 0) {
         fclose(f);
+        if (err_msg) *err_msg = "read_failed";
         goto audit;
     }
 
@@ -144,19 +172,23 @@ int64_t hl_cap_fs_read(const HlFsConfig *cfg, const char *path,
 
     if ((size_t)size > buf_size) {
         fclose(f);
+        if (err_msg) *err_msg = "read_failed";
         goto audit; /* buffer too small */
     }
 
     if (fseek(f, 0, SEEK_SET) != 0) {
         fclose(f);
+        if (err_msg) *err_msg = "read_failed";
         goto audit;
     }
     size_t nread = fread(buf, 1, (size_t)size, f);
     int read_err = ferror(f);
     fclose(f);
 
-    if (read_err || nread != (size_t)size)
+    if (read_err || nread != (size_t)size) {
+        if (err_msg) *err_msg = "read_failed";
         goto audit;
+    }
 
     result = (int64_t)nread;
 
@@ -173,12 +205,13 @@ audit:
 }
 
 int hl_cap_fs_write(const HlFsConfig *cfg, const char *path,
-                      const char *data, size_t len)
+                      const char *data, size_t len,
+                      const char **err_msg)
 {
     int result = -1;
 
     char full[PATH_MAX];
-    if (build_path(cfg, path, full, sizeof(full)) != 0)
+    if (build_path(cfg, path, full, sizeof(full), err_msg) != 0)
         goto audit;
 
     /* Create parent directories if needed */
@@ -196,13 +229,16 @@ int hl_cap_fs_write(const HlFsConfig *cfg, const char *path,
 
     {
         FILE *f = fopen(full, "wb");
-        if (!f)
+        if (!f) {
+            if (err_msg) *err_msg = "write_failed";
             goto audit;
+        }
 
         if (len > 0 && data) {
             size_t written = fwrite(data, 1, len, f);
             if (written != len) {
                 fclose(f);
+                if (err_msg) *err_msg = "write_failed";
                 goto audit;
             }
         }
@@ -222,25 +258,29 @@ audit:
     return result;
 }
 
-int hl_cap_fs_exists(const HlFsConfig *cfg, const char *path)
+int hl_cap_fs_exists(const HlFsConfig *cfg, const char *path,
+                     const char **err_msg)
 {
     char full[PATH_MAX];
-    if (build_path(cfg, path, full, sizeof(full)) != 0)
+    if (build_path(cfg, path, full, sizeof(full), err_msg) != 0)
         return -1;
 
     return access(full, F_OK) == 0 ? 1 : 0;
 }
 
-int hl_cap_fs_delete(const HlFsConfig *cfg, const char *path)
+int hl_cap_fs_delete(const HlFsConfig *cfg, const char *path,
+                     const char **err_msg)
 {
     int result = -1;
 
     char full[PATH_MAX];
-    if (build_path(cfg, path, full, sizeof(full)) != 0)
+    if (build_path(cfg, path, full, sizeof(full), err_msg) != 0)
         goto audit;
 
-    if (unlink(full) != 0)
+    if (unlink(full) != 0) {
+        if (err_msg) *err_msg = "delete_failed";
         goto audit;
+    }
 
     result = 0;
 
@@ -257,33 +297,39 @@ audit:
 /* ── Memory-mapped file ────────────────────────────────────────────── */
 
 HlMappedBuffer *hl_cap_fs_mmap(const HlFsConfig *cfg, const char *path,
-                                HlAllocator *alloc)
+                                HlAllocator *alloc, const char **err_msg)
 {
     HlMappedBuffer *buf = NULL;
 
     char full[PATH_MAX];
-    if (build_path(cfg, path, full, sizeof(full)) != 0)
+    if (build_path(cfg, path, full, sizeof(full), err_msg) != 0)
         goto audit;
 
     int fd = open(full, O_RDONLY);
-    if (fd < 0)
+    if (fd < 0) {
+        if (err_msg) *err_msg = "open_failed";
         goto audit;
+    }
 
     struct stat st;
     if (fstat(fd, &st) != 0 || st.st_size <= 0) {
         close(fd);
+        if (err_msg) *err_msg = st.st_size == 0 ? "empty_file" : "mmap_failed";
         goto audit;
     }
 
     void *addr = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
     close(fd); /* mapping survives close */
 
-    if (addr == MAP_FAILED)
+    if (addr == MAP_FAILED) {
+        if (err_msg) *err_msg = "mmap_failed";
         goto audit;
+    }
 
     buf = hl_alloc_malloc(alloc, sizeof(HlMappedBuffer));
     if (!buf) {
         munmap(addr, (size_t)st.st_size);
+        if (err_msg) *err_msg = "mmap_failed";
         goto audit;
     }
 

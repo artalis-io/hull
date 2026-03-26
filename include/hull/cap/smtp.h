@@ -56,7 +56,8 @@ typedef struct {
  *
  * Returns 0 on success, -1 on failure.
  */
-int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg);
+int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
+                     const char **err_msg);
 
 /* ── Internal helpers (exposed for unit testing) ─────────────────── */
 

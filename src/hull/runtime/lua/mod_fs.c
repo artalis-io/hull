@@ -29,10 +29,12 @@ static int lua_fs_mmap(lua_State *L)
 
     const char *path = luaL_checkstring(L, 1);
 
-    HlMappedBuffer *buf = hl_cap_fs_mmap(lua->base.fs_cfg, path, lua->base.alloc);
+    const char *err_msg = NULL;
+    HlMappedBuffer *buf = hl_cap_fs_mmap(lua->base.fs_cfg, path,
+                                          lua->base.alloc, &err_msg);
     if (!buf) {
         lua_pushnil(L);
-        lua_pushstring(L, "mmap failed");
+        lua_pushstring(L, err_msg ? err_msg : "mmap failed");
         return 2;
     }
 

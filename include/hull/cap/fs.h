@@ -18,17 +18,22 @@ typedef struct HlFsConfig {
     size_t      base_len;
 } HlFsConfig;
 
-int hl_cap_fs_validate(const HlFsConfig *cfg, const char *path);
+int hl_cap_fs_validate(const HlFsConfig *cfg, const char *path,
+                       const char **err_msg);
 
 int64_t hl_cap_fs_read(const HlFsConfig *cfg, const char *path,
-                         char *buf, size_t buf_size);
+                         char *buf, size_t buf_size,
+                         const char **err_msg);
 
 int hl_cap_fs_write(const HlFsConfig *cfg, const char *path,
-                      const char *data, size_t len);
+                      const char *data, size_t len,
+                      const char **err_msg);
 
-int hl_cap_fs_exists(const HlFsConfig *cfg, const char *path);
+int hl_cap_fs_exists(const HlFsConfig *cfg, const char *path,
+                     const char **err_msg);
 
-int hl_cap_fs_delete(const HlFsConfig *cfg, const char *path);
+int hl_cap_fs_delete(const HlFsConfig *cfg, const char *path,
+                     const char **err_msg);
 
 /* ── Memory-mapped file buffer ─────────────────────────────────────── */
 
@@ -43,7 +48,7 @@ typedef struct HlMappedBuffer {
  * Returns heap-allocated HlMappedBuffer on success, NULL on failure.
  * Caller must call hl_cap_fs_munmap() when done. */
 HlMappedBuffer *hl_cap_fs_mmap(const HlFsConfig *cfg, const char *path,
-                                HlAllocator *alloc);
+                                HlAllocator *alloc, const char **err_msg);
 
 /* Unmap and free a mapped buffer. Safe to call multiple times (idempotent). */
 void hl_cap_fs_munmap(HlMappedBuffer *buf);

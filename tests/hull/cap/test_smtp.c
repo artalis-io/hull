@@ -324,14 +324,14 @@ UTEST(smtp_send, null_cfg)
         .from = "a@b.com", .to = "c@d.com",
         .subject = "test", .body = "body",
     };
-    ASSERT_NE(0, hl_cap_smtp_send(NULL, &msg));
+    ASSERT_NE(0, hl_cap_smtp_send(NULL, &msg, NULL));
 }
 
 UTEST(smtp_send, null_msg)
 {
     const char *hosts[] = { "smtp.example.com" };
     HlSmtpConfig cfg = { .allowed_hosts = hosts, .host_count = 1 };
-    ASSERT_NE(0, hl_cap_smtp_send(&cfg, NULL));
+    ASSERT_NE(0, hl_cap_smtp_send(&cfg, NULL, NULL));
 }
 
 UTEST(smtp_send, crlf_in_subject)
@@ -345,7 +345,7 @@ UTEST(smtp_send, crlf_in_subject)
         .body = "body",
     };
     /* Should reject due to CRLF in subject (before any network I/O) */
-    ASSERT_NE(0, hl_cap_smtp_send(&cfg, &msg));
+    ASSERT_NE(0, hl_cap_smtp_send(&cfg, &msg, NULL));
 }
 
 UTEST(smtp_send, crlf_in_from)
@@ -357,7 +357,7 @@ UTEST(smtp_send, crlf_in_from)
         .from = "a@b.com\r\nBcc: x@evil.com", .to = "c@d.com",
         .subject = "test", .body = "body",
     };
-    ASSERT_NE(0, hl_cap_smtp_send(&cfg, &msg));
+    ASSERT_NE(0, hl_cap_smtp_send(&cfg, &msg, NULL));
 }
 
 UTEST(smtp_send, host_not_allowed)
@@ -369,7 +369,7 @@ UTEST(smtp_send, host_not_allowed)
         .from = "a@b.com", .to = "c@d.com",
         .subject = "test", .body = "body",
     };
-    ASSERT_NE(0, hl_cap_smtp_send(&cfg, &msg));
+    ASSERT_NE(0, hl_cap_smtp_send(&cfg, &msg, NULL));
 }
 
 UTEST(smtp_send, missing_required_fields)
@@ -382,28 +382,28 @@ UTEST(smtp_send, missing_required_fields)
         .host = "smtp.example.com", .port = 587,
         .to = "c@d.com", .subject = "test", .body = "body",
     };
-    ASSERT_NE(0, hl_cap_smtp_send(&cfg, &msg1));
+    ASSERT_NE(0, hl_cap_smtp_send(&cfg, &msg1, NULL));
 
     /* Missing to */
     HlSmtpMessage msg2 = {
         .host = "smtp.example.com", .port = 587,
         .from = "a@b.com", .subject = "test", .body = "body",
     };
-    ASSERT_NE(0, hl_cap_smtp_send(&cfg, &msg2));
+    ASSERT_NE(0, hl_cap_smtp_send(&cfg, &msg2, NULL));
 
     /* Missing subject */
     HlSmtpMessage msg3 = {
         .host = "smtp.example.com", .port = 587,
         .from = "a@b.com", .to = "c@d.com", .body = "body",
     };
-    ASSERT_NE(0, hl_cap_smtp_send(&cfg, &msg3));
+    ASSERT_NE(0, hl_cap_smtp_send(&cfg, &msg3, NULL));
 
     /* Missing body */
     HlSmtpMessage msg4 = {
         .host = "smtp.example.com", .port = 587,
         .from = "a@b.com", .to = "c@d.com", .subject = "test",
     };
-    ASSERT_NE(0, hl_cap_smtp_send(&cfg, &msg4));
+    ASSERT_NE(0, hl_cap_smtp_send(&cfg, &msg4, NULL));
 }
 
 UTEST(smtp_send, invalid_port)
@@ -415,7 +415,7 @@ UTEST(smtp_send, invalid_port)
         .from = "a@b.com", .to = "c@d.com",
         .subject = "test", .body = "body",
     };
-    ASSERT_NE(0, hl_cap_smtp_send(&cfg, &msg));
+    ASSERT_NE(0, hl_cap_smtp_send(&cfg, &msg, NULL));
 }
 
 UTEST_MAIN();

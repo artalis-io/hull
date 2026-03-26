@@ -39,40 +39,40 @@ static void teardown_fs(void)
 UTEST(hl_cap_fs, validate_normal_path)
 {
     setup_fs();
-    ASSERT_EQ(hl_cap_fs_validate(&test_cfg, "file.txt"), 0);
-    ASSERT_EQ(hl_cap_fs_validate(&test_cfg, "subdir/file.txt"), 0);
+    ASSERT_EQ(hl_cap_fs_validate(&test_cfg, "file.txt", NULL), 0);
+    ASSERT_EQ(hl_cap_fs_validate(&test_cfg, "subdir/file.txt", NULL), 0);
     teardown_fs();
 }
 
 UTEST(hl_cap_fs, validate_rejects_dotdot)
 {
     setup_fs();
-    ASSERT_EQ(hl_cap_fs_validate(&test_cfg, "../etc/passwd"), -1);
-    ASSERT_EQ(hl_cap_fs_validate(&test_cfg, "subdir/../../etc/passwd"), -1);
-    ASSERT_EQ(hl_cap_fs_validate(&test_cfg, ".."), -1);
+    ASSERT_EQ(hl_cap_fs_validate(&test_cfg, "../etc/passwd", NULL), -1);
+    ASSERT_EQ(hl_cap_fs_validate(&test_cfg, "subdir/../../etc/passwd", NULL), -1);
+    ASSERT_EQ(hl_cap_fs_validate(&test_cfg, "..", NULL), -1);
     teardown_fs();
 }
 
 UTEST(hl_cap_fs, validate_rejects_absolute)
 {
     setup_fs();
-    ASSERT_EQ(hl_cap_fs_validate(&test_cfg, "/etc/passwd"), -1);
-    ASSERT_EQ(hl_cap_fs_validate(&test_cfg, "/tmp/evil"), -1);
+    ASSERT_EQ(hl_cap_fs_validate(&test_cfg, "/etc/passwd", NULL), -1);
+    ASSERT_EQ(hl_cap_fs_validate(&test_cfg, "/tmp/evil", NULL), -1);
     teardown_fs();
 }
 
 UTEST(hl_cap_fs, validate_rejects_empty)
 {
     setup_fs();
-    ASSERT_EQ(hl_cap_fs_validate(&test_cfg, ""), -1);
+    ASSERT_EQ(hl_cap_fs_validate(&test_cfg, "", NULL), -1);
     teardown_fs();
 }
 
 UTEST(hl_cap_fs, validate_null)
 {
-    ASSERT_EQ(hl_cap_fs_validate(NULL, "file.txt"), -1);
+    ASSERT_EQ(hl_cap_fs_validate(NULL, "file.txt", NULL), -1);
     setup_fs();
-    ASSERT_EQ(hl_cap_fs_validate(&test_cfg, NULL), -1);
+    ASSERT_EQ(hl_cap_fs_validate(&test_cfg, NULL, NULL), -1);
     teardown_fs();
 }
 
@@ -83,11 +83,11 @@ UTEST(hl_cap_fs, write_and_read)
     setup_fs();
 
     const char *data = "Hello, Hull!";
-    int rc = hl_cap_fs_write(&test_cfg, "test.txt", data, strlen(data));
+    int rc = hl_cap_fs_write(&test_cfg, "test.txt", data, strlen(data), NULL);
     ASSERT_EQ(rc, 0);
 
     char buf[256];
-    int64_t nread = hl_cap_fs_read(&test_cfg, "test.txt", buf, sizeof(buf));
+    int64_t nread = hl_cap_fs_read(&test_cfg, "test.txt", buf, sizeof(buf), NULL);
     ASSERT_EQ(nread, (int64_t)strlen(data));
     buf[nread] = '\0';
     ASSERT_STREQ(buf, data);
@@ -101,12 +101,12 @@ UTEST(hl_cap_fs, write_creates_subdirs)
 
     const char *data = "nested file";
     int rc = hl_cap_fs_write(&test_cfg, "a/b/c/file.txt",
-                               data, strlen(data));
+                               data, strlen(data), NULL);
     ASSERT_EQ(rc, 0);
 
     char buf[256];
     int64_t nread = hl_cap_fs_read(&test_cfg, "a/b/c/file.txt",
-                                     buf, sizeof(buf));
+                                     buf, sizeof(buf), NULL);
     ASSERT_EQ(nread, (int64_t)strlen(data));
 
     teardown_fs();
@@ -117,10 +117,10 @@ UTEST(hl_cap_fs, read_file_size)
     setup_fs();
 
     const char *data = "12345";
-    hl_cap_fs_write(&test_cfg, "size.txt", data, 5);
+    hl_cap_fs_write(&test_cfg, "size.txt", data, 5, NULL);
 
     /* NULL buf → returns file size */
-    int64_t size = hl_cap_fs_read(&test_cfg, "size.txt", NULL, 0);
+    int64_t size = hl_cap_fs_read(&test_cfg, "size.txt", NULL, 0, NULL);
     ASSERT_EQ(size, 5);
 
     teardown_fs();
@@ -130,7 +130,7 @@ UTEST(hl_cap_fs, read_nonexistent)
 {
     setup_fs();
     char buf[256];
-    int64_t nread = hl_cap_fs_read(&test_cfg, "nope.txt", buf, sizeof(buf));
+    int64_t nread = hl_cap_fs_read(&test_cfg, "nope.txt", buf, sizeof(buf), NULL);
     ASSERT_EQ(nread, -1);
     teardown_fs();
 }
@@ -141,10 +141,10 @@ UTEST(hl_cap_fs, exists)
 {
     setup_fs();
 
-    ASSERT_EQ(hl_cap_fs_exists(&test_cfg, "gone.txt"), 0);
+    ASSERT_EQ(hl_cap_fs_exists(&test_cfg, "gone.txt", NULL), 0);
 
-    hl_cap_fs_write(&test_cfg, "here.txt", "x", 1);
-    ASSERT_EQ(hl_cap_fs_exists(&test_cfg, "here.txt"), 1);
+    hl_cap_fs_write(&test_cfg, "here.txt", "x", 1, NULL);
+    ASSERT_EQ(hl_cap_fs_exists(&test_cfg, "here.txt", NULL), 1);
 
     teardown_fs();
 }
@@ -153,12 +153,12 @@ UTEST(hl_cap_fs, delete)
 {
     setup_fs();
 
-    hl_cap_fs_write(&test_cfg, "del.txt", "x", 1);
-    ASSERT_EQ(hl_cap_fs_exists(&test_cfg, "del.txt"), 1);
+    hl_cap_fs_write(&test_cfg, "del.txt", "x", 1, NULL);
+    ASSERT_EQ(hl_cap_fs_exists(&test_cfg, "del.txt", NULL), 1);
 
-    int rc = hl_cap_fs_delete(&test_cfg, "del.txt");
+    int rc = hl_cap_fs_delete(&test_cfg, "del.txt", NULL);
     ASSERT_EQ(rc, 0);
-    ASSERT_EQ(hl_cap_fs_exists(&test_cfg, "del.txt"), 0);
+    ASSERT_EQ(hl_cap_fs_exists(&test_cfg, "del.txt", NULL), 0);
 
     teardown_fs();
 }
@@ -166,7 +166,7 @@ UTEST(hl_cap_fs, delete)
 UTEST(hl_cap_fs, delete_nonexistent)
 {
     setup_fs();
-    int rc = hl_cap_fs_delete(&test_cfg, "nope.txt");
+    int rc = hl_cap_fs_delete(&test_cfg, "nope.txt", NULL);
     ASSERT_EQ(rc, -1);
     teardown_fs();
 }
@@ -176,7 +176,7 @@ UTEST(hl_cap_fs, delete_nonexistent)
 UTEST(hl_cap_fs, write_rejects_traversal)
 {
     setup_fs();
-    int rc = hl_cap_fs_write(&test_cfg, "../evil.txt", "x", 1);
+    int rc = hl_cap_fs_write(&test_cfg, "../evil.txt", "x", 1, NULL);
     ASSERT_EQ(rc, -1);
     teardown_fs();
 }
@@ -186,7 +186,7 @@ UTEST(hl_cap_fs, read_rejects_traversal)
     setup_fs();
     char buf[256];
     int64_t nread = hl_cap_fs_read(&test_cfg, "../etc/passwd",
-                                     buf, sizeof(buf));
+                                     buf, sizeof(buf), NULL);
     ASSERT_EQ(nread, -1);
     teardown_fs();
 }
@@ -200,7 +200,7 @@ UTEST(hl_cap_fs, validate_rejects_symlink_escape)
     symlink("/tmp", link_path);
 
     /* Accessing via symlink should be rejected */
-    ASSERT_EQ(hl_cap_fs_validate(&test_cfg, "escape/some_file"), -1);
+    ASSERT_EQ(hl_cap_fs_validate(&test_cfg, "escape/some_file", NULL), -1);
 
     unlink(link_path);
     teardown_fs();
@@ -214,10 +214,10 @@ UTEST(hl_cap_fs, mmap_basic)
 
     /* Write a test file */
     const char *data = "hello mmap world";
-    ASSERT_EQ(hl_cap_fs_write(&test_cfg, "mmap_test.txt", data, strlen(data)), 0);
+    ASSERT_EQ(hl_cap_fs_write(&test_cfg, "mmap_test.txt", data, strlen(data), NULL), 0);
 
     /* mmap it */
-    HlMappedBuffer *buf = hl_cap_fs_mmap(&test_cfg, "mmap_test.txt", NULL);
+    HlMappedBuffer *buf = hl_cap_fs_mmap(&test_cfg, "mmap_test.txt", NULL, NULL);
     ASSERT_NE(buf, NULL);
     ASSERT_EQ(buf->len, strlen(data));
     ASSERT_EQ(buf->closed, 0);
@@ -230,22 +230,22 @@ UTEST(hl_cap_fs, mmap_basic)
 UTEST(hl_cap_fs, mmap_path_traversal)
 {
     setup_fs();
-    ASSERT_EQ(hl_cap_fs_mmap(&test_cfg, "../etc/passwd", NULL), NULL);
-    ASSERT_EQ(hl_cap_fs_mmap(&test_cfg, "/etc/passwd", NULL), NULL);
+    ASSERT_EQ(hl_cap_fs_mmap(&test_cfg, "../etc/passwd", NULL, NULL), NULL);
+    ASSERT_EQ(hl_cap_fs_mmap(&test_cfg, "/etc/passwd", NULL, NULL), NULL);
     teardown_fs();
 }
 
 UTEST(hl_cap_fs, mmap_nonexistent)
 {
     setup_fs();
-    ASSERT_EQ(hl_cap_fs_mmap(&test_cfg, "no_such_file.txt", NULL), NULL);
+    ASSERT_EQ(hl_cap_fs_mmap(&test_cfg, "no_such_file.txt", NULL, NULL), NULL);
     teardown_fs();
 }
 
 UTEST(hl_cap_fs, mmap_null_safe)
 {
-    ASSERT_EQ(hl_cap_fs_mmap(NULL, "test.txt", NULL), NULL);
-    ASSERT_EQ(hl_cap_fs_mmap(&test_cfg, NULL, NULL), NULL);
+    ASSERT_EQ(hl_cap_fs_mmap(NULL, "test.txt", NULL, NULL), NULL);
+    ASSERT_EQ(hl_cap_fs_mmap(&test_cfg, NULL, NULL, NULL), NULL);
     hl_cap_fs_munmap(NULL); /* should not crash */
 }
 

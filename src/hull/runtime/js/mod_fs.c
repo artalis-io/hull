@@ -59,11 +59,14 @@ static JSValue js_fs_mmap(JSContext *ctx, JSValueConst this_val,
     const char *path = JS_ToCString(ctx, argv[0]);
     if (!path) return JS_EXCEPTION;
 
-    HlMappedBuffer *buf = hl_cap_fs_mmap(js->base.fs_cfg, path, js->base.alloc);
+    const char *err_msg = NULL;
+    HlMappedBuffer *buf = hl_cap_fs_mmap(js->base.fs_cfg, path,
+                                          js->base.alloc, &err_msg);
     JS_FreeCString(ctx, path);
 
     if (!buf)
-        return JS_ThrowInternalError(ctx, "fs.mmap: failed to map file");
+        return JS_ThrowInternalError(ctx, "fs.mmap: %s",
+                                     err_msg ? err_msg : "failed to map file");
 
     JSValue obj = JS_NewObjectClass(ctx, (int)js_mmap_class_id);
     if (JS_IsException(obj)) {

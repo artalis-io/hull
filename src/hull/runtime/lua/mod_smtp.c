@@ -152,7 +152,8 @@ static int lua_smtp_send(lua_State *L)
         .content_type = content_type,
     };
 
-    int rc = hl_cap_smtp_send(lua->base.smtp_cfg, &msg);
+    const char *err_msg = NULL;
+    int rc = hl_cap_smtp_send(lua->base.smtp_cfg, &msg, &err_msg);
 
     /* Return { ok = true/false, error = "..." } */
     lua_newtable(L);
@@ -162,7 +163,7 @@ static int lua_smtp_send(lua_State *L)
     } else {
         lua_pushboolean(L, 0);
         lua_setfield(L, -2, "ok");
-        lua_pushstring(L, "smtp send failed");
+        lua_pushstring(L, err_msg ? err_msg : "smtp send failed");
         lua_setfield(L, -2, "error");
     }
 
