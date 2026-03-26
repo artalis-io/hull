@@ -423,6 +423,7 @@ static JSValue js_crypto_auth(JSContext *ctx, JSValueConst this_val,
     uint8_t tag[32];
     hl_cap_crypto_auth(msg, msg_len, key, tag);
     JS_FreeCString(ctx, msg);
+    secure_zero(key, sizeof(key));
 
     char hex[65];
     for (int i = 0; i < 32; i++)
@@ -476,6 +477,7 @@ static JSValue js_crypto_auth_verify(JSContext *ctx, JSValueConst this_val,
 
     int rc = hl_cap_crypto_auth_verify(tag, msg, msg_len, key);
     JS_FreeCString(ctx, msg);
+    secure_zero(key, sizeof(key));
 
     return rc == 0 ? JS_TRUE : JS_FALSE;
 }
@@ -524,18 +526,21 @@ static JSValue js_crypto_secretbox(JSContext *ctx, JSValueConst this_val,
 
     if (msg_len > SIZE_MAX - HL_SECRETBOX_MACBYTES) {
         JS_FreeCString(ctx, msg);
+        secure_zero(key, sizeof(key));
         return JS_ThrowRangeError(ctx, "message too large");
     }
     size_t ct_len = msg_len + HL_SECRETBOX_MACBYTES;
     uint8_t *ct = js_malloc(ctx, ct_len);
-    if (!ct) { JS_FreeCString(ctx, msg); return JS_EXCEPTION; }
+    if (!ct) { JS_FreeCString(ctx, msg); secure_zero(key, sizeof(key)); return JS_EXCEPTION; }
 
     if (hl_cap_crypto_secretbox(ct, msg, msg_len, nonce, key) != 0) {
         JS_FreeCString(ctx, msg);
         js_free(ctx, ct);
+        secure_zero(key, sizeof(key));
         return JS_ThrowInternalError(ctx, "secretbox failed");
     }
     JS_FreeCString(ctx, msg);
+    secure_zero(key, sizeof(key));
 
     /* Hex encode */
     if (ct_len > SIZE_MAX / 2) { js_free(ctx, ct); return JS_ThrowRangeError(ctx, "ciphertext too large"); }
@@ -600,24 +605,27 @@ static JSValue js_crypto_secretbox_open(JSContext *ctx, JSValueConst this_val,
     JS_FreeCString(ctx, key_hex);
 
     uint8_t *ct = js_malloc(ctx, ct_len);
-    if (!ct) { JS_FreeCString(ctx, ct_hex); return JS_EXCEPTION; }
+    if (!ct) { JS_FreeCString(ctx, ct_hex); secure_zero(key, sizeof(key)); return JS_EXCEPTION; }
     if (hex_decode(ct_hex, ct_hex_len, ct, ct_len) != 0) {
         JS_FreeCString(ctx, ct_hex);
         js_free(ctx, ct);
+        secure_zero(key, sizeof(key));
         return JS_NULL;
     }
     JS_FreeCString(ctx, ct_hex);
 
     size_t pt_len = ct_len - HL_SECRETBOX_MACBYTES;
     uint8_t *pt = js_malloc(ctx, pt_len + 1);
-    if (!pt) { js_free(ctx, ct); return JS_EXCEPTION; }
+    if (!pt) { js_free(ctx, ct); secure_zero(key, sizeof(key)); return JS_EXCEPTION; }
 
     if (hl_cap_crypto_secretbox_open(pt, ct, ct_len, nonce, key) != 0) {
         js_free(ctx, ct);
         js_free(ctx, pt);
+        secure_zero(key, sizeof(key));
         return JS_NULL;
     }
     js_free(ctx, ct);
+    secure_zero(key, sizeof(key));
 
     JSValue result = JS_NewStringLen(ctx, (const char *)pt, pt_len);
     js_free(ctx, pt);
@@ -670,18 +678,21 @@ static JSValue js_crypto_box(JSContext *ctx, JSValueConst this_val,
 
     if (msg_len > SIZE_MAX - HL_BOX_MACBYTES) {
         JS_FreeCString(ctx, msg);
+        secure_zero(sk, sizeof(sk));
         return JS_ThrowRangeError(ctx, "message too large");
     }
     size_t ct_len = msg_len + HL_BOX_MACBYTES;
     uint8_t *ct = js_malloc(ctx, ct_len);
-    if (!ct) { JS_FreeCString(ctx, msg); return JS_EXCEPTION; }
+    if (!ct) { JS_FreeCString(ctx, msg); secure_zero(sk, sizeof(sk)); return JS_EXCEPTION; }
 
     if (hl_cap_crypto_box(ct, msg, msg_len, nonce, pk, sk) != 0) {
         JS_FreeCString(ctx, msg);
         js_free(ctx, ct);
+        secure_zero(sk, sizeof(sk));
         return JS_ThrowInternalError(ctx, "box failed");
     }
     JS_FreeCString(ctx, msg);
+    secure_zero(sk, sizeof(sk));
 
     if (ct_len > SIZE_MAX / 2) { js_free(ctx, ct); return JS_ThrowRangeError(ctx, "ciphertext too large"); }
     char *hex = js_malloc(ctx, ct_len * 2 + 1);
@@ -743,24 +754,27 @@ static JSValue js_crypto_box_open(JSContext *ctx, JSValueConst this_val,
     JS_FreeCString(ctx, skh);
 
     uint8_t *ct = js_malloc(ctx, ct_len);
-    if (!ct) { JS_FreeCString(ctx, cth); return JS_EXCEPTION; }
+    if (!ct) { JS_FreeCString(ctx, cth); secure_zero(sk, sizeof(sk)); return JS_EXCEPTION; }
     if (hex_decode(cth, cth_len, ct, ct_len) != 0) {
         JS_FreeCString(ctx, cth);
         js_free(ctx, ct);
+        secure_zero(sk, sizeof(sk));
         return JS_NULL;
     }
     JS_FreeCString(ctx, cth);
 
     size_t pt_len = ct_len - HL_BOX_MACBYTES;
     uint8_t *pt = js_malloc(ctx, pt_len + 1);
-    if (!pt) { js_free(ctx, ct); return JS_EXCEPTION; }
+    if (!pt) { js_free(ctx, ct); secure_zero(sk, sizeof(sk)); return JS_EXCEPTION; }
 
     if (hl_cap_crypto_box_open(pt, ct, ct_len, nonce, pk, sk) != 0) {
         js_free(ctx, ct);
         js_free(ctx, pt);
+        secure_zero(sk, sizeof(sk));
         return JS_NULL;
     }
     js_free(ctx, ct);
+    secure_zero(sk, sizeof(sk));
 
     JSValue result = JS_NewStringLen(ctx, (const char *)pt, pt_len);
     js_free(ctx, pt);

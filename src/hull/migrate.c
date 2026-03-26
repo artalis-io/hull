@@ -95,26 +95,23 @@ static int execute_migration(sqlite3 *db, const char *name,
         return -1;
     }
 
-    /* Make a NUL-terminated copy if needed */
-    char *sql_copy = NULL;
-    const char *sql_ptr = sql;
-    if (sql[sql_len] != '\0') {
-        if (sql_len > SIZE_MAX / 2) {
-            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-            return -1;
-        }
-        sql_copy = malloc(sql_len + 1);
-        if (!sql_copy) {
-            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-            return -1;
-        }
-        memcpy(sql_copy, sql, sql_len);
-        sql_copy[sql_len] = '\0';
-        sql_ptr = sql_copy;
+    /* Always copy to ensure NUL-termination (avoids OOB read if VFS
+     * entry isn't NUL-terminated).  Migration SQL is small and runs
+     * once at startup, so the copy cost is negligible. */
+    if (sql_len > SIZE_MAX / 2) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        return -1;
     }
+    char *sql_copy = malloc(sql_len + 1);
+    if (!sql_copy) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        return -1;
+    }
+    memcpy(sql_copy, sql, sql_len);
+    sql_copy[sql_len] = '\0';
 
     /* Execute the migration SQL */
-    rc = sqlite3_exec(db, sql_ptr, NULL, NULL, &err);
+    rc = sqlite3_exec(db, sql_copy, NULL, NULL, &err);
     free(sql_copy);
 
     if (rc != SQLITE_OK) {

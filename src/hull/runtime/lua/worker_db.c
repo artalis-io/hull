@@ -66,6 +66,9 @@ static int worker_lua_db_query(lua_State *L)
 
     const char *sql = luaL_checkstring(L, 1);
 
+    if (hl_cap_db_check_namespace(sql) != 0)
+        return luaL_error(L, "access denied: _hull_* tables are reserved");
+
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(wdb->db, sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK)
@@ -133,6 +136,9 @@ static int worker_lua_db_exec(lua_State *L)
         return luaL_error(L, "database not available in worker");
 
     const char *sql = luaL_checkstring(L, 1);
+
+    if (hl_cap_db_check_namespace(sql) != 0)
+        return luaL_error(L, "access denied: _hull_* tables are reserved");
 
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(wdb->db, sql, -1, &stmt, NULL);

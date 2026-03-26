@@ -249,6 +249,7 @@ int hl_cap_crypto_hmac_sha256(const uint8_t *key, size_t key_len,
     hull_secure_zero(k_opad, sizeof(k_opad));
     hull_secure_zero(tk, sizeof(tk));
     hull_secure_zero(inner_hash, sizeof(inner_hash));
+    hull_secure_zero(outer, sizeof(outer));
     return 0;
 }
 
@@ -611,6 +612,7 @@ static int hmac_sha512(const uint8_t *key, size_t key_len,
     hull_secure_zero(k_opad, sizeof(k_opad));
     hull_secure_zero(tk, sizeof(tk));
     hull_secure_zero(inner_hash, sizeof(inner_hash));
+    hull_secure_zero(outer_buf, sizeof(outer_buf));
     return 0;
 }
 

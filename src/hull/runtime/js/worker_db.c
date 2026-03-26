@@ -84,6 +84,12 @@ static JSValue worker_js_db_query(JSContext *ctx, JSValueConst this_val,
     if (!sql)
         return JS_EXCEPTION;
 
+    if (hl_cap_db_check_namespace(sql) != 0) {
+        JS_FreeCString(ctx, sql);
+        return JS_ThrowInternalError(ctx,
+            "access denied: _hull_* tables are reserved");
+    }
+
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(wdb->db, sql, -1, &stmt, NULL);
     JS_FreeCString(ctx, sql);
@@ -162,6 +168,12 @@ static JSValue worker_js_db_exec(JSContext *ctx, JSValueConst this_val,
     const char *sql = JS_ToCString(ctx, argv[0]);
     if (!sql)
         return JS_EXCEPTION;
+
+    if (hl_cap_db_check_namespace(sql) != 0) {
+        JS_FreeCString(ctx, sql);
+        return JS_ThrowInternalError(ctx,
+            "access denied: _hull_* tables are reserved");
+    }
 
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(wdb->db, sql, -1, &stmt, NULL);

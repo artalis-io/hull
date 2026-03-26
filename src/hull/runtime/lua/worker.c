@@ -94,6 +94,7 @@ static HlLuaWorkerCtx *get_lua_worker_ctx(void)
     /* Remove dangerous functions from minimal VM */
     lua_pushnil(wctx->L); lua_setglobal(wctx->L, "dofile");
     lua_pushnil(wctx->L); lua_setglobal(wctx->L, "loadfile");
+    lua_pushnil(wctx->L); lua_setglobal(wctx->L, "load");
     lua_pushnil(wctx->L); lua_setglobal(wctx->L, "print");
     lua_pushnil(wctx->L); lua_setglobal(wctx->L, "io");
     lua_pushnil(wctx->L); lua_setglobal(wctx->L, "os");

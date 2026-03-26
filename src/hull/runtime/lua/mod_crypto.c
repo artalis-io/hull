@@ -329,8 +329,11 @@ static int lua_crypto_auth(lua_State *L)
         return luaL_error(L, "invalid hex in auth key");
 
     uint8_t tag[32];
-    if (hl_cap_crypto_auth(msg, msg_len, key, tag) != 0)
+    if (hl_cap_crypto_auth(msg, msg_len, key, tag) != 0) {
+        secure_zero(key, sizeof(key));
         return luaL_error(L, "auth failed");
+    }
+    secure_zero(key, sizeof(key));
 
     char hex[65];
     for (int i = 0; i < 32; i++)
@@ -363,6 +366,7 @@ static int lua_crypto_auth_verify(lua_State *L)
         return luaL_error(L, "invalid hex in key");
 
     int rc = hl_cap_crypto_auth_verify(tag, msg, msg_len, key);
+    secure_zero(key, sizeof(key));
     lua_pushboolean(L, rc == 0);
     return 1;
 }
@@ -401,8 +405,11 @@ static int lua_crypto_secretbox(lua_State *L)
     if (!ct)
         return luaL_error(L, "out of memory");
 
-    if (hl_cap_crypto_secretbox(ct, msg, msg_len, nonce, key) != 0)
+    if (hl_cap_crypto_secretbox(ct, msg, msg_len, nonce, key) != 0) {
+        secure_zero(key, sizeof(key));
         return luaL_error(L, "secretbox failed");
+    }
+    secure_zero(key, sizeof(key));
 
     /* Convert to hex */
     if (ct_len > SIZE_MAX / 2)
@@ -464,9 +471,11 @@ static int lua_crypto_secretbox_open(lua_State *L)
         return luaL_error(L, "out of memory");
 
     if (hl_cap_crypto_secretbox_open(msg, ct, ct_len, nonce, key) != 0) {
+        secure_zero(key, sizeof(key));
         lua_pushnil(L);
         return 1;
     }
+    secure_zero(key, sizeof(key));
 
     lua_pushlstring(L, (const char *)msg, msg_len);
     return 1;
@@ -498,22 +507,32 @@ static int lua_crypto_box(lua_State *L)
         return luaL_error(L, "invalid hex in nonce");
     if (hex_decode(pk_hex, pk_hex_len, pk, 32) != 0)
         return luaL_error(L, "invalid hex in public key");
-    if (hex_decode(sk_hex, sk_hex_len, sk, 32) != 0)
+    if (hex_decode(sk_hex, sk_hex_len, sk, 32) != 0) {
         return luaL_error(L, "invalid hex in secret key");
+    }
 
-    if (msg_len > SIZE_MAX - HL_BOX_MACBYTES)
+    if (msg_len > SIZE_MAX - HL_BOX_MACBYTES) {
+        secure_zero(sk, sizeof(sk));
         return luaL_error(L, "message too large");
+    }
     size_t ct_len = msg_len + HL_BOX_MACBYTES;
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->scratch)
+    if (!lua || !lua->scratch) {
+        secure_zero(sk, sizeof(sk));
         return luaL_error(L, "runtime not available");
+    }
 
     uint8_t *ct = sh_arena_alloc(lua->scratch, ct_len);
-    if (!ct)
+    if (!ct) {
+        secure_zero(sk, sizeof(sk));
         return luaL_error(L, "out of memory");
+    }
 
-    if (hl_cap_crypto_box(ct, msg, msg_len, nonce, pk, sk) != 0)
+    if (hl_cap_crypto_box(ct, msg, msg_len, nonce, pk, sk) != 0) {
+        secure_zero(sk, sizeof(sk));
         return luaL_error(L, "box failed");
+    }
+    secure_zero(sk, sizeof(sk));
 
     if (ct_len > SIZE_MAX / 2)
         return luaL_error(L, "ciphertext too large");
@@ -565,24 +584,34 @@ static int lua_crypto_box_open(lua_State *L)
         return luaL_error(L, "invalid hex in secret key");
 
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->scratch)
+    if (!lua || !lua->scratch) {
+        secure_zero(sk, sizeof(sk));
         return luaL_error(L, "runtime not available");
+    }
 
     uint8_t *ct = sh_arena_alloc(lua->scratch, ct_len);
-    if (!ct)
+    if (!ct) {
+        secure_zero(sk, sizeof(sk));
         return luaL_error(L, "out of memory");
-    if (hex_decode(ct_hex, ct_hex_len, ct, ct_len) != 0)
+    }
+    if (hex_decode(ct_hex, ct_hex_len, ct, ct_len) != 0) {
+        secure_zero(sk, sizeof(sk));
         return luaL_error(L, "invalid hex in ciphertext");
+    }
 
     size_t msg_len = ct_len - HL_BOX_MACBYTES;
     uint8_t *msg = sh_arena_alloc(lua->scratch, msg_len + 1);
-    if (!msg)
+    if (!msg) {
+        secure_zero(sk, sizeof(sk));
         return luaL_error(L, "out of memory");
+    }
 
     if (hl_cap_crypto_box_open(msg, ct, ct_len, nonce, pk, sk) != 0) {
+        secure_zero(sk, sizeof(sk));
         lua_pushnil(L);
         return 1;
     }
+    secure_zero(sk, sizeof(sk));
 
     lua_pushlstring(L, (const char *)msg, msg_len);
     return 1;

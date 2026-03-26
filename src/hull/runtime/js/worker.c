@@ -88,7 +88,12 @@ static HlJsWorkerCtx *get_js_worker_ctx(void)
 
     /* Remove dangerous globals from worker VM */
     JSValue global = JS_GetGlobalObject(wctx->ctx);
-    JS_DeleteProperty(wctx->ctx, global, JS_NewAtom(wctx->ctx, "eval"), 0);
+    JSAtom eval_atom = JS_NewAtom(wctx->ctx, "eval");
+    JS_DeleteProperty(wctx->ctx, global, eval_atom, 0);
+    JS_FreeAtom(wctx->ctx, eval_atom);
+    JSAtom fn_atom = JS_NewAtom(wctx->ctx, "Function");
+    JS_DeleteProperty(wctx->ctx, global, fn_atom, 0);
+    JS_FreeAtom(wctx->ctx, fn_atom);
     JS_FreeValue(wctx->ctx, global);
 
     /* Run registered init hooks (e.g. db.*, json.*) */
