@@ -24,6 +24,7 @@
 #include "hull/commands/sign_platform.h"
 #include "hull/commands/agent.h"
 #include "hull/commands/mcp.h"
+#include "hull/commands/check.h"
 
 #include <string.h>
 
@@ -43,6 +44,7 @@ static const HlCommand commands[] = {
     { "migrate",       hl_cmd_migrate },
     { "agent",         hl_cmd_agent },
     { "mcp",           hl_cmd_mcp },
+    { "check",         hl_cmd_check },
     { NULL, NULL }  /* sentinel */
 };
 
