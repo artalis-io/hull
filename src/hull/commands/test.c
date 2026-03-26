@@ -8,13 +8,9 @@
  */
 
 #include "hull/commands/test.h"
+#include "hull/app_context.h"
 #include "hull/cap/db.h"
 #include "hull/cap/tool.h"
-#include "hull/migrate.h"
-#include "hull/vfs.h"
-#ifdef HL_ENABLE_WASM
-#include "hull/cap/wasm.h"
-#endif
 
 #ifdef HL_ENABLE_LUA
 #include "hull/runtime/lua.h"
@@ -33,7 +29,6 @@
 #include <keel/allocator.h>
 
 #include <sqlite3.h>
-#include <sh_arena.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -55,70 +50,29 @@ static void test_usage(void)
 
 static int run_lua_tests(const char *app_dir, const char *entry)
 {
-    /* Init Lua VM (sandboxed — tests run in app context) */
-    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
-    cfg.sandbox = 1;
-
-    HlLua lua;
-    memset(&lua, 0, sizeof(lua));
-
-    /* Open :memory: SQLite for test isolation */
-    sqlite3 *db = NULL;
-    if (sqlite3_open(":memory:", &db) != SQLITE_OK) {
-        fprintf(stderr, "hull test: cannot open :memory: database\n");
-        return 1;
-    }
-    hl_cap_db_init(db);
-
-    extern const HlEntry hl_app_entries[];
-    extern const HlEntry hl_stdlib_entries[];
-    HlVfs app_vfs, platform_vfs;
-    hl_vfs_init(&app_vfs, hl_app_entries, app_dir);
-    hl_vfs_init(&platform_vfs, hl_stdlib_entries, NULL);
-    hl_migrate_run(db, &app_vfs);
-
-    HlStmtCache lua_stmt_cache;
-    hl_stmt_cache_init(&lua_stmt_cache, db, NULL);
-    lua.base.db = db;
-    lua.base.stmt_cache = &lua_stmt_cache;
-    lua.base.app_vfs = &app_vfs;
-    lua.base.platform_vfs = &platform_vfs;
-
-#ifdef HL_ENABLE_WASM
-    HlWasmCache wasm_cache;
-    if (hl_cap_wasm_init(&wasm_cache) == 0)
-        lua.base.wasm_cache = &wasm_cache;
-#endif
-
-    if (hl_lua_init(&lua, &cfg) != 0) {
-        fprintf(stderr, "hull test: Lua init failed\n");
-        sqlite3_close(db);
+    HlAppContext *ctx = NULL;
+    HlAppContextOpts opts = { .app_dir = app_dir, .entry_point = entry };
+    if (hl_app_context_init(&ctx, &opts) != 0) {
+        fprintf(stderr, "hull test: failed to initialize app context\n");
         return 1;
     }
 
-    /* Load app entry point → routes registered */
-    if (hl_lua_load_app(&lua, entry) != 0) {
-        fprintf(stderr, "hull test: failed to load %s\n", entry);
-        hl_lua_free(&lua);
-        sqlite3_close(db);
-        return 1;
-    }
+    HlLua *lua = hl_app_context_lua(ctx);
 
     /* Wire routes into a standalone KlRouter */
     KlAllocator alloc = kl_allocator_default();
     KlRouter router;
     kl_router_init(&router, &alloc);
 
-    if (hl_lua_wire_routes(&lua, &router) != 0) {
+    if (hl_lua_wire_routes(lua, &router) != 0) {
         fprintf(stderr, "hull test: no routes registered\n");
         kl_router_free(&router);
-        hl_lua_free(&lua);
-        sqlite3_close(db);
+        hl_app_context_free(ctx);
         return 1;
     }
 
     /* Register test module */
-    hl_cap_test_register_lua(lua.L, &router, &lua);
+    hl_cap_test_register_lua(lua->L, &router, lua);
 
     /* Discover test files */
     char **test_files = hl_tool_find_files(app_dir, "test_*.lua", NULL);
@@ -126,8 +80,7 @@ static int run_lua_tests(const char *app_dir, const char *entry)
         fprintf(stderr, "hull test: no test files found in %s\n", app_dir);
         if (test_files) free(test_files);
         kl_router_free(&router);
-        hl_lua_free(&lua);
-        sqlite3_close(db);
+        hl_app_context_free(ctx);
         return 1;
     }
 
@@ -142,13 +95,13 @@ static int run_lua_tests(const char *app_dir, const char *entry)
         printf("\n--- %s ---\n", basename);
 
         /* Clear test cases from previous file */
-        hl_cap_test_clear_lua(lua.L);
+        hl_cap_test_clear_lua(lua->L);
 
-        /* Load and execute the test file → registers test cases */
-        if (luaL_dofile(lua.L, file) != LUA_OK) {
-            const char *err = lua_tostring(lua.L, -1);
+        /* Load and execute the test file -> registers test cases */
+        if (luaL_dofile(lua->L, file) != LUA_OK) {
+            const char *err = lua_tostring(lua->L, -1);
             fprintf(stderr, "  ERROR: %s\n", err ? err : "unknown");
-            lua_pop(lua.L, 1);
+            lua_pop(lua->L, 1);
             failed++;
             total++;
             free(*fp);
@@ -157,7 +110,7 @@ static int run_lua_tests(const char *app_dir, const char *entry)
 
         /* Execute registered test cases */
         int file_total = 0, file_passed = 0, file_failed = 0;
-        hl_cap_test_run_lua(lua.L, &file_total, &file_passed, &file_failed,
+        hl_cap_test_run_lua(lua->L, &file_total, &file_passed, &file_failed,
                             stdout, NULL, 0);
 
         total += file_total;
@@ -176,14 +129,7 @@ static int run_lua_tests(const char *app_dir, const char *entry)
 
     /* Cleanup */
     kl_router_free(&router);
-    hl_lua_free(&lua);
-#ifdef HL_ENABLE_WASM
-    if (lua.base.wasm_cache)
-        hl_cap_wasm_destroy(lua.base.wasm_cache);
-#endif
-    hl_stmt_cache_destroy(&lua_stmt_cache);
-    hl_cap_db_shutdown(db);
-    sqlite3_close(db);
+    hl_app_context_free(ctx);
 
     return failed > 0 ? 1 : 0;
 }
@@ -196,71 +142,34 @@ static int run_lua_tests(const char *app_dir, const char *entry)
 
 static int run_js_tests(const char *app_dir, const char *entry)
 {
-    HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
-    HlJS js;
-    memset(&js, 0, sizeof(js));
-
-    sqlite3 *db = NULL;
-    if (sqlite3_open(":memory:", &db) != SQLITE_OK) {
-        fprintf(stderr, "hull test: cannot open :memory: database\n");
-        return 1;
-    }
-    hl_cap_db_init(db);
-
-    extern const HlEntry hl_app_entries[];
-    extern const HlEntry hl_stdlib_entries[];
-    HlVfs app_vfs, platform_vfs;
-    hl_vfs_init(&app_vfs, hl_app_entries, app_dir);
-    hl_vfs_init(&platform_vfs, hl_stdlib_entries, NULL);
-    hl_migrate_run(db, &app_vfs);
-
-    HlStmtCache js_stmt_cache;
-    hl_stmt_cache_init(&js_stmt_cache, db, NULL);
-    js.base.db = db;
-    js.base.stmt_cache = &js_stmt_cache;
-    js.base.app_vfs = &app_vfs;
-    js.base.platform_vfs = &platform_vfs;
-
-#ifdef HL_ENABLE_WASM
-    HlWasmCache js_wasm_cache;
-    if (hl_cap_wasm_init(&js_wasm_cache) == 0)
-        js.base.wasm_cache = &js_wasm_cache;
-#endif
-
-    if (hl_js_init(&js, &cfg) != 0) {
-        fprintf(stderr, "hull test: QuickJS init failed\n");
-        sqlite3_close(db);
+    HlAppContext *ctx = NULL;
+    HlAppContextOpts opts = { .app_dir = app_dir, .entry_point = entry };
+    if (hl_app_context_init(&ctx, &opts) != 0) {
+        fprintf(stderr, "hull test: failed to initialize app context\n");
         return 1;
     }
 
-    if (hl_js_load_app(&js, entry) != 0) {
-        fprintf(stderr, "hull test: failed to load %s\n", entry);
-        hl_js_free(&js);
-        sqlite3_close(db);
-        return 1;
-    }
+    HlJS *js = hl_app_context_js(ctx);
 
     KlAllocator alloc = kl_allocator_default();
     KlRouter router;
     kl_router_init(&router, &alloc);
 
-    if (hl_js_wire_routes(&js, &router) != 0) {
+    if (hl_js_wire_routes(js, &router) != 0) {
         fprintf(stderr, "hull test: no routes registered\n");
         kl_router_free(&router);
-        hl_js_free(&js);
-        sqlite3_close(db);
+        hl_app_context_free(ctx);
         return 1;
     }
 
-    hl_cap_test_register_js(js.ctx, &router, &js);
+    hl_cap_test_register_js(js->ctx, &router, js);
 
     char **test_files = hl_tool_find_files(app_dir, "test_*.js", NULL);
     if (!test_files || !test_files[0]) {
         fprintf(stderr, "hull test: no test files found in %s\n", app_dir);
         if (test_files) free(test_files);
         kl_router_free(&router);
-        hl_js_free(&js);
-        sqlite3_close(db);
+        hl_app_context_free(ctx);
         return 1;
     }
 
@@ -273,7 +182,7 @@ static int run_js_tests(const char *app_dir, const char *entry)
 
         printf("\n--- %s ---\n", basename);
 
-        hl_cap_test_clear_js(js.ctx);
+        hl_cap_test_clear_js(js->ctx);
 
         /* Read and evaluate the test file */
         FILE *f = fopen(file, "r");
@@ -296,22 +205,22 @@ static int run_js_tests(const char *app_dir, const char *entry)
         src[flen] = '\0';
         fclose(f);
 
-        JSValue result = JS_Eval(js.ctx, src, (size_t)flen, file,
+        JSValue result = JS_Eval(js->ctx, src, (size_t)flen, file,
                                  JS_EVAL_TYPE_MODULE);
         free(src);
 
         if (JS_IsException(result)) {
-            hl_js_dump_error(&js);
-            JS_FreeValue(js.ctx, result);
+            hl_js_dump_error(js);
+            JS_FreeValue(js->ctx, result);
             failed++;
             total++;
             free(*fp);
             continue;
         }
-        JS_FreeValue(js.ctx, result);
+        JS_FreeValue(js->ctx, result);
 
         int file_total = 0, file_passed = 0, file_failed = 0;
-        hl_cap_test_run_js(js.ctx, &file_total, &file_passed, &file_failed,
+        hl_cap_test_run_js(js->ctx, &file_total, &file_passed, &file_failed,
                            stdout, NULL, 0);
 
         total += file_total;
@@ -328,14 +237,7 @@ static int run_js_tests(const char *app_dir, const char *entry)
     printf("\n");
 
     kl_router_free(&router);
-    hl_js_free(&js);
-#ifdef HL_ENABLE_WASM
-    if (js.base.wasm_cache)
-        hl_cap_wasm_destroy(js.base.wasm_cache);
-#endif
-    hl_stmt_cache_destroy(&js_stmt_cache);
-    hl_cap_db_shutdown(db);
-    sqlite3_close(db);
+    hl_app_context_free(ctx);
 
     return failed > 0 ? 1 : 0;
 }

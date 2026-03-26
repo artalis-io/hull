@@ -15,9 +15,16 @@
 
 #include <sh_json.h>
 
+/* Forward declaration */
+typedef struct HlAppContext HlAppContext;
+
 /* ── Core agent operations ─────────────────────────────────────────── */
 
 int hl_agent_routes(const char *app_dir, ShJsonBuf *out);
+
+/* ── Warm-context variants (for MCP / long-lived sessions) ─────────── */
+
+int hl_agent_routes_ctx(HlAppContext *ctx, ShJsonBuf *out);
 int hl_agent_db_schema(const char *app_dir, const char *db_path, ShJsonBuf *out);
 int hl_agent_db_query(const char *app_dir, const char *db_path,
                       const char *sql, ShJsonBuf *out);

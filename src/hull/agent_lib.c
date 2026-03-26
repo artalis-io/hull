@@ -8,6 +8,7 @@
  */
 
 #include "hull/agent_lib.h"
+#include "hull/app_context.h"
 #include "hull/cap/db.h"
 #include "hull/cap/test.h"
 #include "hull/cap/tool.h"
@@ -44,157 +45,6 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
-
-/* ── Unified runtime context ───────────────────────────────────────── */
-
-typedef struct {
-    sqlite3         *db;
-    HlVfs            app_vfs;
-    HlVfs            platform_vfs;
-    HlStmtCache      stmt_cache;
-    HlRuntime       *rt;
-
-    /* Storage — large enough for either runtime */
-    // cppcheck-suppress unusedStructMember
-    union {
-#ifdef HL_ENABLE_LUA
-        HlLua lua;
-#endif
-#ifdef HL_ENABLE_JS
-        HlJS  js;
-#endif
-    } rt_storage;
-
-    int              is_lua;   /* 1 = Lua, 0 = JS */
-} AgentCtx;
-
-/* ── Entry point detection ─────────────────────────────────────────── */
-
-static const char *detect_entry(const char *app_dir, const char *ext,
-                                char *buf, size_t buf_size)
-{
-    size_t dir_len = strlen(app_dir);
-    while (dir_len > 1 && app_dir[dir_len - 1] == '/')
-        dir_len--;
-
-    snprintf(buf, buf_size, "%.*s/app.%s", (int)dir_len, app_dir, ext);
-    if (access(buf, F_OK) == 0) return buf;
-    return NULL;
-}
-
-/* ── AgentCtx lifecycle ────────────────────────────────────────────── */
-
-static int agent_ctx_init(const char *app_dir, AgentCtx *ctx)
-{
-    memset(ctx, 0, sizeof(*ctx));
-
-    char entry_buf[4096];
-    const char *entry = NULL;
-
-#ifdef HL_ENABLE_LUA
-    entry = detect_entry(app_dir, "lua", entry_buf, sizeof(entry_buf));
-    if (entry) ctx->is_lua = 1;
-#endif
-#ifdef HL_ENABLE_JS
-    if (!entry) {
-        entry = detect_entry(app_dir, "js", entry_buf, sizeof(entry_buf));
-        if (entry) ctx->is_lua = 0;
-    }
-#endif
-
-    // cppcheck-suppress knownConditionTrueFalse
-    if (!entry) return -1;
-
-    /* Open :memory: DB with migrations */
-    if (sqlite3_open(":memory:", &ctx->db) != SQLITE_OK)
-        return -1;
-    hl_cap_db_init(ctx->db);
-
-    extern const HlEntry hl_app_entries[];
-    extern const HlEntry hl_stdlib_entries[];
-    hl_vfs_init(&ctx->app_vfs, hl_app_entries, app_dir);
-    hl_vfs_init(&ctx->platform_vfs, hl_stdlib_entries, NULL);
-    hl_migrate_run(ctx->db, &ctx->app_vfs);
-
-    hl_stmt_cache_init(&ctx->stmt_cache, ctx->db, NULL);
-
-#ifdef HL_ENABLE_LUA
-    if (ctx->is_lua) {
-        HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
-        cfg.sandbox = 1;
-        HlLua *lua = &ctx->rt_storage.lua;
-        memset(lua, 0, sizeof(*lua));
-        lua->base.db = ctx->db;
-        lua->base.stmt_cache = &ctx->stmt_cache;
-        lua->base.app_vfs = &ctx->app_vfs;
-        lua->base.platform_vfs = &ctx->platform_vfs;
-        ctx->rt = &lua->base;
-
-        if (hl_lua_init(lua, &cfg) != 0) {
-            sqlite3_close(ctx->db);
-            ctx->db = NULL;
-            return -1;
-        }
-        if (hl_lua_load_app(lua, entry) != 0) {
-            hl_lua_free(lua);
-            sqlite3_close(ctx->db);
-            ctx->db = NULL;
-            return -1;
-        }
-        return 0;
-    }
-#endif
-
-#ifdef HL_ENABLE_JS
-    if (!ctx->is_lua) {
-        HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
-        HlJS *js = &ctx->rt_storage.js;
-        memset(js, 0, sizeof(*js));
-        js->base.db = ctx->db;
-        js->base.stmt_cache = &ctx->stmt_cache;
-        js->base.app_vfs = &ctx->app_vfs;
-        js->base.platform_vfs = &ctx->platform_vfs;
-        ctx->rt = &js->base;
-
-        if (hl_js_init(js, &cfg) != 0) {
-            sqlite3_close(ctx->db);
-            ctx->db = NULL;
-            return -1;
-        }
-        if (hl_js_load_app(js, entry) != 0) {
-            hl_js_free(js);
-            sqlite3_close(ctx->db);
-            ctx->db = NULL;
-            return -1;
-        }
-        return 0;
-    }
-#endif
-
-    return -1;
-}
-
-static void agent_ctx_free(AgentCtx *ctx)
-{
-    if (!ctx) return;
-
-#ifdef HL_ENABLE_LUA
-    if (ctx->is_lua && ctx->rt)
-        hl_lua_free(&ctx->rt_storage.lua);
-#endif
-#ifdef HL_ENABLE_JS
-    if (!ctx->is_lua && ctx->rt)
-        hl_js_free(&ctx->rt_storage.js);
-#endif
-
-    hl_stmt_cache_destroy(&ctx->stmt_cache);
-    if (ctx->db) {
-        hl_cap_db_shutdown(ctx->db);
-        sqlite3_close(ctx->db);
-    }
-    ctx->rt = NULL;
-    ctx->db = NULL;
-}
 
 /* ── Database opener (shared by schema/query) ──────────────────────── */
 
@@ -243,9 +93,9 @@ static int write_error(ShJsonBuf *out, const char *msg)
 /* ── hl_agent_routes ───────────────────────────────────────────────── */
 
 #ifdef HL_ENABLE_LUA
-static int agent_routes_lua(AgentCtx *ctx, ShJsonWriter *w)
+static int agent_routes_lua(HlAppContext *ctx, ShJsonWriter *w)
 {
-    HlLua *lua = &ctx->rt_storage.lua;
+    HlLua *lua = hl_app_context_lua(ctx);
 
     sh_json_write_kv_string(w, "runtime", "lua");
 
@@ -340,9 +190,9 @@ static int agent_routes_lua(AgentCtx *ctx, ShJsonWriter *w)
 #endif
 
 #ifdef HL_ENABLE_JS
-static int agent_routes_js(AgentCtx *ctx, ShJsonWriter *w)
+static int agent_routes_js(HlAppContext *ctx, ShJsonWriter *w)
 {
-    HlJS *js = &ctx->rt_storage.js;
+    HlJS *js = hl_app_context_js(ctx);
     JSValue global = JS_GetGlobalObject(js->ctx);
 
     sh_json_write_kv_string(w, "runtime", "js");
@@ -395,27 +245,33 @@ static int agent_routes_js(AgentCtx *ctx, ShJsonWriter *w)
 }
 #endif
 
-int hl_agent_routes(const char *app_dir, ShJsonBuf *out)
+int hl_agent_routes_ctx(HlAppContext *ctx, ShJsonBuf *out)
 {
-    AgentCtx ctx;
-    // cppcheck-suppress knownConditionTrueFalse
-    if (agent_ctx_init(app_dir, &ctx) != 0)
-        return write_error(out, "no entry point found");
-
     ShJsonWriter w;
     sh_json_writer_init(&w, sh_json_buf_write, out);
     sh_json_write_object_start(&w);
 
     int rc = -1;
 #ifdef HL_ENABLE_LUA
-    if (ctx.is_lua) rc = agent_routes_lua(&ctx, &w);
+    if (hl_app_context_is_lua(ctx)) rc = agent_routes_lua(ctx, &w);
 #endif
 #ifdef HL_ENABLE_JS
-    if (!ctx.is_lua) rc = agent_routes_js(&ctx, &w);
+    if (!hl_app_context_is_lua(ctx)) rc = agent_routes_js(ctx, &w);
 #endif
 
     sh_json_write_object_end(&w);
-    agent_ctx_free(&ctx);
+    return rc;
+}
+
+int hl_agent_routes(const char *app_dir, ShJsonBuf *out)
+{
+    HlAppContext *ctx = NULL;
+    HlAppContextOpts opts = { .app_dir = app_dir };
+    if (hl_app_context_init(&ctx, &opts) != 0)
+        return write_error(out, "no entry point found");
+
+    int rc = hl_agent_routes_ctx(ctx, out);
+    hl_app_context_free(ctx);
     return rc;
 }
 
@@ -822,46 +678,29 @@ static void write_test_results(ShJsonWriter *w, HlTestCaseResult *results,
     sh_json_write_array_end(w);
 }
 
+/* ── Entry point detection (for test) ─────────────────────────────── */
+
+static const char *detect_entry(const char *app_dir, const char *ext,
+                                char *buf, size_t buf_size)
+{
+    size_t dir_len = strlen(app_dir);
+    while (dir_len > 1 && app_dir[dir_len - 1] == '/')
+        dir_len--;
+
+    snprintf(buf, buf_size, "%.*s/app.%s", (int)dir_len, app_dir, ext);
+    if (access(buf, F_OK) == 0) return buf;
+    return NULL;
+}
+
 #ifdef HL_ENABLE_LUA
 static int agent_test_lua(const char *app_dir, const char *entry, ShJsonBuf *out)
 {
-    AgentCtx ctx;
-    memset(&ctx, 0, sizeof(ctx));
-
-    /* Initialize runtime */
-    if (sqlite3_open(":memory:", &ctx.db) != SQLITE_OK)
-        return write_error(out, "cannot open :memory: database");
-    hl_cap_db_init(ctx.db);
-
-    extern const HlEntry hl_app_entries[];
-    extern const HlEntry hl_stdlib_entries[];
-    hl_vfs_init(&ctx.app_vfs, hl_app_entries, app_dir);
-    hl_vfs_init(&ctx.platform_vfs, hl_stdlib_entries, NULL);
-    hl_migrate_run(ctx.db, &ctx.app_vfs);
-
-    hl_stmt_cache_init(&ctx.stmt_cache, ctx.db, NULL);
-
-    HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
-    cfg.sandbox = 1;
-    HlLua *lua = &ctx.rt_storage.lua;
-    memset(lua, 0, sizeof(*lua));
-    lua->base.db = ctx.db;
-    lua->base.stmt_cache = &ctx.stmt_cache;
-    lua->base.app_vfs = &ctx.app_vfs;
-    lua->base.platform_vfs = &ctx.platform_vfs;
-    ctx.rt = &lua->base;
-    ctx.is_lua = 1;
-
-    if (hl_lua_init(lua, &cfg) != 0) {
-        sqlite3_close(ctx.db);
+    HlAppContext *ctx = NULL;
+    HlAppContextOpts opts = { .app_dir = app_dir, .entry_point = entry };
+    if (hl_app_context_init(&ctx, &opts) != 0)
         return write_error(out, "Lua init failed");
-    }
 
-    if (hl_lua_load_app(lua, entry) != 0) {
-        hl_lua_free(lua);
-        sqlite3_close(ctx.db);
-        return write_error(out, "failed to load app");
-    }
+    HlLua *lua = hl_app_context_lua(ctx);
 
     KlAllocator alloc = kl_allocator_default();
     KlRouter router;
@@ -869,7 +708,7 @@ static int agent_test_lua(const char *app_dir, const char *entry, ShJsonBuf *out
 
     if (hl_lua_wire_routes(lua, &router) != 0) {
         kl_router_free(&router);
-        agent_ctx_free(&ctx);
+        hl_app_context_free(ctx);
         return write_error(out, "no routes registered");
     }
 
@@ -879,7 +718,7 @@ static int agent_test_lua(const char *app_dir, const char *entry, ShJsonBuf *out
     if (!test_files || !test_files[0]) {
         if (test_files) free(test_files);
         kl_router_free(&router);
-        agent_ctx_free(&ctx);
+        hl_app_context_free(ctx);
         return write_error(out, "no test files found");
     }
 
@@ -939,7 +778,7 @@ static int agent_test_lua(const char *app_dir, const char *entry, ShJsonBuf *out
     sh_json_write_object_end(&w);
 
     kl_router_free(&router);
-    agent_ctx_free(&ctx);
+    hl_app_context_free(ctx);
     return grand_failed > 0 ? 1 : 0;
 }
 #endif
@@ -947,41 +786,12 @@ static int agent_test_lua(const char *app_dir, const char *entry, ShJsonBuf *out
 #ifdef HL_ENABLE_JS
 static int agent_test_js(const char *app_dir, const char *entry, ShJsonBuf *out)
 {
-    AgentCtx ctx;
-    memset(&ctx, 0, sizeof(ctx));
-
-    if (sqlite3_open(":memory:", &ctx.db) != SQLITE_OK)
-        return write_error(out, "cannot open :memory: database");
-    hl_cap_db_init(ctx.db);
-
-    extern const HlEntry hl_app_entries[];
-    extern const HlEntry hl_stdlib_entries[];
-    hl_vfs_init(&ctx.app_vfs, hl_app_entries, app_dir);
-    hl_vfs_init(&ctx.platform_vfs, hl_stdlib_entries, NULL);
-    hl_migrate_run(ctx.db, &ctx.app_vfs);
-
-    hl_stmt_cache_init(&ctx.stmt_cache, ctx.db, NULL);
-
-    HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
-    HlJS *js = &ctx.rt_storage.js;
-    memset(js, 0, sizeof(*js));
-    js->base.db = ctx.db;
-    js->base.stmt_cache = &ctx.stmt_cache;
-    js->base.app_vfs = &ctx.app_vfs;
-    js->base.platform_vfs = &ctx.platform_vfs;
-    ctx.rt = &js->base;
-    ctx.is_lua = 0;
-
-    if (hl_js_init(js, &cfg) != 0) {
-        sqlite3_close(ctx.db);
+    HlAppContext *ctx = NULL;
+    HlAppContextOpts opts = { .app_dir = app_dir, .entry_point = entry };
+    if (hl_app_context_init(&ctx, &opts) != 0)
         return write_error(out, "QuickJS init failed");
-    }
 
-    if (hl_js_load_app(js, entry) != 0) {
-        hl_js_free(js);
-        sqlite3_close(ctx.db);
-        return write_error(out, "failed to load app");
-    }
+    HlJS *js = hl_app_context_js(ctx);
 
     KlAllocator alloc = kl_allocator_default();
     KlRouter router;
@@ -989,7 +799,7 @@ static int agent_test_js(const char *app_dir, const char *entry, ShJsonBuf *out)
 
     if (hl_js_wire_routes(js, &router) != 0) {
         kl_router_free(&router);
-        agent_ctx_free(&ctx);
+        hl_app_context_free(ctx);
         return write_error(out, "no routes registered");
     }
 
@@ -999,7 +809,7 @@ static int agent_test_js(const char *app_dir, const char *entry, ShJsonBuf *out)
     if (!test_files || !test_files[0]) {
         if (test_files) free(test_files);
         kl_router_free(&router);
-        agent_ctx_free(&ctx);
+        hl_app_context_free(ctx);
         return write_error(out, "no test files found");
     }
 
@@ -1094,7 +904,7 @@ static int agent_test_js(const char *app_dir, const char *entry, ShJsonBuf *out)
     sh_json_write_object_end(&w);
 
     kl_router_free(&router);
-    agent_ctx_free(&ctx);
+    hl_app_context_free(ctx);
     return grand_failed > 0 ? 1 : 0;
 }
 #endif
