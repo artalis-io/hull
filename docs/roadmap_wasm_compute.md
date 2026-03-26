@@ -26,7 +26,9 @@ Hull ships a compute-only WASM sandbox built on WAMR with:
 
 ---
 
-## Phase 1 — SIMD128
+## Phase 1 — SIMD128 ✅
+
+**Status:** Complete.
 
 **Goal:** Enable 128-bit SIMD vector operations in WASM modules.
 
@@ -83,7 +85,9 @@ fallback.
 
 ---
 
-## Phase 2 — Memory Limits & Configurable Ceiling
+## Phase 2 — Memory Limits & Configurable Ceiling ✅
+
+**Status:** Complete.
 
 **Goal:** Support large working sets (up to 4 GB) and make the compile-time
 maximum configurable without editing source.
@@ -265,7 +269,9 @@ dispatch selects the correct ABI based on this flag.
 
 ---
 
-## Phase 4 — GPU Compute via WebGPU
+## Phase 4 — GPU Compute via WebGPU ✅
+
+**Status:** Complete.
 
 **Goal:** Optional GPU acceleration for massively parallel numeric workloads
 (matrix ops, convolutions, reductions) through a capability-mediated WebGPU
@@ -385,71 +391,29 @@ typedef struct HlGpuVtable {
 } HlGpuVtable;
 ```
 
-### Tasks
+### Delivered
 
-- [ ] **Vendor wgpu-native**
-  - Add pre-built static libraries (x86_64, aarch64) or build from source
-  - Option A: git submodule + build via cargo (requires Rust toolchain)
-  - Option B: download pre-built `.a` from wgpu-native releases (simpler)
-  - Recommend B for now — avoids Rust build dependency
+- [x] **Vendor wgpu-native** — Pre-built v27 static libraries in `vendor/wgpu/`
+- [x] **Backend vtable** — `HlGpuBackend` in `gpu.h`, `gpu_wgpu.c` implementation
+- [x] **Stub backend** — `gpu.c` returns `HL_GPU_ERR_NOT_AVAILABLE` when `HL_ENABLE_GPU=0`
+- [x] **wgpu-native backend** — Full implementation: device enumeration, WGSL compilation with caching, sync dispatch with timeout, staging buffer readback, fire-and-forget mode
+- [x] **Multi-stage pipelines** — `gpu.pipeline()` with named buffer sharing across stages, single command buffer submission
+- [x] **Persistent GPU buffers** — `gpu.buffer(name, data)`, `gpu.buffer_read()`, `gpu.buffer_copy()` (GPU-side copy)
+- [x] **Async dispatch** — `gpu.async.dispatch()`, `gpu.async.pipeline()` via thread pool
+- [x] **Shader loading from VFS** — `gpu.load(name)` reads `shaders/<name>.wgsl`, embedded in built binaries
+- [x] **Lua/JS bindings** — Full parity: dispatch, pipeline, buffer, async, fire-and-forget
+- [x] **Manifest integration** — `gpu = true` or `gpu = { devices = {0} }` with per-device restriction
+- [x] **Sandbox** — macOS: iokit-open + MTLCompilerService. Linux: per-device `/dev/dri/renderDN` unveil
+- [x] **Per-dispatch timeout** — `{ timeout = 1000 }` in dispatch/pipeline opts (min 10ms, default 5s)
+- [x] **Unified buffer protocol** — MappedBuffer and WasmBuffer accepted as GPU input (zero-copy)
+- [x] **Build integration** — `make HL_ENABLE_GPU=1 WGPU_LIB_DIR=vendor/wgpu`, `make fetch-wgpu` for download
+- [x] **Testing** — 13 unit tests (real GPU tests skip if no adapter), GPU benchmark, macOS Metal CI job
+- [x] **Error codes** — `HlGpuError` enum with 9 specific codes + `err_msg` out-param
 
-- [ ] **Define `HlGpuVtable` interface**
-  - `include/hull/cap/gpu.h`: vtable, types, error codes
-  - `HlGpuDispatchOpts`: buffer descriptors, workgroup dims, uniforms
-  - Keep it minimal — don't expose the full WebGPU API
+### Notes
 
-- [ ] **Implement `gpu_stub.c`**
-  - No-op vtable: all methods return `HL_GPU_ERR_NOT_AVAILABLE`
-  - Compiled when `HL_ENABLE_GPU=0` (default)
-
-- [ ] **Implement `gpu_wgpu.c`**
-  - Init: `wgpuCreateInstance` → adapter → device (headless, no surface)
-  - Pipeline cache: compile WGSL once, cache pipeline object
-  - Dispatch: create buffers → write input → dispatch → read output
-  - Memory management: explicit buffer create/destroy, no leaks
-
-- [ ] **Shader embedding via VFS**
-  - `app_dir/shaders/*.wgsl` embedded alongside templates/static/compute
-  - `hl_vfs_find(app_vfs, "shaders/matmul.wgsl")` for lookup
-
-- [ ] **Lua/JS bindings**
-  - `gpu.dispatch(name, opts)` — async, yields to event loop
-  - `gpu.available()` → boolean (check if GPU backend is active)
-  - Buffer data from Lua strings, JS ArrayBuffers, or `fs.mmap` buffers
-
-- [ ] **Manifest integration**
-  - `gpu = true` in manifest to declare GPU capability
-  - Sandbox: GPU device access requires explicit opt-in
-
-- [ ] **Build integration**
-  - `make HL_ENABLE_GPU=1` links wgpu-native
-  - Binary size impact: wgpu-native is ~5-15 MB (significant — document this)
-  - Consider dynamic linking (`dlopen`) to avoid binary bloat when GPU
-    is rarely used
-
-- [ ] **Testing**
-  - Unit tests with stub backend (no GPU required)
-  - Integration tests with wgpu-native (CI needs GPU or software renderer)
-  - Benchmark: GPU matmul vs WASM SIMD matmul vs native
-
-### Risk
-
-High. This is the largest item on the roadmap.
-
-- **Binary size:** wgpu-native adds 5-15 MB. May warrant dynamic linking
-  or a separate `hull-gpu` binary.
-- **CI/testing:** GPU tests need hardware or a software Vulkan driver
-  (lavapipe/SwiftShader). Adds CI complexity.
-- **API design:** Exposing the right level of abstraction is hard — too low
-  and it's unusable, too high and it's inflexible.
-- **Platform support:** GPU availability varies. Must degrade gracefully.
-- **Cosmo compatibility:** wgpu-native likely won't work with cosmocc
-  (Vulkan/Metal requires platform-specific linking).
-
-### When to Start
-
-After Phases 1-3 are complete and validated. GPU compute is a separate
-capability that doesn't block the WASM improvements.
+GPU compute shipped before Memory64 (Phase 3). The two are independent —
+GPU operates on its own buffers, not WASM linear memory.
 
 ---
 
@@ -569,13 +533,233 @@ Phase 5b is complete.
 
 ---
 
+## Phase 6 — Developer Tooling (Adoption Blocker)
+
+**Goal:** Lower the barrier to creating WASM compute modules from "expert C/Rust
+developer who knows the ABI" to "any developer with a C compiler."
+
+**Why:** The runtime is excellent but getting code into it is painful. Users must
+hand-write C, manually invoke clang with the right flags, know the `hull_process`
+ABI, and have no standard library. This is the #1 adoption barrier.
+
+### Tasks
+
+- [ ] **`hull compute new <name> --lang=c|rust` scaffolding command**
+  - Generates a working module skeleton: source file, Makefile/build.sh,
+    correct ABI exports (`hull_process`, `hull_version`), and a test fixture
+  - C template: clang invocation with `--target=wasm32 -nostdlib -O2`
+  - Rust template: `wasm32-unknown-unknown` target, `#[no_mangle]` exports
+  - Output: `compute/<name>/` directory with source + build script
+
+- [ ] **`hull compute test <name>` module testing**
+  - Run a WASM module with sample inputs and validate outputs
+  - No HTTP app needed — standalone module testing
+  - Input/output from files or inline hex/base64
+  - Reports: pass/fail, gas used, execution time, output bytes
+
+- [ ] **C standard library shim (`compute/hull_libc.h`)**
+  - Minimal libc subset: `memcpy`, `memset`, `strlen`, `memcmp`
+  - Simple bump allocator for `malloc`/`free` using WASM linear memory
+  - Single-header, include in any module
+
+---
+
+## Phase 7 — Sample Compute Modules
+
+**Goal:** Provide reference implementations for common compute patterns so users
+don't start from zero.
+
+**Why:** Only `echo.wasm` exists as a fixture. Developers need working examples
+of real workloads to learn the ABI, understand performance characteristics, and
+copy-paste as starting points.
+
+### Modules (in `stdlib/compute/` or `examples/compute/modules/`)
+
+| Module | Description | SIMD? |
+|--------|-------------|-------|
+| `vector_ops` | Dot product, cosine similarity, L2 distance (f32 arrays) | Yes |
+| `sort` | In-place quicksort of typed arrays (int32, float32) | No |
+| `hash` | SHA-256, FNV-1a, xxHash of input bytes | No |
+| `json_transform` | Parse JSON, extract/rename fields, emit JSON | No |
+| `scoring` | Feature weighting, normalization, softmax | Yes |
+| `text` | Tokenization, lowercase, fuzzy match (Levenshtein) | No |
+
+Each module ships with:
+- C source + optional Rust source
+- Pre-compiled `.wasm` (interpreter) + `.aot.x86_64` + `.aot.aarch64`
+- Test fixture (input bytes → expected output bytes)
+- README with usage example
+
+---
+
+## Phase 8 — Compute Result Caching
+
+**Goal:** Memoize `compute.call()` results to avoid redundant re-execution.
+
+**Why:** Repeated calls on identical input re-execute from scratch. For
+deterministic compute modules (which all should be — they're pure functions),
+caching is safe and often a 100× speedup for repeated queries.
+
+### Design
+
+- **Key:** `SHA-256(module_name + input_bytes + opts_hash)`
+- **Storage:** In-memory LRU cache, configurable max size (default 64 MB)
+- **API:** `compute.call(name, input, { cache = true, cache_ttl = 60 })`
+- **Invalidation:** On module reload, segment change, TTL expiry, or explicit
+  `compute.cache_clear(name)`
+- **Scope:** Per-process (shared across requests), thread-safe
+
+### Tasks
+
+- [ ] **LRU cache implementation** (`src/hull/cap/wasm_cache.c`)
+- [ ] **Cache key computation** (SHA-256 of module + input + serialized opts)
+- [ ] **Lua/JS binding** (`cache` and `cache_ttl` in call opts)
+- [ ] **Invalidation hooks** in module reload and segment change paths
+- [ ] **Cache stats** via `compute.cache_stats()` → `{ hits, misses, size, entries }`
+
+---
+
+## Phase 9 — SQLite UDF Integration (Differentiator)
+
+**Goal:** Register WASM modules as SQL functions callable from queries.
+
+**Why:** This is the killer feature. `SELECT *, hull_score(embedding) FROM items
+ORDER BY hull_score(embedding) DESC` where `hull_score` runs a WASM module per
+row. Brings compute to the data instead of data to the compute.
+
+### Design
+
+```lua
+-- Register a WASM module as a SQL function
+compute.register_udf("score", "score_module")
+
+-- Use in queries — executed per-row by SQLite
+local results = db.query(
+    "SELECT *, hull_score(embedding) AS score FROM items ORDER BY score DESC"
+)
+```
+
+- WASM function receives column value as input bytes, returns scalar or bytes
+- Executed per-row via `sqlite3_create_function_v2`
+- Instance pooling reused (one pool per UDF module)
+- Gas metering per-row (configurable, prevents runaway UDFs)
+- Result type: `SQLITE_INTEGER`, `SQLITE_FLOAT`, `SQLITE_TEXT`, or `SQLITE_BLOB`
+  based on WASM output format
+
+### Tasks
+
+- [ ] **`compute.register_udf(sql_name, module_name, opts)` API**
+- [ ] **SQLite function callback** that dispatches to pooled WASM instance
+- [ ] **Type marshaling** (SQLite value → WASM input bytes → SQLite result)
+- [ ] **Per-row gas limit** (`opts.gas_per_row`, default 100K instructions)
+- [ ] **Namespace protection** (UDF names prefixed with `hull_` to avoid collisions)
+- [ ] **Deterministic flag** for SQLite optimizer (pure WASM functions are deterministic)
+
+---
+
+## Phase 10 — GPU Texture/Image Support
+
+**Goal:** Add 2D texture binding to `gpu.dispatch` for image processing workloads.
+
+**Why:** Currently GPU only supports 1D storage buffers. Image processing (resize,
+blur, convolution, compositing, heatmaps) requires 2D texture sampling with
+hardware-accelerated filtering and boundary handling.
+
+### Design
+
+```lua
+gpu.dispatch("blur", {
+    textures = {
+        { data = image_bytes, width = 1920, height = 1080, format = "rgba8", usage = "read" },
+    },
+    buffers = {
+        { size = 1920 * 1080 * 4, usage = "write" },
+    },
+    workgroups = { x = 120, y = 68 },
+})
+```
+
+- WGSL shader accesses via `texture_2d<f32>` + `textureSample`/`textureLoad`
+- Supported formats: `rgba8`, `rgba16float`, `r32float`, `rg32float`
+- Sampler configuration: nearest, linear, clamp, repeat
+
+### Tasks
+
+- [ ] **Texture descriptor type** (`HlGpuTextureDesc`)
+- [ ] **wgpu texture creation + upload** in `gpu_wgpu.c`
+- [ ] **Bind group layout** with texture + sampler entries
+- [ ] **Lua/JS binding** for `textures` array in dispatch opts
+- [ ] **Sample shaders** (gaussian blur, edge detection, resize)
+
+---
+
+## Phase 11 — Streaming I/O
+
+**Goal:** Process datasets larger than memory through WASM in fixed-size chunks.
+
+**Why:** All compute is currently "load entire input, produce entire output."
+Can't process a 1 GB file without 1 GB of memory. Streaming enables bounded
+memory usage for arbitrarily large inputs.
+
+### Design
+
+```lua
+-- Lua
+compute.stream("transform", input_file, output_file, {
+    chunk_size = 64 * 1024,  -- 64 KB chunks
+    gas = 1000000,           -- per-chunk gas limit
+})
+```
+
+- WASM module exports `hull_process_chunk(in_ptr, in_len, out_ptr, out_max, is_last) → bytes_written`
+- Hull reads input in chunks, calls module per-chunk, writes output
+- Persistent instance reused across chunks (state preserved)
+- Final chunk signaled via `is_last = 1` for flush/finalize
+
+### Tasks
+
+- [ ] **Chunk ABI** (`hull_process_chunk` export alongside `hull_process`)
+- [ ] **`compute.stream()` API** (Lua + JS)
+- [ ] **File reader/writer integration** with `hl_cap_fs_*`
+- [ ] **Accumulator pattern** for reduce operations across chunks
+
+---
+
+## Dependency Graph (Updated)
+
+```
+Phase 1 (SIMD128) ✅ ──────────────────┐
+                                        ├──→  Phase 3 (Memory64)
+Phase 2 (Memory Limits) ✅ ────────────┘
+Phase 2.5 (Instance Pooling) ✅
+Phase 2.6 (WasmBuffer) ✅
+Phase 4 (GPU/WebGPU) ✅
+Phase 5a (Persistent Instances) ✅
+Phase 5b (Shared Data Segments) ✅
+
+Phase 6 (Developer Tooling)  ←── no deps, start anytime
+Phase 7 (Sample Modules)     ←── after Phase 6 (uses scaffolding)
+Phase 8 (Result Caching)     ←── no deps, start anytime
+Phase 9 (SQLite UDFs)        ←── after Phase 2.5 (uses instance pooling)
+Phase 10 (GPU Textures)      ←── after Phase 4 (extends GPU backend)
+Phase 11 (Streaming I/O)     ←── after Phase 5a (uses persistent instances)
+```
+
+---
+
 ## Success Criteria
 
 | Phase | Metric |
 |-------|--------|
-| 1 | SIMD dot-product AOT within 1.5× of native SSE/NEON |
-| 2 | `compute.call` with 2 GB heap, 100 MB input works correctly |
+| 1 | SIMD dot-product AOT within 1.5× of native SSE/NEON ✅ |
+| 2 | `compute.call` with 2 GB heap, 100 MB input works correctly ✅ |
 | 3 | Memory64 module with 6 GB heap runs under AOT |
-| 4 | GPU matmul 10× faster than WASM SIMD matmul for 4096×4096 |
+| 4 | GPU matmul 10× faster than WASM SIMD matmul for 4096×4096 ✅ |
 | 5a | Persistent instance amortizes load time over 1000+ calls ✅ |
 | 5b | Shared data segments readable from pooled + persistent instances ✅ |
+| 6 | `hull compute new score --lang=c` produces a buildable, testable module |
+| 7 | 6 sample modules with source, .wasm, tests, and documentation |
+| 8 | Cached `compute.call` returns in <1µs for repeated identical input |
+| 9 | `SELECT hull_score(col) FROM t` executes WASM per-row at >100K rows/sec |
+| 10 | GPU blur shader processes 1080p image in <5ms |
+| 11 | `compute.stream` processes 1 GB file with <64 MB peak memory |
