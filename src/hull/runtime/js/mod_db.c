@@ -639,7 +639,9 @@ static void js_scalar_udf_destroy(void *data)
 {
     JsScalarUdfCtx *udf = (JsScalarUdfCtx *)data;
     if (!udf) return;
-    JS_FreeValue(udf->ctx, udf->func);
+    /* Do NOT call JS_FreeValue here. This callback fires during
+     * sqlite3_close() which runs AFTER hl_js_free() has already
+     * destroyed the JS runtime. The JS objects are already gone. */
     free(udf);
 }
 
@@ -728,8 +730,7 @@ static void js_agg_udf_destroy(void *data)
 {
     JsAggUdfCtx *udf = (JsAggUdfCtx *)data;
     if (!udf) return;
-    JS_FreeValue(udf->ctx, udf->step_fn);
-    JS_FreeValue(udf->ctx, udf->finalize_fn);
+    /* Do NOT call JS_FreeValue here — see js_scalar_udf_destroy comment */
     free(udf);
 }
 

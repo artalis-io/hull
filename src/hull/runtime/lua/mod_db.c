@@ -563,8 +563,9 @@ static void lua_scalar_udf_destroy(void *data)
 {
     LuaScalarUdfCtx *udf = (LuaScalarUdfCtx *)data;
     if (!udf) return;
-    if (udf->L && udf->func_ref != 0)
-        luaL_unref(udf->L, LUA_REGISTRYINDEX, udf->func_ref);
+    /* Do NOT call luaL_unref here. This callback fires during
+     * sqlite3_close() which runs AFTER hl_lua_free() has already
+     * called lua_close(). The Lua state is gone. */
     free(udf);
 }
 
@@ -635,12 +636,7 @@ static void lua_agg_udf_destroy(void *data)
 {
     LuaAggUdfCtx *udf = (LuaAggUdfCtx *)data;
     if (!udf) return;
-    if (udf->L) {
-        if (udf->step_ref != 0)
-            luaL_unref(udf->L, LUA_REGISTRYINDEX, udf->step_ref);
-        if (udf->finalize_ref != 0)
-            luaL_unref(udf->L, LUA_REGISTRYINDEX, udf->finalize_ref);
-    }
+    /* Do NOT call luaL_unref here — see lua_scalar_udf_destroy comment */
     free(udf);
 }
 
