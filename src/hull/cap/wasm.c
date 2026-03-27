@@ -153,9 +153,13 @@ static int32_t host_call_handler(wasm_exec_env_t exec_env,
     return -1; /* unknown opcode */
 }
 
+/* WAMR's NativeSymbol requires void* for function pointers — unavoidable cast */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
 static NativeSymbol host_symbols[] = {
     { "host_call", (void *)host_call_handler, "(iii)i", NULL },
 };
+#pragma GCC diagnostic pop
 
 /* ── Module name validation ────────────────────────────────────────── */
 
