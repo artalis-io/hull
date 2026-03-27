@@ -594,39 +594,210 @@ triggers, and which modules are safe to cache.
 
 ## Phase 9 — SQLite UDF Integration (Differentiator)
 
-**Goal:** Register WASM modules as SQL functions callable from queries.
+**Goal:** Register user-defined SQL functions backed by Lua/JS callbacks or WASM
+modules. Bring compute to the data instead of data to the compute.
 
-**Why:** This is the killer feature. `SELECT *, hull_score(embedding) FROM items
-ORDER BY hull_score(embedding) DESC` where `hull_score` runs a WASM module per
-row. Brings compute to the data instead of data to the compute.
+**Why:** `SELECT *, hull_score(embedding) FROM items ORDER BY score DESC` where
+`hull_score` runs a WASM module per row. Or a quick Lua transform without writing
+a WASM module at all. One API (`db.udf`), two backends.
 
-### Design
+### API Design
+
+UDFs live on `db.udf`, not `compute` — this is a database concern that happens
+to use WASM or script functions for execution. The `compute` module stays focused
+on WASM lifecycle; `db` stays focused on queries. The bridge (`cap/db_udf.c`) is
+an orthogonal module that connects them.
 
 ```lua
--- Register a WASM module as a SQL function
-compute.register_udf("score", "score_module")
+-- ── Scalar UDFs ─────────────────────────────────────────────────
 
--- Use in queries — executed per-row by SQLite
-local results = db.query(
-    "SELECT *, hull_score(embedding) AS score FROM items ORDER BY score DESC"
+-- Lua function (flexible, sync queries only)
+db.udf.register("hull_upper", function(text)
+    return string.upper(text)
+end, { deterministic = true })
+
+-- WASM module (fast, works with sync + async queries)
+db.udf.register("hull_score", "score", {
+    deterministic = true,
+    gas = 100000,       -- per-row gas limit (default 100K)
+})
+
+-- Multi-argument
+db.udf.register("hull_distance", "distance", { args = 2 })
+
+-- Use in SQL
+local rows = db.query(
+    "SELECT *, hull_score(embedding) AS s FROM items ORDER BY s DESC"
 )
+
+-- ── Aggregate UDFs ──────────────────────────────────────────────
+
+-- Lua aggregate (step + finalize)
+db.udf.register("hull_running_avg", {
+    step = function(ctx, value)
+        ctx.sum = (ctx.sum or 0) + value
+        ctx.count = (ctx.count or 0) + 1
+    end,
+    finalize = function(ctx)
+        if ctx.count == 0 then return nil end
+        return ctx.sum / ctx.count
+    end,
+}, { aggregate = true })
+
+-- WASM aggregate (persistent instance accumulates in linear memory)
+db.udf.register("hull_histogram", "histogram", { aggregate = true })
+
+-- GROUP BY works — each group gets its own WASM instance
+local avgs = db.query(
+    "SELECT category, hull_running_avg(price) FROM items GROUP BY category"
+)
+
+-- ── Unregister ──────────────────────────────────────────────────
+
+db.udf.unregister("hull_score")
 ```
 
-- WASM function receives column value as input bytes, returns scalar or bytes
-- Executed per-row via `sqlite3_create_function_v2`
-- Instance pooling reused (one pool per UDF module)
-- Gas metering per-row (configurable, prevents runaway UDFs)
-- Result type: `SQLITE_INTEGER`, `SQLITE_FLOAT`, `SQLITE_TEXT`, or `SQLITE_BLOB`
-  based on WASM output format
+**JS equivalent (camelCase):**
+```javascript
+import { db } from "hull:db";
+
+db.udf.register("hull_upper", (text) => text.toUpperCase(), { deterministic: true });
+db.udf.register("hull_score", "score", { deterministic: true, gas: 100000 });
+db.udf.unregister("hull_score");
+```
+
+### Detection: function vs string
+
+`db.udf.register(name, impl, opts)` detects the backend from `impl`:
+
+| `impl` type | Backend | Scalar/Aggregate |
+|-------------|---------|-----------------|
+| Function | Lua/JS callback | Scalar |
+| Table with `step`+`finalize` | Lua/JS callbacks | Aggregate |
+| String (module name) | WASM persistent instance | Scalar (default) or aggregate (opts.aggregate) |
+
+### Wire Format (WASM UDFs only)
+
+The WASM module uses the existing `hull_process` ABI. Input/output carry typed
+SQLite values in a simple binary frame.
+
+**Input** (to `hull_process`):
+```
+[opcode: u8] [argc: u8] [type₁: u8] [len₁: u32 LE] [data₁...] ...
+
+Opcodes: 0x01 = SCALAR/STEP, 0x02 = FINALIZE (no args)
+Types:   0x01 = INTEGER (8B int64 LE)
+         0x02 = REAL    (8B float64 LE)
+         0x03 = TEXT    (UTF-8 bytes, len from len field)
+         0x04 = BLOB    (raw bytes)
+         0x05 = NULL    (len = 0, no data)
+```
+
+**Output** (from `hull_process`):
+```
+[type: u8] [data...]
+
+0x00 = VOID (aggregate step — no result yet)
+0x01–0x05 = same type codes as input
+```
+
+### Instance Model
+
+**Scalar WASM UDFs:** One persistent `HlWasmInstance` per registration, created
+at register time, reused across all rows and queries. Zero per-row instantiation
+cost. Module must be stateless between rows.
+
+**Aggregate WASM UDFs:** Per-group instance via `sqlite3_aggregate_context()`.
+Created on first step call, destroyed in finalize. Handles GROUP BY correctly —
+each group has its own linear memory for accumulation.
+
+**Lua/JS scalar UDFs:** Direct function call via `lua_pcall` / `JS_Call` inside
+the SQLite step callback. No instance management needed.
+
+**Lua/JS aggregate UDFs:** Per-group context table allocated via
+`sqlite3_aggregate_context()`. Passed to step and finalize callbacks.
+
+### Async Handling
+
+SQLite UDF callbacks fire synchronously during `sqlite3_step()`. There is no way
+to yield to the event loop from within a UDF callback.
+
+**WASM UDFs** are thread-safe (each instance has its own isolated linear memory).
+They work with both `db.query()` (event loop thread) and `db.async.query()`
+(worker thread). The `tl_host_ctx` thread-local in `wasm.c` provides correct
+per-thread context.
+
+**Lua/JS UDFs** are NOT thread-safe — the scripting VM is single-threaded.
+They work with `db.query()` (event loop thread) only. Using a Lua/JS UDF with
+`db.async.query()` is **undefined behavior** and will likely crash.
+
+### Known Limitations
+
+1. **Lua/JS UDFs are sync-only.** `db.async.query()` runs on worker threads
+   which cannot safely call back into the Lua/JS VM. WASM UDFs have no such
+   restriction. If you need UDFs in async queries, use WASM.
+
+2. **64 KB max input per row.** The UDF input frame is stack-allocated at 64 KB.
+   Arguments exceeding this (e.g., multi-MB BLOB columns) return a SQL error.
+   UDFs are meant for fast per-row operations, not bulk data transforms.
+
+3. **100K gas default per row.** WASM UDFs default to 100K instructions per row
+   (vs 10M for `compute.call`). This prevents a single expensive UDF from
+   stalling a large table scan. Override with `{ gas = N }`.
+
+4. **Names must start with `hull_`.** Prevents shadowing SQLite built-ins
+   (`abs`, `length`, `substr`, etc.). Enforced at registration time.
+
+5. **No async UDFs.** SQLite does not support async/yielding UDF callbacks.
+   The UDF must return a result synchronously from each `hull_process` call.
+
+6. **Aggregate state is per-group, not per-query.** For WASM aggregates, each
+   GROUP BY group creates and destroys a WASM instance. Queries with thousands
+   of groups pay the instantiation cost per group.
+
+### Architecture
+
+```
+db.udf.register()
+    │
+    ├── impl is function/table → Script UDF (Lua/JS callback)
+    │   └── cap/db_udf.c: sqlite3_create_function_v2 + lua_pcall/JS_Call trampoline
+    │
+    └── impl is string → WASM UDF
+        └── cap/db_udf.c: sqlite3_create_function_v2 + hl_cap_wasm_instance_call
+```
+
+`cap/db_udf.c` is the orthogonal bridge module. It includes both `cap/db.h`
+(SQLite API) and `cap/wasm.h` (WASM instances) but neither `db.c` nor `wasm.c`
+changes. The Lua/JS bindings live in `mod_db.c` (since it's `db.udf.*`).
+
+### New Files
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `include/hull/cap/db_udf.h` | ~60 | Wire format constants, opts struct, public API |
+| `src/hull/cap/db_udf.c` | ~350 | Marshal/unmarshal, scalar/aggregate callbacks, register/unregister |
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| `src/hull/runtime/lua/mod_db.c` | Add `db.udf.register`, `db.udf.unregister` |
+| `src/hull/runtime/js/mod_db.c` | Add `db.udf.register`, `db.udf.unregister` |
+| `tests/hull/cap/test_db.c` | UDF unit tests (scalar, aggregate, multi-arg, NULL, gas) |
+| ABI headers (6 copies) | UDF type/opcode constants |
+| `hull_compute.h` template | UDF constants in `stdlib/lua/hull/compute.lua` |
 
 ### Tasks
 
-- [ ] **`compute.register_udf(sql_name, module_name, opts)` API**
-- [ ] **SQLite function callback** that dispatches to pooled WASM instance
-- [ ] **Type marshaling** (SQLite value → WASM input bytes → SQLite result)
-- [ ] **Per-row gas limit** (`opts.gas_per_row`, default 100K instructions)
-- [ ] **Namespace protection** (UDF names prefixed with `hull_` to avoid collisions)
-- [ ] **Deterministic flag** for SQLite optimizer (pure WASM functions are deterministic)
+- [ ] **`include/hull/cap/db_udf.h`** — wire format constants, `HlDbUdfOpts`, public API
+- [ ] **`src/hull/cap/db_udf.c`** — bridge module: marshal, unmarshal, SQLite callbacks, WASM + script dispatch
+- [ ] **Lua bindings** (`mod_db.c`) — `db.udf.register`, `db.udf.unregister` with function/string detection
+- [ ] **JS bindings** (`mod_db.c`) — same, camelCase
+- [ ] **Namespace enforcement** — reject names not starting with `hull_`
+- [ ] **Deterministic flag** — pass `SQLITE_DETERMINISTIC` to SQLite optimizer
+- [ ] **Unit tests** — scalar (Lua + WASM), aggregate (Lua + WASM), multi-arg, NULL, gas, GROUP BY
+- [ ] **ABI header update** — UDF opcode/type constants in `hull_compute.h`
 
 ---
 
@@ -733,6 +904,6 @@ Phase 11 (Streaming I/O)     ←── after Phase 5a (uses persistent instances
 | 6 | `hull compute new score --lang=c` produces a buildable, testable module |
 | 7 | 6 sample modules with source, .wasm, tests, and documentation |
 | 8 | ~~Declined~~ — app-level concern, not framework |
-| 9 | `SELECT hull_score(col) FROM t` executes WASM per-row at >100K rows/sec |
+| 9 | `SELECT hull_score(col) FROM t` executes WASM UDF at >100K rows/sec; Lua UDF works with db.query |
 | 10 | GPU blur shader processes 1080p image in <5ms |
 | 11 | `compute.stream` processes 1 GB file with <64 MB peak memory |
