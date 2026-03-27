@@ -778,7 +778,9 @@ echo "=== E2E: hull compute tooling (sample modules) ==="
 # reliably under unveil, so skip on Cosmo.
 COMPUTE_EXAMPLE="examples/compute"
 IS_COSMO=0
-file "$HULL" 2>/dev/null | grep -qi "cosmo\|APE" && IS_COSMO=1
+# Detect Cosmo: CC env var contains "cosmo", or binary is an APE
+case "${CC:-}" in *cosmo*) IS_COSMO=1 ;; esac
+file "$HULL" 2>/dev/null | grep -qi "cosmo\|APE\|Actually Portable" && IS_COSMO=1
 
 if [ "$IS_COSMO" -eq 1 ]; then
     echo "  SKIP: hull compute test requires self-exec (not supported under Cosmo unveil)"
