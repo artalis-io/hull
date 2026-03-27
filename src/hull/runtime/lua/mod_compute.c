@@ -1047,31 +1047,10 @@ static int lua_compute_stream(lua_State *L)
          * But we called luaL_ref(L, LUA_REGISTRYINDEX) which pops the top
          * element of the stack. Let's fix this properly. */
     } else if (lua_istable(L, 3)) {
-        /* Check if it has "file" key → output file */
-        lua_getfield(L, 3, "file");
-        if (lua_isstring(L, -1)) {
-            has_output = 1;
-            out_storage.kind = HL_STREAM_OUT_FILE;
-            out_storage.path = lua_tostring(L, -1);
-        }
-        lua_pop(L, 1);
-
-        if (!has_output) {
-            /* No "file" key → this is the opts table, no output specified */
-            opts_arg = 3;
-        }
-    } else if (lua_isnil(L, 3) || lua_isnone(L, 3)) {
-        /* Default: buffer output */
-        opts_arg = 4;
     }
 
-    if (has_output && out_storage.kind == HL_STREAM_OUT_CALLBACK) {
-        /* Already set up by function branch — but we need to fix the ref.
-         * The function branch above is wrong because we call luaL_ref
-         * before setting up the type. Let's restructure. */
-    }
-
-    /* Reset — restructure output parsing cleanly */
+    /* Parse output (arg 3): nil/absent → buffer, function → callback,
+     * table with "file" → file, table without "file" → treat as opts */
     has_output = 0;
     cb_ctx.func_ref = LUA_NOREF;
     cb_ctx.error = 0;
