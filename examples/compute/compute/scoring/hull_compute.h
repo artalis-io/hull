@@ -168,4 +168,27 @@ static inline void hull_alloc_reset(void)
     hull_arena_offset = 0;
 }
 
+/* ── UDF wire format (used when module is registered as a SQL function) ── */
+
+#define HULL_UDF_OP_SCALAR    0x01
+#define HULL_UDF_OP_STEP      0x01
+#define HULL_UDF_OP_FINALIZE  0x02
+
+#define HULL_UDF_TYPE_INTEGER 0x01
+#define HULL_UDF_TYPE_REAL    0x02
+#define HULL_UDF_TYPE_TEXT    0x03
+#define HULL_UDF_TYPE_BLOB    0x04
+#define HULL_UDF_TYPE_NULL    0x05
+
+#define HULL_UDF_RESULT_VOID    0x00
+#define HULL_UDF_RESULT_INTEGER 0x01
+#define HULL_UDF_RESULT_REAL    0x02
+#define HULL_UDF_RESULT_TEXT    0x03
+#define HULL_UDF_RESULT_BLOB    0x04
+#define HULL_UDF_RESULT_NULL    0x05
+
+/* Helper: read opcode and argc from UDF input */
+static inline uint8_t hull_udf_opcode(const void *in) { return ((const uint8_t *)in)[0]; }
+static inline uint8_t hull_udf_argc(const void *in)   { return ((const uint8_t *)in)[1]; }
+
 #endif /* HULL_COMPUTE_H */

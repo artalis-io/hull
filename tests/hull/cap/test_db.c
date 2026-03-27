@@ -9,6 +9,9 @@
 
 #include "utest.h"
 #include "hull/cap/db.h"
+#ifdef HL_ENABLE_WASM
+#include "hull/cap/db_udf.h"
+#endif
 #include <sqlite3.h>
 #include <string.h>
 #include <stdlib.h>
@@ -416,5 +419,241 @@ UTEST(hl_cap_db, namespace_check_allows_normal_tables)
     ASSERT_EQ(hl_cap_db_check_namespace("INSERT INTO items VALUES (1)"), HL_DB_OK);
     ASSERT_EQ(hl_cap_db_check_namespace(""), HL_DB_OK);
 }
+
+/* ── UDF integration tests ──────────────────────────────────────────── */
+
+/* Simple C UDF for testing: returns the length of a TEXT argument */
+static void test_strlen_func(sqlite3_context *ctx, int argc, sqlite3_value **argv)
+{
+    (void)argc;
+    if (sqlite3_value_type(argv[0]) == SQLITE_NULL) {
+        sqlite3_result_null(ctx);
+        return;
+    }
+    int len = sqlite3_value_bytes(argv[0]);
+    sqlite3_result_int(ctx, len);
+}
+
+/* Simple C aggregate UDF for testing: sums integer values */
+typedef struct { int64_t sum; int initialized; } TestSumCtx;
+
+static void test_sum_step(sqlite3_context *ctx, int argc, sqlite3_value **argv)
+{
+    (void)argc;
+    TestSumCtx *p = sqlite3_aggregate_context(ctx, (int)sizeof(TestSumCtx));
+    if (!p) return;
+    if (sqlite3_value_type(argv[0]) != SQLITE_NULL) {
+        p->sum += sqlite3_value_int64(argv[0]);
+        p->initialized = 1;
+    }
+}
+
+static void test_sum_finalize(sqlite3_context *ctx)
+{
+    TestSumCtx *p = sqlite3_aggregate_context(ctx, 0);
+    if (!p || !p->initialized)
+        sqlite3_result_null(ctx);
+    else
+        sqlite3_result_int64(ctx, p->sum);
+}
+
+/* UDF test helpers (must be file-scope for C11 compliance) */
+
+typedef struct { int count; int64_t lens[10]; } LenResult;
+
+static int udf_len_cb(void *ctx, HlColumn *cols, int ncols)
+{
+    LenResult *r = (LenResult *)ctx;
+    for (int i = 0; i < ncols; i++) {
+        if (strcmp(cols[i].name, "nlen") == 0 && cols[i].value.type == HL_TYPE_INT)
+            r->lens[r->count] = cols[i].value.i;
+    }
+    r->count++;
+    return 0;
+}
+
+typedef struct { int count; int got_null; } NullResult;
+
+static int udf_null_cb(void *ctx, HlColumn *cols, int ncols)
+{
+    NullResult *r = (NullResult *)ctx;
+    for (int i = 0; i < ncols; i++) {
+        if (strcmp(cols[i].name, "nlen") == 0 && cols[i].value.type == HL_TYPE_NIL)
+            r->got_null = 1;
+    }
+    r->count++;
+    return 0;
+}
+
+typedef struct { int count; int64_t total; } SumResult;
+
+static int udf_sum_cb(void *ctx, HlColumn *cols, int ncols)
+{
+    SumResult *r = (SumResult *)ctx;
+    for (int i = 0; i < ncols; i++) {
+        if (strcmp(cols[i].name, "total") == 0 && cols[i].value.type == HL_TYPE_INT)
+            r->total = cols[i].value.i;
+    }
+    r->count++;
+    return 0;
+}
+
+UTEST(hl_cap_db, udf_scalar_register_and_query)
+{
+    setup_db();
+
+    int rc = sqlite3_create_function_v2(
+        test_db, "hull_strlen", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+        NULL, test_strlen_func, NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    HlValue p1[] = {
+        { .type = HL_TYPE_TEXT, .s = "Hello", .len = 5 },
+        { .type = HL_TYPE_INT, .i = 30 },
+        { .type = HL_TYPE_DOUBLE, .d = 0.0 },
+    };
+    hl_cap_db_exec(&test_cache,
+        "INSERT INTO users (name, age, score) VALUES (?, ?, ?)", p1, 3);
+
+    HlValue p2[] = {
+        { .type = HL_TYPE_TEXT, .s = "Hi", .len = 2 },
+        { .type = HL_TYPE_INT, .i = 25 },
+        { .type = HL_TYPE_DOUBLE, .d = 0.0 },
+    };
+    hl_cap_db_exec(&test_cache,
+        "INSERT INTO users (name, age, score) VALUES (?, ?, ?)", p2, 3);
+
+    LenResult lr = { .count = 0 };
+    rc = hl_cap_db_query(&test_cache,
+        "SELECT hull_strlen(name) AS nlen FROM users ORDER BY name",
+        NULL, 0, udf_len_cb, &lr, NULL);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(lr.count, 2);
+    ASSERT_EQ(lr.lens[0], 5);
+    ASSERT_EQ(lr.lens[1], 2);
+
+    teardown_db();
+}
+
+UTEST(hl_cap_db, udf_null_input_returns_null)
+{
+    setup_db();
+
+    int rc = sqlite3_create_function_v2(
+        test_db, "hull_strlen", 1, SQLITE_UTF8,
+        NULL, test_strlen_func, NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    HlValue p[] = {
+        { .type = HL_TYPE_NIL },
+        { .type = HL_TYPE_INT, .i = 30 },
+        { .type = HL_TYPE_DOUBLE, .d = 0.0 },
+    };
+    sqlite3_exec(test_db,
+        "CREATE TABLE test_null (name TEXT, age INTEGER, score REAL)",
+        NULL, NULL, NULL);
+    hl_cap_db_exec(&test_cache,
+        "INSERT INTO test_null (name, age, score) VALUES (?, ?, ?)", p, 3);
+
+    NullResult nr = { .count = 0, .got_null = 0 };
+    rc = hl_cap_db_query(&test_cache,
+        "SELECT hull_strlen(name) AS nlen FROM test_null",
+        NULL, 0, udf_null_cb, &nr, NULL);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(nr.count, 1);
+    ASSERT_EQ(nr.got_null, 1);
+
+    teardown_db();
+}
+
+UTEST(hl_cap_db, udf_aggregate_register_and_query)
+{
+    setup_db();
+
+    int rc = sqlite3_create_function_v2(
+        test_db, "hull_mysum", 1, SQLITE_UTF8,
+        NULL, NULL, test_sum_step, test_sum_finalize, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    HlValue p1[] = { { .type = HL_TYPE_TEXT, .s = "A", .len = 1 },
+                      { .type = HL_TYPE_INT, .i = 10 },
+                      { .type = HL_TYPE_DOUBLE, .d = 0.0 } };
+    hl_cap_db_exec(&test_cache,
+        "INSERT INTO users (name, age, score) VALUES (?, ?, ?)", p1, 3);
+
+    HlValue p2[] = { { .type = HL_TYPE_TEXT, .s = "B", .len = 1 },
+                      { .type = HL_TYPE_INT, .i = 20 },
+                      { .type = HL_TYPE_DOUBLE, .d = 0.0 } };
+    hl_cap_db_exec(&test_cache,
+        "INSERT INTO users (name, age, score) VALUES (?, ?, ?)", p2, 3);
+
+    HlValue p3[] = { { .type = HL_TYPE_TEXT, .s = "C", .len = 1 },
+                      { .type = HL_TYPE_INT, .i = 30 },
+                      { .type = HL_TYPE_DOUBLE, .d = 0.0 } };
+    hl_cap_db_exec(&test_cache,
+        "INSERT INTO users (name, age, score) VALUES (?, ?, ?)", p3, 3);
+
+    SumResult sr = { .count = 0, .total = 0 };
+    rc = hl_cap_db_query(&test_cache,
+        "SELECT hull_mysum(age) AS total FROM users",
+        NULL, 0, udf_sum_cb, &sr, NULL);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(sr.count, 1);
+    ASSERT_EQ(sr.total, 60);
+
+    teardown_db();
+}
+
+UTEST(hl_cap_db, udf_unregister_removes_function)
+{
+    setup_db();
+
+    int rc = sqlite3_create_function_v2(
+        test_db, "hull_strlen", 1, SQLITE_UTF8,
+        NULL, test_strlen_func, NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    /* Unregister by passing NULL function pointers (same nargs) */
+    rc = sqlite3_create_function_v2(
+        test_db, "hull_strlen", 1, SQLITE_UTF8,
+        NULL, NULL, NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    /* Should fail — function no longer exists */
+    QueryResult result = { .count = 0 };
+    rc = hl_cap_db_query(&test_cache,
+        "SELECT hull_strlen('test') AS nlen", NULL, 0,
+        collect_rows, &result, NULL);
+    ASSERT_NE(rc, 0); /* Should error */
+
+    teardown_db();
+}
+
+#ifdef HL_ENABLE_WASM
+UTEST(hl_cap_db, udf_wasm_rejects_bad_prefix)
+{
+    setup_db();
+
+    HlDbUdfOpts opts = {
+        .sql_name    = "bad_name",  /* no hull_ prefix */
+        .module_name = "echo",
+        .nargs       = 1,
+    };
+    const char *err_msg = NULL;
+    int rc = hl_cap_db_udf_register_wasm(test_db, NULL, &opts, NULL, NULL, NULL, &err_msg);
+    ASSERT_NE(rc, 0);
+    ASSERT_TRUE(err_msg != NULL);
+
+    teardown_db();
+}
+
+UTEST(hl_cap_db, udf_wasm_rejects_null_args)
+{
+    const char *err_msg = NULL;
+    int rc = hl_cap_db_udf_register_wasm(NULL, NULL, NULL, NULL, NULL, NULL, &err_msg);
+    ASSERT_NE(rc, 0);
+    ASSERT_TRUE(err_msg != NULL);
+}
+#endif /* HL_ENABLE_WASM */
 
 UTEST_MAIN();
