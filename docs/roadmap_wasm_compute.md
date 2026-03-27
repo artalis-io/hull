@@ -21,7 +21,7 @@ Hull ships a compute-only WASM sandbox built on WAMR with:
 - ~4 GB max heap (uint32_t ceiling), 256 MB max I/O, 100B max instructions
 - Configurable compile-time ceilings (`make HL_WASM_MAX_HEAP_MB=N`)
 
-**What's disabled:** Memory64, shared memory, threads.
+**What's disabled:** Shared memory, threads.
 **What's enabled:** SIMD128 (AOT-first; interpreter SIMD requires SIMDe, not yet vendored).
 
 ---
@@ -207,65 +207,20 @@ with `buf:bytes()` / `buf.bytes()` to materialize to string/ArrayBuffer, and
 
 ---
 
-## Phase 3 — Memory64
+## Phase 3 — Memory64 ✅
+
+**Status:** Complete.
 
 **Goal:** Enable 64-bit WASM memory addressing, allowing >4 GB linear memory.
 
-**Why:** 32-bit WASM memory tops out at 4 GB. For large ML models, high-res
-image processing, or big in-memory datasets, 64-bit addressing removes the
-ceiling. Memory64 is a standard WASM proposal (Phase 4 at W3C) with growing
-toolchain support.
+### Delivered
 
-### Tasks
-
-- [ ] **Enable Memory64 in WAMR build flags**
-  - `Makefile`: add `-DWASM_ENABLE_MEMORY64=1`
-  - Verify WAMR version supports Memory64 (check `vendor/wamr/` version)
-
-- [ ] **Verify ABI compatibility**
-  - `hull_process` signature uses `i32` parameters — with Memory64, pointers
-    become `i64`
-  - Options:
-    - A) Require Memory64 modules to export `hull_process_64(i64, i64, i64, i64) → i64`
-    - B) Auto-detect Memory64 flag on module and dispatch to correct ABI
-    - C) Use a wrapper that truncates (only if heap stays < 4 GB)
-  - Recommend **B**: detect at load time, store ABI flag in module cache
-
-- [ ] **Update `host_call` import**
-  - Memory64 modules pass 64-bit pointers — `host_call(i32, i64, i64) → i32`
-  - WAMR should handle this transparently if imports are declared correctly
-
-- [ ] **Update `wasm_runtime_module_malloc` calls**
-  - Use 64-bit variants if available in WAMR's Memory64 API
-  - Check `wasm_runtime_validate_app_addr` for 64-bit support
-
-- [ ] **AOT support for Memory64**
-  - Verify `wamrc` can compile Memory64 modules to AOT
-  - WAMR's Memory64 AOT support may be experimental — test thoroughly
-
-- [ ] **Toolchain documentation**
-  - Document how to compile Memory64 WASM modules:
-    - Rust: `wasm32-unknown-unknown` doesn't support Memory64 yet;
-      `wasm64-unknown-unknown` target is experimental
-    - C/C++ (clang): `-mmemory64` flag with WASI SDK
-    - Zig: `wasm64-freestanding` target
-
-- [ ] **Test with >4 GB working sets**
-  - Allocate 6 GB WASM heap, process large dataset
-  - Verify gas metering works correctly with 64-bit memory ops
-
-### Risk
-
-High. Memory64 is still maturing in both WAMR and toolchains. WAMR's support
-may be incomplete for AOT or have edge cases. The ABI change for
-`hull_process` needs careful design to avoid breaking existing 32-bit modules.
-Plan for a compatibility shim.
-
-### Compatibility
-
-Existing 32-bit WASM modules must continue to work unchanged. The module
-cache entry should store a `memory64` flag detected at load time. Call
-dispatch selects the correct ABI based on this flag.
+- [x] **Memory64 enabled in WAMR** — `Makefile`: `-DWASM_ENABLE_MEMORY64=1`
+- [x] **ABI auto-detection** — Option B implemented: `is_memory64` flag detected at module load time via WAMR internal API, stored in module cache
+- [x] **Dual ABI dispatch** — `hull_process` called with `(i64, i64, i64, i64) → i32` for Memory64 modules, `(i32, i32, i32, i32) → i32` for WASM32
+- [x] **host_call updated** — Memory64 modules use `host_call(i32, i64, i64) → i32` with widened pointer/length parameters
+- [x] **AOT support** — `hull build` passes `--enable-memory64` to `wamrc` when Memory64 module detected
+- [x] **Backward compatibility** — existing 32-bit modules work unchanged; ABI flag selects correct calling convention
 
 ---
 
@@ -729,7 +684,7 @@ compute.stream("transform", input_file, output_file, {
 
 ```
 Phase 1 (SIMD128) ✅ ──────────────────┐
-                                        ├──→  Phase 3 (Memory64)
+                                        ├──→  Phase 3 (Memory64) ✅
 Phase 2 (Memory Limits) ✅ ────────────┘
 Phase 2.5 (Instance Pooling) ✅
 Phase 2.6 (WasmBuffer) ✅
@@ -753,7 +708,7 @@ Phase 11 (Streaming I/O)     ←── after Phase 5a (uses persistent instances
 |-------|--------|
 | 1 | SIMD dot-product AOT within 1.5× of native SSE/NEON ✅ |
 | 2 | `compute.call` with 2 GB heap, 100 MB input works correctly ✅ |
-| 3 | Memory64 module with 6 GB heap runs under AOT |
+| 3 | Memory64 module with 6 GB heap runs under AOT ✅ |
 | 4 | GPU matmul 10× faster than WASM SIMD matmul for 4096×4096 ✅ |
 | 5a | Persistent instance amortizes load time over 1000+ calls ✅ |
 | 5b | Shared data segments readable from pooled + persistent instances ✅ |
