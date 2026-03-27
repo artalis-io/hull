@@ -785,6 +785,7 @@ if [ -d "$COMPUTE_EXAMPLE/compute/vector_ops" ]; then
                 pass "hull compute test $MODULE ($TESTS)"
             else
                 fail "hull compute test $MODULE"
+                echo "$OUTPUT" | tail -5
             fi
         else
             echo "  SKIP: $MODULE.wasm not found"
