@@ -770,5 +770,30 @@ else
 fi
 
 echo ""
+echo "=== E2E: hull compute tooling (sample modules) ==="
+
+# Test the sample compute modules via hull compute test
+# These live in examples/compute/compute/<name>/
+COMPUTE_EXAMPLE="examples/compute"
+if [ -d "$COMPUTE_EXAMPLE/compute/vector_ops" ]; then
+    for MODULE in vector_ops sort hash json_extract scoring text; do
+        if [ -f "$COMPUTE_EXAMPLE/compute/$MODULE.wasm" ]; then
+            HULL_ABS="$(cd "$(dirname "$HULL")" && pwd)/$(basename "$HULL")"
+            OUTPUT=$(cd "$COMPUTE_EXAMPLE" && "$HULL_ABS" compute test "$MODULE" 2>&1) || true
+            if echo "$OUTPUT" | grep -qE "tests passed$"; then
+                TESTS=$(echo "$OUTPUT" | grep -oE '[0-9]+/[0-9]+ tests passed' | head -1)
+                pass "hull compute test $MODULE ($TESTS)"
+            else
+                fail "hull compute test $MODULE"
+            fi
+        else
+            echo "  SKIP: $MODULE.wasm not found"
+        fi
+    done
+else
+    echo "  SKIP: sample modules not found in $COMPUTE_EXAMPLE"
+fi
+
+echo ""
 echo "=== Results: $PASS/$TOTAL passed ==="
 if [ $FAIL -gt 0 ]; then exit 1; fi
