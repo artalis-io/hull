@@ -772,10 +772,17 @@ fi
 echo ""
 echo "=== E2E: hull compute tooling (sample modules) ==="
 
-# Test the sample compute modules via hull compute test
-# These live in examples/compute/compute/<name>/
+# Test the sample compute modules via hull compute test.
+# hull compute test spawns hull test as a child process, which
+# requires exec under unveil. Cosmo APE binaries can't self-exec
+# reliably under unveil, so skip on Cosmo.
 COMPUTE_EXAMPLE="examples/compute"
-if [ -d "$COMPUTE_EXAMPLE/compute/vector_ops" ]; then
+IS_COSMO=0
+file "$HULL" 2>/dev/null | grep -qi "cosmo\|APE" && IS_COSMO=1
+
+if [ "$IS_COSMO" -eq 1 ]; then
+    echo "  SKIP: hull compute test requires self-exec (not supported under Cosmo unveil)"
+elif [ -d "$COMPUTE_EXAMPLE/compute/vector_ops" ]; then
     for MODULE in vector_ops sort hash json_extract scoring text; do
         if [ -f "$COMPUTE_EXAMPLE/compute/$MODULE.wasm" ]; then
             HULL_ABS="$(cd "$(dirname "$HULL")" && pwd)/$(basename "$HULL")"
