@@ -401,9 +401,9 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
     if (output_dir)
         hl_tool_unveil_add(ctx, output_dir, "rwc");
 
-    /* Platform library: read */
+    /* Platform library + hull binary: read + execute */
     if (platform_dir)
-        hl_tool_unveil_add(ctx, platform_dir, "r");
+        hl_tool_unveil_add(ctx, platform_dir, "rx");
 
     hl_tool_unveil_seal(ctx);
 
@@ -421,7 +421,7 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
         unveil("/Library", "r");
 #endif
         if (output_dir)   unveil(output_dir, "rwc");
-        if (platform_dir) unveil(platform_dir, "r");
+        if (platform_dir) unveil(platform_dir, "rx");
         unveil(NULL, NULL); /* seal */
 
         /* Pledge for tool mode: needs proc + exec for fork/execvp */
