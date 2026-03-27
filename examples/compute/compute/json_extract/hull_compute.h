@@ -83,6 +83,34 @@ static inline int32_t hull_segment_size(int32_t seg_id)
     return host_call(HULL_OP_DATA_INFO, seg_id, 1);
 }
 
+/* ── Stream chunk info ────────────────────────────────────────────── */
+
+#define HULL_OP_STREAM          0x03
+#define HULL_STREAM_FLAGS       0
+#define HULL_STREAM_CHUNK_INDEX 1
+#define HULL_STREAM_FLAG_FIRST  0x02
+#define HULL_STREAM_FLAG_LAST   0x01
+
+static inline int hull_stream_flags(void)
+{
+    return host_call(HULL_OP_STREAM, 0, HULL_STREAM_FLAGS);
+}
+
+static inline int hull_stream_is_first(void)
+{
+    return (hull_stream_flags() & HULL_STREAM_FLAG_FIRST) != 0;
+}
+
+static inline int hull_stream_is_last(void)
+{
+    return (hull_stream_flags() & HULL_STREAM_FLAG_LAST) != 0;
+}
+
+static inline int hull_stream_chunk_index(void)
+{
+    return host_call(HULL_OP_STREAM, 0, HULL_STREAM_CHUNK_INDEX);
+}
+
 /* ── Minimal libc ─────────────────────────────────────────────────── */
 
 static inline void *hull_memcpy(void *dst, const void *src, size_t n)

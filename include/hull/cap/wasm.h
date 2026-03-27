@@ -117,7 +117,16 @@ typedef int (*HlWasmCallbackFn)(int id, const void *in, size_t in_len,
 
 #define HL_WASM_OP_LOG       0x01
 #define HL_WASM_OP_DATA_INFO 0x02
+#define HL_WASM_OP_STREAM    0x03
 #define HL_WASM_OP_CALLBACK  0x10
+
+/* Stream metadata sub-queries (len parameter to host_call) */
+#define HL_WASM_STREAM_FLAGS        0
+#define HL_WASM_STREAM_CHUNK_INDEX  1
+
+/* Stream flag bits (returned by STREAM_FLAGS query) */
+#define HL_WASM_STREAM_FLAG_LAST    0x01
+#define HL_WASM_STREAM_FLAG_FIRST   0x02
 
 /* ── Error codes ───────────────────────────────────────────────────── */
 
@@ -324,6 +333,21 @@ int hl_cap_wasm_data_load(HlWasmCache *cache, const char *module_name,
  * Remove all shared data for a module.
  */
 void hl_cap_wasm_data_unload(HlWasmCache *cache, const char *module_name);
+
+/* ── Streaming I/O context ─────────────────────────────────────────── */
+
+/**
+ * Set stream metadata on the thread-local host_call context.
+ * Must be called just before hl_cap_wasm_instance_call(); the fields
+ * survive through the call because instance_call only overwrites
+ * fn/ctx/shared_data (it does NOT zero-initialize the struct).
+ */
+void hl_cap_wasm_set_stream_ctx(uint32_t flags, uint32_t chunk_index);
+
+/**
+ * Clear stream metadata after a call completes.
+ */
+void hl_cap_wasm_clear_stream_ctx(void);
 
 #endif /* HL_ENABLE_WASM */
 #endif /* HL_CAP_WASM_H */

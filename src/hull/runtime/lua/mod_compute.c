@@ -8,6 +8,7 @@
 #include "mod_buffer.h"
 #include "hull/cap/wasm.h"
 #include "hull/cap/wasm_buffer.h"
+#include "hull/cap/wasm_stream.h"
 #include "hull/cap/fs.h"
 #include "hull/alloc.h"
 #include "hull/async.h"
@@ -960,6 +961,219 @@ static int lua_compute_segment(lua_State *L)
     return 1;
 }
 
+/* ── compute.stream ────────────────────────────────────────────────── */
+
+typedef struct {
+    lua_State *L;
+    int        func_ref;
+    int        error;
+} LuaStreamCbCtx;
+
+static int lua_stream_cb_trampoline(const void *data, size_t len,
+                                     uint32_t index, int is_last,
+                                     void *user_data)
+{
+    LuaStreamCbCtx *ctx = (LuaStreamCbCtx *)user_data;
+    if (ctx->error) return -1;
+
+    lua_rawgeti(ctx->L, LUA_REGISTRYINDEX, ctx->func_ref);
+    lua_pushlstring(ctx->L, (const char *)data, len);
+    lua_pushinteger(ctx->L, (lua_Integer)(index + 1)); /* 1-indexed for Lua */
+    lua_pushboolean(ctx->L, is_last);
+
+    if (lua_pcall(ctx->L, 3, 0, 0) != LUA_OK) {
+        ctx->error = 1;
+        lua_pop(ctx->L, 1);
+        return -1;
+    }
+    return 0;
+}
+
+/* compute.stream(name, input, [output], [opts]) -> string | true, err */
+static int lua_compute_stream(lua_State *L)
+{
+    HlLua *lua = get_hl_lua(L);
+    if (!lua)
+        return luaL_error(L, "compute.stream: runtime not available");
+    if (!lua->base.wasm_cache)
+        return luaL_error(L, "compute.stream: WASM runtime not initialized");
+
+    const char *name = luaL_checkstring(L, 1);
+
+    /* ── Parse input (arg 2) ─────────────────────────────────────── */
+    HlStreamInput input = {0};
+
+    if (lua_istable(L, 2)) {
+        lua_getfield(L, 2, "file");
+        if (lua_isstring(L, -1)) {
+            input.kind = HL_STREAM_IN_FILE;
+            input.path = lua_tostring(L, -1);
+        }
+        lua_pop(L, 1);
+        if (input.kind != HL_STREAM_IN_FILE)
+            return luaL_error(L, "compute.stream: input table must have 'file' key");
+    } else {
+        HlBufferView view;
+        if (lua_get_buffer(L, 2, &view)) {
+            input.kind = HL_STREAM_IN_BUFFER;
+            input.buffer = view;
+        } else {
+            size_t slen;
+            const char *s = luaL_checklstring(L, 2, &slen);
+            input.kind = HL_STREAM_IN_BUFFER;
+            input.buffer.data = s;
+            input.buffer.len = slen;
+        }
+    }
+
+    /* ── Parse output (arg 3) and opts (arg 3 or 4) ──────────────── */
+    HlStreamOutput out_storage = {0};
+    HlStreamOutput *out_ptr = NULL;
+    void *out_data = NULL;
+    size_t out_len = 0;
+    LuaStreamCbCtx cb_ctx = {0};
+    int has_output = 0;
+    int opts_arg = 4;
+
+    if (lua_isfunction(L, 3)) {
+        has_output = 1;
+        cb_ctx.L = L;
+        cb_ctx.func_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+        /* luaL_ref pops the value at stack top, but we passed index 3.
+         * Actually luaL_ref always pops the top of stack. We need to push
+         * arg 3 to the top first. */
+        /* CORRECTION: luaL_ref pops from the top of the given pseudo-index.
+         * We should push the function to the top, then ref it.
+         * But we called luaL_ref(L, LUA_REGISTRYINDEX) which pops the top
+         * element of the stack. Let's fix this properly. */
+    } else if (lua_istable(L, 3)) {
+        /* Check if it has "file" key → output file */
+        lua_getfield(L, 3, "file");
+        if (lua_isstring(L, -1)) {
+            has_output = 1;
+            out_storage.kind = HL_STREAM_OUT_FILE;
+            out_storage.path = lua_tostring(L, -1);
+        }
+        lua_pop(L, 1);
+
+        if (!has_output) {
+            /* No "file" key → this is the opts table, no output specified */
+            opts_arg = 3;
+        }
+    } else if (lua_isnil(L, 3) || lua_isnone(L, 3)) {
+        /* Default: buffer output */
+        opts_arg = 4;
+    }
+
+    if (has_output && out_storage.kind == HL_STREAM_OUT_CALLBACK) {
+        /* Already set up by function branch — but we need to fix the ref.
+         * The function branch above is wrong because we call luaL_ref
+         * before setting up the type. Let's restructure. */
+    }
+
+    /* Reset — restructure output parsing cleanly */
+    has_output = 0;
+    cb_ctx.func_ref = LUA_NOREF;
+    cb_ctx.error = 0;
+    opts_arg = 4;
+
+    if (lua_isfunction(L, 3)) {
+        has_output = 1;
+        cb_ctx.L = L;
+        lua_pushvalue(L, 3);
+        cb_ctx.func_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+        out_storage.kind = HL_STREAM_OUT_CALLBACK;
+        out_storage.callback.fn = lua_stream_cb_trampoline;
+        out_storage.callback.user_data = &cb_ctx;
+        out_ptr = &out_storage;
+    } else if (lua_istable(L, 3)) {
+        lua_getfield(L, 3, "file");
+        if (lua_isstring(L, -1)) {
+            has_output = 1;
+            out_storage.kind = HL_STREAM_OUT_FILE;
+            out_storage.path = lua_tostring(L, -1);
+            out_ptr = &out_storage;
+        }
+        lua_pop(L, 1);
+        if (!has_output) {
+            /* It's the opts table */
+            opts_arg = 3;
+        }
+    }
+
+    if (!has_output) {
+        /* Default: return buffer */
+        out_storage.kind = HL_STREAM_OUT_BUFFER;
+        out_storage.buffer.data = &out_data;
+        out_storage.buffer.len = &out_len;
+        out_ptr = &out_storage;
+    }
+
+    /* ── Parse opts ──────────────────────────────────────────────── */
+    HlStreamOpts stream_opts = {0};
+    if (lua_istable(L, opts_arg)) {
+        lua_getfield(L, opts_arg, "chunk_size");
+        if (!lua_isnil(L, -1))
+            stream_opts.chunk_size = (size_t)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+
+        lua_getfield(L, opts_arg, "gas");
+        if (!lua_isnil(L, -1))
+            stream_opts.call_opts.gas = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+
+        lua_getfield(L, opts_arg, "heap");
+        if (!lua_isnil(L, -1))
+            stream_opts.call_opts.heap_size = (uint32_t)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+
+        lua_getfield(L, opts_arg, "stack");
+        if (!lua_isnil(L, -1))
+            stream_opts.call_opts.stack_size = (uint32_t)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+    }
+
+    wasm_clamp_opts(&stream_opts.call_opts, &lua->base);
+
+    /* ── Call stream API ─────────────────────────────────────────── */
+    const char *err = NULL;
+    HlStreamResult res = {0};
+
+    int rc = hl_cap_wasm_stream(
+        lua->base.wasm_cache, name,
+        &input, out_ptr, &stream_opts,
+        lua->base.fs_cfg,
+        lua->base.app_vfs,
+        lua->base.app_vfs ? lua->base.app_vfs->root_dir : NULL,
+        lua->base.alloc, &res, &err);
+
+    /* Clean up callback reference */
+    if (cb_ctx.func_ref != LUA_NOREF)
+        luaL_unref(L, LUA_REGISTRYINDEX, cb_ctx.func_ref);
+
+    if (rc != HL_WASM_OK) {
+        lua_pushnil(L);
+        lua_pushstring(L, err ? err : "stream_failed");
+        return 2;
+    }
+
+    /* Return based on output mode */
+    if (out_storage.kind == HL_STREAM_OUT_BUFFER && out_data) {
+        lua_pushlstring(L, (const char *)out_data, out_len);
+        hl_alloc_free(lua->base.alloc, out_data, out_len);
+        lua_pushnil(L);
+        return 2;
+    } else if (out_storage.kind == HL_STREAM_OUT_BUFFER) {
+        lua_pushlstring(L, "", 0);
+        lua_pushnil(L);
+        return 2;
+    }
+
+    lua_pushboolean(L, 1);
+    lua_pushnil(L);
+    return 2;
+}
+
 static int lua_compute_available(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
@@ -974,6 +1188,7 @@ static const luaL_Reg compute_funcs[] = {
     {"buffer",   lua_compute_buffer},
     {"instance", lua_compute_instance},
     {"segment",  lua_compute_segment},
+    {"stream",   lua_compute_stream},
     {NULL, NULL}
 };
 

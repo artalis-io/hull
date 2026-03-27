@@ -94,6 +94,17 @@
 #define HL_WASM_MAX_GAS            (100LL * 1000 * 1000 * 1000) /* 100B instructions */
 #endif
 
+/* ── WASM streaming I/O ──────────────────────────────────────────── */
+#ifndef HL_WASM_STREAM_MAX_CHUNK
+#define HL_WASM_STREAM_MAX_CHUNK    (16 * 1024 * 1024)  /* 16 MB */
+#endif
+#ifndef HL_WASM_STREAM_MIN_CHUNK
+#define HL_WASM_STREAM_MIN_CHUNK    256
+#endif
+#ifndef HL_WASM_STREAM_DEFAULT_CHUNK
+#define HL_WASM_STREAM_DEFAULT_CHUNK 65536  /* 64 KB */
+#endif
+
 /* ── WASM host_call buffer ────────────────────────────────────────── */
 #ifndef HL_WASM_CALLBACK_BUF_SIZE
 #define HL_WASM_CALLBACK_BUF_SIZE  4096  /* host_call CALLBACK output (stack) */

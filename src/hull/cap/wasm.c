@@ -58,6 +58,9 @@ typedef struct {
     void            *ctx;
     /* Shared data segments visible to current call */
     const HlWasmSharedData *shared_data;  /* NULL = no shared data */
+    /* Streaming I/O metadata (set by wasm_stream.c via set/clear helpers) */
+    uint32_t stream_flags;       /* 0 when not streaming */
+    uint32_t stream_chunk_index;
 } HlHostCallCtx;
 
 static _Thread_local HlHostCallCtx tl_host_ctx;
@@ -136,6 +139,14 @@ static int32_t host_call_handler(wasm_exec_env_t exec_env,
             return (int32_t)(uint32_t)(sd->segments[ptr].wasm_addr >> 32);
         if (len == 3)
             return (int32_t)(uint32_t)(sd->segments[ptr].size >> 32);
+        return -1;
+    }
+
+    if (opcode == HL_WASM_OP_STREAM) {
+        if (len == HL_WASM_STREAM_FLAGS)
+            return (int32_t)tl_host_ctx.stream_flags;
+        if (len == HL_WASM_STREAM_CHUNK_INDEX)
+            return (int32_t)tl_host_ctx.stream_chunk_index;
         return -1;
     }
 
@@ -1211,6 +1222,20 @@ void hl_cap_wasm_instance_destroy(HlWasmInstance *pi)
         hl_alloc_free(pi->alloc, pi, sizeof(*pi));
     else
         free(pi);
+}
+
+/* ── Streaming I/O context helpers (for wasm_stream.c) ─────────────── */
+
+void hl_cap_wasm_set_stream_ctx(uint32_t flags, uint32_t chunk_index)
+{
+    tl_host_ctx.stream_flags = flags;
+    tl_host_ctx.stream_chunk_index = chunk_index;
+}
+
+void hl_cap_wasm_clear_stream_ctx(void)
+{
+    tl_host_ctx.stream_flags = 0;
+    tl_host_ctx.stream_chunk_index = 0;
 }
 
 #endif /* HL_ENABLE_WASM */

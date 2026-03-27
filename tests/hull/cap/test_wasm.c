@@ -10,6 +10,7 @@
 
 #include "hull/cap/wasm.h"
 #include "hull/cap/wasm_buffer.h"
+#include "hull/cap/wasm_stream.h"
 #include "hull/limits.h"
 #include "hull/vfs.h"
 #include "hull/entry.h"
@@ -2128,6 +2129,230 @@ UTEST(hl_cap_wasm, wasm32_not_memory64)
     ASSERT_NE(mod, NULL);
     ASSERT_EQ(mod->is_memory64, 0);
 
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* ── Streaming I/O tests ──────────────────────────────────────────── */
+
+UTEST(hl_cap_wasm, stream_echo_basic)
+{
+    /* Stream 1000 bytes through echo with chunk_size=256 (min), verify output == input */
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    /* Build 1000-byte input */
+    char input[1000];
+    for (int i = 0; i < 1000; i++) input[i] = (char)(i & 0xFF);
+
+    HlStreamInput in = {0};
+    in.kind = HL_STREAM_IN_BUFFER;
+    in.buffer.data = input;
+    in.buffer.len = 1000;
+
+    void *out_data = NULL;
+    size_t out_len = 0;
+    HlStreamOutput out = {0};
+    out.kind = HL_STREAM_OUT_BUFFER;
+    out.buffer.data = &out_data;
+    out.buffer.len = &out_len;
+
+    HlStreamOpts opts = {0};
+    opts.chunk_size = 256; /* min chunk size */
+
+    HlStreamResult res = {0};
+    const char *err = NULL;
+
+    int rc = hl_cap_wasm_stream(&cache, "echo", &in, &out, &opts,
+                                 NULL, &vfs, NULL, NULL, &res, &err);
+    ASSERT_EQ(rc, HL_WASM_OK);
+    ASSERT_EQ(out_len, (size_t)1000);
+    ASSERT_EQ(memcmp(out_data, input, 1000), 0);
+    ASSERT_EQ(res.total_input, (size_t)1000);
+    ASSERT_EQ(res.total_output, (size_t)1000);
+    /* 1000 / 256 = 3.90625 → 4 chunks */
+    ASSERT_EQ(res.chunks, (uint32_t)4);
+
+    free(out_data);
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(hl_cap_wasm, stream_echo_single_chunk)
+{
+    /* Input smaller than chunk → single chunk with first+last flags */
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    const char *input = "hello";
+
+    HlStreamInput in = {0};
+    in.kind = HL_STREAM_IN_BUFFER;
+    in.buffer.data = input;
+    in.buffer.len = 5;
+
+    void *out_data = NULL;
+    size_t out_len = 0;
+    HlStreamOutput out = {0};
+    out.kind = HL_STREAM_OUT_BUFFER;
+    out.buffer.data = &out_data;
+    out.buffer.len = &out_len;
+
+    HlStreamOpts opts = {0};
+    opts.chunk_size = 4096; /* much larger than input */
+
+    HlStreamResult res = {0};
+    const char *err = NULL;
+
+    int rc = hl_cap_wasm_stream(&cache, "echo", &in, &out, &opts,
+                                 NULL, &vfs, NULL, NULL, &res, &err);
+    ASSERT_EQ(rc, HL_WASM_OK);
+    ASSERT_EQ(out_len, (size_t)5);
+    ASSERT_EQ(memcmp(out_data, "hello", 5), 0);
+    ASSERT_EQ(res.chunks, (uint32_t)1);
+
+    free(out_data);
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* Callback test state */
+static int cb_test_call_count;
+static int cb_test_last_is_last;
+static size_t cb_test_total_bytes;
+
+static int stream_test_callback(const void *data, size_t len,
+                                 uint32_t index, int is_last,
+                                 void *user_data)
+{
+    (void)data; (void)user_data;
+    cb_test_call_count++;
+    cb_test_last_is_last = is_last;
+    cb_test_total_bytes += len;
+    /* Verify chunk index matches call count (0-indexed) */
+    if (index != (uint32_t)(cb_test_call_count - 1)) return -1;
+    return 0;
+}
+
+UTEST(hl_cap_wasm, stream_callback)
+{
+    /* Use callback output, verify called per chunk with correct index/is_last */
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    /* 768 bytes / 256 (min chunk) = 3 chunks exactly */
+    char input[768];
+    memset(input, 'A', 768);
+
+    cb_test_call_count = 0;
+    cb_test_last_is_last = 0;
+    cb_test_total_bytes = 0;
+
+    HlStreamInput in = {0};
+    in.kind = HL_STREAM_IN_BUFFER;
+    in.buffer.data = input;
+    in.buffer.len = 768;
+
+    HlStreamOutput out = {0};
+    out.kind = HL_STREAM_OUT_CALLBACK;
+    out.callback.fn = stream_test_callback;
+    out.callback.user_data = NULL;
+
+    HlStreamOpts opts = {0};
+    opts.chunk_size = 256; /* min chunk size */
+
+    HlStreamResult res = {0};
+    const char *err = NULL;
+
+    int rc = hl_cap_wasm_stream(&cache, "echo", &in, &out, &opts,
+                                 NULL, &vfs, NULL, NULL, &res, &err);
+    ASSERT_EQ(rc, HL_WASM_OK);
+    ASSERT_EQ(cb_test_call_count, 3);
+    ASSERT_EQ(cb_test_last_is_last, 1);
+    ASSERT_EQ(cb_test_total_bytes, (size_t)768);
+    ASSERT_EQ(res.chunks, (uint32_t)3);
+
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(hl_cap_wasm, stream_empty_input)
+{
+    /* Zero-length input: 1 chunk processed with first+last flags */
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    HlStreamInput in = {0};
+    in.kind = HL_STREAM_IN_BUFFER;
+    in.buffer.data = NULL;
+    in.buffer.len = 0;
+
+    void *out_data = NULL;
+    size_t out_len = 0;
+    HlStreamOutput out = {0};
+    out.kind = HL_STREAM_OUT_BUFFER;
+    out.buffer.data = &out_data;
+    out.buffer.len = &out_len;
+
+    HlStreamResult res = {0};
+    const char *err = NULL;
+
+    int rc = hl_cap_wasm_stream(&cache, "echo", &in, &out, NULL,
+                                 NULL, &vfs, NULL, NULL, &res, &err);
+    ASSERT_EQ(rc, HL_WASM_OK);
+    ASSERT_EQ(out_len, (size_t)0);
+    ASSERT_EQ(res.total_input, (size_t)0);
+    ASSERT_EQ(res.total_output, (size_t)0);
+    ASSERT_EQ(res.chunks, (uint32_t)1);
+
+    free(out_data);
+    hl_cap_wasm_destroy(&cache);
+}
+
+UTEST(hl_cap_wasm, stream_gas_exhaustion)
+{
+    /* Very low gas should cause error on chunk processing */
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    char input[256];
+    memset(input, 'X', 256);
+
+    HlStreamInput in = {0};
+    in.kind = HL_STREAM_IN_BUFFER;
+    in.buffer.data = input;
+    in.buffer.len = 256;
+
+    void *out_data = NULL;
+    size_t out_len = 0;
+    HlStreamOutput out = {0};
+    out.kind = HL_STREAM_OUT_BUFFER;
+    out.buffer.data = &out_data;
+    out.buffer.len = &out_len;
+
+    HlStreamOpts opts = {0};
+    opts.chunk_size = 64;
+    opts.call_opts.gas = 1; /* impossibly low gas */
+
+    const char *err = NULL;
+    HlStreamResult res = {0};
+
+    int rc = hl_cap_wasm_stream(&cache, "echo", &in, &out, &opts,
+                                 NULL, &vfs, NULL, NULL, &res, &err);
+    ASSERT_NE(rc, HL_WASM_OK);
+
+    free(out_data);
     hl_cap_wasm_destroy(&cache);
 }
 

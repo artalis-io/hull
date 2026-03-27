@@ -9,6 +9,7 @@
 #include "mod_buffer.h"
 #include "hull/cap/wasm.h"
 #include "hull/cap/wasm_buffer.h"
+#include "hull/cap/wasm_stream.h"
 #include "hull/cap/fs.h"
 #include "hull/vfs.h"
 #include "hull/worker_wasm.h"
@@ -1048,6 +1049,223 @@ static JSValue js_compute_segment(JSContext *ctx, JSValueConst this_val,
     return JS_TRUE;
 }
 
+/* ── compute.stream ────────────────────────────────────────────────── */
+
+typedef struct {
+    JSContext  *ctx;
+    JSValue     func;
+    int         error;
+} JsStreamCbCtx;
+
+static int js_stream_cb_trampoline(const void *data, size_t len,
+                                    uint32_t index, int is_last,
+                                    void *user_data)
+{
+    JsStreamCbCtx *cb = (JsStreamCbCtx *)user_data;
+    if (cb->error) return -1;
+
+    JSValue args[3];
+    args[0] = JS_NewArrayBufferCopy(cb->ctx, (const uint8_t *)data, len);
+    args[1] = JS_NewUint32(cb->ctx, index);
+    args[2] = JS_NewBool(cb->ctx, is_last);
+
+    JSValue ret = JS_Call(cb->ctx, cb->func, JS_UNDEFINED, 3, args);
+    JS_FreeValue(cb->ctx, args[0]);
+    JS_FreeValue(cb->ctx, args[1]);
+    JS_FreeValue(cb->ctx, args[2]);
+
+    if (JS_IsException(ret)) {
+        cb->error = 1;
+        JS_FreeValue(cb->ctx, ret);
+        return -1;
+    }
+    JS_FreeValue(cb->ctx, ret);
+    return 0;
+}
+
+/* compute.stream(name, input, [output], [opts]) -> ArrayBuffer | true */
+static JSValue js_compute_stream(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->base.wasm_cache)
+        return JS_ThrowInternalError(ctx, "compute.stream: WASM runtime not initialized");
+    if (argc < 2)
+        return JS_ThrowTypeError(ctx, "compute.stream requires (name, input [, output, opts])");
+
+    const char *name = JS_ToCString(ctx, argv[0]);
+    if (!name) return JS_EXCEPTION;
+
+    /* ── Parse input (arg 1) ─────────────────────────────────────── */
+    HlStreamInput input = {0};
+    const char *in_file_str = NULL;
+    int input_is_string = 0;
+
+    if (JS_IsObject(argv[1])) {
+        JSValue fv = JS_GetPropertyStr(ctx, argv[1], "file");
+        if (JS_IsString(fv)) {
+            in_file_str = JS_ToCString(ctx, fv);
+            if (in_file_str) {
+                input.kind = HL_STREAM_IN_FILE;
+                input.path = in_file_str;
+            }
+        }
+        JS_FreeValue(ctx, fv);
+    }
+    if (input.kind != HL_STREAM_IN_FILE) {
+        /* Try buffer protocol / ArrayBuffer / string */
+        size_t ilen = 0;
+        const uint8_t *idata = JS_GetArrayBuffer(ctx, &ilen, argv[1]);
+        if (idata) {
+            input.kind = HL_STREAM_IN_BUFFER;
+            input.buffer.data = idata;
+            input.buffer.len = ilen;
+        } else {
+            HlWasmBuffer *wbuf = JS_GetOpaque2(ctx, argv[1], js_wasm_buf_class_id);
+            if (wbuf && !wbuf->closed) {
+                input.kind = HL_STREAM_IN_BUFFER;
+                input.buffer.data = hl_wasm_buffer_data(wbuf);
+                input.buffer.len = hl_wasm_buffer_len(wbuf);
+            } else {
+                HlMappedBuffer *mmap = JS_GetOpaque2(ctx, argv[1], js_mmap_class_id);
+                if (mmap && !mmap->closed) {
+                    input.kind = HL_STREAM_IN_BUFFER;
+                    input.buffer.data = mmap->addr;
+                    input.buffer.len = mmap->len;
+                } else {
+                    const char *s = JS_ToCStringLen(ctx, &ilen, argv[1]);
+                    if (!s) {
+                        JS_FreeCString(ctx, name);
+                        return JS_ThrowTypeError(ctx, "compute.stream: invalid input");
+                    }
+                    input.kind = HL_STREAM_IN_BUFFER;
+                    input.buffer.data = s;
+                    input.buffer.len = ilen;
+                    input_is_string = 1;
+                }
+            }
+        }
+    }
+
+    /* ── Parse output (arg 2) and opts (arg 2 or 3) ──────────────── */
+    HlStreamOutput out_storage = {0};
+    HlStreamOutput *out_ptr = NULL;
+    void *out_data = NULL;
+    size_t out_len = 0;
+    JsStreamCbCtx cb_ctx = {0};
+    int has_output = 0;
+    int opts_idx = 3;
+    const char *out_file_str = NULL;
+
+    if (argc > 2 && JS_IsFunction(ctx, argv[2])) {
+        has_output = 1;
+        cb_ctx.ctx = ctx;
+        cb_ctx.func = JS_DupValue(ctx, argv[2]);
+        out_storage.kind = HL_STREAM_OUT_CALLBACK;
+        out_storage.callback.fn = js_stream_cb_trampoline;
+        out_storage.callback.user_data = &cb_ctx;
+        out_ptr = &out_storage;
+    } else if (argc > 2 && JS_IsObject(argv[2]) && !JS_IsNull(argv[2])) {
+        JSValue fv = JS_GetPropertyStr(ctx, argv[2], "file");
+        if (JS_IsString(fv)) {
+            out_file_str = JS_ToCString(ctx, fv);
+            if (out_file_str) {
+                has_output = 1;
+                out_storage.kind = HL_STREAM_OUT_FILE;
+                out_storage.path = out_file_str;
+                out_ptr = &out_storage;
+            }
+        }
+        JS_FreeValue(ctx, fv);
+        if (!has_output) {
+            /* It's the opts object */
+            opts_idx = 2;
+        }
+    } else if (argc > 2 && (JS_IsNull(argv[2]) || JS_IsUndefined(argv[2]))) {
+        opts_idx = 3;
+    }
+
+    if (!has_output) {
+        out_storage.kind = HL_STREAM_OUT_BUFFER;
+        out_storage.buffer.data = &out_data;
+        out_storage.buffer.len = &out_len;
+        out_ptr = &out_storage;
+    }
+
+    /* ── Parse opts ──────────────────────────────────────────────── */
+    HlStreamOpts stream_opts = {0};
+    if (opts_idx < argc && JS_IsObject(argv[opts_idx])) {
+        JSValue val;
+        val = JS_GetPropertyStr(ctx, argv[opts_idx], "chunkSize");
+        if (!JS_IsUndefined(val)) {
+            int64_t v; JS_ToInt64(ctx, &v, val);
+            stream_opts.chunk_size = (size_t)v;
+        }
+        JS_FreeValue(ctx, val);
+
+        val = JS_GetPropertyStr(ctx, argv[opts_idx], "gas");
+        if (!JS_IsUndefined(val)) {
+            int64_t v; JS_ToInt64(ctx, &v, val);
+            stream_opts.call_opts.gas = v;
+        }
+        JS_FreeValue(ctx, val);
+
+        val = JS_GetPropertyStr(ctx, argv[opts_idx], "heap");
+        if (!JS_IsUndefined(val)) {
+            int64_t v; JS_ToInt64(ctx, &v, val);
+            stream_opts.call_opts.heap_size = (uint32_t)v;
+        }
+        JS_FreeValue(ctx, val);
+
+        val = JS_GetPropertyStr(ctx, argv[opts_idx], "stack");
+        if (!JS_IsUndefined(val)) {
+            int64_t v; JS_ToInt64(ctx, &v, val);
+            stream_opts.call_opts.stack_size = (uint32_t)v;
+        }
+        JS_FreeValue(ctx, val);
+    }
+
+    js_wasm_clamp_opts(&stream_opts.call_opts, &js->base);
+
+    /* ── Call stream API ─────────────────────────────────────────── */
+    const char *err = NULL;
+    HlStreamResult res = {0};
+
+    int rc = hl_cap_wasm_stream(
+        js->base.wasm_cache, name,
+        &input, out_ptr, &stream_opts,
+        js->base.fs_cfg,
+        js->base.app_vfs,
+        js->base.app_vfs ? js->base.app_vfs->root_dir : NULL,
+        js->base.alloc, &res, &err);
+
+    /* Cleanup */
+    if (input_is_string)
+        JS_FreeCString(ctx, (const char *)input.buffer.data);
+    if (in_file_str)
+        JS_FreeCString(ctx, in_file_str);
+    if (out_file_str)
+        JS_FreeCString(ctx, out_file_str);
+    if (has_output && out_storage.kind == HL_STREAM_OUT_CALLBACK)
+        JS_FreeValue(ctx, cb_ctx.func);
+    JS_FreeCString(ctx, name);
+
+    if (rc != HL_WASM_OK)
+        return JS_ThrowInternalError(ctx, "compute.stream: %s",
+                                     err ? err : "stream_failed");
+
+    if (out_storage.kind == HL_STREAM_OUT_BUFFER && out_data) {
+        JSValue ab = JS_NewArrayBufferCopy(ctx, (const uint8_t *)out_data, out_len);
+        hl_alloc_free(js->base.alloc, out_data, out_len);
+        return ab;
+    } else if (out_storage.kind == HL_STREAM_OUT_BUFFER) {
+        return JS_NewArrayBufferCopy(ctx, NULL, 0);
+    }
+
+    return JS_TRUE;
+}
+
 static JSValue js_compute_available(JSContext *ctx, JSValueConst this_val,
                                      int argc, JSValueConst *argv)
 {
@@ -1071,6 +1289,8 @@ static int js_compute_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_compute_instance, "instance", 2));
     JS_SetPropertyStr(ctx, compute, "segment",
                       JS_NewCFunction(ctx, js_compute_segment, "segment", 3));
+    JS_SetPropertyStr(ctx, compute, "stream",
+                      JS_NewCFunction(ctx, js_compute_stream, "stream", 4));
 
     /* compute.async sub-object */
     JSValue async_obj = JS_NewObject(ctx);
