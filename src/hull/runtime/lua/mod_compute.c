@@ -1032,29 +1032,10 @@ static int lua_compute_stream(lua_State *L)
     void *out_data = NULL;
     size_t out_len = 0;
     LuaStreamCbCtx cb_ctx = {0};
-    int has_output = 0;
-    int opts_arg = 4;
-
-    if (lua_isfunction(L, 3)) {
-        has_output = 1;
-        cb_ctx.L = L;
-        cb_ctx.func_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-        /* luaL_ref pops the value at stack top, but we passed index 3.
-         * Actually luaL_ref always pops the top of stack. We need to push
-         * arg 3 to the top first. */
-        /* CORRECTION: luaL_ref pops from the top of the given pseudo-index.
-         * We should push the function to the top, then ref it.
-         * But we called luaL_ref(L, LUA_REGISTRYINDEX) which pops the top
-         * element of the stack. Let's fix this properly. */
-    } else if (lua_istable(L, 3)) {
-    }
-
     /* Parse output (arg 3): nil/absent → buffer, function → callback,
      * table with "file" → file, table without "file" → treat as opts */
-    has_output = 0;
-    cb_ctx.func_ref = LUA_NOREF;
-    cb_ctx.error = 0;
-    opts_arg = 4;
+    int has_output = 0;
+    int opts_arg = 4;
 
     if (lua_isfunction(L, 3)) {
         has_output = 1;
