@@ -547,30 +547,48 @@ Each module ships with:
 
 ---
 
-## Phase 8 — Compute Result Caching
+## Phase 8 — Compute Result Caching — DECLINED (app-level concern)
 
-**Goal:** Memoize `compute.call()` results to avoid redundant re-execution.
+**Status:** Removed from framework roadmap. Left here for rationale.
 
-**Why:** Repeated calls on identical input re-execute from scratch. For
-deterministic compute modules (which all should be — they're pure functions),
-caching is safe and often a 100× speedup for repeated queries.
+**Why not:**
 
-### Design
+Framework-level caching of `compute.call()` results is unsafe because WASM
+modules can have mutable state that makes identical inputs produce different
+outputs:
 
-- **Key:** `SHA-256(module_name + input_bytes + opts_hash)`
-- **Storage:** In-memory LRU cache, configurable max size (default 64 MB)
-- **API:** `compute.call(name, input, { cache = true, cache_ttl = 60 })`
-- **Invalidation:** On module reload, segment change, TTL expiry, or explicit
-  `compute.cache_clear(name)`
-- **Scope:** Per-process (shared across requests), thread-safe
+1. **Persistent instances** (`compute.instance()`) retain linear memory across
+   calls. Accumulated state (counters, indexes, learned weights) means the same
+   input can produce different output on call N vs call N+1.
 
-### Tasks
+2. **Pooled instances** do not reset linear memory between calls. While pooled
+   modules are *supposed to be* pure functions, nothing enforces this at the
+   WASM level. A module with mutable globals or heap state would silently
+   return stale cached results.
 
-- [ ] **LRU cache implementation** (`src/hull/cap/wasm_cache.c`)
-- [ ] **Cache key computation** (SHA-256 of module + input + serialized opts)
-- [ ] **Lua/JS binding** (`cache` and `cache_ttl` in call opts)
-- [ ] **Invalidation hooks** in module reload and segment change paths
-- [ ] **Cache stats** via `compute.cache_stats()` → `{ hits, misses, size, entries }`
+3. **Shared data segments** (`compute.segment()`) can change between calls.
+   A cache keyed on `module_name + input` would miss segment changes, returning
+   results computed against old data.
+
+A framework-level cache that silently returns stale results when a module has
+hidden state is worse than no cache.
+
+**Recommendation:** Apps that need memoization should implement it in Lua/JS
+where they control the invalidation semantics:
+
+```lua
+local cache = {}
+local function cached_score(input)
+    local key = crypto.sha256(input)
+    if cache[key] then return cache[key] end
+    local result = compute.call("score", input)
+    cache[key] = result
+    return result
+end
+```
+
+This gives the app author full control over cache lifetime, invalidation
+triggers, and which modules are safe to cache.
 
 ---
 
@@ -714,7 +732,7 @@ Phase 11 (Streaming I/O)     ←── after Phase 5a (uses persistent instances
 | 5b | Shared data segments readable from pooled + persistent instances ✅ |
 | 6 | `hull compute new score --lang=c` produces a buildable, testable module |
 | 7 | 6 sample modules with source, .wasm, tests, and documentation |
-| 8 | Cached `compute.call` returns in <1µs for repeated identical input |
+| 8 | ~~Declined~~ — app-level concern, not framework |
 | 9 | `SELECT hull_score(col) FROM t` executes WASM per-row at >100K rows/sec |
 | 10 | GPU blur shader processes 1080p image in <5ms |
 | 11 | `compute.stream` processes 1 GB file with <64 MB peak memory |
