@@ -393,6 +393,7 @@ Register with `app.use(method, pattern, mw)`:
 | `rbac` | `hull.middleware.rbac` | `hull:middleware:rbac` | Role-based access control |
 | `health` | `hull.middleware.health` | `hull:middleware:health` | Health check + readiness endpoints |
 | `etag` | `hull.middleware.etag` | `hull:middleware:etag` | ETag response helpers with 304 Not Modified |
+| `db.udf` | `db.udf.register/unregister` | `db.udf.register/unregister` | User-defined SQL functions (Lua/JS callbacks or WASM) |
 | `json` | `hull.json` | (built-in) | JSON encode/decode |
 
 ### Module APIs
@@ -616,6 +617,18 @@ template.clearCache();                           // clear compiled function cach
 - `etag.compute(body)` → `W/"<first 16 hex chars of SHA-256>"` or `nil`.
 - `etag.matches(req, tag)` → boolean. Checks `If-None-Match` header (comma-separated, `*` wildcard).
 - Only computes ETags for GET/HEAD requests. Skips bodies > 1 MB.
+
+**db.udf** — User-defined SQL functions backed by Lua/JS callbacks or WASM modules.
+- `db.udf.register(name, fn, opts?)` — Register scalar UDF (Lua/JS function).
+- `db.udf.register(name, {step, finalize}, opts?)` — Register aggregate UDF.
+- `db.udf.register(name, "module_name", opts?)` — Register WASM-backed UDF.
+- `db.udf.unregister(name)` — Remove a registered UDF.
+- `opts.deterministic` — boolean, enables SQLite optimizer (default: false)
+- `opts.aggregate` — boolean, WASM aggregate mode (default: false)
+- `opts.args` — number of arguments (-1 = variadic, default: 1)
+- `opts.gas` — per-row gas limit for WASM UDFs (default: 100K)
+- Names must start with `hull_` to prevent shadowing SQLite built-ins.
+- Lua/JS UDFs work with `db.query()` only (sync). WASM UDFs work with both `db.query()` and `db.async.query()`.
 
 ### Static File Serving
 
@@ -861,6 +874,23 @@ For cosmocc builds, both x86_64 and aarch64 AOT files are generated automaticall
 **Memory limits:** Configurable at three tiers — per-call opts, CLI flags (`--wasm-heap 512M`), and compile-time (`make HL_WASM_MAX_HEAP_MB=512`). Default: 2 MB heap, 1 MB I/O. Max: ~4 GB heap, 256 MB I/O (WASM32) / 16 GB I/O (Memory64).
 
 **Memory64:** Modules compiled with 64-bit memory (`(memory i64 N)`) are detected automatically. Memory64 modules **require AOT compilation** — the fast interpreter does not support Memory64. `hull build` passes `--enable-memory64` to wamrc when it detects a Memory64 module. The `hull_process` ABI changes to `(i64, i64, i64, i64) -> i32` for Memory64 modules; the runtime dispatches the correct calling convention based on the module's `is_memory64` flag.
+
+**Streaming I/O:**
+```lua
+-- Buffer → buffer
+local result = compute.stream("module", input_data, nil, { chunk_size = 65536 })
+
+-- File → file (never fully in memory)
+compute.stream("module", { file = "input.csv" }, { file = "output.json" }, { chunk_size = 65536 })
+
+-- Buffer → callback
+compute.stream("module", data, function(chunk, index, is_last) end, { chunk_size = 65536 })
+```
+
+- Input: string, WasmBuffer, MappedBuffer, or `{ file = "path" }`
+- Output: nil (return buffer), `{ file = "path" }`, or callback function
+- Uses persistent instance internally — state preserved between chunks
+- Modules can query chunk metadata via `host_call(0x03)`: `hull_stream_is_first()`, `hull_stream_is_last()`, `hull_stream_chunk_index()`
 
 **Architecture:** See `docs/wamr_architecture.md` for the full design document.
 

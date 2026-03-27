@@ -41,7 +41,9 @@ Keel HTTP Server (C)          # epoll/kqueue event loop + async + thread pool
 Kernel Sandbox                # pledge+unveil (Linux), C-level (macOS)
 ```
 
-WASM compute plugins provide a sandboxed data-plane layer for CPU-intensive computation. Plugins are pure functions (no I/O) that run in isolated WASM linear memory with gas metering. Place `.wasm` files in `compute/`, call via `compute.call("name", input)` (sync) or `compute.async.call("name", input)` (async, yields to event loop) from Lua/JS. `hull build` auto-compiles to AOT when `wamrc` is available (~1.2x native speed vs ~54x for fast interpreter). See `docs/wamr_architecture.md`.
+WASM compute plugins provide a sandboxed data-plane layer for CPU-intensive computation. Plugins are pure functions (no I/O) that run in isolated WASM linear memory with gas metering. Place `.wasm` files in `compute/`, call via `compute.call("name", input)` (sync) or `compute.async.call("name", input)` (async, yields to event loop) from Lua/JS. `compute.stream("name", input, output, opts)` processes data larger than memory in chunks via a persistent instance. `hull build` auto-compiles to AOT when `wamrc` is available (~1.2x native speed vs ~54x for fast interpreter). See `docs/wamr_architecture.md`.
+
+WASM modules can also be registered as SQL UDFs via `db.udf.register("hull_name", "module_name", opts)` — the WASM function is called per row during query execution with gas metering.
 
 GPU compute shaders (optional, `HL_ENABLE_GPU=1`) provide massively parallel data processing via wgpu-native (Metal/Vulkan/DX12). Compile shaders inline with `gpu.compile("name", wgsl)` or load from files with `gpu.load("name")` (reads `shaders/<name>.wgsl`). Dispatch with `gpu.dispatch("name", opts)` or chain multiple shaders with `gpu.pipeline(stages, opts)` for single-submission execution. Persistent buffers (`gpu.buffer()`) keep data on GPU across requests. Fire-and-forget mode (`output = false`) updates GPU buffers in-place without readback. `gpu.buffer_copy()` copies between GPU buffers without CPU roundtrip. GPU dispatches time out after 5 seconds (`HL_GPU_TIMEOUT_MS`).
 
@@ -455,6 +457,42 @@ end)
 ```
 
 All queries are parameterized (no SQL injection possible). SQLite is in WAL mode with prepared statement caching. Tables prefixed with `_hull_` are reserved for internal middleware and cannot be accessed via `db.exec()`/`db.query()` — attempts will raise an error.
+
+### User-Defined Functions (UDFs)
+
+Register Lua/JS callbacks or WASM modules as SQL functions:
+
+```lua
+-- Scalar UDF (called per row)
+db.udf.register("hull_upper", function(text)
+    if not text then return nil end
+    return string.upper(text)
+end, { deterministic = true })
+
+-- Aggregate UDF (called across rows with GROUP BY)
+db.udf.register("hull_avg_price", {
+    step = function(ctx, val)
+        ctx.sum = (ctx.sum or 0) + val
+        ctx.count = (ctx.count or 0) + 1
+    end,
+    finalize = function(ctx)
+        if not ctx.count or ctx.count == 0 then return nil end
+        return ctx.sum / ctx.count
+    end,
+}, { aggregate = true })
+
+-- WASM-backed UDF (string arg = module name in compute/)
+db.udf.register("hull_score", "scoring", { deterministic = true, gas = 100000 })
+
+-- Use in queries like any SQL function
+db.query("SELECT hull_upper(name) FROM products")
+db.query("SELECT category, hull_avg_price(price) FROM products GROUP BY category")
+
+-- Remove a UDF
+db.udf.unregister("hull_upper")
+```
+
+Names must start with `hull_` to prevent shadowing SQLite built-ins.
 
 ## Response API
 

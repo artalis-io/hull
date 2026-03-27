@@ -496,6 +496,26 @@ curl -X POST http://localhost:3000/api/data \
   -d '{"name":"test"}'
 ```
 
+### udf
+
+User-defined SQL functions — register Lua/JS callbacks as SQL functions callable from queries. Demonstrates scalar UDFs, aggregate UDFs with GROUP BY.
+
+```bash
+./build/hull -p 3000 examples/udf/app.lua
+
+# Products with uppercased names (hull_upper scalar UDF)
+curl http://localhost:3000/products
+
+# Average price per category (hull_avg_price aggregate UDF)
+curl http://localhost:3000/avg-prices
+```
+
+**Key features demonstrated:**
+- `db.udf.register(name, function, opts)` — Lua/JS scalar UDF
+- `db.udf.register(name, {step, finalize}, opts)` — Lua/JS aggregate UDF
+- `{ deterministic = true }` — enables SQLite query optimization
+- Aggregate UDFs with GROUP BY (per-group state)
+
 ## WASM Compute Developer Tooling
 
 Hull provides `hull compute` commands for creating, building, and testing WASM modules:
@@ -553,6 +573,7 @@ hull test examples/webhooks/
 hull test examples/todo/
 hull test examples/timers/
 hull test examples/cors_manifest/
+hull test examples/udf/
 hull test examples/compute/
 ```
 
