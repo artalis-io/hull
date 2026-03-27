@@ -777,7 +777,15 @@ echo "=== E2E: hull compute tooling (sample modules) ==="
 # requires exec under unveil. Cosmo APE binaries can't self-exec
 # reliably under unveil, so skip on Cosmo.
 COMPUTE_EXAMPLE="examples/compute"
-if [ -d "$COMPUTE_EXAMPLE/compute/vector_ops" ]; then
+# Cosmo APE self-exec under Landlock needs /bin/sh + libc.so.6 access.
+# The polyfill's unveil may not handle all dynamic linker paths on all
+# CI runners. Skip on Cosmo until the polyfill is patched.
+IS_COSMO=0
+case "${CC:-}" in *cosmo*) IS_COSMO=1 ;; esac
+
+if [ "$IS_COSMO" -eq 1 ]; then
+    echo "  SKIP: hull compute test on Cosmo (APE self-exec under Landlock)"
+elif [ -d "$COMPUTE_EXAMPLE/compute/vector_ops" ]; then
     for MODULE in vector_ops sort hash json_extract scoring text; do
         if [ -f "$COMPUTE_EXAMPLE/compute/$MODULE.wasm" ]; then
             HULL_ABS="$(cd "$(dirname "$HULL")" && pwd)/$(basename "$HULL")"
