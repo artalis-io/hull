@@ -94,6 +94,46 @@ wrk -t4 -c100 -d10s http://localhost:3000/read
 wrk -t4 -c100 -d10s -s wrk_post.lua http://localhost:3000/write
 ```
 
+### async_http
+
+Async I/O primitives — async HTTP fetch, async database queries, async sleep, and worker dispatch. Demonstrates how `http.async.get()`, `db.async.query()`, `hull.sleep()`, and `worker.dispatch()` yield the coroutine so the event loop serves other connections while waiting.
+
+```bash
+./build/hull -p 3000 --no-sandbox examples/async_http/app.lua
+
+# Async sleep (yields, event loop stays responsive)
+curl http://localhost:3000/sleep
+
+# Async HTTP fetch (yields during outbound request)
+curl http://localhost:3000/async-fetch
+
+# Async DB query (offloads to thread pool)
+curl http://localhost:3000/async-db
+
+# Worker dispatch (runs Lua function on a separate worker thread)
+curl http://localhost:3000/worker-dispatch
+```
+
+### bench_template
+
+Template rendering performance benchmark — measures variable substitution, loops with conditionals, and full-featured templates (inheritance + includes + filters). Seeds 50 items at startup to isolate template overhead.
+
+```bash
+./build/hull -p 3000 examples/bench_template/app.lua
+
+curl http://localhost:3000/health        # baseline (JSON, no template)
+curl http://localhost:3000/simple        # variable substitution only
+curl http://localhost:3000/loop          # 50-item loop + conditionals
+curl http://localhost:3000/full          # inheritance + include + loop + filters
+```
+
+Use with a benchmarking tool:
+
+```bash
+wrk -t4 -c100 -d10s http://localhost:3000/simple
+wrk -t4 -c100 -d10s http://localhost:3000/full
+```
+
 ### auth
 
 Session-based authentication — register, login, logout, protected routes. Uses `crypto.hash_password` (PBKDF2-SHA256) for password hashing and SQLite-backed sessions.
@@ -179,6 +219,51 @@ curl -X PUT http://localhost:3000/tasks/1 -b cookies.txt \
 curl -X DELETE http://localhost:3000/tasks/1 -b cookies.txt
 ```
 
+### email
+
+Contact-form / email-sending API with SMTP delivery and SQLite email log. Validates input, sends via `smtp.send()`, and logs every attempt (sent or failed) to the database. Configurable via environment variables.
+
+```bash
+SMTP_HOST=localhost SMTP_PORT=587 \
+./build/hull -p 3000 --no-sandbox examples/email/app.lua
+
+# Send an email
+curl -X POST http://localhost:3000/send \
+  -H 'Content-Type: application/json' \
+  -d '{"to":"bob@example.com","subject":"Hello","body":"Hi Bob!"}'
+
+# List sent emails
+curl http://localhost:3000/sent
+
+# Get a single email log entry
+curl http://localhost:3000/sent/1
+```
+
+### health_etag
+
+Health check and ETag middleware — demonstrates `hull.middleware.health` for liveness/readiness endpoints and `hull.middleware.etag` for conditional responses with `304 Not Modified`. Custom health checks, automatic ETag generation for JSON/text/HTML responses.
+
+```bash
+./build/hull -p 3000 examples/health_etag/app.lua
+
+# Liveness check
+curl http://localhost:3000/health
+
+# Readiness check (includes custom checks + DB ping)
+curl http://localhost:3000/ready
+
+# JSON with ETag
+curl -v http://localhost:3000/api/items
+# → ETag: W/"abc123..."
+
+# Conditional request (returns 304 if unchanged)
+curl -H 'If-None-Match: W/"abc123..."' http://localhost:3000/api/items
+
+# Text and HTML with ETag
+curl http://localhost:3000/api/greeting?name=Hull
+curl http://localhost:3000/api/page
+```
+
 ### middleware
 
 Middleware chaining — request ID generation, request logging, rate limiting (60 req/min on `/api/*`), and CORS headers. Shows how middleware composes.
@@ -259,6 +344,23 @@ curl http://localhost:3000/heartbeats
 curl http://localhost:3000/counter
 ```
 
+### templates
+
+Template engine showcase — demonstrates inheritance, includes, filters, loops, conditionals, HTML auto-escaping, and compiled/cached rendering. Renders pages with a base layout, navigation partial, and user data.
+
+```bash
+./build/hull dev examples/templates/app.lua
+
+# Home page (inheritance + includes + loops + filters + escaping)
+curl http://localhost:3000/
+
+# About page (different block content, same base layout)
+curl http://localhost:3000/about
+
+# JSON endpoint (no template)
+curl http://localhost:3000/users
+```
+
 ### compute
 
 WASM compute plugins — offload CPU-intensive work to sandboxed WASM modules. Demonstrates sync `compute.call()` for fast operations and async `compute.async.call()` for expensive computations that yield to the event loop.
@@ -277,6 +379,19 @@ curl http://localhost:3000/async-echo?text=hello
 
 curl http://localhost:3000/health
 ```
+
+#### Sample Compute Modules
+
+Six reference WASM modules ship with the compute example, each with C source, pre-compiled `.wasm`, and test fixtures:
+
+| Module | File | What it does |
+|--------|------|-------------|
+| `vector_ops` | `compute/vector_ops/` | Cosine similarity between float32 vectors |
+| `sort` | `compute/sort/` | In-place quicksort of int32 arrays |
+| `hash` | `compute/hash/` | FNV-1a 64-bit hash |
+| `json_extract` | `compute/json_extract/` | Extract value by key from flat JSON |
+| `scoring` | `compute/scoring/` | Min-max normalization + weighted scoring |
+| `text` | `compute/text/` | Levenshtein edit distance |
 
 ### gpu_search
 
@@ -381,6 +496,45 @@ curl -X POST http://localhost:3000/api/data \
   -d '{"name":"test"}'
 ```
 
+## WASM Compute Developer Tooling
+
+Hull provides `hull compute` commands for creating, building, and testing WASM modules:
+
+```bash
+# Scaffold a new module
+hull compute new mymodule --lang=c
+# Creates: compute/mymodule/mymodule.c, hull_compute.h, test_fixtures.json
+
+# Compile to .wasm
+hull compute build mymodule
+# Creates: compute/mymodule.wasm
+
+# Run test fixtures
+hull compute test mymodule
+
+# Validate module loads in WAMR
+hull compute check mymodule
+```
+
+#### Streaming I/O
+
+Process data larger than memory through WASM modules in chunks:
+
+```lua
+-- Buffer → buffer
+local result = compute.stream("compress", large_data, nil, { chunk_size = 65536 })
+
+-- File → file (never fully in memory)
+compute.stream("transform", { file = "input.csv" }, { file = "output.json" }, { chunk_size = 65536 })
+
+-- Buffer → callback
+compute.stream("compress", data, function(chunk, index, is_last)
+    -- handle each output chunk
+end)
+```
+
+Modules can query chunk metadata via `hull_stream_is_first()`, `hull_stream_is_last()`, `hull_stream_chunk_index()` from the ABI header.
+
 ## Testing Examples
 
 ### Unit tests (`hull test`)
@@ -432,7 +586,13 @@ test("description", () => {
 
 `test.get/post/put/delete/patch` return `{ status, body, json }` where `json` is auto-decoded.
 
-**Note:** Middleware registered via `app.use()` does not run during `hull test` dispatch — only the matched route handler executes. This means session loading, JWT extraction, rate limiting, and CORS are not active in unit tests. For full middleware coverage, use the e2e tests below.
+**Note:** By default, middleware does not run during `hull test` dispatch — only the matched route handler executes. This means session loading, JWT extraction, rate limiting, and CORS are not active in unit tests. Pass `{ middleware = true }` to test with the full middleware chain:
+
+```lua
+local res = test.get("/api/items", { middleware = true })
+```
+
+For full middleware coverage without per-request flags, use the e2e tests below.
 
 ### E2E tests (shell)
 
