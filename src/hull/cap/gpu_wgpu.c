@@ -477,6 +477,8 @@ static int wgpu_dispatch(void *backend_device, HlGpuPipeline *pipeline,
                           const HlGpuDispatchOpts *opts,
                           const HlGpuBuffer *persistent_buffers,
                           int persistent_count,
+                          const HlGpuTexture *persistent_textures,
+                          int persistent_tex_count,
                           void **output, size_t *output_len,
                           const char **err_msg)
 {
@@ -495,9 +497,18 @@ static int wgpu_dispatch(void *backend_device, HlGpuPipeline *pipeline,
     WGPUComputePassEncoder pass = NULL;
     WGPUCommandBuffer cmd = NULL;
 
+    /* Inline textures created during dispatch (destroyed in cleanup) */
+    HlGpuTexture inline_textures[16];
+    int inline_tex_count = 0;
+
+    /* Count texture bindings: sampled = 2 (view + sampler), storage = 1 */
+    int tex_bindings = 0;
+    for (int i = 0; i < opts->texture_count; i++)
+        tex_bindings += opts->textures[i].storage ? 1 : 2;
+
     int has_uniforms = (opts->uniforms && opts->uniforms_len > 0);
     int binding_offset = has_uniforms ? 1 : 0;
-    int total_bindings = opts->buffer_count + binding_offset;
+    int total_bindings = opts->buffer_count + binding_offset + tex_bindings;
 
     if (total_bindings == 0) {
         if (err_msg) *err_msg = "no_buffers";
@@ -516,7 +527,8 @@ static int wgpu_dispatch(void *backend_device, HlGpuPipeline *pipeline,
         return HL_GPU_ERR_INTERNAL;
     }
 
-    temp_bufs = calloc((size_t)opts->buffer_count, sizeof(WGPUBuffer));
+    temp_bufs = calloc((size_t)(opts->buffer_count > 0 ? opts->buffer_count : 1),
+                        sizeof(WGPUBuffer));
     if (!temp_bufs) {
         free(entries);
         if (err_msg) *err_msg = "out_of_memory";
@@ -625,6 +637,80 @@ static int wgpu_dispatch(void *backend_device, HlGpuPipeline *pipeline,
         };
     }
 
+    /* ── Texture entries ─────────────────────────────────────── */
+
+    {
+        int tex_binding = opts->buffer_count + binding_offset;
+        for (int i = 0; i < opts->texture_count; i++) {
+            const HlGpuTextureDesc *td = &opts->textures[i];
+            const HlGpuTexture *tex = NULL;
+
+            /* Look up persistent texture by name */
+            if (td->name && persistent_textures) {
+                for (int p = 0; p < persistent_tex_count; p++) {
+                    if (persistent_textures[p].name[0] != '\0' &&
+                        strcmp(persistent_textures[p].name, td->name) == 0) {
+                        tex = &persistent_textures[p];
+                        break;
+                    }
+                }
+            }
+
+            /* Create inline texture if not persistent */
+            if (!tex && td->width > 0 && td->height > 0 &&
+                inline_tex_count < 16) {
+                HlGpuTexture *itex = &inline_textures[inline_tex_count];
+                memset(itex, 0, sizeof(*itex));
+                int trc = wgpu_texture_create(backend_device, td->width,
+                    td->height, td->format, td->storage,
+                    HL_GPU_FILTER_NEAREST, HL_GPU_ADDRESS_CLAMP,
+                    HL_GPU_ADDRESS_CLAMP, itex);
+                if (trc != HL_GPU_OK) {
+                    if (err_msg) *err_msg = "texture_create_failed";
+                    goto cleanup;
+                }
+                itex->storage = td->storage;
+                if (td->data && td->data_len > 0) {
+                    trc = wgpu_texture_write(backend_device, itex,
+                                              td->data, td->data_len);
+                    if (trc != HL_GPU_OK) {
+                        wgpu_texture_destroy(backend_device, itex);
+                        if (err_msg) *err_msg = "texture_write_failed";
+                        goto cleanup;
+                    }
+                }
+                inline_tex_count++;
+                tex = itex;
+            }
+
+            if (!tex) {
+                if (err_msg) *err_msg = "texture_not_found";
+                goto cleanup;
+            }
+
+            if (tex->storage) {
+                /* Storage texture: single binding (view only) */
+                entries[tex_binding] = (WGPUBindGroupEntry){
+                    .binding = (uint32_t)tex_binding,
+                    .textureView = (WGPUTextureView)tex->view,
+                };
+                tex_binding++;
+            } else {
+                /* Sampled texture: view + sampler */
+                entries[tex_binding] = (WGPUBindGroupEntry){
+                    .binding = (uint32_t)tex_binding,
+                    .textureView = (WGPUTextureView)tex->view,
+                };
+                tex_binding++;
+                entries[tex_binding] = (WGPUBindGroupEntry){
+                    .binding = (uint32_t)tex_binding,
+                    .sampler = (WGPUSampler)tex->sampler,
+                };
+                tex_binding++;
+            }
+        }
+    }
+
     /* ── Bind group ────────────────────────────────────────── */
 
     {
@@ -724,6 +810,30 @@ static int wgpu_dispatch(void *backend_device, HlGpuPipeline *pipeline,
         rc = readback_buffer(dctx, out_buf, out_size, output, output_len);
         if (rc != HL_GPU_OK && err_msg)
             *err_msg = "readback_failed";
+    } else if (output && output_len && opts->output_texture >= 0) {
+        /* Texture readback */
+        int ti = opts->output_texture;
+        const HlGpuTexture *tex = NULL;
+        if (ti < inline_tex_count) {
+            tex = &inline_textures[ti];
+        } else if (ti < opts->texture_count && opts->textures[ti].name &&
+                   persistent_textures) {
+            for (int p = 0; p < persistent_tex_count; p++) {
+                if (persistent_textures[p].name[0] != '\0' &&
+                    strcmp(persistent_textures[p].name, opts->textures[ti].name) == 0) {
+                    tex = &persistent_textures[p];
+                    break;
+                }
+            }
+        }
+        if (!tex) {
+            if (err_msg) *err_msg = "output_texture_not_found";
+            goto cleanup;
+        }
+        rc = wgpu_texture_read(backend_device, (HlGpuTexture *)tex,
+                                output, output_len);
+        if (rc != HL_GPU_OK && err_msg)
+            *err_msg = "texture_readback_failed";
     } else {
         rc = HL_GPU_OK; /* fire-and-forget: compute done, no readback */
     }
@@ -743,6 +853,8 @@ cleanup:
             wgpuBufferRelease(temp_bufs[i]);
         }
     }
+    for (int i = 0; i < inline_tex_count; i++)
+        wgpu_texture_destroy(backend_device, &inline_textures[i]);
     free(temp_bufs);
     free(entries);
     return rc;
@@ -885,6 +997,8 @@ static int wgpu_dispatch_pipeline(void *backend_device,
                                     const HlGpuPipelineOpts *opts,
                                     const HlGpuBuffer *persistent_buffers,
                                     int persistent_count,
+                                    const HlGpuTexture *persistent_textures,
+                                    int persistent_tex_count,
                                     HlGpuPipelineResult *result,
                                     const char **err_msg)
 {
@@ -960,7 +1074,13 @@ static int wgpu_dispatch_pipeline(void *backend_device,
         const HlGpuPipelineStage *stage = &opts->stages[s];
         int has_uniforms = (stage->uniforms && stage->uniforms_len > 0);
         int binding_offset = has_uniforms ? 1 : 0;
-        int total_bindings = stage->buffer_count + binding_offset;
+
+        /* Count texture bindings: sampled = 2 (view + sampler), storage = 1 */
+        int stage_tex_bindings = 0;
+        for (int t = 0; t < stage->texture_count; t++)
+            stage_tex_bindings += stage->textures[t].storage ? 1 : 2;
+
+        int total_bindings = stage->buffer_count + binding_offset + stage_tex_bindings;
 
         if (entry_count + total_bindings > (int)(sizeof(all_entries) / sizeof(all_entries[0]))) {
             if (err_msg) *err_msg = "too_many_bindings";
@@ -1051,6 +1171,50 @@ static int wgpu_dispatch_pipeline(void *backend_device,
                 .buffer = gpu_buf, .offset = 0,
                 .size = (uint64_t)buf_aligned,
             };
+        }
+
+        /* Texture entries for this stage */
+        {
+            int tex_bind = stage->buffer_count + binding_offset;
+            for (int t = 0; t < stage->texture_count; t++) {
+                const HlGpuTextureDesc *td = &stage->textures[t];
+                const HlGpuTexture *tex = NULL;
+
+                /* Look up persistent texture by name */
+                if (td->name && persistent_textures) {
+                    for (int p = 0; p < persistent_tex_count; p++) {
+                        if (persistent_textures[p].name[0] != '\0' &&
+                            strcmp(persistent_textures[p].name, td->name) == 0) {
+                            tex = &persistent_textures[p];
+                            break;
+                        }
+                    }
+                }
+
+                if (!tex) {
+                    if (err_msg) *err_msg = "texture_not_found_in_pipeline";
+                    goto cleanup;
+                }
+
+                if (tex->storage) {
+                    entries[tex_bind] = (WGPUBindGroupEntry){
+                        .binding = (uint32_t)tex_bind,
+                        .textureView = (WGPUTextureView)tex->view,
+                    };
+                    tex_bind++;
+                } else {
+                    entries[tex_bind] = (WGPUBindGroupEntry){
+                        .binding = (uint32_t)tex_bind,
+                        .textureView = (WGPUTextureView)tex->view,
+                    };
+                    tex_bind++;
+                    entries[tex_bind] = (WGPUBindGroupEntry){
+                        .binding = (uint32_t)tex_bind,
+                        .sampler = (WGPUSampler)tex->sampler,
+                    };
+                    tex_bind++;
+                }
+            }
         }
 
         /* Get bind group layout (lazy) */
@@ -1224,6 +1388,284 @@ cleanup:
     return rc;
 }
 
+/* ── Texture format helpers ─────────────────────────────────────────── */
+
+static WGPUTextureFormat tex_format_to_wgpu(HlGpuTexFormat fmt)
+{
+    switch (fmt) {
+    case HL_GPU_TEX_RGBA8:   return WGPUTextureFormat_RGBA8Unorm;
+    case HL_GPU_TEX_R8:      return WGPUTextureFormat_R8Unorm;
+    case HL_GPU_TEX_RGBA16F: return WGPUTextureFormat_RGBA16Float;
+    case HL_GPU_TEX_R32F:    return WGPUTextureFormat_R32Float;
+    default:                 return WGPUTextureFormat_RGBA8Unorm;
+    }
+}
+
+static int tex_format_bpp(HlGpuTexFormat fmt)
+{
+    switch (fmt) {
+    case HL_GPU_TEX_RGBA8:   return 4;
+    case HL_GPU_TEX_R8:      return 1;
+    case HL_GPU_TEX_RGBA16F: return 8;
+    case HL_GPU_TEX_R32F:    return 4;
+    default:                 return 4;
+    }
+}
+
+static WGPUFilterMode filter_to_wgpu(int filter)
+{
+    return (filter == HL_GPU_FILTER_LINEAR) ? WGPUFilterMode_Linear
+                                            : WGPUFilterMode_Nearest;
+}
+
+static WGPUAddressMode address_to_wgpu(int addr)
+{
+    switch (addr) {
+    case HL_GPU_ADDRESS_REPEAT: return WGPUAddressMode_Repeat;
+    case HL_GPU_ADDRESS_MIRROR: return WGPUAddressMode_MirrorRepeat;
+    default:                    return WGPUAddressMode_ClampToEdge;
+    }
+}
+
+/* ── wgpu_texture_create ───────────────────────────────────────────── */
+
+static int wgpu_texture_create(void *backend_device, uint32_t width,
+                                uint32_t height, HlGpuTexFormat format,
+                                int storage, int filter,
+                                int address_u, int address_v,
+                                HlGpuTexture *out)
+{
+    WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)backend_device;
+    if (!dctx || !dctx->device)
+        return HL_GPU_ERR_DEVICE;
+
+    WGPUTextureUsage usage = WGPUTextureUsage_CopyDst | WGPUTextureUsage_CopySrc;
+    if (storage)
+        usage |= WGPUTextureUsage_StorageBinding;
+    else
+        usage |= WGPUTextureUsage_TextureBinding;
+
+    WGPUTextureDescriptor tex_desc = {
+        .label = sv("hull_texture"),
+        .usage = usage,
+        .dimension = WGPUTextureDimension_2D,
+        .size = { width, height, 1 },
+        .format = tex_format_to_wgpu(format),
+        .mipLevelCount = 1,
+        .sampleCount = 1,
+    };
+
+    WGPUTexture texture = wgpuDeviceCreateTexture(dctx->device, &tex_desc);
+    if (!texture)
+        return HL_GPU_ERR_BUFFER;
+
+    WGPUTextureView view = wgpuTextureCreateView(texture, NULL);
+    if (!view) {
+        wgpuTextureDestroy(texture);
+        wgpuTextureRelease(texture);
+        return HL_GPU_ERR_BUFFER;
+    }
+
+    WGPUSamplerDescriptor sampler_desc = {
+        .label = sv("hull_sampler"),
+        .addressModeU = address_to_wgpu(address_u),
+        .addressModeV = address_to_wgpu(address_v),
+        .addressModeW = WGPUAddressMode_ClampToEdge,
+        .magFilter = filter_to_wgpu(filter),
+        .minFilter = filter_to_wgpu(filter),
+        .mipmapFilter = WGPUMipmapFilterMode_Nearest,
+        .lodMinClamp = 0.0f,
+        .lodMaxClamp = 1.0f,
+        .maxAnisotropy = 1,
+    };
+    WGPUSampler sampler = wgpuDeviceCreateSampler(dctx->device, &sampler_desc);
+    if (!sampler) {
+        wgpuTextureViewRelease(view);
+        wgpuTextureDestroy(texture);
+        wgpuTextureRelease(texture);
+        return HL_GPU_ERR_BUFFER;
+    }
+
+    out->handle  = texture;
+    out->view    = view;
+    out->sampler = sampler;
+    out->width   = width;
+    out->height  = height;
+    out->format  = format;
+    out->storage = storage;
+    return HL_GPU_OK;
+}
+
+/* ── wgpu_texture_write ────────────────────────────────────────────── */
+
+static int wgpu_texture_write(void *backend_device, HlGpuTexture *tex,
+                               const void *data, size_t len)
+{
+    WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)backend_device;
+    if (!dctx || !tex || !tex->handle || !data)
+        return HL_GPU_ERR_BUFFER;
+
+    int bpp = tex_format_bpp(tex->format);
+    uint32_t bytes_per_row = tex->width * (uint32_t)bpp;
+    size_t expected = (size_t)bytes_per_row * tex->height;
+    if (len < expected)
+        return HL_GPU_ERR_BUFFER;
+
+    WGPUTexelCopyTextureInfo dst = {
+        .texture  = (WGPUTexture)tex->handle,
+        .mipLevel = 0,
+        .origin   = { 0, 0, 0 },
+        .aspect   = WGPUTextureAspect_All,
+    };
+    WGPUTexelCopyBufferLayout layout = {
+        .offset       = 0,
+        .bytesPerRow  = bytes_per_row,
+        .rowsPerImage = tex->height,
+    };
+    WGPUExtent3D extent = { tex->width, tex->height, 1 };
+
+    wgpuQueueWriteTexture(dctx->queue, &dst, data, len, &layout, &extent);
+    return HL_GPU_OK;
+}
+
+/* ── wgpu_texture_read ─────────────────────────────────────────────── */
+
+static int wgpu_texture_read(void *backend_device, HlGpuTexture *tex,
+                              void **data, size_t *len)
+{
+    WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)backend_device;
+    if (!dctx || !tex || !tex->handle)
+        return HL_GPU_ERR_BUFFER;
+
+    int bpp = tex_format_bpp(tex->format);
+    uint32_t row_bytes = tex->width * (uint32_t)bpp;
+    /* 256-byte alignment required by WebGPU for buffer-to-texture copies */
+    uint32_t aligned_row = (row_bytes + 255) & ~(uint32_t)255;
+    size_t staging_size = (size_t)aligned_row * tex->height;
+
+    /* Create staging buffer */
+    WGPUBufferDescriptor staging_desc = {
+        .label = sv("hull_tex_staging"),
+        .usage = WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst,
+        .size  = staging_size,
+    };
+    WGPUBuffer staging = wgpuDeviceCreateBuffer(dctx->device, &staging_desc);
+    if (!staging)
+        return HL_GPU_ERR_READBACK;
+
+    /* Encode CopyTextureToBuffer */
+    WGPUCommandEncoderDescriptor enc_desc = { .label = sv("hull_tex_read_enc") };
+    WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(
+        dctx->device, &enc_desc);
+    if (!encoder) {
+        wgpuBufferDestroy(staging);
+        wgpuBufferRelease(staging);
+        return HL_GPU_ERR_READBACK;
+    }
+
+    WGPUTexelCopyTextureInfo src = {
+        .texture  = (WGPUTexture)tex->handle,
+        .mipLevel = 0,
+        .origin   = { 0, 0, 0 },
+        .aspect   = WGPUTextureAspect_All,
+    };
+    WGPUTexelCopyBufferInfo dst = {
+        .buffer = staging,
+        .layout = {
+            .offset       = 0,
+            .bytesPerRow  = aligned_row,
+            .rowsPerImage = tex->height,
+        },
+    };
+    WGPUExtent3D extent = { tex->width, tex->height, 1 };
+    wgpuCommandEncoderCopyTextureToBuffer(encoder, &src, &dst, &extent);
+
+    WGPUCommandBufferDescriptor cmd_desc = { .label = sv("hull_tex_read_cmd") };
+    WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(encoder, &cmd_desc);
+    if (!cmd) {
+        wgpuCommandEncoderRelease(encoder);
+        wgpuBufferDestroy(staging);
+        wgpuBufferRelease(staging);
+        return HL_GPU_ERR_READBACK;
+    }
+
+    wgpuQueueSubmit(dctx->queue, 1, &cmd);
+    wgpuDevicePoll(dctx->device, 1, NULL);
+
+    wgpuCommandBufferRelease(cmd);
+    wgpuCommandEncoderRelease(encoder);
+
+    /* Map staging buffer */
+    MapReq map_req = {0};
+    WGPUBufferMapCallbackInfo map_cb = {
+        .mode = WGPUCallbackMode_AllowSpontaneous,
+        .callback = on_buffer_map,
+        .userdata1 = &map_req,
+    };
+    wgpuBufferMapAsync(staging, WGPUMapMode_Read, 0, staging_size, map_cb);
+    wgpuDevicePoll(dctx->device, 1, NULL);
+
+    if (!map_req.done || map_req.status != WGPUMapAsyncStatus_Success) {
+        wgpuBufferDestroy(staging);
+        wgpuBufferRelease(staging);
+        return HL_GPU_ERR_READBACK;
+    }
+
+    const void *mapped = wgpuBufferGetConstMappedRange(staging, 0, staging_size);
+    if (!mapped) {
+        wgpuBufferUnmap(staging);
+        wgpuBufferDestroy(staging);
+        wgpuBufferRelease(staging);
+        return HL_GPU_ERR_READBACK;
+    }
+
+    /* Copy with row-stripping: remove padding */
+    size_t out_size = (size_t)row_bytes * tex->height;
+    void *result = malloc(out_size);
+    if (!result) {
+        wgpuBufferUnmap(staging);
+        wgpuBufferDestroy(staging);
+        wgpuBufferRelease(staging);
+        return HL_GPU_ERR_INTERNAL;
+    }
+
+    const uint8_t *src_ptr = (const uint8_t *)mapped;
+    uint8_t *dst_ptr = (uint8_t *)result;
+    for (uint32_t row = 0; row < tex->height; row++) {
+        memcpy(dst_ptr + (size_t)row * row_bytes,
+               src_ptr + (size_t)row * aligned_row,
+               row_bytes);
+    }
+
+    wgpuBufferUnmap(staging);
+    wgpuBufferDestroy(staging);
+    wgpuBufferRelease(staging);
+
+    *data = result;
+    *len = out_size;
+    return HL_GPU_OK;
+}
+
+/* ── wgpu_texture_destroy ──────────────────────────────────────────── */
+
+static void wgpu_texture_destroy(void *backend_device, HlGpuTexture *tex)
+{
+    (void)backend_device;
+    if (!tex)
+        return;
+    if (tex->sampler)
+        wgpuSamplerRelease((WGPUSampler)tex->sampler);
+    if (tex->view)
+        wgpuTextureViewRelease((WGPUTextureView)tex->view);
+    if (tex->handle) {
+        wgpuTextureDestroy((WGPUTexture)tex->handle);
+        wgpuTextureRelease((WGPUTexture)tex->handle);
+    }
+    tex->handle = NULL;
+    tex->view = NULL;
+    tex->sampler = NULL;
+}
+
 /* ── wgpu_buffer_copy ──────────────────────────────────────────────── */
 
 static int wgpu_buffer_copy(void *backend_device,
@@ -1275,6 +1717,10 @@ const HlGpuBackend hl_gpu_backend_wgpu = {
     .buffer_write      = wgpu_buffer_write,
     .buffer_read       = wgpu_buffer_read,
     .buffer_destroy    = wgpu_buffer_destroy,
+    .texture_create    = wgpu_texture_create,
+    .texture_write     = wgpu_texture_write,
+    .texture_read      = wgpu_texture_read,
+    .texture_destroy   = wgpu_texture_destroy,
 };
 
 #endif /* HL_ENABLE_GPU */

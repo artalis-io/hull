@@ -53,6 +53,16 @@ static HlGpuBuffer *find_buffer(HlGpuDevice *dev, const char *name)
     return NULL;
 }
 
+/* Find persistent texture by name in a device */
+static HlGpuTexture *find_texture(HlGpuDevice *dev, const char *name)
+{
+    for (int i = 0; i < dev->texture_count; i++) {
+        if (strcmp(dev->textures[i].name, name) == 0)
+            return &dev->textures[i];
+    }
+    return NULL;
+}
+
 /* ── Lifecycle ─────────────────────────────────────────────────────── */
 
 int hl_cap_gpu_init(HlGpuCtx *ctx, const HlGpuBackend *backend)
@@ -100,7 +110,7 @@ void hl_cap_gpu_destroy(HlGpuCtx *ctx)
     if (!ctx || !ctx->backend)
         return;
 
-    /* Destroy all pipelines and buffers per device */
+    /* Destroy all pipelines, buffers, and textures per device */
     for (int d = 0; d < ctx->device_count; d++) {
         HlGpuDevice *dev = &ctx->devices[d];
 
@@ -111,6 +121,12 @@ void hl_cap_gpu_destroy(HlGpuCtx *ctx)
         for (int i = 0; i < dev->buffer_count; i++)
             ctx->backend->buffer_destroy(dev->backend_device,
                                          &dev->buffers[i]);
+
+        if (ctx->backend->texture_destroy) {
+            for (int i = 0; i < dev->texture_count; i++)
+                ctx->backend->texture_destroy(dev->backend_device,
+                                               &dev->textures[i]);
+        }
 
         pthread_mutex_destroy(&dev->mutex);
     }
@@ -235,6 +251,7 @@ int hl_cap_gpu_dispatch(HlGpuCtx *ctx, const char *shader_name,
     /* Dispatch through backend */
     int rc = ctx->backend->dispatch(dev->backend_device, pipeline, opts,
                                     dev->buffers, dev->buffer_count,
+                                    dev->textures, dev->texture_count,
                                     output, output_len, err_msg);
 
     pthread_mutex_unlock(&dev->mutex);
@@ -308,7 +325,8 @@ int hl_cap_gpu_pipeline(HlGpuCtx *ctx, const HlGpuPipelineOpts *opts,
 
     int rc = ctx->backend->dispatch_pipeline(
         dev->backend_device, pipelines, opts->stage_count, opts,
-        dev->buffers, dev->buffer_count, result, err_msg);
+        dev->buffers, dev->buffer_count,
+        dev->textures, dev->texture_count, result, err_msg);
 
     pthread_mutex_unlock(&dev->mutex);
 
@@ -450,6 +468,142 @@ void hl_cap_gpu_buffer_destroy(HlGpuCtx *ctx, int device, const char *name)
             if (i < dev->buffer_count - 1)
                 dev->buffers[i] = dev->buffers[dev->buffer_count - 1];
             dev->buffer_count--;
+            break;
+        }
+    }
+
+    pthread_mutex_unlock(&dev->mutex);
+}
+
+/* ── Persistent textures ───────────────────────────────────────────── */
+
+int hl_cap_gpu_texture_create(HlGpuCtx *ctx, int device, const char *name,
+                               uint32_t width, uint32_t height,
+                               HlGpuTexFormat format, int storage,
+                               int filter, int address_u, int address_v)
+{
+    if (!ctx || !name || width == 0 || height == 0)
+        return HL_GPU_ERR_INTERNAL;
+    if (width > HL_GPU_MAX_TEXTURE_DIM || height > HL_GPU_MAX_TEXTURE_DIM)
+        return HL_GPU_ERR_BUFFER;
+    if (ctx->device_count == 0)
+        return HL_GPU_ERR_NOT_AVAILABLE;
+    if (!ctx->backend->texture_create)
+        return HL_GPU_ERR_INTERNAL;
+
+    int dev_idx = resolve_device(ctx, device);
+    if (dev_idx < 0 || dev_idx >= ctx->device_count)
+        return HL_GPU_ERR_DEVICE;
+
+    HlGpuDevice *dev = &ctx->devices[dev_idx];
+    pthread_mutex_lock(&dev->mutex);
+
+    /* Check if already exists */
+    if (find_texture(dev, name)) {
+        pthread_mutex_unlock(&dev->mutex);
+        return HL_GPU_OK; /* idempotent */
+    }
+
+    if (dev->texture_count >= HL_GPU_TEXTURE_MAX) {
+        pthread_mutex_unlock(&dev->mutex);
+        return HL_GPU_ERR_INTERNAL;
+    }
+
+    HlGpuTexture *slot = &dev->textures[dev->texture_count];
+    int rc = ctx->backend->texture_create(dev->backend_device, width, height,
+                                           format, storage, filter,
+                                           address_u, address_v, slot);
+    if (rc == HL_GPU_OK) {
+        snprintf(slot->name, sizeof(slot->name), "%s", name);
+        dev->texture_count++;
+    }
+
+    pthread_mutex_unlock(&dev->mutex);
+    return rc;
+}
+
+int hl_cap_gpu_texture_write(HlGpuCtx *ctx, int device, const char *name,
+                              const void *data, size_t len)
+{
+    if (!ctx || !name || !data)
+        return HL_GPU_ERR_INTERNAL;
+    if (!ctx->backend->texture_write)
+        return HL_GPU_ERR_INTERNAL;
+
+    int dev_idx = resolve_device(ctx, device);
+    if (dev_idx < 0 || dev_idx >= ctx->device_count)
+        return HL_GPU_ERR_DEVICE;
+
+    HlGpuDevice *dev = &ctx->devices[dev_idx];
+    pthread_mutex_lock(&dev->mutex);
+
+    HlGpuTexture *tex = find_texture(dev, name);
+    if (!tex) {
+        pthread_mutex_unlock(&dev->mutex);
+        return HL_GPU_ERR_NOT_FOUND;
+    }
+
+    int rc = ctx->backend->texture_write(dev->backend_device, tex, data, len);
+    pthread_mutex_unlock(&dev->mutex);
+    return rc;
+}
+
+int hl_cap_gpu_texture_read(HlGpuCtx *ctx, int device, const char *name,
+                             void **data, size_t *len,
+                             uint32_t *out_width, uint32_t *out_height,
+                             HlGpuTexFormat *out_format)
+{
+    if (!ctx || !name || !data || !len)
+        return HL_GPU_ERR_INTERNAL;
+    if (!ctx->backend->texture_read)
+        return HL_GPU_ERR_INTERNAL;
+
+    int dev_idx = resolve_device(ctx, device);
+    if (dev_idx < 0 || dev_idx >= ctx->device_count)
+        return HL_GPU_ERR_DEVICE;
+
+    HlGpuDevice *dev = &ctx->devices[dev_idx];
+    pthread_mutex_lock(&dev->mutex);
+
+    HlGpuTexture *tex = find_texture(dev, name);
+    if (!tex) {
+        pthread_mutex_unlock(&dev->mutex);
+        return HL_GPU_ERR_NOT_FOUND;
+    }
+
+    int rc = ctx->backend->texture_read(dev->backend_device, tex, data, len);
+    if (rc == HL_GPU_OK) {
+        if (out_width)  *out_width  = tex->width;
+        if (out_height) *out_height = tex->height;
+        if (out_format) *out_format = tex->format;
+    }
+
+    pthread_mutex_unlock(&dev->mutex);
+    return rc;
+}
+
+void hl_cap_gpu_texture_destroy(HlGpuCtx *ctx, int device, const char *name)
+{
+    if (!ctx || !name)
+        return;
+    if (!ctx->backend->texture_destroy)
+        return;
+
+    int dev_idx = resolve_device(ctx, device);
+    if (dev_idx < 0 || dev_idx >= ctx->device_count)
+        return;
+
+    HlGpuDevice *dev = &ctx->devices[dev_idx];
+    pthread_mutex_lock(&dev->mutex);
+
+    for (int i = 0; i < dev->texture_count; i++) {
+        if (strcmp(dev->textures[i].name, name) == 0) {
+            ctx->backend->texture_destroy(dev->backend_device,
+                                           &dev->textures[i]);
+            /* Compact: move last element into gap */
+            if (i < dev->texture_count - 1)
+                dev->textures[i] = dev->textures[dev->texture_count - 1];
+            dev->texture_count--;
             break;
         }
     }

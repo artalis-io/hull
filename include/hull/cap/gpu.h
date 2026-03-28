@@ -46,6 +46,54 @@ typedef enum {
 #define HL_GPU_USAGE_WRITE      0x02
 #define HL_GPU_USAGE_READWRITE  0x03
 
+/* ── Texture format ───────────────────────────────────────────────── */
+
+typedef enum {
+    HL_GPU_TEX_RGBA8   = 0,
+    HL_GPU_TEX_R8      = 1,
+    HL_GPU_TEX_RGBA16F = 2,
+    HL_GPU_TEX_R32F    = 3,
+} HlGpuTexFormat;
+
+/* ── Sampler configuration ────────────────────────────────────────── */
+
+typedef enum {
+    HL_GPU_FILTER_NEAREST = 0,
+    HL_GPU_FILTER_LINEAR  = 1,
+} HlGpuFilterMode;
+
+typedef enum {
+    HL_GPU_ADDRESS_CLAMP  = 0,
+    HL_GPU_ADDRESS_REPEAT = 1,
+    HL_GPU_ADDRESS_MIRROR = 2,
+} HlGpuAddressMode;
+
+/* ── Persistent texture ───────────────────────────────────────────── */
+
+typedef struct HlGpuTexture {
+    char     name[HL_GPU_NAME_MAX];
+    void    *handle;     /* WGPUTexture */
+    void    *view;       /* WGPUTextureView */
+    void    *sampler;    /* WGPUSampler */
+    uint32_t width;
+    uint32_t height;
+    HlGpuTexFormat format;
+    int      storage;    /* 1 = storage texture, 0 = sampled */
+} HlGpuTexture;
+
+/* ── Texture descriptor (for dispatch/pipeline) ───────────────────── */
+
+typedef struct HlGpuTextureDesc {
+    const char    *name;       /* persistent texture name, or NULL for inline */
+    const void    *data;       /* pixel data to upload (NULL = use existing) */
+    size_t         data_len;
+    uint32_t       width;
+    uint32_t       height;
+    HlGpuTexFormat format;
+    int            storage;    /* 1 = storage, 0 = sampled (default) */
+    int            binding;    /* -1 = auto-assign */
+} HlGpuTextureDesc;
+
 /* ── Types ─────────────────────────────────────────────────────────── */
 
 typedef struct HlGpuBufferDesc {
@@ -63,10 +111,13 @@ typedef struct {
 typedef struct HlGpuDispatchOpts {
     HlGpuBufferDesc *buffers;
     int              buffer_count;
+    HlGpuTextureDesc *textures;
+    int              texture_count;
     HlGpuWorkgroups  workgroups;
     const void      *uniforms;
     size_t           uniforms_len;
     int              output_buffer;   /* index to read back */
+    int              output_texture;  /* texture index to read back as pixels, -1 = none */
     int              device;          /* -1 = default device */
     uint32_t         timeout_ms;     /* 0 = default (HL_GPU_TIMEOUT_MS), min 10ms */
 } HlGpuDispatchOpts;
@@ -86,7 +137,7 @@ typedef struct HlGpuBuffer {
     int     usage;
 } HlGpuBuffer;
 
-/* Per-device state (pipelines + buffers + backend handle) */
+/* Per-device state (pipelines + buffers + textures + backend handle) */
 typedef struct HlGpuDevice {
     char  name[HL_GPU_NAME_MAX];     /* adapter name for gpu.devices() */
     void *backend_device;             /* opaque, owned by backend vtable */
@@ -94,6 +145,8 @@ typedef struct HlGpuDevice {
     int            pipeline_count;
     HlGpuBuffer   buffers[HL_GPU_BUFFER_MAX];
     int            buffer_count;
+    HlGpuTexture  textures[HL_GPU_TEXTURE_MAX];
+    int            texture_count;
     pthread_mutex_t mutex;
 } HlGpuDevice;
 
@@ -111,6 +164,8 @@ typedef struct HlGpuPipelineStage {
     const char      *shader;          /* compiled shader name (required) */
     HlGpuBufferDesc *buffers;
     int              buffer_count;
+    HlGpuTextureDesc *textures;
+    int              texture_count;
     HlGpuWorkgroups  workgroups;
     const void      *uniforms;
     size_t           uniforms_len;
@@ -160,6 +215,7 @@ typedef struct HlGpuBackend {
     int   (*dispatch)(void *backend_device, HlGpuPipeline *pipeline,
                       const HlGpuDispatchOpts *opts,
                       const HlGpuBuffer *persistent_buffers, int persistent_count,
+                      const HlGpuTexture *persistent_textures, int persistent_tex_count,
                       void **output, size_t *output_len,
                       const char **err_msg);
 
@@ -169,6 +225,8 @@ typedef struct HlGpuBackend {
                                 const HlGpuPipelineOpts *opts,
                                 const HlGpuBuffer *persistent_buffers,
                                 int persistent_count,
+                                const HlGpuTexture *persistent_textures,
+                                int persistent_tex_count,
                                 HlGpuPipelineResult *result,
                                 const char **err_msg);
 
@@ -184,6 +242,17 @@ typedef struct HlGpuBackend {
     int   (*buffer_read)(void *backend_device, HlGpuBuffer *buf,
                          void **data, size_t *len);
     void  (*buffer_destroy)(void *backend_device, HlGpuBuffer *buf);
+
+    /* Texture ops */
+    int   (*texture_create)(void *backend_device, uint32_t width, uint32_t height,
+                            HlGpuTexFormat format, int storage,
+                            int filter, int address_u, int address_v,
+                            HlGpuTexture *out);
+    int   (*texture_write)(void *backend_device, HlGpuTexture *tex,
+                           const void *data, size_t len);
+    int   (*texture_read)(void *backend_device, HlGpuTexture *tex,
+                          void **data, size_t *len);
+    void  (*texture_destroy)(void *backend_device, HlGpuTexture *tex);
 } HlGpuBackend;
 
 /* Top-level GPU context */
@@ -236,6 +305,19 @@ void hl_cap_gpu_buffer_destroy(HlGpuCtx *ctx, int device, const char *name);
 int  hl_cap_gpu_buffer_copy(HlGpuCtx *ctx, int device,
                              const char *src_name, const char *dst_name,
                              size_t src_offset, size_t dst_offset, size_t size);
+
+/* Persistent textures (per-device) */
+int  hl_cap_gpu_texture_create(HlGpuCtx *ctx, int device, const char *name,
+                                uint32_t width, uint32_t height,
+                                HlGpuTexFormat format, int storage,
+                                int filter, int address_u, int address_v);
+int  hl_cap_gpu_texture_write(HlGpuCtx *ctx, int device, const char *name,
+                               const void *data, size_t len);
+int  hl_cap_gpu_texture_read(HlGpuCtx *ctx, int device, const char *name,
+                              void **data, size_t *len,
+                              uint32_t *out_width, uint32_t *out_height,
+                              HlGpuTexFormat *out_format);
+void hl_cap_gpu_texture_destroy(HlGpuCtx *ctx, int device, const char *name);
 
 /* Backend selection (defined in gpu_wgpu.c) */
 extern const HlGpuBackend hl_gpu_backend_wgpu;

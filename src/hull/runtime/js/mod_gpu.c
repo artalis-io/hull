@@ -8,6 +8,7 @@
 
 #include "mod_buffer.h"
 #include "hull/cap/gpu.h"
+#include "hull/cap/image.h"
 #include "hull/worker_gpu.h"
 #include "hull/async.h"
 #include "hull/alloc.h"
@@ -308,14 +309,37 @@ static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
 
     opts.buffers = bufs;
     opts.buffer_count = buf_count;
+    opts.output_texture = -1;
+
+    /* Parse textures */
+    HlGpuTextureDesc tex_descs[8];
+    const char *tex_strs[32] = {0};
+    int tex_str_count = 0;
+    JSValue tex_arr = JS_GetPropertyStr(ctx, opts_val, "textures");
+    int tex_count = js_parse_texture_descs(ctx, tex_arr, tex_descs, 8,
+                                            tex_strs, &tex_str_count, 32);
+    JS_FreeValue(ctx, tex_arr);
+    opts.textures = tex_descs;
+    opts.texture_count = tex_count;
+
+    /* Parse output_texture (0-indexed in JS) */
+    JSValue ot_val = JS_GetPropertyStr(ctx, opts_val, "outputTexture");
+    if (!JS_IsUndefined(ot_val)) {
+        int32_t ot;
+        JS_ToInt32(ctx, &ot, ot_val);
+        opts.output_texture = ot;
+    }
+    JS_FreeValue(ctx, ot_val);
 
     void *output = NULL;
     size_t output_len = 0;
     const char *err_msg = NULL;
 
     /* Fire-and-forget: pass NULL output pointers */
-    void **out_ptr = (opts.output_buffer >= 0) ? &output : NULL;
-    size_t *out_len_ptr = (opts.output_buffer >= 0) ? &output_len : NULL;
+    void **out_ptr = (opts.output_buffer >= 0 || opts.output_texture >= 0)
+                      ? &output : NULL;
+    size_t *out_len_ptr = (opts.output_buffer >= 0 || opts.output_texture >= 0)
+                           ? &output_len : NULL;
 
     int rc = hl_cap_gpu_dispatch(gpu, name, &opts,
                                  out_ptr, out_len_ptr, &err_msg);
@@ -328,6 +352,10 @@ static JSValue js_gpu_dispatch(JSContext *ctx, JSValueConst this_val,
         if (buf_name_strs[i]) JS_FreeCString(ctx, buf_name_strs[i]);
         if (buf_data_strs[i]) JS_FreeCString(ctx, buf_data_strs[i]);
     }
+
+    /* Free texture tracked strings */
+    for (int i = 0; i < tex_str_count; i++)
+        JS_FreeCString(ctx, tex_strs[i]);
 
     JS_FreeCString(ctx, name);
 
@@ -489,6 +517,254 @@ static JSValue js_gpu_buffer_copy(JSContext *ctx, JSValueConst this_val,
                  : "copy_failed");
 
     return JS_TRUE;
+}
+
+/* ── Texture format helper ─────────────────────────────────────────── */
+
+static HlGpuTexFormat js_parse_tex_format(const char *s)
+{
+    if (!s) return HL_GPU_TEX_RGBA8;
+    if (strcmp(s, "r8") == 0)      return HL_GPU_TEX_R8;
+    if (strcmp(s, "rgba16f") == 0)  return HL_GPU_TEX_RGBA16F;
+    if (strcmp(s, "r32f") == 0)     return HL_GPU_TEX_R32F;
+    return HL_GPU_TEX_RGBA8;
+}
+
+/* ── gpu.texture(name, data|null, opts?) ──────────────────────────── */
+
+static JSValue js_gpu_texture(JSContext *ctx, JSValueConst this_val,
+                               int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 2)
+        return JS_ThrowTypeError(ctx, "gpu.texture requires name and data/null");
+
+    HlGpuCtx *gpu = js_get_gpu_ctx(ctx);
+    if (!gpu) return JS_ThrowInternalError(ctx, "gpu not available");
+
+    const char *name = JS_ToCString(ctx, argv[0]);
+    if (!name) return JS_EXCEPTION;
+
+    int device = -1;
+
+    /* null = destroy */
+    if (JS_IsNull(argv[1])) {
+        hl_cap_gpu_texture_destroy(gpu, device, name);
+        JS_FreeCString(ctx, name);
+        return JS_TRUE;
+    }
+
+    uint32_t width = 0, height = 0;
+    HlGpuTexFormat format = HL_GPU_TEX_RGBA8;
+    int storage = 0;
+    int filter = HL_GPU_FILTER_NEAREST;
+    int address_u = HL_GPU_ADDRESS_CLAMP;
+    int address_v = HL_GPU_ADDRESS_CLAMP;
+    const void *pixels = NULL;
+    size_t pixel_len = 0;
+    const char *str_data = NULL;
+    int str_needs_free = 0;
+
+    /* Check if arg 1 is an HlImage object */
+    HlImage *img = JS_GetOpaque(argv[1], js_image_class_id);
+    if (img) {
+        width = img->width;
+        height = img->height;
+        format = (HlGpuTexFormat)img->format;
+        pixels = img->pixels;
+        pixel_len = img->pixel_len;
+    } else {
+        /* Get data from buffer protocol */
+        HlBufferView bv;
+        if (js_get_buffer(ctx, argv[1], &bv, &str_data, &str_needs_free)) {
+            pixels = bv.data;
+            pixel_len = bv.len;
+        } else {
+            JS_FreeCString(ctx, name);
+            return JS_ThrowTypeError(ctx, "gpu.texture: data must be HlImage, ArrayBuffer, or string");
+        }
+    }
+
+    /* Parse opts */
+    if (argc > 2 && JS_IsObject(argv[2])) {
+        JSValue v;
+        v = JS_GetPropertyStr(ctx, argv[2], "device");
+        if (!JS_IsUndefined(v)) { int32_t d; JS_ToInt32(ctx, &d, v); device = d; }
+        JS_FreeValue(ctx, v);
+        v = JS_GetPropertyStr(ctx, argv[2], "width");
+        if (!JS_IsUndefined(v)) { uint32_t w; JS_ToUint32(ctx, &w, v); width = w; }
+        JS_FreeValue(ctx, v);
+        v = JS_GetPropertyStr(ctx, argv[2], "height");
+        if (!JS_IsUndefined(v)) { uint32_t h; JS_ToUint32(ctx, &h, v); height = h; }
+        JS_FreeValue(ctx, v);
+        v = JS_GetPropertyStr(ctx, argv[2], "format");
+        if (JS_IsString(v)) {
+            const char *f = JS_ToCString(ctx, v);
+            if (f) { format = js_parse_tex_format(f); JS_FreeCString(ctx, f); }
+        }
+        JS_FreeValue(ctx, v);
+        v = JS_GetPropertyStr(ctx, argv[2], "storage");
+        if (JS_ToBool(ctx, v)) storage = 1;
+        JS_FreeValue(ctx, v);
+        v = JS_GetPropertyStr(ctx, argv[2], "filter");
+        if (JS_IsString(v)) {
+            const char *f = JS_ToCString(ctx, v);
+            if (f && strcmp(f, "linear") == 0) filter = HL_GPU_FILTER_LINEAR;
+            if (f) JS_FreeCString(ctx, f);
+        }
+        JS_FreeValue(ctx, v);
+        v = JS_GetPropertyStr(ctx, argv[2], "wrap");
+        if (JS_IsString(v)) {
+            const char *w = JS_ToCString(ctx, v);
+            if (w) {
+                if (strcmp(w, "repeat") == 0) {
+                    address_u = HL_GPU_ADDRESS_REPEAT;
+                    address_v = HL_GPU_ADDRESS_REPEAT;
+                } else if (strcmp(w, "mirror") == 0) {
+                    address_u = HL_GPU_ADDRESS_MIRROR;
+                    address_v = HL_GPU_ADDRESS_MIRROR;
+                }
+                JS_FreeCString(ctx, w);
+            }
+        }
+        JS_FreeValue(ctx, v);
+    }
+
+    if (width == 0 || height == 0) {
+        if (str_data) JS_FreeCString(ctx, str_data);
+        JS_FreeCString(ctx, name);
+        return JS_ThrowTypeError(ctx, "gpu.texture: width and height required");
+    }
+
+    int rc = hl_cap_gpu_texture_create(gpu, device, name, width, height,
+                                        format, storage, filter,
+                                        address_u, address_v);
+    if (rc == HL_GPU_OK && pixels && pixel_len > 0)
+        rc = hl_cap_gpu_texture_write(gpu, device, name, pixels, pixel_len);
+
+    if (str_data) JS_FreeCString(ctx, str_data);
+    JS_FreeCString(ctx, name);
+
+    if (rc != HL_GPU_OK)
+        return JS_ThrowInternalError(ctx, "gpu.texture failed");
+    return JS_TRUE;
+}
+
+/* ── gpu.textureRead(name, opts?) → HlImage ──────────────────────── */
+
+static JSValue js_gpu_texture_read(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "gpu.textureRead requires name");
+
+    HlGpuCtx *gpu = js_get_gpu_ctx(ctx);
+    if (!gpu) return JS_ThrowInternalError(ctx, "gpu not available");
+
+    const char *name = JS_ToCString(ctx, argv[0]);
+    if (!name) return JS_EXCEPTION;
+
+    int device = -1;
+    void *data = NULL;
+    size_t len = 0;
+    uint32_t w = 0, h = 0;
+    HlGpuTexFormat fmt = HL_GPU_TEX_RGBA8;
+
+    int rc = hl_cap_gpu_texture_read(gpu, device, name, &data, &len,
+                                      &w, &h, &fmt);
+    JS_FreeCString(ctx, name);
+
+    if (rc != HL_GPU_OK)
+        return JS_ThrowInternalError(ctx, "gpu.textureRead failed");
+
+    /* Create HlImage, then wrap as JS object */
+    HlImage *img = hl_image_new(w, h, (HlImageFormat)fmt, data, len, NULL);
+    free(data);
+    if (!img)
+        return JS_ThrowInternalError(ctx, "gpu.textureRead: image creation failed");
+
+    /* Wrap using js_image_class_id (same pattern as mod_image.c) */
+    JSValue obj = JS_NewObjectClass(ctx, (int)js_image_class_id);
+    if (JS_IsException(obj)) {
+        hl_image_free(img);
+        return JS_EXCEPTION;
+    }
+    JS_SetOpaque(obj, img);
+    return obj;
+}
+
+/* ── JS texture desc parsing helper ──────────────────────────────── */
+
+static int js_parse_texture_descs(JSContext *ctx, JSValueConst arr,
+                                   HlGpuTextureDesc *descs, int max_descs,
+                                   const char **tracked_strs, int *str_count,
+                                   int str_max)
+{
+    if (!JS_IsArray(ctx, arr))
+        return 0;
+    JSValue len_val = JS_GetPropertyStr(ctx, arr, "length");
+    int32_t count = 0;
+    JS_ToInt32(ctx, &count, len_val);
+    JS_FreeValue(ctx, len_val);
+    if (count > max_descs) count = max_descs;
+
+    for (int32_t i = 0; i < count; i++) {
+        JSValue elem = JS_GetPropertyUint32(ctx, arr, (uint32_t)i);
+        memset(&descs[i], 0, sizeof(descs[i]));
+        descs[i].binding = -1;
+
+        if (JS_IsObject(elem)) {
+            JSValue nv = JS_GetPropertyStr(ctx, elem, "name");
+            if (JS_IsString(nv)) {
+                descs[i].name = JS_ToCString(ctx, nv);
+                if (descs[i].name && *str_count < str_max)
+                    tracked_strs[(*str_count)++] = descs[i].name;
+            }
+            JS_FreeValue(ctx, nv);
+
+            JSValue sv2 = JS_GetPropertyStr(ctx, elem, "storage");
+            descs[i].storage = JS_ToBool(ctx, sv2);
+            JS_FreeValue(ctx, sv2);
+
+            JSValue wv = JS_GetPropertyStr(ctx, elem, "width");
+            if (!JS_IsUndefined(wv)) { uint32_t w; JS_ToUint32(ctx, &w, wv); descs[i].width = w; }
+            JS_FreeValue(ctx, wv);
+
+            JSValue hv = JS_GetPropertyStr(ctx, elem, "height");
+            if (!JS_IsUndefined(hv)) { uint32_t h; JS_ToUint32(ctx, &h, hv); descs[i].height = h; }
+            JS_FreeValue(ctx, hv);
+
+            JSValue fv = JS_GetPropertyStr(ctx, elem, "format");
+            if (JS_IsString(fv)) {
+                const char *f = JS_ToCString(ctx, fv);
+                if (f) { descs[i].format = js_parse_tex_format(f); JS_FreeCString(ctx, f); }
+            }
+            JS_FreeValue(ctx, fv);
+
+            /* data: ArrayBuffer or string */
+            JSValue dv = JS_GetPropertyStr(ctx, elem, "data");
+            if (!JS_IsUndefined(dv) && !JS_IsNull(dv)) {
+                size_t dlen;
+                uint8_t *dab = JS_GetArrayBuffer(ctx, &dlen, dv);
+                if (dab) {
+                    descs[i].data = dab;
+                    descs[i].data_len = dlen;
+                } else {
+                    const char *ds = JS_ToCStringLen(ctx, &dlen, dv);
+                    if (ds) {
+                        descs[i].data = ds;
+                        descs[i].data_len = dlen;
+                        if (*str_count < str_max)
+                            tracked_strs[(*str_count)++] = ds;
+                    }
+                }
+            }
+            JS_FreeValue(ctx, dv);
+        }
+        JS_FreeValue(ctx, elem);
+    }
+    return count;
 }
 
 /* push_result callback: convert HlWorkerGpuOp result to JS value */
@@ -1299,6 +1575,10 @@ static int js_gpu_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_gpu_buffer_read, "bufferRead", 1));
     JS_SetPropertyStr(ctx, gpu, "bufferCopy",
                       JS_NewCFunction(ctx, js_gpu_buffer_copy, "bufferCopy", 3));
+    JS_SetPropertyStr(ctx, gpu, "texture",
+                      JS_NewCFunction(ctx, js_gpu_texture, "texture", 3));
+    JS_SetPropertyStr(ctx, gpu, "textureRead",
+                      JS_NewCFunction(ctx, js_gpu_texture_read, "textureRead", 1));
 
     /* gpu.async sub-object */
     JSValue async_obj = JS_NewObject(ctx);

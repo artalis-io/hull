@@ -312,6 +312,114 @@ UTEST(hull_cap_gpu, pipeline_two_stage)
     hl_cap_gpu_destroy(&ctx);
 }
 
+UTEST(hull_cap_gpu, texture_create_destroy)
+{
+    HlGpuCtx ctx;
+    if (!gpu_test_init(&ctx)) { ASSERT_TRUE(1); return; }
+
+    int rc = hl_cap_gpu_texture_create(&ctx, -1, "test_tex",
+                                        64, 64, HL_GPU_TEX_RGBA8, 0,
+                                        HL_GPU_FILTER_NEAREST,
+                                        HL_GPU_ADDRESS_CLAMP,
+                                        HL_GPU_ADDRESS_CLAMP);
+    ASSERT_EQ(HL_GPU_OK, rc);
+
+    /* Idempotent create */
+    rc = hl_cap_gpu_texture_create(&ctx, -1, "test_tex",
+                                    64, 64, HL_GPU_TEX_RGBA8, 0,
+                                    HL_GPU_FILTER_NEAREST,
+                                    HL_GPU_ADDRESS_CLAMP,
+                                    HL_GPU_ADDRESS_CLAMP);
+    ASSERT_EQ(HL_GPU_OK, rc);
+
+    /* Destroy */
+    hl_cap_gpu_texture_destroy(&ctx, -1, "test_tex");
+
+    /* Read after destroy should fail */
+    void *data = NULL;
+    size_t len = 0;
+    uint32_t w, h;
+    HlGpuTexFormat fmt;
+    rc = hl_cap_gpu_texture_read(&ctx, -1, "test_tex",
+                                  &data, &len, &w, &h, &fmt);
+    ASSERT_EQ(HL_GPU_ERR_NOT_FOUND, rc);
+
+    hl_cap_gpu_destroy(&ctx);
+}
+
+UTEST(hull_cap_gpu, texture_write_read_roundtrip)
+{
+    HlGpuCtx ctx;
+    if (!gpu_test_init(&ctx)) { ASSERT_TRUE(1); return; }
+
+    /* Create a small 2x2 RGBA8 texture */
+    int rc = hl_cap_gpu_texture_create(&ctx, -1, "rt_tex",
+                                        2, 2, HL_GPU_TEX_RGBA8, 1,
+                                        HL_GPU_FILTER_NEAREST,
+                                        HL_GPU_ADDRESS_CLAMP,
+                                        HL_GPU_ADDRESS_CLAMP);
+    ASSERT_EQ(HL_GPU_OK, rc);
+
+    /* Write pixels: 4 RGBA pixels = 16 bytes */
+    uint8_t pixels[16] = {
+        255, 0, 0, 255,    /* red */
+        0, 255, 0, 255,    /* green */
+        0, 0, 255, 255,    /* blue */
+        255, 255, 0, 255,  /* yellow */
+    };
+    rc = hl_cap_gpu_texture_write(&ctx, -1, "rt_tex", pixels, sizeof(pixels));
+    ASSERT_EQ(HL_GPU_OK, rc);
+
+    /* Read back */
+    void *data = NULL;
+    size_t len = 0;
+    uint32_t w = 0, h = 0;
+    HlGpuTexFormat fmt;
+    rc = hl_cap_gpu_texture_read(&ctx, -1, "rt_tex",
+                                  &data, &len, &w, &h, &fmt);
+    ASSERT_EQ(HL_GPU_OK, rc);
+    ASSERT_TRUE(data != NULL);
+    ASSERT_EQ((uint32_t)2, w);
+    ASSERT_EQ((uint32_t)2, h);
+    ASSERT_EQ(HL_GPU_TEX_RGBA8, fmt);
+    ASSERT_EQ(sizeof(pixels), len);
+
+    /* Verify pixel data matches */
+    ASSERT_EQ(0, memcmp(data, pixels, sizeof(pixels)));
+
+    free(data);
+    hl_cap_gpu_texture_destroy(&ctx, -1, "rt_tex");
+    hl_cap_gpu_destroy(&ctx);
+}
+
+UTEST(hull_cap_gpu, texture_no_gpu)
+{
+    HlGpuCtx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+
+    int rc = hl_cap_gpu_texture_create(&ctx, 0, "t", 64, 64,
+                                        HL_GPU_TEX_RGBA8, 0, 0, 0, 0);
+    ASSERT_EQ(HL_GPU_ERR_NOT_AVAILABLE, rc);
+}
+
+UTEST(hull_cap_gpu, texture_null_safety)
+{
+    int rc = hl_cap_gpu_texture_create(NULL, 0, "t", 64, 64,
+                                        HL_GPU_TEX_RGBA8, 0, 0, 0, 0);
+    ASSERT_EQ(HL_GPU_ERR_INTERNAL, rc);
+
+    rc = hl_cap_gpu_texture_create(NULL, 0, NULL, 64, 64,
+                                    HL_GPU_TEX_RGBA8, 0, 0, 0, 0);
+    ASSERT_EQ(HL_GPU_ERR_INTERNAL, rc);
+
+    /* Zero dimensions */
+    HlGpuCtx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    rc = hl_cap_gpu_texture_create(&ctx, 0, "t", 0, 0,
+                                    HL_GPU_TEX_RGBA8, 0, 0, 0, 0);
+    ASSERT_EQ(HL_GPU_ERR_INTERNAL, rc);
+}
+
 #else /* !HL_ENABLE_GPU */
 
 UTEST(hull_cap_gpu, disabled_placeholder)

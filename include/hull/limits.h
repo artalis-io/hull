@@ -153,4 +153,11 @@
 #define HL_GPU_MAX_PIPELINE_OUTPUTS 8
 #endif
 
+#ifndef HL_GPU_TEXTURE_MAX
+#define HL_GPU_TEXTURE_MAX       64
+#endif
+#ifndef HL_GPU_MAX_TEXTURE_DIM
+#define HL_GPU_MAX_TEXTURE_DIM   16384
+#endif
+
 #endif /* HL_LIMITS_H */

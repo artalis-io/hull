@@ -7,6 +7,7 @@
 
 #include "mod_buffer.h"
 #include "hull/cap/gpu.h"
+#include "hull/cap/image.h"
 #include "hull/worker_gpu.h"
 #include "hull/async.h"
 #include "hull/vfs.h"
@@ -266,14 +267,31 @@ static int l_gpu_dispatch(lua_State *L)
 
     opts.buffers = bufs;
     opts.buffer_count = buf_count;
+    opts.output_texture = -1;
+
+    /* Parse textures */
+    HlGpuTextureDesc tex_descs[8];
+    memset(tex_descs, 0, sizeof(tex_descs));
+    lua_getfield(L, 2, "textures");
+    int tex_count = lua_parse_texture_descs(L, lua_gettop(L), tex_descs, 8);
+    lua_pop(L, 1);
+    opts.textures = tex_descs;
+    opts.texture_count = tex_count;
+
+    /* Parse output_texture (1-indexed in Lua, -1 = none) */
+    lua_getfield(L, 2, "output_texture");
+    if (!lua_isnil(L, -1))
+        opts.output_texture = (int)lua_tointeger(L, -1) - 1;
+    lua_pop(L, 1);
 
     void *output = NULL;
     size_t output_len = 0;
     const char *err_msg = NULL;
 
     /* Fire-and-forget: pass NULL output pointers */
-    void **out_ptr = (opts.output_buffer >= 0) ? &output : NULL;
-    size_t *out_len_ptr = (opts.output_buffer >= 0) ? &output_len : NULL;
+    int has_output = (opts.output_buffer >= 0 || opts.output_texture >= 0);
+    void **out_ptr = has_output ? &output : NULL;
+    size_t *out_len_ptr = has_output ? &output_len : NULL;
 
     int rc = hl_cap_gpu_dispatch(ctx, name, &opts,
                                  out_ptr, out_len_ptr, &err_msg);
@@ -421,6 +439,234 @@ static int l_gpu_buffer_copy(lua_State *L)
     }
     lua_pushboolean(L, 1);
     return 1;
+}
+
+/* ── Texture format helper ─────────────────────────────────────────── */
+
+static HlGpuTexFormat lua_parse_tex_format(const char *s)
+{
+    if (!s) return HL_GPU_TEX_RGBA8;
+    if (strcmp(s, "r8") == 0)      return HL_GPU_TEX_R8;
+    if (strcmp(s, "rgba16f") == 0)  return HL_GPU_TEX_RGBA16F;
+    if (strcmp(s, "r32f") == 0)     return HL_GPU_TEX_R32F;
+    return HL_GPU_TEX_RGBA8;
+}
+
+static HlGpuTexFormat image_format_to_gpu(HlImageFormat fmt)
+{
+    return (HlGpuTexFormat)fmt;  /* safe: enum values match */
+}
+
+/* ── gpu.texture(name, data_or_nil, opts?) ────────────────────────── */
+
+static int l_gpu_texture(lua_State *L)
+{
+    HlGpuCtx *ctx = lua_get_gpu_ctx(L);
+    const char *name = luaL_checkstring(L, 1);
+
+    int device = -1;
+    int storage = 0;
+    int filter = HL_GPU_FILTER_NEAREST;
+    int address_u = HL_GPU_ADDRESS_CLAMP;
+    int address_v = HL_GPU_ADDRESS_CLAMP;
+
+    /* nil = destroy */
+    if (lua_isnil(L, 2)) {
+        hl_cap_gpu_texture_destroy(ctx, device, name);
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+
+    uint32_t width = 0, height = 0;
+    HlGpuTexFormat format = HL_GPU_TEX_RGBA8;
+    const void *pixels = NULL;
+    size_t pixel_len = 0;
+
+    /* Check if arg 2 is an HlImage userdata */
+    HlImage **imgp = (HlImage **)luaL_testudata(L, 2, HL_IMAGE_MT);
+    if (imgp && *imgp) {
+        HlImage *img = *imgp;
+        width = img->width;
+        height = img->height;
+        format = image_format_to_gpu(img->format);
+        pixels = img->pixels;
+        pixel_len = img->pixel_len;
+    } else {
+        /* Buffer data: require opts with width, height, format */
+        HlBufferView bv;
+        if (!lua_get_buffer(L, 2, &bv))
+            return luaL_error(L, "gpu.texture: data must be HlImage, string, or buffer");
+        pixels = bv.data;
+        pixel_len = bv.len;
+    }
+
+    /* Parse opts */
+    if (lua_istable(L, 3)) {
+        lua_getfield(L, 3, "device");
+        if (!lua_isnil(L, -1)) device = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        lua_getfield(L, 3, "width");
+        if (!lua_isnil(L, -1)) width = (uint32_t)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        lua_getfield(L, 3, "height");
+        if (!lua_isnil(L, -1)) height = (uint32_t)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        lua_getfield(L, 3, "format");
+        if (lua_isstring(L, -1)) format = lua_parse_tex_format(lua_tostring(L, -1));
+        lua_pop(L, 1);
+        lua_getfield(L, 3, "storage");
+        if (lua_toboolean(L, -1)) storage = 1;
+        lua_pop(L, 1);
+        lua_getfield(L, 3, "filter");
+        if (lua_isstring(L, -1)) {
+            const char *f = lua_tostring(L, -1);
+            if (strcmp(f, "linear") == 0) filter = HL_GPU_FILTER_LINEAR;
+        }
+        lua_pop(L, 1);
+        lua_getfield(L, 3, "wrap");
+        if (lua_isstring(L, -1)) {
+            const char *w = lua_tostring(L, -1);
+            if (strcmp(w, "repeat") == 0) {
+                address_u = HL_GPU_ADDRESS_REPEAT;
+                address_v = HL_GPU_ADDRESS_REPEAT;
+            } else if (strcmp(w, "mirror") == 0) {
+                address_u = HL_GPU_ADDRESS_MIRROR;
+                address_v = HL_GPU_ADDRESS_MIRROR;
+            }
+        }
+        lua_pop(L, 1);
+    }
+
+    if (width == 0 || height == 0)
+        return luaL_error(L, "gpu.texture: width and height required");
+
+    /* Create texture (idempotent) */
+    int rc = hl_cap_gpu_texture_create(ctx, device, name, width, height,
+                                        format, storage, filter,
+                                        address_u, address_v);
+    if (rc != HL_GPU_OK) {
+        lua_pushnil(L);
+        lua_pushstring(L, "texture_create_failed");
+        return 2;
+    }
+
+    /* Write pixel data */
+    if (pixels && pixel_len > 0) {
+        rc = hl_cap_gpu_texture_write(ctx, device, name, pixels, pixel_len);
+        if (rc != HL_GPU_OK) {
+            lua_pushnil(L);
+            lua_pushstring(L, "texture_write_failed");
+            return 2;
+        }
+    }
+
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+/* ── gpu.texture_read(name, opts?) → HlImage ─────────────────────── */
+
+static int l_gpu_texture_read(lua_State *L)
+{
+    HlGpuCtx *ctx = lua_get_gpu_ctx(L);
+    const char *name = luaL_checkstring(L, 1);
+    int device = -1;
+    if (lua_istable(L, 2)) {
+        lua_getfield(L, 2, "device");
+        if (!lua_isnil(L, -1)) device = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+    }
+
+    void *data = NULL;
+    size_t len = 0;
+    uint32_t w = 0, h = 0;
+    HlGpuTexFormat fmt = HL_GPU_TEX_RGBA8;
+
+    int rc = hl_cap_gpu_texture_read(ctx, device, name, &data, &len, &w, &h, &fmt);
+    if (rc != HL_GPU_OK) {
+        lua_pushnil(L);
+        lua_pushstring(L, "texture_read_failed");
+        return 2;
+    }
+
+    /* Wrap as HlImage (takes ownership of data) */
+    HlImage *img = hl_image_new(w, h, (HlImageFormat)fmt, data, len, NULL);
+    free(data);
+    if (!img) {
+        lua_pushnil(L);
+        lua_pushstring(L, "image_create_failed");
+        return 2;
+    }
+
+    HlImage **udata = (HlImage **)lua_newuserdata(L, sizeof(HlImage *));
+    *udata = img;
+    luaL_getmetatable(L, HL_IMAGE_MT);
+    lua_setmetatable(L, -2);
+    return 1;
+}
+
+/* ── Texture desc parsing helper (used by dispatch + pipeline) ────── */
+
+static int lua_parse_texture_descs(lua_State *L, int tbl_idx,
+                                    HlGpuTextureDesc *descs, int max_descs)
+{
+    if (!lua_istable(L, tbl_idx))
+        return 0;
+    int count = (int)lua_rawlen(L, tbl_idx);
+    if (count > max_descs) count = max_descs;
+    for (int i = 0; i < count; i++) {
+        lua_rawgeti(L, tbl_idx, i + 1);
+        if (lua_istable(L, -1)) {
+            memset(&descs[i], 0, sizeof(descs[i]));
+            descs[i].binding = -1;
+
+            lua_getfield(L, -1, "name");
+            descs[i].name = lua_tostring(L, -1);
+            lua_pop(L, 1);
+
+            lua_getfield(L, -1, "storage");
+            descs[i].storage = lua_toboolean(L, -1);
+            lua_pop(L, 1);
+
+            lua_getfield(L, -1, "width");
+            if (!lua_isnil(L, -1)) descs[i].width = (uint32_t)lua_tointeger(L, -1);
+            lua_pop(L, 1);
+
+            lua_getfield(L, -1, "height");
+            if (!lua_isnil(L, -1)) descs[i].height = (uint32_t)lua_tointeger(L, -1);
+            lua_pop(L, 1);
+
+            lua_getfield(L, -1, "format");
+            if (lua_isstring(L, -1))
+                descs[i].format = lua_parse_tex_format(lua_tostring(L, -1));
+            lua_pop(L, 1);
+
+            /* data: pixel bytes or HlImage */
+            lua_getfield(L, -1, "image");
+            HlImage **imgp2 = (HlImage **)luaL_testudata(L, -1, HL_IMAGE_MT);
+            if (imgp2 && *imgp2) {
+                HlImage *img = *imgp2;
+                descs[i].data = img->pixels;
+                descs[i].data_len = img->pixel_len;
+                if (descs[i].width == 0) descs[i].width = img->width;
+                if (descs[i].height == 0) descs[i].height = img->height;
+                descs[i].format = image_format_to_gpu(img->format);
+            }
+            lua_pop(L, 1);
+
+            if (!descs[i].data) {
+                lua_getfield(L, -1, "data");
+                HlBufferView bv;
+                if (lua_get_buffer(L, -1, &bv)) {
+                    descs[i].data = bv.data;
+                    descs[i].data_len = bv.len;
+                }
+                lua_pop(L, 1);
+            }
+        }
+        lua_pop(L, 1);
+    }
+    return count;
 }
 
 /* push_result callback: convert HlWorkerGpuOp result to Lua table */
@@ -1056,15 +1302,17 @@ static int l_gpu_async_pipeline(lua_State *L)
 }
 
 static const luaL_Reg gpu_funcs[] = {
-    {"available",    l_gpu_available},
-    {"devices",      l_gpu_devices},
-    {"compile",      l_gpu_compile},
-    {"load",         l_gpu_load},
-    {"dispatch",     l_gpu_dispatch},
-    {"pipeline",     l_gpu_pipeline},
-    {"buffer",       l_gpu_buffer},
-    {"buffer_read",  l_gpu_buffer_read},
-    {"buffer_copy",  l_gpu_buffer_copy},
+    {"available",     l_gpu_available},
+    {"devices",       l_gpu_devices},
+    {"compile",       l_gpu_compile},
+    {"load",          l_gpu_load},
+    {"dispatch",      l_gpu_dispatch},
+    {"pipeline",      l_gpu_pipeline},
+    {"buffer",        l_gpu_buffer},
+    {"buffer_read",   l_gpu_buffer_read},
+    {"buffer_copy",   l_gpu_buffer_copy},
+    {"texture",       l_gpu_texture},
+    {"texture_read",  l_gpu_texture_read},
     {NULL, NULL}
 };
 
