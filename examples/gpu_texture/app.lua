@@ -75,7 +75,7 @@ app.get("/process", function(req, res)
     end
 
     -- Dispatch the invert shader
-    local result, dispatch_err = gpu.dispatch("invert", {
+    local _result, dispatch_err = gpu.dispatch("invert", {
         textures = {
             { name = "input" },                     -- sampled (binding 0, 1)
             { name = "output", storage = true },    -- storage (binding 2)
