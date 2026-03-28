@@ -14,6 +14,10 @@
 #include "hull/alloc.h"
 #include "hull/vfs.h"
 
+/* Forward declaration */
+static int js_parse_texture_descs(JSContext *ctx, JSValueConst arr,
+                                   HlGpuTextureDesc **out, int *count);
+
 #include <keel/server.h>
 #include <stdio.h>
 #include <stdatomic.h>

@@ -12,6 +12,10 @@
 #include "hull/async.h"
 #include "hull/vfs.h"
 
+/* Forward declaration */
+static int lua_parse_texture_descs(lua_State *L, int tbl_idx,
+                                    HlGpuTextureDesc *out, int max);
+
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/wasm_buffer.h"
 #include "hull/alloc.h"
