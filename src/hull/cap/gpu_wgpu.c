@@ -26,6 +26,17 @@
 
 #include <time.h>
 
+/* Forward declarations for texture functions (defined at bottom, used in dispatch) */
+static int wgpu_texture_create(void *backend_device, uint32_t width,
+                                uint32_t height, HlGpuTexFormat format,
+                                int storage, int filter, int address_u,
+                                int address_v, HlGpuTexture *out);
+static int wgpu_texture_write(void *backend_device, HlGpuTexture *tex,
+                               const void *data, size_t len);
+static int wgpu_texture_read(void *backend_device, HlGpuTexture *tex,
+                              void **data, size_t *len);
+static void wgpu_texture_destroy(void *backend_device, HlGpuTexture *tex);
+
 static uint64_t gpu_now_ms(void)
 {
     struct timespec ts;
