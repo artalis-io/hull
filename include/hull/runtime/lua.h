@@ -102,6 +102,10 @@ typedef struct HlLua {
     /* Timer callback context: if non-NULL, hl_lua_async_cont_create
      * will wire timer_ctx on the new continuation. */
     void       *active_timer;       /* HlLuaTimer* during timer callback */
+
+    /* UDF lifecycle: 1 while Lua state is valid, 0 before lua_close.
+     * UDF destroy callbacks check this before calling luaL_unref. */
+    int         udf_runtime_alive;
 } HlLua;
 
 /* ── Async push_result callback ─────────────────────────────────────── */

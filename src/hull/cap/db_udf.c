@@ -55,8 +55,10 @@ static int marshal_udf_input(uint8_t *buf, size_t buf_size,
     if (buf_size < 2)
         return -1;
 
+    if (argc > 255) return -1;  /* too many arguments */
+
     buf[0] = opcode;
-    buf[1] = (uint8_t)(argc > 255 ? 255 : argc);
+    buf[1] = (uint8_t)argc;
     size_t pos = 2;
 
     for (int i = 0; i < argc; i++) {
@@ -192,7 +194,7 @@ static void wasm_scalar_func(sqlite3_context *ctx, int argc,
     int input_len = marshal_udf_input(input_buf, sizeof(input_buf),
                                        HL_UDF_OP_SCALAR, argc, argv);
     if (input_len < 0) {
-        sqlite3_result_error(ctx, "UDF input exceeds 64KB limit", -1);
+        sqlite3_result_error(ctx, "UDF input exceeds 8KB limit", -1);
         return;
     }
 
@@ -224,7 +226,7 @@ static void wasm_scalar_func(sqlite3_context *ctx, int argc,
     if (unmarshal_udf_output(ctx, (const uint8_t *)output, output_len) != 0)
         sqlite3_result_error(ctx, "WASM UDF: invalid output format", -1);
 
-    free(output);
+    hl_alloc_free(udf->alloc, output, output_len);
 }
 
 /* ── Aggregate WASM UDF callbacks ──────────────────────────────────── */
@@ -287,7 +289,7 @@ static void wasm_step_func(sqlite3_context *ctx, int argc,
                                         &output, &output_len,
                                         &call_opts, NULL, NULL,
                                         udf->alloc, &err_msg);
-    free(output); /* step output is ignored (VOID) */
+    hl_alloc_free(udf->alloc, output, output_len); /* step output is ignored (VOID) */
 
     if (rc != 0) {
         char err[256];
@@ -335,7 +337,7 @@ static void wasm_finalize_func(sqlite3_context *ctx)
             sqlite3_result_error(ctx, "WASM UDF: invalid finalize output", -1);
     }
 
-    free(output);
+    hl_alloc_free(udf->alloc, output, output_len);
 
     /* Destroy per-group instance */
     hl_cap_wasm_instance_destroy(gs->inst);

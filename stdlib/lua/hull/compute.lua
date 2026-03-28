@@ -269,6 +269,16 @@ local function parse_args()
     return opts
 end
 
+-- ── Validation ─────────────────────────────────────────────────────────
+
+local function validate_module_name(name)
+    if not name or not name:match("^[a-zA-Z0-9_%-]+$") then
+        tool.stderr("hull compute: invalid module name '" .. tostring(name) .. "'\n")
+        tool.stderr("  Names must contain only letters, digits, underscores, and hyphens.\n")
+        tool.exit(1)
+    end
+end
+
 -- ── Helpers ────────────────────────────────────────────────────────────
 
 local function find_clang()
@@ -319,6 +329,8 @@ local function cmd_new(name, lang)
         tool.exit(1)
     end
 
+    validate_module_name(name)
+
     if lang ~= "c" then
         tool.stderr("hull compute new: only --lang c is supported\n")
         tool.exit(1)
@@ -357,6 +369,8 @@ end
 -- ── Subcommand: build ──────────────────────────────────────────────────
 
 local function cmd_build(name)
+    if name then validate_module_name(name) end
+
     local modules
     if name then
         modules = { name }
@@ -433,6 +447,8 @@ local function cmd_check(name)
         tool.stderr("Usage: hull compute check <name>\n")
         tool.exit(1)
     end
+
+    validate_module_name(name)
 
     local wasm_path = "compute/" .. name .. ".wasm"
     if not tool.file_exists(wasm_path) then
@@ -522,6 +538,8 @@ local function cmd_test(name)
         tool.stderr("Usage: hull compute test <name>\n")
         tool.exit(1)
     end
+
+    validate_module_name(name)
 
     local wasm_path = "compute/" .. name .. ".wasm"
     if not tool.file_exists(wasm_path) then

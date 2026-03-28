@@ -471,6 +471,7 @@ static const luaL_Reg db_async_funcs[] = {
 typedef struct {
     lua_State *L;
     int func_ref;    /* LUA_REGISTRYINDEX ref to the Lua function */
+    int *alive;      /* points to HlLua.udf_runtime_alive */
 } LuaScalarUdfCtx;
 
 /* Context for Lua aggregate UDF trampoline */
@@ -478,6 +479,7 @@ typedef struct {
     lua_State *L;
     int step_ref;
     int finalize_ref;
+    int *alive;      /* points to HlLua.udf_runtime_alive */
 } LuaAggUdfCtx;
 
 /* Per-group state for Lua aggregates (via sqlite3_aggregate_context) */
@@ -563,9 +565,10 @@ static void lua_scalar_udf_destroy(void *data)
 {
     LuaScalarUdfCtx *udf = (LuaScalarUdfCtx *)data;
     if (!udf) return;
-    /* Do NOT call luaL_unref here. This callback fires during
-     * sqlite3_close() which runs AFTER hl_lua_free() has already
-     * called lua_close(). The Lua state is gone. */
+    /* Free the registry ref only if the Lua state is still alive
+     * (explicit unregister). During sqlite3_close the state is dead. */
+    if (udf->alive && *udf->alive && udf->L)
+        luaL_unref(udf->L, LUA_REGISTRYINDEX, udf->func_ref);
     free(udf);
 }
 
@@ -636,7 +639,11 @@ static void lua_agg_udf_destroy(void *data)
 {
     LuaAggUdfCtx *udf = (LuaAggUdfCtx *)data;
     if (!udf) return;
-    /* Do NOT call luaL_unref here — see lua_scalar_udf_destroy comment */
+    /* Free registry refs only if the Lua state is still alive */
+    if (udf->alive && *udf->alive && udf->L) {
+        luaL_unref(udf->L, LUA_REGISTRYINDEX, udf->step_ref);
+        luaL_unref(udf->L, LUA_REGISTRYINDEX, udf->finalize_ref);
+    }
     free(udf);
 }
 
@@ -755,6 +762,7 @@ static int lua_db_udf_register(lua_State *L)
             return luaL_error(L, "db.udf.register: out of memory");
 
         udf_ctx->L = L;
+        udf_ctx->alive = &lua->udf_runtime_alive;
         lua_pushvalue(L, 2);
         udf_ctx->func_ref = luaL_ref(L, LUA_REGISTRYINDEX);
 
@@ -793,6 +801,7 @@ static int lua_db_udf_register(lua_State *L)
         }
 
         udf_ctx->L = L;
+        udf_ctx->alive = &lua->udf_runtime_alive;
         /* finalize is on top of stack, step below it */
         udf_ctx->finalize_ref = luaL_ref(L, LUA_REGISTRYINDEX);
         udf_ctx->step_ref = luaL_ref(L, LUA_REGISTRYINDEX);

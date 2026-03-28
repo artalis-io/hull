@@ -189,7 +189,13 @@ int hl_cap_wasm_stream(HlWasmCache *cache, const char *name,
                         ? 1
                         : (in_total + chunk_size - 1) / chunk_size;
 
-    for (uint32_t ci = 0; ci < num_chunks; ci++) {
+    if (num_chunks > UINT32_MAX) {
+        if (err_msg) *err_msg = "input_too_large";
+        rc = HL_WASM_ERR_INPUT;
+        goto cleanup;
+    }
+
+    for (size_t ci = 0; ci < num_chunks; ci++) {
         size_t this_len = 0;
         const void *this_data = NULL;
 
@@ -219,7 +225,7 @@ int hl_cap_wasm_stream(HlWasmCache *cache, const char *name,
 
         /* Set stream metadata — survives through instance_call because
          * it only overwrites fn/ctx/shared_data, not the stream fields. */
-        hl_cap_wasm_set_stream_ctx(flags, ci);
+        hl_cap_wasm_set_stream_ctx(flags, (uint32_t)ci);
 
         void *chunk_out = NULL;
         size_t chunk_out_len = 0;
@@ -255,7 +261,7 @@ int hl_cap_wasm_stream(HlWasmCache *cache, const char *name,
                 }
             } else if (output->kind == HL_STREAM_OUT_CALLBACK) {
                 int cb_rc = output->callback.fn(
-                    chunk_out, chunk_out_len, ci, is_last,
+                    chunk_out, chunk_out_len, (uint32_t)ci, is_last,
                     output->callback.user_data);
                 if (cb_rc != 0) {
                     rc = HL_WASM_ERR_INTERNAL;
@@ -273,24 +279,23 @@ int hl_cap_wasm_stream(HlWasmCache *cache, const char *name,
     }
 
     /* ── Cleanup ───────────────────────────────────────────────── */
+cleanup:
     hl_cap_wasm_instance_destroy(inst);
     if (in_file) fclose(in_file);
     if (in_buf) hl_alloc_free(alloc, in_buf, chunk_size);
     if (out_file) fclose(out_file);
 
     /* Set output for BUFFER mode */
-    if (rc == HL_WASM_OK && (!output || output->kind == HL_STREAM_OUT_BUFFER)) {
-        if (output && output->buffer.data && output->buffer.len) {
-            *output->buffer.data = out_buf;
-            *output->buffer.len = out_buf_len;
-            /* caller owns out_buf — don't free here */
-        } else if (!output) {
-            /* Caller passed NULL output — discard buffer */
-            hl_alloc_free(alloc, out_buf, out_buf_cap);
-        }
-    } else if (out_buf) {
-        hl_alloc_free(alloc, out_buf, out_buf_cap);
+    if (rc == HL_WASM_OK && out_buf &&
+        output && output->kind == HL_STREAM_OUT_BUFFER &&
+        output->buffer.data && output->buffer.len) {
+        *output->buffer.data = out_buf;
+        *output->buffer.len = out_buf_len;
+        out_buf = NULL; /* ownership transferred */
     }
+    /* Always free if not transferred */
+    if (out_buf)
+        hl_alloc_free(alloc, out_buf, out_buf_cap);
 
     /* Fill result */
     if (result) {

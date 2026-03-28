@@ -1032,6 +1032,7 @@ static int lua_compute_stream(lua_State *L)
     void *out_data = NULL;
     size_t out_len = 0;
     LuaStreamCbCtx cb_ctx = {0};
+    cb_ctx.func_ref = LUA_NOREF;
     /* Parse output (arg 3): nil/absent → buffer, function → callback,
      * table with "file" → file, table without "file" → treat as opts */
     int has_output = 0;

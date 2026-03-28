@@ -45,7 +45,7 @@ typedef struct HlAllocator HlAllocator;
 
 /* Defaults */
 #define HL_UDF_DEFAULT_GAS    (100 * 1000)
-#define HL_UDF_MAX_INPUT_SIZE (64 * 1024)
+#define HL_UDF_MAX_INPUT_SIZE (8 * 1024)   /* 8 KB — sufficient for typical SQL values */
 
 /* Registration options (for WASM UDFs) */
 typedef struct {

@@ -107,6 +107,10 @@ typedef struct HlJS {
     /* Timer callback context: if non-NULL, hl_js_async_cont_create
      * will wire timer_ctx on the new continuation. */
     void           *active_timer;    /* HlJSTimer* during timer callback */
+
+    /* UDF lifecycle: 1 while JS runtime is valid, 0 before JS_FreeRuntime.
+     * UDF destroy callbacks check this before calling JS_FreeValue. */
+    int             udf_runtime_alive;
 } HlJS;
 
 /* ── Vtable ────────────────────────────────────────────────────────── */

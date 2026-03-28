@@ -228,6 +228,8 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
         return -1;
     }
 
+    lua->udf_runtime_alive = 1;
+
     return 0;
 }
 
@@ -464,6 +466,10 @@ void hl_lua_free(HlLua *lua)
         lua->route_count = 0;
         lua->route_cap = 0;
     }
+
+    /* Mark runtime as dead before lua_close so UDF destroy callbacks
+     * (fired by sqlite3_close) don't call luaL_unref on a dead state */
+    lua->udf_runtime_alive = 0;
 
     if (lua->L) {
         lua_close(lua->L);

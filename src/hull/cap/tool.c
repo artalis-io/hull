@@ -172,8 +172,22 @@ int hl_tool_validate_args(const char *const argv[])
         if (strcmp(a, "-fplugin") == 0)       return -1; /* GCC plugin */
         if (strncmp(a, "-fplugin=", 9) == 0)  return -1; /* GCC plugin= */
         if (strcmp(a, "-Xlinker") == 0)       return -1; /* linker pass */
-        if (strncmp(a, "-Wl,", 4) == 0 &&
-            strncmp(a, "-Wl,--", 6) != 0)     return -1; /* linker pass (allow --named flags) */
+        if (strncmp(a, "-Wl,", 4) == 0) {
+            /* Only allow specific safe linker options after -Wl, */
+            static const char *safe_linker_flags[] = {
+                "--no-entry", "--export=", "--export-all", "--allow-undefined",
+                "--initial-memory=", "--max-memory=", "--stack-first",
+                "--import-memory", "--export-memory", "--shared-memory",
+                NULL
+            };
+            const char *wl_arg = a + 4;
+            int safe = 0;
+            for (const char **sf = safe_linker_flags; *sf; sf++) {
+                size_t sflen = strlen(*sf);
+                if (strncmp(wl_arg, *sf, sflen) == 0) { safe = 1; break; }
+            }
+            if (!safe) return -1;
+        }
         if (a[0] == '@')                       return -1; /* response file */
     }
     return 0;

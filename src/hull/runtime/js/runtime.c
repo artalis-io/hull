@@ -553,6 +553,8 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
         return -1;
     }
 
+    js->udf_runtime_alive = 1;
+
     return 0;
 }
 
@@ -737,6 +739,11 @@ void hl_js_free(HlJS *js)
         js->route_count = 0;
         js->route_cap = 0;
     }
+
+    /* Mark runtime as dead before JS_FreeContext/JS_FreeRuntime so UDF
+     * destroy callbacks (fired by sqlite3_close) don't call JS_FreeValue
+     * on a dead runtime */
+    js->udf_runtime_alive = 0;
 
     if (js->ctx) {
         /* Free test state opaque data before deleting globals */

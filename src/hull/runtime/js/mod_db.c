@@ -526,6 +526,7 @@ static JSValue js_db_async_exec(JSContext *ctx, JSValueConst this_val,
 typedef struct {
     JSContext *ctx;
     JSValue    func;  /* borrowed — prevent GC via ref counting */
+    int       *alive; /* points to HlJS.udf_runtime_alive */
 } JsScalarUdfCtx;
 
 /* Context for JS aggregate UDF trampoline */
@@ -533,6 +534,7 @@ typedef struct {
     JSContext *ctx;
     JSValue    step_fn;
     JSValue    finalize_fn;
+    int       *alive; /* points to HlJS.udf_runtime_alive */
 } JsAggUdfCtx;
 
 /* Per-group state for JS aggregates (via sqlite3_aggregate_context) */
@@ -639,9 +641,10 @@ static void js_scalar_udf_destroy(void *data)
 {
     JsScalarUdfCtx *udf = (JsScalarUdfCtx *)data;
     if (!udf) return;
-    /* Do NOT call JS_FreeValue here. This callback fires during
-     * sqlite3_close() which runs AFTER hl_js_free() has already
-     * destroyed the JS runtime. The JS objects are already gone. */
+    /* Free the JS value only if the JS runtime is still alive
+     * (explicit unregister). During sqlite3_close the runtime is dead. */
+    if (udf->alive && *udf->alive && udf->ctx)
+        JS_FreeValue(udf->ctx, udf->func);
     free(udf);
 }
 
@@ -730,7 +733,11 @@ static void js_agg_udf_destroy(void *data)
 {
     JsAggUdfCtx *udf = (JsAggUdfCtx *)data;
     if (!udf) return;
-    /* Do NOT call JS_FreeValue here — see js_scalar_udf_destroy comment */
+    /* Free JS values only if the JS runtime is still alive */
+    if (udf->alive && *udf->alive && udf->ctx) {
+        JS_FreeValue(udf->ctx, udf->step_fn);
+        JS_FreeValue(udf->ctx, udf->finalize_fn);
+    }
     free(udf);
 }
 
@@ -867,6 +874,7 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
         }
 
         udf_ctx->ctx = ctx;
+        udf_ctx->alive = &js->udf_runtime_alive;
         udf_ctx->func = JS_DupValue(ctx, argv[1]);
 
         int encoding = SQLITE_UTF8;
@@ -912,6 +920,7 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
         }
 
         udf_ctx->ctx = ctx;
+        udf_ctx->alive = &js->udf_runtime_alive;
         udf_ctx->step_fn = step_fn;       /* ownership transferred */
         udf_ctx->finalize_fn = final_fn;   /* ownership transferred */
 
