@@ -446,6 +446,26 @@ curl http://localhost:3000/compare
 - `gpu.buffer_copy(src, dst)` — GPU-side buffer copy without CPU roundtrip
 - `fs.mmap()` → `gpu.buffer()` — zero-copy disk→GPU data loading
 
+### gpu_texture
+
+GPU texture processing — load images as GPU textures, process with WGSL compute shaders, read back results. Demonstrates `gpu.texture()`, `gpu.texture_read()`, and dispatch with `textures` array.
+
+Requires GPU build: `make fetch-wgpu && make HL_ENABLE_GPU=1`
+
+```bash
+./build/hull -p 3000 --no-sandbox examples/gpu_texture/app.lua
+
+curl http://localhost:3000/health
+curl http://localhost:3000/process
+```
+
+**Key features demonstrated:**
+- `image.new(w, h, "rgba8", pixels)` — create image from raw pixels
+- `gpu.texture(name, img)` — persistent GPU texture from HlImage
+- `gpu.texture_read(name)` — read back texture as HlImage
+- `gpu.dispatch()` with `textures` array — sampled + storage textures
+- WGSL `texture_2d<f32>` + `texture_storage_2d<rgba8unorm, write>`
+
 ### compute_gpu_chain
 
 WASM→GPU zero-copy data flow — WASM preprocesses data, outputs a WasmBuffer, which passes directly to GPU dispatch without copying through a Lua string. Demonstrates the unified buffer protocol for chaining compute backends.
@@ -471,6 +491,24 @@ curl http://localhost:3000/query
 - WasmBuffer passed directly to `gpu.dispatch()` and `gpu.buffer()` (unified buffer protocol)
 - `gpu.dispatch({ output = false })` — fire-and-forget in-place update
 - WASM + GPU in the same app with `app.manifest({ gpu = true, compute = true })`
+
+### image_processing
+
+Image decode/encode — create images from raw pixels, encode to PNG/JPEG, decode from encoded bytes. Demonstrates the `image` module's codec vtable backed by stb_image.
+
+```bash
+./build/hull -p 3000 examples/image_processing/app.lua
+
+curl http://localhost:3000/health
+curl http://localhost:3000/create
+curl http://localhost:3000/info
+```
+
+**Key features demonstrated:**
+- `image.new(w, h, "rgba8", pixels)` — create from raw pixel data
+- `image.encode(img, "png")` — encode to PNG bytes
+- `image.decode(bytes, "png")` — decode from encoded bytes
+- `img:width()`, `img:height()`, `img:format()`, `img:size()` — properties
 
 ### cors_manifest
 
@@ -575,6 +613,8 @@ hull test examples/timers/
 hull test examples/cors_manifest/
 hull test examples/udf/
 hull test examples/compute/
+hull test examples/gpu_texture/
+hull test examples/image_processing/
 ```
 
 The test API:

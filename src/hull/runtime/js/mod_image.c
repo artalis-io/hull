@@ -276,6 +276,74 @@ static const JSCFunctionListEntry js_image_proto[] = {
     JS_CFUNC_DEF("close",  0, js_image_close),
 };
 
+/* image.toWasm(img) → ArrayBuffer: [w:u32 LE][h:u32 LE][fmt:u8][pixels...] */
+static JSValue js_image_to_wasm(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1) return JS_ThrowTypeError(ctx, "image.toWasm: image required");
+
+    HlImage *img = JS_GetOpaque(argv[0], js_image_class_id);
+    if (!img) return JS_ThrowTypeError(ctx, "image.toWasm: not an HlImage");
+
+    size_t hdr = 9;
+    size_t total = hdr + img->pixel_len;
+    uint8_t *buf = js_malloc(ctx, total);
+    if (!buf) return JS_EXCEPTION;
+
+    buf[0] = img->width & 0xFF;
+    buf[1] = (img->width >> 8) & 0xFF;
+    buf[2] = (img->width >> 16) & 0xFF;
+    buf[3] = (img->width >> 24) & 0xFF;
+    buf[4] = img->height & 0xFF;
+    buf[5] = (img->height >> 8) & 0xFF;
+    buf[6] = (img->height >> 16) & 0xFF;
+    buf[7] = (img->height >> 24) & 0xFF;
+    buf[8] = (uint8_t)(img->format + 1);
+    memcpy(buf + hdr, img->pixels, img->pixel_len);
+
+    return JS_NewArrayBufferCopy(ctx, buf, total);
+}
+
+/* image.fromWasm(arrayBuffer) → HlImage */
+static JSValue js_image_from_wasm(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1) return JS_ThrowTypeError(ctx, "image.fromWasm: data required");
+
+    size_t len;
+    uint8_t *data = JS_GetArrayBuffer(ctx, &len, argv[0]);
+    if (!data) {
+        /* Try string */
+        data = (uint8_t *)JS_ToCStringLen(ctx, &len, argv[0]);
+        if (!data) return JS_ThrowTypeError(ctx, "image.fromWasm: ArrayBuffer or string required");
+    }
+
+    if (len < 9) {
+        return JS_ThrowRangeError(ctx, "image.fromWasm: data too short");
+    }
+
+    uint32_t w = data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24);
+    uint32_t h = data[4] | (data[5] << 8) | (data[6] << 16) | (data[7] << 24);
+    int fmt_byte = data[8];
+    if (fmt_byte < 1 || fmt_byte > 4)
+        return JS_ThrowRangeError(ctx, "image.fromWasm: invalid format byte");
+
+    HlImageFormat fmt = (HlImageFormat)(fmt_byte - 1);
+    size_t pixel_len = len - 9;
+    size_t expected = (size_t)w * h * hl_image_bpp(fmt);
+    if (pixel_len < expected)
+        return JS_ThrowRangeError(ctx, "image.fromWasm: pixel data too short");
+
+    HlImage *img = hl_image_new(w, h, fmt, data + 9, expected, NULL);
+    if (!img) return JS_ThrowInternalError(ctx, "image.fromWasm: create failed");
+
+    JSValue obj = JS_NewObjectClass(ctx, js_image_class_id);
+    JS_SetOpaque(obj, img);
+    return obj;
+}
+
 int hl_js_init_image_module(JSContext *ctx, HlJS *js)
 {
     (void)js;
@@ -302,6 +370,10 @@ int hl_js_init_image_module(JSContext *ctx, HlJS *js)
                       JS_NewCFunction(ctx, js_image_decode_fn, "decode", 2));
     JS_SetPropertyStr(ctx, image_obj, "encode",
                       JS_NewCFunction(ctx, js_image_encode_fn, "encode", 3));
+    JS_SetPropertyStr(ctx, image_obj, "toWasm",
+                      JS_NewCFunction(ctx, js_image_to_wasm, "toWasm", 1));
+    JS_SetPropertyStr(ctx, image_obj, "fromWasm",
+                      JS_NewCFunction(ctx, js_image_from_wasm, "fromWasm", 1));
 
     JS_SetPropertyStr(ctx, global, "image", image_obj);
     JS_FreeValue(ctx, global);

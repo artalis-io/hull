@@ -45,7 +45,7 @@ WASM compute plugins provide a sandboxed data-plane layer for CPU-intensive comp
 
 WASM modules can also be registered as SQL UDFs via `db.udf.register("hull_name", "module_name", opts)` — the WASM function is called per row during query execution with gas metering.
 
-GPU compute shaders (optional, `HL_ENABLE_GPU=1`) provide massively parallel data processing via wgpu-native (Metal/Vulkan/DX12). Compile shaders inline with `gpu.compile("name", wgsl)` or load from files with `gpu.load("name")` (reads `shaders/<name>.wgsl`). Dispatch with `gpu.dispatch("name", opts)` or chain multiple shaders with `gpu.pipeline(stages, opts)` for single-submission execution. Persistent buffers (`gpu.buffer()`) keep data on GPU across requests. Fire-and-forget mode (`output = false`) updates GPU buffers in-place without readback. `gpu.buffer_copy()` copies between GPU buffers without CPU roundtrip. GPU dispatches time out after 5 seconds (`HL_GPU_TIMEOUT_MS`).
+GPU compute shaders (optional, `HL_ENABLE_GPU=1`) provide massively parallel data processing via wgpu-native (Metal/Vulkan/DX12). Compile shaders inline with `gpu.compile("name", wgsl)` or load from files with `gpu.load("name")` (reads `shaders/<name>.wgsl`). Dispatch with `gpu.dispatch("name", opts)` or chain multiple shaders with `gpu.pipeline(stages, opts)` for single-submission execution. Persistent buffers (`gpu.buffer()`) keep data on GPU across requests. Persistent textures (`gpu.texture(name, img)`) accept HlImage objects and can be read back via `gpu.texture_read(name)`. Dispatch supports `textures` array for sampled and storage texture bindings. Fire-and-forget mode (`output = false`) updates GPU buffers in-place without readback. `gpu.buffer_copy()` copies between GPU buffers without CPU roundtrip. GPU dispatches time out after 5 seconds (`HL_GPU_TIMEOUT_MS`).
 
 Both WASM and GPU compute accept the same input types via the unified buffer protocol: strings, `MappedBuffer` (from `fs.mmap()`), and `WasmBuffer` (from `compute.call({buffer=true})`). This enables zero-copy data flow between disk, WASM, and GPU without Lua/JS string intermediaries. Declare `gpu: true` and/or `compute: true` in manifest.
 
@@ -412,6 +412,7 @@ Undeclared capabilities are blocked. An empty manifest `{}` means no filesystem,
 | `fs` | `fs` (global) | `import { fs } from "hull:fs"` | Sandboxed filesystem |
 | `gpu` | `gpu` (global) | `import { gpu } from "hull:gpu"` | GPU compute (wgpu-native, requires `HL_ENABLE_GPU=1`) |
 | `compute` | `compute` (global) | `import { compute } from "hull:compute"` | WASM compute plugins |
+| `image` | `image` (global) | `import { image } from "hull:image"` | Image decode/encode (stb_image) |
 | `http` | `http` (global) | `import { http } from "hull:http"` | HTTP client |
 | `validate` | `require("hull.validate")` | `import { validate } from "hull:validate"` | Input validation |
 | `session` | `require("hull.middleware.session")` | `import { session } from "hull:middleware:session"` | Server sessions |

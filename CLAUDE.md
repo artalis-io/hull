@@ -394,6 +394,7 @@ Register with `app.use(method, pattern, mw)`:
 | `health` | `hull.middleware.health` | `hull:middleware:health` | Health check + readiness endpoints |
 | `etag` | `hull.middleware.etag` | `hull:middleware:etag` | ETag response helpers with 304 Not Modified |
 | `db.udf` | `db.udf.register/unregister` | `db.udf.register/unregister` | User-defined SQL functions (Lua/JS callbacks or WASM) |
+| `image` | `hull.image` | `hull:image` | Image decode/encode (stb_image), raw pixel buffers |
 | `json` | `hull.json` | (built-in) | JSON encode/decode |
 
 ### Module APIs
@@ -629,6 +630,15 @@ template.clearCache();                           // clear compiled function cach
 - `opts.gas` — per-row gas limit for WASM UDFs (default: 100K)
 - Names must start with `hull_` to prevent shadowing SQLite built-ins.
 - Lua/JS UDFs work with `db.query()` only (sync). WASM UDFs work with both `db.query()` and `db.async.query()`.
+
+**image** — Image creation, encoding, and decoding via pluggable codec vtable (stb_image default).
+- `image.new(w, h, format, pixels)` → HlImage. Formats: `"rgba8"`, `"r8"`, `"rgba16float"`, `"r32float"`.
+- `image.from_buffer(buf, w, h, format)` → HlImage (zero-copy borrow from WasmBuffer/MappedBuffer).
+- `image.decode(data, format?)` → HlImage. Auto-detects PNG/JPEG/BMP from magic bytes.
+- `image.encode(img, format, opts?)` → bytes. `opts.quality` for JPEG (default 90).
+- `img:width()`, `img:height()`, `img:format()`, `img:size()` — properties.
+- `img:pixels()` — raw pixel bytes.
+- `img:close()` — explicit free (GC handles it otherwise).
 
 ### Static File Serving
 
@@ -950,8 +960,13 @@ gpu.dispatch("shader_name", {
         { name = "persistent", usage = "read" }, -- binding 2 (named buffer)
         { size = N, usage = "readwrite" },       -- binding 3 (output)
     },
+    textures = {                               -- optional texture bindings
+        { name = "input" },                    -- sampled (paired: texture + sampler)
+        { name = "output", storage = true },   -- storage texture (single binding)
+    },
     workgroups = { x = 64, y = 1, z = 1 },
     output = 3,                        -- 1-indexed buffer to read back (Lua)
+    output_texture = 2,                -- 1-indexed texture to read back as HlImage (Lua)
     device = -1,                       -- -1 = default device
 })
 ```
@@ -1007,6 +1022,24 @@ gpu.buffer_copy("source", "dest", {
     src_offset = 0, dst_offset = 512, size = 256,           -- with offsets
 })
 ```
+
+**GPU Textures:**
+- `gpu.texture(name, img)` — create persistent texture from HlImage.
+- `gpu.texture(name, data, opts)` — create from raw bytes with `opts.width`, `opts.height`, `opts.format`, `opts.storage`.
+- `gpu.texture(name, nil)` — destroy persistent texture.
+- `gpu.texture_read(name)` → HlImage — read back texture pixels.
+- Dispatch with textures:
+  ```lua
+  gpu.dispatch("shader", {
+      textures = {
+          { name = "input" },                        -- sampled (binding N, N+1)
+          { name = "output", storage = true },       -- storage (binding M)
+      },
+      output_texture = 2,                            -- readback as HlImage
+  })
+  ```
+- Sampled textures get paired bindings (texture view + sampler). Storage textures get single binding.
+- Binding convention: uniforms → buffers → sampled textures → storage textures (all `@group(0)`).
 
 **Shader loading from files:** `gpu.load(name)` reads `shaders/<name>.wgsl` from disk (dev mode) or VFS (built binaries) and compiles it. Enables shader iteration without modifying app code.
 

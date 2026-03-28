@@ -1,0 +1,31 @@
+-- Tests for image_processing example
+-- Run: hull test examples/image_processing/
+
+test("GET /health returns ok", function()
+    local res = test.get("/health")
+    test.eq(res.status, 200)
+    test.eq(res.json.status, "ok")
+end)
+
+test("GET /create returns PNG metadata", function()
+    local res = test.get("/create")
+    test.eq(res.status, 200)
+    test.eq(res.json.ok, true)
+    test.eq(res.json.width, 4)
+    test.eq(res.json.height, 4)
+    test.eq(res.json.format, "rgba8")
+    test.eq(res.json.pixel_size, 64)
+    test.ok(res.json.png_size > 0, "PNG size should be positive")
+    test.ok(res.json.png_hex, "should have hex data")
+end)
+
+test("GET /info returns round-trip info", function()
+    local res = test.get("/info")
+    test.eq(res.status, 200)
+    test.eq(res.json.ok, true)
+    test.eq(res.json.original.width, 4)
+    test.eq(res.json.original.height, 4)
+    test.eq(res.json.decoded.width, 4)
+    test.eq(res.json.decoded.height, 4)
+    test.eq(res.json.round_trip_match, true)
+end)

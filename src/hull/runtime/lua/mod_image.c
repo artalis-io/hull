@@ -222,11 +222,72 @@ static const luaL_Reg image_methods[] = {
     { NULL, NULL }
 };
 
+/* image.to_wasm(img) → string: [w:u32 LE][h:u32 LE][fmt:u8][pixels...] */
+static int l_image_to_wasm(lua_State *L)
+{
+    HlImage **imgp = check_image(L, 1);
+    if (!*imgp) return luaL_error(L, "image already closed");
+    HlImage *img = *imgp;
+
+    size_t hdr = 9; /* 4 + 4 + 1 */
+    size_t total = hdr + img->pixel_len;
+    char *buf = malloc(total);
+    if (!buf) return luaL_error(L, "out of memory");
+
+    /* Little-endian width, height */
+    buf[0] = (char)(img->width & 0xFF);
+    buf[1] = (char)((img->width >> 8) & 0xFF);
+    buf[2] = (char)((img->width >> 16) & 0xFF);
+    buf[3] = (char)((img->width >> 24) & 0xFF);
+    buf[4] = (char)(img->height & 0xFF);
+    buf[5] = (char)((img->height >> 8) & 0xFF);
+    buf[6] = (char)((img->height >> 16) & 0xFF);
+    buf[7] = (char)((img->height >> 24) & 0xFF);
+    buf[8] = (char)(img->format + 1); /* 1-based: RGBA8=1, R8=2, RGBA16F=3, R32F=4 */
+    memcpy(buf + hdr, img->pixels, img->pixel_len);
+
+    lua_pushlstring(L, buf, total);
+    free(buf);
+    return 1;
+}
+
+/* image.from_wasm(bytes) → HlImage: parse [w:u32 LE][h:u32 LE][fmt:u8][pixels...] */
+static int l_image_from_wasm(lua_State *L)
+{
+    size_t len;
+    const char *data = luaL_checklstring(L, 1, &len);
+    if (len < 9) return luaL_error(L, "image.from_wasm: data too short (need 9+ bytes)");
+
+    uint32_t w = (uint8_t)data[0] | ((uint8_t)data[1] << 8) |
+                 ((uint8_t)data[2] << 16) | ((uint8_t)data[3] << 24);
+    uint32_t h = (uint8_t)data[4] | ((uint8_t)data[5] << 8) |
+                 ((uint8_t)data[6] << 16) | ((uint8_t)data[7] << 24);
+    int fmt_byte = (uint8_t)data[8];
+    if (fmt_byte < 1 || fmt_byte > 4)
+        return luaL_error(L, "image.from_wasm: invalid format byte %d", fmt_byte);
+
+    HlImageFormat fmt = (HlImageFormat)(fmt_byte - 1);
+    size_t pixel_len = len - 9;
+    size_t expected = (size_t)w * h * hl_image_bpp(fmt);
+    if (pixel_len < expected)
+        return luaL_error(L, "image.from_wasm: pixel data too short (%zu < %zu)", pixel_len, expected);
+
+    HlImage *img = hl_image_new(w, h, fmt, data + 9, expected, NULL);
+    if (!img) return luaL_error(L, "image.from_wasm: failed to create image");
+
+    HlImage **ud = (HlImage **)lua_newuserdata(L, sizeof(HlImage *));
+    *ud = img;
+    luaL_setmetatable(L, HL_IMAGE_MT);
+    return 1;
+}
+
 static const luaL_Reg image_funcs[] = {
     { "new",         l_image_new },
     { "from_buffer", l_image_from_buffer },
     { "decode",      l_image_decode },
     { "encode",      l_image_encode },
+    { "to_wasm",     l_image_to_wasm },
+    { "from_wasm",   l_image_from_wasm },
     { NULL, NULL }
 };
 
