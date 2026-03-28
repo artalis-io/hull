@@ -1165,6 +1165,7 @@ LOG_CFLAGS := -std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-pointe
 SH_ARENA_CFLAGS := -std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-pointer
 SH_JSON_CFLAGS := -std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-pointer
 TWEETNACL_CFLAGS := -std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-pointer
+STB_CFLAGS := -std=c11 -O1 -w -fsanitize=memory,undefined -fno-omit-frame-pointer
 # Re-add runtime defines (the := above clobbers earlier += additions)
 ifeq ($(RUNTIME),js)
   CFLAGS += -DHL_ENABLE_JS
@@ -1258,7 +1259,7 @@ check:
 
 analyze:
 	$(MAKE) clean
-	$(MAKE) $(VEND_OBJS) $(MBEDTLS_OBJS) $(MINIZ_OBJ) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(PLEDGE_OBJS) $(WAMR_OBJS) $(KEEL_LIB)
+	$(MAKE) $(VEND_OBJS) $(MBEDTLS_OBJS) $(MINIZ_OBJ) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(WAMR_OBJS) $(KEEL_LIB)
 	scan-build --status-bugs -disable-checker alpha.unix.Stream $(MAKE) $(CAP_OBJS) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(MAIN_OBJ) $(BUILDDIR)/hull
 
 cppcheck:
