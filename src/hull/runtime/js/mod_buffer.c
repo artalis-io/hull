@@ -5,6 +5,7 @@
  */
 
 #include "mod_buffer.h"
+#include "hull/cap/image.h"
 
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/wasm_buffer.h"
@@ -13,6 +14,7 @@
 /* ── Shared class ID definitions ─────────────────────────────────── */
 
 JSClassID js_mmap_class_id;
+JSClassID js_image_class_id;
 
 #ifdef HL_ENABLE_WASM
 JSClassID js_wasm_buf_class_id;
@@ -22,7 +24,7 @@ JSClassID js_wasm_buf_class_id;
 
 /*
  * Extract a buffer view from a JS value. Tries (in order):
- * MappedBuffer -> WasmBuffer -> ArrayBuffer -> string.
+ * MappedBuffer -> WasmBuffer -> HlImage -> ArrayBuffer -> string.
  * Sets *str_needs_free = 1 if the data came from JS_ToCStringLen
  * (caller must JS_FreeCString). Returns 1 on success, 0 on failure.
  */
@@ -51,6 +53,15 @@ int js_get_buffer(JSContext *ctx, JSValueConst val,
         }
     }
 #endif
+    /* HlImage (pixel data) */
+    if (js_image_class_id) {
+        HlImage *img = JS_GetOpaque2(ctx, val, js_image_class_id);
+        if (img) {
+            out->data = img->pixels;
+            out->len = img->pixel_len;
+            return 1;
+        }
+    }
     /* ArrayBuffer */
     size_t ab_len;
     uint8_t *ab = JS_GetArrayBuffer(ctx, &ab_len, val);

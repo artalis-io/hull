@@ -1,0 +1,310 @@
+/*
+ * mod_image.c — hull:image module (QuickJS bindings)
+ *
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ */
+
+#include "mod_buffer.h"
+#include "hull/cap/image.h"
+
+#include <stdlib.h>
+#include <string.h>
+
+/* ── JS class for HlImage ──────────────────────────────────────────── */
+
+/* js_image_class_id is defined in mod_buffer.c (extern in mod_buffer.h) */
+
+static void js_image_finalizer(JSRuntime *rt, JSValue val)
+{
+    (void)rt;
+    HlImage *img = JS_GetOpaque(val, js_image_class_id);
+    if (img) {
+        hl_image_free(img);
+    }
+}
+
+static JSClassDef js_image_class = {
+    "HlImage",
+    .finalizer = js_image_finalizer,
+};
+
+/* ── Property getters ──────────────────────────────────────────────── */
+
+static JSValue js_image_get_width(JSContext *ctx, JSValueConst this_val)
+{
+    HlImage *img = JS_GetOpaque2(ctx, this_val, js_image_class_id);
+    if (!img) return JS_ThrowInternalError(ctx, "image already closed");
+    return JS_NewUint32(ctx, img->width);
+}
+
+static JSValue js_image_get_height(JSContext *ctx, JSValueConst this_val)
+{
+    HlImage *img = JS_GetOpaque2(ctx, this_val, js_image_class_id);
+    if (!img) return JS_ThrowInternalError(ctx, "image already closed");
+    return JS_NewUint32(ctx, img->height);
+}
+
+static JSValue js_image_get_format(JSContext *ctx, JSValueConst this_val)
+{
+    HlImage *img = JS_GetOpaque2(ctx, this_val, js_image_class_id);
+    if (!img) return JS_ThrowInternalError(ctx, "image already closed");
+    return JS_NewString(ctx, hl_image_format_name(img->format));
+}
+
+static JSValue js_image_get_size(JSContext *ctx, JSValueConst this_val)
+{
+    HlImage *img = JS_GetOpaque2(ctx, this_val, js_image_class_id);
+    if (!img) return JS_ThrowInternalError(ctx, "image already closed");
+    return JS_NewInt64(ctx, (int64_t)img->pixel_len);
+}
+
+/* ── Methods ───────────────────────────────────────────────────────── */
+
+static JSValue js_image_pixels(JSContext *ctx, JSValueConst this_val,
+                               int argc, JSValueConst *argv)
+{
+    (void)argc; (void)argv;
+    HlImage *img = JS_GetOpaque2(ctx, this_val, js_image_class_id);
+    if (!img) return JS_ThrowInternalError(ctx, "image already closed");
+
+    /* Return a copy as ArrayBuffer */
+    return JS_NewArrayBufferCopy(ctx, (const uint8_t *)img->pixels,
+                                  img->pixel_len);
+}
+
+static JSValue js_image_close(JSContext *ctx, JSValueConst this_val,
+                              int argc, JSValueConst *argv)
+{
+    (void)argc; (void)argv;
+    HlImage *img = JS_GetOpaque2(ctx, this_val, js_image_class_id);
+    if (img) {
+        hl_image_free(img);
+        JS_SetOpaque(this_val, NULL);
+    }
+    return JS_UNDEFINED;
+}
+
+/* ── Helper: wrap HlImage* as JS object ────────────────────────────── */
+
+static JSValue js_wrap_image(JSContext *ctx, HlImage *img)
+{
+    JSValue obj = JS_NewObjectClass(ctx, (int)js_image_class_id);
+    if (JS_IsException(obj)) {
+        hl_image_free(img);
+        return obj;
+    }
+    JS_SetOpaque(obj, img);
+    return obj;
+}
+
+/* ── Module functions ──────────────────────────────────────────────── */
+
+/* image.new(w, h, format, data) */
+static JSValue js_image_new(JSContext *ctx, JSValueConst this_val,
+                            int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 4)
+        return JS_ThrowTypeError(ctx, "image.new requires (w, h, format, data)");
+
+    uint32_t w, h;
+    if (JS_ToUint32(ctx, &w, argv[0])) return JS_EXCEPTION;
+    if (JS_ToUint32(ctx, &h, argv[1])) return JS_EXCEPTION;
+
+    const char *fmt_name = JS_ToCString(ctx, argv[2]);
+    if (!fmt_name) return JS_EXCEPTION;
+
+    int fmt = hl_image_format_from_name(fmt_name);
+    if (fmt < 0) {
+        JSValue err = JS_ThrowTypeError(ctx, "unknown image format: %s", fmt_name);
+        JS_FreeCString(ctx, fmt_name);
+        return err;
+    }
+    JS_FreeCString(ctx, fmt_name);
+
+    HlBufferView view;
+    const char *str_out;
+    int needs_free;
+    if (!js_get_buffer(ctx, argv[3], &view, &str_out, &needs_free))
+        return JS_ThrowTypeError(ctx, "image.new: arg 4 must be a buffer");
+
+    HlImage *img = hl_image_new(w, h, (HlImageFormat)fmt,
+                                 view.data, view.len, NULL);
+    if (needs_free) JS_FreeCString(ctx, str_out);
+
+    if (!img)
+        return JS_ThrowRangeError(ctx, "image.new: invalid dimensions or data size");
+
+    return js_wrap_image(ctx, img);
+}
+
+/* image.fromBuffer(data, w, h, format) */
+static JSValue js_image_from_buffer(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 4)
+        return JS_ThrowTypeError(ctx, "image.fromBuffer requires (data, w, h, format)");
+
+    HlBufferView view;
+    const char *str_out;
+    int needs_free;
+    if (!js_get_buffer(ctx, argv[0], &view, &str_out, &needs_free))
+        return JS_ThrowTypeError(ctx, "image.fromBuffer: arg 1 must be a buffer");
+
+    uint32_t w, h;
+    if (JS_ToUint32(ctx, &w, argv[1])) {
+        if (needs_free) JS_FreeCString(ctx, str_out);
+        return JS_EXCEPTION;
+    }
+    if (JS_ToUint32(ctx, &h, argv[2])) {
+        if (needs_free) JS_FreeCString(ctx, str_out);
+        return JS_EXCEPTION;
+    }
+
+    const char *fmt_name = JS_ToCString(ctx, argv[3]);
+    if (!fmt_name) {
+        if (needs_free) JS_FreeCString(ctx, str_out);
+        return JS_EXCEPTION;
+    }
+
+    int fmt = hl_image_format_from_name(fmt_name);
+    JS_FreeCString(ctx, fmt_name);
+
+    if (fmt < 0) {
+        if (needs_free) JS_FreeCString(ctx, str_out);
+        return JS_ThrowTypeError(ctx, "unknown image format");
+    }
+
+    HlImage *img = hl_image_from_view(w, h, (HlImageFormat)fmt,
+                                       view.data, view.len, NULL);
+    if (needs_free) JS_FreeCString(ctx, str_out);
+
+    if (!img)
+        return JS_ThrowRangeError(ctx, "image.fromBuffer: invalid dimensions or data size");
+
+    return js_wrap_image(ctx, img);
+}
+
+/* image.decode(data, format?) */
+static JSValue js_image_decode_fn(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "image.decode requires data");
+
+    HlBufferView view;
+    const char *str_out;
+    int needs_free;
+    if (!js_get_buffer(ctx, argv[0], &view, &str_out, &needs_free))
+        return JS_ThrowTypeError(ctx, "image.decode: arg 1 must be a buffer");
+
+    const char *fmt_name = NULL;
+    if (argc >= 2 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1])) {
+        fmt_name = JS_ToCString(ctx, argv[1]);
+        if (!fmt_name) {
+            if (needs_free) JS_FreeCString(ctx, str_out);
+            return JS_EXCEPTION;
+        }
+    }
+
+    const char *err_msg = NULL;
+    HlImage *img = hl_image_decode(view.data, view.len,
+                                    fmt_name, NULL, &err_msg);
+    if (needs_free) JS_FreeCString(ctx, str_out);
+    if (fmt_name) JS_FreeCString(ctx, fmt_name);
+
+    if (!img)
+        return JS_ThrowInternalError(ctx, "image.decode: %s",
+                                      err_msg ? err_msg : "decode failed");
+
+    return js_wrap_image(ctx, img);
+}
+
+/* image.encode(img, format, opts?) */
+static JSValue js_image_encode_fn(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 2)
+        return JS_ThrowTypeError(ctx, "image.encode requires (img, format)");
+
+    HlImage *img = JS_GetOpaque2(ctx, argv[0], js_image_class_id);
+    if (!img) return JS_ThrowTypeError(ctx, "image.encode: arg 1 must be an Image");
+
+    const char *fmt_name = JS_ToCString(ctx, argv[1]);
+    if (!fmt_name) return JS_EXCEPTION;
+
+    int quality = 90;
+    if (argc >= 3 && JS_IsObject(argv[2])) {
+        JSValue qval = JS_GetPropertyStr(ctx, argv[2], "quality");
+        if (JS_IsNumber(qval)) {
+            int32_t q;
+            JS_ToInt32(ctx, &q, qval);
+            quality = q;
+        }
+        JS_FreeValue(ctx, qval);
+    }
+
+    void *out = NULL;
+    size_t out_len = 0;
+    const char *err_msg = NULL;
+
+    int rc = hl_image_encode(img, fmt_name, quality,
+                              &out, &out_len, NULL, &err_msg);
+    JS_FreeCString(ctx, fmt_name);
+
+    if (rc != 0)
+        return JS_ThrowInternalError(ctx, "image.encode: %s",
+                                      err_msg ? err_msg : "encode failed");
+
+    /* Return as ArrayBuffer */
+    JSValue ab = JS_NewArrayBufferCopy(ctx, (const uint8_t *)out, out_len);
+    free(out);
+    return ab;
+}
+
+/* ── Module registration ───────────────────────────────────────────── */
+
+static const JSCFunctionListEntry js_image_proto[] = {
+    JS_CGETSET_DEF("width",  js_image_get_width,  NULL),
+    JS_CGETSET_DEF("height", js_image_get_height, NULL),
+    JS_CGETSET_DEF("format", js_image_get_format, NULL),
+    JS_CGETSET_DEF("size",   js_image_get_size,   NULL),
+    JS_CFUNC_DEF("pixels", 0, js_image_pixels),
+    JS_CFUNC_DEF("close",  0, js_image_close),
+};
+
+int hl_js_init_image_module(JSContext *ctx, HlJS *js)
+{
+    (void)js;
+
+    /* Register class */
+    JS_NewClassID(&js_image_class_id);
+    JS_NewClass(JS_GetRuntime(ctx), js_image_class_id, &js_image_class);
+
+    /* Set prototype with getters and methods */
+    JSValue proto = JS_NewObject(ctx);
+    JS_SetPropertyFunctionList(ctx, proto, js_image_proto,
+                               sizeof(js_image_proto) / sizeof(js_image_proto[0]));
+    JS_SetClassProto(ctx, js_image_class_id, proto);
+
+    /* Create module object */
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue image_obj = JS_NewObject(ctx);
+
+    JS_SetPropertyStr(ctx, image_obj, "new",
+                      JS_NewCFunction(ctx, js_image_new, "new", 4));
+    JS_SetPropertyStr(ctx, image_obj, "fromBuffer",
+                      JS_NewCFunction(ctx, js_image_from_buffer, "fromBuffer", 4));
+    JS_SetPropertyStr(ctx, image_obj, "decode",
+                      JS_NewCFunction(ctx, js_image_decode_fn, "decode", 2));
+    JS_SetPropertyStr(ctx, image_obj, "encode",
+                      JS_NewCFunction(ctx, js_image_encode_fn, "encode", 3));
+
+    JS_SetPropertyStr(ctx, global, "image", image_obj);
+    JS_FreeValue(ctx, global);
+
+    return 0;
+}

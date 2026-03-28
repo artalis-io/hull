@@ -24,6 +24,9 @@
 /* MappedBuffer class (fs.mmap) — used by fs, compute, gpu, buffer */
 extern JSClassID js_mmap_class_id;
 
+/* HlImage class — used by image, buffer */
+extern JSClassID js_image_class_id;
+
 #ifdef HL_ENABLE_WASM
 /* WasmBuffer class — used by compute, gpu, buffer */
 extern JSClassID js_wasm_buf_class_id;
@@ -70,6 +73,7 @@ int hl_js_init_template_module(JSContext *ctx, HlJS *js);
 int hl_js_init_worker_module(JSContext *ctx, HlJS *js);
 int hl_js_init_server_module(JSContext *ctx, HlJS *js);
 int hl_js_init_fs_module(JSContext *ctx, HlJS *js);
+int hl_js_init_image_module(JSContext *ctx, HlJS *js);
 
 #ifdef HL_ENABLE_WASM
 int hl_js_init_compute_module(JSContext *ctx, HlJS *js);

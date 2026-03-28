@@ -5,6 +5,7 @@
 
 #include "mod_buffer.h"
 #include "hull/cap/fs.h"
+#include "hull/cap/image.h"
 
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/wasm_buffer.h"
@@ -35,5 +36,12 @@ int lua_get_buffer(lua_State *L, int idx, HlBufferView *out)
         return 1;
     }
 #endif
+    /* Try HlImage (pixel data) */
+    HlImage **imgp = luaL_testudata(L, idx, HL_IMAGE_MT);
+    if (imgp && *imgp) {
+        out->data = (*imgp)->pixels;
+        out->len = (*imgp)->pixel_len;
+        return 1;
+    }
     return 0; /* not a buffer type */
 }

@@ -80,6 +80,10 @@ int hl_lua_register_modules(HlLua *lua)
     luaL_requiref(L, "hull.fs", luaopen_hull_fs, 0);
     lua_setglobal(L, "fs");
 
+    /* Register hull.image — always available */
+    luaL_requiref(L, "hull.image", luaopen_hull_image, 0);
+    lua_setglobal(L, "image");
+
 #ifdef HL_ENABLE_WASM
     /* Register hull.compute (only if WASM runtime is available) */
     if (lua->base.wasm_cache) {

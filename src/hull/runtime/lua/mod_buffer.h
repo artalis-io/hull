@@ -16,6 +16,7 @@
 
 #define HL_MMAP_MT     "HlMappedBuffer"
 #define HL_WASM_BUF_MT "HlWasmBuffer"
+#define HL_IMAGE_MT    "HlImage"
 
 /* ── Inline helpers used by most modules ──────────────────────────── */
 
@@ -59,6 +60,7 @@ int luaopen_hull_template_bridge(lua_State *L);
 int luaopen_hull_worker(lua_State *L);
 int luaopen_hull_server(lua_State *L);
 int luaopen_hull_fs(lua_State *L);
+int luaopen_hull_image(lua_State *L);
 
 #ifdef HL_ENABLE_WASM
 int luaopen_hull_compute(lua_State *L);
