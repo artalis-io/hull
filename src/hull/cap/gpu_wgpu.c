@@ -1517,7 +1517,10 @@ static int wgpu_texture_write(void *backend_device, HlGpuTexture *tex,
         return HL_GPU_ERR_BUFFER;
 
     int bpp = tex_format_bpp(tex->format);
-    uint32_t bytes_per_row = tex->width * (uint32_t)bpp;
+    uint64_t row64 = (uint64_t)tex->width * (uint64_t)bpp;
+    if (row64 > UINT32_MAX)
+        return HL_GPU_ERR_BUFFER;
+    uint32_t bytes_per_row = (uint32_t)row64;
     size_t expected = (size_t)bytes_per_row * tex->height;
     if (len < expected)
         return HL_GPU_ERR_BUFFER;
@@ -1549,7 +1552,10 @@ static int wgpu_texture_read(void *backend_device, HlGpuTexture *tex,
         return HL_GPU_ERR_BUFFER;
 
     int bpp = tex_format_bpp(tex->format);
-    uint32_t row_bytes = tex->width * (uint32_t)bpp;
+    uint64_t row64 = (uint64_t)tex->width * (uint64_t)bpp;
+    if (row64 > UINT32_MAX)
+        return HL_GPU_ERR_BUFFER;
+    uint32_t row_bytes = (uint32_t)row64;
     /* 256-byte alignment required by WebGPU for buffer-to-texture copies */
     uint32_t aligned_row = (row_bytes + 255) & ~(uint32_t)255;
     size_t staging_size = (size_t)aligned_row * tex->height;

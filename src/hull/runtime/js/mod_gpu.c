@@ -110,8 +110,9 @@ static JSValue js_gpu_load(JSContext *ctx, JSValueConst this_val,
 
     if (!wgsl) {
         free(file_buf);
+        JSValue err = JS_ThrowInternalError(ctx, "gpu.load: shader '%s' not found in shaders/", name);
         JS_FreeCString(ctx, name);
-        return JS_ThrowInternalError(ctx, "gpu.load: shader '%s' not found in shaders/", name);
+        return err;
     }
 
     int rc = hl_cap_gpu_compile(gpu, -1, name, wgsl, wgsl_len);

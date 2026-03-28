@@ -51,6 +51,8 @@ static int stb_decode(const void *src, size_t src_len,
                       int requested_channels, HlAllocator *alloc)
 {
     (void)alloc;
+    if (src_len > (size_t)INT32_MAX)
+        return -1; /* stbi takes int len — reject oversized input */
     int iw, ih, channels_in_file;
     unsigned char *data = stbi_load_from_memory(
         (const unsigned char *)src, (int)src_len,
@@ -74,8 +76,10 @@ static int stb_encode_png(const void *pixels, uint32_t w, uint32_t h,
     (void)quality;
     (void)alloc;
     WriteCtx wc = { .data = NULL, .len = 0, .cap = 0 };
-    /* Pre-allocate a reasonable buffer */
-    wc.cap = (size_t)w * h * (size_t)channels / 2 + 256;
+    /* Pre-allocate a reasonable buffer (overflow-safe) */
+    uint64_t est = (uint64_t)w * h * (uint64_t)channels / 2 + 256;
+    if (est > SIZE_MAX / 2) est = (uint64_t)w * h + 256;
+    wc.cap = (size_t)est;
     wc.data = malloc(wc.cap);
     if (!wc.data) return -1;
 
@@ -123,7 +127,9 @@ static int stb_encode_jpeg(const void *pixels, uint32_t w, uint32_t h,
     if (quality > 100) quality = 100;
 
     WriteCtx wc = { .data = NULL, .len = 0, .cap = 0 };
-    wc.cap = (size_t)w * h * (size_t)channels / 4 + 256;
+    uint64_t jest = (uint64_t)w * h * (uint64_t)channels / 4 + 256;
+    if (jest > SIZE_MAX / 2) jest = (uint64_t)w * h + 256;
+    wc.cap = (size_t)jest;
     wc.data = malloc(wc.cap);
     if (!wc.data) return -1;
 

@@ -230,6 +230,8 @@ static int l_image_to_wasm(lua_State *L)
     HlImage *img = *imgp;
 
     size_t hdr = 9; /* 4 + 4 + 1 */
+    if (img->pixel_len > SIZE_MAX - hdr)
+        return luaL_error(L, "image.to_wasm: image too large");
     size_t total = hdr + img->pixel_len;
     char *buf = malloc(total);
     if (!buf) return luaL_error(L, "out of memory");
@@ -267,8 +269,13 @@ static int l_image_from_wasm(lua_State *L)
         return luaL_error(L, "image.from_wasm: invalid format byte %d", fmt_byte);
 
     HlImageFormat fmt = (HlImageFormat)(fmt_byte - 1);
+    int bpp = hl_image_bpp(fmt);
+    /* Overflow-safe size check: w * h * bpp */
+    if (w > HL_IMAGE_MAX_DIM || h > HL_IMAGE_MAX_DIM ||
+        (w > 0 && h > SIZE_MAX / 2 / (size_t)w / (size_t)bpp))
+        return luaL_error(L, "image.from_wasm: dimensions overflow");
+    size_t expected = (size_t)w * (size_t)h * (size_t)bpp;
     size_t pixel_len = len - 9;
-    size_t expected = (size_t)w * h * hl_image_bpp(fmt);
     if (pixel_len < expected)
         return luaL_error(L, "image.from_wasm: pixel data too short (%zu < %zu)", pixel_len, expected);
 
