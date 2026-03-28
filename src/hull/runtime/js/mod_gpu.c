@@ -16,7 +16,9 @@
 
 /* Forward declaration */
 static int js_parse_texture_descs(JSContext *ctx, JSValueConst arr,
-                                   HlGpuTextureDesc **out, int *count);
+                                   HlGpuTextureDesc *descs, int max_descs,
+                                   const char **tracked_strs, int *str_count,
+                                   int str_max);
 
 #include <keel/server.h>
 #include <stdio.h>
