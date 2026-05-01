@@ -6,6 +6,7 @@
 
 #include "mod_buffer.h"
 #include "hull/cap/db.h"
+#include "hull/cap/db_backend.h"
 #include "hull/worker_db.h"
 #include "hull/async.h"
 #include "hull/alloc.h"
@@ -16,7 +17,7 @@
 #endif
 
 #include <keel/server.h>
-#include <sqlite3.h>
+#include <sqlite3.h> /* needed for UDF: sqlite3_value, sqlite3_context, etc. */
 
 /* Callback context for building JS result array from hl_cap_db_query */
 typedef struct {
@@ -173,7 +174,7 @@ static JSValue js_db_query_impl(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (!js || !js->base.stmt_cache)
+    if (!js || !js->base.db_handle)
         return JS_ThrowInternalError(ctx, "database not available");
 
     if (argc < 1)
@@ -183,7 +184,10 @@ static JSValue js_db_query_impl(JSContext *ctx, JSValueConst this_val,
     if (!sql)
         return JS_EXCEPTION;
 
-    if (!js_is_stdlib_caller(ctx) && hl_cap_db_check_namespace(sql) != 0) {
+    int is_stdlib = js_is_stdlib_caller(ctx);
+    HlDbHandle *h = is_stdlib ? js->base.hull_db_handle : js->base.db_handle;
+
+    if (!is_stdlib && hl_cap_db_check_namespace(sql) != 0) {
         JS_FreeCString(ctx, sql);
         return JS_ThrowInternalError(ctx,
             "access denied: _hull_* tables are reserved");
@@ -204,8 +208,8 @@ static JSValue js_db_query_impl(JSContext *ctx, JSValueConst this_val,
         .row_count = 0,
     };
 
-    int rc = hl_cap_db_query(js->base.stmt_cache, sql, params, nparams,
-                               js_query_row_cb, &qc, js->base.alloc);
+    int rc = hl_db_query(h, sql, params, nparams,
+                         js_query_row_cb, &qc, js->base.alloc);
 
     js_free_hl_values(ctx, params, nparams);
     JS_FreeCString(ctx, sql);
@@ -213,7 +217,7 @@ static JSValue js_db_query_impl(JSContext *ctx, JSValueConst this_val,
     if (rc != 0) {
         JS_FreeValue(ctx, qc.array);
         return JS_ThrowInternalError(ctx, "query failed: %s",
-                                     sqlite3_errmsg(js->base.db));
+                                     hl_db_errmsg(h));
     }
 
     return qc.array;
@@ -225,7 +229,7 @@ static JSValue js_db_exec_impl(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (!js || !js->base.stmt_cache)
+    if (!js || !js->base.db_handle)
         return JS_ThrowInternalError(ctx, "database not available");
 
     if (argc < 1)
@@ -235,7 +239,10 @@ static JSValue js_db_exec_impl(JSContext *ctx, JSValueConst this_val,
     if (!sql)
         return JS_EXCEPTION;
 
-    if (!js_is_stdlib_caller(ctx) && hl_cap_db_check_namespace(sql) != 0) {
+    int is_stdlib = js_is_stdlib_caller(ctx);
+    HlDbHandle *h = is_stdlib ? js->base.hull_db_handle : js->base.db_handle;
+
+    if (!is_stdlib && hl_cap_db_check_namespace(sql) != 0) {
         JS_FreeCString(ctx, sql);
         return JS_ThrowInternalError(ctx,
             "access denied: _hull_* tables are reserved");
@@ -250,14 +257,14 @@ static JSValue js_db_exec_impl(JSContext *ctx, JSValueConst this_val,
         }
     }
 
-    int rc = hl_cap_db_exec(js->base.stmt_cache, sql, params, nparams);
+    int rc = hl_db_exec(h, sql, params, nparams);
 
     js_free_hl_values(ctx, params, nparams);
     JS_FreeCString(ctx, sql);
 
     if (rc < 0)
         return JS_ThrowInternalError(ctx, "exec failed: %s",
-                                     sqlite3_errmsg(js->base.db));
+                                     hl_db_errmsg(h));
 
     return JS_NewInt32(ctx, rc);
 }
@@ -276,10 +283,10 @@ static JSValue js_db_last_id(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val; (void)argc; (void)argv;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (!js || !js->base.db)
+    if (!js || !js->base.db_handle)
         return JS_ThrowInternalError(ctx, "database not available");
 
-    return JS_NewInt64(ctx, hl_cap_db_last_id(js->base.db));
+    return JS_NewInt64(ctx, hl_db_last_id(js->base.db_handle));
 }
 
 /* db.batch(fn) — execute fn() inside a transaction (BEGIN IMMEDIATE..COMMIT) */
@@ -288,28 +295,30 @@ static JSValue js_db_batch(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val;
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (!js || !js->base.db)
+    if (!js || !js->base.db_handle)
         return JS_ThrowInternalError(ctx, "database not available");
 
     if (argc < 1 || !JS_IsFunction(ctx, argv[0]))
         return JS_ThrowTypeError(ctx, "db.batch requires a function argument");
 
-    if (hl_cap_db_begin(js->base.db) != 0)
+    HlDbHandle *h = js->base.db_handle;
+
+    if (hl_db_begin(h) != 0)
         return JS_ThrowInternalError(ctx, "BEGIN failed: %s",
-                                     sqlite3_errmsg(js->base.db));
+                                     hl_db_errmsg(h));
 
     JSValue result = JS_Call(ctx, argv[0], JS_UNDEFINED, 0, NULL);
 
     if (JS_IsException(result)) {
-        hl_cap_db_rollback(js->base.db);
+        hl_db_rollback(h);
         return result; /* propagate exception */
     }
     JS_FreeValue(ctx, result);
 
-    if (hl_cap_db_commit(js->base.db) != 0) {
-        hl_cap_db_rollback(js->base.db);
+    if (hl_db_commit(h) != 0) {
+        hl_db_rollback(h);
         return JS_ThrowInternalError(ctx, "COMMIT failed: %s",
-                                     sqlite3_errmsg(js->base.db));
+                                     hl_db_errmsg(h));
     }
 
     return JS_UNDEFINED;
@@ -797,7 +806,8 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val;
     HlJS *js = get_hl_js(ctx);
-    if (!js || !js->base.db)
+    sqlite3 *raw_db = js ? hl_db_sqlite_raw(js->base.db_handle) : NULL;
+    if (!js || !raw_db)
         return JS_ThrowInternalError(ctx, "database not available");
 
     if (argc < 2)
@@ -848,7 +858,7 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
 
         const char *err_msg = NULL;
         int rc = hl_cap_db_udf_register_wasm(
-            js->base.db, js->base.wasm_cache, &udf_opts,
+            raw_db, js->base.wasm_cache, &udf_opts,
             js->base.app_vfs, js->app_dir,
             js->base.alloc, &err_msg);
 
@@ -881,7 +891,7 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
         if (deterministic) encoding |= SQLITE_DETERMINISTIC;
 
         int rc = sqlite3_create_function_v2(
-            js->base.db, sql_name, nargs, encoding, udf_ctx,
+            raw_db, sql_name, nargs, encoding, udf_ctx,
             js_scalar_udf_func, NULL, NULL,
             js_scalar_udf_destroy);
 
@@ -890,7 +900,7 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
         if (rc != SQLITE_OK) {
             js_scalar_udf_destroy(udf_ctx);
             return JS_ThrowInternalError(ctx, "db.udf.register: %s",
-                                         sqlite3_errmsg(js->base.db));
+                                         sqlite3_errmsg(raw_db));
         }
     } else if (JS_IsObject(argv[1])) {
         /* ── JS aggregate UDF ({step, finalize}) ───────────────── */
@@ -928,7 +938,7 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
         if (deterministic) encoding |= SQLITE_DETERMINISTIC;
 
         int rc = sqlite3_create_function_v2(
-            js->base.db, sql_name, nargs, encoding, udf_ctx,
+            raw_db, sql_name, nargs, encoding, udf_ctx,
             NULL, js_agg_step_func, js_agg_finalize_func,
             js_agg_udf_destroy);
 
@@ -937,7 +947,7 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
         if (rc != SQLITE_OK) {
             js_agg_udf_destroy(udf_ctx);
             return JS_ThrowInternalError(ctx, "db.udf.register: %s",
-                                         sqlite3_errmsg(js->base.db));
+                                         sqlite3_errmsg(raw_db));
         }
     } else {
         JS_FreeCString(ctx, sql_name);
@@ -954,7 +964,8 @@ static JSValue js_db_udf_unregister(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val;
     HlJS *js = get_hl_js(ctx);
-    if (!js || !js->base.db)
+    sqlite3 *raw_db = js ? hl_db_sqlite_raw(js->base.db_handle) : NULL;
+    if (!js || !raw_db)
         return JS_ThrowInternalError(ctx, "database not available");
 
     if (argc < 1)
@@ -965,14 +976,14 @@ static JSValue js_db_udf_unregister(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
 
     int rc = sqlite3_create_function_v2(
-        js->base.db, sql_name, -1, SQLITE_UTF8,
+        raw_db, sql_name, -1, SQLITE_UTF8,
         NULL, NULL, NULL, NULL, NULL);
 
     JS_FreeCString(ctx, sql_name);
 
     if (rc != SQLITE_OK)
         return JS_ThrowInternalError(ctx, "db.udf.unregister: %s",
-                                     sqlite3_errmsg(js->base.db));
+                                     sqlite3_errmsg(raw_db));
 
     return JS_UNDEFINED;
 }

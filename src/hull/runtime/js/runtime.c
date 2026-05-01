@@ -19,6 +19,7 @@
 #include "hull/cap/env.h"
 #include "hull/cap/http.h"
 #include "hull/cap/db.h"
+#include "hull/cap/db_backend.h"
 #include "hull/cap/test.h"
 #include "quickjs.h"
 
@@ -531,7 +532,7 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
     /* Register worker VM init hooks (e.g. db.* for worker.dispatch).
      * Must happen before modules are registered since module init may
      * trigger worker VM creation. */
-    if (js->base.db)
+    if (js->base.db_handle)
         hl_js_worker_db_init();
 
     /* Register hull:* built-in modules */
@@ -886,7 +887,7 @@ static void hl_js_timer_trampoline(void *user_data)
 
     /* Reset scratch arena + guard stale txn */
     sh_arena_reset(js->scratch);
-    hl_cap_db_guard_stale_txn(js->base.db);
+    hl_db_guard_stale_txn(js->base.db_handle);
 
     assert(js->dispatch_depth == 0 && "timer fired during active dispatch");
     js->dispatch_depth++;
@@ -1017,7 +1018,7 @@ int hl_js_dispatch(HlJS *js, int handler_id,
     js->dispatch_depth++;
 
     /* Guard: roll back any stale transaction left by a crashed handler */
-    hl_cap_db_guard_stale_txn(js->base.db);
+    hl_db_guard_stale_txn(js->base.db_handle);
 
     hl_js_reset_request(js);
 
@@ -1541,7 +1542,7 @@ int hl_js_dispatch_middleware(HlJS *js, int handler_id,
         return -1;
 
     /* Guard: roll back any stale transaction left by a crashed handler */
-    hl_cap_db_guard_stale_txn(js->base.db);
+    hl_db_guard_stale_txn(js->base.db_handle);
 
     hl_js_reset_request(js);
 

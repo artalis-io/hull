@@ -9,6 +9,7 @@
 
 #include "hull/app_context.h"
 #include "hull/cap/db.h"
+#include "hull/cap/db_backend.h"
 #include "hull/entry.h"
 #include "hull/migrate.h"
 #include "hull/vfs.h"
@@ -36,10 +37,10 @@
 /* ── Opaque struct ─────────────────────────────────────────────────── */
 
 struct HlAppContext {
-    sqlite3       *db;
+    HlDbHandle     db_handle;     /* vtable-based DB handle */
+    sqlite3       *db;            /* raw sqlite3* for migrate/agent (from handle) */
     HlVfs          app_vfs;
     HlVfs          platform_vfs;
-    HlStmtCache    stmt_cache;
     HlRuntime     *rt;
 
     /* Storage — large enough for either runtime */
@@ -161,14 +162,16 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
         return -1;
     }
 
-    /* Open database */
+    /* Open database via vtable */
     const char *db_path = opts->db_path ? opts->db_path : ":memory:";
-    if (sqlite3_open(db_path, &ctx->db) != SQLITE_OK) {
+    ctx->db_handle.backend = &hl_db_backend_sqlite;
+    if (hl_db_backend_sqlite.open(&ctx->db_handle.ctx, db_path,
+                                   opts->alloc) != 0) {
         free(ctx);
         return -1;
     }
     ctx->db_open = 1;
-    hl_cap_db_init(ctx->db);
+    ctx->db = hl_db_sqlite_raw(&ctx->db_handle);
 
     /* Init VFS instances */
     extern const HlEntry hl_app_entries[];
@@ -184,9 +187,6 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
             return -1;
         }
     }
-
-    /* Init statement cache */
-    hl_stmt_cache_init(&ctx->stmt_cache, ctx->db, opts->alloc);
 
     /* WASM cache: use external if provided, else init internal */
 #ifdef HL_ENABLE_WASM
@@ -208,8 +208,8 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
         if (opts->instruction_limit > 0) cfg.max_instructions = opts->instruction_limit;
         HlLua *lua = &ctx->rt_storage.lua;
         memset(lua, 0, sizeof(*lua));
-        lua->base.db = ctx->db;
-        lua->base.stmt_cache = &ctx->stmt_cache;
+        lua->base.db_handle = &ctx->db_handle;
+        lua->base.hull_db_handle = &ctx->db_handle;
         lua->base.app_vfs = &ctx->app_vfs;
         lua->base.platform_vfs = &ctx->platform_vfs;
         if (opts->alloc) lua->base.alloc = opts->alloc;
@@ -256,8 +256,8 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
         if (opts->instruction_limit > 0) cfg.max_instructions = opts->instruction_limit;
         HlJS *js = &ctx->rt_storage.js;
         memset(js, 0, sizeof(*js));
-        js->base.db = ctx->db;
-        js->base.stmt_cache = &ctx->stmt_cache;
+        js->base.db_handle = &ctx->db_handle;
+        js->base.hull_db_handle = &ctx->db_handle;
         js->base.app_vfs = &ctx->app_vfs;
         js->base.platform_vfs = &ctx->platform_vfs;
         if (opts->alloc) js->base.alloc = opts->alloc;
@@ -332,11 +332,10 @@ void hl_app_context_free(HlAppContext *ctx)
         hl_cap_wasm_destroy(&ctx->wasm_cache);
 #endif
 
-    hl_stmt_cache_destroy(&ctx->stmt_cache);
-
     if (ctx->db_open) {
-        hl_cap_db_shutdown(ctx->db);
-        sqlite3_close(ctx->db);
+        ctx->db_handle.backend->close(ctx->db_handle.ctx);
+        ctx->db_handle.ctx = NULL;
+        ctx->db = NULL;
     }
 
     ctx->rt = NULL;
@@ -371,7 +370,7 @@ const HlVfs *hl_app_context_platform_vfs(HlAppContext *ctx)
 
 HlStmtCache *hl_app_context_stmt_cache(HlAppContext *ctx)
 {
-    return ctx ? &ctx->stmt_cache : NULL;
+    return ctx ? hl_db_sqlite_cache(&ctx->db_handle) : NULL;
 }
 
 int hl_app_context_is_lua(HlAppContext *ctx)

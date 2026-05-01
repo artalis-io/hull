@@ -1,6 +1,6 @@
 # Database Backend Vtable Roadmap
 
-Status: **Planned** | Created: 2026-03-28
+Status: **Done** | Created: 2026-03-28 | Implemented: 2026-05-01
 
 ## Goal
 

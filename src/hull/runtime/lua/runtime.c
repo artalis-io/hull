@@ -16,6 +16,7 @@
 #include "hull/cap/env.h"
 #include "hull/cap/tool.h"
 #include "hull/cap/db.h"
+#include "hull/cap/db_backend.h"
 
 #include "lua.h"
 #include "lualib.h"
@@ -206,7 +207,7 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
     /* Register worker VM init hooks (e.g. db.* for worker.dispatch).
      * Must happen before modules are registered since module init may
      * trigger worker VM creation. */
-    if (lua->base.db)
+    if (lua->base.db_handle)
         hl_lua_worker_db_init();
 
     /* Register hull.* C modules */
@@ -319,7 +320,7 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     lua->dispatch_depth++;
 
     /* Guard: roll back any stale transaction left by a crashed handler */
-    hl_cap_db_guard_stale_txn(lua->base.db);
+    hl_db_guard_stale_txn(lua->base.db_handle);
 
     /* Re-arm instruction limit for this request */
     if (lua->max_instructions > 0)
@@ -599,7 +600,7 @@ static void hl_lua_timer_trampoline(void *user_data)
 
     /* Reset scratch arena + guard stale txn */
     sh_arena_reset(lua->scratch);
-    hl_cap_db_guard_stale_txn(lua->base.db);
+    hl_db_guard_stale_txn(lua->base.db_handle);
 
     assert(lua->dispatch_depth == 0 && "timer fired during active dispatch");
     lua->dispatch_depth++;
@@ -1039,7 +1040,7 @@ int hl_lua_dispatch_middleware(HlLua *lua, int handler_id,
         return -1;
 
     /* Guard: roll back any stale transaction left by a crashed handler */
-    hl_cap_db_guard_stale_txn(lua->base.db);
+    hl_db_guard_stale_txn(lua->base.db_handle);
 
     /* Re-arm instruction limit for this middleware call */
     if (lua->max_instructions > 0)

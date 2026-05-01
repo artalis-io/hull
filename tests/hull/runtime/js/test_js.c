@@ -13,6 +13,7 @@
 #include "hull/manifest.h"
 #include "hull/vfs.h"
 #include "hull/cap/db.h"
+#include "hull/cap/db_backend.h"
 #include "hull/cap/env.h"
 #include "quickjs.h"
 
@@ -70,6 +71,7 @@ static void free_req_ctx(KlRequest *req)
 /* Init JS with database and env capabilities for testing */
 static sqlite3 *test_db = NULL;
 static HlStmtCache test_stmt_cache;
+static HlDbHandle test_db_handle;
 static const char *env_allowed[] = { "HULL_TEST_VAR", NULL };
 static HlEnvConfig env_cfg = { .allowed = env_allowed, .count = 1 };
 
@@ -79,19 +81,20 @@ static void init_js_with_caps(void)
     hl_vfs_init(&platform_vfs, hl_stdlib_entries, NULL);
     if (js_initialized)
         hl_js_free(&js);
-    if (test_db) {
-        hl_stmt_cache_destroy(&test_stmt_cache);
-        sqlite3_close(test_db);
+    if (test_db_handle.ctx) {
+        hl_db_backend_sqlite.close(test_db_handle.ctx);
+        test_db_handle.ctx = NULL;
         test_db = NULL;
     }
 
-    sqlite3_open(":memory:", &test_db);
-    hl_cap_db_init(test_db);
-    hl_stmt_cache_init(&test_stmt_cache, test_db, NULL);
+    test_db_handle.backend = &hl_db_backend_sqlite;
+    if (hl_db_backend_sqlite.open(&test_db_handle.ctx, ":memory:", NULL) != 0)
+        return;
+    test_db = hl_db_sqlite_raw(&test_db_handle);
     HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
     memset(&js, 0, sizeof(js));
-    js.base.db = test_db;
-    js.base.stmt_cache = &test_stmt_cache;
+    js.base.db_handle = &test_db_handle;
+    js.base.hull_db_handle = &test_db_handle;
     js.base.env_cfg = &env_cfg;
     js.base.platform_vfs = &platform_vfs;
     int rc = hl_js_init(&js, &cfg);
@@ -104,9 +107,9 @@ static void cleanup_js_caps(void)
         hl_js_free(&js);
         js_initialized = 0;
     }
-    if (test_db) {
-        hl_stmt_cache_destroy(&test_stmt_cache);
-        sqlite3_close(test_db);
+    if (test_db_handle.ctx) {
+        hl_db_backend_sqlite.close(test_db_handle.ctx);
+        test_db_handle.ctx = NULL;
         test_db = NULL;
     }
 }

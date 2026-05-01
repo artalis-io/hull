@@ -12,6 +12,7 @@
 #include "hull/reqctx.h"
 #include "hull/vfs.h"
 #include "hull/cap/db.h"
+#include "hull/cap/db_backend.h"
 #include "hull/cap/env.h"
 
 #include "lua.h"
@@ -73,6 +74,7 @@ static void free_lua_req_ctx(KlRequest *req)
 /* Init lua with database and env capabilities for testing */
 static sqlite3 *test_db = NULL;
 static HlStmtCache test_stmt_cache;
+static HlDbHandle test_db_handle;
 static const char *env_allowed[] = { "HULL_TEST_VAR", NULL };
 static HlEnvConfig env_cfg = { .allowed = env_allowed, .count = 1 };
 
@@ -82,19 +84,20 @@ static void init_lua_with_caps(void)
     hl_vfs_init(&platform_vfs, hl_stdlib_entries, NULL);
     if (lua_initialized)
         hl_lua_free(&lua_rt);
-    if (test_db) {
-        hl_stmt_cache_destroy(&test_stmt_cache);
-        sqlite3_close(test_db);
+    if (test_db_handle.ctx) {
+        hl_db_backend_sqlite.close(test_db_handle.ctx);
+        test_db_handle.ctx = NULL;
         test_db = NULL;
     }
 
-    sqlite3_open(":memory:", &test_db);
-    hl_cap_db_init(test_db);
-    hl_stmt_cache_init(&test_stmt_cache, test_db, NULL);
+    test_db_handle.backend = &hl_db_backend_sqlite;
+    if (hl_db_backend_sqlite.open(&test_db_handle.ctx, ":memory:", NULL) != 0)
+        return;
+    test_db = hl_db_sqlite_raw(&test_db_handle);
     HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
     memset(&lua_rt, 0, sizeof(lua_rt));
-    lua_rt.base.db = test_db;
-    lua_rt.base.stmt_cache = &test_stmt_cache;
+    lua_rt.base.db_handle = &test_db_handle;
+    lua_rt.base.hull_db_handle = &test_db_handle;
     lua_rt.base.env_cfg = &env_cfg;
     lua_rt.base.platform_vfs = &platform_vfs;
     int rc = hl_lua_init(&lua_rt, &cfg);
@@ -107,9 +110,9 @@ static void cleanup_lua_caps(void)
         hl_lua_free(&lua_rt);
         lua_initialized = 0;
     }
-    if (test_db) {
-        hl_stmt_cache_destroy(&test_stmt_cache);
-        sqlite3_close(test_db);
+    if (test_db_handle.ctx) {
+        hl_db_backend_sqlite.close(test_db_handle.ctx);
+        test_db_handle.ctx = NULL;
         test_db = NULL;
     }
 }

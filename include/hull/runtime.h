@@ -19,11 +19,10 @@ typedef struct HlEnvConfig HlEnvConfig;
 typedef struct HlHttpConfig HlHttpConfig;
 typedef struct HlSmtpConfig HlSmtpConfig;
 typedef struct HlManifest HlManifest;
-typedef struct HlStmtCache HlStmtCache;
 typedef struct HlVfs HlVfs;
 typedef struct HlWasmCache HlWasmCache;
 typedef struct HlGpuCtx HlGpuCtx;
-typedef struct sqlite3 sqlite3;
+typedef struct HlDbHandle HlDbHandle;
 typedef struct KlServer KlServer;
 typedef struct KlThreadPool KlThreadPool;
 typedef struct HlRuntime HlRuntime;
@@ -40,8 +39,8 @@ typedef struct HlRuntimeVtable {
 
 struct HlRuntime {
     const HlRuntimeVtable *vt;
-    sqlite3      *db;
-    HlStmtCache  *stmt_cache;
+    HlDbHandle   *db_handle;      /* app queries (via vtable) */
+    HlDbHandle   *hull_db_handle; /* hull internal (_hull_* tables) */
     HlAllocator  *alloc;
     HlFsConfig   *fs_cfg;
     HlEnvConfig  *env_cfg;

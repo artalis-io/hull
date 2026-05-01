@@ -5,6 +5,7 @@
 
 #include "mod_buffer.h"
 #include "hull/cap/db.h"
+#include "hull/cap/db_backend.h"
 #include "hull/async.h"
 #include "hull/worker_db.h"
 
@@ -16,7 +17,7 @@
 #include <keel/server.h>
 
 #include <sh_arena.h>
-#include <sqlite3.h>
+#include <sqlite3.h> /* needed for UDF: sqlite3_value, sqlite3_context, etc. */
 #include <stdlib.h>
 #include <string.h>
 
@@ -166,12 +167,15 @@ static int lua_is_stdlib_caller(lua_State *L)
 static int lua_db_query_impl(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->base.stmt_cache)
+    if (!lua || !lua->base.db_handle)
         return luaL_error(L, "database not available");
 
     const char *sql = luaL_checkstring(L, 1);
 
-    if (!lua_is_stdlib_caller(L) && hl_cap_db_check_namespace(sql) != 0)
+    int is_stdlib = lua_is_stdlib_caller(L);
+    HlDbHandle *h = is_stdlib ? lua->base.hull_db_handle : lua->base.db_handle;
+
+    if (!is_stdlib && hl_cap_db_check_namespace(sql) != 0)
         return luaL_error(L, "access denied: _hull_* tables are reserved");
 
     HlValue *params = NULL;
@@ -191,8 +195,8 @@ static int lua_db_query_impl(lua_State *L)
         .row_count = 0,
     };
 
-    int rc = hl_cap_db_query(lua->base.stmt_cache, sql, params, nparams,
-                                lua_query_row_cb, &qc, lua->base.alloc);
+    int rc = hl_db_query(h, sql, params, nparams,
+                         lua_query_row_cb, &qc, lua->base.alloc);
 
     /*
      * lua_to_hl_values left nparams values on the stack (to keep string
@@ -210,7 +214,7 @@ static int lua_db_query_impl(lua_State *L)
 
     if (rc != 0) {
         lua_pop(L, 1); /* pop result table */
-        return luaL_error(L, "query failed: %s", sqlite3_errmsg(lua->base.db));
+        return luaL_error(L, "query failed: %s", hl_db_errmsg(h));
     }
 
     return 1; /* result table already on stack */
@@ -220,12 +224,15 @@ static int lua_db_query_impl(lua_State *L)
 static int lua_db_exec_impl(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->base.stmt_cache)
+    if (!lua || !lua->base.db_handle)
         return luaL_error(L, "database not available");
 
     const char *sql = luaL_checkstring(L, 1);
 
-    if (!lua_is_stdlib_caller(L) && hl_cap_db_check_namespace(sql) != 0)
+    int is_stdlib = lua_is_stdlib_caller(L);
+    HlDbHandle *h = is_stdlib ? lua->base.hull_db_handle : lua->base.db_handle;
+
+    if (!is_stdlib && hl_cap_db_check_namespace(sql) != 0)
         return luaL_error(L, "access denied: _hull_* tables are reserved");
 
     HlValue *params = NULL;
@@ -235,12 +242,12 @@ static int lua_db_exec_impl(lua_State *L)
             return luaL_error(L, "params must be a table");
     }
 
-    int rc = hl_cap_db_exec(lua->base.stmt_cache, sql, params, nparams);
+    int rc = hl_db_exec(h, sql, params, nparams);
 
     lua_free_hl_values(L, params, nparams);
 
     if (rc < 0)
-        return luaL_error(L, "exec failed: %s", sqlite3_errmsg(lua->base.db));
+        return luaL_error(L, "exec failed: %s", hl_db_errmsg(h));
 
     lua_pushinteger(L, rc);
     return 1;
@@ -253,10 +260,10 @@ static int lua_db_exec(lua_State *L) { return lua_db_exec_impl(L); }
 static int lua_db_last_id(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->base.db)
+    if (!lua || !lua->base.db_handle)
         return luaL_error(L, "database not available");
 
-    lua_pushinteger(L, (lua_Integer)hl_cap_db_last_id(lua->base.db));
+    lua_pushinteger(L, (lua_Integer)hl_db_last_id(lua->base.db_handle));
     return 1;
 }
 
@@ -264,25 +271,27 @@ static int lua_db_last_id(lua_State *L)
 static int lua_db_batch(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->base.db)
+    if (!lua || !lua->base.db_handle)
         return luaL_error(L, "database not available");
 
     luaL_checktype(L, 1, LUA_TFUNCTION);
 
-    if (hl_cap_db_begin(lua->base.db) != 0)
-        return luaL_error(L, "BEGIN failed: %s", sqlite3_errmsg(lua->base.db));
+    HlDbHandle *h = lua->base.db_handle;
+
+    if (hl_db_begin(h) != 0)
+        return luaL_error(L, "BEGIN failed: %s", hl_db_errmsg(h));
 
     lua_pushvalue(L, 1); /* push the function */
     int rc = lua_pcall(L, 0, 0, 0);
 
     if (rc != LUA_OK) {
-        hl_cap_db_rollback(lua->base.db);
+        hl_db_rollback(h);
         return lua_error(L); /* re-raise the error */
     }
 
-    if (hl_cap_db_commit(lua->base.db) != 0) {
-        hl_cap_db_rollback(lua->base.db);
-        return luaL_error(L, "COMMIT failed: %s", sqlite3_errmsg(lua->base.db));
+    if (hl_db_commit(h) != 0) {
+        hl_db_rollback(h);
+        return luaL_error(L, "COMMIT failed: %s", hl_db_errmsg(h));
     }
 
     return 0;
@@ -706,7 +715,8 @@ static void lua_parse_udf_opts(lua_State *L, int opts_idx,
 static int lua_db_udf_register(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->base.db)
+    sqlite3 *raw_db = lua ? hl_db_sqlite_raw(lua->base.db_handle) : NULL;
+    if (!lua || !raw_db)
         return luaL_error(L, "database not available");
 
     const char *sql_name = luaL_checkstring(L, 1);
@@ -743,7 +753,7 @@ static int lua_db_udf_register(lua_State *L)
 
         const char *err_msg = NULL;
         int rc = hl_cap_db_udf_register_wasm(
-            lua->base.db, lua->base.wasm_cache, &opts,
+            raw_db, lua->base.wasm_cache, &opts,
             lua->base.app_vfs, lua->app_dir,
             lua->base.alloc, &err_msg);
         if (rc != 0)
@@ -770,13 +780,13 @@ static int lua_db_udf_register(lua_State *L)
         if (deterministic) encoding |= SQLITE_DETERMINISTIC;
 
         int rc = sqlite3_create_function_v2(
-            lua->base.db, sql_name, nargs, encoding, udf_ctx,
+            raw_db, sql_name, nargs, encoding, udf_ctx,
             lua_scalar_udf_func, NULL, NULL,
             lua_scalar_udf_destroy);
         if (rc != SQLITE_OK) {
             lua_scalar_udf_destroy(udf_ctx);
             return luaL_error(L, "db.udf.register: %s",
-                              sqlite3_errmsg(lua->base.db));
+                              sqlite3_errmsg(raw_db));
         }
     } else if (lua_istable(L, 2)) {
         /* ── Lua aggregate UDF (table with step + finalize) ──── */
@@ -810,13 +820,13 @@ static int lua_db_udf_register(lua_State *L)
         if (deterministic) encoding |= SQLITE_DETERMINISTIC;
 
         int rc = sqlite3_create_function_v2(
-            lua->base.db, sql_name, nargs, encoding, udf_ctx,
+            raw_db, sql_name, nargs, encoding, udf_ctx,
             NULL, lua_agg_step_func, lua_agg_finalize_func,
             lua_agg_udf_destroy);
         if (rc != SQLITE_OK) {
             lua_agg_udf_destroy(udf_ctx);
             return luaL_error(L, "db.udf.register: %s",
-                              sqlite3_errmsg(lua->base.db));
+                              sqlite3_errmsg(raw_db));
         }
     } else {
         return luaL_error(L,
@@ -830,19 +840,20 @@ static int lua_db_udf_register(lua_State *L)
 static int lua_db_udf_unregister(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    if (!lua || !lua->base.db)
+    sqlite3 *raw_db = lua ? hl_db_sqlite_raw(lua->base.db_handle) : NULL;
+    if (!lua || !raw_db)
         return luaL_error(L, "database not available");
 
     const char *sql_name = luaL_checkstring(L, 1);
 
     /* SQLite calls the xDestroy callback for the old registration */
     int rc = sqlite3_create_function_v2(
-        lua->base.db, sql_name, -1, SQLITE_UTF8,
+        raw_db, sql_name, -1, SQLITE_UTF8,
         NULL, NULL, NULL, NULL, NULL);
 
     if (rc != SQLITE_OK)
         return luaL_error(L, "db.udf.unregister: %s",
-                          sqlite3_errmsg(lua->base.db));
+                          sqlite3_errmsg(raw_db));
 
     return 0;
 }
