@@ -9,9 +9,9 @@
 //   GET /ws/connections   — current WebSocket connection count
 
 import { app } from "hull:app";
-import { ws } from "hull:ws";
 import { log } from "hull:log";
 import { time } from "hull:time";
+import { ws } from "hull:ws";
 
 app.manifest({});
 
