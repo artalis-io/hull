@@ -1320,11 +1320,10 @@ static void hl_js_sse_handler(KlRequest *req, KlResponse *res,
                                 void *user_data)
 {
     HlJSSseRoute *route = (HlJSSseRoute *)user_data;
-    HlJS *js = route->js;
-    JSContext *ctx = js->ctx;
-
-    if (!js || !ctx || !req || !res)
+    HlJS *js = route ? route->js : NULL;
+    if (!js || !js->ctx || !req || !res)
         return;
+    JSContext *ctx = js->ctx;
 
     js->dispatch_depth++;
 
