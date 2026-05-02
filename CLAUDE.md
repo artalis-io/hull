@@ -395,6 +395,7 @@ Register with `app.use(method, pattern, mw)`:
 | `etag` | `hull.middleware.etag` | `hull:middleware:etag` | ETag response helpers with 304 Not Modified |
 | `db.udf` | `db.udf.register/unregister` | `db.udf.register/unregister` | User-defined SQL functions (Lua/JS callbacks or WASM) |
 | `image` | `hull.image` | `hull:image` | Image decode/encode (stb_image), raw pixel buffers |
+| `ws` | `hull.ws` (global) | `hull:ws` | WebSocket server + client (broadcast, connect) |
 | `json` | `hull.json` | (built-in) | JSON encode/decode |
 
 ### Module APIs
@@ -639,6 +640,109 @@ template.clearCache();                           // clear compiled function cach
 - `img:width()`, `img:height()`, `img:format()`, `img:size()` — properties.
 - `img:pixels()` — raw pixel bytes.
 - `img:close()` — explicit free (GC handles it otherwise).
+
+### WebSocket Endpoints
+
+Register WebSocket endpoints with `app.ws(path, callbacks)`. Server-side connections are managed via the `HlWsRegistry`.
+
+**Lua:**
+```lua
+app.ws("/ws/chat", {
+    on_open = function(conn)
+        log.info("connected: " .. conn:id())
+    end,
+    on_message = function(conn, msg, is_binary)
+        ws.broadcast("/ws/chat", msg)
+    end,
+    on_close = function(conn, code, reason)
+        log.info("disconnected: " .. conn:id())
+    end,
+})
+```
+
+**JavaScript:**
+```javascript
+import { ws } from "hull:ws";
+app.ws("/ws/chat", {
+    onOpen(conn) { log.info("connected: " + conn.id); },
+    onMessage(conn, msg, isBinary) { ws.broadcast("/ws/chat", msg); },
+    onClose(conn, code, reason) { log.info("disconnected: " + conn.id); },
+});
+```
+
+**Connection object:**
+- `conn:id()` / `conn.id` — monotonic connection ID (getter)
+- `conn:path()` / `conn.path` — endpoint path (getter)
+- `conn:send(text)` / `conn.send(text)` — send text frame
+- `conn:send_binary(data)` / `conn.sendBinary(data)` — send binary frame
+- `conn:close(code?, reason?)` / `conn.close(code?, reason?)` — initiate close
+- `conn:ping(data?)` / `conn.ping(data?)` — send ping
+- `conn.data` — per-connection storage (table/object, lazy-created)
+
+**Module functions:**
+- `ws.broadcast(path, data [, binary])` — broadcast to all connections on path, returns count sent
+- `ws.connections(path)` — count active connections on path
+- `ws.connect(url, handlers [, opts])` — connect to remote WebSocket server (see below)
+
+**Client WebSocket (`ws.connect`):**
+
+```lua
+local client = ws.connect("ws://other:8080/feed", {
+    on_open = function(conn) conn:send("hello") end,
+    on_message = function(conn, msg) log.info(msg) end,
+    on_close = function(conn, code, reason) end,
+    on_error = function(conn, err) log.error(err) end,
+})
+```
+
+```javascript
+const client = ws.connect("ws://other:8080/feed", {
+    onOpen(conn) { conn.send("hello"); },
+    onMessage(conn, msg) { log.info(msg); },
+    onClose(conn, code, reason) {},
+    onError(conn, err) { log.error(err); },
+});
+```
+
+- Client conn has same `send`/`sendBinary`/`close`/`ping` methods as server conn
+- Host allowlist enforced (same as `http.fetch` — must be in manifest `hosts`)
+- Requires running server (`hull` with `-p` port)
+- Callbacks fire on the event loop thread (same as server WS callbacks)
+
+### SSE Endpoints
+
+Register Server-Sent Events endpoints with `app.sse(path, handler)`. The handler receives a request object and a stream object.
+
+**Lua:**
+```lua
+app.sse("/sse/events", function(req, stream)
+    stream:event("welcome", json.encode({ time = time.datetime() }))
+    for i = 1, 5 do
+        hull.sleep(1000)
+        stream:event("tick", tostring(i), tostring(i))
+    end
+    stream:close()
+end)
+```
+
+**JavaScript:**
+```javascript
+app.sse("/sse/events", async (req, stream) => {
+    stream.event("welcome", JSON.stringify({ time: time.datetime() }));
+    for (let i = 1; i <= 5; i++) {
+        await hull.sleep(1000);
+        stream.event("tick", String(i), String(i));
+    }
+    stream.close();
+});
+```
+
+**Stream object:**
+- `stream:event(name, data [, id])` / `stream.event(name, data, id?)` — send SSE event. `name` = event type (null/nil to omit), `data` = event data (multiline auto-split), `id` = event ID (optional)
+- `stream:comment(text)` / `stream.comment(text)` — send SSE comment (keep-alive)
+- `stream:close()` / `stream.close()` — end the stream
+
+**Implementation:** Uses Keel's `kl_sse_begin` / `kl_sse_event` / `kl_sse_end` over chunked transfer encoding. The handler runs as a coroutine (Lua) or async function (JS) that can yield with `hull.sleep()` between events.
 
 ### Static File Serving
 

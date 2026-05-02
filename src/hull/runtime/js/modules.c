@@ -99,5 +99,10 @@ int hl_js_register_modules(HlJS *js)
     }
 #endif
 
+    /* Register hull:ws module + SSE class (always available) */
+    hl_js_sse_register_class(js->ctx);
+    if (hl_js_init_ws_module(js->ctx, js) != 0)
+        return -1;
+
     return 0;
 }

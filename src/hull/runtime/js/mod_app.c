@@ -334,6 +334,135 @@ static JSValue js_app_daily(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+/* ── Helper: store handler in __hull_routes, return handler_id ───── */
+
+static int32_t js_store_handler(JSContext *ctx, JSValueConst func)
+{
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue routes = JS_GetPropertyStr(ctx, global, "__hull_routes");
+    if (JS_IsUndefined(routes)) {
+        routes = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, global, "__hull_routes", JS_DupValue(ctx, routes));
+    }
+
+    JSValue len_val = JS_GetPropertyStr(ctx, routes, "length");
+    int32_t handler_id = 0;
+    JS_ToInt32(ctx, &handler_id, len_val);
+    JS_FreeValue(ctx, len_val);
+
+    JS_SetPropertyUint32(ctx, routes, (uint32_t)handler_id, JS_DupValue(ctx, func));
+    JS_FreeValue(ctx, routes);
+    JS_FreeValue(ctx, global);
+    return handler_id;
+}
+
+/* app.ws(path, { onOpen, onMessage, onClose }) — WebSocket endpoint */
+static JSValue js_app_ws(JSContext *ctx, JSValueConst this_val,
+                           int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 2)
+        return JS_ThrowTypeError(ctx, "app.ws requires (path, handlers)");
+
+    const char *path = JS_ToCString(ctx, argv[0]);
+    if (!path) return JS_EXCEPTION;
+
+    if (!JS_IsObject(argv[1])) {
+        JS_FreeCString(ctx, path);
+        return JS_ThrowTypeError(ctx, "app.ws requires handlers object");
+    }
+
+    JSValue global = JS_GetGlobalObject(ctx);
+
+    /* Ensure __hull_ws_defs array exists */
+    JSValue defs = JS_GetPropertyStr(ctx, global, "__hull_ws_defs");
+    if (JS_IsUndefined(defs)) {
+        defs = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, global, "__hull_ws_defs", JS_DupValue(ctx, defs));
+    }
+
+    JSValue len_val = JS_GetPropertyStr(ctx, defs, "length");
+    int32_t idx = 0;
+    JS_ToInt32(ctx, &idx, len_val);
+    JS_FreeValue(ctx, len_val);
+
+    JSValue entry = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, entry, "path", JS_NewString(ctx, path));
+
+    /* Extract and store each callback */
+    JSValue on_open = JS_GetPropertyStr(ctx, argv[1], "onOpen");
+    if (JS_IsFunction(ctx, on_open)) {
+        int32_t hid = js_store_handler(ctx, on_open);
+        JS_SetPropertyStr(ctx, entry, "on_open_id", JS_NewInt32(ctx, hid));
+    }
+    JS_FreeValue(ctx, on_open);
+
+    JSValue on_message = JS_GetPropertyStr(ctx, argv[1], "onMessage");
+    if (JS_IsFunction(ctx, on_message)) {
+        int32_t hid = js_store_handler(ctx, on_message);
+        JS_SetPropertyStr(ctx, entry, "on_message_id", JS_NewInt32(ctx, hid));
+    }
+    JS_FreeValue(ctx, on_message);
+
+    JSValue on_close = JS_GetPropertyStr(ctx, argv[1], "onClose");
+    if (JS_IsFunction(ctx, on_close)) {
+        int32_t hid = js_store_handler(ctx, on_close);
+        JS_SetPropertyStr(ctx, entry, "on_close_id", JS_NewInt32(ctx, hid));
+    }
+    JS_FreeValue(ctx, on_close);
+
+    JS_SetPropertyUint32(ctx, defs, (uint32_t)idx, entry);
+    JS_FreeValue(ctx, defs);
+    JS_FreeValue(ctx, global);
+    JS_FreeCString(ctx, path);
+
+    return JS_UNDEFINED;
+}
+
+/* app.sse(path, handler) — SSE endpoint registration */
+static JSValue js_app_sse(JSContext *ctx, JSValueConst this_val,
+                            int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 2)
+        return JS_ThrowTypeError(ctx, "app.sse requires (path, handler)");
+
+    const char *path = JS_ToCString(ctx, argv[0]);
+    if (!path) return JS_EXCEPTION;
+
+    if (!JS_IsFunction(ctx, argv[1])) {
+        JS_FreeCString(ctx, path);
+        return JS_ThrowTypeError(ctx, "handler must be a function");
+    }
+
+    int32_t handler_id = js_store_handler(ctx, argv[1]);
+
+    JSValue global = JS_GetGlobalObject(ctx);
+
+    /* Ensure __hull_sse_defs array exists */
+    JSValue defs = JS_GetPropertyStr(ctx, global, "__hull_sse_defs");
+    if (JS_IsUndefined(defs)) {
+        defs = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, global, "__hull_sse_defs", JS_DupValue(ctx, defs));
+    }
+
+    JSValue len_val = JS_GetPropertyStr(ctx, defs, "length");
+    int32_t idx = 0;
+    JS_ToInt32(ctx, &idx, len_val);
+    JS_FreeValue(ctx, len_val);
+
+    JSValue entry = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, entry, "path", JS_NewString(ctx, path));
+    JS_SetPropertyStr(ctx, entry, "handler_id", JS_NewInt32(ctx, handler_id));
+    JS_SetPropertyUint32(ctx, defs, (uint32_t)idx, entry);
+
+    JS_FreeValue(ctx, defs);
+    JS_FreeValue(ctx, global);
+    JS_FreeCString(ctx, path);
+
+    return JS_UNDEFINED;
+}
+
 /* app.config(obj) — application configuration */
 static JSValue js_app_config(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv)
@@ -448,6 +577,10 @@ static int js_app_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_app_use, "use", 3));
     JS_SetPropertyStr(ctx, app, "usePost",
                       JS_NewCFunction(ctx, js_app_use_post, "usePost", 3));
+    JS_SetPropertyStr(ctx, app, "ws",
+                      JS_NewCFunction(ctx, js_app_ws, "ws", 2));
+    JS_SetPropertyStr(ctx, app, "sse",
+                      JS_NewCFunction(ctx, js_app_sse, "sse", 2));
     JS_SetPropertyStr(ctx, app, "every",
                       JS_NewCFunction(ctx, js_app_every, "every", 2));
     JS_SetPropertyStr(ctx, app, "daily",

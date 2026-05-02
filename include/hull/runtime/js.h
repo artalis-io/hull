@@ -94,6 +94,26 @@ typedef struct HlJS {
     size_t          timer_count;
     size_t          timer_cap;
 
+    /* Tracked WS route allocations (freed in hl_js_free) */
+    void          **ws_routes;
+    size_t          ws_route_count;
+    size_t          ws_route_cap;
+
+    /* Tracked WS config allocations (freed in hl_js_free) */
+    void          **ws_cfgs;
+    size_t          ws_cfg_count;
+    size_t          ws_cfg_cap;
+
+    /* Tracked SSE route allocations (freed in hl_js_free) */
+    void          **sse_routes;
+    size_t          sse_route_count;
+    size_t          sse_route_cap;
+
+    /* Tracked WS client connections (freed in hl_js_free) */
+    void          **ws_clients;
+    size_t          ws_client_count;
+    size_t          ws_client_cap;
+
     /* Re-entrance guard: > 0 while dispatch or async resume is active */
     int             dispatch_depth;
 

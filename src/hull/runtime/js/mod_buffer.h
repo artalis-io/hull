@@ -83,4 +83,26 @@ int hl_js_init_compute_module(JSContext *ctx, HlJS *js);
 int hl_js_init_gpu_module(JSContext *ctx, HlJS *js);
 #endif
 
+/* ── WebSocket module (defined in js/mod_ws.c) ───────────────────── */
+
+int hl_js_init_ws_module(JSContext *ctx, HlJS *js);
+
+/* WS conn class IDs (defined in js/mod_ws.c) */
+extern JSClassID js_ws_conn_class_id;
+extern JSClassID js_ws_client_conn_class_id;
+
+/* WS conn helpers (defined in js/mod_ws.c) */
+struct HlWsConn;
+JSValue hl_js_ws_push_conn(JSContext *ctx, struct HlWsConn *conn);
+void    hl_js_ws_invalidate_conn(JSContext *ctx, struct HlWsConn *conn);
+
+/* ── SSE module (defined in js/mod_sse.c) ────────────────────────── */
+
+extern JSClassID js_sse_stream_class_id;
+
+void    hl_js_sse_register_class(JSContext *ctx);
+JSValue hl_js_sse_create_stream(JSContext *ctx, KlResponse *res);
+int     hl_js_sse_stream_is_closed(JSContext *ctx, JSValueConst val);
+void    hl_js_sse_stream_force_close(JSContext *ctx, JSValueConst val);
+
 #endif /* HULL_JS_MOD_BUFFER_H */

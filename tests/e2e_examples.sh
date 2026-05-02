@@ -746,6 +746,34 @@ test_compute() {
     rm -rf "$TMPDIR_COMPUTE"
 }
 
+# ── chat (WebSocket + SSE) ────────────────────────────────────────────
+
+test_chat() {
+    LABEL=$1
+    PORT=$2
+    APP=$3
+
+    echo ""
+    echo "--- chat ($LABEL) port $PORT ---"
+
+    TMPDIR_CHAT=$(mktemp -d)
+    start_server "$PORT" "$APP" "$TMPDIR_CHAT/data.db"
+    if ! wait_for_server "$PORT"; then
+        fail "$LABEL chat — server startup"
+        stop_server; rm -rf "$TMPDIR_CHAT"; return
+    fi
+
+    # Health check
+    RESP=$(curl -s "http://127.0.0.1:$PORT/health")
+    check_contains "$LABEL chat GET /health" "$RESP" '"ok"'
+
+    # WS connections should be 0
+    RESP=$(curl -s "http://127.0.0.1:$PORT/ws/connections")
+    check_contains "$LABEL chat GET /ws/connections" "$RESP" '"count":0'
+
+    stop_server; rm -rf "$TMPDIR_CHAT"
+}
+
 PORT_BASE=19870
 
 echo ""
@@ -764,6 +792,7 @@ if [ "$RUNTIME" != "js" ]; then
     test_async_http     "lua" $((PORT_BASE + 9)) examples/async_http/app.lua
     test_timers         "lua" $((PORT_BASE + 20)) examples/timers/app.lua
     test_compute        "lua" $((PORT_BASE + 22)) examples/compute/app.lua
+    test_chat           "lua" $((PORT_BASE + 24)) examples/chat/app.lua
 fi
 
 if [ "$RUNTIME" != "lua" ]; then
@@ -778,6 +807,7 @@ if [ "$RUNTIME" != "lua" ]; then
     test_todo           "js" $((PORT_BASE + 18)) examples/todo/app.js
     test_async_http     "js" $((PORT_BASE + 19)) examples/async_http/app.js
     test_timers         "js" $((PORT_BASE + 21)) examples/timers/app.js
+    test_chat           "js" $((PORT_BASE + 25)) examples/chat/app.js
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────

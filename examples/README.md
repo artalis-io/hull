@@ -327,6 +327,35 @@ open http://localhost:3000
 # Switch language via /lang/hu or /lang/en
 ```
 
+### chat
+
+WebSocket chat server with SSE event streaming. Demonstrates `app.ws()` for WebSocket endpoints (broadcast, per-connection state), `app.sse()` for Server-Sent Events, and `ws.broadcast()` / `ws.connections()` for connection management.
+
+```bash
+./build/hull -p 3000 examples/chat/app.lua
+
+# Health check
+curl http://localhost:3000/health
+
+# Check connection count
+curl http://localhost:3000/ws/connections
+
+# Connect via WebSocket client (e.g. websocat, wscat)
+websocat ws://localhost:3000/ws/chat
+# Type messages — they broadcast to all connected clients
+
+# SSE event stream (3 ticks, then closes)
+curl http://localhost:3000/sse/events
+```
+
+**Key features demonstrated:**
+- `app.ws(path, { on_open, on_message, on_close })` — WebSocket endpoint
+- `ws.broadcast(path, data)` — broadcast to all connections on a path
+- `ws.connections(path)` — count active connections
+- `conn:id()`, `conn:send()` — per-connection methods
+- `app.sse(path, handler)` — SSE endpoint
+- `stream:event(name, data, id)`, `stream:comment()`, `stream:close()`
+
 ### timers
 
 Background timers with `app.every()` and `app.daily()`. A repeating timer inserts heartbeat rows into the database every 500ms, and a self-cancelling timer counts to 3 then stops. Demonstrates timer lifecycle, self-cancellation via `return false`, and timer access to the full capability layer (db, time).
@@ -612,6 +641,7 @@ hull test examples/todo/
 hull test examples/timers/
 hull test examples/cors_manifest/
 hull test examples/udf/
+hull test examples/chat/
 hull test examples/compute/
 hull test examples/gpu_texture/
 hull test examples/image_processing/

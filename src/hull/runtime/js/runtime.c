@@ -24,6 +24,13 @@
 #include "quickjs.h"
 
 #include <keel/keel.h>
+#include <keel/websocket_server.h>
+#include <keel/websocket_client.h>
+#include <keel/sse.h>
+
+#include "hull/cap/ws.h"
+
+#include "mod_buffer.h"
 
 #include <sh_arena.h>
 
@@ -710,6 +717,24 @@ void hl_js_reset_request(HlJS *js)
         sh_arena_reset(js->scratch);
 }
 
+/* Forward struct defs needed by hl_js_free (full defs later in file) */
+typedef struct HlJSWsRoute HlJSWsRoute;
+typedef struct HlJSSseRoute HlJSSseRoute;
+struct HlJSWsRoute {
+    HlJS *js;
+    int   on_open_id;
+    int   on_message_id;
+    int   on_close_id;
+    char  path[256];
+};
+struct HlJSSseRoute {
+    HlJS *js;
+    int   handler_id;
+};
+
+/* Forward declarations for WS client tracking */
+typedef struct HlJSWsClientUD HlJSWsClientUD;
+
 void hl_js_free(HlJS *js)
 {
     if (!js)
@@ -741,6 +766,57 @@ void hl_js_free(HlJS *js)
         js->route_cap = 0;
     }
 
+    /* Free tracked WS route allocations */
+    for (size_t i = 0; i < js->ws_route_count; i++)
+        hl_alloc_free(js->base.alloc, js->ws_routes[i], sizeof(HlJSWsRoute));
+    if (js->ws_routes) {
+        hl_alloc_free(js->base.alloc, js->ws_routes,
+                      js->ws_route_cap * sizeof(void *));
+        js->ws_routes = NULL;
+        js->ws_route_count = 0;
+        js->ws_route_cap = 0;
+    }
+
+    /* Free tracked WS config allocations */
+    for (size_t i = 0; i < js->ws_cfg_count; i++)
+        hl_alloc_free(js->base.alloc, js->ws_cfgs[i],
+                      sizeof(KlWsServerConfig));
+    if (js->ws_cfgs) {
+        hl_alloc_free(js->base.alloc, js->ws_cfgs,
+                      js->ws_cfg_cap * sizeof(void *));
+        js->ws_cfgs = NULL;
+        js->ws_cfg_count = 0;
+        js->ws_cfg_cap = 0;
+    }
+
+    /* Free tracked SSE route allocations */
+    for (size_t i = 0; i < js->sse_route_count; i++)
+        hl_alloc_free(js->base.alloc, js->sse_routes[i], sizeof(HlJSSseRoute));
+    if (js->sse_routes) {
+        hl_alloc_free(js->base.alloc, js->sse_routes,
+                      js->sse_route_cap * sizeof(void *));
+        js->sse_routes = NULL;
+        js->sse_route_count = 0;
+        js->sse_route_cap = 0;
+    }
+
+    /* Free tracked WS client allocations */
+    if (js->ws_clients) {
+        hl_alloc_free(js->base.alloc, js->ws_clients,
+                      js->ws_client_cap * sizeof(void *));
+        js->ws_clients = NULL;
+        js->ws_client_count = 0;
+        js->ws_client_cap = 0;
+    }
+
+    /* Free WebSocket registry */
+    if (js->base.ws_registry) {
+        hl_ws_registry_free(js->base.ws_registry);
+        hl_alloc_free(js->base.alloc, js->base.ws_registry,
+                      sizeof(HlWsRegistry));
+        js->base.ws_registry = NULL;
+    }
+
     /* Mark runtime as dead before JS_FreeContext/JS_FreeRuntime so UDF
      * destroy callbacks (fired by sqlite3_close) don't call JS_FreeValue
      * on a dead runtime */
@@ -759,6 +835,7 @@ void hl_js_free(HlJS *js)
             "__hull_config", "__hull_manifest", "__hull_statics",
             "__hull_test_state", "__hull_async_promise", "test",
             "__hull_timers", "__hull_timer_defs",
+            "__hull_ws_defs", "__hull_sse_defs",
         };
         for (size_t i = 0; i < sizeof(hull_globals)/sizeof(hull_globals[0]); i++) {
             JSAtom atom = JS_NewAtom(js->ctx, hull_globals[i]);
@@ -1002,6 +1079,349 @@ static int hl_js_track_route(HlJS *js, void *route)
     }
     js->routes[js->route_count++] = route;
     return 0;
+}
+
+/* ── Generic tracked-allocation helper ──────────────────────────────── */
+
+static int hl_js_track_alloc(HlJS *js, void ***arr, size_t *count,
+                               size_t *cap, void *ptr)
+{
+    if (*count >= *cap) {
+        size_t new_cap = *cap ? *cap * 2 : 4;
+        if (new_cap < *cap || new_cap > SIZE_MAX / sizeof(void *))
+            return -1;
+        size_t old_sz = *cap * sizeof(void *);
+        size_t new_sz = new_cap * sizeof(void *);
+        void **new_arr = hl_alloc_realloc(js->base.alloc,
+                                           *arr, old_sz, new_sz);
+        if (!new_arr)
+            return -1;
+        *arr = new_arr;
+        *cap = new_cap;
+    }
+    (*arr)[(*count)++] = ptr;
+    return 0;
+}
+
+/* ── WebSocket callback trampolines ────────────────────────────────── */
+
+static void hl_js_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
+{
+    HlJSWsRoute *route = (HlJSWsRoute *)user_data;
+    HlJS *js = route->js;
+    JSContext *ctx = js->ctx;
+
+    /* Register the connection in the registry */
+    HlWsConn *conn = hl_ws_registry_add(js->base.ws_registry,
+                                          route->path, ws_conn);
+    if (!conn)
+        return;
+
+    if (route->on_open_id < 0)
+        return;
+
+    js->dispatch_depth++;
+    js->active_conn = NULL; /* detached — no HTTP connection */
+    js->active_req = NULL;
+    js->active_timer = NULL;
+    js->last_async_cont = NULL;
+    js->async_pending = 0;
+    js->instruction_count = 0;
+
+    /* Look up handler */
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue routes = JS_GetPropertyStr(ctx, global, "__hull_routes");
+    JSValue handler = JS_GetPropertyUint32(ctx, routes,
+                                            (uint32_t)route->on_open_id);
+    JS_FreeValue(ctx, routes);
+    JS_FreeValue(ctx, global);
+
+    if (!JS_IsFunction(ctx, handler)) {
+        JS_FreeValue(ctx, handler);
+        js->dispatch_depth--;
+        return;
+    }
+
+    /* Push conn object */
+    JSValue conn_obj = hl_js_ws_push_conn(ctx, conn);
+
+    JSValue ret = JS_Call(ctx, handler, JS_UNDEFINED, 1, &conn_obj);
+    JS_FreeValue(ctx, handler);
+    JS_FreeValue(ctx, conn_obj);
+
+    if (JS_IsException(ret)) {
+        JSValue exc = JS_GetException(ctx);
+        const char *msg = JS_ToCString(ctx, exc);
+        log_error("[hull:ws] on_open error: %s", msg ? msg : "unknown");
+        if (msg) JS_FreeCString(ctx, msg);
+        JS_FreeValue(ctx, exc);
+    } else {
+        JSPromiseStateEnum state = JS_PromiseState(ctx, ret);
+        if (state == JS_PROMISE_PENDING && js->last_async_cont) {
+            extern void hl_js_async_cont_set_handler_promise(
+                HlAsyncCont *cont, JSContext *c, JSValue promise);
+            hl_js_async_cont_set_handler_promise(
+                (HlAsyncCont *)js->last_async_cont, ctx, ret);
+            js->last_async_cont = NULL;
+            JS_FreeValue(ctx, ret);
+            /* dispatch_depth stays elevated for async */
+            return;
+        }
+    }
+
+    hl_js_run_jobs(js);
+    JS_FreeValue(ctx, ret);
+    js->dispatch_depth--;
+}
+
+static void hl_js_ws_on_message(KlWsServerConn *ws_conn, const char *data,
+                                  size_t len, int is_binary, void *user_data)
+{
+    HlJSWsRoute *route = (HlJSWsRoute *)user_data;
+    HlJS *js = route->js;
+    JSContext *ctx = js->ctx;
+
+    if (route->on_message_id < 0)
+        return;
+
+    /* Find the HlWsConn */
+    HlWsConn *conn = hl_ws_registry_find(js->base.ws_registry,
+                                           route->path, ws_conn);
+    if (!conn)
+        return;
+
+    js->dispatch_depth++;
+    js->active_conn = NULL;
+    js->active_req = NULL;
+    js->active_timer = NULL;
+    js->last_async_cont = NULL;
+    js->async_pending = 0;
+    js->instruction_count = 0;
+
+    /* Look up handler */
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue routes_arr = JS_GetPropertyStr(ctx, global, "__hull_routes");
+    JSValue handler = JS_GetPropertyUint32(ctx, routes_arr,
+                                            (uint32_t)route->on_message_id);
+    JS_FreeValue(ctx, routes_arr);
+    JS_FreeValue(ctx, global);
+
+    if (!JS_IsFunction(ctx, handler)) {
+        JS_FreeValue(ctx, handler);
+        js->dispatch_depth--;
+        return;
+    }
+
+    /* Build args: conn, message, is_binary */
+    JSValue conn_obj = hl_js_ws_push_conn(ctx, conn);
+    JSValue msg_val = JS_NewStringLen(ctx, data, len);
+    JSValue is_bin_val = JS_NewBool(ctx, is_binary);
+
+    JSValue args[3] = { conn_obj, msg_val, is_bin_val };
+    JSValue ret = JS_Call(ctx, handler, JS_UNDEFINED, 3, args);
+    JS_FreeValue(ctx, handler);
+    JS_FreeValue(ctx, conn_obj);
+    JS_FreeValue(ctx, msg_val);
+    JS_FreeValue(ctx, is_bin_val);
+
+    if (JS_IsException(ret)) {
+        JSValue exc = JS_GetException(ctx);
+        const char *msg2 = JS_ToCString(ctx, exc);
+        log_error("[hull:ws] on_message error: %s", msg2 ? msg2 : "unknown");
+        if (msg2) JS_FreeCString(ctx, msg2);
+        JS_FreeValue(ctx, exc);
+    } else {
+        JSPromiseStateEnum state = JS_PromiseState(ctx, ret);
+        if (state == JS_PROMISE_PENDING && js->last_async_cont) {
+            extern void hl_js_async_cont_set_handler_promise(
+                HlAsyncCont *cont, JSContext *c, JSValue promise);
+            hl_js_async_cont_set_handler_promise(
+                (HlAsyncCont *)js->last_async_cont, ctx, ret);
+            js->last_async_cont = NULL;
+            JS_FreeValue(ctx, ret);
+            return;
+        }
+    }
+
+    hl_js_run_jobs(js);
+    JS_FreeValue(ctx, ret);
+    js->dispatch_depth--;
+}
+
+static void hl_js_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
+                                const char *reason, size_t reason_len,
+                                void *user_data)
+{
+    HlJSWsRoute *route = (HlJSWsRoute *)user_data;
+    HlJS *js = route->js;
+    JSContext *ctx = js->ctx;
+
+    /* Find the HlWsConn */
+    HlWsConn *conn = hl_ws_registry_find(js->base.ws_registry,
+                                           route->path, ws_conn);
+    if (!conn)
+        return;
+
+    conn->closed = 1;
+
+    if (route->on_close_id >= 0) {
+        js->dispatch_depth++;
+        js->active_conn = NULL;
+        js->active_req = NULL;
+        js->active_timer = NULL;
+        js->last_async_cont = NULL;
+        js->async_pending = 0;
+        js->instruction_count = 0;
+
+        /* Look up handler */
+        JSValue global = JS_GetGlobalObject(ctx);
+        JSValue routes_arr = JS_GetPropertyStr(ctx, global, "__hull_routes");
+        JSValue handler = JS_GetPropertyUint32(ctx, routes_arr,
+                                                (uint32_t)route->on_close_id);
+        JS_FreeValue(ctx, routes_arr);
+        JS_FreeValue(ctx, global);
+
+        if (JS_IsFunction(ctx, handler)) {
+            JSValue conn_obj = hl_js_ws_push_conn(ctx, conn);
+            JSValue code_val = JS_NewInt32(ctx, code);
+            JSValue reason_val = (reason && reason_len > 0)
+                                     ? JS_NewStringLen(ctx, reason, reason_len)
+                                     : JS_NULL;
+
+            JSValue args[3] = { conn_obj, code_val, reason_val };
+            JSValue ret = JS_Call(ctx, handler, JS_UNDEFINED, 3, args);
+            JS_FreeValue(ctx, conn_obj);
+            JS_FreeValue(ctx, code_val);
+            JS_FreeValue(ctx, reason_val);
+
+            if (JS_IsException(ret)) {
+                JSValue exc = JS_GetException(ctx);
+                const char *msg = JS_ToCString(ctx, exc);
+                log_error("[hull:ws] on_close error: %s", msg ? msg : "unknown");
+                if (msg) JS_FreeCString(ctx, msg);
+                JS_FreeValue(ctx, exc);
+            }
+            hl_js_run_jobs(js);
+            JS_FreeValue(ctx, ret);
+        }
+
+        JS_FreeValue(ctx, handler);
+        js->dispatch_depth--;
+    }
+
+    /* Invalidate conn object and remove from registry */
+    hl_js_ws_invalidate_conn(ctx, conn);
+    hl_ws_registry_remove(js->base.ws_registry, conn);
+}
+
+/* ── SSE dispatch ──────────────────────────────────────────────────── */
+
+static void hl_js_sse_handler(KlRequest *req, KlResponse *res,
+                                void *user_data)
+{
+    HlJSSseRoute *route = (HlJSSseRoute *)user_data;
+    HlJS *js = route->js;
+    JSContext *ctx = js->ctx;
+
+    if (!js || !ctx || !req || !res)
+        return;
+
+    js->dispatch_depth++;
+
+    /* Guard stale transactions */
+    hl_db_guard_stale_txn(js->base.db_handle);
+
+    /* Reset scratch + instruction counter */
+    sh_arena_reset(js->scratch);
+    js->instruction_count = 0;
+
+    /* Set per-request async context */
+    js->active_conn = kl_request_conn(req);
+    js->active_req = req;
+    js->last_async_cont = NULL;
+    js->async_pending = 0;
+
+    /* Get handler function */
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue routes_arr = JS_GetPropertyStr(ctx, global, "__hull_routes");
+    JS_FreeValue(ctx, global);
+
+    if (JS_IsUndefined(routes_arr) || !JS_IsArray(ctx, routes_arr)) {
+        JS_FreeValue(ctx, routes_arr);
+        js->active_conn = NULL;
+        js->active_req = NULL;
+        js->dispatch_depth--;
+        return;
+    }
+
+    JSValue handler = JS_GetPropertyUint32(ctx, routes_arr,
+                                            (uint32_t)route->handler_id);
+    JS_FreeValue(ctx, routes_arr);
+
+    if (!JS_IsFunction(ctx, handler)) {
+        JS_FreeValue(ctx, handler);
+        js->active_conn = NULL;
+        js->active_req = NULL;
+        js->dispatch_depth--;
+        return;
+    }
+
+    /* Build request object */
+    JSValue js_req = hl_js_make_request(ctx, req);
+
+    /* Create SSE stream object (calls kl_sse_begin) */
+    JSValue stream_obj = hl_js_sse_create_stream(ctx, res);
+    if (JS_IsException(stream_obj)) {
+        JS_FreeValue(ctx, handler);
+        JS_FreeValue(ctx, js_req);
+        js->active_conn = NULL;
+        js->active_req = NULL;
+        js->dispatch_depth--;
+        kl_response_status(res, 500);
+        kl_response_header(res, "Content-Type", "text/plain");
+        kl_response_body_borrow(res, "SSE init failed", 15);
+        return;
+    }
+
+    /* Call handler(req, stream) */
+    JSValue args[2] = { js_req, stream_obj };
+    JSValue ret = JS_Call(ctx, handler, JS_UNDEFINED, 2, args);
+    JS_FreeValue(ctx, handler);
+
+    if (JS_IsException(ret)) {
+        JSValue exc = JS_GetException(ctx);
+        const char *msg = JS_ToCString(ctx, exc);
+        log_error("[hull:sse] handler error: %s", msg ? msg : "unknown");
+        if (msg) JS_FreeCString(ctx, msg);
+        JS_FreeValue(ctx, exc);
+        hl_js_sse_stream_force_close(ctx, stream_obj);
+    } else {
+        JSPromiseStateEnum state = JS_PromiseState(ctx, ret);
+        if (state == JS_PROMISE_PENDING && js->last_async_cont) {
+            /* Async SSE handler — wire handler_promise on continuation */
+            extern void hl_js_async_cont_set_handler_promise(
+                HlAsyncCont *cont, JSContext *c, JSValue promise);
+            hl_js_async_cont_set_handler_promise(
+                (HlAsyncCont *)js->last_async_cont, ctx, ret);
+            js->last_async_cont = NULL;
+            JS_FreeValue(ctx, ret);
+            JS_FreeValue(ctx, js_req);
+            JS_FreeValue(ctx, stream_obj);
+            /* dispatch_depth + active_conn stay set — async resume will clear */
+            return;
+        }
+        /* Sync completion — close stream if not already */
+        if (!hl_js_sse_stream_is_closed(ctx, stream_obj))
+            hl_js_sse_stream_force_close(ctx, stream_obj);
+    }
+
+    hl_js_run_jobs(js);
+    JS_FreeValue(ctx, ret);
+    JS_FreeValue(ctx, js_req);
+    JS_FreeValue(ctx, stream_obj);
+    js->active_conn = NULL;
+    js->active_req = NULL;
+    js->dispatch_depth--;
 }
 
 /* ── Request dispatch ───────────────────────────────────────────────── */
@@ -1528,6 +1948,127 @@ int hl_js_wire_routes_server(HlJS *js, KlServer *server,
         }
     }
     JS_FreeValue(ctx, timer_defs);
+
+    /* ── Wire WebSocket endpoints from __hull_ws_defs ──────────────── */
+    JSValue ws_defs = JS_GetPropertyStr(ctx, global, "__hull_ws_defs");
+    if (!JS_IsUndefined(ws_defs) && JS_IsArray(ctx, ws_defs)) {
+        /* Initialize registry if needed */
+        if (!js->base.ws_registry) {
+            js->base.ws_registry = hl_alloc_malloc(js->base.alloc,
+                                                      sizeof(HlWsRegistry));
+            if (js->base.ws_registry)
+                hl_ws_registry_init(js->base.ws_registry, js->base.alloc);
+        }
+
+        JSValue ws_len_val = JS_GetPropertyStr(ctx, ws_defs, "length");
+        int32_t ws_count = 0;
+        JS_ToInt32(ctx, &ws_count, ws_len_val);
+        JS_FreeValue(ctx, ws_len_val);
+
+        for (int32_t i = 0; i < ws_count; i++) {
+            JSValue wd = JS_GetPropertyUint32(ctx, ws_defs, (uint32_t)i);
+            if (JS_IsUndefined(wd)) continue;
+
+            JSValue path_val = JS_GetPropertyStr(ctx, wd, "path");
+            JSValue oo_val = JS_GetPropertyStr(ctx, wd, "on_open_id");
+            JSValue om_val = JS_GetPropertyStr(ctx, wd, "on_message_id");
+            JSValue oc_val = JS_GetPropertyStr(ctx, wd, "on_close_id");
+
+            const char *path = JS_ToCString(ctx, path_val);
+            int32_t on_open_id = -1, on_message_id = -1, on_close_id = -1;
+            if (!JS_IsUndefined(oo_val)) JS_ToInt32(ctx, &on_open_id, oo_val);
+            if (!JS_IsUndefined(om_val)) JS_ToInt32(ctx, &on_message_id, om_val);
+            if (!JS_IsUndefined(oc_val)) JS_ToInt32(ctx, &on_close_id, oc_val);
+
+            if (path) {
+                HlJSWsRoute *ws_route = hl_alloc_malloc(js->base.alloc,
+                                                           sizeof(HlJSWsRoute));
+                if (ws_route) {
+                    ws_route->js = js;
+                    ws_route->on_open_id = on_open_id;
+                    ws_route->on_message_id = on_message_id;
+                    ws_route->on_close_id = on_close_id;
+                    snprintf(ws_route->path, sizeof(ws_route->path),
+                             "%s", path);
+
+                    if (hl_js_track_alloc(js, &js->ws_routes,
+                            &js->ws_route_count,
+                            &js->ws_route_cap, ws_route) != 0) {
+                        hl_alloc_free(js->base.alloc, ws_route,
+                                      sizeof(HlJSWsRoute));
+                    } else {
+                        KlWsServerConfig *ws_cfg =
+                            hl_alloc_malloc(js->base.alloc,
+                                            sizeof(KlWsServerConfig));
+                        if (ws_cfg) {
+                            kl_ws_server_config_init(ws_cfg);
+                            ws_cfg->callbacks.on_open = hl_js_ws_on_open;
+                            ws_cfg->callbacks.on_message = hl_js_ws_on_message;
+                            ws_cfg->callbacks.on_close = hl_js_ws_on_close;
+                            ws_cfg->user_data = ws_route;
+                            hl_js_track_alloc(js, &js->ws_cfgs,
+                                               &js->ws_cfg_count,
+                                               &js->ws_cfg_cap, ws_cfg);
+                            kl_server_ws(server, path, ws_cfg);
+                        }
+                    }
+                }
+                JS_FreeCString(ctx, path);
+            }
+
+            JS_FreeValue(ctx, oc_val);
+            JS_FreeValue(ctx, om_val);
+            JS_FreeValue(ctx, oo_val);
+            JS_FreeValue(ctx, path_val);
+            JS_FreeValue(ctx, wd);
+        }
+    }
+    JS_FreeValue(ctx, ws_defs);
+
+    /* ── Wire SSE endpoints from __hull_sse_defs ───────────────────── */
+    JSValue sse_defs = JS_GetPropertyStr(ctx, global, "__hull_sse_defs");
+    if (!JS_IsUndefined(sse_defs) && JS_IsArray(ctx, sse_defs)) {
+        JSValue sse_len_val = JS_GetPropertyStr(ctx, sse_defs, "length");
+        int32_t sse_count = 0;
+        JS_ToInt32(ctx, &sse_count, sse_len_val);
+        JS_FreeValue(ctx, sse_len_val);
+
+        for (int32_t i = 0; i < sse_count; i++) {
+            JSValue sd = JS_GetPropertyUint32(ctx, sse_defs, (uint32_t)i);
+            if (JS_IsUndefined(sd)) continue;
+
+            JSValue path_val = JS_GetPropertyStr(ctx, sd, "path");
+            JSValue id_val = JS_GetPropertyStr(ctx, sd, "handler_id");
+
+            const char *path = JS_ToCString(ctx, path_val);
+            int32_t handler_id = 0;
+            JS_ToInt32(ctx, &handler_id, id_val);
+
+            if (path) {
+                HlJSSseRoute *sse_route = hl_alloc_malloc(js->base.alloc,
+                                                             sizeof(HlJSSseRoute));
+                if (sse_route) {
+                    sse_route->js = js;
+                    sse_route->handler_id = handler_id;
+                    if (hl_js_track_alloc(js, &js->sse_routes,
+                            &js->sse_route_count,
+                            &js->sse_route_cap, sse_route) != 0) {
+                        hl_alloc_free(js->base.alloc, sse_route,
+                                      sizeof(HlJSSseRoute));
+                    } else {
+                        kl_server_route(server, "GET", path,
+                                        hl_js_sse_handler, sse_route, NULL);
+                    }
+                }
+                JS_FreeCString(ctx, path);
+            }
+
+            JS_FreeValue(ctx, id_val);
+            JS_FreeValue(ctx, path_val);
+            JS_FreeValue(ctx, sd);
+        }
+    }
+    JS_FreeValue(ctx, sse_defs);
 
     JS_FreeValue(ctx, global);
     return 0;
