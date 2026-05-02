@@ -282,6 +282,7 @@ typedef struct {
     int log_level;
     int no_migrate;
     int no_sandbox;
+    int no_db;
     int no_compress;
     int skip_ca_bundle;
     int agent_mode;
@@ -354,6 +355,8 @@ static int hl_parse_serve_args(int argc, char **argv, HlServeConfig *cfg)
             cfg->no_migrate = 1;
         } else if (strcmp(argv[i], "--no-sandbox") == 0) {
             cfg->no_sandbox = 1;
+        } else if (strcmp(argv[i], "--no-db") == 0) {
+            cfg->no_db = 1;
         } else if (strcmp(argv[i], "--no-compress") == 0) {
             cfg->no_compress = 1;
         } else if (strcmp(argv[i], "--skip-ca-bundle") == 0) {
@@ -804,12 +807,13 @@ static int hl_serve_init_app_context(HlServerState *s)
     HlAppContextOpts app_opts = {
         .app_dir           = s->app_dir,
         .entry_point       = s->entry_point,
-        .db_path           = s->cfg.db_path,
+        .db_path           = s->cfg.no_db ? NULL : s->cfg.db_path,
         .no_migrate        = s->cfg.no_migrate,
+        .no_db             = s->cfg.no_db,
         .sandbox           = 1,
         .alloc             = &s->alloc,
         .thread_pool       = s->thread_pool,
-        .worker_db_path    = s->cfg.db_path,
+        .worker_db_path    = s->cfg.no_db ? NULL : s->cfg.db_path,
         .compress          = s->comp_ctx ? &s->compress_cfg : NULL,
         .heap_limit        = s->cfg.heap_limit,
         .stack_limit       = s->cfg.stack_limit,
@@ -1020,7 +1024,8 @@ static int hl_serve_wire_and_start(HlServerState *s)
     /* RT-04: Apply kernel sandbox BEFORE wiring routes — all route
      * handlers execute inside sandbox constraints. */
     if (!s->cfg.no_sandbox) {
-        if (hl_sandbox_apply(&s->manifest, s->app_dir, s->cfg.db_path, s->ca_bundle_path,
+        if (hl_sandbox_apply(&s->manifest, s->app_dir,
+                              s->cfg.no_db ? NULL : s->cfg.db_path, s->ca_bundle_path,
                               s->cfg.tls_cert_path, s->cfg.tls_key_path) != 0) {
             log_error("[hull:c] sandbox enforcement failed");
             hl_manifest_free(&s->manifest);
@@ -1083,7 +1088,8 @@ static int hl_serve_wire_and_start(HlServerState *s)
     }
 
     /* Register agent diagnostic endpoints (opt-in via --agent-api) */
-    s->agent_api_ctx = (HlAgentApiCtx){ .app_dir = s->app_dir, .db_path = s->cfg.db_path };
+    s->agent_api_ctx = (HlAgentApiCtx){ .app_dir = s->app_dir,
+                                        .db_path = s->cfg.no_db ? NULL : s->cfg.db_path };
     if (s->cfg.agent_api_mode)
         hl_agent_api_register(&s->server, &s->agent_api_ctx);
 

@@ -162,16 +162,18 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
         return -1;
     }
 
-    /* Open database via vtable */
-    const char *db_path = opts->db_path ? opts->db_path : ":memory:";
-    ctx->db_handle.backend = &hl_db_backend_sqlite;
-    if (hl_db_backend_sqlite.open(&ctx->db_handle.ctx, db_path,
-                                   opts->alloc) != 0) {
-        free(ctx);
-        return -1;
+    /* Open database via vtable (skip in pure compute mode) */
+    if (!opts->no_db) {
+        const char *db_path = opts->db_path ? opts->db_path : ":memory:";
+        ctx->db_handle.backend = &hl_db_backend_sqlite;
+        if (hl_db_backend_sqlite.open(&ctx->db_handle.ctx, db_path,
+                                       opts->alloc) != 0) {
+            free(ctx);
+            return -1;
+        }
+        ctx->db_open = 1;
+        ctx->db = hl_db_sqlite_raw(&ctx->db_handle);
     }
-    ctx->db_open = 1;
-    ctx->db = hl_db_sqlite_raw(&ctx->db_handle);
 
     /* Init VFS instances */
     extern const HlEntry hl_app_entries[];
@@ -180,7 +182,7 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
     hl_vfs_init(&ctx->platform_vfs, hl_stdlib_entries, NULL);
 
     /* Run migrations (fail on error to prevent starting with broken schema) */
-    if (!opts->no_migrate) {
+    if (!opts->no_migrate && ctx->db_open) {
         int migrated = hl_migrate_run(ctx->db, &ctx->app_vfs);
         if (migrated == HL_MIGRATE_ERR) {
             hl_app_context_free(ctx);
@@ -208,8 +210,10 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
         if (opts->instruction_limit > 0) cfg.max_instructions = opts->instruction_limit;
         HlLua *lua = &ctx->rt_storage.lua;
         memset(lua, 0, sizeof(*lua));
-        lua->base.db_handle = &ctx->db_handle;
-        lua->base.hull_db_handle = &ctx->db_handle;
+        if (ctx->db_open) {
+            lua->base.db_handle = &ctx->db_handle;
+            lua->base.hull_db_handle = &ctx->db_handle;
+        }
         lua->base.app_vfs = &ctx->app_vfs;
         lua->base.platform_vfs = &ctx->platform_vfs;
         if (opts->alloc) lua->base.alloc = opts->alloc;
@@ -256,8 +260,10 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
         if (opts->instruction_limit > 0) cfg.max_instructions = opts->instruction_limit;
         HlJS *js = &ctx->rt_storage.js;
         memset(js, 0, sizeof(*js));
-        js->base.db_handle = &ctx->db_handle;
-        js->base.hull_db_handle = &ctx->db_handle;
+        if (ctx->db_open) {
+            js->base.db_handle = &ctx->db_handle;
+            js->base.hull_db_handle = &ctx->db_handle;
+        }
         js->base.app_vfs = &ctx->app_vfs;
         js->base.platform_vfs = &ctx->platform_vfs;
         if (opts->alloc) js->base.alloc = opts->alloc;

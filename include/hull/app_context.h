@@ -48,6 +48,10 @@ typedef struct {
     HlGpuCtx     *gpu_ctx;          /* NULL = no GPU */
     int           gpu_device;       /* -1 = default */
 
+    /* Pure compute mode: 1 = skip database entirely.
+     * db_handle and hull_db_handle will be NULL, db global not registered. */
+    int           no_db;
+
     /* Deferred loading: 1 = init runtime but don't load app.
      * Use hl_app_context_load() to load app code later. */
     int           no_load;
