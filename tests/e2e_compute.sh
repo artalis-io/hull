@@ -806,5 +806,55 @@ else
 fi
 
 echo ""
+echo "=== E2E: pure compute mode (--no-db) ==="
+
+NODB_DIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR" "$AOTDIR" "$NOAOT_DIR" "$BUFDIR" "$PERSISTDIR" "$SHAREDDIR" "$NODB_DIR"' EXIT
+
+cat > "$NODB_DIR/app.lua" << 'EOF'
+app.get("/health", function(req, res) res:json({ ok = true }) end)
+app.get("/has-db", function(req, res)
+    res:json({ has_db = (db ~= nil) })
+end)
+app.get("/compute-only", function(req, res)
+    res:json({ result = 2 + 2 })
+end)
+EOF
+
+PORT_NODB=19879
+$HULL --no-db --no-sandbox -p $PORT_NODB "$NODB_DIR/app.lua" >/dev/null 2>&1 &
+NODB_PID=$!
+sleep 1
+
+if kill -0 $NODB_PID 2>/dev/null; then
+    RESP=$(curl -sf "http://127.0.0.1:$PORT_NODB/health" 2>/dev/null || echo "FAIL")
+    if echo "$RESP" | grep -q '"ok"'; then
+        pass "no-db health endpoint"
+    else
+        fail "no-db health endpoint — response: $RESP"
+    fi
+
+    RESP=$(curl -sf "http://127.0.0.1:$PORT_NODB/has-db" 2>/dev/null || echo "FAIL")
+    if echo "$RESP" | grep -q '"has_db":false'; then
+        pass "no-db db global is nil"
+    else
+        fail "no-db db global is nil — response: $RESP"
+    fi
+
+    RESP=$(curl -sf "http://127.0.0.1:$PORT_NODB/compute-only" 2>/dev/null || echo "FAIL")
+    if echo "$RESP" | grep -q '"result":4'; then
+        pass "no-db compute endpoint"
+    else
+        fail "no-db compute endpoint — response: $RESP"
+    fi
+
+    kill $NODB_PID 2>/dev/null; wait $NODB_PID 2>/dev/null
+else
+    fail "no-db server failed to start"
+fi
+
+rm -rf "$NODB_DIR"
+
+echo ""
 echo "=== Results: $PASS/$TOTAL passed ==="
 if [ $FAIL -gt 0 ]; then exit 1; fi

@@ -320,6 +320,53 @@ UTEST(db_backend, close_null_ctx)
     hl_db_backend_sqlite.close(NULL);
 }
 
+/* ── No-DB (pure compute) mode tests ──────────────────────────────── */
+
+UTEST(db_backend, null_handle_query)
+{
+    /* Query on zeroed handle should return error, not crash */
+    HlDbHandle h = {0};  /* zeroed = no backend */
+    int rc = hl_db_query(&h, "SELECT 1", NULL, 0, NULL, NULL, NULL);
+    ASSERT_TRUE(rc < 0);
+}
+
+UTEST(db_backend, null_handle_exec)
+{
+    HlDbHandle h = {0};
+    int rc = hl_db_exec(&h, "SELECT 1", NULL, 0);
+    ASSERT_TRUE(rc < 0);
+}
+
+UTEST(db_backend, null_handle_transaction)
+{
+    HlDbHandle h = {0};
+    ASSERT_TRUE(hl_db_begin(&h) < 0);
+    ASSERT_TRUE(hl_db_commit(&h) < 0);
+    ASSERT_TRUE(hl_db_rollback(&h) < 0);
+}
+
+UTEST(db_backend, null_handle_last_id)
+{
+    HlDbHandle h = {0};
+    ASSERT_EQ(hl_db_last_id(&h), (int64_t)-1);
+}
+
+UTEST(db_backend, null_handle_errmsg)
+{
+    HlDbHandle h = {0};
+    const char *msg = hl_db_errmsg(&h);
+    /* Should return "no database", not crash */
+    ASSERT_TRUE(msg != NULL);
+    ASSERT_STREQ(msg, "no database");
+}
+
+UTEST(db_backend, null_backend_ptr_safety)
+{
+    /* Completely NULL handle pointer */
+    hl_db_guard_stale_txn(NULL);
+    /* No crash = pass */
+}
+
 UTEST(db_backend, query_with_params)
 {
     HlDbHandle h;
