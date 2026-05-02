@@ -84,6 +84,21 @@ typedef struct HlLua {
     /* Tool-mode unveil context (NULL in sandbox mode) */
     HlToolUnveilCtx *tool_unveil_ctx;
 
+    /* Tracked WS route allocations (freed in hl_lua_free) */
+    void          **ws_routes;
+    size_t          ws_route_count;
+    size_t          ws_route_cap;
+
+    /* Tracked WS config allocations (freed in hl_lua_free) */
+    void          **ws_cfgs;
+    size_t          ws_cfg_count;
+    size_t          ws_cfg_cap;
+
+    /* Tracked SSE route allocations (freed in hl_lua_free) */
+    void          **sse_routes;
+    size_t          sse_route_count;
+    size_t          sse_route_cap;
+
     /* Tracked timer allocations (freed in hl_lua_free) */
     void          **timers;
     size_t          timer_count;

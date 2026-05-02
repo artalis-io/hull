@@ -75,6 +75,27 @@ void lua_push_wasm_buffer(lua_State *L, struct HlWasmBuffer *buf);
 int luaopen_hull_gpu(lua_State *L);
 #endif
 
+struct HlWsConn;
+
+/* SSE stream userdata (used by runtime.c for stream lifecycle) */
+#include <keel/sse.h>
+struct HlSseStreamUD {
+    KlSse    sse;     /* Keel SSE context */
+    int      closed;  /* 1 after close */
+};
+
+/* SSE stream helpers (defined in lua/mod_sse.c) */
+void hl_lua_sse_register_mt(lua_State *L);
+struct HlSseStreamUD *hl_lua_sse_push_stream(lua_State *L, KlResponse *res);
+
+/* hull.ws module (defined in lua/mod_ws.c) */
+int luaopen_hull_ws(lua_State *L);
+
+/* conn userdata helpers (defined in lua/mod_ws.c) */
+void hl_lua_ws_push_conn(lua_State *L, struct HlWsConn *conn);
+void hl_lua_ws_invalidate_conn(lua_State *L, struct HlWsConn *conn);
+void hl_lua_ws_register_conn_mt(lua_State *L);
+
 /* hull async module (defined in lua/async.c) */
 extern int luaopen_hull_hull(lua_State *L);
 

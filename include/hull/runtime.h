@@ -23,6 +23,7 @@ typedef struct HlVfs HlVfs;
 typedef struct HlWasmCache HlWasmCache;
 typedef struct HlGpuCtx HlGpuCtx;
 typedef struct HlDbHandle HlDbHandle;
+typedef struct HlWsRegistry HlWsRegistry;
 typedef struct KlServer KlServer;
 typedef struct KlThreadPool KlThreadPool;
 typedef struct HlRuntime HlRuntime;
@@ -52,6 +53,7 @@ struct HlRuntime {
     KlThreadPool *thread_pool;   /* worker pool for async work (NULL if not created) */
     const char   *db_path;       /* SQLite file path (borrowed, for worker connections) */
     struct KlCompressConfig *compress;  /* response compression config (NULL = disabled) */
+    HlWsRegistry *ws_registry;          /* WebSocket connection registry (NULL if no WS endpoints) */
 #ifdef HL_ENABLE_WASM
     HlWasmCache *wasm_cache;           /* WAMR compute module cache (NULL if disabled) */
     struct {

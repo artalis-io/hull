@@ -71,6 +71,14 @@ int hl_lua_register_modules(HlLua *lua)
     luaL_requiref(L, "hull.server", luaopen_hull_server, 0);
     lua_setglobal(L, "server");
 
+    /* Register hull.ws (always available — broadcast/connections are no-ops
+     * when no WS endpoints are registered) */
+    luaL_requiref(L, "hull.ws", luaopen_hull_ws, 0);
+    lua_setglobal(L, "ws");
+
+    /* Register SSE stream metatable (used by app.sse handler dispatch) */
+    hl_lua_sse_register_mt(L);
+
     /* Register hull global (hull.sleep, hull.gather, etc.) */
     luaL_requiref(L, "hull.hull", luaopen_hull_hull, 0);
     lua_setglobal(L, "hull");

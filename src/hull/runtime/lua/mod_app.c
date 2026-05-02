@@ -278,6 +278,109 @@ static int lua_app_daily(lua_State *L)
     return 0;
 }
 
+/* ── Helper: store handler in __hull_routes, return handler_id ──── */
+
+static lua_Integer store_handler(lua_State *L, int func_idx,
+                                  const char *table_name)
+{
+    lua_getfield(L, LUA_REGISTRYINDEX, table_name);
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_pushvalue(L, -1);
+        lua_setfield(L, LUA_REGISTRYINDEX, table_name);
+    }
+
+    lua_Integer handler_id = (lua_Integer)luaL_len(L, -1) + 1;
+    lua_pushvalue(L, func_idx);
+    lua_rawseti(L, -2, handler_id);
+    lua_pop(L, 1);
+    return handler_id;
+}
+
+/* ── app.ws(path, callbacks) — WebSocket endpoint registration ───── */
+
+static int lua_app_ws(lua_State *L)
+{
+    const char *path = luaL_checkstring(L, 1);
+    luaL_checktype(L, 2, LUA_TTABLE);
+
+    /* Ensure __hull_ws_defs exists */
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_ws_defs");
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_pushvalue(L, -1);
+        lua_setfield(L, LUA_REGISTRYINDEX, "__hull_ws_defs");
+    }
+
+    lua_Integer idx = (lua_Integer)luaL_len(L, -1) + 1;
+
+    lua_newtable(L); /* ws def entry */
+    lua_pushstring(L, path);
+    lua_setfield(L, -2, "path");
+
+    /* Extract and store each callback */
+    lua_getfield(L, 2, "on_open");
+    if (lua_isfunction(L, -1)) {
+        lua_Integer hid = store_handler(L, lua_gettop(L), "__hull_routes");
+        lua_pushinteger(L, hid);
+        lua_setfield(L, -3, "on_open_id");
+    }
+    lua_pop(L, 1);
+
+    lua_getfield(L, 2, "on_message");
+    if (lua_isfunction(L, -1)) {
+        lua_Integer hid = store_handler(L, lua_gettop(L), "__hull_routes");
+        lua_pushinteger(L, hid);
+        lua_setfield(L, -3, "on_message_id");
+    }
+    lua_pop(L, 1);
+
+    lua_getfield(L, 2, "on_close");
+    if (lua_isfunction(L, -1)) {
+        lua_Integer hid = store_handler(L, lua_gettop(L), "__hull_routes");
+        lua_pushinteger(L, hid);
+        lua_setfield(L, -3, "on_close_id");
+    }
+    lua_pop(L, 1);
+
+    lua_rawseti(L, -2, idx); /* ws_defs[idx] = def */
+    lua_pop(L, 1); /* pop __hull_ws_defs */
+    return 0;
+}
+
+/* ── app.sse(path, handler) — SSE endpoint registration ────────────── */
+
+static int lua_app_sse(lua_State *L)
+{
+    const char *path = luaL_checkstring(L, 1);
+    luaL_checktype(L, 2, LUA_TFUNCTION);
+
+    lua_Integer handler_id = store_handler(L, 2, "__hull_routes");
+
+    /* Store SSE def in __hull_sse_defs */
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_sse_defs");
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_pushvalue(L, -1);
+        lua_setfield(L, LUA_REGISTRYINDEX, "__hull_sse_defs");
+    }
+
+    lua_Integer idx = (lua_Integer)luaL_len(L, -1) + 1;
+
+    lua_newtable(L);
+    lua_pushstring(L, path);
+    lua_setfield(L, -2, "path");
+    lua_pushinteger(L, handler_id);
+    lua_setfield(L, -2, "handler_id");
+    lua_rawseti(L, -2, idx);
+
+    lua_pop(L, 1); /* pop __hull_sse_defs */
+    return 0;
+}
+
 /* app.config(tbl) — application configuration */
 static int lua_app_config(lua_State *L)
 {
@@ -321,6 +424,8 @@ static const luaL_Reg app_funcs[] = {
     {"options",      lua_app_options},
     {"use",          lua_app_use},
     {"use_post",     lua_app_use_post},
+    {"ws",           lua_app_ws},
+    {"sse",          lua_app_sse},
     {"every",        lua_app_every},
     {"daily",        lua_app_daily},
     {"config",       lua_app_config},

@@ -17,12 +17,17 @@
 #include "hull/cap/tool.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
+#include "hull/cap/ws.h"
+
+#include "mod_buffer.h"
 
 #include "lua.h"
 #include "lualib.h"
 #include "lauxlib.h"
 
 #include <keel/keel.h>
+#include <keel/websocket_server.h>
+#include <keel/sse.h>
 
 #include <sh_arena.h>
 
@@ -437,6 +442,21 @@ int hl_lua_dispatch(HlLua *lua, int handler_id,
     return -1;
 }
 
+/* Forward struct defs needed by hl_lua_free (full defs later in file) */
+typedef struct HlLuaWsRoute HlLuaWsRoute;
+typedef struct HlLuaSseRoute HlLuaSseRoute;
+struct HlLuaWsRoute {
+    HlLua *lua;
+    int     on_open_id;
+    int     on_message_id;
+    int     on_close_id;
+    char    path[256];
+};
+struct HlLuaSseRoute {
+    HlLua *lua;
+    int     handler_id;
+};
+
 void hl_lua_free(HlLua *lua)
 {
     if (!lua)
@@ -466,6 +486,50 @@ void hl_lua_free(HlLua *lua)
         lua->routes = NULL;
         lua->route_count = 0;
         lua->route_cap = 0;
+    }
+
+    /* Free tracked WS route allocations */
+    for (size_t i = 0; i < lua->ws_route_count; i++)
+        hl_alloc_free(lua->base.alloc, lua->ws_routes[i],
+                      sizeof(HlLuaWsRoute));
+    if (lua->ws_routes) {
+        hl_alloc_free(lua->base.alloc, lua->ws_routes,
+                      lua->ws_route_cap * sizeof(void *));
+        lua->ws_routes = NULL;
+        lua->ws_route_count = 0;
+        lua->ws_route_cap = 0;
+    }
+
+    /* Free tracked WS config allocations */
+    for (size_t i = 0; i < lua->ws_cfg_count; i++)
+        hl_alloc_free(lua->base.alloc, lua->ws_cfgs[i],
+                      sizeof(KlWsServerConfig));
+    if (lua->ws_cfgs) {
+        hl_alloc_free(lua->base.alloc, lua->ws_cfgs,
+                      lua->ws_cfg_cap * sizeof(void *));
+        lua->ws_cfgs = NULL;
+        lua->ws_cfg_count = 0;
+        lua->ws_cfg_cap = 0;
+    }
+
+    /* Free tracked SSE route allocations */
+    for (size_t i = 0; i < lua->sse_route_count; i++)
+        hl_alloc_free(lua->base.alloc, lua->sse_routes[i],
+                      sizeof(HlLuaSseRoute));
+    if (lua->sse_routes) {
+        hl_alloc_free(lua->base.alloc, lua->sse_routes,
+                      lua->sse_route_cap * sizeof(void *));
+        lua->sse_routes = NULL;
+        lua->sse_route_count = 0;
+        lua->sse_route_cap = 0;
+    }
+
+    /* Free WebSocket registry */
+    if (lua->base.ws_registry) {
+        hl_ws_registry_free(lua->base.ws_registry);
+        hl_alloc_free(lua->base.alloc, lua->base.ws_registry,
+                      sizeof(HlWsRegistry));
+        lua->base.ws_registry = NULL;
     }
 
     /* Mark runtime as dead before lua_close so UDF destroy callbacks
@@ -521,6 +585,28 @@ static int hl_lua_track_route(HlLua *lua, void *route)
         lua->route_cap = new_cap;
     }
     lua->routes[lua->route_count++] = route;
+    return 0;
+}
+
+/* ── Generic tracked-allocation helper ──────────────────────────────── */
+
+static int hl_lua_track_alloc(HlLua *lua, void ***arr, size_t *count,
+                                size_t *cap, void *ptr)
+{
+    if (*count >= *cap) {
+        size_t new_cap = *cap ? *cap * 2 : 4;
+        if (new_cap < *cap || new_cap > SIZE_MAX / sizeof(void *))
+            return -1;
+        size_t old_sz = *cap * sizeof(void *);
+        size_t new_sz = new_cap * sizeof(void *);
+        void **new_arr = hl_alloc_realloc(lua->base.alloc,
+                                           *arr, old_sz, new_sz);
+        if (!new_arr)
+            return -1;
+        *arr = new_arr;
+        *cap = new_cap;
+    }
+    (*arr)[(*count)++] = ptr;
     return 0;
 }
 
@@ -670,6 +756,325 @@ static void hl_lua_timer_trampoline(void *user_data)
     }
 
     lua->active_timer = NULL;
+}
+
+/* ── WebSocket callback trampolines ────────────────────────────────── */
+
+static void hl_lua_ws_on_open(KlWsServerConn *ws_conn, void *user_data)
+{
+    HlLuaWsRoute *route = (HlLuaWsRoute *)user_data;
+    HlLua *lua = route->lua;
+
+    /* Register the connection in the registry */
+    HlWsConn *conn = hl_ws_registry_add(lua->base.ws_registry,
+                                          route->path, ws_conn);
+    if (!conn)
+        return;
+
+    if (route->on_open_id < 0)
+        return;
+
+    /* Create coroutine for this callback */
+    lua->dispatch_depth++;
+
+    lua_State *co = lua_newthread(lua->L);
+    int thread_ref = luaL_ref(lua->L, LUA_REGISTRYINDEX);
+    lua->active_co = co;
+    lua->active_thread_ref = thread_ref;
+    lua->active_conn = NULL; /* detached — no HTTP connection */
+    lua->active_req = NULL;
+    lua->active_timer = NULL;
+
+    /* Push handler function */
+    lua_getfield(lua->L, LUA_REGISTRYINDEX, "__hull_routes");
+    lua_rawgeti(lua->L, -1, route->on_open_id);
+    lua_xmove(lua->L, co, 1);
+    lua_pop(lua->L, 1); /* pop __hull_routes */
+
+    /* Push conn userdata */
+    hl_lua_ws_push_conn(co, conn);
+
+    /* Re-arm instruction limit */
+    if (lua->max_instructions > 0) {
+        lua_sethook(co, NULL, 0, 0);
+        lua_sethook(co, hl_lua_instruction_hook, LUA_MASKCOUNT,
+                    INSTR_COUNT(lua->max_instructions));
+    }
+
+    int nres = 0;
+    int status = lua_resume(co, lua->L, 1, &nres);
+
+    if (status == LUA_OK) {
+        luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
+        lua->active_thread_ref = LUA_NOREF;
+        lua->active_co = NULL;
+        lua->dispatch_depth--;
+    } else if (status == LUA_YIELD) {
+        /* Handler yielded — async op in flight (detached mode).
+         * dispatch_depth stays elevated. */
+    } else {
+        const char *err = lua_tostring(co, -1);
+        log_error("[hull:ws] on_open error: %s", err ? err : "unknown");
+        luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
+        lua->active_thread_ref = LUA_NOREF;
+        lua->active_co = NULL;
+        lua->dispatch_depth--;
+    }
+}
+
+static void hl_lua_ws_on_message(KlWsServerConn *ws_conn, const char *data,
+                                   size_t len, int is_binary, void *user_data)
+{
+    HlLuaWsRoute *route = (HlLuaWsRoute *)user_data;
+    HlLua *lua = route->lua;
+
+    if (route->on_message_id < 0)
+        return;
+
+    /* Find the HlWsConn for this KlWsServerConn */
+    HlWsConn *conn = hl_ws_registry_find(lua->base.ws_registry,
+                                           route->path, ws_conn);
+    if (!conn)
+        return;
+
+    lua->dispatch_depth++;
+
+    lua_State *co = lua_newthread(lua->L);
+    int thread_ref = luaL_ref(lua->L, LUA_REGISTRYINDEX);
+    lua->active_co = co;
+    lua->active_thread_ref = thread_ref;
+    lua->active_conn = NULL; /* detached */
+    lua->active_req = NULL;
+    lua->active_timer = NULL;
+
+    /* Push handler function */
+    lua_getfield(lua->L, LUA_REGISTRYINDEX, "__hull_routes");
+    lua_rawgeti(lua->L, -1, route->on_message_id);
+    lua_xmove(lua->L, co, 1);
+    lua_pop(lua->L, 1);
+
+    /* Push conn userdata, message, is_binary */
+    hl_lua_ws_push_conn(co, conn);
+    lua_pushlstring(co, data, len);
+    lua_pushboolean(co, is_binary);
+
+    /* Re-arm instruction limit */
+    if (lua->max_instructions > 0) {
+        lua_sethook(co, NULL, 0, 0);
+        lua_sethook(co, hl_lua_instruction_hook, LUA_MASKCOUNT,
+                    INSTR_COUNT(lua->max_instructions));
+    }
+
+    int nres = 0;
+    int status = lua_resume(co, lua->L, 3, &nres);
+
+    if (status == LUA_OK) {
+        luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
+        lua->active_thread_ref = LUA_NOREF;
+        lua->active_co = NULL;
+        lua->dispatch_depth--;
+    } else if (status == LUA_YIELD) {
+        /* Async op in flight */
+    } else {
+        const char *err = lua_tostring(co, -1);
+        log_error("[hull:ws] on_message error: %s", err ? err : "unknown");
+        luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
+        lua->active_thread_ref = LUA_NOREF;
+        lua->active_co = NULL;
+        lua->dispatch_depth--;
+    }
+}
+
+static void hl_lua_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
+                                 const char *reason, size_t reason_len,
+                                 void *user_data)
+{
+    HlLuaWsRoute *route = (HlLuaWsRoute *)user_data;
+    HlLua *lua = route->lua;
+
+    /* Find the HlWsConn */
+    HlWsConn *conn = hl_ws_registry_find(lua->base.ws_registry,
+                                           route->path, ws_conn);
+    if (!conn)
+        return;
+
+    conn->closed = 1;
+
+    if (route->on_close_id >= 0) {
+        lua->dispatch_depth++;
+
+        lua_State *co = lua_newthread(lua->L);
+        int thread_ref = luaL_ref(lua->L, LUA_REGISTRYINDEX);
+        lua->active_co = co;
+        lua->active_thread_ref = thread_ref;
+        lua->active_conn = NULL;
+        lua->active_req = NULL;
+        lua->active_timer = NULL;
+
+        /* Push handler function */
+        lua_getfield(lua->L, LUA_REGISTRYINDEX, "__hull_routes");
+        lua_rawgeti(lua->L, -1, route->on_close_id);
+        lua_xmove(lua->L, co, 1);
+        lua_pop(lua->L, 1);
+
+        /* Push conn, code, reason */
+        hl_lua_ws_push_conn(co, conn);
+        lua_pushinteger(co, code);
+        if (reason && reason_len > 0)
+            lua_pushlstring(co, reason, reason_len);
+        else
+            lua_pushnil(co);
+
+        if (lua->max_instructions > 0) {
+            lua_sethook(co, NULL, 0, 0);
+            lua_sethook(co, hl_lua_instruction_hook, LUA_MASKCOUNT,
+                        INSTR_COUNT(lua->max_instructions));
+        }
+
+        int nres = 0;
+        int status = lua_resume(co, lua->L, 3, &nres);
+
+        if (status == LUA_OK) {
+            luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
+            lua->active_thread_ref = LUA_NOREF;
+            lua->active_co = NULL;
+            lua->dispatch_depth--;
+        } else if (status == LUA_YIELD) {
+            /* Async op in flight */
+        } else {
+            const char *err = lua_tostring(co, -1);
+            log_error("[hull:ws] on_close error: %s", err ? err : "unknown");
+            luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
+            lua->active_thread_ref = LUA_NOREF;
+            lua->active_co = NULL;
+            lua->dispatch_depth--;
+        }
+    }
+
+    /* Invalidate conn userdata and remove from registry */
+    hl_lua_ws_invalidate_conn(lua->L, conn);
+    hl_ws_registry_remove(lua->base.ws_registry, conn);
+}
+
+/* ── SSE dispatch ──────────────────────────────────────────────────── */
+
+static void hl_lua_sse_handler(KlRequest *req, KlResponse *res,
+                                 void *user_data)
+{
+    HlLuaSseRoute *route = (HlLuaSseRoute *)user_data;
+    HlLua *lua = route->lua;
+
+    if (!lua || !lua->L || !req || !res)
+        return;
+
+    lua->dispatch_depth++;
+
+    /* Guard stale transactions */
+    hl_db_guard_stale_txn(lua->base.db_handle);
+
+    /* Re-arm instruction limit */
+    if (lua->max_instructions > 0)
+        lua_sethook(lua->L, hl_lua_instruction_hook, LUA_MASKCOUNT,
+                    INSTR_COUNT(lua->max_instructions));
+
+    /* Reset scratch arena */
+    sh_arena_reset(lua->scratch);
+
+    /* Set per-request async context */
+    lua->active_conn = kl_request_conn(req);
+    lua->active_req = req;
+
+    /* Get handler function */
+    lua_getfield(lua->L, LUA_REGISTRYINDEX, "__hull_routes");
+    if (!lua_istable(lua->L, -1)) {
+        lua_pop(lua->L, 1);
+        lua->active_conn = NULL;
+        lua->active_req = NULL;
+        lua->dispatch_depth--;
+        return;
+    }
+
+    lua_rawgeti(lua->L, -1, route->handler_id);
+    if (!lua_isfunction(lua->L, -1)) {
+        lua_pop(lua->L, 2);
+        lua->active_conn = NULL;
+        lua->active_req = NULL;
+        lua->dispatch_depth--;
+        return;
+    }
+
+    /* Create coroutine */
+    lua_State *co = lua_newthread(lua->L);
+    int thread_ref = luaL_ref(lua->L, LUA_REGISTRYINDEX);
+
+    /* Move handler to coroutine */
+    lua_xmove(lua->L, co, 1);
+
+    /* Build request object */
+    hl_lua_make_request(co, req);
+
+    /* Create SSE stream userdata (calls kl_sse_begin) */
+    struct HlSseStreamUD *stream_ud = hl_lua_sse_push_stream(co, res);
+    if (!stream_ud) {
+        luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
+        lua_pop(lua->L, 1); /* pop routes table */
+        lua->active_conn = NULL;
+        lua->active_req = NULL;
+        lua->dispatch_depth--;
+        kl_response_status(res, 500);
+        kl_response_header(res, "Content-Type", "text/plain");
+        kl_response_body_borrow(res, "SSE init failed", 15);
+        return;
+    }
+
+    /* Set coroutine state for async C functions */
+    lua->active_co = co;
+    lua->active_thread_ref = thread_ref;
+
+    /* Re-arm instruction hook on coroutine */
+    if (lua->max_instructions > 0)
+        lua_sethook(co, hl_lua_instruction_hook, LUA_MASKCOUNT,
+                    INSTR_COUNT(lua->max_instructions));
+
+    /* Resume: handler(req, stream) */
+    int nres = 0;
+    int status = lua_resume(co, lua->L, 2, &nres);
+
+    if (status == LUA_OK) {
+        /* Synchronous completion — end stream if not already closed */
+        if (!stream_ud->closed)
+            kl_sse_end(&stream_ud->sse);
+
+        luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
+        lua->active_thread_ref = LUA_NOREF;
+        lua->active_co = NULL;
+        lua->active_conn = NULL;
+        lua->active_req = NULL;
+        lua->dispatch_depth--;
+
+        lua_pop(lua->L, 1); /* pop routes table */
+    } else if (status == LUA_YIELD) {
+        /* Handler yielded — streaming with hull.sleep() between events.
+         * The stream will be ended when the async resume completes.
+         * Routes table cleaned up on resume. */
+        lua_pop(lua->L, 1); /* pop routes table */
+    } else {
+        /* Error — end stream, log */
+        const char *err = lua_tostring(co, -1);
+        log_error("[hull:sse] handler error: %s", err ? err : "unknown");
+
+        if (!stream_ud->closed)
+            kl_sse_end(&stream_ud->sse);
+
+        luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
+        lua->active_thread_ref = LUA_NOREF;
+        lua->active_co = NULL;
+        lua->active_conn = NULL;
+        lua->active_req = NULL;
+        lua->dispatch_depth--;
+
+        lua_pop(lua->L, 1); /* pop routes table */
+    }
 }
 
 /* ── Route wiring ──────────────────────────────────────────────────── */
@@ -1027,6 +1432,125 @@ int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
         }
     }
     lua_pop(L, 1); /* __hull_timer_defs table */
+
+    /* ── Wire WebSocket endpoints from __hull_ws_defs ──────────────── */
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_ws_defs");
+    if (lua_istable(L, -1)) {
+        /* Initialize registry if needed */
+        if (!lua->base.ws_registry) {
+            lua->base.ws_registry = hl_alloc_malloc(lua->base.alloc,
+                                                      sizeof(HlWsRegistry));
+            if (lua->base.ws_registry)
+                hl_ws_registry_init(lua->base.ws_registry, lua->base.alloc);
+        }
+
+        int ws_count = (int)luaL_len(L, -1);
+        for (int i = 1; i <= ws_count; i++) {
+            lua_rawgeti(L, -1, i);
+            if (!lua_istable(L, -1)) {
+                lua_pop(L, 1);
+                continue;
+            }
+
+            lua_getfield(L, -1, "path");
+            const char *path = lua_tostring(L, -1);
+            lua_pop(L, 1);
+
+            lua_getfield(L, -1, "on_open_id");
+            int on_open_id = lua_isinteger(L, -1)
+                                 ? (int)lua_tointeger(L, -1) : -1;
+            lua_pop(L, 1);
+
+            lua_getfield(L, -1, "on_message_id");
+            int on_message_id = lua_isinteger(L, -1)
+                                    ? (int)lua_tointeger(L, -1) : -1;
+            lua_pop(L, 1);
+
+            lua_getfield(L, -1, "on_close_id");
+            int on_close_id = lua_isinteger(L, -1)
+                                  ? (int)lua_tointeger(L, -1) : -1;
+            lua_pop(L, 1);
+
+            if (path) {
+                HlLuaWsRoute *ws_route = hl_alloc_malloc(lua->base.alloc,
+                                                           sizeof(HlLuaWsRoute));
+                if (ws_route) {
+                    ws_route->lua = lua;
+                    ws_route->on_open_id = on_open_id;
+                    ws_route->on_message_id = on_message_id;
+                    ws_route->on_close_id = on_close_id;
+                    snprintf(ws_route->path, sizeof(ws_route->path),
+                             "%s", path);
+
+                    if (hl_lua_track_alloc(lua, &lua->ws_routes,
+                            &lua->ws_route_count,
+                            &lua->ws_route_cap, ws_route) != 0) {
+                        hl_alloc_free(lua->base.alloc, ws_route,
+                                      sizeof(HlLuaWsRoute));
+                    } else {
+                        KlWsServerConfig *ws_cfg =
+                            hl_alloc_malloc(lua->base.alloc,
+                                            sizeof(KlWsServerConfig));
+                        if (ws_cfg) {
+                            kl_ws_server_config_init(ws_cfg);
+                            ws_cfg->callbacks.on_open = hl_lua_ws_on_open;
+                            ws_cfg->callbacks.on_message = hl_lua_ws_on_message;
+                            ws_cfg->callbacks.on_close = hl_lua_ws_on_close;
+                            ws_cfg->user_data = ws_route;
+                            hl_lua_track_alloc(lua, &lua->ws_cfgs,
+                                               &lua->ws_cfg_count,
+                                               &lua->ws_cfg_cap, ws_cfg);
+                            kl_server_ws(server, path, ws_cfg);
+                        }
+                    }
+                }
+            }
+
+            lua_pop(L, 1); /* pop ws def entry */
+        }
+    }
+    lua_pop(L, 1); /* pop __hull_ws_defs */
+
+    /* ── Wire SSE endpoints from __hull_sse_defs ───────────────────── */
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_sse_defs");
+    if (lua_istable(L, -1)) {
+        int sse_count = (int)luaL_len(L, -1);
+        for (int i = 1; i <= sse_count; i++) {
+            lua_rawgeti(L, -1, i);
+            if (!lua_istable(L, -1)) {
+                lua_pop(L, 1);
+                continue;
+            }
+
+            lua_getfield(L, -1, "path");
+            lua_getfield(L, -2, "handler_id");
+
+            const char *path = lua_tostring(L, -2);
+            int handler_id = (int)lua_tointeger(L, -1);
+            lua_pop(L, 2);
+
+            if (path) {
+                HlLuaSseRoute *sse_route = hl_alloc_malloc(lua->base.alloc,
+                                                             sizeof(HlLuaSseRoute));
+                if (sse_route) {
+                    sse_route->lua = lua;
+                    sse_route->handler_id = handler_id;
+                    if (hl_lua_track_alloc(lua, &lua->sse_routes,
+                            &lua->sse_route_count,
+                            &lua->sse_route_cap, sse_route) != 0) {
+                        hl_alloc_free(lua->base.alloc, sse_route,
+                                      sizeof(HlLuaSseRoute));
+                    } else {
+                        kl_server_route(server, "GET", path,
+                                        hl_lua_sse_handler, sse_route, NULL);
+                    }
+                }
+            }
+
+            lua_pop(L, 1); /* pop sse def entry */
+        }
+    }
+    lua_pop(L, 1); /* pop __hull_sse_defs */
 
     return 0;
 }
