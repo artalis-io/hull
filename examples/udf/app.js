@@ -28,18 +28,18 @@ db.udf.register("hull_avg_price", {
 
 // ── Routes ────────────────────────────────────────────────────────
 
-app.get("/health", (req, res) => {
+app.get("/health", (_req, res) => {
     res.json({ ok: true });
 });
 
 // Scalar UDF: uppercase product names
-app.get("/products", (req, res) => {
+app.get("/products", (_req, res) => {
     const rows = db.query("SELECT id, hull_upper(name) as name, category, price FROM products");
     res.json({ products: rows });
 });
 
 // Aggregate UDF: average price per category
-app.get("/avg-prices", (req, res) => {
+app.get("/avg-prices", (_req, res) => {
     const rows = db.query("SELECT category, hull_avg_price(price) as avg_price FROM products GROUP BY category");
     res.json({ averages: rows });
 });

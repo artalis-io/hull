@@ -19,7 +19,7 @@ app.manifest({});
 
 app.ws("/ws/chat", {
     onOpen(conn) {
-        log.info("ws: client connected id=" + conn.id);
+        log.info(`ws: client connected id=${conn.id}`);
         ws.broadcast("/ws/chat", JSON.stringify({
             type: "join",
             id: conn.id,
@@ -36,7 +36,7 @@ app.ws("/ws/chat", {
     },
 
     onClose(conn, code) {
-        log.info("ws: client disconnected id=" + conn.id + " code=" + code);
+        log.info(`ws: client disconnected id=${conn.id} code=${code}`);
         ws.broadcast("/ws/chat", JSON.stringify({
             type: "leave",
             id: conn.id,
@@ -48,7 +48,7 @@ app.ws("/ws/chat", {
 
 // ── SSE event stream ──────────────────────────────────────────────
 
-app.sse("/sse/events", async (req, stream) => {
+app.sse("/sse/events", async (_req, stream) => {
     stream.comment("connected");
     stream.event("welcome", JSON.stringify({ time: time.datetime() }));
 
@@ -66,11 +66,11 @@ app.sse("/sse/events", async (req, stream) => {
 
 // ── HTTP endpoints ────────────────────────────────────────────────
 
-app.get("/health", (req, res) => {
+app.get("/health", (_req, res) => {
     res.json({ status: "ok", runtime: "js" });
 });
 
-app.get("/ws/connections", (req, res) => {
+app.get("/ws/connections", (_req, res) => {
     res.json({ count: ws.connections("/ws/chat") });
 });
 
