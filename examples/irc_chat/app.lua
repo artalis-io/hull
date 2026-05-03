@@ -24,7 +24,7 @@
 local validate = require("hull.validate")
 local session  = require("hull.middleware.session")
 local auth     = require("hull.middleware.auth")
-local cookie   = require("hull.cookie")
+local _cookie  = require("hull.cookie") -- luacheck: ignore
 
 app.manifest({})
 session.init({ ttl = 7200 })
@@ -296,7 +296,7 @@ local function broadcast_to_channel(channel_name, msg, exclude_conn)
     -- Since ws.broadcast sends to ALL connections on a path, we use conn.data
     -- to track channel membership and send individually
     -- This is a simplification — in production you'd want a channel-based pubsub
-    local exclude_id = exclude_conn and exclude_conn:id() or -1
+    local _exclude_id = exclude_conn and exclude_conn:id() or -1 -- luacheck: ignore
     local sent = json.encode(msg)
     -- We rely on the per-connection data to filter
     -- For now, use ws.broadcast and let clients filter
@@ -305,8 +305,6 @@ end
 
 app.ws("/ws", {
     on_open = function(conn)
-        -- Authenticate via cookie (session middleware doesn't run on WS)
-        local cookie_header = conn.data._headers and conn.data._headers["cookie"]
         -- WebSocket connections need auth info stored on connection
         -- For simplicity, mark as unauthenticated until they send credentials
         conn.data.username = nil
