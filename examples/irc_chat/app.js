@@ -174,7 +174,7 @@ app.post("/channels", (req, res) => {
     if (!ok) return res.status(400).json({ errors });
 
     let name = body.name;
-    if (!name.startsWith("#")) name = "#" + name;
+    if (!name.startsWith("#")) name = `#${name}`;
 
     const channelKeyHex = toHex(crypto.random(32));
     const nonceHex = toHex(crypto.random(24));
@@ -209,7 +209,7 @@ app.post("/channels", (req, res) => {
 
 app.get("/channels/:name/members", (req, res) => {
     let channelName = req.params.name;
-    if (!channelName.startsWith("#")) channelName = "#" + channelName;
+    if (!channelName.startsWith("#")) channelName = `#${channelName}`;
 
     const members = db.query(
         "SELECT u.id, u.username, u.public_key, cm.role, cm.joined_at " +
@@ -221,7 +221,7 @@ app.get("/channels/:name/members", (req, res) => {
 
 app.get("/channels/:name/history", (req, res) => {
     let channelName = req.params.name;
-    if (!channelName.startsWith("#")) channelName = "#" + channelName;
+    if (!channelName.startsWith("#")) channelName = `#${channelName}`;
 
     const messages = db.query(
         "SELECT m.id, u.username, m.encrypted_body, m.nonce, m.created_at " +
@@ -292,12 +292,12 @@ app.ws("/ws", {
             if (!msg.channel)
                 return wsError(conn, "channel name required");
             let channelName = msg.channel;
-            if (!channelName.startsWith("#")) channelName = "#" + channelName;
+            if (!channelName.startsWith("#")) channelName = `#${channelName}`;
 
             const ch = db.query(
                 "SELECT id FROM channels WHERE name = ?", [channelName]);
             if (ch.length === 0)
-                return wsError(conn, "channel not found: " + channelName);
+                return wsError(conn, `channel not found: ${channelName}`);
 
             let membership = db.query(
                 "SELECT encrypted_key, nonce FROM channel_members WHERE channel_id = ? AND user_id = ?",
@@ -343,7 +343,7 @@ app.ws("/ws", {
             if (!msg.channel || !msg.encrypted || !msg.nonce)
                 return wsError(conn, "channel, encrypted, and nonce required");
             if (!conn.data.channels[msg.channel])
-                return wsError(conn, "not in channel: " + msg.channel);
+                return wsError(conn, `not in channel: ${msg.channel}`);
 
             const ch = db.query(
                 "SELECT id FROM channels WHERE name = ?", [msg.channel]);
@@ -389,7 +389,7 @@ app.ws("/ws", {
             wsSend(conn, { type: "channels", list: channels });
 
         } else {
-            wsError(conn, "unknown message type: " + String(msg.type));
+            wsError(conn, `unknown message type: ${String(msg.type)}`);
         }
     },
 
