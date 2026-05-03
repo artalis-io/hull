@@ -521,6 +521,41 @@ curl http://localhost:3000/query
 - `gpu.dispatch({ output = false })` — fire-and-forget in-place update
 - WASM + GPU in the same app with `app.manifest({ gpu = true, compute = true })`
 
+### irc_chat
+
+IRC-like encrypted chat server with channels, E2E encryption, and WebSocket real-time messaging. Users register with password (PBKDF2) and receive a Curve25519 keypair. Channel messages are encrypted with XSalsa20-Poly1305 (secretbox) — the server stores and relays ciphertext only.
+
+```bash
+./build/hull -p 3000 examples/irc_chat/app.lua
+
+# Register a user (returns keypair)
+curl -X POST http://localhost:3000/register \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"alice","password":"secret1234"}'
+
+# Login (save cookie)
+curl -X POST http://localhost:3000/login -c cookies.txt \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"alice","password":"secret1234"}'
+
+# List channels
+curl http://localhost:3000/channels -b cookies.txt
+
+# Connect via WebSocket (ws://localhost:3000/ws with session cookie)
+# Send: {"type":"join","channel":"#general"}
+# Send: {"type":"msg","channel":"#general","encrypted":"...","nonce":"..."}
+```
+
+**Key features demonstrated:**
+- `app.ws("/ws", handlers)` — authenticated WebSocket with JSON protocol
+- `crypto.box_keypair()` — Curve25519 key generation per user
+- `crypto.secretbox(msg, nonce, key)` — message encryption (XSalsa20-Poly1305)
+- `crypto.box(data, nonce, pk, sk)` — key distribution (per-member encryption)
+- Session auth + middleware for HTTP and WebSocket
+- Channel management (create, join, leave, topic, kick, who)
+- Encrypted message history (DB stores ciphertext only)
+- See `ROADMAP.md` for planned: federation, file transfer, direct messages
+
 ### image_processing
 
 Image decode/encode — create images from raw pixels, encode to PNG/JPEG, decode from encoded bytes. Demonstrates the `image` module's codec vtable backed by stb_image.

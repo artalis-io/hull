@@ -774,6 +774,50 @@ test_chat() {
     stop_server; rm -rf "$TMPDIR_CHAT"
 }
 
+# ── irc_chat (encrypted WebSocket chat) ──────────────────────────────
+
+test_irc_chat() {
+    LABEL=$1
+    PORT=$2
+    APP=$3
+
+    echo ""
+    echo "--- irc_chat ($LABEL) port $PORT ---"
+
+    TMPDIR_IRC=$(mktemp -d)
+    start_server "$PORT" "$APP" "$TMPDIR_IRC/data.db"
+    if ! wait_for_server "$PORT"; then
+        fail "$LABEL irc_chat — server startup"
+        stop_server; rm -rf "$TMPDIR_IRC"; return
+    fi
+
+    # Health check
+    RESP=$(curl -s "http://127.0.0.1:$PORT/health")
+    check_contains "$LABEL irc_chat GET /health" "$RESP" '"ok"'
+
+    # WS connections should be 0
+    RESP=$(curl -s "http://127.0.0.1:$PORT/ws/connections")
+    check_contains "$LABEL irc_chat GET /ws/connections" "$RESP" '"count":0'
+
+    # Register a user
+    RESP=$(curl -s -X POST -H "Content-Type: application/json" \
+        -d '{"username":"e2euser","password":"secret1234"}' \
+        "http://127.0.0.1:$PORT/register")
+    check_contains "$LABEL irc_chat POST /register" "$RESP" '"public_key"'
+
+    # Login
+    RESP=$(curl -s -X POST -H "Content-Type: application/json" \
+        -d '{"username":"e2euser","password":"secret1234"}' \
+        "http://127.0.0.1:$PORT/login")
+    check_contains "$LABEL irc_chat POST /login" "$RESP" '"e2euser"'
+
+    # List channels (empty)
+    RESP=$(curl -s "http://127.0.0.1:$PORT/channels")
+    check_contains "$LABEL irc_chat GET /channels" "$RESP" '"channels"'
+
+    stop_server; rm -rf "$TMPDIR_IRC"
+}
+
 PORT_BASE=19870
 
 echo ""
@@ -793,6 +837,7 @@ if [ "$RUNTIME" != "js" ]; then
     test_timers         "lua" $((PORT_BASE + 20)) examples/timers/app.lua
     test_compute        "lua" $((PORT_BASE + 22)) examples/compute/app.lua
     test_chat           "lua" $((PORT_BASE + 24)) examples/chat/app.lua
+    test_irc_chat       "lua" $((PORT_BASE + 26)) examples/irc_chat/app.lua
 fi
 
 if [ "$RUNTIME" != "lua" ]; then
@@ -808,6 +853,7 @@ if [ "$RUNTIME" != "lua" ]; then
     test_async_http     "js" $((PORT_BASE + 19)) examples/async_http/app.js
     test_timers         "js" $((PORT_BASE + 21)) examples/timers/app.js
     test_chat           "js" $((PORT_BASE + 25)) examples/chat/app.js
+    test_irc_chat       "js" $((PORT_BASE + 27)) examples/irc_chat/app.js
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────
