@@ -638,7 +638,8 @@ int hl_cap_crypto_auth_verify(const uint8_t tag[32],
         return -1;
 
     uint8_t computed[32];
-    hl_cap_crypto_auth(msg, msg_len, key, computed);
+    if (hl_cap_crypto_auth(msg, msg_len, key, computed) != 0)
+        return -1;
 
     /* Constant-time comparison */
     return crypto_verify_32(computed, tag);

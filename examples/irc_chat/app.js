@@ -51,7 +51,10 @@ if (!FEDERATION.publicKey) {
 
 // In-memory federation state
 const fedPeers = {};     // serverName -> { conn, publicKey, authenticated }
-const fedPending = {};   // connId -> { state, challenge, publicKey, serverName, challenge2 }
+const fedPending = {};   // connId -> { state, challenge, publicKey, serverName, challenge2, createdAt }
+const FED_MAX_INBOUND = 64;
+const FED_HANDSHAKE_TIMEOUT = 30; // seconds
+const FED_MAX_FIELD_LEN = 256;
 
 function fedChannelEnabled(channel) {
     return FEDERATION.channels.indexOf(channel) !== -1;
@@ -92,10 +95,15 @@ function federationRelayPresence(username, online) {
     }
 }
 
+function fedCheckLen(s) {
+    return typeof s === "string" && s.length <= FED_MAX_FIELD_LEN;
+}
+
 function handleFederatedMessage(data) {
-    if (!data.server) return;
+    if (!data.server || !fedCheckLen(data.server)) return;
     if (data.type === "fed_msg") {
         if (!data.channel || !data.from || !data.encrypted || !data.nonce) return;
+        if (!fedCheckLen(data.from) || !fedCheckLen(data.channel)) return;
         if (!fedChannelEnabled(data.channel)) return;
         ws.broadcast("/ws", JSON.stringify({
             type: "msg", channel: data.channel,
@@ -105,6 +113,7 @@ function handleFederatedMessage(data) {
         }));
     } else if (data.type === "fed_join") {
         if (!data.channel || !data.user) return;
+        if (!fedCheckLen(data.user) || !fedCheckLen(data.channel)) return;
         if (!fedChannelEnabled(data.channel)) return;
         ws.broadcast("/ws", JSON.stringify({
             type: "user_joined", channel: data.channel,
@@ -112,13 +121,14 @@ function handleFederatedMessage(data) {
         }));
     } else if (data.type === "fed_leave") {
         if (!data.channel || !data.user) return;
+        if (!fedCheckLen(data.user) || !fedCheckLen(data.channel)) return;
         if (!fedChannelEnabled(data.channel)) return;
         ws.broadcast("/ws", JSON.stringify({
             type: "left", channel: data.channel,
             user: `${data.user}@${data.server}`, federated: true,
         }));
     } else if (data.type === "fed_presence") {
-        if (!data.username) return;
+        if (!data.username || !fedCheckLen(data.username)) return;
         ws.broadcast("/ws", JSON.stringify({
             type: "presence", username: `${data.username}@${data.server}`,
             online: data.online, federated: true,
@@ -1128,10 +1138,18 @@ app.get("/e2e-test", async (req, res) => {
 
 app.ws("/federation", {
     onOpen(conn) {
+        // Enforce inbound peer limit
+        const pendingCount = Object.keys(fedPending).length;
+        const peerCount = Object.keys(fedPeers).length;
+        if (pendingCount + peerCount >= FED_MAX_INBOUND) {
+            wsSend(conn, { type: "fed_error", message: "too many federation connections" });
+            conn.close();
+            return;
+        }
         conn.data.state = "awaiting_hello";
         conn.data.serverName = null;
         conn.data.publicKey = null;
-        fedPending[conn.id] = { state: "awaiting_hello" };
+        fedPending[conn.id] = { state: "awaiting_hello", createdAt: time.now() };
     },
 
     onMessage(conn, raw) {
@@ -1145,6 +1163,14 @@ app.ws("/federation", {
 
         const pending = fedPending[conn.id];
         if (!pending) {
+            conn.close();
+            return;
+        }
+
+        // Enforce handshake timeout
+        if (pending.createdAt && (time.now() - pending.createdAt) > FED_HANDSHAKE_TIMEOUT) {
+            wsSend(conn, { type: "fed_error", message: "handshake timeout" });
+            delete fedPending[conn.id];
             conn.close();
             return;
         }
@@ -1377,8 +1403,11 @@ app.get("/e2e-federation-test", async (req, res) => {
     const fakeSk = fakeKp.secretKey;
     results.keypair_generated = !!fakePk && !!fakeSk;
 
-    // Step 2: Temporarily add fake peer and enable federation
+    // Step 2: Temporarily add fake peer and enable federation.
+    // Safe: event loop is single-threaded; mutations between hull.sleep() are atomic.
+    // Cleanup truncates back to original length to guarantee restoration.
     const origEnabled = FEDERATION.enabled;
+    const origPeersLen = FEDERATION.peers.length;
     FEDERATION.enabled = true;
     FEDERATION.peers.push({ url: fedUrl, publicKey: fakePk });
 
@@ -1497,11 +1526,10 @@ app.get("/e2e-federation-test", async (req, res) => {
         try { userWs.close(); } catch (_e) { /* ignore */ }
     }
 
-    // Clean up
+    // Clean up: restore config first (guaranteed even if close errors)
     try { fakePeerWs.close(); } catch (_e) { /* ignore */ }
-    // Remove fake peer from config
-    const idx = FEDERATION.peers.findIndex(p => p.publicKey === fakePk);
-    if (idx !== -1) FEDERATION.peers.splice(idx, 1);
+    // Truncate peers back to original length
+    FEDERATION.peers.length = origPeersLen;
     FEDERATION.enabled = origEnabled;
 
     results.all_passed = results.keypair_generated

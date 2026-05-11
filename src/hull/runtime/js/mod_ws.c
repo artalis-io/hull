@@ -671,7 +671,7 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
     };
 
     KlWsClientConn *client = kl_ws_client_connect(
-        &js->server->ev, NULL, NULL, url, &cbs, ud);
+        &js->server->ev, &js->server->alloc_storage, NULL, url, &cbs, ud);
 
     JS_FreeCString(ctx, url);
 
@@ -688,6 +688,12 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
     /* Track for cleanup on runtime destroy */
     if (js->ws_client_count >= js->ws_client_cap) {
         size_t new_cap = js->ws_client_cap ? js->ws_client_cap * 2 : 4;
+        if (new_cap > SIZE_MAX / sizeof(void *)) {
+            JS_FreeValue(ctx, ud->self_ref);
+            ud->self_ref = JS_UNDEFINED;
+            JS_FreeValue(ctx, obj);
+            return JS_ThrowInternalError(ctx, "too many WebSocket clients");
+        }
         size_t old_sz = js->ws_client_cap * sizeof(void *);
         size_t new_sz = new_cap * sizeof(void *);
         void **new_arr = hl_alloc_realloc(js->base.alloc,

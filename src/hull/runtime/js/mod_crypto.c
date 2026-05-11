@@ -421,7 +421,11 @@ static JSValue js_crypto_auth(JSContext *ctx, JSValueConst this_val,
     JS_FreeCString(ctx, key_hex);
 
     uint8_t tag[32];
-    hl_cap_crypto_auth(msg, msg_len, key, tag);
+    if (hl_cap_crypto_auth(msg, msg_len, key, tag) != 0) {
+        JS_FreeCString(ctx, msg);
+        secure_zero(key, sizeof(key));
+        return JS_ThrowInternalError(ctx, "crypto.auth failed");
+    }
     JS_FreeCString(ctx, msg);
     secure_zero(key, sizeof(key));
 

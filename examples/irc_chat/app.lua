@@ -97,7 +97,10 @@ end
 
 -- In-memory federation state
 local fed_peers = {}     -- server_name -> { conn, public_key, authenticated }
-local fed_pending = {}   -- conn_id -> { challenge, public_key, state, server_name, challenge2 }
+local fed_pending = {}   -- conn_id -> { challenge, public_key, state, server_name, challenge2, created_at }
+local FED_MAX_INBOUND = 64
+local FED_HANDSHAKE_TIMEOUT = 30 -- seconds
+local FED_MAX_FIELD_LEN = 256
 
 local function fed_channel_enabled(channel)
     for _, ch in ipairs(FEDERATION.channels) do
@@ -139,11 +142,16 @@ local function federation_relay_presence(username, online)
     end
 end
 
+local function fed_check_len(s)
+    return type(s) == "string" and #s <= FED_MAX_FIELD_LEN
+end
+
 local function handle_federated_message(data)
     -- Relay federated messages to local /ws clients — never re-relay to other peers
-    if not data.server then return end
+    if not data.server or not fed_check_len(data.server) then return end
     if data.type == "fed_msg" then
         if not data.channel or not data.from or not data.encrypted or not data.nonce then return end
+        if not fed_check_len(data.from) or not fed_check_len(data.channel) then return end
         if not fed_channel_enabled(data.channel) then return end
         ws.broadcast("/ws", json.encode({
             type = "msg", channel = data.channel,
@@ -153,6 +161,7 @@ local function handle_federated_message(data)
         }))
     elseif data.type == "fed_join" then
         if not data.channel or not data.user then return end
+        if not fed_check_len(data.user) or not fed_check_len(data.channel) then return end
         if not fed_channel_enabled(data.channel) then return end
         ws.broadcast("/ws", json.encode({
             type = "user_joined", channel = data.channel,
@@ -160,13 +169,14 @@ local function handle_federated_message(data)
         }))
     elseif data.type == "fed_leave" then
         if not data.channel or not data.user then return end
+        if not fed_check_len(data.user) or not fed_check_len(data.channel) then return end
         if not fed_channel_enabled(data.channel) then return end
         ws.broadcast("/ws", json.encode({
             type = "left", channel = data.channel,
             user = data.user .. "@" .. data.server, federated = true,
         }))
     elseif data.type == "fed_presence" then
-        if not data.username then return end
+        if not data.username or not fed_check_len(data.username) then return end
         ws.broadcast("/ws", json.encode({
             type = "presence", username = data.username .. "@" .. data.server,
             online = data.online, federated = true,
@@ -1294,10 +1304,20 @@ end)
 
 app.ws("/federation", {
     on_open = function(conn)
+        -- Enforce inbound peer limit
+        local pending_count = 0
+        for _ in pairs(fed_pending) do pending_count = pending_count + 1 end
+        local peer_count = 0
+        for _ in pairs(fed_peers) do peer_count = peer_count + 1 end
+        if pending_count + peer_count >= FED_MAX_INBOUND then
+            ws_send(conn, { type = "fed_error", message = "too many federation connections" })
+            conn:close()
+            return
+        end
         conn.data.state = "awaiting_hello"
         conn.data.server_name = nil
         conn.data.public_key = nil
-        fed_pending[conn:id()] = { state = "awaiting_hello" }
+        fed_pending[conn:id()] = { state = "awaiting_hello", created_at = time.now() }
     end,
 
     on_message = function(conn, raw)
@@ -1310,6 +1330,14 @@ app.ws("/federation", {
 
         local pending = fed_pending[conn:id()]
         if not pending then
+            conn:close()
+            return
+        end
+
+        -- Enforce handshake timeout
+        if pending.created_at and (time.now() - pending.created_at) > FED_HANDSHAKE_TIMEOUT then
+            ws_send(conn, { type = "fed_error", message = "handshake timeout" })
+            fed_pending[conn:id()] = nil
             conn:close()
             return
         end
@@ -1553,8 +1581,11 @@ app.get("/e2e-federation-test", function(req, res)
     local fake_pk, fake_sk = crypto.ed25519_keypair()
     results.keypair_generated = fake_pk ~= nil and fake_sk ~= nil
 
-    -- Step 2: Temporarily add fake peer to FEDERATION config and enable
+    -- Step 2: Temporarily add fake peer to FEDERATION config and enable.
+    -- Safe: event loop is single-threaded; mutations between hull.sleep() are atomic.
+    -- Cleanup uses pcall to guarantee restoration even on error.
     local orig_enabled = FEDERATION.enabled
+    local orig_peers_len = #FEDERATION.peers
     FEDERATION.enabled = true
     FEDERATION.peers[#FEDERATION.peers + 1] = {
         url = fed_url, public_key = fake_pk,
@@ -1681,13 +1712,11 @@ app.get("/e2e-federation-test", function(req, res)
         pcall(function() _user_ws:close() end)
     end
 
-    -- Clean up
+    -- Clean up: restore config first (guaranteed even if ws:close errors)
     pcall(function() _fake_peer_ws:close() end)
-    -- Remove fake peer from config
-    for i = #FEDERATION.peers, 1, -1 do
-        if FEDERATION.peers[i].public_key == fake_pk then
-            table.remove(FEDERATION.peers, i)
-        end
+    -- Truncate peers back to original length
+    for i = #FEDERATION.peers, orig_peers_len + 1, -1 do
+        FEDERATION.peers[i] = nil
     end
     FEDERATION.enabled = orig_enabled
 
