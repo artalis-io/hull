@@ -526,7 +526,7 @@ static int lua_ws_connect(lua_State *L)
     };
 
     KlWsClientConn *client = kl_ws_client_connect(
-        &lua->server->ev, NULL, NULL, url, &cbs, ud);
+        &lua->server->ev, &lua->server->alloc_storage, NULL, url, &cbs, ud);
 
     if (!client) {
         /* Clean up self_ref */
