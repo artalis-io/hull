@@ -26,6 +26,7 @@
 #include "hull/commands/mcp.h"
 #include "hull/commands/check.h"
 #include "hull/commands/compute.h"
+#include "hull/commands/deploy.h"
 
 #include <string.h>
 
@@ -47,6 +48,7 @@ static const HlCommand commands[] = {
     { "mcp",           hl_cmd_mcp },
     { "check",         hl_cmd_check },
     { "compute",       hl_cmd_compute },
+    { "deploy",        hl_cmd_deploy },
     { NULL, NULL }  /* sentinel */
 };
 

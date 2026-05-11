@@ -9,18 +9,49 @@ hull build myapp/          # compile to single binary
 ./myapp/build/app -p 8080   # custom port
 ```
 
+**Config generator:** `hull deploy` generates deployment configs from the app's manifest.
+
+```bash
+hull deploy dockerfile myapp/          # Dockerfile + .dockerignore
+hull deploy systemd myapp/ --name app  # systemd service + install script
+hull deploy fly myapp/ --region lax    # fly.toml (+ Dockerfile if missing)
+hull agent deploy myapp/               # JSON deployment readiness analysis
+```
+
 **Sandbox:** Kernel-level enforcement (pledge/unveil on Linux, Seatbelt on macOS) restricts the binary to declared capabilities only.
 
 **Manifest:** Declares what the app can access.
 ```lua
-app.manifest = {
-    fs = { "data/", "uploads/" },
+app.manifest({
+    fs = { read = {"data/"}, write = {"uploads/"} },
     env = { "API_KEY", "DATABASE_URL" },
     hosts = { "api.stripe.com" },
-}
+})
 ```
 
 <!-- compact -->
+## Deploy Targets
+
+| Target | Command | Output |
+|--------|---------|--------|
+| Docker | `hull deploy dockerfile myapp/` | `Dockerfile` + `.dockerignore` |
+| systemd | `hull deploy systemd myapp/` | `deploy/<name>.service` + `deploy/install.sh` |
+| Fly.io | `hull deploy fly myapp/` | `fly.toml` + `Dockerfile` |
+
+**Common flags:** `--port N`, `--name NAME`, `-o DIR`, `--force` (overwrite).
+
+**Dockerfile flags:** `--scratch` (default), `--distroless`, `--sign` (add verify step).
+
+**systemd flags:** `--user NAME` (default: `hull`), `--install-dir PATH`, `--data-dir PATH`.
+
+**Fly flags:** `--region CODE` (default: `iad`), `--memory N` (default: 256).
+
+Generated configs adapt to the app automatically:
+- CA bundle only when manifest declares `hosts`
+- ENV declarations from manifest `env` array
+- VOLUME/mounts only for database apps
+- systemd hardening with 17 security directives
+
 ## Runtime Flags
 
 | Flag | Effect |
@@ -54,6 +85,8 @@ SQLite database is created at `app_dir/db.sqlite` by default. Migrations run aut
 <!-- full -->
 ## Production Deployment
 
+### Manual
+
 ```bash
 # Build and sign
 hull keygen
@@ -65,24 +98,42 @@ scp myapp/build/app server:/opt/myapp/app
 ssh server 'chmod +x /opt/myapp/app && /opt/myapp/app -p 8080'
 ```
 
-## Systemd Service
+### Docker
 
-```ini
-[Unit]
-Description=My Hull App
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/opt/myapp/app -p 8080
-WorkingDirectory=/opt/myapp
-Restart=always
-RestartSec=5
-Environment=API_KEY=secret
-
-[Install]
-WantedBy=multi-user.target
+```bash
+hull deploy dockerfile myapp/ --sign
+# Copy hull binary into myapp/
+docker build -t myapp myapp/
+docker run -p 8080:8080 -v data:/data myapp
 ```
+
+The generated Dockerfile uses a multi-stage build: `debian:bookworm-slim` build stage compiles the app with `hull build`, then copies the single binary to a `FROM scratch` runtime stage. No shell, no package manager, no libc in the final image.
+
+### systemd
+
+```bash
+hull deploy systemd myapp/ --name myapp --user webapp
+hull build myapp/ --output app
+# Review deploy/install.sh, then run the commands it prints
+```
+
+The generated service unit includes defense-in-depth hardening: `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`, `SystemCallFilter=@system-service`, `MemoryDenyWriteExecute`, and more — layered on top of hull's own kernel sandbox.
+
+### Fly.io
+
+```bash
+hull deploy fly myapp/ --region lax --memory 512
+# Copy hull binary into myapp/
+fly deploy
+```
+
+### Agent Introspection
+
+```bash
+hull agent deploy myapp/
+```
+
+Returns JSON with deployment readiness analysis: runtime, manifest contents, file counts (migrations, templates, static, compute, shaders), existing configs, and recommendations.
 
 ## Audit Logging
 
@@ -115,3 +166,4 @@ hull build myapp/
 - Use `--audit` in staging to verify capability usage matches expectations
 - Set `--max-instructions` to prevent runaway requests
 - Run `hull verify` on the binary before deploying to confirm integrity
+- Use `hull deploy` to generate hardened deployment configs (systemd unit includes 17 security directives)

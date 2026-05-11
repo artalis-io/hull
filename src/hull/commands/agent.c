@@ -227,6 +227,20 @@ static int cmd_context(int argc, char **argv)
     return output_result(&out, rc);
 }
 
+static int cmd_deploy(int argc, char **argv)
+{
+    const char *app_dir = ".";
+    for (int i = 0; i < argc; i++) {
+        if (argv[i][0] != '-')
+            app_dir = argv[i];
+    }
+
+    ShJsonBuf out;
+    sh_json_buf_init(&out);
+    int rc = hl_agent_deploy(app_dir, &out);
+    return output_result(&out, rc);
+}
+
 static int cmd_migrate(int argc, char **argv)
 {
     const char *app_dir = ".";
@@ -262,6 +276,7 @@ static void agent_usage(void)
         "  test [app_dir]                Run tests\n"
         "  context --task=T [--level=L]  Task-relevant documentation\n"
         "  migrate [app_dir] [-d path]   Migration status\n"
+        "  deploy [app_dir]              Deployment readiness analysis\n"
         "\n"
         "All output is JSON to stdout.\n");
 }
@@ -295,6 +310,8 @@ int hl_cmd_agent(int argc, char **argv, const HlCommandEnv *env)
         return cmd_context(sub_argc, sub_argv);
     if (strcmp(sub, "migrate") == 0)
         return cmd_migrate(sub_argc, sub_argv);
+    if (strcmp(sub, "deploy") == 0)
+        return cmd_deploy(sub_argc, sub_argv);
     if (strcmp(sub, "help") == 0 || strcmp(sub, "--help") == 0 ||
         strcmp(sub, "-h") == 0) {
         agent_usage();

@@ -186,6 +186,43 @@ Run tests with structured JSON output (per-file, per-test results).
 }
 ```
 
+### `hull agent deploy [app_dir]`
+
+Analyze deployment readiness — manifest, directory structure, existing configs.
+
+```json
+{
+  "app_dir": "examples/todo",
+  "runtime": "lua",
+  "entry_point": "app.lua",
+  "manifest": {
+    "present": true,
+    "env": ["SECRET_KEY"],
+    "hosts": ["api.stripe.com"],
+    "fs_write": ["uploads/"],
+    "database": true,
+    "gpu": false,
+    "compute": false
+  },
+  "files": {
+    "migrations": 3,
+    "templates": 5,
+    "static": 2,
+    "compute": 0,
+    "shaders": 0
+  },
+  "signature": { "package_sig": false },
+  "configs": {
+    "dockerfile": false,
+    "systemd": false,
+    "fly_toml": false
+  },
+  "recommendations": [
+    "No signature — run hull build --sign for verified deployments"
+  ]
+}
+```
+
 ## Development Workflow
 
 ### 1. Start Dev Server
@@ -599,6 +636,44 @@ hull build myapp/
 # Verify signatures
 hull verify myapp/
 hull inspect myapp/
+```
+
+### Deployment Config Generator
+
+`hull deploy` generates deployment configs from the app's manifest. It writes files — it never makes network calls or executes the configs.
+
+```bash
+# Generate Dockerfile + .dockerignore
+hull deploy dockerfile myapp/
+
+# Generate systemd service unit + install script
+hull deploy systemd myapp/ --name myapp --user webapp
+
+# Generate fly.toml (+ Dockerfile if missing)
+hull deploy fly myapp/ --region lax --memory 512
+```
+
+| Target | Output | Consumed by |
+|--------|--------|-------------|
+| `dockerfile` | `Dockerfile` + `.dockerignore` | `docker build` |
+| `systemd` | `deploy/<name>.service` + `deploy/install.sh` | `systemctl` |
+| `fly` | `fly.toml` + `Dockerfile` (if missing) | `flyctl deploy` |
+
+Generated configs adapt to the app automatically:
+- **FROM scratch** by default (zero attack surface) or `--distroless`
+- **CA bundle** only when manifest declares outbound `hosts`
+- **ENV declarations** from manifest `env` array
+- **VOLUME/mounts** only for database apps (has `migrations/`)
+- **systemd hardening** — 17 security directives layered on top of hull's sandbox
+- **Signature verification** — optional `--sign` adds `hull verify` step in Dockerfile
+
+Common flags: `--port N`, `--name NAME`, `-o DIR`, `--force` (overwrite existing).
+
+**Agent workflow:**
+```bash
+hull agent deploy myapp/           # check deployment readiness (JSON)
+hull deploy dockerfile myapp/      # generate Dockerfile
+hull deploy systemd myapp/         # generate systemd unit
 ```
 
 ## Project Layout Convention

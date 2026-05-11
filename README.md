@@ -45,7 +45,7 @@ cd myapp
 
 ## Hull Tools
 
-Hull ships 14 subcommands for the full development lifecycle:
+Hull ships 16 subcommands for the full development lifecycle:
 
 | Command | Purpose |
 |---------|---------|
@@ -53,6 +53,7 @@ Hull ships 14 subcommands for the full development lifecycle:
 | `hull dev <app>` | Development server with hot reload |
 | `hull build -o <out> <dir>` | Compile app into a standalone binary |
 | `hull test <dir>` | In-process test runner (no TCP, memory SQLite) |
+| `hull deploy <target> [app_dir]` | [Generate deployment configs](#deployment) — Dockerfile, systemd, fly.toml |
 | `hull agent <subcommand>` | [AI agent interface](#using-hull-with-ai-agents) — routes, schema, tests, requests as JSON |
 | `hull inspect <dir>` | Display declared capabilities and signature status |
 | `hull verify [--developer-key <key>]` | Verify Ed25519 signatures and file integrity |
@@ -442,7 +443,7 @@ Example apps in both Lua and JavaScript:
 
 ## Using Hull with AI Agents
 
-Hull provides structured JSON interfaces for AI coding agents via the `hull agent` command. The same interfaces work for any automation — CI scripts, service orchestrators, or human developers who prefer structured output. Seven machine-readable subcommands give structured access to routes, database schema, test results, server status, and HTTP responses — no screen-scraping or log parsing required.
+Hull provides structured JSON interfaces for AI coding agents via the `hull agent` command. The same interfaces work for any automation — CI scripts, service orchestrators, or human developers who prefer structured output. Ten machine-readable subcommands give structured access to routes, database schema, test results, server status, HTTP responses, and deployment readiness — no screen-scraping or log parsing required.
 
 ```
 hull agent routes [app_dir]              # list routes + middleware as JSON
@@ -452,6 +453,9 @@ hull agent request METHOD PATH [opts]    # HTTP request → structured response
 hull agent status [app_dir] [-p port]    # check if dev server is running
 hull agent errors [app_dir]              # structured errors from last reload
 hull agent test [app_dir]                # run tests, get per-test pass/fail as JSON
+hull agent context --task=T [--level=L]  # task-relevant documentation
+hull agent migrate [app_dir] [-d path]   # migration status
+hull agent deploy [app_dir]              # deployment readiness analysis
 ```
 
 Combined with `hull dev --agent` (which writes `.hull/dev.json` and `.hull/last_error.json` as sidecar files), this gives agents a complete feedback loop: edit code, check for errors, run tests, inspect the database, make HTTP requests — all with structured output.
@@ -656,7 +660,7 @@ $ hull agent request POST /tasks -d '{"title":"Buy milk"}' -H 'Content-Type: app
 }
 ```
 
-### Deploy
+### Deployment
 
 ```bash
 # Build standalone binary (embeds app + stdlib + SQLite + HTTP server)
@@ -670,6 +674,41 @@ hull build -o myapp . CC=cosmocc
 ```
 
 The agent workflow for deployment: run `hull agent test .` to verify all tests pass, then `hull build -o myapp .` to produce the binary. The output is a single file under 2 MB. Copy it anywhere and run it.
+
+#### `hull deploy` — Config Generator
+
+`hull deploy` generates deployment configs informed by the app's manifest. It writes files that standard tools consume — it never makes network calls or executes the generated configs.
+
+```bash
+hull deploy dockerfile myapp/              # Dockerfile + .dockerignore
+hull deploy systemd myapp/ --name myapp    # deploy/myapp.service + deploy/install.sh
+hull deploy fly myapp/ --region lax        # fly.toml (+ Dockerfile if missing)
+```
+
+| Target | Output | Consumed by |
+|--------|--------|-------------|
+| `dockerfile` | `Dockerfile` + `.dockerignore` | `docker build` |
+| `systemd` | `deploy/<name>.service` + `deploy/install.sh` | `systemctl` |
+| `fly` | `fly.toml` + `Dockerfile` (if missing) | `flyctl deploy` |
+
+**Manifest-aware generation:** The generated configs automatically adapt based on the app's manifest and directory structure:
+- **CA bundle** — included only when manifest declares `hosts` (outbound HTTPS)
+- **ENV declarations** — from manifest `env` array (documentation + `docker run -e`)
+- **VOLUME** — only when app has migrations (uses a database)
+- **systemd hardening** — 17 security directives (NoNewPrivileges, ProtectSystem=strict, SystemCallFilter, etc.)
+- **fly.toml mounts** — persistent volume only for database apps
+
+```bash
+# Common flags
+hull deploy <target> [app_dir] --port 8080 --name myapp -o /tmp/out
+hull deploy dockerfile myapp/ --distroless     # FROM distroless instead of scratch
+hull deploy dockerfile myapp/ --sign           # add hull verify step in build stage
+hull deploy systemd myapp/ --user webapp       # custom system user
+hull deploy fly myapp/ --memory 512            # 512 MB VM
+
+# Agent introspection
+hull agent deploy myapp/                       # JSON deployment readiness analysis
+```
 
 ## Building Hull
 

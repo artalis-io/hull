@@ -51,4 +51,8 @@ int hl_agent_context(const char *task, const char *level, ShJsonBuf *out);
 int hl_agent_migrate_status(const char *app_dir, const char *db_path,
                             ShJsonBuf *out);
 
+/* ── Phase 5: Deploy ──────────────────────────────────────────────── */
+
+int hl_agent_deploy(const char *app_dir, ShJsonBuf *out);
+
 #endif /* HL_AGENT_LIB_H */
