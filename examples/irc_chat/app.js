@@ -93,7 +93,10 @@ function federationRelayPresence(username, online) {
 }
 
 function handleFederatedMessage(data) {
+    if (!data.server) return;
     if (data.type === "fed_msg") {
+        if (!data.channel || !data.from || !data.encrypted || !data.nonce) return;
+        if (!fedChannelEnabled(data.channel)) return;
         ws.broadcast("/ws", JSON.stringify({
             type: "msg", channel: data.channel,
             from: `${data.from}@${data.server}`,
@@ -101,16 +104,21 @@ function handleFederatedMessage(data) {
             at: data.at, federated: true,
         }));
     } else if (data.type === "fed_join") {
+        if (!data.channel || !data.user) return;
+        if (!fedChannelEnabled(data.channel)) return;
         ws.broadcast("/ws", JSON.stringify({
             type: "user_joined", channel: data.channel,
             user: `${data.user}@${data.server}`, federated: true,
         }));
     } else if (data.type === "fed_leave") {
+        if (!data.channel || !data.user) return;
+        if (!fedChannelEnabled(data.channel)) return;
         ws.broadcast("/ws", JSON.stringify({
             type: "left", channel: data.channel,
             user: `${data.user}@${data.server}`, federated: true,
         }));
     } else if (data.type === "fed_presence") {
+        if (!data.username) return;
         ws.broadcast("/ws", JSON.stringify({
             type: "presence", username: `${data.username}@${data.server}`,
             online: data.online, federated: true,
@@ -1149,6 +1157,12 @@ app.ws("/federation", {
             }
             if (!data.server || !data.public_key) {
                 wsSend(conn, { type: "fed_error", message: "server and public_key required" });
+                conn.close();
+                return;
+            }
+            if (typeof data.server !== "string" || data.server.length > 64
+                || !/^[a-zA-Z0-9_.-]+$/.test(data.server)) {
+                wsSend(conn, { type: "fed_error", message: "invalid server name" });
                 conn.close();
                 return;
             }

@@ -141,7 +141,10 @@ end
 
 local function handle_federated_message(data)
     -- Relay federated messages to local /ws clients — never re-relay to other peers
+    if not data.server then return end
     if data.type == "fed_msg" then
+        if not data.channel or not data.from or not data.encrypted or not data.nonce then return end
+        if not fed_channel_enabled(data.channel) then return end
         ws.broadcast("/ws", json.encode({
             type = "msg", channel = data.channel,
             from = data.from .. "@" .. data.server,
@@ -149,16 +152,21 @@ local function handle_federated_message(data)
             at = data.at, federated = true,
         }))
     elseif data.type == "fed_join" then
+        if not data.channel or not data.user then return end
+        if not fed_channel_enabled(data.channel) then return end
         ws.broadcast("/ws", json.encode({
             type = "user_joined", channel = data.channel,
             user = data.user .. "@" .. data.server, federated = true,
         }))
     elseif data.type == "fed_leave" then
+        if not data.channel or not data.user then return end
+        if not fed_channel_enabled(data.channel) then return end
         ws.broadcast("/ws", json.encode({
             type = "left", channel = data.channel,
             user = data.user .. "@" .. data.server, federated = true,
         }))
     elseif data.type == "fed_presence" then
+        if not data.username then return end
         ws.broadcast("/ws", json.encode({
             type = "presence", username = data.username .. "@" .. data.server,
             online = data.online, federated = true,
@@ -1314,6 +1322,12 @@ app.ws("/federation", {
             end
             if not data.server or not data.public_key then
                 ws_send(conn, { type = "fed_error", message = "server and public_key required" })
+                conn:close()
+                return
+            end
+            if type(data.server) ~= "string" or #data.server > 64
+               or not data.server:match("^[a-zA-Z0-9_.-]+$") then
+                ws_send(conn, { type = "fed_error", message = "invalid server name" })
                 conn:close()
                 return
             end
