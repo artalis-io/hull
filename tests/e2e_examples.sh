@@ -888,6 +888,31 @@ test_irc_chat() {
     check_contains "$LABEL irc_chat E2E retention_cleanup_ok" "$RESP" '"retention_cleanup_ok":true'
     check_contains "$LABEL irc_chat E2E file_capacity_ok" "$RESP" '"file_capacity_ok":true'
 
+    stop_server
+
+    # Federation tests (fresh server — avoids kqueue FD reuse after ws.connect)
+    FED_PORT=$((WS_PORT + 1))
+    start_server "$FED_PORT" "$APP" "$TMPDIR_IRC/fed.db"
+    if ! wait_for_server "$FED_PORT"; then
+        fail "$LABEL irc_chat — FED server startup"
+        stop_server; rm -rf "$TMPDIR_IRC"; return
+    fi
+
+    # Federation status endpoint test
+    RESP=$(curl -s "http://127.0.0.1:$FED_PORT/federation/status")
+    check_contains "$LABEL irc_chat GET /federation/status enabled" "$RESP" '"enabled"'
+    check_contains "$LABEL irc_chat GET /federation/status server_name" "$RESP" '"server_name"'
+    check_contains "$LABEL irc_chat GET /federation/status public_key" "$RESP" '"public_key"'
+    check_contains "$LABEL irc_chat GET /federation/status peers" "$RESP" '"peers"'
+
+    # Federation E2E loopback test (WS handshake + message relay)
+    RESP=$(curl -s -H "Connection: close" --max-time 30 "http://127.0.0.1:$FED_PORT/e2e-federation-test")
+    check_contains "$LABEL irc_chat FED all_passed" "$RESP" '"all_passed":true'
+    check_contains "$LABEL irc_chat FED keypair_generated" "$RESP" '"keypair_generated":true'
+    check_contains "$LABEL irc_chat FED peer_connected" "$RESP" '"peer_connected":true'
+    check_contains "$LABEL irc_chat FED handshake_completed" "$RESP" '"handshake_completed":true'
+    check_contains "$LABEL irc_chat FED message_relayed" "$RESP" '"message_relayed":true'
+
     stop_server; rm -rf "$TMPDIR_IRC"
 }
 

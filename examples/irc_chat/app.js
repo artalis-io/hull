@@ -33,6 +33,91 @@ const RETENTION = {
     cleanupInterval: 3600000, // check every hour (ms)
 };
 
+// ── Federation config ─────────────────────────────────────────────
+
+const FEDERATION = {
+    enabled: false,
+    serverName: "alpha",
+    channels: ["#general"],    // only these channels are relayed
+    peers: [],                  // { url: "ws://host:port/federation", publicKey: "hex" }
+};
+
+// Generate ephemeral Ed25519 keypair for server identity
+if (!FEDERATION.publicKey) {
+    const fedKp = crypto.ed25519Keypair();
+    FEDERATION.publicKey = fedKp.publicKey;
+    FEDERATION.secretKey = fedKp.secretKey;
+}
+
+// In-memory federation state
+const fedPeers = {};     // serverName -> { conn, publicKey, authenticated }
+const fedPending = {};   // connId -> { state, challenge, publicKey, serverName, challenge2 }
+
+function fedChannelEnabled(channel) {
+    return FEDERATION.channels.indexOf(channel) !== -1;
+}
+
+function fedFindPeerByPk(pk) {
+    for (const peer of FEDERATION.peers) {
+        if (peer.publicKey === pk) return peer;
+    }
+    return null;
+}
+
+function federationRelay(channel, msg) {
+    if (!FEDERATION.enabled) return;
+    if (!fedChannelEnabled(channel)) return;
+    msg.server = FEDERATION.serverName;
+    const encoded = JSON.stringify(msg);
+    for (const name in fedPeers) {
+        const peer = fedPeers[name];
+        if (peer.authenticated && peer.conn) {
+            try { peer.conn.send(encoded); } catch (_e) { /* ignore */ }
+        }
+    }
+}
+
+function federationRelayPresence(username, online) {
+    if (!FEDERATION.enabled) return;
+    const msg = {
+        type: "fed_presence", server: FEDERATION.serverName,
+        username, online,
+    };
+    const encoded = JSON.stringify(msg);
+    for (const name in fedPeers) {
+        const peer = fedPeers[name];
+        if (peer.authenticated && peer.conn) {
+            try { peer.conn.send(encoded); } catch (_e) { /* ignore */ }
+        }
+    }
+}
+
+function handleFederatedMessage(data) {
+    if (data.type === "fed_msg") {
+        ws.broadcast("/ws", JSON.stringify({
+            type: "msg", channel: data.channel,
+            from: `${data.from}@${data.server}`,
+            encrypted: data.encrypted, nonce: data.nonce,
+            at: data.at, federated: true,
+        }));
+    } else if (data.type === "fed_join") {
+        ws.broadcast("/ws", JSON.stringify({
+            type: "user_joined", channel: data.channel,
+            user: `${data.user}@${data.server}`, federated: true,
+        }));
+    } else if (data.type === "fed_leave") {
+        ws.broadcast("/ws", JSON.stringify({
+            type: "left", channel: data.channel,
+            user: `${data.user}@${data.server}`, federated: true,
+        }));
+    } else if (data.type === "fed_presence") {
+        ws.broadcast("/ws", JSON.stringify({
+            type: "presence", username: `${data.username}@${data.server}`,
+            online: data.online, federated: true,
+        }));
+    }
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────
 
 function toHex(buf) {
@@ -353,6 +438,7 @@ app.ws("/ws", {
             ws.broadcast("/ws", JSON.stringify({
                 type: "presence", username: rows[0].username, online: true,
             }));
+            federationRelayPresence(rows[0].username, true);
             return;
         }
 
@@ -400,6 +486,9 @@ app.ws("/ws", {
                 type: "user_joined", channel: channelName,
                 user: conn.data.username,
             });
+            federationRelay(channelName, {
+                type: "fed_join", channel: channelName, user: conn.data.username,
+            });
 
         } else if (msg.type === "leave") {
             if (!msg.channel)
@@ -408,6 +497,9 @@ app.ws("/ws", {
             broadcastToChannel(msg.channel, {
                 type: "left", channel: msg.channel,
                 user: conn.data.username,
+            });
+            federationRelay(msg.channel, {
+                type: "fed_leave", channel: msg.channel, user: conn.data.username,
             });
 
         } else if (msg.type === "msg") {
@@ -424,12 +516,17 @@ app.ws("/ws", {
                     [ch[0].id, conn.data.userId, msg.encrypted, msg.nonce, time.now()]);
             }
 
+            const msgAt = time.now();
             broadcastToChannel(msg.channel, {
                 type: "msg", channel: msg.channel,
                 from: conn.data.username,
                 encrypted: msg.encrypted,
                 nonce: msg.nonce,
-                at: time.now(),
+                at: msgAt,
+            });
+            federationRelay(msg.channel, {
+                type: "fed_msg", channel: msg.channel, from: conn.data.username,
+                encrypted: msg.encrypted, nonce: msg.nonce, at: msgAt,
             });
 
         } else if (msg.type === "topic") {
@@ -557,6 +654,7 @@ app.ws("/ws", {
             ws.broadcast("/ws", JSON.stringify({
                 type: "presence", username: conn.data.username, online: false,
             }));
+            federationRelayPresence(conn.data.username, false);
         }
         log.info(`ws: ${conn.data.username || "anon"} disconnected code=${code}`);
     },
@@ -1014,6 +1112,388 @@ app.get("/e2e-test", async (req, res) => {
         && results.file_dm_content_ok
         && results.retention_cleanup_ok
         && results.file_capacity_ok;
+
+    res.json(results);
+});
+
+// ── Federation: /federation WS endpoint (accept incoming peers) ────
+
+app.ws("/federation", {
+    onOpen(conn) {
+        conn.data.state = "awaiting_hello";
+        conn.data.serverName = null;
+        conn.data.publicKey = null;
+        fedPending[conn.id] = { state: "awaiting_hello" };
+    },
+
+    onMessage(conn, raw) {
+        let data;
+        try { data = JSON.parse(raw); } catch (_e) { data = null; }
+        if (!data || !data.type) {
+            wsSend(conn, { type: "fed_error", message: "invalid JSON" });
+            conn.close();
+            return;
+        }
+
+        const pending = fedPending[conn.id];
+        if (!pending) {
+            conn.close();
+            return;
+        }
+
+        if (pending.state === "awaiting_hello") {
+            if (data.type !== "fed_hello") {
+                wsSend(conn, { type: "fed_error", message: "expected fed_hello" });
+                conn.close();
+                return;
+            }
+            if (!data.server || !data.public_key) {
+                wsSend(conn, { type: "fed_error", message: "server and public_key required" });
+                conn.close();
+                return;
+            }
+            const peer = fedFindPeerByPk(data.public_key);
+            if (!peer) {
+                wsSend(conn, { type: "fed_error", message: "unknown public key" });
+                conn.close();
+                return;
+            }
+            const challenge = toHex(crypto.random(32));
+            pending.state = "awaiting_auth";
+            pending.challenge = challenge;
+            pending.publicKey = data.public_key;
+            pending.serverName = data.server;
+            wsSend(conn, {
+                type: "fed_challenge",
+                challenge,
+                public_key: FEDERATION.publicKey,
+            });
+
+        } else if (pending.state === "awaiting_auth") {
+            if (data.type !== "fed_auth") {
+                wsSend(conn, { type: "fed_error", message: "expected fed_auth" });
+                conn.close();
+                return;
+            }
+            if (!data.signature || !data.challenge) {
+                wsSend(conn, { type: "fed_error", message: "signature and challenge required" });
+                conn.close();
+                return;
+            }
+            const valid = crypto.ed25519Verify(
+                pending.challenge, data.signature, pending.publicKey);
+            if (!valid) {
+                wsSend(conn, { type: "fed_error", message: "invalid signature" });
+                conn.close();
+                return;
+            }
+            const mySig = crypto.ed25519Sign(data.challenge, FEDERATION.secretKey);
+            wsSend(conn, {
+                type: "fed_welcome",
+                signature: mySig,
+                server: FEDERATION.serverName,
+            });
+            fedPeers[pending.serverName] = {
+                conn, publicKey: pending.publicKey, authenticated: true,
+            };
+            delete fedPending[conn.id];
+            log.info(`federation: peer ${pending.serverName} authenticated (inbound)`);
+
+        } else {
+            handleFederatedMessage(data);
+        }
+    },
+
+    onClose(conn) {
+        if (fedPending[conn.id]) {
+            delete fedPending[conn.id];
+        }
+        for (const name in fedPeers) {
+            if (fedPeers[name].conn && fedPeers[name].conn.id === conn.id) {
+                delete fedPeers[name];
+                log.info(`federation: peer ${name} disconnected`);
+                break;
+            }
+        }
+    },
+});
+
+// ── Federation: /federation/status HTTP endpoint ──────────────────
+
+app.get("/federation/status", (_req, res) => {
+    const peerList = [];
+    for (const peer of FEDERATION.peers) {
+        let connected = false;
+        for (const name in fedPeers) {
+            if (fedPeers[name].publicKey === peer.publicKey && fedPeers[name].authenticated) {
+                connected = true;
+                break;
+            }
+        }
+        peerList.push({
+            url: peer.url,
+            public_key: peer.publicKey,
+            connected,
+        });
+    }
+    res.json({
+        enabled: FEDERATION.enabled,
+        server_name: FEDERATION.serverName,
+        public_key: FEDERATION.publicKey,
+        peers: peerList,
+    });
+});
+
+// ── Federation: outbound peer connections ──────────────────────────
+
+if (FEDERATION.enabled) {
+    function connectToPeer(peer) {
+        ws.connect(peer.url, {
+            onOpen(conn) {
+                wsSend(conn, {
+                    type: "fed_hello",
+                    server: FEDERATION.serverName,
+                    public_key: FEDERATION.publicKey,
+                });
+                fedPending[conn.id] = {
+                    state: "awaiting_challenge",
+                    publicKey: peer.publicKey,
+                    url: peer.url,
+                };
+            },
+            onMessage(conn, raw) {
+                let data;
+                try { data = JSON.parse(raw); } catch (_e) { return; }
+
+                const pending = fedPending[conn.id];
+                if (pending && pending.state === "awaiting_challenge") {
+                    if (data.type === "fed_challenge") {
+                        const mySig = crypto.ed25519Sign(data.challenge, FEDERATION.secretKey);
+                        const myChallenge = toHex(crypto.random(32));
+                        pending.state = "awaiting_welcome";
+                        pending.challenge = myChallenge;
+                        wsSend(conn, {
+                            type: "fed_auth",
+                            signature: mySig,
+                            challenge: myChallenge,
+                        });
+                    } else if (data.type === "fed_error") {
+                        log.error(`federation: peer rejected hello: ${data.message}`);
+                        conn.close();
+                    }
+                } else if (pending && pending.state === "awaiting_welcome") {
+                    if (data.type === "fed_welcome") {
+                        const valid = crypto.ed25519Verify(
+                            pending.challenge, data.signature, pending.publicKey);
+                        if (!valid) {
+                            log.error("federation: peer signature invalid");
+                            conn.close();
+                            return;
+                        }
+                        const serverName = data.server || "unknown";
+                        fedPeers[serverName] = {
+                            conn, publicKey: pending.publicKey, authenticated: true,
+                        };
+                        delete fedPending[conn.id];
+                        log.info(`federation: peer ${serverName} authenticated (outbound)`);
+                    } else if (data.type === "fed_error") {
+                        log.error(`federation: peer rejected auth: ${data.message}`);
+                        conn.close();
+                    }
+                } else {
+                    handleFederatedMessage(data);
+                }
+            },
+            onClose(conn) {
+                delete fedPending[conn.id];
+                for (const name in fedPeers) {
+                    if (fedPeers[name].conn && fedPeers[name].conn.id === conn.id) {
+                        delete fedPeers[name];
+                        log.info(`federation: outbound peer ${name} disconnected`);
+                        break;
+                    }
+                }
+            },
+            onError(_conn, err) {
+                log.error(`federation: outbound connection error: ${err}`);
+            },
+        });
+    }
+
+    for (const peer of FEDERATION.peers) {
+        connectToPeer(peer);
+    }
+
+    app.every(10000, () => {
+        for (const peer of FEDERATION.peers) {
+            let found = false;
+            for (const name in fedPeers) {
+                if (fedPeers[name].publicKey === peer.publicKey && fedPeers[name].authenticated) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                log.info(`federation: reconnecting to ${peer.url}`);
+                try { connectToPeer(peer); } catch (_e) { /* ignore */ }
+            }
+        }
+    });
+}
+
+// ── Federation E2E test endpoint ──────────────────────────────────
+
+app.get("/e2e-federation-test", async (req, res) => {
+    const host = req.headers.host || "127.0.0.1:3000";
+    const port = host.split(":")[1] || "3000";
+    const fedUrl = `ws://127.0.0.1:${port}/federation`;
+    const wsUrl = `ws://127.0.0.1:${port}/ws`;
+
+    const results = {
+        keypair_generated: false,
+        peer_connected: false,
+        handshake_completed: false,
+        message_relayed: false,
+        all_passed: false,
+    };
+
+    // Step 1: Generate fake peer keypair
+    const fakeKp = crypto.ed25519Keypair();
+    const fakePk = fakeKp.publicKey;
+    const fakeSk = fakeKp.secretKey;
+    results.keypair_generated = !!fakePk && !!fakeSk;
+
+    // Step 2: Temporarily add fake peer and enable federation
+    const origEnabled = FEDERATION.enabled;
+    FEDERATION.enabled = true;
+    FEDERATION.peers.push({ url: fedUrl, publicKey: fakePk });
+
+    // Step 3: Connect fake peer to /federation
+    let handshakeDone = false;
+    let fedMsgReceived = false;
+    let myChallenge = null;
+
+    const fakePeerWs = ws.connect(fedUrl, {
+        onOpen(conn) {
+            results.peer_connected = true;
+            conn.send(JSON.stringify({
+                type: "fed_hello",
+                server: "fake_test_peer",
+                public_key: fakePk,
+            }));
+        },
+        onMessage(conn, raw) {
+            let data;
+            try { data = JSON.parse(raw); } catch (_e) { return; }
+
+            if (data.type === "fed_challenge") {
+                const sig = crypto.ed25519Sign(data.challenge, fakeSk);
+                myChallenge = toHex(crypto.random(32));
+                conn.send(JSON.stringify({
+                    type: "fed_auth",
+                    signature: sig,
+                    challenge: myChallenge,
+                }));
+            } else if (data.type === "fed_welcome") {
+                const valid = crypto.ed25519Verify(
+                    myChallenge, data.signature, FEDERATION.publicKey);
+                if (valid) {
+                    results.handshake_completed = true;
+                    handshakeDone = true;
+                }
+            } else if (data.type === "fed_msg") {
+                fedMsgReceived = true;
+            }
+        },
+        onError(_conn, err) {
+            log.error(`e2e-fed fake peer error: ${err}`);
+        },
+    });
+
+    // Wait for handshake
+    let waited = 0;
+    while (!handshakeDone && waited < 5000) {
+        await hull.sleep(100);
+        waited += 100;
+    }
+
+    // Step 4: Create test user + channel, send message
+    if (handshakeDone) {
+        const fedPw = crypto.hashPassword("fedpass1234");
+        const fedBoxKp = crypto.boxKeypair();
+        try {
+            db.exec("INSERT INTO users (username, password_hash, public_key, created_at) VALUES (?, ?, ?, ?)",
+                    ["fed_test_user", fedPw, fedBoxKp.publicKey, time.now()]);
+        } catch (_e) { /* may exist */ }
+        try {
+            db.exec("INSERT INTO channels (name, topic, creator_id, created_at) VALUES (?, ?, ?, ?)",
+                    ["#general", "General channel", 1, time.now()]);
+        } catch (_e) { /* may exist */ }
+        const ch = db.query("SELECT id FROM channels WHERE name = ?", ["#general"]);
+        const usr = db.query("SELECT id FROM users WHERE username = ?", ["fed_test_user"]);
+        if (ch.length > 0 && usr.length > 0) {
+            try {
+                db.exec("INSERT OR IGNORE INTO channel_members (channel_id, user_id, role, encrypted_key, nonce, joined_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        [ch[0].id, usr[0].id, "member", "test_key", "test_nonce", time.now()]);
+            } catch (_e) { /* ignore */ }
+        }
+
+        let userReady = false;
+        const userWs = ws.connect(wsUrl, {
+            onOpen(_conn) {},
+            onMessage(conn, raw) {
+                let data;
+                try { data = JSON.parse(raw); } catch (_e) { return; }
+                if (data.type === "motd") {
+                    conn.send(JSON.stringify({
+                        type: "login", username: "fed_test_user", password: "fedpass1234",
+                    }));
+                } else if (data.type === "authenticated") {
+                    conn.send(JSON.stringify({ type: "join", channel: "#general" }));
+                } else if (data.type === "joined" && data.channel === "#general") {
+                    userReady = true;
+                }
+            },
+            onError(_conn, err) {
+                log.error(`e2e-fed user ws error: ${err}`);
+            },
+        });
+
+        waited = 0;
+        while (!userReady && waited < 5000) {
+            await hull.sleep(100);
+            waited += 100;
+        }
+
+        if (userReady) {
+            userWs.send(JSON.stringify({
+                type: "msg", channel: "#general",
+                encrypted: "fed_test_ciphertext",
+                nonce: "fed_test_nonce",
+            }));
+
+            waited = 0;
+            while (!fedMsgReceived && waited < 3000) {
+                await hull.sleep(100);
+                waited += 100;
+            }
+            results.message_relayed = fedMsgReceived;
+        }
+
+        try { userWs.close(); } catch (_e) { /* ignore */ }
+    }
+
+    // Clean up
+    try { fakePeerWs.close(); } catch (_e) { /* ignore */ }
+    // Remove fake peer from config
+    const idx = FEDERATION.peers.findIndex(p => p.publicKey === fakePk);
+    if (idx !== -1) FEDERATION.peers.splice(idx, 1);
+    FEDERATION.enabled = origEnabled;
+
+    results.all_passed = results.keypair_generated
+        && results.peer_connected
+        && results.handshake_completed
+        && results.message_relayed;
 
     res.json(results);
 });

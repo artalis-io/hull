@@ -12,34 +12,20 @@
 - [x] MOTD on WebSocket connect
 - [x] Both Lua and JS implementations
 
-## Planned: Federation (v2)
+## Current (v2) — Federation
 
-Multi-server IRC chat where channels span across Hull instances.
+Relay-only federation: servers connect via `ws.connect()`, authenticate with Ed25519 challenge-response, and relay channel messages + presence between peers. No shared membership DB, no CRDTs — each server owns its users and channels.
 
-**Protocol:**
-- Servers connect to each other via `ws.connect()` (client WebSocket)
-- Server-to-server messages are authenticated via Ed25519 signatures
-- Channel membership replicated across federated servers
-- Messages relayed between servers (still E2E encrypted)
-
-**API:**
-```lua
--- In app config
-federation.add_peer("wss://other-server.example.com/federation", {
-    key = "peer_public_key_hex",
-})
-
--- Federated channels prefixed with server name
--- #general           → local channel
--- other.com:#general  → federated channel on other.com
-```
-
-**Tasks:**
-- [ ] Server-to-server WebSocket protocol
-- [ ] Ed25519 mutual authentication between peers
-- [ ] Channel federation (replicate membership + messages)
-- [ ] Split-brain resolution (vector clocks or CRDT)
-- [ ] Federated user directory (user@server.com)
+- [x] Server-to-server WebSocket protocol (`/federation` endpoint)
+- [x] Ed25519 mutual authentication (challenge-response handshake)
+- [x] Channel message relay (`fed_msg` for configured channels)
+- [x] Join/leave relay (`fed_join`, `fed_leave`)
+- [x] Presence relay (`fed_presence`)
+- [x] Loop prevention (federated messages never re-relayed)
+- [x] Outbound peer connections with auto-reconnect
+- [x] Federation status HTTP endpoint (`GET /federation/status`)
+- [x] Loopback E2E test (`GET /e2e-federation-test`)
+- [x] Both Lua and JS implementations
 
 ## Current (v3)
 

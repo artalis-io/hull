@@ -81,6 +81,91 @@ local function cleanup_expired()
     end
 end
 
+-- ── Federation config ─────────────────────────────────────────────
+
+local FEDERATION = {
+    enabled = false,
+    server_name = "alpha",
+    channels = { "#general" },    -- only these channels are relayed
+    peers = {},                    -- { url = "ws://host:port/federation", public_key = "hex" }
+}
+
+-- Generate ephemeral Ed25519 keypair for server identity
+if not FEDERATION.public_key then
+    FEDERATION.public_key, FEDERATION.secret_key = crypto.ed25519_keypair()
+end
+
+-- In-memory federation state
+local fed_peers = {}     -- server_name -> { conn, public_key, authenticated }
+local fed_pending = {}   -- conn_id -> { challenge, public_key, state, server_name, challenge2 }
+
+local function fed_channel_enabled(channel)
+    for _, ch in ipairs(FEDERATION.channels) do
+        if ch == channel then return true end
+    end
+    return false
+end
+
+local function fed_find_peer_by_pk(pk)
+    for _, peer in ipairs(FEDERATION.peers) do
+        if peer.public_key == pk then return peer end
+    end
+    return nil
+end
+
+local function federation_relay(channel, msg)
+    if not FEDERATION.enabled then return end
+    if not fed_channel_enabled(channel) then return end
+    msg.server = FEDERATION.server_name
+    local encoded = json.encode(msg)
+    for _, peer in pairs(fed_peers) do
+        if peer.authenticated and peer.conn then
+            pcall(function() peer.conn:send(encoded) end)
+        end
+    end
+end
+
+local function federation_relay_presence(username, online)
+    if not FEDERATION.enabled then return end
+    local msg = {
+        type = "fed_presence", server = FEDERATION.server_name,
+        username = username, online = online,
+    }
+    local encoded = json.encode(msg)
+    for _, peer in pairs(fed_peers) do
+        if peer.authenticated and peer.conn then
+            pcall(function() peer.conn:send(encoded) end)
+        end
+    end
+end
+
+local function handle_federated_message(data)
+    -- Relay federated messages to local /ws clients — never re-relay to other peers
+    if data.type == "fed_msg" then
+        ws.broadcast("/ws", json.encode({
+            type = "msg", channel = data.channel,
+            from = data.from .. "@" .. data.server,
+            encrypted = data.encrypted, nonce = data.nonce,
+            at = data.at, federated = true,
+        }))
+    elseif data.type == "fed_join" then
+        ws.broadcast("/ws", json.encode({
+            type = "user_joined", channel = data.channel,
+            user = data.user .. "@" .. data.server, federated = true,
+        }))
+    elseif data.type == "fed_leave" then
+        ws.broadcast("/ws", json.encode({
+            type = "left", channel = data.channel,
+            user = data.user .. "@" .. data.server, federated = true,
+        }))
+    elseif data.type == "fed_presence" then
+        ws.broadcast("/ws", json.encode({
+            type = "presence", username = data.username .. "@" .. data.server,
+            online = data.online, federated = true,
+        }))
+    end
+end
+
 -- ── Helpers ─────────────────────────────────────────────────────────
 
 local function to_hex(raw)
@@ -401,6 +486,7 @@ app.ws("/ws", {
             ws.broadcast("/ws", json.encode({
                 type = "presence", username = rows[1].username, online = true,
             }))
+            federation_relay_presence(rows[1].username, true)
             return
         end
 
@@ -463,6 +549,9 @@ app.ws("/ws", {
                 type = "user_joined", channel = channel_name,
                 user = conn.data.username,
             })
+            federation_relay(channel_name, {
+                type = "fed_join", channel = channel_name, user = conn.data.username,
+            })
 
         elseif msg.type == "leave" then
             if not msg.channel then
@@ -472,6 +561,9 @@ app.ws("/ws", {
             broadcast_to_channel(msg.channel, {
                 type = "left", channel = msg.channel,
                 user = conn.data.username,
+            })
+            federation_relay(msg.channel, {
+                type = "fed_leave", channel = msg.channel, user = conn.data.username,
             })
 
         elseif msg.type == "msg" then
@@ -492,12 +584,17 @@ app.ws("/ws", {
             end
 
             -- Broadcast encrypted message to all WS connections
+            local msg_at = time.now()
             broadcast_to_channel(msg.channel, {
                 type = "msg", channel = msg.channel,
                 from = conn.data.username,
                 encrypted = msg.encrypted,
                 nonce = msg.nonce,
-                at = time.now(),
+                at = msg_at,
+            })
+            federation_relay(msg.channel, {
+                type = "fed_msg", channel = msg.channel, from = conn.data.username,
+                encrypted = msg.encrypted, nonce = msg.nonce, at = msg_at,
             })
 
         elseif msg.type == "topic" then
@@ -640,6 +737,7 @@ app.ws("/ws", {
             ws.broadcast("/ws", json.encode({
                 type = "presence", username = conn.data.username, online = false,
             }))
+            federation_relay_presence(conn.data.username, false)
         end
         log.info("ws: " .. tostring(conn.data.username or "anon")
                  .. " disconnected code=" .. tostring(code))
@@ -1180,6 +1278,409 @@ app.get("/e2e-test", function(req, res)
         and results.file_dm_content_ok
         and results.retention_cleanup_ok
         and results.file_capacity_ok
+
+    res:json(results)
+end)
+
+-- ── Federation: /federation WS endpoint (accept incoming peers) ────
+
+app.ws("/federation", {
+    on_open = function(conn)
+        conn.data.state = "awaiting_hello"
+        conn.data.server_name = nil
+        conn.data.public_key = nil
+        fed_pending[conn:id()] = { state = "awaiting_hello" }
+    end,
+
+    on_message = function(conn, raw)
+        local decode_ok, data = pcall(json.decode, raw)
+        if not decode_ok or not data or not data.type then
+            ws_send(conn, { type = "fed_error", message = "invalid JSON" })
+            conn:close()
+            return
+        end
+
+        local pending = fed_pending[conn:id()]
+        if not pending then
+            conn:close()
+            return
+        end
+
+        if pending.state == "awaiting_hello" then
+            if data.type ~= "fed_hello" then
+                ws_send(conn, { type = "fed_error", message = "expected fed_hello" })
+                conn:close()
+                return
+            end
+            if not data.server or not data.public_key then
+                ws_send(conn, { type = "fed_error", message = "server and public_key required" })
+                conn:close()
+                return
+            end
+            -- Validate peer public key is in our peers list
+            local peer = fed_find_peer_by_pk(data.public_key)
+            if not peer then
+                ws_send(conn, { type = "fed_error", message = "unknown public key" })
+                conn:close()
+                return
+            end
+            -- Send challenge
+            local challenge = to_hex(crypto.random(32))
+            pending.state = "awaiting_auth"
+            pending.challenge = challenge
+            pending.public_key = data.public_key
+            pending.server_name = data.server
+            ws_send(conn, {
+                type = "fed_challenge",
+                challenge = challenge,
+                public_key = FEDERATION.public_key,
+            })
+
+        elseif pending.state == "awaiting_auth" then
+            if data.type ~= "fed_auth" then
+                ws_send(conn, { type = "fed_error", message = "expected fed_auth" })
+                conn:close()
+                return
+            end
+            if not data.signature or not data.challenge then
+                ws_send(conn, { type = "fed_error", message = "signature and challenge required" })
+                conn:close()
+                return
+            end
+            -- Verify initiator signed our challenge
+            local valid = crypto.ed25519_verify(
+                pending.challenge, data.signature, pending.public_key)
+            if not valid then
+                ws_send(conn, { type = "fed_error", message = "invalid signature" })
+                conn:close()
+                return
+            end
+            -- Sign their challenge and send welcome
+            local my_sig = crypto.ed25519_sign(data.challenge, FEDERATION.secret_key)
+            ws_send(conn, {
+                type = "fed_welcome",
+                signature = my_sig,
+                server = FEDERATION.server_name,
+            })
+            -- Mark as authenticated
+            fed_peers[pending.server_name] = {
+                conn = conn, public_key = pending.public_key, authenticated = true,
+            }
+            fed_pending[conn:id()] = nil
+            log.info("federation: peer " .. pending.server_name .. " authenticated (inbound)")
+
+        else
+            -- Authenticated: handle federated messages
+            handle_federated_message(data)
+        end
+    end,
+
+    on_close = function(conn, _code, _reason)
+        local pending = fed_pending[conn:id()]
+        if pending then
+            fed_pending[conn:id()] = nil
+        end
+        -- Remove from fed_peers if this was an authenticated connection
+        for name, peer in pairs(fed_peers) do
+            if peer.conn and peer.conn:id() == conn:id() then
+                fed_peers[name] = nil
+                log.info("federation: peer " .. name .. " disconnected")
+                break
+            end
+        end
+    end,
+})
+
+-- ── Federation: /federation/status HTTP endpoint ──────────────────
+
+app.get("/federation/status", function(_req, res)
+    local peer_list = {}
+    for _, peer in ipairs(FEDERATION.peers) do
+        local connected = false
+        -- Check if this peer's pk matches any authenticated fed_peers entry
+        for _, fp in pairs(fed_peers) do
+            if fp.public_key == peer.public_key and fp.authenticated then
+                connected = true
+                break
+            end
+        end
+        peer_list[#peer_list + 1] = {
+            url = peer.url,
+            public_key = peer.public_key,
+            connected = connected,
+        }
+    end
+    res:json({
+        enabled = FEDERATION.enabled,
+        server_name = FEDERATION.server_name,
+        public_key = FEDERATION.public_key,
+        peers = peer_list,
+    })
+end)
+
+-- ── Federation: outbound peer connections ──────────────────────────
+
+if FEDERATION.enabled then
+    local function connect_to_peer(peer)
+        ws.connect(peer.url, {
+            on_open = function(conn)
+                -- Send hello
+                ws_send(conn, {
+                    type = "fed_hello",
+                    server = FEDERATION.server_name,
+                    public_key = FEDERATION.public_key,
+                })
+                fed_pending[conn:id()] = {
+                    state = "awaiting_challenge",
+                    public_key = peer.public_key,
+                    url = peer.url,
+                }
+            end,
+            on_message = function(conn, raw)
+                local decode_ok, data = pcall(json.decode, raw)
+                if not decode_ok or not data then return end
+
+                local pending = fed_pending[conn:id()]
+                if pending and pending.state == "awaiting_challenge" then
+                    if data.type == "fed_challenge" then
+                        -- Sign their challenge and send our own
+                        local my_sig = crypto.ed25519_sign(data.challenge, FEDERATION.secret_key)
+                        local my_challenge = to_hex(crypto.random(32))
+                        pending.state = "awaiting_welcome"
+                        pending.challenge = my_challenge
+                        ws_send(conn, {
+                            type = "fed_auth",
+                            signature = my_sig,
+                            challenge = my_challenge,
+                        })
+                    elseif data.type == "fed_error" then
+                        log.error("federation: peer rejected hello: " .. tostring(data.message))
+                        conn:close()
+                    end
+                elseif pending and pending.state == "awaiting_welcome" then
+                    if data.type == "fed_welcome" then
+                        -- Verify their signature on our challenge
+                        local valid = crypto.ed25519_verify(
+                            pending.challenge, data.signature, pending.public_key)
+                        if not valid then
+                            log.error("federation: peer signature invalid")
+                            conn:close()
+                            return
+                        end
+                        local server_name = data.server or "unknown"
+                        fed_peers[server_name] = {
+                            conn = conn, public_key = pending.public_key, authenticated = true,
+                        }
+                        fed_pending[conn:id()] = nil
+                        log.info("federation: peer " .. server_name .. " authenticated (outbound)")
+                    elseif data.type == "fed_error" then
+                        log.error("federation: peer rejected auth: " .. tostring(data.message))
+                        conn:close()
+                    end
+                else
+                    -- Authenticated: handle federated messages
+                    handle_federated_message(data)
+                end
+            end,
+            on_close = function(conn, _code, _reason)
+                fed_pending[conn:id()] = nil
+                for name, fp in pairs(fed_peers) do
+                    if fp.conn and fp.conn:id() == conn:id() then
+                        fed_peers[name] = nil
+                        log.info("federation: outbound peer " .. name .. " disconnected")
+                        break
+                    end
+                end
+            end,
+            on_error = function(_conn, err)
+                log.error("federation: outbound connection error: " .. tostring(err))
+            end,
+        })
+    end
+
+    for _, peer in ipairs(FEDERATION.peers) do
+        connect_to_peer(peer)
+    end
+
+    -- Reconnect timer: check for disconnected peers
+    app.every(10000, function()
+        for _, peer in ipairs(FEDERATION.peers) do
+            local found = false
+            for _, fp in pairs(fed_peers) do
+                if fp.public_key == peer.public_key and fp.authenticated then
+                    found = true
+                    break
+                end
+            end
+            if not found then
+                log.info("federation: reconnecting to " .. peer.url)
+                pcall(connect_to_peer, peer)
+            end
+        end
+    end)
+end
+
+-- ── Federation E2E test endpoint ──────────────────────────────────
+
+app.get("/e2e-federation-test", function(req, res)
+    local port = req.headers["host"]:match(":(%d+)$") or "3000"
+    local fed_url = "ws://127.0.0.1:" .. port .. "/federation"
+    local ws_url = "ws://127.0.0.1:" .. port .. "/ws"
+
+    local results = {
+        keypair_generated = false,
+        peer_connected = false,
+        handshake_completed = false,
+        message_relayed = false,
+        all_passed = false,
+    }
+
+    -- Step 1: Generate fake peer keypair
+    local fake_pk, fake_sk = crypto.ed25519_keypair()
+    results.keypair_generated = fake_pk ~= nil and fake_sk ~= nil
+
+    -- Step 2: Temporarily add fake peer to FEDERATION config and enable
+    local orig_enabled = FEDERATION.enabled
+    FEDERATION.enabled = true
+    FEDERATION.peers[#FEDERATION.peers + 1] = {
+        url = fed_url, public_key = fake_pk,
+    }
+
+    -- Step 3: Connect fake peer to /federation and complete handshake
+    local handshake_done = false
+    local fed_msg_received = false
+    local my_challenge = nil
+
+    local _fake_peer_ws = ws.connect(fed_url, {
+        on_open = function(conn)
+            results.peer_connected = true
+            -- Send fed_hello
+            conn:send(json.encode({
+                type = "fed_hello",
+                server = "fake_test_peer",
+                public_key = fake_pk,
+            }))
+        end,
+        on_message = function(conn, raw)
+            local data = json.decode(raw)
+            if not data then return end
+
+            if data.type == "fed_challenge" then
+                -- Sign their challenge
+                local sig = crypto.ed25519_sign(data.challenge, fake_sk)
+                my_challenge = to_hex(crypto.random(32))
+                conn:send(json.encode({
+                    type = "fed_auth",
+                    signature = sig,
+                    challenge = my_challenge,
+                }))
+            elseif data.type == "fed_welcome" then
+                -- Verify their signature on our challenge
+                local valid = crypto.ed25519_verify(
+                    my_challenge, data.signature, FEDERATION.public_key)
+                if valid then
+                    results.handshake_completed = true
+                    handshake_done = true
+                end
+            elseif data.type == "fed_msg" then
+                fed_msg_received = true
+            end
+        end,
+        on_error = function(_conn, err)
+            log.error("e2e-fed fake peer error: " .. tostring(err))
+        end,
+    })
+
+    -- Wait for handshake
+    local waited = 0
+    while not handshake_done and waited < 5000 do
+        hull.sleep(100)
+        waited = waited + 100
+    end
+
+    -- Step 4: Create test user and channel, send message via local /ws
+    if handshake_done then
+        -- Ensure #general channel and test user exist
+        local fed_pw = crypto.hash_password("fedpass1234")
+        local fed_pk_box, _fed_sk_box = crypto.box_keypair()
+        pcall(function()
+            db.exec("INSERT INTO users (username, password_hash, public_key, created_at) VALUES (?, ?, ?, ?)",
+                    {"fed_test_user", fed_pw, fed_pk_box, time.now()})
+        end)
+        pcall(function()
+            db.exec("INSERT INTO channels (name, topic, creator_id, created_at) VALUES (?, ?, ?, ?)",
+                    {"#general", "General channel", 1, time.now()})
+        end)
+        local ch = db.query("SELECT id FROM channels WHERE name = ?", {"#general"})
+        local usr = db.query("SELECT id FROM users WHERE username = ?", {"fed_test_user"})
+        if #ch > 0 and #usr > 0 then
+            pcall(function()
+                db.exec("INSERT OR IGNORE INTO channel_members (channel_id, user_id, role, encrypted_key, nonce, joined_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        {ch[1].id, usr[1].id, "member", "test_key", "test_nonce", time.now()})
+            end)
+        end
+
+        -- Connect test user via /ws, login, join #general, send message
+        local user_ready = false
+        local _user_ws = ws.connect(ws_url, {
+            on_open = function(_conn) end,
+            on_message = function(conn, raw)
+                local data = json.decode(raw)
+                if not data then return end
+                if data.type == "motd" then
+                    conn:send(json.encode({
+                        type = "login", username = "fed_test_user", password = "fedpass1234",
+                    }))
+                elseif data.type == "authenticated" then
+                    conn:send(json.encode({ type = "join", channel = "#general" }))
+                elseif data.type == "joined" and data.channel == "#general" then
+                    user_ready = true
+                end
+            end,
+            on_error = function(_conn, err)
+                log.error("e2e-fed user ws error: " .. tostring(err))
+            end,
+        })
+
+        waited = 0
+        while not user_ready and waited < 5000 do
+            hull.sleep(100)
+            waited = waited + 100
+        end
+
+        if user_ready then
+            _user_ws:send(json.encode({
+                type = "msg", channel = "#general",
+                encrypted = "fed_test_ciphertext",
+                nonce = "fed_test_nonce",
+            }))
+
+            -- Wait for the fake peer to receive the federated message
+            waited = 0
+            while not fed_msg_received and waited < 3000 do
+                hull.sleep(100)
+                waited = waited + 100
+            end
+            results.message_relayed = fed_msg_received
+        end
+
+        pcall(function() _user_ws:close() end)
+    end
+
+    -- Clean up
+    pcall(function() _fake_peer_ws:close() end)
+    -- Remove fake peer from config
+    for i = #FEDERATION.peers, 1, -1 do
+        if FEDERATION.peers[i].public_key == fake_pk then
+            table.remove(FEDERATION.peers, i)
+        end
+    end
+    FEDERATION.enabled = orig_enabled
+
+    results.all_passed = results.keypair_generated
+        and results.peer_connected
+        and results.handshake_completed
+        and results.message_relayed
 
     res:json(results)
 end)
