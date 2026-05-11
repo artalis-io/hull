@@ -99,9 +99,14 @@ static int hl_js_validate_module_name(const char *name)
     if (name[0] == '/')
         return -1;
 
-    /* Reject ".." anywhere in the path */
-    if (strstr(name, "..") != NULL)
-        return -1;
+    /* Reject ".." path components */
+    for (const char *p = name; *p; ) {
+        if (p[0] == '.' && p[1] == '.' && (p[2] == '/' || p[2] == '\0'))
+            return -1;
+        const char *slash = strchr(p, '/');
+        if (!slash) break;
+        p = slash + 1;
+    }
 
     /* Reject embedded null bytes (shouldn't happen, but defense-in-depth) */
     return 0;
@@ -146,8 +151,8 @@ static char *hl_js_module_normalize(JSContext *ctx,
             resolved[dir_len] = '/';
             memcpy(resolved + dir_len + 1, name, name_len + 1);
 
-            /* Verify resolved path doesn't contain ".." after concatenation */
-            if (strstr(resolved, "..") != NULL) {
+            /* Verify resolved path doesn't contain ".." components */
+            if (hl_js_validate_module_name(resolved) != 0) {
                 js_free(ctx, resolved);
                 JS_ThrowReferenceError(ctx, "invalid module path: %s", name);
                 return NULL;

@@ -685,13 +685,22 @@ int hl_agent_errors(const char *app_dir, ShJsonBuf *out)
     }
 
     /* Read and pass through the JSON file */
-    char buf[65536];
-    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fseek(f, 0, SEEK_END);
+    long flen = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (flen <= 0 || flen > 1024 * 1024) {
+        fclose(f);
+        return -1;
+    }
+    char *buf = malloc((size_t)flen + 1);
+    if (!buf) { fclose(f); return -1; }
+    size_t n = fread(buf, 1, (size_t)flen, f);
     buf[n] = '\0';
     fclose(f);
 
     /* Pass through raw JSON — write directly to buffer */
     sh_json_buf_write(out, buf, n);
+    free(buf);
     return 0;
 }
 

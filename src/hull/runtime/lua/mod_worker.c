@@ -104,8 +104,10 @@ static int lua_bytecode_writer(lua_State *L, const void *p, size_t sz, void *ud)
     LuaBytecodeWriter *bw = (LuaBytecodeWriter *)ud;
     if (bw->len + sz > bw->cap) {
         size_t new_cap = bw->cap ? bw->cap * 2 : 4096;
-        while (new_cap < bw->len + sz)
+        while (new_cap < bw->len + sz) {
+            if (new_cap > SIZE_MAX / 2) return 1;
             new_cap *= 2;
+        }
         uint8_t *nb = realloc(bw->buf, new_cap);
         if (!nb) return 1;
         bw->buf = nb;

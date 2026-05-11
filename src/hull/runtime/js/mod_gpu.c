@@ -74,6 +74,12 @@ static JSValue js_gpu_load(JSContext *ctx, JSValueConst this_val,
     const char *name = JS_ToCString(ctx, argv[0]);
     if (!name) return JS_EXCEPTION;
 
+    /* Validate shader name: reject path traversal */
+    if (!name[0] || name[0] == '/' || strstr(name, "..") || strchr(name, '\\')) {
+        JS_FreeCString(ctx, name);
+        return JS_ThrowRangeError(ctx, "invalid shader name");
+    }
+
     char vfs_name[512];
     snprintf(vfs_name, sizeof(vfs_name), "shaders/%s.wgsl", name);
     const HlEntry *entry = NULL;

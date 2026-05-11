@@ -78,6 +78,10 @@ static int l_gpu_load(lua_State *L)
     const char *name = luaL_checkstring(L, 1);
     HlLua *lua = get_hl_lua(L);
 
+    /* Validate shader name: reject path traversal */
+    if (!name[0] || name[0] == '/' || strstr(name, "..") || strchr(name, '\\'))
+        return luaL_error(L, "invalid shader name: %s", name);
+
     /* Try VFS first: shaders/<name>.wgsl */
     char vfs_name[512];
     snprintf(vfs_name, sizeof(vfs_name), "shaders/%s.wgsl", name);

@@ -144,6 +144,7 @@ static void materialize_column(sqlite3_stmt *stmt, int col, HlDbValue *out)
         out->type = HL_TYPE_TEXT;
         const char *text = (const char *)sqlite3_column_text(stmt, col);
         size_t len = (size_t)sqlite3_column_bytes(stmt, col);
+        if (!text) { out->type = HL_TYPE_NIL; break; }
         out->s = malloc(len + 1);
         if (out->s) {
             memcpy(out->s, text, len);
@@ -156,6 +157,7 @@ static void materialize_column(sqlite3_stmt *stmt, int col, HlDbValue *out)
         out->type = HL_TYPE_BLOB;
         const void *blob = sqlite3_column_blob(stmt, col);
         size_t len = (size_t)sqlite3_column_bytes(stmt, col);
+        if (!blob) { out->type = HL_TYPE_NIL; break; }
         out->s = malloc(len);
         if (out->s) {
             memcpy(out->s, blob, len);
@@ -271,6 +273,13 @@ static void db_work_fn(void *ud)
             for (int i = 0; i < r->ncols; i++) {
                 const char *name = sqlite3_column_name(stmt, i);
                 r->col_names[i] = strdup(name ? name : "?");
+                if (!r->col_names[i]) {
+                    op->error = 1;
+                    snprintf(op->error_msg, sizeof(op->error_msg),
+                             "out of memory");
+                    sqlite3_finalize(stmt);
+                    return;
+                }
             }
             first = 0;
         }

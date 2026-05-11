@@ -198,6 +198,11 @@ static int discover_fs_migrations(const char *root_dir, MigrationList *ml)
             continue;
 
         if (ml->count >= capacity) {
+            if (capacity > SIZE_MAX / (2 * sizeof(char *))) {
+                migration_list_free(ml);
+                closedir(dir);
+                return -1;
+            }
             capacity *= 2;
             char **tmp = realloc(ml->names, (size_t)capacity * sizeof(char *));
             if (!tmp) {
@@ -364,8 +369,14 @@ int hl_migrate_status(sqlite3 *db, const HlVfs *vfs,
         if (!names)
             return -1;
 
-        for (int i = 0; i < count; i++)
+        for (int i = 0; i < count; i++) {
             names[i] = strdup(first[i].name + 11); /* strip "migrations/" */
+            if (!names[i]) {
+                for (int j = 0; j < i; j++) free(names[j]);
+                free(names);
+                return -1;
+            }
+        }
     } else {
         /* Discover from filesystem */
         if (!vfs->root_dir) {
@@ -389,8 +400,15 @@ int hl_migrate_status(sqlite3 *db, const HlVfs *vfs,
             return -1;
         }
 
-        for (int i = 0; i < count; i++)
+        for (int i = 0; i < count; i++) {
             names[i] = strdup(ml.names[i]);
+            if (!names[i]) {
+                for (int j = 0; j < i; j++) free(names[j]);
+                free(names);
+                migration_list_free(&ml);
+                return -1;
+            }
+        }
 
         migration_list_free(&ml);
     }
