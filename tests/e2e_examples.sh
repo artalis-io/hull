@@ -50,7 +50,7 @@ check_status() {
 wait_for_server() {
     # $1 = port
     for i in 1 2 3 4 5 6 7 8 9 10; do
-        if curl -s "http://127.0.0.1:$1/health" >/dev/null 2>&1; then
+        if curl -s -H "Connection: close" "http://127.0.0.1:$1/health" >/dev/null 2>&1; then
             return 0
         fi
         sleep 0.5
@@ -785,35 +785,108 @@ test_irc_chat() {
     echo "--- irc_chat ($LABEL) port $PORT ---"
 
     TMPDIR_IRC=$(mktemp -d)
-    start_server "$PORT" "$APP" "$TMPDIR_IRC/data.db"
+
+    # HTTP API tests (start server, test HTTP endpoints, stop)
+    start_server "$PORT" "$APP" "$TMPDIR_IRC/http.db"
     if ! wait_for_server "$PORT"; then
         fail "$LABEL irc_chat — server startup"
         stop_server; rm -rf "$TMPDIR_IRC"; return
     fi
 
-    # Health check
     RESP=$(curl -s "http://127.0.0.1:$PORT/health")
     check_contains "$LABEL irc_chat GET /health" "$RESP" '"ok"'
 
-    # WS connections should be 0
     RESP=$(curl -s "http://127.0.0.1:$PORT/ws/connections")
     check_contains "$LABEL irc_chat GET /ws/connections" "$RESP" '"count":0'
 
-    # Register a user
     RESP=$(curl -s -X POST -H "Content-Type: application/json" \
         -d '{"username":"e2euser","password":"secret1234"}' \
         "http://127.0.0.1:$PORT/register")
     check_contains "$LABEL irc_chat POST /register" "$RESP" '"public_key"'
 
-    # Login
     RESP=$(curl -s -X POST -H "Content-Type: application/json" \
         -d '{"username":"e2euser","password":"secret1234"}' \
         "http://127.0.0.1:$PORT/login")
     check_contains "$LABEL irc_chat POST /login" "$RESP" '"e2euser"'
 
-    # List channels (empty)
     RESP=$(curl -s "http://127.0.0.1:$PORT/channels")
     check_contains "$LABEL irc_chat GET /channels" "$RESP" '"channels"'
+
+    RESP=$(curl -s "http://127.0.0.1:$PORT/users")
+    check_contains "$LABEL irc_chat GET /users" "$RESP" '"users"'
+    check_contains "$LABEL irc_chat GET /users has user" "$RESP" '"e2euser"'
+
+    # File upload/download tests (need session cookie)
+    COOKIE_JAR_IRC="$TMPDIR_IRC/cookies.txt"
+    curl -s -c "$COOKIE_JAR_IRC" -X POST -H "Content-Type: application/json" \
+        -d '{"username":"e2euser","password":"secret1234"}' \
+        "http://127.0.0.1:$PORT/login" >/dev/null
+
+    # Create channel for file upload
+    curl -s -b "$COOKIE_JAR_IRC" -X POST -H "Content-Type: application/json" \
+        -d '{"name":"filechan"}' \
+        "http://127.0.0.1:$PORT/channels" >/dev/null
+
+    # Upload file to channel
+    RESP=$(curl -s -w "\n%{http_code}" -b "$COOKIE_JAR_IRC" -X POST \
+        -H "Content-Type: application/json" \
+        -d '{"filename":"test.txt","channel":"#filechan","encrypted":"encrypted_content_here","nonce":"file_nonce_1"}' \
+        "http://127.0.0.1:$PORT/files")
+    BODY=$(echo "$RESP" | sed '$d')
+    STATUS=$(echo "$RESP" | tail -1)
+    check_status "$LABEL irc_chat POST /files status" "$STATUS" "201"
+    check_contains "$LABEL irc_chat POST /files filename" "$BODY" '"test.txt"'
+
+    # Download file
+    RESP=$(curl -s -b "$COOKIE_JAR_IRC" "http://127.0.0.1:$PORT/files/1")
+    check_contains "$LABEL irc_chat GET /files/1 content" "$RESP" '"encrypted_content_here"'
+    check_contains "$LABEL irc_chat GET /files/1 filename" "$RESP" '"test.txt"'
+
+    # List channel files
+    RESP=$(curl -s "http://127.0.0.1:$PORT/channels/filechan/files")
+    check_contains "$LABEL irc_chat GET /channels/:name/files" "$RESP" '"test.txt"'
+
+    # Upload without auth -> 401
+    STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+        -H "Content-Type: application/json" \
+        -d '{"filename":"test.txt","channel":"#filechan","encrypted":"data","nonce":"n"}' \
+        "http://127.0.0.1:$PORT/files")
+    check_status "$LABEL irc_chat POST /files no auth" "$STATUS" "401"
+
+    # Download without auth -> 401
+    STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT/files/1")
+    check_status "$LABEL irc_chat GET /files/1 no auth" "$STATUS" "401"
+
+    stop_server
+
+    # WebSocket E2E test (fresh server — avoids kqueue FD reuse issues
+    # between prior HTTP connections and ws.connect client sockets)
+    WS_PORT=$((PORT + 50))
+    start_server "$WS_PORT" "$APP" "$TMPDIR_IRC/ws.db"
+    if ! wait_for_server "$WS_PORT"; then
+        fail "$LABEL irc_chat — WS server startup"
+        stop_server; rm -rf "$TMPDIR_IRC"; return
+    fi
+
+    RESP=$(curl -s -H "Connection: close" --max-time 30 "http://127.0.0.1:$WS_PORT/e2e-test")
+    check_contains "$LABEL irc_chat E2E all_passed" "$RESP" '"all_passed":true'
+    check_contains "$LABEL irc_chat E2E alice_connected" "$RESP" '"alice_connected":true'
+    check_contains "$LABEL irc_chat E2E bob_connected" "$RESP" '"bob_connected":true'
+    check_contains "$LABEL irc_chat E2E alice_authenticated" "$RESP" '"alice_authenticated":true'
+    check_contains "$LABEL irc_chat E2E bob_authenticated" "$RESP" '"bob_authenticated":true'
+    check_contains "$LABEL irc_chat E2E message_received" "$RESP" '"message_received":true'
+    check_contains "$LABEL irc_chat E2E message_stored" "$RESP" '"message_stored":true'
+    check_contains "$LABEL irc_chat E2E dm_sent" "$RESP" '"dm_sent":true'
+    check_contains "$LABEL irc_chat E2E dm_received" "$RESP" '"dm_received":true'
+    check_contains "$LABEL irc_chat E2E dm_confirmed" "$RESP" '"dm_confirmed":true'
+    check_contains "$LABEL irc_chat E2E dm_stored" "$RESP" '"dm_stored":true'
+    check_contains "$LABEL irc_chat E2E dm_history_ok" "$RESP" '"dm_history_ok":true'
+    check_contains "$LABEL irc_chat E2E file_channel_stored" "$RESP" '"file_channel_stored":true'
+    check_contains "$LABEL irc_chat E2E file_channel_content_ok" "$RESP" '"file_channel_content_ok":true'
+    check_contains "$LABEL irc_chat E2E file_dm_stored" "$RESP" '"file_dm_stored":true'
+    check_contains "$LABEL irc_chat E2E file_dm_content_ok" "$RESP" '"file_dm_content_ok":true'
+    check_contains "$LABEL irc_chat E2E retention_cleanup_ok" "$RESP" '"retention_cleanup_ok":true'
+    check_contains "$LABEL irc_chat E2E file_capacity_ok" "$RESP" '"file_capacity_ok":true'
 
     stop_server; rm -rf "$TMPDIR_IRC"
 }

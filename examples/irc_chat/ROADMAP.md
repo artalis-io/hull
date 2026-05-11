@@ -41,50 +41,25 @@ federation.add_peer("wss://other-server.example.com/federation", {
 - [ ] Split-brain resolution (vector clocks or CRDT)
 - [ ] Federated user directory (user@server.com)
 
-## Planned: File Transfer (v3)
+## Current (v3)
 
-Encrypted file sharing within channels or DMs.
+- [x] File upload endpoint (POST /files with JSON body)
+- [x] File download endpoint with access control (GET /files/:id)
+- [x] Channel file listing (GET /channels/:name/files)
+- [x] DM file listing (GET /dm/:username/files)
+- [x] Encrypted file content stored in DB (server never sees plaintext)
+- [x] Channel files: membership check on upload + download
+- [x] DM files: sender/recipient access check
+- [x] WS notification on file upload (channel broadcast or DM delivery)
+- [x] 1 MB file size limit
+- [x] E2E test coverage (HTTP + DB verification)
 
-**Protocol:**
-- Files encrypted with channel key (same as messages)
-- Uploaded via HTTP POST, stored in `fs.write()`
-- File metadata sent via WebSocket: `{ type: "file", channel, filename, size, encrypted_url }`
-- Recipients download via HTTP GET with auth
+## Current (v4)
 
-**API:**
-```lua
--- Upload
-POST /channels/:name/files
-Content-Type: multipart/form-data
-→ { id, filename, size, url }
-
--- Download (auth required, must be channel member)
-GET /files/:id
-
--- WS notification to channel members
-{ "type": "file", "channel": "#general", "from": "alice",
-  "filename": "doc.pdf", "size": 1234, "url": "/files/42" }
-```
-
-**Tasks:**
-- [ ] File upload endpoint (multipart form data)
-- [ ] File encryption with channel key before storage
-- [ ] File metadata in messages table
-- [ ] Download endpoint with membership check
-- [ ] File size limits (manifest-configurable)
-- [ ] Thumbnail generation for images (via `image` module)
-
-## Planned: Direct Messages (v4)
-
-Private 1:1 encrypted messaging.
-
-**Protocol:**
-- DM uses `crypto.box(msg, nonce, recipient_pk, sender_sk)` — no shared channel key
-- Each DM is encrypted specifically for the recipient
-- DM history stored encrypted per-pair
-
-**Tasks:**
-- [ ] DM send/receive via WebSocket
-- [ ] Per-pair crypto.box encryption
-- [ ] DM history endpoint
-- [ ] Online status / typing indicators
+- [x] DM send/receive via WebSocket (crypto.box per-pair encryption)
+- [x] Two encrypted copies per DM (one for recipient, one for sender history)
+- [x] DM history endpoint (HTTP + WebSocket, cursor pagination)
+- [x] Online user tracking + presence broadcasts
+- [x] Typing indicators (ephemeral relay)
+- [x] User directory endpoint (GET /users, WS `users` command)
+- [x] E2E test coverage for DM flow
