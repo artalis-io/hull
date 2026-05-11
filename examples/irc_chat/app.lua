@@ -1023,9 +1023,6 @@ app.get("/e2e-test", function(req, res)
     end
 
     -- Step 6: DM test — Alice sends DM to Bob
-    local dm_done = false
-    local dm_confirmed_done = false
-
     if alice_ready and bob_ready then
         -- Override bob's on_message to also handle DMs
         -- We use a flag approach: send DM and poll for results
