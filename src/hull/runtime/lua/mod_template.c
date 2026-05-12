@@ -8,7 +8,9 @@
 #include "hull/vfs.h"
 
 #include <sh_arena.h>
+#include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ════════════════════════════════════════════════════════════════════
@@ -61,9 +63,7 @@ static int lua_template_load_raw(lua_State *L)
 
     /* 2. Filesystem fallback (dev mode): app_dir/templates/<name> */
     if (lua && lua->app_dir) {
-        /* Reject ".." components to prevent path traversal (R1 fix).
-         * We use string-level validation rather than realpath() because
-         * the OS sandbox may block stat() on parent directories. */
+        /* Reject ".." components to prevent path traversal */
         const char *p = name;
         while (*p) {
             if (p[0] == '.' && p[1] == '.' &&
@@ -78,9 +78,21 @@ static int lua_template_load_raw(lua_State *L)
         int n = snprintf(path, sizeof(path), "%s/templates/%s",
                          lua->app_dir, name);
         if (n > 0 && (size_t)n < sizeof(path)) {
+            /* Verify resolved path stays within app_dir (symlink escape check) */
+            char resolved[PATH_MAX];
+            if (realpath(path, resolved)) {
+                size_t app_dir_len = strlen(lua->app_dir);
+                if (strncmp(resolved, lua->app_dir, app_dir_len) != 0 ||
+                    (resolved[app_dir_len] != '/' && resolved[app_dir_len] != '\0'))
+                    return luaL_error(L, "invalid template name: %s", name);
+            }
+
             FILE *f = fopen(path, "rb");
             if (f) {
-                fseek(f, 0, SEEK_END);
+                if (fseek(f, 0, SEEK_END) != 0) {
+                    fclose(f);
+                    return luaL_error(L, "seek failed: %s", name);
+                }
                 long size = ftell(f);
                 if (size < 0 || size > HL_MODULE_MAX_SIZE) {
                     fclose(f);

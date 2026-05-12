@@ -94,8 +94,14 @@ function check(data, schema) {
         if (rules.pattern) {
             if (typeof rules.pattern === "string" && rules.pattern.length > 1000)
                 throw new Error("validate: pattern too long (max 1000 chars)");
-            const re = (rules.pattern instanceof RegExp) ? rules.pattern : new RegExp(rules.pattern);
-            if (typeof value !== "string" || !re.test(value))
+            let re;
+            if (rules.pattern instanceof RegExp) {
+                re = rules.pattern;
+            } else {
+                try { re = new RegExp(rules.pattern); }
+                catch (e) { throw new Error("validate: invalid pattern: " + e.message); }
+            }
+            if (typeof value !== "string" || !re.test(String(value).substring(0, 10000)))
                 err = customMsg || "does not match the required pattern";
         }
 

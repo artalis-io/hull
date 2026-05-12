@@ -642,7 +642,10 @@ int hl_js_load_app(HlJS *js, const char *filename)
         return -1;
     }
 
-    fseek(f, 0, SEEK_END);
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return -1;
+    }
     long size = ftell(f);
     if (size < 0 || size > HL_MODULE_MAX_SIZE) {
         fclose(f);

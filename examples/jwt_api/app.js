@@ -20,6 +20,8 @@ app.manifest({
 // so fall back to a dev default.  Set JWT_SECRET in production.
 let JWT_SECRET = "change-me-in-production";
 try { const v = env.get("JWT_SECRET"); if (v) JWT_SECRET = v; } catch (_e) { /* env not ready */ }
+if (JWT_SECRET === "change-me-in-production")
+    log.warn("JWT_SECRET not set — using insecure default. Set JWT_SECRET env var in production.");
 
 // Middleware: extract and verify JWT on every request (optional — won't block)
 app.use("*", "/*", (req, _res) => {
@@ -30,10 +32,10 @@ app.use("*", "/*", (req, _res) => {
     if (!match) return 0;
 
     const result = jwt.verify(match[1], JWT_SECRET);
-    // jwt.verify returns payload on success, [null, "reason"] on failure
-    if (!Array.isArray(result)) {
+    // jwt.verify returns [payload, null] on success, [null, "reason"] on failure
+    if (result[0]) {
         if (!req.ctx) req.ctx = {};
-        req.ctx.user = result;
+        req.ctx.user = result[0];
     }
     return 0;
 });

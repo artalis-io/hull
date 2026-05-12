@@ -8,7 +8,10 @@
 #include "hull/vfs.h"
 #include "hull/limits.h"
 
+#include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 /* _template.compile(code, name?) — compile generated JS source to a function */
 static JSValue js_template_compile(JSContext *ctx, JSValueConst this_val,
@@ -96,9 +99,24 @@ static JSValue js_template_load_raw(JSContext *ctx, JSValueConst this_val,
         int n = snprintf(path, sizeof(path), "%s/templates/%s",
                          js->app_dir, name);
         if (n > 0 && (size_t)n < sizeof(path)) {
+            /* Verify resolved path stays within app_dir (symlink escape check) */
+            char resolved[PATH_MAX];
+            if (realpath(path, resolved)) {
+                size_t app_dir_len = strlen(js->app_dir);
+                if (strncmp(resolved, js->app_dir, app_dir_len) != 0 ||
+                    (resolved[app_dir_len] != '/' && resolved[app_dir_len] != '\0')) {
+                    JS_FreeCString(ctx, name);
+                    return JS_ThrowTypeError(ctx, "invalid template name");
+                }
+            }
+
             FILE *f = fopen(path, "rb");
             if (f) {
-                fseek(f, 0, SEEK_END);
+                if (fseek(f, 0, SEEK_END) != 0) {
+                    fclose(f);
+                    JS_FreeCString(ctx, name);
+                    return JS_ThrowInternalError(ctx, "seek failed: %s", path);
+                }
                 long size = ftell(f);
                 if (size < 0 || size > 1048576) { /* 1 MB limit */
                     fclose(f);

@@ -15,6 +15,13 @@ local FTS_PREFIX = "_hull_fts_"
 
 --- Validate an SQL identifier (table name, column name).
 -- Must match [a-zA-Z_][a-zA-Z0-9_]* and must not start with _hull_.
+local SQL_KEYWORDS = {
+    SELECT=1, INSERT=1, UPDATE=1, DELETE=1, DROP=1, CREATE=1, ALTER=1,
+    TABLE=1, INDEX=1, WHERE=1, FROM=1, INTO=1, VALUES=1, SET=1,
+    UNION=1, JOIN=1, ORDER=1, GROUP=1, HAVING=1, LIMIT=1, OFFSET=1,
+    BEGIN=1, COMMIT=1, ROLLBACK=1, PRAGMA=1, ATTACH=1, DETACH=1,
+}
+
 local function validate_identifier(name, label)
     if type(name) ~= "string" or name == "" then
         error("search: " .. label .. " must be a non-empty string")
@@ -25,6 +32,9 @@ local function validate_identifier(name, label)
     end
     if name:sub(1, 6) == "_hull_" then
         error("search: " .. label .. " must not start with '_hull_'")
+    end
+    if SQL_KEYWORDS[name:upper()] then
+        error("search: " .. label .. " must not be a SQL keyword")
     end
 end
 
@@ -156,7 +166,8 @@ function search.query(name, query, opts)
 
     if opts.snippet then
         local s = opts.snippet
-        local col = tonumber(s.column) or 1
+        local col = math.floor(tonumber(s.column) or 1)
+        if col < 0 then error("search: snippet column must be non-negative") end
         local tokens = tonumber(s.tokens) or 32
         select_cols[#select_cols + 1] = "snippet(" .. tbl .. ", " ..
             tostring(col) .. ", ?, ?, ?, " .. tostring(tokens) .. ") AS snippet"
@@ -165,7 +176,8 @@ function search.query(name, query, opts)
         params[#params + 1] = s.ellipsis or "..."
     elseif opts.highlight then
         local h = opts.highlight
-        local col = tonumber(h.column) or 1
+        local col = math.floor(tonumber(h.column) or 1)
+        if col < 0 then error("search: highlight column must be non-negative") end
         select_cols[#select_cols + 1] = "highlight(" .. tbl .. ", " ..
             tostring(col) .. ", ?, ?) AS highlight"
         params[#params + 1] = h.before or "<b>"

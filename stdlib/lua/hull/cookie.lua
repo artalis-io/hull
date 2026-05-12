@@ -93,6 +93,9 @@ function cookie.serialize(name, value, opts)
 
     -- Expires
     if opts.expires then
+        if type(opts.expires) ~= "string" or opts.expires:find("[%c;]") then
+            error("cookie: invalid expires value")
+        end
         parts[#parts + 1] = "Expires=" .. opts.expires
     end
 

@@ -22,7 +22,7 @@ function parseCookieHeader(req) {
 
 function sessionMiddleware(opts) {
     const o = opts || {};
-    const cookieName = o.cookieName || "hull.sid";
+    const cookieName = o.cookieName || "hull_session";
     const loginPath = o.loginPath || null;
     const excludePaths = o.excludePaths || [];
 
@@ -110,8 +110,8 @@ function jwtMiddleware(opts) {
         const token = authHeader.substring(7);
         const result = jwt.verify(token, secret);
 
-        // jwt.verify returns [null, "reason"] on failure
-        if (Array.isArray(result)) {
+        // jwt.verify returns [payload, null] on success, [null, "reason"] on failure
+        if (!result[0]) {
             res.status(401);
             res.json({ error: result[1] || "invalid token" });
             return 1;
@@ -120,7 +120,7 @@ function jwtMiddleware(opts) {
         // Attach decoded payload to request context
         if (!req.ctx) req.ctx = {};
         req.ctx.token = token;
-        req.ctx.claims = result;
+        req.ctx.claims = result[0];
 
         return 0;
     };
@@ -128,7 +128,7 @@ function jwtMiddleware(opts) {
 
 function login(req, res, userData, opts) {
     const o = opts || {};
-    const cookieName = o.cookieName || "hull.sid";
+    const cookieName = o.cookieName || "hull_session";
     const cookieOpts = Object.assign({}, o.cookieOpts || {});
 
     // Set Max-Age from session TTL if not explicitly provided
@@ -145,7 +145,7 @@ function login(req, res, userData, opts) {
 
 function logout(req, res, opts) {
     const o = opts || {};
-    const cookieName = o.cookieName || "hull.sid";
+    const cookieName = o.cookieName || "hull_session";
     const cookieOpts = o.cookieOpts || {};
 
     const cookies = parseCookieHeader(req);

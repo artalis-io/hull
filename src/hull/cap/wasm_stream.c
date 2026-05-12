@@ -100,7 +100,11 @@ int hl_cap_wasm_stream(HlWasmCache *cache, const char *name,
             if (err_msg) *err_msg = "open_input_failed";
             return HL_WASM_ERR_INTERNAL;
         }
-        fseek(in_file, 0, SEEK_END);
+        if (fseek(in_file, 0, SEEK_END) != 0) {
+            fclose(in_file);
+            if (err_msg) *err_msg = "open_input_failed";
+            return HL_WASM_ERR_INTERNAL;
+        }
         long ftell_res = ftell(in_file);
         if (ftell_res < 0) {
             fclose(in_file);
@@ -108,7 +112,11 @@ int hl_cap_wasm_stream(HlWasmCache *cache, const char *name,
             return HL_WASM_ERR_INTERNAL;
         }
         in_total = (size_t)ftell_res;
-        fseek(in_file, 0, SEEK_SET);
+        if (fseek(in_file, 0, SEEK_SET) != 0) {
+            fclose(in_file);
+            if (err_msg) *err_msg = "open_input_failed";
+            return HL_WASM_ERR_INTERNAL;
+        }
         in_buf = hl_alloc_malloc(alloc, chunk_size);
         if (!in_buf) {
             fclose(in_file);

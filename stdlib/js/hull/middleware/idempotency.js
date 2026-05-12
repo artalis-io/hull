@@ -95,8 +95,9 @@ function middleware(opts) {
     for (let i = 0; i < methodList.length; i++)
         methods[methodList[i]] = true;
 
-    // Counter for probabilistic cleanup (1 in 100 requests)
+    // Counter for probabilistic cleanup (every 100 requests)
     let requestCount = 0;
+    const CLEANUP_INTERVAL = 100;
 
     return function(req, res) {
         if (!methods[req.method])
@@ -113,10 +114,12 @@ function middleware(opts) {
         const endpoint = req.method + " " + req.path;
         const now = time.now();
 
-        // Probabilistic cleanup
+        // Periodic cleanup
         requestCount++;
-        if (requestCount % 100 === 0)
+        if (requestCount >= CLEANUP_INTERVAL) {
+            requestCount = 0;
             db.exec("DELETE FROM _hull_idempotency_keys WHERE expires_at <= ?", [now]);
+        }
 
         // Check for existing key
         const rows = db.query(

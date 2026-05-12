@@ -18,7 +18,8 @@ let counter = 0;
 
 function generateId() {
     counter++;
-    return counter.toString(16);
+    if (counter > 0xffffffffffff) counter = 1;
+    return counter.toString(16).padStart(8, "0");
 }
 
 function sanitizeValue(v) {

@@ -21,8 +21,11 @@
 #include "lauxlib.h"
 #endif
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 /* ── hull keygen ───────────────────────────────────────────────────── */
 
@@ -54,9 +57,15 @@ int hull_keygen(int argc, char **argv)
     fprintf(f, "\n");
     fclose(f);
 
-    /* Write hex-encoded secret key */
-    f = fopen(sk_file, "w");
+    /* Write hex-encoded secret key (mode 0600 — owner-only) */
+    int sk_fd = open(sk_file, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (sk_fd < 0) {
+        fprintf(stderr, "hull keygen: cannot write %s\n", sk_file);
+        return 1;
+    }
+    f = fdopen(sk_fd, "w");
     if (!f) {
+        close(sk_fd);
         fprintf(stderr, "hull keygen: cannot write %s\n", sk_file);
         return 1;
     }

@@ -119,6 +119,9 @@ static int db_result_grow(HlDbResult *r)
         return 0;
     int new_cap = r->capacity ? r->capacity * 2 : 16;
     if (new_cap > 100000) return -1; /* sanity cap */
+    if (r->ncols > 0 &&
+        (size_t)new_cap > SIZE_MAX / ((size_t)r->ncols * sizeof(HlDbValue)))
+        return -1; /* overflow guard */
     HlDbValue *nv = realloc(r->values,
                              (size_t)new_cap * (size_t)r->ncols * sizeof(HlDbValue));
     if (!nv) return -1;
@@ -150,6 +153,8 @@ static void materialize_column(sqlite3_stmt *stmt, int col, HlDbValue *out)
             memcpy(out->s, text, len);
             out->s[len] = '\0';
             out->len = len;
+        } else {
+            out->type = HL_TYPE_NIL;
         }
         break;
     }
@@ -162,6 +167,8 @@ static void materialize_column(sqlite3_stmt *stmt, int col, HlDbValue *out)
         if (out->s) {
             memcpy(out->s, blob, len);
             out->len = len;
+        } else {
+            out->type = HL_TYPE_NIL;
         }
         break;
     }

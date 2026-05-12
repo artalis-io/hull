@@ -115,10 +115,8 @@ end
 -- Detect if a WASM binary uses Memory64 (64-bit memory addressing).
 -- Checks the memory section (ID 5) limits flags for bit 2 (0x04).
 local function is_memory64_wasm(path)
-    local f = io.open(path, "rb")
-    if not f then return false end
-    local data = f:read("*a")
-    f:close()
+    local data = tool.read_file(path)
+    if not data then return false end
     if #data < 8 then return false end
     -- Skip 8-byte WASM header, then scan sections
     local pos = 9  -- 1-indexed
@@ -366,8 +364,12 @@ local function sign_app(app_dir, key_file, sign_ctx, files)
     if file_exists(entry) then
         local chunk = tool.loadfile(entry)
         if chunk then
-            pcall(chunk)
-            manifest = app.get_manifest()
+            local ok, err = pcall(chunk)
+            if ok then
+                manifest = app.get_manifest()
+            else
+                tool.stderr("hull build: warning: manifest extraction failed: " .. tostring(err) .. "\n")
+            end
         end
     end
 

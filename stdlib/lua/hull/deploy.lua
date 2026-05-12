@@ -174,7 +174,10 @@ local function introspect_app(app_dir)
         local entry_path = app_dir .. "/app.lua"
         local chunk = tool.loadfile(entry_path)
         if chunk then
-            local ok, _ = pcall(chunk)
+            local ok, err = pcall(chunk)
+            if not ok then
+                tool.stderr("hull deploy: warning: manifest extraction failed: " .. tostring(err) .. "\n")
+            end
             if ok then
                 local m = app.get_manifest()
                 if m then

@@ -19,7 +19,8 @@ local _counter = 0
 --- Generate an incrementing hex request ID.
 function logger.generate_id()
     _counter = _counter + 1
-    return string.format("%x", _counter)
+    if _counter > 0xffffffffffff then _counter = 1 end
+    return string.format("%08x", _counter)
 end
 
 --- Sanitize a value for safe logfmt output (prevent log injection).

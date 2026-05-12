@@ -416,7 +416,10 @@ static int hl_lua_require(lua_State *L)
             /* Read file from disk */
             FILE *f = fopen(path, "rb");
             if (f) {
-                fseek(f, 0, SEEK_END);
+                if (fseek(f, 0, SEEK_END) != 0) {
+                    fclose(f);
+                    return luaL_error(L, "seek failed: %s", path);
+                }
                 long size = ftell(f);
                 if (size < 0 || size > HL_MODULE_MAX_SIZE) {
                     fclose(f);

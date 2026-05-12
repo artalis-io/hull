@@ -78,6 +78,7 @@ end
 
 --- Send a text response with ETag support.
 function etag.text(req, res, text, status)
+    if not text then text = "" end
     if req.method ~= "GET" and req.method ~= "HEAD" then
         if status then res:status(status) end
         res:text(text)
@@ -103,6 +104,7 @@ end
 
 --- Send an HTML response with ETag support.
 function etag.html(req, res, html, status)
+    if not html then html = "" end
     if req.method ~= "GET" and req.method ~= "HEAD" then
         if status then res:status(status) end
         res:html(html)

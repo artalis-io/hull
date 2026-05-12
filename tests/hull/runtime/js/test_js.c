@@ -1513,7 +1513,7 @@ UTEST(js_stdlib, jwt_sign_and_verify)
         "const token = jwt.sign({ userId: 1, exp: 9999999999 }, 'mysecret');\n"
         "globalThis.__test_jt = token ? 1 : 0;\n"
         "const result = jwt.verify(token, 'mysecret');\n"
-        "globalThis.__test_jv = (result && typeof result === 'object' && result.userId === 1) ? 1 : 0;\n";
+        "globalThis.__test_jv = (result && result[0] && result[0].userId === 1) ? 1 : 0;\n";
 
     JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
                           JS_EVAL_TYPE_MODULE);

@@ -95,13 +95,19 @@ static JSValue js_gpu_load(JSContext *ctx, JSValueConst this_val,
         wgsl_len = entry->len;
     } else if (js && js->base.app_vfs && js->base.app_vfs->root_dir) {
         char path[4096];
-        snprintf(path, sizeof(path), "%s/shaders/%s.wgsl",
+        int pn = snprintf(path, sizeof(path), "%s/shaders/%s.wgsl",
                  js->base.app_vfs->root_dir, name);
+        if (pn < 0 || (size_t)pn >= sizeof(path)) {
+            JS_FreeCString(ctx, name);
+            return JS_ThrowInternalError(ctx, "gpu.load: shader path too long");
+        }
         FILE *f = fopen(path, "r");
         if (f) {
-            fseek(f, 0, SEEK_END);
-            long flen = ftell(f);
-            fseek(f, 0, SEEK_SET);
+            long flen = -1;
+            if (fseek(f, 0, SEEK_END) == 0) {
+                flen = ftell(f);
+                if (fseek(f, 0, SEEK_SET) != 0) flen = -1;
+            }
             if (flen > 0 && flen < 10 * 1024 * 1024) {
                 file_buf = malloc((size_t)flen + 1);
                 if (file_buf && fread(file_buf, 1, (size_t)flen, f) == (size_t)flen) {

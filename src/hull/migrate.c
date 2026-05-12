@@ -250,9 +250,17 @@ static int discover_fs_migrations(const char *root_dir, MigrationList *ml)
             return -1;
         }
 
-        fseek(f, 0, SEEK_END);
+        if (fseek(f, 0, SEEK_END) != 0) {
+            fclose(f);
+            migration_list_free(ml);
+            return -1;
+        }
         long flen = ftell(f);
-        fseek(f, 0, SEEK_SET);
+        if (fseek(f, 0, SEEK_SET) != 0) {
+            fclose(f);
+            migration_list_free(ml);
+            return -1;
+        }
 
         if (flen < 0) {
             fclose(f);

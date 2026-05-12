@@ -185,7 +185,9 @@ function query(name, q, opts) {
 
     if (o.snippet) {
         const s = o.snippet;
-        const sCol = s.column !== undefined ? s.column : 0;
+        const sCol = Number(s.column !== undefined ? s.column : 0);
+        if (!Number.isInteger(sCol) || sCol < 0)
+            throw new Error("search: snippet column must be a non-negative integer");
         const sBefore = s.before || "<b>";
         const sAfter = s.after || "</b>";
         const sEllipsis = s.ellipsis || "...";
@@ -197,7 +199,9 @@ function query(name, q, opts) {
 
     if (o.highlight) {
         const h = o.highlight;
-        const hCol = h.column !== undefined ? h.column : 0;
+        const hCol = Number(h.column !== undefined ? h.column : 0);
+        if (!Number.isInteger(hCol) || hCol < 0)
+            throw new Error("search: highlight column must be a non-negative integer");
         const hBefore = h.before || "<b>";
         const hAfter = h.after || "</b>";
         selectCols += ", highlight(" + table + ", " + hCol +

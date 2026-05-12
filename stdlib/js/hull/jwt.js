@@ -2,7 +2,7 @@
  * hull:jwt -- JWT HS256 sign/verify/decode
  *
  * jwt.sign(payload, secret)   - returns JWT token string
- * jwt.verify(token, secret)   - returns payload object or [null, "reason"]
+ * jwt.verify(token, secret)   - returns [payload, null] or [null, "reason"]
  * jwt.decode(token)           - decode without verification, returns payload or null
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -31,8 +31,11 @@ function constantTimeCompare(a, b) {
 // for non-ASCII which would produce inconsistent HMAC keys.
 function secretToHex(secret) {
     let hex = "";
-    for (let i = 0; i < secret.length; i++)
-        hex += secret.charCodeAt(i).toString(16).padStart(2, "0");
+    for (let i = 0; i < secret.length; i++) {
+        const c = secret.charCodeAt(i);
+        if (c > 127) throw new Error("jwt: secret must be ASCII-only");
+        hex += c.toString(16).padStart(2, "0");
+    }
     return hex;
 }
 
@@ -114,7 +117,7 @@ function verify(token, secret) {
             return [null, "token not yet valid"];
     }
 
-    return payload;
+    return [payload, null];
 }
 
 function decode(token) {

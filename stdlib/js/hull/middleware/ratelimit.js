@@ -14,30 +14,28 @@ import { time } from "hull:time";
 const MAX_BUCKETS = 10000;
 const SWEEP_INTERVAL = 100;
 
+let _bucketCount = 0;
+
 function sweepExpired(buckets, window, now) {
     for (const k in buckets) {
         if ((now - buckets[k].windowStart) >= window) {
             delete buckets[k];
+            _bucketCount--;
         }
     }
-}
-
-function bucketCount(buckets) {
-    let n = 0;
-    for (const k in buckets) n++;
-    return n;
 }
 
 function check(buckets, key, limit, window, now) {
     let bucket = buckets[key];
     if (!bucket || (now - bucket.windowStart) >= window) {
         // Enforce max-entries cap before creating a new bucket
-        if (!bucket && bucketCount(buckets) >= MAX_BUCKETS) {
+        if (!bucket && _bucketCount >= MAX_BUCKETS) {
             sweepExpired(buckets, window, now);
-            if (bucketCount(buckets) >= MAX_BUCKETS) {
+            if (_bucketCount >= MAX_BUCKETS) {
                 return { allowed: false, remaining: 0, reset: now + window };
             }
         }
+        if (!bucket) _bucketCount++;
         buckets[key] = { count: 1, windowStart: now };
         bucket = buckets[key];
     } else {

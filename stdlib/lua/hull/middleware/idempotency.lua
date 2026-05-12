@@ -80,6 +80,7 @@ function idempotency.middleware(opts)
         return "__anon"
     end
 
+    local _cleanup_counter = 0
     local ttl = opts.ttl or _ttl
     local header_name = opts.header_name or _header_name
 
@@ -107,8 +108,10 @@ function idempotency.middleware(opts)
         local endpoint = req.method .. " " .. req.path
         local now = time.now()
 
-        -- Clean up expired keys opportunistically (1 in 100 requests)
-        if math.random(1, 100) == 1 then
+        -- Clean up expired keys periodically (every 100 requests)
+        _cleanup_counter = _cleanup_counter + 1
+        if _cleanup_counter >= 100 then
+            _cleanup_counter = 0
             db.exec("DELETE FROM _hull_idempotency_keys WHERE expires_at <= ?", { now })
         end
 

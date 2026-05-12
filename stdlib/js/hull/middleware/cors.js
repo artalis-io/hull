@@ -22,7 +22,8 @@ function middleware(opts) {
     const methods = o.methods || "GET, POST, PUT, DELETE, OPTIONS";
     const headers = o.headers || "Content-Type, Authorization";
     const credentials = o.credentials || false;
-    const maxAge = String(o.max_age !== undefined ? o.max_age : 86400);
+    const rawMaxAge = o.maxAge !== undefined ? o.maxAge : o.max_age;
+    const maxAge = String(rawMaxAge !== undefined ? rawMaxAge : 86400);
 
     return function corsMiddleware(req, res) {
         const origin = req.header("Origin");

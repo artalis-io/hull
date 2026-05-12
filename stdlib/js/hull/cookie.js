@@ -84,9 +84,11 @@ function serialize(name, value, opts) {
 
     // Expires
     if (o.expires) {
-        if (typeof o.expires === "string")
+        if (typeof o.expires === "string") {
+            if (/[\x00-\x1f;]/.test(o.expires))
+                throw new Error("cookie: invalid expires value");
             str += "; Expires=" + o.expires;
-        else if (typeof o.expires === "number")
+        } else if (typeof o.expires === "number")
             str += "; Expires=" + new Date(o.expires * 1000).toUTCString();
     }
 

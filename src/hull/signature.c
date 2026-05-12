@@ -111,9 +111,9 @@ int hl_sig_read(const char *sig_path, HlSignature *sig)
     FILE *f = fopen(sig_path, "rb");
     if (!f) return -1;
 
-    fseek(f, 0, SEEK_END);
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
     long fsize = ftell(f);
-    fseek(f, 0, SEEK_SET);
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return -1; }
 
     if (fsize <= 0 || fsize > 1024 * 1024) { /* max 1MB */
         fclose(f);
@@ -467,9 +467,9 @@ int hl_sig_verify_files_fs(const HlSignature *sig, const char *app_dir)
             return -1;
         }
 
-        fseek(f, 0, SEEK_END);
+        if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
         long fsize = ftell(f);
-        fseek(f, 0, SEEK_SET);
+        if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return -1; }
 
         if (fsize < 0 || fsize > 100 * 1024 * 1024) {
             fclose(f);

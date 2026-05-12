@@ -193,10 +193,10 @@ static int run_js_tests(const char *app_dir, const char *entry)
             free(*fp);
             continue;
         }
-        fseek(f, 0, SEEK_END);
+        if (fseek(f, 0, SEEK_END) != 0) { fclose(f); free(*fp); continue; }
         long flen = ftell(f);
         if (flen < 0) { fclose(f); free(*fp); continue; }
-        fseek(f, 0, SEEK_SET);
+        if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); free(*fp); continue; }
         char *src = malloc((size_t)flen + 1);
         if (!src) { fclose(f); free(*fp); continue; }
         if (fread(src, 1, (size_t)flen, f) != (size_t)flen) {

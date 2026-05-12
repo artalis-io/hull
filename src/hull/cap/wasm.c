@@ -389,9 +389,11 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
         int n = snprintf(path, sizeof(path), "%s/compute/%s.aot.%s", app_dir, name, arch);
         FILE *f = (n > 0 && (size_t)n < sizeof(path)) ? fopen(path, "rb") : NULL;
         if (f) {
-            fseek(f, 0, SEEK_END);
-            long fsize = ftell(f);
-            fseek(f, 0, SEEK_SET);
+            long fsize = -1;
+            if (fseek(f, 0, SEEK_END) == 0) {
+                fsize = ftell(f);
+                if (fseek(f, 0, SEEK_SET) != 0) fsize = -1;
+            }
             if (fsize > 0 && (uint64_t)fsize < HL_WASM_MAX_IO_SIZE
                 && (uint64_t)fsize <= UINT32_MAX) {
                 /* Raw malloc required: wasm_runtime_load takes ownership and calls free() */
@@ -419,9 +421,11 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
         int n = snprintf(path, sizeof(path), "%s/compute/%s.wasm", app_dir, name);
         FILE *f = (n > 0 && (size_t)n < sizeof(path)) ? fopen(path, "rb") : NULL;
         if (f) {
-            fseek(f, 0, SEEK_END);
-            long fsize = ftell(f);
-            fseek(f, 0, SEEK_SET);
+            long fsize = -1;
+            if (fseek(f, 0, SEEK_END) == 0) {
+                fsize = ftell(f);
+                if (fseek(f, 0, SEEK_SET) != 0) fsize = -1;
+            }
             if (fsize > 0 && (uint64_t)fsize < HL_WASM_MAX_IO_SIZE
                 && (uint64_t)fsize <= UINT32_MAX) {
                 /* Raw malloc required: wasm_runtime_load takes ownership and calls free() */

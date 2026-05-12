@@ -126,23 +126,22 @@ function encode(rows, opts) {
     function quoteField(value) {
         const s = String(value);
         if (needsQuoting(s)) {
-            let escaped = "";
+            const parts = [];
             for (let i = 0; i < s.length; i++) {
-                if (s[i] === quo) escaped += doubledQuote;
-                else escaped += s[i];
+                if (s[i] === quo) parts.push(doubledQuote);
+                else parts.push(s[i]);
             }
-            return quo + escaped + quo;
+            return quo + parts.join("") + quo;
         }
         return s;
     }
 
     function encodeRow(fields) {
-        let line = "";
+        const parts = [];
         for (let i = 0; i < fields.length; i++) {
-            if (i > 0) line += sep;
-            line += quoteField(fields[i] == null ? "" : fields[i]);
+            parts.push(quoteField(fields[i] === null || fields[i] === undefined ? "" : fields[i]));
         }
-        return line;
+        return parts.join(sep);
     }
 
     let out = "";

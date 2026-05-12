@@ -14,6 +14,9 @@ app.manifest({
 -- so fall back to a dev default.  Set JWT_SECRET in production.
 local _ok, _val = pcall(env.get, "JWT_SECRET")
 local JWT_SECRET = (_ok and _val) or "change-me-in-production"
+if JWT_SECRET == "change-me-in-production" then
+    log.warn("JWT_SECRET not set — using insecure default. Set JWT_SECRET env var in production.")
+end
 
 -- Middleware: extract and verify JWT on every request (optional — won't block)
 app.use("*", "/*", function(req, _res)

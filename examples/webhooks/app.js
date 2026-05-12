@@ -30,6 +30,8 @@ app.manifest({
 // so fall back to a dev default.  Set WEBHOOK_SECRET in production.
 let SIGNING_SECRET = "whsec_change-me-in-production";
 try { const v = env.get("WEBHOOK_SECRET"); if (v) SIGNING_SECRET = v; } catch (_e) { /* env not ready */ }
+if (SIGNING_SECRET === "whsec_change-me-in-production")
+    log.warn("WEBHOOK_SECRET not set — using insecure default. Set WEBHOOK_SECRET env var in production.");
 
 // ── Initialize middleware tables ──────────────────────────────────────
 
