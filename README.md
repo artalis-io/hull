@@ -53,6 +53,7 @@ Hull ships 16 subcommands for the full development lifecycle:
 | `hull init [dir]` | Initialize a hull project in-place (idempotent, like `git init`) |
 | `hull dev <app>` | Development server with hot reload |
 | `hull build -o <out> <dir>` | Compile app into a standalone binary |
+| `hull build --compiler=tcc\|system\|<path>` | Select compiler backend (default: embedded tcc if available, else system cc) |
 | `hull test <dir>` | In-process test runner (no TCP, memory SQLite) |
 | `hull deploy <target> [app_dir]` | [Generate deployment configs](#deployment) — Dockerfile, systemd, fly.toml |
 | `hull agent <subcommand>` | [AI agent interface](#using-hull-with-ai-agents) — routes, schema, tests, requests as JSON |
@@ -90,13 +91,22 @@ The build links against `libhull_platform.a` — a static archive containing Kee
 
 ### Cross-Platform Builds
 
-Hull supports three compiler targets:
+Hull supports four compiler targets:
 
-| Compiler | Target | Binary Type |
-|----------|--------|-------------|
-| `gcc` / `clang` | Linux | ELF |
-| `gcc` / `clang` | macOS | Mach-O |
-| `cosmocc` | Any x86_64/aarch64 | APE (Actually Portable Executable) |
+| Compiler | Target | Binary Type | Notes |
+|----------|--------|-------------|-------|
+| Embedded TinyCC | Linux / macOS | ELF / Mach-O | Default; zero-dependency; compile-only (links via system ld) |
+| `gcc` / `clang` | Linux / macOS | ELF / Mach-O | `--compiler=system` or explicit path |
+| `cosmocc` | Any x86_64/aarch64 | APE (Actually Portable Executable) | Multi-arch fat binary |
+
+**Zero-dependency builds:** Distribution builds of Hull embed a copy of [TinyCC](https://github.com/TinyCC/tinycc) (mob branch, ~400 KB). When no system compiler is installed, `hull build` uses the embedded TinyCC for the compile step and falls back to the system linker (`ld`/`cc`) for linking. `hull doctor` reports whether TinyCC is embedded and whether a system compiler is available.
+
+```bash
+hull build -o myapp .                  # auto-select: embedded tcc → system cc → gcc/clang
+hull build -o myapp . --compiler=tcc   # force embedded tcc (compile) + system linker
+hull build -o myapp . --compiler=system  # force system cc (no tcc fallback)
+hull build -o myapp . --compiler=/path/to/cc  # explicit compiler path
+```
 
 Cosmopolitan APE binaries run on Linux, macOS, Windows, FreeBSD, OpenBSD, and NetBSD from a single file. Hull builds multi-architecture platform archives (`make platform-cosmo`) so the resulting APE binary is a true fat binary for both x86_64 and aarch64.
 

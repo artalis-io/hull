@@ -633,7 +633,7 @@ hull version --json       # {"version":"0.1.0","runtime":"lua+js","platform":"da
 
 # Check environment readiness (compiler available, platform embedded)
 hull doctor               # human-readable report; exits 0 if hull build is ready
-hull doctor --json        # {"version":"0.1.0","platform_embedded":"multi-arch","hull_build":"ready",...}
+hull doctor --json        # {"version":"0.1.0","platform_embedded":"multi-arch","tcc_embedded":true,"hull_build":"ready",...}
 
 # Initialize a hull project in-place (idempotent, like git init)
 hull init                 # initialize in current directory (Lua)
@@ -642,6 +642,9 @@ hull init . --runtime js  # initialize with JS runtime
 
 # Build standalone binary (includes app + stdlib + SQLite)
 hull build myapp/
+hull build myapp/ --compiler=tcc     # force embedded TinyCC (zero-dependency)
+hull build myapp/ --compiler=system  # force system cc (gcc/clang from PATH)
+hull build myapp/ --compiler=/path/to/cc  # explicit compiler path
 
 # The binary is self-contained — deploy anywhere
 ./myapp -p 8080 -d /data/app.db
