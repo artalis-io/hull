@@ -631,6 +631,15 @@ Every capability module is instrumented: `db.query`, `db.exec`, `fs.read`, `fs.w
 hull version              # hull 0.1.0
 hull version --json       # {"version":"0.1.0","runtime":"lua+js","platform":"darwin-arm64","build":"release"}
 
+# Check environment readiness (compiler available, platform embedded)
+hull doctor               # human-readable report; exits 0 if hull build is ready
+hull doctor --json        # {"version":"0.1.0","platform_embedded":"multi-arch","hull_build":"ready",...}
+
+# Initialize a hull project in-place (idempotent, like git init)
+hull init                 # initialize in current directory (Lua)
+hull init myapp           # initialize in ./myapp/ (creates dir if needed)
+hull init . --runtime js  # initialize with JS runtime
+
 # Build standalone binary (includes app + stdlib + SQLite)
 hull build myapp/
 

@@ -134,15 +134,19 @@ Client → Keel HTTP → Route Match → hl_{lua,js}_dispatch() → Handler → 
 
 ### Command Dispatch
 
-Table-driven dispatcher in `src/hull/commands/dispatch.c`. 17 commands:
+Table-driven dispatcher in `src/hull/commands/dispatch.c`. 19 commands:
 
 ```
-hull keygen | build | verify | inspect | manifest | test | new | dev | eject | sign-platform | migrate | agent | mcp | check | compute | deploy | version
+hull keygen | build | verify | inspect | manifest | test | new | init | dev | eject | sign-platform | migrate | agent | mcp | check | compute | deploy | version | doctor
 Runtime flags: --audit (capability audit logging), --agent (sidecar files), --no-migrate, --no-sandbox, --skip-ca-bundle
 Global flags: --version / -v (equivalent to hull version)
 ```
 
 Each command is a separate `.c`/`.h` under `src/hull/commands/`. Adding a new command = one line in the table + one source file.
+
+**`hull init [dir] [--runtime lua|js]`** — Initialize a hull project in-place. Like `git init`: creates missing files (`app.lua`, `tests/`, `migrations/`, `.gitignore`) without touching existing ones. Detects existing runtime from `app.lua`/`app.js` presence. Implemented as a Lua tool module (`stdlib/lua/hull/init.lua`).
+
+**`hull doctor [--json]`** — Environment check for distribution readiness. Reports hull version/runtime/platform, whether the platform library is embedded (none / single-arch / multi-arch), and which C compilers (`cc`, `gcc`, `clang`, `cosmocc`) are found in PATH. Exits 0 only when `hull build` is fully ready. Pure C implementation (`src/hull/commands/doctor.c`). `--json` for machine-readable output.
 
 ### Agent Tooling (`hull agent`)
 

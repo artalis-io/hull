@@ -28,6 +28,8 @@
 #include "hull/commands/compute.h"
 #include "hull/commands/deploy.h"
 #include "hull/commands/version.h"
+#include "hull/commands/doctor.h"
+#include "hull/commands/init.h"
 
 #include <string.h>
 
@@ -51,6 +53,8 @@ static const HlCommand commands[] = {
     { "compute",       hl_cmd_compute },
     { "deploy",        hl_cmd_deploy },
     { "version",       hl_cmd_version },
+    { "doctor",        hl_cmd_doctor },
+    { "init",          hl_cmd_init },
     { NULL, NULL }  /* sentinel */
 };
 

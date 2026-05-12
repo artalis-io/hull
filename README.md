@@ -49,7 +49,8 @@ Hull ships 16 subcommands for the full development lifecycle:
 
 | Command | Purpose |
 |---------|---------|
-| `hull new <name>` | Scaffold a new project with example routes and tests |
+| `hull new <name>` | Scaffold a new project in a new directory |
+| `hull init [dir]` | Initialize a hull project in-place (idempotent, like `git init`) |
 | `hull dev <app>` | Development server with hot reload |
 | `hull build -o <out> <dir>` | Compile app into a standalone binary |
 | `hull test <dir>` | In-process test runner (no TCP, memory SQLite) |
@@ -62,6 +63,7 @@ Hull ships 16 subcommands for the full development lifecycle:
 | `hull sign-platform <key>` | Sign platform library with per-arch hashes |
 | `hull manifest <app>` | Extract and print manifest as JSON |
 | `hull version [--json]` | Print version string (`--json` for machine-readable output) |
+| `hull doctor [--json]` | Check environment: compiler available, platform embedded, hull build readiness |
 | `hull <app> --max-instructions N` | Set per-request instruction limit (default: 100M) |
 | `hull <app> --audit` | Enable capability audit logging (JSON to stderr) |
 | `hull <app> --max-connections N` | Max concurrent connections (default: 256) |
