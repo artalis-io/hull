@@ -39,3 +39,6 @@ Thumbs.db
 # Environment
 .env
 .env.local
+
+# Generated version file (written by release workflow, overrides git describe)
+/VERSION

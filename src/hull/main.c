@@ -39,6 +39,7 @@
 
 #include <keel/tls_mbedtls.h>
 #include "hull/commands/dispatch.h"
+#include "hull/commands/version.h"
 #include "hull/agent_api.h"
 #include "hull/limits.h"
 #include "hull/manifest.h"
@@ -1248,6 +1249,15 @@ static int hull_serve(int argc, char **argv)
 
 int hull_main(int argc, char **argv)
 {
+    /* Handle -v / --version before subcommand dispatch so that
+     * `hull --version` and `hull -v` work as conventional global flags. */
+    if (argc >= 2 &&
+        (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-v") == 0)) {
+        char *ver_argv[] = { "version" };
+        HlCommandEnv env = { .hull_exe = argv[0], .app_dir = "." };
+        return hl_cmd_version(1, ver_argv, &env);
+    }
+
     int rc = hl_command_dispatch(argc, argv);
     if (rc != -1)
         return rc;

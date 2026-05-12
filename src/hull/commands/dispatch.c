@@ -27,6 +27,7 @@
 #include "hull/commands/check.h"
 #include "hull/commands/compute.h"
 #include "hull/commands/deploy.h"
+#include "hull/commands/version.h"
 
 #include <string.h>
 
@@ -49,6 +50,7 @@ static const HlCommand commands[] = {
     { "check",         hl_cmd_check },
     { "compute",       hl_cmd_compute },
     { "deploy",        hl_cmd_deploy },
+    { "version",       hl_cmd_version },
     { NULL, NULL }  /* sentinel */
 };
 

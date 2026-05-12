@@ -29,6 +29,22 @@ endif
 # Platform detection
 UNAME_S := $(shell uname -s)
 
+# ── Version string ────────────────────────────────────────────────────
+#
+# Precedence (highest to lowest):
+#   1. VERSION file in repo root (written by release workflow before build)
+#   2. git describe --tags --always --dirty
+#   3. Fallback literal "dev"
+_VERSION_FILE := $(shell cat VERSION 2>/dev/null)
+ifneq ($(_VERSION_FILE),)
+  HL_VERSION := $(_VERSION_FILE)
+else
+  HL_VERSION := $(shell git describe --tags --always --dirty 2>/dev/null)
+  ifeq ($(HL_VERSION),)
+    HL_VERSION := dev
+  endif
+endif
+
 CFLAGS  := -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2
 ifndef COSMO
   CFLAGS += -fstack-protector-strong
@@ -53,6 +69,8 @@ ifdef COVERAGE
 CFLAGS  += -g -O0 --coverage
 LDFLAGS += --coverage
 endif
+
+CFLAGS += -DHL_VERSION=\"$(HL_VERSION)\"
 
 .DEFAULT_GOAL := all
 
@@ -1180,6 +1198,8 @@ endif
 ifeq ($(HL_ENABLE_GPU),1)
   CFLAGS += -DHL_ENABLE_GPU -I$(VENDDIR)/wgpu
 endif
+# Re-add version string (the := above clobbers earlier += additions)
+CFLAGS += -DHL_VERSION=\"$(HL_VERSION)\"
 endif
 
 msan:

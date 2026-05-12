@@ -134,11 +134,12 @@ Client → Keel HTTP → Route Match → hl_{lua,js}_dispatch() → Handler → 
 
 ### Command Dispatch
 
-Table-driven dispatcher in `src/hull/commands/dispatch.c`. 16 commands:
+Table-driven dispatcher in `src/hull/commands/dispatch.c`. 17 commands:
 
 ```
-hull keygen | build | verify | inspect | manifest | test | new | dev | eject | sign-platform | migrate | agent | mcp | check | compute | deploy
+hull keygen | build | verify | inspect | manifest | test | new | dev | eject | sign-platform | migrate | agent | mcp | check | compute | deploy | version
 Runtime flags: --audit (capability audit logging), --agent (sidecar files), --no-migrate, --no-sandbox, --skip-ca-bundle
+Global flags: --version / -v (equivalent to hull version)
 ```
 
 Each command is a separate `.c`/`.h` under `src/hull/commands/`. Adding a new command = one line in the table + one source file.

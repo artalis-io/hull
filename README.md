@@ -61,6 +61,7 @@ Hull ships 16 subcommands for the full development lifecycle:
 | `hull keygen <name>` | Generate Ed25519 signing keypair |
 | `hull sign-platform <key>` | Sign platform library with per-arch hashes |
 | `hull manifest <app>` | Extract and print manifest as JSON |
+| `hull version [--json]` | Print version string (`--json` for machine-readable output) |
 | `hull <app> --max-instructions N` | Set per-request instruction limit (default: 100M) |
 | `hull <app> --audit` | Enable capability audit logging (JSON to stderr) |
 | `hull <app> --max-connections N` | Max concurrent connections (default: 256) |
@@ -288,7 +289,7 @@ app.manifest({
 |----------|---------------|-----------|---------------|
 | Linux (gcc/clang) | seccomp-bpf + Landlock | SIGKILL | No |
 | Cosmopolitan APE | Native pledge/unveil | SIGKILL | Yes (no LD_PRELOAD) |
-| macOS | C-level validation only | Error return | No |
+| macOS | Seatbelt (sandbox_init, deny-default SBPL) | EPERM | No |
 
 See [docs/security.md](docs/security.md) for the full attack model and [docs/architecture.md](docs/architecture.md) for implementation details.
 

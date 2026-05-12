@@ -627,6 +627,10 @@ Every capability module is instrumented: `db.query`, `db.exec`, `fs.read`, `fs.w
 ## Build & Deploy
 
 ```bash
+# Print hull version
+hull version              # hull 0.1.0
+hull version --json       # {"version":"0.1.0","runtime":"lua+js","platform":"darwin-arm64","build":"release"}
+
 # Build standalone binary (includes app + stdlib + SQLite)
 hull build myapp/
 
