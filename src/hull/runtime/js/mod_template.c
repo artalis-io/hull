@@ -99,11 +99,18 @@ static JSValue js_template_load_raw(JSContext *ctx, JSValueConst this_val,
         int n = snprintf(path, sizeof(path), "%s/templates/%s",
                          js->app_dir, name);
         if (n > 0 && (size_t)n < sizeof(path)) {
-            /* Verify resolved path stays within app_dir (symlink escape check) */
+            /* Verify resolved path stays within app_dir (symlink escape check).
+             * Canonicalize app_dir too — it may be a relative path when
+             * invoked as `hull test relative/path/`. */
             char resolved[PATH_MAX];
             if (realpath(path, resolved)) {
-                size_t app_dir_len = strlen(js->app_dir);
-                if (strncmp(resolved, js->app_dir, app_dir_len) != 0 ||
+                char real_app_dir[PATH_MAX];
+                if (!realpath(js->app_dir, real_app_dir)) {
+                    JS_FreeCString(ctx, name);
+                    return JS_ThrowTypeError(ctx, "invalid template name");
+                }
+                size_t app_dir_len = strlen(real_app_dir);
+                if (strncmp(resolved, real_app_dir, app_dir_len) != 0 ||
                     (resolved[app_dir_len] != '/' && resolved[app_dir_len] != '\0')) {
                     JS_FreeCString(ctx, name);
                     return JS_ThrowTypeError(ctx, "invalid template name");

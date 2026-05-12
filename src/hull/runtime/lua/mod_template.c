@@ -78,11 +78,16 @@ static int lua_template_load_raw(lua_State *L)
         int n = snprintf(path, sizeof(path), "%s/templates/%s",
                          lua->app_dir, name);
         if (n > 0 && (size_t)n < sizeof(path)) {
-            /* Verify resolved path stays within app_dir (symlink escape check) */
+            /* Verify resolved path stays within app_dir (symlink escape check).
+             * Canonicalize app_dir too — it may be a relative path when
+             * invoked as `hull test relative/path/`. */
             char resolved[PATH_MAX];
             if (realpath(path, resolved)) {
-                size_t app_dir_len = strlen(lua->app_dir);
-                if (strncmp(resolved, lua->app_dir, app_dir_len) != 0 ||
+                char real_app_dir[PATH_MAX];
+                if (!realpath(lua->app_dir, real_app_dir))
+                    return luaL_error(L, "invalid template name: %s", name);
+                size_t app_dir_len = strlen(real_app_dir);
+                if (strncmp(resolved, real_app_dir, app_dir_len) != 0 ||
                     (resolved[app_dir_len] != '/' && resolved[app_dir_len] != '\0'))
                     return luaL_error(L, "invalid template name: %s", name);
             }
