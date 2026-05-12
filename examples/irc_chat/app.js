@@ -160,7 +160,7 @@ app.use("*", "/*", (req, _res) => {
     const header = req.headers.cookie;
     if (!header) return 0;
     const cookies = cookie.parse(header);
-    const sessionId = cookies["hull_session"];
+    const sessionId = cookies.hull_session;
     if (sessionId) {
         const data = session.load(sessionId);
         if (data) {
@@ -366,7 +366,7 @@ app.get("/dm/:username/history", (req, res) => {
     if (other.length === 0)
         return res.status(404).json({ error: "user not found" });
 
-    let limit = parseInt(req.query.limit) || 50;
+    let limit = Number.parseInt(req.query.limit) || 50;
     if (limit > 200) limit = 200;
     const myId = sess.user_id;
     const otherId = other[0].id;
@@ -382,7 +382,7 @@ app.get("/dm/:username/history", (req, res) => {
             "WHERE ((dm.sender_id = ? AND dm.recipient_id = ?) " +
             "OR (dm.sender_id = ? AND dm.recipient_id = ?)) " +
             "AND dm.id < ? ORDER BY dm.created_at DESC LIMIT ?",
-            [myId, myId, otherId, otherId, myId, parseInt(req.query.before), limit]);
+            [myId, myId, otherId, otherId, myId, Number.parseInt(req.query.before), limit]);
     } else {
         messages = db.query(
             "SELECT dm.id, u.username as 'from', " +
@@ -772,7 +772,7 @@ app.get("/files/:id", (req, res) => {
         "SELECT f.id, f.uploader_id, f.filename, f.size, f.content, f.channel_id, " +
         "f.recipient_id, f.nonce, f.created_at, u.username as 'from' " +
         "FROM files f JOIN users u ON u.id = f.uploader_id WHERE f.id = ?",
-        [parseInt(req.params.id)]);
+        [Number.parseInt(req.params.id)]);
     if (rows.length === 0) return res.status(404).json({ error: "file not found" });
 
     const file = rows[0];
@@ -1549,19 +1549,19 @@ function cleanupExpired() {
         const cutoff = now - RETENTION.channelTtl;
         db.exec("DELETE FROM messages WHERE created_at < ?", [cutoff]);
         const del = db.query("SELECT changes() as n");
-        deleted += (del[0] && del[0].n) || 0;
+        deleted += del[0]?.n ?? 0;
     }
     if (RETENTION.dmTtl > 0) {
         const cutoff = now - RETENTION.dmTtl;
         db.exec("DELETE FROM direct_messages WHERE created_at < ?", [cutoff]);
         const del = db.query("SELECT changes() as n");
-        deleted += (del[0] && del[0].n) || 0;
+        deleted += del[0]?.n ?? 0;
     }
     if (RETENTION.fileTtl > 0) {
         const cutoff = now - RETENTION.fileTtl;
         db.exec("DELETE FROM files WHERE created_at < ?", [cutoff]);
         const del = db.query("SELECT changes() as n");
-        deleted += (del[0] && del[0].n) || 0;
+        deleted += del[0]?.n ?? 0;
     }
     if (RETENTION.maxFileStorage > 0) {
         const usage = db.query("SELECT COALESCE(SUM(size), 0) as total FROM files");
@@ -1570,7 +1570,7 @@ function cleanupExpired() {
             db.exec(
                 "DELETE FROM files WHERE id IN (SELECT id FROM files ORDER BY created_at ASC LIMIT 100)");
             const del = db.query("SELECT changes() as n");
-            deleted += (del[0] && del[0].n) || 0;
+            deleted += del[0]?.n ?? 0;
         }
     }
     if (deleted > 0) {

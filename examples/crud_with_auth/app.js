@@ -24,7 +24,7 @@ app.use("*", "/*", (req, _res) => {
     if (!header) return 0;
 
     const cookies = cookie.parse(header);
-    const sessionId = cookies["hull_session"];
+    const sessionId = cookies.hull_session;
     if (sessionId) {
         const data = session.load(sessionId);
         if (data) {
