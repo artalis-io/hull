@@ -866,14 +866,18 @@ static int hl_serve_load_app(HlServerState *s)
         log_error("[hull:c] failed to load %s", s->entry_point);
         if (s->cfg.agent_mode) {
             char err_dir[4096], err_path[4096];
-            snprintf(err_dir, sizeof(err_dir), "%s/.hull", s->app_dir);
-            mkdir(err_dir, 0755);
-            snprintf(err_path, sizeof(err_path), "%s/.hull/last_error.json", s->app_dir);
-            FILE *ef = fopen(err_path, "w");
-            if (ef) {
-                fprintf(ef, "{\"error\":\"failed to load %s\",\"timestamp\":%ld}\n",
-                        s->entry_point, (long)time(NULL));
-                fclose(ef);
+            int nd = snprintf(err_dir, sizeof(err_dir), "%s/.hull", s->app_dir);
+            int np = snprintf(err_path, sizeof(err_path),
+                              "%s/.hull/last_error.json", s->app_dir);
+            if (nd > 0 && (size_t)nd < sizeof(err_dir) &&
+                np > 0 && (size_t)np < sizeof(err_path)) {
+                mkdir(err_dir, 0755);
+                FILE *ef = fopen(err_path, "w");
+                if (ef) {
+                    fprintf(ef, "{\"error\":\"failed to load %s\",\"timestamp\":%ld}\n",
+                            s->entry_point, (long)time(NULL));
+                    fclose(ef);
+                }
             }
         }
         return -1;
@@ -883,8 +887,10 @@ static int hl_serve_load_app(HlServerState *s)
     /* Clear previous error file on successful load */
     if (s->cfg.agent_mode) {
         char err_path[4096];
-        snprintf(err_path, sizeof(err_path), "%s/.hull/last_error.json", s->app_dir);
-        unlink(err_path);
+        int np = snprintf(err_path, sizeof(err_path),
+                          "%s/.hull/last_error.json", s->app_dir);
+        if (np > 0 && (size_t)np < sizeof(err_path))
+            unlink(err_path);
     }
 
     return 0;

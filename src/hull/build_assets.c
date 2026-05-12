@@ -58,8 +58,10 @@ int hl_build_extract_platform_arch(const char *dir, const char *arch)
     for (int i = 0; hl_embedded_platforms[i].arch; i++) {
         if (strcmp(hl_embedded_platforms[i].arch, arch) == 0) {
             char path[1024];
-            snprintf(path, sizeof(path), "%s/libhull_platform.%s.a",
-                     dir, arch);
+            int n = snprintf(path, sizeof(path), "%s/libhull_platform.%s.a",
+                             dir, arch);
+            if (n < 0 || (size_t)n >= sizeof(path))
+                return -1;
             return write_blob(path, hl_embedded_platforms[i].data,
                               hl_embedded_platforms[i].len);
         }
@@ -81,7 +83,9 @@ int hl_build_extract_platform(const char *dir)
         return -1;
 
     char path[1024];
-    snprintf(path, sizeof(path), "%s/libhull_platform.a", dir);
+    int pn = snprintf(path, sizeof(path), "%s/libhull_platform.a", dir);
+    if (pn < 0 || (size_t)pn >= sizeof(path))
+        return -1;
     return write_blob(path, hl_embedded_platforms[0].data,
                       hl_embedded_platforms[0].len);
 #elif defined(HL_BUILD_EMBEDDED)
@@ -89,7 +93,9 @@ int hl_build_extract_platform(const char *dir)
         return -1;
 
     char path[1024];
-    snprintf(path, sizeof(path), "%s/libhull_platform.a", dir);
+    int pn = snprintf(path, sizeof(path), "%s/libhull_platform.a", dir);
+    if (pn < 0 || (size_t)pn >= sizeof(path))
+        return -1;
     return write_blob(path, hl_embedded_platform_a,
                       hl_embedded_platform_a_len);
 #else
@@ -140,10 +146,13 @@ int hl_build_extract_tcc(const char *dir)
     /* If tcc was not embedded (stub build), len is 0 — report failure */
     if (embedded_tcc_len == 0) return -1;
     char path[1024];
-    snprintf(path, sizeof(path), "%s/tcc", dir);
+    int pn = snprintf(path, sizeof(path), "%s/tcc", dir);
+    if (pn < 0 || (size_t)pn >= sizeof(path))
+        return -1;
     if (write_blob(path, embedded_tcc, embedded_tcc_len) != 0)
         return -1;
-    chmod(path, 0755);
+    if (chmod(path, 0755) != 0)
+        return -1;
     return 0;
 }
 

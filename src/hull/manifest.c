@@ -365,16 +365,20 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
         JSValue methods_val = JS_GetPropertyStr(ctx, cors_val, "methods");
         if (JS_IsString(methods_val)) {
             const char *s = JS_ToCString(ctx, methods_val);
-            out->cors_methods = manifest_strdup(alloc, s);
-            if (s) JS_FreeCString(ctx, s);
+            if (s) {
+                out->cors_methods = manifest_strdup(alloc, s);
+                JS_FreeCString(ctx, s);
+            }
         }
         JS_FreeValue(ctx, methods_val);
 
         JSValue headers_val = JS_GetPropertyStr(ctx, cors_val, "headers");
         if (JS_IsString(headers_val)) {
             const char *s = JS_ToCString(ctx, headers_val);
-            out->cors_headers = manifest_strdup(alloc, s);
-            if (s) JS_FreeCString(ctx, s);
+            if (s) {
+                out->cors_headers = manifest_strdup(alloc, s);
+                JS_FreeCString(ctx, s);
+            }
         }
         JS_FreeValue(ctx, headers_val);
 

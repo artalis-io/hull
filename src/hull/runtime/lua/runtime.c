@@ -1479,8 +1479,13 @@ int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
                     ws_route->on_open_id = on_open_id;
                     ws_route->on_message_id = on_message_id;
                     ws_route->on_close_id = on_close_id;
-                    snprintf(ws_route->path, sizeof(ws_route->path),
-                             "%s", path);
+                    int wn = snprintf(ws_route->path, sizeof(ws_route->path),
+                                      "%s", path);
+                    if (wn < 0 || (size_t)wn >= sizeof(ws_route->path)) {
+                        hl_alloc_free(lua->base.alloc, ws_route,
+                                      sizeof(HlLuaWsRoute));
+                        return luaL_error(L, "app.ws: path too long (max 255 chars)");
+                    }
 
                     if (hl_lua_track_alloc(lua, &lua->ws_routes,
                             &lua->ws_route_count,

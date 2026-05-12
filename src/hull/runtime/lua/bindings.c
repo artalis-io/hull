@@ -35,9 +35,10 @@
 static HlLua *get_hl_lua_from_L(lua_State *L)
 {
     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_lua");
-    HlLua *lua = (HlLua *)lua_touserdata(L, -1);
+    HlLua *hlua = lua_isuserdata(L, -1)
+                  ? (HlLua *)lua_touserdata(L, -1) : NULL;
     lua_pop(L, 1);
-    return lua;
+    return hlua;
 }
 
 /* ── Request object ─────────────────────────────────────────────────── */
@@ -242,6 +243,10 @@ static int lua_res_json(lua_State *L)
 
     size_t json_len;
     const char *json_str = lua_tolstring(L, -1, &json_len);
+    if (!json_str) {
+        lua_pop(L, 2);
+        return luaL_error(L, "res:json — json.encode did not return a string");
+    }
     kl_response_header(res, "Content-Type", "application/json");
     hl_maybe_compress(hlua ? hlua->active_req : NULL, res,
                       hlua ? hlua->base.compress : NULL,

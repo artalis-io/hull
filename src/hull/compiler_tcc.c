@@ -36,13 +36,17 @@ static int tcc_ensure_extracted(TccCtx *ctx)
     char tmpl[] = "/tmp/hull_tcc_XXXXXX";
     char *dir = mkdtemp(tmpl);
     if (!dir) return -1;
-    snprintf(ctx->tmp_dir, sizeof(ctx->tmp_dir), "%s", dir);
+    int dn = snprintf(ctx->tmp_dir, sizeof(ctx->tmp_dir), "%s", dir);
+    if (dn < 0 || (size_t)dn >= sizeof(ctx->tmp_dir))
+        return -1;
 
     if (hl_build_extract_tcc(ctx->tmp_dir) != 0)
         return -1;
 
-    snprintf(ctx->tcc_path, sizeof(ctx->tcc_path),
-             "%s/tcc", ctx->tmp_dir);
+    int tn = snprintf(ctx->tcc_path, sizeof(ctx->tcc_path),
+                      "%s/tcc", ctx->tmp_dir);
+    if (tn < 0 || (size_t)tn >= sizeof(ctx->tcc_path))
+        return -1;
     ctx->extracted = 1;
     return 0;
 }
@@ -52,9 +56,14 @@ static const char *tcc_name(HlCompiler *c) { (void)c; return "tcc"; }
 static int tcc_is_available(HlCompiler *c)
 {
     TccCtx *ctx = (TccCtx *)c->ctx;
-    /* tcc is not useful when cosmo platform archives are embedded */
+    /* tcc produces ELF objects; not useful on cosmo (APE archives) or macOS (Mach-O) */
     if (hl_build_get_platforms(NULL) > 0) return 0;
+#if defined(__APPLE__)
+    (void)ctx;
+    return 0;
+#else
     return tcc_ensure_extracted(ctx) == 0;
+#endif
 }
 
 static char *tcc_version(HlCompiler *c)

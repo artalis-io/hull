@@ -18,6 +18,7 @@
 #include "hull/sandbox.h"
 #include "log.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -104,6 +105,10 @@ static int sb_supported(void) { return 1; }
 #define SEATBELT_PROFILE_SIZE  8192
 #define SEATBELT_MAX_PARAMS    256   /* key-value pairs + NULL terminator */
 #define SEATBELT_PATH_SIZE     4096  /* max path length for resolved paths */
+
+/* realpath(3) writes up to PATH_MAX bytes — assert our buffer is large enough */
+_Static_assert(SEATBELT_PATH_SIZE >= PATH_MAX,
+               "SEATBELT_PATH_SIZE must be >= PATH_MAX");
 
 /* Scratch buffers for derived paths (stack-allocated in caller) */
 typedef struct {
@@ -594,13 +599,11 @@ int hl_sandbox_apply(const HlManifest *manifest, const char *app_dir,
      *   dns    — outbound HTTP name resolution (when hosts declared)
      */
     char promises[256];
-    snprintf(promises, sizeof(promises),
-             "stdio inet rpath wpath cpath flock");
-
-    if (manifest->hosts_count > 0) {
-        size_t len = strlen(promises);
-        snprintf(promises + len, sizeof(promises) - len, " dns");
-    }
+    int plen = snprintf(promises, sizeof(promises),
+                        "stdio inet rpath wpath cpath flock");
+    if (plen > 0 && manifest->hosts_count > 0 &&
+        (size_t)plen < sizeof(promises))
+        snprintf(promises + plen, sizeof(promises) - (size_t)plen, " dns");
 
     if (pledge(promises, NULL) != 0) {
         log_error("[sandbox] pledge failed");

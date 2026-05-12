@@ -2007,9 +2007,17 @@ int hl_js_wire_routes_server(HlJS *js, KlServer *server,
                     ws_route->on_open_id = on_open_id;
                     ws_route->on_message_id = on_message_id;
                     ws_route->on_close_id = on_close_id;
-                    snprintf(ws_route->path, sizeof(ws_route->path),
-                             "%s", path);
-
+                    int wn = snprintf(ws_route->path, sizeof(ws_route->path),
+                                      "%s", path);
+                    if (wn < 0 || (size_t)wn >= sizeof(ws_route->path)) {
+                        log_warn("[hull:js] app.ws: path too long (max 255 chars): %s",
+                                 path);
+                        hl_alloc_free(js->base.alloc, ws_route,
+                                      sizeof(HlJSWsRoute));
+                        ws_route = NULL;
+                    }
+                }
+                if (ws_route) {
                     if (hl_js_track_alloc(js, &js->ws_routes,
                             &js->ws_route_count,
                             &js->ws_route_cap, ws_route) != 0) {
