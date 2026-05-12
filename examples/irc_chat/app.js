@@ -160,7 +160,7 @@ app.use("*", "/*", (req, _res) => {
     const header = req.headers.cookie;
     if (!header) return 0;
     const cookies = cookie.parse(header);
-    const sessionId = cookies["hull.sid"];
+    const sessionId = cookies["hull_session"];
     if (sessionId) {
         const data = session.load(sessionId);
         if (data) {
@@ -728,7 +728,7 @@ app.post("/files", (req, res) => {
 
     if (RETENTION.maxFileStorage > 0) {
         const usage = db.query("SELECT COALESCE(SUM(size), 0) as total FROM files");
-        const total = (usage[0] && usage[0].total) || 0;
+        const total = usage[0]?.total ?? 0;
         if (total + size > RETENTION.maxFileStorage)
             return res.status(507).json({ error: "file storage limit reached" });
     }
@@ -1092,7 +1092,7 @@ app.get("/e2e-test", async (req, res) => {
         const origMax = RETENTION.maxFileStorage;
         RETENTION.maxFileStorage = 1; // 1 byte limit
         const usage = db.query("SELECT COALESCE(SUM(size), 0) as total FROM files");
-        const total = (usage[0] && usage[0].total) || 0;
+        const total = usage[0]?.total ?? 0;
         results.file_capacity_ok = total + 100 > RETENTION.maxFileStorage;
         RETENTION.maxFileStorage = origMax;
     } catch (_e) { /* ignore */ }
@@ -1565,7 +1565,7 @@ function cleanupExpired() {
     }
     if (RETENTION.maxFileStorage > 0) {
         const usage = db.query("SELECT COALESCE(SUM(size), 0) as total FROM files");
-        const total = (usage[0] && usage[0].total) || 0;
+        const total = usage[0]?.total ?? 0;
         if (total > RETENTION.maxFileStorage) {
             db.exec(
                 "DELETE FROM files WHERE id IN (SELECT id FROM files ORDER BY created_at ASC LIMIT 100)");

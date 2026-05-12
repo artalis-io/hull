@@ -151,8 +151,20 @@ static char *hl_js_module_normalize(JSContext *ctx,
             resolved[dir_len] = '/';
             memcpy(resolved + dir_len + 1, name, name_len + 1);
 
-            /* Verify resolved path doesn't contain ".." components */
-            if (hl_js_validate_module_name(resolved) != 0) {
+            /* Verify the resolved path doesn't introduce ".." traversal.
+             * The resolved path may legitimately start with '/' when the
+             * base module was loaded from an absolute filesystem path (dev
+             * mode), so only reject ".." components, not absolute paths. */
+            int has_dotdot = 0;
+            for (const char *p = resolved; *p && !has_dotdot; ) {
+                if (p[0] == '.' && p[1] == '.' &&
+                    (p[2] == '/' || p[2] == '\0'))
+                    has_dotdot = 1;
+                const char *sl = strchr(p, '/');
+                if (!sl) break;
+                p = sl + 1;
+            }
+            if (has_dotdot) {
                 js_free(ctx, resolved);
                 JS_ThrowReferenceError(ctx, "invalid module path: %s", name);
                 return NULL;
