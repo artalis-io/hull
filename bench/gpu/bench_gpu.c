@@ -129,19 +129,23 @@ static const char COSINE_WGSL[] =
 static void bench_native(uint32_t dims, uint32_t count, int iters,
                           uint64_t *samples, float *ref_results)
 {
-    float *query = malloc(dims * 4);
-    float *candidates = malloc((size_t)count * dims * 4);
+    size_t q_size, c_size, out_max, in_len;
+    if (__builtin_mul_overflow((size_t)dims, 4u, &q_size) ||
+        __builtin_mul_overflow((size_t)count, q_size, &c_size) ||
+        __builtin_mul_overflow((size_t)count, 4u, &out_max) ||
+        __builtin_add_overflow(q_size, c_size, &in_len) ||
+        __builtin_add_overflow(in_len, 8u, &in_len)) return;
+    float *query = malloc(q_size);
+    float *candidates = malloc(c_size);
     generate_vectors(query, candidates, dims, count);
 
     /* Pack input: [dims:u32] [count:u32] [query] [candidates] */
-    size_t in_len = 8 + (size_t)dims * 4 + (size_t)count * dims * 4;
     uint8_t *input = malloc(in_len);
     memcpy(input, &dims, 4);
     memcpy(input + 4, &count, 4);
-    memcpy(input + 8, query, dims * 4);
-    memcpy(input + 8 + dims * 4, candidates, (size_t)count * dims * 4);
+    memcpy(input + 8, query, q_size);
+    memcpy(input + 8 + q_size, candidates, c_size);
 
-    size_t out_max = (size_t)count * 4;
     float *output = malloc(out_max);
 
     /* Warmup */
@@ -172,16 +176,20 @@ static void bench_wasm(HlWasmCache *cache, const char *module_name,
                         uint32_t dims, uint32_t count, int iters,
                         uint64_t *samples, const float *ref_results)
 {
-    float *query = malloc(dims * 4);
-    float *candidates = malloc((size_t)count * dims * 4);
+    size_t q_size, c_size, in_len;
+    if (__builtin_mul_overflow((size_t)dims, 4u, &q_size) ||
+        __builtin_mul_overflow((size_t)count, q_size, &c_size) ||
+        __builtin_add_overflow(q_size, c_size, &in_len) ||
+        __builtin_add_overflow(in_len, 8u, &in_len)) return;
+    float *query = malloc(q_size);
+    float *candidates = malloc(c_size);
     generate_vectors(query, candidates, dims, count);
 
-    size_t in_len = 8 + (size_t)dims * 4 + (size_t)count * dims * 4;
     uint8_t *input = malloc(in_len);
     memcpy(input, &dims, 4);
     memcpy(input + 4, &count, 4);
-    memcpy(input + 8, query, dims * 4);
-    memcpy(input + 8 + dims * 4, candidates, (size_t)count * dims * 4);
+    memcpy(input + 8, query, q_size);
+    memcpy(input + 8 + q_size, candidates, c_size);
 
     HlWasmCallOpts opts = {0};
     opts.max_input = in_len + 1024;
@@ -249,15 +257,18 @@ static void bench_wasm(HlWasmCache *cache, const char *module_name,
 static void bench_gpu(HlGpuCtx *gpu_ctx, uint32_t dims, uint32_t count,
                        int iters, uint64_t *samples, const float *ref_results)
 {
-    float *query = malloc(dims * 4);
-    float *candidates = malloc((size_t)count * dims * 4);
+    size_t q_size, c_size;
+    if (__builtin_mul_overflow((size_t)dims, 4u, &q_size) ||
+        __builtin_mul_overflow((size_t)count, q_size, &c_size)) return;
+    float *query = malloc(q_size);
+    float *candidates = malloc(c_size);
     generate_vectors(query, candidates, dims, count);
 
     /* Create persistent candidate buffer */
     hl_cap_gpu_buffer_create(gpu_ctx, -1, "bench_candidates",
-                              (size_t)count * dims * 4, HL_GPU_USAGE_READ);
+                              c_size, HL_GPU_USAGE_READ);
     hl_cap_gpu_buffer_write(gpu_ctx, -1, "bench_candidates",
-                             candidates, (size_t)count * dims * 4, 0);
+                             candidates, c_size, 0);
 
     /* Pack uniform: { dims, count } padded to 16 bytes */
     uint32_t uniforms[4] = { dims, count, 0, 0 };
@@ -450,7 +461,9 @@ int main(int argc, char **argv)
     };
     int nsizes = (int)(sizeof(sizes) / sizeof(sizes[0]));
 
-    uint64_t *samples = malloc((size_t)iters * sizeof(uint64_t));
+    size_t samples_size;
+    if (__builtin_mul_overflow((size_t)iters, sizeof(uint64_t), &samples_size)) return;
+    uint64_t *samples = malloc(samples_size);
 
     printf("%-8s  %12s  %12s  %12s  %12s  %12s\n",
            "Vectors", "Native (us)", "Interp (us)", "AOT (us)", "GPU (us)", "GPU vs AOT");
@@ -459,7 +472,9 @@ int main(int argc, char **argv)
 
     for (int si = 0; si < nsizes; si++) {
         uint32_t count = sizes[si].count;
-        float *ref = malloc(count * 4);
+        size_t ref_size;
+        if (__builtin_mul_overflow((size_t)count, 4u, &ref_size)) continue;
+        float *ref = malloc(ref_size);
 
         /* Native */
         bench_native(DIMENSIONS, count, iters, samples, ref);
