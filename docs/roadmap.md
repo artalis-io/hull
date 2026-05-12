@@ -12,11 +12,18 @@
 
 ### Capabilities (C enforcement layer)
 - **Crypto:** SHA-256, SHA-512, HMAC-SHA256, HMAC-SHA512/256, PBKDF2, base64url, random bytes, password hash/verify, Ed25519 (sign/verify/keypair), XSalsa20+Poly1305 secretbox, Curve25519 box
-- **Filesystem:** Sandboxed read/write/exists/delete with path traversal rejection, symlink escape prevention
-- **Database:** Query/exec with parameterized binding, batch transactions, statement cache
-- **HTTP client:** Outbound HTTP/HTTPS with host allowlist enforcement (mbedTLS)
+- **Filesystem:** Sandboxed read/write/exists/delete/mmap with path traversal rejection, symlink escape prevention via realpath
+- **Database:** Query/exec with parameterized binding, batch transactions, statement cache, user-defined functions (Lua/JS/WASM)
+- **HTTP client:** Outbound HTTP/HTTPS with host allowlist enforcement (mbedTLS), connection pooling, redirect following, async
 - **Environment:** Allowlist-enforced env var access
 - **Time:** now, now_ms, clock, date, datetime
+- **WASM compute:** Module load/call/stream, gas metering, instance pooling, persistent instances, shared data segments, SIMD128, Memory64, AOT
+- **GPU compute:** wgpu-native dispatch/pipeline, persistent buffers/textures, fire-and-forget, async, buffer copy, shader loading
+- **Image:** stb_image decode/encode (PNG/JPEG/BMP), raw pixel buffers
+- **WebSocket:** Server endpoints + client connections, broadcast, per-connection data
+- **SSE:** Server-Sent Events with chunked transfer encoding
+- **SMTP:** Outbound email with TLS, template support
+- **Audit:** Structured JSON capability logging (zero overhead when disabled)
 
 ### Standard Library (Lua + JS)
 - `hull.json` — canonical JSON encode/decode (sorted keys for deterministic signatures)
@@ -48,10 +55,11 @@
 - Detached async mode — timer callbacks use `kl_timer_add` instead of `kl_async_suspend` for connectionless operation
 
 ### Build & Deployment
-- `hull build` — compile Lua/JS apps into standalone binaries
+- `hull build` — compile Lua/JS apps into standalone binaries (auto-AOT for WASM, embeds all assets)
 - `hull new` — project scaffolding with example routes and tests
 - `hull dev` — development server with hot reload
 - `hull test` — in-process test runner (no TCP, memory SQLite, both runtimes)
+- `hull deploy` — deployment config generator (Dockerfile, systemd, fly.toml) — manifest-aware
 - `hull eject` — export to standalone Makefile project
 - `hull inspect` — display capabilities and signature status
 - `hull verify` — dual-layer Ed25519 signature verification
@@ -59,8 +67,11 @@
 - `hull sign-platform` — sign platform libraries with per-arch hashes
 - `hull manifest` — extract and print manifest as JSON
 - `hull migrate` — SQL migration runner (auto-run on startup, embedded in builds)
-- `hull migrate new` — migration scaffolding
-- `hull migrate status` — migration status display
+- `hull migrate new` / `hull migrate status` — migration scaffolding and status
+- `hull agent` — 10 machine-readable subcommands (routes, db schema/query, request, status, errors, test, context, migrate, deploy)
+- `hull mcp` — stdio MCP server wrapping agent core
+- `hull compute` — WASM module management
+- `hull check` — full validation (clean + ASan + test + e2e)
 - Multi-arch Cosmopolitan APE builds (`make platform-cosmo`)
 - Self-build reproducibility chain (hull → hull2 → hull3)
 
@@ -80,13 +91,126 @@
 - ASan + UBSan, MSan + UBSan sanitizer runs
 - Static analysis (scan-build + cppcheck)
 - Code coverage
-- E2E tests for all 11 examples in both runtimes + 40 template engine tests + stdlib middleware tests
+- E2E tests for all examples in both runtimes + template engine tests + stdlib middleware tests + deploy config tests
 - Sandbox violation tests (Linux + Cosmo)
-- Benchmarks (Lua vs QuickJS, DB vs non-DB routes)
+- Benchmarks (Lua vs QuickJS, DB vs non-DB routes, WASM interpreter vs AOT, GPU vs CPU)
 
 ## Roadmap
 
-### Next — Standard Library Expansion
+### Next — Distribution: hull.com Downloadable Tool
+
+The goal: a single downloadable Cosmopolitan APE binary that users install and immediately use to create, build, test, run, and deploy Hull applications — zero dependencies.
+
+#### Current State
+
+The core pipeline works end-to-end:
+
+```
+hull new myapp          ✅  scaffold project
+hull dev app.lua        ✅  hot-reload dev server
+hull test myapp/        ✅  in-process test runner
+hull build myapp/       ✅  compile to standalone binary
+hull deploy dockerfile  ✅  deployment config generator
+hull keygen             ✅  Ed25519 keypair
+hull verify             ✅  signature verification
+make CC=cosmocc         ✅  APE binary builds
+EMBED_PLATFORM=cosmo    ✅  platform archives embedded in hull binary
+make self-build         ✅  reproducible build chain verified
+```
+
+The missing piece: `hull build` shells out to `cc` to compile generated C code. Users need gcc/clang/cosmocc installed. Everything else below addresses that gap and the surrounding distribution story.
+
+#### Phase D1: Version + Release Pipeline
+
+| Feature | Status | Effort | Notes |
+|---------|--------|--------|-------|
+| `hull version` command | Planned | 1h | VERSION file baked at compile time, printed by `hull version` subcommand |
+| Git tag → version string | Planned | 1h | `git describe --tags` at build time → `HL_VERSION` define |
+| GitHub Actions release workflow | Planned | 4h | On tag push: `make platform-cosmo` → `make CC=cosmocc EMBED_PLATFORM=cosmo` → sign → upload |
+| Release artifacts | Planned | — | `hull` (Cosmo APE), `hull.sha256`, `hull.sig` (Ed25519) |
+| Native release artifacts | Planned | 2h | `hull-linux-x86_64`, `hull-darwin-arm64` for users who prefer native binaries |
+
+#### Phase D2: Install Script + First-Run Experience
+
+| Feature | Status | Effort | Notes |
+|---------|--------|--------|-------|
+| Install script (`curl -fsSL hull.com/install \| sh`) | Planned | 2h | Detect OS/arch, download binary, verify SHA-256, install to PATH |
+| `hull init` (in-place project init) | Planned | 2h | Like `git init` — initialize hull in current directory (vs `hull new` which creates a new dir) |
+| First-run welcome + doctor | Planned | 2h | `hull doctor` checks environment: compiler available? correct version? platform embedded? |
+| Shell completions | Planned | 2h | Bash/Zsh/Fish completions for all subcommands and flags |
+
+#### Phase D3: Zero-Dependency Builds (Bundle tcc)
+
+This is the most impactful step. Currently `hull build` requires a system C compiler. Bundling [tcc](https://bellard.org/tcc/) (~100KB) makes `hull build` truly zero-dependency.
+
+| Feature | Status | Effort | Notes |
+|---------|--------|--------|-------|
+| Vendor tcc | Planned | 4h | Add tcc to `vendor/tcc/`, compile as part of hull build |
+| `hull build` auto-selects compiler | Planned | 2h | Prefer system cc if available, fall back to bundled tcc |
+| `hull build --compiler=tcc\|cc\|cosmocc` | Planned | 1h | Explicit compiler selection flag |
+| tcc cross-compilation | Planned | 4h | tcc can target x86_64 and aarch64 — verify both work for hull apps |
+| `hull toolchain install` | Planned | 2h | Download cosmocc on demand, cache in `~/.hull/toolchain/` |
+
+**Why tcc:** The code `hull build` compiles is trivial — one `app_registry.c` file containing byte arrays + a table, and a small `app_main.c` trampoline. All the real code is pre-compiled in `libhull_platform.a`. tcc compiles this in milliseconds. Optimization doesn't matter because it's just data declarations and one function call.
+
+**Alternative considered:** Pre-compile `app_main.o` for each arch and embed it, so hull only needs to compile `app_registry.c` + link. Still needs a compiler for the registry. tcc is cleaner.
+
+#### Phase D4: Embedded CA Bundle
+
+| Feature | Status | Effort | Notes |
+|---------|--------|--------|-------|
+| Embed Mozilla CA bundle | Planned | 2h | ~200KB addition to binary, enables HTTPS on systems without a CA store |
+| Auto-detect system CA store | Planned | 1h | Prefer system store if available, fall back to embedded |
+| `hull build --ca-bundle=PATH` | Planned | 1h | Custom CA bundle for enterprise environments |
+| CA bundle update mechanism | Planned | 1h | `hull update-ca` fetches latest Mozilla bundle |
+
+Matters for: Cosmopolitan APE on Windows (no system CA store), minimal Docker containers (`FROM scratch`), air-gapped environments.
+
+#### Phase D5: Self-Update
+
+| Feature | Status | Effort | Notes |
+|---------|--------|--------|-------|
+| `hull update` | Planned | 4h | Check GitHub releases for newer version, download + verify + replace |
+| `hull update --check` | Planned | 1h | Print "new version available" without updating |
+| Signature verification on update | Planned | 1h | Verify Ed25519 signature of downloaded binary before replacing |
+| Update channel (stable/beta) | Planned | 2h | `hull update --channel=beta` for pre-release testing |
+
+#### Phase D6: hull.com + Documentation Site
+
+| Feature | Status | Effort | Notes |
+|---------|--------|--------|-------|
+| Landing page | Planned | External | Single-page site with install command, what/why/how |
+| Documentation site | Planned | External | Generated from CLAUDE.md + AGENTS.md + examples |
+| `hull.com/install` endpoint | Planned | 1h | Serves install script with latest version URL |
+| `hull.com/download` endpoint | Planned | 1h | Redirects to latest GitHub release asset |
+| Package manager entries | Planned | 4h | `brew install hull`, AUR package, Scoop manifest |
+
+#### Distribution Architecture
+
+```
+Developer machine                           hull.com / GitHub Releases
+─────────────────                           ────────────────────────────
+
+$ curl hull.com/install | sh     ──────►   install.sh (detect OS/arch)
+                                                │
+                                                ▼
+                                           hull (Cosmo APE binary)
+                                             ├── libhull_platform.a (x86_64 + aarch64, embedded)
+                                             ├── tcc (bundled compiler, embedded)
+                                             ├── CA bundle (embedded)
+                                             ├── Lua 5.4 + QuickJS (in platform lib)
+                                             ├── SQLite + mbedTLS (in platform lib)
+                                             └── hull.sig (Ed25519 signature)
+
+$ hull new myapp                ──────►   myapp/
+$ hull dev myapp/app.lua        ──────►   http://localhost:3000 (hot reload)
+$ hull build myapp/             ──────►   myapp/build/app (standalone binary)
+$ hull deploy dockerfile myapp/ ──────►   Dockerfile + .dockerignore
+```
+
+One download. Zero dependencies. Full lifecycle.
+
+### Standard Library (Complete)
 
 | Feature | Status | Notes |
 |---------|--------|-------|
@@ -105,6 +229,9 @@
 | FTS5 search wrapper | **Done** | `hull.search` — full-text search backed by SQLite FTS5 |
 | RBAC (role-based access control) | **Done** | `hull.middleware.rbac` — role/permission middleware |
 | Email (SMTP / API) | **Done** | Outbound SMTP via C capability + stdlib |
+| Health + readiness endpoints | **Done** | `hull.middleware.health` — liveness + readiness with custom checks |
+| ETag response helpers | **Done** | `hull.middleware.etag` — compute + compare + 304 |
+| Deployment config generator | **Done** | `hull deploy` — Dockerfile, systemd, fly.toml from manifest |
 | License key system | Planned | Ed25519 offline verification for commercial distribution |
 
 ### Agent Platform — AI-Native Development Tooling
@@ -160,15 +287,17 @@ Common agent core with dual interface: CLI JSON mode for frontier models, MCP se
 | `hull dev --agent` | **Done** | Write structured errors/status to `.hull/` sidecar files |
 | `AGENTS.md` | **Done** | Comprehensive agent development guide |
 
-#### Phase 2: Context + Render
+#### Phase 2: Context + Render — Done
 
 Dynamic context system — `hull agent context` assembles task-relevant documentation on demand, sized for the model's context window.
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| `hull agent context --task=T --level=L` | Planned | Dynamic docs: domains (auth, db, middleware, etc.) × levels (minimal/compact/full) |
+| `hull agent context --task=T --level=L` | **Done** | 12 domains (auth, db, middleware, templates, routing, testing, build, deploy, search, i18n, webhooks, validation) × 3 levels |
+| `stdlib/context/*.md` | **Done** | Per-domain knowledge files with `<!-- minimal -->` / `<!-- compact -->` / `<!-- full -->` markers |
+| `hull agent migrate` | **Done** | Migration status as JSON |
+| `hull agent deploy` | **Done** | Deployment readiness analysis as JSON |
 | `hull render` | Planned | Offline template rendering without running server |
-| `agents/context/*.md` | Planned | Per-domain knowledge files consumed by context system |
 | `--model-size` auto-selection | Planned | Auto-select context level based on model size (7B→minimal, 70B→compact, frontier→full) |
 
 Context levels:
@@ -179,24 +308,26 @@ Context levels:
 | `compact` | ~4K tokens | Mid-range local (30–70B): signatures + patterns + gotchas + one example |
 | `full` | ~12K tokens | Frontier (Claude, GPT-4): comprehensive with multiple examples, edge cases |
 
-#### Phase 3: MCP Server + Agent Configs
+#### Phase 3: MCP Server + Agent Configs — Partial
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| `hull mcp serve` | Planned | stdio MCP server wrapping agent core (Claude Code, Cursor) |
+| `hull mcp` | **Done** | stdio MCP server wrapping agent core, warm context (shared `HlAppContext`) |
 | `hull mcp serve --sse` | Planned | SSE transport for network-accessible agents |
 | `.cursorrules` | Planned | Cursor/Windsurf agent rules |
 | `codex.md` | Planned | Codex-specific instructions |
 | `.opencode.yml` | Planned | OpenCode config with MCP server reference |
-| Updated `CLAUDE.md` | Planned | MCP server setup, hull agent commands |
+| Updated `CLAUDE.md` | **Done** | Full API reference, agent commands, conventions |
+| Updated `AGENTS.md` | **Done** | Agent development guide with hull agent commands, patterns, stdlib |
 
-#### Phase 4: Lifecycle + Monitoring
+#### Phase 4: Lifecycle + Monitoring — Partial
 
 | Feature | Status | Notes |
 |---------|--------|-------|
+| `hull agent migrate` | **Done** | Structured migration status as JSON |
+| `hull agent deploy` | **Done** | Deployment readiness analysis as JSON |
 | `hull agent scaffold` | Planned | Project scaffolding from templates with structured output |
 | `hull agent build` | Planned | Structured build output (binary path, size, platform) |
-| `hull agent migrate` | Planned | Structured migration status/apply |
 | `/_hull/agent/*` endpoints | Planned | Opt-in diagnostic endpoints in deployed apps (health, schema, logs, errors, stats) |
 | `hull agent monitor` | Planned | Query deployed app diagnostics |
 
@@ -239,13 +370,21 @@ Every step produces machine-readable JSON output. The agent never parses human-f
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| WASM compute plugins (WAMR) | Architecture designed | Sandboxed, gas-metered, no I/O — pure computation |
-| Database encryption at rest | Planned | SQLite SEE or custom VFS |
+| WASM compute plugins (WAMR) | **Done** | Sandboxed, gas-metered, no I/O — sync + async + streaming + persistent instances + shared data segments + SIMD128 + Memory64 + AOT |
+| GPU compute shaders (wgpu-native) | **Done** | dispatch + pipeline + persistent buffers + textures + fire-and-forget + async + buffer copy |
+| User-defined SQL functions | **Done** | Lua/JS callbacks + WASM-backed UDFs with gas metering |
+| Image processing | **Done** | stb_image decode/encode, raw pixel buffers, GPU texture interop |
+| WebSocket server + client | **Done** | `app.ws()` + `ws.connect()` + broadcast + per-connection data |
+| SSE endpoints | **Done** | `app.sse()` with chunked transfer encoding |
 | Background work / timers | **Done** | `app.every()`, `app.daily()` — async-capable repeating timers |
-| Compression (gzip/zstd) | **Done** | Keel-integrated response compression |
-| ETag support | [Plan](etag_plan.md) | Conditional request handling |
+| Compression (gzip) | **Done** | Keel-integrated response compression via miniz |
+| Connection pooling | **Done** | Outbound HTTP reuses TCP+TLS connections (32 pool, 4 per host, 60s idle) |
+| ETag support | **Done** | `hull.middleware.etag` — compute + compare + 304 Not Modified |
+| PostgreSQL support | Planned | Behind same `db.query()`/`db.exec()` capability interface |
+| Database encryption at rest | Planned | SQLite SEE or custom VFS |
 | HTTP/2 full support | [Plan](http2_plan.md) | Currently h2c upgrade only |
 | PDF document builder | Planned | Report generation |
+| Module/package ecosystem | Planned | `hull add <package>` for sharing middleware and compute plugins |
 
 ### Phase 9 — Trusted Rebuild Infrastructure
 

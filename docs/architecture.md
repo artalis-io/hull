@@ -465,7 +465,8 @@ The embedded header contains `hl_embedded_platforms[]` — a self-describing met
 - Violation behavior: SIGKILL
 
 **macOS (gcc/clang):**
-- Kernel sandbox: **not available** (pledge/unveil are no-ops)
-- C-level validation: only defense layer
-- Violation behavior: function returns error (no kill)
-- Known limitation: bugs in C validation have no kernel backup
+- Kernel sandbox: **Seatbelt** via `sandbox_init_with_parameters()` (deny-default SBPL profile built from manifest)
+- Phase 1 (pledge) is a no-op on macOS — Seatbelt is irreversible, so the full profile is applied in phase 2
+- Phase 2 builds dynamic SBPL with selective allows for app_dir, db files, manifest paths, network
+- Violation behavior: EPERM (operation denied, process continues)
+- C-level validation: defense-in-depth layer alongside Seatbelt

@@ -63,7 +63,7 @@ This is the primary threat model. Hull exists to make it possible to trust apps 
 **Attack: Declare minimal manifest but access more at runtime**
 
 - **Prevention:** Manifest is signed in `package.sig`. At runtime, pledge/unveil enforce the declared capabilities at the kernel level. Accessing undeclared paths triggers SIGKILL (Linux/Cosmo).
-- **Remaining risk:** macOS has no kernel sandbox — pledge/unveil are no-ops. C-level validation in capability functions is the only defense. A bug in `hl_cap_fs_validate()` on macOS would allow bypass. Linux and Cosmopolitan are kernel-enforced.
+- **Remaining risk:** On macOS, Seatbelt returns EPERM (operation denied) rather than SIGKILL. The app continues running after a violation — the forbidden operation simply fails. On Linux/Cosmo, the process is killed on violation. The practical security is equivalent (the operation is denied either way), but the failure mode differs.
 
 **Attack: Call `app.manifest()` again at runtime to escalate capabilities**
 
@@ -95,8 +95,9 @@ This is the primary threat model. Hull exists to make it possible to trust apps 
 **Attack: Infinite loop / CPU exhaustion**
 
 - **Prevention:**
-  - QuickJS: Instruction-count interrupt handler. Configurable `max_instructions` limit. Exceeding → JS exception.
-  - Lua: Memory limit eventually triggers (loops allocate stack frames). Less precise than instruction counting.
+  - QuickJS: Instruction-count interrupt handler via `JS_SetInterruptHandler`. Configurable `max_instructions` limit (default 100M). Exceeding → JS exception.
+  - Lua: Instruction-count hook via `lua_sethook(LUA_MASKCOUNT)`. Same configurable `max_instructions` limit (default 100M). Exceeding → `luaL_error("instruction limit exceeded")`. Hook is re-applied on every dispatch, coroutine resume, and async continuation.
+  - Both: Override with `--max-instructions N` or `HULL_MAX_INSTRUCTIONS` env var.
 
 **Attack: Exfiltrate data to unauthorized hosts**
 
@@ -276,16 +277,29 @@ Trust chain: Customer → You (platform builder) → App developer. gethull.dev 
 
 | Mechanism | Implementation | Violation |
 |-----------|---------------|-----------|
-| Kernel sandbox | **Not available** | N/A |
+| Kernel sandbox | Seatbelt via `sandbox_init_with_parameters()` | EPERM (kernel-enforced) |
+| Dynamic SBPL profile | Built from manifest at startup | Deny-default with selective allows |
 | C-level validation | Capability functions | Returns error |
 
-**Active defenses:**
-- `hl_cap_fs_validate()` rejects path traversal
+**Seatbelt enforcement:**
+- `(deny default)` — deny-by-default SBPL profile generated dynamically from manifest
+- App directory: read-only access to app files
+- Database directory: read-write access to SQLite files (db, WAL, SHM, journal)
+- Manifest `fs` paths: unveil-equivalent via `(allow file-read* (subpath ...))` / `(allow file-read* file-write* ...)`
+- Network: TCP allowed only when manifest declares `hosts`
+- GPU: `iokit-open` + MTLCompilerService mach-lookup allowed only when `manifest.gpu` is set
+- CA bundle + TLS paths: read-only when HTTPS client is used
+- System frameworks + dyld cache: read-only (required for process operation)
+- Parameter substitution for paths — avoids escaping issues with special characters
+- Irreversible — `sandbox_init` cannot be modified or removed after application
+
+**Active C-level defenses (defense-in-depth):**
+- `hl_cap_fs_validate()` rejects path traversal (absolute paths, `..`, symlink escapes via realpath)
 - `hl_cap_env_get()` enforces allowlist
 - `hl_cap_db_query()` uses parameterized binding
 - `hl_cap_http_request()` validates host allowlist
 
-**Honest limitation:** If a bug exists in the C validation layer, macOS has no kernel backup. A vulnerability in `hl_cap_fs_validate()` would allow filesystem access. On Linux/Cosmo, the kernel catches it anyway. This is a known, documented limitation.
+**Difference from Linux/Cosmo:** Seatbelt returns EPERM on violation (the operation fails with a permission error) rather than SIGKILL (the process is killed). The app stays alive but the operation is denied. The C capability layer returns errors on violation in all cases, so the practical behavior is identical — the forbidden operation fails.
 
 ---
 
@@ -436,8 +450,8 @@ These are real, not theoretical:
 
 | Limitation | Impact | Mitigation |
 |------------|--------|------------|
-| macOS has no kernel sandbox | C-level validation bugs allow bypass | Use Linux or Cosmo for production |
-| Lua lacks instruction-count metering | Infinite loops are only caught by memory limit | QuickJS has precise gas metering |
+| macOS Seatbelt returns EPERM, not SIGKILL | App survives sandbox violations (operation denied, process continues) | C-level caps also return errors; net effect is the same |
+| Lua instruction hook is per-VM, not per-coroutine-instruction | Hook fires every N VM instructions globally; coroutine yields reset the counter | Both runtimes enforce the same default 100M instruction limit |
 | Canary is not foolproof | Attacker could embed magic bytes in custom binary | Reproducible builds (Phase 9) eliminate this |
 | `realpath()` is TOCTOU | Race between check and use | Kernel unveil prevents actual access |
 | Default CSP blocks client-side JS | Apps needing fetch/AJAX must customize CSP | `app.manifest({ csp = "default-src 'self'; connect-src 'self'" })` |
