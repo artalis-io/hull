@@ -37,6 +37,16 @@ local function parse_args()
         elseif a == "--cc" then
             i = i + 1
             opts.cc = arg[i]
+        elseif a == "--compiler" then
+            i = i + 1
+            local comp = arg[i]
+            if comp == "tcc" then
+                opts.cc = "tcc"
+            elseif comp == "system" then
+                opts.cc = "system"
+            else
+                opts.cc = comp
+            end
         elseif a == "--output" or a == "-o" then
             i = i + 1
             opts.output = arg[i]
@@ -388,19 +398,13 @@ local function sign_app(app_dir, key_file, sign_ctx, files)
     end
 
     -- Capture compiler version
-    local cc_version = nil
-    if sign_ctx.cc then
-        local ver_out = tool.spawn_read({sign_ctx.cc, "--version"})
-        if ver_out then
-            cc_version = ver_out:match("^([^\n]+)")
-        end
-    end
+    local cc_version = tool.compiler and tool.compiler.version() or nil
 
     -- Build the signed payload (canonical JSON key order)
     local payload_table = {
         binary_hash = sign_ctx.binary_hash,
         build = {
-            cc = sign_ctx.cc or tool.default_cc or "cosmocc",
+            cc = tool.compiler and tool.compiler.name() or (sign_ctx.cc or "unknown"),
             cc_version = cc_version,
             flags = "-std=c11 -O2",
         },
@@ -523,6 +527,14 @@ typedef struct {
     -- Resolve CC early (needed for AOT arch detection below)
     local cc = opts.cc or tool.cc or tool.default_cc or "cosmocc"
     local is_cosmo = cc:find("cosmocc") ~= nil
+
+    -- Guard: ensure compiler vtable is available
+    if not tool.compiler then
+        tool.stderr("hull build: no C compiler available\n")
+        tool.stderr("hint: install gcc or clang, or rebuild hull with HL_ENABLE_TCC=1\n")
+        tool.rmdir(tmpdir)
+        tool.exit(1)
+    end
 
     -- AOT compile WASM modules if wamrc is available
     local compute_aot = {} -- {path=..., entry_name=...} for generated AOT files
@@ -705,19 +717,19 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
     end
 
     -- Compile
-    print("hull build: compiling...")
-    local ok = tool.spawn({cc, "-std=c11", "-O2", "-w", "-c",
-                           "-o", tmpdir .. "/app_registry.o",
-                           tmpdir .. "/app_registry.c"})
+    print("hull build: compiling with " .. tool.compiler.name() .. "...")
+    local ok = tool.compiler.compile(tmpdir .. "/app_registry.c",
+                                      tmpdir .. "/app_registry.o",
+                                      tmpdir)
     if not ok then
         tool.stderr("hull build: compilation failed (app_registry.c)\n")
         tool.rmdir(tmpdir)
         tool.exit(1)
     end
 
-    ok = tool.spawn({cc, "-std=c11", "-O2", "-w", "-c",
-                     "-o", tmpdir .. "/app_main.o",
-                     tmpdir .. "/app_main.c"})
+    ok = tool.compiler.compile(tmpdir .. "/app_main.c",
+                                tmpdir .. "/app_main.o",
+                                nil)
     if not ok then
         tool.stderr("hull build: compilation failed (app_main.c)\n")
         tool.rmdir(tmpdir)
@@ -727,11 +739,10 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
     -- Link
     print("hull build: linking...")
     local platform_a = tmpdir .. "/libhull_platform.a"
-    ok = tool.spawn({cc, "-o", opts.output,
-                     tmpdir .. "/app_main.o",
-                     tmpdir .. "/app_registry.o",
-                     platform_a,
-                     "-lm", "-lpthread"})
+    ok = tool.compiler.link(opts.output,
+                             {tmpdir .. "/app_main.o",
+                              tmpdir .. "/app_registry.o"},
+                             {platform_a, "-lm", "-lpthread"})
     if not ok then
         tool.stderr("hull build: linking failed\n")
         tool.rmdir(tmpdir)

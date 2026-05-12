@@ -152,6 +152,13 @@ int hl_tool_rmdir(const char *path, const HlToolUnveilCtx *ctx);
  */
 void hl_cap_tool_register(lua_State *L, HlToolUnveilCtx *ctx);
 
+/*
+ * Expose the compiler vtable as tool.compiler in the Lua tool global.
+ * Must be called after hl_cap_tool_register(). compiler must not be NULL.
+ */
+struct HlCompiler;  /* forward declaration */
+void hl_cap_tool_expose_compiler(lua_State *L, struct HlCompiler *compiler);
+
 #endif /* HL_ENABLE_LUA */
 
 #endif /* HL_CAP_TOOL_H */

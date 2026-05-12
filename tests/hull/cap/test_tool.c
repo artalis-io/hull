@@ -142,6 +142,16 @@ UTEST(tool, allowlist_reject_cross_cc)
     ASSERT_NE(hl_tool_check_allowlist("x86_64-unknown-cosmo-cc"), 0);
 }
 
+UTEST(tool, allowlist_accept_tcc)
+{
+    ASSERT_EQ(hl_tool_check_allowlist("tcc"), 0);
+}
+
+UTEST(tool, allowlist_accept_ld)
+{
+    ASSERT_EQ(hl_tool_check_allowlist("ld"), 0);
+}
+
 UTEST(tool, allowlist_accept_gcc_12)
 {
     ASSERT_EQ(hl_tool_check_allowlist("gcc-12"), 0);

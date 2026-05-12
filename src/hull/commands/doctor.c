@@ -18,6 +18,7 @@
 
 #include "hull/commands/doctor.h"
 #include "hull/build_assets.h"
+#include "hull/compiler.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -148,6 +149,14 @@ static PlatformEmbed detect_platform(void)
     return PLATFORM_NONE;
 }
 
+#ifdef HL_ENABLE_TCC
+static int tcc_is_embedded(void)
+{
+    const char *v = hl_build_tcc_version_string();
+    return v && strcmp(v, "tcc-not-embedded") != 0;
+}
+#endif
+
 /* ── Human-readable output ──────────────────────────────────────── */
 
 static void print_check(const char *label, int ok, const char *detail)
@@ -189,16 +198,36 @@ static void print_human(CompilerInfo *ci, int nci,
     }
     fprintf(stdout, "\n");
 
+#ifdef HL_ENABLE_TCC
+    fprintf(stdout, "Embedded tcc  (compile step)\n");
+    if (tcc_is_embedded()) {
+        fprintf(stdout, "  tcc         \xe2\x9c\x93  embedded (%s)\n",
+                hl_build_tcc_version_string());
+    } else {
+        fprintf(stdout, "  tcc         \xe2\x9c\x97  not embedded\n");
+    }
+    fprintf(stdout, "\n");
+#endif
+
     /* ── Summary ── */
     fprintf(stdout, "hull build    ");
     if (embed == PLATFORM_NONE) {
         fprintf(stdout, "not ready — platform library not embedded\n");
         fprintf(stdout, "              hint: make platform && make EMBED_PLATFORM=1\n");
-    } else if (!any_compiler) {
-        fprintf(stdout, "not ready — no C compiler found in PATH\n");
-        fprintf(stdout, "              hint: install gcc, clang, or cosmocc\n");
     } else {
-        fprintf(stdout, "ready\n");
+#ifdef HL_ENABLE_TCC
+        int tcc_avail = tcc_is_embedded();
+#else
+        int tcc_avail = 0;
+#endif
+        if (!any_compiler && !tcc_avail) {
+            fprintf(stdout, "not ready — no C compiler found\n");
+            fprintf(stdout, "              hint: install gcc or clang\n");
+        } else if (!any_compiler) {
+            fprintf(stdout, "ready (embedded tcc for compile, system linker for link)\n");
+        } else {
+            fprintf(stdout, "ready\n");
+        }
     }
 }
 
@@ -224,9 +253,14 @@ static void print_json(CompilerInfo *ci, int nci,
         embed == PLATFORM_MULTI  ? "multi-arch" :
         embed == PLATFORM_SINGLE ? "single-arch" : "none";
 
+#ifdef HL_ENABLE_TCC
+    int tcc_avail_json = tcc_is_embedded();
+#else
+    int tcc_avail_json = 0;
+#endif
     const char *ready_str =
-        (embed == PLATFORM_NONE)  ? "no-platform" :
-        (!any_compiler)           ? "no-compiler"  : "ready";
+        (embed == PLATFORM_NONE)              ? "no-platform" :
+        (!any_compiler && !tcc_avail_json)    ? "no-compiler"  : "ready";
 
     fprintf(stdout, "{\n");
     fprintf(stdout, "  \"version\": \"%s\",\n", HL_VERSION);
@@ -249,6 +283,10 @@ static void print_json(CompilerInfo *ci, int nci,
         fprintf(stdout, "}");
     }
     fprintf(stdout, "],\n");
+#ifdef HL_ENABLE_TCC
+    fprintf(stdout, "  \"tcc_embedded\": %s,\n",
+            tcc_is_embedded() ? "true" : "false");
+#endif
     fprintf(stdout, "  \"hull_build\": \"%s\"\n", ready_str);
     fprintf(stdout, "}\n");
 }
@@ -286,5 +324,12 @@ int hl_cmd_doctor(int argc, char **argv, const HlCommandEnv *env)
         print_human(ci, MAX_COMPILERS, embed, any_compiler);
 
     /* Exit 1 if hull build cannot work, so scripts can check: hull doctor || ... */
-    return (embed != PLATFORM_NONE && any_compiler) ? 0 : 1;
+#ifdef HL_ENABLE_TCC
+    int tcc_available = tcc_is_embedded();
+#else
+    int tcc_available = 0;
+#endif
+    /* hull build is ready when platform is embedded AND a compiler exists */
+    int build_ready = (embed != PLATFORM_NONE) && (any_compiler || tcc_available);
+    return build_ready ? 0 : 1;
 }

@@ -20,7 +20,6 @@
 
 /* ── Helper: write data to a file ──────────────────────────────────── */
 
-#ifdef HL_BUILD_EMBEDDED
 static int write_blob(const char *path, const unsigned char *data, size_t len)
 {
     FILE *f = fopen(path, "wb");
@@ -30,7 +29,6 @@ static int write_blob(const char *path, const unsigned char *data, size_t len)
     fclose(f);
     return (written == len) ? 0 : -1;
 }
-#endif
 
 /* ── Multi-arch platform API ───────────────────────────────────────── */
 
@@ -129,3 +127,28 @@ int hl_build_get_entry_header(const char **data, size_t *len)
     return -1;
 #endif
 }
+
+/* ── Embedded tcc binary ────────────────────────────────────────── */
+
+#ifdef HL_ENABLE_TCC
+#include "embedded_tcc.h"
+#include <sys/stat.h>
+
+int hl_build_extract_tcc(const char *dir)
+{
+    if (!dir) return -1;
+    /* If tcc was not embedded (stub build), len is 0 — report failure */
+    if (embedded_tcc_len == 0) return -1;
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/tcc", dir);
+    if (write_blob(path, embedded_tcc, embedded_tcc_len) != 0)
+        return -1;
+    chmod(path, 0755);
+    return 0;
+}
+
+const char *hl_build_tcc_version_string(void)
+{
+    return hl_tcc_version_str;
+}
+#endif /* HL_ENABLE_TCC */

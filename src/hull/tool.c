@@ -9,6 +9,7 @@
 
 #include "hull/tool.h"
 #include "hull/compilers.h"
+#include "hull/compiler.h"
 #include "hull/cap/crypto.h"
 #include "hull/cap/tool.h"
 #include "hull/sandbox.h"
@@ -95,7 +96,8 @@ int hull_keygen(int argc, char **argv)
 static const char *parse_cc_option(int argc, char **argv)
 {
     for (int i = 0; i < argc; i++) {
-        if (strcmp(argv[i], "--cc") == 0 && i + 1 < argc)
+        if ((strcmp(argv[i], "--cc") == 0 ||
+             strcmp(argv[i], "--compiler") == 0) && i + 1 < argc)
             return argv[i + 1];
     }
     return NULL;
@@ -113,6 +115,7 @@ static const char *parse_app_dir(int argc, char **argv)
             return argv[i];
         /* Skip --flag value pairs */
         if (strcmp(argv[i], "--cc") == 0 ||
+            strcmp(argv[i], "--compiler") == 0 ||
             strcmp(argv[i], "--sign") == 0 ||
             strcmp(argv[i], "--runtime") == 0 ||
             strcmp(argv[i], "--output") == 0 ||
@@ -130,12 +133,13 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
         return 1;
     }
 
-    /* Parse --cc option for configurable compiler */
-    const char *cc = parse_cc_option(argc, argv);
-    if (!cc) cc = HL_DEFAULT_CC;
+    /* Parse --cc/--compiler option for configurable compiler */
+    const char *cc_explicit = parse_cc_option(argc, argv);
+    const char *cc = cc_explicit ? cc_explicit : HL_DEFAULT_CC;
 
-    /* Validate compiler against allowlist */
-    if (hl_tool_check_allowlist(cc) != 0) {
+    /* Validate compiler against allowlist (skip for "tcc" and "system" sentinels) */
+    if (strcmp(cc, "tcc") != 0 && strcmp(cc, "system") != 0 &&
+        hl_tool_check_allowlist(cc) != 0) {
         fprintf(stderr, "hull: compiler '%s' not in allowlist\n", cc);
         return 1;
     }
@@ -194,6 +198,13 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
     }
     lua_pop(L, 1);
 
+    /* Select compiler backend and expose as tool.compiler.
+     * If no explicit cc was given, use auto-detection (NULL) rather than
+     * requiring the default (cosmocc) to be installed. */
+    HlCompiler *compiler = hl_compiler_select(cc_explicit);
+    if (compiler)
+        hl_cap_tool_expose_compiler(L, compiler);
+
     /* Pass CLI args as global `arg` table */
     lua_newtable(L);
     for (int i = 0; i < argc; i++) {
@@ -219,6 +230,8 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
     }
 
     hl_lua_free(&lua);
+    if (compiler)
+        hl_compiler_destroy(compiler);
     return (rc == LUA_OK) ? 0 : 1;
 }
 

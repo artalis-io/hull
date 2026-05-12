@@ -55,4 +55,18 @@ int hl_build_get_template(const char **data, size_t *len);
  */
 int hl_build_get_entry_header(const char **data, size_t *len);
 
+#ifdef HL_ENABLE_TCC
+/*
+ * Extract the embedded tcc binary to dir/tcc and chmod +x.
+ * Returns 0 on success, -1 on error.
+ */
+int hl_build_extract_tcc(const char *dir);
+
+/*
+ * Return the baked-in tcc version string (e.g. "TinyCC mob").
+ * Never NULL. Do not free.
+ */
+const char *hl_build_tcc_version_string(void);
+#endif
+
 #endif /* HL_BUILD_ASSETS_H */
