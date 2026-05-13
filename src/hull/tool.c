@@ -90,8 +90,10 @@ int hull_keygen(int argc, char **argv)
 #ifdef HL_ENABLE_LUA
 
 /*
- * Parse --cc option from argv, return compiler name (or NULL for default).
- * Scans for "--cc" followed by a value.
+ * Parse --cc / --compiler from argv. Accepts both:
+ *   --compiler tcc      (space-separated)
+ *   --compiler=tcc      (equals-separated)
+ * Returns compiler name (or NULL for default).
  */
 static const char *parse_cc_option(int argc, char **argv)
 {
@@ -99,6 +101,10 @@ static const char *parse_cc_option(int argc, char **argv)
         if ((strcmp(argv[i], "--cc") == 0 ||
              strcmp(argv[i], "--compiler") == 0) && i + 1 < argc)
             return argv[i + 1];
+        if (strncmp(argv[i], "--cc=", 5) == 0)
+            return argv[i] + 5;
+        if (strncmp(argv[i], "--compiler=", 11) == 0)
+            return argv[i] + 11;
     }
     return NULL;
 }
@@ -113,7 +119,14 @@ static const char *parse_app_dir(int argc, char **argv)
         if (!argv[i]) continue;
         if (argv[i][0] != '-')
             return argv[i];
-        /* Skip --flag value pairs */
+        /* --flag=value: single token, no consumption */
+        if (strncmp(argv[i], "--cc=", 5) == 0 ||
+            strncmp(argv[i], "--compiler=", 11) == 0 ||
+            strncmp(argv[i], "--sign=", 7) == 0 ||
+            strncmp(argv[i], "--runtime=", 10) == 0 ||
+            strncmp(argv[i], "--output=", 9) == 0)
+            continue;
+        /* --flag value: skip value */
         if (strcmp(argv[i], "--cc") == 0 ||
             strcmp(argv[i], "--compiler") == 0 ||
             strcmp(argv[i], "--sign") == 0 ||

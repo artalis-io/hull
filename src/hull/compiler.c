@@ -113,8 +113,10 @@ HlCompiler *hl_compiler_select(const char *explicit_cc)
     if (explicit_cc && strcmp(explicit_cc, "tcc") == 0) {
 #ifdef HL_ENABLE_TCC
         HlCompiler *t = hl_compiler_tcc_new();
-        if (t) return t;
-        fprintf(stderr, "hull: tcc requested but not available\n");
+        if (t && hl_compiler_is_available(t)) return t;
+        if (t) hl_compiler_destroy(t);
+        fprintf(stderr, "hull: tcc requested but not available on this "
+                        "platform (cosmo APE archives or macOS Mach-O)\n");
 #else
         fprintf(stderr, "hull: tcc not compiled into this build "
                         "(rebuild with HL_ENABLE_TCC=1)\n");

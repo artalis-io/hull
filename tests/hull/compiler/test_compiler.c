@@ -1,8 +1,9 @@
 /*
  * test_compiler.c — Tests for HlCompilerVtable (compiler.c)
  *
- * Tests the system compiler backend and selection logic.
- * Does NOT test the tcc backend (requires embedded tcc binary).
+ * Tests the system compiler backend, selection logic, and (when
+ * compiled with HL_ENABLE_TCC and embedded tcc is available) the
+ * tcc backend end-to-end.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -253,5 +254,110 @@ UTEST(compiler, compile_app_registry_pattern)
     rm_rf(tmpdir);
     free(tmpdir);
 }
+
+/* ── Tests: tcc backend end-to-end (HL_ENABLE_TCC only) ─────────── */
+
+#ifdef HL_ENABLE_TCC
+
+/* These tests skip themselves on platforms where tcc is not viable
+ * (cosmo APE archives, macOS Mach-O linker). They MUST run for real
+ * on Linux/x86_64 and Linux/arm64 CI runners — that's how we verify
+ * the embedded-tcc build path actually works end-to-end. */
+
+UTEST(compiler, tcc_explicit_sentinel)
+{
+    HlCompiler *c = hl_compiler_select("tcc");
+    if (!c) {
+        /* macOS: tcc_is_available returns 0 by design (Mach-O linker
+         * incompatibility); cosmo: rejected when platforms embedded.
+         * Skip silently — coverage is enforced via the linux_tcc_*
+         * tests below which fail loudly if tcc isn't selected. */
+        return;
+    }
+    ASSERT_STREQ(hl_compiler_name(c), "tcc");
+    ASSERT_EQ(hl_compiler_is_available(c), 1);
+    hl_compiler_destroy(c);
+}
+
+#if defined(__linux__) && !defined(__COSMOPOLITAN__)
+
+/* On Linux native (non-cosmo) builds with HL_ENABLE_TCC, the embedded
+ * tcc binary MUST be functional and selected by default. Anything
+ * else means the zero-dependency build path is broken. */
+
+UTEST(compiler, linux_tcc_is_default)
+{
+    HlCompiler *c = hl_compiler_select(NULL);
+    ASSERT_NE(c, NULL);
+    ASSERT_STREQ_MSG(hl_compiler_name(c), "tcc",
+        "tcc must be selected by default on Linux when "
+        "HL_ENABLE_TCC=1 and embedded_tcc_len > 0");
+    hl_compiler_destroy(c);
+}
+
+UTEST(compiler, linux_tcc_version_string)
+{
+    HlCompiler *c = hl_compiler_select("tcc");
+    ASSERT_NE(c, NULL);
+    char *v = hl_compiler_version(c);
+    ASSERT_NE(v, NULL);
+    /* version string should start with "tcc" — exact format:
+     * "tcc version 0.9.28rc 2026-MM-DD mob@<hash> (<arch> Linux)" */
+    ASSERT_STRNEQ("tcc", v, 3);
+    free(v);
+    hl_compiler_destroy(c);
+}
+
+UTEST(compiler, linux_tcc_compile_and_link)
+{
+    char *tmpdir = make_tmpdir();
+    ASSERT_NE(tmpdir, NULL);
+
+    char src[512], obj[512], out[512];
+    snprintf(src, sizeof(src), "%s/hello.c", tmpdir);
+    snprintf(obj, sizeof(obj), "%s/hello.o", tmpdir);
+    snprintf(out, sizeof(out), "%s/hello", tmpdir);
+
+    write_file(src,
+        "extern int puts(const char *);\n"
+        "int main(void) { puts(\"tcc-linux-ok\"); return 0; }\n");
+
+    /* Force the tcc backend explicitly so we know that's what ran */
+    HlCompiler *c = hl_compiler_select("tcc");
+    ASSERT_NE_MSG(c, NULL, "tcc backend must be available on Linux");
+    ASSERT_STREQ(hl_compiler_name(c), "tcc");
+
+    /* Compile via tcc → ELF .o */
+    int rc = hl_compiler_compile(c, src, obj, NULL);
+    ASSERT_EQ_MSG(rc, 0, "tcc compile of hello.c must succeed");
+    ASSERT_EQ(access(obj, F_OK), 0);
+
+    /* Link via tcc backend (delegates to system cc/ld on Linux) */
+    const char *objs[] = { obj, NULL };
+    const char *libs[] = { NULL };
+    rc = hl_compiler_link(c, out, objs, libs);
+    ASSERT_EQ_MSG(rc, 0, "tcc-backend link must succeed on Linux");
+    ASSERT_EQ(access(out, X_OK), 0);
+
+    /* The proof: actually execute the binary and check it runs.
+     * If the .o is the wrong format or the link produced garbage,
+     * this will fail. */
+    char run_cmd[1024];
+    snprintf(run_cmd, sizeof(run_cmd), "%s 2>&1", out);
+    FILE *p = popen(run_cmd, "r");
+    ASSERT_NE(p, NULL);
+    char buf[64] = {0};
+    fgets(buf, sizeof(buf), p);
+    int status = pclose(p);
+    ASSERT_EQ_MSG(status, 0, "binary built by tcc must run and exit 0");
+    ASSERT_TRUE(strstr(buf, "tcc-linux-ok") != NULL);
+
+    hl_compiler_destroy(c);
+    rm_rf(tmpdir);
+    free(tmpdir);
+}
+
+#endif /* __linux__ && !__COSMOPOLITAN__ */
+#endif /* HL_ENABLE_TCC */
 
 UTEST_MAIN()

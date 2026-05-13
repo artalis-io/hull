@@ -53,6 +53,10 @@ jobs:
         timeout-minutes: 2
         run: make e2e-compute
 
+      - name: TCC E2E tests
+        timeout-minutes: 3
+        run: make e2e-tcc
+
       - name: hull test (examples)
         timeout-minutes: 2
         run: make hull-test-examples
