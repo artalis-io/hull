@@ -1329,7 +1329,9 @@ endif
 msan:
 	$(MAKE) clean
 	$(MAKE) -C $(KEEL_DIR) clean
-	$(MAKE) -C $(KEEL_DIR) CC=clang
+	$(MAKE) -C $(KEEL_DIR) CC=clang \
+		KEEL_TLS=mbedtls MBEDTLS_CONFIG_FILE=hull_config.h \
+		KEEL_COMPRESS=miniz MINIZ_DIR=$(CURDIR)/$(MINIZ_DIR)
 	$(MAKE) CC=clang MSAN=1 test
 
 # ── E2E tests ──────────────────────────────────────────────────────

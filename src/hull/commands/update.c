@@ -238,8 +238,8 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
     int check_only = 0;
     int force = 0;
     const char *repo = HL_DEFAULT_REPO;
-    const char *channel = "stable";  /* "beta" includes pre-releases */
-    (void)channel;  /* reserved */
+    /* --channel=stable|beta — reserved; not wired yet (no separate beta channel
+     * exists today). Accept and ignore so install/CI scripts can pass it. */
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--check") == 0) {
@@ -247,9 +247,9 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
         } else if (strcmp(argv[i], "--force") == 0) {
             force = 1;
         } else if (strncmp(argv[i], "--channel=", 10) == 0) {
-            channel = argv[i] + 10;
+            /* reserved — accepted, not used */
         } else if (strcmp(argv[i], "--channel") == 0 && i + 1 < argc) {
-            channel = argv[++i];
+            i++;  /* consume value; reserved */
         } else if (strncmp(argv[i], "--repo=", 7) == 0) {
             repo = argv[i] + 7;
         } else if (strcmp(argv[i], "--repo") == 0 && i + 1 < argc) {
