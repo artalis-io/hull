@@ -388,18 +388,12 @@ $(BUILDDIR)/tcc: $(TCC_DIR)/tcc.c | $(BUILDDIR)
 	chmod +x $(BUILDDIR)/tcc
 
 # xxd tcc binary → C header
-# If build/tcc doesn't exist, generate a stub header (tcc not yet built)
-$(EMBEDDED_TCC_H): | $(BUILDDIR)
-	@if [ -f $(BUILDDIR)/tcc ]; then \
-		xxd -i -n embedded_tcc $(BUILDDIR)/tcc > $@; \
-		tcc_ver=$$($(BUILDDIR)/tcc --version 2>&1 | head -1); \
-		printf 'static const char hl_tcc_version_str[] = "%s";\n' "$$tcc_ver" >> $@; \
-	else \
-		printf '/* tcc not yet built — stub header */\n' > $@; \
-		printf 'static const unsigned char embedded_tcc[] = {0};\n' >> $@; \
-		printf 'static const unsigned int embedded_tcc_len = 0;\n' >> $@; \
-		printf 'static const char hl_tcc_version_str[] = "tcc-not-embedded";\n' >> $@; \
-	fi
+# Depends on $(BUILDDIR)/tcc so a clean build always embeds a real tcc
+# (instead of silently shipping a stub that breaks --compiler=tcc).
+$(EMBEDDED_TCC_H): $(BUILDDIR)/tcc | $(BUILDDIR)
+	xxd -i -n embedded_tcc $(BUILDDIR)/tcc > $@
+	tcc_ver=$$($(BUILDDIR)/tcc --version 2>&1 | head -1); \
+		printf 'static const char hl_tcc_version_str[] = "%s";\n' "$$tcc_ver" >> $@
 
 # compiler_tcc.o depends on embedded_tcc.h
 COMPILER_TCC_OBJ := $(BUILDDIR)/compiler_tcc.o
