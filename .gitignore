@@ -42,3 +42,4 @@ Thumbs.db
 
 # Generated version file (written by release workflow, overrides git describe)
 /VERSION
+.claude/
