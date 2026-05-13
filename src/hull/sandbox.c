@@ -386,7 +386,9 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
         hl_tool_unveil_add(ctx, app_dir, "r");
 
     /* Temp directory: read/write/create (build artifacts) */
-    hl_tool_unveil_add(ctx, "/tmp", "rwc");
+    /* /tmp needs execute too: embedded TinyCC is extracted to /tmp/hull_tcc_XXX/tcc
+     * and must be executable by the build pipeline. */
+    hl_tool_unveil_add(ctx, "/tmp", "rwcx");
 
     /* System compilers and headers */
     hl_tool_unveil_add(ctx, "/usr", "rx");
@@ -416,7 +418,7 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
     /* Also apply kernel-level unveil on supported platforms */
     if (sb_supported()) {
         if (app_dir)     unveil(app_dir, "r");
-        unveil("/tmp", "rwc");
+        unveil("/tmp", "rwcx");
         unveil("/usr", "rx");
 #if defined(__COSMOPOLITAN__) || defined(__linux__)
         unveil("/bin", "rx");   /* APE shebang invokes /bin/sh */
