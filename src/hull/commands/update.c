@@ -405,6 +405,10 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
 
     /* ── 5. Atomic replace ──────────────────────────────────────── */
     char self_path[PATH_MAX];
+    /* On platforms without /proc/self/exe or _NSGetExecutablePath
+     * (e.g. cosmo), resolve_self_path always returns -1 by design — the
+     * env->hull_exe fallback handles that case. */
+    /* cppcheck-suppress knownConditionTrueFalse */
     if (resolve_self_path(self_path, sizeof(self_path)) != 0) {
         /* Fall back to env->hull_exe (argv[0] from the dispatch layer) */
         if (env && env->hull_exe) {
