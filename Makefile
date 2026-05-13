@@ -1312,7 +1312,7 @@ e2e-agent-api: $(BUILDDIR)/hull
 e2e-compute: $(BUILDDIR)/hull
 	sh tests/e2e_compute.sh
 
-e2e-tcc: $(BUILDDIR)/hull
+e2e-tcc: $(BUILDDIR)/hull $(BUILDDIR)/libhull_platform.a
 	sh tests/e2e_tcc.sh
 
 hull-test-examples: $(BUILDDIR)/hull
