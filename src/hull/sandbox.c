@@ -603,9 +603,24 @@ int hl_sandbox_apply(const HlManifest *manifest, const char *app_dir,
     char promises[256];
     int plen = snprintf(promises, sizeof(promises),
                         "stdio inet rpath wpath cpath flock");
+    /* When the app declares outbound hosts, allow DNS resolution.
+     *   dns      — UDP/IP queries to the resolver
+     *   netlink  — Linux/glibc getaddrinfo() opens AF_NETLINK to enumerate
+     *              interfaces. OpenBSD's pledge() does not have "netlink"
+     *              (would return EINVAL); OpenBSD's getaddrinfo uses
+     *              /etc/resolv.conf directly so it isn't needed.
+     */
     if (plen > 0 && manifest->hosts_count > 0 &&
-        (size_t)plen < sizeof(promises))
-        snprintf(promises + plen, sizeof(promises) - (size_t)plen, " dns");
+        (size_t)plen < sizeof(promises)) {
+#if defined(__linux__) || defined(__COSMOPOLITAN__)
+        const char *dns_promises = " dns netlink";
+#else
+        const char *dns_promises = " dns";
+#endif
+        int n = snprintf(promises + plen, sizeof(promises) - (size_t)plen,
+                         "%s", dns_promises);
+        if (n > 0) plen += n;
+    }
 
     if (pledge(promises, NULL) != 0) {
         log_error("[sandbox] pledge failed");
