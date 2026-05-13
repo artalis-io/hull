@@ -34,6 +34,19 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# Wait up to 10s for $1 = port to accept connections.
+wait_for_port() {
+    port="$1"
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        if curl -fsS --max-time 1 -o /dev/null "http://127.0.0.1:$port/health" 2>/dev/null \
+           || nc -z 127.0.0.1 "$port" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.5
+    done
+    return 1
+}
+
 assert() {
     msg="$1"; shift
     if "$@"; then
@@ -118,9 +131,9 @@ cd "$WORKDIR/myapp"
     --ca-bundle "$SRCDIR/vendor/cacert/cacert.pem" \
     > "$WORKDIR/server.log" 2>&1 &
 SERVER_PID=$!
-sleep 2
+wait_for_port "$PORT" || echo "  (port $PORT never opened)"
 
-BODY=$(curl -s "http://127.0.0.1:$PORT/probe" || echo FAIL)
+BODY=$(curl -fsS --max-time 30 "http://127.0.0.1:$PORT/probe" 2>&1 || echo "FAIL: $?")
 if ! echo "$BODY" | grep -q '"ok":true'; then
     echo "  response: $BODY"
     echo "  --- server.log ---"
@@ -148,9 +161,9 @@ SERVER_PID=""
 "$HULL" "$WORKDIR/myapp/app.lua" -p $((PORT + 1)) -d "$WORKDIR/data2.db" \
     > "$WORKDIR/server2.log" 2>&1 &
 SERVER_PID=$!
-sleep 2
+wait_for_port $((PORT + 1)) || echo "  (port $((PORT + 1)) never opened)"
 
-BODY=$(curl -s "http://127.0.0.1:$((PORT + 1))/probe" || echo FAIL)
+BODY=$(curl -fsS --max-time 30 "http://127.0.0.1:$((PORT + 1))/probe" 2>&1 || echo "FAIL: $?")
 if ! echo "$BODY" | grep -q '"ok":true'; then
     echo "  response: $BODY"
     echo "  --- server2.log ---"
