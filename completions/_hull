@@ -98,6 +98,9 @@ _hull() {
                         '--no-migrate[Skip auto-run migrations on startup]' \
                         '--no-sandbox[Disable kernel sandbox]' \
                         '--audit[Enable capability audit logging]' \
+                        '--ca-bundle[Custom CA bundle path]:file:_files' \
+                        '--ca-bundle=[Custom CA bundle path]:file:_files' \
+                        '--skip-ca-bundle[Skip TLS verification (dev only)]' \
                         '*:entry point:_files'
                     ;;
 

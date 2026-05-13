@@ -70,13 +70,19 @@ _hull() {
 
         dev)
             case "$prev" in
-                -p|--port|-d|--database)
-                    [ "$prev" = "-d" ] || [ "$prev" = "--database" ] && \
-                        COMPREPLY=($(compgen -f -- "$cur"))
+                -p|--port|-d|--database|--ca-bundle)
+                    case "$prev" in
+                        -d|--database|--ca-bundle)
+                            COMPREPLY=($(compgen -f -- "$cur")) ;;
+                    esac
                     return ;;
             esac
+            if [[ "$cur" == --ca-bundle=* ]]; then
+                COMPREPLY=($(compgen -f -- "${cur#--ca-bundle=}"))
+                return
+            fi
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "-p --port -d --database --agent --no-migrate --no-sandbox --audit" -- "$cur"))
+                COMPREPLY=($(compgen -W "-p --port -d --database --agent --no-migrate --no-sandbox --audit --ca-bundle --skip-ca-bundle" -- "$cur"))
             else
                 COMPREPLY=($(compgen -f -- "$cur"))
             fi

@@ -82,6 +82,8 @@ complete -c hull -n '__hull_subcommand dev' -l agent          -d 'Enable agent s
 complete -c hull -n '__hull_subcommand dev' -l no-migrate     -d 'Skip auto-migrate on startup'
 complete -c hull -n '__hull_subcommand dev' -l no-sandbox     -d 'Disable kernel sandbox'
 complete -c hull -n '__hull_subcommand dev' -l audit          -d 'Enable capability audit logging'
+complete -c hull -n '__hull_subcommand dev' -l ca-bundle      -r -d 'Custom CA bundle path'
+complete -c hull -n '__hull_subcommand dev' -l skip-ca-bundle -d 'Skip TLS verification (dev only)'
 
 # ── test / check / inspect / verify / manifest / compute / eject ─────
 

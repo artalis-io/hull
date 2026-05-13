@@ -23,6 +23,7 @@
 
 #include "hull/alloc.h"
 #include "hull/app_context.h"
+#include "hull/cacert.h"
 #include "hull/worker_db.h"
 #include "hull/cap/audit.h"
 #include "hull/cap/db.h"
@@ -208,6 +209,7 @@ static void usage(const char *prog)
             "  --drain-timeout MS   Graceful shutdown drain timeout (default: 5000)\n"
             "  --no-migrate         Skip auto-run migrations on startup\n"
             "  --skip-ca-bundle     Skip TLS certificate verification (dev mode)\n"
+            "  --ca-bundle PATH     Use custom CA bundle (overrides system + embedded)\n"
             "  --max-instructions N Set runtime instruction limit per request (default: 100m)\n"
             "  --audit              Enable capability audit logging (JSON to stderr)\n"
             "  --max-connections N  Max concurrent connections (default: 256)\n"
@@ -286,6 +288,7 @@ typedef struct {
     int no_db;
     int no_compress;
     int skip_ca_bundle;
+    const char *ca_bundle_override; /* --ca-bundle=PATH */
     int agent_mode;
     int agent_api_mode;
     int drain_timeout;
@@ -362,6 +365,10 @@ static int hl_parse_serve_args(int argc, char **argv, HlServeConfig *cfg)
             cfg->no_compress = 1;
         } else if (strcmp(argv[i], "--skip-ca-bundle") == 0) {
             cfg->skip_ca_bundle = 1;
+        } else if (strcmp(argv[i], "--ca-bundle") == 0 && i + 1 < argc) {
+            cfg->ca_bundle_override = argv[++i];
+        } else if (strncmp(argv[i], "--ca-bundle=", 12) == 0) {
+            cfg->ca_bundle_override = argv[i] + 12;
         } else if (strcmp(argv[i], "--agent") == 0) {
             cfg->agent_mode = 1;
         } else if (strcmp(argv[i], "--agent-api") == 0) {
@@ -984,18 +991,47 @@ static int hl_serve_wire_and_start(HlServerState *s)
         s->http_cfg_storage.timeout_ms        = KL_CLIENT_DEFAULT_TIMEOUT_MS;
         s->http_cfg_storage.max_response_size = KL_CLIENT_DEFAULT_MAX_RESP;
 
-        /* Set up TLS client for HTTPS support */
+        /* Set up TLS client for HTTPS support.
+         *
+         * Resolution order:
+         *   1. --skip-ca-bundle           → no verification (dev only)
+         *   2. --ca-bundle PATH (override) → use that file
+         *   3. system CA store at well-known paths
+         *   4. embedded Mozilla bundle (when HL_EMBED_CA_BUNDLE=1)
+         *   5. fail with a clear hint
+         */
         if (s->cfg.skip_ca_bundle) {
             log_warn("[hull:c] TLS certificate verification disabled (--skip-ca-bundle)");
             s->client_tls_ctx = kl_tls_mbedtls_client_ctx_create(NULL, &s->kl_alloc);
+        } else if (s->cfg.ca_bundle_override) {
+            s->ca_bundle_path = s->cfg.ca_bundle_override;
+            log_info("[hull:c] using CA bundle (override): %s", s->ca_bundle_path);
+            s->client_tls_ctx = kl_tls_mbedtls_client_ctx_create(s->ca_bundle_path, &s->kl_alloc);
+            if (!s->client_tls_ctx)
+                log_warn("[hull:c] failed to load CA bundle from %s", s->ca_bundle_path);
         } else {
             s->ca_bundle_path = find_ca_bundle();
             if (s->ca_bundle_path) {
                 log_info("[hull:c] using CA bundle: %s", s->ca_bundle_path);
                 s->client_tls_ctx = kl_tls_mbedtls_client_ctx_create(s->ca_bundle_path, &s->kl_alloc);
             } else {
-                log_warn("[hull:c] no CA bundle found; HTTPS disabled "
-                         "(use --skip-ca-bundle for dev mode)");
+                /* System bundle not found — try embedded fallback */
+                const unsigned char *emb_data = NULL;
+                size_t emb_len = 0;
+                if (hl_embedded_ca_bundle(&emb_data, &emb_len) == 0) {
+                    log_info("[hull:c] using embedded CA bundle (%s)",
+                             hl_embedded_ca_bundle_label());
+                    s->client_tls_ctx = kl_tls_mbedtls_client_ctx_create_from_buf(
+                        emb_data, emb_len, &s->kl_alloc);
+                    /* Sentinel so doctor / introspection sees "(embedded)" */
+                    s->ca_bundle_path = "(embedded)";
+                    if (!s->client_tls_ctx)
+                        log_warn("[hull:c] failed to parse embedded CA bundle");
+                } else {
+                    log_warn("[hull:c] no CA bundle found; HTTPS disabled "
+                             "(use --skip-ca-bundle, --ca-bundle PATH, or "
+                             "build with HL_EMBED_CA_BUNDLE=1)");
+                }
             }
         }
 

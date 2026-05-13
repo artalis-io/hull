@@ -18,6 +18,7 @@
 
 #include "hull/commands/doctor.h"
 #include "hull/build_assets.h"
+#include "hull/cacert.h"
 #include "hull/compiler.h"
 
 #include <stdio.h>
@@ -209,6 +210,37 @@ static void print_human(CompilerInfo *ci, int nci,
     fprintf(stdout, "\n");
 #endif
 
+    /* ── CA bundle (HTTPS trust store) ── */
+    {
+        const unsigned char *cab_data = NULL;
+        size_t cab_len = 0;
+        int cab_embedded = (hl_embedded_ca_bundle(&cab_data, &cab_len) == 0);
+        const char *system_paths[] = {
+            "/etc/ssl/cert.pem",
+            "/etc/ssl/certs/ca-certificates.crt",
+            "/etc/pki/tls/certs/ca-bundle.crt",
+            NULL,
+        };
+        const char *system_found = NULL;
+        for (const char **p = system_paths; *p; p++) {
+            if (access(*p, R_OK) == 0) { system_found = *p; break; }
+        }
+
+        fprintf(stdout, "CA bundle  (HTTPS trust store)\n");
+        if (system_found) {
+            fprintf(stdout, "  system      \xe2\x9c\x93  %s\n", system_found);
+        } else {
+            fprintf(stdout, "  system      \xe2\x9c\x97  not found at standard paths\n");
+        }
+        if (cab_embedded) {
+            fprintf(stdout, "  embedded    \xe2\x9c\x93  %s, %zu bytes\n",
+                    hl_embedded_ca_bundle_label(), cab_len);
+        } else {
+            fprintf(stdout, "  embedded    \xe2\x9c\x97  not embedded (rebuild with HL_EMBED_CA_BUNDLE=1)\n");
+        }
+        fprintf(stdout, "\n");
+    }
+
     /* ── Summary ── */
     fprintf(stdout, "hull build    ");
     if (embed == PLATFORM_NONE) {
@@ -287,6 +319,32 @@ static void print_json(CompilerInfo *ci, int nci,
     fprintf(stdout, "  \"tcc_embedded\": %s,\n",
             tcc_is_embedded() ? "true" : "false");
 #endif
+    /* CA bundle status */
+    {
+        const unsigned char *cab_data = NULL;
+        size_t cab_len = 0;
+        int cab_embedded = (hl_embedded_ca_bundle(&cab_data, &cab_len) == 0);
+        const char *system_paths[] = {
+            "/etc/ssl/cert.pem",
+            "/etc/ssl/certs/ca-certificates.crt",
+            "/etc/pki/tls/certs/ca-bundle.crt",
+            NULL,
+        };
+        const char *system_found = NULL;
+        for (const char **p = system_paths; *p; p++) {
+            if (access(*p, R_OK) == 0) { system_found = *p; break; }
+        }
+        fprintf(stdout, "  \"ca_bundle\": {");
+        fprintf(stdout, "\"system\": ");
+        if (system_found) json_str(stdout, system_found); else fprintf(stdout, "null");
+        fprintf(stdout, ", \"embedded\": %s",
+                cab_embedded ? "true" : "false");
+        if (cab_embedded) {
+            fprintf(stdout, ", \"embedded_label\": ");
+            json_str(stdout, hl_embedded_ca_bundle_label());
+        }
+        fprintf(stdout, "},\n");
+    }
     fprintf(stdout, "  \"hull_build\": \"%s\"\n", ready_str);
     fprintf(stdout, "}\n");
 }

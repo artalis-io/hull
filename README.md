@@ -95,6 +95,8 @@ Hull ships 16 subcommands for the full development lifecycle:
 | `hull <app> --workers N` | Thread pool worker count (default: 4) |
 | `hull <app> --queue-capacity N` | Thread pool queue capacity (default: 64) |
 | `hull <app> --no-compress` | Disable gzip response compression |
+| `hull <app> --ca-bundle PATH` | Custom CA bundle (overrides system + embedded) |
+| `hull <app> --skip-ca-bundle` | Skip TLS certificate verification (dev only) |
 | `hull migrate [app_dir]` | Run pending SQL migrations |
 | `hull migrate status` | Show migration status (applied/pending) |
 | `hull migrate new <name>` | Create a new numbered migration file |
