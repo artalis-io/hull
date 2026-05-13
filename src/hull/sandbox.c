@@ -361,7 +361,16 @@ int hl_sandbox_apply_pledge(void)
     __pledge_mode = 0x0001 | 0x0010; /* KILL_PROCESS | STDERR_LOGGING */
 #endif
 
-    if (pledge("stdio inet rpath wpath cpath flock dns unveil", NULL) != 0) {
+    /* Phase 1: permissive — needs to allow whatever phase 2 will allow,
+     * since seccomp filters can only restrict on Linux, not widen.
+     * On Linux, "netlink" is required so glibc getaddrinfo() can open
+     * AF_NETLINK sockets to enumerate interfaces. */
+#if defined(__linux__) && !defined(__COSMOPOLITAN__)
+    const char *phase1 = "stdio inet rpath wpath cpath flock dns netlink unveil";
+#else
+    const char *phase1 = "stdio inet rpath wpath cpath flock dns unveil";
+#endif
+    if (pledge(phase1, NULL) != 0) {
         log_error("[sandbox] phase 1 pledge failed");
         return -1;
     }
@@ -606,20 +615,19 @@ int hl_sandbox_apply(const HlManifest *manifest, const char *app_dir,
     /* When the app declares outbound hosts, allow DNS resolution.
      *   dns      — UDP/IP queries to the resolver
      *   netlink  — Linux/glibc getaddrinfo() opens AF_NETLINK to enumerate
-     *              interfaces. OpenBSD's pledge() does not have "netlink"
-     *              (would return EINVAL); OpenBSD's getaddrinfo uses
-     *              /etc/resolv.conf directly so it isn't needed.
+     *              interfaces. Cosmo's pledge() rejects the unknown promise
+     *              entirely; OpenBSD's pledge() does not have it either
+     *              (its getaddrinfo reads /etc/resolv.conf directly).
      */
     if (plen > 0 && manifest->hosts_count > 0 &&
         (size_t)plen < sizeof(promises)) {
-#if defined(__linux__) || defined(__COSMOPOLITAN__)
+#if defined(__linux__) && !defined(__COSMOPOLITAN__)
         const char *dns_promises = " dns netlink";
 #else
         const char *dns_promises = " dns";
 #endif
-        int n = snprintf(promises + plen, sizeof(promises) - (size_t)plen,
-                         "%s", dns_promises);
-        if (n > 0) plen += n;
+        (void)snprintf(promises + plen, sizeof(promises) - (size_t)plen,
+                       "%s", dns_promises);
     }
 
     if (pledge(promises, NULL) != 0) {
