@@ -364,9 +364,10 @@ int hl_sandbox_apply_pledge(void)
     /* Phase 1: permissive — needs to allow whatever phase 2 will allow,
      * since seccomp filters can only restrict on Linux, not widen.
      * On Linux, "netlink" is required so glibc getaddrinfo() can open
-     * AF_NETLINK sockets to enumerate interfaces. */
+     * AF_NETLINK sockets to enumerate interfaces; "unix" is required so
+     * nsswitch can talk to systemd-resolved / nscd via AF_UNIX. */
 #if defined(__linux__) && !defined(__COSMOPOLITAN__)
-    const char *phase1 = "stdio inet rpath wpath cpath flock dns netlink unveil";
+    const char *phase1 = "stdio inet unix rpath wpath cpath flock dns netlink unveil";
 #else
     const char *phase1 = "stdio inet rpath wpath cpath flock dns unveil";
 #endif
@@ -622,7 +623,9 @@ int hl_sandbox_apply(const HlManifest *manifest, const char *app_dir,
     if (plen > 0 && manifest->hosts_count > 0 &&
         (size_t)plen < sizeof(promises)) {
 #if defined(__linux__) && !defined(__COSMOPOLITAN__)
-        const char *dns_promises = " dns netlink";
+        /* Linux glibc DNS needs: dns (UDP queries), netlink (interface
+         * enumeration), unix (nsswitch IPC with systemd-resolved/nscd). */
+        const char *dns_promises = " dns netlink unix";
 #else
         const char *dns_promises = " dns";
 #endif
