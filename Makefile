@@ -1349,6 +1349,10 @@ check:
 analyze:
 	$(MAKE) clean
 	$(MAKE) $(VEND_OBJS) $(MBEDTLS_OBJS) $(MINIZ_OBJ) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(WAMR_OBJS) $(KEEL_LIB)
+ifeq ($(HL_ENABLE_TCC),1)
+	# Pre-build tcc + embedded_tcc.h so vendor/tcc source isn't analyzed
+	$(MAKE) $(EMBEDDED_TCC_H)
+endif
 	scan-build --status-bugs -disable-checker alpha.unix.Stream $(MAKE) $(CAP_OBJS) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(MAIN_OBJ) $(BUILDDIR)/hull
 
 cppcheck:
