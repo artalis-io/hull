@@ -96,6 +96,11 @@ if [ "$TCC_VIABLE" = "1" ]; then
 
     "$HULL" build --compiler=tcc -o "$WORKDIR/hello.tcc" . > "$WORKDIR/build.log" 2>&1
     BUILD_RC=$?
+    if [ "$BUILD_RC" -ne 0 ]; then
+        echo "  --- build.log (exit $BUILD_RC) ---"
+        sed 's/^/  | /' "$WORKDIR/build.log"
+        echo "  --- end build.log ---"
+    fi
     assert "hull build --compiler=tcc exits 0" [ "$BUILD_RC" -eq 0 ]
     assert "output binary exists" [ -x "$WORKDIR/hello.tcc" ]
 
@@ -123,7 +128,13 @@ if [ "$TCC_VIABLE" = "1" ]; then
     echo ""
     echo "Test: hull build (no --compiler) selects tcc by default on Linux"
     "$HULL" build -o "$WORKDIR/hello.auto" . > "$WORKDIR/auto.log" 2>&1
-    assert "hull build exits 0" [ $? -eq 0 ]
+    AUTO_RC=$?
+    if [ "$AUTO_RC" -ne 0 ]; then
+        echo "  --- auto.log (exit $AUTO_RC) ---"
+        sed 's/^/  | /' "$WORKDIR/auto.log"
+        echo "  --- end auto.log ---"
+    fi
+    assert "hull build exits 0" [ "$AUTO_RC" -eq 0 ]
     grep -qi "compiling with tcc" "$WORKDIR/auto.log"
     assert "default backend on Linux is tcc" [ $? -eq 0 ]
 
