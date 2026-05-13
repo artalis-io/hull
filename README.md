@@ -87,6 +87,7 @@ Hull ships 16 subcommands for the full development lifecycle:
 | `hull manifest <app>` | Extract and print manifest as JSON |
 | `hull version [--json]` | Print version string (`--json` for machine-readable output) |
 | `hull doctor [--json]` | Check environment: compiler available, platform embedded, hull build readiness |
+| `hull update [--check] [--force] [--channel=beta]` | Self-update from GitHub releases (verifies SHA-256, atomic replace) |
 | `hull <app> --max-instructions N` | Set per-request instruction limit (default: 100M) |
 | `hull <app> --audit` | Enable capability audit logging (JSON to stderr) |
 | `hull <app> --max-connections N` | Max concurrent connections (default: 256) |

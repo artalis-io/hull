@@ -56,6 +56,7 @@ complete -c hull -n __hull_no_subcommand -f -a compute       -d 'WASM compute pl
 complete -c hull -n __hull_no_subcommand -f -a deploy        -d 'Generate deployment configs'
 complete -c hull -n __hull_no_subcommand -f -a version       -d 'Print hull version'
 complete -c hull -n __hull_no_subcommand -f -a doctor        -d 'Check hull build readiness'
+complete -c hull -n __hull_no_subcommand -f -a update        -d 'Self-update from GitHub releases'
 
 complete -c hull -n __hull_no_subcommand -s v -l version     -d 'Print hull version'
 
@@ -143,3 +144,10 @@ complete -c hull -n '__hull_subcommand deploy' -f -a fly        -d 'Generate fly
 
 complete -c hull -n '__hull_subcommand doctor'  -l json -d 'Machine-readable JSON output'
 complete -c hull -n '__hull_subcommand version' -l json -d 'Machine-readable JSON output'
+
+# ── update ───────────────────────────────────────────────────────────
+
+complete -c hull -n '__hull_subcommand update' -l check   -d 'Check for an update without installing'
+complete -c hull -n '__hull_subcommand update' -l force   -d 'Reinstall even if version matches'
+complete -c hull -n '__hull_subcommand update' -l channel -r -d 'Release channel' -xa 'stable beta'
+complete -c hull -n '__hull_subcommand update' -l repo    -r -d 'GitHub repo'

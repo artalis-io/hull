@@ -30,6 +30,7 @@
 #include "hull/commands/version.h"
 #include "hull/commands/doctor.h"
 #include "hull/commands/init.h"
+#include "hull/commands/update.h"
 
 #include <string.h>
 
@@ -55,6 +56,7 @@ static const HlCommand commands[] = {
     { "version",       hl_cmd_version },
     { "doctor",        hl_cmd_doctor },
     { "init",          hl_cmd_init },
+    { "update",        hl_cmd_update },
     { NULL, NULL }  /* sentinel */
 };
 

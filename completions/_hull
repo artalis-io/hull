@@ -35,6 +35,7 @@ _hull() {
         'deploy:Generate deployment configs (Dockerfile, systemd, fly.toml)'
         'version:Print hull version'
         'doctor:Check environment for hull build readiness'
+        'update:Self-update from GitHub releases'
     )
     agent_subs=(
         'routes:List routes + middleware'
@@ -180,6 +181,16 @@ _hull() {
 
                 doctor|version)
                     _arguments '--json[Machine-readable JSON output]'
+                    ;;
+
+                update)
+                    _arguments \
+                        '--check[Check for an update without installing]' \
+                        '--force[Reinstall even if version matches]' \
+                        '--channel[Release channel]:channel:(stable beta)' \
+                        '--channel=[Release channel]:channel:(stable beta)' \
+                        '--repo[GitHub repo]:repo:' \
+                        '--repo=[GitHub repo]:repo:'
                     ;;
 
                 keygen|sign-platform)

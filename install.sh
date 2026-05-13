@@ -275,6 +275,7 @@ post_install() {
     printf '  %shull doctor%s          — check environment\n' "$BOLD" "$RESET"
     printf '  %shull init myapp%s      — create a project\n' "$BOLD" "$RESET"
     printf '  %shull dev app.lua%s     — run the dev server\n' "$BOLD" "$RESET"
+    printf '  %shull update%s          — install future releases\n' "$BOLD" "$RESET"
     printf '\n'
 }
 

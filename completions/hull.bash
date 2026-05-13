@@ -20,7 +20,7 @@ _hull() {
         cword=$COMP_CWORD
     }
 
-    local commands="keygen build verify inspect manifest test new init dev eject sign-platform migrate agent mcp check compute deploy version doctor"
+    local commands="keygen build verify inspect manifest test new init dev eject sign-platform migrate agent mcp check compute deploy version doctor update"
     local agent_subs="routes db request status errors test context migrate deploy"
     local agent_db_subs="schema query"
     local migrate_subs="status new"
@@ -167,6 +167,14 @@ _hull() {
 
         doctor|version)
             COMPREPLY=($(compgen -W "--json" -- "$cur"))
+            ;;
+
+        update)
+            if [[ "$cur" == --channel=* ]]; then
+                COMPREPLY=($(compgen -W "stable beta" -- "${cur#--channel=}"))
+                return
+            fi
+            COMPREPLY=($(compgen -W "--check --force --channel= --repo= --help" -- "$cur"))
             ;;
 
         keygen|sign-platform)

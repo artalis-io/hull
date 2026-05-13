@@ -635,6 +635,11 @@ hull version --json       # {"version":"0.1.0","runtime":"lua+js","platform":"da
 hull doctor               # human-readable report; exits 0 if hull build is ready
 hull doctor --json        # {"version":"0.1.0","platform_embedded":"multi-arch","tcc_embedded":true,"hull_build":"ready",...}
 
+# Self-update (verifies SHA-256, atomic replace via rename)
+hull update               # download + verify + install latest stable release
+hull update --check       # check only; print "update available" / "up to date"
+hull update --channel=beta  # include pre-releases (reserved; same as stable today)
+
 # Initialize a hull project in-place (idempotent, like git init)
 hull init                 # initialize in current directory (Lua)
 hull init myapp           # initialize in ./myapp/ (creates dir if needed)

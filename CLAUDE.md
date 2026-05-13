@@ -163,10 +163,10 @@ Client → Keel HTTP → Route Match → hl_{lua,js}_dispatch() → Handler → 
 
 ### Command Dispatch
 
-Table-driven dispatcher in `src/hull/commands/dispatch.c`. 19 commands:
+Table-driven dispatcher in `src/hull/commands/dispatch.c`. 20 commands:
 
 ```
-hull keygen | build | verify | inspect | manifest | test | new | init | dev | eject | sign-platform | migrate | agent | mcp | check | compute | deploy | version | doctor
+hull keygen | build | verify | inspect | manifest | test | new | init | dev | eject | sign-platform | migrate | agent | mcp | check | compute | deploy | version | doctor | update
 Runtime flags: --audit (capability audit logging), --agent (sidecar files), --no-migrate, --no-sandbox, --skip-ca-bundle, --ca-bundle PATH
 Global flags: --version / -v (equivalent to hull version)
 ```
@@ -178,6 +178,8 @@ Each command is a separate `.c`/`.h` under `src/hull/commands/`. Adding a new co
 **`hull doctor [--json]`** — Environment check for distribution readiness. Reports hull version/runtime/platform, whether the platform library is embedded (none / single-arch / multi-arch), whether TinyCC is embedded, and which system C compilers (`cc`, `gcc`, `clang`, `cosmocc`) are found in PATH. Exits 0 only when `hull build` is fully ready (platform embedded AND at least one compiler available). Pure C implementation (`src/hull/commands/doctor.c`). `--json` for machine-readable output.
 
 **`hull build --compiler=<backend>`** — Select the C compiler backend for `hull build`. Options: `tcc` (embedded TinyCC, compile-only), `system` (system cc/gcc/clang, no tcc fallback), or an explicit compiler path. Default: embedded TinyCC if available, otherwise system cc. The compiler abstraction uses `HlCompilerVtable` (`include/hull/compiler.h`); backends live in `src/hull/compiler.c` and `src/hull/compiler_tcc.c`.
+
+**`hull update [--check] [--force] [--channel=stable|beta] [--repo=ORG/NAME]`** — Self-update from GitHub releases. Fetches the latest release metadata via `api.github.com`, picks the asset matching this binary's OS/arch (`hull-linux-x86_64`, `hull-darwin-arm64`, or `hull-cosmo` fallback), downloads via HTTPS using the embedded Mozilla CA bundle (Phase D4), verifies SHA-256 against `hull.sha256` from the same release, and atomically replaces the running binary via `rename(2)`. `--check` exits after the version compare without installing. No external dependencies — uses keel's `KlRedirectClient` for HTTPS, mbedTLS for SHA-256. Pure C implementation in `src/hull/commands/update.c`. Ed25519 signature verification is deferred until releases are routinely signed.
 
 ### Agent Tooling (`hull agent`)
 
@@ -1324,7 +1326,7 @@ make e2e                            # run all E2E tests (examples + build + sand
 | `test_wasm` | 47 | WAMR init/destroy, module load, echo call, gas exhaustion, limits, pools, persistent instances, shared data segments |
 | `test_gpu` | 13 | GPU init/destroy, device enumeration, shader compile (valid + invalid WGSL), dispatch with data doubling, persistent buffer roundtrip (real GPU tests skip if no adapter) |
 
-\+ E2E suites (`e2e_build.sh`, `e2e_examples.sh`, `e2e_http.sh`, `e2e_sandbox.sh`, `e2e_tcc.sh`, `e2e_install.sh`, `e2e_ca_bundle.sh`)
+\+ E2E suites (`e2e_build.sh`, `e2e_examples.sh`, `e2e_http.sh`, `e2e_sandbox.sh`, `e2e_tcc.sh`, `e2e_install.sh`, `e2e_ca_bundle.sh`, `e2e_update.sh`)
 
 ### E2E Tests
 
