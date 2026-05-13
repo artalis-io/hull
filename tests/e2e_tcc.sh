@@ -81,10 +81,9 @@ fi
 WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/hull_e2e_tcc.XXXXXX")
 mkdir -p "$WORKDIR/myapp"
 cat > "$WORKDIR/myapp/app.lua" << 'EOF'
-local app = hull.app({ name = "hello", description = "tcc smoke test" })
-app.get("/", function(req, res) res:text("hello from tcc-built hull\n") end)
+app.manifest({})
+app.get("/", function(req, res) res:text("hello from tcc-built hull") end)
 app.get("/echo/:msg", function(req, res) res:text(req.params.msg) end)
-return app
 EOF
 
 cd "$WORKDIR/myapp"
