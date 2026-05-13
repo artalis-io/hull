@@ -121,6 +121,12 @@ SERVER_PID=$!
 sleep 2
 
 BODY=$(curl -s "http://127.0.0.1:$PORT/probe" || echo FAIL)
+if ! echo "$BODY" | grep -q '"ok":true'; then
+    echo "  response: $BODY"
+    echo "  --- server.log ---"
+    sed 's/^/  | /' "$WORKDIR/server.log"
+    echo "  --- end server.log ---"
+fi
 echo "$BODY" | grep -q '"ok":true'
 assert "hull app fetched https://example.com via --ca-bundle" [ $? -eq 0 ]
 
@@ -145,6 +151,12 @@ SERVER_PID=$!
 sleep 2
 
 BODY=$(curl -s "http://127.0.0.1:$((PORT + 1))/probe" || echo FAIL)
+if ! echo "$BODY" | grep -q '"ok":true'; then
+    echo "  response: $BODY"
+    echo "  --- server2.log ---"
+    sed 's/^/  | /' "$WORKDIR/server2.log"
+    echo "  --- end server2.log ---"
+fi
 echo "$BODY" | grep -q '"ok":true'
 assert "hull app fetched HTTPS via default CA resolution" [ $? -eq 0 ]
 
