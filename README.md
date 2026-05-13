@@ -24,24 +24,46 @@ Six vendored C libraries. One build command. One file. That's the entire stack. 
 
 ## Quick Start
 
+### Install
+
 ```bash
-# Build hull
+# Download the latest signed release binary:
+curl -fsSL https://raw.githubusercontent.com/artalis-io/hull/main/install.sh | sh
+```
+
+The installer detects your OS/arch, downloads a native binary (or the universal Cosmopolitan APE fallback), verifies the SHA-256 checksum against the release manifest, and installs to `~/.local/bin/hull` (no sudo). Override with `HULL_PREFIX=/usr/local/bin sh install.sh`.
+
+Environment knobs: `HULL_VERSION=v0.1.0` (specific tag), `HULL_FLAVOR=cosmo` (force universal APE), `HULL_FORCE=1` (overwrite existing), `HULL_DRY_RUN=1` (preview only).
+
+Or build from source:
+
+```bash
+git clone --recursive https://github.com/artalis-io/hull
+cd hull
 make
 make test
+```
 
+### Develop
+
+```bash
 # Create a new project
-./build/hull new myapp
+hull new myapp
 cd myapp
 
 # Run in development mode (hot reload)
-../build/hull dev app.lua
+hull dev app.lua
 
 # Build a standalone binary
-../build/hull build -o myapp .
+hull build -o myapp .
 
 # Run it
 ./myapp -p 8080 -d app.db
 ```
+
+### Shell completions
+
+Tab-completion for bash, zsh, and fish is shipped in [`completions/`](completions/) — see [completions/README.md](completions/README.md) for install instructions.
 
 ## Hull Tools
 

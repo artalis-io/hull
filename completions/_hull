@@ -1,0 +1,190 @@
+#compdef hull
+# Hull — zsh completion
+#
+# Install:
+#   # System-wide (Homebrew on macOS):
+#   cp _hull "$(brew --prefix)/share/zsh/site-functions/_hull"
+#   # User-local:
+#   mkdir -p ~/.zsh/completions
+#   cp _hull ~/.zsh/completions/_hull
+#   # Then add to ~/.zshrc:
+#   fpath=(~/.zsh/completions $fpath)
+#   autoload -Uz compinit && compinit
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+_hull() {
+    local -a commands agent_subs agent_db_subs migrate_subs deploy_targets runtimes compilers
+    commands=(
+        'keygen:Generate Ed25519 keypair'
+        'build:Compile app into a standalone binary'
+        'verify:Verify Ed25519 signatures and file integrity'
+        'inspect:Display declared capabilities and signature status'
+        'manifest:Extract and print manifest as JSON'
+        'test:Run app tests (in-process, in-memory SQLite)'
+        'new:Scaffold a new hull project in a new directory'
+        'init:Initialize hull in the current directory (idempotent)'
+        'dev:Run the development server with hot reload'
+        'eject:Export to a standalone Makefile project'
+        'sign-platform:Sign platform library with per-arch hashes'
+        'migrate:Run SQL migrations'
+        'agent:Machine-readable introspection for AI coding agents'
+        'mcp:Model Context Protocol server'
+        'check:Pre-flight checks on a hull project'
+        'compute:WASM compute plugin tools'
+        'deploy:Generate deployment configs (Dockerfile, systemd, fly.toml)'
+        'version:Print hull version'
+        'doctor:Check environment for hull build readiness'
+    )
+    agent_subs=(
+        'routes:List routes + middleware'
+        'db:Database introspection (schema/query)'
+        'request:HTTP request to dev server'
+        'status:Check dev server status'
+        'errors:Structured errors from last reload'
+        'test:Run tests with JSON output'
+        'context:Task-relevant documentation'
+        'migrate:Migration status'
+        'deploy:Deployment readiness analysis'
+    )
+    agent_db_subs=(
+        'schema:Introspect DB schema'
+        'query:Run read-only SQL query'
+    )
+    migrate_subs=(
+        'status:Show migration status (applied/pending)'
+        'new:Create a new numbered migration file'
+    )
+    deploy_targets=(
+        'dockerfile:Generate Dockerfile + .dockerignore'
+        'systemd:Generate systemd service unit + install.sh'
+        'fly:Generate fly.toml'
+    )
+    runtimes=('lua' 'js')
+    compilers=('tcc' 'system' 'cc' 'gcc' 'clang' 'cosmocc')
+
+    _arguments -C \
+        '(-v --version)'{-v,--version}'[Print hull version]' \
+        '1: :->command' \
+        '*:: :->args' \
+        && return 0
+
+    case $state in
+        command)
+            _describe -t commands 'hull command' commands
+            ;;
+
+        args)
+            case "$words[1]" in
+                build)
+                    _arguments \
+                        '(-o --output)'{-o,--output}'[Output binary path]:file:_files' \
+                        '--cc[C compiler]:compiler:('"${compilers[@]}"')' \
+                        '--compiler[C compiler backend]:compiler:('"${compilers[@]}"')' \
+                        '--compiler=[C compiler backend]:compiler:('"${compilers[@]}"')' \
+                        '--runtime[Runtime to use]:runtime:('"${runtimes[@]}"')' \
+                        '--target[Cross-compile target]:arch:(x86_64 aarch64)' \
+                        '--sign[Signing key file]:file:_files' \
+                        '--developer-key[Developer public key]:file:_files' \
+                        '--no-aot[Skip AOT compilation of WASM modules]' \
+                        '*:app dir:_files -/'
+                    ;;
+
+                dev)
+                    _arguments \
+                        '(-p --port)'{-p,--port}'[Listen port]:port:' \
+                        '(-d --database)'{-d,--database}'[Database file]:file:_files' \
+                        '--agent[Enable agent sidecar files]' \
+                        '--no-migrate[Skip auto-run migrations on startup]' \
+                        '--no-sandbox[Disable kernel sandbox]' \
+                        '--audit[Enable capability audit logging]' \
+                        '*:entry point:_files'
+                    ;;
+
+                test|check|inspect|verify|manifest|compute|eject)
+                    _arguments \
+                        '--json[Machine-readable JSON output]' \
+                        '--developer-key[Developer public key]:file:_files' \
+                        '*:app dir:_files -/'
+                    ;;
+
+                new)
+                    _arguments \
+                        '--runtime[Runtime]:runtime:('"${runtimes[@]}"')' \
+                        '--runtime=[Runtime]:runtime:('"${runtimes[@]}"')' \
+                        '*:dir:_files -/'
+                    ;;
+
+                init)
+                    _arguments \
+                        '--runtime[Runtime]:runtime:('"${runtimes[@]}"')' \
+                        '--runtime=[Runtime]:runtime:('"${runtimes[@]}"')' \
+                        '*:dir:_files -/'
+                    ;;
+
+                agent)
+                    if (( CURRENT == 2 )); then
+                        _describe -t agent-subs 'agent subcommand' agent_subs
+                    else
+                        case "$words[2]" in
+                            db)
+                                if (( CURRENT == 3 )); then
+                                    _describe -t agent-db-subs 'db subcommand' agent_db_subs
+                                else
+                                    _files -/
+                                fi
+                                ;;
+                            request)
+                                if (( CURRENT == 3 )); then
+                                    _values 'HTTP method' GET POST PUT PATCH DELETE HEAD OPTIONS
+                                fi
+                                ;;
+                            context)
+                                _arguments \
+                                    '--task=[Task]:task:(auth db routing middleware testing build deploy validation templates i18n search webhooks)' \
+                                    '--level=[Detail level]:level:(brief detailed)'
+                                ;;
+                            *)
+                                _arguments \
+                                    '--json[Machine-readable JSON output]' \
+                                    '(-p --port)'{-p,--port}'[Dev server port]:port:' \
+                                    '*:app dir:_files -/'
+                                ;;
+                        esac
+                    fi
+                    ;;
+
+                migrate)
+                    if (( CURRENT == 2 )); then
+                        _alternative \
+                            'subcommands:migrate subcommand:_describe -t migrate-subs "migrate subcommand" migrate_subs' \
+                            'dirs:app dir:_files -/'
+                    else
+                        _arguments \
+                            '(-d --database)'{-d,--database}'[Database file]:file:_files' \
+                            '--json[Machine-readable JSON output]' \
+                            '*:app dir:_files -/'
+                    fi
+                    ;;
+
+                deploy)
+                    if (( CURRENT == 2 )); then
+                        _describe -t deploy-targets 'deploy target' deploy_targets
+                    else
+                        _files -/
+                    fi
+                    ;;
+
+                doctor|version)
+                    _arguments '--json[Machine-readable JSON output]'
+                    ;;
+
+                keygen|sign-platform)
+                    _files
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_hull "$@"

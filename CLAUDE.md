@@ -1,5 +1,19 @@
 # HULL — Development Guide
 
+## Distribution
+
+End-users install Hull with:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/artalis-io/hull/main/install.sh | sh
+```
+
+`install.sh` (POSIX, ~250 lines) detects OS/arch via `uname`, picks `hull-linux-x86_64` / `hull-darwin-arm64` / `hull-cosmo` from the latest GitHub release, verifies the SHA-256 from `hull.sha256`, and installs to `~/.local/bin/hull` (or `/usr/local/bin` if root). Knobs: `HULL_VERSION`, `HULL_PREFIX`, `HULL_FLAVOR=cosmo|native`, `HULL_FORCE=1`, `HULL_DRY_RUN=1`.
+
+Shell completions for bash, zsh, fish live in `completions/`. They cover every subcommand, `--compiler=tcc|system|cc|...`, agent subcommands, deploy targets, etc. See `completions/README.md`.
+
+Tested by `tests/e2e_install.sh` (`make e2e-install` — runs install.sh in dry-run mode, syntax-checks all three completion shells, exercises bash completion behavior for representative inputs).
+
 ## Build
 
 ```bash
@@ -1295,7 +1309,7 @@ make e2e                            # run all E2E tests (examples + build + sand
 | `test_wasm` | 47 | WAMR init/destroy, module load, echo call, gas exhaustion, limits, pools, persistent instances, shared data segments |
 | `test_gpu` | 13 | GPU init/destroy, device enumeration, shader compile (valid + invalid WGSL), dispatch with data doubling, persistent buffer roundtrip (real GPU tests skip if no adapter) |
 
-\+ E2E suites (`e2e_build.sh`, `e2e_examples.sh`, `e2e_http.sh`, `e2e_sandbox.sh`)
+\+ E2E suites (`e2e_build.sh`, `e2e_examples.sh`, `e2e_http.sh`, `e2e_sandbox.sh`, `e2e_tcc.sh`, `e2e_install.sh`)
 
 ### E2E Tests
 
