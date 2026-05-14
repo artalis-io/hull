@@ -91,7 +91,7 @@ app.put("/tasks/:id", (req, res) => {
 });
 
 // Delete a task
-app.del("/tasks/:id", (req, res) => {
+app.delete("/tasks/:id", (req, res) => {
     detectLang(req);
     const changes = db.exec("DELETE FROM tasks WHERE id = ?", [req.params.id]);
     if (changes === 0) {

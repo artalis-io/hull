@@ -40,7 +40,7 @@ make prod CC=cosmocc
 `make prod CC=cosmocc` handles the full cosmo workflow:
 1. Builds `platform-cosmo` from root (if archives missing)
 2. Rebuilds hull binary (platform-cosmo wipes it)
-3. Runs `hull build --cc cosmocc -o todo .`
+3. Runs `hull build --compiler cosmocc -o todo .`
 
 ## Variables
 

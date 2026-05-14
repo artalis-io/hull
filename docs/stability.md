@@ -150,11 +150,12 @@ We reserve the right to:
 - Restructure Tier 4 freely.
 - Add new Tier 1 surface (manifest keys, flags, functions) — these are additive and don't break existing apps.
 
-## Open API decisions for v0.1.0
+## Resolved before v0.1.0 (no longer experimental)
 
-The following surfaces are under review and may change before v0.1.0 is tagged. See `docs/api_review.md` for the full discussion.
+The pre-v0.1.0 API review landed these decisions (see `docs/api_review.md`):
 
-- **Async error convention** — `db.async.*`, `compute.async.*` currently return `{error}` on failure; sync functions throw. Aligning all to throw is recommended but breaks existing apps that check `result.error`.
-- **HTTP route methods** — `app.del` vs `app.delete` (HTTP-standard naming).
-- **HTTP client surface** — three names for outbound HTTP (`http.fetch`, `http.async.request`, `http.async.get/post/...`). Likely converging on `http.async.*` only.
-- **CLI compiler flag** — `--cc` and `--compiler` are both accepted today. Picking one.
+- **Async error convention** — All `*.async.*` APIs throw on error (uniform with sync). `db.async.query`/`db.async.exec`/`compute.async.call` no longer return `{error}` objects.
+- **HTTP route methods** — `app.delete` is canonical; `app.del` is a deprecated alias kept for one release cycle.
+- **HTTP client** — `http.fetch` removed. Use `http.<method>(url, ...)` for sync or `http.async.<method>(url, ...)` for async.
+- **CLI compiler flag** — Only `--compiler` is accepted; `--cc` removed.
+- **`--no-ca-bundle`** — Canonical name; `--skip-ca-bundle` accepted as a deprecated alias.

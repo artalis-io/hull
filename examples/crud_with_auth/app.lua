@@ -199,7 +199,7 @@ app.put("/tasks/:id", function(req, res)
 end)
 
 -- Delete a task
-app.del("/tasks/:id", function(req, res)
+app.delete("/tasks/:id", function(req, res)
     local sess = require_session(req, res)
     if not sess then return end
 

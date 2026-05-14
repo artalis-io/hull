@@ -216,7 +216,7 @@ app.put("/tasks/:id", (req, res) => {
 });
 
 // Delete a task
-app.del("/tasks/:id", (req, res) => {
+app.delete("/tasks/:id", (req, res) => {
     const sess = requireSession(req, res);
     if (!sess) return;
 

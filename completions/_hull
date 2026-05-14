@@ -80,7 +80,6 @@ _hull() {
                 build)
                     _arguments \
                         '(-o --output)'{-o,--output}'[Output binary path]:file:_files' \
-                        '--cc[C compiler]:compiler:('"${compilers[@]}"')' \
                         '--compiler[C compiler backend]:compiler:('"${compilers[@]}"')' \
                         '--compiler=[C compiler backend]:compiler:('"${compilers[@]}"')' \
                         '--runtime[Runtime to use]:runtime:('"${runtimes[@]}"')' \

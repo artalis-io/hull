@@ -4,7 +4,7 @@
 -- Usage: hull build [options] [app_dir]
 --   --runtime lua|js|both  Runtime to include (default: lua)
 --   --sign <key_file>      Sign with Ed25519 private key
---   --cc <compiler>        C compiler to use (default: cosmocc)
+--   --compiler tcc|system|<path>  C compiler backend (default: embedded tcc → cc/gcc/clang)
 --   --output <path>        Output binary path (default: app_dir/app)
 --
 -- SPDX-License-Identifier: AGPL-3.0-or-later
@@ -34,9 +34,6 @@ local function parse_args()
         elseif a == "--sign" then
             i = i + 1
             opts.sign = arg[i]
-        elseif a == "--cc" then
-            i = i + 1
-            opts.cc = arg[i]
         elseif a == "--compiler" then
             i = i + 1
             local comp = arg[i]
@@ -703,14 +700,13 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
         tool.exit(1)
     end
 
-    -- Validate CC matches platform (cc already resolved above)
+    -- Validate compiler matches platform (cc already resolved above)
     if platform_dir then
-        -- Validate: warn if user --cc doesn't match what platform was built with
         local cc_data = read_file(platform_dir .. "platform_cc")
         if cc_data and opts.cc then
             local platform_cc = cc_data:match("^%s*(.-)%s*$")
             if platform_cc ~= opts.cc then
-                tool.stderr("hull build: warning: --cc " .. opts.cc ..
+                tool.stderr("hull build: warning: --compiler " .. opts.cc ..
                     " does not match platform (built with " .. platform_cc .. ")\n")
             end
         end

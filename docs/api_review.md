@@ -24,66 +24,29 @@ These items are applied in the pre-v0.1.0 cleanup pass.
 | Bug: completions advertise `--developer-key` for commands that don't accept it | `completions/*` | Removed from `inspect`/`manifest`/`check`/`eject` completions |
 | Opaque C type: `HlStmtCache` | `include/hull/cap/db.h` | Marked Tier 4 in the header with an explicit "treat as opaque" notice; full opaque migration deferred to architectural roadmap (depends on M1 since `worker_db.h` embeds it) |
 
-## Decisions pending (need user input before v0.1.0 tag)
+## Decisions resolved (applied before v0.1.0)
 
-### D1. Async error convention
+### D1. Async error convention — **Aligned to throw**
 
-**Current state.** Mixed:
-- `db.query` / `db.exec` (sync): throw on error.
-- `db.async.query` / `db.async.exec`: return `{error: "..."}` on failure.
-- `compute.call` (sync): returns `(output, err)` multi-return in Lua.
-- `compute.async.call`: returns `{result, error}` table.
-- `gpu.dispatch` (sync): throws.
-- `gpu.async.dispatch`: ?
+`db.async.query`, `db.async.exec`, `compute.async.call` (Lua) now raise on error instead of returning `{error: "..."}`. Sync API unchanged (already throws). JS counterparts already threw (via `JS_ThrowInternalError`) — verified.
 
-**Recommendation:** Align all async APIs to **throw on error** (reject the Promise in JS; raise from the coroutine in Lua). Mirrors the sync API; matches what users expect from `await`.
+**Migration for apps:** replace `if r.error then ...` with `try/catch` (JS) or `pcall` (Lua), or let errors propagate.
 
-**Cost:** Existing apps that check `result.error` need to add `try/catch`. Migration is mechanical.
+### D2. HTTP route method spelling — **`app.delete` is canonical**
 
-**Decision needed.** Apply now, or document the asymmetry as a known wart and fix in v0.2?
+`app.delete(path, handler)` is now the canonical DELETE registrar. `app.del` is kept as a deprecated alias for one release cycle. All built-in examples updated.
 
-### D2. HTTP route method spelling
+### D3. HTTP client surface — **`http.fetch` removed**
 
-**Current state.** `app.del(path, handler)` registers a DELETE route. `http.delete(url, ...)` issues an outbound DELETE.
+The `http.fetch` global (Lua + JS) is removed. Canonical names are `http.<method>(url, ...)` (sync) and `http.async.<method>(url, ...)` (async). Use `http.async.request(method, url, opts)` for the generic form.
 
-**Recommendation:** Rename `app.del` → `app.delete`. Matches HTTP spec, matches `http.delete`, matches every modern HTTP framework (Express, Hono, Koa, Fastify, Bun). Keep `app.del` as a deprecated alias for v0.1.
+### D4. CLI compiler flag — **`--cc` removed**
 
-**Cost:** Trivial; one-line addition + alias.
+`hull build --compiler tcc|system|<path>` is the only form. The `--cc` alias is gone. Affected: example Makefiles, e2e_build/e2e_compute tests, build.lua parser, completions.
 
-**Decision needed.** Rename now, or commit to `app.del` and rename `http.delete` → `http.del` for symmetry?
+### D5. Make `HlLua` / `HlJS` opaque — **Deferred to architectural roadmap**
 
-### D3. HTTP client surface
-
-**Current state.** Three names for outbound HTTP:
-- `http.fetch(method, url, opts)` (Lua + JS)
-- `http.async.request(method, url, opts)` (Lua + JS) — literally an alias for `http.fetch`
-- `http.async.get(url, opts)` / `.post(url, body, opts)` / `.put/.patch/.delete/.head/.options` (Lua + JS)
-
-**Recommendation.** Drop `http.fetch`. Standardize on `http.async.<method>(...)` (consistent with `db.async.*`, `compute.async.*`, `gpu.async.*`).
-
-**Cost.** Examples + tests + CLAUDE.md all reference `http.fetch`. Migration is a global find/replace.
-
-**Decision needed.** Drop `http.fetch` now, keep it, or rename to something else?
-
-### D4. CLI compiler flag
-
-**Current state.** `hull build` accepts both `--cc <path>` and `--compiler tcc|system|<path>`. Both map to the same option.
-
-**Recommendation.** Keep `--compiler`, drop `--cc`. `--compiler` matches `hull doctor` terminology and is what CLAUDE.md commits to.
-
-**Cost.** Anyone scripting `hull build --cc` breaks. Likely nobody (D3 just landed).
-
-**Decision needed.** Drop `--cc` or keep both as documented aliases?
-
-### D5. Make `HlLua` / `HlJS` opaque
-
-**Current state.** Both runtime structs are fully exposed in `include/hull/runtime/lua.h` and `js.h` with all internal fields. Per `stability.md` they are Tier 4 (internal) — but they LOOK like Tier 1.
-
-**Recommendation.** Move struct internals to `src/hull/runtime/{lua,js}_internal.h`. Public header exposes only `typedef struct HlLua HlLua;`. Provide accessors for the few fields callers actually need (currently none outside Hull).
-
-**Cost.** Affects how internal `mod_*.c` files compile. Same TU still includes the internal header, so no behavior change. ~30 file diff.
-
-**Decision needed.** Apply in v0.1 prep, or defer to architectural roadmap item #14?
+Tier-4 documentation in headers; full struct hiding tracked as item #14 in `docs/architecture_roadmap.md`.
 
 ## Resolved-via-documentation (no code change)
 

@@ -92,7 +92,7 @@ app.get("/webhooks", function(_req, res)
 end)
 
 -- Delete a webhook
-app.del("/webhooks/:id", function(req, res)
+app.delete("/webhooks/:id", function(req, res)
     local changes = db.exec("DELETE FROM webhooks WHERE id = ?", { req.params.id })
     if changes == 0 then
         return res:status(404):json({ error = "webhook not found" })

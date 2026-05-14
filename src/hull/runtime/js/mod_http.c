@@ -518,8 +518,6 @@ static int js_http_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_http_patch, "patch", 3));
     JS_SetPropertyStr(ctx, http, "delete",
                       JS_NewCFunction(ctx, js_http_del, "delete", 2));
-    JS_SetPropertyStr(ctx, http, "fetch",
-                      JS_NewCFunction(ctx, js_http_fetch, "fetch", 3));
 
     /* http.async sub-object */
     JSValue async_obj = JS_NewObject(ctx);

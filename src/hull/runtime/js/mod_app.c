@@ -516,6 +516,10 @@ static int js_app_module_init(JSContext *ctx, JSModuleDef *m)
     JS_SetPropertyStr(ctx, app, "put",
         JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_app_route,
                              "put", 2, JS_CFUNC_generic_magic, 2));
+    JS_SetPropertyStr(ctx, app, "delete",
+        JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_app_route,
+                             "delete", 2, JS_CFUNC_generic_magic, 3));
+    /* deprecated alias — use `app.delete` */
     JS_SetPropertyStr(ctx, app, "del",
         JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_app_route,
                              "del", 2, JS_CFUNC_generic_magic, 3));

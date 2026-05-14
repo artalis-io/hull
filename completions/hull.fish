@@ -63,8 +63,6 @@ complete -c hull -n __hull_no_subcommand -s v -l version     -d 'Print hull vers
 # ── build ────────────────────────────────────────────────────────────
 
 complete -c hull -n '__hull_subcommand build' -s o -l output  -r -d 'Output binary path'
-complete -c hull -n '__hull_subcommand build' -l cc           -r -d 'C compiler' \
-    -xa 'tcc system cc gcc clang cosmocc'
 complete -c hull -n '__hull_subcommand build' -l compiler     -r -d 'C compiler backend' \
     -xa 'tcc system cc gcc clang cosmocc'
 complete -c hull -n '__hull_subcommand build' -l runtime      -r -d 'Runtime to use' \

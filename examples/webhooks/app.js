@@ -98,7 +98,7 @@ app.get("/webhooks", (_req, res) => {
 });
 
 // Delete a webhook
-app.del("/webhooks/:id", (req, res) => {
+app.delete("/webhooks/:id", (req, res) => {
     const changes = db.exec("DELETE FROM webhooks WHERE id = ?", [req.params.id]);
     if (changes === 0) {
         return res.status(404).json({ error: "webhook not found" });

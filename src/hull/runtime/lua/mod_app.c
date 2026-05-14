@@ -410,7 +410,8 @@ static const luaL_Reg app_funcs[] = {
     {"get",          lua_app_get},
     {"post",         lua_app_post},
     {"put",          lua_app_put},
-    {"del",          lua_app_del},
+    {"delete",       lua_app_del},
+    {"del",          lua_app_del},   /* deprecated alias — use `app.delete` */
     {"patch",        lua_app_patch},
     {"options",      lua_app_options},
     {"use",          lua_app_use},

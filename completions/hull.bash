@@ -47,9 +47,9 @@ _hull() {
     case "$subcommand" in
         build)
             case "$prev" in
-                -o|--output|--cc|--compiler|--target|--sign|--runtime|--developer-key)
+                -o|--output|--compiler|--target|--sign|--runtime|--developer-key)
                     case "$prev" in
-                        --compiler|--cc) COMPREPLY=($(compgen -W "$compilers" -- "$cur")) ;;
+                        --compiler) COMPREPLY=($(compgen -W "$compilers" -- "$cur")) ;;
                         --runtime)       COMPREPLY=($(compgen -W "$runtimes" -- "$cur")) ;;
                         --target)        COMPREPLY=($(compgen -W "x86_64 aarch64" -- "$cur")) ;;
                         -o|--output|--sign|--developer-key)
@@ -62,7 +62,7 @@ _hull() {
                 return
             fi
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "-o --output --compiler --cc --sign --runtime --target --no-aot --developer-key" -- "$cur"))
+                COMPREPLY=($(compgen -W "-o --output --compiler --sign --runtime --target --no-aot --developer-key" -- "$cur"))
             else
                 COMPREPLY=($(compgen -d -- "$cur"))
             fi

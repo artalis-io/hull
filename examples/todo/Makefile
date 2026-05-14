@@ -47,7 +47,7 @@ endif
 prod: check-cosmo
 	$(MAKE) -j$(JOBS) -C $(REPO_ROOT) $(PLATFORM_TARGET)
 	$(MAKE) -j$(JOBS) -C $(REPO_ROOT) $(EMBED_FLAG) CC=cc AR=ar
-	$(HULL) build --cc $(CC) -o todo .
+	$(HULL) build --compiler $(CC) -o todo .
 
 check-cosmo:
 ifneq (,$(findstring cosmo,$(CC)))

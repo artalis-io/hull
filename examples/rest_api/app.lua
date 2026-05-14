@@ -91,7 +91,7 @@ app.put("/tasks/:id", function(req, res)
 end)
 
 -- Delete a task
-app.del("/tasks/:id", function(req, res)
+app.delete("/tasks/:id", function(req, res)
     detect_lang(req)
     local changes = db.exec("DELETE FROM tasks WHERE id = ?", { req.params.id })
     if changes == 0 then

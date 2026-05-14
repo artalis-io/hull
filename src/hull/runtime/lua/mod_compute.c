@@ -291,29 +291,30 @@ static int lua_compute_load(lua_State *L)
 
 /* ── compute.async.call ─────────────────────────────────────────────── */
 
-/* push_result callback: convert HlWorkerWasmOp result to Lua table
- * Returns single table: { result = "output" } or { error = "msg" }
- * Matches db.async pattern (single return value from yield). */
+/* push_result callback: convert HlWorkerWasmOp result to Lua value.
+ * On error, raises a Lua error (propagates through the coroutine resume
+ * as a regular failure). On success, returns the output directly:
+ *   - buffer mode → WasmBuffer userdata
+ *   - normal mode → output string
+ * Matches db.async / http.async / gpu.async error-throwing convention. */
 static void lua_push_worker_wasm_result(lua_State *L, void *driver)
 {
     HlWorkerWasmOp *op = (HlWorkerWasmOp *)driver;
 
-    lua_newtable(L);
     if (op->error) {
-        lua_pushstring(L, op->error_msg);
-        lua_setfield(L, -2, "error");
-    } else if (op->output_buf) {
+        luaL_error(L, "compute.async: %s", op->error_msg);
+        return; /* unreachable */
+    }
+    if (op->output_buf) {
         /* Buffer mode: push WasmBuffer userdata, transfer ownership */
         lua_push_wasm_buffer(L, op->output_buf);
         op->output_buf = NULL; /* prevent hl_worker_wasm_op_free from destroying */
-        lua_setfield(L, -2, "result");
-    } else {
-        if (op->output && op->output_len > 0)
-            lua_pushlstring(L, (const char *)op->output, op->output_len);
-        else
-            lua_pushlstring(L, "", 0);
-        lua_setfield(L, -2, "result");
+        return;
     }
+    if (op->output && op->output_len > 0)
+        lua_pushlstring(L, (const char *)op->output, op->output_len);
+    else
+        lua_pushlstring(L, "", 0);
 }
 
 static int lua_compute_async_call(lua_State *L)

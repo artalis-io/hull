@@ -326,16 +326,16 @@ static JSValue js_db_batch(JSContext *ctx, JSValueConst this_val,
 
 /* ── db.async.query / db.async.exec ─────────────────────────────────── */
 
-/* push_result callback: convert HlWorkerDbOp result to JSValue */
+/* push_result callback: convert HlWorkerDbOp result to JSValue.
+ * On error, returns JS_EXCEPTION (after throwing) — the async resume
+ * machinery rejects the awaiting Promise. Successful exec returns
+ * { changes, lastId }; query returns the rows array directly. */
 static JSValue js_push_worker_db_result(JSContext *ctx, void *driver)
 {
     HlWorkerDbOp *op = (HlWorkerDbOp *)driver;
 
     if (op->error) {
-        JSValue obj = JS_NewObject(ctx);
-        JS_SetPropertyStr(ctx, obj, "error",
-                          JS_NewString(ctx, op->error_msg));
-        return obj;
+        return JS_ThrowInternalError(ctx, "db.async: %s", op->error_msg);
     }
 
     if (op->kind == HL_WORK_DB_EXEC) {

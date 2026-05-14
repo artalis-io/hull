@@ -307,16 +307,18 @@ static const luaL_Reg db_funcs[] = {
 
 /* ── db.async.query / db.async.exec ─────────────────────────────────── */
 
-/* push_result callback: convert HlWorkerDbOp result to Lua table */
+/* push_result callback: convert HlWorkerDbOp result to Lua value.
+ * On error, raises a Lua error (longjmps out of the resume continuation,
+ * which propagates as a regular pcall failure in user code). Successful
+ * exec returns { changes, last_id }; query returns rows array directly. */
 static void lua_push_worker_db_result(lua_State *L, void *driver)
 {
     HlWorkerDbOp *op = (HlWorkerDbOp *)driver;
 
     if (op->error) {
-        lua_newtable(L);
-        lua_pushstring(L, op->error_msg);
-        lua_setfield(L, -2, "error");
-        return;
+        /* luaL_error longjmps — caller's resume completes with an error */
+        luaL_error(L, "db.async: %s", op->error_msg);
+        return; /* unreachable */
     }
 
     if (op->kind == HL_WORK_DB_EXEC) {

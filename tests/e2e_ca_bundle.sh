@@ -106,7 +106,7 @@ cat > "$WORKDIR/myapp/app.lua" << 'EOF'
 app.manifest({ hosts = { "example.com" } })
 
 app.get("/probe", function(req, res)
-    local resp = http.fetch("GET", "https://example.com/")
+    local resp = http.async.request("GET", "https://example.com/")
     if not resp or not resp.status then
         res:status(500)
         res:json({ error = "no response" })

@@ -433,7 +433,6 @@ static const luaL_Reg http_funcs[] = {
     {"put",     lua_http_put},
     {"patch",   lua_http_patch},
     {"delete",  lua_http_delete},
-    {"fetch",   lua_http_fetch},
     {NULL, NULL}
 };
 
