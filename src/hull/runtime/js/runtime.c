@@ -852,7 +852,7 @@ void hl_js_free(HlJS *js)
             "console", "hull",
             "__hull_routes", "__hull_route_defs",
             "__hull_middleware", "__hull_post_middleware",
-            "__hull_config", "__hull_manifest", "__hull_statics",
+            "__hull_manifest",
             "__hull_test_state", "__hull_async_promise", "test",
             "__hull_timers", "__hull_timer_defs",
             "__hull_ws_defs", "__hull_sse_defs",

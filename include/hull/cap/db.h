@@ -25,12 +25,15 @@ typedef enum {
 
 /* ── Prepared statement cache ──────────────────────────────────────── */
 
+/* INTERNAL — Tier 4 (no stability promise). Layout will change post-v0.1.0
+ * (see docs/architecture_roadmap.md). Treat the struct as opaque; use only
+ * the entry points below. */
 #define HL_STMT_CACHE_SIZE 32
 
 typedef struct {
-    const char     *sql;     /* SQL text (owned copy) */
-    size_t          sql_len; /* strlen(sql), tracked for alloc accounting */
-    sqlite3_stmt   *stmt;    /* compiled statement */
+    const char     *sql;
+    size_t          sql_len;
+    sqlite3_stmt   *stmt;
 } HlStmtCacheEntry;
 
 typedef struct HlStmtCache {

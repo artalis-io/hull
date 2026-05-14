@@ -82,7 +82,7 @@ _hull() {
                 return
             fi
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "-p --port -d --database --agent --no-migrate --no-sandbox --audit --ca-bundle --skip-ca-bundle" -- "$cur"))
+                COMPREPLY=($(compgen -W "-p --port -d --database --agent --no-migrate --no-sandbox --audit --ca-bundle --no-ca-bundle" -- "$cur"))
             else
                 COMPREPLY=($(compgen -f -- "$cur"))
             fi
@@ -170,11 +170,7 @@ _hull() {
             ;;
 
         update)
-            if [[ "$cur" == --channel=* ]]; then
-                COMPREPLY=($(compgen -W "stable beta" -- "${cur#--channel=}"))
-                return
-            fi
-            COMPREPLY=($(compgen -W "--check --force --channel= --repo= --help" -- "$cur"))
+            COMPREPLY=($(compgen -W "--check --force --repo= --help" -- "$cur"))
             ;;
 
         keygen|sign-platform)

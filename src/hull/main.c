@@ -208,7 +208,7 @@ static void usage(const char *prog)
             "  --verify-sig PUBKEY  Verify app signature before startup\n"
             "  --drain-timeout MS   Graceful shutdown drain timeout (default: 5000)\n"
             "  --no-migrate         Skip auto-run migrations on startup\n"
-            "  --skip-ca-bundle     Skip TLS certificate verification (dev mode)\n"
+            "  --no-ca-bundle       Skip TLS certificate verification (dev mode)\n"
             "  --ca-bundle PATH     Use custom CA bundle (overrides system + embedded)\n"
             "  --max-instructions N Set runtime instruction limit per request (default: 100m)\n"
             "  --audit              Enable capability audit logging (JSON to stderr)\n"
@@ -363,7 +363,9 @@ static int hl_parse_serve_args(int argc, char **argv, HlServeConfig *cfg)
             cfg->no_db = 1;
         } else if (strcmp(argv[i], "--no-compress") == 0) {
             cfg->no_compress = 1;
-        } else if (strcmp(argv[i], "--skip-ca-bundle") == 0) {
+        } else if (strcmp(argv[i], "--no-ca-bundle") == 0 ||
+                   strcmp(argv[i], "--skip-ca-bundle") == 0) {
+            /* --skip-ca-bundle accepted as deprecated alias (one cycle) */
             cfg->skip_ca_bundle = 1;
         } else if (strcmp(argv[i], "--ca-bundle") == 0 && i + 1 < argc) {
             cfg->ca_bundle_override = argv[++i];
@@ -994,14 +996,14 @@ static int hl_serve_wire_and_start(HlServerState *s)
         /* Set up TLS client for HTTPS support.
          *
          * Resolution order:
-         *   1. --skip-ca-bundle           → no verification (dev only)
+         *   1. --no-ca-bundle (or --skip-ca-bundle alias) → no verification (dev only)
          *   2. --ca-bundle PATH (override) → use that file
          *   3. system CA store at well-known paths
          *   4. embedded Mozilla bundle (when HL_EMBED_CA_BUNDLE=1)
          *   5. fail with a clear hint
          */
         if (s->cfg.skip_ca_bundle) {
-            log_warn("[hull:c] TLS certificate verification disabled (--skip-ca-bundle)");
+            log_warn("[hull:c] TLS certificate verification disabled (--no-ca-bundle)");
             s->client_tls_ctx = kl_tls_mbedtls_client_ctx_create(NULL, &s->kl_alloc);
         } else if (s->cfg.ca_bundle_override) {
             s->ca_bundle_path = s->cfg.ca_bundle_override;
@@ -1029,7 +1031,7 @@ static int hl_serve_wire_and_start(HlServerState *s)
                         log_warn("[hull:c] failed to parse embedded CA bundle");
                 } else {
                     log_warn("[hull:c] no CA bundle found; HTTPS disabled "
-                             "(use --skip-ca-bundle, --ca-bundle PATH, or "
+                             "(use --no-ca-bundle, --ca-bundle PATH, or "
                              "build with HL_EMBED_CA_BUNDLE=1)");
                 }
             }

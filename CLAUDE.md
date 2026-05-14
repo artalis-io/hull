@@ -7,7 +7,7 @@
 Hull embeds Mozilla's CA bundle (from curl.se, ~226KB, ~145 roots) into `libhull_platform.a` so HTTPS works without a system CA store. Apps built via `hull build` inherit the embedded bundle automatically.
 
 Resolution order at startup (in `main.c::hl_serve_wire_and_start`):
-1. `--skip-ca-bundle` → no verification (dev only, MITM-vulnerable)
+1. `--no-ca-bundle` (or `--skip-ca-bundle` deprecated alias) → no verification (dev only, MITM-vulnerable)
 2. `--ca-bundle PATH` (or `--ca-bundle=PATH`) → load that file
 3. System CA store at `/etc/ssl/cert.pem`, `/etc/ssl/certs/ca-certificates.crt`, `/etc/pki/tls/certs/ca-bundle.crt`
 4. Embedded Mozilla bundle (via `hl_embedded_ca_bundle()` in `src/hull/cacert.c`)
@@ -167,7 +167,7 @@ Table-driven dispatcher in `src/hull/commands/dispatch.c`. 20 commands:
 
 ```
 hull keygen | build | verify | inspect | manifest | test | new | init | dev | eject | sign-platform | migrate | agent | mcp | check | compute | deploy | version | doctor | update
-Runtime flags: --audit (capability audit logging), --agent (sidecar files), --no-migrate, --no-sandbox, --skip-ca-bundle, --ca-bundle PATH
+Runtime flags: --audit (capability audit logging), --agent (sidecar files), --no-migrate, --no-sandbox, --no-ca-bundle, --ca-bundle PATH
 Global flags: --version / -v (equivalent to hull version)
 ```
 

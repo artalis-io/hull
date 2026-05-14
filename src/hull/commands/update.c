@@ -7,8 +7,6 @@
  *
  *   hull update                — install latest if newer than current
  *   hull update --check        — print "update available" / "up to date"
- *   hull update --channel=beta — include pre-releases (no beta channel yet;
- *                                 same as stable currently)
  *   hull update --force        — reinstall current version
  *   hull update --repo=org/name — override the GitHub repo
  *
@@ -238,18 +236,12 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
     int check_only = 0;
     int force = 0;
     const char *repo = HL_DEFAULT_REPO;
-    /* --channel=stable|beta — reserved; not wired yet (no separate beta channel
-     * exists today). Accept and ignore so install/CI scripts can pass it. */
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--check") == 0) {
             check_only = 1;
         } else if (strcmp(argv[i], "--force") == 0) {
             force = 1;
-        } else if (strncmp(argv[i], "--channel=", 10) == 0) {
-            /* reserved — accepted, not used */
-        } else if (strcmp(argv[i], "--channel") == 0 && i + 1 < argc) {
-            i++;  /* consume value; reserved */
         } else if (strncmp(argv[i], "--repo=", 7) == 0) {
             repo = argv[i] + 7;
         } else if (strcmp(argv[i], "--repo") == 0 && i + 1 < argc) {
@@ -259,10 +251,9 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
                 "Usage: hull update [options]\n"
                 "\n"
                 "Options:\n"
-                "  --check               Check for an update without installing\n"
-                "  --force               Reinstall even if version matches\n"
-                "  --channel=stable|beta Release channel (default: stable)\n"
-                "  --repo=ORG/NAME       Override the GitHub repo (default: " HL_DEFAULT_REPO ")\n"
+                "  --check          Check for an update without installing\n"
+                "  --force          Reinstall even if version matches\n"
+                "  --repo=ORG/NAME  Override the GitHub repo (default: " HL_DEFAULT_REPO ")\n"
                 "\n");
             return 0;
         }

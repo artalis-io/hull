@@ -46,7 +46,7 @@ app.get("/test/patch", (_req, res) => {
 
 // GET /test/delete — exercise http.delete()
 app.get("/test/delete", (_req, res) => {
-    const r = http.del(`${ECHO_BASE}/echo`);
+    const r = http.delete(`${ECHO_BASE}/echo`);
     res.json({ status: r.status, echo: r.body });
 });
 

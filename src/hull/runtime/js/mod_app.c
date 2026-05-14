@@ -463,21 +463,6 @@ static JSValue js_app_sse(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-/* app.config(obj) — application configuration */
-static JSValue js_app_config(JSContext *ctx, JSValueConst this_val,
-                              int argc, JSValueConst *argv)
-{
-    (void)this_val;
-    if (argc < 1)
-        return JS_ThrowTypeError(ctx, "app.config requires an object");
-
-    JSValue global = JS_GetGlobalObject(ctx);
-    JS_SetPropertyStr(ctx, global, "__hull_config", JS_DupValue(ctx, argv[0]));
-    JS_FreeValue(ctx, global);
-
-    return JS_UNDEFINED;
-}
-
 /* app.manifest(obj) — declare application capabilities (one-shot) */
 static JSValue js_app_manifest(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv)
@@ -517,38 +502,6 @@ static JSValue js_app_get_manifest(JSContext *ctx, JSValueConst this_val,
     return manifest;
 }
 
-/* app.static(prefix, directory) — static file serving */
-static JSValue js_app_static(JSContext *ctx, JSValueConst this_val,
-                              int argc, JSValueConst *argv)
-{
-    (void)this_val;
-    if (argc < 2)
-        return JS_ThrowTypeError(ctx, "app.static requires (prefix, directory)");
-
-    /* Store static config for C router to process */
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue statics = JS_GetPropertyStr(ctx, global, "__hull_statics");
-    if (JS_IsUndefined(statics)) {
-        statics = JS_NewArray(ctx);
-        JS_SetPropertyStr(ctx, global, "__hull_statics", JS_DupValue(ctx, statics));
-    }
-
-    JSValue len_val = JS_GetPropertyStr(ctx, statics, "length");
-    int32_t idx = 0;
-    JS_ToInt32(ctx, &idx, len_val);
-    JS_FreeValue(ctx, len_val);
-
-    JSValue entry = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, entry, "prefix", JS_DupValue(ctx, argv[0]));
-    JS_SetPropertyStr(ctx, entry, "directory", JS_DupValue(ctx, argv[1]));
-    JS_SetPropertyUint32(ctx, statics, (uint32_t)idx, entry);
-
-    JS_FreeValue(ctx, statics);
-    JS_FreeValue(ctx, global);
-
-    return JS_UNDEFINED;
-}
-
 static int js_app_module_init(JSContext *ctx, JSModuleDef *m)
 {
     JSValue app = JS_NewObject(ctx);
@@ -585,10 +538,6 @@ static int js_app_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_app_every, "every", 2));
     JS_SetPropertyStr(ctx, app, "daily",
                       JS_NewCFunction(ctx, js_app_daily, "daily", 3));
-    JS_SetPropertyStr(ctx, app, "config",
-                      JS_NewCFunction(ctx, js_app_config, "config", 1));
-    JS_SetPropertyStr(ctx, app, "static",
-                      JS_NewCFunction(ctx, js_app_static, "static", 2));
     JS_SetPropertyStr(ctx, app, "manifest",
                       JS_NewCFunction(ctx, js_app_manifest, "manifest", 1));
     JS_SetPropertyStr(ctx, app, "getManifest",

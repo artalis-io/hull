@@ -516,8 +516,6 @@ static int js_http_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_http_put, "put", 3));
     JS_SetPropertyStr(ctx, http, "patch",
                       JS_NewCFunction(ctx, js_http_patch, "patch", 3));
-    JS_SetPropertyStr(ctx, http, "del",
-                      JS_NewCFunction(ctx, js_http_del, "del", 2));
     JS_SetPropertyStr(ctx, http, "delete",
                       JS_NewCFunction(ctx, js_http_del, "delete", 2));
     JS_SetPropertyStr(ctx, http, "fetch",

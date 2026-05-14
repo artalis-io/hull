@@ -97,7 +97,7 @@ Hull ships 20 subcommands for the full development lifecycle:
 | `hull <app> --queue-capacity N` | Thread pool queue capacity (default: 64) |
 | `hull <app> --no-compress` | Disable gzip response compression |
 | `hull <app> --ca-bundle PATH` | Custom CA bundle (overrides system + embedded) |
-| `hull <app> --skip-ca-bundle` | Skip TLS certificate verification (dev only) |
+| `hull <app> --no-ca-bundle` | Skip TLS certificate verification (dev only) |
 | `hull migrate [app_dir]` | Run pending SQL migrations |
 | `hull migrate status` | Show migration status (applied/pending) |
 | `hull migrate new <name>` | Create a new numbered migration file |
@@ -473,6 +473,9 @@ Example apps in both Lua and JavaScript:
 | [docs/architecture.md](docs/architecture.md) | System layers, capability API, build pipeline |
 | [docs/security.md](docs/security.md) | Trust model, attack model, sandbox enforcement |
 | [docs/roadmap.md](docs/roadmap.md) | What's built, what's next |
+| [docs/stability.md](docs/stability.md) | API stability tiers, semver mapping, conventions |
+| [docs/api_review.md](docs/api_review.md) | Pre-v0.1.0 API review findings + pending decisions |
+| [docs/architecture_roadmap.md](docs/architecture_roadmap.md) | Post-v0.1.0 cohesion/coupling refactor backlog |
 | [docs/benchmark.md](docs/benchmark.md) | Performance methodology and results |
 | [docs/keel_audit.md](docs/keel_audit.md) | Keel HTTP server C code audit report |
 | [docs/ASSESSMENT.md](docs/ASSESSMENT.md) | Platform assessment, scaling path, strategic positioning |

@@ -6,7 +6,6 @@
  *
  *   hull update                — install latest if newer than current
  *   hull update --check        — print "update available" / "up to date"
- *   hull update --channel=beta — include pre-releases (no beta channel yet)
  *   hull update --force        — reinstall current version
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later

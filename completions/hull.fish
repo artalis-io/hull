@@ -26,7 +26,7 @@ end
 
 function __hull_no_subcommand
     set -l cmd (commandline -opc)
-    set -l commands keygen build verify inspect manifest test new init dev eject sign-platform migrate agent mcp check compute deploy version doctor
+    set -l commands keygen build verify inspect manifest test new init dev eject sign-platform migrate agent mcp check compute deploy version doctor update
     for c in $cmd[2..-1]
         if contains -- $c $commands
             return 1
@@ -84,7 +84,7 @@ complete -c hull -n '__hull_subcommand dev' -l no-migrate     -d 'Skip auto-migr
 complete -c hull -n '__hull_subcommand dev' -l no-sandbox     -d 'Disable kernel sandbox'
 complete -c hull -n '__hull_subcommand dev' -l audit          -d 'Enable capability audit logging'
 complete -c hull -n '__hull_subcommand dev' -l ca-bundle      -r -d 'Custom CA bundle path'
-complete -c hull -n '__hull_subcommand dev' -l skip-ca-bundle -d 'Skip TLS verification (dev only)'
+complete -c hull -n '__hull_subcommand dev' -l no-ca-bundle -d 'Skip TLS verification (dev only)'
 
 # ── test / check / inspect / verify / manifest / compute / eject ─────
 
@@ -147,7 +147,6 @@ complete -c hull -n '__hull_subcommand version' -l json -d 'Machine-readable JSO
 
 # ── update ───────────────────────────────────────────────────────────
 
-complete -c hull -n '__hull_subcommand update' -l check   -d 'Check for an update without installing'
-complete -c hull -n '__hull_subcommand update' -l force   -d 'Reinstall even if version matches'
-complete -c hull -n '__hull_subcommand update' -l channel -r -d 'Release channel' -xa 'stable beta'
-complete -c hull -n '__hull_subcommand update' -l repo    -r -d 'GitHub repo'
+complete -c hull -n '__hull_subcommand update' -l check -d 'Check for an update without installing'
+complete -c hull -n '__hull_subcommand update' -l force -d 'Reinstall even if version matches'
+complete -c hull -n '__hull_subcommand update' -l repo  -r -d 'GitHub repo'

@@ -166,7 +166,7 @@ The missing piece: `hull build` shells out to `cc` to compile generated C code. 
 |---------|--------|-------|
 | `hull update` | **Done** | Pure C in `src/hull/commands/update.c` (~330 LOC) — keel client + embedded CA bundle + mbedTLS SHA-256 + atomic `rename(2)` |
 | `hull update --check` | **Done** | Compare current `HL_VERSION` with latest release tag, no install |
-| `hull update --channel=stable\|beta` | Reserved | Flag accepted but no separate beta channel yet |
+| `hull update --channel=stable\|beta` | Deferred | Flag removed pre-v0.1.0; will be added back when a real beta channel exists |
 | `hull update --repo=ORG/NAME` | **Done** | Override the default repo (`artalis-io/hull`); used in CI tests against `cli/cli` |
 | Signature verification on update | Deferred | Releases are not yet Ed25519-signed; `hull keygen` + `hull verify` already exist for when they are |
 

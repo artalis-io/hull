@@ -101,7 +101,7 @@ _hull() {
                         '--audit[Enable capability audit logging]' \
                         '--ca-bundle[Custom CA bundle path]:file:_files' \
                         '--ca-bundle=[Custom CA bundle path]:file:_files' \
-                        '--skip-ca-bundle[Skip TLS verification (dev only)]' \
+                        '--no-ca-bundle[Skip TLS verification (dev only)]' \
                         '*:entry point:_files'
                     ;;
 
@@ -187,8 +187,6 @@ _hull() {
                     _arguments \
                         '--check[Check for an update without installing]' \
                         '--force[Reinstall even if version matches]' \
-                        '--channel[Release channel]:channel:(stable beta)' \
-                        '--channel=[Release channel]:channel:(stable beta)' \
                         '--repo[GitHub repo]:repo:' \
                         '--repo=[GitHub repo]:repo:'
                     ;;

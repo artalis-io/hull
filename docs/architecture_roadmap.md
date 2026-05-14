@@ -1,0 +1,123 @@
+# Hull Architecture Roadmap
+
+Post-v0.1.0 cohesion + coupling refactor backlog. Derived from a full audit of `src/hull/` and `include/hull/` (≈ 45k LOC, 110 files; vendored libraries excluded).
+
+**TL;DR:** Hull's architecture is fundamentally sound — capability boundary is intact, dispatcher is table-driven, vtables exist for runtime / db / compiler / gpu. The findings below name smells worth scheduling, not active bugs.
+
+## Module map
+
+Top-level Hull modules and where they call.
+
+| Module | Responsibility | Calls into | Called from |
+|--------|----------------|------------|-------------|
+| `main.c` | CLI parse → server boot → event loop. 1308 lines, 11 phases | `app_context`, `manifest`, `sandbox`, `signature`, `static`, `agent_api`, `commands/dispatch`, `cap/*`, `vfs`, Keel | (entry point) |
+| `app_context.c` | Bundle: DB + VFS + runtime init/load/free. 406 lines | `cap/db_backend`, `migrate`, `vfs`, `runtime/lua`, `runtime/js`, `cap/wasm` | `main.c`, `commands/test.c`, `agent_lib.c`, `commands/mcp.c` |
+| `agent_lib.c` | Agent introspection: routes, db_schema, db_query, test, request, status, errors, context, migrate, deploy. 1353 lines | `app_context`, `cap/db`, `cap/tool`, `runtime/lua`, `runtime/js`, `migrate`, Keel | `commands/agent.c`, `commands/mcp.c`, `agent_api.c` |
+| `manifest.c` | Parse `app.manifest({…})` from Lua registry OR JS globalThis. Both impls in one file. 459 lines | `cap/alloc`, Lua/JS C API | vtable consumers |
+| `sandbox.c` | OS sandbox enforcement. Per-OS dispatch for Linux pledge, OpenBSD native, macOS Seatbelt, Cosmo. Reads `HlManifest` directly. 677 lines | `HlManifest` fields, `HlToolUnveilCtx` | `main.c`, `cap/tool` |
+| `commands/dispatch.c` | Table-driven subcommand dispatch + global flag parsing. 99 lines | every `commands/*.c` | `main.c` |
+| `runtime/lua/runtime.c` | VM lifecycle + sandbox + alloc + module loader + dispatch + WebSocket handlers + SSE handler + route wiring + middleware + timers + vtable. **1713 lines (god module)** | Lua C API, Keel, `manifest`, `cap/*` | `app_context`, `tool.c`, vtable dispatch |
+| `runtime/js/runtime.c` | Same as Lua, for QuickJS. **2245 lines (god module)** | QuickJS C API, Keel, `manifest`, `cap/*` | `app_context`, vtable dispatch |
+
+## High-priority findings
+
+### Critical (architectural layering breaks)
+
+**C1. `cap/test_lua.c` + `cap/test_js.c` are runtime bindings sitting in `cap/`.**
+The cap layer is supposed to be the "C enforcement boundary — no runtime knowledge" (per `CLAUDE.md`). But `cap/test_lua.c` is 404 lines of Lua bindings (`l_test_call`, `l_test_get`, etc.) and includes `hull/runtime/lua.h` — a layering inversion.
+**Refactor:** Move shared dispatch helper to stay in `cap/test.c`. Move `cap/test_lua.c` → `runtime/lua/mod_test.c`; `cap/test_js.c` → `runtime/js/mod_test.c`. Update Makefile.
+
+**C2. `cap/tool.c` mixes cap layer with Lua bindings (1035 lines, two purposes).**
+Top half is the cap (unveil/spawn/check/copy/mkdir/rmdir, ~520 lines, no Lua). Bottom half (~520 lines) is Lua bindings + compiler-vtable wrappers.
+**Refactor:** Split into `cap/tool.c` (pure C, no Lua) and `runtime/lua/mod_tool.c`. Drops cap/tool.c from 1035 → ~520 lines.
+
+**C3. `runtime/{lua,js}/runtime.c` are god modules (1713 + 2245 lines).**
+Each does VM init + sandbox + custom allocator + module loader + console + interrupt/gas hook + dispatch + free + timer trampoline + WebSocket handlers + SSE handler + route wiring + middleware bridge + vtable wrappers — all in one file.
+**Refactor:** Per runtime, split into 5–6 files:
+- `runtime.c` — VM lifecycle + sandbox + allocator + vtable (≤ 500 lines)
+- `dispatch.c` — `hl_*_dispatch()`, middleware bridges (~250 lines)
+- `routes.c` — wire_routes, wire_routes_server, route tracking (~400 lines)
+- `timers.c` — timer trampoline, daily computation (~150 lines)
+- `ws.c` — WebSocket handlers (~200 lines)
+- `sse.c` — SSE handler (~150 lines)
+
+### High (duplication / leaky abstractions)
+
+**H1. `agent_lib.c` duplicates the parallel "Lua path / JS path" pattern in five places.**
+`agent_routes_lua`/`_js`, `agent_test_lua_ctx`/`_js_ctx`, etc. Root cause: `HlRuntimeVtable` doesn't expose route enumeration or test execution.
+**Refactor:** Extend the vtable with `enumerate_routes`, `enumerate_middleware`, `run_test_file`. Then agent funcs become single-path.
+
+**H2. `commands/test.c` duplicates the agent_test runner.**
+Same control flow as `agent_test_lua_ctx` / `agent_test_js_ctx`, differs only in output format (stdout vs JSON).
+**Refactor:** After H1, unify into one `hl_test_runner_run(ctx, opts, writer)` with pluggable writer.
+
+**H3. `manifest.c` interleaves Lua and JS extractors (459 lines, two #ifdef blocks).**
+Both implementations share helpers but the actual extractors are completely separate code paths gated by `#ifdef HL_ENABLE_LUA` / `HL_ENABLE_JS`.
+**Refactor:** Keep `manifest.c` with shared HlManifest + helpers + free + validation. Split extractors out: `manifest_lua.c`, `manifest_js.c`. Each #ifdef-conditional source goes in only when its runtime is enabled.
+
+**H4. `sandbox.c` reads `HlManifest` fields directly throughout.**
+References `manifest->fs_read`, `hosts_count`, `gpu_devices`, etc. Adding a manifest field is a manifest + sandbox change.
+**Refactor:** Introduce `HlSandboxPolicy` — a pre-resolved struct sandbox reads, independent of manifest layout. `main.c` builds the policy from manifest. Sandbox stops being a manifest consumer. Low effort, big decoupling win.
+
+**H5. `cap/db_udf.c` reaches across the `HlDbBackend` vtable to grab raw `sqlite3 *`.**
+`mod_db.c:718, 843` (Lua) and `mod_db.c:809, 967` (JS) both do `sqlite3 *raw = hl_db_sqlite_raw(handle)` then call `sqlite3_create_function_v2()` directly.
+**Refactor:** Either (a) add `backend->register_udf(scalar, agg)` to the vtable so non-SQLite backends can return "unsupported"; or (b) explicitly document UDF as a SQLite-only feature with a fail-fast. Prefer (a).
+
+**H6. `migrate.h` takes raw `sqlite3 *`, bypassing the db_backend vtable.**
+`int hl_migrate_run(sqlite3 *db, const HlVfs *vfs);`. App_context extracts the raw pointer to call this.
+**Refactor:** Change `hl_migrate_run` to take `HlDbHandle *`. Removes `sqlite3` forward-decl from `app_context.h`.
+
+### Medium
+
+**M1. `HlLua` / `HlJS` are fully exposed structs.** Every internal field is in the public header. Adding a struct field is an ABI break. → Move to internal headers post-v0.1.0; expose only opaque typedefs.
+
+**M2. `limits.h` is a god-constants header (17+ consumers).** WASM/GPU constants force recompiles of unrelated TUs. → Split into `limits/core.h`, `limits/runtime.h`, `limits/wasm.h`, `limits/gpu.h`.
+
+**M3. `app_context.c` has 5× `is_lua` ladders.** Lifecycle (init, load_app, free) isn't reached via the vtable. → Add a runtime-factory registration so ladders collapse to one call.
+
+**M4. `main.c::hl_serve_wire_and_start()` is 291 lines.** Manifest → caps wiring → TLS → sandbox → routes → static → agent API → run. Extract: `wire_caps`, `wire_routes`, `run`.
+
+**M5. `agent_lib.c` (1353 lines) does five unrelated agent operations.** Split into `agent/{routes,test,db,request,context,deploy}.c`.
+
+**M6. `cap/audit.c` has process-wide `extern int hl_audit_enabled`.** Inconsistent with the rest of the cap layer; tolerable for now (debug flag).
+
+**M7. `cap/http_async.c` has a static module-internal global allocator.** Module-scoped, so OK — but no per-runtime isolation if two contexts ever ran in one process.
+
+**M8. `app_context.h` forward-declares `sqlite3`.** Tied to H6; resolves automatically once migrate is on the vtable.
+
+**M9. Per-runtime `worker_db.c` files duplicate most logic.** 224 lines (Lua) + 273 lines (JS) of mostly parallel binding code. Same idea as H1.
+
+**M10. `lua_get_buffer` / `js_get_buffer` parallel implementations.** Pattern is identical; could share helpers (e.g., a "validate buffer constraints" function).
+
+## Architectural roadmap (post-v0.1.0)
+
+Recommended order. Effort: S = < 1 day, M = 1–3 days, L = 3+ days.
+
+| # | Refactor | Effort | Rationale |
+|---|----------|:------:|-----------|
+| 1 | **M2** — Split `limits.h` per subsystem | S | Cheapest win; kills recompile cascade |
+| 2 | **H4** — `HlSandboxPolicy` decouples sandbox from manifest | S | Manifest format can evolve independently |
+| 3 | **H6 + M8** — Migrate to `HlDbHandle *`; drop sqlite3 forward-decl | S | Completes db_backend abstraction |
+| 4 | **C1** — Move `cap/test_{lua,js}.c` → `runtime/{lua,js}/mod_test.c` | S | Restore cap-layer invariant |
+| 5 | **C2** — Split `cap/tool.c` Lua bindings into `runtime/lua/mod_tool.c` | S | Same; cap/tool.c → 520 lines |
+| 6 | **H5** — Add `register_udf` to `HlDbBackend` vtable | S | Removes last raw-sqlite3 reach-around |
+| 7 | **H3** — Split `manifest.c` → `manifest_{lua,js}.c` | S | Mirrors runtime split |
+| 8 | **M4** — Extract phases from `main.c::wire_and_start` | S | 291-line fn → 4 cohesive helpers |
+| 9 | **C3** — Split each `runtime/*/runtime.c` into 5–6 files | M | Largest QoL improvement; god → focused |
+| 10 | **H1** — Extend `HlRuntimeVtable` with route/middleware/test enumeration | M | Stops Lua/JS doubling in agent_lib |
+| 11 | **H2** — Unify test runners (commands/test + agent_lib.test) | S | Follows from H1 |
+| 12 | **M5** — Split `agent_lib.c` into `agent/*.c` | S | Locality and ownership |
+| 13 | **M3** — Runtime factory registration; collapse is_lua ladder | M | Third-runtime path (e.g. WASM orchestrator) |
+| 14 | **M1** — Mark `HlLua`/`HlJS` internals private; introduce internal.h | M | Long-term opaque-context migration |
+| 15 | **M9 + M10** — Share worker_db / get_buffer between runtimes | M | Follows from H1 pattern |
+
+## Things that look OK
+
+- **Capability boundary integrity.** No runtime module reaches around `hl_cap_*` for sqlite3 / mbedTLS / open / read / write (verified by grep). The H5/H6 reach-arounds are the only exceptions, both confined to SQLite UDF + migrate.
+- **`commands/dispatch.c` is genuinely clean.** All 20 commands use `HlCommandEnv`. No globals grubbing.
+- **`HlAppContext` is well-scoped.** Bundles DB+VFS+runtime properly; supports both pure-compute (no_db) and deferred load. Not a kitchen sink — its responsibility is exactly the init bundle.
+- **`main.c` is well-phased.** Despite 1308 lines, it's split into 11 named phases with documented preconditions.
+- **All vtables are opaque-pointer style** with inline wrappers — `HlRuntimeVtable`, `HlCompilerVtable`, `HlDbBackend`, `HlGpuBackend`, `HlImageCodec` — and the pattern is consistent.
+- **`vfs.c`** — small, focused, single responsibility. 7+ consumers, clean.
+- **`signature.c`** — single concern (Ed25519 read/verify on VFS entries).
+- **No circular includes.** Forward-declarations used consistently.

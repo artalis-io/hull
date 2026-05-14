@@ -61,7 +61,7 @@ RC=$?
 assert "exits 0" [ "$RC" -eq 0 ]
 assert_contains "shows usage" "$OUT" "Usage: hull update"
 assert_contains "documents --check" "$OUT" "--check"
-assert_contains "documents --channel" "$OUT" "--channel"
+assert_contains "documents --force" "$OUT" "--force"
 assert_contains "documents --repo" "$OUT" "--repo"
 
 # Skip network tests if no connectivity

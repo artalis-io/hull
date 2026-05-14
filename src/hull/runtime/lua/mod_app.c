@@ -381,15 +381,6 @@ static int lua_app_sse(lua_State *L)
     return 0;
 }
 
-/* app.config(tbl) — application configuration */
-static int lua_app_config(lua_State *L)
-{
-    luaL_checktype(L, 1, LUA_TTABLE);
-    lua_pushvalue(L, 1);
-    lua_setfield(L, LUA_REGISTRYINDEX, "__hull_config");
-    return 0;
-}
-
 /* app.manifest(tbl) — declare application capabilities (one-shot) */
 static int lua_app_manifest(lua_State *L)
 {
@@ -428,7 +419,6 @@ static const luaL_Reg app_funcs[] = {
     {"sse",          lua_app_sse},
     {"every",        lua_app_every},
     {"daily",        lua_app_daily},
-    {"config",       lua_app_config},
     {"manifest",     lua_app_manifest},
     {"get_manifest", lua_app_get_manifest},
     {NULL, NULL}
