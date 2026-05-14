@@ -1314,17 +1314,34 @@ make e2e                            # run all E2E tests (examples + build + sand
 
 | Suite | Tests | What it covers |
 |-------|------:|----------------|
-| `test_hull_cap_db` | 10 | SQLite query, exec, params, null, error handling |
-| `test_hull_cap_time` | 8 | Timestamps, date formatting, buffer bounds |
-| `test_hull_cap_env` | 7 | Allowlist enforcement, null safety |
-| `test_hull_cap_crypto` | 11 | SHA-256, random, PBKDF2, Ed25519, null safety |
-| `test_hull_cap_fs` | 14 | Path validation, read/write, traversal rejection |
-| `test_js_runtime` | 13 | QuickJS init, eval, sandbox, modules, GC, limits |
-| `test_lua_runtime` | 16 | Lua init, eval, sandbox, modules, GC, double-free |
+| `test_db` | 22 | SQLite query, exec, params, null, error handling |
+| `test_db_backend` | 22 | `HlDbBackend` vtable: open, query, exec, transactions |
+| `test_time` | 8 | Timestamps, date formatting, buffer bounds |
+| `test_env` | 7 | Allowlist enforcement, null safety |
+| `test_crypto` | 31 | SHA-256, random, PBKDF2, Ed25519, NaCl box/secretbox, null safety |
+| `test_fs` | 19 | Path validation, read/write, traversal rejection |
+| `test_http` | 5 | Host allowlist, URL parsing |
+| `test_smtp` | 37 | SMTP client send/auth/TLS |
+| `test_smtp_e2e` | 8 | End-to-end SMTP over real socket |
+| `test_image` | 15 | Decode/encode/raw pixels |
+| `test_audit` | 3 | Audit log JSON output |
+| `test_body` | 3 | Body reader limits + types |
+| `test_ws` | 7 | WebSocket frame parse |
+| `test_wasm` | 55 | WAMR init/destroy, module load, echo call, gas exhaustion, limits, pools, persistent instances, shared data segments |
+| `test_wasm_buffer` | 12 | WasmBuffer protocol + zero-copy paths |
+| `test_gpu` | 1 | GPU init/destroy (real GPU tests skip if no adapter) |
+| `test_tool` | 52 | Tool-spawn allowlist, dangerous-flag validation |
+| `test_js` | 81 | QuickJS init, eval, sandbox, modules, GC, async, host bindings |
+| `test_lua` | 99 | Lua init, eval, sandbox, modules, GC, async, host bindings |
 | `test_static` | 18 | MIME detection, path traversal, embedded VFS lookup |
 | `test_vfs` | 19 | Binary search find, prefix queries, path construction, empty VFS |
-| `test_wasm` | 47 | WAMR init/destroy, module load, echo call, gas exhaustion, limits, pools, persistent instances, shared data segments |
-| `test_gpu` | 13 | GPU init/destroy, device enumeration, shader compile (valid + invalid WGSL), dispatch with data doubling, persistent buffer roundtrip (real GPU tests skip if no adapter) |
+| `test_signature` | 20 | Ed25519 sign/verify round-trips, dual-layer signature |
+| `test_parse_size` | 9 | Size string parser ("1m", "1g", etc.) |
+| `test_compiler` | 16 | Compiler vtable: system + tcc backends, allowlist, end-to-end on Linux |
+| `test_cacert` | 6 | Embedded Mozilla CA bundle: presence, NUL-termination, mbedTLS parse |
+| `test_dispatch` | 4 | Command dispatch table, unknown-command handling |
+
+26 suites, ~590 test cases total.
 
 \+ E2E suites (`e2e_build.sh`, `e2e_examples.sh`, `e2e_http.sh`, `e2e_sandbox.sh`, `e2e_tcc.sh`, `e2e_install.sh`, `e2e_ca_bundle.sh`, `e2e_update.sh`)
 
@@ -1340,6 +1357,10 @@ make e2e                            # run all E2E tests (examples + build + sand
 | `e2e_migrate.sh` | Migration system: apply, status, idempotency, embedding |
 | `e2e_compute.sh` | WASM compute: compute.call() from Lua + JS, preload, error handling |
 | `e2e_deploy.sh` | Deploy config generator: Dockerfile, systemd, fly.toml, agent deploy |
+| `e2e_tcc.sh` | Embedded TinyCC: `hull build --compiler=tcc` end-to-end on Linux; rejection path on macOS/cosmo |
+| `e2e_install.sh` | `install.sh` dry-run across platform/flavor/prefix; shell-completion syntax + behavior |
+| `e2e_ca_bundle.sh` | Doctor output; real HTTPS handshake to `example.com` via embedded CA bundle (sandbox-active) |
+| `e2e_update.sh` | `hull update --check` against real public repo; full GitHub-API + JSON parse + version compare via embedded CA bundle |
 
 ## Runtime Sandboxes
 

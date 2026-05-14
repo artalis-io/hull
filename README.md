@@ -67,7 +67,7 @@ Tab-completion for bash, zsh, and fish is shipped in [`completions/`](completion
 
 ## Hull Tools
 
-Hull ships 16 subcommands for the full development lifecycle:
+Hull ships 20 subcommands for the full development lifecycle:
 
 | Command | Purpose |
 |---------|---------|
@@ -770,7 +770,18 @@ make clean              # remove all build artifacts
 
 ## Status
 
-Hull is in active development. All core features are implemented and tested across Linux, macOS, and Cosmopolitan APE. See [docs/roadmap.md](docs/roadmap.md) for what's next.
+Hull is approaching v0.1.0. The complete distribution lifecycle is in place:
+
+| Phase | What | Status |
+|-------|------|--------|
+| D1 | Version + GitHub Actions release pipeline | Done |
+| D2 | `install.sh` + `hull init` + `hull doctor` + shell completions | Done |
+| D3 | Embedded TinyCC — zero-dependency `hull build` | Done |
+| D4 | Embedded Mozilla CA bundle — zero-dependency HTTPS | Done |
+| D5 | `hull update` — verified self-update from GitHub releases | Done |
+| D6 | `hull.com` landing + docs site | External |
+
+All core features are implemented and tested across Linux (gcc + clang), macOS, and Cosmopolitan APE; capability sandbox enforced via pledge/unveil (Linux/Cosmo/OpenBSD) or Seatbelt (macOS). See [docs/roadmap.md](docs/roadmap.md) for what's next after v0.1.0 (PostgreSQL backend, module ecosystem, HTTP/2, agent platform Phase 5).
 
 ## License
 
