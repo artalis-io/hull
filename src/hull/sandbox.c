@@ -556,6 +556,25 @@ int hl_sandbox_apply(const HlManifest *manifest, const char *app_dir,
                      ca_bundle_path);
     }
 
+    /* DNS resolution: when manifest declares outbound hosts, glibc's
+     * getaddrinfo() needs to read these files. The "dns" pledge promise
+     * allows the syscalls; unveil controls which paths they may touch.
+     * Errors are non-fatal — the file may not exist on minimal systems. */
+    if (manifest->hosts_count > 0) {
+        unveil("/etc/resolv.conf",   "r");
+        unveil("/etc/hosts",         "r");
+        unveil("/etc/nsswitch.conf", "r");
+        unveil("/etc/services",      "r");
+        /* systemd-resolved IPC socket (modern Linux) and nscd socket */
+        unveil("/run/systemd/resolve", "r");
+        unveil("/var/run/nscd",        "r");
+        /* /etc/ssl/certs is needed when CA bundle uses the system path
+         * (mbedTLS doesn't read it directly, but glibc nss modules may
+         * touch /etc files generally — give the whole /etc readonly to
+         * cover gai_conf, hosts.d, etc.). */
+        unveil("/etc",               "r");
+    }
+
     /* TLS certificate and private key for HTTPS server */
     if (tls_cert_path) {
         if (unveil(tls_cert_path, "r") != 0)
