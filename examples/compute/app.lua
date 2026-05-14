@@ -41,18 +41,18 @@ end)
 
 -- Async: yields to event loop, other requests served while WASM runs.
 -- Use for expensive computations that would block the event loop.
--- Returns {result=...} or {error=...} (single table, not two values).
+-- Returns the output directly (string in buffer-less mode); throws on error.
 app.get("/async-echo", function(req, res)
     local input = req.query.text or ""
-    local r = compute.async.call("echo", input)
-    if r.error then
-        res:status(500):json({ error = r.error })
+    local ok, output = pcall(compute.async.call, "echo", input)
+    if not ok then
+        res:status(500):json({ error = tostring(output) })
         return
     end
     res:json({
         input = input,
-        output = r.result,
-        match = (input == r.result),
+        output = output,
+        match = (input == output),
     })
 end)
 

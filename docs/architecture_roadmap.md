@@ -89,27 +89,38 @@ References `manifest->fs_read`, `hosts_count`, `gpu_devices`, etc. Adding a mani
 
 **M10. `lua_get_buffer` / `js_get_buffer` parallel implementations.** Pattern is identical; could share helpers (e.g., a "validate buffer constraints" function).
 
-## Architectural roadmap (post-v0.1.0)
+## Architectural roadmap
 
-Recommended order. Effort: S = < 1 day, M = 1–3 days, L = 3+ days.
+Bundled and ordered after the pre-v0.1.0 weed-through. Effort: S = < 1 day, M = 1–3 days, L = 3+ days.
+
+### Scheduled before v0.1.0
 
 | # | Refactor | Effort | Rationale |
 |---|----------|:------:|-----------|
-| 1 | **M2** — Split `limits.h` per subsystem | S | Cheapest win; kills recompile cascade |
-| 2 | **H4** — `HlSandboxPolicy` decouples sandbox from manifest | S | Manifest format can evolve independently |
-| 3 | **H6 + M8** — Migrate to `HlDbHandle *`; drop sqlite3 forward-decl | S | Completes db_backend abstraction |
-| 4 | **C1** — Move `cap/test_{lua,js}.c` → `runtime/{lua,js}/mod_test.c` | S | Restore cap-layer invariant |
-| 5 | **C2** — Split `cap/tool.c` Lua bindings into `runtime/lua/mod_tool.c` | S | Same; cap/tool.c → 520 lines |
-| 6 | **H5** — Add `register_udf` to `HlDbBackend` vtable | S | Removes last raw-sqlite3 reach-around |
-| 7 | **H3** — Split `manifest.c` → `manifest_{lua,js}.c` | S | Mirrors runtime split |
-| 8 | **M4** — Extract phases from `main.c::wire_and_start` | S | 291-line fn → 4 cohesive helpers |
-| 9 | **C3** — Split each `runtime/*/runtime.c` into 5–6 files | M | Largest QoL improvement; god → focused |
-| 10 | **H1** — Extend `HlRuntimeVtable` with route/middleware/test enumeration | M | Stops Lua/JS doubling in agent_lib |
-| 11 | **H2** — Unify test runners (commands/test + agent_lib.test) | S | Follows from H1 |
-| 12 | **M5** — Split `agent_lib.c` into `agent/*.c` | S | Locality and ownership |
-| 13 | **M3** — Runtime factory registration; collapse is_lua ladder | M | Third-runtime path (e.g. WASM orchestrator) |
-| 14 | **M1** — Mark `HlLua`/`HlJS` internals private; introduce internal.h | M | Long-term opaque-context migration |
-| 15 | **M9 + M10** — Share worker_db / get_buffer between runtimes | M | Follows from H1 pattern |
+| **A** | **C3** — Split each `runtime/*/runtime.c` into 5–6 files (`runtime.c`, `dispatch.c`, `routes.c`, `timers.c`, `ws.c`, `sse.c`) | M | God modules (1713 + 2245 lines) → focused files. Single largest QoL improvement; the split happens **before** v0.1.0 so the file layout doesn't shift after the stability commitment. |
+
+### Scheduled after v0.1.0
+
+Recommended sequence — every item is small/medium, no dependencies between groups except where noted.
+
+| # | Refactor | Effort | Rationale |
+|---|----------|:------:|-----------|
+| **B** | **M2** — Split `limits.h` per subsystem | S | Cheapest win; kills recompile cascade |
+| **C** | **H4** — `HlSandboxPolicy` decouples sandbox from manifest | S | Manifest format can evolve independently |
+| **D** | **H6 + M8 + H5** — Complete the db_backend abstraction: migrate `migrate.h` to `HlDbHandle *`, drop `sqlite3` forward-decl from `app_context.h`, add `register_udf` to vtable | S | Removes the last raw-`sqlite3 *` reach-arounds; opens door for non-SQLite backends. (Bundled.) |
+| **E** | **C1** — Move `cap/test_{lua,js}.c` → `runtime/{lua,js}/mod_test.c` | S | Restore cap-layer invariant (cap has no runtime knowledge) |
+| **F** | **C2** — Split `cap/tool.c` Lua bindings into `runtime/lua/mod_tool.c` | S | Same; cap/tool.c shrinks 1035 → ~520 lines |
+| **G** | **H3** — Split `manifest.c` → `manifest_{lua,js}.c` | S | Mirrors the runtime/{lua,js} split |
+| **H** | **M4** — Extract phases from `main.c::wire_and_start` | S | 291-line fn → 4 cohesive helpers |
+| **I** | **H1 + H2 + M5** — Agent surface cleanup: extend `HlRuntimeVtable` with `enumerate_routes` / `enumerate_middleware` / `run_test_file`; unify test runner between `commands/test.c` and `agent_lib.test`; split `agent_lib.c` into `agent/{routes,test,db,request,context,deploy}.c` | M | One coherent refactor pass — eliminates ≈ 4 Lua/JS sibling pairs, unifies the test runner under a pluggable writer, and gives each agent op its own file. |
+| **J** | **M1** — Mark `HlLua`/`HlJS` internals private; introduce `internal.h` for ops like `HlLuaWorkerDispatchOp` | M | Long-term opaque-context migration. Tier-4 docstrings in headers are good enough for most of v0.x; do the move when a third-party consumer asks. |
+
+### Deferred (no current need; tracked for visibility)
+
+| # | Refactor | Effort | Reason for deferral |
+|---|----------|:------:|---------------------|
+| **K** | **M3** — Runtime factory registration; collapse `is_lua` ladder in `app_context.c` | M | Justifies a "third runtime" (e.g. WASM-as-orchestrator) — but there's no third runtime planned. Reconsider when one is. |
+| **L** | **M9 + M10** — Share worker_db / get_buffer code between runtimes | M | Once item I lands, the remaining duplication is small and not painful. Reconsider if it becomes painful. |
 
 ## Things that look OK
 

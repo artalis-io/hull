@@ -124,11 +124,11 @@ cp tests/fixtures/compute/echo.wasm "$ASYNCDIR/compute/echo.wasm"
 
 cat > "$ASYNCDIR/app.lua" << 'EOF'
 app.get("/async-echo", function(req, res)
-    local r = compute.async.call("echo", "hello async")
-    if r.error then
-        res:json({ error = r.error })
+    local ok, output = pcall(compute.async.call, "echo", "hello async")
+    if ok then
+        res:json({ result = output })
     else
-        res:json({ result = r.result })
+        res:json({ error = tostring(output) })
     end
 end)
 EOF
