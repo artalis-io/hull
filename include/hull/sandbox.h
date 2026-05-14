@@ -22,6 +22,55 @@
 #include "hull/manifest.h"
 #include "hull/cap/tool.h"
 
+/* ── HlSandboxPolicy ────────────────────────────────────────────────── */
+
+/*
+ * Pre-resolved sandbox policy. Decouples the sandbox enforcer from
+ * HlManifest layout: the enforcer reads only this struct, so a manifest
+ * field rename or addition no longer drags sandbox.c with it.
+ *
+ * All string/array pointers are BORROWED — they must outlive the
+ * HlSandboxPolicy. For policies built from HlManifest via
+ * hl_sandbox_policy_from_manifest(), this means the manifest must
+ * stay alive for the policy's lifetime (trivially the case in main.c
+ * where they share the process lifetime).
+ *
+ * Building a policy by hand (e.g. for tests) is also supported — just
+ * populate the fields directly.
+ */
+typedef struct HlSandboxPolicy {
+    /* Filesystem read allowlist */
+    const char *const *fs_read;
+    int                fs_read_count;
+
+    /* Filesystem write allowlist */
+    const char *const *fs_write;
+    int                fs_write_count;
+
+    /* Network: 1 if the app declares any outbound HTTP hosts.
+     * The host allowlist itself is enforced in cap/http.c — the sandbox
+     * only decides whether to unveil network syscalls at all. */
+    int network_outbound;
+
+    /* GPU access. If gpu == 0, no GPU paths are unveiled.
+     * If gpu == 1 and gpu_device_count == 0, all devices are allowed.
+     * If gpu_device_count > 0, gpu_devices[0..gpu_device_count) lists
+     * the specific allowed device minor numbers. */
+    int        gpu;
+    const int *gpu_devices;
+    int        gpu_device_count;
+} HlSandboxPolicy;
+
+/*
+ * Populate `policy` from the resolved capability fields of `manifest`.
+ * Borrows pointers — manifest must outlive policy.
+ *
+ * `policy` is fully overwritten; no need to pre-zero. Always returns
+ * successfully (no allocation, no failure modes).
+ */
+void hl_sandbox_policy_from_manifest(HlSandboxPolicy *policy,
+                                     const HlManifest *manifest);
+
 /*
  * Phase 1: pledge-only sandbox (no unveil) — blocks exec/proc/fork.
  * Call before load_app() to limit syscalls during module loading.
@@ -32,9 +81,9 @@
 int hl_sandbox_apply_pledge(void);
 
 /*
- * Phase 2: full sandbox based on manifest capabilities.
+ * Phase 2: full sandbox based on a resolved policy.
  *
- *   manifest       — declared capabilities (may have present==0)
+ *   policy         — pre-resolved capability bundle (see HlSandboxPolicy)
  *   app_dir        — application directory (always unveiled read-only)
  *   db_path        — SQLite database path (always allowed rw)
  *   ca_bundle_path — CA certificate bundle (unveiled read-only, may be NULL)
@@ -45,7 +94,7 @@ int hl_sandbox_apply_pledge(void);
  * always unveiled for reading (templates, static assets, source files).
  * Returns 0 on success, -1 on error (logged).
  */
-int hl_sandbox_apply(const HlManifest *manifest, const char *app_dir,
+int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
                       const char *db_path,
                       const char *ca_bundle_path,
                       const char *tls_cert_path,

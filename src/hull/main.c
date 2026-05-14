@@ -1067,9 +1067,14 @@ static int hl_serve_wire_and_start(HlServerState *s)
     }
 
     /* RT-04: Apply kernel sandbox BEFORE wiring routes — all route
-     * handlers execute inside sandbox constraints. */
+     * handlers execute inside sandbox constraints.
+     *
+     * The sandbox reads a pre-resolved HlSandboxPolicy, not HlManifest —
+     * decouples enforcement from manifest field layout. */
     if (!s->cfg.no_sandbox) {
-        if (hl_sandbox_apply(&s->manifest, s->app_dir,
+        HlSandboxPolicy sandbox_policy;
+        hl_sandbox_policy_from_manifest(&sandbox_policy, &s->manifest);
+        if (hl_sandbox_apply(&sandbox_policy, s->app_dir,
                               s->cfg.no_db ? NULL : s->cfg.db_path, s->ca_bundle_path,
                               s->cfg.tls_cert_path, s->cfg.tls_key_path) != 0) {
             log_error("[hull:c] sandbox enforcement failed");

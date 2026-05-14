@@ -128,7 +128,7 @@ typedef struct {
  *
  * Returns 0 on success, -1 on buffer overflow.
  */
-static int seatbelt_build_profile(const HlManifest *manifest,
+static int seatbelt_build_profile(const HlSandboxPolicy *policy,
                                    const char *app_dir,
                                    const char *db_path,
                                    const char *ca_bundle_path,
@@ -227,11 +227,11 @@ static int seatbelt_build_profile(const HlManifest *manifest,
 
     /* ── Manifest fs_read[] paths ───────────────────────────── */
 
-    for (int i = 0; i < manifest->fs_read_count; i++) {
+    for (int i = 0; i < policy->fs_read_count; i++) {
         snprintf(scratch->fs_read_keys[i],
                  sizeof(scratch->fs_read_keys[i]), "FS_R_%d", i);
         /* Resolve symlinks — Seatbelt matches real paths */
-        const char *rpath = manifest->fs_read[i];
+        const char *rpath = policy->fs_read[i];
         if (realpath(rpath, scratch->fs_read_real[i]))
             rpath = scratch->fs_read_real[i];
         PARAM_ADD(scratch->fs_read_keys[i], rpath);
@@ -239,13 +239,13 @@ static int seatbelt_build_profile(const HlManifest *manifest,
                   scratch->fs_read_keys[i]);
     }
 
-    /* ── Manifest fs_write[] paths ──────────────────────────── */
+    /* ── Policy fs_write[] paths ────────────────────────────── */
 
-    for (int i = 0; i < manifest->fs_write_count; i++) {
+    for (int i = 0; i < policy->fs_write_count; i++) {
         snprintf(scratch->fs_write_keys[i],
                  sizeof(scratch->fs_write_keys[i]), "FS_W_%d", i);
         /* Resolve symlinks — Seatbelt matches real paths */
-        const char *wpath = manifest->fs_write[i];
+        const char *wpath = policy->fs_write[i];
         if (realpath(wpath, scratch->fs_write_real[i]))
             wpath = scratch->fs_write_real[i];
         PARAM_ADD(scratch->fs_write_keys[i], wpath);
@@ -276,7 +276,7 @@ static int seatbelt_build_profile(const HlManifest *manifest,
     SBPL_LIT("; Network (server socket already bound)\n"
              "(allow network-inbound network-bind)\n"
              "(allow system-socket)\n");
-    if (manifest->hosts_count > 0) {
+    if (policy->network_outbound) {
         SBPL_LIT("(allow network-outbound)\n");
     }
     SBPL_LIT("\n");
@@ -292,7 +292,7 @@ static int seatbelt_build_profile(const HlManifest *manifest,
 
     /* ── GPU compute (Metal) ─────────────────────────────────── */
 
-    if (manifest->gpu) {
+    if (policy->gpu) {
         SBPL_LIT("; GPU compute (Metal)\n"
                  "(allow iokit-open)\n"
                  "(allow mach-lookup (global-name\n"
@@ -455,13 +455,13 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
 
 /* ── Public API ────────────────────────────────────────────────────── */
 
-int hl_sandbox_apply(const HlManifest *manifest, const char *app_dir,
+int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
                       const char *db_path,
                       const char *ca_bundle_path,
                       const char *tls_cert_path,
                       const char *tls_key_path)
 {
-    if (!manifest)
+    if (!policy)
         return 0;
 
     if (!sb_supported()) {
@@ -488,7 +488,7 @@ int hl_sandbox_apply(const HlManifest *manifest, const char *app_dir,
         if (db_path && realpath(db_path, real_db))
             resolved_db = real_db;
 
-        if (seatbelt_build_profile(manifest, resolved_app, resolved_db,
+        if (seatbelt_build_profile(policy, resolved_app, resolved_db,
                                     ca_bundle_path, tls_cert_path,
                                     tls_key_path,
                                     profile_buf, sizeof(profile_buf),
@@ -509,8 +509,8 @@ int hl_sandbox_apply(const HlManifest *manifest, const char *app_dir,
         }
 
         log_info("[sandbox] applied (seatbelt: %d read, %d write%s)",
-                 manifest->fs_read_count, manifest->fs_write_count,
-                 manifest->hosts_count > 0 ? ", network-outbound" : "");
+                 policy->fs_read_count, policy->fs_write_count,
+                 policy->network_outbound ? ", network-outbound" : "");
         return 0;
     }
 #endif /* __APPLE__ */
@@ -531,16 +531,16 @@ int hl_sandbox_apply(const HlManifest *manifest, const char *app_dir,
     /* /dev/urandom: needed by crypto.random and password hashing */
     unveil("/dev/urandom", "r");
 
-    for (int i = 0; i < manifest->fs_read_count; i++) {
-        if (unveil(manifest->fs_read[i], "r") != 0)
+    for (int i = 0; i < policy->fs_read_count; i++) {
+        if (unveil(policy->fs_read[i], "r") != 0)
             log_warn("[sandbox] unveil failed for read path: %s",
-                     manifest->fs_read[i]);
+                     policy->fs_read[i]);
     }
 
-    for (int i = 0; i < manifest->fs_write_count; i++) {
-        if (unveil(manifest->fs_write[i], "rwc") != 0)
+    for (int i = 0; i < policy->fs_write_count; i++) {
+        if (unveil(policy->fs_write[i], "rwc") != 0)
             log_warn("[sandbox] unveil failed for write path: %s",
-                     manifest->fs_write[i]);
+                     policy->fs_write[i]);
     }
 
     /* SQLite database always needs read + write + create */
@@ -560,7 +560,7 @@ int hl_sandbox_apply(const HlManifest *manifest, const char *app_dir,
      * getaddrinfo() needs to read these files. The "dns" pledge promise
      * allows the syscalls; unveil controls which paths they may touch.
      * Errors are non-fatal — the file may not exist on minimal systems. */
-    if (manifest->hosts_count > 0) {
+    if (policy->network_outbound) {
         unveil("/etc/resolv.conf",   "r");
         unveil("/etc/hosts",         "r");
         unveil("/etc/nsswitch.conf", "r");
@@ -588,13 +588,13 @@ int hl_sandbox_apply(const HlManifest *manifest, const char *app_dir,
     }
 
     /* GPU compute (Vulkan) */
-    if (manifest->gpu) {
-        if (manifest->gpu_device_count > 0) {
+    if (policy->gpu) {
+        if (policy->gpu_device_count > 0) {
             /* Unveil only specific render nodes for allowed devices */
-            for (int i = 0; i < manifest->gpu_device_count; i++) {
+            for (int i = 0; i < policy->gpu_device_count; i++) {
                 char node[64];
                 snprintf(node, sizeof(node), "/dev/dri/renderD%d",
-                         128 + manifest->gpu_devices[i]);
+                         128 + policy->gpu_devices[i]);
                 if (unveil(node, "rw") != 0)
                     log_warn("[sandbox] unveil failed for %s", node);
             }
@@ -639,7 +639,7 @@ int hl_sandbox_apply(const HlManifest *manifest, const char *app_dir,
      *              entirely; OpenBSD's pledge() does not have it either
      *              (its getaddrinfo reads /etc/resolv.conf directly).
      */
-    if (plen > 0 && manifest->hosts_count > 0 &&
+    if (plen > 0 && policy->network_outbound &&
         (size_t)plen < sizeof(promises)) {
 #if defined(__linux__) && !defined(__COSMOPOLITAN__)
         /* Linux glibc DNS needs: dns (UDP queries), netlink (interface
@@ -671,7 +671,36 @@ int hl_sandbox_apply(const HlManifest *manifest, const char *app_dir,
     }
 
     log_info("[sandbox] applied (unveil: %d read, %d write; pledge: %s)",
-             manifest->fs_read_count, manifest->fs_write_count, promises);
+             policy->fs_read_count, policy->fs_write_count, promises);
 
     return 0;
+}
+
+/* ── Policy builder ────────────────────────────────────────────────── */
+
+void hl_sandbox_policy_from_manifest(HlSandboxPolicy *policy,
+                                     const HlManifest *manifest)
+{
+    if (!policy)
+        return;
+
+    /* Default-deny: everything starts at zero/NULL. */
+    *policy = (HlSandboxPolicy){0};
+
+    if (!manifest)
+        return;
+
+    /* Borrow array pointers — manifest must outlive the policy. */
+    policy->fs_read         = manifest->fs_read;
+    policy->fs_read_count   = manifest->fs_read_count;
+    policy->fs_write        = manifest->fs_write;
+    policy->fs_write_count  = manifest->fs_write_count;
+
+    /* Sandbox only needs the boolean "any outbound network?" decision.
+     * The actual host allowlist is enforced in cap/http.c. */
+    policy->network_outbound = (manifest->hosts_count > 0);
+
+    policy->gpu              = manifest->gpu;
+    policy->gpu_devices      = manifest->gpu_devices;
+    policy->gpu_device_count = manifest->gpu_device_count;
 }
