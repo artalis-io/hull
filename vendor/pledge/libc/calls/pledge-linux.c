@@ -849,8 +849,12 @@ static const uint16_t kPledgeDns[] = {
     __NR_socket | INET,          //
     __NR_bind,                   //
     __NR_sendto,                 //
+    __NR_sendmsg,                /* glibc 2.32+ — getaddrinfo scatter/gather */
+    __NR_sendmmsg,               /* glibc 2.32+ — batched A+AAAA DNS queries */
     __NR_connect,                //
     __NR_recvfrom,               //
+    __NR_recvmsg,                /* glibc 2.32+ — getaddrinfo scatter/gather */
+    __NR_recvmmsg,               /* glibc 2.32+ — batched A+AAAA DNS responses */
     __NR_setsockopt | RESTRICT,  //
     __NR_newfstatat,             //
     __NR_openat | READONLY,      //

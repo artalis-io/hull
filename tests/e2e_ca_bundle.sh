@@ -127,15 +127,7 @@ PORT=$((10000 + (RANDOM % 50000)))
 # AND we trust the unit test above for the actual embedded-only path.
 
 cd "$WORKDIR/myapp"
-# --no-sandbox: this test verifies the CA bundle resolution + TLS handshake
-# end-to-end. On modern Linux (Ubuntu 24.04+), glibc's getaddrinfo() uses
-# sendmmsg(2) for batched A+AAAA DNS queries, which the jart/pledge polyfill's
-# "dns" promise does not include — so http.fetch() to external hosts is
-# blocked even with dns+netlink+unix. Bypass the sandbox here so we isolate
-# what this test is meant to check; sandbox correctness is exercised in
-# e2e_sandbox.sh. TODO: extend the polyfill or contribute upstream.
 "$HULL" "$WORKDIR/myapp/app.lua" -p "$PORT" -d "$WORKDIR/data.db" \
-    --no-sandbox \
     --ca-bundle "$SRCDIR/vendor/cacert/cacert.pem" \
     > "$WORKDIR/server.log" 2>&1 &
 SERVER_PID=$!
@@ -167,7 +159,6 @@ SERVER_PID=""
 # context was created.
 
 "$HULL" "$WORKDIR/myapp/app.lua" -p $((PORT + 1)) -d "$WORKDIR/data2.db" \
-    --no-sandbox \
     > "$WORKDIR/server2.log" 2>&1 &
 SERVER_PID=$!
 wait_for_port $((PORT + 1)) || echo "  (port $((PORT + 1)) never opened)"

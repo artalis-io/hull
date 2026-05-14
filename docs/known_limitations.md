@@ -44,18 +44,9 @@ All limits are defined in `include/hull/limits.h` and can be overridden at compi
 
 ## Sandbox (pledge) + outbound HTTPS on modern Linux
 
-On Linux glibc ≥ 2.32 (Ubuntu 22.04+, Debian 12+, RHEL 9+), `getaddrinfo()` resolves hostnames by:
+**Resolved.** On Linux glibc ≥ 2.32 (Ubuntu 22.04+, Debian 12+, RHEL 9+), `getaddrinfo()` uses `sendmmsg(2)` / `recvmmsg(2)` for batched A + AAAA DNS queries, plus `AF_UNIX` (systemd-resolved / nscd IPC) and `AF_NETLINK` (interface enumeration) sockets. The bundled jart/pledge polyfill's pledge promises:
 
-1. Opening an `AF_UNIX` socket to talk to `systemd-resolved` or `nscd` via nsswitch IPC
-2. Opening an `AF_NETLINK` socket to enumerate network interfaces
-3. Using `sendmmsg(2)` to send batched A + AAAA DNS queries in one call
+- `sandbox.c` adds `dns`, `netlink`, and `unix` promises when the manifest declares outbound `hosts` (Linux + Cosmo only)
+- `vendor/pledge/libc/calls/pledge-linux.c` `kPledgeDns[]` extended to include `__NR_sendmsg`, `__NR_sendmmsg`, `__NR_recvmsg`, `__NR_recvmmsg` (the scatter/gather and batched variants used by modern glibc)
 
-The jart/pledge polyfill (`vendor/pledge`) bundles pledge promises that map to seccomp-bpf rules. The `dns`, `netlink`, and `unix` promises cover (2) and (1) above, but the polyfill's `kPledgeDns[]` does not include `__NR_sendmmsg` — only `__NR_sendto`. So `http.fetch("https://...")` to an external host under the default sandbox can fail with `pledge sendfd for sendmmsg` on these Linux versions.
-
-Workarounds:
-- `--no-sandbox` (dev-mode disable kernel enforcement)
-- Pre-resolve the hostname to an IP and pass that as a literal address
-- Run `hull` behind a local proxy/sidecar that does DNS for it
-- Build hull as a Cosmopolitan APE (cosmo's libc avoids these glibc-specific paths)
-
-Fixing properly requires either extending the polyfill's `dns` syscall list or contributing the fix upstream to jart/pledge. Tracked separately; the `e2e_ca_bundle.sh` test uses `--no-sandbox` so it isolates CA-bundle correctness from this orthogonal limitation. Sandbox + local-only HTTP (`http.fetch("http://127.0.0.1:...")` ) is unaffected and works as expected.
+`http.fetch("https://...")` to external hosts now works under the default sandbox on Linux/Cosmo/macOS without `--no-sandbox`. Verified by `e2e_ca_bundle.sh` (real HTTPS handshake to `example.com` with sandbox active).
