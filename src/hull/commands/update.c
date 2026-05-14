@@ -18,6 +18,7 @@
 
 #include "hull/commands/update.h"
 #include "hull/cacert.h"
+#include "hull/release.h"
 
 #include <keel/allocator.h>
 #include <keel/client.h>
@@ -362,6 +363,53 @@ int hl_cmd_update(int argc, char **argv, const HlCommandEnv *env)
         kl_free(&alloc, binary, binary_len);
         kl_tls_mbedtls_ctx_destroy(tls);
         return 1;
+    }
+
+    /* ── 4b. Verify Ed25519 signature over the manifest (D-Phase) ── */
+    /*
+     * If this build has a configured release public key (the v0.1.0
+     * release shipped a non-zero HL_RELEASE_PUBKEY_HEX), download and
+     * verify hull.sha256.sig. Missing signature or verification failure
+     * is a hard error — we never substitute an unverified manifest.
+     *
+     * Pre-v0.1.0 builds that ship the all-zeros placeholder skip this
+     * step with a one-time warning.
+     */
+    if (hl_release_pubkey_configured()) {
+        char sig_url[256];
+        snprintf(sig_url, sizeof(sig_url),
+                 "https://github.com/%s/releases/download/%s/hull.sha256.sig",
+                 repo, latest_tag);
+
+        char *sig_hex = NULL;
+        size_t sig_len = 0;
+        if (https_get(sig_url, &sig_hex, &sig_len, &alloc, tls) != 0) {
+            fprintf(stderr,
+                "hull update: failed to download release signature (hull.sha256.sig)\n"
+                "             — this release is not signed; refusing to install\n");
+            kl_free(&alloc, binary, binary_len);
+            kl_free(&alloc, manifest, manifest_len);
+            kl_tls_mbedtls_ctx_destroy(tls);
+            return 1;
+        }
+
+        int sig_rc = hl_release_verify_manifest_sig(manifest, manifest_len,
+                                                    sig_hex, sig_len, NULL);
+        kl_free(&alloc, sig_hex, sig_len);
+        if (sig_rc != 0) {
+            fprintf(stderr,
+                "hull update: release signature verification FAILED\n"
+                "             — manifest does not match the embedded release public key\n");
+            kl_free(&alloc, binary, binary_len);
+            kl_free(&alloc, manifest, manifest_len);
+            kl_tls_mbedtls_ctx_destroy(tls);
+            return 1;
+        }
+        fprintf(stdout, "hull update: release signature verified\n");
+    } else {
+        fprintf(stderr,
+            "hull update: WARNING — this hull build has no embedded release public key,\n"
+            "             skipping Ed25519 signature check (SHA-256 only).\n");
     }
 
     char expected[65];
