@@ -17,7 +17,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "hull/limits.h"
+#include "hull/limits/gpu.h"  /* HL_GPU_MAX_DEVICES */
 
 /* Forward declarations */
 typedef struct lua_State lua_State;

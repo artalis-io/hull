@@ -95,9 +95,10 @@ Bundled and ordered after the pre-v0.1.0 weed-through. Effort: S = < 1 day, M = 
 
 ### Scheduled before v0.1.0
 
-| # | Refactor | Effort | Rationale |
-|---|----------|:------:|-----------|
-| **A** | **C3** — Split each `runtime/*/runtime.c` into 5–6 files (`runtime.c`, `dispatch.c`, `routes.c`, `timers.c`, `ws.c`, `sse.c`) | M | God modules (1713 + 2245 lines) → focused files. Single largest QoL improvement; the split happens **before** v0.1.0 so the file layout doesn't shift after the stability commitment. |
+| # | Refactor | Effort | Status | Rationale |
+|---|----------|:------:|--------|-----------|
+| **A** | **C3** — Split each `runtime/*/runtime.c` into 5–6 files (`runtime.c`, `dispatch.c`, `routes.c`, `timers.c`, `ws.c`, `sse.c`) | M | ✅ done | God modules (1713 + 2245 lines) → focused files. Single largest QoL improvement; the split happens **before** v0.1.0 so the file layout doesn't shift after the stability commitment. |
+| **B** | **M2** — Split `limits.h` per subsystem (`limits/core.h`, `limits/runtime.h`, `limits/wasm.h`, `limits/gpu.h`); `limits.h` kept as umbrella for back-compat; consumers narrowed where each only touches one subsystem | S | ✅ done | Touching a WASM constant no longer rebuilds GPU / runtime TUs (and vice versa). |
 
 ### Scheduled after v0.1.0
 
@@ -105,7 +106,6 @@ Recommended sequence — every item is small/medium, no dependencies between gro
 
 | # | Refactor | Effort | Rationale |
 |---|----------|:------:|-----------|
-| **B** | **M2** — Split `limits.h` per subsystem | S | Cheapest win; kills recompile cascade |
 | **C** | **H4** — `HlSandboxPolicy` decouples sandbox from manifest | S | Manifest format can evolve independently |
 | **D** | **H6 + M8 + H5** — Complete the db_backend abstraction: migrate `migrate.h` to `HlDbHandle *`, drop `sqlite3` forward-decl from `app_context.h`, add `register_udf` to vtable | S | Removes the last raw-`sqlite3 *` reach-arounds; opens door for non-SQLite backends. (Bundled.) |
 | **E** | **C1** — Move `cap/test_{lua,js}.c` → `runtime/{lua,js}/mod_test.c` | S | Restore cap-layer invariant (cap has no runtime knowledge) |

@@ -13,7 +13,7 @@
 
 #include "hull/cap/types.h"
 #include "hull/cap/db.h"
-#include "hull/limits.h"
+#include "hull/limits/core.h"  /* HL_WORKER_ERR_SIZE */
 #include <stddef.h>
 #include <stdint.h>
 

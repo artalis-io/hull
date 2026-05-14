@@ -14,7 +14,7 @@
 
 #include "hull/cap/wasm.h"
 #include "hull/cap/wasm_buffer.h"
-#include "hull/limits.h"
+#include "hull/limits/core.h"  /* HL_WORKER_ERR_SIZE */
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>

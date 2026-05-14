@@ -16,7 +16,7 @@
 #include "internal.h"
 
 #include "hull/alloc.h"
-#include "hull/limits.h"
+#include "hull/limits/runtime.h"
 #include "hull/manifest.h"
 #include "hull/cap/test.h"
 

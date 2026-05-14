@@ -10,7 +10,7 @@
 
 #include "hull/cap/wasm.h"
 #include "hull/cap/wasm_buffer.h"
-#include "hull/limits.h"
+#include "hull/limits/wasm.h"
 #include "hull/vfs.h"
 #include "hull/entry.h"
 #include <stdlib.h>

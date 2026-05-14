@@ -6,7 +6,7 @@
 
 #include "mod_buffer.h"
 #include "hull/vfs.h"
-#include "hull/limits.h"
+#include "hull/limits/core.h"
 
 #include <limits.h>
 #include <stdio.h>

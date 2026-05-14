@@ -8,8 +8,7 @@
 
 #ifdef HL_ENABLE_GPU
 
-#include "hull/cap/gpu.h"
-#include "hull/limits.h"
+#include "hull/cap/gpu.h"  /* error codes; HL_GPU_* limits come transitively from limits/gpu.h */
 #include <stdlib.h>
 #include <string.h>
 

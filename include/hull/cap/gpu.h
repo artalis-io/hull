@@ -16,7 +16,7 @@
 
 #ifdef HL_ENABLE_GPU
 
-#include "hull/limits.h"
+#include "hull/limits/gpu.h"
 
 #include <pthread.h>
 #include <stddef.h>

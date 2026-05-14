@@ -15,7 +15,6 @@
 #include "hull/cap/wasm_buffer.h"
 #include "hull/alloc.h"
 #include "hull/async.h"
-#include "hull/limits.h"
 #include "log.h"
 #include "keel/thread_pool.h"
 #include "keel/async.h"

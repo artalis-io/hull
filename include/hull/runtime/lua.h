@@ -11,7 +11,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include "hull/limits.h"
+#include "hull/limits/runtime.h"  /* transitively pulls in core.h */
 #include "hull/runtime.h"
 #include "hull/cap/types.h"
 

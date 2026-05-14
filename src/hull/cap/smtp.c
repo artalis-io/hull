@@ -10,7 +10,7 @@
 
 #include "hull/cap/smtp.h"
 #include "hull/cap/audit.h"
-#include "hull/limits.h"
+#include "hull/limits/core.h"
 
 #include <keel/allocator.h>
 #include <keel/tls.h>

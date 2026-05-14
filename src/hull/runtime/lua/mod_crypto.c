@@ -5,7 +5,7 @@
 
 #include "mod_buffer.h"
 #include "hull/cap/crypto.h"
-#include "hull/limits.h"
+#include "hull/limits/core.h"
 
 #include <sh_arena.h>
 #include <stdlib.h>

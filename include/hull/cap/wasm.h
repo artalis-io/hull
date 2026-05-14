@@ -15,7 +15,7 @@
 
 #ifdef HL_ENABLE_WASM
 
-#include "hull/limits.h"
+#include "hull/limits/wasm.h"
 
 #include <stddef.h>
 #include <stdint.h>

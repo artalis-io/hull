@@ -10,7 +10,7 @@
 
 #include "hull/runtime/lua.h"
 #include "hull/reqctx.h"
-#include "hull/limits.h"
+#include "hull/limits/core.h"
 #include "hull/cap/body.h"
 #include "hull/compress.h"
 

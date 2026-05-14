@@ -13,7 +13,7 @@
 #ifdef HL_ENABLE_GPU
 
 #include "hull/cap/gpu.h"
-#include "hull/limits.h"
+#include "hull/limits/core.h"  /* HL_WORKER_ERR_SIZE (HL_GPU_NAME_MAX via cap/gpu.h) */
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>

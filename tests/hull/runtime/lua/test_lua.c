@@ -21,7 +21,7 @@
 
 #include <keel/keel.h>
 
-#include "hull/limits.h"
+#include "hull/limits/core.h"  /* HL_MODULE_MAX_SIZE; HL_LUA_* via runtime/lua.h */
 
 #include <sqlite3.h>
 

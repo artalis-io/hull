@@ -12,7 +12,7 @@
 
 #include "hull/cap/gpu.h"
 #include "hull/cap/audit.h"
-#include "hull/limits.h"
+#include "hull/limits/gpu.h"
 #include "log.h"
 
 #include <assert.h>

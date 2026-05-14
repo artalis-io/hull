@@ -9,7 +9,7 @@
  */
 
 #include "hull/cap/body.h"
-#include "hull/limits.h"
+#include "hull/limits/core.h"
 #include <stddef.h>
 
 KlBodyReader *hl_cap_body_factory(KlAllocator *alloc, const KlRequest *req,
