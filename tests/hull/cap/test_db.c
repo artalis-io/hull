@@ -9,6 +9,7 @@
 
 #include "utest.h"
 #include "hull/cap/db.h"
+#include "hull/cap/db_backend.h"
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/db_udf.h"
 #endif
@@ -640,9 +641,14 @@ UTEST(hl_cap_db, udf_wasm_rejects_bad_prefix)
         .nargs       = 1,
     };
     const char *err_msg = NULL;
-    int rc = hl_cap_db_udf_register_wasm(test_db, NULL, &opts, NULL, NULL, NULL, &err_msg);
+    /* Wrap the test sqlite3* in a transient HlDbHandle — the UDF API now
+     * takes HlDbHandle * so non-SQLite backends can fail-fast. */
+    HlDbHandle handle = {0};
+    ASSERT_EQ(hl_db_sqlite_wrap(&handle, test_db), 0);
+    int rc = hl_cap_db_udf_register_wasm(&handle, NULL, &opts, NULL, NULL, NULL, &err_msg);
     ASSERT_NE(rc, 0);
     ASSERT_TRUE(err_msg != NULL);
+    hl_db_sqlite_unwrap(&handle);
 
     teardown_db();
 }
