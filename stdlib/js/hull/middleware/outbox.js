@@ -111,8 +111,10 @@ async function deliverItem(item) {
     if (item.kind === "webhook" || item.kind === "http") {
         let reqHeaders = {};
         if (item.headers) {
-            const decoded = json.decode(item.headers);
-            if (decoded) reqHeaders = decoded;
+            let decoded;
+            try { decoded = json.decode(item.headers); }
+            catch (_e) { decoded = null; }
+            if (decoded && typeof decoded === "object") reqHeaders = decoded;
         }
 
         try {

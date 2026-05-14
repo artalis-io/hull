@@ -138,8 +138,13 @@ function middleware(opts) {
                     [principalId, key]
                 );
             } else {
-                // Fingerprint mismatch
-                if (row.fingerprint !== fingerprint) {
+                // Fingerprint mismatch. Constant-time comparison even though
+                // fingerprints are SHA-256 of public inputs (method+path+body),
+                // for consistency with jwt.js / csrf.js.
+                let diff = (row.fingerprint || "").length === fingerprint.length ? 0 : 1;
+                for (let i = 0; i < fingerprint.length && i < (row.fingerprint || "").length; i++)
+                    diff |= row.fingerprint.charCodeAt(i) ^ fingerprint.charCodeAt(i);
+                if (diff !== 0) {
                     res.status(409);
                     res.json({ error: "idempotency key already used with different request body" });
                     return 1;
@@ -156,8 +161,10 @@ function middleware(opts) {
                 if (row.state === "complete" && row.status) {
                     res.status(row.status);
                     if (row.response_headers) {
-                        const headers = json.decode(row.response_headers);
-                        if (headers) {
+                        let headers;
+                        try { headers = json.decode(row.response_headers); }
+                        catch (_e) { headers = null; }
+                        if (headers && typeof headers === "object") {
                             const keys = Object.keys(headers);
                             for (let i = 0; i < keys.length; i++)
                                 res.header(keys[i], headers[keys[i]]);

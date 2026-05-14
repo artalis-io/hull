@@ -58,8 +58,10 @@ function sign(payload, secret) {
     if (!secret || typeof secret !== "string")
         throw new Error("secret is required");
 
-    // Set iat if not already present
-    const p = Object.assign({}, payload);
+    // Copy payload via own-property iteration so we don't accidentally
+    // promote an inherited or __proto__-set key into the JWT.
+    const p = Object.create(null);
+    for (const k of Object.keys(payload)) p[k] = payload[k];
     if (p.iat === undefined)
         p.iat = time.now();
 

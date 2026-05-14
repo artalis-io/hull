@@ -648,8 +648,21 @@ int hl_sandbox_apply(const HlManifest *manifest, const char *app_dir,
 #else
         const char *dns_promises = " dns";
 #endif
-        (void)snprintf(promises + plen, sizeof(promises) - (size_t)plen,
-                       "%s", dns_promises);
+        size_t remaining = sizeof(promises) - (size_t)plen;
+        size_t dns_len = strlen(dns_promises);
+        if (dns_len + 1 > remaining) {
+            /* Should never happen — promises[256] vs ~50 bytes total —
+             * but fail loud rather than silently drop dns permissions. */
+            log_error("[sandbox] pledge promises buffer overflow "
+                      "(need %zu, have %zu) — refusing to start with "
+                      "an under-permissioned sandbox", dns_len + 1, remaining);
+            return -1;
+        }
+        int dlen = snprintf(promises + plen, remaining, "%s", dns_promises);
+        if (dlen < 0 || (size_t)dlen >= remaining) {
+            log_error("[sandbox] pledge promise concat failed");
+            return -1;
+        }
     }
 
     if (pledge(promises, NULL) != 0) {

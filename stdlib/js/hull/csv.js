@@ -96,7 +96,9 @@ function parse(text, opts) {
         for (let r = 1; r < rows.length; r++) {
             const obj = {};
             for (let c = 0; c < headers.length; c++) {
-                obj[headers[c]] = c < rows[r].length ? rows[r][c] : "";
+                const key = headers[c];
+                if (typeof key !== "string" || key.length === 0) continue;
+                obj[key] = c < rows[r].length ? rows[r][c] : "";
             }
             result.push(obj);
         }

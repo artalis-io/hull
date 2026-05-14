@@ -71,17 +71,25 @@ function definePermission(name) {
     db.exec("INSERT OR IGNORE INTO _hull_permissions (name) VALUES (?)", [name]);
 }
 
+// String() on null/undefined yields the literal "null"/"undefined", which
+// would silently insert a real-looking user_id row. Reject explicitly.
+function normalizeUserId(userId) {
+    if (userId === null || userId === undefined)
+        throw new Error("rbac: userId is required");
+    return String(userId);
+}
+
 function assign(userId, role) {
     db.exec(
         "INSERT OR IGNORE INTO _hull_user_roles (user_id, role) VALUES (?, ?)",
-        [String(userId), role]
+        [normalizeUserId(userId), role]
     );
 }
 
 function revoke(userId, role) {
     db.exec(
         "DELETE FROM _hull_user_roles WHERE user_id = ? AND role = ?",
-        [String(userId), role]
+        [normalizeUserId(userId), role]
     );
 }
 
@@ -102,7 +110,7 @@ function ungrant(role, permission) {
 function roles(userId) {
     const rows = db.query(
         "SELECT role FROM _hull_user_roles WHERE user_id = ? ORDER BY role",
-        [String(userId)]
+        [normalizeUserId(userId)]
     );
     const result = [];
     for (let i = 0; i < rows.length; i++)
@@ -115,7 +123,7 @@ function permissions(userId) {
         "SELECT DISTINCT rp.permission FROM _hull_user_roles ur " +
         "JOIN _hull_role_permissions rp ON ur.role = rp.role " +
         "WHERE ur.user_id = ? ORDER BY rp.permission",
-        [String(userId)]
+        [normalizeUserId(userId)]
     );
     const result = [];
     for (let i = 0; i < rows.length; i++)
@@ -126,7 +134,7 @@ function permissions(userId) {
 function hasRole(userId, role) {
     const rows = db.query(
         "SELECT 1 FROM _hull_user_roles WHERE user_id = ? AND role = ?",
-        [String(userId), role]
+        [normalizeUserId(userId), role]
     );
     return rows.length > 0;
 }
@@ -136,13 +144,13 @@ function hasPermission(userId, permission) {
         "SELECT 1 FROM _hull_user_roles ur " +
         "JOIN _hull_role_permissions rp ON ur.role = rp.role " +
         "WHERE ur.user_id = ? AND rp.permission = ?",
-        [String(userId), permission]
+        [normalizeUserId(userId), permission]
     );
     return rows.length > 0;
 }
 
 function hasAnyRole(userId, roleList) {
-    const uid = String(userId);
+    const uid = normalizeUserId(userId);
     for (let i = 0; i < roleList.length; i++) {
         if (hasRole(uid, roleList[i]))
             return true;
@@ -151,7 +159,7 @@ function hasAnyRole(userId, roleList) {
 }
 
 function hasAnyPermission(userId, permList) {
-    const uid = String(userId);
+    const uid = normalizeUserId(userId);
     for (let i = 0; i < permList.length; i++) {
         if (hasPermission(uid, permList[i]))
             return true;

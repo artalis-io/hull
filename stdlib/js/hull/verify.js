@@ -13,7 +13,11 @@
 
 import { sha256, ed25519Verify } from "hull:crypto";
 
-const GETHULL_DEV_PLATFORM_KEY = "0000000000000000000000000000000000000000000000000000000000000000";
+// Placeholder until the real gethull.dev platform key is pinned. Until then,
+// `hull verify` requires --platform-key PATH and will not fall back to the
+// all-zeros sentinel (which would silently fail every signature check).
+const GETHULL_DEV_PLATFORM_KEY_PLACEHOLDER =
+    "0000000000000000000000000000000000000000000000000000000000000000";
 
 // Parse CLI args
 let appDir = ".";
@@ -62,7 +66,10 @@ catch (e) {
     tool.stderr("hull verify: invalid JSON in signature file\n");
     tool.exit(1);
 }
-if (!sig || !sig.files || !sig.signature || !sig.public_key) {
+if (!sig || typeof sig !== "object" ||
+    typeof sig.files     !== "object" || sig.files === null ||
+    typeof sig.signature !== "string" ||
+    typeof sig.public_key !== "string") {
     tool.stderr("hull verify: invalid signature format\n");
     tool.exit(1);
 }
@@ -71,9 +78,16 @@ let issues = 0;
 
 // ── Platform layer verification ────────────────────────────────────
 if (sig.platform?.signature && sig.platform?.public_key) {
-    const platformKeyHex = readKey(platformKeySource) ?? GETHULL_DEV_PLATFORM_KEY;
+    let platformKeyHex = readKey(platformKeySource);
+    if (!platformKeyHex || platformKeyHex === GETHULL_DEV_PLATFORM_KEY_PLACEHOLDER) {
+        tool.stderr("Platform layer: SKIPPED — no platform key provided\n");
+        tool.stderr("  hint: pass --platform-key <path-to-gethull.dev.pub> " +
+                    "to verify the platform signature\n");
+        issues++;
+        platformKeyHex = null;
+    }
 
-    if (sig.platform.public_key === platformKeyHex) {
+    if (platformKeyHex && sig.platform.public_key === platformKeyHex) {
         const platPayload = JSON.stringify(sig.platform.platforms);
         const platOk = ed25519Verify(platPayload, sig.platform.signature, sig.platform.public_key);
 
@@ -83,7 +97,7 @@ if (sig.platform?.signature && sig.platform?.public_key) {
             tool.stderr("Platform layer: FAILED — signature invalid\n");
             issues++;
         }
-    } else {
+    } else if (platformKeyHex) {
         tool.stderr(`Platform layer: WARNING — key mismatch\n`);
         issues++;
     }

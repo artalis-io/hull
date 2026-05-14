@@ -115,8 +115,19 @@ function serialize(name, value, opts) {
     return str;
 }
 
+// Whitelisted Set-Cookie attributes. Avoiding Object.assign here prevents
+// prototype-pollution if the caller's opts object inherits adversarial keys.
+const COOKIE_ATTRS = ["path", "domain", "httpOnly", "secure", "sameSite",
+                       "maxAge", "expires"];
+
 function clear(name, opts) {
-    const o = Object.assign({}, opts || {});
+    const o = Object.create(null);
+    if (opts) {
+        for (const k of COOKIE_ATTRS) {
+            if (Object.prototype.hasOwnProperty.call(opts, k))
+                o[k] = opts[k];
+        }
+    }
     o.maxAge = 0;
     o.expires = "Thu, 01 Jan 1970 00:00:00 GMT";
     return serialize(name, "", o);

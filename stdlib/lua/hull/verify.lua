@@ -13,8 +13,12 @@
 
 local json = require("hull.json")
 
--- Hardcoded gethull.dev platform public key (from keys/gethull.dev.pub)
-local GETHULL_DEV_PLATFORM_KEY = "0000000000000000000000000000000000000000000000000000000000000000"
+-- Placeholder until the real gethull.dev platform key is pinned in this file.
+-- Until then, `hull verify` requires the caller to pass --platform-key PATH
+-- (a file containing the hex-encoded public key) and will refuse to fall
+-- back to the all-zeros sentinel.
+local GETHULL_DEV_PLATFORM_KEY_PLACEHOLDER =
+    "0000000000000000000000000000000000000000000000000000000000000000"
 
 local function read_file(path)
     return tool.read_file(path)
@@ -94,10 +98,18 @@ local function main()
 
     -- ── Platform layer verification ────────────────────────────────
     if sig.platform and sig.platform.signature and sig.platform.public_key then
-        local platform_key_hex = read_key(opts.platform_key) or GETHULL_DEV_PLATFORM_KEY
+        local platform_key_hex = read_key(opts.platform_key)
+        if not platform_key_hex or
+           platform_key_hex == GETHULL_DEV_PLATFORM_KEY_PLACEHOLDER then
+            tool.stderr("Platform layer: SKIPPED — no platform key provided\n")
+            tool.stderr("  hint: pass --platform-key <path-to-gethull.dev.pub> " ..
+                        "to verify the platform signature\n")
+            issues = issues + 1
+            platform_key_hex = nil
+        end
 
         -- Check if platform key matches
-        if sig.platform.public_key == platform_key_hex then
+        if platform_key_hex and sig.platform.public_key == platform_key_hex then
             -- Verify platform signature
             local plat_payload = json.encode(sig.platform.platforms)
             local plat_ok = crypto.ed25519_verify(plat_payload,
@@ -109,7 +121,7 @@ local function main()
                 tool.stderr("Platform layer: FAILED — signature invalid\n")
                 issues = issues + 1
             end
-        else
+        elseif platform_key_hex then
             tool.stderr("Platform layer: WARNING — key mismatch (expected " ..
                 platform_key_hex:sub(1, 16) .. "..., got " ..
                 sig.platform.public_key:sub(1, 16) .. "...)\n")

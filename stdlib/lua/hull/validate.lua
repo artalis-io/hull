@@ -8,7 +8,31 @@
 
 local validate = {}
 
-local EMAIL_PATTERN = "^[^%s@]+@[^%s@]+%.[^%s@]+$"
+-- Email validation: practical RFC-5322 subset suitable for form-input
+-- screening. Catches obvious garbage (a..b@x, @foo, user@, foo) without
+-- aiming for full compliance — apps wanting stricter checks should layer
+-- their own validator on top.
+--
+-- Constraints encoded in the pattern:
+--   * local part starts with alphanumeric
+--   * local part allows letters, digits, and . _ % + -
+--   * single '@' boundary
+--   * domain starts with alphanumeric
+--   * domain has at least one '.'
+--   * TLD ≥ 2 letters
+local EMAIL_PATTERN =
+    "^[A-Za-z0-9][A-Za-z0-9._+%-]*@[A-Za-z0-9][A-Za-z0-9.%-]*%.[A-Za-z][A-Za-z]+$"
+
+-- Reject "..", trailing ".", and leading "." in local or domain — the
+-- pattern above doesn't catch these. We do a secondary check at use time.
+local function email_ok(s)
+    if type(s) ~= "string" then return false end
+    if #s > 254 then return false end
+    if not s:match(EMAIL_PATTERN) then return false end
+    if s:find("%.%.", 1, false) then return false end
+    if s:find("^%.") or s:find("%.@") or s:find("@%.") then return false end
+    return true
+end
 
 --- Validate a data table against a schema.
 -- Returns: ok (boolean), errors (table or nil)
@@ -127,7 +151,7 @@ function validate.check(data, schema)
 
         -- 8. email
         if rules.email then
-            if type(value) ~= "string" or not value:match(EMAIL_PATTERN) then
+            if not email_ok(value) then
                 err = custom_msg or "is not a valid email"
             end
         end

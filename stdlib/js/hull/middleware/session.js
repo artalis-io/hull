@@ -96,8 +96,10 @@ function load(sessionId, opts) {
         [now, now + ttl, sessionId]
     );
 
-    const decoded = json.decode(rows[0].data);
-    if (decoded == null) {
+    let decoded;
+    try { decoded = json.decode(rows[0].data); }
+    catch (_e) { decoded = null; }
+    if (decoded == null || typeof decoded !== "object") {
         // Corrupted session data — destroy and return null
         db.exec("DELETE FROM _hull_sessions WHERE id = ?", [sessionId]);
         return null;

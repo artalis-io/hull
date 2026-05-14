@@ -129,10 +129,17 @@ function idempotency.middleware(opts)
                 db.exec("DELETE FROM _hull_idempotency_keys WHERE principal_id = ? AND key = ?",
                         { principal_id, key })
             else
-                -- Fingerprint mismatch: different request body with same key.
-                -- Standard string compare is acceptable here — fingerprints are
-                -- SHA-256 hashes (not secrets), so timing leaks are not exploitable.
-                if row.fingerprint ~= fingerprint then
+                -- Fingerprint comparison. Fingerprints are SHA-256(public
+                -- inputs) — not secrets — so timing leaks are not exploitable.
+                -- We still use a constant-time loop for consistency with jwt.lua
+                -- and csrf.lua so the comparison contract is the same everywhere
+                -- in the stdlib.
+                local diff = (row.fingerprint and #row.fingerprint or 0) == #fingerprint and 0 or 1
+                local n = math.min(#fingerprint, row.fingerprint and #row.fingerprint or 0)
+                for i = 1, n do
+                    diff = diff | (string.byte(row.fingerprint, i) ~ string.byte(fingerprint, i))
+                end
+                if diff ~= 0 then
                     res:status(409):json({
                         error = "idempotency key already used with different request body"
                     })

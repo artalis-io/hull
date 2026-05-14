@@ -90,18 +90,22 @@ function check(data, schema) {
 
         if (err) { setError(); continue; }
 
-        // 6. pattern
-        if (rules.pattern) {
-            if (typeof rules.pattern === "string" && rules.pattern.length > 1000)
-                throw new Error("validate: pattern too long (max 1000 chars)");
+        // 6. pattern. Bound both the pattern (≤ 1024 chars) and the value
+        // (≤ 8192 chars) to make a ReDoS attack via crafted pattern + input
+        // require a very persistent attacker. We don't accept pre-compiled
+        // RegExp objects: their source could contain known-bad backtracking
+        // patterns the string check would catch.
+        if (rules.pattern !== undefined && rules.pattern !== null) {
+            if (rules.pattern instanceof RegExp)
+                throw new Error("validate: pass pattern as a string, not a RegExp");
+            if (typeof rules.pattern !== "string")
+                throw new Error("validate: pattern must be a string");
+            if (rules.pattern.length > 1024)
+                throw new Error("validate: pattern too long (max 1024 chars)");
             let re;
-            if (rules.pattern instanceof RegExp) {
-                re = rules.pattern;
-            } else {
-                try { re = new RegExp(rules.pattern); }
-                catch (e) { throw new Error("validate: invalid pattern: " + e.message); }
-            }
-            if (typeof value !== "string" || !re.test(String(value).substring(0, 10000)))
+            try { re = new RegExp(rules.pattern); }
+            catch (e) { throw new Error("validate: invalid pattern: " + e.message); }
+            if (typeof value !== "string" || !re.test(String(value).substring(0, 8192)))
                 err = customMsg || "does not match the required pattern";
         }
 

@@ -83,12 +83,17 @@ function cookie.serialize(name, value, opts)
         parts[#parts + 1] = "Max-Age=" .. tostring(opts.max_age)
     end
 
-    -- Domain
+    -- Domain — RFC 6265 attribute syntax. Accepts an optional leading "."
+    -- (legacy subdomain-matching form, still in widespread use). Rejects
+    -- length > 253, double dots, trailing dots, and any non-host characters.
     if opts.domain then
-        if not opts.domain:match("^[a-zA-Z0-9%.%-]+$") then
+        local d = opts.domain
+        if #d > 253
+           or not d:match("^%.?[a-zA-Z0-9][a-zA-Z0-9%-%.]*[a-zA-Z0-9]$")
+           or d:find("%.%.", 1, false) then
             error("cookie: invalid domain")
         end
-        parts[#parts + 1] = "Domain=" .. opts.domain
+        parts[#parts + 1] = "Domain=" .. d
     end
 
     -- Expires

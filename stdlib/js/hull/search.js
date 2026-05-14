@@ -64,8 +64,12 @@ function createIndex(name, columns, opts) {
     let ftsOpts = "";
 
     const tokenize = o.tokenize || "unicode61";
-    if (!/^[a-zA-Z0-9_ ]+$/.test(tokenize))
-        throw new Error("search: invalid tokenize option (must match [a-zA-Z0-9_ ]+)");
+    // FTS5 tokenize names are short identifiers ("unicode61", "porter ascii",
+    // "trigram", etc.). Allow letters/digits/underscores and single spaces
+    // between identifier tokens; reject leading/trailing/double spaces or
+    // anything else that could escape the quoted SQL string.
+    if (!/^[a-zA-Z][a-zA-Z0-9_]*( [a-zA-Z][a-zA-Z0-9_]*)*$/.test(tokenize))
+        throw new Error("search: invalid tokenize option");
     ftsOpts += ", tokenize=\"" + tokenize + "\"";
 
     if (o.content) {

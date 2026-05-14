@@ -126,10 +126,25 @@ function jwtMiddleware(opts) {
     };
 }
 
+// Whitelisted cookie attributes — keep in sync with stdlib/js/hull/cookie.js
+const COOKIE_ATTRS = ["path", "domain", "httpOnly", "secure", "sameSite",
+                       "maxAge", "expires"];
+
+function copyCookieOpts(src) {
+    const o = Object.create(null);
+    if (src) {
+        for (const k of COOKIE_ATTRS) {
+            if (Object.prototype.hasOwnProperty.call(src, k))
+                o[k] = src[k];
+        }
+    }
+    return o;
+}
+
 function login(req, res, userData, opts) {
     const o = opts || {};
     const cookieName = o.cookieName || "hull_session";
-    const cookieOpts = Object.assign({}, o.cookieOpts || {});
+    const cookieOpts = copyCookieOpts(o.cookieOpts);
 
     // Set Max-Age from session TTL if not explicitly provided
     if (cookieOpts.maxAge === undefined && o.ttl)
