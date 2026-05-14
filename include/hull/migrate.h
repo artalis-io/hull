@@ -5,16 +5,20 @@
  * entries or filesystem, tracks applied migrations in _hull_migrations,
  * executes pending ones in filename order.
  *
+ * Takes HlDbHandle * (not raw sqlite3 *). The SQLite-specific internal
+ * table _hull_migrations is currently SQLite-only — non-SQLite backends
+ * would supply their own migration mechanism. Reach-around to the raw
+ * sqlite3 * is now confined to migrate.c.
+ *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
 #ifndef HL_MIGRATE_H
 #define HL_MIGRATE_H
 
-#include <sqlite3.h>
-
-/* Forward declaration */
-typedef struct HlVfs HlVfs;
+/* Forward declarations */
+typedef struct HlVfs       HlVfs;
+typedef struct HlDbHandle  HlDbHandle;
 
 /* Return codes for hl_migrate_run() */
 #define HL_MIGRATE_ERR    (-1)   /* SQL error during migration */
@@ -24,14 +28,14 @@ typedef struct HlVfs HlVfs;
  * Discover and apply pending SQL migrations.
  *
  * Uses vfs for O(log n) lookup of "migrations/" entries (embedded in built
- * binaries). If no embedded entries found and vfs->root_dir is set, falls back
- * to scanning root_dir/migrations/ for .sql files.
+ * binaries). If no embedded entries found and vfs->root_dir is set, falls
+ * back to scanning root_dir/migrations/ for .sql files.
  * Migrations are sorted by filename and executed in order.
  * Each migration runs in its own BEGIN IMMEDIATE / COMMIT.
  *
  * Returns: count of applied migrations (>=0), HL_MIGRATE_ERR, or HL_MIGRATE_NO_DIR.
  */
-int hl_migrate_run(sqlite3 *db, const HlVfs *vfs);
+int hl_migrate_run(HlDbHandle *handle, const HlVfs *vfs);
 
 /* ── Status query ──────────────────────────────────────────────────── */
 
@@ -48,7 +52,7 @@ typedef struct {
  * Caller must free with hl_migrate_status_free().
  * Returns 0 on success, -1 on error.
  */
-int hl_migrate_status(sqlite3 *db, const HlVfs *vfs,
+int hl_migrate_status(HlDbHandle *handle, const HlVfs *vfs,
                       HlMigrationStatus **out, int *out_count);
 
 void hl_migrate_status_free(HlMigrationStatus *entries, int count);

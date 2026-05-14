@@ -147,3 +147,28 @@ HlStmtCache *hl_db_sqlite_cache(HlDbHandle *h)
     HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
     return s ? &s->cache : NULL;
 }
+
+/* ── Wrap an externally-owned sqlite3* ────────────────────────────── */
+
+int hl_db_sqlite_wrap(HlDbHandle *out, sqlite3 *db)
+{
+    if (!out || !db) return -1;
+    HlDbSqliteCtx *s = calloc(1, sizeof(*s));
+    if (!s) return -1;
+    s->db    = db;       /* borrowed — caller owns lifetime */
+    s->alloc = NULL;
+    hl_stmt_cache_init(&s->cache, db, NULL);
+    out->backend = &hl_db_backend_sqlite;
+    out->ctx     = s;
+    return 0;
+}
+
+void hl_db_sqlite_unwrap(HlDbHandle *h)
+{
+    if (!h || h->backend != &hl_db_backend_sqlite || !h->ctx) return;
+    HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
+    hl_stmt_cache_destroy(&s->cache);
+    /* NOTE: s->db is borrowed — do NOT sqlite3_close it here. */
+    free(s);
+    h->ctx = NULL;
+}

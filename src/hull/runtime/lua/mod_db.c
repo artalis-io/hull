@@ -755,7 +755,7 @@ static int lua_db_udf_register(lua_State *L)
 
         const char *err_msg = NULL;
         int rc = hl_cap_db_udf_register_wasm(
-            raw_db, lua->base.wasm_cache, &opts,
+            lua->base.db_handle, lua->base.wasm_cache, &opts,
             lua->base.app_vfs, lua->app_dir,
             lua->base.alloc, &err_msg);
         if (rc != 0)
@@ -842,20 +842,27 @@ static int lua_db_udf_register(lua_State *L)
 static int lua_db_udf_unregister(lua_State *L)
 {
     HlLua *lua = get_hl_lua(L);
-    sqlite3 *raw_db = lua ? hl_db_sqlite_raw(lua->base.db_handle) : NULL;
-    if (!lua || !raw_db)
+    if (!lua || !lua->base.db_handle)
         return luaL_error(L, "database not available");
 
     const char *sql_name = luaL_checkstring(L, 1);
 
-    /* SQLite calls the xDestroy callback for the old registration */
+#ifdef HL_ENABLE_WASM
+    if (hl_cap_db_udf_unregister(lua->base.db_handle, sql_name) != 0)
+        return luaL_error(L, "db.udf.unregister: failed");
+#else
+    /* Fall back to direct sqlite3 call when WASM (and the UDF cap helper)
+     * is compiled out — Lua/JS callback UDFs still work without WASM. */
+    sqlite3 *raw_db = hl_db_sqlite_raw(lua->base.db_handle);
+    if (!raw_db)
+        return luaL_error(L, "database not available");
     int rc = sqlite3_create_function_v2(
         raw_db, sql_name, -1, SQLITE_UTF8,
         NULL, NULL, NULL, NULL, NULL);
-
     if (rc != SQLITE_OK)
         return luaL_error(L, "db.udf.unregister: %s",
                           sqlite3_errmsg(raw_db));
+#endif
 
     return 0;
 }

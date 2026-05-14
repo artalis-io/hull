@@ -13,6 +13,7 @@
 #include "hull/migrate.h"
 #include "hull/vfs.h"
 #include "hull/cap/db.h"
+#include "hull/cap/db_backend.h"
 #include "hull/tool.h"
 
 #include <sqlite3.h>
@@ -41,24 +42,21 @@ static void migrate_usage(void)
 
 static int cmd_run(const char *app_dir, const char *db_path)
 {
-    sqlite3 *db = NULL;
-    if (sqlite3_open(db_path, &db) != SQLITE_OK) {
-        fprintf(stderr, "hull migrate: cannot open database %s: %s\n",
-                db_path, sqlite3_errmsg(db));
-        sqlite3_close(db);
+    /* Open via the backend vtable so the handle.ctx is the proper
+     * HlDbSqliteCtx — required for hl_db_sqlite_raw / hl_migrate_run. */
+    HlDbHandle handle = { .backend = &hl_db_backend_sqlite, .ctx = NULL };
+    if (hl_db_backend_sqlite.open(&handle.ctx, db_path, NULL) != 0) {
+        fprintf(stderr, "hull migrate: cannot open database %s\n", db_path);
         return 1;
     }
-
-    hl_cap_db_init(db);
 
     extern const HlEntry hl_app_entries[];
     HlVfs vfs;
     hl_vfs_init(&vfs, hl_app_entries, app_dir);
 
-    int result = hl_migrate_run(db, &vfs);
+    int result = hl_migrate_run(&handle, &vfs);
 
-    hl_cap_db_shutdown(db);
-    sqlite3_close(db);
+    hl_db_backend_sqlite.close(handle.ctx);
 
     if (result == HL_MIGRATE_ERR) {
         fprintf(stderr, "hull migrate: migration failed\n");
@@ -80,15 +78,12 @@ static int cmd_run(const char *app_dir, const char *db_path)
 
 static int cmd_status(const char *app_dir, const char *db_path)
 {
-    sqlite3 *db = NULL;
-    if (sqlite3_open(db_path, &db) != SQLITE_OK) {
-        fprintf(stderr, "hull migrate: cannot open database %s: %s\n",
-                db_path, sqlite3_errmsg(db));
-        sqlite3_close(db);
+    /* Open via the backend vtable (same reason as cmd_run). */
+    HlDbHandle handle = { .backend = &hl_db_backend_sqlite, .ctx = NULL };
+    if (hl_db_backend_sqlite.open(&handle.ctx, db_path, NULL) != 0) {
+        fprintf(stderr, "hull migrate: cannot open database %s\n", db_path);
         return 1;
     }
-
-    hl_cap_db_init(db);
 
     extern const HlEntry hl_app_entries[];
     HlVfs vfs;
@@ -96,11 +91,9 @@ static int cmd_status(const char *app_dir, const char *db_path)
 
     HlMigrationStatus *entries = NULL;
     int count = 0;
+    int rc = hl_migrate_status(&handle, &vfs, &entries, &count);
 
-    int rc = hl_migrate_status(db, &vfs, &entries, &count);
-
-    hl_cap_db_shutdown(db);
-    sqlite3_close(db);
+    hl_db_backend_sqlite.close(handle.ctx);
 
     if (rc != 0) {
         fprintf(stderr, "hull migrate: failed to query status\n");

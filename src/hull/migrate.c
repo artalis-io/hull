@@ -10,6 +10,9 @@
 
 #include "hull/migrate.h"
 #include "hull/vfs.h"
+#include "hull/cap/db_backend.h"
+
+#include <sqlite3.h>
 
 #include <dirent.h>
 #include <stdint.h>
@@ -299,8 +302,19 @@ static int discover_fs_migrations(const char *root_dir, MigrationList *ml)
 
 /* ── Public API: run migrations ───────────────────────────────────── */
 
-int hl_migrate_run(sqlite3 *db, const HlVfs *vfs)
+int hl_migrate_run(HlDbHandle *handle, const HlVfs *vfs)
 {
+    /*
+     * The _hull_migrations tracking table + ad-hoc SQL prepared
+     * statements below are currently SQLite-specific. Non-SQLite
+     * backends would supply their own migration mechanism.
+     */
+    sqlite3 *db = hl_db_sqlite_raw(handle);
+    if (!db) {
+        /* No SQLite handle: nothing to migrate (e.g. compute-only or
+         * future non-SQLite backend). Not an error. */
+        return 0;
+    }
     if (ensure_tracking_table(db) != 0)
         return HL_MIGRATE_ERR;
 
@@ -356,9 +370,16 @@ int hl_migrate_run(sqlite3 *db, const HlVfs *vfs)
 
 /* ── Public API: query status ─────────────────────────────────────── */
 
-int hl_migrate_status(sqlite3 *db, const HlVfs *vfs,
+int hl_migrate_status(HlDbHandle *handle, const HlVfs *vfs,
                       HlMigrationStatus **out, int *out_count)
 {
+    sqlite3 *db = hl_db_sqlite_raw(handle);
+    if (!db) {
+        /* Non-SQLite or absent backend: report zero migrations. */
+        if (out) *out = NULL;
+        if (out_count) *out_count = 0;
+        return 0;
+    }
     if (ensure_tracking_table(db) != 0)
         return -1;
 

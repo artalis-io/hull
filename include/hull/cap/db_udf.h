@@ -17,7 +17,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-struct sqlite3;
+struct HlDbHandle;
 struct HlWasmCache;
 struct HlWasmInstance;
 struct HlVfs;
@@ -60,15 +60,18 @@ typedef struct {
 } HlDbUdfOpts;
 
 /**
- * Register a WASM-backed UDF with SQLite.
+ * Register a WASM-backed UDF.
  *
  * For scalar UDFs: creates a persistent WASM instance at registration time,
  * reused across all rows. Module must be stateless between rows.
  *
- * For aggregate UDFs: creates per-group instances via sqlite3_aggregate_context.
- * Each group gets its own WASM linear memory for accumulation.
+ * For aggregate UDFs: creates per-group instances via per-row aggregate
+ * contexts. Each group gets its own WASM linear memory for accumulation.
  *
- * @param db        SQLite database handle
+ * UDFs are currently SQLite-specific. If the backend behind `handle` is
+ * not the SQLite backend, the call returns -1 with err_msg set.
+ *
+ * @param handle    Database handle (vtable-based; must be SQLite-backed)
  * @param cache     WASM module cache
  * @param opts      Registration options
  * @param app_vfs   App VFS for module loading
@@ -77,7 +80,7 @@ typedef struct {
  * @param err_msg   Output: error description on failure
  * @return 0 on success, -1 on failure
  */
-int hl_cap_db_udf_register_wasm(struct sqlite3 *db,
+int hl_cap_db_udf_register_wasm(struct HlDbHandle *handle,
                                  struct HlWasmCache *cache,
                                  const HlDbUdfOpts *opts,
                                  const struct HlVfs *app_vfs,
@@ -87,13 +90,12 @@ int hl_cap_db_udf_register_wasm(struct sqlite3 *db,
 
 /**
  * Unregister any UDF by name.
- * Passing NULL function pointers to sqlite3_create_function_v2 removes it.
  *
- * @param db        SQLite database handle
+ * @param handle    Database handle (vtable-based; must be SQLite-backed)
  * @param sql_name  Function name to remove
- * @return 0 on success, -1 on failure
+ * @return 0 on success, -1 on failure (or unsupported backend)
  */
-int hl_cap_db_udf_unregister(struct sqlite3 *db, const char *sql_name);
+int hl_cap_db_udf_unregister(struct HlDbHandle *handle, const char *sql_name);
 
 #endif /* HL_ENABLE_WASM */
 

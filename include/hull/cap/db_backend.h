@@ -107,4 +107,18 @@ struct sqlite3 *hl_db_sqlite_raw(HlDbHandle *h);
 /* Get statement cache from a SQLite-backed HlDbHandle (NULL if not SQLite) */
 struct HlStmtCache *hl_db_sqlite_cache(HlDbHandle *h);
 
+/*
+ * Wrap an externally-managed sqlite3* in an HlDbHandle for code paths that
+ * still open SQLite directly (agent_lib, tests). The handle does NOT own
+ * the underlying sqlite3* — caller stays responsible for sqlite3_close.
+ *
+ * Allocates a small adapter context (with its own statement cache pointing
+ * at the borrowed sqlite3). Call hl_db_sqlite_unwrap(&handle) when done.
+ *
+ * Returns 0 on success, -1 on allocation failure.
+ */
+struct sqlite3;  /* forward decl for parameter type below */
+int  hl_db_sqlite_wrap(HlDbHandle *out, struct sqlite3 *db);
+void hl_db_sqlite_unwrap(HlDbHandle *h);
+
 #endif /* HL_CAP_DB_BACKEND_H */

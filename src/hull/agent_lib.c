@@ -10,6 +10,7 @@
 #include "hull/agent_lib.h"
 #include "hull/app_context.h"
 #include "hull/cap/db.h"
+#include "hull/cap/db_backend.h"
 #include "hull/cap/test.h"
 #include "hull/cap/tool.h"
 #include "hull/entry.h"
@@ -74,7 +75,15 @@ static sqlite3 *open_app_db(const char *app_dir, const char *db_path)
         extern const HlEntry hl_app_entries[];
         HlVfs app_vfs;
         hl_vfs_init(&app_vfs, hl_app_entries, app_dir);
-        hl_migrate_run(db, &app_vfs);
+        /* agent_lib opens its own SQLite handle directly (it predates the
+         * backend vtable). Wrap the borrowed sqlite3* in a transient
+         * HlDbHandle for hl_migrate_run so the migrate API doesn't have
+         * to expose sqlite3*. */
+        HlDbHandle tmp_handle;
+        if (hl_db_sqlite_wrap(&tmp_handle, db) == 0) {
+            hl_migrate_run(&tmp_handle, &app_vfs);
+            hl_db_sqlite_unwrap(&tmp_handle);
+        }
     }
 
     return db;
@@ -1090,7 +1099,10 @@ static int migrate_status_impl(sqlite3 *db, int close_db, const HlVfs *vfs,
 {
     HlMigrationStatus *entries = NULL;
     int count = 0;
-    int rc = hl_migrate_status(db, vfs, &entries, &count);
+    HlDbHandle tmp_handle = {0};
+    int wrap_ok = (hl_db_sqlite_wrap(&tmp_handle, db) == 0);
+    int rc = wrap_ok ? hl_migrate_status(&tmp_handle, vfs, &entries, &count) : -1;
+    if (wrap_ok) hl_db_sqlite_unwrap(&tmp_handle);
     if (rc != 0) {
         if (close_db) sqlite3_close(db);
         return write_error(out, "failed to query migration status");

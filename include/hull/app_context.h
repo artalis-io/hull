@@ -15,13 +15,13 @@
 #include <stdint.h>
 
 /* Forward declarations */
-typedef struct sqlite3 sqlite3;
 typedef struct HlAllocator HlAllocator;
 typedef struct HlRuntime HlRuntime;
 typedef struct HlVfs HlVfs;
 typedef struct HlStmtCache HlStmtCache;
 typedef struct HlWasmCache HlWasmCache;
 typedef struct HlGpuCtx HlGpuCtx;
+typedef struct HlDbHandle HlDbHandle;
 typedef struct KlThreadPool KlThreadPool;
 struct KlCompressConfig;
 
@@ -80,7 +80,24 @@ int hl_app_context_load(HlAppContext *ctx, const char *entry_point);
 void hl_app_context_free(HlAppContext *ctx);
 
 /* Accessors */
-sqlite3      *hl_app_context_db(HlAppContext *ctx);
+
+/*
+ * Raw SQLite handle. Returns NULL if the context has no DB (no_db mode)
+ * or if the active backend isn't SQLite. The return type is declared as
+ * `struct sqlite3 *` rather than the `sqlite3` typedef so that this header
+ * does not need to know about SQLite — callers that want to use the result
+ * include <sqlite3.h> themselves. New code should prefer
+ * hl_app_context_db_handle() and the HlDbBackend vtable.
+ */
+struct sqlite3 *hl_app_context_db(HlAppContext *ctx);
+
+/*
+ * Vtable-based DB handle. Returns NULL if the context has no DB.
+ * Backend-agnostic — works with SQLite today, with future backends
+ * (PostgreSQL, DuckDB) transparently.
+ */
+HlDbHandle   *hl_app_context_db_handle(HlAppContext *ctx);
+
 HlRuntime    *hl_app_context_runtime(HlAppContext *ctx);
 const HlVfs  *hl_app_context_app_vfs(HlAppContext *ctx);
 const HlVfs  *hl_app_context_platform_vfs(HlAppContext *ctx);

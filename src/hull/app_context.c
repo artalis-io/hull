@@ -183,7 +183,7 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
 
     /* Run migrations (fail on error to prevent starting with broken schema) */
     if (!opts->no_migrate && ctx->db_open) {
-        int migrated = hl_migrate_run(ctx->db, &ctx->app_vfs);
+        int migrated = hl_migrate_run(&ctx->db_handle, &ctx->app_vfs);
         if (migrated == HL_MIGRATE_ERR) {
             hl_app_context_free(ctx);
             return -1;
@@ -357,6 +357,12 @@ void hl_app_context_free(HlAppContext *ctx)
 sqlite3 *hl_app_context_db(HlAppContext *ctx)
 {
     return ctx ? ctx->db : NULL;
+}
+
+HlDbHandle *hl_app_context_db_handle(HlAppContext *ctx)
+{
+    if (!ctx || !ctx->db_handle.backend) return NULL;
+    return &ctx->db_handle;
 }
 
 HlRuntime *hl_app_context_runtime(HlAppContext *ctx)

@@ -11,6 +11,7 @@
 #ifdef HL_ENABLE_WASM
 
 #include "hull/cap/db_udf.h"
+#include "hull/cap/db_backend.h"
 #include "hull/cap/wasm.h"
 #include "hull/alloc.h"
 #include "hull/vfs.h"
@@ -366,7 +367,7 @@ static void wasm_udf_destroy(void *data)
 
 /* ── Public API ────────────────────────────────────────────────────── */
 
-int hl_cap_db_udf_register_wasm(sqlite3 *db,
+int hl_cap_db_udf_register_wasm(HlDbHandle *handle,
                                  HlWasmCache *cache,
                                  const HlDbUdfOpts *opts,
                                  const HlVfs *app_vfs,
@@ -374,14 +375,23 @@ int hl_cap_db_udf_register_wasm(sqlite3 *db,
                                  HlAllocator *alloc,
                                  const char **err_msg)
 {
-    static const char *err_invalid  = "invalid arguments";
-    static const char *err_prefix   = "UDF name must start with 'hull_'";
-    static const char *err_oom      = "out of memory";
-    static const char *err_inst     = "failed to create WASM instance";
-    static const char *err_sqlite   = "sqlite3_create_function_v2 failed";
+    static const char *err_invalid     = "invalid arguments";
+    static const char *err_unsupported = "UDFs require the SQLite backend";
+    static const char *err_prefix      = "UDF name must start with 'hull_'";
+    static const char *err_oom         = "out of memory";
+    static const char *err_inst        = "failed to create WASM instance";
+    static const char *err_sqlite      = "sqlite3_create_function_v2 failed";
 
-    if (!db || !cache || !opts || !opts->sql_name || !opts->module_name) {
+    if (!handle || !cache || !opts || !opts->sql_name || !opts->module_name) {
         if (err_msg) *err_msg = err_invalid;
+        return -1;
+    }
+
+    /* UDFs are SQLite-specific. If a future non-SQLite backend is wired,
+     * hl_db_sqlite_raw returns NULL and we fail with a clear error. */
+    sqlite3 *db = hl_db_sqlite_raw(handle);
+    if (!db) {
+        if (err_msg) *err_msg = err_unsupported;
         return -1;
     }
 
@@ -479,10 +489,12 @@ int hl_cap_db_udf_register_wasm(sqlite3 *db,
     return 0;
 }
 
-int hl_cap_db_udf_unregister(sqlite3 *db, const char *sql_name)
+int hl_cap_db_udf_unregister(HlDbHandle *handle, const char *sql_name)
 {
-    if (!db || !sql_name)
+    if (!handle || !sql_name)
         return -1;
+    sqlite3 *db = hl_db_sqlite_raw(handle);
+    if (!db) return -1;
 
     /* Passing NULL function pointers removes the function.
      * SQLite calls xDestroy on the old registration. */

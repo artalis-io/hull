@@ -858,7 +858,7 @@ static JSValue js_db_udf_register(JSContext *ctx, JSValueConst this_val,
 
         const char *err_msg = NULL;
         int rc = hl_cap_db_udf_register_wasm(
-            raw_db, js->base.wasm_cache, &udf_opts,
+            js->base.db_handle, js->base.wasm_cache, &udf_opts,
             js->base.app_vfs, js->app_dir,
             js->base.alloc, &err_msg);
 
@@ -964,8 +964,7 @@ static JSValue js_db_udf_unregister(JSContext *ctx, JSValueConst this_val,
 {
     (void)this_val;
     HlJS *js = get_hl_js(ctx);
-    sqlite3 *raw_db = js ? hl_db_sqlite_raw(js->base.db_handle) : NULL;
-    if (!js || !raw_db)
+    if (!js || !js->base.db_handle)
         return JS_ThrowInternalError(ctx, "database not available");
 
     if (argc < 1)
@@ -975,6 +974,18 @@ static JSValue js_db_udf_unregister(JSContext *ctx, JSValueConst this_val,
     if (!sql_name)
         return JS_EXCEPTION;
 
+#ifdef HL_ENABLE_WASM
+    int rc_unreg = hl_cap_db_udf_unregister(js->base.db_handle, sql_name);
+    JS_FreeCString(ctx, sql_name);
+    if (rc_unreg != 0)
+        return JS_ThrowInternalError(ctx, "db.udf.unregister: failed");
+    return JS_UNDEFINED;
+#else
+    sqlite3 *raw_db = hl_db_sqlite_raw(js->base.db_handle);
+    if (!raw_db) {
+        JS_FreeCString(ctx, sql_name);
+        return JS_ThrowInternalError(ctx, "database not available");
+    }
     int rc = sqlite3_create_function_v2(
         raw_db, sql_name, -1, SQLITE_UTF8,
         NULL, NULL, NULL, NULL, NULL);
@@ -986,6 +997,7 @@ static JSValue js_db_udf_unregister(JSContext *ctx, JSValueConst this_val,
                                      sqlite3_errmsg(raw_db));
 
     return JS_UNDEFINED;
+#endif
 }
 
 /* ── Module init ─────────────────────────────────────────────────────── */

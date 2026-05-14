@@ -100,6 +100,7 @@ Bundled and ordered after the pre-v0.1.0 weed-through. Effort: S = < 1 day, M = 
 | **A** | **C3** — Split each `runtime/*/runtime.c` into 5–6 files (`runtime.c`, `dispatch.c`, `routes.c`, `timers.c`, `ws.c`, `sse.c`) | M | ✅ done | God modules (1713 + 2245 lines) → focused files. Single largest QoL improvement; the split happens **before** v0.1.0 so the file layout doesn't shift after the stability commitment. |
 | **B** | **M2** — Split `limits.h` per subsystem (`limits/core.h`, `limits/runtime.h`, `limits/wasm.h`, `limits/gpu.h`); `limits.h` kept as umbrella for back-compat; consumers narrowed where each only touches one subsystem | S | ✅ done | Touching a WASM constant no longer rebuilds GPU / runtime TUs (and vice versa). |
 | **C** | **H4** — `HlSandboxPolicy` decouples sandbox from manifest. New struct + `hl_sandbox_policy_from_manifest()` builder; `sandbox.c` no longer reads `manifest->X` fields directly. | S | ✅ done | Manifest format can evolve in 1 layer (extraction) instead of 2 (extraction + sandbox). Removed 14 cross-layer reach-arounds. |
+| **D** | **H6 + M8 + H5** — Complete the db_backend abstraction. `hl_migrate_run/status` take `HlDbHandle *` instead of `sqlite3 *`; `app_context.h` drops the `sqlite3` forward-decl + adds `hl_app_context_db_handle()`; `hl_cap_db_udf_register_wasm/unregister` take `HlDbHandle *` and contain the SQLite reach-around inside `db_udf.c`. New `hl_db_sqlite_wrap/unwrap` helper for code paths still opening SQLite directly. | S | ✅ done | Public migrate/UDF APIs are backend-agnostic; the only remaining raw `sqlite3 *` reach-arounds are confined to `db_udf.c`'s Lua/JS scalar/aggregate-UDF callback path, which is structurally tied to SQLite's xFunc/xStep ABI. |
 | — | **Release signing**: Ed25519 over `hull.sha256` manifest; embedded `HL_RELEASE_PUBKEY_HEX`; `hull sign-release` + `hull verify-release` commands; `hull update` enforces signature when pubkey is configured; release workflow signs via repo secret. Design: `docs/release_signing.md`. | M | ✅ code done; awaiting real release key | Steps 1-8 of the design are landed. Step 9 (generate key, commit pubkey, set GitHub secret) is operational and happens at release time. |
 
 ### Scheduled after v0.1.0
@@ -108,7 +109,6 @@ Recommended sequence — every item is small/medium, no dependencies between gro
 
 | # | Refactor | Effort | Rationale |
 |---|----------|:------:|-----------|
-| **D** | **H6 + M8 + H5** — Complete the db_backend abstraction: migrate `migrate.h` to `HlDbHandle *`, drop `sqlite3` forward-decl from `app_context.h`, add `register_udf` to vtable | S | Removes the last raw-`sqlite3 *` reach-arounds; opens door for non-SQLite backends. (Bundled.) |
 | **E** | **C1** — Move `cap/test_{lua,js}.c` → `runtime/{lua,js}/mod_test.c` | S | Restore cap-layer invariant (cap has no runtime knowledge) |
 | **F** | **C2** — Split `cap/tool.c` Lua bindings into `runtime/lua/mod_tool.c` | S | Same; cap/tool.c shrinks 1035 → ~520 lines |
 | **G** | **H3** — Split `manifest.c` → `manifest_{lua,js}.c` | S | Mirrors the runtime/{lua,js} split |
