@@ -120,60 +120,55 @@ make self-build         ✅  reproducible build chain verified
 
 The missing piece: `hull build` shells out to `cc` to compile generated C code. Users need gcc/clang/cosmocc installed. Everything else below addresses that gap and the surrounding distribution story.
 
-#### Phase D1: Version + Release Pipeline
+#### Phase D1: Version + Release Pipeline — **Done**
 
-| Feature | Status | Effort | Notes |
-|---------|--------|--------|-------|
-| `hull version` command | Planned | 1h | VERSION file baked at compile time, printed by `hull version` subcommand |
-| Git tag → version string | Planned | 1h | `git describe --tags` at build time → `HL_VERSION` define |
-| GitHub Actions release workflow | Planned | 4h | On tag push: `make platform-cosmo` → `make CC=cosmocc EMBED_PLATFORM=cosmo` → sign → upload |
-| Release artifacts | Planned | — | `hull` (Cosmo APE), `hull.sha256`, `hull.sig` (Ed25519) |
-| Native release artifacts | Planned | 2h | `hull-linux-x86_64`, `hull-darwin-arm64` for users who prefer native binaries |
+| Feature | Status | Notes |
+|---------|--------|-------|
+| `hull version` command | **Done** | Pure C; `--json` for machine-readable output (version/runtime/platform/build) |
+| Git tag → version string | **Done** | `git describe --tags` at build time → `HL_VERSION` define; `VERSION` file override |
+| GitHub Actions release workflow | **Done** | `.github/workflows/release.yml`, triggered on `v*` tag push |
+| Release artifacts | **Done** | `hull-cosmo` (APE), `hull-linux-x86_64`, `hull-darwin-arm64`, `hull.sha256` |
+| Native release artifacts | **Done** | Linux x86_64 + macOS arm64 native; cosmo APE covers Linux arm64, macOS x86_64, BSDs, Windows |
 
-#### Phase D2: Install Script + First-Run Experience
+#### Phase D2: Install Script + First-Run Experience — **Done**
 
-| Feature | Status | Effort | Notes |
-|---------|--------|--------|-------|
-| Install script (`curl -fsSL hull.com/install \| sh`) | Planned | 2h | Detect OS/arch, download binary, verify SHA-256, install to PATH |
-| `hull init` (in-place project init) | Planned | 2h | Like `git init` — initialize hull in current directory (vs `hull new` which creates a new dir) |
-| First-run welcome + doctor | Planned | 2h | `hull doctor` checks environment: compiler available? correct version? platform embedded? |
-| Shell completions | Planned | 2h | Bash/Zsh/Fish completions for all subcommands and flags |
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Install script (`curl -fsSL .../install.sh \| sh`) | **Done** | POSIX, ~250 LOC: detect OS/arch, fetch latest release, SHA-256 verify, install to `~/.local/bin/hull` |
+| `hull init` (in-place project init) | **Done** | Like `git init`; idempotent; auto-detects existing runtime; Lua tool module |
+| First-run welcome + doctor | **Done** | `hull doctor` reports platform embed, compiler availability, TCC + CA bundle status; `--json` mode |
+| Shell completions | **Done** | bash, zsh, fish; covers every subcommand and flag in `completions/` |
 
-#### Phase D3: Zero-Dependency Builds (Bundle tcc)
+#### Phase D3: Zero-Dependency Builds (Embedded TCC) — **Done**
 
-This is the most impactful step. Currently `hull build` requires a system C compiler. Bundling [tcc](https://bellard.org/tcc/) (~100KB) makes `hull build` truly zero-dependency.
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Vendor tcc | **Done** | `vendor/tcc` submodule (mob branch), built by Makefile, embedded via xxd into `libhull_platform.a` |
+| `hull build` auto-selects compiler | **Done** | `HlCompilerVtable`: TCC backend (compile) + system cc/gcc/clang (link); auto-fallback on macOS where TCC produces ELF |
+| `hull build --compiler=tcc\|system\|<path>` | **Done** | Explicit backend selection; both `--compiler tcc` and `--compiler=tcc` accepted |
+| Linux native + cosmo coverage | **Done** | TCC compile + system link verified end-to-end on Linux CI in `e2e_tcc.sh` |
+| `hull toolchain install` | Skipped | Embedded TCC removes the original need; cosmocc users can `make fetch-cosmocc` |
 
-| Feature | Status | Effort | Notes |
-|---------|--------|--------|-------|
-| Vendor tcc | Planned | 4h | Add tcc to `vendor/tcc/`, compile as part of hull build |
-| `hull build` auto-selects compiler | Planned | 2h | Prefer system cc if available, fall back to bundled tcc |
-| `hull build --compiler=tcc\|cc\|cosmocc` | Planned | 1h | Explicit compiler selection flag |
-| tcc cross-compilation | Planned | 4h | tcc can target x86_64 and aarch64 — verify both work for hull apps |
-| `hull toolchain install` | Planned | 2h | Download cosmocc on demand, cache in `~/.hull/toolchain/` |
+#### Phase D4: Embedded CA Bundle — **Done**
 
-**Why tcc:** The code `hull build` compiles is trivial — one `app_registry.c` file containing byte arrays + a table, and a small `app_main.c` trampoline. All the real code is pre-compiled in `libhull_platform.a`. tcc compiles this in milliseconds. Optimization doesn't matter because it's just data declarations and one function call.
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Embed Mozilla CA bundle | **Done** | `vendor/cacert/cacert.pem` (curl.se, SHA-256 verified); xxd'd into `libhull_platform.a` so built apps inherit it |
+| Auto-detect system CA store | **Done** | Resolution order: `--skip-ca-bundle` → `--ca-bundle PATH` → system paths → embedded → fail |
+| `hull <app> --ca-bundle=PATH` | **Done** | Custom override via runtime flag |
+| CA bundle update mechanism | **Done** | `make fetch-ca-bundle` pulls + verifies; `hull doctor` reports the embedded bundle's update date |
+| New Keel API: `kl_tls_mbedtls_client_ctx_create_from_buf` | **Done** | Released in Keel v1.1.0 — TLS client from in-memory PEM/DER bundle |
+| Pledge + unveil for outbound HTTPS | **Done** | Linux: `dns netlink unix` promises + unveiled `/etc/resolv.conf` (and family); polyfill's `kPledgeDns` extended with `sendmmsg`/`recvmmsg`/`sendmsg`/`recvmsg` for glibc 2.32+ |
 
-**Alternative considered:** Pre-compile `app_main.o` for each arch and embed it, so hull only needs to compile `app_registry.c` + link. Still needs a compiler for the registry. tcc is cleaner.
+#### Phase D5: Self-Update — **Done** (signature verification deferred)
 
-#### Phase D4: Embedded CA Bundle
-
-| Feature | Status | Effort | Notes |
-|---------|--------|--------|-------|
-| Embed Mozilla CA bundle | Planned | 2h | ~200KB addition to binary, enables HTTPS on systems without a CA store |
-| Auto-detect system CA store | Planned | 1h | Prefer system store if available, fall back to embedded |
-| `hull build --ca-bundle=PATH` | Planned | 1h | Custom CA bundle for enterprise environments |
-| CA bundle update mechanism | Planned | 1h | `hull update-ca` fetches latest Mozilla bundle |
-
-Matters for: Cosmopolitan APE on Windows (no system CA store), minimal Docker containers (`FROM scratch`), air-gapped environments.
-
-#### Phase D5: Self-Update
-
-| Feature | Status | Effort | Notes |
-|---------|--------|--------|-------|
-| `hull update` | Planned | 4h | Check GitHub releases for newer version, download + verify + replace |
-| `hull update --check` | Planned | 1h | Print "new version available" without updating |
-| Signature verification on update | Planned | 1h | Verify Ed25519 signature of downloaded binary before replacing |
-| Update channel (stable/beta) | Planned | 2h | `hull update --channel=beta` for pre-release testing |
+| Feature | Status | Notes |
+|---------|--------|-------|
+| `hull update` | **Done** | Pure C in `src/hull/commands/update.c` (~330 LOC) — keel client + embedded CA bundle + mbedTLS SHA-256 + atomic `rename(2)` |
+| `hull update --check` | **Done** | Compare current `HL_VERSION` with latest release tag, no install |
+| `hull update --channel=stable\|beta` | Reserved | Flag accepted but no separate beta channel yet |
+| `hull update --repo=ORG/NAME` | **Done** | Override the default repo (`artalis-io/hull`); used in CI tests against `cli/cli` |
+| Signature verification on update | Deferred | Releases are not yet Ed25519-signed; `hull keygen` + `hull verify` already exist for when they are |
 
 #### Phase D6: hull.com + Documentation Site
 
