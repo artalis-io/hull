@@ -105,16 +105,42 @@ jobs:
           sha256sum hull-cosmo hull-linux-x86_64 hull-darwin-arm64 > hull.sha256
           cat hull.sha256
 
+      - name: Sign release manifest (Ed25519)
+        env:
+          HULL_RELEASE_KEY: ${{ secrets.HULL_RELEASE_KEY }}
+        working-directory: dist
+        run: |
+          # The native-linux artifact embeds the 'hull sign-release'
+          # subcommand. We use it to sign the SHA-256 manifest with the
+          # Ed25519 secret key from the repo secret HULL_RELEASE_KEY
+          # (128 hex chars, generated offline with 'hull keygen release').
+          # If the secret is unset, the release ships without .sig and
+          # 'hull update' falls back to SHA-256 only.
+          if [ -z "$HULL_RELEASE_KEY" ]; then
+            echo "::warning::HULL_RELEASE_KEY is not set; release will ship without hull.sha256.sig"
+            exit 0
+          fi
+          umask 077
+          printf '%s\n' "$HULL_RELEASE_KEY" > /tmp/release.key
+          chmod +x ./hull-linux-x86_64
+          ./hull-linux-x86_64 sign-release hull.sha256 --key /tmp/release.key
+          rm -f /tmp/release.key
+          test -s hull.sha256.sig
+          echo "--- hull.sha256.sig:"
+          cat hull.sha256.sig
+
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Build asset list — include hull.sha256.sig only if it was produced.
+          assets=(dist/hull-cosmo dist/hull-linux-x86_64 dist/hull-darwin-arm64 dist/hull.sha256)
+          if [ -f dist/hull.sha256.sig ]; then
+            assets+=(dist/hull.sha256.sig)
+          fi
           gh release create "${{ github.ref_name }}" \
             --repo "${{ github.repository }}" \
             --title "Hull ${{ github.ref_name }}" \
             --generate-notes \
             ${{ contains(github.ref_name, '-') && '--prerelease' || '' }} \
-            dist/hull-cosmo \
-            dist/hull-linux-x86_64 \
-            dist/hull-darwin-arm64 \
-            dist/hull.sha256
+            "${assets[@]}"

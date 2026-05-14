@@ -99,6 +99,7 @@ Bundled and ordered after the pre-v0.1.0 weed-through. Effort: S = < 1 day, M = 
 |---|----------|:------:|--------|-----------|
 | **A** | **C3** — Split each `runtime/*/runtime.c` into 5–6 files (`runtime.c`, `dispatch.c`, `routes.c`, `timers.c`, `ws.c`, `sse.c`) | M | ✅ done | God modules (1713 + 2245 lines) → focused files. Single largest QoL improvement; the split happens **before** v0.1.0 so the file layout doesn't shift after the stability commitment. |
 | **B** | **M2** — Split `limits.h` per subsystem (`limits/core.h`, `limits/runtime.h`, `limits/wasm.h`, `limits/gpu.h`); `limits.h` kept as umbrella for back-compat; consumers narrowed where each only touches one subsystem | S | ✅ done | Touching a WASM constant no longer rebuilds GPU / runtime TUs (and vice versa). |
+| — | **Release signing**: Ed25519 over `hull.sha256` manifest; embedded `HL_RELEASE_PUBKEY_HEX`; `hull sign-release` + `hull verify-release` commands; `hull update` enforces signature when pubkey is configured; release workflow signs via repo secret. Design: `docs/release_signing.md`. | M | ✅ code done; awaiting real release key | Steps 1-8 of the design are landed. Step 9 (generate key, commit pubkey, set GitHub secret) is operational and happens at release time. |
 
 ### Scheduled after v0.1.0
 

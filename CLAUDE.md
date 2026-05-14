@@ -163,10 +163,10 @@ Client → Keel HTTP → Route Match → hl_{lua,js}_dispatch() → Handler → 
 
 ### Command Dispatch
 
-Table-driven dispatcher in `src/hull/commands/dispatch.c`. 20 commands:
+Table-driven dispatcher in `src/hull/commands/dispatch.c`. 22 commands:
 
 ```
-hull keygen | build | verify | inspect | manifest | test | new | init | dev | eject | sign-platform | migrate | agent | mcp | check | compute | deploy | version | doctor | update
+hull keygen | build | verify | inspect | manifest | test | new | init | dev | eject | sign-platform | migrate | agent | mcp | check | compute | deploy | version | doctor | update | sign-release | verify-release
 Runtime flags: --audit (capability audit logging), --agent (sidecar files), --no-migrate, --no-sandbox, --no-ca-bundle, --ca-bundle PATH
 Global flags: --version / -v (equivalent to hull version)
 ```
@@ -179,7 +179,11 @@ Each command is a separate `.c`/`.h` under `src/hull/commands/`. Adding a new co
 
 **`hull build --compiler=<backend>`** — Select the C compiler backend for `hull build`. Options: `tcc` (embedded TinyCC, compile-only), `system` (system cc/gcc/clang, no tcc fallback), or an explicit compiler path. Default: embedded TinyCC if available, otherwise system cc. The compiler abstraction uses `HlCompilerVtable` (`include/hull/compiler.h`); backends live in `src/hull/compiler.c` and `src/hull/compiler_tcc.c`.
 
-**`hull update [--check] [--force] [--channel=stable|beta] [--repo=ORG/NAME]`** — Self-update from GitHub releases. Fetches the latest release metadata via `api.github.com`, picks the asset matching this binary's OS/arch (`hull-linux-x86_64`, `hull-darwin-arm64`, or `hull-cosmo` fallback), downloads via HTTPS using the embedded Mozilla CA bundle (Phase D4), verifies SHA-256 against `hull.sha256` from the same release, and atomically replaces the running binary via `rename(2)`. `--check` exits after the version compare without installing. No external dependencies — uses keel's `KlRedirectClient` for HTTPS, mbedTLS for SHA-256. Pure C implementation in `src/hull/commands/update.c`. Ed25519 signature verification is deferred until releases are routinely signed.
+**`hull update [--check] [--force] [--channel=stable|beta] [--repo=ORG/NAME]`** — Self-update from GitHub releases. Fetches the latest release metadata via `api.github.com`, picks the asset matching this binary's OS/arch (`hull-linux-x86_64`, `hull-darwin-arm64`, or `hull-cosmo` fallback), downloads via HTTPS using the embedded Mozilla CA bundle (Phase D4), verifies the manifest's Ed25519 signature against the embedded `HL_RELEASE_PUBKEY_HEX` (when configured), verifies SHA-256 against `hull.sha256` from the same release, and atomically replaces the running binary via `rename(2)`. `--check` exits after the version compare without installing. No external dependencies — uses keel's `KlRedirectClient` for HTTPS, mbedTLS for SHA-256, TweetNaCl for Ed25519. Pure C implementation in `src/hull/commands/update.c`.
+
+**`hull sign-release <manifest> --key <secret_key>`** — Sign a release manifest (typically `hull.sha256`) with an Ed25519 secret key. Writes `<manifest>.sig` (128 hex chars). Used by the GitHub Actions release workflow; never invoked by end users. See [docs/release_signing.md](docs/release_signing.md).
+
+**`hull verify-release <manifest> <signature> [--pubkey <hex>]`** — Verify an Ed25519 signature over a release manifest using the embedded release public key (or an explicit override). Exit 0 = valid, 1 = invalid / placeholder. For offline auditing of a downloaded release.
 
 ### Agent Tooling (`hull agent`)
 
@@ -341,11 +345,12 @@ Violation = SIGABRT on OpenBSD, SIGKILL on Linux/Cosmo, EPERM on macOS. `--no-sa
 
 ### Signature System
 
-Dual-layer Ed25519:
-- **Platform layer (inner):** Signed by gethull.dev key. Proves platform library is authentic.
-- **App layer (outer):** Signed by developer key. Proves app hasn't been tampered with.
+Three independent Ed25519 layers:
+- **Platform layer (inner, in `package.sig`):** Signed by gethull.dev key. Proves platform library is authentic.
+- **App layer (outer, in `package.sig`):** Signed by developer key. Proves app hasn't been tampered with.
+- **Release layer (`hull.sha256.sig`):** Signed by Hull release key. Proves the `hull` binary you just downloaded via `hull update` matches the SHA-256 manifest signed by the release authority. Embedded pubkey: `HL_RELEASE_PUBKEY_HEX` in `include/hull/release.h`.
 
-See [docs/security.md](docs/security.md) for the full attack model.
+See [docs/security.md](docs/security.md) for the full attack model and [docs/release_signing.md](docs/release_signing.md) for the release-signing design.
 
 ### Keel Audit
 
@@ -1336,12 +1341,13 @@ make e2e                            # run all E2E tests (examples + build + sand
 | `test_static` | 18 | MIME detection, path traversal, embedded VFS lookup |
 | `test_vfs` | 19 | Binary search find, prefix queries, path construction, empty VFS |
 | `test_signature` | 20 | Ed25519 sign/verify round-trips, dual-layer signature |
+| `test_release` | 20 | Ed25519 release-manifest sign/verify, tamper detect, hex edge cases, secret-key file IO |
 | `test_parse_size` | 9 | Size string parser ("1m", "1g", etc.) |
 | `test_compiler` | 16 | Compiler vtable: system + tcc backends, allowlist, end-to-end on Linux |
 | `test_cacert` | 6 | Embedded Mozilla CA bundle: presence, NUL-termination, mbedTLS parse |
 | `test_dispatch` | 4 | Command dispatch table, unknown-command handling |
 
-26 suites, ~590 test cases total.
+27 suites, ~610 test cases total.
 
 \+ E2E suites (`e2e_build.sh`, `e2e_examples.sh`, `e2e_http.sh`, `e2e_sandbox.sh`, `e2e_tcc.sh`, `e2e_install.sh`, `e2e_ca_bundle.sh`, `e2e_update.sh`)
 
