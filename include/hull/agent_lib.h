@@ -61,4 +61,124 @@ int hl_agent_migrate_status(const char *app_dir, const char *db_path,
 
 int hl_agent_deploy(const char *app_dir, ShJsonBuf *out);
 
+/* ── Phase 6: Extended introspection (2026-05-15) ──────────────────── */
+
+/*
+ * hl_agent_manifest — emit the effective manifest as JSON.
+ *
+ * Loads the app, runs hl_manifest_extract_*, and serializes the resulting
+ * HlManifest to JSON. Different from `hull manifest` which prints a hash.
+ */
+int hl_agent_manifest(const char *app_dir, ShJsonBuf *out);
+int hl_agent_manifest_ctx(HlAppContext *ctx, ShJsonBuf *out);
+
+/*
+ * hl_agent_endpoint — preview which handler + middleware would fire for
+ * METHOD + PATH without running the request. Pattern matching mirrors
+ * Keel's router.
+ */
+int hl_agent_endpoint(const char *app_dir, const char *method, const char *path,
+                      ShJsonBuf *out);
+int hl_agent_endpoint_ctx(HlAppContext *ctx, const char *method,
+                          const char *path, ShJsonBuf *out);
+
+/*
+ * hl_agent_middleware — list middleware that match METHOD + PATH.
+ * A focused subset of hl_agent_routes for one specific request shape.
+ */
+int hl_agent_middleware(const char *app_dir, const char *method,
+                        const char *path, ShJsonBuf *out);
+int hl_agent_middleware_ctx(HlAppContext *ctx, const char *method,
+                            const char *path, ShJsonBuf *out);
+
+/*
+ * hl_agent_validate — parse one Lua/JS file in isolation, emit syntax
+ * and basic sandbox-violation findings as JSON. Faster than `hull dev`
+ * for iterative editing.
+ */
+int hl_agent_validate(const char *file_path, ShJsonBuf *out);
+
+/*
+ * hl_agent_capabilities — source-walk the app to find caps it USES vs
+ * caps it DECLARES (manifest). Surfaces declared-but-unused and
+ * used-but-undeclared.
+ */
+int hl_agent_capabilities(const char *app_dir, ShJsonBuf *out);
+int hl_agent_capabilities_ctx(HlAppContext *ctx, ShJsonBuf *out);
+
+/*
+ * hl_agent_vfs — list embedded files (path → size) for the loaded app
+ * VFS and the platform stdlib VFS.
+ */
+int hl_agent_vfs(const char *app_dir, ShJsonBuf *out);
+int hl_agent_vfs_ctx(HlAppContext *ctx, ShJsonBuf *out);
+
+/*
+ * hl_agent_compute — list WASM compute modules in app_dir/compute/ +
+ * their sizes (and AOT variant presence). Module-level metadata.
+ */
+int hl_agent_compute(const char *app_dir, ShJsonBuf *out);
+int hl_agent_compute_ctx(HlAppContext *ctx, ShJsonBuf *out);
+
+/*
+ * hl_agent_compute_call — invoke a WASM compute module with input read
+ * from a file, return stdout as base64 + length. For isolated testing
+ * of compute modules without running the full app.
+ */
+int hl_agent_compute_call_ctx(HlAppContext *ctx, const char *module_name,
+                              const char *input_path, ShJsonBuf *out);
+
+/*
+ * hl_agent_gpu — list compiled WGSL shaders in app_dir/shaders/ + device
+ * info if GPU is available.
+ */
+int hl_agent_gpu(const char *app_dir, ShJsonBuf *out);
+int hl_agent_gpu_ctx(HlAppContext *ctx, ShJsonBuf *out);
+
+/*
+ * hl_agent_perf — runtime stats: heap usage, instruction counts (last
+ * known), connection counts. Static snapshot.
+ */
+int hl_agent_perf_ctx(HlAppContext *ctx, ShJsonBuf *out);
+
+/*
+ * hl_agent_template — render a template against sample data; returns
+ * the output as JSON. Validates the template path independently of the
+ * app routes.
+ */
+int hl_agent_template_ctx(HlAppContext *ctx, const char *template_name,
+                          const char *data_json, ShJsonBuf *out);
+
+/*
+ * hl_agent_logs — read structured logs from app_dir/.hull/dev.log if it
+ * exists; emit the last N lines as a JSON array. Falls back to empty
+ * array if no log file.
+ */
+int hl_agent_logs(const char *app_dir, int tail_n, ShJsonBuf *out);
+
+/*
+ * hl_agent_eval — evaluate a one-shot Lua/JS snippet against the loaded
+ * app context, return the result as JSON. Dev mode only; the manifest
+ * still constrains capability access.
+ */
+int hl_agent_eval_ctx(HlAppContext *ctx, const char *code, ShJsonBuf *out);
+
+#ifdef HL_ENABLE_DB
+/*
+ * hl_agent_schema_diff — compare the live DB schema against what the
+ * migrations directory would produce. Reports tables/indexes present
+ * in the DB but not in any migration (drift) and vice versa.
+ */
+int hl_agent_schema_diff(const char *app_dir, const char *db_path, ShJsonBuf *out);
+int hl_agent_schema_diff_ctx(HlAppContext *ctx, const char *db_path, ShJsonBuf *out);
+
+/*
+ * hl_agent_sql_named — run a pre-defined query from app_dir/queries.json
+ * (or queries.yaml). The agent can only invoke queries the developer
+ * has explicitly named — no arbitrary SQL.
+ */
+int hl_agent_sql_named_ctx(HlAppContext *ctx, const char *query_name,
+                           const char *params_json, ShJsonBuf *out);
+#endif
+
 #endif /* HL_AGENT_LIB_H */

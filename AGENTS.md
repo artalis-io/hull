@@ -225,6 +225,108 @@ Analyze deployment readiness — manifest, directory structure, existing configs
 }
 ```
 
+### Extended introspection (Phase 6, 2026-05-15)
+
+Sixteen additional subcommands close the iterative-edit loop. All JSON to stdout.
+
+#### `hull agent manifest [app_dir]`
+
+Effective manifest as JSON (post-extraction). Different from `hull manifest` which prints a hash.
+
+```json
+{"declared":true,"runtime":"lua","fs":{"read":[],"write":[]},"env":[],"hosts":[]}
+```
+
+#### `hull agent endpoint METHOD PATH [app_dir]`
+
+Preview which handler + middleware stack would fire for a request, without running it.
+
+```json
+{"method":"GET","path":"/users/42","middleware":[{"method":"*","pattern":"/api/*","phase":"pre","kind":"middleware"}],"middleware_count":1,"routes":[{"method":"GET","pattern":"/users/:id","kind":"route"}],"route_count":1,"would_match":true}
+```
+
+#### `hull agent middleware METHOD PATH [app_dir]`
+
+Just the middleware stack — focused subset of the above.
+
+#### `hull agent capabilities [app_dir]`
+
+Source-walk vs manifest diff. Surfaces declared-but-unused (tighten manifest) and used-but-undeclared (sandbox will deny).
+
+```json
+{"runtime":"lua","manifest_declared":true,"capabilities":[...],"used_but_undeclared_count":0}
+```
+
+#### `hull agent validate <file>`
+
+Parse one Lua/JS file in isolation. Faster than `hull dev` + `hull agent errors` for iterative editing.
+
+```json
+{"file":"app.lua","runtime":"lua","ok":true,"findings":[{"severity":"high","pattern":"loadstring(","message":"loadstring is removed in the Lua sandbox","line":42}]}
+```
+
+#### `hull agent vfs [app_dir]`
+
+Every embedded file (app + stdlib) with name, size, and bucket (template/static/migration/shader/compute/stdlib-lua/stdlib-js/app-module/module).
+
+#### `hull agent compute [app_dir]`
+
+WASM modules: name, size, AOT presence, AOT architecture.
+
+#### `hull agent gpu [app_dir]`
+
+WGSL shaders + GPU availability.
+
+#### `hull agent perf [app_dir]`
+
+Compile-time feature flags + default limits snapshot. Points at `/ready` for live stats (requires `health.middleware()`).
+
+#### `hull agent logs [app_dir] [--tail N]`
+
+Last N lines from `.hull/dev.log`. Default 100, max 10000.
+
+#### `hull agent eval <code> [app_dir]`
+
+Run a one-shot Lua/JS snippet against the loaded app. Return value JSON-encoded by the runtime's own JSON encoder.
+
+```bash
+hull agent eval "1+1" myapp
+# → {"ok":true,"result":2}
+
+hull agent eval "db.query('SELECT count(*) AS n FROM users')[1].n" myapp
+# → {"ok":true,"result":42}
+```
+
+#### `hull agent template <name> [data.json] [app_dir]`
+
+Render a template with sample data — validates the template path independently of the request pipeline.
+
+#### `hull agent compute-call <module> <input-file> [app_dir]`
+
+Invoke a WASM compute module against file input.
+
+#### `hull agent schema-diff [app_dir] [-d path]`
+
+DB schema drift: tokenises migration SQL, diffs `CREATE TABLE/INDEX` against `sqlite_master`. Reports `expected_tables`, `actual_tables`, `drift_tables`, `drift_indexes`, `missing_tables`, `in_sync`.
+
+#### `hull agent sql named <qname> [--params JSON] [app_dir]`
+
+Run a pre-defined query from `app_dir/queries.json`. Safer than `db query "..."` because the agent can only invoke published queries.
+
+`queries.json` format:
+```json
+{
+  "list_active_users": "SELECT id, name FROM users WHERE active = 1",
+  "user_by_id":        "SELECT * FROM users WHERE id = :id",
+  "recent_orders":     "SELECT * FROM orders ORDER BY created_at DESC LIMIT :limit"
+}
+```
+
+Invocation:
+```bash
+hull agent sql named user_by_id --params '{"id":42}'
+```
+
 ## Development Workflow
 
 ### 1. Start Dev Server

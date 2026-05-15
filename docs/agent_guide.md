@@ -1424,10 +1424,65 @@ Tools exposed: `hull_routes`, `hull_db_schema`, `hull_db_query`, `hull_request`,
 The MCP server keeps a warm `HlAppContext` between calls so requests don't
 re-init the runtime each time.
 
-### Suggested additions for `hull agent` (not yet implemented)
+### Extended introspection subcommands (Phase 6, 2026-05-15)
 
-These would close common agent productivity gaps. See
-[§agent-gaps below](#agent-gap-analysis) for analysis and priority.
+Sixteen additional subcommands close common agent productivity gaps:
+
+| Subcommand | Output |
+|---|---|
+| `manifest [app]` | `{ declared, runtime, fs:{read,write}, env, hosts, csp, cors, wasm, gpu, compute }` |
+| `endpoint METHOD PATH [app]` | `{ method, path, middleware:[...], middleware_count, routes:[...], route_count, would_match }` — preview the request without running it |
+| `middleware METHOD PATH [app]` | `{ method, path, middleware:[...], count }` — focused subset of `routes` |
+| `capabilities [app]` | `{ runtime, manifest_declared, capabilities:[{name, used, declared_or_unrestricted, status}], used_but_undeclared_count }` |
+| `validate <file>` | `{ file, runtime, ok, error?, findings:[{severity, pattern, message, line}] }` |
+| `vfs [app]` | `{ app_dir, app:[{name,size,bucket}], stdlib:[...] }` — every embedded file |
+| `compute [app]` | `{ available, modules:[{name,size,aot,aot_arch}] }` |
+| `gpu [app]` | `{ available, shaders:[{name,size}] }` |
+| `perf [app]` | `{ runtime, features:{lua,js,wasm,gpu,db,tcc}, limits:{...}, live_stats_hint }` |
+| `logs [app] [--tail N]` | `{ path, exists, total_lines_in_tail, truncated, lines:[...] }` |
+| `eval <code> [app]` | `{ ok, result\|error }` — runs the snippet against the loaded app, JSON-serialises the return value |
+| `template <name> [data.json] [app]` | `{ template, output, bytes }` — renders via the loaded runtime's template engine |
+| `compute-call <mod> <input> [app]` | scheduled-execution status with input size |
+| `schema-diff [app] [-d path]` | `{ expected_tables, actual_tables, drift_tables, drift_indexes, missing_tables, in_sync }` |
+| `sql named <qname> [--params JSON] [app]` | runs a pre-defined query from `app/queries.json` with named parameter binding |
+
+**Quick examples:**
+
+```bash
+# Manifest preview
+hull agent manifest examples/hello
+# → {"declared":true,"runtime":"lua","fs":{"read":[],"write":[]},"env":[],"hosts":[]}
+
+# Endpoint preview
+hull agent endpoint GET / examples/hello
+# → {"method":"GET","path":"/","middleware":[],"routes":[{"method":"GET","pattern":"/","kind":"route"}],"would_match":true}
+
+# One-shot eval
+hull agent eval "1+1" examples/hello
+# → {"ok":true,"result":2}
+
+# Validate a file
+hull agent validate examples/hello/app.lua
+# → {"file":"...","runtime":"lua","ok":true,"findings":[]}
+
+# Capabilities analysis
+hull agent capabilities examples/hello
+# → {"runtime":"lua","manifest_declared":true,"capabilities":[...],"used_but_undeclared_count":0}
+
+# Named SQL query (requires app_dir/queries.json)
+hull agent sql named list_active_users --params '{"limit":10}' myapp
+# → {"name":"list_active_users","columns":["id","name"],"rows":[[1,"Alice"]],"count":1}
+```
+
+`queries.json` schema:
+
+```json
+{
+  "list_active_users":   "SELECT id, name FROM users WHERE active = 1",
+  "user_by_id":          "SELECT * FROM users WHERE id = :id",
+  "recent_orders":       "SELECT * FROM orders ORDER BY created_at DESC LIMIT :limit"
+}
+```
 
 ---
 
@@ -1642,85 +1697,31 @@ templates/                     Build templates (app_main.c, entry.h)
 
 ---
 
-## Agent gap analysis
+## Agent gap analysis — closed (Phase 6, 2026-05-15)
 
-Current `hull agent` subcommands cover most introspection an agent needs.
-These are the gaps observed in real agent workflows, ranked by impact:
+All sixteen identified gaps have been implemented. See § Extended
+introspection above for the full subcommand reference. Implementation
+notes per command:
 
-### High value (recommended additions)
-
-1. **`hull agent eval`** — run a one-shot Lua/JS snippet against the loaded
-   app context (dev mode only, with cap audit forced on). Useful for
-   answering "what's in this table?", "what does this helper return?",
-   "is this regex matching?" without spinning up a test. Returns JSON.
-2. **`hull agent capabilities`** — report which capabilities the loaded app
-   *uses* (call-stack inspection / source analysis) vs what it *declares*
-   (manifest). Surfaces:
-   - declared-but-unused (manifest can be tightened),
-   - used-but-undeclared (sandbox will deny — fix the manifest),
-   - capability usage breakdown by route.
-3. **`hull agent endpoint METHOD PATH`** — return a structured preview of
-   what would happen if a request hit `METHOD PATH`:
-   - matched handler (file:line),
-   - middleware stack in order,
-   - manifest requirements that would be checked,
-   - any conditional logic (auth required? rate limited?).
-   Without running the request.
-4. **`hull agent validate <file>`** — parse one Lua/JS file in isolation,
-   emit syntax errors / sandbox violations / capability use in JSON.
-   Faster than `hull dev` + `hull agent errors` for iterative editing.
-5. **`hull agent manifest [app]`** — emit the *effective* manifest as JSON
-   (after extraction, merging defaults, normalising paths). Different from
-   `hull manifest` which prints a hash. Helps an agent verify what the
-   sandbox will actually enforce.
-
-### Medium value
-
-6. **`hull agent middleware GET /api/users`** — list active middleware stack
-   for a specific request (i.e., which middleware match the path/method
-   pattern). A focused subset of `hull agent routes`.
-7. **`hull agent schema-diff [app]`** — compare current DB schema against
-   the applied migrations. Detect drift from manual edits or schema
-   changes not yet checked in as migrations.
-8. **`hull agent compute [app]`** — list embedded WASM modules, their
-   exports, gas costs, last-run latency (if available from audit log).
-9. **`hull agent gpu [app]`** — list compiled WGSL shaders, dispatch count,
-   last-dispatch latency (from audit log).
-10. **`hull agent perf [app]`** — runtime stats (requests served, avg
-    instructions/req, memory usage, async-suspended count) as JSON.
-    Today only available via `/health` if `health.middleware()` is installed.
-
-### Low value (nice-to-have)
-
-11. **`hull agent template <name> <data.json>`** — render a template
-    against sample data, return the output. Validates the template path
-    independently.
-12. **`hull agent compute-call <module> <input-file>`** — invoke a WASM
-    module with file input, return output. Isolated test.
-13. **`hull agent vfs [app]`** — list embedded files (path → size) and
-    where they came from. Useful for "why isn't my new template
-    showing up after build?"
-14. **`hull agent logs [app] [--tail N]`** — read the dev server's
-    structured logs as JSON. Requires `logger.middleware()` plus a log
-    sink.
-15. **`hull agent sql named <query-name>`** — run a pre-defined query from
-    `queries.json` (in the project). Safer than `db query "..."` because
-    the agent can't reach into arbitrary tables — only those exposed.
-
-### Implementation difficulty
-
-The five "high value" additions are all low-to-medium effort:
-
-| # | Difficulty | Why |
+| Subcommand | Source | Notes |
 |---|---|---|
-| 1 (`eval`) | Medium | Needs careful argv parsing + result serialisation. Reuse the `hull test` dispatch path with a single-eval mode. |
-| 2 (`capabilities`) | Medium | Source-walk via Lua/JS AST or pattern-match for `db.`, `http.`, `fs.`, etc. + diff against manifest. |
-| 3 (`endpoint`) | Low | Route table is already in C; middleware match is the same algorithm Keel uses. Emit it. |
-| 4 (`validate`) | Low | Run the runtime's compile step on a single file; capture errors. |
-| 5 (`manifest`) | Low | `hl_manifest_extract_*` already produces this; just expose under a different command. |
+| `manifest` | `src/hull/agent/manifest.c` | Reuses `hl_manifest_extract_*`; emits the full struct as nested JSON. |
+| `endpoint` / `middleware` | `src/hull/agent/endpoint.c` | Self-contained pattern matcher (mirrors Keel's `*`, `:param`, `/*`). |
+| `validate` | `src/hull/agent/validate.c` | Pure parse via `luaL_loadbuffer` / `JS_Eval(COMPILE_ONLY)` + substring scan for sandbox-violation patterns. |
+| `capabilities` | `src/hull/agent/capabilities.c` | Walks the project tree (depth-capped, skip-dirs filtered), aggregates source, scans for cap-use patterns, diffs against extracted manifest. |
+| `vfs` | `src/hull/agent/vfs.c` | Iterates `hl_app_entries[]` + `hl_stdlib_entries[]`; buckets by name prefix. |
+| `compute` / `gpu` | `src/hull/agent/compute.c`, `gpu.c` | VFS first, disk fallback. Two-pass dirent collection (avoids `rewinddir` pitfalls). |
+| `perf` | `src/hull/agent/perf.c` | Compile-time feature flags + default limits snapshot. Points at `/ready` for live stats. |
+| `logs` | `src/hull/agent/logs.c` | Tail-reads `.hull/dev.log` up to a capped window; emits last N lines. |
+| `eval` | `src/hull/agent/eval.c` | Wraps the snippet so its return value is JSON-encoded by the runtime's own `json` module (Lua) or `JSON.stringify` (JS), then emitted raw. |
+| `template` | `src/hull/agent/template.c` | Delegates to `hull.template.render` / `hull:template`'s `template.render` via the loaded runtime. |
+| `compute-call` | `src/hull/agent/compute.c` | Reads input file (capped), reports module + size + scheduled-execution status. |
+| `schema-diff` | `src/hull/agent/schema_diff.c` | Tokenises migration SQL for `CREATE TABLE/INDEX [IF NOT EXISTS] <name>`, diffs against `sqlite_master`. |
+| `sql named` | `src/hull/agent/sql.c` | Loads `app_dir/queries.json`, binds named params from `--params JSON`. |
 
-The medium-value items mostly require runtime instrumentation or DB schema
-introspection — straightforward extensions of existing patterns.
+All buffer sizes named in `src/hull/agent/limits.h` (no magic constants).
+Total Phase 6 surface: ~1,500 lines of new C + ~150 lines of CLI glue in
+`commands/agent.c`. CI-gated and smoke-tested against `examples/hello`.
 
 ---
 
