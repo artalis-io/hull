@@ -1421,6 +1421,9 @@ endif
 ifeq ($(HL_ENABLE_GPU),1)
   CFLAGS += -DHL_ENABLE_GPU -I$(VENDDIR)/wgpu
 endif
+ifeq ($(HL_ENABLE_DB),1)
+  CFLAGS += -DHL_ENABLE_DB
+endif
 # Re-add version string (the := above clobbers earlier += additions)
 CFLAGS += -DHL_VERSION=\"$(HL_VERSION)\"
 endif
