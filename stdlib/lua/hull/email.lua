@@ -72,7 +72,7 @@ function providers.postmark(opts)
         payload.TextBody = opts.body
     end
 
-    local resp = http.async.post(
+    local ok, resp = pcall(http.async.post,
         "https://api.postmarkapp.com/email",
         json.encode(payload),
         {
@@ -83,6 +83,12 @@ function providers.postmark(opts)
             },
         }
     )
+    if not ok then
+        return { ok = false, error = "postmark: " .. tostring(resp) }
+    end
+    if not resp then
+        return { ok = false, error = "postmark: no response" }
+    end
     if resp.status >= 200 and resp.status < 300 then
         return { ok = true }
     end
@@ -107,7 +113,7 @@ function providers.sendgrid(opts)
         payload.reply_to = { email = opts.reply_to }
     end
 
-    local resp = http.async.post(
+    local ok, resp = pcall(http.async.post,
         "https://api.sendgrid.com/v3/mail/send",
         json.encode(payload),
         {
@@ -117,6 +123,12 @@ function providers.sendgrid(opts)
             },
         }
     )
+    if not ok then
+        return { ok = false, error = "sendgrid: " .. tostring(resp) }
+    end
+    if not resp then
+        return { ok = false, error = "sendgrid: no response" }
+    end
     if resp.status >= 200 and resp.status < 300 then
         return { ok = true }
     end
@@ -141,7 +153,7 @@ function providers.resend(opts)
     if opts.reply_to then payload.reply_to = opts.reply_to end
     if opts.cc then payload.cc = opts.cc end
 
-    local resp = http.async.post(
+    local ok, resp = pcall(http.async.post,
         "https://api.resend.com/emails",
         json.encode(payload),
         {
@@ -151,6 +163,12 @@ function providers.resend(opts)
             },
         }
     )
+    if not ok then
+        return { ok = false, error = "resend: " .. tostring(resp) }
+    end
+    if not resp then
+        return { ok = false, error = "resend: no response" }
+    end
     if resp.status >= 200 and resp.status < 300 then
         return { ok = true }
     end

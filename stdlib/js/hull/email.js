@@ -62,8 +62,11 @@ providers.postmark = async function(opts) {
         To: opts.to,
         Subject: opts.subject,
     };
-    if (opts.cc)
+    // M-3: accept either array or string for `cc`.
+    if (Array.isArray(opts.cc))
         payload.Cc = opts.cc.join(",");
+    else if (typeof opts.cc === "string")
+        payload.Cc = opts.cc;
     if (opts.reply_to)
         payload.ReplyTo = opts.reply_to;
     if (opts.content_type === "text/html")
@@ -71,17 +74,26 @@ providers.postmark = async function(opts) {
     else
         payload.TextBody = opts.body;
 
-    const resp = await http.async.post(
-        "https://api.postmarkapp.com/email",
-        json.encode(payload),
-        {
-            headers: {
-                "X-Postmark-Server-Token": opts.api_key,
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-        }
-    );
+    // M-2: trap network exceptions and return the documented {ok, error}
+    // contract rather than throwing out of email.send().
+    let resp;
+    try {
+        resp = await http.async.post(
+            "https://api.postmarkapp.com/email",
+            json.encode(payload),
+            {
+                headers: {
+                    "X-Postmark-Server-Token": opts.api_key,
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+            }
+        );
+    } catch (e) {
+        return { ok: false, error: "postmark: " + String(e) };
+    }
+    if (!resp)
+        return { ok: false, error: "postmark: no response" };
     if (resp.status >= 200 && resp.status < 300)
         return { ok: true };
     return { ok: false, error: "postmark: " + (resp.body || "unknown error") };
@@ -103,16 +115,23 @@ providers.sendgrid = async function(opts) {
     if (opts.reply_to)
         payload.reply_to = { email: opts.reply_to };
 
-    const resp = await http.async.post(
-        "https://api.sendgrid.com/v3/mail/send",
-        json.encode(payload),
-        {
-            headers: {
-                "Authorization": "Bearer " + opts.api_key,
-                "Content-Type": "application/json",
-            },
-        }
-    );
+    let resp;
+    try {
+        resp = await http.async.post(
+            "https://api.sendgrid.com/v3/mail/send",
+            json.encode(payload),
+            {
+                headers: {
+                    "Authorization": "Bearer " + opts.api_key,
+                    "Content-Type": "application/json",
+                },
+            }
+        );
+    } catch (e) {
+        return { ok: false, error: "sendgrid: " + String(e) };
+    }
+    if (!resp)
+        return { ok: false, error: "sendgrid: no response" };
     if (resp.status >= 200 && resp.status < 300)
         return { ok: true };
     return { ok: false, error: "sendgrid: " + (resp.body || "unknown error") };
@@ -132,18 +151,28 @@ providers.resend = async function(opts) {
     else
         payload.text = opts.body;
     if (opts.reply_to) payload.reply_to = opts.reply_to;
-    if (opts.cc) payload.cc = opts.cc;
+    // M-3: Resend accepts cc as array of strings, but accept a single
+    // string too.
+    if (Array.isArray(opts.cc)) payload.cc = opts.cc;
+    else if (typeof opts.cc === "string") payload.cc = [opts.cc];
 
-    const resp = await http.async.post(
-        "https://api.resend.com/emails",
-        json.encode(payload),
-        {
-            headers: {
-                "Authorization": "Bearer " + opts.api_key,
-                "Content-Type": "application/json",
-            },
-        }
-    );
+    let resp;
+    try {
+        resp = await http.async.post(
+            "https://api.resend.com/emails",
+            json.encode(payload),
+            {
+                headers: {
+                    "Authorization": "Bearer " + opts.api_key,
+                    "Content-Type": "application/json",
+                },
+            }
+        );
+    } catch (e) {
+        return { ok: false, error: "resend: " + String(e) };
+    }
+    if (!resp)
+        return { ok: false, error: "resend: no response" };
     if (resp.status >= 200 && resp.status < 300)
         return { ok: true };
     return { ok: false, error: "resend: " + (resp.body || "unknown error") };

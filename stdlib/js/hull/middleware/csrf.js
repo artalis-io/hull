@@ -136,13 +136,29 @@ function middleware(opts) {
         let token = req.header(headerName);
         if (!token && req.body) {
             const body = req.body;
+            // Defense-in-depth: cap body length before split to avoid
+            // splitting a multi-MB payload into a giant pairs array on
+            // every unsafe-method request (M-5).
+            if (body.length > 1 << 20) {  // 1 MiB
+                res.status(413);
+                res.json({ error: "CSRF: body too large" });
+                return 1;
+            }
             const pairs = body.split("&");
             for (let k = 0; k < pairs.length; k++) {
                 const eqIdx = pairs[k].indexOf("=");
                 if (eqIdx >= 0) {
                     const key = pairs[k].substring(0, eqIdx);
                     if (key === fieldName) {
-                        token = decodeURIComponent(pairs[k].substring(eqIdx + 1));
+                        const raw = pairs[k].substring(eqIdx + 1);
+                        try {
+                            token = decodeURIComponent(raw);
+                        } catch (_e) {
+                            // Malformed percent-encoding (e.g. "%X") — fall
+                            // back to the raw value rather than throwing
+                            // URIError out of the middleware (H-1).
+                            token = raw;
+                        }
                         break;
                     }
                 }

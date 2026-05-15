@@ -52,6 +52,16 @@ static int js_object_to_kv(JSContext *ctx, JSValueConst obj,
 
         kvs[count].key = strdup(key);
         JS_FreeCString(ctx, key);
+        if (!kvs[count].key) {
+            /* OOM on key dup: release tab slot, then everything copied so
+             * far, and bail (M-2). */
+            JS_FreeAtom(ctx, tab[i].atom);
+            for (uint32_t j = i + 1; j < tab_len; j++)
+                JS_FreeAtom(ctx, tab[j].atom);
+            js_free(ctx, tab);
+            hl_kv_free(kvs, count);
+            return -1;
+        }
 
         JSValue val = JS_GetProperty(ctx, obj, tab[i].atom);
         JS_FreeAtom(ctx, tab[i].atom);
@@ -76,11 +86,22 @@ static int js_object_to_kv(JSContext *ctx, JSValueConst obj,
             kvs[count].value.type = HL_TYPE_TEXT;
             if (sv) {
                 kvs[count].value.s = malloc(slen + 1);
-                if (kvs[count].value.s) {
-                    memcpy((void *)kvs[count].value.s, sv, slen);
-                    ((char *)kvs[count].value.s)[slen] = '\0';
-                    kvs[count].value.len = slen;
+                if (!kvs[count].value.s) {
+                    /* OOM on string dup: mark NIL, bump count so op_free
+                     * releases the already-strdup'd key. */
+                    kvs[count].value.type = HL_TYPE_NIL;
+                    count++;
+                    JS_FreeCString(ctx, sv);
+                    JS_FreeValue(ctx, val);
+                    for (uint32_t j = i + 1; j < tab_len; j++)
+                        JS_FreeAtom(ctx, tab[j].atom);
+                    js_free(ctx, tab);
+                    hl_kv_free(kvs, count);
+                    return -1;
                 }
+                memcpy((void *)kvs[count].value.s, sv, slen);
+                ((char *)kvs[count].value.s)[slen] = '\0';
+                kvs[count].value.len = slen;
                 JS_FreeCString(ctx, sv);
             }
         } else {

@@ -202,6 +202,12 @@ static int capture_result(lua_State *L, HlLuaWorkerDispatchOp *op)
             int idx = op->result_count;
             const char *key = lua_tostring(L, -2);
             op->result_kvs[idx].key = strdup(key);
+            if (!op->result_kvs[idx].key) {
+                /* OOM on key dup: leave partial state — caller (op_free)
+                 * will release everything we've copied so far (M-2). */
+                lua_pop(L, 2);
+                return -1;
+            }
 
             int vt = lua_type(L, -1);
             switch (vt) {
@@ -223,11 +229,17 @@ static int capture_result(lua_State *L, HlLuaWorkerDispatchOp *op)
                 const char *sv = lua_tolstring(L, -1, &slen);
                 op->result_kvs[idx].value.type = HL_TYPE_TEXT;
                 op->result_kvs[idx].value.s = malloc(slen + 1);
-                if (op->result_kvs[idx].value.s) {
-                    memcpy((void *)op->result_kvs[idx].value.s, sv, slen);
-                    ((char *)op->result_kvs[idx].value.s)[slen] = '\0';
-                    op->result_kvs[idx].value.len = slen;
+                if (!op->result_kvs[idx].value.s) {
+                    /* OOM on string dup: mark slot NIL but bump count so
+                     * the key allocation is released by op_free. */
+                    op->result_kvs[idx].value.type = HL_TYPE_NIL;
+                    op->result_count++;
+                    lua_pop(L, 2);
+                    return -1;
                 }
+                memcpy((void *)op->result_kvs[idx].value.s, sv, slen);
+                ((char *)op->result_kvs[idx].value.s)[slen] = '\0';
+                op->result_kvs[idx].value.len = slen;
                 break;
             }
             default:

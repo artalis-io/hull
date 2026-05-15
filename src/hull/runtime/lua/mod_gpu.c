@@ -1241,19 +1241,26 @@ static int l_gpu_async_pipeline(lua_State *L)
 
     int buf_off = 0;
     for (int s = 0; s < stage_count; s++) {
-        /* Deep-copy shader name */
-        if (stages[s].shader)
+        /* Deep-copy shader name (M-3: OOM must abort, not silently NULL). */
+        if (stages[s].shader) {
             op->stages[s].shader = strdup(stages[s].shader);
+            if (!op->stages[s].shader) {
+                hl_worker_gpu_op_free(op); free(op);
+                return luaL_error(L, "gpu.async.pipeline: out of memory");
+            }
+        }
         op->stages[s].workgroups = stages[s].workgroups;
         op->stages[s].buffer_count = stages[s].buffer_count;
 
         /* Deep-copy per-stage uniforms */
         if (stages[s].uniforms && stages[s].uniforms_len > 0) {
             op->stage_uniforms[s] = malloc(stages[s].uniforms_len);
-            if (op->stage_uniforms[s]) {
-                memcpy(op->stage_uniforms[s], stages[s].uniforms, stages[s].uniforms_len);
-                op->stages[s].uniforms_len = stages[s].uniforms_len;
+            if (!op->stage_uniforms[s]) {
+                hl_worker_gpu_op_free(op); free(op);
+                return luaL_error(L, "gpu.async.pipeline: out of memory");
             }
+            memcpy(op->stage_uniforms[s], stages[s].uniforms, stages[s].uniforms_len);
+            op->stages[s].uniforms_len = stages[s].uniforms_len;
         }
 
         /* Deep-copy buffer descs + data for this stage */
@@ -1263,14 +1270,21 @@ static int l_gpu_async_pipeline(lua_State *L)
             dst_desc->size = src_desc->size;
             dst_desc->usage = src_desc->usage;
             dst_desc->binding = src_desc->binding;
-            if (src_desc->name)
+            if (src_desc->name) {
                 dst_desc->name = strdup(src_desc->name);
+                if (!dst_desc->name) {
+                    hl_worker_gpu_op_free(op); free(op);
+                    return luaL_error(L, "gpu.async.pipeline: out of memory");
+                }
+            }
             if (src_desc->data && src_desc->size > 0) {
                 op->buffer_data[buf_off] = malloc(src_desc->size);
-                if (op->buffer_data[buf_off]) {
-                    memcpy(op->buffer_data[buf_off], src_desc->data, src_desc->size);
-                    dst_desc->data = op->buffer_data[buf_off];
+                if (!op->buffer_data[buf_off]) {
+                    hl_worker_gpu_op_free(op); free(op);
+                    return luaL_error(L, "gpu.async.pipeline: out of memory");
                 }
+                memcpy(op->buffer_data[buf_off], src_desc->data, src_desc->size);
+                dst_desc->data = op->buffer_data[buf_off];
             }
             buf_off++;
         }

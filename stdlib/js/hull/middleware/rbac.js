@@ -53,22 +53,35 @@ function init(opts) {
     );
 }
 
+// M-8: reject null/undefined/empty-string names upfront. Otherwise the
+// SQL layer would either insert "null"/"undefined" literals (via String
+// coercion in the binding) or fail with a NOT NULL constraint error
+// that obscures the API misuse.
+function requireName(value, what) {
+    if (typeof value !== "string" || value.length === 0)
+        throw new Error("rbac: " + what + " is required");
+    return value;
+}
+
 function defineRole(name, permissions) {
-    db.exec("INSERT OR IGNORE INTO _hull_roles (name) VALUES (?)", [name]);
+    const roleName = requireName(name, "role name");
+    db.exec("INSERT OR IGNORE INTO _hull_roles (name) VALUES (?)", [roleName]);
 
     if (permissions) {
         for (let i = 0; i < permissions.length; i++) {
-            db.exec("INSERT OR IGNORE INTO _hull_permissions (name) VALUES (?)", [permissions[i]]);
+            const permName = requireName(permissions[i], "permission name");
+            db.exec("INSERT OR IGNORE INTO _hull_permissions (name) VALUES (?)", [permName]);
             db.exec(
                 "INSERT OR IGNORE INTO _hull_role_permissions (role, permission) VALUES (?, ?)",
-                [name, permissions[i]]
+                [roleName, permName]
             );
         }
     }
 }
 
 function definePermission(name) {
-    db.exec("INSERT OR IGNORE INTO _hull_permissions (name) VALUES (?)", [name]);
+    const permName = requireName(name, "permission name");
+    db.exec("INSERT OR IGNORE INTO _hull_permissions (name) VALUES (?)", [permName]);
 }
 
 // String() on null/undefined yields the literal "null"/"undefined", which
@@ -82,28 +95,28 @@ function normalizeUserId(userId) {
 function assign(userId, role) {
     db.exec(
         "INSERT OR IGNORE INTO _hull_user_roles (user_id, role) VALUES (?, ?)",
-        [normalizeUserId(userId), role]
+        [normalizeUserId(userId), requireName(role, "role name")]
     );
 }
 
 function revoke(userId, role) {
     db.exec(
         "DELETE FROM _hull_user_roles WHERE user_id = ? AND role = ?",
-        [normalizeUserId(userId), role]
+        [normalizeUserId(userId), requireName(role, "role name")]
     );
 }
 
 function grant(role, permission) {
     db.exec(
         "INSERT OR IGNORE INTO _hull_role_permissions (role, permission) VALUES (?, ?)",
-        [role, permission]
+        [requireName(role, "role name"), requireName(permission, "permission name")]
     );
 }
 
 function ungrant(role, permission) {
     db.exec(
         "DELETE FROM _hull_role_permissions WHERE role = ? AND permission = ?",
-        [role, permission]
+        [requireName(role, "role name"), requireName(permission, "permission name")]
     );
 }
 

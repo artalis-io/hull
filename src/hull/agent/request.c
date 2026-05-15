@@ -50,7 +50,13 @@ int hl_agent_request(const char *method, const char *path, int port,
         return hl_agent_write_error(out, err);
     }
 
-    /* Build HTTP request */
+    /* Build HTTP request.
+     *
+     * Each `snprintf` returns the would-be length even on truncation, so
+     * naively accumulating `req_len += snprintf(...)` past `sizeof(req_buf)`
+     * causes `sizeof(req_buf) - req_len` to wrap to a huge size_t on the
+     * next call, writing past the end of `req_buf`. Check truncation after
+     * every call and bail with a clear error (M-1). */
     size_t body_len = body ? strlen(body) : 0;
     char req_buf[8192];
     int req_len = snprintf(req_buf, sizeof(req_buf),
@@ -58,16 +64,30 @@ int hl_agent_request(const char *method, const char *path, int port,
         "Host: 127.0.0.1:%d\r\n"
         "Connection: close\r\n",
         method, path, port);
+    if (req_len < 0 || (size_t)req_len >= sizeof(req_buf)) {
+        close(sock);
+        return hl_agent_write_error(out, "request too large");
+    }
+
+    #define APPEND_FMT(...) do { \
+        int _n = snprintf(req_buf + req_len, \
+                          sizeof(req_buf) - (size_t)req_len, __VA_ARGS__); \
+        if (_n < 0 || (size_t)_n >= sizeof(req_buf) - (size_t)req_len) { \
+            close(sock); \
+            return hl_agent_write_error(out, "request too large"); \
+        } \
+        req_len += _n; \
+    } while (0)
 
     if (body_len > 0)
-        req_len += snprintf(req_buf + req_len, sizeof(req_buf) - (size_t)req_len,
-            "Content-Length: %zu\r\n", body_len);
+        APPEND_FMT("Content-Length: %zu\r\n", body_len);
 
     for (int i = 0; i < nhdrs; i++)
-        req_len += snprintf(req_buf + req_len, sizeof(req_buf) - (size_t)req_len,
-            "%s\r\n", headers[i]);
+        APPEND_FMT("%s\r\n", headers[i]);
 
-    req_len += snprintf(req_buf + req_len, sizeof(req_buf) - (size_t)req_len, "\r\n");
+    APPEND_FMT("\r\n");
+
+    #undef APPEND_FMT
 
     ssize_t sent = send(sock, req_buf, (size_t)req_len, 0);
     if (sent < 0) {

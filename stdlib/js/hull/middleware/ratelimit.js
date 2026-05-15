@@ -14,28 +14,45 @@ import { time } from "hull:time";
 const MAX_BUCKETS = 10000;
 const SWEEP_INTERVAL = 100;
 
-let _bucketCount = 0;
+/* M-4: bucket counter is per-store, not module-global. Multiple
+ * ratelimit.middleware() instances would otherwise share the same
+ * MAX_BUCKETS budget and starve each other. The store object holds the
+ * bucket map plus its own count. */
+function makeStore() {
+    return { buckets: {}, count: 0 };
+}
 
-function sweepExpired(buckets, window, now) {
+function sweepExpired(store, window, now) {
+    const buckets = store.buckets;
     for (const k in buckets) {
         if ((now - buckets[k].windowStart) >= window) {
             delete buckets[k];
-            _bucketCount--;
+            store.count--;
         }
     }
 }
 
-function check(buckets, key, limit, window, now) {
+function check(store, key, limit, window, now) {
+    /* Back-compat: the exported `ratelimit.check(buckets, key, ...)` API
+     * accepts either a bare object (legacy) or a Store. Wrap on demand. */
+    if (!store || typeof store.count !== "number") {
+        // Treat as a bare bucket map; use a transient store with count
+        // derived from Object.keys length. Cap enforcement still applies.
+        const b = store || {};
+        const transient = { buckets: b, count: Object.keys(b).length };
+        return check(transient, key, limit, window, now);
+    }
+    const buckets = store.buckets;
     let bucket = buckets[key];
     if (!bucket || (now - bucket.windowStart) >= window) {
         // Enforce max-entries cap before creating a new bucket
-        if (!bucket && _bucketCount >= MAX_BUCKETS) {
-            sweepExpired(buckets, window, now);
-            if (_bucketCount >= MAX_BUCKETS) {
+        if (!bucket && store.count >= MAX_BUCKETS) {
+            sweepExpired(store, window, now);
+            if (store.count >= MAX_BUCKETS) {
                 return { allowed: false, remaining: 0, reset: now + window };
             }
         }
-        if (!bucket) _bucketCount++;
+        if (!bucket) store.count++;
         buckets[key] = { count: 1, windowStart: now };
         bucket = buckets[key];
     } else {
@@ -57,7 +74,7 @@ function middleware(opts) {
     const limit = o.limit !== undefined ? o.limit : 60;
     const window = o.window !== undefined ? o.window : 60;
     let keyFn = o.key;
-    const buckets = {};
+    const store = makeStore();
     let checkCount = 0;
 
     // Normalize key option into a function
@@ -73,10 +90,10 @@ function middleware(opts) {
         // Periodic sweep of expired buckets to prevent unbounded growth
         checkCount++;
         if (checkCount % SWEEP_INTERVAL === 0) {
-            sweepExpired(buckets, window, now);
+            sweepExpired(store, window, now);
         }
 
-        const result = check(buckets, key, limit, window, now);
+        const result = check(store, key, limit, window, now);
 
         res.header("X-RateLimit-Limit", String(limit));
         res.header("X-RateLimit-Remaining", String(result.remaining));

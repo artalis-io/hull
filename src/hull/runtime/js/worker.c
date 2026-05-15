@@ -225,6 +225,15 @@ static int capture_result(JSContext *ctx, JSValue val,
             int idx = op->result_count;
             op->result_kvs[idx].key = strdup(key);
             JS_FreeCString(ctx, key);
+            if (!op->result_kvs[idx].key) {
+                /* OOM on key dup: caller's op_free will release everything
+                 * already in result_kvs (M-2). */
+                JS_FreeAtom(ctx, tab[i].atom);
+                for (uint32_t j = i + 1; j < tab_len; j++)
+                    JS_FreeAtom(ctx, tab[j].atom);
+                js_free(ctx, tab);
+                return -1;
+            }
 
             JSValue pval = JS_GetProperty(ctx, val, tab[i].atom);
             JS_FreeAtom(ctx, tab[i].atom);
@@ -249,11 +258,21 @@ static int capture_result(JSContext *ctx, JSValue val,
                 op->result_kvs[idx].value.type = HL_TYPE_TEXT;
                 if (sv) {
                     op->result_kvs[idx].value.s = malloc(slen + 1);
-                    if (op->result_kvs[idx].value.s) {
-                        memcpy((void *)op->result_kvs[idx].value.s, sv, slen);
-                        ((char *)op->result_kvs[idx].value.s)[slen] = '\0';
-                        op->result_kvs[idx].value.len = slen;
+                    if (!op->result_kvs[idx].value.s) {
+                        /* OOM on string dup: mark NIL, bump count so
+                         * op_free releases the strdup'd key. */
+                        op->result_kvs[idx].value.type = HL_TYPE_NIL;
+                        op->result_count++;
+                        JS_FreeCString(ctx, sv);
+                        JS_FreeValue(ctx, pval);
+                        for (uint32_t j = i + 1; j < tab_len; j++)
+                            JS_FreeAtom(ctx, tab[j].atom);
+                        js_free(ctx, tab);
+                        return -1;
                     }
+                    memcpy((void *)op->result_kvs[idx].value.s, sv, slen);
+                    ((char *)op->result_kvs[idx].value.s)[slen] = '\0';
+                    op->result_kvs[idx].value.len = slen;
                     JS_FreeCString(ctx, sv);
                 }
             } else {

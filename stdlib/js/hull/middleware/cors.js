@@ -25,6 +25,17 @@ function middleware(opts) {
     const rawMaxAge = o.maxAge !== undefined ? o.maxAge : o.max_age;
     const maxAge = String(rawMaxAge !== undefined ? rawMaxAge : 86400);
 
+    // M-1: refuse the unsafe combination `credentials: true` + wildcard
+    // origin. Browsers would also reject it, but failing fast at factory
+    // time surfaces the misconfiguration in dev rather than silently
+    // serving an insecure CORS policy.
+    if (credentials && origins.indexOf("*") !== -1) {
+        throw new Error(
+            "cors: credentials:true is incompatible with origins:['*']; " +
+            "list explicit origins."
+        );
+    }
+
     return function corsMiddleware(req, res) {
         const origin = req.header("Origin");
         if (!origin) return 0;

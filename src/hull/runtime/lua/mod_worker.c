@@ -52,6 +52,12 @@ static int lua_table_to_kv(lua_State *L, int idx, HlKV **out_kvs, int *out_count
             continue;
         }
         kvs[i].key = strdup(lua_tostring(L, -2));
+        if (!kvs[i].key) {
+            /* OOM on key dup: free everything copied so far and bail (M-2). */
+            lua_pop(L, 2);
+            hl_kv_free(kvs, i);
+            return -1;
+        }
         int vt = lua_type(L, -1);
         switch (vt) {
         case LUA_TBOOLEAN:
@@ -72,11 +78,17 @@ static int lua_table_to_kv(lua_State *L, int idx, HlKV **out_kvs, int *out_count
             const char *sv = lua_tolstring(L, -1, &slen);
             kvs[i].value.type = HL_TYPE_TEXT;
             kvs[i].value.s = malloc(slen + 1);
-            if (kvs[i].value.s) {
-                memcpy((void *)kvs[i].value.s, sv, slen);
-                ((char *)kvs[i].value.s)[slen] = '\0';
-                kvs[i].value.len = slen;
+            if (!kvs[i].value.s) {
+                /* OOM on string dup: include this kv (with key + nil value
+                 * slot) in the free count so the key is also released. */
+                kvs[i].value.type = HL_TYPE_NIL;
+                lua_pop(L, 2);
+                hl_kv_free(kvs, i + 1);
+                return -1;
             }
+            memcpy((void *)kvs[i].value.s, sv, slen);
+            ((char *)kvs[i].value.s)[slen] = '\0';
+            kvs[i].value.len = slen;
             break;
         }
         default:

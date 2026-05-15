@@ -33,6 +33,36 @@ import { json } from "hull:json";
 let idemTtl = 86400;
 const HEADER_NAME = "idempotency-key";
 
+/* M-7: Allowlist of headers safe to replay or cache from a previous
+ * response. Excludes credential-bearing / session-binding headers
+ * (Set-Cookie, WWW-Authenticate, Authorization), since a stale value
+ * could outlive a revoked session, and excludes hop-by-hop headers
+ * that should never propagate. Custom X-* and X-RateLimit-* are
+ * permitted to preserve application semantics. */
+const REPLAYABLE_HEADERS = {
+    "content-type": 1,
+    "content-language": 1,
+    "content-encoding": 1,
+    "location": 1,
+    "etag": 1,
+    "last-modified": 1,
+    "cache-control": 1,
+    "vary": 1,
+    "x-request-id": 1,
+};
+function isReplayableHeader(name) {
+    if (typeof name !== "string" || !name) return false;
+    const lc = name.toLowerCase();
+    if (REPLAYABLE_HEADERS[lc]) return true;
+    // Allow X-* (custom application headers); the application code that
+    // set them is presumed safe. Never allow Set-Cookie / Authorization
+    // / WWW-Authenticate / Proxy-Authenticate / Cookie.
+    if (lc === "set-cookie" || lc === "authorization" ||
+        lc === "cookie" || lc === "proxy-authenticate" ||
+        lc === "www-authenticate") return false;
+    return lc.startsWith("x-");
+}
+
 /**
  * Initialize the idempotency table.
  * @param {Object} opts - Options: ttl (seconds, default 86400)
@@ -166,8 +196,19 @@ function middleware(opts) {
                         catch (_e) { headers = null; }
                         if (headers && typeof headers === "object") {
                             const keys = Object.keys(headers);
-                            for (let i = 0; i < keys.length; i++)
-                                res.header(keys[i], headers[keys[i]]);
+                            for (let i = 0; i < keys.length; i++) {
+                                const k = keys[i];
+                                const v = headers[k];
+                                // M-7: defense-in-depth — drop credential-
+                                // affecting headers from a replayed response
+                                // (stale Set-Cookie / Authorization could
+                                // outlive a revoked session) and reject any
+                                // CRLF/NUL injection attempt.
+                                if (!isReplayableHeader(k)) continue;
+                                if (typeof v !== "string") continue;
+                                if (/[\r\n\x00]/.test(v)) continue;
+                                res.header(k, v);
+                            }
                         }
                     }
                     res.header("X-Idempotency-Replay", "true");
@@ -225,8 +266,17 @@ function respond(req, res, statusCode, data, extraHeaders) {
     res.status(statusCode);
     if (extraHeaders) {
         const keys = Object.keys(extraHeaders);
-        for (let i = 0; i < keys.length; i++)
-            res.header(keys[i], extraHeaders[keys[i]]);
+        for (let i = 0; i < keys.length; i++) {
+            const k = keys[i];
+            const v = extraHeaders[k];
+            // M-7: same allowlist/CRLF policy as the replay path so the
+            // stored set never contains credential headers in the first
+            // place.
+            if (!isReplayableHeader(k)) continue;
+            if (typeof v !== "string") continue;
+            if (/[\r\n\x00]/.test(v)) continue;
+            res.header(k, v);
+        }
     }
     res.json(data);
 

@@ -465,7 +465,12 @@ function codegen(ast) {
                 }
                 emit("}");
             } else if (node.kind === "for") {
-                emit("for (const " + node.var + " of (" + genDotPath(node.expr, null, localsSet) + " || [])) {");
+                // M-9: guard against non-array iterables. Iterating a string
+                // walks code units silently; iterating a non-iterable object
+                // throws TypeError. Coerce to [] in both cases so templates
+                // fail safe (zero loop iterations) on a malformed `list`.
+                const expr = genDotPath(node.expr, null, localsSet);
+                emit("for (const " + node.var + " of (Array.isArray(" + expr + ") ? " + expr + " : [])) {");
                 localsSet[node.var] = true;
                 indent++;
                 genBody(node.body);
@@ -473,7 +478,10 @@ function codegen(ast) {
                 delete localsSet[node.var];
                 emit("}");
             } else if (node.kind === "for_kv") {
-                emit("for (const [" + node.key + ", " + node.val + "] of Object.entries(" + genDotPath(node.expr, null, localsSet) + " || {})) {");
+                // M-9: only iterate non-null object values; avoid TypeError
+                // from Object.entries(null) / Object.entries(undefined).
+                const expr2 = genDotPath(node.expr, null, localsSet);
+                emit("for (const [" + node.key + ", " + node.val + "] of Object.entries((" + expr2 + " && typeof " + expr2 + " === \"object\") ? " + expr2 + " : {})) {");
                 localsSet[node.key] = true;
                 localsSet[node.val] = true;
                 indent++;

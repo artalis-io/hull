@@ -1345,7 +1345,14 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
         op->buffer_count = total_bufs;
     }
 
-    /* Deep-copy each stage */
+    /* Deep-copy each stage.
+     *
+     * M-3: any OOM during deep-copy must abort the dispatch — previously
+     * NULL was silently stored in op->stages[s].shader and op->buffer_data[]
+     * and the worker thread would crash. We set `oom` and continue parsing
+     * (to keep the JS_FreeValue/JS_FreeCString pairs balanced), then bail
+     * before submitting to the thread pool. */
+    int oom = 0;
     int buf_off = 0;
     for (int32_t s = 0; s < stage_count; s++) {
         JSValue stage_val = JS_GetPropertyUint32(ctx, argv[0], (uint32_t)s);
@@ -1355,7 +1362,8 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
         JSValue sv2 = JS_GetPropertyStr(ctx, stage_val, "shader");
         const char *sname = JS_ToCString(ctx, sv2);
         if (sname) {
-            op->stages[s].shader = strdup(sname); /* NULL on OOM → pipeline returns error */
+            op->stages[s].shader = strdup(sname);
+            if (!op->stages[s].shader) oom = 1;
             JS_FreeCString(ctx, sname);
         }
         JS_FreeValue(ctx, sv2);
@@ -1383,6 +1391,8 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
                 if (op->stage_uniforms[s]) {
                     memcpy(op->stage_uniforms[s], uab, ulen);
                     op->stages[s].uniforms_len = ulen;
+                } else {
+                    oom = 1;
                 }
             } else {
                 const char *us = JS_ToCStringLen(ctx, &ulen, uni);
@@ -1391,6 +1401,8 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
                     if (op->stage_uniforms[s]) {
                         memcpy(op->stage_uniforms[s], us, ulen);
                         op->stages[s].uniforms_len = ulen;
+                    } else {
+                        oom = 1;
                     }
                 }
                 if (us) JS_FreeCString(ctx, us);
@@ -1414,7 +1426,11 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
                     JSValue nv = JS_GetPropertyStr(ctx, elem, "name");
                     if (JS_IsString(nv)) {
                         const char *ns = JS_ToCString(ctx, nv);
-                        if (ns) { op->buffers[buf_off].name = strdup(ns); JS_FreeCString(ctx, ns); }
+                        if (ns) {
+                            op->buffers[buf_off].name = strdup(ns);
+                            if (!op->buffers[buf_off].name) oom = 1;
+                            JS_FreeCString(ctx, ns);
+                        }
                     }
                     JS_FreeValue(ctx, nv);
 
@@ -1429,6 +1445,8 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
                                 memcpy(op->buffer_data[buf_off], dab, dlen);
                                 op->buffers[buf_off].data = op->buffer_data[buf_off];
                                 op->buffers[buf_off].size = dlen;
+                            } else {
+                                oom = 1;
                             }
                         } else {
                             const char *ds = JS_ToCStringLen(ctx, &dlen, dv);
@@ -1439,6 +1457,8 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
                                         memcpy(op->buffer_data[buf_off], ds, dlen);
                                         op->buffers[buf_off].data = op->buffer_data[buf_off];
                                         op->buffers[buf_off].size = dlen;
+                                    } else {
+                                        oom = 1;
                                     }
                                 }
                                 JS_FreeCString(ctx, ds);
@@ -1514,6 +1534,14 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
             op->pipe_opts.timeout_ms = t;
         }
         JS_FreeValue(ctx, tv);
+    }
+
+    /* Abort if any deep-copy hit OOM (M-3) — must happen before the op is
+     * handed off to the worker thread, otherwise the worker dereferences
+     * NULL shader names / buffer data. */
+    if (oom) {
+        hl_worker_gpu_op_free(op); free(op);
+        return JS_ThrowInternalError(ctx, "gpu.async.pipeline: out of memory");
     }
 
     /* Create async ctx + Promise + continuation */
