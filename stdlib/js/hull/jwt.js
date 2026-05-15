@@ -73,7 +73,11 @@ function sign(payload, secret) {
 
     // Lua-jwt parity (M-1): if exp is small enough to look like a
     // duration (e.g. 3600) rather than an absolute timestamp, add now.
-    if (typeof p.exp === "number" && p.exp > 0 && p.exp < EXP_RELATIVE_THRESHOLD)
+    // Phase 6 audit M-2: drop the `> 0` guard so a caller passing
+    // `exp: 0` or a negative value gets the same "subtract from now"
+    // treatment as Lua (both runtimes produce expired tokens, but the
+    // branch shape is now identical).
+    if (typeof p.exp === "number" && p.exp < EXP_RELATIVE_THRESHOLD)
         p.exp = time.now() + p.exp;
 
     const payloadB64 = crypto.base64urlEncode(json.encode(p));

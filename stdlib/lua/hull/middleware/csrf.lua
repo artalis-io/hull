@@ -168,9 +168,20 @@ function csrf.middleware(opts)
                 return 1
             end
             local pair_count = 0
+            -- Phase 6 audit M-4: per-pair-byte cap. Without this, a body
+            -- with a single 1 MiB pair (under the 1 MiB total cap above)
+            -- would force a 1 MiB url_decode on every unsafe-method
+            -- request. 4 KiB is generous for any sane form field.
+            local MAX_PAIR_BYTES = 4096
             for pair in body:gmatch("[^&]+") do
                 pair_count = pair_count + 1
                 if pair_count > 256 then break end
+                if #pair > MAX_PAIR_BYTES then
+                    -- Skip oversized pairs entirely; the _csrf field
+                    -- itself is short by spec, so a real CSRF token
+                    -- will never exceed this limit.
+                    goto continue
+                end
                 local eq = pair:find("=", 1, true)
                 if eq then
                     local key = pair:sub(1, eq - 1)
@@ -180,6 +191,7 @@ function csrf.middleware(opts)
                         break
                     end
                 end
+                ::continue::
             end
         end
 

@@ -34,7 +34,15 @@ function sweepExpired(store, window, now) {
 
 function check(store, key, limit, window, now) {
     /* Back-compat: the exported `ratelimit.check(buckets, key, ...)` API
-     * accepts either a bare object (legacy) or a Store. Wrap on demand. */
+     * accepts either a bare object (legacy) or a Store. Wrap on demand.
+     *
+     * @deprecated The bare-bucket-map form is legacy. New callers should
+     * use ratelimit.middleware() which manages its own per-instance Store
+     * via makeStore(). The bare form is preserved only for existing
+     * direct callers of `ratelimit.check` in tests / app code; it recomputes
+     * Object.keys(b).length per call and the MAX_BUCKETS cap enforcement
+     * is effectively pass-through because the transient store's count is
+     * thrown away. */
     if (!store || typeof store.count !== "number") {
         // Treat as a bare bucket map; use a transient store with count
         // derived from Object.keys length. Cap enforcement still applies.

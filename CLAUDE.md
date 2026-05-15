@@ -524,6 +524,13 @@ Register with `app.use(method, pattern, mw)`:
 - Unsafe methods: verifies token from header or form field.
 - Returns `1` on verification failure (sends 403 + JSON), `0` otherwise.
 - Helpers: `csrf.generate(session_id, secret)`, `csrf.verify(token, session_id, secret, max_age)`.
+- **Body size caps (bounded work per request):** when reading the CSRF
+  token from a url-encoded form body, the middleware caps total body at
+  **1 MiB**, max **256** form pairs, and (Lua) max **4 KiB** per individual
+  pair. Requests exceeding the body cap get **413**. Large multipart
+  uploads should use a multipart parser BEFORE `csrf.middleware` in the
+  stack — by the time CSRF sees the body, it should already be the
+  pre-parsed url-encoded form, not the raw upload.
 
 **auth.session_middleware(opts)** — Session cookie authentication.
 - `opts.cookie_name` — session cookie name (default: `"hull_session"`)
@@ -604,6 +611,19 @@ Register with `app.use(method, pattern, mw)`:
   - Fingerprint: `SHA-256(method + path + body)`.
 - `idempotency.respond(req, res, status, data)` — sends response and caches it for replay.
 - `idempotency.complete(req)` — marks key as processed without caching response body.
+- **Replay-header allowlist (security):** when `idempotency.respond` is
+  called with `extra_headers`, only headers on a strict allowlist are
+  emitted AND persisted to SQLite. Allowed: `Content-*`, `Location`,
+  `ETag`, `Last-Modified`, `Cache-Control`, `Vary`, the stdlib's own
+  `X-Request-ID` / `X-RateLimit-*` / `X-Idempotency-Replay`, plus
+  `X-Content-Type-Options`, `X-Frame-Options`, `Strict-Transport-Security`,
+  `Content-Security-Policy`, `Referrer-Policy`, `Permissions-Policy`.
+  Anything else — especially credential headers like `Set-Cookie`,
+  `Authorization`, `X-Auth-*`, `X-API-Key`, `X-CSRF-*`,
+  `X-Forwarded-Authorization`, `X-Amz-Security-Token`, etc. — is dropped
+  silently on BOTH the cache-write and replay paths. Set credential
+  headers via a separate middleware (e.g. session.create) instead of
+  passing them through `respond()`'s `extra_headers`.
 - `idempotency.cleanup()` → count of deleted expired keys.
 
 **outbox** — Transactional outbox for reliable side-effect delivery.

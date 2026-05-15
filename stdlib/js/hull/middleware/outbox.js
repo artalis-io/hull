@@ -140,6 +140,10 @@ function backoffDelay(attempt) {
     // L-4: `1 << attempt` overflows / sign-flips at attempt >= 31. Default
     // maxAttempts is 5, but a user-set higher cap should still produce
     // sane backoff. Math.pow + cap on the exponent first.
+    // Phase 6 audit L-4: defensive typeof guard — non-numeric `attempt`
+    // (e.g. undefined from a malformed row) coerces to 0 via `| 0` which
+    // is fine but worth making the intent explicit.
+    if (typeof attempt !== "number" || !isFinite(attempt)) attempt = 0;
     const exp = Math.min(Math.max(0, attempt | 0), 30);
     return Math.min(Math.pow(2, exp) * 10, 3600);
 }

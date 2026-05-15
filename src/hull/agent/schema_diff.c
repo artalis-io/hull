@@ -55,7 +55,11 @@ static void name_list_push(NameList *l, const char *name)
         l->names = g;
         l->cap = ncap;
     }
-    l->names[l->count++] = strdup(name);
+    /* L-1 fix: don't increment count if strdup returned NULL — otherwise
+     * downstream name_present / emit_list would crash on the slot. */
+    char *dup = strdup(name);
+    if (!dup) return;
+    l->names[l->count++] = dup;
 }
 
 static void name_list_free(NameList *l)
@@ -66,48 +70,54 @@ static void name_list_free(NameList *l)
 }
 
 /* Walk over SQL text, find every `CREATE TABLE [IF NOT EXISTS] <name>`
- * and `CREATE INDEX [...] <name>`. Identifier may be quoted or bare. */
-static void collect_creates(const char *sql, NameList *tables, NameList *indexes)
+ * and `CREATE INDEX [...] <name>`. Identifier may be quoted or bare.
+ *
+ * H-1 fix: `sql` is the .data pointer from an HlEntry which is NOT
+ * NUL-terminated (the registry stores raw bytes + a separate `len`).
+ * Walk against `sql + sql_len` rather than against `*p`. */
+static void collect_creates(const char *sql, size_t sql_len,
+                             NameList *tables, NameList *indexes)
 {
     const char *p = sql;
-    while (*p) {
+    const char *end = sql + sql_len;
+    while (p < end) {
         /* Skip whitespace/comments crudely */
         if (isspace((unsigned char)*p)) { p++; continue; }
-        if (p[0] == '-' && p[1] == '-') {
-            while (*p && *p != '\n') p++;
+        if (p + 1 < end && p[0] == '-' && p[1] == '-') {
+            while (p < end && *p != '\n') p++;
             continue;
         }
-        if (p[0] == '/' && p[1] == '*') {
+        if (p + 1 < end && p[0] == '/' && p[1] == '*') {
             p += 2;
-            while (*p && !(p[0] == '*' && p[1] == '/')) p++;
-            if (*p) p += 2;
+            while (p + 1 < end && !(p[0] == '*' && p[1] == '/')) p++;
+            if (p + 1 < end) p += 2;
             continue;
         }
-        if (strncasecmp(p, "CREATE", 6) == 0) {
+        if (end - p >= 6 && strncasecmp(p, "CREATE", 6) == 0) {
             const char *cursor = p + 6;
-            while (isspace((unsigned char)*cursor)) cursor++;
-            int is_table = strncasecmp(cursor, "TABLE",  5) == 0;
-            int is_index = strncasecmp(cursor, "INDEX",  5) == 0;
-            int is_unique_index = strncasecmp(cursor, "UNIQUE", 6) == 0;
+            while (cursor < end && isspace((unsigned char)*cursor)) cursor++;
+            int is_table = (end - cursor >= 5) && strncasecmp(cursor, "TABLE",  5) == 0;
+            int is_index = (end - cursor >= 5) && strncasecmp(cursor, "INDEX",  5) == 0;
+            int is_unique_index = (end - cursor >= 6) && strncasecmp(cursor, "UNIQUE", 6) == 0;
             if (is_unique_index) {
                 cursor += 6;
-                while (isspace((unsigned char)*cursor)) cursor++;
-                if (strncasecmp(cursor, "INDEX", 5) == 0) is_index = 1;
+                while (cursor < end && isspace((unsigned char)*cursor)) cursor++;
+                if ((end - cursor >= 5) && strncasecmp(cursor, "INDEX", 5) == 0) is_index = 1;
             }
             if (is_table) cursor += 5;
             else if (is_index) cursor += 5;
             else { p++; continue; }
 
-            while (isspace((unsigned char)*cursor)) cursor++;
-            if (strncasecmp(cursor, "IF", 2) == 0) {
-                while (*cursor && !isspace((unsigned char)*cursor)) cursor++;
-                while (isspace((unsigned char)*cursor)) cursor++;
-                if (strncasecmp(cursor, "NOT", 3) == 0) {
-                    while (*cursor && !isspace((unsigned char)*cursor)) cursor++;
-                    while (isspace((unsigned char)*cursor)) cursor++;
-                    if (strncasecmp(cursor, "EXISTS", 6) == 0) {
+            while (cursor < end && isspace((unsigned char)*cursor)) cursor++;
+            if ((end - cursor >= 2) && strncasecmp(cursor, "IF", 2) == 0) {
+                while (cursor < end && !isspace((unsigned char)*cursor)) cursor++;
+                while (cursor < end && isspace((unsigned char)*cursor)) cursor++;
+                if ((end - cursor >= 3) && strncasecmp(cursor, "NOT", 3) == 0) {
+                    while (cursor < end && !isspace((unsigned char)*cursor)) cursor++;
+                    while (cursor < end && isspace((unsigned char)*cursor)) cursor++;
+                    if ((end - cursor >= 6) && strncasecmp(cursor, "EXISTS", 6) == 0) {
                         cursor += 6;
-                        while (isspace((unsigned char)*cursor)) cursor++;
+                        while (cursor < end && isspace((unsigned char)*cursor)) cursor++;
                     }
                 }
             }
@@ -115,10 +125,10 @@ static void collect_creates(const char *sql, NameList *tables, NameList *indexes
             char name[HL_AGENT_IDENT_MED];
             int ni = 0;
             char quote = 0;
-            if (*cursor == '"' || *cursor == '`' || *cursor == '\'') {
+            if (cursor < end && (*cursor == '"' || *cursor == '`' || *cursor == '\'')) {
                 quote = *cursor++;
             }
-            while (*cursor && ni < (int)sizeof(name) - 1) {
+            while (cursor < end && ni < (int)sizeof(name) - 1) {
                 if (quote) {
                     if (*cursor == quote) { cursor++; break; }
                 } else {
@@ -163,7 +173,8 @@ static int schema_diff_impl(sqlite3 *db, const HlVfs *vfs, ShJsonBuf *out)
     const HlEntry *first = NULL;
     int mig_count = hl_vfs_prefix(vfs, "migrations/", &first);
     for (int i = 0; i < mig_count; i++) {
-        collect_creates((const char *)first[i].data,
+        /* HlEntry::data is NOT NUL-terminated; use the entry's len. */
+        collect_creates((const char *)first[i].data, first[i].len,
                         &expected_tables, &expected_indexes);
     }
 

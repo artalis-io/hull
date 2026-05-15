@@ -54,8 +54,12 @@ static int path_matches(const char *pattern, const char *path)
         if (*p == ':') {
             /* Skip the parameter name in the pattern */
             while (*p && *p != '/') p++;
-            /* Skip the captured segment in the path */
+            /* Skip the captured segment in the path. L-4 fix: require at
+             * least one byte — empty segments (e.g. /users/) should NOT
+             * match /users/:id, matching Keel router semantics. */
+            const char *r_seg_start = r;
             while (*r && *r != '/') r++;
+            if (r == r_seg_start) return 0;
             continue;
         }
         if (*p != *r) return 0;

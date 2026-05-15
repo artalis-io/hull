@@ -141,6 +141,13 @@ local function parse_args()
             tool.stderr("Allowed: alphanumerics, '.', '/', '_', '-'.\n")
             tool.exit(1)
         end
+        -- Phase 6 audit L-1: reject leading '-' so the value can't be
+        -- interpreted as a flag by tools the generated install.sh
+        -- invokes (useradd, chown, mkdir, systemctl).
+        if value:sub(1, 1) == "-" then
+            tool.stderr("hull deploy: " .. label .. " cannot start with '-': '" .. value .. "'\n")
+            tool.exit(1)
+        end
     end
     if opts.user then validate_ident(opts.user, "--user") end
     validate_ident(opts.name, "--name")

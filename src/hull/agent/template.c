@@ -84,21 +84,9 @@ static int render_lua(HlLua *lua, const char *template_name,
 static int render_js(HlJS *js, const char *template_name,
                      const char *data_json, ShJsonBuf *out)
 {
-    /* Build an inline ES module: import + render + return. */
-    char snippet[HL_AGENT_PATH_MAX];
-    snprintf(snippet, sizeof(snippet),
-        "import { template } from 'hull:template';\n"
-        "globalThis.__hull_agent_template_result = "
-        "template.render(%s, JSON.parse(%s));\n",
-        /* JSON-quote the template name and data */
-        /* Safe because template_name has no quotes by file convention. */
-        /* For data_json we rely on the caller having already given valid JSON. */
-        /* We wrap each in JSON.stringify form: "...". */
-        "(function(){return ", "(function(){return ");
-    /* That snprintf was wrong — rewrite with explicit JSON-quoting. */
-    (void)snippet;
-
-    /* Proper approach: use JS_ParseJSON for safety. */
+    /* Use JS_ParseJSON for the data argument and JS_NewString for the
+     * template name — both safe regardless of contents. (An earlier
+     * snprintf-based snippet builder was dead code; removed per M-2.) */
     JSContext *ctx = js->ctx;
     JSValue tpl_arg = JS_NewString(ctx, template_name ? template_name : "");
     JSValue data_arg = JS_ParseJSON(ctx, data_json ? data_json : "{}", strlen(data_json ? data_json : "{}"), "<agent-data>");

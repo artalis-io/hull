@@ -33,12 +33,12 @@ import { json } from "hull:json";
 let idemTtl = 86400;
 const HEADER_NAME = "idempotency-key";
 
-/* M-7: Allowlist of headers safe to replay or cache from a previous
- * response. Excludes credential-bearing / session-binding headers
- * (Set-Cookie, WWW-Authenticate, Authorization), since a stale value
- * could outlive a revoked session, and excludes hop-by-hop headers
- * that should never propagate. Custom X-* and X-RateLimit-* are
- * permitted to preserve application semantics. */
+/* M-7 (Phase 5) + Phase 6 audit M-1: allowlist of headers safe to replay
+ * or cache from a previous response. Excludes credential-bearing /
+ * session-binding headers; explicitly allowlists common security
+ * response headers (HSTS/CSP/etc.) so they aren't silently dropped on
+ * replay. NO blanket X-* — the previous version was too permissive
+ * (would replay X-Auth-Token, X-API-Key, X-CSRF-Token, etc.). */
 const REPLAYABLE_HEADERS = {
     "content-type": 1,
     "content-language": 1,
@@ -48,19 +48,42 @@ const REPLAYABLE_HEADERS = {
     "last-modified": 1,
     "cache-control": 1,
     "vary": 1,
+    // Safe X-* (stdlib-emitted or widely-used non-credential):
     "x-request-id": 1,
+    "x-ratelimit-limit": 1,
+    "x-ratelimit-remaining": 1,
+    "x-ratelimit-reset": 1,
+    "x-idempotency-replay": 1,
+    "x-content-type-options": 1,
+    "x-frame-options": 1,
+    // Other safe response-shaping headers:
+    "strict-transport-security": 1,
+    "content-security-policy": 1,
+    "referrer-policy": 1,
+    "permissions-policy": 1,
 };
+
+// X-* substrings we explicitly deny even if a future allowlist entry
+// would catch them by name. Belt and braces.
+const X_CREDENTIAL_PATTERNS = [
+    "x-auth", "x-api-key", "x-csrf", "x-token",
+    "x-forwarded-authorization", "x-amz-security-token",
+    "x-aws-", "x-google-", "x-vault-", "x-jwt-",
+];
+
 function isReplayableHeader(name) {
     if (typeof name !== "string" || !name) return false;
     const lc = name.toLowerCase();
     if (REPLAYABLE_HEADERS[lc]) return true;
-    // Allow X-* (custom application headers); the application code that
-    // set them is presumed safe. Never allow Set-Cookie / Authorization
-    // / WWW-Authenticate / Proxy-Authenticate / Cookie.
+    // Credential headers: always deny.
     if (lc === "set-cookie" || lc === "authorization" ||
         lc === "cookie" || lc === "proxy-authenticate" ||
         lc === "www-authenticate") return false;
-    return lc.startsWith("x-");
+    for (let i = 0; i < X_CREDENTIAL_PATTERNS.length; i++) {
+        if (lc.indexOf(X_CREDENTIAL_PATTERNS[i]) !== -1) return false;
+    }
+    // Anything not on the allowlist is denied (no blanket X-*).
+    return false;
 }
 
 /**
@@ -280,11 +303,27 @@ function respond(req, res, statusCode, data, extraHeaders) {
     }
     res.json(data);
 
-    // Cache if idempotency key is active
+    // Cache if idempotency key is active. Phase 6 audit M-3 parity:
+    // filter headers through the same allowlist before writing to
+    // SQLite, so credential headers never persist on disk for the TTL
+    // even if the replay path would have dropped them anyway.
     if (req.ctx && req.ctx._idem_key) {
         let headersStr = null;
-        if (extraHeaders)
-            headersStr = json.encode(extraHeaders);
+        if (extraHeaders) {
+            const filtered = {};
+            const keys = Object.keys(extraHeaders);
+            let any = false;
+            for (let i = 0; i < keys.length; i++) {
+                const k = keys[i];
+                const v = extraHeaders[k];
+                if (!isReplayableHeader(k)) continue;
+                if (typeof v !== "string") continue;
+                if (/[\r\n\x00]/.test(v)) continue;
+                filtered[k] = v;
+                any = true;
+            }
+            if (any) headersStr = json.encode(filtered);
+        }
 
         db.exec(
             "UPDATE _hull_idempotency_keys SET state = 'complete', status = ?, " +

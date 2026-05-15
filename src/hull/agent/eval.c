@@ -114,11 +114,17 @@ static int eval_js(HlJS *js, const char *code, ShJsonBuf *out)
     JSContext *ctx = js->ctx;
 
     /* Evaluate the snippet as a global expression. Wrap in (() => (...))()
-     * so a bare expression like `1+1` works as well as a statement block. */
-    char *snippet = malloc(strlen(code) + HL_AGENT_EVAL_WRAP_HEADROOM);
+     * so a bare expression like `1+1` works as well as a statement block.
+     * M-1 fix: snprintf with truncation check rather than raw sprintf. */
+    size_t snip_cap = strlen(code) + HL_AGENT_EVAL_WRAP_HEADROOM;
+    char *snippet = malloc(snip_cap);
     if (!snippet) return hl_agent_write_error(out, "out of memory");
-    sprintf(snippet, "(()=>{return (%s);})()", code);
-    JSValue v = JS_Eval(ctx, snippet, strlen(snippet), "<agent-eval>",
+    int snip_n = snprintf(snippet, snip_cap, "(()=>{return (%s);})()", code);
+    if (snip_n < 0 || (size_t)snip_n >= snip_cap) {
+        free(snippet);
+        return hl_agent_write_error(out, "code too large");
+    }
+    JSValue v = JS_Eval(ctx, snippet, (size_t)snip_n, "<agent-eval>",
                         JS_EVAL_TYPE_GLOBAL);
     free(snippet);
 

@@ -51,14 +51,17 @@ function health.run_checks(opts)
 
     -- Custom checks. Contract: fn() returns
     --   true               → ok
-    --   false, "msg"       → fail with msg
+    --   (no return / nil)  → ok (back-compat — common Lua idiom for
+    --                        success when an assert-style check passes)
+    --   false[, "msg"]     → fail (optional message)
     --   true, "info"       → ok with extra info (ignored)
-    --   nil / other        → ambiguous; treat as fail to surface bugs
-    -- M-4: the previous `ok and err ~= false` treated a nil return as
-    -- success and a true-with-msg as success, but missed
-    -- `false`-without-msg (which lua's `pcall` would never produce
-    -- anyway) and `nil` (which it would). Promote the function return
-    -- value to the source of truth on pcall success.
+    --   other (number/etc) → fail to surface bugs
+    --
+    -- Phase 6 audit M-1: the original Phase 6 patch tightened the
+    -- contract to "only `ret == true` is ok", which silently flipped
+    -- every existing `function() end` check to fail. Operationally
+    -- dangerous on upgrade (readiness probes go to 503). Restored
+    -- back-compat: nil-on-success and bare-true are both ok.
     for name, fn in pairs(_checks) do
         local t0 = time.clock()
         local ok, ret, err_msg = pcall(fn)
@@ -69,9 +72,11 @@ function health.run_checks(opts)
                               error = type(ret) == "string" and ret or "check threw",
                               latency_ms = latency }
             all_ok = false
-        elseif ret == true then
+        elseif ret == nil or ret == true then
+            -- Success: explicit `true` or implicit (no return value).
             results[name] = { status = "ok", latency_ms = latency }
         else
+            -- ret is false, a string, a number, etc. — treat as failure.
             local msg = "check failed"
             if type(err_msg) == "string" then msg = err_msg
             elseif type(ret) == "string" then msg = ret end

@@ -32,28 +32,58 @@ local _ttl = 86400  -- default 24 hours
 -- M-3: allowlist of headers safe to replay/cache. Excludes credential
 -- and session-binding headers (Set-Cookie, WWW-Authenticate, etc.) so a
 -- stored Set-Cookie can't outlive a revoked session.
+--
+-- Phase 6 audit M-2: previously this allowlist included a blanket `x-*`
+-- catch-all, which permitted X-Auth-Token, X-API-Key, X-CSRF-Token,
+-- X-Forwarded-Authorization, X-Amz-Security-Token and other common
+-- credential-bearing headers. Removed the blanket and replaced with an
+-- explicit allowlist of safe X-* headers + an explicit deny-list of
+-- credential X-* patterns.
 local REPLAYABLE_HEADERS = {
-    ["content-type"]      = true,
-    ["content-language"]  = true,
-    ["content-encoding"]  = true,
-    ["location"]          = true,
-    ["etag"]              = true,
-    ["last-modified"]     = true,
-    ["cache-control"]     = true,
-    ["vary"]              = true,
-    ["x-request-id"]      = true,
+    ["content-type"]        = true,
+    ["content-language"]    = true,
+    ["content-encoding"]    = true,
+    ["location"]            = true,
+    ["etag"]                = true,
+    ["last-modified"]       = true,
+    ["cache-control"]       = true,
+    ["vary"]                = true,
+    -- Safe X-* headers (stdlib-emitted or widely-used non-credential):
+    ["x-request-id"]        = true,
+    ["x-ratelimit-limit"]   = true,
+    ["x-ratelimit-remaining"] = true,
+    ["x-ratelimit-reset"]   = true,
+    ["x-idempotency-replay"] = true,
+    ["x-content-type-options"] = true,
+    ["x-frame-options"]     = true,
+    -- Other safe response-shaping headers:
+    ["strict-transport-security"] = true,
+    ["content-security-policy"]   = true,
+    ["referrer-policy"]     = true,
+    ["permissions-policy"]  = true,
 }
 
 local function is_replayable_header(name)
     if type(name) ~= "string" or name == "" then return false end
     local lc = name:lower()
     if REPLAYABLE_HEADERS[lc] then return true end
+    -- Credential headers: always deny, regardless of casing or X- prefix.
     if lc == "set-cookie" or lc == "authorization" or lc == "cookie" or
        lc == "proxy-authenticate" or lc == "www-authenticate" then
         return false
     end
-    -- X-* custom application headers
-    return lc:sub(1, 2) == "x-"
+    -- X-* credential patterns we explicitly deny (case-insensitive
+    -- substring matches on the lowered name):
+    local x_creds = {
+        "x-auth", "x-api-key", "x-csrf", "x-token",
+        "x-forwarded-authorization", "x-amz-security-token",
+        "x-aws-", "x-google-", "x-vault-", "x-jwt-",
+    }
+    for _, deny in ipairs(x_creds) do
+        if lc:find(deny, 1, true) then return false end
+    end
+    -- Anything not on the allowlist is denied (no blanket X-*).
+    return false
 end
 
 local function header_value_safe(v)
@@ -263,11 +293,23 @@ function idempotency.respond(req, res, status_code, data, extra_headers)
     end
     res:json(data)
 
-    -- Cache if idempotency key is active
+    -- Cache if idempotency key is active.
+    -- Phase 6 audit M-3: filter headers through the same allowlist before
+    -- writing to SQLite, so credential headers never persist on disk for
+    -- the TTL even if the replay path would have dropped them anyway.
     if req.ctx._idem_key then
         local headers_str = nil
         if extra_headers then
-            headers_str = json.encode(extra_headers)
+            local filtered = {}
+            for k, v in pairs(extra_headers) do
+                if is_replayable_header(k) and header_value_safe(v) then
+                    filtered[k] = v
+                end
+            end
+            -- Only encode if there's at least one header to store.
+            if next(filtered) ~= nil then
+                headers_str = json.encode(filtered)
+            end
         end
 
         db.exec(

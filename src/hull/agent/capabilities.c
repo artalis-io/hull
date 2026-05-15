@@ -103,7 +103,12 @@ static int read_file_into(Aggregate *a, const char *path, size_t max_bytes)
     char *buf = malloc((size_t)n);
     if (!buf) { fclose(f); return 0; }
     size_t got = fread(buf, 1, (size_t)n, f);
+    /* L-3 fix: capture read error before fclose. A partial read shouldn't
+     * be appended — it could split a capability call's substring match
+     * at a boundary and yield false-negative coverage. */
+    int read_err = ferror(f);
     fclose(f);
+    if (read_err) { free(buf); return 0; }
     int rc = agg_append(a, buf, got);
     free(buf);
     /* Separator between files so substring matches don't span boundaries. */
@@ -134,7 +139,8 @@ static int is_skip_dir(const char *name)
 
 static void walk_dir(const char *dir, Aggregate *a, int depth)
 {
-    if (depth > 8) return;        /* sanity cap */
+    /* L-2 fix: use the named constant. */
+    if (depth > HL_AGENT_WALK_MAX_DEPTH) return;
     DIR *d = opendir(dir);
     if (!d) return;
     struct dirent *ent;

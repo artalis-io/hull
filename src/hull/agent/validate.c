@@ -30,12 +30,19 @@
 /* Patterns that indicate a sandbox-violation attempt. The C runtime
  * rejects these at execution time; surfacing them at validate time
  * gives a faster signal. Each pattern is a substring match (not a
- * regex) — keep it simple. */
-static const struct {
+ * regex) — keep it simple.
+ *
+ * L-5 fix: named struct (`BadPattern`) shared between Lua/JS tables.
+ * The previous code declared two anonymous-struct types with identical
+ * layouts and cast through `(void *)` to a third anonymous-struct
+ * type for iteration — strict-aliasing UB. */
+typedef struct {
     const char *needle;
     const char *severity;
     const char *what;
-} LUA_BAD_PATTERNS[] = {
+} BadPattern;
+
+static const BadPattern LUA_BAD_PATTERNS[] = {
     { "loadstring(",  "high",   "loadstring is removed in the Lua sandbox" },
     { "loadfile(",    "high",   "loadfile is removed in the Lua sandbox" },
     { "dofile(",      "high",   "dofile is removed in the Lua sandbox" },
@@ -46,11 +53,7 @@ static const struct {
     { NULL, NULL, NULL }
 };
 
-static const struct {
-    const char *needle;
-    const char *severity;
-    const char *what;
-} JS_BAD_PATTERNS[] = {
+static const BadPattern JS_BAD_PATTERNS[] = {
     { "eval(",                 "high",   "eval is removed in the QuickJS sandbox" },
     { "new Function(",         "high",   "Function constructor is removed in the sandbox" },
     { "Object.prototype.",     "medium", "modifying Object.prototype pollutes globals" },
@@ -69,8 +72,7 @@ static void scan_patterns(ShJsonWriter *w, const char *content, size_t len,
     memcpy(buf, content, len);
     buf[len] = '\0';
 
-    const struct { const char *needle, *severity, *what; } *p =
-        is_lua ? (void *)LUA_BAD_PATTERNS : (void *)JS_BAD_PATTERNS;
+    const BadPattern *p = is_lua ? LUA_BAD_PATTERNS : JS_BAD_PATTERNS;
     for (; p->needle; p++) {
         const char *hit = strstr(buf, p->needle);
         if (!hit) continue;

@@ -37,20 +37,28 @@ const email = {};
 const providers = {};
 
 providers.smtp = function(opts) {
-    return smtp.send({
-        host: opts.smtp_host,
-        port: opts.smtp_port || 587,
-        username: opts.smtp_user,
-        password: opts.smtp_pass,
-        tls: opts.smtp_tls !== false,
-        from: opts.from,
-        to: opts.to,
-        cc: opts.cc,
-        reply_to: opts.reply_to,
-        subject: opts.subject,
-        body: opts.body,
-        content_type: opts.content_type || "text/plain",
-    });
+    // Phase 6 audit M-3: mirror the three API providers — wrap in
+    // try/catch so the {ok, error} contract is uniform across providers.
+    let result;
+    try {
+        result = smtp.send({
+            host: opts.smtp_host,
+            port: opts.smtp_port || 587,
+            username: opts.smtp_user,
+            password: opts.smtp_pass,
+            tls: opts.smtp_tls !== false,
+            from: opts.from,
+            to: opts.to,
+            cc: opts.cc,
+            reply_to: opts.reply_to,
+            subject: opts.subject,
+            body: opts.body,
+            content_type: opts.content_type || "text/plain",
+        });
+    } catch (e) {
+        return { ok: false, error: "smtp: " + String(e) };
+    }
+    return result;
 };
 
 providers.postmark = async function(opts) {

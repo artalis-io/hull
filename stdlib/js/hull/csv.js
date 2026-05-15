@@ -19,8 +19,8 @@ function parse(text, opts) {
     const quo = (opts && opts.quote) || '"';
     const useHeaders = !!(opts && opts.headers);
     // L-3: accept Lua-style `max_rows` as well as the canonical
-    // `maxRows`. `??` falls through 0 (which would otherwise mean
-    // "no rows" via the default).
+    // `maxRows`. `??` preserves an explicit 0 (the prior `||` would
+    // have replaced it with the default).
     const maxRows = (opts && (opts.maxRows ?? opts.max_rows)) ?? 100000;
 
     const rows = [];

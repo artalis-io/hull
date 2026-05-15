@@ -469,19 +469,25 @@ function codegen(ast) {
                 // walks code units silently; iterating a non-iterable object
                 // throws TypeError. Coerce to [] in both cases so templates
                 // fail safe (zero loop iterations) on a malformed `list`.
+                // Phase 6 audit L-5: cache the dot-path in a block-scoped
+                // local so genDotPath isn't called twice (also halves the
+                // generated-code size for the typical for loop).
                 const expr = genDotPath(node.expr, null, localsSet);
-                emit("for (const " + node.var + " of (Array.isArray(" + expr + ") ? " + expr + " : [])) {");
+                emit("{ const __it = " + expr + ";");
+                emit("for (const " + node.var + " of (Array.isArray(__it) ? __it : [])) {");
                 localsSet[node.var] = true;
                 indent++;
                 genBody(node.body);
                 indent--;
                 delete localsSet[node.var];
-                emit("}");
+                emit("} }");
             } else if (node.kind === "for_kv") {
                 // M-9: only iterate non-null object values; avoid TypeError
                 // from Object.entries(null) / Object.entries(undefined).
+                // L-5: same single-eval pattern as the for loop above.
                 const expr2 = genDotPath(node.expr, null, localsSet);
-                emit("for (const [" + node.key + ", " + node.val + "] of Object.entries((" + expr2 + " && typeof " + expr2 + " === \"object\") ? " + expr2 + " : {})) {");
+                emit("{ const __it = " + expr2 + ";");
+                emit("for (const [" + node.key + ", " + node.val + "] of Object.entries((__it && typeof __it === \"object\") ? __it : {})) {");
                 localsSet[node.key] = true;
                 localsSet[node.val] = true;
                 indent++;
@@ -489,7 +495,7 @@ function codegen(ast) {
                 indent--;
                 delete localsSet[node.key];
                 delete localsSet[node.val];
-                emit("}");
+                emit("} }");
             } else if (node.kind === "block") {
                 genBody(node.body);
             }

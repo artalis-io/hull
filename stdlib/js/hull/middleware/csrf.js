@@ -139,6 +139,13 @@ function middleware(opts) {
             // Defense-in-depth: cap body length before split to avoid
             // splitting a multi-MB payload into a giant pairs array on
             // every unsafe-method request (M-5).
+            //
+            // Note (Phase 6 audit L-2): 1 MiB is the hard cap. Large
+            // multipart uploads should use a multipart parser BEFORE
+            // csrf.middleware in the stack so the body is already
+            // pre-consumed by the time we get here. A url-encoded form
+            // legitimately needing > 1 MiB is exceedingly rare; the cap
+            // bounds worst-case work per request.
             if (body.length > 1 << 20) {  // 1 MiB
                 res.status(413);
                 res.json({ error: "CSRF: body too large" });
