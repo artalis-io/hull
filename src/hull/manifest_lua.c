@@ -50,7 +50,7 @@ static int read_string_array(lua_State *L, int table_idx,
     return count;
 }
 
-int hl_manifest_extract(lua_State *L, HlManifest *out, HlAllocator *alloc)
+int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
 {
     if (!L || !out)
         return -1;

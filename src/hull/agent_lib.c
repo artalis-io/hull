@@ -1225,7 +1225,7 @@ int hl_agent_deploy(const char *app_dir, ShJsonBuf *out)
 #ifdef HL_ENABLE_LUA
         if (hl_app_context_is_lua(ctx)) {
             HlLua *lua = hl_app_context_lua(ctx);
-            if (hl_manifest_extract(lua->L, &manifest, NULL) == 0)
+            if (hl_manifest_extract_lua(lua->L, &manifest, NULL) == 0)
                 has_manifest = 1;
         }
 #endif

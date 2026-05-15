@@ -430,7 +430,7 @@ static int vt_lua_wire_routes_server(HlRuntime *rt, KlServer *server,
 static int vt_lua_extract_manifest(HlRuntime *rt, HlManifest *out)
 {
     HlLua *lua = (HlLua *)rt;
-    return hl_manifest_extract(lua->L, out, lua->base.alloc);
+    return hl_manifest_extract_lua(lua->L, out, lua->base.alloc);
 }
 
 static void vt_lua_destroy(HlRuntime *rt)

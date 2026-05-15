@@ -1220,7 +1220,7 @@ UTEST(lua_runtime, manifest_not_declared)
     ASSERT_TRUE(lua_initialized);
 
     HlManifest m;
-    int rc = hl_manifest_extract(lua_rt.L, &m, NULL);
+    int rc = hl_manifest_extract_lua(lua_rt.L, &m, NULL);
     ASSERT_EQ(rc, -1);
     ASSERT_EQ(m.present, 0);
 
@@ -1243,7 +1243,7 @@ UTEST(lua_runtime, manifest_basic)
     ASSERT_EQ(rc, LUA_OK);
 
     HlManifest m;
-    rc = hl_manifest_extract(lua_rt.L, &m, NULL);
+    rc = hl_manifest_extract_lua(lua_rt.L, &m, NULL);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(m.present, 1);
 

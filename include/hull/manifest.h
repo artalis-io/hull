@@ -87,7 +87,7 @@ typedef struct HlManifest {
  * All strings are copied into Hull-owned allocations via `alloc`.
  * Returns 0 on success, -1 if no manifest was declared.
  */
-int hl_manifest_extract(lua_State *L, HlManifest *out, HlAllocator *alloc);
+int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc);
 
 /*
  * Free all owned strings in the manifest.

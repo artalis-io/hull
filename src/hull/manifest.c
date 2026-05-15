@@ -2,7 +2,7 @@
  * manifest.c — Shared manifest helpers + free
  *
  * The per-runtime extractors live in sibling files:
- *   manifest_lua.c  — hl_manifest_extract     (Lua registry → HlManifest)
+ *   manifest_lua.c  — hl_manifest_extract_lua     (Lua registry → HlManifest)
  *   manifest_js.c   — hl_manifest_extract_js  (QuickJS globalThis → HlManifest)
  *
  * This file holds only what's runtime-free: the shared string helpers, the
