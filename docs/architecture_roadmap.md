@@ -120,7 +120,7 @@ Recommended sequence — every item is small/medium, no dependencies between gro
 
 | # | Refactor | Effort | Reason for deferral |
 |---|----------|:------:|---------------------|
-| **K** | **M3** — Runtime factory registration; collapse `is_lua` ladder in `app_context.c` | M | Justifies a "third runtime" (e.g. WASM-as-orchestrator) — but there's no third runtime planned. Reconsider when one is. |
+| ✅ **K** | **M3** — Runtime factory registration. New `HlRuntimeFactory` struct (in `include/hull/runtime/factory.h`) bundles name + entry-extension + create/destroy + vtable. Each runtime publishes its factory: `hl_lua_factory` in `src/hull/runtime/lua/factory.c`, `hl_js_factory` in `src/hull/runtime/js/factory.c`. Registry in `src/hull/runtime/factory.c` walks a compile-time array assembled under `HL_ENABLE_{LUA,JS}` and exposes lookup by file extension. New `HlRuntimeBaseConfig` bundle wires shared resources (db_handle, alloc, vfs, wasm_cache, gpu_ctx) into `rt->base` BEFORE init so the runtime's module-registration phase can read them. `app_context.c` drops 5 `is_lua` ladders + the storage union: storage is now heap, init/load/free all go through `ctx->factory->{create,destroy}` and `ctx->rt->vt->load_app`. Identity-via-factory-pointer for `hl_app_context_{is_lua,lua,js}`. | M | Adding a third runtime is now one new factory file plus its build entry — no more touching `app_context.c`. Also the prerequisite for the opaque-HlLua/HlJS migration that J deferred. |
 | **L** | **M9 + M10** — Share worker_db / get_buffer code between runtimes | M | Once item I lands, the remaining duplication is small and not painful. Reconsider if it becomes painful. |
 
 ## Things that look OK

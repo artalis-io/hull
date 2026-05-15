@@ -12,6 +12,7 @@
 #include "hull/cap/db_backend.h"
 #include "hull/entry.h"
 #include "hull/migrate.h"
+#include "hull/runtime/factory.h"
 #include "hull/vfs.h"
 #include "hull/worker_db.h"
 
@@ -43,18 +44,9 @@ struct HlAppContext {
     HlVfs          platform_vfs;
     HlRuntime     *rt;
 
-    /* Storage — large enough for either runtime */
-    // cppcheck-suppress unusedStructMember
-    union {
-#ifdef HL_ENABLE_LUA
-        HlLua lua;
-#endif
-#ifdef HL_ENABLE_JS
-        HlJS  js;
-#endif
-    } rt_storage;
+    /* Factory that built `rt`, owns the heap storage. NULL until init. */
+    const HlRuntimeFactory *factory;
 
-    int            is_lua;    /* 1 = Lua, 0 = JS */
     int            db_open;   /* 1 = db was opened */
     int            rt_init;   /* 1 = runtime was initialized */
     int            app_loaded; /* 1 = app code was loaded */
@@ -92,27 +84,29 @@ static int resolve_entry_and_runtime(HlAppContext *ctx,
     const char *entry = opts->entry_point;
 
     if (!entry) {
-#ifdef HL_ENABLE_LUA
-        entry = detect_entry(opts->app_dir, "lua", entry_buf, buf_size);
-        if (entry) ctx->is_lua = 1;
-#endif
-#ifdef HL_ENABLE_JS
-        if (!entry) { /* cppcheck-suppress identicalInnerCondition ; JS fallback after Lua */
-            entry = detect_entry(opts->app_dir, "js", entry_buf, buf_size);
-            if (entry) ctx->is_lua = 0;
+        /* Discover entry by trying each registered factory's extension
+         * in order. First match wins (Lua then JS today). */
+        size_t fcount = 0;
+        const HlRuntimeFactory *const *factories = hl_runtime_factories(&fcount);
+        for (size_t i = 0; i < fcount; i++) {
+            const HlRuntimeFactory *f = factories[i];
+            if (!f || !f->entry_extension) continue;
+            /* extension is ".lua" / ".js" — strip leading dot for detect_entry */
+            const char *ext = f->entry_extension;
+            if (ext[0] == '.') ext++;
+            entry = detect_entry(opts->app_dir, ext, entry_buf, buf_size);
+            if (entry) {
+                ctx->factory = f;
+                break;
+            }
         }
-#endif
     } else {
-        /* Caller provided entry point — determine runtime from extension */
-        size_t len = strlen(entry);
-        if (len >= 4 && strcmp(entry + len - 4, ".lua") == 0)
-            ctx->is_lua = 1;
-        else
-            ctx->is_lua = 0;
+        /* Caller provided entry point — match factory by file extension. */
+        ctx->factory = hl_runtime_factory_for_filename(entry);
     }
 
     // cppcheck-suppress knownConditionTrueFalse
-    if (!entry)
+    if (!entry || !ctx->factory)
         return -1;
 
     *out_entry = entry;
@@ -123,26 +117,11 @@ static int resolve_entry_and_runtime(HlAppContext *ctx,
 
 static int load_app_code(HlAppContext *ctx, const char *entry)
 {
-#ifdef HL_ENABLE_LUA
-    if (ctx->is_lua) {
-        if (hl_lua_load_app(&ctx->rt_storage.lua, entry) != 0)
-            return -1;
-        ctx->app_loaded = 1;
-        return 0;
-    }
-#endif
-
-#ifdef HL_ENABLE_JS
-    if (!ctx->is_lua) {
-        if (hl_js_load_app(&ctx->rt_storage.js, entry) != 0)
-            return -1;
-        ctx->app_loaded = 1;
-        return 0;
-    }
-#endif
-
-    (void)entry;
-    return -1;
+    if (!ctx->rt || !ctx->rt->vt || !ctx->rt->vt->load_app) return -1;
+    if (ctx->rt->vt->load_app(ctx->rt, entry) != 0)
+        return -1;
+    ctx->app_loaded = 1;
+    return 0;
 }
 
 /* ── Init ──────────────────────────────────────────────────────────── */
@@ -201,109 +180,46 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
     }
 #endif
 
-    /* Init runtime */
-#ifdef HL_ENABLE_LUA
-    if (ctx->is_lua) {
-        HlLuaConfig cfg = HL_LUA_CONFIG_DEFAULT;
-        cfg.sandbox = opts->sandbox ? opts->sandbox : 1;
-        if (opts->heap_limit > 0)        cfg.max_heap_bytes   = (size_t)opts->heap_limit;
-        if (opts->instruction_limit > 0) cfg.max_instructions = opts->instruction_limit;
-        HlLua *lua = &ctx->rt_storage.lua;
-        memset(lua, 0, sizeof(*lua));
-        if (ctx->db_open) {
-            lua->base.db_handle = &ctx->db_handle;
-            lua->base.hull_db_handle = &ctx->db_handle;
-        }
-        lua->base.app_vfs = &ctx->app_vfs;
-        lua->base.platform_vfs = &ctx->platform_vfs;
-        if (opts->alloc) lua->base.alloc = opts->alloc;
-        if (opts->thread_pool) lua->base.thread_pool = opts->thread_pool;
-        if (opts->worker_db_path) lua->base.db_path = opts->worker_db_path;
-        if (opts->compress) lua->base.compress = opts->compress;
+    /* Build base config bundle — wired into rt->base BEFORE init. */
+    HlRuntimeBaseConfig base = {0};
+    if (ctx->db_open) {
+        base.db_handle      = &ctx->db_handle;
+        base.hull_db_handle = &ctx->db_handle;
+    }
+    base.alloc        = opts->alloc;
+    base.app_vfs      = &ctx->app_vfs;
+    base.platform_vfs = &ctx->platform_vfs;
+    base.thread_pool  = opts->thread_pool;
+    base.db_path      = opts->worker_db_path;
+    base.compress     = opts->compress;
 #ifdef HL_ENABLE_WASM
-        if (ctx->wasm_ok)
-            lua->base.wasm_cache = opts->wasm_cache ? opts->wasm_cache : &ctx->wasm_cache;
+    if (ctx->wasm_ok)
+        base.wasm_cache = opts->wasm_cache ? opts->wasm_cache : &ctx->wasm_cache;
 #endif
 #ifdef HL_ENABLE_GPU
-        if (opts->gpu_ctx) lua->base.gpu_ctx = opts->gpu_ctx;
+    base.gpu_ctx = opts->gpu_ctx;
 #endif
-        ctx->rt = &lua->base;
-        ctx->rt->vt = &hl_lua_vtable;
 
-        if (hl_lua_init(lua, &cfg) != 0) {
+    /* Init runtime via the factory — table-driven, single-path. */
+    if (ctx->factory->create(&ctx->rt, opts, &base) != 0) {
+        hl_app_context_free(ctx);
+        return -1;
+    }
+    ctx->rt_init = 1;
+
+    if (!opts->no_load) {
+        if (load_app_code(ctx, entry) != 0) {
             hl_app_context_free(ctx);
             return -1;
         }
-        ctx->rt_init = 1;
-
-        if (!opts->no_load) {
-            if (load_app_code(ctx, entry) != 0) {
-                hl_app_context_free(ctx);
-                return -1;
-            }
-        }
-
-        /* Init worker DB after runtime init (needs db_path) */
-        if (opts->worker_db_path)
-            hl_worker_db_init(opts->worker_db_path);
-
-        *out = ctx;
-        return 0;
     }
-#endif
 
-#ifdef HL_ENABLE_JS
-    if (!ctx->is_lua) {
-        HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
-        if (opts->heap_limit > 0)        cfg.max_heap_bytes   = (size_t)opts->heap_limit;
-        if (opts->stack_limit > 0)       cfg.max_stack_bytes  = (size_t)opts->stack_limit;
-        if (opts->instruction_limit > 0) cfg.max_instructions = opts->instruction_limit;
-        HlJS *js = &ctx->rt_storage.js;
-        memset(js, 0, sizeof(*js));
-        if (ctx->db_open) {
-            js->base.db_handle = &ctx->db_handle;
-            js->base.hull_db_handle = &ctx->db_handle;
-        }
-        js->base.app_vfs = &ctx->app_vfs;
-        js->base.platform_vfs = &ctx->platform_vfs;
-        if (opts->alloc) js->base.alloc = opts->alloc;
-        if (opts->thread_pool) js->base.thread_pool = opts->thread_pool;
-        if (opts->worker_db_path) js->base.db_path = opts->worker_db_path;
-        if (opts->compress) js->base.compress = opts->compress;
-#ifdef HL_ENABLE_WASM
-        if (ctx->wasm_ok)
-            js->base.wasm_cache = opts->wasm_cache ? opts->wasm_cache : &ctx->wasm_cache;
-#endif
-#ifdef HL_ENABLE_GPU
-        if (opts->gpu_ctx) js->base.gpu_ctx = opts->gpu_ctx;
-#endif
-        ctx->rt = &js->base;
-        ctx->rt->vt = &hl_js_vtable;
+    /* Init worker DB after runtime init (needs db_path). */
+    if (opts->worker_db_path)
+        hl_worker_db_init(opts->worker_db_path);
 
-        if (hl_js_init(js, &cfg) != 0) {
-            hl_app_context_free(ctx);
-            return -1;
-        }
-        ctx->rt_init = 1;
-
-        if (!opts->no_load) {
-            if (load_app_code(ctx, entry) != 0) {
-                hl_app_context_free(ctx);
-                return -1;
-            }
-        }
-
-        /* Init worker DB after runtime init */
-        if (opts->worker_db_path)
-            hl_worker_db_init(opts->worker_db_path);
-
-        *out = ctx;
-        return 0;
-    }
-#endif
-
-    hl_app_context_free(ctx);
-    return -1;
+    *out = ctx;
+    return 0;
 }
 
 /* ── Load (deferred) ──────────────────────────────────────────────── */
@@ -322,15 +238,9 @@ void hl_app_context_free(HlAppContext *ctx)
 {
     if (!ctx) return;
 
-    if (ctx->rt_init) {
-#ifdef HL_ENABLE_LUA
-        if (ctx->is_lua)
-            hl_lua_free(&ctx->rt_storage.lua);
-#endif
-#ifdef HL_ENABLE_JS
-        if (!ctx->is_lua)
-            hl_js_free(&ctx->rt_storage.js);
-#endif
+    if (ctx->rt_init && ctx->factory && ctx->factory->destroy) {
+        ctx->factory->destroy(ctx->rt);
+        ctx->rt = NULL;
     }
 
 #ifdef HL_ENABLE_WASM
@@ -387,7 +297,16 @@ HlStmtCache *hl_app_context_stmt_cache(HlAppContext *ctx)
 
 int hl_app_context_is_lua(HlAppContext *ctx)
 {
-    return ctx ? ctx->is_lua : 0;
+    /* Identify via the factory pointer — avoids a stored is_lua flag.
+     * &hl_lua_vtable / &hl_js_vtable comparisons would also work but
+     * the factory pointer is the canonical source of truth post-K. */
+#ifdef HL_ENABLE_LUA
+    extern const HlRuntimeFactory hl_lua_factory;
+    return (ctx && ctx->factory == &hl_lua_factory) ? 1 : 0;
+#else
+    (void)ctx;
+    return 0;
+#endif
 }
 
 const char *hl_app_context_app_dir(HlAppContext *ctx)
@@ -398,15 +317,17 @@ const char *hl_app_context_app_dir(HlAppContext *ctx)
 #ifdef HL_ENABLE_LUA
 HlLua *hl_app_context_lua(HlAppContext *ctx)
 {
-    if (!ctx || !ctx->is_lua) return NULL;
-    return &ctx->rt_storage.lua;
+    extern const HlRuntimeFactory hl_lua_factory;
+    if (!ctx || ctx->factory != &hl_lua_factory) return NULL;
+    return (HlLua *)ctx->rt;   /* base is the first field of HlLua */
 }
 #endif
 
 #ifdef HL_ENABLE_JS
 HlJS *hl_app_context_js(HlAppContext *ctx)
 {
-    if (!ctx || ctx->is_lua) return NULL;
-    return &ctx->rt_storage.js;
+    extern const HlRuntimeFactory hl_js_factory;
+    if (!ctx || ctx->factory != &hl_js_factory) return NULL;
+    return (HlJS *)ctx->rt;
 }
 #endif

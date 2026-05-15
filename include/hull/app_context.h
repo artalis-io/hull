@@ -25,7 +25,7 @@ typedef struct HlDbHandle HlDbHandle;
 typedef struct KlThreadPool KlThreadPool;
 struct KlCompressConfig;
 
-typedef struct {
+typedef struct HlAppContextOpts {
     const char   *app_dir;        /* required */
     const char   *entry_point;    /* NULL = auto-detect (app.lua / app.js) */
     const char   *db_path;        /* NULL = ":memory:" */

@@ -584,6 +584,12 @@ int hl_js_load_app(HlJS *js, const char *filename)
     if (!js || !js->ctx || !filename)
         return -1;
 
+    /* Re-anchor JS stack base — see the stack-top contract block in
+     * vt_js_init. After the runtime-factory refactor (item K) this
+     * function is called from a shallower C stack than JS_NewRuntime,
+     * so we update before JS_Eval to keep the check accurate. */
+    JS_UpdateStackTop(js->rt);
+
     /* Extract app directory from filename (needed regardless of source) */
     size_t fn_len = strlen(filename);
     char *app_dir = hl_alloc_malloc(js->base.alloc, fn_len + 1);
