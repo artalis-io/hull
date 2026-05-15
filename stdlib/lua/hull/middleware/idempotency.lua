@@ -114,7 +114,9 @@ function idempotency.middleware(opts)
         return "__anon"
     end
 
-    local _cleanup_counter = 0
+    -- L-3: dropped the leading underscore — Lua convention reserves `_x`
+    -- for unused locals; this counter is actively mutated below.
+    local cleanup_counter = 0
     local ttl = opts.ttl or _ttl
     local header_name = opts.header_name or _header_name
 
@@ -143,9 +145,9 @@ function idempotency.middleware(opts)
         local now = time.now()
 
         -- Clean up expired keys periodically (every 100 requests)
-        _cleanup_counter = _cleanup_counter + 1
-        if _cleanup_counter >= 100 then
-            _cleanup_counter = 0
+        cleanup_counter = cleanup_counter + 1
+        if cleanup_counter >= 100 then
+            cleanup_counter = 0
             db.exec("DELETE FROM _hull_idempotency_keys WHERE expires_at <= ?", { now })
         end
 

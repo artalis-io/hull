@@ -51,8 +51,10 @@ static int read_file(const char *path, char **out_buf, size_t *out_len)
     char *buf = (char *)malloc((size_t)n);
     if (!buf) { fclose(f); return -1; }
     size_t got = fread(buf, 1, (size_t)n, f);
+    /* L3: capture read error before fclose. */
+    int read_err = ferror(f);
     fclose(f);
-    if (got != (size_t)n) { free(buf); return -1; }
+    if (read_err || got != (size_t)n) { free(buf); return -1; }
 
     *out_buf = buf;
     *out_len = (size_t)n;

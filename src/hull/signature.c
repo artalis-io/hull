@@ -124,7 +124,13 @@ int hl_sig_read(const char *sig_path, HlSignature *sig)
     if (!data) { fclose(f); return -1; }
 
     size_t nread = fread(data, 1, (size_t)fsize, f);
+    /* L3: capture read error before fclose() invalidates the stream. */
+    int read_err = ferror(f);
     fclose(f);
+    if (read_err || nread != (size_t)fsize) {
+        free(data);
+        return -1;
+    }
     data[nread] = '\0';
 
     /* Parse JSON into arena-allocated DOM.

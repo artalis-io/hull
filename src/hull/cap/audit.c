@@ -35,14 +35,19 @@ ShJsonWriter hl_audit_begin(const char *cap)
     sh_json_writer_init(&w, audit_stderr_write, NULL);
     sh_json_write_object_start(&w);
 
-    /* Timestamp: ISO 8601 UTC */
+    /* Timestamp: ISO 8601 UTC. L4: gmtime_r can fail (e.g. very large
+     * negative time_t on platforms that don't normalize) — in that case
+     * `tm` is undefined and strftime would print garbage. */
     {
         time_t now = time(NULL);
         struct tm tm;
-        gmtime_r(&now, &tm);
-        char ts[32];
-        strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tm);
-        sh_json_write_kv_string(&w, "ts", ts);
+        if (gmtime_r(&now, &tm) == NULL) {
+            sh_json_write_kv_string(&w, "ts", "?");
+        } else {
+            char ts[32];
+            strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tm);
+            sh_json_write_kv_string(&w, "ts", ts);
+        }
     }
 
     sh_json_write_kv_string(&w, "cap", cap);

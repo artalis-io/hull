@@ -34,9 +34,26 @@ function cors.middleware(opts)
     local credentials = opts.credentials or false
     local max_age = tostring(opts.max_age or 86400)
 
+    -- Parity with JS cors M-1: refuse the unsafe `credentials=true` +
+    -- wildcard origin combination at factory time. Browsers would
+    -- reject the response too; failing fast here surfaces the
+    -- misconfiguration in dev.
+    if credentials then
+        for _, o in ipairs(origins) do
+            if o == "*" then
+                error("cors: credentials=true is incompatible with origins={'*'}; list explicit origins.")
+            end
+        end
+    end
+
     return function(req, res)
         local origin = req.headers["origin"]
         if not origin then return 0 end
+
+        -- L-1: defense-in-depth. Reject any header with CR/LF/NUL before
+        -- reflecting it. Keel's response layer also strips these, but
+        -- stdlib should not depend on that contract.
+        if origin:find("[\r\n%z]") then return 0 end
 
         if not cors.is_allowed_origin(origin, origins) then return 0 end
 

@@ -137,7 +137,11 @@ async function deliverItem(item) {
  * 2^attempt * 10 seconds, capped at 1 hour.
  */
 function backoffDelay(attempt) {
-    return Math.min((1 << attempt) * 10, 3600);
+    // L-4: `1 << attempt` overflows / sign-flips at attempt >= 31. Default
+    // maxAttempts is 5, but a user-set higher cap should still produce
+    // sane backoff. Math.pow + cap on the exponent first.
+    const exp = Math.min(Math.max(0, attempt | 0), 30);
+    return Math.min(Math.pow(2, exp) * 10, 3600);
 }
 
 /**
@@ -225,12 +229,28 @@ function stats() {
 
 /**
  * Delete delivered items older than maxAge seconds.
+ *
+ * L-5: NOTE — by default this only deletes `state = 'delivered'` rows.
+ * Failed deliveries (`state = 'failed'`, i.e. exceeded maxAttempts) are
+ * retained indefinitely as an audit trail. Pass `opts.alsoFailed = true`
+ * to delete old failed rows too (when, e.g., you've drained them via an
+ * out-of-band investigation).
+ *
  * @param {number} maxAge - seconds (default 7 days)
+ * @param {Object} [opts] - { alsoFailed?: boolean }
  * @returns {number} deleted count
  */
-function cleanup(maxAge) {
+function cleanup(maxAge, opts) {
     if (maxAge === undefined) maxAge = 86400 * 7;
     const cutoff = time.now() - maxAge;
+    const alsoFailed = !!(opts && opts.alsoFailed);
+    if (alsoFailed) {
+        return db.exec(
+            "DELETE FROM _hull_outbox WHERE delivered_at <= ? " +
+            "AND state IN ('delivered', 'failed')",
+            [cutoff]
+        );
+    }
     return db.exec(
         "DELETE FROM _hull_outbox WHERE state = 'delivered' AND delivered_at <= ?",
         [cutoff]

@@ -276,8 +276,14 @@ int hl_agent_errors(const char *app_dir, ShJsonBuf *out)
     char *buf = malloc((size_t)flen + 1);
     if (!buf) { fclose(f); return -1; }
     size_t n = fread(buf, 1, (size_t)flen, f);
-    buf[n] = '\0';
+    /* L3: capture read error before fclose. */
+    int read_err = ferror(f);
     fclose(f);
+    if (read_err || n != (size_t)flen) {
+        free(buf);
+        return -1;
+    }
+    buf[n] = '\0';
 
     /* Pass through raw JSON — write directly to buffer */
     sh_json_buf_write(out, buf, n);

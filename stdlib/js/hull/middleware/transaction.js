@@ -61,5 +61,8 @@ function attempt(fn) {
     }
 }
 
-const transaction = { middleware, run, attempt };
+// L-1 (parity with Lua transaction.try): expose under both `attempt` and
+// `try` so cross-runtime code can use the documented Lua name. `try` is
+// a reserved word so the object literal must quote it.
+const transaction = { middleware, run, attempt, "try": attempt };
 export { transaction };

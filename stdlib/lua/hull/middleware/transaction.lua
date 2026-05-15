@@ -16,28 +16,12 @@
 
 local transaction = {}
 
---- Create a post-body middleware that wraps the downstream handler in db.batch().
--- opts.on_error: optional function(req, res, err) called on rollback (default: 500 JSON)
+--- Marks the request as needing transactional wrapping. Handlers call
+-- transaction.run(fn) (or transaction.try(fn)) to actually wrap their
+-- DB work in BEGIN IMMEDIATE..COMMIT — see those helpers below.
+-- L-4: trimmed the long historical-design comment block.
 function transaction.middleware(_opts)
     return function(req, _res)
-        -- Store the original handler result in ctx so the transaction wrapper
-        -- can propagate it. The actual wrapping happens via db.batch():
-        -- BEGIN IMMEDIATE is acquired, handler runs, COMMIT on success,
-        -- ROLLBACK on error.
-        --
-        -- Since post-body middleware runs before the handler, we set a flag
-        -- that the dispatch layer can use. However, Hull's middleware model
-        -- doesn't let us wrap the handler call itself. Instead, we use
-        -- db.batch() directly here and store state for the handler to use.
-        --
-        -- The practical approach: mark the request as "in transaction" and
-        -- let the handler call transaction.wrap(req, fn) explicitly, OR
-        -- use this middleware which calls db.batch() around a flag check.
-        --
-        -- Simplest correct approach: this middleware sets req.ctx._txn = true
-        -- as a marker. Handlers that want transactional semantics should use
-        -- transaction.run(fn) which checks for nested transactions.
-
         req.ctx._txn = true
         return 0
     end

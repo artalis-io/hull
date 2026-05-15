@@ -435,16 +435,44 @@ static int hl_parse_serve_args(int argc, char **argv, HlServeConfig *cfg)
             }
             cfg->drain_timeout = (int)dt;
         } else if (strcmp(argv[i], "--wasm-heap") == 0 && i + 1 < argc) {
-            cfg->wasm_heap = hl_parse_size(argv[++i]);
+            /* L1: validate hl_parse_size; previously a typo like "128MB"
+             * silently set wasm_heap=-1 and was then masked by a
+             * downstream `> 0` check that printed nothing. */
+            long v = hl_parse_size(argv[++i]);
+            if (v <= 0) {
+                fprintf(stderr, "hull: invalid --wasm-heap: %s\n", argv[i]);
+                return -1;
+            }
+            cfg->wasm_heap = v;
         } else if (strcmp(argv[i], "--wasm-stack") == 0 && i + 1 < argc) {
-            cfg->wasm_stack = hl_parse_size(argv[++i]);
+            long v = hl_parse_size(argv[++i]);
+            if (v <= 0) {
+                fprintf(stderr, "hull: invalid --wasm-stack: %s\n", argv[i]);
+                return -1;
+            }
+            cfg->wasm_stack = v;
         } else if (strcmp(argv[i], "--wasm-gas") == 0 && i + 1 < argc) {
             char *end;
-            cfg->wasm_gas = strtoll(argv[++i], &end, 10);
+            long long v = strtoll(argv[++i], &end, 10);
+            if (*end != '\0' || v <= 0) {
+                fprintf(stderr, "hull: invalid --wasm-gas: %s\n", argv[i]);
+                return -1;
+            }
+            cfg->wasm_gas = v;
         } else if (strcmp(argv[i], "--wasm-max-input") == 0 && i + 1 < argc) {
-            cfg->wasm_max_input = hl_parse_size(argv[++i]);
+            long v = hl_parse_size(argv[++i]);
+            if (v <= 0) {
+                fprintf(stderr, "hull: invalid --wasm-max-input: %s\n", argv[i]);
+                return -1;
+            }
+            cfg->wasm_max_input = v;
         } else if (strcmp(argv[i], "--wasm-max-output") == 0 && i + 1 < argc) {
-            cfg->wasm_max_output = hl_parse_size(argv[++i]);
+            long v = hl_parse_size(argv[++i]);
+            if (v <= 0) {
+                fprintf(stderr, "hull: invalid --wasm-max-output: %s\n", argv[i]);
+                return -1;
+            }
+            cfg->wasm_max_output = v;
 #ifdef HL_ENABLE_GPU
         } else if (strcmp(argv[i], "--gpu-device") == 0 && i + 1 < argc) {
             char *end;

@@ -97,8 +97,11 @@ static int marshal_udf_input(uint8_t *buf, size_t buf_size,
             break;
         }
 
-        /* Need: 1 (tag) + 4 (len) + data_len */
-        if (pos + 5 + data_len > buf_size)
+        /* Need: 1 (tag) + 4 (len) + data_len. L5: phrase as subtractions
+         * so a 32-bit `size_t` (e.g. ILP32 target) cannot wrap when
+         * `data_len` is near UINT32_MAX. */
+        if (pos > buf_size || buf_size - pos < 5 ||
+            data_len > buf_size - pos - 5)
             return -1;
 
         buf[pos++] = tag;

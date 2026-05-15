@@ -56,7 +56,8 @@ function shouldSkip(path, skipList) {
 function middleware(opts) {
     const o = opts || {};
     const skip = o.skip || null;
-    const includeHeaders = o.include_headers || null;
+    // L-2: accept camelCase (idiomatic JS) and snake_case (Lua-parity).
+    const includeHeaders = o.includeHeaders || o.include_headers || null;
 
     return function loggerMiddleware(req, res) {
         if (shouldSkip(req.path, skip))

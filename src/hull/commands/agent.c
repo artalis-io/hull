@@ -132,9 +132,18 @@ static int cmd_request(int argc, char **argv)
     int header_count = 0;
 
     for (int i = 2; i < argc; i++) {
-        if (strcmp(argv[i], "-p") == 0 && i + 1 < argc)
-            port = (int)strtol(argv[++i], NULL, 10);
-        else if (strcmp(argv[i], "-d") == 0 && i + 1 < argc)
+        if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
+            /* L2: strict port parse — silent strtol(s, NULL, 10) lets
+             * "abc" become 0 and the request would fail downstream with
+             * a confusing error. */
+            char *e;
+            long v = strtol(argv[++i], &e, 10);
+            if (*e != '\0' || v < 1 || v > 65535) {
+                fprintf(stderr, "hull agent: invalid port: %s\n", argv[i]);
+                return 1;
+            }
+            port = (int)v;
+        } else if (strcmp(argv[i], "-d") == 0 && i + 1 < argc)
             body = argv[++i];
         else if (strcmp(argv[i], "-H") == 0 && i + 1 < argc) {
             if (header_count < 32)
@@ -158,9 +167,15 @@ static int cmd_status(int argc, char **argv)
     const char *app_dir = ".";
 
     for (int i = 0; i < argc; i++) {
-        if (strcmp(argv[i], "-p") == 0 && i + 1 < argc)
-            port = (int)strtol(argv[++i], NULL, 10);
-        else if (argv[i][0] != '-')
+        if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
+            char *e;
+            long v = strtol(argv[++i], &e, 10);
+            if (*e != '\0' || v < 1 || v > 65535) {
+                fprintf(stderr, "hull agent status: invalid port: %s\n", argv[i]);
+                return 1;
+            }
+            port = (int)v;
+        } else if (argv[i][0] != '-')
             app_dir = argv[i];
     }
 
