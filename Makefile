@@ -603,7 +603,8 @@ MIGRATE_OBJ    := $(BUILDDIR)/migrate.o
 VFS_OBJ        := $(BUILDDIR)/vfs.o
 CACERT_OBJ     := $(BUILDDIR)/cacert.o
 APP_CONTEXT_OBJ := $(BUILDDIR)/app_context.o
-AGENT_LIB_OBJ := $(BUILDDIR)/agent_lib.o
+AGENT_LIB_SRCS := $(wildcard $(SRCDIR)/hull/agent/*.c)
+AGENT_LIB_OBJ  := $(patsubst $(SRCDIR)/hull/agent/%.c,$(BUILDDIR)/agent_%.o,$(AGENT_LIB_SRCS))
 AGENT_API_OBJ  := $(BUILDDIR)/agent_api.o
 MAIN_OBJ       := $(BUILDDIR)/main.o
 ENTRY_OBJ      := $(BUILDDIR)/entry.o
@@ -1103,8 +1104,10 @@ $(VFS_OBJ): $(SRCDIR)/hull/vfs.c | $(BUILDDIR)
 $(APP_CONTEXT_OBJ): $(SRCDIR)/hull/app_context.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# Agent library (shared by CLI, MCP, HTTP endpoints)
-$(AGENT_LIB_OBJ): $(SRCDIR)/hull/agent_lib.c | $(BUILDDIR)
+# Agent library (shared by CLI, MCP, HTTP endpoints) — one .o per
+# operation, plus agent_helpers.o for write_error/open_app_db.
+# Source files live under src/hull/agent/ since roadmap item I step 3.
+$(BUILDDIR)/agent_%.o: $(SRCDIR)/hull/agent/%.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Agent API (diagnostic HTTP endpoints)
@@ -1465,10 +1468,10 @@ cppcheck:
 		--suppress=staticFunction \
 		--suppress=uninitvar:$(SRCDIR)/hull/runtime/lua/bindings.c \
 		--suppress=unusedLabelConfiguration:$(SRCDIR)/hull/main.c \
-		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/agent_lib.c \
+		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/agent/*.c \
 		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/cap/wasm.c \
-		--suppress=unusedStructMember:$(SRCDIR)/hull/agent_lib.c \
-		--suppress=unusedVariable:$(SRCDIR)/hull/agent_lib.c \
+		--suppress=unusedStructMember:$(SRCDIR)/hull/agent/*.c \
+		--suppress=unusedVariable:$(SRCDIR)/hull/agent/*.c \
 		--suppress=unusedStructMember:$(SRCDIR)/hull/app_context.c \
 		--suppress=unusedVariable:$(SRCDIR)/hull/app_context.c \
 		--suppress=variableScope:$(SRCDIR)/hull/cap/wasm.c \
@@ -1485,7 +1488,7 @@ cppcheck:
 		--suppress='*:$(LOG_DIR)/*' \
 		--error-exitcode=1 \
 		-I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(SQLITE_DIR) -I$(KEEL_INC) \
-		$(SRCDIR)/hull/main.c $(SRCDIR)/hull/alloc.c $(SRCDIR)/hull/static.c $(SRCDIR)/hull/app_context.c $(SRCDIR)/hull/agent_lib.c $(SRCDIR)/hull/agent_api.c $(SRCDIR)/hull/cap/*.c \
+		$(SRCDIR)/hull/main.c $(SRCDIR)/hull/alloc.c $(SRCDIR)/hull/static.c $(SRCDIR)/hull/app_context.c $(SRCDIR)/hull/agent/*.c $(SRCDIR)/hull/agent_api.c $(SRCDIR)/hull/cap/*.c \
 		$(SRCDIR)/hull/commands/*.c \
 		$(SRCDIR)/hull/runtime/js/*.c $(SRCDIR)/hull/runtime/lua/*.c 2>&1
 
