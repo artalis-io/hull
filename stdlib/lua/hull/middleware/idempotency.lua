@@ -63,25 +63,28 @@ local REPLAYABLE_HEADERS = {
     ["permissions-policy"]  = true,
 }
 
+-- X-* credential substrings we explicitly deny. Module-level so the
+-- table is created once, not per-call.
+local X_CREDENTIAL_PATTERNS = {
+    "x-auth", "x-api-key", "x-csrf", "x-token",
+    "x-forwarded-authorization", "x-amz-security-token",
+    "x-aws-", "x-google-", "x-vault-", "x-jwt-",
+}
+
 local function is_replayable_header(name)
     if type(name) ~= "string" or name == "" then return false end
     local lc = name:lower()
-    if REPLAYABLE_HEADERS[lc] then return true end
-    -- Credential headers: always deny, regardless of casing or X- prefix.
+    -- Always-deny credential headers (run FIRST so an accidental
+    -- allowlist addition can't override the deny — JS parity).
     if lc == "set-cookie" or lc == "authorization" or lc == "cookie" or
        lc == "proxy-authenticate" or lc == "www-authenticate" then
         return false
     end
-    -- X-* credential patterns we explicitly deny (case-insensitive
-    -- substring matches on the lowered name):
-    local x_creds = {
-        "x-auth", "x-api-key", "x-csrf", "x-token",
-        "x-forwarded-authorization", "x-amz-security-token",
-        "x-aws-", "x-google-", "x-vault-", "x-jwt-",
-    }
-    for _, deny in ipairs(x_creds) do
+    for _, deny in ipairs(X_CREDENTIAL_PATTERNS) do
         if lc:find(deny, 1, true) then return false end
     end
+    -- Then check allowlist.
+    if REPLAYABLE_HEADERS[lc] then return true end
     -- Anything not on the allowlist is denied (no blanket X-*).
     return false
 end

@@ -74,14 +74,18 @@ const X_CREDENTIAL_PATTERNS = [
 function isReplayableHeader(name) {
     if (typeof name !== "string" || !name) return false;
     const lc = name.toLowerCase();
-    if (REPLAYABLE_HEADERS[lc]) return true;
-    // Credential headers: always deny.
+    // Always-deny credential headers (run FIRST so an accidental
+    // allowlist addition can't override the deny — defense in depth
+    // that actually defends; the previous order made the deny loop
+    // dead code because the function fell through to `return false`).
     if (lc === "set-cookie" || lc === "authorization" ||
         lc === "cookie" || lc === "proxy-authenticate" ||
         lc === "www-authenticate") return false;
     for (let i = 0; i < X_CREDENTIAL_PATTERNS.length; i++) {
         if (lc.indexOf(X_CREDENTIAL_PATTERNS[i]) !== -1) return false;
     }
+    // Then check allowlist.
+    if (REPLAYABLE_HEADERS[lc]) return true;
     // Anything not on the allowlist is denied (no blanket X-*).
     return false;
 }

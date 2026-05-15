@@ -38,11 +38,21 @@ const MAX_CACHE_SIZE     = 1024;
 
 // ── Validation ──────────────────────────────────────────────────────
 
+// Identifiers reachable from generated code:
+//   - Must match IDENT_RE (start with letter/underscore, then letters/digits/_)
+//   - Must NOT start with `__` — those names are reserved for codegen
+//     helpers (`__p`, `__d`, `__e`, `__f`, `__it`). A user-template
+//     `{% for __it in items %}` would otherwise shadow the cached
+//     loop-source local and TDZ-crash at render time.
 const IDENT_RE = /^[a-zA-Z_]\w*$/;
 
 function validateIdent(s, context) {
     if (!IDENT_RE.test(s)) {
         throw new Error("invalid identifier in template " + (context || "expression") + ": " + s);
+    }
+    if (s.length >= 2 && s.charAt(0) === "_" && s.charAt(1) === "_") {
+        throw new Error("identifier in template " + (context || "expression") +
+                        " cannot start with '__' (reserved): " + s);
     }
 }
 
