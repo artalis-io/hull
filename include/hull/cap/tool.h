@@ -1,9 +1,13 @@
 /*
- * cap/tool.h — Controlled process/filesystem access for tool scripts
+ * cap/tool.h — Pure-C tool capability surface
  *
- * Provides the `tool` global table in Lua tool mode.
- * All process execution goes through an allowlisted fork/execvp path.
- * All filesystem operations validate paths against unveiled directories.
+ * Declares the controlled-process and unveil/filesystem helpers used by
+ * Hull tooling. All process execution goes through an allowlisted
+ * fork/execvp path. All filesystem operations validate paths against
+ * unveiled directories.
+ *
+ * The Lua `tool` global is declared separately in hull/runtime/tool.h
+ * (item F — cap layer is now runtime-free).
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -12,11 +16,6 @@
 #define HL_CAP_TOOL_H
 
 #include <stddef.h>
-
-#ifdef HL_ENABLE_LUA
-/* Forward declaration */
-typedef struct lua_State lua_State;
-#endif
 
 /* ── Unveil path table ─────────────────────────────────────────────── */
 
@@ -120,45 +119,5 @@ int hl_tool_mkdir(const char *path, const HlToolUnveilCtx *ctx);
  * Returns 0 on success, -1 on error.
  */
 int hl_tool_rmdir(const char *path, const HlToolUnveilCtx *ctx);
-
-/* ── Lua registration ──────────────────────────────────────────────── */
-
-#ifdef HL_ENABLE_LUA
-
-/*
- * Register the `tool` global table in the Lua state.
- *
- * Provides:
- *   tool.spawn(argv_table)        — fork/execvp with allowlist, return (bool, int)
- *   tool.spawn_read(argv_table)   — spawn and capture stdout, return string|nil
- *   tool.find_files(dir, pattern) — recursive file search, return table
- *   tool.copy(src, dst)           — copy file, return bool
- *   tool.mkdir(path)              — recursive mkdir, return bool
- *   tool.rmdir(path)              — recursive remove, return bool
- *   tool.tmpdir()                 — create temp directory, return path
- *   tool.exit(code)               — exit process
- *   tool.read_file(path)          — read file, return string or nil
- *   tool.write_file(path, data)   — write file, return bool
- *   tool.file_exists(path)        — check existence, return bool
- *   tool.stderr(msg)              — write to stderr
- *   tool.loadfile(path)           — load Lua chunk, return function or nil+err
- *   tool.extract_platform(dir)    — extract embedded platform .a, return bool
- *   tool.extract_platform_cosmo(dir) — extract multi-arch + .aarch64/ layout
- *   tool.platform_archs()         — return table of embedded arch names or nil
- *   tool.cc                       — configured compiler (string field)
- *
- * The unveil context pointer is stored in the Lua registry for
- * path validation by filesystem functions.
- */
-void hl_cap_tool_register(lua_State *L, HlToolUnveilCtx *ctx);
-
-/*
- * Expose the compiler vtable as tool.compiler in the Lua tool global.
- * Must be called after hl_cap_tool_register(). compiler must not be NULL.
- */
-struct HlCompiler;  /* forward declaration */
-void hl_cap_tool_expose_compiler(lua_State *L, struct HlCompiler *compiler);
-
-#endif /* HL_ENABLE_LUA */
 
 #endif /* HL_CAP_TOOL_H */

@@ -12,6 +12,7 @@
 #include "hull/compiler.h"
 #include "hull/cap/crypto.h"
 #include "hull/cap/tool.h"
+#include "hull/runtime/tool.h"
 #include "hull/sandbox.h"
 #include "hull/vfs.h"
 #include "hull/entry.h"
@@ -211,7 +212,7 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
      * requiring the default (cosmocc) to be installed. */
     HlCompiler *compiler = hl_compiler_select(cc_explicit);
     if (compiler)
-        hl_cap_tool_expose_compiler(L, compiler);
+        hl_lua_tool_expose_compiler(L, compiler);
 
     /* Pass CLI args as global `arg` table */
     lua_newtable(L);
