@@ -109,7 +109,7 @@ Recommended sequence — every item is small/medium, no dependencies between gro
 
 | # | Refactor | Effort | Rationale |
 |---|----------|:------:|-----------|
-| **E** | **C1** — Move `cap/test_{lua,js}.c` → `runtime/{lua,js}/mod_test.c` | S | Restore cap-layer invariant (cap has no runtime knowledge) |
+| ✅ **E** | **C1** — Move `cap/test_{lua,js}.c` → `runtime/{lua,js}/mod_test.c`. Split `cap/test.h` into a pure-C `cap/test.h` (HlTestResult + `hl_cap_test_dispatch`) and a new `runtime/test.h` for the per-runtime bindings. Functions renamed `hl_cap_test_*_{lua,js}` → `hl_{lua,js}_test_*`. | S | Done. `grep -r "hull/runtime" src/hull/cap/` now returns zero — the cap layer is genuinely runtime-free. |
 | **F** | **C2** — Split `cap/tool.c` Lua bindings into `runtime/lua/mod_tool.c` | S | Same; cap/tool.c shrinks 1035 → ~520 lines |
 | **G** | **H3** — Split `manifest.c` → `manifest_{lua,js}.c` | S | Mirrors the runtime/{lua,js} split |
 | **H** | **M4** — Extract phases from `main.c::wire_and_start` | S | 291-line fn → 4 cohesive helpers |

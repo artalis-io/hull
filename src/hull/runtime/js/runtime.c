@@ -19,6 +19,7 @@
 #include "hull/limits/runtime.h"
 #include "hull/manifest.h"
 #include "hull/cap/test.h"
+#include "hull/runtime/test.h"
 
 #include <keel/keel.h>
 #include <keel/websocket_server.h>
@@ -797,7 +798,7 @@ void hl_js_free(HlJS *js)
 
     if (js->ctx) {
         /* Free test state opaque data before deleting globals */
-        hl_cap_test_free_js(js->ctx);
+        hl_js_test_free(js->ctx);
 
         /* Delete hull internal globals so GC can collect them */
         JSValue global = JS_GetGlobalObject(js->ctx);

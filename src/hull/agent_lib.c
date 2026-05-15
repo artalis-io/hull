@@ -13,6 +13,7 @@
 #include "hull/cap/db_backend.h"
 #include "hull/cap/test.h"
 #include "hull/cap/tool.h"
+#include "hull/runtime/test.h"
 #include "hull/entry.h"
 #include "hull/migrate.h"
 #include "hull/runtime.h"
@@ -764,7 +765,7 @@ static int agent_test_lua_ctx(HlAppContext *ctx, ShJsonBuf *out)
         return write_error(out, "no routes registered");
     }
 
-    hl_cap_test_register_lua(lua->L, &router, lua);
+    hl_lua_test_register(lua->L, &router, lua);
 
     char **test_files = hl_tool_find_files(app_dir, "test_*.lua", NULL);
     if (!test_files || !test_files[0]) {
@@ -788,7 +789,7 @@ static int agent_test_lua_ctx(HlAppContext *ctx, ShJsonBuf *out)
         const char *basename = strrchr(file, '/');
         basename = basename ? basename + 1 : file;
 
-        hl_cap_test_clear_lua(lua->L);
+        hl_lua_test_clear(lua->L);
 
         sh_json_write_object_start(&w);
         sh_json_write_kv_string(&w, "name", basename);
@@ -809,7 +810,7 @@ static int agent_test_lua_ctx(HlAppContext *ctx, ShJsonBuf *out)
 
         int file_total = 0, file_passed = 0, file_failed = 0;
         memset(results, 0, sizeof(results));
-        hl_cap_test_run_lua(lua->L, &file_total, &file_passed, &file_failed,
+        hl_lua_test_run(lua->L, &file_total, &file_passed, &file_failed,
                             NULL, results, MAX_TEST_RESULTS);
 
         write_test_results(&w, results, file_total);
@@ -848,7 +849,7 @@ static int agent_test_js_ctx(HlAppContext *ctx, ShJsonBuf *out)
         return write_error(out, "no routes registered");
     }
 
-    hl_cap_test_register_js(js->ctx, &router, js);
+    hl_js_test_register(js->ctx, &router, js);
 
     char **test_files = hl_tool_find_files(app_dir, "test_*.js", NULL);
     if (!test_files || !test_files[0]) {
@@ -872,7 +873,7 @@ static int agent_test_js_ctx(HlAppContext *ctx, ShJsonBuf *out)
         const char *basename = strrchr(file, '/');
         basename = basename ? basename + 1 : file;
 
-        hl_cap_test_clear_js(js->ctx);
+        hl_js_test_clear(js->ctx);
 
         sh_json_write_object_start(&w);
         sh_json_write_kv_string(&w, "name", basename);
@@ -928,7 +929,7 @@ static int agent_test_js_ctx(HlAppContext *ctx, ShJsonBuf *out)
 
         int file_total = 0, file_passed = 0, file_failed = 0;
         memset(results, 0, sizeof(results));
-        hl_cap_test_run_js(js->ctx, &file_total, &file_passed, &file_failed,
+        hl_js_test_run(js->ctx, &file_total, &file_passed, &file_failed,
                            NULL, results, MAX_TEST_RESULTS);
 
         write_test_results(&w, results, file_total);

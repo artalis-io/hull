@@ -15,6 +15,7 @@
 #ifdef HL_ENABLE_LUA
 #include "hull/runtime/lua.h"
 #include "hull/cap/test.h"
+#include "hull/runtime/test.h"
 #include "lua.h"
 #include "lauxlib.h"
 #endif
@@ -22,6 +23,7 @@
 #ifdef HL_ENABLE_JS
 #include "hull/runtime/js.h"
 #include "hull/cap/test.h"
+#include "hull/runtime/test.h"
 #include "quickjs.h"
 #endif
 
@@ -72,7 +74,7 @@ static int run_lua_tests(const char *app_dir, const char *entry)
     }
 
     /* Register test module */
-    hl_cap_test_register_lua(lua->L, &router, lua);
+    hl_lua_test_register(lua->L, &router, lua);
 
     /* Discover test files */
     char **test_files = hl_tool_find_files(app_dir, "test_*.lua", NULL);
@@ -95,7 +97,7 @@ static int run_lua_tests(const char *app_dir, const char *entry)
         printf("\n--- %s ---\n", basename);
 
         /* Clear test cases from previous file */
-        hl_cap_test_clear_lua(lua->L);
+        hl_lua_test_clear(lua->L);
 
         /* Load and execute the test file -> registers test cases */
         if (luaL_dofile(lua->L, file) != LUA_OK) {
@@ -110,7 +112,7 @@ static int run_lua_tests(const char *app_dir, const char *entry)
 
         /* Execute registered test cases */
         int file_total = 0, file_passed = 0, file_failed = 0;
-        hl_cap_test_run_lua(lua->L, &file_total, &file_passed, &file_failed,
+        hl_lua_test_run(lua->L, &file_total, &file_passed, &file_failed,
                             stdout, NULL, 0);
 
         total += file_total;
@@ -162,7 +164,7 @@ static int run_js_tests(const char *app_dir, const char *entry)
         return 1;
     }
 
-    hl_cap_test_register_js(js->ctx, &router, js);
+    hl_js_test_register(js->ctx, &router, js);
 
     char **test_files = hl_tool_find_files(app_dir, "test_*.js", NULL);
     if (!test_files || !test_files[0]) {
@@ -182,7 +184,7 @@ static int run_js_tests(const char *app_dir, const char *entry)
 
         printf("\n--- %s ---\n", basename);
 
-        hl_cap_test_clear_js(js->ctx);
+        hl_js_test_clear(js->ctx);
 
         /* Read and evaluate the test file */
         FILE *f = fopen(file, "r");
@@ -220,7 +222,7 @@ static int run_js_tests(const char *app_dir, const char *entry)
         JS_FreeValue(js->ctx, result);
 
         int file_total = 0, file_passed = 0, file_failed = 0;
-        hl_cap_test_run_js(js->ctx, &file_total, &file_passed, &file_failed,
+        hl_js_test_run(js->ctx, &file_total, &file_passed, &file_failed,
                            stdout, NULL, 0);
 
         total += file_total;

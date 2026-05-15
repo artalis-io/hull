@@ -532,11 +532,14 @@ PLEDGE_OBJS ?=
 
 # ── Hull source files ───────────────────────────────────────────────
 
-# Capability sources (always compiled, except cap/tool.c and cap/test_*.c which need runtimes)
-CAP_SRCS := $(filter-out $(SRCDIR)/hull/cap/tool.c $(SRCDIR)/hull/cap/test.c $(SRCDIR)/hull/cap/test_lua.c $(SRCDIR)/hull/cap/test_js.c,$(wildcard $(SRCDIR)/hull/cap/*.c))
+# Capability sources (always compiled, except cap/tool.c and cap/test.c
+# which need runtimes / linker visibility from runtime bindings).
+# Runtime-layer test bindings live in runtime/{lua,js}/mod_test.c (picked
+# up via the JS_RT_SRCS / LUA_RT_SRCS globs below).
+CAP_SRCS := $(filter-out $(SRCDIR)/hull/cap/tool.c $(SRCDIR)/hull/cap/test.c,$(wildcard $(SRCDIR)/hull/cap/*.c))
 CAP_OBJS := $(patsubst $(SRCDIR)/hull/cap/%.c,$(BUILDDIR)/cap_%.o,$(CAP_SRCS))
 CAP_TOOL_OBJ := $(BUILDDIR)/cap_tool.o
-CAP_TEST_OBJ := $(BUILDDIR)/cap_test.o $(BUILDDIR)/cap_test_lua.o $(BUILDDIR)/cap_test_js.o
+CAP_TEST_OBJ := $(BUILDDIR)/cap_test.o
 
 # JS runtime sources
 JS_RT_SRCS := $(wildcard $(SRCDIR)/hull/runtime/js/*.c)
@@ -578,7 +581,11 @@ SANDBOX_OBJ    := $(BUILDDIR)/sandbox.o
 # Test-specific objects (single runtime — avoids pulling Lua into JS tests and vice versa)
 MANIFEST_JS_OBJ  := $(BUILDDIR)/manifest_js_only.o
 MANIFEST_LUA_OBJ := $(BUILDDIR)/manifest_lua_only.o
-CAP_TEST_JS_OBJ  := $(BUILDDIR)/cap_test_dispatch.o $(BUILDDIR)/cap_test_js_only.o
+CAP_TEST_JS_OBJ  := $(BUILDDIR)/cap_test_dispatch.o
+CAP_TEST_LUA_OBJ := $(BUILDDIR)/cap_test_dispatch.o
+# Note: the JS/Lua test bindings now live in {JS,LUA}_RT_OBJS
+# (runtime/{lua,js}/mod_test.c); only the pure-C dispatch helper needs
+# to be linked separately. (Item E: cap layer is now runtime-free.)
 TOOL_OBJ       := $(BUILDDIR)/tool.o
 SIG_OBJ        := $(BUILDDIR)/signature.o
 RELEASE_OBJ    := $(BUILDDIR)/release.o
@@ -1047,10 +1054,6 @@ $(MANIFEST_OBJ): $(SRCDIR)/hull/manifest.c | $(BUILDDIR)
 $(MANIFEST_JS_OBJ): $(SRCDIR)/hull/manifest.c | $(BUILDDIR)
 	$(CC) $(filter-out -DHL_ENABLE_LUA,$(CFLAGS)) $(INCLUDES) -c -o $@ $<
 
-# cap/test_js.c (JS-only, for test_js — excludes Lua bindings to avoid Lua link deps)
-$(BUILDDIR)/cap_test_js_only.o: $(SRCDIR)/hull/cap/test_js.c | $(BUILDDIR)
-	$(CC) $(filter-out -DHL_ENABLE_LUA,$(CFLAGS)) $(INCLUDES) -c -o $@ $<
-
 # cap/test.c (shared dispatch — no runtime deps, used by both runtimes)
 $(BUILDDIR)/cap_test_dispatch.o: $(SRCDIR)/hull/cap/test.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
@@ -1224,9 +1227,9 @@ $(BUILDDIR)/test_js: $(TESTDIR)/hull/runtime/js/test_js.c $(TEST_COMMON_DEPS) $(
 		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(WGPU_LIB) $(WGPU_FRAMEWORKS) -lm -lpthread
 
 # Lua runtime test — needs Lua + Lua runtime objects + manifest (Lua-only) + cap_tool + build_assets
-$(BUILDDIR)/test_lua: $(TESTDIR)/hull/runtime/lua/test_lua.c $(TEST_COMMON_DEPS) $(CAP_TOOL_OBJ) $(BUILD_ASSET_OBJ) $(MANIFEST_LUA_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(LUA_RT_OBJS) $(LUA_OBJS) | $(BUILDDIR)
+$(BUILDDIR)/test_lua: $(TESTDIR)/hull/runtime/lua/test_lua.c $(TEST_COMMON_DEPS) $(CAP_TOOL_OBJ) $(CAP_TEST_LUA_OBJ) $(BUILD_ASSET_OBJ) $(MANIFEST_LUA_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(LUA_RT_OBJS) $(LUA_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(TEST_CAP_OBJS) $(CAP_TOOL_OBJ) $(BUILD_ASSET_OBJ) $(LUA_RT_OBJS) $(MANIFEST_LUA_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(WAMR_OBJS) $(LUA_OBJS) \
+		$(TEST_CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_LUA_OBJ) $(BUILD_ASSET_OBJ) $(LUA_RT_OBJS) $(MANIFEST_LUA_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(WAMR_OBJS) $(LUA_OBJS) \
 		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(WGPU_LIB) $(WGPU_FRAMEWORKS) -lm -lpthread
 
 # Tool hardening test — cap/tool.c compiled without runtime flags (self-contained C functions)

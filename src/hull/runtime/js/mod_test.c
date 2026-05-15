@@ -1,8 +1,10 @@
 /*
- * cap/test_js.c — JavaScript test bindings
+ * runtime/js/mod_test.c — JavaScript test bindings
  *
  * JS-specific test registration, HTTP dispatch wrappers, and assertions.
- * Uses shared dispatch logic from test.c (hl_cap_test_dispatch).
+ * Uses the shared pure-C dispatch helper (cap/test.c::hl_cap_test_dispatch);
+ * its source moved from cap/ to runtime/js/ as part of architectural
+ * roadmap item E (restore the cap-layer "no runtime knowledge" invariant).
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -10,6 +12,7 @@
 #ifdef HL_ENABLE_JS
 
 #include "hull/cap/test.h"
+#include "hull/runtime/test.h"
 #include "hull/runtime/js.h"
 #include "hull/alloc.h"
 
@@ -351,7 +354,7 @@ static JSValue js_test_err(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-void hl_cap_test_register_js(JSContext *ctx, KlRouter *router, HlJS *js)
+void hl_js_test_register(JSContext *ctx, KlRouter *router, HlJS *js)
 {
     HlJSTestState *state = js_malloc(ctx, sizeof(HlJSTestState));
     if (!state) return;
@@ -392,7 +395,7 @@ void hl_cap_test_register_js(JSContext *ctx, KlRouter *router, HlJS *js)
     JS_FreeValue(ctx, global);
 }
 
-void hl_cap_test_free_js(JSContext *ctx)
+void hl_js_test_free(JSContext *ctx)
 {
     HlJSTestState *state = get_js_test_state(ctx);
     if (!state) return;
@@ -401,7 +404,7 @@ void hl_cap_test_free_js(JSContext *ctx)
     js_free(ctx, state);
 }
 
-void hl_cap_test_clear_js(JSContext *ctx)
+void hl_js_test_clear(JSContext *ctx)
 {
     HlJSTestState *state = get_js_test_state(ctx);
     if (!state) return;
@@ -410,7 +413,7 @@ void hl_cap_test_clear_js(JSContext *ctx)
     state->cases = JS_NewArray(ctx);
 }
 
-void hl_cap_test_run_js(JSContext *ctx, int *total, int *passed, int *failed,
+void hl_js_test_run(JSContext *ctx, int *total, int *passed, int *failed,
                         FILE *out, HlTestCaseResult *results, int max_results)
 {
     *total = 0;

@@ -1,8 +1,10 @@
 /*
- * cap/test_lua.c — Lua test bindings
+ * runtime/lua/mod_test.c — Lua test bindings
  *
  * Lua-specific test registration, HTTP dispatch wrappers, and assertions.
- * Uses shared dispatch logic from test.c (hl_cap_test_dispatch).
+ * Uses the shared pure-C dispatch helper (cap/test.c::hl_cap_test_dispatch);
+ * its source moved from cap/ to runtime/lua/ as part of architectural
+ * roadmap item E (restore the cap-layer "no runtime knowledge" invariant).
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -10,6 +12,7 @@
 #ifdef HL_ENABLE_LUA
 
 #include "hull/cap/test.h"
+#include "hull/runtime/test.h"
 #include "hull/runtime/lua.h"
 #include "hull/alloc.h"
 
@@ -312,7 +315,7 @@ static const luaL_Reg test_methods[] = {
     { NULL, NULL }
 };
 
-void hl_cap_test_register_lua(lua_State *L, KlRouter *router, HlLua *lua)
+void hl_lua_test_register(lua_State *L, KlRouter *router, HlLua *lua)
 {
     /* Store router and lua context in registry */
     lua_pushlightuserdata(L, router);
@@ -337,13 +340,13 @@ void hl_cap_test_register_lua(lua_State *L, KlRouter *router, HlLua *lua)
     lua_setglobal(L, "test");
 }
 
-void hl_cap_test_clear_lua(lua_State *L)
+void hl_lua_test_clear(lua_State *L)
 {
     lua_newtable(L);
     lua_setfield(L, LUA_REGISTRYINDEX, TEST_CASES_KEY);
 }
 
-void hl_cap_test_run_lua(lua_State *L, int *total, int *passed, int *failed,
+void hl_lua_test_run(lua_State *L, int *total, int *passed, int *failed,
                          FILE *out, HlTestCaseResult *results, int max_results)
 {
     *total = 0;
