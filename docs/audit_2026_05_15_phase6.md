@@ -12,6 +12,10 @@
 | Lua stdlib (12 files touched) | 0 | 0 | 4 | 1 | 5 |
 | **Total** | **0** | **1** | **9** | **11** | **21** |
 
+**Resolution:** all 21 findings landed in commit `c1e8781`. Verified with
+`make test` (27/27), `make e2e-templates` (40/40), `e2e_deploy.sh` (43/43),
+`make e2e-mcp` (34/34). No regressions.
+
 ---
 
 ## C Audit (Phase 6 delta)
