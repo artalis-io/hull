@@ -66,7 +66,10 @@ CFLAGS += -O2
 endif
 
 ifdef COVERAGE
-CFLAGS  += -g -O0 --coverage
+# -fprofile-update=atomic prevents racy negative counts in multithreaded
+# tests (cap/wasm.c, worker_db.c, etc.) which otherwise make geninfo
+# fail with "Unexpected negative count" in the CI coverage job.
+CFLAGS  += -g -O0 --coverage -fprofile-update=atomic
 LDFLAGS += --coverage
 endif
 
