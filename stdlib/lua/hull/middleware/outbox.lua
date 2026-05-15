@@ -33,7 +33,9 @@ local _max_attempts = 5
 -- opts.flush_after_request: auto-flush after each request (default false)
 function outbox.init(opts)
     opts = opts or {}
-    if opts.max_attempts then
+    -- M-2: explicit nil check; opts.max_attempts == 0 (no retries) must
+    -- override the default.
+    if opts.max_attempts ~= nil then
         _max_attempts = opts.max_attempts
     end
     db.exec([[

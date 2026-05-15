@@ -221,7 +221,11 @@ end
 
 
 local function parse_string(str, i)
-  local res = ""
+  -- M-7: build chunks into a table and table.concat at end, not via
+  -- repeated `res = res .. ...` which is O(n²) and a DoS amplifier on
+  -- untrusted JSON bodies.
+  local parts = {}
+  local n_parts = 0
   local j = i + 1
   local k = j
 
@@ -232,26 +236,30 @@ local function parse_string(str, i)
       decode_error(str, j, "control character in string")
 
     elseif x == 92 then -- `\`: Escape
-      res = res .. str:sub(k, j - 1)
+      n_parts = n_parts + 1
+      parts[n_parts] = str:sub(k, j - 1)
       j = j + 1
       local c = str:sub(j, j)
       if c == "u" then
         local hex = str:match("^[dD][89aAbB]%x%x\\u%x%x%x%x", j + 1)
                  or str:match("^%x%x%x%x", j + 1)
                  or decode_error(str, j - 1, "invalid unicode escape in string")
-        res = res .. parse_unicode_escape(hex)
+        n_parts = n_parts + 1
+        parts[n_parts] = parse_unicode_escape(hex)
         j = j + #hex
       else
         if not escape_chars[c] then
           decode_error(str, j - 1, "invalid escape char '" .. c .. "' in string")
         end
-        res = res .. escape_char_map_inv[c]
+        n_parts = n_parts + 1
+        parts[n_parts] = escape_char_map_inv[c]
       end
       k = j + 1
 
     elseif x == 34 then -- `"`: End of string
-      res = res .. str:sub(k, j - 1)
-      return res, j + 1
+      n_parts = n_parts + 1
+      parts[n_parts] = str:sub(k, j - 1)
+      return table.concat(parts), j + 1
     end
 
     j = j + 1

@@ -29,7 +29,8 @@ local _ttl = 604800  -- default 7 days
 -- opts.ttl: how long to remember processed message IDs (default 604800 = 7 days)
 function inbox.init(opts)
     opts = opts or {}
-    if opts.ttl then
+    -- M-2: explicit nil check; opts.ttl == 0 must override the default.
+    if opts.ttl ~= nil then
         _ttl = opts.ttl
     end
 

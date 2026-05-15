@@ -155,9 +155,17 @@ function csrf.middleware(opts)
         -- Look for token in header first, then body field
         local token = req.headers[header_name]
         if not token and req.body then
-            -- Try to parse as form-encoded body for _csrf field
+            -- M-5: cap body size + max pairs to prevent DoS via a giant
+            -- form body. 1 MiB / 256 pairs is generous for any real form.
             local body = req.body
+            if #body > 1048576 then
+                res:status(413):json({ error = "csrf: body too large" })
+                return 1
+            end
+            local pair_count = 0
             for pair in body:gmatch("[^&]+") do
+                pair_count = pair_count + 1
+                if pair_count > 256 then break end
                 local eq = pair:find("=", 1, true)
                 if eq then
                     local key = pair:sub(1, eq - 1)

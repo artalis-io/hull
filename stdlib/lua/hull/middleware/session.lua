@@ -16,7 +16,9 @@ local _ttl = 86400
 -- opts.ttl: session lifetime in seconds (default 86400)
 function session.init(opts)
     opts = opts or {}
-    if opts.ttl then
+    -- M-2: explicit nil check; `if opts.ttl then` would override the
+    -- default even when the caller passes ttl=0 (0 is truthy in Lua).
+    if opts.ttl ~= nil then
         _ttl = opts.ttl
     end
 

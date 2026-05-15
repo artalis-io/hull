@@ -609,7 +609,11 @@ local function lua_quote(s)
         level = level + 1
     end
     local eq = string.rep("=", level)
-    return "[" .. eq .. "[" .. s .. "]" .. eq .. "]"
+    -- M-6: Lua silently strips the first newline immediately after `[[`
+    -- (or `[==[` etc.), so a template chunk starting with "\n..." would
+    -- lose its leading newline at render time. Prepend an extra newline
+    -- so the lexer eats THAT one and `s` is preserved byte-for-byte.
+    return "[" .. eq .. "[\n" .. s .. "]" .. eq .. "]"
 end
 
 local function codegen(ast)

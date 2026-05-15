@@ -15,6 +15,12 @@ import { json } from "hull:json";
 // Pre-computed base64url of {"alg":"HS256","typ":"JWT"}
 const HEADER_B64 = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
 
+// Lua-jwt parity: if payload.exp is below this threshold (~2033), treat
+// it as a duration in seconds-from-now rather than an absolute Unix
+// timestamp. Lets callers write `{ exp: 3600 }` meaning "1 hour from
+// now" without manually adding time.now().
+const EXP_RELATIVE_THRESHOLD = 2e9;
+
 // Length leak is acceptable: both inputs are always base64url of
 // 32-byte HMAC-SHA256 output (43 chars), so lengths always match
 // for well-formed tokens. A truncated signature fails the length
@@ -65,17 +71,23 @@ function sign(payload, secret) {
     if (p.iat === undefined)
         p.iat = time.now();
 
+    // Lua-jwt parity (M-1): if exp is small enough to look like a
+    // duration (e.g. 3600) rather than an absolute timestamp, add now.
+    if (typeof p.exp === "number" && p.exp > 0 && p.exp < EXP_RELATIVE_THRESHOLD)
+        p.exp = time.now() + p.exp;
+
     const payloadB64 = crypto.base64urlEncode(json.encode(p));
     const sig = computeSignature(HEADER_B64, payloadB64, secret);
 
     return HEADER_B64 + "." + payloadB64 + "." + sig;
 }
 
-function verify(token, secret) {
+function verify(token, secret, opts) {
     if (!token || typeof token !== "string")
         return [null, "invalid token"];
     if (!secret || typeof secret !== "string")
         return [null, "secret is required"];
+    opts = opts || {};
 
     const parts = token.split(".", 4);
     if (parts.length !== 3)
@@ -105,11 +117,14 @@ function verify(token, secret) {
     if (!payload || typeof payload !== "object")
         return [null, "payload is not an object"];
 
-    // Check expiration
+    // Check expiration. Lua-jwt parity (M-1): opts.requireExp /
+    // opts.require_exp rejects tokens lacking an exp claim.
     if (payload.exp !== undefined) {
         const now = time.now();
         if (now >= payload.exp)
             return [null, "token expired"];
+    } else if (opts.requireExp || opts.require_exp) {
+        return [null, "token missing required exp claim"];
     }
 
     // Check not-before

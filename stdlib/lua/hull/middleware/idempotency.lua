@@ -28,13 +28,47 @@
 local idempotency = {}
 
 local _ttl = 86400  -- default 24 hours
+
+-- M-3: allowlist of headers safe to replay/cache. Excludes credential
+-- and session-binding headers (Set-Cookie, WWW-Authenticate, etc.) so a
+-- stored Set-Cookie can't outlive a revoked session.
+local REPLAYABLE_HEADERS = {
+    ["content-type"]      = true,
+    ["content-language"]  = true,
+    ["content-encoding"]  = true,
+    ["location"]          = true,
+    ["etag"]              = true,
+    ["last-modified"]     = true,
+    ["cache-control"]     = true,
+    ["vary"]              = true,
+    ["x-request-id"]      = true,
+}
+
+local function is_replayable_header(name)
+    if type(name) ~= "string" or name == "" then return false end
+    local lc = name:lower()
+    if REPLAYABLE_HEADERS[lc] then return true end
+    if lc == "set-cookie" or lc == "authorization" or lc == "cookie" or
+       lc == "proxy-authenticate" or lc == "www-authenticate" then
+        return false
+    end
+    -- X-* custom application headers
+    return lc:sub(1, 2) == "x-"
+end
+
+local function header_value_safe(v)
+    if type(v) ~= "string" then return false end
+    -- Reject CRLF / NUL injection.
+    return v:find("[\r\n%z]") == nil
+end
 local _header_name = "idempotency-key"
 
 --- Initialize the idempotency table.
 -- opts.ttl: key lifetime in seconds (default 86400)
 function idempotency.init(opts)
     opts = opts or {}
-    if opts.ttl then
+    -- M-2: explicit nil check; opts.ttl == 0 must override the default.
+    if opts.ttl ~= nil then
         _ttl = opts.ttl
     end
 
@@ -157,12 +191,14 @@ function idempotency.middleware(opts)
                 -- Completed: return cached response
                 if row.state == "complete" and row.status then
                     res:status(row.status)
-                    -- Restore cached headers
+                    -- Restore cached headers (M-3: allowlist + CRLF reject)
                     if row.response_headers then
                         local headers = json.decode(row.response_headers)
                         if headers then
                             for k, v in pairs(headers) do
-                                res:header(k, v)
+                                if is_replayable_header(k) and header_value_safe(v) then
+                                    res:header(k, v)
+                                end
                             end
                         end
                     end
@@ -213,11 +249,14 @@ end
 function idempotency.respond(req, res, status_code, data, extra_headers)
     local body_str = json.encode(data)
 
-    -- Send the actual response
+    -- Send the actual response (M-3: same allowlist/CRLF check as the
+    -- replay path so credentials never end up in the cached row).
     res:status(status_code)
     if extra_headers then
         for k, v in pairs(extra_headers) do
-            res:header(k, v)
+            if is_replayable_header(k) and header_value_safe(v) then
+                res:header(k, v)
+            end
         end
     end
     res:json(data)
