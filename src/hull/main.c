@@ -924,7 +924,9 @@ static int hl_serve_load_app(HlServerState *s)
  */
 
 /* Phase 1: extract manifest + wire all per-capability configs. */
-static int hl_serve_wire_caps(HlServerState *s)
+/* Returns void — this phase has no failure mode (manifest extraction
+ * tolerates absence, TLS context creation only warns). */
+static void hl_serve_wire_caps(HlServerState *s)
 {
     HlRuntime *rt = hl_app_context_runtime(s->app);
 
@@ -1079,8 +1081,6 @@ static int hl_serve_wire_caps(HlServerState *s)
         s->smtp_cfg_storage.tls           = s->client_tls_ctx ? &s->client_tls_config : NULL;
         rt->smtp_cfg = &s->smtp_cfg_storage;
     }
-
-    return 0;
 }
 
 /* Cleanup if a phase fails after wire_caps has succeeded. */
@@ -1237,8 +1237,7 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
 
 static int hl_serve_wire_and_start(HlServerState *s)
 {
-    if (hl_serve_wire_caps(s) != 0)
-        return -1;
+    hl_serve_wire_caps(s);
     if (hl_serve_apply_sandbox(s) != 0) {
         hl_serve_undo_caps(s);
         return -1;
