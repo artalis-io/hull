@@ -86,20 +86,12 @@ int hl_agent_deploy(const char *app_dir, ShJsonBuf *out)
     int has_manifest = 0;
 
     if (hl_app_context_init(&ctx, &opts) == 0) {
-#ifdef HL_ENABLE_LUA
-        if (hl_app_context_is_lua(ctx)) {
-            HlLua *lua = hl_app_context_lua(ctx);
-            if (hl_manifest_extract_lua(lua->L, &manifest, NULL) == 0)
-                has_manifest = 1;
-        }
-#endif
-#ifdef HL_ENABLE_JS
-        if (!hl_app_context_is_lua(ctx)) {
-            HlJS *js = hl_app_context_js(ctx);
-            if (hl_manifest_extract_js(js->ctx, &manifest, NULL) == 0)
-                has_manifest = 1;
-        }
-#endif
+        /* Route manifest extraction through the runtime vtable so this
+         * file doesn't peek at HlLua->L / HlJS->ctx internals. */
+        HlRuntime *rt = hl_app_context_runtime(ctx);
+        if (rt && rt->vt && rt->vt->extract_manifest &&
+            rt->vt->extract_manifest(rt, &manifest) == 0)
+            has_manifest = 1;
         hl_app_context_free(ctx);
     }
 

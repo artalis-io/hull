@@ -16,7 +16,65 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "hull/runtime/js.h"
+#include "hull/cap/types.h"   /* HlKV for worker dispatch op */
+#include "hull/limits/core.h" /* HL_WORKER_ERR_SIZE */
 #include "quickjs.h"
+
+/* Forward declarations to keep internal.h small. */
+typedef struct HlAsyncCtx     HlAsyncCtx;
+typedef struct HlAllocator    HlAllocator;
+typedef struct KlServer       KlServer;
+typedef struct KlAsyncOp      KlAsyncOp;
+typedef struct KlThreadPool   KlThreadPool;
+
+/* ── Internal op structs (moved from public js.h, roadmap item J) ── */
+
+/* Per-timer context. Allocated by app.every/app.daily registration. */
+typedef struct HlJSTimer {
+    struct HlJS *js;
+    int         handler_id;
+    int64_t     interval_ms;
+    int64_t     timer_id;
+    int         daily;
+    int         localtime;
+    int         hour;
+    int         minute;
+    int         in_flight;
+} HlJSTimer;
+
+/* Worker dispatch operation — runtime-specific, submitted to thread pool. */
+typedef struct HlJsWorkerDispatchOp {
+    HlAsyncCtx   *async_ctx;
+    HlAllocator  *alloc;
+    KlServer     *server;
+
+    /* Input (deep-copied, owned) */
+    char         *fn_source;
+    size_t        fn_source_len;
+    HlKV         *ctx_kvs;
+    int           ctx_count;
+
+    /* Output (set by worker thread) */
+    int           result_kind;
+    int64_t       result_int;
+    double        result_double;
+    int           result_bool;
+    char         *result_str;
+    size_t        result_str_len;
+    HlKV         *result_kvs;
+    int           result_count;
+
+    int           error;
+    char          error_msg[HL_WORKER_ERR_SIZE];
+    int           cancelled;
+} HlJsWorkerDispatchOp;
+
+int  hl_js_worker_dispatch_submit(KlThreadPool *pool,
+                                  HlJsWorkerDispatchOp *op);
+void hl_js_worker_dispatch_op_free(HlJsWorkerDispatchOp *op);
+void hl_js_worker_dispatch_op_free_all(void *ptr);
+void hl_js_worker_dispatch_cancel(KlAsyncOp *op, void *user_data);
+void hl_js_worker_db_init(void);
 
 /* Forward declaration for Keel WS server connection (avoid pulling
  * <keel/websocket_server.h> into every TU). */

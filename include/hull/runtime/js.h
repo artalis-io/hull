@@ -30,19 +30,12 @@ typedef struct SHArena SHArena;
 typedef struct HlAsyncCtx HlAsyncCtx;
 typedef struct HlAllocator HlAllocator;
 
-/* ── Timer context ─────────────────────────────────────────────────── */
-
-typedef struct HlJSTimer {
-    struct HlJS *js;
-    int         handler_id;    /* index into __hull_timers */
-    int64_t     interval_ms;   /* repeat interval (or recomputed for daily) */
-    int64_t     timer_id;      /* kl_timer_add return, for cancellation */
-    int         daily;         /* 1 = daily timer */
-    int         localtime;     /* 1 = local time, 0 = UTC */
-    int         hour;          /* for daily: target hour */
-    int         minute;        /* for daily: target minute */
-    int         in_flight;     /* 1 = callback currently running (async) */
-} HlJSTimer;
+/*
+ * HlJSTimer + HlJsWorkerDispatchOp moved to
+ * src/hull/runtime/js/internal.h as part of architectural roadmap
+ * item J — they're Hull-internal op structs that no external consumer
+ * references.
+ */
 
 /* ── Configuration ──────────────────────────────────────────────────── */
 
@@ -63,8 +56,20 @@ typedef struct {
 
 /* ── Runtime context ────────────────────────────────────────────────── */
 
+/*
+ * Stability: Tier 4 (internal — see docs/stability.md). All fields below
+ * `base` are Hull-internal implementation detail; the layout may change
+ * in any release. External code must reach HlJS only via:
+ *   - the lifecycle functions (hl_js_init / _free / _load_app)
+ *   - the runtime vtable (rt->vt->...)
+ *   - the public `base` field (HlRuntime, Tier-2 stable)
+ *
+ * The struct stays in this public header for now so app_context.c can
+ * stack-allocate it; that storage strategy is itself Tier 4 and may move
+ * to a heap factory (hl_js_create()) post-v0.1.0.
+ */
 typedef struct HlJS {
-    HlRuntime       base;          /* vtable + shared capabilities */
+    HlRuntime       base;          /* vtable + shared capabilities — Tier 2 */
 
     JSRuntime      *rt;
     JSContext      *ctx;
@@ -267,48 +272,11 @@ typedef int (*HlJsWorkerInitFn)(JSContext *ctx);
 /* Register an init hook for worker JS VMs. Call before workers spawn. */
 void hl_js_worker_register_init(HlJsWorkerInitFn fn);
 
-/* Worker dispatch operation — runtime-specific, submitted to thread pool. */
-typedef struct HlJsWorkerDispatchOp {
-    HlAsyncCtx   *async_ctx;
-    HlAllocator  *alloc;
-    KlServer     *server;
-
-    /* Input (deep-copied, owned) */
-    char         *fn_source;        /* function source text from fn.toString() */
-    size_t        fn_source_len;
-    HlKV         *ctx_kvs;
-    int           ctx_count;
-
-    /* Output (set by worker thread) */
-    int           result_kind;       /* 0=nil,1=bool,2=int,3=double,4=text,5=table */
-    int64_t       result_int;
-    double        result_double;
-    int           result_bool;
-    char         *result_str;        /* owned */
-    size_t        result_str_len;
-    HlKV         *result_kvs;       /* owned, for table result */
-    int           result_count;
-
-    int           error;
-    char          error_msg[HL_WORKER_ERR_SIZE];
-    int           cancelled;
-} HlJsWorkerDispatchOp;
-
-/* Submit a worker.dispatch operation to the thread pool.
- * Returns 0 on success, -1 on error. */
-int hl_js_worker_dispatch_submit(KlThreadPool *pool,
-                                   HlJsWorkerDispatchOp *op);
-
-/* Free resources owned by a dispatch op (fn_source, kvs, result). */
-void hl_js_worker_dispatch_op_free(HlJsWorkerDispatchOp *op);
-
-/* Free dispatch op struct and all owned data (for use as free_driver). */
-void hl_js_worker_dispatch_op_free_all(void *ptr);
-
-/* KlAsyncOp on_cancel handler for worker.dispatch operations. */
-void hl_js_worker_dispatch_cancel(KlAsyncOp *op, void *user_data);
-
-/* Wire db.* module into worker JS VMs. Call during runtime init. */
-void hl_js_worker_db_init(void);
+/*
+ * HlJsWorkerDispatchOp + the hl_js_worker_dispatch_* functions and
+ * hl_js_worker_db_init moved to src/hull/runtime/js/internal.h as
+ * part of architectural roadmap item J — they're Hull-internal
+ * machinery, not consumed by any external code.
+ */
 
 #endif /* HL_RUNTIME_JS_H */
