@@ -125,6 +125,28 @@ local function parse_args()
         opts.data_dir = "/var/lib/hull/" .. opts.name
     end
 
+    -- L-6: the generated install.sh interpolates these values into shell
+    -- `echo "..."` strings. Reject anything that breaks the quoting so a
+    -- malicious `--user 'foo"; rm -rf /'` can't smuggle a command via
+    -- sudo when the user later runs install.sh. The actual sandbox is
+    -- the user reviewing the generated file before running it, but a
+    -- well-formed file is a cheap second line of defence.
+    local function validate_ident(value, label)
+        if type(value) ~= "string" or value == "" then
+            tool.stderr("hull deploy: " .. label .. " cannot be empty\n")
+            tool.exit(1)
+        end
+        if value:find("[^%w./_%-]") then
+            tool.stderr("hull deploy: " .. label .. " contains unsafe characters: '" .. value .. "'\n")
+            tool.stderr("Allowed: alphanumerics, '.', '/', '_', '-'.\n")
+            tool.exit(1)
+        end
+    end
+    if opts.user then validate_ident(opts.user, "--user") end
+    validate_ident(opts.name, "--name")
+    validate_ident(opts.install_dir, "--install-dir")
+    validate_ident(opts.data_dir, "--data-dir")
+
     return opts
 end
 

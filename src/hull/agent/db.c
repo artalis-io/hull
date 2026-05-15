@@ -47,8 +47,31 @@ static int db_schema_impl(sqlite3 *db, int close_db, ShJsonBuf *out)
             sh_json_write_key(&w, "columns");
             sh_json_write_array_start(&w);
 
+            /* L-6: escape `"` in the table name (SQLite identifier
+             * quoting doubles the quote character). Trust boundary is
+             * the developer's own DB but a literal `"` in a table name
+             * would otherwise produce a malformed PRAGMA. Also reject
+             * pathological lengths so we never overflow the 512-byte
+             * scratch buffer. */
+            char quoted[256];
+            size_t qi = 0;
+            int truncated = 0;
+            for (const char *p = table_name; p && *p; p++) {
+                if (qi + 2 >= sizeof(quoted)) { truncated = 1; break; }
+                quoted[qi++] = *p;
+                if (*p == '"') {
+                    if (qi + 1 >= sizeof(quoted)) { truncated = 1; break; }
+                    quoted[qi++] = '"';
+                }
+            }
+            quoted[qi] = '\0';
+            if (truncated) {
+                sh_json_write_array_end(&w);
+                sh_json_write_object_end(&w);
+                continue;
+            }
             char pragma[512];
-            snprintf(pragma, sizeof(pragma), "PRAGMA table_info(\"%s\")", table_name);
+            snprintf(pragma, sizeof(pragma), "PRAGMA table_info(\"%s\")", quoted);
 
             sqlite3_stmt *col_stmt = NULL;
             int rc2 = sqlite3_prepare_v2(db, pragma, -1, &col_stmt, NULL);

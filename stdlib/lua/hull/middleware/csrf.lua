@@ -137,7 +137,12 @@ function csrf.middleware(opts)
     return function(req, res)
         -- Safe methods skip verification
         if safe_methods[req.method] then
-            -- Generate a token and attach it to ctx for templates
+            -- Generate a token and attach it to ctx for templates.
+            -- L-5: a metatable-based lazy variant was considered but
+            -- would conflict with downstream middleware that also
+            -- inspects req.ctx. HMAC-SHA256 here is sub-millisecond
+            -- and the audit's "wasted" qualification was a perf
+            -- observation, not a correctness issue.
             local sid = req.ctx[session_key]
             if sid then
                 req.ctx.csrf_token = csrf.generate(sid, secret)
