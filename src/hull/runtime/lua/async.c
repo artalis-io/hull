@@ -8,6 +8,7 @@
  */
 
 #include "hull/runtime/lua.h"
+#include "internal.h"
 #include "hull/async.h"
 #include "hull/alloc.h"
 

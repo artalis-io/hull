@@ -5,6 +5,7 @@
  */
 
 #include "mod_buffer.h"
+#include "internal.h"
 #include "hull/worker_db.h"
 #include "hull/async.h"
 #include "hull/alloc.h"

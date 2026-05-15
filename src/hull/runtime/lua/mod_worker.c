@@ -4,6 +4,7 @@
  */
 
 #include "mod_buffer.h"
+#include "internal.h"
 #include "hull/async.h"
 
 #include <keel/server.h>

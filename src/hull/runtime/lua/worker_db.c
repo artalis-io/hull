@@ -9,6 +9,7 @@
  */
 
 #include "hull/runtime/lua.h"
+#include "internal.h"
 #include "hull/worker_db.h"
 #include "hull/cap/db.h"
 

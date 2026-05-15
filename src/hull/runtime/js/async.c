@@ -8,6 +8,7 @@
  */
 
 #include "hull/runtime/js.h"
+#include "internal.h"
 #include "hull/async.h"
 #include "hull/alloc.h"
 
