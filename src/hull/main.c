@@ -909,10 +909,24 @@ static int hl_serve_load_app(HlServerState *s)
  * static, agent API, run event loop, post-run cleanup.
  * Depends on: load_app (app code loaded). WASM/GPU destroy happens here
  * on the success path only — not on error gotos. */
-static int hl_serve_wire_and_start(HlServerState *s)
+/* ── hl_serve_wire_and_start — orchestrates phases below ───────────────
+ *
+ * Phases (each a small static helper):
+ *   1. hl_serve_wire_caps              — extract manifest, wire fs/env/http/
+ *                                        smtp + TLS client context + CSP
+ *   2. hl_serve_apply_sandbox          — build HlSandboxPolicy, apply
+ *   3. hl_serve_wire_routes            — CORS, vtable route wiring, static
+ *                                        middleware, agent diagnostic API
+ *   4. hl_serve_run                    — kl_server_run event loop
+ *   5. hl_serve_teardown_after_serve   — success-path resource teardown
+ *
+ * Split out of a 296-line monolith as roadmap item H.
+ */
+
+/* Phase 1: extract manifest + wire all per-capability configs. */
+static int hl_serve_wire_caps(HlServerState *s)
 {
     HlRuntime *rt = hl_app_context_runtime(s->app);
-    const HlVfs *app_vfs = hl_app_context_app_vfs(s->app);
 
     /* Extract manifest and configure capabilities */
     memset(&s->manifest, 0, sizeof(s->manifest));
@@ -1066,11 +1080,23 @@ static int hl_serve_wire_and_start(HlServerState *s)
         rt->smtp_cfg = &s->smtp_cfg_storage;
     }
 
-    /* RT-04: Apply kernel sandbox BEFORE wiring routes — all route
-     * handlers execute inside sandbox constraints.
-     *
-     * The sandbox reads a pre-resolved HlSandboxPolicy, not HlManifest —
-     * decouples enforcement from manifest field layout. */
+    return 0;
+}
+
+/* Cleanup if a phase fails after wire_caps has succeeded. */
+static void hl_serve_undo_caps(HlServerState *s)
+{
+    hl_manifest_free(&s->manifest);
+    s->manifest_extracted = 0;
+    if (s->client_tls_ctx) {
+        kl_tls_mbedtls_ctx_destroy(s->client_tls_ctx);
+        s->client_tls_ctx = NULL;
+    }
+}
+
+/* Phase 2: apply the OS-level sandbox built from the resolved manifest. */
+static int hl_serve_apply_sandbox(HlServerState *s)
+{
     if (!s->cfg.no_sandbox) {
         HlSandboxPolicy sandbox_policy;
         hl_sandbox_policy_from_manifest(&sandbox_policy, &s->manifest);
@@ -1078,19 +1104,19 @@ static int hl_serve_wire_and_start(HlServerState *s)
                               s->cfg.no_db ? NULL : s->cfg.db_path, s->ca_bundle_path,
                               s->cfg.tls_cert_path, s->cfg.tls_key_path) != 0) {
             log_error("[hull:c] sandbox enforcement failed");
-            hl_manifest_free(&s->manifest);
-            s->manifest_extracted = 0;
-            if (s->client_tls_ctx) {
-                kl_tls_mbedtls_ctx_destroy(s->client_tls_ctx);
-                s->client_tls_ctx = NULL;
-            }
             return -1;
         }
     } else {
         log_warn("[hull:c] kernel sandbox disabled (--no-sandbox)");
     }
+    return 0;
+}
 
-    /* Register CORS middleware from manifest (before routes) */
+/* Phase 3: CORS + route wiring + static + agent API. */
+static int hl_serve_wire_routes(HlServerState *s)
+{
+    HlRuntime *rt = hl_app_context_runtime(s->app);
+    const HlVfs *app_vfs = hl_app_context_app_vfs(s->app);
     KlCorsConfig cors_cfg;
     if (s->manifest.cors_set) {
         kl_cors_init(&cors_cfg);
@@ -1110,12 +1136,6 @@ static int hl_serve_wire_and_start(HlServerState *s)
 
     /* Wire routes into Keel (after sandbox is applied) */
     if (rt->vt->wire_routes_server(rt, &s->server, track_route_alloc) != 0) {
-        hl_manifest_free(&s->manifest);
-        s->manifest_extracted = 0;
-        if (s->client_tls_ctx) {
-            kl_tls_mbedtls_ctx_destroy(s->client_tls_ctx);
-            s->client_tls_ctx = NULL;
-        }
         return -1;
     }
 
@@ -1142,7 +1162,13 @@ static int hl_serve_wire_and_start(HlServerState *s)
                                         .db_path = s->cfg.no_db ? NULL : s->cfg.db_path };
     if (s->cfg.agent_api_mode)
         hl_agent_api_register(&s->server, &s->agent_api_ctx);
+    return 0;
+}
 
+/* Phase 4: log + enter the event loop until the server stops. */
+static void hl_serve_run(HlServerState *s)
+{
+    HlRuntime *rt = hl_app_context_runtime(s->app);
     log_info("[hull:c] listening on %s://%s:%d (%s runtime)",
              s->server_tls_ctx ? "https" : "http",
              s->cfg.bind_addr, s->cfg.port, rt->vt->name);
@@ -1153,7 +1179,11 @@ static int hl_serve_wire_and_start(HlServerState *s)
                   kl_strerror(s->server.last_error));
 
     log_info("[hull:c] server stopped");
+}
 
+/* Phase 5: tear down all resources after the event loop returns. */
+static void hl_serve_teardown_after_serve(HlServerState *s)
+{
     /* Free thread pool BEFORE server — join workers, drain queues while
      * server infrastructure (connections, event loop) is still valid */
     if (s->thread_pool) {
@@ -1203,8 +1233,23 @@ static int hl_serve_wire_and_start(HlServerState *s)
         kl_tls_mbedtls_ctx_destroy(s->server_tls_ctx);
         s->server_tls_ctx = NULL;
     }
+}
 
-    return 0; /* success */
+static int hl_serve_wire_and_start(HlServerState *s)
+{
+    if (hl_serve_wire_caps(s) != 0)
+        return -1;
+    if (hl_serve_apply_sandbox(s) != 0) {
+        hl_serve_undo_caps(s);
+        return -1;
+    }
+    if (hl_serve_wire_routes(s) != 0) {
+        hl_serve_undo_caps(s);
+        return -1;
+    }
+    hl_serve_run(s);
+    hl_serve_teardown_after_serve(s);
+    return 0;
 }
 
 /* ── Cleanup (checks init flags before freeing) ──────────────────────
