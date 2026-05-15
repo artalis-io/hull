@@ -1007,6 +1007,11 @@ static int vt_js_run_test_file(HlRuntime *rt, const char *file_path,
     src[flen] = '\0';
     fclose(f);
 
+    /* Reset stack base — the test runner adds C frames between
+     * JS_NewRuntime and JS_Eval; without this the JS stack check can
+     * trigger 'stack overflow' even though OS stack has plenty of room. */
+    JS_UpdateStackTop(js->rt);
+
     JSValue result = JS_Eval(js->ctx, src, (size_t)flen, file_path,
                              JS_EVAL_TYPE_MODULE);
     free(src);
