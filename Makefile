@@ -575,12 +575,15 @@ COMPRESS_OBJ   := $(BUILDDIR)/hull_compress.o
 MINIZ_OBJ      := $(BUILDDIR)/miniz.o
 WORKER_DB_OBJ  := $(BUILDDIR)/worker_db.o
 WORKER_WASM_OBJ := $(BUILDDIR)/worker_wasm.o
-MANIFEST_OBJ   := $(BUILDDIR)/manifest.o
-SANDBOX_OBJ    := $(BUILDDIR)/sandbox.o
+MANIFEST_OBJ     := $(BUILDDIR)/manifest.o $(BUILDDIR)/manifest_lua.o $(BUILDDIR)/manifest_js.o
+SANDBOX_OBJ      := $(BUILDDIR)/sandbox.o
 
-# Test-specific objects (single runtime — avoids pulling Lua into JS tests and vice versa)
-MANIFEST_JS_OBJ  := $(BUILDDIR)/manifest_js_only.o
-MANIFEST_LUA_OBJ := $(BUILDDIR)/manifest_lua_only.o
+# Test-specific objects (single runtime — avoids pulling Lua into JS tests
+# and vice versa). After roadmap item G the per-runtime extractors live in
+# their own .c files that auto-#ifdef-out, so single-runtime tests just
+# pull manifest.o (shared helpers) + the relevant extractor.
+MANIFEST_JS_OBJ  := $(BUILDDIR)/manifest.o $(BUILDDIR)/manifest_js.o
+MANIFEST_LUA_OBJ := $(BUILDDIR)/manifest.o $(BUILDDIR)/manifest_lua.o
 CAP_TEST_JS_OBJ  := $(BUILDDIR)/cap_test_dispatch.o
 CAP_TEST_LUA_OBJ := $(BUILDDIR)/cap_test_dispatch.o
 # Note: the JS/Lua test bindings now live in {JS,LUA}_RT_OBJS
@@ -1046,21 +1049,23 @@ $(WORKER_GPU_OBJ): $(SRCDIR)/hull/worker_gpu.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 endif
 
-# Manifest
-$(MANIFEST_OBJ): $(SRCDIR)/hull/manifest.c | $(BUILDDIR)
+# Manifest — split into shared helpers + per-runtime extractors (item G).
+# Each per-runtime .c compiles to an empty TU when its runtime is disabled,
+# so no special -D filtering is needed for the test-binary single-runtime
+# variants — those just pull in the relevant {manifest_lua.o, manifest_js.o}
+# alongside manifest.o.
+$(BUILDDIR)/manifest.o: $(SRCDIR)/hull/manifest.c $(SRCDIR)/hull/manifest_internal.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# Manifest (JS-only, for test_js — excludes Lua extraction to avoid Lua link deps)
-$(MANIFEST_JS_OBJ): $(SRCDIR)/hull/manifest.c | $(BUILDDIR)
-	$(CC) $(filter-out -DHL_ENABLE_LUA,$(CFLAGS)) $(INCLUDES) -c -o $@ $<
+$(BUILDDIR)/manifest_lua.o: $(SRCDIR)/hull/manifest_lua.c $(SRCDIR)/hull/manifest_internal.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+$(BUILDDIR)/manifest_js.o: $(SRCDIR)/hull/manifest_js.c $(SRCDIR)/hull/manifest_internal.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # cap/test.c (shared dispatch — no runtime deps, used by both runtimes)
 $(BUILDDIR)/cap_test_dispatch.o: $(SRCDIR)/hull/cap/test.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
-
-# Manifest (Lua-only, for test_lua — excludes JS extraction to avoid QuickJS link deps)
-$(MANIFEST_LUA_OBJ): $(SRCDIR)/hull/manifest.c | $(BUILDDIR)
-	$(CC) $(filter-out -DHL_ENABLE_JS,$(CFLAGS)) $(INCLUDES) -c -o $@ $<
 
 # Sandbox (pledge/unveil enforcement)
 $(SANDBOX_OBJ): $(SRCDIR)/hull/sandbox.c | $(BUILDDIR)
