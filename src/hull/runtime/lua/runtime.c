@@ -18,6 +18,7 @@
 #include "hull/manifest.h"
 #include "hull/cap/tool.h"
 #include "hull/runtime/tool.h"
+#include "hull/runtime/test.h"
 #include "hull/cap/ws.h"
 
 #include "lua.h"
@@ -488,6 +489,36 @@ static void vt_lua_enumerate_middleware(HlRuntime *rt, HlMiddlewareCb cb, void *
     }
 }
 
+static int vt_lua_test_setup(HlRuntime *rt, KlRouter *router)
+{
+    HlLua *lua = (HlLua *)rt;
+    if (hl_lua_wire_routes(lua, router) != 0)
+        return -1;
+    hl_lua_test_register(lua->L, router, lua);
+    return 0;
+}
+
+static int vt_lua_run_test_file(HlRuntime *rt, const char *file_path,
+                                HlTestCaseResult *results, int max_results,
+                                int *file_total, int *file_passed, int *file_failed,
+                                const char **load_err)
+{
+    HlLua *lua = (HlLua *)rt;
+    hl_lua_test_clear(lua->L);
+    if (luaL_dofile(lua->L, file_path) != LUA_OK) {
+        const char *err = lua_tostring(lua->L, -1);
+        if (load_err) *load_err = err ? err : "unknown";
+        lua_pop(lua->L, 1);
+        return -1;
+    }
+    if (file_total)  *file_total  = 0;
+    if (file_passed) *file_passed = 0;
+    if (file_failed) *file_failed = 0;
+    hl_lua_test_run(lua->L, file_total, file_passed, file_failed,
+                    NULL, results, max_results);
+    return 0;
+}
+
 static void vt_lua_destroy(HlRuntime *rt)
 {
     hl_lua_free((HlLua *)rt);
@@ -500,6 +531,8 @@ const HlRuntimeVtable hl_lua_vtable = {
     .extract_manifest    = vt_lua_extract_manifest,
     .enumerate_routes    = vt_lua_enumerate_routes,
     .enumerate_middleware= vt_lua_enumerate_middleware,
+    .test_setup          = vt_lua_test_setup,
+    .run_test_file       = vt_lua_run_test_file,
     .destroy             = vt_lua_destroy,
     .name                = "Lua",
 };

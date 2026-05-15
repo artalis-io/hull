@@ -17,6 +17,7 @@
 #include "hull/entry.h"
 #include "hull/migrate.h"
 #include "hull/runtime.h"
+#include "hull/test_runner.h"
 #include "hull/vfs.h"
 
 #ifdef HL_ENABLE_LUA
@@ -605,256 +606,116 @@ int hl_agent_errors(const char *app_dir, ShJsonBuf *out)
 
 /* ── hl_agent_test ─────────────────────────────────────────────────── */
 
-#define MAX_TEST_RESULTS 256
+/* Single-path test runner via HlRuntimeVtable::test_setup + run_test_file
+ * and the shared hl_test_runner_run orchestrator. Folds the previous
+ * agent_test_lua_ctx + agent_test_js_ctx (~80 lines × 2) into ~70 lines
+ * of JSON visitor + shared runner invocation. */
 
-static void write_test_results(ShJsonWriter *w, HlTestCaseResult *results,
-                               int total)
+typedef struct {
+    ShJsonWriter *w;
+    int file_active;
+    int grand_total, grand_passed, grand_failed;
+} JsonTestWriterState;
+
+static void json_test_on_file_start(void *user, const char *basename)
 {
-    sh_json_write_key(w, "tests");
-    sh_json_write_array_start(w);
-    for (int i = 0; i < total && i < MAX_TEST_RESULTS; i++) {
-        sh_json_write_object_start(w);
-        sh_json_write_kv_string(w, "name", results[i].name);
-        sh_json_write_kv_string(w, "status", results[i].passed ? "pass" : "fail");
-        if (!results[i].passed && results[i].error[0])
-            sh_json_write_kv_string(w, "error", results[i].error);
-        sh_json_write_object_end(w);
-    }
-    sh_json_write_array_end(w);
+    JsonTestWriterState *s = user;
+    sh_json_write_object_start(s->w);
+    sh_json_write_kv_string(s->w, "name", basename);
+    s->file_active = 1;
 }
 
-/* ── Entry point detection (for test) ─────────────────────────────── */
+static void json_test_on_file_load_error(void *user, const char *err)
+{
+    JsonTestWriterState *s = user;
+    if (!s->file_active) {
+        sh_json_write_object_start(s->w);
+        sh_json_write_kv_string(s->w, "name", "");
+    }
+    sh_json_write_kv_string(s->w, "error", err ? err : "unknown");
+    sh_json_write_key(s->w, "tests");
+    sh_json_write_array_start(s->w);
+    sh_json_write_array_end(s->w);
+    sh_json_write_object_end(s->w);
+    s->file_active = 0;
+}
 
+static void json_test_on_file_end(void *user,
+                                  const HlTestCaseResult *results, int count,
+                                  int file_total, int file_passed, int file_failed)
+{
+    JsonTestWriterState *s = user;
+    (void)file_total; (void)file_passed; (void)file_failed;
+    sh_json_write_key(s->w, "tests");
+    sh_json_write_array_start(s->w);
+    for (int i = 0; i < count; i++) {
+        const HlTestCaseResult *r = &results[i];
+        sh_json_write_object_start(s->w);
+        sh_json_write_kv_string(s->w, "name",   r->name);
+        sh_json_write_kv_string(s->w, "status", r->passed ? "pass" : "fail");
+        if (!r->passed && r->error[0])
+            sh_json_write_kv_string(s->w, "error", r->error);
+        sh_json_write_object_end(s->w);
+    }
+    sh_json_write_array_end(s->w);
+    sh_json_write_object_end(s->w);
+    s->file_active = 0;
+}
+
+static void json_test_on_summary(void *user, int total, int passed, int failed)
+{
+    JsonTestWriterState *s = user;
+    s->grand_total  = total;
+    s->grand_passed = passed;
+    s->grand_failed = failed;
+}
+
+/* Entry-point detection (still used by hl_agent_test below). */
 static const char *detect_entry(const char *app_dir, const char *ext,
                                 char *buf, size_t buf_size)
 {
     size_t dir_len = strlen(app_dir);
     while (dir_len > 1 && app_dir[dir_len - 1] == '/')
         dir_len--;
-
     snprintf(buf, buf_size, "%.*s/app.%s", (int)dir_len, app_dir, ext);
     if (access(buf, F_OK) == 0) return buf;
     return NULL;
 }
 
-#ifdef HL_ENABLE_LUA
-static int agent_test_lua_ctx(HlAppContext *ctx, ShJsonBuf *out)
-{
-    HlLua *lua = hl_app_context_lua(ctx);
-    const char *app_dir = hl_app_context_app_dir(ctx);
-
-    KlAllocator alloc = kl_allocator_default();
-    KlRouter router;
-    kl_router_init(&router, &alloc);
-
-    if (hl_lua_wire_routes(lua, &router) != 0) {
-        kl_router_free(&router);
-        return write_error(out, "no routes registered");
-    }
-
-    hl_lua_test_register(lua->L, &router, lua);
-
-    char **test_files = hl_tool_find_files(app_dir, "test_*.lua", NULL);
-    if (!test_files || !test_files[0]) {
-        if (test_files) free(test_files);
-        kl_router_free(&router);
-        return write_error(out, "no test files found");
-    }
-
-    int grand_total = 0, grand_passed = 0, grand_failed = 0;
-    HlTestCaseResult results[MAX_TEST_RESULTS];
-
-    ShJsonWriter w;
-    sh_json_writer_init(&w, sh_json_buf_write, out);
-    sh_json_write_object_start(&w);
-    sh_json_write_kv_string(&w, "runtime", "lua");
-    sh_json_write_key(&w, "files");
-    sh_json_write_array_start(&w);
-
-    for (char **fp = test_files; *fp; fp++) {
-        const char *file = *fp;
-        const char *basename = strrchr(file, '/');
-        basename = basename ? basename + 1 : file;
-
-        hl_lua_test_clear(lua->L);
-
-        sh_json_write_object_start(&w);
-        sh_json_write_kv_string(&w, "name", basename);
-
-        if (luaL_dofile(lua->L, file) != LUA_OK) {
-            const char *err = lua_tostring(lua->L, -1);
-            sh_json_write_kv_string(&w, "error", err ? err : "unknown");
-            sh_json_write_key(&w, "tests");
-            sh_json_write_array_start(&w);
-            sh_json_write_array_end(&w);
-            sh_json_write_object_end(&w);
-            lua_pop(lua->L, 1);
-            grand_failed++;
-            grand_total++;
-            free(*fp);
-            continue;
-        }
-
-        int file_total = 0, file_passed = 0, file_failed = 0;
-        memset(results, 0, sizeof(results));
-        hl_lua_test_run(lua->L, &file_total, &file_passed, &file_failed,
-                            NULL, results, MAX_TEST_RESULTS);
-
-        write_test_results(&w, results, file_total);
-        sh_json_write_object_end(&w);
-
-        grand_total += file_total;
-        grand_passed += file_passed;
-        grand_failed += file_failed;
-        free(*fp);
-    }
-    free(test_files);
-
-    sh_json_write_array_end(&w);
-    sh_json_write_kv_int(&w, "total", grand_total);
-    sh_json_write_kv_int(&w, "passed", grand_passed);
-    sh_json_write_kv_int(&w, "failed", grand_failed);
-    sh_json_write_object_end(&w);
-
-    kl_router_free(&router);
-    return grand_failed > 0 ? 1 : 0;
-}
-#endif
-
-#ifdef HL_ENABLE_JS
-static int agent_test_js_ctx(HlAppContext *ctx, ShJsonBuf *out)
-{
-    HlJS *js = hl_app_context_js(ctx);
-    const char *app_dir = hl_app_context_app_dir(ctx);
-
-    KlAllocator alloc = kl_allocator_default();
-    KlRouter router;
-    kl_router_init(&router, &alloc);
-
-    if (hl_js_wire_routes(js, &router) != 0) {
-        kl_router_free(&router);
-        return write_error(out, "no routes registered");
-    }
-
-    hl_js_test_register(js->ctx, &router, js);
-
-    char **test_files = hl_tool_find_files(app_dir, "test_*.js", NULL);
-    if (!test_files || !test_files[0]) {
-        if (test_files) free(test_files);
-        kl_router_free(&router);
-        return write_error(out, "no test files found");
-    }
-
-    int grand_total = 0, grand_passed = 0, grand_failed = 0;
-    HlTestCaseResult results[MAX_TEST_RESULTS];
-
-    ShJsonWriter w;
-    sh_json_writer_init(&w, sh_json_buf_write, out);
-    sh_json_write_object_start(&w);
-    sh_json_write_kv_string(&w, "runtime", "js");
-    sh_json_write_key(&w, "files");
-    sh_json_write_array_start(&w);
-
-    for (char **fp = test_files; *fp; fp++) {
-        const char *file = *fp;
-        const char *basename = strrchr(file, '/');
-        basename = basename ? basename + 1 : file;
-
-        hl_js_test_clear(js->ctx);
-
-        sh_json_write_object_start(&w);
-        sh_json_write_kv_string(&w, "name", basename);
-
-        /* Read and evaluate the test file */
-        FILE *f = fopen(file, "r");
-        if (!f) {
-            sh_json_write_kv_string(&w, "error", "cannot open file");
-            sh_json_write_key(&w, "tests");
-            sh_json_write_array_start(&w);
-            sh_json_write_array_end(&w);
-            sh_json_write_object_end(&w);
-            grand_failed++;
-            grand_total++;
-            free(*fp);
-            continue;
-        }
-        if (fseek(f, 0, SEEK_END) != 0) { fclose(f); free(*fp); continue; }
-        long flen = ftell(f);
-        if (flen < 0) { fclose(f); free(*fp); continue; }
-        if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); free(*fp); continue; }
-        char *src = malloc((size_t)flen + 1);
-        if (!src) { fclose(f); free(*fp); continue; }
-        if (fread(src, 1, (size_t)flen, f) != (size_t)flen) {
-            free(src); fclose(f); free(*fp); continue;
-        }
-        src[flen] = '\0';
-        fclose(f);
-
-        JSValue result = JS_Eval(js->ctx, src, (size_t)flen, file,
-                                 JS_EVAL_TYPE_MODULE);
-        free(src);
-
-        if (JS_IsException(result)) {
-            JSValue exc = JS_GetException(js->ctx);
-            JSValue msg_val = JS_GetPropertyStr(js->ctx, exc, "message");
-            const char *msg = JS_ToCString(js->ctx, msg_val);
-            sh_json_write_kv_string(&w, "error", msg ? msg : "unknown");
-            sh_json_write_key(&w, "tests");
-            sh_json_write_array_start(&w);
-            sh_json_write_array_end(&w);
-            sh_json_write_object_end(&w);
-            if (msg) JS_FreeCString(js->ctx, msg);
-            JS_FreeValue(js->ctx, msg_val);
-            JS_FreeValue(js->ctx, exc);
-            JS_FreeValue(js->ctx, result);
-            grand_failed++;
-            grand_total++;
-            free(*fp);
-            continue;
-        }
-        JS_FreeValue(js->ctx, result);
-
-        int file_total = 0, file_passed = 0, file_failed = 0;
-        memset(results, 0, sizeof(results));
-        hl_js_test_run(js->ctx, &file_total, &file_passed, &file_failed,
-                           NULL, results, MAX_TEST_RESULTS);
-
-        write_test_results(&w, results, file_total);
-        sh_json_write_object_end(&w);
-
-        grand_total += file_total;
-        grand_passed += file_passed;
-        grand_failed += file_failed;
-        free(*fp);
-    }
-    free(test_files);
-
-    sh_json_write_array_end(&w);
-    sh_json_write_kv_int(&w, "total", grand_total);
-    sh_json_write_kv_int(&w, "passed", grand_passed);
-    sh_json_write_kv_int(&w, "failed", grand_failed);
-    sh_json_write_object_end(&w);
-
-    kl_router_free(&router);
-    return grand_failed > 0 ? 1 : 0;
-}
-#endif
-
 int hl_agent_test_ctx(HlAppContext *ctx, ShJsonBuf *out)
 {
-#ifdef HL_ENABLE_LUA
-    if (hl_app_context_is_lua(ctx))
-        return agent_test_lua_ctx(ctx, out);
-#endif
-#ifdef HL_ENABLE_JS
-    if (!hl_app_context_is_lua(ctx))
-        return agent_test_js_ctx(ctx, out);
-#endif
+    ShJsonWriter w;
+    sh_json_writer_init(&w, sh_json_buf_write, out);
+    sh_json_write_object_start(&w);
 
-    (void)ctx;
-    return write_error(out, "no runtime available");
+    HlRuntime *rt = hl_app_context_runtime(ctx);
+    if (rt && rt->vt && rt->vt->name)
+        sh_json_write_kv_string(&w, "runtime",
+            rt->vt == &hl_lua_vtable ? "lua" :
+            rt->vt == &hl_js_vtable  ? "js"  : rt->vt->name);
+
+    sh_json_write_key(&w, "files");
+    sh_json_write_array_start(&w);
+
+    JsonTestWriterState state = { .w = &w, .file_active = 0 };
+    HlTestRunnerWriter writer = {
+        .user                = &state,
+        .on_file_start       = json_test_on_file_start,
+        .on_file_load_error  = json_test_on_file_load_error,
+        .on_file_end         = json_test_on_file_end,
+        .on_summary          = json_test_on_summary,
+    };
+    int rc = hl_test_runner_run(ctx, &writer);
+
+    sh_json_write_array_end(&w);
+    sh_json_write_kv_int(&w, "total",  state.grand_total);
+    sh_json_write_kv_int(&w, "passed", state.grand_passed);
+    sh_json_write_kv_int(&w, "failed", state.grand_failed);
+    sh_json_write_object_end(&w);
+
+    /* rc<0 = setup failure (already emitted to writer); rc>=0 = fail count. */
+    return (rc < 0 || state.grand_failed > 0) ? 1 : 0;
 }
-
 int hl_agent_test(const char *app_dir, ShJsonBuf *out)
 {
     char entry_buf[4096];

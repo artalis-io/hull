@@ -20,7 +20,7 @@ typedef struct HlAllocator HlAllocator;
 /* ── Test result collection ─────────────────────────────────────────── */
 
 /* Per-test result for structured (JSON) output */
-typedef struct {
+typedef struct HlTestCaseResult {
     char name[256];
     int  passed;       /* 1 = pass, 0 = fail */
     char error[1024];  /* error message if failed, empty if passed */

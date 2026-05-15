@@ -973,6 +973,70 @@ static void vt_js_enumerate_middleware(HlRuntime *rt, HlMiddlewareCb cb, void *u
     JS_FreeValue(js->ctx, global);
 }
 
+static int vt_js_test_setup(HlRuntime *rt, KlRouter *router)
+{
+    HlJS *js = (HlJS *)rt;
+    if (hl_js_wire_routes(js, router) != 0)
+        return -1;
+    hl_js_test_register(js->ctx, router, js);
+    return 0;
+}
+
+static int vt_js_run_test_file(HlRuntime *rt, const char *file_path,
+                               HlTestCaseResult *results, int max_results,
+                               int *file_total, int *file_passed, int *file_failed,
+                               const char **load_err)
+{
+    static const char *err_open   = "cannot open file";
+    static const char *err_read   = "cannot read file";
+    static const char *err_oom    = "out of memory";
+    HlJS *js = (HlJS *)rt;
+    hl_js_test_clear(js->ctx);
+
+    FILE *f = fopen(file_path, "r");
+    if (!f) { if (load_err) *load_err = err_open; return -1; }
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); if (load_err) *load_err = err_read; return -1; }
+    long flen = ftell(f);
+    if (flen < 0) { fclose(f); if (load_err) *load_err = err_read; return -1; }
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); if (load_err) *load_err = err_read; return -1; }
+    char *src = malloc((size_t)flen + 1);
+    if (!src) { fclose(f); if (load_err) *load_err = err_oom; return -1; }
+    if (fread(src, 1, (size_t)flen, f) != (size_t)flen) {
+        free(src); fclose(f); if (load_err) *load_err = err_read; return -1;
+    }
+    src[flen] = '\0';
+    fclose(f);
+
+    JSValue result = JS_Eval(js->ctx, src, (size_t)flen, file_path,
+                             JS_EVAL_TYPE_MODULE);
+    free(src);
+
+    /* JS_Eval error message — kept in a thread-local static so caller can
+     * read it as a borrowed pointer. */
+    static __thread char load_err_buf[1024];
+
+    if (JS_IsException(result)) {
+        JSValue exc = JS_GetException(js->ctx);
+        JSValue msg_val = JS_GetPropertyStr(js->ctx, exc, "message");
+        const char *msg = JS_ToCString(js->ctx, msg_val);
+        snprintf(load_err_buf, sizeof(load_err_buf), "%s", msg ? msg : "unknown");
+        if (msg) JS_FreeCString(js->ctx, msg);
+        JS_FreeValue(js->ctx, msg_val);
+        JS_FreeValue(js->ctx, exc);
+        JS_FreeValue(js->ctx, result);
+        if (load_err) *load_err = load_err_buf;
+        return -1;
+    }
+    JS_FreeValue(js->ctx, result);
+
+    if (file_total)  *file_total  = 0;
+    if (file_passed) *file_passed = 0;
+    if (file_failed) *file_failed = 0;
+    hl_js_test_run(js->ctx, file_total, file_passed, file_failed,
+                   NULL, results, max_results);
+    return 0;
+}
+
 static void vt_js_destroy(HlRuntime *rt)
 {
     hl_js_free((HlJS *)rt);
@@ -985,6 +1049,8 @@ const HlRuntimeVtable hl_js_vtable = {
     .extract_manifest     = vt_js_extract_manifest,
     .enumerate_routes     = vt_js_enumerate_routes,
     .enumerate_middleware = vt_js_enumerate_middleware,
+    .test_setup           = vt_js_test_setup,
+    .run_test_file        = vt_js_run_test_file,
     .destroy              = vt_js_destroy,
     .name                 = "QuickJS",
 };

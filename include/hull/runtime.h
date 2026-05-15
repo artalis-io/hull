@@ -14,6 +14,8 @@
 
 /* Forward declarations */
 typedef struct HlAllocator HlAllocator;
+typedef struct HlTestCaseResult HlTestCaseResult;
+typedef struct KlRouter KlRouter;
 typedef struct HlFsConfig HlFsConfig;
 typedef struct HlEnvConfig HlEnvConfig;
 typedef struct HlHttpConfig HlHttpConfig;
@@ -55,6 +57,25 @@ typedef struct HlRuntimeVtable {
      * introspection — folds parallel Lua/JS code paths into one. */
     void  (*enumerate_routes)(HlRuntime *rt, HlRouteCb cb, void *user);
     void  (*enumerate_middleware)(HlRuntime *rt, HlMiddlewareCb cb, void *user);
+
+    /* Wire app routes + register the `test` global onto the router.
+     * Called once per runtime by the shared test runner before any
+     * test files load. Returns 0 on success, -1 if no app routes
+     * were registered (caller should report "no routes"). */
+    int   (*test_setup)(HlRuntime *rt, KlRouter *router);
+
+    /* Run a single test file end-to-end:
+     *   1. clear test cases left over from a previous file
+     *   2. load + execute file_path (registers test cases via test(name,fn))
+     *   3. run all registered test cases, filling results[] up to max_results
+     *
+     * On success: returns 0, fills *file_total/passed/failed and results[].
+     * On load error: returns -1, sets *load_err to a static string.
+     * Used by the shared test runner (src/hull/test_runner.c). */
+    int   (*run_test_file)(HlRuntime *rt, const char *file_path,
+                           HlTestCaseResult *results, int max_results,
+                           int *file_total, int *file_passed, int *file_failed,
+                           const char **load_err);
 
     void  (*destroy)(HlRuntime *rt);
     const char *name;
