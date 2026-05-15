@@ -79,6 +79,11 @@ typedef struct HlRuntimeVtable {
 
     void  (*destroy)(HlRuntime *rt);
     const char *name;
+
+    /* Glob pattern for test files in this runtime (e.g. "test_*.lua").
+     * Used by the shared test runner — avoids switching on rt->vt->name
+     * to pick the file pattern. */
+    const char *test_file_pattern;
 } HlRuntimeVtable;
 
 struct HlRuntime {

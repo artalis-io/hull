@@ -481,6 +481,33 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
     JS_SetMaxStackSize(js->rt, cfg->max_stack_bytes);
     JS_SetGCThreshold(js->rt, cfg->gc_threshold);
 
+    /*
+     * Stack-top contract for JS_Eval call sites in Hull:
+     *
+     * QuickJS captures the C stack pointer at JS_NewRuntime time
+     * (above, inside the constructor) and computes the stack-overflow
+     * ceiling as `rt->stack_top - max_stack_bytes`. Every JS_Eval call
+     * is then checked against that ceiling.
+     *
+     * For top-level JS_Eval entry points called from C at the SAME
+     * stack depth as JS_NewRuntime (e.g. hl_js_load_app, called during
+     * app_context init), this is a non-issue.
+     *
+     * For top-level JS_Eval entry points called from C at a DEEPER
+     * stack depth than JS_NewRuntime (e.g. vt_js_run_test_file, called
+     * through the shared test_runner), the available JS stack shrinks
+     * by the C-frame difference — and small test scripts can spuriously
+     * trip "stack overflow" because the runtime measures depth from
+     * the wrong base.
+     *
+     * The rule: any C function that calls JS_Eval at a stack depth
+     * not reached during JS_NewRuntime must call JS_UpdateStackTop(rt)
+     * first to re-anchor the base. This is a no-op when the depth is
+     * the same, and corrects the base when it's deeper. Module-loader
+     * sites (js_module_loader, called BY JS_Eval) must NOT reset —
+     * they're already inside JS execution.
+     */
+
     /* Set interrupt handler for gas metering */
     JS_SetInterruptHandler(js->rt, hl_js_interrupt_handler, js);
 
@@ -1007,18 +1034,21 @@ static int vt_js_run_test_file(HlRuntime *rt, const char *file_path,
     src[flen] = '\0';
     fclose(f);
 
-    /* Reset stack base — the test runner adds C frames between
-     * JS_NewRuntime and JS_Eval; without this the JS stack check can
-     * trigger 'stack overflow' even though OS stack has plenty of room. */
+    /* Reset stack base — see the stack-top contract block in
+     * vt_js_init (above). The test runner adds C frames between
+     * JS_NewRuntime and JS_Eval, so without this anchoring even a
+     * trivial test file trips "stack overflow". */
     JS_UpdateStackTop(js->rt);
 
     JSValue result = JS_Eval(js->ctx, src, (size_t)flen, file_path,
                              JS_EVAL_TYPE_MODULE);
     free(src);
 
-    /* JS_Eval error message — kept in a thread-local static so caller can
-     * read it as a borrowed pointer. */
-    static __thread char load_err_buf[1024];
+    /* JS_Eval error message — caller receives a pointer to load_err_buf,
+     * which lives until the next vt_js_run_test_file call. Hull's test
+     * runner is single-threaded; if that ever changes, this becomes
+     * per-HlJS state. */
+    static char load_err_buf[1024];
 
     if (JS_IsException(result)) {
         JSValue exc = JS_GetException(js->ctx);
@@ -1058,4 +1088,5 @@ const HlRuntimeVtable hl_js_vtable = {
     .run_test_file        = vt_js_run_test_file,
     .destroy              = vt_js_destroy,
     .name                 = "QuickJS",
+    .test_file_pattern    = "test_*.js",
 };

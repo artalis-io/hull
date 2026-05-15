@@ -535,4 +535,5 @@ const HlRuntimeVtable hl_lua_vtable = {
     .run_test_file       = vt_lua_run_test_file,
     .destroy             = vt_lua_destroy,
     .name                = "Lua",
+    .test_file_pattern   = "test_*.lua",
 };

@@ -26,11 +26,10 @@ int hl_test_runner_run(HlAppContext *ctx, const HlTestRunnerWriter *writer)
     if (!rt || !rt->vt || !rt->vt->test_setup || !rt->vt->run_test_file)
         return -1;
 
-    /* Pick test-file glob from runtime name: Lua → test_*.lua,
-     * QuickJS → test_*.js. */
-    const char *pattern =
-        (rt->vt->name && rt->vt->name[0] == 'L') ? "test_*.lua" :
-                                                   "test_*.js";
+    /* Test file glob comes from the vtable — keeps the runner free of
+     * per-runtime knowledge. */
+    const char *pattern = rt->vt->test_file_pattern;
+    if (!pattern) return -1;
 
     /* Standalone KlRouter so tests can dispatch HTTP in-process. */
     KlAllocator alloc = kl_allocator_default();
