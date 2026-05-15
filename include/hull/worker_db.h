@@ -39,6 +39,22 @@ void hl_worker_db_init(const char *db_path);
  * Returns NULL on error. Thread-safe: each thread gets its own connection. */
 HlWorkerDb *hl_worker_db_get(void);
 
+/*
+ * Shared "get worker DB + check namespace + prepare statement" helper
+ * for runtime bindings. Both Lua and JS worker_db.c bindings used to
+ * duplicate this 6-line dance at the top of every query/exec function;
+ * folded into one place (roadmap item L / M9).
+ *
+ * Returns 0 on success: *out_db and *out_stmt are filled, caller is
+ * responsible for sqlite3_finalize(*out_stmt).
+ * Returns -1 on failure: *out_err points to a static or sqlite3_errmsg
+ * string that's valid until the next sqlite3 call on *out_db.
+ */
+int hl_worker_db_get_and_prepare(const char    *sql,
+                                 sqlite3      **out_db,
+                                 sqlite3_stmt **out_stmt,
+                                 const char   **out_err);
+
 /* ── Materialized query result (deep-copied, worker-thread safe) ──── */
 
 typedef struct HlDbValue {

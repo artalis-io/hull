@@ -61,24 +61,17 @@ static int worker_lua_bind_params(sqlite3_stmt *stmt, lua_State *L, int idx)
 
 static int worker_lua_db_query(lua_State *L)
 {
-    HlWorkerDb *wdb = hl_worker_db_get();
-    if (!wdb || !wdb->db)
-        return luaL_error(L, "database not available in worker");
-
     const char *sql = luaL_checkstring(L, 1);
-
-    if (hl_cap_db_check_namespace(sql) != 0)
-        return luaL_error(L, "access denied: _hull_* tables are reserved");
-
+    sqlite3 *db = NULL;
     sqlite3_stmt *stmt = NULL;
-    int rc = sqlite3_prepare_v2(wdb->db, sql, -1, &stmt, NULL);
-    if (rc != SQLITE_OK)
-        return luaL_error(L, "prepare: %s", sqlite3_errmsg(wdb->db));
+    const char *err = NULL;
+    if (hl_worker_db_get_and_prepare(sql, &db, &stmt, &err) != 0)
+        return luaL_error(L, "%s", err ? err : "worker db");
 
     if (lua_gettop(L) >= 2 && lua_istable(L, 2)) {
         if (worker_lua_bind_params(stmt, L, 2) != 0) {
             sqlite3_finalize(stmt);
-            return luaL_error(L, "bind: %s", sqlite3_errmsg(wdb->db));
+            return luaL_error(L, "bind: %s", sqlite3_errmsg(db));
         }
     }
 
@@ -88,6 +81,7 @@ static int worker_lua_db_query(lua_State *L)
 
     int ncols = 0;
     int first = 1;
+    int rc;
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         if (first) {
             ncols = sqlite3_column_count(stmt);
@@ -122,7 +116,7 @@ static int worker_lua_db_query(lua_State *L)
     sqlite3_finalize(stmt);
     if (rc != SQLITE_DONE) {
         lua_pop(L, 1); /* pop table */
-        return luaL_error(L, "query: %s", sqlite3_errmsg(wdb->db));
+        return luaL_error(L, "query: %s", sqlite3_errmsg(db));
     }
 
     return 1;
@@ -132,34 +126,27 @@ static int worker_lua_db_query(lua_State *L)
 
 static int worker_lua_db_exec(lua_State *L)
 {
-    HlWorkerDb *wdb = hl_worker_db_get();
-    if (!wdb || !wdb->db)
-        return luaL_error(L, "database not available in worker");
-
     const char *sql = luaL_checkstring(L, 1);
-
-    if (hl_cap_db_check_namespace(sql) != 0)
-        return luaL_error(L, "access denied: _hull_* tables are reserved");
-
+    sqlite3 *db = NULL;
     sqlite3_stmt *stmt = NULL;
-    int rc = sqlite3_prepare_v2(wdb->db, sql, -1, &stmt, NULL);
-    if (rc != SQLITE_OK)
-        return luaL_error(L, "prepare: %s", sqlite3_errmsg(wdb->db));
+    const char *err = NULL;
+    if (hl_worker_db_get_and_prepare(sql, &db, &stmt, &err) != 0)
+        return luaL_error(L, "%s", err ? err : "worker db");
 
     if (lua_gettop(L) >= 2 && lua_istable(L, 2)) {
         if (worker_lua_bind_params(stmt, L, 2) != 0) {
             sqlite3_finalize(stmt);
-            return luaL_error(L, "bind: %s", sqlite3_errmsg(wdb->db));
+            return luaL_error(L, "bind: %s", sqlite3_errmsg(db));
         }
     }
 
-    rc = sqlite3_step(stmt);
+    int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
 
     if (rc != SQLITE_DONE)
-        return luaL_error(L, "exec: %s", sqlite3_errmsg(wdb->db));
+        return luaL_error(L, "exec: %s", sqlite3_errmsg(db));
 
-    lua_pushinteger(L, sqlite3_changes(wdb->db));
+    lua_pushinteger(L, sqlite3_changes(db));
     return 1;
 }
 

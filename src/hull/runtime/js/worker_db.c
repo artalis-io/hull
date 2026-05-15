@@ -74,10 +74,6 @@ static JSValue worker_js_db_query(JSContext *ctx, JSValueConst this_val,
                                    int argc, JSValueConst *argv)
 {
     (void)this_val;
-    HlWorkerDb *wdb = hl_worker_db_get();
-    if (!wdb || !wdb->db)
-        return JS_ThrowInternalError(ctx, "database not available in worker");
-
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "db.query requires (sql, params?)");
 
@@ -85,24 +81,19 @@ static JSValue worker_js_db_query(JSContext *ctx, JSValueConst this_val,
     if (!sql)
         return JS_EXCEPTION;
 
-    if (hl_cap_db_check_namespace(sql) != 0) {
-        JS_FreeCString(ctx, sql);
-        return JS_ThrowInternalError(ctx,
-            "access denied: _hull_* tables are reserved");
-    }
-
+    sqlite3 *db = NULL;
     sqlite3_stmt *stmt = NULL;
-    int rc = sqlite3_prepare_v2(wdb->db, sql, -1, &stmt, NULL);
+    const char *err = NULL;
+    int rc = hl_worker_db_get_and_prepare(sql, &db, &stmt, &err);
     JS_FreeCString(ctx, sql);
-    if (rc != SQLITE_OK)
-        return JS_ThrowInternalError(ctx, "prepare: %s",
-                                     sqlite3_errmsg(wdb->db));
+    if (rc != 0)
+        return JS_ThrowInternalError(ctx, "%s", err ? err : "worker db");
 
     if (argc >= 2) {
         if (worker_js_bind_params(stmt, ctx, argv[1]) != 0) {
             sqlite3_finalize(stmt);
             return JS_ThrowInternalError(ctx, "bind: %s",
-                                         sqlite3_errmsg(wdb->db));
+                                         sqlite3_errmsg(db));
         }
     }
 
@@ -147,7 +138,7 @@ static JSValue worker_js_db_query(JSContext *ctx, JSValueConst this_val,
     if (rc != SQLITE_DONE) {
         JS_FreeValue(ctx, rows);
         return JS_ThrowInternalError(ctx, "query: %s",
-                                     sqlite3_errmsg(wdb->db));
+                                     sqlite3_errmsg(db));
     }
 
     return rows;
@@ -159,10 +150,6 @@ static JSValue worker_js_db_exec(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv)
 {
     (void)this_val;
-    HlWorkerDb *wdb = hl_worker_db_get();
-    if (!wdb || !wdb->db)
-        return JS_ThrowInternalError(ctx, "database not available in worker");
-
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "db.exec requires (sql, params?)");
 
@@ -170,24 +157,19 @@ static JSValue worker_js_db_exec(JSContext *ctx, JSValueConst this_val,
     if (!sql)
         return JS_EXCEPTION;
 
-    if (hl_cap_db_check_namespace(sql) != 0) {
-        JS_FreeCString(ctx, sql);
-        return JS_ThrowInternalError(ctx,
-            "access denied: _hull_* tables are reserved");
-    }
-
+    sqlite3 *db = NULL;
     sqlite3_stmt *stmt = NULL;
-    int rc = sqlite3_prepare_v2(wdb->db, sql, -1, &stmt, NULL);
+    const char *err = NULL;
+    int rc = hl_worker_db_get_and_prepare(sql, &db, &stmt, &err);
     JS_FreeCString(ctx, sql);
-    if (rc != SQLITE_OK)
-        return JS_ThrowInternalError(ctx, "prepare: %s",
-                                     sqlite3_errmsg(wdb->db));
+    if (rc != 0)
+        return JS_ThrowInternalError(ctx, "%s", err ? err : "worker db");
 
     if (argc >= 2) {
         if (worker_js_bind_params(stmt, ctx, argv[1]) != 0) {
             sqlite3_finalize(stmt);
             return JS_ThrowInternalError(ctx, "bind: %s",
-                                         sqlite3_errmsg(wdb->db));
+                                         sqlite3_errmsg(db));
         }
     }
 
@@ -196,9 +178,9 @@ static JSValue worker_js_db_exec(JSContext *ctx, JSValueConst this_val,
 
     if (rc != SQLITE_DONE)
         return JS_ThrowInternalError(ctx, "exec: %s",
-                                     sqlite3_errmsg(wdb->db));
+                                     sqlite3_errmsg(db));
 
-    return JS_NewInt32(ctx, sqlite3_changes(wdb->db));
+    return JS_NewInt32(ctx, sqlite3_changes(db));
 }
 
 /* ── db.batch for worker VMs ─────────────────────────────────────── */

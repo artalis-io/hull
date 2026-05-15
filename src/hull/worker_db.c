@@ -91,6 +91,39 @@ HlWorkerDb *hl_worker_db_get(void)
     return wdb;
 }
 
+/* ── Shared "get + check + prepare" for runtime bindings ──────────── */
+
+int hl_worker_db_get_and_prepare(const char    *sql,
+                                 sqlite3      **out_db,
+                                 sqlite3_stmt **out_stmt,
+                                 const char   **out_err)
+{
+    static const char *e_no_db     = "database not available in worker";
+    static const char *e_namespace = "access denied: _hull_* tables are reserved";
+
+    HlWorkerDb *wdb = hl_worker_db_get();
+    if (!wdb || !wdb->db) {
+        if (out_err) *out_err = e_no_db;
+        return -1;
+    }
+    if (out_db) *out_db = wdb->db;
+
+    if (hl_cap_db_check_namespace(sql) != 0) {
+        if (out_err) *out_err = e_namespace;
+        return -1;
+    }
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(wdb->db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        if (out_err) *out_err = sqlite3_errmsg(wdb->db);
+        return -1;
+    }
+
+    if (out_stmt) *out_stmt = stmt;
+    return 0;
+}
+
 /* ── HlDbResult helpers ────────────────────────────────────────────── */
 
 void hl_db_result_free(HlDbResult *r)
