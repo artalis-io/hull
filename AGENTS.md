@@ -2,6 +2,8 @@
 
 Hull is a capability-secure, local-first runtime for programmable tools and workflows. It provides structured JSON interfaces for AI coding agents, but also works for human developers and automated services. This document covers everything an agent needs to build, test, debug, and deploy Hull applications.
 
+> **Comprehensive companion:** [`docs/agent_guide.md`](docs/agent_guide.md) — full SDLC reference (install → dev → test → build → sign → deploy → release), every CLI command, every module's API surface, security model, performance reference, common patterns/anti-patterns, and a gap analysis of where `hull agent` could grow next. Start there if you need depth; this AGENTS.md is the quick reference.
+
 ## Quick Start
 
 ```bash

@@ -495,6 +495,8 @@ Example apps in both Lua and JavaScript:
 | [docs/ASSESSMENT.md](docs/ASSESSMENT.md) | Platform assessment, scaling path, strategic positioning |
 | [CLAUDE.md](CLAUDE.md) | Development guide for contributors |
 | [AGENTS.md](AGENTS.md) | Agent development guide (hull agent CLI, patterns, stdlib) |
+| [docs/agent_guide.md](docs/agent_guide.md) | **Full SDLC reference** — install → dev → test → build → sign → deploy → release. Every CLI command, every module's API, security/performance/patterns. The deep reference for agents working with Hull. |
+| [docs/audit_2026_05_15.md](docs/audit_2026_05_15.md) | Latest security audit (C / JS / Lua); all findings closed |
 
 ## Using Hull with AI Agents
 
