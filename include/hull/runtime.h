@@ -28,12 +28,34 @@ typedef struct KlServer KlServer;
 typedef struct KlThreadPool KlThreadPool;
 typedef struct HlRuntime HlRuntime;
 
+/*
+ * Route enumeration callback. Invoked once per registered route handler.
+ * `method` is the HTTP method ("GET", "POST", ...) or "*" for any.
+ * `pattern` is the path pattern (e.g. "/users/:id").
+ */
+typedef void (*HlRouteCb)(void *user, const char *method, const char *pattern);
+
+/*
+ * Middleware enumeration callback. Invoked once per registered middleware.
+ * `phase` is "pre" or "post" (pre-body vs post-body).
+ */
+typedef void (*HlMiddlewareCb)(void *user,
+                               const char *method, const char *pattern,
+                               const char *phase);
+
 typedef struct HlRuntimeVtable {
     int   (*init)(HlRuntime *rt, const void *config);
     int   (*load_app)(HlRuntime *rt, const char *filename);
     int   (*wire_routes_server)(HlRuntime *rt, KlServer *server,
                                 void *(*alloc_fn)(size_t));
     int   (*extract_manifest)(HlRuntime *rt, HlManifest *out);
+
+    /* Walk every registered route + middleware. Either callback may be
+     * NULL to skip that category. Used by agent_lib::routes for
+     * introspection — folds parallel Lua/JS code paths into one. */
+    void  (*enumerate_routes)(HlRuntime *rt, HlRouteCb cb, void *user);
+    void  (*enumerate_middleware)(HlRuntime *rt, HlMiddlewareCb cb, void *user);
+
     void  (*destroy)(HlRuntime *rt);
     const char *name;
 } HlRuntimeVtable;

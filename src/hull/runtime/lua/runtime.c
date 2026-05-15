@@ -433,6 +433,61 @@ static int vt_lua_extract_manifest(HlRuntime *rt, HlManifest *out)
     return hl_manifest_extract_lua(lua->L, out, lua->base.alloc);
 }
 
+/* Walk __hull_route_defs in the Lua registry, calling cb for each entry. */
+static void vt_lua_enumerate_routes(HlRuntime *rt, HlRouteCb cb, void *user)
+{
+    if (!cb) return;
+    HlLua *lua = (HlLua *)rt;
+    lua_State *L = lua->L;
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_route_defs");
+    if (!lua_isnil(L, -1)) {
+        int count = (int)luaL_len(L, -1);
+        for (int i = 1; i <= count; i++) {
+            lua_rawgeti(L, -1, i);
+            lua_getfield(L, -1, "method");
+            const char *method = lua_tostring(L, -1);
+            lua_pop(L, 1);
+            lua_getfield(L, -1, "pattern");
+            const char *pattern = lua_tostring(L, -1);
+            lua_pop(L, 1);
+            cb(user, method, pattern);
+            lua_pop(L, 1);
+        }
+    }
+    lua_pop(L, 1);
+}
+
+/* Walk __hull_middleware (pre) + __hull_post_middleware (post). */
+static void vt_lua_enumerate_middleware(HlRuntime *rt, HlMiddlewareCb cb, void *user)
+{
+    if (!cb) return;
+    HlLua *lua = (HlLua *)rt;
+    lua_State *L = lua->L;
+
+    static const struct { const char *key; const char *phase; } phases[] = {
+        { "__hull_middleware",      "pre"  },
+        { "__hull_post_middleware", "post" },
+    };
+    for (size_t p = 0; p < sizeof(phases)/sizeof(phases[0]); p++) {
+        lua_getfield(L, LUA_REGISTRYINDEX, phases[p].key);
+        if (!lua_isnil(L, -1)) {
+            int count = (int)luaL_len(L, -1);
+            for (int i = 1; i <= count; i++) {
+                lua_rawgeti(L, -1, i);
+                lua_getfield(L, -1, "method");
+                const char *method = lua_tostring(L, -1);
+                lua_pop(L, 1);
+                lua_getfield(L, -1, "pattern");
+                const char *pattern = lua_tostring(L, -1);
+                lua_pop(L, 1);
+                cb(user, method, pattern, phases[p].phase);
+                lua_pop(L, 1);
+            }
+        }
+        lua_pop(L, 1);
+    }
+}
+
 static void vt_lua_destroy(HlRuntime *rt)
 {
     hl_lua_free((HlLua *)rt);
@@ -443,6 +498,8 @@ const HlRuntimeVtable hl_lua_vtable = {
     .load_app            = vt_lua_load_app,
     .wire_routes_server  = vt_lua_wire_routes_server,
     .extract_manifest    = vt_lua_extract_manifest,
+    .enumerate_routes    = vt_lua_enumerate_routes,
+    .enumerate_middleware= vt_lua_enumerate_middleware,
     .destroy             = vt_lua_destroy,
     .name                = "Lua",
 };

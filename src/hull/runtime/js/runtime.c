@@ -902,16 +902,89 @@ static int vt_js_extract_manifest(HlRuntime *rt, HlManifest *out)
     return hl_manifest_extract_js(js->ctx, out, js->base.alloc);
 }
 
+/* Walk a JS array property of globalThis, calling cb with method+pattern.
+ * Shared body for route + middleware enumeration; the visitor differs. */
+typedef struct { const char *method, *pattern; } JsRouteRow;
+
+static int js_read_route_array(JSContext *ctx, JSValue global, const char *prop,
+                               void (*emit)(void *user, const JsRouteRow *r, const char *phase),
+                               void *user, const char *phase)
+{
+    JSValue arr = JS_GetPropertyStr(ctx, global, prop);
+    int seen = 0;
+    if (!JS_IsUndefined(arr) && !JS_IsNull(arr)) {
+        JSValue len_val = JS_GetPropertyStr(ctx, arr, "length");
+        int32_t len = 0;
+        JS_ToInt32(ctx, &len, len_val);
+        JS_FreeValue(ctx, len_val);
+        for (int32_t i = 0; i < len; i++) {
+            JSValue item = JS_GetPropertyUint32(ctx, arr, (uint32_t)i);
+            JSValue m = JS_GetPropertyStr(ctx, item, "method");
+            JSValue p = JS_GetPropertyStr(ctx, item, "pattern");
+            const char *ms = JS_ToCString(ctx, m);
+            const char *ps = JS_ToCString(ctx, p);
+            JsRouteRow row = { .method = ms, .pattern = ps };
+            emit(user, &row, phase);
+            seen++;
+            JS_FreeCString(ctx, ms);
+            JS_FreeCString(ctx, ps);
+            JS_FreeValue(ctx, m);
+            JS_FreeValue(ctx, p);
+            JS_FreeValue(ctx, item);
+        }
+    }
+    JS_FreeValue(ctx, arr);
+    return seen;
+}
+
+typedef struct { HlRouteCb cb; void *user; } RouteEmitCtx;
+static void route_emit(void *user, const JsRouteRow *r, const char *phase)
+{
+    (void)phase;
+    RouteEmitCtx *c = user;
+    c->cb(c->user, r->method, r->pattern);
+}
+
+static void vt_js_enumerate_routes(HlRuntime *rt, HlRouteCb cb, void *user)
+{
+    if (!cb) return;
+    HlJS *js = (HlJS *)rt;
+    JSValue global = JS_GetGlobalObject(js->ctx);
+    RouteEmitCtx c = { .cb = cb, .user = user };
+    js_read_route_array(js->ctx, global, "__hull_route_defs", route_emit, &c, NULL);
+    JS_FreeValue(js->ctx, global);
+}
+
+typedef struct { HlMiddlewareCb cb; void *user; } MwEmitCtx;
+static void mw_emit(void *user, const JsRouteRow *r, const char *phase)
+{
+    MwEmitCtx *c = user;
+    c->cb(c->user, r->method, r->pattern, phase);
+}
+
+static void vt_js_enumerate_middleware(HlRuntime *rt, HlMiddlewareCb cb, void *user)
+{
+    if (!cb) return;
+    HlJS *js = (HlJS *)rt;
+    JSValue global = JS_GetGlobalObject(js->ctx);
+    MwEmitCtx c = { .cb = cb, .user = user };
+    js_read_route_array(js->ctx, global, "__hull_middleware",      mw_emit, &c, "pre");
+    js_read_route_array(js->ctx, global, "__hull_post_middleware", mw_emit, &c, "post");
+    JS_FreeValue(js->ctx, global);
+}
+
 static void vt_js_destroy(HlRuntime *rt)
 {
     hl_js_free((HlJS *)rt);
 }
 
 const HlRuntimeVtable hl_js_vtable = {
-    .init                = vt_js_init,
-    .load_app            = vt_js_load_app,
-    .wire_routes_server  = vt_js_wire_routes_server,
-    .extract_manifest    = vt_js_extract_manifest,
-    .destroy             = vt_js_destroy,
-    .name                = "QuickJS",
+    .init                 = vt_js_init,
+    .load_app             = vt_js_load_app,
+    .wire_routes_server   = vt_js_wire_routes_server,
+    .extract_manifest     = vt_js_extract_manifest,
+    .enumerate_routes     = vt_js_enumerate_routes,
+    .enumerate_middleware = vt_js_enumerate_middleware,
+    .destroy              = vt_js_destroy,
+    .name                 = "QuickJS",
 };

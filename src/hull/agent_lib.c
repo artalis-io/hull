@@ -104,158 +104,31 @@ static int write_error(ShJsonBuf *out, const char *msg)
 
 /* ── hl_agent_routes ───────────────────────────────────────────────── */
 
-#ifdef HL_ENABLE_LUA
-static int agent_routes_lua(HlAppContext *ctx, ShJsonWriter *w)
+
+/* Single-path implementation via HlRuntimeVtable::enumerate_routes /
+ * enumerate_middleware. Folds the previous parallel agent_routes_lua +
+ * agent_routes_js (~150 lines × 2) into ~30 lines of JSON emission. */
+
+static void emit_route_json(void *user, const char *method, const char *pattern)
 {
-    HlLua *lua = hl_app_context_lua(ctx);
-
-    sh_json_write_kv_string(w, "runtime", "lua");
-
-    /* Routes */
-    sh_json_write_key(w, "routes");
-    sh_json_write_array_start(w);
-
-    lua_getfield(lua->L, LUA_REGISTRYINDEX, "__hull_route_defs");
-    if (!lua_isnil(lua->L, -1)) {
-        int count = (int)luaL_len(lua->L, -1);
-        for (int i = 1; i <= count; i++) {
-            lua_rawgeti(lua->L, -1, i);
-
-            lua_getfield(lua->L, -1, "method");
-            const char *method = lua_tostring(lua->L, -1);
-            lua_pop(lua->L, 1);
-
-            lua_getfield(lua->L, -1, "pattern");
-            const char *pattern = lua_tostring(lua->L, -1);
-            lua_pop(lua->L, 1);
-
-            sh_json_write_object_start(w);
-            sh_json_write_kv_string(w, "method", method);
-            sh_json_write_kv_string(w, "pattern", pattern);
-            sh_json_write_object_end(w);
-
-            lua_pop(lua->L, 1);
-        }
-    }
-    lua_pop(lua->L, 1);
-    sh_json_write_array_end(w);
-
-    /* Middleware */
-    sh_json_write_key(w, "middleware");
-    sh_json_write_array_start(w);
-
-    /* Pre-body */
-    lua_getfield(lua->L, LUA_REGISTRYINDEX, "__hull_middleware");
-    if (!lua_isnil(lua->L, -1)) {
-        int count = (int)luaL_len(lua->L, -1);
-        for (int i = 1; i <= count; i++) {
-            lua_rawgeti(lua->L, -1, i);
-
-            lua_getfield(lua->L, -1, "method");
-            const char *method = lua_tostring(lua->L, -1);
-            lua_pop(lua->L, 1);
-
-            lua_getfield(lua->L, -1, "pattern");
-            const char *pattern = lua_tostring(lua->L, -1);
-            lua_pop(lua->L, 1);
-
-            sh_json_write_object_start(w);
-            sh_json_write_kv_string(w, "method", method);
-            sh_json_write_kv_string(w, "pattern", pattern);
-            sh_json_write_kv_string(w, "phase", "pre");
-            sh_json_write_object_end(w);
-
-            lua_pop(lua->L, 1);
-        }
-    }
-    lua_pop(lua->L, 1);
-
-    /* Post-body */
-    lua_getfield(lua->L, LUA_REGISTRYINDEX, "__hull_post_middleware");
-    if (!lua_isnil(lua->L, -1)) {
-        int count = (int)luaL_len(lua->L, -1);
-        for (int i = 1; i <= count; i++) {
-            lua_rawgeti(lua->L, -1, i);
-
-            lua_getfield(lua->L, -1, "method");
-            const char *method = lua_tostring(lua->L, -1);
-            lua_pop(lua->L, 1);
-
-            lua_getfield(lua->L, -1, "pattern");
-            const char *pattern = lua_tostring(lua->L, -1);
-            lua_pop(lua->L, 1);
-
-            sh_json_write_object_start(w);
-            sh_json_write_kv_string(w, "method", method);
-            sh_json_write_kv_string(w, "pattern", pattern);
-            sh_json_write_kv_string(w, "phase", "post");
-            sh_json_write_object_end(w);
-
-            lua_pop(lua->L, 1);
-        }
-    }
-    lua_pop(lua->L, 1);
-
-    sh_json_write_array_end(w);
-    return 0;
+    ShJsonWriter *w = user;
+    sh_json_write_object_start(w);
+    sh_json_write_kv_string(w, "method",  method  ? method  : "");
+    sh_json_write_kv_string(w, "pattern", pattern ? pattern : "");
+    sh_json_write_object_end(w);
 }
-#endif
 
-#ifdef HL_ENABLE_JS
-static int agent_routes_js(HlAppContext *ctx, ShJsonWriter *w)
+static void emit_middleware_json(void *user,
+                                 const char *method, const char *pattern,
+                                 const char *phase)
 {
-    HlJS *js = hl_app_context_js(ctx);
-    JSValue global = JS_GetGlobalObject(js->ctx);
-
-    sh_json_write_kv_string(w, "runtime", "js");
-
-    /* Helper macro to extract route/middleware arrays */
-    #define EXTRACT_ARRAY(prop, phase_str) do { \
-        JSValue arr = JS_GetPropertyStr(js->ctx, global, prop); \
-        if (!JS_IsUndefined(arr) && !JS_IsNull(arr)) { \
-            JSValue len_val = JS_GetPropertyStr(js->ctx, arr, "length"); \
-            int32_t len = 0; \
-            JS_ToInt32(js->ctx, &len, len_val); \
-            JS_FreeValue(js->ctx, len_val); \
-            for (int32_t i = 0; i < len; i++) { \
-                JSValue item = JS_GetPropertyUint32(js->ctx, arr, (uint32_t)i); \
-                JSValue m = JS_GetPropertyStr(js->ctx, item, "method"); \
-                JSValue p = JS_GetPropertyStr(js->ctx, item, "pattern"); \
-                const char *ms = JS_ToCString(js->ctx, m); \
-                const char *ps = JS_ToCString(js->ctx, p); \
-                sh_json_write_object_start(w); \
-                sh_json_write_kv_string(w, "method", ms); \
-                sh_json_write_kv_string(w, "pattern", ps); \
-                if (phase_str) sh_json_write_kv_string(w, "phase", phase_str); \
-                sh_json_write_object_end(w); \
-                JS_FreeCString(js->ctx, ms); \
-                JS_FreeCString(js->ctx, ps); \
-                JS_FreeValue(js->ctx, m); \
-                JS_FreeValue(js->ctx, p); \
-                JS_FreeValue(js->ctx, item); \
-            } \
-        } \
-        JS_FreeValue(js->ctx, arr); \
-    } while (0)
-
-    sh_json_write_key(w, "routes");
-    sh_json_write_array_start(w);
-    // cppcheck-suppress nullPointer
-    EXTRACT_ARRAY("__hull_route_defs", NULL);
-    sh_json_write_array_end(w);
-
-    sh_json_write_key(w, "middleware");
-    sh_json_write_array_start(w);
-    EXTRACT_ARRAY("__hull_middleware", "pre");
-    EXTRACT_ARRAY("__hull_post_middleware", "post");
-    sh_json_write_array_end(w);
-
-    #undef EXTRACT_ARRAY
-
-    JS_FreeValue(js->ctx, global);
-    return 0;
+    ShJsonWriter *w = user;
+    sh_json_write_object_start(w);
+    sh_json_write_kv_string(w, "method",  method  ? method  : "");
+    sh_json_write_kv_string(w, "pattern", pattern ? pattern : "");
+    sh_json_write_kv_string(w, "phase",   phase   ? phase   : "");
+    sh_json_write_object_end(w);
 }
-#endif
 
 int hl_agent_routes_ctx(HlAppContext *ctx, ShJsonBuf *out)
 {
@@ -263,16 +136,30 @@ int hl_agent_routes_ctx(HlAppContext *ctx, ShJsonBuf *out)
     sh_json_writer_init(&w, sh_json_buf_write, out);
     sh_json_write_object_start(&w);
 
-    int rc = -1;
-#ifdef HL_ENABLE_LUA
-    if (hl_app_context_is_lua(ctx)) rc = agent_routes_lua(ctx, &w);
-#endif
-#ifdef HL_ENABLE_JS
-    if (!hl_app_context_is_lua(ctx)) rc = agent_routes_js(ctx, &w);
-#endif
+    HlRuntime *rt = hl_app_context_runtime(ctx);
+    if (!rt || !rt->vt) {
+        sh_json_write_object_end(&w);
+        return -1;
+    }
+
+    sh_json_write_kv_string(&w, "runtime",
+        rt->vt == &hl_lua_vtable ? "lua" :
+        rt->vt == &hl_js_vtable  ? "js"  : rt->vt->name);
+
+    sh_json_write_key(&w, "routes");
+    sh_json_write_array_start(&w);
+    if (rt->vt->enumerate_routes)
+        rt->vt->enumerate_routes(rt, emit_route_json, &w);
+    sh_json_write_array_end(&w);
+
+    sh_json_write_key(&w, "middleware");
+    sh_json_write_array_start(&w);
+    if (rt->vt->enumerate_middleware)
+        rt->vt->enumerate_middleware(rt, emit_middleware_json, &w);
+    sh_json_write_array_end(&w);
 
     sh_json_write_object_end(&w);
-    return rc;
+    return 0;
 }
 
 int hl_agent_routes(const char *app_dir, ShJsonBuf *out)
