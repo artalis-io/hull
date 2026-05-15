@@ -76,6 +76,62 @@ static const char SCHEMA_MIGRATE[] =
 static const char SCHEMA_RELOAD[] =
     "{\"type\":\"object\",\"properties\":{}}";
 
+/* ── Phase 6 (2026-05-15): extended introspection schemas ─────────── */
+
+/* Shared schema for any subcommand whose only param is app_dir. */
+static const char SCHEMA_APP_DIR_ONLY[] =
+    "{\"type\":\"object\",\"properties\":{\"app_dir\":{\"type\":\"string\","
+    "\"description\":\"Application directory (default: .)\"}}}";
+
+static const char SCHEMA_ENDPOINT[] =
+    "{\"type\":\"object\",\"properties\":{"
+    "\"method\":{\"type\":\"string\",\"description\":\"HTTP method (e.g. GET)\"},"
+    "\"path\":{\"type\":\"string\",\"description\":\"Request path (e.g. /api/users/42)\"},"
+    "\"app_dir\":{\"type\":\"string\",\"description\":\"Application directory (default: .)\"}},"
+    "\"required\":[\"method\",\"path\"]}";
+
+static const char SCHEMA_VALIDATE[] =
+    "{\"type\":\"object\",\"properties\":{"
+    "\"file\":{\"type\":\"string\",\"description\":\"Path to a .lua or .js file\"}},"
+    "\"required\":[\"file\"]}";
+
+static const char SCHEMA_EVAL[] =
+    "{\"type\":\"object\",\"properties\":{"
+    "\"code\":{\"type\":\"string\",\"description\":\"Lua/JS expression or statements to evaluate\"},"
+    "\"app_dir\":{\"type\":\"string\",\"description\":\"Application directory (default: .)\"}},"
+    "\"required\":[\"code\"]}";
+
+static const char SCHEMA_LOGS[] =
+    "{\"type\":\"object\",\"properties\":{"
+    "\"app_dir\":{\"type\":\"string\",\"description\":\"Application directory (default: .)\"},"
+    "\"tail\":{\"type\":\"integer\",\"description\":\"Number of trailing lines (default 100, max 10000)\"}}}";
+
+static const char SCHEMA_TEMPLATE[] =
+    "{\"type\":\"object\",\"properties\":{"
+    "\"name\":{\"type\":\"string\",\"description\":\"Template name (e.g. pages/home.html)\"},"
+    "\"data\":{\"type\":\"string\",\"description\":\"JSON string of data to render with (default: {})\"},"
+    "\"app_dir\":{\"type\":\"string\",\"description\":\"Application directory (default: .)\"}},"
+    "\"required\":[\"name\"]}";
+
+static const char SCHEMA_COMPUTE_CALL[] =
+    "{\"type\":\"object\",\"properties\":{"
+    "\"module\":{\"type\":\"string\",\"description\":\"WASM module name (e.g. score)\"},"
+    "\"input_file\":{\"type\":\"string\",\"description\":\"Path to a file with input bytes\"},"
+    "\"app_dir\":{\"type\":\"string\",\"description\":\"Application directory (default: .)\"}},"
+    "\"required\":[\"module\",\"input_file\"]}";
+
+static const char SCHEMA_SCHEMA_DIFF[] =
+    "{\"type\":\"object\",\"properties\":{"
+    "\"app_dir\":{\"type\":\"string\",\"description\":\"Application directory (default: .)\"},"
+    "\"db_path\":{\"type\":\"string\",\"description\":\"Database file path (default: app/data.db)\"}}}";
+
+static const char SCHEMA_SQL_NAMED[] =
+    "{\"type\":\"object\",\"properties\":{"
+    "\"name\":{\"type\":\"string\",\"description\":\"Query name from app/queries.json\"},"
+    "\"params\":{\"type\":\"string\",\"description\":\"JSON string of parameter bindings (e.g. {\\\"id\\\":42})\"},"
+    "\"app_dir\":{\"type\":\"string\",\"description\":\"Application directory (default: .)\"}},"
+    "\"required\":[\"name\"]}";
+
 typedef struct {
     const char *name;
     const char *description;
@@ -107,6 +163,39 @@ static const McpTool mcp_tools[] = {
 #endif
     { "hull_reload",         "Reload application context (after code changes)",
                               SCHEMA_RELOAD },
+    /* Phase 6 extended introspection */
+    { "hull_manifest",       "Effective manifest JSON (post-extraction)",
+                              SCHEMA_APP_DIR_ONLY },
+    { "hull_endpoint",       "Preview which handler+middleware would fire for METHOD PATH",
+                              SCHEMA_ENDPOINT },
+    { "hull_middleware",     "List middleware that match METHOD PATH",
+                              SCHEMA_ENDPOINT },
+    { "hull_capabilities",   "Capability declared-vs-used analysis (source walk vs manifest)",
+                              SCHEMA_APP_DIR_ONLY },
+    { "hull_validate",       "Parse + sandbox-check a Lua/JS file in isolation",
+                              SCHEMA_VALIDATE },
+    { "hull_vfs",            "List embedded files (path, size, bucket)",
+                              SCHEMA_APP_DIR_ONLY },
+    { "hull_compute",        "List WASM compute modules + AOT presence",
+                              SCHEMA_APP_DIR_ONLY },
+    { "hull_gpu",            "List compiled WGSL shaders + GPU availability",
+                              SCHEMA_APP_DIR_ONLY },
+    { "hull_perf",           "Runtime stats snapshot (features, default limits)",
+                              SCHEMA_APP_DIR_ONLY },
+    { "hull_logs",           "Tail of app_dir/.hull/dev.log as JSON lines",
+                              SCHEMA_LOGS },
+    { "hull_eval",           "Run a one-shot Lua/JS snippet against the loaded app",
+                              SCHEMA_EVAL },
+    { "hull_template",       "Render a template with sample data via the loaded runtime",
+                              SCHEMA_TEMPLATE },
+    { "hull_compute_call",   "Invoke a WASM module against file input",
+                              SCHEMA_COMPUTE_CALL },
+#ifdef HL_ENABLE_DB
+    { "hull_schema_diff",    "DB schema drift analysis (sqlite_master vs migrations)",
+                              SCHEMA_SCHEMA_DIFF },
+    { "hull_sql_named",      "Run a pre-defined query from app/queries.json",
+                              SCHEMA_SQL_NAMED },
+#endif
     { NULL, NULL, NULL }
 };
 
@@ -367,6 +456,183 @@ static void handle_tools_call(FILE *fp, const ShJsonValue *id,
         sh_json_write_object_start(&w);
         sh_json_write_kv_bool(&w, "ok", warm_ctx_ptr && *warm_ctx_ptr);
         sh_json_write_object_end(&w);
+
+    /* ── Phase 6 extended introspection ─────────────────────────── */
+
+    } else if (strcmp(tool_name, "hull_manifest") == 0) {
+        const char *dir = sh_json_as_string(sh_json_get(args, "app_dir"), app_dir);
+        if (warm_ctx && strcmp(dir, app_dir) == 0)
+            hl_agent_manifest_ctx(warm_ctx, &agent_out);
+        else
+            hl_agent_manifest(dir, &agent_out);
+
+    } else if (strcmp(tool_name, "hull_endpoint") == 0) {
+        const char *dir = sh_json_as_string(sh_json_get(args, "app_dir"), app_dir);
+        const char *method = sh_json_as_string(sh_json_get(args, "method"), "GET");
+        const char *path = sh_json_as_string(sh_json_get(args, "path"), "/");
+        if (warm_ctx && strcmp(dir, app_dir) == 0)
+            hl_agent_endpoint_ctx(warm_ctx, method, path, &agent_out);
+        else
+            hl_agent_endpoint(dir, method, path, &agent_out);
+
+    } else if (strcmp(tool_name, "hull_middleware") == 0) {
+        const char *dir = sh_json_as_string(sh_json_get(args, "app_dir"), app_dir);
+        const char *method = sh_json_as_string(sh_json_get(args, "method"), "GET");
+        const char *path = sh_json_as_string(sh_json_get(args, "path"), "/");
+        if (warm_ctx && strcmp(dir, app_dir) == 0)
+            hl_agent_middleware_ctx(warm_ctx, method, path, &agent_out);
+        else
+            hl_agent_middleware(dir, method, path, &agent_out);
+
+    } else if (strcmp(tool_name, "hull_capabilities") == 0) {
+        const char *dir = sh_json_as_string(sh_json_get(args, "app_dir"), app_dir);
+        if (warm_ctx && strcmp(dir, app_dir) == 0)
+            hl_agent_capabilities_ctx(warm_ctx, &agent_out);
+        else
+            hl_agent_capabilities(dir, &agent_out);
+
+    } else if (strcmp(tool_name, "hull_validate") == 0) {
+        const char *file = sh_json_as_string(sh_json_get(args, "file"), NULL);
+        hl_agent_validate(file, &agent_out);
+
+    } else if (strcmp(tool_name, "hull_vfs") == 0) {
+        const char *dir = sh_json_as_string(sh_json_get(args, "app_dir"), app_dir);
+        if (warm_ctx && strcmp(dir, app_dir) == 0)
+            hl_agent_vfs_ctx(warm_ctx, &agent_out);
+        else
+            hl_agent_vfs(dir, &agent_out);
+
+    } else if (strcmp(tool_name, "hull_compute") == 0) {
+        const char *dir = sh_json_as_string(sh_json_get(args, "app_dir"), app_dir);
+        if (warm_ctx && strcmp(dir, app_dir) == 0)
+            hl_agent_compute_ctx(warm_ctx, &agent_out);
+        else
+            hl_agent_compute(dir, &agent_out);
+
+    } else if (strcmp(tool_name, "hull_gpu") == 0) {
+        const char *dir = sh_json_as_string(sh_json_get(args, "app_dir"), app_dir);
+        if (warm_ctx && strcmp(dir, app_dir) == 0)
+            hl_agent_gpu_ctx(warm_ctx, &agent_out);
+        else
+            hl_agent_gpu(dir, &agent_out);
+
+    } else if (strcmp(tool_name, "hull_perf") == 0) {
+        const char *dir = sh_json_as_string(sh_json_get(args, "app_dir"), app_dir);
+        if (warm_ctx && strcmp(dir, app_dir) == 0) {
+            hl_agent_perf_ctx(warm_ctx, &agent_out);
+        } else {
+            /* No warm context — load briefly and free. */
+            HlAppContextOpts opts = { .app_dir = dir };
+            HlAppContext *tmp = NULL;
+            if (hl_app_context_init(&tmp, &opts) == 0) {
+                hl_agent_perf_ctx(tmp, &agent_out);
+                hl_app_context_free(tmp);
+            } else {
+                ShJsonWriter w;
+                sh_json_writer_init(&w, sh_json_buf_write, &agent_out);
+                sh_json_write_object_start(&w);
+                sh_json_write_kv_string(&w, "error", "failed to load app");
+                sh_json_write_object_end(&w);
+            }
+        }
+
+    } else if (strcmp(tool_name, "hull_logs") == 0) {
+        const char *dir = sh_json_as_string(sh_json_get(args, "app_dir"), app_dir);
+        int tail_n = sh_json_as_int(sh_json_get(args, "tail"), 0);
+        hl_agent_logs(dir, tail_n, &agent_out);
+
+    } else if (strcmp(tool_name, "hull_eval") == 0) {
+        const char *code = sh_json_as_string(sh_json_get(args, "code"), NULL);
+        const char *dir = sh_json_as_string(sh_json_get(args, "app_dir"), app_dir);
+        if (warm_ctx && strcmp(dir, app_dir) == 0) {
+            hl_agent_eval_ctx(warm_ctx, code, &agent_out);
+        } else {
+            HlAppContextOpts opts = { .app_dir = dir };
+            HlAppContext *tmp = NULL;
+            if (hl_app_context_init(&tmp, &opts) == 0) {
+                hl_agent_eval_ctx(tmp, code, &agent_out);
+                hl_app_context_free(tmp);
+            } else {
+                ShJsonWriter w;
+                sh_json_writer_init(&w, sh_json_buf_write, &agent_out);
+                sh_json_write_object_start(&w);
+                sh_json_write_kv_string(&w, "error", "failed to load app");
+                sh_json_write_object_end(&w);
+            }
+        }
+
+    } else if (strcmp(tool_name, "hull_template") == 0) {
+        const char *name = sh_json_as_string(sh_json_get(args, "name"), NULL);
+        const char *data = sh_json_as_string(sh_json_get(args, "data"), "{}");
+        const char *dir = sh_json_as_string(sh_json_get(args, "app_dir"), app_dir);
+        if (warm_ctx && strcmp(dir, app_dir) == 0) {
+            hl_agent_template_ctx(warm_ctx, name, data, &agent_out);
+        } else {
+            HlAppContextOpts opts = { .app_dir = dir };
+            HlAppContext *tmp = NULL;
+            if (hl_app_context_init(&tmp, &opts) == 0) {
+                hl_agent_template_ctx(tmp, name, data, &agent_out);
+                hl_app_context_free(tmp);
+            } else {
+                ShJsonWriter w;
+                sh_json_writer_init(&w, sh_json_buf_write, &agent_out);
+                sh_json_write_object_start(&w);
+                sh_json_write_kv_string(&w, "error", "failed to load app");
+                sh_json_write_object_end(&w);
+            }
+        }
+
+    } else if (strcmp(tool_name, "hull_compute_call") == 0) {
+        const char *module = sh_json_as_string(sh_json_get(args, "module"), NULL);
+        const char *input_file = sh_json_as_string(sh_json_get(args, "input_file"), NULL);
+        const char *dir = sh_json_as_string(sh_json_get(args, "app_dir"), app_dir);
+        if (warm_ctx && strcmp(dir, app_dir) == 0) {
+            hl_agent_compute_call_ctx(warm_ctx, module, input_file, &agent_out);
+        } else {
+            HlAppContextOpts opts = { .app_dir = dir };
+            HlAppContext *tmp = NULL;
+            if (hl_app_context_init(&tmp, &opts) == 0) {
+                hl_agent_compute_call_ctx(tmp, module, input_file, &agent_out);
+                hl_app_context_free(tmp);
+            } else {
+                ShJsonWriter w;
+                sh_json_writer_init(&w, sh_json_buf_write, &agent_out);
+                sh_json_write_object_start(&w);
+                sh_json_write_kv_string(&w, "error", "failed to load app");
+                sh_json_write_object_end(&w);
+            }
+        }
+
+#ifdef HL_ENABLE_DB
+    } else if (strcmp(tool_name, "hull_schema_diff") == 0) {
+        const char *dir = sh_json_as_string(sh_json_get(args, "app_dir"), app_dir);
+        const char *db = sh_json_as_string(sh_json_get(args, "db_path"), NULL);
+        if (warm_ctx && strcmp(dir, app_dir) == 0)
+            hl_agent_schema_diff_ctx(warm_ctx, db, &agent_out);
+        else
+            hl_agent_schema_diff(dir, db, &agent_out);
+
+    } else if (strcmp(tool_name, "hull_sql_named") == 0) {
+        const char *name = sh_json_as_string(sh_json_get(args, "name"), NULL);
+        const char *params = sh_json_as_string(sh_json_get(args, "params"), NULL);
+        const char *dir = sh_json_as_string(sh_json_get(args, "app_dir"), app_dir);
+        if (warm_ctx && strcmp(dir, app_dir) == 0) {
+            hl_agent_sql_named_ctx(warm_ctx, name, params, &agent_out);
+        } else {
+            HlAppContextOpts opts = { .app_dir = dir };
+            HlAppContext *tmp = NULL;
+            if (hl_app_context_init(&tmp, &opts) == 0) {
+                hl_agent_sql_named_ctx(tmp, name, params, &agent_out);
+                hl_app_context_free(tmp);
+            } else {
+                ShJsonWriter w;
+                sh_json_writer_init(&w, sh_json_buf_write, &agent_out);
+                sh_json_write_object_start(&w);
+                sh_json_write_kv_string(&w, "error", "failed to load app");
+                sh_json_write_object_end(&w);
+            }
+        }
+#endif
 
     } else {
         sh_json_buf_free(&agent_out);
