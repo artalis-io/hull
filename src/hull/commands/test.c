@@ -175,6 +175,7 @@ int hl_cmd_test(int argc, char **argv, const HlCommandEnv *env)
     }
 #endif
 
+    // cppcheck-suppress knownConditionTrueFalse
     if (!ran_any) {
         fprintf(stderr, "hull test: no test files found in %s\n", app_dir);
         return 1;

@@ -20,7 +20,7 @@
 #include <string.h>
 #include <unistd.h>
 
-int hl_agent_write_error(struct ShJsonBuf *out, const char *msg)
+int hl_agent_write_error(ShJsonBuf *out, const char *msg)
 {
     ShJsonWriter w;
     sh_json_writer_init(&w, sh_json_buf_write, out);

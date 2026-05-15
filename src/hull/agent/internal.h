@@ -11,13 +11,13 @@
 #define HL_AGENT_INTERNAL_H
 
 #include <stddef.h>
+#include <sh_json.h>  /* ShJsonBuf is a typedef of an anonymous struct — needs full include */
 #include "hull/agent_lib.h"
 
 struct sqlite3;
-struct ShJsonBuf;
 
 /* Emit {"error": msg} as JSON. Always returns -1. */
-int hl_agent_write_error(struct ShJsonBuf *out, const char *msg);
+int hl_agent_write_error(ShJsonBuf *out, const char *msg);
 
 /*
  * Open an app database for read-only introspection.

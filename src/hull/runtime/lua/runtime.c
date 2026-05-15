@@ -511,9 +511,9 @@ static int vt_lua_run_test_file(HlRuntime *rt, const char *file_path,
         lua_pop(lua->L, 1);
         return -1;
     }
-    if (file_total)  *file_total  = 0;
-    if (file_passed) *file_passed = 0;
-    if (file_failed) *file_failed = 0;
+    /* hl_lua_test_run unconditionally writes to file_total/passed/failed.
+     * The shared runner always passes non-NULL pointers; cppcheck CTU
+     * traces it via the vtable so the deref is provably safe. */
     hl_lua_test_run(lua->L, file_total, file_passed, file_failed,
                     NULL, results, max_results);
     return 0;

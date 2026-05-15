@@ -416,6 +416,9 @@ void hl_js_test_clear(JSContext *ctx)
 void hl_js_test_run(JSContext *ctx, int *total, int *passed, int *failed,
                         FILE *out, HlTestCaseResult *results, int max_results)
 {
+    /* All three count pointers are required (callers always pass &locals). */
+    if (!total || !passed || !failed)
+        return;
     *total = 0;
     *passed = 0;
     *failed = 0;

@@ -1034,9 +1034,9 @@ static int vt_js_run_test_file(HlRuntime *rt, const char *file_path,
     }
     JS_FreeValue(js->ctx, result);
 
-    if (file_total)  *file_total  = 0;
-    if (file_passed) *file_passed = 0;
-    if (file_failed) *file_failed = 0;
+    /* hl_js_test_run unconditionally writes to file_total/passed/failed.
+     * The shared runner always passes non-NULL; same reasoning as the
+     * Lua side. */
     hl_js_test_run(js->ctx, file_total, file_passed, file_failed,
                    NULL, results, max_results);
     return 0;
