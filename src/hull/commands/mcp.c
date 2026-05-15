@@ -85,10 +85,12 @@ typedef struct {
 static const McpTool mcp_tools[] = {
     { "hull_routes",         "List registered routes and middleware",
                               SCHEMA_ROUTES },
+#ifdef HL_ENABLE_DB
     { "hull_db_schema",      "Introspect database schema",
                               SCHEMA_DB_SCHEMA },
     { "hull_db_query",       "Run read-only SQL query",
                               SCHEMA_QUERY },
+#endif
     { "hull_request",        "HTTP request to dev server",
                               SCHEMA_REQUEST },
     { "hull_status",         "Check dev server status",
@@ -99,8 +101,10 @@ static const McpTool mcp_tools[] = {
                               SCHEMA_TEST },
     { "hull_context",        "Get task-relevant documentation",
                               SCHEMA_CONTEXT },
+#ifdef HL_ENABLE_DB
     { "hull_migrate_status", "Show migration status",
                               SCHEMA_MIGRATE },
+#endif
     { "hull_reload",         "Reload application context (after code changes)",
                               SCHEMA_RELOAD },
     { NULL, NULL, NULL }
@@ -291,6 +295,7 @@ static void handle_tools_call(FILE *fp, const ShJsonValue *id,
         else
             hl_agent_routes(dir, &agent_out);
 
+#ifdef HL_ENABLE_DB
     } else if (strcmp(tool_name, "hull_db_schema") == 0) {
         const char *dir = sh_json_as_string(sh_json_get(args, "app_dir"), app_dir);
         const char *db = sh_json_as_string(sh_json_get(args, "db_path"), NULL);
@@ -307,6 +312,7 @@ static void handle_tools_call(FILE *fp, const ShJsonValue *id,
             hl_agent_db_query_ctx(warm_ctx, db, sql, &agent_out);
         else
             hl_agent_db_query(dir, db, sql, &agent_out);
+#endif
 
     } else if (strcmp(tool_name, "hull_request") == 0) {
         const char *method = sh_json_as_string(sh_json_get(args, "method"), "GET");
@@ -336,6 +342,7 @@ static void handle_tools_call(FILE *fp, const ShJsonValue *id,
         const char *level = sh_json_as_string(sh_json_get(args, "level"), "compact");
         hl_agent_context(task, level, &agent_out);
 
+#ifdef HL_ENABLE_DB
     } else if (strcmp(tool_name, "hull_migrate_status") == 0) {
         const char *dir = sh_json_as_string(sh_json_get(args, "app_dir"), app_dir);
         const char *db = sh_json_as_string(sh_json_get(args, "db_path"), NULL);
@@ -343,6 +350,7 @@ static void handle_tools_call(FILE *fp, const ShJsonValue *id,
             hl_agent_migrate_status_ctx(warm_ctx, db, &agent_out);
         else
             hl_agent_migrate_status(dir, db, &agent_out);
+#endif
 
     } else if (strcmp(tool_name, "hull_reload") == 0) {
         if (warm_ctx_ptr) {

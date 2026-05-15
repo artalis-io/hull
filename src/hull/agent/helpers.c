@@ -6,14 +6,17 @@
 
 #include "internal.h"
 #include "hull/app_context.h"
-#include "hull/cap/db.h"
-#include "hull/cap/db_backend.h"
 #include "hull/entry.h"
-#include "hull/migrate.h"
 #include "hull/vfs.h"
 
-#include <sh_json.h>
+#ifdef HL_ENABLE_DB
+#include "hull/cap/db.h"
+#include "hull/cap/db_backend.h"
+#include "hull/migrate.h"
 #include <sqlite3.h>
+#endif
+
+#include <sh_json.h>
 
 #include <limits.h>
 #include <stdio.h>
@@ -30,6 +33,7 @@ int hl_agent_write_error(ShJsonBuf *out, const char *msg)
     return -1;
 }
 
+#ifdef HL_ENABLE_DB
 sqlite3 *hl_agent_open_app_db(const char *app_dir, const char *db_path)
 {
     sqlite3 *db = NULL;
@@ -63,6 +67,7 @@ sqlite3 *hl_agent_open_app_db(const char *app_dir, const char *db_path)
 
     return db;
 }
+#endif /* HL_ENABLE_DB */
 
 const char *hl_agent_detect_entry(const char *app_dir, const char *ext,
                                   char *buf, size_t buf_size)

@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#ifdef HL_ENABLE_DB
+
 #include "mod_buffer.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
@@ -889,3 +891,5 @@ int luaopen_hull_db(lua_State *L)
 
     return 1;
 }
+
+#endif /* HL_ENABLE_DB */

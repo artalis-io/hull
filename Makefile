@@ -136,10 +136,28 @@ MBEDTLS_CFLAGS := -std=c11 -O2 -w \
 $(BUILDDIR)/mbed_%.o: $(MBEDTLS_DIR)/library/%.c | $(BUILDDIR)
 	$(CC) $(MBEDTLS_CFLAGS) -c -o $@ $<
 
+# ── SQLite (embedded relational DB) — config flag ──────────────────
+# On by default. Drop for pure-compute builds via:
+#   make HL_ENABLE_DB=0
+# When disabled, every `cap/db*.c`, `worker_db*`, `migrate*`, `mod_db.c`,
+# `agent/db.c`, and SQLite itself are excluded from the build. Apps must
+# avoid `db.*`, `migrate.*`, and any stdlib module that depends on
+# SQLite (session, ratelimit, idempotency, outbox, inbox, rbac, search).
+
+HL_ENABLE_DB ?= 1
+
+ifeq ($(HL_ENABLE_DB),1)
+CFLAGS += -DHL_ENABLE_DB
+endif
+
 # ── SQLite (vendored amalgamation) ─────────────────────────────────
 
 SQLITE_DIR    := $(VENDDIR)/sqlite
+ifeq ($(HL_ENABLE_DB),0)
+SQLITE_OBJ    :=
+else
 SQLITE_OBJ    := $(BUILDDIR)/sqlite3.o
+endif
 SQLITE_CFLAGS := -std=c11 -O2 -w -DSQLITE_THREADSAFE=1 -DSQLITE_ENABLE_FTS5
 
 # ── rxi/log.c ─────────────────────────────────────────────────────────
@@ -177,6 +195,7 @@ $(STB_OBJ): $(STB_DIR)/stb_impl.c | $(BUILDDIR)
 
 # ── WAMR (WebAssembly Micro Runtime — compute-only) ──────────────
 #
+# ── WASM (WAMR) ───────────────────────────────────────────────────────
 # Optional 7th vendored C library. Provides near-native WASM execution
 # for CPU-intensive compute plugins. No WASI, no I/O.
 # Disable with: make HL_ENABLE_WASM=0
@@ -540,20 +559,43 @@ PLEDGE_OBJS ?=
 # Runtime-layer test bindings live in runtime/{lua,js}/mod_test.c (picked
 # up via the JS_RT_SRCS / LUA_RT_SRCS globs below).
 CAP_SRCS := $(filter-out $(SRCDIR)/hull/cap/tool.c $(SRCDIR)/hull/cap/test.c,$(wildcard $(SRCDIR)/hull/cap/*.c))
+ifeq ($(HL_ENABLE_DB),0)
+  # Drop SQLite-backed capability modules in pure-compute builds.
+  CAP_SRCS := $(filter-out \
+      $(SRCDIR)/hull/cap/db.c \
+      $(SRCDIR)/hull/cap/db_sqlite.c \
+      $(SRCDIR)/hull/cap/db_udf.c, \
+      $(CAP_SRCS))
+endif
 CAP_OBJS := $(patsubst $(SRCDIR)/hull/cap/%.c,$(BUILDDIR)/cap_%.o,$(CAP_SRCS))
 CAP_TOOL_OBJ := $(BUILDDIR)/cap_tool.o
 CAP_TEST_OBJ := $(BUILDDIR)/cap_test.o
 
 # JS runtime sources
 JS_RT_SRCS := $(wildcard $(SRCDIR)/hull/runtime/js/*.c)
+ifeq ($(HL_ENABLE_DB),0)
+  JS_RT_SRCS := $(filter-out \
+      $(SRCDIR)/hull/runtime/js/mod_db.c \
+      $(SRCDIR)/hull/runtime/js/worker_db.c, \
+      $(JS_RT_SRCS))
+endif
 JS_RT_OBJS := $(patsubst $(SRCDIR)/hull/runtime/js/%.c,$(BUILDDIR)/js_%.o,$(JS_RT_SRCS))
 
 # Lua runtime sources
 LUA_RT_SRCS := $(wildcard $(SRCDIR)/hull/runtime/lua/*.c)
+ifeq ($(HL_ENABLE_DB),0)
+  LUA_RT_SRCS := $(filter-out \
+      $(SRCDIR)/hull/runtime/lua/mod_db.c \
+      $(SRCDIR)/hull/runtime/lua/worker_db.c, \
+      $(LUA_RT_SRCS))
+endif
 LUA_RT_OBJS := $(patsubst $(SRCDIR)/hull/runtime/lua/%.c,$(BUILDDIR)/lua_rt_%.o,$(LUA_RT_SRCS))
 
 # Command module sources
 CMD_SRCS := $(wildcard $(SRCDIR)/hull/commands/*.c)
+ifeq ($(HL_ENABLE_DB),0)
+  CMD_SRCS := $(filter-out $(SRCDIR)/hull/commands/migrate.c,$(CMD_SRCS))
+endif
 CMD_OBJS := $(patsubst $(SRCDIR)/hull/commands/%.c,$(BUILDDIR)/cmd_%.o,$(CMD_SRCS))
 
 # Select which runtimes to build
@@ -576,7 +618,11 @@ ALLOC_OBJ      := $(BUILDDIR)/hull_alloc.o
 ASYNC_OBJ      := $(BUILDDIR)/hull_async.o
 COMPRESS_OBJ   := $(BUILDDIR)/hull_compress.o
 MINIZ_OBJ      := $(BUILDDIR)/miniz.o
+ifeq ($(HL_ENABLE_DB),0)
+WORKER_DB_OBJ  :=
+else
 WORKER_DB_OBJ  := $(BUILDDIR)/worker_db.o
+endif
 WORKER_WASM_OBJ := $(BUILDDIR)/worker_wasm.o
 MANIFEST_OBJ     := $(BUILDDIR)/manifest.o $(BUILDDIR)/manifest_lua.o $(BUILDDIR)/manifest_js.o
 SANDBOX_OBJ      := $(BUILDDIR)/sandbox.o
@@ -600,11 +646,18 @@ RUNTIME_FACTORY_OBJ := $(BUILDDIR)/runtime_factory.o
 STATIC_OBJ     := $(BUILDDIR)/hull_static.o
 BUILD_ASSET_OBJ      := $(BUILDDIR)/build_assets.o
 BUILD_ASSET_STUB_OBJ := $(BUILDDIR)/build_assets_stub.o
+ifeq ($(HL_ENABLE_DB),0)
+MIGRATE_OBJ    :=
+else
 MIGRATE_OBJ    := $(BUILDDIR)/migrate.o
+endif
 VFS_OBJ        := $(BUILDDIR)/vfs.o
 CACERT_OBJ     := $(BUILDDIR)/cacert.o
 APP_CONTEXT_OBJ := $(BUILDDIR)/app_context.o
 AGENT_LIB_SRCS := $(wildcard $(SRCDIR)/hull/agent/*.c)
+ifeq ($(HL_ENABLE_DB),0)
+  AGENT_LIB_SRCS := $(filter-out $(SRCDIR)/hull/agent/db.c,$(AGENT_LIB_SRCS))
+endif
 AGENT_LIB_OBJ  := $(patsubst $(SRCDIR)/hull/agent/%.c,$(BUILDDIR)/agent_%.o,$(AGENT_LIB_SRCS))
 AGENT_API_OBJ  := $(BUILDDIR)/agent_api.o
 MAIN_OBJ       := $(BUILDDIR)/main.o
@@ -1221,6 +1274,18 @@ ifeq ($(RUNTIME),js)
   TEST_SRCS := $(filter-out %/test_lua.c,$(TEST_SRCS))
 else ifeq ($(RUNTIME),lua)
   TEST_SRCS := $(filter-out %/test_js.c,$(TEST_SRCS))
+endif
+
+# Drop DB-dependent tests in pure-compute builds.
+# test_js.c and test_lua.c exercise the full orchestration surface
+# (including db.*) — they reference hl_db_backend_sqlite directly.
+# Pure-compute builds skip them; the runtime sandbox is still covered
+# by the smaller runtime-isolated tests.
+ifeq ($(HL_ENABLE_DB),0)
+  TEST_SRCS := $(filter-out \
+      %/test_db.c %/test_db_backend.c \
+      %/test_js.c %/test_lua.c, \
+      $(TEST_SRCS))
 endif
 
 # Flatten test paths to build/ binaries: tests/hull/cap/test_body.c → build/test_body

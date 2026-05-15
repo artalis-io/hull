@@ -8,6 +8,8 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#ifdef HL_ENABLE_DB
+
 #include "hull/migrate.h"
 #include "hull/vfs.h"
 #include "hull/cap/db_backend.h"
@@ -487,3 +489,5 @@ void hl_migrate_status_free(HlMigrationStatus *entries, int count)
     }
     free(entries);
 }
+
+#endif /* HL_ENABLE_DB */

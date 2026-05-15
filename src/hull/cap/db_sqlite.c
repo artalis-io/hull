@@ -8,6 +8,8 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#ifdef HL_ENABLE_DB
+
 #include "hull/cap/db_backend.h"
 #include "hull/cap/db.h"
 #include "hull/alloc.h"
@@ -172,3 +174,5 @@ void hl_db_sqlite_unwrap(HlDbHandle *h)
     free(s);
     h->ctx = NULL;
 }
+
+#endif /* HL_ENABLE_DB */

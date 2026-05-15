@@ -9,6 +9,8 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#ifdef HL_ENABLE_DB
+
 #include "hull/commands/migrate.h"
 #include "hull/migrate.h"
 #include "hull/vfs.h"
@@ -159,3 +161,5 @@ int hl_cmd_migrate(int argc, char **argv, const HlCommandEnv *env)
     /* Default: run migrations */
     return cmd_run(app_dir, db_path);
 }
+
+#endif /* HL_ENABLE_DB */

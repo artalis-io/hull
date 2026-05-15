@@ -19,12 +19,14 @@ struct sqlite3;
 /* Emit {"error": msg} as JSON. Always returns -1. */
 int hl_agent_write_error(ShJsonBuf *out, const char *msg);
 
+#ifdef HL_ENABLE_DB
 /*
  * Open an app database for read-only introspection.
  * Tries db_path → app_dir/data.db → :memory: (with migrations applied).
  * Returns a sqlite3 handle the caller must close, or NULL on failure.
  */
 struct sqlite3 *hl_agent_open_app_db(const char *app_dir, const char *db_path);
+#endif
 
 /*
  * Detect an app entry point (app.lua or app.js) under app_dir.

@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#ifdef HL_ENABLE_DB
+
 #include "mod_buffer.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
@@ -1043,3 +1045,5 @@ int hl_js_init_db_module(JSContext *ctx, HlJS *js)
     JS_AddModuleExport(ctx, m, "db");
     return 0;
 }
+
+#endif /* HL_ENABLE_DB */

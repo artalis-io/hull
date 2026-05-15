@@ -24,9 +24,12 @@
 #include "hull/alloc.h"
 #include "hull/app_context.h"
 #include "hull/cacert.h"
+#ifdef HL_ENABLE_DB
 #include "hull/worker_db.h"
-#include "hull/cap/audit.h"
 #include "hull/cap/db.h"
+#include "hull/migrate.h"
+#endif
+#include "hull/cap/audit.h"
 #include "hull/cap/env.h"
 #include "hull/cap/fs.h"
 #include "hull/cap/http.h"
@@ -35,7 +38,6 @@
 #include <keel/client_pool.h>
 #include <keel/compress_miniz.h>
 #include <keel/decompress_miniz.h>
-#include "hull/migrate.h"
 #include "hull/vfs.h"
 
 #include <keel/tls_mbedtls.h>
@@ -60,7 +62,9 @@
 #include <keel/keel.h>
 #include <keel/thread_pool.h>
 
+#ifdef HL_ENABLE_DB
 #include <sqlite3.h>
+#endif
 
 #include "log.h"
 

@@ -199,8 +199,10 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
     /* Register worker VM init hooks (e.g. db.* for worker.dispatch).
      * Must happen before modules are registered since module init may
      * trigger worker VM creation. */
+#ifdef HL_ENABLE_DB
     if (lua->base.db_handle)
         hl_lua_worker_db_init();
+#endif
 
     /* Register hull.* C modules */
     if (hl_lua_register_modules(lua) != 0) {

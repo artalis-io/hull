@@ -35,14 +35,18 @@ static int agent_api_middleware(KlRequest *req, KlResponse *res, void *user_data
 
     if (strcmp(endpoint, "routes") == 0) {
         hl_agent_routes(ctx->app_dir, &out);
+#ifdef HL_ENABLE_DB
     } else if (strcmp(endpoint, "schema") == 0) {
         hl_agent_db_schema(ctx->app_dir, ctx->db_path, &out);
+#endif
     } else if (strcmp(endpoint, "status") == 0) {
         hl_agent_status(ctx->app_dir, 0, &out);
     } else if (strcmp(endpoint, "errors") == 0) {
         hl_agent_errors(ctx->app_dir, &out);
+#ifdef HL_ENABLE_DB
     } else if (strcmp(endpoint, "migrate") == 0) {
         hl_agent_migrate_status(ctx->app_dir, ctx->db_path, &out);
+#endif
     } else {
         sh_json_buf_free(&out);
         return 0; /* not our endpoint, continue */

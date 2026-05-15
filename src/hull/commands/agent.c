@@ -54,6 +54,7 @@ static int cmd_routes(int argc, char **argv)
     return output_result(&out, rc);
 }
 
+#ifdef HL_ENABLE_DB
 static int cmd_db_schema(int argc, char **argv)
 {
     const char *app_dir = ".";
@@ -113,6 +114,7 @@ static int cmd_db(int argc, char **argv)
     fprintf(stderr, "hull agent db: unknown subcommand '%s'\n", argv[0]);
     return 1;
 }
+#endif /* HL_ENABLE_DB */
 
 static int cmd_request(int argc, char **argv)
 {
@@ -241,6 +243,7 @@ static int cmd_deploy(int argc, char **argv)
     return output_result(&out, rc);
 }
 
+#ifdef HL_ENABLE_DB
 static int cmd_migrate(int argc, char **argv)
 {
     const char *app_dir = ".";
@@ -258,6 +261,7 @@ static int cmd_migrate(int argc, char **argv)
     int rc = hl_agent_migrate_status(app_dir, db_path, &out);
     return output_result(&out, rc);
 }
+#endif
 
 /* ── Usage ────────────────────────────────────────────────────────── */
 
@@ -296,8 +300,10 @@ int hl_cmd_agent(int argc, char **argv, const HlCommandEnv *env)
 
     if (strcmp(sub, "routes") == 0)
         return cmd_routes(sub_argc, sub_argv);
+#ifdef HL_ENABLE_DB
     if (strcmp(sub, "db") == 0)
         return cmd_db(sub_argc, sub_argv);
+#endif
     if (strcmp(sub, "request") == 0)
         return cmd_request(sub_argc, sub_argv);
     if (strcmp(sub, "status") == 0)
@@ -308,8 +314,10 @@ int hl_cmd_agent(int argc, char **argv, const HlCommandEnv *env)
         return cmd_test(sub_argc, sub_argv, env);
     if (strcmp(sub, "context") == 0)
         return cmd_context(sub_argc, sub_argv);
+#ifdef HL_ENABLE_DB
     if (strcmp(sub, "migrate") == 0)
         return cmd_migrate(sub_argc, sub_argv);
+#endif
     if (strcmp(sub, "deploy") == 0)
         return cmd_deploy(sub_argc, sub_argv);
     if (strcmp(sub, "help") == 0 || strcmp(sub, "--help") == 0 ||

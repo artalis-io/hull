@@ -26,10 +26,12 @@ int hl_lua_register_modules(HlLua *lua)
     lua_setglobal(L, "app");
 
     /* Register hull.db (only if database is available) */
+#ifdef HL_ENABLE_DB
     if (lua->base.db_handle) {
         luaL_requiref(L, "hull.db", luaopen_hull_db, 0);
         lua_setglobal(L, "db");
     }
+#endif
 
     /* Register hull.time */
     luaL_requiref(L, "hull.time", luaopen_hull_time, 0);

@@ -416,6 +416,20 @@ make HL_ENABLE_GPU=1                                       # build with GPU
 make bench-gpu HL_ENABLE_GPU=1                             # GPU vs WASM vs native benchmark
 ```
 
+## Compute-only builds (`HL_ENABLE_DB=0`)
+
+For pure compute deployments (REST endpoints wrapping WASM/GPU shaders, transform pipelines, signing services) where state lives elsewhere, drop SQLite entirely:
+
+```bash
+make HL_ENABLE_DB=0       # ~3.66 MB binary vs ~5.06 MB default (≈28% smaller)
+```
+
+Removed: SQLite + `db.*` + `migrate.*` + `worker_db` + DB-backed stdlib modules (session, ratelimit, idempotency, outbox, inbox, rbac, search) + the `hull migrate` and `hull agent db|migrate` subcommands.
+
+Still works: HTTP routing, middleware, both runtimes, sandbox, `http.fetch`, `ws.*`, `fs.*`, `crypto.*`, `compute.*`, `gpu.*`, templates, static files, image codecs, SSE, timers, validation, CSV, i18n, CORS, ETag, health, JWT, stateless CSRF, form parsing, logger.
+
+Combine with other flags freely, e.g. `make HL_ENABLE_DB=0 HL_ENABLE_TCC=0 HL_ENABLE_GPU=1 WGPU_LIB_DIR=vendor/wgpu` for a GPU-focused compute service.
+
 ## Server Tuning
 
 - **Response Compression** — gzip via miniz, automatic for bodies >= 860 bytes when `Accept-Encoding: gzip`. Disable with `--no-compress`.

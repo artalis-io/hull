@@ -8,13 +8,17 @@
  */
 
 #include "hull/app_context.h"
-#include "hull/cap/db.h"
-#include "hull/cap/db_backend.h"
 #include "hull/entry.h"
-#include "hull/migrate.h"
 #include "hull/runtime/factory.h"
 #include "hull/vfs.h"
+
+#ifdef HL_ENABLE_DB
+#include "hull/cap/db.h"
+#include "hull/cap/db_backend.h"
+#include "hull/migrate.h"
 #include "hull/worker_db.h"
+#include <sqlite3.h>
+#endif
 
 #ifdef HL_ENABLE_LUA
 #include "hull/runtime/lua.h"
@@ -29,7 +33,6 @@
 #include "hull/cap/gpu.h"
 #endif
 
-#include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,8 +41,11 @@
 /* ── Opaque struct ─────────────────────────────────────────────────── */
 
 struct HlAppContext {
+#ifdef HL_ENABLE_DB
     HlDbHandle     db_handle;     /* vtable-based DB handle */
     sqlite3       *db;            /* raw sqlite3* for migrate/agent (from handle) */
+    int            db_open;       /* 1 = db was opened */
+#endif
     HlVfs          app_vfs;
     HlVfs          platform_vfs;
     HlRuntime     *rt;
@@ -47,7 +53,6 @@ struct HlAppContext {
     /* Factory that built `rt`, owns the heap storage. NULL until init. */
     const HlRuntimeFactory *factory;
 
-    int            db_open;   /* 1 = db was opened */
     int            rt_init;   /* 1 = runtime was initialized */
     int            app_loaded; /* 1 = app code was loaded */
 
@@ -142,6 +147,7 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
     }
 
     /* Open database via vtable (skip in pure compute mode) */
+#ifdef HL_ENABLE_DB
     if (!opts->no_db) {
         const char *db_path = opts->db_path ? opts->db_path : ":memory:";
         ctx->db_handle.backend = &hl_db_backend_sqlite;
@@ -153,6 +159,7 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
         ctx->db_open = 1;
         ctx->db = hl_db_sqlite_raw(&ctx->db_handle);
     }
+#endif
 
     /* Init VFS instances */
     extern const HlEntry hl_app_entries[];
@@ -160,6 +167,7 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
     hl_vfs_init(&ctx->app_vfs, hl_app_entries, opts->app_dir);
     hl_vfs_init(&ctx->platform_vfs, hl_stdlib_entries, NULL);
 
+#ifdef HL_ENABLE_DB
     /* Run migrations (fail on error to prevent starting with broken schema) */
     if (!opts->no_migrate && ctx->db_open) {
         int migrated = hl_migrate_run(&ctx->db_handle, &ctx->app_vfs);
@@ -168,6 +176,7 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
             return -1;
         }
     }
+#endif
 
     /* WASM cache: use external if provided, else init internal */
 #ifdef HL_ENABLE_WASM
@@ -182,10 +191,12 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
 
     /* Build base config bundle — wired into rt->base BEFORE init. */
     HlRuntimeBaseConfig base = {0};
+#ifdef HL_ENABLE_DB
     if (ctx->db_open) {
         base.db_handle      = &ctx->db_handle;
         base.hull_db_handle = &ctx->db_handle;
     }
+#endif
     base.alloc        = opts->alloc;
     base.app_vfs      = &ctx->app_vfs;
     base.platform_vfs = &ctx->platform_vfs;
@@ -215,8 +226,10 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
     }
 
     /* Init worker DB after runtime init (needs db_path). */
+#ifdef HL_ENABLE_DB
     if (opts->worker_db_path)
         hl_worker_db_init(opts->worker_db_path);
+#endif
 
     *out = ctx;
     return 0;
@@ -248,31 +261,43 @@ void hl_app_context_free(HlAppContext *ctx)
         hl_cap_wasm_destroy(&ctx->wasm_cache);
 #endif
 
+#ifdef HL_ENABLE_DB
     if (ctx->db_open) {
         ctx->db_handle.backend->close(ctx->db_handle.ctx);
         ctx->db_handle.ctx = NULL;
         ctx->db = NULL;
     }
+    ctx->db = NULL;
+    ctx->db_open = 0;
+#endif
 
     ctx->rt = NULL;
-    ctx->db = NULL;
     ctx->rt_init = 0;
-    ctx->db_open = 0;
     ctx->app_loaded = 0;
     free(ctx);
 }
 
 /* ── Accessors ─────────────────────────────────────────────────────── */
 
-sqlite3 *hl_app_context_db(HlAppContext *ctx)
+struct sqlite3 *hl_app_context_db(HlAppContext *ctx)
 {
+#ifdef HL_ENABLE_DB
     return ctx ? ctx->db : NULL;
+#else
+    (void)ctx;
+    return NULL;
+#endif
 }
 
 HlDbHandle *hl_app_context_db_handle(HlAppContext *ctx)
 {
+#ifdef HL_ENABLE_DB
     if (!ctx || !ctx->db_handle.backend) return NULL;
     return &ctx->db_handle;
+#else
+    (void)ctx;
+    return NULL;
+#endif
 }
 
 HlRuntime *hl_app_context_runtime(HlAppContext *ctx)
@@ -292,7 +317,12 @@ const HlVfs *hl_app_context_platform_vfs(HlAppContext *ctx)
 
 HlStmtCache *hl_app_context_stmt_cache(HlAppContext *ctx)
 {
+#ifdef HL_ENABLE_DB
     return ctx ? hl_db_sqlite_cache(&ctx->db_handle) : NULL;
+#else
+    (void)ctx;
+    return NULL;
+#endif
 }
 
 int hl_app_context_is_lua(HlAppContext *ctx)

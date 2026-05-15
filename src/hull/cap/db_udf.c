@@ -8,7 +8,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#ifdef HL_ENABLE_WASM
+#if defined(HL_ENABLE_WASM) && defined(HL_ENABLE_DB)
 
 #include "hull/cap/db_udf.h"
 #include "hull/cap/db_backend.h"
@@ -512,4 +512,4 @@ int hl_cap_db_udf_unregister(HlDbHandle *handle, const char *sql_name)
     return 0;
 }
 
-#endif /* HL_ENABLE_WASM */
+#endif /* HL_ENABLE_WASM && HL_ENABLE_DB */

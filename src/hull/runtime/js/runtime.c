@@ -552,8 +552,10 @@ int hl_js_init(HlJS *js, const HlJSConfig *cfg)
     /* Register worker VM init hooks (e.g. db.* for worker.dispatch).
      * Must happen before modules are registered since module init may
      * trigger worker VM creation. */
+#ifdef HL_ENABLE_DB
     if (js->base.db_handle)
         hl_js_worker_db_init();
+#endif
 
     /* Register hull:* built-in modules */
     if (hl_js_register_modules(js) != 0) {

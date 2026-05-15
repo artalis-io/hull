@@ -7,6 +7,8 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#ifdef HL_ENABLE_DB
+
 #include "hull/worker_db.h"
 #include "hull/cap/db.h"
 #include "hull/async.h"
@@ -453,3 +455,5 @@ void hl_worker_db_async_cancel(KlAsyncOp *kl_op, void *user_data)
     }
     /* Don't free ctx or op — done_fn needs them */
 }
+
+#endif /* HL_ENABLE_DB */

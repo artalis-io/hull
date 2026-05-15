@@ -20,7 +20,9 @@
 #include "hull/commands/new.h"
 #include "hull/commands/dev.h"
 #include "hull/commands/eject.h"
+#ifdef HL_ENABLE_DB
 #include "hull/commands/migrate.h"
+#endif
 #include "hull/commands/sign_platform.h"
 #include "hull/commands/agent.h"
 #include "hull/commands/mcp.h"
@@ -49,7 +51,9 @@ static const HlCommand commands[] = {
     { "dev",      hl_cmd_dev },
     { "eject",         hl_cmd_eject },
     { "sign-platform", hl_cmd_sign_platform },
+#ifdef HL_ENABLE_DB
     { "migrate",       hl_cmd_migrate },
+#endif
     { "agent",         hl_cmd_agent },
     { "mcp",           hl_cmd_mcp },
     { "check",         hl_cmd_check },

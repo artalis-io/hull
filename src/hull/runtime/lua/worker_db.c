@@ -8,6 +8,8 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#ifdef HL_ENABLE_DB
+
 #include "hull/runtime/lua.h"
 #include "internal.h"
 #include "hull/worker_db.h"
@@ -210,3 +212,5 @@ void hl_lua_worker_db_init(void)
 {
     hl_lua_worker_register_init(lua_worker_db_init_hook);
 }
+
+#endif /* HL_ENABLE_DB */

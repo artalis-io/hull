@@ -50,8 +50,61 @@ make wamrc              # build WAMR AOT compiler (requires cmake + LLVM)
 make bench-wasm         # WASM compute benchmark (native vs interpreter vs AOT)
 make HL_ENABLE_GPU=1 WGPU_LIB_DIR=vendor/wgpu  # build with GPU compute (wgpu-native)
 make bench-gpu HL_ENABLE_GPU=1 WGPU_LIB_DIR=vendor/wgpu  # GPU vs WASM vs native benchmark
+make HL_ENABLE_DB=0     # compute-only build (drop SQLite, ~1.4 MB smaller)
 make clean              # remove all build artifacts
 ```
+
+### Build feature flags
+
+Hull's distribution is one binary; what's compiled into it is controlled by a small set of `HL_ENABLE_*` flags. Each is on/off at the Makefile level and surfaces as a `-D` define so the C code branches consistently.
+
+| Flag | Default | Effect when off |
+|------|---------|-----------------|
+| `HL_ENABLE_LUA` | 1 | Drop the Lua 5.4 runtime; QuickJS-only build |
+| `HL_ENABLE_JS` | 1 | Drop QuickJS; Lua-only build |
+| `HL_ENABLE_WASM` | 1 | Drop WAMR (`compute.*` unavailable, ~256 KB) |
+| `HL_ENABLE_GPU` | 0 | (Off by default.) On enables wgpu-native (`gpu.*`) |
+| `HL_ENABLE_TCC` | 1 | Drop embedded TinyCC (`hull build --compiler=tcc` rejected) |
+| `HL_EMBED_CA_BUNDLE` | 1 | Drop Mozilla CA bundle (~200 KB, breaks HTTPS without system store) |
+| `HL_ENABLE_DB` | 1 | Drop SQLite + `db.*` + `migrate.*` + worker-DB connections + DB-backed stdlib (session, ratelimit, idempotency, outbox, inbox, rbac, search). ~1.4 MB smaller. See "Compute-only builds" below. |
+
+Combine flags freely: `make HL_ENABLE_DB=0 HL_ENABLE_WASM=1 HL_ENABLE_TCC=0` yields a pure compute runtime with Lua/JS orchestration but no database or build-toolchain.
+
+### Compute-only builds (`HL_ENABLE_DB=0`)
+
+`make HL_ENABLE_DB=0` produces a hull binary without SQLite. Use when the deployment is a pure compute service (REST endpoints that wrap WASM/GPU shaders, transform pipelines, signing services) and any persistent state lives elsewhere (Redis, Postgres-over-HTTP, S3).
+
+What's removed:
+- `vendor/sqlite/sqlite3.c` (~700 KB compiled)
+- `src/hull/cap/db.c`, `cap/db_sqlite.c`, `cap/db_udf.c`
+- `src/hull/migrate.c`, `commands/migrate.c`, `agent/db.c`, `worker_db.c`
+- `runtime/{lua,js}/mod_db.c`, `runtime/{lua,js}/worker_db.c`
+
+What's unavailable to app code:
+- `db` global (`db.query`, `db.exec`, `db.batch`, `db.udf.*`, `db.async.*`)
+- `hull migrate` subcommand and `hull agent db|migrate` subcommands
+- The `migrate`/`outbox`/`inbox`/`session`/`idempotency`/`rbac`/`search`/`ratelimit` stdlib modules — they all assume `db`. Apps importing them will fail at module load.
+
+What still works:
+- Full HTTP routing, middleware, request/response handling
+- Lua / QuickJS runtimes, sandbox, instruction limits, audit logging
+- `http.fetch`, `ws.*`, `fs.*` (filesystem capability with manifest allowlist), `crypto.*`, `compute.*`, `gpu.*`
+- Templates, static files, image codecs, SSE, timers, validation, CSV, i18n, CORS, ETag, health, JWT, CSRF (the stateless variant), form parsing, logger
+- `hull build`, `hull dev`, `hull test`, `hull agent` (minus the `db`/`migrate` subcommands)
+
+Binary size on arm64 Darwin: ~3.66 MB vs ~5.06 MB with DB (about 28% smaller).
+
+### Lua/JS orchestration overhead for compute-heavy workloads
+
+The runtime sandboxes are designed so the hot path of a compute request is dominated by the C/WASM/GPU work, not the script glue:
+
+- Request entry → C dispatcher → Lua/JS handler is a single C→script call (~µs).
+- Inside the handler, `compute.call(name, input)` / `gpu.dispatch(...)` is one C call that hands the request off to WAMR (interpreter or AOT) or wgpu-native. The script suspends until completion.
+- For large inputs use the unified buffer protocol (`fs.mmap`, `WasmBuffer`, `ArrayBuffer`) so bytes never round-trip through a Lua string / JS typed array copy.
+- `compute.async.call` / `gpu.async.dispatch` dispatch to the thread pool and yield to the event loop — other requests are served while the GPU/WASM job runs.
+- Per-request instruction limits (default 100M) cap script-side cost; the bytecode interpreters themselves run at hundreds of MIPS.
+
+Empirically, when a request executes a non-trivial AOT WASM or GPU dispatch, script overhead is sub-millisecond on top of multi-millisecond compute work. If a workload becomes orchestration-bound (very small jobs, hot loop dispatching to GPU), the right fix is usually to batch in the shader (e.g. one `gpu.pipeline` covering multiple stages) rather than to drop the script layer — the C `hl_cap_*` boundary is what makes the build reproducible and the manifest enforceable.
 
 ### Dependencies
 

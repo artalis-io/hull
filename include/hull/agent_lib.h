@@ -25,16 +25,20 @@ int hl_agent_routes(const char *app_dir, ShJsonBuf *out);
 /* ── Warm-context variants (for MCP / long-lived sessions) ─────────── */
 
 int hl_agent_routes_ctx(HlAppContext *ctx, ShJsonBuf *out);
+#ifdef HL_ENABLE_DB
 int hl_agent_db_schema_ctx(HlAppContext *ctx, const char *db_path, ShJsonBuf *out);
 int hl_agent_db_query_ctx(HlAppContext *ctx, const char *db_path,
                           const char *sql, ShJsonBuf *out);
+#endif
 int hl_agent_test_ctx(HlAppContext *ctx, ShJsonBuf *out);
+#ifdef HL_ENABLE_DB
 int hl_agent_migrate_status_ctx(HlAppContext *ctx, const char *db_path,
                                 ShJsonBuf *out);
 
 int hl_agent_db_schema(const char *app_dir, const char *db_path, ShJsonBuf *out);
 int hl_agent_db_query(const char *app_dir, const char *db_path,
                       const char *sql, ShJsonBuf *out);
+#endif
 int hl_agent_request(const char *method, const char *path, int port,
                      const char *body, const char **headers, int nhdrs,
                      ShJsonBuf *out);
@@ -48,8 +52,10 @@ int hl_agent_context(const char *task, const char *level, ShJsonBuf *out);
 
 /* ── Phase 4: Lifecycle ────────────────────────────────────────────── */
 
+#ifdef HL_ENABLE_DB
 int hl_agent_migrate_status(const char *app_dir, const char *db_path,
                             ShJsonBuf *out);
+#endif
 
 /* ── Phase 5: Deploy ──────────────────────────────────────────────── */
 

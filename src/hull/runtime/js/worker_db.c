@@ -8,6 +8,8 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#ifdef HL_ENABLE_DB
+
 #include "hull/runtime/js.h"
 #include "internal.h"
 #include "hull/worker_db.h"
@@ -254,3 +256,5 @@ void hl_js_worker_db_init(void)
 {
     hl_js_worker_register_init(js_worker_db_init_hook);
 }
+
+#endif /* HL_ENABLE_DB */

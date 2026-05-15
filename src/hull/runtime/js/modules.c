@@ -25,10 +25,12 @@ int hl_js_register_modules(HlJS *js)
         return -1;
 
     /* Register hull:db module (only if database is available) */
+#ifdef HL_ENABLE_DB
     if (js->base.db_handle) {
         if (hl_js_init_db_module(js->ctx, js) != 0)
             return -1;
     }
+#endif
 
     /* Register hull:json module */
     if (hl_js_init_json_module(js->ctx, js) != 0)

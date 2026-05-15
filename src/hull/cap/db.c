@@ -8,6 +8,8 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#ifdef HL_ENABLE_DB
+
 #include "hull/cap/db.h"
 #include "hull/cap/audit.h"
 #include "hull/alloc.h"
@@ -412,3 +414,5 @@ int hl_cap_db_check_namespace(const char *sql)
     }
     return HL_DB_OK;
 }
+
+#endif /* HL_ENABLE_DB */

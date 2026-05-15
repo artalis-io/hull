@@ -5,6 +5,8 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#ifdef HL_ENABLE_DB
+
 #include "internal.h"
 #include "hull/app_context.h"
 #include "hull/cap/db.h"
@@ -298,3 +300,5 @@ static int count_files_in_dir(const char *app_dir, const char *subdir,
     free(files);
     return count;
 }
+
+#endif /* HL_ENABLE_DB */

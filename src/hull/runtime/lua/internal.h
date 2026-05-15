@@ -84,7 +84,9 @@ void hl_lua_worker_dispatch_op_free_all(void *ptr);
 void hl_lua_worker_dispatch_cancel(KlAsyncOp *op, void *user_data);
 
 /* Wire db.* module into worker Lua VMs. Call during runtime init. */
+#ifdef HL_ENABLE_DB
 void hl_lua_worker_db_init(void);
+#endif
 
 /* Forward declaration for Keel WS server connection (avoid pulling
  * <keel/websocket_server.h> into every TU that just needs to call
