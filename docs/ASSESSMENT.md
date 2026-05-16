@@ -1,89 +1,297 @@
 # Hull — Platform Assessment
 
-An honest evaluation of where Hull stands, what's strong, what's weak, and what the scaling path looks like.
+**As of 2026-05-16. Approaching v0.1.0.**
+
+An honest evaluation of where Hull stands, what's strong, what's still
+weak, and what the scaling path looks like.
+
+The previous version of this document (2026-03-04) treated WASM compute,
+the agent platform, the deploy command, signed self-update, and most of
+the stdlib expansion as future work. All of those are now shipped. This
+revision reflects the current state.
 
 ## What Hull gets right
 
-### The single-binary thesis is real
+### Capability-secure runtime is fully realized
 
-The build pipeline — source files collected into a sorted registry, compiled, linked against a signed platform library, Ed25519 signed — actually delivers on the promise. Sub-2MB binaries that run on six operating systems via Cosmopolitan APE. Most "single binary" claims involve Docker images or bundled runtimes. Hull means a literal file you can email to someone.
+The capability layer (`src/hull/cap/`) is the structural boundary between
+sandboxed scripting and system resources. Every filesystem read, database
+query, HTTP request, environment-variable lookup, SMTP send, WASM call,
+and GPU dispatch passes through a `hl_cap_*` C function that enforces the
+manifest's allowlist. Apps cannot bypass this — the runtimes don't have
+direct access to `open`, `connect`, `sqlite3_*`, or any other ambient
+primitive. SQL injection is structurally impossible (every query uses
+`sqlite3_bind_*`). Path traversal is blocked by `hl_cap_fs_validate` plus
+kernel `unveil`. Internal `_hull_*` tables are protected by call-stack
+inspection. None of this is bolted-on — it's the architecture.
 
-### The security architecture is unusually mature
+Kernel enforcement is real:
 
-Capability-based manifests with kernel enforcement isn't something you see at this stage. Three independent verification points (pre-download browser tool, pre-install CLI verification, runtime startup check). Pledge/unveil via seccomp-bpf + landlock on Linux. Ed25519 signing chains for both platform and app layers. The C enforcement boundary between application scripting and system resources is structural, not bolted-on. The attack model in `docs/security.md` addresses real adversaries, not theoretical ones.
+- **Linux / Cosmopolitan:** SECCOMP-BPF + Landlock LSM via pledge/unveil
+  polyfill. Violation = SIGKILL.
+- **OpenBSD:** native pledge/unveil. Violation = SIGABRT.
+- **macOS:** Seatbelt (`sandbox_init_with_parameters`) with a deny-default
+  SBPL profile built dynamically from the manifest. Violation = EPERM.
+
+Three independent Ed25519 signature layers (platform, app, release) plus
+file-content hashing means the chain from `hull update` through `hull
+build` through runtime startup is verifiable end-to-end.
+
+### The single-binary thesis is delivered
+
+The build pipeline — source files collected into a sorted registry,
+embedded into a generated C source, compiled, linked against a signed
+platform library — actually delivers on the promise. The current default
+binary is ~5 MB on aarch64 (Lua + JS + WAMR + DB + TLS + CA bundle +
+embedded TinyCC); compute-only with `HL_ENABLE_DB=0` is ~3.66 MB. With
+Cosmopolitan, one APE binary runs on Linux, macOS, Windows, FreeBSD,
+OpenBSD, and NetBSD. `hull build` works on a fresh machine with no
+system compiler thanks to embedded TinyCC and the embedded Mozilla CA
+bundle.
 
 ### The C foundation is production-grade
 
-Allocator discipline (no raw malloc/free anywhere), overflow guards before arithmetic, three sanitizer configurations in CI (ASan+UBSan, MSan+UBSan, debug), static analysis (scan-build + cppcheck), fuzz targets for the HTTP parser and multipart reader. Keel sustains 100K+ req/s on a single core. The VFS provides O(log n) lookups over embedded file arrays. This is not prototype-quality C.
+Allocator discipline (Keel's `KlAllocator` vtable, no raw `malloc`/`free`
+in Hull's own code), overflow guards before arithmetic, three sanitizer
+configurations (ASan+UBSan, MSan+UBSan, debug), static analysis
+(scan-build + cppcheck on every commit), fuzz targets for the HTTP
+parser and multipart reader. Keel sustains 100K+ req/s on a single core.
+The VFS provides O(log n) lookups over embedded file arrays.
 
-### The architecture is extensible
+Three independent security audits in the last month — main audit (49
+findings), Phase 6 audit (21 findings), Phase 6 re-audit (3 follow-ups) —
+all closed. 27 unit-test suites, ~610 test cases, plus 12 E2E scripts.
 
-Each layer talks only to the one below it. The allocator interface means memory management can be swapped. The event loop is abstracted behind epoll/kqueue/io_uring/poll backends. The parser is a vtable. The capability system is a clean boundary. These abstractions aren't academic — they're what makes the scaling path (below) tractable without rewrites.
+### The runtime stack is no longer thin
 
-## What needs honest acknowledgment
+The stdlib has expanded substantially since the March assessment. Lua
+and JS now ship parity coverage of: cors, ratelimit, csrf, auth (session
++ JWT), session, cookie, jwt, template, csv, validate, form, i18n,
+logger, transaction, idempotency, outbox, inbox, rbac, health, etag,
+search (SQLite FTS5), email (SMTP + 3 API providers). Plus WebSockets,
+SSE, background timers (`app.every`, `app.daily`), and `db.udf` for
+user-defined SQL functions in Lua, JS, or WASM. The "missing modules
+are the leak in the funnel" critique from March still applies for niche
+needs, but the baseline for a typical backend is covered.
 
-### The runtime ecosystem is thin
+### WASM and GPU compute are shipped
 
-Lua and QuickJS are defensible technical choices for embedding and sandboxing. But the combined stdlib (cors, ratelimit, csrf, auth, jwt, session, template, json, cookie, i18n) is sparse compared to Express, Django, or Rails. Developers who hit the edge of what the stdlib provides have no npm or luarocks to fall back on. Every missing library is a feature request or a hand-rolled solution. This is the primary adoption friction point.
+What the March assessment treated as designed-but-not-built is now
+production. WASM compute runs through WAMR with:
 
-### QuickJS performance is a known ceiling
+- Fast interpreter + AOT (auto-compiled during `hull build` when
+  `wamrc` is present).
+- Gas metering, configurable heap/stack/I-O caps.
+- Instance pooling (per-module pools cut per-call overhead to ~µs).
+- Persistent instances (linear memory retained across calls — for
+  stateful models / pre-built indexes).
+- Shared data segments (multi-GB read-only datasets in shared heaps).
+- Streaming I/O (file → file, buffer → buffer, callback).
+- SIMD128 + Memory64.
+- The unified buffer protocol (`HlBufferView`) — fs.mmap + WasmBuffer
+  + ArrayBuffer + Lua string all flow into compute and GPU without
+  copying.
 
-QuickJS is roughly 10-20x slower than V8 for compute-heavy workloads. For I/O-bound CRUD (the primary use case), this matters less than it sounds — the 52K req/s on no-DB routes and 4.5K req/s on DB-write routes are adequate for local-first single-user apps. But it sets a ceiling that matters if Hull targets multi-user servers.
+GPU compute (optional, `HL_ENABLE_GPU=1`) via wgpu-native:
 
-### AGPL creates adoption friction
+- WGSL shader dispatch + multi-stage pipeline with shared named buffers.
+- Persistent buffers / textures.
+- Fire-and-forget mode (in-place updates, no readback).
+- GPU-side buffer copy (no CPU roundtrip).
+- Async dispatch (yields to event loop).
+- 5-second per-dispatch timeout (`HL_GPU_TIMEOUT_MS`).
 
-The developers most likely to benefit from Hull — small teams shipping internal tools, indie hackers building products, vibecoders turning ideas into distributable software — are the ones most likely to be uncertain about AGPL implications. The commercial license option helps, but it adds a decision point at exactly the moment you want zero friction. This is a business model choice, not a technical one, and it may need revisiting as adoption data comes in.
+Measured: on Apple M1 Max, GPU beats WASM AOT past ~16K-vector cosine
+similarity workloads.
 
-### The "AI writes Lua" thesis is necessary but not sufficient
+### Agent-native development is a first-class workflow
 
-The README correctly identifies that AI solved code generation but not deployment. But AI writes Go, Rust, and Python just as easily as Lua, and those ecosystems have their own deployment stories. The differentiator isn't that AI can write Lua — it's that Hull's deployment model produces an artifact the creator owns. The positioning should lead with ownership and distribution, not with the language.
+The `hull agent` family ships 26 subcommands covering routes, schema,
+read-only SQL, request preview, status, errors, tests, deploy readiness,
+manifest analysis, capabilities (declared vs used), validate, vfs,
+compute modules + AOT, GPU shaders + devices, perf snapshot, log tail,
+one-shot eval, template render, compute-call, schema-diff, sql-named.
+All emit JSON to stdout. All are also exposed via MCP (`hull mcp`) so
+Cursor and Claude Code can hit the same surface natively. Together with
+`hull dev --agent` (sidecar `.hull/dev.json` + `.hull/last_error.json`),
+agents have a complete feedback loop. This is genuinely differentiated
+— most "AI-friendly" tools mean "we wrote good docs."
+
+### Distribution lifecycle is closed
+
+`install.sh` (POSIX, ~250 lines), shell completions for bash/zsh/fish,
+`hull doctor` for environment checks, `hull update` for signed
+self-update (Ed25519 release signature + SHA-256 manifest verification),
+`hull deploy` for Dockerfile / systemd / fly.toml generation,
+reproducible build chain (`make self-build` produces hull → hull2 →
+hull3 identical). The release signing key infrastructure is in place
+(`HL_RELEASE_PUBKEY_HEX`, GitHub Actions sign step in workflow). The
+gap to v0.1.0 is release engineering, not feature engineering.
+
+## What still needs honest acknowledgment
+
+### Multi-user server use cases are bounded
+
+Lua/JS handlers run one at a time on the event loop. Async DB and HTTP
+work hits the thread pool. SQLite serializes writes. Hull benchmarks
+70-100K req/s on I/O-bound routes and ~19K req/s on SQLite writes on a
+single core — excellent for local tools and small-team servers, not for
+thousands of concurrent users on one box. This is by design but it's
+the ceiling that matters if Hull targets multi-user servers.
+
+The path forward is in `roadmap.md` (PostgreSQL backend, worker-pool
+expansion, SQLite-per-tenant sharding via the DB vtable). None of these
+require architectural changes — the DB capability layer is already a
+vtable, the thread pool already exists, the allocator is already
+pluggable.
+
+### AGPL still creates adoption friction
+
+The developers most likely to benefit from Hull — small teams shipping
+internal tools, indie hackers, vibecoders — are also most likely to be
+uncertain about AGPL implications. The commercial license option helps,
+but it adds a decision point at exactly the moment you want zero
+friction. The LICENSE file's dead-man's-switch (§9: 24 months without a
+release → automatic MIT conversion) is a real risk hedge for adopters,
+but it isn't surfaced prominently. This is a positioning + business-model
+problem, not a technical one, and worth revisiting as adoption data comes
+in.
+
+### QuickJS is still ~10-20× slower than V8 for compute
+
+For I/O-bound CRUD (the primary use case), this barely matters — 52K
+req/s on no-DB JS routes is plenty. But it sets a real ceiling for
+compute-heavy JS workloads. The escape hatches (`compute.async.call`
+for WASM, `gpu.async.dispatch` for GPU) cover this for any workload
+significant enough to feel the gap.
+
+### Encrypted-at-rest is not implemented
+
+The MANIFESTO previously claimed "AES-256 database encryption,
+license-key-derived." This is corrected. The infrastructure exists
+(TweetNaCl's Curve25519 + XSalsa20+Poly1305 gives apps `crypto.secretbox_*`
+for value-level encryption today), but transparent SQLite-level
+encryption (SEE-compatible or SQLCipher-style) is roadmap, not shipped.
+Apps that need it now wrap sensitive values with `secretbox` before
+writing.
+
+### Hosted platform services don't exist yet
+
+Hull Build, Hull Verify, and Hull Sync — described in INVESTORS.md
+with pricing — are planned post-v0.1.0. None are live. Every Hull
+application works without them today; the value proposition holds.
+But the revenue projections in the investor brief depend on services
+that haven't been built.
 
 ## The scaling path
 
-Two common objections — SQLite scalability and single-threaded throughput — are engineering tasks, not architectural dead ends. The foundation already supports both.
+Three engineering tracks, all incremental on the existing architecture:
 
-### SQLite sharding
+### PostgreSQL backend (HlDbBackend)
 
-SQLite's single-writer constraint disappears with sharding. Per-tenant, per-workspace, or per-partition-key database files give each shard its own WAL and its own write lock. The capability layer (`db.query`, `db.exec`) is the natural routing point — application code doesn't need to change if the underlying handle points to a different SQLite file.
+The DB capability layer is already a vtable (`HlDbBackend` in
+`include/hull/cap/db.h`). The compute-only build (`HL_ENABLE_DB=0`)
+already proves that the rest of the platform doesn't depend on SQLite.
+A PostgreSQL backend (libpq + statement caching) is the natural next
+step. Per-handler config or `--db postgres://…` selects the backend at
+startup. App code is unchanged.
 
-This is a proven pattern. Cloudflare D1, Turso/LibSQL, and Litestream all bet on SQLite-per-tenant. The architecture is right: Hull's clean DB capability boundary means shard routing can be added below the application layer without touching app code.
+This validates the abstraction and unlocks two new deployment shapes
+(shared-DB multi-instance, multi-tenant hosted) without breaking the
+local-first single-binary story.
 
-For the primary use case (local-first, single-user), sharding isn't needed. For multi-tenant servers, it's a straightforward extension of what's already there.
+### SQLite-per-tenant sharding
 
-### Worker pool concurrency
+For multi-tenant servers, per-tenant SQLite files (or per-workspace,
+or per-partition-key) give each shard its own WAL and its own write
+lock. The DB vtable is the natural routing point — app code doesn't
+need to change if the underlying handle resolves to a different SQLite
+file per request.
 
-The current model is single-threaded: the event loop accepts connections, reads requests, runs the handler, writes the response. CPU-bound work in Lua/QuickJS blocks everything.
+Proven pattern: Cloudflare D1, Turso/LibSQL, Litestream. Hull's clean
+DB capability boundary means shard routing fits below the application
+layer without touching app code.
 
-The path to concurrency is a producer/consumer worker pool:
+### Worker-pool concurrency expansion
 
-1. **Event loop (producer):** Accepts connections, reads requests, parses headers — stays single-threaded on the event loop, which is where it's most efficient.
-2. **Worker threads (consumers):** A pool of N threads, each with its own Lua state or QuickJS runtime, handles request processing. The event loop dispatches parsed requests to the pool and gets responses back.
-3. **No shared mutable state:** Lua states are per-thread, QuickJS runtimes are per-thread, arena allocators are per-request. The allocator discipline and capability isolation that already exist make this cleaner than it would be in most C codebases.
+The current shape is correct (event loop accepts + parses, thread pool
+handles async DB/HTTP, Lua/JS runs synchronously per request). The
+scaling step is one Lua state / QuickJS runtime per worker thread with
+explicit dispatch from the event loop. The same model Nginx uses (event
+loop + worker processes) and that Node.js worker_threads provide. The
+allocator discipline and capability isolation that already exist make
+this cleaner here than in most C codebases.
 
-This is the same model Nginx uses (event loop + worker processes) and what Node.js worker_threads provide. The Keel event loop abstraction, the allocator interface, and the per-request arena allocation are exactly the foundation this requires. It's an incremental addition, not a rewrite.
+Not needed for the primary local-first thesis (100K req/s on a single
+thread is far more than one person clicking buttons requires). Build
+this when multi-user server demand is a real signal, not before.
 
-## Strategic positioning
+## Strategic positioning (still valid)
 
 ### Lead with ownership, not with Lua
 
-The strongest thing about Hull isn't the language choice — it's that `hull build` produces a file the creator owns. No hosting costs. No vendor lock-in. No runtime dependency. No cloud account. The binary is the product. This is the message that resonates with the AI-coding wave: millions of people can now describe software, but they can't distribute it without renting infrastructure. Hull eliminates the rental.
+`hull build` produces a file the creator owns. No hosting costs. No
+vendor lock-in. No runtime dependency. The binary is the product. This
+is the message that resonates with the AI-coding wave: millions of
+people can now describe software, but they can't distribute it without
+renting infrastructure. Hull eliminates the rental.
 
-### The AI output target is the unlock
+### The capability-secure boundary is the underused differentiator
 
-If Hull reaches a point where an AI agent goes from natural language to a working, distributable binary in one shot — with the security model providing the guardrails that make that safe — that's a genuinely new capability. Not "AI writes code you then have to deploy" but "AI produces a product." This requires the AI integration to be a first-class workflow, not a positioning statement. The `hull new` + `hull dev` + `hull build` pipeline is close, but the gap between "scaffold" and "production app" needs to shrink.
+In a world where AI agents write and run code, the manifest-declared,
+kernel-enforced sandbox is exactly what's needed. The app declares what
+it can touch. The kernel enforces it. The signing chain verifies the
+app hasn't been tampered with. This is the opposite of "give the AI
+agent access to everything and hope for the best." As AI-generated
+software becomes common, the question "how do I know this app is safe
+to run?" becomes critical. Hull has a real answer that competitors
+literally cannot match without rewriting their stack. Lead with it.
 
-### The security model is an underused differentiator
+### Agent-native is a real moat
 
-In a world where AI agents are writing and running code, Hull's capability-based sandbox is exactly what's needed. The manifest declares what the app can touch. The kernel enforces it. The signing chain verifies the app hasn't been tampered with. This is the opposite of "give the AI agent access to everything and hope for the best." As AI-generated software becomes common, the question "how do I know this app is safe to run?" becomes critical. Hull has a real answer. Lead with it.
+The 26-subcommand agent surface + MCP + sidecar files means an AI coding
+assistant has a closed feedback loop on a Hull project that doesn't exist
+on any competing stack. "Did the reload succeed?", "what's the schema?",
+"what's the declared manifest vs what the code actually uses?", "render
+this template with this data" — all single CLI calls returning JSON. The
+combination of `hull dev --agent` + `hull agent eval` + `hull agent
+validate` + MCP integration is a workflow nobody else has shipped.
 
 ## What to build next (priority order)
 
-1. **Stdlib expansion** — Email, CSV, FTS5, RBAC. Every missing module is a reason to reach for Express instead. When a vibecoder's AI writes `require("hull.email")` and it doesn't exist, they leave. The stdlib gap is the leak in the adoption funnel. This directly serves the people Hull is built for today. (Input validation is already shipped: `hull.validate` in both Lua and JS.)
-2. **AI workflow integration** — Make the path from description to distributable binary as short as possible. The thesis lives or dies on how few steps it takes to go from "I want an invoicing app" to a file you can distribute. This is product work, not infrastructure work.
-3. **Worker pool concurrency** — Removes the single-threaded ceiling for multi-user server use cases. Not needed for the primary local-first, single-user thesis — 100K req/s on a single thread is absurdly more than enough for one person clicking buttons. Build this when multi-user servers become a real demand signal.
-4. **SQLite sharding** — Per-tenant database files, routed through the capability layer. Same as above: needed when multi-tenant servers are a real use case, not before.
-5. **WASM compute plugins** — Architecture is designed. Opens Hull to compiled-language performance for compute-heavy tasks without breaking the sandbox model. Build when the stdlib and workflow are mature enough that compute performance is the bottleneck, not missing features.
+This matches `docs/roadmap_next.md`:
+
+1. **v0.1.0 release engineering.** Tag, sign, publish, announce.
+   Everything technical is in place; this is product work.
+
+2. **PostgreSQL backend (HlDbBackend).** Validates the DB-vtable
+   abstraction. Unlocks shared-DB deployments without breaking
+   local-first.
+
+3. **Module ecosystem / package format.** Currently apps are flat.
+   A versioned, signed module format (Hull's answer to luarocks/npm,
+   except with manifest-aware capabilities) would let community modules
+   compose without re-introducing supply-chain risk.
+
+4. **Worker-pool concurrency expansion** for multi-user servers.
+
+5. **Hosted services (Hull Build / Verify / Sync).** Post-v0.1.0.
+
+6. **Encrypted-at-rest** (SQLCipher-style transparent SQLite encryption,
+   license-key-derived). Roadmap item that closes the MANIFESTO claim.
 
 ## The bottom line
 
-Hull's technical foundation — the C quality, the security model, the build pipeline, the cross-platform story, the clean architecture — is strong enough to support the scaling path. The constraints are ecosystem richness and developer adoption, not runtime architecture. The single-binary thesis, the ownership model, and the security story are genuine differentiators. The question is execution speed: can the stdlib and developer experience mature fast enough to capture the AI-coding wave before the window closes?
+Hull's technical foundation — the C quality, the capability-secure
+architecture, the dual-signature build pipeline, the cross-platform
+story, the WASM/GPU compute layers, the agent platform — is
+production-grade and the security audits prove it. The constraints
+that remain are ecosystem richness and developer adoption, not runtime
+architecture. The single-binary thesis, the ownership model, and the
+capability-secure story are genuine, defensible differentiators.
+
+The question for the next year is execution speed: can the v0.1.0
+release ship, can the module ecosystem mature, and can the AI-coding
+workflow surface (`hull agent` + MCP) capture mindshare fast enough to
+make Hull the default exit ramp for AI-generated code before the window
+closes?
