@@ -1,11 +1,25 @@
-/*
- * agent_lib.h — Reusable agent introspection library
+/**
+ * @file agent_lib.h
+ * @brief Transport-agnostic agent introspection library.
  *
- * Transport-agnostic functions for all agent operations.
- * Each function writes complete JSON to an ShJsonBuf.
- * Returns 0 on success, -1 on error (error JSON in buf).
+ * Every `hull agent <verb>` subcommand, every `mcp/<verb>` MCP method,
+ * and every `/_agent/*` HTTP endpoint funnels into one of the functions
+ * declared here. Each writes a complete JSON document to an
+ * `ShJsonBuf`, returning 0 on success and -1 on error (in which case
+ * the buf contains an error envelope `{"error": "..."}`).
  *
- * Used by: CLI (agent.c), MCP server (mcp.c), HTTP endpoints (agent_api.c).
+ * @par Function families:
+ *   - **Plain variant** (`hl_agent_<verb>`) — takes `app_dir` and creates
+ *     a fresh #HlAppContext per call. Used by the CLI.
+ *   - **`_ctx` variant** (`hl_agent_<verb>_ctx`) — reuses a long-lived
+ *     #HlAppContext. Used by the MCP server and HTTP endpoints to avoid
+ *     per-request init.
+ *
+ * @par Consumers:
+ *   `src/hull/commands/agent.c` (CLI), `src/hull/commands/mcp.c` (MCP
+ *   server), `src/hull/agent_api.c` (HTTP `/_agent/*` endpoints).
+ *
+ * Stability: Tier 3 (internal — used across binaries but not pinned).
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
