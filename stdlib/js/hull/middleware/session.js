@@ -1,14 +1,13 @@
-/*
- * hull:session -- Server-side sessions backed by SQLite
+/**
+ * @file hull:middleware:session
+ * @module hull:middleware:session
+ * @description Server-side sessions backed by SQLite. Lua parity:
+ *   `hull.middleware.session`.
  *
- * session.init(opts)          - creates _hull_sessions table, opts.ttl default 86400
- * session.create(data)        - returns session_id (64-char hex)
- * session.load(sessionId)     - returns data object or null
- * session.update(sessionId, data) - boolean
- * session.destroy(sessionId)  - boolean
- * session.cleanup()           - count of expired sessions deleted
+ * Storage: `_hull_sessions` table with sliding TTL (refreshed on every
+ * {@link load} hit). Session ids are 64-char hex from `crypto.random`.
  *
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * @license AGPL-3.0-or-later
  */
 
 import { db } from "hull:db";
@@ -18,6 +17,12 @@ import { json } from "hull:json";
 
 let sessionTtl = 86400;
 
+/**
+ * Initialize the sessions table. Call once at startup.
+ *
+ * @param {Object} [opts]
+ * @param {number} [opts.ttl=86400]  Session lifetime in seconds.
+ */
 function init(opts) {
     const o = opts || {};
     sessionTtl = o.ttl !== undefined ? o.ttl : 86400;
@@ -49,6 +54,14 @@ function generateId() {
  * Create a new session with the given data.
  * opts.ttl: override module-level TTL for this session (optional)
  */
+/**
+ * Create a new session.
+ *
+ * @param {Object} [data={}]  Initial session payload (JSON-encoded).
+ * @param {Object} [opts]
+ * @param {number} [opts.ttl]  Override module-level TTL for this session.
+ * @returns {string}  Session id (64-char hex).
+ */
 function create(data, opts) {
     const id = generateId();
     const now = time.now();
@@ -66,6 +79,16 @@ function create(data, opts) {
 /**
  * Load a session by ID.
  * opts.ttl: override module-level TTL for expiry extension (optional)
+ */
+/**
+ * Load a session by id; refresh expiry on hit (sliding TTL).
+ *
+ * Validates the 64-char hex shape before hitting the DB. Expired
+ * sessions return `null` (and are NOT deleted — see {@link cleanup}).
+ *
+ * @param {string} sessionId
+ * @param {Object} [opts]  `{ ttl }` for the extended expiry.
+ * @returns {Object|null}  Decoded session data, or `null`.
  */
 function load(sessionId, opts) {
     if (!sessionId || typeof sessionId !== "string")
@@ -111,6 +134,13 @@ function load(sessionId, opts) {
  * Replace session data for an existing session.
  * opts.ttl: override module-level TTL for expiry extension (optional)
  */
+/**
+ * Replace session data and refresh expiry.
+ *
+ * @param {string} sessionId
+ * @param {Object} data  Replacement payload.
+ * @param {Object} [opts]  `{ ttl }`.
+ */
 function update(sessionId, data, opts) {
     if (!sessionId || typeof sessionId !== "string")
         return false;
@@ -127,6 +157,11 @@ function update(sessionId, data, opts) {
     return affected > 0;
 }
 
+/**
+ * Delete a session by id. Empty / null is a no-op.
+ *
+ * @param {string} sessionId
+ */
 function destroy(sessionId) {
     if (!sessionId || typeof sessionId !== "string")
         return false;
@@ -139,6 +174,14 @@ function destroy(sessionId) {
     return affected > 0;
 }
 
+/**
+ * Delete all expired sessions. Run periodically.
+ *
+ * @returns {number}  Rows deleted.
+ *
+ * @example
+ * app.every(3600 * 1000, session.cleanup);
+ */
 function cleanup() {
     const now = time.now();
     return db.exec(

@@ -717,8 +717,20 @@ end
 
 local cache_count = 0
 
---- Compile a named template (from embedded entries or filesystem).
--- Returns a function(data) that renders the template.
+--- Compile a named template into a render function.
+--
+-- Loads the template source from the embedded VFS (built binaries) or
+-- from `app_dir/templates/<name>` (dev mode), parses + code-generates +
+-- compiles via `luaL_loadbuffer`. Subsequent calls with the same `name`
+-- return the cached function.
+--
+-- @tparam string name  Template path relative to `templates/`
+--   (e.g. `"pages/home.html"`).
+-- @treturn function  `function(data) -> string` — renders the template.
+-- @raise If the template is not found, or has a parse error.
+-- @usage
+-- local home = template.compile("pages/home.html")
+-- res:html(home({ title = "Hello" }))
 function template.compile(name)
     if cache[name] then
         return cache[name]
@@ -742,19 +754,32 @@ function template.compile(name)
 end
 
 --- Render a named template with data.
--- Loads, compiles (cached), and renders in one call.
+--
+-- Convenience wrapper: `compile` (cached) + invoke.
+--
+-- @tparam string name  Template name; relative to `templates/`.
+-- @tparam[opt] table data  Data context for the template. Defaults to `{}`.
+-- @treturn string  Rendered output.
+-- @usage
+-- res:html(template.render("pages/home.html", { user = req.ctx.user }))
 function template.render(name, data)
     local fn = template.compile(name)
     return fn(data or {}, html_escape, filters)
 end
 
---- Compile and render a template from a source string.
+--- Compile and render a template from a source string (not cached).
+--
+-- @tparam string source  Template source.
+-- @tparam[opt] table data
+-- @treturn string  Rendered output.
 function template.render_string(source, data)
     local fn = compile_source(source, nil)
     return fn(data or {}, html_escape, filters)
 end
 
---- Clear the compiled function cache.
+--- Clear the compiled-function cache.
+--
+-- Primarily for dev hot-reload; not normally needed.
 function template.clear_cache()
     cache = {}
     cache_count = 0

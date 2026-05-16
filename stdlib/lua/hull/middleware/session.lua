@@ -1,10 +1,12 @@
+--- Server-side sessions backed by SQLite.
 --
--- hull.session -- Server-side sessions backed by SQLite
+-- @module hull.middleware.session
+-- @license AGPL-3.0-or-later
 --
--- Uses the global `db` object for storage and `crypto` for ID generation.
---
--- SPDX-License-Identifier: AGPL-3.0-or-later
---
+-- Storage: `_hull_sessions` table (id, data, created_at, last_accessed,
+-- expires_at). Uses `db.*` for persistence and `crypto.random` for the
+-- session id (32 bytes hex). Cookie-based auth pairs this with
+-- @{hull.middleware.auth.session_middleware}.
 
 local session = {}
 
@@ -12,8 +14,18 @@ local session = {}
 -- Singleton TTL — session.init() must be called exactly once per application.
 local _ttl = 86400
 
---- Initialize the sessions table and configure TTL.
--- opts.ttl: session lifetime in seconds (default 86400)
+--- Initialize the sessions table.
+--
+-- Creates the `_hull_sessions` table if absent and sets the module-level
+-- TTL. **Must be called once at startup** before any other session
+-- function. Calling twice with different TTLs is silently allowed but
+-- the latter overrides.
+--
+-- @tparam[opt] table opts  `{ ttl = integer }` (seconds, default `86400`).
+--
+-- @usage
+-- local session = require("hull.middleware.session")
+-- session.init({ ttl = 7 * 24 * 3600 })  -- 1 week
 function session.init(opts)
     opts = opts or {}
     -- M-2: explicit nil check; `if opts.ttl then` would override the
@@ -47,9 +59,12 @@ local function generate_id()
     return table.concat(hex)
 end
 
---- Create a new session with the given data table.
--- opts.ttl: override module-level TTL for this session (optional)
--- Returns the session ID (64-char hex string).
+--- Create a new session.
+--
+-- @tparam[opt] table data  Initial session data. JSON-encoded for storage.
+-- @tparam[opt] table opts  `{ ttl = integer }` — override module-level TTL.
+-- @treturn string  Session id (64-char hex). Persist to the client via
+--   a cookie (see @{hull.middleware.auth.login}).
 function session.create(data, opts)
     local id = generate_id()
     local now = time.now()
@@ -64,10 +79,16 @@ function session.create(data, opts)
     return id
 end
 
---- Load a session by ID.
--- Returns the data table, or nil if the session does not exist or is expired.
--- Updates last_accessed and extends expiry on successful load.
--- opts.ttl: override module-level TTL for expiry extension (optional)
+--- Load a session by id; refresh expiry on hit (sliding TTL).
+--
+-- Validates that `session_id` matches the 64-char hex shape before
+-- hitting the DB. On hit, updates `last_accessed` and extends
+-- `expires_at`. Expired sessions return `nil` and are NOT deleted
+-- (call @{session.cleanup} for that).
+--
+-- @tparam string session_id  Session id (from the auth cookie).
+-- @tparam[opt] table opts  `{ ttl = integer }` for the extended expiry.
+-- @treturn ?table  Session data, or `nil` if absent / expired / malformed.
 function session.load(session_id, opts)
     if not session_id or session_id == "" then
         return nil
@@ -112,8 +133,11 @@ function session.load(session_id, opts)
     return decoded
 end
 
---- Replace session data for an existing session.
--- opts.ttl: override module-level TTL for expiry extension (optional)
+--- Replace the data for an existing session and refresh expiry.
+--
+-- @tparam string session_id
+-- @tparam table data  Replacement payload (JSON-encoded).
+-- @tparam[opt] table opts  `{ ttl = integer }`.
 function session.update(session_id, data, opts)
     if not session_id or session_id == "" then
         return
@@ -129,7 +153,9 @@ function session.update(session_id, data, opts)
     )
 end
 
---- Destroy a session by ID.
+--- Destroy a session by id.
+--
+-- @tparam string session_id  Empty / nil is a no-op.
 function session.destroy(session_id)
     if not session_id or session_id == "" then
         return
@@ -139,7 +165,10 @@ function session.destroy(session_id)
 end
 
 --- Delete all expired sessions.
--- Returns the number of deleted sessions.
+--
+-- Run periodically — typically `app.every(3600_000, session.cleanup)`.
+--
+-- @treturn integer  Number of rows deleted.
 function session.cleanup()
     local now = time.now()
     local count = db.exec(

@@ -540,6 +540,13 @@ function compileSource(source, name) {
     return _template.compile(code, chunkName);
 }
 
+/**
+ * Compile a named template into a render function (cached).
+ *
+ * @param {string} name  Template path relative to `templates/`.
+ * @returns {(data: Object) => string}  Render function.
+ * @throws {Error} If the template is not found or has a parse error.
+ */
 function compile(name) {
     if (cache[name]) return cache[name];
 
@@ -558,16 +565,34 @@ function compile(name) {
     return fn;
 }
 
+/**
+ * Render a named template with data.
+ *
+ * @param {string} name             Template name.
+ * @param {Object} [data={}]        Data context.
+ * @returns {string}                Rendered output.
+ *
+ * @example
+ * res.html(template.render("pages/home.html", { user: req.ctx.user }));
+ */
 function render(name, data) {
     const fn = compile(name);
     return fn(data || {}, htmlEscape, filters);
 }
 
+/**
+ * Compile + render a template from a source string (not cached).
+ *
+ * @param {string} source
+ * @param {Object} [data={}]
+ * @returns {string}
+ */
 function renderString(source, data) {
     const fn = compileSource(source, null);
     return fn(data || {}, htmlEscape, filters);
 }
 
+/** Clear the compiled-function cache. Primarily for hot-reload. */
 function clearCache() {
     for (const k in cache) delete cache[k];
     cacheCount = 0;

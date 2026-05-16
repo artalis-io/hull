@@ -1,11 +1,11 @@
+--- RFC 4180 CSV parser + writer.
 --
--- hull.csv -- RFC 4180 CSV parser and writer
+-- @module hull.csv
+-- @license AGPL-3.0-or-later
 --
--- Character-by-character state machine parser that correctly handles
--- quoted fields with embedded newlines, separators, and escaped quotes.
---
--- SPDX-License-Identifier: AGPL-3.0-or-later
---
+-- Character-by-character state machine parser. Correctly handles quoted
+-- fields containing the separator, embedded newlines, and doubled-quote
+-- escapes (`""`).
 
 local csv = {}
 
@@ -15,14 +15,23 @@ local STATE_UNQUOTED     = 2
 local STATE_QUOTED        = 3
 local STATE_QUOTE_IN_QUOTED = 4
 
---- Parse a CSV string into an array of rows.
+--- Parse a CSV string.
 --
--- Options:
---   headers   (bool, default false)  — first row is header; returns array of objects
---   separator (string, default ",")  — field delimiter
---   quote     (string, default '"')  — quote character
+-- @tparam string text  CSV text (UTF-8). `nil` or `""` returns `{}`.
+-- @tparam[opt] table opts  Options:
 --
--- Returns: array of row arrays, or array of row objects if headers=true
+--   - `headers`   (boolean, default `false`): first row treated as
+--     headers; returns an array of objects (`{ [col_name] = value, ... }`)
+--     instead of an array of arrays.
+--   - `separator` (string, default `","`): field delimiter.
+--   - `quote`     (string, default `'"'`): quote character.
+--   - `max_rows`  (integer, default `100_000`): hard cap; rows past this
+--     are silently dropped.
+--
+-- @treturn table[]  Array of row arrays (or row objects if `headers=true`).
+-- @usage
+-- local rows = csv.parse(req.body, { headers = true })
+-- for _, row in ipairs(rows) do print(row.name, row.email) end
 function csv.parse(text, opts)
     if text == nil or text == "" then
         return {}
@@ -207,17 +216,19 @@ function csv.parse(text, opts)
     return rows
 end
 
---- Encode an array of rows into a CSV string.
+--- Encode rows into a CSV string.
 --
--- Options:
---   headers   (bool, default false)  — rows are objects; first row of output is header
---   separator (string, default ",")  — field delimiter
---   quote     (string, default '"')  — quote character
+-- @tparam table[] rows  Array of rows. When `opts.headers = true`, rows
+--   are objects (keys become the header row). Otherwise rows are arrays.
+-- @tparam[opt] table opts
 --
--- When headers=false: rows is an array of arrays.
--- When headers=true:  rows is an array of objects (keys become header row).
+--   - `headers`   (boolean, default `false`)
+--   - `separator` (string, default `","`)
+--   - `quote`     (string, default `'"'`)
 --
--- Returns: CSV string with LF line endings
+-- @treturn string  CSV text with LF line endings. Values containing the
+--   separator, quote, CR, or LF are auto-quoted; embedded quotes are
+--   doubled (RFC 4180).
 function csv.encode(rows, opts)
     if rows == nil or #rows == 0 then
         return ""

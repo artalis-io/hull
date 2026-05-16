@@ -1,14 +1,13 @@
-/*
- * hull:csrf -- Stateless CSRF token generation and verification
+/**
+ * @file hull:middleware:csrf
+ * @module hull:middleware:csrf
+ * @description Stateless CSRF tokens via HMAC-SHA256. Lua parity:
+ *   `hull.middleware.csrf`.
  *
- * csrf.generate(sessionId, secret)              - returns "hexTimestamp.hmacHex"
- * csrf.verify(token, sessionId, secret, maxAge) - boolean
- * csrf.middleware(opts)                          - returns middleware function
+ * Only relevant for cookie/session-based auth. JWT Bearer auth does not
+ * need CSRF protection.
  *
- * Tokens are stateless: HMAC(sessionId + "." + timestamp, secret).
- * No database required.
- *
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * @license AGPL-3.0-or-later
  */
 
 import { crypto } from "hull:crypto";
@@ -33,6 +32,13 @@ function computeHmac(sessionId, timestamp, secret) {
     return crypto.hmacSha256(msg, keyHex);
 }
 
+/**
+ * Generate a CSRF token for `(sessionId, secret)`.
+ *
+ * @param {string} sessionId
+ * @param {string} secret  HMAC key.
+ * @returns {string}  `hex_timestamp.hmac_hex`.
+ */
 function generate(sessionId, secret) {
     if (!sessionId || typeof sessionId !== "string")
         throw new Error("sessionId is required");
@@ -46,6 +52,15 @@ function generate(sessionId, secret) {
     return tsHex + "." + mac;
 }
 
+/**
+ * Verify a CSRF token (constant-time HMAC compare + age check).
+ *
+ * @param {string} token
+ * @param {string} sessionId
+ * @param {string} secret
+ * @param {number} [maxAge=3600]
+ * @returns {boolean}
+ */
 function verify(token, sessionId, secret, maxAge) {
     if (!token || typeof token !== "string")
         return false;
@@ -96,6 +111,25 @@ function parseCookieSessionId(req, cookieName) {
     return val || null;
 }
 
+/**
+ * Build a CSRF middleware. Register with `app.usePost()`.
+ *
+ * Safe methods (GET/HEAD/OPTIONS): generates a token, attaches to
+ * `req.ctx.csrfToken`. Unsafe methods: verifies token from
+ * `X-CSRF-Token` header or `_csrf` form field; sends 403 on failure.
+ *
+ * Body parsing capped at 1 MiB / 256 form pairs.
+ *
+ * @param {Object}  opts
+ * @param {string}  opts.secret              **Required.** HMAC secret.
+ * @param {string}  [opts.sessionKey="session_id"]
+ * @param {number}  [opts.maxAge=3600]
+ * @param {string[]} [opts.safeMethods=["GET","HEAD","OPTIONS"]]
+ * @param {string}  [opts.headerName="x-csrf-token"]
+ * @param {string}  [opts.fieldName="_csrf"]
+ * @returns {(req, res) => number}
+ * @throws {Error} If `opts.secret` is missing.
+ */
 function middleware(opts) {
     const o = opts || {};
     const secret = o.secret;

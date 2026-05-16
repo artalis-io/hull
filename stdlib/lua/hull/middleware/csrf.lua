@@ -1,11 +1,14 @@
+--- Stateless CSRF tokens via HMAC-SHA256.
 --
--- hull.csrf -- Stateless CSRF token generation and verification
+-- @module hull.middleware.csrf
+-- @license AGPL-3.0-or-later
 --
--- Tokens are "hex_timestamp.hmac_hex" where the HMAC covers
--- session_id .. ":" .. timestamp.
+-- Tokens are `hex_timestamp.hmac_hex` where the HMAC covers
+-- `session_id .. ":" .. timestamp`. No DB storage — verification is
+-- pure HMAC + age check.
 --
--- SPDX-License-Identifier: AGPL-3.0-or-later
---
+-- Only relevant for cookie-based session auth. JWT Bearer auth does
+-- NOT need CSRF protection (browsers don't auto-send Bearer tokens).
 
 local csrf = {}
 
@@ -38,11 +41,14 @@ local function constant_time_compare(a, b)
     return diff == 0
 end
 
---- Generate a CSRF token for the given session ID and secret.
--- Returns "hex_timestamp.hmac_hex"
--- Note: token is scoped to session + time window, not to a specific endpoint.
--- A valid token generated on any page can be used on any endpoint within
--- the same session and max_age window. This is standard CSRF practice.
+--- Generate a CSRF token for `(session_id, secret)`.
+--
+-- @tparam string session_id  Session id (or any per-user secret nonce).
+-- @tparam string secret      HMAC key.
+-- @treturn string  Token in `hex_timestamp.hmac_hex` form. Embed in
+--   form `<input type="hidden">` or send via `X-CSRF-Token` header.
+-- @usage
+-- local token = csrf.generate(req.ctx.session_id, app_secret)
 function csrf.generate(session_id, secret)
     local ts = tostring(time.now())
     local ts_hex = str_to_hex(ts)
@@ -54,9 +60,16 @@ function csrf.generate(session_id, secret)
     return ts_hex .. "." .. mac
 end
 
---- Verify a CSRF token against the session ID and secret.
--- max_age: maximum token age in seconds (default 3600)
--- Returns true if valid, false otherwise.
+--- Verify a CSRF token.
+--
+-- Constant-time HMAC comparison + age check. Tokens older than
+-- `max_age` are rejected even if the HMAC matches.
+--
+-- @tparam string token
+-- @tparam string session_id
+-- @tparam string secret
+-- @tparam[opt] integer max_age  Max token age in seconds (default `3600`).
+-- @treturn boolean  `true` if valid.
 function csrf.verify(token, session_id, secret, max_age)
     max_age = max_age or 3600
 
@@ -109,13 +122,30 @@ function csrf.verify(token, session_id, secret, max_age)
     return constant_time_compare(mac, expected_mac)
 end
 
---- Create a CSRF middleware function for use with app.use().
--- opts.secret (required): HMAC secret string
--- opts.session_key: key in req.ctx for session ID (default "session_id")
--- opts.max_age: max token age in seconds (default 3600)
--- opts.safe_methods: methods that skip verification (default {"GET","HEAD","OPTIONS"})
--- opts.header_name: header to read token from (default "x-csrf-token")
--- opts.field_name: form field name for token (default "_csrf")
+--- Build a CSRF middleware function. Register with `app.use_post()`.
+--
+-- Safe methods (`GET`/`HEAD`/`OPTIONS`): generates a token and attaches
+-- it to `req.ctx.csrf_token` for templates to embed. Returns `0`.
+--
+-- Unsafe methods: reads the token from `X-CSRF-Token` header or `_csrf`
+-- form field, verifies it, and sends `403` on failure. Returns `1` on
+-- short-circuit, `0` on success.
+--
+-- Body parsing caps: 1 MiB body, 256 form pairs, 4 KiB per pair —
+-- bounded work per unsafe request. Large multipart uploads should be
+-- parsed before this middleware runs.
+--
+-- @tparam table opts  Options:
+--
+--   - `secret`       (string, **required**): HMAC secret.
+--   - `session_key`  (string, default `"session_id"`): key in `req.ctx`.
+--   - `max_age`      (integer, default `3600`).
+--   - `safe_methods` (`{string,...}`, default `{"GET","HEAD","OPTIONS"}`).
+--   - `header_name`  (string, default `"x-csrf-token"`).
+--   - `field_name`   (string, default `"_csrf"`).
+--
+-- @treturn function  Middleware `(req, res) -> integer`.
+-- @raise If `opts.secret` is missing.
 function csrf.middleware(opts)
     if not opts or not opts.secret then
         error("csrf.middleware requires opts.secret")

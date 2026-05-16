@@ -1,17 +1,22 @@
-/*
- * hull:csv -- RFC 4180 CSV parser and writer
- *
- * csv.parse(text, opts?)  -> array of row arrays (or row objects if headers=true)
- * csv.encode(rows, opts?) -> CSV string
- *
- * Options:
- *   headers   (bool,   default false) - first row is header row
- *   separator (string, default ",")   - field delimiter
- *   quote     (string, default '"')   - quote character
- *
- * SPDX-License-Identifier: AGPL-3.0-or-later
+/**
+ * @file hull:csv
+ * @module hull:csv
+ * @description RFC 4180 CSV parser + writer. Lua parity: `hull.csv`.
+ * @license AGPL-3.0-or-later
  */
 
+/**
+ * Parse a CSV string.
+ *
+ * @param {string} text  CSV text. Non-string or empty input returns `[]`.
+ * @param {Object} [opts]
+ * @param {boolean} [opts.headers=false]   First row treated as header; returns
+ *   `Array<Object>` instead of `Array<Array>`.
+ * @param {string}  [opts.separator=","]
+ * @param {string}  [opts.quote='"']
+ * @param {number}  [opts.maxRows=100000]  Lua-parity alias: `max_rows`.
+ * @returns {Array<Array<string>>|Array<Object<string,string>>}
+ */
 function parse(text, opts) {
     if (typeof text !== "string" || text.length === 0) return [];
 
@@ -111,6 +116,20 @@ function parse(text, opts) {
     return rows;
 }
 
+/**
+ * Encode rows into a CSV string.
+ *
+ * Values containing the separator, quote, CR, or LF are auto-quoted;
+ * embedded quotes are doubled (RFC 4180).
+ *
+ * @param {Array<Array>|Array<Object>} rows  When `opts.headers=true`, rows
+ *   are objects (keys become the header row). Otherwise arrays.
+ * @param {Object} [opts]
+ * @param {boolean} [opts.headers=false]
+ * @param {string}  [opts.separator=","]
+ * @param {string}  [opts.quote='"']
+ * @returns {string}  CSV text (LF line endings).
+ */
 function encode(rows, opts) {
     if (!Array.isArray(rows) || rows.length === 0) return "";
 

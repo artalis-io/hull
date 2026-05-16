@@ -1,10 +1,16 @@
+--- Schema-based input validation for form / JSON / query data.
 --
--- hull.validate -- Schema-based data validation
+-- @module hull.validate
+-- @license AGPL-3.0-or-later
 --
--- Pure function for validating tables against a schema definition.
---
--- SPDX-License-Identifier: AGPL-3.0-or-later
---
+-- @usage
+-- local validate = require("hull.validate")
+-- local ok, errors = validate.check(req.json, {
+--     email = { required = true, email = true },
+--     name  = { required = true, trim = true, min = 1, max = 100 },
+--     age   = { type = "integer", min = 0, max = 150 },
+-- })
+-- if not ok then return res:status(422):json({ errors = errors }) end
 
 local validate = {}
 
@@ -35,13 +41,23 @@ local function email_ok(s)
 end
 
 --- Validate a data table against a schema.
--- Returns: ok (boolean), errors (table or nil)
 --
--- Schema example:
---   { email = { required = true, email = true },
---     name  = { required = true, trim = true, max = 100 } }
+-- Schema is a table mapping field names to rule tables. Recognised rules:
 --
--- Error table maps field name to error message string.
+--   - `required` (boolean) — error if absent.
+--   - `trim` (boolean) — strip leading/trailing whitespace before other checks.
+--   - `type` (string) — `"string"` / `"number"` / `"integer"` / `"boolean"`.
+--   - `min` / `max` (number) — string length (for strings) or numeric bound (for numbers).
+--   - `pattern` (string) — Lua pattern the value must match.
+--   - `oneof` (`{any,...}`) — value must equal one of the listed values.
+--   - `email` (boolean) — practical RFC-5322 subset (good for form screening).
+--   - `fn` (`function(value) -> boolean`) — custom validator.
+--   - `message` (string) — override the default error message.
+--
+-- @tparam table data    Input. Non-table input is treated as `{}`.
+-- @tparam table schema  Rules. Non-table input → `true, nil`.
+-- @treturn boolean ok   `true` if all fields pass.
+-- @treturn ?table errors  Maps field-name → error message. `nil` on success.
 function validate.check(data, schema)
     if type(data) ~= "table" then data = {} end
     if type(schema) ~= "table" then return true, nil end

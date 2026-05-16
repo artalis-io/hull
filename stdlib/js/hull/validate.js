@@ -1,15 +1,35 @@
-/*
- * hull:validate -- Schema-based data validation
+/**
+ * @file hull:validate
+ * @module hull:validate
+ * @description Schema-based input validation. Lua parity: `hull.validate`.
+ * @license AGPL-3.0-or-later
  *
- * validate.check(data, schema) -> [ok, errors]
- *
- * Pure function for validating objects against a schema definition.
- *
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * @example
+ * import { validate } from "hull:validate";
+ * const [ok, errors] = validate.check(req.json, {
+ *     email: { required: true, email: true },
+ *     name:  { required: true, trim: true, min: 1, max: 100 },
+ *     age:   { type: "integer", min: 0, max: 150 },
+ * });
+ * if (!ok) return res.status(422).json({ errors });
  */
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+/**
+ * Validate a data object against a schema.
+ *
+ * Schema is an object mapping field names to rule objects. Rules
+ * (all optional): `required`, `trim`, `type` (`"string"|"number"|"integer"|"boolean"`),
+ * `min` / `max` (string length or numeric bound), `pattern` (regex),
+ * `oneof` (array of allowed values), `email` (boolean), `fn`
+ * (`value => boolean`), `message` (custom error message).
+ *
+ * @param {Object} data    Input. Non-object input is treated as `{}`.
+ * @param {Object} schema  Rules. Non-object → `[true, null]`.
+ * @returns {[boolean, Object<string,string>|null]}  `[ok, errors]` where
+ *   errors maps field name → message, or `null` on success.
+ */
 function check(data, schema) {
     if (typeof data !== "object" || data === null) data = {};
     if (typeof schema !== "object" || schema === null) return [true, null];
