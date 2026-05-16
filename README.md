@@ -487,9 +487,10 @@ Full index with start-here guidance by role lives in [`docs/README.md`](docs/REA
 
 | Document | When to read |
 |---|---|
-| [CLAUDE.md](CLAUDE.md) | Contributor guide — build commands, conventions, full API reference. The canonical project doc. |
+| [CLAUDE.md](CLAUDE.md) | Contributor guide — build commands, conventions, full module reference. The canonical project doc. |
 | [AGENTS.md](AGENTS.md) | Quick reference for AI agents using `hull agent` CLI and stdlib. |
 | [docs/agent_guide.md](docs/agent_guide.md) | **Full SDLC reference** — install → dev → test → build → sign → deploy → release. Every CLI command, every module API, common patterns/anti-patterns. ~1700 lines, deeply hyperlinked. |
+| [docs/api/](docs/api/) | **Per-function API reference (Javadoc-style).** [`api/c.md`](docs/api/c.md) for C public headers, [`api/lua.md`](docs/api/lua.md) for Lua stdlib, [`api/js.md`](docs/api/js.md) for JS stdlib. Use when you need to look up a specific signature. |
 
 **Core reference (`docs/`):**
 

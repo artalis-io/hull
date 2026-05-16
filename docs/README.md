@@ -9,11 +9,24 @@ the repo root: [`README.md`](../README.md), [`CLAUDE.md`](../CLAUDE.md),
 | If you're… | Read this |
 |---|---|
 | A new developer writing a Hull app | [`../README.md`](../README.md) → [`agent_guide.md`](agent_guide.md) §1–§5 |
+| Looking up a specific function | **[`api/`](api/) — per-function reference, Javadoc-style.** `api/c.md` / `api/lua.md` / `api/js.md`. |
 | An AI agent introspecting a Hull project | [`../AGENTS.md`](../AGENTS.md) + [`agent_guide.md`](agent_guide.md) §17 (Agent workflow) |
-| A contributor to the Hull core | [`../CLAUDE.md`](../CLAUDE.md) → [`architecture.md`](architecture.md) |
+| A contributor to the Hull core | [`../CLAUDE.md`](../CLAUDE.md) → [`architecture.md`](architecture.md) → [`api/c.md`](api/c.md) |
 | Auditing Hull's security posture | [`security.md`](security.md) → [`audit_2026_05_15.md`](audit_2026_05_15.md) → [`audit_2026_05_15_phase6.md`](audit_2026_05_15_phase6.md) → [`audit_2026_05_15_phase6_reaudit.md`](audit_2026_05_15_phase6_reaudit.md) |
 | Packaging a Hull release | [`release_signing.md`](release_signing.md) |
-| Deciding whether to depend on a Hull API | [`stability.md`](stability.md) + [`api_review.md`](api_review.md) |
+| Deciding whether to depend on a Hull API | [`stability.md`](stability.md) + [`api_review.md`](api_review.md) + [`api/`](api/) |
+
+## API reference
+
+Per-function Javadoc-style reference. Use these when you need to look up a
+specific signature, parameter list, or return value.
+
+| Doc | Surface |
+|---|---|
+| [`api/c.md`](api/c.md) | Hull's public C headers (`include/hull/*.h`). ~250 functions. For embedders, contributors, runtime authors. |
+| [`api/lua.md`](api/lua.md) | Lua 5.4 stdlib (`stdlib/lua/hull/*.lua`). ~200 functions. For app developers. |
+| [`api/js.md`](api/js.md) | JS stdlib (`stdlib/js/hull/*.js`). ~200 functions. Same surface as Lua, camelCase. |
+| [`api/README.md`](api/README.md) | Format conventions, naming, how the API doc relates to the prose docs. |
 
 ## Core reference
 
