@@ -37,6 +37,7 @@ _hull() {
         'doctor:Check environment for hull build readiness'
         'update:Self-update from GitHub releases'
     )
+    # Keep in sync with src/hull/commands/agent.c hl_cmd_agent() dispatch table.
     agent_subs=(
         'routes:List routes + middleware'
         'db:Database introspection (schema/query)'
@@ -47,6 +48,21 @@ _hull() {
         'context:Task-relevant documentation'
         'migrate:Migration status'
         'deploy:Deployment readiness analysis'
+        'manifest:Manifest as structured JSON'
+        'vfs:List embedded VFS entries'
+        'compute:WASM compute module inventory'
+        'compute-call:Invoke a WASM compute module with a JSON input'
+        'gpu:GPU device + shader inventory'
+        'capabilities:Resolved capability surface (manifest + defaults)'
+        'validate:Validate a request/response/config file against a schema'
+        'logs:Tail recent dev-server logs as JSON'
+        'endpoint:Describe a single route in detail'
+        'middleware:Enumerate registered middleware'
+        'eval:Evaluate a Lua/JS expression in the app sandbox'
+        'perf:Per-request performance snapshot'
+        'template:Render a template with sample data'
+        'schema-diff:Diff applied schema vs migration files'
+        'sql:Run a read-only SQL query against the app DB'
     )
     agent_db_subs=(
         'schema:Introspect DB schema'

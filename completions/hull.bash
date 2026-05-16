@@ -21,7 +21,8 @@ _hull() {
     }
 
     local commands="keygen build verify inspect manifest test new init dev eject sign-platform migrate agent mcp check compute deploy version doctor update"
-    local agent_subs="routes db request status errors test context migrate deploy"
+    # Keep in sync with src/hull/commands/agent.c hl_cmd_agent() dispatch table.
+    local agent_subs="routes db request status errors test context migrate deploy manifest vfs compute compute-call gpu capabilities validate logs endpoint middleware eval perf template schema-diff sql"
     local agent_db_subs="schema query"
     local migrate_subs="status new"
     local deploy_targets="dockerfile systemd fly"

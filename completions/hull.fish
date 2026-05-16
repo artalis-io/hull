@@ -142,16 +142,32 @@ for cmd in new init
 end
 
 # ── agent ────────────────────────────────────────────────────────────
+# Keep in sync with src/hull/commands/agent.c hl_cmd_agent() dispatch table.
 
-complete -c hull -n '__hull_subcommand agent' -f -a routes  -d 'List routes + middleware'
-complete -c hull -n '__hull_subcommand agent' -f -a db      -d 'DB introspection (schema/query)'
-complete -c hull -n '__hull_subcommand agent' -f -a request -d 'HTTP request to dev server'
-complete -c hull -n '__hull_subcommand agent' -f -a status  -d 'Check dev server status'
-complete -c hull -n '__hull_subcommand agent' -f -a errors  -d 'Structured errors from last reload'
-complete -c hull -n '__hull_subcommand agent' -f -a test    -d 'Run tests with JSON output'
-complete -c hull -n '__hull_subcommand agent' -f -a context -d 'Task-relevant documentation'
-complete -c hull -n '__hull_subcommand agent' -f -a migrate -d 'Migration status'
-complete -c hull -n '__hull_subcommand agent' -f -a deploy  -d 'Deployment readiness analysis'
+complete -c hull -n '__hull_subcommand agent' -f -a routes       -d 'List routes + middleware'
+complete -c hull -n '__hull_subcommand agent' -f -a db           -d 'DB introspection (schema/query)'
+complete -c hull -n '__hull_subcommand agent' -f -a request      -d 'HTTP request to dev server'
+complete -c hull -n '__hull_subcommand agent' -f -a status       -d 'Check dev server status'
+complete -c hull -n '__hull_subcommand agent' -f -a errors       -d 'Structured errors from last reload'
+complete -c hull -n '__hull_subcommand agent' -f -a test         -d 'Run tests with JSON output'
+complete -c hull -n '__hull_subcommand agent' -f -a context      -d 'Task-relevant documentation'
+complete -c hull -n '__hull_subcommand agent' -f -a migrate      -d 'Migration status'
+complete -c hull -n '__hull_subcommand agent' -f -a deploy       -d 'Deployment readiness analysis'
+complete -c hull -n '__hull_subcommand agent' -f -a manifest     -d 'Manifest as structured JSON'
+complete -c hull -n '__hull_subcommand agent' -f -a vfs          -d 'List embedded VFS entries'
+complete -c hull -n '__hull_subcommand agent' -f -a compute      -d 'WASM compute module inventory'
+complete -c hull -n '__hull_subcommand agent' -f -a compute-call -d 'Invoke a WASM compute module'
+complete -c hull -n '__hull_subcommand agent' -f -a gpu          -d 'GPU device + shader inventory'
+complete -c hull -n '__hull_subcommand agent' -f -a capabilities -d 'Resolved capability surface'
+complete -c hull -n '__hull_subcommand agent' -f -a validate     -d 'Validate a file against a schema'
+complete -c hull -n '__hull_subcommand agent' -f -a logs         -d 'Tail recent dev-server logs'
+complete -c hull -n '__hull_subcommand agent' -f -a endpoint     -d 'Describe a single route in detail'
+complete -c hull -n '__hull_subcommand agent' -f -a middleware   -d 'Enumerate registered middleware'
+complete -c hull -n '__hull_subcommand agent' -f -a eval         -d 'Evaluate Lua/JS in the app sandbox'
+complete -c hull -n '__hull_subcommand agent' -f -a perf         -d 'Per-request performance snapshot'
+complete -c hull -n '__hull_subcommand agent' -f -a template     -d 'Render a template with sample data'
+complete -c hull -n '__hull_subcommand agent' -f -a schema-diff  -d 'Diff applied schema vs migrations'
+complete -c hull -n '__hull_subcommand agent' -f -a sql          -d 'Read-only SQL query against app DB'
 
 # agent db subcommands
 complete -c hull -n '__hull_agent_sub db' -f -a schema -d 'Introspect DB schema'
