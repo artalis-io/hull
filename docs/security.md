@@ -86,6 +86,16 @@ This is the primary threat model. Hull exists to make it possible to trust apps 
   - Symlink escapes (realpath resolves symlinks before checking)
 - Kernel unveil() also blocks access to undeclared paths.
 
+**Attack: Inject native code at runtime via JIT, dlopen, or mmap(W|X)**
+
+- **Prevention:** Hull's W^X policy makes guest-controlled memory non-executable and writable→executable transitions impossible. Executable memory only comes from Hull itself or from predeclared, signed build-time artifacts. The policy is enforced at four layers:
+  - **Lua VM:** `package`, `package.loadlib`, `package.cpath`, `debug`, `os`, `io`, `load`, `loadfile`, `dofile` are absent from the sandbox. The Lua interpreter has no JIT.
+  - **JS VM:** `eval` and `Function` are removed from the global; the `std`/`os` QuickJS modules are never registered; module resolution is whitelist-only. QuickJS has no JIT.
+  - **WASM:** WAMR is compiled without `WASM_ENABLE_JIT` and `WASM_ENABLE_FAST_JIT` (the C source carries `#error` directives so the policy fails at build time if either is re-enabled). Modules run via the fast interpreter or as AOT artifacts produced at `hull build` time and embedded in the VFS — never JIT-compiled at runtime. `init_args.running_mode = Mode_Interp` is set explicitly in `hl_cap_wasm_init`.
+  - **Kernel (Linux/Cosmopolitan):** seccomp-bpf via the jart/pledge polyfill denies `mmap` with `PROT_WRITE|PROT_EXEC`, denies `mprotect` adding `PROT_EXEC` (including `pkey_mprotect`), returns `ENOSYS` from `memfd_create`, and kills the process on `execve`/`execveat`/`ptrace`/`process_vm_readv`/`process_vm_writev` — none of those promises are granted in the phase-2 promise set.
+  - **Kernel (macOS):** The signed release binary uses Hardened Runtime (`codesign --options=runtime`) and deliberately does NOT carry `com.apple.security.cs.allow-jit` or `com.apple.security.cs.allow-unsigned-executable-memory`. The kernel refuses any RWX mapping under these conditions. When `HL_RELEASE_BUILD` is set, Hull verifies via `csops(CS_OPS_STATUS)` that Hardened Runtime is active and fails closed if it is not. (We deliberately do not add a Seatbelt `(deny dynamic-code-generation)` clause: WAMR uses `MAP_JIT` for non-executable linear-memory housekeeping, so the SBPL clause would block legitimate memory allocation even though no code is being generated. The defense at this layer is the entitlement-and-Hardened-Runtime check, not SBPL.)
+- **Remaining risk:** Apps that explicitly opt in via `app.manifest({ allow_dynamic_code = true })` or `allow_dynamic_libraries = true` are rejected by the sandbox unless the operator additionally passes `--no-sandbox` (development only). There is no second downgrade flag and no silent fallback. Documented downgrade is the existing `--no-sandbox` flag.
+
 **Attack: Memory exhaustion / DoS via infinite allocation**
 
 - **Prevention:**
@@ -247,9 +257,10 @@ Trust chain: Customer → You (platform builder) → App developer. gethull.dev 
 |-----------|---------------|-----------|
 | Syscall filter | seccomp-bpf via jart/pledge | SIGKILL (unbypassable, kernel-enforced) |
 | Filesystem restriction | Landlock via jart/pledge | EACCES or SIGKILL |
+| W^X / dynamic code | seccomp-bpf denies `mmap` and `mprotect` adding `PROT_EXEC`; `memfd_create` returns ENOSYS; `execve`/`execveat`/`ptrace`/`process_vm_*` are not in any granted promise group | SIGKILL or ENOSYS |
 | Mode | `__pledge_mode = KILL_PROCESS \| STDERR_LOGGING` | Process killed + diagnostic to stderr |
 
-**Allowed pledge promises:** `stdio inet rpath wpath cpath flock dns` (dns only if hosts declared)
+**Allowed pledge promises:** `stdio inet rpath wpath cpath flock dns` (dns only if hosts declared). Notably absent: `prot_exec`, `exec`, `proc` — these grant the very syscalls Hull's W^X policy forbids.
 
 **CVE classes prevented:**
 - Arbitrary file access outside declared paths
@@ -257,6 +268,7 @@ Trust chain: Customer → You (platform builder) → App developer. gethull.dev 
 - Shell escape / command injection (no `exec` pledge)
 - Network exfiltration to undeclared hosts
 - Device access, mount, ptrace, raw sockets
+- Runtime native code injection (no `prot_exec` pledge; `memfd_create` blocked)
 
 ### Cosmopolitan APE (cosmocc)
 
@@ -271,7 +283,7 @@ Trust chain: Customer → You (platform builder) → App developer. gethull.dev 
 - No dynamic linking → no LD_PRELOAD attacks
 - No DLL injection
 - No dynamic linker attacks
-- W^X enforcement by Cosmopolitan runtime
+- W^X enforcement by Cosmopolitan runtime (APE loader uses fixed code segments; `MAP_JIT` and equivalent OS-specific JIT APIs are unavailable to the guest)
 
 ### macOS (gcc/clang)
 
@@ -279,6 +291,8 @@ Trust chain: Customer → You (platform builder) → App developer. gethull.dev 
 |-----------|---------------|-----------|
 | Kernel sandbox | Seatbelt via `sandbox_init_with_parameters()` | EPERM (kernel-enforced) |
 | Dynamic SBPL profile | Built from manifest at startup | Deny-default with selective allows |
+| W^X / no JIT | WAMR built without `WASM_ENABLE_JIT` / `WASM_ENABLE_FAST_JIT` (`_Static_assert` in `src/hull/cap/wasm.c`); QuickJS / Lua have no JIT; Hardened Runtime + absent `cs.allow-jit` / `cs.allow-unsigned-executable-memory` entitlements | Build fails / kernel refuses RWX |
+| Hardened Runtime probe | `csops(CS_OPS_STATUS)` at startup under `HL_RELEASE_BUILD` | Hull exits before sandbox if not active |
 | C-level validation | Capability functions | Returns error |
 
 **Seatbelt enforcement:**
@@ -292,6 +306,26 @@ Trust chain: Customer → You (platform builder) → App developer. gethull.dev 
 - System frameworks + dyld cache: read-only (required for process operation)
 - Parameter substitution for paths — avoids escaping issues with special characters
 - Irreversible — `sandbox_init` cannot be modified or removed after application
+
+**Hardened Runtime (out-of-repo signing concern):**
+
+The released `hull` binary on gethull.dev is signed with `codesign
+--options=runtime`, notarized, and intentionally does NOT carry the
+`com.apple.security.cs.allow-jit`,
+`com.apple.security.cs.allow-unsigned-executable-memory`,
+`com.apple.security.cs.allow-dyld-environment-variables`, or
+`com.apple.security.cs.disable-library-validation` entitlements. This
+is enforced in the release pipeline, not in the repo build files.
+
+Release builds are compiled with `-DHL_RELEASE_BUILD`. At startup Hull
+calls `csops(CS_OPS_STATUS)` to verify the `CS_HARD` flag is set; if it
+is not (e.g. the binary has been re-signed without `--options=runtime`,
+or stripped of its signature), the sandbox refuses to start.
+
+Self-built binaries from `make` are unsigned and lack Hardened Runtime.
+In that case the `csops` check downgrades to a warning so dev workflows
+continue to function — the Seatbelt `(deny dynamic-code-generation)`
+clause and the C-level capability layer still apply.
 
 **Active C-level defenses (defense-in-depth):**
 - `hl_cap_fs_validate()` rejects path traversal (absolute paths, `..`, symlink escapes via realpath)
@@ -335,6 +369,15 @@ app.manifest({
 - **CSP is active** — the default strict policy is injected on all HTML responses
 - **C-level capabilities deny all** — env returns NULL, HTTP requests fail, filesystem operations fail
 - Signature still covers the absence of manifest (`"manifest": null`)
+
+**Escape-hatch keys (off by default, surfaced as risky by `hull inspect`):**
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `allow_dynamic_code` (Lua) / `allowDynamicCode` (JS) | bool | `false` | Opt-in to JIT / runtime codegen. Rejected by the sandbox unless `--no-sandbox` is passed. |
+| `allow_dynamic_libraries` (Lua) / `allowDynamicLibraries` (JS) | bool | `false` | Opt-in to runtime native library loading (dlopen). Rejected by the sandbox unless `--no-sandbox` is passed. |
+
+Setting either key emits a warning at manifest-extract time and causes the kernel sandbox to refuse to start. There is no in-policy downgrade — the operator must explicitly disable the sandbox with `--no-sandbox` (development only).
 
 All example apps declare `app.manifest()` explicitly, even when the empty `{}` is sufficient, as a best practice.
 
@@ -453,3 +496,4 @@ These are real, not theoretical:
 | 32-entry limit per manifest category | Large apps may hit ceiling | Sufficient for most production apps |
 | `req.ctx` uses raw malloc (not tracked) | ctx JSON bypasses runtime memory limits | Capped at 64KB; bounded by runtime heap indirectly |
 | HMAC-SHA256 binding returns hex string | Callers must use constant-time comparison | `hull.jwt` and `hull.middleware.csrf` stdlib use constant-time internally |
+| `--no-sandbox` is the only W^X downgrade | Apps run under `--no-sandbox` lose every kernel-enforced guarantee, not only W^X | Use only for local development; production startup fails closed when the manifest opts into dynamic code / dynamic libraries. The Hardened-Runtime `csops` probe under `HL_RELEASE_BUILD` and the WAMR-JIT `#error` build assertions add additional fail-loud layers. |

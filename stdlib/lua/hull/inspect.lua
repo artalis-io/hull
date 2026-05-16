@@ -161,6 +161,16 @@ local function main()
         if m.hosts and #m.hosts > 0 then
             print("  hosts:    " .. table.concat(m.hosts, ", "))
         end
+        -- W^X escape hatches — surface loudly so the auditor sees them.
+        -- Accept both snake_case (Lua manifest) and camelCase (JS manifest).
+        local adc = m.allow_dynamic_code or m.allowDynamicCode
+        local adl = m.allow_dynamic_libraries or m.allowDynamicLibraries
+        if adc then
+            print("  [!] allow_dynamic_code:      true  (RISKY — JIT / runtime codegen)")
+        end
+        if adl then
+            print("  [!] allow_dynamic_libraries: true  (RISKY — dlopen of native libs)")
+        end
         print("")
     end
 

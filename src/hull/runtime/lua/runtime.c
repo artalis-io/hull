@@ -98,9 +98,18 @@ static void *hl_lua_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 
 static void hl_lua_sandbox(lua_State *L)
 {
-    /* Remove dangerous globals */
+    /* Remove dangerous globals.
+     *
+     * `package` and `debug` are never opened via luaL_requiref above,
+     * so these are normally absent. Nil-ing them defensively makes the
+     * W^X intent explicit and survives any future change that opens
+     * additional libraries (e.g. via luaL_openlibs). The `package`
+     * library is the channel for `package.loadlib` / `package.cpath`
+     * which would allow loading native code from disk; `debug` exposes
+     * introspection APIs that can subvert sandboxing. */
     static const char *blocked[] = {
         "io", "os", "loadfile", "dofile", "load",
+        "package", "debug",
     };
 
     for (size_t i = 0; i < sizeof(blocked) / sizeof(blocked[0]); i++) {

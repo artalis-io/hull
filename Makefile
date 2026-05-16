@@ -46,16 +46,27 @@ else
 endif
 
 CFLAGS  := -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2
+LDFLAGS :=
 ifndef COSMO
-  CFLAGS += -fstack-protector-strong
+  # Stack protection + PIE for ASLR. PIE is harmless on macOS (default
+  # since 10.7) but the explicit -pie flag keeps intent visible.
+  CFLAGS  += -fstack-protector-strong -fPIE
+  LDFLAGS += -pie
+
   ifndef DEBUG
-    CFLAGS += -D_FORTIFY_SOURCE=2
+    # _FORTIFY_SOURCE=3 requires glibc 2.34+ / gcc 12+ / clang 9+; on
+    # older toolchains it emits a noisy warning and behaves as =2.
+    # We intentionally leave the warning loud so stale CI is visible.
+    CFLAGS += -D_FORTIFY_SOURCE=3
   endif
+
+  # Linux-only linker hardening: RELRO + BIND_NOW + non-executable
+  # stack. ld64 (macOS) rejects -z flags, so gate to Linux.
   ifeq ($(UNAME_S),Linux)
-    CFLAGS += -D_DEFAULT_SOURCE
+    CFLAGS  += -D_DEFAULT_SOURCE
+    LDFLAGS += -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack
   endif
 endif
-LDFLAGS :=
 
 # Build mode
 ifdef DEBUG

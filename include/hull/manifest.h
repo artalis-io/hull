@@ -86,6 +86,14 @@ typedef struct HlManifest {
     int         gpu_device_count; /* 0 = all devices allowed (backward compat) */
     int         compute;          /* 1 if app declares compute: true */
 
+    /* W^X / no runtime dynamic code — opt-in escape hatches.
+     * Both default to 0 (deny). Setting either to 1 in a manifest is
+     * rejected by `hl_sandbox_apply` unless the user opts out of the
+     * kernel sandbox entirely via `--no-sandbox` (development only).
+     * Surfaced by `hull inspect` with a risk marker when true. */
+    int         allow_dynamic_code;       /* opt-in: JIT / runtime codegen */
+    int         allow_dynamic_libraries;  /* opt-in: dlopen() native libs */
+
     /* Whether app.manifest() was called */
     int         present;
 } HlManifest;

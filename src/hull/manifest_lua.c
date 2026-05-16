@@ -184,6 +184,24 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
     out->compute = lua_toboolean(L, -1);
     lua_pop(L, 1);
 
+    /* allow_dynamic_code = true — opt-in to JIT / runtime codegen.
+     * Rejected by hl_sandbox_apply unless --no-sandbox. */
+    lua_getfield(L, manifest_idx, "allow_dynamic_code");
+    out->allow_dynamic_code = lua_toboolean(L, -1);
+    lua_pop(L, 1);
+    if (out->allow_dynamic_code)
+        log_warn("[manifest] allow_dynamic_code=true — kernel sandbox "
+                 "will fail closed unless --no-sandbox is set");
+
+    /* allow_dynamic_libraries = true — opt-in to dlopen() of native libs.
+     * Rejected by hl_sandbox_apply unless --no-sandbox. */
+    lua_getfield(L, manifest_idx, "allow_dynamic_libraries");
+    out->allow_dynamic_libraries = lua_toboolean(L, -1);
+    lua_pop(L, 1);
+    if (out->allow_dynamic_libraries)
+        log_warn("[manifest] allow_dynamic_libraries=true — kernel sandbox "
+                 "will fail closed unless --no-sandbox is set");
+
     lua_pop(L, 1); /* pop manifest table */
     return 0;
 }

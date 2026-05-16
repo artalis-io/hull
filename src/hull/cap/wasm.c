@@ -38,6 +38,23 @@ _Static_assert(sizeof(uint32_t) == 4, "WASM32 ABI requires 4-byte uint32_t");
 _Static_assert(HL_WASM_CALLBACK_BUF_SIZE <= 65536,
                "callback buffer must fit on stack (max 64 KB)");
 
+/* ── W^X / no runtime dynamic code ─────────────────────────────────────
+ *
+ * Hull's W^X policy forbids WAMR's JIT and Fast-JIT backends, which
+ * generate native code into RWX pages at runtime. The interpreter (and
+ * AOT artifacts produced at build time by `hull build` and embedded in
+ * the VFS) are the only permitted execution modes.
+ *
+ * If a future Makefile change enables either JIT macro, fail at compile
+ * time so the policy violation is loud and immediate. See docs/security.md
+ * §3.A "Inject native code at runtime" and §4 for context. */
+#if defined(WASM_ENABLE_JIT) && WASM_ENABLE_JIT != 0
+#error "Hull W^X policy forbids WAMR JIT. Build with WASM_ENABLE_JIT=0."
+#endif
+#if defined(WASM_ENABLE_FAST_JIT) && WASM_ENABLE_FAST_JIT != 0
+#error "Hull W^X policy forbids WAMR Fast JIT. Build with WASM_ENABLE_FAST_JIT=0."
+#endif
+
 /* ── Architecture suffix for AOT lookup ────────────────────────────── */
 
 static const char *wasm_arch_suffix(void)
@@ -279,6 +296,15 @@ int hl_cap_wasm_init(HlWasmCache *cache)
 
     /* Use system allocator (malloc/free) */
     init_args.mem_alloc_type = Alloc_With_System_Allocator;
+
+    /* Hull's W^X policy: no JIT. The Makefile leaves WASM_ENABLE_JIT
+     * and WASM_ENABLE_FAST_JIT undefined, and the _Static_assert above
+     * fails the build if either is ever turned on. We leave
+     * `init_args.running_mode` at Mode_Default (0); WAMR's auto-select
+     * then decays to fast-interpreter for bytecode modules and the AOT
+     * runtime for AOT modules — the two paths Hull supports. Forcing
+     * Mode_Interp here would prevent AOT modules from executing. */
+    /* init_args.running_mode left as Mode_Default */
 
     /* Register host_call as a native function under "env" module */
     init_args.native_module_name = "env";

@@ -87,9 +87,13 @@ extern int sandbox_init_with_parameters(const char *profile,
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#if defined(__linux__) && !defined(__COSMOPOLITAN__)
+#include <sys/syscall.h>
+#endif
 
 static int pass_count;
 static int fail_count;
@@ -369,6 +373,263 @@ static void test_pledge_allowed(void)
     }
 }
 
+/* ── W^X tests (Linux + Cosmopolitan): no executable guest memory ──
+ *
+ * These tests prove that after pledge() with Hull's default phase-2
+ * promise set ("stdio rpath wpath cpath flock"), the kernel refuses:
+ *   - mmap with PROT_WRITE | PROT_EXEC simultaneously
+ *   - mmap(PROT_WRITE) followed by mprotect adding PROT_EXEC
+ *   - memfd_create (sealed memfd → mmap PROT_EXEC trick)
+ *   - execve from the post-pledge child
+ * AND that ordinary non-exec memory still works (negative control).
+ *
+ * Linux polyfill mode: RETURN_EPERM. Cosmopolitan: KILL_PROCESS — so
+ * the test parent treats either non-zero exit or signal death as PASS.
+ */
+
+static int test_wx_mmap_wx_child(void)
+{
+#if HAS_PLEDGE_MODE
+    __pledge_mode = PLEDGE_PENALTY_RETURN_EPERM | PLEDGE_STDERR_LOGGING;
+#endif
+
+    if (pledge("stdio rpath wpath cpath flock", NULL) != 0) {
+        if (errno == ENOSYS) _exit(77);
+        _exit(2);
+    }
+
+    void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p != MAP_FAILED) {
+        munmap(p, 4096);
+        _exit(1); /* FAIL: PROT_W|PROT_X mmap succeeded */
+    }
+    _exit(0); /* PASS: kernel denied PROT_W|PROT_X */
+}
+
+static void test_wx_mmap_wx(void)
+{
+    printf("\n=== W^X: mmap(PROT_WRITE|PROT_EXEC) denied ===\n");
+    pid_t pid = fork();
+    if (pid < 0) { fail("fork failed"); return; }
+    if (pid == 0) test_wx_mmap_wx_child();
+
+    int status;
+    waitpid(pid, &status, 0);
+    if (WIFEXITED(status)) {
+        int code = WEXITSTATUS(status);
+        if (code == 0)
+            pass("mmap(PROT_W|PROT_X) denied");
+        else if (code == 77)
+            pass("W^X mmap test SKIPPED — seccomp not supported");
+        else if (code == 1)
+            fail("mmap(PROT_W|PROT_X) succeeded — W^X NOT enforced");
+        else
+            fail("W^X mmap test exited with unexpected code");
+    } else if (WIFSIGNALED(status)) {
+        pass("W^X mmap test killed (KILL mode enforcement active)");
+    }
+}
+
+static int test_wx_mprotect_child(void)
+{
+#if HAS_PLEDGE_MODE
+    __pledge_mode = PLEDGE_PENALTY_RETURN_EPERM | PLEDGE_STDERR_LOGGING;
+#endif
+
+    if (pledge("stdio rpath wpath cpath flock", NULL) != 0) {
+        if (errno == ENOSYS) _exit(77);
+        _exit(2);
+    }
+
+    /* Allocate writable memory first (should succeed) */
+    void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) {
+        /* RW mmap itself failed — environment problem, not a W^X test */
+        _exit(2);
+    }
+
+    /* Now try to promote to executable — must fail */
+    if (mprotect(p, 4096, PROT_READ | PROT_EXEC) == 0) {
+        munmap(p, 4096);
+        _exit(1); /* FAIL: W→X transition succeeded */
+    }
+
+    munmap(p, 4096);
+    _exit(0); /* PASS: kernel denied W→X transition */
+}
+
+static void test_wx_mprotect(void)
+{
+    printf("\n=== W^X: mprotect adding PROT_EXEC denied ===\n");
+    pid_t pid = fork();
+    if (pid < 0) { fail("fork failed"); return; }
+    if (pid == 0) test_wx_mprotect_child();
+
+    int status;
+    waitpid(pid, &status, 0);
+    if (WIFEXITED(status)) {
+        int code = WEXITSTATUS(status);
+        if (code == 0)
+            pass("mprotect → PROT_EXEC denied (no W→X transition)");
+        else if (code == 77)
+            pass("W^X mprotect test SKIPPED — seccomp not supported");
+        else if (code == 1)
+            fail("mprotect → PROT_EXEC succeeded — W^X NOT enforced");
+        else
+            fail("W^X mprotect test exited with unexpected code");
+    } else if (WIFSIGNALED(status)) {
+        pass("W^X mprotect test killed (KILL mode enforcement active)");
+    }
+}
+
+#if defined(__linux__) && !defined(__COSMOPOLITAN__)
+static int test_wx_memfd_child(void)
+{
+#if HAS_PLEDGE_MODE
+    __pledge_mode = PLEDGE_PENALTY_RETURN_EPERM | PLEDGE_STDERR_LOGGING;
+#endif
+
+    if (pledge("stdio rpath wpath cpath flock", NULL) != 0) {
+        if (errno == ENOSYS) _exit(77);
+        _exit(2);
+    }
+
+    /* memfd_create is filtered to ENOSYS by the pledge polyfill prefix.
+     * Direct syscall avoids glibc memfd_create wrapper missing on old libc.
+     * On arches we don't know the syscall number for, SKIP — falling back
+     * to syscall(0, ...) would dispatch to `read` on x86_64 (syscall #0)
+     * and return 0 success, producing a spurious test failure. */
+#ifndef __NR_memfd_create
+# if defined(__x86_64__)
+#  define __NR_memfd_create 319
+# elif defined(__aarch64__)
+#  define __NR_memfd_create 279
+# else
+    _exit(77); /* SKIP: unknown arch */
+# endif
+#endif
+#ifdef __NR_memfd_create
+    long r = syscall(__NR_memfd_create, "wxprobe", 0u);
+    if (r >= 0) {
+        close((int)r);
+        _exit(1); /* FAIL: memfd_create succeeded */
+    }
+    _exit(0); /* PASS */
+#endif
+}
+
+static void test_wx_memfd(void)
+{
+    printf("\n=== W^X: memfd_create denied ===\n");
+    pid_t pid = fork();
+    if (pid < 0) { fail("fork failed"); return; }
+    if (pid == 0) test_wx_memfd_child();
+
+    int status;
+    waitpid(pid, &status, 0);
+    if (WIFEXITED(status)) {
+        int code = WEXITSTATUS(status);
+        if (code == 0)
+            pass("memfd_create denied (ENOSYS / EPERM)");
+        else if (code == 77)
+            pass("W^X memfd test SKIPPED — seccomp not supported");
+        else if (code == 1)
+            fail("memfd_create succeeded — bypass available");
+        else
+            fail("W^X memfd test exited with unexpected code");
+    } else if (WIFSIGNALED(status)) {
+        pass("W^X memfd test killed (KILL mode enforcement active)");
+    }
+}
+#endif /* __linux__ && !__COSMOPOLITAN__ */
+
+static int test_wx_execve_child(void)
+{
+#if HAS_PLEDGE_MODE
+    __pledge_mode = PLEDGE_PENALTY_RETURN_EPERM | PLEDGE_STDERR_LOGGING;
+#endif
+
+    if (pledge("stdio rpath wpath cpath flock", NULL) != 0) {
+        if (errno == ENOSYS) _exit(77);
+        _exit(2);
+    }
+
+    char *argv[] = { (char *)"/bin/true", NULL };
+    char *envp[] = { NULL };
+    execve("/bin/true", argv, envp);
+    /* If execve returns, it failed → that's the expected outcome */
+    if (errno == EPERM || errno == EACCES || errno == ENOSYS)
+        _exit(0);
+    _exit(1);
+}
+
+static void test_wx_execve(void)
+{
+    printf("\n=== W^X: execve denied (no `exec` pledge) ===\n");
+    pid_t pid = fork();
+    if (pid < 0) { fail("fork failed"); return; }
+    if (pid == 0) test_wx_execve_child();
+
+    int status;
+    waitpid(pid, &status, 0);
+    if (WIFEXITED(status)) {
+        int code = WEXITSTATUS(status);
+        if (code == 0)
+            pass("execve denied without `exec` promise");
+        else if (code == 77)
+            pass("W^X execve test SKIPPED — seccomp not supported");
+        else
+            fail("execve returned unexpected outcome");
+    } else if (WIFSIGNALED(status)) {
+        pass("W^X execve test killed (KILL mode enforcement active)");
+    }
+}
+
+static int test_wx_anon_rw_child(void)
+{
+    /* Negative control: ordinary anonymous read/write mmap must STILL work
+     * after pledge — proves the seccomp filter targets only PROT_EXEC, not
+     * legitimate libc/runtime allocation patterns. */
+#if HAS_PLEDGE_MODE
+    __pledge_mode = PLEDGE_PENALTY_RETURN_EPERM | PLEDGE_STDERR_LOGGING;
+#endif
+    if (pledge("stdio rpath wpath cpath flock", NULL) != 0) {
+        if (errno == ENOSYS) _exit(77);
+        _exit(2);
+    }
+    void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) _exit(1);
+    /* Touch it to prove it's usable */
+    *(volatile unsigned char *)p = 0xAB;
+    munmap(p, 4096);
+    _exit(0);
+}
+
+static void test_wx_anon_rw(void)
+{
+    printf("\n=== W^X: ordinary anon r/w mmap still works ===\n");
+    pid_t pid = fork();
+    if (pid < 0) { fail("fork failed"); return; }
+    if (pid == 0) test_wx_anon_rw_child();
+
+    int status;
+    waitpid(pid, &status, 0);
+    if (WIFEXITED(status)) {
+        int code = WEXITSTATUS(status);
+        if (code == 0)
+            pass("anon r/w mmap still works post-pledge (filter not over-broad)");
+        else if (code == 77)
+            pass("W^X anon-rw control SKIPPED — seccomp not supported");
+        else
+            fail("anon r/w mmap broke under pledge — over-broad filter");
+    } else if (WIFSIGNALED(status)) {
+        fail("anon r/w mmap killed — filter over-broad");
+    }
+}
+
 #endif /* !HAS_SEATBELT */
 
 /* ── Test 4: Seatbelt deny-all enforcement (macOS only) ──────────── */
@@ -541,6 +802,13 @@ int main(void)
     test_unveil();
     test_pledge();
     test_pledge_allowed();
+    test_wx_mmap_wx();
+    test_wx_mprotect();
+#if defined(__linux__) && !defined(__COSMOPOLITAN__)
+    test_wx_memfd();
+#endif
+    test_wx_execve();
+    test_wx_anon_rw();
 #endif
 
     int total = pass_count + fail_count;

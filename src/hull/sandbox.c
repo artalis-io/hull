@@ -90,6 +90,34 @@ static int unveil(const char *p, const char *perm)
 
 static int sb_supported(void) { return 1; }
 
+/* ── Hardened Runtime probe (release-only fail-closed) ─────────────
+ *
+ * `csops` is a private but stable syscall used by Apple's own services
+ * to read code-signing flags. We use it to verify Hardened Runtime is
+ * active when wx_enforced is set.
+ *
+ * In DEBUG builds we warn but allow startup (locally-built binaries are
+ * never signed with Hardened Runtime). In release builds the absence
+ * of Hardened Runtime is treated as a fail-closed condition, because
+ * the signed gethull.dev release binary always carries it.
+ *
+ * CS_HARD  (0x0100) — Hardened Runtime in effect (kill invalid)
+ * CS_KILL  (0x0200) — kill the process on invalid signature
+ */
+#define HL_CS_OPS_STATUS    0
+#define HL_CS_HARD          0x00000100
+#define HL_CS_KILL          0x00000200
+
+extern int csops(int pid, unsigned int ops, void *useraddr, size_t usersize);
+
+static int hl_macos_hardened_runtime_active(void)
+{
+    uint32_t flags = 0;
+    if (csops(0, HL_CS_OPS_STATUS, &flags, sizeof(flags)) != 0)
+        return 0;
+    return (flags & HL_CS_HARD) ? 1 : 0;
+}
+
 /* ── Seatbelt profile builder ─────────────────────────────────────── */
 
 /*
@@ -311,6 +339,25 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
              "(deny process-exec*)\n"
              "(deny process-fork)\n");
 
+    /* W^X on macOS is enforced by three other layers, not by an SBPL
+     * `(deny dynamic-code-generation)` clause:
+     *   1. WAMR is built without WASM_ENABLE_JIT / WASM_ENABLE_FAST_JIT
+     *      (the _Static_assert in src/hull/cap/wasm.c fails the build
+     *      if either is ever turned on). The interpreter and AOT paths
+     *      never allocate PROT_EXEC pages from guest code.
+     *   2. Lua and QuickJS have no JIT.
+     *   3. The signed release binary uses Hardened Runtime and lacks
+     *      the `cs.allow-jit` / `cs.allow-unsigned-executable-memory`
+     *      entitlements. The kernel refuses any RWX mapping without
+     *      them. `hl_macos_hardened_runtime_active()` above fails
+     *      closed in `HL_RELEASE_BUILD` if the runtime is missing.
+     *
+     * We deliberately do NOT add `(deny dynamic-code-generation)`:
+     * WAMR uses `MAP_JIT` on macOS/arm64 for non-executable linear
+     * memory housekeeping (posix_memmap.c). Denying it crashes the
+     * runtime even though no code is being generated. See
+     * docs/security.md §4 (macOS) for the full rationale. */
+
     #undef SBPL_LIT
     #undef SBPL_FMT
     #undef PARAM_ADD
@@ -464,12 +511,62 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
     if (!policy)
         return 0;
 
+    /* ── W^X / no-runtime-dynamic-code fail-closed check ───────────
+     *
+     * When wx_enforced=1 (the default posture set by
+     * hl_sandbox_policy_from_manifest), refuse any manifest that
+     * opts into JIT / runtime codegen / dlopen, AND refuse to start
+     * on platforms without a kernel sandbox.
+     *
+     * The escape hatch is `--no-sandbox`, which causes main.c to
+     * skip this function entirely and log a warning. We do NOT add
+     * a second downgrade flag — there is exactly one. */
+    if (policy->wx_enforced) {
+        if (policy->allow_dynamic_code) {
+            log_error("[sandbox] manifest requests allow_dynamic_code=true "
+                      "but W^X is enforced — fail-closed. "
+                      "Use --no-sandbox to opt out (development only).");
+            return -1;
+        }
+        if (policy->allow_dynamic_libraries) {
+            log_error("[sandbox] manifest requests allow_dynamic_libraries=true "
+                      "but W^X is enforced — fail-closed.");
+            return -1;
+        }
+        if (!sb_supported()) {
+            log_error("[sandbox] W^X enforcement requested but no kernel "
+                      "sandbox is available on this platform — fail-closed. "
+                      "Use --no-sandbox to opt out (development only).");
+            return -1;
+        }
+    }
+
     if (!sb_supported()) {
         log_info("[sandbox] kernel sandbox not available on this platform");
         return 0;
     }
 
 #ifdef __APPLE__
+    /* ── macOS: Hardened Runtime check (release-only fail-closed) ─
+     *
+     * The signed gethull.dev release binary always has Hardened
+     * Runtime active and is built with -DHL_RELEASE_BUILD. A locally
+     * `make`-built binary is unsigned and lacks Hardened Runtime —
+     * we degrade to a warning there so dev/test workflows continue
+     * to run with the sandbox enabled. CI sets HL_RELEASE_BUILD to
+     * make the missing Hardened Runtime fail-closed. */
+    if (policy->wx_enforced && !hl_macos_hardened_runtime_active()) {
+#ifdef HL_RELEASE_BUILD
+        log_error("[sandbox] Hardened Runtime not active and W^X is enforced "
+                  "— refusing to start. Release binaries must be code-signed "
+                  "with --options=runtime and notarized.");
+        return -1;
+#else
+        log_warn("[sandbox] Hardened Runtime not active — local/dev build. "
+                 "Release binaries must be signed with --options=runtime.");
+#endif
+    }
+
     /* ── macOS: Seatbelt sandbox ──────────────────────────────── */
     {
         char profile_buf[SEATBELT_PROFILE_SIZE];
@@ -687,6 +784,11 @@ void hl_sandbox_policy_from_manifest(HlSandboxPolicy *policy,
     /* Default-deny: everything starts at zero/NULL. */
     *policy = (HlSandboxPolicy){0};
 
+    /* W^X is the platform's default posture — independent of manifest.
+     * Only `--no-sandbox` disables it (by skipping hl_sandbox_apply
+     * entirely in main.c). */
+    policy->wx_enforced = 1;
+
     if (!manifest)
         return;
 
@@ -703,4 +805,9 @@ void hl_sandbox_policy_from_manifest(HlSandboxPolicy *policy,
     policy->gpu              = manifest->gpu;
     policy->gpu_devices      = manifest->gpu_devices;
     policy->gpu_device_count = manifest->gpu_device_count;
+
+    /* Mirror manifest-declared dynamic-code intent. Defaults are 0
+     * (deny). `hl_sandbox_apply` enforces the W^X conflict check. */
+    policy->allow_dynamic_code      = manifest->allow_dynamic_code;
+    policy->allow_dynamic_libraries = manifest->allow_dynamic_libraries;
 }

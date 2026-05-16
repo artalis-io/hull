@@ -59,6 +59,26 @@ typedef struct HlSandboxPolicy {
     int        gpu;
     const int *gpu_devices;
     int        gpu_device_count;
+
+    /* ── W^X / no runtime dynamic code ────────────────────────────────
+     *
+     * wx_enforced — when 1, the sandbox refuses to start unless the
+     *   platform can enforce the W^X invariant: no guest-controlled
+     *   memory is ever executable, and no W→X transition is possible.
+     *   On platforms where this cannot be enforced (no kernel sandbox
+     *   support, or manifest opts into dynamic code), startup fails.
+     *   Default: 1.
+     *
+     * allow_dynamic_code — mirrored from manifest.allow_dynamic_code.
+     *   When 0, the manifest declares no need for JIT/runtime codegen
+     *   and `hl_sandbox_apply` rejects any conflicting request.
+     *
+     * allow_dynamic_libraries — mirrored from
+     *   manifest.allow_dynamic_libraries. When 0, the manifest declares
+     *   no need to dlopen() native libraries at runtime. */
+    int wx_enforced;
+    int allow_dynamic_code;
+    int allow_dynamic_libraries;
 } HlSandboxPolicy;
 
 /*

@@ -212,6 +212,34 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
         out->compute = JS_ToBool(ctx, compute_val);
     JS_FreeValue(ctx, compute_val);
 
+    /* allowDynamicCode: true — opt-in to JIT / runtime codegen.
+     * Rejected by hl_sandbox_apply unless --no-sandbox.
+     * Also accept the snake_case form for parity with the Lua manifest. */
+    JSValue adc_val = JS_GetPropertyStr(ctx, manifest, "allowDynamicCode");
+    if (JS_IsUndefined(adc_val)) {
+        JS_FreeValue(ctx, adc_val);
+        adc_val = JS_GetPropertyStr(ctx, manifest, "allow_dynamic_code");
+    }
+    if (JS_IsBool(adc_val))
+        out->allow_dynamic_code = JS_ToBool(ctx, adc_val);
+    JS_FreeValue(ctx, adc_val);
+    if (out->allow_dynamic_code)
+        log_warn("[manifest] allowDynamicCode=true — kernel sandbox "
+                 "will fail closed unless --no-sandbox is set");
+
+    /* allowDynamicLibraries: true — opt-in to dlopen() of native libs. */
+    JSValue adl_val = JS_GetPropertyStr(ctx, manifest, "allowDynamicLibraries");
+    if (JS_IsUndefined(adl_val)) {
+        JS_FreeValue(ctx, adl_val);
+        adl_val = JS_GetPropertyStr(ctx, manifest, "allow_dynamic_libraries");
+    }
+    if (JS_IsBool(adl_val))
+        out->allow_dynamic_libraries = JS_ToBool(ctx, adl_val);
+    JS_FreeValue(ctx, adl_val);
+    if (out->allow_dynamic_libraries)
+        log_warn("[manifest] allowDynamicLibraries=true — kernel sandbox "
+                 "will fail closed unless --no-sandbox is set");
+
     JS_FreeValue(ctx, manifest);
     return 0;
 }
