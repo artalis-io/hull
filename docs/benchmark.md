@@ -2,6 +2,8 @@
 
 All benchmarks run on a single machine using [wrk](https://github.com/wg/wrk) with 4 threads and 100 connections for 10 seconds. Results are from a MacBook Pro (Apple M4 Pro).
 
+> **Methodology, not a release SLA.** The numbers below are point measurements from a single hardware/OS configuration. Treat them as a baseline for what Hull can do, not as a guaranteed throughput target. The headline summary in [`../README.md#performance`](../README.md#performance) shows numbers from a more recent run on the same hardware that diverge slightly (~98K Lua /health, ~52K QuickJS /health, ~6.8K SQLite write); both are valid runs, the README pair is the more recent one. Re-run with `sh bench/bench.sh` to get current numbers on your hardware.
+
 ## Hull Results
 
 | Endpoint | Lua (req/s) | QuickJS (req/s) | Description |
@@ -77,6 +79,27 @@ POST requests with body parsing add ~5-10% overhead vs equivalent GET routes due
 The DB write endpoint (GET /) is bottlenecked by SQLite write throughput (~20k writes/s with WAL mode), not the scripting layer. Both runtimes produce identical DB write performance.
 
 The DB read endpoint (GET /visits) shows divergent performance: QuickJS (22k req/s) significantly outperforms Lua (11.5k req/s) on SELECT queries returning multiple rows, likely due to differences in result set serialization overhead.
+
+## WASM and GPU Compute
+
+WASM AOT closes the gap to native C to within ~1.2-1.9× on compute- and
+memory-bound workloads (4 MB inputs, Apple M-series aarch64, -O2). GPU
+compute via wgpu-native has a constant ~2.6 ms submit floor on Apple
+M1 Max; crossover vs WASM AOT for cosine similarity on 128-dim vectors
+is around 16K vectors. See the headline tables in
+[`../README.md#wasm-compute-overhead`](../README.md#wasm-compute-overhead)
+and [`../README.md#gpu-compute`](../README.md#gpu-compute) for the
+numbers, and [`wamr_architecture.md`](wamr_architecture.md) for the
+methodology.
+
+Reproduce locally:
+
+```bash
+make wamrc                              # one-time, requires LLVM
+make bench-wasm                          # WASM compute benchmark
+make HL_ENABLE_GPU=1 WGPU_LIB_DIR=vendor/wgpu \
+     bench-gpu                           # GPU vs WASM vs native
+```
 
 ## Comparison with Other Frameworks
 

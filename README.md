@@ -789,7 +789,7 @@ hull build -o myapp .
 hull build -o myapp . CC=cosmocc
 ```
 
-The agent workflow for deployment: run `hull agent test .` to verify all tests pass, then `hull build -o myapp .` to produce the binary. The output is a single file under 2 MB. Copy it anywhere and run it.
+The agent workflow for deployment: run `hull agent test .` to verify all tests pass, then `hull build -o myapp .` to produce the binary. The output is a single file (~5 MB on aarch64 with the full default build; ~3.66 MB compute-only with `HL_ENABLE_DB=0`). Copy it anywhere and run it.
 
 #### `hull deploy` — Config Generator
 
