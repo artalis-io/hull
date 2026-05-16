@@ -1,32 +1,42 @@
---
--- hull.middleware.inbox -- Inbox deduplication for incoming events
+--- Inbox deduplication for incoming events.
 --
 -- Prevents duplicate processing of incoming events (webhook receipts,
--- queue messages, etc.) by tracking processed message IDs in SQLite.
+-- queue messages, retries) by tracking processed `(source, message_id)`
+-- pairs in SQLite.
 --
--- Usage:
+-- Counterpart to `hull.middleware.outbox`: outbox provides at-least-once
+-- delivery, inbox lets receivers deduplicate.
+--
+-- @par State table
+--   `_hull_inbox_processed`. Schema is created by `inbox.init()`.
+--
+-- @module hull.middleware.inbox
+-- @license AGPL-3.0-or-later
+-- @usage
 --   local inbox = require("hull.middleware.inbox")
 --   inbox.init()
 --
 --   app.post("/webhooks/receive", function(req, res)
 --       local event_id = req.headers["x-webhook-event-id"]
---       if inbox.is_duplicate(event_id, "upstream") then
+--       if inbox.check_and_mark(event_id, "upstream") then
 --           return res:json({ received = true, duplicate = true })
 --       end
---       -- Process event...
---       inbox.mark_processed(event_id, "upstream")
+--       -- ... process event ...
 --       res:json({ received = true })
 --   end)
---
--- SPDX-License-Identifier: AGPL-3.0-or-later
 --
 
 local inbox = {}
 
 local _ttl = 604800  -- default 7 days
 
---- Initialize the inbox table.
--- opts.ttl: how long to remember processed message IDs (default 604800 = 7 days)
+--- Initialize the `_hull_inbox_processed` SQLite table.
+--
+-- Idempotent — safe to call on every boot.
+--
+-- @function inbox.init
+-- @tparam[opt] table opts
+-- @tparam[opt=604800] number opts.ttl  Record lifetime in seconds (default = 7 days).
 function inbox.init(opts)
     opts = opts or {}
     -- M-2: explicit nil check; opts.ttl == 0 must override the default.
@@ -49,9 +59,14 @@ function inbox.init(opts)
     ]])
 end
 
---- Check if a message has already been processed.
--- Returns true if the message_id from the given source was already processed
--- and has not expired.
+--- Has `(source, message_id)` been processed within its TTL?
+--
+-- Expired rows are deleted lazily and treated as not-yet-processed.
+--
+-- @function inbox.is_duplicate
+-- @tparam string message_id  Caller-provided message identifier.
+-- @tparam[opt="default"] string source  Source name (scopes the namespace).
+-- @treturn boolean
 function inbox.is_duplicate(message_id, source)
     if not message_id or message_id == "" then
         return false
@@ -80,8 +95,15 @@ function inbox.is_duplicate(message_id, source)
     return true
 end
 
---- Mark a message as processed.
--- opts.ttl: override module-level TTL for this message (optional)
+--- Record `(source, message_id)` as processed.
+--
+-- Uses `INSERT OR REPLACE` so repeated calls slide the expiry forward.
+--
+-- @function inbox.mark_processed
+-- @tparam string message_id
+-- @tparam[opt="default"] string source
+-- @tparam[opt] table opts
+-- @tparam[opt] number opts.ttl  Override module-level TTL for this message.
 function inbox.mark_processed(message_id, source, opts)
     if not message_id or message_id == "" then
         return
@@ -98,9 +120,16 @@ function inbox.mark_processed(message_id, source, opts)
     )
 end
 
---- Check and mark in a single call. Returns true if this is a duplicate
---- (already processed), false if it's new (and marks it as processed).
--- This is the common pattern: check + mark atomically.
+--- Atomic check-and-mark.
+--
+-- Returns `true` if `(source, message_id)` was already processed.
+-- Otherwise marks it as processed and returns `false`.
+--
+-- @function inbox.check_and_mark
+-- @tparam string message_id
+-- @tparam[opt="default"] string source
+-- @tparam[opt] table opts  Same as `inbox.mark_processed`.
+-- @treturn boolean  `true` if duplicate, `false` if new (and marked).
 function inbox.check_and_mark(message_id, source, opts)
     local is_dup = false
     db.batch(function()
@@ -113,7 +142,10 @@ function inbox.check_and_mark(message_id, source, opts)
     return is_dup
 end
 
---- Delete expired inbox records. Returns number of deleted rows.
+--- Delete expired inbox records.
+--
+-- @function inbox.cleanup
+-- @treturn number  Count of deleted rows.
 function inbox.cleanup()
     local now = time.now()
     return db.exec(

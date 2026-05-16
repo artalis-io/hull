@@ -1,36 +1,52 @@
+--- Transactional outbox for reliable side-effect delivery.
 --
--- hull.middleware.outbox -- Transactional outbox for reliable side effects
+-- Decouples external side effects (webhooks, HTTP calls, SMTP) from the
+-- request transaction. The handler enqueues an outbox row inside the same
+-- `db.batch` that commits the state change; the outbox flusher then
+-- delivers the row after commit with exponential backoff retries.
 --
--- Decouples external side effects (HTTP, SMTP, webhook delivery) from the
--- request transaction. Side effects are written as outbox rows inside the
--- same transaction as the state change, then delivered after commit.
+-- Delivery is **at-least-once** — a crash between deliver-and-mark can
+-- re-deliver an item. Design receivers to be idempotent (e.g. with
+-- `hull.middleware.inbox`).
 --
--- Usage:
+-- @par Backoff schedule
+--   `2^attempt * 10s`, capped at 1 hour. After `max_attempts` (default
+--   5) the row is marked `failed`.
+--
+-- @par State table
+--   `_hull_outbox`. Schema is created by `outbox.init()`.
+--
+-- @module hull.middleware.outbox
+-- @license AGPL-3.0-or-later
+-- @usage
 --   local outbox = require("hull.middleware.outbox")
---   outbox.init({ flush_after_request = true })
+--   outbox.init({ max_attempts = 5 })
 --
---   -- Inside a handler (within a transaction):
+--   -- Inside a handler, within a transaction:
 --   outbox.enqueue({
---       kind = "webhook",
---       destination = webhook.url,
---       payload = json.encode(data),
---       headers = json.encode({ ["Content-Type"] = "application/json" }),
+--       kind            = "webhook",
+--       destination     = webhook.url,
+--       payload         = json.encode(data),
+--       headers         = json.encode({ ["Content-Type"] = "application/json" }),
 --       idempotency_key = "evt-" .. event_id .. "-wh-" .. wh.id,
 --   })
 --
---   -- After handler returns (or explicitly):
---   outbox.flush()
---
--- SPDX-License-Identifier: AGPL-3.0-or-later
+--   -- Periodic flush from a timer:
+--   app.every(30000, outbox.flush)
 --
 
 local outbox = {}
 
 local _max_attempts = 5
 
---- Initialize the outbox table.
--- opts.max_attempts: max delivery attempts before marking failed (default 5)
--- opts.flush_after_request: auto-flush after each request (default false)
+--- Initialize the `_hull_outbox` table.
+--
+-- Idempotent — safe to call on every boot.
+--
+-- @function outbox.init
+-- @tparam[opt] table opts
+-- @tparam[opt=5] number opts.max_attempts  Max delivery attempts before
+--   the row is marked `failed`.
 function outbox.init(opts)
     opts = opts or {}
     -- M-2: explicit nil check; opts.max_attempts == 0 (no retries) must
@@ -66,15 +82,22 @@ function outbox.init(opts)
 end
 
 --- Enqueue a side effect for delivery after commit.
--- Must be called inside a transaction (db.batch) to be atomic with state changes.
 --
--- opts.kind: type of delivery ("webhook", "http", "smtp", etc.)
--- opts.destination: URL or address
--- opts.payload: string body
--- opts.headers: JSON-encoded headers string (optional)
--- opts.idempotency_key: unique key for dedup (optional but recommended)
--- opts.max_attempts: override default max attempts (optional)
--- opts.delay: seconds to delay first attempt (optional, default 0)
+-- Must be called inside a `db.batch` to be atomic with the state change.
+-- Returns the new row id (use it to enforce per-row idempotency in the
+-- receiver).
+--
+-- @function outbox.enqueue
+-- @tparam table opts
+-- @tparam string opts.kind         `"webhook"`, `"http"`, `"smtp"`, ...
+-- @tparam string opts.destination  URL or address.
+-- @tparam string opts.payload      Body bytes.
+-- @tparam[opt]  string opts.headers          JSON-encoded headers.
+-- @tparam[opt]  string opts.idempotency_key  Dedup key (recommended).
+-- @tparam[opt]  number opts.max_attempts     Override module default.
+-- @tparam[opt=0] number opts.delay           Seconds before first attempt.
+-- @treturn number  New `_hull_outbox.id`.
+-- @raise If `kind`, `destination`, or `payload` is missing.
 function outbox.enqueue(opts)
     if not opts or not opts.kind then
         error("outbox.enqueue requires opts.kind")
@@ -143,12 +166,17 @@ local function backoff_delay(attempt)
     return delay
 end
 
---- Flush pending outbox items. Delivers items where next_attempt_at <= now.
--- opts.limit: max items to process per flush (default 50)
--- Returns { delivered = N, failed = N, retried = N }
--- Note: delivery is at-least-once. If the process crashes after delivering
--- an item but before updating its state, the item will be re-delivered.
--- Design receivers to be idempotent (use inbox deduplication).
+--- Flush pending outbox items whose `next_attempt_at <= now`.
+--
+-- Successful deliveries are marked `delivered`. Failures bump the
+-- attempt counter and schedule the next retry; after `max_attempts`
+-- failures the row is marked `failed`.
+--
+-- @function outbox.flush
+-- @tparam[opt] table opts
+-- @tparam[opt=50] number opts.limit  Max items to process per call.
+-- @treturn table  `{ delivered = N, failed = N, retried = N }`.
+-- @note Delivery is at-least-once — design receivers to be idempotent.
 function outbox.flush(opts)
     opts = opts or {}
     local limit = opts.limit or 50
@@ -194,8 +222,13 @@ function outbox.flush(opts)
     return { delivered = delivered, failed = failed, retried = retried }
 end
 
---- Create a post-body middleware that auto-flushes outbox after each request.
--- Only flushes on successful responses (non-error status).
+--- Build a post-body middleware that marks the request for auto-flush.
+--
+-- Sets `req.ctx._outbox_flush = true`; call `outbox.flush_if_needed(req)`
+-- from a post-handler hook to trigger the actual flush.
+--
+-- @function outbox.middleware
+-- @treturn function(req, res) -> 0
 function outbox.middleware()
     return function(req, _res)
         -- Mark request for post-handler flush
@@ -204,16 +237,22 @@ function outbox.middleware()
     end
 end
 
---- Flush if the request was marked for it (call after handler returns).
--- Intended for use in a post-handler hook or explicitly by the app.
+--- Flush if `outbox.middleware()` marked the request.
+--
+-- Call from a post-handler hook (or explicitly from the handler).
+--
+-- @function outbox.flush_if_needed
+-- @tparam table req  The request object.
 function outbox.flush_if_needed(req)
     if req.ctx and req.ctx._outbox_flush then
         outbox.flush()
     end
 end
 
---- Get counts of items by state.
--- Returns { pending = N, delivered = N, failed = N }
+--- Count outbox rows per state.
+--
+-- @function outbox.stats
+-- @treturn table  `{ pending = N, delivered = N, failed = N }`.
 function outbox.stats()
     local rows = db.query(
         "SELECT state, COUNT(*) as count FROM _hull_outbox GROUP BY state"
@@ -225,8 +264,11 @@ function outbox.stats()
     return result
 end
 
---- Delete delivered items older than max_age seconds.
--- Returns number of deleted rows.
+--- Delete delivered rows older than `max_age` seconds.
+--
+-- @function outbox.cleanup
+-- @tparam[opt=604800] number max_age  Age in seconds (default = 7 days).
+-- @treturn number  Count of deleted rows.
 function outbox.cleanup(max_age)
     max_age = max_age or 86400 * 7  -- default 7 days
     local cutoff = time.now() - max_age

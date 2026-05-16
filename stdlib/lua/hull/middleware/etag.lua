@@ -1,26 +1,35 @@
+--- ETag response helpers — `etag.json`, `etag.text`, `etag.html`.
 --
--- hull.middleware.etag -- ETag response helpers
+-- Not a Keel middleware (no `(req, res) -> int` signature). Instead,
+-- handlers call `etag.json(req, res, data)` in place of `res:json(data)`
+-- and the helper:
 --
--- Wraps res:json/text/html to add ETag support with 304 Not Modified.
--- Not a middleware function (runs after handler, not before) — instead
--- provides wrapper functions that replace res:json() in route handlers.
+--   1. Encodes the body.
+--   2. Computes a weak ETag `W/"<first 16 hex of SHA-256>"`.
+--   3. Returns `304 Not Modified` when `If-None-Match` matches.
+--   4. Otherwise sends the full response with an `ETag` header.
 --
--- Usage:
+-- Skips ETag work for:
+--   - non-GET/HEAD methods
+--   - bodies larger than 1 MB (`MAX_BODY_SIZE`)
+--
+-- @module hull.middleware.etag
+-- @license AGPL-3.0-or-later
+-- @usage
 --   local etag = require("hull.middleware.etag")
 --   app.get("/api/items", function(req, res)
---       local data = db.query("SELECT * FROM items")
---       etag.json(req, res, data)
+--       etag.json(req, res, db.query("SELECT * FROM items"))
 --   end)
---
--- SPDX-License-Identifier: AGPL-3.0-or-later
---
 
 local etag = {}
 
 local MAX_BODY_SIZE = 1024 * 1024  -- 1 MB: skip ETag for larger responses
 
 --- Compute a weak ETag from a body string.
--- Returns W/"<first 16 hex chars of SHA-256>"
+--
+-- @function etag.compute
+-- @tparam string body
+-- @treturn ?string  `W/"<16-hex>"`, or `nil` for empty/error.
 function etag.compute(body)
     if not body or #body == 0 then return nil end
     local ok, hash = pcall(crypto.sha256, body)
@@ -28,8 +37,14 @@ function etag.compute(body)
     return 'W/"' .. hash:sub(1, 16) .. '"'
 end
 
---- Check if the request's If-None-Match header matches an ETag value.
--- Handles comma-separated lists and * wildcard.
+--- Does the request's `If-None-Match` match `tag`?
+--
+-- Accepts a comma-separated list of values and the `*` wildcard.
+--
+-- @function etag.matches
+-- @tparam table req
+-- @tparam ?string tag
+-- @treturn boolean
 function etag.matches(req, tag)
     if not tag then return false end
     local inm = req.headers["if-none-match"]
@@ -47,9 +62,15 @@ function etag.matches(req, tag)
 end
 
 --- Send a JSON response with ETag support.
--- If If-None-Match matches, sends 304 (no body).
--- Otherwise sends full response with ETag header.
--- status: optional HTTP status code (default 200)
+--
+-- Returns `304 Not Modified` when `If-None-Match` matches; otherwise
+-- sends the encoded body with an `ETag` header.
+--
+-- @function etag.json
+-- @tparam table  req
+-- @tparam table  res
+-- @tparam any    data    Body data (JSON-encoded).
+-- @tparam[opt=200] number status  HTTP status when sending the body.
 function etag.json(req, res, data, status)
     -- Only compute ETag for GET/HEAD
     if req.method ~= "GET" and req.method ~= "HEAD" then
@@ -77,6 +98,11 @@ function etag.json(req, res, data, status)
 end
 
 --- Send a text response with ETag support.
+-- @function etag.text
+-- @tparam table  req
+-- @tparam table  res
+-- @tparam string text
+-- @tparam[opt=200] number status
 function etag.text(req, res, text, status)
     if not text then text = "" end
     if req.method ~= "GET" and req.method ~= "HEAD" then
@@ -103,6 +129,11 @@ function etag.text(req, res, text, status)
 end
 
 --- Send an HTML response with ETag support.
+-- @function etag.html
+-- @tparam table  req
+-- @tparam table  res
+-- @tparam string html
+-- @tparam[opt=200] number status
 function etag.html(req, res, html, status)
     if not html then html = "" end
     if req.method ~= "GET" and req.method ~= "HEAD" then

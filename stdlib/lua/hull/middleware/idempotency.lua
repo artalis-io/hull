@@ -1,28 +1,43 @@
+--- Idempotency-Key middleware for safe POST retries.
 --
--- hull.middleware.idempotency -- Idempotency-Key middleware for safe retries
+-- Prevents duplicate side effects when clients retry the same request by
+-- caching the response keyed by `(principal_id, idempotency_key)`. A
+-- `SHA-256(method || path || body)` fingerprint detects key reuse with a
+-- different body (returns `409 Conflict`).
 --
--- Prevents duplicate side effects when clients retry POST requests by caching
--- responses keyed by (principal_id, idempotency_key). Uses SHA-256 fingerprint
--- to detect key reuse with different request bodies (409 Conflict).
+-- @par State table
+--   `_hull_idempotency_keys`. Schema is created by `idempotency.init()`.
+--   Entries auto-expire after `opts.ttl` seconds. Call
+--   `idempotency.cleanup()` periodically to reclaim space; the middleware
+--   also opportunistically deletes expired rows every 100 invocations.
 --
--- Usage:
+-- @par Replay semantics
+--   - Same key, same body → cached response returned (handler skipped).
+--   - Same key, different body → `409`.
+--   - Same key, still inflight → `409` (`request already in progress`).
+--   - No `Idempotency-Key` header → handler runs normally (no caching).
+--
+-- @par Header allowlist (M-3)
+--   Only safe response headers are persisted/replayed. `Set-Cookie`,
+--   `Authorization`, `Cookie`, and a deny-list of `X-*` credential
+--   patterns (`x-auth`, `x-api-key`, …) are never cached, so a stored
+--   replay can't outlive a revoked session.
+--
+-- @module hull.middleware.idempotency
+-- @license AGPL-3.0-or-later
+-- @usage
 --   local idempotency = require("hull.middleware.idempotency")
 --   idempotency.init({ ttl = 86400 })
 --   app.use_post("POST", "/api/*", idempotency.middleware({
---       get_principal = function(req) return req.ctx.session and req.ctx.session.user_id or "__anon" end,
+--       get_principal = function(req)
+--           return req.ctx.session and req.ctx.session.user_id or "__anon"
+--       end,
 --   }))
 --
--- Handlers capture responses via idempotency.respond(req, res, status, body):
 --   app.post("/api/events", function(req, res)
 --       -- ... do work inside db.batch() ...
 --       idempotency.respond(req, res, 201, { event_id = id })
 --   end)
---
--- On retry with same key+body: cached response is returned, handler never runs.
--- On retry with same key+different body: 409 Conflict.
--- Without Idempotency-Key header: handler runs normally (no caching).
---
--- SPDX-License-Identifier: AGPL-3.0-or-later
 --
 
 local idempotency = {}
@@ -96,8 +111,13 @@ local function header_value_safe(v)
 end
 local _header_name = "idempotency-key"
 
---- Initialize the idempotency table.
--- opts.ttl: key lifetime in seconds (default 86400)
+--- Initialize the `_hull_idempotency_keys` SQLite table.
+--
+-- Idempotent — safe to call on every boot.
+--
+-- @function idempotency.init
+-- @tparam[opt] table opts
+-- @tparam[opt=86400] number opts.ttl Key lifetime in seconds.
 function idempotency.init(opts)
     opts = opts or {}
     -- M-2: explicit nil check; opts.ttl == 0 must override the default.
@@ -132,11 +152,22 @@ local function compute_fingerprint(req)
     return crypto.sha256(data)
 end
 
---- Create the idempotency post-body middleware.
--- opts.get_principal: function(req) -> string (default: req.ctx.session.user_id or "__anon")
--- opts.ttl: override module-level TTL for this middleware instance
--- opts.header_name: header to read key from (default "idempotency-key")
--- opts.methods: table of methods to intercept (default {"POST"})
+--- Build a post-body idempotency middleware.
+--
+-- Reads the idempotency key from `req.headers[header_name]`. On retry
+-- with the same key+body the cached response is replayed; with a
+-- different body a `409` is returned. Without the header the handler
+-- runs normally.
+--
+-- @function idempotency.middleware
+-- @tparam[opt] table opts
+-- @tparam[opt] function(req)->string opts.get_principal
+--   Returns a stable per-user key for scoping. Default:
+--   `req.ctx.session.user_id` or `"__anon"`.
+-- @tparam[opt] number opts.ttl  Override module-level TTL for this instance.
+-- @tparam[opt="idempotency-key"] string opts.header_name  Header to read.
+-- @tparam[opt={"POST"}] table opts.methods  Methods to intercept.
+-- @treturn function(req, res) -> 0|1
 function idempotency.middleware(opts)
     opts = opts or {}
 
@@ -275,11 +306,22 @@ function idempotency.middleware(opts)
     end
 end
 
---- Send a response and cache it for idempotency replay.
--- Must be called from within a handler that has an idempotency key active.
--- data is encoded as JSON.
+--- Send a JSON response and cache it for idempotency replay.
 --
--- Usage:
+-- Call from inside a handler that has an idempotency key active (see
+-- `idempotency.middleware`). `data` is JSON-encoded; on cache hit the
+-- middleware will replay the encoded body verbatim.
+--
+-- `extra_headers` is filtered through the same allowlist used by the
+-- replay path, so credential headers never persist on disk.
+--
+-- @function idempotency.respond
+-- @tparam table  req           The request object.
+-- @tparam table  res           The response object.
+-- @tparam number status_code   HTTP status to send + cache.
+-- @tparam any    data          Body data (JSON-encoded).
+-- @tparam[opt]  table extra_headers Map of `Header-Name -> value`.
+-- @usage
 --   idempotency.respond(req, res, 201, { event_id = 42 })
 function idempotency.respond(req, res, status_code, data, extra_headers)
     local body_str = json.encode(data)
@@ -323,8 +365,13 @@ function idempotency.respond(req, res, status_code, data, extra_headers)
 end
 
 --- Mark an idempotency key as complete without caching a response.
--- Useful when the handler sends a response via res:json() directly.
--- Retries will re-execute the handler (the key prevents concurrent duplicates).
+--
+-- Useful when the handler sends a response via `res:json()` directly.
+-- The key prevents concurrent duplicates but retries will re-execute the
+-- handler (no cached body to replay).
+--
+-- @function idempotency.complete
+-- @tparam table req The request object.
 function idempotency.complete(req)
     if req.ctx._idem_key then
         db.exec(
@@ -334,8 +381,12 @@ function idempotency.complete(req)
     end
 end
 
---- Delete expired idempotency keys. Returns the number of deleted rows.
--- Call periodically (e.g., alongside session.cleanup()).
+--- Delete expired idempotency keys.
+--
+-- Call periodically (e.g. inside `app.every(3600, idempotency.cleanup)`).
+--
+-- @function idempotency.cleanup
+-- @treturn number Count of deleted rows.
 function idempotency.cleanup()
     local now = time.now()
     return db.exec("DELETE FROM _hull_idempotency_keys WHERE expires_at <= ?", { now })

@@ -1,36 +1,57 @@
+--- Liveness + readiness HTTP endpoints.
 --
--- hull.middleware.health -- Health check endpoints
+-- `health.middleware()` intercepts `GET /health` and `GET /ready`:
 --
--- Provides /health (liveness) and /ready (readiness) endpoints with
--- built-in DB ping, custom check registration, server stats, and uptime.
+--   - `/health` (liveness) — always returns `200 {status="ok", uptime}`.
+--     Verifies the process is alive; never fails.
+--   - `/ready`  (readiness) — runs the DB ping (if enabled) and every
+--     check registered via `health.register()`. Returns `200` when all
+--     pass, otherwise `503` with a per-check breakdown.
 --
--- Usage:
+-- Custom check contract:
+--   * `true` or no return value  → ok
+--   * `false, "msg"`              → fail (optional message)
+--   * raised error                → fail (uses error string)
+--
+-- @module hull.middleware.health
+-- @license AGPL-3.0-or-later
+-- @usage
 --   local health = require("hull.middleware.health")
---   health.register("cache", function() return true end)
+--   health.register("redis", function()
+--       return redis.ping() == "PONG"
+--   end)
 --   app.use("GET", "/*", health.middleware())
---
--- SPDX-License-Identifier: AGPL-3.0-or-later
---
 
 local health = {}
 
 local _checks = {}
 local _start_time = nil
 
---- Register a custom health check.
--- name: string identifier for the check
--- fn: function() -> true | false, err_string
+--- Register a custom readiness check.
+--
+-- Replaces any prior check with the same name.
+--
+-- @function health.register
+-- @tparam string name  Identifier (appears in `/ready` JSON output).
+-- @tparam function fn  `function() -> ok[, msg]` — see contract above.
 function health.register(name, fn)
     _checks[name] = fn
 end
 
---- Remove a registered health check.
+--- Remove a previously registered check.
+-- @function health.unregister
+-- @tparam string name
 function health.unregister(name)
     _checks[name] = nil
 end
 
---- Run all checks and return results table.
--- Returns: { checks = { name = { status, latency_ms, error? } }, all_ok = bool }
+--- Run the DB ping (if enabled) + every registered check.
+--
+-- @function health.run_checks
+-- @tparam[opt] table opts
+-- @tparam[opt=true] boolean opts.db_check  Include the DB ping.
+-- @treturn table  `{ checks = { name = {status, latency_ms, error?}, ... },
+--                  all_ok = boolean }`
 function health.run_checks(opts)
     opts = opts or {}
     local results = {}
@@ -88,10 +109,18 @@ function health.run_checks(opts)
     return { checks = results, all_ok = all_ok }
 end
 
---- Create health check middleware.
--- opts.path_health: liveness path (default "/health")
--- opts.path_ready:  readiness path (default "/ready")
--- opts.db_check:    include DB ping (default true)
+--- Build the `/health` + `/ready` middleware.
+--
+-- Returns `1` (short-circuit) when the request hits one of the health
+-- paths and `0` (continue) otherwise. Records the start time on first
+-- invocation so subsequent `/health` responses include uptime.
+--
+-- @function health.middleware
+-- @tparam[opt] table opts
+-- @tparam[opt="/health"] string opts.path_health  Liveness path.
+-- @tparam[opt="/ready"]  string opts.path_ready   Readiness path.
+-- @tparam[opt=true]      boolean opts.db_check    Include DB ping in `/ready`.
+-- @treturn function(req, res) -> 0|1
 function health.middleware(opts)
     opts = opts or {}
     local path_health = opts.path_health or "/health"

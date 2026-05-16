@@ -1,25 +1,38 @@
+--- Wrap mutation handlers in a single SQLite transaction.
 --
--- hull.middleware.transaction -- Wrap mutation handlers in a database transaction
+-- `transaction.middleware()` is a marker — it sets `req.ctx._txn = true`
+-- so downstream code knows the handler should be wrapped. The real work
+-- happens in `transaction.run(fn)` / `transaction.try(fn)`, which call
+-- `db.batch()` (BEGIN IMMEDIATE → fn → COMMIT, with ROLLBACK on error).
 --
--- Registers as post-body middleware. All db.exec()/db.query() calls within the
--- handler run inside a single BEGIN IMMEDIATE..COMMIT transaction. If the handler
--- errors, the transaction is rolled back automatically (via db.batch semantics).
+-- SQLite does not support nested transactions, so wrapping handlers that
+-- are already inside a `db.batch` is a no-op via the batch semantics.
 --
--- Usage:
+-- @module hull.middleware.transaction
+-- @license AGPL-3.0-or-later
+-- @usage
 --   local transaction = require("hull.middleware.transaction")
---   app.use_post("POST", "/api/*", transaction.middleware())
---   app.use_post("PUT",  "/api/*", transaction.middleware())
+--   app.use_post("POST",   "/api/*", transaction.middleware())
+--   app.use_post("PUT",    "/api/*", transaction.middleware())
 --   app.use_post("DELETE", "/api/*", transaction.middleware())
 --
--- SPDX-License-Identifier: AGPL-3.0-or-later
---
+--   -- inside a handler:
+--   transaction.run(function()
+--       db.exec("INSERT INTO orders ...", { ... })
+--       db.exec("UPDATE inventory ...",   { ... })
+--   end)
 
 local transaction = {}
 
---- Marks the request as needing transactional wrapping. Handlers call
--- transaction.run(fn) (or transaction.try(fn)) to actually wrap their
--- DB work in BEGIN IMMEDIATE..COMMIT — see those helpers below.
--- L-4: trimmed the long historical-design comment block.
+--- Build a transaction marker middleware.
+--
+-- Always returns `0` (continue). Sets `req.ctx._txn = true` so handlers
+-- and other middleware can tell that DB work in this request should
+-- run under `transaction.run` / `transaction.try`.
+--
+-- @function transaction.middleware
+-- @tparam[opt] table _opts Reserved for future options.
+-- @treturn function(req, res) -> 0  Post-body middleware.
 function transaction.middleware(_opts)
     return function(req, _res)
         req.ctx._txn = true
@@ -27,25 +40,34 @@ function transaction.middleware(_opts)
     end
 end
 
---- Execute fn inside a transaction. If already inside a db.batch(), fn runs
--- directly (no nesting — SQLite doesn't support nested transactions).
--- On error, the transaction is rolled back and the error is re-raised.
+--- Run `fn` inside `BEGIN IMMEDIATE..COMMIT`.
 --
--- Usage inside a handler:
+-- On error, the transaction is rolled back and the error re-raised.
+-- If already inside a `db.batch`, `fn` runs without an extra BEGIN.
+--
+-- @function transaction.run
+-- @tparam function fn  Function whose DB writes should be atomic.
+-- @raise Re-raises any error from `fn` after rollback.
+-- @usage
 --   transaction.run(function()
---       db.exec("INSERT INTO ...", {...})
---       db.exec("UPDATE ...", {...})
+--       db.exec("INSERT INTO ...", { ... })
+--       db.exec("UPDATE ...",      { ... })
 --   end)
 function transaction.run(fn)
     db.batch(fn)
 end
 
---- Convenience: execute fn in a transaction, catch errors, and return
--- ok, result_or_error. Does NOT re-raise.
+--- Run `fn` inside a transaction; return `(ok, err_or_result)`.
 --
--- Usage:
+-- Same as `transaction.run` but uses `pcall` instead of re-raising.
+--
+-- @function transaction.try
+-- @tparam function fn  Function whose DB writes should be atomic.
+-- @treturn boolean ok     `true` on success, `false` on error.
+-- @treturn any   value    `fn`'s return value on success, error message on failure.
+-- @usage
 --   local ok, err = transaction.try(function()
---       db.exec("INSERT INTO ...", {...})
+--       db.exec("INSERT INTO ...", { ... })
 --   end)
 --   if not ok then
 --       res:status(500):json({ error = tostring(err) })
