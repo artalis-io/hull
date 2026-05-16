@@ -29,6 +29,15 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+/* On Linux glibc, `syscall(2)` is only declared by <unistd.h> when
+ * _GNU_SOURCE (or _DEFAULT_SOURCE) is defined. Newer clang treats the
+ * resulting implicit declaration as a hard error under
+ * -Wimplicit-function-declaration, so we set it before any include.
+ * No effect on macOS/BSD/Cosmo. */
+#if defined(__linux__) && !defined(__COSMOPOLITAN__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+
 /* ── Platform detection ────────────────────────────────────────────── */
 
 #if defined(__COSMOPOLITAN__)
