@@ -10,7 +10,8 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 --
 
-local json = require("hull.json")
+local json     = require("hull.json")
+local cbuild   = require("hull.compute_build")
 
 -- ── Embedded hull_compute.h ────────────────────────────────────────────
 
@@ -280,46 +281,9 @@ local function validate_module_name(name)
 end
 
 -- ── Helpers ────────────────────────────────────────────────────────────
-
-local function find_clang()
-    -- Prefer Homebrew LLVM (bundles wasm-ld for wasm32 target)
-    local brew_paths = {
-        "/opt/homebrew/opt/llvm@18/bin/clang",
-        "/opt/homebrew/opt/llvm/bin/clang",
-        "/usr/local/opt/llvm@18/bin/clang",
-        "/usr/local/opt/llvm/bin/clang",
-    }
-    for _, p in ipairs(brew_paths) do
-        if tool.file_exists(p) then return p end
-    end
-
-    -- Fall back to system clang (works if wasm-ld is in PATH)
-    local out = tool.spawn_read({"clang", "--version"})
-    if out then return "clang" end
-
-    return nil
-end
-
---- List all subdirectories under compute/ that contain source files
-local function discover_modules()
-    local modules = {}
-    local files = tool.find_files("compute", "*.c")
-    for _, path in ipairs(files) do
-        -- path is like compute/<name>/<name>.c
-        local name = path:match("^compute/([^/]+)/")
-        if name then
-            -- Deduplicate
-            local found = false
-            for _, m in ipairs(modules) do
-                if m == name then found = true; break end
-            end
-            if not found then
-                modules[#modules + 1] = name
-            end
-        end
-    end
-    return modules
-end
+-- Compilation lookup, module discovery, and per-module clang invocation
+-- live in stdlib/lua/hull/compute_build.lua so they can be reused by
+-- stdlib/lua/hull/build.lua during `hull build` auto-rebuilds.
 
 -- ── Subcommand: new ────────────────────────────────────────────────────
 
@@ -371,18 +335,27 @@ end
 local function cmd_build(name)
     if name then validate_module_name(name) end
 
-    local modules
+    -- Discover all modules; filter to one if `name` was given.
+    local all_modules = cbuild.discover_modules(".")
+    local todo
     if name then
-        modules = { name }
+        for _, m in ipairs(all_modules) do
+            if m.name == name then todo = { m }; break end
+        end
+        if not todo then
+            local src = "compute/" .. name .. "/" .. name .. ".c"
+            tool.stderr("hull compute build: source not found: " .. src .. "\n")
+            tool.exit(1)
+        end
     else
-        modules = discover_modules()
-        if #modules == 0 then
+        todo = all_modules
+        if #todo == 0 then
             tool.stderr("hull compute build: no modules found under compute/\n")
             tool.exit(1)
         end
     end
 
-    local cc = find_clang()
+    local cc = cbuild.find_clang()
     if not cc then
         tool.stderr("hull compute build: clang not found\n")
         tool.stderr("  Install clang with wasm32 target support.\n")
@@ -392,52 +365,21 @@ local function cmd_build(name)
     end
 
     local all_ok = true
-    for _, mod in ipairs(modules) do
-        local dir = "compute/" .. mod
-        local src = dir .. "/" .. mod .. ".c"
-        local out = "compute/" .. mod .. ".wasm"
-
-        if not tool.file_exists(src) then
-            tool.stderr("hull compute build: source not found: " .. src .. "\n")
+    for _, m in ipairs(todo) do
+        print("hull compute build: " .. m.name)
+        local ok, err = cbuild.compile_module(cc, m)
+        if not ok then
+            tool.stderr("  " .. (err or "compile failed") .. "\n")
             all_ok = false
         else
-            print("hull compute build: " .. mod)
-
-            local ok = tool.spawn({
-                cc,
-                "--target=wasm32-unknown-unknown",
-                "-nostdlib",
-                "-O2",
-                "-flto",
-                "-I", dir,
-                "-Wl,--no-entry",
-                "-Wl,--export=hull_process",
-                "-Wl,--export=hull_version",
-                "-Wl,--export=memory",
-                "-Wl,--allow-undefined",
-                "-Wl,--initial-memory=131072",
-                "-Wl,--max-memory=67108864",
-                "-o", out,
-                src,
-            })
-
-            if not ok then
-                tool.stderr("hull compute build: failed to compile " .. mod .. "\n")
-                all_ok = false
-            else
-                -- Report file size
-                local data = tool.read_file(out)
-                if data then
-                    local kb = string.format("%.1f", #data / 1024)
-                    print("  -> " .. out .. " (" .. kb .. " KB)")
-                end
+            local data = tool.read_file(m.wasm)
+            if data then
+                print(string.format("  -> %s (%.1f KB)", m.wasm, #data / 1024))
             end
         end
     end
 
-    if not all_ok then
-        tool.exit(1)
-    end
+    if not all_ok then tool.exit(1) end
 end
 
 -- ── Subcommand: check ──────────────────────────────────────────────────

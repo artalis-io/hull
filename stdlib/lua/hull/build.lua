@@ -23,6 +23,8 @@ local function parse_args()
         app_dir = ".",
         aot = true,       -- AOT compile WASM modules (--no-aot to disable)
         target = nil,     -- cross-compilation target arch (e.g. "x86_64", "aarch64")
+        build_compute = true, -- Auto-rebuild compute/<name>/<name>.c → .wasm
+                              -- (--no-build-compute to disable)
     }
 
     local i = 1
@@ -49,6 +51,8 @@ local function parse_args()
             opts.output = arg[i]
         elseif a == "--no-aot" then
             opts.aot = false
+        elseif a == "--no-build-compute" then
+            opts.build_compute = false
         elseif a == "--target" then
             i = i + 1
             opts.target = arg[i]
@@ -497,6 +501,44 @@ typedef struct {
     end
 
     local compute_dir = opts.app_dir .. "/compute"
+
+    -- Auto-rebuild compute source → .wasm before discovery (so the new
+    -- artifacts get picked up in this same build pass).
+    --
+    -- We invoke the same logic that `hull compute build` uses, gated on
+    -- staleness so unchanged sources don't trigger clang. If clang isn't
+    -- installed and there's nothing stale, we emit no output at all. If
+    -- there IS stale work and clang is missing, we treat that as a build
+    -- error — the developer asked for an integrated build but we cannot
+    -- produce the artifact they expect.
+    if opts.build_compute then
+        local cbuild = require("hull.compute_build")
+        local r = cbuild.build_all(opts.app_dir, "stale")
+        if #r.errors > 0 then
+            if r.no_clang then
+                tool.stderr("hull build: cannot rebuild compute module(s) — clang not found.\n")
+                tool.stderr("  Missing/stale: ")
+                local names = {}
+                for _, e in ipairs(r.errors) do names[#names + 1] = e.name end
+                tool.stderr(table.concat(names, ", ") .. "\n")
+                tool.stderr("  Either install clang with wasm32 target support, run\n")
+                tool.stderr("    hull compute build  (on a machine with clang)\n")
+                tool.stderr("  and commit the resulting .wasm files, or pass --no-build-compute\n")
+                tool.stderr("  to embed the existing .wasm files as-is.\n")
+            else
+                for _, e in ipairs(r.errors) do
+                    tool.stderr("hull build: compute/" .. e.name .. ": " .. e.err .. "\n")
+                end
+            end
+            tool.rmdir(tmpdir)
+            tool.exit(1)
+        end
+        if #r.built > 0 then
+            print("hull build: compiled " .. #r.built .. " compute source(s): " ..
+                  table.concat(r.built, ", "))
+        end
+    end
+
     local compute_files = {}
     if file_exists(compute_dir) then
         local wasm = tool.find_files(compute_dir, "*.wasm")

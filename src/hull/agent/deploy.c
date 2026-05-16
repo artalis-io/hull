@@ -190,6 +190,84 @@ int hl_agent_deploy(const char *app_dir, ShJsonBuf *out)
     sh_json_write_kv_int(&w, "shaders", n_shaders);
     sh_json_write_object_end(&w);
 
+    /* Compute modules — per-module detail.
+     *
+     * For every compute/<name>.wasm we report:
+     *   - name             module name (filename without extension)
+     *   - wasm_size        size of the .wasm artifact in bytes
+     *   - has_aot          whether at least one compute/<name>.aot.<arch>
+     *                      exists alongside the .wasm
+     *   - has_source       whether compute/<name>/<name>.c exists
+     *   - source_stale     true if has_source AND source mtime > .wasm mtime
+     *                      (i.e. a `hull build` or `hull compute build` would
+     *                      regenerate the artifact)
+     *
+     * Agents use this to surface compute coverage in deployment readiness
+     * UIs and to decide whether to nudge developers to rebuild before
+     * shipping.
+     */
+    sh_json_write_key(&w, "compute_modules");
+    sh_json_write_array_start(&w);
+    {
+        char compute_dir[PATH_MAX];
+        snprintf(compute_dir, sizeof(compute_dir), "%s/compute", app_dir);
+        char **wasm_files = hl_tool_find_files(compute_dir, "*.wasm", NULL);
+        if (wasm_files) {
+            for (char **fp = wasm_files; *fp; fp++) {
+                const char *full = *fp;
+                /* Module name is the basename without the .wasm extension. */
+                const char *slash = strrchr(full, '/');
+                const char *base = slash ? slash + 1 : full;
+                size_t base_len = strlen(base);
+                if (base_len <= 5) continue;  /* must end with ".wasm" */
+                char name[256];
+                size_t copy_len = base_len - 5;
+                if (copy_len >= sizeof(name)) copy_len = sizeof(name) - 1;
+                memcpy(name, base, copy_len);
+                name[copy_len] = '\0';
+
+                /* Sizes + mtimes via stat. */
+                struct stat wasm_st;
+                long wasm_size = 0;
+                time_t wasm_mtime = 0;
+                if (stat(full, &wasm_st) == 0) {
+                    wasm_size = (long)wasm_st.st_size;
+                    wasm_mtime = wasm_st.st_mtime;
+                }
+
+                /* Look for compute/<name>.aot.* siblings. */
+                int has_aot = 0;
+                char aot_pattern[64];
+                snprintf(aot_pattern, sizeof(aot_pattern), "%s.aot.*", name);
+                char **aot_files = hl_tool_find_files(compute_dir, aot_pattern, NULL);
+                if (aot_files) {
+                    has_aot = (aot_files[0] != NULL);
+                    for (char **ap = aot_files; *ap; ap++) free(*ap);
+                    free(aot_files);
+                }
+
+                /* Look for compute/<name>/<name>.c source. */
+                char src_path[PATH_MAX];
+                snprintf(src_path, sizeof(src_path), "%s/%s/%s.c",
+                         compute_dir, name, name);
+                struct stat src_st;
+                int has_source = (stat(src_path, &src_st) == 0);
+                int source_stale = has_source && (src_st.st_mtime > wasm_mtime);
+
+                sh_json_write_object_start(&w);
+                sh_json_write_kv_string(&w, "name", name);
+                sh_json_write_kv_int(&w, "wasm_size", (int)wasm_size);
+                sh_json_write_kv_bool(&w, "has_aot", has_aot != 0);
+                sh_json_write_kv_bool(&w, "has_source", has_source != 0);
+                sh_json_write_kv_bool(&w, "source_stale", source_stale != 0);
+                sh_json_write_object_end(&w);
+            }
+            for (char **fp = wasm_files; *fp; fp++) free(*fp);
+            free(wasm_files);
+        }
+    }
+    sh_json_write_array_end(&w);
+
     /* Signature section */
     sh_json_write_key(&w, "signature");
     sh_json_write_object_start(&w);
@@ -213,6 +291,43 @@ int hl_agent_deploy(const char *app_dir, ShJsonBuf *out)
         sh_json_write_string(&w, "No signature — run hull build --sign for verified deployments");
     if (has_manifest && manifest.env_count == 0 && manifest.hosts_count == 0)
         sh_json_write_string(&w, "Manifest is empty — declare env vars and hosts for better config generation");
+    /* Stale-source advisory: re-scan briefly to flag any modules whose .c
+     * is newer than the .wasm artifact. hull build auto-rebuilds when
+     * clang is available; this advisory matters most for CI machines and
+     * locked-down deploy pipelines without a wasm toolchain. */
+    {
+        char compute_dir[PATH_MAX];
+        snprintf(compute_dir, sizeof(compute_dir), "%s/compute", app_dir);
+        char **wasm_files = hl_tool_find_files(compute_dir, "*.wasm", NULL);
+        if (wasm_files) {
+            int any_stale = 0;
+            for (char **fp = wasm_files; *fp && !any_stale; fp++) {
+                const char *slash = strrchr(*fp, '/');
+                const char *base = slash ? slash + 1 : *fp;
+                size_t base_len = strlen(base);
+                if (base_len <= 5) continue;
+                char name[256];
+                size_t copy_len = base_len - 5;
+                if (copy_len >= sizeof(name)) copy_len = sizeof(name) - 1;
+                memcpy(name, base, copy_len);
+                name[copy_len] = '\0';
+                char src_path[PATH_MAX];
+                snprintf(src_path, sizeof(src_path), "%s/%s/%s.c",
+                         compute_dir, name, name);
+                struct stat src_st, wasm_st;
+                if (stat(src_path, &src_st) == 0 &&
+                    stat(*fp, &wasm_st) == 0 &&
+                    src_st.st_mtime > wasm_st.st_mtime) {
+                    any_stale = 1;
+                }
+            }
+            if (any_stale) {
+                sh_json_write_string(&w, "Compute source newer than .wasm — run `hull compute build` or rebuild (hull build auto-rebuilds when clang is available)");
+            }
+            for (char **fp = wasm_files; *fp; fp++) free(*fp);
+            free(wasm_files);
+        }
+    }
     sh_json_write_array_end(&w);
 
     sh_json_write_object_end(&w);

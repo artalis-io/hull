@@ -296,6 +296,28 @@ static int l_tool_file_exists(lua_State *L)
     return 1;
 }
 
+/* ── tool.file_mtime(path) → number|nil ────────────────────────────── */
+
+static int l_tool_file_mtime(lua_State *L)
+{
+    const char *path = luaL_checkstring(L, 1);
+    HlToolUnveilCtx *ctx = get_unveil_ctx(L);
+
+    if (ctx && hl_tool_unveil_check(ctx, path, 'r') != 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+    /* Return seconds since epoch as a Lua number. */
+    lua_pushnumber(L, (lua_Number)st.st_mtime);
+    return 1;
+}
+
 /* ── tool.stderr(msg) ──────────────────────────────────────────────── */
 
 static int l_tool_stderr(lua_State *L)
@@ -528,6 +550,7 @@ static const luaL_Reg tool_funcs[] = {
     { "read_file",              l_tool_read_file },
     { "write_file",             l_tool_write_file },
     { "file_exists",            l_tool_file_exists },
+    { "file_mtime",             l_tool_file_mtime },
     { "stderr",                 l_tool_stderr },
     { "loadfile",               l_tool_loadfile },
     { "extract_platform",       l_tool_extract_platform },
