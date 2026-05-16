@@ -1,32 +1,29 @@
--- hull.email — Outbound email with provider dispatch
+--- Outbound email with pluggable provider dispatch.
 --
--- Supports direct SMTP and API providers (Postmark, SendGrid, Resend).
--- SMTP goes through the C smtp.send() binding; API providers use http.async.post()
--- (non-blocking).
+-- Wraps four delivery backends behind one `email.send(opts)` call:
 --
--- Usage:
+--   - `"smtp"`     — direct SMTP via the C `smtp.send` binding.
+--   - `"postmark"` — Postmark HTTPS API.
+--   - `"sendgrid"` — SendGrid HTTPS API.
+--   - `"resend"`   — Resend HTTPS API.
+--
+-- API providers use `http.async.post` so they cooperate with the event
+-- loop. SMTP delivery goes through the C `smtp.send()` cap which handles
+-- TLS via mbedTLS and the embedded Mozilla CA bundle.
+--
+-- @module hull.email
+-- @license AGPL-3.0-or-later
+-- @usage
 --   local email = require("hull.email")
 --   local result = email.send({
---       provider = "smtp",           -- or "postmark", "sendgrid", "resend"
---       from = "app@example.com",
---       to = "user@example.com",
---       subject = "Hello",
---       body = "Message body",
---       -- SMTP-specific:
---       smtp_host = "smtp.example.com",
---       smtp_port = 587,
---       smtp_user = "apikey",
---       smtp_pass = env.get("SMTP_PASS"),
---       smtp_tls = true,
---       -- API-specific:
---       api_key = env.get("POSTMARK_TOKEN"),
---       -- Optional:
---       cc = {"admin@example.com"},
---       reply_to = "support@example.com",
---       content_type = "text/html",
+--       provider = "smtp",
+--       from = "app@example.com",  to = "user@example.com",
+--       subject = "Hello",         body = "Message body",
+--       smtp_host = "smtp.example.com", smtp_port = 587,
+--       smtp_user = "apikey",      smtp_pass = env.get("SMTP_PASS"),
+--       smtp_tls  = true,
 --   })
---
--- SPDX-License-Identifier: AGPL-3.0-or-later
+--   if not result.ok then log.error(result.error) end
 
 local email = {}
 
@@ -175,14 +172,31 @@ function providers.resend(opts)
     return { ok = false, error = "resend: " .. (resp.body or "unknown error") }
 end
 
---- Send an email.
--- @param opts table with fields:
---   provider: "smtp" | "postmark" | "sendgrid" | "resend" (default: "smtp")
---   from, to, subject, body: required
---   cc, reply_to, content_type: optional
---   api_key: required for API providers
---   smtp_host, smtp_port, smtp_user, smtp_pass, smtp_tls: required for SMTP
--- @return { ok = true } or { ok = false, error = "message" }
+--- Send an email via the selected provider.
+--
+-- Always validates `from`/`to` against a simple `local@domain.tld`
+-- pattern before dispatch; provider-specific errors are surfaced as
+-- `{ok=false, error="<provider>: <msg>"}`.
+--
+-- @function email.send
+-- @tparam table opts
+-- @tparam[opt="smtp"] string opts.provider  `"smtp"`, `"postmark"`,
+--   `"sendgrid"`, or `"resend"`.
+-- @tparam string opts.from     Sender address.
+-- @tparam string opts.to       Recipient address.
+-- @tparam string opts.subject  Subject line.
+-- @tparam string opts.body     Body bytes.
+-- @tparam[opt] {string,...} opts.cc           Cc recipients.
+-- @tparam[opt] string opts.reply_to           Reply-To address.
+-- @tparam[opt="text/plain"] string opts.content_type
+--   `"text/plain"` or `"text/html"`.
+-- @tparam[opt] string opts.api_key            Required for API providers.
+-- @tparam[opt] string opts.smtp_host          SMTP server host.
+-- @tparam[opt=587] number opts.smtp_port      SMTP server port.
+-- @tparam[opt] string opts.smtp_user          SMTP username.
+-- @tparam[opt] string opts.smtp_pass          SMTP password.
+-- @tparam[opt=true] boolean opts.smtp_tls     Enable STARTTLS.
+-- @treturn table  `{ok = true}` on success, `{ok = false, error = "..."}` on failure.
 function email.send(opts)
     if not opts then return { ok = false, error = "opts required" } end
     if not opts.from then return { ok = false, error = "from required" } end

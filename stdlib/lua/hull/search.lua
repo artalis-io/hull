@@ -1,11 +1,22 @@
+--- Full-text search backed by SQLite FTS5 virtual tables.
 --
--- hull.search -- FTS5 full-text search wrapper
+-- Each search index is a `_hull_fts_<name>` FTS5 table with a fixed `id`
+-- column plus the columns the caller declared. Identifiers are
+-- validated against `[A-Za-z_][A-Za-z0-9_]*` and a small SQL-keyword
+-- deny-list to prevent injection through `name` / column arguments.
 --
--- Provides full-text search indexing and querying backed by SQLite FTS5
--- virtual tables. Uses the global `db` object for storage.
+-- Supports snippet/highlight extraction, ranked (`rank`) or insertion
+-- order (`rowid`), and bulk re-indexing from a source table.
 --
--- SPDX-License-Identifier: AGPL-3.0-or-later
---
+-- @module hull.search
+-- @license AGPL-3.0-or-later
+-- @usage
+--   local search = require("hull.search")
+--   search.create_index("posts", { "title", "body" })
+--   search.index("posts", post_id, { title = post.title, body = post.body })
+--   for _, hit in ipairs(search.query("posts", "hull AND wasm", { limit = 10 })) do
+--       print(hit.id, hit.rank)
+--   end
 
 local search = {}
 
@@ -56,11 +67,16 @@ end
 
 -- ── Public API ────────────────────────────────────────────────────────
 
---- Create an FTS5 virtual table for full-text search.
--- columns: array of column name strings (e.g. {"title", "body"})
--- opts.tokenize: FTS5 tokenizer (default "unicode61")
--- opts.content: external content table name
--- opts.content_rowid: rowid column name for external content
+--- Create an FTS5 virtual table for full-text search. Idempotent.
+--
+-- @function search.create_index
+-- @tparam string name         Index name (will become `_hull_fts_<name>`).
+-- @tparam {string,...} columns  Searchable column names (≥ 1).
+-- @tparam[opt] table opts
+-- @tparam[opt="unicode61"] string opts.tokenize  FTS5 tokenizer spec.
+-- @tparam[opt] string opts.content        External content table name.
+-- @tparam[opt] string opts.content_rowid  Rowid column for external content.
+-- @raise If `name`/columns fail identifier validation.
 function search.create_index(name, columns, opts)
     validate_identifier(name, "index name")
     validate_columns(columns)
@@ -94,16 +110,21 @@ function search.create_index(name, columns, opts)
     db.exec(sql)
 end
 
---- Drop an FTS5 index.
+--- Drop an FTS5 index. Idempotent.
+-- @function search.drop_index
+-- @tparam string name
 function search.drop_index(name)
     validate_identifier(name, "index name")
     db.exec("DROP TABLE IF EXISTS " .. fts_table(name))
 end
 
 --- Insert or replace a document in the index.
--- name: index name
--- id: document identifier (string or number)
--- fields: table mapping column names to values (e.g. {title="Hello", body="World"})
+--
+-- @function search.index
+-- @tparam string name    Index name.
+-- @tparam string|number id  Document identifier.
+-- @tparam table  fields  Map of column name → value (e.g. `{title=..., body=...}`).
+-- @raise If `id` is nil or any field name fails validation.
 function search.index(name, id, fields)
     validate_identifier(name, "index name")
     if id == nil then
@@ -132,6 +153,9 @@ function search.index(name, id, fields)
 end
 
 --- Remove a document from the index by id.
+-- @function search.remove
+-- @tparam string name
+-- @tparam string|number id
 function search.remove(name, id)
     validate_identifier(name, "index name")
     if id == nil then
@@ -142,13 +166,22 @@ function search.remove(name, id)
 end
 
 --- Query the FTS5 index.
--- name: index name
--- query: FTS5 match expression (e.g. "hello world", "title:hello")
--- opts.limit: max results (default 20)
--- opts.offset: result offset (default 0)
--- opts.snippet: table with {column, tokens, before, after, ellipsis}
--- opts.highlight: table with {column, before, after}
--- opts.order: "rank" (default) or "rowid"
+--
+-- @function search.query
+-- @tparam string name
+-- @tparam string query  FTS5 MATCH expression (e.g. `"hello world"`,
+--   `"title:hello AND body:world"`).
+-- @tparam[opt] table opts
+-- @tparam[opt=20] number opts.limit
+-- @tparam[opt=0]  number opts.offset
+-- @tparam[opt] table opts.snippet
+--   `{ column = N, tokens = N, before = "<b>", after = "</b>", ellipsis = "..." }`
+--   Adds a `snippet` column to each result row.
+-- @tparam[opt] table opts.highlight
+--   `{ column = N, before = "<b>", after = "</b>" }` —
+--   adds a `highlight` column.
+-- @tparam[opt="rank"] string opts.order  `"rank"` or `"rowid"`.
+-- @treturn {table,...}  Array of `{id, rank, snippet?, highlight?}` rows.
 function search.query(name, query, opts)
     validate_identifier(name, "index name")
     if type(query) ~= "string" or query == "" then
@@ -207,11 +240,18 @@ function search.query(name, query, opts)
 end
 
 --- Bulk re-index from a source table.
--- name: index name
--- source_table: table to read documents from
--- opts.columns: table mapping FTS column names to source column names
---               e.g. {title = "title", body = "content"}
--- opts.id_column: source table's ID column (default "id")
+--
+-- Clears every row in `_hull_fts_<name>` then `INSERT INTO ... SELECT
+-- FROM <source_table>` for an atomic-feeling rebuild.
+--
+-- @function search.reindex
+-- @tparam string name
+-- @tparam string source_table  Source SQL table to read from.
+-- @tparam[opt] table opts
+-- @tparam[opt] table opts.columns
+--   Map of `<fts_column> -> <source_column>` (e.g. `{ title = "title",
+--   body = "content" }`).
+-- @tparam[opt="id"] string opts.id_column  Source table's ID column.
 function search.reindex(name, source_table, opts)
     validate_identifier(name, "index name")
     validate_identifier(source_table, "source table")
