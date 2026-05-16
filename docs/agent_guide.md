@@ -280,7 +280,10 @@ Grouped by purpose. Run `hull <cmd> --help` for full per-command flags.
 | `hull migrate [app]` | Run pending migrations |
 | `hull migrate status [app]` | Show applied / pending |
 | `hull migrate new <name>` | Scaffold new `NNN_<name>.sql` |
-| `hull compute <module> < input` | One-shot run a WASM compute module |
+| `hull compute new <name> [--lang c]` | Scaffold a new WASM compute module under `compute/<name>/` |
+| `hull compute build [name]` | Compile `compute/<name>/<name>.c` → `compute/<name>.wasm` (auto-runs as part of `hull build` for stale sources) |
+| `hull compute test <name>` | Run JSON fixtures from `compute/<name>/test_fixtures.json` |
+| `hull compute check <name>` | Validate that `compute/<name>.wasm` loads in WAMR |
 
 ### Agent commands
 
@@ -857,6 +860,30 @@ Name must start with `hull_` (prevents shadowing SQLite built-ins).
 Don't use for I/O (no syscall imports) or for trivial work (the µs-scale
 boundary cost dominates).
 
+### Authoring a module
+
+Hull ships a complete scaffolding lifecycle. The full developer guide lives
+in [`../README.md#authoring-compute-modules`](../README.md#authoring-compute-modules);
+the short form:
+
+```bash
+hull compute new score          # scaffold compute/score/{score.c, hull_compute.h, test_fixtures.json}
+# edit compute/score/score.c
+hull compute build score        # compile to compute/score.wasm
+hull compute test  score        # run JSON fixtures
+hull compute check score        # smoke-test load in WAMR
+hull build .                    # embeds .wasm (and AOT if wamrc available)
+```
+
+`hull build` automatically rebuilds stale `.c` sources before embedding —
+no separate `hull compute build` step required during release builds.
+Pass `--no-build-compute` for hermetic CI builds that ship pre-committed
+`.wasm` artifacts.
+
+`hull agent deploy <app>` reports per-module status (`name`, `wasm_size`,
+`has_aot`, `has_source`, `source_stale`) plus a recommendation when any
+source is newer than its `.wasm`.
+
 ### Plugin ABI
 
 Plugins export:
@@ -864,7 +891,13 @@ Plugins export:
 - (optional) `hull_version() -> int`
 
 Import (single): `env.host_call(opcode, ptr, len) -> int` with opcodes
-`LOG=0x01`, `DATA_INFO=0x02`, `CALLBACK=0x10`.
+`LOG=0x01`, `DATA_INFO=0x02`, `STREAM=0x03`, `CALLBACK=0x10`.
+
+`hull_compute.h` (written by `hull compute new` into each module dir) is
+the freestanding header that provides the export macros, error codes,
+host-call wrappers, segment accessors, a minimal libc shim
+(`hull_memcpy`/`hull_memset`/`hull_memcmp`/`hull_strlen`), and a 64 KiB
+bump allocator.
 
 ### Calling
 

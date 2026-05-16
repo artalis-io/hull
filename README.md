@@ -110,6 +110,10 @@ Hull ships 20 subcommands for the full development lifecycle:
 | `hull migrate [app_dir]` | Run pending SQL migrations |
 | `hull migrate status` | Show migration status (applied/pending) |
 | `hull migrate new <name>` | Create a new numbered migration file |
+| `hull compute new <name> [--lang c]` | [Scaffold a new WASM compute module](#authoring-compute-modules) under `compute/<name>/` |
+| `hull compute build [name]` | Compile `compute/<name>/<name>.c` → `compute/<name>.wasm` (all modules if no name) |
+| `hull compute test <name>` | Run JSON fixtures against a compiled module |
+| `hull compute check <name>` | Validate that a `.wasm` module loads correctly in WAMR |
 
 ### Build Pipeline
 
@@ -373,6 +377,294 @@ When disabled (default), the audit check is a single branch on a global flag —
 | GET /greet/:name (params) | 102,204 req/s | 57,405 req/s |
 
 See [docs/benchmark.md](docs/benchmark.md) for methodology.
+
+## Authoring Compute Modules
+
+WASM compute modules let you drop pure-function workloads (scoring,
+transforms, parsing, vector math, image kernels) into a Hull app at
+near-native speed without leaving the capability-secure sandbox.
+Modules are written in C (Rust planned), compiled to WebAssembly,
+and either embedded in the final binary or loaded from disk in dev.
+
+> See [docs/wamr_architecture.md](docs/wamr_architecture.md) for the
+> full WAMR design (ABI, gas metering, pooling, segments, streaming,
+> AOT, Memory64); this section is the developer guide.
+
+### Directory convention
+
+A compute module is a pair of paths inside your app:
+
+```
+myapp/
+  app.lua
+  compute/
+    score.wasm           ← compiled artifact (what gets embedded)
+    score/               ← source directory (one per module)
+      score.c            ← required: the actual source
+      hull_compute.h     ← required: the freestanding ABI header
+      test_fixtures.json ← optional: input/output fixtures for `hull compute test`
+```
+
+The runtime only ever loads `compute/<name>.wasm` (and the AOT siblings
+`compute/<name>.aot.<arch>`). The source directory `compute/<name>/`
+is purely a build input — it's not embedded in the final binary and
+nothing in production looks at it.
+
+### Lifecycle
+
+```
+                                              hull build (auto)
+                                                  ▼
+hull compute new score          ┌───────────────────┐
+        │                       │ compute/score.wasm│ ──── embedded into
+        ▼                       └───────────────────┘      the app binary
+compute/score/score.c (edit)            ▲
+        │                               │
+        ├──► hull compute build score ──┘   (manual rebuild)
+        │
+        ├──► hull compute test  score        (run JSON fixtures)
+        │
+        └──► hull compute check score        (load + smoke-test in WAMR)
+```
+
+### Step 1 — Scaffold
+
+```bash
+hull compute new score
+```
+
+Creates:
+
+- `compute/score/score.c` — a 30-line skeleton implementing
+  `hull_process(in, in_len, out, out_max)`. The default scaffold sums
+  input bytes into a 0-100 score; replace it with your actual logic.
+- `compute/score/hull_compute.h` — the freestanding ABI header
+  (described below). Don't edit it; it's owned by Hull.
+- `compute/score/test_fixtures.json` — a few example fixtures.
+
+`hull compute new` is **idempotent-safe**: re-running on an existing
+module errors instead of clobbering. Names must match
+`[A-Za-z0-9_-]+`.
+
+### Step 2 — Write your module
+
+Implement `hull_process` in `compute/<name>/<name>.c`. The ABI is the
+function signature you export, nothing more:
+
+```c
+#include "hull_compute.h"
+
+HULL_VERSION_EXPORT
+
+HULL_EXPORT
+int32_t hull_process(const void *in_ptr, int32_t in_len,
+                     void *out_ptr, int32_t out_max)
+{
+    /* Read up to in_len bytes from in_ptr.
+     * Write up to out_max bytes to out_ptr.
+     * Return number of bytes written, or a negative HULL_ERR_* code. */
+    if (out_max < 4) return HULL_ERR_OUTPUT;
+    /* ... your logic ... */
+    return 4;
+}
+```
+
+`hull_compute.h` is freestanding (no libc dependency) and provides:
+
+| API | Use |
+|-----|-----|
+| `HULL_EXPORT` / `HULL_VERSION_EXPORT` | Visibility macros — required on `hull_process` and `hull_version`. |
+| `HULL_OK`, `HULL_ERR_OUTPUT`, `HULL_ERR_INPUT`, `HULL_ERR_INTERNAL` | Standard return codes. |
+| `int32_t host_call(opcode, ptr, len)` | The single host import — for logging, shared-data access, and UDF callbacks. |
+| `hull_log(msg, len)` | Convenience wrapper around `host_call(HULL_OP_LOG, ...)`. |
+| `hull_segment_count()` / `hull_segment_addr(id)` / `hull_segment_size(id)` | Read shared data segments loaded via `compute.segment(...)`. |
+| `hull_memcpy`, `hull_memset`, `hull_memcmp`, `hull_strlen` | Minimal libc replacements. |
+| `hull_alloc(n)` / `hull_alloc_reset()` | 64 KB bump allocator scoped to one call. |
+| `HULL_UDF_*` constants | UDF wire format for modules registered as SQL functions via `db.udf.register`. |
+
+Modules cannot import anything else — no WASI, no `open`, no `socket`,
+no `time`. They are pure functions from input bytes to output bytes
+with a strict gas budget (default 100M instructions per call) and a
+strict memory budget (default 2 MiB heap, configurable up to ~4 GiB
+on WASM32 or 16 GiB on Memory64).
+
+### Step 3 — Build
+
+```bash
+hull compute build score        # one module
+hull compute build              # all modules under compute/
+```
+
+`hull compute build` invokes `clang --target=wasm32-unknown-unknown -nostdlib`
+with the flags Hull's runtime expects (`-Wl,--no-entry`, exports
+`hull_process` + `hull_version` + `memory`, 128 KiB initial / 64 MiB max
+linear memory). Toolchain expectations:
+
+- **macOS**: `brew install llvm@18` (bundles `wasm-ld`). The build
+  prefers `/opt/homebrew/opt/llvm@18/bin/clang` then falls back to
+  Homebrew `llvm` and finally to system `clang`.
+- **Linux**: `apt install clang lld` (or equivalent — `wasm-ld` must
+  be in PATH).
+- **No toolchain installed?** `hull compute build` errors with a hint;
+  pre-compiled `.wasm` files can be committed and used directly.
+
+Output: `compute/<name>.wasm`. The compiler removes everything you
+don't reference (LTO + `-O2`), so a typical module is 500 bytes - 5 KB.
+
+### Step 4 — Test
+
+`compute/<name>/test_fixtures.json` is a JSON array of test cases:
+
+```json
+[
+    {"name": "happy path", "input": "hello", "expect_status": 0},
+    {"name": "empty input", "input": "", "expect_status": 0},
+    {"name": "rejects nul", "input": " ", "expect_status": 500}
+]
+```
+
+Each fixture's `input` is fed to `compute.call("<name>", input)`. The
+runner asserts the HTTP status matches `expect_status` (200 if `0`,
+otherwise the literal value).
+
+```bash
+hull compute test score
+```
+
+Under the hood the runner generates a tempdir app with one route
+(`GET /call?input=...`) and runs `hull test` against it. This means
+your fixtures exercise the exact same `compute.call` codepath your
+real handlers use — same gas metering, same instance pool, same
+limits.
+
+For one-shot invocations with arbitrary inputs (no fixture file
+needed), use `hull agent compute-call <name> <input-file>`.
+
+### Step 5 — Sanity-check
+
+```bash
+hull compute check score
+```
+
+Validates the WASM magic bytes, the WASM version, then loads the
+module in WAMR with a trivial input and asserts the call returns 200.
+This is the "yes, this module can actually run inside Hull" gate. If
+`hull compute check` passes, `compute.call()` from your app code will
+at least find the module.
+
+### Step 6 — Build and embed
+
+`hull build` automatically:
+
+1. **Rebuilds stale sources.** Before any other build step, it scans
+   `compute/<name>/<name>.c` for sources whose mtime is newer than the
+   matching `.wasm`. Any stale source is recompiled inline using the
+   same logic as `hull compute build`. Output is reported as
+   `hull build: compiled N compute source(s): <names>`.
+2. **AOT-compiles `.wasm` artifacts.** If `wamrc` is available (`make
+   wamrc`), every `compute/*.wasm` is AOT-compiled to
+   `compute/*.aot.<arch>` for near-native speed. For cosmocc fat
+   binaries both `x86_64` and `aarch64` AOT files are produced.
+3. **Embeds both into the binary** via the unified VFS array. At
+   runtime, AOT is preferred over interpreter; `hull build --no-aot`
+   skips AOT compilation.
+
+Opt out of step 1 with `--no-build-compute` (for hermetic CI builds
+that ship pre-committed `.wasm` artifacts). Opt out of step 2 with
+`--no-aot`.
+
+Once embedded, modules are loaded via `compute.call("<name>", input)`
+from Lua or `compute.call("<name>", input)` from JS, just like any
+other capability. The bytes-in-bytes-out contract is the entire API.
+
+### Deployment
+
+`hull agent deploy <app_dir>` reports per-module status in its JSON
+output:
+
+```json
+{
+  "files": { "compute": 3, ... },
+  "compute_modules": [
+    {"name": "score",       "wasm_size": 1023, "has_aot": true,  "has_source": true,  "source_stale": false},
+    {"name": "transform",   "wasm_size": 718,  "has_aot": true,  "has_source": true,  "source_stale": false},
+    {"name": "vendored",    "wasm_size": 135,  "has_aot": false, "has_source": false, "source_stale": false}
+  ],
+  "recommendations": [
+    "Compute source newer than .wasm — run `hull compute build` or rebuild (hull build auto-rebuilds when clang is available)"
+  ]
+}
+```
+
+`hull deploy dockerfile`, `hull deploy systemd`, and `hull deploy fly`
+don't need any compute-specific configuration: the `.wasm` (and any
+AOT) files are already embedded in the binary at `hull build` time, so
+the deployment artifact is whatever your build pipeline produces. The
+generated configs treat compute modules transparently.
+
+For pure compute services (no DB), combine with `HL_ENABLE_DB=0`:
+
+```bash
+make HL_ENABLE_DB=0          # ~3.66 MB binary, no SQLite
+hull build myapp             # embeds compute/*.wasm + AOT
+```
+
+### Sharing data with modules
+
+For multi-GB read-only datasets (routing graphs, ML weights, embeddings),
+load via shared data segments instead of passing through input bytes:
+
+```lua
+compute.segment("router", "graph", fs.mmap("graph.bin"))
+local out = compute.call("router", query)
+```
+
+Inside the module, query segments via `host_call(0x02, segment_id, 0/1)`:
+
+```c
+void *graph = (void *)(size_t)host_call(0x02, 0, 0);  /* segment 0 address */
+int32_t graph_size = host_call(0x02, 0, 1);           /* segment 0 size */
+```
+
+Segments are page-aligned mmap regions in shared heaps. Multiple
+worker threads read concurrently. Adding or removing segments drains
+the instance pool and rebuilds it transparently.
+
+### Stateful compute (persistent instances)
+
+For stateful workloads (model weights you want to keep between calls,
+pre-built indexes), use `compute.instance()` instead of `compute.call`:
+
+```lua
+local m = compute.instance("model", { heap = 64 * 1024 * 1024 })
+m:call(query_1)   -- linear memory persists between calls
+m:call(query_2)
+m:close()
+```
+
+### Streaming I/O
+
+For datasets larger than memory:
+
+```lua
+compute.stream("transform", { file = "input.csv" },
+                            { file = "output.json" },
+                            { chunk_size = 65536 })
+```
+
+The module exports `hull_process_chunk` instead of `hull_process` and
+queries chunk metadata via `host_call(0x03, ...)`. See `examples/compute/`
+for working modules.
+
+### What about Rust?
+
+C is the only supported source language today. Rust support
+(`--lang=rust`) is on the roadmap — it requires Cargo + a
+`#[no_mangle] extern "C"` template + `wasm32-unknown-unknown` target
++ a `panic_handler`. Until then, modules in any compiled language are
+loadable as long as they expose `hull_process` and `hull_version` with
+the documented signatures (`Rust`, `Zig`, `AssemblyScript`, `TinyGo`
+all work — only the scaffolding shortcut is C-only).
 
 ### WASM Compute Overhead
 

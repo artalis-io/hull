@@ -484,7 +484,8 @@ WASM-backed buffers keep the pooled instance checked out until `close()` / GC. N
 | Shared data segments | ✅ Shipped — `compute.segment` (up to 16 per module via WAMR shared heaps) |
 | Streaming I/O | ✅ Shipped — `compute.stream` with chunk metadata via `host_call(0x03)` |
 | Memory64 | ✅ Shipped — AOT-only, detected at load time, auto-passed to `wamrc` |
-| Plugin scaffolding (`hull compute new`) | Planned ([`roadmap.md`](roadmap.md)) |
-| Sample compute modules | Planned ([`roadmap.md`](roadmap.md)) |
+| Plugin scaffolding (`hull compute new` / `build` / `test` / `check`) | ✅ Shipped — full dev lifecycle including auto-rebuild during `hull build` and per-module enumeration in `hull agent deploy`. See [`../README.md#authoring-compute-modules`](../README.md#authoring-compute-modules). |
+| Sample compute modules | ✅ Shipped (initial set) — `examples/compute/` covers vector_ops, sort, hash, json_extract, scoring, text. |
+| Rust scaffolding (`hull compute new --lang=rust`) | Planned ([`roadmap.md`](roadmap.md)) — manually-authored Rust modules work today (only need `hull_process` + `hull_version` exports); only the scaffolding shortcut is C-only. |
 | Plugin signatures | Considered — `package.sig` already covers embedded `.wasm`/`.aot` bytes; per-module signing is a separable concern |
 | Plugin-to-plugin composition | Available today — `WasmBuffer` outputs flow into the next `compute.call` zero-copy via the unified buffer protocol |

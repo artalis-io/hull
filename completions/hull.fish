@@ -84,11 +84,54 @@ complete -c hull -n '__hull_subcommand dev' -l audit          -d 'Enable capabil
 complete -c hull -n '__hull_subcommand dev' -l ca-bundle      -r -d 'Custom CA bundle path'
 complete -c hull -n '__hull_subcommand dev' -l no-ca-bundle -d 'Skip TLS verification (dev only)'
 
-# ── test / check / inspect / verify / manifest / compute / eject ─────
+# ── test / check / inspect / verify / manifest / eject ──────────────
 
-for cmd in test check inspect verify manifest compute eject
+for cmd in test check inspect verify manifest eject
     complete -c hull -n "__hull_subcommand $cmd" -l json -d 'Machine-readable JSON output'
     complete -c hull -n "__hull_subcommand $cmd" -l developer-key -r -d 'Developer public key'
+end
+
+# ── compute (sub-subcommands) ─────────────────────────────────────────
+#
+# `hull compute new <name> [--lang c]`
+# `hull compute build [name]`
+# `hull compute test  <name>`
+# `hull compute check <name>`
+
+function __hull_compute_no_subsub
+    set -l tokens (commandline -opc)
+    test (count $tokens) -eq 2 -a "$tokens[2]" = compute
+end
+
+function __hull_compute_at_subsub
+    set -l tokens (commandline -opc)
+    test (count $tokens) -ge 3 -a "$tokens[2]" = compute
+end
+
+function __hull_compute_subsub_is
+    set -l tokens (commandline -opc)
+    test (count $tokens) -ge 3 -a "$tokens[2]" = compute -a "$tokens[3]" = $argv[1]
+end
+
+function __hull_compute_modules
+    if test -d compute
+        for c in compute/*/*.c
+            set -l rel (string replace -r '^compute/' '' -- $c)
+            set -l name (string split -- '/' $rel)[1]
+            echo $name
+        end | sort -u
+    end
+end
+
+complete -c hull -n __hull_compute_no_subsub -f -a new   -d 'Scaffold a new compute module'
+complete -c hull -n __hull_compute_no_subsub -f -a build -d 'Compile module(s) source -> .wasm'
+complete -c hull -n __hull_compute_no_subsub -f -a test  -d 'Run fixtures against a module'
+complete -c hull -n __hull_compute_no_subsub -f -a check -d 'Validate a .wasm module loads'
+
+complete -c hull -n '__hull_compute_subsub_is new' -l lang -r -d 'Source language' -xa 'c'
+
+for subsub in build test check
+    complete -c hull -n "__hull_compute_subsub_is $subsub" -f -a '(__hull_compute_modules)'
 end
 
 # ── new / init ───────────────────────────────────────────────────────

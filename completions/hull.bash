@@ -88,12 +88,40 @@ _hull() {
             fi
             ;;
 
-        test|check|inspect|verify|manifest|compute|eject)
+        test|check|inspect|verify|manifest|eject)
             if [[ "$cur" == -* ]]; then
                 COMPREPLY=($(compgen -W "--json --developer-key" -- "$cur"))
             else
                 COMPREPLY=($(compgen -d -- "$cur"))
             fi
+            ;;
+
+        compute)
+            # `hull compute <subcmd>` — complete the subcommand name.
+            if [[ ${COMP_CWORD} -eq 2 ]]; then
+                COMPREPLY=($(compgen -W "new build test check" -- "$cur"))
+                return
+            fi
+            # `hull compute new <name> [--lang c]`
+            local subcmd="${COMP_WORDS[2]}"
+            case "$subcmd" in
+                new)
+                    case "$prev" in
+                        --lang) COMPREPLY=($(compgen -W "c" -- "$cur")); return ;;
+                    esac
+                    if [[ "$cur" == -* ]]; then
+                        COMPREPLY=($(compgen -W "--lang" -- "$cur"))
+                    fi
+                    ;;
+                build|test|check)
+                    # Complete with existing module names from compute/<name>/<name>.c.
+                    if [[ -d compute ]]; then
+                        local mods=$(compgen -G "compute/*/*.c" 2>/dev/null | \
+                                     sed 's|compute/||; s|/.*\.c$||' | sort -u)
+                        COMPREPLY=($(compgen -W "$mods" -- "$cur"))
+                    fi
+                    ;;
+            esac
             ;;
 
         new|init)

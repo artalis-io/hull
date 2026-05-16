@@ -387,10 +387,14 @@ Every step produces machine-readable JSON output. The agent never parses human-f
 
 | Item | Status | Notes |
 |------|--------|-------|
-| `hull compute new <name> --lang=c\|rust` scaffolding | Planned | Generates module skeleton with correct `hull_process` ABI exports, build script, and test fixture. Lowers the barrier from "expert who knows the ABI" to "any developer with a C compiler". |
-| `hull compute test <name>` module testing | Planned | Run a WASM module with sample inputs and validate outputs without an HTTP app. Reports gas used, execution time, output bytes. |
-| `compute/hull_libc.h` C standard library shim | Planned | Minimal libc subset (`memcpy`, `memset`, `strlen`, `memcmp`) + bump allocator for `malloc`/`free`. Single-header, include in any module. |
-| Sample compute modules | Planned | Reference implementations for common patterns: `vector_ops` (dot product, cosine sim), `sort`, `hash` (SHA-256, FNV-1a, xxHash), `json_transform`, `scoring` (weighting + softmax), `text` (tokenization + Levenshtein). Each with C source, pre-compiled `.wasm`+`.aot`, test fixture, README. |
+| `hull compute new <name> [--lang c]` scaffolding | ✅ Shipped | Generates `compute/<name>/{<name>.c, hull_compute.h, test_fixtures.json}` with the correct `hull_process` ABI exports. C language only; Rust deferred. |
+| `hull compute build [name]` | ✅ Shipped | Compiles `compute/<name>/<name>.c` → `compute/<name>.wasm` via clang. Auto-runs as a step inside `hull build` for stale sources (`--no-build-compute` opts out). |
+| `hull compute test <name>` | ✅ Shipped | Runs `test_fixtures.json` against the compiled module via a tempdir `hull test` harness. |
+| `hull compute check <name>` | ✅ Shipped | Validates WASM magic + roundtrip-loads the module in WAMR. |
+| `hull_compute.h` freestanding ABI header | ✅ Shipped | Embedded in the binary; written to each module dir on `hull compute new`. Includes libc shim (`hull_memcpy`/`memset`/`memcmp`/`strlen`) + 64 KiB bump allocator + UDF wire format constants. |
+| `hull agent deploy` compute enumeration | ✅ Shipped | Per-module `{name, wasm_size, has_aot, has_source, source_stale}` plus stale-source advisory in recommendations. |
+| Sample compute modules | ✅ Shipped (initial set) | `examples/compute/` includes `vector_ops`, `sort`, `hash`, `json_extract`, `scoring`, `text`, `score`, `echo`. Each has C source + compiled `.wasm` + a working `app.lua` that invokes them. |
+| `--lang=rust` scaffolding | Planned | `wasm32-unknown-unknown` target + `Cargo.toml` template + `panic_handler`. Deferred — manually-authored Rust modules work today (they only need to expose `hull_process` and `hull_version`); only the scaffolding shortcut is C-only. |
 | Reproducible AOT cross-builds | Planned | Today `hull build` auto-AOT-compiles for the host arch when `wamrc` is present. Multi-arch AOT (`x86_64` + `aarch64` together) works under cosmocc; CI should produce both for every release. |
 
 Out of scope (declined or downstream):

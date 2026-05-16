@@ -104,11 +104,41 @@ _hull() {
                         '*:entry point:_files'
                     ;;
 
-                test|check|inspect|verify|manifest|compute|eject)
+                test|check|inspect|verify|manifest|eject)
                     _arguments \
                         '--json[Machine-readable JSON output]' \
                         '--developer-key[Developer public key]:file:_files' \
                         '*:app dir:_files -/'
+                    ;;
+
+                compute)
+                    # hull compute <subcmd> [args]
+                    local -a compute_subs
+                    compute_subs=(
+                        'new:Create a new WASM compute module skeleton'
+                        'build:Compile compute/<name>/<name>.c -> compute/<name>.wasm'
+                        'test:Run test fixtures against a compute module'
+                        'check:Validate a .wasm module loads correctly in WAMR'
+                    )
+                    if (( CURRENT == 2 )); then
+                        _describe -t compute-subs 'compute subcommand' compute_subs
+                    else
+                        case "$words[2]" in
+                            new)
+                                _arguments \
+                                    '--lang[Source language]:lang:(c)' \
+                                    '*:module name:'
+                                ;;
+                            build|test|check)
+                                # Complete with discovered module names.
+                                local -a mods
+                                if [[ -d compute ]]; then
+                                    mods=(${(f)"$(print -l compute/*/*.c(N:h:t) 2>/dev/null)"})
+                                fi
+                                _arguments "*:module:($mods)"
+                                ;;
+                        esac
+                    fi
                     ;;
 
                 new)
