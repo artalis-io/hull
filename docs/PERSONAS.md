@@ -12,7 +12,7 @@ Real people, real problems, real reasons to care about local-first.
 
 **His problem:** Everything he builds with Claude lives on his laptop or on Vercel. The Vercel path terrifies him — client names, deal terms, and valuation models sitting on someone else's infrastructure. His compliance officer would have a stroke. The localhost path means nobody else on his team can use it.
 
-**Why Hull:** One file. Runs on any analyst's laptop. Client data never leaves the machine. Encrypted SQLite database. Kernel sandbox that proves — provably, to a regulator — the app can't phone home. No Vercel bill. No AWS account. No compliance nightmare. He emails the file to his team, they double-click, they have the tool.
+**Why Hull:** One file. Runs on any analyst's laptop. Client data never leaves the machine. SQLite database he controls (with `crypto.secretbox_*` for value-level encryption of sensitive fields today; transparent at-rest encryption is on the roadmap). Capability-secure runtime — manifest declares what files, hosts and env vars the app can touch, and pledge/unveil enforces it at the kernel — provably, to a regulator, the app can't phone home. No Vercel bill. No AWS account. No compliance nightmare. He emails the file to his team, they double-click, they have the tool.
 
 **What he'd pay:** $499 Perpetual without blinking. That's less than one hour of his billable rate. If it saves his analysts 4 hours per deal and they do 200 deals a year, the ROI is absurd.
 
@@ -64,11 +64,11 @@ He's also deeply tired of the AI hype cycle. He built AI companies. He knows wha
 
 For his personal tools: he can't use his company's internal platform (policy). He can't put sensitive comp data or board prep in a SaaS (obviously). He's been running Python scripts from his terminal like it's 2008.
 
-**Why Hull:** He doesn't need Hull to solve a problem he can't solve otherwise — he's technical enough to deploy a server. He wants Hull because it's *correct*. Single binary. Six dependencies. Kernel sandbox. Reproducible builds. Ed25519 signatures. This is how he thinks software should be built. He'll use it for personal tools, recommend it to founders he advises, and eventually propose it for internal tooling pilots at his company.
+**Why Hull:** He doesn't need Hull to solve a problem he can't solve otherwise — he's technical enough to deploy a server. He wants Hull because it's *correct*. Single binary. All dependencies vendored, no package-manager graph, zero downloads at build time. Kernel-enforced capability sandbox. Reproducible builds (`make self-build` produces hull → hull2 → hull3 identical). Three-layer Ed25519 signature chain. This is how he thinks software should be built. He'll use it for personal tools, recommend it to founders he advises, and eventually propose it for internal tooling pilots at his company.
 
 **What he'd pay:** $99 Standard personally. The real value is when he walks into a board meeting at one of his three advisory companies and says "you should build on this." One recommendation from someone like James is worth more than 10,000 Hacker News upvotes.
 
-**The quote:** "I've spent 20 years watching the industry add complexity. Layers on layers on layers. Hull is the first thing I've seen in a decade that goes the other direction. Six libraries. Two megabytes. That's not a limitation — that's a design philosophy I can get behind."
+**The quote:** "I've spent 20 years watching the industry add complexity. Layers on layers on layers. Hull is the first thing I've seen in a decade that goes the other direction. Vendored deps. Five megabytes. A capability boundary that's actually enforced by the kernel. That's not a limitation — that's a design philosophy I can get behind."
 
 ---
 
@@ -118,13 +118,13 @@ He does this for 10 clients and suddenly he has a small software business on top
 
 **Her problem:** The supply chain review process was designed for a world where software had 5-10 dependencies. Modern software stacks have 500-1,500. The process hasn't scaled. Her engineers are productive with AI coding assistants but can't deploy what they build to the networks where it's needed, because the certification overhead is prohibitive. The irony: the tools are simple, the certification is complex.
 
-**Why Hull:** Six dependencies. Total. She can enumerate the entire supply chain in one paragraph: Keel, Lua, SQLite, mbedTLS, TweetNaCl, pledge/unveil. All vendored, all auditable, all with established security track records. One SBOM entry instead of hundreds. The binary is self-contained — no runtime installation, no package manager on the classified network, no internet access required (by design). Kernel sandbox provides provable containment. Ed25519 signatures provide provable integrity. `hull verify` gives her a one-command attestation she can attach to the certification package.
+**Why Hull:** A vendored dependency set she can enumerate in one paragraph — Keel, Lua, QuickJS, SQLite, mbedTLS, TweetNaCl, pledge/unveil, miniz, log.c, sh_arena, sh_json — plus the embedded Mozilla CA bundle and embedded TinyCC. Optional WAMR for WASM compute. All vendored, all auditable, all with established security track records or under a few hundred lines. A short, finite SBOM instead of a 1,500-package npm tree. The binary is self-contained — no runtime installation, no package manager on the classified network, no internet access required (by design — `hull update` is opt-in). Kernel-enforced capability sandbox (pledge/unveil with SECCOMP-BPF + Landlock) provides provable containment. Three-layer Ed25519 signature chain (platform, app, release) provides provable integrity. `hull verify` and `hull verify-release` give her one-command attestations she can attach to the certification package.
 
 Development can be fully air-gapped: engineers use a local LLM on isolated hardware. Source code never leaves the secure facility. The entire pipeline — from code generation to build to deployment — operates within the air gap.
 
 **What she'd pay:** Enterprise tier. She'd sign a $10K/year contract for compliance documentation, priority support, and a direct line to the Hull team for security questions. The real value is the hundreds of engineering hours saved on certification per year.
 
-**The quote:** "You're telling me the entire supply chain is six C libraries, the binary is self-contained, it runs air-gapped, and the sandbox is kernel-enforced? Give me the paperwork. This is the easiest certification I've done in ten years."
+**The quote:** "You're telling me the entire supply chain is vendored, the binary is self-contained, it runs air-gapped, and the sandbox is kernel-enforced via pledge/unveil with a manifest-declared allowlist? Give me the paperwork. This is the easiest certification I've done in ten years."
 
 ---
 
