@@ -613,16 +613,19 @@ static void handle_tools_call(FILE *fp, const ShJsonValue *id,
             hl_agent_schema_diff(dir, db, &agent_out);
 
     } else if (strcmp(tool_name, "hull_sql_named") == 0) {
+        /* `params_json` (not `params`) — the JSON-RPC outer scope already
+         * has a `params` argument to this handler, so cppcheck flags the
+         * shadow under -shadowArgument. */
         const char *name = sh_json_as_string(sh_json_get(args, "name"), NULL);
-        const char *params = sh_json_as_string(sh_json_get(args, "params"), NULL);
+        const char *params_json = sh_json_as_string(sh_json_get(args, "params"), NULL);
         const char *dir = sh_json_as_string(sh_json_get(args, "app_dir"), app_dir);
         if (warm_ctx && strcmp(dir, app_dir) == 0) {
-            hl_agent_sql_named_ctx(warm_ctx, name, params, &agent_out);
+            hl_agent_sql_named_ctx(warm_ctx, name, params_json, &agent_out);
         } else {
             HlAppContextOpts opts = { .app_dir = dir };
             HlAppContext *tmp = NULL;
             if (hl_app_context_init(&tmp, &opts) == 0) {
-                hl_agent_sql_named_ctx(tmp, name, params, &agent_out);
+                hl_agent_sql_named_ctx(tmp, name, params_json, &agent_out);
                 hl_app_context_free(tmp);
             } else {
                 ShJsonWriter w;

@@ -212,24 +212,23 @@ int hl_agent_validate(const char *file_path, ShJsonBuf *out)
     int is_lua = (plen > 4 && strcmp(file_path + plen - 4, ".lua") == 0);
     int is_js  = (plen > 3 && strcmp(file_path + plen - 3, ".js") == 0);
 
-    int rc;
 #ifdef HL_ENABLE_LUA
     if (is_lua) {
-        rc = validate_lua(file_path, content, got, out);
+        int rc = validate_lua(file_path, content, got, out);
         free(content);
         return rc;
     }
 #endif
 #ifdef HL_ENABLE_JS
     if (is_js) {
-        rc = validate_js(file_path, content, got, out);
+        int rc = validate_js(file_path, content, got, out);
         free(content);
         return rc;
     }
 #endif
 
     free(content);
-    (void)is_lua; (void)is_js; (void)rc;
+    (void)is_lua; (void)is_js;
     return hl_agent_write_error(out,
         "unsupported file extension (expected .lua or .js)");
 }
