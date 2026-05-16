@@ -30,4 +30,4 @@ The **current** audit reports are at the top level of `docs/`:
 | [`roadmaps/wasm_improvement_roadmap.md`](roadmaps/wasm_improvement_roadmap.md) | 10 WASM hardening items | **All ✅** — shared-data MappedBuffer, pool mutex per module, etc. |
 | [`roadmaps/roadmap_v0_to_v1.md`](roadmaps/roadmap_v0_to_v1.md) | Pre-v0.1.0 release-readiness checklist | Mostly shipped. Remaining items folded into [`../roadmap.md`](../roadmap.md). |
 
-The **current** roadmap is [`../roadmap.md`](../roadmap.md) + [`../roadmap_next.md`](../roadmap_next.md). WASM/GPU compute work continues at [`../roadmap_wasm_compute.md`](../roadmap_wasm_compute.md).
+The **current** roadmap is [`../roadmap.md`](../roadmap.md) + [`../roadmap_next.md`](../roadmap_next.md). WASM/GPU compute work is merged into the main roadmap (the former `roadmap_wasm_compute.md` was retired in May 2026 along with `plan_memory64.md` and `keel_audit.md`).

@@ -25,8 +25,7 @@
  *   subsystem (~256 KB).
  *
  * @par Related docs:
- *   `docs/wamr_architecture.md` for full design,
- *   `docs/roadmap_wasm_compute.md` for status.
+ *   `docs/wamr_architecture.md` for full design + status.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

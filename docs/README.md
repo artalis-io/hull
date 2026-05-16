@@ -43,12 +43,9 @@ specific signature, parameter list, or return value.
 
 | Doc | What it covers |
 |---|---|
-| [`wamr_architecture.md`](wamr_architecture.md) | WASM compute design — WAMR integration, ABI, gas metering, pooling, segments, streaming, AOT. |
-| [`plan_memory64.md`](plan_memory64.md) | Active implementation plan for WASM Memory64 support. |
-| [`roadmap_wasm_compute.md`](roadmap_wasm_compute.md) | WASM/GPU compute roadmap — completed items + remaining work. |
+| [`wamr_architecture.md`](wamr_architecture.md) | WASM compute design — WAMR integration, ABI, gas metering, pooling, segments, streaming, AOT, Memory64. |
 | [`release_signing.md`](release_signing.md) | Three-layer signature system + the release-key flow (`HL_RELEASE_PUBKEY_HEX` embedding, GitHub Actions sign step, `hull update` verification). |
 | [`api_review.md`](api_review.md) | Pre-v0.1.0 public-surface review findings + pending decisions. |
-| [`keel_audit.md`](keel_audit.md) | Keel HTTP server C code audit (separate library). |
 
 ## Audits (current)
 
@@ -65,9 +62,8 @@ Findings are closed; the reports stay as evidence + reproducibility records.
 
 | Doc | What it covers |
 |---|---|
-| [`roadmap.md`](roadmap.md) | What's built + what's next. Living document. |
+| [`roadmap.md`](roadmap.md) | What's built + what's next. Living document. WASM/GPU compute work merged in. |
 | [`roadmap_next.md`](roadmap_next.md) | Targeted next-feature priorities. |
-| [`roadmap_wasm_compute.md`](roadmap_wasm_compute.md) | WASM/GPU compute roadmap. |
 
 ## Strategic / positioning
 

@@ -422,25 +422,20 @@ Run your own rebuild service. Pin your own platform key. Your customers trust yo
 
 ## 8. Keel HTTP Server Audit
 
-The Keel HTTP server library (vendored at `vendor/keel/`) has been audited for memory safety, input validation, resource management, and network security. Full report: [keel_audit.md](keel_audit.md).
+The Keel HTTP server library (vendored at `vendor/keel/`, upstream at
+[github.com/artalis-io/keel](https://github.com/artalis-io/keel)) is
+maintained as a separate project with its own audit cycle. The
+findings that were live when Hull first vendored Keel — kqueue
+READ|WRITE bitmask handling, WebSocket and HTTP/2 partial-write
+issues, TLS private-key zeroization, `writev_all` busy-spin on EAGAIN
+— are all resolved upstream and reflected in the current submodule
+pin.
 
-**Key findings relevant to security:**
-
-| Severity | Issue | Impact |
-|----------|-------|--------|
-| Critical | kqueue `kl_event_mod` doesn't handle READ\|WRITE bitmask | HTTP/2 write starvation on macOS |
-| Critical | WebSocket `ws_send_frame` partial writes | Frame corruption on non-blocking sockets |
-| High | HTTP/2 and WebSocket 101 upgrade partial writes | Protocol stream corruption |
-| High | TLS private key material not zeroed before free | Key residue in heap memory |
-| Informational | Request smuggling mitigation present | `Transfer-Encoding: chunked` zeroes `Content-Length` (RFC 7230 §3.3.3) |
-| Informational | Header injection guard present | `contains_crlf()` rejects `\r`/`\n` in header names/values |
-
-**Build hardening verified:**
-- `-Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror` in production
-- `-fstack-protector-strong` (non-Cosmopolitan builds)
-- ASan + UBSan debug build (`make debug`)
-- Two libFuzzer targets (HTTP parser + multipart parser)
-- 229 unit tests across 13 suites
+Keel ships the same hardening Hull does: `-Wall -Wextra -Wpedantic
+-Wshadow -Wformat=2 -Werror`, `-fstack-protector-strong` (non-Cosmo
+builds), ASan+UBSan debug build, libFuzzer targets for the HTTP parser
+and multipart parser, request-smuggling and header-injection guards.
+For the live audit history see the Keel repository.
 
 ---
 

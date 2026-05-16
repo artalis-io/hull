@@ -518,10 +518,7 @@ Full index with start-here guidance by role lives in [`docs/README.md`](docs/REA
 
 | Document | Content |
 |---|---|
-| [docs/wamr_architecture.md](docs/wamr_architecture.md) | WASM compute design — WAMR integration, ABI, pooling, segments, streaming, AOT |
-| [docs/plan_memory64.md](docs/plan_memory64.md) | Active implementation plan for WASM Memory64 |
-| [docs/roadmap_wasm_compute.md](docs/roadmap_wasm_compute.md) | WASM/GPU compute roadmap (completed + open items) |
-| [docs/keel_audit.md](docs/keel_audit.md) | Keel HTTP server (separate library) audit |
+| [docs/wamr_architecture.md](docs/wamr_architecture.md) | WASM compute design — WAMR integration, ABI, pooling, segments, streaming, AOT, Memory64 |
 
 **Audits (current state of record):**
 

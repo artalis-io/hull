@@ -381,6 +381,23 @@ Every step produces machine-readable JSON output. The agent never parses human-f
 | PDF document builder | Planned | Report generation |
 | Module/package ecosystem | Planned | `hull add <package>` for sharing middleware and compute plugins |
 
+### WASM / GPU Compute — Remaining Work
+
+(Merged in from the former `roadmap_wasm_compute.md`. The shipped phases — SIMD128, memory limits, Memory64, GPU/WebGPU, instance pooling, WasmBuffer protocol, persistent instances, shared data segments, GPU textures, streaming I/O, SQLite UDFs — are listed in the "Done" sections above.)
+
+| Item | Status | Notes |
+|------|--------|-------|
+| `hull compute new <name> --lang=c\|rust` scaffolding | Planned | Generates module skeleton with correct `hull_process` ABI exports, build script, and test fixture. Lowers the barrier from "expert who knows the ABI" to "any developer with a C compiler". |
+| `hull compute test <name>` module testing | Planned | Run a WASM module with sample inputs and validate outputs without an HTTP app. Reports gas used, execution time, output bytes. |
+| `compute/hull_libc.h` C standard library shim | Planned | Minimal libc subset (`memcpy`, `memset`, `strlen`, `memcmp`) + bump allocator for `malloc`/`free`. Single-header, include in any module. |
+| Sample compute modules | Planned | Reference implementations for common patterns: `vector_ops` (dot product, cosine sim), `sort`, `hash` (SHA-256, FNV-1a, xxHash), `json_transform`, `scoring` (weighting + softmax), `text` (tokenization + Levenshtein). Each with C source, pre-compiled `.wasm`+`.aot`, test fixture, README. |
+| Reproducible AOT cross-builds | Planned | Today `hull build` auto-AOT-compiles for the host arch when `wamrc` is present. Multi-arch AOT (`x86_64` + `aarch64` together) works under cosmocc; CI should produce both for every release. |
+
+Out of scope (declined or downstream):
+
+- **Result caching for `compute.call`** — declined; app-level concern. Apps that need it can cache on top of `db.query` or in a Lua table.
+- **`compute.async.streaming`** — covered by the existing `compute.stream` API. No separate async-stream variant needed.
+
 ### Phase 9 — Trusted Rebuild Infrastructure
 
 - [ ] Reproducible build verification service at `api.gethull.dev/ci/v1`
@@ -397,18 +414,9 @@ Hull's architecture makes reproducible builds achievable:
 4. Cosmopolitan produces deterministic output — static linking, no timestamps
 5. Build metadata is signed — `cc_version` + `flags` attested by developer
 
-### Keel HTTP Server — Audit Backlog
+### Keel HTTP Server
 
-The [Keel C audit](keel_audit.md) identified issues to address upstream:
-
-| Priority | Issue | Impact |
-|----------|-------|--------|
-| Critical | ~~kqueue READ\|WRITE bitmask (C-1)~~ | **Resolved** in Keel upstream |
-| Critical | ~~WebSocket partial writes (C-2)~~ | **Resolved** in Keel upstream |
-| High | ~~Protocol upgrade partial writes (H-3, H-4)~~ | **Resolved** in Keel upstream |
-| High | ~~Private key material not zeroed (H-2)~~ | **Resolved** in Keel upstream |
-| High | ~~writev_all busy-spin on EAGAIN (H-5)~~ | **Resolved** in Keel upstream |
-| Medium | Add WebSocket fuzz target | Attack surface coverage gap |
+Keel is a separate project ([github.com/artalis-io/keel](https://github.com/artalis-io/keel)) vendored as a git submodule. Its audit history and roadmap live there. Hull's pinned submodule tracks Keel's current state; the previous Hull-side audit findings (kqueue bitmask, WebSocket / HTTP/2 partial writes, TLS key zeroization, `writev_all` EAGAIN spin) are resolved upstream and reflected in the current pin.
 
 ## Benchmark Baseline
 

@@ -407,7 +407,7 @@ See [docs/security.md](docs/security.md) for the full attack model and [docs/rel
 
 ### Keel Audit
 
-Run `/c-audit` to perform a comprehensive C code audit on the Keel HTTP server library. The audit checks for memory safety, input validation, resource management, integer overflow, network security, dead code, and build hardening. Results are in [docs/keel_audit.md](docs/keel_audit.md).
+Run `/c-audit` to perform a comprehensive C code audit on the Keel HTTP server library. The audit checks for memory safety, input validation, resource management, integer overflow, network security, dead code, and build hardening. Keel lives in a separate repository ([github.com/artalis-io/keel](https://github.com/artalis-io/keel)); its own audit history is maintained there.
 
 Key findings to be aware of:
 - WebSocket and HTTP/2 upgrade code has partial-write issues (C-2, H-3, H-4)
