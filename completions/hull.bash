@@ -99,7 +99,7 @@ _hull() {
         compute)
             # `hull compute <subcmd>` — complete the subcommand name.
             if [[ ${COMP_CWORD} -eq 2 ]]; then
-                COMPREPLY=($(compgen -W "new build test check" -- "$cur"))
+                COMPREPLY=($(compgen -W "new build test check refresh-header" -- "$cur"))
                 return
             fi
             # `hull compute new <name> [--lang c]`
@@ -113,7 +113,7 @@ _hull() {
                         COMPREPLY=($(compgen -W "--lang" -- "$cur"))
                     fi
                     ;;
-                build|test|check)
+                build|test|check|refresh-header)
                     # Complete with existing module names from compute/<name>/<name>.c.
                     if [[ -d compute ]]; then
                         local mods=$(compgen -G "compute/*/*.c" 2>/dev/null | \

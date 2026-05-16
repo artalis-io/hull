@@ -297,6 +297,46 @@ else
     fail "recommendations missing stale-source advisory"
 fi
 
+# ── hull compute refresh-header ─────────────────────────────────────
+
+echo ""
+echo "--- hull compute refresh-header ---"
+
+# Corrupt the per-module copy and verify refresh-header restores it
+# from the embedded canonical version.
+echo "// CORRUPTED — should be overwritten by refresh-header" > compute/score/hull_compute.h
+
+if "$HULL_ABS" compute refresh-header score > /tmp/refresh.log 2>&1; then
+    pass "hull compute refresh-header score succeeds"
+else
+    fail "hull compute refresh-header score failed"
+fi
+
+if grep -q "HULL_COMPUTE_H" compute/score/hull_compute.h; then
+    pass "compute/score/hull_compute.h restored to canonical version"
+else
+    fail "hull_compute.h was not overwritten; still contains corrupted content"
+fi
+
+# Refresh-header with no name should refresh every module — scaffold a
+# second module to exercise the multi-module path.
+"$HULL_ABS" compute new other > /dev/null 2>&1 || true
+echo "// CORRUPTED" > compute/score/hull_compute.h
+echo "// CORRUPTED" > compute/other/hull_compute.h
+
+if "$HULL_ABS" compute refresh-header > /tmp/refresh_all.log 2>&1; then
+    pass "hull compute refresh-header (all) succeeds"
+else
+    fail "hull compute refresh-header (all) failed"
+fi
+
+if grep -q "HULL_COMPUTE_H" compute/score/hull_compute.h && \
+   grep -q "HULL_COMPUTE_H" compute/other/hull_compute.h; then
+    pass "refresh-header (all) restored every module's header"
+else
+    fail "refresh-header (all) did not restore all headers"
+fi
+
 # ── Result summary ──────────────────────────────────────────────────
 
 echo ""

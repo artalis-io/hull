@@ -285,6 +285,47 @@ end
 -- live in stdlib/lua/hull/compute_build.lua so they can be reused by
 -- stdlib/lua/hull/build.lua during `hull build` auto-rebuilds.
 
+-- ── Tempdir test harness (used by cmd_test + cmd_check) ───────────────
+--
+-- Both `hull compute test` and `hull compute check` exercise a module by
+-- spawning a tempdir Hull app containing the .wasm + a synthesized
+-- app.lua + tests, then running `hull test` against it. The shared
+-- shape is extracted here so the two commands differ only in what they
+-- write into the app.
+
+--- Create a tempdir, copy `compute/<name>.wasm` into it.
+-- @return path to the new tempdir (caller frees with cleanup_harness)
+local function setup_harness(name, wasm_path)
+    local tmpdir = tool.tmpdir()
+    if not tmpdir then
+        tool.stderr("hull compute: failed to create temp directory\n")
+        tool.exit(1)
+    end
+    tool.mkdir(tmpdir .. "/compute")
+    tool.copy(wasm_path, tmpdir .. "/compute/" .. name .. ".wasm")
+    tool.mkdir(tmpdir .. "/tests")
+    return tmpdir
+end
+
+--- Run `hull test <tmpdir>`. Returns true on pass.
+local function run_harness(tmpdir)
+    local hull_exe = __hull_exe or "hull"
+    return tool.spawn({hull_exe, "test", tmpdir})
+end
+
+--- Remove the tempdir.
+local function cleanup_harness(tmpdir)
+    if tmpdir then tool.rmdir(tmpdir) end
+end
+
+--- Escape a string for Lua-source embedding (used by test fixture inputs).
+local function lua_escape(s)
+    return s:gsub("\\", "\\\\")
+            :gsub('"', '\\"')
+            :gsub("\n", "\\n")
+            :gsub("\r", "\\r")
+end
+
 -- ── Subcommand: new ────────────────────────────────────────────────────
 
 local function cmd_new(name, lang)
@@ -421,18 +462,11 @@ local function cmd_check(name)
         tool.exit(1)
     end
 
-    -- Generate a minimal test app to verify the module loads in WAMR
-    local tmpdir = tool.tmpdir()
-    if not tmpdir then
-        tool.stderr("hull compute check: failed to create temp directory\n")
-        tool.exit(1)
-    end
+    -- Spin up a tempdir Hull app, drop in just the module, and run a
+    -- tiny smoke test through `compute.call(...)`. If hull test passes,
+    -- the module loads correctly in WAMR.
+    local tmpdir = setup_harness(name, wasm_path)
 
-    -- Copy the wasm file into the temp app's compute/ directory
-    tool.mkdir(tmpdir .. "/compute")
-    tool.copy(wasm_path, tmpdir .. "/compute/" .. name .. ".wasm")
-
-    -- Write a minimal app that just tries to load the module
     tool.write_file(tmpdir .. "/app.lua", string.format([[
 app.get("/check", function(req, res)
     if not compute.available() then
@@ -448,8 +482,6 @@ app.get("/check", function(req, res)
 end)
 ]], name))
 
-    -- Write a test that exercises the check
-    tool.mkdir(tmpdir .. "/tests")
     tool.write_file(tmpdir .. "/tests/test_check.lua", string.format([[
 test("compute.call('%s') succeeds", function()
     local res = test.get("/check")
@@ -458,12 +490,8 @@ test("compute.call('%s') succeeds", function()
 end)
 ]], name))
 
-    -- Run hull test on the temp app
-    local hull_exe = __hull_exe or "hull"
-    local ok = tool.spawn({hull_exe, "test", tmpdir})
-
-    -- Clean up
-    tool.rmdir(tmpdir)
+    local ok = run_harness(tmpdir)
+    cleanup_harness(tmpdir)
 
     if not ok then
         tool.stderr("hull compute check: " .. name .. " failed validation\n")
@@ -505,77 +533,92 @@ local function cmd_test(name)
         }
     end
 
-    -- Generate a temp test app
-    local tmpdir = tool.tmpdir()
-    if not tmpdir then
-        tool.stderr("hull compute test: failed to create temp directory\n")
-        tool.exit(1)
-    end
+    -- Spin up a tempdir Hull app exposing the module via /call?input=...
+    -- and generate one test case per fixture entry.
+    local tmpdir = setup_harness(name, wasm_path)
 
-    -- Copy the wasm file
-    tool.mkdir(tmpdir .. "/compute")
-    tool.copy(wasm_path, tmpdir .. "/compute/" .. name .. ".wasm")
+    local app_src = table.concat({
+        "-- Auto-generated test app for compute module: " .. name,
+        'app.get("/health", function(req, res) res:json({ ok = true }) end)',
+        "",
+        'app.get("/call", function(req, res)',
+        '    local input = req.query.input or ""',
+        string.format('    local out, err = compute.call("%s", input)', name),
+        '    if err then',
+        '        res:status(500):json({ error = err })',
+        '        return',
+        '    end',
+        '    res:json({ ok = true, output_len = #out, output_bytes = { string.byte(out, 1, #out) } })',
+        'end)',
+    }, "\n") .. "\n"
+    tool.write_file(tmpdir .. "/app.lua", app_src)
 
-    -- Write a minimal app with a route per fixture
-    local app_lines = {}
-    app_lines[#app_lines + 1] = "-- Auto-generated test app for compute module: " .. name
-    app_lines[#app_lines + 1] = 'app.get("/health", function(req, res) res:json({ ok = true }) end)'
-    app_lines[#app_lines + 1] = ""
-    app_lines[#app_lines + 1] = string.format('app.get("/call", function(req, res)', name)
-    app_lines[#app_lines + 1] = '    local input = req.query.input or ""'
-    app_lines[#app_lines + 1] = string.format('    local out, err = compute.call("%s", input)', name)
-    app_lines[#app_lines + 1] = '    if err then'
-    app_lines[#app_lines + 1] = '        res:status(500):json({ error = err })'
-    app_lines[#app_lines + 1] = '        return'
-    app_lines[#app_lines + 1] = '    end'
-    app_lines[#app_lines + 1] = '    res:json({ ok = true, output_len = #out, output_bytes = { string.byte(out, 1, #out) } })'
-    app_lines[#app_lines + 1] = 'end)'
-
-    tool.write_file(tmpdir .. "/app.lua", table.concat(app_lines, "\n") .. "\n")
-
-    -- Write test file from fixtures
-    local test_lines = {}
-    test_lines[#test_lines + 1] = "-- Auto-generated tests for compute module: " .. name
-    test_lines[#test_lines + 1] = ""
-
+    local test_lines = {
+        "-- Auto-generated tests for compute module: " .. name,
+        "",
+    }
     for _, fixture in ipairs(fixtures) do
         local fname = fixture.name or "unnamed"
         local input = fixture.input or ""
         local expect_status = fixture.expect_status or 0
-
-        -- Escape the input string for Lua
-        local escaped = input:gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", "\\n"):gsub("\r", "\\r")
-
+        local escaped = lua_escape(input)
         test_lines[#test_lines + 1] = string.format('test("fixture: %s", function()', fname)
-
+        test_lines[#test_lines + 1] = string.format('    local res = test.get("/call?input=%s")', escaped)
         if expect_status == 0 then
-            test_lines[#test_lines + 1] = string.format(
-                '    local res = test.get("/call?input=%s")', escaped)
             test_lines[#test_lines + 1] = '    test.eq(res.status, 200)'
             test_lines[#test_lines + 1] = '    test.ok(res.json.ok, "compute.call should succeed")'
         else
-            test_lines[#test_lines + 1] = string.format(
-                '    local res = test.get("/call?input=%s")', escaped)
             test_lines[#test_lines + 1] = '    test.eq(res.status, 500)'
         end
-
         test_lines[#test_lines + 1] = "end)"
         test_lines[#test_lines + 1] = ""
     end
-
-    tool.mkdir(tmpdir .. "/tests")
     tool.write_file(tmpdir .. "/tests/test_compute.lua", table.concat(test_lines, "\n"))
 
-    -- Run hull test
-    local hull_exe = __hull_exe or "hull"
-    local ok = tool.spawn({hull_exe, "test", tmpdir})
+    local ok = run_harness(tmpdir)
+    cleanup_harness(tmpdir)
 
-    -- Clean up
-    tool.rmdir(tmpdir)
+    if not ok then tool.exit(1) end
+end
 
-    if not ok then
-        tool.exit(1)
+-- ── Subcommand: refresh-header ─────────────────────────────────────────
+--
+-- `hull_compute.h` is owned by Hull. The canonical version is embedded
+-- in this file (HULL_COMPUTE_H above) and written to each module's dir
+-- on `hull compute new`. When Hull bumps the ABI or adds a new helper,
+-- existing module directories carry a stale copy.
+--
+-- `hull compute refresh-header [name]` overwrites the per-module copy
+-- with the embedded canonical version. With no name, refreshes every
+-- discovered module.
+
+local function cmd_refresh_header(name)
+    if name then validate_module_name(name) end
+
+    local modules
+    if name then
+        if not tool.file_exists("compute/" .. name) then
+            tool.stderr("hull compute refresh-header: compute/" .. name ..
+                        "/ does not exist\n")
+            tool.exit(1)
+        end
+        modules = { { name = name } }
+    else
+        modules = cbuild.discover_modules(".")
+        if #modules == 0 then
+            tool.stderr("hull compute refresh-header: no modules under compute/\n")
+            tool.exit(1)
+        end
     end
+
+    local written = 0
+    for _, m in ipairs(modules) do
+        local path = "compute/" .. m.name .. "/hull_compute.h"
+        tool.write_file(path, HULL_COMPUTE_H)
+        print("hull compute refresh-header: " .. path)
+        written = written + 1
+    end
+    print("hull compute refresh-header: refreshed " .. written .. " header(s)")
 end
 
 -- ── Usage ──────────────────────────────────────────────────────────────
@@ -584,13 +627,14 @@ local function print_usage()
     print("Usage: hull compute <command> [options]")
     print("")
     print("Commands:")
-    print("  new <name>        Create a new WASM compute module")
-    print("  build [name]      Compile module(s) to .wasm")
-    print("  test <name>       Run test fixtures against a module")
-    print("  check <name>      Validate a .wasm module loads correctly")
+    print("  new <name>             Create a new WASM compute module")
+    print("  build [name]           Compile module(s) to .wasm")
+    print("  test <name>            Run test fixtures against a module")
+    print("  check <name>           Validate a .wasm module loads correctly")
+    print("  refresh-header [name]  Overwrite per-module hull_compute.h from the embedded canonical version")
     print("")
     print("Options:")
-    print("  --lang c          Language for 'new' (default: c, only c supported)")
+    print("  --lang c               Language for 'new' (default: c, only c supported)")
     print("")
     print("Examples:")
     print("  hull compute new score")
@@ -618,6 +662,8 @@ local function main()
         cmd_test(opts.name)
     elseif opts.subcmd == "check" then
         cmd_check(opts.name)
+    elseif opts.subcmd == "refresh-header" then
+        cmd_refresh_header(opts.name)
     else
         tool.stderr("hull compute: unknown command '" .. opts.subcmd .. "'\n\n")
         print_usage()

@@ -246,6 +246,8 @@ Each command is a separate `.c`/`.h` under `src/hull/commands/`. Adding a new co
 
 **`hull compute check <name>`** — Validate that `compute/<name>.wasm` has the correct WASM magic, has version 1, and actually loads in WAMR with a trivial input. The "yes, this module can run inside Hull" gate.
 
+**`hull compute refresh-header [name]`** — Overwrite the per-module `compute/<name>/hull_compute.h` with the canonical version embedded in the `hull` binary. With no name, refreshes every discovered module. Run after upgrading Hull when a new ABI helper has been added.
+
 ### `hull build` and compute modules
 
 `hull build` makes compute modules first-class artifacts:

@@ -119,6 +119,7 @@ _hull() {
                         'build:Compile compute/<name>/<name>.c -> compute/<name>.wasm'
                         'test:Run test fixtures against a compute module'
                         'check:Validate a .wasm module loads correctly in WAMR'
+                        'refresh-header:Update per-module hull_compute.h from canonical version'
                     )
                     if (( CURRENT == 2 )); then
                         _describe -t compute-subs 'compute subcommand' compute_subs
@@ -129,7 +130,7 @@ _hull() {
                                     '--lang[Source language]:lang:(c)' \
                                     '*:module name:'
                                 ;;
-                            build|test|check)
+                            build|test|check|refresh-header)
                                 # Complete with discovered module names.
                                 local -a mods
                                 if [[ -d compute ]]; then

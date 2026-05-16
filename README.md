@@ -114,6 +114,7 @@ Hull ships 20 subcommands for the full development lifecycle:
 | `hull compute build [name]` | Compile `compute/<name>/<name>.c` → `compute/<name>.wasm` (all modules if no name) |
 | `hull compute test <name>` | Run JSON fixtures against a compiled module |
 | `hull compute check <name>` | Validate that a `.wasm` module loads correctly in WAMR |
+| `hull compute refresh-header [name]` | Overwrite per-module `hull_compute.h` from the canonical embedded version (all modules if no name) |
 
 ### Build Pipeline
 
@@ -487,6 +488,14 @@ no `time`. They are pure functions from input bytes to output bytes
 with a strict gas budget (default 100M instructions per call) and a
 strict memory budget (default 2 MiB heap, configurable up to ~4 GiB
 on WASM32 or 16 GiB on Memory64).
+
+> **Keeping `hull_compute.h` current.** Hull owns this header; the
+> canonical version is embedded in the `hull` binary and written into
+> each module's directory by `hull compute new`. When you upgrade Hull
+> the per-module copies will not change automatically. Run
+> `hull compute refresh-header <name>` (or with no name for all
+> modules) to overwrite each `compute/<name>/hull_compute.h` from the
+> embedded canonical version.
 
 ### Step 3 — Build
 

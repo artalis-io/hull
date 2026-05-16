@@ -123,14 +123,15 @@ function __hull_compute_modules
     end
 end
 
-complete -c hull -n __hull_compute_no_subsub -f -a new   -d 'Scaffold a new compute module'
-complete -c hull -n __hull_compute_no_subsub -f -a build -d 'Compile module(s) source -> .wasm'
-complete -c hull -n __hull_compute_no_subsub -f -a test  -d 'Run fixtures against a module'
-complete -c hull -n __hull_compute_no_subsub -f -a check -d 'Validate a .wasm module loads'
+complete -c hull -n __hull_compute_no_subsub -f -a new            -d 'Scaffold a new compute module'
+complete -c hull -n __hull_compute_no_subsub -f -a build          -d 'Compile module(s) source -> .wasm'
+complete -c hull -n __hull_compute_no_subsub -f -a test           -d 'Run fixtures against a module'
+complete -c hull -n __hull_compute_no_subsub -f -a check          -d 'Validate a .wasm module loads'
+complete -c hull -n __hull_compute_no_subsub -f -a refresh-header -d 'Update per-module hull_compute.h'
 
 complete -c hull -n '__hull_compute_subsub_is new' -l lang -r -d 'Source language' -xa 'c'
 
-for subsub in build test check
+for subsub in build test check refresh-header
     complete -c hull -n "__hull_compute_subsub_is $subsub" -f -a '(__hull_compute_modules)'
 end
 
