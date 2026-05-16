@@ -1,14 +1,25 @@
-/*
- * hull:search -- SQLite FTS5 full-text search wrapper
+/**
+ * @file hull:search
+ * @module hull:search
+ * @description Full-text search backed by SQLite FTS5. Lua parity:
+ *   `hull.search`.
  *
- * search.createIndex(name, columns, opts?)   - creates FTS5 virtual table
- * search.dropIndex(name)                     - drops FTS5 table
- * search.index(name, id, fields)             - insert/replace document
- * search.remove(name, id)                    - delete document
- * search.query(name, query, opts?)           - returns array of {id, ...columns, rank}
- * search.reindex(name, sourceTable, opts?)   - bulk re-index from source table
+ * Each search index is a `_hull_fts_<name>` FTS5 virtual table with a
+ * fixed `id` column plus the columns the caller declared. Identifiers
+ * are validated against `/^[A-Za-z_][A-Za-z0-9_]*$/` and rejected if
+ * they begin with `_hull_`.
  *
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * Supports snippet/highlight extraction and bulk re-indexing from a
+ * source table.
+ *
+ * @license AGPL-3.0-or-later
+ *
+ * @example
+ * search.createIndex("posts", ["title", "body"]);
+ * search.index("posts", post.id, { title: post.title, body: post.body });
+ * for (const hit of search.query("posts", "hull AND wasm", { limit: 10 })) {
+ *     console.log(hit.id, hit.rank);
+ * }
  */
 
 import { db } from "hull:db";
@@ -37,11 +48,15 @@ function ftsTable(name) {
 }
 
 /**
- * Create an FTS5 virtual table.
+ * Create an FTS5 virtual table for full-text search. Idempotent.
  *
- * @param {string} name - index name (becomes _hull_fts_<name>)
- * @param {string[]} columns - column names for the FTS index
- * @param {Object} opts - optional: tokenize, content, contentRowid
+ * @param {string}   name             Index name (becomes `_hull_fts_<name>`).
+ * @param {string[]} columns          Searchable column names (≥ 1).
+ * @param {Object}   [opts]
+ * @param {string}   [opts.tokenize="unicode61"]  FTS5 tokenizer spec.
+ * @param {string}   [opts.content]               External content table name.
+ * @param {string}   [opts.contentRowid]          Rowid column for external content.
+ * @throws If `name`/columns fail identifier validation.
  */
 function createIndex(name, columns, opts) {
     validateIdent(name, "index name");
@@ -89,9 +104,8 @@ function createIndex(name, columns, opts) {
 }
 
 /**
- * Drop an FTS5 virtual table.
- *
- * @param {string} name - index name
+ * Drop an FTS5 index. Idempotent.
+ * @param {string} name
  */
 function dropIndex(name) {
     validateIdent(name, "index name");
@@ -99,11 +113,12 @@ function dropIndex(name) {
 }
 
 /**
- * Insert or replace a document in the FTS index.
+ * Insert or replace a document in the index.
  *
- * @param {string} name - index name
- * @param {*} id - document ID (string or number)
- * @param {Object} fields - object mapping column names to values
+ * @param {string}        name    Index name.
+ * @param {string|number} id      Document identifier.
+ * @param {Object}        fields  Map of column name → value.
+ * @throws If `id` is `null`/`undefined` or any field name fails validation.
  */
 function index(name, id, fields) {
     validateIdent(name, "index name");
@@ -146,10 +161,9 @@ function index(name, id, fields) {
 }
 
 /**
- * Delete a document from the FTS index.
- *
- * @param {string} name - index name
- * @param {*} id - document ID
+ * Remove a document from the index by id.
+ * @param {string}        name
+ * @param {string|number} id
  */
 function remove(name, id) {
     validateIdent(name, "index name");
@@ -164,12 +178,19 @@ function remove(name, id) {
 }
 
 /**
- * Query the FTS index.
+ * Query the FTS5 index.
  *
- * @param {string} name - index name
- * @param {string} q - FTS5 query string
- * @param {Object} opts - optional: limit, offset, snippet, highlight, order
- * @returns {Array} array of result objects with id, columns, and rank
+ * @param {string} name
+ * @param {string} q     FTS5 MATCH expression
+ *   (e.g. `"hello world"`, `"title:hello AND body:world"`).
+ * @param {Object} [opts]
+ * @param {number} [opts.limit=20]
+ * @param {number} [opts.offset=0]
+ * @param {{column:number,tokens:number,before:string,after:string,ellipsis:string}}
+ *                 [opts.snippet]
+ * @param {{column:number,before:string,after:string}} [opts.highlight]
+ * @param {("rank"|"rowid")} [opts.order="rank"]
+ * @returns {Array<{id:any, rank:number, snippet?:string, highlight?:string}>}
  */
 function query(name, q, opts) {
     validateIdent(name, "index name");
@@ -243,11 +264,18 @@ function query(name, q, opts) {
 }
 
 /**
- * Bulk re-index from a source table into the FTS index.
+ * Bulk re-index from a source table.
  *
- * @param {string} name - index name
- * @param {string} sourceTable - source table name
- * @param {Object} opts - optional: columns (map of FTS col -> source col), idColumn
+ * Clears every row in `_hull_fts_<name>` then `INSERT INTO ... SELECT
+ * FROM <sourceTable>` for an atomic-feeling rebuild.
+ *
+ * @param {string} name
+ * @param {string} sourceTable
+ * @param {Object} opts
+ * @param {Object<string,string>} opts.columns
+ *   Map of `<ftsColumn> -> <sourceColumn>` (e.g. `{ title: "title",
+ *   body: "content" }`).
+ * @param {string} [opts.idColumn="id"]
  */
 function reindex(name, sourceTable, opts) {
     validateIdent(name, "index name");

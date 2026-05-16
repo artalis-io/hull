@@ -1,35 +1,63 @@
-/*
- * hull:middleware:health -- Health check endpoints
+/**
+ * @file hull:middleware:health
+ * @module hull:middleware:health
+ * @description Liveness + readiness HTTP endpoints. Lua parity:
+ *   `hull.middleware.health`.
  *
- * Provides /health (liveness) and /ready (readiness) endpoints with
- * built-in DB ping, custom check registration, server stats, and uptime.
+ * `health.middleware()` intercepts `GET /health` and `GET /ready`:
  *
- * Usage:
- *   import { health } from "hull:middleware:health";
- *   health.register("cache", () => true);
- *   app.use("GET", "/*", health.middleware());
+ *   - `/health` (liveness) — always returns `200 {status:"ok", uptime}`.
+ *     Verifies the process is alive; never fails.
+ *   - `/ready`  (readiness) — runs the DB ping (if enabled) and every
+ *     check registered via `health.register()`. Returns `200` when all
+ *     pass, otherwise `503` with a per-check breakdown.
  *
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * ES modules can't conditionally import — pass the `db` module
+ * explicitly via `health.setDb(dbModule)` or `opts.db`.
+ *
+ * @license AGPL-3.0-or-later
  */
 
 import { time } from "hull:time";
 import { server } from "hull:server";
 
-/* db module is optional — not all apps use a database.
- * We try to import it but fall back gracefully. */
+/* db module is optional — not all apps use a database. */
 let _dbMod = null;
 
 const _checks = {};
 let _startTime = null;
 
+/**
+ * Register a custom readiness check.
+ *
+ * Replaces any prior check with the same name. Contract:
+ *   - return `true` or no return value → ok
+ *   - return `false` → fail
+ *   - throw → fail (uses error string)
+ *
+ * @param {string}      name  Identifier (appears in `/ready` JSON output).
+ * @param {() => boolean|void} fn
+ */
 function register(name, fn) {
     _checks[name] = fn;
 }
 
+/**
+ * Remove a previously registered check.
+ * @param {string} name
+ */
 function unregister(name) {
     delete _checks[name];
 }
 
+/**
+ * Run the DB ping (if enabled) + every registered check.
+ *
+ * @param {Object} [opts]
+ * @param {boolean} [opts.dbCheck=true]  Include the DB ping.
+ * @returns {{ checks: Object<string,{status:string,latency_ms:number,error?:string}>,
+ *             allOk: boolean }}
+ */
 function runChecks(opts) {
     const o = opts || {};
     const results = {};
@@ -71,10 +99,30 @@ function runChecks(opts) {
     return { checks: results, allOk };
 }
 
+/**
+ * Inject the db module used for the readiness DB ping.
+ *
+ * Equivalent to passing `opts.db` to `middleware()`.
+ *
+ * @param {Object} dbModule  The `hull:db` module value.
+ */
 function setDb(dbModule) {
     _dbMod = dbModule;
 }
 
+/**
+ * Build the `/health` + `/ready` middleware.
+ *
+ * Returns `1` (short-circuit) when the request hits one of the health
+ * paths and `0` (continue) otherwise.
+ *
+ * @param {Object} [opts]
+ * @param {string} [opts.pathHealth="/health"]
+ * @param {string} [opts.pathReady="/ready"]
+ * @param {boolean}[opts.dbCheck=true]  Include DB ping in `/ready`.
+ * @param {Object} [opts.db]  Inject the db module (alternative to `setDb`).
+ * @returns {(req, res) => number}
+ */
 function middleware(opts) {
     const o = opts || {};
     const pathHealth = o.pathHealth || "/health";

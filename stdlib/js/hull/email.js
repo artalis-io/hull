@@ -1,32 +1,22 @@
-// hull:email — Outbound email with provider dispatch
-//
-// Supports direct SMTP and API providers (Postmark, SendGrid, Resend).
-// SMTP goes through the C smtp.send() binding; API providers use http.async.post()
-// (non-blocking).
-//
-// Usage:
-//   import { email } from "hull:email";
-//   const result = email.send({
-//       provider: "smtp",            // or "postmark", "sendgrid", "resend"
-//       from: "app@example.com",
-//       to: "user@example.com",
-//       subject: "Hello",
-//       body: "Message body",
-//       // SMTP-specific:
-//       smtp_host: "smtp.example.com",
-//       smtp_port: 587,
-//       smtp_user: "apikey",
-//       smtp_pass: env.get("SMTP_PASS"),
-//       smtp_tls: true,
-//       // API-specific:
-//       api_key: env.get("POSTMARK_TOKEN"),
-//       // Optional:
-//       cc: ["admin@example.com"],
-//       reply_to: "support@example.com",
-//       content_type: "text/html",
-//   });
-//
-// SPDX-License-Identifier: AGPL-3.0-or-later
+/**
+ * @file hull:email
+ * @module hull:email
+ * @description Outbound email with pluggable provider dispatch. Lua parity:
+ *   `hull.email`.
+ *
+ * Wraps four delivery backends behind one `email.send(opts)` call:
+ *
+ *   - `"smtp"`     — direct SMTP via the C `smtp.send` binding.
+ *   - `"postmark"` — Postmark HTTPS API.
+ *   - `"sendgrid"` — SendGrid HTTPS API.
+ *   - `"resend"`   — Resend HTTPS API.
+ *
+ * API providers use `http.async.post` so they cooperate with the event
+ * loop. SMTP uses the C `smtp.send` cap (mbedTLS + embedded Mozilla CA
+ * bundle).
+ *
+ * @license AGPL-3.0-or-later
+ */
 
 import { smtp } from "hull:smtp";
 import { http } from "hull:http";
@@ -186,6 +176,35 @@ providers.resend = async function(opts) {
     return { ok: false, error: "resend: " + (resp.body || "unknown error") };
 };
 
+/**
+ * Send an email via the selected provider.
+ *
+ * @param {Object} opts
+ * @param {("smtp"|"postmark"|"sendgrid"|"resend")} [opts.provider="smtp"]
+ * @param {string} opts.from
+ * @param {string} opts.to
+ * @param {string} opts.subject
+ * @param {string} opts.body
+ * @param {string[]} [opts.cc]
+ * @param {string}   [opts.reply_to]
+ * @param {("text/plain"|"text/html")} [opts.content_type="text/plain"]
+ * @param {string}   [opts.api_key]    Required for API providers.
+ * @param {string}   [opts.smtp_host]
+ * @param {number}   [opts.smtp_port=587]
+ * @param {string}   [opts.smtp_user]
+ * @param {string}   [opts.smtp_pass]
+ * @param {boolean}  [opts.smtp_tls=true]
+ * @returns {Promise<{ok:true} | {ok:false, error:string}>}
+ *
+ * @example
+ * const r = await email.send({
+ *     provider: "postmark",
+ *     from: "app@example.com", to: "user@example.com",
+ *     subject: "Hi", body: "Hello!",
+ *     api_key: env.get("POSTMARK_TOKEN"),
+ * });
+ * if (!r.ok) log.error(r.error);
+ */
 email.send = async function(opts) {
     if (!opts) return { ok: false, error: "opts required" };
     if (!opts.from) return { ok: false, error: "from required" };

@@ -1,24 +1,34 @@
-/*
- * hull:middleware:transaction -- Wrap mutation handlers in a database transaction
+/**
+ * @file hull:middleware:transaction
+ * @module hull:middleware:transaction
+ * @description Wrap mutation handlers in a SQLite transaction. Lua parity:
+ *   `hull.middleware.transaction`.
  *
- * Registers as post-body middleware. All db.exec()/db.query() calls within the
- * handler run inside a single BEGIN IMMEDIATE..COMMIT transaction. If the handler
- * errors, the transaction is rolled back automatically (via db.batch semantics).
+ * `transaction.middleware()` is a marker — it sets `req.ctx._txn = true`
+ * so downstream code knows the handler should run under a transaction.
+ * The real work happens in `transaction.run(fn)` / `transaction.attempt(fn)`
+ * which call `db.batch()` (`BEGIN IMMEDIATE → fn → COMMIT`, with
+ * `ROLLBACK` on error).
  *
- * Usage:
- *   import { transaction } from "hull:middleware:transaction";
- *   app.usePost("POST", "/api/*", transaction.middleware());
- *   app.usePost("PUT",  "/api/*", transaction.middleware());
- *   app.usePost("DELETE", "/api/*", transaction.middleware());
- *
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * @license AGPL-3.0-or-later
  */
 
 import { db } from "hull:db";
 
 /**
- * Create a post-body middleware that marks the request for transactional execution.
- * Handlers should use transaction.run(fn) to wrap their DB operations.
+ * Build a transaction marker middleware.
+ *
+ * Always returns `0` (continue). Sets `req.ctx._txn = true` so handlers
+ * and other middleware know DB work for this request should be wrapped
+ * in `transaction.run` / `transaction.attempt`.
+ *
+ * @param {Object} [opts]  Reserved for future options.
+ * @returns {(req, res) => number}
+ *
+ * @example
+ * app.usePost("POST",   "/api/*", transaction.middleware());
+ * app.usePost("PUT",    "/api/*", transaction.middleware());
+ * app.usePost("DELETE", "/api/*", transaction.middleware());
  */
 function middleware(opts) {
     return function(req, _res) {
@@ -29,28 +39,37 @@ function middleware(opts) {
 }
 
 /**
- * Execute fn inside a transaction. Uses db.batch() which provides
- * BEGIN IMMEDIATE..COMMIT with automatic ROLLBACK on error.
- * SQLite doesn't support nested transactions — if already inside
- * a db.batch(), this will error.
+ * Run `fn` inside `BEGIN IMMEDIATE..COMMIT`.
+ *
+ * On error the transaction is rolled back and the error is re-thrown.
+ * SQLite doesn't support nested transactions — calling this while
+ * already inside a `db.batch` will error.
+ *
+ * @param {() => void} fn  Function whose DB writes should be atomic.
+ * @throws Re-throws any error from `fn` after rollback.
  */
 function run(fn) {
     db.batch(fn);
 }
 
 /**
- * Execute fn in a transaction, catch errors. Returns [ok, error].
- * Does NOT re-throw on failure.
+ * Run `fn` inside a transaction; return `[ok, errOrNull]`.
  *
- * Usage:
- *   const [ok, err] = transaction.attempt(() => {
- *       db.exec("INSERT INTO ...", [...]);
- *   });
- *   if (!ok) {
- *       res.status(500);
- *       res.json({ error: String(err) });
- *       return;
- *   }
+ * Same as `run` but catches errors instead of re-throwing. Aliased as
+ * `try` (quoted because `try` is reserved) for parity with Lua's
+ * `transaction.try`.
+ *
+ * @param {() => void} fn
+ * @returns {[true, null] | [false, Error]}
+ *
+ * @example
+ * const [ok, err] = transaction.attempt(() => {
+ *     db.exec("INSERT INTO ...", [...]);
+ * });
+ * if (!ok) {
+ *     res.status(500).json({ error: String(err) });
+ *     return;
+ * }
  */
 function attempt(fn) {
     try {

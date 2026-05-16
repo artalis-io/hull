@@ -1,27 +1,27 @@
-/*
- * hull:middleware:rbac -- Role-based access control
+/**
+ * @file hull:middleware:rbac
+ * @module hull:middleware:rbac
+ * @description Role-based access control backed by SQLite. Lua parity:
+ *   `hull.middleware.rbac`.
  *
- * rbac.init(opts?)                       - creates tables
- * rbac.defineRole(name, permissions?)    - insert role + optionally grant permissions
- * rbac.definePermission(name)            - insert permission
- * rbac.assign(userId, role)              - grant role to user
- * rbac.revoke(userId, role)              - remove role from user
- * rbac.grant(role, permission)           - add permission to role
- * rbac.ungrant(role, permission)         - remove permission from role
- * rbac.roles(userId)                     - array of role names
- * rbac.permissions(userId)               - array of permission names (via join)
- * rbac.hasRole(userId, role)             - boolean
- * rbac.hasPermission(userId, perm)       - boolean
- * rbac.hasAnyRole(userId, roles)         - boolean
- * rbac.hasAnyPermission(userId, perms)   - boolean
- * rbac.requireRole(roleOrRoles)          - returns middleware fn (403 if missing)
- * rbac.requirePermission(permOrPerms)    - returns middleware fn (403 if missing)
+ * Stores `(role, permission, user_role)` triples in four `_hull_*` tables
+ * and exposes both a query API (`hasRole`, `hasPermission`, ...) and
+ * middleware factories (`requireRole`, `requirePermission`) that
+ * short-circuit unauthorized requests with `401`/`403`.
  *
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * Tables: `_hull_roles`, `_hull_permissions`, `_hull_role_permissions`,
+ * `_hull_user_roles`. Schemas are created by `rbac.init()`.
+ *
+ * @license AGPL-3.0-or-later
  */
 
 import { db } from "hull:db";
 
+/**
+ * Create the four `_hull_*` RBAC tables. Idempotent.
+ *
+ * @param {Object} [opts]  Reserved for future configuration.
+ */
 function init(opts) {
     db.exec(
         "CREATE TABLE IF NOT EXISTS _hull_roles (" +
@@ -63,6 +63,12 @@ function requireName(value, what) {
     return value;
 }
 
+/**
+ * Define a role and optionally grant it permissions. Idempotent.
+ *
+ * @param {string} name             Role name (e.g. `"admin"`).
+ * @param {string[]} [permissions]  Array of permission names to grant.
+ */
 function defineRole(name, permissions) {
     const roleName = requireName(name, "role name");
     db.exec("INSERT OR IGNORE INTO _hull_roles (name) VALUES (?)", [roleName]);
@@ -79,6 +85,10 @@ function defineRole(name, permissions) {
     }
 }
 
+/**
+ * Define a permission. Idempotent.
+ * @param {string} name
+ */
 function definePermission(name) {
     const permName = requireName(name, "permission name");
     db.exec("INSERT OR IGNORE INTO _hull_permissions (name) VALUES (?)", [permName]);
@@ -92,6 +102,11 @@ function normalizeUserId(userId) {
     return String(userId);
 }
 
+/**
+ * Assign a role to a user. Idempotent.
+ * @param {string} userId
+ * @param {string} role
+ */
 function assign(userId, role) {
     db.exec(
         "INSERT OR IGNORE INTO _hull_user_roles (user_id, role) VALUES (?, ?)",
@@ -99,6 +114,11 @@ function assign(userId, role) {
     );
 }
 
+/**
+ * Revoke a role from a user.
+ * @param {string} userId
+ * @param {string} role
+ */
 function revoke(userId, role) {
     db.exec(
         "DELETE FROM _hull_user_roles WHERE user_id = ? AND role = ?",
@@ -106,6 +126,11 @@ function revoke(userId, role) {
     );
 }
 
+/**
+ * Grant a permission to a role. Idempotent.
+ * @param {string} role
+ * @param {string} permission
+ */
 function grant(role, permission) {
     db.exec(
         "INSERT OR IGNORE INTO _hull_role_permissions (role, permission) VALUES (?, ?)",
@@ -113,6 +138,11 @@ function grant(role, permission) {
     );
 }
 
+/**
+ * Remove a permission from a role.
+ * @param {string} role
+ * @param {string} permission
+ */
 function ungrant(role, permission) {
     db.exec(
         "DELETE FROM _hull_role_permissions WHERE role = ? AND permission = ?",
@@ -120,6 +150,11 @@ function ungrant(role, permission) {
     );
 }
 
+/**
+ * List all roles assigned to a user.
+ * @param {string} userId
+ * @returns {string[]}
+ */
 function roles(userId) {
     const rows = db.query(
         "SELECT role FROM _hull_user_roles WHERE user_id = ? ORDER BY role",
@@ -131,6 +166,11 @@ function roles(userId) {
     return result;
 }
 
+/**
+ * List distinct permissions the user holds (via any role).
+ * @param {string} userId
+ * @returns {string[]}
+ */
 function permissions(userId) {
     const rows = db.query(
         "SELECT DISTINCT rp.permission FROM _hull_user_roles ur " +
@@ -144,6 +184,12 @@ function permissions(userId) {
     return result;
 }
 
+/**
+ * Does the user have this role?
+ * @param {string} userId
+ * @param {string} role
+ * @returns {boolean}
+ */
 function hasRole(userId, role) {
     const rows = db.query(
         "SELECT 1 FROM _hull_user_roles WHERE user_id = ? AND role = ?",
@@ -152,6 +198,12 @@ function hasRole(userId, role) {
     return rows.length > 0;
 }
 
+/**
+ * Does the user have this permission (via any role)?
+ * @param {string} userId
+ * @param {string} permission
+ * @returns {boolean}
+ */
 function hasPermission(userId, permission) {
     const rows = db.query(
         "SELECT 1 FROM _hull_user_roles ur " +
@@ -162,6 +214,12 @@ function hasPermission(userId, permission) {
     return rows.length > 0;
 }
 
+/**
+ * Does the user hold any role in the list?
+ * @param {string} userId
+ * @param {string[]} roleList
+ * @returns {boolean}
+ */
 function hasAnyRole(userId, roleList) {
     const uid = normalizeUserId(userId);
     for (let i = 0; i < roleList.length; i++) {
@@ -171,6 +229,12 @@ function hasAnyRole(userId, roleList) {
     return false;
 }
 
+/**
+ * Does the user hold any permission in the list?
+ * @param {string} userId
+ * @param {string[]} permList
+ * @returns {boolean}
+ */
 function hasAnyPermission(userId, permList) {
     const uid = normalizeUserId(userId);
     for (let i = 0; i < permList.length; i++) {
@@ -180,6 +244,22 @@ function hasAnyPermission(userId, permList) {
     return false;
 }
 
+/**
+ * Middleware: require the user to hold a role (or any from a list).
+ *
+ * - No `userId` → `401`.
+ * - User has none of the required roles → `403`.
+ * - Otherwise → `0` (continue).
+ *
+ * @param {string|string[]} roleOrRoles  Single role or any-of array.
+ * @param {Object} [opts]
+ * @param {(req) => string} [opts.getUserId]
+ *   Default resolves `req.ctx.session.user_id`.
+ * @returns {(req, res) => number}
+ *
+ * @example
+ * app.usePost("*", "/admin/*", rbac.requireRole("admin"));
+ */
 function requireRole(roleOrRoles, opts) {
     const isList = Array.isArray(roleOrRoles);
     const getUserId = (opts && opts.getUserId) || null;
@@ -207,6 +287,16 @@ function requireRole(roleOrRoles, opts) {
     };
 }
 
+/**
+ * Middleware: require the user to hold a permission (or any from a list).
+ *
+ * Returns `401` for unauthenticated requests and `403` for authorized
+ * users who lack every requested permission.
+ *
+ * @param {string|string[]} permOrPerms
+ * @param {Object} [opts]  Same as `requireRole`.
+ * @returns {(req, res) => number}
+ */
 function requirePermission(permOrPerms, opts) {
     const isList = Array.isArray(permOrPerms);
     const getUserId = (opts && opts.getUserId) || null;

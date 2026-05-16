@@ -1,28 +1,26 @@
-/*
- * hull:middleware:idempotency -- Idempotency-Key middleware for safe retries
+/**
+ * @file hull:middleware:idempotency
+ * @module hull:middleware:idempotency
+ * @description Idempotency-Key middleware for safe POST retries. Lua parity:
+ *   `hull.middleware.idempotency`.
  *
- * Prevents duplicate side effects when clients retry POST requests by caching
- * responses keyed by (principal_id, idempotency_key). Uses SHA-256 fingerprint
- * to detect key reuse with different request bodies (409 Conflict).
+ * Prevents duplicate side effects when clients retry the same request by
+ * caching the response keyed by `(principal_id, idempotency_key)`. A
+ * `SHA-256(method || path || body)` fingerprint detects key reuse with a
+ * different body (returns `409 Conflict`).
  *
- * Usage:
- *   import { idempotency } from "hull:middleware:idempotency";
- *   idempotency.init({ ttl: 86400 });
- *   app.usePost("POST", "/api/*", idempotency.middleware({
- *       getPrincipal: (req) => req.ctx?.session?.user_id || "__anon",
- *   }));
+ * **Replay semantics:**
+ *   - Same key, same body → cached response returned (handler skipped).
+ *   - Same key, different body → `409`.
+ *   - Same key, still inflight → `409` (`request already in progress`).
+ *   - No `Idempotency-Key` header → handler runs normally (no caching).
  *
- * Handlers capture responses via idempotency.respond(req, res, status, body):
- *   app.post("/api/events", (req, res) => {
- *       // ... do work inside db.batch() ...
- *       idempotency.respond(req, res, 201, { event_id: id });
- *   });
+ * **Header allowlist:** Only safe response headers are persisted/replayed.
+ * `Set-Cookie`, `Authorization`, `Cookie`, and `X-*` credential patterns
+ * (`x-auth`, `x-api-key`, …) are never cached, so a stored replay can't
+ * outlive a revoked session.
  *
- * On retry with same key+body: cached response returned, handler never runs.
- * On retry with same key+different body: 409 Conflict.
- * Without Idempotency-Key header: handler runs normally (no caching).
- *
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * @license AGPL-3.0-or-later
  */
 
 import { db } from "hull:db";
@@ -91,8 +89,10 @@ function isReplayableHeader(name) {
 }
 
 /**
- * Initialize the idempotency table.
- * @param {Object} opts - Options: ttl (seconds, default 86400)
+ * Initialize the `_hull_idempotency_keys` SQLite table. Idempotent.
+ *
+ * @param {Object} [opts]
+ * @param {number} [opts.ttl=86400]  Key lifetime in seconds.
  */
 function init(opts) {
     const o = opts || {};
@@ -128,12 +128,24 @@ function computeFingerprint(req) {
 }
 
 /**
- * Create a post-body middleware for idempotency-key processing.
- * @param {Object} opts
- * @param {Function} opts.getPrincipal - (req) => string (default: session user_id or "__anon")
- * @param {number} opts.ttl - override module TTL
- * @param {string} opts.headerName - header name (default "idempotency-key")
- * @param {string[]} opts.methods - methods to intercept (default ["POST"])
+ * Build a post-body idempotency middleware.
+ *
+ * Reads the key from `req.header(headerName)`. Same key+body → cached
+ * replay; different body → 409; missing header → handler runs.
+ *
+ * @param {Object} [opts]
+ * @param {(req) => string} [opts.getPrincipal]
+ *   Returns a stable per-user key for scoping. Default:
+ *   `req.ctx.session.user_id` or `"__anon"`.
+ * @param {number}   [opts.ttl]        Override module TTL for this instance.
+ * @param {string}   [opts.headerName="idempotency-key"]
+ * @param {string[]} [opts.methods=["POST"]]
+ * @returns {(req, res) => number}
+ *
+ * @example
+ * app.usePost("POST", "/api/*", idempotency.middleware({
+ *     getPrincipal: (req) => req.ctx?.session?.user_id || "__anon",
+ * }));
  */
 function middleware(opts) {
     const o = opts || {};
@@ -278,14 +290,20 @@ function middleware(opts) {
 }
 
 /**
- * Send a response and cache it for idempotency replay.
- * Must be called from within a handler that has an idempotency key active.
+ * Send a JSON response and cache it for idempotency replay.
  *
- * @param {Object} req - Request object
- * @param {Object} res - Response object
- * @param {number} statusCode - HTTP status code
- * @param {Object} data - Response body (will be JSON-encoded)
- * @param {Object} extraHeaders - Optional additional headers
+ * Call from inside a handler that has an idempotency key active.
+ * `extraHeaders` is filtered through the same allowlist as the replay
+ * path, so credential headers never persist on disk.
+ *
+ * @param {Object}   req
+ * @param {Object}   res
+ * @param {number}   statusCode  HTTP status to send + cache.
+ * @param {Object}   data        Body data (JSON-encoded).
+ * @param {Object<string,string>} [extraHeaders]  Optional response headers.
+ *
+ * @example
+ * idempotency.respond(req, res, 201, { event_id: 42 });
  */
 function respond(req, res, statusCode, data, extraHeaders) {
     const bodyStr = json.encode(data);
@@ -339,7 +357,12 @@ function respond(req, res, statusCode, data, extraHeaders) {
 
 /**
  * Mark an idempotency key as complete without caching a response.
- * Retries will re-execute the handler (prevents concurrent duplicates only).
+ *
+ * Useful when the handler sends a response via `res.json()` directly.
+ * The key prevents concurrent duplicates but retries will re-execute
+ * the handler (no cached body to replay).
+ *
+ * @param {Object} req
  */
 function complete(req) {
     if (req.ctx && req.ctx._idem_key) {
@@ -352,7 +375,11 @@ function complete(req) {
 }
 
 /**
- * Delete expired idempotency keys. Returns number of deleted rows.
+ * Delete expired idempotency keys.
+ *
+ * Call periodically (e.g. from `app.every(3600_000, idempotency.cleanup)`).
+ *
+ * @returns {number} Count of deleted rows.
  */
 function cleanup() {
     const now = time.now();

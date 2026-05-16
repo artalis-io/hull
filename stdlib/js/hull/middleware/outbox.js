@@ -1,27 +1,21 @@
-/*
- * hull:middleware:outbox -- Transactional outbox for reliable side effects
+/**
+ * @file hull:middleware:outbox
+ * @module hull:middleware:outbox
+ * @description Transactional outbox for reliable side-effect delivery. Lua
+ *   parity: `hull.middleware.outbox`.
  *
- * Decouples external side effects (HTTP, SMTP, webhook delivery) from the
- * request transaction. Side effects are written as outbox rows inside the
- * same transaction as the state change, then delivered after commit.
+ * Decouples external side effects (webhooks, HTTP, SMTP) from the request
+ * transaction. The handler enqueues an outbox row inside the same
+ * `db.batch` that commits the state change; the outbox flusher then
+ * delivers the row after commit with exponential backoff retries.
  *
- * Usage:
- *   import { outbox } from "hull:middleware:outbox";
- *   outbox.init({ flushAfterRequest: true });
+ * Delivery is **at-least-once** — design receivers to be idempotent
+ * (e.g. with `hull:middleware:inbox`).
  *
- *   // Inside a handler (within a transaction):
- *   outbox.enqueue({
- *       kind: "webhook",
- *       destination: webhook.url,
- *       payload: JSON.stringify(data),
- *       headers: JSON.stringify({ "Content-Type": "application/json" }),
- *       idempotencyKey: `evt-${eventId}-wh-${wh.id}`,
- *   });
+ * **Backoff schedule:** `2^attempt * 10s`, capped at 1 hour. After
+ * `maxAttempts` (default 5) the row is marked `failed`.
  *
- *   // After handler returns (or explicitly):
- *   outbox.flush();
- *
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * @license AGPL-3.0-or-later
  */
 
 import { db } from "hull:db";
@@ -32,8 +26,11 @@ import { json } from "hull:json";
 let maxAttempts = 5;
 
 /**
- * Initialize the outbox table.
- * @param {Object} opts - Options: maxAttempts (default 5)
+ * Initialize the `_hull_outbox` SQLite table. Idempotent.
+ *
+ * @param {Object} [opts]
+ * @param {number} [opts.maxAttempts=5]
+ *   Max delivery attempts before the row is marked `failed`.
  */
 function init(opts) {
     const o = opts || {};
@@ -68,17 +65,28 @@ function init(opts) {
 
 /**
  * Enqueue a side effect for delivery after commit.
- * Must be called inside a transaction (db.batch) to be atomic with state changes.
+ *
+ * Must be called inside a `db.batch` to be atomic with the state change.
  *
  * @param {Object} opts
- * @param {string} opts.kind - "webhook", "http", "smtp"
- * @param {string} opts.destination - URL or address
- * @param {string} opts.payload - string body
- * @param {string} opts.headers - JSON-encoded headers (optional)
- * @param {string} opts.idempotencyKey - unique key for dedup (optional)
- * @param {number} opts.maxAttempts - override default (optional)
- * @param {number} opts.delay - seconds to delay first attempt (optional)
- * @returns {number} outbox item ID
+ * @param {string} opts.kind            `"webhook"`, `"http"`, `"smtp"`, ...
+ * @param {string} opts.destination     Target URL or address.
+ * @param {string} opts.payload         Body bytes.
+ * @param {string} [opts.headers]       JSON-encoded headers.
+ * @param {string} [opts.idempotencyKey]  Dedup key (recommended).
+ * @param {number} [opts.maxAttempts]   Override module default.
+ * @param {number} [opts.delay=0]       Seconds to delay first attempt.
+ * @returns {number}  New `_hull_outbox.id`.
+ * @throws If `kind`, `destination`, or `payload` is missing.
+ *
+ * @example
+ * outbox.enqueue({
+ *     kind: "webhook",
+ *     destination: webhook.url,
+ *     payload: JSON.stringify(data),
+ *     headers: JSON.stringify({ "Content-Type": "application/json" }),
+ *     idempotencyKey: `evt-${eventId}-wh-${wh.id}`,
+ * });
  */
 function enqueue(opts) {
     if (!opts || !opts.kind)
@@ -149,9 +157,16 @@ function backoffDelay(attempt) {
 }
 
 /**
- * Flush pending outbox items. Delivers items where next_attempt_at <= now.
- * @param {Object} opts - Options: limit (max items, default 50)
- * @returns {{ delivered: number, failed: number, retried: number }}
+ * Flush pending outbox items where `next_attempt_at <= now`.
+ *
+ * Successful deliveries are marked `delivered`. Failures bump the attempt
+ * counter and reschedule; after `maxAttempts` the row is marked `failed`.
+ *
+ * Delivery is at-least-once — design receivers to be idempotent.
+ *
+ * @param {Object} [opts]
+ * @param {number} [opts.limit=50]  Max items to process per call.
+ * @returns {Promise<{ delivered: number, failed: number, retried: number }>}
  */
 async function flush(opts) {
     const o = opts || {};
@@ -199,7 +214,12 @@ async function flush(opts) {
 }
 
 /**
- * Create a post-body middleware that marks requests for outbox flush.
+ * Build a post-body middleware that marks the request for auto-flush.
+ *
+ * Sets `req.ctx._outbox_flush = true`. Call `outbox.flushIfNeeded(req)`
+ * from a post-handler hook to trigger the actual flush.
+ *
+ * @returns {(req, res) => number}
  */
 function middleware() {
     return function(req, _res) {
@@ -210,7 +230,11 @@ function middleware() {
 }
 
 /**
- * Flush if the request was marked for it.
+ * Flush if `outbox.middleware()` marked the request.
+ *
+ * Call from a post-handler hook (or explicitly from the handler).
+ *
+ * @param {Object} req
  */
 async function flushIfNeeded(req) {
     if (req.ctx && req.ctx._outbox_flush)
@@ -218,7 +242,8 @@ async function flushIfNeeded(req) {
 }
 
 /**
- * Get counts of items by state.
+ * Count outbox rows per state.
+ *
  * @returns {{ pending: number, delivered: number, failed: number }}
  */
 function stats() {
