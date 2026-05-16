@@ -43,7 +43,7 @@ Keel HTTP Server (C)          # epoll/kqueue event loop + async + thread pool
 Kernel Sandbox                # pledge+unveil (Linux), C-level (macOS)
 ```
 
-WASM compute plugins provide a sandboxed data-plane layer for CPU-intensive computation. Plugins are pure functions (no I/O) that run in isolated WASM linear memory with gas metering. Place `.wasm` files in `compute/`, call via `compute.call("name", input)` (sync) or `compute.async.call("name", input)` (async, yields to event loop) from Lua/JS. `compute.stream("name", input, output, opts)` processes data larger than memory in chunks via a persistent instance. `hull build` auto-compiles to AOT when `wamrc` is available (~1.2x native speed vs ~54x for fast interpreter). See `docs/wamr_architecture.md`.
+WASM compute plugins provide a sandboxed data-plane layer for CPU-intensive computation. Plugins are pure functions (no I/O) that run in isolated WASM linear memory with gas metering. Place `.wasm` files in `compute/`, call via `compute.call("name", input)` (sync) or `compute.async.call("name", input)` (async, yields to event loop) from Lua/JS. `compute.stream("name", input, output, opts)` processes data larger than memory in chunks via a persistent instance. `hull build` auto-compiles `.c` sources to `.wasm` and to AOT when `wamrc` is available (~1.2x native speed vs ~54x for fast interpreter). When a module loads via the fast interpreter at runtime (no AOT artifact), Hull emits a one-time warning per module — install `wamrc` (`make wamrc`) and rebuild to silence it. Scaffolding lifecycle: `hull compute new|build|test|check|refresh-header`. See `docs/wamr_architecture.md` and `hull agent context --task=compute --level=compact`.
 
 WASM modules can also be registered as SQL UDFs via `db.udf.register("hull_name", "module_name", opts)` — the WASM function is called per row during query execution with gas metering.
 
@@ -762,6 +762,52 @@ hull build myapp/ --compiler=/path/to/cc  # explicit compiler path
 hull verify myapp/
 hull inspect myapp/
 ```
+
+### Compute Modules (WASM)
+
+Compute modules are pure WASM functions invoked via `compute.call()` /
+`compute.async.call()` from Lua/JS. The full developer lifecycle is
+exposed as `hull compute` subcommands; an agent typically chains them
+like the database migration flow.
+
+```bash
+# Scaffold a new module — writes compute/<name>/{<name>.c, hull_compute.h, test_fixtures.json}.
+hull compute new score
+
+# (edit compute/score/score.c — implement hull_process)
+
+# Compile the module to compute/score.wasm.
+hull compute build score
+
+# Run the JSON fixtures in compute/score/test_fixtures.json.
+hull compute test score
+
+# Smoke-test that the .wasm actually loads in WAMR.
+hull compute check score
+
+# Refresh the per-module hull_compute.h from the canonical version embedded in
+# the hull binary (run after upgrading Hull).
+hull compute refresh-header score
+
+# Build the whole app — hull build auto-rebuilds any stale .c -> .wasm,
+# AOT-compiles every .wasm if wamrc is present, and embeds both into the
+# final binary. --no-build-compute opts out for hermetic CI pipelines that
+# ship pre-committed .wasm artifacts.
+hull build .
+```
+
+Introspection (read-only, JSON):
+
+```bash
+hull agent compute .                  # list modules + sizes + AOT presence
+hull agent compute-call <name> <file> # one-shot invocation against file input
+hull agent deploy .                   # includes compute_modules[] with source_stale flags
+hull agent context --task=compute --level=compact  # this doc surface as JSON
+```
+
+The runtime warns once per module when it loads as the fast interpreter
+(no AOT artifact found). `hull doctor` reports the compute toolchain
+status: `wasm_enabled`, `wamrc`, `clang`, `wasm_ld`, `aot_ready`.
 
 ### Deployment Config Generator
 

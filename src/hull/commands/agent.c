@@ -233,7 +233,8 @@ static int cmd_context(int argc, char **argv)
     if (!task) {
         fprintf(stderr, "Usage: hull agent context --task=TASK [--level=LEVEL]\n"
                 "  Tasks: auth, db, middleware, templates, routing, testing,\n"
-                "         build, deploy, search, i18n, webhooks, validation\n"
+                "         build, deploy, search, i18n, webhooks, validation,\n"
+                "         compute\n"
                 "  Levels: minimal, compact (default), full\n");
         return 1;
     }

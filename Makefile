@@ -1373,7 +1373,7 @@ test: $(TEST_BINS)
 	for t in $(TEST_BINS); do \
 		total=$$((total + 1)); \
 		echo "=== $$(basename $$t) ==="; \
-		if $$t; then \
+		if HULL_QUIET_AOT=1 $$t; then \
 			pass=$$((pass + 1)); \
 		else \
 			fail=$$((fail + 1)); \

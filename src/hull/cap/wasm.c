@@ -535,6 +535,20 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
 
     log_info("[wasm] cached module '%s' (abi=%u, aot=%d, mem64=%d)",
              name, cached->abi_version, is_aot, detected_memory64);
+
+    /* AOT-fallback warning: Hull always links the WAMR AOT loader, so
+     * loading via the (much slower) fast interpreter when an AOT-compiled
+     * variant could exist is almost always a build-pipeline oversight.
+     * Fires once per module load (which is cached, so once per process).
+     *
+     * Suppress the warning when HULL_QUIET_AOT=1 (set by tests + CI that
+     * intentionally exercise the interpreter path). */
+    if (!is_aot && getenv("HULL_QUIET_AOT") == NULL) {
+        log_warn("[wasm] module '%s' is running in the fast interpreter "
+                 "(no AOT artifact found). Compile with `wamrc` (make wamrc) "
+                 "and rebuild — AOT is typically ~50x faster.",
+                 name);
+    }
     return 0;
 }
 

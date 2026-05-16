@@ -11,7 +11,9 @@
  *   1. Hull binary metadata (version, runtime, platform, build mode)
  *   2. Platform library embedding (none / single-arch / multi-arch)
  *   3. C compiler availability in PATH (cc, gcc, clang, cosmocc)
- *   4. Overall hull build readiness summary
+ *   4. WASM compute capability (HL_ENABLE_WASM, AOT loader, wamrc)
+ *   5. GPU compute capability (HL_ENABLE_GPU)
+ *   6. Overall hull build readiness summary
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -158,6 +160,102 @@ static int tcc_is_embedded(void)
 }
 #endif
 
+/* ── Compute (WASM/AOT) capability detection ───────────────────────── */
+/*
+ * Reports what this hull binary can do with compute WASM modules
+ * and how AOT-ready the host environment is.
+ *
+ * We answer four questions:
+ *   1. Was the binary built with HL_ENABLE_WASM?  (yes / no — compile-time)
+ *   2. Was Memory64 support compiled in?           (always yes when WASM is on
+ *                                                   today, kept as a flag so
+ *                                                   future builds can drop it)
+ *   3. Is `wamrc` available to AOT-compile sources on this host?
+ *      Looked up in PATH and as a sibling to the running hull binary.
+ *   4. Is `clang` with wasm32 targeting available? (so `hull compute build`
+ *      can compile `.c` sources). We piggy-back on the existing compiler
+ *      discovery: any `clang` in PATH suffices on Linux (assumes lld);
+ *      Homebrew llvm@18 sits in a non-PATH directory we also probe.
+ */
+
+#define HL_AOT_ARCH_THIS \
+    "host"
+
+typedef struct {
+    int   wasm_enabled;          /* HL_ENABLE_WASM */
+    char  wamrc_path[PATH_MAX];  /* empty = not found */
+    char  clang_path[PATH_MAX];  /* empty = not found */
+    int   has_brew_llvm;         /* Homebrew llvm clang exists under /opt/homebrew or /usr/local */
+    int   has_wasm_ld;           /* wasm-ld in PATH (Linux) */
+    int   gpu_enabled;           /* HL_ENABLE_GPU */
+} ComputeInfo;
+
+/* Look for wamrc next to the running hull binary as well as in PATH.
+ * Many devs run `make wamrc` which produces build/wamrc next to build/hull. */
+static int find_sibling_executable(const char *self_path, const char *name,
+                                   char *out, size_t out_sz)
+{
+    if (!self_path || !name || !out || out_sz == 0) return 0;
+    /* Strip the basename from self_path. */
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof(dir), "%s", self_path);
+    char *slash = strrchr(dir, '/');
+    if (!slash) return 0;
+    *slash = '\0';
+    char candidate[PATH_MAX];
+    int n = snprintf(candidate, sizeof(candidate), "%s/%s", dir, name);
+    if (n <= 0 || (size_t)n >= sizeof(candidate)) return 0;
+    if (access(candidate, X_OK) == 0) {
+        snprintf(out, out_sz, "%s", candidate);
+        return 1;
+    }
+    return 0;
+}
+
+static void detect_compute(ComputeInfo *info, const char *self_path)
+{
+    memset(info, 0, sizeof(*info));
+
+#ifdef HL_ENABLE_WASM
+    info->wasm_enabled = 1;
+#else
+    info->wasm_enabled = 0;
+#endif
+
+#ifdef HL_ENABLE_GPU
+    info->gpu_enabled = 1;
+#else
+    info->gpu_enabled = 0;
+#endif
+
+    /* wamrc: prefer sibling-to-hull (i.e. `make wamrc` artifact next to
+     * the running binary), fall back to PATH. */
+    if (!find_sibling_executable(self_path, "wamrc",
+                                 info->wamrc_path, sizeof(info->wamrc_path)))
+        find_in_path("wamrc", info->wamrc_path, sizeof(info->wamrc_path));
+
+    /* Probe for Homebrew llvm (needed on macOS for wasm-ld). */
+    const char *brew[] = {
+        "/opt/homebrew/opt/llvm@18/bin/clang",
+        "/opt/homebrew/opt/llvm/bin/clang",
+        "/usr/local/opt/llvm@18/bin/clang",
+        "/usr/local/opt/llvm/bin/clang",
+        NULL,
+    };
+    for (const char **p = brew; *p; p++) {
+        if (access(*p, X_OK) == 0) {
+            snprintf(info->clang_path, sizeof(info->clang_path), "%s", *p);
+            info->has_brew_llvm = 1;
+            break;
+        }
+    }
+    if (!info->clang_path[0])
+        find_in_path("clang", info->clang_path, sizeof(info->clang_path));
+
+    char wasm_ld_path[PATH_MAX];
+    info->has_wasm_ld = find_in_path("wasm-ld", wasm_ld_path, sizeof(wasm_ld_path));
+}
+
 /* ── Human-readable output ──────────────────────────────────────── */
 
 static void print_check(const char *label, int ok, const char *detail)
@@ -169,7 +267,8 @@ static void print_check(const char *label, int ok, const char *detail)
 }
 
 static void print_human(CompilerInfo *ci, int nci,
-                        PlatformEmbed embed, int any_compiler)
+                        PlatformEmbed embed, int any_compiler,
+                        const ComputeInfo *cmp)
 {
     /* ── Binary info ── */
     fprintf(stdout, "hull %s  %s  %s  %s\n\n",
@@ -241,6 +340,50 @@ static void print_human(CompilerInfo *ci, int nci,
         fprintf(stdout, "\n");
     }
 
+    /* ── Compute (WASM) ── */
+    fprintf(stdout, "Compute (WASM)  (compute/<name>.wasm modules)\n");
+    if (!cmp->wasm_enabled) {
+        fprintf(stdout, "  runtime     \xe2\x9c\x97  HL_ENABLE_WASM=0 — compute.* unavailable\n");
+    } else {
+        fprintf(stdout, "  runtime     \xe2\x9c\x93  WAMR enabled (interpreter + AOT loader linked in)\n");
+
+        /* AOT precompiler (host toolchain). */
+        if (cmp->wamrc_path[0]) {
+            fprintf(stdout, "  wamrc       \xe2\x9c\x93  %s\n", cmp->wamrc_path);
+            fprintf(stdout, "                (hull build will auto-AOT-compile compute/*.wasm)\n");
+        } else {
+            fprintf(stdout, "  wamrc       \xe2\x9c\x97  not found in PATH or next to hull\n");
+            fprintf(stdout, "                hint: `make wamrc` (requires cmake + LLVM)\n");
+            fprintf(stdout, "                without wamrc, modules run via the fast interpreter\n");
+            fprintf(stdout, "                (~50x slower than AOT for compute-heavy work)\n");
+        }
+
+        /* Source toolchain (for `hull compute build`). */
+        if (cmp->clang_path[0]) {
+            fprintf(stdout, "  clang       \xe2\x9c\x93  %s\n", cmp->clang_path);
+            if (cmp->has_brew_llvm) {
+                fprintf(stdout, "                (Homebrew llvm — bundles wasm-ld)\n");
+            } else if (cmp->has_wasm_ld) {
+                fprintf(stdout, "                (with wasm-ld in PATH)\n");
+            } else {
+                fprintf(stdout, "                \xe2\x9a\xa0  wasm-ld not found — install lld\n");
+            }
+        } else {
+            fprintf(stdout, "  clang       \xe2\x9c\x97  not found — `hull compute build` cannot compile sources\n");
+            fprintf(stdout, "                hint: brew install llvm@18 (macOS) / apt install clang lld (Linux)\n");
+        }
+    }
+    fprintf(stdout, "\n");
+
+    /* ── Compute (GPU) ── */
+    fprintf(stdout, "Compute (GPU)   (shaders/<name>.wgsl)\n");
+    if (cmp->gpu_enabled) {
+        fprintf(stdout, "  runtime     \xe2\x9c\x93  wgpu-native linked in\n");
+    } else {
+        fprintf(stdout, "  runtime     \xe2\x97\x8b  not built (rebuild with `make HL_ENABLE_GPU=1 WGPU_LIB_DIR=vendor/wgpu`)\n");
+    }
+    fprintf(stdout, "\n");
+
     /* ── Summary ── */
     fprintf(stdout, "hull build    ");
     if (embed == PLATFORM_NONE) {
@@ -279,7 +422,8 @@ static void json_str(FILE *f, const char *s)
 }
 
 static void print_json(CompilerInfo *ci, int nci,
-                       PlatformEmbed embed, int any_compiler)
+                       PlatformEmbed embed, int any_compiler,
+                       const ComputeInfo *cmp)
 {
     const char *embed_str =
         embed == PLATFORM_MULTI  ? "multi-arch" :
@@ -345,6 +489,24 @@ static void print_json(CompilerInfo *ci, int nci,
         }
         fprintf(stdout, "},\n");
     }
+    /* Compute capability surface. */
+    fprintf(stdout, "  \"compute\": {");
+    fprintf(stdout, "\"wasm_enabled\": %s",
+            cmp->wasm_enabled ? "true" : "false");
+    fprintf(stdout, ", \"gpu_enabled\": %s",
+            cmp->gpu_enabled ? "true" : "false");
+    fprintf(stdout, ", \"wamrc\": ");
+    if (cmp->wamrc_path[0]) json_str(stdout, cmp->wamrc_path);
+    else                    fprintf(stdout, "null");
+    fprintf(stdout, ", \"clang\": ");
+    if (cmp->clang_path[0]) json_str(stdout, cmp->clang_path);
+    else                    fprintf(stdout, "null");
+    fprintf(stdout, ", \"wasm_ld\": %s",
+            cmp->has_wasm_ld ? "true" : "false");
+    /* aot_ready: hull build will produce AOT outputs end-to-end. */
+    int aot_ready = cmp->wasm_enabled && cmp->wamrc_path[0] != '\0';
+    fprintf(stdout, ", \"aot_ready\": %s", aot_ready ? "true" : "false");
+    fprintf(stdout, "},\n");
     fprintf(stdout, "  \"hull_build\": \"%s\"\n", ready_str);
     fprintf(stdout, "}\n");
 }
@@ -353,8 +515,6 @@ static void print_json(CompilerInfo *ci, int nci,
 
 int hl_cmd_doctor(int argc, char **argv, const HlCommandEnv *env)
 {
-    (void)env;
-
     int json = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--json") == 0)
@@ -376,10 +536,13 @@ int hl_cmd_doctor(int argc, char **argv, const HlCommandEnv *env)
 
     PlatformEmbed embed = detect_platform();
 
+    ComputeInfo cmp;
+    detect_compute(&cmp, env->hull_exe);
+
     if (json)
-        print_json(ci, MAX_COMPILERS, embed, any_compiler);
+        print_json(ci, MAX_COMPILERS, embed, any_compiler, &cmp);
     else
-        print_human(ci, MAX_COMPILERS, embed, any_compiler);
+        print_human(ci, MAX_COMPILERS, embed, any_compiler, &cmp);
 
     /* Exit 1 if hull build cannot work, so scripts can check: hull doctor || ... */
 #ifdef HL_ENABLE_TCC

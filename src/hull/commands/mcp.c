@@ -63,7 +63,7 @@ static const char SCHEMA_TEST[] =
 static const char SCHEMA_CONTEXT[] =
     "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\","
     "\"description\":\"Task keyword (auth, db, middleware, templates, routing, "
-    "testing, build, deploy, search, i18n, webhooks, validation)\"},"
+    "testing, build, deploy, search, i18n, webhooks, validation, compute)\"},"
     "\"level\":{\"type\":\"string\",\"enum\":[\"minimal\",\"compact\",\"full\"],"
     "\"description\":\"Detail level (default: compact)\"}},"
     "\"required\":[\"task\"]}";
@@ -176,7 +176,7 @@ static const McpTool mcp_tools[] = {
                               SCHEMA_VALIDATE },
     { "hull_vfs",            "List embedded files (path, size, bucket)",
                               SCHEMA_APP_DIR_ONLY },
-    { "hull_compute",        "List WASM compute modules + AOT presence",
+    { "hull_compute",        "List WASM compute modules + AOT presence. For authoring use the shell commands `hull compute new|build|test|check|refresh-header` and the `compute` context (hull_context task=compute).",
                               SCHEMA_APP_DIR_ONLY },
     { "hull_gpu",            "List compiled WGSL shaders + GPU availability",
                               SCHEMA_APP_DIR_ONLY },
