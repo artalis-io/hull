@@ -1,11 +1,18 @@
-/*
- * hull:jwt -- JWT HS256 sign/verify/decode
+/**
+ * @file hull:jwt
+ * @module hull:jwt
+ * @description JWT HS256 sign / verify / decode.
  *
- * jwt.sign(payload, secret)   - returns JWT token string
- * jwt.verify(token, secret)   - returns [payload, null] or [null, "reason"]
- * jwt.decode(token)           - decode without verification, returns payload or null
+ * Only HS256 is supported — `"alg":"none"` is rejected, and there is no
+ * asymmetric-key path here. All comparisons of HMAC digests are
+ * constant-time.
  *
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * @example
+ * import { jwt } from "hull:jwt";
+ * const token = jwt.sign({ sub: userId, exp: 3600 }, secret);  // 1h from now
+ * const [payload, err] = jwt.verify(token, secret, { requireExp: true });
+ *
+ * @license AGPL-3.0-or-later
  */
 
 import { crypto } from "hull:crypto";
@@ -58,6 +65,22 @@ function computeSignature(headerB64, payloadB64, secret) {
     return crypto.base64urlEncode(raw);
 }
 
+/**
+ * Sign a payload and return a JWT string.
+ *
+ * Special claim handling:
+ *   - `iat` is auto-set to `time.now()` if absent.
+ *   - `exp` < 2e9 is treated as seconds-from-now and added to `time.now()`.
+ *     Values ≥ 2e9 are taken as absolute Unix timestamps. (Lua parity.)
+ *
+ * @param {Object} payload  Claims to encode. Any JSON-serializable values.
+ * @param {string} secret   HMAC-SHA256 key. ASCII bytes; must not be empty.
+ * @returns {string}        Compact-encoded JWT (`base64url(header).base64url(payload).base64url(sig)`).
+ * @throws {Error} If `payload` is not an object or `secret` is missing.
+ *
+ * @example
+ * const token = sign({ sub: "alice", exp: 3600 }, "my-secret");
+ */
 function sign(payload, secret) {
     if (!payload || typeof payload !== "object")
         throw new Error("payload must be an object");
@@ -86,6 +109,33 @@ function sign(payload, secret) {
     return HEADER_B64 + "." + payloadB64 + "." + sig;
 }
 
+/**
+ * Verify a JWT and return the decoded payload.
+ *
+ * Steps performed:
+ *   1. Split the token into header / payload / signature.
+ *   2. Check the header matches the canonical HS256 header.
+ *   3. Recompute HMAC-SHA256, constant-time-compare.
+ *   4. Decode payload JSON.
+ *   5. Reject expired (`exp` ≤ now) or not-yet-valid (`nbf` > now).
+ *   6. If `opts.requireExp` / `opts.require_exp`, reject tokens with no `exp`.
+ *
+ * @param {string} token       JWT in compact form.
+ * @param {string} secret      Same secret used at sign time.
+ * @param {Object} [opts]      Verification options.
+ * @param {boolean} [opts.requireExp]   Reject tokens missing `exp`.
+ * @param {boolean} [opts.require_exp]  Lua-parity alias.
+ * @returns {[Object|null, string|null]}
+ *   On success: `[payload, null]`. On failure: `[null, reason]` where reason is one of
+ *   `"invalid token"`, `"secret is required"`, `"malformed token"`,
+ *   `"unsupported algorithm"`, `"invalid signature"`, `"invalid payload encoding"`,
+ *   `"invalid payload JSON"`, `"payload is not an object"`, `"token expired"`,
+ *   `"token missing required exp claim"`, `"token not yet valid"`.
+ *
+ * @example
+ * const [payload, err] = verify(token, secret, { requireExp: true });
+ * if (!payload) return res.status(401).json({ error: err });
+ */
 function verify(token, secret, opts) {
     if (!token || typeof token !== "string")
         return [null, "invalid token"];
@@ -141,6 +191,14 @@ function verify(token, secret, opts) {
     return [payload, null];
 }
 
+/**
+ * Decode a JWT payload WITHOUT verifying the signature. Debug use only.
+ *
+ * @param {string} token  JWT in compact form.
+ * @returns {Object|null} Decoded payload, or `null` on malformed input.
+ *
+ * @warning Never use this for authentication. Always pair with {@link verify}.
+ */
 function decode(token) {
     if (!token || typeof token !== "string")
         return null;

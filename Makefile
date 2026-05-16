@@ -1705,6 +1705,74 @@ fetch-cosmocc:
 		echo "Add to PATH: export PATH=$(COSMOCC_DIR)/bin:\$$PATH"; \
 	fi
 
+# ── API documentation (two-tier: source comments + generated HTML) ──
+#
+# Ground truth: Doxygen/JSDoc/LDoc comments in the source. Generated
+# browseable HTML lives under build/api/ (gitignored). Curated narrative
+# docs live at docs/api/{c,lua,js}.md (hand-edited; kept in sync).
+#
+# Requirements:
+#   - doxygen (brew install doxygen / apt install doxygen)
+#   - ldoc    (luarocks install ldoc)
+#   - jsdoc   (npm install -g jsdoc)
+#
+# Targets:
+#   docs-api          — build all three
+#   docs-api-c        — Doxygen → build/api/c/
+#   docs-api-lua      — LDoc    → build/api/lua/
+#   docs-api-js       — JSDoc   → build/api/js/
+#   docs-api-check    — fail if any required tool is missing
+
+DOXYGEN ?= doxygen
+LDOC    ?= ldoc
+JSDOC   ?= jsdoc
+
+.PHONY: docs-api docs-api-c docs-api-lua docs-api-js docs-api-check
+
+docs-api: docs-api-c docs-api-lua docs-api-js
+	@echo ""
+	@echo "=== Hull API docs built ==="
+	@echo "  C   → build/api/c/index.html"
+	@echo "  Lua → build/api/lua/index.html"
+	@echo "  JS  → build/api/js/index.html"
+	@echo ""
+	@echo "Curated markdown reference: docs/api/{c,lua,js}.md"
+
+docs-api-c:
+	@if ! command -v $(DOXYGEN) >/dev/null 2>&1; then \
+		echo "ERROR: doxygen not found. Install with: brew install doxygen / apt install doxygen"; \
+		exit 1; \
+	fi
+	@mkdir -p build/api/c
+	@$(DOXYGEN) config/Doxyfile
+
+docs-api-lua:
+	@if ! command -v $(LDOC) >/dev/null 2>&1; then \
+		echo "ERROR: ldoc not found. Install with: luarocks install ldoc"; \
+		exit 1; \
+	fi
+	@mkdir -p build/api/lua
+	@$(LDOC) -c config/ldoc.cfg .
+
+docs-api-js:
+	@if ! command -v $(JSDOC) >/dev/null 2>&1; then \
+		echo "ERROR: jsdoc not found. Install with: npm install -g jsdoc"; \
+		exit 1; \
+	fi
+	@mkdir -p build/api/js
+	@$(JSDOC) -c config/jsdoc.conf.json
+
+docs-api-check:
+	@missing=0; \
+	for tool in $(DOXYGEN) $(LDOC) $(JSDOC); do \
+		if ! command -v $$tool >/dev/null 2>&1; then \
+			echo "missing: $$tool"; missing=1; \
+		else \
+			echo "found:   $$tool ($$($$tool --version 2>/dev/null | head -1))"; \
+		fi; \
+	done; \
+	exit $$missing
+
 # ── Clean ───────────────────────────────────────────────────────────
 
 clean:

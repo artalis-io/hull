@@ -1,10 +1,19 @@
+--- JWT HS256 sign / verify / decode.
 --
--- hull.jwt -- JWT creation and verification (HS256)
+-- @module hull.jwt
+-- @author Hull contributors
+-- @license AGPL-3.0-or-later
 --
--- Uses crypto.hmac_sha256, crypto.base64url_encode/decode, json, and time globals.
+-- Uses `crypto.hmac_sha256`, `crypto.base64url_encode/decode`, `json`,
+-- and `time` globals. Only HS256 is supported — the `"alg":"none"` family
+-- is rejected, and there is no asymmetric-key path here.
 --
--- SPDX-License-Identifier: AGPL-3.0-or-later
+-- All comparisons of HMAC digests are constant-time.
 --
+-- @usage
+-- local jwt = require("hull.jwt")
+-- local token = jwt.sign({ sub = user_id, exp = 3600 }, secret)  -- 1h from now
+-- local payload, err = jwt.verify(token, secret, { require_exp = true })
 
 local jwt = {}
 
@@ -48,9 +57,18 @@ local function compute_signature(data, secret)
     return table.concat(raw)
 end
 
---- Sign a payload table and return a JWT string.
--- If payload.exp is set and < 2e9, treat it as seconds-from-now.
--- Automatically sets payload.iat if missing.
+--- Sign a payload and return a JWT string.
+--
+-- @tparam table payload  Claims to encode. Any JSON-serializable values.
+--   Special handling:
+--     - `iat` is auto-set to `time.now()` if absent.
+--     - `exp` < 2e9 is treated as seconds-from-now and `time.now()` is added.
+--       Values ≥ 2e9 are taken as absolute Unix timestamps.
+-- @tparam string secret  HMAC-SHA256 key. ASCII bytes; **must not** be empty.
+-- @treturn string  Compact-encoded JWT (`base64url(header).base64url(payload).base64url(sig)`).
+-- @raise Errors if `payload` or `secret` is missing.
+-- @usage
+-- local token = jwt.sign({ sub = "alice", exp = 3600 }, "my-secret")
 function jwt.sign(payload, secret)
     if not payload or not secret then
         return nil, "payload and secret are required"
@@ -82,9 +100,29 @@ function jwt.sign(payload, secret)
     return signing_input .. "." .. sig_b64
 end
 
---- Verify a JWT token and return the payload table on success.
--- Returns nil, "error reason" on failure.
--- opts.require_exp: if true, reject tokens without an exp claim.
+--- Verify a JWT and return the decoded payload.
+--
+-- Steps performed:
+--   1. Split the token, check it has exactly three parts.
+--   2. Compare the header (only `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9` is accepted).
+--   3. Recompute the HMAC-SHA256 signature and constant-time-compare.
+--   4. Decode the payload JSON.
+--   5. Reject expired (`exp` ≤ now) or not-yet-valid (`nbf` > now) tokens.
+--   6. If `opts.require_exp` is true, reject tokens lacking an `exp` claim.
+--
+-- @tparam string token   JWT in compact form.
+-- @tparam string secret  Same secret used at sign time.
+-- @tparam[opt] table opts  `{ require_exp = boolean }`.
+-- @treturn ?table payload  Decoded claims on success.
+-- @treturn ?string err     Reason on failure (when payload is nil):
+--   `"token and secret are required"`, `"invalid token format"`,
+--   `"unsupported algorithm"`, `"invalid signature"`,
+--   `"invalid payload encoding"`, `"invalid payload JSON"`,
+--   `"token expired"`, `"token missing required exp claim"`,
+--   `"token not yet valid"`.
+-- @usage
+-- local payload, err = jwt.verify(token, secret, { require_exp = true })
+-- if not payload then return res:status(401):json({ error = err }) end
 function jwt.verify(token, secret, opts)
     if not token or not secret then
         return nil, "token and secret are required"
@@ -150,8 +188,11 @@ function jwt.verify(token, secret, opts)
     return payload
 end
 
---- Decode a JWT token without verification (for debugging only).
--- Returns the payload table, or nil on decode failure.
+--- Decode a JWT payload WITHOUT verifying the signature. Debug use only.
+--
+-- @tparam string token  JWT in compact form.
+-- @treturn ?table  Decoded claims, or `nil` on malformed / unparsable input.
+-- @warning Never use this for authentication. Always pair with @{jwt.verify}.
 function jwt.decode(token)
     if not token then
         return nil

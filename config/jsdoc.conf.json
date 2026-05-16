@@ -1,0 +1,36 @@
+{
+    "//": "JSDoc config for Hull's JS stdlib (stdlib/js/hull/). Output: build/api/js/",
+    "//": "Run via: make docs-api-js",
+    "//": "Reference: https://jsdoc.app/about-configuring-jsdoc",
+    "source": {
+        "include": ["stdlib/js/hull"],
+        "exclude": ["stdlib/js/hull/tests"],
+        "includePattern": "\\.js$",
+        "excludePattern": "(^|\\/|\\\\)_"
+    },
+    "opts": {
+        "destination": "build/api/js",
+        "encoding": "utf8",
+        "recurse": true,
+        "verbose": false,
+        "readme": "docs/api/js.md"
+    },
+    "plugins": [
+        "plugins/markdown"
+    ],
+    "markdown": {
+        "parser": "gfm"
+    },
+    "templates": {
+        "default": {
+            "outputSourceFiles": true,
+            "includeDate": false
+        },
+        "cleverLinks": true,
+        "monospaceLinks": true
+    },
+    "tags": {
+        "allowUnknownTags": false,
+        "dictionaries": ["jsdoc"]
+    }
+}
