@@ -1,15 +1,25 @@
-/*
- * hull:cookie -- Cookie parsing and serialization
+/**
+ * @file hull:cookie
+ * @module hull:cookie
+ * @description HTTP cookie parsing and serialization.
  *
- * cookie.parse(headerString)        -> object of name/value pairs
- * cookie.serialize(name, value, opts) -> Set-Cookie header string
- * cookie.clear(name, opts)          -> Set-Cookie header that expires the cookie
+ * Lua parity: same surface as `hull.cookie` with camelCase options.
  *
- * Defaults: httpOnly=true, secure=true, sameSite="Lax", path="/"
- *
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * @license AGPL-3.0-or-later
  */
 
+/**
+ * Parse a `Cookie` header string into a name-value object.
+ *
+ * Empty or non-string input returns an empty object (never throws).
+ *
+ * @param {string|null|undefined} headerString  Value of the inbound `Cookie` header.
+ * @returns {Object.<string, string>}  Parsed cookies. `{}` when input is empty.
+ *
+ * @example
+ * const cookies = cookie.parse(req.headers.cookie);
+ * if (cookies.session_id) { ... }
+ */
 function parse(headerString) {
     const result = {};
     if (!headerString || typeof headerString !== "string")
@@ -43,6 +53,24 @@ function parse(headerString) {
     return result;
 }
 
+/**
+ * Serialize a cookie into a `Set-Cookie` header value.
+ *
+ * @param {string} name           Cookie name.
+ * @param {string} value          Cookie value.
+ * @param {Object} [opts]         Options.
+ * @param {string}  [opts.path="/"]
+ * @param {boolean} [opts.httpOnly=true]
+ * @param {boolean} [opts.secure=true]
+ * @param {"Lax"|"Strict"|"None"} [opts.sameSite="Lax"]
+ * @param {number}  [opts.maxAge]
+ * @param {string}  [opts.domain]
+ * @param {string}  [opts.expires]  RFC 1123 date.
+ * @returns {string}  `Set-Cookie` header value. Pair with `res.header("Set-Cookie", v)`.
+ *
+ * @example
+ * res.header("Set-Cookie", cookie.serialize("session", sid, { sameSite: "Strict" }));
+ */
 function serialize(name, value, opts) {
     if (!name || typeof name !== "string")
         throw new Error("cookie name is required");
@@ -120,6 +148,13 @@ function serialize(name, value, opts) {
 const COOKIE_ATTRS = ["path", "domain", "httpOnly", "secure", "sameSite",
                        "maxAge", "expires"];
 
+/**
+ * Build a `Set-Cookie` value that deletes the named cookie.
+ *
+ * @param {string} name  Cookie name to clear.
+ * @param {Object} [opts]  Same options as {@link serialize}; `path`/`domain` should match the original.
+ * @returns {string}  `Set-Cookie` header value with `Max-Age=0`.
+ */
 function clear(name, opts) {
     const o = Object.create(null);
     if (opts) {

@@ -1,16 +1,19 @@
+--- CORS middleware factory.
 --
--- hull.cors -- CORS middleware factory
---
--- cors.middleware(opts)                      - returns middleware function
--- cors.is_allowed_origin(origin, origins)    - pure helper, testable
---
--- SPDX-License-Identifier: AGPL-3.0-or-later
---
+-- @module hull.middleware.cors
+-- @license AGPL-3.0-or-later
 
 local cors = {}
 
 --- Check whether an origin is in the allowed list.
--- Returns true if origins contains "*" or the exact origin string.
+--
+-- Returns true iff `origins` contains `"*"` or an exact match of @{origin}.
+-- Wildcard subdomains (`*.example.com`) are not supported — list each
+-- explicit origin.
+--
+-- @tparam string origin   Incoming `Origin` header value.
+-- @tparam {string,...} origins  Allowed origins list.
+-- @treturn boolean  `true` if the origin is allowed.
 function cors.is_allowed_origin(origin, origins)
     if not origin or not origins then return false end
     for _, o in ipairs(origins) do
@@ -19,12 +22,37 @@ function cors.is_allowed_origin(origin, origins)
     return false
 end
 
---- Create a CORS middleware function for use with app.use().
--- opts.origins: list of allowed origin strings, or {"*"} (required)
--- opts.methods: allowed methods string (default "GET, POST, PUT, DELETE, OPTIONS")
--- opts.headers: allowed headers string (default "Content-Type, Authorization")
--- opts.credentials: boolean, send Allow-Credentials header (default false)
--- opts.max_age: preflight cache max-age in seconds (default 86400)
+--- Create a CORS middleware function for use with `app.use()`.
+--
+-- The returned middleware:
+--   - skips requests without an `Origin` header (returns 0, "continue");
+--   - rejects with no headers (silently — browser will block) when the
+--     origin is not in the allowlist;
+--   - on allowed origins, emits `Access-Control-Allow-Origin` + `Vary`
+--     + (when `opts.credentials`) `Access-Control-Allow-Credentials`;
+--   - on `OPTIONS` preflight: emits methods/headers/max-age and replies
+--     `204 No Content` (returns 1, "short-circuit").
+--
+-- Phase 6 fail-fast: `error()` is raised at factory time if
+-- `credentials = true` is combined with `origins = {"*"}` — that
+-- combination is silently rejected by browsers and a common bug.
+--
+-- @tparam[opt] table opts  Options:
+--
+--   - `origins` (`{string,...}`, default `{"*"}`): allowed origins.
+--   - `methods` (string, default `"GET, POST, PUT, DELETE, OPTIONS"`)
+--   - `headers` (string, default `"Content-Type, Authorization"`)
+--   - `credentials` (boolean, default `false`)
+--   - `max_age` (integer, preflight cache seconds, default `86400`)
+--
+-- @treturn function  Middleware function with signature `(req, res) -> integer`.
+-- @raise If `credentials = true` and `origins = {"*"}`.
+-- @usage
+-- local cors = require("hull.middleware.cors")
+-- app.use("*", "/api/*", cors.middleware({
+--     origins = { "https://app.example.com" },
+--     credentials = true,
+-- }))
 function cors.middleware(opts)
     opts = opts or {}
 

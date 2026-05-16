@@ -1,15 +1,20 @@
+--- HTTP cookie parsing and serialization.
 --
--- hull.cookie -- Cookie parsing and serialization
---
--- Pure functions for HTTP cookie handling.
---
--- SPDX-License-Identifier: AGPL-3.0-or-later
---
+-- @module hull.cookie
+-- @license AGPL-3.0-or-later
 
 local cookie = {}
 
---- Parse a Cookie header string into a key-value table.
--- "session=abc; theme=dark" -> { session = "abc", theme = "dark" }
+--- Parse a `Cookie` header string into a name-value table.
+--
+-- Each cookie is split on `=`, trimmed of surrounding whitespace.
+-- Empty input or `nil` returns an empty table (never errors).
+--
+-- @tparam string|nil header_string  Value of the inbound `Cookie` header.
+-- @treturn {[string]=string} Parsed cookies. Empty table when input is `nil` or empty.
+-- @usage
+-- local cookies = cookie.parse(req.headers["cookie"])
+-- if cookies.session_id then ... end
 function cookie.parse(header_string)
     local result = {}
     if not header_string or header_string == "" then
@@ -34,8 +39,23 @@ function cookie.parse(header_string)
     return result
 end
 
---- Serialize a cookie name/value pair with options into a Set-Cookie header value.
--- Defaults: HttpOnly=true, Secure=false, SameSite=Lax, Path=/
+--- Serialize a cookie into a `Set-Cookie` header value.
+--
+-- @tparam string name   Cookie name.
+-- @tparam string value  Cookie value. Caller is responsible for any encoding.
+-- @tparam[opt] table opts  Options:
+--
+--   - `path`     (string, default `"/"`)
+--   - `httponly` (boolean, default `true`)
+--   - `secure`   (boolean, default `false`)
+--   - `samesite` (string, default `"Lax"`; one of `"Lax"|"Strict"|"None"`)
+--   - `max_age`  (integer, seconds; omits attribute if `nil`)
+--   - `domain`   (string)
+--   - `expires`  (string, RFC 1123 date; omits if `nil`)
+--
+-- @treturn string  `Set-Cookie` header value. Pair with `res:header("Set-Cookie", v)`.
+-- @usage
+-- res:header("Set-Cookie", cookie.serialize("session", sid, { secure = true }))
 function cookie.serialize(name, value, opts)
     opts = opts or {}
 
@@ -107,7 +127,17 @@ function cookie.serialize(name, value, opts)
     return table.concat(parts, "; ")
 end
 
---- Clear a cookie by setting Max-Age=0 and an empty value.
+--- Build a `Set-Cookie` value that deletes the named cookie.
+--
+-- Sets `Max-Age=0` and an empty value. The browser deletes the cookie
+-- on receipt.
+--
+-- @tparam string name  Cookie name to clear.
+-- @tparam[opt] table opts  Same options as @{cookie.serialize}; `path` /
+--   `domain` should match the original to ensure the right cookie is cleared.
+-- @treturn string  `Set-Cookie` header value.
+-- @usage
+-- res:header("Set-Cookie", cookie.clear("session", { path = "/" }))
 function cookie.clear(name, opts)
     opts = opts or {}
     local clear_opts = {}

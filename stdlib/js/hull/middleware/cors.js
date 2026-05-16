@@ -1,12 +1,22 @@
-/*
- * hull:cors -- CORS middleware factory
+/**
+ * @file hull:middleware:cors
+ * @module hull:middleware:cors
+ * @description CORS middleware factory.
  *
- * cors.middleware(opts)                     - returns middleware function
- * cors.isAllowedOrigin(origin, origins)     - pure helper, testable
+ * Lua parity: same surface as `hull.middleware.cors` with camelCase
+ * options.
  *
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * @license AGPL-3.0-or-later
  */
 
+/**
+ * Check whether an origin is in the allowed list.
+ *
+ * @param {string} origin       Incoming `Origin` header value.
+ * @param {string[]} origins    Allowed origins. Use `"*"` for any (browser-rejected
+ *                              when combined with credentials — the factory throws).
+ * @returns {boolean}
+ */
 function isAllowedOrigin(origin, origins) {
     if (!origin || !origins) return false;
     for (let i = 0; i < origins.length; i++) {
@@ -15,6 +25,34 @@ function isAllowedOrigin(origin, origins) {
     return false;
 }
 
+/**
+ * Build a CORS middleware function for `app.use()`.
+ *
+ * The middleware skips requests without an `Origin` header, rejects
+ * disallowed origins silently (browser blocks), and on allowed origins
+ * emits `Access-Control-Allow-Origin` + `Vary` + (when `credentials`)
+ * `Access-Control-Allow-Credentials`. On `OPTIONS` preflight: emits
+ * methods/headers/max-age and replies 204 (short-circuit, returns 1).
+ *
+ * Fail-fast: throws at factory time if `credentials: true` is combined
+ * with `origins: ["*"]` — browsers reject that combination and it's a
+ * common bug.
+ *
+ * @param {Object} [opts]
+ * @param {string[]} [opts.origins=["*"]]
+ * @param {string}   [opts.methods="GET, POST, PUT, DELETE, OPTIONS"]
+ * @param {string}   [opts.headers="Content-Type, Authorization"]
+ * @param {boolean}  [opts.credentials=false]
+ * @param {number}   [opts.maxAge=86400]
+ * @returns {(req, res) => number}     Middleware function.
+ * @throws {Error} If `credentials: true && origins: ["*"]`.
+ *
+ * @example
+ * app.use("*", "/api/*", cors.middleware({
+ *     origins: ["https://app.example.com"],
+ *     credentials: true,
+ * }));
+ */
 function middleware(opts) {
     const o = opts || {};
 

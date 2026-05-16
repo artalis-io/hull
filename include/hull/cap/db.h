@@ -4,17 +4,17 @@
  *
  * Mediates every database access from Lua/JS runtimes. Apps that don't
  * need SQL can be built without this whole subsystem via
- * `make HL_ENABLE_DB=0` — see @ref CLAUDE.md "Compute-only builds".
+ * `make HL_ENABLE_DB=0` — see CLAUDE.md "Compute-only builds".
  *
- * @par Security invariants:
- * - All SQL goes through parameterised binding (@ref hl_cap_db_query /
- *   @ref hl_cap_db_exec). Hull does not expose any path that
- *   interpolates user data into SQL.
- * - Tables matching `_hull_*` are reserved for stdlib internals; see
- *   @ref hl_cap_db_check_namespace. User code is rejected by a
- *   call-stack check (Lua `ar.source` / JS module name).
+ * Security invariants:
+ *   - All SQL goes through parameterised binding (#hl_cap_db_query /
+ *     #hl_cap_db_exec). Hull does not expose any path that interpolates
+ *     user data into SQL.
+ *   - Tables matching `_hull_*` are reserved for stdlib internals; see
+ *     #hl_cap_db_check_namespace. User code is rejected by a call-stack
+ *     check (Lua `ar.source` / JS module name).
  *
- * @par Related: @ref CLAUDE.md "## Stdlib Middleware" `db.*` global.
+ * Related: CLAUDE.md "## Stdlib Middleware" `db.*` global.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

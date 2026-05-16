@@ -1,11 +1,11 @@
-/*
- * hull:form -- URL-encoded form body parsing
+/**
+ * @file hull:form
+ * @module hull:form
+ * @description URL-encoded form-body parsing.
  *
- * form.parse(body) -> object of name/value pairs
+ * Lua parity: same surface as `hull.form` with camelCase options.
  *
- * Decodes application/x-www-form-urlencoded strings.
- *
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * @license AGPL-3.0-or-later
  */
 
 function decodePart(s) {
@@ -14,6 +14,24 @@ function decodePart(s) {
     catch (e) { return decoded; }
 }
 
+/**
+ * Parse a URL-encoded form body into a name-value object.
+ *
+ * Handles `+` → space and `%XX` percent-decoding. Last value wins for
+ * duplicate keys. Empty/non-string input returns `{}` (never throws
+ * except on `maxFields` overflow).
+ *
+ * @param {string} body              Body bytes from a POST `application/x-www-form-urlencoded` request.
+ * @param {Object} [opts]            Options.
+ * @param {number} [opts.maxFields=1000]  Hard cap on `&`-separated pairs.
+ *   Exceeding throws.
+ * @returns {Object.<string, string>}     Parsed fields, with a `null` prototype.
+ * @throws {Error} If `body` contains more than `opts.maxFields` pairs.
+ *
+ * @example
+ * const fields = form.parse(req.body);
+ * const email = fields.email;
+ */
 function parse(body, opts) {
     const result = Object.create(null);
     if (!body || typeof body !== "string" || body.length === 0)

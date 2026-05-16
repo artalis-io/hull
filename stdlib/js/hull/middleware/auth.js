@@ -1,12 +1,23 @@
-/*
- * hull:auth -- Authentication middleware factories
+/**
+ * @file hull:middleware:auth
+ * @module hull:middleware:auth
+ * @description Authentication middleware factories (session + JWT) and login/logout helpers.
  *
- * auth.sessionMiddleware(opts) - returns middleware for session-based auth
- * auth.jwtMiddleware(opts)     - returns middleware for JWT bearer auth
- * auth.login(req, res, userData, opts)  - creates session, sets cookie, returns sessionId
- * auth.logout(req, res, opts)           - destroys session, clears cookie
+ * Lua parity: same surface as `hull.middleware.auth` with camelCase
+ * option names.
  *
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * @example
+ * import { auth } from "hull:middleware:auth";
+ * import { session } from "hull:middleware:session";
+ * session.init();
+ *
+ * // Cookie-based session auth for /app/*; redirect to /login on failure
+ * app.use("*", "/app/*", auth.sessionMiddleware({ loginPath: "/login" }));
+ *
+ * // Bearer-token JWT auth for /api/*
+ * app.use("*", "/api/*", auth.jwtMiddleware({ secret: env.get("JWT_SECRET") }));
+ *
+ * @license AGPL-3.0-or-later
  */
 
 import { cookie } from "hull:cookie";
@@ -20,6 +31,22 @@ function parseCookieHeader(req) {
     return cookie.parse(header);
 }
 
+/**
+ * Session-based authentication middleware.
+ *
+ * On match, populates `req.ctx.sessionId` and `req.ctx.session` (the
+ * session data object). On miss:
+ *   - sends `401 {error}` (default), OR
+ *   - redirects to `opts.loginPath` (302), OR
+ *   - returns 0 if `opts.optional`.
+ *
+ * @param {Object} [opts]
+ * @param {string} [opts.cookieName="hull_session"]
+ * @param {string} [opts.loginPath]    Redirect target on failure.
+ * @param {boolean} [opts.optional=false]
+ * @param {string[]} [opts.excludePaths]   Paths skipped entirely.
+ * @returns {(req, res) => number}     Middleware function.
+ */
 function sessionMiddleware(opts) {
     const o = opts || {};
     const cookieName = o.cookieName || "hull_session";
@@ -78,6 +105,20 @@ function sessionMiddleware(opts) {
     };
 }
 
+/**
+ * JWT Bearer-token authentication middleware.
+ *
+ * Reads `Authorization: Bearer <token>`, verifies via {@link
+ * module:hull:jwt.verify}, and populates `req.ctx.user` with the decoded
+ * payload on success. On failure sends `401 {error}` or returns 0 if
+ * `opts.optional`. CSRF is not needed for Bearer auth.
+ *
+ * @param {Object}  opts
+ * @param {string}  opts.secret    HMAC-SHA256 secret. **Required.**
+ * @param {boolean} [opts.optional=false]
+ * @returns {(req, res) => number}
+ * @throws {Error} If `opts.secret` is missing (at factory time).
+ */
 function jwtMiddleware(opts) {
     const o = opts || {};
     const secret = o.secret;
@@ -141,6 +182,17 @@ function copyCookieOpts(src) {
     return o;
 }
 
+/**
+ * Create a session and set the auth cookie.
+ *
+ * @param {Object} req            (Unused; reserved.)
+ * @param {Object} res            Response — `Set-Cookie` is added here.
+ * @param {Object} userData       Session payload, e.g. `{ user_id: 1 }`.
+ * @param {Object} [opts]
+ * @param {string} [opts.cookieName="hull_session"]
+ * @param {Object} [opts.cookieOpts]   Forwarded to {@link module:hull:cookie.serialize}.
+ * @returns {string}              Session id (hex).
+ */
 function login(req, res, userData, opts) {
     const o = opts || {};
     const cookieName = o.cookieName || "hull_session";
@@ -158,6 +210,15 @@ function login(req, res, userData, opts) {
     return sessionId;
 }
 
+/**
+ * Destroy the current session and clear the auth cookie.
+ *
+ * @param {Object} req            Reads the session cookie.
+ * @param {Object} res            Emits a `Set-Cookie` that clears it.
+ * @param {Object} [opts]
+ * @param {string} [opts.cookieName="hull_session"]
+ * @param {Object} [opts.cookieOpts]   Forwarded to {@link module:hull:cookie.clear}.
+ */
 function logout(req, res, opts) {
     const o = opts || {};
     const cookieName = o.cookieName || "hull_session";

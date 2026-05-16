@@ -1,10 +1,7 @@
+--- URL-encoded form-body parsing.
 --
--- hull.form -- URL-encoded form body parsing
---
--- Pure function for decoding application/x-www-form-urlencoded strings.
---
--- SPDX-License-Identifier: AGPL-3.0-or-later
---
+-- @module hull.form
+-- @license AGPL-3.0-or-later
 
 local form = {}
 
@@ -17,8 +14,23 @@ local function decode_percent(hex)
 end
 
 --- Parse a URL-encoded form body into a key-value table.
--- "email=a%40b.com&pass=hello+world" -> { email = "a@b.com", pass = "hello world" }
--- Last value wins for duplicate keys. Returns {} for nil/empty/non-string input.
+--
+-- Handles `+` → space and `%XX` percent-decoding. Last value wins for
+-- duplicate keys. Empty/`nil`/non-string input returns an empty table
+-- (no error).
+--
+-- @tparam string body  Body bytes (typically `req.body` for a POST
+--   `application/x-www-form-urlencoded` request).
+-- @tparam[opt] table opts  Options:
+--
+--   - `max_fields` (integer, default `1000`): hard cap on the number
+--     of `&`-separated pairs; exceeding raises an error.
+--
+-- @treturn {[string]=string} Parsed fields.
+-- @raise If `body` contains more than `opts.max_fields` pairs.
+-- @usage
+-- local fields = form.parse(req.body)
+-- local email = fields.email
 function form.parse(body, opts)
     local result = {}
     if not body or type(body) ~= "string" or body == "" then

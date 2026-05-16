@@ -75,4 +75,4 @@ STRIP_CODE_COMMENTS    = NO
 
 # Disable noisy / unused
 HAVE_DOT               = NO
-CLASS_DIAGRAMS         = NO
+# CLASS_DIAGRAMS removed in newer Doxygen — handled via CLASS_GRAPH=NO instead
