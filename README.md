@@ -80,40 +80,40 @@ Hull ships 20 subcommands for the full development lifecycle:
 
 | Command | Purpose |
 |---------|---------|
-| `hull new <name>` | Scaffold a new project in a new directory |
+| <code>hull new &lt;name&gt;</code> | Scaffold a new project in a new directory |
 | `hull init [dir]` | Initialize a hull project in-place (idempotent, like `git init`) |
-| `hull dev <app>` | Development server with hot reload |
-| `hull build -o <out> <dir>` | Compile app into a standalone binary |
-| `hull build --compiler=tcc\|system\|<path>` | Select compiler backend (default: embedded tcc if available, else system cc) |
-| `hull test <dir>` | In-process test runner (no TCP, memory SQLite) |
-| `hull deploy <target> [app_dir]` | [Generate deployment configs](#deployment) — Dockerfile, systemd, fly.toml |
-| `hull agent <subcommand>` | [AI agent interface](#using-hull-with-ai-agents) — routes, schema, tests, requests as JSON |
-| `hull inspect <dir>` | Display declared capabilities and signature status |
-| `hull verify [--developer-key <key>]` | Verify Ed25519 signatures and file integrity |
-| `hull eject <dir>` | Export to a standalone Makefile project |
-| `hull keygen <name>` | Generate Ed25519 signing keypair |
-| `hull sign-platform <key>` | Sign platform library with per-arch hashes |
-| `hull manifest <app>` | Extract and print manifest as JSON |
+| <code>hull dev &lt;app&gt;</code> | Development server with hot reload |
+| <code>hull build -o &lt;out&gt; &lt;dir&gt;</code> | Compile app into a standalone binary |
+| <code>hull build --compiler=tcc\|system\|&lt;path&gt;</code> | Select compiler backend (default: embedded tcc if available, else system cc) |
+| <code>hull test &lt;dir&gt;</code> | In-process test runner (no TCP, memory SQLite) |
+| <code>hull deploy &lt;target&gt; [app_dir]</code> | [Generate deployment configs](#deployment) — Dockerfile, systemd, fly.toml |
+| <code>hull agent &lt;subcommand&gt;</code> | [AI agent interface](#using-hull-with-ai-agents) — routes, schema, tests, requests as JSON |
+| <code>hull inspect &lt;dir&gt;</code> | Display declared capabilities and signature status |
+| <code>hull verify [--developer-key &lt;key&gt;]</code> | Verify Ed25519 signatures and file integrity |
+| <code>hull eject &lt;dir&gt;</code> | Export to a standalone Makefile project |
+| <code>hull keygen &lt;name&gt;</code> | Generate Ed25519 signing keypair |
+| <code>hull sign-platform &lt;key&gt;</code> | Sign platform library with per-arch hashes |
+| <code>hull manifest &lt;app&gt;</code> | Extract and print manifest as JSON |
 | `hull version [--json]` | Print version string (`--json` for machine-readable output) |
 | `hull doctor [--json]` | Check environment: compiler available, platform embedded, hull build readiness |
 | `hull update [--check] [--force] [--channel=beta]` | Self-update from GitHub releases (verifies SHA-256, atomic replace) |
-| `hull <app> --max-instructions N` | Set per-request instruction limit (default: 100M) |
-| `hull <app> --audit` | Enable capability audit logging (JSON to stderr) |
-| `hull <app> --max-connections N` | Max concurrent connections (default: 256) |
-| `hull <app> --body-max-size SIZE` | Max request body size (default: 1m) |
-| `hull <app> --read-timeout MS` | Read timeout in milliseconds (default: 30000) |
-| `hull <app> --workers N` | Thread pool worker count (default: 4) |
-| `hull <app> --queue-capacity N` | Thread pool queue capacity (default: 64) |
-| `hull <app> --no-compress` | Disable gzip response compression |
-| `hull <app> --ca-bundle PATH` | Custom CA bundle (overrides system + embedded) |
-| `hull <app> --no-ca-bundle` | Skip TLS certificate verification (dev only) |
+| <code>hull &lt;app&gt; --max-instructions N</code> | Set per-request instruction limit (default: 100M) |
+| <code>hull &lt;app&gt; --audit</code> | Enable capability audit logging (JSON to stderr) |
+| <code>hull &lt;app&gt; --max-connections N</code> | Max concurrent connections (default: 256) |
+| <code>hull &lt;app&gt; --body-max-size SIZE</code> | Max request body size (default: 1m) |
+| <code>hull &lt;app&gt; --read-timeout MS</code> | Read timeout in milliseconds (default: 30000) |
+| <code>hull &lt;app&gt; --workers N</code> | Thread pool worker count (default: 4) |
+| <code>hull &lt;app&gt; --queue-capacity N</code> | Thread pool queue capacity (default: 64) |
+| <code>hull &lt;app&gt; --no-compress</code> | Disable gzip response compression |
+| <code>hull &lt;app&gt; --ca-bundle PATH</code> | Custom CA bundle (overrides system + embedded) |
+| <code>hull &lt;app&gt; --no-ca-bundle</code> | Skip TLS certificate verification (dev only) |
 | `hull migrate [app_dir]` | Run pending SQL migrations |
 | `hull migrate status` | Show migration status (applied/pending) |
-| `hull migrate new <name>` | Create a new numbered migration file |
-| `hull compute new <name> [--lang c]` | [Scaffold a new WASM compute module](#authoring-compute-modules) under `compute/<name>/` |
-| `hull compute build [name]` | Compile `compute/<name>/<name>.c` → `compute/<name>.wasm` (all modules if no name) |
-| `hull compute test <name>` | Run JSON fixtures against a compiled module |
-| `hull compute check <name>` | Validate that a `.wasm` module loads correctly in WAMR |
+| <code>hull migrate new &lt;name&gt;</code> | Create a new numbered migration file |
+| <code>hull compute new &lt;name&gt; [--lang c]</code> | [Scaffold a new WASM compute module](#authoring-compute-modules) under <code>compute/&lt;name&gt;/</code> |
+| `hull compute build [name]` | Compile <code>compute/&lt;name&gt;/&lt;name&gt;.c</code> → <code>compute/&lt;name&gt;.wasm</code> (all modules if no name) |
+| <code>hull compute test &lt;name&gt;</code> | Run JSON fixtures against a compiled module |
+| <code>hull compute check &lt;name&gt;</code> | Validate that a `.wasm` module loads correctly in WAMR |
 | `hull compute refresh-header [name]` | Overwrite per-module `hull_compute.h` from the canonical embedded version (all modules if no name) |
 
 ### Build Pipeline
@@ -528,7 +528,7 @@ don't reference (LTO + `-O2`), so a typical module is 500 bytes - 5 KB.
 [
     {"name": "happy path", "input": "hello", "expect_status": 0},
     {"name": "empty input", "input": "", "expect_status": 0},
-    {"name": "rejects nul", "input": " ", "expect_status": 500}
+    {"name": "rejects nul", "input": "
 ]
 ```
 
@@ -1102,7 +1102,7 @@ hull deploy fly myapp/ --region lax        # fly.toml (+ Dockerfile if missing)
 | Target | Output | Consumed by |
 |--------|--------|-------------|
 | `dockerfile` | `Dockerfile` + `.dockerignore` | `docker build` |
-| `systemd` | `deploy/<name>.service` + `deploy/install.sh` | `systemctl` |
+| `systemd` | <code>deploy/&lt;name&gt;.service</code> + `deploy/install.sh` | `systemctl` |
 | `fly` | `fly.toml` + `Dockerfile` (if missing) | `flyctl deploy` |
 
 **Manifest-aware generation:** The generated configs automatically adapt based on the app's manifest and directory structure:
