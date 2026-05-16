@@ -1,10 +1,18 @@
-/*
- * hull:i18n -- Lightweight internationalization
+/**
+ * @file hull:i18n
+ * @module hull:i18n
+ * @description Lightweight internationalization. Lua parity: `hull.i18n`.
  *
- * Locale-aware string lookup with interpolation, number/date/currency
- * formatting, and Accept-Language detection.
+ * Locale-aware string lookup with `${var}` interpolation, number / date /
+ * currency formatting per locale rules, and an `Accept-Language` parser.
  *
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * @license AGPL-3.0-or-later
+ *
+ * @example
+ * import { i18n } from "hull:i18n";
+ * i18n.load("en", { hello: "Hello, ${name}!" });
+ * i18n.locale(i18n.detect(req.headers["accept-language"]) || "en");
+ * res.html(i18n.t("hello", { name: "Alice" }));
  */
 
 // ── Internal state ──────────────────────────────────────────────────
@@ -95,18 +103,34 @@ function pad(n, w) {
 
 // ── Public API ──────────────────────────────────────────────────────
 
+/**
+ * Register a translation table under a locale name.
+ * @param {string} name  Locale code (e.g. `"en"`, `"hu"`).
+ * @param {Object} tbl   Message keys → strings (with `${var}` placeholders).
+ */
 function load(name, tbl) {
     if (typeof name !== "string" || tbl === null || typeof tbl !== "object")
         throw new Error("i18n.load: expected (string, object)");
     locales[name] = tbl;
 }
 
+/**
+ * Get or set the active locale.
+ * @param {string} [name]  When passed, sets the active locale.
+ * @returns {string|null}  Current locale name after the call.
+ */
 function locale(name) {
     if (name !== undefined)
         active = name;
     return active;
 }
 
+/**
+ * Translate a key with `${var}` interpolation. Dotted paths supported.
+ * @param {string} key
+ * @param {Object} [params]
+ * @returns {string}  Translation, or the key itself when missing.
+ */
 function t(key, params) {
     if (!active || !locales[active]) return key;
     const val = deepGet(locales[active], key);
@@ -114,6 +138,11 @@ function t(key, params) {
     return interpolate(val, params);
 }
 
+/**
+ * Format a number using the active locale's separators.
+ * @param {number} n
+ * @returns {string}
+ */
 function number(n) {
     if (typeof n !== "number") return String(n);
 
@@ -142,6 +171,14 @@ function number(n) {
     return result;
 }
 
+/**
+ * Format a Unix timestamp using the locale's `datePattern`.
+ *
+ * Supports `YYYY`/`MM`/`DD`/`HH`/`mm`/`ss` tokens.
+ *
+ * @param {number} timestamp  Seconds since epoch.
+ * @returns {string}
+ */
 function date(timestamp) {
     if (typeof timestamp !== "number") return String(timestamp);
 
@@ -160,6 +197,12 @@ function date(timestamp) {
     return result;
 }
 
+/**
+ * Format an amount in a given currency per the active locale.
+ * @param {number} amount
+ * @param {string} code   ISO 4217 (e.g. `"USD"`).
+ * @returns {string}
+ */
 function currency(amount, code) {
     if (typeof amount !== "number" || typeof code !== "string")
         return String(amount);
@@ -198,6 +241,13 @@ function currency(amount, code) {
     return symbol + result;
 }
 
+/**
+ * Pick the best matching locale from `Accept-Language` (RFC 7231 q-pairs).
+ *
+ * @param {string|Object} headerOrReq  Header value OR a request object
+ *   (the function calls `.header("Accept-Language")` on it).
+ * @returns {string|null}  Matched locale name.
+ */
 function detect(headerOrReq) {
     let header = headerOrReq;
     // Duck-type: if it has a .header method, call it

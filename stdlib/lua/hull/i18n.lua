@@ -1,11 +1,17 @@
+--- Lightweight internationalization.
 --
--- hull.i18n -- Lightweight internationalization
+-- @module hull.i18n
+-- @license AGPL-3.0-or-later
 --
--- Locale-aware string lookup with interpolation, number/date/currency
--- formatting, and Accept-Language detection.
+-- Locale-aware string lookup with `${var}` interpolation, number / date /
+-- currency formatting per locale rules, and an `Accept-Language` parser.
 --
--- SPDX-License-Identifier: AGPL-3.0-or-later
---
+-- @usage
+-- local i18n = require("hull.i18n")
+-- i18n.load("en", { hello = "Hello, ${name}!" })
+-- i18n.load("hu", { hello = "Szia, ${name}!" })
+-- i18n.locale(i18n.detect(req.headers["accept-language"]) or "en")
+-- res:html(i18n.t("hello", { name = "Alice" }))
 
 local i18n = {}
 
@@ -95,7 +101,11 @@ end
 
 -- ── Public API ──────────────────────────────────────────────────────
 
---- Register a locale table under the given name.
+--- Register a translation table under a locale name.
+--
+-- @tparam string name  Locale code (e.g. `"en"`, `"hu"`, `"pt-BR"`).
+-- @tparam table tbl    Map of message keys → strings. May contain
+--   `${variable}` placeholders that @{i18n.t} will interpolate.
 function i18n.load(name, tbl)
     if type(name) ~= "string" or type(tbl) ~= "table" then
         error("i18n.load: expected (string, table)")
@@ -104,8 +114,9 @@ function i18n.load(name, tbl)
 end
 
 --- Get or set the active locale.
--- i18n.locale()        -> returns current locale name (or nil)
--- i18n.locale("en")    -> sets active locale, returns "en"
+--
+-- @tparam[opt] string name  When non-nil, sets the active locale.
+-- @treturn ?string  Current locale name after the call (or `nil` if none).
 function i18n.locale(name)
     if name ~= nil then
         active = name
@@ -113,8 +124,15 @@ function i18n.locale(name)
     return active
 end
 
---- Translate a dotted key path, with optional interpolation.
--- Returns the key path itself if not found (standard fallback).
+--- Translate a key in the active locale, with `${var}` interpolation.
+--
+-- Supports dotted paths (`"errors.not_found"`) — nested tables in the
+-- registered locale are walked.
+--
+-- @tparam string key       Translation key.
+-- @tparam[opt] table params  Map of `${var}` substitutions.
+-- @treturn string  Translated string, or the key itself if not found
+--   (standard fallback so missing keys are visible in development).
 function i18n.t(key, params)
     if not active or not locales[active] then return key end
     local val = deep_get(locales[active], key)
@@ -122,7 +140,10 @@ function i18n.t(key, params)
     return interpolate(val, params)
 end
 
---- Format a number using the active locale's format table.
+--- Format a number using the active locale's separators.
+--
+-- @tparam number n
+-- @treturn string  Formatted; e.g. `1_234_567.89` → `"1,234,567.89"` in en-US.
 function i18n.number(n)
     if type(n) ~= "number" then return tostring(n) end
 
@@ -151,8 +172,11 @@ function i18n.number(n)
     return result
 end
 
---- Format a Unix timestamp using the active locale's date_pattern.
--- Supports: YYYY, MM, DD, HH, mm, ss (replaced with zero-padded values).
+--- Format a Unix timestamp using the locale's `date_pattern`.
+--
+-- @tparam integer timestamp  Seconds since epoch.
+-- @treturn string  Formatted; supports `YYYY`/`MM`/`DD`/`HH`/`mm`/`ss`
+--   tokens in the pattern.
 function i18n.date(timestamp)
     if type(timestamp) ~= "number" then return tostring(timestamp) end
 
@@ -170,7 +194,11 @@ function i18n.date(timestamp)
     return result
 end
 
---- Format a currency amount using the active locale's currency config.
+--- Format an amount in a given currency.
+--
+-- @tparam number amount  Numeric value.
+-- @tparam string code    ISO 4217 code (e.g. `"USD"`, `"EUR"`, `"HUF"`).
+-- @treturn string  Formatted per the active locale's `currency` table.
 function i18n.currency(amount, code)
     if type(amount) ~= "number" or type(code) ~= "string" then
         return tostring(amount)
@@ -214,8 +242,15 @@ function i18n.currency(amount, code)
     end
 end
 
---- Detect the best locale from an Accept-Language header string or request object.
--- Returns the matched locale name, or nil if no match.
+--- Pick the best matching locale from an `Accept-Language` header.
+--
+-- Parses RFC 7231 quality pairs (`en;q=0.8, hu;q=0.6`) and returns the
+-- highest-priority match among the loaded locales.
+--
+-- @param header_or_req  Either an `Accept-Language` header value string,
+--   or a request object (`req`) from which the header is auto-read via
+--   `req:header("Accept-Language")`.
+-- @treturn ?string  Matched locale name, or `nil` if no overlap.
 function i18n.detect(header_or_req)
     local header = header_or_req
     -- Duck-type: if it has a .header method, call it

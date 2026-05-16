@@ -1,15 +1,14 @@
-/*
- * hull:middleware:logger -- Request logging middleware (logfmt)
+/**
+ * @file hull:middleware:logger
+ * @module hull:middleware:logger
+ * @description Request logging middleware (logfmt output). Lua parity:
+ *   `hull.middleware.logger`.
  *
- * Logs incoming requests as single-line key=value pairs (logfmt).
- * Sets X-Request-ID header for request tracing.
+ * Emits one logfmt line per request with method/path/status/duration.
+ * Assigns a request id (`req.ctx.requestId`) and sets `X-Request-ID`
+ * on the response.
  *
- * logger.generateId()              - hex counter string for request ID
- * logger.formatLine(entries)       - key=value pairs -> single string
- * logger.shouldSkip(path, skip)    - exact-match path check
- * logger.middleware(opts)          - returns middleware function
- *
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * @license AGPL-3.0-or-later
  */
 
 import { log } from "hull:log";
@@ -53,6 +52,18 @@ function shouldSkip(path, skipList) {
     return false;
 }
 
+/**
+ * Build the logger middleware.
+ *
+ * @param {Object}    [opts]
+ * @param {string[]}  [opts.skip]              Paths to skip (exact match).
+ * @param {string[]}  [opts.includeHeaders]    Header names to include.
+ * @param {string[]}  [opts.include_headers]   Lua-parity alias.
+ * @returns {(req, res) => number}
+ *
+ * @example
+ * app.use("*", "/*", logger.middleware({ skip: ["/health"] }));
+ */
 function middleware(opts) {
     const o = opts || {};
     const skip = o.skip || null;

@@ -1,12 +1,13 @@
-/*
- * hull:ratelimit -- In-memory rate limiting middleware factory
+/**
+ * @file hull:middleware:ratelimit
+ * @module hull:middleware:ratelimit
+ * @description In-memory rate limiting middleware factory. Lua parity:
+ *   `hull.middleware.ratelimit`.
  *
- * ratelimit.middleware(opts)                         - returns middleware function
- * ratelimit.check(buckets, key, limit, window, now) - pure helper, testable
+ * Sliding-window counter per key. **In-memory only — resets on restart.**
+ * For multi-instance production rate limiting, layer a DB-backed limiter.
  *
- * In-memory only (resets on restart). For production, use a DB-backed limiter.
- *
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * @license AGPL-3.0-or-later
  */
 
 import { time } from "hull:time";
@@ -76,6 +77,28 @@ function check(store, key, limit, window, now) {
     };
 }
 
+/**
+ * Build a rate-limit middleware.
+ *
+ * On limit exceeded: sends `429` and returns `1` (short-circuit). On
+ * allowed: sets `X-RateLimit-Limit` / `-Remaining` / `-Reset` headers
+ * and returns `0`.
+ *
+ * Memory cap: 10_000 unique keys per limiter instance (Phase 6 fix: now
+ * per-instance, not module-global).
+ *
+ * @param {Object}  [opts]
+ * @param {number}  [opts.limit=60]
+ * @param {number}  [opts.window=60]  Seconds.
+ * @param {string|((req) => string)} [opts.key="global"]  Limit key.
+ * @returns {(req, res) => number}
+ *
+ * @example
+ * app.use("*", "/api/*", ratelimit.middleware({
+ *     limit: 60, window: 60,
+ *     key: (req) => req.ctx.userId || req.headers["x-forwarded-for"] || "anon",
+ * }));
+ */
 function middleware(opts) {
     const o = opts || {};
 

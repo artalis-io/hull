@@ -1,22 +1,24 @@
+--- Request logging middleware (logfmt output).
 --
--- hull.middleware.logger -- Request logging middleware (logfmt)
+-- @module hull.middleware.logger
+-- @license AGPL-3.0-or-later
 --
--- Logs incoming requests as single-line key=value pairs (logfmt).
--- Sets X-Request-ID header for request tracing.
---
--- logger.generate_id()            - hex counter string for request ID
--- logger.format_line(entries)     - key=value pairs -> single string
--- logger.should_skip(path, skip)  - exact-match path check
--- logger.middleware(opts)         - returns middleware function
---
--- SPDX-License-Identifier: AGPL-3.0-or-later
---
+-- Emits one logfmt line per request to the configured logger, e.g.
+-- `time=… level=info req_id=… method=GET path=/users status=200 dur_ms=12`.
+-- Also assigns a monotonic request id (`req.ctx.request_id`) and sets
+-- the `X-Request-ID` response header.
 
 local logger = {}
 
 local _counter = 0
 
---- Generate an incrementing hex request ID.
+--- Generate an incrementing hex request id.
+--
+-- Process-local counter; not unique across instances. For distributed
+-- tracing add an upstream id (e.g. from a load balancer) and pass it
+-- through `req.headers["x-request-id"]` instead.
+--
+-- @treturn string  16-char hex string.
 function logger.generate_id()
     _counter = _counter + 1
     if _counter > 0xffffffffffff then _counter = 1 end
@@ -32,8 +34,13 @@ local function sanitize_value(v)
     return v
 end
 
---- Format a list of {key, value} pairs into a logfmt line.
--- Values are sanitized and quoted when they contain special characters.
+--- Format `{key, value}` pairs into a logfmt line.
+--
+-- Quotes values that contain spaces, `=`, `"`, or newlines. Sanitises
+-- control characters.
+--
+-- @tparam {{string,any},...} entries  List of pairs.
+-- @treturn string  Single-line logfmt-encoded.
 function logger.format_line(entries)
     local parts = {}
     for _, entry in ipairs(entries) do
@@ -49,6 +56,11 @@ function logger.format_line(entries)
 end
 
 --- Check whether a path is in the skip list (exact match).
+--- Test whether `path` should be skipped by the logger.
+--
+-- @tparam string path
+-- @tparam[opt] {string,...} skip_list  Exact paths to skip (no glob).
+-- @treturn boolean
 function logger.should_skip(path, skip_list)
     if not skip_list then return false end
     for _, p in ipairs(skip_list) do
@@ -60,6 +72,21 @@ end
 --- Create a logging middleware function for use with app.use().
 -- opts.skip: list of paths to skip (exact match)
 -- opts.include_headers: list of header names to include in log line
+--- Build the logging middleware.
+--
+-- Pre-body middleware: sets `req.ctx.request_id` and the response
+-- `X-Request-ID` header. Logs one line at request end with method,
+-- path, status, and duration.
+--
+-- @tparam[opt] table opts
+--
+--   - `skip` (`{string,...}`): paths to skip entirely (e.g. `{"/health"}`).
+--   - `include_headers` / `includeHeaders` (`{string,...}`): header names
+--     to include in the log line as `header_<name>="..."`.
+--
+-- @treturn function  Middleware `(req, res) -> integer` (always returns 0).
+-- @usage
+-- app.use("*", "/*", logger.middleware({ skip = {"/health"} }))
 function logger.middleware(opts)
     opts = opts or {}
     local skip = opts.skip

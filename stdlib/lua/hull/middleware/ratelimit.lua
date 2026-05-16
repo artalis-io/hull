@@ -1,13 +1,11 @@
+--- In-memory rate limiting middleware factory.
 --
--- hull.ratelimit -- In-memory rate limiting middleware factory
+-- @module hull.middleware.ratelimit
+-- @license AGPL-3.0-or-later
 --
--- ratelimit.middleware(opts)                          - returns middleware function
--- ratelimit.check(buckets, key, limit, window, now)  - pure helper, testable
---
--- In-memory only (resets on restart). For production, use a DB-backed limiter.
---
--- SPDX-License-Identifier: AGPL-3.0-or-later
---
+-- Sliding-window counter per key. **In-memory only — resets on restart.**
+-- For production-grade rate limiting across multiple instances, layer
+-- a DB-backed limiter on top.
 
 local ratelimit = {}
 
@@ -28,10 +26,16 @@ local function sweep_expired(buckets, window, now)
     return remaining
 end
 
---- Check rate limit for a key. Pure function, no side effects on the request.
--- buckets: table of { [key] = { count, window_start } }
--- bucket_count: current number of entries (tracked externally for O(1) access)
--- Returns result, new_bucket_count
+--- Check rate-limit state for a key. Pure helper.
+--
+-- @tparam table buckets       `{ [key] = { count, window_start } }`.
+-- @tparam string key          Limit key (e.g. user id, IP).
+-- @tparam integer limit       Max hits per window.
+-- @tparam integer window      Window length (seconds).
+-- @tparam integer now         Current time (seconds).
+-- @tparam[opt] integer bucket_count  Pre-tracked entry count for O(1) cap check.
+-- @treturn table result       `{ allowed, remaining, reset }`.
+-- @treturn integer new_bucket_count
 function ratelimit.check(buckets, key, limit, window, now, bucket_count)
     bucket_count = bucket_count or 0
     local bucket = buckets[key]
@@ -62,10 +66,29 @@ function ratelimit.check(buckets, key, limit, window, now, bucket_count)
     }, bucket_count
 end
 
---- Create a rate limiting middleware function for use with app.use().
--- opts.limit: max requests per window (default 60)
--- opts.window: window in seconds (default 60)
--- opts.key: fixed string key (default "global"), or function(req) -> string
+--- Build a rate-limit middleware.
+--
+-- On limit exceeded: sends `429 {"error":"rate limit exceeded"}` and
+-- returns `1` (short-circuit). On allowed: sets `X-RateLimit-Limit` /
+-- `-Remaining` / `-Reset` headers and returns `0`.
+--
+-- Memory cap: 10_000 unique keys per limiter instance. Beyond that,
+-- expired entries are swept; if still full, new keys are rejected.
+--
+-- @tparam[opt] table opts
+--
+--   - `limit`  (integer, default `60`): max requests per window.
+--   - `window` (integer, default `60`): window length in seconds.
+--   - `key`    (string or `function(req) -> string`): limit key.
+--     Default `"global"` (single bucket for all clients).
+--
+-- @treturn function  Middleware `(req, res) -> integer`.
+-- @usage
+-- -- Per-user rate limit
+-- app.use("*", "/api/*", ratelimit.middleware({
+--     limit = 60, window = 60,
+--     key = function(req) return req.ctx.user_id or req.headers["x-forwarded-for"] or "anon" end,
+-- }))
 function ratelimit.middleware(opts)
     opts = opts or {}
 
