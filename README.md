@@ -481,41 +481,90 @@ Example apps in both Lua and JavaScript:
 
 ## Documentation
 
+Full index with start-here guidance by role lives in [`docs/README.md`](docs/README.md).
+
+**Top-level guides:**
+
+| Document | When to read |
+|---|---|
+| [CLAUDE.md](CLAUDE.md) | Contributor guide — build commands, conventions, full API reference. The canonical project doc. |
+| [AGENTS.md](AGENTS.md) | Quick reference for AI agents using `hull agent` CLI and stdlib. |
+| [docs/agent_guide.md](docs/agent_guide.md) | **Full SDLC reference** — install → dev → test → build → sign → deploy → release. Every CLI command, every module API, common patterns/anti-patterns. ~1700 lines, deeply hyperlinked. |
+
+**Core reference (`docs/`):**
+
 | Document | Content |
-|----------|---------|
-| [MANIFESTO.md](docs/MANIFESTO.md) | Design philosophy, architecture, security model |
-| [docs/architecture.md](docs/architecture.md) | System layers, capability API, build pipeline |
-| [docs/security.md](docs/security.md) | Trust model, attack model, sandbox enforcement |
-| [docs/roadmap.md](docs/roadmap.md) | What's built, what's next |
-| [docs/stability.md](docs/stability.md) | API stability tiers, semver mapping, conventions |
-| [docs/api_review.md](docs/api_review.md) | Pre-v0.1.0 API review findings + pending decisions |
-| [docs/architecture_roadmap.md](docs/architecture_roadmap.md) | Post-v0.1.0 cohesion/coupling refactor backlog |
-| [docs/benchmark.md](docs/benchmark.md) | Performance methodology and results |
-| [docs/keel_audit.md](docs/keel_audit.md) | Keel HTTP server C code audit report |
-| [docs/ASSESSMENT.md](docs/ASSESSMENT.md) | Platform assessment, scaling path, strategic positioning |
-| [CLAUDE.md](CLAUDE.md) | Development guide for contributors |
-| [AGENTS.md](AGENTS.md) | Agent development guide (hull agent CLI, patterns, stdlib) |
-| [docs/agent_guide.md](docs/agent_guide.md) | **Full SDLC reference** — install → dev → test → build → sign → deploy → release. Every CLI command, every module's API, security/performance/patterns. The deep reference for agents working with Hull. |
-| [docs/audit_2026_05_15.md](docs/audit_2026_05_15.md) | Latest security audit (C / JS / Lua); all findings closed |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | System layers, capability API, request flow, build pipeline |
+| [docs/security.md](docs/security.md) | Threat model, sandbox phases, signature system, enforcement invariants |
+| [docs/stability.md](docs/stability.md) | API stability tiers, semver mapping |
+| [docs/known_limitations.md](docs/known_limitations.md) | Compile-time limit constants, override knobs |
+| [docs/benchmark.md](docs/benchmark.md) | Performance methodology and measured numbers |
+| [docs/release_signing.md](docs/release_signing.md) | Three-layer signature flow + release-key handling |
+| [docs/api_review.md](docs/api_review.md) | Pre-v0.1.0 API surface review |
+| [docs/roadmap.md](docs/roadmap.md) · [docs/roadmap_next.md](docs/roadmap_next.md) | What's built; what's next |
+
+**Subsystem deep-dives:**
+
+| Document | Content |
+|---|---|
+| [docs/wamr_architecture.md](docs/wamr_architecture.md) | WASM compute design — WAMR integration, ABI, pooling, segments, streaming, AOT |
+| [docs/plan_memory64.md](docs/plan_memory64.md) | Active implementation plan for WASM Memory64 |
+| [docs/roadmap_wasm_compute.md](docs/roadmap_wasm_compute.md) | WASM/GPU compute roadmap (completed + open items) |
+| [docs/keel_audit.md](docs/keel_audit.md) | Keel HTTP server (separate library) audit |
+
+**Audits (current state of record):**
+
+| Document | Scope |
+|---|---|
+| [docs/audit_2026_05_15.md](docs/audit_2026_05_15.md) | Main audit — Phase 5 surface, 49 findings, all closed |
+| [docs/audit_2026_05_15_phase6.md](docs/audit_2026_05_15_phase6.md) | Phase 6 (extended `hull agent` + MCP) — 21 findings, all closed |
+| [docs/audit_2026_05_15_phase6_reaudit.md](docs/audit_2026_05_15_phase6_reaudit.md) | Re-audit of the Phase 6 fixes — 3 follow-ups, all closed |
+
+**Strategic / positioning (non-developer audience):**
+
+[docs/MANIFESTO.md](docs/MANIFESTO.md) · [docs/ASSESSMENT.md](docs/ASSESSMENT.md) · [docs/INVESTORS.md](docs/INVESTORS.md) · [docs/PERSONAS.md](docs/PERSONAS.md)
+
+**Archive:** historical audits and completed roadmaps (architecture A–L refactor, db-vtable, WASM-improvement, v0-to-v1) live in [`docs/archive/`](docs/archive/) — preserved for reproducibility, not current state.
 
 ## Using Hull with AI Agents
 
-Hull provides structured JSON interfaces for AI coding agents via the `hull agent` command. The same interfaces work for any automation — CI scripts, service orchestrators, or human developers who prefer structured output. Ten machine-readable subcommands give structured access to routes, database schema, test results, server status, HTTP responses, and deployment readiness — no screen-scraping or log parsing required.
+Hull provides structured JSON interfaces for AI coding agents via the `hull agent` command. The same interfaces work for any automation — CI scripts, service orchestrators, or human developers who prefer structured output. **Twenty-six machine-readable subcommands** cover routes, database schema, test results, server status, HTTP responses, deployment readiness, capability analysis, request preview, one-shot eval, and more — no screen-scraping or log parsing required.
 
 ```
-hull agent routes [app_dir]              # list routes + middleware as JSON
-hull agent db schema [app_dir] [-d path] # introspect database tables and columns
-hull agent db query "SQL" [app_dir]      # run read-only SQL query, get rows as JSON
+# Core introspection (Phase 1–5)
+hull agent routes [app_dir]              # routes + middleware as JSON
+hull agent db schema [app_dir] [-d path] # database tables and columns
+hull agent db query "SQL" [app_dir]      # read-only SQL → rows as JSON
 hull agent request METHOD PATH [opts]    # HTTP request → structured response
 hull agent status [app_dir] [-p port]    # check if dev server is running
 hull agent errors [app_dir]              # structured errors from last reload
-hull agent test [app_dir]                # run tests, get per-test pass/fail as JSON
+hull agent test [app_dir]                # run tests, per-test pass/fail JSON
 hull agent context --task=T [--level=L]  # task-relevant documentation
 hull agent migrate [app_dir] [-d path]   # migration status
 hull agent deploy [app_dir]              # deployment readiness analysis
+
+# Extended introspection (Phase 6)
+hull agent manifest [app_dir]            # effective manifest JSON
+hull agent endpoint METHOD PATH [dir]    # request preview (no execution)
+hull agent middleware METHOD PATH [dir]  # middleware stack for path
+hull agent capabilities [app_dir]        # declared vs used analysis
+hull agent validate <file>               # single-file syntax + sandbox check
+hull agent vfs [app_dir]                 # list embedded files
+hull agent compute [app_dir]             # WASM modules + AOT
+hull agent gpu [app_dir]                 # WGSL shaders + GPU availability
+hull agent perf [app_dir]                # runtime stats snapshot
+hull agent logs [app_dir] [--tail N]     # tail .hull/dev.log
+hull agent eval <code> [app_dir]         # one-shot Lua/JS snippet → JSON result
+hull agent template <name> [data] [dir]  # render template via runtime
+hull agent compute-call <mod> <in> [dir] # invoke WASM module on file input
+hull agent schema-diff [app_dir]         # DB schema drift vs migrations
+hull agent sql named <qname> [--params J] [dir]  # named query from queries.json
 ```
 
-Combined with `hull dev --agent` (which writes `.hull/dev.json` and `.hull/last_error.json` as sidecar files), this gives agents a complete feedback loop: edit code, check for errors, run tests, inspect the database, make HTTP requests — all with structured output.
+All 26 are also exposed via MCP (`hull mcp [app_dir]`) for IDE integrations like Cursor / Claude Code's MCP support.
+
+Combined with `hull dev --agent` (which writes `.hull/dev.json` and `.hull/last_error.json` as sidecar files), agents get a complete feedback loop: edit code, check for errors, run tests, inspect the database, make HTTP requests, validate manifest coverage — all structured.
 
 ### Agent Development Workflow
 

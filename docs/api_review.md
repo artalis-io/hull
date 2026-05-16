@@ -44,9 +44,9 @@ The `http.fetch` global (Lua + JS) is removed. Canonical names are `http.<method
 
 `hull build --compiler tcc|system|<path>` is the only form. The `--cc` alias is gone. Affected: example Makefiles, e2e_build/e2e_compute tests, build.lua parser, completions.
 
-### D5. Make `HlLua` / `HlJS` opaque — **Deferred to architectural roadmap**
+### D5. Make `HlLua` / `HlJS` opaque — **Resolved**
 
-Tier-4 documentation in headers; full struct hiding tracked as item #14 in `docs/architecture_roadmap.md`.
+`HlLua` and `HlJS` are now private to per-runtime `internal.h` files (item J of the architecture refactor, commit `d9caad2`). Public callers go through the polymorphic `HlRuntime` base + factory pattern. See [`docs/archive/roadmaps/architecture_roadmap.md`](archive/roadmaps/architecture_roadmap.md) for the full A–L history.
 
 ## Resolved-via-documentation (no code change)
 
