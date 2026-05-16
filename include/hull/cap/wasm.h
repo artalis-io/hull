@@ -223,6 +223,7 @@ int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
  * @param callback_ctx User data passed to callback_fn
  * @param app_vfs     App VFS for module loading
  * @param app_dir     App directory for filesystem fallback
+ * @param alloc       Allocator for the output buffer (NULL = raw malloc)
  * @param err_msg     Output: static error string on failure
  * @return 0 on success, negative error code on failure
  */
@@ -302,6 +303,7 @@ HlWasmInstance *hl_cap_wasm_instance_create(HlWasmCache *cache,
  * @param opts       Per-call overrides (gas, max_input, max_output) — NULL for instance defaults
  * @param cb_fn      Optional callback
  * @param cb_ctx     Callback context
+ * @param alloc      Allocator for the output buffer (NULL = raw malloc)
  * @param err_msg    Output: static error string on failure
  * @return 0 on success, negative error code on failure
  */

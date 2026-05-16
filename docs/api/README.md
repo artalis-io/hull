@@ -56,13 +56,31 @@ Where the same option exists in both Lua and JS, both casings are accepted (e.g.
 - This API reference is the **per-function lookup** — the "what does this exact thing take and return".
 - Both reference each other; this one is grep-friendly for "find me the signature of X".
 
-## Coverage status
+## Coverage
 
-Initial pass (2026-05-16): the docs cover the core surfaces. As of this writing:
+The **source files are the ground truth** — every public symbol in `include/hull/`,
+`stdlib/lua/hull/`, and `stdlib/js/hull/` carries Doxygen / LDoc / JSDoc annotations.
+The generated HTML (`make docs-api`) and the curated markdown files here are derived
+views.
 
-- ✅ C: capability layer (`hl_cap_*`) — DB, FS, crypto, HTTP, env, time, audit
-- ✅ Lua: globals (`app`, `db`, `http`, `fs`, `crypto`, `time`, `env`, `log`), top middleware
-- ✅ JS: same surfaces, camelCase
-- 🟡 Remaining: runtime internals (`HlRuntime`, `HlAppContext`), agent library API, less-common stdlib modules
+Source-level coverage (as of 2026-05-16):
 
-See the per-file TOCs for what's complete.
+- ✅ **C headers** (`include/hull/`) — `@file` block + per-function blocks for
+  every public symbol:
+  - Capability layer (`cap/*.h`): `db`, `fs`, `env`, `time`, `audit`, `body`,
+    `crypto`, `http`, `smtp`, `image`, `ws`, `wasm`, `gpu`.
+  - Runtime + core: `runtime.h`, `app_context.h`, `manifest.h`, `vfs.h`,
+    `buffer.h`, `signature.h`, `release.h`.
+  - Agent + commands: `agent_lib.h`, `agent_api.h`, `commands/dispatch.h`,
+    every `commands/<verb>.h`.
+- ✅ **Lua stdlib** (`stdlib/lua/hull/`) — `@module` + `@function`/`@tparam`/`@treturn`
+  for every public function:
+  - Top-level: `jwt`, `cookie`, `form`, `csv`, `validate`, `template`, `i18n`,
+    `email`, `search`, `json`.
+  - Middleware: `cors`, `auth`, `session`, `csrf`, `logger`, `ratelimit`,
+    `transaction`, `idempotency`, `outbox`, `inbox`, `rbac`, `health`, `etag`.
+- ✅ **JS stdlib** (`stdlib/js/hull/`) — same coverage with camelCase + JSDoc
+  `@param`/`@returns`/`@example`.
+
+Curated markdown (`c.md`, `lua.md`, `js.md`) is sampled, not exhaustive — for the
+full surface use the generated HTML or read the annotated source directly.
