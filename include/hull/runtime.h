@@ -1,8 +1,23 @@
-/*
- * runtime.h — Pluggable runtime vtable
+/**
+ * @file runtime.h
+ * @brief Pluggable runtime vtable.
  *
- * Defines HlRuntime (shared base) and HlRuntimeVtable so main.c
- * can drive Lua or QuickJS through a single polymorphic interface.
+ * Defines #HlRuntime (shared base) and #HlRuntimeVtable so main.c can
+ * drive Lua or QuickJS through a single polymorphic interface. Each
+ * concrete runtime (`HlLua`, `HlJS`) keeps `HlRuntime` as its first
+ * member so the base pointer can be cast back to the concrete type.
+ *
+ * @par Lifecycle:
+ *   1. The factory registry (`runtime/factory.h`) selects a runtime
+ *      based on the entry-point file extension (`.lua` / `.js`).
+ *   2. The factory's `create()` returns a heap-allocated runtime with
+ *      `HlRuntime::vt` pointing at the appropriate vtable.
+ *   3. The runtime loads the app, extracts the manifest, wires routes
+ *      onto Keel's router via the vtable hooks, and serves.
+ *   4. `vt->destroy()` tears down all module state and frees the
+ *      runtime.
+ *
+ * Stability: Tier 3 (internal API; will evolve with the runtime split).
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

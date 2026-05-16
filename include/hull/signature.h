@@ -1,9 +1,29 @@
-/*
- * signature.h — App signature verification (runtime)
+/**
+ * @file signature.h
+ * @brief Dual-layer Ed25519 signature verification for built apps.
  *
- * Reads package.sig (dual-layer), verifies Ed25519 signatures for both
- * the platform layer and the application layer, and checks file hashes.
- * Used by --verify-sig to refuse startup if the app has been tampered with.
+ * Hull packages carry a `package.sig` JSON file with two Ed25519 signatures:
+ *
+ *   - **Platform layer (inner):** signed by the Hull release/platform key.
+ *     Proves `libhull_platform.a` is authentic for each architecture.
+ *   - **App layer (outer):** signed by the application developer's key.
+ *     Proves the app's source files (entry point, modules, templates,
+ *     static assets, migrations, compute, shaders) have not been tampered
+ *     with since `hull build`.
+ *
+ * @ref hl_verify_startup ties this together: read the developer pubkey,
+ * parse `package.sig`, verify both signatures, then hash each file (either
+ * embedded via #HlVfs or from disk in dev mode) and compare against
+ * `files[<name>]`.
+ *
+ * A third (separate) signature lives in `hull.sha256.sig` for the `hull`
+ * binary itself — see `release.h` and `commands/update.h`.
+ *
+ * @par Canonical payload:
+ *   The signed message is the canonical-JSON serialization of
+ *   `{binary_hash, build, files, manifest, platform, trampoline_hash}`
+ *   for the app layer, and `canonicalStringify(platforms)` for the
+ *   platform layer.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -72,55 +92,70 @@ typedef struct {
     size_t entry_count;
 } HlSignature;
 
-/*
- * Read and parse a package.sig file.
- * Returns 0 on success, -1 on error.
+/**
+ * @brief Read and parse a `package.sig` file.
+ *
+ * On success, all strings in `*sig` are arena-allocated and freed by
+ * @ref hl_sig_free. On failure, `*sig` is left in a partially-initialized
+ * state — call @ref hl_sig_free anyway (it's safe on partial state).
+ *
+ * @return 0 on success, -1 on read/parse error.
  */
 int hl_sig_read(const char *sig_path, HlSignature *sig);
 
-/*
- * Verify the Ed25519 app-layer signature.
- * Reconstructs the canonical payload:
- *   {binary_hash, build, files, manifest, platform, trampoline_hash}
- * `pubkey` is the 32-byte Ed25519 public key.
- * Returns 0 on success (valid), -1 on failure.
+/**
+ * @brief Verify the app-layer Ed25519 signature.
+ *
+ * Reconstructs the canonical JSON payload
+ * `{binary_hash, build, files, manifest, platform, trampoline_hash}` and
+ * verifies the signature against the developer's public key.
+ *
+ * @param sig    Parsed signature (from @ref hl_sig_read).
+ * @param pubkey 32-byte Ed25519 public key.
+ * @return 0 if valid, -1 if signature mismatch.
  */
 int hl_sig_verify(const HlSignature *sig, const uint8_t pubkey[32]);
 
-/*
- * Verify the Ed25519 platform-layer signature.
- * Reconstructs canonicalStringify(platforms).
- * `pubkey` is the 32-byte platform Ed25519 public key.
- * Returns 0 on success (valid), -1 on failure.
+/**
+ * @brief Verify the platform-layer Ed25519 signature.
+ *
+ * Reconstructs `canonicalStringify(platforms)` and verifies against the
+ * platform pubkey (gethull.dev key or `--platform-key` override).
+ *
+ * @param sig    Parsed signature.
+ * @param pubkey 32-byte Ed25519 public key.
+ * @return 0 if valid, -1 if signature mismatch.
  */
 int hl_sig_verify_platform(const HlSignature *sig, const uint8_t pubkey[32]);
 
-/*
- * Verify file hashes against embedded app entries via VFS.
- * Returns 0 if all files match, -1 on mismatch or missing files.
+/**
+ * @brief Verify file hashes against embedded entries via VFS (build mode).
+ * @return 0 if every `files[<name>]` matches the VFS entry, -1 on
+ *   mismatch or missing entry.
  */
 int hl_sig_verify_files_embedded(const HlSignature *sig, const HlVfs *vfs);
 
-/*
- * Verify file hashes against filesystem files in app_dir.
- * Returns 0 if all files match, -1 on mismatch or missing files.
+/**
+ * @brief Verify file hashes against on-disk files in `app_dir` (dev mode).
+ * @return 0 if every `files[<name>]` hashes to the recorded SHA-256,
+ *   -1 on mismatch, missing file, or I/O error.
  */
 int hl_sig_verify_files_fs(const HlSignature *sig, const char *app_dir);
 
-/*
- * Free all resources in an HlSignature.
- */
+/** @brief Free arena and reset signature. Idempotent. */
 void hl_sig_free(HlSignature *sig);
 
-/*
- * Full startup verification: read pubkey, read package.sig, verify both
- * signature layers, verify file hashes (embedded or filesystem).
+/**
+ * @brief Full startup verification path.
  *
- * `pubkey_path` — path to the developer .pub file (64 hex chars)
- * `entry_point` — path to the app entry point (used to derive sig location)
- * `app_vfs`     — app VFS for embedded entry lookup
+ * Reads the developer pubkey, reads `package.sig`, verifies both signature
+ * layers, then verifies file hashes against embedded entries (build mode)
+ * or filesystem files (dev mode, derived from the entry-point path).
  *
- * Returns 0 on success, -1 on any verification failure.
+ * @param pubkey_path Path to developer `.pub` file (64 hex chars).
+ * @param entry_point Path to the app entry point — used to locate sig.
+ * @param app_vfs     App VFS for embedded entry lookup.
+ * @return 0 on success, -1 on any verification failure.
  */
 int hl_verify_startup(const char *pubkey_path, const char *entry_point,
                       const HlVfs *app_vfs);

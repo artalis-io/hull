@@ -1,9 +1,17 @@
-/*
- * app_context.h — Reusable application context for commands
+/**
+ * @file app_context.h
+ * @brief Reusable application context for commands.
  *
- * Consolidates VFS + DB + runtime initialization shared by
- * test, agent, MCP commands, and the main server. Each consumer
- * creates an HlAppContext instead of duplicating the init sequence.
+ * Consolidates the `VFS + DB + runtime` init sequence shared by
+ * `hull test`, `hull agent`, `hull mcp`, and the dev server in
+ * `main.c`. Each consumer calls @ref hl_app_context_init instead of
+ * duplicating the init sequence.
+ *
+ * @par Lifecycle:
+ *   `hl_app_context_init` → use → `hl_app_context_free`.
+ *
+ * Stability: Tier 3 (internal — used across commands but not part of
+ * the v0.1.0 public surface).
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

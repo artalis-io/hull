@@ -1,10 +1,11 @@
-/*
- * cap/smtp.h — SMTP email capability
+/**
+ * @file cap/smtp.h
+ * @brief SMTP email capability — outbound send with STARTTLS / TLS.
  *
- * HlSmtpConfig holds runtime configuration (host allowlist, timeout, TLS
- * context) — typically set once at startup from the app manifest.
+ * #HlSmtpConfig holds runtime configuration (host allowlist, timeout,
+ * TLS context) — typically set once at startup from the app manifest.
  *
- * HlSmtpMessage carries per-send parameters: connection details (host,
+ * #HlSmtpMessage carries per-send parameters: connection details (host,
  * port, credentials, TLS mode) and the RFC 5322 envelope (from, to, cc,
  * reply-to, subject, body).
  *

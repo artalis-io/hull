@@ -1,12 +1,30 @@
-/*
- * gpu.h — GPU compute capability (wgpu-native backend)
+/**
+ * @file cap/gpu.h
+ * @brief GPU compute capability (wgpu-native backend).
  *
- * Provides GPU compute dispatch for WGSL compute shaders.
- * Backend-agnostic vtable design: wgpu-native is the default,
- * Dawn is a future option.
+ * GPU compute dispatch for WGSL shaders. Backend-agnostic vtable design:
+ * wgpu-native is the default (Vulkan/Metal/DX12); Dawn is a future option.
  *
- * Disabled by default (HL_ENABLE_GPU=0). When disabled, all
- * GPU files compile to empty translation units.
+ * @par Lifecycle:
+ *   1. `hl_cap_gpu_init` creates the context (one per process).
+ *   2. `hl_cap_gpu_compile(name, wgsl)` builds and caches a pipeline.
+ *      `hl_cap_gpu_load(name)` reads `shaders/<name>.wgsl` from VFS.
+ *   3. `hl_cap_gpu_dispatch(name, opts)` runs the shader. Persistent
+ *      buffers (`hl_cap_gpu_buffer(name, data)`) survive across dispatches.
+ *   4. `hl_cap_gpu_pipeline(stages, opts)` chains stages in one submit.
+ *
+ * @par Compile-time:
+ *   Disabled by default. `make HL_ENABLE_GPU=1 WGPU_LIB_DIR=vendor/wgpu`
+ *   enables. When disabled the TU is empty (one `@empty-translation-unit`).
+ *
+ * @par Performance:
+ *   ~2.5 ms submit floor on Apple Silicon, independent of payload size.
+ *   Crossover vs. WASM AOT at ~16K elements for typical workloads. Use
+ *   `gpu.pipeline()` to amortise multiple dispatches into one submit.
+ *
+ * @par Manifest:
+ *   Apps must declare `gpu: true` in the manifest to access these
+ *   functions from Lua/JS.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

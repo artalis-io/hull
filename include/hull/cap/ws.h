@@ -1,8 +1,14 @@
-/*
- * cap/ws.h — WebSocket connection registry
+/**
+ * @file cap/ws.h
+ * @brief WebSocket connection registry.
  *
- * Tracks WebSocket connections per-endpoint for broadcast and
- * connection counting. Runtime-agnostic — used by both Lua and JS.
+ * Tracks per-endpoint WebSocket connections to support broadcast and
+ * `ws.connections(path)` counting. Runtime-agnostic — used by both Lua
+ * (`hull.ws`) and JS (`hull:ws`).
+ *
+ * Server endpoints are registered via `app.ws(path, callbacks)`; client
+ * connections (`ws.connect(url, callbacks)`) are tracked separately and
+ * gated by the manifest's `hosts` allowlist.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

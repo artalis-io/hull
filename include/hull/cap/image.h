@@ -1,9 +1,14 @@
-/*
- * cap/image.h — Image capability with pluggable codec vtable
+/**
+ * @file cap/image.h
+ * @brief Image decode / encode / pixel buffers (stb_image-backed).
  *
- * First-class image type with four pixel formats and stb_image
- * as the default decoder/encoder. Integrates with the unified
- * buffer protocol (HlBufferView).
+ * First-class image type with four pixel formats (`rgba8`, `r8`,
+ * `rgba16float`, `r32float`) and a pluggable codec vtable. `stb_image`
+ * is the default decoder (PNG, JPEG, BMP) and encoder.
+ *
+ * Integrates with the unified buffer protocol (#HlBufferView) so a
+ * decoded image can be passed to `gpu.texture()` or `compute.call()`
+ * without copying.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

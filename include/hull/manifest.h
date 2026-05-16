@@ -1,12 +1,22 @@
-/*
- * manifest.h — Application manifest declaration and extraction
+/**
+ * @file manifest.h
+ * @brief App-declared manifest: capability extraction + signing input.
  *
- * Apps declare capabilities via app.manifest({...}).
- * This module extracts the manifest from the runtime state into
- * a C struct for cap config wiring and signing.
+ * Apps declare their capability surface via `app.manifest({...})`.
+ * This module extracts the declaration from the runtime state into a
+ * C struct (#HlManifest) which:
+ *   1. Configures the cap layer's allowlists at startup.
+ *   2. Is hashed and signed for `package.sig` integrity checks.
  *
- * All strings in HlManifest are Hull-owned copies (allocated via
- * the stored allocator). Call hl_manifest_free() to release them.
+ * @par Memory:
+ *   All strings in #HlManifest are Hull-owned copies (allocated via
+ *   the stored allocator). Call @ref hl_manifest_free to release them.
+ *
+ * @par Limits (compile-time):
+ *   - `HL_MANIFEST_MAX_PATHS` = 32 (`fs.read` / `fs.write` patterns)
+ *   - `HL_MANIFEST_MAX_ENVS` = 32 (env var names)
+ *   - `HL_MANIFEST_MAX_HOSTS` = 32 (HTTP/WS hosts)
+ *   - `HL_MANIFEST_MAX_CORS_ORIGINS` = 16
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

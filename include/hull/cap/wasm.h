@@ -1,11 +1,32 @@
-/*
- * cap/wasm.h — WASM compute capability (WAMR)
+/**
+ * @file cap/wasm.h
+ * @brief WASM compute capability (WAMR-backed).
  *
  * Module cache + lifecycle + call dispatch for compute-only WASM plugins.
- * Plugins export hull_process(in_ptr, in_len, out_ptr, out_max) -> bytes_written.
- * No WASI, no I/O — pure computation only.
  *
- * Gated by HL_ENABLE_WASM (set in Makefile when WAMR is available).
+ * @par Plugin ABI:
+ *   Plugins export `hull_process(in_ptr, in_len, out_ptr, out_max) -> bytes_written`.
+ *   Optional: `hull_version() -> int`. Single import: `env.host_call(op, ptr, len) -> int`
+ *   with opcodes `LOG=0x01`, `DATA_INFO=0x02`, `CALLBACK=0x10`.
+ *
+ * @par No I/O:
+ *   No WASI imports. No filesystem, no network, no time. Pure
+ *   computation. State must be passed in via the input buffer or via
+ *   shared data segments (`compute.segment(name, slot, bytes)`).
+ *
+ * @par Execution:
+ *   - Gas-metered (default 100M instructions per call).
+ *   - Memory-capped (default 2 MiB heap; configurable to ~4 GiB).
+ *   - AOT-compiled when `wamrc` is available; fast-interpreter fallback.
+ *   - Instance pool per module (pool size 8) reuses linear memory.
+ *
+ * @par Compile-time:
+ *   Gated by `HL_ENABLE_WASM`. `make HL_ENABLE_WASM=0` drops the whole
+ *   subsystem (~256 KB).
+ *
+ * @par Related docs:
+ *   `docs/wamr_architecture.md` for full design,
+ *   `docs/roadmap_wasm_compute.md` for status.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

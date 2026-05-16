@@ -1,9 +1,19 @@
-/*
- * release.h — Release artifact signature verification
+/**
+ * @file release.h
+ * @brief Ed25519 signing/verification for release-artifact manifests.
  *
- * Distinct from `signature.h` (which signs built apps / platforms). This module
- * signs and verifies *release artifacts* — specifically the `hull.sha256`
- * checksum manifest distributed alongside every GitHub release.
+ * Distinct from `signature.h` (which signs built apps + platforms). This
+ * module signs and verifies *release artifacts* — specifically the
+ * `hull.sha256` checksum manifest distributed alongside every GitHub
+ * release. It is the trust root for `hull update`.
+ *
+ * @par Roles:
+ *   - **CI / release workflow:** uses @ref hl_release_load_secret_key and
+ *     @ref hl_release_sign_manifest (via `hull sign-release`) with the
+ *     private half stored in offline + GitHub Actions secret
+ *     `HULL_RELEASE_KEY`.
+ *   - **Client `hull update`:** uses @ref hl_release_verify_manifest_sig
+ *     with the embedded #HL_RELEASE_PUBKEY_HEX (or `--pubkey` override).
  *
  * Design: docs/release_signing.md.
  *
@@ -30,61 +40,68 @@
 #define HL_RELEASE_PUBKEY_HEX \
     "0000000000000000000000000000000000000000000000000000000000000000"
 
-/*
- * Returns 1 if HL_RELEASE_PUBKEY_HEX is non-zero (a real key has been
- * committed), 0 otherwise. Callers should skip signature verification
- * when this returns 0.
+/**
+ * @brief Is the embedded release pubkey real (not all-zero placeholder)?
+ *
+ * Callers (notably `hull update`) should skip signature verification — with
+ * a visible one-time warning — when this returns 0. This lets pre-v0.1.0
+ * builds self-update without a chicken-and-egg key-bootstrap problem.
+ *
+ * @return 1 if #HL_RELEASE_PUBKEY_HEX is non-zero, 0 otherwise.
  */
 int hl_release_pubkey_configured(void);
 
-/*
- * Decode the embedded HL_RELEASE_PUBKEY_HEX into 32 raw bytes.
- * Returns 0 on success, -1 on hex decode error (should be unreachable for
- * a correctly-encoded constant).
+/**
+ * @brief Decode the embedded #HL_RELEASE_PUBKEY_HEX into 32 raw bytes.
+ * @return 0 on success, -1 on hex decode error (should be unreachable
+ *   for a correctly-encoded build).
  */
 int hl_release_pubkey_decode(uint8_t out_pk[32]);
 
-/*
- * Verify an Ed25519 signature over a release manifest buffer.
+/**
+ * @brief Verify an Ed25519 signature over a release-manifest buffer.
  *
- *   manifest, manifest_len  — the bytes that were signed (typically the
- *                             entire `hull.sha256` file contents).
- *   sig_hex, sig_hex_len    — 128 hex chars + optional trailing newline.
- *                             Any trailing whitespace/newline is stripped.
- *   pubkey                  — 32-byte Ed25519 public key. Pass NULL to
- *                             use the embedded HL_RELEASE_PUBKEY_HEX.
+ * @param manifest      Bytes that were signed (typically the entire
+ *                      `hull.sha256` file contents).
+ * @param manifest_len  Length of `manifest` in bytes.
+ * @param sig_hex       128 hex chars + optional trailing whitespace/NL
+ *                      (stripped).
+ * @param sig_hex_len   Length of `sig_hex` (may include trailing NL).
+ * @param pubkey        32-byte Ed25519 public key, or NULL to use the
+ *                      embedded #HL_RELEASE_PUBKEY_HEX.
+ * @return 0 on valid signature, -1 on parse error or signature mismatch.
  *
- * Returns 0 on valid signature, -1 on any error or mismatch. Constant-time
- * in the sense that TweetNaCl's crypto_sign_ed25519_open is — every input
- * shape failure short-circuits early on parsing, but successful parse
- * paths reach the verifier.
+ * @note Constant-time only in the verifier itself (TweetNaCl
+ *   `crypto_sign_ed25519_open`). Parse failures short-circuit early.
  */
 int hl_release_verify_manifest_sig(const void *manifest, size_t manifest_len,
                                    const char *sig_hex, size_t sig_hex_len,
                                    const uint8_t pubkey[32]);
 
-/*
- * Sign a release manifest. Used by `hull sign-release` in the GitHub
- * Actions release workflow.
+/**
+ * @brief Sign a release manifest. Used by `hull sign-release` in CI.
  *
- *   manifest, manifest_len  — bytes to sign.
- *   secret_key              — 64-byte Ed25519 secret key (output of
- *                             hl_cap_crypto_ed25519_keypair).
- *   out_sig_hex             — buffer for 128 hex chars + NUL.
- *   out_sig_hex_size        — must be >= 129.
- *
- * Returns 0 on success, -1 on any error.
+ * @param manifest          Bytes to sign.
+ * @param manifest_len      Length of `manifest`.
+ * @param secret_key        64-byte Ed25519 secret key (output of
+ *                          `hl_cap_crypto_ed25519_keypair`).
+ * @param out_sig_hex       Buffer for 128 hex chars + NUL.
+ * @param out_sig_hex_size  Must be >= 129.
+ * @return 0 on success, -1 on any error.
  */
 int hl_release_sign_manifest(const void *manifest, size_t manifest_len,
                              const uint8_t secret_key[64],
                              char *out_sig_hex, size_t out_sig_hex_size);
 
-/*
- * Load a 64-byte Ed25519 secret key from a hex file (the format produced
- * by `hull keygen <prefix>` — 128 hex chars optionally trailed by a
- * newline). On success, fills out_sk[64] and returns 0.
+/**
+ * @brief Load a 64-byte Ed25519 secret key from a `hull keygen` hex file.
  *
- * Caller must hull_secure_zero() out_sk after use.
+ * Accepts 128 hex chars optionally followed by a single newline.
+ *
+ * @param[in]  path    Path to the hex secret-key file.
+ * @param[out] out_sk  64-byte buffer, filled on success.
+ * @return 0 on success, -1 on file I/O or parse error.
+ * @warning Caller must `hull_secure_zero()` `out_sk` after use.
  */
 int hl_release_load_secret_key(const char *path, uint8_t out_sk[64]);
 
