@@ -300,28 +300,9 @@ int hl_agent_migrate_status(const char *app_dir, const char *db_path,
     return migrate_status_impl(db, 1, &app_vfs, out);
 }
 
-/* ── hl_agent_deploy ───────────────────────────────────────────────── */
-
-static int count_files_in_dir(const char *app_dir, const char *subdir,
-                               const char *pattern)
-{
-    char dir_path[PATH_MAX];
-    snprintf(dir_path, sizeof(dir_path), "%s/%s", app_dir, subdir);
-
-    struct stat st;
-    if (stat(dir_path, &st) != 0 || !S_ISDIR(st.st_mode))
-        return 0;
-
-    char **files = hl_tool_find_files(dir_path, pattern, NULL);
-    if (!files) return 0;
-
-    int count = 0;
-    for (char **fp = files; *fp; fp++) {
-        count++;
-        free(*fp);
-    }
-    free(files);
-    return count;
-}
+/* (Removed: an earlier draft had a `count_files_in_dir` helper here.
+ * The current `hull agent deploy` path uses `hl_tool_find_files`
+ * directly in `agent/deploy.c` and doesn't need it. Triggered
+ * -Wunused-function under the static-analysis CI job.) */
 
 #endif /* HL_ENABLE_DB */

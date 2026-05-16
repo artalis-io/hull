@@ -8,10 +8,10 @@
  * without actually issuing it.
  *
  * Pattern matching mirrors Keel's router (see vendor/keel/src/router.c):
- *   "*"            — match any method
- *   "/foo"         — exact path
- *   "/foo/*"       — prefix match (everything under /foo/)
- *   "/users/:id"   — parameter capture (matches /users/anything-no-slash)
+ *   "*"             — match any method
+ *   "/foo"          — exact path
+ *   "/foo/" + "*"   — prefix match (everything under /foo/)
+ *   "/users/:id"    — parameter capture (matches /users/anything-no-slash)
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -39,7 +39,8 @@ static int method_matches(const char *pattern_method, const char *req_method)
     return strcasecmp(pattern_method, req_method) == 0;
 }
 
-/* Returns 1 if path matches the pattern. Handles `*`, `/*`, `:param`. */
+/* Returns 1 if path matches the pattern. Handles `*`, `:param`, and
+ * prefix-style trailing-wildcard patterns. */
 static int path_matches(const char *pattern, const char *path)
 {
     if (!pattern || !path) return 0;

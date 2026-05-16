@@ -39,16 +39,35 @@ static int render_lua(HlLua *lua, const char *template_name,
                       const char *data_json, ShJsonBuf *out)
 {
     lua_State *L = lua->L;
-    /* Push:  require("hull.template").render(name, json.decode(data_json)) */
-    /* Build a small Lua snippet to avoid manual stack juggling. */
+    /* Push:  require("hull.template").render(name, json.decode(data_json))
+     *
+     * `%q` is a Lua string.format specifier, not a C one — using it in
+     * snprintf would compile under most compilers but tripped
+     * -Wformat-invalid-specifier in CI's static analysis pass. Reject
+     * any unsafe character in the template name up-front so we can use
+     * a plain single-quoted literal in the generated Lua. Template
+     * names are filesystem paths under templates/ — alnum + dot/slash/
+     * underscore/dash is plenty.
+     */
+    for (const char *c = template_name; *c; c++) {
+        unsigned char ch = (unsigned char)*c;
+        int ok = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                 (ch >= '0' && ch <= '9') ||
+                 ch == '.' || ch == '/' || ch == '_' || ch == '-';
+        if (!ok)
+            return hl_agent_write_error(out,
+                "template name contains unsafe characters");
+    }
     char snippet[HL_AGENT_SNIPPET_BUF];
-    snprintf(snippet, sizeof(snippet),
+    int snip_n = snprintf(snippet, sizeof(snippet),
         "local template = require('hull.template')\n"
         "local json = require('hull.json')\n"
         "local ok, data = pcall(json.decode, ...)\n"
         "if not ok then error('invalid JSON: ' .. tostring(data)) end\n"
-        "return template.render(%q, data)\n",
+        "return template.render('%s', data)\n",
         template_name);
+    if (snip_n < 0 || (size_t)snip_n >= sizeof(snippet))
+        return hl_agent_write_error(out, "template name too long");
 
     if (luaL_loadstring(L, snippet) != LUA_OK) {
         const char *err = lua_tostring(L, -1);
