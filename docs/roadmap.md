@@ -277,19 +277,18 @@ fetch, or load packages; the resolved module set is fixed at build/startup.
 | `hull init` / `hull new` generate `modules = {...}` | **Done** | Templates produce array-form module declarations matching what they actually use. |
 | Documentation (`docs/security.md` §5b + `CLAUDE.md` + `README.md` + `AGENTS.md`) | **Done** | Module Declaration sections added to all four; failure-mode table, registry overview, CLI/agent pointers. |
 
-#### Correctness coverage — **Mostly done**
+#### Correctness coverage — **Done**
 
 | Feature | Status | Notes |
 |---------|--------|-------|
 | Static import/require analyzer | **Done** | `hull modules analyze` — Lua + JS state-machine scanners that skip comments and string literals; auto-seeds intrinsic core; integrated into `hull check`. |
-| Gate non-server entry points | **Mostly done** | `hull agent` (warm context) and `hull mcp` (all 7 context openings) opt in via `HlAppContextOpts.gate_modules = 1`. `hull dev`/serve is gated through `main.c::hl_serve_wire_caps`. **Open:** `hull test` still inits an app context without `gate_modules` — tests don't currently enforce the declaration. |
+| Gate non-server entry points | **Done** | Every consumer that runs user app code now opts in via `HlAppContextOpts.gate_modules = 1`: `hull test` (`test.c`), `hull agent` warm context (`agent.c`), all 7 `hull mcp` context openings (`mcp.c`). `hull dev`/serve is gated through `main.c::hl_serve_wire_caps`. Verified by `make e2e-examples` (280/280 passing under the gated test runner). |
 
 #### Remaining v1 polish
 
 | # | Feature | Status | Effort | Notes |
 |---|---------|--------|--------|-------|
-| 1 | Gate `hull test` | Planned | 30m | Flip `gate_modules = 1` on `test.c:88` so the test runner enforces module declarations the same way the dev server does. Risk: legacy test scripts that import undeclared modules will break — needs a sweep through `tests/`. |
-| 2 | "Did you mean …" suggestions on gate errors | Planned | 1h | Today gate errors list the missing module + a pointer to `hull modules available`. Levenshtein-1 / shared-prefix matching against the registry would catch typos (`hull.cyrpto` → did you mean `hull.crypto`?). |
+| 1 | "Did you mean …" suggestions on gate errors | Planned | 1h | Today gate errors list the missing module + a pointer to `hull modules available`. Levenshtein-1 / shared-prefix matching against the registry would catch typos (`hull.cyrpto` → did you mean `hull.crypto`?). |
 
 #### Future — out of v1 (explicitly deferred)
 

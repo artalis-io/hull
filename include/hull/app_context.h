@@ -67,14 +67,17 @@ typedef struct HlAppContextOpts {
     /* Module-system gating:
      *   1 = run the resolver after manifest extraction and wire the
      *       result onto rt->module_set so require/import enforce the
-     *       declared modules. Intended for any consumer that runs user
-     *       app code (server, agent eval, mcp).
-     *   0 = leave rt->module_set = NULL (permissive). Intended for the
-     *       test runner (which installs legacy globals for inline
-     *       snippets) and read-only introspection.
+     *       declared modules. Used by every consumer that runs user
+     *       app code: hull test, hull agent (warm context), hull mcp.
+     *       hull dev / serve does its own resolution + wiring in
+     *       main.c::hl_serve_wire_caps.
+     *   0 = leave rt->module_set = NULL (permissive). Reserved for
+     *       read-only introspection paths that load but don't execute
+     *       user code under the gate (e.g. tooling that just wants
+     *       the runtime + VFS).
      *
-     * Defaults to 0 so existing call sites are unchanged; main.c's
-     * server path keeps doing its own resolution + wiring for now. */
+     * Defaults to 0 so a zero-initialized opts struct is still a
+     * legal (permissive) call; new consumers should set it explicitly. */
     int           gate_modules;
 } HlAppContextOpts;
 
