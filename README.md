@@ -886,7 +886,7 @@ Full index with start-here guidance by role lives in [`docs/README.md`](docs/REA
 
 ## Using Hull with AI Agents
 
-Hull provides structured JSON interfaces for AI coding agents via the `hull agent` command. The same interfaces work for any automation — CI scripts, service orchestrators, or human developers who prefer structured output. **Twenty-six machine-readable subcommands** cover routes, database schema, test results, server status, HTTP responses, deployment readiness, capability analysis, request preview, one-shot eval, and more — no screen-scraping or log parsing required.
+Hull provides structured JSON interfaces for AI coding agents via the `hull agent` command. The same interfaces work for any automation — CI scripts, service orchestrators, or human developers who prefer structured output. **Twenty-seven machine-readable subcommands** cover routes, database schema, test results, server status, HTTP responses, deployment readiness, capability analysis, request preview, one-shot eval, and more — no screen-scraping or log parsing required.
 
 ```
 # Core introspection (Phase 1–5)
@@ -906,6 +906,7 @@ hull agent manifest [app_dir]            # effective manifest JSON
 hull agent endpoint METHOD PATH [dir]    # request preview (no execution)
 hull agent middleware METHOD PATH [dir]  # middleware stack for path
 hull agent capabilities [app_dir]        # declared vs used analysis
+hull agent modules [app_dir]             # declared + intrinsic modules + build caps
 hull agent validate <file>               # single-file syntax + sandbox check
 hull agent vfs [app_dir]                 # list embedded files
 hull agent compute [app_dir]             # WASM modules + AOT
@@ -919,7 +920,7 @@ hull agent schema-diff [app_dir]         # DB schema drift vs migrations
 hull agent sql named <qname> [--params J] [dir]  # named query from queries.json
 ```
 
-All 26 are also exposed via MCP (`hull mcp [app_dir]`) for IDE integrations like Cursor / Claude Code's MCP support.
+All 27 are also exposed via MCP (`hull mcp [app_dir]`) for IDE integrations like Cursor / Claude Code's MCP support.
 
 Combined with `hull dev --agent` (which writes `.hull/dev.json` and `.hull/last_error.json` as sidecar files), agents get a complete feedback loop: edit code, check for errors, run tests, inspect the database, make HTTP requests, validate manifest coverage — all structured.
 
