@@ -15,6 +15,10 @@ import { time } from "hull:time";
 
 app.manifest({
     database: "timers.db",
+    modules: [
+        "hull/db@1",
+        "hull/time@1",
+    ],
 });
 
 // ── Repeating timer: insert heartbeat every 500ms ──────────────────

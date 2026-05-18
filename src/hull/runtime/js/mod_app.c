@@ -504,6 +504,8 @@ static JSValue js_app_get_manifest(JSContext *ctx, JSValueConst this_val,
 
 static int js_app_module_init(JSContext *ctx, JSModuleDef *m)
 {
+    if (hl_js_check_module_declared(ctx, "hull/app", "hull:app") != 0) return -1;
+
     JSValue app = JS_NewObject(ctx);
 
     /* Route methods: magic encodes the HTTP method index */

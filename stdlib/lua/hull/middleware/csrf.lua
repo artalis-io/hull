@@ -10,6 +10,9 @@
 -- Only relevant for cookie-based session auth. JWT Bearer auth does
 -- NOT need CSRF protection (browsers don't auto-send Bearer tokens).
 
+local crypto = require("hull.crypto")
+local time = require("hull.time")
+
 local csrf = {}
 
 --- URL-decode a percent-encoded string (e.g. form body values).

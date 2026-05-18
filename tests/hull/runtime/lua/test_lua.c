@@ -37,6 +37,25 @@ static HlLua lua_rt;
 static int lua_initialized = 0;
 static HlVfs platform_vfs;
 
+/* Tests use lots of inline Lua snippets that reference modules as
+ * globals (`db.exec(...)`, `crypto.sha256(...)`, ...). Phase 2b removes
+ * those globals from production runtime — apps must `require` instead.
+ * This helper restores the globals for testing convenience by trying to
+ * require each known native module and assigning to `_G`. Modules that
+ * aren't available (compile flag off, etc.) are silently skipped. */
+static void install_test_globals(lua_State *L)
+{
+    static const char *PRELUDE =
+        "for _, m in ipairs({"
+        "  'crypto','db','env','time','fs','http','smtp',"
+        "  'ws','image','compute','gpu','worker','server'"
+        "}) do "
+        "  local ok, mod = pcall(require, 'hull.' .. m) "
+        "  if ok then _G[m] = mod end "
+        "end";
+    (void)luaL_dostring(L, PRELUDE);
+}
+
 static void init_lua(void)
 {
     extern const HlEntry hl_stdlib_entries[];
@@ -48,6 +67,7 @@ static void init_lua(void)
     lua_rt.base.platform_vfs = &platform_vfs;
     int rc = hl_lua_init(&lua_rt, &cfg);
     lua_initialized = (rc == 0);
+    if (lua_initialized) install_test_globals(lua_rt.L);
 }
 
 static void cleanup_lua(void)
@@ -102,6 +122,7 @@ static void init_lua_with_caps(void)
     lua_rt.base.platform_vfs = &platform_vfs;
     int rc = hl_lua_init(&lua_rt, &cfg);
     lua_initialized = (rc == 0);
+    if (lua_initialized) install_test_globals(lua_rt.L);
 }
 
 static void cleanup_lua_caps(void)
@@ -465,6 +486,134 @@ UTEST(lua_runtime, require_non_string_errors)
     int rc = luaL_dostring(lua_rt.L, "require(42)");
     ASSERT_NE(rc, LUA_OK);
     lua_pop(lua_rt.L, 1);
+
+    cleanup_lua();
+}
+
+/* ── Module-set gating in require() ────────────────────────────────── */
+/* These exercise the phase-2a gate in hl_lua_require: when the runtime
+ * has a non-NULL module_set, names that map to a known first-party
+ * module must be in that set or require() raises. */
+
+#include "hull/manifest.h"
+#include "hull/module_registry.h"
+#include "hull/module_resolver.h"
+
+UTEST(lua_runtime, require_gated_undeclared_module_fails)
+{
+    init_lua();
+
+    /* Wire an empty resolved set (intrinsics only — no crypto/validate). */
+    HlResolvedModuleSet set;
+    hl_module_set_clear(&set);
+    lua_rt.base.module_set = &set;
+
+    int rc = luaL_dostring(lua_rt.L, "require('hull.validate')");
+    ASSERT_NE(rc, LUA_OK);
+    const char *err = lua_tostring(lua_rt.L, -1);
+    ASSERT_NE(err, NULL);
+    /* Error mentions the runtime-form name + the manifest fix + the
+     * `hull modules available` hint. */
+    ASSERT_NE(strstr(err, "hull.validate"), NULL);
+    ASSERT_NE(strstr(err, "app.manifest"), NULL);
+    ASSERT_NE(strstr(err, "hull modules available"), NULL);
+    lua_pop(lua_rt.L, 1);
+
+    lua_rt.base.module_set = NULL;
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, require_gated_declared_module_succeeds)
+{
+    init_lua();
+
+    /* Resolve with hull/validate admitted via the real resolver. */
+    HlManifest m;
+    memset(&m, 0, sizeof(m));
+    m.modules[0].name = "validate";
+    m.modules[0].api_major = 1;
+    m.modules_count = 1;
+    m.modules_declared = 1;
+
+    HlResolvedModuleSet set;
+    char err_resolver[256] = {0};
+    int rc_resolve = hl_module_resolver_resolve(&m, &set, err_resolver,
+                                                 sizeof(err_resolver));
+    ASSERT_EQ(rc_resolve, 0);
+
+    lua_rt.base.module_set = &set;
+
+    int rc = luaL_dostring(lua_rt.L,
+        "local v = require('hull.validate'); "
+        "if type(v) ~= 'table' then error('not a table') end");
+    if (rc != LUA_OK) {
+        const char *err = lua_tostring(lua_rt.L, -1);
+        fprintf(stderr, "load err: %s\n", err ? err : "?");
+        lua_pop(lua_rt.L, 1);
+    }
+    ASSERT_EQ(rc, LUA_OK);
+
+    lua_rt.base.module_set = NULL;
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, require_gating_skipped_for_user_modules)
+{
+    /* Names that don't map to any registry entry fall through to the
+     * normal lookup — gating does NOT intercept user code. */
+    init_lua();
+
+    HlResolvedModuleSet set;
+    hl_module_set_clear(&set);
+    lua_rt.base.module_set = &set;
+
+    int rc = luaL_dostring(lua_rt.L, "require('myapp.helpers')");
+    /* Without an app_dir, expect "module not found" (original behavior),
+     * NOT the gating error. */
+    ASSERT_NE(rc, LUA_OK);
+    const char *err = lua_tostring(lua_rt.L, -1);
+    ASSERT_NE(err, NULL);
+    ASSERT_NE(strstr(err, "module not found"), NULL);
+    /* And NOT the gating message. */
+    ASSERT_EQ(strstr(err, "app.manifest"), NULL);
+    lua_pop(lua_rt.L, 1);
+
+    lua_rt.base.module_set = NULL;
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, require_null_module_set_is_permissive)
+{
+    /* NULL module_set = legacy entry points: gating disabled. */
+    init_lua();
+    ASSERT_EQ(lua_rt.base.module_set, NULL);
+
+    /* require('hull.validate') would normally fire the gate if a set
+     * were wired; with NULL set, behavior matches pre-phase-2. */
+    int rc = luaL_dostring(lua_rt.L,
+        "local v = require('hull.validate'); "
+        "if type(v) ~= 'table' then error('not a table') end");
+    ASSERT_EQ(rc, LUA_OK);
+
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, require_resolves_native_modules)
+{
+    /* Phase 2b bridge: native C modules (luaL_requiref-registered) like
+     * hull.crypto must resolve via the custom require even though they
+     * live in _LOADED, not __hull_modules. */
+    init_lua();
+
+    int rc = luaL_dostring(lua_rt.L,
+        "local c = require('hull.crypto'); "
+        "if type(c) ~= 'table' or type(c.sha256) ~= 'function' "
+        "then error('crypto not loaded correctly: ' .. type(c)) end");
+    if (rc != LUA_OK) {
+        const char *e = lua_tostring(lua_rt.L, -1);
+        fprintf(stderr, "require native err: %s\n", e ? e : "?");
+    }
+    ASSERT_EQ(rc, LUA_OK);
 
     cleanup_lua();
 }

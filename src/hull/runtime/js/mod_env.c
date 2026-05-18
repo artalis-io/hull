@@ -32,6 +32,8 @@ static JSValue js_env_get(JSContext *ctx, JSValueConst this_val,
 
 static int js_env_module_init(JSContext *ctx, JSModuleDef *m)
 {
+    if (hl_js_check_module_declared(ctx, "hull/env", "hull:env") != 0) return -1;
+
     JSValue env = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, env, "get",
                       JS_NewCFunction(ctx, js_env_get, "get", 1));

@@ -13,7 +13,12 @@
 
 import { gpu } from "hull:gpu";
 
-app.manifest({ gpu: true });
+app.manifest({
+    gpu: true,
+    modules: [
+        "hull/gpu@1",
+    ],
+});
 
 // WGSL compute shader: cosine similarity between query and N candidates
 const SHADER = `

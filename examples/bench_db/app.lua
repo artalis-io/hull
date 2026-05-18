@@ -7,7 +7,15 @@
 --   GET  /mixed       — mixed: 1 INSERT + 1 SELECT (20 rows)
 --   GET  /health      — baseline (no DB)
 
-app.manifest({})
+local db   = require("hull.db")
+local time = require("hull.time")
+
+app.manifest({
+    modules = {
+        "hull/db@1",
+        "hull/time@1",
+    },
+})
 
 -- Seed data for reads (1000 rows)
 local count = db.query("SELECT count(*) AS n FROM events")

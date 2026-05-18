@@ -989,6 +989,9 @@ static JSValue js_crypto_base64url_decode(JSContext *ctx, JSValueConst this_val,
 
 static int js_crypto_module_init(JSContext *ctx, JSModuleDef *m)
 {
+    if (hl_js_check_module_declared(ctx, "hull/crypto", "hull:crypto") != 0)
+        return -1;
+
     JSValue crypto = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, crypto, "sha256",
                       JS_NewCFunction(ctx, js_crypto_sha256, "sha256", 1));

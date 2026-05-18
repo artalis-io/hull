@@ -21,6 +21,8 @@
 --       etag.json(req, res, db.query("SELECT * FROM items"))
 --   end)
 
+local crypto = require("hull.crypto")
+
 local etag = {}
 
 local MAX_BODY_SIZE = 1024 * 1024  -- 1 MB: skip ETag for larger responses

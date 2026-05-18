@@ -25,6 +25,9 @@
 --   })
 --   if not result.ok then log.error(result.error) end
 
+local http = require("hull.http")
+local smtp = require("hull.smtp")
+
 local email = {}
 
 -- Provider adapters: each takes (opts) and returns { ok, error }

@@ -1006,6 +1006,8 @@ static JSValue js_db_udf_unregister(JSContext *ctx, JSValueConst this_val,
 
 static int js_db_module_init(JSContext *ctx, JSModuleDef *m)
 {
+    if (hl_js_check_module_declared(ctx, "hull/db", "hull:db") != 0) return -1;
+
     JSValue db = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, db, "query",
                       JS_NewCFunction(ctx, js_db_query, "query", 2));

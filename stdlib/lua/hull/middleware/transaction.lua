@@ -22,6 +22,8 @@
 --       db.exec("UPDATE inventory ...",   { ... })
 --   end)
 
+local db = require("hull.db")
+
 local transaction = {}
 
 --- Build a transaction marker middleware.

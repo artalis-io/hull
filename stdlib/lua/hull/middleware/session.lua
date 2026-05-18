@@ -8,6 +8,10 @@
 -- session id (32 bytes hex). Cookie-based auth pairs this with
 -- @{hull.middleware.auth.session_middleware}.
 
+local crypto = require("hull.crypto")
+local db = require("hull.db")
+local time = require("hull.time")
+
 local session = {}
 
 -- Module-level TTL (seconds), default 24 hours.

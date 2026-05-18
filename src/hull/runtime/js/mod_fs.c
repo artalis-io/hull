@@ -79,6 +79,8 @@ static JSValue js_fs_mmap(JSContext *ctx, JSValueConst this_val,
 
 static int js_fs_module_init(JSContext *ctx, JSModuleDef *m)
 {
+    if (hl_js_check_module_declared(ctx, "hull/fs", "hull:fs") != 0) return -1;
+
     JSValue fs = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, fs, "mmap",
                       JS_NewCFunction(ctx, js_fs_mmap, "mmap", 1));

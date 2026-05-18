@@ -11,7 +11,14 @@
 --       curl -X POST localhost:3000/index -d '{"dimensions":4,"vectors":[[1,0,0,0],[0,1,0,0],[0.7,0.7,0,0]]}'
 --       curl -X POST localhost:3000/search -d '{"query":[0.8,0.6,0,0],"k":2}'
 
-app.manifest({ gpu = true })
+local gpu = require("hull.gpu")
+
+app.manifest({
+    gpu = true,
+    modules = {
+        "hull/gpu@1",
+    },
+})
 
 -- WGSL compute shader: cosine similarity between query and N candidates
 --

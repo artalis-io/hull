@@ -125,4 +125,26 @@ int hl_js_track_route(HlJS *js, void *route);
 int hl_js_track_alloc(HlJS *js, void ***arr, size_t *count,
                       size_t *cap, void *ptr);
 
+/* ── Module-declaration gate ─────────────────────────────────────────
+ *
+ * Called from each native module's QuickJS init callback to enforce
+ * the resolved module set. Returns 0 if the import is admitted
+ * (permissive when no set is wired, or the name is not in the
+ * registry — e.g. private bridges like hull:_template). Returns -1
+ * after throwing a ReferenceError when the module is registry-known
+ * but absent from the app's declared modules.
+ *
+ *   canonical_name: registry-canonical form, e.g. "hull/db"
+ *   runtime_name  : how the user wrote it, e.g. "hull:db" (used in
+ *                   the thrown error message)
+ *
+ * Native modules ARE registered with QuickJS up front (otherwise
+ * `import "hull:db"` would fail with "module not found" even when
+ * declared), but their init callback — which populates exports —
+ * doesn't run until first import. That's the hook this gate uses.
+ */
+int hl_js_check_module_declared(JSContext *ctx,
+                                 const char *canonical_name,
+                                 const char *runtime_name);
+
 #endif /* HL_RUNTIME_JS_INTERNAL_H */

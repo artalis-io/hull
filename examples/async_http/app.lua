@@ -11,8 +11,17 @@
 -- and worker.dispatch() — all yield the coroutine and let the event
 -- loop serve other connections while waiting.
 
+local db = require("hull.db")
+local http = require("hull.http")
+local worker = require("hull.worker")
+
 -- Allow outbound HTTP to self (localhost) for the fetch demos
 app.manifest({
+    modules = {
+        "hull/db@1",
+        "hull/http@1",
+        "hull/worker@1",
+    },
     hosts = {"127.0.0.1"},
     database = "async_demo.db",
 })
@@ -72,6 +81,11 @@ end)
 -- Worker dispatch: runs Lua function on a worker thread with its own VM
 app.get("/worker-dispatch", function(_req, res)
     local result = worker.dispatch(function(ctx)
+        -- Worker runs on a fresh Lua VM with a separate set of globals.
+        -- worker_db.c installs `db` as a worker-VM global (no require()
+        -- in workers). Read it through _G so the closure does NOT
+        -- capture the file-scope `db` upvalue from the parent VM.
+        local db = _G.db
         db.exec("CREATE TABLE IF NOT EXISTS async_test (id INTEGER PRIMARY KEY, val TEXT)")
         db.exec("INSERT INTO async_test (val) VALUES (?)", {ctx.value})
         local rows = db.query("SELECT COUNT(*) as n FROM async_test")

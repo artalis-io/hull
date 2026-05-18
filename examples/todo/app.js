@@ -31,7 +31,28 @@ import { validate } from "hull:validate";
 import en from "./locales/en.json";
 import hu from "./locales/hu.json";
 
-app.manifest({ hosts: ["127.0.0.1"] });  // allow self-fetch for /api/stats
+app.manifest({
+    hosts: ["127.0.0.1"],  // allow self-fetch for /api/stats
+    modules: [
+        "hull/cookie@1",
+        "hull/crypto@1",
+        "hull/csv@1",
+        "hull/db@1",
+        "hull/form@1",
+        "hull/http@1",
+        "hull/i18n@1",
+        "hull/search@1",
+        "hull/template@1",
+        "hull/time@1",
+        "hull/validate@1",
+        "hull/middleware/auth@1",
+        "hull/middleware/csrf@1",
+        "hull/middleware/logger@1",
+        "hull/middleware/ratelimit@1",
+        "hull/middleware/rbac@1",
+        "hull/middleware/session@1",
+    ],
+});
 
 // ── i18n setup ─────────────────────────────────────────────────────
 

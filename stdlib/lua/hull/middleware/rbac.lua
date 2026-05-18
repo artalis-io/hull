@@ -18,6 +18,8 @@
 --   rbac.assign(user_id, "admin")
 --   app.use_post("*", "/admin/*", rbac.require_role("admin"))
 
+local db = require("hull.db")
+
 local rbac = {}
 
 --- Create the four `_hull_*` RBAC tables.

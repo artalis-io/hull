@@ -38,6 +38,8 @@ static JSValue js_log_level(JSContext *ctx, JSValueConst this_val,
 
 static int js_log_module_init(JSContext *ctx, JSModuleDef *m)
 {
+    if (hl_js_check_module_declared(ctx, "hull/log", "hull:log") != 0) return -1;
+
     JSValue log = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, log, "info",
         JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_log_level,

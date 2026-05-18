@@ -1,6 +1,9 @@
 --
 -- hull.template -- Server-side template engine
 --
+-- Internal: bridges to the native hull._template C module for the
+-- expensive parse/codegen path. _template is a private module and
+-- intentionally not in the public registry.
 -- template.render(name, data)             - load + compile + render (cached)
 -- template.render_string(source, data)    - compile from string + render
 -- template.compile(name)                  - returns compiled function
@@ -35,6 +38,9 @@ local template = {}
 local MAX_INCLUDE_DEPTH  = 16
 local MAX_EXTENDS_DEPTH  = 8
 local MAX_CACHE_SIZE     = 1024
+
+-- Native bridge for parse/codegen (private — not in module registry).
+local _template = require("hull._template")
 
 -- ── Validation ──────────────────────────────────────────────────────
 

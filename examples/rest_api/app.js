@@ -12,7 +12,14 @@ import { i18n } from "hull:i18n";
 import { time } from "hull:time";
 import { validate } from "hull:validate";
 
-app.manifest({});
+app.manifest({
+    modules: [
+        "hull/db@1",
+        "hull/i18n@1",
+        "hull/time@1",
+        "hull/validate@1",
+    ],
+});
 
 // ── i18n setup ─────────────────────────────────────────────────────
 

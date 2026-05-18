@@ -7,6 +7,8 @@
 -- For production-grade rate limiting across multiple instances, layer
 -- a DB-backed limiter on top.
 
+local time = require("hull.time")
+
 local ratelimit = {}
 
 local SWEEP_INTERVAL = 100  -- sweep every N checks

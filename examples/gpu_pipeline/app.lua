@@ -13,7 +13,16 @@
 --   curl localhost:3000/health
 --   curl -X POST localhost:3000/score -d '{"items":[[80,150,3],[60,200,1],[95,50,5]],"weights":[0.5,0.3,0.2]}'
 
-app.manifest({ gpu = true })
+local gpu  = require("hull.gpu")
+local time = require("hull.time")
+
+app.manifest({
+    gpu = true,
+    modules = {
+        "hull/gpu@1",
+        "hull/time@1",
+    },
+})
 
 -- ── Stage 1: normalize each value by column max ──────────────────
 -- Finds max per column, divides each value by it.

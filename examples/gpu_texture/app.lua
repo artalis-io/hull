@@ -9,7 +9,16 @@
 -- Test: curl localhost:3000/health
 --       curl localhost:3000/process
 
-app.manifest({ gpu = true })
+local gpu   = require("hull.gpu")
+local image = require("hull.image")
+
+app.manifest({
+    gpu = true,
+    modules = {
+        "hull/gpu@1",
+        "hull/image@1",
+    },
+})
 
 -- Load and compile the invert shader from shaders/invert.wgsl
 if gpu.available() then

@@ -13,7 +13,12 @@ import { log } from "hull:log";
 import { time } from "hull:time";
 import { ws } from "hull:ws";
 
-app.manifest({});
+app.manifest({
+    modules: [
+        "hull/time@1",
+        "hull/ws@1",
+    ],
+});
 
 // ── WebSocket chat ────────────────────────────────────────────────
 

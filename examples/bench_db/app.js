@@ -14,7 +14,12 @@ import { db } from "hull:db";
 import { log } from "hull:log";
 import { time } from "hull:time";
 
-app.manifest({});
+app.manifest({
+    modules: [
+        "hull/db@1",
+        "hull/time@1",
+    ],
+});
 
 // Seed data for reads (1000 rows)
 const count = db.query("SELECT count(*) AS n FROM events");

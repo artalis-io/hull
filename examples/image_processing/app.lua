@@ -9,7 +9,13 @@
 --       curl localhost:3000/create
 --       curl localhost:3000/info
 
-app.manifest({})
+local image = require("hull.image")
+
+app.manifest({
+    modules = {
+        "hull/image@1",
+    },
+})
 
 -- Create a 4x4 RGBA8 gradient test image programmatically
 local function make_gradient()

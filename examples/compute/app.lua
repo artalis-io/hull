@@ -6,6 +6,15 @@
 -- Run: hull examples/compute/app.lua
 -- Test: hull test examples/compute
 
+local compute = require("hull.compute")
+
+app.manifest({
+    compute = true,
+    modules = {
+        "hull/compute@1",
+    },
+})
+
 -- Sync: blocks the request handler (good for fast/small calls)
 app.get("/score", function(req, res)
     local input = req.query.text or "hello"

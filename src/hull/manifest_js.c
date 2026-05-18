@@ -12,6 +12,7 @@
 #include "manifest_internal.h"
 #include "log.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef HL_ENABLE_JS
@@ -211,6 +212,116 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
     if (JS_IsBool(compute_val))
         out->compute = JS_ToBool(ctx, compute_val);
     JS_FreeValue(ctx, compute_val);
+
+    /* modules: ["hull/crypto@1", "hull/db@1", ...] — an array of
+     * canonical spec strings. The local variable / imported identifier
+     * is a plain JS binding (the user chooses the name); the manifest
+     * only declares which canonical modules are in scope.
+     *
+     * For back-compat we also accept the legacy object form when the
+     * value is a non-array object (`{ crypto: "hull/crypto@1" }`) —
+     * keys are ignored as cosmetic labels.
+     *
+     * Presence of `modules` (array OR object, even empty) sets
+     * `modules_declared = 1`. */
+    JSValue modules_val = JS_GetPropertyStr(ctx, manifest, "modules");
+
+    if (JS_IsArray(ctx, modules_val)) {
+        out->modules_declared = 1;
+        JSValue len_val = JS_GetPropertyStr(ctx, modules_val, "length");
+        int32_t len = 0;
+        JS_ToInt32(ctx, &len, len_val);
+        JS_FreeValue(ctx, len_val);
+        for (int32_t i = 0;
+             i < len && out->modules_count < HL_MANIFEST_MAX_MODULES;
+             i++) {
+            JSValue elem = JS_GetPropertyUint32(ctx, modules_val, (uint32_t)i);
+            if (JS_IsString(elem)) {
+                const char *spec = JS_ToCString(ctx, elem);
+                if (spec) {
+                    const char *at = strchr(spec, '@');
+                    if (at && at != spec) {
+                        char *end = NULL;
+                        long v = strtol(at + 1, &end, 10);
+                        if (end != at + 1 && *end == '\0' &&
+                            v >= 1 && v <= 255) {
+                            size_t nlen = (size_t)(at - spec);
+                            char *namebuf = hl_alloc_malloc(alloc, nlen + 1);
+                            if (namebuf) {
+                                memcpy(namebuf, spec, nlen);
+                                namebuf[nlen] = '\0';
+                                out->modules[out->modules_count].name      = namebuf;
+                                out->modules[out->modules_count].api_major = (uint8_t)v;
+                                out->modules_count++;
+                            }
+                        } else {
+                            log_warn("[manifest] modules[%d] = %s — invalid "
+                                     "major version, ignored", (int)i, spec);
+                        }
+                    } else {
+                        log_warn("[manifest] modules[%d] = %s — expected "
+                                 "\"vendor/name@version\", ignored",
+                                 (int)i, spec);
+                    }
+                    JS_FreeCString(ctx, spec);
+                }
+            }
+            JS_FreeValue(ctx, elem);
+        }
+    } else if (JS_IsObject(modules_val) && !JS_IsNull(modules_val)) {
+        out->modules_declared = 1;
+        JSPropertyEnum *props = NULL;
+        uint32_t prop_count = 0;
+        if (JS_GetOwnPropertyNames(ctx, &props, &prop_count, modules_val,
+                                    JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) == 0) {
+            for (uint32_t i = 0; i < prop_count; i++) {
+                if (out->modules_count >= HL_MANIFEST_MAX_MODULES) {
+                    log_warn("[manifest] modules object exceeds HL_MANIFEST_MAX_MODULES (%d), truncated",
+                             HL_MANIFEST_MAX_MODULES);
+                    for (uint32_t j = i; j < prop_count; j++)
+                        JS_FreeAtom(ctx, props[j].atom);
+                    break;
+                }
+                const char *alias = JS_AtomToCString(ctx, props[i].atom);
+                JSValue v_val = JS_GetProperty(ctx, modules_val, props[i].atom);
+                if (alias && JS_IsString(v_val)) {
+                    const char *spec = JS_ToCString(ctx, v_val);
+                    if (spec) {
+                        const char *at = strchr(spec, '@');
+                        if (!at || at == spec) {
+                            log_warn("[manifest] modules.%s = %s — expected "
+                                     "\"vendor/name@version\", ignored",
+                                     alias, spec);
+                        } else {
+                            char *end = NULL;
+                            long v = strtol(at + 1, &end, 10);
+                            if (end == at + 1 || *end != '\0' ||
+                                v < 1 || v > 255) {
+                                log_warn("[manifest] modules.%s = %s — invalid "
+                                         "major version, ignored", alias, spec);
+                            } else {
+                                size_t nlen = (size_t)(at - spec);
+                                char *namebuf = hl_alloc_malloc(alloc, nlen + 1);
+                                if (namebuf) {
+                                    memcpy(namebuf, spec, nlen);
+                                    namebuf[nlen] = '\0';
+                                    out->modules[out->modules_count].name      = namebuf;
+                                    out->modules[out->modules_count].api_major = (uint8_t)v;
+                                    out->modules_count++;
+                                }
+                            }
+                        }
+                        JS_FreeCString(ctx, spec);
+                    }
+                }
+                if (alias) JS_FreeCString(ctx, alias);
+                JS_FreeValue(ctx, v_val);
+                JS_FreeAtom(ctx, props[i].atom);
+            }
+            js_free(ctx, props);
+        }
+    }
+    JS_FreeValue(ctx, modules_val);
 
     /* allowDynamicCode: true — opt-in to JIT / runtime codegen.
      * Rejected by hl_sandbox_apply unless --no-sandbox.

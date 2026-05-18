@@ -189,6 +189,8 @@ cleanup:
 
 static int js_smtp_module_init(JSContext *ctx, JSModuleDef *m)
 {
+    if (hl_js_check_module_declared(ctx, "hull/smtp", "hull:smtp") != 0) return -1;
+
     JSValue smtp = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, smtp, "send",
                       JS_NewCFunction(ctx, js_smtp_send, "send", 1));

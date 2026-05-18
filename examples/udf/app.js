@@ -6,7 +6,11 @@
 import { app } from "hull:app";
 import { db } from "hull:db";
 
-app.manifest({});
+app.manifest({
+    modules: [
+        "hull/db@1",
+    ],
+});
 
 // ── JS scalar UDF: uppercase text ─────────────────────────────────
 db.udf.register("hull_upper", (text) => {

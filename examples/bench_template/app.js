@@ -10,7 +10,11 @@ import { app } from "hull:app";
 import { log } from "hull:log";
 import { template } from "hull:template";
 
-app.manifest({});
+app.manifest({
+    modules: [
+        "hull/template@1",
+    ],
+});
 
 // Prepare data once at startup to isolate template overhead
 const items = [];

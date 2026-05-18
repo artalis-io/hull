@@ -27,12 +27,28 @@
 -- WebSocket:
 --   WS /ws — authenticated chat (see protocol below)
 
+local crypto   = require("hull.crypto")
+local db       = require("hull.db")
+local time     = require("hull.time")
 local validate = require("hull.validate")
+local ws       = require("hull.ws")
 local session  = require("hull.middleware.session")
 local auth     = require("hull.middleware.auth")
 local _cookie  = require("hull.cookie") -- luacheck: ignore
 
-app.manifest({ hosts = {"127.0.0.1"} })
+app.manifest({
+    hosts = {"127.0.0.1"},
+    modules = {
+        "hull/cookie@1",
+        "hull/crypto@1",
+        "hull/db@1",
+        "hull/time@1",
+        "hull/validate@1",
+        "hull/ws@1",
+        "hull/middleware/auth@1",
+        "hull/middleware/session@1",
+    },
+})
 session.init({ ttl = 7200 })
 
 -- ── Retention config (0 = no limit, >0 = TTL in seconds) ────────────

@@ -13,7 +13,17 @@ import { session } from "hull:middleware:session";
 import { time } from "hull:time";
 import { validate } from "hull:validate";
 
-app.manifest({});
+app.manifest({
+    modules: [
+        "hull/cookie@1",
+        "hull/crypto@1",
+        "hull/db@1",
+        "hull/time@1",
+        "hull/validate@1",
+        "hull/middleware/auth@1",
+        "hull/middleware/session@1",
+    ],
+});
 
 // Initialize sessions
 session.init({ ttl: 3600 });

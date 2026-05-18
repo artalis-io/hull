@@ -15,6 +15,9 @@ app.manifest({
         credentials: true,
         maxAge: 3600,
     },
+    modules: [
+        "hull/server@1",
+    ],
 });
 
 // ── Routes ──────────────────────────────────────────────────────────

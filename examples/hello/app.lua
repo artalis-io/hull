@@ -6,9 +6,17 @@
 -- Graceful shutdown: Ctrl+C triggers drain mode (finishes in-flight
 -- requests within 5s). Second Ctrl+C stops immediately.
 
+local db = require("hull.db")
 local i18n = require("hull.i18n")
+local time = require("hull.time")
 
-app.manifest({})
+app.manifest({
+    modules = {
+        "hull/db@1",
+        "hull/i18n@1",
+        "hull/time@1",
+    },
+})
 
 -- ── i18n setup ─────────────────────────────────────────────────────
 

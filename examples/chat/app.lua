@@ -8,7 +8,15 @@
 --   GET /health           — health check
 --   GET /ws/connections   — current WebSocket connection count
 
-app.manifest({})
+local time = require("hull.time")
+local ws   = require("hull.ws")
+
+app.manifest({
+    modules = {
+        "hull/time@1",
+        "hull/ws@1",
+    },
+})
 
 -- ── WebSocket chat ────────────────────────────────────────────────
 

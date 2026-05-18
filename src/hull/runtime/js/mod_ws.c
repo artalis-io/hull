@@ -714,6 +714,8 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
 
 static int js_ws_module_init(JSContext *ctx, JSModuleDef *m)
 {
+    if (hl_js_check_module_declared(ctx, "hull/ws", "hull:ws") != 0) return -1;
+
     JSValue ws = JS_NewObject(ctx);
 
     JS_SetPropertyStr(ctx, ws, "broadcast",

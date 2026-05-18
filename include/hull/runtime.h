@@ -37,6 +37,7 @@ typedef struct HlEnvConfig HlEnvConfig;
 typedef struct HlHttpConfig HlHttpConfig;
 typedef struct HlSmtpConfig HlSmtpConfig;
 typedef struct HlManifest HlManifest;
+typedef struct HlResolvedModuleSet HlResolvedModuleSet;
 typedef struct HlVfs HlVfs;
 typedef struct HlWasmCache HlWasmCache;
 typedef struct HlGpuCtx HlGpuCtx;
@@ -114,6 +115,11 @@ struct HlRuntime {
     const char   *csp_policy;  /* CSP header value for HTML responses (NULL = none) */
     const HlVfs  *app_vfs;       /* app entries (embedded + dev fallback) */
     const HlVfs  *platform_vfs;  /* stdlib entries (always embedded) */
+    /* Frozen module set: which first-party stdlib modules the app may
+     * import. Borrowed pointer; lifetime exceeds the runtime. NULL means
+     * no gating (legacy entry points: test runner, agent, mcp). When
+     * non-NULL, gating fires for any registry-known name not in the set. */
+    const HlResolvedModuleSet *module_set;
     KlThreadPool *thread_pool;   /* worker pool for async work (NULL if not created) */
     const char   *db_path;       /* SQLite file path (borrowed, for worker connections) */
     struct KlCompressConfig *compress;  /* response compression config (NULL = disabled) */

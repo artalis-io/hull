@@ -3,11 +3,23 @@
 -- Run: hull app.lua -p 3000
 -- Session-based auth API: register, login, logout, protected routes
 
+local crypto   = require("hull.crypto")
+local db       = require("hull.db")
+local time     = require("hull.time")
 local validate = require("hull.validate")
 local session  = require("hull.middleware.session")
 local auth     = require("hull.middleware.auth")
 
-app.manifest({})
+app.manifest({
+    modules = {
+        "hull/crypto@1",
+        "hull/db@1",
+        "hull/time@1",
+        "hull/validate@1",
+        "hull/middleware/auth@1",
+        "hull/middleware/session@1",
+    },
+})
 
 -- Initialize sessions
 session.init({ ttl = 3600 })

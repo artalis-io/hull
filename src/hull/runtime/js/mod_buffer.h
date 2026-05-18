@@ -14,10 +14,18 @@
 #include "hull/runtime/js.h"
 #include "hull/buffer.h"
 #include "hull/cap/fs.h"
+#include "hull/module_registry.h"
+#include "hull/module_resolver.h"
 #include "quickjs.h"
 
 #include <stdlib.h>
 #include <string.h>
+
+/* Module-declaration gate for native JS modules. Declared here so every
+ * mod_*.c sees it via mod_buffer.h. Implementation in runtime.c. */
+int hl_js_check_module_declared(JSContext *ctx,
+                                 const char *canonical_name,
+                                 const char *runtime_name);
 
 /* ── Shared JS class IDs ─────────────────────────────────────────── */
 

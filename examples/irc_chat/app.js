@@ -20,7 +20,19 @@ import { time } from "hull:time";
 import { validate } from "hull:validate";
 import { ws } from "hull:ws";
 
-app.manifest({ hosts: ["127.0.0.1"] });
+app.manifest({
+    hosts: ["127.0.0.1"],
+    modules: [
+        "hull/cookie@1",
+        "hull/crypto@1",
+        "hull/db@1",
+        "hull/time@1",
+        "hull/validate@1",
+        "hull/ws@1",
+        "hull/middleware/auth@1",
+        "hull/middleware/session@1",
+    ],
+});
 session.init({ ttl: 7200 });
 
 // ── Retention config (0 = no limit, >0 = TTL in seconds) ────────────

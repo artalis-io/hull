@@ -9,15 +9,31 @@
 --   - Idempotency keys: POST /events supports Idempotency-Key header
 --   - Retry with exponential backoff via outbox.flush()
 
+local crypto      = require("hull.crypto")
+local db          = require("hull.db")
+local env         = require("hull.env")
+local http        = require("hull.http")
+local time        = require("hull.time")
 local validate    = require("hull.validate")
 local idempotency = require("hull.middleware.idempotency")
-local outbox      = require("hull.middleware.outbox")
 local inbox       = require("hull.middleware.inbox")
+local outbox      = require("hull.middleware.outbox")
 
 -- Manifest: allow outbound HTTP to localhost for webhook delivery
 app.manifest({
     env = {"WEBHOOK_SECRET"},
     hosts = {"127.0.0.1"},
+    modules = {
+        "hull/crypto@1",
+        "hull/db@1",
+        "hull/env@1",
+        "hull/http@1",
+        "hull/time@1",
+        "hull/validate@1",
+        "hull/middleware/idempotency@1",
+        "hull/middleware/inbox@1",
+        "hull/middleware/outbox@1",
+    },
 })
 
 -- env.get() is unavailable at load time (env_cfg wired after manifest extraction),

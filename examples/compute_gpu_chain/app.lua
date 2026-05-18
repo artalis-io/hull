@@ -14,7 +14,17 @@
 --   curl localhost:3000/health
 --   curl -X POST localhost:3000/chain -d '{"values":[1,2,3,4,5,6,7,8]}'
 
-app.manifest({ gpu = true, compute = true })
+local compute = require("hull.compute")
+local gpu     = require("hull.gpu")
+
+app.manifest({
+    gpu     = true,
+    compute = true,
+    modules = {
+        "hull/compute@1",
+        "hull/gpu@1",
+    },
+})
 
 -- GPU shader: double each u32
 gpu.compile("double", [[

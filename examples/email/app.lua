@@ -11,12 +11,23 @@
 --   SMTP_FROM  — sender address (default: noreply@example.com)
 --   SMTP_TLS   — "true" for STARTTLS, "false" for plain (default: true)
 
+local db       = require("hull.db")
+local env      = require("hull.env")
+local smtp     = require("hull.smtp")
+local time     = require("hull.time")
 local validate = require("hull.validate")
 
 -- Add your SMTP host to the hosts list for production use.
 app.manifest({
     env = {"SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS", "SMTP_FROM", "SMTP_TLS"},
     hosts = {"localhost", "127.0.0.1", "smtp.gmail.com"},
+    modules = {
+        "hull/db@1",
+        "hull/env@1",
+        "hull/smtp@1",
+        "hull/time@1",
+        "hull/validate@1",
+    },
 })
 
 -- ── Config from env (lazy — env.get only works at request time) ──

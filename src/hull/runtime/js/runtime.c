@@ -18,6 +18,8 @@
 #include "hull/alloc.h"
 #include "hull/limits/runtime.h"
 #include "hull/manifest.h"
+#include "hull/module_registry.h"
+#include "hull/module_resolver.h"
 #include "hull/cap/test.h"
 #include "hull/runtime/test.h"
 
@@ -147,6 +149,37 @@ static char *hl_js_module_normalize(JSContext *ctx,
 }
 
 /*
+ * Module-declaration gate for native modules. See internal.h for
+ * the contract. Used by each mod_*.c init callback so QuickJS can
+ * refuse imports of undeclared first-party modules at the same
+ * boundary where the Lua require() gate fires (mod_fs.c).
+ */
+int hl_js_check_module_declared(JSContext *ctx,
+                                 const char *canonical_name,
+                                 const char *runtime_name)
+{
+    HlJS *js = JS_GetContextOpaque(ctx);
+    if (!js || !js->base.module_set) return 0;  /* legacy entry point */
+
+    const HlModuleSpec *spec = hl_module_registry_find(canonical_name);
+    if (!spec) return 0;  /* private / not registry-known — pass through */
+    if (hl_module_set_contains_spec(js->base.module_set, spec)) return 0;
+
+    char deps_buf[128];
+    hl_module_registry_format_deps(spec, deps_buf, sizeof(deps_buf));
+    char deps_part[160] = {0};
+    if (deps_buf[0])
+        snprintf(deps_part, sizeof(deps_part), " (also needs: %s)", deps_buf);
+
+    JS_ThrowReferenceError(ctx,
+        "module '%s' is not declared in app.manifest. "
+        "Add \"%s@%d\" to the modules array%s. "
+        "See `hull modules available` for the full list.",
+        runtime_name, spec->name, (int)spec->api_major, deps_part);
+    return -1;
+}
+
+/*
  * Module loader. Handles:
  * 1. hull:* prefix → built-in modules (registered at init time)
  * 2. Relative paths → load from filesystem (dev mode)
@@ -161,6 +194,31 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
      * resolves them automatically. If we get here, it wasn't found as
      * a native module, so check the embedded JS stdlib registry. */
     if (strncmp(module_name, "hull:", 5) == 0) {
+        /* Capability-aware gate. If the runtime has a resolved module
+         * set wired AND the name maps to a known first-party module
+         * not in that set, refuse before doing the VFS lookup. Names
+         * outside the registry fall through to the normal "unknown
+         * hull module" error. */
+        if (js->base.module_set) {
+            const HlModuleSpec *spec =
+                hl_module_registry_find_runtime(module_name, ':');
+            if (spec &&
+                !hl_module_set_contains_spec(js->base.module_set, spec)) {
+                char deps_buf[128];
+                hl_module_registry_format_deps(spec, deps_buf, sizeof(deps_buf));
+                char deps_part[160] = {0};
+                if (deps_buf[0])
+                    snprintf(deps_part, sizeof(deps_part),
+                             " (also needs: %s)", deps_buf);
+                JS_ThrowReferenceError(ctx,
+                    "module '%s' is not declared in app.manifest. "
+                    "Add \"%s@%d\" to the modules array%s. "
+                    "See `hull modules available` for the full list.",
+                    module_name, spec->name, (int)spec->api_major, deps_part);
+                return NULL;
+            }
+        }
+
         if (js->base.platform_vfs) {
             const HlEntry *e = hl_vfs_find(js->base.platform_vfs, module_name);
             if (e) {

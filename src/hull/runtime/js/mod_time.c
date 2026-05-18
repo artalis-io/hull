@@ -50,6 +50,8 @@ static JSValue js_time_datetime(JSContext *ctx, JSValueConst this_val,
 
 static int js_time_module_init(JSContext *ctx, JSModuleDef *m)
 {
+    if (hl_js_check_module_declared(ctx, "hull/time", "hull:time") != 0) return -1;
+
     JSValue time_obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, time_obj, "now",
                       JS_NewCFunction(ctx, js_time_now, "now", 0));

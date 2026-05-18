@@ -10,7 +10,11 @@
 import { app } from "hull:app";
 import { template } from "hull:template";
 
-app.manifest({});
+app.manifest({
+    modules: [
+        "hull/template@1",
+    ],
+});
 
 // Sample data
 const users = [

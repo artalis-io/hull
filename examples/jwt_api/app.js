@@ -14,6 +14,14 @@ import { validate } from "hull:validate";
 
 app.manifest({
     env: ["JWT_SECRET"],
+    modules: [
+        "hull/crypto@1",
+        "hull/db@1",
+        "hull/env@1",
+        "hull/jwt@1",
+        "hull/time@1",
+        "hull/validate@1",
+    ],
 });
 
 // env.get() is unavailable at load time (env_cfg wired after manifest extraction),

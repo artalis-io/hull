@@ -3,11 +3,23 @@
 -- Run: hull app.lua -p 3000
 -- Token-based auth API: register, login, protected routes using Bearer tokens
 
+local crypto   = require("hull.crypto")
+local db       = require("hull.db")
+local env      = require("hull.env")
 local jwt      = require("hull.jwt")
+local time     = require("hull.time")
 local validate = require("hull.validate")
 
 app.manifest({
     env = {"JWT_SECRET"},
+    modules = {
+        "hull/crypto@1",
+        "hull/db@1",
+        "hull/env@1",
+        "hull/jwt@1",
+        "hull/time@1",
+        "hull/validate@1",
+    },
 })
 
 -- env.get() is unavailable at load time (env_cfg wired after manifest extraction),

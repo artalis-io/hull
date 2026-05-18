@@ -12,6 +12,7 @@
 #include "manifest_internal.h"
 #include "log.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef HL_ENABLE_LUA
@@ -183,6 +184,98 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
     lua_getfield(L, manifest_idx, "compute");
     out->compute = lua_toboolean(L, -1);
     lua_pop(L, 1);
+
+    /* modules = { crypto = "1", fs = "1", ["hull/http"] = "1" }
+     *
+     * Strict format: key is the module name (short alias or full
+     * canonical), value is a version-string parsed as the API major.
+     * Other shapes (array, boolean, number) are rejected silently here
+     * and surface as resolver errors later. The presence of the key —
+     * even with an empty table — sets `modules_declared = 1`. */
+    lua_getfield(L, manifest_idx, "modules");
+    if (lua_istable(L, -1)) {
+        int modules_idx = lua_gettop(L);
+        out->modules_declared = 1;
+
+        /* Syntax: `modules = { "<vendor>/<name>@<major>", ... }` — a
+         * Lua sequence of canonical spec strings. The local-variable
+         * name in `require()` is the user-facing alias (a plain Lua
+         * convention); the manifest only declares which canonical
+         * modules are in scope.
+         *
+         * We iterate as a sequence first (the supported form). For
+         * back-compat we also accept the legacy table-keyed form
+         * `{ crypto = "hull/crypto@1" }` if the sequence is empty —
+         * keys are then ignored as cosmetic labels. */
+        lua_Integer seq_len = luaL_len(L, modules_idx);
+        if (seq_len > 0) {
+            for (lua_Integer i = 1;
+                 i <= seq_len && out->modules_count < HL_MANIFEST_MAX_MODULES;
+                 i++) {
+                lua_rawgeti(L, modules_idx, i);
+                if (lua_type(L, -1) == LUA_TSTRING) {
+                    const char *spec = lua_tostring(L, -1);
+                    const char *at   = strchr(spec, '@');
+                    if (!at || at == spec) {
+                        log_warn("[manifest] modules[%lld] = %s — expected "
+                                 "\"vendor/name@version\", ignored",
+                                 (long long)i, spec);
+                    } else {
+                        char *end = NULL;
+                        long v = strtol(at + 1, &end, 10);
+                        if (end == at + 1 || *end != '\0' ||
+                            v < 1 || v > 255) {
+                            log_warn("[manifest] modules[%lld] = %s — "
+                                     "invalid major version, ignored",
+                                     (long long)i, spec);
+                        } else {
+                            size_t nlen = (size_t)(at - spec);
+                            char *namebuf = hl_alloc_malloc(alloc, nlen + 1);
+                            if (namebuf) {
+                                memcpy(namebuf, spec, nlen);
+                                namebuf[nlen] = '\0';
+                                out->modules[out->modules_count].name      = namebuf;
+                                out->modules[out->modules_count].api_major = (uint8_t)v;
+                                out->modules_count++;
+                            }
+                        }
+                    }
+                }
+                lua_pop(L, 1);
+            }
+        } else {
+            /* Fall back to keyed form (legacy). Iterate string keys. */
+            lua_pushnil(L);
+            while (lua_next(L, modules_idx) != 0) {
+                if (lua_type(L, -2) == LUA_TSTRING &&
+                    lua_type(L, -1) == LUA_TSTRING &&
+                    out->modules_count < HL_MANIFEST_MAX_MODULES) {
+                    const char *alias = lua_tostring(L, -2);
+                    const char *spec  = lua_tostring(L, -1);
+                    const char *at    = strchr(spec, '@');
+                    if (at && at != spec) {
+                        char *end = NULL;
+                        long v = strtol(at + 1, &end, 10);
+                        if (end != at + 1 && *end == '\0' &&
+                            v >= 1 && v <= 255) {
+                            size_t nlen = (size_t)(at - spec);
+                            char *namebuf = hl_alloc_malloc(alloc, nlen + 1);
+                            if (namebuf) {
+                                memcpy(namebuf, spec, nlen);
+                                namebuf[nlen] = '\0';
+                                out->modules[out->modules_count].name      = namebuf;
+                                out->modules[out->modules_count].api_major = (uint8_t)v;
+                                out->modules_count++;
+                            }
+                        }
+                    }
+                    (void)alias;  /* cosmetic — not used for resolution */
+                }
+                lua_pop(L, 1);
+            }
+        }
+    }
+    lua_pop(L, 1); /* pop modules */
 
     /* allow_dynamic_code = true — opt-in to JIT / runtime codegen.
      * Rejected by hl_sandbox_apply unless --no-sandbox. */

@@ -8,6 +8,13 @@
 import { app } from "hull:app";
 import { compute } from "hull:compute";
 
+app.manifest({
+    compute: true,
+    modules: [
+        "hull/compute@1",
+    ],
+});
+
 // Sync echo
 app.get("/echo", (req, res) => {
     const input = req.query.text || "";

@@ -15,6 +15,9 @@
 -- local token = jwt.sign({ sub = user_id, exp = 3600 }, secret)  -- 1h from now
 -- local payload, err = jwt.verify(token, secret, { require_exp = true })
 
+local crypto = require("hull.crypto")
+local time = require("hull.time")
+
 local jwt = {}
 
 -- Pre-computed base64url encoding of {"alg":"HS256","typ":"JWT"}

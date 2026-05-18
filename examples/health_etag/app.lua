@@ -2,8 +2,23 @@
 --
 -- Demonstrates hull.middleware.health and hull.middleware.etag
 
+local crypto = require("hull.crypto")
+local db     = require("hull.db")
+local server = require("hull.server")
+local time   = require("hull.time")
 local health = require("hull.middleware.health")
-local etag = require("hull.middleware.etag")
+local etag   = require("hull.middleware.etag")
+
+app.manifest({
+    modules = {
+        "hull/crypto@1",
+        "hull/db@1",
+        "hull/server@1",
+        "hull/time@1",
+        "hull/middleware/etag@1",
+        "hull/middleware/health@1",
+    },
+})
 
 -- Register a custom health check
 health.register("app_ready", function()

@@ -46,6 +46,7 @@
 #include "hull/agent_api.h"
 #include "hull/limits.h"
 #include "hull/manifest.h"
+#include "hull/module_resolver.h"
 #include "hull/parse_size.h"
 #include "hull/sandbox.h"
 #include "hull/signature.h"
@@ -585,6 +586,7 @@ typedef struct {
 
     /* Manifest + wired capability configs */
     HlManifest           manifest;
+    HlResolvedModuleSet  module_set; /* frozen after resolver; consulted by gating */
     HlFsConfig           fs_cfg_storage;
     HlEnvConfig          env_cfg_storage;
     HlHttpConfig         http_cfg_storage;
@@ -955,10 +957,13 @@ static int hl_serve_load_app(HlServerState *s)
  * Split out of a 296-line monolith as roadmap item H.
  */
 
-/* Phase 1: extract manifest + wire all per-capability configs. */
-/* Returns void — this phase has no failure mode (manifest extraction
- * tolerates absence, TLS context creation only warns). */
-static void hl_serve_wire_caps(HlServerState *s)
+/* Phase 1: extract manifest + resolve module set + wire per-capability configs.
+ *
+ * Returns 0 on success, -1 if module resolution fails (unknown name,
+ * version mismatch, missing capability, undeclared dep). Module
+ * resolution failures are fatal because they indicate the manifest
+ * doesn't match what the runtime is about to be configured to expose. */
+static int hl_serve_wire_caps(HlServerState *s)
 {
     HlRuntime *rt = hl_app_context_runtime(s->app);
 
@@ -966,9 +971,27 @@ static void hl_serve_wire_caps(HlServerState *s)
     memset(&s->manifest, 0, sizeof(s->manifest));
     if (rt->vt->extract_manifest(rt, &s->manifest) == 0) {
         s->manifest_extracted = 1;
-        log_info("[hull:c] manifest: fs_read=%d fs_write=%d env=%d hosts=%d",
+        log_info("[hull:c] manifest: fs_read=%d fs_write=%d env=%d hosts=%d modules=%d",
                  s->manifest.fs_read_count, s->manifest.fs_write_count,
-                 s->manifest.env_count, s->manifest.hosts_count);
+                 s->manifest.env_count, s->manifest.hosts_count,
+                 s->manifest.modules_count);
+    }
+
+    /* Resolve manifest.modules against the canonical registry. Always
+     * runs — with no manifest, only the intrinsic core is admitted. */
+    {
+        char err[HL_MODULE_RESOLVER_ERR_MAX] = {0};
+        if (hl_module_resolver_resolve(s->manifest_extracted ? &s->manifest : NULL,
+                                       &s->module_set, err, sizeof(err)) != 0) {
+            log_error("[hull:c] %s", err);
+            return -1;
+        }
+        log_info("[hull:c] modules resolved: %d admitted",
+                 hl_module_set_count(&s->module_set));
+        /* Borrow the set into the runtime so per-language gates can see
+         * it. The set lives in HlServerState; its lifetime exceeds the
+         * runtime, so storing the pointer is safe. */
+        rt->module_set = &s->module_set;
     }
 
     /* Wire CSP policy to runtime.
@@ -980,11 +1003,21 @@ static void hl_serve_wire_caps(HlServerState *s)
         rt->csp_policy = HL_DEFAULT_CSP;  /* default */
 
 #ifdef HL_ENABLE_WASM
-    /* Revoke WASM if manifest is present but doesn't declare compute: true.
-     * Already wired above; only revoke when manifest explicitly omits it. */
-    if (wasm_cache_ok && s->manifest.present && !s->manifest.compute) {
-        rt->wasm_cache = NULL;
-        log_info("[hull:c] compute not declared in manifest — compute.* disabled");
+    /* WASM gating. Two paths:
+     *   - Modern: app declares `modules.compute = "1"` → admit.
+     *   - Legacy: app declares `compute = true` (without modules block) → admit.
+     * If the modules block is present, it is authoritative — the legacy
+     * `compute = true` field is ignored. Otherwise fall back to legacy. */
+    if (wasm_cache_ok) {
+        int admit;
+        if (s->manifest.modules_declared)
+            admit = hl_module_set_contains_name(&s->module_set, "hull/compute");
+        else
+            admit = !s->manifest.present || s->manifest.compute;
+        if (!admit) {
+            rt->wasm_cache = NULL;
+            log_info("[hull:c] compute not declared — compute.* disabled");
+        }
     }
 
     /* Resolve three-tier WASM config: CLI > manifest > compile-time defaults */
@@ -992,11 +1025,17 @@ static void hl_serve_wire_caps(HlServerState *s)
 #endif
 
 #ifdef HL_ENABLE_GPU
-    /* Revoke GPU if manifest is present but doesn't declare gpu: true.
-     * Already wired above; only revoke when manifest explicitly omits it. */
-    if (gpu_ctx_ok && s->manifest.present && !s->manifest.gpu) {
-        rt->gpu_ctx = NULL;
-        log_info("[hull:c] gpu not declared in manifest — gpu.* disabled");
+    /* GPU gating mirrors the WASM rule above. */
+    if (gpu_ctx_ok) {
+        int admit;
+        if (s->manifest.modules_declared)
+            admit = hl_module_set_contains_name(&s->module_set, "hull/gpu");
+        else
+            admit = !s->manifest.present || s->manifest.gpu;
+        if (!admit) {
+            rt->gpu_ctx = NULL;
+            log_info("[hull:c] gpu not declared — gpu.* disabled");
+        }
     }
     /* Apply per-device allowlist if manifest declares specific devices */
     if (gpu_ctx_ok && s->manifest.present && s->manifest.gpu &&
@@ -1113,6 +1152,8 @@ static void hl_serve_wire_caps(HlServerState *s)
         s->smtp_cfg_storage.tls           = s->client_tls_ctx ? &s->client_tls_config : NULL;
         rt->smtp_cfg = &s->smtp_cfg_storage;
     }
+
+    return 0;
 }
 
 /* Cleanup if a phase fails after wire_caps has succeeded. */
@@ -1269,7 +1310,10 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
 
 static int hl_serve_wire_and_start(HlServerState *s)
 {
-    hl_serve_wire_caps(s);
+    if (hl_serve_wire_caps(s) != 0) {
+        hl_serve_undo_caps(s);
+        return -1;
+    }
     if (hl_serve_apply_sandbox(s) != 0) {
         hl_serve_undo_caps(s);
         return -1;

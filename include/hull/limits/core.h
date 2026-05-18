@@ -15,6 +15,12 @@
 #define HL_MODULE_PATH_MAX    4096              /* Max resolved module path length */
 #define HL_MODULE_MAX_SIZE    (10 * 1024 * 1024) /* 10 MB max module file */
 
+/* Module registry / resolver (capability-aware declaration system). */
+#define HL_MODULE_NAME_MAX           64    /* Max bytes for "hull/<x>" + NUL */
+#define HL_MODULE_MAX_DEPS           4     /* Max internal deps per spec */
+#define HL_MODULE_BITSET_WORDS       2     /* 128 bits → registry headroom */
+#define HL_MODULE_RESOLVER_ERR_MAX   256   /* Resolver error message buffer */
+
 /* ── HTTP / body ────────────────────────────────────────────────────── */
 
 #define HL_BODY_MAX_SIZE      (1024 * 1024)     /* 1 MB request body */

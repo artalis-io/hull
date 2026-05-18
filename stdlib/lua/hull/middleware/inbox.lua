@@ -26,6 +26,9 @@
 --   end)
 --
 
+local db = require("hull.db")
+local time = require("hull.time")
+
 local inbox = {}
 
 local _ttl = 604800  -- default 7 days

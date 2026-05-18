@@ -11,22 +11,48 @@
 -- Run:  hull dev examples/todo/app.lua -d /tmp/todo.db
 --
 
-local template    = require("hull.template")
+local cookie      = require("hull.cookie")
+local crypto      = require("hull.crypto")
+local csv         = require("hull.csv")
+local db          = require("hull.db")
 local form        = require("hull.form")
+local http        = require("hull.http")
+local i18n        = require("hull.i18n")
+local search      = require("hull.search")
+local template    = require("hull.template")
+local time        = require("hull.time")
 local validate    = require("hull.validate")
-local session     = require("hull.middleware.session")
 local auth        = require("hull.middleware.auth")
 local csrf        = require("hull.middleware.csrf")
-local ratelimit   = require("hull.middleware.ratelimit")
 local logger      = require("hull.middleware.logger")
-local transaction = require("hull.middleware.transaction")
-local cookie      = require("hull.cookie")
-local i18n        = require("hull.i18n")
-local csv         = require("hull.csv")
-local search      = require("hull.search")
+local ratelimit   = require("hull.middleware.ratelimit")
 local rbac        = require("hull.middleware.rbac")
+local session     = require("hull.middleware.session")
+local transaction = require("hull.middleware.transaction")
 
-app.manifest({ hosts = {"127.0.0.1"} })  -- allow self-fetch for /api/stats
+app.manifest({
+    hosts = {"127.0.0.1"},  -- allow self-fetch for /api/stats
+    modules = {
+        "hull/cookie@1",
+        "hull/crypto@1",
+        "hull/csv@1",
+        "hull/db@1",
+        "hull/form@1",
+        "hull/http@1",
+        "hull/i18n@1",
+        "hull/search@1",
+        "hull/template@1",
+        "hull/time@1",
+        "hull/validate@1",
+        "hull/middleware/auth@1",
+        "hull/middleware/csrf@1",
+        "hull/middleware/logger@1",
+        "hull/middleware/ratelimit@1",
+        "hull/middleware/rbac@1",
+        "hull/middleware/session@1",
+        "hull/middleware/transaction@1",
+    },
+})
 
 -- ── i18n setup ─────────────────────────────────────────────────────
 

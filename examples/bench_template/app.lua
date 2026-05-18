@@ -8,8 +8,14 @@
 --   GET /health  — baseline (no template)
 
 local template = require("hull.template")
+local time     = require("hull.time")
 
-app.manifest({})
+app.manifest({
+    modules = {
+        "hull/template@1",
+        "hull/time@1",
+    },
+})
 
 -- Prepare data once at startup to isolate template overhead
 local items = {}

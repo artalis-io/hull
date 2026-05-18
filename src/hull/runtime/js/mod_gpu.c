@@ -1602,6 +1602,8 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
 
 static int js_gpu_module_init(JSContext *ctx, JSModuleDef *m)
 {
+    if (hl_js_check_module_declared(ctx, "hull/gpu", "hull:gpu") != 0) return -1;
+
     JSValue gpu = JS_NewObject(ctx);
 
     JS_SetPropertyStr(ctx, gpu, "available",

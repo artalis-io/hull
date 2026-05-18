@@ -1276,6 +1276,9 @@ static JSValue js_compute_available(JSContext *ctx, JSValueConst this_val,
 
 static int js_compute_module_init(JSContext *ctx, JSModuleDef *m)
 {
+    if (hl_js_check_module_declared(ctx, "hull/compute", "hull:compute") != 0)
+        return -1;
+
     JSValue compute = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, compute, "available",
                       JS_NewCFunction(ctx, js_compute_available, "available", 0));

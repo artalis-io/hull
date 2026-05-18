@@ -308,6 +308,9 @@ static JSValue js_worker_dispatch(JSContext *ctx, JSValueConst this_val,
 
 static int js_worker_module_init(JSContext *ctx, JSModuleDef *m)
 {
+    if (hl_js_check_module_declared(ctx, "hull/worker", "hull:worker") != 0)
+        return -1;
+
     JSValue worker = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, worker, "dispatch",
                       JS_NewCFunction(ctx, js_worker_dispatch, "dispatch", 2));

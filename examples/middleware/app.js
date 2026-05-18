@@ -10,7 +10,14 @@ import { ratelimit } from "hull:middleware:ratelimit";
 import { server } from "hull:server";
 import { time } from "hull:time";
 
-app.manifest({});
+app.manifest({
+    modules: [
+        "hull/server@1",
+        "hull/time@1",
+        "hull/middleware/cors@1",
+        "hull/middleware/ratelimit@1",
+    ],
+});
 
 // ── Request ID middleware ────────────────────────────────────────────
 // Assigns a unique ID to every request, available via req.ctx.request_id

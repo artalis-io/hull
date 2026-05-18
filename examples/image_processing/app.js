@@ -11,7 +11,11 @@
 
 import { image } from "hull:image";
 
-app.manifest({});
+app.manifest({
+    modules: [
+        "hull/image@1",
+    ],
+});
 
 // Create a 4x4 RGBA8 gradient test image programmatically
 function makeGradient() {

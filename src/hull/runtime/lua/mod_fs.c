@@ -6,6 +6,8 @@
 #include "mod_buffer.h"
 #include "hull/cap/fs.h"
 #include "hull/limits/core.h"
+#include "hull/module_registry.h"
+#include "hull/module_resolver.h"
 #include "hull/vfs.h"
 
 #include "log.h"
@@ -354,6 +356,7 @@ static int execute_and_cache_module(lua_State *L, const char *module_path)
 static int hl_lua_require(lua_State *L)
 {
     const char *name = luaL_checkstring(L, 1);
+    HlLua *lua = get_hl_lua(L);
 
     /* 1. Check cache (registry "__hull_loaded") */
     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_loaded");
@@ -364,7 +367,58 @@ static int hl_lua_require(lua_State *L)
     }
     lua_pop(L, 2); /* pop nil + __hull_loaded */
 
-    /* 2. Look up in embedded modules table (registry "__hull_modules") */
+    /* 2. Capability-aware gate. If the runtime has a resolved module
+     * set wired AND the requested name maps to a known first-party
+     * module that is not admitted, refuse here with a clear message
+     * rather than letting the lookup fall through to "module not
+     * found". Names that aren't in the registry (user code, app
+     * helpers) fall through unchanged. */
+    if (lua && lua->base.module_set) {
+        const HlModuleSpec *spec =
+            hl_module_registry_find_runtime(name, '.');
+        if (spec &&
+            !hl_module_set_contains_spec(lua->base.module_set, spec)) {
+            char deps_buf[128];
+            hl_module_registry_format_deps(spec, deps_buf, sizeof(deps_buf));
+            char deps_part[160] = {0};
+            if (deps_buf[0])
+                snprintf(deps_part, sizeof(deps_part),
+                         " (also needs: %s)", deps_buf);
+
+            return luaL_error(L,
+                "module '%s' is not declared in app.manifest. "
+                "Add \"%s@%d\" to the modules array%s. "
+                "See `hull modules available` for the full list.",
+                name, spec->name, (int)spec->api_major, deps_part);
+        }
+    }
+
+    /* 3. Native modules: check Lua's standard loaded table.
+     *
+     * Each hull.X C module is registered at runtime init via
+     * luaL_requiref, which populates LUA_LOADED_TABLE
+     * (registry["_LOADED"][name]). The Hull-custom require() doesn't
+     * normally consult that table, but for native modules it is the
+     * right answer — they are not in __hull_modules (which only holds
+     * VFS-embedded .lua files). The `package` global itself is
+     * sandboxed out, but the registry table still backs it. */
+    lua_getfield(L, LUA_REGISTRYINDEX, LUA_LOADED_TABLE);
+    if (lua_istable(L, -1)) {
+        lua_getfield(L, -1, name);
+        if (!lua_isnil(L, -1)) {
+            /* Stack: loaded, module — cache in __hull_loaded too. */
+            lua_getfield(L, LUA_REGISTRYINDEX, "__hull_loaded");
+            lua_pushvalue(L, -2);
+            lua_setfield(L, -2, name);
+            lua_pop(L, 1);            /* pop __hull_loaded */
+            lua_remove(L, -2);         /* remove loaded */
+            return 1;                  /* module on top */
+        }
+        lua_pop(L, 1); /* pop nil */
+    }
+    lua_pop(L, 1); /* pop _LOADED */
+
+    /* 4. Look up in embedded modules table (registry "__hull_modules") */
     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_modules");
     lua_getfield(L, -1, name);
     if (!lua_isnil(L, -1)) {
@@ -395,8 +449,7 @@ static int hl_lua_require(lua_State *L)
     }
     lua_pop(L, 2); /* pop nil + __hull_modules */
 
-    /* 3. Filesystem fallback (dev mode — relative requires) */
-    HlLua *lua = get_hl_lua(L);
+    /* 5. Filesystem fallback (dev mode — relative requires) */
     if (lua && lua->app_dir &&
         (name[0] == '.' || strchr(name, '/') != NULL)) {
 

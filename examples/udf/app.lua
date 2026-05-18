@@ -3,7 +3,13 @@
 -- Run: hull app.lua -p 3000
 -- Demonstrates scalar and aggregate UDFs registered from Lua callbacks.
 
-app.manifest({})
+local db = require("hull.db")
+
+app.manifest({
+    modules = {
+        "hull/db@1",
+    },
+})
 
 -- ── Lua scalar UDF: uppercase text ────────────────────────────────
 db.udf.register("hull_upper", function(text)

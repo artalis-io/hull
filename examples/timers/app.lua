@@ -8,8 +8,15 @@
 -- Demonstrates app.every() and app.daily() — background timers
 -- that fire on the event loop thread with full async support.
 
+local db   = require("hull.db")
+local time = require("hull.time")
+
 app.manifest({
     database = "timers.db",
+    modules = {
+        "hull/db@1",
+        "hull/time@1",
+    },
 })
 
 -- ── Repeating timer: insert heartbeat every 500ms ──────────────────

@@ -12,7 +12,13 @@
 import { gpu } from "hull:gpu";
 import { image } from "hull:image";
 
-app.manifest({ gpu: true });
+app.manifest({
+    gpu: true,
+    modules: [
+        "hull/gpu@1",
+        "hull/image@1",
+    ],
+});
 
 // Load and compile the invert shader from shaders/invert.wgsl
 if (gpu.available()) {

@@ -9,6 +9,7 @@
 
 #include "hull/tool.h"
 #include "hull/compilers.h"
+#include "hull/module_registry.h"
 #include "hull/compiler.h"
 #include "hull/cap/crypto.h"
 #include "hull/cap/tool.h"
@@ -96,6 +97,17 @@ int hull_keygen(int argc, char **argv)
  *   --compiler=tcc      (equals-separated)
  * Returns compiler name (or NULL for default).
  */
+/* Returns a function that does nothing — used as the __index of the
+ * tool-mode stub table so chained attribute access (e.g. `db.exec(...)`)
+ * doesn't fault. The returned function is reused — same closure every
+ * time, with `return nil` semantics. */
+static int hl_tool_noop_fn(lua_State *L) { (void)L; return 0; }
+int hl_tool_noop_index(lua_State *L)
+{
+    lua_pushcfunction(L, hl_tool_noop_fn);
+    return 1;
+}
+
 static const char *parse_cc_option(int argc, char **argv)
 {
     for (int i = 0; i < argc; i++) {
@@ -194,6 +206,115 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
     if (hl_lua_init(&lua, &cfg) != 0) {
         fprintf(stderr, "hull: Lua init failed\n");
         return 1;
+    }
+
+    /* Tool-mode native-module exposure.
+     *
+     * The tool VM is used to load app code for manifest extraction
+     * (`hull manifest`, `hull modules list`, `hull deploy`, …) AND to
+     * run hull's own tool modules (`hull.build`, `hull.sign_platform`,
+     * `hull.inspect`, etc.). Both code paths assume:
+     *
+     *   1. `require("hull.X")` works for every native (apps after
+     *      phase 2b top-level-require their deps).
+     *   2. `crypto.X`, `db.X`, … are reachable as globals — tool .lua
+     *      modules are trusted hull internals shipped with hull and
+     *      pre-date the import-only refactor.
+     *
+     * Two stubs together cover both:
+     *
+     *   (a) For conditional natives whose backing handle isn't wired up
+     *       in tool mode (hull.db, hull.worker, hull.compute, hull.gpu),
+     *       install a chain-friendly nop table into LUA_LOADED_TABLE so
+     *       `local db = require("hull.db")` succeeds and `db.exec(...)`
+     *       silently no-ops. Tool-mode never invokes route handlers, so
+     *       the no-op stub is safe — only top-level code runs to set
+     *       the manifest.
+     *
+     *   (b) Promote every entry in LUA_LOADED_TABLE to a global of the
+     *       same short name (hull.crypto → crypto, hull.middleware.session
+     *       → session, …). Restores phase-2a tool-mode globals. */
+    {
+        lua_State *L = lua.L;
+        size_t total = 0;
+        const HlModuleSpec *all = hl_module_registry_all(&total);
+
+        /* Build a single shared "noop" table with __index returning a
+         * nop function. Reused across every stub entry. */
+        lua_newtable(L);                 /* nop_table */
+        lua_newtable(L);                 /* metatable */
+        lua_pushcfunction(L, hl_tool_noop_index);
+        lua_setfield(L, -2, "__index");
+        lua_setmetatable(L, -2);
+        int nop_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+
+        lua_getfield(L, LUA_REGISTRYINDEX, LUA_LOADED_TABLE);
+        lua_getfield(L, LUA_REGISTRYINDEX, "__hull_modules");
+
+        for (size_t i = 0; i < total; i++) {
+            const char *cname = all[i].name;
+            if (strncmp(cname, "hull/", 5) != 0) continue;
+            char lua_name[HL_MODULE_NAME_MAX];
+            if (strlen(cname) + 1 > sizeof(lua_name)) continue;
+            strcpy(lua_name, cname);
+            for (char *p = lua_name; *p; p++)
+                if (*p == '/') *p = '.';
+
+            /* In _LOADED already? (native-registered) */
+            lua_getfield(L, -2, lua_name);
+            int in_loaded = !lua_isnil(L, -1);
+            lua_pop(L, 1);
+
+            /* In __hull_modules? (stdlib .lua file) */
+            int in_hull_mods = 0;
+            if (lua_istable(L, -1)) {
+                lua_getfield(L, -1, lua_name);
+                in_hull_mods = !lua_isnil(L, -1);
+                lua_pop(L, 1);
+            }
+
+            if (!in_loaded && !in_hull_mods) {
+                lua_rawgeti(L, LUA_REGISTRYINDEX, nop_ref);
+                lua_setfield(L, -3, lua_name);  /* _LOADED[lua_name] = nop_table */
+            }
+        }
+
+        lua_pop(L, 2);  /* pop __hull_modules + _LOADED */
+        /* Keep nop_ref alive — released when the VM is freed. */
+    }
+
+    /* (b) Promote registry-known modules in _LOADED to short-name globals
+     * for tool-mode convenience. Required because every shipped tool
+     * .lua (hull.build, hull.sign_platform, hull.inspect, …) references
+     * `crypto`, `db`, `time`, etc. as globals, predating the phase-2b
+     * import-only refactor of the runtime. Only registry-known names
+     * are promoted; private bridges (hull._template) and user files are
+     * left alone. */
+    {
+        lua_State *L = lua.L;
+        size_t total = 0;
+        const HlModuleSpec *all = hl_module_registry_all(&total);
+        lua_getfield(L, LUA_REGISTRYINDEX, LUA_LOADED_TABLE);
+        for (size_t i = 0; i < total; i++) {
+            const char *cname = all[i].name;
+            if (strncmp(cname, "hull/", 5) != 0) continue;
+            const char *short_name = cname + 5;
+            /* Skip nested names like "middleware/session" — those are
+             * stdlib .lua modules accessed via require, never as a
+             * global (no Lua identifier could spell that). */
+            if (strchr(short_name, '/')) continue;
+            char lua_name[HL_MODULE_NAME_MAX];
+            if (strlen(cname) + 1 > sizeof(lua_name)) continue;
+            strcpy(lua_name, cname);
+            for (char *p = lua_name; *p; p++)
+                if (*p == '/') *p = '.';
+            lua_getfield(L, -1, lua_name);
+            if (!lua_isnil(L, -1))
+                lua_setglobal(L, short_name);
+            else
+                lua_pop(L, 1);
+        }
+        lua_pop(L, 1);  /* pop _LOADED */
     }
 
     /* Set tool.cc and tool.default_cc in the tool global table */

@@ -505,6 +505,8 @@ static JSValue js_http_async_delete(JSContext *ctx, JSValueConst this_val,
 
 static int js_http_module_init(JSContext *ctx, JSModuleDef *m)
 {
+    if (hl_js_check_module_declared(ctx, "hull/http", "hull:http") != 0) return -1;
+
     JSValue http = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, http, "request",
                       JS_NewCFunction(ctx, js_http_request, "request", 3));

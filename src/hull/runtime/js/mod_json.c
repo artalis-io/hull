@@ -40,6 +40,8 @@ static JSValue js_json_decode(JSContext *ctx, JSValueConst this_val,
 
 static int js_json_module_init(JSContext *ctx, JSModuleDef *m)
 {
+    if (hl_js_check_module_declared(ctx, "hull/json", "hull:json") != 0) return -1;
+
     JSValue json = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, json, "encode",
                       JS_NewCFunction(ctx, js_json_encode, "encode", 1));

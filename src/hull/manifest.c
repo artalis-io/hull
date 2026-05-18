@@ -72,6 +72,8 @@ void hl_manifest_free(HlManifest *m)
         hl_manifest_str_free(a, &m->cors_origins[i]);
     hl_manifest_str_free(a, &m->cors_methods);
     hl_manifest_str_free(a, &m->cors_headers);
+    for (int i = 0; i < m->modules_count; i++)
+        hl_manifest_str_free(a, &m->modules[i].name);
 
     memset(m, 0, sizeof(*m));
 }

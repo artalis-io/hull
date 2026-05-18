@@ -31,7 +31,49 @@ static HlJS js;
 static int js_initialized = 0;
 static HlVfs platform_vfs;
 
+/* Tests use lots of inline JS snippets that reference modules as
+ * globals. Phase 2b removes globals from production — apps must
+ * import. This helper restores them for testing convenience by
+ * evaluating a module that imports each native module and assigns to
+ * globalThis. Modules that aren't available are silently skipped. */
+static void install_test_js_globals(HlJS *jsp)
+{
+    static const char *PRELUDE =
+        "const _names = ['crypto','db','env','time','fs','http','smtp',"
+        "                'ws','compute','gpu','worker','server','image'];\n"
+        "for (const n of _names) {\n"
+        "  try {\n"
+        "    const mod = await import('hull:' + n);\n"
+        "    globalThis[n] = mod[n] || mod.default || mod;\n"
+        "  } catch (_) { /* not available — skip */ }\n"
+        "}\n";
+    JSValue v = JS_Eval(jsp->ctx, PRELUDE, strlen(PRELUDE), "<test-globals>",
+                        JS_EVAL_TYPE_MODULE);
+    JS_FreeValue(jsp->ctx, v);
+    hl_js_run_jobs(jsp);
+}
+
 static void init_js(void)
+{
+    if (js_initialized)
+        hl_js_free(&js);
+    extern const HlEntry hl_stdlib_entries[];
+    hl_vfs_init(&platform_vfs, hl_stdlib_entries, NULL);
+    HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
+    memset(&js, 0, sizeof(js));
+    js.base.platform_vfs = &platform_vfs;
+    int rc = hl_js_init(&js, &cfg);
+    js_initialized = (rc == 0);
+    if (js_initialized) install_test_js_globals(&js);
+}
+
+/* Variant for tests that need to assert on the module gate. The
+ * global-installer in init_js() runs `import 'hull:X'` for every
+ * native module — that runs each module's init callback exactly once
+ * with module_set = NULL (permissive). Once a module is initialized,
+ * QuickJS caches it and the gate never fires again on later imports.
+ * Tests that want to observe the gate must skip the installer. */
+static void init_js_bare(void)
 {
     if (js_initialized)
         hl_js_free(&js);
@@ -99,6 +141,7 @@ static void init_js_with_caps(void)
     js.base.platform_vfs = &platform_vfs;
     int rc = hl_js_init(&js, &cfg);
     js_initialized = (rc == 0);
+    if (js_initialized) install_test_js_globals(&js);
 }
 
 static void cleanup_js_caps(void)
@@ -2272,6 +2315,198 @@ UTEST(js_stdlib, rbac_middleware_deny)
     ASSERT_EQ(eval_int("globalThis.__test_rmd"), 1);
 
     cleanup_js_caps();
+}
+
+/* ── Module-set gating in import resolver ─────────────────────────── */
+/* Phase-2a gate in hl_js_module_loader: when the runtime has a
+ * non-NULL module_set, hull:* names that map to a known first-party
+ * module must be in that set or the import throws.
+ *
+ * Note: the gate only catches stdlib .js modules (loaded via VFS).
+ * Native C modules registered at init time (hull:db, hull:crypto, ...)
+ * still resolve through QuickJS' own module cache and bypass the
+ * loader; their gating arrives in phase 2b together with the
+ * import-only refactor. */
+
+#include "hull/manifest.h"
+#include "hull/module_registry.h"
+#include "hull/module_resolver.h"
+
+UTEST(js_runtime, import_gated_undeclared_stdlib_fails)
+{
+    init_js();
+
+    HlResolvedModuleSet set;
+    hl_module_set_clear(&set);
+    js.base.module_set = &set;
+
+    /* hull:validate is a .js stdlib file — gating must intercept. */
+    const char *code = "import { validate } from 'hull:validate';\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    ASSERT_TRUE(JS_IsException(val));
+    JSValue exc = JS_GetException(js.ctx);
+    const char *msg = JS_ToCString(js.ctx, exc);
+    ASSERT_NE(msg, NULL);
+    ASSERT_NE(strstr(msg, "hull:validate"), NULL);
+    ASSERT_NE(strstr(msg, "app.manifest"), NULL);
+    ASSERT_NE(strstr(msg, "hull modules available"), NULL);
+    JS_FreeCString(js.ctx, msg);
+    JS_FreeValue(js.ctx, exc);
+    JS_FreeValue(js.ctx, val);
+
+    js.base.module_set = NULL;
+    cleanup_js();
+}
+
+UTEST(js_runtime, import_gated_declared_stdlib_succeeds)
+{
+    init_js();
+
+    HlManifest m;
+    memset(&m, 0, sizeof(m));
+    m.modules[0].name = "validate";
+    m.modules[0].api_major = 1;
+    m.modules_count = 1;
+    m.modules_declared = 1;
+
+    HlResolvedModuleSet set;
+    char err[256] = {0};
+    ASSERT_EQ(hl_module_resolver_resolve(&m, &set, err, sizeof(err)), 0);
+    js.base.module_set = &set;
+
+    const char *code =
+        "import { validate } from 'hull:validate';\n"
+        "globalThis.__gate_ok = (validate && typeof validate.check === 'function') ? 1 : 0;\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    ASSERT_EQ(eval_int("globalThis.__gate_ok"), 1);
+
+    js.base.module_set = NULL;
+    cleanup_js();
+}
+
+UTEST(js_runtime, import_null_module_set_is_permissive)
+{
+    /* NULL module_set = legacy entry points: gating disabled. */
+    init_js();
+    ASSERT_EQ(js.base.module_set, NULL);
+
+    const char *code =
+        "import { validate } from 'hull:validate';\n"
+        "globalThis.__legacy_ok = (validate && typeof validate.check === 'function') ? 1 : 0;\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    ASSERT_EQ(eval_int("globalThis.__legacy_ok"), 1);
+
+    cleanup_js();
+}
+
+UTEST(js_runtime, import_gated_undeclared_native_module_fails)
+{
+    /* Phase 2c: native C modules (hull:crypto, hull:time, ...) now
+     * self-gate via hl_js_check_module_declared inside their init
+     * callbacks. Undeclared imports throw ReferenceError on first use.
+     *
+     * Use init_js_bare() so the init callback for hull:crypto hasn't
+     * yet been triggered — the gate fires there exactly once per VM. */
+    init_js_bare();
+
+    HlResolvedModuleSet set;
+    hl_module_set_clear(&set);
+    js.base.module_set = &set;
+
+    /* Module evaluation in QuickJS returns a Promise. A failed init
+     * callback rejects that promise; the rejection reason is the gate
+     * error. Inspect it directly via JS_PromiseResult instead of
+     * relying on JS_Eval to return JS_EXCEPTION. */
+    const char *code = "import { crypto } from 'hull:crypto';\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    hl_js_run_jobs(&js);
+
+    JSPromiseStateEnum st = JS_PromiseState(js.ctx, val);
+    ASSERT_EQ(st, JS_PROMISE_REJECTED);
+
+    JSValue reason = JS_PromiseResult(js.ctx, val);
+    const char *msg = JS_ToCString(js.ctx, reason);
+    ASSERT_NE(msg, NULL);
+    ASSERT_NE(strstr(msg, "hull:crypto"), NULL);
+    ASSERT_NE(strstr(msg, "app.manifest"), NULL);
+    ASSERT_NE(strstr(msg, "hull modules available"), NULL);
+    JS_FreeCString(js.ctx, msg);
+    JS_FreeValue(js.ctx, reason);
+    JS_FreeValue(js.ctx, val);
+
+    js.base.module_set = NULL;
+    cleanup_js();
+}
+
+UTEST(js_runtime, import_gated_declared_native_module_succeeds)
+{
+    init_js_bare();
+
+    HlManifest m;
+    memset(&m, 0, sizeof(m));
+    m.modules[0].name = "crypto";
+    m.modules[0].api_major = 1;
+    m.modules_count = 1;
+    m.modules_declared = 1;
+
+    HlResolvedModuleSet set;
+    char err[256] = {0};
+    ASSERT_EQ(hl_module_resolver_resolve(&m, &set, err, sizeof(err)), 0);
+    js.base.module_set = &set;
+
+    const char *code =
+        "import { crypto } from 'hull:crypto';\n"
+        "globalThis.__native_ok = (crypto && typeof crypto.sha256 === 'function') ? 1 : 0;\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+    ASSERT_EQ(eval_int("globalThis.__native_ok"), 1);
+
+    js.base.module_set = NULL;
+    cleanup_js();
+}
+
+UTEST(js_runtime, import_image_is_a_real_hull_module)
+{
+    /* Phase 2c: image is no longer a global on globalThis — it must be
+     * imported from hull:image like every other native module. */
+    init_js_bare();
+
+    /* Without declaration: import rejects the module-eval promise. */
+    HlResolvedModuleSet empty;
+    hl_module_set_clear(&empty);
+    js.base.module_set = &empty;
+
+    const char *fail_code = "import { image } from 'hull:image';\n";
+    JSValue v1 = JS_Eval(js.ctx, fail_code, strlen(fail_code), "<test>",
+                         JS_EVAL_TYPE_MODULE);
+    hl_js_run_jobs(&js);
+
+    JSPromiseStateEnum st = JS_PromiseState(js.ctx, v1);
+    ASSERT_EQ(st, JS_PROMISE_REJECTED);
+    JSValue reason = JS_PromiseResult(js.ctx, v1);
+    const char *msg = JS_ToCString(js.ctx, reason);
+    ASSERT_NE(strstr(msg, "hull:image"), NULL);
+    JS_FreeCString(js.ctx, msg);
+    JS_FreeValue(js.ctx, reason);
+    JS_FreeValue(js.ctx, v1);
+    js.base.module_set = NULL;
+    cleanup_js();
 }
 
 UTEST_MAIN();

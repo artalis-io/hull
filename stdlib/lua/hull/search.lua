@@ -18,6 +18,8 @@
 --       print(hit.id, hit.rank)
 --   end
 
+local db = require("hull.db")
+
 local search = {}
 
 -- ── Helpers ───────────────────────────────────────────────────────────

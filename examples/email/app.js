@@ -22,6 +22,13 @@ import { validate } from "hull:validate";
 app.manifest({
     env: ["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS", "SMTP_FROM", "SMTP_TLS"],
     hosts: ["localhost", "127.0.0.1", "smtp.gmail.com"],
+    modules: [
+        "hull/db@1",
+        "hull/env@1",
+        "hull/smtp@1",
+        "hull/time@1",
+        "hull/validate@1",
+    ],
 });
 
 // ── Config from env (lazy — env.get only works at request time) ──

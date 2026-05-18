@@ -37,6 +37,9 @@ static JSValue js_server_stats(JSContext *ctx, JSValueConst this_val,
 
 static int js_server_module_init(JSContext *ctx, JSModuleDef *m)
 {
+    if (hl_js_check_module_declared(ctx, "hull/server", "hull:server") != 0)
+        return -1;
+
     JSValue server = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, server, "stats",
                       JS_NewCFunction(ctx, js_server_stats, "stats", 0));

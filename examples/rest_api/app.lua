@@ -6,10 +6,19 @@
 -- Graceful shutdown: Ctrl+C triggers drain mode (finishes in-flight
 -- requests within 5s). Second Ctrl+C stops immediately.
 
-local validate = require("hull.validate")
+local db       = require("hull.db")
 local i18n     = require("hull.i18n")
+local time     = require("hull.time")
+local validate = require("hull.validate")
 
-app.manifest({})
+app.manifest({
+    modules = {
+        "hull/db@1",
+        "hull/i18n@1",
+        "hull/time@1",
+        "hull/validate@1",
+    },
+})
 
 -- ── i18n setup ─────────────────────────────────────────────────────
 
