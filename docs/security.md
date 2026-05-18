@@ -383,6 +383,67 @@ All example apps declare `app.manifest()` explicitly, even when the empty `{}` i
 
 ---
 
+## 5b. Module Declaration
+
+The manifest's `modules` table is the app's **declared module surface** — a strict allowlist of which first-party Hull stdlib modules the app may import at runtime. It complements the capability fields described above: capability sections (`fs`, `hosts`, `env`) say *what ambient authority* the app uses; `modules` says *which library names* it imports.
+
+```lua
+app.manifest({
+    modules = {
+        "hull/crypto@1",
+        "hull/db@1",
+        "hull/time@1",
+        "hull/validate@1",
+        "hull/middleware/auth@1",
+        "hull/middleware/session@1",
+    },
+    fs    = { read = {"data/"} },
+    hosts = {"api.stripe.com"},
+})
+
+-- import paths use the standard Lua/JS forms — name the local
+-- variable whatever you want:
+local crypto = require("hull.crypto")
+local fetcher = require("hull.http")           -- bind to any local name
+```
+
+Each entry is a canonical spec `"<vendor>/<name>@<major>"`. First-party modules live under `hull/`; future third-party packages would follow the same pattern (`"acme/widgets@2"`). The manifest declares *what's in scope*; the `require()` / `import` call site picks *what to call it locally*.
+
+**Design principles:**
+
+| Principle | What it means |
+|-----------|---------------|
+| **Nothing exists unless declared** | Lua/JS intrinsics (string, table, math, JSON in JS) plus a minimal Hull core (`hull/app`, `hull/log`, `hull/json`) are always available. Every other first-party module — `hull/crypto`, `hull/db`, `hull/http`, every middleware, every stdlib helper — must be in `modules` or imports fail. |
+| **Import-only exposure** | Declared modules are reached via `require("hull.X")` (Lua) / `import "hull:X"` (JS). They are NOT globals. Apps that don't declare a module cannot use it even by accident. |
+| **Capability + module separate gates** | Declaring `hull/http@1` does not also open the network. Apps still need a non-empty `hosts` allowlist. The resolver rejects `hull/http` declared without `hosts`. Same for `hull/fs` (needs `fs.read`/`write`) and `hull/env` (needs `env`). |
+| **Explicit dependencies** | If `hull/middleware/session` internally uses `hull/db`, `hull/crypto`, and `hull/time`, the app must declare *all four*. No silent pull-in. The resolver lists the missing dep in its error. |
+| **Sealed at startup, no runtime install** | The resolved module set is computed once after manifest extraction, frozen for the lifetime of the process. Runtime code cannot install, fetch, discover, or load new modules. The set's contents are signed into `package.sig` as `modules_resolved`. |
+| **Build-time subsystems gate too** | Modules whose backing C is compile-time-optional (`hull/db`, `hull/compute`, `hull/gpu`) are rejected if the build wasn't compiled with the corresponding `HL_ENABLE_*` flag. The resolver reports the missing build flag by name. |
+
+**What this prevents:**
+- **Capability expansion via stdlib upgrade.** A new module added to `hull/*` cannot magically become available to existing apps. The app's declaration is its admit list.
+- **Hidden imports in transitive code.** If a vendored helper `require("hull.crypto")` without the app declaring it, the require fails at runtime. The static-analysis pass (planned, see roadmap) surfaces this at build time.
+- **Ambient stdlib drift.** The set of admitted modules is auditable from `package.sig` alone — no need to load the app to know what it imports.
+
+**What it does NOT do:**
+- Replace the capability sections. `modules = { http = "hull/http@1" }` doesn't grant network — the app still needs a `hosts` allowlist. The resolver enforces this pairing.
+- Defeat C-level escape via embedded WASM or compute. Compute modules still execute inside the WAMR sandbox with their own gas + memory limits.
+
+**Inspection:**
+
+| Command | Output |
+|---------|--------|
+| `hull modules available` | Print the full first-party registry — names, deps, capability requirements |
+| `hull modules list [APP_DIR]` | What the app declares |
+| `hull modules explain <NAME>` | One spec, including deps and required capabilities |
+| `hull --json modules ...` | Same, machine-readable |
+| `hull agent modules [APP_DIR]` | Agent-friendly JSON: `{declared, intrinsic, build_caps, registry_count}` |
+| `hull doctor` | Reports which `HL_ENABLE_*` build-time subsystems are linked in |
+
+**This is not npm/pip/cargo.** There is no remote registry, no fetching, no runtime install, no third-party packages, no version resolution beyond the single API-major. v1 is capability-aware dependency declaration for sealed Hull apps.
+
+---
+
 ## 6. Verification Tools
 
 ### A. Browser Verifier (`verify/index.html`)

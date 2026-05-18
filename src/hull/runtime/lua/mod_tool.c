@@ -17,6 +17,9 @@
 #include "hull/runtime/tool.h"
 #include "hull/build_assets.h"
 #include "hull/compiler.h"
+#include "hull/manifest.h"
+#include "hull/module_registry.h"
+#include "hull/module_resolver.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -536,6 +539,141 @@ void hl_lua_tool_expose_compiler(lua_State *L, HlCompiler *compiler)
     lua_pop(L, 1);
 }
 
+/* ── Module-system resolver binding ────────────────────────────────── */
+/*
+ * tool.modules_resolve(manifest_table) → { ok = bool, modules = {...} }
+ *                                       | { ok = false, error = "..." }
+ *
+ * Runs the canonical resolver in C against a Lua-side manifest table
+ * (the same shape returned by app.get_manifest()). Returns the
+ * admitted set as a sorted array of { name = "hull/foo", api_major = 1 }
+ * entries — intrinsics included. Used by `hull build` to persist the
+ * resolved set into package.sig, and by anything that needs to know
+ * "given this manifest, what will the runtime actually admit".
+ *
+ * Mirrors HlManifest field-by-field by walking the Lua table:
+ *   modules = { name = "ver" }
+ *   fs      = { read = {...}, write = {...} }  (for cap presence)
+ *   env     = {...}                              (for cap presence)
+ *   hosts   = {...}                              (for cap presence)
+ *
+ * The manifest stub is allocated on the C stack with no Hull allocator
+ * — names are read directly off the Lua stack and copied via strdup
+ * only for the time of the resolver call, then freed.
+ */
+static int l_tool_modules_resolve(lua_State *L)
+{
+    luaL_checktype(L, 1, LUA_TTABLE);
+
+    HlManifest m = {0};
+
+    /* fs.read / fs.write — only the counts matter for the resolver. */
+    lua_getfield(L, 1, "fs");
+    if (lua_istable(L, -1)) {
+        lua_getfield(L, -1, "read");
+        if (lua_istable(L, -1)) {
+            lua_Integer n = luaL_len(L, -1);
+            m.fs_read_count = n > HL_MANIFEST_MAX_PATHS
+                              ? HL_MANIFEST_MAX_PATHS : (int)n;
+        }
+        lua_pop(L, 1);
+        lua_getfield(L, -1, "write");
+        if (lua_istable(L, -1)) {
+            lua_Integer n = luaL_len(L, -1);
+            m.fs_write_count = n > HL_MANIFEST_MAX_PATHS
+                               ? HL_MANIFEST_MAX_PATHS : (int)n;
+        }
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 1);
+
+    /* env */
+    lua_getfield(L, 1, "env");
+    if (lua_istable(L, -1)) {
+        lua_Integer n = luaL_len(L, -1);
+        m.env_count = n > HL_MANIFEST_MAX_ENVS ? HL_MANIFEST_MAX_ENVS : (int)n;
+    }
+    lua_pop(L, 1);
+
+    /* hosts */
+    lua_getfield(L, 1, "hosts");
+    if (lua_istable(L, -1)) {
+        lua_Integer n = luaL_len(L, -1);
+        m.hosts_count = n > HL_MANIFEST_MAX_HOSTS ? HL_MANIFEST_MAX_HOSTS : (int)n;
+    }
+    lua_pop(L, 1);
+
+    /* modules — copy names so the resolver sees stable pointers. */
+    char *owned_names[HL_MANIFEST_MAX_MODULES] = {0};
+    int owned_count = 0;
+    lua_getfield(L, 1, "modules");
+    if (lua_istable(L, -1)) {
+        m.modules_declared = 1;
+        lua_pushnil(L);
+        while (lua_next(L, -2) != 0 && m.modules_count < HL_MANIFEST_MAX_MODULES) {
+            if (lua_type(L, -2) == LUA_TSTRING &&
+                lua_type(L, -1) == LUA_TSTRING) {
+                const char *name = lua_tostring(L, -2);
+                const char *vstr = lua_tostring(L, -1);
+                char *end = NULL;
+                long v = strtol(vstr, &end, 10);
+                if (end != vstr && v >= 1 && v <= 255) {
+                    char *copy = strdup(name);
+                    if (copy) {
+                        owned_names[owned_count] = copy;
+                        m.modules[m.modules_count].name = copy;
+                        m.modules[m.modules_count].api_major = (uint8_t)v;
+                        m.modules_count++;
+                        owned_count++;
+                    }
+                }
+            }
+            lua_pop(L, 1);
+        }
+    }
+    lua_pop(L, 1);
+
+    /* Resolve. */
+    HlResolvedModuleSet set;
+    char err[HL_MODULE_RESOLVER_ERR_MAX] = {0};
+    int rc = hl_module_resolver_resolve(&m, &set, err, sizeof(err));
+
+    /* Free owned name copies. */
+    for (int i = 0; i < owned_count; i++) free(owned_names[i]);
+
+    /* Build result table. */
+    lua_newtable(L);
+    if (rc != 0) {
+        lua_pushboolean(L, 0);
+        lua_setfield(L, -2, "ok");
+        lua_pushstring(L, err);
+        lua_setfield(L, -2, "error");
+        return 1;
+    }
+
+    lua_pushboolean(L, 1);
+    lua_setfield(L, -2, "ok");
+
+    lua_newtable(L);  /* modules array */
+    size_t total = 0;
+    const HlModuleSpec *all = hl_module_registry_all(&total);
+    int idx = 1;
+    for (size_t i = 0; i < total; i++) {
+        if (!hl_module_set_contains_index(&set, (int)i)) continue;
+        lua_newtable(L);
+        lua_pushstring(L, all[i].name);
+        lua_setfield(L, -2, "name");
+        lua_pushinteger(L, all[i].api_major);
+        lua_setfield(L, -2, "api_major");
+        lua_pushboolean(L, all[i].intrinsic ? 1 : 0);
+        lua_setfield(L, -2, "intrinsic");
+        lua_rawseti(L, -2, idx++);
+    }
+    lua_setfield(L, -2, "modules");
+
+    return 1;
+}
+
 /* ── Registration ──────────────────────────────────────────────────── */
 
 static const luaL_Reg tool_funcs[] = {
@@ -556,6 +694,7 @@ static const luaL_Reg tool_funcs[] = {
     { "extract_platform",       l_tool_extract_platform },
     { "extract_platform_cosmo", l_tool_extract_platform_cosmo },
     { "platform_archs",         l_tool_platform_archs },
+    { "modules_resolve",        l_tool_modules_resolve },
     { NULL, NULL }
 };
 

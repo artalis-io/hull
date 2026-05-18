@@ -22,6 +22,7 @@
 #include "hull/build_assets.h"
 #include "hull/cacert.h"
 #include "hull/compiler.h"
+#include "hull/module_registry.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -383,6 +384,35 @@ static void print_human(CompilerInfo *ci, int nci,
         fprintf(stdout, "  runtime     \xe2\x97\x8b  not built (rebuild with `make HL_ENABLE_GPU=1 WGPU_LIB_DIR=vendor/wgpu`)\n");
     }
     fprintf(stdout, "\n");
+
+    /* ── Module subsystems ── */
+    /* Summarises which capability bits the *build* satisfies, then walks
+     * the registry to flag any modules that can never be admitted in
+     * this binary (e.g. `hull/gpu` when HL_ENABLE_GPU=0). The full
+     * resolver runs at app startup; this is purely a build-side hint. */
+    {
+        fprintf(stdout, "Module subsystems  (build-time capabilities)\n");
+#ifdef HL_ENABLE_DB
+        fprintf(stdout, "  HL_ENABLE_DB    \xe2\x9c\x93  hull/db, hull/middleware/{session,csrf,auth,...} importable\n");
+#else
+        fprintf(stdout, "  HL_ENABLE_DB    \xe2\x97\x8b  off — hull/db and DB-dependent middleware will fail to resolve\n");
+#endif
+#ifdef HL_ENABLE_WASM
+        fprintf(stdout, "  HL_ENABLE_WASM  \xe2\x9c\x93  hull/compute importable\n");
+#else
+        fprintf(stdout, "  HL_ENABLE_WASM  \xe2\x97\x8b  off — hull/compute will fail to resolve\n");
+#endif
+#ifdef HL_ENABLE_GPU
+        fprintf(stdout, "  HL_ENABLE_GPU   \xe2\x9c\x93  hull/gpu importable\n");
+#else
+        fprintf(stdout, "  HL_ENABLE_GPU   \xe2\x97\x8b  off — hull/gpu will fail to resolve\n");
+#endif
+        size_t total = 0;
+        (void)hl_module_registry_all(&total);
+        fprintf(stdout, "  registry        %zu first-party modules — run `hull modules available` for the full list\n",
+                total);
+        fprintf(stdout, "\n");
+    }
 
     /* ── Summary ── */
     fprintf(stdout, "hull build    ");

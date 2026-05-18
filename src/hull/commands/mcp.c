@@ -447,7 +447,7 @@ static void handle_tools_call(FILE *fp, const ShJsonValue *id,
                 hl_app_context_free(*warm_ctx_ptr);
                 *warm_ctx_ptr = NULL;
             }
-            HlAppContextOpts opts = { .app_dir = app_dir };
+            HlAppContextOpts opts = { .app_dir = app_dir, .gate_modules = 1 };
             if (hl_app_context_init(warm_ctx_ptr, &opts) != 0)
                 *warm_ctx_ptr = NULL;
         }
@@ -522,7 +522,7 @@ static void handle_tools_call(FILE *fp, const ShJsonValue *id,
             hl_agent_perf_ctx(warm_ctx, &agent_out);
         } else {
             /* No warm context — load briefly and free. */
-            HlAppContextOpts opts = { .app_dir = dir };
+            HlAppContextOpts opts = { .app_dir = dir, .gate_modules = 1 };
             HlAppContext *tmp = NULL;
             if (hl_app_context_init(&tmp, &opts) == 0) {
                 hl_agent_perf_ctx(tmp, &agent_out);
@@ -547,7 +547,7 @@ static void handle_tools_call(FILE *fp, const ShJsonValue *id,
         if (warm_ctx && strcmp(dir, app_dir) == 0) {
             hl_agent_eval_ctx(warm_ctx, code, &agent_out);
         } else {
-            HlAppContextOpts opts = { .app_dir = dir };
+            HlAppContextOpts opts = { .app_dir = dir, .gate_modules = 1 };
             HlAppContext *tmp = NULL;
             if (hl_app_context_init(&tmp, &opts) == 0) {
                 hl_agent_eval_ctx(tmp, code, &agent_out);
@@ -568,7 +568,7 @@ static void handle_tools_call(FILE *fp, const ShJsonValue *id,
         if (warm_ctx && strcmp(dir, app_dir) == 0) {
             hl_agent_template_ctx(warm_ctx, name, data, &agent_out);
         } else {
-            HlAppContextOpts opts = { .app_dir = dir };
+            HlAppContextOpts opts = { .app_dir = dir, .gate_modules = 1 };
             HlAppContext *tmp = NULL;
             if (hl_app_context_init(&tmp, &opts) == 0) {
                 hl_agent_template_ctx(tmp, name, data, &agent_out);
@@ -589,7 +589,7 @@ static void handle_tools_call(FILE *fp, const ShJsonValue *id,
         if (warm_ctx && strcmp(dir, app_dir) == 0) {
             hl_agent_compute_call_ctx(warm_ctx, module, input_file, &agent_out);
         } else {
-            HlAppContextOpts opts = { .app_dir = dir };
+            HlAppContextOpts opts = { .app_dir = dir, .gate_modules = 1 };
             HlAppContext *tmp = NULL;
             if (hl_app_context_init(&tmp, &opts) == 0) {
                 hl_agent_compute_call_ctx(tmp, module, input_file, &agent_out);
@@ -622,7 +622,7 @@ static void handle_tools_call(FILE *fp, const ShJsonValue *id,
         if (warm_ctx && strcmp(dir, app_dir) == 0) {
             hl_agent_sql_named_ctx(warm_ctx, name, params_json, &agent_out);
         } else {
-            HlAppContextOpts opts = { .app_dir = dir };
+            HlAppContextOpts opts = { .app_dir = dir, .gate_modules = 1 };
             HlAppContext *tmp = NULL;
             if (hl_app_context_init(&tmp, &opts) == 0) {
                 hl_agent_sql_named_ctx(tmp, name, params_json, &agent_out);
@@ -662,7 +662,7 @@ int hl_cmd_mcp(int argc, char **argv, const HlCommandEnv *env)
 
     /* Initialize warm context for reuse across tool calls */
     HlAppContext *warm_ctx = NULL;
-    HlAppContextOpts ctx_opts = { .app_dir = app_dir };
+    HlAppContextOpts ctx_opts = { .app_dir = app_dir, .gate_modules = 1 };
     if (hl_app_context_init(&warm_ctx, &ctx_opts) != 0)
         warm_ctx = NULL;  /* fallback to per-call init */
 

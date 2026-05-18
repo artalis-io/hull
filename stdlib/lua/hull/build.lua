@@ -384,6 +384,22 @@ local function sign_app(app_dir, key_file, sign_ctx, files)
         end
     end
 
+    -- Resolve the manifest's modules block against the canonical registry.
+    -- The result is the full set of admitted modules (declared + intrinsic
+    -- core), persisted into package.sig as `modules_resolved`. Auditors can
+    -- then read the bundle and see exactly which first-party module surface
+    -- the app shipped with, without executing any code. The signature covers
+    -- this field, so tampering invalidates the package.
+    local modules_resolved = nil
+    if manifest then
+        local r = tool.modules_resolve(manifest)
+        if r.ok then
+            modules_resolved = r.modules
+        else
+            tool.stderr("hull build: warning: module resolver failed: " .. tostring(r.error) .. "\n")
+        end
+    end
+
     -- Read platform.sig (required for --sign)
     local platform = nil
     if sign_ctx.platform_sig_path then
@@ -401,7 +417,10 @@ local function sign_app(app_dir, key_file, sign_ctx, files)
     -- Capture compiler version
     local cc_version = tool.compiler and tool.compiler.version() or nil
 
-    -- Build the signed payload (canonical JSON key order)
+    -- Build the signed payload (canonical JSON key order). The `manifest`
+    -- field captures the app's declarations as written; `modules_resolved`
+    -- captures the closure (declared + intrinsics) so the signed surface
+    -- is unambiguous even across hull-version upgrades.
     local payload_table = {
         binary_hash = sign_ctx.binary_hash,
         build = {
@@ -411,6 +430,7 @@ local function sign_app(app_dir, key_file, sign_ctx, files)
         },
         files = file_hashes,
         manifest = manifest,
+        modules_resolved = modules_resolved,
         platform = platform,
         trampoline_hash = sign_ctx.trampoline_hash,
     }
@@ -423,6 +443,7 @@ local function sign_app(app_dir, key_file, sign_ctx, files)
         build = payload_table.build,
         files = file_hashes,
         manifest = manifest,
+        modules_resolved = modules_resolved,
         platform = platform,
         trampoline_hash = sign_ctx.trampoline_hash,
         signature = sig_hex,

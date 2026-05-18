@@ -416,6 +416,68 @@ Violation = SIGABRT on OpenBSD, SIGKILL on Linux/Cosmo, EPERM on macOS. `--no-sa
 - **Instruction limits:** Both Lua and JS runtimes enforce per-request instruction limits (default 100M). Lua uses `lua_sethook(LUA_MASKCOUNT)`, JS uses `JS_SetInterruptHandler`. Override with `--max-instructions N` or `HULL_MAX_INSTRUCTIONS` env var.
 - **Audit logging:** `--audit` flag or `HULL_AUDIT=1` env var enables structured JSON logging of all capability calls to stderr. Off by default (zero overhead — single branch on `hl_audit_enabled` global). Uses `ShJsonWriter` for streaming output with proper escaping. No heap allocation.
 
+### Module Declaration System
+
+Apps declare which first-party Hull stdlib modules they import via `manifest.modules`. Three principles:
+
+1. **Nothing exists unless declared.** Language intrinsics (Lua: `string/table/math/utf8/coroutine`; JS: `Object/Array/Math/JSON`) plus an "intrinsic core" (`hull/app`, `hull/log`, `hull/json`) are always available. Every other first-party module — `hull/crypto`, `hull/db`, `hull/http`, every middleware, every stdlib helper — must be in `modules` or imports fail at runtime.
+2. **Import-only exposure.** Declared modules are reached via `require("hull.X")` (Lua) / `import "hull:X"` (JS). They are NOT exposed as globals.
+3. **Capability + module are separate gates.** Declaring `hull/http@1` doesn't open the network. The app still needs a non-empty `hosts` allowlist. The resolver pairs them.
+
+```lua
+app.manifest({
+    modules = {
+        "hull/crypto@1",
+        "hull/db@1",
+        "hull/time@1",
+        "hull/middleware/auth@1",
+        "hull/middleware/session@1",     -- needs db, crypto, time (declare each)
+    },
+    hosts = {"api.stripe.com"},          -- required if http is declared
+})
+
+-- require/import are standard Lua/JS — choose any local binding name:
+local crypto = require("hull.crypto")
+local fetcher = require("hull.http")
+```
+
+**Manifest syntax**: each entry is a canonical spec `"<vendor>/<name>@<major>"` in an array. First-party modules use `hull/`; future third-party would use `"acme/widgets@2"`. The manifest declares *what's in scope*; the require/import call site picks *what to call it locally*. The legacy keyed form (`crypto = "hull/crypto@1"`) is still parsed for back-compat but the array form is canonical.
+
+**Architecture (`include/hull/module_registry.h`, `include/hull/module_resolver.h`):**
+
+| Component | File | Purpose |
+|-----------|------|---------|
+| Canonical registry | `src/hull/module_registry.c` | Sorted `HlModuleSpec` table — name, api_major, intrinsic, deps, required_caps. O(log n) lookup. |
+| Resolver | `src/hull/module_resolver.c` | Validates `manifest.modules` against registry; auto-seeds intrinsics; produces `HlResolvedModuleSet` bitset stored on `HlRuntime`. |
+| Lua gate | `src/hull/runtime/lua/mod_fs.c` (`hl_lua_require`) | Per-require check against the set. |
+| JS gate (native) | `src/hull/runtime/js/runtime.c` (`hl_js_check_module_declared`) | Called inside each native module's QuickJS init callback. |
+| JS gate (stdlib `.js`) | `src/hull/runtime/js/runtime.c` (`hl_js_module_loader`) | VFS-resolved `.js` modules checked before load. |
+| Build-time persistence | `stdlib/lua/hull/build.lua` | Resolver output written to `package.sig` as `modules_resolved` — covered by the signature. |
+| Tool exposure | `src/hull/runtime/lua/mod_tool.c` (`tool.modules_resolve`) | Lua binding so `hull build` and similar tools can run the resolver. |
+
+**Failure-mode summary:**
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `module 'hull.X' is not declared in app.manifest. Add to modules: X = "1"...` | App requires a known module not in the modules table | Add to `modules` (the error includes the exact line, plus deps if any) |
+| `module 'hull/jwt@1' requires 'hull/crypto' but it is not declared` | Declared module's dep is missing | Add the dep to `modules` |
+| `module 'hull/http@1' requires a non-empty 'hosts' section in the manifest` | Declared module needs a capability that isn't wired | Add the matching capability field |
+| `module 'hull/gpu@1' requires HL_ENABLE_GPU (build-time)` | The build wasn't compiled with the subsystem | Rebuild hull with `make HL_ENABLE_GPU=1 …` or remove the module declaration |
+| `unknown module 'X' in app.manifest.modules` | Typo or non-existent module | Run `hull modules available` for the canonical list |
+
+**CLI surface:**
+
+| Command | Output |
+|---------|--------|
+| `hull modules available [--json]` | Full first-party registry — names, deps, capability requirements |
+| `hull modules list [APP_DIR]` | What the app declares |
+| `hull modules explain <NAME>` | One spec |
+| `hull agent modules [APP_DIR]` | `{declared, intrinsic, build_caps, registry_count}` JSON |
+| `hull doctor` | Reports which `HL_ENABLE_*` subsystems the build supports |
+| `hull check` | Validates the app's manifest before tests fire |
+
+See [docs/security.md §5b](docs/security.md) for the full design and design principles.
+
 ### Signature System
 
 Three independent Ed25519 layers:

@@ -286,7 +286,11 @@ static int cmd_migrate(int argc, char **argv)
 /* Open a warm app context for the duration of a single subcommand. */
 static HlAppContext *open_warm_ctx(const char *app_dir)
 {
-    HlAppContextOpts opts = { .app_dir = app_dir };
+    /* Agent commands that run app code (eval, request, scaffold)
+     * inherit the app's declared module surface — same gate the server
+     * applies. Read-only introspection (manifest, routes, schema, ...)
+     * never triggers require/import so the gate is a no-op there. */
+    HlAppContextOpts opts = { .app_dir = app_dir, .gate_modules = 1 };
     HlAppContext *ctx = NULL;
     if (hl_app_context_init(&ctx, &opts) != 0) return NULL;
     return ctx;
@@ -339,6 +343,16 @@ static int cmd_capabilities(int argc, char **argv)
     ShJsonBuf out;
     sh_json_buf_init(&out);
     int rc = hl_agent_capabilities(app_dir, &out);
+    return output_result(&out, rc);
+}
+
+static int cmd_modules_sub(int argc, char **argv)
+{
+    const char *app_dir = ".";
+    if (argc >= 1 && argv[0][0] != '-') app_dir = argv[0];
+    ShJsonBuf out;
+    sh_json_buf_init(&out);
+    int rc = hl_agent_modules(app_dir, &out);
     return output_result(&out, rc);
 }
 
@@ -638,6 +652,7 @@ int hl_cmd_agent(int argc, char **argv, const HlCommandEnv *env)
     if (strcmp(sub, "compute") == 0)      return cmd_compute_sub(sub_argc, sub_argv);
     if (strcmp(sub, "gpu") == 0)          return cmd_gpu_sub(sub_argc, sub_argv);
     if (strcmp(sub, "capabilities") == 0) return cmd_capabilities(sub_argc, sub_argv);
+    if (strcmp(sub, "modules") == 0)      return cmd_modules_sub(sub_argc, sub_argv);
     if (strcmp(sub, "validate") == 0)     return cmd_validate(sub_argc, sub_argv);
     if (strcmp(sub, "logs") == 0)         return cmd_logs(sub_argc, sub_argv);
     if (strcmp(sub, "endpoint") == 0)     return cmd_endpoint(sub_argc, sub_argv);

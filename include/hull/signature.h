@@ -80,9 +80,10 @@ typedef struct {
     const char *public_key_hex;       /* 64 hex chars — app developer's pk */
 
     /* Parsed DOM nodes for canonical JSON reconstruction in verify */
-    ShJsonValue *build_value;         /* "build" object (or NULL) */
-    ShJsonValue *files_value;         /* "files" object (required) */
-    ShJsonValue *manifest_value;      /* "manifest" value (may be null/absent) */
+    ShJsonValue *build_value;            /* "build" object (or NULL) */
+    ShJsonValue *files_value;            /* "files" object (required) */
+    ShJsonValue *manifest_value;         /* "manifest" value (may be null/absent) */
+    ShJsonValue *modules_resolved_value; /* "modules_resolved" array (may be null) */
 
     /* Platform layer (nested) */
     HlPlatformSig platform;

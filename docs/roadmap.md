@@ -229,6 +229,72 @@ One download. Zero dependencies. Full lifecycle.
 | Deployment config generator | **Done** | `hull deploy` — Dockerfile, systemd, fly.toml from manifest |
 | License key system | Planned | Ed25519 offline verification for commercial distribution |
 
+### Package & Module System
+
+First-party stdlib modules are declared by the app and gated by the runtime.
+"Nothing exists unless declared" — language runtimes provide pure computation;
+access to side-effect modules (crypto, db, http, fs, …) is opt-in via the
+manifest's `modules = {...}` array of canonical specs
+(`"vendor/name@version"`, e.g. `"hull/crypto@1"`). Imports use the standard
+`require()` / `import` forms with any local binding name. The foundation
+(phases 1–2c plus header-dep tracking) is shipped; what follows is the rest
+of the package-system roadmap in implementation order.
+
+This is *not* npm/pip/cargo. It is capability-aware dependency declaration
+for sealed Hull apps — no remote registry, no runtime install, no dynamic
+discovery, no transitive third-party deps. Runtime code cannot install,
+fetch, or load packages; the resolved module set is fixed at build/startup.
+
+#### Foundation — **Done** (phases 1, 2a, 2b, 2c)
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Canonical module registry (`HlModuleSpec` table) | **Done** | 38 first-party modules sorted by name; `api_major`, `intrinsic`, `pure`, `required_caps`, `deps`. O(log n) binary search. |
+| `HlManifest.modules` declaration + extractor | **Done** | Lua + JS strict `modules = { name = "ver" }` parsing; distinguishes "missing key" from "declared empty". |
+| Resolver | **Done** | Validates unknown names, version mismatches, missing manifest caps (fs/hosts/env), missing compile-time subsystems (DB/WASM/GPU), undeclared explicit deps. Auto-seeds intrinsic core (`app`, `log`, `json`). |
+| Lua `require()` gating | **Done** | Custom require checks the resolved set; bridges to native modules via `LUA_LOADED_TABLE`. |
+| JS `import` gating | **Done** | Stdlib `.js` modules gated in the loader hook; native C modules gated inside each `js_*_module_init` callback via `hl_js_check_module_declared`. |
+| WASM compute/GPU gating | **Done** | Cache revocation when `modules.compute` / `modules.gpu` not declared. |
+| Globals removed for declarable modules (Lua) | **Done** | Only `app`, `log`, and the `hull` namespace remain as globals. Everything else is `require("hull.X")`. |
+| `image` converted to `hull:image` ES module | **Done** | No more `globalThis.image`; flows through the same gate as every other native module. |
+| Stdlib middleware migration | **Done** | All 14 stdlib `.lua` files use `require` for their dependencies. |
+| Example app migration | **Done** | 23 Lua + 21 JS examples migrated to `modules = {...}` + explicit `require`/`import`. |
+| Test harness compatibility | **Done** | `test_lua.c` / `test_js.c` install legacy globals once at init so inline test snippets keep working. |
+| Header-dep tracking in Makefile | **Done** | `-MMD -MP` + `-include build/**/*.d` — touching a header invalidates only the right `.o` files. (Was previously the source of mid-phase SIGSEGVs.) |
+
+#### Next — Visibility & UX
+
+| # | Feature | Status | Effort | Notes |
+|---|---------|--------|--------|-------|
+| 1 | `hull modules list [app_dir]` | Planned | 1h | Print the declared modules from the app's manifest as JSON. |
+| 1 | `hull modules available` | Planned | 1h | Dump the full registry (~38 entries) with deps, capability requirements, intrinsic flag. |
+| 1 | `hull modules explain <name>` | Planned | 1h | Pretty-print one spec. |
+| 1 | `hull check` integration | Planned | 1h | Run the resolver before tests; surface manifest errors at check-time rather than first server startup. |
+| - | `hull doctor` module subsystems section | Planned | 30m | Doctor reports which `HL_ENABLE_*` capabilities are linked in and what they admit. |
+| - | `hull agent modules [app_dir]` + manifest extension | Planned | 1h | New agent subcommand emits `{declared, intrinsic, build_caps, registry_count}` JSON; existing `hull agent manifest` also surfaces the modules block. |
+| 3 | Record resolved set in `manifest.bin` + cover with `package.sig` | Planned | 2h | The resolved set is in-memory only today; persisting it makes "this binary was built with these modules" a signed, tamper-evident claim. |
+| 6 | `hull init` / `hull new` generate `modules = {...}` | Planned | 1h | Templates currently produce `app.manifest({})`; should reflect what the template actually uses (`db`, `time`, `validate`, …). |
+| 7 | Better error messages on runtime gate fires | Planned | 2h | Include similar-name suggestions ("did you mean `db`?"), pointer to `hull modules available`, link to docs. |
+| 4 | Documentation (`docs/security.md` + `CLAUDE.md`) | Planned | 2h | New "Module declaration" section in the security doc; module-system overview in CLAUDE.md; nothing in either mentions modules today. |
+
+#### Then — Correctness coverage
+
+| # | Feature | Status | Effort | Notes |
+|---|---------|--------|--------|-------|
+| 5 | Gate non-server entry points | Planned | 2h | `hull dev` / `hull test` / `hull agent` / `hull mcp` currently init runtimes without wiring a `module_set` (permissive). Decide per command; most should enforce. |
+| 2 | Static import/require analyzer at build time | Planned | 4h | Parse Lua/JS source for `require("hull.X")` / `import "hull:X"`, warn when imports reference undeclared modules and when declared modules are never imported. Slots into `hull build` and `hull check`. Needs a tiny lexer that skips comments and string literals. |
+
+#### Future — out of v1 (explicitly deferred)
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Third-party packages (`acme/widgets@1`) | Deferred | Vendor-prefix design + fetching + verification + trust model. The registry already supports the `vendor/name` form, so adding a second namespace is a small step; the broader infrastructure is a separate project. |
+| Bundle stripping for `hull build` | Deferred | Physically remove undeclared stdlib bytes. Smaller binaries + reduced ROP surface, but adds a per-build compile step and complicates the platform-embed path. Runtime gating is the boundary in v1. |
+| Per-opcode WASM `host_call` gating | Deferred | Manifest design supports it (`required_caps` bitmask has room); current gate admits all opcodes together when `hull/compute@1` is declared. |
+| CBOR / additional pure codecs in intrinsic core | Deferred | Pure-stdlib expansion; orthogonal to the module system. |
+| Lockfile for resolved-set pinning | Deferred | The "resolved set in `manifest.bin`" item above covers tamper detection. A separate lockfile is overkill for v1's no-third-party model. |
+| `hull add <package>` install command | Deferred | The existing "Module/package ecosystem" row in *Future — Advanced Features* covers this. Out of scope until third-party packages exist. |
+
 ### Agent Platform — AI-Native Development Tooling
 
 Hull treats agentic coding environments (Claude Code, Codex, OpenCode, Cursor, Ollama-based harnesses) as first-class citizens. The agent platform provides machine-readable tooling, dynamic context management, and a structured feedback loop so AI agents can rapidly prototype, test, and deploy Hull applications.

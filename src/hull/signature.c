@@ -165,6 +165,7 @@ int hl_sig_read(const char *sig_path, HlSignature *sig)
     sig->build_value = sh_json_get(root, "build");
     sig->files_value = sh_json_get(root, "files");
     sig->manifest_value = sh_json_get(root, "manifest");
+    sig->modules_resolved_value = sh_json_get(root, "modules_resolved");
 
     /* Required fields */
     if (!sig->signature_hex || !sig->public_key_hex || !sig->files_value) {
@@ -278,6 +279,15 @@ int hl_sig_verify(const HlSignature *sig, const uint8_t pubkey[32])
 
         sh_json_write_key(&w, "manifest");
         sig_write_value(&w, sig->manifest_value);
+
+        /* modules_resolved: array of {name, api_major, intrinsic} entries
+         * captured at build time. Optional — when absent (built with an
+         * older hull), the canonical reconstruction omits the key
+         * entirely so existing signatures still verify. */
+        if (sig->modules_resolved_value) {
+            sh_json_write_key(&w, "modules_resolved");
+            sig_write_value(&w, sig->modules_resolved_value);
+        }
 
         sh_json_write_key(&w, "platform");
         if (sig->platform.platforms_value &&

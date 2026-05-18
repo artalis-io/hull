@@ -23,6 +23,7 @@
 #endif
 
 #include <sh_json.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -105,6 +106,18 @@ static int emit_manifest_json(const HlManifest *m, ShJsonBuf *out,
     }
     if (m->compute)
         sh_json_write_kv_bool(&w, "compute", true);
+
+    /* modules — first-party stdlib declarations */
+    if (m->modules_declared) {
+        sh_json_write_key(&w, "modules");
+        sh_json_write_object_start(&w);
+        for (int i = 0; i < m->modules_count; i++) {
+            char vstr[8];
+            snprintf(vstr, sizeof(vstr), "%d", (int)m->modules[i].api_major);
+            sh_json_write_kv_string(&w, m->modules[i].name, vstr);
+        }
+        sh_json_write_object_end(&w);
+    }
 
     sh_json_write_object_end(&w);
     return 0;

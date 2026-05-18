@@ -10,7 +10,19 @@
 
 local templates = {}
 
-templates.lua_app = [[app.get("/", function(_req, res)
+templates.lua_app = [[-- Declare every first-party module the app imports.
+-- The runtime gate refuses undeclared imports — `hull modules available`
+-- lists the full registry. Add capability sections (fs, hosts, env)
+-- alongside `modules` when a module needs them.
+local time = require("hull.time")
+
+app.manifest({
+    modules = {
+        "hull/time@1",
+    },
+})
+
+app.get("/", function(_req, res)
     res:json({ status = "ok" })
 end)
 
@@ -33,7 +45,19 @@ test("GET /health returns ok", function()
 end)
 ]]
 
-templates.js_app = [[app.get("/", (_req, res) => {
+templates.js_app = [[// Declare every first-party module the app imports.
+// The runtime gate refuses undeclared imports — `hull modules available`
+// lists the full registry. Add capability sections (fs, hosts, env)
+// alongside `modules` when a module needs them.
+import { time } from "hull:time";
+
+app.manifest({
+    modules: [
+        "hull/time@1",
+    ],
+});
+
+app.get("/", (_req, res) => {
     res.json({ status: "ok" });
 });
 

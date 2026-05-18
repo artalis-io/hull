@@ -128,6 +128,19 @@ int hl_agent_vfs(const char *app_dir, ShJsonBuf *out);
 int hl_agent_vfs_ctx(HlAppContext *ctx, ShJsonBuf *out);
 
 /*
+ * hl_agent_modules — emit the app's declared first-party stdlib modules
+ * crossed with the canonical registry. Agents use it to discover what
+ * the app imports and what the build can satisfy. Output shape:
+ *
+ *   { "declared": { "crypto": "1", "fs": "1" },
+ *     "intrinsic": ["hull/app","hull/log","hull/json"],
+ *     "build_caps": { "db": true, "wasm": true, "gpu": false },
+ *     "registry_count": 39 }
+ */
+int hl_agent_modules(const char *app_dir, ShJsonBuf *out);
+int hl_agent_modules_ctx(HlAppContext *ctx, ShJsonBuf *out);
+
+/*
  * hl_agent_compute — list WASM compute modules in app_dir/compute/ +
  * their sizes (and AOT variant presence). Module-level metadata.
  */

@@ -63,6 +63,19 @@ typedef struct HlAppContextOpts {
     /* Deferred loading: 1 = init runtime but don't load app.
      * Use hl_app_context_load() to load app code later. */
     int           no_load;
+
+    /* Module-system gating:
+     *   1 = run the resolver after manifest extraction and wire the
+     *       result onto rt->module_set so require/import enforce the
+     *       declared modules. Intended for any consumer that runs user
+     *       app code (server, agent eval, mcp).
+     *   0 = leave rt->module_set = NULL (permissive). Intended for the
+     *       test runner (which installs legacy globals for inline
+     *       snippets) and read-only introspection.
+     *
+     * Defaults to 0 so existing call sites are unchanged; main.c's
+     * server path keeps doing its own resolution + wiring for now. */
+    int           gate_modules;
 } HlAppContextOpts;
 
 typedef struct HlAppContext HlAppContext;

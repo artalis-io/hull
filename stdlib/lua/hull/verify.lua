@@ -156,15 +156,21 @@ local function main()
     -- Verify app signature
     local payload
     if sig.binary_hash then
-        -- New package.sig format
-        payload = json.encode({
+        -- New package.sig format. Include modules_resolved if present
+        -- (added in the package & module system roadmap), omit otherwise
+        -- so signatures written by older builds still verify.
+        local reconstructed = {
             binary_hash = sig.binary_hash,
             build = sig.build,
             files = sig.files,
             manifest = sig.manifest,
             platform = sig.platform,
             trampoline_hash = sig.trampoline_hash,
-        })
+        }
+        if sig.modules_resolved then
+            reconstructed.modules_resolved = sig.modules_resolved
+        end
+        payload = json.encode(reconstructed)
     else
         -- Legacy hull.sig format
         payload = json.encode({

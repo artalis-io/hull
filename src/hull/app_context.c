@@ -9,6 +9,8 @@
 
 #include "hull/app_context.h"
 #include "hull/entry.h"
+#include "hull/manifest.h"
+#include "hull/module_resolver.h"
 #include "hull/runtime/factory.h"
 #include "hull/vfs.h"
 
@@ -49,6 +51,11 @@ struct HlAppContext {
     HlVfs          app_vfs;
     HlVfs          platform_vfs;
     HlRuntime     *rt;
+
+    /* Resolved module set (opt-in via opts.gate_modules). Lives here so
+     * its lifetime matches the runtime — rt->module_set borrows. */
+    HlResolvedModuleSet module_set;
+    int                 module_set_wired;
 
     /* Factory that built `rt`, owns the heap storage. NULL until init. */
     const HlRuntimeFactory *factory;
@@ -223,6 +230,38 @@ int hl_app_context_init(HlAppContext **out, const HlAppContextOpts *opts)
             hl_app_context_free(ctx);
             return -1;
         }
+
+        /* Module-system gating (opt-in via opts.gate_modules).
+         *
+         * After the app's top-level code has run (which sets the
+         * manifest) and before any handler is invoked, extract the
+         * manifest, run the resolver, and wire the resulting set onto
+         * the runtime so require/import enforce the declared module
+         * surface. This is the same mechanism the server path
+         * (main.c::hl_serve_wire_caps) uses, lifted into the shared
+         * context so agent/mcp can opt in without re-implementing.
+         *
+         * The set lives in HlAppContext (lifetime matches the runtime).
+         * Resolver failure is fatal — caller sees init failure. */
+        if (opts->gate_modules) {
+            HlManifest m = {0};
+            if (ctx->rt->vt->extract_manifest(ctx->rt, &m) == 0) {
+                char err[HL_MODULE_RESOLVER_ERR_MAX] = {0};
+                int rc = hl_module_resolver_resolve(&m, &ctx->module_set,
+                                                     err, sizeof(err));
+                hl_manifest_free(&m);
+                if (rc != 0) {
+                    fprintf(stderr, "[app-context] module resolver: %s\n", err);
+                    hl_app_context_free(ctx);
+                    return -1;
+                }
+            } else {
+                /* No manifest declared → resolver still admits intrinsics. */
+                hl_module_resolver_resolve(NULL, &ctx->module_set, NULL, 0);
+            }
+            ctx->rt->module_set = &ctx->module_set;
+            ctx->module_set_wired = 1;
+        }
     }
 
     /* Init worker DB after runtime init (needs db_path). */
@@ -242,6 +281,11 @@ int hl_app_context_load(HlAppContext *ctx, const char *entry_point)
     if (!ctx || !entry_point) return -1;
     if (ctx->app_loaded) return 0; /* already loaded */
     if (!ctx->rt_init) return -1;  /* runtime not initialized */
+    /* Note: the gate_modules pass in hl_app_context_init only runs when
+     * !opts->no_load. Callers that defer loading via hl_app_context_load
+     * must also drive the resolver themselves (main.c does this in
+     * hl_serve_wire_caps). Keeping load() narrow so server's existing
+     * orchestration is unchanged. */
     return load_app_code(ctx, entry_point);
 }
 
