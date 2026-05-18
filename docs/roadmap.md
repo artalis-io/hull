@@ -249,7 +249,7 @@ fetch, or load packages; the resolved module set is fixed at build/startup.
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Canonical module registry (`HlModuleSpec` table) | **Done** | 38 first-party modules sorted by name; `api_major`, `intrinsic`, `pure`, `required_caps`, `deps`. O(log n) binary search. |
+| Canonical module registry (`HlModuleSpec` table) | **Done** | 40 first-party modules sorted by name; `api_major`, `intrinsic`, `pure`, `required_caps`, `deps`. O(log n) binary search. |
 | `HlManifest.modules` declaration + extractor | **Done** | Lua + JS strict `modules = { name = "ver" }` parsing; distinguishes "missing key" from "declared empty". |
 | Resolver | **Done** | Validates unknown names, version mismatches, missing manifest caps (fs/hosts/env), missing compile-time subsystems (DB/WASM/GPU), undeclared explicit deps. Auto-seeds intrinsic core (`app`, `log`, `json`). |
 | Lua `require()` gating | **Done** | Custom require checks the resolved set; bridges to native modules via `LUA_LOADED_TABLE`. |
@@ -262,27 +262,34 @@ fetch, or load packages; the resolved module set is fixed at build/startup.
 | Test harness compatibility | **Done** | `test_lua.c` / `test_js.c` install legacy globals once at init so inline test snippets keep working. |
 | Header-dep tracking in Makefile | **Done** | `-MMD -MP` + `-include build/**/*.d` — touching a header invalidates only the right `.o` files. (Was previously the source of mid-phase SIGSEGVs.) |
 
-#### Next — Visibility & UX
+#### Visibility & UX — **Done**
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| `hull modules list [app_dir]` | **Done** | Declared modules from the app's manifest as JSON. |
+| `hull modules available [--json]` | **Done** | Full registry dump (40 entries) with deps, required caps, intrinsic flag. |
+| `hull modules explain <name>` | **Done** | Pretty-print one spec. |
+| `hull modules analyze [app_dir]` | **Done** | Static `require`/`import` scanner — flags undeclared imports and unused declarations. Soft-fails on app-load errors so app-level filesystem fallbacks (e.g. `require("./locales/en.json")`) don't break the scan. |
+| `hull check` integration | **Done** | Runs `modules list` + `modules analyze` before tests + verify. Manifest errors surface at check-time rather than first server startup. |
+| `hull doctor` module subsystems section | **Done** | Doctor reports which `HL_ENABLE_*` subsystems are linked in. |
+| `hull agent modules [app_dir]` | **Done** | Emits `{declared, intrinsic, build_caps, registry_count}` JSON. `hull agent manifest` also includes a `modules` block. |
+| Record resolved set in `package.sig` | **Done** | `modules_resolved` field included in the canonical reconstruction in `verify.lua` — covered by the existing Ed25519 app-layer signature. "This binary was built with these modules" is now a signed, tamper-evident claim. |
+| `hull init` / `hull new` generate `modules = {...}` | **Done** | Templates produce array-form module declarations matching what they actually use. |
+| Documentation (`docs/security.md` §5b + `CLAUDE.md` + `README.md` + `AGENTS.md`) | **Done** | Module Declaration sections added to all four; failure-mode table, registry overview, CLI/agent pointers. |
+
+#### Correctness coverage — **Mostly done**
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Static import/require analyzer | **Done** | `hull modules analyze` — Lua + JS state-machine scanners that skip comments and string literals; auto-seeds intrinsic core; integrated into `hull check`. |
+| Gate non-server entry points | **Mostly done** | `hull agent` (warm context) and `hull mcp` (all 7 context openings) opt in via `HlAppContextOpts.gate_modules = 1`. `hull dev`/serve is gated through `main.c::hl_serve_wire_caps`. **Open:** `hull test` still inits an app context without `gate_modules` — tests don't currently enforce the declaration. |
+
+#### Remaining v1 polish
 
 | # | Feature | Status | Effort | Notes |
 |---|---------|--------|--------|-------|
-| 1 | `hull modules list [app_dir]` | Planned | 1h | Print the declared modules from the app's manifest as JSON. |
-| 1 | `hull modules available` | Planned | 1h | Dump the full registry (~38 entries) with deps, capability requirements, intrinsic flag. |
-| 1 | `hull modules explain <name>` | Planned | 1h | Pretty-print one spec. |
-| 1 | `hull check` integration | Planned | 1h | Run the resolver before tests; surface manifest errors at check-time rather than first server startup. |
-| - | `hull doctor` module subsystems section | Planned | 30m | Doctor reports which `HL_ENABLE_*` capabilities are linked in and what they admit. |
-| - | `hull agent modules [app_dir]` + manifest extension | Planned | 1h | New agent subcommand emits `{declared, intrinsic, build_caps, registry_count}` JSON; existing `hull agent manifest` also surfaces the modules block. |
-| 3 | Record resolved set in `manifest.bin` + cover with `package.sig` | Planned | 2h | The resolved set is in-memory only today; persisting it makes "this binary was built with these modules" a signed, tamper-evident claim. |
-| 6 | `hull init` / `hull new` generate `modules = {...}` | Planned | 1h | Templates currently produce `app.manifest({})`; should reflect what the template actually uses (`db`, `time`, `validate`, …). |
-| 7 | Better error messages on runtime gate fires | Planned | 2h | Include similar-name suggestions ("did you mean `db`?"), pointer to `hull modules available`, link to docs. |
-| 4 | Documentation (`docs/security.md` + `CLAUDE.md`) | Planned | 2h | New "Module declaration" section in the security doc; module-system overview in CLAUDE.md; nothing in either mentions modules today. |
-
-#### Then — Correctness coverage
-
-| # | Feature | Status | Effort | Notes |
-|---|---------|--------|--------|-------|
-| 5 | Gate non-server entry points | Planned | 2h | `hull dev` / `hull test` / `hull agent` / `hull mcp` currently init runtimes without wiring a `module_set` (permissive). Decide per command; most should enforce. |
-| 2 | Static import/require analyzer at build time | Planned | 4h | Parse Lua/JS source for `require("hull.X")` / `import "hull:X"`, warn when imports reference undeclared modules and when declared modules are never imported. Slots into `hull build` and `hull check`. Needs a tiny lexer that skips comments and string literals. |
+| 1 | Gate `hull test` | Planned | 30m | Flip `gate_modules = 1` on `test.c:88` so the test runner enforces module declarations the same way the dev server does. Risk: legacy test scripts that import undeclared modules will break — needs a sweep through `tests/`. |
+| 2 | "Did you mean …" suggestions on gate errors | Planned | 1h | Today gate errors list the missing module + a pointer to `hull modules available`. Levenshtein-1 / shared-prefix matching against the registry would catch typos (`hull.cyrpto` → did you mean `hull.crypto`?). |
 
 #### Future — out of v1 (explicitly deferred)
 
