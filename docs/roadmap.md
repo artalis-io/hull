@@ -284,11 +284,13 @@ fetch, or load packages; the resolved module set is fixed at build/startup.
 | Static import/require analyzer | **Done** | `hull modules analyze` — Lua + JS state-machine scanners that skip comments and string literals; auto-seeds intrinsic core; integrated into `hull check`. |
 | Gate non-server entry points | **Done** | Every consumer that runs user app code now opts in via `HlAppContextOpts.gate_modules = 1`: `hull test` (`test.c`), `hull agent` warm context (`agent.c`), all 7 `hull mcp` context openings (`mcp.c`). `hull dev`/serve is gated through `main.c::hl_serve_wire_caps`. Verified by `make e2e-examples` (280/280 passing under the gated test runner). |
 
-#### Remaining v1 polish
+#### Error-message UX — **Done**
 
-| # | Feature | Status | Effort | Notes |
-|---|---------|--------|--------|-------|
-| 1 | "Did you mean …" suggestions on gate errors | Planned | 1h | Today gate errors list the missing module + a pointer to `hull modules available`. Levenshtein-1 / shared-prefix matching against the registry would catch typos (`hull.cyrpto` → did you mean `hull.crypto`?). |
+| Feature | Status | Notes |
+|---------|--------|-------|
+| "Did you mean …" suggestions on gate errors | **Done** | `hl_module_registry_suggest()` (length-scaled Levenshtein, threshold 1/2/3 for ≤4/5–8/≥9-char inputs) wired into three error sites: resolver `unknown module 'X' in app.manifest.modules`, Lua `module not found: hull.X`, JS `unknown hull module: hull:X`. Each emits the suggested canonical name in the syntax the caller used. |
+
+At this point the Package & Module System is feature-complete for v1; everything below is explicitly deferred.
 
 #### Future — out of v1 (explicitly deferred)
 

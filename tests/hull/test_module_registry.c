@@ -215,4 +215,56 @@ UTEST(module_registry, count_matches_iteration)
     ASSERT_GT(total, (size_t)10);  /* sanity: real registry */
 }
 
+/* ── Suggestion (did-you-mean) ────────────────────────────────────── */
+
+UTEST(module_registry, suggest_finds_obvious_typo)
+{
+    const HlModuleSpec *g = hl_module_registry_suggest("cyrpto");
+    ASSERT_NE(g, NULL);
+    ASSERT_STREQ(g->name, "hull/crypto");
+}
+
+UTEST(module_registry, suggest_accepts_canonical_input)
+{
+    const HlModuleSpec *g = hl_module_registry_suggest("hull/cyrpto");
+    ASSERT_NE(g, NULL);
+    ASSERT_STREQ(g->name, "hull/crypto");
+}
+
+UTEST(module_registry, suggest_finds_long_name_typo)
+{
+    /* middleware/session typo: tolerance is 3 for ≥ 9-char input */
+    const HlModuleSpec *g = hl_module_registry_suggest("middleware/sesssion");
+    ASSERT_NE(g, NULL);
+    ASSERT_STREQ(g->name, "hull/middleware/session");
+}
+
+UTEST(module_registry, suggest_returns_null_for_unrelated_input)
+{
+    /* "zzzzzz" has no close match — should yield no suggestion. */
+    ASSERT_EQ(hl_module_registry_suggest("zzzzzz"), NULL);
+}
+
+UTEST(module_registry, suggest_returns_null_for_short_far_input)
+{
+    /* "xx" is 2 chars (threshold 1). Distance ≥ 2 from every 2-char
+     * registry name (db, fs, ws) and ≥ 2 from every 3-char one too. */
+    ASSERT_EQ(hl_module_registry_suggest("xx"), NULL);
+}
+
+UTEST(module_registry, suggest_null_safe)
+{
+    ASSERT_EQ(hl_module_registry_suggest(NULL), NULL);
+    ASSERT_EQ(hl_module_registry_suggest(""), NULL);
+}
+
+UTEST(module_registry, suggest_finds_exact_match)
+{
+    /* Distance 0 — caller would normally have hit find() first, but
+     * suggest() should still return something sensible if called. */
+    const HlModuleSpec *g = hl_module_registry_suggest("crypto");
+    ASSERT_NE(g, NULL);
+    ASSERT_STREQ(g->name, "hull/crypto");
+}
+
 UTEST_MAIN();

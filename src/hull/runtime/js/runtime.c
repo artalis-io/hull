@@ -240,6 +240,34 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
                 return m;
             }
         }
+        /* "hull:something" that isn't a known native and isn't in the
+         * VFS stdlib — almost always a typo. Probe the registry for a
+         * near match and surface "did you mean?" if anything is close. */
+        {
+            char short_name[64];
+            size_t i = 0;
+            const char *src = module_name + 5;  /* skip "hull:" */
+            while (*src && i + 1 < sizeof(short_name)) {
+                short_name[i++] = (*src == ':') ? '/' : *src;
+                src++;
+            }
+            short_name[i] = '\0';
+            const HlModuleSpec *guess = hl_module_registry_suggest(short_name);
+            if (guess) {
+                char hint[128];
+                const char *g = guess->name;
+                size_t hpos = 0;
+                while (*g && hpos + 1 < sizeof(hint)) {
+                    hint[hpos++] = (*g == '/') ? ':' : *g;
+                    g++;
+                }
+                hint[hpos] = '\0';
+                JS_ThrowReferenceError(ctx,
+                    "unknown hull module: %s — did you mean import \"%s\"?",
+                    module_name, hint);
+                return NULL;
+            }
+        }
         JS_ThrowReferenceError(ctx, "unknown hull module: %s", module_name);
         return NULL;
     }

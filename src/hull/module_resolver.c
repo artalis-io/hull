@@ -94,6 +94,8 @@ int hl_module_set_count(const HlResolvedModuleSet *s)
     do { if (errbuf && errlen) snprintf(errbuf, errlen, fmt, (a), (b)); } while (0)
 #define ERR3(fmt, a, b, c) \
     do { if (errbuf && errlen) snprintf(errbuf, errlen, fmt, (a), (b), (c)); } while (0)
+#define ERR4(fmt, a, b, c, d) \
+    do { if (errbuf && errlen) snprintf(errbuf, errlen, fmt, (a), (b), (c), (d)); } while (0)
 
 /* Capabilities the *manifest* claims (versus what the build provides). */
 static uint32_t manifest_provided_caps(const HlManifest *m)
@@ -172,6 +174,14 @@ int hl_module_resolver_resolve(const HlManifest *manifest,
         const HlModuleSpec *spec = hl_module_registry_find_short(m->name);
 
         if (!spec) {
+            const HlModuleSpec *guess = hl_module_registry_suggest(m->name);
+            if (guess) {
+                ERR3("unknown module '%s' in app.manifest.modules — "
+                     "did you mean \"%s@%u\"? "
+                     "(see `hull modules available` for the full list)",
+                     m->name, guess->name, (unsigned)guess->api_major);
+                return -1;
+            }
             ERR1("unknown module '%s' in app.manifest.modules — "
                  "see `hull modules available` for the v1 set",
                  m->name);

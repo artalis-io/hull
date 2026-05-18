@@ -128,4 +128,22 @@ size_t hl_module_registry_count(void);
 void hl_module_registry_format_deps(const HlModuleSpec *spec,
                                      char *out, size_t cap);
 
+/*
+ * Find the registry entry whose name is closest (Levenshtein) to the
+ * input. Used to suggest "did you mean `hull/crypto`?" when the user
+ * mistypes a module name.
+ *
+ * `input` is matched against canonical names with the leading `hull/`
+ * stripped — so callers should pass either the short form (e.g.
+ * "cyrpto", "middleware/sesssion") or the full canonical form (the
+ * `hull/` prefix is stripped automatically).
+ *
+ * Returns the closest match if its edit distance fits within an
+ * input-length-scaled threshold (≤1 for very short names, ≤2 for
+ * short, ≤3 for long). Returns NULL when nothing is close enough —
+ * callers should fall back to the plain "see `hull modules available`"
+ * message in that case.
+ */
+const HlModuleSpec *hl_module_registry_suggest(const char *input);
+
 #endif /* HL_MODULE_REGISTRY_H */

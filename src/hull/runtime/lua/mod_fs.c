@@ -537,6 +537,37 @@ static int hl_lua_require(lua_State *L)
         }
     }
 
+    /* Final fall-through. If the user wrote `require("hull.something")`
+     * and we got here, it's a real typo (the known-module gate above
+     * already short-circuited admitted modules). Probe the registry for
+     * a near-match and surface "did you mean?" if anything is close. */
+    if (strncmp(name, "hull.", 5) == 0) {
+        char short_name[64];
+        size_t i = 0;
+        const char *src = name + 5;
+        while (*src && i + 1 < sizeof(short_name)) {
+            short_name[i++] = (*src == '.') ? '/' : *src;
+            src++;
+        }
+        short_name[i] = '\0';
+        const HlModuleSpec *guess = hl_module_registry_suggest(short_name);
+        if (guess) {
+            /* Convert the suggested canonical name back to require()
+             * syntax: hull/middleware/session → hull.middleware.session */
+            char hint[128];
+            const char *g = guess->name;
+            size_t hpos = 0;
+            while (*g && hpos + 1 < sizeof(hint)) {
+                hint[hpos++] = (*g == '/') ? '.' : *g;
+                g++;
+            }
+            hint[hpos] = '\0';
+            return luaL_error(L,
+                "module not found: %s — did you mean require(\"%s\")?",
+                name, hint);
+        }
+    }
+
     return luaL_error(L, "module not found: %s", name);
 }
 

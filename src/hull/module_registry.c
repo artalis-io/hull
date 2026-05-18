@@ -360,3 +360,102 @@ void hl_module_registry_format_deps(const HlModuleSpec *spec,
         first = 0;
     }
 }
+
+/* ── Suggestion (Levenshtein) ───────────────────────────────────────── */
+
+/* Longest registry name today is "middleware/idempotency" (22 chars) — pad
+ * generously so future entries don't silently bust the bound. */
+#define SUGGEST_MAX_LEN 64
+
+/* Two-row Levenshtein. O(m*n) time, O(min(m,n)) extra space. */
+static int levenshtein(const char *a, size_t alen,
+                       const char *b, size_t blen)
+{
+    if (alen == 0) return (int)blen;
+    if (blen == 0) return (int)alen;
+
+    /* Swap so b is the shorter side — bounds the row to SUGGEST_MAX_LEN+1. */
+    if (blen > alen) {
+        const char *t = a; a = b; b = t;
+        size_t tl = alen; alen = blen; blen = tl;
+    }
+    if (blen > SUGGEST_MAX_LEN) return (int)alen;  /* would overflow row */
+
+    int prev[SUGGEST_MAX_LEN + 1];
+    int curr[SUGGEST_MAX_LEN + 1];
+
+    for (size_t j = 0; j <= blen; j++) prev[j] = (int)j;
+
+    for (size_t i = 1; i <= alen; i++) {
+        curr[0] = (int)i;
+        for (size_t j = 1; j <= blen; j++) {
+            int cost = (a[i - 1] == b[j - 1]) ? 0 : 1;
+            int del  = prev[j] + 1;
+            int ins  = curr[j - 1] + 1;
+            int sub  = prev[j - 1] + cost;
+            int m    = del < ins ? del : ins;
+            curr[j]  = m < sub ? m : sub;
+        }
+        for (size_t j = 0; j <= blen; j++) prev[j] = curr[j];
+    }
+
+    return prev[blen];
+}
+
+/* Normalize an input into a short form: strip "hull/", lowercase nothing
+ * (we match case-sensitively — registry names are all lowercase). Output
+ * buffer must be SUGGEST_MAX_LEN+1 bytes. Returns the strlen of out, or
+ * SIZE_MAX if input is too long / NULL. */
+static size_t normalize_input(const char *input, char *out)
+{
+    if (!input) return (size_t)-1;
+    if (strncmp(input, "hull/", 5) == 0) input += 5;
+    size_t len = strlen(input);
+    if (len > SUGGEST_MAX_LEN) return (size_t)-1;
+    memcpy(out, input, len);
+    out[len] = '\0';
+    return len;
+}
+
+const HlModuleSpec *hl_module_registry_suggest(const char *input)
+{
+    char norm[SUGGEST_MAX_LEN + 1];
+    size_t in_len = normalize_input(input, norm);
+    if (in_len == (size_t)-1 || in_len == 0) return NULL;
+
+    /* Length-scaled threshold:
+     *   ≤ 4 chars → 1 edit
+     *   5–8       → 2 edits
+     *   ≥ 9       → 3 edits
+     * Avoids matching e.g. "fs" → "ws" on a single edit when the user
+     * really did mean "fs"; and lets longer names ("middleware/sesssion")
+     * tolerate the typo budget they need. */
+    int threshold;
+    if      (in_len <= 4) threshold = 1;
+    else if (in_len <= 8) threshold = 2;
+    else                  threshold = 3;
+
+    int best_dist = threshold + 1;
+    const HlModuleSpec *best = NULL;
+
+    for (size_t i = 0; i < REGISTRY_COUNT; i++) {
+        const char *cand = REGISTRY[i].name;
+        if (strncmp(cand, "hull/", 5) == 0) cand += 5;
+        size_t clen = strlen(cand);
+
+        /* Cheap reject: if the length difference alone exceeds the
+         * threshold, no single-substitution/insert/delete budget can
+         * bridge the gap. */
+        size_t diff = (clen > in_len) ? (clen - in_len) : (in_len - clen);
+        if ((int)diff > threshold) continue;
+
+        int d = levenshtein(norm, in_len, cand, clen);
+        if (d < best_dist) {
+            best_dist = d;
+            best = &REGISTRY[i];
+            if (d == 0) break;  /* exact (shouldn't happen — caller checks) */
+        }
+    }
+
+    return best;
+}
