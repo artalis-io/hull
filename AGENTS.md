@@ -257,6 +257,19 @@ Source-walk vs manifest diff. Surfaces declared-but-unused (tighten manifest) an
 {"runtime":"lua","manifest_declared":true,"capabilities":[...],"used_but_undeclared_count":0}
 ```
 
+#### `hull agent modules [app_dir]`
+
+The app's declared first-party module surface plus the build's capability matrix. Use this to know what an app imports without parsing source.
+
+```json
+{"declared":["hull/crypto@1","hull/db@1","hull/middleware/session@1"],
+ "intrinsic":["hull/app","hull/json","hull/log"],
+ "build_caps":{"db":true,"wasm":true,"gpu":false},
+ "registry_count":39}
+```
+
+`hull agent manifest` also includes the modules block under `manifest.modules` for free — use this `modules` subcommand when you want the resolved closure (declared + intrinsic) and the build's compile-time subsystem flags side by side.
+
 #### `hull agent validate <file>`
 
 Parse one Lua/JS file in isolation. Faster than `hull dev` + `hull agent errors` for iterative editing.
@@ -427,8 +440,12 @@ end)
 
 ```lua
 -- app.lua
+local db       = require("hull.db")
 local validate = require("hull.validate")
-app.manifest({})
+
+app.manifest({
+    modules = { "hull/db@1", "hull/validate@1" },
+})
 
 -- migrations/001_init.sql creates the tasks table
 
@@ -473,10 +490,19 @@ end)
 ### With Authentication
 
 ```lua
+local db      = require("hull.db")
+local crypto  = require("hull.crypto")
 local session = require("hull.middleware.session")
 local auth    = require("hull.middleware.auth")
 
-app.manifest({})
+app.manifest({
+    modules = {
+        "hull/db@1",
+        "hull/crypto@1",
+        "hull/middleware/session@1",
+        "hull/middleware/auth@1",
+    },
+})
 
 session.init({ ttl = 3600 })
 
@@ -509,12 +535,21 @@ end)
 ### With Middleware Stack
 
 ```lua
+local db          = require("hull.db")
 local cors        = require("hull.middleware.cors")
 local ratelimit   = require("hull.middleware.ratelimit")
 local logger      = require("hull.middleware.logger")
 local transaction = require("hull.middleware.transaction")
 
-app.manifest({})
+app.manifest({
+    modules = {
+        "hull/db@1",
+        "hull/middleware/cors@1",
+        "hull/middleware/ratelimit@1",
+        "hull/middleware/logger@1",
+        "hull/middleware/transaction@1",
+    },
+})
 
 -- Pre-body middleware (runs before body is read)
 app.use("*", "/*", logger.middleware({ skip = {"/health"} }))
@@ -527,55 +562,75 @@ app.use_post("POST", "/api/*", transaction.middleware())
 
 ## Manifest & Capabilities
 
-Every app must call `app.manifest({})`. Capabilities are declared here:
+Every app must call `app.manifest({})`. Capabilities AND module imports are declared here:
 
 ```lua
 app.manifest({
-    fs_read  = { "config/" },              -- read access to config/ directory
-    fs_write = { "uploads/" },             -- write access to uploads/ directory
-    env      = { "DATABASE_URL", "SECRET" }, -- environment variable access
-    hosts    = { "api.example.com" },       -- outbound HTTP allowlist
+    modules  = {                              -- first-party modules the app uses
+        "hull/crypto@1",
+        "hull/db@1",
+        "hull/middleware/session@1",
+    },
+    fs_read  = { "config/" },                 -- read access to config/ directory
+    fs_write = { "uploads/" },                -- write access to uploads/ directory
+    env      = { "DATABASE_URL", "SECRET" },  -- environment variable access
+    hosts    = { "api.example.com" },         -- outbound HTTP allowlist
 })
 ```
 
-Undeclared capabilities are blocked. An empty manifest `{}` means no filesystem, no env, no outbound HTTP.
+Undeclared capabilities are blocked. An empty manifest `{}` means no filesystem, no env, no outbound HTTP, and no side-effect modules (only `hull/app`, `hull/log`, `hull/json` are intrinsic and always available).
+
+**Module rules (important for AI agents):**
+- Format is `"namespace/name@major"` (e.g. `"hull/crypto@1"`). Major version is required.
+- Only first-party modules from the registry are accepted. List them with `hull modules available`.
+- Module imports are checked at `require`/`import` time. Undeclared imports fail with an error like `module 'hull/crypto' not declared in manifest — add it to modules = { ... }`.
+- The transitive closure is enforced: if you import `hull/middleware/session`, you must also declare `hull/db` and `hull/crypto`. The error message lists exactly which deps to add.
+- Capability bits piggy-back: declaring `hull/fs` doesn't grant filesystem access — you still need `fs_read`/`fs_write`. The module declaration only opens the import; the capability declaration grants the data path.
+- `hull modules analyze [app_dir]` static-scans your code and reports imports you didn't declare. Run it before `hull build`.
+- `hull check` includes the same analysis as a pre-test gate.
 
 ## Available Standard Library
 
-| Module | Lua Import | JS Import | Purpose |
-|--------|-----------|-----------|---------|
-| `json` | `json` (global) | built-in `JSON` | Encode/decode |
-| `db` | `db` (global) | `import { db } from "hull:db"` | SQLite queries |
-| `crypto` | `crypto` (global) | `import { crypto } from "hull:crypto"` | Hashing, signing |
-| `time` | `time` (global) | `import { time } from "hull:time"` | Timestamps |
-| `log` | `log` (global) | `import { log } from "hull:log"` | Logging |
-| `env` | `env` (global) | `import { env } from "hull:env"` | Environment vars |
-| `fs` | `fs` (global) | `import { fs } from "hull:fs"` | Sandboxed filesystem |
-| `gpu` | `gpu` (global) | `import { gpu } from "hull:gpu"` | GPU compute (wgpu-native, requires `HL_ENABLE_GPU=1`) |
-| `compute` | `compute` (global) | `import { compute } from "hull:compute"` | WASM compute plugins |
-| `image` | `image` (global) | `import { image } from "hull:image"` | Image decode/encode (stb_image) |
-| `http` | `http` (global) | `import { http } from "hull:http"` | HTTP client |
-| `validate` | `require("hull.validate")` | `import { validate } from "hull:validate"` | Input validation |
-| `session` | `require("hull.middleware.session")` | `import { session } from "hull:middleware:session"` | Server sessions |
-| `auth` | `require("hull.middleware.auth")` | `import { auth } from "hull:middleware:auth"` | Authentication |
-| `jwt` | `require("hull.jwt")` | `import { jwt } from "hull:jwt"` | JWT sign/verify |
-| `csrf` | `require("hull.middleware.csrf")` | `import { csrf } from "hull:middleware:csrf"` | CSRF protection |
-| `cors` | `require("hull.middleware.cors")` | `import { cors } from "hull:middleware:cors"` | CORS headers |
-| `ratelimit` | `require("hull.middleware.ratelimit")` | `import { ratelimit } from "hull:middleware:ratelimit"` | Rate limiting |
-| `logger` | `require("hull.middleware.logger")` | `import { logger } from "hull:middleware:logger"` | Request logging |
-| `transaction` | `require("hull.middleware.transaction")` | `import { transaction } from "hull:middleware:transaction"` | DB transactions |
-| `idempotency` | `require("hull.middleware.idempotency")` | `import { idempotency } from "hull:middleware:idempotency"` | Idempotency keys |
-| `outbox` | `require("hull.middleware.outbox")` | `import { outbox } from "hull:middleware:outbox"` | Transactional outbox |
-| `inbox` | `require("hull.middleware.inbox")` | `import { inbox } from "hull:middleware:inbox"` | Inbox dedup |
-| `template` | `require("hull.template")` | `import { template } from "hull:template"` | HTML templates |
-| `form` | `require("hull.form")` | `import { form } from "hull:form"` | Form parsing |
-| `cookie` | `require("hull.cookie")` | `import { cookie } from "hull:cookie"` | Cookie helpers |
-| `csv` | `require("hull.csv")` | `import { csv } from "hull:csv"` | CSV parse/encode (RFC 4180) |
-| `search` | `require("hull.search")` | `import { search } from "hull:search"` | Full-text search (SQLite FTS5) |
-| `rbac` | `require("hull.middleware.rbac")` | `import { rbac } from "hull:middleware:rbac"` | Role-based access control |
-| `i18n` | `require("hull.i18n")` | `import { i18n } from "hull:i18n"` | Translations |
-| `health` | `require("hull.middleware.health")` | `import { health } from "hull:middleware:health"` | Health check + readiness endpoints |
-| `etag` | `require("hull.middleware.etag")` | `import { etag } from "hull:middleware:etag"` | ETag response helpers |
+Every module except the intrinsic core (`hull/app`, `hull/log`, `hull/json`) must be listed in `manifest.modules`. The "Declare" column is the literal entry to add.
+
+| Module | Lua Import | JS Import | Declare | Purpose |
+|--------|-----------|-----------|---------|---------|
+| `app` | `app` (intrinsic) | `import { app } from "hull:app"` | _intrinsic_ | Routes, middleware, timers, manifest |
+| `log` | `log` (intrinsic) | `import { log } from "hull:log"` | _intrinsic_ | Logging |
+| `json` | `json` (intrinsic) | built-in `JSON` | _intrinsic_ | Encode/decode |
+| `db` | `require("hull.db")` | `import { db } from "hull:db"` | `"hull/db@1"` | SQLite queries (requires `HL_ENABLE_DB=1`) |
+| `crypto` | `require("hull.crypto")` | `import { crypto } from "hull:crypto"` | `"hull/crypto@1"` | Hashing, signing, random |
+| `time` | `require("hull.time")` | `import { time } from "hull:time"` | `"hull/time@1"` | Timestamps |
+| `env` | `require("hull.env")` | `import { env } from "hull:env"` | `"hull/env@1"` | Environment vars (also needs `env` allowlist) |
+| `fs` | `require("hull.fs")` | `import { fs } from "hull:fs"` | `"hull/fs@1"` | Sandboxed FS (also needs `fs_read`/`fs_write`) |
+| `http` | `require("hull.http")` | `import { http } from "hull:http"` | `"hull/http@1"` | HTTP client (also needs `hosts` allowlist) |
+| `ws` | `require("hull.ws")` | `import { ws } from "hull:ws"` | `"hull/ws@1"` | WebSocket server + client |
+| `gpu` | `require("hull.gpu")` | `import { gpu } from "hull:gpu"` | `"hull/gpu@1"` | GPU compute (requires `HL_ENABLE_GPU=1`, manifest `gpu = true`) |
+| `compute` | `require("hull.compute")` | `import { compute } from "hull:compute"` | `"hull/compute@1"` | WASM compute plugins |
+| `image` | `require("hull.image")` | `import { image } from "hull:image"` | `"hull/image@1"` | Image decode/encode |
+| `template` | `require("hull.template")` | `import { template } from "hull:template"` | `"hull/template@1"` | HTML templates |
+| `validate` | `require("hull.validate")` | `import { validate } from "hull:validate"` | `"hull/validate@1"` | Input validation |
+| `form` | `require("hull.form")` | `import { form } from "hull:form"` | `"hull/form@1"` | Form parsing |
+| `cookie` | `require("hull.cookie")` | `import { cookie } from "hull:cookie"` | `"hull/cookie@1"` | Cookie helpers |
+| `jwt` | `require("hull.jwt")` | `import { jwt } from "hull:jwt"` | `"hull/jwt@1"` | JWT sign/verify (deps: `crypto`) |
+| `csv` | `require("hull.csv")` | `import { csv } from "hull:csv"` | `"hull/csv@1"` | CSV parse/encode |
+| `search` | `require("hull.search")` | `import { search } from "hull:search"` | `"hull/search@1"` | FTS5 search (deps: `db`) |
+| `rbac` | `require("hull.middleware.rbac")` | `import { rbac } from "hull:middleware:rbac"` | `"hull/middleware/rbac@1"` | RBAC (deps: `db`) |
+| `i18n` | `require("hull.i18n")` | `import { i18n } from "hull:i18n"` | `"hull/i18n@1"` | Translations |
+| `session` | `require("hull.middleware.session")` | `import { session } from "hull:middleware:session"` | `"hull/middleware/session@1"` | Sessions (deps: `db`, `crypto`) |
+| `auth` | `require("hull.middleware.auth")` | `import { auth } from "hull:middleware:auth"` | `"hull/middleware/auth@1"` | Auth middleware |
+| `csrf` | `require("hull.middleware.csrf")` | `import { csrf } from "hull:middleware:csrf"` | `"hull/middleware/csrf@1"` | CSRF (deps: `crypto`) |
+| `cors` | `require("hull.middleware.cors")` | `import { cors } from "hull:middleware:cors"` | `"hull/middleware/cors@1"` | CORS headers |
+| `ratelimit` | `require("hull.middleware.ratelimit")` | `import { ratelimit } from "hull:middleware:ratelimit"` | `"hull/middleware/ratelimit@1"` | Rate limiting |
+| `logger` | `require("hull.middleware.logger")` | `import { logger } from "hull:middleware:logger"` | `"hull/middleware/logger@1"` | Request logging |
+| `transaction` | `require("hull.middleware.transaction")` | `import { transaction } from "hull:middleware:transaction"` | `"hull/middleware/transaction@1"` | DB transactions (deps: `db`) |
+| `idempotency` | `require("hull.middleware.idempotency")` | `import { idempotency } from "hull:middleware:idempotency"` | `"hull/middleware/idempotency@1"` | Idempotency keys (deps: `db`, `crypto`) |
+| `outbox` | `require("hull.middleware.outbox")` | `import { outbox } from "hull:middleware:outbox"` | `"hull/middleware/outbox@1"` | Transactional outbox (deps: `db`, `http`) |
+| `inbox` | `require("hull.middleware.inbox")` | `import { inbox } from "hull:middleware:inbox"` | `"hull/middleware/inbox@1"` | Inbox dedup (deps: `db`) |
+| `health` | `require("hull.middleware.health")` | `import { health } from "hull:middleware:health"` | `"hull/middleware/health@1"` | Health/readiness endpoints |
+| `etag` | `require("hull.middleware.etag")` | `import { etag } from "hull:middleware:etag"` | `"hull/middleware/etag@1"` | ETag helpers (deps: `crypto`) |
+
+To get the authoritative list for your hull build (including deps and capability requirements), run `hull modules available --json`. For a single module's spec, `hull modules explain hull/middleware/session`.
 
 ## Database API
 
@@ -696,6 +751,10 @@ req.ctx             -- middleware context table (session, user, csrf_token, etc.
 9. **Template auto-escaping** — `{{ var }}` HTML-escapes. Use `{{{ var }}}` for raw HTML only when safe.
 
 10. **Static files at `/static/*`** — put files in `static/` directory. They're auto-detected and served.
+
+11. **Module imports must be declared** — `require("hull.crypto")` / `import { crypto } from "hull:crypto"` fails unless `"hull/crypto@1"` is in `manifest.modules = { ... }`. The error message names the missing module. Run `hull modules analyze` before building. Intrinsic modules (`hull/app`, `hull/log`, `hull/json`) are always available; everything else needs an explicit entry.
+
+12. **Module deps are transitive** — declaring `"hull/middleware/session@1"` is not enough; you must also declare its dependencies (`hull/db@1`, `hull/crypto@1`). The error tells you exactly which to add. Use `hull modules explain hull/middleware/session` to see required deps.
 
 ## Audit Logging
 

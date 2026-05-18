@@ -94,8 +94,13 @@ Hull ships 20 subcommands for the full development lifecycle:
 | <code>hull keygen &lt;name&gt;</code> | Generate Ed25519 signing keypair |
 | <code>hull sign-platform &lt;key&gt;</code> | Sign platform library with per-arch hashes |
 | <code>hull manifest &lt;app&gt;</code> | Extract and print manifest as JSON |
+| `hull modules available` | Print the full first-party module registry — names, deps, capability requirements |
+| <code>hull modules list [app_dir]</code> | Print modules declared by an app's manifest |
+| <code>hull modules explain &lt;NAME&gt;</code> | Print spec for one module (deps, required caps, intrinsic flag) |
+| <code>hull modules analyze [app_dir]</code> | Static scan of source — flag `require`/`import` of undeclared modules; warn on unused declarations |
+| `hull check [app_dir]` | Validate manifest + import declarations, then run tests + verify |
 | `hull version [--json]` | Print version string (`--json` for machine-readable output) |
-| `hull doctor [--json]` | Check environment: compiler available, platform embedded, hull build readiness |
+| `hull doctor [--json]` | Check environment: compiler, platform embed, module subsystems (DB/WASM/GPU), build readiness |
 | `hull update [--check] [--force] [--channel=beta]` | Self-update from GitHub releases (verifies SHA-256, atomic replace) |
 | <code>hull &lt;app&gt; --max-instructions N</code> | Set per-request instruction limit (default: 100M) |
 | <code>hull &lt;app&gt; --audit</code> | Enable capability audit logging (JSON to stderr) |
@@ -176,6 +181,50 @@ Cosmopolitan APE binaries run on Linux, macOS, Windows, FreeBSD, OpenBSD, and Ne
 ```
 
 Each layer only talks to the one directly below it. Application code cannot bypass the capability layer.
+
+### Module Declaration
+
+Apps declare which first-party stdlib modules they import via the manifest's `modules` array; runtime gates refuse imports of anything not declared. Three principles:
+
+1. **Nothing exists unless declared.** Language intrinsics (Lua: `string/table/math`; JS: `Object/Array/JSON`) plus an "intrinsic core" (`hull/app`, `hull/log`, `hull/json`) are always available. Every other first-party module — `hull/crypto`, `hull/db`, `hull/http`, every middleware, every stdlib helper — must be in `modules` or the import fails.
+2. **Import-only exposure.** Declared modules are reached via `require("hull.X")` (Lua) / `import "hull:X"` (JS). They are NOT exposed as globals.
+3. **Capability + module are separate gates.** Declaring `hull/http@1` doesn't open the network — the app still needs a non-empty `hosts` allowlist. The resolver pairs them.
+
+```lua
+app.manifest({
+    modules = {
+        "hull/crypto@1",
+        "hull/db@1",
+        "hull/time@1",
+        "hull/middleware/auth@1",
+        "hull/middleware/session@1",   -- the resolver enforces that its
+                                       -- deps (db, crypto, time) are
+                                       -- also declared
+    },
+    hosts = {"api.stripe.com"},        -- required if http is declared
+    fs    = { read = {"data/"} },      -- required if fs is declared
+})
+
+-- require/import are standard Lua/JS — choose any local binding name:
+local crypto = require("hull.crypto")
+local cookie = require("hull.cookie")
+```
+
+Each entry is a canonical spec `"<vendor>/<name>@<major>"`. The manifest declares *what's in scope*; the `require()` / `import` call site picks *what to call it locally*. First-party modules use `hull/`; future third-party packages would use the same form (`"acme/widgets@2"`).
+
+**Failure modes** (all surface with the canonical spec + dep list + a pointer to `hull modules available`):
+
+| Error | Cause |
+|-------|-------|
+| `module 'hull.X' is not declared in app.manifest` | App imports a known module not in `modules` |
+| `module 'hull/jwt@1' requires 'hull/crypto' but it is not declared` | Declared module's internal dep is missing |
+| `module 'hull/http@1' requires a non-empty 'hosts' section` | Module needs a capability that isn't wired |
+| `module 'hull/gpu@1' requires HL_ENABLE_GPU (build-time)` | Build wasn't compiled with the subsystem |
+| `unknown module 'X' in app.manifest.modules` | Typo or non-existent module |
+
+The resolved set is recorded in `package.sig` as `modules_resolved` and covered by the existing Ed25519 signature — `hull verify` ensures the module surface hasn't been tampered with since `hull build --sign`.
+
+**CLI / agent tooling:** `hull modules available | list | explain | analyze`, `hull check` (analyzer-integrated), `hull agent modules` (JSON), `hull doctor` (build-subsystem readiness). See [docs/security.md §5b](docs/security.md) for the full design.
 
 ### Standard Library
 
