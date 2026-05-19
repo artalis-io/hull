@@ -302,6 +302,12 @@ typedef struct {
     int read_timeout;
     int num_workers;
     int queue_capacity;
+
+    /* CLI mode (app.main): everything after `--` on the command line is
+     * passed to main as ctx.args. Borrows pointers from argv; lifetime
+     * matches the original argv (hl_parse_serve_args copies neither). */
+    char **app_args;
+    int    app_argc;
 } HlServeConfig;
 
 #define HL_SERVE_CONFIG_DEFAULT { \
@@ -487,6 +493,11 @@ static int hl_parse_serve_args(int argc, char **argv, HlServeConfig *cfg)
         } else if (strcmp(argv[i], "-h") == 0) {
             usage(argv[0]);
             return 1; /* signal help shown, exit 0 */
+        } else if (strcmp(argv[i], "--") == 0) {
+            /* Everything past `--` is app argv (CLI mode). */
+            cfg->app_args = &argv[i + 1];
+            cfg->app_argc = argc - i - 1;
+            break;
         } else if (argv[i][0] != '-') {
             cfg->entry_point = argv[i];
         }
@@ -1338,7 +1349,9 @@ static int hl_serve_run_main(HlServerState *s)
     log_info("[hull:c] running app.main (%s runtime)", rt->vt->name);
 
     int rc = 1;
-    int run = rt->vt->run_main(rt, &s->server, 0, NULL, env_allow, &rc);
+    int run = rt->vt->run_main(rt, &s->server,
+                                s->cfg.app_argc, s->cfg.app_args,
+                                env_allow, &rc);
     free((void *)env_allow);
 
     s->cli_exit_code = rc;
@@ -1426,7 +1439,7 @@ static void hl_serve_cleanup(HlServerState *s)
 
 /* ── Server mode (default) ──────────────────────────────────────────── */
 
-static int hull_serve(int argc, char **argv)
+int hull_serve(int argc, char **argv)
 {
     HlServerState s;
     memset(&s, 0, sizeof(s));
@@ -1486,6 +1499,21 @@ int hull_main(int argc, char **argv)
         char *ver_argv[] = { "version" };
         HlCommandEnv env = { .hull_exe = argv[0], .app_dir = "." };
         return hl_cmd_version(1, ver_argv, &env);
+    }
+
+    /* `hull run [args]` is a discoverable alias for `hull [args]` —
+     * both go through hull_serve, which branches on whether the loaded
+     * app registered app.main (CLI mode) or routes (server mode). The
+     * `run` token gives users an explicit, documented entry for CLI
+     * apps without needing a separate code path.
+     *
+     * Strip the "run" token in-place by shifting argv left so the rest
+     * of the parser sees a clean argv. */
+    if (argc >= 2 && strcmp(argv[1], "run") == 0) {
+        for (int i = 1; i < argc - 1; i++) argv[i] = argv[i + 1];
+        argc--;
+        argv[argc] = NULL;
+        return hull_serve(argc, argv);
     }
 
     int rc = hl_command_dispatch(argc, argv);

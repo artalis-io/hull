@@ -1,10 +1,14 @@
 --
 -- hull.init — Initialize a Hull project in the current (or specified) directory
 --
--- Usage: hull init [dir] [--runtime lua|js]
+-- Usage: hull init [dir] [--runtime lua|js] [--cli]
 --
 -- Unlike `hull new`, init is idempotent: it creates missing files but never
 -- overwrites existing ones. Works in-place like `git init`.
+--
+-- If an app file already exists, mode (CLI vs server) is detected from its
+-- contents (presence of `app.main(`). Otherwise the --cli flag picks mode;
+-- default is server.
 --
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 --
@@ -83,6 +87,45 @@ test("GET /health returns ok", async () => {
 });
 ]]
 
+templates.lua_cli_app = [[-- CLI app — `hull run app.lua [-- args...]` invokes app.main once and exits.
+-- `app.main` is mutually exclusive with route registration: pick CLI mode
+-- (app.main) or server mode (app.get/etc), not both.
+
+app.manifest({
+    modules = {},
+})
+
+app.main(function(ctx)
+    local who = ctx.args[1] or "world"
+    ctx.stdout:write("hello " .. who .. "\n")
+    return 0
+end)
+]]
+
+templates.lua_cli_test = [[test("placeholder", function()
+    test.eq(1, 1)
+end)
+]]
+
+templates.js_cli_app = [[// CLI app — `hull run app.js [-- args...]` invokes app.main once and exits.
+import { app } from "hull:app";
+
+app.manifest({
+    modules: [],
+});
+
+app.main(async (ctx) => {
+    const who = ctx.args[0] ?? "world";
+    ctx.stdout.write(`hello ${who}\n`);
+    return 0;
+});
+]]
+
+templates.js_cli_test = [[test("placeholder", () => {
+    test.eq(1, 1);
+});
+]]
+
 templates.gitignore = [[data.db
 data.db-*
 *.key
@@ -123,12 +166,27 @@ local function detect_existing_runtime(dir)
     return nil
 end
 
+-- Detect mode from an existing app file: returns "cli" if app.main is
+-- registered, otherwise "server". Returns nil if the file is missing or
+-- unreadable.
+local function detect_existing_mode(dir, runtime)
+    if not runtime then return nil end
+    local ext = (runtime == "js") and ".js" or ".lua"
+    local path = dir .. "/app" .. ext
+    if not file_exists(path) then return nil end
+    local content = tool.read_file(path)
+    if not content then return nil end
+    if content:find("app%.main%s*%(", 1, false) then return "cli" end
+    return "server"
+end
+
 -- ── Argument parsing ─────────────────────────────────────────────────
 
 local function parse_args()
     local opts = {
         dir     = ".",
-        runtime = nil,   -- nil = auto-detect from existing files, else "lua"
+        runtime = nil,   -- nil = auto-detect from existing files, else "lua"/"js"
+        cli     = nil,   -- nil = auto-detect or default server; true = force CLI
     }
 
     local i = 1
@@ -137,6 +195,8 @@ local function parse_args()
         if a == "--runtime" then
             i = i + 1
             opts.runtime = arg[i]
+        elseif a == "--cli" then
+            opts.cli = true
         elseif a:sub(1, 1) ~= "-" then
             opts.dir = a
         end
@@ -169,9 +229,22 @@ local function main()
     local existing_runtime = detect_existing_runtime(dir)
     local runtime = opts.runtime or existing_runtime or "lua"
 
-    local ext          = runtime == "js" and ".js" or ".lua"
-    local app_template = runtime == "js" and templates.js_app  or templates.lua_app
-    local test_template = runtime == "js" and templates.js_test or templates.lua_test
+    -- Detect or choose mode (CLI vs server). Priority:
+    --   1. --cli flag (explicit opt-in)
+    --   2. existing app file content (app.main → cli, else server)
+    --   3. default: server
+    local existing_mode = detect_existing_mode(dir, existing_runtime)
+    local cli_mode = opts.cli or (existing_mode == "cli")
+
+    local ext = runtime == "js" and ".js" or ".lua"
+    local app_template, test_template
+    if cli_mode then
+        app_template  = runtime == "js" and templates.js_cli_app  or templates.lua_cli_app
+        test_template = runtime == "js" and templates.js_cli_test or templates.lua_cli_test
+    else
+        app_template  = runtime == "js" and templates.js_app  or templates.lua_app
+        test_template = runtime == "js" and templates.js_test or templates.lua_test
+    end
 
     -- Track what we create vs skip
     local created = {}
@@ -191,13 +264,17 @@ local function main()
         end
     end
 
-    track_dir(dir .. "/migrations")
+    if not cli_mode then
+        track_dir(dir .. "/migrations")
+    end
     track_dir(dir .. "/tests")
 
-    track_file(dir .. "/app" .. ext,                       app_template)
-    track_file(dir .. "/tests/test_app" .. ext,            test_template)
-    track_file(dir .. "/migrations/001_init.sql",          templates.migration_init)
-    track_file(dir .. "/.gitignore",                       templates.gitignore)
+    track_file(dir .. "/app" .. ext,            app_template)
+    track_file(dir .. "/tests/test_app" .. ext, test_template)
+    if not cli_mode then
+        track_file(dir .. "/migrations/001_init.sql", templates.migration_init)
+    end
+    track_file(dir .. "/.gitignore", templates.gitignore)
 
     -- Output
     local display_dir = (dir == ".") and "./" or dir .. "/"
@@ -207,6 +284,7 @@ local function main()
         print("hull init: initialized " .. display_dir)
     end
     print("  runtime   " .. runtime)
+    print("  mode      " .. (cli_mode and "cli" or "server"))
     print("")
 
     if #created > 0 then
@@ -227,7 +305,11 @@ local function main()
 
     local app_path = (dir == "." and "" or dir .. "/") .. "app" .. ext
     print("Next steps:")
-    print("  hull " .. app_path)
+    if cli_mode then
+        print("  hull run " .. app_path .. " -- world")
+    else
+        print("  hull " .. app_path)
+    end
 end
 
 main()
