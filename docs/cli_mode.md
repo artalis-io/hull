@@ -357,16 +357,77 @@ build-capability cross-check.
 - Outcome: full dev workflow for CLI apps on a standard hull build.
 
 ### Phase 3 — `HL_ENABLE_HTTP=0` build flag
-- Makefile gating: drop Keel from link, conditional `.o` lists, conditional
-  embedding for middleware
-- Conditional compilation in main.c, runtime/{lua,js}, commands/
-- `HL_MOD_CAP_HTTP` registry bit; resolver respects it
-- `hull doctor` reports HTTP subsystem
-- `hull dev` absent (or warns)
-- Binary-size verification (target ≥ 1 MB reduction)
-- `make CC=cosmocc HL_ENABLE_HTTP=0` works for the multi-arch case
-- E2E suite: build + test the same CLI apps on a no-HTTP hull
-- Outcome: pure CLI hull binary that's a meaningful fraction smaller.
+
+Split into 3a (foundation, no behavior change) and 3b (the actual no-HTTP
+build, multi-session refactor).
+
+**Phase 3a — foundation: shipped**
+- `HL_MOD_CAP_HTTP` registry bit; `hull/http`, `hull/ws`, `hull/server`,
+  `hull/smtp`, and every `hull/middleware/*` entry now require it.
+- Resolver: `build_provided_caps()` includes `HL_MOD_CAP_HTTP` when
+  `HL_ENABLE_HTTP` is defined; build-cap mask grows to include HTTP;
+  `cap_label` gains the matching error string.
+- Makefile: `HL_ENABLE_HTTP ?= 1` flag wired through CFLAGS.
+- `hull doctor`: new "HL_ENABLE_HTTP" row + `"http"` key in
+  `--json`'s `subsystems` object.
+- `hull_serve` + all its helpers split from `main.c` into a new
+  `src/hull/serve.c`. `main.c` is now ~55 lines: just `hull_main` (the
+  subcommand dispatcher / version / run-alias). A future
+  `HL_ENABLE_HTTP=0` build can swap `serve.c` for a Keel-free
+  counterpart without touching the dispatcher.
+
+**Phase 3b — actual `HL_ENABLE_HTTP=0` build: not yet shipped**
+
+Scope is genuinely a multi-day refactor — 58 source files touch Keel
+symbols (`KlServer` / `KlRequest` / `KlResponse` / `KlConn` /
+`KlAsyncOp` / `kl_*`). The work breaks into ~7 independent slices,
+each landable as its own commit:
+
+1. **Leaf cap files**: wrap `cap/ws.c`, `cap/body.c`, `cap/smtp.c`,
+   `cap/http.c`, `cap/http_async.c`, `static.c` in
+   `#ifdef HL_ENABLE_HTTP`. Headers grow matching guards so callers
+   get clean preprocessor errors instead of mysterious link failures.
+2. **Runtime route/middleware bindings**: `mod_app.c` keeps only
+   `manifest` + `main` exports when `HL_ENABLE_HTTP=0`; the route /
+   middleware / ws / sse / timer entry points get `#ifdef`'d out.
+   `mod_http.c`, `mod_ws.c`, `mod_server.c`, `mod_sse.c` excluded
+   from the Makefile entirely.
+3. **Runtime support files**: `routes.c`, `dispatch.c`, `sse.c`,
+   `ws.c`, `timers.c` excluded when `HL_ENABLE_HTTP=0`. `async.c`
+   needs care — it's used by both HTTP handlers and `app.main`'s
+   coroutine driver. Either trim it to the detached/timer path only,
+   or split into `async_core.c` (kept) + `async_http.c` (dropped).
+4. **Stdlib middleware**: skip embedding `stdlib/{lua,js}/hull/middleware/*`
+   in the embedded-modules table when `HL_ENABLE_HTTP=0`. The
+   registry already refuses these modules via `HL_MOD_CAP_HTTP` so
+   apps that declare them fail at resolve-time; skipping the embedding
+   trims binary size.
+5. **`serve.c` CLI variant**: provide an `HL_ENABLE_HTTP=0` build that
+   either `#ifdef`s out `serve.c` and replaces it with a tiny
+   `serve_cli.c` (load app → invoke `app.main` → exit) OR keeps
+   `serve.c` but ifdef's out the Keel-only branches. The latter is
+   probably simpler — only the route-wiring and event-loop sections
+   need guards.
+6. **Commands**: `hull dev` excluded when `HL_ENABLE_HTTP=0` (it forks
+   a serve subprocess; no point without a server). `hull agent` /
+   `hull mcp` warn that some subcommands are no-ops on this build.
+   The Makefile filter-out approach used for `HL_ENABLE_DB=0`
+   migrations applies cleanly here.
+7. **Keel itself**: dropped from the link via Makefile filter-out;
+   `vendor/keel/libkeel.a` and the entire `wamr` rule remain
+   unaffected. Need to add `ifeq ($(HL_ENABLE_HTTP),0)` blocks
+   around the `KEEL_LIB` variable + linker include.
+
+After 3b: `hull doctor` reports HTTP=no, `hull dev` is absent, binary
+shrinks by ~1.5MB (Keel + middleware source + bindings). The CLI app
+written for an HTTP=1 build runs unchanged on the HTTP=0 binary.
+
+**Phase 3c — sandbox narrowing & cosmo support**
+- Drop `inet` pledge promise + macOS network SBPL clauses when no HTTP
+  module is declared (or when `HL_ENABLE_HTTP=0`).
+- `make platform-cosmo HL_ENABLE_HTTP=0` — verify multi-arch builds.
+- Binary-size verification (target ≥ 1 MB reduction).
+- E2E: build + test the same CLI apps on a no-HTTP hull.
 
 ### Phase 4 — Polish & documentation
 - `hull build` mode validation against build's HTTP cap

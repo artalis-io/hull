@@ -318,10 +318,13 @@ Full design + lifecycle + phased implementation: [docs/cli_mode.md](cli_mode.md)
 
 | # | Feature | Status | Effort | Notes |
 |---|---------|--------|--------|-------|
-| 1 | `app.main(fn)` registration + lifecycle | Planned | 2d | Bindings, mode detection, conflict error, return-value → exit code coercion. Works on HTTP=1 builds first. |
-| 2 | `hull run` command + scaffolding | Planned | 1d | New command, `hull new --cli`, `hull init` mode detection, templates. |
-| 3 | `HL_ENABLE_HTTP=0` build flag | Planned | 2d | Conditional compilation, drop Keel from link, `HL_MOD_CAP_HTTP` registry bit, `hull doctor` row, narrower sandbox. |
-| 4 | Polish & documentation | Planned | 1d | `hull build` mode validation, `hull agent manifest` `mode` field, example CLI apps, README/CLAUDE/AGENTS sections. |
+| 1   | `app.main(fn)` registration + lifecycle | **Done** | — | Bindings, mode detection, conflict error, return-value → exit code coercion. Works on HTTP=1 builds. |
+| 1.5 | Event-loop integration for async-in-main | **Done** | — | Lua coroutine wrap + cli_main_co detection in async resume; JS Promise + `.then` callback; both call `kl_server_stop` on terminal state. |
+| 2   | `hull run` command + scaffolding | **Done** | — | `run` token stripped in `hull_main` and falls through to serve. `--` separator for app args. `hull new --cli` + `hull init` mode detection (auto-detected from `app.main(` presence). |
+| 3a  | HTTP foundation (no behavior change) | **Done** | — | `HL_MOD_CAP_HTTP` bit, registry markings on http/ws/server/smtp/middleware/*, resolver + cap_label updates, `hull doctor` row + `--json` subsystems object, Makefile flag, `hull_serve` extracted from `main.c` into `src/hull/serve.c`. |
+| 3b  | `HL_ENABLE_HTTP=0` build flag | Planned | 2d | The actual no-HTTP build: leaf cap files, runtime bindings, stdlib middleware embedding, `serve.c` CLI variant, command-level gating. 7 independent slices detailed in [docs/cli_mode.md](cli_mode.md). |
+| 3c  | Sandbox narrowing + cosmo | Planned | 1d | Drop `inet` promise + macOS network SBPL when no HTTP module declared; `make platform-cosmo HL_ENABLE_HTTP=0`; binary-size verification. |
+| 4   | Polish & documentation | Planned | 1d | `hull build` mode validation, `hull agent manifest` `mode` field, example CLI apps. |
 
 ### Agent Platform — AI-Native Development Tooling
 
