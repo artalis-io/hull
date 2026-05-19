@@ -37,8 +37,46 @@ static void emit_string_array(ShJsonWriter *w, const char *key,
     sh_json_write_array_end(w);
 }
 
+/* Counter callback for enumerate_routes / enumerate_middleware. */
+static void count_route_cb(void *user, const char *method, const char *pattern)
+{
+    (void)method; (void)pattern;
+    (*(int *)user)++;
+}
+static void count_mw_cb(void *user, const char *method, const char *pattern,
+                        const char *phase)
+{
+    (void)method; (void)pattern; (void)phase;
+    (*(int *)user)++;
+}
+
+/* Detect dispatch mode from what the app registered. Mutually
+ * exclusive at registration time (mod_app.c gates), so seeing both
+ * `main` and any HTTP-side registration is impossible — the loader
+ * would have errored. The "unknown" branch fires for apps that
+ * register nothing (e.g. just declared a manifest). */
+static const char *detect_mode(HlRuntime *rt,
+                               int *out_routes, int *out_middleware)
+{
+    int routes = 0, middleware = 0;
+    if (rt->vt->enumerate_routes)
+        rt->vt->enumerate_routes(rt, count_route_cb, &routes);
+    if (rt->vt->enumerate_middleware)
+        rt->vt->enumerate_middleware(rt, count_mw_cb, &middleware);
+
+    if (out_routes)     *out_routes = routes;
+    if (out_middleware) *out_middleware = middleware;
+
+    if (rt->vt->has_main && rt->vt->has_main(rt)) return "cli";
+    if (routes > 0 || middleware > 0)             return "server";
+    return "unknown";
+}
+
 static int emit_manifest_json(const HlManifest *m, ShJsonBuf *out,
-                              const char *runtime_name)
+                              const char *runtime_name,
+                              const char *mode,
+                              int routes_count, int middleware_count,
+                              int main_registered)
 {
     ShJsonWriter w;
     sh_json_writer_init(&w, sh_json_buf_write, out);
@@ -47,6 +85,16 @@ static int emit_manifest_json(const HlManifest *m, ShJsonBuf *out,
     sh_json_write_kv_bool(&w, "declared", m->present ? true : false);
     if (runtime_name)
         sh_json_write_kv_string(&w, "runtime", runtime_name);
+
+    /* Dispatch mode — derived from what the app registered. Useful
+     * for tooling that wants to know whether to introspect routes or
+     * run main without parsing source. */
+    if (mode)
+        sh_json_write_kv_string(&w, "mode", mode);
+    sh_json_write_kv_bool(&w, "main_registered",
+                          main_registered ? true : false);
+    sh_json_write_kv_int(&w, "routes_registered", routes_count);
+    sh_json_write_kv_int(&w, "middleware_registered", middleware_count);
 
     /* fs */
     sh_json_write_key(&w, "fs");
@@ -151,7 +199,12 @@ int hl_agent_manifest_ctx(HlAppContext *ctx, ShJsonBuf *out)
          * the agent gets predictable JSON shape. */
     }
 
-    int ret = emit_manifest_json(&m, out, runtime_name);
+    int routes = 0, middleware = 0;
+    const char *mode = detect_mode(rt, &routes, &middleware);
+    int main_registered = (rt->vt->has_main && rt->vt->has_main(rt)) ? 1 : 0;
+
+    int ret = emit_manifest_json(&m, out, runtime_name,
+                                  mode, routes, middleware, main_registered);
     hl_manifest_free(&m);
     return ret;
 }

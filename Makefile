@@ -986,7 +986,7 @@ INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(KEEL_DIR)/ve
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan e2e e2e-build e2e-http e2e-sandbox e2e-examples e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-compute-dev e2e-tcc e2e-install e2e-ca-bundle e2e-update hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-gpu wamrc coverage lint-lua lint-js lint platform platform-cosmo
+.PHONY: all clean test debug msan e2e e2e-build e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-compute-dev e2e-tcc e2e-install e2e-ca-bundle e2e-update hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-gpu wamrc coverage lint-lua lint-js lint platform platform-cosmo
 
 all: $(BUILDDIR)/hull
 
@@ -1546,6 +1546,11 @@ e2e-sandbox: $(BUILDDIR)/hull
 
 e2e-examples: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_examples.sh
+
+# CLI-mode (app.main) examples: invoke + check stdout/exit. Distinct
+# from e2e-examples which is HTTP-focused.
+e2e-cli: $(BUILDDIR)/hull
+	HULL_BIN=$(BUILDDIR)/hull sh tests/e2e_cli.sh
 
 e2e-migrate: $(BUILDDIR)/hull
 	sh tests/e2e_migrate.sh

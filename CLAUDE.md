@@ -506,6 +506,7 @@ local fetcher = require("hull.http")
 | `module 'hull/jwt@1' requires 'hull/crypto' but it is not declared` | Declared module's dep is missing | Add the dep to `modules` |
 | `module 'hull/http@1' requires a non-empty 'hosts' section in the manifest` | Declared module needs a capability that isn't wired | Add the matching capability field |
 | `module 'hull/gpu@1' requires HL_ENABLE_GPU (build-time)` | The build wasn't compiled with the subsystem | Rebuild hull with `make HL_ENABLE_GPU=1 …` or remove the module declaration |
+| `module 'hull/http@1' requires HL_ENABLE_HTTP (build-time)` | App targets an `HL_ENABLE_HTTP=0` CLI-only build but declares an HTTP-dependent module (`hull/http`, `hull/ws`, `hull/server`, `hull/smtp`, `hull/email`, any `hull/middleware/*`) | Rebuild without `HL_ENABLE_HTTP=0` or remove the module. See [docs/cli_mode.md](docs/cli_mode.md). |
 | `unknown module 'X' in app.manifest.modules` | Typo or non-existent module | Run `hull modules available` for the canonical list |
 
 **CLI surface:**

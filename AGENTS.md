@@ -672,6 +672,15 @@ Every module except the intrinsic core (`hull/app`, `hull/log`, `hull/json`) mus
 
 To get the authoritative list for your hull build (including deps and capability requirements), run `hull modules available --json`. For a single module's spec, `hull modules explain hull/middleware/session`.
 
+**Modules that require an HTTP-enabled build** (i.e. `HL_ENABLE_HTTP=1`, the
+default): `hull/http`, `hull/ws`, `hull/server`, `hull/smtp`, `hull/email`,
+and every entry under `hull/middleware/*` (auth, cors, csrf, etag, health,
+idempotency, inbox, logger, outbox, ratelimit, rbac, session, transaction).
+On a CLI-only build (`HL_ENABLE_HTTP=0`, see [docs/cli_mode.md](docs/cli_mode.md))
+declaring any of these in `manifest.modules` fails at resolve time with
+`requires HL_ENABLE_HTTP (build-time)`. `hull doctor` reports which
+subsystems your binary supports.
+
 ## Database API
 
 ```lua
