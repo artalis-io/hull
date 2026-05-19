@@ -59,6 +59,46 @@ Each app is a single file (`app.lua` or `app.js`) with optional:
 - `shaders/*.wgsl` — GPU compute shaders (embedded by `hull build`, loaded via `gpu.load()`)
 - `tests/test_*.lua` or `tests/test_*.js` — test files
 
+## App Lifecycle
+
+Apps run in one of two modes, selected by what they register (not by a
+build flag). Knowing which mode an app is in tells you which subcommands
+apply (`hull dev` is server-only; `hull run` works for both) and what the
+process lifecycle looks like.
+
+**Server mode** — app registers `app.get/post/use/ws/sse/every/daily`.
+
+```
+process start → init runtime → sandbox phase 1 → load app
+  → manifest extracted → modules resolved → sandbox phase 2
+  → migrations (HL_ENABLE_DB + ./migrations/) → start Keel
+  → event loop: dispatch requests until SIGINT/SIGTERM
+  → graceful shutdown → exit
+```
+
+**CLI mode** (planned, see [docs/cli_mode.md](docs/cli_mode.md)) — app
+registers `app.main(fn)`.
+
+```
+process start → init runtime → sandbox phase 1 → load app
+  → manifest extracted → modules resolved → sandbox phase 2
+  → migrations (same gate as server mode)
+  → call app.main(ctx) where ctx = { args, env, stdin, stdout, stderr }
+  → main returns (sync or via coroutine/Promise)
+  → cleanup (drain caches, scrub keys, close DB) → exit with main's rc
+```
+
+Apply this when working on app code:
+- If you see `app.get/post/use` in the app, it's server mode — `hull dev`
+  + `hull agent request` are the right tools to iterate.
+- If you see `app.main`, it's CLI mode — `hull run` is the right tool;
+  `hull dev` doesn't apply. Test files use `test.run_main({args=...,
+  stdin=...})` instead of `test.get/post`.
+- Registering both `app.main` and routes is an error — Hull fails at
+  startup. If you're refactoring, pick one mode for the whole app.
+- `hull agent manifest` reports `"mode": "server" | "cli"` so you can
+  introspect without reading the source.
+
 ## Runtime Selection
 
 Hull supports two runtimes — selected by file extension:

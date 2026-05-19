@@ -214,6 +214,49 @@ Client → Keel HTTP → Route Match → hl_{lua,js}_dispatch() → Handler → 
                                     SQLite / FS / Crypto / HTTP
 ```
 
+### App Lifecycle
+
+Two execution modes; selected by what the app registers, not by build flags.
+
+**Server mode** (app calls `app.get/post/use/ws/sse/every/daily`):
+
+```
+1. Process start; argv parsed
+2. Init runtime; kernel sandbox phase 1
+3. Load app.{lua,js}  ── top-level runs once:
+     app.manifest({...}); app.get(...); app.use(...); ...
+4. Extract manifest; run module resolver; sandbox phase 2
+5. Run migrations (HL_ENABLE_DB + ./migrations/ + not --no-migrate)
+6. Start Keel; enter event loop
+7. Forever: accept connections → dispatch to handler → respond
+8. SIGINT/SIGTERM → graceful shutdown → cleanup → exit
+```
+
+**CLI mode** (app calls `app.main(fn)`) — **planned**, see [docs/cli_mode.md](docs/cli_mode.md):
+
+```
+1. Process start; argv parsed
+2. Init runtime; kernel sandbox phase 1
+3. Load app.{lua,js}  ── top-level runs once:
+     app.manifest({...}); app.main(fn)
+4. Extract manifest; run module resolver; sandbox phase 2
+5. Run migrations (same gate as server mode)
+6. Call app.main(ctx) on the event-loop thread
+     ctx = { args, env, stdin, stdout, stderr }
+     async ops (compute.async / gpu.async / http.fetch) yield via
+     coroutine/Promise — main awaits naturally
+7. main returns/throws → cleanup
+8. Drain mmap/WASM/GPU caches; scrub keys; close DB
+9. Process exits with main's return value (nil → 0; integer → that code)
+```
+
+Conflict handling: registering both `app.main` and any route in the same
+app errors at step 6 with `app registered both app.main and HTTP routes;
+choose one`. CLI mode produces no event-loop survival, so `app.every` /
+`app.daily` error at registration with `timers require server mode`.
+`HL_ENABLE_HTTP=0` builds simply lack the route-registration bindings
+entirely.
+
 ### Command Dispatch
 
 Table-driven dispatcher in `src/hull/commands/dispatch.c`. 22 commands:

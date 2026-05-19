@@ -182,6 +182,38 @@ Cosmopolitan APE binaries run on Linux, macOS, Windows, FreeBSD, OpenBSD, and Ne
 
 Each layer only talks to the one directly below it. Application code cannot bypass the capability layer.
 
+### App Lifecycle
+
+Hull apps execute in one of two modes, chosen by what the app registers:
+
+**Server mode** — app registers route handlers (`app.get/post/use/ws/sse/every/daily`):
+
+```
+process start → init runtime → sandbox phase 1 → load app code
+  → manifest extracted → modules resolved → sandbox phase 2
+  → migrations (HL_ENABLE_DB + migrations/) → start Keel
+  → event loop: dispatch requests until SIGINT/SIGTERM
+  → graceful shutdown → exit
+```
+
+**CLI mode** *(planned — see [docs/cli_mode.md](docs/cli_mode.md))* — app registers a single entry point with `app.main(fn)`:
+
+```
+process start → init runtime → sandbox phase 1 → load app code
+  → manifest extracted → modules resolved → sandbox phase 2
+  → migrations (same gate as server mode)
+  → call app.main(ctx) where ctx = { args, env, stdin, stdout, stderr }
+  → main returns (sync or via coroutine/Promise)
+  → cleanup → exit with main's return value
+```
+
+Both modes share the same manifest, sandbox, module resolver, signature
+system, and capability layer — only the dispatch surface differs.
+Registering both `app.main` and routes in the same app is a startup
+error; pick one. A future `HL_ENABLE_HTTP=0` build will drop Keel +
+middleware entirely, producing a pure CLI / compute runtime; CLI apps
+written today run unchanged on that future binary.
+
 ### Module Declaration
 
 Apps declare which first-party stdlib modules they import via the manifest's `modules` array; runtime gates refuse imports of anything not declared. Three principles:

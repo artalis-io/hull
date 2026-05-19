@@ -303,6 +303,26 @@ At this point the Package & Module System is feature-complete for v1; everything
 | Lockfile for resolved-set pinning | Deferred | The "resolved set in `manifest.bin`" item above covers tamper detection. A separate lockfile is overkill for v1's no-third-party model. |
 | `hull add <package>` install command | Deferred | The existing "Module/package ecosystem" row in *Future — Advanced Features* covers this. Out of scope until third-party packages exist. |
 
+### CLI / Compute-Only Mode
+
+`HL_ENABLE_HTTP=0` builds Hull without Keel, routing, or middleware —
+producing a pure CLI / compute runtime with the full module surface
+(`db`, `crypto`, `compute`, `gpu`, `image`, `fs`, etc.). Apps register
+`app.main(fn)` instead of `app.get/post/…`; lifecycle is *load → resolve
+modules → migrate → main → exit-with-rc*, mirroring `int main()` /
+`def main()` from any other language. The default hull binary
+(`HL_ENABLE_HTTP=1`) runs both modes, so a CLI app written today works
+on any future stripped-down distribution.
+
+Full design + lifecycle + phased implementation: [docs/cli_mode.md](cli_mode.md).
+
+| # | Feature | Status | Effort | Notes |
+|---|---------|--------|--------|-------|
+| 1 | `app.main(fn)` registration + lifecycle | Planned | 2d | Bindings, mode detection, conflict error, return-value → exit code coercion. Works on HTTP=1 builds first. |
+| 2 | `hull run` command + scaffolding | Planned | 1d | New command, `hull new --cli`, `hull init` mode detection, templates. |
+| 3 | `HL_ENABLE_HTTP=0` build flag | Planned | 2d | Conditional compilation, drop Keel from link, `HL_MOD_CAP_HTTP` registry bit, `hull doctor` row, narrower sandbox. |
+| 4 | Polish & documentation | Planned | 1d | `hull build` mode validation, `hull agent manifest` `mode` field, example CLI apps, README/CLAUDE/AGENTS sections. |
+
 ### Agent Platform — AI-Native Development Tooling
 
 Hull treats agentic coding environments (Claude Code, Codex, OpenCode, Cursor, Ollama-based harnesses) as first-class citizens. The agent platform provides machine-readable tooling, dynamic context management, and a structured feedback loop so AI agents can rapidly prototype, test, and deploy Hull applications.
