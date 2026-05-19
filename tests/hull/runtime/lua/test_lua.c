@@ -427,7 +427,7 @@ UTEST(lua_runtime, app_main_via_vtable_runs)
 
     ASSERT_TRUE(hl_lua_vtable.has_main(&lua_rt.base));
     int exit_code = 99;
-    int run_rc = hl_lua_vtable.run_main(&lua_rt.base, 0, NULL, NULL, &exit_code);
+    int run_rc = hl_lua_vtable.run_main(&lua_rt.base, NULL, 0, NULL, NULL, &exit_code);
     ASSERT_EQ(run_rc, 0);
     ASSERT_EQ(exit_code, 7);
     cleanup_lua();
@@ -441,7 +441,7 @@ UTEST(lua_runtime, app_main_nil_return_yields_zero)
     ASSERT_EQ(rc, LUA_OK);
 
     int exit_code = 99;
-    int run_rc = hl_lua_vtable.run_main(&lua_rt.base, 0, NULL, NULL, &exit_code);
+    int run_rc = hl_lua_vtable.run_main(&lua_rt.base, NULL, 0, NULL, NULL, &exit_code);
     ASSERT_EQ(run_rc, 0);
     ASSERT_EQ(exit_code, 0);
     cleanup_lua();
@@ -455,7 +455,7 @@ UTEST(lua_runtime, app_main_string_return_is_error)
     ASSERT_EQ(rc, LUA_OK);
 
     int exit_code = 0;
-    int run_rc = hl_lua_vtable.run_main(&lua_rt.base, 0, NULL, NULL, &exit_code);
+    int run_rc = hl_lua_vtable.run_main(&lua_rt.base, NULL, 0, NULL, NULL, &exit_code);
     ASSERT_EQ(run_rc, 0);
     ASSERT_EQ(exit_code, 1);
     cleanup_lua();
@@ -469,7 +469,7 @@ UTEST(lua_runtime, app_main_clamps_large_return)
     ASSERT_EQ(rc, LUA_OK);
 
     int exit_code = 0;
-    int run_rc = hl_lua_vtable.run_main(&lua_rt.base, 0, NULL, NULL, &exit_code);
+    int run_rc = hl_lua_vtable.run_main(&lua_rt.base, NULL, 0, NULL, NULL, &exit_code);
     ASSERT_EQ(run_rc, 0);
     ASSERT_EQ(exit_code, 44);   /* 300 & 0xff */
     cleanup_lua();
@@ -483,7 +483,7 @@ UTEST(lua_runtime, app_main_thrown_error_returns_minus_one)
     ASSERT_EQ(rc, LUA_OK);
 
     int exit_code = 0;
-    int run_rc = hl_lua_vtable.run_main(&lua_rt.base, 0, NULL, NULL, &exit_code);
+    int run_rc = hl_lua_vtable.run_main(&lua_rt.base, NULL, 0, NULL, NULL, &exit_code);
     ASSERT_EQ(run_rc, -1);
     ASSERT_EQ(exit_code, 1);    /* preset to 1 at entry */
     cleanup_lua();
@@ -515,7 +515,7 @@ UTEST(lua_runtime, app_main_ctx_args_and_env)
     char *argv_in[] = { "alpha", "beta", "gamma" };
     const char *env_allow[] = { "TEST_VAR", NULL };
     int exit_code = 99;
-    int run_rc = hl_lua_vtable.run_main(&lua_rt.base, 3, argv_in,
+    int run_rc = hl_lua_vtable.run_main(&lua_rt.base, NULL, 3, argv_in,
                                          env_allow, &exit_code);
     ASSERT_EQ(run_rc, 0);
     ASSERT_EQ(exit_code, 0);

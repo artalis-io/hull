@@ -1317,6 +1317,26 @@ static JSValue js_cli_close(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+/* .then / .catch callback wired to main's Promise in CLI mode. magic=0
+ * → resolved, magic=1 → rejected. Captures the value on the runtime
+ * and stops the event loop so vt_js_run_main can return. */
+static JSValue js_cli_main_settle(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv, int magic)
+{
+    (void)this_val;
+    HlJS *js = JS_GetContextOpaque(ctx);
+    if (!js || !js->cli_main_value) return JS_UNDEFINED;
+
+    JSValue *slot = (JSValue *)js->cli_main_value;
+    JS_FreeValue(ctx, *slot);
+    *slot = (argc >= 1) ? JS_DupValue(ctx, argv[0]) : JS_UNDEFINED;
+    js->cli_main_rejected = (magic == 1) ? 1 : 0;
+    js->cli_main_active   = 0;
+
+    if (js->server) kl_server_stop(js->server);
+    return JS_UNDEFINED;
+}
+
 static int vt_js_has_main(HlRuntime *rt)
 {
     if (!rt) return 0;
@@ -1347,7 +1367,8 @@ static int coerce_js_exit_code(JSContext *ctx, JSValue v)
     return 1;
 }
 
-static int vt_js_run_main(HlRuntime *rt, int argc, char **argv,
+static int vt_js_run_main(HlRuntime *rt, KlServer *server,
+                           int argc, char **argv,
                            const char *const *env_allowlist,
                            int *exit_code_out)
 {
@@ -1355,6 +1376,11 @@ static int vt_js_run_main(HlRuntime *rt, int argc, char **argv,
     if (!rt || !exit_code_out) return -1;
     HlJS *js = (HlJS *)rt;
     JSContext *ctx = js->ctx;
+
+    /* Same reasoning as the Lua side: CLI bypasses wire_routes_server,
+     * so the server pointer isn't wired. Async ops (hull.sleep,
+     * compute.async, gpu.async, http.fetch) reach for js->server. */
+    if (server) js->server = server;
 
     /* Look up the main function. */
     JSValue global = JS_GetGlobalObject(ctx);
@@ -1431,44 +1457,76 @@ static int vt_js_run_main(HlRuntime *rt, int argc, char **argv,
         return -1;
     }
 
-    /* Drain pending microtasks. If main returned a synchronously-
-     * resolvable Promise (Promise.resolve(0), Promise chains without
-     * thread-pool waits), this is enough. Async work tied to the
-     * thread pool / Keel event loop is Phase 1.5+. */
+    /* Drain microtasks — resolves any synchronously-resolvable Promise. */
     hl_js_run_jobs(js);
 
-    /* If main returned a Promise, unwrap it. Pending means no event
-     * loop is driving it (Phase 1 limitation — full async-in-main needs
-     * Keel event-loop integration, deferred to Phase 1.5). */
+    /* Branch on whether main returned a Promise. */
     JSValue value = ret;
     int owned_value = 0;
+    int rejected = 0;
     JSPromiseStateEnum st = JS_PromiseState(ctx, ret);
+
     if (st == JS_PROMISE_PENDING) {
-        fprintf(stderr, "[hull:main] returned a pending Promise — "
-                "async work in app.main is not supported yet "
-                "(Phase 1.5)\n");
-        JS_FreeValue(ctx, ret);
-        JS_FreeValue(ctx, main_fn);
-        JS_FreeValue(ctx, global);
-        return -1;
-    }
-    if (st == JS_PROMISE_FULFILLED || st == JS_PROMISE_REJECTED) {
-        value = JS_PromiseResult(ctx, ret);
-        owned_value = 1;
-        if (st == JS_PROMISE_REJECTED) {
-            const char *msg = JS_ToCString(ctx, value);
-            fprintf(stderr, "[hull:main] promise rejected: %s\n",
-                    msg ? msg : "(unknown)");
-            if (msg) JS_FreeCString(ctx, msg);
-            JS_FreeValue(ctx, value);
+        /* Async main — attach C-side .then/.catch callbacks that stash
+         * the resolved value on the runtime and stop the server, then
+         * drive the Keel event loop until they fire. */
+        if (!server) {
+            fprintf(stderr, "[hull:main] internal: no server to drive event loop\n");
             JS_FreeValue(ctx, ret);
             JS_FreeValue(ctx, main_fn);
             JS_FreeValue(ctx, global);
             return -1;
         }
+
+        JSValue settled_slot = JS_UNDEFINED;
+        js->cli_main_active   = 1;
+        js->cli_main_rejected = 0;
+        js->cli_main_value    = &settled_slot;
+
+        JSValue then_fn = JS_GetPropertyStr(ctx, ret, "then");
+        JSValue resolve_cb = JS_NewCFunctionMagic(
+            ctx, (JSCFunctionMagic *)js_cli_main_settle,
+            "__hull_main_resolved", 1, JS_CFUNC_generic_magic, 0);
+        JSValue reject_cb = JS_NewCFunctionMagic(
+            ctx, (JSCFunctionMagic *)js_cli_main_settle,
+            "__hull_main_rejected", 1, JS_CFUNC_generic_magic, 1);
+        JSValue then_args[2] = { resolve_cb, reject_cb };
+        JSValue chained = JS_Call(ctx, then_fn, ret, 2, then_args);
+        JS_FreeValue(ctx, then_fn);
+        JS_FreeValue(ctx, resolve_cb);
+        JS_FreeValue(ctx, reject_cb);
+        JS_FreeValue(ctx, chained);
+
+        hl_js_run_jobs(js);  /* in case both already settled via microtasks */
+
+        if (js->cli_main_active) {
+            int srv_rc = kl_server_run(server);
+            if (srv_rc < 0)
+                fprintf(stderr, "[hull:main] event loop error\n");
+            hl_js_run_jobs(js);  /* drain anything that landed after stop */
+        }
+
+        value = settled_slot;
+        owned_value = 1;
+        rejected = js->cli_main_rejected;
+        js->cli_main_value = NULL;
+        js->cli_main_active = 0;
+    } else if (st == JS_PROMISE_FULFILLED || st == JS_PROMISE_REJECTED) {
+        value = JS_PromiseResult(ctx, ret);
+        owned_value = 1;
+        rejected = (st == JS_PROMISE_REJECTED);
     }
 
-    int rc = coerce_js_exit_code(ctx, value);
+    int rc;
+    if (rejected) {
+        const char *msg = JS_ToCString(ctx, value);
+        fprintf(stderr, "[hull:main] promise rejected: %s\n",
+                msg ? msg : "(unknown)");
+        if (msg) JS_FreeCString(ctx, msg);
+        rc = 1;
+    } else {
+        rc = coerce_js_exit_code(ctx, value);
+    }
 
     if (owned_value) JS_FreeValue(ctx, value);
     JS_FreeValue(ctx, ret);
@@ -1476,7 +1534,7 @@ static int vt_js_run_main(HlRuntime *rt, int argc, char **argv,
     JS_FreeValue(ctx, global);
 
     *exit_code_out = rc;
-    return 0;
+    return rejected ? -1 : 0;
 }
 
 const HlRuntimeVtable hl_js_vtable = {

@@ -110,6 +110,12 @@ typedef struct HlRuntimeVtable {
     /* Run the registered app.main(fn) and return its exit code via
      * `exit_code_out` (clamped to 0..255).
      *
+     *   server          : Keel server whose event loop drives async ops
+     *                     inside main (compute.async, gpu.async, http.fetch,
+     *                     hull.sleep). May be NULL only if the runtime can
+     *                     guarantee main is purely synchronous; otherwise
+     *                     async ops will fail with "requires an active
+     *                     server".
      *   argv/argc       : positional args passed to main as `ctx.args`
      *   env_allowlist   : NULL-terminated array of env-var names allowed
      *                     by the manifest; only these populate `ctx.env`.
@@ -118,7 +124,8 @@ typedef struct HlRuntimeVtable {
      * Returns 0 on success, -1 if main was not registered, or if the
      * function threw / failed to coerce a return value. On failure,
      * exit_code_out is set to 1. */
-    int   (*run_main)(HlRuntime *rt, int argc, char **argv,
+    int   (*run_main)(HlRuntime *rt, KlServer *server,
+                      int argc, char **argv,
                       const char *const *env_allowlist,
                       int *exit_code_out);
 } HlRuntimeVtable;

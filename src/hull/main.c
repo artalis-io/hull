@@ -1338,7 +1338,7 @@ static int hl_serve_run_main(HlServerState *s)
     log_info("[hull:c] running app.main (%s runtime)", rt->vt->name);
 
     int rc = 1;
-    int run = rt->vt->run_main(rt, 0, NULL, env_allow, &rc);
+    int run = rt->vt->run_main(rt, &s->server, 0, NULL, env_allow, &rc);
     free((void *)env_allow);
 
     s->cli_exit_code = rc;

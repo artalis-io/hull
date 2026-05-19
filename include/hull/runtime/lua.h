@@ -126,6 +126,13 @@ typedef struct HlLua {
     /* UDF lifecycle: 1 while Lua state is valid, 0 before lua_close.
      * UDF destroy callbacks check this before calling luaL_unref. */
     int         udf_runtime_alive;
+
+    /* CLI mode (app.main) — non-NULL while main's coroutine is alive.
+     * When the existing async resume machinery sees the resumed coroutine
+     * == cli_main_co and the status is no longer LUA_YIELD, it knows
+     * main has terminated and calls kl_server_stop on `server` so the
+     * event loop returns. */
+    lua_State  *cli_main_co;
 } HlLua;
 
 /* ── Async push_result callback ─────────────────────────────────────── */

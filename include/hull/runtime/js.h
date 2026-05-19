@@ -136,6 +136,16 @@ typedef struct HlJS {
     /* UDF lifecycle: 1 while JS runtime is valid, 0 before JS_FreeRuntime.
      * UDF destroy callbacks check this before calling JS_FreeValue. */
     int             udf_runtime_alive;
+
+    /* CLI mode (app.main) — tracks main's eventual completion when it
+     * returns a pending Promise. Set in vt_js_run_main; the C-side
+     * .then callbacks attached to main's Promise stash the resolved
+     * value here and call kl_server_stop. cli_main_value points at a
+     * heap-allocated JSValue (opaque to this header to avoid pulling
+     * in quickjs.h here); owned by the runtime — freed in run_main. */
+    int             cli_main_active;     /* 1 = waiting on main's Promise */
+    int             cli_main_rejected;   /* 1 = Promise rejected, 0 = fulfilled */
+    void           *cli_main_value;      /* JSValue * — borrowed in runtime.c */
 } HlJS;
 
 /* ── Vtable ────────────────────────────────────────────────────────── */

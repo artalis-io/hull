@@ -683,7 +683,28 @@ static int vt_lua_has_main(HlRuntime *rt)
     return has;
 }
 
-static int vt_lua_run_main(HlRuntime *rt, int argc, char **argv,
+/* Coerce the value on top of `co`'s stack to an exit code in [0..255]. */
+static int lua_coerce_exit_code(lua_State *co)
+{
+    int t = lua_type(co, -1);
+    if (t == LUA_TNONE || t == LUA_TNIL) return 0;
+    if (t == LUA_TNUMBER) {
+        if (lua_isinteger(co, -1)) {
+            lua_Integer i = lua_tointeger(co, -1);
+            if (i < 0) i = 0;
+            if (i > 255) i = i & 0xff;
+            return (int)i;
+        }
+        return (int)lua_tonumber(co, -1);
+    }
+    const char *s = lua_tostring(co, -1);
+    fprintf(stderr, "[hull:main] non-numeric return: %s\n",
+            s ? s : "(unprintable)");
+    return 1;
+}
+
+static int vt_lua_run_main(HlRuntime *rt, KlServer *server,
+                            int argc, char **argv,
                             const char *const *env_allowlist,
                             int *exit_code_out)
 {
@@ -692,75 +713,125 @@ static int vt_lua_run_main(HlRuntime *rt, int argc, char **argv,
     HlLua *lua = (HlLua *)rt;
     lua_State *L = lua->L;
 
-    /* Push the registered main function. */
-    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_main");
-    if (!lua_isfunction(L, -1)) {
-        lua_pop(L, 1);
+    /* CLI mode bypasses wire_routes_server, so the server pointer
+     * normally set there isn't wired. Set it now so async ops
+     * (hull.sleep, compute.async, gpu.async, http.fetch) can find it. */
+    if (server) lua->server = server;
+
+    /* Wrap main in a coroutine so async ops (compute.async, gpu.async,
+     * http.fetch, hull.sleep) can yield via the existing infrastructure.
+     * The same machinery the HTTP dispatch uses applies here — only the
+     * "what to do when the coroutine finally terminates" differs.
+     *
+     * Stack: [_] → after setup [thread] (pinned via registry ref). */
+    lua_State *co = lua_newthread(L);
+    int co_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    if (co_ref == LUA_REFNIL) {
         return -1;
     }
 
-    /* Build ctx table. */
-    lua_newtable(L);  /* ctx */
-
-    /* ctx.args = { argv[0], argv[1], ... } */
-    lua_newtable(L);
-    for (int i = 0; i < argc; i++) {
-        lua_pushstring(L, argv[i] ? argv[i] : "");
-        lua_rawseti(L, -2, i + 1);
+    /* Push main onto the coroutine stack. */
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_main");
+    if (!lua_isfunction(L, -1)) {
+        lua_pop(L, 1);
+        luaL_unref(L, LUA_REGISTRYINDEX, co_ref);
+        return -1;
     }
-    lua_setfield(L, -2, "args");
+    lua_xmove(L, co, 1);  /* L: ... → co: [main_fn] */
 
-    /* ctx.env = { NAME = value, ... } limited to env_allowlist. */
-    lua_newtable(L);
+    /* Build the ctx table directly on the coroutine. */
+    lua_newtable(co);
+
+    lua_newtable(co);
+    for (int i = 0; i < argc; i++) {
+        lua_pushstring(co, argv[i] ? argv[i] : "");
+        lua_rawseti(co, -2, i + 1);
+    }
+    lua_setfield(co, -2, "args");
+
+    lua_newtable(co);
     if (env_allowlist) {
         for (int i = 0; env_allowlist[i]; i++) {
             const char *name = env_allowlist[i];
             const char *val = getenv(name);
             if (val) {
-                lua_pushstring(L, val);
-                lua_setfield(L, -2, name);
+                lua_pushstring(co, val);
+                lua_setfield(co, -2, name);
             }
         }
     }
-    lua_setfield(L, -2, "env");
+    lua_setfield(co, -2, "env");
 
-    /* ctx.stdin / stdout / stderr */
-    cli_push_stream(L, 0, cli_stdin_methods);   lua_setfield(L, -2, "stdin");
-    cli_push_stream(L, 1, cli_writer_methods);  lua_setfield(L, -2, "stdout");
-    cli_push_stream(L, 2, cli_writer_methods);  lua_setfield(L, -2, "stderr");
+    cli_push_stream(co, 0, cli_stdin_methods);   lua_setfield(co, -2, "stdin");
+    cli_push_stream(co, 1, cli_writer_methods);  lua_setfield(co, -2, "stdout");
+    cli_push_stream(co, 2, cli_writer_methods);  lua_setfield(co, -2, "stderr");
 
-    /* Call main(ctx). Expect 1 arg, 1 return. */
-    if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
-        const char *err = lua_tostring(L, -1);
-        fprintf(stderr, "[hull:main] error: %s\n", err ? err : "(unknown)");
-        lua_pop(L, 1);
-        return -1;
+    /* Set active state so async ops see the right coroutine/conn. */
+    lua_State *saved_co       = lua->active_co;
+    KlConn   *saved_conn      = lua->active_conn;
+    int       saved_thread_ref = lua->active_thread_ref;
+    int       saved_depth      = lua->dispatch_depth;
+
+    lua->active_co         = co;
+    lua->active_conn       = NULL;       /* detached — no HTTP conn */
+    lua->active_thread_ref = co_ref;
+    lua->dispatch_depth    = saved_depth + 1;
+
+    /* First resume: main runs until it returns or yields. */
+    int nres = 0;
+    int status = lua_resume(co, L, 1, &nres);
+
+    if (status == LUA_YIELD) {
+        /* Main yielded — async op in flight. Mark this coroutine so
+         * hl_lua_async_resume knows to stop the server when it
+         * eventually completes, then enter the event loop. */
+        lua->cli_main_co = co;
+
+        if (!lua->server) {
+            fprintf(stderr, "[hull:main] internal: no server to drive event loop\n");
+            luaL_unref(L, LUA_REGISTRYINDEX, co_ref);
+            lua->active_co         = saved_co;
+            lua->active_conn       = saved_conn;
+            lua->active_thread_ref = saved_thread_ref;
+            lua->dispatch_depth    = saved_depth;
+            lua->cli_main_co       = NULL;
+            return -1;
+        }
+
+        int srv_rc = kl_server_run(lua->server);
+        if (srv_rc < 0) {
+            fprintf(stderr, "[hull:main] event loop error\n");
+        }
+
+        /* hl_lua_async_resume cleared lua->cli_main_co + the active_co
+         * fields before calling kl_server_stop. After kl_server_run
+         * returns, the coroutine status reflects main's terminal state. */
+        status = lua_status(co);
+        nres   = lua_gettop(co);
     }
 
-    /* Coerce return value to exit code. */
-    int rc = 0;
-    int t = lua_type(L, -1);
-    if (t == LUA_TNIL) {
-        rc = 0;
-    } else if (t == LUA_TNUMBER) {
-        if (lua_isinteger(L, -1)) {
-            lua_Integer i = lua_tointeger(L, -1);
-            if (i < 0) i = 0;
-            if (i > 255) i = i & 0xff;
-            rc = (int)i;
-        } else {
-            rc = (int)lua_tonumber(L, -1);
-        }
+    /* `co`'s stack now holds main's return value (LUA_OK) or an error
+     * message (LUA_ERRRUN etc.) — either way, the top of the stack is
+     * what we read. */
+    int rc;
+    if (status == LUA_OK) {
+        rc = lua_coerce_exit_code(co);
     } else {
-        const char *s = lua_tostring(L, -1);
-        fprintf(stderr, "[hull:main] non-numeric return: %s\n",
-                s ? s : "(unprintable)");
+        const char *err = lua_tostring(co, -1);
+        fprintf(stderr, "[hull:main] error: %s\n", err ? err : "(unknown)");
         rc = 1;
     }
-    lua_pop(L, 1);
+
+    /* Restore active state and release the coroutine. */
+    lua->active_co         = saved_co;
+    lua->active_conn       = saved_conn;
+    lua->active_thread_ref = saved_thread_ref;
+    lua->dispatch_depth    = saved_depth;
+    lua->cli_main_co       = NULL;
+    luaL_unref(L, LUA_REGISTRYINDEX, co_ref);
 
     *exit_code_out = rc;
-    return 0;
+    return (status == LUA_OK) ? 0 : -1;
 }
 
 const HlRuntimeVtable hl_lua_vtable = {

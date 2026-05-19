@@ -459,7 +459,7 @@ UTEST(js_runtime, app_main_via_vtable_runs)
     hl_js_run_jobs(&js);
 
     int exit_code = 99;
-    int run_rc = hl_js_vtable.run_main(&js.base, 0, NULL, NULL, &exit_code);
+    int run_rc = hl_js_vtable.run_main(&js.base, NULL, 0, NULL, NULL, &exit_code);
     ASSERT_EQ(run_rc, 0);
     ASSERT_EQ(exit_code, 5);
     cleanup_js();
@@ -477,7 +477,7 @@ UTEST(js_runtime, app_main_undefined_return_yields_zero)
     hl_js_run_jobs(&js);
 
     int exit_code = 99;
-    int run_rc = hl_js_vtable.run_main(&js.base, 0, NULL, NULL, &exit_code);
+    int run_rc = hl_js_vtable.run_main(&js.base, NULL, 0, NULL, NULL, &exit_code);
     ASSERT_EQ(run_rc, 0);
     ASSERT_EQ(exit_code, 0);
     cleanup_js();
@@ -495,7 +495,7 @@ UTEST(js_runtime, app_main_promise_resolved_unwraps)
     hl_js_run_jobs(&js);
 
     int exit_code = 99;
-    int run_rc = hl_js_vtable.run_main(&js.base, 0, NULL, NULL, &exit_code);
+    int run_rc = hl_js_vtable.run_main(&js.base, NULL, 0, NULL, NULL, &exit_code);
     ASSERT_EQ(run_rc, 0);
     ASSERT_EQ(exit_code, 11);
     cleanup_js();
@@ -513,7 +513,7 @@ UTEST(js_runtime, app_main_clamps_large_return)
     hl_js_run_jobs(&js);
 
     int exit_code = 0;
-    int run_rc = hl_js_vtable.run_main(&js.base, 0, NULL, NULL, &exit_code);
+    int run_rc = hl_js_vtable.run_main(&js.base, NULL, 0, NULL, NULL, &exit_code);
     ASSERT_EQ(run_rc, 0);
     ASSERT_EQ(exit_code, 44);  /* 300 & 0xff */
     cleanup_js();
@@ -545,7 +545,7 @@ UTEST(js_runtime, app_main_ctx_args_and_env)
     char *argv_in[] = { "one", "two" };
     const char *env_allow[] = { "TEST_VAR_JS", NULL };
     int exit_code = 99;
-    int run_rc = hl_js_vtable.run_main(&js.base, 2, argv_in, env_allow,
+    int run_rc = hl_js_vtable.run_main(&js.base, NULL, 2, argv_in, env_allow,
                                         &exit_code);
     ASSERT_EQ(run_rc, 0);
     ASSERT_EQ(exit_code, 0);

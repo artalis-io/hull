@@ -83,6 +83,13 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
             lua_isboolean(co, -1) && !lua_toboolean(co, -1))
             cancelled = 1;
 
+        /* CLI main coroutine just finished — stop the server so the
+         * dispatching event loop returns. Detection is set-based: only
+         * one coroutine is ever stored as cli_main_co (mutually
+         * exclusive with server-mode handlers + timers + ws + sse, all
+         * gated at registration). */
+        int was_main = (lua->cli_main_co == co);
+
         luaL_unref(lua->L, LUA_REGISTRYINDEX, lc->thread_ref);
         lc->thread_ref = LUA_NOREF;
         lc->co = NULL;
@@ -107,6 +114,11 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
             if (!cancelled)
                 hl_lua_timer_reschedule(t);
         }
+
+        if (was_main && lua->server) {
+            lua->cli_main_co = NULL;
+            kl_server_stop(lua->server);
+        }
     } else if (status == LUA_YIELD) {
         /* Handler yielded again — new HlAsyncCtx already set up.
          * The new continuation captured the current co/conn/thread_ref.
@@ -120,9 +132,12 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
     } else {
         /* Error */
         const char *msg = lua_tostring(co, -1);
+        int was_main = (lua->cli_main_co == co);
         if (conn)
             log_error("[hull:c] async lua handler error: %s",
                       msg ? msg : "(unknown)");
+        else if (was_main)
+            log_error("[hull:main] error: %s", msg ? msg : "(unknown)");
         else
             log_error("[hull:timer] error: %s", msg ? msg : "(unknown)");
 
@@ -146,6 +161,11 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
             HlLuaTimer *t = (HlLuaTimer *)lc->timer_ctx;
             t->in_flight = 0;
             hl_lua_timer_reschedule(t);
+        }
+
+        if (was_main && lua->server) {
+            lua->cli_main_co = NULL;
+            kl_server_stop(lua->server);
         }
     }
 }
