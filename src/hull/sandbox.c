@@ -301,9 +301,19 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
 
     /* ── Network ────────────────────────────────────────────── */
 
-    SBPL_LIT("; Network (server socket already bound)\n"
-             "(allow network-inbound network-bind)\n"
-             "(allow system-socket)\n");
+    /* Inbound + bind only if the app may accept connections (server
+     * mode). CLI mode apps (app.main, no routes) get a strictly
+     * tighter profile — no network-inbound, no network-bind. The
+     * `system-socket` rule is needed for any socket creation so it
+     * stays whenever any network rule is wanted. */
+    if (policy->network_inbound) {
+        SBPL_LIT("; Network (server socket already bound)\n"
+                 "(allow network-inbound network-bind)\n"
+                 "(allow system-socket)\n");
+    } else if (policy->network_outbound) {
+        SBPL_LIT("; Network (outbound only — CLI mode)\n"
+                 "(allow system-socket)\n");
+    }
     if (policy->network_outbound) {
         SBPL_LIT("(allow network-outbound)\n");
     }
@@ -717,18 +727,28 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
      *
      * Always needed:
      *   stdio  — basic I/O on open fds, epoll/kqueue, signals
-     *   inet   — accept connections on the bound server socket
      *   rpath  — SQLite reads, app file reads
      *   wpath  — SQLite WAL writes
      *   cpath  — SQLite journal/WAL creation
      *   flock  — SQLite locking
      *
      * Conditional:
+     *   inet   — socket-family syscalls. Needed when the app serves
+     *            HTTP (network_inbound) OR makes outbound requests
+     *            (network_outbound). CLI-mode apps with neither drop
+     *            it entirely; their kernel-visible syscall surface
+     *            shrinks accordingly.
      *   dns    — outbound HTTP name resolution (when hosts declared)
      */
     char promises[256];
     int plen = snprintf(promises, sizeof(promises),
-                        "stdio inet rpath wpath cpath flock");
+                        "stdio rpath wpath cpath flock");
+    if (plen > 0 && (size_t)plen < sizeof(promises) &&
+        (policy->network_inbound || policy->network_outbound)) {
+        int n = snprintf(promises + plen, sizeof(promises) - (size_t)plen,
+                         " inet");
+        if (n > 0) plen += n;
+    }
     /* When the app declares outbound hosts, allow DNS resolution.
      *   dns      — UDP/IP queries to the resolver
      *   netlink  — Linux/glibc getaddrinfo() opens AF_NETLINK to enumerate
@@ -801,6 +821,11 @@ void hl_sandbox_policy_from_manifest(HlSandboxPolicy *policy,
     /* Sandbox only needs the boolean "any outbound network?" decision.
      * The actual host allowlist is enforced in cap/http.c. */
     policy->network_outbound = (manifest->hosts_count > 0);
+
+    /* Inbound: assume the app may serve (default-permissive). serve.c
+     * narrows this to 0 right before applying the sandbox when the
+     * loaded app turned out to be CLI mode (app.main, no routes). */
+    policy->network_inbound = 1;
 
     policy->gpu              = manifest->gpu;
     policy->gpu_devices      = manifest->gpu_devices;

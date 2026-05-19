@@ -52,6 +52,15 @@ typedef struct HlSandboxPolicy {
      * only decides whether to unveil network syscalls at all. */
     int network_outbound;
 
+    /* Network-inbound: 1 if the app may need to accept connections
+     * (i.e. it's a server app, not a CLI app.main). Defaults to 1 from
+     * the manifest builder — overridden to 0 by serve.c right before
+     * applying the sandbox when the loaded app registered app.main
+     * with no routes. When 0, pledge's `inet` promise is dropped
+     * entirely (unless network_outbound is also 1, in which case
+     * outbound sockets still need it). */
+    int network_inbound;
+
     /* GPU access. If gpu == 0, no GPU paths are unveiled.
      * If gpu == 1 and gpu_device_count == 0, all devices are allowed.
      * If gpu_device_count > 0, gpu_devices[0..gpu_device_count) lists

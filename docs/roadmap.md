@@ -323,8 +323,8 @@ Full design + lifecycle + phased implementation: [docs/cli_mode.md](cli_mode.md)
 | 2   | `hull run` command + scaffolding | **Done** | — | `run` token stripped in `hull_main` and falls through to serve. `--` separator for app args. `hull new --cli` + `hull init` mode detection (auto-detected from `app.main(` presence). |
 | 3a  | HTTP foundation (no behavior change) | **Done** | — | `HL_MOD_CAP_HTTP` bit, registry markings on http/ws/server/smtp/middleware/*, resolver + cap_label updates, `hull doctor` row + `--json` subsystems object, Makefile flag, `hull_serve` extracted from `main.c` into `src/hull/serve.c`. |
 | 3b  | `HL_ENABLE_HTTP=0` build flag | Planned | 2d | The actual no-HTTP build: leaf cap files, runtime bindings, stdlib middleware embedding, `serve.c` CLI variant, command-level gating. 7 independent slices detailed in [docs/cli_mode.md](cli_mode.md). |
-| 3c  | Sandbox narrowing + cosmo | Planned | 1d | Drop `inet` promise + macOS network SBPL when no HTTP module declared; `make platform-cosmo HL_ENABLE_HTTP=0`; binary-size verification. |
-| 4   | Polish & documentation | Planned | 1d | `hull build` mode validation, `hull agent manifest` `mode` field, example CLI apps. |
+| 3c  | Sandbox narrowing | **Done** | — | `HlSandboxPolicy.network_inbound`: defaults to 1; serve.c sets to 0 when `rt->vt->has_main(rt)` is true. Pledge's `inet` promise is dropped entirely on CLI apps with no outbound either; macOS Seatbelt's `network-inbound`/`network-bind` rules become conditional on the same. Cosmo coverage + binary-size verification still pending — fold into Phase 3b. |
+| 4   | Polish & documentation | **Mostly done** | — | `hull agent manifest` mode field, `examples/hello_cli/`, `tests/e2e_cli.sh`, AGENTS/CLAUDE doc markings for HTTP-build modules. Remaining: `hull build` mode validation (needs Phase 3b), more sample CLI apps. |
 
 ### Agent Platform — AI-Native Development Tooling
 

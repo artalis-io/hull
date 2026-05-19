@@ -1194,6 +1194,16 @@ static int hl_serve_apply_sandbox(HlServerState *s)
     if (!s->cfg.no_sandbox) {
         HlSandboxPolicy sandbox_policy;
         hl_sandbox_policy_from_manifest(&sandbox_policy, &s->manifest);
+
+        /* CLI-mode apps (app.main registered) never accept inbound
+         * connections — narrow the sandbox accordingly. The runtime
+         * vtable's has_main was populated in mod_app.c at app-load time,
+         * so this check is purely informational here. */
+        HlRuntime *rt = hl_app_context_runtime(s->app);
+        if (rt && rt->vt && rt->vt->has_main && rt->vt->has_main(rt)) {
+            sandbox_policy.network_inbound = 0;
+        }
+
         if (hl_sandbox_apply(&sandbox_policy, s->app_dir,
                               s->cfg.no_db ? NULL : s->cfg.db_path, s->ca_bundle_path,
                               s->cfg.tls_cert_path, s->cfg.tls_key_path) != 0) {
