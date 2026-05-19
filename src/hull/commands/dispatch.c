@@ -18,7 +18,9 @@
 #include "hull/commands/manifest.h"
 #include "hull/commands/test.h"
 #include "hull/commands/new.h"
+#ifdef HL_ENABLE_HTTP
 #include "hull/commands/dev.h"
+#endif
 #include "hull/commands/eject.h"
 #ifdef HL_ENABLE_DB
 #include "hull/commands/migrate.h"
@@ -49,7 +51,9 @@ static const HlCommand commands[] = {
     { "manifest", hl_cmd_manifest },
     { "test",     hl_cmd_test },
     { "new",      hl_cmd_new },
+#ifdef HL_ENABLE_HTTP
     { "dev",      hl_cmd_dev },
+#endif
     { "eject",         hl_cmd_eject },
     { "sign-platform", hl_cmd_sign_platform },
 #ifdef HL_ENABLE_DB

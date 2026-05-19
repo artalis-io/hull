@@ -625,6 +625,17 @@ ifeq ($(HL_ENABLE_DB),0)
       $(SRCDIR)/hull/cap/db_udf.c, \
       $(CAP_SRCS))
 endif
+ifeq ($(HL_ENABLE_HTTP),0)
+  # Drop HTTP capability modules in CLI-only builds. Keel itself is
+  # also dropped from the link below.
+  CAP_SRCS := $(filter-out \
+      $(SRCDIR)/hull/cap/http.c \
+      $(SRCDIR)/hull/cap/http_async.c \
+      $(SRCDIR)/hull/cap/ws.c \
+      $(SRCDIR)/hull/cap/body.c \
+      $(SRCDIR)/hull/cap/smtp.c, \
+      $(CAP_SRCS))
+endif
 CAP_OBJS := $(patsubst $(SRCDIR)/hull/cap/%.c,$(BUILDDIR)/cap_%.o,$(CAP_SRCS))
 CAP_TOOL_OBJ := $(BUILDDIR)/cap_tool.o
 CAP_TEST_OBJ := $(BUILDDIR)/cap_test.o
@@ -637,6 +648,22 @@ ifeq ($(HL_ENABLE_DB),0)
       $(SRCDIR)/hull/runtime/js/worker_db.c, \
       $(JS_RT_SRCS))
 endif
+ifeq ($(HL_ENABLE_HTTP),0)
+  # Drop server/route/middleware/HTTP-client bindings + their backends.
+  JS_RT_SRCS := $(filter-out \
+      $(SRCDIR)/hull/runtime/js/mod_http.c \
+      $(SRCDIR)/hull/runtime/js/mod_ws.c \
+      $(SRCDIR)/hull/runtime/js/mod_server.c \
+      $(SRCDIR)/hull/runtime/js/mod_sse.c \
+      $(SRCDIR)/hull/runtime/js/mod_smtp.c \
+      $(SRCDIR)/hull/runtime/js/routes.c \
+      $(SRCDIR)/hull/runtime/js/dispatch.c \
+      $(SRCDIR)/hull/runtime/js/sse.c \
+      $(SRCDIR)/hull/runtime/js/ws.c \
+      $(SRCDIR)/hull/runtime/js/timers.c \
+      $(SRCDIR)/hull/runtime/js/bindings.c, \
+      $(JS_RT_SRCS))
+endif
 JS_RT_OBJS := $(patsubst $(SRCDIR)/hull/runtime/js/%.c,$(BUILDDIR)/js_%.o,$(JS_RT_SRCS))
 
 # Lua runtime sources
@@ -647,12 +674,31 @@ ifeq ($(HL_ENABLE_DB),0)
       $(SRCDIR)/hull/runtime/lua/worker_db.c, \
       $(LUA_RT_SRCS))
 endif
+ifeq ($(HL_ENABLE_HTTP),0)
+  LUA_RT_SRCS := $(filter-out \
+      $(SRCDIR)/hull/runtime/lua/mod_http.c \
+      $(SRCDIR)/hull/runtime/lua/mod_ws.c \
+      $(SRCDIR)/hull/runtime/lua/mod_server.c \
+      $(SRCDIR)/hull/runtime/lua/mod_sse.c \
+      $(SRCDIR)/hull/runtime/lua/mod_smtp.c \
+      $(SRCDIR)/hull/runtime/lua/routes.c \
+      $(SRCDIR)/hull/runtime/lua/dispatch.c \
+      $(SRCDIR)/hull/runtime/lua/sse.c \
+      $(SRCDIR)/hull/runtime/lua/ws.c \
+      $(SRCDIR)/hull/runtime/lua/timers.c \
+      $(SRCDIR)/hull/runtime/lua/bindings.c, \
+      $(LUA_RT_SRCS))
+endif
 LUA_RT_OBJS := $(patsubst $(SRCDIR)/hull/runtime/lua/%.c,$(BUILDDIR)/lua_rt_%.o,$(LUA_RT_SRCS))
 
 # Command module sources
 CMD_SRCS := $(wildcard $(SRCDIR)/hull/commands/*.c)
 ifeq ($(HL_ENABLE_DB),0)
   CMD_SRCS := $(filter-out $(SRCDIR)/hull/commands/migrate.c,$(CMD_SRCS))
+endif
+ifeq ($(HL_ENABLE_HTTP),0)
+  # hull dev forks a serve subprocess; no point without a server.
+  CMD_SRCS := $(filter-out $(SRCDIR)/hull/commands/dev.c,$(CMD_SRCS))
 endif
 CMD_OBJS := $(patsubst $(SRCDIR)/hull/commands/%.c,$(BUILDDIR)/cmd_%.o,$(CMD_SRCS))
 
@@ -704,7 +750,11 @@ SIG_OBJ        := $(BUILDDIR)/signature.o
 RELEASE_OBJ    := $(BUILDDIR)/release.o
 TEST_RUNNER_OBJ := $(BUILDDIR)/test_runner.o
 RUNTIME_FACTORY_OBJ := $(BUILDDIR)/runtime_factory.o
+ifeq ($(HL_ENABLE_HTTP),0)
+STATIC_OBJ     :=
+else
 STATIC_OBJ     := $(BUILDDIR)/hull_static.o
+endif
 BUILD_ASSET_OBJ      := $(BUILDDIR)/build_assets.o
 BUILD_ASSET_STUB_OBJ := $(BUILDDIR)/build_assets_stub.o
 ifeq ($(HL_ENABLE_DB),0)
@@ -720,9 +770,21 @@ ifeq ($(HL_ENABLE_DB),0)
   AGENT_LIB_SRCS := $(filter-out $(SRCDIR)/hull/agent/db.c,$(AGENT_LIB_SRCS))
 endif
 AGENT_LIB_OBJ  := $(patsubst $(SRCDIR)/hull/agent/%.c,$(BUILDDIR)/agent_%.o,$(AGENT_LIB_SRCS))
+# HL_ENABLE_HTTP=0: replace serve.c (Keel-driven full server) with
+# serve_cli.c (load + app.main + exit). agent_api (in-process HTTP
+# introspection) drops out. Keel itself stays linked because its
+# async primitives (kl_async_*, kl_timer_*, KlThreadPool) back the
+# detached coroutine path used by request handlers. CLI-only builds
+# don't drive the event loop, so async-in-main isn't supported — see
+# docs/cli_mode.md Phase 3d for the followup that drops Keel entirely.
+ifeq ($(HL_ENABLE_HTTP),0)
+AGENT_API_OBJ  :=
+SERVE_OBJ      := $(BUILDDIR)/serve_cli.o
+else
 AGENT_API_OBJ  := $(BUILDDIR)/agent_api.o
-MAIN_OBJ       := $(BUILDDIR)/main.o
 SERVE_OBJ      := $(BUILDDIR)/serve.o
+endif
+MAIN_OBJ       := $(BUILDDIR)/main.o
 ENTRY_OBJ      := $(BUILDDIR)/entry.o
 
 # ── Stdlib embedding (xxd) ──────────────────────────────────────────
@@ -1265,6 +1327,10 @@ $(BUILDDIR)/main.o: $(SRCDIR)/hull/main.c | $(BUILDDIR)
 
 # Serve (full app lifecycle — orchestrates Keel server + runtime)
 $(BUILDDIR)/serve.o: $(SRCDIR)/hull/serve.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+# Serve-cli (CLI-only counterpart for HL_ENABLE_HTTP=0 builds)
+$(BUILDDIR)/serve_cli.o: $(SRCDIR)/hull/serve_cli.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Entry (thin main → hull_main trampoline — NOT in platform .a)

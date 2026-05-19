@@ -47,8 +47,11 @@ typedef struct HlJsAsyncCont {
  * is suspended for the async HTTP response, while the server-side
  * connection for /api/slow can also suspend for hull.sleep).
  */
-/* Forward declarations for timer reschedule (defined in runtime.c) */
+/* Forward declarations for timer reschedule (defined in timers.c —
+ * dropped under HL_ENABLE_HTTP=0; call sites are guarded). */
+#ifdef HL_ENABLE_HTTP
 void hl_js_timer_reschedule(HlJSTimer *t);
+#endif
 
 static void hl_js_async_resume(HlAsyncCont *self, void *driver)
 {
@@ -112,13 +115,19 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
             }
         }
 
-        /* Timer async completion: clear in_flight and reschedule */
+        /* Timer async completion: clear in_flight and reschedule.
+         * Timers are HTTP-only (app.every / app.daily); CLI builds
+         * never set timer_ctx so the branch is dead. */
+#ifdef HL_ENABLE_HTTP
         if (jc->timer_ctx) {
             HlJSTimer *t = (HlJSTimer *)jc->timer_ctx;
             t->in_flight = 0;
             if (!cancelled)
                 hl_js_timer_reschedule(t);
         }
+#else
+        (void)cancelled;
+#endif
     } else if (state == JS_PROMISE_REJECTED) {
         /* Handler error — extract message, write 500 */
         JSValue result = JS_PromiseResult(ctx, jc->handler_promise);
@@ -146,12 +155,15 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
             conn->state = KL_CONN_SENDING;
         }
 
-        /* Timer error: clear in_flight and reschedule anyway */
+        /* Timer error: clear in_flight and reschedule anyway. CLI
+         * builds have no timers. */
+#ifdef HL_ENABLE_HTTP
         if (jc->timer_ctx) {
             HlJSTimer *t = (HlJSTimer *)jc->timer_ctx;
             t->in_flight = 0;
             hl_js_timer_reschedule(t);
         }
+#endif
     } else {
         /* PENDING — handler re-yielded (another async op in flight).
          * Transfer handler promise and timer_ctx to the new continuation. */

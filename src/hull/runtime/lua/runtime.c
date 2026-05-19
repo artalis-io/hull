@@ -378,13 +378,15 @@ void hl_lua_free(HlLua *lua)
         lua->sse_route_cap = 0;
     }
 
-    /* Free WebSocket registry */
+    /* Free WebSocket registry — HTTP-only; CLI builds never create one. */
+#ifdef HL_ENABLE_HTTP
     if (lua->base.ws_registry) {
         hl_ws_registry_free(lua->base.ws_registry);
         hl_alloc_free(lua->base.alloc, lua->base.ws_registry,
                       sizeof(HlWsRegistry));
         lua->base.ws_registry = NULL;
     }
+#endif
 
     /* Mark runtime as dead before lua_close so UDF destroy callbacks
      * (fired by sqlite3_close) don't call luaL_unref on a dead state */
@@ -433,11 +435,21 @@ static int vt_lua_load_app(HlRuntime *rt, const char *filename)
     return hl_lua_load_app((HlLua *)rt, filename);
 }
 
+#ifdef HL_ENABLE_HTTP
 static int vt_lua_wire_routes_server(HlRuntime *rt, KlServer *server,
                                       void *(*alloc_fn)(size_t))
 {
     return hl_lua_wire_routes_server((HlLua *)rt, server, alloc_fn);
 }
+#else
+/* CLI-only build placeholder (see vt_js equivalent). */
+static int vt_lua_wire_routes_server(HlRuntime *rt, KlServer *server,
+                                      void *(*alloc_fn)(size_t))
+{
+    (void)rt; (void)server; (void)alloc_fn;
+    return -1;
+}
+#endif
 
 static int vt_lua_extract_manifest(HlRuntime *rt, HlManifest *out)
 {
@@ -500,6 +512,7 @@ static void vt_lua_enumerate_middleware(HlRuntime *rt, HlMiddlewareCb cb, void *
     }
 }
 
+#ifdef HL_ENABLE_HTTP
 static int vt_lua_test_setup(HlRuntime *rt, KlRouter *router)
 {
     HlLua *lua = (HlLua *)rt;
@@ -508,6 +521,13 @@ static int vt_lua_test_setup(HlRuntime *rt, KlRouter *router)
     hl_lua_test_register(lua->L, router, lua);
     return 0;
 }
+#else
+static int vt_lua_test_setup(HlRuntime *rt, KlRouter *router)
+{
+    (void)rt; (void)router;
+    return -1;
+}
+#endif
 
 static int vt_lua_run_test_file(HlRuntime *rt, const char *file_path,
                                 HlTestCaseResult *results, int max_results,

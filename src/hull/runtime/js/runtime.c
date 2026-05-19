@@ -904,13 +904,15 @@ void hl_js_free(HlJS *js)
         js->ws_client_cap = 0;
     }
 
-    /* Free WebSocket registry */
+    /* Free WebSocket registry — HTTP-only; CLI builds never create one. */
+#ifdef HL_ENABLE_HTTP
     if (js->base.ws_registry) {
         hl_ws_registry_free(js->base.ws_registry);
         hl_alloc_free(js->base.alloc, js->base.ws_registry,
                       sizeof(HlWsRegistry));
         js->base.ws_registry = NULL;
     }
+#endif
 
     /* Mark runtime as dead before JS_FreeContext/JS_FreeRuntime so UDF
      * destroy callbacks (fired by sqlite3_close) don't call JS_FreeValue
@@ -1011,11 +1013,23 @@ static int vt_js_load_app(HlRuntime *rt, const char *filename)
     return hl_js_load_app((HlJS *)rt, filename);
 }
 
+#ifdef HL_ENABLE_HTTP
 static int vt_js_wire_routes_server(HlRuntime *rt, KlServer *server,
                                      void *(*alloc_fn)(size_t))
 {
     return hl_js_wire_routes_server((HlJS *)rt, server, alloc_fn);
 }
+#else
+/* CLI-only build: the vtable still has the slot for layout
+ * compatibility, but it should never be invoked (serve.c, the only
+ * caller, doesn't get compiled in). */
+static int vt_js_wire_routes_server(HlRuntime *rt, KlServer *server,
+                                     void *(*alloc_fn)(size_t))
+{
+    (void)rt; (void)server; (void)alloc_fn;
+    return -1;
+}
+#endif
 
 static int vt_js_extract_manifest(HlRuntime *rt, HlManifest *out)
 {
@@ -1094,6 +1108,7 @@ static void vt_js_enumerate_middleware(HlRuntime *rt, HlMiddlewareCb cb, void *u
     JS_FreeValue(js->ctx, global);
 }
 
+#ifdef HL_ENABLE_HTTP
 static int vt_js_test_setup(HlRuntime *rt, KlRouter *router)
 {
     HlJS *js = (HlJS *)rt;
@@ -1102,6 +1117,15 @@ static int vt_js_test_setup(HlRuntime *rt, KlRouter *router)
     hl_js_test_register(js->ctx, router, js);
     return 0;
 }
+#else
+/* CLI-only build stub: hull test against a CLI app needs a different
+ * harness (test.run_main) — placeholder so the vtable still links. */
+static int vt_js_test_setup(HlRuntime *rt, KlRouter *router)
+{
+    (void)rt; (void)router;
+    return -1;
+}
+#endif
 
 static int vt_js_run_test_file(HlRuntime *rt, const char *file_path,
                                HlTestCaseResult *results, int max_results,

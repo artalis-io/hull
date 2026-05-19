@@ -52,6 +52,7 @@ int hl_js_register_modules(HlJS *js)
     if (hl_js_init_log_module(js->ctx, js) != 0)
         return -1;
 
+#ifdef HL_ENABLE_HTTP
     /* Register hull:http module — always available; per-function checks
      * enforce that http_cfg is set (wired from manifest after load_app). */
     if (hl_js_init_http_module(js->ctx, js) != 0)
@@ -61,6 +62,7 @@ int hl_js_register_modules(HlJS *js)
      * enforce that smtp_cfg is set (wired from manifest after load_app). */
     if (hl_js_init_smtp_module(js->ctx, js) != 0)
         return -1;
+#endif
 
     /* Register hull:_template — internal bridge for hull:template stdlib */
     if (hl_js_init_template_module(js->ctx, js) != 0)
@@ -72,9 +74,11 @@ int hl_js_register_modules(HlJS *js)
             return -1;
     }
 
+#ifdef HL_ENABLE_HTTP
     /* Register hull:server module (always available) */
     if (hl_js_init_server_module(js->ctx, js) != 0)
         return -1;
+#endif
 
     /* Register hull:fs module — always available; per-function checks
      * enforce that fs_cfg is set (wired from manifest after load_app). */
@@ -101,10 +105,12 @@ int hl_js_register_modules(HlJS *js)
     }
 #endif
 
+#ifdef HL_ENABLE_HTTP
     /* Register hull:ws module + SSE class (always available) */
     hl_js_sse_register_class(js->ctx);
     if (hl_js_init_ws_module(js->ctx, js) != 0)
         return -1;
+#endif
 
     return 0;
 }

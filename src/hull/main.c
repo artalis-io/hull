@@ -20,6 +20,13 @@
 
 #include <string.h>
 
+/* Fall-through entry. With HL_ENABLE_HTTP=1 this drives serve.c
+ * (which branches on app.main vs routes). With HL_ENABLE_HTTP=0 the
+ * same hull_serve symbol is exported by serve_cli.c — load app,
+ * invoke app.main, exit. Apps that register HTTP routes on an
+ * HL_ENABLE_HTTP=0 build fail at module-resolve time (the modules
+ * they need require HL_ENABLE_HTTP build cap). */
+
 int hull_main(int argc, char **argv)
 {
     /* Handle -v / --version before subcommand dispatch so that
@@ -33,12 +40,7 @@ int hull_main(int argc, char **argv)
 
     /* `hull run [args]` is a discoverable alias for `hull [args]` —
      * both go through hull_serve, which branches on whether the loaded
-     * app registered app.main (CLI mode) or routes (server mode). The
-     * `run` token gives users an explicit, documented entry for CLI
-     * apps without needing a separate code path.
-     *
-     * Strip the "run" token in-place by shifting argv left so the rest
-     * of the parser sees a clean argv. */
+     * app registered app.main (CLI mode) or routes (server mode). */
     if (argc >= 2 && strcmp(argv[1], "run") == 0) {
         for (int i = 1; i < argc - 1; i++) argv[i] = argv[i + 1];
         argc--;

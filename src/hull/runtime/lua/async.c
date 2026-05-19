@@ -47,8 +47,12 @@ typedef struct HlLuaAsyncCont {
  *   LUA_YIELD → KL_CONN_SUSPENDED (handler re-yielded, new op active)
  *   error     → KL_CONN_SENDING (500 response written)
  */
-/* Forward declarations for timer reschedule (defined in runtime.c) */
+/* Forward declarations for timer reschedule (defined in timers.c —
+ * dropped under HL_ENABLE_HTTP=0; the corresponding call sites are
+ * guarded so the symbol is never referenced in CLI builds). */
+#ifdef HL_ENABLE_HTTP
 void hl_lua_timer_reschedule(HlLuaTimer *t);
+#endif
 
 static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
 {
@@ -107,13 +111,21 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
             }
         }
 
-        /* Timer async completion: clear in_flight and reschedule */
+        /* Timer async completion: clear in_flight and reschedule.
+         * Timers only exist in HTTP builds (app.every / app.daily); the
+         * timer_ctx field is always NULL in CLI-only builds so the
+         * branch is dead but the symbol reference would still need to
+         * link — guard it out entirely. */
+#ifdef HL_ENABLE_HTTP
         if (lc->timer_ctx) {
             HlLuaTimer *t = (HlLuaTimer *)lc->timer_ctx;
             t->in_flight = 0;
             if (!cancelled)
                 hl_lua_timer_reschedule(t);
         }
+#else
+        (void)cancelled;
+#endif
 
         if (was_main && lua->server) {
             lua->cli_main_co = NULL;
@@ -156,12 +168,15 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
             conn->state = KL_CONN_SENDING;
         }
 
-        /* Timer error: clear in_flight and reschedule anyway */
+        /* Timer error: clear in_flight and reschedule anyway. CLI-only
+         * builds have no timers, so this branch is dead — guard out. */
+#ifdef HL_ENABLE_HTTP
         if (lc->timer_ctx) {
             HlLuaTimer *t = (HlLuaTimer *)lc->timer_ctx;
             t->in_flight = 0;
             hl_lua_timer_reschedule(t);
         }
+#endif
 
         if (was_main && lua->server) {
             lua->cli_main_co = NULL;
