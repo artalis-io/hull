@@ -6,11 +6,63 @@
 
 #include "mod_buffer.h"
 
+/* Returns 1 if app.main was already registered. */
+static int js_app_main_registered(JSContext *ctx)
+{
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue m = JS_GetPropertyStr(ctx, global, "__hull_main");
+    int has = !JS_IsUndefined(m) && !JS_IsNull(m);
+    JS_FreeValue(ctx, m);
+    JS_FreeValue(ctx, global);
+    return has;
+}
+
+/* Throws + returns 1 if app.main is registered; CLI and server modes
+ * are mutually exclusive. Returns 0 if the caller may proceed. */
+static int js_app_throw_if_main(JSContext *ctx, const char *call)
+{
+    if (!js_app_main_registered(ctx)) return 0;
+    JS_ThrowTypeError(ctx,
+        "%s cannot be called when app.main is registered — "
+        "choose CLI mode (app.main) or server mode (app.get/etc), not both",
+        call);
+    return 1;
+}
+
+/* Returns 1 if any dispatch-style handler has been registered. Used to
+ * guard app.main against late registration. */
+static int js_app_dispatch_registered(JSContext *ctx)
+{
+    static const char *keys[] = {
+        "__hull_route_defs", "__hull_middleware", "__hull_post_middleware",
+        "__hull_timer_defs", "__hull_ws_defs", "__hull_sse_defs",
+        NULL
+    };
+    JSValue global = JS_GetGlobalObject(ctx);
+    int found = 0;
+    for (int i = 0; keys[i]; i++) {
+        JSValue v = JS_GetPropertyStr(ctx, global, keys[i]);
+        if (JS_IsArray(ctx, v)) {
+            JSValue len_val = JS_GetPropertyStr(ctx, v, "length");
+            int32_t len = 0;
+            JS_ToInt32(ctx, &len, len_val);
+            JS_FreeValue(ctx, len_val);
+            if (len > 0) found = 1;
+        }
+        JS_FreeValue(ctx, v);
+        if (found) break;
+    }
+    JS_FreeValue(ctx, global);
+    return found;
+}
+
 /* Helper: register a route with given method string */
 static JSValue js_app_route(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv, int magic)
 {
     (void)this_val;
+    if (js_app_throw_if_main(ctx, "app.get/post/put/delete/patch/options"))
+        return JS_EXCEPTION;
     static const char *method_names[] = {
         "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "*"
     };
@@ -77,6 +129,7 @@ static JSValue js_app_use(JSContext *ctx, JSValueConst this_val,
                            int argc, JSValueConst *argv)
 {
     (void)this_val;
+    if (js_app_throw_if_main(ctx, "app.use")) return JS_EXCEPTION;
     if (argc < 3)
         return JS_ThrowTypeError(ctx, "app.use requires (method, pattern, handler)");
 
@@ -137,6 +190,7 @@ static JSValue js_app_use_post(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv)
 {
     (void)this_val;
+    if (js_app_throw_if_main(ctx, "app.usePost")) return JS_EXCEPTION;
     if (argc < 3)
         return JS_ThrowTypeError(ctx, "app.usePost requires (method, pattern, handler)");
 
@@ -197,6 +251,7 @@ static JSValue js_app_every(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv)
 {
     (void)this_val;
+    if (js_app_throw_if_main(ctx, "app.every")) return JS_EXCEPTION;
     if (argc < 2)
         return JS_ThrowTypeError(ctx, "app.every requires (interval_ms, handler)");
 
@@ -257,6 +312,7 @@ static JSValue js_app_daily(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv)
 {
     (void)this_val;
+    if (js_app_throw_if_main(ctx, "app.daily")) return JS_EXCEPTION;
     if (argc < 2)
         return JS_ThrowTypeError(ctx, "app.daily requires (time_str, handler)");
 
@@ -361,6 +417,7 @@ static JSValue js_app_ws(JSContext *ctx, JSValueConst this_val,
                            int argc, JSValueConst *argv)
 {
     (void)this_val;
+    if (js_app_throw_if_main(ctx, "app.ws")) return JS_EXCEPTION;
     if (argc < 2)
         return JS_ThrowTypeError(ctx, "app.ws requires (path, handlers)");
 
@@ -424,6 +481,7 @@ static JSValue js_app_sse(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
     (void)this_val;
+    if (js_app_throw_if_main(ctx, "app.sse")) return JS_EXCEPTION;
     if (argc < 2)
         return JS_ThrowTypeError(ctx, "app.sse requires (path, handler)");
 
@@ -502,6 +560,32 @@ static JSValue js_app_get_manifest(JSContext *ctx, JSValueConst this_val,
     return manifest;
 }
 
+/* app.main(fn) — register CLI-mode entry point. Mutually exclusive with
+ * route / middleware / timer / ws / sse registration. Stored under
+ * globalThis.__hull_main; invoked once by the dispatcher in main.c. */
+static JSValue js_app_main(JSContext *ctx, JSValueConst this_val,
+                            int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1 || !JS_IsFunction(ctx, argv[0]))
+        return JS_ThrowTypeError(ctx, "app.main requires a function");
+
+    if (js_app_main_registered(ctx))
+        return JS_ThrowTypeError(ctx, "app.main() can only be called once");
+
+    if (js_app_dispatch_registered(ctx))
+        return JS_ThrowTypeError(ctx,
+            "app.main() cannot be called after registering routes, "
+            "middleware, timers, or WebSocket/SSE handlers — "
+            "choose CLI mode (app.main) or server mode (app.get/etc), not both");
+
+    JSValue global = JS_GetGlobalObject(ctx);
+    JS_SetPropertyStr(ctx, global, "__hull_main", JS_DupValue(ctx, argv[0]));
+    JS_FreeValue(ctx, global);
+
+    return JS_UNDEFINED;
+}
+
 static int js_app_module_init(JSContext *ctx, JSModuleDef *m)
 {
     if (hl_js_check_module_declared(ctx, "hull/app", "hull:app") != 0) return -1;
@@ -544,6 +628,8 @@ static int js_app_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_app_every, "every", 2));
     JS_SetPropertyStr(ctx, app, "daily",
                       JS_NewCFunction(ctx, js_app_daily, "daily", 3));
+    JS_SetPropertyStr(ctx, app, "main",
+                      JS_NewCFunction(ctx, js_app_main, "main", 1));
     JS_SetPropertyStr(ctx, app, "manifest",
                       JS_NewCFunction(ctx, js_app_manifest, "manifest", 1));
     JS_SetPropertyStr(ctx, app, "getManifest",

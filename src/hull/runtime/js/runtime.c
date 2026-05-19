@@ -1171,6 +1171,314 @@ static void vt_js_destroy(HlRuntime *rt)
     hl_js_free((HlJS *)rt);
 }
 
+/* ── CLI mode (app.main) ───────────────────────────────────────────────
+ *
+ * Phase 1: sync stdio (calls return values directly, not Promises). Full
+ * async-inside-main (compute.async / gpu.async / http.fetch) needs Keel
+ * event-loop integration in run_main_mode; deferred to Phase 1.5. The
+ * synchronous Promise machinery in QuickJS (Promise.resolve, microtask
+ * chains) still works because we drain pending jobs after main returns. */
+
+static FILE *cli_stream_for(int magic)
+{
+    switch (magic) {
+    case 0: return stdin;
+    case 1: return stdout;
+    case 2: return stderr;
+    default: return NULL;
+    }
+}
+
+static JSValue js_cli_read(JSContext *ctx, JSValueConst this_val,
+                            int argc, JSValueConst *argv, int magic)
+{
+    (void)this_val;
+    FILE *f = cli_stream_for(magic);
+    if (!f) return JS_ThrowInternalError(ctx, "invalid stream");
+
+    /* read()        → "*l" line read
+     * read("a"|"l") → that mode
+     * read(n)       → n bytes */
+    int want_bytes = 0;
+    int64_t nbytes = 0;
+    const char *mode = "l";
+    if (argc >= 1 && !JS_IsUndefined(argv[0]) && !JS_IsNull(argv[0])) {
+        if (JS_IsNumber(argv[0])) {
+            if (JS_ToInt64(ctx, &nbytes, argv[0]) != 0) return JS_EXCEPTION;
+            if (nbytes < 0) return JS_ThrowRangeError(ctx, "read: negative count");
+            want_bytes = 1;
+        } else {
+            const char *s = JS_ToCString(ctx, argv[0]);
+            if (!s) return JS_EXCEPTION;
+            mode = (s[0] == '*' ? s + 1 : s);
+            if (mode[0] != 'a' && mode[0] != 'l') {
+                JSValue err = JS_ThrowRangeError(ctx,
+                    "read: unsupported mode '%s' (use 'l', 'a', or n bytes)", s);
+                JS_FreeCString(ctx, s);
+                return err;
+            }
+            char keep[2] = { mode[0], 0 };
+            mode = keep;  /* before freeing the source */
+            JS_FreeCString(ctx, s);
+        }
+    }
+
+    if (want_bytes) {
+        if (nbytes == 0) return JS_NewString(ctx, "");
+        char *buf = js_malloc(ctx, (size_t)nbytes + 1);
+        if (!buf) return JS_EXCEPTION;
+        size_t n = fread(buf, 1, (size_t)nbytes, f);
+        buf[n] = 0;
+        if (n == 0 && feof(f)) { js_free(ctx, buf); return JS_NULL; }
+        JSValue r = JS_NewStringLen(ctx, buf, n);
+        js_free(ctx, buf);
+        return r;
+    }
+
+    if (mode[0] == 'a') {
+        size_t cap = 4096, len = 0;
+        char *buf = js_malloc(ctx, cap);
+        if (!buf) return JS_EXCEPTION;
+        char chunk[4096];
+        size_t n;
+        while ((n = fread(chunk, 1, sizeof(chunk), f)) > 0) {
+            if (len + n + 1 > cap) {
+                while (len + n + 1 > cap) cap *= 2;
+                char *nb = js_realloc(ctx, buf, cap);
+                if (!nb) { js_free(ctx, buf); return JS_EXCEPTION; }
+                buf = nb;
+            }
+            memcpy(buf + len, chunk, n);
+            len += n;
+        }
+        JSValue r = JS_NewStringLen(ctx, buf, len);
+        js_free(ctx, buf);
+        return r;
+    }
+
+    /* default: line read */
+    size_t cap = 256, len = 0;
+    char *buf = js_malloc(ctx, cap);
+    if (!buf) return JS_EXCEPTION;
+    int got = 0;
+    for (;;) {
+        int c = fgetc(f);
+        if (c == EOF) break;
+        got = 1;
+        if (c == '\n') break;
+        if (len + 2 > cap) {
+            cap *= 2;
+            char *nb = js_realloc(ctx, buf, cap);
+            if (!nb) { js_free(ctx, buf); return JS_EXCEPTION; }
+            buf = nb;
+        }
+        buf[len++] = (char)c;
+    }
+    if (!got) { js_free(ctx, buf); return JS_NULL; }
+    JSValue r = JS_NewStringLen(ctx, buf, len);
+    js_free(ctx, buf);
+    return r;
+}
+
+static JSValue js_cli_write(JSContext *ctx, JSValueConst this_val,
+                             int argc, JSValueConst *argv, int magic)
+{
+    (void)this_val;
+    FILE *f = cli_stream_for(magic);
+    if (!f) return JS_ThrowInternalError(ctx, "invalid stream");
+    for (int i = 0; i < argc; i++) {
+        size_t n = 0;
+        const char *s = JS_ToCStringLen(ctx, &n, argv[i]);
+        if (!s) return JS_EXCEPTION;
+        if (n && fwrite(s, 1, n, f) != n) {
+            JS_FreeCString(ctx, s);
+            return JS_ThrowInternalError(ctx, "write failed");
+        }
+        JS_FreeCString(ctx, s);
+    }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_cli_flush(JSContext *ctx, JSValueConst this_val,
+                             int argc, JSValueConst *argv, int magic)
+{
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    FILE *f = cli_stream_for(magic);
+    if (f) fflush(f);
+    return JS_UNDEFINED;
+}
+
+static JSValue js_cli_close(JSContext *ctx, JSValueConst this_val,
+                             int argc, JSValueConst *argv, int magic)
+{
+    /* No-op for stdin; we don't want to propagate fclose(stdin) to
+     * other readers in the process. */
+    (void)ctx; (void)this_val; (void)argc; (void)argv; (void)magic;
+    return JS_UNDEFINED;
+}
+
+static int vt_js_has_main(HlRuntime *rt)
+{
+    if (!rt) return 0;
+    HlJS *js = (HlJS *)rt;
+    if (!js->ctx) return 0;
+    JSValue global = JS_GetGlobalObject(js->ctx);
+    JSValue m = JS_GetPropertyStr(js->ctx, global, "__hull_main");
+    int has = !JS_IsUndefined(m) && !JS_IsNull(m);
+    JS_FreeValue(js->ctx, m);
+    JS_FreeValue(js->ctx, global);
+    return has;
+}
+
+static int coerce_js_exit_code(JSContext *ctx, JSValue v)
+{
+    if (JS_IsUndefined(v) || JS_IsNull(v)) return 0;
+    if (JS_IsNumber(v)) {
+        int32_t i = 0;
+        if (JS_ToInt32(ctx, &i, v) != 0) return 1;
+        if (i < 0) i = 0;
+        if (i > 255) i = i & 0xff;
+        return i;
+    }
+    const char *s = JS_ToCString(ctx, v);
+    fprintf(stderr, "[hull:main] non-numeric return: %s\n",
+            s ? s : "(unprintable)");
+    if (s) JS_FreeCString(ctx, s);
+    return 1;
+}
+
+static int vt_js_run_main(HlRuntime *rt, int argc, char **argv,
+                           const char *const *env_allowlist,
+                           int *exit_code_out)
+{
+    if (exit_code_out) *exit_code_out = 1;
+    if (!rt || !exit_code_out) return -1;
+    HlJS *js = (HlJS *)rt;
+    JSContext *ctx = js->ctx;
+
+    /* Look up the main function. */
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue main_fn = JS_GetPropertyStr(ctx, global, "__hull_main");
+    if (!JS_IsFunction(ctx, main_fn)) {
+        JS_FreeValue(ctx, main_fn);
+        JS_FreeValue(ctx, global);
+        return -1;
+    }
+
+    /* Build ctx object. */
+    JSValue ctxobj = JS_NewObject(ctx);
+
+    /* ctx.args = [...argv] */
+    JSValue args_arr = JS_NewArray(ctx);
+    for (int i = 0; i < argc; i++) {
+        JS_SetPropertyUint32(ctx, args_arr, (uint32_t)i,
+                             JS_NewString(ctx, argv[i] ? argv[i] : ""));
+    }
+    JS_SetPropertyStr(ctx, ctxobj, "args", args_arr);
+
+    /* ctx.env = { NAME: value, ... } from env_allowlist */
+    JSValue env_obj = JS_NewObject(ctx);
+    if (env_allowlist) {
+        for (int i = 0; env_allowlist[i]; i++) {
+            const char *name = env_allowlist[i];
+            const char *val = getenv(name);
+            if (val)
+                JS_SetPropertyStr(ctx, env_obj, name, JS_NewString(ctx, val));
+        }
+    }
+    JS_SetPropertyStr(ctx, ctxobj, "env", env_obj);
+
+    /* ctx.stdin / stdout / stderr */
+    struct { const char *prop; int magic; int writer; } streams[] = {
+        { "stdin",  0, 0 },
+        { "stdout", 1, 1 },
+        { "stderr", 2, 1 },
+    };
+    for (size_t i = 0; i < sizeof(streams)/sizeof(streams[0]); i++) {
+        JSValue s = JS_NewObject(ctx);
+        if (streams[i].writer) {
+            JS_SetPropertyStr(ctx, s, "write",
+                JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_cli_write,
+                                     "write", 1, JS_CFUNC_generic_magic,
+                                     streams[i].magic));
+            JS_SetPropertyStr(ctx, s, "flush",
+                JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_cli_flush,
+                                     "flush", 0, JS_CFUNC_generic_magic,
+                                     streams[i].magic));
+        } else {
+            JS_SetPropertyStr(ctx, s, "read",
+                JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_cli_read,
+                                     "read", 1, JS_CFUNC_generic_magic,
+                                     streams[i].magic));
+            JS_SetPropertyStr(ctx, s, "close",
+                JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_cli_close,
+                                     "close", 0, JS_CFUNC_generic_magic,
+                                     streams[i].magic));
+        }
+        JS_SetPropertyStr(ctx, ctxobj, streams[i].prop, s);
+    }
+
+    /* Call main(ctx). */
+    JSValue call_argv[1] = { ctxobj };
+    JSValue ret = JS_Call(ctx, main_fn, JS_UNDEFINED, 1, call_argv);
+    JS_FreeValue(ctx, ctxobj);
+
+    if (JS_IsException(ret)) {
+        hl_js_dump_error(js);
+        JS_FreeValue(ctx, ret);
+        JS_FreeValue(ctx, main_fn);
+        JS_FreeValue(ctx, global);
+        return -1;
+    }
+
+    /* Drain pending microtasks. If main returned a synchronously-
+     * resolvable Promise (Promise.resolve(0), Promise chains without
+     * thread-pool waits), this is enough. Async work tied to the
+     * thread pool / Keel event loop is Phase 1.5+. */
+    hl_js_run_jobs(js);
+
+    /* If main returned a Promise, unwrap it. Pending means no event
+     * loop is driving it (Phase 1 limitation — full async-in-main needs
+     * Keel event-loop integration, deferred to Phase 1.5). */
+    JSValue value = ret;
+    int owned_value = 0;
+    JSPromiseStateEnum st = JS_PromiseState(ctx, ret);
+    if (st == JS_PROMISE_PENDING) {
+        fprintf(stderr, "[hull:main] returned a pending Promise — "
+                "async work in app.main is not supported yet "
+                "(Phase 1.5)\n");
+        JS_FreeValue(ctx, ret);
+        JS_FreeValue(ctx, main_fn);
+        JS_FreeValue(ctx, global);
+        return -1;
+    }
+    if (st == JS_PROMISE_FULFILLED || st == JS_PROMISE_REJECTED) {
+        value = JS_PromiseResult(ctx, ret);
+        owned_value = 1;
+        if (st == JS_PROMISE_REJECTED) {
+            const char *msg = JS_ToCString(ctx, value);
+            fprintf(stderr, "[hull:main] promise rejected: %s\n",
+                    msg ? msg : "(unknown)");
+            if (msg) JS_FreeCString(ctx, msg);
+            JS_FreeValue(ctx, value);
+            JS_FreeValue(ctx, ret);
+            JS_FreeValue(ctx, main_fn);
+            JS_FreeValue(ctx, global);
+            return -1;
+        }
+    }
+
+    int rc = coerce_js_exit_code(ctx, value);
+
+    if (owned_value) JS_FreeValue(ctx, value);
+    JS_FreeValue(ctx, ret);
+    JS_FreeValue(ctx, main_fn);
+    JS_FreeValue(ctx, global);
+
+    *exit_code_out = rc;
+    return 0;
+}
+
 const HlRuntimeVtable hl_js_vtable = {
     .init                 = vt_js_init,
     .load_app             = vt_js_load_app,
@@ -1183,4 +1491,6 @@ const HlRuntimeVtable hl_js_vtable = {
     .destroy              = vt_js_destroy,
     .name                 = "QuickJS",
     .test_file_pattern    = "test_*.js",
+    .has_main             = vt_js_has_main,
+    .run_main             = vt_js_run_main,
 };

@@ -16,9 +16,49 @@
  *   registry["__hull_route_defs"] = { [1]={method,pattern,handler_id}, ... }
  * ════════════════════════════════════════════════════════════════════ */
 
+/* Returns 1 if app.main has been registered. */
+static int lua_app_main_registered(lua_State *L)
+{
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_main");
+    int has = !lua_isnil(L, -1);
+    lua_pop(L, 1);
+    return has;
+}
+
+/* Raise an error if app.main was already registered; CLI and server
+ * modes are mutually exclusive. */
+static int lua_app_reject_if_main(lua_State *L, const char *call)
+{
+    if (lua_app_main_registered(L))
+        return luaL_error(L,
+            "%s cannot be called when app.main is registered — "
+            "choose CLI mode (app.main) or server mode (app.get/etc), not both",
+            call);
+    return 0;
+}
+
+/* Returns 1 if any route/middleware/timer/ws/sse handler has been
+ * registered. Used to guard app.main() against late registration. */
+static int lua_app_dispatch_registered(lua_State *L)
+{
+    static const char *keys[] = {
+        "__hull_route_defs", "__hull_middleware", "__hull_post_middleware",
+        "__hull_timer_defs", "__hull_ws_defs", "__hull_sse_defs",
+        NULL
+    };
+    for (int i = 0; keys[i]; i++) {
+        lua_getfield(L, LUA_REGISTRYINDEX, keys[i]);
+        int present = lua_istable(L, -1) && luaL_len(L, -1) > 0;
+        lua_pop(L, 1);
+        if (present) return 1;
+    }
+    return 0;
+}
+
 /* Helper: register a route with given method string */
 static int lua_app_route(lua_State *L, const char *method)
 {
+    lua_app_reject_if_main(L, "app.get/post/put/delete/patch/options");
     const char *pattern = luaL_checkstring(L, 1);
     luaL_checktype(L, 2, LUA_TFUNCTION);
 
@@ -75,6 +115,7 @@ static int lua_app_options(lua_State *L) { return lua_app_route(L, "OPTIONS"); }
 /* app.use(method, pattern, handler) — middleware registration */
 static int lua_app_use(lua_State *L)
 {
+    lua_app_reject_if_main(L, "app.use");
     const char *method = luaL_checkstring(L, 1);
     const char *pattern = luaL_checkstring(L, 2);
     luaL_checktype(L, 3, LUA_TFUNCTION);
@@ -120,6 +161,7 @@ static int lua_app_use(lua_State *L)
 /* app.use_post(method, pattern, fn) — register post-body middleware */
 static int lua_app_use_post(lua_State *L)
 {
+    lua_app_reject_if_main(L, "app.use_post");
     const char *method = luaL_checkstring(L, 1);
     const char *pattern = luaL_checkstring(L, 2);
     luaL_checktype(L, 3, LUA_TFUNCTION);
@@ -165,6 +207,7 @@ static int lua_app_use_post(lua_State *L)
 /* app.every(interval_ms, handler) — repeating timer */
 static int lua_app_every(lua_State *L)
 {
+    lua_app_reject_if_main(L, "app.every");
     lua_Integer interval_ms = luaL_checkinteger(L, 1);
     luaL_checktype(L, 2, LUA_TFUNCTION);
 
@@ -212,6 +255,7 @@ static int lua_app_every(lua_State *L)
 /* app.daily(time_str, handler [, opts]) — daily timer at HH:MM */
 static int lua_app_daily(lua_State *L)
 {
+    lua_app_reject_if_main(L, "app.daily");
     const char *time_str = luaL_checkstring(L, 1);
     luaL_checktype(L, 2, LUA_TFUNCTION);
 
@@ -302,6 +346,7 @@ static lua_Integer store_handler(lua_State *L, int func_idx,
 
 static int lua_app_ws(lua_State *L)
 {
+    lua_app_reject_if_main(L, "app.ws");
     const char *path = luaL_checkstring(L, 1);
     luaL_checktype(L, 2, LUA_TTABLE);
 
@@ -354,6 +399,7 @@ static int lua_app_ws(lua_State *L)
 
 static int lua_app_sse(lua_State *L)
 {
+    lua_app_reject_if_main(L, "app.sse");
     const char *path = luaL_checkstring(L, 1);
     luaL_checktype(L, 2, LUA_TFUNCTION);
 
@@ -406,6 +452,30 @@ static int lua_app_get_manifest(lua_State *L)
     return 1;
 }
 
+/* app.main(fn) — register CLI-mode entry point.
+ *
+ * Mutually exclusive with route / middleware / timer / ws / sse
+ * registration: pick CLI mode or server mode, not both. The function
+ * is stored under registry["__hull_main"] and invoked once by the
+ * dispatcher in main.c after manifest extraction + sandbox + migrations. */
+static int lua_app_main(lua_State *L)
+{
+    luaL_checktype(L, 1, LUA_TFUNCTION);
+
+    if (lua_app_main_registered(L))
+        return luaL_error(L, "app.main() can only be called once");
+
+    if (lua_app_dispatch_registered(L))
+        return luaL_error(L,
+            "app.main() cannot be called after registering routes, "
+            "middleware, timers, or WebSocket/SSE handlers — "
+            "choose CLI mode (app.main) or server mode (app.get/etc), not both");
+
+    lua_pushvalue(L, 1);
+    lua_setfield(L, LUA_REGISTRYINDEX, "__hull_main");
+    return 0;
+}
+
 static const luaL_Reg app_funcs[] = {
     {"get",          lua_app_get},
     {"post",         lua_app_post},
@@ -420,6 +490,7 @@ static const luaL_Reg app_funcs[] = {
     {"sse",          lua_app_sse},
     {"every",        lua_app_every},
     {"daily",        lua_app_daily},
+    {"main",         lua_app_main},
     {"manifest",     lua_app_manifest},
     {"get_manifest", lua_app_get_manifest},
     {NULL, NULL}

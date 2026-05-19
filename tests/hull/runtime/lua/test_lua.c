@@ -360,6 +360,180 @@ UTEST(lua_runtime, hull_app_module)
     cleanup_lua();
 }
 
+/* ── app.main (CLI mode) tests ─────────────────────────────────────── */
+
+UTEST(lua_runtime, app_main_registers)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "app.main(function(ctx) return 0 end)\n");
+    ASSERT_EQ(rc, LUA_OK);
+
+    /* __hull_main should be set to a function */
+    lua_getfield(lua_rt.L, LUA_REGISTRYINDEX, "__hull_main");
+    ASSERT_TRUE(lua_isfunction(lua_rt.L, -1));
+    lua_pop(lua_rt.L, 1);
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, app_main_twice_rejected)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "app.main(function() return 0 end)\n"
+        "app.main(function() return 1 end)\n");
+    ASSERT_NE(rc, LUA_OK);
+    const char *err = lua_tostring(lua_rt.L, -1);
+    ASSERT_NE(err, NULL);
+    ASSERT_TRUE(strstr(err, "only be called once") != NULL);
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, app_main_blocks_routes_after)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "app.main(function() return 0 end)\n"
+        "app.get('/x', function() end)\n");
+    ASSERT_NE(rc, LUA_OK);
+    const char *err = lua_tostring(lua_rt.L, -1);
+    ASSERT_NE(err, NULL);
+    ASSERT_TRUE(strstr(err, "app.main is registered") != NULL);
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, routes_block_app_main_after)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "app.get('/x', function() end)\n"
+        "app.main(function() return 0 end)\n");
+    ASSERT_NE(rc, LUA_OK);
+    const char *err = lua_tostring(lua_rt.L, -1);
+    ASSERT_NE(err, NULL);
+    ASSERT_TRUE(strstr(err, "registering routes") != NULL);
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, app_main_via_vtable_runs)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "app.main(function(ctx)\n"
+        "  ctx.stderr:write('hi from main\\n')\n"
+        "  return 7\n"
+        "end)\n");
+    ASSERT_EQ(rc, LUA_OK);
+
+    ASSERT_TRUE(hl_lua_vtable.has_main(&lua_rt.base));
+    int exit_code = 99;
+    int run_rc = hl_lua_vtable.run_main(&lua_rt.base, 0, NULL, NULL, &exit_code);
+    ASSERT_EQ(run_rc, 0);
+    ASSERT_EQ(exit_code, 7);
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, app_main_nil_return_yields_zero)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "app.main(function() return end)\n");
+    ASSERT_EQ(rc, LUA_OK);
+
+    int exit_code = 99;
+    int run_rc = hl_lua_vtable.run_main(&lua_rt.base, 0, NULL, NULL, &exit_code);
+    ASSERT_EQ(run_rc, 0);
+    ASSERT_EQ(exit_code, 0);
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, app_main_string_return_is_error)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "app.main(function() return 'oops' end)\n");
+    ASSERT_EQ(rc, LUA_OK);
+
+    int exit_code = 0;
+    int run_rc = hl_lua_vtable.run_main(&lua_rt.base, 0, NULL, NULL, &exit_code);
+    ASSERT_EQ(run_rc, 0);
+    ASSERT_EQ(exit_code, 1);
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, app_main_clamps_large_return)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "app.main(function() return 300 end)\n");
+    ASSERT_EQ(rc, LUA_OK);
+
+    int exit_code = 0;
+    int run_rc = hl_lua_vtable.run_main(&lua_rt.base, 0, NULL, NULL, &exit_code);
+    ASSERT_EQ(run_rc, 0);
+    ASSERT_EQ(exit_code, 44);   /* 300 & 0xff */
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, app_main_thrown_error_returns_minus_one)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "app.main(function() error('boom') end)\n");
+    ASSERT_EQ(rc, LUA_OK);
+
+    int exit_code = 0;
+    int run_rc = hl_lua_vtable.run_main(&lua_rt.base, 0, NULL, NULL, &exit_code);
+    ASSERT_EQ(run_rc, -1);
+    ASSERT_EQ(exit_code, 1);    /* preset to 1 at entry */
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, has_main_false_when_not_registered)
+{
+    init_lua();
+    ASSERT_FALSE(hl_lua_vtable.has_main(&lua_rt.base));
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, app_main_ctx_args_and_env)
+{
+    init_lua();
+    /* Register main that captures ctx.args and ctx.env into globals so
+     * the test can inspect them after run_main returns. */
+    int rc = luaL_dostring(lua_rt.L,
+        "_G.test_main_args = nil\n"
+        "_G.test_main_env_user = nil\n"
+        "app.main(function(ctx)\n"
+        "  _G.test_main_args = ctx.args\n"
+        "  _G.test_main_env_user = ctx.env.TEST_VAR\n"
+        "  return 0\n"
+        "end)\n");
+    ASSERT_EQ(rc, LUA_OK);
+
+    setenv("TEST_VAR", "test_value", 1);
+    char *argv_in[] = { "alpha", "beta", "gamma" };
+    const char *env_allow[] = { "TEST_VAR", NULL };
+    int exit_code = 99;
+    int run_rc = hl_lua_vtable.run_main(&lua_rt.base, 3, argv_in,
+                                         env_allow, &exit_code);
+    ASSERT_EQ(run_rc, 0);
+    ASSERT_EQ(exit_code, 0);
+
+    lua_getglobal(lua_rt.L, "test_main_args");
+    ASSERT_TRUE(lua_istable(lua_rt.L, -1));
+    ASSERT_EQ((int)luaL_len(lua_rt.L, -1), 3);
+    lua_rawgeti(lua_rt.L, -1, 2);
+    ASSERT_STREQ(lua_tostring(lua_rt.L, -1), "beta");
+    lua_pop(lua_rt.L, 2);
+
+    lua_getglobal(lua_rt.L, "test_main_env_user");
+    ASSERT_STREQ(lua_tostring(lua_rt.L, -1), "test_value");
+    lua_pop(lua_rt.L, 1);
+    unsetenv("TEST_VAR");
+    cleanup_lua();
+}
+
 /* ── GC test ────────────────────────────────────────────────────────── */
 
 UTEST(lua_runtime, gc_runs)

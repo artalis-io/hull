@@ -101,6 +101,26 @@ typedef struct HlRuntimeVtable {
      * Used by the shared test runner — avoids switching on rt->vt->name
      * to pick the file pattern. */
     const char *test_file_pattern;
+
+    /* Returns 1 if the loaded app registered app.main(fn), 0 otherwise.
+     * Returns 0 if the runtime hasn't been told to look (no app loaded).
+     * Used by main.c to choose between CLI and server dispatch. */
+    int   (*has_main)(HlRuntime *rt);
+
+    /* Run the registered app.main(fn) and return its exit code via
+     * `exit_code_out` (clamped to 0..255).
+     *
+     *   argv/argc       : positional args passed to main as `ctx.args`
+     *   env_allowlist   : NULL-terminated array of env-var names allowed
+     *                     by the manifest; only these populate `ctx.env`.
+     *                     NULL or empty → `ctx.env` is an empty table.
+     *
+     * Returns 0 on success, -1 if main was not registered, or if the
+     * function threw / failed to coerce a return value. On failure,
+     * exit_code_out is set to 1. */
+    int   (*run_main)(HlRuntime *rt, int argc, char **argv,
+                      const char *const *env_allowlist,
+                      int *exit_code_out);
 } HlRuntimeVtable;
 
 struct HlRuntime {

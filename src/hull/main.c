@@ -602,6 +602,10 @@ typedef struct {
     int                  server_init;  /* kl_server_init succeeded */
     int                  app_loaded;   /* rt->vt->load_app() succeeded */
     int                  manifest_extracted; /* extract_manifest called */
+
+    /* CLI mode (app.main) state */
+    int                  cli_mode;    /* 1 = run app.main instead of starting server */
+    int                  cli_exit_code; /* main's return value (0..255) */
 } HlServerState;
 
 /* ── Phase functions ─────────────────────────────────────────────────
@@ -1308,6 +1312,43 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
     }
 }
 
+/* Build a NULL-terminated env_allowlist from the manifest. The returned
+ * array points into manifest storage (no allocation), so it's valid only
+ * for the lifetime of the manifest. Caller frees the outer array. */
+static const char **hl_build_env_allowlist(const HlManifest *m)
+{
+    if (!m || m->env_count <= 0) return NULL;
+    const char **arr = calloc((size_t)m->env_count + 1, sizeof(char *));
+    if (!arr) return NULL;
+    for (int i = 0; i < m->env_count; i++)
+        arr[i] = m->env[i];
+    arr[m->env_count] = NULL;
+    return arr;
+}
+
+/* CLI-mode dispatch: instead of starting Keel, invoke app.main(ctx)
+ * once and exit with its return code. Called after wire_caps +
+ * apply_sandbox when the runtime reports has_main(). For Phase 1, app
+ * args are empty (no positional pass-through wired in yet — covered in
+ * Phase 2 by `hull run`). */
+static int hl_serve_run_main(HlServerState *s)
+{
+    HlRuntime *rt = hl_app_context_runtime(s->app);
+    const char **env_allow = hl_build_env_allowlist(&s->manifest);
+    log_info("[hull:c] running app.main (%s runtime)", rt->vt->name);
+
+    int rc = 1;
+    int run = rt->vt->run_main(rt, 0, NULL, env_allow, &rc);
+    free((void *)env_allow);
+
+    s->cli_exit_code = rc;
+    if (run != 0)
+        return -1;
+
+    log_info("[hull:c] app.main exited with code %d", rc);
+    return 0;
+}
+
 static int hl_serve_wire_and_start(HlServerState *s)
 {
     if (hl_serve_wire_caps(s) != 0) {
@@ -1318,6 +1359,17 @@ static int hl_serve_wire_and_start(HlServerState *s)
         hl_serve_undo_caps(s);
         return -1;
     }
+
+    /* Branch on dispatch mode. If the loaded app registered app.main,
+     * skip route wiring + Keel event loop and run main once. */
+    HlRuntime *rt = hl_app_context_runtime(s->app);
+    if (rt->vt->has_main && rt->vt->has_main(rt)) {
+        s->cli_mode = 1;
+        int rc = hl_serve_run_main(s);
+        hl_serve_teardown_after_serve(s);
+        return rc;
+    }
+
     if (hl_serve_wire_routes(s) != 0) {
         hl_serve_undo_caps(s);
         return -1;
@@ -1407,7 +1459,16 @@ static int hull_serve(int argc, char **argv)
     if (hl_serve_load_app(&s) != 0) { hl_serve_cleanup(&s); return 1; }
 
     /* Phase 11: manifest, caps, phase-2 sandbox, routes, event loop */
-    int ret = hl_serve_wire_and_start(&s) == 0 ? 0 : 1;
+    int wire_rc = hl_serve_wire_and_start(&s);
+    int ret;
+    if (s.cli_mode) {
+        /* CLI mode: app.main's return value is the process exit code,
+         * regardless of whether wire_and_start succeeded (a non-zero
+         * wire_rc with cli_mode=1 already set exit_code to a sane value). */
+        ret = s.cli_exit_code;
+    } else {
+        ret = (wire_rc == 0) ? 0 : 1;
+    }
 
     /* Final cleanup (handles any resources not freed by wire_and_start) */
     hl_serve_cleanup(&s);

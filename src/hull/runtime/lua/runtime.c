@@ -535,6 +535,234 @@ static void vt_lua_destroy(HlRuntime *rt)
     hl_lua_free((HlLua *)rt);
 }
 
+/* ── CLI mode (app.main) ───────────────────────────────────────────────
+ *
+ * Methods that get pushed onto ctx.stdin / ctx.stdout / ctx.stderr.
+ * They capture the stream identifier (0/1/2) as an upvalue and call
+ * the corresponding libc FILE*. Methods accept `self` as the first
+ * argument (so callers can use `ctx.stdout:write(s)`) but ignore it.
+ */
+
+static FILE *cli_stream(lua_State *L)
+{
+    int s = (int)lua_tointeger(L, lua_upvalueindex(1));
+    switch (s) {
+    case 0: return stdin;
+    case 1: return stdout;
+    case 2: return stderr;
+    default: return NULL;
+    }
+}
+
+static int cli_stdin_read(lua_State *L)
+{
+    FILE *f = cli_stream(L);
+    if (!f) return luaL_error(L, "invalid stream");
+
+    /* Accept "*l" (line, no newline), "*a" (all), or a positive integer
+     * count of bytes. Default (no arg) → "*l". */
+    const char *fmt = "*l";
+    lua_Integer nbytes = 0;
+    int want_bytes = 0;
+
+    int top = lua_gettop(L);
+    if (top >= 2 && !lua_isnil(L, 2)) {
+        if (lua_isnumber(L, 2)) {
+            nbytes = lua_tointeger(L, 2);
+            if (nbytes < 0) return luaL_error(L, "read: negative byte count");
+            want_bytes = 1;
+        } else {
+            fmt = luaL_checkstring(L, 2);
+        }
+    }
+
+    if (want_bytes) {
+        if (nbytes == 0) { lua_pushliteral(L, ""); return 1; }
+        luaL_Buffer b;
+        char *buf = luaL_buffinitsize(L, &b, (size_t)nbytes);
+        size_t n = fread(buf, 1, (size_t)nbytes, f);
+        luaL_pushresultsize(&b, n);
+        if (n == 0 && feof(f)) {
+            lua_pop(L, 1);
+            lua_pushnil(L);
+        }
+        return 1;
+    }
+
+    if (strcmp(fmt, "*a") == 0 || strcmp(fmt, "a") == 0) {
+        luaL_Buffer b;
+        luaL_buffinit(L, &b);
+        char chunk[4096];
+        size_t n;
+        while ((n = fread(chunk, 1, sizeof(chunk), f)) > 0)
+            luaL_addlstring(&b, chunk, n);
+        luaL_pushresult(&b);
+        return 1;
+    }
+
+    if (strcmp(fmt, "*l") == 0 || strcmp(fmt, "l") == 0) {
+        luaL_Buffer b;
+        luaL_buffinit(L, &b);
+        int got = 0;
+        for (;;) {
+            int c = fgetc(f);
+            if (c == EOF) break;
+            got = 1;
+            if (c == '\n') break;
+            char ch = (char)c;
+            luaL_addlstring(&b, &ch, 1);
+        }
+        luaL_pushresult(&b);
+        if (!got) { lua_pop(L, 1); lua_pushnil(L); }
+        return 1;
+    }
+
+    return luaL_error(L, "read: unsupported format '%s' (use '*l', '*a', or n bytes)", fmt);
+}
+
+static int cli_writer_write(lua_State *L)
+{
+    FILE *f = cli_stream(L);
+    if (!f) return luaL_error(L, "invalid stream");
+    int top = lua_gettop(L);
+    for (int i = 2; i <= top; i++) {  /* arg 1 is self */
+        size_t n = 0;
+        const char *s = luaL_checklstring(L, i, &n);
+        if (n && fwrite(s, 1, n, f) != n)
+            return luaL_error(L, "write failed");
+    }
+    return 0;
+}
+
+static int cli_writer_flush(lua_State *L)
+{
+    FILE *f = cli_stream(L);
+    if (f) fflush(f);
+    return 0;
+}
+
+static int cli_stdin_close(lua_State *L)
+{
+    /* No-op: closing stdin should not propagate to other readers. */
+    (void)L;
+    return 0;
+}
+
+/* Build a stream table with the given methods, capturing `stream_id`
+ * as an upvalue. Leaves the table on top of the Lua stack. */
+static void cli_push_stream(lua_State *L, int stream_id,
+                             const luaL_Reg *methods)
+{
+    lua_newtable(L);
+    for (const luaL_Reg *m = methods; m->name; m++) {
+        lua_pushinteger(L, stream_id);
+        lua_pushcclosure(L, m->func, 1);
+        lua_setfield(L, -2, m->name);
+    }
+}
+
+static const luaL_Reg cli_stdin_methods[]  = {
+    { "read",  cli_stdin_read  },
+    { "close", cli_stdin_close },
+    { NULL, NULL }
+};
+static const luaL_Reg cli_writer_methods[] = {
+    { "write", cli_writer_write },
+    { "flush", cli_writer_flush },
+    { NULL, NULL }
+};
+
+static int vt_lua_has_main(HlRuntime *rt)
+{
+    if (!rt) return 0;
+    HlLua *lua = (HlLua *)rt;
+    if (!lua->L) return 0;
+    lua_getfield(lua->L, LUA_REGISTRYINDEX, "__hull_main");
+    int has = !lua_isnil(lua->L, -1);
+    lua_pop(lua->L, 1);
+    return has;
+}
+
+static int vt_lua_run_main(HlRuntime *rt, int argc, char **argv,
+                            const char *const *env_allowlist,
+                            int *exit_code_out)
+{
+    if (exit_code_out) *exit_code_out = 1;
+    if (!rt || !exit_code_out) return -1;
+    HlLua *lua = (HlLua *)rt;
+    lua_State *L = lua->L;
+
+    /* Push the registered main function. */
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_main");
+    if (!lua_isfunction(L, -1)) {
+        lua_pop(L, 1);
+        return -1;
+    }
+
+    /* Build ctx table. */
+    lua_newtable(L);  /* ctx */
+
+    /* ctx.args = { argv[0], argv[1], ... } */
+    lua_newtable(L);
+    for (int i = 0; i < argc; i++) {
+        lua_pushstring(L, argv[i] ? argv[i] : "");
+        lua_rawseti(L, -2, i + 1);
+    }
+    lua_setfield(L, -2, "args");
+
+    /* ctx.env = { NAME = value, ... } limited to env_allowlist. */
+    lua_newtable(L);
+    if (env_allowlist) {
+        for (int i = 0; env_allowlist[i]; i++) {
+            const char *name = env_allowlist[i];
+            const char *val = getenv(name);
+            if (val) {
+                lua_pushstring(L, val);
+                lua_setfield(L, -2, name);
+            }
+        }
+    }
+    lua_setfield(L, -2, "env");
+
+    /* ctx.stdin / stdout / stderr */
+    cli_push_stream(L, 0, cli_stdin_methods);   lua_setfield(L, -2, "stdin");
+    cli_push_stream(L, 1, cli_writer_methods);  lua_setfield(L, -2, "stdout");
+    cli_push_stream(L, 2, cli_writer_methods);  lua_setfield(L, -2, "stderr");
+
+    /* Call main(ctx). Expect 1 arg, 1 return. */
+    if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
+        const char *err = lua_tostring(L, -1);
+        fprintf(stderr, "[hull:main] error: %s\n", err ? err : "(unknown)");
+        lua_pop(L, 1);
+        return -1;
+    }
+
+    /* Coerce return value to exit code. */
+    int rc = 0;
+    int t = lua_type(L, -1);
+    if (t == LUA_TNIL) {
+        rc = 0;
+    } else if (t == LUA_TNUMBER) {
+        if (lua_isinteger(L, -1)) {
+            lua_Integer i = lua_tointeger(L, -1);
+            if (i < 0) i = 0;
+            if (i > 255) i = i & 0xff;
+            rc = (int)i;
+        } else {
+            rc = (int)lua_tonumber(L, -1);
+        }
+    } else {
+        const char *s = lua_tostring(L, -1);
+        fprintf(stderr, "[hull:main] non-numeric return: %s\n",
+                s ? s : "(unprintable)");
+        rc = 1;
+    }
+    lua_pop(L, 1);
+
+    *exit_code_out = rc;
+    return 0;
+}
+
 const HlRuntimeVtable hl_lua_vtable = {
     .init                = vt_lua_init,
     .load_app            = vt_lua_load_app,
@@ -547,4 +775,6 @@ const HlRuntimeVtable hl_lua_vtable = {
     .destroy             = vt_lua_destroy,
     .name                = "Lua",
     .test_file_pattern   = "test_*.lua",
+    .has_main            = vt_lua_has_main,
+    .run_main            = vt_lua_run_main,
 };

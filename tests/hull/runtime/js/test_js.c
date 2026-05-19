@@ -385,6 +385,184 @@ UTEST(js_runtime, hull_app_module)
     cleanup_js();
 }
 
+/* ── app.main (CLI mode) tests ─────────────────────────────────────── */
+
+UTEST(js_runtime, app_main_registers)
+{
+    init_js();
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.main((ctx) => { return 0; });\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    int has = eval_int("typeof globalThis.__hull_main === 'function' ? 1 : 0");
+    ASSERT_EQ(has, 1);
+    ASSERT_TRUE(hl_js_vtable.has_main(&js.base));
+    cleanup_js();
+}
+
+UTEST(js_runtime, app_main_blocks_route_after)
+{
+    init_js();
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "let caught = null;\n"
+        "app.main((ctx) => { return 0; });\n"
+        "try { app.get('/x', () => {}); } catch (e) { caught = e.message; }\n"
+        "globalThis.__test_caught = caught;\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    char *msg = eval_str("globalThis.__test_caught");
+    ASSERT_NE(msg, NULL);
+    ASSERT_TRUE(strstr(msg, "app.main is registered") != NULL);
+    free(msg);
+    cleanup_js();
+}
+
+UTEST(js_runtime, route_blocks_app_main_after)
+{
+    init_js();
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "let caught = null;\n"
+        "app.get('/x', () => {});\n"
+        "try { app.main(() => 0); } catch (e) { caught = e.message; }\n"
+        "globalThis.__test_caught = caught;\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    char *msg = eval_str("globalThis.__test_caught");
+    ASSERT_NE(msg, NULL);
+    ASSERT_TRUE(strstr(msg, "registering routes") != NULL);
+    free(msg);
+    cleanup_js();
+}
+
+UTEST(js_runtime, app_main_via_vtable_runs)
+{
+    init_js();
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.main((ctx) => { return 5; });\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    int exit_code = 99;
+    int run_rc = hl_js_vtable.run_main(&js.base, 0, NULL, NULL, &exit_code);
+    ASSERT_EQ(run_rc, 0);
+    ASSERT_EQ(exit_code, 5);
+    cleanup_js();
+}
+
+UTEST(js_runtime, app_main_undefined_return_yields_zero)
+{
+    init_js();
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.main(() => {});\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    int exit_code = 99;
+    int run_rc = hl_js_vtable.run_main(&js.base, 0, NULL, NULL, &exit_code);
+    ASSERT_EQ(run_rc, 0);
+    ASSERT_EQ(exit_code, 0);
+    cleanup_js();
+}
+
+UTEST(js_runtime, app_main_promise_resolved_unwraps)
+{
+    init_js();
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.main(() => Promise.resolve(11));\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    int exit_code = 99;
+    int run_rc = hl_js_vtable.run_main(&js.base, 0, NULL, NULL, &exit_code);
+    ASSERT_EQ(run_rc, 0);
+    ASSERT_EQ(exit_code, 11);
+    cleanup_js();
+}
+
+UTEST(js_runtime, app_main_clamps_large_return)
+{
+    init_js();
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.main(() => 300);\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    int exit_code = 0;
+    int run_rc = hl_js_vtable.run_main(&js.base, 0, NULL, NULL, &exit_code);
+    ASSERT_EQ(run_rc, 0);
+    ASSERT_EQ(exit_code, 44);  /* 300 & 0xff */
+    cleanup_js();
+}
+
+UTEST(js_runtime, has_main_false_when_not_registered)
+{
+    init_js();
+    ASSERT_FALSE(hl_js_vtable.has_main(&js.base));
+    cleanup_js();
+}
+
+UTEST(js_runtime, app_main_ctx_args_and_env)
+{
+    init_js();
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.main((ctx) => {\n"
+        "  globalThis.__test_args = ctx.args;\n"
+        "  globalThis.__test_env = ctx.env.TEST_VAR_JS;\n"
+        "  return 0;\n"
+        "});\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    setenv("TEST_VAR_JS", "jvalue", 1);
+    char *argv_in[] = { "one", "two" };
+    const char *env_allow[] = { "TEST_VAR_JS", NULL };
+    int exit_code = 99;
+    int run_rc = hl_js_vtable.run_main(&js.base, 2, argv_in, env_allow,
+                                        &exit_code);
+    ASSERT_EQ(run_rc, 0);
+    ASSERT_EQ(exit_code, 0);
+
+    int len = eval_int("globalThis.__test_args.length");
+    ASSERT_EQ(len, 2);
+    char *first = eval_str("globalThis.__test_args[0]");
+    ASSERT_STREQ(first, "one");
+    free(first);
+
+    char *envv = eval_str("globalThis.__test_env");
+    ASSERT_STREQ(envv, "jvalue");
+    free(envv);
+    unsetenv("TEST_VAR_JS");
+    cleanup_js();
+}
+
 /* ── JSON module tests ───────────────────────────────────────────────── */
 
 UTEST(js_runtime, hull_json_encode)
