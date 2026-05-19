@@ -125,6 +125,9 @@ static uint32_t build_provided_caps(void)
 #ifdef HL_ENABLE_GPU
     caps |= HL_MOD_CAP_GPU;
 #endif
+#ifdef HL_ENABLE_HTTP
+    caps |= HL_MOD_CAP_HTTP;
+#endif
     return caps;
 }
 
@@ -138,6 +141,7 @@ static const char *cap_label(uint32_t cap)
     case HL_MOD_CAP_DB:    return "HL_ENABLE_DB (build-time)";
     case HL_MOD_CAP_WASM:  return "HL_ENABLE_WASM (build-time)";
     case HL_MOD_CAP_GPU:   return "HL_ENABLE_GPU (build-time)";
+    case HL_MOD_CAP_HTTP:  return "HL_ENABLE_HTTP (build-time)";
     default:               return "unknown";
     }
 }
@@ -205,8 +209,10 @@ int hl_module_resolver_resolve(const HlManifest *manifest,
         /* Required capabilities — check build first (compile-time
          * subsystems), then manifest sections. */
         uint32_t need = spec->required_caps;
-        uint32_t need_build    = need & (HL_MOD_CAP_DB | HL_MOD_CAP_WASM | HL_MOD_CAP_GPU);
-        uint32_t need_manifest = need & ~(HL_MOD_CAP_DB | HL_MOD_CAP_WASM | HL_MOD_CAP_GPU);
+        const uint32_t build_cap_mask = HL_MOD_CAP_DB | HL_MOD_CAP_WASM
+                                        | HL_MOD_CAP_GPU | HL_MOD_CAP_HTTP;
+        uint32_t need_build    = need & build_cap_mask;
+        uint32_t need_manifest = need & ~build_cap_mask;
 
         for (uint32_t bit = 1; bit; bit <<= 1) {
             if (!(need_build & bit)) continue;

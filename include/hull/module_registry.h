@@ -53,6 +53,7 @@
 #define HL_MOD_CAP_DB      (1u << 3)  /* requires HL_ENABLE_DB at build */
 #define HL_MOD_CAP_WASM    (1u << 4)  /* requires HL_ENABLE_WASM + compute */
 #define HL_MOD_CAP_GPU     (1u << 5)  /* requires HL_ENABLE_GPU + gpu:true */
+#define HL_MOD_CAP_HTTP    (1u << 6)  /* requires HL_ENABLE_HTTP at build */
 
 /* ── Module spec ────────────────────────────────────────────────────── */
 

@@ -172,6 +172,26 @@ ifeq ($(HL_ENABLE_DB),1)
 CFLAGS += -DHL_ENABLE_DB
 endif
 
+# ── HTTP server / client (Keel) — config flag ──────────────────────
+# On by default. When disabled, Hull builds as a pure CLI / compute
+# runtime: drops Keel from the link, drops the HTTP capability layer
+# (cap/http, cap/ws, cap/body, cap/smtp, static), drops route /
+# middleware / WebSocket / SSE bindings in both runtimes, and removes
+# every middleware in the stdlib (cors, ratelimit, csrf, auth, session,
+# logger, transaction, idempotency, outbox, inbox, rbac, health, etag).
+# Apps must use app.main(fn) entry point and may not declare hull/http,
+# hull/ws, hull/server, hull/smtp, hull/email, or any middleware.
+#
+# Phase 3a: flag is wired through CFLAGS and the module resolver, but
+# conditional compilation of source files (Phase 3b) is not yet done —
+# setting HL_ENABLE_HTTP=0 today will NOT produce a valid build.
+
+HL_ENABLE_HTTP ?= 1
+
+ifeq ($(HL_ENABLE_HTTP),1)
+CFLAGS += -DHL_ENABLE_HTTP
+endif
+
 # ── SQLite (vendored amalgamation) ─────────────────────────────────
 
 SQLITE_DIR    := $(VENDDIR)/sqlite

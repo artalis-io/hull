@@ -407,6 +407,11 @@ static void print_human(CompilerInfo *ci, int nci,
 #else
         fprintf(stdout, "  HL_ENABLE_GPU   \xe2\x97\x8b  off — hull/gpu will fail to resolve\n");
 #endif
+#ifdef HL_ENABLE_HTTP
+        fprintf(stdout, "  HL_ENABLE_HTTP  \xe2\x9c\x93  hull/http, hull/ws, hull/server, hull/middleware/* importable\n");
+#else
+        fprintf(stdout, "  HL_ENABLE_HTTP  \xe2\x97\x8b  off — CLI / compute-only build; all middleware + http/ws/server modules will fail to resolve\n");
+#endif
         size_t total = 0;
         (void)hl_module_registry_all(&total);
         fprintf(stdout, "  registry        %zu first-party modules — run `hull modules available` for the full list\n",
@@ -536,6 +541,30 @@ static void print_json(CompilerInfo *ci, int nci,
     /* aot_ready: hull build will produce AOT outputs end-to-end. */
     int aot_ready = cmp->wasm_enabled && cmp->wamrc_path[0] != '\0';
     fprintf(stdout, ", \"aot_ready\": %s", aot_ready ? "true" : "false");
+    fprintf(stdout, "},\n");
+    /* Module-subsystem capability bits — what the build's resolver will
+     * admit. Mirrors the build_provided_caps() set in module_resolver.c. */
+    fprintf(stdout, "  \"subsystems\": {");
+#ifdef HL_ENABLE_DB
+    fprintf(stdout, "\"db\": true");
+#else
+    fprintf(stdout, "\"db\": false");
+#endif
+#ifdef HL_ENABLE_WASM
+    fprintf(stdout, ", \"wasm\": true");
+#else
+    fprintf(stdout, ", \"wasm\": false");
+#endif
+#ifdef HL_ENABLE_GPU
+    fprintf(stdout, ", \"gpu\": true");
+#else
+    fprintf(stdout, ", \"gpu\": false");
+#endif
+#ifdef HL_ENABLE_HTTP
+    fprintf(stdout, ", \"http\": true");
+#else
+    fprintf(stdout, ", \"http\": false");
+#endif
     fprintf(stdout, "},\n");
     fprintf(stdout, "  \"hull_build\": \"%s\"\n", ready_str);
     fprintf(stdout, "}\n");
