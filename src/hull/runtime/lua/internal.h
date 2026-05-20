@@ -25,7 +25,7 @@ typedef struct HlAsyncCtx     HlAsyncCtx;
 typedef struct HlAllocator    HlAllocator;
 typedef struct KlServer       KlServer;
 typedef struct KlAsyncOp      KlAsyncOp;
-typedef struct KlThreadPool   KlThreadPool;
+typedef struct HlAsyncBackendPool HlAsyncBackendPool;
 
 /* ── Internal op structs (moved from public lua.h, roadmap item J) ── */
 
@@ -71,7 +71,7 @@ typedef struct HlLuaWorkerDispatchOp {
 
 /* Submit a worker.dispatch operation to the thread pool.
  * Returns 0 on success, -1 on error. */
-int hl_lua_worker_dispatch_submit(KlThreadPool *pool,
+int hl_lua_worker_dispatch_submit(HlAsyncBackendPool *pool,
                                    HlLuaWorkerDispatchOp *op);
 
 /* Free resources owned by a dispatch op (bytecode, kvs, result). */

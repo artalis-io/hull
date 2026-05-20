@@ -20,8 +20,8 @@
 /* Forward declarations */
 typedef struct HlAsyncCtx HlAsyncCtx;
 typedef struct HlAllocator HlAllocator;
+typedef struct HlAsyncBackendPool HlAsyncBackendPool;
 typedef struct KlServer KlServer;
-typedef struct KlThreadPool KlThreadPool;
 typedef struct KlAsyncOp KlAsyncOp;
 
 /* ── Per-worker DB context (thread-local, lazy init) ───────────────── */
@@ -101,7 +101,7 @@ typedef struct HlWorkerDbOp {
 
 /* Submit a db.async operation to the thread pool.
  * Returns 0 on success, -1 on error (pool full or NULL). */
-int hl_worker_db_submit(KlThreadPool *pool, HlWorkerDbOp *op);
+int hl_worker_db_submit(HlAsyncBackendPool *pool, HlWorkerDbOp *op);
 
 /* Free all resources owned by an HlWorkerDbOp (sql, params, result). */
 void hl_worker_db_op_free(HlWorkerDbOp *op);

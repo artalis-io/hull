@@ -23,7 +23,6 @@ typedef struct KlRouter KlRouter;
 typedef struct KlServer KlServer;
 typedef struct KlConn KlConn;
 typedef struct KlAsyncOp KlAsyncOp;
-typedef struct KlThreadPool KlThreadPool;
 typedef struct SHArena SHArena;
 typedef struct HlToolUnveilCtx HlToolUnveilCtx;
 typedef struct HlAsyncCtx HlAsyncCtx;

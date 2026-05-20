@@ -13,6 +13,7 @@
 
 #include "hull/worker_gpu.h"
 #include "hull/async.h"
+#include "hull/async_backend.h"
 #include "log.h"
 #include "keel/thread_pool.h"
 #include "keel/async.h"
@@ -111,17 +112,12 @@ static void gpu_cancel_fn(void *ud)
 
 /* ── Public API ────────────────────────────────────────────────────── */
 
-int hl_worker_gpu_submit(KlThreadPool *pool, HlWorkerGpuOp *op)
+int hl_worker_gpu_submit(HlAsyncBackendPool *pool, HlWorkerGpuOp *op)
 {
     if (!pool || !op) return -1;
-
-    KlWorkItem item = {
-        .work_fn   = gpu_work_fn,
-        .done_fn   = gpu_done_fn,
-        .cancel_fn = gpu_cancel_fn,
-        .user_data = op,
-    };
-    return kl_thread_pool_submit(pool, &item);
+    const HlAsyncBackend *be = hl_async_backend();
+    return be->pool_submit(pool, gpu_work_fn, gpu_done_fn,
+                           gpu_cancel_fn, op);
 }
 
 void hl_worker_gpu_op_free(HlWorkerGpuOp *op)

@@ -12,6 +12,7 @@
 #include "hull/worker_db.h"
 #include "hull/cap/db.h"
 #include "hull/async.h"
+#include "hull/async_backend.h"
 #include "hull/alloc.h"
 
 #include <keel/thread_pool.h>
@@ -376,17 +377,11 @@ static void db_cancel_fn(void *ud)
 
 /* ── Submit / free ─────────────────────────────────────────────────── */
 
-int hl_worker_db_submit(KlThreadPool *pool, HlWorkerDbOp *op)
+int hl_worker_db_submit(HlAsyncBackendPool *pool, HlWorkerDbOp *op)
 {
     if (!pool || !op) return -1;
-
-    KlWorkItem item = {
-        .work_fn   = db_work_fn,
-        .done_fn   = db_done_fn,
-        .cancel_fn = db_cancel_fn,
-        .user_data = op,
-    };
-    return kl_thread_pool_submit(pool, &item);
+    const HlAsyncBackend *be = hl_async_backend();
+    return be->pool_submit(pool, db_work_fn, db_done_fn, db_cancel_fn, op);
 }
 
 /* Deep-copy helper for HlValue params */

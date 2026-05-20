@@ -33,7 +33,7 @@ typedef struct HlRuntimeBaseConfig {
     HlAllocator              *alloc;
     const HlVfs              *app_vfs;
     const HlVfs              *platform_vfs;
-    KlThreadPool             *thread_pool;
+    HlAsyncBackendPool       *thread_pool;
     const char               *db_path;
     struct KlCompressConfig  *compress;
     HlWasmCache              *wasm_cache;

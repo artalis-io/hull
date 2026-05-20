@@ -24,7 +24,7 @@ typedef struct HlAsyncCtx HlAsyncCtx;
 typedef struct HlAllocator HlAllocator;
 struct HlVfs;
 typedef struct KlServer KlServer;
-typedef struct KlThreadPool KlThreadPool;
+typedef struct HlAsyncBackendPool HlAsyncBackendPool;
 typedef struct KlAsyncOp KlAsyncOp;
 
 /* ── Worker WASM operation ─────────────────────────────────────────── */
@@ -61,7 +61,7 @@ typedef struct HlWorkerWasmOp {
 
 /* Submit a compute.async.call operation to the thread pool.
  * Returns 0 on success, -1 on error (pool full or NULL). */
-int hl_worker_wasm_submit(KlThreadPool *pool, HlWorkerWasmOp *op);
+int hl_worker_wasm_submit(HlAsyncBackendPool *pool, HlWorkerWasmOp *op);
 
 /* Free all resources owned by an HlWorkerWasmOp. */
 void hl_worker_wasm_op_free(HlWorkerWasmOp *op);

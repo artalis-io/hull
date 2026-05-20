@@ -21,7 +21,7 @@
 /* Forward declarations */
 typedef struct HlAsyncCtx HlAsyncCtx;
 typedef struct KlServer KlServer;
-typedef struct KlThreadPool KlThreadPool;
+typedef struct HlAsyncBackendPool HlAsyncBackendPool;
 typedef struct KlAsyncOp KlAsyncOp;
 
 /* ── Worker GPU operation ──────────────────────────────────────────── */
@@ -64,7 +64,7 @@ typedef struct HlWorkerGpuOp {
 
 /* Submit a gpu.async.dispatch operation to the thread pool.
  * Returns 0 on success, -1 on error (pool full or NULL). */
-int hl_worker_gpu_submit(KlThreadPool *pool, HlWorkerGpuOp *op);
+int hl_worker_gpu_submit(HlAsyncBackendPool *pool, HlWorkerGpuOp *op);
 
 /* Free all resources owned by an HlWorkerGpuOp. */
 void hl_worker_gpu_op_free(HlWorkerGpuOp *op);

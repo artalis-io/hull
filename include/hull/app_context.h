@@ -30,7 +30,7 @@ typedef struct HlStmtCache HlStmtCache;
 typedef struct HlWasmCache HlWasmCache;
 typedef struct HlGpuCtx HlGpuCtx;
 typedef struct HlDbHandle HlDbHandle;
-typedef struct KlThreadPool KlThreadPool;
+typedef struct HlAsyncBackendPool HlAsyncBackendPool;
 struct KlCompressConfig;
 
 typedef struct HlAppContextOpts {
@@ -42,7 +42,7 @@ typedef struct HlAppContextOpts {
     HlAllocator  *alloc;          /* NULL = use raw malloc */
 
     /* Server-specific runtime wiring (all optional, NULL/0 = not used) */
-    KlThreadPool             *thread_pool;      /* wired to rt->thread_pool */
+    HlAsyncBackendPool       *thread_pool;      /* wired to rt->thread_pool */
     const char               *worker_db_path;   /* for hl_worker_db_init */
     struct KlCompressConfig  *compress;         /* wired to rt->compress */
 

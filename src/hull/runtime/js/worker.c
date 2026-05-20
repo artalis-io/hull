@@ -13,6 +13,7 @@
 #include "hull/runtime/js.h"
 #include "internal.h"
 #include "hull/async.h"
+#include "hull/async_backend.h"
 #include "hull/alloc.h"
 
 #include <keel/thread_pool.h>
@@ -392,18 +393,13 @@ static void js_dispatch_cancel_fn(void *ud)
 
 /* ── Public API ────────────────────────────────────────────────────── */
 
-int hl_js_worker_dispatch_submit(KlThreadPool *pool,
+int hl_js_worker_dispatch_submit(HlAsyncBackendPool *pool,
                                    HlJsWorkerDispatchOp *op)
 {
     if (!pool || !op) return -1;
-
-    KlWorkItem item = {
-        .work_fn   = js_dispatch_work_fn,
-        .done_fn   = js_dispatch_done_fn,
-        .cancel_fn = js_dispatch_cancel_fn,
-        .user_data = op,
-    };
-    return kl_thread_pool_submit(pool, &item);
+    const HlAsyncBackend *be = hl_async_backend();
+    return be->pool_submit(pool, js_dispatch_work_fn, js_dispatch_done_fn,
+                           js_dispatch_cancel_fn, op);
 }
 
 void hl_js_worker_dispatch_op_free(HlJsWorkerDispatchOp *op)

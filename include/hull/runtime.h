@@ -30,7 +30,8 @@
 
 /* Forward declarations */
 typedef struct HlAllocator HlAllocator;
-typedef struct HlAsyncBackendCtx HlAsyncBackendCtx;
+typedef struct HlAsyncBackendCtx  HlAsyncBackendCtx;
+typedef struct HlAsyncBackendPool HlAsyncBackendPool;
 typedef struct HlTestCaseResult HlTestCaseResult;
 typedef struct KlRouter KlRouter;
 typedef struct HlFsConfig HlFsConfig;
@@ -45,7 +46,6 @@ typedef struct HlGpuCtx HlGpuCtx;
 typedef struct HlDbHandle HlDbHandle;
 typedef struct HlWsRegistry HlWsRegistry;
 typedef struct KlServer KlServer;
-typedef struct KlThreadPool KlThreadPool;
 typedef struct HlRuntime HlRuntime;
 
 /*
@@ -148,7 +148,7 @@ struct HlRuntime {
      * no gating (legacy entry points: test runner, agent, mcp). When
      * non-NULL, gating fires for any registry-known name not in the set. */
     const HlResolvedModuleSet *module_set;
-    KlThreadPool *thread_pool;   /* worker pool for async work (NULL if not created) */
+    HlAsyncBackendPool *thread_pool; /* worker pool for async work (NULL if not created) */
     /* HlAsyncBackend context — the event loop primitives layer. In
      * server-mode builds this is a wrap around the KlServer's
      * embedded event ctx; in CLI-mode builds it's an independent

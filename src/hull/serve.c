@@ -29,6 +29,7 @@
 
 #include "hull/alloc.h"
 #include "hull/app_context.h"
+#include "hull/async_backend.h"
 #include "hull/async/keel.h"
 #include "hull/cacert.h"
 #ifdef HL_ENABLE_DB
@@ -594,8 +595,13 @@ typedef struct {
     KlTlsConfig          server_tls_config;
     KlTlsCtx            *server_tls_ctx;
 
+    /* Backend wrap around server.ev. Created in init_infra (so the
+     * thread pool can go through the backend vtable), borrowed by the
+     * runtime via rt->async_ctx, unwrapped in cleanup. */
+    HlAsyncBackendCtx   *async_ctx;
+
     /* Infrastructure (thread pool, client pool, compression) */
-    KlThreadPool        *thread_pool;
+    HlAsyncBackendPool  *thread_pool;
     KlClientPool         client_pool;
     int                  cpool_ok;
     KlCompressCtx       *comp_ctx;
@@ -794,16 +800,24 @@ static int hl_serve_init_server(HlServerState *s)
  * Depends on: init_server (server.ev for thread pool + client pool). */
 static void hl_serve_init_infra(HlServerState *s)
 {
-    /* Create thread pool for async work (db queries, file I/O) */
-    KlThreadPoolConfig tp_cfg = {
-        .num_workers    = s->cfg.num_workers > 0 ? s->cfg.num_workers : HL_THREAD_POOL_WORKERS,
-        .queue_capacity = s->cfg.queue_capacity > 0 ? s->cfg.queue_capacity : HL_THREAD_POOL_CAPACITY,
-        .alloc          = &s->kl_alloc,
-    };
-    s->thread_pool = kl_thread_pool_create(&s->server.ev, &tp_cfg);
-    if (!s->thread_pool)
-        log_warn("[hull:c] thread pool creation failed: %s — async work unavailable",
-                 kl_strerror(s->server.ev.last_error));
+    /* Wrap the server's event loop so the thread pool + later
+     * consumers go through the async backend vtable. The wrap is
+     * borrowed — KlServer still owns the underlying KlEventCtx. */
+    if (!s->async_ctx)
+        s->async_ctx = hl_async_backend_keel_wrap(&s->server.ev);
+
+    /* Create thread pool for async work (db queries, file I/O) via
+     * the vtable. With the keel backend this still ends up calling
+     * kl_thread_pool_create under the hood, just routed through
+     * HlAsyncBackend so future backends slot in. */
+    const HlAsyncBackend *be = hl_async_backend();
+    int num_workers    = s->cfg.num_workers > 0 ? s->cfg.num_workers : HL_THREAD_POOL_WORKERS;
+    int queue_capacity = s->cfg.queue_capacity > 0 ? s->cfg.queue_capacity : HL_THREAD_POOL_CAPACITY;
+    if (be->pool_create(&s->thread_pool, s->async_ctx,
+                         num_workers, queue_capacity) != 0) {
+        s->thread_pool = NULL;
+        log_warn("[hull:c] thread pool creation failed — async work unavailable");
+    }
     /* thread_pool may be NULL if creation fails — non-fatal, async work
      * will simply be unavailable */
 
@@ -989,13 +1003,10 @@ static int hl_serve_wire_caps(HlServerState *s)
 {
     HlRuntime *rt = hl_app_context_runtime(s->app);
 
-    /* Route the server's existing event loop through the async backend
-     * vtable. Consumers that need async primitives (timers, suspension,
-     * thread pool) use rt->async_ctx via hl_async_backend()->... instead
-     * of calling kl_* directly on s->server.ev. The wrap doesn't take
-     * ownership — KlServer continues to own the underlying loop. */
-    if (!rt->async_ctx)
-        rt->async_ctx = hl_async_backend_keel_wrap(&s->server.ev);
+    /* The server's event loop was wrapped in init_infra (so the thread
+     * pool could go through the backend); just lend the existing wrap
+     * to the runtime so its consumers reach the loop via the vtable. */
+    rt->async_ctx = s->async_ctx;
 
     /* Extract manifest and configure capabilities */
     memset(&s->manifest, 0, sizeof(s->manifest));
@@ -1298,9 +1309,9 @@ static void hl_serve_run(HlServerState *s)
 static void hl_serve_teardown_after_serve(HlServerState *s)
 {
     /* Free thread pool BEFORE server — join workers, drain queues while
-     * server infrastructure (connections, event loop) is still valid */
+     * server infrastructure (connections, event loop) is still valid. */
     if (s->thread_pool) {
-        kl_thread_pool_free(s->thread_pool);
+        hl_async_backend()->pool_free(s->thread_pool);
         s->thread_pool = NULL;
     }
 
@@ -1323,22 +1334,25 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
         s->manifest_extracted = 0;
     }
 
-    /* Free the async-backend wrap (does NOT destroy the underlying
-     * KlEventCtx — KlServer still owns it; we just registered a
-     * vtable view onto it in wire_caps). Must run BEFORE
-     * app_context_free which destroys the runtime that points at it. */
+    /* Detach the borrowed async_ctx pointer from the runtime before
+     * app_context_free destroys the runtime — the wrap itself is
+     * owned by HlServerState and unwrapped further down. */
     {
         HlRuntime *rt = hl_app_context_runtime(s->app);
-        if (rt && rt->async_ctx) {
-            hl_async_backend_keel_unwrap(rt->async_ctx);
-            rt->async_ctx = NULL;
-        }
+        if (rt) rt->async_ctx = NULL;
     }
 
     /* Free app context (runtime + DB + VFS + stmt cache).
      * WASM/GPU static caches are external — freed separately below. */
     hl_app_context_free(s->app);
     s->app = NULL;
+
+    /* Now unwrap the async-backend wrap — borrowed, doesn't destroy
+     * KlServer's KlEventCtx (server's own free does that). */
+    if (s->async_ctx) {
+        hl_async_backend_keel_unwrap(s->async_ctx);
+        s->async_ctx = NULL;
+    }
 
     /* Destroy WASM cache AFTER runtime destroy — GC finalizers
      * (WasmBuffer WASM-kind and WasmInstance) need WAMR alive */
@@ -1440,9 +1454,11 @@ static void hl_serve_cleanup(HlServerState *s)
     if (s->manifest_extracted)
         hl_manifest_free(&s->manifest);
 
-    /* Free thread pool BEFORE server */
-    if (s->thread_pool)
-        kl_thread_pool_free(s->thread_pool);
+    /* Free thread pool BEFORE server (via the backend vtable) */
+    if (s->thread_pool) {
+        hl_async_backend()->pool_free(s->thread_pool);
+        s->thread_pool = NULL;
+    }
 
     /* Free client connection pool */
     if (s->cpool_ok == 0)
@@ -1463,20 +1479,24 @@ static void hl_serve_cleanup(HlServerState *s)
     if (s->server_init)
         kl_server_free(&s->server);
 
-    /* Free async-backend wrap before the runtime that holds it.
-     * Borrowed wrap — does not destroy KlServer's KlEventCtx. */
+    /* Detach the borrowed async_ctx from the runtime before app_context_free
+     * destroys the runtime — the wrap is owned by HlServerState. */
     if (s->app) {
         HlRuntime *rt = hl_app_context_runtime(s->app);
-        if (rt && rt->async_ctx) {
-            hl_async_backend_keel_unwrap(rt->async_ctx);
-            rt->async_ctx = NULL;
-        }
+        if (rt) rt->async_ctx = NULL;
     }
 
     /* Free app context (runtime + DB + VFS + stmt cache) */
     if (s->app) {
         hl_app_context_free(s->app);
         s->app = NULL;
+    }
+
+    /* Unwrap the async-backend wrap (borrowed — does not destroy
+     * KlServer's KlEventCtx). */
+    if (s->async_ctx) {
+        hl_async_backend_keel_unwrap(s->async_ctx);
+        s->async_ctx = NULL;
     }
 
     free_route_allocs(&s->alloc);

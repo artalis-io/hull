@@ -25,7 +25,7 @@ typedef struct HlAsyncCtx     HlAsyncCtx;
 typedef struct HlAllocator    HlAllocator;
 typedef struct KlServer       KlServer;
 typedef struct KlAsyncOp      KlAsyncOp;
-typedef struct KlThreadPool   KlThreadPool;
+typedef struct HlAsyncBackendPool HlAsyncBackendPool;
 
 /* ── Internal op structs (moved from public js.h, roadmap item J) ── */
 
@@ -69,7 +69,7 @@ typedef struct HlJsWorkerDispatchOp {
     int           cancelled;
 } HlJsWorkerDispatchOp;
 
-int  hl_js_worker_dispatch_submit(KlThreadPool *pool,
+int  hl_js_worker_dispatch_submit(HlAsyncBackendPool *pool,
                                   HlJsWorkerDispatchOp *op);
 void hl_js_worker_dispatch_op_free(HlJsWorkerDispatchOp *op);
 void hl_js_worker_dispatch_op_free_all(void *ptr);
