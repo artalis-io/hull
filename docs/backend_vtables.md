@@ -292,36 +292,43 @@ kl_async_suspend(server, conn, &ctx->op);
 
 ### Phase 3d-3 — migrate consumers (mechanical)
 
-In progress. Done so far:
+Done:
 
-  ✓ `kl_monotonic_ms` → vtable (3 call sites — cap/http_async, runtime/
-    {lua,js}/async).
-  ✓ Plumbing: HlRuntime.async_ctx + hl_async_backend_keel_wrap so
-    serve.c routes the server's KlEventCtx through the vtable.
-    Consumers use rt->async_ctx instead of &server->ev.
-  ✓ `kl_timer_add` / `kl_timer_cancel` → vtable (8 sites — runtime/
-    {lua,js}/{async,timers,routes,runtime}.c). Zero direct kl_timer_*
-    references remain outside async/keel.c.
+  ✓ `kl_monotonic_ms` → vtable (3 call sites).
+  ✓ Plumbing: HlRuntime.async_ctx + hl_async_backend_keel_wrap.
+    HlServerState owns the wrap (created in init_infra so the thread
+    pool can go through the backend); runtime borrows it via
+    rt->async_ctx. Cleanup nulls the runtime field before
+    app_context_free runs, then unwraps the HlServerState-owned one.
+  ✓ `kl_timer_add` / `kl_timer_cancel` → vtable (8 sites). Zero
+    direct kl_timer_* references in consumer code.
+  ✓ `kl_thread_pool_*` → vtable (16 files). Type changes through
+    HlRuntime, HlAppContextOpts, HlRuntimeBaseConfig, HlServerState,
+    and every `hl_*_submit` signature. Stale KlThreadPool
+    forward-declarations cleaned up.
+  ✓ `kl_watcher_*` — single comment reference remains (`mod_http.c`);
+    effectively done.
 
-Pending (each its own focused commit, in roughly this order):
+Blocked on HlNetBackend (Phase 3d-2 deferred):
 
-  - `kl_thread_pool_*` → vtable. ~34 references across serve.c +
-    worker_db/wasm/gpu.c + runtime/{lua,js}/worker.c. The pool object
-    flows through public header signatures (`KlThreadPool *` in
-    `hull/worker_*.h`), so this isn't just a call-site swap — the
-    HlWorkerDbOp / HlWorkerWasmOp / HlWorkerGpuOp shapes change, and
-    every caller's declaration updates with them. Plan for the
-    KlWorkItem-vs-vtable signature mismatch: keep the per-worker
-    struct, derive the three fn pointers from it at submit time.
-  - `kl_async_suspend` / `kl_async_complete` → split: detached path
-    (used by hull.sleep, app.timer trampolines) onto
-    `HlAsyncBackend->op_suspend`/`op_complete`; request-bound path
-    (used by HTTP handlers + db.async/compute.async during a request)
-    stays on Keel until `HlNetBackend` lands, since they need
-    KlConn-aware suspension that doesn't belong in the async vtable.
-  - `kl_watcher_*` → vtable. Only one direct reference today (a
-    comment in mod_http.c), so this is essentially done — included
-    here for completeness.
+  - `kl_async_suspend` / `kl_async_complete`. The pair must migrate
+    together — the backend's op_complete only resumes ops suspended
+    via its own op_suspend (it walks a backend-private state pointer
+    set at suspend time). All current callsites are request-bound:
+    HTTP handlers + worker_db/wasm/gpu submitters that pass a
+    KlConn to kl_async_suspend so Keel can revive the connection
+    when the worker finishes. KlConn doesn't fit HlAsyncBackend
+    (which is connection-agnostic by design); the right home is
+    HlNetBackend's request lifecycle.
+
+  The shape this will take: HlNetBackend gains
+  `req_suspend(req, op)` / `req_complete(req, op)` methods that wrap
+  Keel's KlConn-aware path. Callers in cap/http_async.c, worker_*.c,
+  and runtime/{lua,js}/async.c (attached sleep) use those. The
+  detached-mode hull.sleep + timer-callback paths are already on the
+  async backend (Phase 1.5 + this phase); they're the only paths
+  that genuinely need a connectionless suspension and they work via
+  the existing async backend.
 
 ### Phase 3d-4 — write the poll backend
 - `src/hull/net/async_poll.c` — minimal `poll(2)` + `pthread` impl
