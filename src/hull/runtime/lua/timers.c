@@ -11,6 +11,7 @@
 #include "internal.h"
 
 #include "hull/alloc.h"
+#include "hull/async_backend.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
 
@@ -78,9 +79,11 @@ void hl_lua_timer_reschedule(HlLuaTimer *t)
     else
         delay_ms = t->interval_ms;
 
-    t->timer_id = kl_timer_add(&lua->server->ev, (uint64_t)delay_ms,
-                                hl_lua_timer_trampoline, t);
-    if (t->timer_id < 0)
+    const HlAsyncBackend *be = hl_async_backend();
+    t->timer_id = (int64_t)be->timer_add(lua->base.async_ctx,
+                                          (uint64_t)delay_ms,
+                                          hl_lua_timer_trampoline, t);
+    if (t->timer_id == 0)
         log_error("[hull:timer] failed to reschedule timer (handler_id=%d)",
                   t->handler_id);
 }
@@ -92,8 +95,9 @@ void hl_lua_timer_trampoline(void *user_data)
 
     /* Skip if previous invocation still in flight (async) */
     if (t->in_flight) {
-        t->timer_id = kl_timer_add(&lua->server->ev, 1000,
-                                    hl_lua_timer_trampoline, t);
+        const HlAsyncBackend *be = hl_async_backend();
+        t->timer_id = (int64_t)be->timer_add(lua->base.async_ctx, 1000,
+                                              hl_lua_timer_trampoline, t);
         return;
     }
 

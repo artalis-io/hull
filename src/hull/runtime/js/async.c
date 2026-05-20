@@ -350,12 +350,15 @@ static JSValue js_hull_sleep(JSContext *ctx, JSValueConst this_val,
                 "hull.sleep(): failed to suspend connection");
         }
     } else {
-        /* Detached mode (timer callback): use kl_timer_add */
+        /* Detached mode: schedule via the async backend vtable. The
+         * underlying loop is the same one KlServer drives (wrapped in
+         * serve.c::wire_caps), so the timer fires alongside HTTP work. */
         actx->detached = 1;
 
-        int64_t tid = kl_timer_add(&server->ev, (uint64_t)ms,
-                                    hl_detached_timer_fire, actx);
-        if (tid < 0) {
+        const HlAsyncBackend *be = hl_async_backend();
+        uint64_t tid = be->timer_add(js->base.async_ctx, (uint64_t)ms,
+                                      hl_detached_timer_fire, actx);
+        if (tid == 0) {
             actx->cont->destroy(actx->cont);
             hl_async_ctx_free(actx);
             JS_FreeValue(ctx, promise);

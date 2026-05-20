@@ -34,7 +34,7 @@ typedef struct HlLuaTimer {
     struct HlLua *lua;
     int         handler_id;    /* index into __hull_timers */
     int64_t     interval_ms;   /* repeat interval (or recomputed for daily) */
-    int64_t     timer_id;      /* kl_timer_add return, for cancellation */
+    int64_t     timer_id;      /* HlAsyncBackend->timer_add return, for cancellation */
     int         daily;         /* 1 = daily timer */
     int         localtime;     /* 1 = local time, 0 = UTC */
     int         hour;          /* for daily: target hour */

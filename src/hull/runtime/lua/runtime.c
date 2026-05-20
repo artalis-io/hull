@@ -15,6 +15,7 @@
 #include "internal.h"
 
 #include "hull/alloc.h"
+#include "hull/async_backend.h"
 #include "hull/manifest.h"
 #include "hull/cap/tool.h"
 #include "hull/runtime/tool.h"
@@ -316,12 +317,15 @@ void hl_lua_free(HlLua *lua)
     if (!lua)
         return;
 
-    /* Cancel and free tracked timers */
-    for (size_t i = 0; i < lua->timer_count; i++) {
-        HlLuaTimer *t = (HlLuaTimer *)lua->timers[i];
-        if (t->timer_id >= 0 && lua->server)
-            kl_timer_cancel(&lua->server->ev, t->timer_id);
-        hl_alloc_free(lua->base.alloc, t, sizeof(HlLuaTimer));
+    /* Cancel and free tracked timers — via async backend vtable. */
+    {
+        const HlAsyncBackend *be = hl_async_backend();
+        for (size_t i = 0; i < lua->timer_count; i++) {
+            HlLuaTimer *t = (HlLuaTimer *)lua->timers[i];
+            if (t->timer_id > 0 && lua->base.async_ctx)
+                be->timer_cancel(lua->base.async_ctx, (uint64_t)t->timer_id);
+            hl_alloc_free(lua->base.alloc, t, sizeof(HlLuaTimer));
+        }
     }
     if (lua->timers) {
         hl_alloc_free(lua->base.alloc, lua->timers,

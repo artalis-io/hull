@@ -16,6 +16,7 @@
 #include "internal.h"
 
 #include "hull/alloc.h"
+#include "hull/async_backend.h"
 #include "hull/limits/runtime.h"
 #include "hull/manifest.h"
 #include "hull/module_registry.h"
@@ -835,12 +836,15 @@ void hl_js_free(HlJS *js)
     if (!js)
         return;
 
-    /* Cancel and free tracked timers */
-    for (size_t i = 0; i < js->timer_count; i++) {
-        HlJSTimer *t = (HlJSTimer *)js->timers[i];
-        if (t->timer_id >= 0 && js->server)
-            kl_timer_cancel(&js->server->ev, t->timer_id);
-        hl_alloc_free(js->base.alloc, t, sizeof(HlJSTimer));
+    /* Cancel and free tracked timers — via async backend vtable. */
+    {
+        const HlAsyncBackend *be = hl_async_backend();
+        for (size_t i = 0; i < js->timer_count; i++) {
+            HlJSTimer *t = (HlJSTimer *)js->timers[i];
+            if (t->timer_id > 0 && js->base.async_ctx)
+                be->timer_cancel(js->base.async_ctx, (uint64_t)t->timer_id);
+            hl_alloc_free(js->base.alloc, t, sizeof(HlJSTimer));
+        }
     }
     if (js->timers) {
         hl_alloc_free(js->base.alloc, js->timers,

@@ -13,6 +13,7 @@
 #include "internal.h"
 
 #include "hull/alloc.h"
+#include "hull/async_backend.h"
 #include "hull/cap/body.h"
 #include "hull/cap/ws.h"
 
@@ -400,9 +401,13 @@ int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
                 delay_ms = t->interval_ms;
             }
 
-            t->timer_id = kl_timer_add(&server->ev, (uint64_t)delay_ms,
-                                        hl_lua_timer_trampoline, t);
-            if (t->timer_id < 0) {
+            {
+                const HlAsyncBackend *be = hl_async_backend();
+                t->timer_id = (int64_t)be->timer_add(lua->base.async_ctx,
+                                                      (uint64_t)delay_ms,
+                                                      hl_lua_timer_trampoline, t);
+            }
+            if (t->timer_id == 0) {
                 hl_alloc_free(lua->base.alloc, t, sizeof(HlLuaTimer));
                 lua_pop(L, 1);
                 continue;

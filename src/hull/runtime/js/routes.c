@@ -13,6 +13,7 @@
 #include "internal.h"
 
 #include "hull/alloc.h"
+#include "hull/async_backend.h"
 #include "hull/cap/body.h"
 #include "hull/cap/ws.h"
 
@@ -427,9 +428,11 @@ int hl_js_wire_routes_server(HlJS *js, KlServer *server,
                 delay_ms = iv;
             }
 
-            t->timer_id = kl_timer_add(&server->ev, (uint64_t)delay_ms,
-                                        hl_js_timer_trampoline, t);
-            if (t->timer_id < 0) {
+            const HlAsyncBackend *be = hl_async_backend();
+            t->timer_id = (int64_t)be->timer_add(js->base.async_ctx,
+                                                  (uint64_t)delay_ms,
+                                                  hl_js_timer_trampoline, t);
+            if (t->timer_id == 0) {
                 hl_alloc_free(js->base.alloc, t, sizeof(HlJSTimer));
             } else {
                 hl_js_track_timer(js, t);
