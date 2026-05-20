@@ -309,34 +309,52 @@ Done:
   ✓ `kl_watcher_*` — single comment reference remains (`mod_http.c`);
     effectively done.
 
-Blocked on HlNetBackend (Phase 3d-2 deferred):
+Also done (Phase 3d-2 deferred slice + Phase 3d-3 follow-through):
 
-  - `kl_async_suspend` / `kl_async_complete`. The pair must migrate
-    together — the backend's op_complete only resumes ops suspended
-    via its own op_suspend (it walks a backend-private state pointer
-    set at suspend time). All current callsites are request-bound:
-    HTTP handlers + worker_db/wasm/gpu submitters that pass a
-    KlConn to kl_async_suspend so Keel can revive the connection
-    when the worker finishes. KlConn doesn't fit HlAsyncBackend
-    (which is connection-agnostic by design); the right home is
-    HlNetBackend's request lifecycle.
+  ✓ HlNetBackend minimal vtable + Keel impl. `op_suspend(ctx, req, op)` /
+    `op_complete(ctx, op)` land in `include/hull/net_backend.h`, with
+    `src/hull/net/keel.c` reinterpreting the opaque handles back to
+    KlConn / KlAsyncOp inside the keel boundary. The other 30+ vtable
+    slots (routing, req/res accessors, SSE, WebSocket) stay NULL
+    until each surface is migrated in follow-up commits.
+  ✓ Plumbing: HlRuntime.net_ctx + hl_net_backend_keel_wrap; same
+    HlServerState-owns / runtime-borrows pattern as async_ctx.
+  ✓ `kl_async_suspend` / `kl_async_complete` → vtable (~25 sites
+    across cap/http_async.c, worker_db/wasm/gpu.c, runtime/{lua,js}/
+    async.c+worker.c+mod_db/gpu/compute/worker/http.c). HlAsyncCtx grew
+    a borrowed net_ctx alongside server so completion callbacks no
+    longer need direct KlServer access.
 
-  The shape this will take: HlNetBackend gains
-  `req_suspend(req, op)` / `req_complete(req, op)` methods that wrap
-  Keel's KlConn-aware path. Callers in cap/http_async.c, worker_*.c,
-  and runtime/{lua,js}/async.c (attached sleep) use those. The
-  detached-mode hull.sleep + timer-callback paths are already on the
-  async backend (Phase 1.5 + this phase); they're the only paths
-  that genuinely need a connectionless suspension and they work via
-  the existing async backend.
+  Phase 3d-3 is now fully complete; every Hull source outside serve.c
+  reaches async / suspend / complete primitives only through the
+  vtable.
 
 ### Phase 3d-4 — write the poll backend
-- `src/hull/net/async_poll.c` — minimal `poll(2)` + `pthread` impl
-- ~600-800 lines: event-loop tick, timer min-heap, FD watcher table,
-  thread pool (existing Keel pool design ports cleanly)
-- Tested by running every `make e2e-cli` example on a HL_ENABLE_HTTP=0
-  build that uses the poll backend
-- Outcome: async-in-app.main works on CLI builds. ~3 days.
+
+Done:
+
+  ✓ `src/hull/async/poll.c` — ~470 lines: minimal `poll(2)` + `pthread`
+    impl. Event-loop tick, software timer min-heap (pointer-stable
+    ids, lazy cancellation), flat FD-watcher table, bounded
+    ring-buffer thread pool, self-pipe for cross-thread wakeup, full
+    op_suspend/op_complete with deadline timers. No Keel symbols.
+  ✓ `tests/hull/test_async_backend_poll.c` — 10 cases: lifecycle,
+    monotonic, timer fire + cancel, multi-timer ordering, op_complete
+    fires on-loop, op_deadline races op_complete, pool runs work+done
+    with done on the event-loop thread, pool_free fires cancel_fn
+    on pending items. (test_async_backend stays parameterized by
+    whatever hl_async_backend() returns; the poll suite pins by name
+    so both backends are exercised on every build.)
+  ✓ Backend selection: `hl_async_backend()` returns the keel vtable
+    when `HL_ENABLE_HTTP` is defined and the poll vtable otherwise.
+    Both backends compile in HTTP=1 builds today (poll is exercised
+    only by tests); Phase 3d-5 drops keel.c + libkeel.a from the link
+    for HTTP=0.
+
+Outcome: async primitives have a Keel-free implementation that
+passes the same tests as the keel backend. The CLI driver (Phase
+3d-5 + the cli_mode work) gets a working event loop without any
+HTTP server library in the link.
 
 ### Phase 3d-5 — drop Keel from `HL_ENABLE_HTTP=0` link
 - Makefile: when `HL_ENABLE_HTTP=0`, the keel backend objects + `libkeel.a`

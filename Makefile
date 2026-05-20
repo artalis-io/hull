@@ -1530,11 +1530,17 @@ $(BUILDDIR)/test_static: $(TESTDIR)/hull/test_static.c $(STATIC_OBJ) $(TEST_COMM
 $(BUILDDIR)/test_vfs: $(TESTDIR)/hull/test_vfs.c $(VFS_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(VFS_OBJ)
 
-# Async backend test — exercises the HlAsyncBackend vtable (today
-# always backed by Keel; future poll backend will share the same test).
+# Async backend tests — exercise the HlAsyncBackend vtable.
+# test_async_backend covers whichever backend hl_async_backend() returns
+# (keel on HTTP=1, poll on HTTP=0). test_async_backend_poll always
+# pins the poll backend by name, so it runs on both build flavors.
 $(BUILDDIR)/test_async_backend: $(TESTDIR)/hull/test_async_backend.c $(ASYNC_BACKEND_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(ASYNC_BACKEND_OBJS) $(KEEL_LIB) -lm -lpthread
+
+$(BUILDDIR)/test_async_backend_poll: $(TESTDIR)/hull/test_async_backend_poll.c $(BUILDDIR)/async_poll.o | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
+		$(BUILDDIR)/async_poll.o -lm -lpthread
 
 # Module registry — standalone, only links the registry object
 $(BUILDDIR)/test_module_registry: $(TESTDIR)/hull/test_module_registry.c $(MODULE_REGISTRY_OBJ) | $(BUILDDIR)
