@@ -16,7 +16,9 @@
 #include "hull/commands/verify.h"
 #include "hull/commands/inspect.h"
 #include "hull/commands/manifest.h"
+#ifdef HL_ENABLE_HTTP
 #include "hull/commands/test.h"
+#endif
 #include "hull/commands/new.h"
 #ifdef HL_ENABLE_HTTP
 #include "hull/commands/dev.h"
@@ -26,8 +28,10 @@
 #include "hull/commands/migrate.h"
 #endif
 #include "hull/commands/sign_platform.h"
+#ifdef HL_ENABLE_HTTP
 #include "hull/commands/agent.h"
 #include "hull/commands/mcp.h"
+#endif
 #include "hull/commands/check.h"
 #include "hull/commands/compute.h"
 #include "hull/commands/deploy.h"
@@ -35,7 +39,9 @@
 #include "hull/commands/doctor.h"
 #include "hull/commands/init.h"
 #include "hull/commands/modules.h"
+#ifdef HL_ENABLE_HTTP
 #include "hull/commands/update.h"
+#endif
 #include "hull/commands/sign_release.h"
 #include "hull/commands/verify_release.h"
 
@@ -49,7 +55,9 @@ static const HlCommand commands[] = {
     { "verify",   hl_cmd_verify },
     { "inspect",  hl_cmd_inspect },
     { "manifest", hl_cmd_manifest },
+#ifdef HL_ENABLE_HTTP
     { "test",     hl_cmd_test },
+#endif
     { "new",      hl_cmd_new },
 #ifdef HL_ENABLE_HTTP
     { "dev",      hl_cmd_dev },
@@ -59,8 +67,10 @@ static const HlCommand commands[] = {
 #ifdef HL_ENABLE_DB
     { "migrate",       hl_cmd_migrate },
 #endif
+#ifdef HL_ENABLE_HTTP
     { "agent",         hl_cmd_agent },
     { "mcp",           hl_cmd_mcp },
+#endif
     { "check",         hl_cmd_check },
     { "compute",       hl_cmd_compute },
     { "deploy",        hl_cmd_deploy },
@@ -68,7 +78,9 @@ static const HlCommand commands[] = {
     { "doctor",        hl_cmd_doctor },
     { "init",          hl_cmd_init },
     { "modules",       hl_cmd_modules },
+#ifdef HL_ENABLE_HTTP
     { "update",         hl_cmd_update },
+#endif
     { "sign-release",   hl_cmd_sign_release },
     { "verify-release", hl_cmd_verify_release },
     { NULL, NULL }  /* sentinel */

@@ -129,9 +129,9 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
         (void)cancelled;
 #endif
 
-        if (was_main && lua->server) {
+        if (was_main && lua->base.async_ctx) {
             lua->cli_main_co = NULL;
-            kl_server_stop(lua->server);
+            hl_async_backend()->stop(lua->base.async_ctx);
         }
     } else if (status == LUA_YIELD) {
         /* Handler yielded again — new HlAsyncCtx already set up.
@@ -163,12 +163,14 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
         lua->active_conn = NULL;
         lua->dispatch_depth--;
 
+#ifdef HL_ENABLE_HTTP
         if (conn) {
             kl_response_status(&conn->res, 500);
             kl_response_header(&conn->res, "Content-Type", "text/plain");
             kl_response_body_borrow(&conn->res, "Internal Server Error", 21);
             conn->state = KL_CONN_SENDING;
         }
+#endif
 
         /* Timer error: clear in_flight and reschedule anyway. CLI-only
          * builds have no timers, so this branch is dead — guard out. */
@@ -180,9 +182,9 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
         }
 #endif
 
-        if (was_main && lua->server) {
+        if (was_main && lua->base.async_ctx) {
             lua->cli_main_co = NULL;
-            kl_server_stop(lua->server);
+            hl_async_backend()->stop(lua->base.async_ctx);
         }
     }
 }
@@ -269,8 +271,8 @@ static int lua_hull_sleep(lua_State *L)
     HlLua *lua = (HlLua *)lua_touserdata(L, -1);
     lua_pop(L, 1);
 
-    if (!lua || !lua->server)
-        return luaL_error(L, "hull.sleep() requires an active server");
+    if (!lua || !lua->base.async_ctx)
+        return luaL_error(L, "hull.sleep() requires an active event loop");
 
     KlServer *server = lua->server;
     KlConn *conn = lua->active_conn;

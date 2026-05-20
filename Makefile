@@ -130,27 +130,45 @@ LUA_CFLAGS := -std=c11 -O2 -w -DLUA_USE_POSIX
 
 # ── Keel (external library) ─────────────────────────────────────────
 
-# Keel is included as a git submodule in vendor/keel.
-# Override KEEL_DIR to point to a different Keel build if needed.
+# Keel is included as a git submodule in vendor/keel. On HL_ENABLE_HTTP=0
+# builds Keel is not linked — KEEL_LIB resolves to empty so it can be
+# spliced into link lines unconditionally. KEEL_INC stays defined so
+# tests that include <keel/...> still parse (they're filtered out of
+# the HTTP=0 build at the source-list level).
 KEEL_DIR   ?= $(VENDDIR)/keel
 KEEL_INC   := $(KEEL_DIR)/include
+ifeq ($(HL_ENABLE_HTTP),0)
+KEEL_LIB   :=
+else
 KEEL_LIB   := $(KEEL_DIR)/libkeel.a
+endif
 
 # Build Keel with mbedTLS backend
 # Keel now detects the cosmo toolchain natively from CC and handles
 # poll backend, .aarch64/ archive creation, etc.
 MINIZ_DIR  := $(VENDDIR)/miniz
 
+ifneq ($(KEEL_LIB),)
 $(KEEL_LIB): $(MBEDTLS_OBJS)
 	$(MAKE) -C $(KEEL_DIR) CC=$(CC) AR=$(AR) \
 		KEEL_TLS=mbedtls MBEDTLS_CONFIG_FILE=hull_config.h \
 		KEEL_COMPRESS=miniz MINIZ_DIR=$(CURDIR)/$(MINIZ_DIR)
+endif
 
 # ── mbedTLS (vendored) ─────────────────────────────────────────────
+#
+# mbedTLS is only consumed by HTTP-flavored code (cap/smtp.c for STARTTLS,
+# serve.c via Keel's KlTlsCtx). On HL_ENABLE_HTTP=0 builds none of those
+# are compiled in, so mbedTLS drops out of the link entirely — saving
+# ~1.5 MB.
 
 MBEDTLS_DIR    := $(VENDDIR)/mbedtls
 MBEDTLS_SRCS   := $(wildcard $(MBEDTLS_DIR)/library/*.c)
+ifeq ($(HL_ENABLE_HTTP),0)
+MBEDTLS_OBJS   :=
+else
 MBEDTLS_OBJS   := $(patsubst $(MBEDTLS_DIR)/library/%.c,$(BUILDDIR)/mbed_%.o,$(MBEDTLS_SRCS))
+endif
 MBEDTLS_CFLAGS := -std=c11 -O2 -w \
 	-I$(MBEDTLS_DIR)/include -I$(MBEDTLS_DIR)/library -I$(MBEDTLS_DIR) \
 	-DMBEDTLS_CONFIG_FILE='"hull_config.h"'
@@ -638,7 +656,13 @@ ifeq ($(HL_ENABLE_HTTP),0)
 endif
 CAP_OBJS := $(patsubst $(SRCDIR)/hull/cap/%.c,$(BUILDDIR)/cap_%.o,$(CAP_SRCS))
 CAP_TOOL_OBJ := $(BUILDDIR)/cap_tool.o
+# cap/test.c is the in-process HTTP test harness — depends on KlRouter
+# and the rest of Keel's request/response machinery. Drop on HTTP=0.
+ifeq ($(HL_ENABLE_HTTP),0)
+CAP_TEST_OBJ :=
+else
 CAP_TEST_OBJ := $(BUILDDIR)/cap_test.o
+endif
 
 # JS runtime sources
 JS_RT_SRCS := $(wildcard $(SRCDIR)/hull/runtime/js/*.c)
@@ -650,12 +674,15 @@ ifeq ($(HL_ENABLE_DB),0)
 endif
 ifeq ($(HL_ENABLE_HTTP),0)
   # Drop server/route/middleware/HTTP-client bindings + their backends.
+  # mod_test (in-process HTTP test harness) depends on hl_cap_test_dispatch
+  # which is in cap/test.c — both go.
   JS_RT_SRCS := $(filter-out \
       $(SRCDIR)/hull/runtime/js/mod_http.c \
       $(SRCDIR)/hull/runtime/js/mod_ws.c \
       $(SRCDIR)/hull/runtime/js/mod_server.c \
       $(SRCDIR)/hull/runtime/js/mod_sse.c \
       $(SRCDIR)/hull/runtime/js/mod_smtp.c \
+      $(SRCDIR)/hull/runtime/js/mod_test.c \
       $(SRCDIR)/hull/runtime/js/routes.c \
       $(SRCDIR)/hull/runtime/js/dispatch.c \
       $(SRCDIR)/hull/runtime/js/sse.c \
@@ -681,6 +708,7 @@ ifeq ($(HL_ENABLE_HTTP),0)
       $(SRCDIR)/hull/runtime/lua/mod_server.c \
       $(SRCDIR)/hull/runtime/lua/mod_sse.c \
       $(SRCDIR)/hull/runtime/lua/mod_smtp.c \
+      $(SRCDIR)/hull/runtime/lua/mod_test.c \
       $(SRCDIR)/hull/runtime/lua/routes.c \
       $(SRCDIR)/hull/runtime/lua/dispatch.c \
       $(SRCDIR)/hull/runtime/lua/sse.c \
@@ -698,7 +726,25 @@ ifeq ($(HL_ENABLE_DB),0)
 endif
 ifeq ($(HL_ENABLE_HTTP),0)
   # hull dev forks a serve subprocess; no point without a server.
-  CMD_SRCS := $(filter-out $(SRCDIR)/hull/commands/dev.c,$(CMD_SRCS))
+  # hull update uses keel's HTTPS client to fetch releases; without
+  # libkeel.a we'd need a freestanding HTTPS path. Self-update is
+  # therefore unavailable on CLI builds today.
+  # hull test exercises the in-process HTTP harness (cap/test.c +
+  # test_runner.c); both depend on KlRouter and drop with the
+  # HTTP=0 build.
+  # hull agent / hull mcp are introspection tools targeting a running
+  # HTTP server (most subcommands call hl_agent_endpoint /
+  # hl_agent_request / hl_agent_test which need a live HTTP harness).
+  # Drop them on CLI builds; future work could split out a
+  # `cmd_agent_cli.c` that exposes only the DB / schema / routes
+  # subcommands that don't need a server.
+  CMD_SRCS := $(filter-out \
+      $(SRCDIR)/hull/commands/dev.c \
+      $(SRCDIR)/hull/commands/update.c \
+      $(SRCDIR)/hull/commands/test.c \
+      $(SRCDIR)/hull/commands/agent.c \
+      $(SRCDIR)/hull/commands/mcp.c, \
+      $(CMD_SRCS))
 endif
 CMD_OBJS := $(patsubst $(SRCDIR)/hull/commands/%.c,$(BUILDDIR)/cmd_%.o,$(CMD_SRCS))
 
@@ -720,7 +766,13 @@ endif
 
 ALLOC_OBJ      := $(BUILDDIR)/hull_alloc.o
 ASYNC_OBJ      := $(BUILDDIR)/hull_async.o
+# hull_compress.c wraps kl_response_body_compress for HTTP response
+# bodies. CLI builds have no HTTP responses; drop on HTTP=0.
+ifeq ($(HL_ENABLE_HTTP),0)
+COMPRESS_OBJ   :=
+else
 COMPRESS_OBJ   := $(BUILDDIR)/hull_compress.o
+endif
 MINIZ_OBJ      := $(BUILDDIR)/miniz.o
 ifeq ($(HL_ENABLE_DB),0)
 WORKER_DB_OBJ  :=
@@ -734,23 +786,30 @@ MODULE_RESOLVER_OBJ := $(BUILDDIR)/module_resolver.o
 MODULE_OBJ       := $(MODULE_REGISTRY_OBJ) $(MODULE_RESOLVER_OBJ)
 SANDBOX_OBJ      := $(BUILDDIR)/sandbox.o
 
-# Async backend implementations (Phase 3d-2)
-# async/keel.c — Keel-backed HlAsyncBackend (used by both HTTP=1 and
-#                HTTP=0 builds today; the future poll backend
-#                async/poll.c will swap in for HL_ENABLE_HTTP=0 in
-#                Phase 3d-4). The directory is async/ rather than
-#                net/ because the async backend is layer-independent
-#                of HTTP — it just provides event-loop primitives.
+# Async backend implementations
+#   async/keel.c — wraps Keel's KlEventCtx + KlThreadPool. Default on
+#                  HL_ENABLE_HTTP=1 (shares the loop with the HTTP
+#                  server). Dropped from the build on HL_ENABLE_HTTP=0
+#                  (Phase 3d-5) along with libkeel.a itself.
+#   async/poll.c — freestanding poll(2) + pthread impl. Always built;
+#                  selected by hl_async_backend() when HL_ENABLE_HTTP
+#                  is not defined.
 ASYNC_BACKEND_SRCS := $(wildcard $(SRCDIR)/hull/async/*.c)
+ifeq ($(HL_ENABLE_HTTP),0)
+  ASYNC_BACKEND_SRCS := $(filter-out $(SRCDIR)/hull/async/keel.c,$(ASYNC_BACKEND_SRCS))
+endif
 ASYNC_BACKEND_OBJS := $(patsubst $(SRCDIR)/hull/async/%.c,$(BUILDDIR)/async_%.o,$(ASYNC_BACKEND_SRCS))
 
-# Net backend implementations (Phase 3d-2 deferred slice)
-# net/keel.c — Keel-backed HlNetBackend. Today exposes only the
-#              async-op suspend/complete pair; the rest of the
-#              vtable (server lifecycle, routing, request/response
-#              accessors, SSE, WebSocket) is migrated in follow-up
-#              commits as each call surface is moved off Keel.
+# Net backend implementations
+#   net/keel.c — Keel-backed HlNetBackend (op_suspend / op_complete
+#                pair today). Dropped entirely on HL_ENABLE_HTTP=0:
+#                CLI builds have no HTTP layer, so there's no net
+#                backend to select. `hl_net_backend()` is not called
+#                by any HTTP=0-compiled source.
 NET_BACKEND_SRCS := $(wildcard $(SRCDIR)/hull/net/*.c)
+ifeq ($(HL_ENABLE_HTTP),0)
+  NET_BACKEND_SRCS :=
+endif
 NET_BACKEND_OBJS := $(patsubst $(SRCDIR)/hull/net/%.c,$(BUILDDIR)/net_%.o,$(NET_BACKEND_SRCS))
 
 # Test-specific objects (single runtime — avoids pulling Lua into JS tests
@@ -767,7 +826,13 @@ CAP_TEST_LUA_OBJ := $(BUILDDIR)/cap_test_dispatch.o
 TOOL_OBJ       := $(BUILDDIR)/tool.o
 SIG_OBJ        := $(BUILDDIR)/signature.o
 RELEASE_OBJ    := $(BUILDDIR)/release.o
+# test_runner.c uses KlRouter to dispatch in-process test requests.
+# Drop on HTTP=0 along with the `hull test` command.
+ifeq ($(HL_ENABLE_HTTP),0)
+TEST_RUNNER_OBJ :=
+else
 TEST_RUNNER_OBJ := $(BUILDDIR)/test_runner.o
+endif
 RUNTIME_FACTORY_OBJ := $(BUILDDIR)/runtime_factory.o
 ifeq ($(HL_ENABLE_HTTP),0)
 STATIC_OBJ     :=
@@ -787,6 +852,20 @@ APP_CONTEXT_OBJ := $(BUILDDIR)/app_context.o
 AGENT_LIB_SRCS := $(wildcard $(SRCDIR)/hull/agent/*.c)
 ifeq ($(HL_ENABLE_DB),0)
   AGENT_LIB_SRCS := $(filter-out $(SRCDIR)/hull/agent/db.c,$(AGENT_LIB_SRCS))
+endif
+ifeq ($(HL_ENABLE_HTTP),0)
+  # agent/test.c calls hl_test_runner_run + the in-process HTTP harness;
+  # agent/request.c, agent/eval.c, agent/perf.c, agent/endpoint.c also
+  # exercise HTTP routes. Drop them; the `hull agent` subcommands that
+  # depend on a running server (test/request/eval/perf/endpoint) lose
+  # their backends on CLI builds.
+  AGENT_LIB_SRCS := $(filter-out \
+      $(SRCDIR)/hull/agent/test.c \
+      $(SRCDIR)/hull/agent/request.c \
+      $(SRCDIR)/hull/agent/eval.c \
+      $(SRCDIR)/hull/agent/perf.c \
+      $(SRCDIR)/hull/agent/endpoint.c, \
+      $(AGENT_LIB_SRCS))
 endif
 AGENT_LIB_OBJ  := $(patsubst $(SRCDIR)/hull/agent/%.c,$(BUILDDIR)/agent_%.o,$(AGENT_LIB_SRCS))
 # HL_ENABLE_HTTP=0: replace serve.c (Keel-driven full server) with
@@ -1538,9 +1617,9 @@ $(BUILDDIR)/test_async_backend: $(TESTDIR)/hull/test_async_backend.c $(ASYNC_BAC
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
 		$(ASYNC_BACKEND_OBJS) $(KEEL_LIB) -lm -lpthread
 
-$(BUILDDIR)/test_async_backend_poll: $(TESTDIR)/hull/test_async_backend_poll.c $(BUILDDIR)/async_poll.o | $(BUILDDIR)
+$(BUILDDIR)/test_async_backend_poll: $(TESTDIR)/hull/test_async_backend_poll.c $(ASYNC_BACKEND_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(BUILDDIR)/async_poll.o -lm -lpthread
+		$(ASYNC_BACKEND_OBJS) $(KEEL_LIB) -lm -lpthread
 
 # Module registry — standalone, only links the registry object
 $(BUILDDIR)/test_module_registry: $(TESTDIR)/hull/test_module_registry.c $(MODULE_REGISTRY_OBJ) | $(BUILDDIR)

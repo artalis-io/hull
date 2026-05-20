@@ -924,8 +924,11 @@ void hl_js_free(HlJS *js)
     js->udf_runtime_alive = 0;
 
     if (js->ctx) {
-        /* Free test state opaque data before deleting globals */
+        /* Free test state opaque data before deleting globals.
+         * mod_test (and the test backend) is HTTP-only. */
+#ifdef HL_ENABLE_HTTP
         hl_js_test_free(js->ctx);
+#endif
 
         /* Delete hull internal globals so GC can collect them */
         JSValue global = JS_GetGlobalObject(js->ctx);
@@ -1136,6 +1139,12 @@ static int vt_js_run_test_file(HlRuntime *rt, const char *file_path,
                                int *file_total, int *file_passed, int *file_failed,
                                const char **load_err)
 {
+#ifndef HL_ENABLE_HTTP
+    (void)rt; (void)file_path; (void)results; (void)max_results;
+    (void)file_total; (void)file_passed; (void)file_failed;
+    if (load_err) *load_err = "test runner unavailable on HTTP=0 builds";
+    return -1;
+#else
     static const char *err_open   = "cannot open file";
     static const char *err_read   = "cannot read file";
     static const char *err_oom    = "out of memory";
@@ -1192,6 +1201,7 @@ static int vt_js_run_test_file(HlRuntime *rt, const char *file_path,
     hl_js_test_run(js->ctx, file_total, file_passed, file_failed,
                    NULL, results, max_results);
     return 0;
+#endif
 }
 
 static void vt_js_destroy(HlRuntime *rt)
@@ -1361,7 +1371,11 @@ static JSValue js_cli_main_settle(JSContext *ctx, JSValueConst this_val,
     js->cli_main_rejected = (magic == 1) ? 1 : 0;
     js->cli_main_active   = 0;
 
-    if (js->server) kl_server_stop(js->server);
+    /* Tell the backend's event loop to exit so vt_js_run_main returns.
+     * Works for both keel (kl_server_stop equivalent through the
+     * wrapped event ctx) and the poll backend. */
+    if (js->base.async_ctx)
+        hl_async_backend()->stop(js->base.async_ctx);
     return JS_UNDEFINED;
 }
 
@@ -1528,7 +1542,15 @@ static int vt_js_run_main(HlRuntime *rt, KlServer *server,
         hl_js_run_jobs(js);  /* in case both already settled via microtasks */
 
         if (js->cli_main_active) {
-            int srv_rc = kl_server_run(server);
+            /* Drive the event loop via the async backend. On HTTP=1
+             * this is a wrap around KlServer's KlEventCtx; on HTTP=0
+             * it's the poll backend's standalone loop. The .then
+             * callbacks attached above (js_cli_main_settle) call
+             * backend->stop when main's promise settles. */
+            (void)server;  /* unused — we go through the backend now */
+            int srv_rc = (js->base.async_ctx)
+                ? hl_async_backend()->run(js->base.async_ctx)
+                : -1;
             if (srv_rc < 0)
                 fprintf(stderr, "[hull:main] event loop error\n");
             hl_js_run_jobs(js);  /* drain anything that landed after stop */

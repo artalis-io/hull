@@ -380,8 +380,12 @@ static void js_dispatch_done_fn(void *ud)
         if (ctx) hl_async_ctx_free(ctx);
         return;
     }
+#ifdef HL_ENABLE_HTTP
     hl_net_op_complete(op->async_ctx->net_ctx,
                        (HlSuspendOp *)&op->async_ctx->op);
+#else
+    (void)op;
+#endif
 }
 
 static void js_dispatch_cancel_fn(void *ud)

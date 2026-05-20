@@ -359,28 +359,6 @@ const HlAsyncBackend hl_async_backend_keel = {
     .op_complete      = keel_op_complete,
 };
 
-/*
- * Backend selection.
- *
- * HL_ENABLE_HTTP=1 (default): the keel backend wins. HTTP-server-y
- *   code shares the same KlEventCtx that backs kl_server_*.
- *
- * HL_ENABLE_HTTP=0 (CLI builds, Phase 3d-5): the poll backend wins;
- *   keel.c isn't even compiled in (Makefile drops async/keel.c from
- *   ASYNC_BACKEND_SRCS when HL_ENABLE_HTTP=0), and the link drops
- *   libkeel.a.
- *
- * The vtable is picked at compile time so the hot-path call
- * (hl_async_backend()->whatever) inlines through one indirection,
- * not two.
- */
-extern const HlAsyncBackend hl_async_backend_poll;
-
-const HlAsyncBackend *hl_async_backend(void)
-{
-#ifdef HL_ENABLE_HTTP
-    return &hl_async_backend_keel;
-#else
-    return &hl_async_backend_poll;
-#endif
-}
+/* The hl_async_backend() selector lives in async/poll.c — poll.c is
+ * always compiled, this file (keel.c) gets dropped on HL_ENABLE_HTTP=0
+ * so the selector can't live here. */

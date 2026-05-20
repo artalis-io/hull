@@ -857,3 +857,54 @@ const HlAsyncBackend hl_async_backend_poll = {
     .op_suspend       = poll_op_suspend,
     .op_complete      = poll_op_complete,
 };
+
+/* ── Backend selection ─────────────────────────────────────────────── */
+
+/*
+ * Lives here (poll.c is always compiled) rather than in keel.c (dropped
+ * on HL_ENABLE_HTTP=0). Compile-time pick so the hot-path call
+ * (hl_async_backend()->whatever) costs one indirection.
+ *
+ *   HL_ENABLE_HTTP=1: keel wins. HTTP-server-y code shares the same
+ *                     KlEventCtx that backs kl_server_*.
+ *   HL_ENABLE_HTTP=0: poll wins. async/keel.c isn't compiled and
+ *                     libkeel.a isn't linked.
+ */
+#ifdef HL_ENABLE_HTTP
+extern const HlAsyncBackend hl_async_backend_keel;
+#endif
+
+const HlAsyncBackend *hl_async_backend(void)
+{
+#ifdef HL_ENABLE_HTTP
+    return &hl_async_backend_keel;
+#else
+    return &hl_async_backend_poll;
+#endif
+}
+
+/* ── HlNetBackend stubs for HTTP=0 builds ─────────────────────────────
+ *
+ * On HTTP=1 these symbols live in src/hull/net/keel.c. On HTTP=0
+ * net/keel.c is dropped from the build entirely (there's no net
+ * backend), but the call sites in worker_db.c / worker_wasm.c /
+ * worker_gpu.c / async.c / runtime/{lua,js}/{async,mod_db,mod_compute,
+ * mod_gpu,mod_worker}.c are guarded by `if (active_conn)` checks
+ * that are false on CLI builds — so the symbols are referenced but
+ * the calls are unreachable. Provide harmless stubs so the link
+ * succeeds.
+ */
+#ifndef HL_ENABLE_HTTP
+#include "hull/net_backend.h"
+
+int hl_net_op_suspend(HlNetBackendCtx *ctx, HlReqHandle *req, HlSuspendOp *op)
+{
+    (void)ctx; (void)req; (void)op;
+    return -1;       /* CLI mode: no net backend to suspend on */
+}
+
+void hl_net_op_complete(HlNetBackendCtx *ctx, HlSuspendOp *op)
+{
+    (void)ctx; (void)op;
+}
+#endif

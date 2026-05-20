@@ -538,6 +538,7 @@ static int vt_lua_run_test_file(HlRuntime *rt, const char *file_path,
                                 int *file_total, int *file_passed, int *file_failed,
                                 const char **load_err)
 {
+#ifdef HL_ENABLE_HTTP
     HlLua *lua = (HlLua *)rt;
     hl_lua_test_clear(lua->L);
     if (luaL_dofile(lua->L, file_path) != LUA_OK) {
@@ -552,6 +553,12 @@ static int vt_lua_run_test_file(HlRuntime *rt, const char *file_path,
     hl_lua_test_run(lua->L, file_total, file_passed, file_failed,
                     NULL, results, max_results);
     return 0;
+#else
+    (void)rt; (void)file_path; (void)results; (void)max_results;
+    (void)file_total; (void)file_passed; (void)file_failed;
+    if (load_err) *load_err = "test runner unavailable on HTTP=0 builds";
+    return -1;
+#endif
 }
 
 static void vt_lua_destroy(HlRuntime *rt)
@@ -811,8 +818,8 @@ static int vt_lua_run_main(HlRuntime *rt, KlServer *server,
          * eventually completes, then enter the event loop. */
         lua->cli_main_co = co;
 
-        if (!lua->server) {
-            fprintf(stderr, "[hull:main] internal: no server to drive event loop\n");
+        if (!lua->base.async_ctx) {
+            fprintf(stderr, "[hull:main] internal: no event loop available\n");
             luaL_unref(L, LUA_REGISTRYINDEX, co_ref);
             lua->active_co         = saved_co;
             lua->active_conn       = saved_conn;
@@ -822,14 +829,18 @@ static int vt_lua_run_main(HlRuntime *rt, KlServer *server,
             return -1;
         }
 
-        int srv_rc = kl_server_run(lua->server);
+        /* Drive the event loop via the async backend vtable. On HTTP=1
+         * builds this is a wrap around KlServer's KlEventCtx (same loop
+         * the HTTP server uses); on HTTP=0 it's the poll backend's
+         * standalone loop. hl_lua_async_resume calls backend->stop when
+         * main terminates, which returns us here. */
+        int srv_rc = hl_async_backend()->run(lua->base.async_ctx);
         if (srv_rc < 0) {
             fprintf(stderr, "[hull:main] event loop error\n");
         }
 
-        /* hl_lua_async_resume cleared lua->cli_main_co + the active_co
-         * fields before calling kl_server_stop. After kl_server_run
-         * returns, the coroutine status reflects main's terminal state. */
+        /* After run() returns, the coroutine status reflects main's
+         * terminal state. */
         status = lua_status(co);
         nres   = lua_gettop(co);
     }

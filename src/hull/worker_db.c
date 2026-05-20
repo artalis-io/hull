@@ -362,8 +362,16 @@ static void db_done_fn(void *ud)
         if (ctx) hl_async_ctx_free(ctx);
         return;
     }
+#ifdef HL_ENABLE_HTTP
+    /* Connection revival path — only meaningful when an HTTP request
+     * was suspended. CLI builds never reach here because submit()
+     * fails at suspend-time (no net backend → hl_net_op_suspend
+     * returns -1 → mod_db.c bails before submitting work). */
     hl_net_op_complete(op->async_ctx->net_ctx,
                        (HlSuspendOp *)&op->async_ctx->op);
+#else
+    (void)op;
+#endif
 }
 
 static void db_cancel_fn(void *ud)

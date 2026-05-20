@@ -109,6 +109,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
         js->active_conn = NULL;
         js->dispatch_depth--;
 
+#ifdef HL_ENABLE_HTTP
         if (conn) {
             if (conn->res.body_mode == KL_BODY_STREAM) {
                 conn->state = KL_CONN_CLOSED;
@@ -116,6 +117,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
                 conn->state = KL_CONN_SENDING;
             }
         }
+#endif
 
         /* Timer async completion: clear in_flight and reschedule.
          * Timers are HTTP-only (app.every / app.daily); CLI builds
@@ -150,12 +152,14 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
         js->active_conn = NULL;
         js->dispatch_depth--;
 
+#ifdef HL_ENABLE_HTTP
         if (conn) {
             kl_response_status(&conn->res, 500);
             kl_response_header(&conn->res, "Content-Type", "text/plain");
             kl_response_body_borrow(&conn->res, "Internal Server Error", 21);
             conn->state = KL_CONN_SENDING;
         }
+#endif
 
         /* Timer error: clear in_flight and reschedule anyway. CLI
          * builds have no timers. */
@@ -299,9 +303,9 @@ static JSValue js_hull_sleep(JSContext *ctx, JSValueConst this_val,
         return JS_UNDEFINED; /* no-op for zero/negative */
 
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (!js || !js->server)
+    if (!js || !js->base.async_ctx)
         return JS_ThrowInternalError(ctx,
-            "hull.sleep() requires an active server");
+            "hull.sleep() requires an active event loop");
 
     KlServer *server = js->server;
     KlConn *conn = js->active_conn;

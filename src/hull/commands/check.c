@@ -8,7 +8,9 @@
  */
 
 #include "hull/commands/check.h"
+#ifdef HL_ENABLE_HTTP
 #include "hull/commands/test.h"
+#endif
 #include "hull/commands/verify.h"
 #include "hull/commands/modules.h"
 
@@ -45,12 +47,17 @@ int hl_cmd_check(int argc, char **argv, const HlCommandEnv *env)
         }
     }
 
+#ifdef HL_ENABLE_HTTP
     fprintf(stderr, "[hull:check] running tests...\n");
     int rc = hl_cmd_test(argc, argv, env);
     if (rc != 0) {
         fprintf(stderr, "[hull:check] tests failed\n");
         return rc;
     }
+#else
+    int rc = 0;
+    fprintf(stderr, "[hull:check] (test runner unavailable on HTTP=0 builds)\n");
+#endif
 
     fprintf(stderr, "[hull:check] running verify...\n");
     rc = hl_cmd_verify(argc, argv, env);

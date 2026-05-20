@@ -357,13 +357,49 @@ passes the same tests as the keel backend. The CLI driver (Phase
 HTTP server library in the link.
 
 ### Phase 3d-5 — drop Keel from `HL_ENABLE_HTTP=0` link
-- Makefile: when `HL_ENABLE_HTTP=0`, the keel backend objects + `libkeel.a`
-  drop out, the poll backend objects come in
-- `serve_cli.c` switches from `server=NULL` to passing the poll backend's
-  context — main.c's run_main now actually has an event loop
-- Binary-size verification: target ≥ 1 MB drop vs HTTP=1 build
-- Outcome: pure CLI Hull with full async support, no Keel in the link.
-  ~2 days.
+
+Done:
+
+  ✓ Makefile drops `src/hull/async/keel.c`, `src/hull/net/keel.c`, all
+    `NET_BACKEND_OBJS`, `vendor/keel/libkeel.a`, and the entire
+    `MBEDTLS_OBJS` set on `HL_ENABLE_HTTP=0`. Also filters out
+    `cap/test.c`, `test_runner.c`, `hull_compress.c` (all HTTP-only),
+    `cmd/update.c` + `cmd/test.c` + `cmd/agent.c` + `cmd/mcp.c`
+    (HTTP-server tools), and `mod_test.c` + the agent subcommands
+    that target a running server (test/request/eval/perf/endpoint).
+  ✓ `hl_async_backend()` selector moved to `async/poll.c` (always
+    compiled) so it survives keel.c being dropped. Stubs for
+    `hl_net_op_suspend` / `hl_net_op_complete` live there too,
+    behind `#ifndef HL_ENABLE_HTTP`, so the worker_*.c done_fns
+    link cleanly without needing per-callsite guards.
+  ✓ `serve_cli.c` creates a poll-backend ctx via `hl_async_backend()->init`
+    and lends it to `rt->async_ctx` before calling `run_main`, then
+    tears it down. Replaces the old `server=NULL` stub.
+  ✓ `vt_{lua,js}_run_main` and the cli_main_settle / async_resume
+    paths route through `hl_async_backend()->run` / `->stop` instead
+    of `kl_server_run` / `kl_server_stop`. Removes the
+    HTTP-server-shaped gate on a generic async-in-main primitive.
+  ✓ `hull.sleep` gates on `rt->async_ctx` instead of `lua->server`
+    (Keel's KlServer*) — the architectural mistake of muddling
+    layer-2 HTTP state with the layer-1 async primitive is cleaned
+    up.
+  ✓ Binary size drop: 5.0 MB → 4.4 MB (~600 KB, ~12%). Short of the
+    1 MB target in the original plan; mbedTLS (-200 KB) + keel
+    (-200 KB) + dead HTTP code (-200 KB) account for the savings.
+    Getting closer to 1 MB will require additional source-level
+    pruning (cacert.c, more agent_*.c paths).
+  ✓ Smoke-tested: `hull run app.lua` runs `app.main(fn)` with
+    `hull.sleep` working across multiple yield/resume cycles, using
+    only the poll backend (no Keel in the link).
+
+Limitations still in place (Phase 3d-6+ work):
+
+  - `db.async`, `compute.async`, `gpu.async`, `http.fetch` are
+    request-bound today — they require `active_conn`, which on CLI
+    builds is always NULL. Synchronous variants of all four work.
+  - `hull update` (Keel-dependent HTTPS client), `hull test`
+    (in-process HTTP harness), `hull dev` (forks a server),
+    `hull agent`, `hull mcp` are unavailable on HTTP=0 builds.
 
 Total: ~14 days of focused work, spread across 5 commits. Each commit
 keeps both build flavors green.

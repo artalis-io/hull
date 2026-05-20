@@ -58,7 +58,9 @@ static void hl_async_on_cancel(KlAsyncOp *op, void *user_data)
 HlAsyncCtx *hl_async_ctx_create(KlServer *s, HlNetBackendCtx *net_ctx,
                                 HlAllocator *alloc)
 {
-    if (!s) return NULL;
+    /* Both may be NULL — detached callers don't need either field;
+     * the actual loop is reached via the async backend ctx that the
+     * caller's runtime carries separately. */
 
     HlAsyncCtx *ctx = hl_alloc_malloc(alloc, sizeof(HlAsyncCtx));
     if (!ctx) return NULL;
@@ -85,11 +87,17 @@ void hl_async_ctx_free(HlAsyncCtx *ctx)
 void hl_async_on_deadline_sleep(KlAsyncOp *op, void *user_data)
 {
     HlAsyncCtx *ctx = (HlAsyncCtx *)user_data;
-    /* For sleep, deadline = "timer fired" = success.
-     * Routes through the net backend so this code stays free of
-     * Keel symbols; op_complete fires op->on_resume, which resumes
-     * the handler. */
+    /* For sleep, deadline = "timer fired" = success. The attached
+     * path routes through the net backend to revive the suspended
+     * connection. CLI builds (HTTP=0) never reach here — connection-
+     * less sleeps go through the detached-mode timer path in
+     * runtime/{lua,js}/async.c. */
+#ifdef HL_ENABLE_HTTP
     hl_net_op_complete(ctx->net_ctx, (HlSuspendOp *)op);
+#else
+    (void)ctx;
+    (void)op;
+#endif
 }
 
 void hl_async_ctx_resume_detached(HlAsyncCtx *ctx)

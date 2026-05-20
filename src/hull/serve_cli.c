@@ -18,6 +18,7 @@
  */
 
 #include "hull/app_context.h"
+#include "hull/async_backend.h"
 #include "hull/manifest.h"
 #include "hull/module_resolver.h"
 #include "hull/runtime.h"
@@ -167,10 +168,29 @@ int hull_serve(int argc, char **argv)
 
     const char **env_allow = build_env_allowlist(&manifest);
 
-    /* Invoke main. server=NULL ⇒ no event loop ⇒ async-in-main is
-     * not supported (Phase 3d). Sync ops work normally. */
+    /* Create an async-backend ctx — the poll backend on HTTP=0, the
+     * keel backend on HTTP=1. The runtime's vt_*_run_main drives this
+     * loop while main is suspended on async ops (hull.sleep at
+     * minimum; other async ops still depend on a connection and
+     * remain unavailable in CLI mode pending the worker-detached
+     * follow-up). */
+    const HlAsyncBackend *be = hl_async_backend();
+    HlAsyncBackendCtx *async_ctx = NULL;
+    if (be->init(&async_ctx, NULL) != 0) {
+        fprintf(stderr, "[hull:cli] failed to init async backend\n");
+        free((void *)env_allow);
+        hl_manifest_free(&manifest);
+        hl_app_context_free(ctx);
+        return 1;
+    }
+    rt->async_ctx = async_ctx;
+
     int rc = 1;
     int run = rt->vt->run_main(rt, NULL, app_argc, app_argv, env_allow, &rc);
+
+    /* Detach borrowed pointer before tearing down (mirrors serve.c). */
+    rt->async_ctx = NULL;
+    be->free(async_ctx);
 
     free((void *)env_allow);
     hl_manifest_free(&manifest);
