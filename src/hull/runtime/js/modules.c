@@ -52,14 +52,13 @@ int hl_js_register_modules(HlJS *js)
     if (hl_js_init_log_module(js->ctx, js) != 0)
         return -1;
 
-#ifdef HL_ENABLE_HTTP
-    /* Register hull:http module — always available; per-function checks
-     * enforce that http_cfg is set (wired from manifest after load_app). */
+#ifdef HL_ENABLE_HTTP_CLIENT
+    /* hull:http (http.fetch) — per-function checks enforce that
+     * http_cfg is set (wired from manifest after load_app). */
     if (hl_js_init_http_module(js->ctx, js) != 0)
         return -1;
 
-    /* Register hull:smtp module — always available; per-function checks
-     * enforce that smtp_cfg is set (wired from manifest after load_app). */
+    /* hull:smtp (outbound mail) — per-function checks enforce smtp_cfg. */
     if (hl_js_init_smtp_module(js->ctx, js) != 0)
         return -1;
 #endif
@@ -74,8 +73,8 @@ int hl_js_register_modules(HlJS *js)
             return -1;
     }
 
-#ifdef HL_ENABLE_HTTP
-    /* Register hull:server module (always available) */
+#ifdef HL_ENABLE_HTTP_SERVER
+    /* hull:server — app.get/app.post/app.use/etc. */
     if (hl_js_init_server_module(js->ctx, js) != 0)
         return -1;
 #endif
@@ -105,8 +104,8 @@ int hl_js_register_modules(HlJS *js)
     }
 #endif
 
-#ifdef HL_ENABLE_HTTP
-    /* Register hull:ws module + SSE class (always available) */
+#ifdef HL_ENABLE_HTTP_SERVER
+    /* hull:ws + SSE class — server-side WebSocket + Server-Sent Events. */
     hl_js_sse_register_class(js->ctx);
     if (hl_js_init_ws_module(js->ctx, js) != 0)
         return -1;

@@ -24,6 +24,15 @@
 #include "hull/runtime.h"
 #include "hull/sandbox.h"
 #include "hull/serve.h"
+#include "hull/cap/fs.h"
+#include "hull/cap/env.h"
+
+#ifdef HL_ENABLE_HTTP_CLIENT
+#include "hull/cap/http.h"
+#include "hull/cacert.h"
+#include <keel/client.h>
+#include <keel/tls_mbedtls.h>
+#endif
 
 #include "log.h"
 
@@ -162,6 +171,58 @@ int hull_serve(int argc, char **argv)
         log_warn("[hull:cli] manifest extraction failed; running without policy");
     }
 
+    /* Wire per-capability configs from the manifest. serve.c does this
+     * in `wire_caps` for the server build; in CLI mode we do the same
+     * dance inline so capabilities that gate on manifest declarations
+     * (fs.read paths, env allowlist, http hosts + TLS) work out of
+     * app.main. */
+    HlFsConfig fs_cfg = {0};
+    if (manifest.fs_read_count > 0) {
+        fs_cfg.base_dir = app_dir;
+        fs_cfg.base_len = strlen(app_dir);
+        rt->fs_cfg = &fs_cfg;
+    }
+
+    HlEnvConfig env_cfg = {0};
+    if (manifest.env_count > 0) {
+        env_cfg.allowed = manifest.env;
+        env_cfg.count   = manifest.env_count;
+        rt->env_cfg = &env_cfg;
+    }
+
+#ifdef HL_ENABLE_HTTP_CLIENT
+    /* http.fetch needs allowlisted hosts + a TLS client for https://.
+     * The embedded Mozilla CA bundle is the default trust anchor —
+     * matches the resolution order in serve.c minus the system-store
+     * probe (which adds platform-specific cruft we don't need for CLI). */
+    HlHttpConfig http_cfg = {0};
+    KlAllocator kalloc    = kl_allocator_default();
+    KlTlsConfig tls_cfg   = {0};
+    KlTlsCtx *tls_ctx     = NULL;
+
+    if (manifest.hosts_count > 0) {
+        http_cfg.allowed_hosts     = manifest.hosts;
+        http_cfg.count             = manifest.hosts_count;
+        http_cfg.timeout_ms        = KL_CLIENT_DEFAULT_TIMEOUT_MS;
+        http_cfg.max_response_size = KL_CLIENT_DEFAULT_MAX_RESP;
+        http_cfg.follow_redirects  = 1;
+
+        const unsigned char *emb_data = NULL;
+        size_t emb_len = 0;
+        if (hl_embedded_ca_bundle(&emb_data, &emb_len) == 0) {
+            tls_ctx = kl_tls_mbedtls_client_ctx_create_from_buf(
+                emb_data, emb_len, &kalloc);
+            if (tls_ctx) {
+                tls_cfg.ctx         = tls_ctx;
+                tls_cfg.factory     = (KlTlsFactory)kl_tls_mbedtls_create;
+                tls_cfg.ctx_destroy = (void (*)(KlTlsCtx *))kl_tls_mbedtls_ctx_destroy;
+                http_cfg.tls        = &tls_cfg;
+            }
+        }
+        rt->http_cfg = &http_cfg;
+    }
+#endif
+
     if (!no_sandbox) {
         HlSandboxPolicy sandbox_policy;
         hl_sandbox_policy_from_manifest(&sandbox_policy, &manifest);
@@ -209,6 +270,12 @@ int hull_serve(int argc, char **argv)
     /* Detach borrowed pointers before tearing down (mirrors serve.c). */
     rt->thread_pool = NULL;
     rt->async_ctx = NULL;
+    rt->fs_cfg = NULL;
+    rt->env_cfg = NULL;
+#ifdef HL_ENABLE_HTTP_CLIENT
+    rt->http_cfg = NULL;
+    if (tls_ctx) kl_tls_mbedtls_ctx_destroy(tls_ctx);
+#endif
     if (pool) be->pool_free(pool);
     be->free(async_ctx);
 

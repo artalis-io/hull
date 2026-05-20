@@ -47,13 +47,18 @@
  * `hull/http@1` without any `hosts` entries is an error.
  */
 
-#define HL_MOD_CAP_FS      (1u << 0)  /* requires manifest.fs.read/write */
-#define HL_MOD_CAP_HOSTS   (1u << 1)  /* requires manifest.hosts */
-#define HL_MOD_CAP_ENV     (1u << 2)  /* requires manifest.env */
-#define HL_MOD_CAP_DB      (1u << 3)  /* requires HL_ENABLE_DB at build */
-#define HL_MOD_CAP_WASM    (1u << 4)  /* requires HL_ENABLE_WASM + compute */
-#define HL_MOD_CAP_GPU     (1u << 5)  /* requires HL_ENABLE_GPU + gpu:true */
-#define HL_MOD_CAP_HTTP    (1u << 6)  /* requires HL_ENABLE_HTTP at build */
+#define HL_MOD_CAP_FS          (1u << 0)  /* requires manifest.fs.read/write */
+#define HL_MOD_CAP_HOSTS       (1u << 1)  /* requires manifest.hosts */
+#define HL_MOD_CAP_ENV         (1u << 2)  /* requires manifest.env */
+#define HL_MOD_CAP_DB          (1u << 3)  /* requires HL_ENABLE_DB at build */
+#define HL_MOD_CAP_WASM        (1u << 4)  /* requires HL_ENABLE_WASM + compute */
+#define HL_MOD_CAP_GPU         (1u << 5)  /* requires HL_ENABLE_GPU + gpu:true */
+#define HL_MOD_CAP_HTTP_CLIENT (1u << 6)  /* requires HL_ENABLE_HTTP_CLIENT at build */
+#define HL_MOD_CAP_HTTP_SERVER (1u << 7)  /* requires HL_ENABLE_HTTP_SERVER at build */
+/* Back-compat: HL_MOD_CAP_HTTP means "any HTTP" (server OR client).
+ * Existing module specs that haven't been classified yet still use
+ * this; new specs should pick CLIENT or SERVER. */
+#define HL_MOD_CAP_HTTP        (HL_MOD_CAP_HTTP_CLIENT | HL_MOD_CAP_HTTP_SERVER)
 
 /* ── Module spec ────────────────────────────────────────────────────── */
 

@@ -67,8 +67,26 @@ Hull's distribution is one binary; what's compiled into it is controlled by a sm
 | `HL_ENABLE_TCC` | 1 | Drop embedded TinyCC (`hull build --compiler=tcc` rejected) |
 | `HL_EMBED_CA_BUNDLE` | 1 | Drop Mozilla CA bundle (~200 KB, breaks HTTPS without system store) |
 | `HL_ENABLE_DB` | 1 | Drop SQLite + `db.*` + `migrate.*` + worker-DB connections + DB-backed stdlib (session, ratelimit, idempotency, outbox, inbox, rbac, search). ~1.4 MB smaller. See "Compute-only builds" below. |
+| `HL_ENABLE_HTTP_SERVER` | 1 | Drop the inbound HTTP server: serve.c (KlServer setup), routing, body reader, WebSocket server (cap/ws), middleware, SSE, in-process test harness (cap/test, test_runner), and `hull dev/test/agent/mcp` commands. Apps must use `app.main(fn)` and may not declare `hull/ws`, `hull/server`, `hull/sse`, or any `hull/middleware/*`. See "HTTP build flavors" below. |
+| `HL_ENABLE_HTTP_CLIENT` | 1 | Drop the outbound HTTP/HTTPS client: `http.fetch` (cap/http + cap/http_async), SMTP send (cap/smtp), and `hull update` (which uses Keel's HTTPS client). Apps may not declare `hull/http`, `hull/smtp`, or `hull/email`. |
+| `HL_ENABLE_HTTP` | 1 | **Back-compat alias.** Setting `HL_ENABLE_HTTP=0` pins both `HL_ENABLE_HTTP_SERVER` and `HL_ENABLE_HTTP_CLIENT` to 0. The macro stays defined when either granular flag is on, so existing source guards continue to mean "any HTTP at all". |
 
 Combine flags freely: `make HL_ENABLE_DB=0 HL_ENABLE_WASM=1 HL_ENABLE_TCC=0` yields a pure compute runtime with Lua/JS orchestration but no database or build-toolchain.
+
+### HTTP build flavors
+
+The two HTTP flags are independent. Each combination produces a useful binary (arm64 Darwin sizes for the default `make` invocation):
+
+| Flavor | Server | Client | Binary | Use case |
+|---|---|---|---|---|
+| Default | 1 | 1 | ~5.0 MB | Full HTTP — web apps that serve requests and call out to APIs. |
+| Server-only | 1 | 0 | ~5.0 MB | Apps that handle inbound HTTP but are forbidden from making outgoing HTTP calls (compliance, network isolation). |
+| **Client-only** | 0 | 1 | ~4.9 MB | CLI tools that call APIs over HTTPS. No HTTP listener; `http.fetch("https://...")` works from `app.main(fn)`. Keel + mbedTLS stay linked. |
+| Pure compute | 0 | 0 | ~4.4 MB | Compute / CLI binary with no HTTP, no Keel, no mbedTLS. Smallest possible build. |
+
+**Linker dependencies.** Keel's `libkeel.a` and mbedTLS are linked whenever either HTTP flag is on (Keel ships both halves; the linker dead-strips the unused side). The compile-time `-DHL_ENABLE_HTTP` macro is defined in that same case, so existing source guards continue to work — `HL_ENABLE_HTTP_SERVER` / `HL_ENABLE_HTTP_CLIENT` are only used where the distinction matters.
+
+**Migration note.** The single `HL_ENABLE_HTTP` flag is now a back-compat alias. New code targeting one half (e.g. an HTTP-server-only middleware, or a CLI tool that needs outbound HTTPS) should use the granular flags directly.
 
 ### Compute-only builds (`HL_ENABLE_DB=0`)
 
@@ -506,7 +524,8 @@ local fetcher = require("hull.http")
 | `module 'hull/jwt@1' requires 'hull/crypto' but it is not declared` | Declared module's dep is missing | Add the dep to `modules` |
 | `module 'hull/http@1' requires a non-empty 'hosts' section in the manifest` | Declared module needs a capability that isn't wired | Add the matching capability field |
 | `module 'hull/gpu@1' requires HL_ENABLE_GPU (build-time)` | The build wasn't compiled with the subsystem | Rebuild hull with `make HL_ENABLE_GPU=1 …` or remove the module declaration |
-| `module 'hull/http@1' requires HL_ENABLE_HTTP (build-time)` | App targets an `HL_ENABLE_HTTP=0` CLI-only build but declares an HTTP-dependent module (`hull/http`, `hull/ws`, `hull/server`, `hull/smtp`, `hull/email`, any `hull/middleware/*`) | Rebuild without `HL_ENABLE_HTTP=0` or remove the module. See [docs/cli_mode.md](docs/cli_mode.md). |
+| `module 'hull/http@1' requires HL_ENABLE_HTTP_CLIENT (build-time)` | App declares an outbound HTTP module (`hull/http`, `hull/smtp`, `hull/email`) on a build with `HL_ENABLE_HTTP_CLIENT=0` | Rebuild with `HL_ENABLE_HTTP_CLIENT=1` (the default) or remove the module declaration. |
+| `module 'hull/server@1' requires HL_ENABLE_HTTP_SERVER (build-time)` | App declares an inbound HTTP module (`hull/server`, `hull/ws`, `hull/sse`, any `hull/middleware/*`) on a build with `HL_ENABLE_HTTP_SERVER=0` | Rebuild with `HL_ENABLE_HTTP_SERVER=1` (the default) or remove the module declaration. See [docs/cli_mode.md](docs/cli_mode.md). |
 | `unknown module 'X' in app.manifest.modules` | Typo or non-existent module | Run `hull modules available` for the canonical list |
 
 **CLI surface:**

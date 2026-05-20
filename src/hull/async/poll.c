@@ -862,13 +862,19 @@ const HlAsyncBackend hl_async_backend_poll = {
 
 /*
  * Lives here (poll.c is always compiled) rather than in keel.c (dropped
- * on HL_ENABLE_HTTP=0). Compile-time pick so the hot-path call
- * (hl_async_backend()->whatever) costs one indirection.
+ * when neither HTTP half is on). Compile-time pick so the hot-path
+ * call (hl_async_backend()->whatever) costs one indirection.
  *
- *   HL_ENABLE_HTTP=1: keel wins. HTTP-server-y code shares the same
- *                     KlEventCtx that backs kl_server_*.
- *   HL_ENABLE_HTTP=0: poll wins. async/keel.c isn't compiled and
- *                     libkeel.a isn't linked.
+ *   either HTTP half on : keel wins. The same KlEventCtx backs both
+ *                          KlServer (HL_ENABLE_HTTP_SERVER) and
+ *                          kl_client_* (HL_ENABLE_HTTP_CLIENT).
+ *   both halves off     : poll wins. async/keel.c isn't compiled and
+ *                          libkeel.a isn't linked.
+ *
+ * HL_ENABLE_HTTP is the legacy "any HTTP at all" macro — still
+ * defined by the Makefile when either granular flag is on, and that's
+ * exactly the condition under which keel.c compiles. Keep using it
+ * here for symmetry with the build.
  */
 #ifdef HL_ENABLE_HTTP
 extern const HlAsyncBackend hl_async_backend_keel;
@@ -883,18 +889,18 @@ const HlAsyncBackend *hl_async_backend(void)
 #endif
 }
 
-/* ── HlNetBackend stubs for HTTP=0 builds ─────────────────────────────
+/* ── HlNetBackend stubs for HL_ENABLE_HTTP_SERVER=0 builds ──────────
  *
- * On HTTP=1 these symbols live in src/hull/net/keel.c. On HTTP=0
- * net/keel.c is dropped from the build entirely (there's no net
- * backend), but the call sites in worker_db.c / worker_wasm.c /
- * worker_gpu.c / async.c / runtime/{lua,js}/{async,mod_db,mod_compute,
- * mod_gpu,mod_worker}.c are guarded by `if (active_conn)` checks
- * that are false on CLI builds — so the symbols are referenced but
- * the calls are unreachable. Provide harmless stubs so the link
- * succeeds.
+ * The real symbols live in src/hull/net/keel.c, which compiles only
+ * when HL_ENABLE_HTTP_SERVER=1 (the only situation where the
+ * connection-bound suspend pair is meaningfully invoked). Other
+ * builds — CLI, pure compute, or even client-only HTTPS — reach the
+ * symbols transitively (worker_db/wasm/gpu.c, cap/http_async.c, the
+ * runtime async paths), but the call sites are gated by
+ * `if (active_conn)` / `if (!ctx->detached)` checks that never fire
+ * without a server. Stubs let the link succeed.
  */
-#ifndef HL_ENABLE_HTTP
+#ifndef HL_ENABLE_HTTP_SERVER
 #include "hull/net_backend.h"
 
 int hl_net_op_suspend(HlNetBackendCtx *ctx, HlReqHandle *req, HlSuspendOp *op)

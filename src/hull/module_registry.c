@@ -95,7 +95,9 @@ static const HlModuleSpec REGISTRY[] = {
     {
         .name = "hull/http",
         .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = HL_MOD_CAP_HOSTS | HL_MOD_CAP_HTTP, .deps = {0},
+        /* http.fetch — outbound HTTP/HTTPS client. */
+        .required_caps = HL_MOD_CAP_HOSTS | HL_MOD_CAP_HTTP_CLIENT,
+        .deps = {0},
     },
     {
         .name = "hull/i18n",
@@ -135,37 +137,37 @@ static const HlModuleSpec REGISTRY[] = {
 
     /* ── Middleware ───────────────────────────────────────────────────
      * Every middleware consumes KlRequest/KlResponse and registers via
-     * app.use() / app.use_post(), all of which need Keel. They share
-     * HL_MOD_CAP_HTTP — apps targeting an HL_ENABLE_HTTP=0 hull build
-     * can't declare any of them. */
+     * app.use() / app.use_post(), all of which need Keel's HTTP server.
+     * They share HL_MOD_CAP_HTTP_SERVER — apps targeting an
+     * HL_ENABLE_HTTP_SERVER=0 build can't declare any of them. */
     {
         .name = "hull/middleware/auth",
         .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = HL_MOD_CAP_HTTP,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER,
         .deps = {"hull/db", "hull/crypto", 0},
     },
     {
         .name = "hull/middleware/cors",
         .api_major = 1, .intrinsic = 0, .pure = 1,
-        .required_caps = HL_MOD_CAP_HTTP, .deps = {0},
+        .required_caps = HL_MOD_CAP_HTTP_SERVER, .deps = {0},
     },
     {
         .name = "hull/middleware/csrf",
         .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = HL_MOD_CAP_HTTP,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER,
         .deps = {"hull/crypto", 0},
     },
     {
         .name = "hull/middleware/etag",
         .api_major = 1, .intrinsic = 0, .pure = 1,
-        .required_caps = HL_MOD_CAP_HTTP,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER,
         .deps = {"hull/crypto", 0},
         /* No db dep — etag only computes a SHA-256 from the body. */
     },
     {
         .name = "hull/middleware/health",
         .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = HL_MOD_CAP_HTTP,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER,
         /* health pings the DB and inspects server stats; both are hard
          * deps even when db_check is disabled at runtime, because the
          * required modules need to be importable. */
@@ -174,47 +176,47 @@ static const HlModuleSpec REGISTRY[] = {
     {
         .name = "hull/middleware/idempotency",
         .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = HL_MOD_CAP_HTTP,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER,
         .deps = {"hull/db", "hull/crypto", 0},
     },
     {
         .name = "hull/middleware/inbox",
         .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = HL_MOD_CAP_HTTP,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER,
         .deps = {"hull/db", 0},
     },
     {
         .name = "hull/middleware/logger",
         .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = HL_MOD_CAP_HTTP, .deps = {0},
+        .required_caps = HL_MOD_CAP_HTTP_SERVER, .deps = {0},
     },
     {
         .name = "hull/middleware/outbox",
         .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = HL_MOD_CAP_HTTP,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER,
         .deps = {"hull/db", "hull/http", 0},
     },
     {
         .name = "hull/middleware/ratelimit",
         .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = HL_MOD_CAP_HTTP, .deps = {0},
+        .required_caps = HL_MOD_CAP_HTTP_SERVER, .deps = {0},
     },
     {
         .name = "hull/middleware/rbac",
         .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = HL_MOD_CAP_HTTP,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER,
         .deps = {"hull/db", 0},
     },
     {
         .name = "hull/middleware/session",
         .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = HL_MOD_CAP_HTTP,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER,
         .deps = {"hull/db", "hull/crypto", 0},
     },
     {
         .name = "hull/middleware/transaction",
         .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = HL_MOD_CAP_HTTP,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER,
         .deps = {"hull/db", 0},
     },
 
@@ -228,12 +230,15 @@ static const HlModuleSpec REGISTRY[] = {
     {
         .name = "hull/server",
         .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = HL_MOD_CAP_HTTP, .deps = {0},
+        /* app.get/post/use/etc. — inbound HTTP server registration. */
+        .required_caps = HL_MOD_CAP_HTTP_SERVER, .deps = {0},
     },
     {
         .name = "hull/smtp",
         .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = HL_MOD_CAP_HOSTS | HL_MOD_CAP_HTTP, .deps = {0},
+        /* SMTP client — outbound mail delivery. */
+        .required_caps = HL_MOD_CAP_HOSTS | HL_MOD_CAP_HTTP_CLIENT,
+        .deps = {0},
     },
     {
         .name = "hull/template",
@@ -258,7 +263,8 @@ static const HlModuleSpec REGISTRY[] = {
     {
         .name = "hull/ws",
         .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = HL_MOD_CAP_HTTP, .deps = {0},
+        /* WebSocket server — app.ws() endpoint registration. */
+        .required_caps = HL_MOD_CAP_HTTP_SERVER, .deps = {0},
     },
 };
 

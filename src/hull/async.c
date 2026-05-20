@@ -92,7 +92,7 @@ void hl_async_on_deadline_sleep(KlAsyncOp *op, void *user_data)
      * connection. CLI builds (HTTP=0) never reach here — connection-
      * less sleeps go through the detached-mode timer path in
      * runtime/{lua,js}/async.c. */
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_SERVER
     hl_net_op_complete(ctx->net_ctx, (HlSuspendOp *)op);
 #else
     (void)ctx;

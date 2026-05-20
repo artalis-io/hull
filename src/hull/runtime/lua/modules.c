@@ -61,9 +61,11 @@ int hl_lua_register_modules(HlLua *lua)
     register_native_module(L, "hull.time",   luaopen_hull_time);
     register_native_module(L, "hull.env",    luaopen_hull_env);
     register_native_module(L, "hull.crypto", luaopen_hull_crypto);
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_CLIENT
     register_native_module(L, "hull.http",   luaopen_hull_http);
     register_native_module(L, "hull.smtp",   luaopen_hull_smtp);
+#endif
+#ifdef HL_ENABLE_HTTP_SERVER
     register_native_module(L, "hull.server", luaopen_hull_server);
     register_native_module(L, "hull.ws",     luaopen_hull_ws);
 #endif
@@ -88,7 +90,7 @@ int hl_lua_register_modules(HlLua *lua)
         register_native_module(L, "hull.gpu", luaopen_hull_gpu);
 #endif
 
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_SERVER
     /* SSE stream metatable (used by app.sse handler dispatch). */
     hl_lua_sse_register_mt(L);
 #endif

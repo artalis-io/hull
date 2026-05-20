@@ -52,7 +52,7 @@ typedef struct HlLuaAsyncCont {
 /* Forward declarations for timer reschedule (defined in timers.c —
  * dropped under HL_ENABLE_HTTP=0; the corresponding call sites are
  * guarded so the symbol is never referenced in CLI builds). */
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_SERVER
 void hl_lua_timer_reschedule(HlLuaTimer *t);
 #endif
 
@@ -118,7 +118,7 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
          * timer_ctx field is always NULL in CLI-only builds so the
          * branch is dead but the symbol reference would still need to
          * link — guard it out entirely. */
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_SERVER
         if (lc->timer_ctx) {
             HlLuaTimer *t = (HlLuaTimer *)lc->timer_ctx;
             t->in_flight = 0;
@@ -163,7 +163,7 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
         lua->active_conn = NULL;
         lua->dispatch_depth--;
 
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_SERVER
         if (conn) {
             kl_response_status(&conn->res, 500);
             kl_response_header(&conn->res, "Content-Type", "text/plain");
@@ -174,7 +174,7 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
 
         /* Timer error: clear in_flight and reschedule anyway. CLI-only
          * builds have no timers, so this branch is dead — guard out. */
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_SERVER
         if (lc->timer_ctx) {
             HlLuaTimer *t = (HlLuaTimer *)lc->timer_ctx;
             t->in_flight = 0;

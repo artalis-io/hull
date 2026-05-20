@@ -8,7 +8,7 @@
  */
 
 #include "hull/commands/check.h"
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_SERVER
 #include "hull/commands/test.h"
 #endif
 #include "hull/commands/verify.h"
@@ -47,7 +47,7 @@ int hl_cmd_check(int argc, char **argv, const HlCommandEnv *env)
         }
     }
 
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_SERVER
     fprintf(stderr, "[hull:check] running tests...\n");
     int rc = hl_cmd_test(argc, argv, env);
     if (rc != 0) {

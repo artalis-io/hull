@@ -128,16 +128,49 @@ LUA_OBJS := $(patsubst $(LUA_DIR)/%.c,$(BUILDDIR)/lua_%.o,$(LUA_SRCS))
 # Lua compiled with relaxed warnings (vendored code)
 LUA_CFLAGS := -std=c11 -O2 -w -DLUA_USE_POSIX
 
+# ── HTTP server / client — config flags ─────────────────────────────
+#
+# Declared here (early) because the Keel + mbedTLS sections below gate
+# on $(HL_ENABLE_HTTP_ANY). Full prose docs are repeated at line 195
+# (where they used to live) so anyone scrolling the build flags table
+# also finds them.
+
+HL_ENABLE_HTTP ?= 1
+
+# Back-compat: HL_ENABLE_HTTP=0 forces both off; otherwise honour the
+# granular flag defaults (both ?= 1 below).
+ifeq ($(HL_ENABLE_HTTP),0)
+HL_ENABLE_HTTP_SERVER ?= 0
+HL_ENABLE_HTTP_CLIENT ?= 0
+endif
+HL_ENABLE_HTTP_SERVER ?= 1
+HL_ENABLE_HTTP_CLIENT ?= 1
+
+# CFLAGS macros: granular always defined; HL_ENABLE_HTTP (the legacy
+# "any HTTP at all" gate) defined when either is on.
+ifeq ($(HL_ENABLE_HTTP_SERVER),1)
+CFLAGS += -DHL_ENABLE_HTTP_SERVER
+endif
+ifeq ($(HL_ENABLE_HTTP_CLIENT),1)
+CFLAGS += -DHL_ENABLE_HTTP_CLIENT
+endif
+ifeq ($(HL_ENABLE_HTTP_SERVER)$(HL_ENABLE_HTTP_CLIENT),00)
+HL_ENABLE_HTTP_ANY := 0
+else
+HL_ENABLE_HTTP_ANY := 1
+CFLAGS += -DHL_ENABLE_HTTP
+endif
+
 # ── Keel (external library) ─────────────────────────────────────────
 
-# Keel is included as a git submodule in vendor/keel. On HL_ENABLE_HTTP=0
-# builds Keel is not linked — KEEL_LIB resolves to empty so it can be
-# spliced into link lines unconditionally. KEEL_INC stays defined so
-# tests that include <keel/...> still parse (they're filtered out of
-# the HTTP=0 build at the source-list level).
+# Keel is included as a git submodule in vendor/keel. Dropped from the
+# link only when both HTTP halves are off — Keel ships the HTTP client
+# (used by HL_ENABLE_HTTP_CLIENT=1) and the HTTP server (used by
+# HL_ENABLE_HTTP_SERVER=1) together; the linker dead-strips the half
+# that isn't referenced.
 KEEL_DIR   ?= $(VENDDIR)/keel
 KEEL_INC   := $(KEEL_DIR)/include
-ifeq ($(HL_ENABLE_HTTP),0)
+ifeq ($(HL_ENABLE_HTTP_ANY),0)
 KEEL_LIB   :=
 else
 KEEL_LIB   := $(KEEL_DIR)/libkeel.a
@@ -157,14 +190,16 @@ endif
 
 # ── mbedTLS (vendored) ─────────────────────────────────────────────
 #
-# mbedTLS is only consumed by HTTP-flavored code (cap/smtp.c for STARTTLS,
-# serve.c via Keel's KlTlsCtx). On HL_ENABLE_HTTP=0 builds none of those
-# are compiled in, so mbedTLS drops out of the link entirely — saving
-# ~1.5 MB.
+# mbedTLS is used by both halves of the HTTP stack:
+#   - HTTP server (HL_ENABLE_HTTP_SERVER=1): TLS termination via Keel's
+#     KlTlsCtx in serve.c.
+#   - HTTP client (HL_ENABLE_HTTP_CLIENT=1): HTTPS for http.fetch +
+#     STARTTLS for SMTP send (cap/smtp.c).
+# Dropped from the link only when BOTH are off (pure-compute build).
 
 MBEDTLS_DIR    := $(VENDDIR)/mbedtls
 MBEDTLS_SRCS   := $(wildcard $(MBEDTLS_DIR)/library/*.c)
-ifeq ($(HL_ENABLE_HTTP),0)
+ifeq ($(HL_ENABLE_HTTP_ANY),0)
 MBEDTLS_OBJS   :=
 else
 MBEDTLS_OBJS   := $(patsubst $(MBEDTLS_DIR)/library/%.c,$(BUILDDIR)/mbed_%.o,$(MBEDTLS_SRCS))
@@ -190,25 +225,52 @@ ifeq ($(HL_ENABLE_DB),1)
 CFLAGS += -DHL_ENABLE_DB
 endif
 
-# ── HTTP server / client (Keel) — config flag ──────────────────────
-# On by default. When disabled, Hull builds as a pure CLI / compute
-# runtime: drops Keel from the link, drops the HTTP capability layer
-# (cap/http, cap/ws, cap/body, cap/smtp, static), drops route /
-# middleware / WebSocket / SSE bindings in both runtimes, and removes
-# every middleware in the stdlib (cors, ratelimit, csrf, auth, session,
-# logger, transaction, idempotency, outbox, inbox, rbac, health, etag).
-# Apps must use app.main(fn) entry point and may not declare hull/http,
-# hull/ws, hull/server, hull/smtp, hull/email, or any middleware.
+# ── HTTP server / client — config flag reference ────────────────────
 #
-# Phase 3a: flag is wired through CFLAGS and the module resolver, but
-# conditional compilation of source files (Phase 3b) is not yet done —
-# setting HL_ENABLE_HTTP=0 today will NOT produce a valid build.
-
-HL_ENABLE_HTTP ?= 1
-
-ifeq ($(HL_ENABLE_HTTP),1)
-CFLAGS += -DHL_ENABLE_HTTP
-endif
+# Flag values are computed up top (above the Keel / mbedTLS sections
+# which gate on them); this block documents them.
+#
+#   HL_ENABLE_HTTP_SERVER (default 1)
+#     The inbound HTTP stack: serve.c (KlServer setup), routing, body
+#     reader, WebSocket server (cap/ws), middleware, SSE, the in-process
+#     test harness (cap/test, test_runner), and `hull dev/test/agent/mcp`
+#     commands. Drops mod_{server,ws,sse,test} + routes/dispatch/timers/
+#     bindings glue in both runtimes. Apps with HL_ENABLE_HTTP_SERVER=0
+#     must use `app.main(fn)` and may not declare hull/ws, hull/server,
+#     hull/sse, or any hull/middleware/*.
+#
+#   HL_ENABLE_HTTP_CLIENT (default 1)
+#     The outbound network stack: `http.fetch` (cap/http + cap/http_async),
+#     SMTP send (cap/smtp), and the `hull update` command (which uses
+#     Keel's HTTPS client). Drops mod_http + mod_smtp from both runtimes.
+#     Apps with HL_ENABLE_HTTP_CLIENT=0 may not declare hull/http,
+#     hull/smtp, or hull/email.
+#
+# Combined effects (binary sizes are arm64 Darwin, default build):
+#
+#   server  client  result                                   binary
+#   1       1       Full HTTP — default Hull build.          ~5.0 MB
+#   0       1       CLI + outbound HTTPS. No server stack;   ~4.9 MB
+#                   http.fetch works, can hit https://*.
+#                   Keel + mbedTLS still linked.
+#   1       0       Inbound server, no outbound HTTP. Niche  ~5.0 MB
+#                   — server-only apps that may not make
+#                   outgoing HTTP calls.
+#   0       0       Pure compute / CLI. No Keel, no mbedTLS. ~4.4 MB
+#
+# HL_ENABLE_HTTP back-compat:
+#   Setting HL_ENABLE_HTTP=0 still works — it pins both
+#   HL_ENABLE_HTTP_{SERVER,CLIENT} to 0. Setting HL_ENABLE_HTTP=1
+#   (the default) leaves the granular flags at their own defaults
+#   (both 1), so existing `make` invocations don't change behavior.
+#
+# Linker dependencies:
+#   mbedTLS and libkeel.a are linked when EITHER server or client
+#   is on (Keel ships both halves; the linker dead-strips the unused
+#   side). The compile-time -DHL_ENABLE_HTTP macro stays defined in
+#   that same case, so existing source guards continue to mean "any
+#   HTTP at all" — granular guards (HL_ENABLE_HTTP_{SERVER,CLIENT})
+#   are only used where the distinction matters.
 
 # ── SQLite (vendored amalgamation) ─────────────────────────────────
 
@@ -643,22 +705,28 @@ ifeq ($(HL_ENABLE_DB),0)
       $(SRCDIR)/hull/cap/db_udf.c, \
       $(CAP_SRCS))
 endif
-ifeq ($(HL_ENABLE_HTTP),0)
-  # Drop HTTP capability modules in CLI-only builds. Keel itself is
-  # also dropped from the link below.
+ifeq ($(HL_ENABLE_HTTP_CLIENT),0)
+  # CLIENT-only capability sources — http.fetch sync + async + SMTP send.
   CAP_SRCS := $(filter-out \
       $(SRCDIR)/hull/cap/http.c \
       $(SRCDIR)/hull/cap/http_async.c \
-      $(SRCDIR)/hull/cap/ws.c \
-      $(SRCDIR)/hull/cap/body.c \
       $(SRCDIR)/hull/cap/smtp.c, \
+      $(CAP_SRCS))
+endif
+ifeq ($(HL_ENABLE_HTTP_SERVER),0)
+  # SERVER-only capability sources — body reader (request bodies) +
+  # WebSocket server. cap/test.c (in-process HTTP harness) is handled
+  # separately below.
+  CAP_SRCS := $(filter-out \
+      $(SRCDIR)/hull/cap/ws.c \
+      $(SRCDIR)/hull/cap/body.c, \
       $(CAP_SRCS))
 endif
 CAP_OBJS := $(patsubst $(SRCDIR)/hull/cap/%.c,$(BUILDDIR)/cap_%.o,$(CAP_SRCS))
 CAP_TOOL_OBJ := $(BUILDDIR)/cap_tool.o
 # cap/test.c is the in-process HTTP test harness — depends on KlRouter
-# and the rest of Keel's request/response machinery. Drop on HTTP=0.
-ifeq ($(HL_ENABLE_HTTP),0)
+# and the rest of Keel's request/response machinery. Server-only.
+ifeq ($(HL_ENABLE_HTTP_SERVER),0)
 CAP_TEST_OBJ :=
 else
 CAP_TEST_OBJ := $(BUILDDIR)/cap_test.o
@@ -672,16 +740,21 @@ ifeq ($(HL_ENABLE_DB),0)
       $(SRCDIR)/hull/runtime/js/worker_db.c, \
       $(JS_RT_SRCS))
 endif
-ifeq ($(HL_ENABLE_HTTP),0)
-  # Drop server/route/middleware/HTTP-client bindings + their backends.
-  # mod_test (in-process HTTP test harness) depends on hl_cap_test_dispatch
-  # which is in cap/test.c — both go.
+ifeq ($(HL_ENABLE_HTTP_CLIENT),0)
+  # CLIENT-only JS bindings: http.fetch + SMTP send.
   JS_RT_SRCS := $(filter-out \
       $(SRCDIR)/hull/runtime/js/mod_http.c \
+      $(SRCDIR)/hull/runtime/js/mod_smtp.c, \
+      $(JS_RT_SRCS))
+endif
+ifeq ($(HL_ENABLE_HTTP_SERVER),0)
+  # SERVER-only JS bindings: app.ws/app.sse/app.get/etc + their backends.
+  # mod_test depends on hl_cap_test_dispatch which is in cap/test.c —
+  # both drop together (cap/test is filtered above).
+  JS_RT_SRCS := $(filter-out \
       $(SRCDIR)/hull/runtime/js/mod_ws.c \
       $(SRCDIR)/hull/runtime/js/mod_server.c \
       $(SRCDIR)/hull/runtime/js/mod_sse.c \
-      $(SRCDIR)/hull/runtime/js/mod_smtp.c \
       $(SRCDIR)/hull/runtime/js/mod_test.c \
       $(SRCDIR)/hull/runtime/js/routes.c \
       $(SRCDIR)/hull/runtime/js/dispatch.c \
@@ -701,13 +774,17 @@ ifeq ($(HL_ENABLE_DB),0)
       $(SRCDIR)/hull/runtime/lua/worker_db.c, \
       $(LUA_RT_SRCS))
 endif
-ifeq ($(HL_ENABLE_HTTP),0)
+ifeq ($(HL_ENABLE_HTTP_CLIENT),0)
   LUA_RT_SRCS := $(filter-out \
       $(SRCDIR)/hull/runtime/lua/mod_http.c \
+      $(SRCDIR)/hull/runtime/lua/mod_smtp.c, \
+      $(LUA_RT_SRCS))
+endif
+ifeq ($(HL_ENABLE_HTTP_SERVER),0)
+  LUA_RT_SRCS := $(filter-out \
       $(SRCDIR)/hull/runtime/lua/mod_ws.c \
       $(SRCDIR)/hull/runtime/lua/mod_server.c \
       $(SRCDIR)/hull/runtime/lua/mod_sse.c \
-      $(SRCDIR)/hull/runtime/lua/mod_smtp.c \
       $(SRCDIR)/hull/runtime/lua/mod_test.c \
       $(SRCDIR)/hull/runtime/lua/routes.c \
       $(SRCDIR)/hull/runtime/lua/dispatch.c \
@@ -724,23 +801,22 @@ CMD_SRCS := $(wildcard $(SRCDIR)/hull/commands/*.c)
 ifeq ($(HL_ENABLE_DB),0)
   CMD_SRCS := $(filter-out $(SRCDIR)/hull/commands/migrate.c,$(CMD_SRCS))
 endif
-ifeq ($(HL_ENABLE_HTTP),0)
-  # hull dev forks a serve subprocess; no point without a server.
-  # hull update uses keel's HTTPS client to fetch releases; without
-  # libkeel.a we'd need a freestanding HTTPS path. Self-update is
-  # therefore unavailable on CLI builds today.
-  # hull test exercises the in-process HTTP harness (cap/test.c +
-  # test_runner.c); both depend on KlRouter and drop with the
-  # HTTP=0 build.
-  # hull agent / hull mcp are introspection tools targeting a running
-  # HTTP server (most subcommands call hl_agent_endpoint /
-  # hl_agent_request / hl_agent_test which need a live HTTP harness).
-  # Drop them on CLI builds; future work could split out a
-  # `cmd_agent_cli.c` that exposes only the DB / schema / routes
-  # subcommands that don't need a server.
+ifeq ($(HL_ENABLE_HTTP_CLIENT),0)
+  # `hull update` uses Keel's HTTPS client to fetch releases.
+  CMD_SRCS := $(filter-out $(SRCDIR)/hull/commands/update.c,$(CMD_SRCS))
+endif
+ifeq ($(HL_ENABLE_HTTP_SERVER),0)
+  # SERVER-side commands:
+  #   - `hull dev` forks a serve subprocess (no server = no point).
+  #   - `hull test` exercises the in-process HTTP harness (cap/test.c +
+  #     test_runner.c, both KlRouter-bound).
+  #   - `hull agent` / `hull mcp` are introspection tools targeting a
+  #     running HTTP server (most subcommands call hl_agent_endpoint /
+  #     hl_agent_request / hl_agent_test which need a live harness).
+  # A future `cmd_agent_cli.c` could expose just the DB / schema / routes
+  # subcommands that don't need a running server.
   CMD_SRCS := $(filter-out \
       $(SRCDIR)/hull/commands/dev.c \
-      $(SRCDIR)/hull/commands/update.c \
       $(SRCDIR)/hull/commands/test.c \
       $(SRCDIR)/hull/commands/agent.c \
       $(SRCDIR)/hull/commands/mcp.c, \
@@ -767,8 +843,8 @@ endif
 ALLOC_OBJ      := $(BUILDDIR)/hull_alloc.o
 ASYNC_OBJ      := $(BUILDDIR)/hull_async.o
 # hull_compress.c wraps kl_response_body_compress for HTTP response
-# bodies. CLI builds have no HTTP responses; drop on HTTP=0.
-ifeq ($(HL_ENABLE_HTTP),0)
+# bodies (server-side). Drop when the server is off.
+ifeq ($(HL_ENABLE_HTTP_SERVER),0)
 COMPRESS_OBJ   :=
 else
 COMPRESS_OBJ   := $(BUILDDIR)/hull_compress.o
@@ -787,27 +863,24 @@ MODULE_OBJ       := $(MODULE_REGISTRY_OBJ) $(MODULE_RESOLVER_OBJ)
 SANDBOX_OBJ      := $(BUILDDIR)/sandbox.o
 
 # Async backend implementations
-#   async/keel.c — wraps Keel's KlEventCtx + KlThreadPool. Default on
-#                  HL_ENABLE_HTTP=1 (shares the loop with the HTTP
-#                  server). Dropped from the build on HL_ENABLE_HTTP=0
-#                  (Phase 3d-5) along with libkeel.a itself.
+#   async/keel.c — wraps Keel's KlEventCtx + KlThreadPool. Compiled
+#                  whenever Keel is linked (either HTTP half on).
 #   async/poll.c — freestanding poll(2) + pthread impl. Always built;
-#                  selected by hl_async_backend() when HL_ENABLE_HTTP
-#                  is not defined.
+#                  selected by hl_async_backend() when neither HTTP
+#                  half is compiled in.
 ASYNC_BACKEND_SRCS := $(wildcard $(SRCDIR)/hull/async/*.c)
-ifeq ($(HL_ENABLE_HTTP),0)
+ifeq ($(HL_ENABLE_HTTP_ANY),0)
   ASYNC_BACKEND_SRCS := $(filter-out $(SRCDIR)/hull/async/keel.c,$(ASYNC_BACKEND_SRCS))
 endif
 ASYNC_BACKEND_OBJS := $(patsubst $(SRCDIR)/hull/async/%.c,$(BUILDDIR)/async_%.o,$(ASYNC_BACKEND_SRCS))
 
 # Net backend implementations
 #   net/keel.c — Keel-backed HlNetBackend (op_suspend / op_complete
-#                pair today). Dropped entirely on HL_ENABLE_HTTP=0:
-#                CLI builds have no HTTP layer, so there's no net
-#                backend to select. `hl_net_backend()` is not called
-#                by any HTTP=0-compiled source.
+#                pair). Server-only: the only callers are server-side
+#                connection-bound request suspension. CLIENT-only or
+#                pure-compute builds use the no-op stubs in async/poll.c.
 NET_BACKEND_SRCS := $(wildcard $(SRCDIR)/hull/net/*.c)
-ifeq ($(HL_ENABLE_HTTP),0)
+ifeq ($(HL_ENABLE_HTTP_SERVER),0)
   NET_BACKEND_SRCS :=
 endif
 NET_BACKEND_OBJS := $(patsubst $(SRCDIR)/hull/net/%.c,$(BUILDDIR)/net_%.o,$(NET_BACKEND_SRCS))
@@ -826,15 +899,17 @@ CAP_TEST_LUA_OBJ := $(BUILDDIR)/cap_test_dispatch.o
 TOOL_OBJ       := $(BUILDDIR)/tool.o
 SIG_OBJ        := $(BUILDDIR)/signature.o
 RELEASE_OBJ    := $(BUILDDIR)/release.o
-# test_runner.c uses KlRouter to dispatch in-process test requests.
-# Drop on HTTP=0 along with the `hull test` command.
-ifeq ($(HL_ENABLE_HTTP),0)
+# test_runner.c uses KlRouter to dispatch in-process test requests —
+# server-only.
+ifeq ($(HL_ENABLE_HTTP_SERVER),0)
 TEST_RUNNER_OBJ :=
 else
 TEST_RUNNER_OBJ := $(BUILDDIR)/test_runner.o
 endif
 RUNTIME_FACTORY_OBJ := $(BUILDDIR)/runtime_factory.o
-ifeq ($(HL_ENABLE_HTTP),0)
+# static.c serves embedded static files via Keel response writers —
+# server-only.
+ifeq ($(HL_ENABLE_HTTP_SERVER),0)
 STATIC_OBJ     :=
 else
 STATIC_OBJ     := $(BUILDDIR)/hull_static.o
@@ -853,12 +928,12 @@ AGENT_LIB_SRCS := $(wildcard $(SRCDIR)/hull/agent/*.c)
 ifeq ($(HL_ENABLE_DB),0)
   AGENT_LIB_SRCS := $(filter-out $(SRCDIR)/hull/agent/db.c,$(AGENT_LIB_SRCS))
 endif
-ifeq ($(HL_ENABLE_HTTP),0)
+ifeq ($(HL_ENABLE_HTTP_SERVER),0)
   # agent/test.c calls hl_test_runner_run + the in-process HTTP harness;
   # agent/request.c, agent/eval.c, agent/perf.c, agent/endpoint.c also
-  # exercise HTTP routes. Drop them; the `hull agent` subcommands that
-  # depend on a running server (test/request/eval/perf/endpoint) lose
-  # their backends on CLI builds.
+  # exercise HTTP routes. All server-only — the `hull agent` subcommands
+  # that depend on a running server (test/request/eval/perf/endpoint)
+  # lose their backends.
   AGENT_LIB_SRCS := $(filter-out \
       $(SRCDIR)/hull/agent/test.c \
       $(SRCDIR)/hull/agent/request.c \
@@ -868,14 +943,11 @@ ifeq ($(HL_ENABLE_HTTP),0)
       $(AGENT_LIB_SRCS))
 endif
 AGENT_LIB_OBJ  := $(patsubst $(SRCDIR)/hull/agent/%.c,$(BUILDDIR)/agent_%.o,$(AGENT_LIB_SRCS))
-# HL_ENABLE_HTTP=0: replace serve.c (Keel-driven full server) with
+# HL_ENABLE_HTTP_SERVER=0: replace serve.c (KlServer setup + routing +
+# middleware + wire_routes + the full request/response lifecycle) with
 # serve_cli.c (load + app.main + exit). agent_api (in-process HTTP
-# introspection) drops out. Keel itself stays linked because its
-# async primitives (kl_async_*, kl_timer_*, KlThreadPool) back the
-# detached coroutine path used by request handlers. CLI-only builds
-# don't drive the event loop, so async-in-main isn't supported — see
-# docs/cli_mode.md Phase 3d for the followup that drops Keel entirely.
-ifeq ($(HL_ENABLE_HTTP),0)
+# introspection) drops out too — it speaks HTTP to a running server.
+ifeq ($(HL_ENABLE_HTTP_SERVER),0)
 AGENT_API_OBJ  :=
 SERVE_OBJ      := $(BUILDDIR)/serve_cli.o
 else
@@ -1436,7 +1508,7 @@ $(BUILDDIR)/main.o: $(SRCDIR)/hull/main.c | $(BUILDDIR)
 $(BUILDDIR)/serve.o: $(SRCDIR)/hull/serve.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# Serve-cli (CLI-only counterpart for HL_ENABLE_HTTP=0 builds)
+# Serve-cli (CLI counterpart, used when HL_ENABLE_HTTP_SERVER=0)
 $(BUILDDIR)/serve_cli.o: $(SRCDIR)/hull/serve_cli.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 

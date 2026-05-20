@@ -51,7 +51,7 @@ typedef struct HlJsAsyncCont {
  */
 /* Forward declarations for timer reschedule (defined in timers.c —
  * dropped under HL_ENABLE_HTTP=0; call sites are guarded). */
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_SERVER
 void hl_js_timer_reschedule(HlJSTimer *t);
 #endif
 
@@ -109,7 +109,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
         js->active_conn = NULL;
         js->dispatch_depth--;
 
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_SERVER
         if (conn) {
             if (conn->res.body_mode == KL_BODY_STREAM) {
                 conn->state = KL_CONN_CLOSED;
@@ -122,7 +122,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
         /* Timer async completion: clear in_flight and reschedule.
          * Timers are HTTP-only (app.every / app.daily); CLI builds
          * never set timer_ctx so the branch is dead. */
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_SERVER
         if (jc->timer_ctx) {
             HlJSTimer *t = (HlJSTimer *)jc->timer_ctx;
             t->in_flight = 0;
@@ -152,7 +152,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
         js->active_conn = NULL;
         js->dispatch_depth--;
 
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_SERVER
         if (conn) {
             kl_response_status(&conn->res, 500);
             kl_response_header(&conn->res, "Content-Type", "text/plain");
@@ -163,7 +163,7 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
 
         /* Timer error: clear in_flight and reschedule anyway. CLI
          * builds have no timers. */
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_SERVER
         if (jc->timer_ctx) {
             HlJSTimer *t = (HlJSTimer *)jc->timer_ctx;
             t->in_flight = 0;

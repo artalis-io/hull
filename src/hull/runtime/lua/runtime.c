@@ -383,7 +383,7 @@ void hl_lua_free(HlLua *lua)
     }
 
     /* Free WebSocket registry — HTTP-only; CLI builds never create one. */
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_SERVER
     if (lua->base.ws_registry) {
         hl_ws_registry_free(lua->base.ws_registry);
         hl_alloc_free(lua->base.alloc, lua->base.ws_registry,
@@ -439,7 +439,7 @@ static int vt_lua_load_app(HlRuntime *rt, const char *filename)
     return hl_lua_load_app((HlLua *)rt, filename);
 }
 
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_SERVER
 static int vt_lua_wire_routes_server(HlRuntime *rt, KlServer *server,
                                       void *(*alloc_fn)(size_t))
 {
@@ -516,7 +516,7 @@ static void vt_lua_enumerate_middleware(HlRuntime *rt, HlMiddlewareCb cb, void *
     }
 }
 
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_SERVER
 static int vt_lua_test_setup(HlRuntime *rt, KlRouter *router)
 {
     HlLua *lua = (HlLua *)rt;
@@ -538,7 +538,7 @@ static int vt_lua_run_test_file(HlRuntime *rt, const char *file_path,
                                 int *file_total, int *file_passed, int *file_failed,
                                 const char **load_err)
 {
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_SERVER
     HlLua *lua = (HlLua *)rt;
     hl_lua_test_clear(lua->L);
     if (luaL_dofile(lua->L, file_path) != LUA_OK) {

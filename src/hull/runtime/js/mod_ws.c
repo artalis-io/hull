@@ -610,6 +610,7 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "invalid WebSocket URL");
     }
 
+#ifdef HL_ENABLE_HTTP_CLIENT
     if (js->base.http_cfg) {
         if (hl_http_check_host(js->base.http_cfg, parsed.host,
                                 parsed.host_len) != 0) {
@@ -617,6 +618,14 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
             return JS_ThrowTypeError(ctx, "host not in allowlist");
         }
     }
+#else
+    /* Without HL_ENABLE_HTTP_CLIENT the host allowlist function isn't
+     * compiled in. ws.connect on a server-only build can't dial out
+     * to arbitrary hosts — fail closed. */
+    JS_FreeCString(ctx, url);
+    return JS_ThrowTypeError(ctx,
+        "ws.connect requires HL_ENABLE_HTTP_CLIENT (build-time)");
+#endif
 
     if (!js->server) {
         JS_FreeCString(ctx, url);

@@ -16,11 +16,11 @@
 #include "hull/commands/verify.h"
 #include "hull/commands/inspect.h"
 #include "hull/commands/manifest.h"
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_SERVER
 #include "hull/commands/test.h"
 #endif
 #include "hull/commands/new.h"
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_SERVER
 #include "hull/commands/dev.h"
 #endif
 #include "hull/commands/eject.h"
@@ -28,7 +28,7 @@
 #include "hull/commands/migrate.h"
 #endif
 #include "hull/commands/sign_platform.h"
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_SERVER
 #include "hull/commands/agent.h"
 #include "hull/commands/mcp.h"
 #endif
@@ -39,7 +39,7 @@
 #include "hull/commands/doctor.h"
 #include "hull/commands/init.h"
 #include "hull/commands/modules.h"
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_CLIENT
 #include "hull/commands/update.h"
 #endif
 #include "hull/commands/sign_release.h"
@@ -55,11 +55,11 @@ static const HlCommand commands[] = {
     { "verify",   hl_cmd_verify },
     { "inspect",  hl_cmd_inspect },
     { "manifest", hl_cmd_manifest },
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_SERVER
     { "test",     hl_cmd_test },
 #endif
     { "new",      hl_cmd_new },
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_SERVER
     { "dev",      hl_cmd_dev },
 #endif
     { "eject",         hl_cmd_eject },
@@ -67,7 +67,7 @@ static const HlCommand commands[] = {
 #ifdef HL_ENABLE_DB
     { "migrate",       hl_cmd_migrate },
 #endif
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_SERVER
     { "agent",         hl_cmd_agent },
     { "mcp",           hl_cmd_mcp },
 #endif
@@ -78,7 +78,7 @@ static const HlCommand commands[] = {
     { "doctor",        hl_cmd_doctor },
     { "init",          hl_cmd_init },
     { "modules",       hl_cmd_modules },
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_CLIENT
     { "update",         hl_cmd_update },
 #endif
     { "sign-release",   hl_cmd_sign_release },

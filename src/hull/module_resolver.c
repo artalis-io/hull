@@ -125,8 +125,11 @@ static uint32_t build_provided_caps(void)
 #ifdef HL_ENABLE_GPU
     caps |= HL_MOD_CAP_GPU;
 #endif
-#ifdef HL_ENABLE_HTTP
-    caps |= HL_MOD_CAP_HTTP;
+#ifdef HL_ENABLE_HTTP_CLIENT
+    caps |= HL_MOD_CAP_HTTP_CLIENT;
+#endif
+#ifdef HL_ENABLE_HTTP_SERVER
+    caps |= HL_MOD_CAP_HTTP_SERVER;
 #endif
     return caps;
 }
@@ -135,14 +138,16 @@ static uint32_t build_provided_caps(void)
 static const char *cap_label(uint32_t cap)
 {
     switch (cap) {
-    case HL_MOD_CAP_FS:    return "fs.read or fs.write";
-    case HL_MOD_CAP_HOSTS: return "hosts";
-    case HL_MOD_CAP_ENV:   return "env";
-    case HL_MOD_CAP_DB:    return "HL_ENABLE_DB (build-time)";
-    case HL_MOD_CAP_WASM:  return "HL_ENABLE_WASM (build-time)";
-    case HL_MOD_CAP_GPU:   return "HL_ENABLE_GPU (build-time)";
-    case HL_MOD_CAP_HTTP:  return "HL_ENABLE_HTTP (build-time)";
-    default:               return "unknown";
+    case HL_MOD_CAP_FS:          return "fs.read or fs.write";
+    case HL_MOD_CAP_HOSTS:       return "hosts";
+    case HL_MOD_CAP_ENV:         return "env";
+    case HL_MOD_CAP_DB:          return "HL_ENABLE_DB (build-time)";
+    case HL_MOD_CAP_WASM:        return "HL_ENABLE_WASM (build-time)";
+    case HL_MOD_CAP_GPU:         return "HL_ENABLE_GPU (build-time)";
+    case HL_MOD_CAP_HTTP_CLIENT: return "HL_ENABLE_HTTP_CLIENT (build-time)";
+    case HL_MOD_CAP_HTTP_SERVER: return "HL_ENABLE_HTTP_SERVER (build-time)";
+    case HL_MOD_CAP_HTTP:        return "HL_ENABLE_HTTP (build-time)";
+    default:                     return "unknown";
     }
 }
 

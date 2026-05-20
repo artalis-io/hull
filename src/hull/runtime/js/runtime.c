@@ -909,7 +909,7 @@ void hl_js_free(HlJS *js)
     }
 
     /* Free WebSocket registry — HTTP-only; CLI builds never create one. */
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_SERVER
     if (js->base.ws_registry) {
         hl_ws_registry_free(js->base.ws_registry);
         hl_alloc_free(js->base.alloc, js->base.ws_registry,
@@ -926,7 +926,7 @@ void hl_js_free(HlJS *js)
     if (js->ctx) {
         /* Free test state opaque data before deleting globals.
          * mod_test (and the test backend) is HTTP-only. */
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_SERVER
         hl_js_test_free(js->ctx);
 #endif
 
@@ -1020,7 +1020,7 @@ static int vt_js_load_app(HlRuntime *rt, const char *filename)
     return hl_js_load_app((HlJS *)rt, filename);
 }
 
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_SERVER
 static int vt_js_wire_routes_server(HlRuntime *rt, KlServer *server,
                                      void *(*alloc_fn)(size_t))
 {
@@ -1115,7 +1115,7 @@ static void vt_js_enumerate_middleware(HlRuntime *rt, HlMiddlewareCb cb, void *u
     JS_FreeValue(js->ctx, global);
 }
 
-#ifdef HL_ENABLE_HTTP
+#ifdef HL_ENABLE_HTTP_SERVER
 static int vt_js_test_setup(HlRuntime *rt, KlRouter *router)
 {
     HlJS *js = (HlJS *)rt;
@@ -1139,7 +1139,7 @@ static int vt_js_run_test_file(HlRuntime *rt, const char *file_path,
                                int *file_total, int *file_passed, int *file_failed,
                                const char **load_err)
 {
-#ifndef HL_ENABLE_HTTP
+#ifndef HL_ENABLE_HTTP_SERVER
     (void)rt; (void)file_path; (void)results; (void)max_results;
     (void)file_total; (void)file_passed; (void)file_failed;
     if (load_err) *load_err = "test runner unavailable on HTTP=0 builds";
