@@ -6,6 +6,7 @@
 #include "mod_buffer.h"
 #include "internal.h"
 #include "hull/async.h"
+#include "hull/net_backend.h"
 
 #include <keel/server.h>
 
@@ -236,7 +237,7 @@ static int lua_worker_dispatch(lua_State *L)
     op->ctx_count = ctx_count;
 
     /* Create async ctx */
-    HlAsyncCtx *actx = hl_async_ctx_create(lua->server, lua->base.alloc);
+    HlAsyncCtx *actx = hl_async_ctx_create(lua->server, lua->base.net_ctx, lua->base.alloc);
     if (!actx) {
         hl_lua_worker_dispatch_op_free(op);
         free(op);
@@ -272,7 +273,7 @@ static int lua_worker_dispatch(lua_State *L)
     }
 
     /* Suspend the connection */
-    if (kl_async_suspend(lua->server, lua->active_conn, &actx->op) < 0) {
+    if (hl_net_op_suspend(lua->base.net_ctx, (HlReqHandle *)lua->active_conn, (HlSuspendOp *)&actx->op) < 0) {
         op->cancelled = 1;
         actx->cont->cancel(actx->cont);
         actx->cont->destroy(actx->cont);

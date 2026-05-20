@@ -11,6 +11,7 @@
 #include "internal.h"
 #include "hull/async.h"
 #include "hull/async_backend.h"
+#include "hull/net_backend.h"
 #include "hull/alloc.h"
 
 #include "lua.h"
@@ -275,7 +276,7 @@ static int lua_hull_sleep(lua_State *L)
     KlConn *conn = lua->active_conn;
 
     /* Create async ctx */
-    HlAsyncCtx *ctx = hl_async_ctx_create(server, lua->base.alloc);
+    HlAsyncCtx *ctx = hl_async_ctx_create(server, lua->base.net_ctx, lua->base.alloc);
     if (!ctx)
         return luaL_error(L, "hull.sleep(): out of memory");
 
@@ -295,7 +296,7 @@ static int lua_hull_sleep(lua_State *L)
         ctx->free_driver = NULL;
         ctx->detached = 0;
 
-        if (kl_async_suspend(server, conn, &ctx->op) < 0) {
+        if (hl_net_op_suspend(lua->base.net_ctx, (HlReqHandle *)conn, (HlSuspendOp *)&ctx->op) < 0) {
             ctx->cont->destroy(ctx->cont);
             hl_async_ctx_free(ctx);
             return luaL_error(L, "hull.sleep(): failed to suspend connection");

@@ -11,6 +11,7 @@
 #include "hull/cap/image.h"
 #include "hull/worker_gpu.h"
 #include "hull/async.h"
+#include "hull/net_backend.h"
 #include "hull/alloc.h"
 #include "hull/vfs.h"
 
@@ -989,7 +990,7 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
     JS_FreeCString(ctx, name);
 
     /* Create async ctx */
-    HlAsyncCtx *actx = hl_async_ctx_create(js->server, js->base.alloc);
+    HlAsyncCtx *actx = hl_async_ctx_create(js->server, js->base.net_ctx, js->base.alloc);
     if (!actx) {
         hl_worker_gpu_op_free(op); free(op);
         return JS_ThrowInternalError(ctx, "gpu.async.dispatch: out of memory");
@@ -1033,7 +1034,7 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "gpu.async.dispatch: thread pool full");
     }
 
-    if (kl_async_suspend(js->server, js->active_conn, &actx->op) < 0) {
+    if (hl_net_op_suspend(js->base.net_ctx, (HlReqHandle *)js->active_conn, (HlSuspendOp *)&actx->op) < 0) {
         atomic_store(&op->cancelled, 1);
         actx->cont->cancel(actx->cont);
         actx->cont->destroy(actx->cont);
@@ -1545,7 +1546,7 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
     }
 
     /* Create async ctx + Promise + continuation */
-    HlAsyncCtx *actx = hl_async_ctx_create(js->server, js->base.alloc);
+    HlAsyncCtx *actx = hl_async_ctx_create(js->server, js->base.net_ctx, js->base.alloc);
     if (!actx) {
         hl_worker_gpu_op_free(op); free(op);
         return JS_ThrowInternalError(ctx, "gpu.async.pipeline: out of memory");
@@ -1588,7 +1589,7 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "gpu.async.pipeline: thread pool full");
     }
 
-    if (kl_async_suspend(js->server, js->active_conn, &actx->op) < 0) {
+    if (hl_net_op_suspend(js->base.net_ctx, (HlReqHandle *)js->active_conn, (HlSuspendOp *)&actx->op) < 0) {
         atomic_store(&op->cancelled, 1);
         actx->cont->cancel(actx->cont);
         actx->cont->destroy(actx->cont);

@@ -14,6 +14,7 @@
 #include "hull/vfs.h"
 #include "hull/worker_wasm.h"
 #include "hull/async.h"
+#include "hull/net_backend.h"
 #include "hull/alloc.h"
 
 #include <keel/server.h>
@@ -456,7 +457,7 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
     JS_FreeCString(ctx, name);
 
     /* Create async ctx */
-    HlAsyncCtx *actx = hl_async_ctx_create(js->server, js->base.alloc);
+    HlAsyncCtx *actx = hl_async_ctx_create(js->server, js->base.net_ctx, js->base.alloc);
     if (!actx) {
         hl_worker_wasm_op_free(op);
         free(op);
@@ -510,7 +511,7 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
     }
 
     /* Suspend connection */
-    if (kl_async_suspend(js->server, js->active_conn, &actx->op) < 0) {
+    if (hl_net_op_suspend(js->base.net_ctx, (HlReqHandle *)js->active_conn, (HlSuspendOp *)&actx->op) < 0) {
         op->cancelled = 1;
         actx->cont->cancel(actx->cont);
         actx->cont->destroy(actx->cont);
@@ -791,7 +792,7 @@ static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
     atomic_store(&pi->busy, 1);
 
     /* Create async ctx */
-    HlAsyncCtx *actx = hl_async_ctx_create(js->server, js->base.alloc);
+    HlAsyncCtx *actx = hl_async_ctx_create(js->server, js->base.net_ctx, js->base.alloc);
     if (!actx) {
         atomic_store(&pi->busy, 0);
         hl_worker_wasm_op_free(op);
@@ -846,7 +847,7 @@ static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "WasmInstance.asyncCall: thread pool full");
     }
 
-    if (kl_async_suspend(js->server, js->active_conn, &actx->op) < 0) {
+    if (hl_net_op_suspend(js->base.net_ctx, (HlReqHandle *)js->active_conn, (HlSuspendOp *)&actx->op) < 0) {
         atomic_store(&pi->busy, 0);
         op->cancelled = 1;
         actx->cont->cancel(actx->cont);

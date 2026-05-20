@@ -10,6 +10,7 @@
 #include "hull/cap/image.h"
 #include "hull/worker_gpu.h"
 #include "hull/async.h"
+#include "hull/net_backend.h"
 #include "hull/vfs.h"
 
 /* Forward declaration */
@@ -856,7 +857,7 @@ static int l_gpu_async_dispatch(lua_State *L)
     op->uniforms_len = uni_len;
 
     /* Create async ctx */
-    HlAsyncCtx *actx = hl_async_ctx_create(lua->server, lua->base.alloc);
+    HlAsyncCtx *actx = hl_async_ctx_create(lua->server, lua->base.net_ctx, lua->base.alloc);
     if (!actx) {
         hl_worker_gpu_op_free(op); free(op);
         return luaL_error(L, "gpu.async.dispatch: out of memory");
@@ -884,7 +885,7 @@ static int l_gpu_async_dispatch(lua_State *L)
         return luaL_error(L, "gpu.async.dispatch: thread pool full");
     }
 
-    if (kl_async_suspend(lua->server, lua->active_conn, &actx->op) < 0) {
+    if (hl_net_op_suspend(lua->base.net_ctx, (HlReqHandle *)lua->active_conn, (HlSuspendOp *)&actx->op) < 0) {
         atomic_store(&op->cancelled, 1);
         actx->cont->cancel(actx->cont);
         actx->cont->destroy(actx->cont);
@@ -1291,7 +1292,7 @@ static int l_gpu_async_pipeline(lua_State *L)
     }
 
     /* Create async ctx */
-    HlAsyncCtx *actx = hl_async_ctx_create(lua->server, lua->base.alloc);
+    HlAsyncCtx *actx = hl_async_ctx_create(lua->server, lua->base.net_ctx, lua->base.alloc);
     if (!actx) {
         hl_worker_gpu_op_free(op); free(op);
         return luaL_error(L, "gpu.async.pipeline: out of memory");
@@ -1319,7 +1320,7 @@ static int l_gpu_async_pipeline(lua_State *L)
         return luaL_error(L, "gpu.async.pipeline: thread pool full");
     }
 
-    if (kl_async_suspend(lua->server, lua->active_conn, &actx->op) < 0) {
+    if (hl_net_op_suspend(lua->base.net_ctx, (HlReqHandle *)lua->active_conn, (HlSuspendOp *)&actx->op) < 0) {
         atomic_store(&op->cancelled, 1);
         actx->cont->cancel(actx->cont);
         actx->cont->destroy(actx->cont);

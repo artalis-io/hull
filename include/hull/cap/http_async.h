@@ -16,7 +16,8 @@
 #include <keel/client.h>
 
 /* Forward declarations */
-typedef struct HlAllocator HlAllocator;
+typedef struct HlAllocator      HlAllocator;
+typedef struct HlNetBackendCtx  HlNetBackendCtx;
 typedef struct KlClientResponse KlClientResponse;
 
 /*
@@ -30,6 +31,7 @@ typedef struct KlClientResponse KlClientResponse;
  * On failure, returns NULL (conn NOT suspended).
  */
 HlAsyncCtx *hl_async_http_start(KlServer *server, KlConn *conn,
+                                  HlNetBackendCtx *net_ctx,
                                   HlAllocator *alloc,
                                   HlHttpConfig *http_cfg,
                                   const char *method, const char *url,

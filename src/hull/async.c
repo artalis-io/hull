@@ -10,6 +10,7 @@
 
 #include "hull/async.h"
 #include "hull/alloc.h"
+#include "hull/net_backend.h"
 #include <string.h>
 
 /* ── KlAsyncOp callbacks ──────────────────────────────────────────── */
@@ -54,7 +55,8 @@ static void hl_async_on_cancel(KlAsyncOp *op, void *user_data)
 
 /* ── Public API ───────────────────────────────────────────────────── */
 
-HlAsyncCtx *hl_async_ctx_create(KlServer *s, HlAllocator *alloc)
+HlAsyncCtx *hl_async_ctx_create(KlServer *s, HlNetBackendCtx *net_ctx,
+                                HlAllocator *alloc)
 {
     if (!s) return NULL;
 
@@ -63,6 +65,7 @@ HlAsyncCtx *hl_async_ctx_create(KlServer *s, HlAllocator *alloc)
 
     memset(ctx, 0, sizeof(*ctx));
     ctx->server = s;
+    ctx->net_ctx = net_ctx;
     ctx->alloc = alloc;
 
     /* Wire common callbacks — caller sets on_deadline (operation-specific) */
@@ -83,8 +86,10 @@ void hl_async_on_deadline_sleep(KlAsyncOp *op, void *user_data)
 {
     HlAsyncCtx *ctx = (HlAsyncCtx *)user_data;
     /* For sleep, deadline = "timer fired" = success.
-     * kl_async_complete calls op->on_resume, which resumes the handler. */
-    kl_async_complete(ctx->server, op);
+     * Routes through the net backend so this code stays free of
+     * Keel symbols; op_complete fires op->on_resume, which resumes
+     * the handler. */
+    hl_net_op_complete(ctx->net_ctx, (HlSuspendOp *)op);
 }
 
 void hl_async_ctx_resume_detached(HlAsyncCtx *ctx)

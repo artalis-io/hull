@@ -12,6 +12,7 @@
 #include "hull/cap/fs.h"
 #include "hull/alloc.h"
 #include "hull/async.h"
+#include "hull/net_backend.h"
 #include "hull/worker_wasm.h"
 #include "hull/vfs.h"
 
@@ -414,7 +415,7 @@ static int lua_compute_async_call(lua_State *L)
     op->input_len = input_len;
 
     /* Create async ctx */
-    HlAsyncCtx *ctx = hl_async_ctx_create(lua->server, lua->base.alloc);
+    HlAsyncCtx *ctx = hl_async_ctx_create(lua->server, lua->base.net_ctx, lua->base.alloc);
     if (!ctx) {
         hl_worker_wasm_op_free(op);
         free(op);
@@ -450,7 +451,7 @@ static int lua_compute_async_call(lua_State *L)
     }
 
     /* Suspend connection and yield */
-    if (kl_async_suspend(lua->server, lua->active_conn, &ctx->op) < 0) {
+    if (hl_net_op_suspend(lua->base.net_ctx, (HlReqHandle *)lua->active_conn, (HlSuspendOp *)&ctx->op) < 0) {
         op->cancelled = 1;
         ctx->cont->cancel(ctx->cont);
         ctx->cont->destroy(ctx->cont);
@@ -635,7 +636,7 @@ static int lua_wasm_inst_async_call(lua_State *L)
     atomic_store(&pi->busy, 1);
 
     /* Create async ctx */
-    HlAsyncCtx *ctx = hl_async_ctx_create(lua->server, lua->base.alloc);
+    HlAsyncCtx *ctx = hl_async_ctx_create(lua->server, lua->base.net_ctx, lua->base.alloc);
     if (!ctx) {
         atomic_store(&pi->busy, 0);
         hl_worker_wasm_op_free(op);
@@ -671,7 +672,7 @@ static int lua_wasm_inst_async_call(lua_State *L)
         return luaL_error(L, "WasmInstance:async_call: thread pool full");
     }
 
-    if (kl_async_suspend(lua->server, lua->active_conn, &ctx->op) < 0) {
+    if (hl_net_op_suspend(lua->base.net_ctx, (HlReqHandle *)lua->active_conn, (HlSuspendOp *)&ctx->op) < 0) {
         atomic_store(&pi->busy, 0);
         op->cancelled = 1;
         ctx->cont->cancel(ctx->cont);

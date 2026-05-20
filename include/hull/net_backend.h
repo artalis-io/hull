@@ -41,6 +41,7 @@ typedef struct HlAsyncBackendCtx HlAsyncBackendCtx;
 typedef struct HlNetBackendCtx   HlNetBackendCtx;   /* server instance */
 typedef struct HlReqHandle       HlReqHandle;       /* one in-flight request */
 typedef struct HlResHandle       HlResHandle;       /* its response builder */
+typedef struct HlSuspendOp       HlSuspendOp;       /* opaque async-op handle (KlAsyncOp* for keel) */
 
 /* ── Handler callback ──────────────────────────────────────────────── */
 
@@ -197,7 +198,35 @@ typedef struct HlNetBackend {
     int    (*ws_send_binary)(HlWsHandle *conn, const char *data, size_t len);
     int    (*ws_send_ping)  (HlWsHandle *conn, const char *data, size_t len);
     int    (*ws_close)      (HlWsHandle *conn, int code, const char *reason);
+
+    /* ── Async-op suspend/complete pair ──────────────────────────────
+     *
+     * These two run the connection-bound side of Hull's async machinery.
+     * `op_suspend` parks an in-flight request: the connection's FD is
+     * pulled out of the event loop, its KlAsyncOp slot is marked
+     * suspended, and the handler returns. `op_complete` re-arms the
+     * FD and fires the op's on_resume callback so the runtime can
+     * deliver the result back to the suspended handler.
+     *
+     * Unlike HlAsyncBackend's connectionless `op_complete`, these take
+     * a request handle (the connection) and route through the net
+     * backend's request lifecycle. They're the bridge that lets
+     * runtime/{lua,js}/async.c + cap/http_async.c + worker_*.c stop
+     * calling Keel directly.
+     *
+     * `op` is opaque to consumers; for the keel backend it is reinterpreted
+     * as KlAsyncOp*. Lifetime + memory ownership stays with the caller. */
+    int    (*op_suspend) (HlNetBackendCtx *ctx, HlReqHandle *req, HlSuspendOp *op);
+    void   (*op_complete)(HlNetBackendCtx *ctx, HlSuspendOp *op);
 } HlNetBackend;
+
+/* ── Convenience wrappers ─────────────────────────────────────────────
+ *
+ * Thin inline forwards over the vtable. Most callers should use these
+ * instead of dereferencing `hl_net_backend()` every time.
+ */
+int  hl_net_op_suspend(HlNetBackendCtx *ctx, HlReqHandle *req, HlSuspendOp *op);
+void hl_net_op_complete(HlNetBackendCtx *ctx, HlSuspendOp *op);
 
 /* ── Backend getter ────────────────────────────────────────────────── */
 

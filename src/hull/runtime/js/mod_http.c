@@ -393,7 +393,7 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
 
     /* Start async HTTP */
     HlAsyncCtx *async_ctx = hl_async_http_start(
-        js->server, js->active_conn, js->base.alloc,
+        js->server, js->active_conn, js->base.net_ctx, js->base.alloc,
         js->base.http_cfg, method, url, headers, num_headers, body, body_len);
 
     JS_FreeCString(ctx, method);

@@ -14,6 +14,7 @@
 #include "internal.h"
 #include "hull/async.h"
 #include "hull/async_backend.h"
+#include "hull/net_backend.h"
 #include "hull/alloc.h"
 
 #include <keel/thread_pool.h>
@@ -379,7 +380,8 @@ static void js_dispatch_done_fn(void *ud)
         if (ctx) hl_async_ctx_free(ctx);
         return;
     }
-    kl_async_complete(op->server, &op->async_ctx->op);
+    hl_net_op_complete(op->async_ctx->net_ctx,
+                       (HlSuspendOp *)&op->async_ctx->op);
 }
 
 static void js_dispatch_cancel_fn(void *ud)

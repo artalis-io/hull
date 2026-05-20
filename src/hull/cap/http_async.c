@@ -12,6 +12,7 @@
 #include "hull/cap/audit.h"
 #include "hull/alloc.h"
 #include "hull/async_backend.h"
+#include "hull/net_backend.h"
 
 #include <keel/allocator.h>
 #include <keel/client_pool.h>
@@ -97,7 +98,7 @@ static void on_redirect_done(KlRedirectClient *rc, void *user_data)
     if (ctx->detached)
         hl_async_ctx_resume_detached(ctx);
     else
-        kl_async_complete(ctx->server, &ctx->op);
+        hl_net_op_complete(ctx->net_ctx, (HlSuspendOp *)&ctx->op);
 }
 
 /* ── KlClient on_done callback (no-redirect path) ───────────────── */
@@ -129,7 +130,7 @@ static void on_keel_client_done(KlClient *client, void *user_data)
     if (ctx->detached)
         hl_async_ctx_resume_detached(ctx);
     else
-        kl_async_complete(ctx->server, &ctx->op);
+        hl_net_op_complete(ctx->net_ctx, (HlSuspendOp *)&ctx->op);
 }
 
 /* ── Deadline timeout ────────────────────────────────────────────── */
@@ -149,12 +150,13 @@ static void on_http_deadline(KlAsyncOp *op, void *user_data)
     if (ctx->detached)
         hl_async_ctx_resume_detached(ctx);
     else
-        kl_async_complete(ctx->server, &ctx->op);
+        hl_net_op_complete(ctx->net_ctx, (HlSuspendOp *)&ctx->op);
 }
 
 /* ── Public API ──────────────────────────────────────────────────── */
 
 HlAsyncCtx *hl_async_http_start(KlServer *server, KlConn *conn,
+                                  HlNetBackendCtx *net_ctx,
                                   HlAllocator *alloc,
                                   HlHttpConfig *http_cfg,
                                   const char *method, const char *url,
@@ -197,7 +199,7 @@ HlAsyncCtx *hl_async_http_start(KlServer *server, KlConn *conn,
         kl_cfg.tls = NULL;
 
     /* Create async context */
-    HlAsyncCtx *ctx = hl_async_ctx_create(server, alloc);
+    HlAsyncCtx *ctx = hl_async_ctx_create(server, net_ctx, alloc);
     if (!ctx)
         return NULL;
 
@@ -256,7 +258,7 @@ HlAsyncCtx *hl_async_http_start(KlServer *server, KlConn *conn,
     if (conn) {
         /* Attached mode: suspend the inbound connection */
         ctx->detached = 0;
-        if (kl_async_suspend(server, conn, &ctx->op) < 0) {
+        if (hl_net_op_suspend(net_ctx, (HlReqHandle *)conn, (HlSuspendOp *)&ctx->op) < 0) {
             if (ctx->free_driver)
                 ctx->free_driver(ctx->driver);
             ctx->driver = NULL;

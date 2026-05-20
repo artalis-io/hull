@@ -32,6 +32,7 @@
 typedef struct HlAllocator HlAllocator;
 typedef struct HlAsyncBackendCtx  HlAsyncBackendCtx;
 typedef struct HlAsyncBackendPool HlAsyncBackendPool;
+typedef struct HlNetBackendCtx    HlNetBackendCtx;
 typedef struct HlTestCaseResult HlTestCaseResult;
 typedef struct KlRouter KlRouter;
 typedef struct HlFsConfig HlFsConfig;
@@ -157,6 +158,13 @@ struct HlRuntime {
      * of touching KlServer / KlEventCtx directly. NULL means async
      * primitives are unavailable on this runtime (rare). */
     HlAsyncBackendCtx *async_ctx;
+    /* HlNetBackend context — the HTTP/connection lifecycle layer.
+     * Borrowed from HlServerState (which owns the wrap around KlServer).
+     * Consumers route connection-bound async-op suspend/complete
+     * (hl_net_op_suspend / hl_net_op_complete) through this so they
+     * don't need to know about Keel directly. NULL in CLI-mode builds
+     * (no net layer). */
+    HlNetBackendCtx *net_ctx;
     const char   *db_path;       /* SQLite file path (borrowed, for worker connections) */
     struct KlCompressConfig *compress;  /* response compression config (NULL = disabled) */
     HlWsRegistry *ws_registry;          /* WebSocket connection registry (NULL if no WS endpoints) */

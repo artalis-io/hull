@@ -18,7 +18,8 @@
 #include <keel/async.h>
 
 /* Forward declarations */
-typedef struct HlAllocator HlAllocator;
+typedef struct HlAllocator     HlAllocator;
+typedef struct HlNetBackendCtx HlNetBackendCtx;
 
 /* ── HlAsyncCont — runtime continuation vtable ────────────────────── */
 
@@ -53,7 +54,8 @@ typedef struct HlAsyncCont {
 
 typedef struct HlAsyncCtx {
     KlAsyncOp    op;            /* embedded — container_of to get ctx */
-    KlServer    *server;
+    KlServer    *server;        /* TODO: retire once all consumers route via net_ctx */
+    HlNetBackendCtx *net_ctx;   /* borrowed from rt->net_ctx */
 
     /* Keel driver — opaque to the ctx */
     void        *driver;        /* KlHttpClient*, NULL for sleep, etc. */
@@ -71,9 +73,14 @@ typedef struct HlAsyncCtx {
  * (on_resume, on_cancel). Caller must set:
  *   ctx->cont, ctx->driver, ctx->free_driver, ctx->op.deadline_ms,
  *   and ctx->op.on_deadline (operation-specific).
- * Then call kl_async_suspend(server, conn, &ctx->op).
+ * Then call hl_net_op_suspend(net_ctx, conn, &ctx->op).
+ *
+ * `net_ctx` is borrowed from the runtime (rt->net_ctx). It may be
+ * NULL only for connectionless / detached callers; suspend-based
+ * paths must pass a real backend ctx.
  */
-HlAsyncCtx *hl_async_ctx_create(KlServer *s, HlAllocator *alloc);
+HlAsyncCtx *hl_async_ctx_create(KlServer *s, HlNetBackendCtx *net_ctx,
+                                HlAllocator *alloc);
 
 /*
  * Free an async context without calling callbacks.

@@ -8,10 +8,12 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 
 app.manifest({
+    modules = { "hull/http@1" },
     hosts = {"127.0.0.1"},
     env = {"ECHO_PORT"},
 })
 
+local http = require("hull.http")
 local ECHO_BASE = "http://127.0.0.1:19860"
 
 -- GET /test/get — exercise http.get()

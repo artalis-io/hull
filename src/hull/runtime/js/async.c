@@ -11,6 +11,7 @@
 #include "internal.h"
 #include "hull/async.h"
 #include "hull/async_backend.h"
+#include "hull/net_backend.h"
 #include "hull/alloc.h"
 
 #include "quickjs.h"
@@ -306,7 +307,7 @@ static JSValue js_hull_sleep(JSContext *ctx, JSValueConst this_val,
     KlConn *conn = js->active_conn;
 
     /* Create async ctx */
-    HlAsyncCtx *actx = hl_async_ctx_create(server, js->base.alloc);
+    HlAsyncCtx *actx = hl_async_ctx_create(server, js->base.net_ctx, js->base.alloc);
     if (!actx)
         return JS_ThrowInternalError(ctx, "hull.sleep(): out of memory");
 
@@ -342,7 +343,7 @@ static JSValue js_hull_sleep(JSContext *ctx, JSValueConst this_val,
         actx->op.on_deadline = hl_async_on_deadline_sleep;
         actx->detached = 0;
 
-        if (kl_async_suspend(server, conn, &actx->op) < 0) {
+        if (hl_net_op_suspend(js->base.net_ctx, (HlReqHandle *)conn, (HlSuspendOp *)&actx->op) < 0) {
             actx->cont->destroy(actx->cont);
             hl_async_ctx_free(actx);
             JS_FreeValue(ctx, promise);

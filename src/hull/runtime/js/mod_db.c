@@ -11,6 +11,7 @@
 #include "hull/cap/db_backend.h"
 #include "hull/worker_db.h"
 #include "hull/async.h"
+#include "hull/net_backend.h"
 #include "hull/alloc.h"
 
 #ifdef HL_ENABLE_WASM
@@ -452,7 +453,7 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
     js_free_hl_values(ctx, params, nparams);
 
     /* Create async ctx */
-    HlAsyncCtx *actx = hl_async_ctx_create(js->server, js->base.alloc);
+    HlAsyncCtx *actx = hl_async_ctx_create(js->server, js->base.net_ctx, js->base.alloc);
     if (!actx) {
         hl_worker_db_op_free(op);
         free(op);
@@ -506,7 +507,7 @@ static JSValue js_db_async_common(JSContext *ctx, JSValueConst this_val,
     }
 
     /* Suspend the connection */
-    if (kl_async_suspend(js->server, js->active_conn, &actx->op) < 0) {
+    if (hl_net_op_suspend(js->base.net_ctx, (HlReqHandle *)js->active_conn, (HlSuspendOp *)&actx->op) < 0) {
         op->cancelled = 1;
         actx->cont->cancel(actx->cont);
         actx->cont->destroy(actx->cont);

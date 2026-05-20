@@ -9,6 +9,7 @@
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
 #include "hull/async.h"
+#include "hull/net_backend.h"
 #include "hull/worker_db.h"
 
 #ifdef HL_ENABLE_WASM
@@ -415,7 +416,7 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
     lua_free_hl_values(L, params, nparams);
 
     /* Create async ctx */
-    HlAsyncCtx *ctx = hl_async_ctx_create(lua->server, lua->base.alloc);
+    HlAsyncCtx *ctx = hl_async_ctx_create(lua->server, lua->base.net_ctx, lua->base.alloc);
     if (!ctx) {
         hl_worker_db_op_free(op);
         free(op);
@@ -451,7 +452,7 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
     }
 
     /* Suspend the connection */
-    if (kl_async_suspend(lua->server, lua->active_conn, &ctx->op) < 0) {
+    if (hl_net_op_suspend(lua->base.net_ctx, (HlReqHandle *)lua->active_conn, (HlSuspendOp *)&ctx->op) < 0) {
         op->cancelled = 1;
         ctx->cont->cancel(ctx->cont);
         ctx->cont->destroy(ctx->cont);

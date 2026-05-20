@@ -14,6 +14,7 @@
 #include "hull/worker_gpu.h"
 #include "hull/async.h"
 #include "hull/async_backend.h"
+#include "hull/net_backend.h"
 #include "log.h"
 #include "keel/thread_pool.h"
 #include "keel/async.h"
@@ -96,7 +97,8 @@ static void gpu_done_fn(void *ud)
         return;
     }
 
-    kl_async_complete(op->server, &op->async_ctx->op);
+    hl_net_op_complete(op->async_ctx->net_ctx,
+                       (HlSuspendOp *)&op->async_ctx->op);
 }
 
 /* ── cancel_fn: cleanup for items that never ran ───────────────────── */

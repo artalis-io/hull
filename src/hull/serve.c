@@ -31,6 +31,8 @@
 #include "hull/app_context.h"
 #include "hull/async_backend.h"
 #include "hull/async/keel.h"
+#include "hull/net_backend.h"
+#include "hull/net/keel.h"
 #include "hull/cacert.h"
 #ifdef HL_ENABLE_DB
 #include "hull/worker_db.h"
@@ -600,6 +602,13 @@ typedef struct {
      * runtime via rt->async_ctx, unwrapped in cleanup. */
     HlAsyncBackendCtx   *async_ctx;
 
+    /* HlNetBackend wrap around the KlServer. Created in init_server
+     * (server must exist first), lent to rt->net_ctx in wire_caps,
+     * unwrapped in teardown. Lets vtable consumers route async-op
+     * suspend/complete through the backend instead of touching
+     * Keel directly. */
+    HlNetBackendCtx     *net_ctx;
+
     /* Infrastructure (thread pool, client pool, compression) */
     HlAsyncBackendPool  *thread_pool;
     KlClientPool         client_pool;
@@ -806,6 +815,13 @@ static void hl_serve_init_infra(HlServerState *s)
     if (!s->async_ctx)
         s->async_ctx = hl_async_backend_keel_wrap(&s->server.ev);
 
+    /* Wrap the server itself so net-backend consumers can route
+     * connection-bound async-op suspend/complete through the vtable
+     * instead of calling kl_async_* directly. Same borrowed-pointer
+     * pattern as async_ctx. */
+    if (!s->net_ctx)
+        s->net_ctx = hl_net_backend_keel_wrap(&s->server);
+
     /* Create thread pool for async work (db queries, file I/O) via
      * the vtable. With the keel backend this still ends up calling
      * kl_thread_pool_create under the hood, just routed through
@@ -1007,6 +1023,10 @@ static int hl_serve_wire_caps(HlServerState *s)
      * pool could go through the backend); just lend the existing wrap
      * to the runtime so its consumers reach the loop via the vtable. */
     rt->async_ctx = s->async_ctx;
+    /* Same pattern for the net backend wrap — runtime borrows it so
+     * connection-bound async-op suspend/complete go through the vtable
+     * instead of touching KlServer directly. */
+    rt->net_ctx = s->net_ctx;
 
     /* Extract manifest and configure capabilities */
     memset(&s->manifest, 0, sizeof(s->manifest));
@@ -1334,12 +1354,15 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
         s->manifest_extracted = 0;
     }
 
-    /* Detach the borrowed async_ctx pointer from the runtime before
-     * app_context_free destroys the runtime — the wrap itself is
-     * owned by HlServerState and unwrapped further down. */
+    /* Detach the borrowed async_ctx + net_ctx pointers from the runtime
+     * before app_context_free destroys the runtime — the wraps themselves
+     * are owned by HlServerState and unwrapped further down. */
     {
         HlRuntime *rt = hl_app_context_runtime(s->app);
-        if (rt) rt->async_ctx = NULL;
+        if (rt) {
+            rt->async_ctx = NULL;
+            rt->net_ctx = NULL;
+        }
     }
 
     /* Free app context (runtime + DB + VFS + stmt cache).
@@ -1352,6 +1375,13 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
     if (s->async_ctx) {
         hl_async_backend_keel_unwrap(s->async_ctx);
         s->async_ctx = NULL;
+    }
+
+    /* Same for the net-backend wrap — borrowed, doesn't destroy
+     * KlServer (server's own free does that). */
+    if (s->net_ctx) {
+        hl_net_backend_keel_unwrap(s->net_ctx);
+        s->net_ctx = NULL;
     }
 
     /* Destroy WASM cache AFTER runtime destroy — GC finalizers
@@ -1479,11 +1509,15 @@ static void hl_serve_cleanup(HlServerState *s)
     if (s->server_init)
         kl_server_free(&s->server);
 
-    /* Detach the borrowed async_ctx from the runtime before app_context_free
-     * destroys the runtime — the wrap is owned by HlServerState. */
+    /* Detach the borrowed async_ctx + net_ctx from the runtime before
+     * app_context_free destroys the runtime — both wraps are owned by
+     * HlServerState. */
     if (s->app) {
         HlRuntime *rt = hl_app_context_runtime(s->app);
-        if (rt) rt->async_ctx = NULL;
+        if (rt) {
+            rt->async_ctx = NULL;
+            rt->net_ctx = NULL;
+        }
     }
 
     /* Free app context (runtime + DB + VFS + stmt cache) */
@@ -1497,6 +1531,12 @@ static void hl_serve_cleanup(HlServerState *s)
     if (s->async_ctx) {
         hl_async_backend_keel_unwrap(s->async_ctx);
         s->async_ctx = NULL;
+    }
+
+    /* Same for the net-backend wrap. */
+    if (s->net_ctx) {
+        hl_net_backend_keel_unwrap(s->net_ctx);
+        s->net_ctx = NULL;
     }
 
     free_route_allocs(&s->alloc);

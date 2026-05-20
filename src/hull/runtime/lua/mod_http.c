@@ -347,7 +347,7 @@ static int lua_http_fetch(lua_State *L)
     /* Start the async HTTP request — checks allowlist, creates KlClient,
      * creates HlAsyncCtx, and suspends the inbound connection */
     HlAsyncCtx *ctx = hl_async_http_start(
-        lua->server, lua->active_conn, lua->base.alloc,
+        lua->server, lua->active_conn, lua->base.net_ctx, lua->base.alloc,
         lua->base.http_cfg, method, url, headers, num_headers, body, body_len);
     if (!ctx)
         return luaL_error(L, "http.fetch: failed to start request");
