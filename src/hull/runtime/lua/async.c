@@ -301,14 +301,17 @@ static int lua_hull_sleep(lua_State *L)
             return luaL_error(L, "hull.sleep(): failed to suspend connection");
         }
     } else {
-        /* Detached mode (timer callback): use kl_timer_add */
+        /* Detached mode: schedule via the async backend vtable. The
+         * underlying loop is the same one KlServer drives (wrapped in
+         * wire_caps), so the timer fires alongside HTTP work. */
         ctx->driver = NULL;
         ctx->free_driver = NULL;
         ctx->detached = 1;
 
-        int64_t tid = kl_timer_add(&server->ev, (uint64_t)ms,
-                                    hl_detached_timer_fire, ctx);
-        if (tid < 0) {
+        const HlAsyncBackend *be = hl_async_backend();
+        uint64_t tid = be->timer_add(lua->base.async_ctx, (uint64_t)ms,
+                                      hl_detached_timer_fire, ctx);
+        if (tid == 0) {
             ctx->cont->destroy(ctx->cont);
             hl_async_ctx_free(ctx);
             return luaL_error(L, "hull.sleep(): failed to add timer");

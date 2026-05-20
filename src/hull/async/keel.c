@@ -25,6 +25,7 @@
  */
 
 #include "hull/async_backend.h"
+#include "hull/async/keel.h"
 #include "hull/alloc.h"
 
 #include <keel/event_ctx.h>
@@ -41,10 +42,16 @@
 /* ── Backend context ────────────────────────────────────────────────── */
 
 struct HlAsyncBackendCtx {
-    KlEventCtx    kel;          /* Keel event loop */
-    KlAllocator   kalloc;       /* defaults if alloc==NULL */
+    /* The active event loop. Either points to `kel_storage` (owned
+     * mode: backend->init created it) or to an external KlEventCtx
+     * passed via hl_async_backend_keel_wrap (borrowed mode: the
+     * caller — typically KlServer — owns it). */
+    KlEventCtx   *kel;
+    KlEventCtx    kel_storage;
+    KlAllocator   kalloc;       /* used only in owned mode */
     HlAllocator  *alloc;        /* borrowed; may be NULL */
     int           stop_flag;    /* run() / run_until() exit hint */
+    int           borrowed;     /* 1 = wrap; free() must not destroy kel */
 };
 
 /* ── Init / free ────────────────────────────────────────────────────── */
@@ -60,10 +67,12 @@ static int keel_init(HlAsyncBackendCtx **out, HlAllocator *alloc)
      * default malloc/free wrapper; future work could route through
      * HlAllocator instead. */
     ctx->kalloc = kl_allocator_default();
-    if (kl_event_ctx_init(&ctx->kel, &ctx->kalloc) != 0) {
+    if (kl_event_ctx_init(&ctx->kel_storage, &ctx->kalloc) != 0) {
         free(ctx);
         return -1;
     }
+    ctx->kel = &ctx->kel_storage;
+    ctx->borrowed = 0;
     *out = ctx;
     return 0;
 }
@@ -71,7 +80,26 @@ static int keel_init(HlAsyncBackendCtx **out, HlAllocator *alloc)
 static void keel_free(HlAsyncBackendCtx *ctx)
 {
     if (!ctx) return;
-    kl_event_ctx_free(&ctx->kel);
+    if (!ctx->borrowed) kl_event_ctx_free(&ctx->kel_storage);
+    free(ctx);
+}
+
+/* Borrowed-mode constructor: wrap an existing KlEventCtx so vtable
+ * consumers share it with whoever owns the loop (typically KlServer). */
+HlAsyncBackendCtx *hl_async_backend_keel_wrap(KlEventCtx *ev)
+{
+    if (!ev) return NULL;
+    HlAsyncBackendCtx *ctx = calloc(1, sizeof *ctx);
+    if (!ctx) return NULL;
+    ctx->kel = ev;
+    ctx->borrowed = 1;
+    return ctx;
+}
+
+void hl_async_backend_keel_unwrap(HlAsyncBackendCtx *ctx)
+{
+    if (!ctx) return;
+    /* No kel_event_ctx_free here — borrowed. */
     free(ctx);
 }
 
@@ -89,9 +117,9 @@ static void keel_free(HlAsyncBackendCtx *ctx)
 static int keel_tick(HlAsyncBackendCtx *ctx, int timeout_ms)
 {
     if (!ctx) return -1;
-    int rc = kl_event_ctx_run(&ctx->kel, 16, timeout_ms);
+    int rc = kl_event_ctx_run(ctx->kel, 16, timeout_ms);
     if (rc < 0) return -1;
-    kl_timer_fire(&ctx->kel);
+    kl_timer_fire(ctx->kel);
     return 0;
 }
 
@@ -136,14 +164,14 @@ static uint64_t keel_timer_add(HlAsyncBackendCtx *ctx, uint64_t ms,
                                 HlAsyncTimerFn cb, void *user)
 {
     if (!ctx || !cb) return 0;
-    int64_t h = kl_timer_add(&ctx->kel, ms, cb, user);
+    int64_t h = kl_timer_add(ctx->kel, ms, cb, user);
     return (h >= 0) ? (uint64_t)h + 1 : 0;
 }
 
 static void keel_timer_cancel(HlAsyncBackendCtx *ctx, uint64_t handle)
 {
     if (!ctx || handle == 0) return;
-    kl_timer_cancel(&ctx->kel, (int64_t)(handle - 1));
+    kl_timer_cancel(ctx->kel, (int64_t)(handle - 1));
 }
 
 /* ── FD watchers ───────────────────────────────────────────────────── */
@@ -160,7 +188,7 @@ static int keel_watcher_add(HlAsyncBackendCtx *ctx, int fd, unsigned mask,
     /* KlWatcherFn signature: void (*)(int fd, KlEventMask, void *).
      * HlAsyncWatcherFn:      void (*)(int fd, unsigned, void *).
      * KlEventMask is an enum (int-compatible); the bits line up. */
-    return kl_watcher_add(&ctx->kel, fd, kmask, (KlWatcherFn)cb, user);
+    return kl_watcher_add(ctx->kel, fd, kmask, (KlWatcherFn)cb, user);
 }
 
 static int keel_watcher_mod(HlAsyncBackendCtx *ctx, int fd, unsigned mask)
@@ -169,12 +197,12 @@ static int keel_watcher_mod(HlAsyncBackendCtx *ctx, int fd, unsigned mask)
     KlEventMask kmask = 0;
     if (mask & HL_ASYNC_READ)  kmask |= KL_EVENT_READ;
     if (mask & HL_ASYNC_WRITE) kmask |= KL_EVENT_WRITE;
-    return kl_watcher_mod(&ctx->kel, fd, kmask);
+    return kl_watcher_mod(ctx->kel, fd, kmask);
 }
 
 static void keel_watcher_del(HlAsyncBackendCtx *ctx, int fd)
 {
-    if (ctx) kl_watcher_del(&ctx->kel, fd);
+    if (ctx) kl_watcher_del(ctx->kel, fd);
 }
 
 /* ── Thread pool ───────────────────────────────────────────────────── */
@@ -194,7 +222,7 @@ static int keel_pool_create(HlAsyncBackendPool **out, HlAsyncBackendCtx *ctx,
         .queue_capacity  = queue_capacity,
         .alloc           = NULL,
     };
-    p->kpool = kl_thread_pool_create(&ctx->kel, &cfg);
+    p->kpool = kl_thread_pool_create(ctx->kel, &cfg);
     if (!p->kpool) {
         free(p);
         return -1;
@@ -277,7 +305,7 @@ static int keel_op_suspend(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
     if (op->deadline_ms > 0 && op->on_deadline) {
         uint64_t now = kl_monotonic_ms();
         uint64_t delay = (op->deadline_ms > now) ? op->deadline_ms - now : 0;
-        int64_t h = kl_timer_add(&ctx->kel, delay, keel_op_deadline_timer, op);
+        int64_t h = kl_timer_add(ctx->kel, delay, keel_op_deadline_timer, op);
         if (h < 0) {
             free(s);
             op->_backend_state = NULL;
@@ -295,11 +323,11 @@ static void keel_op_complete(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
     if (!s) return;                    /* already completed */
     s->resumed = 1;
     if (s->deadline_timer >= 0) {
-        kl_timer_cancel(&ctx->kel, s->deadline_timer);
+        kl_timer_cancel(ctx->kel, s->deadline_timer);
         s->deadline_timer = -1;
     }
     /* Schedule on_resume to fire on the event-loop thread. 0ms == ASAP. */
-    int64_t h = kl_timer_add(&ctx->kel, 0, keel_op_resume_timer, op);
+    int64_t h = kl_timer_add(ctx->kel, 0, keel_op_resume_timer, op);
     if (h < 0) {
         /* Best-effort: fire synchronously if scheduling fails. */
         if (op->on_resume) op->on_resume(op);

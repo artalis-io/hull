@@ -30,6 +30,7 @@
 
 /* Forward declarations */
 typedef struct HlAllocator HlAllocator;
+typedef struct HlAsyncBackendCtx HlAsyncBackendCtx;
 typedef struct HlTestCaseResult HlTestCaseResult;
 typedef struct KlRouter KlRouter;
 typedef struct HlFsConfig HlFsConfig;
@@ -148,6 +149,14 @@ struct HlRuntime {
      * non-NULL, gating fires for any registry-known name not in the set. */
     const HlResolvedModuleSet *module_set;
     KlThreadPool *thread_pool;   /* worker pool for async work (NULL if not created) */
+    /* HlAsyncBackend context — the event loop primitives layer. In
+     * server-mode builds this is a wrap around the KlServer's
+     * embedded event ctx; in CLI-mode builds it's an independent
+     * loop created via backend->init(). Consumers use the vtable
+     * (hl_async_backend()->timer_add(rt->async_ctx, ...)) instead
+     * of touching KlServer / KlEventCtx directly. NULL means async
+     * primitives are unavailable on this runtime (rare). */
+    HlAsyncBackendCtx *async_ctx;
     const char   *db_path;       /* SQLite file path (borrowed, for worker connections) */
     struct KlCompressConfig *compress;  /* response compression config (NULL = disabled) */
     HlWsRegistry *ws_registry;          /* WebSocket connection registry (NULL if no WS endpoints) */

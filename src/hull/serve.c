@@ -29,6 +29,7 @@
 
 #include "hull/alloc.h"
 #include "hull/app_context.h"
+#include "hull/async/keel.h"
 #include "hull/cacert.h"
 #ifdef HL_ENABLE_DB
 #include "hull/worker_db.h"
@@ -988,6 +989,14 @@ static int hl_serve_wire_caps(HlServerState *s)
 {
     HlRuntime *rt = hl_app_context_runtime(s->app);
 
+    /* Route the server's existing event loop through the async backend
+     * vtable. Consumers that need async primitives (timers, suspension,
+     * thread pool) use rt->async_ctx via hl_async_backend()->... instead
+     * of calling kl_* directly on s->server.ev. The wrap doesn't take
+     * ownership — KlServer continues to own the underlying loop. */
+    if (!rt->async_ctx)
+        rt->async_ctx = hl_async_backend_keel_wrap(&s->server.ev);
+
     /* Extract manifest and configure capabilities */
     memset(&s->manifest, 0, sizeof(s->manifest));
     if (rt->vt->extract_manifest(rt, &s->manifest) == 0) {
@@ -1314,6 +1323,18 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
         s->manifest_extracted = 0;
     }
 
+    /* Free the async-backend wrap (does NOT destroy the underlying
+     * KlEventCtx — KlServer still owns it; we just registered a
+     * vtable view onto it in wire_caps). Must run BEFORE
+     * app_context_free which destroys the runtime that points at it. */
+    {
+        HlRuntime *rt = hl_app_context_runtime(s->app);
+        if (rt && rt->async_ctx) {
+            hl_async_backend_keel_unwrap(rt->async_ctx);
+            rt->async_ctx = NULL;
+        }
+    }
+
     /* Free app context (runtime + DB + VFS + stmt cache).
      * WASM/GPU static caches are external — freed separately below. */
     hl_app_context_free(s->app);
@@ -1441,6 +1462,16 @@ static void hl_serve_cleanup(HlServerState *s)
 
     if (s->server_init)
         kl_server_free(&s->server);
+
+    /* Free async-backend wrap before the runtime that holds it.
+     * Borrowed wrap — does not destroy KlServer's KlEventCtx. */
+    if (s->app) {
+        HlRuntime *rt = hl_app_context_runtime(s->app);
+        if (rt && rt->async_ctx) {
+            hl_async_backend_keel_unwrap(rt->async_ctx);
+            rt->async_ctx = NULL;
+        }
+    }
 
     /* Free app context (runtime + DB + VFS + stmt cache) */
     if (s->app) {
