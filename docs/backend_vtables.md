@@ -291,14 +291,37 @@ kl_async_suspend(server, conn, &ctx->op);
 - Outcome: backends exist; Hull still uses `kl_*` directly. ~3 days.
 
 ### Phase 3d-3 — migrate consumers (mechanical)
-- Replace direct `kl_*` calls in Hull's consumers with vtable calls
-- One layer at a time: async helpers first, then cap/http, then worker_*,
-  then runtime dispatch, then serve.c
-- After each layer: run `make test + make e2e-examples + make e2e-cli`
-- Heaviest layer: `runtime/{lua,js}/dispatch.c` + `bindings.c` (request /
-  response handling)
-- Outcome: Hull never imports a `kl_*` symbol directly. Keel becomes a
-  link-time dependency only. ~4 days.
+
+In progress. Done so far:
+
+  ✓ `kl_monotonic_ms` → vtable (3 call sites — cap/http_async, runtime/
+    {lua,js}/async).
+  ✓ Plumbing: HlRuntime.async_ctx + hl_async_backend_keel_wrap so
+    serve.c routes the server's KlEventCtx through the vtable.
+    Consumers use rt->async_ctx instead of &server->ev.
+  ✓ `kl_timer_add` / `kl_timer_cancel` → vtable (8 sites — runtime/
+    {lua,js}/{async,timers,routes,runtime}.c). Zero direct kl_timer_*
+    references remain outside async/keel.c.
+
+Pending (each its own focused commit, in roughly this order):
+
+  - `kl_thread_pool_*` → vtable. ~34 references across serve.c +
+    worker_db/wasm/gpu.c + runtime/{lua,js}/worker.c. The pool object
+    flows through public header signatures (`KlThreadPool *` in
+    `hull/worker_*.h`), so this isn't just a call-site swap — the
+    HlWorkerDbOp / HlWorkerWasmOp / HlWorkerGpuOp shapes change, and
+    every caller's declaration updates with them. Plan for the
+    KlWorkItem-vs-vtable signature mismatch: keep the per-worker
+    struct, derive the three fn pointers from it at submit time.
+  - `kl_async_suspend` / `kl_async_complete` → split: detached path
+    (used by hull.sleep, app.timer trampolines) onto
+    `HlAsyncBackend->op_suspend`/`op_complete`; request-bound path
+    (used by HTTP handlers + db.async/compute.async during a request)
+    stays on Keel until `HlNetBackend` lands, since they need
+    KlConn-aware suspension that doesn't belong in the async vtable.
+  - `kl_watcher_*` → vtable. Only one direct reference today (a
+    comment in mod_http.c), so this is essentially done — included
+    here for completeness.
 
 ### Phase 3d-4 — write the poll backend
 - `src/hull/net/async_poll.c` — minimal `poll(2)` + `pthread` impl
