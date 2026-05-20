@@ -1,10 +1,13 @@
 /*
- * net/async_keel.c — HlAsyncBackend implementation backed by Keel.
+ * async/keel.c — HlAsyncBackend implementation backed by Keel.
  *
  * Wraps Keel's event loop, timers, watchers, thread pool, and
- * monotonic time behind the HlAsyncBackend vtable. The HTTP=1
- * default build wires this as `hl_async_backend()`'s return value;
- * future HTTP=0 builds will swap to async_poll.c (Phase 3d-4).
+ * monotonic time behind the HlAsyncBackend vtable. The async backend
+ * is logically independent of any HTTP server — Keel just happens to
+ * provide a convenient implementation today. Future siblings under
+ * this directory: async/poll.c (libc poll for HL_ENABLE_HTTP=0
+ * builds, Phase 3d-4), and any libuv / io_uring backends that come
+ * later.
  *
  * Notes on the op_suspend/op_complete contract:
  *

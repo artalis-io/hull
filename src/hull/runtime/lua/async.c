@@ -10,6 +10,7 @@
 #include "hull/runtime/lua.h"
 #include "internal.h"
 #include "hull/async.h"
+#include "hull/async_backend.h"
 #include "hull/alloc.h"
 
 #include "lua.h"
@@ -288,7 +289,7 @@ static int lua_hull_sleep(lua_State *L)
 
     if (conn) {
         /* Attached mode: use KlAsyncOp deadline via kl_async_suspend */
-        ctx->op.deadline_ms = kl_monotonic_ms() + (uint64_t)ms;
+        ctx->op.deadline_ms = hl_async_backend()->monotonic_ms() + (uint64_t)ms;
         ctx->op.on_deadline = hl_async_on_deadline_sleep;
         ctx->driver = NULL;
         ctx->free_driver = NULL;

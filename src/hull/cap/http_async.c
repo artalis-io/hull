@@ -11,6 +11,7 @@
 #include "hull/cap/http_async.h"
 #include "hull/cap/audit.h"
 #include "hull/alloc.h"
+#include "hull/async_backend.h"
 
 #include <keel/allocator.h>
 #include <keel/client_pool.h>
@@ -200,7 +201,7 @@ HlAsyncCtx *hl_async_http_start(KlServer *server, KlConn *conn,
     if (!ctx)
         return NULL;
 
-    ctx->op.deadline_ms = kl_monotonic_ms() + (uint64_t)timeout_ms;
+    ctx->op.deadline_ms = hl_async_backend()->monotonic_ms() + (uint64_t)timeout_ms;
     ctx->op.on_deadline = on_http_deadline;
 
     /* Start Keel async client — prefer redirect+pooled path */

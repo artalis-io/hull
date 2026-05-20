@@ -10,6 +10,7 @@
 #include "hull/runtime/js.h"
 #include "internal.h"
 #include "hull/async.h"
+#include "hull/async_backend.h"
 #include "hull/alloc.h"
 
 #include "quickjs.h"
@@ -337,7 +338,7 @@ static JSValue js_hull_sleep(JSContext *ctx, JSValueConst this_val,
 
     if (conn) {
         /* Attached mode: use KlAsyncOp deadline via kl_async_suspend */
-        actx->op.deadline_ms = kl_monotonic_ms() + (uint64_t)ms;
+        actx->op.deadline_ms = hl_async_backend()->monotonic_ms() + (uint64_t)ms;
         actx->op.on_deadline = hl_async_on_deadline_sleep;
         actx->detached = 0;
 
