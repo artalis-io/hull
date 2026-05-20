@@ -734,6 +734,13 @@ MODULE_RESOLVER_OBJ := $(BUILDDIR)/module_resolver.o
 MODULE_OBJ       := $(MODULE_REGISTRY_OBJ) $(MODULE_RESOLVER_OBJ)
 SANDBOX_OBJ      := $(BUILDDIR)/sandbox.o
 
+# Backend vtable implementations (Phase 3d-2)
+# async_keel.c   — Keel-backed HlAsyncBackend (used by both HTTP=1 and
+#                  HTTP=0 builds today; future poll backend swaps in for
+#                  HL_ENABLE_HTTP=0 once async_poll.c lands in 3d-4).
+NET_BACKEND_SRCS := $(wildcard $(SRCDIR)/hull/net/*.c)
+NET_BACKEND_OBJS := $(patsubst $(SRCDIR)/hull/net/%.c,$(BUILDDIR)/net_%.o,$(NET_BACKEND_SRCS))
+
 # Test-specific objects (single runtime — avoids pulling Lua into JS tests
 # and vice versa). After roadmap item G the per-runtime extractors live in
 # their own .c files that auto-#ifdef-out, so single-runtime tests just
@@ -1055,7 +1062,7 @@ all: $(BUILDDIR)/hull
 # Platform static library — everything except entry.o and build_assets.o
 # Used by `hull build` to produce standalone app binaries.
 # Exports hull_main() (subcommand dispatch + server logic).
-PLATFORM_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(CACERT_OBJ) $(APP_CONTEXT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) \
+PLATFORM_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(CACERT_OBJ) $(APP_CONTEXT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) \
 	$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) \
 	$(COMPILER_OBJ) $(COMPILER_TCC_OBJ)
 
@@ -1182,8 +1189,8 @@ $(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H)
 endif
 
 # Hull binary
-$(BUILDDIR)/hull: $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(CACERT_OBJ) $(APP_CONTEXT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(COMPILER_TCC_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB)
-	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(CACERT_OBJ) $(APP_CONTEXT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(COMPILER_TCC_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) \
+$(BUILDDIR)/hull: $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(CACERT_OBJ) $(APP_CONTEXT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(COMPILER_TCC_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB)
+	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(CACERT_OBJ) $(APP_CONTEXT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(COMPILER_TCC_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) \
 		$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB) $(WGPU_LIB) $(WGPU_FRAMEWORKS) -lm -lpthread
 
 # Capability sources
@@ -1192,6 +1199,10 @@ $(BUILDDIR)/cap_%.o: $(SRCDIR)/hull/cap/%.c | $(BUILDDIR)
 
 # Command module sources
 $(BUILDDIR)/cmd_%.o: $(SRCDIR)/hull/commands/%.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+# Net backend implementations (HlAsyncBackend, HlNetBackend, ...)
+$(BUILDDIR)/net_%.o: $(SRCDIR)/hull/net/%.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # JS runtime sources
@@ -1501,6 +1512,12 @@ $(BUILDDIR)/test_static: $(TESTDIR)/hull/test_static.c $(STATIC_OBJ) $(TEST_COMM
 # VFS test — standalone module, no runtime deps
 $(BUILDDIR)/test_vfs: $(TESTDIR)/hull/test_vfs.c $(VFS_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(VFS_OBJ)
+
+# Async backend test — exercises the HlAsyncBackend vtable (today
+# always backed by Keel; future poll backend will share the same test).
+$(BUILDDIR)/test_async_backend: $(TESTDIR)/hull/test_async_backend.c $(NET_BACKEND_OBJS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
+		$(NET_BACKEND_OBJS) $(KEEL_LIB) -lm -lpthread
 
 # Module registry — standalone, only links the registry object
 $(BUILDDIR)/test_module_registry: $(TESTDIR)/hull/test_module_registry.c $(MODULE_REGISTRY_OBJ) | $(BUILDDIR)

@@ -127,12 +127,18 @@ typedef struct HlAsyncBackend {
      * via run_until first. */
     void   (*free)(HlAsyncBackendCtx *ctx);
 
-    /* Run the event loop until stop() is called or the predicate
-     * returns 1. block determines whether each iteration may sleep
-     * waiting for events.
-     *
-     * Returns 0 on clean exit, -1 on fatal backend error. */
+    /* Drive a single event-loop iteration. timeout_ms ≥ 0 caps how
+     * long the underlying poll/kqueue/epoll may block waiting for
+     * events; 0 = non-blocking poll. Returns 0 on success, -1 on
+     * fatal error. Useful as a building block for custom loops + tests. */
+    int    (*tick)(HlAsyncBackendCtx *ctx, int timeout_ms);
+
+    /* Run the event loop until stop() is called. Equivalent to
+     * `while (!stopped) tick(ctx, large);`. */
     int    (*run)(HlAsyncBackendCtx *ctx);
+
+    /* Run the loop until `stop(user)` returns non-zero. tick()-based;
+     * predicate is checked between ticks. */
     int    (*run_until)(HlAsyncBackendCtx *ctx,
                         HlAsyncStopFn stop, void *user);
 
