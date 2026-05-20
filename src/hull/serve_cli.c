@@ -48,13 +48,15 @@ static const char **build_env_allowlist(const HlManifest *m)
  * to the slice past `--`. Returns -1 if no entry point given. */
 static int cli_parse_args(int argc, char **argv,
                           int *out_app_argc, char ***out_app_argv,
-                          int *out_no_migrate, int *out_no_sandbox)
+                          int *out_no_migrate, int *out_no_sandbox,
+                          const char **out_db_path)
 {
     int entry_idx = -1;
     *out_app_argc = 0;
     *out_app_argv = NULL;
     *out_no_migrate = 0;
     *out_no_sandbox = 0;
+    *out_db_path = NULL;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--") == 0) {
@@ -70,6 +72,10 @@ static int cli_parse_args(int argc, char **argv,
             *out_no_sandbox = 1;
             continue;
         }
+        if (strcmp(argv[i], "-d") == 0 && i + 1 < argc) {
+            *out_db_path = argv[++i];
+            continue;
+        }
         if (argv[i][0] == '-') continue;
         if (entry_idx < 0) entry_idx = i;
     }
@@ -81,9 +87,11 @@ int hull_serve(int argc, char **argv)
     int app_argc = 0;
     char **app_argv = NULL;
     int no_migrate = 0, no_sandbox = 0;
+    const char *db_path = NULL;
 
     int entry_idx = cli_parse_args(argc, argv, &app_argc, &app_argv,
-                                    &no_migrate, &no_sandbox);
+                                    &no_migrate, &no_sandbox, &db_path);
+    if (!db_path) db_path = getenv("HULL_DB");
     if (entry_idx < 0) {
         fprintf(stderr,
             "hull: no entry point given. Usage: hull run <app.lua|app.js> "
@@ -116,11 +124,13 @@ int hull_serve(int argc, char **argv)
     /* Init app context — runs migrations + loads the app. */
     HlAppContext *ctx = NULL;
     HlAppContextOpts opts = {
-        .app_dir      = app_dir,
-        .entry_point  = entry,
-        .no_migrate   = no_migrate,
-        .sandbox      = !no_sandbox,
-        .gate_modules = 1,
+        .app_dir         = app_dir,
+        .entry_point     = entry,
+        .db_path         = db_path,        /* NULL → ":memory:" */
+        .worker_db_path  = db_path,        /* worker-thread sqlite connection */
+        .no_migrate      = no_migrate,
+        .sandbox         = !no_sandbox,
+        .gate_modules    = 1,
     };
     if (hl_app_context_init(&ctx, &opts) != 0) {
         fprintf(stderr, "hull: failed to initialize app context\n");
@@ -158,7 +168,8 @@ int hull_serve(int argc, char **argv)
         /* CLI mode → no inbound network. */
         sandbox_policy.network_inbound = 0;
 
-        if (hl_sandbox_apply(&sandbox_policy, NULL, NULL, NULL, NULL, NULL) != 0) {
+        if (hl_sandbox_apply(&sandbox_policy, app_dir, db_path,
+                             NULL, NULL, NULL) != 0) {
             log_error("[hull:cli] sandbox enforcement failed");
             hl_manifest_free(&manifest);
             hl_app_context_free(ctx);
@@ -168,12 +179,9 @@ int hull_serve(int argc, char **argv)
 
     const char **env_allow = build_env_allowlist(&manifest);
 
-    /* Create an async-backend ctx — the poll backend on HTTP=0, the
-     * keel backend on HTTP=1. The runtime's vt_*_run_main drives this
-     * loop while main is suspended on async ops (hull.sleep at
-     * minimum; other async ops still depend on a connection and
-     * remain unavailable in CLI mode pending the worker-detached
-     * follow-up). */
+    /* Create an event loop and worker pool for app.main. The runtime's
+     * vt_*_run_main drives this loop while main is suspended on async
+     * ops (hull.sleep, compute.async, db.async, etc.). */
     const HlAsyncBackend *be = hl_async_backend();
     HlAsyncBackendCtx *async_ctx = NULL;
     if (be->init(&async_ctx, NULL) != 0) {
@@ -185,11 +193,23 @@ int hull_serve(int argc, char **argv)
     }
     rt->async_ctx = async_ctx;
 
+    /* Worker pool for async ops that delegate to threads (db.async,
+     * compute.async, gpu.async). Non-fatal if it fails — the runtime
+     * checks for NULL before submitting. */
+    HlAsyncBackendPool *pool = NULL;
+    if (be->pool_create(&pool, async_ctx, 4, 64) != 0) {
+        pool = NULL;
+        fprintf(stderr, "[hull:cli] thread pool init failed — async ops unavailable\n");
+    }
+    rt->thread_pool = pool;
+
     int rc = 1;
     int run = rt->vt->run_main(rt, NULL, app_argc, app_argv, env_allow, &rc);
 
-    /* Detach borrowed pointer before tearing down (mirrors serve.c). */
+    /* Detach borrowed pointers before tearing down (mirrors serve.c). */
+    rt->thread_pool = NULL;
     rt->async_ctx = NULL;
+    if (pool) be->pool_free(pool);
     be->free(async_ctx);
 
     free((void *)env_allow);

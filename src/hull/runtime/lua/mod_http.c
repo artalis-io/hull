@@ -317,8 +317,8 @@ static int lua_http_fetch(lua_State *L)
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->base.http_cfg)
         return luaL_error(L, "http not configured (no hosts in manifest)");
-    if (!lua->server || !lua->active_conn)
-        return luaL_error(L, "http.fetch() can only be called from a request handler");
+    if (!lua->base.async_ctx)
+        return luaL_error(L, "http.fetch() requires an active event loop");
 
     const char *method = luaL_checkstring(L, 1);
     const char *url = luaL_checkstring(L, 2);

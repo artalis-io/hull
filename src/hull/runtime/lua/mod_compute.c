@@ -323,8 +323,8 @@ static int lua_compute_async_call(lua_State *L)
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->base.thread_pool)
         return luaL_error(L, "compute.async not available (no thread pool)");
-    if (!lua->server || !lua->active_conn)
-        return luaL_error(L, "compute.async can only be called from a request handler");
+    if (!lua->base.async_ctx)
+        return luaL_error(L, "compute.async requires an active event loop");
 
     if (!lua->base.wasm_cache)
         return luaL_error(L, "compute.async.call: WASM runtime not initialized");
@@ -437,11 +437,14 @@ static int lua_compute_async_call(lua_State *L)
     ctx->driver = op;
     ctx->free_driver = hl_worker_wasm_op_free_all;
     ctx->op.on_cancel = hl_worker_wasm_async_cancel;
+    ctx->detached = (lua->active_conn == NULL);
 
     op->async_ctx = ctx;
     op->cancelled = 0;
 
-    /* Submit to thread pool */
+    /* Submit to thread pool. done_fn can't fire before we return to
+     * the event loop (lua_yieldk below), so the ordering with the
+     * attached-mode suspend below is race-free. */
     if (hl_worker_wasm_submit(lua->base.thread_pool, op) != 0) {
         ctx->cont->destroy(ctx->cont);
         hl_worker_wasm_op_free(op);
@@ -450,13 +453,19 @@ static int lua_compute_async_call(lua_State *L)
         return luaL_error(L, "compute.async.call: thread pool full");
     }
 
-    /* Suspend connection and yield */
-    if (hl_net_op_suspend(lua->base.net_ctx, (HlReqHandle *)lua->active_conn, (HlSuspendOp *)&ctx->op) < 0) {
-        op->cancelled = 1;
-        ctx->cont->cancel(ctx->cont);
-        ctx->cont->destroy(ctx->cont);
-        ctx->cont = NULL;
-        return luaL_error(L, "compute.async.call: failed to suspend connection");
+    /* Suspend the FD (attached only). Detached callers yield via
+     * lua_yieldk; the worker's done_fn calls resume_detached. */
+    if (!ctx->detached) {
+        if (hl_net_op_suspend(lua->base.net_ctx,
+                              (HlReqHandle *)lua->active_conn,
+                              (HlSuspendOp *)&ctx->op) < 0) {
+            op->cancelled = 1;
+            ctx->cont->cancel(ctx->cont);
+            ctx->cont->destroy(ctx->cont);
+            ctx->cont = NULL;
+            return luaL_error(L,
+                "compute.async.call: failed to suspend connection");
+        }
     }
 
     return lua_yieldk(L, 0, 0, NULL);
@@ -565,8 +574,8 @@ static int lua_wasm_inst_async_call(lua_State *L)
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->base.thread_pool)
         return luaL_error(L, "WasmInstance:async_call: not available (no thread pool)");
-    if (!lua->server || !lua->active_conn)
-        return luaL_error(L, "WasmInstance:async_call: can only be called from a request handler");
+    if (!lua->base.async_ctx)
+        return luaL_error(L, "WasmInstance:async_call: requires an active event loop");
 
     HlWasmInstance *pi = check_wasm_inst(L, 1);
     if (!pi || pi->closed)
@@ -659,6 +668,7 @@ static int lua_wasm_inst_async_call(lua_State *L)
     ctx->driver = op;
     ctx->free_driver = hl_worker_wasm_op_free_all;
     ctx->op.on_cancel = hl_worker_wasm_async_cancel;
+    ctx->detached = (lua->active_conn == NULL);
 
     op->async_ctx = ctx;
     op->cancelled = 0;
@@ -672,7 +682,8 @@ static int lua_wasm_inst_async_call(lua_State *L)
         return luaL_error(L, "WasmInstance:async_call: thread pool full");
     }
 
-    if (hl_net_op_suspend(lua->base.net_ctx, (HlReqHandle *)lua->active_conn, (HlSuspendOp *)&ctx->op) < 0) {
+    if (!ctx->detached &&
+        hl_net_op_suspend(lua->base.net_ctx, (HlReqHandle *)lua->active_conn, (HlSuspendOp *)&ctx->op) < 0) {
         atomic_store(&pi->busy, 0);
         op->cancelled = 1;
         ctx->cont->cancel(ctx->cont);

@@ -181,9 +181,9 @@ static JSValue js_worker_dispatch(JSContext *ctx, JSValueConst this_val,
     if (!js || !js->base.thread_pool)
         return JS_ThrowInternalError(ctx,
             "worker.dispatch not available (no thread pool)");
-    if (!js->server || !js->active_conn)
+    if (!js->base.async_ctx)
         return JS_ThrowInternalError(ctx,
-            "worker.dispatch can only be called from a request handler");
+            "worker.dispatch requires an active event loop");
 
     if (argc < 1 || !JS_IsFunction(ctx, argv[0]))
         return JS_ThrowTypeError(ctx,
@@ -278,6 +278,7 @@ static JSValue js_worker_dispatch(JSContext *ctx, JSValueConst this_val,
     actx->driver = op;
     actx->free_driver = hl_js_worker_dispatch_op_free_all;
     actx->op.on_cancel = hl_js_worker_dispatch_cancel;
+    actx->detached = (js->active_conn == NULL);
 
     op->async_ctx = actx;
     op->cancelled = 0;
@@ -293,8 +294,9 @@ static JSValue js_worker_dispatch(JSContext *ctx, JSValueConst this_val,
             "worker.dispatch: thread pool full");
     }
 
-    /* Suspend the connection */
-    if (hl_net_op_suspend(js->base.net_ctx, (HlReqHandle *)js->active_conn, (HlSuspendOp *)&actx->op) < 0) {
+    /* Suspend the FD (attached only). */
+    if (!actx->detached &&
+        hl_net_op_suspend(js->base.net_ctx, (HlReqHandle *)js->active_conn, (HlSuspendOp *)&actx->op) < 0) {
         op->cancelled = 1;
         actx->cont->cancel(actx->cont);
         actx->cont->destroy(actx->cont);

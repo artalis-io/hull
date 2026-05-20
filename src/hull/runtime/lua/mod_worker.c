@@ -196,8 +196,8 @@ static int lua_worker_dispatch(lua_State *L)
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->base.thread_pool)
         return luaL_error(L, "worker.dispatch not available (no thread pool)");
-    if (!lua->server || !lua->active_conn)
-        return luaL_error(L, "worker.dispatch can only be called from a request handler");
+    if (!lua->base.async_ctx)
+        return luaL_error(L, "worker.dispatch requires an active event loop");
 
     luaL_checktype(L, 1, LUA_TFUNCTION);
 
@@ -259,6 +259,7 @@ static int lua_worker_dispatch(lua_State *L)
     actx->driver = op;
     actx->free_driver = hl_lua_worker_dispatch_op_free_all;
     actx->op.on_cancel = hl_lua_worker_dispatch_cancel;
+    actx->detached = (lua->active_conn == NULL);
 
     op->async_ctx = actx;
     op->cancelled = 0;
@@ -272,8 +273,9 @@ static int lua_worker_dispatch(lua_State *L)
         return luaL_error(L, "worker.dispatch: thread pool full");
     }
 
-    /* Suspend the connection */
-    if (hl_net_op_suspend(lua->base.net_ctx, (HlReqHandle *)lua->active_conn, (HlSuspendOp *)&actx->op) < 0) {
+    /* Suspend the FD (attached only). */
+    if (!actx->detached &&
+        hl_net_op_suspend(lua->base.net_ctx, (HlReqHandle *)lua->active_conn, (HlSuspendOp *)&actx->op) < 0) {
         op->cancelled = 1;
         actx->cont->cancel(actx->cont);
         actx->cont->destroy(actx->cont);

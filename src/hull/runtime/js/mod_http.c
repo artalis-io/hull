@@ -358,9 +358,9 @@ static JSValue js_http_fetch(JSContext *ctx, JSValueConst this_val,
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     if (!js || !js->base.http_cfg)
         return JS_ThrowInternalError(ctx, "http not configured (no hosts in manifest)");
-    if (!js->server || !js->active_conn)
+    if (!js->base.async_ctx)
         return JS_ThrowInternalError(ctx,
-            "http.fetch() can only be called from a request handler");
+            "http.fetch() requires an active event loop");
 
     if (argc < 2)
         return JS_ThrowTypeError(ctx, "http.fetch requires (method, url, opts?)");

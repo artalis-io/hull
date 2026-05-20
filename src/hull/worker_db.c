@@ -362,16 +362,17 @@ static void db_done_fn(void *ud)
         if (ctx) hl_async_ctx_free(ctx);
         return;
     }
-#ifdef HL_ENABLE_HTTP
-    /* Connection revival path — only meaningful when an HTTP request
-     * was suspended. CLI builds never reach here because submit()
-     * fails at suspend-time (no net backend → hl_net_op_suspend
-     * returns -1 → mod_db.c bails before submitting work). */
-    hl_net_op_complete(op->async_ctx->net_ctx,
-                       (HlSuspendOp *)&op->async_ctx->op);
-#else
-    (void)op;
-#endif
+    HlAsyncCtx *ctx = op->async_ctx;
+    if (ctx->detached) {
+        /* No connection to revive — fire the cont directly on the
+         * event-loop thread. resume_detached owns the teardown
+         * (frees driver, cont, ctx). */
+        hl_async_ctx_resume_detached(ctx);
+    } else {
+        /* Attached: wake the suspended FD; on_resume schedules the
+         * cont fire on the event-loop thread + tears down. */
+        hl_net_op_complete(ctx->net_ctx, (HlSuspendOp *)&ctx->op);
+    }
 }
 
 static void db_cancel_fn(void *ud)

@@ -708,8 +708,8 @@ static int l_gpu_async_dispatch(lua_State *L)
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->base.thread_pool)
         return luaL_error(L, "gpu.async not available (no thread pool)");
-    if (!lua->server || !lua->active_conn)
-        return luaL_error(L, "gpu.async can only be called from a request handler");
+    if (!lua->base.async_ctx)
+        return luaL_error(L, "gpu.async requires an active event loop");
     if (!lua->base.gpu_ctx)
         return luaL_error(L, "gpu.async.dispatch: GPU not initialized");
 
@@ -875,6 +875,7 @@ static int l_gpu_async_dispatch(lua_State *L)
     actx->driver = op;
     actx->free_driver = hl_worker_gpu_op_free_all;
     actx->op.on_cancel = hl_worker_gpu_async_cancel;
+    actx->detached = (lua->active_conn == NULL);
 
     op->async_ctx = actx;
     atomic_store(&op->cancelled, 0);
@@ -885,7 +886,8 @@ static int l_gpu_async_dispatch(lua_State *L)
         return luaL_error(L, "gpu.async.dispatch: thread pool full");
     }
 
-    if (hl_net_op_suspend(lua->base.net_ctx, (HlReqHandle *)lua->active_conn, (HlSuspendOp *)&actx->op) < 0) {
+    if (!actx->detached &&
+        hl_net_op_suspend(lua->base.net_ctx, (HlReqHandle *)lua->active_conn, (HlSuspendOp *)&actx->op) < 0) {
         atomic_store(&op->cancelled, 1);
         actx->cont->cancel(actx->cont);
         actx->cont->destroy(actx->cont);
@@ -1145,8 +1147,8 @@ static int l_gpu_async_pipeline(lua_State *L)
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->base.thread_pool)
         return luaL_error(L, "gpu.async not available (no thread pool)");
-    if (!lua->server || !lua->active_conn)
-        return luaL_error(L, "gpu.async can only be called from a request handler");
+    if (!lua->base.async_ctx)
+        return luaL_error(L, "gpu.async requires an active event loop");
     if (!lua->base.gpu_ctx)
         return luaL_error(L, "gpu.async.pipeline: GPU not initialized");
 
@@ -1310,6 +1312,7 @@ static int l_gpu_async_pipeline(lua_State *L)
     actx->driver = op;
     actx->free_driver = hl_worker_gpu_op_free_all;
     actx->op.on_cancel = hl_worker_gpu_async_cancel;
+    actx->detached = (lua->active_conn == NULL);
 
     op->async_ctx = actx;
     atomic_store(&op->cancelled, 0);
@@ -1320,7 +1323,8 @@ static int l_gpu_async_pipeline(lua_State *L)
         return luaL_error(L, "gpu.async.pipeline: thread pool full");
     }
 
-    if (hl_net_op_suspend(lua->base.net_ctx, (HlReqHandle *)lua->active_conn, (HlSuspendOp *)&actx->op) < 0) {
+    if (!actx->detached &&
+        hl_net_op_suspend(lua->base.net_ctx, (HlReqHandle *)lua->active_conn, (HlSuspendOp *)&actx->op) < 0) {
         atomic_store(&op->cancelled, 1);
         actx->cont->cancel(actx->cont);
         actx->cont->destroy(actx->cont);

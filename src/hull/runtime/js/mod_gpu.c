@@ -806,8 +806,8 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     if (!js || !js->base.thread_pool)
         return JS_ThrowInternalError(ctx, "gpu.async not available (no thread pool)");
-    if (!js->server || !js->active_conn)
-        return JS_ThrowInternalError(ctx, "gpu.async can only be called from a request handler");
+    if (!js->base.async_ctx)
+        return JS_ThrowInternalError(ctx, "gpu.async requires an active event loop");
     if (!js->base.gpu_ctx)
         return JS_ThrowInternalError(ctx, "gpu.async.dispatch: GPU not initialized");
 
@@ -1023,6 +1023,7 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
     actx->driver = op;
     actx->free_driver = hl_worker_gpu_op_free_all;
     actx->op.on_cancel = hl_worker_gpu_async_cancel;
+    actx->detached = (js->active_conn == NULL);
 
     op->async_ctx = actx;
     atomic_store(&op->cancelled, 0);
@@ -1034,7 +1035,8 @@ static JSValue js_gpu_async_dispatch(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "gpu.async.dispatch: thread pool full");
     }
 
-    if (hl_net_op_suspend(js->base.net_ctx, (HlReqHandle *)js->active_conn, (HlSuspendOp *)&actx->op) < 0) {
+    if (!actx->detached &&
+        hl_net_op_suspend(js->base.net_ctx, (HlReqHandle *)js->active_conn, (HlSuspendOp *)&actx->op) < 0) {
         atomic_store(&op->cancelled, 1);
         actx->cont->cancel(actx->cont);
         actx->cont->destroy(actx->cont);
@@ -1287,8 +1289,8 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     if (!js || !js->base.thread_pool)
         return JS_ThrowInternalError(ctx, "gpu.async not available (no thread pool)");
-    if (!js->server || !js->active_conn)
-        return JS_ThrowInternalError(ctx, "gpu.async can only be called from a request handler");
+    if (!js->base.async_ctx)
+        return JS_ThrowInternalError(ctx, "gpu.async requires an active event loop");
     if (!js->base.gpu_ctx)
         return JS_ThrowInternalError(ctx, "gpu.async.pipeline: GPU not initialized");
     if (argc < 1 || !JS_IsArray(ctx, argv[0]))
@@ -1578,6 +1580,7 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
     actx->driver = op;
     actx->free_driver = hl_worker_gpu_op_free_all;
     actx->op.on_cancel = hl_worker_gpu_async_cancel;
+    actx->detached = (js->active_conn == NULL);
 
     op->async_ctx = actx;
     atomic_store(&op->cancelled, 0);
@@ -1589,7 +1592,8 @@ static JSValue js_gpu_async_pipeline(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "gpu.async.pipeline: thread pool full");
     }
 
-    if (hl_net_op_suspend(js->base.net_ctx, (HlReqHandle *)js->active_conn, (HlSuspendOp *)&actx->op) < 0) {
+    if (!actx->detached &&
+        hl_net_op_suspend(js->base.net_ctx, (HlReqHandle *)js->active_conn, (HlSuspendOp *)&actx->op) < 0) {
         atomic_store(&op->cancelled, 1);
         actx->cont->cancel(actx->cont);
         actx->cont->destroy(actx->cont);

@@ -369,8 +369,8 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
     HlLua *lua = get_hl_lua(L);
     if (!lua || !lua->base.thread_pool)
         return luaL_error(L, "db.async not available (no thread pool)");
-    if (!lua->server || !lua->active_conn)
-        return luaL_error(L, "db.async can only be called from a request handler");
+    if (!lua->base.async_ctx)
+        return luaL_error(L, "db.async requires an active event loop");
 
     const char *sql = luaL_checkstring(L, 1);
 
@@ -438,6 +438,7 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
     ctx->driver = op;
     ctx->free_driver = hl_worker_db_op_free_all;
     ctx->op.on_cancel = hl_worker_db_async_cancel;
+    ctx->detached = (lua->active_conn == NULL);
 
     op->async_ctx = ctx;
     op->cancelled = 0;
@@ -451,8 +452,9 @@ static int lua_db_async_common(lua_State *L, HlWorkerDbKind kind)
         return luaL_error(L, "db.async: thread pool full");
     }
 
-    /* Suspend the connection */
-    if (hl_net_op_suspend(lua->base.net_ctx, (HlReqHandle *)lua->active_conn, (HlSuspendOp *)&ctx->op) < 0) {
+    /* Suspend the FD (attached only). */
+    if (!ctx->detached &&
+        hl_net_op_suspend(lua->base.net_ctx, (HlReqHandle *)lua->active_conn, (HlSuspendOp *)&ctx->op) < 0) {
         op->cancelled = 1;
         ctx->cont->cancel(ctx->cont);
         ctx->cont->destroy(ctx->cont);

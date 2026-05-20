@@ -94,12 +94,11 @@ static void wasm_done_fn(void *ud)
         return;
     }
 
-#ifdef HL_ENABLE_HTTP
-    hl_net_op_complete(op->async_ctx->net_ctx,
-                       (HlSuspendOp *)&op->async_ctx->op);
-#else
-    (void)op;
-#endif
+    HlAsyncCtx *ctx = op->async_ctx;
+    if (ctx->detached)
+        hl_async_ctx_resume_detached(ctx);
+    else
+        hl_net_op_complete(ctx->net_ctx, (HlSuspendOp *)&ctx->op);
 }
 
 /* ── cancel_fn: cleanup for items that never ran ───────────────────── */

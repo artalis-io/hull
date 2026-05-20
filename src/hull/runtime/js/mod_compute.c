@@ -343,8 +343,8 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     if (!js || !js->base.thread_pool)
         return JS_ThrowInternalError(ctx, "compute.async not available (no thread pool)");
-    if (!js->server || !js->active_conn)
-        return JS_ThrowInternalError(ctx, "compute.async can only be called from a request handler");
+    if (!js->base.async_ctx)
+        return JS_ThrowInternalError(ctx, "compute.async requires an active event loop");
     if (!js->base.wasm_cache)
         return JS_ThrowInternalError(ctx, "compute.async.call: WASM runtime not initialized");
 
@@ -496,11 +496,14 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
     actx->driver = op;
     actx->free_driver = hl_worker_wasm_op_free_all;
     actx->op.on_cancel = hl_worker_wasm_async_cancel;
+    actx->detached = (js->active_conn == NULL);
 
     op->async_ctx = actx;
     op->cancelled = 0;
 
-    /* Submit to thread pool */
+    /* Submit to thread pool. done_fn can't fire before we return to
+     * the event loop, so the ordering with the attached suspend is
+     * race-free. */
     if (hl_worker_wasm_submit(js->base.thread_pool, op) != 0) {
         actx->cont->destroy(actx->cont);
         hl_worker_wasm_op_free(op);
@@ -510,8 +513,10 @@ static JSValue js_compute_async_call(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "compute.async.call: thread pool full");
     }
 
-    /* Suspend connection */
-    if (hl_net_op_suspend(js->base.net_ctx, (HlReqHandle *)js->active_conn, (HlSuspendOp *)&actx->op) < 0) {
+    /* Suspend the FD (attached only). */
+    if (!actx->detached &&
+        hl_net_op_suspend(js->base.net_ctx, (HlReqHandle *)js->active_conn,
+                          (HlSuspendOp *)&actx->op) < 0) {
         op->cancelled = 1;
         actx->cont->cancel(actx->cont);
         actx->cont->destroy(actx->cont);
@@ -704,8 +709,8 @@ static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
     if (!js || !js->base.thread_pool)
         return JS_ThrowInternalError(ctx, "WasmInstance.asyncCall: no thread pool");
-    if (!js->server || !js->active_conn)
-        return JS_ThrowInternalError(ctx, "WasmInstance.asyncCall: can only be called from a request handler");
+    if (!js->base.async_ctx)
+        return JS_ThrowInternalError(ctx, "WasmInstance.asyncCall: requires an active event loop");
 
     HlWasmInstance *pi = JS_GetOpaque2(ctx, this_val, js_wasm_inst_class_id);
     if (!pi || pi->closed)
@@ -833,6 +838,7 @@ static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
     actx->driver = op;
     actx->free_driver = hl_worker_wasm_op_free_all;
     actx->op.on_cancel = hl_worker_wasm_async_cancel;
+    actx->detached = (js->active_conn == NULL);
 
     op->async_ctx = actx;
     op->cancelled = 0;
@@ -847,7 +853,8 @@ static JSValue js_wasm_inst_async_call(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowInternalError(ctx, "WasmInstance.asyncCall: thread pool full");
     }
 
-    if (hl_net_op_suspend(js->base.net_ctx, (HlReqHandle *)js->active_conn, (HlSuspendOp *)&actx->op) < 0) {
+    if (!actx->detached &&
+        hl_net_op_suspend(js->base.net_ctx, (HlReqHandle *)js->active_conn, (HlSuspendOp *)&actx->op) < 0) {
         atomic_store(&pi->busy, 0);
         op->cancelled = 1;
         actx->cont->cancel(actx->cont);
