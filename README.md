@@ -1243,6 +1243,9 @@ All core features are implemented and tested across Linux (gcc + clang), macOS, 
 
 ## License
 
-AGPL-3.0. See [LICENSE](LICENSE).
+Hull is dual-licensed:
 
-Commercial licenses available for closed-source distribution. See the [Licensing](docs/MANIFESTO.md#licensing) section of the manifesto.
+- **AGPL-3.0** for open source use. see [LICENSE](LICENSE).
+- **Commercial license** for closed-source embedding and proprietary distribution. email <licensing+site@artalis.io>.
+
+See [LICENSING.md](LICENSING.md) for which license applies to your use case, or [`docs/MANIFESTO.md`](docs/MANIFESTO.md#licensing) for the longer rationale.

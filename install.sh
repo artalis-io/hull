@@ -1,5 +1,5 @@
 #!/bin/sh
-# Hull installer — downloads the latest release binary from GitHub.
+# Hull installer. Downloads the latest release binary from GitHub.
 #
 #   curl -fsSL https://raw.githubusercontent.com/artalis-io/hull/main/install.sh | sh
 #
@@ -65,7 +65,7 @@ if command -v curl >/dev/null 2>&1; then
 elif command -v wget >/dev/null 2>&1; then
     DOWNLOADER="wget -qO-"
 else
-    err "neither curl nor wget found — please install one"
+    err "neither curl nor wget found. Please install one"
     exit 2
 fi
 
@@ -75,7 +75,7 @@ if command -v sha256sum >/dev/null 2>&1; then
 elif command -v shasum >/dev/null 2>&1; then
     SHA256="shasum -a 256"
 else
-    warn "neither sha256sum nor shasum found — checksum verification will be skipped"
+    warn "neither sha256sum nor shasum found. Checksum verification will be skipped"
 fi
 
 # ── Platform detection ───────────────────────────────────────────────
@@ -115,7 +115,7 @@ select_asset() {
         case "${OS_NAME}-${ARCH_NAME}" in
             linux-x86_64)  ASSET=hull-linux-x86_64 ;;
             darwin-arm64)  ASSET=hull-darwin-arm64 ;;
-            *) err "no native binary for ${OS_NAME}-${ARCH_NAME} — set HULL_FLAVOR=cosmo"
+            *) err "no native binary for ${OS_NAME}-${ARCH_NAME}. Set HULL_FLAVOR=cosmo"
                exit 3 ;;
         esac
         return
@@ -160,7 +160,7 @@ resolve_version() {
 
 resolve_prefix() {
     if [ -n "${HULL_PREFIX:-}" ]; then
-        # User-specified — use as-is
+        # User-specified. Use as-is
         return
     fi
 
@@ -183,20 +183,20 @@ download_and_install() {
     run "$DOWNLOADER '$ASSET_URL' > '$TMPDIR/$ASSET'"
 
     if [ "$HULL_DRY_RUN" != "1" ] && [ ! -s "$TMPDIR/$ASSET" ]; then
-        err "download produced an empty file — release likely does not exist at $HULL_VERSION"
+        err "download produced an empty file. Release likely does not exist at $HULL_VERSION"
         exit 1
     fi
 
     if [ -n "$SHA256" ]; then
         info "verifying SHA-256 checksum"
         if ! run "$DOWNLOADER '$CHECKSUM_URL' > '$TMPDIR/hull.sha256'"; then
-            warn "could not fetch checksum file — proceeding without verification"
+            warn "could not fetch checksum file. Proceeding without verification"
         else
             if [ "$HULL_DRY_RUN" != "1" ]; then
                 expected=$(grep " $ASSET\$" "$TMPDIR/hull.sha256" | awk '{print $1}')
                 actual=$(cd "$TMPDIR" && $SHA256 "$ASSET" | awk '{print $1}')
                 if [ -z "$expected" ]; then
-                    warn "no checksum entry for $ASSET in hull.sha256 — skipping verification"
+                    warn "no checksum entry for $ASSET in hull.sha256. Skipping verification"
                 elif [ "$expected" != "$actual" ]; then
                     err "checksum mismatch:"
                     err "  expected: $expected"
@@ -221,7 +221,7 @@ download_and_install() {
                 *) info "aborted (set HULL_FORCE=1 to skip this prompt)"; exit 0 ;;
             esac
         else
-            warn "non-interactive — refusing to overwrite (set HULL_FORCE=1 to override)"
+            warn "non-interactive. Refusing to overwrite (set HULL_FORCE=1 to override)"
             exit 1
         fi
     fi
@@ -272,10 +272,10 @@ post_install() {
 
     printf '\n'
     info "next steps:"
-    printf '  %shull doctor%s          — check environment\n' "$BOLD" "$RESET"
-    printf '  %shull init myapp%s      — create a project\n' "$BOLD" "$RESET"
-    printf '  %shull dev app.lua%s     — run the dev server\n' "$BOLD" "$RESET"
-    printf '  %shull update%s          — install future releases\n' "$BOLD" "$RESET"
+    printf '  %shull doctor%s         . Check environment\n' "$BOLD" "$RESET"
+    printf '  %shull init myapp%s     . Create a project\n' "$BOLD" "$RESET"
+    printf '  %shull dev app.lua%s    . Run the dev server\n' "$BOLD" "$RESET"
+    printf '  %shull update%s         . Install future releases\n' "$BOLD" "$RESET"
     printf '\n'
 }
 
@@ -293,7 +293,7 @@ main() {
     info "asset:     ${ASSET}"
     info "version:   ${HULL_VERSION}"
     info "prefix:    ${HULL_PREFIX}"
-    [ "$HULL_DRY_RUN" = "1" ] && warn "dry-run mode — no files will be written"
+    [ "$HULL_DRY_RUN" = "1" ] && warn "dry-run mode. No files will be written"
     printf '\n'
 
     download_and_install
