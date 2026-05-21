@@ -237,14 +237,11 @@
             you almost trust.
           </h1>
 
-          <p class="mt-5 text-lg md:text-xl text-paper-100 max-w-xl leading-snug">
-            A sealed runtime for agentic and local-first software.
-          </p>
-          <p class="mt-4 text-base text-mute-400 max-w-xl leading-relaxed">
-            The check belongs inside the process &mdash; not in a
+          <p class="mt-6 text-base md:text-lg text-mute-400 max-w-xl leading-relaxed">
+            Hull puts the capability check inside the process, at a
+            C boundary the script cannot cross &mdash; not in a
             sidecar, not in a reverse proxy, not in a YAML policy
-            someone forgot to update. Hull puts it at a C boundary
-            the script cannot cross.
+            someone forgot to update.
           </p>
 
           <div class="mt-8 flex flex-wrap items-center gap-3">
@@ -660,50 +657,18 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
 
       </div>
 
-      <!-- Sample output: hull agent routes -->
-      <div class="mt-10 code-block">
-        <header>
-          <i data-lucide="terminal" class="w-3.5 h-3.5"></i>
-          <span>shell</span>
-          <span class="ml-auto text-[10px] text-mute-500">what the agent sees</span>
-        </header>
-<pre><span class="tk-com"># Machine-readable introspection for AI coding agents.</span>
-$ hull agent routes my-tool
-{
-  <span class="tk-key">"app"</span>: <span class="tk-str">"my-tool"</span>,
-  <span class="tk-key">"runtime"</span>: <span class="tk-str">"lua"</span>,
-  <span class="tk-key">"modules"</span>: [<span class="tk-str">"hull/server@1"</span>, <span class="tk-str">"hull/db@1"</span>, <span class="tk-str">"hull/middleware/session@1"</span>],
-  <span class="tk-key">"routes"</span>: [
-    { <span class="tk-key">"method"</span>: <span class="tk-str">"GET"</span>,  <span class="tk-key">"path"</span>: <span class="tk-str">"/items"</span>,  <span class="tk-key">"handler"</span>: <span class="tk-str">"app.lua:32"</span> },
-    { <span class="tk-key">"method"</span>: <span class="tk-str">"POST"</span>, <span class="tk-key">"path"</span>: <span class="tk-str">"/items"</span>,  <span class="tk-key">"handler"</span>: <span class="tk-str">"app.lua:48"</span> }
-  ],
-  <span class="tk-key">"middleware"</span>: [
-    { <span class="tk-key">"method"</span>: <span class="tk-str">"*"</span>, <span class="tk-key">"pattern"</span>: <span class="tk-str">"/api/*"</span>, <span class="tk-key">"name"</span>: <span class="tk-str">"auth.session"</span> }
-  ]
-}
-</pre>
-      </div>
-
-      <!-- Three patterns the manifest model makes safe (formerly Use Cases) -->
+      <!-- Patterns sub-block: two agent-themed patterns the manifest model enables -->
       <div class="mt-14">
         <h3 class="text-lg md:text-xl font-semibold text-paper-50 tracking-tight">
-          Three patterns the manifest model makes safe.
+          Two patterns the manifest model makes safe.
         </h3>
-        <div class="mt-6 grid sm:grid-cols-2 lg:grid-cols-3 gap-px bg-white/[0.06] border border-white/[0.06] rounded-md overflow-hidden">
+        <div class="mt-6 grid sm:grid-cols-2 gap-px bg-white/[0.06] border border-white/[0.06] rounded-md overflow-hidden">
 
           <div class="bg-ink-950 p-5">
             <i data-lucide="bot" class="w-4 h-4 text-paper-100 mb-3"></i>
             <div class="text-paper-50 font-medium text-sm">Agent tools</div>
             <p class="mt-2 text-[13px] text-mute-400 leading-relaxed">
               A bounded host for LLM-callable tools. The agent gets exactly the surface you declared, nothing else.
-            </p>
-          </div>
-
-          <div class="bg-ink-950 p-5">
-            <i data-lucide="cpu" class="w-4 h-4 text-paper-100 mb-3"></i>
-            <div class="text-paper-50 font-medium text-sm">Compute plugins</div>
-            <p class="mt-2 text-[13px] text-mute-400 leading-relaxed">
-              Ship WASM modules from any language or WebGPU shaders in WGSL. Gas-metered, memory-capped, AOT-compiled.
             </p>
           </div>
 
@@ -740,7 +705,7 @@ $ hull agent routes my-tool
             runtime codegen in one binary.
           </p>
           <p class="mt-4 text-xs text-mute-400 leading-relaxed">
-            Marks reflect default configurations as of v0.1.0.
+            Marks reflect default configurations.
             <span class="text-paper-100">~</span> means partial coverage with caveats noted per row below the table.
           </p>
         </div>
@@ -1123,7 +1088,7 @@ $ hull agent routes my-tool
           </div>
         </div>
 
-        <div class="lg:col-span-7">
+        <div class="lg:col-span-7 space-y-4">
           <div class="code-block">
             <header>
               <i data-lucide="terminal" class="w-3.5 h-3.5"></i>
@@ -1145,6 +1110,30 @@ hull build: my-tool  5.0 MB  signed  ed25519
 
 <span class="tk-com"># Run</span>
 $ ./my-tool
+</pre>
+          </div>
+
+          <!-- Sample agent output: proves the introspection surface is real -->
+          <div class="code-block">
+            <header>
+              <i data-lucide="terminal" class="w-3.5 h-3.5"></i>
+              <span>shell</span>
+              <span class="ml-auto text-[10px] text-mute-500">what an AI coding agent sees</span>
+            </header>
+<pre><span class="tk-com"># Machine-readable introspection — no plugins, no MCP servers required.</span>
+$ hull agent routes my-tool
+{
+  <span class="tk-key">"app"</span>: <span class="tk-str">"my-tool"</span>,
+  <span class="tk-key">"runtime"</span>: <span class="tk-str">"lua"</span>,
+  <span class="tk-key">"modules"</span>: [<span class="tk-str">"hull/server@1"</span>, <span class="tk-str">"hull/db@1"</span>, <span class="tk-str">"hull/middleware/session@1"</span>],
+  <span class="tk-key">"routes"</span>: [
+    { <span class="tk-key">"method"</span>: <span class="tk-str">"GET"</span>,  <span class="tk-key">"path"</span>: <span class="tk-str">"/items"</span>,  <span class="tk-key">"handler"</span>: <span class="tk-str">"app.lua:32"</span> },
+    { <span class="tk-key">"method"</span>: <span class="tk-str">"POST"</span>, <span class="tk-key">"path"</span>: <span class="tk-str">"/items"</span>,  <span class="tk-key">"handler"</span>: <span class="tk-str">"app.lua:48"</span> }
+  ],
+  <span class="tk-key">"middleware"</span>: [
+    { <span class="tk-key">"method"</span>: <span class="tk-str">"*"</span>, <span class="tk-key">"pattern"</span>: <span class="tk-str">"/api/*"</span>, <span class="tk-key">"name"</span>: <span class="tk-str">"auth.session"</span> }
+  ]
+}
 </pre>
           </div>
         </div>
