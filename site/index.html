@@ -78,6 +78,33 @@
     .code-block { background: #0f0f10; border: 1px solid rgba(255,255,255,0.08); border-radius: .5rem; overflow: hidden; }
     .code-block header { padding: .5rem .875rem; border-bottom: 1px solid rgba(255,255,255,0.06); font-size: .6875rem; color: #a1a1aa; letter-spacing: .04em; text-transform: uppercase; display: flex; align-items: center; gap: .5rem; }
     .code-block pre { padding: 1rem 1.125rem; overflow-x: auto; font-size: .8125rem; line-height: 1.6; color: #e4e4e7; }
+
+    /* Tabs inside a .code-block */
+    .code-tabs-bar { display: flex; border-bottom: 1px solid rgba(255,255,255,0.06); overflow-x: auto; }
+    .tab-btn {
+        padding: .5rem .875rem;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: .6875rem;
+        letter-spacing: .04em;
+        text-transform: uppercase;
+        color: #71717a;
+        background: transparent;
+        border: 0;
+        border-right: 1px solid rgba(255,255,255,0.04);
+        border-bottom: 1px solid transparent;
+        margin-bottom: -1px;
+        cursor: pointer;
+        white-space: nowrap;
+        transition: color .15s ease, background-color .15s ease, border-color .15s ease;
+    }
+    .tab-btn:hover { color: #d4d4d8; background: rgba(255,255,255,0.02); }
+    .tab-btn.tab-active { color: #f4f4f5; background: rgba(255,255,255,0.025); border-bottom-color: #22d3a8; }
+    .code-tab-panel.hidden { display: none; }
+
+    /* Per-language token tweaks. The tk-* palette stays the same;
+       these aliases just make WGSL-specific decoration legible. */
+    .tk-attr { color: #c4b5fd; }    /* WGSL @attributes, manifest keys */
+    .tk-type { color: #f0abfc; }    /* WGSL types, keywords */
     .tk-key { color: #c4b5fd; }     /* manifest keys */
     .tk-str { color: #86efac; }     /* strings */
     .tk-num { color: #fcd34d; }     /* numbers */
@@ -89,6 +116,32 @@
 
     /* Subtle row separators in feature lists */
     .rule { height: 1px; background: linear-gradient(to right, transparent, rgba(255,255,255,0.08), transparent); }
+
+    /* Comparison table */
+    .cmp-table { width: 100%; border-collapse: collapse; font-size: .8125rem; }
+    .cmp-table th, .cmp-table td { padding: .75rem 1rem; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.06); }
+    .cmp-table thead th { font-size: .6875rem; text-transform: uppercase; letter-spacing: .04em; color: #a1a1aa; font-weight: 500; background: rgba(255,255,255,0.015); }
+    .cmp-table tbody td:not(:first-child) { text-align: center; font-family: 'JetBrains Mono', monospace; font-size: .875rem; }
+    .cmp-table tbody tr:hover { background: rgba(255,255,255,0.015); }
+    .cmp-table tbody tr:last-child td { border-bottom: 0; }
+    .cmp-yes { color: #22d3a8; }
+    .cmp-no  { color: #52525b; }
+    .cmp-part { color: #a78bfa; font-size: .75rem !important; letter-spacing: .04em; }
+    .cmp-na  { color: #52525b; font-size: .6875rem !important; letter-spacing: .04em; }
+    .cmp-hull-col { background: rgba(34,211,168,0.04); border-left: 1px solid rgba(34,211,168,0.15); border-right: 1px solid rgba(34,211,168,0.15); }
+
+    /* Perf strip */
+    .stat-num { font-family: 'JetBrains Mono', monospace; font-weight: 500; color: #fafafa; font-size: 1.5rem; line-height: 1; letter-spacing: -0.02em; }
+    .stat-num small { font-size: .875rem; color: #71717a; margin-left: .125rem; }
+    .stat-label { font-size: .6875rem; text-transform: uppercase; letter-spacing: .06em; color: #71717a; margin-top: .375rem; }
+    .stat-foot  { font-size: .6875rem; color: #52525b; margin-top: .25rem; }
+
+    /* Respect prefers-reduced-motion: cut all transitions and
+       smooth scrolling for users who opt out of animation. */
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { transition: none !important; animation: none !important; }
+      html { scroll-behavior: auto; }
+    }
   </style>
 </head>
 
@@ -105,15 +158,17 @@
           <path d="M8 8.5v7"/><path d="M16 8.5v7"/><path d="M8 12h8"/>
         </svg>
         <span class="text-paper-100 font-semibold tracking-tight">Hull</span>
-        <span class="chip ml-1.5 hidden sm:inline-flex">
+        <a href="https://github.com/artalis-io/hull/releases" class="chip ml-1.5 hidden sm:inline-flex hover:text-paper-50 transition" title="Release notes on GitHub">
           <span class="accent-dot"></span>
-          v1.2
-        </span>
+          v0.1.0
+        </a>
       </a>
 
-      <nav class="hidden md:flex items-center gap-7 text-sm">
+      <nav class="hidden md:flex items-center gap-x-6 text-sm">
         <a href="#principles" class="link">Principles</a>
-        <a href="#how" class="link">How it works</a>
+        <a href="#agents" class="link">Agents</a>
+        <a href="#compare" class="link">Compare</a>
+        <a href="#how" class="link">How</a>
         <a href="#security" class="link">Security</a>
         <a href="#use-cases" class="link">Use cases</a>
         <a href="/docs" class="link">Docs</a>
@@ -151,7 +206,7 @@
 
           <p class="mt-6 text-lg text-mute-400 max-w-xl leading-relaxed">
             Hull is a small C capability kernel hardened by OS primitives,
-            W&thinsp;<sup>X</sup> policy, sealed bundles, and minimal
+            W^X policy, sealed bundles, and minimal
             ambient authority. Applications declare what they need.
             Everything else is unavailable.
           </p>
@@ -167,6 +222,23 @@
             </a>
           </div>
 
+          <p class="mt-4 text-xs text-mute-400 leading-relaxed flex items-center gap-2">
+            <i data-lucide="zap" class="w-3.5 h-3.5 text-accent shrink-0"></i>
+            <span>
+              Designed for
+              <a href="#agents" class="text-paper-100 hover:text-accent transition">agent tools and constrained AI-generated code</a>.
+            </span>
+          </p>
+
+          <p class="mt-2 text-xs text-mute-500 leading-relaxed flex items-start gap-2 max-w-xl">
+            <i data-lucide="alert-triangle" class="w-3.5 h-3.5 mt-0.5 text-mute-400 shrink-0"></i>
+            <span>
+              Hull is at <span class="text-paper-100">v0.1.0</span>.
+              APIs and the manifest schema will change before v1.0 &mdash;
+              pin your version and read the changelog before upgrading.
+            </span>
+          </p>
+
           <div class="mt-10 flex flex-wrap items-center gap-x-6 gap-y-3 text-xs text-mute-500">
             <div class="flex items-center gap-2">
               <i data-lucide="package" class="w-3.5 h-3.5"></i>
@@ -174,7 +246,7 @@
             </div>
             <div class="flex items-center gap-2">
               <i data-lucide="cpu" class="w-3.5 h-3.5"></i>
-              <span>Lua &middot; QuickJS &middot; WASM</span>
+              <span>Lua &middot; QuickJS &middot; WASM &middot; WebGPU</span>
             </div>
             <div class="flex items-center gap-2">
               <i data-lucide="shield-check" class="w-3.5 h-3.5"></i>
@@ -189,13 +261,13 @@
 
         <!-- HERO MANIFEST SNIPPET -->
         <div class="lg:col-span-5">
-          <div class="code-block shadow-xl shadow-black/40">
-            <header>
-              <i data-lucide="file-code" class="w-3.5 h-3.5"></i>
-              <span>app.lua</span>
-              <span class="ml-auto text-[10px] text-mute-500">manifest</span>
-            </header>
-<pre><span class="tk-kw">app</span>.<span class="tk-fn">manifest</span>({
+          <div class="code-block code-tabs shadow-xl shadow-black/40">
+            <div class="code-tabs-bar" role="tablist" aria-label="Hero example language">
+              <button class="tab-btn tab-active" data-tab="lua" role="tab" aria-selected="true">app.lua</button>
+              <button class="tab-btn" data-tab="js" role="tab" aria-selected="false">app.js</button>
+              <span class="ml-auto self-center pr-3 text-[10px] text-mute-500 uppercase tracking-widest">manifest</span>
+            </div>
+<pre class="code-tab-panel" data-tab-panel="lua"><span class="tk-kw">app</span>.<span class="tk-fn">manifest</span>({
     <span class="tk-key">modules</span> = {
         <span class="tk-str">"hull/server@1"</span>,
         <span class="tk-str">"hull/db@1"</span>,
@@ -213,12 +285,127 @@
     res:<span class="tk-fn">json</span>(r)
 <span class="tk-kw">end</span>)
 </pre>
+<pre class="code-tab-panel hidden" data-tab-panel="js"><span class="tk-kw">import</span> { http } <span class="tk-kw">from</span> <span class="tk-str">"hull:http"</span>;
+<span class="tk-kw">import</span> { env  } <span class="tk-kw">from</span> <span class="tk-str">"hull:env"</span>;
+
+<span class="tk-kw">app</span>.<span class="tk-fn">manifest</span>({
+    <span class="tk-key">modules</span>: [
+        <span class="tk-str">"hull/server@1"</span>,
+        <span class="tk-str">"hull/db@1"</span>,
+        <span class="tk-str">"hull/crypto@1"</span>,
+    ],
+    <span class="tk-key">hosts</span>:   [<span class="tk-str">"api.stripe.com"</span>],
+    <span class="tk-key">fs</span>:      { <span class="tk-key">read</span>: [<span class="tk-str">"./assets/*"</span>] },
+    <span class="tk-key">env</span>:     [<span class="tk-str">"STRIPE_KEY"</span>],
+});
+
+<span class="tk-kw">app</span>.<span class="tk-fn">get</span>(<span class="tk-str">"/charge"</span>, <span class="tk-kw">async</span> (req, res) =&gt; {
+    <span class="tk-com">// only declared capabilities exist</span>
+    <span class="tk-kw">const</span> key = <span class="tk-acc">env</span>.<span class="tk-fn">get</span>(<span class="tk-str">"STRIPE_KEY"</span>);
+    <span class="tk-kw">const</span> r   = <span class="tk-kw">await</span> <span class="tk-acc">http</span>.<span class="tk-fn">fetch</span>(<span class="tk-str">"https://api.stripe.com/..."</span>);
+    res.<span class="tk-fn">json</span>(r);
+});
+</pre>
           </div>
           <p class="mt-3 text-[11px] text-mute-500 leading-relaxed">
             Nothing exists unless declared. Undeclared modules fail at
             module load. Undeclared hosts, paths, and env vars fail at
             the capability boundary.
           </p>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────────────────
+       INSTALL & VERIFY — show the trust chain up front
+       ───────────────────────────────────────────────────────────────── -->
+  <section class="hairline-t">
+    <div class="max-w-6xl mx-auto px-6 py-14 md:py-16">
+      <div class="grid lg:grid-cols-12 gap-8 lg:gap-12 items-start">
+
+        <div class="lg:col-span-4">
+          <div class="text-xs uppercase tracking-widest text-mute-500 mb-2">Install &amp; verify</div>
+          <h2 class="text-xl md:text-2xl font-semibold text-paper-50 tracking-tight">
+            One line to install.
+            One line to verify.
+          </h2>
+          <p class="mt-4 text-sm text-mute-400 leading-relaxed">
+            The install script checks the SHA-256 manifest as it
+            downloads the right binary for your OS and arch.
+            <code class="text-paper-100 text-[0.78rem]">hull verify-release</code>
+            then verifies the Ed25519 signature against the public
+            key embedded in your local binary &mdash; no key
+            distribution needed.
+          </p>
+          <p class="mt-3 text-[11px] text-mute-500 leading-relaxed">
+            Linux x86_64 &middot; macOS arm64 &middot; Cosmopolitan APE fallback.
+          </p>
+        </div>
+
+        <div class="lg:col-span-8">
+          <div class="code-block">
+            <header>
+              <i data-lucide="terminal" class="w-3.5 h-3.5"></i>
+              <span>shell</span>
+              <span class="ml-auto text-[10px] text-mute-500">copy &amp; paste</span>
+            </header>
+<pre><span class="tk-com"># 1. Install. install.sh verifies the SHA-256 manifest as it downloads.</span>
+$ curl -fsSL <span class="tk-str">https://gethull.dev/install.sh</span> | sh
+hull installed to ~/.local/bin/hull  (v0.1.0)
+
+<span class="tk-com"># 2. Verify the release signature (Ed25519, embedded pubkey).</span>
+$ hull verify-release hull.sha256 hull.sha256.sig
+<span class="tk-acc">ok</span> &mdash; signature valid
+
+<span class="tk-com"># 3. Inspect the toolchain.</span>
+$ hull doctor
+hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middot;  cc: ok
+</pre>
+          </div>
+          <p class="mt-3 text-[11px] text-mute-500 leading-relaxed">
+            Prefer manual download? Grab the binary from the
+            <a href="https://github.com/artalis-io/hull/releases" class="link">releases page</a>
+            and verify with
+            <code class="text-paper-100 text-[0.72rem]">hull verify-release</code> &mdash;
+            no <code class="text-paper-100 text-[0.72rem]">curl | sh</code> required.
+          </p>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────────────────
+       PERF STRIP — measured, not aspirational
+       ───────────────────────────────────────────────────────────────── -->
+  <section class="hairline-t bg-ink-900/50">
+    <div class="max-w-6xl mx-auto px-6 py-10 md:py-12">
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-x-6 gap-y-8">
+
+        <div>
+          <div class="stat-num">5.0<small> MB</small></div>
+          <div class="stat-label">Full binary</div>
+          <div class="stat-foot">HTTP &middot; DB &middot; WASM &middot; Lua &middot; JS, statically linked</div>
+        </div>
+
+        <div>
+          <div class="stat-num">4.4<small> MB</small></div>
+          <div class="stat-label">Pure compute</div>
+          <div class="stat-foot">No HTTP, no DB &mdash; CLI / compute service flavor</div>
+        </div>
+
+        <div>
+          <div class="stat-num">2.6<small> ms</small></div>
+          <div class="stat-label">GPU dispatch floor</div>
+          <div class="stat-foot">Apple M1 Max &mdash; WebGPU submit + poll latency</div>
+        </div>
+
+        <div>
+          <div class="stat-num">0</div>
+          <div class="stat-label">Runtime dependencies</div>
+          <div class="stat-foot">No package manager, no <code class="text-paper-100 text-[0.7rem]">dlopen</code>, no JIT</div>
         </div>
 
       </div>
@@ -309,7 +496,7 @@
 
         <div class="bg-ink-900 p-6">
           <i data-lucide="shield-half" class="w-5 h-5 text-accent mb-4"></i>
-          <h3 class="text-paper-50 font-medium">W&thinsp;<sup>X</sup>, no runtime codegen</h3>
+          <h3 class="text-paper-50 font-medium">W^X, no runtime codegen</h3>
           <p class="mt-2 text-sm text-mute-400 leading-relaxed">
             Pages are writable or executable &mdash; never both. No JIT.
             No runtime dynamic code. WASM runs from AOT-compiled
@@ -340,14 +527,208 @@
         <div class="bg-ink-900 p-6 md:col-span-2 lg:col-span-3 flex items-start gap-5">
           <i data-lucide="cpu" class="w-5 h-5 text-accent mt-1 shrink-0"></i>
           <div>
-            <h3 class="text-paper-50 font-medium">WASM compute modules</h3>
+            <h3 class="text-paper-50 font-medium">Compute in WASM and WebGPU</h3>
             <p class="mt-2 text-sm text-mute-400 leading-relaxed max-w-3xl">
               CPU-heavy work runs as pure-function WASM plugins inside
               WAMR &mdash; no I/O imports, gas-metered execution,
-              configurable memory caps. Optionally accelerated on GPU
-              via wgpu-native compute shaders.
+              configurable memory caps. Parallel workloads dispatch to
+              WebGPU compute shaders via wgpu-native (Vulkan, Metal,
+              DX12) through the same capability boundary.
             </p>
           </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────────────────
+       AGENTS — Hull as host AND Hull as dev surface
+       ───────────────────────────────────────────────────────────────── -->
+  <section id="agents" class="hairline-t">
+    <div class="max-w-6xl mx-auto px-6 py-20 md:py-28">
+      <div class="grid lg:grid-cols-12 gap-10 lg:gap-16 items-start">
+
+        <div class="lg:col-span-5">
+          <div class="text-xs uppercase tracking-widest text-mute-500 mb-3">For agents</div>
+          <h2 class="text-2xl md:text-3xl font-semibold text-paper-50 tracking-tight">
+            The runtime agents
+            already live in.
+          </h2>
+          <p class="mt-6 text-mute-400 leading-relaxed">
+            Hull is built for both sides of the agent loop &mdash;
+            hosting LLM-callable tools behind a manifest the model
+            can't write to, and giving AI coding agents a structured
+            CLI surface to read, test, and deploy Hull apps.
+          </p>
+          <p class="mt-4 text-mute-400 leading-relaxed">
+            The runtime is the trust boundary. The manifest is the
+            contract.
+          </p>
+          <div class="mt-8 flex flex-wrap gap-3">
+            <a href="https://github.com/artalis-io/hull/blob/main/AGENTS.md" class="btn btn-primary">
+              <i data-lucide="bot" class="w-4 h-4"></i>
+              AGENTS.md
+            </a>
+            <a href="/docs/mcp" class="btn btn-ghost">
+              <i data-lucide="plug-zap" class="w-4 h-4"></i>
+              MCP server
+            </a>
+          </div>
+        </div>
+
+        <div class="lg:col-span-7 space-y-5">
+
+          <!-- Angle 1: Host for LLM tools -->
+          <div class="border border-white/[0.08] rounded-md bg-ink-900/40 p-6">
+            <div class="flex items-start gap-4">
+              <div class="w-9 h-9 rounded-md border border-accent/25 bg-accent/[0.06] flex items-center justify-center shrink-0">
+                <i data-lucide="bot" class="w-4 h-4 text-accent"></i>
+              </div>
+              <div class="flex-1">
+                <h3 class="text-paper-50 font-medium">A sandbox for LLM-callable tools</h3>
+                <p class="mt-2 text-sm text-mute-400 leading-relaxed">
+                  The manifest is the tool's allowed surface. An LLM
+                  can write the handler but cannot expand the
+                  capabilities &mdash; declaring a new host, path, or
+                  env var means editing the manifest, which the
+                  runtime parses and validates before any user code
+                  runs. One Hull binary per tool gives you
+                  per-tool capability scoping for free.
+                </p>
+                <ul class="mt-4 space-y-1.5 text-sm text-mute-400">
+                  <li class="flex items-start gap-2">
+                    <i data-lucide="check" class="w-3.5 h-3.5 text-accent mt-1 shrink-0"></i>
+                    <span>Gas-metered Lua/JS &middot; AOT WASM &middot; deny-default everything.</span>
+                  </li>
+                  <li class="flex items-start gap-2">
+                    <i data-lucide="check" class="w-3.5 h-3.5 text-accent mt-1 shrink-0"></i>
+                    <span>Sealed signed binary &mdash; the agent can't smuggle native code in.</span>
+                  </li>
+                  <li class="flex items-start gap-2">
+                    <i data-lucide="check" class="w-3.5 h-3.5 text-accent mt-1 shrink-0"></i>
+                    <span>Kernel sandbox engaged at process start &mdash; ambient authority drops away.</span>
+                  </li>
+                </ul>
+              </div>
+            </div>
+          </div>
+
+          <!-- Angle 2: Dev surface for AI coding agents -->
+          <div class="border border-white/[0.08] rounded-md bg-ink-900/40 p-6">
+            <div class="flex items-start gap-4">
+              <div class="w-9 h-9 rounded-md border border-accent/25 bg-accent/[0.06] flex items-center justify-center shrink-0">
+                <i data-lucide="terminal" class="w-4 h-4 text-accent"></i>
+              </div>
+              <div class="flex-1">
+                <h3 class="text-paper-50 font-medium">A CLI surface for AI coding agents</h3>
+                <p class="mt-2 text-sm text-mute-400 leading-relaxed">
+                  <code class="text-paper-100 text-[0.78rem]">hull agent</code>
+                  subcommands return machine-readable JSON for routes,
+                  schema, errors, tests, and deploy status &mdash; no
+                  plugins, no separate sidecar process.
+                  <code class="text-paper-100 text-[0.78rem]">hull mcp</code>
+                  exposes the same surface as a Model Context Protocol
+                  server, ready to plug into Claude Code, Codex CLI, or
+                  any MCP-compatible client.
+                </p>
+                <div class="mt-4 grid sm:grid-cols-2 gap-x-6 gap-y-1.5 text-[12px]">
+                  <div class="font-mono text-mute-400"><span class="text-accent">$</span> hull agent routes</div>
+                  <div class="font-mono text-mute-400"><span class="text-accent">$</span> hull agent db schema</div>
+                  <div class="font-mono text-mute-400"><span class="text-accent">$</span> hull agent errors</div>
+                  <div class="font-mono text-mute-400"><span class="text-accent">$</span> hull agent test</div>
+                  <div class="font-mono text-mute-400"><span class="text-accent">$</span> hull agent deploy</div>
+                  <div class="font-mono text-mute-400"><span class="text-accent">$</span> hull mcp</div>
+                </div>
+                <p class="mt-3 text-[11px] text-mute-500 leading-relaxed">
+                  <code class="text-paper-100 text-[0.72rem]">hull dev --agent</code>
+                  also writes <code class="text-paper-100 text-[0.72rem]">.hull/dev.json</code> and <code class="text-paper-100 text-[0.72rem]">.hull/last_error.json</code> sidecar files for live reload + structured error reporting.
+                </p>
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────────────────
+       COMPARISON
+       ───────────────────────────────────────────────────────────────── -->
+  <section id="compare" class="hairline-t">
+    <div class="max-w-6xl mx-auto px-6 py-20 md:py-24">
+      <div class="grid lg:grid-cols-12 gap-10 lg:gap-16 items-start">
+
+        <div class="lg:col-span-4">
+          <div class="text-xs uppercase tracking-widest text-mute-500 mb-3">Why not &hellip;?</div>
+          <h2 class="text-2xl md:text-3xl font-semibold text-paper-50 tracking-tight">
+            Why a new runtime.
+          </h2>
+          <p class="mt-6 text-mute-400 leading-relaxed">
+            Other sandboxed runtimes solve parts of this. Hull is the
+            combination &mdash; manifest-declared capabilities,
+            sealed signed bundles, kernel sandboxing, and no
+            runtime codegen in one binary.
+          </p>
+          <p class="mt-4 text-xs text-mute-500 leading-relaxed">
+            Marks reflect default configurations as of v0.1.0.
+            <span class="text-mute-400">~</span> means partial coverage
+            &mdash; e.g. Deno's CLI flags are capability-like but
+            declared at launch, not in source.
+          </p>
+        </div>
+
+        <div class="lg:col-span-8 overflow-x-auto border border-white/[0.08] rounded-md bg-ink-900/40">
+          <table class="cmp-table">
+            <thead>
+              <tr>
+                <th>Property</th>
+                <th class="cmp-hull-col">Hull</th>
+                <th>Deno</th>
+                <th>CF&nbsp;Workers</th>
+                <th>WasmEdge</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="text-paper-100">Manifest-declared capabilities</td>
+                <td class="cmp-hull-col"><span class="cmp-yes">&check;</span></td>
+                <td><span class="cmp-part">part</span></td>
+                <td><span class="cmp-no">&middot;</span></td>
+                <td><span class="cmp-part">part</span></td>
+              </tr>
+              <tr>
+                <td class="text-paper-100">Sealed signed bundle</td>
+                <td class="cmp-hull-col"><span class="cmp-yes">&check;</span></td>
+                <td><span class="cmp-no">&middot;</span></td>
+                <td><span class="cmp-no">&middot;</span></td>
+                <td><span class="cmp-no">&middot;</span></td>
+              </tr>
+              <tr>
+                <td class="text-paper-100">Kernel sandbox built-in</td>
+                <td class="cmp-hull-col"><span class="cmp-yes">&check;</span></td>
+                <td><span class="cmp-no">&middot;</span></td>
+                <td><span class="cmp-na">n/a</span></td>
+                <td><span class="cmp-no">&middot;</span></td>
+              </tr>
+              <tr>
+                <td class="text-paper-100">No runtime codegen (W^X)</td>
+                <td class="cmp-hull-col"><span class="cmp-yes">&check;</span></td>
+                <td><span class="cmp-no">&middot;</span></td>
+                <td><span class="cmp-no">&middot;</span></td>
+                <td><span class="cmp-yes">&check;</span></td>
+              </tr>
+              <tr>
+                <td class="text-paper-100">Single static binary</td>
+                <td class="cmp-hull-col"><span class="cmp-yes">&check;</span></td>
+                <td><span class="cmp-yes">&check;</span></td>
+                <td><span class="cmp-na">n/a</span></td>
+                <td><span class="cmp-yes">&check;</span></td>
+              </tr>
+            </tbody>
+          </table>
         </div>
 
       </div>
@@ -372,6 +753,65 @@
             calls cross into C, where the declared allowlists are
             consulted on every operation.
           </p>
+
+          <!-- Architecture diagram -->
+          <div class="mt-8 border border-white/[0.08] rounded-md bg-ink-900/40 p-4">
+            <div class="text-[10px] uppercase tracking-widest text-mute-500 mb-3">Defense-in-depth flow</div>
+            <svg viewBox="0 0 420 320" class="w-full h-auto" role="img" aria-label="Architecture diagram showing requests passing through manifest, capability layer, and kernel sandbox before reaching the OS">
+              <defs>
+                <marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                  <path d="M0,0 L10,5 L0,10 z" fill="#71717a"/>
+                </marker>
+                <marker id="ahd" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                  <path d="M0,0 L10,5 L0,10 z" fill="#52525b"/>
+                </marker>
+              </defs>
+
+              <!-- Lane: request flow -->
+              <text x="10" y="20" font-family="JetBrains Mono, monospace" font-size="9" fill="#71717a" letter-spacing="0.06em">REQUEST</text>
+              <text x="410" y="20" font-family="JetBrains Mono, monospace" font-size="9" fill="#52525b" letter-spacing="0.06em" text-anchor="end">DENY</text>
+
+              <!-- L1: handler / script -->
+              <rect x="10" y="34" width="280" height="44" rx="4" fill="#0f0f10" stroke="#262626"/>
+              <text x="22" y="55" font-family="Inter, sans-serif" font-size="11" font-weight="600" fill="#fafafa">Lua / JS handler</text>
+              <text x="22" y="69" font-family="JetBrains Mono, monospace" font-size="9" fill="#71717a">runtime sandbox &middot; gas-metered</text>
+
+              <!-- Arrow down 1 -->
+              <line x1="150" y1="78" x2="150" y2="110" stroke="#71717a" stroke-width="1.25" marker-end="url(#ah)"/>
+              <text x="158" y="98" font-family="JetBrains Mono, monospace" font-size="8.5" fill="#71717a">capability call</text>
+
+              <!-- L2: manifest gate -->
+              <rect x="10" y="110" width="280" height="44" rx="4" fill="#0f0f10" stroke="#22d3a8" stroke-opacity="0.35"/>
+              <text x="22" y="131" font-family="Inter, sans-serif" font-size="11" font-weight="600" fill="#fafafa">Manifest gate</text>
+              <text x="22" y="145" font-family="JetBrains Mono, monospace" font-size="9" fill="#71717a">modules &middot; hosts &middot; fs &middot; env</text>
+              <!-- deny arrow -->
+              <line x1="290" y1="132" x2="396" y2="132" stroke="#52525b" stroke-width="1" stroke-dasharray="3 3" marker-end="url(#ahd)"/>
+
+              <!-- Arrow down 2 -->
+              <line x1="150" y1="154" x2="150" y2="186" stroke="#71717a" stroke-width="1.25" marker-end="url(#ah)"/>
+              <text x="158" y="174" font-family="JetBrains Mono, monospace" font-size="8.5" fill="#71717a">allowed</text>
+
+              <!-- L3: C capability layer -->
+              <rect x="10" y="186" width="280" height="44" rx="4" fill="#0f0f10" stroke="#22d3a8" stroke-opacity="0.35"/>
+              <text x="22" y="207" font-family="Inter, sans-serif" font-size="11" font-weight="600" fill="#fafafa">C capability layer  &middot; <tspan font-family="JetBrains Mono, monospace" font-size="10" fill="#22d3a8">hl_cap_*</tspan></text>
+              <text x="22" y="221" font-family="JetBrains Mono, monospace" font-size="9" fill="#71717a">parameterised SQL &middot; realpath &middot; allowlists</text>
+              <line x1="290" y1="208" x2="396" y2="208" stroke="#52525b" stroke-width="1" stroke-dasharray="3 3" marker-end="url(#ahd)"/>
+
+              <!-- Arrow down 3 -->
+              <line x1="150" y1="230" x2="150" y2="262" stroke="#71717a" stroke-width="1.25" marker-end="url(#ah)"/>
+              <text x="158" y="250" font-family="JetBrains Mono, monospace" font-size="8.5" fill="#71717a">syscall</text>
+
+              <!-- L4: kernel -->
+              <rect x="10" y="262" width="280" height="44" rx="4" fill="#0f0f10" stroke="#22d3a8" stroke-opacity="0.35"/>
+              <text x="22" y="283" font-family="Inter, sans-serif" font-size="11" font-weight="600" fill="#fafafa">Kernel sandbox</text>
+              <text x="22" y="297" font-family="JetBrains Mono, monospace" font-size="9" fill="#71717a">pledge &middot; unveil &middot; seatbelt</text>
+              <line x1="290" y1="284" x2="396" y2="284" stroke="#52525b" stroke-width="1" stroke-dasharray="3 3" marker-end="url(#ahd)"/>
+            </svg>
+            <p class="mt-3 text-[11px] text-mute-500 leading-relaxed">
+              A capability call must pass the manifest gate, the C layer's allowlists, and the kernel sandbox.
+              A denial at any layer is a hard stop &mdash; never a warning.
+            </p>
+          </div>
 
           <div class="mt-10 space-y-5">
             <div class="flex items-start gap-4">
@@ -406,12 +846,13 @@
         </div>
 
         <div class="lg:col-span-7 space-y-4">
-          <div class="code-block">
-            <header>
-              <i data-lucide="file-code" class="w-3.5 h-3.5"></i>
-              <span>app.lua &mdash; full example</span>
-            </header>
-<pre><span class="tk-kw">local</span> db     = <span class="tk-fn">require</span>(<span class="tk-str">"hull.db"</span>)
+          <div class="code-block code-tabs">
+            <div class="code-tabs-bar" role="tablist" aria-label="Full example language">
+              <button class="tab-btn tab-active" data-tab="lua" role="tab" aria-selected="true">app.lua</button>
+              <button class="tab-btn" data-tab="js" role="tab" aria-selected="false">app.js</button>
+              <button class="tab-btn" data-tab="gpu" role="tab" aria-selected="false">compute &middot; wgsl</button>
+            </div>
+<pre class="code-tab-panel" data-tab-panel="lua"><span class="tk-kw">local</span> db     = <span class="tk-fn">require</span>(<span class="tk-str">"hull.db"</span>)
 <span class="tk-kw">local</span> crypto = <span class="tk-fn">require</span>(<span class="tk-str">"hull.crypto"</span>)
 
 <span class="tk-kw">app</span>.<span class="tk-fn">manifest</span>({
@@ -431,6 +872,48 @@
     res:<span class="tk-fn">json</span>({ items = rows })
 <span class="tk-kw">end</span>)
 </pre>
+<pre class="code-tab-panel hidden" data-tab-panel="js"><span class="tk-kw">import</span> { db }     <span class="tk-kw">from</span> <span class="tk-str">"hull:db"</span>;
+<span class="tk-kw">import</span> { crypto } <span class="tk-kw">from</span> <span class="tk-str">"hull:crypto"</span>;
+
+<span class="tk-kw">app</span>.<span class="tk-fn">manifest</span>({
+    <span class="tk-key">modules</span>: [
+        <span class="tk-str">"hull/server@1"</span>,
+        <span class="tk-str">"hull/db@1"</span>,
+        <span class="tk-str">"hull/crypto@1"</span>,
+        <span class="tk-str">"hull/middleware/session@1"</span>,
+    ],
+    <span class="tk-key">hosts</span>: [<span class="tk-str">"api.example.com"</span>],
+    <span class="tk-key">fs</span>:    { <span class="tk-key">read</span>: [<span class="tk-str">"./assets/*"</span>] },
+    <span class="tk-key">env</span>:   [<span class="tk-str">"API_KEY"</span>],
+});
+
+<span class="tk-kw">app</span>.<span class="tk-fn">get</span>(<span class="tk-str">"/items"</span>, (req, res) =&gt; {
+    <span class="tk-kw">const</span> rows = <span class="tk-acc">db</span>.<span class="tk-fn">query</span>(<span class="tk-str">"SELECT id, name FROM items"</span>);
+    res.<span class="tk-fn">json</span>({ items: rows });
+});
+</pre>
+<pre class="code-tab-panel hidden" data-tab-panel="gpu"><span class="tk-com">// shaders/normalize.wgsl  &mdash; compiled at hull build</span>
+<span class="tk-attr">@group</span>(<span class="tk-num">0</span>) <span class="tk-attr">@binding</span>(<span class="tk-num">0</span>) <span class="tk-kw">var</span>&lt;<span class="tk-type">storage</span>, <span class="tk-type">read_write</span>&gt; data: <span class="tk-type">array</span>&lt;<span class="tk-type">f32</span>&gt;;
+
+<span class="tk-attr">@compute</span> <span class="tk-attr">@workgroup_size</span>(<span class="tk-num">64</span>)
+<span class="tk-kw">fn</span> <span class="tk-fn">main</span>(<span class="tk-attr">@builtin</span>(global_invocation_id) gid: <span class="tk-type">vec3</span>&lt;<span class="tk-type">u32</span>&gt;) {
+    <span class="tk-kw">let</span> i = gid.x;
+    <span class="tk-kw">if</span> (i &gt;= <span class="tk-fn">arrayLength</span>(&amp;data)) { <span class="tk-kw">return</span>; }
+    data[i] = data[i] / <span class="tk-num">255.0</span>;
+}
+
+<span class="tk-com">-- app.lua &mdash; dispatch from a handler</span>
+<span class="tk-kw">app</span>.<span class="tk-fn">post</span>(<span class="tk-str">"/rank"</span>, <span class="tk-kw">function</span>(req, res)
+    <span class="tk-kw">local</span> raw    = req:<span class="tk-fn">body</span>()
+    <span class="tk-kw">local</span> scored = <span class="tk-acc">compute</span>.<span class="tk-fn">call</span>(<span class="tk-str">"score"</span>, raw)              <span class="tk-com">-- WASM (WAMR AOT)</span>
+    <span class="tk-kw">local</span> final  = <span class="tk-acc">gpu</span>.async.<span class="tk-fn">dispatch</span>(<span class="tk-str">"normalize"</span>, {       <span class="tk-com">-- WebGPU (wgpu-native)</span>
+        <span class="tk-key">buffers</span>    = { { <span class="tk-key">data</span> = scored, <span class="tk-key">usage</span> = <span class="tk-str">"readwrite"</span> } },
+        <span class="tk-key">workgroups</span> = { <span class="tk-key">x</span> = <span class="tk-num">256</span> },
+        <span class="tk-key">output</span>     = <span class="tk-num">1</span>,
+    })
+    res:<span class="tk-fn">json</span>({ result = final })
+<span class="tk-kw">end</span>)
+</pre>
           </div>
 
           <div class="grid sm:grid-cols-3 gap-4">
@@ -441,8 +924,8 @@
             </div>
             <div class="border border-white/[0.08] rounded-md p-4 bg-white/[0.015]">
               <div class="text-[11px] uppercase tracking-widest text-mute-500">Compute</div>
-              <div class="mt-1 text-sm text-paper-50">WAMR + AOT</div>
-              <div class="text-xs text-mute-500">optional GPU via wgpu</div>
+              <div class="mt-1 text-sm text-paper-50">WASM &middot; WebGPU</div>
+              <div class="text-xs text-mute-500">WAMR AOT &middot; wgpu-native</div>
             </div>
             <div class="border border-white/[0.08] rounded-md p-4 bg-white/[0.015]">
               <div class="text-[11px] uppercase tracking-widest text-mute-500">Kernel</div>
@@ -486,7 +969,7 @@
               <i data-lucide="lock" class="w-4 h-4 text-accent mt-1 shrink-0"></i>
               <div>
                 <div class="text-sm font-medium text-paper-50">Guest-controlled memory is never executable</div>
-                <div class="text-sm text-mute-500 mt-1">W<sup>X</sup> across the runtime. No JIT. WASM AOT artifacts are produced at build time and shipped read-only.</div>
+                <div class="text-sm text-mute-500 mt-1">W^X across the runtime. No JIT. WASM AOT artifacts are produced at build time and shipped read-only.</div>
               </div>
             </li>
 
@@ -543,11 +1026,14 @@
 
       <div class="mt-12 grid sm:grid-cols-2 lg:grid-cols-3 gap-px bg-white/[0.06] border border-white/[0.06] rounded-md overflow-hidden">
 
-        <div class="bg-ink-950 p-6">
+        <a href="#agents" class="bg-ink-950 p-6 block hover:bg-ink-900 transition group">
           <i data-lucide="bot" class="w-5 h-5 text-accent mb-4"></i>
-          <div class="text-paper-50 font-medium">Agent tools</div>
+          <div class="text-paper-50 font-medium flex items-center gap-1.5">
+            Agent tools
+            <i data-lucide="arrow-up-right" class="w-3.5 h-3.5 text-mute-500 group-hover:text-accent transition"></i>
+          </div>
           <p class="mt-2 text-sm text-mute-400 leading-relaxed">A bounded host for LLM-callable tools. The agent gets exactly the surface you declared, nothing else.</p>
-        </div>
+        </a>
 
         <div class="bg-ink-950 p-6">
           <i data-lucide="laptop" class="w-5 h-5 text-accent mb-4"></i>
@@ -564,7 +1050,7 @@
         <div class="bg-ink-950 p-6">
           <i data-lucide="cpu" class="w-5 h-5 text-accent mb-4"></i>
           <div class="text-paper-50 font-medium">Compute plugins</div>
-          <p class="mt-2 text-sm text-mute-400 leading-relaxed">Ship WASM modules from any language. Gas-metered, memory-capped, AOT-compiled, callable from Lua/JS handlers.</p>
+          <p class="mt-2 text-sm text-mute-400 leading-relaxed">Ship WASM modules from any language or WebGPU shaders in WGSL. Gas-metered, memory-capped, AOT-compiled, callable from Lua/JS handlers.</p>
         </div>
 
         <div class="bg-ink-950 p-6">
@@ -576,7 +1062,14 @@
         <div class="bg-ink-950 p-6">
           <i data-lucide="brain-circuit" class="w-5 h-5 text-accent mb-4"></i>
           <div class="text-paper-50 font-medium">Constrained AI-generated code</div>
-          <p class="mt-2 text-sm text-mute-400 leading-relaxed">Execute generated handlers behind a manifest the model didn't write. Capability creep is impossible by construction.</p>
+          <p class="mt-2 text-sm text-mute-400 leading-relaxed">
+            Execute generated handlers behind a manifest the model
+            didn't write. The LLM cannot expand its own reach &mdash;
+            declaring a new host, path, or env var means editing the
+            manifest, which the runtime parses and validates before
+            user code runs. Capability creep is impossible by
+            construction.
+          </p>
         </div>
 
       </div>
@@ -649,7 +1142,7 @@ $ ./my-tool
     <div class="max-w-6xl mx-auto px-6 py-20 md:py-24 text-center">
       <h2 class="text-2xl md:text-3xl font-semibold text-paper-50 tracking-tight max-w-2xl mx-auto leading-snug">
         Orchestration in Lua or JavaScript.
-        Compute in WASM.
+        Compute in WASM and WebGPU.
         Access through capabilities.
       </h2>
       <div class="mt-8 flex items-center justify-center gap-3">
@@ -669,24 +1162,49 @@ $ ./my-tool
        FOOTER
        ───────────────────────────────────────────────────────────────── -->
   <footer class="hairline-t">
-    <div class="max-w-6xl mx-auto px-6 py-10 flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
-      <div class="flex items-center gap-3">
-        <svg viewBox="0 0 24 24" class="w-5 h-5 text-paper-50 opacity-80" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <rect x="3" y="3" width="18" height="18" rx="4"/>
-          <path d="M8 8.5v7"/><path d="M16 8.5v7"/><path d="M8 12h8"/>
-        </svg>
-        <span class="text-sm text-mute-400">
-          Hull &mdash; capability-secure runtime
-        </span>
+    <div class="max-w-6xl mx-auto px-6 py-10 space-y-6">
+
+      <!-- Brand + integrity statement -->
+      <div class="flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div class="flex items-center gap-3">
+          <svg viewBox="0 0 24 24" class="w-5 h-5 text-paper-50 opacity-80" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="3" y="3" width="18" height="18" rx="4"/>
+            <path d="M8 8.5v7"/><path d="M16 8.5v7"/><path d="M8 12h8"/>
+          </svg>
+          <span class="text-sm text-mute-400">
+            Hull &mdash; capability-secure runtime
+          </span>
+        </div>
+        <div class="flex items-center gap-2 text-xs text-mute-500 leading-relaxed">
+          <i data-lucide="shield-check" class="w-3.5 h-3.5 text-accent shrink-0"></i>
+          <span>
+            Releases signed with Ed25519. Verify with
+            <code class="text-paper-100 text-[0.72rem]">hull verify-release</code>.
+          </span>
+        </div>
       </div>
-      <nav class="flex flex-wrap items-center gap-x-7 gap-y-2 text-sm">
-        <a href="https://github.com/artalis-io/hull" class="link inline-flex items-center gap-1.5">
-          <i data-lucide="github" class="w-3.5 h-3.5"></i> GitHub
+
+      <div class="rule"></div>
+
+      <!-- Nav + license -->
+      <div class="flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <nav class="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+          <a href="https://github.com/artalis-io/hull" class="link inline-flex items-center gap-1.5">
+            <i data-lucide="github" class="w-3.5 h-3.5"></i> GitHub
+          </a>
+          <a href="/docs" class="link">Docs</a>
+          <a href="https://github.com/artalis-io/hull/releases" class="link inline-flex items-center gap-1.5">
+            <i data-lucide="tag" class="w-3.5 h-3.5"></i> Changelog
+          </a>
+          <a href="https://github.com/artalis-io/hull/security/advisories/new" class="link inline-flex items-center gap-1.5">
+            <i data-lucide="shield" class="w-3.5 h-3.5"></i> Report a vulnerability
+          </a>
+        </nav>
+        <a href="https://github.com/artalis-io/hull/blob/main/LICENSING.md" class="kbd hover:bg-white/10 hover:text-paper-50 transition no-underline" title="AGPL-3.0 for open source — commercial license available at licensing+site@artalis.io">
+          AGPL-3.0 &middot; Commercial
         </a>
-        <a href="/docs" class="link">Docs</a>
-        <a href="/security" class="link">Security</a>
-        <a href="https://github.com/artalis-io/hull/blob/main/LICENSE" class="link">License</a>
-      </nav>
+      </div>
+
     </div>
   </footer>
 
@@ -696,6 +1214,27 @@ $ ./my-tool
     // [data-lucide] placeholders with the SVG. Stays minimal — no
     // framework, no hydration.
     if (window.lucide) { lucide.createIcons(); }
+
+    // Tabbed code blocks. Each .code-tabs container has its own bar
+    // of [data-tab] buttons and [data-tab-panel] panes; switching is
+    // scoped to the container so multiple tabbed blocks coexist.
+    document.querySelectorAll('.code-tabs').forEach((container) => {
+        const buttons = container.querySelectorAll('.tab-btn');
+        const panels  = container.querySelectorAll('.code-tab-panel');
+        buttons.forEach((btn) => {
+            btn.addEventListener('click', () => {
+                const target = btn.dataset.tab;
+                buttons.forEach((b) => {
+                    const active = b.dataset.tab === target;
+                    b.classList.toggle('tab-active', active);
+                    b.setAttribute('aria-selected', active ? 'true' : 'false');
+                });
+                panels.forEach((p) => {
+                    p.classList.toggle('hidden', p.dataset.tabPanel !== target);
+                });
+            });
+        });
+    });
   </script>
 </body>
 </html>
