@@ -714,6 +714,28 @@ static int vt_lua_has_main(HlRuntime *rt)
     return has;
 }
 
+/* True iff any route/middleware/timer/ws/sse handler has been
+ * registered. Matches the set of registry keys populated by the
+ * app.get/use/every/ws/sse registration helpers in mod_app.c. */
+static int vt_lua_has_server_handlers(HlRuntime *rt)
+{
+    if (!rt) return 0;
+    HlLua *lua = (HlLua *)rt;
+    if (!lua->L) return 0;
+    static const char *keys[] = {
+        "__hull_route_defs", "__hull_middleware", "__hull_post_middleware",
+        "__hull_timer_defs", "__hull_ws_defs", "__hull_sse_defs",
+        NULL
+    };
+    for (int i = 0; keys[i]; i++) {
+        lua_getfield(lua->L, LUA_REGISTRYINDEX, keys[i]);
+        int present = lua_istable(lua->L, -1) && luaL_len(lua->L, -1) > 0;
+        lua_pop(lua->L, 1);
+        if (present) return 1;
+    }
+    return 0;
+}
+
 /* Coerce the value on top of `co`'s stack to an exit code in [0..255]. */
 static int lua_coerce_exit_code(lua_State *co)
 {
@@ -882,5 +904,6 @@ const HlRuntimeVtable hl_lua_vtable = {
     .name                = "Lua",
     .test_file_pattern   = "test_*.lua",
     .has_main            = vt_lua_has_main,
+    .has_server_handlers = vt_lua_has_server_handlers,
     .run_main            = vt_lua_run_main,
 };

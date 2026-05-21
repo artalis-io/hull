@@ -1240,7 +1240,14 @@ static int hl_serve_apply_sandbox(HlServerState *s)
          * vtable's has_main was populated in mod_app.c at app-load time,
          * so this check is purely informational here. */
         HlRuntime *rt = hl_app_context_runtime(s->app);
-        if (rt && rt->vt && rt->vt->has_main && rt->vt->has_main(rt)) {
+        int has_main_only = rt && rt->vt
+            && rt->vt->has_main && rt->vt->has_main(rt)
+            && (!rt->vt->has_server_handlers
+                || !rt->vt->has_server_handlers(rt));
+        if (has_main_only) {
+            /* Pure CLI app (main, no handlers) doesn't accept inbound
+             * connections. Init-then-serve apps still need bind+listen
+             * so the server loop can run after main returns. */
             sandbox_policy.network_inbound = 0;
         }
 
@@ -1454,14 +1461,49 @@ static int hl_serve_wire_and_start(HlServerState *s)
         return -1;
     }
 
-    /* Branch on dispatch mode. If the loaded app registered app.main,
-     * skip route wiring + Keel event loop and run main once. */
+    /* Lifecycle (one rule covers all three modes):
+     *
+     *   1. If app.main is registered, run it once on the event loop
+     *      thread. Non-zero return = fatal → exit with that code.
+     *   2. If any server handlers (routes, middleware, timers, ws,
+     *      sse) are registered, enter the HTTP serve loop until
+     *      SIGINT.
+     *   3. Otherwise return — the app had nothing left to do.
+     *
+     * Pure CLI (main, no handlers) and pure web (handlers, no main)
+     * are the special cases; init-then-serve (both registered) is
+     * the unified case. */
     HlRuntime *rt = hl_app_context_runtime(s->app);
-    if (rt->vt->has_main && rt->vt->has_main(rt)) {
-        s->cli_mode = 1;
-        int rc = hl_serve_run_main(s);
-        hl_serve_teardown_after_serve(s);
-        return rc;
+    int has_main = rt->vt->has_main && rt->vt->has_main(rt);
+    int has_handlers = rt->vt->has_server_handlers
+                       && rt->vt->has_server_handlers(rt);
+
+    if (has_main) {
+        s->cli_mode = !has_handlers;     /* informational; affects nothing yet */
+        int main_rc = hl_serve_run_main(s);
+        if (main_rc != 0) {
+            /* run_main returned non-zero — either an internal error
+             * (-1) or main itself exited non-zero. Either way, don't
+             * enter the server loop. */
+            hl_serve_teardown_after_serve(s);
+            return main_rc;
+        }
+        if (s->cli_exit_code != 0) {
+            /* main returned non-zero — short-circuit even if handlers
+             * are registered. Matches the shell-style "main exit code
+             * wins" rule. */
+            hl_serve_teardown_after_serve(s);
+            return 0;        /* hl_serve_wire_and_start success; the
+                              * outer caller reads s->cli_exit_code. */
+        }
+        if (!has_handlers) {
+            /* Pure CLI — main was the whole program. */
+            hl_serve_teardown_after_serve(s);
+            return 0;
+        }
+        /* Fall through: main succeeded and handlers exist. The HTTP
+         * serve loop takes over below as if main had been a startup
+         * hook. */
     }
 
     if (hl_serve_wire_routes(s) != 0) {
@@ -1582,11 +1624,18 @@ int hull_serve(int argc, char **argv)
     int wire_rc = hl_serve_wire_and_start(&s);
     int ret;
     if (s.cli_mode) {
-        /* CLI mode: app.main's return value is the process exit code,
-         * regardless of whether wire_and_start succeeded (a non-zero
-         * wire_rc with cli_mode=1 already set exit_code to a sane value). */
+        /* Pure CLI (app.main only, no handlers) — main's return value
+         * is the process exit code. */
+        ret = s.cli_exit_code;
+    } else if (s.cli_exit_code != 0) {
+        /* Init-then-serve, but main short-circuited with a non-zero
+         * exit. Honour main's exit code; the serve loop was never
+         * entered. */
         ret = s.cli_exit_code;
     } else {
+        /* Either handlers-only (no main) or main-then-serve where
+         * main succeeded; defer to whether the server loop finished
+         * cleanly. */
         ret = (wire_rc == 0) ? 0 : 1;
     }
 

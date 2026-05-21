@@ -1392,6 +1392,36 @@ static int vt_js_has_main(HlRuntime *rt)
     return has;
 }
 
+/* True iff any route/middleware/timer/ws/sse handler has been
+ * registered. Same set of globalThis keys js_app_dispatch_registered
+ * walks in mod_app.c. */
+static int vt_js_has_server_handlers(HlRuntime *rt)
+{
+    if (!rt) return 0;
+    HlJS *js = (HlJS *)rt;
+    if (!js->ctx) return 0;
+    static const char *keys[] = {
+        "__hull_route_defs", "__hull_middleware", "__hull_post_middleware",
+        "__hull_timer_defs", "__hull_ws_defs", "__hull_sse_defs",
+        NULL
+    };
+    JSValue global = JS_GetGlobalObject(js->ctx);
+    int found = 0;
+    for (int i = 0; keys[i] && !found; i++) {
+        JSValue v = JS_GetPropertyStr(js->ctx, global, keys[i]);
+        if (JS_IsArray(js->ctx, v)) {
+            JSValue len_val = JS_GetPropertyStr(js->ctx, v, "length");
+            uint32_t len = 0;
+            JS_ToUint32(js->ctx, &len, len_val);
+            JS_FreeValue(js->ctx, len_val);
+            if (len > 0) found = 1;
+        }
+        JS_FreeValue(js->ctx, v);
+    }
+    JS_FreeValue(js->ctx, global);
+    return found;
+}
+
 static int coerce_js_exit_code(JSContext *ctx, JSValue v)
 {
     if (JS_IsUndefined(v) || JS_IsNull(v)) return 0;
@@ -1600,5 +1630,6 @@ const HlRuntimeVtable hl_js_vtable = {
     .name                 = "QuickJS",
     .test_file_pattern    = "test_*.js",
     .has_main             = vt_js_has_main,
+    .has_server_handlers  = vt_js_has_server_handlers,
     .run_main             = vt_js_run_main,
 };

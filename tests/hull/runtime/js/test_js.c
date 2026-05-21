@@ -405,8 +405,11 @@ UTEST(js_runtime, app_main_registers)
     cleanup_js();
 }
 
-UTEST(js_runtime, app_main_blocks_route_after)
+UTEST(js_runtime, app_main_coexists_with_route_after)
 {
+    /* app.main + routes are no longer mutually exclusive: app.main
+     * is a startup hook, routes are served after it returns. See
+     * docs/cli_mode.md and CLAUDE.md "App Lifecycle". */
     init_js();
     const char *code =
         "import { app } from 'hull:app';\n"
@@ -420,13 +423,15 @@ UTEST(js_runtime, app_main_blocks_route_after)
     hl_js_run_jobs(&js);
 
     char *msg = eval_str("globalThis.__test_caught");
+    /* No exception expected — globalThis.__test_caught is JS null,
+     * which eval_str stringifies to "null". */
     ASSERT_NE(msg, NULL);
-    ASSERT_TRUE(strstr(msg, "app.main is registered") != NULL);
+    ASSERT_STREQ(msg, "null");
     free(msg);
     cleanup_js();
 }
 
-UTEST(js_runtime, route_blocks_app_main_after)
+UTEST(js_runtime, route_coexists_with_app_main_after)
 {
     init_js();
     const char *code =
@@ -441,8 +446,10 @@ UTEST(js_runtime, route_blocks_app_main_after)
     hl_js_run_jobs(&js);
 
     char *msg = eval_str("globalThis.__test_caught");
+    /* No exception expected — globalThis.__test_caught is JS null,
+     * which eval_str stringifies to "null". */
     ASSERT_NE(msg, NULL);
-    ASSERT_TRUE(strstr(msg, "registering routes") != NULL);
+    ASSERT_STREQ(msg, "null");
     free(msg);
     cleanup_js();
 }

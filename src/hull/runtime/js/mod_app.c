@@ -17,16 +17,13 @@ static int js_app_main_registered(JSContext *ctx)
     return has;
 }
 
-/* Throws + returns 1 if app.main is registered; CLI and server modes
- * are mutually exclusive. Returns 0 if the caller may proceed. */
+/* No-op: kept for source compatibility with the call sites in this
+ * file. app.main and route registration are no longer mutually
+ * exclusive — see the lifecycle docs in CLAUDE.md and serve.c. */
 static int js_app_throw_if_main(JSContext *ctx, const char *call)
 {
-    if (!js_app_main_registered(ctx)) return 0;
-    JS_ThrowTypeError(ctx,
-        "%s cannot be called when app.main is registered — "
-        "choose CLI mode (app.main) or server mode (app.get/etc), not both",
-        call);
-    return 1;
+    (void)ctx; (void)call;
+    return 0;
 }
 
 /* Returns 1 if any dispatch-style handler has been registered. Used to
@@ -560,9 +557,15 @@ static JSValue js_app_get_manifest(JSContext *ctx, JSValueConst this_val,
     return manifest;
 }
 
-/* app.main(fn) — register CLI-mode entry point. Mutually exclusive with
- * route / middleware / timer / ws / sse registration. Stored under
- * globalThis.__hull_main; invoked once by the dispatcher in main.c. */
+/* app.main(fn) — register a startup hook.
+ *
+ * Lifecycle: serve.c invokes the function once after manifest extraction
+ * + sandbox + migrations, on the event loop thread. If the app also
+ * registered routes / middleware / timers / WebSocket / SSE handlers,
+ * the HTTP listener auto-starts after main resolves. Returning a
+ * non-zero exit code from main short-circuits — the process exits with
+ * that code even if routes are registered. Apps with main only and no
+ * routes exit when main returns. */
 static JSValue js_app_main(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
@@ -572,12 +575,6 @@ static JSValue js_app_main(JSContext *ctx, JSValueConst this_val,
 
     if (js_app_main_registered(ctx))
         return JS_ThrowTypeError(ctx, "app.main() can only be called once");
-
-    if (js_app_dispatch_registered(ctx))
-        return JS_ThrowTypeError(ctx,
-            "app.main() cannot be called after registering routes, "
-            "middleware, timers, or WebSocket/SSE handlers — "
-            "choose CLI mode (app.main) or server mode (app.get/etc), not both");
 
     JSValue global = JS_GetGlobalObject(ctx);
     JS_SetPropertyStr(ctx, global, "__hull_main", JS_DupValue(ctx, argv[0]));

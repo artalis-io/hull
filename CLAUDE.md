@@ -234,46 +234,50 @@ Client → Keel HTTP → Route Match → hl_{lua,js}_dispatch() → Handler → 
 
 ### App Lifecycle
 
-Two execution modes; selected by what the app registers, not by build flags.
-
-**Server mode** (app calls `app.get/post/use/ws/sse/every/daily`):
+One unified flow; the runtime picks the behavior from what the app
+registers.
 
 ```
 1. Process start; argv parsed
 2. Init runtime; kernel sandbox phase 1
 3. Load app.{lua,js}  ── top-level runs once:
-     app.manifest({...}); app.get(...); app.use(...); ...
+     app.manifest({...})
+     // any combination of:
+     app.main(fn)
+     app.get(...), app.use(...), app.ws(...), app.sse(...),
+     app.every(...), app.daily(...)
 4. Extract manifest; run module resolver; sandbox phase 2
 5. Run migrations (HL_ENABLE_DB + ./migrations/ + not --no-migrate)
-6. Start Keel; enter event loop
-7. Forever: accept connections → dispatch to handler → respond
-8. SIGINT/SIGTERM → graceful shutdown → cleanup → exit
-```
-
-**CLI mode** (app calls `app.main(fn)`) — **planned**, see [docs/cli_mode.md](docs/cli_mode.md):
-
-```
-1. Process start; argv parsed
-2. Init runtime; kernel sandbox phase 1
-3. Load app.{lua,js}  ── top-level runs once:
-     app.manifest({...}); app.main(fn)
-4. Extract manifest; run module resolver; sandbox phase 2
-5. Run migrations (same gate as server mode)
-6. Call app.main(ctx) on the event-loop thread
+6. If app.main is registered, invoke it once on the event-loop thread.
      ctx = { args, env, stdin, stdout, stderr }
-     async ops (compute.async / gpu.async / http.fetch) yield via
-     coroutine/Promise — main awaits naturally
-7. main returns/throws → cleanup
-8. Drain mmap/WASM/GPU caches; scrub keys; close DB
-9. Process exits with main's return value (nil → 0; integer → that code)
+     async ops (compute.async / gpu.async / http.fetch / hull.sleep)
+     yield via coroutine/Promise — main awaits naturally.
+7. After main returns:
+     - non-zero return → exit with that code, skip the serve loop
+     - zero/nil return + handlers registered → enter the serve loop
+     - zero/nil return + no handlers → exit 0
+   If app.main is NOT registered: go straight to the serve loop
+   (today's pure web-app behavior).
+8. Serve loop: accept connections → dispatch to handler → respond
+   until SIGINT / SIGTERM.
+9. Graceful shutdown → drain mmap/WASM/GPU caches → scrub keys →
+   close DB → exit.
 ```
 
-Conflict handling: registering both `app.main` and any route in the same
-app errors at step 6 with `app registered both app.main and HTTP routes;
-choose one`. CLI mode produces no event-loop survival, so `app.every` /
-`app.daily` error at registration with `timers require server mode`.
-`HL_ENABLE_HTTP=0` builds simply lack the route-registration bindings
-entirely.
+Three useful patterns this covers:
+
+| App registers | Behavior |
+|---|---|
+| `app.main` only | Run main; exit with its return code. CLI tool. |
+| `app.get`/etc only | Serve forever. Web app. Today's default. |
+| Both | Run main as a startup hook (run migrations, warm caches, prefetch config). Then serve. |
+
+`app.main` and route registration are **no longer mutually exclusive**
+— register them in any order. `app.main`'s return value short-circuits
+the serve loop if non-zero, matching shell exit-code conventions.
+
+On `HL_ENABLE_HTTP_SERVER=0` builds (CLI flavor) the route-registration
+bindings drop out entirely; only the `app.main` path is reachable.
 
 ### Command Dispatch
 

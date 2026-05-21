@@ -389,29 +389,26 @@ UTEST(lua_runtime, app_main_twice_rejected)
     cleanup_lua();
 }
 
-UTEST(lua_runtime, app_main_blocks_routes_after)
+UTEST(lua_runtime, app_main_coexists_with_routes_after)
 {
+    /* app.main + routes are no longer mutually exclusive: app.main
+     * is a startup hook, routes are served after it returns. See
+     * docs/cli_mode.md and CLAUDE.md "App Lifecycle". */
     init_lua();
     int rc = luaL_dostring(lua_rt.L,
         "app.main(function() return 0 end)\n"
         "app.get('/x', function() end)\n");
-    ASSERT_NE(rc, LUA_OK);
-    const char *err = lua_tostring(lua_rt.L, -1);
-    ASSERT_NE(err, NULL);
-    ASSERT_TRUE(strstr(err, "app.main is registered") != NULL);
+    ASSERT_EQ(rc, LUA_OK);
     cleanup_lua();
 }
 
-UTEST(lua_runtime, routes_block_app_main_after)
+UTEST(lua_runtime, routes_coexist_with_app_main_after)
 {
     init_lua();
     int rc = luaL_dostring(lua_rt.L,
         "app.get('/x', function() end)\n"
         "app.main(function() return 0 end)\n");
-    ASSERT_NE(rc, LUA_OK);
-    const char *err = lua_tostring(lua_rt.L, -1);
-    ASSERT_NE(err, NULL);
-    ASSERT_TRUE(strstr(err, "registering routes") != NULL);
+    ASSERT_EQ(rc, LUA_OK);
     cleanup_lua();
 }
 

@@ -25,33 +25,12 @@ static int lua_app_main_registered(lua_State *L)
     return has;
 }
 
-/* Raise an error if app.main was already registered; CLI and server
- * modes are mutually exclusive. */
+/* No-op: kept for source compatibility with the call sites in this
+ * file. app.main and route registration are no longer mutually
+ * exclusive — see the lifecycle docs in CLAUDE.md and serve.c. */
 static int lua_app_reject_if_main(lua_State *L, const char *call)
 {
-    if (lua_app_main_registered(L))
-        return luaL_error(L,
-            "%s cannot be called when app.main is registered — "
-            "choose CLI mode (app.main) or server mode (app.get/etc), not both",
-            call);
-    return 0;
-}
-
-/* Returns 1 if any route/middleware/timer/ws/sse handler has been
- * registered. Used to guard app.main() against late registration. */
-static int lua_app_dispatch_registered(lua_State *L)
-{
-    static const char *keys[] = {
-        "__hull_route_defs", "__hull_middleware", "__hull_post_middleware",
-        "__hull_timer_defs", "__hull_ws_defs", "__hull_sse_defs",
-        NULL
-    };
-    for (int i = 0; keys[i]; i++) {
-        lua_getfield(L, LUA_REGISTRYINDEX, keys[i]);
-        int present = lua_istable(L, -1) && luaL_len(L, -1) > 0;
-        lua_pop(L, 1);
-        if (present) return 1;
-    }
+    (void)L; (void)call;
     return 0;
 }
 
@@ -452,24 +431,21 @@ static int lua_app_get_manifest(lua_State *L)
     return 1;
 }
 
-/* app.main(fn) — register CLI-mode entry point.
+/* app.main(fn) — register a startup hook.
  *
- * Mutually exclusive with route / middleware / timer / ws / sse
- * registration: pick CLI mode or server mode, not both. The function
- * is stored under registry["__hull_main"] and invoked once by the
- * dispatcher in main.c after manifest extraction + sandbox + migrations. */
+ * Lifecycle: serve.c invokes the function once after manifest extraction
+ * + sandbox + migrations, on the event loop thread. If the app also
+ * registered routes / middleware / timers / WebSocket / SSE handlers,
+ * the HTTP listener auto-starts after main returns nil/0. Returning a
+ * non-zero exit code from main short-circuits — the process exits with
+ * that code even if routes are registered. Apps with main only and no
+ * routes exit when main returns. */
 static int lua_app_main(lua_State *L)
 {
     luaL_checktype(L, 1, LUA_TFUNCTION);
 
     if (lua_app_main_registered(L))
         return luaL_error(L, "app.main() can only be called once");
-
-    if (lua_app_dispatch_registered(L))
-        return luaL_error(L,
-            "app.main() cannot be called after registering routes, "
-            "middleware, timers, or WebSocket/SSE handlers — "
-            "choose CLI mode (app.main) or server mode (app.get/etc), not both");
 
     lua_pushvalue(L, 1);
     lua_setfield(L, LUA_REGISTRYINDEX, "__hull_main");

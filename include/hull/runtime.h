@@ -106,8 +106,15 @@ typedef struct HlRuntimeVtable {
 
     /* Returns 1 if the loaded app registered app.main(fn), 0 otherwise.
      * Returns 0 if the runtime hasn't been told to look (no app loaded).
-     * Used by main.c to choose between CLI and server dispatch. */
+     * Used by serve.c to decide whether to invoke the startup hook. */
     int   (*has_main)(HlRuntime *rt);
+
+    /* Returns 1 if the app registered any route, middleware, timer,
+     * WebSocket endpoint, or SSE endpoint. Used by serve.c to decide
+     * whether to enter the server loop after app.main returns (or as
+     * the primary dispatch when there's no main). 0 means "nothing
+     * for the server loop to do — just exit when main completes." */
+    int   (*has_server_handlers)(HlRuntime *rt);
 
     /* Run the registered app.main(fn) and return its exit code via
      * `exit_code_out` (clamped to 0..255).
