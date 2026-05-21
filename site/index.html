@@ -8,10 +8,42 @@
   <meta name="theme-color" content="#0a0a0a">
 
   <meta property="og:title" content="Hull — a sealed runtime for programmable tools">
-  <meta property="og:description" content="Capability-declared access. No ambient authority. Sealed bundles. W^X. Local-first.">
+  <meta property="og:description" content="Built for code you almost trust. A sealed runtime for agentic and local-first software — capability-declared, kernel-sandboxed, W^X, single static binary.">
   <meta property="og:type" content="website">
+  <meta property="og:url" content="https://gethull.dev/">
+  <meta name="twitter:card" content="summary">
+  <link rel="canonical" href="https://gethull.dev/">
 
   <link rel="icon" type="image/svg+xml" href="mark.svg">
+
+  <!-- Structured data for search / SoftwareApplication card -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "Hull",
+    "applicationCategory": "DeveloperApplication",
+    "applicationSubCategory": "Runtime",
+    "operatingSystem": "Linux, macOS, Windows (via Cosmopolitan), FreeBSD, OpenBSD, NetBSD",
+    "description": "A sealed, capability-secure runtime for agentic and local-first software. Applications declare what they need; everything else is unavailable, checked at a C boundary the script cannot cross.",
+    "softwareVersion": "0.1.0",
+    "url": "https://gethull.dev/",
+    "downloadUrl": "https://github.com/artalis-io/hull/releases",
+    "codeRepository": "https://github.com/artalis-io/hull",
+    "programmingLanguage": ["C", "Lua", "JavaScript", "WebAssembly", "WGSL"],
+    "license": "https://www.gnu.org/licenses/agpl-3.0.html",
+    "offers": {
+      "@type": "Offer",
+      "price": "0",
+      "priceCurrency": "USD"
+    },
+    "author": {
+      "@type": "Organization",
+      "name": "Artalis",
+      "url": "https://artalis.io"
+    }
+  }
+  </script>
   <link rel="preconnect" href="https://cdn.tailwindcss.com">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -166,12 +198,12 @@
       </a>
 
       <nav class="hidden md:flex items-center gap-x-6 text-sm">
+        <a href="#not" class="link">Scope</a>
         <a href="#principles" class="link">Principles</a>
         <a href="#agents" class="link">Agents</a>
         <a href="#compare" class="link">Compare</a>
         <a href="#how" class="link">How</a>
         <a href="#security" class="link">Security</a>
-        <a href="#use-cases" class="link">Use cases</a>
         <a href="https://github.com/artalis-io/hull#readme" class="link">Docs</a>
       </nav>
 
@@ -194,19 +226,25 @@
       <div class="grid lg:grid-cols-12 gap-10 lg:gap-16 items-start">
 
         <div class="lg:col-span-7">
+          <a href="#agents" class="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-white/10 bg-white/[0.025] hover:bg-white/[0.05] hover:border-white/20 transition text-[11px] text-mute-400 hover:text-paper-100 mb-6">
+            <i data-lucide="zap" class="w-3 h-3 shrink-0"></i>
+            <span>Designed for agent tools &amp; constrained AI-generated code</span>
+            <i data-lucide="arrow-right" class="w-3 h-3 shrink-0"></i>
+          </a>
+
           <h1 class="text-4xl md:text-5xl lg:text-6xl font-semibold leading-[1.05] tracking-tight text-paper-50">
-            A sealed runtime for
-            agentic and
-            local-first software.
+            Built for code
+            you almost trust.
           </h1>
 
-          <p class="mt-6 text-2xl md:text-3xl text-paper-100 max-w-xl leading-snug font-medium tracking-tight">
-            Built for code you almost trust.
+          <p class="mt-5 text-lg md:text-xl text-paper-100 max-w-xl leading-snug">
+            A sealed runtime for agentic and local-first software.
           </p>
-          <p class="mt-4 text-lg text-mute-400 max-w-xl leading-relaxed">
-            Applications declare what they need. Everything else is
-            unavailable &mdash; checked inside the process, on every
-            capability call, at a boundary the script cannot cross.
+          <p class="mt-4 text-base text-mute-400 max-w-xl leading-relaxed">
+            The check belongs inside the process &mdash; not in a
+            sidecar, not in a reverse proxy, not in a YAML policy
+            someone forgot to update. Hull puts it at a C boundary
+            the script cannot cross.
           </p>
 
           <div class="mt-8 flex flex-wrap items-center gap-3">
@@ -219,12 +257,6 @@
               View on GitHub
             </a>
           </div>
-
-          <a href="#agents" class="mt-5 inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-white/10 bg-white/[0.025] hover:bg-white/[0.05] hover:border-white/20 transition text-xs text-paper-100">
-            <i data-lucide="zap" class="w-3.5 h-3.5 shrink-0"></i>
-            <span>Designed for agent tools and constrained AI-generated code</span>
-            <i data-lucide="arrow-right" class="w-3 h-3 text-mute-400 shrink-0"></i>
-          </a>
 
           <div class="mt-10 flex flex-wrap items-center gap-x-6 gap-y-3 text-xs text-mute-400">
             <div class="flex items-center gap-2">
@@ -402,6 +434,63 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
   </section>
 
   <!-- ─────────────────────────────────────────────────────────────────
+       WHAT HULL IS NOT — honest scope before the long pitch
+       ───────────────────────────────────────────────────────────────── -->
+  <section id="not" class="hairline-t">
+    <div class="max-w-6xl mx-auto px-6 py-16 md:py-20">
+      <div class="grid lg:grid-cols-12 gap-8 lg:gap-12 items-start">
+
+        <div class="lg:col-span-4">
+          <div class="text-xs uppercase tracking-widest text-mute-500 mb-3">Scope</div>
+          <h2 class="text-2xl md:text-3xl font-semibold text-paper-50 tracking-tight">
+            What Hull
+            is not.
+          </h2>
+          <p class="mt-4 text-sm text-mute-400 leading-relaxed">
+            Before you spend more time on this page &mdash; four
+            things Hull does not solve, named plainly, so you can
+            decide whether to keep reading.
+          </p>
+        </div>
+
+        <div class="lg:col-span-8">
+          <ul class="border border-white/[0.08] rounded-md bg-ink-900/40 divide-y divide-white/[0.06]">
+            <li class="flex items-start gap-3 p-5">
+              <span class="text-mute-500 font-mono text-xs mt-1 shrink-0">&minus;</span>
+              <div class="text-sm text-mute-400 leading-relaxed">
+                <span class="text-paper-100 font-medium">Not a defence against CPU-level side channels.</span>
+                Spectre-class attacks, cache timing, and other shared-hardware leaks are out of scope &mdash; capability isolation operates above that layer.
+              </div>
+            </li>
+            <li class="flex items-start gap-3 p-5">
+              <span class="text-mute-500 font-mono text-xs mt-1 shrink-0">&minus;</span>
+              <div class="text-sm text-mute-400 leading-relaxed">
+                <span class="text-paper-100 font-medium">Not a Lambda or Workers replacement.</span>
+                Hull is one process per app. There's no built-in autoscaler, no multi-tenant isolation; horizontal scaling is your platform's job.
+              </div>
+            </li>
+            <li class="flex items-start gap-3 p-5">
+              <span class="text-mute-500 font-mono text-xs mt-1 shrink-0">&minus;</span>
+              <div class="text-sm text-mute-400 leading-relaxed">
+                <span class="text-paper-100 font-medium">macOS kernel sandbox is best-effort.</span>
+                <code class="text-paper-100 text-[0.78rem]">sandbox_init</code> is a private, deprecated Apple API. Linux/Cosmo get the load-bearing isolation; on macOS the C capability layer carries more of the weight.
+              </div>
+            </li>
+            <li class="flex items-start gap-3 p-5">
+              <span class="text-mute-500 font-mono text-xs mt-1 shrink-0">&minus;</span>
+              <div class="text-sm text-mute-400 leading-relaxed">
+                <span class="text-paper-100 font-medium">Sealing protects from tamper-after-build, not from a compromised build host.</span>
+                Supply-chain attacks on the toolchain or a poisoned vendored dependency live outside the signed-bundle guarantee. Vendoring helps; build reproducibility helps; sealing alone doesn't.
+              </div>
+            </li>
+          </ul>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────────────────
        PRINCIPLES
        ───────────────────────────────────────────────────────────────── -->
   <section id="principles" class="hairline-t bg-ink-900">
@@ -409,7 +498,7 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
       <div class="max-w-2xl">
         <div class="text-xs uppercase tracking-widest text-mute-500 mb-3">Core principles</div>
         <h2 class="text-2xl md:text-3xl font-semibold text-paper-50 tracking-tight">
-          Five properties, enforced from the bottom up.
+          Four properties, enforced from the bottom up.
         </h2>
       </div>
 
@@ -437,17 +526,6 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
         </div>
 
         <div class="bg-ink-900 p-6">
-          <i data-lucide="package-check" class="w-5 h-5 text-paper-100 mb-4"></i>
-          <h3 class="text-paper-50 font-medium">Sealed bundles</h3>
-          <p class="mt-2 text-sm text-mute-400 leading-relaxed">
-            <code class="text-paper-100 text-[0.78rem]">hull build</code> emits a
-            single signed binary &mdash; app code, manifest, templates,
-            migrations, and AOT WASM all live behind an Ed25519
-            signature.
-          </p>
-        </div>
-
-        <div class="bg-ink-900 p-6">
           <i data-lucide="shield-half" class="w-5 h-5 text-paper-100 mb-4"></i>
           <h3 class="text-paper-50 font-medium">W^X, no runtime codegen</h3>
           <p class="mt-2 text-sm text-mute-400 leading-relaxed">
@@ -457,18 +535,15 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
           </p>
         </div>
 
-        <div class="bg-ink-900 p-6 md:col-span-2 flex items-start gap-5">
-          <i data-lucide="cpu" class="w-5 h-5 text-paper-100 mt-1 shrink-0"></i>
-          <div>
-            <h3 class="text-paper-50 font-medium">Compute in WASM and WebGPU</h3>
-            <p class="mt-2 text-sm text-mute-400 leading-relaxed max-w-3xl">
-              CPU-heavy work runs as pure-function WASM plugins inside
-              WAMR &mdash; no I/O imports, gas-metered execution,
-              configurable memory caps. Parallel workloads dispatch to
-              WebGPU compute shaders via wgpu-native (Vulkan, Metal,
-              DX12) through the same capability boundary.
-            </p>
-          </div>
+        <div class="bg-ink-900 p-6">
+          <i data-lucide="cpu" class="w-5 h-5 text-paper-100 mb-4"></i>
+          <h3 class="text-paper-50 font-medium">Compute in WASM and WebGPU</h3>
+          <p class="mt-2 text-sm text-mute-400 leading-relaxed">
+            Pure-function WASM via WAMR &mdash; no I/O imports,
+            gas-metered. Parallel workloads dispatch to WebGPU
+            shaders via wgpu-native (Vulkan, Metal, DX12) through the
+            same capability boundary.
+          </p>
         </div>
 
       </div>
@@ -584,6 +659,65 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
         </div>
 
       </div>
+
+      <!-- Sample output: hull agent routes -->
+      <div class="mt-10 code-block">
+        <header>
+          <i data-lucide="terminal" class="w-3.5 h-3.5"></i>
+          <span>shell</span>
+          <span class="ml-auto text-[10px] text-mute-500">what the agent sees</span>
+        </header>
+<pre><span class="tk-com"># Machine-readable introspection for AI coding agents.</span>
+$ hull agent routes my-tool
+{
+  <span class="tk-key">"app"</span>: <span class="tk-str">"my-tool"</span>,
+  <span class="tk-key">"runtime"</span>: <span class="tk-str">"lua"</span>,
+  <span class="tk-key">"modules"</span>: [<span class="tk-str">"hull/server@1"</span>, <span class="tk-str">"hull/db@1"</span>, <span class="tk-str">"hull/middleware/session@1"</span>],
+  <span class="tk-key">"routes"</span>: [
+    { <span class="tk-key">"method"</span>: <span class="tk-str">"GET"</span>,  <span class="tk-key">"path"</span>: <span class="tk-str">"/items"</span>,  <span class="tk-key">"handler"</span>: <span class="tk-str">"app.lua:32"</span> },
+    { <span class="tk-key">"method"</span>: <span class="tk-str">"POST"</span>, <span class="tk-key">"path"</span>: <span class="tk-str">"/items"</span>,  <span class="tk-key">"handler"</span>: <span class="tk-str">"app.lua:48"</span> }
+  ],
+  <span class="tk-key">"middleware"</span>: [
+    { <span class="tk-key">"method"</span>: <span class="tk-str">"*"</span>, <span class="tk-key">"pattern"</span>: <span class="tk-str">"/api/*"</span>, <span class="tk-key">"name"</span>: <span class="tk-str">"auth.session"</span> }
+  ]
+}
+</pre>
+      </div>
+
+      <!-- Three patterns the manifest model makes safe (formerly Use Cases) -->
+      <div class="mt-14">
+        <h3 class="text-lg md:text-xl font-semibold text-paper-50 tracking-tight">
+          Three patterns the manifest model makes safe.
+        </h3>
+        <div class="mt-6 grid sm:grid-cols-2 lg:grid-cols-3 gap-px bg-white/[0.06] border border-white/[0.06] rounded-md overflow-hidden">
+
+          <div class="bg-ink-950 p-5">
+            <i data-lucide="bot" class="w-4 h-4 text-paper-100 mb-3"></i>
+            <div class="text-paper-50 font-medium text-sm">Agent tools</div>
+            <p class="mt-2 text-[13px] text-mute-400 leading-relaxed">
+              A bounded host for LLM-callable tools. The agent gets exactly the surface you declared, nothing else.
+            </p>
+          </div>
+
+          <div class="bg-ink-950 p-5">
+            <i data-lucide="cpu" class="w-4 h-4 text-paper-100 mb-3"></i>
+            <div class="text-paper-50 font-medium text-sm">Compute plugins</div>
+            <p class="mt-2 text-[13px] text-mute-400 leading-relaxed">
+              Ship WASM modules from any language or WebGPU shaders in WGSL. Gas-metered, memory-capped, AOT-compiled.
+            </p>
+          </div>
+
+          <div class="bg-ink-950 p-5">
+            <i data-lucide="brain-circuit" class="w-4 h-4 text-paper-100 mb-3"></i>
+            <div class="text-paper-50 font-medium text-sm">Constrained AI-generated code</div>
+            <p class="mt-2 text-[13px] text-mute-400 leading-relaxed">
+              Execute generated handlers behind a manifest the model didn't write. Capability creep is impossible by construction.
+            </p>
+          </div>
+
+        </div>
+      </div>
+
     </div>
   </section>
 
@@ -686,9 +820,9 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
           One manifest. One handler. One sealed binary.
         </h2>
         <p class="mt-6 text-mute-400 leading-relaxed">
-          Each arrow below is a place Hull says no on your behalf.
-          The four steps further down are how you, the developer,
-          make that diagram bind to your app.
+          The diagram below is the runtime. The four steps further
+          down are how you, the developer, make it apply to your
+          app.
         </p>
       </div>
 
@@ -954,86 +1088,6 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
             </li>
 
           </ul>
-
-          <!-- What Hull is NOT — honest scope statement -->
-          <div class="mt-6 border border-white/[0.08] rounded-md bg-ink-950/40 p-5">
-            <div class="text-[10px] uppercase tracking-widest text-mute-400 mb-3">What Hull is not</div>
-            <ul class="text-sm text-mute-400 leading-relaxed space-y-2">
-              <li class="flex items-start gap-3">
-                <span class="text-mute-500 font-mono text-xs mt-0.5 shrink-0">&minus;</span>
-                <span>
-                  <span class="text-paper-100">Not a defence against CPU-level side channels.</span>
-                  Spectre-class attacks, cache timing, and other shared-hardware leaks are out of scope &mdash; capability isolation operates above that layer.
-                </span>
-              </li>
-              <li class="flex items-start gap-3">
-                <span class="text-mute-500 font-mono text-xs mt-0.5 shrink-0">&minus;</span>
-                <span>
-                  <span class="text-paper-100">Not a Lambda or Workers replacement.</span>
-                  Hull is one process per app. There's no built-in autoscaler, no multi-tenant isolation; horizontal scaling is your platform's job.
-                </span>
-              </li>
-              <li class="flex items-start gap-3">
-                <span class="text-mute-500 font-mono text-xs mt-0.5 shrink-0">&minus;</span>
-                <span>
-                  <span class="text-paper-100">macOS kernel sandbox is best-effort.</span>
-                  <code class="text-paper-100 text-[0.78rem]">sandbox_init</code> is a private, deprecated Apple API. Linux/Cosmo get the load-bearing isolation; on macOS the C capability layer carries more of the weight.
-                </span>
-              </li>
-              <li class="flex items-start gap-3">
-                <span class="text-mute-500 font-mono text-xs mt-0.5 shrink-0">&minus;</span>
-                <span>
-                  <span class="text-paper-100">Sealing protects from tamper-after-build, not from a compromised build host.</span>
-                  Supply-chain attacks on the toolchain or a poisoned vendored dependency live outside the signed-bundle guarantee. Vendoring helps; build reproducibility helps; sealing alone doesn't.
-                </span>
-              </li>
-            </ul>
-          </div>
-        </div>
-
-      </div>
-    </div>
-  </section>
-
-  <!-- ─────────────────────────────────────────────────────────────────
-       USE CASES
-       ───────────────────────────────────────────────────────────────── -->
-  <section id="use-cases" class="hairline-t">
-    <div class="max-w-6xl mx-auto px-6 py-20 md:py-28">
-      <div class="max-w-2xl">
-        <div class="text-xs uppercase tracking-widest text-mute-500 mb-3">Where Hull fits</div>
-        <h2 class="text-2xl md:text-3xl font-semibold text-paper-50 tracking-tight">
-          Three patterns the manifest model makes safe.
-        </h2>
-      </div>
-
-      <div class="mt-12 grid sm:grid-cols-2 lg:grid-cols-3 gap-px bg-white/[0.06] border border-white/[0.06] rounded-md overflow-hidden">
-
-        <a href="#agents" class="bg-ink-950 p-6 block hover:bg-ink-900 transition group">
-          <i data-lucide="bot" class="w-5 h-5 text-paper-100 mb-4"></i>
-          <div class="text-paper-50 font-medium flex items-center gap-1.5">
-            Agent tools
-            <i data-lucide="arrow-up-right" class="w-3.5 h-3.5 text-mute-400 group-hover:text-paper-50 transition"></i>
-          </div>
-          <p class="mt-2 text-sm text-mute-400 leading-relaxed">A bounded host for LLM-callable tools. The agent gets exactly the surface you declared, nothing else.</p>
-        </a>
-
-        <div class="bg-ink-950 p-6">
-          <i data-lucide="cpu" class="w-5 h-5 text-paper-100 mb-4"></i>
-          <div class="text-paper-50 font-medium">Compute plugins</div>
-          <p class="mt-2 text-sm text-mute-400 leading-relaxed">Ship WASM modules from any language or WebGPU shaders in WGSL. Gas-metered, memory-capped, AOT-compiled, callable from Lua/JS handlers.</p>
-        </div>
-
-        <div class="bg-ink-950 p-6">
-          <i data-lucide="brain-circuit" class="w-5 h-5 text-paper-100 mb-4"></i>
-          <div class="text-paper-50 font-medium">Constrained AI-generated code</div>
-          <p class="mt-2 text-sm text-mute-400 leading-relaxed">
-            Execute generated handlers behind a manifest the model
-            didn't write. Declaring a new host, path, or env var
-            means editing the manifest &mdash; which the runtime
-            validates before user code runs. Capability creep is
-            impossible by construction.
-          </p>
         </div>
 
       </div>
@@ -1150,7 +1204,7 @@ $ ./my-tool
         Hull is at <span class="text-paper-100">v0.1.0</span> &mdash; APIs and the manifest schema are pre-stable, so pin your version and read the
         <a href="https://github.com/artalis-io/hull/releases" class="link">changelog</a>
         before upgrading.
-        Page last updated <time datetime="2026-05-21">May 2026</time>.
+        Page last updated <time datetime="2026-05">May&nbsp;2026</time>.
       </p>
 
     </div>
