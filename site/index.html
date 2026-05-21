@@ -200,11 +200,13 @@
             local-first software.
           </h1>
 
-          <p class="mt-6 text-lg text-mute-400 max-w-xl leading-relaxed">
-            Hull is a small C capability kernel hardened by OS primitives,
-            W^X policy, sealed bundles, and minimal
-            ambient authority. Applications declare what they need.
-            Everything else is unavailable.
+          <p class="mt-6 text-2xl md:text-3xl text-paper-100 max-w-xl leading-snug font-medium tracking-tight">
+            Built for code you almost trust.
+          </p>
+          <p class="mt-4 text-lg text-mute-400 max-w-xl leading-relaxed">
+            Applications declare what they need. Everything else is
+            unavailable &mdash; checked inside the process, on every
+            capability call, at a boundary the script cannot cross.
           </p>
 
           <div class="mt-8 flex flex-wrap items-center gap-3">
@@ -218,13 +220,11 @@
             </a>
           </div>
 
-          <p class="mt-5 text-xs text-mute-400 leading-relaxed flex items-center gap-2">
-            <i data-lucide="zap" class="w-3.5 h-3.5 text-paper-100 shrink-0"></i>
-            <span>
-              Designed for
-              <a href="#agents" class="text-paper-100 underline decoration-mute-600 underline-offset-2 hover:decoration-paper-50 transition">agent tools and constrained AI-generated code</a>.
-            </span>
-          </p>
+          <a href="#agents" class="mt-5 inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-white/10 bg-white/[0.025] hover:bg-white/[0.05] hover:border-white/20 transition text-xs text-paper-100">
+            <i data-lucide="zap" class="w-3.5 h-3.5 shrink-0"></i>
+            <span>Designed for agent tools and constrained AI-generated code</span>
+            <i data-lucide="arrow-right" class="w-3 h-3 text-mute-400 shrink-0"></i>
+          </a>
 
           <div class="mt-10 flex flex-wrap items-center gap-x-6 gap-y-3 text-xs text-mute-400">
             <div class="flex items-center gap-2">
@@ -402,43 +402,6 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
   </section>
 
   <!-- ─────────────────────────────────────────────────────────────────
-       PROBLEM
-       ───────────────────────────────────────────────────────────────── -->
-  <section class="hairline-t">
-    <div class="max-w-6xl mx-auto px-6 py-20 md:py-28">
-      <div class="grid lg:grid-cols-12 gap-10">
-        <div class="lg:col-span-4">
-          <div class="text-xs uppercase tracking-widest text-mute-500 mb-3">The problem</div>
-          <h2 class="text-2xl md:text-3xl font-semibold text-paper-50 tracking-tight">
-            Code you didn't write
-            is running inside
-            processes you do trust.
-          </h2>
-        </div>
-        <div class="lg:col-span-8 space-y-6 text-mute-400 leading-relaxed">
-          <p>
-            Tools, plugins, scripts, and AI-generated code increasingly
-            land inside production processes with the full authority of
-            the user running them. Filesystem access. Network access.
-            Environment. Subprocess. Native loading.
-          </p>
-          <p>
-            Most runtimes treat this as a configuration problem &mdash;
-            something you bolt on with a Docker policy, a seccomp
-            profile, or a careful reverse proxy. Hull treats it as a
-            runtime problem. The check belongs inside the process,
-            on every capability call, at a boundary the script
-            cannot cross.
-          </p>
-          <p class="text-paper-100">
-            Programmable tools without ambient authority.
-          </p>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- ─────────────────────────────────────────────────────────────────
        PRINCIPLES
        ───────────────────────────────────────────────────────────────── -->
   <section id="principles" class="hairline-t bg-ink-900">
@@ -446,19 +409,19 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
       <div class="max-w-2xl">
         <div class="text-xs uppercase tracking-widest text-mute-500 mb-3">Core principles</div>
         <h2 class="text-2xl md:text-3xl font-semibold text-paper-50 tracking-tight">
-          Seven properties, enforced from the bottom up.
+          Five properties, enforced from the bottom up.
         </h2>
       </div>
 
-      <div class="mt-12 grid md:grid-cols-2 lg:grid-cols-3 gap-px bg-white/[0.06] border border-white/[0.06] rounded-md overflow-hidden">
+      <div class="mt-12 grid md:grid-cols-2 gap-px bg-white/[0.06] border border-white/[0.06] rounded-md overflow-hidden">
 
         <div class="bg-ink-900 p-6">
           <i data-lucide="key-round" class="w-5 h-5 text-paper-100 mb-4"></i>
-          <h3 class="text-paper-50 font-medium">Capability-declared access</h3>
+          <h3 class="text-paper-50 font-medium">Fail at load, not at first use</h3>
           <p class="mt-2 text-sm text-mute-400 leading-relaxed">
-            Every filesystem path, host, environment variable, and module
-            is declared in the manifest. Undeclared access doesn't
-            error &mdash; it isn't there.
+            Module imports and capability checks resolve when the app
+            loads, before any handler runs. An undeclared import is a
+            startup error, not a midnight 500.
           </p>
         </div>
 
@@ -494,27 +457,7 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
           </p>
         </div>
 
-        <div class="bg-ink-900 p-6">
-          <i data-lucide="hard-drive-download" class="w-5 h-5 text-paper-100 mb-4"></i>
-          <h3 class="text-paper-50 font-medium">Local-first, one binary</h3>
-          <p class="mt-2 text-sm text-mute-400 leading-relaxed">
-            No daemons. No package manager at runtime. The CA bundle,
-            stdlib, runtimes, and WASM modules are all linked in. Boot
-            on Linux, macOS, or Cosmopolitan APE.
-          </p>
-        </div>
-
-        <div class="bg-ink-900 p-6">
-          <i data-lucide="braces" class="w-5 h-5 text-paper-100 mb-4"></i>
-          <h3 class="text-paper-50 font-medium">Lua / QuickJS orchestration</h3>
-          <p class="mt-2 text-sm text-mute-400 leading-relaxed">
-            Pick Lua&nbsp;5.4 or QuickJS (ES2023). One runtime per app,
-            selected by entry extension. Both call the same C
-            capability layer through the same vtable.
-          </p>
-        </div>
-
-        <div class="bg-ink-900 p-6 md:col-span-2 lg:col-span-3 flex items-start gap-5">
+        <div class="bg-ink-900 p-6 md:col-span-2 flex items-start gap-5">
           <i data-lucide="cpu" class="w-5 h-5 text-paper-100 mt-1 shrink-0"></i>
           <div>
             <h3 class="text-paper-50 font-medium">Compute in WASM and WebGPU</h3>
@@ -749,13 +692,12 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
         </p>
       </div>
 
-      <!-- Full-width architecture diagram -->
+      <!-- Full-width architecture diagram. Wrapper scrolls horizontally
+           below ~640px so the SVG keeps a readable min-width on phones. -->
       <div class="mb-14 border border-white/[0.08] rounded-md bg-ink-900/40 p-5 md:p-7">
-        <div class="flex items-center justify-between mb-5">
-          <div class="text-[10px] uppercase tracking-widest text-mute-400">Defense-in-depth flow</div>
-          <div class="text-[10px] uppercase tracking-widest text-mute-500">denial at any layer = hard stop</div>
-        </div>
-        <svg viewBox="0 0 880 220" class="w-full h-auto" role="img" aria-label="Horizontal architecture diagram: a request flows left to right through the Lua/JS handler, the manifest gate, the C capability layer, and the kernel sandbox before becoming a syscall. Denied calls drop down out of each gate.">
+        <div class="text-[10px] uppercase tracking-widest text-mute-400 mb-5">Defense-in-depth flow</div>
+        <div class="overflow-x-auto -mx-1 px-1">
+        <svg viewBox="0 0 880 220" class="w-full h-auto" style="min-width: 640px;" role="img" aria-label="Horizontal architecture diagram: a request flows left to right through the Lua/JS handler, the manifest gate, the C capability layer, and the kernel sandbox before becoming a syscall. Denied calls drop down out of each gate.">
           <defs>
             <marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
               <path d="M0,0 L10,5 L0,10 z" fill="#a1a1aa"/>
@@ -801,16 +743,20 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
           <!-- exit arrow -->
           <line x1="830" y1="77" x2="858" y2="77" stroke="#a1a1aa" stroke-width="1.25" marker-end="url(#ah)"/>
 
-          <!-- Deny arrows down from each gate -->
-          <line x1="320" y1="114" x2="320" y2="172" stroke="#52525b" stroke-width="1" stroke-dasharray="3 3" marker-end="url(#ahd)"/>
-          <line x1="530" y1="114" x2="530" y2="172" stroke="#52525b" stroke-width="1" stroke-dasharray="3 3" marker-end="url(#ahd)"/>
-          <line x1="740" y1="114" x2="740" y2="172" stroke="#52525b" stroke-width="1" stroke-dasharray="3 3" marker-end="url(#ahd)"/>
+          <!-- Deny arrows down from each gate, weighted heavier so they read -->
+          <line x1="320" y1="114" x2="320" y2="168" stroke="#71717a" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#ahd)"/>
+          <line x1="530" y1="114" x2="530" y2="168" stroke="#71717a" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#ahd)"/>
+          <line x1="740" y1="114" x2="740" y2="168" stroke="#71717a" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#ahd)"/>
 
-          <!-- Deny labels -->
-          <text x="320" y="196" font-family="JetBrains Mono, monospace" font-size="10" fill="#a1a1aa" text-anchor="middle">deny</text>
-          <text x="530" y="196" font-family="JetBrains Mono, monospace" font-size="10" fill="#a1a1aa" text-anchor="middle">deny</text>
-          <text x="740" y="196" font-family="JetBrains Mono, monospace" font-size="10" fill="#a1a1aa" text-anchor="middle">deny</text>
+          <!-- Deny labels - bumped to 11px paper-100 so the meaning lands -->
+          <text x="320" y="190" font-family="JetBrains Mono, monospace" font-size="11" fill="#e4e4e7" text-anchor="middle" font-weight="500">DENY</text>
+          <text x="530" y="190" font-family="JetBrains Mono, monospace" font-size="11" fill="#e4e4e7" text-anchor="middle" font-weight="500">DENY</text>
+          <text x="740" y="190" font-family="JetBrains Mono, monospace" font-size="11" fill="#e4e4e7" text-anchor="middle" font-weight="500">DENY</text>
+
+          <!-- Bottom caption tying the three denies together -->
+          <text x="530" y="210" font-family="Inter, sans-serif" font-size="10" fill="#a1a1aa" text-anchor="middle" font-style="italic">a denial at any layer is a hard stop, not a warning</text>
         </svg>
+        </div>
       </div>
 
       <!-- Steps + code grid -->
@@ -852,7 +798,7 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
             <div class="code-tabs-bar" role="tablist" aria-label="Full example language">
               <button class="tab-btn tab-active" data-tab="lua" role="tab" aria-selected="true">app.lua</button>
               <button class="tab-btn" data-tab="js" role="tab" aria-selected="false">app.js</button>
-              <button class="tab-btn" data-tab="gpu" role="tab" aria-selected="false">compute &middot; wgsl</button>
+              <button class="tab-btn" data-tab="gpu" role="tab" aria-selected="false">normalize.wgsl</button>
             </div>
 <pre class="code-tab-panel" data-tab-panel="lua"><span class="tk-kw">local</span> db     = <span class="tk-fn">require</span>(<span class="tk-str">"hull.db"</span>)
 <span class="tk-kw">local</span> crypto = <span class="tk-fn">require</span>(<span class="tk-str">"hull.crypto"</span>)
@@ -1003,11 +949,46 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
               <i data-lucide="shield" class="w-4 h-4 text-paper-100 mt-1 shrink-0"></i>
               <div>
                 <div class="text-sm font-medium text-paper-50">Kernel sandboxing on supported platforms</div>
-                <div class="text-sm text-mute-500 mt-1">Linux/Cosmo: <code class="text-paper-100 text-[0.78rem]">pledge</code>&thinsp;+&thinsp;<code class="text-paper-100 text-[0.78rem]">unveil</code>. macOS: <code class="text-paper-100 text-[0.78rem]">sandbox_init</code> with a manifest-derived profile.</div>
+                <div class="text-sm text-mute-400 mt-1">Linux/Cosmo: <code class="text-paper-100 text-[0.78rem]">pledge</code>&thinsp;+&thinsp;<code class="text-paper-100 text-[0.78rem]">unveil</code>. macOS: <code class="text-paper-100 text-[0.78rem]">sandbox_init</code> with a manifest-derived profile.</div>
               </div>
             </li>
 
           </ul>
+
+          <!-- What Hull is NOT — honest scope statement -->
+          <div class="mt-6 border border-white/[0.08] rounded-md bg-ink-950/40 p-5">
+            <div class="text-[10px] uppercase tracking-widest text-mute-400 mb-3">What Hull is not</div>
+            <ul class="text-sm text-mute-400 leading-relaxed space-y-2">
+              <li class="flex items-start gap-3">
+                <span class="text-mute-500 font-mono text-xs mt-0.5 shrink-0">&minus;</span>
+                <span>
+                  <span class="text-paper-100">Not a defence against CPU-level side channels.</span>
+                  Spectre-class attacks, cache timing, and other shared-hardware leaks are out of scope &mdash; capability isolation operates above that layer.
+                </span>
+              </li>
+              <li class="flex items-start gap-3">
+                <span class="text-mute-500 font-mono text-xs mt-0.5 shrink-0">&minus;</span>
+                <span>
+                  <span class="text-paper-100">Not a Lambda or Workers replacement.</span>
+                  Hull is one process per app. There's no built-in autoscaler, no multi-tenant isolation; horizontal scaling is your platform's job.
+                </span>
+              </li>
+              <li class="flex items-start gap-3">
+                <span class="text-mute-500 font-mono text-xs mt-0.5 shrink-0">&minus;</span>
+                <span>
+                  <span class="text-paper-100">macOS kernel sandbox is best-effort.</span>
+                  <code class="text-paper-100 text-[0.78rem]">sandbox_init</code> is a private, deprecated Apple API. Linux/Cosmo get the load-bearing isolation; on macOS the C capability layer carries more of the weight.
+                </span>
+              </li>
+              <li class="flex items-start gap-3">
+                <span class="text-mute-500 font-mono text-xs mt-0.5 shrink-0">&minus;</span>
+                <span>
+                  <span class="text-paper-100">Sealing protects from tamper-after-build, not from a compromised build host.</span>
+                  Supply-chain attacks on the toolchain or a poisoned vendored dependency live outside the signed-bundle guarantee. Vendoring helps; build reproducibility helps; sealing alone doesn't.
+                </span>
+              </li>
+            </ul>
+          </div>
         </div>
 
       </div>
@@ -1022,7 +1003,7 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
       <div class="max-w-2xl">
         <div class="text-xs uppercase tracking-widest text-mute-500 mb-3">Where Hull fits</div>
         <h2 class="text-2xl md:text-3xl font-semibold text-paper-50 tracking-tight">
-          Built for code you almost trust.
+          Three patterns the manifest model makes safe.
         </h2>
       </div>
 
@@ -1119,29 +1100,6 @@ $ ./my-tool
   </section>
 
   <!-- ─────────────────────────────────────────────────────────────────
-       CLOSING
-       ───────────────────────────────────────────────────────────────── -->
-  <section class="hairline-t">
-    <div class="max-w-6xl mx-auto px-6 py-20 md:py-24 text-center">
-      <h2 class="text-2xl md:text-3xl font-semibold text-paper-50 tracking-tight max-w-2xl mx-auto leading-snug">
-        Orchestration in Lua or JavaScript.
-        Compute in WASM and WebGPU.
-        Access through capabilities.
-      </h2>
-      <div class="mt-8 flex items-center justify-center gap-3">
-        <a href="https://github.com/artalis-io/hull#readme" class="btn btn-primary">
-          Read the docs
-          <i data-lucide="arrow-right" class="w-4 h-4"></i>
-        </a>
-        <a href="https://github.com/artalis-io/hull" class="btn btn-ghost">
-          <i data-lucide="github" class="w-4 h-4"></i>
-          View on GitHub
-        </a>
-      </div>
-    </div>
-  </section>
-
-  <!-- ─────────────────────────────────────────────────────────────────
        FOOTER
        ───────────────────────────────────────────────────────────────── -->
   <footer class="hairline-t">
@@ -1189,10 +1147,10 @@ $ ./my-tool
       </div>
 
       <p class="text-[11px] text-mute-400 leading-relaxed">
-        Hull v0.1.0 &middot; page last updated <time datetime="2026-05-21">May 2026</time>.
-        APIs and the manifest schema are pre-stable &mdash; pin your version and read the
+        Hull is at <span class="text-paper-100">v0.1.0</span> &mdash; APIs and the manifest schema are pre-stable, so pin your version and read the
         <a href="https://github.com/artalis-io/hull/releases" class="link">changelog</a>
         before upgrading.
+        Page last updated <time datetime="2026-05-21">May 2026</time>.
       </p>
 
     </div>
