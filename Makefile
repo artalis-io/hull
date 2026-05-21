@@ -1216,6 +1216,67 @@ $(APP_ENTRIES_DEFAULT_OBJ): $(SRCDIR)/hull/app_entries_default.c $(INCDIR)/hull/
 
 INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(KEEL_DIR)/vendor/llhttp -I$(MBEDTLS_DIR)/include -I$(SQLITE_DIR) -I$(LOG_DIR) -I$(SH_ARENA_DIR) -I$(SH_JSON_DIR) -I$(TWEETNACL_DIR) -I$(STB_DIR) -I$(BUILDDIR) $(WAMR_INC)
 
+# ── Build-flag fingerprint (force-rebuild on flag change) ───────────
+#
+# Make tracks file mtimes; it doesn't notice when `-D` defines
+# change between invocations. Without this, switching between e.g.
+# `make` and `make HL_ENABLE_HTTP=0` reuses .o files compiled with
+# the wrong defines — manifests as duplicate-symbol link errors
+# (poll.c's stubs collide with net/keel.c's real impls), wrong
+# code paths active, or stale conditional logic.
+#
+# Mechanism: at parse time, compute a fingerprint string of every
+# flag that flows into CFLAGS. If it differs from the previous run,
+# delete every Hull-owned .o (and the binaries that link them) so
+# make naturally rebuilds them from source with the new flags.
+# Vendor .o files (mbedTLS, WAMR, QuickJS, Lua, SQLite) are kept —
+# they don't see Hull's flags, so reusing them saves real wall time.
+#
+# We considered the obvious "pattern-rule prereq" approach
+# (`$(BUILDDIR)/cap_%.o: $(BUILD_CONFIG_FILE)`), but pattern rules
+# without a recipe *cancel* the matching pattern rule (GNU Make
+# manual, "Canceling Rules"). Removing stale objects is simpler and
+# doesn't require touching every recipe.
+BUILD_FINGERPRINT := \
+  HTTP_SERVER=$(HL_ENABLE_HTTP_SERVER)|\
+  HTTP_CLIENT=$(HL_ENABLE_HTTP_CLIENT)|\
+  DB=$(HL_ENABLE_DB)|\
+  WASM=$(HL_ENABLE_WASM)|\
+  GPU=$(HL_ENABLE_GPU)|\
+  TCC=$(HL_ENABLE_TCC)|\
+  CA=$(HL_EMBED_CA_BUNDLE)|\
+  JS=$(HL_ENABLE_JS)|\
+  LUA=$(HL_ENABLE_LUA)|\
+  RUNTIME=$(RUNTIME)|\
+  CC=$(CC)
+
+BUILD_CONFIG_FILE := $(BUILDDIR)/.build-config
+
+# Parse-time: ensure builddir exists, then compare fingerprint. On
+# mismatch, drop every Hull .o (cap_*, cmd_*, js_*, lua_rt_*,
+# agent_*, async_*, net_*, plus the small set of unprefixed Hull
+# objects under build/) and the binaries that link them. Vendor
+# objects, WAMR, mbedTLS, QuickJS, Lua, SQLite stay put.
+$(shell mkdir -p $(BUILDDIR))
+$(shell test "$$(cat $(BUILD_CONFIG_FILE) 2>/dev/null)" = "$(BUILD_FINGERPRINT)" || { \
+    rm -f $(BUILDDIR)/cap_*.o $(BUILDDIR)/cmd_*.o $(BUILDDIR)/js_*.o $(BUILDDIR)/lua_rt_*.o \
+          $(BUILDDIR)/agent_*.o $(BUILDDIR)/async_*.o $(BUILDDIR)/net_*.o \
+          $(BUILDDIR)/main.o $(BUILDDIR)/serve.o $(BUILDDIR)/serve_cli.o $(BUILDDIR)/entry.o \
+          $(BUILDDIR)/manifest.o $(BUILDDIR)/manifest_lua.o $(BUILDDIR)/manifest_js.o \
+          $(BUILDDIR)/module_registry.o $(BUILDDIR)/module_resolver.o \
+          $(BUILDDIR)/sandbox.o $(BUILDDIR)/signature.o $(BUILDDIR)/release.o \
+          $(BUILDDIR)/test_runner.o $(BUILDDIR)/runtime_factory.o $(BUILDDIR)/hull_static.o \
+          $(BUILDDIR)/migrate.o $(BUILDDIR)/vfs.o $(BUILDDIR)/cacert.o \
+          $(BUILDDIR)/app_context.o $(BUILDDIR)/tool.o $(BUILDDIR)/build_assets.o \
+          $(BUILDDIR)/compiler.o $(BUILDDIR)/compiler_tcc.o \
+          $(BUILDDIR)/hull_alloc.o $(BUILDDIR)/hull_async.o $(BUILDDIR)/hull_compress.o \
+          $(BUILDDIR)/worker_db.o $(BUILDDIR)/worker_wasm.o $(BUILDDIR)/worker_gpu.o \
+          $(BUILDDIR)/stdlib_registry.o $(BUILDDIR)/app_entries_default.o \
+          $(BUILDDIR)/hull $(BUILDDIR)/libhull_platform.a \
+          $(BUILDDIR)/test_* 2>/dev/null; \
+    printf '%s\n' '$(BUILD_FINGERPRINT)' > $(BUILD_CONFIG_FILE); \
+})
+
 # ── Targets ─────────────────────────────────────────────────────────
 
 .PHONY: all clean test debug msan e2e e2e-build e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-compute-dev e2e-tcc e2e-install e2e-ca-bundle e2e-update hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-gpu wamrc coverage lint-lua lint-js lint platform platform-cosmo
