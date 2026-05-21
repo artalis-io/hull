@@ -758,33 +758,52 @@ static int poll_pool_submit(HlAsyncBackendPool *p,
 /* ── Async-op suspension ───────────────────────────────────────────── */
 
 /*
- * Same shape as the keel backend: each suspended op gets a timer if
- * it has a deadline, plus an op_complete escape hatch that cancels
- * the deadline timer and schedules on_resume via a 0ms timer so it
- * fires on the event-loop thread.
+ * The op state — including the live deadline-timer handle — is owned
+ * exclusively by the event-loop thread. Two threads need to interact
+ * with it:
+ *
+ *   - poll_op_deadline_timer fires from the timer system (event-loop
+ *     thread → safe).
+ *
+ *   - poll_op_complete may be called from ANY thread per the vtable
+ *     contract. It marshals onto the event-loop thread via the
+ *     completion queue, so the actual state mutation
+ *     (poll_op_complete_eventloop) runs single-threaded next to the
+ *     deadline timer.
+ *
+ * That marshal removes every race: there are no atomics, no locks,
+ * no `resumed` flag, no fragile coordination — the only state-mutating
+ * code paths both run on the same thread, in the same tick. The
+ * completion queue is drained before timers in poll_tick, so when both
+ * fire in the same tick the resume wins (matching keel-backend
+ * semantics where op_complete cancels the deadline timer).
+ *
+ * Tradeoff vs the keel backend: op_complete has one tick of latency
+ * (gets queued, fires on next tick). The keel backend does the same
+ * thing via a 0ms timer, so this is consistent.
  */
 
 typedef struct PollOpState {
     HlAsyncBackendCtx *ctx;
-    uint64_t           deadline_timer;  /* 0 = no timer */
-    int                resumed;
+    uint64_t           deadline_timer;  /* 0 = no timer scheduled */
 } PollOpState;
 
 static void poll_op_deadline_timer(void *ud)
 {
     HlAsyncOp *op = ud;
     PollOpState *s = op->_backend_state;
-    if (s->resumed) return;             /* op_complete raced us */
-    s->deadline_timer = 0;
+    if (!s) return;                     /* op_complete already cleaned up */
     if (op->on_deadline) op->on_deadline(op);
     free(s);
     op->_backend_state = NULL;
 }
 
-static void poll_op_resume_timer(void *ud)
+static void poll_op_complete_eventloop(void *ud)
 {
     HlAsyncOp *op = ud;
     PollOpState *s = op->_backend_state;
+    if (!s) return;                     /* deadline already fired + cleaned up */
+    if (s->deadline_timer) poll_timer_cancel(s->ctx, s->deadline_timer);
     if (op->on_resume) op->on_resume(op);
     free(s);
     op->_backend_state = NULL;
@@ -815,21 +834,9 @@ static int poll_op_suspend(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
 static void poll_op_complete(HlAsyncBackendCtx *ctx, HlAsyncOp *op)
 {
     if (!ctx || !op) return;
-    PollOpState *s = op->_backend_state;
-    if (!s) return;                     /* already completed */
-    s->resumed = 1;
-    if (s->deadline_timer) {
-        poll_timer_cancel(ctx, s->deadline_timer);
-        s->deadline_timer = 0;
-    }
-    /* Schedule on_resume to fire on the event-loop thread. 0ms == ASAP. */
-    uint64_t h = poll_timer_add(ctx, 0, poll_op_resume_timer, op);
-    if (h == 0) {
-        /* Best-effort: fire synchronously if scheduling fails. */
-        if (op->on_resume) op->on_resume(op);
-        free(s);
-        op->_backend_state = NULL;
-    }
+    /* Marshal to the event-loop thread; the actual mutation runs
+     * single-threaded in poll_op_complete_eventloop. */
+    completion_enqueue(ctx, poll_op_complete_eventloop, op);
 }
 
 /* ── Exported vtable ───────────────────────────────────────────────── */

@@ -637,7 +637,10 @@ typedef struct {
     int                  manifest_extracted; /* extract_manifest called */
 
     /* CLI mode (app.main) state */
-    int                  cli_mode;    /* 1 = run app.main instead of starting server */
+    int                  app_main_only;  /* 1 = app registered main + no
+                                          *     server handlers; serve loop
+                                          *     is skipped and the process
+                                          *     exits with cli_exit_code. */
     int                  cli_exit_code; /* main's return value (0..255) */
 } HlServerState;
 
@@ -1479,7 +1482,7 @@ static int hl_serve_wire_and_start(HlServerState *s)
                        && rt->vt->has_server_handlers(rt);
 
     if (has_main) {
-        s->cli_mode = !has_handlers;     /* informational; affects nothing yet */
+        s->app_main_only = !has_handlers;
         int main_rc = hl_serve_run_main(s);
         if (main_rc != 0) {
             /* run_main returned non-zero — either an internal error
@@ -1623,7 +1626,7 @@ int hull_serve(int argc, char **argv)
     /* Phase 11: manifest, caps, phase-2 sandbox, routes, event loop */
     int wire_rc = hl_serve_wire_and_start(&s);
     int ret;
-    if (s.cli_mode) {
+    if (s.app_main_only) {
         /* Pure CLI (app.main only, no handlers) — main's return value
          * is the process exit code. */
         ret = s.cli_exit_code;
