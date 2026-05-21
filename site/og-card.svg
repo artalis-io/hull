@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="Hull — built for code you almost trust. A sealed, capability-secure runtime.">
+  <defs>
+    <!-- Subtle grid pattern, faded at the bottom -->
+    <pattern id="grid" width="48" height="48" patternUnits="userSpaceOnUse">
+      <path d="M 48 0 L 0 0 0 48" fill="none" stroke="rgba(255,255,255,0.05)" stroke-width="1"/>
+    </pattern>
+    <radialGradient id="fade" cx="40%" cy="0%" r="100%">
+      <stop offset="0%" stop-color="#000" stop-opacity="0.0"/>
+      <stop offset="70%" stop-color="#000" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="#000" stop-opacity="1"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="630" fill="#0a0a0a"/>
+  <rect width="1200" height="630" fill="url(#grid)"/>
+  <rect width="1200" height="630" fill="url(#fade)"/>
+
+  <!-- Top hairline -->
+  <line x1="0" y1="120" x2="1200" y2="120" stroke="rgba(255,255,255,0.08)" stroke-width="1"/>
+
+  <!-- Top-left: logo mark + wordmark + version chip -->
+  <g transform="translate(80, 60)">
+    <!-- Mark (rounded square + H shape, matching site/mark.svg) -->
+    <g stroke="#fafafa" stroke-width="2.25" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="0" y="0" width="42" height="42" rx="7"/>
+      <line x1="13.5" y1="13" x2="13.5" y2="29"/>
+      <line x1="28.5" y1="13" x2="28.5" y2="29"/>
+      <line x1="13.5" y1="21" x2="28.5" y2="21"/>
+    </g>
+    <!-- Wordmark -->
+    <text x="56" y="30" font-family="Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif" font-size="24" font-weight="600" fill="#fafafa" letter-spacing="-0.01em">Hull</text>
+    <!-- Version chip -->
+    <g transform="translate(118, 8)">
+      <rect width="78" height="26" rx="13" fill="rgba(255,255,255,0.025)" stroke="rgba(255,255,255,0.10)"/>
+      <circle cx="14" cy="13" r="3" fill="#fafafa"/>
+      <text x="24" y="17" font-family="ui-monospace, 'SF Mono', Menlo, Monaco, monospace" font-size="11" fill="#d4d4d8" letter-spacing="0.04em">v0.1.0</text>
+    </g>
+  </g>
+
+  <!-- Top-right: a subtle "Capability-secure runtime" tag -->
+  <g transform="translate(1120, 86)" text-anchor="end">
+    <text font-family="ui-monospace, 'SF Mono', Menlo, Monaco, monospace" font-size="11" fill="#a1a1aa" letter-spacing="0.08em" text-transform="uppercase">CAPABILITY-SECURE RUNTIME</text>
+  </g>
+
+  <!-- Headline (mirrors the H1 on the page) -->
+  <text x="80" y="290" font-family="Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif" font-size="84" font-weight="600" fill="#fafafa" letter-spacing="-0.025em">Built for code</text>
+  <text x="80" y="376" font-family="Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif" font-size="84" font-weight="600" fill="#fafafa" letter-spacing="-0.025em">you almost trust.</text>
+
+  <!-- Supporting line -->
+  <text x="80" y="448" font-family="Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif" font-size="26" fill="#a1a1aa" letter-spacing="-0.01em">A sealed, capability-secure runtime for agentic</text>
+  <text x="80" y="484" font-family="Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif" font-size="26" fill="#a1a1aa" letter-spacing="-0.01em">and local-first software.</text>
+
+  <!-- Bottom hairline -->
+  <line x1="0" y1="540" x2="1200" y2="540" stroke="rgba(255,255,255,0.08)" stroke-width="1"/>
+
+  <!-- Bottom row: domain (left) + tech chips (right) -->
+  <g transform="translate(80, 585)">
+    <text font-family="ui-monospace, 'SF Mono', Menlo, Monaco, monospace" font-size="16" fill="#e4e4e7" letter-spacing="0.02em">gethull.dev</text>
+  </g>
+  <g transform="translate(1120, 585)" text-anchor="end">
+    <text font-family="ui-monospace, 'SF Mono', Menlo, Monaco, monospace" font-size="14" fill="#71717a" letter-spacing="0.04em">Lua &#xb7; QuickJS &#xb7; WASM &#xb7; WebGPU</text>
+  </g>
+</svg>

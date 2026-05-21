@@ -11,7 +11,14 @@
   <meta property="og:description" content="Built for code you almost trust. A sealed runtime for agentic and local-first software — capability-declared, kernel-sandboxed, W^X, single static binary.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://gethull.dev/">
-  <meta name="twitter:card" content="summary">
+  <meta property="og:image" content="https://gethull.dev/og-card.svg">
+  <meta property="og:image:type" content="image/svg+xml">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Hull — Built for code you almost trust. A sealed, capability-secure runtime for agentic and local-first software.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://gethull.dev/og-card.svg">
+  <meta name="twitter:image:alt" content="Hull — Built for code you almost trust.">
   <link rel="canonical" href="https://gethull.dev/">
 
   <link rel="icon" type="image/svg+xml" href="mark.svg">
@@ -1094,21 +1101,18 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
               <i data-lucide="terminal" class="w-3.5 h-3.5"></i>
               <span>shell</span>
             </header>
-<pre><span class="tk-com"># Install</span>
-$ curl -fsSL https://gethull.dev/install.sh | sh
+<pre><span class="tk-com"># Scaffold a new app (install is shown up the page).</span>
+$ hull init my-tool &amp;&amp; cd my-tool
 
-<span class="tk-com"># Scaffold</span>
-$ hull init my-tool && cd my-tool
-
-<span class="tk-com"># Develop</span>
+<span class="tk-com"># Develop with auto-reload.</span>
 $ hull dev
 hull dev: listening on :8080  (auto-reload)
 
-<span class="tk-com"># Build a sealed, signed, single-binary release</span>
+<span class="tk-com"># Build a sealed, signed, single-binary release.</span>
 $ hull build .
 hull build: my-tool  5.0 MB  signed  ed25519
 
-<span class="tk-com"># Run</span>
+<span class="tk-com"># Run on Linux, macOS, or any APE host.</span>
 $ ./my-tool
 </pre>
           </div>
