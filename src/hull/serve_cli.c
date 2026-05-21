@@ -1,18 +1,28 @@
 /*
- * serve_cli.c — `hull run` driver for HL_ENABLE_HTTP=0 builds.
+ * serve_cli.c — `hull run` driver for HL_ENABLE_HTTP_SERVER=0 builds.
  *
- * Replaces serve.c on CLI-only builds. The flow is the same minus
- * Keel: load app via HlAppContext, resolve modules, apply sandbox,
- * invoke app.main, exit with the return code.
+ * Replaces serve.c on CLI builds. The flow:
+ *   1. Parse CLI args (`-d <path>`, `--no-migrate`, `--no-sandbox`,
+ *      `--` separator for app args).
+ *   2. Load app via HlAppContext (migrations run here if HL_ENABLE_DB
+ *      and -d points at a real file).
+ *   3. Wire fs / env / http (incl. TLS for HL_ENABLE_HTTP_CLIENT=1)
+ *      configs from manifest.
+ *   4. Apply sandbox.
+ *   5. Create the async backend ctx + thread pool so app.main can
+ *      use hull.sleep, db.async, compute.async, gpu.async, http.fetch
+ *      (async ops on a CLI build run on the poll backend's loop).
+ *   6. Invoke app.main(ctx); return its exit code.
  *
- * Limitations of this driver compared to serve.c (documented in
- * docs/cli_mode.md as Phase 3d work):
- *   - No Keel event loop ⇒ async-in-main (hull.sleep, compute.async,
- *     gpu.async, http.fetch async, db.async) is not supported. Sync
- *     versions still work.
- *   - No thread pool wiring.
- *   - Test commands that target server apps (the existing in-process
- *     HTTP harness) aren't available.
+ * Limitations vs the full serve.c:
+ *   - No HTTP server (HL_ENABLE_HTTP_SERVER=0 → no Keel server, no
+ *     routing, no middleware/ws/sse). Apps must use app.main as the
+ *     entry point.
+ *   - HTTP client (http.fetch) only available when
+ *     HL_ENABLE_HTTP_CLIENT=1; otherwise the binding is filtered out
+ *     of the runtime.
+ *   - In-process HTTP test harness (cap/test.c, test_runner.c) is
+ *     dropped along with the server, so `hull test` is unavailable.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -153,13 +163,14 @@ int hull_serve(int argc, char **argv)
         return 1;
     }
 
-    /* CLI mode requires app.main. */
+    /* CLI mode requires app.main — server routes can't be registered
+     * on HL_ENABLE_HTTP_SERVER=0 builds (the bindings are dropped). */
     if (!rt->vt->has_main || !rt->vt->has_main(rt)) {
         fprintf(stderr,
             "hull: app did not register app.main(). This build was "
-            "compiled with HL_ENABLE_HTTP=0 and cannot serve HTTP. "
-            "Either register app.main(fn) in your app, or rebuild "
-            "hull with HL_ENABLE_HTTP=1.\n");
+            "compiled with HL_ENABLE_HTTP_SERVER=0 and cannot serve "
+            "HTTP. Either add app.main(fn) to your app, or rebuild "
+            "hull with HL_ENABLE_HTTP_SERVER=1.\n");
         hl_app_context_free(ctx);
         return 1;
     }
@@ -232,6 +243,9 @@ int hull_serve(int argc, char **argv)
         if (hl_sandbox_apply(&sandbox_policy, app_dir, db_path,
                              NULL, NULL, NULL) != 0) {
             log_error("[hull:cli] sandbox enforcement failed");
+#ifdef HL_ENABLE_HTTP_CLIENT
+            if (tls_ctx) kl_tls_mbedtls_ctx_destroy(tls_ctx);
+#endif
             hl_manifest_free(&manifest);
             hl_app_context_free(ctx);
             return 1;
@@ -247,6 +261,9 @@ int hull_serve(int argc, char **argv)
     HlAsyncBackendCtx *async_ctx = NULL;
     if (be->init(&async_ctx, NULL) != 0) {
         fprintf(stderr, "[hull:cli] failed to init async backend\n");
+#ifdef HL_ENABLE_HTTP_CLIENT
+        if (tls_ctx) kl_tls_mbedtls_ctx_destroy(tls_ctx);
+#endif
         free((void *)env_allow);
         hl_manifest_free(&manifest);
         hl_app_context_free(ctx);

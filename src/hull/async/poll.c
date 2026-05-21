@@ -476,13 +476,10 @@ static int poll_tick(HlAsyncBackendCtx *ctx, int timeout_ms)
         free(t);
     }
 
-    /* ── Step 6: dispatch ready FDs from the snapshot. */
-    for (size_t i = 0; i < ctx->watcher_count + 0; i++) {
-        /* Use snapshot count (saved as the original watcher_count
-         * before the unlock — pfds[] was sized to match). */
-    }
-    /* Walk the original snapshot length, not the (possibly changed)
-     * live count. */
+    /* ── Step 6: dispatch ready FDs from the snapshot.
+     * Walk the snapshot length (nfds - 1 entries; the wakeup pipe
+     * occupies slot 0), not the live watcher count — the table may
+     * have grown or shrunk while a completion ran. */
     size_t snap_n = nfds - 1;
     for (size_t i = 0; i < snap_n; i++) {
         short re = pfds[i + 1].revents;
