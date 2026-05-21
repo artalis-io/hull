@@ -3,22 +3,22 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Hull — a sealed runtime for programmable tools</title>
+  <title>Hull. A sealed runtime for programmable tools</title>
   <meta name="description" content="Hull is a capability-secure, local-first runtime. Applications declare what they need. Everything else is unavailable.">
   <meta name="theme-color" content="#0a0a0a">
 
-  <meta property="og:title" content="Hull — a sealed runtime for programmable tools">
-  <meta property="og:description" content="Built for code you almost trust. A sealed runtime for agentic and local-first software — capability-declared, kernel-sandboxed, W^X, single static binary.">
+  <meta property="og:title" content="Hull. A sealed runtime for programmable tools">
+  <meta property="og:description" content="Built for code you almost trust. A sealed runtime for agentic and local-first software. Capability-declared, kernel-sandboxed, W^X, single static binary.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://gethull.dev/">
   <meta property="og:image" content="https://gethull.dev/og-card.svg">
   <meta property="og:image:type" content="image/svg+xml">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="Hull — Built for code you almost trust. A sealed, capability-secure runtime for agentic and local-first software.">
+  <meta property="og:image:alt" content="Hull. Built for code you almost trust. A sealed, capability-secure runtime for agentic and local-first software.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:image" content="https://gethull.dev/og-card.svg">
-  <meta name="twitter:image:alt" content="Hull — Built for code you almost trust.">
+  <meta name="twitter:image:alt" content="Hull. Built for code you almost trust.">
   <link rel="canonical" href="https://gethull.dev/">
 
   <link rel="icon" type="image/svg+xml" href="mark.svg">
@@ -113,7 +113,7 @@
     .link:hover { color: #ffffff; }
     .kbd { font-family: 'JetBrains Mono', monospace; font-size: .75rem; padding: .0625rem .375rem; border-radius: .25rem; background: rgba(255,255,255,0.06); color: #e4e4e7; border: 1px solid rgba(255,255,255,0.08); }
 
-    /* Code block — keep it readable, no excessive color */
+    /* Code block. Keep it readable, no excessive color */
     .code-block { background: #0f0f10; border: 1px solid rgba(255,255,255,0.08); border-radius: .5rem; overflow: hidden; }
     .code-block header { padding: .5rem .875rem; border-bottom: 1px solid rgba(255,255,255,0.06); font-size: .6875rem; color: #a1a1aa; letter-spacing: .04em; text-transform: uppercase; display: flex; align-items: center; gap: .5rem; }
     .code-block pre { padding: 1rem 1.125rem; overflow-x: auto; font-size: .8125rem; line-height: 1.6; color: #e4e4e7; }
@@ -127,7 +127,7 @@
         font-size: .6875rem;
         letter-spacing: .04em;
         text-transform: uppercase;
-        color: #a1a1aa;                    /* mute-400 — bumped from mute-500 for contrast */
+        color: #a1a1aa;                    /* mute-400. Bumped from mute-500 for contrast */
         background: transparent;
         border: 0;
         border-right: 1px solid rgba(255,255,255,0.04);
@@ -152,7 +152,7 @@
     .tk-fn  { color: #93c5fd; }     /* function names */
     .tk-kw  { color: #f0abfc; }     /* keywords */
     .tk-id  { color: #e4e4e7; }     /* identifiers */
-    .tk-acc { color: #22d3a8; }     /* accent — capability calls etc */
+    .tk-acc { color: #22d3a8; }     /* accent. Capability calls etc */
 
     /* Subtle row separators in feature lists */
     .rule { height: 1px; background: linear-gradient(to right, transparent, rgba(255,255,255,0.08), transparent); }
@@ -170,7 +170,7 @@
     .cmp-na  { color: #52525b; font-size: .6875rem !important; letter-spacing: .04em; }
     .cmp-hull-col { background: rgba(34,211,168,0.04); border-left: 1px solid rgba(34,211,168,0.15); border-right: 1px solid rgba(34,211,168,0.15); }
 
-    /* Perf strip — small labels bumped one shade lighter for WCAG-AA on dark */
+    /* Perf strip. Small labels bumped one shade lighter for WCAG-AA on dark */
     .stat-num { font-family: 'JetBrains Mono', monospace; font-weight: 500; color: #fafafa; font-size: 1.5rem; line-height: 1; letter-spacing: -0.02em; }
     .stat-num small { font-size: .875rem; color: #a1a1aa; margin-left: .125rem; }
     .stat-label { font-size: .75rem; text-transform: uppercase; letter-spacing: .06em; color: #a1a1aa; margin-top: .5rem; }
@@ -246,7 +246,7 @@
 
           <p class="mt-6 text-base md:text-lg text-mute-400 max-w-xl leading-relaxed">
             Hull puts the capability check inside the process, at a
-            C boundary the script cannot cross &mdash; not in a
+            C boundary the script cannot cross. Not in a
             sidecar, not in a reverse proxy, not in a YAML policy
             someone forgot to update.
           </p>
@@ -342,7 +342,7 @@
   </section>
 
   <!-- ─────────────────────────────────────────────────────────────────
-       INSTALL & VERIFY — show the trust chain up front
+       INSTALL & VERIFY. Show the trust chain up front
        ───────────────────────────────────────────────────────────────── -->
   <section class="hairline-t">
     <div class="max-w-6xl mx-auto px-6 py-14 md:py-16">
@@ -359,7 +359,7 @@
             downloads the right binary for your OS and arch.
             <code class="text-paper-100 text-[0.78rem]">hull verify-release</code>
             then verifies the Ed25519 signature against the public
-            key embedded in your local binary &mdash; no key
+            key embedded in your local binary. No key
             distribution needed.
           </p>
           <p class="mt-3 text-[11px] text-mute-500 leading-relaxed">
@@ -382,7 +382,7 @@ hull installed to ~/.local/bin/hull  (v0.1.0)
 $ <span class="tk-kw">REL</span>=https://github.com/artalis-io/hull/releases/latest/download
 $ curl -fsSLO $REL/hull.sha256 $REL/hull.sha256.sig
 $ hull verify-release hull.sha256 hull.sha256.sig
-<span class="tk-acc">ok</span> &mdash; signature valid
+<span class="tk-acc">ok</span>. Signature valid
 
 <span class="tk-com"># 3. Inspect the toolchain.</span>
 $ hull doctor
@@ -393,8 +393,8 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
             Prefer manual download? Grab the binary from the
             <a href="https://github.com/artalis-io/hull/releases" class="link">releases page</a>
             and verify with
-            <code class="text-paper-100 text-[0.72rem]">hull verify-release</code> &mdash;
-            no <code class="text-paper-100 text-[0.72rem]">curl | sh</code> required.
+            <code class="text-paper-100 text-[0.72rem]">hull verify-release</code>.
+            No <code class="text-paper-100 text-[0.72rem]">curl | sh</code> required.
           </p>
         </div>
 
@@ -403,7 +403,7 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
   </section>
 
   <!-- ─────────────────────────────────────────────────────────────────
-       PERF STRIP — measured, not aspirational
+       PERF STRIP. Measured, not aspirational
        ───────────────────────────────────────────────────────────────── -->
   <section class="hairline-t bg-ink-900/50">
     <div class="max-w-6xl mx-auto px-6 py-10 md:py-12">
@@ -418,13 +418,13 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
         <div>
           <div class="stat-num">4.4<small> MB</small></div>
           <div class="stat-label">Pure compute</div>
-          <div class="stat-foot">No HTTP, no DB &mdash; CLI / compute service flavor</div>
+          <div class="stat-foot">No HTTP, no DB. CLI / compute service flavor</div>
         </div>
 
         <div>
           <div class="stat-num">&lt;1<small> ms</small></div>
           <div class="stat-label">Script dispatch overhead</div>
-          <div class="stat-foot">Lua / JS handler entry &mdash; sub-ms on top of compute</div>
+          <div class="stat-foot">Lua / JS handler entry. Sub-ms on top of compute</div>
         </div>
 
         <div>
@@ -438,7 +438,7 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
   </section>
 
   <!-- ─────────────────────────────────────────────────────────────────
-       WHAT HULL IS NOT — honest scope before the long pitch
+       WHAT HULL IS NOT. Honest scope before the long pitch
        ───────────────────────────────────────────────────────────────── -->
   <section id="not" class="hairline-t">
     <div class="max-w-6xl mx-auto px-6 py-16 md:py-20">
@@ -451,7 +451,7 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
             is not.
           </h2>
           <p class="mt-4 text-sm text-mute-400 leading-relaxed">
-            Before you spend more time on this page &mdash; four
+            Before you spend more time on this page, four
             things Hull does not solve, named plainly, so you can
             decide whether to keep reading.
           </p>
@@ -463,7 +463,7 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
               <span class="text-mute-500 font-mono text-xs mt-1 shrink-0">&minus;</span>
               <div class="text-sm text-mute-400 leading-relaxed">
                 <span class="text-paper-100 font-medium">Not a defence against CPU-level side channels.</span>
-                Spectre-class attacks, cache timing, and other shared-hardware leaks are out of scope &mdash; capability isolation operates above that layer.
+                Spectre-class attacks, cache timing, and other shared-hardware leaks are out of scope. Capability isolation operates above that layer.
               </div>
             </li>
             <li class="flex items-start gap-3 p-5">
@@ -533,7 +533,7 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
           <i data-lucide="shield-half" class="w-5 h-5 text-paper-100 mb-4"></i>
           <h3 class="text-paper-50 font-medium">W^X, no runtime codegen</h3>
           <p class="mt-2 text-sm text-mute-400 leading-relaxed">
-            Pages are writable or executable &mdash; never both. No JIT.
+            Pages are writable or executable. Never both. No JIT.
             No runtime dynamic code. WASM runs from AOT-compiled
             artifacts embedded at build time.
           </p>
@@ -543,7 +543,7 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
           <i data-lucide="cpu" class="w-5 h-5 text-paper-100 mb-4"></i>
           <h3 class="text-paper-50 font-medium">Compute in WASM and WebGPU</h3>
           <p class="mt-2 text-sm text-mute-400 leading-relaxed">
-            Pure-function WASM via WAMR &mdash; no I/O imports,
+            Pure-function WASM via WAMR. No I/O imports,
             gas-metered. Parallel workloads dispatch to WebGPU
             shaders via wgpu-native (Vulkan, Metal, DX12) through the
             same capability boundary.
@@ -555,7 +555,7 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
   </section>
 
   <!-- ─────────────────────────────────────────────────────────────────
-       AGENTS — Hull as host AND Hull as dev surface
+       AGENTS. Hull as host AND Hull as dev surface
        ───────────────────────────────────────────────────────────────── -->
   <section id="agents" class="hairline-t">
     <div class="max-w-6xl mx-auto px-6 py-20 md:py-28">
@@ -568,7 +568,7 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
             already live in.
           </h2>
           <p class="mt-6 text-mute-400 leading-relaxed">
-            Hull is built for both sides of the agent loop &mdash;
+            Hull is built for both sides of the agent loop:
             hosting LLM-callable tools behind a manifest the model
             can't write to, and giving AI coding agents a structured
             CLI surface to read, test, and deploy Hull apps.
@@ -602,7 +602,7 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
                 <p class="mt-2 text-sm text-mute-400 leading-relaxed">
                   The manifest is the tool's allowed surface. An LLM
                   can write the handler but cannot expand the
-                  capabilities &mdash; declaring a new host, path, or
+                  capabilities. Declaring a new host, path, or
                   env var means editing the manifest, which the
                   runtime parses and validates before any user code
                   runs. One Hull binary per tool gives you
@@ -615,11 +615,11 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
                   </li>
                   <li class="flex items-start gap-2">
                     <i data-lucide="check" class="w-3.5 h-3.5 text-accent mt-1 shrink-0"></i>
-                    <span>Sealed signed binary &mdash; the agent can't smuggle native code in.</span>
+                    <span>Sealed signed binary. The agent can't smuggle native code in.</span>
                   </li>
                   <li class="flex items-start gap-2">
                     <i data-lucide="check" class="w-3.5 h-3.5 text-accent mt-1 shrink-0"></i>
-                    <span>Kernel sandbox engaged at process start &mdash; ambient authority drops away.</span>
+                    <span>Kernel sandbox engaged at process start. Ambient authority drops away.</span>
                   </li>
                 </ul>
               </div>
@@ -637,7 +637,7 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
                 <p class="mt-2 text-sm text-mute-400 leading-relaxed">
                   <code class="text-paper-100 text-[0.78rem]">hull agent</code>
                   subcommands return machine-readable JSON for routes,
-                  schema, errors, tests, and deploy status &mdash; no
+                  schema, errors, tests, and deploy status. No
                   plugins, no separate sidecar process.
                   <code class="text-paper-100 text-[0.78rem]">hull mcp</code>
                   exposes the same surface as a Model Context Protocol
@@ -707,7 +707,7 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
           </h2>
           <p class="mt-6 text-mute-400 leading-relaxed">
             Other sandboxed runtimes solve parts of this. Hull is the
-            combination &mdash; manifest-declared capabilities,
+            combination. Manifest-declared capabilities,
             sealed signed bundles, kernel sandboxing, and no
             runtime codegen in one binary.
           </p>
@@ -768,9 +768,9 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
           </table>
           <div class="px-4 py-3 border-t border-white/[0.06] bg-ink-950/40">
             <ul class="text-[11px] text-mute-400 leading-relaxed space-y-1">
-              <li><span class="text-paper-100 font-mono">~ Deno</span> &mdash; permissions can be declared in <code class="text-paper-100">deno.json</code> for Deno Deploy; default <code class="text-paper-100">deno run</code> uses <code class="text-paper-100">--allow-*</code> flags at launch, not in the source bundle. Hull's manifest is in the app and signed.</li>
-              <li><span class="text-paper-100 font-mono">~ WasmEdge</span> &mdash; capabilities are WASI imports declared per-module; there's no app-level manifest binding them to host policy.</li>
-              <li><span class="text-paper-100 font-mono">n/a Workers</span> &mdash; runs on Cloudflare's V8 isolate fleet; the "single binary" and "kernel sandbox" categories don't apply.</li>
+              <li><span class="text-paper-100 font-mono">~ Deno</span>. Permissions can be declared in <code class="text-paper-100">deno.json</code> for Deno Deploy; default <code class="text-paper-100">deno run</code> uses <code class="text-paper-100">--allow-*</code> flags at launch, not in the source bundle. Hull's manifest is in the app and signed.</li>
+              <li><span class="text-paper-100 font-mono">~ WasmEdge</span>. Capabilities are WASI imports declared per-module; there's no app-level manifest binding them to host policy.</li>
+              <li><span class="text-paper-100 font-mono">n/a Workers</span>. Runs on Cloudflare's V8 isolate fleet; the "single binary" and "kernel sandbox" categories don't apply.</li>
             </ul>
           </div>
         </div>
@@ -946,7 +946,7 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
     res.<span class="tk-fn">json</span>({ items: rows });
 });
 </pre>
-<pre class="code-tab-panel hidden" data-tab-panel="gpu"><span class="tk-com">// shaders/normalize.wgsl  &mdash; compiled at hull build</span>
+<pre class="code-tab-panel hidden" data-tab-panel="gpu"><span class="tk-com">// shaders/normalize.wgsl, compiled at hull build</span>
 <span class="tk-attr">@group</span>(<span class="tk-num">0</span>) <span class="tk-attr">@binding</span>(<span class="tk-num">0</span>) <span class="tk-kw">var</span>&lt;<span class="tk-type">storage</span>, <span class="tk-type">read_write</span>&gt; data: <span class="tk-type">array</span>&lt;<span class="tk-type">f32</span>&gt;;
 
 <span class="tk-attr">@compute</span> <span class="tk-attr">@workgroup_size</span>(<span class="tk-num">64</span>)
@@ -956,7 +956,7 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
     data[i] = data[i] / <span class="tk-num">255.0</span>;
 }
 
-<span class="tk-com">-- app.lua &mdash; dispatch from a handler</span>
+<span class="tk-com">-- app.lua, dispatch from a handler</span>
 <span class="tk-kw">app</span>.<span class="tk-fn">post</span>(<span class="tk-str">"/rank"</span>, <span class="tk-kw">function</span>(req, res)
     <span class="tk-kw">local</span> raw    = req:<span class="tk-fn">body</span>()
     <span class="tk-kw">local</span> scored = <span class="tk-acc">compute</span>.<span class="tk-fn">call</span>(<span class="tk-str">"score"</span>, raw)              <span class="tk-com">-- WASM (WAMR AOT)</span>
@@ -974,7 +974,7 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
             <div class="border border-white/[0.08] rounded-md p-4 bg-white/[0.015]">
               <div class="text-[11px] uppercase tracking-widest text-mute-500">Runtime</div>
               <div class="mt-1 text-sm text-paper-50">Lua 5.4</div>
-              <div class="text-xs text-mute-500">or QuickJS &mdash; one per app</div>
+              <div class="text-xs text-mute-500">or QuickJS. One per app</div>
             </div>
             <div class="border border-white/[0.08] rounded-md p-4 bg-white/[0.015]">
               <div class="text-[11px] uppercase tracking-widest text-mute-500">Compute</div>
@@ -1124,7 +1124,7 @@ $ ./my-tool
               <span>shell</span>
               <span class="ml-auto text-[10px] text-mute-500">what an AI coding agent sees</span>
             </header>
-<pre><span class="tk-com"># Machine-readable introspection — no plugins, no MCP servers required.</span>
+<pre><span class="tk-com"># Machine-readable introspection. No plugins, no MCP servers required.</span>
 $ hull agent routes my-tool
 {
   <span class="tk-key">"app"</span>: <span class="tk-str">"my-tool"</span>,
@@ -1160,7 +1160,7 @@ $ hull agent routes my-tool
             <path d="M8 8.5v7"/><path d="M16 8.5v7"/><path d="M8 12h8"/>
           </svg>
           <span class="text-sm text-mute-400">
-            Hull &mdash; capability-secure runtime
+            Hull. Capability-secure runtime
           </span>
         </div>
         <div class="flex items-center gap-2 text-xs text-mute-500 leading-relaxed">
@@ -1188,13 +1188,13 @@ $ hull agent routes my-tool
             <i data-lucide="shield" class="w-3.5 h-3.5"></i> Report a vulnerability
           </a>
         </nav>
-        <a href="https://github.com/artalis-io/hull/blob/main/LICENSING.md" class="kbd hover:bg-white/10 hover:text-paper-50 transition no-underline" title="AGPL-3.0 for open source — commercial license available at licensing+site@artalis.io">
+        <a href="https://github.com/artalis-io/hull/blob/main/LICENSING.md" class="kbd hover:bg-white/10 hover:text-paper-50 transition no-underline" title="AGPL-3.0 for open source. Commercial license available at licensing+site@artalis.io">
           AGPL-3.0 &middot; Commercial
         </a>
       </div>
 
       <p class="text-[11px] text-mute-400 leading-relaxed">
-        Hull is at <span class="text-paper-100">v0.1.0</span> &mdash; APIs and the manifest schema are pre-stable, so pin your version and read the
+        Hull is at <span class="text-paper-100">v0.1.0</span>. APIs and the manifest schema are pre-stable, so pin your version and read the
         <a href="https://github.com/artalis-io/hull/releases" class="link">changelog</a>
         before upgrading.
         Page last updated <time datetime="2026-05">May&nbsp;2026</time>.
@@ -1206,7 +1206,7 @@ $ hull agent routes my-tool
   <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
   <script>
     // Render icons. lucide.createIcons() walks the DOM and replaces
-    // [data-lucide] placeholders with the SVG. Stays minimal — no
+    // [data-lucide] placeholders with the SVG. Stays minimal. No
     // framework, no hydration.
     if (window.lucide) { lucide.createIcons(); }
 

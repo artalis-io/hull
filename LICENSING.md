@@ -29,7 +29,7 @@ The commercial license:
 
 - Removes the AGPL-3.0's copyleft and source-disclosure requirements.
 - Permits embedding Hull in closed-source products and distributions.
-- Is priced by team size and use case &mdash; no per-end-user fees.
+- Is priced by team size and use case. No per-end-user fees.
 
 Contact **<licensing+site@artalis.io>** with a short description of your use case
 and we'll send terms.

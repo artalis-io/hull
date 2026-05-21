@@ -1245,7 +1245,7 @@ All core features are implemented and tested across Linux (gcc + clang), macOS, 
 
 Hull is dual-licensed:
 
-- **AGPL-3.0** for open source use &mdash; see [LICENSE](LICENSE).
-- **Commercial license** for closed-source embedding and proprietary distribution &mdash; email <licensing+site@artalis.io>.
+- **AGPL-3.0** for open source use. see [LICENSE](LICENSE).
+- **Commercial license** for closed-source embedding and proprietary distribution. email <licensing+site@artalis.io>.
 
 See [LICENSING.md](LICENSING.md) for which license applies to your use case, or [`docs/MANIFESTO.md`](docs/MANIFESTO.md#licensing) for the longer rationale.
