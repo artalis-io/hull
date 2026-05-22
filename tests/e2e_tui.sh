@@ -385,6 +385,90 @@ APP
         pass "hull modules available --tui without a tty exits with a helpful error"
     fi
 
+    # ── tui_repl example ──────────────────────────────────────────
+    echo "--- tui_repl ---"
+    OUT=$("${DRIVE}" "repl: 2 expressions" "1+1%r2*3%rq" -- \
+          "${HULL_BIN}" examples/tui_repl/app.lua 2>/dev/null)
+    case "${OUT}" in
+        *"calc>"*"= 2"*"= 6"*)
+            pass "tui_repl evaluates two expressions + tracks history"
+            ;;
+        *)
+            fail "tui_repl missing expected eval output"
+            ;;
+    esac
+
+    # ── tui_log_tailer example ────────────────────────────────────
+    echo "--- tui_log_tailer ---"
+    TAIL_LOG=/tmp/hull-tui-tail-e2e.log
+    rm -f "${TAIL_LOG}"
+    echo "seed" > "${TAIL_LOG}"
+    OUT=$("${DRIVE}" "hull tui-tailer" "%s200%q" -- \
+          "${HULL_BIN}" examples/tui_log_tailer/app.lua 2>/dev/null)
+    case "${OUT}" in
+        *"hull tui-tailer"*"/tmp/hull-tail.log"*)
+            pass "tui_log_tailer renders title + watched path"
+            ;;
+        *)
+            fail "tui_log_tailer missing expected output"
+            ;;
+    esac
+    rm -f "${TAIL_LOG}"
+
+    # ── tui_chat example ──────────────────────────────────────────
+    echo "--- tui_chat ---"
+    OUT=$("${DRIVE}" "chat:" "hello%r%s700q" -- \
+          "${HULL_BIN}" examples/tui_chat/app.lua 2>/dev/null)
+    case "${OUT}" in
+        *"hull tui-chat"*"you:"*"hello"*)
+            pass "tui_chat renders user message"
+            ;;
+        *)
+            fail "tui_chat did not render user message"
+            ;;
+    esac
+
+    # ── hull migrate status --tui ─────────────────────────────────
+    echo "--- hull migrate status --tui ---"
+    MIG_DIR=$(mktemp -d 2>/dev/null || mktemp -d -t hullmig)
+    mkdir -p "${MIG_DIR}/migrations"
+    cat > "${MIG_DIR}/migrations/001_init.sql" <<'SQL'
+CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);
+SQL
+    cat > "${MIG_DIR}/migrations/002_index.sql" <<'SQL'
+CREATE INDEX idx_users_name ON users(name);
+SQL
+    OUT=$("${DRIVE}" "hull migrate status" "%q" -- \
+          "${HULL_BIN}" migrate status --tui -d "${MIG_DIR}/data.db" "${MIG_DIR}" 2>/dev/null)
+    case "${OUT}" in
+        *"hull migrate status"*"0 applied"*"2 pending"*"001_init.sql"*)
+            pass "hull migrate status --tui shows applied/pending counts + entries"
+            ;;
+        *)
+            fail "hull migrate status --tui missing expected output"
+            ;;
+    esac
+
+    # Apply migrations, re-run, and expect "2 applied".
+    "${HULL_BIN}" migrate -d "${MIG_DIR}/data.db" "${MIG_DIR}" >/dev/null 2>&1
+    OUT=$("${DRIVE}" "2 applied" "%q" -- \
+          "${HULL_BIN}" migrate status --tui -d "${MIG_DIR}/data.db" "${MIG_DIR}" 2>/dev/null)
+    case "${OUT}" in
+        *"2 applied"*"0 pending"*)
+            pass "hull migrate status --tui reflects applied state after running migrations"
+            ;;
+        *)
+            fail "hull migrate status --tui did not show applied state"
+            ;;
+    esac
+    rm -rf "${MIG_DIR}"
+
+    if "${HULL_BIN}" migrate status --tui < /dev/null > /dev/null 2>&1; then
+        fail "hull migrate status --tui without a tty should exit non-zero"
+    else
+        pass "hull migrate status --tui without a tty exits with a helpful error"
+    fi
+
     # ── tui_dashboard example (multi-pane + tui.frame + mouse) ────
     echo "--- tui_dashboard ---"
 

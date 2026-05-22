@@ -744,6 +744,67 @@ static int l_tool_agent_context(lua_State *L)
     return 2;
 }
 
+#ifdef HL_ENABLE_DB
+/* ── tool.migrate_status — applied/pending migration list ─────────
+ *
+ * Opens the database via the sqlite backend, queries
+ * _hull_migrations, returns an array of {name, applied, applied_at}
+ * entries (sorted by filename like hl_migrate_status does).
+ *
+ * Returns nil + an error message on open/query failure, so the
+ * stdlib's migrate_status_tui can render the failure mode. */
+
+#include "hull/cap/db.h"
+#include "hull/cap/db_backend.h"
+#include "hull/migrate.h"
+#include "hull/vfs.h"
+
+extern const HlEntry hl_app_entries[];
+extern const HlDbBackend hl_db_backend_sqlite;
+
+static int l_tool_migrate_status(lua_State *L)
+{
+    const char *app_dir = luaL_optstring(L, 1, ".");
+    const char *db_path = luaL_optstring(L, 2, "data.db");
+
+    HlDbHandle handle = { .backend = &hl_db_backend_sqlite, .ctx = NULL };
+    if (hl_db_backend_sqlite.open(&handle.ctx, db_path, NULL) != 0) {
+        lua_pushnil(L);
+        lua_pushfstring(L, "cannot open database: %s", db_path);
+        return 2;
+    }
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, hl_app_entries, app_dir);
+
+    HlMigrationStatus *entries = NULL;
+    int count = 0;
+    int rc = hl_migrate_status(&handle, &vfs, &entries, &count);
+    hl_db_backend_sqlite.close(handle.ctx);
+
+    if (rc != 0) {
+        lua_pushnil(L);
+        lua_pushstring(L, "migrate_status query failed");
+        return 2;
+    }
+
+    lua_newtable(L);
+    for (int i = 0; i < count; i++) {
+        lua_newtable(L);
+        lua_pushstring(L, entries[i].name);    lua_setfield(L, -2, "name");
+        lua_pushboolean(L, entries[i].applied); lua_setfield(L, -2, "applied");
+        if (entries[i].applied_at) {
+            lua_pushstring(L, entries[i].applied_at);
+            lua_setfield(L, -2, "applied_at");
+        }
+        lua_rawseti(L, -2, i + 1);
+    }
+    hl_migrate_status_free(entries, count);
+    lua_pushinteger(L, count);
+    return 2;
+}
+#endif
+
 /* ── tool.modules_available — every first-party registry entry ──── */
 
 /* Returns a table { count = N, modules = { {name, api_major, intrinsic,
@@ -924,6 +985,9 @@ static const luaL_Reg tool_funcs[] = {
     { "dev_check_file_change",  l_tool_dev_check_file_change },
     { "dev_reload",             l_tool_dev_reload },
     { "modules_available",      l_tool_modules_available },
+#ifdef HL_ENABLE_DB
+    { "migrate_status",         l_tool_migrate_status },
+#endif
     { NULL, NULL }
 };
 

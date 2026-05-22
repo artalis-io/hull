@@ -22,6 +22,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 /* ── Usage ─────────────────────────────────────────────────────────── */
 
@@ -128,6 +129,7 @@ int hl_cmd_migrate(int argc, char **argv, const HlCommandEnv *env)
     const char *app_dir = env->app_dir;
     const char *db_path = "data.db";
     const char *subcmd = NULL;
+    int tui = 0;
 
     /* Parse arguments */
     for (int i = 1; i < argc; i++) {
@@ -136,6 +138,8 @@ int hl_cmd_migrate(int argc, char **argv, const HlCommandEnv *env)
         } else if (strcmp(argv[i], "-h") == 0) {
             migrate_usage();
             return 0;
+        } else if (strcmp(argv[i], "--tui") == 0) {
+            tui = 1;
         } else if (!subcmd && argv[i][0] != '-') {
             /* First positional arg: could be subcommand or app_dir */
             if (strcmp(argv[i], "status") == 0 ||
@@ -155,8 +159,27 @@ int hl_cmd_migrate(int argc, char **argv, const HlCommandEnv *env)
         return hull_tool("hull.migrate", argc, argv, env->hull_exe);
 
     /* Status subcommand */
-    if (subcmd && strcmp(subcmd, "status") == 0)
+    if (subcmd && strcmp(subcmd, "status") == 0) {
+#ifdef HL_ENABLE_TUI
+        if (tui) {
+            if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
+                fprintf(stderr,
+                    "hull migrate status --tui: not attached to a "
+                    "terminal. Run without --tui for plain text.\n");
+                return 1;
+            }
+            return hull_tool("hull.migrate_status_tui", argc, argv,
+                             env->hull_exe);
+        }
+#else
+        if (tui) {
+            fprintf(stderr, "hull migrate status --tui: this build was "
+                            "compiled without HL_ENABLE_TUI.\n");
+            return 1;
+        }
+#endif
         return cmd_status(app_dir, db_path);
+    }
 
     /* Default: run migrations */
     return cmd_run(app_dir, db_path);

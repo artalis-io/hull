@@ -82,7 +82,7 @@ Hull ships 20 subcommands for the full development lifecycle:
 |---------|---------|
 | <code>hull new &lt;name&gt;</code> | Scaffold a new project in a new directory |
 | `hull init [dir]` | Initialize a hull project in-place (idempotent, like `git init`) |
-| <code>hull dev &lt;app&gt;</code> | Development server with hot reload |
+| <code>hull dev &lt;app&gt; [--tui]</code> | Development server with hot reload. [`--tui`](#terminal-ui) streams the child's log into an alt-screen pane with substring filtering, file-watch auto-reload, and `r` for manual reload |
 | <code>hull build -o &lt;out&gt; &lt;dir&gt;</code> | Compile app into a standalone binary |
 | <code>hull build --compiler=tcc\|system\|&lt;path&gt;</code> | Select compiler backend (default: embedded tcc if available, else system cc) |
 | <code>hull test &lt;dir&gt;</code> | In-process test runner (no TCP, memory SQLite) |
@@ -94,13 +94,13 @@ Hull ships 20 subcommands for the full development lifecycle:
 | <code>hull keygen &lt;name&gt;</code> | Generate Ed25519 signing keypair |
 | <code>hull sign-platform &lt;key&gt;</code> | Sign platform library with per-arch hashes |
 | <code>hull manifest &lt;app&gt;</code> | Extract and print manifest as JSON |
-| `hull modules available` | Print the full first-party module registry — names, deps, capability requirements |
+| `hull modules available [--tui]` | Print the full first-party module registry — names, deps, capability requirements. [`--tui`](#terminal-ui) opens a searchable two-pane picker (`/` to filter) |
 | <code>hull modules list [app_dir]</code> | Print modules declared by an app's manifest |
 | <code>hull modules explain &lt;NAME&gt;</code> | Print spec for one module (deps, required caps, intrinsic flag) |
 | <code>hull modules analyze [app_dir]</code> | Static scan of source — flag `require`/`import` of undeclared modules; warn on unused declarations |
 | `hull check [app_dir]` | Validate manifest + import declarations, then run tests + verify |
 | `hull version [--json]` | Print version string (`--json` for machine-readable output) |
-| `hull doctor [--json]` | Check environment: compiler, platform embed, module subsystems (DB/WASM/GPU), build readiness |
+| `hull doctor [--json\|--tui]` | Check environment: compiler, platform embed, module subsystems (DB/WASM/GPU), build readiness. [`--tui`](#terminal-ui) opens a live, color-coded interactive readiness pane with `r` to reprobe and `c` to copy JSON to the clipboard |
 | `hull update [--check] [--force] [--channel=beta]` | Self-update from GitHub releases (verifies SHA-256, atomic replace) |
 | <code>hull &lt;app&gt; --max-instructions N</code> | Set per-request instruction limit (default: 100M) |
 | <code>hull &lt;app&gt; --audit</code> | Enable capability audit logging (JSON to stderr) |
@@ -113,7 +113,7 @@ Hull ships 20 subcommands for the full development lifecycle:
 | <code>hull &lt;app&gt; --ca-bundle PATH</code> | Custom CA bundle (overrides system + embedded) |
 | <code>hull &lt;app&gt; --no-ca-bundle</code> | Skip TLS certificate verification (dev only) |
 | `hull migrate [app_dir]` | Run pending SQL migrations |
-| `hull migrate status` | Show migration status (applied/pending) |
+| `hull migrate status [--tui]` | Show migration status (applied/pending). [`--tui`](#terminal-ui) opens a two-pane view with the .sql source preview on the right |
 | <code>hull migrate new &lt;name&gt;</code> | Create a new numbered migration file |
 | <code>hull compute new &lt;name&gt; [--lang c]</code> | [Scaffold a new WASM compute module](#authoring-compute-modules) under <code>compute/&lt;name&gt;/</code> |
 | `hull compute build [name]` | Compile <code>compute/&lt;name&gt;/&lt;name&gt;.c</code> → <code>compute/&lt;name&gt;.wasm</code> (all modules if no name) |
@@ -820,6 +820,62 @@ Removed: SQLite + `db.*` + `migrate.*` + `worker_db` + DB-backed stdlib modules 
 Still works: HTTP routing, middleware, both runtimes, sandbox, `http.fetch`, `ws.*`, `fs.*`, `crypto.*`, `compute.*`, `gpu.*`, templates, static files, image codecs, SSE, timers, validation, CSV, i18n, CORS, ETag, health, JWT, stateless CSRF, form parsing, logger.
 
 Combine with other flags freely, e.g. `make HL_ENABLE_DB=0 HL_ENABLE_TCC=0 HL_ENABLE_GPU=1 WGPU_LIB_DIR=vendor/wgpu` for a GPU-focused compute service.
+
+## Terminal UI
+
+Hull ships a built-in `hull.tui` module for interactive terminal apps — the same primitives power `hull doctor --tui`, `hull dev --tui`, and friends. Designed to make the obvious thing easy: one canonical entry point, cell-level diff rendering (flicker-free over ssh), async-integrated input (background fetches keep ticking while waiting for keystrokes), and an embedded Unicode 16.0 width table for identical rendering across glibc / musl / cosmo / macOS.
+
+```lua
+local tui = require("hull.tui")
+
+app.manifest({
+    tui = true,
+    modules = { "hull/tui@1" },
+})
+
+app.main(function(ctx)
+    local picked = tui.list({"apple", "banana", "cherry"}, {
+        title = "Pick a fruit",
+    })
+    ctx.stdout:write((picked and "you picked: " .. picked or "aborted") .. "\n")
+    return 0
+end)
+```
+
+Helpers: `tui.run` (canonical immediate-mode loop), `tui.list` / `tui.confirm` / `tui.input` / `tui.frame` / `tui.progress` / `tui.spinner`, plus `tui.async` for fire-and-forget background work on the same event loop.
+
+### First-party `--tui` tools
+
+Five subcommands ship interactive TUI variants — each is a Lua tool module (`stdlib/lua/hull/X_tui.lua`) dispatched by the matching C command. All refuse cleanly without a real terminal.
+
+| Command | TUI |
+|---------|-----|
+| `hull doctor --tui` | Live readiness pane: platform/compilers/subsystems/compute/CA-bundle sections with ✓/✗ glyphs, theme-aware colors via OSC 11, `r` reprobes, `c` copies the JSON to the system clipboard via OSC 52 |
+| `hull dev --tui` | Live request log streamed from child's stderr+stdout into a ring buffer, status line (pid, reloads, lines, app_dir), inline substring filter, file-watch auto-reload, manual `r` reload |
+| `hull agent context --interactive` | Two-pane task picker w/ live preview; ←/→ cycles level; Enter prints chosen context as JSON for shell pipelines |
+| `hull agent errors --tui` | Scrollable error list + detail panel from `.hull/last_error.json` |
+| `hull modules available --tui` | Searchable registry — `/` opens filter prompt; right pane shows caps + deps + a manifest snippet |
+| `hull migrate status --tui` | Two-pane migration ledger with applied/pending counts; right pane shows the `.sql` source for the focused entry |
+
+### Examples
+
+Under `examples/`:
+
+- **`tui_picker`** — minimal `tui.list` usage in both Lua and JS, plus an `async_proof.lua/.js` that demonstrates how `tui.poll` yields to the event loop (a background ticker advances a counter while the main coroutine awaits a key).
+- **`tui_dashboard`** — three-pane layout via `tui.frame` (round / single borders), live progress bars in the metrics pane, a task list with cursor + checkbox glyphs, opt-in SGR mouse support.
+- **`tui_repl`** — single-line editor with full history navigation (↑/↓), ctrl+u/k for line kill, etc. The "eval" is a tiny safe calculator (Lua's `load` is sandboxed out).
+- **`tui_chat`** — split-pane chat mock; each user message spawns a background `tui.async` "bot reply" that hull.sleep()s 200–500ms before appending, proving the input stays responsive while async work is pending.
+- **`tui_log_tailer`** — `tail -f`-style file follower; a `tui.async` coroutine polls the file via `fs.read` every 200ms while the main loop awaits keystrokes.
+
+### Disabling
+
+The TUI capability is gated by `HL_ENABLE_TUI` (default on). Disabling drops the cap layer (`cap/tui.c`, `cap/tui_input.c`), the runtime bindings, the `hull.tui` stdlib module, and every `--tui` flag for ~80–150 KB binary savings:
+
+```bash
+make HL_ENABLE_TUI=0
+```
+
+See [`docs/tui_mode.md`](docs/tui_mode.md) for the full design — phases, architectural decisions, the Cosmo support matrix, and the async-integration model.
 
 ## Server Tuning
 

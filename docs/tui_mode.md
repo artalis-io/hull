@@ -915,6 +915,43 @@ Estimated effort: ~1 day.
 Shape still matches CLI mode itself — TUI is "CLI mode + alternate
 screen + input parser + cell-diffed render loop."
 
+## Cosmopolitan support
+
+Cosmo APE is a first-class build target for Hull. The TUI module
+should run on it without modification — every syscall it uses is in
+Cosmo's libc:
+
+| Used by | Calls |
+|---------|-------|
+| Cap layer (cap/tui*.c) | `tcgetattr/tcsetattr`, `poll`, `read`/`write`, `ioctl(TIOCGWINSZ)`, `sigaction`, `atexit`, `clock_gettime(CLOCK_MONOTONIC)`, `fcntl`, `isatty` |
+| Dev TUI (commands/dev.c) | the above + `pipe`, `fork`, `execvp`, `waitpid` |
+
+All POSIX. No Linux-specific syscalls (`inotify`, `eventfd`, `signalfd`),
+no macOS-specific (`kqueue`, `EvFilt*`), no GNU extensions.
+
+The platform-specific `#define` gates in `tests/hull/cap/test_tui_lifecycle.c`
+and `tests/e2e_tui_drive.c` cover `__APPLE__ / __linux__ / __FreeBSD__ /
+__OpenBSD__` but not Cosmo — on a Cosmo build the PTY harnesses
+gracefully skip (`SKIP: no forkpty on this platform`). The width-table
+and parser unit tests are pure C and run unchanged.
+
+End-to-end verification on Cosmo is the standard recipe:
+
+```sh
+make platform-cosmo
+make CC=cosmocc HL_ENABLE_TUI=1
+make test CC=cosmocc HL_ENABLE_TUI=1
+# Manual:
+./build/hull doctor --tui          # interactive
+./build/hull modules available --tui
+./build/hull dev --tui examples/hello_cli/app.lua
+```
+
+The PTY-based e2e (`tests/e2e_tui.sh`) requires forkpty and therefore
+does not run on Cosmo today — apps are exercised manually. A
+follow-up could port the PTY harness to use Cosmo's `pty_open`
+equivalent or shell out to `script(1)`.
+
 ## Risk callouts
 
 - **Acquire/release correctness.** A subtle bug here produces
