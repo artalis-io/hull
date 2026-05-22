@@ -68,9 +68,10 @@ static const HlModuleSpec REGISTRY[] = {
         .api_major = 1, .intrinsic = 0, .pure = 0,
         /* email dispatches to either SMTP or HTTPS API providers — both
          * are reachable from the same email.send() entry point, so both
-         * are hard deps. */
+         * are hard deps. Auto-pulls hull/log + hull/json for structured
+         * error logging and provider payload marshaling. */
         .required_caps = 0,
-        .deps = {"hull/http-client", "hull/smtp", 0},
+        .deps = {"hull/http-client", "hull/smtp", "hull/log", "hull/json", 0},
     },
     {
         .name = "hull/env",
@@ -146,7 +147,8 @@ static const HlModuleSpec REGISTRY[] = {
         .name = "hull/jwt",
         .api_major = 1, .intrinsic = 0, .pure = 1,
         .required_caps = 0,
-        .deps = {"hull/crypto", 0},
+        /* HMAC needs crypto; payload encoding needs json; exp/iat checks need time. */
+        .deps = {"hull/crypto", "hull/json", "hull/time", 0},
     },
 
     /* ── Logger ───────────────────────────────────────────────────── */
@@ -169,25 +171,28 @@ static const HlModuleSpec REGISTRY[] = {
         .name = "hull/middleware/auth",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HTTP_SERVER,
-        .deps = {"hull/db", "hull/crypto", 0},
+        /* Wraps cookie + jwt + session: session-cookie or bearer-token auth. */
+        .deps = {"hull/http-server", "hull/db", "hull/crypto", "hull/cookie", "hull/jwt",
+                 "hull/middleware/session", 0},
     },
     {
         .name = "hull/middleware/cors",
         .api_major = 1, .intrinsic = 0, .pure = 1,
-        .required_caps = HL_MOD_CAP_HTTP_SERVER, .deps = {0},
+        .required_caps = HL_MOD_CAP_HTTP_SERVER, .deps = {"hull/http-server", 0},
     },
     {
         .name = "hull/middleware/csrf",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HTTP_SERVER,
-        .deps = {"hull/crypto", 0},
+        /* HMAC token + max-age check; needs crypto + time. */
+        .deps = {"hull/http-server", "hull/crypto", "hull/time", 0},
     },
     {
         .name = "hull/middleware/etag",
         .api_major = 1, .intrinsic = 0, .pure = 1,
         .required_caps = HL_MOD_CAP_HTTP_SERVER,
-        .deps = {"hull/crypto", 0},
-        /* No db dep — etag only computes a SHA-256 from the body. */
+        /* SHA-256 of body + json encode for the response payload. */
+        .deps = {"hull/http-server", "hull/crypto", "hull/json", 0},
     },
     {
         .name = "hull/middleware/health",
@@ -202,47 +207,52 @@ static const HlModuleSpec REGISTRY[] = {
         .name = "hull/middleware/idempotency",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HTTP_SERVER,
-        .deps = {"hull/db", "hull/crypto", 0},
+        /* Key fingerprint (crypto), JSON payload caching, TTL clock. */
+        .deps = {"hull/http-server", "hull/db", "hull/crypto", "hull/json", "hull/time", 0},
     },
     {
         .name = "hull/middleware/inbox",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HTTP_SERVER,
-        .deps = {"hull/db", 0},
+        .deps = {"hull/http-server", "hull/db", "hull/time", 0},
     },
     {
         .name = "hull/middleware/logger",
         .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = HL_MOD_CAP_HTTP_SERVER, .deps = {0},
+        .required_caps = HL_MOD_CAP_HTTP_SERVER,
+        .deps = {"hull/http-server", "hull/log", 0},
     },
     {
         .name = "hull/middleware/outbox",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HTTP_SERVER,
-        .deps = {"hull/db", "hull/http-client", 0},
+        /* Webhook payload as JSON, retry backoff via time. */
+        .deps = {"hull/http-server", "hull/db", "hull/http-client", "hull/json", "hull/time", 0},
     },
     {
         .name = "hull/middleware/ratelimit",
         .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = HL_MOD_CAP_HTTP_SERVER, .deps = {0},
+        .required_caps = HL_MOD_CAP_HTTP_SERVER,
+        .deps = {"hull/http-server", "hull/time", 0},
     },
     {
         .name = "hull/middleware/rbac",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HTTP_SERVER,
-        .deps = {"hull/db", 0},
+        .deps = {"hull/http-server", "hull/db", 0},
     },
     {
         .name = "hull/middleware/session",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HTTP_SERVER,
-        .deps = {"hull/db", "hull/crypto", 0},
+        /* Session payload is JSON; ID is crypto.random; expiry needs time. */
+        .deps = {"hull/http-server", "hull/db", "hull/crypto", "hull/json", "hull/time", 0},
     },
     {
         .name = "hull/middleware/transaction",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HTTP_SERVER,
-        .deps = {"hull/db", 0},
+        .deps = {"hull/http-server", "hull/db", 0},
     },
 
     /* ── Pure stdlib + remaining side-effect ─────────────────────── */
@@ -270,7 +280,8 @@ static const HlModuleSpec REGISTRY[] = {
     {
         .name = "hull/template",
         .api_major = 1, .intrinsic = 0, .pure = 1,
-        .required_caps = 0, .deps = {0},
+        /* The `| json` filter encodes data as JSON in templates. */
+        .required_caps = 0, .deps = {"hull/json", 0},
     },
     {
         .name = "hull/time",

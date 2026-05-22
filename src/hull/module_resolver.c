@@ -179,6 +179,9 @@ int hl_module_resolver_resolve(const HlManifest *manifest,
 
     const uint32_t prov_manifest = manifest_provided_caps(manifest);
     const uint32_t prov_build    = build_provided_caps();
+    const uint32_t build_cap_mask = HL_MOD_CAP_DB | HL_MOD_CAP_WASM
+                                    | HL_MOD_CAP_GPU | HL_MOD_CAP_HTTP
+                                    | HL_MOD_CAP_TUI;
 
     /* Pass 1: look up each declared module + admit it. Detect unknown
      * names, version mismatches, duplicates, missing capabilities. */
@@ -224,9 +227,6 @@ int hl_module_resolver_resolve(const HlManifest *manifest,
          * any path declared at all. Pairing the module with a section
          * is documentation, not a load-time requirement. */
         uint32_t need = spec->required_caps;
-        const uint32_t build_cap_mask = HL_MOD_CAP_DB | HL_MOD_CAP_WASM
-                                        | HL_MOD_CAP_GPU | HL_MOD_CAP_HTTP
-                                        | HL_MOD_CAP_TUI;
         uint32_t need_build = need & build_cap_mask;
         (void)prov_manifest;  /* manifest-cap surfacing intentional; see above */
 
@@ -255,28 +255,71 @@ int hl_module_resolver_resolve(const HlManifest *manifest,
         set_bit(out, idx);
     }
 
-    /* Pass 2: verify every dep of every admitted module is also
-     * declared. Walked separately so error messages are deterministic
-     * (we don't surface a dep error before the module that names it is
-     * itself validated). */
-    for (int i = 0; i < manifest->modules_count; i++) {
-        const HlManifestModule *m = &manifest->modules[i];
-        const HlModuleSpec *spec = hl_module_registry_find_short(m->name);
-        if (!spec) continue;  /* unreachable: caught in pass 1 */
+    /* Pass 2: auto-admit transitive deps of every admitted module.
+     *
+     * Policy (changed 2026-05-22): declaring a module implicitly admits
+     * its registry-declared deps, recursively. The previous policy
+     * required users to re-declare every transitive dep ("declared
+     * jwt? add crypto too; declared email? add log + json + http-client
+     * + smtp"), which produced unhelpful error chains and forced apps
+     * declaring any stdlib middleware to list hull/log + hull/json
+     * even though they're internal-only utility imports.
+     *
+     * Build-time caps of auto-admitted deps are re-checked so a
+     * declared module can't transitively pull in a subsystem the
+     * binary was compiled without (e.g. declaring `hull/email`
+     * shouldn't smuggle hull/smtp into an HL_ENABLE_HTTP_CLIENT=0
+     * build). Manifest-side caps (fs/hosts/env) stay gated at call
+     * time as before — the module gate only controls import visibility.
+     *
+     * Walked as a fixed-point loop so deps-of-deps get admitted.
+     * Bounded by total registry size; terminates when no new bits
+     * flip in a pass. */
+    size_t reg_count = 0;
+    const HlModuleSpec *reg = hl_module_registry_all(&reg_count);
+    int changed = 1;
+    while (changed) {
+        changed = 0;
+        for (size_t idx = 0; idx < reg_count; idx++) {
+            if (!get_bit(out, (int)idx)) continue;
+            const HlModuleSpec *spec = &reg[idx];
 
-        for (int j = 0; j < HL_MODULE_MAX_DEPS && spec->deps[j]; j++) {
-            const HlModuleSpec *dep_spec = hl_module_registry_find(spec->deps[j]);
-            if (!dep_spec) {
-                /* Registry inconsistency — would be a programming bug. */
-                ERR2("internal: module '%s' declares unknown dep '%s'",
-                     spec->name, spec->deps[j]);
-                return -1;
-            }
-            if (!get_bit(out, hl_module_registry_index(dep_spec))) {
-                ERR3("module '%s' requires '%s' but it is not declared — "
-                     "add `%s` to modules in app.manifest",
-                     spec->name, dep_spec->name, dep_spec->name);
-                return -1;
+            for (int j = 0; j < HL_MODULE_MAX_DEPS && spec->deps[j]; j++) {
+                const HlModuleSpec *dep_spec =
+                    hl_module_registry_find(spec->deps[j]);
+                if (!dep_spec) {
+                    /* Registry inconsistency — programming bug. */
+                    ERR2("internal: module '%s' declares unknown dep '%s'",
+                         spec->name, spec->deps[j]);
+                    return -1;
+                }
+                int dep_idx = hl_module_registry_index(dep_spec);
+                if (get_bit(out, dep_idx)) continue;  /* already in */
+
+                /* Re-check build-time gates for the dep — auto-admit
+                 * must not bypass HL_ENABLE_* requirements. */
+                uint32_t need_build = dep_spec->required_caps & build_cap_mask;
+                for (uint32_t bit = 1; bit; bit <<= 1) {
+                    if (!(need_build & bit)) continue;
+                    if (!(prov_build & bit)) {
+                        ERR3("module '%s' transitively requires '%s', "
+                             "which needs %s but it is disabled in this "
+                             "hull build",
+                             spec->name, dep_spec->name, cap_label(bit));
+                        return -1;
+                    }
+                }
+                if ((dep_spec->required_caps & HL_MOD_CAP_TUI)
+                        && !manifest->tui) {
+                    ERR2("module '%s' transitively requires '%s', which "
+                         "needs the 'tui' capability — add `tui = true` "
+                         "to the manifest",
+                         spec->name, dep_spec->name);
+                    return -1;
+                }
+
+                set_bit(out, dep_idx);
+                changed = 1;
             }
         }
     }

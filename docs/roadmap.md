@@ -480,6 +480,72 @@ Every step produces machine-readable JSON output. The agent never parses human-f
 | PDF document builder | Planned | Report generation |
 | Module/package ecosystem | Planned | `hull add <package>` for sharing middleware and compute plugins |
 
+### Architectural cohesion / coupling — Deferred
+
+Two findings from the May 2026 architectural audit that didn't make the
+immediate-fix cut. Both are low-urgency cleanups, not bugs. Listed here
+so they don't get lost.
+
+#### A-1: `runtime/lua/mod_tool.c` is doing too much (~1000 LOC, cross-layer includes)
+
+`src/hull/runtime/lua/mod_tool.c` is a single ~1000-line file that
+both (a) exposes the `tool.*` Lua surface (spawn / mkdir / copy /
+read_file / write_file / etc.) and (b) wires those bindings into
+build, doctor, and dev orchestration. Its include set pulls headers
+from `commands/` (`commands/doctor.h`, `dev_state.h`), `build_assets.h`,
+`compiler.h`, `manifest.h`, `module_registry.h`, `module_resolver.h`,
+and `agent_lib.h` — i.e. the file under `runtime/lua/` knows about
+half the codebase.
+
+**Why it's worth fixing eventually:** convention says
+`runtime/lua/mod_*.c` is a thin Lua binding for a cap. This one isn't.
+The layer line between *runtime bindings* and *tool orchestration* is
+already blurred and will keep accumulating debt every time `dev_state`
+or `compiler` adds an entry point.
+
+**Direction when picked up:** split into two files. Keep
+`runtime/lua/mod_tool.c` as the thin `tool.*` surface (spawn / mkdir /
+copy / etc.) — same shape as `mod_crypto.c`. Move the build-tool
+orchestration helpers to `src/hull/tool_bindings.c` (or under
+`commands/`), which can include whatever it needs from the upper
+layers without violating the runtime convention.
+
+**Cost estimate:** 1–2 hour file-shuffle + Makefile entry; no
+behavior change. Defer until the next time the file is touched.
+
+#### A-2: CLI plugins live in `stdlib/lua/hull/` but aren't user-facing
+
+The Lua stdlib (`stdlib/lua/hull/`) currently mixes two different
+things:
+
+- **User-facing modules** apps actually `require`: `template`, `jwt`,
+  `csrf`, `session`, `cookie`, `validate`, `csv`, `i18n`, `search`,
+  `rbac`, `health`, `etag`, `email`, `form`, `inspect`, all the
+  `middleware/*`, and the universal utility pair `json` / `log`.
+- **CLI plugins** the C dispatcher invokes when running tool-mode
+  commands: `build`, `deploy`, `init`, `new`, `inspect`, `analyze`,
+  `manifest`, `migrate`, `modules`, `eject`, `sign_platform`,
+  `compute`, `compute_build`, `doctor_tui`, `dev_tui`,
+  `migrate_status_tui`, `agent_context_tui`, `agent_errors_tui`,
+  `modules_available_tui`.
+
+The JS stdlib has zero CLI plugins because the CLI tool layer was
+written in Lua from day one. That's an intentional choice — there's no
+plan to port `hull build` to JS — but the asymmetry between the two
+stdlib directories looks like a feature gap when read cold. A
+contributor opening `stdlib/js/hull/` and not finding `build.js` will
+reasonably assume JS apps are second-class.
+
+**Direction when picked up:** relocate the CLI plugins out of
+`stdlib/lua/hull/` and into `stdlib/cli/lua/` (or similar). The
+embedded stdlib registry and Makefile discovery would track the new
+location; user-facing `require("hull.X")` stays clean and the JS/Lua
+parity story stops being misleading. Until then, document the
+convention prominently in CLAUDE.md.
+
+**Cost estimate:** 1–2 hour relocation + Makefile path updates +
+embedded-asset wiring. Defer until a JS contributor asks about it.
+
 ### WASM / GPU Compute — Remaining Work
 
 (Merged in from the former `roadmap_wasm_compute.md`. The shipped phases — SIMD128, memory limits, Memory64, GPU/WebGPU, instance pooling, WasmBuffer protocol, persistent instances, shared data segments, GPU textures, streaming I/O, SQLite UDFs — are listed in the "Done" sections above.)

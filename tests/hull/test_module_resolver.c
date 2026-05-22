@@ -286,10 +286,15 @@ UTEST(module_resolver, env_without_allowlist_admitted)
     ASSERT_EQ(err[0], '\0');
 }
 
-UTEST(module_resolver, jwt_without_crypto_rejected)
+/* Policy (changed 2026-05-22): declaring a module auto-admits its
+ * registry-declared deps transitively. The resolver only errors on
+ * build-time gates (HL_ENABLE_*) and TUI's manifest boolean. The two
+ * tests below used to assert the old "explicit declaration required"
+ * policy; they now assert the auto-admit shape. Per-call cap checks
+ * (hosts/fs/env) still gate actual resource access. */
+
+UTEST(module_resolver, jwt_auto_admits_crypto)
 {
-    /* jwt internally depends on crypto. The user-facing principle is
-     * explicit declaration — no silent pull-in. */
     HlManifest m;
     clear_manifest(&m);
     add_module(&m, "jwt", 1);
@@ -297,15 +302,19 @@ UTEST(module_resolver, jwt_without_crypto_rejected)
     HlResolvedModuleSet s = {0};
     char err[256] = {0};
     int rc = hl_module_resolver_resolve(&m, &s, err, sizeof(err));
-    ASSERT_EQ(rc, -1);
-    ASSERT_NE(strstr(err, "hull/crypto"), NULL);
-    ASSERT_NE(strstr(err, "hull/jwt"), NULL);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(err[0], '\0');
+
+    const HlModuleSpec *jwt    = hl_module_registry_find_short("jwt");
+    const HlModuleSpec *crypto = hl_module_registry_find_short("crypto");
+    ASSERT_TRUE(jwt != NULL);
+    ASSERT_TRUE(crypto != NULL);
+    ASSERT_TRUE(hl_module_set_contains_spec(&s, jwt));
+    ASSERT_TRUE(hl_module_set_contains_spec(&s, crypto));
 }
 
-UTEST(module_resolver, session_without_db_rejected)
+UTEST(module_resolver, session_auto_admits_db_and_crypto)
 {
-    /* session declares deps = {hull/db, hull/crypto} — neither is
-     * automatically pulled in. */
     HlManifest m;
     clear_manifest(&m);
     add_module(&m, "middleware/session", 1);
@@ -313,9 +322,18 @@ UTEST(module_resolver, session_without_db_rejected)
     HlResolvedModuleSet s = {0};
     char err[256] = {0};
     int rc = hl_module_resolver_resolve(&m, &s, err, sizeof(err));
-    ASSERT_EQ(rc, -1);
-    /* The first missing dep listed for session is hull/db. */
-    ASSERT_NE(strstr(err, "hull/db"), NULL);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(err[0], '\0');
+
+    const HlModuleSpec *session = hl_module_registry_find_short("middleware/session");
+    const HlModuleSpec *db      = hl_module_registry_find_short("db");
+    const HlModuleSpec *crypto  = hl_module_registry_find_short("crypto");
+    ASSERT_TRUE(session != NULL);
+    ASSERT_TRUE(db != NULL);
+    ASSERT_TRUE(crypto != NULL);
+    ASSERT_TRUE(hl_module_set_contains_spec(&s, session));
+    ASSERT_TRUE(hl_module_set_contains_spec(&s, db));
+    ASSERT_TRUE(hl_module_set_contains_spec(&s, crypto));
 }
 
 #ifndef HL_ENABLE_GPU

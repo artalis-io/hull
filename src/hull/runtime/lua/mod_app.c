@@ -4,6 +4,7 @@
  */
 
 #include "mod_buffer.h"
+#include "hull/module_registry.h"
 
 #include <string.h>
 
@@ -417,6 +418,22 @@ static int lua_app_daily(lua_State *L);
  *
  * Stack on entry: table at index `manifest_idx`. Stack unchanged
  * on return. */
+/* True iff `prefix` matches `name` directly OR any of `name`'s
+ * registry-declared transitive deps. Mirrors the resolver's auto-admit
+ * walk (module_resolver.c) but runs inline at decoration time, before
+ * the resolver has populated the bitset. Bounded by registry size. */
+static int spec_chain_matches(const HlModuleSpec *spec, const char *prefix,
+                              size_t plen, int depth)
+{
+    if (!spec || depth > 8) return 0;
+    if (strncmp(spec->name, prefix, plen) == 0) return 1;
+    for (int i = 0; i < HL_MODULE_MAX_DEPS && spec->deps[i]; i++) {
+        const HlModuleSpec *dep = hl_module_registry_find(spec->deps[i]);
+        if (spec_chain_matches(dep, prefix, plen, depth + 1)) return 1;
+    }
+    return 0;
+}
+
 static int manifest_declares_module(lua_State *L, int manifest_idx,
                                     const char *prefix)
 {
@@ -428,8 +445,28 @@ static int manifest_declares_module(lua_State *L, int manifest_idx,
         while (lua_next(L, -2) != 0) {
             if (lua_isstring(L, -1)) {
                 const char *s = lua_tostring(L, -1);
+                /* Fast path: direct prefix match against the declared
+                 * string (e.g. "hull/http-server@1"). */
                 if (s && strncmp(s, prefix, plen) == 0) {
                     found = 1;
+                } else if (s) {
+                    /* Slow path: walk registry deps in case the user
+                     * declared something that transitively pulls in
+                     * `prefix`. Mirrors the resolver's auto-admit so
+                     * decoration is in lockstep with module gating.
+                     * Strip the "@N" version suffix before looking up
+                     * the registry entry. */
+                    char nameonly[HL_MODULE_NAME_MAX];
+                    const char *at = strchr(s, '@');
+                    size_t nlen = at ? (size_t)(at - s) : strlen(s);
+                    if (nlen + 1 <= sizeof(nameonly)) {
+                        memcpy(nameonly, s, nlen);
+                        nameonly[nlen] = '\0';
+                        const HlModuleSpec *spec =
+                            hl_module_registry_find(nameonly);
+                        if (spec_chain_matches(spec, prefix, plen, 0))
+                            found = 1;
+                    }
                 }
             }
             lua_pop(L, 1); /* drop value, keep key */

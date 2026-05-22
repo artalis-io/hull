@@ -502,6 +502,21 @@ static JSValue js_app_daily(JSContext *ctx, JSValueConst this_val,
  * with `prefix` (e.g. "hull/timers"). Returns 1 if found.
  * Manifest and modules array are inspected via JS_GetPropertyStr;
  * caller owns the manifest reference. */
+/* Walk a registry spec's deps recursively for a name-prefix match.
+ * Mirrors the Lua-side spec_chain_matches; see mod_app.c (lua) for
+ * design rationale. */
+static int js_spec_chain_matches(const HlModuleSpec *spec, const char *prefix,
+                                 size_t plen, int depth)
+{
+    if (!spec || depth > 8) return 0;
+    if (strncmp(spec->name, prefix, plen) == 0) return 1;
+    for (int i = 0; i < HL_MODULE_MAX_DEPS && spec->deps[i]; i++) {
+        const HlModuleSpec *dep = hl_module_registry_find(spec->deps[i]);
+        if (js_spec_chain_matches(dep, prefix, plen, depth + 1)) return 1;
+    }
+    return 0;
+}
+
 static int js_manifest_declares_module(JSContext *ctx, JSValueConst manifest,
                                        const char *prefix)
 {
@@ -519,7 +534,24 @@ static int js_manifest_declares_module(JSContext *ctx, JSValueConst manifest,
             if (JS_IsString(item)) {
                 const char *s = JS_ToCString(ctx, item);
                 if (s && strncmp(s, prefix, plen) == 0) {
+                    /* Fast path: direct prefix match on the declared
+                     * string (e.g. "hull/http-server@1"). */
                     found = 1;
+                } else if (s) {
+                    /* Slow path: walk transitive deps so middleware
+                     * declarations decorate the app intrinsic the same
+                     * way explicit declarations do. */
+                    char nameonly[HL_MODULE_NAME_MAX];
+                    const char *at = strchr(s, '@');
+                    size_t nlen = at ? (size_t)(at - s) : strlen(s);
+                    if (nlen + 1 <= sizeof(nameonly)) {
+                        memcpy(nameonly, s, nlen);
+                        nameonly[nlen] = '\0';
+                        const HlModuleSpec *spec =
+                            hl_module_registry_find(nameonly);
+                        if (js_spec_chain_matches(spec, prefix, plen, 0))
+                            found = 1;
+                    }
                 }
                 if (s) JS_FreeCString(ctx, s);
             }

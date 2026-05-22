@@ -1,11 +1,18 @@
 /*
- * cap/test.c — Shared test dispatch logic
+ * cap/test.c — in-process synthetic-request harness for hull test
  *
- * In-process HTTP dispatch (no TCP) for testing Hull apps.
- * Routes are matched via kl_router_match, handlers called in-process,
- * and KlResponse fields inspected directly.
+ * Builds a fully-formed KlRequest from the runtime-side test bindings
+ * (method, path, headers, body, opaque JSON ctx), hands it to Keel's
+ * router pipeline via `kl_router_dispatch_synthetic`, and copies the
+ * resulting status / body / headers into an HlTestResult that the
+ * Lua/JS runtime sides can inspect.
  *
- * Runtime-specific bindings live in test_lua.c and test_js.c.
+ * Routing semantics (match → pre-body middleware → post-body
+ * middleware → handler) live in Keel — this file deliberately does
+ * not duplicate that sequence so it cannot drift away from the
+ * network-driven dispatch in vendor/keel/src/connection.c and h2.c.
+ *
+ * Runtime-specific bindings live in runtime/{lua,js}/mod_test.c.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -24,8 +31,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-/* ── Shared C dispatch logic ───────────────────────────────────────── */
 
 int hl_cap_test_dispatch(KlRouter *router, const char *method,
                          const char *path, const char *body_data,
@@ -50,21 +55,7 @@ int hl_cap_test_dispatch(KlRouter *router, const char *method,
         query_len = strlen(query);
     }
 
-    /* Match route */
-    KlRoute *matched = NULL;
-    KlParam params[KL_MAX_PARAMS];
-    int num_params = 0;
-
-    int match_status = kl_router_match(router, method, strlen(method),
-                                        path, path_len,
-                                        &matched, params, &num_params);
-
-    if (!run_middleware && (match_status != 200 || !matched)) {
-        result->status = match_status;
-        return 0;
-    }
-
-    /* Build request */
+    /* Build request — params are filled in by dispatch_synthetic. */
     KlRequest req;
     memset(&req, 0, sizeof(req));
     req.method = method;
@@ -76,11 +67,6 @@ int hl_cap_test_dispatch(KlRouter *router, const char *method,
     req.version_major = 1;
     req.version_minor = 1;
     req.keep_alive = 0;
-
-    /* Copy matched params */
-    req.num_params = num_params;
-    for (int i = 0; i < num_params && i < KL_MAX_PARAMS; i++)
-        req.params[i] = params[i];
 
     /* Set headers — lowercase names to match llhttp parser behavior */
     char lowered_names[KL_MAX_HEADERS][64];
@@ -130,39 +116,26 @@ int hl_cap_test_dispatch(KlRouter *router, const char *method,
         }
     }
 
-    /* Build response */
+    /* Build response, then hand the (req, res) pair to Keel's router
+     * pipeline. dispatch_synthetic encapsulates the match → pre-body
+     * mw → post-body mw → handler sequence so this file no longer
+     * needs to mirror Keel internals. */
     KlAllocator alloc = kl_allocator_default();
     KlResponse res;
     if (kl_response_init(&res, &alloc) != 0) return -1;
     res.conn_fd = -1; /* no actual connection */
 
-    /* Run middleware chain if requested */
-    if (run_middleware) {
-        int mw_rc = kl_router_run_middleware(router, &req, &res);
-        if (mw_rc != 0)
-            goto extract_result; /* middleware short-circuited */
+    (void)kl_router_dispatch_synthetic(router, &req, &res, run_middleware);
 
-        mw_rc = kl_router_run_post_middleware(router, &req, &res);
-        if (mw_rc != 0)
-            goto extract_result; /* post-body middleware short-circuited */
-    }
-
-    /* Dispatch handler (skip if route didn't match) */
-    if (match_status == 200 && matched)
-        matched->handler(&req, &res, matched->user_data);
-    else
-        kl_response_status(&res, match_status);
-
-extract_result:
-    /* Extract results */
+    /* Extract results — copy body and headers into hl_alloc-owned
+     * storage before freeing the response (kl_response_free releases
+     * hdr_buf, and body may live in runtime-managed memory). */
     result->status = res.status;
     result->body = res.body;
     result->body_len = res.body_len;
     result->hdr_buf = res.hdr_buf;
     result->hdr_len = res.hdr_len;
 
-    /* Copy body and headers before freeing response (kl_response_free
-     * frees hdr_buf). Body points into runtime-managed memory. */
     if (res.body && res.body_len > 0) {
         char *body_copy = hl_alloc_malloc(hl_alloc, res.body_len + 1);
         if (body_copy) {

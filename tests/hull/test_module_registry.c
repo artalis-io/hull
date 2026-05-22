@@ -143,21 +143,36 @@ UTEST(module_registry, crypto_has_no_capability_requirement)
 
 /* ── Internal dependencies ────────────────────────────────────────── */
 
+/* Registry deps are checked structurally — order matters because the
+ * resolver walks the list in order and the error path used to surface
+ * the first missing dep. With auto-admit (May 2026) order is less
+ * load-bearing, but keeping the assertions ensures dep lists stay
+ * intentional rather than drifting. Helper checks any-of membership
+ * since several modules now declare log/json deps too. */
+static int dep_list_contains(const HlModuleSpec *s, const char *needle)
+{
+    for (int i = 0; i < HL_MODULE_MAX_DEPS && s->deps[i]; i++)
+        if (strcmp(s->deps[i], needle) == 0) return 1;
+    return 0;
+}
+
 UTEST(module_registry, jwt_depends_on_crypto)
 {
     const HlModuleSpec *s = hl_module_registry_find("hull/jwt");
     ASSERT_NE(s, NULL);
-    ASSERT_STREQ(s->deps[0], "hull/crypto");
-    ASSERT_EQ(s->deps[1], NULL);
+    ASSERT_TRUE(dep_list_contains(s, "hull/crypto"));
+    ASSERT_TRUE(dep_list_contains(s, "hull/json"));
+    ASSERT_TRUE(dep_list_contains(s, "hull/time"));
 }
 
 UTEST(module_registry, session_depends_on_db_and_crypto)
 {
     const HlModuleSpec *s = hl_module_registry_find("hull/middleware/session");
     ASSERT_NE(s, NULL);
-    ASSERT_STREQ(s->deps[0], "hull/db");
-    ASSERT_STREQ(s->deps[1], "hull/crypto");
-    ASSERT_EQ(s->deps[2], NULL);
+    ASSERT_TRUE(dep_list_contains(s, "hull/db"));
+    ASSERT_TRUE(dep_list_contains(s, "hull/crypto"));
+    ASSERT_TRUE(dep_list_contains(s, "hull/json"));
+    ASSERT_TRUE(dep_list_contains(s, "hull/time"));
 }
 
 UTEST(module_registry, every_dep_points_to_a_real_module)

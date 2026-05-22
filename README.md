@@ -249,7 +249,7 @@ Each entry is a canonical spec `"<vendor>/<name>@<major>"`. The manifest declare
 | Error | Cause |
 |-------|-------|
 | `module 'hull.X' is not declared in app.manifest` | App imports a known module not in `modules` |
-| `module 'hull/jwt@1' requires 'hull/crypto' but it is not declared` | Declared module's internal dep is missing |
+| `module 'hull/X' transitively requires 'hull/gpu', which needs HL_ENABLE_GPU but it is disabled in this hull build` | An auto-admitted dep needs a compile-time subsystem this binary doesn't have |
 | `http.fetch: host 'api.x.com' not in manifest hosts allowlist` | Module loaded fine; per-call cap layer rejected the URL — add to `hosts` |
 | `module 'hull/gpu@1' requires HL_ENABLE_GPU (build-time)` | Build wasn't compiled with the subsystem |
 | `unknown module 'X' in app.manifest.modules` | Typo or non-existent module |
