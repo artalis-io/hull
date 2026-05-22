@@ -12,6 +12,7 @@ import { log } from "hull:log";
 import { httpClient } from "hull:http-client";
 
 app.manifest({
+    modules: ["hull/http-client@1", "hull/http-server@1", "hull/log@1"],
     hosts: ["127.0.0.1"],
     env: ["ECHO_PORT"],
 });
@@ -40,7 +41,7 @@ app.get("/test/put", (_req, res) => {
 
 // GET /test/patch — exercise http.patch()
 app.get("/test/patch", (_req, res) => {
-    const r = http.patch(`${ECHO_BASE}/echo`, "patch-body");
+    const r = httpClient.patch(`${ECHO_BASE}/echo`, "patch-body");
     res.json({ status: r.status, echo: r.body });
 });
 

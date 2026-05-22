@@ -109,10 +109,12 @@ int hl_js_register_modules(HlJS *js)
 #endif
 
 #ifdef HL_ENABLE_HTTP_SERVER
-    /* hull:ws-server + hull:ws-client (split from old hull:ws),
-     * plus SSE class — server-side WebSocket + outbound client. */
+    /* hull:ws-server + hull:ws-client (now in mod_ws_server.c +
+     * mod_ws_client.c respectively), plus SSE class. */
     hl_js_sse_register_class(js->ctx);
-    if (hl_js_init_ws_module(js->ctx, js) != 0)
+    if (hl_js_init_ws_server_module(js->ctx, js) != 0)
+        return -1;
+    if (hl_js_init_ws_client_module(js->ctx, js) != 0)
         return -1;
 #endif
 

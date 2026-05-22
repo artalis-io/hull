@@ -32,11 +32,18 @@ echo "=== E2E: compute.call (Lua) ==="
 
 # Lua app + tests
 cat > "$TMPDIR/app.lua" << 'EOF'
+app.manifest({
+    modules = {"hull/http-server@1","hull/log@1","hull/json@1","hull/template@1","hull/compute@1","hull/timers@1","hull/http-client@1","hull/db@1","hull/crypto@1","hull/time@1","hull/validate@1","hull/csv@1"},
+    hosts = {"127.0.0.1"},
+})
+
 app.get("/health", function(req, res) res:json({ ok = true }) end)
 EOF
 
 mkdir -p "$TMPDIR/tests"
 cat > "$TMPDIR/tests/test_compute.lua" << 'EOF'
+local compute = require("hull.compute")
+
 test("compute.call echo", function()
     local out, err = compute.call("echo", "hello wasm")
     assert(not err, "err: " .. tostring(err))
@@ -87,6 +94,11 @@ rm -f "$TMPDIR/app.lua" "$TMPDIR/tests/test_compute.lua"
 
 cat > "$TMPDIR/app.js" << 'JSEOF'
 import { app } from "hull:app";
+app.manifest({
+    modules: ["hull/http-server@1","hull/log@1","hull/json@1","hull/template@1","hull/compute@1","hull/timers@1","hull/http-client@1","hull/db@1","hull/crypto@1","hull/time@1","hull/validate@1","hull/csv@1"],
+    hosts: ["127.0.0.1"],
+});
+
 app.get("/health", (req, res) => { res.json({ ok: true }); });
 JSEOF
 
@@ -127,6 +139,13 @@ mkdir -p "$ASYNCDIR/compute"
 cp tests/fixtures/compute/echo.wasm "$ASYNCDIR/compute/echo.wasm"
 
 cat > "$ASYNCDIR/app.lua" << 'EOF'
+app.manifest({
+    modules = {"hull/http-server@1","hull/log@1","hull/json@1","hull/template@1","hull/compute@1","hull/timers@1","hull/http-client@1","hull/db@1","hull/crypto@1","hull/time@1","hull/validate@1","hull/csv@1"},
+    hosts = {"127.0.0.1"},
+})
+
+local compute = require("hull.compute")
+
 app.get("/async-echo", function(req, res)
     local ok, output = pcall(compute.async.call, "echo", "hello async")
     if ok then
@@ -172,6 +191,13 @@ mkdir -p "$CONCDIR/compute"
 cp tests/fixtures/compute/spin.wasm "$CONCDIR/compute/spin.wasm"
 
 cat > "$CONCDIR/app.lua" << 'EOF'
+app.manifest({
+    modules = {"hull/http-server@1","hull/log@1","hull/json@1","hull/template@1","hull/compute@1","hull/timers@1","hull/http-client@1","hull/db@1","hull/crypto@1","hull/time@1","hull/validate@1","hull/csv@1"},
+    hosts = {"127.0.0.1"},
+})
+
+local compute = require("hull.compute")
+
 app.get("/health", function(req, res) res:json({ ok = true }) end)
 
 -- Slow: ~1s of WASM computation via async (yields to event loop)
@@ -288,6 +314,11 @@ trap 'rm -rf "$TMPDIR" "$AOTDIR" "$NOAOT_DIR"' EXIT
 mkdir -p "$NOAOT_DIR/compute"
 cp tests/fixtures/compute/echo.wasm "$NOAOT_DIR/compute/echo.wasm"
 cat > "$NOAOT_DIR/app.lua" << 'EOF'
+app.manifest({
+    modules = {"hull/http-server@1","hull/log@1","hull/json@1","hull/template@1","hull/compute@1","hull/timers@1","hull/http-client@1","hull/db@1","hull/crypto@1","hull/time@1","hull/validate@1","hull/csv@1"},
+    hosts = {"127.0.0.1"},
+})
+
 app.get("/health", function(req, res) res:json({ ok = true }) end)
 EOF
 
@@ -311,11 +342,18 @@ mkdir -p "$BUFDIR/compute"
 cp tests/fixtures/compute/echo.wasm "$BUFDIR/compute/echo.wasm"
 
 cat > "$BUFDIR/app.lua" << 'EOF'
+app.manifest({
+    modules = {"hull/http-server@1","hull/log@1","hull/json@1","hull/template@1","hull/compute@1","hull/timers@1","hull/http-client@1","hull/db@1","hull/crypto@1","hull/time@1","hull/validate@1","hull/csv@1"},
+    hosts = {"127.0.0.1"},
+})
+
 app.get("/health", function(req, res) res:json({ ok = true }) end)
 EOF
 
 mkdir -p "$BUFDIR/tests"
 cat > "$BUFDIR/tests/test_buffer.lua" << 'EOF'
+local compute = require("hull.compute")
+
 test("compute.call buffer mode", function()
     local buf, err = compute.call("echo", "hello buffer", { buffer = true })
     assert(not err, "err: " .. tostring(err))
@@ -363,6 +401,11 @@ rm -f "$BUFDIR/app.lua" "$BUFDIR/tests/test_buffer.lua"
 
 cat > "$BUFDIR/app.js" << 'JSEOF'
 import { app } from "hull:app";
+app.manifest({
+    modules: ["hull/http-server@1","hull/log@1","hull/json@1","hull/template@1","hull/compute@1","hull/timers@1","hull/http-client@1","hull/db@1","hull/crypto@1","hull/time@1","hull/validate@1","hull/csv@1"],
+    hosts: ["127.0.0.1"],
+});
+
 app.get("/health", (req, res) => { res.json({ ok: true }); });
 JSEOF
 
@@ -425,11 +468,18 @@ cp tests/fixtures/compute/echo.wasm "$PERSISTDIR/compute/echo.wasm"
 cp tests/fixtures/compute/kv_store.wasm "$PERSISTDIR/compute/kv_store.wasm"
 
 cat > "$PERSISTDIR/app.lua" << 'EOF'
+app.manifest({
+    modules = {"hull/http-server@1","hull/log@1","hull/json@1","hull/template@1","hull/compute@1","hull/timers@1","hull/http-client@1","hull/db@1","hull/crypto@1","hull/time@1","hull/validate@1","hull/csv@1"},
+    hosts = {"127.0.0.1"},
+})
+
 app.get("/health", function(req, res) res:json({ ok = true }) end)
 EOF
 
 mkdir -p "$PERSISTDIR/tests"
 cat > "$PERSISTDIR/tests/test_persistent.lua" << 'EOF'
+local compute = require("hull.compute")
+
 test("compute.instance create and call", function()
     local inst, err = compute.instance("echo")
     assert(inst, "create failed: " .. tostring(err))
@@ -553,6 +603,11 @@ rm -f "$PERSISTDIR/app.lua" "$PERSISTDIR/tests/test_persistent.lua"
 
 cat > "$PERSISTDIR/app.js" << 'JSEOF'
 import { app } from "hull:app";
+app.manifest({
+    modules: ["hull/http-server@1","hull/log@1","hull/json@1","hull/template@1","hull/compute@1","hull/timers@1","hull/http-client@1","hull/db@1","hull/crypto@1","hull/time@1","hull/validate@1","hull/csv@1"],
+    hosts: ["127.0.0.1"],
+});
+
 app.get("/health", (req, res) => { res.json({ ok: true }); });
 JSEOF
 
@@ -623,10 +678,17 @@ PROBEDIR=$(mktemp -d)
 mkdir -p "$PROBEDIR/compute"
 cp tests/fixtures/compute/shared_read.wasm "$PROBEDIR/compute/shared_read.wasm"
 cat > "$PROBEDIR/app.lua" << 'EOF'
+app.manifest({
+    modules = {"hull/http-server@1","hull/log@1","hull/json@1","hull/template@1","hull/compute@1","hull/timers@1","hull/http-client@1","hull/db@1","hull/crypto@1","hull/time@1","hull/validate@1","hull/csv@1"},
+    hosts = {"127.0.0.1"},
+})
+
 app.get("/health", function(req, res) res:json({ ok = true }) end)
 EOF
 mkdir -p "$PROBEDIR/tests"
 cat > "$PROBEDIR/tests/test_probe.lua" << 'EOF'
+local compute = require("hull.compute")
+
 test("shared heap probe", function()
     local ok, err = compute.segment("shared_read", "seg0", "ABCDEFGHIJ")
     assert(ok, "load failed: " .. tostring(err))
@@ -660,11 +722,18 @@ mkdir -p "$SHAREDDIR/compute"
 cp tests/fixtures/compute/shared_read.wasm "$SHAREDDIR/compute/shared_read.wasm"
 
 cat > "$SHAREDDIR/app.lua" << 'EOF'
+app.manifest({
+    modules = {"hull/http-server@1","hull/log@1","hull/json@1","hull/template@1","hull/compute@1","hull/timers@1","hull/http-client@1","hull/db@1","hull/crypto@1","hull/time@1","hull/validate@1","hull/csv@1"},
+    hosts = {"127.0.0.1"},
+})
+
 app.get("/health", function(req, res) res:json({ ok = true }) end)
 EOF
 
 mkdir -p "$SHAREDDIR/tests"
 cat > "$SHAREDDIR/tests/test_shared.lua" << 'EOF'
+local compute = require("hull.compute")
+
 test("compute.segment single segment", function()
     -- Load data into shared_read module
     local ok, err = compute.segment("shared_read", "seg0", "ABCDEFGHIJ")
@@ -730,6 +799,11 @@ rm -f "$SHAREDDIR/app.lua" "$SHAREDDIR/tests/test_shared.lua"
 
 cat > "$SHAREDDIR/app.js" << 'JSEOF'
 import { app } from "hull:app";
+app.manifest({
+    modules: ["hull/http-server@1","hull/log@1","hull/json@1","hull/template@1","hull/compute@1","hull/timers@1","hull/http-client@1","hull/db@1","hull/crypto@1","hull/time@1","hull/validate@1","hull/csv@1"],
+    hosts: ["127.0.0.1"],
+});
+
 app.get("/health", (req, res) => { res.json({ ok: true }); });
 JSEOF
 
@@ -816,6 +890,11 @@ NODB_DIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR" "$AOTDIR" "$NOAOT_DIR" "$BUFDIR" "$PERSISTDIR" "$SHAREDDIR" "$NODB_DIR"' EXIT
 
 cat > "$NODB_DIR/app.lua" << 'EOF'
+app.manifest({
+    modules = {"hull/http-server@1","hull/log@1","hull/json@1","hull/template@1","hull/compute@1","hull/timers@1","hull/http-client@1","hull/db@1","hull/crypto@1","hull/time@1","hull/validate@1","hull/csv@1"},
+    hosts = {"127.0.0.1"},
+})
+
 app.get("/health", function(req, res) res:json({ ok = true }) end)
 app.get("/has-db", function(req, res)
     res:json({ has_db = (db ~= nil) })

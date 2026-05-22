@@ -8,12 +8,13 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 
 app.manifest({
-    modules = { "hull/http-client@1" },
+    modules = { "hull/http-client@1", "hull/http-server@1", "hull/log@1" },
     hosts = {"127.0.0.1"},
     env = {"ECHO_PORT"},
 })
 
 local http_client = require("hull.http-client")
+local log = require("hull.log")
 local ECHO_BASE = "http://127.0.0.1:19860"
 
 -- GET /test/get — exercise http_client.get()
@@ -38,7 +39,7 @@ end)
 
 -- GET /test/patch — exercise http.patch()
 app.get("/test/patch", function(_req, res)
-    local r = http.patch(ECHO_BASE .. "/echo", "patch-body")
+    local r = http_client.patch(ECHO_BASE .. "/echo", "patch-body")
     res:json({ status = r.status, echo = r.body })
 end)
 

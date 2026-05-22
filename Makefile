@@ -743,7 +743,7 @@ endif
 ifeq ($(HL_ENABLE_HTTP_CLIENT),0)
   # CLIENT-only JS bindings: http.fetch + SMTP send.
   JS_RT_SRCS := $(filter-out \
-      $(SRCDIR)/hull/runtime/js/mod_http.c \
+      $(SRCDIR)/hull/runtime/js/mod_http_client.c \
       $(SRCDIR)/hull/runtime/js/mod_smtp.c, \
       $(JS_RT_SRCS))
 endif
@@ -752,8 +752,9 @@ ifeq ($(HL_ENABLE_HTTP_SERVER),0)
   # mod_test depends on hl_cap_test_dispatch which is in cap/test.c —
   # both drop together (cap/test is filtered above).
   JS_RT_SRCS := $(filter-out \
-      $(SRCDIR)/hull/runtime/js/mod_ws.c \
-      $(SRCDIR)/hull/runtime/js/mod_server.c \
+      $(SRCDIR)/hull/runtime/js/mod_ws_server.c \
+      $(SRCDIR)/hull/runtime/js/mod_ws_client.c \
+      $(SRCDIR)/hull/runtime/js/mod_http_server.c \
       $(SRCDIR)/hull/runtime/js/mod_sse.c \
       $(SRCDIR)/hull/runtime/js/mod_test.c \
       $(SRCDIR)/hull/runtime/js/routes.c \
@@ -776,14 +777,15 @@ ifeq ($(HL_ENABLE_DB),0)
 endif
 ifeq ($(HL_ENABLE_HTTP_CLIENT),0)
   LUA_RT_SRCS := $(filter-out \
-      $(SRCDIR)/hull/runtime/lua/mod_http.c \
+      $(SRCDIR)/hull/runtime/lua/mod_http_client.c \
       $(SRCDIR)/hull/runtime/lua/mod_smtp.c, \
       $(LUA_RT_SRCS))
 endif
 ifeq ($(HL_ENABLE_HTTP_SERVER),0)
   LUA_RT_SRCS := $(filter-out \
-      $(SRCDIR)/hull/runtime/lua/mod_ws.c \
-      $(SRCDIR)/hull/runtime/lua/mod_server.c \
+      $(SRCDIR)/hull/runtime/lua/mod_ws_server.c \
+      $(SRCDIR)/hull/runtime/lua/mod_ws_client.c \
+      $(SRCDIR)/hull/runtime/lua/mod_http_server.c \
       $(SRCDIR)/hull/runtime/lua/mod_sse.c \
       $(SRCDIR)/hull/runtime/lua/mod_test.c \
       $(SRCDIR)/hull/runtime/lua/routes.c \
@@ -1968,10 +1970,10 @@ cppcheck:
 		--suppress=unusedStructMember:$(SRCDIR)/hull/app_context.c \
 		--suppress=unusedVariable:$(SRCDIR)/hull/app_context.c \
 		--suppress=variableScope:$(SRCDIR)/hull/cap/wasm.c \
-		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/runtime/js/mod_http.c \
+		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/runtime/js/mod_http_client.c \
 		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/runtime/js/mod_compute.c \
 		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/runtime/js/mod_gpu.c \
-		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/runtime/lua/mod_http.c \
+		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/runtime/lua/mod_http_client.c \
 		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/runtime/lua/mod_gpu.c \
 		--suppress=variableScope:$(SRCDIR)/hull/cap/test.c \
 		--suppress=unmatchedSuppression \

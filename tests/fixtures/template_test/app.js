@@ -6,6 +6,10 @@
 import { app } from "hull:app";
 import { template } from "hull:template";
 
+app.manifest({
+    modules: ["hull/http-server@1", "hull/template@1"],
+});
+
 // Helper: compare expected vs actual
 function check(name, actual, expected) {
     if (actual === expected) {

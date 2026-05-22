@@ -468,6 +468,9 @@ local function cmd_check(name)
     local tmpdir = setup_harness(name, wasm_path)
 
     tool.write_file(tmpdir .. "/app.lua", string.format([[
+app.manifest({ modules = {"hull/http-server@1","hull/compute@1"} })
+local compute = require("hull.compute")
+
 app.get("/check", function(req, res)
     if not compute.available() then
         res:status(500):json({ error = "wasm runtime not available" })
@@ -539,6 +542,9 @@ local function cmd_test(name)
 
     local app_src = table.concat({
         "-- Auto-generated test app for compute module: " .. name,
+        'app.manifest({ modules = {"hull/http-server@1","hull/compute@1"} })',
+        'local compute = require("hull.compute")',
+        "",
         'app.get("/health", function(req, res) res:json({ ok = true }) end)',
         "",
         'app.get("/call", function(req, res)',

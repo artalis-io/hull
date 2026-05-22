@@ -211,28 +211,25 @@ int hl_module_resolver_resolve(const HlManifest *manifest,
             return -1;
         }
 
-        /* Required capabilities — check build first (compile-time
-         * subsystems), then manifest sections. */
+        /* Build-time (compile flag) caps are hard-blocked at the
+         * resolver — there's no per-call recovery once they're
+         * compiled out. Manifest-side caps (fs.read/write, hosts, env)
+         * are intentionally NOT checked here: the per-call cap layer
+         * fails closed against an empty allowlist, and some module
+         * surface (e.g. `fs.realpath`, future `fs.stat`) doesn't need
+         * any path declared at all. Pairing the module with a section
+         * is documentation, not a load-time requirement. */
         uint32_t need = spec->required_caps;
         const uint32_t build_cap_mask = HL_MOD_CAP_DB | HL_MOD_CAP_WASM
                                         | HL_MOD_CAP_GPU | HL_MOD_CAP_HTTP;
-        uint32_t need_build    = need & build_cap_mask;
-        uint32_t need_manifest = need & ~build_cap_mask;
+        uint32_t need_build = need & build_cap_mask;
+        (void)prov_manifest;  /* manifest-cap surfacing intentional; see above */
 
         for (uint32_t bit = 1; bit; bit <<= 1) {
             if (!(need_build & bit)) continue;
             if (!(prov_build & bit)) {
                 ERR2("module '%s' requires %s, but it is disabled in "
                      "this hull build",
-                     spec->name, cap_label(bit));
-                return -1;
-            }
-        }
-        for (uint32_t bit = 1; bit; bit <<= 1) {
-            if (!(need_manifest & bit)) continue;
-            if (!(prov_manifest & bit)) {
-                ERR2("module '%s' requires a non-empty `%s` section in "
-                     "the manifest",
                      spec->name, cap_label(bit));
                 return -1;
             }
