@@ -18,8 +18,8 @@ import { auth } from "hull:middleware:auth";
 import { session } from "hull:middleware:session";
 import { time } from "hull:time";
 import { validate } from "hull:validate";
-import { ws } from "hull:ws-server";              // broadcast, connections
-import { ws as wsClient } from "hull:ws-client";  // connect (outbound federation)
+import { wsServer } from "hull:ws-server";              // broadcast, connections
+import { wsClient } from "hull:ws-client";  // connect (outbound federation)
 
 app.manifest({
     hosts: ["127.0.0.1"],
@@ -122,7 +122,7 @@ function handleFederatedMessage(data) {
         if (!data.channel || !data.from || !data.encrypted || !data.nonce) return;
         if (!fedCheckLen(data.from) || !fedCheckLen(data.channel)) return;
         if (!fedChannelEnabled(data.channel)) return;
-        ws.broadcast("/ws", JSON.stringify({
+        wsServer.broadcast("/ws", JSON.stringify({
             type: "msg", channel: data.channel,
             from: `${data.from}@${data.server}`,
             encrypted: data.encrypted, nonce: data.nonce,
@@ -132,7 +132,7 @@ function handleFederatedMessage(data) {
         if (!data.channel || !data.user) return;
         if (!fedCheckLen(data.user) || !fedCheckLen(data.channel)) return;
         if (!fedChannelEnabled(data.channel)) return;
-        ws.broadcast("/ws", JSON.stringify({
+        wsServer.broadcast("/ws", JSON.stringify({
             type: "user_joined", channel: data.channel,
             user: `${data.user}@${data.server}`, federated: true,
         }));
@@ -140,13 +140,13 @@ function handleFederatedMessage(data) {
         if (!data.channel || !data.user) return;
         if (!fedCheckLen(data.user) || !fedCheckLen(data.channel)) return;
         if (!fedChannelEnabled(data.channel)) return;
-        ws.broadcast("/ws", JSON.stringify({
+        wsServer.broadcast("/ws", JSON.stringify({
             type: "left", channel: data.channel,
             user: `${data.user}@${data.server}`, federated: true,
         }));
     } else if (data.type === "fed_presence") {
         if (!data.username || !fedCheckLen(data.username)) return;
-        ws.broadcast("/ws", JSON.stringify({
+        wsServer.broadcast("/ws", JSON.stringify({
             type: "presence", username: `${data.username}@${data.server}`,
             online: data.online, federated: true,
         }));
@@ -429,7 +429,7 @@ function wsError(conn, message) {
 }
 
 function broadcastToChannel(_channelName, msg) {
-    ws.broadcast("/ws", JSON.stringify(msg));
+    wsServer.broadcast("/ws", JSON.stringify(msg));
 }
 
 app.ws("/ws", {
@@ -470,7 +470,7 @@ app.ws("/ws", {
                 username: rows[0].username,
                 public_key: rows[0].public_key,
             });
-            ws.broadcast("/ws", JSON.stringify({
+            wsServer.broadcast("/ws", JSON.stringify({
                 type: "presence", username: rows[0].username, online: true,
             }));
             federationRelayPresence(rows[0].username, true);
@@ -686,7 +686,7 @@ app.ws("/ws", {
                     user: conn.data.username,
                 });
             }
-            ws.broadcast("/ws", JSON.stringify({
+            wsServer.broadcast("/ws", JSON.stringify({
                 type: "presence", username: conn.data.username, online: false,
             }));
             federationRelayPresence(conn.data.username, false);
@@ -698,7 +698,7 @@ app.ws("/ws", {
 // ── WS connection count ─────────────────────────────────────────────
 
 app.get("/ws/connections", (_req, res) => {
-    res.json({ count: ws.connections("/ws") });
+    res.json({ count: wsServer.connections("/ws") });
 });
 
 // ── File endpoints ────────────────────────────────────────────────
@@ -845,7 +845,7 @@ app.get("/dm/:username/files", (req, res) => {
 
 // ── E2E self-test endpoint ─────────────────────────────────────────
 // Exercises the full 2-client WebSocket flow from inside the server:
-//   register 2 users, create a channel, connect both via ws.connect,
+//   register 2 users, create a channel, connect both via wsServer.connect,
 //   authenticate, join, send a message, verify receipt.
 
 app.get("/e2e-test", async (req, res) => {

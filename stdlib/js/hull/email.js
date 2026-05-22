@@ -11,7 +11,7 @@
  *   - `"sendgrid"` — SendGrid HTTPS API.
  *   - `"resend"`   — Resend HTTPS API.
  *
- * API providers use `http.async.post` so they cooperate with the event
+ * API providers use `httpClient.async.post` so they cooperate with the event
  * loop. SMTP uses the C `smtp.send` cap (mbedTLS + embedded Mozilla CA
  * bundle).
  *
@@ -19,7 +19,7 @@
  */
 
 import { smtp } from "hull:smtp";
-import { http } from "hull:http-client";
+import { httpClient } from "hull:http-client";
 import { json } from "hull:json";
 
 const email = {};
@@ -76,7 +76,7 @@ providers.postmark = async function(opts) {
     // contract rather than throwing out of email.send().
     let resp;
     try {
-        resp = await http.async.post(
+        resp = await httpClient.async.post(
             "https://api.postmarkapp.com/email",
             json.encode(payload),
             {
@@ -115,7 +115,7 @@ providers.sendgrid = async function(opts) {
 
     let resp;
     try {
-        resp = await http.async.post(
+        resp = await httpClient.async.post(
             "https://api.sendgrid.com/v3/mail/send",
             json.encode(payload),
             {
@@ -156,7 +156,7 @@ providers.resend = async function(opts) {
 
     let resp;
     try {
-        resp = await http.async.post(
+        resp = await httpClient.async.post(
             "https://api.resend.com/emails",
             json.encode(payload),
             {

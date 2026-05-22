@@ -537,7 +537,7 @@ static int js_http_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_http_async_delete, "delete", 2));
     JS_SetPropertyStr(ctx, http, "async", async_obj);
 
-    JS_SetModuleExport(ctx, m, "http", http);
+    JS_SetModuleExport(ctx, m, "httpClient", http);
     return 0;
 }
 
@@ -547,6 +547,6 @@ int hl_js_init_http_module(JSContext *ctx, HlJS *js)
     JSModuleDef *m = JS_NewCModule(ctx, "hull:http-client", js_http_module_init);
     if (!m)
         return -1;
-    JS_AddModuleExport(ctx, m, "http");
+    JS_AddModuleExport(ctx, m, "httpClient");
     return 0;
 }

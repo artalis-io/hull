@@ -7,13 +7,13 @@
 //       curl localhost:3000/async-db
 //       curl localhost:3000/worker-dispatch
 //
-// Demonstrates hull.sleep(), http.async.get(), db.async.query(),
+// Demonstrates hull.sleep(), httpClient.async.get(), db.async.query(),
 // and worker.dispatch() — all return Promises that pause the handler
 // while the event loop serves other connections.
 
 import { app } from "hull:app";
 import { db } from "hull:db";
-import { http } from "hull:http-client";
+import { httpClient } from "hull:http-client";
 import { log } from "hull:log";
 import { worker } from "hull:worker";
 
@@ -43,7 +43,7 @@ app.get("/api/slow", async (_req, res) => {
 app.get("/sync-fetch", (req, res) => {
     const host = req.headers.host || "127.0.0.1:3000";
     const port = host.split(":")[1] || "3000";
-    const resp = http.get(`http://127.0.0.1:${port}/api/slow`);
+    const resp = httpClient.get(`http://127.0.0.1:${port}/api/slow`);
     res.json({ mode: "sync", status: resp.status, body: resp.body });
 });
 
@@ -51,7 +51,7 @@ app.get("/sync-fetch", (req, res) => {
 app.get("/async-fetch", async (req, res) => {
     const host = req.headers.host || "127.0.0.1:3000";
     const port = host.split(":")[1] || "3000";
-    const resp = await http.async.get(`http://127.0.0.1:${port}/api/slow`);
+    const resp = await httpClient.async.get(`http://127.0.0.1:${port}/api/slow`);
     res.json({ mode: "async", status: resp.status, body: resp.body });
 });
 
@@ -59,7 +59,7 @@ app.get("/async-fetch", async (req, res) => {
 app.get("/async-post", async (req, res) => {
     const host = req.headers.host || "127.0.0.1:3000";
     const port = host.split(":")[1] || "3000";
-    const resp = await http.async.post(`http://127.0.0.1:${port}/echo`,
+    const resp = await httpClient.async.post(`http://127.0.0.1:${port}/echo`,
         '{"greeting":"hello"}',
         { headers: { "Content-Type": "application/json" } });
     res.json({ mode: "async", status: resp.status, body: resp.body });

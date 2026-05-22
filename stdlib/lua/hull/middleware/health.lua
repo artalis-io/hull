@@ -23,7 +23,7 @@
 --   app.use("GET", "/*", health.middleware())
 
 local db = require("hull.db")
-local server = require("hull.http-server")
+local http_server = require("hull.http-server")
 local time = require("hull.time")
 
 local health = {}
@@ -158,8 +158,8 @@ function health.middleware(opts)
             }
 
             -- Include server stats if available
-            if server and server.stats then
-                body.stats = server.stats()
+            if server and http_server.stats then
+                body.stats = http_server.stats()
             end
 
             if result.all_ok then

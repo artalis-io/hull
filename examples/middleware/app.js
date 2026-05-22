@@ -7,7 +7,7 @@ import { app } from "hull:app";
 import { log } from "hull:log";
 import { cors } from "hull:middleware:cors";
 import { ratelimit } from "hull:middleware:ratelimit";
-import { server } from "hull:http-server";
+import { httpServer } from "hull:http-server";
 import { time } from "hull:time";
 
 app.manifest({
@@ -108,7 +108,7 @@ app.get("/api/debug", (req, res) => {
 // Server stats (live connection counts)
 app.get("/api/stats", (_req, res) => {
     let stats;
-    try { stats = server.stats(); } catch (_e) {
+    try { stats = httpServer.stats(); } catch (_e) {
         stats = { activeConnections: 0, maxConnections: 0 };
     }
     res.json(stats);

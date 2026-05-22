@@ -529,7 +529,7 @@ local fetcher = require("hull.http-client")
 | `module 'hull/http-client@1' requires a non-empty 'hosts' section in the manifest` | Declared module needs a capability that isn't wired | Add the matching capability field |
 | `module 'hull/gpu@1' requires HL_ENABLE_GPU (build-time)` | The build wasn't compiled with the subsystem | Rebuild hull with `make HL_ENABLE_GPU=1 …` or remove the module declaration |
 | `module 'hull/http-client@1' requires HL_ENABLE_HTTP_CLIENT (build-time)` | App declares an outbound HTTP module (`hull/http`, `hull/smtp`, `hull/email`) on a build with `HL_ENABLE_HTTP_CLIENT=0` | Rebuild with `HL_ENABLE_HTTP_CLIENT=1` (the default) or remove the module declaration. |
-| `module 'hull/server@1' requires HL_ENABLE_HTTP_SERVER (build-time)` | App declares an inbound HTTP module (`hull/server`, `hull/ws`, `hull/sse`, any `hull/middleware/*`) on a build with `HL_ENABLE_HTTP_SERVER=0` | Rebuild with `HL_ENABLE_HTTP_SERVER=1` (the default) or remove the module declaration. See [docs/cli_mode.md](docs/cli_mode.md). |
+| `module 'hull/http-server@1' requires HL_ENABLE_HTTP_SERVER (build-time)` | App declares an inbound HTTP module (`hull/server`, `hull/ws`, `hull/sse`, any `hull/middleware/*`) on a build with `HL_ENABLE_HTTP_SERVER=0` | Rebuild with `HL_ENABLE_HTTP_SERVER=1` (the default) or remove the module declaration. See [docs/cli_mode.md](docs/cli_mode.md). |
 | `unknown module 'X' in app.manifest.modules` | Typo or non-existent module | Run `hull modules available` for the canonical list |
 
 **CLI surface:**
@@ -930,7 +930,7 @@ app.ws("/ws/chat", {
 
 **JavaScript:**
 ```javascript
-import { ws } from "hull:ws-server";
+import { wsServer } from "hull:ws-server";
 app.ws("/ws/chat", {
     onOpen(conn) { log.info("connected: " + conn.id); },
     onMessage(conn, msg, isBinary) { ws.broadcast("/ws/chat", msg); },

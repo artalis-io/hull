@@ -37,7 +37,7 @@
 
 local json = require("hull.json")
 local db = require("hull.db")
-local http = require("hull.http-client")
+local http_client = require("hull.http-client")
 local time = require("hull.time")
 
 local outbox = {}
@@ -139,7 +139,7 @@ local function deliver_item(item)
         end
 
         local send_ok, result = pcall(function()
-            return http.async.post(item.destination, item.payload, {
+            return http_client.async.post(item.destination, item.payload, {
                 headers = req_headers
             })
         end)

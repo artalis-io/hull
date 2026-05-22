@@ -734,7 +734,9 @@ static int js_ws_server_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_ws_broadcast, "broadcast", 2));
     JS_SetPropertyStr(ctx, ws, "connections",
                       JS_NewCFunction(ctx, js_ws_connections, "connections", 1));
-    JS_SetModuleExport(ctx, m, "ws", ws);
+    /* Export as `wsServer` to match the module name and stay symmetric
+     * with `wsClient` from hull:ws-client. */
+    JS_SetModuleExport(ctx, m, "wsServer", ws);
     return 0;
 }
 
@@ -747,7 +749,7 @@ static int js_ws_client_module_init(JSContext *ctx, JSModuleDef *m)
     JSValue ws = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, ws, "connect",
                       JS_NewCFunction(ctx, js_ws_connect, "connect", 2));
-    JS_SetModuleExport(ctx, m, "ws", ws);
+    JS_SetModuleExport(ctx, m, "wsClient", ws);
     return 0;
 }
 
@@ -777,14 +779,17 @@ int hl_js_init_ws_module(JSContext *ctx, HlJS *js)
                                sizeof(js_ws_client_conn_proto_funcs[0]));
     JS_SetClassProto(ctx, js_ws_client_conn_class_id, client_proto);
 
-    /* Two modules, one C body: hull:ws-server and hull:ws-client. */
+    /* Two modules, one C body: hull:ws-server and hull:ws-client.
+     * Each exports a single named binding (wsServer / wsClient) that
+     * matches the module name in camelCase — symmetric and avoids
+     * the alias dance: `import { wsServer } from "hull:ws-server"`. */
     JSModuleDef *ms = JS_NewCModule(ctx, "hull:ws-server", js_ws_server_module_init);
     if (!ms) return -1;
-    JS_AddModuleExport(ctx, ms, "ws");
+    JS_AddModuleExport(ctx, ms, "wsServer");
 
     JSModuleDef *mc = JS_NewCModule(ctx, "hull:ws-client", js_ws_client_module_init);
     if (!mc) return -1;
-    JS_AddModuleExport(ctx, mc, "ws");
+    JS_AddModuleExport(ctx, mc, "wsClient");
 
     return 0;
 }

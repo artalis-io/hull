@@ -7,12 +7,12 @@
 --       curl localhost:3000/async-db
 --       curl localhost:3000/worker-dispatch
 --
--- Demonstrates hull.sleep(), http.async.get(), db.async.query(),
+-- Demonstrates hull.sleep(), http_client.async.get(), db.async.query(),
 -- and worker.dispatch() — all yield the coroutine and let the event
 -- loop serve other connections while waiting.
 
 local db = require("hull.db")
-local http = require("hull.http-client")
+local http_client = require("hull.http-client")
 local worker = require("hull.worker")
 
 local log = require("hull.log")
@@ -44,21 +44,21 @@ end)
 -- Sync HTTP: blocks the event loop while waiting for response
 app.get("/sync-fetch", function(req, res)
     local port = req.headers["host"]:match(":(%d+)$") or "3000"
-    local resp = http.get("http://127.0.0.1:" .. port .. "/api/slow")
+    local resp = http_client.get("http://127.0.0.1:" .. port .. "/api/slow")
     res:json({ mode = "sync", status = resp.status, body = resp.body })
 end)
 
 -- Async HTTP: yields coroutine, event loop stays responsive
 app.get("/async-fetch", function(req, res)
     local port = req.headers["host"]:match(":(%d+)$") or "3000"
-    local resp = http.async.get("http://127.0.0.1:" .. port .. "/api/slow")
+    local resp = http_client.async.get("http://127.0.0.1:" .. port .. "/api/slow")
     res:json({ mode = "async", status = resp.status, body = resp.body })
 end)
 
 -- Async POST with body and headers
 app.get("/async-post", function(req, res)
     local port = req.headers["host"]:match(":(%d+)$") or "3000"
-    local resp = http.async.post("http://127.0.0.1:" .. port .. "/echo",
+    local resp = http_client.async.post("http://127.0.0.1:" .. port .. "/echo",
         '{"greeting":"hello"}',
         { headers = {["Content-Type"] = "application/json"} })
     res:json({ mode = "async", status = resp.status, body = resp.body })

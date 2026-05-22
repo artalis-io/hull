@@ -15,7 +15,7 @@ import { crypto } from "hull:crypto";
 import { csv } from "hull:csv";
 import { db } from "hull:db";
 import { form } from "hull:form";
-import { http } from "hull:http-client";
+import { httpClient } from "hull:http-client";
 import { i18n } from "hull:i18n";
 import { log } from "hull:log";
 import { auth } from "hull:middleware:auth";
@@ -205,14 +205,14 @@ app.get("/health", (_req, res) => {
     res.json({ status: "ok" });
 });
 
-// Stats endpoint: uses http.async.get() to check own health
+// Stats endpoint: uses httpClient.async.get() to check own health
 app.get("/api/stats", async (req, res) => {
     const sess = requireSession(req, res);
     if (!sess) return;
 
     const host = req.headers.host || "127.0.0.1:3000";
     const port = host.split(":")[1] || "3000";
-    const health = await http.async.get(`http://127.0.0.1:${port}/health`);
+    const health = await httpClient.async.get(`http://127.0.0.1:${port}/health`);
     const count = db.query("SELECT COUNT(*) as n FROM todos WHERE user_id = ?",
                            [sess.user_id]);
     res.json({

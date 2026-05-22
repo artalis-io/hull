@@ -7,7 +7,7 @@
 --   - `"sendgrid"` — SendGrid HTTPS API.
 --   - `"resend"`   — Resend HTTPS API.
 --
--- API providers use `http.async.post` so they cooperate with the event
+-- API providers use `http_client.async.post` so they cooperate with the event
 -- loop. SMTP delivery goes through the C `smtp.send()` cap which handles
 -- TLS via mbedTLS and the embedded Mozilla CA bundle.
 --
@@ -27,7 +27,7 @@
 
 local log = require("hull.log")
 local json = require("hull.json")
-local http = require("hull.http-client")
+local http_client = require("hull.http-client")
 local smtp = require("hull.smtp")
 
 local email = {}
@@ -74,7 +74,7 @@ function providers.postmark(opts)
         payload.TextBody = opts.body
     end
 
-    local ok, resp = pcall(http.async.post,
+    local ok, resp = pcall(http_client.async.post,
         "https://api.postmarkapp.com/email",
         json.encode(payload),
         {
@@ -115,7 +115,7 @@ function providers.sendgrid(opts)
         payload.reply_to = { email = opts.reply_to }
     end
 
-    local ok, resp = pcall(http.async.post,
+    local ok, resp = pcall(http_client.async.post,
         "https://api.sendgrid.com/v3/mail/send",
         json.encode(payload),
         {
@@ -155,7 +155,7 @@ function providers.resend(opts)
     if opts.reply_to then payload.reply_to = opts.reply_to end
     if opts.cc then payload.cc = opts.cc end
 
-    local ok, resp = pcall(http.async.post,
+    local ok, resp = pcall(http_client.async.post,
         "https://api.resend.com/emails",
         json.encode(payload),
         {

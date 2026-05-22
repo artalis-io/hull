@@ -635,16 +635,20 @@ Every module except the intrinsic core must be listed in `manifest.modules`. The
 
 | Module | Lua Import | JS Import | Declare | Purpose |
 |--------|-----------|-----------|---------|---------|
-| `app` | `app` (intrinsic) | `import { app } from "hull:app"` | _intrinsic_ | Routes, middleware, timers, manifest |
-| `log` | `log` (intrinsic) | `import { log } from "hull:log"` | _intrinsic_ | Logging |
-| `json` | `json` (intrinsic) | built-in `JSON` | _intrinsic_ | Encode/decode |
-| `db` | `require("hull.db")` | `import { db } from "hull:db"` | `"hull/db@1"` | SQLite queries (requires `HL_ENABLE_DB=1`) |
-| `crypto` | `require("hull.crypto")` | `import { crypto } from "hull:crypto"` | `"hull/crypto@1"` | Hashing, signing, random |
-| `time` | `require("hull.time")` | `import { time } from "hull:time"` | `"hull/time@1"` | Timestamps |
-| `env` | `require("hull.env")` | `import { env } from "hull:env"` | `"hull/env@1"` | Environment vars (also needs `env` allowlist) |
-| `fs` | `require("hull.fs")` | `import { fs } from "hull:fs"` | `"hull/fs@1"` | Sandboxed FS (also needs `fs_read`/`fs_write`) |
-| `http` | `require("hull.http-client")` | `import { http } from "hull:http-client"` | `"hull/http-client@1"` | HTTP client (also needs `hosts` allowlist) |
-| `ws` | `require("hull.ws-server")` | `import { ws } from "hull:ws-server"` | `"hull/ws-server@1"` | WebSocket server + client |
+| `app` | `app` (intrinsic, gets methods via declarations) | `import { app } from "hull:app"` | _intrinsic_ | Bootstrap: `app.manifest` + `app.main` only — the rest is decorated by declared modules. |
+| `log` | `local log = require("hull.log")` | `import { log } from "hull:log"` | `"hull/log@1"` | Logging |
+| `json` | `local json = require("hull.json")` | `import { json } from "hull:json"` (or built-in `JSON`) | `"hull/json@1"` | Encode/decode |
+| `db` | `local db = require("hull.db")` | `import { db } from "hull:db"` | `"hull/db@1"` | SQLite queries (requires `HL_ENABLE_DB=1`) |
+| `crypto` | `local crypto = require("hull.crypto")` | `import { crypto } from "hull:crypto"` | `"hull/crypto@1"` | Hashing, signing, random |
+| `time` | `local time = require("hull.time")` | `import { time } from "hull:time"` | `"hull/time@1"` | Timestamps |
+| `env` | `local env = require("hull.env")` | `import { env } from "hull:env"` | `"hull/env@1"` | Environment vars (also needs `env` allowlist) |
+| `fs` | `local fs = require("hull.fs")` | `import { fs } from "hull:fs"` | `"hull/fs@1"` | Sandboxed FS (also needs `fs_read`/`fs_write`) |
+| `http_client` | `local http_client = require("hull.http-client")` | `import { httpClient } from "hull:http-client"` | `"hull/http-client@1"` | Outbound HTTP/HTTPS (`http.fetch` etc.); needs `hosts` allowlist |
+| `http_server` | `local http_server = require("hull.http-server")` | `import { httpServer } from "hull:http-server"` | `"hull/http-server@1"` | Decorates `app` with `get/post/use/router`; also exposes `server.stats()` |
+| `ws_server` | `local ws_server = require("hull.ws-server")` | `import { wsServer } from "hull:ws-server"` | `"hull/ws-server@1"` | Decorates `app.ws`; also exposes `wsServer.broadcast`, `wsServer.connections` |
+| `ws_client` | `local ws_client = require("hull.ws-client")` | `import { wsClient } from "hull:ws-client"` | `"hull/ws-client@1"` | Outbound WebSocket (`wsClient.connect`); needs `hosts` allowlist |
+| `sse` | (no module — `app.sse` decoration only) | (same) | `"hull/sse@1"` | Decorates `app.sse` for Server-Sent Events |
+| `timers` | (no module — `app.every` / `app.daily` decoration) | (same) | `"hull/timers@1"` | Decorates `app.every` and `app.daily` |
 | `gpu` | `require("hull.gpu")` | `import { gpu } from "hull:gpu"` | `"hull/gpu@1"` | GPU compute (requires `HL_ENABLE_GPU=1`, manifest `gpu = true`) |
 | `compute` | `require("hull.compute")` | `import { compute } from "hull:compute"` | `"hull/compute@1"` | WASM compute plugins |
 | `image` | `require("hull.image")` | `import { image } from "hull:image"` | `"hull/image@1"` | Image decode/encode |

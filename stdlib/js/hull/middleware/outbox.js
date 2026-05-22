@@ -19,7 +19,7 @@
  */
 
 import { db } from "hull:db";
-import { http } from "hull:http-client";
+import { httpClient } from "hull:http-client";
 import { time } from "hull:time";
 import { json } from "hull:json";
 
@@ -126,7 +126,7 @@ async function deliverItem(item) {
         }
 
         try {
-            const result = await http.async.post(item.destination, item.payload, {
+            const result = await httpClient.async.post(item.destination, item.payload, {
                 headers: reqHeaders
             });
             if (result && result.status >= 200 && result.status < 300)

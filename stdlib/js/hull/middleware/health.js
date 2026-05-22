@@ -19,7 +19,7 @@
  */
 
 import { time } from "hull:time";
-import { server } from "hull:http-server";
+import { httpServer } from "hull:http-server";
 
 /* db module is optional — not all apps use a database. */
 let _dbMod = null;
@@ -157,8 +157,8 @@ function middleware(opts) {
                 uptime,
             };
 
-            if (server && server.stats) {
-                body.stats = server.stats();
+            if (server && httpServer.stats) {
+                body.stats = httpServer.stats();
             }
 
             if (result.allOk) {
