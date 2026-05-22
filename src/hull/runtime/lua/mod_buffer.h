@@ -75,6 +75,10 @@ void lua_push_wasm_buffer(lua_State *L, struct HlWasmBuffer *buf);
 int luaopen_hull_gpu(lua_State *L);
 #endif
 
+#ifdef HL_ENABLE_TUI
+int luaopen_hull_tui(lua_State *L);
+#endif
+
 struct HlWsConn;
 
 /* SSE stream userdata (used by runtime.c for stream lifecycle) */

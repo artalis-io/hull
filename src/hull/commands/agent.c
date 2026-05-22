@@ -23,10 +23,12 @@
 
 #include "hull/commands/agent.h"
 #include "hull/agent_lib.h"
+#include "hull/tool.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* ── Output helper ─────────────────────────────────────────────────── */
 
@@ -185,13 +187,34 @@ static int cmd_status(int argc, char **argv)
     return output_result(&out, rc);
 }
 
-static int cmd_errors(int argc, char **argv)
+static int cmd_errors(int argc, char **argv, const HlCommandEnv *env)
 {
     const char *app_dir = ".";
+    int tui = 0;
     for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "--tui") == 0) { tui = 1; continue; }
         if (argv[i][0] != '-')
             app_dir = argv[i];
     }
+
+#ifdef HL_ENABLE_TUI
+    if (tui) {
+        if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
+            fprintf(stderr, "hull agent errors --tui: not attached to a "
+                            "terminal (stdin/stdout redirected). Run "
+                            "without --tui to get JSON.\n");
+            return 1;
+        }
+        return hull_tool("hull.agent_errors_tui", argc, argv, env->hull_exe);
+    }
+#else
+    if (tui) {
+        fprintf(stderr, "hull agent errors --tui: this build was compiled "
+                        "without HL_ENABLE_TUI.\n");
+        return 1;
+    }
+#endif
+    (void)env;
 
     ShJsonBuf out;
     sh_json_buf_init(&out);
@@ -212,12 +235,18 @@ static int cmd_test(int argc, char **argv, const HlCommandEnv *env)
     return output_result(&out, rc);
 }
 
-static int cmd_context(int argc, char **argv)
+static int cmd_context(int argc, char **argv, const HlCommandEnv *env)
 {
     const char *task = NULL;
     const char *level = "compact";
+    int interactive = 0;
 
     for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "--interactive") == 0 ||
+            strcmp(argv[i], "--tui") == 0) {
+            interactive = 1;
+            continue;
+        }
         if (strncmp(argv[i], "--task=", 7) == 0)
             task = argv[i] + 7;
         else if (strncmp(argv[i], "--level=", 8) == 0)
@@ -230,12 +259,32 @@ static int cmd_context(int argc, char **argv)
             task = argv[i];
     }
 
+#ifdef HL_ENABLE_TUI
+    if (interactive) {
+        if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
+            fprintf(stderr,
+                "hull agent context --interactive: not attached to a "
+                "terminal. Use --task=NAME instead.\n");
+            return 1;
+        }
+        return hull_tool("hull.agent_context_tui", argc, argv, env->hull_exe);
+    }
+#else
+    if (interactive) {
+        fprintf(stderr, "hull agent context --interactive: this build was "
+                        "compiled without HL_ENABLE_TUI.\n");
+        return 1;
+    }
+#endif
+    (void)env;
+
     if (!task) {
         fprintf(stderr, "Usage: hull agent context --task=TASK [--level=LEVEL]\n"
                 "  Tasks: auth, db, middleware, templates, routing, testing,\n"
                 "         build, deploy, search, i18n, webhooks, validation,\n"
                 "         compute\n"
-                "  Levels: minimal, compact (default), full\n");
+                "  Levels: minimal, compact (default), full\n"
+                "  Try --interactive (--tui) for a TUI picker.\n");
         return 1;
     }
 
@@ -635,11 +684,11 @@ int hl_cmd_agent(int argc, char **argv, const HlCommandEnv *env)
     if (strcmp(sub, "status") == 0)
         return cmd_status(sub_argc, sub_argv);
     if (strcmp(sub, "errors") == 0)
-        return cmd_errors(sub_argc, sub_argv);
+        return cmd_errors(sub_argc, sub_argv, env);
     if (strcmp(sub, "test") == 0)
         return cmd_test(sub_argc, sub_argv, env);
     if (strcmp(sub, "context") == 0)
-        return cmd_context(sub_argc, sub_argv);
+        return cmd_context(sub_argc, sub_argv, env);
 #ifdef HL_ENABLE_DB
     if (strcmp(sub, "migrate") == 0)
         return cmd_migrate(sub_argc, sub_argv);

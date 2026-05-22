@@ -337,6 +337,15 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
                  "    \"com.apple.MTLCompilerService\"))\n\n");
     }
 
+    /* ── Terminal UI ─────────────────────────────────────────── */
+
+    if (policy->tui) {
+        SBPL_LIT("; Terminal UI (tcsetattr, alt screen, TIOCGWINSZ)\n"
+                 "(allow file-read* file-write* (literal \"/dev/tty\"))\n"
+                 "(allow file-read* file-write* (regex #\"^/dev/ttys[0-9]+\"))\n"
+                 "(allow file-ioctl)\n\n");
+    }
+
     /* ── Signals, sysctl ────────────────────────────────────── */
 
     SBPL_LIT("; Signals and sysctl\n"
@@ -714,6 +723,13 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
             log_warn("[sandbox] unveil failed for /proc/self");
     }
 
+    /* Terminal UI — unveil the controlling tty so tcsetattr /
+     * TIOCGWINSZ keep working after the filesystem seal. */
+    if (policy->tui) {
+        if (unveil("/dev/tty", "rw") != 0)
+            log_warn("[sandbox] unveil failed for /dev/tty");
+    }
+
     /* Seal: no more unveil calls allowed */
     if (unveil(NULL, NULL) != 0) {
         log_error("[sandbox] failed to seal filesystem restrictions");
@@ -747,6 +763,15 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
         (policy->network_inbound || policy->network_outbound)) {
         int n = snprintf(promises + plen, sizeof(promises) - (size_t)plen,
                          " inet");
+        if (n > 0) plen += n;
+    }
+    /* `tty` covers tcsetattr / tcgetattr / TIOCGWINSZ / ioctl on the
+     * controlling terminal. Required for TUI's raw-mode toggle and
+     * size queries; rejected silently if the app never asks for it. */
+    if (plen > 0 && policy->tui &&
+        (size_t)plen < sizeof(promises)) {
+        int n = snprintf(promises + plen, sizeof(promises) - (size_t)plen,
+                         " tty");
         if (n > 0) plen += n;
     }
     /* When the app declares outbound hosts, allow DNS resolution.
@@ -830,6 +855,8 @@ void hl_sandbox_policy_from_manifest(HlSandboxPolicy *policy,
     policy->gpu              = manifest->gpu;
     policy->gpu_devices      = manifest->gpu_devices;
     policy->gpu_device_count = manifest->gpu_device_count;
+
+    policy->tui              = manifest->tui;
 
     /* Mirror manifest-declared dynamic-code intent. Defaults are 0
      * (deny). `hl_sandbox_apply` enforces the W^X conflict check. */

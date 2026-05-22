@@ -69,6 +69,12 @@ typedef struct HlSandboxPolicy {
     const int *gpu_devices;
     int        gpu_device_count;
 
+    /* Terminal UI. When 1, the sandbox unveils /dev/tty and adds the
+     * Seatbelt clauses needed for tcsetattr / TIOCGWINSZ. Mirrors
+     * manifest.tui — the cap layer's hl_cap_tui_acquire requires this
+     * bit to be set. */
+    int tui;
+
     /* ── W^X / no runtime dynamic code ────────────────────────────────
      *
      * wx_enforced — when 1, the sandbox refuses to start unless the

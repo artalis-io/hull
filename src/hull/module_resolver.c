@@ -131,6 +131,9 @@ static uint32_t build_provided_caps(void)
 #ifdef HL_ENABLE_HTTP_SERVER
     caps |= HL_MOD_CAP_HTTP_SERVER;
 #endif
+#ifdef HL_ENABLE_TUI
+    caps |= HL_MOD_CAP_TUI;
+#endif
     return caps;
 }
 
@@ -147,6 +150,7 @@ static const char *cap_label(uint32_t cap)
     case HL_MOD_CAP_HTTP_CLIENT: return "HL_ENABLE_HTTP_CLIENT (build-time)";
     case HL_MOD_CAP_HTTP_SERVER: return "HL_ENABLE_HTTP_SERVER (build-time)";
     case HL_MOD_CAP_HTTP:        return "HL_ENABLE_HTTP (build-time)";
+    case HL_MOD_CAP_TUI:         return "HL_ENABLE_TUI (build-time)";
     default:                     return "unknown";
     }
 }
@@ -215,7 +219,8 @@ int hl_module_resolver_resolve(const HlManifest *manifest,
          * subsystems), then manifest sections. */
         uint32_t need = spec->required_caps;
         const uint32_t build_cap_mask = HL_MOD_CAP_DB | HL_MOD_CAP_WASM
-                                        | HL_MOD_CAP_GPU | HL_MOD_CAP_HTTP;
+                                        | HL_MOD_CAP_GPU | HL_MOD_CAP_HTTP
+                                        | HL_MOD_CAP_TUI;
         uint32_t need_build    = need & build_cap_mask;
         uint32_t need_manifest = need & ~build_cap_mask;
 
@@ -236,6 +241,18 @@ int hl_module_resolver_resolve(const HlManifest *manifest,
                      spec->name, cap_label(bit));
                 return -1;
             }
+        }
+
+        /* Modules that require a manifest boolean field in addition to
+         * a build-time subsystem. The build-time check above has
+         * already passed; here we enforce the matching declaration.
+         * Same shape as the GPU runtime-wiring check, but raised at
+         * resolve time so apps see the error before reaching cap
+         * code. */
+        if ((spec->required_caps & HL_MOD_CAP_TUI) && !manifest->tui) {
+            ERR1("module '%s' requires the 'tui' capability in the "
+                 "manifest (add `tui = true`)", spec->name);
+            return -1;
         }
 
         set_bit(out, idx);

@@ -91,6 +91,10 @@ int hl_js_init_compute_module(JSContext *ctx, HlJS *js);
 int hl_js_init_gpu_module(JSContext *ctx, HlJS *js);
 #endif
 
+#ifdef HL_ENABLE_TUI
+int hl_js_init_tui_module(JSContext *ctx, HlJS *js);
+#endif
+
 /* ── WebSocket module (defined in js/mod_ws.c) ───────────────────── */
 
 int hl_js_init_ws_module(JSContext *ctx, HlJS *js);

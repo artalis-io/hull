@@ -15,11 +15,19 @@
 
 #include "hull/cap/tool.h"
 #include "hull/runtime/tool.h"
+#include "hull/agent_lib.h"
 #include "hull/build_assets.h"
+#include "hull/commands/doctor.h"
 #include "hull/compiler.h"
+#include "hull/dev_state.h"
 #include "hull/manifest.h"
 #include "hull/module_registry.h"
 #include "hull/module_resolver.h"
+
+#include "sh_json.h"
+
+#include <signal.h>
+#include <sys/wait.h>
 
 #include <dirent.h>
 #include <errno.h>
@@ -674,6 +682,155 @@ static int l_tool_modules_resolve(lua_State *L)
     return 1;
 }
 
+/* ── tool.doctor_json() ───────────────────────────────────────────── */
+
+/* Render `hull doctor --json` payload into a heap buffer and return
+ * it as a Lua string. Consumed by stdlib/lua/hull/doctor_tui.lua
+ * which parses with json.decode and renders interactively via the
+ * hull.tui module.
+ *
+ * Wrapping fmemopen avoids reimplementing all of doctor.c's print_json
+ * in Lua; the JSON text is already the canonical machine-readable
+ * shape. */
+static int l_tool_doctor_json(lua_State *L)
+{
+    char *buf = NULL;
+    size_t sz = 0;
+    FILE *f = open_memstream(&buf, &sz);
+    if (!f) return luaL_error(L, "doctor_json: open_memstream failed");
+    hl_doctor_collect_json(f);
+    fflush(f);
+    fclose(f);
+    if (!buf) return luaL_error(L, "doctor_json: empty");
+    lua_pushlstring(L, buf, sz);
+    free(buf);
+    return 1;
+}
+
+/* ── tool.agent_errors(app_dir) / tool.agent_context(task, level) ── */
+
+/* Helper: run an agent JSON-producing function into a Lua string.
+ * The agent functions accept an app_dir + return JSON in a ShJsonBuf.
+ * We push two values: the JSON string and the integer return code.
+ *
+ * Bindings live here (not in a dedicated mod_agent.c) because the
+ * tool-mode VM is what hull's own TUI tool modules run in — same
+ * shape as tool.doctor_json. Apps don't get this surface; the
+ * resolver gates `hull/agent@*` separately. */
+static int l_tool_agent_errors(lua_State *L)
+{
+    const char *app_dir = luaL_optstring(L, 1, ".");
+    ShJsonBuf out;
+    sh_json_buf_init(&out);
+    int rc = hl_agent_errors(app_dir, &out);
+    if (out.buf) lua_pushlstring(L, out.buf, out.len);
+    else         lua_pushnil(L);
+    sh_json_buf_free(&out);
+    lua_pushinteger(L, rc);
+    return 2;
+}
+
+static int l_tool_agent_context(lua_State *L)
+{
+    const char *task  = luaL_checkstring(L, 1);
+    const char *level = luaL_optstring(L, 2, "compact");
+    ShJsonBuf out;
+    sh_json_buf_init(&out);
+    int rc = hl_agent_context(task, level, &out);
+    if (out.buf) lua_pushlstring(L, out.buf, out.len);
+    else         lua_pushnil(L);
+    sh_json_buf_free(&out);
+    lua_pushinteger(L, rc);
+    return 2;
+}
+
+/* ── tool.dev_* — hull dev --tui bindings ─────────────────────────── */
+
+/* These accessors all consult hl_dev_state(); they're a no-op (returns
+ * nil / safe defaults) when hull dev --tui isn't running. That lets
+ * the stdlib module load cleanly outside the dev context (e.g. tests
+ * that just require the file). */
+
+static int l_tool_dev_status(lua_State *L)
+{
+    HlDevState *s = hl_dev_state();
+    if (!s) { lua_pushnil(L); return 1; }
+    lua_newtable(L);
+    lua_pushinteger(L, (lua_Integer)s->child_pid);  lua_setfield(L, -2, "pid");
+    lua_pushinteger(L, s->reload_count);            lua_setfield(L, -2, "reload_count");
+    lua_pushinteger(L, (lua_Integer)s->last_reload_ms); lua_setfield(L, -2, "last_reload_ms");
+    lua_pushinteger(L, s->log_count);               lua_setfield(L, -2, "log_count");
+    lua_pushstring(L,  s->app_dir);                 lua_setfield(L, -2, "app_dir");
+
+    /* Liveness: non-blocking waitpid. */
+    int alive = 0;
+    if (s->child_pid > 0) {
+        int status;
+        pid_t r = waitpid(s->child_pid, &status, WNOHANG);
+        if (r == 0) alive = 1;
+        else if (r == s->child_pid) {
+            /* Child exited — mark dead so the TUI shows it. */
+            s->child_pid = 0;
+        }
+    }
+    lua_pushboolean(L, alive); lua_setfield(L, -2, "alive");
+    return 1;
+}
+
+/* tool.dev_drain() — pull whatever's currently on the pipe into the
+ * ring buffer. Returns the number of new lines appended (informational). */
+static int l_tool_dev_drain(lua_State *L)
+{
+    HlDevState *s = hl_dev_state();
+    if (!s) { lua_pushinteger(L, 0); return 1; }
+    int before = s->log_count;
+    hl_dev_state_drain(s);
+    lua_pushinteger(L, s->log_count - before);
+    return 1;
+}
+
+/* tool.dev_recent_lines(n) — newest-first array of the most recent
+ * up-to-n lines from the ring buffer. */
+static int l_tool_dev_recent_lines(lua_State *L)
+{
+    HlDevState *s = hl_dev_state();
+    int n = (int)luaL_optinteger(L, 1, 50);
+    if (n < 1) n = 1;
+    if (n > HL_DEV_LOG_LINES) n = HL_DEV_LOG_LINES;
+
+    lua_newtable(L);
+    if (!s || s->log_count == 0) return 1;
+
+    int available = s->log_count < HL_DEV_LOG_LINES ? s->log_count : HL_DEV_LOG_LINES;
+    if (n > available) n = available;
+
+    /* Walk back from head-1 for n entries. */
+    for (int i = 0; i < n; i++) {
+        int idx = (s->log_head - 1 - i + HL_DEV_LOG_LINES) % HL_DEV_LOG_LINES;
+        lua_pushstring(L, s->log_lines[idx]);
+        lua_rawseti(L, -2, i + 1);
+    }
+    return 1;
+}
+
+/* tool.dev_check_file_change() — returns true if app files changed
+ * since the last reload baseline. */
+static int l_tool_dev_check_file_change(lua_State *L)
+{
+    HlDevState *s = hl_dev_state();
+    lua_pushboolean(L, s ? hl_dev_state_check_file_change(s) : 0);
+    return 1;
+}
+
+/* tool.dev_reload() — kill+respawn child. Returns true on success. */
+static int l_tool_dev_reload(lua_State *L)
+{
+    HlDevState *s = hl_dev_state();
+    if (!s) { lua_pushboolean(L, 0); return 1; }
+    lua_pushboolean(L, hl_dev_state_reload(s) == 0);
+    return 1;
+}
+
 /* ── Registration ──────────────────────────────────────────────────── */
 
 static const luaL_Reg tool_funcs[] = {
@@ -695,6 +852,14 @@ static const luaL_Reg tool_funcs[] = {
     { "extract_platform_cosmo", l_tool_extract_platform_cosmo },
     { "platform_archs",         l_tool_platform_archs },
     { "modules_resolve",        l_tool_modules_resolve },
+    { "doctor_json",            l_tool_doctor_json },
+    { "agent_errors",           l_tool_agent_errors },
+    { "agent_context",          l_tool_agent_context },
+    { "dev_status",             l_tool_dev_status },
+    { "dev_drain",              l_tool_dev_drain },
+    { "dev_recent_lines",       l_tool_dev_recent_lines },
+    { "dev_check_file_change",  l_tool_dev_check_file_change },
+    { "dev_reload",             l_tool_dev_reload },
     { NULL, NULL }
 };
 

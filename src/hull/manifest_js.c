@@ -213,6 +213,12 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
         out->compute = JS_ToBool(ctx, compute_val);
     JS_FreeValue(ctx, compute_val);
 
+    /* tui: true */
+    JSValue tui_val = JS_GetPropertyStr(ctx, manifest, "tui");
+    if (JS_IsBool(tui_val))
+        out->tui = JS_ToBool(ctx, tui_val);
+    JS_FreeValue(ctx, tui_val);
+
     /* modules: ["hull/crypto@1", "hull/db@1", ...] — an array of
      * canonical spec strings. The local variable / imported identifier
      * is a plain JS binding (the user chooses the name); the manifest

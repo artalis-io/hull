@@ -90,6 +90,14 @@ int hl_lua_register_modules(HlLua *lua)
         register_native_module(L, "hull.gpu", luaopen_hull_gpu);
 #endif
 
+#ifdef HL_ENABLE_TUI
+    /* Native bridge — the user-facing module is the stdlib Lua file
+     * at stdlib/lua/hull/tui.lua, which `require`s the bridge below
+     * and layers tui.run / tui.list / tui.confirm on top. Underscore
+     * prefix keeps it out of the public module registry. */
+    register_native_module(L, "hull._tui", luaopen_hull_tui);
+#endif
+
 #ifdef HL_ENABLE_HTTP_SERVER
     /* SSE stream metatable (used by app.sse handler dispatch). */
     hl_lua_sse_register_mt(L);

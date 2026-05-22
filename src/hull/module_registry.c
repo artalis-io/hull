@@ -251,6 +251,13 @@ static const HlModuleSpec REGISTRY[] = {
         .required_caps = 0, .deps = {0},
     },
     {
+        .name = "hull/tui",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        /* Terminal UI capability. Requires HL_ENABLE_TUI at build AND
+         * tui = true in the manifest. */
+        .required_caps = HL_MOD_CAP_TUI, .deps = {0},
+    },
+    {
         .name = "hull/validate",
         .api_major = 1, .intrinsic = 0, .pure = 1,
         .required_caps = 0, .deps = {0},

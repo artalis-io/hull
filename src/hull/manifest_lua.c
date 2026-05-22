@@ -185,6 +185,11 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
     out->compute = lua_toboolean(L, -1);
     lua_pop(L, 1);
 
+    /* tui = true */
+    lua_getfield(L, manifest_idx, "tui");
+    out->tui = lua_toboolean(L, -1);
+    lua_pop(L, 1);
+
     /* modules = { crypto = "1", fs = "1", ["hull/http"] = "1" }
      *
      * Strict format: key is the module name (short alias or full

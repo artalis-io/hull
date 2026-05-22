@@ -94,6 +94,7 @@ typedef struct HlManifest {
     int         gpu_devices[HL_GPU_MAX_DEVICES]; /* allowed device indices */
     int         gpu_device_count; /* 0 = all devices allowed (backward compat) */
     int         compute;          /* 1 if app declares compute: true */
+    int         tui;              /* 1 if app declares tui: true (terminal UI) */
 
     /* Declared first-party module set.
      *

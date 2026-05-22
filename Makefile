@@ -315,6 +315,16 @@ STB_CFLAGS  := -std=c11 -O2 -w
 $(STB_OBJ): $(STB_DIR)/stb_impl.c | $(BUILDDIR)
 	$(CC) $(STB_CFLAGS) -I$(STB_DIR) -c -o $@ $<
 
+# ── Unicode tables (TUI cell-width lookup) ──────────────────────────
+#
+# vendor/unicode/eaw.h is checked in (~28 KB) and included by
+# src/hull/cap/tui_width.c via "unicode/eaw.h". The Unicode data
+# files (EastAsianWidth.txt + UnicodeData.txt) and the generator
+# (gen.lua) live alongside it; `make fetch-unicode` refreshes the
+# data and regenerates the header.
+
+UNICODE_DIR := $(VENDDIR)/unicode
+
 # ── Apply DEPFLAGS to every vendor CFLAGS variant ────────────────────
 # Bundled here (rather than inline in each := definition) so the policy
 # is visible in one place and so we don't fight backslash-continuation
@@ -534,6 +544,20 @@ else
   HL_ENABLE_TCC ?= 1
 endif
 
+# ── HL_ENABLE_TUI — terminal UI capability ─────────────────────────
+#
+# Off this flag drops cap/tui.c, cap/tui_input.c, cap/tui_width.c,
+# the runtime bindings, and the stdlib `hull/tui` module. Width-only
+# (cap_tui_width.c) is light enough to keep around for other uses,
+# but for simplicity the cap_tui_* trio is gated together.
+#
+# Default: on. Cosmo: on (POSIX termios + ANSI; no platform deps).
+HL_ENABLE_TUI ?= 1
+
+ifeq ($(HL_ENABLE_TUI),1)
+CFLAGS += -DHL_ENABLE_TUI
+endif
+
 ifeq ($(HL_ENABLE_TCC),1)
 CFLAGS += -DHL_ENABLE_TCC
 
@@ -609,6 +633,38 @@ fetch-ca-bundle:
 	@cd $(CACERT_DIR) && (sha256sum -c cacert.pem.sha256 2>/dev/null \
 	    || shasum -a 256 -c cacert.pem.sha256)
 	@echo "Done — $$(grep -c '^-----BEGIN CERTIFICATE-----' $(CACERT_PEM)) certificates."
+
+# ── Unicode width data (refresh + regenerate) ──────────────────────
+#
+# `make fetch-unicode` downloads fresh EastAsianWidth.txt and
+# UnicodeData.txt from unicode.org, verifies SHA-256 against the
+# pinned checksums, then regenerates vendor/unicode/eaw.h via
+# vendor/unicode/gen.lua. Checked-in artifacts cover hermetic builds;
+# this target is invoked manually when upgrading Unicode versions.
+#
+# Pin to a specific Unicode release via HL_UNICODE_VERSION.
+
+HL_UNICODE_VERSION ?= 16.0.0
+UNICODE_BASE_URL   := https://www.unicode.org/Public/$(HL_UNICODE_VERSION)/ucd
+UNICODE_EAW_TXT    := $(UNICODE_DIR)/EastAsianWidth.txt
+UNICODE_UCD_TXT    := $(UNICODE_DIR)/UnicodeData.txt
+UNICODE_EAW_H      := $(UNICODE_DIR)/eaw.h
+
+.PHONY: fetch-unicode
+fetch-unicode:
+	@mkdir -p $(UNICODE_DIR)
+	@echo "Fetching Unicode $(HL_UNICODE_VERSION) data from unicode.org …"
+	curl -fsSL $(UNICODE_BASE_URL)/EastAsianWidth.txt -o $(UNICODE_EAW_TXT)
+	curl -fsSL $(UNICODE_BASE_URL)/UnicodeData.txt   -o $(UNICODE_UCD_TXT)
+	@echo "Recording SHA-256 …"
+	@cd $(UNICODE_DIR) && (shasum -a 256 EastAsianWidth.txt > EastAsianWidth.txt.sha256 \
+	    || sha256sum    EastAsianWidth.txt > EastAsianWidth.txt.sha256)
+	@cd $(UNICODE_DIR) && (shasum -a 256 UnicodeData.txt   > UnicodeData.txt.sha256 \
+	    || sha256sum    UnicodeData.txt   > UnicodeData.txt.sha256)
+	@echo "Regenerating eaw.h via gen.lua …"
+	@command -v lua >/dev/null && LUA=lua || LUA=luajit; \
+	    $$LUA $(UNICODE_DIR)/gen.lua $(UNICODE_EAW_TXT) $(UNICODE_UCD_TXT) > $(UNICODE_EAW_H)
+	@echo "Done — $$(grep -c '^    {' $(UNICODE_EAW_H)) ranges in $(UNICODE_EAW_H)."
 
 # ── wgpu-native (GPU compute — optional) ─────────────────────────
 #
@@ -720,6 +776,15 @@ ifeq ($(HL_ENABLE_HTTP_SERVER),0)
   CAP_SRCS := $(filter-out \
       $(SRCDIR)/hull/cap/ws.c \
       $(SRCDIR)/hull/cap/body.c, \
+      $(CAP_SRCS))
+endif
+ifeq ($(HL_ENABLE_TUI),0)
+  # Drop the TUI capability when disabled. cap/tui_width.c stays
+  # compiled regardless — it's a pure data-table lookup with no
+  # platform deps, useful elsewhere.
+  CAP_SRCS := $(filter-out \
+      $(SRCDIR)/hull/cap/tui.c \
+      $(SRCDIR)/hull/cap/tui_input.c, \
       $(CAP_SRCS))
 endif
 CAP_OBJS := $(patsubst $(SRCDIR)/hull/cap/%.c,$(BUILDDIR)/cap_%.o,$(CAP_SRCS))
@@ -1214,7 +1279,7 @@ $(APP_ENTRIES_DEFAULT_OBJ): $(SRCDIR)/hull/app_entries_default.c $(INCDIR)/hull/
 
 # ── Include paths ───────────────────────────────────────────────────
 
-INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(KEEL_DIR)/vendor/llhttp -I$(MBEDTLS_DIR)/include -I$(SQLITE_DIR) -I$(LOG_DIR) -I$(SH_ARENA_DIR) -I$(SH_JSON_DIR) -I$(TWEETNACL_DIR) -I$(STB_DIR) -I$(BUILDDIR) $(WAMR_INC)
+INCLUDES := -I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(KEEL_INC) -I$(KEEL_DIR)/vendor/llhttp -I$(MBEDTLS_DIR)/include -I$(SQLITE_DIR) -I$(LOG_DIR) -I$(SH_ARENA_DIR) -I$(SH_JSON_DIR) -I$(TWEETNACL_DIR) -I$(STB_DIR) -I$(VENDDIR) -I$(BUILDDIR) $(WAMR_INC)
 
 # ── Build-flag fingerprint (force-rebuild on flag change) ───────────
 #
@@ -1693,10 +1758,10 @@ $(BUILDDIR)/test_js: $(TESTDIR)/hull/runtime/js/test_js.c $(TEST_COMMON_DEPS) $(
 		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(WGPU_LIB) $(WGPU_FRAMEWORKS) -lm -lpthread
 
 # Lua runtime test — needs Lua + Lua runtime objects + manifest (Lua-only) + cap_tool + build_assets
-$(BUILDDIR)/test_lua: $(TESTDIR)/hull/runtime/lua/test_lua.c $(TEST_COMMON_DEPS) $(CAP_TOOL_OBJ) $(CAP_TEST_LUA_OBJ) $(BUILD_ASSET_OBJ) $(MANIFEST_LUA_OBJ) $(MODULE_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(LUA_RT_OBJS) $(LUA_OBJS) | $(BUILDDIR)
+$(BUILDDIR)/test_lua: $(TESTDIR)/hull/runtime/lua/test_lua.c $(TEST_COMMON_DEPS) $(CAP_TOOL_OBJ) $(CAP_TEST_LUA_OBJ) $(BUILD_ASSET_OBJ) $(BUILDDIR)/cmd_doctor.o $(BUILDDIR)/cmd_dev.o $(BUILDDIR)/compiler.o $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(APP_CONTEXT_OBJ) $(MIGRATE_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(LUA_RT_OBJS) $(JS_RT_OBJS) $(LUA_OBJS) $(QJS_OBJS) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(TEST_RUNNER_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(TEST_CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_LUA_OBJ) $(BUILD_ASSET_OBJ) $(LUA_RT_OBJS) $(MANIFEST_LUA_OBJ) $(MODULE_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(ALLOC_OBJ) $(ASYNC_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(WAMR_OBJS) $(LUA_OBJS) \
-		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(WGPU_LIB) $(WGPU_FRAMEWORKS) -lm -lpthread
+		$(TEST_CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_LUA_OBJ) $(BUILD_ASSET_OBJ) $(BUILDDIR)/cmd_doctor.o $(BUILDDIR)/cmd_dev.o $(BUILDDIR)/compiler.o $(BUILDDIR)/compiler_tcc.o $(BUILDDIR)/tool.o $(BUILDDIR)/sandbox.o $(BUILDDIR)/cacert.o $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(APP_CONTEXT_OBJ) $(MIGRATE_OBJ) $(LUA_RT_OBJS) $(JS_RT_OBJS) $(MANIFEST_OBJ) $(MODULE_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(TEST_RUNNER_OBJ) $(ALLOC_OBJ) $(ASYNC_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(WAMR_OBJS) $(LUA_OBJS) $(QJS_OBJS) \
+		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(WGPU_LIB) $(WGPU_FRAMEWORKS) $(PLEDGE_OBJS) -lm -lpthread
 
 # Tool hardening test — cap/tool.c compiled without runtime flags (self-contained C functions)
 CAP_TOOL_NONE_OBJ := $(BUILDDIR)/cap_tool_none.o
@@ -1905,6 +1970,23 @@ e2e-ca-bundle: $(BUILDDIR)/hull $(BUILDDIR)/test_cacert
 
 e2e-update: $(BUILDDIR)/hull
 	sh tests/e2e_update.sh
+
+# ── TUI e2e (smoke + interactive PTY-driven) ───────────────────────
+#
+# The interactive part shells out to the e2e_tui_drive helper which
+# spawns the hull binary under a PTY and feeds it scripted input.
+# Built only when HL_ENABLE_TUI is on (no point otherwise).
+
+ifeq ($(HL_ENABLE_TUI),1)
+$(BUILDDIR)/e2e_tui_drive: $(TESTDIR)/e2e_tui_drive.c | $(BUILDDIR)
+	$(CC) -std=c11 -Wall -Wextra -O2 -o $@ $<
+E2E_TUI_DEPS := $(BUILDDIR)/hull $(BUILDDIR)/e2e_tui_drive
+else
+E2E_TUI_DEPS := $(BUILDDIR)/hull
+endif
+
+e2e-tui: $(E2E_TUI_DEPS)
+	sh tests/e2e_tui.sh
 
 hull-test-examples: $(BUILDDIR)/hull
 	@for dir in examples/hello examples/rest_api examples/bench_db examples/auth \

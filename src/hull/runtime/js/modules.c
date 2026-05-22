@@ -104,6 +104,13 @@ int hl_js_register_modules(HlJS *js)
     }
 #endif
 
+#ifdef HL_ENABLE_TUI
+    /* Register hull:tui module — gated at use time by the resolver
+     * (requires HL_ENABLE_TUI + manifest.tui). */
+    if (hl_js_init_tui_module(js->ctx, js) != 0)
+        return -1;
+#endif
+
 #ifdef HL_ENABLE_HTTP_SERVER
     /* hull:ws + SSE class — server-side WebSocket + Server-Sent Events. */
     hl_js_sse_register_class(js->ctx);

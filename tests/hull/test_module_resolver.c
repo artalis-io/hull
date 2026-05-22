@@ -325,6 +325,51 @@ UTEST(module_resolver, gpu_rejected_when_compiled_out)
 }
 #endif
 
+#ifdef HL_ENABLE_TUI
+UTEST(module_resolver, tui_admitted_when_both_build_and_manifest_set)
+{
+    HlManifest m;
+    clear_manifest(&m);
+    m.tui = 1;
+    add_module(&m, "tui", 1);
+
+    HlResolvedModuleSet s = {0};
+    char err[256] = {0};
+    int rc = hl_module_resolver_resolve(&m, &s, err, sizeof(err));
+    ASSERT_EQ(rc, 0);
+}
+
+UTEST(module_resolver, tui_rejected_without_manifest_flag)
+{
+    HlManifest m;
+    clear_manifest(&m);
+    /* m.tui left at 0 */
+    add_module(&m, "tui", 1);
+
+    HlResolvedModuleSet s = {0};
+    char err[256] = {0};
+    int rc = hl_module_resolver_resolve(&m, &s, err, sizeof(err));
+    ASSERT_EQ(rc, -1);
+    ASSERT_NE(strstr(err, "tui = true"), NULL);
+}
+#endif
+
+#ifndef HL_ENABLE_TUI
+UTEST(module_resolver, tui_rejected_when_compiled_out)
+{
+    HlManifest m;
+    clear_manifest(&m);
+    m.tui = 1;  /* even with manifest flag set */
+    add_module(&m, "tui", 1);
+
+    HlResolvedModuleSet s = {0};
+    char err[256] = {0};
+    int rc = hl_module_resolver_resolve(&m, &s, err, sizeof(err));
+    ASSERT_EQ(rc, -1);
+    ASSERT_NE(strstr(err, "HL_ENABLE_TUI"), NULL);
+}
+#endif
+
 #ifndef HL_ENABLE_WASM
 UTEST(module_resolver, compute_rejected_when_compiled_out)
 {
