@@ -46,6 +46,14 @@ else
 endif
 
 CFLAGS  := -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2
+# -Wall/-Wextra already enable these implicitly. Promoting unused
+# functions and variables to errors is the actual policy: dead code in
+# Hull source must be deleted, not left to accrue. -Wunused-parameter
+# stays a warning (not an error) because vendored static-inline headers
+# (notably QuickJS) leak unused-parameter diagnostics into every Hull
+# TU that includes them, and we can't edit the vendor source. Unused
+# parameters in Hull code itself should be silenced with `(void)x;`.
+CFLAGS  += -Werror=unused-function -Werror=unused-variable
 LDFLAGS :=
 
 # Header-dependency tracking. -MMD writes a sibling .d file listing every

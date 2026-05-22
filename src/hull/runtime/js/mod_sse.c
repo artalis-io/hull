@@ -164,6 +164,7 @@ JSValue hl_js_sse_create_stream(JSContext *ctx, KlResponse *res)
 /* Check if stream is closed (used by runtime.c for auto-close on handler return). */
 int hl_js_sse_stream_is_closed(JSContext *ctx, JSValueConst val)
 {
+    (void)ctx;
     HlJSSseStreamUD *ud = (HlJSSseStreamUD *)JS_GetOpaque(val,
                                                              js_sse_stream_class_id);
     return ud ? ud->closed : 1;

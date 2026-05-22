@@ -26,33 +26,6 @@ static int js_app_throw_if_main(JSContext *ctx, const char *call)
     return 0;
 }
 
-/* Returns 1 if any dispatch-style handler has been registered. Used to
- * guard app.main against late registration. */
-static int js_app_dispatch_registered(JSContext *ctx)
-{
-    static const char *keys[] = {
-        "__hull_route_defs", "__hull_middleware", "__hull_post_middleware",
-        "__hull_timer_defs", "__hull_ws_defs", "__hull_sse_defs",
-        NULL
-    };
-    JSValue global = JS_GetGlobalObject(ctx);
-    int found = 0;
-    for (int i = 0; keys[i]; i++) {
-        JSValue v = JS_GetPropertyStr(ctx, global, keys[i]);
-        if (JS_IsArray(ctx, v)) {
-            JSValue len_val = JS_GetPropertyStr(ctx, v, "length");
-            int32_t len = 0;
-            JS_ToInt32(ctx, &len, len_val);
-            JS_FreeValue(ctx, len_val);
-            if (len > 0) found = 1;
-        }
-        JS_FreeValue(ctx, v);
-        if (found) break;
-    }
-    JS_FreeValue(ctx, global);
-    return found;
-}
-
 /* Helper: register a route with given method string */
 static JSValue js_app_route(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv, int magic)

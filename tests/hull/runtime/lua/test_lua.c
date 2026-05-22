@@ -93,7 +93,6 @@ static void free_lua_req_ctx(KlRequest *req)
 
 /* Init lua with database and env capabilities for testing */
 static sqlite3 *test_db = NULL;
-static HlStmtCache test_stmt_cache;
 static HlDbHandle test_db_handle;
 static const char *env_allowed[] = { "HULL_TEST_VAR", NULL };
 static HlEnvConfig env_cfg = { .allowed = env_allowed, .count = 1 };

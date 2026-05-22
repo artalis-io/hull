@@ -588,7 +588,8 @@ Key findings to be aware of:
 
 ## Conventions
 
-- C11, compiled with `-Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror`
+- C11, compiled with `-Wall -Wextra -Wpedantic -Wshadow -Wformat=2`
+- Unused functions and variables are errors (`-Werror=unused-function -Werror=unused-variable`) — dead code must be deleted, not left to accrue. Unused parameters stay a warning (vendored static-inline headers like QuickJS leak the diagnostic into Hull TUs); silence them in Hull code with `(void)x;`.
 - `-fstack-protector-strong` for buffer overflow detection (not Cosmo)
 - Vendor code compiled with `-w` (relaxed warnings, no `-Werror`)
 - Integer overflow guards: check against `SIZE_MAX/2` before arithmetic
