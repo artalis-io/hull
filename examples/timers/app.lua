@@ -11,9 +11,11 @@
 local db   = require("hull.db")
 local time = require("hull.time")
 
+local log = require("hull.log")
 app.manifest({
     database = "timers.db",
     modules = {
+        "hull/log@1",
         "hull/db@1",
         "hull/time@1",
     },

@@ -40,6 +40,7 @@ local MAX_EXTENDS_DEPTH  = 8
 local MAX_CACHE_SIZE     = 1024
 
 -- Native bridge for parse/codegen (private — not in module registry).
+local json = require("hull.json")
 local _template = require("hull._template")
 
 -- ── Validation ──────────────────────────────────────────────────────

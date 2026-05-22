@@ -77,9 +77,12 @@ UTEST(module_resolver, null_manifest_admits_only_intrinsics)
     int rc = hl_module_resolver_resolve(NULL, &s, err, sizeof(err));
     ASSERT_EQ(rc, 0);
 
+    /* Intrinsic core as of v0.1.0 release: just hull/app. log and
+     * json are declared modules; apps must put them in
+     * manifest.modules to use them. */
     ASSERT_TRUE(hl_module_set_contains_name(&s, "hull/app"));
-    ASSERT_TRUE(hl_module_set_contains_name(&s, "hull/log"));
-    ASSERT_TRUE(hl_module_set_contains_name(&s, "hull/json"));
+    ASSERT_FALSE(hl_module_set_contains_name(&s, "hull/log"));
+    ASSERT_FALSE(hl_module_set_contains_name(&s, "hull/json"));
     ASSERT_FALSE(hl_module_set_contains_name(&s, "hull/crypto"));
     ASSERT_FALSE(hl_module_set_contains_name(&s, "hull/fs"));
 }

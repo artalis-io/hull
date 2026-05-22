@@ -40,6 +40,7 @@
 --   end)
 --
 
+local json = require("hull.json")
 local crypto = require("hull.crypto")
 local db = require("hull.db")
 local time = require("hull.time")

@@ -17,11 +17,13 @@ local smtp     = require("hull.smtp")
 local time     = require("hull.time")
 local validate = require("hull.validate")
 
+local json = require("hull.json")
 -- Add your SMTP host to the hosts list for production use.
 app.manifest({
     env = {"SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS", "SMTP_FROM", "SMTP_TLS"},
     hosts = {"localhost", "127.0.0.1", "smtp.gmail.com"},
     modules = {
+        "hull/json@1",
         "hull/db@1",
         "hull/env@1",
         "hull/smtp@1",

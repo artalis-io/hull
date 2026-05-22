@@ -935,14 +935,17 @@ UTEST(lua_runtime, require_resolves_native_modules)
     cleanup_lua();
 }
 
-UTEST(lua_runtime, json_global_available)
+UTEST(lua_runtime, json_module_requireable)
 {
     init_lua();
 
-    /* json global should be available (pre-loaded) */
+    /* json is a DECLARED module as of v0.1.0 release — no longer
+     * a global. require("hull.json") returns the table. Wrapped in
+     * IIFE since eval_int prefixes "return". */
     int result = eval_int(
-        "type(json) == 'table' and type(json.encode) == 'function' "
-        "and type(json.decode) == 'function' and 1 or 0");
+        "(function() local json = require('hull.json') "
+        "return type(json) == 'table' and type(json.encode) == 'function' "
+        "and type(json.decode) == 'function' and 1 or 0 end)()");
     ASSERT_EQ(result, 1);
 
     cleanup_lua();
@@ -952,15 +955,17 @@ UTEST(lua_runtime, json_encode_decode)
 {
     init_lua();
 
-    /* json.encode and json.decode should work */
-    char *s = eval_str("json.encode({name='hull'})");
+    char *s = eval_str(
+        "(function() local json = require('hull.json') "
+        "return json.encode({name='hull'}) end)()");
     ASSERT_NE(s, NULL);
     ASSERT_NE(strstr(s, "\"name\""), NULL);
     ASSERT_NE(strstr(s, "\"hull\""), NULL);
     free(s);
 
     int result = eval_int(
-        "json.decode('{\"x\":42}').x");
+        "(function() local json = require('hull.json') "
+        "return json.decode('{\"x\":42}').x end)()");
     ASSERT_EQ(result, 42);
 
     cleanup_lua();
@@ -971,7 +976,8 @@ UTEST(lua_runtime, json_roundtrip)
     init_lua();
 
     int result = eval_int(
-        "(function() local t = {a=1, b='two'} "
+        "(function() local json = require('hull.json') "
+        "local t = {a=1, b='two'} "
         "local s = json.encode(t) "
         "local t2 = json.decode(s) "
         "return t2.a == 1 and t2.b == 'two' and 1 or 0 end)()");
@@ -1473,11 +1479,15 @@ UTEST(lua_cap, log_functions_exist)
     init_lua_with_caps();
     ASSERT_TRUE(lua_initialized);
 
+    /* log is a DECLARED module as of v0.1.0 release — no longer a
+     * global. Apps must require("hull.log"). The test environment
+     * has no manifest, so the require gate is permissive. */
     int result = eval_int(
-        "type(log.info) == 'function' and "
+        "(function() local log = require('hull.log') "
+        "return type(log.info) == 'function' and "
         "type(log.warn) == 'function' and "
         "type(log.error) == 'function' and "
-        "type(log.debug) == 'function' and 1 or 0");
+        "type(log.debug) == 'function' and 1 or 0 end)()");
     ASSERT_EQ(result, 1);
 
     cleanup_lua_caps();
@@ -1490,6 +1500,7 @@ UTEST(lua_cap, log_does_not_error)
 
     /* Calling all four log functions should not raise a Lua error */
     int rc = luaL_dostring(lua_rt.L,
+        "local log = require('hull.log')\n"
         "log.info('test info')\n"
         "log.warn('test warn')\n"
         "log.error('test error')\n"

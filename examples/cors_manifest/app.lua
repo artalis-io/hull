@@ -6,6 +6,8 @@
 
 local server = require("hull.server")
 
+local log = require("hull.log")
+local json = require("hull.json")
 app.manifest({
     cors = {
         origins = {"http://localhost:5173", "http://localhost:3001"},
@@ -14,6 +16,8 @@ app.manifest({
         max_age = 3600,
     },
     modules = {
+    "hull/json@1",
+    "hull/log@1",
         "hull/server@1",
     },
 })

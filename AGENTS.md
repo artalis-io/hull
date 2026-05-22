@@ -618,7 +618,7 @@ app.manifest({
 })
 ```
 
-Undeclared capabilities are blocked. An empty manifest `{}` means no filesystem, no env, no outbound HTTP, and no side-effect modules. The intrinsic core (always available without declaration) is **`hull/app`** today, plus **`hull/log`** and **`hull/json`** which are scheduled for demotion to declared modules in v0.1.1. Declare `hull/log@1` and `hull/json@1` now if you use them and your v0.1.1 migration is a no-op.
+Undeclared capabilities are blocked. An empty manifest `{}` means no filesystem, no env, no outbound HTTP, and no side-effect modules. The intrinsic core (always available without declaration) is **`hull/app`** alone (the registration API: `app.manifest`, `app.get/post/use`, `app.router`, `app.ws/sse`, `app.every/daily`, `app.main`). `hull/log` and `hull/json` are declared modules — apps that call `log.X` or `json.X` must put `"hull/log@1"` / `"hull/json@1"` in `manifest.modules`.
 
 **Module rules (important for AI agents):**
 - Format is `"namespace/name@major"` (e.g. `"hull/crypto@1"`). Major version is required.
@@ -631,7 +631,7 @@ Undeclared capabilities are blocked. An empty manifest `{}` means no filesystem,
 
 ## Available Standard Library
 
-Every module except the intrinsic core must be listed in `manifest.modules`. The intrinsic core today is `hull/app`, `hull/log`, and `hull/json`; `log` and `json` are scheduled for demotion in v0.1.1 (declare them now to avoid the migration). The "Declare" column is the literal manifest entry to add.
+Every module except the intrinsic core must be listed in `manifest.modules`. The intrinsic core is just `hull/app` (registration API; bootstrap requirement because the manifest itself uses `app.manifest`). `hull/log` and `hull/json` are declared modules — list them if you call `log.X` or `json.X` directly. The "Declare" column is the literal manifest entry to add.
 
 | Module | Lua Import | JS Import | Declare | Purpose |
 |--------|-----------|-----------|---------|---------|
@@ -801,7 +801,7 @@ req.ctx             -- middleware context table (session, user, csrf_token, etc.
 
 10. **Static files at `/static/*`** — put files in `static/` directory. They're auto-detected and served.
 
-11. **Module imports must be declared** — `require("hull.crypto")` / `import { crypto } from "hull:crypto"` fails unless `"hull/crypto@1"` is in `manifest.modules = { ... }`. The error message names the missing module. Run `hull modules analyze` before building. The intrinsic core is `hull/app` (registration API, must be intrinsic because the manifest itself is expressed via `app.manifest`). `hull/log` and `hull/json` are intrinsic in v0.1.0 but scheduled for demotion to declared modules in v0.1.1.
+11. **Module imports must be declared** — `require("hull.crypto")` / `import { crypto } from "hull:crypto"` fails unless `"hull/crypto@1"` is in `manifest.modules = { ... }`. The error message names the missing module. Run `hull modules analyze` before building. The intrinsic core is just `hull/app` (registration API, must be intrinsic because the manifest itself is expressed via `app.manifest`). Everything else, including `hull/log` and `hull/json`, must be declared.
 
 12. **Module deps are transitive** — declaring `"hull/middleware/session@1"` is not enough; you must also declare its dependencies (`hull/db@1`, `hull/crypto@1`). The error tells you exactly which to add. Use `hull modules explain hull/middleware/session` to see required deps.
 

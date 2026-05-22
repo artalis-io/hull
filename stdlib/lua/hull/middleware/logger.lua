@@ -1,3 +1,5 @@
+local log = require("hull.log")
+
 --- Request logging middleware (logfmt output).
 --
 -- @module hull.middleware.logger

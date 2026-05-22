@@ -46,9 +46,13 @@ int hl_lua_register_modules(HlLua *lua)
      * can reference `app.X` directly. */
     hl_lua_install_app_router(L);
 
-    /* hull.log — basic stderr logger. */
+    /* hull.log — pre-register so `require("hull.log")` resolves
+     * via LUA_LOADED_TABLE without a disk hit. As of v0.1.0
+     * release, hull/log is a DECLARED module (no longer intrinsic):
+     * apps that use it must put "hull/log@1" in manifest.modules.
+     * No lua_setglobal — `log` is not a runtime global anymore. */
     luaL_requiref(L, "hull.log", luaopen_hull_log, 0);
-    lua_setglobal(L, "log");
+    lua_pop(L, 1); /* drop the module table left on the stack */
 
     /* hull global (hull.sleep, hull.gather, etc.) — runtime primitives. */
     luaL_requiref(L, "hull.hull", luaopen_hull_hull, 0);

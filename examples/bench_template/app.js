@@ -12,6 +12,7 @@ import { template } from "hull:template";
 
 app.manifest({
     modules: [
+    "hull/log@1",
         "hull/template@1",
     ],
 });

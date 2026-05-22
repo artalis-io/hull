@@ -155,10 +155,11 @@ void hl_lua_make_request(lua_State *L, KlRequest *req)
             /* Native Lua table — retrieve directly from registry */
             lua_rawgeti(L, LUA_REGISTRYINDEX, rctx->lua_ref);
         } else if (rctx->kind == HL_REQCTX_JSON) {
-            /* JSON string (from test dispatch) — parse it */
+            /* JSON string (from test dispatch) — parse it via the
+             * runtime's cached decoder (no manifest gate). */
             lua_newtable(L);
             int ctx_idx = lua_absindex(L, -1);
-            lua_getglobal(L, "json");
+            lua_getfield(L, LUA_REGISTRYINDEX, "__hull_json_internal");
             lua_getfield(L, -1, "decode");
             lua_pushstring(L, rctx->json.data);
             if (lua_pcall(L, 1, 1, 0) == LUA_OK && lua_istable(L, -1)) {
@@ -232,8 +233,11 @@ static int lua_res_json(lua_State *L)
         kl_response_status(res, code);
     }
 
-    /* Call json.encode(data) via the global 'json' table */
-    lua_getglobal(L, "json");
+    /* Call json.encode(data) via the runtime's cached decoder
+     * (registry stash from mod_fs.c init). Works regardless of
+     * whether the app declared hull/json — res:json() is a
+     * response helper, not a user-visible json import. */
+    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_json_internal");
     lua_getfield(L, -1, "encode");
     lua_pushvalue(L, 2); /* push the data argument */
     if (lua_pcall(L, 1, 1, 0) != LUA_OK) {

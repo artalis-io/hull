@@ -19,11 +19,15 @@ local idempotency = require("hull.middleware.idempotency")
 local inbox       = require("hull.middleware.inbox")
 local outbox      = require("hull.middleware.outbox")
 
+local log = require("hull.log")
+local json = require("hull.json")
 -- Manifest: allow outbound HTTP to localhost for webhook delivery
 app.manifest({
     env = {"WEBHOOK_SECRET"},
     hosts = {"127.0.0.1"},
     modules = {
+        "hull/json@1",
+        "hull/log@1",
         "hull/crypto@1",
         "hull/db@1",
         "hull/env@1",

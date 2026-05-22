@@ -115,10 +115,15 @@ static const HlModuleSpec REGISTRY[] = {
         .required_caps = 0, .deps = {0},
     },
 
-    /* ── Intrinsic: pure data codec ───────────────────────────────── */
+    /* ── Pure data codec ──────────────────────────────────────────── */
     {
+        /* json was intrinsic in early v0.1.0; demoted to declared so
+         * the intrinsic core is just `app`. The runtime's response
+         * helpers (res:json / res.json) keep working at the C level
+         * without requiring this declaration — apps only need to
+         * declare it when they call json.encode/decode directly. */
         .name = "hull/json",
-        .api_major = 1, .intrinsic = 1, .pure = 1,
+        .api_major = 1, .intrinsic = 0, .pure = 1,
         .required_caps = 0, .deps = {0},
     },
     {
@@ -128,10 +133,14 @@ static const HlModuleSpec REGISTRY[] = {
         .deps = {"hull/crypto", 0},
     },
 
-    /* ── Intrinsic: logger ────────────────────────────────────────── */
+    /* ── Logger ───────────────────────────────────────────────────── */
     {
+        /* log was intrinsic in early v0.1.0; demoted to declared. It
+         * does stderr I/O, so the declared-modules story is cleaner
+         * with it explicit. Runtime's internal error logging stays
+         * intrinsic at the C level. */
         .name = "hull/log",
-        .api_major = 1, .intrinsic = 1, .pure = 0,
+        .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = 0, .deps = {0},
     },
 

@@ -17,6 +17,8 @@ templates.lua_app = [[-- Declare every first-party module the app imports.
 -- The runtime gate refuses undeclared imports — `hull modules available`
 -- lists the full registry. Add capability sections (fs, hosts, env)
 -- alongside `modules` when a module needs them.
+local log = require("hull.log")
+local json = require("hull.json")
 local time = require("hull.time")
 
 app.manifest({

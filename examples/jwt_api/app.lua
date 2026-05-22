@@ -10,9 +10,13 @@ local jwt      = require("hull.jwt")
 local time     = require("hull.time")
 local validate = require("hull.validate")
 
+local log = require("hull.log")
+local json = require("hull.json")
 app.manifest({
     env = {"JWT_SECRET"},
     modules = {
+        "hull/json@1",
+        "hull/log@1",
         "hull/crypto@1",
         "hull/db@1",
         "hull/env@1",

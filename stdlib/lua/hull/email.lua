@@ -25,6 +25,8 @@
 --   })
 --   if not result.ok then log.error(result.error) end
 
+local log = require("hull.log")
+local json = require("hull.json")
 local http = require("hull.http")
 local smtp = require("hull.smtp")
 
