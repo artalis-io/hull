@@ -502,6 +502,71 @@ UTEST(js_runtime, app_router_chainable)
     cleanup_js();
 }
 
+/* ── hull/timers decoration tests ────────────────────────────────────
+ *
+ * app.every / app.daily are conditionally installed by app.manifest
+ * when the manifest's modules array contains "hull/timers@*". Without
+ * the declaration the methods literally don't exist on `app` —
+ * accessing them returns undefined, calling them throws TypeError. */
+
+UTEST(js_runtime, app_timers_absent_without_declaration)
+{
+    init_js();
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "globalThis.__test_every_type = typeof app.every;\n"
+        "globalThis.__test_daily_type = typeof app.daily;\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    char *e = eval_str("globalThis.__test_every_type");
+    ASSERT_STREQ(e, "undefined"); free(e);
+    char *d = eval_str("globalThis.__test_daily_type");
+    ASSERT_STREQ(d, "undefined"); free(d);
+    cleanup_js();
+}
+
+UTEST(js_runtime, app_timers_present_when_declared)
+{
+    init_js();
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/timers@1'] });\n"
+        "globalThis.__test_every_type = typeof app.every;\n"
+        "globalThis.__test_daily_type = typeof app.daily;\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    char *e = eval_str("globalThis.__test_every_type");
+    ASSERT_STREQ(e, "function"); free(e);
+    char *d = eval_str("globalThis.__test_daily_type");
+    ASSERT_STREQ(d, "function"); free(d);
+    cleanup_js();
+}
+
+UTEST(js_runtime, app_timers_register_timer_when_declared)
+{
+    init_js();
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/timers@1'] });\n"
+        "app.every(1000, () => {});\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__hull_timer_defs.length"), 1);
+    cleanup_js();
+}
+
 UTEST(js_runtime, app_router_empty_prefix)
 {
     init_js();

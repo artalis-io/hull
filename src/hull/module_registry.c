@@ -259,6 +259,18 @@ static const HlModuleSpec REGISTRY[] = {
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = 0, .deps = {0},
     },
+    /* Timers — declaring this module decorates the `app` intrinsic
+     * with `app.every(ms, fn)` and `app.daily(hhmm, fn)`. Without it
+     * those methods don't exist on `app` at all (calling them raises
+     * "attempt to call a nil value"). The methods grant no new
+     * authority — the handler runs in the same sandbox with the
+     * same declared caps — but the declaration makes background
+     * activity visible to a reviewer reading the manifest. */
+    {
+        .name = "hull/timers",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = 0, .deps = {0},
+    },
     {
         .name = "hull/validate",
         .api_major = 1, .intrinsic = 0, .pure = 1,

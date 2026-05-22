@@ -519,6 +519,63 @@ static JSValue js_app_sse(JSContext *ctx, JSValueConst this_val,
 }
 
 /* app.manifest(obj) — declare application capabilities (one-shot) */
+/* Forward decls for the conditionally-installed timer methods. */
+static JSValue js_app_every(JSContext *ctx, JSValueConst this_val,
+                             int argc, JSValueConst *argv);
+static JSValue js_app_daily(JSContext *ctx, JSValueConst this_val,
+                             int argc, JSValueConst *argv);
+
+/* Scan a manifest object for a `modules` array entry that starts
+ * with `prefix` (e.g. "hull/timers"). Returns 1 if found.
+ * Manifest and modules array are inspected via JS_GetPropertyStr;
+ * caller owns the manifest reference. */
+static int js_manifest_declares_module(JSContext *ctx, JSValueConst manifest,
+                                       const char *prefix)
+{
+    int found = 0;
+    size_t plen = strlen(prefix);
+
+    JSValue modules = JS_GetPropertyStr(ctx, manifest, "modules");
+    if (JS_IsArray(ctx, modules)) {
+        JSValue len_val = JS_GetPropertyStr(ctx, modules, "length");
+        uint32_t len = 0;
+        JS_ToUint32(ctx, &len, len_val);
+        JS_FreeValue(ctx, len_val);
+        for (uint32_t i = 0; i < len; i++) {
+            JSValue item = JS_GetPropertyUint32(ctx, modules, i);
+            if (JS_IsString(item)) {
+                const char *s = JS_ToCString(ctx, item);
+                if (s && strncmp(s, prefix, plen) == 0) {
+                    found = 1;
+                }
+                if (s) JS_FreeCString(ctx, s);
+            }
+            JS_FreeValue(ctx, item);
+            if (found) break;
+        }
+    }
+    JS_FreeValue(ctx, modules);
+    return found;
+}
+
+/* Install app.every / app.daily on the exported `app` object.
+ * The app object is stashed on globalThis under __hull_app_ref by
+ * js_app_module_init so this function can reach it. Mirrors the
+ * Lua partial-class pattern. */
+static void js_install_app_timers(JSContext *ctx)
+{
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue app = JS_GetPropertyStr(ctx, global, "__hull_app_ref");
+    if (JS_IsObject(app)) {
+        JS_SetPropertyStr(ctx, app, "every",
+            JS_NewCFunction(ctx, js_app_every, "every", 2));
+        JS_SetPropertyStr(ctx, app, "daily",
+            JS_NewCFunction(ctx, js_app_daily, "daily", 3));
+    }
+    JS_FreeValue(ctx, app);
+    JS_FreeValue(ctx, global);
+}
+
 static JSValue js_app_manifest(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv)
 {
@@ -538,6 +595,12 @@ static JSValue js_app_manifest(JSContext *ctx, JSValueConst this_val,
 
     JS_SetPropertyStr(ctx, global, "__hull_manifest", JS_DupValue(ctx, argv[0]));
     JS_FreeValue(ctx, global);
+
+    /* Module-conditional method installation. Today: hull/timers
+     * decorates the `app` intrinsic with every/daily. */
+    if (js_manifest_declares_module(ctx, argv[0], "hull/timers")) {
+        js_install_app_timers(ctx);
+    }
 
     return JS_UNDEFINED;
 }
@@ -621,10 +684,9 @@ static int js_app_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_app_ws, "ws", 2));
     JS_SetPropertyStr(ctx, app, "sse",
                       JS_NewCFunction(ctx, js_app_sse, "sse", 2));
-    JS_SetPropertyStr(ctx, app, "every",
-                      JS_NewCFunction(ctx, js_app_every, "every", 2));
-    JS_SetPropertyStr(ctx, app, "daily",
-                      JS_NewCFunction(ctx, js_app_daily, "daily", 3));
+    /* every / daily are installed conditionally by js_app_manifest
+     * when the manifest declares "hull/timers@1" — they're absent
+     * from the default app surface. */
     JS_SetPropertyStr(ctx, app, "main",
                       JS_NewCFunction(ctx, js_app_main, "main", 1));
     JS_SetPropertyStr(ctx, app, "manifest",
@@ -693,11 +755,17 @@ static int js_app_module_init(JSContext *ctx, JSModuleDef *m)
     JSAtom temp_atom = JS_NewAtom(ctx, "__hull_app_for_router");
     JS_DeleteProperty(ctx, global, temp_atom, 0);
     JS_FreeAtom(ctx, temp_atom);
-    JS_FreeValue(ctx, global);
     if (router_failed) {
+        JS_FreeValue(ctx, global);
         JS_FreeValue(ctx, app);
         return -1;
     }
+
+    /* Stash the app object on globalThis under an internal name so
+     * js_app_manifest can find it later to install module-conditional
+     * methods (currently: every/daily, gated on hull/timers). */
+    JS_SetPropertyStr(ctx, global, "__hull_app_ref", JS_DupValue(ctx, app));
+    JS_FreeValue(ctx, global);
 
     JS_SetModuleExport(ctx, m, "app", app);
     return 0;

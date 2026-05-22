@@ -41,6 +41,7 @@ local _cookie  = require("hull.cookie") -- luacheck: ignore
 app.manifest({
     hosts = {"127.0.0.1"},
     modules = {
+        "hull/timers@1",
         "hull/json@1",
         "hull/log@1",
         "hull/cookie@1",

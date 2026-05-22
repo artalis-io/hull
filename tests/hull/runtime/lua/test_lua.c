@@ -487,6 +487,66 @@ UTEST(lua_runtime, app_router_chainable)
     cleanup_lua();
 }
 
+/* ── hull/timers decoration tests ────────────────────────────────────
+ *
+ * app.every / app.daily are conditionally installed by app.manifest
+ * when the manifest's modules array contains "hull/timers@*". Without
+ * the declaration the methods literally don't exist on `app` —
+ * calling them raises "attempt to call a nil value". */
+
+UTEST(lua_runtime, app_timers_absent_without_declaration)
+{
+    init_lua();
+    /* No app.manifest call at all → every/daily are nil */
+    int every_nil = eval_int("app.every == nil and 1 or 0");
+    int daily_nil = eval_int("app.daily == nil and 1 or 0");
+    ASSERT_EQ(every_nil, 1);
+    ASSERT_EQ(daily_nil, 1);
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, app_timers_absent_with_empty_modules)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "app.manifest({ modules = {} })\n");
+    ASSERT_EQ(rc, LUA_OK);
+    int every_nil = eval_int("app.every == nil and 1 or 0");
+    int daily_nil = eval_int("app.daily == nil and 1 or 0");
+    ASSERT_EQ(every_nil, 1);
+    ASSERT_EQ(daily_nil, 1);
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, app_timers_present_when_declared)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "app.manifest({ modules = { 'hull/timers@1' } })\n");
+    ASSERT_EQ(rc, LUA_OK);
+    int every_fn = eval_int("type(app.every) == 'function' and 1 or 0");
+    int daily_fn = eval_int("type(app.daily) == 'function' and 1 or 0");
+    ASSERT_EQ(every_fn, 1);
+    ASSERT_EQ(daily_fn, 1);
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, app_timers_register_timer_when_declared)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "app.manifest({ modules = { 'hull/timers@1' } })\n"
+        "app.every(1000, function() end)\n");
+    ASSERT_EQ(rc, LUA_OK);
+    /* timer registration stores into __hull_timer_defs */
+    lua_getfield(lua_rt.L, LUA_REGISTRYINDEX, "__hull_timer_defs");
+    ASSERT_TRUE(lua_istable(lua_rt.L, -1));
+    int count = (int)luaL_len(lua_rt.L, -1);
+    ASSERT_EQ(count, 1);
+    lua_pop(lua_rt.L, 1);
+    cleanup_lua();
+}
+
 UTEST(lua_runtime, app_router_empty_prefix)
 {
     /* app.router() with no prefix should still work — empty prefix
