@@ -385,6 +385,142 @@ UTEST(js_runtime, hull_app_module)
     cleanup_js();
 }
 
+/* ── app.router tests ─────────────────────────────────────────────── */
+
+UTEST(js_runtime, app_router_prefixes_routes)
+{
+    init_js();
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "const r = app.router('/api/v1');\n"
+        "r.get('/items', (req, res) => {});\n"
+        "r.post('/items', (req, res) => {});\n"
+        "r.put('/items/:id', (req, res) => {});\n"
+        "r.delete('/items/:id', (req, res) => {});\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__hull_route_defs.length"), 4);
+    char *p0 = eval_str("globalThis.__hull_route_defs[0].pattern");
+    ASSERT_STREQ(p0, "/api/v1/items"); free(p0);
+    char *p2 = eval_str("globalThis.__hull_route_defs[2].pattern");
+    ASSERT_STREQ(p2, "/api/v1/items/:id"); free(p2);
+    char *m3 = eval_str("globalThis.__hull_route_defs[3].method");
+    ASSERT_STREQ(m3, "DELETE"); free(m3);
+
+    cleanup_js();
+}
+
+UTEST(js_runtime, app_router_nested_composes_prefixes)
+{
+    init_js();
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "const api = app.router('/api/v1');\n"
+        "const admin = api.router('/admin');\n"
+        "admin.get('/users', (req, res) => {});\n"
+        "admin.get('/audit', (req, res) => {});\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__hull_route_defs.length"), 2);
+    char *p0 = eval_str("globalThis.__hull_route_defs[0].pattern");
+    ASSERT_STREQ(p0, "/api/v1/admin/users"); free(p0);
+    char *p1 = eval_str("globalThis.__hull_route_defs[1].pattern");
+    ASSERT_STREQ(p1, "/api/v1/admin/audit"); free(p1);
+
+    cleanup_js();
+}
+
+UTEST(js_runtime, app_router_use_with_handler_only)
+{
+    init_js();
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "const r = app.router('/api');\n"
+        "r.use((req, res) => 0);\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__hull_middleware.length"), 1);
+    char *m0 = eval_str("globalThis.__hull_middleware[0].method");
+    ASSERT_STREQ(m0, "*"); free(m0);
+    char *p0 = eval_str("globalThis.__hull_middleware[0].pattern");
+    ASSERT_STREQ(p0, "/api/*"); free(p0);
+
+    cleanup_js();
+}
+
+UTEST(js_runtime, app_router_use_with_explicit_method_pattern)
+{
+    init_js();
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "const r = app.router('/api');\n"
+        "r.use('POST', '/items', (req, res) => 0);\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__hull_middleware.length"), 1);
+    char *m0 = eval_str("globalThis.__hull_middleware[0].method");
+    ASSERT_STREQ(m0, "POST"); free(m0);
+    char *p0 = eval_str("globalThis.__hull_middleware[0].pattern");
+    ASSERT_STREQ(p0, "/api/items"); free(p0);
+
+    cleanup_js();
+}
+
+UTEST(js_runtime, app_router_chainable)
+{
+    init_js();
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.router('/api')\n"
+        "  .get('/a', () => {})\n"
+        "  .post('/b', () => {})\n"
+        "  .delete('/c', () => {});\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__hull_route_defs.length"), 3);
+
+    cleanup_js();
+}
+
+UTEST(js_runtime, app_router_empty_prefix)
+{
+    init_js();
+    const char *code =
+        "import { app } from 'hull:app';\n"
+        "const r = app.router();\n"
+        "r.get('/items', () => {});\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    char *p0 = eval_str("globalThis.__hull_route_defs[0].pattern");
+    ASSERT_STREQ(p0, "/items"); free(p0);
+
+    cleanup_js();
+}
+
 /* ── app.main (CLI mode) tests ─────────────────────────────────────── */
 
 UTEST(js_runtime, app_main_registers)

@@ -360,6 +360,152 @@ UTEST(lua_runtime, hull_app_module)
     cleanup_lua();
 }
 
+/* ── app.router tests ────────────────────────────────────────────────
+ *
+ * app.router(prefix, opts) returns a Router object that batches
+ * route registration with a common path prefix. Methods compose on
+ * top of app.get/app.post/app.use, so we verify by inspecting
+ * __hull_route_defs / __hull_middleware after the calls. */
+
+UTEST(lua_runtime, app_router_prefixes_routes)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "local r = app.router('/api/v1')\n"
+        "r:get('/items', function(req, res) end)\n"
+        "r:post('/items', function(req, res) end)\n"
+        "r:put('/items/:id', function(req, res) end)\n"
+        "r:delete('/items/:id', function(req, res) end)\n");
+    ASSERT_EQ(rc, LUA_OK);
+
+    lua_getfield(lua_rt.L, LUA_REGISTRYINDEX, "__hull_route_defs");
+    ASSERT_TRUE(lua_istable(lua_rt.L, -1));
+    ASSERT_EQ((int)luaL_len(lua_rt.L, -1), 4);
+
+    const char *expect_methods[]  = {"GET","POST","PUT","DELETE"};
+    const char *expect_patterns[] = {"/api/v1/items","/api/v1/items",
+                                      "/api/v1/items/:id","/api/v1/items/:id"};
+    for (int i = 1; i <= 4; i++) {
+        lua_rawgeti(lua_rt.L, -1, i);
+        lua_getfield(lua_rt.L, -1, "method");
+        ASSERT_STREQ(lua_tostring(lua_rt.L, -1), expect_methods[i-1]);
+        lua_pop(lua_rt.L, 1);
+        lua_getfield(lua_rt.L, -1, "pattern");
+        ASSERT_STREQ(lua_tostring(lua_rt.L, -1), expect_patterns[i-1]);
+        lua_pop(lua_rt.L, 2);
+    }
+    lua_pop(lua_rt.L, 1);
+
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, app_router_nested_composes_prefixes)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "local api   = app.router('/api/v1')\n"
+        "local admin = api:router('/admin')\n"
+        "admin:get('/users', function(req, res) end)\n"
+        "admin:get('/audit', function(req, res) end)\n");
+    ASSERT_EQ(rc, LUA_OK);
+
+    lua_getfield(lua_rt.L, LUA_REGISTRYINDEX, "__hull_route_defs");
+    ASSERT_EQ((int)luaL_len(lua_rt.L, -1), 2);
+
+    lua_rawgeti(lua_rt.L, -1, 1);
+    lua_getfield(lua_rt.L, -1, "pattern");
+    ASSERT_STREQ(lua_tostring(lua_rt.L, -1), "/api/v1/admin/users");
+    lua_pop(lua_rt.L, 2);
+
+    lua_rawgeti(lua_rt.L, -1, 2);
+    lua_getfield(lua_rt.L, -1, "pattern");
+    ASSERT_STREQ(lua_tostring(lua_rt.L, -1), "/api/v1/admin/audit");
+    lua_pop(lua_rt.L, 3);
+
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, app_router_use_with_handler_only)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "local r = app.router('/api')\n"
+        "r:use(function(req, res) return 0 end)\n");
+    ASSERT_EQ(rc, LUA_OK);
+
+    lua_getfield(lua_rt.L, LUA_REGISTRYINDEX, "__hull_middleware");
+    ASSERT_TRUE(lua_istable(lua_rt.L, -1));
+    ASSERT_EQ((int)luaL_len(lua_rt.L, -1), 1);
+
+    lua_rawgeti(lua_rt.L, -1, 1);
+    lua_getfield(lua_rt.L, -1, "method");
+    ASSERT_STREQ(lua_tostring(lua_rt.L, -1), "*");
+    lua_pop(lua_rt.L, 1);
+    lua_getfield(lua_rt.L, -1, "pattern");
+    ASSERT_STREQ(lua_tostring(lua_rt.L, -1), "/api/*");
+    lua_pop(lua_rt.L, 3);
+
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, app_router_use_with_explicit_method_pattern)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "local r = app.router('/api')\n"
+        "r:use('POST', '/items', function(req, res) return 0 end)\n");
+    ASSERT_EQ(rc, LUA_OK);
+
+    lua_getfield(lua_rt.L, LUA_REGISTRYINDEX, "__hull_middleware");
+    ASSERT_EQ((int)luaL_len(lua_rt.L, -1), 1);
+
+    lua_rawgeti(lua_rt.L, -1, 1);
+    lua_getfield(lua_rt.L, -1, "method");
+    ASSERT_STREQ(lua_tostring(lua_rt.L, -1), "POST");
+    lua_pop(lua_rt.L, 1);
+    lua_getfield(lua_rt.L, -1, "pattern");
+    ASSERT_STREQ(lua_tostring(lua_rt.L, -1), "/api/items");
+    lua_pop(lua_rt.L, 3);
+
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, app_router_chainable)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "app.router('/api')\n"
+        "  :get('/a', function() end)\n"
+        "  :post('/b', function() end)\n"
+        "  :delete('/c', function() end)\n");
+    ASSERT_EQ(rc, LUA_OK);
+
+    lua_getfield(lua_rt.L, LUA_REGISTRYINDEX, "__hull_route_defs");
+    ASSERT_EQ((int)luaL_len(lua_rt.L, -1), 3);
+    lua_pop(lua_rt.L, 1);
+
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, app_router_empty_prefix)
+{
+    /* app.router() with no prefix should still work — empty prefix
+     * means routes register at the bare paths. */
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "local r = app.router()\n"
+        "r:get('/items', function() end)\n");
+    ASSERT_EQ(rc, LUA_OK);
+
+    lua_getfield(lua_rt.L, LUA_REGISTRYINDEX, "__hull_route_defs");
+    lua_rawgeti(lua_rt.L, -1, 1);
+    lua_getfield(lua_rt.L, -1, "pattern");
+    ASSERT_STREQ(lua_tostring(lua_rt.L, -1), "/items");
+    lua_pop(lua_rt.L, 3);
+
+    cleanup_lua();
+}
+
 /* ── app.main (CLI mode) tests ─────────────────────────────────────── */
 
 UTEST(lua_runtime, app_main_registers)

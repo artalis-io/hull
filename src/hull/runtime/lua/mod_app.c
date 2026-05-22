@@ -477,3 +477,78 @@ int luaopen_hull_app(lua_State *L)
     luaL_newlib(L, app_funcs);
     return 1;
 }
+
+/* ─────────────────────────────────────────────────────────────────────
+ * app.router(prefix, opts) — prefix-mounted route group.
+ *
+ * Composes on top of app.get/app.post/app.use rather than duplicating
+ * route registration logic in C. The Router class is pure Lua;
+ * methods translate `r:get(path, h)` into `app.get(prefix .. path, h)`.
+ *
+ * Why this lives in C as an embedded string instead of a stdlib .lua:
+ * the Router patches the intrinsic `app` global, so it has to load at
+ * runtime init (after `lua_setglobal(L, "app")`) before any user code
+ * runs. A regular stdlib .lua would require an explicit manifest
+ * declaration, which defeats the "method on app" ergonomics.
+ *
+ * Call hl_lua_install_app_router(L) from modules.c after the app
+ * global is set. The eval runs once per Lua state.
+ * ──────────────────────────────────────────────────────────────────── */
+
+static const char router_src[] =
+"do\n"
+"  local Router = {}\n"
+"  Router.__index = Router\n"
+"\n"
+"  local function route_method(m)\n"
+"    return function(self, path, h)\n"
+"      app[m](self.prefix .. path, h)\n"
+"      return self\n"
+"    end\n"
+"  end\n"
+"\n"
+"  Router.get     = route_method('get')\n"
+"  Router.post    = route_method('post')\n"
+"  Router.put     = route_method('put')\n"
+"  Router.delete  = route_method('delete')\n"
+"  Router.patch   = route_method('patch')\n"
+"  Router.options = route_method('options')\n"
+"\n"
+"  function Router:use(a, b, c)\n"
+"    if type(a) == 'function' then\n"
+"      app.use('*', self.prefix .. '/*', a)\n"
+"    else\n"
+"      app.use(a, self.prefix .. b, c)\n"
+"    end\n"
+"    return self\n"
+"  end\n"
+"\n"
+"  function Router:use_post(a, b, c)\n"
+"    if type(a) == 'function' then\n"
+"      app.use_post('*', self.prefix .. '/*', a)\n"
+"    else\n"
+"      app.use_post(a, self.prefix .. b, c)\n"
+"    end\n"
+"    return self\n"
+"  end\n"
+"\n"
+"  function Router:ws(path, h)  app.ws(self.prefix .. path, h);  return self end\n"
+"  function Router:sse(path, h) app.sse(self.prefix .. path, h); return self end\n"
+"\n"
+"  function Router:router(sub, opts)\n"
+"    return setmetatable({prefix = self.prefix .. (sub or ''), opts = opts}, Router)\n"
+"  end\n"
+"\n"
+"  app.router = function(prefix, opts)\n"
+"    return setmetatable({prefix = prefix or '', opts = opts}, Router)\n"
+"  end\n"
+"end\n";
+
+int hl_lua_install_app_router(lua_State *L)
+{
+    if (luaL_dostring(L, router_src) != LUA_OK) {
+        const char *err = lua_tostring(L, -1);
+        return luaL_error(L, "app.router init failed: %s", err ? err : "?");
+    }
+    return 0;
+}

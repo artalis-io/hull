@@ -632,6 +632,73 @@ static int js_app_module_init(JSContext *ctx, JSModuleDef *m)
     JS_SetPropertyStr(ctx, app, "getManifest",
                       JS_NewCFunction(ctx, js_app_get_manifest, "getManifest", 0));
 
+    /* app.router(prefix, opts) — prefix-mounted route group.
+     *
+     * Pure-JS implementation evaluated against the live `app` object.
+     * The router methods translate r.get(path, h) into
+     * app.get(prefix + path, h), composing on top of the existing
+     * route registration C functions rather than duplicating them.
+     *
+     * We stash `app` on globalThis under a temporary name so the
+     * eval'd source can reach it, then clean up after the eval. */
+    static const char router_src[] =
+"(function() {\n"
+"  const app = globalThis.__hull_app_for_router;\n"
+"  class Router {\n"
+"    constructor(prefix, opts) {\n"
+"      this.prefix = prefix || '';\n"
+"      this.opts = opts;\n"
+"    }\n"
+"    get(p, h)     { app.get    (this.prefix + p, h); return this; }\n"
+"    post(p, h)    { app.post   (this.prefix + p, h); return this; }\n"
+"    put(p, h)     { app.put    (this.prefix + p, h); return this; }\n"
+"    delete(p, h)  { app.delete (this.prefix + p, h); return this; }\n"
+"    patch(p, h)   { app.patch  (this.prefix + p, h); return this; }\n"
+"    options(p, h) { app.options(this.prefix + p, h); return this; }\n"
+"    use(...args) {\n"
+"      if (typeof args[0] === 'function') {\n"
+"        app.use('*', this.prefix + '/*', args[0]);\n"
+"      } else {\n"
+"        app.use(args[0], this.prefix + args[1], args[2]);\n"
+"      }\n"
+"      return this;\n"
+"    }\n"
+"    usePost(...args) {\n"
+"      if (typeof args[0] === 'function') {\n"
+"        app.usePost('*', this.prefix + '/*', args[0]);\n"
+"      } else {\n"
+"        app.usePost(args[0], this.prefix + args[1], args[2]);\n"
+"      }\n"
+"      return this;\n"
+"    }\n"
+"    ws(p, h)  { app.ws (this.prefix + p, h); return this; }\n"
+"    sse(p, h) { app.sse(this.prefix + p, h); return this; }\n"
+"    router(sub, opts) {\n"
+"      return new Router(this.prefix + (sub || ''), opts);\n"
+"    }\n"
+"  }\n"
+"  app.router = function(prefix, opts) {\n"
+"    return new Router(prefix, opts);\n"
+"  };\n"
+"})();\n";
+
+    JSValue global = JS_GetGlobalObject(ctx);
+    JS_SetPropertyStr(ctx, global, "__hull_app_for_router",
+                      JS_DupValue(ctx, app));
+    JSValue rret = JS_Eval(ctx, router_src, sizeof(router_src) - 1,
+                           "<hull-router-init>", JS_EVAL_TYPE_GLOBAL);
+    int router_failed = JS_IsException(rret);
+    JS_FreeValue(ctx, rret);
+    /* Clean up the temporary stash regardless of success. */
+    JSAtom temp_atom = JS_NewAtom(ctx, "__hull_app_for_router");
+    JS_DeleteProperty(ctx, global, temp_atom, 0);
+    JS_FreeAtom(ctx, temp_atom);
+    JS_FreeValue(ctx, global);
+    if (router_failed) {
+        JS_FreeValue(ctx, app);
+        return -1;
+    }
+
     JS_SetModuleExport(ctx, m, "app", app);
     return 0;
 }

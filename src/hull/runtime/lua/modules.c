@@ -42,6 +42,10 @@ int hl_lua_register_modules(HlLua *lua)
     luaL_requiref(L, "hull.app", luaopen_hull_app, 0);
     lua_setglobal(L, "app");
 
+    /* Add app.router AFTER app is global so the embedded Lua source
+     * can reference `app.X` directly. */
+    hl_lua_install_app_router(L);
+
     /* hull.log — basic stderr logger. */
     luaL_requiref(L, "hull.log", luaopen_hull_log, 0);
     lua_setglobal(L, "log");
