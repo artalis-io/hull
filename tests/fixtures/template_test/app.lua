@@ -3,6 +3,10 @@
 -- Each route tests a different template feature and returns JSON pass/fail.
 --
 
+app.manifest({
+    modules = {"hull/http-server@1","hull/template@1"},
+})
+
 local template = require("hull.template")
 
 -- Helper: compare expected vs actual

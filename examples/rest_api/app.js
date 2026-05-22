@@ -14,6 +14,7 @@ import { validate } from "hull:validate";
 
 app.manifest({
     modules: [
+        "hull/http-server@1",
         "hull/db@1",
         "hull/i18n@1",
         "hull/time@1",

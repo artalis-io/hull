@@ -95,13 +95,16 @@ int hl_js_init_gpu_module(JSContext *ctx, HlJS *js);
 int hl_js_init_tui_module(JSContext *ctx, HlJS *js);
 #endif
 
-/* ── WebSocket module (defined in js/mod_ws.c) ───────────────────── */
+/* ── WebSocket modules (split: server in mod_ws_server.c,
+ *    client in mod_ws_client.c) ─────────────────────────────────── */
 
-int hl_js_init_ws_module(JSContext *ctx, HlJS *js);
+int hl_js_init_ws_server_module(JSContext *ctx, HlJS *js);
+int hl_js_init_ws_client_module(JSContext *ctx, HlJS *js);
 
-/* WS conn class IDs (defined in js/mod_ws.c) */
+/* Server-side conn class ID (in mod_ws_server.c) — referenced by
+ * runtime/js/ws.c (Keel callback dispatcher). The client conn class
+ * is internal to mod_ws_client.c. */
 extern JSClassID js_ws_conn_class_id;
-extern JSClassID js_ws_client_conn_class_id;
 
 /* WS conn helpers (defined in js/mod_ws.c) */
 struct HlWsConn;

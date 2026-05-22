@@ -129,6 +129,7 @@ echo "=== Test 1: Hull with manifest — sandbox log ==="
 
 cat > "$WORKDIR/app.lua" << 'EOF'
 app.manifest({
+    modules = {"hull/http-server@1"},
     fs = { read = {"/tmp"}, write = {"/tmp"} },
     env = {"PORT"},
     hosts = {"example.com"},
@@ -180,6 +181,8 @@ echo ""
 echo "=== Test 2: Hull without manifest — default-deny sandbox ==="
 
 cat > "$WORKDIR/nomanifest.lua" << 'EOF'
+app.manifest({ modules = {"hull/http-server@1"} })
+
 app.get("/", function(req, res)
     res:json({status = "ok"})
 end)
@@ -222,6 +225,7 @@ echo "=== Test 3: Manifest without hosts — no dns promise ==="
 
 cat > "$WORKDIR/nohosts.lua" << 'EOF'
 app.manifest({
+    modules = {"hull/http-server@1"},
     fs = { read = {"/tmp"} },
     env = {"PORT"},
 })
@@ -267,6 +271,7 @@ cat > "$WORKDIR/jsapp.js" << 'EOF'
 import { app } from 'hull:app';
 
 app.manifest({
+    modules: ["hull/http-server@1"],
     fs: { read: ["/tmp"], write: ["/tmp"] },
     env: ["PORT"],
     hosts: ["example.com"],

@@ -4,7 +4,7 @@
 
 local crypto = require("hull.crypto")
 local db     = require("hull.db")
-local server = require("hull.server")
+local http_server = require("hull.http-server")
 local time   = require("hull.time")
 local health = require("hull.middleware.health")
 local etag   = require("hull.middleware.etag")
@@ -12,10 +12,10 @@ local etag   = require("hull.middleware.etag")
 local json = require("hull.json")
 app.manifest({
     modules = {
+        "hull/http-server@1",
         "hull/json@1",
         "hull/crypto@1",
         "hull/db@1",
-        "hull/server@1",
         "hull/time@1",
         "hull/middleware/etag@1",
         "hull/middleware/health@1",

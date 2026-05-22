@@ -3,7 +3,7 @@
 -- Run: hull app.lua -p 3000
 -- Demonstrates middleware chaining: request ID, logging, rate limiting, CORS
 
-local server    = require("hull.server")
+local http_server    = require("hull.http-server")
 local time      = require("hull.time")
 local cors      = require("hull.middleware.cors")
 local ratelimit = require("hull.middleware.ratelimit")
@@ -12,9 +12,9 @@ local log = require("hull.log")
 local json = require("hull.json")
 app.manifest({
     modules = {
+        "hull/http-server@1",
         "hull/json@1",
         "hull/log@1",
-        "hull/server@1",
         "hull/time@1",
         "hull/middleware/cors@1",
         "hull/middleware/ratelimit@1",
@@ -105,7 +105,7 @@ end)
 
 -- Server stats (live connection counts)
 app.get("/api/stats", function(_req, res)
-    local ok, stats = pcall(server.stats)
+    local ok, stats = pcall(http_server.stats)
     if ok then
         res:json(stats)
     else

@@ -23,6 +23,7 @@ app.manifest({
     env: ["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS", "SMTP_FROM", "SMTP_TLS"],
     hosts: ["localhost", "127.0.0.1", "smtp.gmail.com"],
     modules: [
+        "hull/http-server@1",
         "hull/db@1",
         "hull/env@1",
         "hull/smtp@1",

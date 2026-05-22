@@ -148,13 +148,13 @@ UTEST(module_resolver, http_with_hosts_admitted)
 {
     HlManifest m;
     clear_manifest(&m);
-    add_module(&m, "http", 1);
+    add_module(&m, "http-client", 1);
     add_host(&m, "https://api.example.com");
 
     HlResolvedModuleSet s = {0};
     char err[256] = {0};
     ASSERT_EQ(hl_module_resolver_resolve(&m, &s, err, sizeof(err)), 0);
-    ASSERT_TRUE(hl_module_set_contains_name(&s, "hull/http"));
+    ASSERT_TRUE(hl_module_set_contains_name(&s, "hull/http-client"));
 }
 
 UTEST(module_resolver, fs_with_read_path_admitted)
@@ -240,22 +240,27 @@ UTEST(module_resolver, duplicate_declaration_rejected)
     ASSERT_NE(strstr(err, "more than once"), NULL);
 }
 
-UTEST(module_resolver, http_without_hosts_rejected)
+/* Module declarations without their matching capability section are
+ * intentionally allowed: the per-call cap layer fails closed, and some
+ * surface (fs.realpath, future fs.stat, http_client with a hosts list
+ * filled in at runtime via a tool, etc.) can be useful without paths.
+ * The resolver only hard-blocks compile-time gates. */
+
+UTEST(module_resolver, http_client_without_hosts_admitted)
 {
     HlManifest m;
     clear_manifest(&m);
-    add_module(&m, "http", 1);
-    /* no hosts */
+    add_module(&m, "http-client", 1);
+    /* no hosts — resolver still admits the module */
 
     HlResolvedModuleSet s = {0};
     char err[256] = {0};
     int rc = hl_module_resolver_resolve(&m, &s, err, sizeof(err));
-    ASSERT_EQ(rc, -1);
-    ASSERT_NE(strstr(err, "hosts"), NULL);
-    ASSERT_NE(strstr(err, "hull/http"), NULL);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(err[0], '\0');
 }
 
-UTEST(module_resolver, fs_without_paths_rejected)
+UTEST(module_resolver, fs_without_paths_admitted)
 {
     HlManifest m;
     clear_manifest(&m);
@@ -264,11 +269,11 @@ UTEST(module_resolver, fs_without_paths_rejected)
     HlResolvedModuleSet s = {0};
     char err[256] = {0};
     int rc = hl_module_resolver_resolve(&m, &s, err, sizeof(err));
-    ASSERT_EQ(rc, -1);
-    ASSERT_NE(strstr(err, "fs"), NULL);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(err[0], '\0');
 }
 
-UTEST(module_resolver, env_without_allowlist_rejected)
+UTEST(module_resolver, env_without_allowlist_admitted)
 {
     HlManifest m;
     clear_manifest(&m);
@@ -277,8 +282,8 @@ UTEST(module_resolver, env_without_allowlist_rejected)
     HlResolvedModuleSet s = {0};
     char err[256] = {0};
     int rc = hl_module_resolver_resolve(&m, &s, err, sizeof(err));
-    ASSERT_EQ(rc, -1);
-    ASSERT_NE(strstr(err, "env"), NULL);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(err[0], '\0');
 }
 
 UTEST(module_resolver, jwt_without_crypto_rejected)

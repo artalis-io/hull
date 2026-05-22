@@ -351,6 +351,7 @@ UTEST(js_runtime, hull_app_module)
     /* Register routes via hull:app */
     const char *code =
         "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
         "app.get('/test', (req, res) => { res.json({ok: true}); });\n"
         "app.post('/data', (req, res) => { res.text('received'); });\n";
 
@@ -392,6 +393,7 @@ UTEST(js_runtime, app_router_prefixes_routes)
     init_js();
     const char *code =
         "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
         "const r = app.router('/api/v1');\n"
         "r.get('/items', (req, res) => {});\n"
         "r.post('/items', (req, res) => {});\n"
@@ -419,6 +421,7 @@ UTEST(js_runtime, app_router_nested_composes_prefixes)
     init_js();
     const char *code =
         "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
         "const api = app.router('/api/v1');\n"
         "const admin = api.router('/admin');\n"
         "admin.get('/users', (req, res) => {});\n"
@@ -443,6 +446,7 @@ UTEST(js_runtime, app_router_use_with_handler_only)
     init_js();
     const char *code =
         "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
         "const r = app.router('/api');\n"
         "r.use((req, res) => 0);\n";
     JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
@@ -465,6 +469,7 @@ UTEST(js_runtime, app_router_use_with_explicit_method_pattern)
     init_js();
     const char *code =
         "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
         "const r = app.router('/api');\n"
         "r.use('POST', '/items', (req, res) => 0);\n";
     JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
@@ -487,6 +492,7 @@ UTEST(js_runtime, app_router_chainable)
     init_js();
     const char *code =
         "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
         "app.router('/api')\n"
         "  .get('/a', () => {})\n"
         "  .post('/b', () => {})\n"
@@ -572,6 +578,7 @@ UTEST(js_runtime, app_router_empty_prefix)
     init_js();
     const char *code =
         "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
         "const r = app.router();\n"
         "r.get('/items', () => {});\n";
     JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
@@ -614,6 +621,7 @@ UTEST(js_runtime, app_main_coexists_with_route_after)
     init_js();
     const char *code =
         "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
         "let caught = null;\n"
         "app.main((ctx) => { return 0; });\n"
         "try { app.get('/x', () => {}); } catch (e) { caught = e.message; }\n"
@@ -637,6 +645,7 @@ UTEST(js_runtime, route_coexists_with_app_main_after)
     init_js();
     const char *code =
         "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
         "let caught = null;\n"
         "app.get('/x', () => {});\n"
         "try { app.main(() => 0); } catch (e) { caught = e.message; }\n"
@@ -910,9 +919,11 @@ UTEST(js_runtime, free_after_modules_no_gc_leak)
 
     const char *code =
         "import { app } from 'hull:app';\n"
+        /* Manifest must come first so app.get/post are installed
+         * before they are called (hull/http-server@1 decoration). */
+        "app.manifest({ env: ['FOO'], modules: ['hull/http-server@1'] });\n"
         "app.get('/a', (req, res) => {});\n"
-        "app.post('/b', (req, res) => {});\n"
-        "app.manifest({ env: ['FOO'] });\n";
+        "app.post('/b', (req, res) => {});\n";
 
     JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
                           JS_EVAL_TYPE_MODULE);
@@ -1520,6 +1531,7 @@ UTEST(js_middleware, registration_stores_handler_id)
 
     const char *code =
         "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
         "app.use('*', '/*', (req, res) => 0);\n";
 
     JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
@@ -1562,6 +1574,7 @@ UTEST(js_middleware, handler_ids_do_not_collide_with_routes)
 
     const char *code =
         "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
         "app.get('/test', (req, res) => {});\n"
         "app.use('*', '/*', (req, res) => 0);\n";
 
@@ -1594,6 +1607,7 @@ UTEST(js_middleware, dispatch_return_zero_continues)
 
     const char *code =
         "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
         "app.use('*', '/*', (req, res) => 0);\n";
 
     JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
@@ -1621,6 +1635,7 @@ UTEST(js_middleware, dispatch_return_nonzero_short_circuits)
 
     const char *code =
         "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
         "app.use('*', '/*', (req, res) => 1);\n";
 
     JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
@@ -1660,6 +1675,7 @@ UTEST(js_middleware, wiring_to_server)
 
     const char *code =
         "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
         "app.get('/test', (req, res) => {});\n"
         "app.use('*', '/*', (req, res) => 0);\n"
         "app.use('GET', '/api/*', (req, res) => 0);\n";
@@ -1701,6 +1717,7 @@ UTEST(js_middleware, order_preserved)
 
     const char *code =
         "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
         "app.use('*', '/*', (req, res) => 0);\n"
         "app.use('GET', '/api/*', (req, res) => 0);\n";
 
@@ -2334,6 +2351,8 @@ UTEST(js_stdlib, email_validation)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-client@1'] });\n"
         "import { email } from 'hull:email';\n"
         "var r1 = await email.send(null);\n"
         "globalThis.__test_ev1 = (r1.ok === false && r1.error === 'opts required') ? 1 : 0;\n"
@@ -2362,6 +2381,8 @@ UTEST(js_stdlib, email_unknown_provider)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-client@1'] });\n"
         "import { email } from 'hull:email';\n"
         "var r = await email.send({ provider: 'foo', from: 'a@b.com', "
         "to: 'c@d.com', subject: 's', body: 'b' });\n"
@@ -2385,6 +2406,8 @@ UTEST(js_stdlib, email_api_key_required)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-client@1'] });\n"
         "import { email } from 'hull:email';\n"
         "var r = await email.send({ provider: 'postmark', from: 'a@b.com', "
         "to: 'c@d.com', subject: 's', body: 'b' });\n"

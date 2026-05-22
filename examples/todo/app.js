@@ -15,7 +15,7 @@ import { crypto } from "hull:crypto";
 import { csv } from "hull:csv";
 import { db } from "hull:db";
 import { form } from "hull:form";
-import { http } from "hull:http";
+import { httpClient } from "hull:http-client";
 import { i18n } from "hull:i18n";
 import { log } from "hull:log";
 import { auth } from "hull:middleware:auth";
@@ -34,13 +34,14 @@ import hu from "./locales/hu.json";
 app.manifest({
     hosts: ["127.0.0.1"],  // allow self-fetch for /api/stats
     modules: [
+        "hull/http-server@1",
         "hull/log@1",
         "hull/cookie@1",
         "hull/crypto@1",
         "hull/csv@1",
         "hull/db@1",
         "hull/form@1",
-        "hull/http@1",
+        "hull/http-client@1",
         "hull/i18n@1",
         "hull/search@1",
         "hull/template@1",
@@ -204,14 +205,14 @@ app.get("/health", (_req, res) => {
     res.json({ status: "ok" });
 });
 
-// Stats endpoint: uses http.async.get() to check own health
+// Stats endpoint: uses httpClient.async.get() to check own health
 app.get("/api/stats", async (req, res) => {
     const sess = requireSession(req, res);
     if (!sess) return;
 
     const host = req.headers.host || "127.0.0.1:3000";
     const port = host.split(":")[1] || "3000";
-    const health = await http.async.get(`http://127.0.0.1:${port}/health`);
+    const health = await httpClient.async.get(`http://127.0.0.1:${port}/health`);
     const count = db.query("SELECT COUNT(*) as n FROM todos WHERE user_id = ?",
                            [sess.user_id]);
     res.json({

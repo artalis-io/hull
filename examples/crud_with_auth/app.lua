@@ -14,6 +14,7 @@ local log = require("hull.log")
 local json = require("hull.json")
 app.manifest({
     modules = {
+        "hull/http-server@1",
         "hull/json@1",
         "hull/log@1",
         "hull/crypto@1",

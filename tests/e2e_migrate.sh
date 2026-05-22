@@ -40,6 +40,11 @@ echo "--- hull migrate new ---"
 
 mkdir -p "$TMPDIR/app1"
 cat > "$TMPDIR/app1/app.lua" << 'EOF'
+app.manifest({
+    modules = {"hull/http-server@1","hull/log@1","hull/json@1","hull/template@1","hull/compute@1","hull/timers@1","hull/http-client@1","hull/db@1","hull/crypto@1","hull/time@1","hull/validate@1","hull/csv@1"},
+    hosts = {"127.0.0.1"},
+})
+
 app.get("/", function(_req, res)
     res:json({ status = "ok" })
 end)
@@ -66,6 +71,11 @@ echo "--- hull migrate (run) ---"
 
 mkdir -p "$TMPDIR/app2/migrations"
 cat > "$TMPDIR/app2/app.lua" << 'EOF'
+app.manifest({
+    modules = {"hull/http-server@1","hull/log@1","hull/json@1","hull/template@1","hull/compute@1","hull/timers@1","hull/http-client@1","hull/db@1","hull/crypto@1","hull/time@1","hull/validate@1","hull/csv@1"},
+    hosts = {"127.0.0.1"},
+})
+
 app.get("/", function(_req, res)
     res:json({ status = "ok" })
 end)
@@ -127,6 +137,11 @@ echo "--- SQL error handling ---"
 
 mkdir -p "$TMPDIR/app3/migrations"
 cat > "$TMPDIR/app3/app.lua" << 'EOF'
+app.manifest({
+    modules = {"hull/http-server@1","hull/log@1","hull/json@1","hull/template@1","hull/compute@1","hull/timers@1","hull/http-client@1","hull/db@1","hull/crypto@1","hull/time@1","hull/validate@1","hull/csv@1"},
+    hosts = {"127.0.0.1"},
+})
+
 app.get("/", function(_req, res)
     res:json({ status = "ok" })
 end)
@@ -152,6 +167,11 @@ echo "--- no migrations dir ---"
 
 mkdir -p "$TMPDIR/app4"
 cat > "$TMPDIR/app4/app.lua" << 'EOF'
+app.manifest({
+    modules = {"hull/http-server@1","hull/log@1","hull/json@1","hull/template@1","hull/compute@1","hull/timers@1","hull/http-client@1","hull/db@1","hull/crypto@1","hull/time@1","hull/validate@1","hull/csv@1"},
+    hosts = {"127.0.0.1"},
+})
+
 app.get("/", function(_req, res)
     res:json({ status = "ok" })
 end)
@@ -185,6 +205,13 @@ echo "--- auto-run on startup ---"
 
 mkdir -p "$TMPDIR/app5/migrations"
 cat > "$TMPDIR/app5/app.lua" << 'EOF'
+app.manifest({
+    modules = {"hull/http-server@1","hull/log@1","hull/json@1","hull/template@1","hull/compute@1","hull/timers@1","hull/http-client@1","hull/db@1","hull/crypto@1","hull/time@1","hull/validate@1","hull/csv@1"},
+    hosts = {"127.0.0.1"},
+})
+
+local db = require("hull.db")
+
 app.get("/", function(_req, res)
     local rows = db.query("SELECT name FROM users ORDER BY name")
     res:json(rows)
@@ -226,6 +253,11 @@ echo "--- --no-migrate flag ---"
 
 mkdir -p "$TMPDIR/app6/migrations"
 cat > "$TMPDIR/app6/app.lua" << 'EOF'
+app.manifest({
+    modules = {"hull/http-server@1","hull/log@1","hull/json@1","hull/template@1","hull/compute@1","hull/timers@1","hull/http-client@1","hull/db@1","hull/crypto@1","hull/time@1","hull/validate@1","hull/csv@1"},
+    hosts = {"127.0.0.1"},
+})
+
 app.get("/", function(_req, res)
     res:json({ status = "ok" })
 end)

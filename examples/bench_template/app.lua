@@ -13,6 +13,7 @@ local time     = require("hull.time")
 local log = require("hull.log")
 app.manifest({
     modules = {
+        "hull/http-server@1",
         "hull/log@1",
         "hull/template@1",
         "hull/time@1",

@@ -16,7 +16,7 @@ local crypto      = require("hull.crypto")
 local csv         = require("hull.csv")
 local db          = require("hull.db")
 local form        = require("hull.form")
-local http        = require("hull.http")
+local http_client        = require("hull.http-client")
 local i18n        = require("hull.i18n")
 local search      = require("hull.search")
 local template    = require("hull.template")
@@ -34,13 +34,14 @@ local log = require("hull.log")
 app.manifest({
     hosts = {"127.0.0.1"},  -- allow self-fetch for /api/stats
     modules = {
+        "hull/http-server@1",
         "hull/log@1",
         "hull/cookie@1",
         "hull/crypto@1",
         "hull/csv@1",
         "hull/db@1",
         "hull/form@1",
-        "hull/http@1",
+        "hull/http-client@1",
         "hull/i18n@1",
         "hull/search@1",
         "hull/template@1",
@@ -197,13 +198,13 @@ app.get("/health", function(_req, res)
     res:json({ status = "ok" })
 end)
 
--- Stats endpoint: uses http.async.get() to check own health
+-- Stats endpoint: uses http_client.async.get() to check own health
 app.get("/api/stats", function(req, res)
     local sess = require_session(req, res)
     if not sess then return end
 
     local port = req.headers["host"]:match(":(%d+)$") or "3000"
-    local health = http.async.get("http://127.0.0.1:" .. port .. "/health")
+    local health = http_client.async.get("http://127.0.0.1:" .. port .. "/health")
     local count = db.query("SELECT COUNT(*) as n FROM todos WHERE user_id = ?",
                            { sess.user_id })
     res:json({

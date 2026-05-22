@@ -21,6 +21,7 @@ local json = require("hull.json")
 app.manifest({
     gpu = true,
     modules = {
+        "hull/http-server@1",
         "hull/json@1",
         "hull/log@1",
         "hull/gpu@1",

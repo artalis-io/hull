@@ -15,6 +15,7 @@ local log = require("hull.log")
 app.manifest({
     database = "timers.db",
     modules = {
+        "hull/http-server@1",
         "hull/timers@1",
         "hull/log@1",
         "hull/db@1",

@@ -75,7 +75,9 @@ UTEST(module_registry, side_effect_modules_are_not_intrinsic)
 {
     const char *side_effecting[] = {
         "hull/crypto", "hull/db", "hull/env", "hull/fs",
-        "hull/http", "hull/ws", "hull/time", "hull/compute", "hull/gpu",
+        "hull/http-client", "hull/http-server",
+        "hull/ws-client", "hull/ws-server", "hull/sse",
+        "hull/time", "hull/timers", "hull/compute", "hull/gpu",
         NULL,
     };
     for (int i = 0; side_effecting[i]; i++) {
@@ -87,9 +89,9 @@ UTEST(module_registry, side_effect_modules_are_not_intrinsic)
 
 /* ── Capability bits ──────────────────────────────────────────────── */
 
-UTEST(module_registry, http_requires_hosts_cap)
+UTEST(module_registry, http_client_requires_hosts_cap)
 {
-    const HlModuleSpec *s = hl_module_registry_find("hull/http");
+    const HlModuleSpec *s = hl_module_registry_find("hull/http-client");
     ASSERT_NE(s, NULL);
     ASSERT_NE((s->required_caps & HL_MOD_CAP_HOSTS), 0u);
 }

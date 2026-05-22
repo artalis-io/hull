@@ -460,6 +460,56 @@ static void install_app_timers(lua_State *L)
     lua_pop(L, 1); /* drop app */
 }
 
+/* Install the REST + middleware + router surface on the `app`
+ * global. Called when "hull/http-server@1" is declared in the
+ * manifest. The router (defined in router_src below as embedded
+ * Lua) gets evaluated as part of the install so app.router(...)
+ * comes along with the verbs. */
+static void install_app_http_server(lua_State *L)
+{
+    lua_getglobal(L, "app");
+    if (lua_istable(L, -1)) {
+        lua_pushcfunction(L, lua_app_get);      lua_setfield(L, -2, "get");
+        lua_pushcfunction(L, lua_app_post);     lua_setfield(L, -2, "post");
+        lua_pushcfunction(L, lua_app_put);      lua_setfield(L, -2, "put");
+        lua_pushcfunction(L, lua_app_del);      lua_setfield(L, -2, "delete");
+        lua_pushcfunction(L, lua_app_del);      lua_setfield(L, -2, "del");
+        lua_pushcfunction(L, lua_app_patch);    lua_setfield(L, -2, "patch");
+        lua_pushcfunction(L, lua_app_options);  lua_setfield(L, -2, "options");
+        lua_pushcfunction(L, lua_app_use);      lua_setfield(L, -2, "use");
+        lua_pushcfunction(L, lua_app_use_post); lua_setfield(L, -2, "use_post");
+    }
+    lua_pop(L, 1);
+
+    /* Router is bundled with hull/http-server — install it now too. */
+    hl_lua_install_app_router(L);
+}
+
+/* Install app.sse on the `app` global. Called when "hull/sse@1"
+ * is declared. */
+static void install_app_sse(lua_State *L)
+{
+    lua_getglobal(L, "app");
+    if (lua_istable(L, -1)) {
+        lua_pushcfunction(L, lua_app_sse);
+        lua_setfield(L, -2, "sse");
+    }
+    lua_pop(L, 1);
+}
+
+/* Install app.ws on the `app` global. Called when "hull/ws-server@1"
+ * is declared. The ws.broadcast/ws.connections helpers come from
+ * the require("hull.ws-server") module (see mod_ws.c). */
+static void install_app_ws_server(lua_State *L)
+{
+    lua_getglobal(L, "app");
+    if (lua_istable(L, -1)) {
+        lua_pushcfunction(L, lua_app_ws);
+        lua_setfield(L, -2, "ws");
+    }
+    lua_pop(L, 1);
+}
+
 /* app.manifest(tbl) — declare application capabilities (one-shot).
  *
  * Conditionally decorates the `app` intrinsic with methods provided
@@ -480,7 +530,17 @@ static int lua_app_manifest(lua_State *L)
     lua_pushvalue(L, 1);
     lua_setfield(L, LUA_REGISTRYINDEX, "__hull_manifest");
 
-    /* Module-conditional method installation. */
+    /* Module-conditional method installation. Each declared module
+     * may decorate the `app` intrinsic with additional methods. */
+    if (manifest_declares_module(L, 1, "hull/http-server")) {
+        install_app_http_server(L);
+    }
+    if (manifest_declares_module(L, 1, "hull/ws-server")) {
+        install_app_ws_server(L);
+    }
+    if (manifest_declares_module(L, 1, "hull/sse")) {
+        install_app_sse(L);
+    }
     if (manifest_declares_module(L, 1, "hull/timers")) {
         install_app_timers(L);
     }
@@ -518,18 +578,22 @@ static int lua_app_main(lua_State *L)
     return 0;
 }
 
+/* The default `app` table contains only the bootstrap registration
+ * surface: manifest, main, get_manifest. Every other method is
+ * conditionally installed by lua_app_manifest based on the modules
+ * an app declares:
+ *
+ *   hull/http-server@1 → get/post/put/delete/del/patch/options
+ *                         use/use_post/router
+ *   hull/ws-server@1   → ws
+ *   hull/sse@1         → sse
+ *   hull/timers@1      → every/daily (existing)
+ *
+ * Without the declaration, those methods literally don't exist on
+ * `app` — accessing them yields nil (Lua) / undefined (JS) and
+ * calling them raises a clear error.
+ */
 static const luaL_Reg app_funcs[] = {
-    {"get",          lua_app_get},
-    {"post",         lua_app_post},
-    {"put",          lua_app_put},
-    {"delete",       lua_app_del},
-    {"del",          lua_app_del},   /* deprecated alias — use `app.delete` */
-    {"patch",        lua_app_patch},
-    {"options",      lua_app_options},
-    {"use",          lua_app_use},
-    {"use_post",     lua_app_use_post},
-    {"ws",           lua_app_ws},
-    {"sse",          lua_app_sse},
     /* every + daily are installed conditionally by lua_app_manifest
      * when the manifest declares "hull/timers@1" — they're absent
      * from the default app table. */

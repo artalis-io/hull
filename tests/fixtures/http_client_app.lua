@@ -8,55 +8,56 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 
 app.manifest({
-    modules = { "hull/http@1" },
+    modules = { "hull/http-client@1", "hull/http-server@1", "hull/log@1" },
     hosts = {"127.0.0.1"},
     env = {"ECHO_PORT"},
 })
 
-local http = require("hull.http")
+local http_client = require("hull.http-client")
+local log = require("hull.log")
 local ECHO_BASE = "http://127.0.0.1:19860"
 
--- GET /test/get — exercise http.get()
+-- GET /test/get — exercise http_client.get()
 app.get("/test/get", function(_req, res)
-    local r = http.get(ECHO_BASE .. "/echo")
+    local r = http_client.get(ECHO_BASE .. "/echo")
     res:json({ status = r.status, echo = r.body })
 end)
 
--- GET /test/post — exercise http.post()
+-- GET /test/post — exercise http_client.post()
 app.get("/test/post", function(_req, res)
-    local r = http.post(ECHO_BASE .. "/echo", "hello from lua", {
+    local r = http_client.post(ECHO_BASE .. "/echo", "hello from lua", {
         headers = { ["X-Test"] = "lua-post" }
     })
     res:json({ status = r.status, echo = r.body })
 end)
 
--- GET /test/put — exercise http.put()
+-- GET /test/put — exercise http_client.put()
 app.get("/test/put", function(_req, res)
-    local r = http.put(ECHO_BASE .. "/echo", "put-body")
+    local r = http_client.put(ECHO_BASE .. "/echo", "put-body")
     res:json({ status = r.status, echo = r.body })
 end)
 
 -- GET /test/patch — exercise http.patch()
 app.get("/test/patch", function(_req, res)
-    local r = http.patch(ECHO_BASE .. "/echo", "patch-body")
+    local r = http_client.patch(ECHO_BASE .. "/echo", "patch-body")
     res:json({ status = r.status, echo = r.body })
 end)
 
--- GET /test/delete — exercise http.delete()
+-- GET /test/delete — exercise http_client.delete()
 app.get("/test/delete", function(_req, res)
-    local r = http.delete(ECHO_BASE .. "/echo")
+    local r = http_client.delete(ECHO_BASE .. "/echo")
     res:json({ status = r.status, echo = r.body })
 end)
 
--- GET /test/request — exercise http.request() with custom method
+-- GET /test/request — exercise http_client.request() with custom method
 app.get("/test/request", function(_req, res)
-    local r = http.request("OPTIONS", ECHO_BASE .. "/echo")
+    local r = http_client.request("OPTIONS", ECHO_BASE .. "/echo")
     res:json({ status = r.status, echo = r.body })
 end)
 
 -- GET /test/headers — verify custom headers are sent
 app.get("/test/headers", function(_req, res)
-    local r = http.get(ECHO_BASE .. "/echo", {
+    local r = http_client.get(ECHO_BASE .. "/echo", {
         headers = { ["X-Custom-Header"] = "test-value-lua" }
     })
     res:json({ status = r.status, echo = r.body })
@@ -65,7 +66,7 @@ end)
 -- GET /test/denied — verify host not in allowlist is rejected
 app.get("/test/denied", function(_req, res)
     local ok, err = pcall(function()
-        http.get("http://evil.example.com/steal")
+        http_client.get("http://evil.example.com/steal")
     end)
     if ok then
         res:json({ error = "should have been denied" })

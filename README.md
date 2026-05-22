@@ -220,7 +220,7 @@ Apps declare which first-party stdlib modules they import via the manifest's `mo
 
 1. **Every external capability is declared.** Language intrinsics (Lua: `string/table/math`; JS: `Object/Array/JSON`) and Hull's intrinsic core are always available; every other first-party module must appear in `manifest.modules` or the import fails. The intrinsic core is just `hull/app` (the registration API: `app.manifest`, `app.get/post/use`, `app.router`, `app.ws/sse`, `app.every/daily`, `app.main`). `hull/app` stays intrinsic because the manifest itself is expressed via `app.manifest(...)` and must exist before parsing. Everything else, including `hull/log` and `hull/json`, must be declared — apps that call `log.X` or `json.X` directly need `"hull/log@1"` / `"hull/json@1"` in `manifest.modules`.
 2. **Import-only exposure.** Declared modules are reached via `require("hull.X")` (Lua) / `import "hull:X"` (JS). They are NOT exposed as globals.
-3. **Capability + module are separate gates.** Declaring `hull/http@1` doesn't open the network — the app still needs a non-empty `hosts` allowlist. The resolver pairs them.
+3. **Capability + module are separate gates.** Declaring `hull/http-client@1` doesn't open the network — the app still needs a non-empty `hosts` allowlist. The resolver pairs them.
 
 ```lua
 app.manifest({
@@ -250,7 +250,7 @@ Each entry is a canonical spec `"<vendor>/<name>@<major>"`. The manifest declare
 |-------|-------|
 | `module 'hull.X' is not declared in app.manifest` | App imports a known module not in `modules` |
 | `module 'hull/jwt@1' requires 'hull/crypto' but it is not declared` | Declared module's internal dep is missing |
-| `module 'hull/http@1' requires a non-empty 'hosts' section` | Module needs a capability that isn't wired |
+| `http.fetch: host 'api.x.com' not in manifest hosts allowlist` | Module loaded fine; per-call cap layer rejected the URL — add to `hosts` |
 | `module 'hull/gpu@1' requires HL_ENABLE_GPU (build-time)` | Build wasn't compiled with the subsystem |
 | `unknown module 'X' in app.manifest.modules` | Typo or non-existent module |
 

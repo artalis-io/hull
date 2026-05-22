@@ -292,40 +292,44 @@
             </div>
 <pre class="code-tab-panel" data-tab-panel="lua"><span class="tk-kw">app</span>.<span class="tk-fn">manifest</span>({
     <span class="tk-key">modules</span> = {
-        <span class="tk-str">"hull/server@1"</span>,
-        <span class="tk-str">"hull/db@1"</span>,
-        <span class="tk-str">"hull/crypto@1"</span>,
+        <span class="tk-str">"hull/http-server@1"</span>,
+        <span class="tk-str">"hull/http-client@1"</span>,
+        <span class="tk-str">"hull/env@1"</span>,
+        <span class="tk-str">"hull/json@1"</span>,
     },
-    <span class="tk-key">hosts</span>   = { <span class="tk-str">"api.stripe.com"</span> },
-    <span class="tk-key">fs</span>      = { <span class="tk-key">read</span> = { <span class="tk-str">"./assets/*"</span> } },
-    <span class="tk-key">env</span>     = { <span class="tk-str">"STRIPE_KEY"</span> },
+    <span class="tk-key">hosts</span> = { <span class="tk-str">"api.stripe.com"</span> },
+    <span class="tk-key">env</span>   = { <span class="tk-str">"STRIPE_KEY"</span> },
 })
+
+<span class="tk-kw">local</span> env         = <span class="tk-fn">require</span>(<span class="tk-str">"hull.env"</span>)
+<span class="tk-kw">local</span> http_client = <span class="tk-fn">require</span>(<span class="tk-str">"hull.http-client"</span>)
 
 <span class="tk-kw">app</span>.<span class="tk-fn">get</span>(<span class="tk-str">"/charge"</span>, <span class="tk-kw">function</span>(req, res)
     <span class="tk-com">-- only declared capabilities exist</span>
     <span class="tk-kw">local</span> key = <span class="tk-acc">env</span>.<span class="tk-fn">get</span>(<span class="tk-str">"STRIPE_KEY"</span>)
-    <span class="tk-kw">local</span> r   = <span class="tk-acc">http</span>.<span class="tk-fn">fetch</span>(<span class="tk-str">"https://api.stripe.com/..."</span>)
+    <span class="tk-kw">local</span> r   = <span class="tk-acc">http_client</span>.<span class="tk-fn">fetch</span>(<span class="tk-str">"https://api.stripe.com/..."</span>)
     res:<span class="tk-fn">json</span>(r)
 <span class="tk-kw">end</span>)
 </pre>
-<pre class="code-tab-panel hidden" data-tab-panel="js"><span class="tk-kw">import</span> { http } <span class="tk-kw">from</span> <span class="tk-str">"hull:http"</span>;
-<span class="tk-kw">import</span> { env  } <span class="tk-kw">from</span> <span class="tk-str">"hull:env"</span>;
+<pre class="code-tab-panel hidden" data-tab-panel="js"><span class="tk-kw">import</span> { app }        <span class="tk-kw">from</span> <span class="tk-str">"hull:app"</span>;
+<span class="tk-kw">import</span> { httpClient } <span class="tk-kw">from</span> <span class="tk-str">"hull:http-client"</span>;
+<span class="tk-kw">import</span> { env }        <span class="tk-kw">from</span> <span class="tk-str">"hull:env"</span>;
 
 <span class="tk-kw">app</span>.<span class="tk-fn">manifest</span>({
     <span class="tk-key">modules</span>: [
-        <span class="tk-str">"hull/server@1"</span>,
-        <span class="tk-str">"hull/db@1"</span>,
-        <span class="tk-str">"hull/crypto@1"</span>,
+        <span class="tk-str">"hull/http-server@1"</span>,
+        <span class="tk-str">"hull/http-client@1"</span>,
+        <span class="tk-str">"hull/env@1"</span>,
+        <span class="tk-str">"hull/json@1"</span>,
     ],
-    <span class="tk-key">hosts</span>:   [<span class="tk-str">"api.stripe.com"</span>],
-    <span class="tk-key">fs</span>:      { <span class="tk-key">read</span>: [<span class="tk-str">"./assets/*"</span>] },
-    <span class="tk-key">env</span>:     [<span class="tk-str">"STRIPE_KEY"</span>],
+    <span class="tk-key">hosts</span>: [<span class="tk-str">"api.stripe.com"</span>],
+    <span class="tk-key">env</span>:   [<span class="tk-str">"STRIPE_KEY"</span>],
 });
 
 <span class="tk-kw">app</span>.<span class="tk-fn">get</span>(<span class="tk-str">"/charge"</span>, <span class="tk-kw">async</span> (req, res) =&gt; {
     <span class="tk-com">// only declared capabilities exist</span>
     <span class="tk-kw">const</span> key = <span class="tk-acc">env</span>.<span class="tk-fn">get</span>(<span class="tk-str">"STRIPE_KEY"</span>);
-    <span class="tk-kw">const</span> r   = <span class="tk-kw">await</span> <span class="tk-acc">http</span>.<span class="tk-fn">fetch</span>(<span class="tk-str">"https://api.stripe.com/..."</span>);
+    <span class="tk-kw">const</span> r   = <span class="tk-kw">await</span> <span class="tk-acc">httpClient</span>.<span class="tk-fn">fetch</span>(<span class="tk-str">"https://api.stripe.com/..."</span>);
     res.<span class="tk-fn">json</span>(r);
 });
 </pre>
@@ -912,7 +916,7 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
 
 <span class="tk-kw">app</span>.<span class="tk-fn">manifest</span>({
     <span class="tk-key">modules</span> = {
-        <span class="tk-str">"hull/server@1"</span>,
+        <span class="tk-str">"hull/http-server@1"</span>,
         <span class="tk-str">"hull/db@1"</span>,
         <span class="tk-str">"hull/crypto@1"</span>,
         <span class="tk-str">"hull/middleware/session@1"</span>,
@@ -932,7 +936,7 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
 
 <span class="tk-kw">app</span>.<span class="tk-fn">manifest</span>({
     <span class="tk-key">modules</span>: [
-        <span class="tk-str">"hull/server@1"</span>,
+        <span class="tk-str">"hull/http-server@1"</span>,
         <span class="tk-str">"hull/db@1"</span>,
         <span class="tk-str">"hull/crypto@1"</span>,
         <span class="tk-str">"hull/middleware/session@1"</span>,
@@ -1130,7 +1134,7 @@ $ hull agent routes my-tool
 {
   <span class="tk-key">"app"</span>: <span class="tk-str">"my-tool"</span>,
   <span class="tk-key">"runtime"</span>: <span class="tk-str">"lua"</span>,
-  <span class="tk-key">"modules"</span>: [<span class="tk-str">"hull/server@1"</span>, <span class="tk-str">"hull/db@1"</span>, <span class="tk-str">"hull/middleware/session@1"</span>],
+  <span class="tk-key">"modules"</span>: [<span class="tk-str">"hull/http-server@1"</span>, <span class="tk-str">"hull/db@1"</span>, <span class="tk-str">"hull/middleware/session@1"</span>],
   <span class="tk-key">"routes"</span>: [
     { <span class="tk-key">"method"</span>: <span class="tk-str">"GET"</span>,  <span class="tk-key">"path"</span>: <span class="tk-str">"/items"</span>,  <span class="tk-key">"handler"</span>: <span class="tk-str">"app.lua:32"</span> },
     { <span class="tk-key">"method"</span>: <span class="tk-str">"POST"</span>, <span class="tk-key">"path"</span>: <span class="tk-str">"/items"</span>,  <span class="tk-key">"handler"</span>: <span class="tk-str">"app.lua:48"</span> }

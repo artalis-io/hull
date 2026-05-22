@@ -1,12 +1,12 @@
 // CORS via Manifest — Hull + QuickJS example
 //
 // Run: hull app.js -p 3000
-// Demonstrates CORS configuration via app.manifest() and server.stats() API.
+// Demonstrates CORS configuration via app.manifest() and httpServer.stats() API.
 // CORS headers are handled automatically by Keel — no middleware code needed.
 
 import { app } from "hull:app";
 import { log } from "hull:log";
-import { server } from "hull:server";
+import { httpServer } from "hull:http-server";
 
 app.manifest({
     cors: {
@@ -16,8 +16,8 @@ app.manifest({
         maxAge: 3600,
     },
     modules: [
+    "hull/http-server@1",
     "hull/log@1",
-        "hull/server@1",
     ],
 });
 
@@ -30,7 +30,7 @@ app.get("/health", (_req, res) => {
 // Returns live server stats (connection counts)
 app.get("/api/data", (_req, res) => {
     let stats;
-    try { stats = server.stats(); } catch (_e) {
+    try { stats = httpServer.stats(); } catch (_e) {
         stats = { activeConnections: 0, maxConnections: 0, asyncSuspended: 0 };
     }
     res.json({

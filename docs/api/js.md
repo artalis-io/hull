@@ -169,7 +169,7 @@ JS uses ES modules. All Hull capabilities are imported by name:
 
 ```javascript
 import { db } from "hull:db";
-import { http } from "hull:http";
+import { httpClient } from "hull:http-client";
 import { fs } from "hull:fs";
 import { crypto } from "hull:crypto";
 import { time } from "hull:time";

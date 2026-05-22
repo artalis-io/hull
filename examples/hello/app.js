@@ -14,6 +14,7 @@ import { time } from "hull:time";
 
 app.manifest({
     modules: [
+    "hull/http-server@1",
         "hull/log@1",
     ],
 });

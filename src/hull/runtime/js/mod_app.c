@@ -576,6 +576,110 @@ static void js_install_app_timers(JSContext *ctx)
     JS_FreeValue(ctx, global);
 }
 
+/* Install the REST + middleware + router surface. Called when the
+ * manifest declares "hull/http-server@1". Mirrors install_app_http_server
+ * on the Lua side. The router is a pure-JS class evaluated against
+ * the live `app` object. */
+static void js_install_app_http_server(JSContext *ctx)
+{
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue app = JS_GetPropertyStr(ctx, global, "__hull_app_ref");
+    if (JS_IsObject(app)) {
+        JS_SetPropertyStr(ctx, app, "get",
+            JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_app_route,
+                                 "get", 2, JS_CFUNC_generic_magic, 0));
+        JS_SetPropertyStr(ctx, app, "post",
+            JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_app_route,
+                                 "post", 2, JS_CFUNC_generic_magic, 1));
+        JS_SetPropertyStr(ctx, app, "put",
+            JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_app_route,
+                                 "put", 2, JS_CFUNC_generic_magic, 2));
+        JS_SetPropertyStr(ctx, app, "delete",
+            JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_app_route,
+                                 "delete", 2, JS_CFUNC_generic_magic, 3));
+        JS_SetPropertyStr(ctx, app, "del",
+            JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_app_route,
+                                 "del", 2, JS_CFUNC_generic_magic, 3));
+        JS_SetPropertyStr(ctx, app, "patch",
+            JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_app_route,
+                                 "patch", 2, JS_CFUNC_generic_magic, 4));
+        JS_SetPropertyStr(ctx, app, "options",
+            JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_app_route,
+                                 "options", 2, JS_CFUNC_generic_magic, 6));
+        JS_SetPropertyStr(ctx, app, "use",
+            JS_NewCFunction(ctx, js_app_use, "use", 3));
+        JS_SetPropertyStr(ctx, app, "usePost",
+            JS_NewCFunction(ctx, js_app_use_post, "usePost", 3));
+    }
+
+    /* Router (pure JS, evaluated against the freshly-decorated app
+     * via a temporary globalThis stash that we clear immediately). */
+    static const char router_src[] =
+"(function() {\n"
+"  const app = globalThis.__hull_app_for_router;\n"
+"  class Router {\n"
+"    constructor(prefix, opts) { this.prefix = prefix || ''; this.opts = opts; }\n"
+"    get(p, h)     { app.get    (this.prefix + p, h); return this; }\n"
+"    post(p, h)    { app.post   (this.prefix + p, h); return this; }\n"
+"    put(p, h)     { app.put    (this.prefix + p, h); return this; }\n"
+"    delete(p, h)  { app.delete (this.prefix + p, h); return this; }\n"
+"    patch(p, h)   { app.patch  (this.prefix + p, h); return this; }\n"
+"    options(p, h) { app.options(this.prefix + p, h); return this; }\n"
+"    use(...args) {\n"
+"      if (typeof args[0] === 'function') app.use('*', this.prefix + '/*', args[0]);\n"
+"      else app.use(args[0], this.prefix + args[1], args[2]);\n"
+"      return this;\n"
+"    }\n"
+"    usePost(...args) {\n"
+"      if (typeof args[0] === 'function') app.usePost('*', this.prefix + '/*', args[0]);\n"
+"      else app.usePost(args[0], this.prefix + args[1], args[2]);\n"
+"      return this;\n"
+"    }\n"
+"    ws(p, h)  { if (app.ws)  app.ws (this.prefix + p, h); return this; }\n"
+"    sse(p, h) { if (app.sse) app.sse(this.prefix + p, h); return this; }\n"
+"    router(sub, opts) { return new Router(this.prefix + (sub || ''), opts); }\n"
+"  }\n"
+"  app.router = function(prefix, opts) { return new Router(prefix, opts); };\n"
+"})();\n";
+
+    JS_SetPropertyStr(ctx, global, "__hull_app_for_router",
+                      JS_DupValue(ctx, app));
+    JSValue rret = JS_Eval(ctx, router_src, sizeof(router_src) - 1,
+                           "<hull-router-init>", JS_EVAL_TYPE_GLOBAL);
+    JS_FreeValue(ctx, rret);
+    JSAtom temp_atom = JS_NewAtom(ctx, "__hull_app_for_router");
+    JS_DeleteProperty(ctx, global, temp_atom, 0);
+    JS_FreeAtom(ctx, temp_atom);
+    JS_FreeValue(ctx, app);
+    JS_FreeValue(ctx, global);
+}
+
+/* Install app.ws on the exported `app` object. */
+static void js_install_app_ws_server(JSContext *ctx)
+{
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue app = JS_GetPropertyStr(ctx, global, "__hull_app_ref");
+    if (JS_IsObject(app)) {
+        JS_SetPropertyStr(ctx, app, "ws",
+            JS_NewCFunction(ctx, js_app_ws, "ws", 2));
+    }
+    JS_FreeValue(ctx, app);
+    JS_FreeValue(ctx, global);
+}
+
+/* Install app.sse on the exported `app` object. */
+static void js_install_app_sse(JSContext *ctx)
+{
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue app = JS_GetPropertyStr(ctx, global, "__hull_app_ref");
+    if (JS_IsObject(app)) {
+        JS_SetPropertyStr(ctx, app, "sse",
+            JS_NewCFunction(ctx, js_app_sse, "sse", 2));
+    }
+    JS_FreeValue(ctx, app);
+    JS_FreeValue(ctx, global);
+}
+
 static JSValue js_app_manifest(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv)
 {
@@ -596,8 +700,17 @@ static JSValue js_app_manifest(JSContext *ctx, JSValueConst this_val,
     JS_SetPropertyStr(ctx, global, "__hull_manifest", JS_DupValue(ctx, argv[0]));
     JS_FreeValue(ctx, global);
 
-    /* Module-conditional method installation. Today: hull/timers
-     * decorates the `app` intrinsic with every/daily. */
+    /* Module-conditional method installation. Each declared module
+     * may decorate the `app` intrinsic with additional methods. */
+    if (js_manifest_declares_module(ctx, argv[0], "hull/http-server")) {
+        js_install_app_http_server(ctx);
+    }
+    if (js_manifest_declares_module(ctx, argv[0], "hull/ws-server")) {
+        js_install_app_ws_server(ctx);
+    }
+    if (js_manifest_declares_module(ctx, argv[0], "hull/sse")) {
+        js_install_app_sse(ctx);
+    }
     if (js_manifest_declares_module(ctx, argv[0], "hull/timers")) {
         js_install_app_timers(ctx);
     }
@@ -652,41 +765,16 @@ static int js_app_module_init(JSContext *ctx, JSModuleDef *m)
 
     JSValue app = JS_NewObject(ctx);
 
-    /* Route methods: magic encodes the HTTP method index */
-    JS_SetPropertyStr(ctx, app, "get",
-        JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_app_route,
-                             "get", 2, JS_CFUNC_generic_magic, 0));
-    JS_SetPropertyStr(ctx, app, "post",
-        JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_app_route,
-                             "post", 2, JS_CFUNC_generic_magic, 1));
-    JS_SetPropertyStr(ctx, app, "put",
-        JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_app_route,
-                             "put", 2, JS_CFUNC_generic_magic, 2));
-    JS_SetPropertyStr(ctx, app, "delete",
-        JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_app_route,
-                             "delete", 2, JS_CFUNC_generic_magic, 3));
-    /* deprecated alias — use `app.delete` */
-    JS_SetPropertyStr(ctx, app, "del",
-        JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_app_route,
-                             "del", 2, JS_CFUNC_generic_magic, 3));
-    JS_SetPropertyStr(ctx, app, "patch",
-        JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_app_route,
-                             "patch", 2, JS_CFUNC_generic_magic, 4));
-    JS_SetPropertyStr(ctx, app, "options",
-        JS_NewCFunctionMagic(ctx, (JSCFunctionMagic *)js_app_route,
-                             "options", 2, JS_CFUNC_generic_magic, 6));
-
-    JS_SetPropertyStr(ctx, app, "use",
-                      JS_NewCFunction(ctx, js_app_use, "use", 3));
-    JS_SetPropertyStr(ctx, app, "usePost",
-                      JS_NewCFunction(ctx, js_app_use_post, "usePost", 3));
-    JS_SetPropertyStr(ctx, app, "ws",
-                      JS_NewCFunction(ctx, js_app_ws, "ws", 2));
-    JS_SetPropertyStr(ctx, app, "sse",
-                      JS_NewCFunction(ctx, js_app_sse, "sse", 2));
-    /* every / daily are installed conditionally by js_app_manifest
-     * when the manifest declares "hull/timers@1" — they're absent
-     * from the default app surface. */
+    /* Default app surface is just bootstrap registration. Every other
+     * method (get/post/use/router/ws/sse/every/daily) is installed
+     * conditionally by js_app_manifest based on which modules the
+     * manifest declares:
+     *   hull/http-server@1 → get/post/put/delete/del/patch/options +
+     *                         use/usePost + router
+     *   hull/ws-server@1   → ws
+     *   hull/sse@1         → sse
+     *   hull/timers@1      → every/daily
+     */
     JS_SetPropertyStr(ctx, app, "main",
                       JS_NewCFunction(ctx, js_app_main, "main", 1));
     JS_SetPropertyStr(ctx, app, "manifest",
@@ -694,76 +782,10 @@ static int js_app_module_init(JSContext *ctx, JSModuleDef *m)
     JS_SetPropertyStr(ctx, app, "getManifest",
                       JS_NewCFunction(ctx, js_app_get_manifest, "getManifest", 0));
 
-    /* app.router(prefix, opts) — prefix-mounted route group.
-     *
-     * Pure-JS implementation evaluated against the live `app` object.
-     * The router methods translate r.get(path, h) into
-     * app.get(prefix + path, h), composing on top of the existing
-     * route registration C functions rather than duplicating them.
-     *
-     * We stash `app` on globalThis under a temporary name so the
-     * eval'd source can reach it, then clean up after the eval. */
-    static const char router_src[] =
-"(function() {\n"
-"  const app = globalThis.__hull_app_for_router;\n"
-"  class Router {\n"
-"    constructor(prefix, opts) {\n"
-"      this.prefix = prefix || '';\n"
-"      this.opts = opts;\n"
-"    }\n"
-"    get(p, h)     { app.get    (this.prefix + p, h); return this; }\n"
-"    post(p, h)    { app.post   (this.prefix + p, h); return this; }\n"
-"    put(p, h)     { app.put    (this.prefix + p, h); return this; }\n"
-"    delete(p, h)  { app.delete (this.prefix + p, h); return this; }\n"
-"    patch(p, h)   { app.patch  (this.prefix + p, h); return this; }\n"
-"    options(p, h) { app.options(this.prefix + p, h); return this; }\n"
-"    use(...args) {\n"
-"      if (typeof args[0] === 'function') {\n"
-"        app.use('*', this.prefix + '/*', args[0]);\n"
-"      } else {\n"
-"        app.use(args[0], this.prefix + args[1], args[2]);\n"
-"      }\n"
-"      return this;\n"
-"    }\n"
-"    usePost(...args) {\n"
-"      if (typeof args[0] === 'function') {\n"
-"        app.usePost('*', this.prefix + '/*', args[0]);\n"
-"      } else {\n"
-"        app.usePost(args[0], this.prefix + args[1], args[2]);\n"
-"      }\n"
-"      return this;\n"
-"    }\n"
-"    ws(p, h)  { app.ws (this.prefix + p, h); return this; }\n"
-"    sse(p, h) { app.sse(this.prefix + p, h); return this; }\n"
-"    router(sub, opts) {\n"
-"      return new Router(this.prefix + (sub || ''), opts);\n"
-"    }\n"
-"  }\n"
-"  app.router = function(prefix, opts) {\n"
-"    return new Router(prefix, opts);\n"
-"  };\n"
-"})();\n";
-
-    JSValue global = JS_GetGlobalObject(ctx);
-    JS_SetPropertyStr(ctx, global, "__hull_app_for_router",
-                      JS_DupValue(ctx, app));
-    JSValue rret = JS_Eval(ctx, router_src, sizeof(router_src) - 1,
-                           "<hull-router-init>", JS_EVAL_TYPE_GLOBAL);
-    int router_failed = JS_IsException(rret);
-    JS_FreeValue(ctx, rret);
-    /* Clean up the temporary stash regardless of success. */
-    JSAtom temp_atom = JS_NewAtom(ctx, "__hull_app_for_router");
-    JS_DeleteProperty(ctx, global, temp_atom, 0);
-    JS_FreeAtom(ctx, temp_atom);
-    if (router_failed) {
-        JS_FreeValue(ctx, global);
-        JS_FreeValue(ctx, app);
-        return -1;
-    }
-
     /* Stash the app object on globalThis under an internal name so
      * js_app_manifest can find it later to install module-conditional
-     * methods (currently: every/daily, gated on hull/timers). */
+     * methods. */
+    JSValue global = JS_GetGlobalObject(ctx);
     JS_SetPropertyStr(ctx, global, "__hull_app_ref", JS_DupValue(ctx, app));
     JS_FreeValue(ctx, global);
 

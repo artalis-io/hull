@@ -13,6 +13,7 @@ local image = require("hull.image")
 
 app.manifest({
     modules = {
+    "hull/http-server@1",
         "hull/image@1",
     },
 })

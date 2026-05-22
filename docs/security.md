@@ -404,7 +404,7 @@ app.manifest({
 -- import paths use the standard Lua/JS forms — name the local
 -- variable whatever you want:
 local crypto = require("hull.crypto")
-local fetcher = require("hull.http")           -- bind to any local name
+local fetcher = require("hull.http-client")           -- bind to any local name
 ```
 
 Each entry is a canonical spec `"<vendor>/<name>@<major>"`. First-party modules live under `hull/`; future third-party packages would follow the same pattern (`"acme/widgets@2"`). The manifest declares *what's in scope*; the `require()` / `import` call site picks *what to call it locally*.
@@ -415,7 +415,7 @@ Each entry is a canonical spec `"<vendor>/<name>@<major>"`. First-party modules 
 |-----------|---------------|
 | **Every external capability is declared** | Lua/JS intrinsics (string, table, math, JSON in JS) plus a minimal Hull core are always available. The intrinsic core is just `hull/app` — the registration API; it must be intrinsic because the manifest is expressed via `app.manifest(...)`. Every other first-party module — `hull/log`, `hull/json`, `hull/crypto`, `hull/db`, `hull/http`, every middleware, every stdlib helper — must be in `modules` or imports fail. |
 | **Import-only exposure** | Declared modules are reached via `require("hull.X")` (Lua) / `import "hull:X"` (JS). They are NOT globals. Apps that don't declare a module cannot use it even by accident. |
-| **Capability + module separate gates** | Declaring `hull/http@1` does not also open the network. Apps still need a non-empty `hosts` allowlist. The resolver rejects `hull/http` declared without `hosts`. Same for `hull/fs` (needs `fs.read`/`write`) and `hull/env` (needs `env`). |
+| **Capability + module separate gates** | Declaring `hull/http-client@1` does not also open the network. Apps still need a non-empty `hosts` allowlist. The resolver rejects `hull/http` declared without `hosts`. Same for `hull/fs` (needs `fs.read`/`write`) and `hull/env` (needs `env`). |
 | **Explicit dependencies** | If `hull/middleware/session` internally uses `hull/db`, `hull/crypto`, and `hull/time`, the app must declare *all four*. No silent pull-in. The resolver lists the missing dep in its error. |
 | **Sealed at startup, no runtime install** | The resolved module set is computed once after manifest extraction, frozen for the lifetime of the process. Runtime code cannot install, fetch, discover, or load new modules. The set's contents are signed into `package.sig` as `modules_resolved`. |
 | **Build-time subsystems gate too** | Modules whose backing C is compile-time-optional (`hull/db`, `hull/compute`, `hull/gpu`) are rejected if the build wasn't compiled with the corresponding `HL_ENABLE_*` flag. The resolver reports the missing build flag by name. |
@@ -426,7 +426,7 @@ Each entry is a canonical spec `"<vendor>/<name>@<major>"`. First-party modules 
 - **Ambient stdlib drift.** The set of admitted modules is auditable from `package.sig` alone — no need to load the app to know what it imports.
 
 **What it does NOT do:**
-- Replace the capability sections. `modules = { http = "hull/http@1" }` doesn't grant network — the app still needs a `hosts` allowlist. The resolver enforces this pairing.
+- Replace the capability sections. `modules = { http = "hull/http-client@1" }` doesn't grant network — the app still needs a `hosts` allowlist. The resolver enforces this pairing.
 - Defeat C-level escape via embedded WASM or compute. Compute modules still execute inside the WAMR sandbox with their own gas + memory limits.
 
 **Inspection:**

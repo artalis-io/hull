@@ -25,11 +25,12 @@ app.manifest({
     env: ["WEBHOOK_SECRET"],
     hosts: ["127.0.0.1"],
     modules: [
+        "hull/http-server@1",
         "hull/log@1",
         "hull/crypto@1",
         "hull/db@1",
         "hull/env@1",
-        "hull/http@1",
+        "hull/http-client@1",
         "hull/time@1",
         "hull/validate@1",
         "hull/middleware/idempotency@1",

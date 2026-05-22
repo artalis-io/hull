@@ -11,13 +11,15 @@
 import { app } from "hull:app";
 import { log } from "hull:log";
 import { time } from "hull:time";
-import { ws } from "hull:ws";
+import { wsServer } from "hull:ws-server";
 
 app.manifest({
     modules: [
+        "hull/ws-server@1",
+        "hull/sse@1",
+        "hull/http-server@1",
         "hull/log@1",
         "hull/time@1",
-        "hull/ws@1",
     ],
 });
 
@@ -26,15 +28,15 @@ app.manifest({
 app.ws("/ws/chat", {
     onOpen(conn) {
         log.info(`ws: client connected id=${conn.id}`);
-        ws.broadcast("/ws/chat", JSON.stringify({
+        wsServer.broadcast("/ws/chat", JSON.stringify({
             type: "join",
             id: conn.id,
-            connections: ws.connections("/ws/chat"),
+            connections: wsServer.connections("/ws/chat"),
         }));
     },
 
     onMessage(conn, msg) {
-        ws.broadcast("/ws/chat", JSON.stringify({
+        wsServer.broadcast("/ws/chat", JSON.stringify({
             type: "message",
             from: conn.id,
             data: msg,
@@ -43,11 +45,11 @@ app.ws("/ws/chat", {
 
     onClose(conn, code) {
         log.info(`ws: client disconnected id=${conn.id} code=${code}`);
-        ws.broadcast("/ws/chat", JSON.stringify({
+        wsServer.broadcast("/ws/chat", JSON.stringify({
             type: "leave",
             id: conn.id,
             code: code,
-            connections: ws.connections("/ws/chat"),
+            connections: wsServer.connections("/ws/chat"),
         }));
     },
 });
@@ -77,7 +79,7 @@ app.get("/health", (_req, res) => {
 });
 
 app.get("/ws/connections", (_req, res) => {
-    res.json({ count: ws.connections("/ws/chat") });
+    res.json({ count: wsServer.connections("/ws/chat") });
 });
 
 log.info("Chat app loaded — routes registered");

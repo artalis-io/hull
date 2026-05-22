@@ -9,16 +9,18 @@
 --   GET /ws/connections   — current WebSocket connection count
 
 local time = require("hull.time")
-local ws   = require("hull.ws")
+local ws_server   = require("hull.ws-server")
 
 local log = require("hull.log")
 local json = require("hull.json")
 app.manifest({
     modules = {
+        "hull/ws-server@1",
+        "hull/sse@1",
+        "hull/http-server@1",
         "hull/json@1",
         "hull/log@1",
         "hull/time@1",
-        "hull/ws@1",
     },
 })
 
@@ -27,16 +29,16 @@ app.manifest({
 app.ws("/ws/chat", {
     on_open = function(conn)
         log.info("ws: client connected id=" .. conn:id())
-        ws.broadcast("/ws/chat", json.encode({
+        ws_server.broadcast("/ws/chat", json.encode({
             type = "join",
             id = conn:id(),
-            connections = ws.connections("/ws/chat"),
+            connections = ws_server.connections("/ws/chat"),
         }))
     end,
 
     on_message = function(conn, msg)
         -- Broadcast message to all connected clients
-        ws.broadcast("/ws/chat", json.encode({
+        ws_server.broadcast("/ws/chat", json.encode({
             type = "message",
             from = conn:id(),
             data = msg,
@@ -46,11 +48,11 @@ app.ws("/ws/chat", {
     on_close = function(conn, code, reason)
         log.info("ws: client disconnected id=" .. conn:id()
                  .. " code=" .. tostring(code))
-        ws.broadcast("/ws/chat", json.encode({
+        ws_server.broadcast("/ws/chat", json.encode({
             type = "leave",
             id = conn:id(),
             code = code,
-            connections = ws.connections("/ws/chat"),
+            connections = ws_server.connections("/ws/chat"),
         }))
     end,
 })
@@ -80,7 +82,7 @@ app.get("/health", function(_req, res)
 end)
 
 app.get("/ws/connections", function(_req, res)
-    res:json({ count = ws.connections("/ws/chat") })
+    res:json({ count = ws_server.connections("/ws/chat") })
 end)
 
 log.info("Chat app loaded — routes registered")

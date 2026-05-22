@@ -18,11 +18,14 @@ import { auth } from "hull:middleware:auth";
 import { session } from "hull:middleware:session";
 import { time } from "hull:time";
 import { validate } from "hull:validate";
-import { ws } from "hull:ws";
+import { wsServer } from "hull:ws-server";              // broadcast, connections
+import { wsClient } from "hull:ws-client";  // connect (outbound federation)
 
 app.manifest({
     hosts: ["127.0.0.1"],
     modules: [
+        "hull/ws-server@1",
+        "hull/http-server@1",
         "hull/timers@1",
         "hull/log@1",
         "hull/cookie@1",
@@ -30,7 +33,7 @@ app.manifest({
         "hull/db@1",
         "hull/time@1",
         "hull/validate@1",
-        "hull/ws@1",
+        "hull/ws-client@1",
         "hull/middleware/auth@1",
         "hull/middleware/session@1",
     ],
@@ -119,7 +122,7 @@ function handleFederatedMessage(data) {
         if (!data.channel || !data.from || !data.encrypted || !data.nonce) return;
         if (!fedCheckLen(data.from) || !fedCheckLen(data.channel)) return;
         if (!fedChannelEnabled(data.channel)) return;
-        ws.broadcast("/ws", JSON.stringify({
+        wsServer.broadcast("/ws", JSON.stringify({
             type: "msg", channel: data.channel,
             from: `${data.from}@${data.server}`,
             encrypted: data.encrypted, nonce: data.nonce,
@@ -129,7 +132,7 @@ function handleFederatedMessage(data) {
         if (!data.channel || !data.user) return;
         if (!fedCheckLen(data.user) || !fedCheckLen(data.channel)) return;
         if (!fedChannelEnabled(data.channel)) return;
-        ws.broadcast("/ws", JSON.stringify({
+        wsServer.broadcast("/ws", JSON.stringify({
             type: "user_joined", channel: data.channel,
             user: `${data.user}@${data.server}`, federated: true,
         }));
@@ -137,13 +140,13 @@ function handleFederatedMessage(data) {
         if (!data.channel || !data.user) return;
         if (!fedCheckLen(data.user) || !fedCheckLen(data.channel)) return;
         if (!fedChannelEnabled(data.channel)) return;
-        ws.broadcast("/ws", JSON.stringify({
+        wsServer.broadcast("/ws", JSON.stringify({
             type: "left", channel: data.channel,
             user: `${data.user}@${data.server}`, federated: true,
         }));
     } else if (data.type === "fed_presence") {
         if (!data.username || !fedCheckLen(data.username)) return;
-        ws.broadcast("/ws", JSON.stringify({
+        wsServer.broadcast("/ws", JSON.stringify({
             type: "presence", username: `${data.username}@${data.server}`,
             online: data.online, federated: true,
         }));
@@ -426,7 +429,7 @@ function wsError(conn, message) {
 }
 
 function broadcastToChannel(_channelName, msg) {
-    ws.broadcast("/ws", JSON.stringify(msg));
+    wsServer.broadcast("/ws", JSON.stringify(msg));
 }
 
 app.ws("/ws", {
@@ -467,7 +470,7 @@ app.ws("/ws", {
                 username: rows[0].username,
                 public_key: rows[0].public_key,
             });
-            ws.broadcast("/ws", JSON.stringify({
+            wsServer.broadcast("/ws", JSON.stringify({
                 type: "presence", username: rows[0].username, online: true,
             }));
             federationRelayPresence(rows[0].username, true);
@@ -683,7 +686,7 @@ app.ws("/ws", {
                     user: conn.data.username,
                 });
             }
-            ws.broadcast("/ws", JSON.stringify({
+            wsServer.broadcast("/ws", JSON.stringify({
                 type: "presence", username: conn.data.username, online: false,
             }));
             federationRelayPresence(conn.data.username, false);
@@ -695,7 +698,7 @@ app.ws("/ws", {
 // ── WS connection count ─────────────────────────────────────────────
 
 app.get("/ws/connections", (_req, res) => {
-    res.json({ count: ws.connections("/ws") });
+    res.json({ count: wsServer.connections("/ws") });
 });
 
 // ── File endpoints ────────────────────────────────────────────────
@@ -842,7 +845,7 @@ app.get("/dm/:username/files", (req, res) => {
 
 // ── E2E self-test endpoint ─────────────────────────────────────────
 // Exercises the full 2-client WebSocket flow from inside the server:
-//   register 2 users, create a channel, connect both via ws.connect,
+//   register 2 users, create a channel, connect both via wsServer.connect,
 //   authenticate, join, send a message, verify receipt.
 
 app.get("/e2e-test", async (req, res) => {
@@ -916,7 +919,7 @@ app.get("/e2e-test", async (req, res) => {
     let aliceReady = false;
     let bobReady = false;
 
-    const aliceWs = ws.connect(wsUrl, {
+    const aliceWs = wsClient.connect(wsUrl, {
         onOpen(_conn) {
             results.alice_connected = true;
         },
@@ -950,7 +953,7 @@ app.get("/e2e-test", async (req, res) => {
     }
 
     // Step 4: Connect bob
-    const bobWs = ws.connect(wsUrl, {
+    const bobWs = wsClient.connect(wsUrl, {
         onOpen(_conn) {
             results.bob_connected = true;
         },
@@ -1302,7 +1305,7 @@ app.get("/federation/status", (_req, res) => {
 
 if (FEDERATION.enabled) {
     function connectToPeer(peer) {
-        ws.connect(peer.url, {
+        wsClient.connect(peer.url, {
             onOpen(conn) {
                 wsSend(conn, {
                     type: "fed_hello",
@@ -1430,7 +1433,7 @@ app.get("/e2e-federation-test", async (req, res) => {
     let fedMsgReceived = false;
     let myChallenge = null;
 
-    const fakePeerWs = ws.connect(fedUrl, {
+    const fakePeerWs = wsClient.connect(fedUrl, {
         onOpen(conn) {
             results.peer_connected = true;
             conn.send(JSON.stringify({
@@ -1496,7 +1499,7 @@ app.get("/e2e-federation-test", async (req, res) => {
         }
 
         let userReady = false;
-        const userWs = ws.connect(wsUrl, {
+        const userWs = wsClient.connect(wsUrl, {
             onOpen(_conn) {},
             onMessage(conn, raw) {
                 let data;
