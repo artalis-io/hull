@@ -17,6 +17,7 @@ import { log } from "hull:log";
 app.manifest({
     gpu: true,
     modules: [
+        "hull/http-server@1",
     "hull/log@1",
         "hull/gpu@1",
     ],

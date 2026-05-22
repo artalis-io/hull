@@ -12,7 +12,7 @@
 local crypto      = require("hull.crypto")
 local db          = require("hull.db")
 local env         = require("hull.env")
-local http        = require("hull.http")
+local http        = require("hull.http-client")
 local time        = require("hull.time")
 local validate    = require("hull.validate")
 local idempotency = require("hull.middleware.idempotency")
@@ -26,12 +26,13 @@ app.manifest({
     env = {"WEBHOOK_SECRET"},
     hosts = {"127.0.0.1"},
     modules = {
+        "hull/http-server@1",
         "hull/json@1",
         "hull/log@1",
         "hull/crypto@1",
         "hull/db@1",
         "hull/env@1",
-        "hull/http@1",
+        "hull/http-client@1",
         "hull/time@1",
         "hull/validate@1",
         "hull/middleware/idempotency@1",

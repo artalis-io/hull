@@ -8,6 +8,7 @@ import { db } from "hull:db";
 
 app.manifest({
     modules: [
+    "hull/http-server@1",
         "hull/db@1",
     ],
 });

@@ -37,7 +37,7 @@
 
 local json = require("hull.json")
 local db = require("hull.db")
-local http = require("hull.http")
+local http = require("hull.http-client")
 local time = require("hull.time")
 
 local outbox = {}

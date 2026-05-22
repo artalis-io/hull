@@ -13,6 +13,7 @@ import { crypto } from "hull:crypto";
 
 app.manifest({
     modules: [
+    "hull/http-server@1",
         "hull/crypto@1",
     ],
     env: ["USER", "LANG"],

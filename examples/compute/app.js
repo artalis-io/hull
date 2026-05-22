@@ -11,6 +11,7 @@ import { compute } from "hull:compute";
 app.manifest({
     compute: true,
     modules: [
+    "hull/http-server@1",
         "hull/compute@1",
     ],
 });

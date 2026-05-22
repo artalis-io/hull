@@ -37,7 +37,7 @@ static JSValue js_server_stats(JSContext *ctx, JSValueConst this_val,
 
 static int js_server_module_init(JSContext *ctx, JSModuleDef *m)
 {
-    if (hl_js_check_module_declared(ctx, "hull/server", "hull:server") != 0)
+    if (hl_js_check_module_declared(ctx, "hull/http-server", "hull:http-server") != 0)
         return -1;
 
     JSValue server = JS_NewObject(ctx);
@@ -50,7 +50,7 @@ static int js_server_module_init(JSContext *ctx, JSModuleDef *m)
 int hl_js_init_server_module(JSContext *ctx, HlJS *js)
 {
     (void)js;
-    JSModuleDef *m = JS_NewCModule(ctx, "hull:server", js_server_module_init);
+    JSModuleDef *m = JS_NewCModule(ctx, "hull:http-server", js_server_module_init);
     if (!m)
         return -1;
     JS_AddModuleExport(ctx, m, "server");

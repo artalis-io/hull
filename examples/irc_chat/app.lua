@@ -31,7 +31,8 @@ local crypto   = require("hull.crypto")
 local db       = require("hull.db")
 local time     = require("hull.time")
 local validate = require("hull.validate")
-local ws       = require("hull.ws")
+local ws        = require("hull.ws-server")  -- broadcast, connections (server)
+local ws_client = require("hull.ws-client")  -- connect (outbound federation)
 local session  = require("hull.middleware.session")
 local auth     = require("hull.middleware.auth")
 local log = require("hull.log")
@@ -41,6 +42,8 @@ local _cookie  = require("hull.cookie") -- luacheck: ignore
 app.manifest({
     hosts = {"127.0.0.1"},
     modules = {
+        "hull/ws-server@1",
+        "hull/http-server@1",
         "hull/timers@1",
         "hull/json@1",
         "hull/log@1",
@@ -49,7 +52,7 @@ app.manifest({
         "hull/db@1",
         "hull/time@1",
         "hull/validate@1",
-        "hull/ws@1",
+        "hull/ws-client@1",
         "hull/middleware/auth@1",
         "hull/middleware/session@1",
     },
@@ -1073,7 +1076,7 @@ app.get("/e2e-test", function(req, res)
     local alice_ready = false
     local bob_ready = false
 
-    local _alice_ws = ws.connect(ws_url, {
+    local _alice_ws = ws_client.connect(ws_url, {
         on_open = function(_conn)
             results.alice_connected = true
         end,
@@ -1106,7 +1109,7 @@ app.get("/e2e-test", function(req, res)
     end
 
     -- Step 4: Connect bob
-    local _bob_ws = ws.connect(ws_url, {
+    local _bob_ws = ws_client.connect(ws_url, {
         on_open = function(_conn)
             results.bob_connected = true
         end,
@@ -1485,7 +1488,7 @@ end)
 
 if FEDERATION.enabled then
     local function connect_to_peer(peer)
-        ws.connect(peer.url, {
+        ws_client.connect(peer.url, {
             on_open = function(conn)
                 -- Send hello
                 ws_send(conn, {
@@ -1617,7 +1620,7 @@ app.get("/e2e-federation-test", function(req, res)
     local fed_msg_received = false
     local my_challenge = nil
 
-    local _fake_peer_ws = ws.connect(fed_url, {
+    local _fake_peer_ws = ws_client.connect(fed_url, {
         on_open = function(conn)
             results.peer_connected = true
             -- Send fed_hello
@@ -1688,7 +1691,7 @@ app.get("/e2e-federation-test", function(req, res)
 
         -- Connect test user via /ws, login, join #general, send message
         local user_ready = false
-        local _user_ws = ws.connect(ws_url, {
+        local _user_ws = ws_client.connect(ws_url, {
             on_open = function(_conn) end,
             on_message = function(conn, raw)
                 local data = json.decode(raw)

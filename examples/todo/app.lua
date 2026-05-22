@@ -16,7 +16,7 @@ local crypto      = require("hull.crypto")
 local csv         = require("hull.csv")
 local db          = require("hull.db")
 local form        = require("hull.form")
-local http        = require("hull.http")
+local http        = require("hull.http-client")
 local i18n        = require("hull.i18n")
 local search      = require("hull.search")
 local template    = require("hull.template")
@@ -34,13 +34,14 @@ local log = require("hull.log")
 app.manifest({
     hosts = {"127.0.0.1"},  -- allow self-fetch for /api/stats
     modules = {
+        "hull/http-server@1",
         "hull/log@1",
         "hull/cookie@1",
         "hull/crypto@1",
         "hull/csv@1",
         "hull/db@1",
         "hull/form@1",
-        "hull/http@1",
+        "hull/http-client@1",
         "hull/i18n@1",
         "hull/search@1",
         "hull/template@1",

@@ -27,7 +27,7 @@
 
 local log = require("hull.log")
 local json = require("hull.json")
-local http = require("hull.http")
+local http = require("hull.http-client")
 local smtp = require("hull.smtp")
 
 local email = {}

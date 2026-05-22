@@ -12,16 +12,17 @@
 -- loop serve other connections while waiting.
 
 local db = require("hull.db")
-local http = require("hull.http")
+local http = require("hull.http-client")
 local worker = require("hull.worker")
 
 local log = require("hull.log")
 -- Allow outbound HTTP to self (localhost) for the fetch demos
 app.manifest({
     modules = {
+        "hull/http-server@1",
         "hull/log@1",
         "hull/db@1",
-        "hull/http@1",
+        "hull/http-client@1",
         "hull/worker@1",
     },
     hosts = {"127.0.0.1"},

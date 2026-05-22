@@ -19,7 +19,7 @@
  */
 
 import { time } from "hull:time";
-import { server } from "hull:server";
+import { server } from "hull:http-server";
 
 /* db module is optional — not all apps use a database. */
 let _dbMod = null;

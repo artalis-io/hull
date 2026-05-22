@@ -487,7 +487,7 @@ Apps declare which first-party Hull stdlib modules they import via `manifest.mod
 
 1. **Every external capability is declared.** Language intrinsics (Lua: `string/table/math/utf8/coroutine`; JS: `Object/Array/Math/JSON`) and Hull's intrinsic core are always available; everything else must appear in `manifest.modules`. The intrinsic core is the minimum needed to bootstrap an app: **`hull/app`** alone, providing `app.manifest`, `app.get/post/use`, `app.router`, `app.ws/sse`, and `app.main`. `app` stays intrinsic because the manifest itself is expressed via `app.manifest(...)` — it must exist before the manifest is parsed. **Module-conditional decoration:** some declared modules don't just enable imports, they add methods to the `app` intrinsic. Today: `"hull/timers@1"` decorates `app` with `app.every(ms, fn)` and `app.daily(hhmm, fn)`. Without the declaration those methods don't exist on `app` at all (calling them raises "attempt to call a nil value" / "is not a function") — the C# partial-class metaphor. `hull/log` and `hull/json` are also declared modules; apps that call `log.X` or `json.X` directly must put `"hull/log@1"` / `"hull/json@1"` in `manifest.modules`. Response helpers (`res:json(...)`) and internal JSON marshalling work without either declaration — they bypass user-visible imports at the C layer.
 2. **Import-only exposure.** Declared modules are reached via `require("hull.X")` (Lua) / `import "hull:X"` (JS). They are NOT exposed as globals.
-3. **Capability + module are separate gates.** Declaring `hull/http@1` doesn't open the network. The app still needs a non-empty `hosts` allowlist. The resolver pairs them.
+3. **Capability + module are separate gates.** Declaring `hull/http-client@1` doesn't open the network. The app still needs a non-empty `hosts` allowlist. The resolver pairs them.
 
 ```lua
 app.manifest({
@@ -503,7 +503,7 @@ app.manifest({
 
 -- require/import are standard Lua/JS — choose any local binding name:
 local crypto = require("hull.crypto")
-local fetcher = require("hull.http")
+local fetcher = require("hull.http-client")
 ```
 
 **Manifest syntax**: each entry is a canonical spec `"<vendor>/<name>@<major>"` in an array. First-party modules use `hull/`; future third-party would use `"acme/widgets@2"`. The manifest declares *what's in scope*; the require/import call site picks *what to call it locally*. The legacy keyed form (`crypto = "hull/crypto@1"`) is still parsed for back-compat but the array form is canonical.
@@ -526,9 +526,9 @@ local fetcher = require("hull.http")
 |-------|-------|-----|
 | `module 'hull.X' is not declared in app.manifest. Add to modules: X = "1"...` | App requires a known module not in the modules table | Add to `modules` (the error includes the exact line, plus deps if any) |
 | `module 'hull/jwt@1' requires 'hull/crypto' but it is not declared` | Declared module's dep is missing | Add the dep to `modules` |
-| `module 'hull/http@1' requires a non-empty 'hosts' section in the manifest` | Declared module needs a capability that isn't wired | Add the matching capability field |
+| `module 'hull/http-client@1' requires a non-empty 'hosts' section in the manifest` | Declared module needs a capability that isn't wired | Add the matching capability field |
 | `module 'hull/gpu@1' requires HL_ENABLE_GPU (build-time)` | The build wasn't compiled with the subsystem | Rebuild hull with `make HL_ENABLE_GPU=1 …` or remove the module declaration |
-| `module 'hull/http@1' requires HL_ENABLE_HTTP_CLIENT (build-time)` | App declares an outbound HTTP module (`hull/http`, `hull/smtp`, `hull/email`) on a build with `HL_ENABLE_HTTP_CLIENT=0` | Rebuild with `HL_ENABLE_HTTP_CLIENT=1` (the default) or remove the module declaration. |
+| `module 'hull/http-client@1' requires HL_ENABLE_HTTP_CLIENT (build-time)` | App declares an outbound HTTP module (`hull/http`, `hull/smtp`, `hull/email`) on a build with `HL_ENABLE_HTTP_CLIENT=0` | Rebuild with `HL_ENABLE_HTTP_CLIENT=1` (the default) or remove the module declaration. |
 | `module 'hull/server@1' requires HL_ENABLE_HTTP_SERVER (build-time)` | App declares an inbound HTTP module (`hull/server`, `hull/ws`, `hull/sse`, any `hull/middleware/*`) on a build with `HL_ENABLE_HTTP_SERVER=0` | Rebuild with `HL_ENABLE_HTTP_SERVER=1` (the default) or remove the module declaration. See [docs/cli_mode.md](docs/cli_mode.md). |
 | `unknown module 'X' in app.manifest.modules` | Typo or non-existent module | Run `hull modules available` for the canonical list |
 
@@ -930,7 +930,7 @@ app.ws("/ws/chat", {
 
 **JavaScript:**
 ```javascript
-import { ws } from "hull:ws";
+import { ws } from "hull:ws-server";
 app.ws("/ws/chat", {
     onOpen(conn) { log.info("connected: " + conn.id); },
     onMessage(conn, msg, isBinary) { ws.broadcast("/ws/chat", msg); },

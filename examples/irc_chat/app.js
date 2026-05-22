@@ -18,11 +18,14 @@ import { auth } from "hull:middleware:auth";
 import { session } from "hull:middleware:session";
 import { time } from "hull:time";
 import { validate } from "hull:validate";
-import { ws } from "hull:ws";
+import { ws } from "hull:ws-server";              // broadcast, connections
+import { ws as wsClient } from "hull:ws-client";  // connect (outbound federation)
 
 app.manifest({
     hosts: ["127.0.0.1"],
     modules: [
+        "hull/ws-server@1",
+        "hull/http-server@1",
         "hull/timers@1",
         "hull/log@1",
         "hull/cookie@1",
@@ -30,7 +33,7 @@ app.manifest({
         "hull/db@1",
         "hull/time@1",
         "hull/validate@1",
-        "hull/ws@1",
+        "hull/ws-client@1",
         "hull/middleware/auth@1",
         "hull/middleware/session@1",
     ],
@@ -916,7 +919,7 @@ app.get("/e2e-test", async (req, res) => {
     let aliceReady = false;
     let bobReady = false;
 
-    const aliceWs = ws.connect(wsUrl, {
+    const aliceWs = wsClient.connect(wsUrl, {
         onOpen(_conn) {
             results.alice_connected = true;
         },
@@ -950,7 +953,7 @@ app.get("/e2e-test", async (req, res) => {
     }
 
     // Step 4: Connect bob
-    const bobWs = ws.connect(wsUrl, {
+    const bobWs = wsClient.connect(wsUrl, {
         onOpen(_conn) {
             results.bob_connected = true;
         },
@@ -1302,7 +1305,7 @@ app.get("/federation/status", (_req, res) => {
 
 if (FEDERATION.enabled) {
     function connectToPeer(peer) {
-        ws.connect(peer.url, {
+        wsClient.connect(peer.url, {
             onOpen(conn) {
                 wsSend(conn, {
                     type: "fed_hello",
@@ -1430,7 +1433,7 @@ app.get("/e2e-federation-test", async (req, res) => {
     let fedMsgReceived = false;
     let myChallenge = null;
 
-    const fakePeerWs = ws.connect(fedUrl, {
+    const fakePeerWs = wsClient.connect(fedUrl, {
         onOpen(conn) {
             results.peer_connected = true;
             conn.send(JSON.stringify({
@@ -1496,7 +1499,7 @@ app.get("/e2e-federation-test", async (req, res) => {
         }
 
         let userReady = false;
-        const userWs = ws.connect(wsUrl, {
+        const userWs = wsClient.connect(wsUrl, {
             onOpen(_conn) {},
             onMessage(conn, raw) {
                 let data;

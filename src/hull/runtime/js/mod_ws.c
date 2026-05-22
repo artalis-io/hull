@@ -721,19 +721,32 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
 
 /* ── Module init ───────────────────────────────────────────────────── */
 
-static int js_ws_module_init(JSContext *ctx, JSModuleDef *m)
+/* hull:ws-server — broadcast + connections (server helpers). The
+ * app.ws() endpoint registration is decorated on the `app` intrinsic
+ * by mod_app.c when "hull/ws-server@1" is declared. */
+static int js_ws_server_module_init(JSContext *ctx, JSModuleDef *m)
 {
-    if (hl_js_check_module_declared(ctx, "hull/ws", "hull:ws") != 0) return -1;
+    if (hl_js_check_module_declared(ctx, "hull/ws-server",
+                                    "hull:ws-server") != 0) return -1;
 
     JSValue ws = JS_NewObject(ctx);
-
     JS_SetPropertyStr(ctx, ws, "broadcast",
                       JS_NewCFunction(ctx, js_ws_broadcast, "broadcast", 2));
     JS_SetPropertyStr(ctx, ws, "connections",
                       JS_NewCFunction(ctx, js_ws_connections, "connections", 1));
+    JS_SetModuleExport(ctx, m, "ws", ws);
+    return 0;
+}
+
+/* hull:ws-client — connect (outbound WS, gated on hosts at call time). */
+static int js_ws_client_module_init(JSContext *ctx, JSModuleDef *m)
+{
+    if (hl_js_check_module_declared(ctx, "hull/ws-client",
+                                    "hull:ws-client") != 0) return -1;
+
+    JSValue ws = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, ws, "connect",
                       JS_NewCFunction(ctx, js_ws_connect, "connect", 2));
-
     JS_SetModuleExport(ctx, m, "ws", ws);
     return 0;
 }
@@ -764,10 +777,14 @@ int hl_js_init_ws_module(JSContext *ctx, HlJS *js)
                                sizeof(js_ws_client_conn_proto_funcs[0]));
     JS_SetClassProto(ctx, js_ws_client_conn_class_id, client_proto);
 
-    /* Register module */
-    JSModuleDef *m = JS_NewCModule(ctx, "hull:ws", js_ws_module_init);
-    if (!m)
-        return -1;
-    JS_AddModuleExport(ctx, m, "ws");
+    /* Two modules, one C body: hull:ws-server and hull:ws-client. */
+    JSModuleDef *ms = JS_NewCModule(ctx, "hull:ws-server", js_ws_server_module_init);
+    if (!ms) return -1;
+    JS_AddModuleExport(ctx, ms, "ws");
+
+    JSModuleDef *mc = JS_NewCModule(ctx, "hull:ws-client", js_ws_client_module_init);
+    if (!mc) return -1;
+    JS_AddModuleExport(ctx, mc, "ws");
+
     return 0;
 }

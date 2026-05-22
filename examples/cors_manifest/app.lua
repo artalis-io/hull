@@ -4,7 +4,7 @@
 -- Demonstrates CORS configuration via app.manifest() and server.stats() API.
 -- CORS headers are handled automatically by Keel — no middleware code needed.
 
-local server = require("hull.server")
+local server = require("hull.http-server")
 
 local log = require("hull.log")
 local json = require("hull.json")
@@ -16,9 +16,9 @@ app.manifest({
         max_age = 3600,
     },
     modules = {
+    "hull/http-server@1",
     "hull/json@1",
     "hull/log@1",
-        "hull/server@1",
     },
 })
 

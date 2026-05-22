@@ -7,13 +7,13 @@ import { app } from "hull:app";
 import { log } from "hull:log";
 import { cors } from "hull:middleware:cors";
 import { ratelimit } from "hull:middleware:ratelimit";
-import { server } from "hull:server";
+import { server } from "hull:http-server";
 import { time } from "hull:time";
 
 app.manifest({
     modules: [
+        "hull/http-server@1",
         "hull/log@1",
-        "hull/server@1",
         "hull/time@1",
         "hull/middleware/cors@1",
         "hull/middleware/ratelimit@1",

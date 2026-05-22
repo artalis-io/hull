@@ -6,7 +6,7 @@
 
 import { app } from "hull:app";
 import { log } from "hull:log";
-import { server } from "hull:server";
+import { server } from "hull:http-server";
 
 app.manifest({
     cors: {
@@ -16,8 +16,8 @@ app.manifest({
         maxAge: 3600,
     },
     modules: [
+    "hull/http-server@1",
     "hull/log@1",
-        "hull/server@1",
     ],
 });
 

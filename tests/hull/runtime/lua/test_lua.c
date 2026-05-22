@@ -325,7 +325,7 @@ UTEST(lua_runtime, hull_app_module)
 
     /* Register routes via app.get/app.post */
     int rc = luaL_dostring(lua_rt.L,
-        "app.get('/test', function(req, res) res:json({ok=true}) end)\n"
+        "app.manifest({modules = {'hull/http-server@1'}})\napp.get('/test', function(req, res) res:json({ok=true}) end)\n"
         "app.post('/data', function(req, res) res:text('received') end)\n");
     ASSERT_EQ(rc, LUA_OK);
 
@@ -371,7 +371,7 @@ UTEST(lua_runtime, app_router_prefixes_routes)
 {
     init_lua();
     int rc = luaL_dostring(lua_rt.L,
-        "local r = app.router('/api/v1')\n"
+        "app.manifest({modules = {'hull/http-server@1'}})\nlocal r = app.router('/api/v1')\n"
         "r:get('/items', function(req, res) end)\n"
         "r:post('/items', function(req, res) end)\n"
         "r:put('/items/:id', function(req, res) end)\n"
@@ -403,7 +403,7 @@ UTEST(lua_runtime, app_router_nested_composes_prefixes)
 {
     init_lua();
     int rc = luaL_dostring(lua_rt.L,
-        "local api   = app.router('/api/v1')\n"
+        "app.manifest({modules = {'hull/http-server@1'}})\nlocal api   = app.router('/api/v1')\n"
         "local admin = api:router('/admin')\n"
         "admin:get('/users', function(req, res) end)\n"
         "admin:get('/audit', function(req, res) end)\n");
@@ -429,7 +429,7 @@ UTEST(lua_runtime, app_router_use_with_handler_only)
 {
     init_lua();
     int rc = luaL_dostring(lua_rt.L,
-        "local r = app.router('/api')\n"
+        "app.manifest({modules = {'hull/http-server@1'}})\nlocal r = app.router('/api')\n"
         "r:use(function(req, res) return 0 end)\n");
     ASSERT_EQ(rc, LUA_OK);
 
@@ -452,7 +452,7 @@ UTEST(lua_runtime, app_router_use_with_explicit_method_pattern)
 {
     init_lua();
     int rc = luaL_dostring(lua_rt.L,
-        "local r = app.router('/api')\n"
+        "app.manifest({modules = {'hull/http-server@1'}})\nlocal r = app.router('/api')\n"
         "r:use('POST', '/items', function(req, res) return 0 end)\n");
     ASSERT_EQ(rc, LUA_OK);
 
@@ -474,7 +474,7 @@ UTEST(lua_runtime, app_router_chainable)
 {
     init_lua();
     int rc = luaL_dostring(lua_rt.L,
-        "app.router('/api')\n"
+        "app.manifest({modules = {'hull/http-server@1'}})\napp.router('/api')\n"
         "  :get('/a', function() end)\n"
         "  :post('/b', function() end)\n"
         "  :delete('/c', function() end)\n");
@@ -553,7 +553,7 @@ UTEST(lua_runtime, app_router_empty_prefix)
      * means routes register at the bare paths. */
     init_lua();
     int rc = luaL_dostring(lua_rt.L,
-        "local r = app.router()\n"
+        "app.manifest({modules = {'hull/http-server@1'}})\nlocal r = app.router()\n"
         "r:get('/items', function() end)\n");
     ASSERT_EQ(rc, LUA_OK);
 
@@ -602,7 +602,7 @@ UTEST(lua_runtime, app_main_coexists_with_routes_after)
      * docs/cli_mode.md and CLAUDE.md "App Lifecycle". */
     init_lua();
     int rc = luaL_dostring(lua_rt.L,
-        "app.main(function() return 0 end)\n"
+        "app.manifest({modules = {'hull/http-server@1'}})\napp.main(function() return 0 end)\n"
         "app.get('/x', function() end)\n");
     ASSERT_EQ(rc, LUA_OK);
     cleanup_lua();
@@ -612,7 +612,7 @@ UTEST(lua_runtime, routes_coexist_with_app_main_after)
 {
     init_lua();
     int rc = luaL_dostring(lua_rt.L,
-        "app.get('/x', function() end)\n"
+        "app.manifest({modules = {'hull/http-server@1'}})\napp.get('/x', function() end)\n"
         "app.main(function() return 0 end)\n");
     ASSERT_EQ(rc, LUA_OK);
     cleanup_lua();
@@ -1811,7 +1811,7 @@ UTEST(lua_middleware, registration_stores_handler_id)
     ASSERT_TRUE(lua_initialized);
 
     int rc = luaL_dostring(lua_rt.L,
-        "app.use('*', '/*', function(req, res) return 0 end)\n");
+        "app.manifest({modules = {'hull/http-server@1'}})\napp.use('*', '/*', function(req, res) return 0 end)\n");
     ASSERT_EQ(rc, LUA_OK);
 
     /* Verify middleware entry has handler_id (not handler function) */
@@ -1857,7 +1857,7 @@ UTEST(lua_middleware, handler_ids_do_not_collide_with_routes)
 
     /* Register a route first, then middleware */
     int rc = luaL_dostring(lua_rt.L,
-        "app.get('/test', function(req, res) end)\n"
+        "app.manifest({modules = {'hull/http-server@1'}})\napp.get('/test', function(req, res) end)\n"
         "app.use('*', '/*', function(req, res) return 0 end)\n");
     ASSERT_EQ(rc, LUA_OK);
 
@@ -1894,7 +1894,7 @@ UTEST(lua_middleware, dispatch_return_zero_continues)
     ASSERT_TRUE(lua_initialized);
 
     int rc = luaL_dostring(lua_rt.L,
-        "app.use('*', '/*', function(req, res) return 0 end)\n");
+        "app.manifest({modules = {'hull/http-server@1'}})\napp.use('*', '/*', function(req, res) return 0 end)\n");
     ASSERT_EQ(rc, LUA_OK);
 
     /* Get the handler_id */
@@ -1920,7 +1920,7 @@ UTEST(lua_middleware, dispatch_return_nonzero_short_circuits)
     ASSERT_TRUE(lua_initialized);
 
     int rc = luaL_dostring(lua_rt.L,
-        "app.use('*', '/*', function(req, res) return 1 end)\n");
+        "app.manifest({modules = {'hull/http-server@1'}})\napp.use('*', '/*', function(req, res) return 1 end)\n");
     ASSERT_EQ(rc, LUA_OK);
 
     lua_getfield(lua_rt.L, LUA_REGISTRYINDEX, "__hull_middleware");
@@ -1957,7 +1957,7 @@ UTEST(lua_middleware, wiring_to_server)
 
     /* Need at least one route for wire_routes_server to not fail */
     int rc = luaL_dostring(lua_rt.L,
-        "app.get('/test', function(req, res) end)\n"
+        "app.manifest({modules = {'hull/http-server@1'}})\napp.get('/test', function(req, res) end)\n"
         "app.use('*', '/*', function(req, res) return 0 end)\n"
         "app.use('GET', '/api/*', function(req, res) return 0 end)\n");
     ASSERT_EQ(rc, LUA_OK);
@@ -1993,7 +1993,7 @@ UTEST(lua_middleware, order_preserved)
 
     /* Register two middlewares — order should be preserved */
     int rc = luaL_dostring(lua_rt.L,
-        "app.use('*', '/*', function(req, res) return 0 end)\n"
+        "app.manifest({modules = {'hull/http-server@1'}})\napp.use('*', '/*', function(req, res) return 0 end)\n"
         "app.use('GET', '/api/*', function(req, res) return 0 end)\n");
     ASSERT_EQ(rc, LUA_OK);
 

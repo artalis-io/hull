@@ -53,8 +53,10 @@ int hl_js_register_modules(HlJS *js)
         return -1;
 
 #ifdef HL_ENABLE_HTTP_CLIENT
-    /* hull:http (http.fetch) — per-function checks enforce that
-     * http_cfg is set (wired from manifest after load_app). */
+    /* hull:http-client (http.fetch) — per-function checks enforce that
+     * http_cfg is set (wired from manifest after load_app). Renamed
+     * from hull:http for clarity (the server-side counterpart is
+     * hull:http-server, exposed via app.get/post/use etc.). */
     if (hl_js_init_http_module(js->ctx, js) != 0)
         return -1;
 
@@ -74,7 +76,9 @@ int hl_js_register_modules(HlJS *js)
     }
 
 #ifdef HL_ENABLE_HTTP_SERVER
-    /* hull:server — app.get/app.post/app.use/etc. */
+    /* hull:http-server — server.stats() (server-side helpers). The
+     * registration verbs (get/post/use/router etc.) land directly on
+     * the `app` intrinsic via mod_app.c's install_app_http_server. */
     if (hl_js_init_server_module(js->ctx, js) != 0)
         return -1;
 #endif
@@ -105,7 +109,8 @@ int hl_js_register_modules(HlJS *js)
 #endif
 
 #ifdef HL_ENABLE_HTTP_SERVER
-    /* hull:ws + SSE class — server-side WebSocket + Server-Sent Events. */
+    /* hull:ws-server + hull:ws-client (split from old hull:ws),
+     * plus SSE class — server-side WebSocket + outbound client. */
     hl_js_sse_register_class(js->ctx);
     if (hl_js_init_ws_module(js->ctx, js) != 0)
         return -1;

@@ -643,8 +643,8 @@ Every module except the intrinsic core must be listed in `manifest.modules`. The
 | `time` | `require("hull.time")` | `import { time } from "hull:time"` | `"hull/time@1"` | Timestamps |
 | `env` | `require("hull.env")` | `import { env } from "hull:env"` | `"hull/env@1"` | Environment vars (also needs `env` allowlist) |
 | `fs` | `require("hull.fs")` | `import { fs } from "hull:fs"` | `"hull/fs@1"` | Sandboxed FS (also needs `fs_read`/`fs_write`) |
-| `http` | `require("hull.http")` | `import { http } from "hull:http"` | `"hull/http@1"` | HTTP client (also needs `hosts` allowlist) |
-| `ws` | `require("hull.ws")` | `import { ws } from "hull:ws"` | `"hull/ws@1"` | WebSocket server + client |
+| `http` | `require("hull.http-client")` | `import { http } from "hull:http-client"` | `"hull/http-client@1"` | HTTP client (also needs `hosts` allowlist) |
+| `ws` | `require("hull.ws-server")` | `import { ws } from "hull:ws-server"` | `"hull/ws-server@1"` | WebSocket server + client |
 | `gpu` | `require("hull.gpu")` | `import { gpu } from "hull:gpu"` | `"hull/gpu@1"` | GPU compute (requires `HL_ENABLE_GPU=1`, manifest `gpu = true`) |
 | `compute` | `require("hull.compute")` | `import { compute } from "hull:compute"` | `"hull/compute@1"` | WASM compute plugins |
 | `image` | `require("hull.image")` | `import { image } from "hull:image"` | `"hull/image@1"` | Image decode/encode |

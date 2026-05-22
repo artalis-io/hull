@@ -13,13 +13,14 @@
 
 import { app } from "hull:app";
 import { db } from "hull:db";
-import { http } from "hull:http";
+import { http } from "hull:http-client";
 import { log } from "hull:log";
 import { worker } from "hull:worker";
 
 // Allow outbound HTTP to self (localhost) for the fetch demos
 app.manifest({
     modules: [
+    "hull/http-server@1",
         "hull/log@1",
     ],
     hosts: ["127.0.0.1"],

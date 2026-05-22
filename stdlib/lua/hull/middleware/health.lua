@@ -23,7 +23,7 @@
 --   app.use("GET", "/*", health.middleware())
 
 local db = require("hull.db")
-local server = require("hull.server")
+local server = require("hull.http-server")
 local time = require("hull.time")
 
 local health = {}

@@ -38,13 +38,14 @@ int hl_lua_register_modules(HlLua *lua)
 
     /* ── Intrinsic globals (always present) ────────────────────────── */
 
-    /* hull.app — route registration is infrastructure. */
+    /* hull.app — the bootstrap intrinsic. Only `app.manifest`,
+     * `app.main`, and `app.get_manifest` are present by default; all
+     * other methods (get/post/use/router/ws/sse/every/daily) are
+     * decorated onto `app` by lua_app_manifest based on the modules
+     * the app declares (hull/http-server, hull/ws-server, hull/sse,
+     * hull/timers). The C# partial-class pattern. */
     luaL_requiref(L, "hull.app", luaopen_hull_app, 0);
     lua_setglobal(L, "app");
-
-    /* Add app.router AFTER app is global so the embedded Lua source
-     * can reference `app.X` directly. */
-    hl_lua_install_app_router(L);
 
     /* hull.log — pre-register so `require("hull.log")` resolves
      * via LUA_LOADED_TABLE without a disk hit. As of v0.1.0
@@ -70,12 +71,16 @@ int hl_lua_register_modules(HlLua *lua)
     register_native_module(L, "hull.env",    luaopen_hull_env);
     register_native_module(L, "hull.crypto", luaopen_hull_crypto);
 #ifdef HL_ENABLE_HTTP_CLIENT
-    register_native_module(L, "hull.http",   luaopen_hull_http);
-    register_native_module(L, "hull.smtp",   luaopen_hull_smtp);
+    register_native_module(L, "hull.http-client", luaopen_hull_http);
+    register_native_module(L, "hull.smtp",        luaopen_hull_smtp);
 #endif
 #ifdef HL_ENABLE_HTTP_SERVER
-    register_native_module(L, "hull.server", luaopen_hull_server);
-    register_native_module(L, "hull.ws",     luaopen_hull_ws);
+    /* hull.http-server provides server stats (stats()) — registration
+     * verbs land directly on the app intrinsic via install_app_http_server. */
+    register_native_module(L, "hull.http-server", luaopen_hull_server);
+    /* WebSocket split: ws-server (broadcast/connections) vs ws-client (connect). */
+    register_native_module(L, "hull.ws-server", luaopen_hull_ws_server);
+    register_native_module(L, "hull.ws-client", luaopen_hull_ws_client);
 #endif
     register_native_module(L, "hull.fs",     luaopen_hull_fs);
     register_native_module(L, "hull.image",  luaopen_hull_image);

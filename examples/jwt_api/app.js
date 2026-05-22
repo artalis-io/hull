@@ -15,6 +15,7 @@ import { validate } from "hull:validate";
 app.manifest({
     env: ["JWT_SECRET"],
     modules: [
+        "hull/http-server@1",
         "hull/log@1",
         "hull/crypto@1",
         "hull/db@1",

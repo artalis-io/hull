@@ -586,19 +586,44 @@ static int lua_ws_connections(lua_State *L)
     return 1;
 }
 
-static const luaL_Reg ws_funcs[] = {
+/* Split into server-side and client-side reg tables. The single
+ * old hull/ws@1 module is replaced by hull/ws-server@1 (broadcast,
+ * connections, plus app.ws decoration) and hull/ws-client@1
+ * (connect, gated on hosts allowlist at call time). */
+static const luaL_Reg ws_server_funcs[] = {
     {"broadcast",   lua_ws_broadcast},
     {"connections", lua_ws_connections},
+    {NULL, NULL}
+};
+
+static const luaL_Reg ws_client_funcs[] = {
     {"connect",     lua_ws_connect},
     {NULL, NULL}
 };
 
-int luaopen_hull_ws(lua_State *L)
+/* Shared init for metatables — both openers need these registered
+ * exactly once per Lua state. Idempotent because luaL_newmetatable
+ * checks before creating. */
+static void hl_lua_ws_register_metatables(lua_State *L);
+
+int luaopen_hull_ws_server(lua_State *L)
 {
-    /* Register metatables */
+    hl_lua_ws_register_metatables(L);
+    luaL_newlib(L, ws_server_funcs);
+    return 1;
+}
+
+int luaopen_hull_ws_client(lua_State *L)
+{
+    hl_lua_ws_register_metatables(L);
+    luaL_newlib(L, ws_client_funcs);
+    return 1;
+}
+
+static void hl_lua_ws_register_metatables(lua_State *L)
+{
+    /* Both connection metatables — idempotent across multiple
+     * luaopen_hull_ws_{server,client} calls. */
     hl_lua_ws_register_conn_mt(L);
     hl_lua_ws_register_client_conn_mt(L);
-
-    luaL_newlib(L, ws_funcs);
-    return 1;
 }

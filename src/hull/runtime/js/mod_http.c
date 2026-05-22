@@ -505,7 +505,7 @@ static JSValue js_http_async_delete(JSContext *ctx, JSValueConst this_val,
 
 static int js_http_module_init(JSContext *ctx, JSModuleDef *m)
 {
-    if (hl_js_check_module_declared(ctx, "hull/http", "hull:http") != 0) return -1;
+    if (hl_js_check_module_declared(ctx, "hull/http-client", "hull:http-client") != 0) return -1;
 
     JSValue http = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, http, "request",
@@ -544,7 +544,7 @@ static int js_http_module_init(JSContext *ctx, JSModuleDef *m)
 int hl_js_init_http_module(JSContext *ctx, HlJS *js)
 {
     (void)js;
-    JSModuleDef *m = JS_NewCModule(ctx, "hull:http", js_http_module_init);
+    JSModuleDef *m = JS_NewCModule(ctx, "hull:http-client", js_http_module_init);
     if (!m)
         return -1;
     JS_AddModuleExport(ctx, m, "http");

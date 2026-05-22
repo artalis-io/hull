@@ -19,7 +19,7 @@
  */
 
 import { smtp } from "hull:smtp";
-import { http } from "hull:http";
+import { http } from "hull:http-client";
 import { json } from "hull:json";
 
 const email = {};

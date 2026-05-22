@@ -11,13 +11,15 @@
 import { app } from "hull:app";
 import { log } from "hull:log";
 import { time } from "hull:time";
-import { ws } from "hull:ws";
+import { ws } from "hull:ws-server";
 
 app.manifest({
     modules: [
+        "hull/ws-server@1",
+        "hull/sse@1",
+        "hull/http-server@1",
         "hull/log@1",
         "hull/time@1",
-        "hull/ws@1",
     ],
 });
 

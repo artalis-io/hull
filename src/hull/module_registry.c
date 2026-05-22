@@ -70,7 +70,7 @@ static const HlModuleSpec REGISTRY[] = {
          * are reachable from the same email.send() entry point, so both
          * are hard deps. */
         .required_caps = 0,
-        .deps = {"hull/http", "hull/smtp", 0},
+        .deps = {"hull/http-client", "hull/smtp", 0},
     },
     {
         .name = "hull/env",
@@ -93,11 +93,27 @@ static const HlModuleSpec REGISTRY[] = {
         .required_caps = HL_MOD_CAP_GPU, .deps = {0},
     },
     {
-        .name = "hull/http",
+        /* Outbound HTTPS client — http.fetch. Renamed from
+         * hull/http@1 (which was misleading; it was always the
+         * client). The server-side counterpart is hull/http-server@1. */
+        .name = "hull/http-client",
         .api_major = 1, .intrinsic = 0, .pure = 0,
-        /* http.fetch — outbound HTTP/HTTPS client. */
         .required_caps = HL_MOD_CAP_HOSTS | HL_MOD_CAP_HTTP_CLIENT,
         .deps = {0},
+    },
+    {
+        /* Inbound HTTP server — REST verbs + middleware + router.
+         * Declaring this module decorates the `app` intrinsic with:
+         *   app.get / .post / .put / .delete / .patch / .options
+         *   app.use / .use_post
+         *   app.router(prefix, opts)
+         * Without it, those methods don't exist on `app` at all
+         * (attempt to call a nil value / not a function). Replaces
+         * the vestigial hull/server@1 module — middleware modules
+         * now depend on hull/http-server. */
+        .name = "hull/http-server",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER, .deps = {0},
     },
     {
         .name = "hull/i18n",
@@ -180,7 +196,7 @@ static const HlModuleSpec REGISTRY[] = {
         /* health pings the DB and inspects server stats; both are hard
          * deps even when db_check is disabled at runtime, because the
          * required modules need to be importable. */
-        .deps = {"hull/db", "hull/server", "hull/time", 0},
+        .deps = {"hull/db", "hull/http-server", "hull/time", 0},
     },
     {
         .name = "hull/middleware/idempotency",
@@ -203,7 +219,7 @@ static const HlModuleSpec REGISTRY[] = {
         .name = "hull/middleware/outbox",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HTTP_SERVER,
-        .deps = {"hull/db", "hull/http", 0},
+        .deps = {"hull/db", "hull/http-client", 0},
     },
     {
         .name = "hull/middleware/ratelimit",
@@ -237,17 +253,19 @@ static const HlModuleSpec REGISTRY[] = {
         .deps = {"hull/db", 0},
     },
     {
-        .name = "hull/server",
-        .api_major = 1, .intrinsic = 0, .pure = 0,
-        /* app.get/post/use/etc. — inbound HTTP server registration. */
-        .required_caps = HL_MOD_CAP_HTTP_SERVER, .deps = {0},
-    },
-    {
         .name = "hull/smtp",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         /* SMTP client — outbound mail delivery. */
         .required_caps = HL_MOD_CAP_HOSTS | HL_MOD_CAP_HTTP_CLIENT,
         .deps = {0},
+    },
+    {
+        /* Server-Sent Events — declaring this decorates the `app`
+         * intrinsic with app.sse(path, handler). Server-push protocol
+         * only; no client API in Hull. */
+        .name = "hull/sse",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER, .deps = {0},
     },
     {
         .name = "hull/template",
@@ -282,9 +300,21 @@ static const HlModuleSpec REGISTRY[] = {
         .required_caps = 0, .deps = {0},
     },
     {
-        .name = "hull/ws",
+        /* WebSocket client — outbound ws.connect(). Requires a
+         * non-empty hosts allowlist (capability gate enforced at
+         * call time inside ws.connect). */
+        .name = "hull/ws-client",
         .api_major = 1, .intrinsic = 0, .pure = 0,
-        /* WebSocket server — app.ws() endpoint registration. */
+        .required_caps = HL_MOD_CAP_HOSTS | HL_MOD_CAP_HTTP_SERVER, .deps = {0},
+    },
+    {
+        /* WebSocket server — declaring this decorates the `app`
+         * intrinsic with app.ws(path, handlers), and exposes
+         * ws.broadcast(path, msg) and ws.connections(path) helpers
+         * for managing connected clients. Split from the old
+         * hull/ws@1 which mixed server and client. */
+        .name = "hull/ws-server",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HTTP_SERVER, .deps = {0},
     },
 };

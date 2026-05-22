@@ -8,9 +8,9 @@ import { health } from "hull:middleware:health";
 
 app.manifest({
     modules: [
+        "hull/http-server@1",
         "hull/crypto@1",
         "hull/db@1",
-        "hull/server@1",
         "hull/time@1",
         "hull/middleware/etag@1",
         "hull/middleware/health@1",
