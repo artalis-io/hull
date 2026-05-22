@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* ── Helpers ─────────────────────────────────────────────────────── */
 
@@ -104,8 +105,31 @@ static void print_spec_human(const HlModuleSpec *s)
 
 /* ── available ───────────────────────────────────────────────────── */
 
-static int cmd_available(const HlCommandEnv *env)
+static int cmd_available(int argc, char **argv, const HlCommandEnv *env)
 {
+    int tui = 0;
+    for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "--tui") == 0) { tui = 1; break; }
+    }
+#ifdef HL_ENABLE_TUI
+    if (tui) {
+        if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
+            fprintf(stderr,
+                "hull modules available --tui: not attached to a "
+                "terminal. Run without --tui for plain text.\n");
+            return 1;
+        }
+        return hull_tool("hull.modules_available_tui",
+                         argc, argv, env->hull_exe);
+    }
+#else
+    if (tui) {
+        fprintf(stderr, "hull modules available --tui: this build was "
+                        "compiled without HL_ENABLE_TUI.\n");
+        return 1;
+    }
+#endif
+
     size_t total = 0;
     const HlModuleSpec *all = hl_module_registry_all(&total);
 
@@ -247,7 +271,7 @@ int hl_cmd_modules(int argc, char **argv, const HlCommandEnv *env)
      * arg[0]="list" and arg[1]=<app_dir> (matches the convention every
      * other hull_tool command uses). */
     if (strcmp(sub, "list") == 0)      return cmd_list(argc - 1, argv + 1, env);
-    if (strcmp(sub, "available") == 0) return cmd_available(env);
+    if (strcmp(sub, "available") == 0) return cmd_available(argc - 1, argv + 1, env);
     if (strcmp(sub, "explain") == 0)   return cmd_explain(argc - 2, argv + 2, env);
     if (strcmp(sub, "analyze") == 0)   return cmd_analyze(argc - 1, argv + 1, env);
     if (strcmp(sub, "-h") == 0 || strcmp(sub, "--help") == 0)

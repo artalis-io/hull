@@ -744,6 +744,69 @@ static int l_tool_agent_context(lua_State *L)
     return 2;
 }
 
+/* ── tool.modules_available — every first-party registry entry ──── */
+
+/* Returns a table { count = N, modules = { {name, api_major, intrinsic,
+ * pure, deps = {...}, caps = {...} }, ... } }. The Lua dev_tui /
+ * modules_available_tui modules render from it directly; no JSON
+ * intermediate. */
+static int l_tool_modules_available(lua_State *L)
+{
+    size_t total = 0;
+    const HlModuleSpec *all = hl_module_registry_all(&total);
+
+    lua_newtable(L);
+    lua_pushinteger(L, (lua_Integer)total);
+    lua_setfield(L, -2, "count");
+
+    lua_newtable(L);  /* modules array */
+    for (size_t i = 0; i < total; i++) {
+        const HlModuleSpec *s = &all[i];
+        lua_newtable(L);
+
+        lua_pushstring(L, s->name);                 lua_setfield(L, -2, "name");
+        lua_pushinteger(L, s->api_major);            lua_setfield(L, -2, "api_major");
+        lua_pushboolean(L, s->intrinsic);            lua_setfield(L, -2, "intrinsic");
+        lua_pushboolean(L, s->pure);                 lua_setfield(L, -2, "pure");
+
+        /* deps array */
+        lua_newtable(L);
+        int di = 1;
+        for (int j = 0; j < HL_MODULE_MAX_DEPS && s->deps[j]; j++) {
+            lua_pushstring(L, s->deps[j]);
+            lua_rawseti(L, -2, di++);
+        }
+        lua_setfield(L, -2, "deps");
+
+        /* caps array — turn the bitmask back into stable names */
+        lua_newtable(L);
+        int ci = 1;
+        uint32_t need = s->required_caps;
+        struct { uint32_t bit; const char *name; } map[] = {
+            { HL_MOD_CAP_FS,          "fs"          },
+            { HL_MOD_CAP_HOSTS,       "hosts"       },
+            { HL_MOD_CAP_ENV,         "env"         },
+            { HL_MOD_CAP_DB,          "db"          },
+            { HL_MOD_CAP_WASM,        "wasm"        },
+            { HL_MOD_CAP_GPU,         "gpu"         },
+            { HL_MOD_CAP_HTTP_CLIENT, "http_client" },
+            { HL_MOD_CAP_HTTP_SERVER, "http_server" },
+            { HL_MOD_CAP_TUI,         "tui"         },
+        };
+        for (size_t k = 0; k < sizeof map / sizeof map[0]; k++) {
+            if (need & map[k].bit) {
+                lua_pushstring(L, map[k].name);
+                lua_rawseti(L, -2, ci++);
+            }
+        }
+        lua_setfield(L, -2, "caps");
+
+        lua_rawseti(L, -2, (int)(i + 1));
+    }
+    lua_setfield(L, -2, "modules");
+    return 1;
+}
+
 /* ── tool.dev_* — hull dev --tui bindings ─────────────────────────── */
 
 /* These accessors all consult hl_dev_state(); they're a no-op (returns
@@ -860,6 +923,7 @@ static const luaL_Reg tool_funcs[] = {
     { "dev_recent_lines",       l_tool_dev_recent_lines },
     { "dev_check_file_change",  l_tool_dev_check_file_change },
     { "dev_reload",             l_tool_dev_reload },
+    { "modules_available",      l_tool_modules_available },
     { NULL, NULL }
 };
 

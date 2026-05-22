@@ -70,6 +70,7 @@ Hull's distribution is one binary; what's compiled into it is controlled by a sm
 | `HL_ENABLE_HTTP_SERVER` | 1 | Drop the inbound HTTP server: serve.c (KlServer setup), routing, body reader, WebSocket server (cap/ws), middleware, SSE, in-process test harness (cap/test, test_runner), and `hull dev/test/agent/mcp` commands. Apps must use `app.main(fn)` and may not declare `hull/ws`, `hull/server`, `hull/sse`, or any `hull/middleware/*`. See "HTTP build flavors" below. |
 | `HL_ENABLE_HTTP_CLIENT` | 1 | Drop the outbound HTTP/HTTPS client: `http.fetch` (cap/http + cap/http_async), SMTP send (cap/smtp), and `hull update` (which uses Keel's HTTPS client). Apps may not declare `hull/http`, `hull/smtp`, or `hull/email`. |
 | `HL_ENABLE_HTTP` | 1 | **Back-compat alias.** Setting `HL_ENABLE_HTTP=0` pins both `HL_ENABLE_HTTP_SERVER` and `HL_ENABLE_HTTP_CLIENT` to 0. The macro stays defined when either granular flag is on, so existing source guards continue to mean "any HTTP at all". |
+| `HL_ENABLE_TUI` | 1 | Drop the terminal UI capability: `cap/tui.c`, `cap/tui_input.c`, the runtime bindings, the `hull.tui` stdlib module, and the `--tui` flag on `hull doctor / dev / agent context / agent errors / modules available`. `cap/tui_width.c` (data-table lookup) stays. ~80–150 KB. See "Terminal UI module" below. |
 
 Combine flags freely: `make HL_ENABLE_DB=0 HL_ENABLE_WASM=1 HL_ENABLE_TCC=0` yields a pure compute runtime with Lua/JS orchestration but no database or build-toolchain.
 
@@ -220,6 +221,7 @@ All system access is mediated by C capability functions. Neither runtime touches
 | Body | `cap/body.c` | Request body handling |
 | WASM compute | `cap/wasm.c` | `hl_cap_wasm_init()`, `_load()`, `_call()` — WAMR compute plugins |
 | GPU compute | `cap/gpu.c`, `cap/gpu_wgpu.c` | `hl_cap_gpu_init()`, `_compile()`, `_dispatch()` — wgpu-native compute shaders |
+| TUI | `cap/tui.c`, `cap/tui_input.c`, `cap/tui_width.c` | `hl_cap_tui_acquire/release()`, `_size()`, `_move/print/style/flush()`, `_poll()`, `_clipboard_set()` — terminal UI w/ cell-diff rendering, ANSI parser, OSC 11 theme detect |
 | Audit | `cap/audit.c` | Structured capability audit logging (JSON to stderr) |
 
 ### Request Flow
@@ -1525,6 +1527,89 @@ WASM and GPU compute share symmetric naming where the concepts align:
 | Execution limits | Gas metering (per-instruction) | Timeout (5s wall clock) |
 
 Intentionally different: `call` vs `dispatch` (function call vs hardware dispatch), `instance` vs `buffer` (retained linear memory vs GPU storage), `segment` vs `buffer` (read-only shared heap vs read/write GPU buffer).
+
+## Terminal UI module
+
+Hull ships a built-in `hull.tui` module for interactive terminal apps. The design lives in [docs/tui_mode.md](docs/tui_mode.md); the short version:
+
+- **One canonical entry point**: `tui.run({ draw, on_event, tick_ms })`. Raw primitives (`tui.move`, `tui.print`, `tui.poll`, …) are exposed but the immediate-mode loop is what apps lead with.
+- **CLI mode only**: TUI requires `app.main`. Server apps (`app.get/post/...`) cannot also call `tui.run`. Same rationale as CLI mode itself.
+- **Manifest gate**: `app.manifest({ tui = true, modules = { "hull/tui@1" } })`. The resolver enforces both — the build flag at compile time, the manifest field at app-load time.
+- **Per-process singleton**: one `HlTuiCtx` per process (the controlling tty is singleton). Second `acquire` returns `-EBUSY`.
+- **Cell-diff rendering**: shadow + pending buffers in the cap layer; only changed cells are emitted on flush. Flicker-free over ssh / mosh without app-side work. Unicode width comes from an embedded data table at `vendor/unicode/eaw.h` — identical behavior across glibc / musl / cosmo / macOS. Refresh via `make fetch-unicode`.
+- **Async-integrated `tui.poll`**: yields to the runtime's event loop while waiting for input. Background `tui.async` coroutines / Promises keep ticking, so an app can `http.fetch` or `db.async.query` while the main coroutine awaits a keystroke.
+- **Lone-ESC commit**: bare `\x1b` is committed as a synthetic `"escape"` event after a 50 ms quiet window — resolves the classic "ESC vs. start of CSI" ambiguity without making the user wait for a follow-up byte.
+
+### API surface
+
+```lua
+local tui = require("hull.tui")
+
+-- Canonical entry point.
+tui.run({
+    draw     = function(t) ... end,        -- required, called every tick + on event
+    on_event = function(ev) return nil end,-- nil = keep going; non-nil = exit token
+    tick_ms  = -1,                         -- -1 = block until event; 100 = 10Hz
+    mouse    = false,                      -- opt-in SGR mouse (CSI <btn>;<x>;<y> M)
+    paste    = false,                      -- opt-in bracketed paste
+    focus    = false,                      -- opt-in focus in/out events
+    kitty_kbd= false,                      -- opt-in Kitty keyboard protocol
+})
+
+-- Helpers.
+tui.list(items, opts?)        -- scrollable picker; returns picked index or nil
+tui.confirm(msg)              -- y/N prompt; returns boolean
+tui.input(prompt, opts?)      -- single-line editor with cursor + editing keys
+tui.frame(opts, fn)           -- bordered area; opts.border ∈ single/double/round/ascii
+tui.progress(pct, opts?)      -- "[████░░] 67%"
+tui.spinner(state)            -- ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ — returns frame + next state
+tui.theme()                   -- "dark" | "light" | "unknown" (cached at acquire)
+tui.caps()                    -- { truecolor, color256, color, mouse, focus, kitty_kbd, clipboard }
+tui.clipboard_set(text)       -- OSC 52 write to system clipboard
+tui.async(fn)                 -- spawn a detached coroutine on the event loop
+
+-- Escape-hatch primitives (use tui.run instead).
+tui.enter() / tui.leave()
+tui.size() / tui.theme() / tui.caps()
+tui.clear() / tui.invalidate() / tui.move(x, y) / tui.style(opts)
+tui.print(x, y, s) / tui.write(s) / tui.flush()
+tui.poll(timeout_ms)          -- yields to event loop; returns event or nil
+```
+
+JS API is the same shape (`import { tui } from "hull:tui"`) in camelCase: `tui.enableMouse`, `tui.clipboardSet`, `tui.poll` returns a `Promise<event|null>`.
+
+### First-party `--tui` tools
+
+These ship as Lua tool modules under `stdlib/lua/hull/`; the C dispatchers in `src/hull/commands/` accept a `--tui` (or `--interactive`) flag and delegate via `hull_tool`. Each refuses cleanly when stdin/stdout isn't a real terminal.
+
+| Command | What | Module |
+|---------|------|--------|
+| `hull doctor --tui` | Live readiness check w/ ✓/✗ glyphs, sections for platform/compilers/subsystems/compute/CA-bundle, summary. `r` reprobes, `c` copies JSON via OSC 52, `q` quits. | `hull/doctor_tui.lua` |
+| `hull dev --tui` | Live request log streamed from child's stderr/stdout into a ring buffer, status line (pid, reloads, lines, app_dir), inline filter prompt, file-watch auto-reload, manual `r` reload. | `hull/dev_tui.lua` (+ `src/hull/dev_state.h`) |
+| `hull agent context --interactive` | Two-pane task picker w/ live preview; ←/→ cycles level (minimal/compact/full); Enter prints chosen context as JSON to stdout for shell pipelines. | `hull/agent_context_tui.lua` |
+| `hull agent errors --tui` | Scrollable error list + detail panel. Normalizes varied error shapes. Empty-state shows clean "✓ No errors". | `hull/agent_errors_tui.lua` |
+| `hull modules available --tui` | Two-pane searchable registry; `/` opens filter prompt; right pane shows caps + deps + manifest snippet. | `hull/modules_available_tui.lua` |
+
+### Architecture conventions for `--tui` dogfood
+
+The pattern, verified by all five commands above:
+
+1. C command parses `--tui`, checks `isatty()`, delegates to `hull_tool("hull.X_tui", argc, argv, env->hull_exe)`. Non-tty path prints a helpful message + exits non-zero.
+2. The Lua tool module accesses data via `tool.*` accessors (registered in `src/hull/runtime/lua/mod_tool.c`). Examples: `tool.doctor_json()`, `tool.agent_context(task, level)`, `tool.dev_drain()`, `tool.modules_available()`.
+3. Heavy data goes through JSON strings parsed with `hull.json.decode`. Lighter data (registry walks) goes through Lua tables directly. No data is duplicated between the JSON path and the TUI path — both call the same C helpers.
+
+### Testing
+
+- **Cap layer**: 72 tests across `test_tui_width.c` (Unicode width, UTF-8 decode), `test_tui_parser.c` (CSI/SS3/OSC parser, mouse, paste, focus, flush_idle), `test_tui_lifecycle.c` (PTY-driven acquire/release/render/termios). Skips gracefully on platforms without `forkpty`.
+- **Resolver**: 3 tests for the build/manifest gate (`hull/tui@1` admitted, rejected without `tui = true`, rejected without `HL_ENABLE_TUI`).
+- **E2E**: `tests/e2e_tui.sh` + the PTY harness `tests/e2e_tui_drive.c` cover 30+ cases including all five dogfood tools, the async-yield proof, and ENOTTY refusals. Drive script supports `%d`/`%u`/`%r`/`%e`/`%q`/`%sN` and literal bytes; the e2e helper builds on every `HL_ENABLE_TUI=1` build via `make e2e-tui`.
+
+### Adding a new `--tui` command
+
+1. Expose any in-process data the TUI needs by adding a `tool.X()` binding in `src/hull/runtime/lua/mod_tool.c` (either returning a Lua table directly or calling `open_memstream` + a JSON writer for heavier payloads).
+2. Add a `--tui` flag to the C dispatcher in `src/hull/commands/*.c`. Check `isatty(STDIN_FILENO) && isatty(STDOUT_FILENO)`; refuse cleanly otherwise.
+3. Write `stdlib/lua/hull/X_tui.lua` — `require "hull.tui"` + a `tui.run` loop calling your new `tool.X()`.
+4. Add an e2e case in `tests/e2e_tui.sh` using the PTY driver (e.g. `"%q"` to send 'q' immediately after the first frame).
 
 ## Testing
 

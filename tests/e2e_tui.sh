@@ -349,6 +349,77 @@ APP
     else
         pass "hull dev --tui without a tty exits with a helpful error"
     fi
+
+    # ── hull modules available --tui ──────────────────────────────
+    echo "--- hull modules available --tui ---"
+    OUT=$("${DRIVE}" "hull modules" "%q" -- \
+          "${HULL_BIN}" modules available --tui 2>/dev/null)
+    case "${OUT}" in
+        *"hull modules available"*"hull/app"*)
+            pass "hull modules available --tui renders title + first module"
+            ;;
+        *)
+            fail "hull modules available --tui missing expected output"
+            ;;
+    esac
+
+    # Filter for "tui" — should narrow down to just modules with that
+    # substring (hull/tui at minimum). We look for `filter="tui"` in
+    # the bottom key bar; the cell-diff renderer skips re-emitting
+    # unchanged prefixes ("hull/" was already on-screen pre-filter),
+    # so a `hull/tui` substring search would miss.
+    OUT=$("${DRIVE}" 'filter="tui"' "/tui%r%q" -- \
+          "${HULL_BIN}" modules available --tui 2>/dev/null)
+    case "${OUT}" in
+        *'filter="tui"'*)
+            pass "hull modules available --tui filter narrows the list"
+            ;;
+        *)
+            fail "hull modules available --tui filter did not work"
+            ;;
+    esac
+
+    if "${HULL_BIN}" modules available --tui < /dev/null > /dev/null 2>&1; then
+        fail "hull modules available --tui without a tty should exit non-zero"
+    else
+        pass "hull modules available --tui without a tty exits with a helpful error"
+    fi
+
+    # ── tui_dashboard example (multi-pane + tui.frame + mouse) ────
+    echo "--- tui_dashboard ---"
+
+    # Verify the dashboard renders title + sections + progress glyphs.
+    OUT=$("${DRIVE}" "Hull TUI dashboard" "%s300%q" -- \
+          "${HULL_BIN}" examples/tui_dashboard/app.lua 2>/dev/null)
+    case "${OUT}" in
+        *"Hull TUI dashboard"*"metrics"*"startup tasks"*"help"*)
+            pass "tui_dashboard renders three panes"
+            ;;
+        *)
+            fail "tui_dashboard missing expected panes"
+            ;;
+    esac
+
+    # Mouse mode is opt-in via tui.run({ mouse = true }) — verify the
+    # cap layer emitted the SGR mouse enable sequences.
+    case "${OUT}" in
+        *"[?1000h"*"[?1006h"*)
+            pass "tui_dashboard enables SGR mouse via mouse=true"
+            ;;
+        *)
+            fail "tui_dashboard did not enable SGR mouse"
+            ;;
+    esac
+
+    # And cleanly disables them on exit.
+    case "${OUT}" in
+        *"[?1006l"*"[?1000l"*)
+            pass "tui_dashboard disables SGR mouse on exit"
+            ;;
+        *)
+            fail "tui_dashboard did not disable SGR mouse on exit"
+            ;;
+    esac
 fi
 
 echo
