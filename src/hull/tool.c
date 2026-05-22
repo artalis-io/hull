@@ -255,8 +255,9 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
             const char *cname = all[i].name;
             if (strncmp(cname, "hull/", 5) != 0) continue;
             char lua_name[HL_MODULE_NAME_MAX];
-            if (strlen(cname) + 1 > sizeof(lua_name)) continue;
-            strcpy(lua_name, cname);
+            size_t cname_len = strlen(cname);
+            if (cname_len + 1 > sizeof(lua_name)) continue;
+            memcpy(lua_name, cname, cname_len + 1);
             for (char *p = lua_name; *p; p++)
                 if (*p == '/') *p = '.';
 
@@ -304,8 +305,9 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
              * global (no Lua identifier could spell that). */
             if (strchr(short_name, '/')) continue;
             char lua_name[HL_MODULE_NAME_MAX];
-            if (strlen(cname) + 1 > sizeof(lua_name)) continue;
-            strcpy(lua_name, cname);
+            size_t cname_len = strlen(cname);
+            if (cname_len + 1 > sizeof(lua_name)) continue;
+            memcpy(lua_name, cname, cname_len + 1);
             for (char *p = lua_name; *p; p++)
                 if (*p == '/') *p = '.';
             lua_getfield(L, -1, lua_name);

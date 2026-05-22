@@ -47,11 +47,17 @@ static void js_ws_client_conn_finalizer(JSRuntime *rt, JSValue val)
     if (ud->client)
         kl_ws_client_free(ud->client);
 
-    JS_FreeValueRT(rt, ud->on_open);
-    JS_FreeValueRT(rt, ud->on_message);
-    JS_FreeValueRT(rt, ud->on_close);
-    JS_FreeValueRT(rt, ud->on_error);
-    /* self_ref already freed when we clear it */
+    /* Mirror the gc_mark guards: callbacks may have been cleared to
+     * JS_UNDEFINED by on_close before the finalizer runs. Freeing
+     * UNDEFINED is a no-op in QuickJS today, but the explicit check
+     * documents the invariant and keeps the two callbacks symmetric. */
+    if (!JS_IsUndefined(ud->on_open))    JS_FreeValueRT(rt, ud->on_open);
+    if (!JS_IsUndefined(ud->on_message)) JS_FreeValueRT(rt, ud->on_message);
+    if (!JS_IsUndefined(ud->on_close))   JS_FreeValueRT(rt, ud->on_close);
+    if (!JS_IsUndefined(ud->on_error))   JS_FreeValueRT(rt, ud->on_error);
+    /* self_ref is the cycle-breaking handle dropped by on_close (or
+     * never installed if connect failed early); freeing it here would
+     * double-decrement the GC refcount. */
     js_free_rt(rt, ud);
 }
 

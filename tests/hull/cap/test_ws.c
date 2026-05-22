@@ -4,6 +4,22 @@
  * Uses utest.h for the test framework.
  * Tests the registry in isolation (no Keel server needed).
  *
+ * Scope: server-side registry (HlWsRegistry, hl_ws_broadcast_*,
+ * hl_ws_connections). Server-side conn class and per-connection methods
+ * (send / send_binary / close / ping / conn.data) live in
+ * runtime/{lua,js}/mod_ws_server.c and are exercised end-to-end through
+ * the chat example (e2e_examples.sh).
+ *
+ * Client-side WebSocket lifecycle (ws.connect outbound, on_open /
+ * on_message / on_close / on_error callbacks, JS finalizer cleanup of
+ * UD callback refs) is a thin wrapper over keel's kl_ws_client_* and
+ * requires a live event loop. It is covered end-to-end by the
+ * irc_chat federation tests (examples/irc_chat/tests/test_app.{lua,js}
+ * — 13 federation cases), which exercise the on_open → on_message →
+ * on_close → finalizer teardown path under both runtimes. Mocking
+ * keel's WS client for a standalone C unit test was considered and
+ * rejected as brittle for the value gained.
+ *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 

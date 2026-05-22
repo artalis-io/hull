@@ -55,6 +55,9 @@ end
 --   - `message` (string) — override the default error message.
 --
 -- @tparam table data    Input. Non-table input is treated as `{}`.
+--   **NOTE:** when any field uses `trim = true`, `data[field]` is
+--   replaced with the trimmed value in-place — the caller's table is
+--   mutated. Pass a shallow copy if you need the original preserved.
 -- @tparam table schema  Rules. Non-table input → `true, nil`.
 -- @treturn boolean ok   `true` if all fields pass.
 -- @treturn ?table errors  Maps field-name → error message. `nil` on success.

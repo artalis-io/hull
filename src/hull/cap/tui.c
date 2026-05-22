@@ -469,10 +469,23 @@ fallback:
         const char *fgbg = getenv("COLORFGBG");
         if (fgbg) {
             const char *semi = strchr(fgbg, ';');
-            if (semi) {
-                int bg = atoi(semi + 1);
-                ctx->theme = (bg >= 0 && bg <= 6) ? "dark" : "light";
-                return;
+            if (semi && semi[1] != '\0') {
+                char *endptr = NULL;
+                errno = 0;
+                long bg = strtol(semi + 1, &endptr, 10);
+                /* Only treat as a valid index if at least one digit was
+                 * consumed (endptr advanced) and no overflow occurred.
+                 * Anything else falls through to the default "dark". */
+                if (endptr != semi + 1 && errno == 0
+                        && bg >= 0 && bg <= 6) {
+                    ctx->theme = "dark";
+                    return;
+                }
+                if (endptr != semi + 1 && errno == 0
+                        && bg >= 7 && bg <= 15) {
+                    ctx->theme = "light";
+                    return;
+                }
             }
         }
     }

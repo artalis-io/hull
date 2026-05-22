@@ -748,13 +748,18 @@ function template.compile(name)
         error("template not found: " .. name)
     end
 
-    -- Evict cache if at capacity
+    local fn = compile_source(source, name)
+
+    -- Cache full → flush, then insert. Single-threaded Lua means there's
+    -- no observable window where the cache holds more than MAX_CACHE_SIZE
+    -- entries: compile_source ran before we touched the cache, the flush
+    -- and re-insert happen back-to-back, and Hull never preempts inside
+    -- a Lua slice. Counting after-flush keeps cache_count in lockstep
+    -- with the actual table size.
     if cache_count >= MAX_CACHE_SIZE then
         cache = {}
         cache_count = 0
     end
-
-    local fn = compile_source(source, name)
     cache[name] = fn
     cache_count = cache_count + 1
     return fn
