@@ -39,6 +39,11 @@ app.main(function(ctx)
         cursor     = 1,
         bg_ticks   = 0,
         running    = true,
+        -- Captured during `draw` so `on_event` (a separate closure)
+        -- can compute the same mid-column split for mouse hit-testing
+        -- without hardcoding a column count.
+        cols       = 0,
+        rows       = 0,
     }
 
     -- Background ticker — updates metrics every 250ms while the
@@ -70,6 +75,8 @@ app.main(function(ctx)
             t:style({})
 
             -- Layout: left = metrics, right top = tasks, right bottom = help.
+            state.cols = t.cols
+            state.rows = t.rows
             local mid    = math.floor(t.cols * 0.5)
             local left_w = mid - 2
             local right_x = mid + 1
@@ -172,9 +179,10 @@ app.main(function(ctx)
             elseif ev.kind == "mouse" then
                 -- Click in the tasks pane toggles that row. The
                 -- pane starts at (mid, 2) with a 1-cell border, so
-                -- the first task row is at y=3.
-                if ev.button == 0 then  -- left click
-                    local mid = math.floor(80 * 0.5)  -- crude, we don't know cols here
+                -- the first task row is at y=3. `state.cols` is
+                -- updated each draw so the split tracks resizes.
+                if ev.button == 0 and state.cols > 0 then  -- left click
+                    local mid = math.floor(state.cols * 0.5)
                     local row = ev.y - 2
                     if row >= 1 and row <= #TASKS and ev.x > mid then
                         state.cursor = row

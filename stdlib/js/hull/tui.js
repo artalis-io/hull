@@ -15,6 +15,34 @@ import { tui as native } from "hull:_tui";
 
 function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
 
+/* A codepoint counts as "printable input" only if it's outside the C0
+ * control range (< 0x20), not DEL (0x7F), and not in the C1 range
+ * (0x80..0x9F). tui.input uses this to reject keystrokes that would
+ * otherwise inject terminal escape bytes into the returned buffer.
+ * The cap-layer write path already strips these on the way to cells,
+ * but rejecting at insertion-time keeps the returned string clean.
+ */
+function isPrintableCp(cp) {
+    if (!cp) return false;
+    if (cp < 0x20) return false;
+    if (cp === 0x7F) return false;
+    if (cp >= 0x80 && cp <= 0x9F) return false;
+    return true;
+}
+
+/* UTF-8-safe truncate by codepoint count. JS strings are UTF-16, so
+ * `.length` counts code units (one for BMP characters, two for
+ * surrogate pairs). Use Array.from to split by codepoint so the
+ * result never cuts a surrogate pair or multi-byte UTF-8 sequence
+ * once written to the cap layer.
+ */
+function truncateByCodepoints(s, maxCells) {
+    if (maxCells <= 0) return "";
+    const cps = Array.from(s);
+    if (cps.length <= maxCells) return s;
+    return cps.slice(0, maxCells).join("");
+}
+
 /* Per-frame draw context handed to the user's `draw` callback. */
 function makeDrawCtx() {
     const { cols, rows } = native.size();
@@ -144,6 +172,7 @@ function list(items, opts = {}) {
             else if (k === "enter")             return cursor;
             else if (k === "escape" || k === "q" || k === "ctrl+c") return false;
         },
+        tickMs: opts.tickMs,
     });
 
     return (result === false) ? null : result;
@@ -151,7 +180,7 @@ function list(items, opts = {}) {
 
 /* ── tui.confirm ─────────────────────────────────────────────── */
 
-function confirm(msg) {
+function confirm(msg, opts = {}) {
     const result = run({
         draw(t) {
             t.clear();
@@ -164,6 +193,7 @@ function confirm(msg) {
             if (ev.key === "enter") return false;
             if (ev.key === "escape" || ev.key === "ctrl+c") return false;
         },
+        tickMs: opts.tickMs,
     });
     return result === true;
 }
@@ -172,9 +202,14 @@ function confirm(msg) {
 
 const SPINNER_FRAMES = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
 function spinner(state = 0) {
-    let next = state + 1;
-    if (next >= SPINNER_FRAMES.length) next = 0;
-    return [SPINNER_FRAMES[next], next];
+    /* Return the frame at index `state`, then advance. The previous
+     * implementation returned frames[state+1] which meant calling
+     * spinner(0) returned "⠙" — skipping the first glyph "⠋" entirely
+     * and making the state/frame pair feel rotated. */
+    const idx = ((state % SPINNER_FRAMES.length) + SPINNER_FRAMES.length)
+                % SPINNER_FRAMES.length;
+    const next = (idx + 1) % SPINNER_FRAMES.length;
+    return [SPINNER_FRAMES[idx], next];
 }
 
 /* ── tui.progress ────────────────────────────────────────────── */
@@ -209,9 +244,12 @@ function frame(opts, fn) {
     if (opts.style) native.style(opts.style);
 
     let top = b.tl + b.h.repeat(w - 2) + b.tr;
-    if (opts.title && w - 4 > 0) {
-        let tt = String(opts.title);
-        if (tt.length > w - 4) tt = tt.slice(0, w - 4);
+    if (opts.title && w - 5 > 0) {
+        /* Layout: ┌─ title ─...─┐ — the framing reserves five chars
+         * (tl + h + " " around the title prefix, then " " + tr at the
+         * suffix end). The previous w-4 cap overshot by one cell
+         * when the title exactly filled the available room. */
+        let tt = truncateByCodepoints(String(opts.title), w - 5);
         const prefix = b.tl + b.h + " ";
         const suffixLen = Math.max(0, w - prefix.length - tt.length - 2);
         top = prefix + tt + " " + b.h.repeat(suffixLen) + b.tr;
@@ -231,7 +269,10 @@ function frame(opts, fn) {
             x: x + 1, y: y + 1, w: w - 2, h: h - 2,
             print(ix, iy, s) {
                 if (ix < 1 || iy < 1 || ix > w - 2 || iy > h - 2) return;
-                if (s.length > w - 2 - (ix - 1)) s = s.slice(0, w - 2 - (ix - 1));
+                /* Truncate by codepoint so a surrogate pair (e.g.
+                 * emoji) isn't split — the cap layer would otherwise
+                 * see invalid UTF-16 high surrogate as garbage. */
+                s = truncateByCodepoints(String(s), w - 2 - (ix - 1));
                 native.print(x + ix, y + iy, s);
             },
         });
@@ -283,13 +324,17 @@ function input(prompt, opts = {}) {
                 cursor = 0;
             } else if (k === "ctrl+k") {
                 buf = buf.slice(0, cursor);
-            } else if (ev.codepoint && ev.codepoint >= 0x20 && !ev.ctrl && !ev.alt) {
+            } else if (isPrintableCp(ev.codepoint) && !ev.ctrl && !ev.alt) {
                 if (buf.length < maxLen) {
+                    /* isPrintableCp has already filtered C0/DEL/C1,
+                     * so ev.key here can't carry an ANSI-injection
+                     * payload. */
                     buf = buf.slice(0, cursor) + ev.key + buf.slice(cursor);
                     cursor += ev.key.length;
                 }
             }
         },
+        tickMs: opts.tickMs,
     });
 
     return (result === false) ? null : result;

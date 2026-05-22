@@ -29,6 +29,35 @@ local function clamp(v, lo, hi)
     return v
 end
 
+-- A codepoint is "printable input" if it isn't a C0 control byte
+-- (< 0x20), DEL (0x7F), or a C1 control (0x80..0x9F). Used by
+-- tui.input to reject keystrokes that would otherwise insert
+-- terminal-escape bytes into the returned string. The cap layer
+-- already strips these on the way to cells (sanitization in
+-- hl_cap_tui_write), but rejecting at insertion-time keeps the
+-- returned buffer free of injected control bytes.
+local function is_printable_cp(cp)
+    if not cp then return false end
+    if cp < 0x20 then return false end
+    if cp == 0x7F then return false end
+    if cp >= 0x80 and cp <= 0x9F then return false end
+    return true
+end
+
+-- UTF-8-safe truncate: trim `s` to at most `max_cells` Lua chars
+-- WITHOUT cutting a multi-byte codepoint in half. We approximate
+-- "cell width" with `utf8.len` (one count per codepoint) — wide
+-- chars (CJK / emoji) over-count, but the result never produces
+-- a 0xFFFD glyph from a half-cut continuation byte. Returns the
+-- truncated string. Lua's utf8 lib is in the sandboxed Lua stdlib.
+local function utf8_truncate(s, max_cells)
+    if max_cells <= 0 then return "" end
+    if utf8.len(s) and utf8.len(s) <= max_cells then return s end
+    local last = utf8.offset(s, max_cells + 1)
+    if not last then return s end
+    return string.sub(s, 1, last - 1)
+end
+
 -- A draw-context handed to the user's `draw` function. Holds
 -- current size + a few convenience methods that delegate to the
 -- module-level cap functions. Stable across the lifetime of a
@@ -200,12 +229,14 @@ function tui.list(items, opts)
             elseif k == "escape" or k == "q" or k == "ctrl+c" then return false
             end
         end,
+        tick_ms = opts.tick_ms,
     })
 end
 
 -- ── tui.confirm ────────────────────────────────────────────────
 
-function tui.confirm(msg)
+function tui.confirm(msg, opts)
+    opts = opts or {}
     return tui.run({
         draw = function(t)
             t:clear()
@@ -218,6 +249,7 @@ function tui.confirm(msg)
             if ev.key == "enter" then return false end
             if ev.key == "escape" or ev.key == "ctrl+c" then return false end
         end,
+        tick_ms = opts.tick_ms,
     }) and true or false
 end
 
@@ -259,10 +291,14 @@ function tui.frame(opts, fn)
 
     -- Top edge
     local top = b.tl .. string.rep(b.h, w - 2) .. b.tr
-    if title and #title > 0 and w - 4 > 0 then
-        local tt = title
-        if #tt > w - 4 then tt = string.sub(tt, 1, w - 4) end
+    if title and #title > 0 and w - 5 > 0 then
         -- Slot the title into the top edge: ┌─ title ─...─┐
+        -- The framing reserves five chars: tl + h + " " around the
+        -- title prefix, then " " + tr at the suffix end, plus 0+
+        -- horizontal fill in between. So the title can use at most
+        -- w-5 columns. Using w-4 (the previous cap) overshoots by
+        -- one cell when the title exactly fills the room.
+        local tt = utf8_truncate(title, w - 5)
         local prefix = b.tl .. b.h .. " "
         local suffix_len = w - #prefix - #tt - 2
         if suffix_len < 0 then suffix_len = 0 end
@@ -289,8 +325,12 @@ function tui.frame(opts, fn)
             h = h - 2,
             print = function(_, ix, iy, s)
                 if ix < 1 or iy < 1 or ix > w - 2 or iy > h - 2 then return end
-                -- Truncate to inner width.
-                if #s > w - 2 - (ix - 1) then s = string.sub(s, 1, w - 2 - (ix - 1)) end
+                -- Truncate to inner width. utf8_truncate keeps
+                -- multi-byte codepoints intact; the previous
+                -- string.sub byte-cut could leave a half-decoded
+                -- continuation byte that the cap layer drops as
+                -- 0xFFFD, eating the last visible glyph.
+                s = utf8_truncate(s, w - 2 - (ix - 1))
                 tui.print(x + ix, y + iy, s)
             end,
         }
@@ -359,16 +399,19 @@ function tui.input(prompt, opts)
                 cursor = 1
             elseif k == "ctrl+k" then
                 buf = string.sub(buf, 1, cursor - 1)
-            elseif ev.codepoint and ev.codepoint >= 0x20 and not ev.ctrl and not ev.alt then
+            elseif is_printable_cp(ev.codepoint) and not ev.ctrl and not ev.alt then
                 if #buf < max_len then
                     -- Encode codepoint as UTF-8 (use the key string
-                    -- which already has it encoded).
+                    -- which already has it encoded). is_printable_cp
+                    -- has filtered out C0/DEL/C1 ranges so ev.key
+                    -- can't carry an ANSI-injection payload here.
                     local ch = ev.key
                     buf = string.sub(buf, 1, cursor - 1) .. ch .. string.sub(buf, cursor)
                     cursor = cursor + #ch
                 end
             end
         end,
+        tick_ms = opts.tick_ms,
     }) or nil   -- false → nil (aborted)
 end
 
