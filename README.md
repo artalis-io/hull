@@ -218,7 +218,7 @@ written today run unchanged on that future binary.
 
 Apps declare which first-party stdlib modules they import via the manifest's `modules` array; runtime gates refuse imports of anything not declared. Three principles:
 
-1. **Nothing exists unless declared.** Language intrinsics (Lua: `string/table/math`; JS: `Object/Array/JSON`) plus an "intrinsic core" (`hull/app`, `hull/log`, `hull/json`) are always available. Every other first-party module — `hull/crypto`, `hull/db`, `hull/http`, every middleware, every stdlib helper — must be in `modules` or the import fails.
+1. **Every external capability is declared.** Language intrinsics (Lua: `string/table/math`; JS: `Object/Array/JSON`) and Hull's intrinsic core are always available; every other first-party module must appear in `manifest.modules` or the import fails. The intrinsic core in v0.1.0 is `hull/app` (registration API), `hull/log` (stderr logging), and `hull/json` (serialization). **`hull/log` and `hull/json` are scheduled for demotion to declared modules in v0.1.1** — declare them in your manifest now if you use them, and your migration is a no-op. `hull/app` stays intrinsic because the manifest itself is expressed via `app.manifest(...)` and must exist before the manifest is parsed.
 2. **Import-only exposure.** Declared modules are reached via `require("hull.X")` (Lua) / `import "hull:X"` (JS). They are NOT exposed as globals.
 3. **Capability + module are separate gates.** Declaring `hull/http@1` doesn't open the network — the app still needs a non-empty `hosts` allowlist. The resolver pairs them.
 

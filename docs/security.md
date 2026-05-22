@@ -413,7 +413,7 @@ Each entry is a canonical spec `"<vendor>/<name>@<major>"`. First-party modules 
 
 | Principle | What it means |
 |-----------|---------------|
-| **Nothing exists unless declared** | Lua/JS intrinsics (string, table, math, JSON in JS) plus a minimal Hull core (`hull/app`, `hull/log`, `hull/json`) are always available. Every other first-party module — `hull/crypto`, `hull/db`, `hull/http`, every middleware, every stdlib helper — must be in `modules` or imports fail. |
+| **Every external capability is declared** | Lua/JS intrinsics (string, table, math, JSON in JS) plus a minimal Hull core are always available. The intrinsic core is `hull/app` (registration API — must be intrinsic because the manifest is expressed via `app.manifest(...)`), plus `hull/log` and `hull/json` for v0.1.0 only (both scheduled for demotion to declared modules in v0.1.1). Every other first-party module — `hull/crypto`, `hull/db`, `hull/http`, every middleware, every stdlib helper — must be in `modules` or imports fail. |
 | **Import-only exposure** | Declared modules are reached via `require("hull.X")` (Lua) / `import "hull:X"` (JS). They are NOT globals. Apps that don't declare a module cannot use it even by accident. |
 | **Capability + module separate gates** | Declaring `hull/http@1` does not also open the network. Apps still need a non-empty `hosts` allowlist. The resolver rejects `hull/http` declared without `hosts`. Same for `hull/fs` (needs `fs.read`/`write`) and `hull/env` (needs `env`). |
 | **Explicit dependencies** | If `hull/middleware/session` internally uses `hull/db`, `hull/crypto`, and `hull/time`, the app must declare *all four*. No silent pull-in. The resolver lists the missing dep in its error. |
