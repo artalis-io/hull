@@ -49,6 +49,10 @@ int lua_get_buffer(lua_State *L, int idx, HlBufferView *out);
 /* ── Module openers — called from hl_lua_register_modules() ──────── */
 
 int luaopen_hull_app(lua_State *L);
+/* Installs the app.router(prefix, opts) method by evaluating an
+ * embedded Lua source against the live `app` global. Must be called
+ * AFTER `lua_setglobal(L, "app")`. Idempotent per Lua state. */
+int hl_lua_install_app_router(lua_State *L);
 int luaopen_hull_db(lua_State *L);
 int luaopen_hull_time(lua_State *L);
 int luaopen_hull_env(lua_State *L);

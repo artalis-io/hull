@@ -12,9 +12,11 @@
 local gpu   = require("hull.gpu")
 local image = require("hull.image")
 
+local log = require("hull.log")
 app.manifest({
     gpu = true,
     modules = {
+        "hull/log@1",
         "hull/gpu@1",
         "hull/image@1",
     },

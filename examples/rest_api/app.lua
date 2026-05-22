@@ -11,8 +11,10 @@ local i18n     = require("hull.i18n")
 local time     = require("hull.time")
 local validate = require("hull.validate")
 
+local json = require("hull.json")
 app.manifest({
     modules = {
+        "hull/json@1",
         "hull/db@1",
         "hull/i18n@1",
         "hull/time@1",

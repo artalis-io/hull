@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Hull. A sealed runtime for programmable tools</title>
-  <meta name="description" content="Hull is a capability-secure, local-first runtime. Applications declare what they need. Everything else is unavailable.">
+  <meta name="description" content="Hull is a capability-secure, local-first runtime. Every external capability is declared in the manifest and checked at a C boundary the script cannot cross.">
   <meta name="theme-color" content="#0a0a0a">
 
   <meta property="og:title" content="Hull. A sealed runtime for programmable tools">
@@ -32,7 +32,7 @@
     "applicationCategory": "DeveloperApplication",
     "applicationSubCategory": "Runtime",
     "operatingSystem": "Linux, macOS, Windows (via Cosmopolitan), FreeBSD, OpenBSD, NetBSD",
-    "description": "A sealed, capability-secure runtime for agentic and local-first software. Applications declare what they need; everything else is unavailable, checked at a C boundary the script cannot cross.",
+    "description": "A sealed, capability-secure runtime for agentic and local-first software. Every external capability (filesystem, network, env, process) is declared in the manifest and checked at a C boundary the script cannot cross. Only the bootstrap registration API is intrinsic.",
     "softwareVersion": "0.1.0",
     "url": "https://gethull.dev/",
     "downloadUrl": "https://github.com/artalis-io/hull/releases",
@@ -331,9 +331,10 @@
 </pre>
           </div>
           <p class="mt-3 text-[11px] text-mute-500 leading-relaxed">
-            Nothing exists unless declared. Undeclared modules fail at
-            module load. Undeclared hosts, paths, and env vars fail at
-            the capability boundary.
+            Every external capability is declared. Undeclared modules
+            fail at module load; undeclared hosts, paths, and env
+            vars fail at the capability boundary. Only the
+            registration API (<code class="text-paper-100 text-[0.72rem]">app</code>) is intrinsic.
           </p>
         </div>
 

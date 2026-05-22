@@ -34,11 +34,16 @@ local validate = require("hull.validate")
 local ws       = require("hull.ws")
 local session  = require("hull.middleware.session")
 local auth     = require("hull.middleware.auth")
+local log = require("hull.log")
+local json = require("hull.json")
 local _cookie  = require("hull.cookie") -- luacheck: ignore
 
 app.manifest({
     hosts = {"127.0.0.1"},
     modules = {
+        "hull/timers@1",
+        "hull/json@1",
+        "hull/log@1",
         "hull/cookie@1",
         "hull/crypto@1",
         "hull/db@1",

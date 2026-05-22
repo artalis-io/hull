@@ -12,9 +12,11 @@
 import { gpu } from "hull:gpu";
 import { image } from "hull:image";
 
+import { log } from "hull:log";
 app.manifest({
     gpu: true,
     modules: [
+        "hull/log@1",
         "hull/gpu@1",
         "hull/image@1",
     ],

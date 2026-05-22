@@ -34,6 +34,7 @@ import hu from "./locales/hu.json";
 app.manifest({
     hosts: ["127.0.0.1"],  // allow self-fetch for /api/stats
     modules: [
+        "hull/log@1",
         "hull/cookie@1",
         "hull/crypto@1",
         "hull/csv@1",

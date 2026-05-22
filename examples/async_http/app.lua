@@ -15,9 +15,11 @@ local db = require("hull.db")
 local http = require("hull.http")
 local worker = require("hull.worker")
 
+local log = require("hull.log")
 -- Allow outbound HTTP to self (localhost) for the fetch demos
 app.manifest({
     modules = {
+        "hull/log@1",
         "hull/db@1",
         "hull/http@1",
         "hull/worker@1",

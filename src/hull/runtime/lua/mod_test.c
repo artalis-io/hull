@@ -120,7 +120,7 @@ static int l_test_http(lua_State *L, const char *method)
          * until after hl_cap_test_dispatch() returns. */
         lua_getfield(L, 2, "ctx");
         if (lua_istable(L, -1)) {
-            lua_getglobal(L, "json");
+            lua_getfield(L, LUA_REGISTRYINDEX, "__hull_json_internal");
             if (lua_istable(L, -1)) {
                 lua_getfield(L, -1, "encode");
                 lua_pushvalue(L, -3); /* push ctx table */

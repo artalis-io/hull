@@ -35,6 +35,7 @@
 --   app.every(30000, outbox.flush)
 --
 
+local json = require("hull.json")
 local db = require("hull.db")
 local http = require("hull.http")
 local time = require("hull.time")

@@ -11,8 +11,12 @@
 local time = require("hull.time")
 local ws   = require("hull.ws")
 
+local log = require("hull.log")
+local json = require("hull.json")
 app.manifest({
     modules = {
+        "hull/json@1",
+        "hull/log@1",
         "hull/time@1",
         "hull/ws@1",
     },

@@ -30,9 +30,11 @@ local rbac        = require("hull.middleware.rbac")
 local session     = require("hull.middleware.session")
 local transaction = require("hull.middleware.transaction")
 
+local log = require("hull.log")
 app.manifest({
     hosts = {"127.0.0.1"},  -- allow self-fetch for /api/stats
     modules = {
+        "hull/log@1",
         "hull/cookie@1",
         "hull/crypto@1",
         "hull/csv@1",

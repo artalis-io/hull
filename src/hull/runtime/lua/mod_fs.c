@@ -424,12 +424,15 @@ static int hl_lua_require(lua_State *L)
     if (!lua_isnil(L, -1)) {
         lua_remove(L, -2); /* remove __hull_modules table */
 
-        /* JSON embedded module → decode raw string with json.decode()
-         * Only for relative paths (./) — not stdlib like "hull.json" */
+        /* JSON embedded module → decode raw string with the runtime's
+         * cached json.decode. Uses the __hull_json_internal stash so
+         * the decode works even when the app doesn't declare
+         * hull/json@1 (the user wrote `require("./locales/en.json")`,
+         * which is data loading, not stdlib use). */
         size_t nlen = strlen(name);
         if (name[0] == '.' && name[1] == '/' &&
             nlen >= 5 && strcmp(name + nlen - 5, ".json") == 0) {
-            lua_getglobal(L, "json");
+            lua_getfield(L, LUA_REGISTRYINDEX, "__hull_json_internal");
             lua_getfield(L, -1, "decode");
             lua_remove(L, -2); /* remove json table */
             lua_pushvalue(L, -2); /* push the JSON string */
@@ -502,12 +505,12 @@ static int hl_lua_require(lua_State *L)
                     return luaL_error(L, "read error: %s", path);
                 }
 
-                /* JSON file → decode with json.decode() instead of
-                 * compiling as Lua bytecode */
+                /* JSON file → decode with the runtime's cached
+                 * json.decode (registry stash, no manifest gate). */
                 size_t path_len = strlen(path);
                 if (path_len >= 5 &&
                     strcmp(path + path_len - 5, ".json") == 0) {
-                    lua_getglobal(L, "json");
+                    lua_getfield(L, LUA_REGISTRYINDEX, "__hull_json_internal");
                     lua_getfield(L, -1, "decode");
                     lua_remove(L, -2); /* remove json table */
                     lua_pushlstring(L, buf, nread);
@@ -632,8 +635,13 @@ int hl_lua_register_stdlib(HlLua *lua)
     lua_pushcfunction(L, hl_lua_require);
     lua_setglobal(L, "require");
 
-    /* Pre-load json as a global: call require('hull.json') internally.
-     * Skip if no platform VFS is available (bare init without stdlib). */
+    /* Pre-load hull.json into the Lua registry under
+     * __hull_json_internal for runtime-internal use (request-context
+     * JSON decoding, embedded .json file decoding, test harness JSON
+     * marshalling). User code must declare "hull/json@1" and call
+     * require("hull.json") explicitly — log and json are no longer
+     * intrinsic as of v0.1.0 release. The internal stash bypasses
+     * the manifest gate because it's not user-callable. */
     if (lua->base.platform_vfs) {
         lua_getglobal(L, "require");
         lua_pushstring(L, "hull.json");
@@ -643,7 +651,7 @@ int hl_lua_register_stdlib(HlLua *lua)
             lua_pop(L, 1);
             return -1;
         }
-        lua_setglobal(L, "json");
+        lua_setfield(L, LUA_REGISTRYINDEX, "__hull_json_internal");
     }
 
     return 0;

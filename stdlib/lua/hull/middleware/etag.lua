@@ -21,6 +21,7 @@
 --       etag.json(req, res, db.query("SELECT * FROM items"))
 --   end)
 
+local json = require("hull.json")
 local crypto = require("hull.crypto")
 
 local etag = {}

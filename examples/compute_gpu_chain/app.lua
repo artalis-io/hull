@@ -17,10 +17,12 @@
 local compute = require("hull.compute")
 local gpu     = require("hull.gpu")
 
+local json = require("hull.json")
 app.manifest({
     gpu     = true,
     compute = true,
     modules = {
+        "hull/json@1",
         "hull/compute@1",
         "hull/gpu@1",
     },

@@ -15,6 +15,7 @@ import { ws } from "hull:ws";
 
 app.manifest({
     modules: [
+        "hull/log@1",
         "hull/time@1",
         "hull/ws@1",
     ],

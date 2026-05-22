@@ -56,6 +56,10 @@ UTEST(module_registry, find_short_unknown_returns_null)
 
 UTEST(module_registry, intrinsic_modules_are_marked)
 {
+    /* As of v0.1.0 release, the intrinsic core is just hull/app
+     * (registration API; required at bootstrap because the manifest
+     * itself is expressed via app.manifest). log and json are
+     * declared modules — apps must put them in manifest.modules. */
     const HlModuleSpec *app = hl_module_registry_find("hull/app");
     const HlModuleSpec *log = hl_module_registry_find("hull/log");
     const HlModuleSpec *jsn = hl_module_registry_find("hull/json");
@@ -63,8 +67,8 @@ UTEST(module_registry, intrinsic_modules_are_marked)
     ASSERT_NE(log, NULL);
     ASSERT_NE(jsn, NULL);
     ASSERT_EQ((int)app->intrinsic, 1);
-    ASSERT_EQ((int)log->intrinsic, 1);
-    ASSERT_EQ((int)jsn->intrinsic, 1);
+    ASSERT_EQ((int)log->intrinsic, 0);
+    ASSERT_EQ((int)jsn->intrinsic, 0);
 }
 
 UTEST(module_registry, side_effect_modules_are_not_intrinsic)

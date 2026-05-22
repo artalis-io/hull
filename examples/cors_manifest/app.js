@@ -16,6 +16,7 @@ app.manifest({
         maxAge: 3600,
     },
     modules: [
+    "hull/log@1",
         "hull/server@1",
     ],
 });

@@ -12,7 +12,11 @@ import { i18n } from "hull:i18n";
 import { log } from "hull:log";
 import { time } from "hull:time";
 
-app.manifest({});
+app.manifest({
+    modules: [
+        "hull/log@1",
+    ],
+});
 
 // ── i18n setup ─────────────────────────────────────────────────────
 

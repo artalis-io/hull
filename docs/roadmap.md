@@ -300,6 +300,7 @@ At this point the Package & Module System is feature-complete for v1; everything
 | Bundle stripping for `hull build` | Deferred | Physically remove undeclared stdlib bytes. Smaller binaries + reduced ROP surface, but adds a per-build compile step and complicates the platform-embed path. Runtime gating is the boundary in v1. |
 | Per-opcode WASM `host_call` gating | Deferred | Manifest design supports it (`required_caps` bitmask has room); current gate admits all opcodes together when `hull/compute@1` is declared. |
 | CBOR / additional pure codecs in intrinsic core | Deferred | Pure-stdlib expansion; orthogonal to the module system. |
+| **Demote `hull/log` and `hull/json` to declared modules** | **Done** | The intrinsic core is now `hull/app` alone. Apps that call `log.X` or `json.X` directly must declare `"hull/log@1"` and/or `"hull/json@1"` in `manifest.modules`. The `res:json(...)` response helper and the runtime's internal JSON marshalling continue to work without any declaration — they bypass user-visible imports at the C layer via a registry-stashed decoder. |
 | Lockfile for resolved-set pinning | Deferred | The "resolved set in `manifest.bin`" item above covers tamper detection. A separate lockfile is overkill for v1's no-third-party model. |
 | `hull add <package>` install command | Deferred | The existing "Module/package ecosystem" row in *Future — Advanced Features* covers this. Out of scope until third-party packages exist. |
 

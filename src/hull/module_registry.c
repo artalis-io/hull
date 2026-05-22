@@ -115,10 +115,15 @@ static const HlModuleSpec REGISTRY[] = {
         .required_caps = 0, .deps = {0},
     },
 
-    /* ── Intrinsic: pure data codec ───────────────────────────────── */
+    /* ── Pure data codec ──────────────────────────────────────────── */
     {
+        /* json was intrinsic in early v0.1.0; demoted to declared so
+         * the intrinsic core is just `app`. The runtime's response
+         * helpers (res:json / res.json) keep working at the C level
+         * without requiring this declaration — apps only need to
+         * declare it when they call json.encode/decode directly. */
         .name = "hull/json",
-        .api_major = 1, .intrinsic = 1, .pure = 1,
+        .api_major = 1, .intrinsic = 0, .pure = 1,
         .required_caps = 0, .deps = {0},
     },
     {
@@ -128,10 +133,14 @@ static const HlModuleSpec REGISTRY[] = {
         .deps = {"hull/crypto", 0},
     },
 
-    /* ── Intrinsic: logger ────────────────────────────────────────── */
+    /* ── Logger ───────────────────────────────────────────────────── */
     {
+        /* log was intrinsic in early v0.1.0; demoted to declared. It
+         * does stderr I/O, so the declared-modules story is cleaner
+         * with it explicit. Runtime's internal error logging stays
+         * intrinsic at the C level. */
         .name = "hull/log",
-        .api_major = 1, .intrinsic = 1, .pure = 0,
+        .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = 0, .deps = {0},
     },
 
@@ -247,6 +256,18 @@ static const HlModuleSpec REGISTRY[] = {
     },
     {
         .name = "hull/time",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = 0, .deps = {0},
+    },
+    /* Timers — declaring this module decorates the `app` intrinsic
+     * with `app.every(ms, fn)` and `app.daily(hhmm, fn)`. Without it
+     * those methods don't exist on `app` at all (calling them raises
+     * "attempt to call a nil value"). The methods grant no new
+     * authority — the handler runs in the same sandbox with the
+     * same declared caps — but the declaration makes background
+     * activity visible to a reviewer reading the manifest. */
+    {
+        .name = "hull/timers",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = 0, .deps = {0},
     },

@@ -406,7 +406,67 @@ static int lua_app_sse(lua_State *L)
     return 0;
 }
 
-/* app.manifest(tbl) — declare application capabilities (one-shot) */
+/* Forward decls for the conditionally-installed timer methods. */
+static int lua_app_every(lua_State *L);
+static int lua_app_daily(lua_State *L);
+
+/* Scan an `app.manifest({modules = {...}})` table for a literal
+ * "hull/<name>@<major>" entry. Returns 1 if found. The check is
+ * loose: it matches any entry whose string starts with the prefix
+ * so "hull/timers" matches "hull/timers@1" or "hull/timers@2".
+ *
+ * Stack on entry: table at index `manifest_idx`. Stack unchanged
+ * on return. */
+static int manifest_declares_module(lua_State *L, int manifest_idx,
+                                    const char *prefix)
+{
+    int found = 0;
+    lua_getfield(L, manifest_idx, "modules");
+    if (lua_istable(L, -1)) {
+        size_t plen = strlen(prefix);
+        lua_pushnil(L);
+        while (lua_next(L, -2) != 0) {
+            if (lua_isstring(L, -1)) {
+                const char *s = lua_tostring(L, -1);
+                if (s && strncmp(s, prefix, plen) == 0) {
+                    found = 1;
+                }
+            }
+            lua_pop(L, 1); /* drop value, keep key */
+            if (found) {
+                lua_pop(L, 1); /* drop key */
+                break;
+            }
+        }
+    }
+    lua_pop(L, 1); /* drop modules (or nil) */
+    return found;
+}
+
+/* Install app.every / app.daily on the `app` global. Called from
+ * lua_app_manifest after the manifest is captured, only when
+ * "hull/timers@..." is declared. Mirrors the C# partial-class
+ * pattern: the methods literally don't exist on `app` unless the
+ * module is declared. */
+static void install_app_timers(lua_State *L)
+{
+    lua_getglobal(L, "app");
+    if (lua_istable(L, -1)) {
+        lua_pushcfunction(L, lua_app_every);
+        lua_setfield(L, -2, "every");
+        lua_pushcfunction(L, lua_app_daily);
+        lua_setfield(L, -2, "daily");
+    }
+    lua_pop(L, 1); /* drop app */
+}
+
+/* app.manifest(tbl) — declare application capabilities (one-shot).
+ *
+ * Conditionally decorates the `app` intrinsic with methods provided
+ * by declared modules. Today: hull/timers adds app.every/app.daily.
+ * The decoration happens here, not at module-init time, because
+ * the runtime only knows what modules an app declared once
+ * app.manifest is called. */
 static int lua_app_manifest(lua_State *L)
 {
     luaL_checktype(L, 1, LUA_TTABLE);
@@ -419,6 +479,12 @@ static int lua_app_manifest(lua_State *L)
 
     lua_pushvalue(L, 1);
     lua_setfield(L, LUA_REGISTRYINDEX, "__hull_manifest");
+
+    /* Module-conditional method installation. */
+    if (manifest_declares_module(L, 1, "hull/timers")) {
+        install_app_timers(L);
+    }
+
     return 0;
 }
 
@@ -464,8 +530,9 @@ static const luaL_Reg app_funcs[] = {
     {"use_post",     lua_app_use_post},
     {"ws",           lua_app_ws},
     {"sse",          lua_app_sse},
-    {"every",        lua_app_every},
-    {"daily",        lua_app_daily},
+    /* every + daily are installed conditionally by lua_app_manifest
+     * when the manifest declares "hull/timers@1" — they're absent
+     * from the default app table. */
     {"main",         lua_app_main},
     {"manifest",     lua_app_manifest},
     {"get_manifest", lua_app_get_manifest},
@@ -476,4 +543,79 @@ int luaopen_hull_app(lua_State *L)
 {
     luaL_newlib(L, app_funcs);
     return 1;
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+ * app.router(prefix, opts) — prefix-mounted route group.
+ *
+ * Composes on top of app.get/app.post/app.use rather than duplicating
+ * route registration logic in C. The Router class is pure Lua;
+ * methods translate `r:get(path, h)` into `app.get(prefix .. path, h)`.
+ *
+ * Why this lives in C as an embedded string instead of a stdlib .lua:
+ * the Router patches the intrinsic `app` global, so it has to load at
+ * runtime init (after `lua_setglobal(L, "app")`) before any user code
+ * runs. A regular stdlib .lua would require an explicit manifest
+ * declaration, which defeats the "method on app" ergonomics.
+ *
+ * Call hl_lua_install_app_router(L) from modules.c after the app
+ * global is set. The eval runs once per Lua state.
+ * ──────────────────────────────────────────────────────────────────── */
+
+static const char router_src[] =
+"do\n"
+"  local Router = {}\n"
+"  Router.__index = Router\n"
+"\n"
+"  local function route_method(m)\n"
+"    return function(self, path, h)\n"
+"      app[m](self.prefix .. path, h)\n"
+"      return self\n"
+"    end\n"
+"  end\n"
+"\n"
+"  Router.get     = route_method('get')\n"
+"  Router.post    = route_method('post')\n"
+"  Router.put     = route_method('put')\n"
+"  Router.delete  = route_method('delete')\n"
+"  Router.patch   = route_method('patch')\n"
+"  Router.options = route_method('options')\n"
+"\n"
+"  function Router:use(a, b, c)\n"
+"    if type(a) == 'function' then\n"
+"      app.use('*', self.prefix .. '/*', a)\n"
+"    else\n"
+"      app.use(a, self.prefix .. b, c)\n"
+"    end\n"
+"    return self\n"
+"  end\n"
+"\n"
+"  function Router:use_post(a, b, c)\n"
+"    if type(a) == 'function' then\n"
+"      app.use_post('*', self.prefix .. '/*', a)\n"
+"    else\n"
+"      app.use_post(a, self.prefix .. b, c)\n"
+"    end\n"
+"    return self\n"
+"  end\n"
+"\n"
+"  function Router:ws(path, h)  app.ws(self.prefix .. path, h);  return self end\n"
+"  function Router:sse(path, h) app.sse(self.prefix .. path, h); return self end\n"
+"\n"
+"  function Router:router(sub, opts)\n"
+"    return setmetatable({prefix = self.prefix .. (sub or ''), opts = opts}, Router)\n"
+"  end\n"
+"\n"
+"  app.router = function(prefix, opts)\n"
+"    return setmetatable({prefix = prefix or '', opts = opts}, Router)\n"
+"  end\n"
+"end\n";
+
+int hl_lua_install_app_router(lua_State *L)
+{
+    if (luaL_dostring(L, router_src) != LUA_OK) {
+        const char *err = lua_tostring(L, -1);
+        return luaL_error(L, "app.router init failed: %s", err ? err : "?");
+    }
+    return 0;
 }

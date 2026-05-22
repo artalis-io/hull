@@ -9,8 +9,10 @@ local time   = require("hull.time")
 local health = require("hull.middleware.health")
 local etag   = require("hull.middleware.etag")
 
+local json = require("hull.json")
 app.manifest({
     modules = {
+        "hull/json@1",
         "hull/crypto@1",
         "hull/db@1",
         "hull/server@1",

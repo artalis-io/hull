@@ -16,6 +16,8 @@ import { time } from "hull:time";
 app.manifest({
     database: "timers.db",
     modules: [
+        "hull/timers@1",
+        "hull/log@1",
         "hull/db@1",
         "hull/time@1",
     ],

@@ -10,8 +10,12 @@ local validate = require("hull.validate")
 local session  = require("hull.middleware.session")
 local auth     = require("hull.middleware.auth")
 
+local log = require("hull.log")
+local json = require("hull.json")
 app.manifest({
     modules = {
+        "hull/json@1",
+        "hull/log@1",
         "hull/crypto@1",
         "hull/db@1",
         "hull/time@1",

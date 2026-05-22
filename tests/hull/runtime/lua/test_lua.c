@@ -360,6 +360,212 @@ UTEST(lua_runtime, hull_app_module)
     cleanup_lua();
 }
 
+/* ── app.router tests ────────────────────────────────────────────────
+ *
+ * app.router(prefix, opts) returns a Router object that batches
+ * route registration with a common path prefix. Methods compose on
+ * top of app.get/app.post/app.use, so we verify by inspecting
+ * __hull_route_defs / __hull_middleware after the calls. */
+
+UTEST(lua_runtime, app_router_prefixes_routes)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "local r = app.router('/api/v1')\n"
+        "r:get('/items', function(req, res) end)\n"
+        "r:post('/items', function(req, res) end)\n"
+        "r:put('/items/:id', function(req, res) end)\n"
+        "r:delete('/items/:id', function(req, res) end)\n");
+    ASSERT_EQ(rc, LUA_OK);
+
+    lua_getfield(lua_rt.L, LUA_REGISTRYINDEX, "__hull_route_defs");
+    ASSERT_TRUE(lua_istable(lua_rt.L, -1));
+    ASSERT_EQ((int)luaL_len(lua_rt.L, -1), 4);
+
+    const char *expect_methods[]  = {"GET","POST","PUT","DELETE"};
+    const char *expect_patterns[] = {"/api/v1/items","/api/v1/items",
+                                      "/api/v1/items/:id","/api/v1/items/:id"};
+    for (int i = 1; i <= 4; i++) {
+        lua_rawgeti(lua_rt.L, -1, i);
+        lua_getfield(lua_rt.L, -1, "method");
+        ASSERT_STREQ(lua_tostring(lua_rt.L, -1), expect_methods[i-1]);
+        lua_pop(lua_rt.L, 1);
+        lua_getfield(lua_rt.L, -1, "pattern");
+        ASSERT_STREQ(lua_tostring(lua_rt.L, -1), expect_patterns[i-1]);
+        lua_pop(lua_rt.L, 2);
+    }
+    lua_pop(lua_rt.L, 1);
+
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, app_router_nested_composes_prefixes)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "local api   = app.router('/api/v1')\n"
+        "local admin = api:router('/admin')\n"
+        "admin:get('/users', function(req, res) end)\n"
+        "admin:get('/audit', function(req, res) end)\n");
+    ASSERT_EQ(rc, LUA_OK);
+
+    lua_getfield(lua_rt.L, LUA_REGISTRYINDEX, "__hull_route_defs");
+    ASSERT_EQ((int)luaL_len(lua_rt.L, -1), 2);
+
+    lua_rawgeti(lua_rt.L, -1, 1);
+    lua_getfield(lua_rt.L, -1, "pattern");
+    ASSERT_STREQ(lua_tostring(lua_rt.L, -1), "/api/v1/admin/users");
+    lua_pop(lua_rt.L, 2);
+
+    lua_rawgeti(lua_rt.L, -1, 2);
+    lua_getfield(lua_rt.L, -1, "pattern");
+    ASSERT_STREQ(lua_tostring(lua_rt.L, -1), "/api/v1/admin/audit");
+    lua_pop(lua_rt.L, 3);
+
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, app_router_use_with_handler_only)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "local r = app.router('/api')\n"
+        "r:use(function(req, res) return 0 end)\n");
+    ASSERT_EQ(rc, LUA_OK);
+
+    lua_getfield(lua_rt.L, LUA_REGISTRYINDEX, "__hull_middleware");
+    ASSERT_TRUE(lua_istable(lua_rt.L, -1));
+    ASSERT_EQ((int)luaL_len(lua_rt.L, -1), 1);
+
+    lua_rawgeti(lua_rt.L, -1, 1);
+    lua_getfield(lua_rt.L, -1, "method");
+    ASSERT_STREQ(lua_tostring(lua_rt.L, -1), "*");
+    lua_pop(lua_rt.L, 1);
+    lua_getfield(lua_rt.L, -1, "pattern");
+    ASSERT_STREQ(lua_tostring(lua_rt.L, -1), "/api/*");
+    lua_pop(lua_rt.L, 3);
+
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, app_router_use_with_explicit_method_pattern)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "local r = app.router('/api')\n"
+        "r:use('POST', '/items', function(req, res) return 0 end)\n");
+    ASSERT_EQ(rc, LUA_OK);
+
+    lua_getfield(lua_rt.L, LUA_REGISTRYINDEX, "__hull_middleware");
+    ASSERT_EQ((int)luaL_len(lua_rt.L, -1), 1);
+
+    lua_rawgeti(lua_rt.L, -1, 1);
+    lua_getfield(lua_rt.L, -1, "method");
+    ASSERT_STREQ(lua_tostring(lua_rt.L, -1), "POST");
+    lua_pop(lua_rt.L, 1);
+    lua_getfield(lua_rt.L, -1, "pattern");
+    ASSERT_STREQ(lua_tostring(lua_rt.L, -1), "/api/items");
+    lua_pop(lua_rt.L, 3);
+
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, app_router_chainable)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "app.router('/api')\n"
+        "  :get('/a', function() end)\n"
+        "  :post('/b', function() end)\n"
+        "  :delete('/c', function() end)\n");
+    ASSERT_EQ(rc, LUA_OK);
+
+    lua_getfield(lua_rt.L, LUA_REGISTRYINDEX, "__hull_route_defs");
+    ASSERT_EQ((int)luaL_len(lua_rt.L, -1), 3);
+    lua_pop(lua_rt.L, 1);
+
+    cleanup_lua();
+}
+
+/* ── hull/timers decoration tests ────────────────────────────────────
+ *
+ * app.every / app.daily are conditionally installed by app.manifest
+ * when the manifest's modules array contains "hull/timers@*". Without
+ * the declaration the methods literally don't exist on `app` —
+ * calling them raises "attempt to call a nil value". */
+
+UTEST(lua_runtime, app_timers_absent_without_declaration)
+{
+    init_lua();
+    /* No app.manifest call at all → every/daily are nil */
+    int every_nil = eval_int("app.every == nil and 1 or 0");
+    int daily_nil = eval_int("app.daily == nil and 1 or 0");
+    ASSERT_EQ(every_nil, 1);
+    ASSERT_EQ(daily_nil, 1);
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, app_timers_absent_with_empty_modules)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "app.manifest({ modules = {} })\n");
+    ASSERT_EQ(rc, LUA_OK);
+    int every_nil = eval_int("app.every == nil and 1 or 0");
+    int daily_nil = eval_int("app.daily == nil and 1 or 0");
+    ASSERT_EQ(every_nil, 1);
+    ASSERT_EQ(daily_nil, 1);
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, app_timers_present_when_declared)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "app.manifest({ modules = { 'hull/timers@1' } })\n");
+    ASSERT_EQ(rc, LUA_OK);
+    int every_fn = eval_int("type(app.every) == 'function' and 1 or 0");
+    int daily_fn = eval_int("type(app.daily) == 'function' and 1 or 0");
+    ASSERT_EQ(every_fn, 1);
+    ASSERT_EQ(daily_fn, 1);
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, app_timers_register_timer_when_declared)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "app.manifest({ modules = { 'hull/timers@1' } })\n"
+        "app.every(1000, function() end)\n");
+    ASSERT_EQ(rc, LUA_OK);
+    /* timer registration stores into __hull_timer_defs */
+    lua_getfield(lua_rt.L, LUA_REGISTRYINDEX, "__hull_timer_defs");
+    ASSERT_TRUE(lua_istable(lua_rt.L, -1));
+    int count = (int)luaL_len(lua_rt.L, -1);
+    ASSERT_EQ(count, 1);
+    lua_pop(lua_rt.L, 1);
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, app_router_empty_prefix)
+{
+    /* app.router() with no prefix should still work — empty prefix
+     * means routes register at the bare paths. */
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "local r = app.router()\n"
+        "r:get('/items', function() end)\n");
+    ASSERT_EQ(rc, LUA_OK);
+
+    lua_getfield(lua_rt.L, LUA_REGISTRYINDEX, "__hull_route_defs");
+    lua_rawgeti(lua_rt.L, -1, 1);
+    lua_getfield(lua_rt.L, -1, "pattern");
+    ASSERT_STREQ(lua_tostring(lua_rt.L, -1), "/items");
+    lua_pop(lua_rt.L, 3);
+
+    cleanup_lua();
+}
+
 /* ── app.main (CLI mode) tests ─────────────────────────────────────── */
 
 UTEST(lua_runtime, app_main_registers)
@@ -789,14 +995,17 @@ UTEST(lua_runtime, require_resolves_native_modules)
     cleanup_lua();
 }
 
-UTEST(lua_runtime, json_global_available)
+UTEST(lua_runtime, json_module_requireable)
 {
     init_lua();
 
-    /* json global should be available (pre-loaded) */
+    /* json is a DECLARED module as of v0.1.0 release — no longer
+     * a global. require("hull.json") returns the table. Wrapped in
+     * IIFE since eval_int prefixes "return". */
     int result = eval_int(
-        "type(json) == 'table' and type(json.encode) == 'function' "
-        "and type(json.decode) == 'function' and 1 or 0");
+        "(function() local json = require('hull.json') "
+        "return type(json) == 'table' and type(json.encode) == 'function' "
+        "and type(json.decode) == 'function' and 1 or 0 end)()");
     ASSERT_EQ(result, 1);
 
     cleanup_lua();
@@ -806,15 +1015,17 @@ UTEST(lua_runtime, json_encode_decode)
 {
     init_lua();
 
-    /* json.encode and json.decode should work */
-    char *s = eval_str("json.encode({name='hull'})");
+    char *s = eval_str(
+        "(function() local json = require('hull.json') "
+        "return json.encode({name='hull'}) end)()");
     ASSERT_NE(s, NULL);
     ASSERT_NE(strstr(s, "\"name\""), NULL);
     ASSERT_NE(strstr(s, "\"hull\""), NULL);
     free(s);
 
     int result = eval_int(
-        "json.decode('{\"x\":42}').x");
+        "(function() local json = require('hull.json') "
+        "return json.decode('{\"x\":42}').x end)()");
     ASSERT_EQ(result, 42);
 
     cleanup_lua();
@@ -825,7 +1036,8 @@ UTEST(lua_runtime, json_roundtrip)
     init_lua();
 
     int result = eval_int(
-        "(function() local t = {a=1, b='two'} "
+        "(function() local json = require('hull.json') "
+        "local t = {a=1, b='two'} "
         "local s = json.encode(t) "
         "local t2 = json.decode(s) "
         "return t2.a == 1 and t2.b == 'two' and 1 or 0 end)()");
@@ -1327,11 +1539,15 @@ UTEST(lua_cap, log_functions_exist)
     init_lua_with_caps();
     ASSERT_TRUE(lua_initialized);
 
+    /* log is a DECLARED module as of v0.1.0 release — no longer a
+     * global. Apps must require("hull.log"). The test environment
+     * has no manifest, so the require gate is permissive. */
     int result = eval_int(
-        "type(log.info) == 'function' and "
+        "(function() local log = require('hull.log') "
+        "return type(log.info) == 'function' and "
         "type(log.warn) == 'function' and "
         "type(log.error) == 'function' and "
-        "type(log.debug) == 'function' and 1 or 0");
+        "type(log.debug) == 'function' and 1 or 0 end)()");
     ASSERT_EQ(result, 1);
 
     cleanup_lua_caps();
@@ -1344,6 +1560,7 @@ UTEST(lua_cap, log_does_not_error)
 
     /* Calling all four log functions should not raise a Lua error */
     int rc = luaL_dostring(lua_rt.L,
+        "local log = require('hull.log')\n"
         "log.info('test info')\n"
         "log.warn('test warn')\n"
         "log.error('test error')\n"
