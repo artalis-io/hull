@@ -463,12 +463,17 @@ void hl_tui_parser_feed(HlTuiParser *p, const char *bytes, size_t len)
              * acquire. */
             if (c == 0x07) {
                 p->state = HL_TUI_PS_GROUND;
-            } else if (c == 0x1B) {
-                /* Possible ST start; the next byte should be '\\'. */
+                p->acc_len = 0;
             } else if (c == '\\' && p->acc_len > 0 &&
                        p->acc[p->acc_len - 1] == 0x1B) {
+                /* ST: the previous byte recorded a pending ESC. */
                 p->state = HL_TUI_PS_GROUND;
+                p->acc_len = 0;
             } else if (p->acc_len + 1 < sizeof p->acc) {
+                /* Includes ESC: we record it so the next byte can
+                 * decide whether this is ST (ESC '\\') or random
+                 * payload. acc[] is bounded; long OSC strings drop
+                 * trailing bytes but the terminator still works. */
                 p->acc[p->acc_len++] = (char)c;
             }
             break;

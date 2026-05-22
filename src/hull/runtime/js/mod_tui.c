@@ -412,6 +412,28 @@ static JSValue js_tui_poll(JSContext *ctx, JSValueConst this_val,
     return promise;
 }
 
+/* tui.pollSync(timeoutMs) — fully synchronous, blocking variant. Used
+ * by tui.run inside its synchronous render loop where no `await` is
+ * available (and where the async poll's Promise would leak because
+ * sync JS code never yields the thread for the microtask drain to
+ * resolve it). Returns the event object directly or null on timeout.
+ * tui.poll above remains the public async-aware entry point for
+ * callers that own an async context. */
+static JSValue js_tui_poll_sync(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (ensure_acquired(ctx) != 0) return JS_EXCEPTION;
+    int32_t timeout_ms = -1;
+    if (argc >= 1 && !JS_IsUndefined(argv[0]) && !JS_IsNull(argv[0]))
+        JS_ToInt32(ctx, &timeout_ms, argv[0]);
+    HlTuiEvent ev = {0};
+    int rc = hl_cap_tui_poll(g_ctx, timeout_ms, &ev);
+    if (rc < 0) return JS_ThrowInternalError(ctx, "tui.pollSync failed");
+    if (rc == 1) return JS_NULL;
+    return event_to_js(ctx, &ev);
+}
+
 /* ── Clipboard + modes ─────────────────────────────────────────── */
 
 static JSValue js_tui_clipboard_set(JSContext *ctx, JSValueConst this_val,
@@ -498,6 +520,7 @@ static int js_tui_module_init(JSContext *ctx, JSModuleDef *m)
     JS_SetPropertyStr(ctx, o, "write",         JS_NewCFunction(ctx, js_tui_write,         "write",         1));
     JS_SetPropertyStr(ctx, o, "flush",         JS_NewCFunction(ctx, js_tui_flush,         "flush",         0));
     JS_SetPropertyStr(ctx, o, "poll",          JS_NewCFunction(ctx, js_tui_poll,          "poll",          1));
+    JS_SetPropertyStr(ctx, o, "pollSync",      JS_NewCFunction(ctx, js_tui_poll_sync,     "pollSync",      1));
     JS_SetPropertyStr(ctx, o, "clipboardSet",  JS_NewCFunction(ctx, js_tui_clipboard_set, "clipboardSet",  1));
     JS_SetPropertyStr(ctx, o, "enableMouse",   JS_NewCFunction(ctx, js_tui_enable_mouse,    "enableMouse",   1));
     JS_SetPropertyStr(ctx, o, "enablePaste",   JS_NewCFunction(ctx, js_tui_enable_paste,    "enablePaste",   1));

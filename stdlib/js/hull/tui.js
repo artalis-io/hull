@@ -55,28 +55,42 @@ function run(opts) {
         ctx.rows = rows;
     };
 
-    const safeDraw = () => {
-        try {
-            draw(ctx);
-            native.flush();
-        } catch (e) {
-            native.leave();
-            throw e;
-        }
-    };
+    /* The JS run loop is synchronous so callers can write
+     *   const picked = tui.list(items);
+     * without `await`. Synchronous JS holds the QuickJS thread, so the
+     * native.poll(tickMs) slow path — which returns a Promise — can
+     * never resolve from inside this loop (no microtask drain happens
+     * until we yield). We instead use native.pollSync(timeoutMs), which
+     * blocks the C thread until an event arrives or the timeout
+     * expires; this gives proper event-loop pacing without leaking a
+     * Promise + HlAsyncCtx per iteration as the previous
+     * native.poll(tickMs) call did. tickMs<0 means "block until event";
+     * tickMs>0 means "deliver a timer-tick after that long with no
+     * input"; tickMs=0 means "poll once non-blocking". */
+    const pollMs = (typeof tickMs === "number" && tickMs >= 0) ? tickMs : -1;
 
-    safeDraw();
+    try {
+        draw(ctx);
+        native.flush();
 
-    while (exitToken === null) {
-        const ev = native.poll(tickMs);
-        if (ev) {
-            if (ev.kind === "resize") refresh();
-            if (onEvent) {
-                const r = onEvent(ev);
-                if (r !== undefined && r !== null) exitToken = r;
+        while (exitToken === null) {
+            const ev = native.pollSync(pollMs);
+            if (ev) {
+                if (ev.kind === "resize") refresh();
+                if (onEvent) {
+                    const r = onEvent(ev);
+                    if (r !== undefined && r !== null) exitToken = r;
+                }
+                if (exitToken !== null) break;
+            }
+            if (exitToken === null) {
+                draw(ctx);
+                native.flush();
             }
         }
-        if (exitToken === null) safeDraw();
+    } catch (e) {
+        native.leave();
+        throw e;
     }
 
     native.leave();

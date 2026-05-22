@@ -294,10 +294,17 @@ int hl_dev_state_reload(HlDevState *s)
         return -1;
     }
     if (pid == 0) {
-        /* Child: redirect stdout + stderr into the pipe, exec the
-         * server binary. */
+        /* Child: redirect stdout + stderr into the pipe, replace stdin
+         * with /dev/null so the child can't read the controlling tty
+         * (which the parent has put into raw mode for the TUI), then
+         * exec the server binary. */
         signal(SIGINT, SIG_DFL);
         signal(SIGTERM, SIG_DFL);
+        int devnull = open("/dev/null", O_RDONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDIN_FILENO);
+            close(devnull);
+        }
         dup2(pfd_for_child, STDOUT_FILENO);
         dup2(pfd_for_child, STDERR_FILENO);
         close(pfd_for_child);
@@ -424,9 +431,16 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
     int ci = 0;
     child_argv[ci++] = hull_exe;
 
-    /* Pass through all original args except "dev" (argv[0]) */
-    for (int i = 1; i < argc; i++)
+    /* Pass through all original args except "dev" (argv[0]) and
+     * dev-only flags. --tui is consumed by the parent (it triggers
+     * the TUI render loop in this process); forwarding it to the
+     * child would either get rejected by the server CLI parser or
+     * be silently ignored, depending on the build. --agent is
+     * already a server-mode flag, so pass that through. */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--tui") == 0) continue;
         child_argv[ci++] = argv[i];
+    }
 
     child_argv[ci] = NULL;
 

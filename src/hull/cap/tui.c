@@ -644,6 +644,18 @@ int hl_cap_tui_write(HlTuiCtx *ctx, const char *s, size_t len)
         i += (size_t)adv;
         if (cp == 0xFFFD) continue;
 
+        /* Strip C0 / DEL / C1 control codepoints. These would otherwise
+         * survive into the cell buffer and be re-emitted byte-for-byte
+         * by the flush path, letting untrusted text (log lines, file
+         * contents, error messages) inject ANSI escape sequences that
+         * desync the cell-diff renderer's coordinate tracking. The
+         * cap layer is the right enforcement boundary — every caller
+         * (Lua, JS, stdlib middleware) routes through here. We treat
+         * sanitized codepoints as no-ops rather than 0xFFFD glyphs so
+         * untrusted input doesn't visually pollute the UI. */
+        if (cp < 0x20 || cp == 0x7F || (cp >= 0x80 && cp <= 0x9F))
+            continue;
+
         int w = hl_tui_cp_width(cp);
         if (w == 0) {
             /* Combining mark — attach to preceding cell when possible. */
