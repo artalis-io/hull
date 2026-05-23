@@ -56,9 +56,15 @@ make test
 ### Develop
 
 ```bash
-# Create a new project
+# Create a new project (single-file default — best for small services and demos)
 hull new myapp
 cd myapp
+
+# Or scaffold a modular layout for larger apps:
+#   --type rest   modular REST API (routes/ models/ middleware/ lib/)
+#   --type cli    modular CLI tool (commands/ + lib/)
+#   --type tui    modular TUI app  (views/ + lib/, Lua-only)
+hull new --type rest myapp
 
 # Run in development mode (hot reload)
 hull dev app.lua
@@ -69,6 +75,12 @@ hull build -o myapp .
 # Run it
 ./myapp -p 8080 -d app.db
 ```
+
+Default stays flat; modular layouts opt in via `--type`. See
+[App Layout Conventions](#app-layout-conventions) below and the canonical
+examples: [`examples/rest_api_modular/`](examples/rest_api_modular/),
+[`examples/cli_modular/`](examples/cli_modular/),
+[`examples/tui_modular/`](examples/tui_modular/).
 
 ### Shell completions
 
@@ -213,6 +225,69 @@ Registering both `app.main` and routes in the same app is a startup
 error; pick one. A future `HL_ENABLE_HTTP=0` build will drop Keel +
 middleware entirely, producing a pure CLI / compute runtime; CLI apps
 written today run unchanged on that future binary.
+
+### App Layout Conventions
+
+Hull's runtime supports both single-file apps and modular trees. Pick
+the layout that matches the app's scope; `hull new` scaffolds either:
+
+**Flat** (default, `hull new myapp`) — one `app.lua` (or `app.js`)
+holds the manifest, requires, and all routes / commands. Best for
+small services, demos, single-resource APIs, one-shot CLI tools.
+
+**Modular REST** (`hull new --type rest myapp`) — bootstrap +
+per-resource files, models separate from routes:
+
+```
+myapp/
+  app.lua          — manifest + bootstrap (mounts each route group)
+  routes/          — one file per resource; exports register(app)
+    users.lua      — verb registration only
+  models/          — DB access per resource (no SQL in routes)
+    user.lua       — { create, find_by_id, list, delete_by_id }
+  middleware/      — app-specific wrappers around stdlib middleware
+  lib/             — shared schemas, formatters, helpers
+  migrations/, tests/, static/, templates/, locales/
+```
+
+Routes import models via relative requires (`require("./../models/user")`);
+Hull's path normalizer (`src/hull/path_normalize.c`, shared by both
+runtimes) collapses `./`/`../` safely and fails closed on escape past
+the app root.
+
+**Modular CLI** (`hull new --type cli mytool`) — `app.main` is a
+dispatcher; subcommands live as files:
+
+```
+mytool/
+  app.lua            — ctx.args[1] picks the command; the rest forward as args
+  commands/
+    greet.lua        — exports M.run(ctx); returns exit code
+    count.lua
+  lib/fmt.lua        — shared output helpers
+```
+
+**Modular TUI** (`hull new --type tui mydash`, Lua-only) — single
+`state` table threaded through views; immediate-mode loop in `app.lua`:
+
+```
+mydash/
+  app.lua            — tui.run({ draw, on_event }); dispatches via state.view
+  views/
+    menu.lua         — render(ctx, state) + handle_event(state, ev)
+    detail.lua
+  lib/state.lua      — initial state + helpers
+  tests/views/test_menu.lua   — pure-function unit tests
+```
+
+Both runtimes coexist in the same modular tree (`app.lua` + `app.js`
+side by side, parallel `routes/`, `models/`, `lib/` etc.). `hull build`
+walks subdirectories automatically — no build-config change needed.
+`hull deploy` is layout-agnostic.
+
+Canonical examples: [`examples/rest_api_modular/`](examples/rest_api_modular/),
+[`examples/cli_modular/`](examples/cli_modular/),
+[`examples/tui_modular/`](examples/tui_modular/).
 
 ### Module Declaration
 
