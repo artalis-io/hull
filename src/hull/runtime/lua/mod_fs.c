@@ -8,6 +8,7 @@
 #include "hull/limits/core.h"
 #include "hull/module_registry.h"
 #include "hull/module_resolver.h"
+#include "hull/path_normalize.h"
 #include "hull/vfs.h"
 
 #include "log.h"
@@ -152,65 +153,10 @@ int luaopen_hull_fs(lua_State *L)
 
 /* ── Path normalization helper ────────────────────────────────────── */
 
-/*
- * Normalize a path in-place by collapsing `.` and `..` segments.
- * Input:  "routes/../utils/./helper"
- * Output: "utils/helper"
- * Returns 0 on success, -1 if `..` escapes past root.
- */
-static int normalize_path(char *path)
-{
-    /* Split into segments, process left-to-right */
-    char *segments[128];
-    int depth = 0;
-    int absolute = (path[0] == '/');
-
-    char *p = path;
-    while (*p) {
-        /* Skip slashes */
-        while (*p == '/')
-            p++;
-        if (*p == '\0')
-            break;
-
-        /* Find end of segment */
-        char *seg = p;
-        while (*p && *p != '/')
-            p++;
-        if (*p == '/') {
-            *p = '\0';
-            p++;
-        }
-
-        if (strcmp(seg, ".") == 0) {
-            continue; /* skip */
-        } else if (strcmp(seg, "..") == 0) {
-            if (depth > 0)
-                depth--;
-            else
-                return -1; /* escapes past root */
-        } else {
-            if (depth >= 128)
-                return -1;
-            segments[depth++] = seg;
-        }
-    }
-
-    /* Rebuild path */
-    char *out = path;
-    if (absolute)
-        *out++ = '/';
-    for (int i = 0; i < depth; i++) {
-        if (i > 0)
-            *out++ = '/';
-        size_t len = strlen(segments[i]);
-        memmove(out, segments[i], len);
-        out += len;
-    }
-    *out = '\0';
-
-    return 0;
-}
+/* normalize_path moved to src/hull/path_normalize.c so the JS module
+ * loader can share the same implementation — see the path_normalize.h
+ * header for the contract. Local alias kept for call-site readability. */
+#define normalize_path(p)  hl_path_normalize(p)
 
 /* ── Resolve relative module path ─────────────────────────────────── */
 

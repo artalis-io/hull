@@ -21,6 +21,7 @@
 #include "hull/manifest.h"
 #include "hull/module_registry.h"
 #include "hull/module_resolver.h"
+#include "hull/path_normalize.h"
 #include "hull/cap/test.h"
 #include "hull/runtime/test.h"
 
@@ -62,25 +63,19 @@ static int hl_js_interrupt_handler(JSRuntime *rt, void *opaque)
 /* ── Module loader ──────────────────────────────────────────────────── */
 
 /*
- * Reject module names that contain path traversal sequences.
- * Returns 0 if safe, -1 if the name contains ".." or is absolute.
+ * Reject module names that are absolute or contain NULs. Path-traversal
+ * (`..`) is NOT rejected here: the resolver builds the full joined
+ * path and runs hl_path_normalize, which fails closed if `..` would
+ * collapse past the caller's base directory. Letting safe `..` through
+ * — e.g. `./../models/user.js` from `routes/users.js` resolves to
+ * `models/user.js` — matches the Lua require-gate behaviour.
+ *
+ * Returns 0 if safe, -1 if absolute.
  */
 static int hl_js_validate_module_name(const char *name)
 {
-    /* Reject absolute paths */
     if (name[0] == '/')
         return -1;
-
-    /* Reject ".." path components */
-    for (const char *p = name; *p; ) {
-        if (p[0] == '.' && p[1] == '.' && (p[2] == '/' || p[2] == '\0'))
-            return -1;
-        const char *slash = strchr(p, '/');
-        if (!slash) break;
-        p = slash + 1;
-    }
-
-    /* Reject embedded null bytes (shouldn't happen, but defense-in-depth) */
     return 0;
 }
 
@@ -123,20 +118,15 @@ static char *hl_js_module_normalize(JSContext *ctx,
             resolved[dir_len] = '/';
             memcpy(resolved + dir_len + 1, name, name_len + 1);
 
-            /* Verify the resolved path doesn't introduce ".." traversal.
-             * The resolved path may legitimately start with '/' when the
-             * base module was loaded from an absolute filesystem path (dev
-             * mode), so only reject ".." components, not absolute paths. */
-            int has_dotdot = 0;
-            for (const char *p = resolved; *p && !has_dotdot; ) {
-                if (p[0] == '.' && p[1] == '.' &&
-                    (p[2] == '/' || p[2] == '\0'))
-                    has_dotdot = 1;
-                const char *sl = strchr(p, '/');
-                if (!sl) break;
-                p = sl + 1;
-            }
-            if (has_dotdot) {
+            /* Collapse `.` and `..` segments. hl_path_normalize returns
+             * -1 if the result would escape past the root (i.e. more
+             * `..` than path depth), which is the only traversal case
+             * we need to reject. Previously this code rejected any
+             * `..` substring before normalizing, which broke valid
+             * cross-directory imports like `./../models/user.js` from
+             * routes/users.js — a regression vs the Lua-side require
+             * gate which already normalized correctly. */
+            if (hl_path_normalize(resolved) != 0) {
                 js_free(ctx, resolved);
                 JS_ThrowReferenceError(ctx, "invalid module path: %s", name);
                 return NULL;
@@ -390,16 +380,21 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
         return NULL;
     }
 
-    /* Build filesystem path.  The normalizer resolves relative imports
-     * against the base module directory, which may prepend app_dir
-     * (e.g. "examples/todo/./locales/en.json").  Strip that prefix
-     * to avoid doubling when we prepend app_dir ourselves. */
-    const char *fs_name = module_name;
-    const char *dot_slash = strstr(module_name, "/./");
-    if (dot_slash)
-        fs_name = dot_slash + 1; /* points to "./" */
+    /* Build filesystem path. After the normalizer collapses `.` / `..`
+     * segments, module_name is either an absolute path (when the base
+     * module was loaded from an absolute filesystem path, dev mode) or
+     * a clean app-relative path (when joining against an embedded /
+     * tool-mode base). For absolute paths, fopen directly; for
+     * relative, prepend app_dir. The old loader had to strip "/./"
+     * here as a workaround because the normalizer left those in
+     * place — no longer needed. */
     char path[HL_MODULE_PATH_MAX];
-    int n = snprintf(path, sizeof(path), "%s/%s", js->app_dir, fs_name);
+    int n;
+    if (module_name[0] == '/') {
+        n = snprintf(path, sizeof(path), "%s", module_name);
+    } else {
+        n = snprintf(path, sizeof(path), "%s/%s", js->app_dir, module_name);
+    }
     if (n < 0 || (size_t)n >= sizeof(path)) {
         JS_ThrowReferenceError(ctx, "module path too long: %s", module_name);
         return NULL;

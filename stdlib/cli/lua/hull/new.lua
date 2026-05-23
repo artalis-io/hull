@@ -1,10 +1,21 @@
 --
 -- hull.new — Scaffold a new Hull project
 --
--- Usage: hull new <name> [--runtime lua|js] [--cli]
+-- Usage: hull new <name> [--runtime lua|js] [--cli] [--type TYPE]
 --
--- Without --cli: scaffolds an HTTP server app (app.get/post/etc).
--- With --cli:    scaffolds a CLI app with an app.main(ctx) entry point.
+-- Layout types (--type):
+--   flat (default)  — single app.lua + tests/ + migrations/. Best for
+--                     small services, demos, single-file experiments.
+--   rest            — modular REST API: app.lua + routes/ + middleware/
+--                     + models/ + lib/. Best for apps that will grow
+--                     past one resource.
+--   cli             — modular CLI tool: app.lua + commands/ + lib/.
+--                     (Planned — Stage 2 of the layout work.)
+--   tui             — modular TUI app: app.lua + views/ + lib/.
+--                     (Planned — Stage 3 of the layout work.)
+--
+-- The legacy --cli flag (no --type) remains a flat single-file CLI
+-- and is unchanged. --type takes precedence when both are given.
 --
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 --
@@ -176,6 +187,7 @@ local function parse_args()
         name = nil,
         runtime = "lua",
         cli = false,
+        layout = nil,  -- nil → derived from --cli/default; set by --type
     }
 
     local i = 1
@@ -186,10 +198,19 @@ local function parse_args()
             opts.runtime = arg[i]
         elseif a == "--cli" then
             opts.cli = true
+        elseif a == "--type" then
+            i = i + 1
+            opts.layout = arg[i]
         elseif a:sub(1, 1) ~= "-" then
             opts.name = a
         end
         i = i + 1
+    end
+
+    -- Resolve layout: explicit --type wins; --cli implies flat-cli;
+    -- otherwise default to flat (single-file server).
+    if not opts.layout then
+        opts.layout = opts.cli and "flat-cli" or "flat"
     end
 
     return opts
@@ -211,24 +232,74 @@ local function main()
         tool.exit(1)
     end
 
+    local known_layouts = { ["flat"] = true, ["flat-cli"] = true,
+                            ["rest"] = true, ["cli"] = true, ["tui"] = true }
+    if not known_layouts[opts.layout] then
+        tool.stderr("hull new: invalid --type '" .. opts.layout ..
+                    "' (use flat, rest, cli, or tui)\n")
+        tool.exit(1)
+    end
+    if opts.layout == "cli" or opts.layout == "tui" then
+        tool.stderr("hull new: --type " .. opts.layout ..
+                    " is planned but not yet shipped — use --cli for a flat CLI today\n")
+        tool.exit(1)
+    end
+
     -- Check if directory already exists
     if tool.file_exists(opts.name) then
         tool.stderr("hull new: directory '" .. opts.name .. "' already exists\n")
         tool.exit(1)
     end
 
-    -- Create project structure
     local dir = opts.name
+    local ext = runtime == "js" and ".js" or ".lua"
+
+    -- Modular layouts delegate to a per-type templates module. Each
+    -- module returns a flat { ["relative/path"] = "content" } table;
+    -- this function creates parent dirs as needed, writes files, and
+    -- prints a tree of what was created.
+    if opts.layout == "rest" then
+        local templates_rest = require("hull.templates_rest")
+        local files = templates_rest.files(runtime)
+
+        -- Strip the wrong-runtime files so `files` only contains the
+        -- entries the user actually asked for (`hull new --runtime js
+        -- --type rest` shouldn't emit .lua files alongside the .js
+        -- scaffold). The templates module already filters by runtime,
+        -- but defence-in-depth here keeps the writer dumb.
+        tool.mkdir(dir)
+        local created = {}
+        for path, content in pairs(files) do
+            local full = dir .. "/" .. path
+            -- Create parent directories as needed.
+            local last_slash = full:find("/[^/]*$")
+            if last_slash then
+                local parent = full:sub(1, last_slash - 1)
+                tool.mkdir(parent)
+            end
+            tool.write_file(full, content)
+            created[#created + 1] = full
+        end
+        table.sort(created)
+
+        print("hull new: created " .. dir .. "/ (modular REST API)")
+        for _, p in ipairs(created) do print("  " .. p) end
+        print("")
+        print("Next steps:")
+        print("  cd " .. dir)
+        print("  hull " .. (ext == ".js" and "app.js" or "app.lua"))
+        return
+    end
+
+    -- Flat layouts (default and --cli) keep their original behavior.
     tool.mkdir(dir)
     tool.mkdir(dir .. "/tests")
-    if not opts.cli then
+    if opts.layout == "flat" then
         tool.mkdir(dir .. "/migrations")  -- CLI apps may not need a DB
     end
 
-    -- Pick templates by runtime + mode (cli vs server)
-    local ext = runtime == "js" and ".js" or ".lua"
     local app_template, test_template
-    if opts.cli then
+    if opts.layout == "flat-cli" then
         app_template  = runtime == "js" and templates.js_cli_app  or templates.lua_cli_app
         test_template = runtime == "js" and templates.js_cli_test or templates.lua_cli_test
     else
@@ -238,7 +309,7 @@ local function main()
 
     tool.write_file(dir .. "/app" .. ext, app_template)
     tool.write_file(dir .. "/tests/test_app" .. ext, test_template)
-    if not opts.cli then
+    if opts.layout == "flat" then
         tool.write_file(dir .. "/migrations/001_init.sql", templates.migration_init)
     end
     tool.write_file(dir .. "/.gitignore", templates.gitignore)
@@ -246,14 +317,14 @@ local function main()
     print("hull new: created " .. dir .. "/")
     print("  " .. dir .. "/app" .. ext)
     print("  " .. dir .. "/tests/test_app" .. ext)
-    if not opts.cli then
+    if opts.layout == "flat" then
         print("  " .. dir .. "/migrations/001_init.sql")
     end
     print("  " .. dir .. "/.gitignore")
     print("")
     print("Next steps:")
     print("  cd " .. dir)
-    if opts.cli then
+    if opts.layout == "flat-cli" then
         print("  hull run app" .. ext .. " -- world")
     else
         print("  hull app" .. ext)

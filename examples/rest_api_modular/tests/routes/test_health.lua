@@ -1,0 +1,5 @@
+test("GET /health returns ok", function()
+    local res = test.get("/health")
+    test.eq(res.status, 200)
+    test.eq(res.json.status, "ok")
+end)

@@ -170,7 +170,9 @@ stdlib/                 # Embedded standard library
                         #   Same `hull.X` require name as user-facing modules
                         #   (Makefile strips both prefixes); the split exists
                         #   so the user-facing directory honestly reflects
-                        #   what apps can import.
+                        #   what apps can import. `hull new`'s modular
+                        #   templates (templates_rest.lua, etc.) also live
+                        #   here — they're embedded scaffolds, not user code.
 vendor/                 # Vendored libraries (do not modify)
 tests/                  # Unit tests (test_*.c) and E2E scripts (e2e_*.sh)
   fixtures/             #   Test fixtures (null_app, etc.)
@@ -289,6 +291,85 @@ the serve loop if non-zero, matching shell exit-code conventions.
 
 On `HL_ENABLE_HTTP_SERVER=0` builds (CLI flavor) the route-registration
 bindings drop out entirely; only the `app.main` path is reachable.
+
+### App Layout Conventions
+
+Hull's runtime supports both single-file apps and modular trees. Pick
+the layout that matches the app's scope:
+
+**Flat** (default `hull new myapp`) — one `app.lua` (or `app.js`) holds
+the manifest, requires, and all routes. Best for small services, demos,
+single-resource APIs, and one-shot CLI tools. The scaffolder emits:
+
+```
+myapp/
+  app.lua              — manifest + routes inline
+  migrations/001_init.sql
+  tests/test_app.lua
+```
+
+**Modular REST** (`hull new --type rest myapp`) — `app.lua` is the
+bootstrap; resources, models, validation, and middleware live in
+sibling directories. Best for apps that will grow past one resource.
+
+```
+myapp/
+  app.lua              — manifest + bootstrap (requires each route group)
+  routes/              — one file per resource; exports register(app)
+    users.lua          — calls app.get/post/put/delete for /users
+    posts.lua
+  middleware/          — app-specific middleware (wraps stdlib's hull.middleware.*)
+    require_auth.lua
+  models/              — DB access functions per resource (no SQL in routes/)
+    user.lua           — exports { create, find_by_id, list, delete_by_id }
+    post.lua
+  lib/                 — shared helpers (validators, formatters, domain types)
+    validate_user.lua
+  migrations/, tests/, static/, templates/, locales/  — same as flat
+  tests/routes/test_users.lua    — mirror the source tree under tests/
+```
+
+The shape:
+
+- **`app.lua`** is bootstrap only. It declares the manifest (every module
+  any file in the tree imports must be listed, per Hull's import
+  tracker), `require`s cross-cutting middleware (logger, session.init,
+  etc.), and calls each route group's `register(app)`. No route handlers
+  inline.
+- **`routes/X.lua`** registers HTTP verbs for one resource. Exports a
+  single function: `function M.register(app) ... end`. Returns `M`.
+  Routes call into models; they don't touch `db` directly.
+- **`models/X.lua`** holds the SQL for one resource. Exports CRUD
+  functions: `create`, `find_by_id`, `list`, etc. Each function is a
+  pure function of its arguments; no dependency on `req`/`res`.
+- **`middleware/X.lua`** wraps stdlib middleware with app-specific
+  policy (login redirect target, role checks, etc.). Stays thin.
+- **`lib/X.lua`** is for anything that doesn't fit a route/model/
+  middleware: schemas, formatters, helpers shared across resources.
+
+**Relative `require` is supported.** `routes/users.lua` does
+`require("./../models/user")` and Hull's path normalizer (shared by
+both runtimes via `src/hull/path_normalize.c`) collapses `./`/`../`
+segments safely. Escape past the app root fails closed.
+
+**Both runtimes coexist.** Generating with `--runtime js` produces the
+parallel JS scaffold (same dirs, `.js` extension, `export { register }`
+instead of Lua's `M.register = ...`). When `app.lua` and `app.js` both
+exist, `hull test` runs each runtime's tests; `hull` picks one entry
+based on filename.
+
+**`hull build`** walks subdirectories — `routes/`, `models/`, `lib/`,
+etc. are all picked up by `tool.find_files(dir, "*.lua")` and embedded
+in the produced binary. No build-config change needed. **`hull deploy`**
+treats the modular app as one bundle; same Dockerfile / systemd /
+fly.toml output regardless of layout.
+
+CLI and TUI modular layouts (`--type cli`, `--type tui`) are planned
+for the next two stages; today, `--cli` produces a flat single-file
+CLI app and `examples/tui_picker/` shows the canonical TUI pattern.
+
+The canonical example for the modular REST layout lives at
+`examples/rest_api_modular/` (both Lua and JS).
 
 ### Command Dispatch
 
