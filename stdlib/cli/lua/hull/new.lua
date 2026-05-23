@@ -239,11 +239,6 @@ local function main()
                     "' (use flat, rest, cli, or tui)\n")
         tool.exit(1)
     end
-    if opts.layout == "cli" or opts.layout == "tui" then
-        tool.stderr("hull new: --type " .. opts.layout ..
-                    " is planned but not yet shipped — use --cli for a flat CLI today\n")
-        tool.exit(1)
-    end
 
     -- Check if directory already exists
     if tool.file_exists(opts.name) then
@@ -255,23 +250,29 @@ local function main()
     local ext = runtime == "js" and ".js" or ".lua"
 
     -- Modular layouts delegate to a per-type templates module. Each
-    -- module returns a flat { ["relative/path"] = "content" } table;
-    -- this function creates parent dirs as needed, writes files, and
-    -- prints a tree of what was created.
-    if opts.layout == "rest" then
-        local templates_rest = require("hull.templates_rest")
-        local files = templates_rest.files(runtime)
+    -- module's M.files(runtime) returns either:
+    --   (table, nil)  — { ["relative/path"] = "content" } to write
+    --   (nil, "msg")  — runtime not supported (e.g. TUI rejects JS)
+    -- This function creates parent dirs as needed, writes files,
+    -- and prints a tree of what was created.
+    local MODULAR_TYPES = {
+        rest = { module = "hull.templates_rest", label = "modular REST API",  default = "hull app" },
+        cli  = { module = "hull.templates_cli",  label = "modular CLI tool",  default = "hull run app -- greet world" },
+        tui  = { module = "hull.templates_tui",  label = "modular TUI app",   default = "hull run app" },
+    }
+    local mt = MODULAR_TYPES[opts.layout]
+    if mt then
+        local templates_mod = require(mt.module)
+        local files, err    = templates_mod.files(runtime)
+        if err then
+            tool.stderr("hull new: " .. err .. "\n")
+            tool.exit(1)
+        end
 
-        -- Strip the wrong-runtime files so `files` only contains the
-        -- entries the user actually asked for (`hull new --runtime js
-        -- --type rest` shouldn't emit .lua files alongside the .js
-        -- scaffold). The templates module already filters by runtime,
-        -- but defence-in-depth here keeps the writer dumb.
         tool.mkdir(dir)
         local created = {}
         for path, content in pairs(files) do
             local full = dir .. "/" .. path
-            -- Create parent directories as needed.
             local last_slash = full:find("/[^/]*$")
             if last_slash then
                 local parent = full:sub(1, last_slash - 1)
@@ -282,12 +283,12 @@ local function main()
         end
         table.sort(created)
 
-        print("hull new: created " .. dir .. "/ (modular REST API)")
+        print("hull new: created " .. dir .. "/ (" .. mt.label .. ")")
         for _, p in ipairs(created) do print("  " .. p) end
         print("")
         print("Next steps:")
         print("  cd " .. dir)
-        print("  hull " .. (ext == ".js" and "app.js" or "app.lua"))
+        print("  " .. (mt.default:gsub("app", "app" .. ext)))
         return
     end
 

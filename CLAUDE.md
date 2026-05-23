@@ -364,12 +364,48 @@ in the produced binary. No build-config change needed. **`hull deploy`**
 treats the modular app as one bundle; same Dockerfile / systemd /
 fly.toml output regardless of layout.
 
-CLI and TUI modular layouts (`--type cli`, `--type tui`) are planned
-for the next two stages; today, `--cli` produces a flat single-file
-CLI app and `examples/tui_picker/` shows the canonical TUI pattern.
+**Modular CLI** (`hull new --type cli mytool`) — `app.lua` is a
+dispatcher: `ctx.args[1]` names a subcommand; `commands/<name>.lua`
+exports `M.run(ctx)`. `lib/` holds shared output formatters.
 
-The canonical example for the modular REST layout lives at
-`examples/rest_api_modular/` (both Lua and JS).
+```
+mytool/
+  app.lua             — manifest + app.main(ctx) → require("./commands/" .. ctx.args[1]).run(...)
+  commands/
+    greet.lua         — exports M.run(ctx); ctx.args is shifted (subcommand argv)
+    count.lua
+  lib/
+    fmt.lua           — shared helpers
+  tests/commands/test_greet.lua
+```
+
+`hull test` for `app.main`-based apps is a known limitation today (the
+runner expects a registered HTTP server context — emits "no routes
+registered" otherwise). The scaffolded `tests/` files are placeholders
+until a CLI-mode test harness lands. The commands themselves are
+plain Lua/JS, so they're easy to unit-test in any external harness.
+
+**Modular TUI** (`hull new --type tui mydash`, Lua-only) — `app.lua`
+holds the `tui.run({ draw, on_event })` loop and a single `state`
+table threaded through views. Each view in `views/<name>.lua` exports
+`render(ctx, state)` and `handle_event(state, ev) → (new_state | nil,
+exit_token | nil)`. Routing is `state.view = "X"`. Because views are
+pure functions of state, they unit-test cleanly without a terminal —
+see the scaffolded `tests/views/test_menu.lua`.
+
+```
+mydash/
+  app.lua             — manifest + tui.run loop; dispatches to views by state.view
+  views/
+    menu.lua          — render() + handle_event(); sets state.view to route
+    detail.lua
+  lib/
+    state.lua         — initial state factory + helpers
+  tests/views/test_menu.lua
+```
+
+The canonical examples live at `examples/rest_api_modular/`,
+`examples/cli_modular/`, and `examples/tui_modular/`.
 
 ### Command Dispatch
 
