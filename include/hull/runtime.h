@@ -28,6 +28,9 @@
 #include <stddef.h>
 #include <stdint.h>  /* uint32_t / int64_t / uint64_t in wasm_config */
 
+#include "hull/limits/core.h"  /* HL_MODULE_BITSET_WORDS / other limits */
+#include "hull/manifest.h"     /* HL_MANIFEST_MAX_MODULES (import tracker) */
+
 /* Forward declarations */
 typedef struct HlAllocator HlAllocator;
 typedef struct HlAsyncBackendCtx  HlAsyncBackendCtx;
@@ -156,6 +159,20 @@ struct HlRuntime {
      * no gating (legacy entry points: test runner, agent, mcp). When
      * non-NULL, gating fires for any registry-known name not in the set. */
     const HlResolvedModuleSet *module_set;
+    /* Pre-manifest import tracker. Top-level Lua require() / JS import
+     * statements run before module_set is wired (the manifest hasn't
+     * been extracted yet, so the resolver hasn't run). To prevent
+     * silent-bypass, the gate records every registry-known canonical
+     * name it lets through during that window into this fixed-size
+     * array. After the resolver runs in serve.c, the validator walks
+     * the array and rejects any name that the resolved set doesn't
+     * cover. See hl_import_tracker_record / _validate in
+     * module_resolver.c.
+     *
+     * Capacity is HL_MANIFEST_MAX_MODULES because no app can declare
+     * (or transitively use) more registry-known modules than that. */
+    int import_tracker_count;
+    const char *import_tracker_names[HL_MANIFEST_MAX_MODULES];
     HlAsyncBackendPool *thread_pool; /* worker pool for async work (NULL if not created) */
     /* HlAsyncBackend context — the event loop primitives layer. In
      * server-mode builds this is a wrap around the KlServer's

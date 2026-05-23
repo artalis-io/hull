@@ -20,8 +20,11 @@ import { worker } from "hull:worker";
 // Allow outbound HTTP to self (localhost) for the fetch demos
 app.manifest({
     modules: [
-    "hull/http-server@1",
+        "hull/http-server@1",
+        "hull/db@1",
+        "hull/http-client@1",
         "hull/log@1",
+        "hull/worker@1",
     ],
     hosts: ["127.0.0.1"],
     database: "async_demo.db",

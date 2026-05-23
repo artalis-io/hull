@@ -372,24 +372,56 @@ static int hl_lua_require(lua_State *L)
      * module that is not admitted, refuse here with a clear message
      * rather than letting the lookup fall through to "module not
      * found". Names that aren't in the registry (user code, app
-     * helpers) fall through unchanged. */
-    if (lua && lua->base.module_set) {
+     * helpers) fall through unchanged.
+     *
+     * If module_set isn't wired yet (top-of-file require running
+     * before app.manifest()), record the canonical name in the
+     * runtime's import tracker. serve.c will validate the tracker
+     * against the resolved set after manifest extraction so silent
+     * bypass of undeclared imports can't slip through. */
+    if (lua) {
         const HlModuleSpec *spec =
             hl_module_registry_find_runtime(name, '.');
-        if (spec &&
-            !hl_module_set_contains_spec(lua->base.module_set, spec)) {
-            char deps_buf[128];
-            hl_module_registry_format_deps(spec, deps_buf, sizeof(deps_buf));
-            char deps_part[160] = {0};
-            if (deps_buf[0])
-                snprintf(deps_part, sizeof(deps_part),
-                         " (also needs: %s)", deps_buf);
+        if (spec) {
+            if (lua->base.module_set) {
+                if (!hl_module_set_contains_spec(lua->base.module_set, spec)) {
+                    char deps_buf[128];
+                    hl_module_registry_format_deps(spec, deps_buf, sizeof(deps_buf));
+                    char deps_part[160] = {0};
+                    if (deps_buf[0])
+                        snprintf(deps_part, sizeof(deps_part),
+                                 " (also needs: %s)", deps_buf);
 
-            return luaL_error(L,
-                "module '%s' is not declared in app.manifest. "
-                "Add \"%s@%d\" to the modules array%s. "
-                "See `hull modules available` for the full list.",
-                name, spec->name, (int)spec->api_major, deps_part);
+                    return luaL_error(L,
+                        "module '%s' is not declared in app.manifest. "
+                        "Add \"%s@%d\" to the modules array%s. "
+                        "See `hull modules available` for the full list.",
+                        name, spec->name, (int)spec->api_major, deps_part);
+                }
+            } else {
+                /* Only track requires originating from user-level Lua
+                 * code. Two non-user paths bypass tracking:
+                 *
+                 *   1) The C runtime pre-loads hull.json into the
+                 *      registry stash before the app file runs (see
+                 *      hl_lua_register_modules); there's no Lua frame
+                 *      above this require, lua_getstack returns 0.
+                 *   2) Stdlib modules that transitively require other
+                 *      stdlib (middleware/session → hull.crypto): the
+                 *      Lua caller's chunk source starts with "hull.".
+                 *      The user's entry-point declaration is what
+                 *      matters; auto-admit covers transitive deps.
+                 *
+                 * Tracking fires only when there IS a Lua caller AND
+                 * that caller is NOT in the hull namespace. */
+                lua_Debug ar;
+                int caller_is_user = lua_getstack(L, 1, &ar) &&
+                                     lua_getinfo(L, "S", &ar) &&
+                                     ar.source &&
+                                     strncmp(ar.source, "hull.", 5) != 0;
+                if (caller_is_user)
+                    hl_import_tracker_record(&lua->base, spec->name);
+            }
         }
     }
 

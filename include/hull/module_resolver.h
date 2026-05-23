@@ -99,4 +99,38 @@ int hl_module_resolver_resolve(const HlManifest *manifest,
                                 HlResolvedModuleSet *out,
                                 char *errbuf, size_t errlen);
 
+/* ── Pre-manifest import tracker ───────────────────────────────────── */
+
+/*
+ * Forward decl of HlRuntime — this header is shared by runtime/lua/ and
+ * runtime/js/ which both build against the same HlRuntime base struct.
+ */
+typedef struct HlRuntime HlRuntime;
+
+/*
+ * Record a hull:* / hull.X canonical name that the per-runtime require/
+ * import gate let through while the runtime's `module_set` was still
+ * NULL (top-level imports before app.manifest() runs).
+ *
+ * Dedups against the existing tracker contents. Silently truncates at
+ * HL_MANIFEST_MAX_MODULES — no app can legitimately import more
+ * registry-known modules than the manifest itself can declare.
+ *
+ * `canonical_name` must outlive the runtime (point into the registry
+ * or another static string — the tracker stores the pointer, not a copy).
+ */
+void hl_import_tracker_record(HlRuntime *rt, const char *canonical_name);
+
+/*
+ * After the resolver wires `rt->module_set`, validate that every
+ * tracked top-level import was admitted by the resolved set.
+ *
+ * Returns 0 if all tracked imports are admitted, -1 with a formatted
+ * message in errbuf otherwise. The message names the first missing
+ * import and counts the rest.
+ */
+int hl_import_tracker_validate(const HlRuntime *rt,
+                                const HlResolvedModuleSet *set,
+                                char *errbuf, size_t errlen);
+
 #endif /* HL_MODULE_RESOLVER_H */

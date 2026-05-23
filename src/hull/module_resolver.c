@@ -18,6 +18,7 @@
 
 #include "hull/module_resolver.h"
 #include "hull/manifest.h"
+#include "hull/runtime.h"  /* HlRuntime — import_tracker fields */
 
 #include <stdio.h>
 #include <string.h>
@@ -325,4 +326,59 @@ int hl_module_resolver_resolve(const HlManifest *manifest,
     }
 
     return 0;
+}
+
+/* ── Pre-manifest import tracker ───────────────────────────────────── */
+
+void hl_import_tracker_record(HlRuntime *rt, const char *canonical_name)
+{
+    if (!rt || !canonical_name) return;
+    if (rt->import_tracker_count >= HL_MANIFEST_MAX_MODULES) return;
+
+    /* Dedup against the existing list — apps commonly require/import
+     * the same module from multiple files, and we want each name to
+     * appear at most once in the validation error. Linear scan is
+     * fine; HL_MANIFEST_MAX_MODULES is small. */
+    for (int i = 0; i < rt->import_tracker_count; i++) {
+        if (rt->import_tracker_names[i] == canonical_name) return;
+        if (strcmp(rt->import_tracker_names[i], canonical_name) == 0) return;
+    }
+    rt->import_tracker_names[rt->import_tracker_count++] = canonical_name;
+}
+
+int hl_import_tracker_validate(const HlRuntime *rt,
+                                const HlResolvedModuleSet *set,
+                                char *errbuf, size_t errlen)
+{
+    if (!rt || !set) return 0;
+
+    int missing_count = 0;
+    const char *first_missing = NULL;
+    for (int i = 0; i < rt->import_tracker_count; i++) {
+        const char *name = rt->import_tracker_names[i];
+        if (!hl_module_set_contains_name(set, name)) {
+            if (!first_missing) first_missing = name;
+            missing_count++;
+        }
+    }
+    if (missing_count == 0) return 0;
+
+    if (errbuf && errlen) {
+        if (missing_count == 1) {
+            snprintf(errbuf, errlen,
+                     "module '%s' was imported at top-of-file but is not "
+                     "declared in app.manifest. Add \"%s@1\" to the "
+                     "modules array (or declare a module that auto-pulls "
+                     "it via deps).",
+                     first_missing, first_missing);
+        } else {
+            snprintf(errbuf, errlen,
+                     "%d top-level imports are not declared in app.manifest "
+                     "(first: '%s'). Add each to the modules array, or "
+                     "declare a module that auto-pulls them via deps. "
+                     "Run `hull modules available` for the full list.",
+                     missing_count, first_missing);
+        }
+    }
+    return -1;
 }

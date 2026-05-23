@@ -160,24 +160,35 @@ int hl_js_check_module_declared(JSContext *ctx,
                                  const char *runtime_name)
 {
     HlJS *js = JS_GetContextOpaque(ctx);
-    if (!js || !js->base.module_set) return 0;  /* legacy entry point */
+    if (!js) return 0;
 
     const HlModuleSpec *spec = hl_module_registry_find(canonical_name);
     if (!spec) return 0;  /* private / not registry-known — pass through */
-    if (hl_module_set_contains_spec(js->base.module_set, spec)) return 0;
 
-    char deps_buf[128];
-    hl_module_registry_format_deps(spec, deps_buf, sizeof(deps_buf));
-    char deps_part[160] = {0};
-    if (deps_buf[0])
-        snprintf(deps_part, sizeof(deps_part), " (also needs: %s)", deps_buf);
+    /* module_set wired (post-manifest): gate immediately. */
+    if (js->base.module_set) {
+        if (hl_module_set_contains_spec(js->base.module_set, spec)) return 0;
 
-    JS_ThrowReferenceError(ctx,
-        "module '%s' is not declared in app.manifest. "
-        "Add \"%s@%d\" to the modules array%s. "
-        "See `hull modules available` for the full list.",
-        runtime_name, spec->name, (int)spec->api_major, deps_part);
-    return -1;
+        char deps_buf[128];
+        hl_module_registry_format_deps(spec, deps_buf, sizeof(deps_buf));
+        char deps_part[160] = {0};
+        if (deps_buf[0])
+            snprintf(deps_part, sizeof(deps_part), " (also needs: %s)", deps_buf);
+
+        JS_ThrowReferenceError(ctx,
+            "module '%s' is not declared in app.manifest. "
+            "Add \"%s@%d\" to the modules array%s. "
+            "See `hull modules available` for the full list.",
+            runtime_name, spec->name, (int)spec->api_major, deps_part);
+        return -1;
+    }
+
+    /* Pre-manifest window: record the canonical name. serve.c validates
+     * the tracker after the resolver runs, so undeclared imports that
+     * slip through this window get caught synchronously at app-load
+     * time. */
+    hl_import_tracker_record(&js->base, spec->name);
+    return 0;
 }
 
 /*
@@ -199,24 +210,32 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
          * set wired AND the name maps to a known first-party module
          * not in that set, refuse before doing the VFS lookup. Names
          * outside the registry fall through to the normal "unknown
-         * hull module" error. */
-        if (js->base.module_set) {
-            const HlModuleSpec *spec =
-                hl_module_registry_find_runtime(module_name, ':');
-            if (spec &&
-                !hl_module_set_contains_spec(js->base.module_set, spec)) {
-                char deps_buf[128];
-                hl_module_registry_format_deps(spec, deps_buf, sizeof(deps_buf));
-                char deps_part[160] = {0};
-                if (deps_buf[0])
-                    snprintf(deps_part, sizeof(deps_part),
-                             " (also needs: %s)", deps_buf);
-                JS_ThrowReferenceError(ctx,
-                    "module '%s' is not declared in app.manifest. "
-                    "Add \"%s@%d\" to the modules array%s. "
-                    "See `hull modules available` for the full list.",
-                    module_name, spec->name, (int)spec->api_major, deps_part);
-                return NULL;
+         * hull module" error.
+         *
+         * If module_set isn't wired yet (top-of-file import running
+         * before app.manifest()), record the canonical name in the
+         * runtime's import tracker. serve.c validates the tracker
+         * against the resolved set after manifest extraction. */
+        const HlModuleSpec *spec =
+            hl_module_registry_find_runtime(module_name, ':');
+        if (spec) {
+            if (js->base.module_set) {
+                if (!hl_module_set_contains_spec(js->base.module_set, spec)) {
+                    char deps_buf[128];
+                    hl_module_registry_format_deps(spec, deps_buf, sizeof(deps_buf));
+                    char deps_part[160] = {0};
+                    if (deps_buf[0])
+                        snprintf(deps_part, sizeof(deps_part),
+                                 " (also needs: %s)", deps_buf);
+                    JS_ThrowReferenceError(ctx,
+                        "module '%s' is not declared in app.manifest. "
+                        "Add \"%s@%d\" to the modules array%s. "
+                        "See `hull modules available` for the full list.",
+                        module_name, spec->name, (int)spec->api_major, deps_part);
+                    return NULL;
+                }
+            } else {
+                hl_import_tracker_record(&js->base, spec->name);
             }
         }
 

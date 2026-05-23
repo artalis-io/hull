@@ -1056,6 +1056,19 @@ static int hl_serve_wire_caps(HlServerState *s)
          * it. The set lives in HlServerState; its lifetime exceeds the
          * runtime, so storing the pointer is safe. */
         rt->module_set = &s->module_set;
+
+        /* Validate the pre-manifest import tracker against the resolved
+         * set. Top-level Lua require / JS import statements run before
+         * the gate is wired, so the gate records the canonical names
+         * it lets through during that window into rt->import_tracker_*.
+         * Walking them here catches the silent-bypass case where an
+         * app imports e.g. hull:db but never declares hull/db@1. */
+        char itrack_err[256] = {0};
+        if (hl_import_tracker_validate(rt, &s->module_set,
+                                        itrack_err, sizeof(itrack_err)) != 0) {
+            log_error("[hull:c] %s", itrack_err);
+            return -1;
+        }
     }
 
     /* Wire CSP policy to runtime.
