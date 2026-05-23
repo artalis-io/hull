@@ -19,6 +19,7 @@
 #include "hull/manifest.h"
 #include "hull/cap/tool.h"
 #include "hull/runtime/tool.h"
+#include "hull/tool_orchestration.h"
 #include "hull/runtime/test.h"
 #include "hull/cap/ws.h"
 
@@ -196,6 +197,7 @@ int hl_lua_init(HlLua *lua, const HlLuaConfig *cfg)
         luaL_requiref(lua->L, LUA_COLIBNAME, luaopen_coroutine, 1);
         lua_pop(lua->L, 1);
         hl_lua_tool_register(lua->L, lua->tool_unveil_ctx);
+        hl_lua_tool_register_orchestration(lua->L);
     }
 
     /* Replace print with stderr version */

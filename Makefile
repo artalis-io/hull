@@ -971,7 +971,7 @@ CAP_TEST_LUA_OBJ := $(BUILDDIR)/cap_test_dispatch.o
 # Note: the JS/Lua test bindings now live in {JS,LUA}_RT_OBJS
 # (runtime/{lua,js}/mod_test.c); only the pure-C dispatch helper needs
 # to be linked separately. (Item E: cap layer is now runtime-free.)
-TOOL_OBJ       := $(BUILDDIR)/tool.o
+TOOL_OBJ       := $(BUILDDIR)/tool.o $(BUILDDIR)/tool_orchestration.o
 SIG_OBJ        := $(BUILDDIR)/signature.o
 RELEASE_OBJ    := $(BUILDDIR)/release.o
 # test_runner.c uses KlRouter to dispatch in-process test requests —
@@ -1034,15 +1034,38 @@ ENTRY_OBJ      := $(BUILDDIR)/entry.o
 
 # ── Stdlib embedding (xxd) ──────────────────────────────────────────
 #
-# All .lua files under stdlib/lua/ (excluding tests/) are converted to
-# C byte arrays at build time via xxd -i. Path separators are flattened
-# to underscores: stdlib/lua/vendor/json.lua → build/stdlib_lua_vendor_json.h
+# Two Lua source trees feed the embedded stdlib registry:
+#
+#   stdlib/lua/hull/*.lua       — user-facing modules apps may
+#                                 require("hull.foo"): template, jwt,
+#                                 cookie, csrf, csv, email, form, i18n,
+#                                 json, search, validate, plus
+#                                 middleware/*.
+#
+#   stdlib/cli/lua/hull/*.lua   — CLI plugins invoked only by the C
+#                                 dispatcher (`hull build`, `hull deploy`,
+#                                 etc.) via hull_tool(); never imported
+#                                 by app code. Split out per audit A-2
+#                                 so stdlib/lua/hull/ honestly reflects
+#                                 the user-facing surface.
+#
+# Both trees go through the same xxd pipeline and end up in
+# hl_stdlib_entries[]. The name-strip rule below makes
+# stdlib/cli/lua/hull/build.lua resolve as "hull.build" — same name
+# the C dispatcher and any cross-CLI require already use, so this is
+# a path move with no code change required.
 
-STDLIB_LUA_FILES := $(shell find stdlib/lua -name '*.lua' -not -path '*/tests/*' 2>/dev/null)
+STDLIB_LUA_USER_FILES := $(shell find stdlib/lua -name '*.lua' -not -path '*/tests/*' 2>/dev/null)
+STDLIB_LUA_CLI_FILES  := $(shell find stdlib/cli/lua -name '*.lua' -not -path '*/tests/*' 2>/dev/null)
+STDLIB_LUA_FILES      := $(STDLIB_LUA_USER_FILES) $(STDLIB_LUA_CLI_FILES)
 
-# Flatten path: stdlib/lua/vendor/json.lua → build/stdlib_lua_vendor_json.h
-stdlib_hdr = $(BUILDDIR)/$(subst /,_,$(patsubst stdlib/%.lua,stdlib_%.h,$(1)))
-STDLIB_LUA_HDRS := $(foreach f,$(STDLIB_LUA_FILES),$(call stdlib_hdr,$(f)))
+# User-facing: stdlib/lua/hull/foo.lua → build/stdlib_lua_hull_foo.h
+stdlib_hdr     = $(BUILDDIR)/$(subst /,_,$(patsubst stdlib/%.lua,stdlib_%.h,$(1)))
+# CLI plugins:  stdlib/cli/lua/hull/build.lua → build/stdlib_cli_lua_hull_build.h
+stdlib_cli_hdr = $(BUILDDIR)/$(subst /,_,$(patsubst stdlib/%.lua,stdlib_%.h,$(1)))
+
+STDLIB_LUA_HDRS  := $(foreach f,$(STDLIB_LUA_USER_FILES),$(call stdlib_hdr,$(f)))
+STDLIB_LUA_HDRS  += $(foreach f,$(STDLIB_LUA_CLI_FILES),$(call stdlib_cli_hdr,$(f)))
 
 # Generate per-file xxd rules (avoids % matching directory separators)
 define STDLIB_LUA_RULE
@@ -1109,7 +1132,7 @@ $(STDLIB_REGISTRY_C): $(STDLIB_LUA_XXD_HDRS) $(STDLIB_JS_XXD_HDRS) $(CONTEXT_XXD
 	@echo "const HlEntry hl_stdlib_entries[] = {" >> $@
 	@( for f in $(STDLIB_LUA_FILES); do \
 		varname=$$(echo "$$f" | sed 's/[\/.]/_/g'); \
-		modname=$$(echo "$$f" | sed 's|^stdlib/lua/||; s|\.lua$$||; s|/|.|g'); \
+		modname=$$(echo "$$f" | sed 's|^stdlib/lua/||; s|^stdlib/cli/lua/||; s|\.lua$$||; s|/|.|g'); \
 		echo "$$modname	    { \"$$modname\", $${varname}, sizeof($${varname}) },"; \
 	done; \
 	for f in $(STDLIB_JS_FILES); do \
@@ -1620,7 +1643,14 @@ $(AGENT_API_OBJ): $(SRCDIR)/hull/agent_api.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Tool mode (keygen, build, verify, etc.)
-$(TOOL_OBJ): $(SRCDIR)/hull/tool.c | $(BUILDDIR)
+$(BUILDDIR)/tool.o: $(SRCDIR)/hull/tool.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+# Tool orchestration — cross-layer bindings spliced onto the `tool`
+# global after the runtime/lua thin-binding layer installs the base
+# table. Lives at src/hull/ (not runtime/lua/) so commands/, dev_state,
+# agent_lib, migrate, and module_* aren't pulled into runtime/ headers.
+$(BUILDDIR)/tool_orchestration.o: $(SRCDIR)/hull/tool_orchestration.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Build assets (embedded platform lib — stub unless HL_BUILD_EMBEDDED=1)
@@ -1768,9 +1798,9 @@ $(BUILDDIR)/test_js: $(TESTDIR)/hull/runtime/js/test_js.c $(TEST_COMMON_DEPS) $(
 		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(WGPU_LIB) $(WGPU_FRAMEWORKS) -lm -lpthread
 
 # Lua runtime test — needs Lua + Lua runtime objects + manifest (Lua-only) + cap_tool + build_assets
-$(BUILDDIR)/test_lua: $(TESTDIR)/hull/runtime/lua/test_lua.c $(TEST_COMMON_DEPS) $(CAP_TOOL_OBJ) $(CAP_TEST_LUA_OBJ) $(BUILD_ASSET_OBJ) $(BUILDDIR)/cmd_doctor.o $(BUILDDIR)/cmd_dev.o $(BUILDDIR)/compiler.o $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(APP_CONTEXT_OBJ) $(MIGRATE_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(LUA_RT_OBJS) $(JS_RT_OBJS) $(LUA_OBJS) $(QJS_OBJS) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(TEST_RUNNER_OBJ) | $(BUILDDIR)
+$(BUILDDIR)/test_lua: $(TESTDIR)/hull/runtime/lua/test_lua.c $(TEST_COMMON_DEPS) $(CAP_TOOL_OBJ) $(CAP_TEST_LUA_OBJ) $(BUILD_ASSET_OBJ) $(BUILDDIR)/cmd_doctor.o $(BUILDDIR)/cmd_dev.o $(BUILDDIR)/compiler.o $(BUILDDIR)/tool_orchestration.o $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(APP_CONTEXT_OBJ) $(MIGRATE_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(LUA_RT_OBJS) $(JS_RT_OBJS) $(LUA_OBJS) $(QJS_OBJS) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(TEST_RUNNER_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(TEST_CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_LUA_OBJ) $(BUILD_ASSET_OBJ) $(BUILDDIR)/cmd_doctor.o $(BUILDDIR)/cmd_dev.o $(BUILDDIR)/compiler.o $(BUILDDIR)/compiler_tcc.o $(BUILDDIR)/tool.o $(BUILDDIR)/sandbox.o $(BUILDDIR)/cacert.o $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(APP_CONTEXT_OBJ) $(MIGRATE_OBJ) $(LUA_RT_OBJS) $(JS_RT_OBJS) $(MANIFEST_OBJ) $(MODULE_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(TEST_RUNNER_OBJ) $(ALLOC_OBJ) $(ASYNC_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(WAMR_OBJS) $(LUA_OBJS) $(QJS_OBJS) \
+		$(TEST_CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_LUA_OBJ) $(BUILD_ASSET_OBJ) $(BUILDDIR)/cmd_doctor.o $(BUILDDIR)/cmd_dev.o $(BUILDDIR)/compiler.o $(BUILDDIR)/compiler_tcc.o $(BUILDDIR)/tool.o $(BUILDDIR)/tool_orchestration.o $(BUILDDIR)/sandbox.o $(BUILDDIR)/cacert.o $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(APP_CONTEXT_OBJ) $(MIGRATE_OBJ) $(LUA_RT_OBJS) $(JS_RT_OBJS) $(MANIFEST_OBJ) $(MODULE_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(TEST_RUNNER_OBJ) $(ALLOC_OBJ) $(ASYNC_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(WAMR_OBJS) $(LUA_OBJS) $(QJS_OBJS) \
 		$(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(WGPU_LIB) $(WGPU_FRAMEWORKS) $(PLEDGE_OBJS) -lm -lpthread
 
 # Tool hardening test — cap/tool.c compiled without runtime flags (self-contained C functions)

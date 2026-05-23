@@ -160,8 +160,17 @@ src/hull/               # Core source
   vfs.c                 #   Unified Virtual Filesystem (O(log n) binary search over HlEntry arrays)
   static.c              #   Static file serving middleware (/static/* convention)
 stdlib/                 # Embedded standard library
-  lua/hull/             #   Lua modules (json, cookie, session, jwt, csrf, auth, build, verify, etc.)
-  js/hull/              #   JS modules (cookie, session, jwt, csrf, auth, verify)
+  lua/hull/             #   User-facing Lua modules apps may require: template,
+                        #   jwt, csrf, cookie, csv, email, form, i18n, json,
+                        #   search, validate, plus middleware/*
+  js/hull/              #   User-facing JS modules (parallel to Lua side)
+  cli/lua/hull/         #   CLI plugins invoked only by the C dispatcher
+                        #   (`hull build`, `hull deploy`, `hull init`, etc.)
+                        #   via hull_tool — never imported by app code.
+                        #   Same `hull.X` require name as user-facing modules
+                        #   (Makefile strips both prefixes); the split exists
+                        #   so the user-facing directory honestly reflects
+                        #   what apps can import.
 vendor/                 # Vendored libraries (do not modify)
 tests/                  # Unit tests (test_*.c) and E2E scripts (e2e_*.sh)
   fixtures/             #   Test fixtures (null_app, etc.)
@@ -293,7 +302,7 @@ Global flags: --version / -v (equivalent to hull version)
 
 Each command is a separate `.c`/`.h` under `src/hull/commands/`. Adding a new command = one line in the table + one source file.
 
-**`hull init [dir] [--runtime lua|js]`** — Initialize a hull project in-place. Like `git init`: creates missing files (`app.lua`, `tests/`, `migrations/`, `.gitignore`) without touching existing ones. Detects existing runtime from `app.lua`/`app.js` presence. Implemented as a Lua tool module (`stdlib/lua/hull/init.lua`).
+**`hull init [dir] [--runtime lua|js]`** — Initialize a hull project in-place. Like `git init`: creates missing files (`app.lua`, `tests/`, `migrations/`, `.gitignore`) without touching existing ones. Detects existing runtime from `app.lua`/`app.js` presence. Implemented as a Lua tool module (`stdlib/cli/lua/hull/init.lua`).
 
 **`hull doctor [--json]`** — Environment check for distribution readiness. Reports hull version/runtime/platform, whether the platform library is embedded (none / single-arch / multi-arch), whether TinyCC is embedded, and which system C compilers (`cc`, `gcc`, `clang`, `cosmocc`) are found in PATH. Exits 0 only when `hull build` is fully ready (platform embedded AND at least one compiler available). Pure C implementation (`src/hull/commands/doctor.c`). `--json` for machine-readable output.
 
@@ -307,7 +316,7 @@ Each command is a separate `.c`/`.h` under `src/hull/commands/`. Adding a new co
 
 **`hull compute new <name> [--lang c]`** — Scaffold a new WASM compute module under `compute/<name>/`. Writes `<name>.c` (with a 30-line `hull_process` skeleton), `hull_compute.h` (the freestanding ABI header with libc shim + bump allocator + UDF wire format), and `test_fixtures.json`. Errors if the directory already exists. Names must match `[A-Za-z0-9_-]+`. C is the only supported language today.
 
-**`hull compute build [name]`** — Compile `compute/<name>/<name>.c` → `compute/<name>.wasm` via `clang --target=wasm32-unknown-unknown -nostdlib -O2 -flto`. With no name, builds every discovered module. Toolchain lookup prefers Homebrew `llvm@18` then falls back to system `clang` with `wasm-ld` in PATH. The same logic runs automatically as part of `hull build` for stale sources — `hull compute build` is the manual rebuild entry point. Implementation: `stdlib/lua/hull/compute.lua` + the shared helper at `stdlib/lua/hull/compute_build.lua`.
+**`hull compute build [name]`** — Compile `compute/<name>/<name>.c` → `compute/<name>.wasm` via `clang --target=wasm32-unknown-unknown -nostdlib -O2 -flto`. With no name, builds every discovered module. Toolchain lookup prefers Homebrew `llvm@18` then falls back to system `clang` with `wasm-ld` in PATH. The same logic runs automatically as part of `hull build` for stale sources — `hull compute build` is the manual rebuild entry point. Implementation: `stdlib/cli/lua/hull/compute.lua` + the shared helper at `stdlib/cli/lua/hull/compute_build.lua`.
 
 **`hull compute test <name>`** — Run JSON fixtures from `compute/<name>/test_fixtures.json` against `compute/<name>.wasm`. Each fixture has `{name, input, expect_status}`; the runner generates a tempdir app with a `GET /call?input=...` route that calls `compute.call("<name>", input)`, then exercises it via `hull test`. Fixtures use the exact same `compute.call` codepath that production handlers use.
 
@@ -352,7 +361,7 @@ SQL migrations provide versioned schema management for SQLite databases.
 |-----------|------|---------|
 | Migration runner | `src/hull/migrate.c`, `include/hull/migrate.h` | Core migration execution engine (uses VFS prefix query) |
 | CLI command | `src/hull/commands/migrate.c` | `hull migrate` subcommand |
-| Scaffolding | `stdlib/lua/hull/migrate.lua` | `hull migrate new` template generation |
+| Scaffolding | `stdlib/cli/lua/hull/migrate.lua` | `hull migrate new` template generation |
 | Auto-run (dev) | `main.c` | Runs pending migrations on startup |
 | Auto-run (test) | `test.c` | Runs migrations against `:memory:` database |
 | Embedding | `build.lua` | Embeds `migrations/*.sql` in built binaries |
@@ -519,7 +528,7 @@ local fetcher = require("hull.http-client")
 | Lua gate | `src/hull/runtime/lua/mod_fs.c` (`hl_lua_require`) | Per-require check against the set. |
 | JS gate (native) | `src/hull/runtime/js/runtime.c` (`hl_js_check_module_declared`) | Called inside each native module's QuickJS init callback. |
 | JS gate (stdlib `.js`) | `src/hull/runtime/js/runtime.c` (`hl_js_module_loader`) | VFS-resolved `.js` modules checked before load. |
-| Build-time persistence | `stdlib/lua/hull/build.lua` | Resolver output written to `package.sig` as `modules_resolved` — covered by the signature. |
+| Build-time persistence | `stdlib/cli/lua/hull/build.lua` | Resolver output written to `package.sig` as `modules_resolved` — covered by the signature. |
 | Tool exposure | `src/hull/runtime/lua/mod_tool.c` (`tool.modules_resolve`) | Lua binding so `hull build` and similar tools can run the resolver. |
 
 **Failure-mode summary:**
@@ -1581,7 +1590,7 @@ JS API is the same shape (`import { tui } from "hull:tui"`) in camelCase: `tui.e
 
 ### First-party `--tui` tools
 
-These ship as Lua tool modules under `stdlib/lua/hull/`; the C dispatchers in `src/hull/commands/` accept a `--tui` (or `--interactive`) flag and delegate via `hull_tool`. Each refuses cleanly when stdin/stdout isn't a real terminal.
+These ship as Lua tool modules under `stdlib/cli/lua/hull/`; the C dispatchers in `src/hull/commands/` accept a `--tui` (or `--interactive`) flag and delegate via `hull_tool`. Each refuses cleanly when stdin/stdout isn't a real terminal.
 
 | Command | What | Module |
 |---------|------|--------|
@@ -1609,7 +1618,7 @@ The pattern, verified by all five commands above:
 
 1. Expose any in-process data the TUI needs by adding a `tool.X()` binding in `src/hull/runtime/lua/mod_tool.c` (either returning a Lua table directly or calling `open_memstream` + a JSON writer for heavier payloads).
 2. Add a `--tui` flag to the C dispatcher in `src/hull/commands/*.c`. Check `isatty(STDIN_FILENO) && isatty(STDOUT_FILENO)`; refuse cleanly otherwise.
-3. Write `stdlib/lua/hull/X_tui.lua` — `require "hull.tui"` + a `tui.run` loop calling your new `tool.X()`.
+3. Write `stdlib/cli/lua/hull/X_tui.lua` — `require "hull.tui"` + a `tui.run` loop calling your new `tool.X()`.
 4. Add an e2e case in `tests/e2e_tui.sh` using the PTY driver (e.g. `"%q"` to send 'q' immediately after the first frame).
 
 ## Testing
@@ -1720,7 +1729,7 @@ make e2e                            # run all E2E tests (examples + build + sand
 1. Create `src/hull/commands/<name>.c` and `include/hull/commands/<name>.h`
 2. Implement `int hl_cmd_<name>(int argc, char **argv, const char *hull_path)`
 3. Add one line to the command table in `src/hull/commands/dispatch.c`
-4. Add Lua implementation in `stdlib/lua/hull/<name>.lua` if tool-mode command
+4. Add Lua implementation in `stdlib/cli/lua/hull/<name>.lua` if tool-mode command (CLI plugin); user-facing modules live in `stdlib/lua/hull/`
 
 ## Debugging
 

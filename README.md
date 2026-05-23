@@ -846,7 +846,7 @@ Helpers: `tui.run` (canonical immediate-mode loop), `tui.list` / `tui.confirm` /
 
 ### First-party `--tui` tools
 
-Five subcommands ship interactive TUI variants — each is a Lua tool module (`stdlib/lua/hull/X_tui.lua`) dispatched by the matching C command. All refuse cleanly without a real terminal.
+Five subcommands ship interactive TUI variants — each is a Lua tool module (`stdlib/cli/lua/hull/X_tui.lua`) dispatched by the matching C command. All refuse cleanly without a real terminal.
 
 | Command | TUI |
 |---------|-----|

@@ -183,6 +183,7 @@ echo "=== Step 2: Create test app ==="
 mkdir -p "$WORKDIR/myapp"
 cat > "$WORKDIR/myapp/app.lua" << 'APPEOF'
 app.manifest({
+    modules = {"hull/http-server@1"},
     fs = { read = {"data/"}, write = {"uploads/"} },
     env = {"PORT", "DATABASE_URL"},
     hosts = {"api.stripe.com", "api.sendgrid.com"},
@@ -341,6 +342,7 @@ cat > "$WORKDIR/multiapp/app.lua" << 'APPEOF'
 local greet = require("./lib/greet")
 
 app.manifest({
+    modules = {"hull/http-server@1"},
     env = {"APP_NAME"},
 })
 

@@ -352,7 +352,7 @@ build-capability cross-check.
 - `src/hull/commands/run.c` — load + invoke main, exit with rc
 - `hull new --cli` — scaffold a minimal CLI app skeleton
 - `hull init` — detect CLI vs server from existing `app.{lua,js}`
-- Templates in `stdlib/lua/hull/new.lua` and `init.lua`
+- Templates in `stdlib/cli/lua/hull/new.lua` and `init.lua`
 - E2E test against a few sample CLI apps (line counter, CSV reformatter)
 - Outcome: full dev workflow for CLI apps on a standard hull build.
 

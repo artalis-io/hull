@@ -731,7 +731,7 @@ The reason TUI exists. Each is a real Lua tool module under
 
 ```
 src/hull/commands/doctor.c          ─ accepts --tui, delegates to:
-stdlib/lua/hull/doctor_tui.lua      ─ uses hull.tui, renders interactively
+stdlib/cli/lua/hull/doctor_tui.lua      ─ uses hull.tui, renders interactively
 ```
 
 The C side stays small (arg parsing, capability checks, dispatch); the
@@ -860,7 +860,7 @@ add ~1 day).
 - `stdlib/lua/hull/tui.lua`, `stdlib/js/hull/tui.js`: helpers built on
   `tui.run` — `tui.frame`, `tui.list`, `tui.input`, `tui.progress`,
   `tui.spinner`, `tui.confirm`.
-- `stdlib/lua/hull/doctor_tui.lua` — the `--tui` rendering for
+- `stdlib/cli/lua/hull/doctor_tui.lua` — the `--tui` rendering for
   `hull doctor`. `src/hull/commands/doctor.c` gets a `--tui` arg that
   dispatches into this Lua module. First end-to-end exercise of the
   whole stack (C dispatcher → Lua tool module → `tui.run` → cap layer).
@@ -878,7 +878,7 @@ parent process alongside the existing file watcher.
 
 - `--tui` flag on `hull dev`. When set (and stdout is a tty), the
   parent spawns a Lua tool runtime that runs
-  `stdlib/lua/hull/dev_tui.lua`.
+  `stdlib/cli/lua/hull/dev_tui.lua`.
 - Before forking the child, parse the served app's manifest. If it
   declares `tui = true`, refuse with `served app uses tui mode; run
   it directly with hull run`.

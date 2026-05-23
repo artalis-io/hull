@@ -1,0 +1,425 @@
+/*
+ * tool_orchestration.c — orchestration bindings for the `tool` global
+ *
+ * Split out of runtime/lua/mod_tool.c per architectural audit A-1.
+ * runtime/lua/ stays a thin binding layer (spawn / mkdir / copy /
+ * read_file / etc.); orchestration that crosses into commands/,
+ * agent_lib, dev_state, migrate, module_registry/resolver lives here
+ * at the same layer as its consumers.
+ *
+ * Wire-up: `runtime/lua/runtime.c` calls hl_lua_tool_register() first
+ * (installs the `tool` global with the base surface), then
+ * hl_lua_tool_register_orchestration() which splices the entries
+ * below onto the existing table.
+ *
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ */
+
+#include "hull/tool_orchestration.h"
+
+#ifdef HL_ENABLE_LUA
+
+#include "hull/agent_lib.h"
+#include "hull/commands/doctor.h"
+#include "hull/dev_state.h"
+#include "hull/manifest.h"
+#include "hull/module_registry.h"
+#include "hull/module_resolver.h"
+
+#include "sh_json.h"
+
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/wait.h>
+
+#include "lua.h"
+#include "lauxlib.h"
+
+/* ── tool.modules_resolve(manifest_table) → {ok, modules|error} ───── */
+
+/* Take a manifest-shaped Lua table (modules + fs/env/hosts arrays),
+ * walk it through the resolver, and return either {ok=true, modules=...}
+ * or {ok=false, error=...}. Used by `hull build` to validate the
+ * manifest before signing. The fs/env/hosts arrays here are converted
+ * to counts only — the resolver doesn't need the actual values. */
+static int l_tool_modules_resolve(lua_State *L)
+{
+    luaL_checktype(L, 1, LUA_TTABLE);
+
+    HlManifest m = {0};
+
+    lua_getfield(L, 1, "fs");
+    if (lua_istable(L, -1)) {
+        lua_getfield(L, -1, "read");
+        if (lua_istable(L, -1)) {
+            lua_Integer n = luaL_len(L, -1);
+            m.fs_read_count = n > HL_MANIFEST_MAX_PATHS
+                              ? HL_MANIFEST_MAX_PATHS : (int)n;
+        }
+        lua_pop(L, 1);
+        lua_getfield(L, -1, "write");
+        if (lua_istable(L, -1)) {
+            lua_Integer n = luaL_len(L, -1);
+            m.fs_write_count = n > HL_MANIFEST_MAX_PATHS
+                               ? HL_MANIFEST_MAX_PATHS : (int)n;
+        }
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 1);
+
+    lua_getfield(L, 1, "env");
+    if (lua_istable(L, -1)) {
+        lua_Integer n = luaL_len(L, -1);
+        m.env_count = n > HL_MANIFEST_MAX_ENVS ? HL_MANIFEST_MAX_ENVS : (int)n;
+    }
+    lua_pop(L, 1);
+
+    lua_getfield(L, 1, "hosts");
+    if (lua_istable(L, -1)) {
+        lua_Integer n = luaL_len(L, -1);
+        m.hosts_count = n > HL_MANIFEST_MAX_HOSTS ? HL_MANIFEST_MAX_HOSTS : (int)n;
+    }
+    lua_pop(L, 1);
+
+    /* modules — copy names so the resolver sees stable pointers. */
+    char *owned_names[HL_MANIFEST_MAX_MODULES] = {0};
+    int owned_count = 0;
+    lua_getfield(L, 1, "modules");
+    if (lua_istable(L, -1)) {
+        m.modules_declared = 1;
+        lua_pushnil(L);
+        while (lua_next(L, -2) != 0 && m.modules_count < HL_MANIFEST_MAX_MODULES) {
+            if (lua_type(L, -2) == LUA_TSTRING &&
+                lua_type(L, -1) == LUA_TSTRING) {
+                const char *name = lua_tostring(L, -2);
+                const char *vstr = lua_tostring(L, -1);
+                char *end = NULL;
+                long v = strtol(vstr, &end, 10);
+                if (end != vstr && v >= 1 && v <= 255) {
+                    char *copy = strdup(name);
+                    if (copy) {
+                        owned_names[owned_count] = copy;
+                        m.modules[m.modules_count].name = copy;
+                        m.modules[m.modules_count].api_major = (uint8_t)v;
+                        m.modules_count++;
+                        owned_count++;
+                    }
+                }
+            }
+            lua_pop(L, 1);
+        }
+    }
+    lua_pop(L, 1);
+
+    HlResolvedModuleSet set;
+    char err[HL_MODULE_RESOLVER_ERR_MAX] = {0};
+    int rc = hl_module_resolver_resolve(&m, &set, err, sizeof(err));
+
+    for (int i = 0; i < owned_count; i++) free(owned_names[i]);
+
+    lua_newtable(L);
+    if (rc != 0) {
+        lua_pushboolean(L, 0);
+        lua_setfield(L, -2, "ok");
+        lua_pushstring(L, err);
+        lua_setfield(L, -2, "error");
+        return 1;
+    }
+
+    lua_pushboolean(L, 1);
+    lua_setfield(L, -2, "ok");
+
+    lua_newtable(L);  /* modules array */
+    size_t total = 0;
+    const HlModuleSpec *all = hl_module_registry_all(&total);
+    int idx = 1;
+    for (size_t i = 0; i < total; i++) {
+        if (!hl_module_set_contains_index(&set, (int)i)) continue;
+        lua_newtable(L);
+        lua_pushstring(L, all[i].name);
+        lua_setfield(L, -2, "name");
+        lua_pushinteger(L, all[i].api_major);
+        lua_setfield(L, -2, "api_major");
+        lua_pushboolean(L, all[i].intrinsic ? 1 : 0);
+        lua_setfield(L, -2, "intrinsic");
+        lua_rawseti(L, -2, idx++);
+    }
+    lua_setfield(L, -2, "modules");
+
+    return 1;
+}
+
+/* ── tool.doctor_json() — render the `hull doctor --json` payload ── */
+
+/* Wrapping `hl_doctor_collect_json` via open_memstream avoids
+ * reimplementing the JSON payload in Lua. Consumed by
+ * stdlib/lua/hull/doctor_tui.lua. */
+static int l_tool_doctor_json(lua_State *L)
+{
+    char *buf = NULL;
+    size_t sz = 0;
+    FILE *f = open_memstream(&buf, &sz);
+    if (!f) return luaL_error(L, "doctor_json: open_memstream failed");
+    hl_doctor_collect_json(f);
+    fflush(f);
+    fclose(f);
+    if (!buf) return luaL_error(L, "doctor_json: empty");
+    lua_pushlstring(L, buf, sz);
+    free(buf);
+    return 1;
+}
+
+/* ── tool.agent_errors(app_dir) / tool.agent_context(task, level) ── */
+
+static int l_tool_agent_errors(lua_State *L)
+{
+    const char *app_dir = luaL_optstring(L, 1, ".");
+    ShJsonBuf out;
+    sh_json_buf_init(&out);
+    int rc = hl_agent_errors(app_dir, &out);
+    if (out.buf) lua_pushlstring(L, out.buf, out.len);
+    else         lua_pushnil(L);
+    sh_json_buf_free(&out);
+    lua_pushinteger(L, rc);
+    return 2;
+}
+
+static int l_tool_agent_context(lua_State *L)
+{
+    const char *task  = luaL_checkstring(L, 1);
+    const char *level = luaL_optstring(L, 2, "compact");
+    ShJsonBuf out;
+    sh_json_buf_init(&out);
+    int rc = hl_agent_context(task, level, &out);
+    if (out.buf) lua_pushlstring(L, out.buf, out.len);
+    else         lua_pushnil(L);
+    sh_json_buf_free(&out);
+    lua_pushinteger(L, rc);
+    return 2;
+}
+
+#ifdef HL_ENABLE_DB
+
+#include "hull/cap/db.h"
+#include "hull/cap/db_backend.h"
+#include "hull/migrate.h"
+#include "hull/vfs.h"
+
+extern const HlEntry hl_app_entries[];
+extern const HlDbBackend hl_db_backend_sqlite;
+
+/* ── tool.migrate_status(app_dir, db_path) — applied/pending list ── */
+
+static int l_tool_migrate_status(lua_State *L)
+{
+    const char *app_dir = luaL_optstring(L, 1, ".");
+    const char *db_path = luaL_optstring(L, 2, "data.db");
+
+    HlDbHandle handle = { .backend = &hl_db_backend_sqlite, .ctx = NULL };
+    if (hl_db_backend_sqlite.open(&handle.ctx, db_path, NULL) != 0) {
+        lua_pushnil(L);
+        lua_pushfstring(L, "cannot open database: %s", db_path);
+        return 2;
+    }
+
+    HlVfs vfs;
+    hl_vfs_init(&vfs, hl_app_entries, app_dir);
+
+    HlMigrationStatus *entries = NULL;
+    int count = 0;
+    int rc = hl_migrate_status(&handle, &vfs, &entries, &count);
+    hl_db_backend_sqlite.close(handle.ctx);
+
+    if (rc != 0) {
+        lua_pushnil(L);
+        lua_pushstring(L, "migrate_status query failed");
+        return 2;
+    }
+
+    lua_newtable(L);
+    for (int i = 0; i < count; i++) {
+        lua_newtable(L);
+        lua_pushstring(L, entries[i].name);    lua_setfield(L, -2, "name");
+        lua_pushboolean(L, entries[i].applied); lua_setfield(L, -2, "applied");
+        if (entries[i].applied_at) {
+            lua_pushstring(L, entries[i].applied_at);
+            lua_setfield(L, -2, "applied_at");
+        }
+        lua_rawseti(L, -2, i + 1);
+    }
+    hl_migrate_status_free(entries, count);
+    lua_pushinteger(L, count);
+    return 2;
+}
+#endif
+
+/* ── tool.modules_available — every first-party registry entry ──── */
+
+static int l_tool_modules_available(lua_State *L)
+{
+    size_t total = 0;
+    const HlModuleSpec *all = hl_module_registry_all(&total);
+
+    lua_newtable(L);
+    lua_pushinteger(L, (lua_Integer)total);
+    lua_setfield(L, -2, "count");
+
+    lua_newtable(L);  /* modules array */
+    for (size_t i = 0; i < total; i++) {
+        const HlModuleSpec *s = &all[i];
+        lua_newtable(L);
+
+        lua_pushstring(L, s->name);                 lua_setfield(L, -2, "name");
+        lua_pushinteger(L, s->api_major);            lua_setfield(L, -2, "api_major");
+        lua_pushboolean(L, s->intrinsic);            lua_setfield(L, -2, "intrinsic");
+        lua_pushboolean(L, s->pure);                 lua_setfield(L, -2, "pure");
+
+        lua_newtable(L);
+        int di = 1;
+        for (int j = 0; j < HL_MODULE_MAX_DEPS && s->deps[j]; j++) {
+            lua_pushstring(L, s->deps[j]);
+            lua_rawseti(L, -2, di++);
+        }
+        lua_setfield(L, -2, "deps");
+
+        lua_newtable(L);
+        int ci = 1;
+        uint32_t need = s->required_caps;
+        struct { uint32_t bit; const char *name; } map[] = {
+            { HL_MOD_CAP_FS,          "fs"          },
+            { HL_MOD_CAP_HOSTS,       "hosts"       },
+            { HL_MOD_CAP_ENV,         "env"         },
+            { HL_MOD_CAP_DB,          "db"          },
+            { HL_MOD_CAP_WASM,        "wasm"        },
+            { HL_MOD_CAP_GPU,         "gpu"         },
+            { HL_MOD_CAP_HTTP_CLIENT, "http_client" },
+            { HL_MOD_CAP_HTTP_SERVER, "http_server" },
+            { HL_MOD_CAP_TUI,         "tui"         },
+        };
+        for (size_t k = 0; k < sizeof map / sizeof map[0]; k++) {
+            if (need & map[k].bit) {
+                lua_pushstring(L, map[k].name);
+                lua_rawseti(L, -2, ci++);
+            }
+        }
+        lua_setfield(L, -2, "caps");
+
+        lua_rawseti(L, -2, (int)(i + 1));
+    }
+    lua_setfield(L, -2, "modules");
+    return 1;
+}
+
+/* ── tool.dev_* — hull dev --tui bindings ─────────────────────────── */
+
+/* All dev_* accessors consult hl_dev_state(), which is a no-op
+ * (returns nil / safe defaults) when hull dev --tui isn't running.
+ * That lets the stdlib's *_tui modules load cleanly in tests too. */
+
+static int l_tool_dev_status(lua_State *L)
+{
+    HlDevState *s = hl_dev_state();
+    if (!s) { lua_pushnil(L); return 1; }
+    lua_newtable(L);
+    lua_pushinteger(L, (lua_Integer)s->child_pid);  lua_setfield(L, -2, "pid");
+    lua_pushinteger(L, s->reload_count);            lua_setfield(L, -2, "reload_count");
+    lua_pushinteger(L, (lua_Integer)s->last_reload_ms); lua_setfield(L, -2, "last_reload_ms");
+    lua_pushinteger(L, s->log_count);               lua_setfield(L, -2, "log_count");
+    lua_pushstring(L,  s->app_dir);                 lua_setfield(L, -2, "app_dir");
+
+    int alive = 0;
+    if (s->child_pid > 0) {
+        int status;
+        pid_t r = waitpid(s->child_pid, &status, WNOHANG);
+        if (r == 0) alive = 1;
+        else if (r == s->child_pid) {
+            s->child_pid = 0;
+        }
+    }
+    lua_pushboolean(L, alive); lua_setfield(L, -2, "alive");
+    return 1;
+}
+
+static int l_tool_dev_drain(lua_State *L)
+{
+    HlDevState *s = hl_dev_state();
+    if (!s) { lua_pushinteger(L, 0); return 1; }
+    int before = s->log_count;
+    hl_dev_state_drain(s);
+    lua_pushinteger(L, s->log_count - before);
+    return 1;
+}
+
+static int l_tool_dev_recent_lines(lua_State *L)
+{
+    HlDevState *s = hl_dev_state();
+    int n = (int)luaL_optinteger(L, 1, 50);
+    if (n < 1) n = 1;
+    if (n > HL_DEV_LOG_LINES) n = HL_DEV_LOG_LINES;
+
+    lua_newtable(L);
+    if (!s || s->log_count == 0) return 1;
+
+    int available = s->log_count < HL_DEV_LOG_LINES ? s->log_count : HL_DEV_LOG_LINES;
+    if (n > available) n = available;
+
+    for (int i = 0; i < n; i++) {
+        int idx = (s->log_head - 1 - i + HL_DEV_LOG_LINES) % HL_DEV_LOG_LINES;
+        lua_pushstring(L, s->log_lines[idx]);
+        lua_rawseti(L, -2, i + 1);
+    }
+    return 1;
+}
+
+static int l_tool_dev_check_file_change(lua_State *L)
+{
+    HlDevState *s = hl_dev_state();
+    lua_pushboolean(L, s ? hl_dev_state_check_file_change(s) : 0);
+    return 1;
+}
+
+static int l_tool_dev_reload(lua_State *L)
+{
+    HlDevState *s = hl_dev_state();
+    if (!s) { lua_pushboolean(L, 0); return 1; }
+    lua_pushboolean(L, hl_dev_state_reload(s) == 0);
+    return 1;
+}
+
+/* ── Registration ──────────────────────────────────────────────────── */
+
+void hl_lua_tool_register_orchestration(lua_State *L)
+{
+    /* Splice onto the existing `tool` global. The base table was
+     * installed by hl_lua_tool_register(); we look it up and add
+     * each function as a field. */
+    lua_getglobal(L, "tool");
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        return;
+    }
+
+    static const luaL_Reg orchestration_funcs[] = {
+        { "modules_resolve",        l_tool_modules_resolve },
+        { "doctor_json",            l_tool_doctor_json },
+        { "agent_errors",           l_tool_agent_errors },
+        { "agent_context",          l_tool_agent_context },
+        { "modules_available",      l_tool_modules_available },
+        { "dev_status",             l_tool_dev_status },
+        { "dev_drain",              l_tool_dev_drain },
+        { "dev_recent_lines",       l_tool_dev_recent_lines },
+        { "dev_check_file_change",  l_tool_dev_check_file_change },
+        { "dev_reload",             l_tool_dev_reload },
+#ifdef HL_ENABLE_DB
+        { "migrate_status",         l_tool_migrate_status },
+#endif
+        { NULL, NULL }
+    };
+    luaL_setfuncs(L, orchestration_funcs, 0);
+
+    lua_pop(L, 1);  /* drop tool */
+}
+
+#endif /* HL_ENABLE_LUA */
