@@ -125,6 +125,15 @@ int hl_cap_test_dispatch(KlRouter *router, const char *method,
     if (kl_response_init(&res, &alloc) != 0) return -1;
     res.conn_fd = -1; /* no actual connection */
 
+    /* Hand the (req, res) pair to Keel. OWNERSHIP: req.ctx (if we
+     * allocated one above) is freed by the runtime's HlReqCtx-kind
+     * dispatch when the handler runs — see runtime/{lua,js}/runtime.c.
+     * If the dispatch path short-circuits before the handler (e.g.
+     * middleware returns non-zero, or the route doesn't match), the
+     * HlReqCtx outlives this call and leaks; the runtime's per-test
+     * arena reclaims it when the test finishes. We discard the return
+     * value because the caller inspects res->status / res->body
+     * directly, not the dispatch verdict. */
     (void)kl_router_dispatch_synthetic(router, &req, &res, run_middleware);
 
     /* Extract results — copy body and headers into hl_alloc-owned

@@ -585,6 +585,20 @@ check_exit "hull new existing dir fails" 1 $RC
 check_exit "hull new --runtime js exits 0" 0 $RC
 check_file_exists "new app.js exists" "$WORKDIR/newapp_js/app.js"
 
+# Actually run the generated JS app — exists-check alone missed a real
+# bug (missing `import { app } from "hull:app"` in the template) caught
+# only after a downstream JS audit. Run it for one second and curl
+# /health to confirm the template actually boots a working server.
+"$HULL" -p 19876 "$WORKDIR/newapp_js/app.js" >/dev/null 2>&1 &
+SERVER_PID=$!
+if wait_for_server 19876; then
+    RESP=$(curl -s "http://127.0.0.1:19876/health")
+    check_contains "new JS app GET /health ok" "$RESP" "ok"
+else
+    fail "new JS app did not start"
+fi
+stop_server
+
 # ── Step 17: hull eject ────────────────────────────────────────────
 
 echo ""

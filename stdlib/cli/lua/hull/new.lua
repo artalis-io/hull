@@ -56,6 +56,8 @@ templates.js_app = [[// Declare every first-party module the app imports.
 // The runtime gate refuses undeclared imports — `hull modules available`
 // lists the full registry. Add capability sections (fs, hosts, env)
 // alongside `modules` when a module needs them.
+import { app }  from "hull:app";
+import { log }  from "hull:log";
 import { time } from "hull:time";
 
 app.manifest({

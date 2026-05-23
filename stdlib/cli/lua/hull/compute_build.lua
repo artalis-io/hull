@@ -2,8 +2,8 @@
 -- hull.compute_build — Shared source→WASM compilation helpers
 --
 -- Internal helper module used by:
---   stdlib/lua/hull/compute.lua  (hull compute build [name])
---   stdlib/lua/hull/build.lua    (auto-rebuild during hull build)
+--   stdlib/cli/lua/hull/compute.lua  (hull compute build [name])
+--   stdlib/cli/lua/hull/build.lua    (auto-rebuild during hull build)
 --
 -- Centralizing this avoids drift between the dev-tool path and the
 -- release-build path: same clang lookup, same flags, same module
