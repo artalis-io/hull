@@ -533,6 +533,14 @@ void hl_js_test_run(JSContext *ctx, int *total, int *passed, int *failed,
         const char *desc = JS_ToCString(ctx, desc_val);
         int32_t timeout_ms = HL_JS_TEST_DEFAULT_TIMEOUT_MS;
         JS_ToInt32(ctx, &timeout_ms, timeout_val);
+        /* js_test_call validates timeout_ms > 0 at registration time, but
+         * test_state.cases is a JS array — user test code COULD mutate
+         * the stored timeout_ms before hl_js_test_run iterates. Re-clamp
+         * here so the pump loop's `timeout_ms > 0 && monotonic_ms() >=
+         * deadline` guard fires reliably; otherwise a zero/negative value
+         * combined with a wired async_ctx and a never-settling promise
+         * would spin forever. */
+        if (timeout_ms <= 0) timeout_ms = HL_JS_TEST_DEFAULT_TIMEOUT_MS;
 
         int idx = *total;
         (*total)++;
