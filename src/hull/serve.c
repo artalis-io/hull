@@ -73,10 +73,6 @@
 #include <keel/keel.h>
 #include <keel/thread_pool.h>
 
-#ifdef HL_ENABLE_DB
-#include <sqlite3.h>
-#endif
-
 #include "log.h"
 
 #include <sh_arena.h>

@@ -18,8 +18,6 @@
 #include "hull/cap/db_backend.h"
 #include "hull/tool.h"
 
-#include <sqlite3.h>
-
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>

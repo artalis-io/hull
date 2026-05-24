@@ -27,6 +27,7 @@ static const char SCHEMA_ROUTES[] =
     "{\"type\":\"object\",\"properties\":{\"app_dir\":{\"type\":\"string\","
     "\"description\":\"Application directory (default: .)\"}}}";
 
+#ifdef HL_ENABLE_DB
 static const char SCHEMA_DB_SCHEMA[] =
     "{\"type\":\"object\",\"properties\":{\"app_dir\":{\"type\":\"string\","
     "\"description\":\"Application directory (default: .)\"},"
@@ -38,6 +39,7 @@ static const char SCHEMA_QUERY[] =
     "\"app_dir\":{\"type\":\"string\",\"description\":\"Application directory (default: .)\"},"
     "\"db_path\":{\"type\":\"string\",\"description\":\"Database file path\"}},"
     "\"required\":[\"sql\"]}";
+#endif
 
 static const char SCHEMA_REQUEST[] =
     "{\"type\":\"object\",\"properties\":{\"method\":{\"type\":\"string\","
@@ -68,10 +70,12 @@ static const char SCHEMA_CONTEXT[] =
     "\"description\":\"Detail level (default: compact)\"}},"
     "\"required\":[\"task\"]}";
 
+#ifdef HL_ENABLE_DB
 static const char SCHEMA_MIGRATE[] =
     "{\"type\":\"object\",\"properties\":{\"app_dir\":{\"type\":\"string\","
     "\"description\":\"Application directory (default: .)\"},"
     "\"db_path\":{\"type\":\"string\",\"description\":\"Database file path\"}}}";
+#endif
 
 static const char SCHEMA_RELOAD[] =
     "{\"type\":\"object\",\"properties\":{}}";
@@ -120,6 +124,7 @@ static const char SCHEMA_COMPUTE_CALL[] =
     "\"app_dir\":{\"type\":\"string\",\"description\":\"Application directory (default: .)\"}},"
     "\"required\":[\"module\",\"input_file\"]}";
 
+#ifdef HL_ENABLE_DB
 static const char SCHEMA_SCHEMA_DIFF[] =
     "{\"type\":\"object\",\"properties\":{"
     "\"app_dir\":{\"type\":\"string\",\"description\":\"Application directory (default: .)\"},"
@@ -131,6 +136,7 @@ static const char SCHEMA_SQL_NAMED[] =
     "\"params\":{\"type\":\"string\",\"description\":\"JSON string of parameter bindings (e.g. {\\\"id\\\":42})\"},"
     "\"app_dir\":{\"type\":\"string\",\"description\":\"Application directory (default: .)\"}},"
     "\"required\":[\"name\"]}";
+#endif
 
 typedef struct {
     const char *name;
