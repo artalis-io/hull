@@ -2,10 +2,7 @@
 --
 -- Demonstrates hull.middleware.health and hull.middleware.etag
 
-local crypto = require("hull.crypto")
 local db     = require("hull.db")
-local http_server = require("hull.http-server")
-local time   = require("hull.time")
 local health = require("hull.middleware.health")
 local etag   = require("hull.middleware.etag")
 

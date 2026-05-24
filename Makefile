@@ -1791,6 +1791,12 @@ TEST_CAP_OBJS := $(CAP_OBJS)
 # Shared link deps for all tests
 TEST_COMMON_DEPS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(WAMR_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(KEEL_LIB)
 TEST_COMMON_LIBS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(WAMR_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(WGPU_LIB) $(WGPU_FRAMEWORKS) -lm -lpthread
+# forkpty(3) is in libutil on glibc/musl Linux (used by
+# tests/hull/cap/test_tui_lifecycle.c). macOS / BSD ship it inside
+# libSystem so no extra flag is needed. Cosmo doesn't have it.
+ifeq ($(UNAME_S),Linux)
+  TEST_COMMON_LIBS += -lutil
+endif
 
 # Capability tests (tests/hull/cap/)
 $(BUILDDIR)/test_%: $(TESTDIR)/hull/cap/test_%.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
@@ -1943,6 +1949,21 @@ ifeq ($(HL_ENABLE_GPU),1)
 endif
 ifeq ($(HL_ENABLE_DB),1)
   CFLAGS += -DHL_ENABLE_DB
+endif
+# Re-add HTTP server/client defines. The Makefile-level
+# NET_BACKEND_SRCS gate above keys off $(HL_ENABLE_HTTP_SERVER),
+# while async/poll.c's #ifndef HL_ENABLE_HTTP_SERVER stubs key off
+# the C macro. If the two disagree the linker sees duplicate
+# definitions of hl_net_op_suspend / hl_net_op_complete (net/keel.o
+# vs. async/poll.o). Keep them aligned for sanitizer builds.
+ifeq ($(HL_ENABLE_HTTP_SERVER),1)
+  CFLAGS += -DHL_ENABLE_HTTP_SERVER
+endif
+ifeq ($(HL_ENABLE_HTTP_CLIENT),1)
+  CFLAGS += -DHL_ENABLE_HTTP_CLIENT
+endif
+ifneq ($(HL_ENABLE_HTTP_ANY),0)
+  CFLAGS += -DHL_ENABLE_HTTP
 endif
 # Re-add version string (the := above clobbers earlier += additions)
 CFLAGS += -DHL_VERSION=\"$(HL_VERSION)\"

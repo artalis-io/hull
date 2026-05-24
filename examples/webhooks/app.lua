@@ -12,7 +12,6 @@
 local crypto      = require("hull.crypto")
 local db          = require("hull.db")
 local env         = require("hull.env")
-local http_client        = require("hull.http-client")
 local time        = require("hull.time")
 local validate    = require("hull.validate")
 local idempotency = require("hull.middleware.idempotency")

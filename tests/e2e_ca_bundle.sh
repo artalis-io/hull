@@ -103,7 +103,15 @@ fi
 WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/hull_e2e_ca.XXXXXX")
 mkdir -p "$WORKDIR/myapp"
 cat > "$WORKDIR/myapp/app.lua" << 'EOF'
-app.manifest({ hosts = { "example.com" } })
+-- app.get is installed by "hull/http-server@1"; http.* by
+-- "hull/http-client@1". Declare both in the manifest along with the
+-- per-call host allowlist.
+app.manifest({
+    modules = { "hull/http-server@1", "hull/http-client@1" },
+    hosts   = { "example.com" },
+})
+
+local http = require("hull.http-client")
 
 app.get("/probe", function(req, res)
     local resp = http.async.request("GET", "https://example.com/")

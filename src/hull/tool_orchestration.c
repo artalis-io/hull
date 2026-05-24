@@ -153,20 +153,32 @@ static int l_tool_modules_resolve(lua_State *L)
 
 /* ── tool.doctor_json() — render the `hull doctor --json` payload ── */
 
-/* Wrapping `hl_doctor_collect_json` via open_memstream avoids
+/* Wrapping `hl_doctor_collect_json` via tmpfile() avoids
  * reimplementing the JSON payload in Lua. Consumed by
- * stdlib/lua/hull/doctor_tui.lua. */
+ * stdlib/lua/hull/doctor_tui.lua.
+ *
+ * tmpfile() (POSIX) is used in preference to open_memstream (glibc/BSD)
+ * because Cosmopolitan's libc does not provide open_memstream. The
+ * doctor payload is small (< 4 KiB), so the disk round-trip is
+ * irrelevant. */
 static int l_tool_doctor_json(lua_State *L)
 {
-    char *buf = NULL;
-    size_t sz = 0;
-    FILE *f = open_memstream(&buf, &sz);
-    if (!f) return luaL_error(L, "doctor_json: open_memstream failed");
+    FILE *f = tmpfile();
+    if (!f) return luaL_error(L, "doctor_json: tmpfile failed");
     hl_doctor_collect_json(f);
     fflush(f);
+
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return luaL_error(L, "doctor_json: fseek end failed"); }
+    long end = ftell(f);
+    if (end < 0)                    { fclose(f); return luaL_error(L, "doctor_json: ftell failed"); }
+    rewind(f);
+
+    char *buf = (char *)malloc((size_t)end);
+    if (!buf)                       { fclose(f); return luaL_error(L, "doctor_json: malloc failed"); }
+    size_t n = fread(buf, 1, (size_t)end, f);
     fclose(f);
-    if (!buf) return luaL_error(L, "doctor_json: empty");
-    lua_pushlstring(L, buf, sz);
+
+    lua_pushlstring(L, buf, n);
     free(buf);
     return 1;
 }

@@ -15,7 +15,6 @@
 
 -- Module-load constants (used internally; not part of the API).
 local TUI_RUN_DEFAULT_TICK_MS = -1   -- block until event by default
-local TUI_RUN_MAX_DEFER_FRAMES = 60  -- safety cap on deferred redraw
 
 -- Bridge to the native bindings. The stdlib *is* the public `hull.tui`
 -- module — augment the C primitives with run-loop and widget helpers.

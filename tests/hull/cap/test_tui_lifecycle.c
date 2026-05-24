@@ -29,9 +29,16 @@
 #include <termios.h>
 #include <unistd.h>
 
-#if defined(__APPLE__) || defined(__linux__) || defined(__FreeBSD__) || defined(__OpenBSD__)
-#define HL_HAVE_FORKPTY 1
-#include <util.h>
+/* forkpty(3) lives in different headers on different Unixes:
+ *   - glibc/musl Linux: <pty.h>  (link -lutil)
+ *   - macOS / FreeBSD / OpenBSD / NetBSD: <util.h>
+ * Pick the right one or leave HL_HAVE_FORKPTY undefined. */
+#if defined(__linux__)
+#  define HL_HAVE_FORKPTY 1
+#  include <pty.h>
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+#  define HL_HAVE_FORKPTY 1
+#  include <util.h>
 #endif
 
 #ifndef HL_HAVE_FORKPTY

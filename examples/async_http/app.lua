@@ -88,6 +88,7 @@ app.get("/worker-dispatch", function(_req, res)
         -- worker_db.c installs `db` as a worker-VM global (no require()
         -- in workers). Read it through _G so the closure does NOT
         -- capture the file-scope `db` upvalue from the parent VM.
+        -- luacheck: ignore 431
         local db = _G.db
         db.exec("CREATE TABLE IF NOT EXISTS async_test (id INTEGER PRIMARY KEY, val TEXT)")
         db.exec("INSERT INTO async_test (val) VALUES (?)", {ctx.value})
