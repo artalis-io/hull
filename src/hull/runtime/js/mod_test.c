@@ -483,22 +483,58 @@ static void record_pass(FILE *out, HlTestCaseResult *results, int max_results,
     }
 }
 
+/* JS_ToCString and JS_GetPropertyStr can leave a pending exception on
+ * the context on failure (e.g. an err object whose .message getter
+ * throws). The next QuickJS API call would then misbehave. Helper
+ * defensively drains and frees any pending exception so callers stay
+ * on the happy path. JS_GetException returns JS_NULL when no exception
+ * is set, so the unconditional drain is safe — JS_FreeValue on a
+ * NULL/undefined tagged value is a no-op in QuickJS. */
+static void clear_pending_exception(JSContext *ctx)
+{
+    JSValue exc = JS_GetException(ctx);
+    JS_FreeValue(ctx, exc);
+}
+
 /* Extract a human-readable error message from a JS exception value
  * (or any value coerced to a string). Caller owns the JSValue copy
  * but not the C string — buffer must outlive use. */
 static void extract_error_string(JSContext *ctx, JSValueConst err,
                                  char *buf, size_t buf_size)
 {
-    /* Prefer .message; fall back to String(err). */
+    /* Prefer .message; fall back to String(err). Either lookup can
+     * raise (e.g. a getter that throws) — clear any pending exception
+     * on the failure path so we don't poison subsequent calls. */
     JSValue msg_val = JS_GetPropertyStr(ctx, err, "message");
     const char *msg = NULL;
-    if (!JS_IsUndefined(msg_val) && !JS_IsNull(msg_val))
+    if (JS_IsException(msg_val)) {
+        clear_pending_exception(ctx);
+        msg_val = JS_UNDEFINED;
+    }
+    if (!JS_IsUndefined(msg_val) && !JS_IsNull(msg_val)) {
         msg = JS_ToCString(ctx, msg_val);
-    if (!msg)
+        if (!msg) clear_pending_exception(ctx);
+    }
+    if (!msg) {
         msg = JS_ToCString(ctx, err);
+        if (!msg) clear_pending_exception(ctx);
+    }
     snprintf(buf, buf_size, "%s", msg ? msg : "unknown error");
     if (msg) JS_FreeCString(ctx, msg);
     JS_FreeValue(ctx, msg_val);
+}
+
+/* QuickJS doesn't expose JS_IsPromise() in the public header. JS_PromiseState
+ * returns one of three enum values for Promises and an out-of-range value for
+ * everything else (in vendored QuickJS, -1 cast to the enum type). Wrapping
+ * the test in a named helper makes the call site read intentionally — and
+ * makes the day a future QuickJS adds JS_IsPromise() a one-line swap. */
+static int hl_js_value_is_promise(JSContext *ctx, JSValueConst v)
+{
+    JSPromiseStateEnum s = JS_PromiseState(ctx, v);
+    return s == JS_PROMISE_PENDING ||
+           s == JS_PROMISE_FULFILLED ||
+           s == JS_PROMISE_REJECTED;
 }
 
 void hl_js_test_run(JSContext *ctx, int *total, int *passed, int *failed,
@@ -556,27 +592,15 @@ void hl_js_test_run(JSContext *ctx, int *total, int *passed, int *failed,
             record_fail(out, results, max_results, idx, desc, err_buf);
             (*failed)++;
         }
-        else if (JS_IsObject(ret) && backend && backend->monotonic_ms) {
-            /* Promise-aware path. JS_PromiseState only meaningful on
-             * Promise values; if `ret` is some other object that
-             * happens to pass JS_IsObject we'll still get
-             * JS_PROMISE_PENDING-or-equivalent on the first call and
-             * fall through to the timeout. In practice async test
-             * bodies always return Promises. */
+        else if (JS_IsObject(ret) && backend && backend->monotonic_ms
+                 && hl_js_value_is_promise(ctx, ret)) {
+            /* Promise-aware path. Async test bodies return a Promise;
+             * drive it to settlement (or timeout) before reporting. */
             uint64_t deadline = backend->monotonic_ms() +
                                 (timeout_ms > 0 ? (uint64_t)timeout_ms : 0);
-            JSPromiseStateEnum pstate = JS_PromiseState(ctx, ret);
-            int is_promise = (pstate == JS_PROMISE_PENDING ||
-                              pstate == JS_PROMISE_FULFILLED ||
-                              pstate == JS_PROMISE_REJECTED);
+            JSPromiseStateEnum pstate;
 
-            if (!is_promise) {
-                /* Sync function returned a non-Promise object — treat
-                 * as PASS like the original code did for any non-
-                 * exception return. */
-                record_pass(out, results, max_results, idx, desc);
-                (*passed)++;
-            } else {
+            {
                 /* Pump microtasks (and the async backend if any) until
                  * the promise settles or the deadline expires. The
                  * combination handles both pure-assertion async tests
