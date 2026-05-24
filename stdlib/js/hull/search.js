@@ -78,12 +78,19 @@ function createIndex(name, columns, opts) {
     // FTS5 options
     let ftsOpts = "";
 
-    const tokenize = o.tokenize || "unicode61";
+    // Only default when `tokenize` was omitted. An explicit "" must
+    // fall through to the validator so Lua and JS agree byte-for-byte
+    // — Lua's `or` keeps "" because Lua strings are always truthy.
+    const tokenize = (o.tokenize === undefined || o.tokenize === null)
+        ? "unicode61"
+        : o.tokenize;
     // FTS5 tokenize names are short identifiers ("unicode61", "porter ascii",
-    // "trigram", etc.). Allow letters/digits/underscores and single spaces
-    // between identifier tokens; reject leading/trailing/double spaces or
-    // anything else that could escape the quoted SQL string.
-    if (!/^[a-zA-Z][a-zA-Z0-9_]*( [a-zA-Z][a-zA-Z0-9_]*)*$/.test(tokenize))
+    // "trigram") optionally followed by identifier-or-integer args
+    // ("unicode61 remove_diacritics 1"). First token must be an identifier;
+    // subsequent tokens may also be positive integers. Reject leading/
+    // trailing/double spaces or anything else that could escape the quoted
+    // SQL string. Mirrors the Lua sibling's grammar exactly.
+    if (!/^[a-zA-Z][a-zA-Z0-9_]*( ([a-zA-Z][a-zA-Z0-9_]*|[0-9]+))*$/.test(tokenize))
         throw new Error("search: invalid tokenize option");
     ftsOpts += ", tokenize=\"" + tokenize + "\"";
 

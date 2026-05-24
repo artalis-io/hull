@@ -2652,6 +2652,59 @@ UTEST(js_stdlib, search_snippet)
     cleanup_js_caps();
 }
 
+/* Tokenize grammar parity with Lua. First token is an identifier;
+ * subsequent space-separated tokens may be identifiers or positive
+ * integers. Leading/trailing/double spaces, leading underscores, etc.
+ * are rejected. */
+UTEST(js_stdlib, search_tokenize_grammar_parity)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { search } from 'hull:search';\n"
+        "function tryCreate(tok) {\n"
+        "  try { search.createIndex('tk_x', ['t'], { tokenize: tok });\n"
+        "        search.dropIndex('tk_x'); return true; }\n"
+        "  catch (_e) { return false; }\n"
+        "}\n"
+        /* Valid: identifier; identifier + identifier args;
+         * identifier + identifier + integer arg. */
+        "globalThis.__tk_v1 = tryCreate('unicode61') ? 1 : 0;\n"
+        "globalThis.__tk_v2 = tryCreate('porter ascii') ? 1 : 0;\n"
+        "globalThis.__tk_v3 = tryCreate('unicode61 remove_diacritics 1') ? 1 : 0;\n"
+        /* Invalid: space variants, leading digit, leading underscore, empty. */
+        "globalThis.__tk_b1 = tryCreate(' ') ? 0 : 1;\n"
+        "globalThis.__tk_b2 = tryCreate('  ') ? 0 : 1;\n"
+        "globalThis.__tk_b3 = tryCreate(' unicode61') ? 0 : 1;\n"
+        "globalThis.__tk_b4 = tryCreate('unicode61 ') ? 0 : 1;\n"
+        "globalThis.__tk_b5 = tryCreate('unicode61  porter') ? 0 : 1;\n"
+        "globalThis.__tk_b6 = tryCreate('123abc') ? 0 : 1;\n"
+        "globalThis.__tk_b7 = tryCreate('_foo') ? 0 : 1;\n"
+        "globalThis.__tk_b8 = tryCreate('') ? 0 : 1;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__tk_v1"), 1);
+    ASSERT_EQ(eval_int("globalThis.__tk_v2"), 1);
+    ASSERT_EQ(eval_int("globalThis.__tk_v3"), 1);
+    ASSERT_EQ(eval_int("globalThis.__tk_b1"), 1);
+    ASSERT_EQ(eval_int("globalThis.__tk_b2"), 1);
+    ASSERT_EQ(eval_int("globalThis.__tk_b3"), 1);
+    ASSERT_EQ(eval_int("globalThis.__tk_b4"), 1);
+    ASSERT_EQ(eval_int("globalThis.__tk_b5"), 1);
+    ASSERT_EQ(eval_int("globalThis.__tk_b6"), 1);
+    ASSERT_EQ(eval_int("globalThis.__tk_b7"), 1);
+    ASSERT_EQ(eval_int("globalThis.__tk_b8"), 1);
+
+    cleanup_js_caps();
+}
+
 /* ── hull:middleware:rbac tests ───────────────────────────────────────── */
 
 UTEST(js_stdlib, rbac_init_and_assign)

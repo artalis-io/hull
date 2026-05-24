@@ -2697,6 +2697,55 @@ UTEST(lua_stdlib, search_remove)
     cleanup_lua_caps();
 }
 
+/* Tokenize grammar parity with JS. Must match
+ * /^[A-Za-z][A-Za-z0-9_]*( [A-Za-z][A-Za-z0-9_]*)*$/ — leading/trailing/
+ * double spaces, leading digits, leading underscores all rejected. */
+UTEST(lua_stdlib, search_tokenize_grammar_parity)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* Valid: single identifier, multi-word with single spaces. */
+    int ok = eval_int(
+        "(function() "
+        "  local s = require('hull.search') "
+        "  s.create_index('tk_a', {'t'}, { tokenize = 'unicode61' }) "
+        "  s.drop_index('tk_a') "
+        "  s.create_index('tk_b', {'t'}, { tokenize = 'porter ascii' }) "
+        "  s.drop_index('tk_b') "
+        "  s.create_index('tk_c', {'t'}, { tokenize = "
+        "      'porter unicode61 remove_diacritics 1' }) "
+        "  s.drop_index('tk_c') "
+        "  return 1 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    /* Invalid: each of these used to slip through ^[a-zA-Z0-9_ ]+$. */
+    const char *bad_inputs[] = {
+        "' '",                /* single space */
+        "'  '",               /* double space */
+        "' unicode61'",       /* leading space */
+        "'unicode61 '",       /* trailing space */
+        "'unicode61  porter'",/* double space between */
+        "'123abc'",           /* leading digit */
+        "'_foo'",             /* leading underscore */
+        "''",                 /* empty */
+    };
+    for (size_t i = 0; i < sizeof(bad_inputs)/sizeof(bad_inputs[0]); i++) {
+        char buf[512];
+        snprintf(buf, sizeof(buf),
+            "(function() "
+            "  local s = require('hull.search') "
+            "  local ok, err = pcall(s.create_index, 'tk_x', {'t'}, "
+            "    { tokenize = %s }) "
+            "  return (not ok) and 1 or 0 "
+            "end)()", bad_inputs[i]);
+        ASSERT_EQ(eval_int(buf), 1);
+    }
+
+    cleanup_lua_caps();
+}
+
 UTEST(lua_stdlib, search_snippet)
 {
     init_lua_with_caps();

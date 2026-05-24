@@ -91,9 +91,35 @@ function search.create_index(name, columns, opts)
     local fts_opts = {}
     fts_opts[#fts_opts + 1] = col_list
 
+    -- FTS5 tokenize names are short identifiers ("unicode61"), optionally
+    -- followed by space-separated identifier-or-integer args
+    -- ("porter ascii", "unicode61 remove_diacritics 1"). The shape is a
+    -- sequence of [A-Za-z][A-Za-z0-9_]* (identifier) OR [0-9]+ (positive
+    -- integer arg) separated by single spaces; the first token must be
+    -- an identifier. Lua patterns can't express repeated groups so we
+    -- split-and-validate manually. Mirror semantics in the JS sibling.
     local tokenize = opts.tokenize or "unicode61"
-    if not tokenize:match("^[a-zA-Z0-9_ ]+$") then
-        error("search: invalid tokenize option (must match [a-zA-Z0-9_ ]+)")
+    local function valid_tokenize(s)
+        if #s == 0 then return false end
+        local idx = 0
+        for part in (s .. " "):gmatch("([^ ]*) ") do
+            idx = idx + 1
+            if part == "" then return false end  -- empty → leading/trailing/double space
+            if idx == 1 then
+                if not part:match("^[a-zA-Z][a-zA-Z0-9_]*$") then return false end
+            else
+                if not (part:match("^[a-zA-Z][a-zA-Z0-9_]*$") or
+                        part:match("^[0-9]+$")) then
+                    return false
+                end
+            end
+        end
+        return idx > 0
+    end
+    if not valid_tokenize(tokenize) then
+        error("search: invalid tokenize option " ..
+              "(must match identifier [A-Za-z][A-Za-z0-9_]* with " ..
+              "single-space-separated identifier-or-integer args)")
     end
     fts_opts[#fts_opts + 1] = "tokenize='" .. tokenize .. "'"
 
