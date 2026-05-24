@@ -22,11 +22,19 @@
 #include <sqlite3.h>
 #endif
 
+/* app_context is meant to stay runtime-agnostic — it dispatches
+ * through the HlRuntimeFactory vtable and never touches Lua/JS
+ * internals directly. The hl_app_context_lua / _js accessors below
+ * return typed pointers (HlLua * / HlJS *), but a cast to a typed
+ * pointer only needs a forward declaration of the type, not the full
+ * struct shape. Pulling in hull/runtime/lua.h or hull/runtime/js.h
+ * here would surface the full HlLua / HlJS struct layout to a layer
+ * that has no business inspecting it. */
 #ifdef HL_ENABLE_LUA
-#include "hull/runtime/lua.h"
+typedef struct HlLua HlLua;
 #endif
 #ifdef HL_ENABLE_JS
-#include "hull/runtime/js.h"
+typedef struct HlJS HlJS;
 #endif
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/wasm.h"

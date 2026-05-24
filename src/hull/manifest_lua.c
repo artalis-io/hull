@@ -214,9 +214,13 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
          * keys are then ignored as cosmetic labels. */
         lua_Integer seq_len = luaL_len(L, modules_idx);
         if (seq_len > 0) {
-            for (lua_Integer i = 1;
-                 i <= seq_len && out->modules_count < HL_MANIFEST_MAX_MODULES;
-                 i++) {
+            for (lua_Integer i = 1; i <= seq_len; i++) {
+                if (out->modules_count >= HL_MANIFEST_MAX_MODULES) {
+                    log_warn("[manifest] modules array exceeds "
+                             "HL_MANIFEST_MAX_MODULES (%d), truncated",
+                             HL_MANIFEST_MAX_MODULES);
+                    break;
+                }
                 lua_rawgeti(L, modules_idx, i);
                 if (lua_type(L, -1) == LUA_TSTRING) {
                     const char *spec = lua_tostring(L, -1);
@@ -250,19 +254,36 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
             }
         } else {
             /* Fall back to keyed form (legacy). Iterate string keys. */
+            int truncated_warned = 0;
             lua_pushnil(L);
             while (lua_next(L, modules_idx) != 0) {
                 if (lua_type(L, -2) == LUA_TSTRING &&
-                    lua_type(L, -1) == LUA_TSTRING &&
-                    out->modules_count < HL_MANIFEST_MAX_MODULES) {
+                    lua_type(L, -1) == LUA_TSTRING) {
+                    if (out->modules_count >= HL_MANIFEST_MAX_MODULES) {
+                        if (!truncated_warned) {
+                            log_warn("[manifest] modules object exceeds "
+                                     "HL_MANIFEST_MAX_MODULES (%d), truncated",
+                                     HL_MANIFEST_MAX_MODULES);
+                            truncated_warned = 1;
+                        }
+                        lua_pop(L, 1);
+                        continue;
+                    }
                     const char *alias = lua_tostring(L, -2);
                     const char *spec  = lua_tostring(L, -1);
                     const char *at    = strchr(spec, '@');
-                    if (at && at != spec) {
+                    if (!at || at == spec) {
+                        log_warn("[manifest] modules.%s = %s — expected "
+                                 "\"vendor/name@version\", ignored",
+                                 alias, spec);
+                    } else {
                         char *end = NULL;
                         long v = strtol(at + 1, &end, 10);
-                        if (end != at + 1 && *end == '\0' &&
-                            v >= 1 && v <= 255) {
+                        if (end == at + 1 || *end != '\0' ||
+                            v < 1 || v > 255) {
+                            log_warn("[manifest] modules.%s = %s — invalid "
+                                     "major version, ignored", alias, spec);
+                        } else {
                             size_t nlen = (size_t)(at - spec);
                             char *namebuf = hl_alloc_malloc(alloc, nlen + 1);
                             if (namebuf) {
@@ -274,7 +295,6 @@ int hl_manifest_extract_lua(lua_State *L, HlManifest *out, HlAllocator *alloc)
                             }
                         }
                     }
-                    (void)alias;  /* cosmetic — not used for resolution */
                 }
                 lua_pop(L, 1);
             }

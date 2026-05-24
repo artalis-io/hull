@@ -424,6 +424,23 @@ The canonical examples live at `examples/rest_api_modular/`,
 
 ### Command Dispatch
 
+**Tool mode is Lua-only by design.** The C dispatcher delegates most
+non-trivial subcommands (`hull build`, `hull deploy`, `hull init`,
+`hull new`, `hull verify`, `hull migrate`, `hull inspect`, `hull
+analyze`, `hull sign-platform`, all `--tui` variants, etc.) to a
+sandboxed Lua VM via `hull_tool("hull.X", argc, argv, hull_exe)`.
+The "tool VM" is the same Lua 5.4 runtime that user apps use, but
+loaded with the unveil + spawn-allowlist caps and never with HTTP /
+DB / network. **There is no JS counterpart.** When Hull was first
+built the tool layer was written in Lua because of its smaller
+sandbox surface; adding a parallel JS dispatch path would double
+the tool-mode VM count without removing the Lua one (tool plugins
+in `stdlib/cli/lua/hull/` would still need maintenance). JS users
+can still write applications in JS without restriction — only the
+CLI tool plugins are Lua-only. See `stdlib/cli/lua/hull/` for the
+plugin source and `src/hull/tool.c` / `src/hull/tool_orchestration.c`
+for the C binding surface the tool VM exposes.
+
 Table-driven dispatcher in `src/hull/commands/dispatch.c`. 22 commands:
 
 ```

@@ -238,6 +238,10 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc)
         int32_t len = 0;
         JS_ToInt32(ctx, &len, len_val);
         JS_FreeValue(ctx, len_val);
+        if (len > HL_MANIFEST_MAX_MODULES)
+            log_warn("[manifest] modules array exceeds "
+                     "HL_MANIFEST_MAX_MODULES (%d), truncated",
+                     HL_MANIFEST_MAX_MODULES);
         for (int32_t i = 0;
              i < len && out->modules_count < HL_MANIFEST_MAX_MODULES;
              i++) {
