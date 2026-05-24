@@ -291,4 +291,7 @@ int hl_agent_schema_diff(const char *app_dir, const char *db_path,
     return rc;
 }
 
+#else /* !HL_ENABLE_DB */
+/* ISO C requires a translation unit to contain at least one declaration. */
+typedef int hl_agent_schema_diff_disabled;
 #endif /* HL_ENABLE_DB */

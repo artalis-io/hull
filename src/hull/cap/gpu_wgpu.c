@@ -1740,4 +1740,7 @@ const HlGpuBackend hl_gpu_backend_wgpu = {
     .texture_destroy   = wgpu_texture_destroy,
 };
 
+#else /* !HL_ENABLE_GPU */
+/* ISO C requires a translation unit to contain at least one declaration. */
+typedef int hl_cap_gpu_wgpu_disabled;
 #endif /* HL_ENABLE_GPU */

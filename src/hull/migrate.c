@@ -203,7 +203,7 @@ static int discover_fs_migrations(const char *root_dir, MigrationList *ml)
             continue;
 
         if (ml->count >= capacity) {
-            if (capacity > SIZE_MAX / (2 * sizeof(char *))) {
+            if ((size_t)capacity > SIZE_MAX / (2 * sizeof(char *))) {
                 migration_list_free(ml);
                 closedir(dir);
                 return -1;

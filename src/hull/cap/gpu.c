@@ -678,4 +678,7 @@ int hl_cap_gpu_buffer_copy(HlGpuCtx *ctx, int device,
     return rc;
 }
 
+#else /* !HL_ENABLE_GPU */
+/* ISO C requires a translation unit to contain at least one declaration. */
+typedef int hl_cap_gpu_disabled;
 #endif /* HL_ENABLE_GPU */

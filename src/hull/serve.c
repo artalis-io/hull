@@ -93,13 +93,20 @@
 
 /* ── Logging ───────────────────────────────────────────────────────── */
 
-/* Custom log callback: suppresses file:line in release builds */
+/* Custom log callback: suppresses file:line in release builds.
+ *
+ * The format string is provided by the log.c callback API, not a
+ * literal; vsnprintf is doing exactly what it's meant to. Suppress
+ * -Wformat-nonliteral locally rather than restructuring the API. */
 static void hl_log_callback(log_Event *ev) {
     char ts[16];
     ts[strftime(ts, sizeof(ts), "%H:%M:%S", ev->time)] = '\0';
 
     char msg[1024];
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-nonliteral"
     vsnprintf(msg, sizeof(msg), ev->fmt, ev->ap);
+#pragma GCC diagnostic pop
 
 #ifdef DEBUG
     fprintf((FILE *)ev->udata, "%s %-5s %s:%d: %s\n",
@@ -120,12 +127,17 @@ static int hl_parse_log_level(const char *s) {
     return -1;
 }
 
-/* Bridge: routes Keel KlLogFn through rxi/log.c with [keel] prefix */
+/* Bridge: routes Keel KlLogFn through rxi/log.c with [keel] prefix.
+ * `fmt` comes from Keel's logging callback API; see the comment on
+ * hl_log_callback above. */
 static void hl_keel_log_bridge(int level, const char *fmt, va_list ap,
                                 void *user_data) {
     (void)user_data;
     char buf[512];
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-nonliteral"
     vsnprintf(buf, sizeof(buf), fmt, ap);
+#pragma GCC diagnostic pop
     log_log(level, "keel", 0, "[keel] %s", buf);
 }
 

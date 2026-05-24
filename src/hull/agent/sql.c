@@ -205,4 +205,7 @@ int hl_agent_sql_named_ctx(HlAppContext *ctx, const char *query_name,
     return 0;
 }
 
+#else /* !HL_ENABLE_DB */
+/* ISO C requires a translation unit to contain at least one declaration. */
+typedef int hl_agent_sql_disabled;
 #endif /* HL_ENABLE_DB */

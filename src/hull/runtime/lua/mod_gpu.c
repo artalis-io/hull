@@ -1364,4 +1364,7 @@ int luaopen_hull_gpu(lua_State *L)
     return 1;
 }
 
+#else /* !HL_ENABLE_GPU */
+/* ISO C requires a translation unit to contain at least one declaration. */
+typedef int hl_lua_mod_gpu_disabled;
 #endif /* HL_ENABLE_GPU */

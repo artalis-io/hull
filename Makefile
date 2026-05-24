@@ -67,10 +67,14 @@ DEPFLAGS := -MMD -MP
 CFLAGS   += $(DEPFLAGS)
 
 ifndef COSMO
-  # Stack protection + PIE for ASLR. PIE is harmless on macOS (default
-  # since 10.7) but the explicit -pie flag keeps intent visible.
+  # Stack protection + PIE for ASLR. PIE is the macOS default since
+  # 10.7 — passing `-pie` to clang on Darwin emits a harmless
+  # "argument unused during compilation" warning that pollutes every
+  # link line. Only set it where the linker actually needs it.
   CFLAGS  += -fstack-protector-strong -fPIE
-  LDFLAGS += -pie
+  ifneq ($(UNAME_S),Darwin)
+    LDFLAGS += -pie
+  endif
 
   ifndef DEBUG
     # _FORTIFY_SOURCE=3 requires glibc 2.34+ / gcc 12+ / clang 9+; on
