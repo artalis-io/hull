@@ -360,6 +360,19 @@ js_files["routes/users.js"] = [[// routes/users.js — User resource.
 import * as users      from "./../models/user.js";
 import * as userSchema from "./../lib/validate_user.js";
 
+// req.body is the raw request bytes, not a parsed object — Hull's JS
+// bindings expose the body as a string. Each route that consumes JSON
+// decodes it here. A real app would put this in lib/req.js and reuse
+// it across resources.
+function parseJsonBody(req) {
+    if (!req.body) return [{}, null];
+    try {
+        return [JSON.parse(req.body), null];
+    } catch (_e) {
+        return [null, "invalid json"];
+    }
+}
+
 export function register(app) {
     // GET /users — list (paginated via ?limit=)
     app.get("/users", (req, res) => {
@@ -369,7 +382,9 @@ export function register(app) {
 
     // POST /users — create
     app.post("/users", (req, res) => {
-        const body = req.body || {};
+        const [body, perr] = parseJsonBody(req);
+        if (perr) { res.status(400).json({ error: perr }); return; }
+
         const [ok, errors] = userSchema.create(body);
         if (!ok) {
             res.status(400).json({ errors });

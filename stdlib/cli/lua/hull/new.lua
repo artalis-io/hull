@@ -255,10 +255,26 @@ local function main()
     --   (nil, "msg")  — runtime not supported (e.g. TUI rejects JS)
     -- This function creates parent dirs as needed, writes files,
     -- and prints a tree of what was created.
+    -- next_step is a function so the entry-extension is plugged in
+    -- via plain concatenation, not a gsub against the literal "app"
+    -- (which would mis-substitute if a future default contained
+    -- "application" or similar substrings).
     local MODULAR_TYPES = {
-        rest = { module = "hull.templates_rest", label = "modular REST API",  default = "hull app" },
-        cli  = { module = "hull.templates_cli",  label = "modular CLI tool",  default = "hull run app -- greet world" },
-        tui  = { module = "hull.templates_tui",  label = "modular TUI app",   default = "hull run app" },
+        rest = {
+            module = "hull.templates_rest",
+            label  = "modular REST API",
+            next_step = function(e) return "hull app" .. e end,
+        },
+        cli  = {
+            module = "hull.templates_cli",
+            label  = "modular CLI tool",
+            next_step = function(e) return "hull run app" .. e .. " -- greet world" end,
+        },
+        tui  = {
+            module = "hull.templates_tui",
+            label  = "modular TUI app",
+            next_step = function(e) return "hull run app" .. e end,
+        },
     }
     local mt = MODULAR_TYPES[opts.layout]
     if mt then
@@ -288,7 +304,7 @@ local function main()
         print("")
         print("Next steps:")
         print("  cd " .. dir)
-        print("  " .. (mt.default:gsub("app", "app" .. ext)))
+        print("  " .. mt.next_step(ext))
         return
     end
 

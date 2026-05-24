@@ -59,13 +59,23 @@ app.main(function(ctx)
         stdin = ctx.stdin, stdout = ctx.stdout, stderr = ctx.stderr,
     }
 
-    -- pcall the require so a typo in cmd name shows usage rather than
-    -- a Lua "module not found" backtrace.
+    -- Distinguish "unknown command" (the file doesn't exist) from
+    -- "command file has a bug" (require failed for some OTHER reason).
+    -- The first should show usage; the second should re-raise so the
+    -- user sees the actual traceback. The Hull require gate emits a
+    -- specific "module not found" / "is not declared" prefix on
+    -- missing modules; anything else came from inside the file.
     local ok, mod = pcall(require, "./commands/" .. cmd)
     if not ok then
-        ctx.stderr:write("mytool: unknown command '" .. cmd .. "'\n\n")
-        usage(ctx.stderr)
-        return 1
+        if type(mod) == "string" and
+                (mod:find("module not found", 1, true) or
+                 mod:find("not declared",     1, true)) then
+            ctx.stderr:write("mytool: unknown command '" .. cmd .. "'\n\n")
+            usage(ctx.stderr)
+            return 1
+        end
+        -- A real error inside the command file — propagate it.
+        error(mod, 0)
     end
 
     log.info("running " .. cmd)
@@ -181,13 +191,22 @@ app.main(async (ctx) => {
         stderr: ctx.stderr,
     };
 
+    // Distinguish "unknown command" (file doesn't exist) from "command
+    // file has a bug." QuickJS's module loader emits "module not found"
+    // for the first case; anything else came from inside the file and
+    // should propagate so the user sees the actual error.
     let mod;
     try {
         mod = await import("./commands/" + cmd + ".js");
-    } catch (_e) {
-        ctx.stderr.write("mytool: unknown command '" + cmd + "'\n\n");
-        usage(ctx.stderr);
-        return 1;
+    } catch (e) {
+        const msg = String(e);
+        if (msg.indexOf("module not found") >= 0 ||
+            msg.indexOf("is not declared") >= 0) {
+            ctx.stderr.write("mytool: unknown command '" + cmd + "'\n\n");
+            usage(ctx.stderr);
+            return 1;
+        }
+        throw e;
     }
 
     log.info("running " + cmd);

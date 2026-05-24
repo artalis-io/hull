@@ -1852,6 +1852,12 @@ $(BUILDDIR)/test_static: $(TESTDIR)/hull/test_static.c $(STATIC_OBJ) $(TEST_COMM
 $(BUILDDIR)/test_vfs: $(TESTDIR)/hull/test_vfs.c $(VFS_OBJ) $(PATH_NORM_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(VFS_OBJ) $(PATH_NORM_OBJ)
 
+# Path-normalize test — standalone, exercises hl_path_normalize directly
+# so a regression in the helper is caught here rather than only via the
+# runtime module loaders that consume it.
+$(BUILDDIR)/test_path_normalize: $(TESTDIR)/hull/test_path_normalize.c $(PATH_NORM_OBJ) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(PATH_NORM_OBJ)
+
 # Async backend tests — exercise the HlAsyncBackend vtable.
 # test_async_backend covers whichever backend hl_async_backend() returns
 # (keel on HTTP=1, poll on HTTP=0). test_async_backend_poll always

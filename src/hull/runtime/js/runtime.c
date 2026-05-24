@@ -90,6 +90,11 @@ static char *hl_js_module_normalize(JSContext *ctx,
     (void)base_name;
     (void)opaque;
 
+    /* Defensive NULL guard — QuickJS's module loader is documented to
+     * pass non-NULL names, but a NULL slipping through would crash at
+     * the strncmp below. Mirrors hl_path_normalize's NULL handling. */
+    if (!name) return NULL;
+
     /* hull:* modules are already normalized */
     if (strncmp(name, "hull:", 5) == 0)
         return js_strdup(ctx, name);
