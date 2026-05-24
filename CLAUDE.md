@@ -355,8 +355,23 @@ segments safely. Escape past the app root fails closed.
 **Both runtimes coexist.** Generating with `--runtime js` produces the
 parallel JS scaffold (same dirs, `.js` extension, `export { register }`
 instead of Lua's `M.register = ...`). When `app.lua` and `app.js` both
-exist, `hull test` runs each runtime's tests; `hull` picks one entry
-based on filename.
+exist, `hull test` runs each runtime's tests separately (each gets its
+own runtime, router, and test discovery); `hull` picks one entry based
+on filename.
+
+**JS test bodies may be `async`.** The runner detects a returned Promise
+and pumps both QuickJS microtasks (for pure `await`-chain tests) and
+the async backend (for tests that do real I/O via `http.fetch` /
+`compute.async`) until the promise settles or a per-test timeout
+elapses. Default timeout is 5 seconds; override per-test via
+`test("slow", { timeout: 30000 }, async () => { ... })`. A rejected
+promise (which is how a failing `await test.eq(...)` surfaces in an
+async body) marks the test as FAIL with the rejection reason. Sync
+test bodies (`() => { ... }`) work too — non-exception return → PASS,
+thrown error → FAIL. Pre-May-2026, the runner only checked
+`JS_IsException(ret)` and silently passed every async test regardless
+of the awaited assertions; the regression is covered by
+`tests/hull/runtime/js/test_js.c::js_test_runner.*`.
 
 **`hull build`** walks subdirectories — `routes/`, `models/`, `lib/`,
 etc. are all picked up by `tool.find_files(dir, "*.lua")` and embedded

@@ -498,6 +498,12 @@ js_files["tests/routes/test_health.js"] = [[test("GET /health returns ok", async
 
 js_files["tests/routes/test_users.js"] = [[// Hull's test.post takes an opts object where `body` is a raw string;
 // routes/users.js decodes JSON manually, so the tests JSON-encode here.
+//
+// Async test bodies are fully supported: the runner pumps microtasks
+// (and the async backend) until the returned Promise settles, so a
+// rejecting promise from a failed `await test.eq(...)` marks the test
+// FAIL with the rejection reason. Default per-test timeout is 5s;
+// override via `test("name", { timeout: 30000 }, async () => {...})`.
 
 test("POST /users creates a user", async () => {
     const res = await test.post("/users", {

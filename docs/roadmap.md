@@ -460,6 +460,612 @@ Every step produces machine-readable JSON output. The agent never parses human-f
 | Ollama (local 70B) | CLI or MCP | Compact context (~4K tokens) |
 | Ollama (local 7–14B) | MCP (structured tools) | Minimal context (~1K tokens) |
 
+### Local Agent Runtime - Open-Weight Models Building Hull Apps
+
+Hull should be able to run as the complete local development loop for apps
+written by agents: a constrained runtime for the generated app, a constrained
+tool surface for the generating agent, and a local/open-weight model backend
+that can inspect, edit, test, build, and sign Hull applications without cloud
+dependency.
+
+The product shape is not "Hull embeds a chat UI." It is a secure local agent
+workbench:
+
+```
+open-weight model
+  -> Hull Agent Runtime
+  -> bounded tools: read/patch/hull agent/test/build/dev
+  -> Hull app source
+  -> hull build
+  -> signed single-file artifact
+```
+
+Target model backends:
+
+- `bitnet.c` for zero-dependency CPU-first local inference.
+- `llama.cpp` / `llama-server` for GGUF local models.
+- Ollama for existing local model installations.
+- Generic OpenAI-compatible local HTTP servers.
+- Optional remote providers later, only behind explicit manifest/CLI network
+  permission.
+
+Example UX:
+
+```bash
+hull models add qwen-local --provider llama.cpp --url http://127.0.0.1:8080
+hull models add gemma-local --provider ollama --model gemma
+hull models add bitnet-qwen --provider bitnet --model ~/.hull/models/qwen.gguf
+hull models test bitnet-qwen
+
+hull develop . --model bitnet-qwen --goal "Add login, sessions, and tests"
+hull develop . --model qwen-local --review-only
+hull develop . --model gemma-local --approve-each-patch
+```
+
+#### Provider Layer
+
+Normalize model backends behind one local interface:
+
+| Operation | Purpose |
+|-----------|---------|
+| `chat` | Agent planning and tool decisions |
+| `complete` | Fallback for non-chat models |
+| `stream` | TUI progress and long generations |
+| `embed` | Optional context retrieval |
+| `tokenize` / `count_tokens` | Context budgeting |
+| `health` | Backend readiness and model metadata |
+
+Model profile:
+
+```json
+{
+  "id": "qwen-local",
+  "provider": "llama.cpp",
+  "endpoint": "http://127.0.0.1:8080",
+  "context_window": 32768,
+  "supports_tools": true,
+  "supports_json_schema": true,
+  "supports_streaming": true,
+  "supports_embeddings": false
+}
+```
+
+CLI surface:
+
+| Command | Status | Notes |
+|---------|--------|-------|
+| `hull models list` | Planned | Configured local and remote model profiles |
+| `hull models add` | Planned | Register `bitnet`, `llama.cpp`, `ollama`, or OpenAI-compatible endpoint |
+| `hull models test` | Planned | Health check + simple JSON/tool-call probe |
+| `hull models inspect --json` | Planned | Context window, capabilities, backend version |
+| `hull models serve` | Planned | Launch managed local backend where supported |
+| `hull models bench` | Planned | Hull-specific coding/tool-use evaluation suite |
+
+#### Bundled `bitnet.c`
+
+Bundling `bitnet.c` makes sense as an optional build/profile because it closes
+the local-first loop: a single Hull tool binary can run the app runtime, the
+agent tool runtime, the build pipeline, and CPU-first inference without Ollama,
+Python, CUDA, or external servers.
+
+Recommended policy:
+
+- Ship `bitnet.c` as an optional embedded provider in the developer tool
+  distribution, not as part of every built Hull app.
+- Keep model weights outside normal app bundles by default. Weights are large,
+  often separately licensed, and should be user-managed under
+  `~/.hull/models/` or an explicitly configured path.
+- Allow a special `hull models bundle` / `hull build --include-model` path only
+  for deliberate appliances where the size/licensing tradeoff is explicit.
+- Compile-time flag: `HL_ENABLE_BITNET=1`.
+- Doctor row: `hull doctor` reports `bitnet.c` support, CPU features, and
+  model directory.
+- Provider behavior must still flow through the same agent permission model as
+  every other backend. The model is local, but the agent is still constrained.
+
+This keeps the default Hull app artifact small while allowing a "single binary
+developer tool" distribution that genuinely works offline with open weights.
+
+#### Constrained Agent Command
+
+Add a first-class local agent loop:
+
+```bash
+hull develop .
+hull develop . --goal "Build a local invoicing app"
+hull develop . --model bitnet-qwen --budget 30m
+hull develop . --dry-run
+hull develop . --review-only
+```
+
+The loop should be policy-driven rather than prompt-only:
+
+1. Understand the user goal.
+2. Inspect the project with `hull agent`.
+3. Build a task-specific context pack.
+4. Ask the model for the next structured action.
+5. Apply patches only through a controlled patch tool.
+6. Run `hull agent validate`, `hull agent test`, and relevant requests.
+7. Iterate until tests/build pass or the budget is exhausted.
+8. Produce a signed session report.
+
+Default tool permissions:
+
+- no arbitrary shell
+- no network
+- no writes outside the project
+- no deletion unless explicitly approved
+- edits are patches, not direct blind rewrites
+- all tool calls are logged
+- command surface is allowlisted
+
+Example policy:
+
+```json
+{
+  "read": ["app.lua", "migrations/", "templates/", "static/", "tests/"],
+  "write": ["app.lua", "migrations/", "templates/", "static/", "tests/"],
+  "commands": [
+    "hull agent *",
+    "hull test",
+    "hull build",
+    "hull dev"
+  ],
+  "network": false,
+  "max_steps": 80,
+  "max_patch_bytes": 200000
+}
+```
+
+#### Agent Sessions and Auditability
+
+Every `hull develop` run should be replayable:
+
+```
+.hull/agent/sessions/<timestamp>/
+  goal.json
+  model.json
+  policy.json
+  transcript.jsonl
+  tool_calls.jsonl
+  patches/
+  final_report.md
+  build_artifacts.json
+```
+
+Commands:
+
+| Command | Status | Notes |
+|---------|--------|-------|
+| `hull agent sessions .` | Planned | List recorded local agent sessions |
+| `hull agent diff SESSION` | Planned | Show patches from a session |
+| `hull agent replay SESSION` | Planned | Replay tool calls where deterministic |
+| `hull agent report SESSION` | Planned | Human-readable final report |
+| `hull verify-agent-session SESSION` | Planned | Check transcript, patch hashes, model profile, and build output |
+
+#### Context Packs
+
+Local models need less raw text and more structure. Extend `hull agent context`
+into project-aware context packs:
+
+```bash
+hull context build . --task web-app --model bitnet-qwen
+hull context inspect . --json
+```
+
+Automatic context should include:
+
+- manifest and declared modules
+- route map
+- DB schema and migrations
+- relevant stdlib docs snippets
+- failing tests and recent structured errors
+- project tree and selected file excerpts
+- capability diff
+- build/test command recipes
+
+The context packer should know the model's context window and choose
+`minimal`, `compact`, or `full` context automatically.
+
+#### Structured Tool Calling
+
+Models should return validated JSON actions:
+
+```json
+{
+  "action": "apply_patch",
+  "path": "app.lua",
+  "patch": "...",
+  "reason": "Add POST /login and session creation"
+}
+```
+
+Support degraded mode for weaker local models:
+
+- prompt-enforced JSON
+- parser repair
+- retry with validation errors
+- strict retry limit
+- fallback to user question
+
+The agent runtime should never execute natural-language commands directly.
+
+#### Model Benchmarks
+
+Add a Hull-specific local model benchmark:
+
+```bash
+hull models bench bitnet-qwen
+hull models bench qwen-local --suite hull-apps
+hull models rank
+```
+
+Evaluate:
+
+- JSON action validity
+- patch apply rate
+- Lua syntax correctness
+- manifest/module correctness
+- migration generation
+- test-fixing ability
+- use of `hull agent` outputs
+- context-window behavior
+
+Output:
+
+```json
+{
+  "model": "bitnet-qwen",
+  "tool_json_valid_rate": 0.92,
+  "patch_apply_rate": 0.87,
+  "hull_test_pass_rate": 0.64,
+  "recommended_roles": ["review", "small_edit"]
+}
+```
+
+#### Phased Plan
+
+| Phase | Feature | Status | Notes |
+|-------|---------|--------|-------|
+| L1 | Provider abstraction | Planned | `bitnet.c`, `llama.cpp`, Ollama, OpenAI-compatible local HTTP |
+| L2 | `hull models` CLI | Planned | add/list/test/inspect/serve |
+| L3 | `hull develop` agent loop | Planned | inspect -> patch -> validate -> test -> build |
+| L4 | Agent policy file | Planned | read/write/command/network restrictions |
+| L5 | Session logging | Planned | replayable transcript, tool calls, patch hashes |
+| L6 | Context packs | Planned | project-aware context assembly and token budgeting |
+| L7 | Structured action schemas | Planned | JSON action validation + repair/retry |
+| L8 | Model benchmark suite | Planned | score local models on Hull development tasks |
+| L9 | Managed local backends | Planned | launch/stop/status for supported providers |
+| L10 | Multi-role workflows | Planned | planner/coder/reviewer/test-fixer/security-reviewer |
+
+### Mission-Critical and Embedded Agentic Software
+
+Hull's strongest thesis is not simply local app development. It is a secure
+runtime and build system for agent-generated local software:
+
+> Hull lets organizations use AI-generated code without giving that code, or
+> the agent that wrote it, uncontrolled access to the machine.
+
+For mission-critical and embedded markets, the differentiator is the combined
+trust boundary:
+
+- constrained agent runtime
+- constrained app runtime
+- explicit capabilities
+- offline/open-weight model support
+- single-file deployment
+- reproducible builds
+- signed provenance
+- structured local observability
+- no mandatory cloud control plane
+- no package-manager dependency graph at runtime
+
+The missing work is mostly not more web framework APIs. It is policy,
+provenance, certification, deterministic offline operation, and embedded
+deployment hardening.
+
+#### Policy as Product
+
+Add first-class named policy profiles:
+
+```bash
+hull policy check .
+hull policy apply embedded-strict
+hull policy apply factory-floor-offline
+hull policy apply medical-device-local
+hull policy apply vehicle-semantic-layer
+```
+
+Policies should cover:
+
+- allowed capabilities
+- network mode: none, localhost, allowlisted outbound only
+- max binary size
+- max memory
+- dynamic code prohibition
+- runtime model-download prohibition
+- required tests
+- required signatures
+- required SBOM
+- required reproducibility metadata
+- required human approvals for capability changes
+
+Policy check output should be machine-readable and signable:
+
+```json
+{
+  "policy": "embedded-strict",
+  "ok": true,
+  "capabilities": {
+    "network": false,
+    "fs_write": ["data/"],
+    "env": []
+  },
+  "requirements": {
+    "tests": "pass",
+    "sbom": "present",
+    "reproducible_build": "attested"
+  }
+}
+```
+
+#### Signed Agent and Build Provenance
+
+Every agent-generated change should be attributable:
+
+```bash
+hull attest build .
+hull verify-attestation app.bin
+hull verify-agent-session SESSION
+```
+
+Attestation should include:
+
+- model/provider/profile used
+- model file hash where local
+- prompt/goal hash
+- context pack hash
+- tool-call transcript hash
+- patch hashes
+- test results
+- capability diff
+- policy result
+- build inputs
+- output binary hash
+
+This creates an auditable chain from human goal -> model actions -> source
+patches -> tests -> signed binary.
+
+#### Deterministic Offline Development
+
+Support a fully offline agentic loop:
+
+```bash
+hull develop . \
+  --offline \
+  --model bitnet-qwen \
+  --policy embedded-strict \
+  --approve capability-change
+```
+
+Guarantees:
+
+- no network access
+- local model only
+- local context/docs only
+- local tests only
+- bounded tool surface
+- replayable session
+- signed result
+
+This is the operating mode for defense, industrial control, remote
+infrastructure, healthcare, and classified/off-grid environments.
+
+#### Local Observability Without Cloud
+
+Mission-critical systems need supportability without SaaS telemetry:
+
+```bash
+hull diagnose ./app
+hull inspect-run ./app --last 24h
+hull export-support-bundle ./app
+```
+
+Support bundle contents:
+
+- app manifest and capability policy
+- structured logs
+- capability audit logs
+- health/readiness history
+- crash metadata
+- version/build attestation
+- local metrics
+- recent configuration changes
+
+No data should leave the device unless the operator explicitly exports it.
+
+#### Capability Diff and Approval Gates
+
+Permission changes should be visible and reviewable:
+
+```bash
+hull capability diff old.bin new.bin
+hull develop . --approve capability-change
+hull develop . --approve network
+hull develop . --approve db-migration
+hull develop . --approve deletion
+```
+
+Example diff:
+
+```json
+{
+  "added": {
+    "hosts": ["api.vendor.example"],
+    "fs_write": ["exports/"]
+  },
+  "removed": {},
+  "risk": "medium"
+}
+```
+
+Agent workflows must stop at these gates unless approval policy allows them.
+
+#### Reproducible Build Attestation
+
+Extend the existing reproducible-build direction into a product surface:
+
+```bash
+hull build --repro .
+hull verify-repro app.bin source.tar
+hull attest-repro app.bin
+```
+
+Attested inputs:
+
+- Hull version
+- platform archive hash
+- TCC/cosmocc hash
+- app source hash
+- manifest hash
+- generated asset hash
+- compiler flags
+- timestamp policy
+- target platform
+
+#### Embedded Deployment Profiles
+
+Add hardened embedded targets:
+
+```bash
+hull build --target linux-arm64 --profile embedded
+hull build --target riscv64 --profile gateway
+hull deploy systemd --profile watchdog
+```
+
+Profile features:
+
+- static binary
+- readonly-rootfs mode
+- explicit data directory
+- watchdog integration
+- crash restart policy
+- health endpoint or CLI health check
+- memory ceiling
+- no writable paths except declared data
+- OTA/update hook integration
+
+#### Vehicle and Autonomous Systems Boundary
+
+Hull is a good fit for the control-adjacent and semantic layers of autonomous
+systems, not for hard realtime actuator loops in v1.
+
+Good-fit layers:
+
+- mission planning
+- semantic task execution
+- route/waypoint policy
+- local UI/API on the vehicle or base station
+- telemetry collection and compression
+- command validation and authorization
+- geofence and rules-of-engagement checks
+- perception post-processing where bounded latency is acceptable
+- local model inference for classification or decision support
+- data logging and replay
+- configuration management
+- update/rollback controller
+
+Poor-fit layers unless Hull grows substantial realtime/certification support:
+
+- motor control
+- flight stabilization loops
+- brake/steering-by-wire loops
+- hard realtime sensor fusion
+- safety-critical actuator arbitration
+- sub-millisecond deterministic control
+
+Recommended architecture:
+
+```
+certified realtime controller / autopilot
+  <-> narrow protocol boundary
+Hull semantic/control-adjacent app
+  <-> policy, mission logic, logging, local inference, operator UI
+```
+
+Required future features for serious vehicle/robotics use:
+
+- explicit realtime/non-realtime boundary docs
+- hardware/protocol capabilities: MAVLink, CAN/UAVCAN, serial, GPIO where
+  supported
+- deadline and watchdog APIs
+- bounded queue/backpressure primitives
+- deterministic state-machine helper
+- command authorization gates
+- safe-mode/fail-closed behavior
+- flight/drive log replay harness
+- simulation-in-the-loop test runner
+- hardware-in-the-loop test hooks
+- certification artifact generation for standards such as DO-178C,
+  ISO 26262, IEC 61508, or IEC 62304 where applicable
+
+#### App-Level Local Inference Capability
+
+Keep "agent uses a model to build the app" separate from "the deployed app uses
+a model at runtime." Runtime inference should be a separately declared app
+capability:
+
+```lua
+app.manifest({
+  modules = { "hull/llm@1" },
+  llm = {
+    models = { "classifier-q4" },
+    network = false,
+    max_tokens = 256,
+  },
+})
+```
+
+This allows embedded apps to run small local classifiers/planners while keeping
+model files, token limits, memory use, and network access explicit.
+
+#### Certification Artifacts
+
+Add a certification bundle generator:
+
+```bash
+hull certify .
+```
+
+Outputs:
+
+- SBOM
+- capability manifest
+- policy result
+- threat model summary
+- test report
+- build attestation
+- agent provenance
+- dependency list
+- known limitations
+- runtime policy
+- update/rollback procedure
+
+#### Phased Plan
+
+| Phase | Feature | Status | Notes |
+|-------|---------|--------|-------|
+| M1 | Policy profiles | Planned | `hull policy check/apply`, named embedded and regulated profiles |
+| M2 | Agent/build provenance | Planned | Signed session and build attestations |
+| M3 | Offline agent mode | Planned | local model, local context, no network, bounded tools |
+| M4 | Capability diff | Planned | binary/source capability delta with risk labels |
+| M5 | Human approval gates | Planned | network, deletion, DB migration, capability change |
+| M6 | Repro build surface | Planned | `build --repro`, `verify-repro`, signed input metadata |
+| M7 | Embedded profiles | Planned | readonly rootfs, watchdog, memory ceilings, target presets |
+| M8 | Local observability bundle | Planned | diagnostics and support export without telemetry |
+| M9 | Runtime LLM capability | Planned | explicit app-level local inference module and policy |
+| M10 | Certification bundle | Planned | SBOM, policy, tests, provenance, update procedure |
+
 ### Future — Advanced Features
 
 | Feature | Status | Notes |

@@ -2917,4 +2917,175 @@ UTEST(js_runtime, import_image_is_a_real_hull_module)
     cleanup_js();
 }
 
+/* ── Async test-runner regression coverage ──────────────────────────
+ *
+ * Before May 2026 the JS test runner invoked each test body via
+ * `JS_Call` and only checked `JS_IsException(ret)`. For async test
+ * bodies (`async () => {...}`) JS_Call returns the Promise object
+ * immediately — non-exception → silent PASS — without awaiting the
+ * body. Every async test "passed" regardless of its assertions.
+ *
+ * The runner is now Promise-aware: it pumps microtasks (and the
+ * async backend tick) until the promise settles, then maps
+ * fulfilled→PASS and rejected→FAIL. These tests lock that in.
+ *
+ * We exercise hl_js_test_run directly with a synthesized test list
+ * — no router, no real HTTP. Synchronous and async, passing and
+ * failing variants. The async-rejecting case is the one the old
+ * runner got wrong; if it ever regresses, it'll trip
+ * `js_test_runner.async_rejecting_test_fails` here. */
+
+#include "hull/runtime/test.h"  /* HlTestCaseResult, hl_js_test_run */
+
+UTEST(js_test_runner, sync_passing_test_marked_pass)
+{
+    init_js();
+    KlRouter router;
+    KlAllocator alloc = kl_allocator_default();
+    kl_router_init(&router, &alloc);
+    hl_js_test_register(js.ctx, &router, &js);
+
+    /* Sync test that returns undefined — should PASS. */
+    JSValue rv = JS_Eval(js.ctx, "test('sync ok', () => {})", 24,
+                         "test", JS_EVAL_TYPE_GLOBAL);
+    JS_FreeValue(js.ctx, rv);
+
+    int total = 0, passed = 0, failed = 0;
+    HlTestCaseResult results[4] = {{0}};
+    hl_js_test_run(js.ctx, &total, &passed, &failed, NULL, results, 4);
+
+    ASSERT_EQ(total, 1);
+    ASSERT_EQ(passed, 1);
+    ASSERT_EQ(failed, 0);
+    ASSERT_TRUE(results[0].passed);
+
+    kl_router_free(&router);
+    cleanup_js();
+}
+
+UTEST(js_test_runner, sync_throwing_test_marked_fail)
+{
+    init_js();
+    KlRouter router;
+    KlAllocator alloc = kl_allocator_default();
+    kl_router_init(&router, &alloc);
+    hl_js_test_register(js.ctx, &router, &js);
+
+    /* Sync test that throws — should FAIL with the message. */
+    const char *src = "test('sync throw', () => { throw new Error('boom') })";
+    JSValue rv = JS_Eval(js.ctx, src, strlen(src), "test",
+                         JS_EVAL_TYPE_GLOBAL);
+    JS_FreeValue(js.ctx, rv);
+
+    int total = 0, passed = 0, failed = 0;
+    HlTestCaseResult results[4] = {{0}};
+    hl_js_test_run(js.ctx, &total, &passed, &failed, NULL, results, 4);
+
+    ASSERT_EQ(total, 1);
+    ASSERT_EQ(passed, 0);
+    ASSERT_EQ(failed, 1);
+    ASSERT_FALSE(results[0].passed);
+    ASSERT_NE(strstr(results[0].error, "boom"), NULL);
+
+    kl_router_free(&router);
+    cleanup_js();
+}
+
+UTEST(js_test_runner, async_resolving_test_marked_pass)
+{
+    init_js();
+    KlRouter router;
+    KlAllocator alloc = kl_allocator_default();
+    kl_router_init(&router, &alloc);
+    hl_js_test_register(js.ctx, &router, &js);
+
+    /* Async test that resolves cleanly — should PASS once the
+     * runner awaits the returned promise. */
+    const char *src = "test('async ok', async () => { return 1 })";
+    JSValue rv = JS_Eval(js.ctx, src, strlen(src), "test",
+                         JS_EVAL_TYPE_GLOBAL);
+    JS_FreeValue(js.ctx, rv);
+
+    int total = 0, passed = 0, failed = 0;
+    HlTestCaseResult results[4] = {{0}};
+    hl_js_test_run(js.ctx, &total, &passed, &failed, NULL, results, 4);
+
+    ASSERT_EQ(total, 1);
+    ASSERT_EQ(passed, 1);
+    ASSERT_EQ(failed, 0);
+    ASSERT_TRUE(results[0].passed);
+
+    kl_router_free(&router);
+    cleanup_js();
+}
+
+UTEST(js_test_runner, async_rejecting_test_fails)
+{
+    /* THE regression test. Pre-fix this would have shown PASS
+     * because JS_Call returned the (rejecting) Promise as a
+     * non-exception value and the runner never awaited it. */
+    init_js();
+    KlRouter router;
+    KlAllocator alloc = kl_allocator_default();
+    kl_router_init(&router, &alloc);
+    hl_js_test_register(js.ctx, &router, &js);
+
+    const char *src =
+        "test('async fail', async () => { throw new Error('assert failed') })";
+    JSValue rv = JS_Eval(js.ctx, src, strlen(src), "test",
+                         JS_EVAL_TYPE_GLOBAL);
+    JS_FreeValue(js.ctx, rv);
+
+    int total = 0, passed = 0, failed = 0;
+    HlTestCaseResult results[4] = {{0}};
+    hl_js_test_run(js.ctx, &total, &passed, &failed, NULL, results, 4);
+
+    ASSERT_EQ(total, 1);
+    ASSERT_EQ(passed, 0);
+    ASSERT_EQ(failed, 1);
+    ASSERT_FALSE(results[0].passed);
+    ASSERT_NE(strstr(results[0].error, "assert failed"), NULL);
+
+    kl_router_free(&router);
+    cleanup_js();
+}
+
+UTEST(js_test_runner, mixed_results_in_one_file)
+{
+    /* Multiple tests, mixed sync/async, mixed pass/fail. The runner
+     * must aggregate totals correctly and not let one async failure
+     * mask later results. */
+    init_js();
+    KlRouter router;
+    KlAllocator alloc = kl_allocator_default();
+    kl_router_init(&router, &alloc);
+    hl_js_test_register(js.ctx, &router, &js);
+
+    const char *src =
+        "test('a sync pass',  () => {});\n"
+        "test('b sync fail',  () => { throw new Error('sync') });\n"
+        "test('c async pass', async () => { return 'ok' });\n"
+        "test('d async fail', async () => { throw new Error('async') });\n";
+    JSValue rv = JS_Eval(js.ctx, src, strlen(src), "test",
+                         JS_EVAL_TYPE_GLOBAL);
+    JS_FreeValue(js.ctx, rv);
+
+    int total = 0, passed = 0, failed = 0;
+    HlTestCaseResult results[8] = {{0}};
+    hl_js_test_run(js.ctx, &total, &passed, &failed, NULL, results, 8);
+
+    ASSERT_EQ(total,  4);
+    ASSERT_EQ(passed, 2);
+    ASSERT_EQ(failed, 2);
+    ASSERT_TRUE (results[0].passed);  /* a sync pass  */
+    ASSERT_FALSE(results[1].passed);  /* b sync fail  */
+    ASSERT_TRUE (results[2].passed);  /* c async pass */
+    ASSERT_FALSE(results[3].passed);  /* d async fail */
+    ASSERT_NE(strstr(results[1].error, "sync"),  NULL);
+    ASSERT_NE(strstr(results[3].error, "async"), NULL);
+
+    kl_router_free(&router);
+    cleanup_js();
+}
+
 UTEST_MAIN();

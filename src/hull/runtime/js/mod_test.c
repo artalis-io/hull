@@ -15,6 +15,7 @@
 #include "hull/runtime/test.h"
 #include "hull/runtime/js.h"
 #include "hull/alloc.h"
+#include "hull/async_backend.h"
 
 #include <keel/request.h>
 
@@ -43,7 +44,21 @@ static HlJSTestState *get_js_test_state(JSContext *ctx)
     return state;
 }
 
-/* test("desc", fn) — callable */
+/* Default per-test timeout in milliseconds. Tests that need more time
+ * (real I/O, heavy compute) pass an `opts.timeout` override. Five seconds
+ * matches the GPU dispatch timeout and is plenty for synthetic-dispatch
+ * assertions that settle in <100ms in practice. */
+#define HL_JS_TEST_DEFAULT_TIMEOUT_MS 5000
+
+/* test(desc, fn)                 — common case: default timeout
+ * test(desc, opts, fn)           — opts may carry { timeout: N_ms }
+ *
+ * The body may be sync or async. Async bodies' returned promises are
+ * driven to settlement by hl_js_test_run; rejected promises (which is
+ * how a failing `await test.eq(...)` surfaces) mark the test as FAIL.
+ * Before the runner became Promise-aware (May 2026) every async test
+ * passed regardless of its assertions — see test_async_runner.c for
+ * the regression coverage. */
 static JSValue js_test_call(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
@@ -53,6 +68,30 @@ static JSValue js_test_call(JSContext *ctx, JSValueConst this_val,
     HlJSTestState *state = get_js_test_state(ctx);
     if (!state) return JS_ThrowInternalError(ctx, "test not initialized");
 
+    /* Distinguish the two call shapes by inspecting argv[1]. If it's
+     * callable, we're in the 2-arg form (desc, fn). Otherwise we
+     * expect (desc, opts, fn) — opts may be any object; missing fields
+     * fall back to defaults. */
+    JSValueConst fn_arg;
+    int32_t timeout_ms = HL_JS_TEST_DEFAULT_TIMEOUT_MS;
+
+    if (JS_IsFunction(ctx, argv[1])) {
+        fn_arg = argv[1];
+    } else if (argc >= 3 && JS_IsFunction(ctx, argv[2])) {
+        fn_arg = argv[2];
+        if (JS_IsObject(argv[1]) && !JS_IsNull(argv[1])) {
+            JSValue t_val = JS_GetPropertyStr(ctx, argv[1], "timeout");
+            if (!JS_IsUndefined(t_val))
+                JS_ToInt32(ctx, &timeout_ms, t_val);
+            JS_FreeValue(ctx, t_val);
+            if (timeout_ms <= 0) timeout_ms = HL_JS_TEST_DEFAULT_TIMEOUT_MS;
+        }
+    } else {
+        return JS_ThrowTypeError(ctx,
+            "test() requires (desc, fn) or (desc, opts, fn) — "
+            "the last argument must be the test function");
+    }
+
     JSValue len_val = JS_GetPropertyStr(ctx, state->cases, "length");
     int32_t idx = 0;
     JS_ToInt32(ctx, &idx, len_val);
@@ -60,7 +99,8 @@ static JSValue js_test_call(JSContext *ctx, JSValueConst this_val,
 
     JSValue entry = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, entry, "desc", JS_DupValue(ctx, argv[0]));
-    JS_SetPropertyStr(ctx, entry, "fn", JS_DupValue(ctx, argv[1]));
+    JS_SetPropertyStr(ctx, entry, "fn",   JS_DupValue(ctx, fn_arg));
+    JS_SetPropertyStr(ctx, entry, "timeout_ms", JS_NewInt32(ctx, timeout_ms));
     JS_SetPropertyUint32(ctx, state->cases, (uint32_t)idx, entry);
 
     return JS_UNDEFINED;
@@ -413,6 +453,54 @@ void hl_js_test_clear(JSContext *ctx)
     state->cases = JS_NewArray(ctx);
 }
 
+/* Record a FAIL into the writer + results array, with formatted error. */
+static void record_fail(FILE *out, HlTestCaseResult *results, int max_results,
+                        int idx, const char *desc, const char *msg)
+{
+    if (out)
+        fprintf(out, "  FAIL  %s\n    %s\n",
+                desc ? desc : "(unnamed)",
+                msg  ? msg  : "unknown error");
+    if (results && idx < max_results) {
+        snprintf(results[idx].name, sizeof(results[idx].name),
+                 "%s", desc ? desc : "(unnamed)");
+        results[idx].passed = 0;
+        snprintf(results[idx].error, sizeof(results[idx].error),
+                 "%s", msg ? msg : "unknown error");
+    }
+}
+
+static void record_pass(FILE *out, HlTestCaseResult *results, int max_results,
+                        int idx, const char *desc)
+{
+    if (out)
+        fprintf(out, "  PASS  %s\n", desc ? desc : "(unnamed)");
+    if (results && idx < max_results) {
+        snprintf(results[idx].name, sizeof(results[idx].name),
+                 "%s", desc ? desc : "(unnamed)");
+        results[idx].passed = 1;
+        results[idx].error[0] = '\0';
+    }
+}
+
+/* Extract a human-readable error message from a JS exception value
+ * (or any value coerced to a string). Caller owns the JSValue copy
+ * but not the C string — buffer must outlive use. */
+static void extract_error_string(JSContext *ctx, JSValueConst err,
+                                 char *buf, size_t buf_size)
+{
+    /* Prefer .message; fall back to String(err). */
+    JSValue msg_val = JS_GetPropertyStr(ctx, err, "message");
+    const char *msg = NULL;
+    if (!JS_IsUndefined(msg_val) && !JS_IsNull(msg_val))
+        msg = JS_ToCString(ctx, msg_val);
+    if (!msg)
+        msg = JS_ToCString(ctx, err);
+    snprintf(buf, buf_size, "%s", msg ? msg : "unknown error");
+    if (msg) JS_FreeCString(ctx, msg);
+    JS_FreeValue(ctx, msg_val);
+}
+
 void hl_js_test_run(JSContext *ctx, int *total, int *passed, int *failed,
                         FILE *out, HlTestCaseResult *results, int max_results)
 {
@@ -426,6 +514,11 @@ void hl_js_test_run(JSContext *ctx, int *total, int *passed, int *failed,
     HlJSTestState *state = get_js_test_state(ctx);
     if (!state) return;
 
+    HlJS *js = state->js;
+    HlRuntime *rt = js ? (HlRuntime *)js : NULL;
+    HlAsyncBackendCtx *async_ctx = rt ? rt->async_ctx : NULL;
+    const HlAsyncBackend *backend = hl_async_backend();
+
     JSValue len_val = JS_GetPropertyStr(ctx, state->cases, "length");
     int32_t count = 0;
     JS_ToInt32(ctx, &count, len_val);
@@ -433,47 +526,100 @@ void hl_js_test_run(JSContext *ctx, int *total, int *passed, int *failed,
 
     for (int32_t i = 0; i < count; i++) {
         JSValue entry = JS_GetPropertyUint32(ctx, state->cases, (uint32_t)i);
-        JSValue desc_val = JS_GetPropertyStr(ctx, entry, "desc");
-        JSValue fn = JS_GetPropertyStr(ctx, entry, "fn");
+        JSValue desc_val    = JS_GetPropertyStr(ctx, entry, "desc");
+        JSValue fn          = JS_GetPropertyStr(ctx, entry, "fn");
+        JSValue timeout_val = JS_GetPropertyStr(ctx, entry, "timeout_ms");
 
         const char *desc = JS_ToCString(ctx, desc_val);
+        int32_t timeout_ms = HL_JS_TEST_DEFAULT_TIMEOUT_MS;
+        JS_ToInt32(ctx, &timeout_ms, timeout_val);
 
         int idx = *total;
         (*total)++;
+
         JSValue ret = JS_Call(ctx, fn, JS_UNDEFINED, 0, NULL);
+        char err_buf[512];
 
         if (JS_IsException(ret)) {
+            /* Sync throw — captured as before. */
             JSValue exc = JS_GetException(ctx);
-            JSValue msg_val = JS_GetPropertyStr(ctx, exc, "message");
-            const char *msg = JS_ToCString(ctx, msg_val);
-            if (out)
-                fprintf(out, "  FAIL  %s\n    %s\n", desc ? desc : "(unnamed)",
-                       msg ? msg : "unknown error");
-            if (results && idx < max_results) {
-                snprintf(results[idx].name, sizeof(results[idx].name),
-                         "%s", desc ? desc : "(unnamed)");
-                results[idx].passed = 0;
-                snprintf(results[idx].error, sizeof(results[idx].error),
-                         "%s", msg ? msg : "unknown error");
-            }
-            if (msg) JS_FreeCString(ctx, msg);
-            JS_FreeValue(ctx, msg_val);
+            extract_error_string(ctx, exc, err_buf, sizeof(err_buf));
             JS_FreeValue(ctx, exc);
+            record_fail(out, results, max_results, idx, desc, err_buf);
             (*failed)++;
-        } else {
-            if (out)
-                fprintf(out, "  PASS  %s\n", desc ? desc : "(unnamed)");
-            if (results && idx < max_results) {
-                snprintf(results[idx].name, sizeof(results[idx].name),
-                         "%s", desc ? desc : "(unnamed)");
-                results[idx].passed = 1;
-                results[idx].error[0] = '\0';
+        }
+        else if (JS_IsObject(ret) && backend && backend->monotonic_ms) {
+            /* Promise-aware path. JS_PromiseState only meaningful on
+             * Promise values; if `ret` is some other object that
+             * happens to pass JS_IsObject we'll still get
+             * JS_PROMISE_PENDING-or-equivalent on the first call and
+             * fall through to the timeout. In practice async test
+             * bodies always return Promises. */
+            uint64_t deadline = backend->monotonic_ms() +
+                                (timeout_ms > 0 ? (uint64_t)timeout_ms : 0);
+            JSPromiseStateEnum pstate = JS_PromiseState(ctx, ret);
+            int is_promise = (pstate == JS_PROMISE_PENDING ||
+                              pstate == JS_PROMISE_FULFILLED ||
+                              pstate == JS_PROMISE_REJECTED);
+
+            if (!is_promise) {
+                /* Sync function returned a non-Promise object — treat
+                 * as PASS like the original code did for any non-
+                 * exception return. */
+                record_pass(out, results, max_results, idx, desc);
+                (*passed)++;
+            } else {
+                /* Pump microtasks (and the async backend if any) until
+                 * the promise settles or the deadline expires. The
+                 * combination handles both pure-assertion async tests
+                 * (only microtasks needed) and tests that perform
+                 * async I/O (timer / http.fetch / compute.async — the
+                 * backend tick advances those). */
+                while ((pstate = JS_PromiseState(ctx, ret)) == JS_PROMISE_PENDING) {
+                    hl_js_run_jobs(js);
+                    if (async_ctx && backend->tick)
+                        backend->tick(async_ctx, 10);
+                    if (timeout_ms > 0 && backend->monotonic_ms() >= deadline)
+                        break;
+                    /* If no async backend is wired and microtasks
+                     * settled nothing, we'd spin — guard by re-
+                     * checking state after a single microtask pass
+                     * and bailing if still PENDING. */
+                    if (!async_ctx) {
+                        if (JS_PromiseState(ctx, ret) == JS_PROMISE_PENDING)
+                            break;
+                    }
+                }
+
+                if (pstate == JS_PROMISE_FULFILLED) {
+                    record_pass(out, results, max_results, idx, desc);
+                    (*passed)++;
+                } else if (pstate == JS_PROMISE_REJECTED) {
+                    JSValue reason = JS_PromiseResult(ctx, ret);
+                    extract_error_string(ctx, reason, err_buf, sizeof(err_buf));
+                    JS_FreeValue(ctx, reason);
+                    record_fail(out, results, max_results, idx, desc, err_buf);
+                    (*failed)++;
+                } else {
+                    /* Still PENDING — treat as timeout/hang. */
+                    snprintf(err_buf, sizeof(err_buf),
+                             "test did not settle within %d ms", timeout_ms);
+                    record_fail(out, results, max_results, idx, desc, err_buf);
+                    (*failed)++;
+                }
             }
+        }
+        else {
+            /* Sync test body that returned a primitive (undefined,
+             * boolean, etc.). Treat as PASS — matches the original
+             * runner's behavior for any non-exception return. */
+            record_pass(out, results, max_results, idx, desc);
             (*passed)++;
         }
 
         JS_FreeValue(ctx, ret);
         if (desc) JS_FreeCString(ctx, desc);
+        JS_FreeValue(ctx, timeout_val);
         JS_FreeValue(ctx, fn);
         JS_FreeValue(ctx, desc_val);
         JS_FreeValue(ctx, entry);
