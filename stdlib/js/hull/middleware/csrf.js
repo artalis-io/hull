@@ -4,6 +4,17 @@
  * @description Stateless CSRF tokens via HMAC-SHA256. Lua parity:
  *   `hull.middleware.csrf`.
  *
+ * Wire format (shared with Lua sibling): `tsHex.hmac_hex`.
+ *   tsHex   = unix timestamp formatted as compact lowercase hex
+ *             (e.g. `"664f4f80"`).
+ *   hmac_hex = HMAC-SHA256(secret, `session_id ":" tsHex`).
+ *
+ * The `:` separator inside the HMAC input is deliberately distinct
+ * from the `.` separator in the wire token, so a session id that
+ * contains `.` cannot be confused with the tsHex prefix. Tokens minted
+ * by one runtime verify in the other; cross-runtime fixture is in
+ * `tests/e2e_csrf_parity.sh`.
+ *
  * Only relevant for cookie/session-based auth. JWT Bearer auth does not
  * need CSRF protection.
  *
@@ -26,8 +37,10 @@ function secretToHex(secret) {
     return hex;
 }
 
-function computeHmac(sessionId, timestamp, secret) {
-    const msg = sessionId + "." + timestamp;
+function computeHmac(sessionId, tsHex, secret) {
+    // ":" separator deliberately distinct from the wire-format "."
+    // separator — see the wire-format note at the top of this file.
+    const msg = sessionId + ":" + tsHex;
     const keyHex = secretToHex(secret);
     return crypto.hmacSha256(msg, keyHex);
 }

@@ -2305,6 +2305,38 @@ UTEST(lua_stdlib, csrf_wrong_session_rejected)
     cleanup_lua_caps();
 }
 
+/* Cross-runtime wire-format fixture. The reference token below was
+ * precomputed for session_id="s1", secret="k", tsHex="1" — i.e. the
+ * HMAC of "s1:1" keyed by hex("k")="6b". The same fixture lives in
+ * tests/hull/runtime/js/test_js.c; both must accept it byte-for-byte
+ * or the Lua and JS sibling middlewares have drifted out of parity. */
+UTEST(lua_stdlib, csrf_cross_runtime_reference_token)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* max_age of 4294967295 (year ~2106 in unix-seconds) keeps the
+     * fixture valid forever for the purposes of this test. */
+    int ok = eval_int(
+        "(function() "
+        "  local csrf = require('hull.middleware.csrf') "
+        "  local ref = '1.6ae78d056ed813a207a55074947fdbeef0ae8c7850acab486cb52bae058956da' "
+        "  return csrf.verify(ref, 's1', 'k', 4294967295) and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    /* Flip one bit of the MAC — must reject. */
+    int rej = eval_int(
+        "(function() "
+        "  local csrf = require('hull.middleware.csrf') "
+        "  local bad = '1.7ae78d056ed813a207a55074947fdbeef0ae8c7850acab486cb52bae058956da' "
+        "  return csrf.verify(bad, 's1', 'k', 4294967295) and 0 or 1 "
+        "end)()");
+    ASSERT_EQ(rej, 1);
+
+    cleanup_lua_caps();
+}
+
 /* ── hull.middleware.auth tests (smoke — modules load and expose API) */
 
 UTEST(lua_cap, crypto_hmac_sha256_verify)

@@ -2068,6 +2068,37 @@ UTEST(js_stdlib, csrf_wrong_session_rejected)
     cleanup_js_caps();
 }
 
+/* Cross-runtime wire-format fixture. The reference token below was
+ * precomputed for sessionId="s1", secret="k", tsHex="1" — i.e. the
+ * HMAC of "s1:1" keyed by hex("k")="6b". The same fixture lives in
+ * tests/hull/runtime/lua/test_lua.c; both must accept it byte-for-byte
+ * or the Lua and JS sibling middlewares have drifted out of parity. */
+UTEST(js_stdlib, csrf_cross_runtime_reference_token)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { csrf } from 'hull:middleware:csrf';\n"
+        "const ref = '1.6ae78d056ed813a207a55074947fdbeef0ae8c7850acab486cb52bae058956da';\n"
+        "globalThis.__test_csrf_ref_ok = csrf.verify(ref, 's1', 'k', 4294967295) ? 1 : 0;\n"
+        /* Flip one bit of the MAC — must reject. */
+        "const bad = '1.7ae78d056ed813a207a55074947fdbeef0ae8c7850acab486cb52bae058956da';\n"
+        "globalThis.__test_csrf_ref_bad = csrf.verify(bad, 's1', 'k', 4294967295) ? 0 : 1;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__test_csrf_ref_ok"), 1);
+    ASSERT_EQ(eval_int("globalThis.__test_csrf_ref_bad"), 1);
+
+    cleanup_js_caps();
+}
+
 /* ── hull:middleware:auth tests (smoke — modules load and expose API) */
 
 UTEST(js_cap, crypto_hmac_sha256_verify)

@@ -3,9 +3,15 @@
 -- @module hull.middleware.csrf
 -- @license AGPL-3.0-or-later
 --
--- Tokens are `hex_timestamp.hmac_hex` where the HMAC covers
--- `session_id .. ":" .. timestamp`. No DB storage — verification is
--- pure HMAC + age check.
+-- Tokens are `tsHex.hmac_hex` where the HMAC covers
+-- `session_id .. ":" .. tsHex` and `tsHex` is the unix timestamp
+-- formatted as compact lowercase hex (e.g. `"664f4f80"`). No DB
+-- storage — verification is pure HMAC + age check.
+--
+-- The wire format is shared with the JS sibling
+-- (`stdlib/js/hull/middleware/csrf.js`); tokens minted by one
+-- runtime must verify in the other. Cross-runtime fixture is in
+-- `tests/e2e_csrf_parity.sh`.
 --
 -- Only relevant for cookie-based session auth. JWT Bearer auth does
 -- NOT need CSRF protection (browsers don't auto-send Bearer tokens).
@@ -48,15 +54,15 @@ end
 --
 -- @tparam string session_id  Session id (or any per-user secret nonce).
 -- @tparam string secret      HMAC key.
--- @treturn string  Token in `hex_timestamp.hmac_hex` form. Embed in
+-- @treturn string  Token in `tsHex.hmac_hex` form. Embed in
 --   form `<input type="hidden">` or send via `X-CSRF-Token` header.
 -- @usage
 -- local token = csrf.generate(req.ctx.session_id, app_secret)
 function csrf.generate(session_id, secret)
-    local ts = tostring(time.now())
-    local ts_hex = str_to_hex(ts)
+    local ts = time.now()
+    local ts_hex = string.format("%x", ts)
 
-    local message = session_id .. ":" .. ts
+    local message = session_id .. ":" .. ts_hex
     local key_hex = str_to_hex(secret)
     local mac = crypto.hmac_sha256(message, key_hex)
 
@@ -93,32 +99,28 @@ function csrf.verify(token, session_id, secret, max_age)
         return false
     end
 
-    -- Decode hex timestamp back to string
-    if #ts_hex % 2 ~= 0 then
-        return false
-    end
-    local ts_chars = {}
-    for i = 1, #ts_hex, 2 do
-        local byte = tonumber(ts_hex:sub(i, i + 1), 16)
-        if not byte then
-            return false
-        end
-        ts_chars[#ts_chars + 1] = string.char(byte)
-    end
-    local ts_str = table.concat(ts_chars)
-    local ts = tonumber(ts_str)
+    -- ts_hex is hex of the numeric unix timestamp (e.g. "664f4f80").
+    -- tonumber with base 16 returns nil on any non-hex byte, which is
+    -- exactly the rejection we want.
+    local ts = tonumber(ts_hex, 16)
     if not ts then
         return false
     end
 
-    -- Check expiry
+    -- Check expiry (and reject clearly-future timestamps to bound
+    -- replay windows; mirrors the JS sibling's ts > now + 60 check).
     local now = time.now()
     if now - ts > max_age then
         return false
     end
+    if ts > now + 60 then
+        return false
+    end
 
-    -- Recompute HMAC and compare
-    local message = session_id .. ":" .. ts_str
+    -- Recompute HMAC and compare. Both halves of the HMAC input use
+    -- the canonical wire encoding (tsHex), so a token minted by the
+    -- JS sibling verifies bit-for-bit here.
+    local message = session_id .. ":" .. ts_hex
     local key_hex = str_to_hex(secret)
     local expected_mac = crypto.hmac_sha256(message, key_hex)
 
