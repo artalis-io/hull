@@ -2,11 +2,28 @@
 
 ## One sentence
 
-Hull is a capability-secure runtime that turns AI-generated code into self-contained, distributable, local-first products — sandboxed by default, no cloud, no hosting, no dependencies.
+Hull is a capability-secure runtime that turns AI-generated code into
+self-contained, distributable, local-first products — sandboxed by default, no
+cloud, no hosting, no runtime dependencies.
+
+## The sharper thesis
+
+Hull is the secure runtime and build system for agent-generated local software.
+
+The first wave of AI coding tools made agents productive. The next wave has to
+make them governable. Hull's bet is that the valuable market is not simply
+"generate more code"; it is letting organizations use AI agents to build real
+software while constraining what the agent and the generated app can touch,
+proving what happened, and shipping an artifact the customer owns.
+
+That matters most where cloud AI, unrestricted developer machines, npm-style
+dependency graphs, and ambient filesystem/network authority are unacceptable:
+regulated enterprises, industrial/OT teams, defense, healthcare, financial
+institutions, embedded product teams, and air-gapped environments.
 
 ## The problem
 
-AI coding assistants (Claude Code, Cursor, Copilot, Codex) solved code generation. Millions of people can now describe software and have it written. But the output is always the same: a React frontend, a Node.js backend, a Postgres database, and a cloud deployment problem.
+AI coding assistants (Claude Code, Cursor, Copilot, Codex) solved code generation. Millions of people can now describe software and have it written. But the default output is usually the same: a React frontend, a Node.js backend, a Postgres database, and a cloud deployment problem.
 
 The vibecoder — the person who builds software by describing it to an AI — swapped one dependency (coding skill) for another (cloud infrastructure). They don't own anything more than before. They just rent different things.
 
@@ -18,17 +35,33 @@ Hull is that piece.
 
 Hull is a capability-secure runtime for local-first applications. It is not a do-everything framework — it is a sandboxed environment where AI-generated code runs inside declared capability boundaries. The app states what it can access (files, hosts, environment variables, GPU devices), and the kernel enforces it. The agent writes the code; Hull constrains what that code can do.
 
+The same architecture extends naturally to the agent itself. Hull's shipped
+agent surface gives models structured tools (`hull agent routes`, schema,
+tests, requests, manifest analysis, logs, eval, deployment checks) rather than
+raw shell access. The roadmap extends this into a local agent runtime that can
+use open-weight models through `bitnet.c`, `llama.cpp`, Ollama, or compatible
+local servers. In that planned workflow, the model inspects, patches, tests,
+and builds through Hull's bounded tool surface. The app it produces runs inside
+Hull's bounded runtime.
+
 The developer writes backend logic in Lua or JavaScript, frontend in HTML5/JS, data in SQLite. `hull build` compiles everything into a single portable executable — around 5 MB on aarch64, ~3.66 MB for compute-only deployments — that runs on Linux, macOS, Windows, FreeBSD, OpenBSD, and NetBSD.
 
 The whole stack is vendored: Keel (HTTP server), Lua 5.4 + QuickJS (dual scripting), SQLite (database), mbedTLS (TLS client), TweetNaCl (Ed25519 signatures), pledge/unveil (kernel sandbox), miniz (gzip), the Mozilla CA bundle (HTTPS without a system store), and embedded TinyCC (so `hull build` works with zero system dependencies). Optional: WAMR for WASM compute, wgpu-native for GPU. No external package managers, no transitive dependency graphs, no runtime installation. The user double-clicks a file and has a working application. Their data never leaves their machine.
 
-In a world where AI writes the code, the runtime must be the trust boundary. Unrestricted frameworks assume trusted code — Hull assumes untrusted code and proves containment. This is the architectural difference: Hull apps can't exfiltrate data, can't access undeclared files, can't connect to undeclared hosts, can't spawn processes, can't open GPU devices not in the manifest. Not by policy — by kernel enforcement (pledge/unveil on Linux/Cosmo/OpenBSD, Seatbelt on macOS).
+In a world where AI writes the code, the runtime must be the trust boundary. Unrestricted frameworks assume trusted code — Hull assumes untrusted code and proves containment. This is the architectural difference: Hull apps cannot access undeclared files, connect to undeclared hosts, spawn processes, or open GPU devices not in the manifest. A Hull app can only communicate through declared capabilities. Not by convention — by kernel enforcement where available (pledge/unveil on Linux/Cosmo/OpenBSD, Seatbelt on macOS) plus Hull's C capability layer.
 
-Hull ships batteries included: routing, authentication, RBAC, sessions, JWT, CSRF, transactional outbox/inbox, idempotency keys, rate limiting, CORS, health checks, ETags, HTML templates, input validation, form parsing, full-text search (SQLite FTS5), i18n, CSV, image codecs, SMTP, WebSockets, SSE, background timers, audit logging. WASM compute plugins for CPU-bound work; GPU compute shaders for parallel data. Plus a complete AI-agent surface — 26 `hull agent` subcommands exposing routes, schema, tests, request previews, manifest analysis, and structured eval as JSON, all also reachable over MCP. A vibecoder describes an invoicing app to an AI, the AI writes Lua, `hull build` produces a file. That file is the product.
+Hull ships batteries included: routing, authentication, RBAC, sessions, JWT, CSRF, transactional outbox/inbox, idempotency keys, rate limiting, CORS, health checks, ETags, HTML templates, input validation, form parsing, full-text search (SQLite FTS5), i18n, CSV, image codecs, SMTP, WebSockets, SSE, background timers, audit logging. WASM compute plugins for CPU-bound work; GPU compute shaders for parallel data. Plus a complete AI-agent surface — over two dozen `hull agent` subcommands exposing routes, schema, tests, request previews, manifest analysis, and structured eval as JSON, all also reachable over MCP. A vibecoder describes an invoicing app to an AI, the AI writes Lua, `hull build` produces a file. That file is the product.
+
+For secure and embedded environments, the planned local-agent workflow is
+stronger: an engineer or operator runs a local model, gives it a bounded goal,
+Hull records the session, applies patches through policy, runs tests/builds,
+signs the output, and produces provenance. The organization gets AI
+productivity without granting the agent or the generated code uncontrolled
+authority.
 
 ## Why now
 
-Three forces are converging:
+Five forces are converging:
 
 **1. AI coding is mainstream.** Claude Code, Cursor, and Copilot have millions of active users. The number of people who can describe software and have it built is growing exponentially. Every one of them hits the same wall: deployment. This wall didn't exist two years ago because these people weren't building software two years ago.
 
@@ -36,7 +69,14 @@ Three forces are converging:
 
 **3. Supply chain security is a board-level concern.** SolarWinds, Log4j, xz-utils. "How many dependencies does this have?" is a question executives ask now. Hull's answer — all vendored, no package managers, no build-time downloads, the entire C surface auditable in a few days — is the strongest possible position.
 
-**4. AI-generated code is untrusted code.** When an AI writes an application, nobody has read every line. The vibecoder described what they wanted — they didn't audit what they got. Traditional frameworks assume the developer trusts the code they wrote. Hull assumes the opposite: the code is untrusted, and the runtime must prove containment. This is a new requirement that didn't exist before AI coding — and no existing framework addresses it.
+**4. AI-generated code is untrusted code.** When an AI writes an application, nobody has read every line. The vibecoder described what they wanted — they didn't audit what they got. Traditional frameworks assume the developer trusts the code they wrote. Hull assumes the opposite: the code is untrusted, and the runtime must prove containment. This is a new requirement that did not exist at this scale before AI coding, and few mainstream app frameworks address it as their core design constraint.
+
+**5. Enterprises want AI coding, but not unconstrained AI coding.** Regulated
+teams are under pressure to adopt AI development tools, but many cannot send
+source or data to cloud models, cannot allow agents arbitrary shell/network
+access, and cannot accept unaudited dependency sprawl. Hull's local model path,
+bounded tools, capability manifests, signed sessions, SBOMs, and reproducible
+builds turn AI development into something a security team can review.
 
 The timing window is narrow. Whoever builds the vibecoder-to-product pipeline first accumulates the trust, community, and ecosystem that defines the category. This is a land grab.
 
@@ -44,7 +84,8 @@ The timing window is narrow. Whoever builds the vibecoder-to-product pipeline fi
 
 Hull's cost structure is unusually favorable for a software business.
 
-**Revenue model:** Two streams — one-time licenses and recurring platform services.
+**Revenue model:** Three streams — commercial licenses, optional platform
+services, and enterprise local-agent deployments.
 
 **Stream 1: Commercial licenses.** One-time purchase.
 
@@ -78,25 +119,93 @@ These services are by design optional. Every Hull app works without them today. 
 | Hull Verify | Free | Trust infrastructure, not a revenue line |
 | Hull Sync | $5/month per user | Per-user; covers encrypted storage and relay |
 
-**Why this matters:** License revenue is front-loaded — a spike at each release, then a trough. Once shipped, platform services would provide steady monthly recurring revenue that smooths the curve. Together, the two streams would give Hull both the high-margin economics of one-time sales and the predictability of recurring revenue — without the ethical contradiction of locking customers into infrastructure they can't leave.
+**Why this matters:** License revenue is front-loaded — a spike at each release, then a trough. Once shipped, platform services would provide steady monthly recurring revenue that smooths the curve. Together, these streams would give Hull both the high-margin economics of one-time sales and the predictability of recurring revenue — without the ethical contradiction of locking customers into infrastructure they can't leave.
 
-**Gross margin: ~95%.** Costs are salaries, CI (GitHub Actions, runners), CDN for downloads/docs, and — once shipped — modest infrastructure for hosted services. These are largely fixed. Adding the 10,000th customer costs the same as adding the 10th.
+**Stream 3: Enterprise local agent workbench *(planned, highest-ACV wedge).***
+Recurring enterprise licensing for regulated teams that want on-prem/offline AI
+development with constrained tools and signed provenance.
 
-**Break-even is low.** A 2-3 person team with near-zero COGS needs hundreds of licenses — not thousands — to cover costs. At $99-499 per license plus platform services, the math works early.
+| Package | Target | Model |
+|---------|--------|-------|
+| Hull Local Agent Workbench | Regulated engineering teams | $25k-100k/year per team/site |
+| Hull Secure Build & Attestation | Security/compliance teams | $50k-150k/year platform license |
+| Hull Embedded/OT Profile | Industrial and embedded teams | $50k-200k/year + support |
+| Air-gapped Enterprise Bundle | Defense/government/classified networks | $150k-500k/year high-touch contract |
 
-**Expansion:** Enterprise contracts ($2,000-10,000/year) for compliance documentation and priority support. Hull Marketplace (curated app directory, 15% commission). Training and certification. Migration consulting (Excel/SaaS to Hull).
+This is the more financially attractive wedge than solo vibecoders. Individual
+licenses create adoption and community; enterprise/offline agent development
+captures the willingness to pay. These buyers pay for trust, auditability,
+offline operation, and support — not just convenience.
+
+**Gross margin.** Self-serve software licenses and hosted-light services can
+approach ~95% gross margin because the marginal cost is a signed key, a build,
+or a relay account. Enterprise air-gapped deployments and certification support
+are lower-margin because they include services, but they are high-ACV and can
+fund the platform without requiring consumer-scale adoption.
+
+**Break-even is low.** A 2-3 person team with near-zero self-serve COGS needs
+hundreds of licenses or a small number of enterprise pilots — not thousands of
+customers — to cover costs. At $99-499 per self-serve license plus planned
+enterprise contracts, the math works early.
+
+**Expansion:** Enterprise contracts for compliance documentation, priority
+support, on-prem local-agent deployments, certification bundles, and embedded
+profiles. Hull Marketplace (curated app directory, 15% commission). Training
+and certification. Migration consulting (Excel/SaaS to Hull).
 
 ## The market
 
-We don't have credible TAM/SAM/SOM numbers because this category doesn't exist yet. Market sizing for a category that doesn't exist is fiction, and we won't insult you with fabricated numbers.
+We don't have credible TAM/SAM/SOM numbers because this exact category doesn't
+exist yet. Market sizing for a category that doesn't exist is fiction, and we
+won't insult you with fabricated numbers.
 
 What we know:
 
 - **AI coding assistants have millions of users.** Some fraction want to distribute what they build. Today they can't — Hull removes that wall.
 - **SMBs are massively underserved.** Millions of small businesses run on spreadsheets because custom software was too expensive. A vibecoder building a Hull app for €500 is cheaper than any SaaS subscription over 2 years.
-- **High-value verticals align naturally.** Defense and government (air-gapped, zero supply chain, kernel sandbox). Medical and healthcare (HIPAA, encrypted database, offline operation). Legal and financial (data residency, client confidentiality). These sectors have high willingness to pay and compliance requirements that Hull satisfies by architecture.
+- **AI coding agents are becoming a major software budget.** Independent analyst
+  estimates vary widely, but the direction is clear: code-generation agents are
+  one of the fastest-growing AI software categories. The crowded market is
+  horizontal cloud coding assistants. Hull's wedge is the part those tools
+  handle poorly: local, governed, auditable agentic development.
+- **High-value verticals align naturally.** Defense and government (air-gapped,
+  zero supply chain, kernel sandbox). Medical and healthcare (HIPAA, offline
+  operation, auditability). Legal and financial (data residency, client
+  confidentiality). Industrial/OT (offline factory-floor tools, local
+  diagnostics, no cloud dependency). Embedded product teams (single-file local
+  controllers, telemetry tools, update/config services). These sectors have high
+  willingness to pay and compliance requirements that Hull satisfies by
+  architecture.
 
-The honest answer: we'll know the market size when we see adoption. Hull's cost structure means we don't need a large market to be profitable.
+The most attractive initial market is regulated/on-prem agentic software
+development:
+
+| Segment | Why Hull fits | Sales motion |
+|---------|---------------|--------------|
+| Regulated enterprises | Want AI coding without cloud code exposure or unconstrained agents | Enterprise platform/security sale |
+| Industrial/OT teams | Need local tools, offline operation, audit logs, no dependency sprawl | Departmental pilot -> site license |
+| Defense/government | Air-gapped/open-weight model use, provenance, SBOM, reproducible builds | Slow, high-ACV enterprise sale |
+| Healthcare/lab automation | Local data, validated workflows, support bundles, auditability | Compliance-led pilot |
+| Embedded product teams | Control-adjacent apps, telemetry, config/update, local inference | Engineering platform sale |
+| Solo builders/SMBs | Great adoption channel, lower ACV | Bottom-up community/licensing |
+
+The honest answer: we'll know the market size when we see adoption. Hull's cost
+structure means we don't need a large market to be profitable. The first
+commercial target should be regulated enterprise and secure industrial teams
+that want agentic software development but need on-prem/offline execution,
+explicit capabilities, audit trails, and reproducible signed artifacts.
+
+Bottom-up beachhead:
+
+| Milestone | Assumption | Annualized revenue |
+|-----------|------------|--------------------|
+| 5 secure pilots | $25k average pilot | $125k |
+| 10 team/site licenses | $75k average contract | $750k |
+| 20 enterprise/OT customers | $125k average contract | $2.5M |
+| 50 enterprise/OT customers | $150k average contract | $7.5M |
+
+This is not a TAM claim. It is the practical reason Hull can be a good business
+before it becomes a broad developer platform.
 
 ## The moat
 
@@ -108,11 +217,24 @@ The moat is the ecosystem:
 
 **Trust accumulation.** Every signed Hull binary, every verify.gethull.dev check, every AGPL application with visible source builds a trust network. Ed25519 signatures create a verifiable chain from source to binary. Trust compounds over time and doesn't transfer to competitors.
 
+**Agent provenance.** As agents write more software, the defensible asset is not
+only the runtime; it is the provenance layer around agent-generated changes:
+model identity, prompts, context packs, tool calls, patches, tests, policy
+results, and build hashes. A signed agent session attached to a signed binary is
+a compliance primitive that generic coding assistants do not provide.
+
 **Community gravity.** AGPL means every free Hull application is a showcase. Users see the source, see the platform, see the commercial license as the natural upgrade. The more apps that exist, the more discoverable Hull becomes.
 
 **Ejection as trust signal.** `hull eject` copies the build tool into the project. Developers can leave anytime. This paradoxically increases loyalty — people trust platforms that let them leave. No lock-in means the platform must earn retention through value, which is exactly the kind of retention that lasts.
 
 **Simplicity as structural advantage.** Vendored dependency set with zero package-manager graphs, a small well-bounded capability boundary in C, and a build system that doesn't pull anything from the internet. A 2-3 person team maintains the entire platform. Competitors building on Electron/Node/npm stacks need much larger teams for parity. Hull's simplicity is a cost advantage that compounds.
+
+**Offline model optionality.** Hull can integrate with local open-weight
+inference backends (`bitnet.c`, `llama.cpp`, Ollama) without making any model a
+platform dependency. `bitnet.c` is Artalis-owned code, so bundling it as an
+optional CPU-first provider is a licensing-clean path to air-gapped inference;
+keeping model weights outside ordinary app bundles preserves small artifacts and
+clean model licensing.
 
 **Platform services as non-coercive lock-in.** Hull Build, Hull Verify, and Hull Sync create value without creating dependency. Every service is optional and replaceable. But once a developer is building with hosted `hull build`, verifying with verify.gethull.dev, and syncing with Hull Sync, switching costs are real — not because we lock them in, but because the integrated experience is better than the alternatives. This is the same dynamic that makes GitHub sticky despite git being decentralized.
 
@@ -124,8 +246,16 @@ The moat is the ecosystem:
 | JetBrains | Developer tooling, perpetual fallback licenses | $600M+/year | Proves developer platforms can build large businesses |
 | Panic (Transmit, Nova) | Small team, premium dev tools, one-time purchase | Profitable, private | Proves small teams can build premium, profitable dev tool businesses |
 | Laravel (Spark, Forge, Vapor) | Open-source framework + commercial tools | $25M+/year | Proves AGPL/open-source + commercial dual license works |
+| GitLab | Self-managed DevSecOps platform | Public company | Shows enterprise willingness to pay for on-prem developer infrastructure |
+| HashiCorp | Infrastructure automation, open-core enterprise | Acquired for $6.4B | Shows policy/workflow infrastructure can become strategic enterprise software |
+| Snyk | Developer security platform | Private, venture-backed | Shows security review can be sold inside developer workflows |
+| Chainguard | Software supply-chain security | Private, venture-backed | Comparable trust/SBOM/provenance buyer |
+| Tailscale | Zero-trust networking with strong developer adoption | Private, venture-backed | Shows security infrastructure can win through simplicity |
 
-Hull's cost structure is leaner than all of these. No servers to operate for customers. No per-customer infrastructure costs. No SaaS operational burden.
+Hull's cost structure is leaner than the enterprise comparables and closer to
+the indie tools for self-serve distribution. No servers are required for
+customers to run what they build. Enterprise services are optional, not the
+runtime dependency.
 
 ## The risks (honest)
 
@@ -140,6 +270,14 @@ Hull's cost structure is leaner than all of these. No servers to operate for cus
 **Platform risk.** Hull depends on Cosmopolitan C for cross-platform binaries. If Cosmopolitan development stalls, Hull's "runs anywhere" promise weakens. Mitigation: Cosmopolitan is open source and actively maintained by Justine Tunney. Hull could fall back to per-platform builds — less elegant, still functional.
 
 **Competitive response.** A well-funded competitor (or a big tech company) could build something similar. Mitigation: first-mover ecosystem advantage. The combination of Cosmopolitan APE + Lua + SQLite + kernel sandbox + Ed25519 licensing + AGPL dual license is specific enough that a generic "local-first framework" from a big company would lack the coherence. And big companies don't ship AGPL.
+
+**Mission-critical positioning risk.** Hull is suitable for semantic and
+control-adjacent layers — mission planning, policy, command validation,
+telemetry, local UI, config/update, audit, and bounded local inference. It is
+not a hard realtime flight-control or actuator runtime today. Mitigation:
+position correctly, integrate through narrow protocol boundaries with certified
+controllers/autopilots, and build embedded profiles, watchdogs, simulation/HIL
+tests, and certification artifacts over time.
 
 ## Survivability
 
@@ -168,13 +306,16 @@ Small team, low burn, high leverage. The platform's simplicity is intentional �
 - Can open doors in high-value verticals (defense, medical, financial)
 - Have patience for category creation — this is a 3-5 year build, not a 12-month flip
 
-**Where Hull is today (as of 2026-05):** Hull v0.1.0 is feature-complete and approaching release. Core platform, dual runtime, capability layer, kernel sandbox, signature chain (three Ed25519 layers), `hull build` with embedded TinyCC, WASM compute (interpreter + AOT + Memory64), GPU compute (wgpu-native), the full stdlib (sessions, CSRF, RBAC, idempotency, outbox/inbox, FTS5, i18n, ETags, health, etc.), agent platform (26 `hull agent` subcommands + MCP), `hull update` (signed self-update), three completed security audits with all 73 findings closed. The product exists; what's left for v1.0 is mostly polish, docs, and ecosystem.
+**Where Hull is today (as of 2026-05):** Hull v0.1.0 is feature-complete and approaching release. Core platform, dual runtime, capability layer, kernel sandbox, signature chain (three Ed25519 layers), `hull build` with embedded TinyCC, WASM compute (interpreter + AOT + Memory64), GPU compute (wgpu-native), the full stdlib (sessions, CSRF, RBAC, idempotency, outbox/inbox, FTS5, i18n, ETags, health, etc.), agent platform (over two dozen `hull agent` subcommands + MCP), `hull update` (signed self-update), and three completed security audits with all findings closed as of the May 2026 audit cycle. The product exists; what's left for v1.0 is mostly polish, docs, and ecosystem.
 
 **What the capital would fund:**
 
 - v0.1.0 release engineering and post-release stabilization
 - PostgreSQL backend (validates the DB-vtable abstraction)
 - Worker-pool concurrency expansion for multi-user server use cases
+- Local Agent Runtime: model provider layer (`bitnet.c`, `llama.cpp`, Ollama), `hull develop`, bounded tool policies, signed agent sessions
+- Mission-critical/embedded features: policy profiles, capability diffs, reproducible build attestation, certification bundles, local diagnostics
+- Optional `bitnet.c` developer-tool bundle for single-binary offline inference
 - gethull.dev website, docs site, and example gallery
 - Hosted platform services (Hull Build, Hull Verify, Hull Sync) — planned post-v0.1.0
 - Initial community building and developer relations
