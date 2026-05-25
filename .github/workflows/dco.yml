@@ -1,0 +1,60 @@
+name: DCO
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  check:
+    name: Sign-off check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # We need the full PR commit range to walk every commit.
+          # actions/checkout's default depth=1 only gives us the merge
+          # commit, which would let unsigned PR commits slip through.
+          fetch-depth: 0
+
+      - name: Walk PR commits and verify Signed-off-by
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -e
+          # Iterate every commit unique to the PR branch.
+          missing=()
+          while read -r sha; do
+            [ -z "$sha" ] && continue
+            author_name=$(git show -s --format='%an' "$sha")
+            author_email=$(git show -s --format='%ae' "$sha")
+            expected="Signed-off-by: ${author_name} <${author_email}>"
+            body=$(git show -s --format='%B' "$sha")
+            # Accept any Signed-off-by line whose name+email matches
+            # the commit author. (We don't require the line to come
+            # from a particular committer slot; just that the author
+            # has signed off.)
+            if ! printf '%s\n' "$body" | grep -Fqx "$expected"; then
+              missing+=("$sha  $author_name <$author_email>")
+            fi
+          done < <(git log --format='%H' "${BASE}..${HEAD}")
+
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::The following commits lack a matching Signed-off-by line:"
+            for m in "${missing[@]}"; do echo "  $m"; done
+            echo ""
+            echo "Every commit must include:"
+            echo "    Signed-off-by: <commit author name> <commit author email>"
+            echo ""
+            echo "Add the sign-off with one of:"
+            echo "    git commit -s                                # for new commits"
+            echo "    git commit --amend -s --no-edit              # amend most recent"
+            echo "    git rebase HEAD~N --signoff                  # last N commits"
+            echo ""
+            echo "By signing off, you accept the Contributor Terms (CCT 1.0)"
+            echo "in CONTRIBUTING.md, including assignment of copyright in"
+            echo "your contribution to Artalis Ltd."
+            exit 1
+          fi
+          n=$(git log --format='%H' "${BASE}..${HEAD}" | wc -l | tr -d ' ')
+          echo "OK — all $n PR commit(s) carry a matching Signed-off-by line."

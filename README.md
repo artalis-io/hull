@@ -1416,6 +1416,14 @@ Hull is approaching v0.1.0. The complete distribution lifecycle is in place:
 
 All core features are implemented and tested across Linux (gcc + clang), macOS, and Cosmopolitan APE; capability sandbox enforced via pledge/unveil (Linux/Cosmo/OpenBSD) or Seatbelt (macOS). See [docs/roadmap.md](docs/roadmap.md) for what's next after v0.1.0 (PostgreSQL backend, module ecosystem, HTTP/2, agent platform Phase 5).
 
+## Changelog & Contributing
+
+See [CHANGELOG.md](CHANGELOG.md) for release notes and
+[CONTRIBUTING.md](CONTRIBUTING.md) for the contributor terms (CCT 1.0)
+and the sign-off mechanics. Every commit in every PR must carry a
+`Signed-off-by` line acknowledging copyright assignment to Artalis Ltd.;
+a CI check enforces this.
+
 ## License
 
 Hull is dual-licensed:
