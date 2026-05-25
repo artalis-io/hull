@@ -223,6 +223,8 @@
         <a href="#compare" class="link">Compare</a>
         <a href="#how" class="link">How</a>
         <a href="#security" class="link">Security</a>
+        <a href="#trust" class="link">Trust chain</a>
+        <a href="/verify.html" class="link">Verify</a>
         <a href="https://github.com/artalis-io/hull#readme" class="link">Docs</a>
       </nav>
 
@@ -1083,6 +1085,296 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
         </div>
 
       </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────────────────
+       TRUST CHAIN — Three layers of signed trust, all browser-verifiable.
+       Mirrors docs/security.md sections 1-3 and 6.
+       ───────────────────────────────────────────────────────────────── -->
+  <section id="trust" class="hairline-t">
+    <div class="max-w-6xl mx-auto px-6 py-20 md:py-28">
+
+      <div class="grid lg:grid-cols-12 gap-10 lg:gap-16 items-start mb-12">
+        <div class="lg:col-span-5">
+          <div class="text-xs uppercase tracking-widest text-mute-500 mb-3">Trust chain</div>
+          <h2 class="text-2xl md:text-3xl font-semibold text-paper-50 tracking-tight">
+            Three signatures.
+            One trust root you can replace.
+          </h2>
+          <p class="mt-6 text-mute-400 leading-relaxed">
+            Every artefact you receive from the Hull ecosystem — the
+            <code class="text-paper-100 text-[0.78rem]">hull</code>
+            binary, the platform library inside it, the app a developer ships
+            you — is signed by a different key and verified by a different
+            tool. No single compromise unwinds the chain.
+          </p>
+          <p class="mt-4 text-mute-400 leading-relaxed">
+            The whole stack is verifiable from a browser tab. You
+            don&rsquo;t need to have Hull installed to confirm the binary
+            you&rsquo;re about to install is genuine.
+          </p>
+          <div class="mt-8 flex flex-wrap items-center gap-3">
+            <a href="/verify.html" class="btn btn-primary">
+              <i data-lucide="shield-check" class="w-4 h-4"></i>
+              Verify in the browser
+            </a>
+            <a href="https://github.com/artalis-io/hull/blob/main/docs/security.md" class="btn btn-ghost">
+              <i data-lucide="book-open" class="w-4 h-4"></i>
+              Security model (full doc)
+            </a>
+          </div>
+        </div>
+
+        <div class="lg:col-span-7 space-y-4">
+          <!-- Tier 1: Release -->
+          <div class="surface" style="background:#0f0f10;border:1px solid rgba(255,255,255,0.08);border-radius:.5rem;overflow:hidden">
+            <div class="px-5 py-4 hairline-b flex items-center justify-between">
+              <div class="flex items-center gap-2.5">
+                <span class="text-[0.7rem] uppercase tracking-widest text-mute-500 font-medium">Tier 1</span>
+                <span class="text-sm font-semibold text-paper-50">Release</span>
+              </div>
+              <span class="text-[0.7rem] text-mute-500">hull.sha256.sig</span>
+            </div>
+            <div class="px-5 py-4">
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-x-6 gap-y-3 text-[0.8125rem]">
+                <div>
+                  <div class="text-[0.65rem] uppercase tracking-widest text-mute-500 mb-1">Signed object</div>
+                  <div class="text-paper-100">SHA-256 manifest of the four release binaries</div>
+                </div>
+                <div>
+                  <div class="text-[0.65rem] uppercase tracking-widest text-mute-500 mb-1">Signer key</div>
+                  <div class="text-paper-100">Release key, offline at gethull.dev</div>
+                </div>
+                <div>
+                  <div class="text-[0.65rem] uppercase tracking-widest text-mute-500 mb-1">Verifier</div>
+                  <div class="text-paper-100"><code class="text-[0.78rem]">hull update</code>, <code class="text-[0.78rem]">hull verify-release</code>, browser</div>
+                </div>
+              </div>
+              <p class="mt-3 text-xs text-mute-400 leading-relaxed">
+                Stops a hijacked CDN, a swapped binary on a stale mirror,
+                a downgrade attack pointing you at an older signed release.
+              </p>
+            </div>
+          </div>
+
+          <!-- Tier 2: Platform -->
+          <div class="surface" style="background:#0f0f10;border:1px solid rgba(255,255,255,0.08);border-radius:.5rem;overflow:hidden">
+            <div class="px-5 py-4 hairline-b flex items-center justify-between">
+              <div class="flex items-center gap-2.5">
+                <span class="text-[0.7rem] uppercase tracking-widest text-mute-500 font-medium">Tier 2</span>
+                <span class="text-sm font-semibold text-paper-50">Platform</span>
+              </div>
+              <span class="text-[0.7rem] text-mute-500">package.sig &middot; inner</span>
+            </div>
+            <div class="px-5 py-4">
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-x-6 gap-y-3 text-[0.8125rem]">
+                <div>
+                  <div class="text-[0.65rem] uppercase tracking-widest text-mute-500 mb-1">Signed object</div>
+                  <div class="text-paper-100">The Hull platform library + integrity canary, per architecture</div>
+                </div>
+                <div>
+                  <div class="text-[0.65rem] uppercase tracking-widest text-mute-500 mb-1">Signer key</div>
+                  <div class="text-paper-100">Platform key, offline at gethull.dev (or your fork)</div>
+                </div>
+                <div>
+                  <div class="text-[0.65rem] uppercase tracking-widest text-mute-500 mb-1">Verifier</div>
+                  <div class="text-paper-100"><code class="text-[0.78rem]">hull verify</code>, browser</div>
+                </div>
+              </div>
+              <p class="mt-3 text-xs text-mute-400 leading-relaxed">
+                Stops a developer shipping &ldquo;Hull-built&rdquo; binaries
+                with a custom runtime that pretends to enforce the sandbox.
+                Canary in the binary lets the verifier prove the real platform
+                is present.
+              </p>
+            </div>
+          </div>
+
+          <!-- Tier 3: App -->
+          <div class="surface" style="background:#0f0f10;border:1px solid rgba(255,255,255,0.08);border-radius:.5rem;overflow:hidden">
+            <div class="px-5 py-4 hairline-b flex items-center justify-between">
+              <div class="flex items-center gap-2.5">
+                <span class="text-[0.7rem] uppercase tracking-widest text-mute-500 font-medium">Tier 3</span>
+                <span class="text-sm font-semibold text-paper-50">App developer</span>
+              </div>
+              <span class="text-[0.7rem] text-mute-500">package.sig &middot; outer</span>
+            </div>
+            <div class="px-5 py-4">
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-x-6 gap-y-3 text-[0.8125rem]">
+                <div>
+                  <div class="text-[0.65rem] uppercase tracking-widest text-mute-500 mb-1">Signed object</div>
+                  <div class="text-paper-100">App binary hash + manifest + every embedded source file&rsquo;s hash</div>
+                </div>
+                <div>
+                  <div class="text-[0.65rem] uppercase tracking-widest text-mute-500 mb-1">Signer key</div>
+                  <div class="text-paper-100">The app developer&rsquo;s own key</div>
+                </div>
+                <div>
+                  <div class="text-[0.65rem] uppercase tracking-widest text-mute-500 mb-1">Verifier</div>
+                  <div class="text-paper-100"><code class="text-[0.78rem]">hull verify</code>, browser, runtime <code class="text-[0.78rem]">--verify-sig</code></div>
+                </div>
+              </div>
+              <p class="mt-3 text-xs text-mute-400 leading-relaxed">
+                Stops a tampered app (modified bytes, swapped manifest,
+                expanded capabilities) being passed off as the original.
+                You hold the developer&rsquo;s pubkey separately as your
+                identity anchor.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ─── Trust-anchor & self-sovereignty ─── -->
+      <div class="grid lg:grid-cols-12 gap-10 lg:gap-16 items-start mb-12">
+
+        <div class="lg:col-span-5">
+          <div class="text-xs uppercase tracking-widest text-mute-500 mb-3">Trust anchor</div>
+          <h3 class="text-xl font-semibold text-paper-50 tracking-tight">
+            One pinned key, two safe replacement paths.
+          </h3>
+        </div>
+
+        <div class="lg:col-span-7 space-y-4 text-sm text-mute-400 leading-relaxed">
+          <p>
+            By default, your trust anchor is <strong class="text-paper-100">gethull.dev</strong> &mdash;
+            the release and platform pubkeys for that anchor are compiled
+            into every Hull binary as
+            <code class="text-paper-100 text-[0.78rem]">HL_RELEASE_PUBKEY_HEX</code>
+            and <code class="text-paper-100 text-[0.78rem]">HL_PLATFORM_PUBKEY_HEX</code>,
+            and into the
+            <a href="/verify.html" class="text-paper-100 underline decoration-mute-500 hover:decoration-paper-50">browser verifier</a>
+            as JavaScript constants.
+            Anyone can compare what&rsquo;s in your local binary to what&rsquo;s on the live site &mdash;
+            the values are not secret.
+          </p>
+          <p>
+            If you don&rsquo;t want that anchor:
+          </p>
+          <ol class="list-decimal pl-5 space-y-2">
+            <li>
+              <strong class="text-paper-100">Fork the source.</strong>
+              Hull is AGPL-3.0. Generate your own release + platform keys,
+              replace the two
+              <code class="text-paper-100 text-[0.78rem]">HL_*_PUBKEY_HEX</code>
+              values in
+              <code class="text-paper-100 text-[0.78rem]">include/hull/{release,signature}.h</code>,
+              ship the rebuilt binary to your customers. Your customers verify
+              against <strong class="text-paper-100">your</strong> keys, not gethull.dev&rsquo;s.
+              The architecture stops working with the upstream supply chain
+              the moment your fork ships &mdash; intentionally.
+            </li>
+            <li>
+              <strong class="text-paper-100">Override per-run.</strong>
+              Pass <code class="text-paper-100 text-[0.78rem]">--platform-key&nbsp;&lt;file&gt;</code>
+              to <code class="text-paper-100 text-[0.78rem]">hull verify</code>,
+              or <code class="text-paper-100 text-[0.78rem]">--pubkey&nbsp;&lt;hex&gt;</code>
+              to <code class="text-paper-100 text-[0.78rem]">hull verify-release</code>,
+              to validate against any key you trust. Useful for ad-hoc auditing of
+              a build that&rsquo;s NOT yours.
+            </li>
+          </ol>
+          <p>
+            Trust chain end-to-end:
+            <span class="text-paper-100">customer</span> &nbsp;&rarr;&nbsp;
+            <span class="text-paper-100">platform publisher</span> (you or gethull.dev) &nbsp;&rarr;&nbsp;
+            <span class="text-paper-100">app developer</span>.
+            Pull any link out by replacing its pubkey; the rest still verifies.
+          </p>
+        </div>
+      </div>
+
+      <!-- ─── What Hull provides / does not (yet) ─── -->
+      <div>
+        <div class="text-xs uppercase tracking-widest text-mute-500 mb-3">Honest scorecard</div>
+        <h3 class="text-xl font-semibold text-paper-50 tracking-tight mb-6">
+          What v0.1 ships, and what it doesn&rsquo;t (yet).
+        </h3>
+
+        <div class="grid md:grid-cols-2 gap-px bg-white/[0.06] border border-white/[0.06] rounded-md overflow-hidden">
+
+          <!-- Ships -->
+          <div class="bg-ink-900 p-6">
+            <div class="flex items-center gap-2 mb-4">
+              <i data-lucide="check-circle-2" class="w-4 h-4 text-accent"></i>
+              <span class="text-sm font-semibold text-paper-50">Ships in v0.1</span>
+            </div>
+            <ul class="space-y-3 text-sm text-mute-400 leading-relaxed">
+              <li class="flex gap-2">
+                <span class="text-accent mt-0.5">&check;</span>
+                <span><strong class="text-paper-100">Three-layer Ed25519 signature scheme.</strong> Release, platform, app developer &mdash; cryptographic primitives wired and verifiable.</span>
+              </li>
+              <li class="flex gap-2">
+                <span class="text-accent mt-0.5">&check;</span>
+                <span><strong class="text-paper-100">Signed release manifest.</strong> Every <code class="text-paper-100 text-[0.78rem]">hull update</code> verifies <code class="text-paper-100 text-[0.78rem]">hull.sha256.sig</code> against the embedded release pubkey before <code class="text-paper-100 text-[0.78rem]">rename(2)</code>.</span>
+              </li>
+              <li class="flex gap-2">
+                <span class="text-accent mt-0.5">&check;</span>
+                <span><strong class="text-paper-100">Browser verifier (this site).</strong> Drop a manifest, a built app, a binary &mdash; runs locally in your browser via vendored TweetNaCl. No upload, no telemetry.</span>
+              </li>
+              <li class="flex gap-2">
+                <span class="text-accent mt-0.5">&check;</span>
+                <span><strong class="text-paper-100">CLI verifier.</strong> <code class="text-paper-100 text-[0.78rem]">hull verify-release</code> + <code class="text-paper-100 text-[0.78rem]">hull verify</code> against the embedded keys.</span>
+              </li>
+              <li class="flex gap-2">
+                <span class="text-accent mt-0.5">&check;</span>
+                <span><strong class="text-paper-100">Manifest-declared capabilities.</strong> Every <code class="text-paper-100 text-[0.78rem]">fs/env/host</code> access checked at a C boundary the script can&rsquo;t cross.</span>
+              </li>
+              <li class="flex gap-2">
+                <span class="text-accent mt-0.5">&check;</span>
+                <span><strong class="text-paper-100">Kernel sandbox.</strong> <code class="text-paper-100 text-[0.78rem]">pledge</code> + <code class="text-paper-100 text-[0.78rem]">unveil</code> on Linux/Cosmo; Seatbelt SBPL on macOS. Violation = SIGKILL or EPERM.</span>
+              </li>
+              <li class="flex gap-2">
+                <span class="text-accent mt-0.5">&check;</span>
+                <span><strong class="text-paper-100">Self-sovereignty path.</strong> AGPL source; fork, rotate the two pubkeys, ship your own trust root.</span>
+              </li>
+            </ul>
+          </div>
+
+          <!-- Not yet -->
+          <div class="bg-ink-900 p-6">
+            <div class="flex items-center gap-2 mb-4">
+              <i data-lucide="alert-triangle" class="w-4 h-4 text-amber-400"></i>
+              <span class="text-sm font-semibold text-paper-50">Not yet &mdash; honest gaps</span>
+            </div>
+            <ul class="space-y-3 text-sm text-mute-400 leading-relaxed">
+              <li class="flex gap-2">
+                <span class="text-mute-500 mt-0.5">&ndash;</span>
+                <span><strong class="text-paper-100">Platform-sig is wired but inactive in built apps.</strong> The keys and verifier code exist, but the release workflow doesn&rsquo;t yet sign the platform library and <code class="text-paper-100 text-[0.78rem]">hull build</code> doesn&rsquo;t yet pass the signed blob through into a built app&rsquo;s <code class="text-paper-100 text-[0.78rem]">package.sig</code>. Tracked for v0.1.x.</span>
+              </li>
+              <li class="flex gap-2">
+                <span class="text-mute-500 mt-0.5">&ndash;</span>
+                <span><strong class="text-paper-100">No reproducible builds.</strong> The signature proves the binary <em>was</em> the one the developer published. It doesn&rsquo;t prove the developer didn&rsquo;t sneak custom native code in. Reproducible builds + a trusted rebuild service close this; Phase 9 on the roadmap.</span>
+              </li>
+              <li class="flex gap-2">
+                <span class="text-mute-500 mt-0.5">&ndash;</span>
+                <span><strong class="text-paper-100">No key transparency log.</strong> If a publisher&rsquo;s key is compromised and rotated, current users have no automatic notification. Re-pinning is manual until we wire something like Sigsum.</span>
+              </li>
+              <li class="flex gap-2">
+                <span class="text-mute-500 mt-0.5">&ndash;</span>
+                <span><strong class="text-paper-100">No timestamp authority.</strong> Signatures don&rsquo;t carry a verified timestamp, so a stale-but-once-valid release can&rsquo;t be distinguished from a current one by signature alone. Mitigated today by version pinning and SHA-256 manifests.</span>
+              </li>
+              <li class="flex gap-2">
+                <span class="text-mute-500 mt-0.5">&ndash;</span>
+                <span><strong class="text-paper-100">Developer-pubkey distribution is out-of-band.</strong> You verify a developer&rsquo;s app against their pubkey, but the pubkey itself comes from their repo / website / personal page. The same TLS-trust problem most ecosystems have. No PKI yet.</span>
+              </li>
+              <li class="flex gap-2">
+                <span class="text-mute-500 mt-0.5">&ndash;</span>
+                <span><strong class="text-paper-100">install.sh is SHA-256 only.</strong> First install trusts <code class="text-paper-100 text-[0.78rem]">https://gethull.dev/install.sh</code> via TLS plus the SHA-256 it checks against. The Ed25519 enforcement kicks in on the first <code class="text-paper-100 text-[0.78rem]">hull update</code>. Bootstrap-of-trust problem; the same problem all signed-update schemes have.</span>
+              </li>
+            </ul>
+          </div>
+
+        </div>
+
+        <p class="mt-6 text-xs text-mute-500 leading-relaxed max-w-3xl">
+          The threat model, attack-by-attack mitigations, and the
+          self-sovereignty walkthrough live in
+          <a href="https://github.com/artalis-io/hull/blob/main/docs/security.md" class="link underline decoration-mute-600 hover:decoration-paper-50">docs/security.md</a>.
+        </p>
+      </div>
+
     </div>
   </section>
 
