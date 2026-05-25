@@ -49,12 +49,12 @@ app.main((ctx) => {
         }
     }
 
-    const greeting = "hello " + name;
+    const greeting = `hello ${name}`;
     const digest = crypto.sha256(greeting);
     const user = ctx.env.USER || "unknown";
 
-    ctx.stdout.write(greeting + "\n");
-    ctx.stdout.write("  digest = " + digest.slice(0, 16) + "...\n");
-    ctx.stdout.write("  user   = " + user + "\n");
+    ctx.stdout.write(`${greeting}\n`);
+    ctx.stdout.write(`  digest = ${digest.slice(0, 16)}...\n`);
+    ctx.stdout.write(`  user   = ${user}\n`);
     return 0;
 });

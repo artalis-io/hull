@@ -32,6 +32,6 @@ app.main(async (ctx) => {
         return 130;
     }
 
-    ctx.stdout.write(fruits[picked] + "\n");
+    ctx.stdout.write(`${fruits[picked]}\n`);
     return 0;
 });

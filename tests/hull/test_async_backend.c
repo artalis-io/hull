@@ -43,7 +43,10 @@ UTEST(async_backend, init_and_free)
 {
     Fixture f;
     ASSERT_EQ(fixture_init(&f), 0);
-    ASSERT_NE(f.ctx, NULL);
+    /* HlAsyncBackendCtx is opaque (forward-declared); cast to void* so
+     * utest.h's __typeof__(x + 0) doesn't do pointer arithmetic on an
+     * incomplete type (GCC -Werror). */
+    ASSERT_NE((void *)f.ctx, (void *)NULL);
     fixture_free(&f);
 }
 

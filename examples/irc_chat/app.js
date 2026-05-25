@@ -18,8 +18,8 @@ import { auth } from "hull:middleware:auth";
 import { session } from "hull:middleware:session";
 import { time } from "hull:time";
 import { validate } from "hull:validate";
-import { wsServer } from "hull:ws-server";              // broadcast, connections
 import { wsClient } from "hull:ws-client";  // connect (outbound federation)
+import { wsServer } from "hull:ws-server";              // broadcast, connections
 
 app.manifest({
     hosts: ["127.0.0.1"],

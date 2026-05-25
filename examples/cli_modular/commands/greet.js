@@ -8,6 +8,6 @@ export function run(ctx) {
         ctx.stderr.write("greet: missing NAME argument\n");
         return 2;
     }
-    ctx.stdout.write(greeting(name) + "\n");
+    ctx.stdout.write(`${greeting(name)}\n`);
     return 0;
 }

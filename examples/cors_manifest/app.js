@@ -5,8 +5,8 @@
 // CORS headers are handled automatically by Keel — no middleware code needed.
 
 import { app } from "hull:app";
-import { log } from "hull:log";
 import { httpServer } from "hull:http-server";
+import { log } from "hull:log";
 
 app.manifest({
     cors: {

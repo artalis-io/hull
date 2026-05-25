@@ -20,6 +20,12 @@
 
 /* ── Helper: write data to a file ──────────────────────────────────── */
 
+/* write_blob is only called from the embedded-platform / embedded-tcc
+ * extraction paths below. On the cosmocc `platform-cosmo` initial
+ * build step (which compiles this translation unit before either
+ * HL_BUILD_EMBEDDED* or HL_ENABLE_TCC is defined), the function is
+ * defined-but-unused and -Werror=unused-function kills the build. */
+#if defined(HL_BUILD_EMBEDDED) || defined(HL_BUILD_EMBEDDED_MULTIARCH) || defined(HL_ENABLE_TCC)
 static int write_blob(const char *path, const unsigned char *data, size_t len)
 {
     FILE *f = fopen(path, "wb");
@@ -29,6 +35,7 @@ static int write_blob(const char *path, const unsigned char *data, size_t len)
     fclose(f);
     return (written == len) ? 0 : -1;
 }
+#endif
 
 /* ── Multi-arch platform API ───────────────────────────────────────── */
 

@@ -1,7 +1,7 @@
 // models/user.js — Persistence layer for the User resource.
 
-import { db }     from "hull:db";
 import { crypto } from "hull:crypto";
+import { db }     from "hull:db";
 import { time }   from "hull:time";
 
 export function create(input) {
@@ -26,7 +26,7 @@ export function findById(id) {
 }
 
 export function list(opts) {
-    const limit = (opts && opts.limit) || 50;
+    const limit = (opts?.limit) || 50;
     return db.query(
         "SELECT id, email, name, created_at FROM users " +
         "ORDER BY created_at DESC LIMIT ?",

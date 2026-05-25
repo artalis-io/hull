@@ -4,10 +4,10 @@
 // Demonstrates middleware chaining: request ID, logging, rate limiting, CORS
 
 import { app } from "hull:app";
+import { httpServer } from "hull:http-server";
 import { log } from "hull:log";
 import { cors } from "hull:middleware:cors";
 import { ratelimit } from "hull:middleware:ratelimit";
-import { httpServer } from "hull:http-server";
 import { time } from "hull:time";
 
 app.manifest({

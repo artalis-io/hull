@@ -39,13 +39,13 @@ app.main(async (ctx) => {
 
     let mod;
     try {
-        mod = await import("./commands/" + cmd + ".js");
+        mod = await import(`./commands/${cmd}.js`);
     } catch (_e) {
-        ctx.stderr.write("mytool: unknown command '" + cmd + "'\n\n");
+        ctx.stderr.write(`mytool: unknown command '${cmd}'\n\n`);
         usage(ctx.stderr);
         return 1;
     }
 
-    log.info("running " + cmd);
+    log.info(`running ${cmd}`);
     return mod.run(subCtx);
 });

@@ -197,10 +197,9 @@ int hl_dev_state_drain(HlDevState *s)
             size_t llen = i - start;
             /* Concatenate accumulated partial + this segment. */
             if (s->partial_len > 0) {
-                size_t need = s->partial_len + llen;
-                if (need >= HL_DEV_LOG_LINE_MAX) need = HL_DEV_LOG_LINE_MAX - 1;
-                /* Reuse partial buffer as a scratch — copy into a local
-                 * buffer to keep things simple. */
+                /* Copy into a local merge buffer; pcopy + llen are
+                 * clamped to sizeof merged below, so we don't need a
+                 * separate "need" pre-check. */
                 char merged[HL_DEV_LOG_LINE_MAX];
                 size_t pcopy = s->partial_len;
                 if (pcopy > sizeof merged) pcopy = sizeof merged;

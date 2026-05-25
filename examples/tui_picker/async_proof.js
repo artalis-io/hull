@@ -35,7 +35,7 @@ app.main(async (ctx) => {
     while (keyName === null) {
         tui.clear();
         tui.print(1, 1, "Press any key to stop the background ticker.");
-        tui.print(1, 2, "Background counter: " + counter);
+        tui.print(1, 2, `Background counter: ${counter}`);
         tui.flush();
         const ev = await tui.poll(-1);
         if (ev && ev.kind === "key") keyName = ev.key;

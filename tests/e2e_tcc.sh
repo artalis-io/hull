@@ -81,7 +81,10 @@ fi
 WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/hull_e2e_tcc.XXXXXX")
 mkdir -p "$WORKDIR/myapp"
 cat > "$WORKDIR/myapp/app.lua" << 'EOF'
-app.manifest({})
+-- app.get / .post / .use are installed by hull/http-server; the
+-- intrinsic `app` only carries .manifest / .main / .router. Declare
+-- it explicitly so the fixture loads under the module resolver.
+app.manifest({ modules = { "hull/http-server@1" } })
 app.get("/", function(req, res) res:text("hello from tcc-built hull") end)
 app.get("/echo/:msg", function(req, res) res:text(req.params.msg) end)
 EOF
