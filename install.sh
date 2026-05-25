@@ -103,7 +103,8 @@ detect_platform() {
 #
 # Available assets:
 #   hull-cosmo            (universal APE: linux/darwin/windows/bsd × x86_64/arm64)
-#   hull-linux-x86_64     (native ELF)
+#   hull-linux-x86_64     (native ELF, x86_64)
+#   hull-linux-aarch64    (native ELF, ARM64 — Graviton, DGX, Ampere, Pi 4+)
 #   hull-darwin-arm64     (native Mach-O)
 select_asset() {
     if [ "$HULL_FLAVOR" = "cosmo" ]; then
@@ -114,6 +115,7 @@ select_asset() {
     if [ "$HULL_FLAVOR" = "native" ]; then
         case "${OS_NAME}-${ARCH_NAME}" in
             linux-x86_64)  ASSET=hull-linux-x86_64 ;;
+            linux-arm64)   ASSET=hull-linux-aarch64 ;;
             darwin-arm64)  ASSET=hull-darwin-arm64 ;;
             *) err "no native binary for ${OS_NAME}-${ARCH_NAME}. Set HULL_FLAVOR=cosmo"
                exit 3 ;;
@@ -124,8 +126,9 @@ select_asset() {
     # auto: prefer native, fall back to cosmo APE
     case "${OS_NAME}-${ARCH_NAME}" in
         linux-x86_64)  ASSET=hull-linux-x86_64 ;;
+        linux-arm64)   ASSET=hull-linux-aarch64 ;;
         darwin-arm64)  ASSET=hull-darwin-arm64 ;;
-        linux-arm64|darwin-x86_64|other-*|*-other)
+        darwin-x86_64|other-*|*-other)
             ASSET=hull-cosmo ;;
         *) ASSET=hull-cosmo ;;
     esac

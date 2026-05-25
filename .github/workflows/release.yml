@@ -51,6 +51,9 @@ jobs:
           - name: linux-x86_64
             os: ubuntu-latest
             artifact: hull-linux-x86_64
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+            artifact: hull-linux-aarch64
           - name: darwin-arm64
             os: macos-latest
             artifact: hull-darwin-arm64
@@ -92,9 +95,10 @@ jobs:
       - name: Flatten artifacts
         run: |
           mkdir -p dist
-          mv artifacts/hull-cosmo/hull-cosmo               dist/hull-cosmo
-          mv artifacts/hull-linux-x86_64/hull-linux-x86_64 dist/hull-linux-x86_64
-          mv artifacts/hull-darwin-arm64/hull-darwin-arm64  dist/hull-darwin-arm64
+          mv artifacts/hull-cosmo/hull-cosmo                 dist/hull-cosmo
+          mv artifacts/hull-linux-x86_64/hull-linux-x86_64   dist/hull-linux-x86_64
+          mv artifacts/hull-linux-aarch64/hull-linux-aarch64 dist/hull-linux-aarch64
+          mv artifacts/hull-darwin-arm64/hull-darwin-arm64   dist/hull-darwin-arm64
 
       - name: Make binaries executable
         run: chmod +x dist/*
@@ -102,7 +106,7 @@ jobs:
       - name: Compute SHA-256 checksums
         working-directory: dist
         run: |
-          sha256sum hull-cosmo hull-linux-x86_64 hull-darwin-arm64 > hull.sha256
+          sha256sum hull-cosmo hull-linux-x86_64 hull-linux-aarch64 hull-darwin-arm64 > hull.sha256
           cat hull.sha256
 
       - name: Sign release manifest (Ed25519)
@@ -134,7 +138,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # Build asset list — include hull.sha256.sig only if it was produced.
-          assets=(dist/hull-cosmo dist/hull-linux-x86_64 dist/hull-darwin-arm64 dist/hull.sha256)
+          assets=(dist/hull-cosmo dist/hull-linux-x86_64 dist/hull-linux-aarch64 dist/hull-darwin-arm64 dist/hull.sha256)
           if [ -f dist/hull.sha256.sig ]; then
             assets+=(dist/hull.sha256.sig)
           fi

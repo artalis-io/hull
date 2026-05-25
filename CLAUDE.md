@@ -23,7 +23,7 @@ End-users install Hull with:
 curl -fsSL https://raw.githubusercontent.com/artalis-io/hull/main/install.sh | sh
 ```
 
-`install.sh` (POSIX, ~250 lines) detects OS/arch via `uname`, picks `hull-linux-x86_64` / `hull-darwin-arm64` / `hull-cosmo` from the latest GitHub release, verifies the SHA-256 from `hull.sha256`, and installs to `~/.local/bin/hull` (or `/usr/local/bin` if root). Knobs: `HULL_VERSION`, `HULL_PREFIX`, `HULL_FLAVOR=cosmo|native`, `HULL_FORCE=1`, `HULL_DRY_RUN=1`.
+`install.sh` (POSIX, ~250 lines) detects OS/arch via `uname`, picks `hull-linux-x86_64` / `hull-linux-aarch64` / `hull-darwin-arm64` / `hull-cosmo` from the latest GitHub release, verifies the SHA-256 from `hull.sha256`, and installs to `~/.local/bin/hull` (or `/usr/local/bin` if root). Knobs: `HULL_VERSION`, `HULL_PREFIX`, `HULL_FLAVOR=cosmo|native`, `HULL_FORCE=1`, `HULL_DRY_RUN=1`.
 
 Shell completions for bash, zsh, fish live in `completions/`. They cover every subcommand, `--compiler=tcc|system|cc|...`, agent subcommands, deploy targets, etc. See `completions/README.md`.
 
@@ -32,11 +32,13 @@ Tested by `tests/e2e_install.sh` (`make e2e-install` — runs install.sh in dry-
 ## Release Process
 
 Releases are tagged commits (`v0.1.0`, `v0.1.1`, …) that trigger
-`.github/workflows/release.yml`. The workflow runs three platform
-builds in parallel (`hull-linux-x86_64`, `hull-darwin-arm64`,
-`hull-cosmo`), computes `hull.sha256` over the three artifacts,
-signs that manifest with the offline Ed25519 release key, and
-publishes a GitHub release with all five files. End-user `hull
+`.github/workflows/release.yml`. The workflow runs four platform
+builds in parallel — `hull-linux-x86_64`, `hull-linux-aarch64`
+(Graviton / DGX / Ampere / Pi 4+ — `runs-on: ubuntu-24.04-arm`),
+`hull-darwin-arm64`, and the universal `hull-cosmo` APE — computes
+`hull.sha256` over the four artifacts, signs that manifest with the
+offline Ed25519 release key, and publishes a GitHub release with
+all six files. End-user `hull
 update` then verifies `hull.sha256.sig` against the public key
 embedded at build time as `HL_RELEASE_PUBKEY_HEX` (in
 `include/hull/release.h`) before atomically `rename(2)`-ing the
@@ -58,7 +60,7 @@ new binary into place.
 |---|------|
 | 1 | Confirm CI green on the commit to be tagged. The release workflow re-runs `make`, signs from the freshly built native-linux binary, and publishes — broken CI means a broken release. |
 | 2 | `git tag -a vX.Y.Z -m "Hull vX.Y.Z" && git push origin vX.Y.Z` |
-| 3 | Watch `.github/workflows/release.yml`; on success the GitHub release lands with `hull-cosmo`, `hull-linux-x86_64`, `hull-darwin-arm64`, `hull.sha256`, and `hull.sha256.sig`. |
+| 3 | Watch `.github/workflows/release.yml`; on success the GitHub release lands with `hull-cosmo`, `hull-linux-x86_64`, `hull-linux-aarch64`, `hull-darwin-arm64`, `hull.sha256`, and `hull.sha256.sig`. |
 | 4 | Smoke-test on a clean machine: `curl -fsSL https://raw.githubusercontent.com/artalis-io/hull/main/install.sh \| sh && hull update --check`. |
 
 ### Invariants
@@ -498,7 +500,7 @@ Each command is a separate `.c`/`.h` under `src/hull/commands/`. Adding a new co
 
 **`hull build --compiler=<backend>`** — Select the C compiler backend for `hull build`. Options: `tcc` (embedded TinyCC, compile-only), `system` (system cc/gcc/clang, no tcc fallback), or an explicit compiler path. Default: embedded TinyCC if available, otherwise system cc. The compiler abstraction uses `HlCompilerVtable` (`include/hull/compiler.h`); backends live in `src/hull/compiler.c` and `src/hull/compiler_tcc.c`.
 
-**`hull update [--check] [--force] [--channel=stable|beta] [--repo=ORG/NAME]`** — Self-update from GitHub releases. Fetches the latest release metadata via `api.github.com`, picks the asset matching this binary's OS/arch (`hull-linux-x86_64`, `hull-darwin-arm64`, or `hull-cosmo` fallback), downloads via HTTPS using the embedded Mozilla CA bundle (Phase D4), verifies the manifest's Ed25519 signature against the embedded `HL_RELEASE_PUBKEY_HEX` (when configured), verifies SHA-256 against `hull.sha256` from the same release, and atomically replaces the running binary via `rename(2)`. `--check` exits after the version compare without installing. No external dependencies — uses keel's `KlRedirectClient` for HTTPS, mbedTLS for SHA-256, TweetNaCl for Ed25519. Pure C implementation in `src/hull/commands/update.c`.
+**`hull update [--check] [--force] [--channel=stable|beta] [--repo=ORG/NAME]`** — Self-update from GitHub releases. Fetches the latest release metadata via `api.github.com`, picks the asset matching this binary's OS/arch (`hull-linux-x86_64`, `hull-linux-aarch64`, `hull-darwin-arm64`, or `hull-cosmo` fallback), downloads via HTTPS using the embedded Mozilla CA bundle (Phase D4), verifies the manifest's Ed25519 signature against the embedded `HL_RELEASE_PUBKEY_HEX` (when configured), verifies SHA-256 against `hull.sha256` from the same release, and atomically replaces the running binary via `rename(2)`. `--check` exits after the version compare without installing. No external dependencies — uses keel's `KlRedirectClient` for HTTPS, mbedTLS for SHA-256, TweetNaCl for Ed25519. Pure C implementation in `src/hull/commands/update.c`.
 
 **`hull sign-release <manifest> --key <secret_key>`** — Sign a release manifest (typically `hull.sha256`) with an Ed25519 secret key. Writes `<manifest>.sig` (128 hex chars). Used by the GitHub Actions release workflow; never invoked by end users. See [docs/release_signing.md](docs/release_signing.md).
 
