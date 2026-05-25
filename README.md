@@ -178,7 +178,7 @@ Cosmopolitan APE binaries run on Linux, macOS, Windows, FreeBSD, OpenBSD, and Ne
 ├─────────────────────────────────────────────┤
 │  Standard Library (stdlib/)                 │  ← cors, ratelimit, csrf, auth, jwt, session
 ├─────────────────────────────────────────────┤
-│  Runtimes (Lua 5.4 + QuickJS)              │  ← Sandboxed interpreters
+│  Runtimes (Lua 5.4 + QuickJS)               │  ← Sandboxed interpreters
 ├─────────────────────────────────────────────┤
 │  Capability Layer (src/hull/cap/)           │  ← C enforcement boundary
 │  fs, db, crypto, time, env, http, gpu, tool │  ← audit logging (--audit)
