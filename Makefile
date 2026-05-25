@@ -1851,21 +1851,15 @@ $(BUILDDIR)/test_dispatch: $(TESTDIR)/hull/commands/test_dispatch.c $(CMD_OBJS) 
 		$(KEEL_LIB) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(WGPU_LIB) $(WGPU_FRAMEWORKS) -lm -lpthread
 
 # Signature verification test — needs crypto + app_entries_default + vfs.
-# Compile a TEST-ONLY signature.o that overrides HL_PLATFORM_PUBKEY_HEX
-# back to all-zeros, restoring the placeholder bypass. The test creates
-# its own platform keypair on the fly; without the bypass, the pinning
-# check in hl_verify_startup rejects any platform key that doesn't
-# match the embedded one. (Production signature.o keeps the real key.)
-SIG_TEST_OBJ := $(BUILDDIR)/signature_test.o
-$(SIG_TEST_OBJ): $(SRCDIR)/hull/signature.c | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) \
-		-UHL_PLATFORM_PUBKEY_HEX \
-		-DHL_PLATFORM_PUBKEY_HEX='"0000000000000000000000000000000000000000000000000000000000000000"' \
-		-c -o $@ $<
-
-$(BUILDDIR)/test_signature: $(TESTDIR)/hull/test_signature.c $(SIG_TEST_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(TEST_COMMON_DEPS) | $(BUILDDIR)
+# Uses the production signature.o; the all-zeros placeholder in
+# HL_PLATFORM_PUBKEY_HEX activates the pinning bypass that the test
+# relies on. When the platform-sig chain is fully wired
+# (roadmap_next.md §2) and the real pubkey is embedded, this rule
+# should grow a -DHL_PLATFORM_PUBKEY_HEX="\"0...0\"" override so the
+# test's locally-generated platform keypair isn't rejected by pinning.
+$(BUILDDIR)/test_signature: $(TESTDIR)/hull/test_signature.c $(SIG_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(SIG_TEST_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(TEST_COMMON_LIBS)
+		$(SIG_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(TEST_COMMON_LIBS)
 
 # Release manifest sign/verify test — needs release.c + crypto
 $(BUILDDIR)/test_release: $(TESTDIR)/hull/test_release.c $(RELEASE_OBJ) $(TEST_COMMON_DEPS) | $(BUILDDIR)

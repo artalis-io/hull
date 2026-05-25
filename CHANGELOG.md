@@ -10,7 +10,7 @@ release-artifact layout).
 
 _Nothing yet._
 
-## [0.1.1] — 2026-05-25
+## [0.1.1] — 2026-05-26
 
 Patch release. Two reproducible v0.1.0 bugs that broke first-time
 user experience on Linux:
@@ -42,10 +42,26 @@ user experience on Linux:
 ### Improved
 
 - `HL_PLATFORM_PUBKEY_HEX` and `HL_RELEASE_PUBKEY_HEX` macros are
-  now `#ifndef`-guarded in their headers so tests (and future
-  rotation tooling) can override them at compile time via
-  `-DHL_*_PUBKEY_HEX=...`. Production builds inherit the real
+  now `#ifndef`-guarded in their headers so tests, self-hosted
+  forks, and future rotation tooling can override them at compile
+  time via `-DHL_*_PUBKEY_HEX=...`. Production builds inherit the
   embedded values unchanged.
+
+### Reverted
+
+- `HL_PLATFORM_PUBKEY_HEX` is back to the all-zeros placeholder.
+  v0.1.0 shipped a real value, but the rest of the platform-sig
+  chain (canary emission in `libhull_platform.a`, release-time
+  signed manifest, `hull build` pass-through, runtime
+  enforcement — tracked as item 2 in `docs/roadmap_next.md`)
+  isn't in place yet. With a real pubkey embedded and no actual
+  signed platform artefact, the pinning bypass in
+  `hl_verify_startup` turns off and rejects every `hull build`
+  output. The placeholder restores the documented "wired but
+  inactive" state until the full chain ships. The platform key
+  itself is still backed up offline and in the
+  `HULL_PLATFORM_KEY` GitHub secret — no key regeneration needed
+  when the chain is ready.
 
 ### Trust model
 

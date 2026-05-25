@@ -56,12 +56,25 @@ typedef struct ShJsonValue ShJsonValue;
  * Override at runtime with `--platform-key <file>` for local
  * development against an unsigned platform library.
  */
-/* Override-able from the command line (via -DHL_PLATFORM_PUBKEY_HEX=...)
- * so tests can restore the all-zeros placeholder and bypass platform-key
- * pinning. Production builds inherit the real key below. */
+/* Placeholder all-zeros until the platform-sig chain is fully wired
+ * (canary emission → release-time signed platform manifest →
+ * hull build pass-through → runtime enforcement). Tracked as item 2
+ * in docs/roadmap_next.md. The matching secret half is generated and
+ * stored offline (~/.hull/keys/platform.key + HULL_PLATFORM_KEY GH
+ * secret), so when the chain lands we just swap the placeholder for
+ * the real hex; no key-generation step needed.
+ *
+ * While this is all-zeros, hl_verify_startup detects the placeholder
+ * and skips platform-key pinning with a one-time warning — so
+ * `hull build`-produced binaries verify their own developer signature
+ * but don't enforce the platform layer yet. Documented in the
+ * "Honest scorecard" section of gethull.dev.
+ *
+ * Override-able from the command line (via -DHL_PLATFORM_PUBKEY_HEX=...)
+ * for tests and self-hosted forks. */
 #ifndef HL_PLATFORM_PUBKEY_HEX
 #define HL_PLATFORM_PUBKEY_HEX \
-    "2a5461235aa51bbbe1e9cbc462e6a63f37d099f5ad17646a8f3a67db2f3a4fad"
+    "0000000000000000000000000000000000000000000000000000000000000000"
 #endif
 
 /* ── Platform signature (inner layer) ─────────────────────────────── */
