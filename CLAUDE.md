@@ -29,6 +29,47 @@ Shell completions for bash, zsh, fish live in `completions/`. They cover every s
 
 Tested by `tests/e2e_install.sh` (`make e2e-install` — runs install.sh in dry-run mode, syntax-checks all three completion shells, exercises bash completion behavior for representative inputs).
 
+## Release Process
+
+Releases are tagged commits (`v0.1.0`, `v0.1.1`, …) that trigger
+`.github/workflows/release.yml`. The workflow runs three platform
+builds in parallel (`hull-linux-x86_64`, `hull-darwin-arm64`,
+`hull-cosmo`), computes `hull.sha256` over the three artifacts,
+signs that manifest with the offline Ed25519 release key, and
+publishes a GitHub release with all five files. End-user `hull
+update` then verifies `hull.sha256.sig` against the public key
+embedded at build time as `HL_RELEASE_PUBKEY_HEX` (in
+`include/hull/release.h`) before atomically `rename(2)`-ing the
+new binary into place.
+
+### One-time setup (per release-signing-key generation)
+
+| # | Step | Where |
+|---|------|-------|
+| 1 | `mkdir -p ~/.hull/keys && chmod 700 ~/.hull/keys` | local |
+| 2 | `cd ~/.hull/keys && hull keygen release` | local — writes `release.key` (mode 0600, 128 hex) + `release.pub` (mode 0644, 64 hex) |
+| 3 | Paste the 64-hex contents of `release.pub` into `include/hull/release.h` as the value of `HL_RELEASE_PUBKEY_HEX` (replacing the all-zero placeholder). Commit + push. | repo |
+| 4 | `gh secret set HULL_RELEASE_KEY --body "$(cat ~/.hull/keys/release.key)" --repo artalis-io/hull` | GitHub Actions secret |
+| 5 | Back up `~/.hull/keys/release.key` offline (USB stick, password-manager attachment, sealed envelope). **Losing it = no more signed v0.1.x releases; rotation requires a new embedded pubkey and a coordinated user-side reinstall.** | external |
+
+### Per-release procedure
+
+| # | Step |
+|---|------|
+| 1 | Confirm CI green on the commit to be tagged. The release workflow re-runs `make`, signs from the freshly built native-linux binary, and publishes — broken CI means a broken release. |
+| 2 | `git tag -a vX.Y.Z -m "Hull vX.Y.Z" && git push origin vX.Y.Z` |
+| 3 | Watch `.github/workflows/release.yml`; on success the GitHub release lands with `hull-cosmo`, `hull-linux-x86_64`, `hull-darwin-arm64`, `hull.sha256`, and `hull.sha256.sig`. |
+| 4 | Smoke-test on a clean machine: `curl -fsSL https://raw.githubusercontent.com/artalis-io/hull/main/install.sh \| sh && hull update --check`. |
+
+### Invariants
+
+- The private release key **never** leaves `~/.hull/keys/release.key` and the GitHub Actions secret `HULL_RELEASE_KEY`. Not in the repo, not in any commit, not in any log.
+- The public release key **is** in the repo (as the `HL_RELEASE_PUBKEY_HEX` literal). Anyone can read it; that's the point.
+- Pre-v0.1.0 builds with the all-zero placeholder pubkey skip signature verification with a one-time warning — see `hl_release_pubkey_configured()`. Once a real key is embedded, that bypass disappears.
+- `install.sh` stays SHA-256-only (no signature check). The signature is what `hull update` verifies on subsequent self-updates, after the user has already trusted the first install via TLS + SHA-256.
+
+See [docs/release_signing.md](docs/release_signing.md) for the threat model, key-management rationale, and rotation plan.
+
 ## Build
 
 ```bash

@@ -1357,6 +1357,50 @@ make CC=cosmocc         # build with Cosmopolitan (APE binary)
 make clean              # remove all build artifacts
 ```
 
+## Release Process
+
+Releases are tagged commits (`v0.1.0`, `v0.1.1`, …) that trigger
+`.github/workflows/release.yml`. The workflow builds three platform
+binaries in parallel, signs a SHA-256 manifest with an offline Ed25519
+key, and publishes a GitHub release. `hull update` then verifies the
+signature against the public key embedded in the binary
+(`HL_RELEASE_PUBKEY_HEX` in `include/hull/release.h`) before atomically
+replacing itself.
+
+### One-time setup
+
+Generate the release-signing key on the maintainer's machine:
+
+```bash
+mkdir -p ~/.hull/keys && chmod 700 ~/.hull/keys
+cd ~/.hull/keys && hull keygen release      # writes release.{pub,key}
+```
+
+- `release.key` is 128 hex chars, mode `0600`. **Back this up offline**
+  (USB stick / password-manager attachment / sealed envelope). Losing
+  it means no more signed `v0.1.x` releases.
+- `release.pub` is 64 hex chars. Paste its contents into
+  `include/hull/release.h` as the value of `HL_RELEASE_PUBKEY_HEX`,
+  replacing the all-zero placeholder. Commit and push.
+- Set the GitHub Actions secret:
+  `gh secret set HULL_RELEASE_KEY --body "$(cat ~/.hull/keys/release.key)" --repo artalis-io/hull`
+
+### Per release
+
+1. Wait for CI to go green on the commit being tagged. The release
+   workflow re-runs `make`, signs from the freshly built linux native
+   binary, and publishes — broken CI means a broken release.
+2. `git tag -a vX.Y.Z -m "Hull vX.Y.Z" && git push origin vX.Y.Z`
+3. `.github/workflows/release.yml` builds `hull-{linux-x86_64,darwin-arm64,cosmo}`,
+   produces `hull.sha256` and `hull.sha256.sig`, and publishes the
+   GitHub release.
+4. Smoke-test on a clean machine:
+   `curl -fsSL https://raw.githubusercontent.com/artalis-io/hull/main/install.sh | sh && hull update --check`.
+
+Threat model, key-rotation plan, and the rationale for signing the
+manifest rather than each binary individually are in
+[docs/release_signing.md](docs/release_signing.md).
+
 ## Status
 
 Hull is approaching v0.1.0. The complete distribution lifecycle is in place:

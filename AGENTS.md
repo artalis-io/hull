@@ -959,6 +959,62 @@ hull deploy dockerfile myapp/      # generate Dockerfile
 hull deploy systemd myapp/         # generate systemd unit
 ```
 
+## Release Process
+
+> **Agents should not run this procedure unattended.** Cutting a Hull
+> release involves generating / handling the Ed25519 release private
+> key, setting GitHub repository secrets, and pushing version tags.
+> All three actions are durable, hard to undo, and affect every Hull
+> end-user. Treat as a human-driven workflow; agent involvement is
+> limited to running diagnostics (`gh run watch`, `hull verify-release`,
+> etc.) and drafting release notes.
+
+The release pipeline (`.github/workflows/release.yml`) is fully wired:
+it builds `hull-{linux-x86_64,darwin-arm64,cosmo}`, signs `hull.sha256`
+with the offline release Ed25519 key (loaded from the
+`HULL_RELEASE_KEY` repo secret), and publishes a GitHub release.
+End-user `hull update` verifies the signature against the public key
+embedded as `HL_RELEASE_PUBKEY_HEX` (in `include/hull/release.h`)
+before atomically replacing itself via `rename(2)`.
+
+### Maintainer setup (one time)
+
+```bash
+mkdir -p ~/.hull/keys && chmod 700 ~/.hull/keys
+cd ~/.hull/keys && hull keygen release   # writes release.{pub,key}
+```
+
+- `release.key` (128 hex, mode 0600) stays on the maintainer's machine
+  plus an offline backup. Never in the repo, never in any log.
+- `release.pub` (64 hex) is pasted into
+  `include/hull/release.h::HL_RELEASE_PUBKEY_HEX`, committed, pushed.
+- `gh secret set HULL_RELEASE_KEY --body "$(cat ~/.hull/keys/release.key)"
+  --repo artalis-io/hull` installs the signing key for the workflow.
+
+### Per release
+
+1. Confirm CI green on the commit to be tagged. The release workflow
+   re-runs `make`, signs from the freshly built linux-native binary,
+   and publishes — red CI means a red release.
+2. `git tag -a vX.Y.Z -m "Hull vX.Y.Z" && git push origin vX.Y.Z`
+3. `.github/workflows/release.yml` produces the five release assets.
+4. Smoke-test from a clean machine:
+   `curl -fsSL https://raw.githubusercontent.com/artalis-io/hull/main/install.sh | sh && hull update --check`.
+
+### Agent-callable diagnostics
+
+| Command | Use |
+|---------|-----|
+| `gh run list --branch main --limit 3` | check CI state before suggesting a tag |
+| `gh release view vX.Y.Z` | confirm the release landed with all five assets |
+| `hull verify-release hull.sha256 hull.sha256.sig` | offline integrity check of a downloaded release |
+| `hull update --check` | end-user view: is a newer release available? |
+
+Threat model, rationale for signing the manifest rather than each
+binary, and rotation plan: [docs/release_signing.md](docs/release_signing.md).
+The reference procedure (with rationale per step) is the **Release
+Process** section in [CLAUDE.md](CLAUDE.md).
+
 ## Project Layout Convention
 
 ```
