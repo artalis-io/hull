@@ -46,6 +46,11 @@
   <style>
     html, body { background: #0a0a0a; color: #f4f4f5; -webkit-font-smoothing: antialiased; }
     html, body { overflow-x: hidden; max-width: 100%; }
+    /* See site/index.html: grid items default to min-width: auto
+     * which lets shrinkable children push the track wider than the
+     * viewport. Forcing min-width: 0 lets columns shrink and the
+     * inner element's own overflow-x: auto handles scrolling. */
+    .grid > * { min-width: 0; }
     code, pre { font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; }
     .hairline-b { border-bottom: 1px solid rgba(255,255,255,0.08); }
     .chip {

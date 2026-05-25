@@ -85,6 +85,16 @@
      * element on iOS Safari, which then horizontal-scrolls the
      * viewport. */
     html, body { overflow-x: hidden; max-width: 100%; }
+    /* CSS Grid children default to min-width: auto (= intrinsic
+     * min-content). That means a grid item containing a <pre> with
+     * long lines, or any shrinkable code block, forces its track
+     * wider than the viewport — and drags its sibling columns'
+     * text along, preventing wrap. The standard fix is min-width: 0
+     * on grid items, which lets them shrink to track width and
+     * delegates horizontal overflow to the inner element's own
+     * overflow-x: auto. Applied globally so every grid layout
+     * (hero, install, principles, agents, CLI, …) gets it. */
+    .grid > * { min-width: 0; }
     code, pre { font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; }
     .grid-bg {
       background-image:
