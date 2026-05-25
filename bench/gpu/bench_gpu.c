@@ -129,6 +129,11 @@ static const char COSINE_WGSL[] =
 static void bench_native(uint32_t dims, uint32_t count, int iters,
                           uint64_t *samples, float *ref_results)
 {
+    /* These mallocs look like classic overflow candidates, but `dims` is
+     * always #define DIMENSIONS 128 and `count` always comes from the
+     * static {64..65536} table in main(); worst case is 32 MB. No I/O,
+     * WASM, or UDF path reaches this benchmark — it's standalone
+     * `make bench-gpu`. Not linked into the hull binary. */
     float *query = malloc(dims * 4);
     float *candidates = malloc((size_t)count * dims * 4);
     generate_vectors(query, candidates, dims, count);
