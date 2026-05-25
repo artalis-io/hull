@@ -1336,8 +1336,12 @@ static int wgpu_dispatch_pipeline(void *backend_device,
             out_count = HL_GPU_MAX_PIPELINE_OUTPUTS;
 
         result->count = out_count;
+        /* When out_count==1 and outs aliases &default_out, the loop
+         * only reads outs[0]; cppcheck can't see that invariant. */
         for (int i = 0; i < out_count; i++) {
+            /* cppcheck-suppress objectIndex */
             int os = outs[i].stage;
+            /* cppcheck-suppress objectIndex */
             int ob = outs[i].buffer;
             if (os < 0 || os >= stage_count || ob < 0 || ob >= 16) {
                 if (err_msg) *err_msg = "output_index_out_of_range";

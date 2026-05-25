@@ -234,6 +234,9 @@ static void lua_ws_client_on_error(KlWsClientConn *ws, const char *msg,
 /* ws.connect(url, handlers [, opts]) */
 static int lua_ws_connect(lua_State *L)
 {
+    /* `lua` is read on lines further down; cppcheck's data-flow
+     * loses track across the early luaL_error returns below. */
+    /* cppcheck-suppress unreadVariable */
     HlLua *lua = get_hl_lua(L);
 
     const char *url = luaL_checkstring(L, 1);

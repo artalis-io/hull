@@ -297,6 +297,9 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv)
 {
     (void)this_val;
+    /* `js` is read on lines 316/332/371/etc.; cppcheck's data-flow
+     * loses track across the early-return below. */
+    /* cppcheck-suppress unreadVariable */
     HlJS *js = get_hl_js(ctx);
 
     if (argc < 2)
