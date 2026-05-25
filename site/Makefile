@@ -14,7 +14,7 @@ BUILD_DIR := build
 
 # Files that ship in the deployed site. install.sh is the symlink that
 # must be dereferenced; everything else is a regular file.
-STATIC_FILES := index.html mark.svg og-card.svg
+STATIC_FILES := index.html verify.html mark.svg og-card.svg
 SYMLINKED    := install.sh
 
 all: build
