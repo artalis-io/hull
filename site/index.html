@@ -80,10 +80,11 @@
   <style>
     html, body { background: #0a0a0a; color: #f4f4f5; -webkit-font-smoothing: antialiased; }
     /* Belt-and-braces against any rogue horizontal overflow on
-     * narrow screens (iPhone SE = 375px). Every wide element
-     * (code blocks, cmp-table) already has its own overflow-x:auto;
-     * this just stops any future addition from breaking the layout. */
-    body { overflow-x: hidden; }
+     * narrow screens (iPhone SE = 375px). We set it on BOTH html and
+     * body — `body { overflow-x: hidden }` alone leaks to the html
+     * element on iOS Safari, which then horizontal-scrolls the
+     * viewport. */
+    html, body { overflow-x: hidden; max-width: 100%; }
     code, pre { font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; }
     .grid-bg {
       background-image:
@@ -820,12 +821,15 @@ hull v0.1.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
         </p>
       </div>
 
-      <!-- Full-width architecture diagram. Wrapper scrolls horizontally
-           below ~640px so the SVG keeps a readable min-width on phones. -->
+      <!-- Full-width architecture diagram. Scales fluidly via viewBox
+           down to the parent's width (no min-width); on iPhone-class
+           screens the text inside ends up around 8-10px CSS which is
+           still readable on a Retina display. The wrapper keeps
+           overflow-x-auto as a fallback. -->
       <div class="mb-14 border border-white/[0.08] rounded-md bg-ink-900/40 p-5 md:p-7">
         <div class="text-[10px] uppercase tracking-widest text-mute-400 mb-5">Defense-in-depth flow</div>
         <div class="overflow-x-auto -mx-1 px-1">
-        <svg viewBox="0 0 880 220" class="w-full h-auto" style="min-width: 640px;" role="img" aria-label="Horizontal architecture diagram: a request flows left to right through the Lua/JS handler, the manifest gate, the C capability layer, and the kernel sandbox before becoming a syscall. Denied calls drop down out of each gate.">
+        <svg viewBox="0 0 880 220" preserveAspectRatio="xMidYMid meet" class="w-full h-auto block" role="img" aria-label="Horizontal architecture diagram: a request flows left to right through the Lua/JS handler, the manifest gate, the C capability layer, and the kernel sandbox before becoming a syscall. Denied calls drop down out of each gate.">
           <defs>
             <marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
               <path d="M0,0 L10,5 L0,10 z" fill="#a1a1aa"/>
