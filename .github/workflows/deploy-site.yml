@@ -1,0 +1,54 @@
+name: Deploy Hull Site
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      # Site changes themselves.
+      - 'site/**'
+      # The canonical install.sh that site/install.sh symlinks to.
+      # Changing it should redeploy so `curl gethull.dev/install.sh`
+      # picks up new platform support, knobs, etc.
+      - 'install.sh'
+      - '.github/workflows/deploy-site.yml'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build site
+        run: |
+          cd site && make build
+          echo "Build contents:"
+          find build -type f
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Sync to S3
+        run: |
+          # --delete prunes objects on the bucket that are no longer in
+          # the build dir, so removing a file in the repo actually
+          # removes it from www.gethull.dev.
+          aws s3 sync site/build/ s3://${{ secrets.S3_BUCKET }} \
+            --delete
+
+      # Optional: only runs if the secret is configured. Lets the
+      # workflow ship today without a CloudFront distribution; add the
+      # secret later to enable invalidation.
+      - name: Invalidate CloudFront cache
+        if: ${{ env.CF_DISTRIBUTION_ID != '' }}
+        env:
+          CF_DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id "$CF_DISTRIBUTION_ID" \
+            --paths "/*"
