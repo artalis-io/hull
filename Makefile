@@ -1793,9 +1793,14 @@ TEST_COMMON_DEPS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(ASYNC_BACKEND_O
 TEST_COMMON_LIBS := $(TEST_CAP_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(WAMR_OBJS) $(MBEDTLS_OBJS) $(KEEL_LIB) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(WGPU_LIB) $(WGPU_FRAMEWORKS) -lm -lpthread
 # forkpty(3) is in libutil on glibc/musl Linux (used by
 # tests/hull/cap/test_tui_lifecycle.c). macOS / BSD ship it inside
-# libSystem so no extra flag is needed. Cosmo doesn't have it.
+# libSystem so no extra flag is needed. Cosmopolitan does not provide
+# libutil at all — gating on !COSMO keeps the cosmocc CI green; the
+# TUI lifecycle test on cosmo already short-circuits via the
+# HL_HAVE_FORKPTY=0 path.
 ifeq ($(UNAME_S),Linux)
+ifndef COSMO
   TEST_COMMON_LIBS += -lutil
+endif
 endif
 
 # Capability tests (tests/hull/cap/)

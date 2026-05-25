@@ -42,19 +42,25 @@ UTEST_F_TEARDOWN(release_fixture) {
     (void)utest_fixture;
 }
 
-/* ── Embedded pubkey placeholder ────────────────────────────────────── */
+/* ── Embedded pubkey ────────────────────────────────────────────────── */
 
-UTEST(release, pubkey_placeholder_is_unconfigured) {
-    /* The default ship-source has an all-zeros HL_RELEASE_PUBKEY_HEX. */
-    ASSERT_EQ(hl_release_pubkey_configured(), 0);
+/* Pre-v0.1.0 ship-source had an all-zeros placeholder, and a separate
+ * test asserted hl_release_pubkey_configured() == 0 to lock in the
+ * "warn-and-skip verification" bypass for unsigned dev builds. With a
+ * real v0.1.0 release key embedded the placeholder is gone, so the
+ * test inverts: configured() must be 1 (any non-zero key), decode
+ * must succeed, and the decoded bytes must be non-zero somewhere. */
+UTEST(release, pubkey_is_configured) {
+    ASSERT_EQ(hl_release_pubkey_configured(), 1);
 }
 
-UTEST(release, pubkey_decode_placeholder_succeeds) {
+UTEST(release, pubkey_decode_succeeds_and_is_nonzero) {
     uint8_t pk[32];
-    /* The placeholder is valid hex (just all zeros), so decode should succeed. */
     ASSERT_EQ(hl_release_pubkey_decode(pk), 0);
+    int any_nonzero = 0;
     for (size_t i = 0; i < 32; i++)
-        ASSERT_EQ(pk[i], 0);
+        if (pk[i] != 0) { any_nonzero = 1; break; }
+    ASSERT_EQ(any_nonzero, 1);
 }
 
 UTEST(release, pubkey_decode_null_arg_rejected) {
