@@ -1258,7 +1258,15 @@ static JSValue js_cli_read(JSContext *ctx, JSValueConst this_val,
      * read(n)       → n bytes */
     int want_bytes = 0;
     int64_t nbytes = 0;
-    const char *mode = "l";
+    /* keep[] lives for the whole function so `mode` remains valid
+     * after the parse block exits. Previously `keep` was declared
+     * inside the parse block and `mode` was set to point into it —
+     * technically a dangling pointer once the block went out of scope
+     * (cppcheck flags as invalidLifetime). Behaviour was de-facto fine
+     * because no other stack slot reused the bytes, but the lifetime
+     * is now correct by construction. */
+    char keep[2] = {'l', 0};
+    const char *mode = keep;
     if (argc >= 1 && !JS_IsUndefined(argv[0]) && !JS_IsNull(argv[0])) {
         if (JS_IsNumber(argv[0])) {
             if (JS_ToInt64(ctx, &nbytes, argv[0]) != 0) return JS_EXCEPTION;
@@ -1267,15 +1275,14 @@ static JSValue js_cli_read(JSContext *ctx, JSValueConst this_val,
         } else {
             const char *s = JS_ToCString(ctx, argv[0]);
             if (!s) return JS_EXCEPTION;
-            mode = (s[0] == '*' ? s + 1 : s);
-            if (mode[0] != 'a' && mode[0] != 'l') {
+            const char *src = (s[0] == '*' ? s + 1 : s);
+            if (src[0] != 'a' && src[0] != 'l') {
                 JSValue err = JS_ThrowRangeError(ctx,
                     "read: unsupported mode '%s' (use 'l', 'a', or n bytes)", s);
                 JS_FreeCString(ctx, s);
                 return err;
             }
-            char keep[2] = { mode[0], 0 };
-            mode = keep;  /* before freeing the source */
+            keep[0] = src[0];  /* mode already points at keep */
             JS_FreeCString(ctx, s);
         }
     }

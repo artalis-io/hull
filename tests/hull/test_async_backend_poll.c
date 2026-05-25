@@ -54,7 +54,10 @@ UTEST(async_backend_poll, init_and_free)
 {
     Fixture f;
     ASSERT_EQ(fixture_init(&f), 0);
-    ASSERT_NE(f.ctx, NULL);
+    /* HlAsyncBackendCtx is opaque; cast to void* so utest.h's
+     * __typeof__(x + 0) doesn't do pointer arithmetic on an
+     * incomplete type (GCC -Werror). */
+    ASSERT_NE((void *)f.ctx, (void *)NULL);
     fixture_free(&f);
 }
 
@@ -201,7 +204,7 @@ UTEST(async_backend_poll, pool_runs_work_and_done)
 
     HlAsyncBackendPool *pool = NULL;
     ASSERT_EQ(f.be->pool_create(&pool, f.ctx, 2, 4), 0);
-    ASSERT_NE(pool, NULL);
+    ASSERT_NE((void *)pool, (void *)NULL);
 
     pool_work_count = 0;
     pool_done_count = 0;
