@@ -45,8 +45,13 @@
  * before signing anything with the new secret. See
  * docs/release_signing.md.
  */
+/* Override-able from the command line (via -DHL_RELEASE_PUBKEY_HEX=...)
+ * so tests can restore the all-zeros placeholder and bypass release-key
+ * pinning. Production builds inherit the real key below. */
+#ifndef HL_RELEASE_PUBKEY_HEX
 #define HL_RELEASE_PUBKEY_HEX \
     "31ac1195c1be4030d45275256808b3e4c7468257cd255bc44c2ea2ef6c59886b"
+#endif
 
 /**
  * @brief Is the embedded release pubkey real (not all-zero placeholder)?

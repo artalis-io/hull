@@ -56,8 +56,13 @@ typedef struct ShJsonValue ShJsonValue;
  * Override at runtime with `--platform-key <file>` for local
  * development against an unsigned platform library.
  */
+/* Override-able from the command line (via -DHL_PLATFORM_PUBKEY_HEX=...)
+ * so tests can restore the all-zeros placeholder and bypass platform-key
+ * pinning. Production builds inherit the real key below. */
+#ifndef HL_PLATFORM_PUBKEY_HEX
 #define HL_PLATFORM_PUBKEY_HEX \
     "2a5461235aa51bbbe1e9cbc462e6a63f37d099f5ad17646a8f3a67db2f3a4fad"
+#endif
 
 /* ── Platform signature (inner layer) ─────────────────────────────── */
 

@@ -1850,10 +1850,22 @@ $(BUILDDIR)/test_dispatch: $(TESTDIR)/hull/commands/test_dispatch.c $(CMD_OBJS) 
 		$(TEST_CAP_OBJS) $(RT_OBJS) $(MANIFEST_OBJ) $(MODULE_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(COMPILER_TCC_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(ALLOC_OBJ) $(ASYNC_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(WAMR_OBJS) $(VEND_OBJS) \
 		$(KEEL_LIB) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(WGPU_LIB) $(WGPU_FRAMEWORKS) -lm -lpthread
 
-# Signature verification test — needs crypto + app_entries_default + vfs
-$(BUILDDIR)/test_signature: $(TESTDIR)/hull/test_signature.c $(SIG_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(TEST_COMMON_DEPS) | $(BUILDDIR)
+# Signature verification test — needs crypto + app_entries_default + vfs.
+# Compile a TEST-ONLY signature.o that overrides HL_PLATFORM_PUBKEY_HEX
+# back to all-zeros, restoring the placeholder bypass. The test creates
+# its own platform keypair on the fly; without the bypass, the pinning
+# check in hl_verify_startup rejects any platform key that doesn't
+# match the embedded one. (Production signature.o keeps the real key.)
+SIG_TEST_OBJ := $(BUILDDIR)/signature_test.o
+$(SIG_TEST_OBJ): $(SRCDIR)/hull/signature.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) \
+		-UHL_PLATFORM_PUBKEY_HEX \
+		-DHL_PLATFORM_PUBKEY_HEX='"0000000000000000000000000000000000000000000000000000000000000000"' \
+		-c -o $@ $<
+
+$(BUILDDIR)/test_signature: $(TESTDIR)/hull/test_signature.c $(SIG_TEST_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(SIG_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(TEST_COMMON_LIBS)
+		$(SIG_TEST_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(TEST_COMMON_LIBS)
 
 # Release manifest sign/verify test — needs release.c + crypto
 $(BUILDDIR)/test_release: $(TESTDIR)/hull/test_release.c $(RELEASE_OBJ) $(TEST_COMMON_DEPS) | $(BUILDDIR)
