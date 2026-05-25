@@ -44,15 +44,28 @@ embedded at build time as `HL_RELEASE_PUBKEY_HEX` (in
 `include/hull/release.h`) before atomically `rename(2)`-ing the
 new binary into place.
 
-### One-time setup (per release-signing-key generation)
+### One-time setup (per signing-key generation)
+
+Hull has **two independent signing keys**, each generated and stored
+the same way:
+
+- **Release key** — signs `hull.sha256` for `hull update` to verify
+  downloads. Pubkey embedded as `HL_RELEASE_PUBKEY_HEX` in
+  `include/hull/release.h`.
+- **Platform key** — signs the platform `.a` library (the inner layer
+  of `package.sig` when an app is built via `hull build`). Pubkey
+  embedded as `HL_PLATFORM_PUBKEY_HEX` in `include/hull/signature.h`.
+
+Keep them separate (different `.key` files, different GitHub secrets)
+so one compromise doesn't taint the other.
 
 | # | Step | Where |
 |---|------|-------|
 | 1 | `mkdir -p ~/.hull/keys && chmod 700 ~/.hull/keys` | local |
-| 2 | `cd ~/.hull/keys && hull keygen release` | local — writes `release.key` (mode 0600, 128 hex) + `release.pub` (mode 0644, 64 hex) |
-| 3 | Paste the 64-hex contents of `release.pub` into `include/hull/release.h` as the value of `HL_RELEASE_PUBKEY_HEX` (replacing the all-zero placeholder). Commit + push. | repo |
-| 4 | `gh secret set HULL_RELEASE_KEY --body "$(cat ~/.hull/keys/release.key)" --repo artalis-io/hull` | GitHub Actions secret |
-| 5 | Back up `~/.hull/keys/release.key` offline (USB stick, password-manager attachment, sealed envelope). **Losing it = no more signed v0.1.x releases; rotation requires a new embedded pubkey and a coordinated user-side reinstall.** | external |
+| 2 | `cd ~/.hull/keys && hull keygen release && hull keygen platform` | local — writes `release.{key,pub}` and `platform.{key,pub}` |
+| 3 | Paste `release.pub` into `include/hull/release.h::HL_RELEASE_PUBKEY_HEX`; paste `platform.pub` into `include/hull/signature.h::HL_PLATFORM_PUBKEY_HEX`. Commit + push. | repo |
+| 4 | `gh secret set HULL_RELEASE_KEY --body "$(cat ~/.hull/keys/release.key)" --repo artalis-io/hull` (and similarly `HULL_PLATFORM_KEY` once sign-platform is wired into a workflow) | GitHub Actions secret |
+| 5 | Back up `~/.hull/keys/release.key` AND `~/.hull/keys/platform.key` offline (USB stick, password-manager attachments, sealed envelope). **Losing either = no more signed v0.1.x artefacts of that kind; rotation requires a new embedded pubkey and a coordinated user-side reinstall.** | external |
 
 ### Per-release procedure
 

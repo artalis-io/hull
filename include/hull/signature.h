@@ -39,13 +39,25 @@ typedef struct HlVfs HlVfs;
 typedef struct SHArena SHArena;
 typedef struct ShJsonValue ShJsonValue;
 
-/* ── Hardcoded gethull.dev platform public key (from keys/gethull.dev.pub) ── */
+/* ── Hardcoded gethull.dev platform public key ────────────────────── */
 /*
- * This is the trust root for platform signature verification.
- * Override at runtime with --platform-key <file>.
+ * Trust root for platform-layer signature verification (inner layer of
+ * package.sig — see docs/security.md). The matching secret half lives
+ * in two places only: the maintainer's ~/.hull/keys/platform.key (with
+ * offline backup) and the HULL_PLATFORM_KEY GitHub Actions secret on
+ * artalis-io/hull (set when sign-platform is wired into CI). Never in
+ * the repo, never in any log.
+ *
+ * Distinct from HL_RELEASE_PUBKEY_HEX in include/hull/release.h: that
+ * key signs hull.sha256 for `hull update`, this one signs the platform
+ * .a library when an app is built with `hull build`. Separate keys so
+ * one compromise doesn't taint the other.
+ *
+ * Override at runtime with `--platform-key <file>` for local
+ * development against an unsigned platform library.
  */
 #define HL_PLATFORM_PUBKEY_HEX \
-    "0000000000000000000000000000000000000000000000000000000000000000"
+    "2a5461235aa51bbbe1e9cbc462e6a63f37d099f5ad17646a8f3a67db2f3a4fad"
 
 /* ── Platform signature (inner layer) ─────────────────────────────── */
 

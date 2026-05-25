@@ -3,8 +3,29 @@ name: CI
 on:
   push:
     branches: [main]
+    # Site / docs / changelog updates don't touch any C, Lua, JS, Makefile,
+    # or workflow surface that CI validates — skip the full build matrix
+    # for those. deploy-site.yml handles site/** independently.
+    paths-ignore:
+      - 'site/**'
+      - 'docs/**'
+      - 'CHANGELOG.md'
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+      - 'LICENSE'
+      - 'LICENSING.md'
+      - '**.md'
   pull_request:
     branches: [main]
+    paths-ignore:
+      - 'site/**'
+      - 'docs/**'
+      - 'CHANGELOG.md'
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+      - 'LICENSE'
+      - 'LICENSING.md'
+      - '**.md'
 
 jobs:
   build:
