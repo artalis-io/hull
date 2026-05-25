@@ -66,11 +66,22 @@ jobs:
       - name: Write VERSION file
         run: echo "${GITHUB_REF_NAME#v}" > VERSION
 
-      - name: Build
-        run: make
+      - name: Build platform library
+        run: make platform
 
-      - name: Smoke-test version
-        run: ./build/hull version
+      - name: Build hull with embedded platform
+        # EMBED_PLATFORM=1 xxd's libhull_platform.a into the binary so
+        # `hull build` works on end-user machines that don't have hull
+        # source. Without this, hull doctor on a freshly installed
+        # release reports `Platform library: embedded no` and refuses
+        # to build apps. Cosmo job above does the same thing via
+        # `EMBED_PLATFORM=cosmo`.
+        run: make EMBED_PLATFORM=1
+
+      - name: Smoke-test version + platform
+        run: |
+          ./build/hull version
+          ./build/hull doctor | grep -E "embedded\s+yes|hull build" || (echo "::error::Platform library not embedded"; exit 1)
 
       - name: Rename artifact
         run: cp build/hull ${{ matrix.artifact }}

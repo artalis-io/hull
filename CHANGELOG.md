@@ -10,6 +10,49 @@ release-artifact layout).
 
 _Nothing yet._
 
+## [0.1.1] — 2026-05-25
+
+Patch release. Two reproducible v0.1.0 bugs that broke first-time
+user experience on Linux:
+
+### Fixed
+
+- **`hull init` scaffolded app crashed at load.** The generated
+  `app.lua` / `app.js` declared `modules = ["hull/time@1"]` and
+  imported `hull.log` + `hull.time`, but never declared
+  `hull/http-server@1`. The runtime gate refused `app.get` (which
+  the http-server module installs on the `app` intrinsic) and
+  emitted "module 'hull/log' was imported at top-of-file but is not
+  declared". Templates now declare every module they import
+  (`hull/http-server@1`, `hull/log@1`, `hull/time@1`); the JS
+  template also gains its missing `import { app, log } from
+  "hull:..."` lines.
+- **Released native binaries shipped without the embedded platform
+  library.** `hull doctor` on a freshly-installed v0.1.0
+  `hull-linux-x86_64` / `hull-linux-aarch64` / `hull-darwin-arm64`
+  reported `Platform library: embedded no` and `hull build: not
+  ready`. Cause: the release-workflow native-build step ran plain
+  `make` while the Cosmopolitan job correctly ran `make CC=cosmocc
+  EMBED_PLATFORM=cosmo`. Now the native step runs `make platform`
+  followed by `make EMBED_PLATFORM=1`, with a smoke-test check that
+  fails the release if doctor doesn't report `embedded yes`. Binary
+  size grows ~5.5 MB → ~12 MB per native platform; still well under
+  the cosmo APE.
+
+### Improved
+
+- `HL_PLATFORM_PUBKEY_HEX` and `HL_RELEASE_PUBKEY_HEX` macros are
+  now `#ifndef`-guarded in their headers so tests (and future
+  rotation tooling) can override them at compile time via
+  `-DHL_*_PUBKEY_HEX=...`. Production builds inherit the real
+  embedded values unchanged.
+
+### Trust model
+
+No changes. Existing v0.1.0 binaries continue to verify their own
+updates against the same embedded release pubkey; v0.1.1 is a
+drop-in replacement.
+
 ## [0.1.0] — 2026-05-25
 
 First publicly tagged release. The goal of `v0.1.x` is to lock the
@@ -188,5 +231,6 @@ Dual-licensed:
 - PostgreSQL backend for `hull/db` is on the post-0.1 roadmap; v0.1
   ships SQLite only.
 
-[Unreleased]: https://github.com/artalis-io/hull/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/artalis-io/hull/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/artalis-io/hull/releases/tag/v0.1.1
 [0.1.0]: https://github.com/artalis-io/hull/releases/tag/v0.1.0
