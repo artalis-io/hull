@@ -244,14 +244,98 @@
     <div class="mb-8">
       <h1 class="text-2xl md:text-3xl font-semibold text-paper-50 tracking-tight">Hull Signature Verifier</h1>
       <p class="mt-2 text-sm text-mute-400 leading-relaxed">
-        Verify a Hull <code class="text-paper-100 text-[0.78rem]">package.sig</code> or
-        <code class="text-paper-100 text-[0.78rem]">hull.sig</code> against the embedded
-        <strong class="text-paper-100 font-medium">gethull.dev</strong> platform key.
-        Ed25519 verification runs in your browser via vendored TweetNaCl — no upload, no telemetry.
+        Two flows: verify a <strong class="text-paper-100 font-medium">Hull release binary</strong>
+        against the embedded release public key, OR verify a Hull-built
+        <strong class="text-paper-100 font-medium">app bundle</strong>
+        (<code class="text-paper-100 text-[0.78rem]">package.sig</code>) against the embedded
+        platform key. Ed25519 verification runs in your browser via vendored TweetNaCl —
+        no upload, no telemetry.
       </p>
     </div>
 
-    <div id="banner" class="status-banner"></div>
+    <!-- ═══════════ 1. Release binary verification ═══════════ -->
+    <section class="mb-12">
+      <div class="flex items-baseline justify-between mb-3">
+        <h2 class="text-lg font-semibold text-paper-50">Release binary</h2>
+        <span class="text-[0.7rem] uppercase tracking-widest text-mute-500">Tier 1 · release key</span>
+      </div>
+      <p class="text-sm text-mute-400 leading-relaxed mb-4">
+        Drop the <code class="text-paper-100 text-[0.78rem]">hull.sha256</code> manifest and its
+        <code class="text-paper-100 text-[0.78rem]">hull.sha256.sig</code> from a GitHub release.
+        Optionally drop the <code class="text-paper-100 text-[0.78rem]">hull-*</code> binary itself
+        to confirm its SHA-256 matches the signed manifest.
+      </p>
+
+      <div id="release-banner" class="status-banner"></div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+        <div class="surface">
+          <header class="surface-header">
+            <span>hull.sha256</span>
+          </header>
+          <div class="surface-body">
+            <div class="drop-zone" id="rel-manifest-drop">
+              <p>Drop <strong>hull.sha256</strong> here</p>
+              <p class="text-[0.7rem] mt-1 opacity-70">SHA-256 manifest of release artefacts</p>
+              <input type="file" id="rel-manifest-file" accept=".sha256,.txt">
+            </div>
+          </div>
+        </div>
+        <div class="surface">
+          <header class="surface-header">
+            <span>hull.sha256.sig</span>
+          </header>
+          <div class="surface-body">
+            <div class="drop-zone" id="rel-sig-drop">
+              <p>Drop <strong>hull.sha256.sig</strong> here</p>
+              <p class="text-[0.7rem] mt-1 opacity-70">Ed25519 signature (128 hex chars)</p>
+              <input type="file" id="rel-sig-file" accept=".sig,.txt">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="surface mb-4">
+        <header class="surface-header">
+          <span>Optional: release binary</span>
+        </header>
+        <div class="surface-body">
+          <div class="drop-zone drop-zone-small" id="rel-bin-drop">
+            Drop one or more <strong>hull-*</strong> binaries to verify their SHA-256
+            <input type="file" id="rel-bin-files" multiple>
+          </div>
+        </div>
+      </div>
+
+      <div id="release-results" style="display:none">
+        <div class="surface">
+          <div class="surface-body">
+            <div class="section-label">Signature</div>
+            <div id="rel-sig-results"></div>
+
+            <div id="rel-binaries-section" style="display:none">
+              <div class="section-label">Binaries</div>
+              <div id="rel-binaries-results"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══════════ 2. App bundle verification ═══════════ -->
+    <section>
+      <div class="flex items-baseline justify-between mb-3">
+        <h2 class="text-lg font-semibold text-paper-50">App bundle</h2>
+        <span class="text-[0.7rem] uppercase tracking-widest text-mute-500">Tiers 2 + 3 · platform + dev key</span>
+      </div>
+      <p class="text-sm text-mute-400 leading-relaxed mb-4">
+        Drop a <code class="text-paper-100 text-[0.78rem]">package.sig</code> from a built Hull app
+        (the <em>inner</em> half is signed by gethull.dev's platform key — the embedded one — and the
+        <em>outer</em> half by the app developer's key). Optionally drop the APE binary and the
+        developer's <code class="text-paper-100 text-[0.78rem]">.pub</code> file.
+      </p>
+
+      <div id="banner" class="status-banner"></div>
 
     <!-- ── Inputs ──────────────────────────────────────────────────── -->
     <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
@@ -354,6 +438,7 @@
         </div>
       </div>
     </div>
+    </section>
 
     <p class="mt-10 text-center text-xs text-mute-500">
       All verification happens locally in your browser. No data leaves this page.
@@ -378,12 +463,24 @@
     const GETHULL_DEV_PLATFORM_KEY =
       "2a5461235aa51bbbe1e9cbc462e6a63f37d099f5ad17646a8f3a67db2f3a4fad";
 
-    // ── State ───────────────────────────────────────────────────────────
+    // ── Hardcoded gethull.dev release pubkey ──────────────────────────
+    // Matches HL_RELEASE_PUBKEY_HEX in include/hull/release.h. Used by
+    // `hull update` / `hull verify-release`; mirrored here so the
+    // browser verifier covers the release-binary path too.
+    const GETHULL_DEV_RELEASE_KEY =
+      "31ac1195c1be4030d45275256808b3e4c7468257cd255bc44c2ea2ef6c59886b";
+
+    // ── State (app-bundle flow) ─────────────────────────────────────────
     let pkg = null;
     let binaryBuf = null;
     let devKeyHex = null;
     let platKeyOverride = null;
     let uploadedFiles = {};
+
+    // ── State (release-binary flow) ─────────────────────────────────────
+    let relManifestBuf = null;  // ArrayBuffer of hull.sha256
+    let relSigHex = null;       // 128-hex Ed25519 signature
+    let relBinaries = {};       // filename → ArrayBuffer
 
     // ── Helpers ─────────────────────────────────────────────────────────
     function hexToBytes(hex) {
@@ -759,6 +856,152 @@
     });
     $("plat-key-override").addEventListener("keydown", function(e) {
       if (e.key === "Enter") $("plat-key-btn").click();
+    });
+
+    // ── Release-binary flow ─────────────────────────────────────────────
+    //
+    // hull.sha256 format (produced by `sha256sum` in release.yml):
+    //
+    //   <64-hex>  hull-cosmo
+    //   <64-hex>  hull-linux-x86_64
+    //   <64-hex>  hull-linux-aarch64
+    //   <64-hex>  hull-darwin-arm64
+    //
+    // The signature in hull.sha256.sig is Ed25519 over the *raw bytes*
+    // of hull.sha256 (no canonicalization), produced by `hull
+    // sign-release` and verified by `hull verify-release` against
+    // HL_RELEASE_PUBKEY_HEX. We mirror the same byte-level path here.
+
+    function parseManifest(text) {
+      // Returns Map<filename, hex-sha256> for every well-formed line.
+      const out = new Map();
+      for (const line of text.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        // sha256sum default: 64 hex chars, space-space, filename
+        const m = trimmed.match(/^([0-9a-fA-F]{64})\s+\*?(.+)$/);
+        if (m) out.set(m[2], m[1].toLowerCase());
+      }
+      return out;
+    }
+
+    async function renderRelease() {
+      const sigEl = $("rel-sig-results");
+      const binEl = $("rel-binaries-results");
+      const banner = $("release-banner");
+      sigEl.innerHTML = "";
+      binEl.innerHTML = "";
+
+      if (!relManifestBuf || !relSigHex) {
+        $("release-results").style.display = "none";
+        banner.className = "status-banner";
+        return;
+      }
+      $("release-results").style.display = "block";
+
+      let issues = 0;
+      let checks = 0;
+
+      // 1. Signature check.
+      const manifestBytes = new Uint8Array(relManifestBuf);
+      let valid = false;
+      try {
+        valid = nacl.sign.detached.verify(
+          manifestBytes,
+          hexToBytes(relSigHex),
+          hexToBytes(GETHULL_DEV_RELEASE_KEY));
+      } catch (e) { valid = false; }
+      checks++;
+      if (valid) {
+        addResult(sigEl, "ok", "Manifest Signature",
+          "VALID — Signed by gethull.dev release key");
+      } else {
+        addResult(sigEl, "bad", "Manifest Signature",
+          "INVALID — Signature does not match the embedded release key");
+        issues++;
+      }
+      addResultHTML(sigEl, "info", "Release Key",
+        esc(truncKey(GETHULL_DEV_RELEASE_KEY)) + copyBtn(GETHULL_DEV_RELEASE_KEY));
+      addResult(sigEl, "info", "Manifest Size",
+        manifestBytes.length + " bytes");
+
+      // 2. Per-binary hash check (if any binaries dropped).
+      const manifestText = new TextDecoder().decode(manifestBytes);
+      const expected = parseManifest(manifestText);
+      const droppedNames = Object.keys(relBinaries);
+
+      if (droppedNames.length > 0 || expected.size > 0) {
+        $("rel-binaries-section").style.display = "block";
+        let html = '<table class="results-table"><thead><tr><th>File</th><th>Expected</th><th>Status</th></tr></thead><tbody>';
+        // Show every entry in the manifest; mark dropped ones as
+        // verified, others as pending (info only).
+        for (const [name, expectedHex] of expected) {
+          let status = '<span class="file-status pending">not uploaded</span>';
+          if (relBinaries[name] !== undefined) {
+            const actual = await sha256hex(relBinaries[name]);
+            checks++;
+            if (actual === expectedHex) {
+              status = '<span class="file-status match">match</span>';
+            } else {
+              status = '<span class="file-status mismatch">mismatch</span>';
+              issues++;
+            }
+          }
+          html += '<tr><td>' + esc(name) + '</td><td>' + esc(truncKey(expectedHex)) + '</td><td>' + status + '</td></tr>';
+        }
+        // Surface any dropped files NOT in the manifest (user error
+        // / wrong file).
+        for (const name of droppedNames) {
+          if (!expected.has(name)) {
+            checks++;
+            issues++;
+            html += '<tr><td>' + esc(name) + '</td><td class="text-mute-500">—</td><td><span class="file-status mismatch">not in manifest</span></td></tr>';
+          }
+        }
+        html += '</tbody></table>';
+        binEl.innerHTML = html;
+      } else {
+        $("rel-binaries-section").style.display = "none";
+      }
+
+      // Banner — scoped to the release section.
+      if (issues === 0 && checks > 0) {
+        banner.className = "status-banner pass";
+        banner.textContent = "ALL CHECKS PASSED (" + checks + " verified)";
+      } else if (issues > 0) {
+        banner.className = "status-banner fail";
+        banner.textContent = issues + " ISSUE(S) FOUND";
+      } else {
+        banner.className = "status-banner";
+      }
+    }
+
+    setupDrop("rel-manifest-drop", "rel-manifest-file", async function(files) {
+      relManifestBuf = await files[0].arrayBuffer();
+      $("rel-manifest-drop").classList.add("loaded");
+      $("rel-manifest-drop").querySelector("p").textContent = files[0].name + " loaded";
+      await renderRelease();
+    });
+
+    setupDrop("rel-sig-drop", "rel-sig-file", async function(files) {
+      const text = (await files[0].text()).trim();
+      const match = text.match(/^([0-9a-fA-F]{128})/);
+      if (!match) {
+        alert("Could not find 128-hex Ed25519 signature in file");
+        return;
+      }
+      relSigHex = match[1].toLowerCase();
+      $("rel-sig-drop").classList.add("loaded");
+      $("rel-sig-drop").querySelector("p").textContent = files[0].name + " loaded";
+      await renderRelease();
+    });
+
+    setupDrop("rel-bin-drop", "rel-bin-files", async function(files) {
+      for (const f of files) {
+        relBinaries[f.name] = await f.arrayBuffer();
+      }
+      $("rel-bin-drop").classList.add("loaded");
+      await renderRelease();
     });
   })();
   </script>
