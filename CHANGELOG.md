@@ -10,7 +10,7 @@ release-artifact layout).
 
 _Nothing yet._
 
-## [0.1.1] — 2026-05-26
+## [0.1.1] — 2026-05-25
 
 Patch release. Two reproducible v0.1.0 bugs that broke first-time
 user experience on Linux:
