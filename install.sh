@@ -280,6 +280,9 @@ post_install() {
     printf '  %shull dev app.lua%s    . Run the dev server\n' "$BOLD" "$RESET"
     printf '  %shull update%s         . Install future releases\n' "$BOLD" "$RESET"
     printf '\n'
+    printf 'For AI agents bootstrapping against Hull:\n'
+    printf '  %shull agent context --task=orientation --level=minimal%s\n' "$BOLD" "$RESET"
+    printf '\n'
 }
 
 # ── Main ─────────────────────────────────────────────────────────────

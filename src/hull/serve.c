@@ -267,7 +267,14 @@ static void usage(const char *prog)
             "  migrate [subcommand] Run/status/create SQL migrations\n"
             "  eject [dir] [-o out] Export standalone Makefile project\n"
             "\n"
-            "SIZE accepts optional suffix: k (KB), m (MB), g (GB).\n",
+            "SIZE accepts optional suffix: k (KB), m (MB), g (GB).\n"
+            "\n"
+            "Help:\n"
+            "  hull --help / hull help    Full subcommand reference\n"
+            "  hull --version             Print version and exit\n"
+            "\n"
+            "AI agents: bootstrap with\n"
+            "  hull agent context --task=orientation --level=minimal\n",
             prog);
 }
 
