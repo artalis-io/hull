@@ -21,7 +21,7 @@ jobs:
       - name: Install cosmocc
         run: |
           COSMOCC_DIR=/opt/cosmo make fetch-cosmocc
-          echo "/opt/cosmo/bin" >> $GITHUB_PATH
+          echo "/opt/cosmo/bin" >> "$GITHUB_PATH"
 
       - name: Build platform (multi-arch)
         run: make platform-cosmo
@@ -91,10 +91,77 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
 
+  build-wamrc:
+    # Side-loaded `wamrc` (WAMR AOT compiler) shipped as a separate
+    # release asset and pulled by `hull tools install wamrc`. See
+    # docs/tools_install.md. The trust chain reuses the same
+    # Ed25519-signed hull.sha256 manifest — each wamrc artifact is
+    # listed in the manifest below.
+    #
+    # No cosmo wamrc: LLVM doesn't fit cleanly into a cosmocc fat APE
+    # binary. Cosmo users build from source with `make wamrc`.
+    name: Build wamrc (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            artifact: hull-wamrc-linux-x86_64
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+            artifact: hull-wamrc-linux-aarch64
+          - name: darwin-arm64
+            os: macos-latest
+            artifact: hull-wamrc-darwin-arm64
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install LLVM + cmake (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-18-dev cmake
+
+      - name: Install LLVM + cmake (macOS)
+        if: runner.os == 'macOS'
+        run: brew install llvm@18 cmake
+
+      - name: Build wamrc
+        run: |
+          # Declare separately so shellcheck SC2155 doesn't flag the
+          # masked return value from $(llvm-config-18 ...).
+          if command -v llvm-config-18 >/dev/null 2>&1; then
+            llvm_cmakedir=$(llvm-config-18 --cmakedir)
+            export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=${llvm_cmakedir}"
+          elif [ -d /opt/homebrew/opt/llvm@18 ]; then
+            export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=/opt/homebrew/opt/llvm@18/lib/cmake/llvm"
+          elif [ -d /usr/local/opt/llvm@18 ]; then
+            export WAMRC_CMAKE_FLAGS="-DLLVM_DIR=/usr/local/opt/llvm@18/lib/cmake/llvm"
+          fi
+          make wamrc
+          strip build/wamrc 2>/dev/null || true
+
+      - name: Smoke-test wamrc
+        run: ./build/wamrc --help | head -5
+
+      - name: Rename artifact
+        run: cp build/wamrc ${{ matrix.artifact }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
   release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: [build-cosmo, build-native]
+    needs: [build-cosmo, build-native, build-wamrc]
     permissions:
       contents: write
 
@@ -106,18 +173,26 @@ jobs:
       - name: Flatten artifacts
         run: |
           mkdir -p dist
-          mv artifacts/hull-cosmo/hull-cosmo                 dist/hull-cosmo
-          mv artifacts/hull-linux-x86_64/hull-linux-x86_64   dist/hull-linux-x86_64
-          mv artifacts/hull-linux-aarch64/hull-linux-aarch64 dist/hull-linux-aarch64
-          mv artifacts/hull-darwin-arm64/hull-darwin-arm64   dist/hull-darwin-arm64
+          mv artifacts/hull-cosmo/hull-cosmo                              dist/hull-cosmo
+          mv artifacts/hull-linux-x86_64/hull-linux-x86_64                dist/hull-linux-x86_64
+          mv artifacts/hull-linux-aarch64/hull-linux-aarch64              dist/hull-linux-aarch64
+          mv artifacts/hull-darwin-arm64/hull-darwin-arm64                dist/hull-darwin-arm64
+          mv artifacts/hull-wamrc-linux-x86_64/hull-wamrc-linux-x86_64    dist/hull-wamrc-linux-x86_64
+          mv artifacts/hull-wamrc-linux-aarch64/hull-wamrc-linux-aarch64  dist/hull-wamrc-linux-aarch64
+          mv artifacts/hull-wamrc-darwin-arm64/hull-wamrc-darwin-arm64    dist/hull-wamrc-darwin-arm64
 
       - name: Make binaries executable
         run: chmod +x dist/*
 
       - name: Compute SHA-256 checksums
+        # `hull tools install <name>` looks up entries by exact asset
+        # name in this manifest — keep the file list in sync with the
+        # tool registry in src/hull/tools_install.c.
         working-directory: dist
         run: |
-          sha256sum hull-cosmo hull-linux-x86_64 hull-linux-aarch64 hull-darwin-arm64 > hull.sha256
+          sha256sum hull-cosmo hull-linux-x86_64 hull-linux-aarch64 hull-darwin-arm64 \
+                    hull-wamrc-linux-x86_64 hull-wamrc-linux-aarch64 hull-wamrc-darwin-arm64 \
+                    > hull.sha256
           cat hull.sha256
 
       - name: Sign release manifest (Ed25519)
@@ -149,7 +224,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # Build asset list — include hull.sha256.sig only if it was produced.
-          assets=(dist/hull-cosmo dist/hull-linux-x86_64 dist/hull-linux-aarch64 dist/hull-darwin-arm64 dist/hull.sha256)
+          assets=(
+            dist/hull-cosmo
+            dist/hull-linux-x86_64
+            dist/hull-linux-aarch64
+            dist/hull-darwin-arm64
+            dist/hull-wamrc-linux-x86_64
+            dist/hull-wamrc-linux-aarch64
+            dist/hull-wamrc-darwin-arm64
+            dist/hull.sha256
+          )
           if [ -f dist/hull.sha256.sig ]; then
             assets+=(dist/hull.sha256.sig)
           fi
