@@ -50,43 +50,32 @@ commit). Apps that mix both must accept eventual consistency.
 
 ---
 
-## 2. `hull tools install` — side-loaded optional tools
+## 2. `hull tools install` — side-loaded optional tools  ✅ Shipped (v0.1.2)
 
-**Priority:** Medium — closes the "wamrc not bundled" friction without
-inflating the main hull binary, and establishes the pattern for
-future optional tooling (wgpu-native, future analytics agents).
+**Design:** [`tools_install.md`](tools_install.md). What landed:
 
-**Target:** v0.1.2
-
-**Full design:** [`tools_install.md`](tools_install.md). Key shape:
-
-- `hull tools install <name>` / `list` / `uninstall` subcommands.
-- Tools land in `$HOME/.hull/tools/`, isolated from the user's PATH.
-- Same release pubkey + `hull.sha256` signature covers tool binaries
-  (no new keys, no new ceremonies).
-- Version-coupled: `hull tools install` pulls from the SAME release
-  as the running hull binary, so e.g. wamrc stays at the WAMR commit
-  hull was compiled against.
-- First concrete tool: `wamrc` (WAMR AOT compiler).
-- Cosmo unsupported for tools that need LLVM (Cosmo users
-  `make wamrc` from source).
-
-**Tasks:**
-
-- [ ] `src/hull/tools_install.c` — `hl_tools_dir()` + lookup helper.
-- [ ] `src/hull/commands/tools.c` — dispatcher for `install` /
-      `list` / `uninstall`, reusing `hl_release_verify_manifest_sig()`.
-- [ ] Tool registry (static array — one entry today, easy to grow).
-- [ ] Wire `cap/wasm.c` AOT path to consult `$HOME/.hull/tools/wamrc`
-      before falling back to PATH lookup.
-- [ ] Doctor section: WASM row reflects installed/outdated/missing
-      states from the registry.
-- [ ] Release workflow: `build-wamrc` matrix job (linux-x86_64,
-      linux-aarch64, darwin-arm64), extend flatten / sha256 /
-      gh-release-create steps.
-- [ ] e2e test: install → exercise → uninstall.
-- [ ] Docs: this entry, CLAUDE.md "Tools and side-loading" section,
-      site mention.
+- `hull tools install <name>` / `list [--json]` / `uninstall` subcommands.
+- Tools land in `$HOME/.hull/tools/` (mode 0755), isolated from PATH.
+- Trust chain reuses the same Ed25519-signed `hull.sha256` manifest as
+  `hull update` — no new keys, no new ceremonies.
+- Version-coupled: pulls from the SAME release as the running hull
+  binary (not "latest"), so e.g. wamrc stays at the WAMR commit hull
+  was compiled against.
+- First concrete tool: `wamrc` (WAMR AOT compiler), published for
+  linux-x86_64 / linux-aarch64 / darwin-arm64. Cosmo unsupported
+  (LLVM doesn't fit a fat APE binary) — cosmo users `make wamrc`.
+- Shared `release_io.{c,h}` extracted from `commands/update.c` so both
+  self-update and tool-install paths share the same HTTPS / SHA-256 /
+  signature-verification / atomic-rename plumbing.
+- `tool.find_tool()` Lua binding so `build.lua`'s wamrc resolver
+  consults the canonical install location without reimplementing the
+  4-step lookup in script.
+- `hull doctor` reports installed / managed / unmanaged state.
+- Audit fixes shipped together: OOB-read defense in
+  `hl_release_io_find_checksum`, JSON-string escaper for
+  `tools list --json` descriptions, fsync/close error checks in
+  atomic-write, constant-time SHA-256 hex compares (both `tools` and
+  `update` paths).
 
 **Out of scope (deferred):** wgpu-native (needs runtime dlopen
 architecture change), system-wide install path (stay user-scoped),

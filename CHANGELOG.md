@@ -10,6 +10,119 @@ release-artifact layout).
 
 _Nothing yet._
 
+## [0.1.2] — 2026-05-26
+
+Two themes: (1) side-loaded Hull-native tools (`hull tools install`),
+opening the door for optional executables like `wamrc` without bloating
+the main binary; (2) a complete agent-onboarding surface so AI coding
+agents can bootstrap against a fresh hull install without scraping
+docs from elsewhere.
+
+### Added
+
+- **`hull tools install <name> [--all]` / `tools list [--json]` /
+  `tools uninstall <name>`** — Side-load optional tools (currently
+  `wamrc`, the WAMR AOT compiler) from GitHub releases into
+  `$HOME/.hull/tools/`. Reuses the same Ed25519-signed `hull.sha256`
+  manifest that protects `hull update` — no new keys, no new
+  ceremonies. Version-coupled: pulls from the SAME release as the
+  running hull binary so e.g. wamrc stays at the WAMR commit hull was
+  compiled against. Cosmo unsupported for tools that need LLVM. Full
+  design: [`docs/tools_install.md`](docs/tools_install.md).
+- **CI `build-wamrc` matrix** (linux-x86_64, linux-aarch64,
+  darwin-arm64) in the release workflow — produces signed
+  `hull-wamrc-<platform>` assets listed in the same `hull.sha256`
+  manifest as the hull binaries.
+- **`tool.find_tool(name)` Lua binding** (build-tool VM) — generic
+  4-step lookup (`~/.hull/tools/` → sibling-of-hull → `$PATH`).
+  Replaces the inline `find_wamrc()` heuristic in `build.lua`.
+- **`hull --help` / `hull help` / `hull -h`** — Top-level usage
+  printer grouping every registered subcommand by purpose. Suppresses
+  build-time-gated commands when their `HL_ENABLE_*` flag is off so
+  help only advertises what this binary can do. Symmetric with
+  `--version`/`-v`/`version`.
+- **`hull agent tools`** — Generic JSON dump of the tool registry
+  crossed with the install state on this host. Independent of
+  `HL_ENABLE_HTTP_CLIENT` — CLI-flavor builds without the installer
+  can still enumerate what's registered.
+- **`hull agent compute` gains a `wamrc` block** — installed/path/
+  managed/available_for_platform/install_hint, so agents seeing
+  modules with no AOT artifacts can recommend
+  `hull tools install wamrc` in one call.
+- **`hull agent context --list`** — Enumerate every embedded topic
+  doc plus which level markers (minimal/compact/full) each populates.
+  Cold-start agents call this first to discover the topic registry.
+- **`hull agent overview [app_dir]`** — Single-shot composite
+  summary (runtime, routes, compute, gpu, migrations, declared
+  modules, tests, build_ready). One call to orient an agent dropped
+  into an unfamiliar tree.
+- **Six new context docs** in `stdlib/context/`: `orientation.md`
+  (the AI-agent cold-start primer), `quickstart-{web,cli,tui}.md`
+  (opinionated bootstraps per app shape), `gpu.md` (WGSL shaders +
+  GPU vs WASM AOT crossover guidance), `tools.md` (`hull tools
+  install` from the app-dev perspective). All three levels.
+- **Discoverability breadcrumbs** in `hull --help`, bare-`hull`
+  usage, and `install.sh` postscript — every entry point now points
+  at `hull agent context --task=orientation --level=minimal` so an
+  agent can bootstrap by reading any one of them.
+- **Shared `release_io.{c,h}` helpers** extracted from
+  `commands/update.c` — HTTPS GET, JSON-string extraction, SHA-256
+  hex, manifest-line lookup, atomic install. Used by both `hull
+  update` and `hull tools install` so the trust chain is implemented
+  once.
+- **`tests/release_smoke.sh`** — Post-`gh release create` smoke
+  script that exercises the live install path: download wamrc from
+  the just-published release, verify SHA-256, run `wamrc --help`,
+  uninstall. The only end-to-end test of the live install codepath
+  (the rest is covered by unit + e2e suites).
+- **Shell completions** (bash, zsh, fish) for the new surface:
+  `tools list/install/uninstall`, `agent overview`, `agent context
+  --list`, all 19 context tasks.
+
+### Fixed
+
+- **`hl_release_io_find_checksum` OOB-read defense** — Reordered the
+  exact-match guard's OR chain so the bounds check runs before the
+  byte dereference. Dormant in practice (Keel allocates body+1 and
+  writes a trailing NUL), but the helper is now safe regardless of
+  caller. Surfaced by the post-implementation audit.
+- **`atomic_write` checks `fsync` + `close` return values** — Aborts
+  + unlinks the `.new` sidecar on either failure. Prevents a
+  power-loss window where rename could happen over a half-flushed
+  file (ENOSPC, EIO on network mounts).
+- **SHA-256 hex compare is now constant-time** in both `hull update`
+  and `hull tools install` paths (via `mbedtls_ct_memcmp`). The
+  compared values are public, so the practical timing leak is nil,
+  but the codebase now uniformly uses constant-time comparison for
+  hash equality.
+- **JSON escaper for `hull tools list --json`** — Tool descriptions
+  now flow through a proper RFC 8259 escaper. Today's static
+  registry is clean (no embedded quotes/backslashes), but future
+  tool descriptions can't accidentally produce malformed JSON.
+- **Makefile xxd hyphen handling** — The stdlib registry generator's
+  sed expression now translates hyphens to underscores in symbol
+  names, matching xxd's own normalization. Without this, context
+  docs with hyphens in their filenames (`quickstart-web.md`) would
+  fail to link.
+
+### Changed
+
+- **`build.lua` wamrc lookup simplified** — Replaces the inline
+  `find_wamrc()` (PATH → `./build/wamrc` → sibling-of-hull) with a
+  call to `tool.find_tool("wamrc")` plus a single `./build/wamrc`
+  dev fallback. Same effective lookup order, implemented once in C.
+- **`hull doctor` wamrc row** — Reports `installed` /
+  `managed via hull tools` / `not installed` states. Hint text now
+  recommends `hull tools install wamrc` (signed download) over
+  `make wamrc` (build from source) as the first option.
+- **`hull agent context` bare-command error** — Now points users at
+  `--list` instead of hard-coding a stale topic enumeration.
+- **`hull update` refactored to use `release_io`** — Same external
+  behavior; the HTTPS + SHA-256 + manifest plumbing it relied on is
+  now shared with `hull tools install`. Net diff: 252 lines deleted
+  from `update.c`, same lines added to `release_io.{c,h}` plus
+  reused in `tools.c`.
+
 ## [0.1.1] — 2026-05-25
 
 Patch release. Two reproducible v0.1.0 bugs that broke first-time

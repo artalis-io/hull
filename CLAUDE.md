@@ -497,12 +497,12 @@ CLI tool plugins are Lua-only. See `stdlib/cli/lua/hull/` for the
 plugin source and `src/hull/tool.c` / `src/hull/tool_orchestration.c`
 for the C binding surface the tool VM exposes.
 
-Table-driven dispatcher in `src/hull/commands/dispatch.c`. 22 commands:
+Table-driven dispatcher in `src/hull/commands/dispatch.c`. 24 commands:
 
 ```
-hull keygen | build | verify | inspect | manifest | test | new | init | dev | eject | sign-platform | migrate | agent | mcp | check | compute | deploy | version | doctor | update | sign-release | verify-release
+hull keygen | build | verify | inspect | manifest | test | new | init | dev | eject | sign-platform | migrate | agent | mcp | check | compute | deploy | version | doctor | update | tools | sign-release | verify-release | help
 Runtime flags: --audit (capability audit logging), --agent (sidecar files), --no-migrate, --no-sandbox, --no-ca-bundle, --ca-bundle PATH
-Global flags: --version / -v (equivalent to hull version)
+Global flags: --version / -v (equivalent to hull version), --help / -h (equivalent to hull help)
 ```
 
 Each command is a separate `.c`/`.h` under `src/hull/commands/`. Adding a new command = one line in the table + one source file.
@@ -513,7 +513,19 @@ Each command is a separate `.c`/`.h` under `src/hull/commands/`. Adding a new co
 
 **`hull build --compiler=<backend>`** — Select the C compiler backend for `hull build`. Options: `tcc` (embedded TinyCC, compile-only), `system` (system cc/gcc/clang, no tcc fallback), or an explicit compiler path. Default: embedded TinyCC if available, otherwise system cc. The compiler abstraction uses `HlCompilerVtable` (`include/hull/compiler.h`); backends live in `src/hull/compiler.c` and `src/hull/compiler_tcc.c`.
 
-**`hull update [--check] [--force] [--channel=stable|beta] [--repo=ORG/NAME]`** — Self-update from GitHub releases. Fetches the latest release metadata via `api.github.com`, picks the asset matching this binary's OS/arch (`hull-linux-x86_64`, `hull-linux-aarch64`, `hull-darwin-arm64`, or `hull-cosmo` fallback), downloads via HTTPS using the embedded Mozilla CA bundle (Phase D4), verifies the manifest's Ed25519 signature against the embedded `HL_RELEASE_PUBKEY_HEX` (when configured), verifies SHA-256 against `hull.sha256` from the same release, and atomically replaces the running binary via `rename(2)`. `--check` exits after the version compare without installing. No external dependencies — uses keel's `KlRedirectClient` for HTTPS, mbedTLS for SHA-256, TweetNaCl for Ed25519. Pure C implementation in `src/hull/commands/update.c`.
+**`hull update [--check] [--force] [--channel=stable|beta] [--repo=ORG/NAME]`** — Self-update from GitHub releases. Fetches the latest release metadata via `api.github.com`, picks the asset matching this binary's OS/arch (`hull-linux-x86_64`, `hull-linux-aarch64`, `hull-darwin-arm64`, or `hull-cosmo` fallback), downloads via HTTPS using the embedded Mozilla CA bundle (Phase D4), verifies the manifest's Ed25519 signature against the embedded `HL_RELEASE_PUBKEY_HEX` (when configured), verifies SHA-256 against `hull.sha256` from the same release (constant-time compare), and atomically replaces the running binary via `rename(2)`. `--check` exits after the version compare without installing. Pure C implementation in `src/hull/commands/update.c`; shared HTTPS / SHA-256 / manifest plumbing lives in `src/hull/release_io.{c,h}`.
+
+**`hull tools install <name> [--all]` / `tools list [--json]` / `tools uninstall <name>`** — Side-load optional Hull-native tools (currently: `wamrc`) from GitHub releases into `$HOME/.hull/tools/`. The trust chain is identical to `hull update` — same Ed25519-signed `hull.sha256` manifest covers tool binaries, no new keys. Install is version-coupled: it pulls from the SAME release as the running hull binary (not "latest"), so e.g. wamrc stays at the WAMR commit hull was compiled against. Tool registry is a compile-time-constant static table in `src/hull/tools_install.c`; adding a tool means one entry in the registry + matching `hull-<tool>-<platform>` assets in `hull.sha256`. Cosmo unsupported for tools that need LLVM (cosmo users build from source with `make wamrc`). Pure C; consumers locate installed tools via `hl_tools_lookup_path()` (or `tool.find_tool()` from build-tool Lua) which checks `~/.hull/tools/` → `dirname(hull_exe)/` → `$PATH`. Full design: [docs/tools_install.md](docs/tools_install.md).
+
+The live install path is intentionally not tested in CI (it would need the just-published release to exist before publishing). The post-release validation step is `tests/release_smoke.sh`: install hull, run `sh tests/release_smoke.sh`, watch `hull tools install wamrc` actually fetch the asset, verify SHA-256, exercise `wamrc --help`, and uninstall cleanly. Run it manually after every `gh release create`.
+
+**`hull help` / `hull --help` / `hull -h`** — Print top-level usage grouping every registered subcommand by purpose (Scaffolding, Build & ship, Develop & test, Diagnostics, Compute / WASM, Database, Deployment, Self-management). Implementation in `src/hull/commands/help.c`. Build-time-gated commands (HL_ENABLE_HTTP_SERVER, HL_ENABLE_DB, HL_ENABLE_HTTP_CLIENT) are suppressed when the corresponding flag is off so help only advertises what this binary can do. The output ends with a "for AI agents" pointer at `hull agent context --task=orientation --level=minimal`, matched by similar breadcrumbs in `hull`'s bare-mode usage and the `install.sh` postscript.
+
+**`hull agent tools`** — Generic JSON dump of the tool registry crossed with the install state on this host (`{platform, tools: [{name, available_for_platform, installed, path, asset_name, install_hint}, ...]}`). Independent of `HL_ENABLE_HTTP_CLIENT` — even CLI-flavor builds without the installer can list what's registered. The compute-specific wamrc state is also surfaced inside `hull agent compute` under a `wamrc` block so agents reading per-subsystem panels see the actionable hint without making a second call.
+
+**`hull agent context --list [--json]`** — Enumerate every context: task in the embedded platform stdlib registry plus which level markers each one populates. Cold-start agents call this first to discover what `--task=NAME` values are valid. The bare `hull agent context` form (no `--task`, no `--list`) errors with a usage message that points at `--list`. Topic docs live in `stdlib/context/*.md` and are auto-discovered by the Makefile + xxd embedding pipeline.
+
+**`hull agent overview [app_dir]`** — Single-shot composite project summary an agent can read when dropped into an unfamiliar app dir. Composes runtime detection, route stats (count + methods + ws/sse flags), compute modules + AOT readiness + wamrc state, GPU shaders, migrations, declared modules, tests, and a `build_ready` flag. No DB connection; agents needing pending-migration counts call `hull agent migrate` separately.
 
 **`hull sign-release <manifest> --key <secret_key>`** — Sign a release manifest (typically `hull.sha256`) with an Ed25519 secret key. Writes `<manifest>.sig` (128 hex chars). Used by the GitHub Actions release workflow; never invoked by end users. See [docs/release_signing.md](docs/release_signing.md).
 

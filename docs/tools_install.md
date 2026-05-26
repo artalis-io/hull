@@ -1,6 +1,6 @@
 # Hull tools — `hull tools install`
 
-Status: **Design** | Target: v0.1.2 | Tracked in: [`roadmap_next.md`](roadmap_next.md)
+Status: **Shipped** (v0.1.2) | Tracked in: [`roadmap_next.md`](roadmap_next.md)
 
 This is the design for shipping **optional Hull-native tools** as
 separately-downloadable, separately-installable artefacts covered by
