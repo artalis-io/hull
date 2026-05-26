@@ -64,6 +64,19 @@ int hl_agent_test(const char *app_dir, ShJsonBuf *out);
 
 int hl_agent_context(const char *task, const char *level, ShJsonBuf *out);
 
+/*
+ * hl_agent_context_list — enumerate every context: task in the embedded
+ * platform stdlib registry plus which level markers each one populates.
+ * Cold-start agents call this first to discover what `--task=NAME`
+ * values are valid. Output shape:
+ *
+ *   { "tasks": [
+ *       { "name": "orientation", "levels": ["minimal","compact","full"] },
+ *       ...
+ *   ] }
+ */
+int hl_agent_context_list(ShJsonBuf *out);
+
 /* ── Phase 4: Lifecycle ────────────────────────────────────────────── */
 
 #ifdef HL_ENABLE_DB
@@ -142,10 +155,44 @@ int hl_agent_modules_ctx(HlAppContext *ctx, ShJsonBuf *out);
 
 /*
  * hl_agent_compute — list WASM compute modules in app_dir/compute/ +
- * their sizes (and AOT variant presence). Module-level metadata.
+ * their sizes (and AOT variant presence). Module-level metadata. The
+ * output also includes a `wamrc` block (installed / path / managed /
+ * available_for_platform / install_hint) so agents can recommend
+ * `hull tools install wamrc` when they see modules with no AOT
+ * artifacts.
  */
 int hl_agent_compute(const char *app_dir, ShJsonBuf *out);
 int hl_agent_compute_ctx(HlAppContext *ctx, ShJsonBuf *out);
+
+/*
+ * hl_agent_overview — single-shot project summary an agent can read
+ * when dropped into an unfamiliar app dir. Composes runtime detection,
+ * route stats (count + methods + ws/sse flags), compute modules + AOT
+ * readiness + wamrc state, GPU shaders, migrations, declared modules,
+ * tests, and a build_ready flag. No DB connection; agents needing
+ * pending-migration counts call `hull agent migrate` separately.
+ */
+int hl_agent_overview(const char *app_dir, ShJsonBuf *out);
+int hl_agent_overview_ctx(HlAppContext *ctx, ShJsonBuf *out);
+
+/*
+ * hl_agent_tools — emit the side-loaded tool registry crossed with
+ * the canonical install state on this host. Generic over the
+ * registry; per-tool semantic callouts live in their subsystem
+ * panels (e.g. wamrc in hl_agent_compute).
+ *
+ *   { "platform": "darwin-arm64",
+ *     "tools": [
+ *       { "name": "wamrc",
+ *         "description": "...",
+ *         "available_for_platform": true,
+ *         "installed": false,
+ *         "path": null,
+ *         "asset_name": "hull-wamrc-darwin-arm64",
+ *         "install_hint": "hull tools install wamrc" }
+ *     ] }
+ */
+int hl_agent_tools(ShJsonBuf *out);
 
 /*
  * hl_agent_compute_call — invoke a WASM compute module with input read

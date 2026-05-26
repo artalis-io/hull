@@ -16,12 +16,14 @@
 #include "hull/app_context.h"
 #include "hull/entry.h"
 #include "hull/vfs.h"
+#include "hull/tools_install.h"
 
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/wasm.h"
 #endif
 
 #include <sh_json.h>
+#include <sys/stat.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -185,6 +187,71 @@ static void emit_from_disk(ShJsonWriter *w, const char *app_dir)
     free(ents);
 }
 
+/* Emit the wamrc-state block agents use to decide whether they can ask
+ * an end-user to AOT-compile compute modules. The block always appears
+ * in `hull agent compute` output; "installed=false, available=true"
+ * means "tell the user to run `hull tools install wamrc`". */
+static void emit_wamrc_state(ShJsonWriter *w, const char *hull_exe)
+{
+    sh_json_write_key(w, "wamrc");
+    sh_json_write_object_start(w);
+
+    const HlToolSpec *spec = hl_tools_find("wamrc");
+    const char *platform = "unknown";
+#ifdef __APPLE__
+# ifdef __aarch64__
+    platform = "darwin-arm64";
+# endif
+#elif defined(__linux__)
+# if defined(__x86_64__)
+    platform = "linux-x86_64";
+# elif defined(__aarch64__) || defined(__arm64__)
+    platform = "linux-aarch64";
+# endif
+#elif defined(__COSMOPOLITAN__)
+    platform = "cosmo";
+#endif
+
+    char path[HL_AGENT_PATH_MAX];
+    int found = hl_tools_lookup_path("wamrc", hull_exe,
+                                     path, sizeof(path)) == 0;
+
+    if (found) {
+        struct stat st;
+        sh_json_write_kv_bool(w, "installed", true);
+        sh_json_write_kv_string(w, "path", path);
+        if (stat(path, &st) == 0)
+            sh_json_write_kv_int(w, "size_bytes", (int64_t)st.st_size);
+
+        /* `managed` distinguishes a `hull tools install` install (under
+         * ~/.hull/tools/) from a system / sibling-of-hull binary. The
+         * managed location is the only one `hull tools uninstall`
+         * touches. */
+        int managed = 0;
+        const char *home = getenv("HOME");
+        if (home && *home) {
+            char prefix[HL_AGENT_PATH_MAX];
+            int pn = snprintf(prefix, sizeof(prefix), "%s/.hull/tools/", home);
+            if (pn > 0 && (size_t)pn < sizeof(prefix) &&
+                strncmp(path, prefix, (size_t)pn) == 0)
+                managed = 1;
+        }
+        sh_json_write_kv_bool(w, "managed", managed);
+    } else {
+        sh_json_write_kv_bool(w, "installed", false);
+        sh_json_write_kv_null(w, "path");
+        sh_json_write_kv_bool(w, "managed", false);
+        int available = spec && hl_tools_published_for(spec, platform);
+        sh_json_write_kv_bool(w, "available_for_platform", available != 0);
+        sh_json_write_kv_string(w, "install_hint",
+            available
+                ? "hull tools install wamrc"
+                : "make wamrc (no signed binary published for this platform)");
+    }
+
+    sh_json_write_object_end(w);
+}
+
 int hl_agent_compute_ctx(HlAppContext *ctx, ShJsonBuf *out)
 {
     ShJsonWriter w;
@@ -215,6 +282,12 @@ int hl_agent_compute_ctx(HlAppContext *ctx, ShJsonBuf *out)
     }
 
     sh_json_write_array_end(&w);
+
+    /* wamrc state lets agents recommend `hull tools install wamrc`
+     * when they see modules with no AOT artifacts. NULL hull_exe is
+     * fine — the lookup falls back to ~/.hull/tools and $PATH. */
+    emit_wamrc_state(&w, NULL);
+
     sh_json_write_object_end(&w);
     return 0;
 }
@@ -237,6 +310,8 @@ int hl_agent_compute(const char *app_dir, ShJsonBuf *out)
     sh_json_write_array_start(&w);
     emit_from_disk(&w, app_dir);
     sh_json_write_array_end(&w);
+
+    emit_wamrc_state(&w, NULL);
 
     sh_json_write_object_end(&w);
     return 0;

@@ -240,11 +240,16 @@ static int cmd_context(int argc, char **argv, const HlCommandEnv *env)
     const char *task = NULL;
     const char *level = "compact";
     int interactive = 0;
+    int list_mode = 0;
 
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "--interactive") == 0 ||
             strcmp(argv[i], "--tui") == 0) {
             interactive = 1;
+            continue;
+        }
+        if (strcmp(argv[i], "--list") == 0) {
+            list_mode = 1;
             continue;
         }
         if (strncmp(argv[i], "--task=", 7) == 0)
@@ -257,6 +262,16 @@ static int cmd_context(int argc, char **argv, const HlCommandEnv *env)
             level = argv[++i];
         else if (argv[i][0] != '-' && !task)
             task = argv[i];
+    }
+
+    /* --list short-circuits everything else — it enumerates the
+     * embedded context: registry so cold-start agents discover the
+     * task set without scraping. */
+    if (list_mode) {
+        ShJsonBuf out;
+        sh_json_buf_init(&out);
+        int rc = hl_agent_context_list(&out);
+        return output_result(&out, rc);
     }
 
 #ifdef HL_ENABLE_TUI
@@ -279,12 +294,11 @@ static int cmd_context(int argc, char **argv, const HlCommandEnv *env)
     (void)env;
 
     if (!task) {
-        fprintf(stderr, "Usage: hull agent context --task=TASK [--level=LEVEL]\n"
-                "  Tasks: auth, db, middleware, templates, routing, testing,\n"
-                "         build, deploy, search, i18n, webhooks, validation,\n"
-                "         compute\n"
-                "  Levels: minimal, compact (default), full\n"
-                "  Try --interactive (--tui) for a TUI picker.\n");
+        fprintf(stderr,
+            "Usage: hull agent context --task=TASK [--level=LEVEL]\n"
+            "       hull agent context --list   (enumerate available tasks)\n"
+            "  Levels: minimal, compact (default), full\n"
+            "  Try --interactive (--tui) for a TUI picker.\n");
         return 1;
     }
 
@@ -392,6 +406,27 @@ static int cmd_capabilities(int argc, char **argv)
     ShJsonBuf out;
     sh_json_buf_init(&out);
     int rc = hl_agent_capabilities(app_dir, &out);
+    return output_result(&out, rc);
+}
+
+static int cmd_tools_sub(int argc, char **argv)
+{
+    /* No app context needed — the registry + install state are
+     * host-level concerns independent of any particular app. */
+    (void)argc; (void)argv;
+    ShJsonBuf out;
+    sh_json_buf_init(&out);
+    int rc = hl_agent_tools(&out);
+    return output_result(&out, rc);
+}
+
+static int cmd_overview(int argc, char **argv)
+{
+    const char *app_dir = ".";
+    if (argc >= 1 && argv[0][0] != '-') app_dir = argv[0];
+    ShJsonBuf out;
+    sh_json_buf_init(&out);
+    int rc = hl_agent_overview(app_dir, &out);
     return output_result(&out, rc);
 }
 
@@ -637,6 +672,7 @@ static void agent_usage(void)
         "  errors [app_dir]               Show structured errors\n"
         "  test [app_dir]                 Run tests\n"
         "  context --task=T [--level=L]   Task-relevant documentation\n"
+        "  context --list                 Enumerate available context tasks\n"
         "  migrate [app_dir] [-d path]    Migration status\n"
         "  deploy [app_dir]               Deployment readiness analysis\n"
         "\n"
@@ -656,6 +692,8 @@ static void agent_usage(void)
         "  compute-call <mod> <in> [dir]  Invoke a WASM module against a file\n"
         "  schema-diff [app_dir] [-d p]   DB schema drift analysis\n"
         "  sql named <qname> [--params J] [dir]  Run a named query from queries.json\n"
+        "  tools                          Side-loaded tool registry + install state\n"
+        "  overview [app_dir]             Composite project summary (one shot)\n"
         "\n"
         "All output is JSON to stdout.\n");
 }
@@ -710,6 +748,12 @@ int hl_cmd_agent(int argc, char **argv, const HlCommandEnv *env)
     if (strcmp(sub, "perf") == 0)         return cmd_perf(sub_argc, sub_argv);
     if (strcmp(sub, "template") == 0)     return cmd_template(sub_argc, sub_argv);
     if (strcmp(sub, "compute-call") == 0) return cmd_compute_call(sub_argc, sub_argv);
+    /* Tool registry + install state — independent of HL_ENABLE_HTTP_CLIENT.
+     * Agents on CLI-flavor builds can still see the registry; the install
+     * command itself is the only thing gated by HTTP_CLIENT. */
+    if (strcmp(sub, "tools") == 0)        return cmd_tools_sub(sub_argc, sub_argv);
+    /* Composite project summary — one call to orient an agent. */
+    if (strcmp(sub, "overview") == 0)     return cmd_overview(sub_argc, sub_argv);
 #ifdef HL_ENABLE_DB
     if (strcmp(sub, "schema-diff") == 0)  return cmd_schema_diff(sub_argc, sub_argv);
     if (strcmp(sub, "sql") == 0)          return cmd_sql(sub_argc, sub_argv);

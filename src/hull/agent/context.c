@@ -110,4 +110,89 @@ int hl_agent_context(const char *task, const char *level, ShJsonBuf *out)
     return 0;
 }
 
+/* Helper: scan one context doc for which level markers are present.
+ * Used by hl_agent_context_list. Mirrors the marker-scan loop above
+ * but only records presence — no content extraction. */
+static void scan_levels(const char *content, size_t len,
+                        int *has_min, int *has_compact, int *has_full)
+{
+    *has_min = *has_compact = *has_full = 0;
+    static const char *MIN_M     = "<!-- minimal -->";
+    static const char *COMPACT_M = "<!-- compact -->";
+    static const char *FULL_M    = "<!-- full -->";
+
+    size_t min_len     = strlen(MIN_M);
+    size_t compact_len = strlen(COMPACT_M);
+    size_t full_len    = strlen(FULL_M);
+
+    for (size_t i = 0; i + 5 < len; i++) {
+        if (memcmp(content + i, "<!-- ", 5) != 0) continue;
+        if (i + min_len <= len &&
+            memcmp(content + i, MIN_M, min_len) == 0) {
+            *has_min = 1;
+        }
+        if (i + compact_len <= len &&
+            memcmp(content + i, COMPACT_M, compact_len) == 0) {
+            *has_compact = 1;
+        }
+        if (i + full_len <= len &&
+            memcmp(content + i, FULL_M, full_len) == 0) {
+            *has_full = 1;
+        }
+    }
+}
+
+/* List every context: task in the embedded stdlib registry plus
+ * which level markers each one has populated. Used by
+ * `hull agent context --list` so cold-start agents can discover the
+ * available topic set without scraping. Output shape:
+ *
+ *   { "tasks": [
+ *       { "name": "orientation", "levels": ["minimal","compact","full"] },
+ *       { "name": "auth",        "levels": ["minimal","compact","full"] },
+ *       ...
+ *   ] }
+ *
+ * The list is emitted in the order entries appear in the registry,
+ * which is sorted by name (LC_ALL=C). */
+int hl_agent_context_list(ShJsonBuf *out)
+{
+    extern const HlEntry hl_stdlib_entries[];
+
+    ShJsonWriter w;
+    sh_json_writer_init(&w, sh_json_buf_write, out);
+    sh_json_write_object_start(&w);
+    sh_json_write_key(&w, "tasks");
+    sh_json_write_array_start(&w);
+
+    const char *prefix = "context:";
+    size_t prefix_len = strlen(prefix);
+
+    for (const HlEntry *e = hl_stdlib_entries; e->name; e++) {
+        if (strncmp(e->name, prefix, prefix_len) != 0) continue;
+        const char *task = e->name + prefix_len;
+        /* Skip if the suffix is empty (defensive — shouldn't happen
+         * given the build pipeline). */
+        if (!*task) continue;
+
+        int has_min, has_compact, has_full;
+        scan_levels((const char *)e->data, e->len,
+                    &has_min, &has_compact, &has_full);
+
+        sh_json_write_object_start(&w);
+        sh_json_write_kv_string(&w, "name", task);
+        sh_json_write_key(&w, "levels");
+        sh_json_write_array_start(&w);
+        if (has_min)     sh_json_write_string(&w, "minimal");
+        if (has_compact) sh_json_write_string(&w, "compact");
+        if (has_full)    sh_json_write_string(&w, "full");
+        sh_json_write_array_end(&w);
+        sh_json_write_object_end(&w);
+    }
+
+    sh_json_write_array_end(&w);
+    sh_json_write_object_end(&w);
+    return 0;
+}
+
 /* ── Phase 4: hl_agent_migrate_status ──────────────────────────────── */
