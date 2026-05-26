@@ -24,6 +24,7 @@
 #include "hull/runtime/tool.h"
 #include "hull/build_assets.h"
 #include "hull/compiler.h"
+#include "hull/tools_install.h"
 
 #include <signal.h>
 #include <sys/wait.h>
@@ -547,10 +548,39 @@ void hl_lua_tool_expose_compiler(lua_State *L, HlCompiler *compiler)
 }
 
 
+/* ── tool.find_tool(name) → path|nil ──────────────────────────────
+ *
+ * Resolve a Hull-managed tool's executable path using the same
+ * 4-step lookup order as `hl_tools_lookup_path()`:
+ *   1. $HOME/.hull/tools/<name>
+ *   2. dirname(hull_exe)/<name>
+ *   3. $PATH lookup
+ * Returns nil if not found. Used by build.lua to locate `wamrc`.
+ */
+static int l_tool_find_tool(lua_State *L)
+{
+    const char *name = luaL_checkstring(L, 1);
+    /* Pull the hull binary path from the global `__hull_exe`, which
+     * runtime/lua/runtime.c sets at tool-mode init. */
+    const char *hull_exe = NULL;
+    lua_getglobal(L, "__hull_exe");
+    if (lua_isstring(L, -1)) hull_exe = lua_tostring(L, -1);
+    char out[PATH_MAX];
+    int rc = hl_tools_lookup_path(name, hull_exe, out, sizeof(out));
+    lua_pop(L, 1);
+    if (rc != 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushstring(L, out);
+    return 1;
+}
+
 static const luaL_Reg tool_funcs[] = {
     { "spawn",                  l_tool_spawn },
     { "spawn_read",             l_tool_spawn_read },
     { "find_files",             l_tool_find_files },
+    { "find_tool",              l_tool_find_tool },
     { "copy",                   l_tool_copy },
     { "mkdir",                  l_tool_mkdir },
     { "rmdir",                  l_tool_rmdir },

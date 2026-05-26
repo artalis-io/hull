@@ -41,9 +41,11 @@
 #include "hull/commands/modules.h"
 #ifdef HL_ENABLE_HTTP_CLIENT
 #include "hull/commands/update.h"
+#include "hull/commands/tools.h"
 #endif
 #include "hull/commands/sign_release.h"
 #include "hull/commands/verify_release.h"
+#include "hull/commands/help.h"
 
 #include <string.h>
 
@@ -80,9 +82,11 @@ static const HlCommand commands[] = {
     { "modules",       hl_cmd_modules },
 #ifdef HL_ENABLE_HTTP_CLIENT
     { "update",         hl_cmd_update },
+    { "tools",          hl_cmd_tools },
 #endif
     { "sign-release",   hl_cmd_sign_release },
     { "verify-release", hl_cmd_verify_release },
+    { "help",           hl_cmd_help },
     { NULL, NULL }  /* sentinel */
 };
 

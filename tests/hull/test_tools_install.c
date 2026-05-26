@@ -1,0 +1,350 @@
+/*
+ * test_tools_install.c — Unit tests for the tool registry + path helpers.
+ *
+ * Covers the API in include/hull/tools_install.h:
+ *   - hl_tools_registry() returns a NUL-terminated table with at least
+ *     one entry (wamrc).
+ *   - hl_tools_find() — present, absent, NULL inputs.
+ *   - hl_tools_name_valid() — accepted chars, rejected escape attempts.
+ *   - hl_tools_published_for() — known + unknown platforms.
+ *   - hl_tools_asset_name() — composition + buffer overflow rejection.
+ *   - hl_tools_install_path() — refuses traversal-bearing names.
+ *   - hl_tools_dir() — creates ~/.hull/tools, idempotent.
+ *   - hl_tools_lookup_path() — find an installed binary, miss when
+ *     absent, prefer ~/.hull/tools/ over $PATH.
+ *
+ * The tests redirect HOME and PATH to a tempdir per fixture so a real
+ * user environment is never touched.
+ *
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ */
+
+#include "utest.h"
+#include "hull/tools_install.h"
+
+#include <errno.h>
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+/* ── Fixture: per-test sandbox under /tmp ───────────────────────────── */
+
+struct tools_fixture {
+    char tmpdir[PATH_MAX];          /* sandbox root */
+    char saved_home[PATH_MAX];      /* original HOME, restored on teardown */
+    char saved_path[2048];          /* original PATH */
+    int  had_home;
+    int  had_path;
+};
+
+static int rm_recursive(const char *path)
+{
+    /* Tiny synchronous rm -rf; the sandbox only ever has a handful of
+     * shallow files, so we don't need anything clever. */
+    char cmd[PATH_MAX + 64];
+    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", path);
+    return system(cmd);
+}
+
+UTEST_F_SETUP(tools_fixture) {
+    snprintf(utest_fixture->tmpdir, sizeof(utest_fixture->tmpdir),
+             "/tmp/hull-tools-test-%d", getpid());
+    rm_recursive(utest_fixture->tmpdir);
+    ASSERT_EQ(mkdir(utest_fixture->tmpdir, 0700), 0);
+
+    const char *h = getenv("HOME");
+    utest_fixture->had_home = h != NULL;
+    if (h) snprintf(utest_fixture->saved_home, sizeof(utest_fixture->saved_home), "%s", h);
+    setenv("HOME", utest_fixture->tmpdir, 1);
+
+    const char *p = getenv("PATH");
+    utest_fixture->had_path = p != NULL;
+    if (p) snprintf(utest_fixture->saved_path, sizeof(utest_fixture->saved_path), "%s", p);
+    /* Empty PATH so step (3) of lookup is a no-op unless the test sets
+     * its own — keeps tests hermetic. */
+    setenv("PATH", "", 1);
+}
+
+UTEST_F_TEARDOWN(tools_fixture) {
+    (void)utest_result;
+    if (utest_fixture->had_home) setenv("HOME", utest_fixture->saved_home, 1);
+    else                          unsetenv("HOME");
+    if (utest_fixture->had_path) setenv("PATH", utest_fixture->saved_path, 1);
+    else                          unsetenv("PATH");
+    rm_recursive(utest_fixture->tmpdir);
+}
+
+/* ── Registry ──────────────────────────────────────────────────────── */
+
+UTEST(registry, sentinel_terminated) {
+    const HlToolSpec *r = hl_tools_registry();
+    ASSERT_TRUE(r != NULL);
+    /* At least one real entry. */
+    ASSERT_TRUE(r[0].name != NULL);
+    /* Walk to sentinel without running forever. */
+    int n = 0;
+    for (const HlToolSpec *t = r; t->name; t++) {
+        n++;
+        ASSERT_TRUE(t->description != NULL);
+        if (n > 64) break;  /* registry is small; fail loud if it isn't */
+    }
+    ASSERT_LT(n, 64);
+}
+
+UTEST(registry, wamrc_present_with_platform_publish_flags) {
+    const HlToolSpec *spec = hl_tools_find("wamrc");
+    ASSERT_TRUE(spec != NULL);
+    /* Native binaries are published for the three native targets; cosmo
+     * is intentionally skipped (LLVM doesn't fit). */
+    ASSERT_EQ(spec->has_linux_x86_64, 1);
+    ASSERT_EQ(spec->has_linux_aarch64, 1);
+    ASSERT_EQ(spec->has_darwin_arm64, 1);
+    ASSERT_EQ(spec->has_cosmo, 0);
+}
+
+UTEST(registry, find_unknown_returns_null) {
+    ASSERT_TRUE(hl_tools_find("not-a-real-tool") == NULL);
+    ASSERT_TRUE(hl_tools_find("") == NULL);
+    ASSERT_TRUE(hl_tools_find(NULL) == NULL);
+}
+
+/* ── Name validation ──────────────────────────────────────────────── */
+
+UTEST(name_valid, accepts_simple_identifiers) {
+    ASSERT_EQ(hl_tools_name_valid("wamrc"), 1);
+    ASSERT_EQ(hl_tools_name_valid("wgpu-native"), 1);
+    ASSERT_EQ(hl_tools_name_valid("Some_Tool9"), 1);
+    ASSERT_EQ(hl_tools_name_valid("a"), 1);  /* single char OK */
+}
+
+UTEST(name_valid, rejects_traversal_and_separators) {
+    ASSERT_EQ(hl_tools_name_valid(""), 0);
+    ASSERT_EQ(hl_tools_name_valid(NULL), 0);
+    ASSERT_EQ(hl_tools_name_valid(".."), 0);
+    ASSERT_EQ(hl_tools_name_valid("../etc/passwd"), 0);
+    ASSERT_EQ(hl_tools_name_valid("/etc/passwd"), 0);
+    ASSERT_EQ(hl_tools_name_valid("foo/bar"), 0);
+    ASSERT_EQ(hl_tools_name_valid("foo bar"), 0);     /* space */
+    ASSERT_EQ(hl_tools_name_valid("foo\nbar"), 0);    /* newline */
+    ASSERT_EQ(hl_tools_name_valid("foo:bar"), 0);     /* PATH separator */
+    ASSERT_EQ(hl_tools_name_valid("foo.bar"), 0);     /* dot — would shadow ext */
+}
+
+UTEST(name_valid, rejects_overlong) {
+    char overlong[HL_TOOL_NAME_MAX + 8];
+    memset(overlong, 'a', sizeof(overlong) - 1);
+    overlong[sizeof(overlong) - 1] = '\0';
+    ASSERT_EQ(hl_tools_name_valid(overlong), 0);
+}
+
+/* ── Platform / asset name ───────────────────────────────────────── */
+
+UTEST(asset_name, composes_correctly) {
+    const HlToolSpec *spec = hl_tools_find("wamrc");
+    ASSERT_TRUE(spec != NULL);
+    char out[128];
+    ASSERT_EQ(hl_tools_asset_name(spec, "linux-x86_64", out, sizeof(out)), 0);
+    ASSERT_STREQ(out, "hull-wamrc-linux-x86_64");
+    ASSERT_EQ(hl_tools_asset_name(spec, "darwin-arm64", out, sizeof(out)), 0);
+    ASSERT_STREQ(out, "hull-wamrc-darwin-arm64");
+}
+
+UTEST(asset_name, refuses_unpublished_platform) {
+    const HlToolSpec *spec = hl_tools_find("wamrc");
+    char out[128];
+    /* wamrc is not published for cosmo. */
+    ASSERT_EQ(hl_tools_asset_name(spec, "cosmo", out, sizeof(out)), -1);
+}
+
+UTEST(asset_name, refuses_unknown_platform) {
+    const HlToolSpec *spec = hl_tools_find("wamrc");
+    char out[128];
+    ASSERT_EQ(hl_tools_asset_name(spec, "freebsd-riscv32", out, sizeof(out)), -1);
+}
+
+UTEST(asset_name, refuses_short_buffer) {
+    const HlToolSpec *spec = hl_tools_find("wamrc");
+    char tiny[4];
+    ASSERT_EQ(hl_tools_asset_name(spec, "darwin-arm64", tiny, sizeof(tiny)), -1);
+}
+
+UTEST(published_for, null_safe) {
+    ASSERT_EQ(hl_tools_published_for(NULL, "linux-x86_64"), 0);
+    const HlToolSpec *spec = hl_tools_find("wamrc");
+    ASSERT_EQ(hl_tools_published_for(spec, NULL), 0);
+}
+
+/* ── Directory creation ──────────────────────────────────────────── */
+
+UTEST_F(tools_fixture, dir_creates_and_returns_trailing_slash) {
+    (void)utest_fixture;
+    char dir[PATH_MAX];
+    ASSERT_EQ(hl_tools_dir(dir, sizeof(dir)), 0);
+    /* ends with slash */
+    size_t L = strlen(dir);
+    ASSERT_GT(L, 0u);
+    ASSERT_EQ(dir[L - 1], '/');
+
+    /* Created on disk. */
+    struct stat st;
+    ASSERT_EQ(stat(dir, &st), 0);
+    ASSERT_TRUE(S_ISDIR(st.st_mode));
+
+    /* Mode masked by umask, but at least owner-readable/writable. */
+    ASSERT_NE((st.st_mode & 0700), (mode_t)0);
+}
+
+UTEST_F(tools_fixture, dir_is_idempotent) {
+    (void)utest_fixture;
+    char a[PATH_MAX], b[PATH_MAX];
+    ASSERT_EQ(hl_tools_dir(a, sizeof(a)), 0);
+    ASSERT_EQ(hl_tools_dir(b, sizeof(b)), 0);
+    ASSERT_STREQ(a, b);
+}
+
+UTEST_F(tools_fixture, dir_fails_without_home) {
+    (void)utest_fixture;
+    char out[PATH_MAX];
+    unsetenv("HOME");
+    ASSERT_EQ(hl_tools_dir(out, sizeof(out)), -1);
+}
+
+/* ── Install path ────────────────────────────────────────────────── */
+
+UTEST_F(tools_fixture, install_path_composes) {
+    char out[PATH_MAX];
+    ASSERT_EQ(hl_tools_install_path("wamrc", out, sizeof(out)), 0);
+    char expect[PATH_MAX];
+    snprintf(expect, sizeof(expect), "%s/.hull/tools/wamrc", utest_fixture->tmpdir);
+    ASSERT_STREQ(out, expect);
+}
+
+UTEST_F(tools_fixture, install_path_rejects_traversal) {
+    (void)utest_fixture;
+    char out[PATH_MAX];
+    ASSERT_EQ(hl_tools_install_path("../etc/passwd", out, sizeof(out)), -1);
+    ASSERT_EQ(hl_tools_install_path("foo/bar", out, sizeof(out)), -1);
+    ASSERT_EQ(hl_tools_install_path("", out, sizeof(out)), -1);
+}
+
+/* ── Lookup ──────────────────────────────────────────────────────── */
+
+/* Write an executable stub at `path`. Returns 0 on success. */
+static int touch_exec(const char *path)
+{
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof(dir), "%s", path);
+    char *slash = strrchr(dir, '/');
+    if (slash) {
+        *slash = '\0';
+        /* Walk down and mkdir each component (cheap mkdir -p). */
+        char acc[PATH_MAX] = "";
+        if (dir[0] == '/') { acc[0] = '/'; acc[1] = '\0'; }
+        char *t = dir;
+        while (*t == '/') t++;
+        char buf[PATH_MAX]; snprintf(buf, sizeof(buf), "%s", t);
+        char *save = NULL;
+        for (char *seg = strtok_r(buf, "/", &save); seg;
+             seg = strtok_r(NULL, "/", &save)) {
+            size_t L = strlen(acc);
+            if (L > 0 && acc[L-1] != '/')
+                snprintf(acc + L, sizeof(acc) - L, "/%s", seg);
+            else
+                snprintf(acc + L, sizeof(acc) - L, "%s", seg);
+            mkdir(acc, 0755);
+        }
+    }
+    FILE *f = fopen(path, "w");
+    if (!f) return -1;
+    fputs("#!/bin/sh\nexit 0\n", f);
+    fclose(f);
+    return chmod(path, 0755);
+}
+
+UTEST_F(tools_fixture, lookup_misses_when_nothing_exists) {
+    (void)utest_fixture;
+    char out[PATH_MAX];
+    ASSERT_EQ(hl_tools_lookup_path("wamrc", NULL, out, sizeof(out)), -1);
+}
+
+UTEST_F(tools_fixture, lookup_finds_canonical_install) {
+    (void)utest_fixture;
+    /* Place a stub at ~/.hull/tools/wamrc. */
+    char dir[PATH_MAX];
+    ASSERT_EQ(hl_tools_dir(dir, sizeof(dir)), 0);
+    char target[PATH_MAX];
+    snprintf(target, sizeof(target), "%swamrc", dir);
+    ASSERT_EQ(touch_exec(target), 0);
+
+    char out[PATH_MAX];
+    ASSERT_EQ(hl_tools_lookup_path("wamrc", NULL, out, sizeof(out)), 0);
+    ASSERT_STREQ(out, target);
+}
+
+UTEST_F(tools_fixture, lookup_finds_sibling_of_hull_exe) {
+    /* No canonical install; place stub next to "hull". */
+    char hull_dir[PATH_MAX];
+    snprintf(hull_dir, sizeof(hull_dir), "%s/bin", utest_fixture->tmpdir);
+    ASSERT_EQ(mkdir(hull_dir, 0755), 0);
+
+    char hull_path[PATH_MAX];
+    snprintf(hull_path, sizeof(hull_path), "%s/hull", hull_dir);
+    ASSERT_EQ(touch_exec(hull_path), 0);
+
+    char tool_path[PATH_MAX];
+    snprintf(tool_path, sizeof(tool_path), "%s/wamrc", hull_dir);
+    ASSERT_EQ(touch_exec(tool_path), 0);
+
+    char out[PATH_MAX];
+    ASSERT_EQ(hl_tools_lookup_path("wamrc", hull_path, out, sizeof(out)), 0);
+    ASSERT_STREQ(out, tool_path);
+}
+
+UTEST_F(tools_fixture, lookup_finds_on_PATH) {
+    char path_dir[PATH_MAX];
+    snprintf(path_dir, sizeof(path_dir), "%s/path-stub", utest_fixture->tmpdir);
+    ASSERT_EQ(mkdir(path_dir, 0755), 0);
+
+    char tool_path[PATH_MAX];
+    snprintf(tool_path, sizeof(tool_path), "%s/wamrc", path_dir);
+    ASSERT_EQ(touch_exec(tool_path), 0);
+
+    setenv("PATH", path_dir, 1);
+
+    char out[PATH_MAX];
+    ASSERT_EQ(hl_tools_lookup_path("wamrc", NULL, out, sizeof(out)), 0);
+    ASSERT_STREQ(out, tool_path);
+}
+
+UTEST_F(tools_fixture, lookup_prefers_canonical_over_PATH) {
+    /* Both ~/.hull/tools and PATH have a wamrc. Canonical must win. */
+    char dir[PATH_MAX];
+    ASSERT_EQ(hl_tools_dir(dir, sizeof(dir)), 0);
+    char canonical[PATH_MAX];
+    snprintf(canonical, sizeof(canonical), "%swamrc", dir);
+    ASSERT_EQ(touch_exec(canonical), 0);
+
+    char path_dir[PATH_MAX];
+    snprintf(path_dir, sizeof(path_dir), "%s/path-stub", utest_fixture->tmpdir);
+    ASSERT_EQ(mkdir(path_dir, 0755), 0);
+    char path_tool[PATH_MAX];
+    snprintf(path_tool, sizeof(path_tool), "%s/wamrc", path_dir);
+    ASSERT_EQ(touch_exec(path_tool), 0);
+    setenv("PATH", path_dir, 1);
+
+    char out[PATH_MAX];
+    ASSERT_EQ(hl_tools_lookup_path("wamrc", NULL, out, sizeof(out)), 0);
+    ASSERT_STREQ(out, canonical);
+}
+
+UTEST_F(tools_fixture, lookup_rejects_invalid_name) {
+    (void)utest_fixture;
+    char out[PATH_MAX];
+    ASSERT_EQ(hl_tools_lookup_path("../etc/passwd", NULL, out, sizeof(out)), -1);
+    ASSERT_EQ(hl_tools_lookup_path("foo/bar", NULL, out, sizeof(out)), -1);
+}
+
+UTEST_MAIN()

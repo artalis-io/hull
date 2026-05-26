@@ -103,23 +103,16 @@ local function find_json_files(dir)
     return result
 end
 
--- Find wamrc binary: check PATH, then build/, then hull binary dir
+-- Find wamrc binary. Lookup order is implemented in C by
+-- `hl_tools_lookup_path` (see include/hull/tools_install.h):
+--   1. $HOME/.hull/tools/wamrc   (canonical install for `hull tools install`)
+--   2. dirname(hull_exe)/wamrc   (ejected / portable installs)
+--   3. wamrc on $PATH            (system / brew install)
+-- Build-tree convention `./build/wamrc` is checked as a dev fallback.
 local function find_wamrc()
-    -- Check PATH
-    local out = tool.spawn_read({"wamrc", "--version"})
-    if out then return "wamrc" end
-
-    -- Check build/ directory (next to hull binary build output)
+    local p = tool.find_tool("wamrc")
+    if p then return p end
     if file_exists("build/wamrc") then return "./build/wamrc" end
-
-    -- Check hull binary directory (for embedded/installed builds)
-    if __hull_exe then
-        local hull_dir = __hull_exe:match("(.*/)")
-        if hull_dir and file_exists(hull_dir .. "wamrc") then
-            return hull_dir .. "wamrc"
-        end
-    end
-
     return nil
 end
 

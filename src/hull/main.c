@@ -16,6 +16,7 @@
 
 #include "hull/commands/dispatch.h"
 #include "hull/commands/version.h"
+#include "hull/commands/help.h"
 #include "hull/serve.h"
 
 #include <string.h>
@@ -36,6 +37,14 @@ int hull_main(int argc, char **argv)
         char *ver_argv[] = { "version" };
         HlCommandEnv env = { .hull_exe = argv[0], .app_dir = "." };
         return hl_cmd_version(1, ver_argv, &env);
+    }
+
+    /* Same for -h / --help — symmetric with --version. */
+    if (argc >= 2 &&
+        (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
+        char *help_argv[] = { "help" };
+        HlCommandEnv env = { .hull_exe = argv[0], .app_dir = "." };
+        return hl_cmd_help(1, help_argv, &env);
     }
 
     /* `hull run [args]` is a discoverable alias for `hull [args]` —

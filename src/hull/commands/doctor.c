@@ -24,6 +24,7 @@
 #include "hull/compiler.h"
 #include "hull/module_registry.h"
 #include "hull/tool.h"
+#include "hull/tools_install.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -186,6 +187,7 @@ static int tcc_is_embedded(void)
 typedef struct {
     int   wasm_enabled;          /* HL_ENABLE_WASM */
     char  wamrc_path[PATH_MAX];  /* empty = not found */
+    int   wamrc_managed;         /* 1 if wamrc came from ~/.hull/tools/ */
     char  clang_path[PATH_MAX];  /* empty = not found */
     int   has_brew_llvm;         /* Homebrew llvm clang exists under /opt/homebrew or /usr/local */
     int   has_wasm_ld;           /* wasm-ld in PATH (Linux) */
@@ -230,11 +232,32 @@ static void detect_compute(ComputeInfo *info, const char *self_path)
     info->gpu_enabled = 0;
 #endif
 
-    /* wamrc: prefer sibling-to-hull (i.e. `make wamrc` artifact next to
-     * the running binary), fall back to PATH. */
-    if (!find_sibling_executable(self_path, "wamrc",
-                                 info->wamrc_path, sizeof(info->wamrc_path)))
-        find_in_path("wamrc", info->wamrc_path, sizeof(info->wamrc_path));
+    /* wamrc: consult the shared `hl_tools_lookup_path` so we follow the
+     * same order as the build system (~/.hull/tools first, then
+     * dirname(hull), then PATH). Fall back to the historical
+     * sibling-to-hull / PATH probes if the canonical helper returns
+     * nothing, so `./build/wamrc` is still discoverable in source-tree
+     * development. */
+    if (hl_tools_lookup_path("wamrc", self_path,
+                             info->wamrc_path, sizeof(info->wamrc_path)) != 0) {
+        if (!find_sibling_executable(self_path, "wamrc",
+                                     info->wamrc_path,
+                                     sizeof(info->wamrc_path)))
+            find_in_path("wamrc", info->wamrc_path, sizeof(info->wamrc_path));
+    }
+    /* Flag whether the discovered binary is under ~/.hull/tools so the
+     * renderer can produce the right hint. */
+    if (info->wamrc_path[0]) {
+        const char *home = getenv("HOME");
+        if (home && *home) {
+            char prefix[PATH_MAX];
+            int pn = snprintf(prefix, sizeof(prefix), "%s/.hull/tools/", home);
+            if (pn > 0 && (size_t)pn < sizeof(prefix) &&
+                strncmp(info->wamrc_path, prefix, (size_t)pn) == 0) {
+                info->wamrc_managed = 1;
+            }
+        }
+    }
 
     /* Probe for Homebrew llvm (needed on macOS for wasm-ld). */
     const char *brew[] = {
@@ -351,11 +374,15 @@ static void print_human(FILE *f, CompilerInfo *ci, int nci,
 
         /* AOT precompiler (host toolchain). */
         if (cmp->wamrc_path[0]) {
-            fprintf(f, "  wamrc       \xe2\x9c\x93  %s\n", cmp->wamrc_path);
+            fprintf(f, "  wamrc       \xe2\x9c\x93  %s%s\n",
+                    cmp->wamrc_path,
+                    cmp->wamrc_managed ? "  (managed via `hull tools`)" : "");
             fprintf(f, "                (hull build will auto-AOT-compile compute/*.wasm)\n");
         } else {
-            fprintf(f, "  wamrc       \xe2\x9c\x97  not found in PATH or next to hull\n");
-            fprintf(f, "                hint: `make wamrc` (requires cmake + LLVM)\n");
+            fprintf(f, "  wamrc       \xe2\x97\x8b  not installed\n");
+            fprintf(f, "                hint: `hull tools install wamrc` "
+                       "(signed download)\n");
+            fprintf(f, "                       or `make wamrc` (build from source)\n");
             fprintf(f, "                without wamrc, modules run via the fast interpreter\n");
             fprintf(f, "                (~50x slower than AOT for compute-heavy work)\n");
         }
@@ -534,6 +561,8 @@ static void print_json(FILE *f, CompilerInfo *ci, int nci,
     fprintf(f, ", \"wamrc\": ");
     if (cmp->wamrc_path[0]) json_str(f, cmp->wamrc_path);
     else                    fprintf(f, "null");
+    fprintf(f, ", \"wamrc_managed\": %s",
+            cmp->wamrc_managed ? "true" : "false");
     fprintf(f, ", \"clang\": ");
     if (cmp->clang_path[0]) json_str(f, cmp->clang_path);
     else                    fprintf(f, "null");
