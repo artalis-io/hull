@@ -50,7 +50,51 @@ commit). Apps that mix both must accept eventual consistency.
 
 ---
 
-## 2. Platform-sig completion — make `HL_PLATFORM_PUBKEY_HEX` meaningful
+## 2. `hull tools install` — side-loaded optional tools
+
+**Priority:** Medium — closes the "wamrc not bundled" friction without
+inflating the main hull binary, and establishes the pattern for
+future optional tooling (wgpu-native, future analytics agents).
+
+**Target:** v0.1.2
+
+**Full design:** [`tools_install.md`](tools_install.md). Key shape:
+
+- `hull tools install <name>` / `list` / `uninstall` subcommands.
+- Tools land in `$HOME/.hull/tools/`, isolated from the user's PATH.
+- Same release pubkey + `hull.sha256` signature covers tool binaries
+  (no new keys, no new ceremonies).
+- Version-coupled: `hull tools install` pulls from the SAME release
+  as the running hull binary, so e.g. wamrc stays at the WAMR commit
+  hull was compiled against.
+- First concrete tool: `wamrc` (WAMR AOT compiler).
+- Cosmo unsupported for tools that need LLVM (Cosmo users
+  `make wamrc` from source).
+
+**Tasks:**
+
+- [ ] `src/hull/tools_install.c` — `hl_tools_dir()` + lookup helper.
+- [ ] `src/hull/commands/tools.c` — dispatcher for `install` /
+      `list` / `uninstall`, reusing `hl_release_verify_manifest_sig()`.
+- [ ] Tool registry (static array — one entry today, easy to grow).
+- [ ] Wire `cap/wasm.c` AOT path to consult `$HOME/.hull/tools/wamrc`
+      before falling back to PATH lookup.
+- [ ] Doctor section: WASM row reflects installed/outdated/missing
+      states from the registry.
+- [ ] Release workflow: `build-wamrc` matrix job (linux-x86_64,
+      linux-aarch64, darwin-arm64), extend flatten / sha256 /
+      gh-release-create steps.
+- [ ] e2e test: install → exercise → uninstall.
+- [ ] Docs: this entry, CLAUDE.md "Tools and side-loading" section,
+      site mention.
+
+**Out of scope (deferred):** wgpu-native (needs runtime dlopen
+architecture change), system-wide install path (stay user-scoped),
+`hull update --with-tools` auto-refresh.
+
+---
+
+## 3. Platform-sig completion — make `HL_PLATFORM_PUBKEY_HEX` meaningful
 
 **Priority:** Medium — the cryptographic primitives, the embedded
 pubkeys (`HL_PLATFORM_PUBKEY_HEX` in `signature.h`,
@@ -148,7 +192,7 @@ trust roots, so existing v0.1.0 installs continue to work unchanged.
 
 ---
 
-## 3. Background job queue (`hull.jobs`)
+## 4. Background job queue (`hull.jobs`)
 
 **Priority:** Low — the existing transactional outbox + inbox patterns cover
 most reliable side-effect use cases. Add this when an explicit user need
@@ -180,7 +224,7 @@ end, { batch = 10, retry = 3 })
 
 ---
 
-## 4. Email retry/backoff (Phase 7 candidate from Phase 6 audit)
+## 5. Email retry/backoff (Phase 7 candidate from Phase 6 audit)
 
 **Priority:** Low — Phase 6 wrapped `email.js` / `email.lua` providers in
 try/catch; now that errors surface cleanly as `{ok:false, error}`, retry on
@@ -192,7 +236,7 @@ exponential backoff math as `outbox.backoffDelay`.
 
 ---
 
-## 5. Test coverage gaps surfaced by audits
+## 6. Test coverage gaps surfaced by audits
 
 Three items the audits flagged as deserving unit tests (currently e2e-only):
 
