@@ -33,7 +33,7 @@
     "applicationSubCategory": "Runtime",
     "operatingSystem": "Linux, macOS, Windows (via Cosmopolitan), FreeBSD, OpenBSD, NetBSD",
     "description": "A sealed, capability-secure runtime for agentic and local-first software. Every external capability (filesystem, network, env, process) is declared in the manifest and checked at a C boundary the script cannot cross. Only the bootstrap registration API is intrinsic.",
-    "softwareVersion": "0.1.1",
+    "softwareVersion": "0.1.2",
     "url": "https://gethull.dev/",
     "downloadUrl": "https://github.com/artalis-io/hull/releases",
     "codeRepository": "https://github.com/artalis-io/hull",
@@ -223,7 +223,7 @@
         <span class="text-paper-100 font-semibold tracking-tight">Hull</span>
         <a href="https://github.com/artalis-io/hull/releases" class="chip ml-1.5 hidden sm:inline-flex hover:text-paper-50 transition" title="Release notes on GitHub">
           <span class="accent-dot"></span>
-          v0.1.1
+          v0.1.2
         </a>
       </a>
 
@@ -406,7 +406,7 @@
             </header>
 <pre><span class="tk-com"># 1. Install. install.sh verifies the SHA-256 manifest as it downloads.</span>
 $ curl -fsSL <span class="tk-str">https://gethull.dev/install.sh</span> | sh
-hull installed to ~/.local/bin/hull  (v0.1.1)
+hull installed to ~/.local/bin/hull  (v0.1.2)
 
 <span class="tk-com"># 2. Verify the release signature (Ed25519, embedded pubkey).</span>
 $ <span class="tk-kw">REL</span>=https://github.com/artalis-io/hull/releases/latest/download
@@ -416,7 +416,7 @@ $ hull verify-release hull.sha256 hull.sha256.sig
 
 <span class="tk-com"># 3. Inspect the toolchain.</span>
 $ hull doctor
-hull v0.1.1  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middot;  cc: ok
+hull v0.1.2  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middot;  cc: ok
 </pre>
           </div>
           <p class="mt-3 text-[11px] text-mute-400 leading-relaxed">
@@ -1520,7 +1520,7 @@ $ hull agent routes my-tool
       </div>
 
       <p class="text-[11px] text-mute-400 leading-relaxed">
-        Hull is at <span class="text-paper-100">v0.1.1</span>. APIs and the manifest schema are pre-stable, so pin your version and read the
+        Hull is at <span class="text-paper-100">v0.1.2</span>. APIs and the manifest schema are pre-stable, so pin your version and read the
         <a href="https://github.com/artalis-io/hull/releases" class="link">changelog</a>
         before upgrading.
         Page last updated <time datetime="2026-05">May&nbsp;2026</time>.
