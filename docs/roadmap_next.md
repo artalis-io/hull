@@ -1,6 +1,6 @@
 # Hull — Next Features Roadmap
 
-Status: **Active** | Last reviewed: 2026-05-25
+Status: **Active** | Last reviewed: 2026-05-26
 
 Companion to [`roadmap.md`](roadmap.md). That doc records what's built;
 this one tracks the **next** feature batches in priority order.
@@ -17,6 +17,7 @@ For completed historical roadmaps see [`archive/roadmaps/`](archive/roadmaps/).
 - ✅ **SSE support** — `app.sse(path, handler)` with `stream:event(name, data, [id])` and `stream:close()`.
 - ✅ **`hull deploy`** — Dockerfile, systemd, fly.toml targets; `hull agent deploy` JSON readiness analysis.
 - ✅ **Extended `hull agent`** — 16 new subcommands (Phase 6) covering manifest preview, request preview, single-file validate, eval, schema-diff, sql-named, vfs/compute/gpu/perf/logs/template/compute-call. Wired into MCP. See [`agent_guide.md`](agent_guide.md) §5.
+- ✅ **v0.1.2 batch** — `hull tools install/list/uninstall` (first tool: wamrc), shared `release_io.{c,h}` extracted from `commands/update.c`, top-level `hull help`, audit fixes (OOB defense, JSON escape, fsync/close checks, constant-time SHA-256 compare), agent surface expansion (`hull agent tools/overview` + `agent context --list` + wamrc state in agent compute), six new opinionated context docs (orientation, quickstart × 3, gpu, tools), discoverability breadcrumbs in `hull --help` + bare-hull + install.sh, `build-wamrc` CI matrix. See [`../CHANGELOG.md#012`](../CHANGELOG.md).
 
 ---
 
@@ -85,99 +86,167 @@ architecture change), system-wide install path (stay user-scoped),
 
 ## 3. Platform-sig completion — make `HL_PLATFORM_PUBKEY_HEX` meaningful
 
-**Priority:** Medium — the cryptographic primitives, the embedded
+**Priority:** High for v0.1.3 — this is the loudest remaining gap on
+the v0.1.x "honest scorecard" and the symmetric companion to the
+release-sig trust chain that shipped fully in v0.1.0 (release-side)
+and matured in v0.1.2 (audit-hardened constant-time compare, OOB
+defense, `release_io.{c,h}` shared between `hull update` and
+`hull tools install`).
+
+**Target:** v0.1.3.
+
+**Current state:** the cryptographic primitives, the embedded
 pubkeys (`HL_PLATFORM_PUBKEY_HEX` in `signature.h`,
 `GETHULL_DEV_PLATFORM_KEY` in `site/verify.html`), and the verifier
-code paths (`hull verify`, browser verifier) all exist. But no signed
-platform artefact is produced at release time, so `package.sig`'s
-`platform` field is empty in every built app and the verifier has
-nothing to check against. Closes the loudest gap on the v0.1.0
-"honest scorecard" section of gethull.dev.
+code paths (`hull verify`, browser verifier) all exist. But:
 
-The release-key half of the same trust model shipped fully in v0.1.0
-(release.yml signs `hull.sha256` → `hull update` verifies against
-`HL_RELEASE_PUBKEY_HEX`). Platform-sig is the symmetric companion;
-the architecture treats them as peers.
+- `HL_PLATFORM_PUBKEY_HEX` is the all-zeros placeholder. v0.1.1
+  reverted it from the real key after a test-only override Makefile
+  rule got removed — the real key is in the GH secrets, just not
+  embedded.
+- No signed platform artefact is produced at release time, so
+  `package.sig`'s `platform` field is empty in every built app and
+  the verifier has nothing to check against.
+- The browser verifier at `gethull.dev/verify.html` enforces the
+  platform layer; the CLI and runtime do not.
 
-**Four missing pieces, in execution order:**
+### Why v0.1.2 unblocks this
 
-1. **`HULL_PLATFORM_CANARY` magic byte sequence actually emitted into
-   the linked `libhull_platform.a`.** Structural prerequisite —
-   without the canary present in the linked artefact, the scanner
-   has nothing to find regardless of signing.
+v0.1.2 established the patterns this work needs to copy:
 
-   Either a linker section (`__attribute__((section(...)))` with a
-   well-known SHA-256 placeholder that a post-link tool rewrites) or
-   a generated `canary.c` whose contents come from a SHA-256 of the
-   rest of the .a. The latter is portable, easier to reason about,
-   and matches the "compute first, embed second" pattern Hull
-   already uses for `embedded_tcc.h`.
+| v0.1.2 shipped | Reused here |
+|---|---|
+| `release_io.{c,h}` — HTTPS GET, signed-manifest verify, SHA-256, atomic write | Same module verifies the embedded platform-sig blob (no new code paths) |
+| Audit-hardened trust chain (constant-time compare, OOB defense, fsync checks) | Platform-sig path is implemented against the same hardened helpers |
+| `release.yml` matrix: build artifact → sha256 → Ed25519 sign → publish | Same shape applies to per-arch platform archives |
+| Hex pubkey override via `-DHL_*_PUBKEY_HEX=…` in `release.h` | Already in `signature.h` too; tests can flip back to placeholder |
 
-2. **A signed platform manifest produced at release time.** The
-   release workflow runs `make platform` / `make platform-cosmo`,
-   computes the SHA-256 + canary of each per-arch
-   `libhull_platform.*.a`, builds a canonical JSON like
+The architecture is right. What's missing is the wire format and
+the release-time signing step.
 
-       {
-         "platforms": {
-           "linux-x86_64":   { "canary": "<hex>", "hash": "<hex>" },
-           "linux-aarch64":  { "canary": "<hex>", "hash": "<hex>" },
-           "darwin-arm64":   { "canary": "<hex>", "hash": "<hex>" },
-           "cosmo-x86_64":   { "canary": "<hex>", "hash": "<hex>" },
-           "cosmo-aarch64":  { "canary": "<hex>", "hash": "<hex>" }
-         },
-         "public_key": "<hex>",
-         "signature":  "<hex>"
-       }
+### Four pieces, in execution order
 
-   signs the canonical payload with `HULL_PLATFORM_KEY` (already in
-   the GH secrets), and embeds the signed blob into the hull binary
-   alongside the existing `.a` files (analogous to how the CA
-   bundle gets embedded today).
+**(A) Canary in the linked `libhull_platform.a`.** Structural
+prerequisite — without a canary the post-link scanner has nothing
+to anchor on. Implementation: generated `canary.c` whose contents
+come from a SHA-256 of the rest of the `.a`. The same
+"compute-then-embed" pattern Hull already uses for `embedded_tcc.h`
+and the CA bundle. Avoids linker-section portability issues across
+cosmocc + Mach-O + ELF.
 
-3. **`hull build` passes the embedded platform-sig blob through into
-   every built app's `package.sig`.** Today the `platform` field is
-   mostly empty / placeholder. After (2), `hull build` extracts the
-   embedded signed blob and writes it verbatim into
-   `package.sig.platform` so downstream verifiers see something to
-   check.
+**(B) Signed platform manifest produced at release time.** Extend
+`release.yml` (in the same release workflow that already signs
+`hull.sha256`): after `make platform-cosmo` + each `make platform`,
+compute SHA-256 + canary of each per-arch `libhull_platform.*.a`,
+emit canonical JSON, sign with the existing `HULL_PLATFORM_KEY` GH
+secret, embed the signed blob via `xxd` into
+`embedded_platform_sig.h`. Same secret-handling pattern as
+`HULL_RELEASE_KEY` today.
 
-4. **`hull verify` and `--verify-sig` enforce platform-sig at
-   startup.** Today both verify the app layer (outer). They should
-   also verify `package.sig.platform.signature` against
-   `HL_PLATFORM_PUBKEY_HEX` and refuse to start if it fails. The
-   browser verifier already enforces this — it's just the CLI /
-   runtime that need to catch up.
+```
+{
+  "platforms": {
+    "linux-x86_64":  { "canary": "<hex>", "hash": "<hex>" },
+    "linux-aarch64": { "canary": "<hex>", "hash": "<hex>" },
+    "darwin-arm64":  { "canary": "<hex>", "hash": "<hex>" },
+    "cosmo-x86_64":  { "canary": "<hex>", "hash": "<hex>" },
+    "cosmo-aarch64": { "canary": "<hex>", "hash": "<hex>" }
+  },
+  "public_key": "<hex>",
+  "signature":  "<hex>"
+}
+```
 
-**Tasks:**
+**(C) Restore the real `HL_PLATFORM_PUBKEY_HEX`.** Replace the
+all-zeros placeholder with the actual pubkey embedded for v0.1.0.
+Coordinate with (B): the embedded pubkey on the verify side must
+match the secret that signs on the release side. (The pubkey is
+already in `verify.html`; this is just symmetric reinstatement.)
 
-- [ ] `src/hull/platform_canary.c` (or linker-section equivalent) +
-      post-link `compute_canary` step in the Makefile.
-- [ ] Release workflow step: build platforms, compute canaries,
-      emit `platform-manifest.json`, sign with
-      `HULL_PLATFORM_KEY`, embed via `xxd`/`bin2c` into
-      `embedded_platform_sig.h`.
+**(D) `hull build` passes through + `hull verify`/`--verify-sig`
+enforce.** Today `hull build` writes a placeholder into
+`package.sig.platform`. After (B), it reads the embedded signed
+blob and writes it verbatim. `hull verify` + the `--verify-sig`
+startup path verify `package.sig.platform.signature` against
+`HL_PLATFORM_PUBKEY_HEX` and refuse to start on failure. Browser
+verifier already enforces this — just CLI + runtime to catch up.
+
+### Concrete commit shape (mirrors v0.1.2's batch)
+
+1. `sig:` — `platform_canary.c` + post-link `compute_canary`
+   Makefile step + unit tests.
+2. `ci:` — `release.yml` extension to emit + sign +
+   `embedded_platform_sig.h`; `bin2c` / xxd embed step.
+3. `sig:` — restore real `HL_PLATFORM_PUBKEY_HEX` (one-line
+   patch + test fixture update).
+4. `build:` — `hull build` passes embedded blob into
+   `package.sig.platform` (was a placeholder).
+5. `sig:` — `hull verify` + `--verify-sig` enforce platform layer
+   at startup; e2e test that mutating an embedded `.a` byte makes
+   verify fail with a clear message.
+6. `docs:` — update `docs/security.md §6`, flip the "honest
+   scorecard" item on `site/index.html` from "wired but inactive"
+   to "shipped", refresh `verify.html` fixture.
+
+Each step is independently revertable — if (B) lands but (D) is
+deferred, builds get a signed-but-unverified platform blob in their
+`package.sig` (forward-compatible — older verifiers ignore the
+field; newer ones can validate against historical releases).
+
+### Tasks
+
+- [ ] `src/hull/platform_canary.c` + post-link `compute_canary`
+      Makefile step.
+- [ ] Release workflow: build platforms, compute canaries, emit
+      `platform-manifest.json`, sign with `HULL_PLATFORM_KEY`, embed
+      via `xxd` into `embedded_platform_sig.h`.
+- [ ] Restore real `HL_PLATFORM_PUBKEY_HEX` (revert the
+      v0.1.1 placeholder commit's hex value; keep the
+      `#ifndef HL_PLATFORM_PUBKEY_HEX` test-override guard).
 - [ ] `hull build` reads the embedded blob, writes it into
       `package.sig.platform`.
 - [ ] `src/hull/signature.c` — verify `package.sig.platform` against
-      `HL_PLATFORM_PUBKEY_HEX`. Add to `hull verify` + `--verify-sig`
-      runtime path.
-- [ ] e2e test: build an app, mutate the embedded `.a` bytes, expect
-      verify to fail with a clear message.
-- [ ] Update `verify/index.html` test fixture + roadmap entry in
-      `docs/security.md §6` to reflect that the platform layer is
-      now active.
+      `HL_PLATFORM_PUBKEY_HEX`. Add to `hull verify` +
+      `--verify-sig` runtime path.
+- [ ] e2e test: build an app, mutate the embedded `.a` bytes,
+      expect verify to fail with a clear message and exit non-zero.
+- [ ] Audit pass (mirror v0.1.2): OOB defense on the canary
+      scanner, fsync/close on any atomic blob writes, constant-time
+      compare on canary equality if it ever moves to a runtime
+      check.
+- [ ] Update `docs/security.md §6` to flip the "platform layer is
+      inactive" caveat to "shipped".
+- [ ] Update `site/verify.html` fixture + the
+      `site/index.html` honest-scorecard entry that calls out
+      platform-sig as a gap.
+- [ ] Post-release smoke: extend `tests/release_smoke.sh` to
+      `hull verify` the just-published artifacts and confirm the
+      platform layer reports valid.
 
-**Out of scope (defer to reproducible-builds Phase 9):** proving the
-`.a` was built from the published source rather than a tampered
-fork. Platform-sig only proves the bytes were endorsed by whoever
-holds the platform key; reproducible builds prove WHAT got endorsed.
+### Out of scope
 
-**Effort:** ~2-3 day of engineering + 1 day of release-engineering
-once (3) lands and the rotation/test paths are exercised.
-Realistically v0.1.2 or v0.2.0 depending on what else gets bundled.
-Not a v0.1.0 retrofit — the wire format is what's missing, not the
-trust roots, so existing v0.1.0 installs continue to work unchanged.
+- **Reproducible builds** (Phase 9). Platform-sig proves bytes were
+  endorsed by whoever holds the platform key; reproducible builds
+  prove WHAT got endorsed. Separate concern.
+- **Key rotation tooling.** The current model assumes the platform
+  key doesn't rotate within a major version. If it does need to
+  rotate before v0.2, that's a separate commit batch (extending
+  `HL_PLATFORM_PUBKEY_HEX` to a small array of accepted keys).
+- **Backwards compatibility with v0.1.0/v0.1.1/v0.1.2 binaries.**
+  Those builds were released with the placeholder pubkey embedded
+  and no signed platform blob; they'll continue to work because
+  the verifier short-circuits to "skip with warning" when the
+  pubkey is all-zeros. v0.1.3+ is the cutover point.
+
+### Effort
+
+Realistic estimate: **3 engineering days + 1 release-engineering
+day** based on the v0.1.2 shape (which extended `release_io` and
+the release workflow in roughly the same amount of work). Cleanly
+fits v0.1.3 alongside whatever else gets bundled. Not a v0.1.x
+retrofit — the wire format is what's missing, not the trust roots,
+so existing v0.1.0–v0.1.2 installs continue to work unchanged with
+their "skip-with-warning" verifier behavior.
 
 ---
 
