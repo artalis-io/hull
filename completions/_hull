@@ -36,6 +36,14 @@ _hull() {
         'version:Print hull version'
         'doctor:Check environment for hull build readiness'
         'update:Self-update from GitHub releases'
+        'tools:Install / list / uninstall side-loaded tools (e.g. wamrc)'
+        'help:Show top-level usage'
+    )
+    local -a tools_subs
+    tools_subs=(
+        'list:Print the registry + install state'
+        'install:Download, verify, install a tool'
+        'uninstall:Remove an installed tool'
     )
     # Keep in sync with src/hull/commands/agent.c hl_cmd_agent() dispatch table.
     agent_subs=(
@@ -63,6 +71,15 @@ _hull() {
         'template:Render a template with sample data'
         'schema-diff:Diff applied schema vs migration files'
         'sql:Run a read-only SQL query against the app DB'
+        'tools:Side-loaded tool registry + install state'
+        'overview:Single-shot project summary'
+    )
+    # Keep in sync with stdlib/context/*.md filenames.
+    local -a agent_context_tasks
+    agent_context_tasks=(
+        'auth' 'build' 'compute' 'db' 'deploy' 'gpu' 'i18n' 'middleware'
+        'orientation' 'quickstart-cli' 'quickstart-tui' 'quickstart-web'
+        'routing' 'search' 'templates' 'testing' 'tools' 'validation' 'webhooks'
     )
     agent_db_subs=(
         'schema:Introspect DB schema'
@@ -191,8 +208,14 @@ _hull() {
                                 ;;
                             context)
                                 _arguments \
-                                    '--task=[Task]:task:(auth db routing middleware testing build deploy validation templates i18n search webhooks)' \
-                                    '--level=[Detail level]:level:(brief detailed)'
+                                    "--task=[Task]:task:($agent_context_tasks)" \
+                                    '--level=[Detail level]:level:(minimal compact full)' \
+                                    '--list[Enumerate available context tasks]' \
+                                    '--interactive[Interactive TUI picker]' \
+                                    '--tui[Interactive TUI picker]'
+                                ;;
+                            overview)
+                                _arguments '*:app dir:_files -/'
                                 ;;
                             *)
                                 _arguments \
@@ -235,6 +258,31 @@ _hull() {
                         '--force[Reinstall even if version matches]' \
                         '--repo[GitHub repo]:repo:' \
                         '--repo=[GitHub repo]:repo:'
+                    ;;
+
+                tools)
+                    if (( CURRENT == 3 )); then
+                        _describe -t tools-verbs 'tools verb' tools_subs
+                    else
+                        case "$words[3]" in
+                            list)
+                                _arguments \
+                                    '--json[Machine-readable JSON output]' \
+                                    '--repo=[GitHub repo]:repo:'
+                                ;;
+                            install)
+                                # Tool names — keep in sync with REGISTRY
+                                # in src/hull/tools_install.c.
+                                _arguments \
+                                    '--all[Install every published tool]' \
+                                    '--repo=[GitHub repo]:repo:' \
+                                    '*:tool:(wamrc)'
+                                ;;
+                            uninstall|remove)
+                                _arguments '*:tool:(wamrc)'
+                                ;;
+                        esac
+                    fi
                     ;;
 
                 keygen|sign-platform)

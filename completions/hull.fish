@@ -26,7 +26,7 @@ end
 
 function __hull_no_subcommand
     set -l cmd (commandline -opc)
-    set -l commands keygen build verify inspect manifest test new init dev eject sign-platform migrate agent mcp check compute deploy version doctor update
+    set -l commands keygen build verify inspect manifest test new init dev eject sign-platform migrate agent mcp check compute deploy version doctor update tools help
     for c in $cmd[2..-1]
         if contains -- $c $commands
             return 1
@@ -57,8 +57,53 @@ complete -c hull -n __hull_no_subcommand -f -a deploy        -d 'Generate deploy
 complete -c hull -n __hull_no_subcommand -f -a version       -d 'Print hull version'
 complete -c hull -n __hull_no_subcommand -f -a doctor        -d 'Check hull build readiness'
 complete -c hull -n __hull_no_subcommand -f -a update        -d 'Self-update from GitHub releases'
+complete -c hull -n __hull_no_subcommand -f -a tools         -d 'Install / list / uninstall side-loaded tools'
+complete -c hull -n __hull_no_subcommand -f -a help          -d 'Show top-level usage'
 
 complete -c hull -n __hull_no_subcommand -s v -l version     -d 'Print hull version'
+complete -c hull -n __hull_no_subcommand -s h -l help        -d 'Show top-level usage'
+
+# ── tools ────────────────────────────────────────────────────────────
+# Keep tool names in sync with REGISTRY in src/hull/tools_install.c.
+
+function __hull_tools_no_verb
+    set -l cmd (commandline -opc)
+    set -l verbs list install uninstall remove
+    set -l seen 0
+    for c in $cmd[2..-1]
+        if test "$c" = "tools"
+            set seen 1
+        else if test $seen -eq 1
+            if contains -- $c $verbs
+                return 1
+            end
+        end
+    end
+    test $seen -eq 1
+end
+
+function __hull_tools_verb_is
+    set -l cmd (commandline -opc)
+    set -l want $argv[1]
+    set -l seen_tools 0
+    for c in $cmd[2..-1]
+        if test "$c" = "tools"
+            set seen_tools 1
+        else if test $seen_tools -eq 1; and test "$c" = "$want"
+            return 0
+        end
+    end
+    return 1
+end
+
+complete -c hull -n __hull_tools_no_verb -f -a list      -d 'Print registry + install state'
+complete -c hull -n __hull_tools_no_verb -f -a install   -d 'Download, verify, install a tool'
+complete -c hull -n __hull_tools_no_verb -f -a uninstall -d 'Remove an installed tool'
+
+complete -c hull -n '__hull_tools_verb_is list'      -l json -d 'Machine-readable JSON output'
+complete -c hull -n '__hull_tools_verb_is install'   -l all  -d 'Install every published tool'
+complete -c hull -n '__hull_tools_verb_is install'   -f -a wamrc -d 'WAMR AOT compiler'
+complete -c hull -n '__hull_tools_verb_is uninstall' -f -a wamrc -d 'WAMR AOT compiler'
 
 # ── build ────────────────────────────────────────────────────────────
 
@@ -168,6 +213,8 @@ complete -c hull -n '__hull_subcommand agent' -f -a perf         -d 'Per-request
 complete -c hull -n '__hull_subcommand agent' -f -a template     -d 'Render a template with sample data'
 complete -c hull -n '__hull_subcommand agent' -f -a schema-diff  -d 'Diff applied schema vs migrations'
 complete -c hull -n '__hull_subcommand agent' -f -a sql          -d 'Read-only SQL query against app DB'
+complete -c hull -n '__hull_subcommand agent' -f -a tools        -d 'Side-loaded tool registry + install state'
+complete -c hull -n '__hull_subcommand agent' -f -a overview     -d 'Single-shot project summary'
 
 # agent db subcommands
 complete -c hull -n '__hull_agent_sub db' -f -a schema -d 'Introspect DB schema'
@@ -176,10 +223,14 @@ complete -c hull -n '__hull_agent_sub db' -f -a query  -d 'Run read-only SQL que
 # agent request HTTP methods
 complete -c hull -n '__hull_agent_sub request' -f -a 'GET POST PUT PATCH DELETE HEAD OPTIONS'
 
-# agent context flags
+# agent context flags. Task list mirrors stdlib/context/*.md.
 complete -c hull -n '__hull_agent_sub context' -l task  -r -d 'Task' \
-    -xa 'auth db routing middleware testing build deploy validation templates i18n search webhooks'
-complete -c hull -n '__hull_agent_sub context' -l level -r -d 'Detail level' -xa 'brief detailed'
+    -xa 'auth build compute db deploy gpu i18n middleware orientation quickstart-cli quickstart-tui quickstart-web routing search templates testing tools validation webhooks'
+complete -c hull -n '__hull_agent_sub context' -l level -r -d 'Detail level' \
+    -xa 'minimal compact full'
+complete -c hull -n '__hull_agent_sub context' -l list  -d 'Enumerate context tasks'
+complete -c hull -n '__hull_agent_sub context' -l interactive -d 'Interactive TUI picker'
+complete -c hull -n '__hull_agent_sub context' -l tui   -d 'Interactive TUI picker'
 
 # agent: shared flags
 complete -c hull -n '__hull_subcommand agent' -l json -d 'Machine-readable JSON output'

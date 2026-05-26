@@ -20,9 +20,12 @@ _hull() {
         cword=$COMP_CWORD
     }
 
-    local commands="keygen build verify inspect manifest test new init dev eject sign-platform migrate agent mcp check compute deploy version doctor update"
+    local commands="keygen build verify inspect manifest test new init dev eject sign-platform migrate agent mcp check compute deploy version doctor update tools help"
+    local tools_subs="list install uninstall"
     # Keep in sync with src/hull/commands/agent.c hl_cmd_agent() dispatch table.
-    local agent_subs="routes db request status errors test context migrate deploy manifest vfs compute compute-call gpu capabilities validate logs endpoint middleware eval perf template schema-diff sql"
+    local agent_subs="routes db request status errors test context migrate deploy manifest vfs compute compute-call gpu capabilities validate logs endpoint middleware eval perf template schema-diff sql tools overview"
+    # Keep in sync with stdlib/context/*.md filenames.
+    local agent_context_tasks="auth build compute db deploy gpu i18n middleware orientation quickstart-cli quickstart-tui quickstart-web routing search templates testing tools validation webhooks"
     local agent_db_subs="schema query"
     local migrate_subs="status new"
     local deploy_targets="dockerfile systemd fly"
@@ -30,7 +33,7 @@ _hull() {
     local compilers="tcc system cc gcc clang cosmocc"
 
     # Global flags (always available)
-    local global_flags="--version -v"
+    local global_flags="--version -v --help -h"
 
     # ── Top-level command ───────────────────────────────────────────
     if [ "$cword" -eq 1 ]; then
@@ -159,11 +162,16 @@ _hull() {
                     ;;
                 context)
                     if [[ "$cur" == --task=* ]]; then
-                        COMPREPLY=($(compgen -W "auth db routing middleware testing build deploy validation templates i18n search webhooks" -- "${cur#--task=}"))
+                        COMPREPLY=($(compgen -W "$agent_context_tasks" -- "${cur#--task=}"))
                     elif [[ "$cur" == --level=* ]]; then
-                        COMPREPLY=($(compgen -W "brief detailed" -- "${cur#--level=}"))
+                        COMPREPLY=($(compgen -W "minimal compact full" -- "${cur#--level=}"))
                     elif [[ "$cur" == -* ]]; then
-                        COMPREPLY=($(compgen -W "--task= --level=" -- "$cur"))
+                        COMPREPLY=($(compgen -W "--task= --level= --list --interactive --tui" -- "$cur"))
+                    fi
+                    ;;
+                overview)
+                    if [ "$cword" -eq 3 ] && [[ "$cur" != -* ]]; then
+                        COMPREPLY=($(compgen -d -- "$cur"))
                     fi
                     ;;
                 *)
@@ -200,6 +208,28 @@ _hull() {
 
         update)
             COMPREPLY=($(compgen -W "--check --force --repo= --help" -- "$cur"))
+            ;;
+
+        tools)
+            # `hull tools <verb> [args]`. cword==2 → verb; cword>=3 → verb args.
+            if [ "$cword" -eq 2 ]; then
+                COMPREPLY=($(compgen -W "$tools_subs --help -h" -- "$cur"))
+            else
+                local verb="${words[2]}"
+                case "$verb" in
+                    list)
+                        COMPREPLY=($(compgen -W "--json --repo=" -- "$cur"))
+                        ;;
+                    install)
+                        # The registered tool names are stable enough to inline.
+                        # Keep in sync with REGISTRY in src/hull/tools_install.c.
+                        COMPREPLY=($(compgen -W "wamrc --all --repo=" -- "$cur"))
+                        ;;
+                    uninstall|remove)
+                        COMPREPLY=($(compgen -W "wamrc" -- "$cur"))
+                        ;;
+                esac
+            fi
             ;;
 
         keygen|sign-platform)
