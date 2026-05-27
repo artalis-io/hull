@@ -101,6 +101,12 @@ typedef struct {
     size_t      gethull_manifest_len;
     const char *gethull_signature_hex;
     size_t      gethull_signature_hex_len;
+    /* Parsed DOM of the entire `platform.gethull` object preserved
+     * for canonical-JSON reconstruction at app-sig verify time.
+     * build.lua includes the gethull subtree in the signed payload,
+     * so the verifier MUST serialize it identically. NULL when no
+     * gethull block is present in package.sig. */
+    ShJsonValue *gethull_value;
 } HlPlatformSig;
 
 /* ── Parsed package.sig ───────────────────────────────────────────── */

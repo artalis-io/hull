@@ -209,9 +209,13 @@ int hl_sig_read(const char *sig_path, HlSignature *sig)
 
         /* v0.1.3: gethull-signed manifest blob (written by `hull build`
          * when the building hull had an embedded platform-sig). Strings
-         * point into the arena; safe across the function's lifetime. */
+         * point into the arena; safe across the function's lifetime.
+         * The whole DOM subtree is also retained so the app-sig
+         * canonical-JSON reconstruction (hl_sig_verify) can emit the
+         * gethull block byte-identically to what build.lua signed. */
         ShJsonValue *gethull = sh_json_get(platform, "gethull");
         if (gethull && sh_json_type(gethull) == SH_JSON_OBJECT) {
+            sig->platform.gethull_value = gethull;
             sig->platform.gethull_manifest = sh_json_as_string(
                 sh_json_get(gethull, "manifest"), NULL);
             if (sig->platform.gethull_manifest) {
@@ -314,6 +318,19 @@ int hl_sig_verify(const HlSignature *sig, const uint8_t pubkey[32])
             sig->platform.signature_hex &&
             sig->platform.public_key_hex) {
             sh_json_write_object_start(&w);
+            /* v0.1.3: gethull subtree MUST emit first (alphabetical
+             * canonical order: gethull < platforms < public_key <
+             * signature). build.lua signs the whole platform object
+             * including the gethull block, so the verifier has to
+             * reconstruct byte-identical input. Walking the parsed
+             * DOM (sig_write_value) preserves whatever internal
+             * shape the build wrote — arch_hashes (object), manifest
+             * (string), signature (string) — without the verifier
+             * needing to know those names. */
+            if (sig->platform.gethull_value) {
+                sh_json_write_key(&w, "gethull");
+                sig_write_value(&w, sig->platform.gethull_value);
+            }
             sh_json_write_key(&w, "platforms");
             sig_write_value(&w, sig->platform.platforms_value);
             sh_json_write_kv_string(&w, "public_key",
