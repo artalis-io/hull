@@ -364,7 +364,7 @@
         <div class="surface-body">
           <div class="drop-zone" id="bin-drop">
             <p>Drop <strong>APE binary</strong> here</p>
-            <p class="text-[0.7rem] mt-1 opacity-70">Verifies binary hash + canary</p>
+            <p class="text-[0.7rem] mt-1 opacity-70">Verifies binary hash</p>
             <input type="file" id="bin-file">
           </div>
         </div>
@@ -431,8 +431,8 @@
             <summary>What does this prove?</summary>
             <div class="trust-explainer mt-2">
               <ul>
-                <li><strong>Platform signature + key pin.</strong> The platform library is authentic, signed by the gethull.dev platform key. Does NOT prove the binary actually uses it.</li>
-                <li><strong>Platform canary.</strong> The binary contains the Hull platform code (high confidence). Faking it requires knowing the platform's integrity hash; not foolproof.</li>
+                <li><strong>Gethull platform-sig.</strong> The per-arch SHA-256 of <code class="text-paper-100">libhull_platform.a</code> baked into the built app matches what gethull.dev signed at release time. The platform bytes were not swapped after release.</li>
+                <li><strong>Per-app platform layer.</strong> The signature over the developer's <code class="text-paper-100">platforms</code> object is self-consistent with the embedded per-app pubkey. Developer-signed; not pinned to gethull.</li>
                 <li><strong>App signature + key check.</strong> Binary + source + manifest + build info are authentic, signed by the stated developer. Does NOT prove the developer's intent is honest.</li>
                 <li><strong>Binary hash match.</strong> The uploaded file is the one that was signed. Does NOT prove how it was built.</li>
               </ul>
@@ -516,24 +516,47 @@
       return nacl.sign.detached.verify(msg, hexToBytes(sigHex), hexToBytes(pkHex));
     }
 
+    // v0.1.3 gethull layer: the signed per-arch SHA-256 manifest of
+    // libhull_platform.a, written by `hull build` from the embedded
+    // blob the building hull inherited from release CI.
+    function verifyGethullLayer(sig) {
+      if (!sig.platform || !sig.platform.gethull ||
+          !sig.platform.gethull.manifest ||
+          !sig.platform.gethull.signature)
+        return { status: "missing" };
+      let valid = false;
+      try {
+        valid = verifySignature(
+          sig.platform.gethull.manifest,
+          sig.platform.gethull.signature,
+          GETHULL_DEV_PLATFORM_KEY);
+      } catch (e) { valid = false; }
+      // Pull arch list out of the manifest text (line-based:
+      // "<64-hex-sha256>  <arch>\n", canonical-sorted by arch).
+      const archs = [];
+      const archHashes = {};
+      for (const line of sig.platform.gethull.manifest.split("\n")) {
+        const m = line.match(/^([0-9a-f]{64})\s+(\S+)\s*$/);
+        if (m) { archs.push(m[2]); archHashes[m[2]] = m[1]; }
+      }
+      return { status: "present", valid, archs, archHashes };
+    }
+
+    // v0.1.2 per-app platform layer: the developer's local
+    // `hull sign-platform` output. Reduced in v0.1.3 to a
+    // self-consistency check — no upstream-key pinning, since that
+    // role moved to the gethull layer.
     function verifyPlatformLayer(sig) {
       if (!sig.platform || !sig.platform.signature || !sig.platform.public_key)
         return { status: "missing" };
-      const platKey = platKeyOverride || GETHULL_DEV_PLATFORM_KEY;
-      const keyMatch = sig.platform.public_key === platKey;
+      const platKey = platKeyOverride || null;
+      const keyMatch = platKey ? sig.platform.public_key === platKey : null;
       const payload = canonicalStringify(sig.platform.platforms);
       let valid = false;
       try { valid = verifySignature(payload, sig.platform.signature, sig.platform.public_key); }
       catch (e) { valid = false; }
       const archs = sig.platform.platforms ? Object.keys(sig.platform.platforms).sort() : [];
-      let canaryHex = null;
-      if (sig.platform.platforms) {
-        for (const arch of archs) {
-          if (sig.platform.platforms[arch].canary) { canaryHex = sig.platform.platforms[arch].canary; break; }
-        }
-      }
-      const isGethullDev = sig.platform.public_key === GETHULL_DEV_PLATFORM_KEY;
-      return { status: "present", valid, keyMatch, archs, canaryHex, isGethullDev, publicKey: sig.platform.public_key };
+      return { status: "present", valid, keyMatch, archs, publicKey: sig.platform.public_key };
     }
 
     function verifyAppLayer(sig) {
@@ -555,24 +578,6 @@
         status: "present", valid, keyMatch, publicKey: sig.public_key,
         binaryHash: sig.binary_hash, build: sig.build, trampolineHash: sig.trampoline_hash,
       };
-    }
-
-    function scanCanary(binary, expectedCanaryHex) {
-      const marker = new TextEncoder().encode("HULL_PLATFORM_CANARY");
-      const view = new Uint8Array(binary);
-      for (let i = 0; i <= view.length - 24 - 32; i++) {
-        let match = true;
-        for (let j = 0; j < marker.length; j++) {
-          if (view[i + j] !== marker[j]) { match = false; break; }
-        }
-        if (match) {
-          const integrity = view.slice(i + 24, i + 24 + 32);
-          const integrityHex = bytesToHex(integrity);
-          return { found: true, integrity: integrityHex,
-                   matches: expectedCanaryHex ? integrityHex === expectedCanaryHex : null };
-        }
-      }
-      return { found: false };
     }
 
     // ── DOM helpers ─────────────────────────────────────────────────────
@@ -614,54 +619,57 @@
       let issues = 0;
       let checks = 0;
 
+      // v0.1.3 gethull layer — the canonical platform trust check.
+      const gethull = verifyGethullLayer(pkg);
+      if (gethull.status === "present") {
+        checks++;
+        if (gethull.valid) {
+          addResult(platEl, "ok", "Gethull Platform-Sig",
+            "VALID — Signed by gethull.dev platform key");
+        } else {
+          addResult(platEl, "bad", "Gethull Platform-Sig",
+            "INVALID — Signature does not verify against gethull.dev key");
+          issues++;
+        }
+        if (gethull.archs.length > 0) {
+          addResult(platEl, "info", "Signed Architectures", gethull.archs.join(", "));
+        }
+      } else {
+        addResult(platEl, "warn", "Gethull Platform-Sig",
+          "MISSING — App was built with a dev hull (no embedded signed manifest), " +
+          "or against a hull older than v0.1.3");
+        issues++;
+      }
+
+      // v0.1.2 per-app platform layer — self-consistency only.
       const plat = verifyPlatformLayer(pkg);
       if (plat.status === "present") {
         checks++;
         if (plat.valid) {
-          if (plat.isGethullDev && plat.keyMatch) {
-            addResult(platEl, "ok", "Platform Signature",
-              "VALID — Signed by gethull.dev platform key");
-          } else if (plat.keyMatch) {
-            addResult(platEl, "ok", "Platform Signature",
-              "VALID — Signed by known platform key");
-          } else {
-            addResult(platEl, "warn", "Platform Signature",
-              "VALID — Unknown platform key (verify manually)");
+          if (plat.keyMatch === true) {
+            addResult(platEl, "ok", "Per-App Platform Layer",
+              "VALID — Matches provided platform key");
+          } else if (plat.keyMatch === false) {
+            addResult(platEl, "warn", "Per-App Platform Layer",
+              "VALID — Provided platform key MISMATCH");
             issues++;
+          } else {
+            addResult(platEl, "ok", "Per-App Platform Layer",
+              "VALID — Self-consistent (developer-signed)");
           }
         } else {
-          addResult(platEl, "bad", "Platform Signature", "INVALID");
+          addResult(platEl, "bad", "Per-App Platform Layer", "INVALID");
           issues++;
         }
 
-        addResultHTML(platEl, "info", "Platform Key",
+        addResultHTML(platEl, "info", "Per-App Platform Key",
           esc(truncKey(plat.publicKey)) + copyBtn(plat.publicKey));
 
         if (plat.archs.length > 0) {
           addResult(platEl, "info", "Architectures", plat.archs.join(", "));
         }
-
-        if (binaryBuf && plat.canaryHex) {
-          checks++;
-          const canary = scanCanary(binaryBuf, plat.canaryHex);
-          if (canary.found && canary.matches) {
-            addResult(platEl, "ok", "Platform Canary", "FOUND — matches platform.sig");
-          } else if (canary.found && !canary.matches) {
-            addResult(platEl, "warn", "Platform Canary",
-              "FOUND — integrity mismatch (expected " + truncKey(plat.canaryHex) +
-              ", got " + truncKey(canary.integrity) + ")");
-            issues++;
-          } else {
-            addResult(platEl, "warn", "Platform Canary",
-              "NOT FOUND — binary may not contain Hull platform");
-            issues++;
-          }
-        } else if (binaryBuf) {
-          addResult(platEl, "info", "Platform Canary",
-            "No canary hash in platform signature");
-        }
       } else {
-        addResult(platEl, "info", "Platform Layer", "Not present in signature");
+        addResult(platEl, "info", "Per-App Platform Layer", "Not present in signature");
       }
 
       const app = verifyAppLayer(pkg);

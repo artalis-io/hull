@@ -1341,6 +1341,10 @@ hull v0.1.2  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
               </li>
               <li class="flex gap-2">
                 <span class="text-accent mt-0.5">&check;</span>
+                <span><strong class="text-paper-100">Signed platform-sig chain (v0.1.3).</strong> Release CI signs the per-arch SHA-256 manifest of <code class="text-paper-100 text-[0.78rem]">libhull_platform.a</code> with the gethull platform key. <code class="text-paper-100 text-[0.78rem]">hull build</code> cross-checks the embedded <code class="text-paper-100 text-[0.78rem]">.a</code> against the manifest; <code class="text-paper-100 text-[0.78rem]">hull verify</code> and runtime <code class="text-paper-100 text-[0.78rem]">--verify-sig</code> re-check the signature against the embedded <code class="text-paper-100 text-[0.78rem]">HL_PLATFORM_PUBKEY_HEX</code>. <code class="text-paper-100 text-[0.78rem]">--no-verify-platform</code> is the documented escape valve for dev hulls and forks.</span>
+              </li>
+              <li class="flex gap-2">
+                <span class="text-accent mt-0.5">&check;</span>
                 <span><strong class="text-paper-100">Self-sovereignty path.</strong> AGPL source; fork, rotate the two pubkeys, ship your own trust root.</span>
               </li>
             </ul>
@@ -1355,7 +1359,7 @@ hull v0.1.2  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
             <ul class="space-y-3 text-sm text-mute-400 leading-relaxed">
               <li class="flex gap-2">
                 <span class="text-mute-500 mt-0.5">&ndash;</span>
-                <span><strong class="text-paper-100">Platform-sig is wired but inactive in built apps.</strong> The keys and verifier code exist, but the release workflow doesn&rsquo;t yet sign the platform library and <code class="text-paper-100 text-[0.78rem]">hull build</code> doesn&rsquo;t yet pass the signed blob through into a built app&rsquo;s <code class="text-paper-100 text-[0.78rem]">package.sig</code>. Tracked for v0.1.x.</span>
+                <span><strong class="text-paper-100">Post-install binary integrity is out of scope.</strong> The signature chain protects the bytes from publisher to disk. Once <code class="text-paper-100 text-[0.78rem]">hull</code> is on your machine, defending the binary against an attacker with local write access is the OS&rsquo;s job (signed system updates, FIM, SELinux/AppArmor). Reproducible builds (Phase 9) make the bytes-on-disk cross-checkable against the published source.</span>
               </li>
               <li class="flex gap-2">
                 <span class="text-mute-500 mt-0.5">&ndash;</span>

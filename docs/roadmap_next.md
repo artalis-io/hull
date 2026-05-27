@@ -86,14 +86,31 @@ architecture change), system-wide install path (stay user-scoped),
 
 ## 3. Platform-sig completion — make `HL_PLATFORM_PUBKEY_HEX` meaningful
 
-**Priority:** High for v0.1.3 — this is the loudest remaining gap on
+**Status: SHIPPED in v0.1.3 (six commits, landed on `main`).** The
+release pipeline now signs the per-arch `libhull_platform.a`
+manifest with `HULL_PLATFORM_KEY` at release time, `hull build`
+cross-checks the embedded `.a` against the inherited signed
+manifest and writes it into `package.sig.platform.gethull`, and
+both `hull verify` and runtime `--verify-sig` enforce the
+gethull-layer signature against the real
+`HL_PLATFORM_PUBKEY_HEX`. Browser verifier (`site/verify.html`)
+matches. Escape valve `--no-verify-platform` exists on every
+consumer for dev hulls and forks. Honest-scorecard bullet moved
+from "Not yet" → "Ships"; new explicit out-of-scope note for
+post-install binary integrity (an OS-layer concern).
+
+The original plan and execution order are preserved below as
+historical context for future readers tracing similar trust-chain
+work.
+
+**Priority:** High for v0.1.3 — this was the loudest remaining gap on
 the v0.1.x "honest scorecard" and the symmetric companion to the
 release-sig trust chain that shipped fully in v0.1.0 (release-side)
 and matured in v0.1.2 (audit-hardened constant-time compare, OOB
 defense, `release_io.{c,h}` shared between `hull update` and
 `hull tools install`).
 
-**Target:** v0.1.3.
+**Target:** v0.1.3 (shipped).
 
 **Current state:** the cryptographic primitives, the embedded
 pubkeys (`HL_PLATFORM_PUBKEY_HEX` in `signature.h`,

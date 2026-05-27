@@ -8,7 +8,80 @@ release-artifact layout).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **Platform-sig chain end-to-end (v0.1.3).** The
+  `HL_PLATFORM_PUBKEY_HEX` placeholder is replaced with the real
+  gethull.dev platform Ed25519 public key
+  (`2a5461235aa51bbbe1e9cbc462e6a63f37d099f5ad17646a8f3a67db2f3a4fad`),
+  and the full release → build → verify chain is wired:
+  - **Release CI:** `release.yml` reorg splits platform building
+    into a matrix, then a single Linux job
+    (`sign-platform-manifest`) downloads the per-arch `.a`
+    artifacts, computes SHA-256s, signs the canonical text
+    manifest (`<64-hex>  <arch>\n`, LC_ALL=C sorted by arch) with
+    `HULL_PLATFORM_KEY`, and emits
+    `build/embedded_platform_sig.h` for the downstream
+    `build-native` / `build-cosmo` jobs to embed.
+  - **`hull build`:** computes SHA-256 of the
+    `libhull_platform.a` being embedded, cross-checks against the
+    inherited signed manifest, hard-rejects on mismatch unless
+    `--no-verify-platform` is set. Writes the inherited
+    `{manifest, signature, arch_hashes}` into
+    `package.sig.platform.gethull`.
+  - **`--verify-sig` runtime:** verifies the gethull manifest
+    signature against `HL_PLATFORM_PUBKEY_HEX`; hard-rejects on
+    missing block unless `--no-verify-platform`. Apps built by
+    dev hulls (placeholder pubkey) skip the check silently with
+    a one-line warning — same bootstrap shape as `hull update`'s
+    release-pubkey placeholder.
+  - **`hull verify` (CLI):** matching `--no-verify-platform`
+    flag, new `tool.platform_pubkey()` Lua binding exposing the
+    embedded pubkey, gethull-layer block in the report.
+  - **Browser verifier (`site/verify.html`):**
+    `verifyGethullLayer()` checks `platform.gethull.signature`
+    against the hardcoded gethull pubkey; renders the layer
+    explicitly. Per-app platform layer is now self-consistency
+    only (the canary scanner is gone — the signed per-arch
+    SHA-256 does all the integrity work it was hypothesized for).
+- **`--no-verify-platform`** flag on both `hull build` and the
+  runtime serve path. Documented escape valve for dev-built hulls
+  and forks signing with their own key.
+- **`tool.platform_pubkey()`** Lua tool-mode binding — returns the
+  embedded `HL_PLATFORM_PUBKEY_HEX` or `nil` when the all-zeros
+  placeholder is active.
+- **`hull sign-release` / `hull verify-release`** still cover the
+  release-binary path; the new gethull layer is signed by a
+  separate key (`HULL_PLATFORM_KEY`) so a release-key compromise
+  cannot forge platform-sigs and vice-versa.
+
+### Changed
+
+- **`signature.c` §5 reduced to self-consistency.** The v0.1.2
+  per-app platform layer no longer pins
+  `platform.public_key_hex` against `HL_PLATFORM_PUBKEY_HEX` —
+  that role moved to the new §5b gethull layer. Forks signing
+  platform with their own developer key continue to work without
+  conflicting with the upstream gethull pubkey. `hull verify`
+  matches the same shape; the
+  `Platform layer: WARNING — key mismatch` path becomes a soft
+  comparison against `--platform-key` only.
+- **Docs/security.md §2 and §6** rewritten to reflect the
+  three-layer structure (gethull, per-app, app developer) and
+  the v0.1.3 status flip from "wired but inactive" to "shipped
+  and enforced." Section 3.A and 3.B replace the canary-based
+  prevention story with the manifest-signature prevention story.
+- **Honest scorecard on `gethull.dev`** moves the platform-sig
+  bullet from "Not yet" to "Ships," and replaces the old gap
+  text with an explicit out-of-scope note for post-install
+  binary integrity (OS layer's job).
+
+### Removed
+
+- **Platform canary scanner** in the browser verifier. The
+  canary was the placeholder integrity signal while the
+  signed-manifest path was missing; v0.1.3's per-arch SHA-256s
+  cover the same property without Makefile post-link gymnastics.
 
 ## [0.1.2] — 2026-05-26
 

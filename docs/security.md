@@ -30,17 +30,38 @@ Three verification points, each catching different attack vectors:
 
 | When | What | Tool | Checks |
 |------|------|------|--------|
-| Before download | Inspect capabilities | `verify/index.html` (offline) | Platform sig, app sig, manifest, canary |
-| Before install | Verify integrity | `hull verify --developer-key` (CLI) | Both sigs + file hashes |
-| At startup | Runtime check | `--verify-sig` flag | App sig + file hashes, platform key pin |
+| Before download | Inspect capabilities | `verify/index.html` (offline) | Gethull platform-sig, per-app platform sig, app sig, manifest |
+| Before install | Verify integrity | `hull verify --developer-key` (CLI) | All three layers + file hashes |
+| At startup | Runtime check | `--verify-sig` flag | All three layers + file hashes |
+
+The platform layer split into two sub-layers in v0.1.3:
+
+- **Gethull layer** (`package.sig.platform.gethull`) — the per-arch
+  SHA-256 manifest of `libhull_platform.a`, signed at release time by
+  `HULL_PLATFORM_KEY` and verified by every consumer against the
+  hard-coded `HL_PLATFORM_PUBKEY_HEX`. This is the proof that the
+  platform bytes baked into a built app are the ones gethull.dev
+  published.
+- **Per-app platform layer** (`package.sig.platform.{platforms,
+  signature, public_key}`) — the developer's own
+  `hull sign-platform` output, kept for back-compat and for forks
+  that pin a non-gethull platform pubkey. Verified for
+  self-consistency only — no upstream-key pinning, since that role
+  moved to the gethull layer.
 
 ### Trust Anchors
 
-**Platform public key:**
-- Hardcoded in Hull CLI (`HL_PLATFORM_PUBKEY_HEX` in `signature.h`)
-- Hardcoded in browser verifier (`GETHULL_DEV_PLATFORM_KEY` in `verify/index.html`)
-- Published at `https://gethull.dev/.well-known/platform.pub`
-- Overridable via `--platform-key <file>` for self-hosted platforms
+**Gethull platform public key:**
+- Hardcoded in Hull CLI as `HL_PLATFORM_PUBKEY_HEX` in
+  `include/hull/signature.h`
+  (`2a5461235aa51bbbe1e9cbc462e6a63f37d099f5ad17646a8f3a67db2f3a4fad`,
+  active since v0.1.3)
+- Hardcoded in the browser verifier (`GETHULL_DEV_PLATFORM_KEY` in
+  `site/verify.html`) — must rotate in lockstep
+- Override at compile time with
+  `-DHL_PLATFORM_PUBKEY_HEX="<your hex>"` for forks running their
+  own platform-signing key (Section 3.D); pass
+  `--no-verify-platform` to skip the gethull check entirely
 
 **Developer public key:**
 - Published in app repository (`.pub` file)
@@ -57,8 +78,27 @@ This is the primary threat model. Hull exists to make it possible to trust apps 
 
 **Attack: Ship a binary without the Hull platform (custom runtime, no sandbox)**
 
-- **Prevention:** Platform signature + canary. Browser verifier checks platform sig against pinned gethull.dev key. Canary scanner finds `HULL_PLATFORM_CANARY` in the binary and verifies its integrity hash against the signed value.
-- **Remaining risk:** Developer could build a custom binary that includes the canary bytes at the right offset. Reproducible builds (Phase 9) close this gap entirely — a rebuild from source proves the binary is just "Hull platform + declared source."
+- **Prevention (v0.1.3+):** Gethull platform-sig. At `hull build`
+  time the SHA-256 of the `libhull_platform.a` being embedded is
+  cross-checked against the per-arch entry in the signed manifest
+  inherited from the building hull binary; mismatch hard-rejects
+  unless `--no-verify-platform` is set. At runtime `--verify-sig`
+  re-verifies the manifest signature against `HL_PLATFORM_PUBKEY_HEX`
+  and refuses to start on missing/invalid block. Browser verifier
+  performs the same gethull-layer check.
+- **Remaining risk:** Developer could rebuild Hull from source with a
+  different `HL_PLATFORM_PUBKEY_HEX` (their own key) and re-sign the
+  manifest themselves. Browser verifier and CLI both detect this as a
+  key mismatch — the gethull-signed layer is missing or signed by an
+  unexpected key, the user sees a warning in both UIs.
+- **Out of scope:** Post-install binary integrity (an attacker with
+  local write access to the on-disk `hull` binary editing
+  `HL_PLATFORM_PUBKEY_HEX` and re-signing). This is the same threat
+  class as any local malware with file-system write access — not
+  something the signature scheme can prevent. Defense lives at the
+  OS layer (signed system updates, FIM, SELinux/AppArmor, etc.).
+  Reproducible builds (Phase 9) make the bytes-on-disk
+  cross-checkable against the published source.
 
 **Attack: Declare minimal manifest but access more at runtime**
 
@@ -216,7 +256,12 @@ default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; form-action 'self
 
 **Attack: Replace platform libraries in a self-hosted Hull**
 
-- **Prevention:** Platform signature in `package.sig` is verified against the pinned gethull.dev key. Swapped platform → platform signature mismatch.
+- **Prevention (v0.1.3+):** The gethull-signed manifest pins the
+  exact per-arch SHA-256 of `libhull_platform.a`.
+  `hull build` cross-checks the on-disk `.a` against the manifest
+  before signing. `--verify-sig` re-checks the manifest signature
+  at startup. Swapping the platform library → SHA-256 mismatch at
+  build, or signature failure at startup.
 
 ### C. Compromised gethull.dev (Platform Publisher)
 
@@ -446,50 +491,71 @@ Each entry is a canonical spec `"<vendor>/<name>@<major>"`. First-party modules 
 
 ## 6. Verification Tools
 
-### A. Browser Verifier (`verify/index.html`)
+**Status:** Shipped in full as of v0.1.3 — all three verifiers check
+the gethull platform-sig layer, the per-app self-consistency layer,
+and the app developer signature.
+
+### A. Browser Verifier (`site/verify.html`)
 
 - Self-contained HTML file, zero server dependencies
 - Runs entirely in browser — no data sent anywhere
 - Inlined tweetnacl-js (public domain) for Ed25519
 - Web Crypto API for SHA-256
 - CSP: `default-src 'none'` — no network except optional key fetch via `connect-src https:`
-- gethull.dev platform key hardcoded — auto-verifies against known key
-- Canary scanner: searches uploaded binary for `HULL_PLATFORM_CANARY` magic bytes
+- Gethull platform pubkey hardcoded (matches `HL_PLATFORM_PUBKEY_HEX`)
+- Release pubkey hardcoded (matches `HL_RELEASE_PUBKEY_HEX`) — covers
+  both app-bundle and release-binary verification flows
 
 **Checks performed:**
-1. Platform signature validity (Ed25519)
-2. Platform key match against pinned gethull.dev key
+1. **Gethull platform-sig (v0.1.3):** `package.sig.platform.gethull.signature` verified against the hardcoded gethull pubkey; missing block flagged
+2. Per-app platform layer self-consistency (Ed25519 over `platforms` object with the embedded per-app key)
 3. App signature validity (Ed25519)
 4. Developer key match (if provided)
 5. Binary hash match (if binary uploaded)
-6. Platform canary presence + integrity (if binary uploaded)
-7. Source file hash verification (if files uploaded)
-8. Manifest capability display with risk levels
+6. Source file hash verification (if files uploaded)
+7. Manifest capability display with risk levels
 
 ### B. CLI Verifier (`hull verify`)
 
 ```
-hull verify [--platform-key <file|url>] [--developer-key <file|url>] [app_dir]
+hull verify [--no-verify-platform] [--platform-key <file|url>] \
+            [--developer-key <file|url>] [app_dir]
 ```
 
 - Reads `package.sig` (or `hull.sig` for backwards compat)
-- Verifies platform layer Ed25519 signature
-- Verifies app layer Ed25519 signature
-- Recomputes SHA-256 of all declared files
-- Reports mismatches, missing files, key mismatches
-- Exit code 0 = all checks passed, 1 = failure
+- **Gethull layer:** signature on `platform.gethull.manifest`
+  verified against `HL_PLATFORM_PUBKEY_HEX` (queried via the
+  `tool.platform_pubkey()` binding). Missing block on a hull with a
+  real pubkey hard-rejects unless `--no-verify-platform`. Hulls
+  built with the all-zeros placeholder skip the check silently
+  (dev-hull bootstrap path).
+- **Per-app platform layer:** self-consistency check only — no
+  upstream-key pinning. `--platform-key <file>` is honored as an
+  optional comparison against an expected developer pubkey.
+- **App layer:** Ed25519 over the canonical payload of
+  `{binary_hash, build, files, manifest, modules_resolved,
+  platform, trampoline_hash}`.
+- Recomputes SHA-256 of all declared files; reports mismatches,
+  missing files, key mismatches.
+- Exit code 0 = all checks passed, 1 = failure.
 
 ### C. Runtime Verifier (`--verify-sig`)
 
 ```
-./myapp --verify-sig dev.pub
+./myapp --verify-sig dev.pub [--no-verify-platform]
 ```
 
-- Checks on every startup before accepting connections
-- Platform key pinned at compile time (`HL_PLATFORM_PUBKEY_HEX`)
-- Verifies both signature layers
-- Verifies file hashes against embedded entries via VFS (O(log n) lookup)
-- Refuses to start if any check fails
+- Checks on every startup before accepting connections.
+- Platform key pinned at compile time (`HL_PLATFORM_PUBKEY_HEX`,
+  real key since v0.1.3).
+- Verifies all three layers (gethull, per-app, app developer) in
+  `signature.c` §4 → §5 → §5b.
+- Verifies file hashes against embedded entries via VFS
+  (`O(log n)` lookup).
+- Refuses to start on any failure. `--no-verify-platform` skips
+  the gethull layer (for dev hulls and forks). Builds with the
+  all-zeros placeholder pubkey skip the gethull layer with a
+  one-line warning.
 
 ---
 
