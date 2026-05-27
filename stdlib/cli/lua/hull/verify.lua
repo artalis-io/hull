@@ -42,13 +42,25 @@ local function read_file(path)
     return tool.read_file(path)
 end
 
+-- Cap the HTTPS key fetch at 4 KiB. A pubkey is 64 hex chars; even
+-- with surrounding whitespace, comments, or PEM-armor headers an
+-- honest key file is well under this. Defends against a misbehaving
+-- key URL (intentional or not) streaming megabytes through the
+-- verifier on an opt-in CLI flag.
+local KEY_FETCH_MAX_BYTES = 4096
+
 local function read_key(source)
     if not source then return nil end
 
     -- URL fetch
     -- WARNING: HTTPS key fetch trusts system CA store. Use local key files for high-security verification.
     if source:sub(1, 8) == "https://" then
-        local data = tool.spawn_read({"curl", "-sfL", "--proto", "=https", source})
+        local data = tool.spawn_read({
+            "curl", "-sfL",
+            "--proto", "=https",
+            "--max-filesize", tostring(KEY_FETCH_MAX_BYTES),
+            source,
+        })
         if data then
             return data:match("^(%x+)")
         end

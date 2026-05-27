@@ -20,10 +20,12 @@
 
 import { sha256, ed25519Verify } from "hull:crypto";
 
-// Placeholder until the real gethull.dev platform key is pinned. Until then,
-// `hull verify` requires --platform-key PATH and will not fall back to the
-// all-zeros sentinel (which would silently fail every signature check).
-const GETHULL_DEV_PLATFORM_KEY_PLACEHOLDER =
+// All-zeros sentinel: dev hulls / forks built without their own
+// pinned platform pubkey. `hull build` writes this when no real key
+// has been embedded yet — comparing against it lets us silently
+// short-circuit warnings rather than nag the user about a key they
+// never opted into.
+const ZERO_PUBKEY_HEX =
     "0000000000000000000000000000000000000000000000000000000000000000";
 
 // Parse CLI args
@@ -115,7 +117,7 @@ if (noVerifyPlatform) {
 // The pinning role moved to the v0.1.3 gethull layer above.
 if (sig.platform?.signature && sig.platform?.public_key) {
     const platformKeyHex = readKey(platformKeySource);
-    if (platformKeyHex && platformKeyHex !== GETHULL_DEV_PLATFORM_KEY_PLACEHOLDER &&
+    if (platformKeyHex && platformKeyHex !== ZERO_PUBKEY_HEX &&
         sig.platform.public_key !== platformKeyHex) {
         tool.stderr("Platform layer: WARNING — key does not match --platform-key\n");
         issues++;

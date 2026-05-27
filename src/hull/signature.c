@@ -684,19 +684,18 @@ int hl_verify_startup(const char *pubkey_path, const char *entry_point,
      * (checked above) is independent — it's the developer-signed
      * fork-deployable layer and remains enforceable on its own. */
     if (!no_verify_platform) {
-        uint8_t embedded_pk[32];
-        int placeholder_pk = 0;
-        if (hex_decode(HL_PLATFORM_PUBKEY_HEX, 64, embedded_pk, 32) == 0) {
-            placeholder_pk = 1;
-            for (int i = 0; i < 32; i++) {
-                if (embedded_pk[i] != 0) { placeholder_pk = 0; break; }
+        if (hl_platform_pubkey_is_placeholder()) {
+            /* Skip-with-warning (matches v0.1.0 release-pubkey bootstrap).
+             * `static int` guard so a long-running process logs once,
+             * not once per `--verify-sig` startup. The macro is
+             * compile-time-constant so the first answer is the only
+             * one. */
+            static int warned_placeholder = 0;
+            if (!warned_placeholder) {
+                log_warn("[sig] HL_PLATFORM_PUBKEY_HEX is the all-zeros "
+                         "placeholder — skipping gethull platform-sig check");
+                warned_placeholder = 1;
             }
-        }
-
-        if (placeholder_pk) {
-            /* Skip-with-warning (matches v0.1.0 release-pubkey bootstrap). */
-            log_warn("[sig] HL_PLATFORM_PUBKEY_HEX is the all-zeros "
-                     "placeholder — skipping gethull platform-sig check");
         } else if (!sig.platform.gethull_manifest ||
                    !sig.platform.gethull_signature_hex ||
                    sig.platform.gethull_manifest_len == 0) {
@@ -706,12 +705,22 @@ int hl_verify_startup(const char *pubkey_path, const char *entry_point,
             hl_sig_free(&sig);
             return -1;
         } else {
+            /* Decode HL_PLATFORM_PUBKEY_HEX once here and pass it
+             * explicitly — avoids hl_platform_sig_verify decoding the
+             * same macro a second time when its pubkey arg is NULL. */
+            uint8_t embedded_pk[32];
+            if (hex_decode(HL_PLATFORM_PUBKEY_HEX, 64, embedded_pk, 32) != 0) {
+                log_error("[sig] HL_PLATFORM_PUBKEY_HEX is malformed "
+                          "(compile-time misconfiguration)");
+                hl_sig_free(&sig);
+                return -1;
+            }
             if (hl_platform_sig_verify(
                     sig.platform.gethull_manifest,
                     sig.platform.gethull_manifest_len,
                     sig.platform.gethull_signature_hex,
                     sig.platform.gethull_signature_hex_len,
-                    NULL /* use HL_PLATFORM_PUBKEY_HEX */) != 0) {
+                    embedded_pk) != 0) {
                 log_error("[sig] gethull platform-sig verification failed");
                 hl_sig_free(&sig);
                 return -1;

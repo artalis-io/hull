@@ -674,17 +674,18 @@ static int l_tool_platform_sig_arch_hash(lua_State *L)
  * platform-sig wired). verify.lua uses this to verify the
  * package.sig.platform.gethull layer signed by gethull.dev at
  * release time.
+ *
+ * Placeholder detection delegates to
+ * `hl_platform_pubkey_is_placeholder()` so this binding and
+ * signature.c §5b always agree on what "no pinned key" means.
  */
 static int l_tool_platform_pubkey(lua_State *L)
 {
-    static const char zeros[] =
-        "0000000000000000000000000000000000000000000000000000000000000000";
-    const char *hex = HL_PLATFORM_PUBKEY_HEX;
-    if (!hex || strcmp(hex, zeros) == 0) {
+    if (hl_platform_pubkey_is_placeholder()) {
         lua_pushnil(L);
         return 1;
     }
-    lua_pushstring(L, hex);
+    lua_pushstring(L, HL_PLATFORM_PUBKEY_HEX);
     return 1;
 }
 

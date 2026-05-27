@@ -118,6 +118,25 @@ int hl_platform_sig_verify(const void *manifest, size_t manifest_len,
                            const uint8_t pubkey[32]);
 
 /**
+ * @brief True iff `HL_PLATFORM_PUBKEY_HEX` is the all-zeros placeholder
+ *        sentinel.
+ *
+ * Single source of truth for "this hull was built without a real
+ * pinned platform pubkey." Used by both runtime verify (signature.c
+ * §5b skips with a warning) and the `tool.platform_pubkey()` Lua
+ * binding (returns nil so verify.lua takes the placeholder-skip
+ * branch). Keeping the check in one place stops the two consumers
+ * from drifting if the macro's formatting ever changes (uppercase
+ * hex, surrounding whitespace, etc.).
+ *
+ * @return 1 if the embedded pubkey decodes to 32 zero bytes;
+ *         0 otherwise (real key, or unparseable macro — both treated
+ *         as "not placeholder" so the verifier runs and fails
+ *         loudly rather than silently skipping).
+ */
+int hl_platform_pubkey_is_placeholder(void);
+
+/**
  * @brief Extract the SHA-256 hex for a specific arch from the manifest.
  *
  * Thin wrapper over `hl_release_io_find_checksum()` — the manifest

@@ -22,11 +22,9 @@
  * the duplicate-check both O(n²) without ever mattering. */
 #define HL_PLATFORM_SIG_MAX_ARCHES 16
 
-/* Single line is "<64 hex>  <arch>\n" — bounded since arch names are
- * stable identifiers. The longest registered arch today is
+/* Arch names are stable identifiers; the longest registered today is
  * "cosmo-aarch64" (13 chars). Cap at 32 to leave headroom. */
 #define HL_PLATFORM_SIG_MAX_ARCH_NAME 32
-#define HL_PLATFORM_SIG_LINE_MAX (64 + 2 + HL_PLATFORM_SIG_MAX_ARCH_NAME + 1)
 
 /* ── Validation helpers ──────────────────────────────────────────── */
 
@@ -147,6 +145,16 @@ static int decode_embedded_platform_pubkey(uint8_t out_pk[32])
         out_pk[i] = (uint8_t)((hi_v << 4) | lo_v);
     }
     return 0;
+}
+
+int hl_platform_pubkey_is_placeholder(void)
+{
+    uint8_t pk[32];
+    if (decode_embedded_platform_pubkey(pk) != 0) return 0;
+    for (int i = 0; i < 32; i++) {
+        if (pk[i] != 0) return 0;
+    }
+    return 1;
 }
 
 int hl_platform_sig_verify(const void *manifest, size_t manifest_len,
