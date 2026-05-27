@@ -51,6 +51,664 @@ commit). Apps that mix both must accept eventual consistency.
 
 ---
 
+## 1.5 Hypermedia web application profile (HTMX + Pico)
+
+**Priority:** High — fills the gap between full-page SSR apps and
+React-style SPAs for business workflow software. The target use case is
+internal tools such as IT asset trackers, admin consoles, inventory systems,
+approval workflows, CRM-like dashboards, and other CRUD-heavy applications
+where the server should remain the source of truth.
+
+**Thesis:**
+
+Hull already has the right backend primitives for secure SSR: templates,
+forms, sessions, CSRF, RBAC, SQLite, migrations, static files, search, CSV,
+email, audit logging, and single-binary deployment. HTMX adds partial page
+updates while preserving HTML as the application protocol. Pico.css provides a
+classless baseline that rewards semantic templates and avoids a frontend build
+pipeline.
+
+The desired application profile is:
+
+```
+templates/
+  base.html
+  pages/
+  fragments/
+static/
+  vendor/htmx.min.js
+  vendor/pico.classless.min.css
+  app.css
+```
+
+No CDN by default. Assets are vendored into `static/`, embedded by
+`hull build`, served from `/static/*`, and covered by a self-hosted CSP.
+
+**Tasks:**
+
+- [ ] Add a small `hull.htmx` helper module:
+      `is(req)`, `boosted(req)`, `redirect(req, res, path)`,
+      `retarget(res, selector)`, `reswap(res, mode)`,
+      `trigger(res, event, payload)`.
+- [ ] Add `hull new --profile htmx` / scaffold support with vendored HTMX,
+      vendored Pico classless CSS, base layout, fragment layout, CSRF forms,
+      and no JavaScript build step.
+- [ ] Add a named CSP profile for self-hosted hypermedia apps, equivalent to
+      `script-src 'self'`, `style-src 'self' 'unsafe-inline'`, `img-src 'self'`,
+      `form-action 'self'`, and `frame-ancestors 'none'`.
+- [ ] Add `examples/hypermedia_todo` or `examples/asset_tracker` showing
+      progressive enhancement: normal links/forms work without JavaScript,
+      HTMX requests receive fragments, and full browser navigation receives
+      complete pages.
+- [ ] Extend the test helpers and examples to send `HX-Request: true` and
+      assert fragment responses, redirects, retargeting, and triggered events.
+- [ ] Document the pattern: "return full pages for ordinary navigation,
+      fragments for `HX-Request`", including CSRF, validation errors, flash
+      messages, and empty states.
+
+**Enterprise/internal-app gaps this profile should unblock or make explicit:**
+
+- [ ] Streaming multipart uploads. Current request bodies are capped at 1 MB;
+      real asset trackers need photos, invoices, receipts, PDFs, and bulk
+      import files.
+- [ ] Attachment/document storage helpers: declared `fs_write` location,
+      checksum, MIME type, size limits, metadata table, and secure download
+      routes.
+- [ ] OIDC middleware for enterprise SSO. SAML/LDAP/SCIM can follow, but OIDC
+      should be the first supported path for company identity providers.
+- [ ] First-party app audit-log helper distinct from capability audit logs:
+      record who changed which business object, before/after values, source
+      request, timestamp, and optional reason.
+- [ ] Reusable admin UI conventions for paginated tables, filter forms,
+      inline validation, confirm-delete flows, flash messages, and optimistic
+      row replacement.
+- [ ] Import/export workflow helpers: CSV preview, per-row validation errors,
+      dry-run mode, commit step, and background processing hooks for large
+      imports.
+
+**Out of scope:** adopting React/Vue/Svelte, client-side hydration, npm as a
+required app build step, or making HTMX a runtime dependency of Hull itself.
+HTMX and Pico should remain vendored static assets at the application layer;
+Hull provides the server-side conventions and helpers.
+
+---
+
+## 1.6 Native sidecar services (`hull.services`)
+
+**Priority:** High — enables large native accelerators such as bitnet.c /
+llama.cpp-style inference engines without embedding them into Hull's trusted
+core and without pretending they are as safe as WASM plugins. Native sidecars
+are lower-trust, out-of-process services with explicit capabilities, narrow
+RPC, supervised lifecycle, and OS sandboxing where available.
+
+**Security stance:**
+
+Preserve the execution tiering:
+
+| Tier | Runtime | Trust posture |
+|---|---|---|
+| 0 | Hull core | Small trusted runtime |
+| 1 | Lua/JS app logic | Hull capability model + kernel sandbox |
+| 2 | WASM plugins | Portable in-process sandbox, no I/O |
+| 3 | Native sidecars | Isolated native accelerators, out-of-process |
+| 4 | Native in-process plugins | Forbidden by default; trusted/unsafe only |
+
+Native sidecars must never become a general `exec` escape hatch. They are
+declared services resolved by Hull, launched by Hull, sandboxed by Hull, and
+communicated with through Hull-owned transports. Sidecar tool metadata may
+declare what the tool can support, but the app manifest remains the final
+authority; tool metadata must not expand app capabilities.
+
+**Key architecture constraint:**
+
+Current server startup applies phase-1 pledge before loading app code, and
+that phase intentionally blocks `exec`/`proc`/`fork`. Do not weaken this. To
+keep services in `app.manifest()` while still spawning before the sandbox is
+sealed, Hull needs a manifest pre-extraction pass for privileged launch-time
+declarations.
+
+The `services` block must be statically extractable from a literal
+`app.manifest({...})` table/object before executing the app:
+
+- Accept: literal strings, numbers, booleans, arrays, and objects/tables.
+- Reject for service declarations: function calls, imports/requires, env
+  reads, string concatenation, conditionals, loops, computed keys, or runtime
+  values.
+- Normal app capability extraction can still run after app load; native
+  sidecar launch decisions must come from the static subset.
+
+**Manifest sketch:**
+
+```lua
+app.manifest({
+    modules = { "hull/services@1" },
+    services = {
+        bitnet = {
+            type = "native-sidecar",
+            tool = "bitnet-worker@1",
+            transport = "stdio-fd", -- stdio-fd | unix | tcp
+            protocol = "json-rpc",
+            restart = "on-crash",
+            trust = "confined-native",
+            models = {
+                main = {
+                    path = "data/models/bitnet/model.gguf",
+                    access = "fd-read",
+                },
+            },
+            fs_write = { "data/cache/bitnet" },
+            net = { connect = {}, listen = {} },
+            limits = {
+                memory_mb = 8192,
+                cpu_percent = 400,
+                processes = 1,
+                open_files = 64,
+                wall_ms = 600000,
+            },
+        },
+    },
+})
+```
+
+Prefer `tool = "name@major"` over `exec = "./path"`. Hull resolves tools via
+the signed `hull tools install` registry, platform-specific artifacts, hashes,
+install paths, and optional sidecar metadata. Local executable paths should be
+development-only escape hatches, e.g. `dev_exec = "./bin/bitnet-worker"`, with
+loud diagnostics and no production-signing claim.
+
+**Resource passing model:**
+
+Sidecars should receive Hull-resolved resources, not ambient path authority.
+For model files, prefer pre-opened read-only resources:
+
+```json
+{
+  "models": {
+    "main": {
+      "resource": 10,
+      "kind": "file-read",
+      "size": 4213379012,
+      "label": "main"
+    }
+  },
+  "cache": {
+    "resource": 11,
+    "kind": "dir-rw"
+  }
+}
+```
+
+On Unix, resources are inherited FDs or passed via `SCM_RIGHTS`. On Windows,
+they are inherited handles. The protocol should call them "resources", not
+POSIX-only FDs. The sidecar should not discover arbitrary model/cache paths on
+its own.
+
+**Transport and protocol model:**
+
+- Default transport: dedicated inherited RPC FD (`stdio-fd`), not child
+  stdin/stdout. Keep stdin/stdout closed or pointed at `/dev/null`; stderr is
+  logs only. This avoids log/protocol mixing.
+- Phase 2 transport: Unix domain sockets for long-running local daemons,
+  including socketpair and filesystem socket paths.
+- TCP: design now, but keep disabled by default until listen/connect
+  capabilities are explicit and audited. Default TCP binding must be
+  localhost-only unless manifest says otherwise.
+- Initial protocol: JSON-RPC 2.0 with Content-Length framing
+  (LSP-style), not newline-delimited JSON. This supports pretty JSON, robust
+  framing, future binary headers, and clean parser error handling.
+- Streaming responses: JSON-RPC notifications keyed by request id, e.g.
+  `$/stream` events for tokens/progress/done.
+- Cancellation: LSP-style `$/cancelRequest` plus Hull-enforced local
+  deadlines. On timeout, send cancel, wait a grace period, then terminate or
+  restart by policy.
+- Backpressure: bounded write queues, bounded in-flight requests, bounded
+  stream buffering, and explicit failure when the app does not consume fast
+  enough.
+
+**Example app API:**
+
+```lua
+local services = require("hull.services")
+
+local out = services.call("bitnet", "generate", {
+    model = "main",
+    prompt = "Summarize this asset history",
+    max_tokens = 256,
+}, { timeout_ms = 60000 })
+```
+
+Sidecar method baseline:
+
+- `rpc.discover`
+- `health`
+- `load_model`
+- `unload_model`
+- `generate`
+- `embed`
+- `tokenize`
+- `cancel`
+- `stats`
+
+**Keel vs Hull ownership:**
+
+Keel should own reusable event-loop transport primitives only: FD watchers,
+timers, write queues, framing parser/serializer, and optional JSON-RPC
+client/server helpers if they stay dependency-light.
+
+Hull owns process boundaries: manifest parsing, tool resolution, service
+supervision, process launch, FD/handle/resource passing, sandbox/resource
+limits, capability checks, audit logs, app bindings, and lifecycle policy.
+
+Start with a thin `hull/rpc` layer above Keel. Promote transport-neutral pieces
+to Keel later only if they prove useful outside Hull.
+
+**Platform sandbox tiers:**
+
+Expose the actual enforcement level at runtime and in `hull agent services` so
+operators do not confuse "native sidecar" with WASM-grade containment.
+
+| Level | Platforms | Backend |
+|---|---|---|
+| strong | Linux | `no_new_privs` + seccomp + Landlock + rlimits + FD discipline |
+| strong | OpenBSD / Cosmopolitan where supported | pledge/unveil + rlimits + FD discipline |
+| good | macOS | Seatbelt + Hardened Runtime + rlimits + inherited-handle discipline |
+| partial | FreeBSD | Capsicum where available, otherwise documented degradation |
+| partial | Windows | Job Object + restricted token / AppContainer later |
+
+**Error model:**
+
+Keep failure classes distinct:
+
+- `rpc_error` — valid JSON-RPC error returned by a method.
+- `protocol_error` — malformed JSON, bad frame, invalid id, unsupported method.
+- `transport_error` — EOF, EPIPE, timeout, reset.
+- `service_exit` — process exited with status/signal.
+- `sandbox_violation` — OS denied/killed the sidecar.
+- `supervisor_error` — launch failed, bad tool, denied path/resource/capability.
+- `app_error` — Lua/JS misuse of the service API.
+
+**Phased plan:**
+
+- [ ] Phase 0: design doc + threat model + repo survey. Decide the exact
+      static manifest pre-extraction subset and signing implications.
+- [ ] Phase 1: minimal `stdio-fd` Content-Length JSON-RPC client/server,
+      dedicated RPC FD, stderr log separation, `rpc.discover`, `health`, and
+      one request/response method.
+- [ ] Phase 2: Unix socket transport, including socketpair and filesystem
+      socket paths; consider FD passing for resources.
+- [ ] Phase 3: lifecycle supervision: launch, readiness, health checks,
+      crash detection, restart policy, log capture, graceful shutdown, and
+      `hull agent services`.
+- [ ] Phase 4: sandbox/resource limits: close inherited FDs, scrub env, set
+      cwd, rlimits, Linux seccomp/Landlock, OpenBSD pledge/unveil, macOS
+      Seatbelt profile, Windows/FreeBSD degraded backends.
+- [ ] Phase 5: TCP transport gated by explicit manifest capabilities.
+      Localhost-only default; no production remote bind without a declared
+      listen policy.
+- [ ] Phase 6: bitnet.c proof-of-concept sidecar installed through
+      `hull tools install`, using pre-opened model resources and no arbitrary
+      filesystem discovery.
+- [ ] Phase 7: signed sidecar packaging: tool metadata declares supported
+      needs, app manifest grants concrete resources, `hull verify` includes
+      sidecar tool identity/hash in the app's signed deployment surface.
+
+**Hard parts / security traps:**
+
+- Manifest timing: sidecars cannot be discovered by executing app code after
+  phase-1 pledge; service declarations need static pre-extraction.
+- Dynamic linker behavior: native tools may need shared libraries unless
+  shipped static. Prefer static sidecar artifacts where practical.
+- Inherited FDs/handles are ambient authority; close everything except
+  explicit RPC/log/resource handles.
+- Environment variables leak authority; start from an empty env and add only
+  declared values.
+- `cwd` leaks filesystem reachability; set to a controlled service workdir.
+- TCP can accidentally become an undeclared local network service; keep it
+  off until capability gates and tests are in place.
+- Sidecars spawning subprocesses must be blocked by sandbox/resource policy.
+- Logs must never share the RPC stream.
+- Restart loops can DoS the host; cap restart rate and expose status.
+- Native sidecars are lower trust than WASM. Documentation and `inspect` /
+  `agent services` output should make that explicit.
+
+**Out of scope:** arbitrary user-controlled process execution, in-process
+native plugins, unrestricted `dlopen`, plugin package managers, remote sidecar
+orchestration, and claiming sidecars are equivalent to WASM sandboxing.
+
+---
+
+## 1.7 Native sandbox runner and services (`hull sandbox`)
+
+**Priority:** Medium-High — follow-on to native sidecar services. Reuses the
+same process-supervision, resource-passing, sandbox, and limit machinery to
+run native executables under declared capability manifests, either as
+foreground one-shot processes or supervised daemon processes.
+
+This is a different product surface from app-owned sidecars:
+
+- `hull sandbox run` runs a foreground / one-shot native process.
+- `hull sandbox service` supervises a long-running native daemon.
+- `hull.services` launches app-owned RPC sidecars on behalf of Lua/JS app
+  logic.
+
+The goal is not to make arbitrary native binaries "safe" in the same sense as
+WASM or Hull app code. The goal is to provide an honest, capability-oriented
+launcher for native programs that can operate inside a narrow declared surface.
+
+**Proposed CLI:**
+
+```bash
+hull sandbox run ./blabla --manifest manifest.json
+hull sandbox run ./blabla --manifest -
+hull sandbox run glpsol --manifest - < glpk.solve.json
+hull sandbox service start --manifest daemon.json
+hull sandbox service status local-solver
+hull sandbox service stop local-solver
+hull sandbox service logs local-solver
+hull sandbox inspect manifest.json
+hull sandbox explain ./blabla --manifest manifest.json
+```
+
+Avoid overloading `hull run`; Hull app execution and native process sandboxing
+should remain visibly distinct.
+
+`--manifest -` reads the manifest JSON from stdin. This is important for
+agent workflows and one-shot generated runs where writing a temporary manifest
+file is unnecessary or undesirable. When stdin is used for the manifest, the
+child's stdin must be explicitly configured separately (`"stdin": "inherit"`,
+`"stdin": "null"`, `"stdin": {"file": "..."}`, or a future dedicated input
+FD), so manifest input cannot be confused with child process input.
+
+**Best-fit workloads:**
+
+| Fit | Workload |
+|---|---|
+| Best | Native tools designed for Hull sandboxing |
+| Good | Static or mostly self-contained CLI tools |
+| Good | Solver/optimizer tools such as GLPK and HiGHS, run unmodified against declared input/output files |
+| Good | Local daemons with narrow Unix-socket interfaces and explicit readiness checks |
+| Mixed | Ordinary Unix programs with predictable file/network needs |
+| Poor | GUI apps, browsers, package managers, shells, build systems |
+
+**Process manifest sketch:**
+
+```json
+{
+  "type": "native-process",
+  "exec": "./blabla",
+  "args": ["--model-fd", "$HULL_RESOURCE_model"],
+  "env": {},
+  "cwd": "work/blabla",
+  "resources": {
+    "model": {
+      "path": "models/model.bin",
+      "access": "fd-read"
+    },
+    "cache": {
+      "path": "cache/blabla",
+      "access": "dir-rw"
+    }
+  },
+  "fs": {
+    "read": [],
+    "write": []
+  },
+  "net": {
+    "connect": [],
+    "listen": []
+  },
+  "stdio": {
+    "stdin": "inherit",
+    "stdout": "inherit",
+    "stderr": "inherit"
+  },
+  "limits": {
+    "memory_mb": 4096,
+    "open_files": 32,
+    "processes": 1,
+    "wall_ms": 600000
+  }
+}
+```
+
+Prefer pre-opened resources (`fd-read`, `dir-rw`, inherited handles on
+Windows) over broad path visibility. Path allowlists are still useful for
+legacy tools, but the highest-integrity mode is "the child sees only handles
+Hull intentionally gives it."
+
+**Unmodified solver tools:**
+
+This runner should make it practical to use established native command-line
+tools such as GLPK (`glpsol`) and HiGHS without linking them into Hull and
+without rewriting them as WASM modules. Many solvers already have a narrow
+file/stdio shape:
+
+```bash
+hull sandbox run glpsol --manifest glpk.solve.json
+hull sandbox run highs --manifest highs.solve.json
+```
+
+Example GLPK-style manifest:
+
+```json
+{
+  "type": "native-process",
+  "tool": "glpk@5",
+  "args": [
+    "--math", "model/problem.mod",
+    "--data", "model/data.dat",
+    "--output", "out/solution.txt"
+  ],
+  "cwd": ".",
+  "fs": {
+    "read": ["model/problem.mod", "model/data.dat"],
+    "write": ["out"]
+  },
+  "net": { "connect": [], "listen": [] },
+  "env": {},
+  "limits": {
+    "memory_mb": 2048,
+    "open_files": 32,
+    "processes": 1,
+    "wall_ms": 300000
+  }
+}
+```
+
+For unmodified tools, path allowlists are necessary because the program does
+not know how to consume Hull resource FDs. For Hull-aware tools, prefer
+resource placeholders. The runner should support both modes and make the
+security tradeoff visible in `hull sandbox inspect`.
+
+**Daemon/service mode:**
+
+Sandboxed daemons need distinct lifecycle semantics. Do not stretch
+`hull sandbox run` to mean "background this and hope"; make service mode
+explicit.
+
+Example service manifest:
+
+```json
+{
+  "type": "native-service",
+  "name": "local-solver",
+  "tool": "highs-server@1",
+  "args": ["--socket", "$HULL_SOCKET"],
+  "cwd": "work/local-solver",
+  "transport": {
+    "type": "unix",
+    "path": "run/highs.sock"
+  },
+  "readiness": {
+    "type": "unix-connect",
+    "timeout_ms": 5000
+  },
+  "restart": {
+    "policy": "on-crash",
+    "max_restarts": 3,
+    "window_ms": 60000
+  },
+  "fs": {
+    "read": ["models"],
+    "write": ["run", "cache"]
+  },
+  "net": { "connect": [], "listen": [] },
+  "env": {},
+  "limits": {
+    "memory_mb": 2048,
+    "processes": 1,
+    "open_files": 64
+  },
+  "logs": {
+    "mode": "capture",
+    "max_bytes": 10485760
+  }
+}
+```
+
+Daemon-specific requirements:
+
+- Readiness detection: process-started is not ready. Support Unix-connect,
+  TCP-connect, HTTP health endpoint, JSON-RPC `health`, and process-only as a
+  last resort.
+- Stable identity: services have names, state directories, PID/state files,
+  socket paths, and status JSON.
+- Lifecycle commands: `start`, `stop`, `restart`, `status`, `logs`.
+- Graceful shutdown: send configured signal/request, wait grace period, then
+  terminate.
+- Restart policy: disabled by default; `on-crash` must include restart-rate
+  limits.
+- Stale socket cleanup: only remove sockets owned by the service state.
+- Double-fork/background escape: treat daemonization that detaches from the
+  supervisor as a policy violation unless a future platform service-manager
+  integration explicitly supports it.
+- Network daemons: prefer Unix sockets. TCP listen requires explicit
+  `net.listen`, defaults to `127.0.0.1`, and must appear in `inspect/status`.
+
+**Unified execution model:**
+
+1. Parse and validate the native process manifest.
+2. If the manifest came from stdin, require an explicit `base_dir` or use the
+   current working directory with a diagnostic in `inspect`.
+3. Resolve all paths relative to the manifest location, explicit `base_dir`,
+   or the stdin fallback base.
+4. Open declared resources before sandboxing.
+5. Build the child argv from literal args plus resource placeholders.
+6. Start from an empty environment; add only declared env vars.
+7. Set a controlled cwd.
+8. Close every inherited FD/handle except stdio and declared resources.
+9. Apply resource limits.
+10. Apply the best available OS sandbox backend.
+11. Exec/spawn the child.
+12. For `native-process`, monitor exit status, signals, wall timeout, logs, and
+    sandbox diagnostics until the foreground process exits.
+13. For `native-service`, wait for readiness, persist service state, monitor
+    lifecycle, enforce restart policy, and keep logs/status queryable.
+14. Emit structured JSON when requested (`--json`) for agents and tests.
+
+**Relationship to sidecars:**
+
+This should be implemented after the sidecar supervisor proves the core
+primitives:
+
+- process launch without shell invocation
+- environment scrubbing
+- close-on-exec / inherited FD discipline
+- pre-opened resource passing
+- rlimits / Job Objects / platform limits
+- Linux seccomp/Landlock, OpenBSD pledge/unveil, macOS Seatbelt, Windows and
+  FreeBSD degraded backends
+- structured error and audit model
+
+The runner should reuse the same internal API where possible, but without RPC
+or restart policy by default.
+
+**Platform semantics:**
+
+The runner must report actual enforcement strength, not a generic "sandboxed"
+claim:
+
+```json
+{
+  "sandbox": {
+    "level": "strong",
+    "backend": "linux-seccomp-landlock",
+    "degraded": false
+  }
+}
+```
+
+If a platform cannot enforce a requested capability boundary, default behavior
+should be fail-closed unless the operator passes an explicit development flag
+such as `--allow-degraded-sandbox`.
+
+**Tasks:**
+
+- [ ] Define `manifest.json` schema for `type = "native-process"` and resource
+      placeholders.
+- [ ] Define `type = "native-service"` schema for daemon lifecycle:
+      name, transport, readiness, restart, logs, state dir, graceful shutdown.
+- [ ] Support `--manifest -` to read manifest JSON from stdin, with explicit
+      child-stdin configuration and clear `base_dir` path-resolution rules.
+- [ ] Add `hull sandbox inspect` to normalize and display the resolved
+      capability surface without running the process.
+- [ ] Add `hull sandbox explain` to show which OS backend rules would be
+      applied on the current platform.
+- [ ] Implement `hull sandbox run` using the sidecar process/sandbox
+      supervisor primitives.
+- [ ] Implement `hull sandbox service start|stop|restart|status|logs` with
+      service state files, stale-socket handling, readiness checks, graceful
+      shutdown, and restart-rate limits.
+- [ ] Support inherited stdio plus optional capture mode (`--json`,
+      `--capture-output`, max output size).
+- [ ] Support pre-opened file/dir resources and placeholder expansion in argv.
+- [ ] Support path-allowlisted legacy tools that cannot consume resource FDs,
+      with `inspect` clearly marking the broader path-based authority.
+- [ ] Add network capability gates: no connect/listen by default; localhost
+      listen/connect only when declared; remote connect only when declared.
+- [ ] Add solver examples for GLPK and HiGHS, including read-only model/data
+      inputs, write-only solution directories, no environment, no network, and
+      bounded memory/wall-time.
+- [ ] Add daemon examples using Unix sockets first; TCP daemon examples only
+      after `net.listen` policy is implemented and tested.
+- [ ] Add clear error classes mirroring sidecars: manifest error, launch
+      error, sandbox unsupported, sandbox violation, timeout, exit status,
+      signal, readiness failure, restart exhaustion, escaped daemon,
+      resource denied.
+- [ ] Add tests with tiny static helper binaries that attempt allowed and
+      denied file reads/writes, env reads, network access, subprocess spawn,
+      and FD leakage.
+- [ ] Document honest workload fit and platform degradation behavior.
+
+**Security traps:**
+
+- Arbitrary native programs often depend on dynamic libraries, locale files,
+  `/proc`, temp dirs, config files, DNS files, and subprocesses. Tight
+  manifests will break many programs; broad manifests weaken the guarantee.
+- Shells and build systems are poor targets because they are designed to
+  discover and execute more programs.
+- GUI applications are out of scope for v1; window-system access is a broad
+  ambient channel.
+- Dynamic linker behavior can undermine "no file access" claims unless the
+  child is static or the loader/library paths are explicitly accounted for.
+- Passing path strings instead of resources invites confused-deputy bugs.
+- Leaking an inherited directory FD can bypass path allowlists.
+- Network controls must be OS-enforced where possible, not only checked by
+  Hull before launch.
+- Daemons that double-fork, write arbitrary PID files, or reopen logs outside
+  declared paths can escape supervision assumptions.
+- Stale Unix sockets and PID files can cause confused ownership unless state
+  files include Hull-generated service identity.
+- On platforms with partial sandbox support, the CLI must be explicit about
+  degraded enforcement.
+
+**Out of scope:** remote orchestration, containers, VM isolation, package
+manager sandboxes, GUI app sandboxing, system-wide init/service-manager
+integration, and claiming arbitrary native binaries are equivalent to Hull
+apps or WASM plugins.
+
+---
+
 ## 2. `hull tools install` — side-loaded optional tools  ✅ Shipped (v0.1.2)
 
 **Design:** [`tools_install.md`](tools_install.md). What landed:
