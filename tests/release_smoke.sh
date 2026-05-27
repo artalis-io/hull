@@ -16,7 +16,7 @@
 #
 # Usage:
 #     # After `gh release create v0.1.2 ...` returns success
-#     curl -fsSL https://raw.githubusercontent.com/artalis-io/hull/main/install.sh | sh
+#     curl -fsSL https://gethull.dev/install.sh | sh
 #     sh tests/release_smoke.sh
 #
 # Or in-tree against a locally-built hull pinned to the published tag:

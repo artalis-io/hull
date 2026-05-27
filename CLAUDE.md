@@ -20,7 +20,7 @@ Refresh the bundle with `make fetch-ca-bundle` (pulls from `curl.se/ca/cacert.pe
 End-users install Hull with:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/artalis-io/hull/main/install.sh | sh
+curl -fsSL https://gethull.dev/install.sh | sh
 ```
 
 `install.sh` (POSIX, ~250 lines) detects OS/arch via `uname`, picks `hull-linux-x86_64` / `hull-linux-aarch64` / `hull-darwin-arm64` / `hull-cosmo` from the latest GitHub release, verifies the SHA-256 from `hull.sha256`, and installs to `~/.local/bin/hull` (or `/usr/local/bin` if root). Knobs: `HULL_VERSION`, `HULL_PREFIX`, `HULL_FLAVOR=cosmo|native`, `HULL_FORCE=1`, `HULL_DRY_RUN=1`.
@@ -74,7 +74,7 @@ so one compromise doesn't taint the other.
 | 1 | Confirm CI green on the commit to be tagged. The release workflow re-runs `make`, signs from the freshly built native-linux binary, and publishes — broken CI means a broken release. |
 | 2 | `git tag -a vX.Y.Z -m "Hull vX.Y.Z" && git push origin vX.Y.Z` |
 | 3 | Watch `.github/workflows/release.yml`; on success the GitHub release lands with `hull-cosmo`, `hull-linux-x86_64`, `hull-linux-aarch64`, `hull-darwin-arm64`, `hull.sha256`, and `hull.sha256.sig`. |
-| 4 | Smoke-test on a clean machine: `curl -fsSL https://raw.githubusercontent.com/artalis-io/hull/main/install.sh \| sh && hull update --check`. |
+| 4 | Smoke-test on a clean machine: `curl -fsSL https://gethull.dev/install.sh \| sh && hull update --check`. |
 
 ### Invariants
 

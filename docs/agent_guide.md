@@ -74,7 +74,7 @@ and a build tool that turns your app into a signed single-file binary.*
 ### End-user install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/artalis-io/hull/main/install.sh | sh
+curl -fsSL https://gethull.dev/install.sh | sh
 ```
 
 `install.sh` detects OS/arch via `uname`, picks `hull-linux-x86_64`,

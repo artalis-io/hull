@@ -999,7 +999,7 @@ cd ~/.hull/keys && hull keygen release   # writes release.{pub,key}
 2. `git tag -a vX.Y.Z -m "Hull vX.Y.Z" && git push origin vX.Y.Z`
 3. `.github/workflows/release.yml` produces the five release assets.
 4. Smoke-test from a clean machine:
-   `curl -fsSL https://raw.githubusercontent.com/artalis-io/hull/main/install.sh | sh && hull update --check`.
+   `curl -fsSL https://gethull.dev/install.sh | sh && hull update --check`.
 
 ### Agent-callable diagnostics
 

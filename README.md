@@ -37,7 +37,7 @@ Hull — Hardened Userspace Lockdown Layer.
 
 ```bash
 # Download the latest signed release binary:
-curl -fsSL https://raw.githubusercontent.com/artalis-io/hull/main/install.sh | sh
+curl -fsSL https://gethull.dev/install.sh | sh
 ```
 
 The installer detects your OS/arch, downloads a native binary (or the universal Cosmopolitan APE fallback), verifies the SHA-256 checksum against the release manifest, and installs to `~/.local/bin/hull` (no sudo). Override with `HULL_PREFIX=/usr/local/bin sh install.sh`.
@@ -1395,7 +1395,7 @@ cd ~/.hull/keys && hull keygen release      # writes release.{pub,key}
    produces `hull.sha256` and `hull.sha256.sig`, and publishes the
    GitHub release.
 4. Smoke-test on a clean machine:
-   `curl -fsSL https://raw.githubusercontent.com/artalis-io/hull/main/install.sh | sh && hull update --check`.
+   `curl -fsSL https://gethull.dev/install.sh | sh && hull update --check`.
 
 Threat model, key-rotation plan, and the rationale for signing the
 manifest rather than each binary individually are in

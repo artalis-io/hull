@@ -1,7 +1,7 @@
 #!/bin/sh
 # Hull installer. Downloads the latest release binary from GitHub.
 #
-#   curl -fsSL https://raw.githubusercontent.com/artalis-io/hull/main/install.sh | sh
+#   curl -fsSL https://gethull.dev/install.sh | sh
 #
 # Environment variables (all optional):
 #   HULL_VERSION    Specific version to install (e.g. "v0.1.0"). Default: latest.
