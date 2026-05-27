@@ -218,18 +218,39 @@ matching the v0.1.2 audit-hardening posture.
 
 ### Six commits, ordered
 
+The original draft of this plan put "restore the real pubkey" first
+as a small spike commit. That sequencing was wrong: restoring the
+pubkey activates `hl_verify_startup`'s platform-key pinning, which
+hard-rejects any app whose `package.sig.platform.public_key_hex`
+doesn't match the embedded key. Today's
+`hull sign-platform` + `hull build --sign` developer flow (exercised
+by `e2e_build.sh` Step 14) signs platforms with the developer's own
+key — so the moment the real gethull pubkey is embedded, every
+existing dev-signed app fails verify. The same failure mode triggered
+the `ff0a39b` reversion during v0.1.1. C1 is therefore a *dependent*
+commit, not an independent one.
+
+The corrected order lands the chain bottom-up: helpers → CI →
+build-side cross-check + opt-out flag → runtime enforcement →
+THEN flip the pubkey + update the dev-flow e2e to use the
+`--no-verify-platform` opt-out. Each step compiles and passes its
+own tests; restoring the pubkey becomes safe only after every
+consumer of the pin can opt out of it.
+
 | # | Prefix | Summary | Effort |
 |---|---|---|---|
-| 1 | `sig:` | Restore real `HL_PLATFORM_PUBKEY_HEX`; keep `#ifndef` override guard; update `test_signature.c` placeholder-assertion fixture | 0.5d |
-| 2 | `sig:` | `src/hull/platform_sig.{c,h}` — manifest builder, signer, verifier, `extract_for_arch` helper. Pure data; reuses `release_io` helpers (`find_checksum`, `verify_manifest_sig`, `sha256_hex`). Unit tests with synthetic hashes including mismatch + tamper cases. | 1d |
-| 3 | `ci:` | `release.yml` reorg per Option A: `build-platform` (matrix, uploads `.a`) → `sign-platform-manifest` (single Linux job, signs with `HULL_PLATFORM_KEY`, emits `build/embedded_platform_sig.h` + `build/embedded_platform_hashes.h`, uploads as artifact) → `build-native` + `build-cosmo` (matrix, depend on the headers artifact, include them in hull build). Bootstrap check fails the workflow if `HULL_PLATFORM_KEY` is empty in CI. | 1.5d |
-| 4 | `build:` | `hull build` integration: new `--no-verify-platform` flag, `tool.platform_sig_get()` Lua binding wrapping `hl_platform_sig_extract_for_arch()`, `build.lua` computes SHA-256 of embedded `.a`, cross-checks against manifest entry, writes verified `(manifest + sig + arch_hash)` into `package.sig.platform`. Hard-reject paths with the messages in the behavior matrix above. | 1d |
-| 5 | `sig:` | `hull verify` + `--verify-sig` enforce platform layer at startup. Same `--no-verify-platform` flag works at runtime. Hard reject on empty/invalid with clear messages. E2E test: build an app, mutate embedded `.a` bytes via hex editor, expect verify fails non-zero with the specific message. | 0.5d |
+| 1 | `sig:` | `src/hull/platform_sig.{c,h}` — manifest builder, signer, verifier, `extract_for_arch` helper. Pure data; reuses `release_io` helpers (`find_checksum`, `verify_manifest_sig`, `sha256_hex`). Unit tests with synthetic hashes including mismatch + tamper cases. Standalone — no runtime behavior change. | 1d |
+| 2 | `ci:` | `release.yml` reorg per Option A: `build-platform` (matrix, uploads `.a`) → `sign-platform-manifest` (single Linux job, signs with `HULL_PLATFORM_KEY`, emits `build/embedded_platform_sig.h` + `build/embedded_platform_hashes.h`, uploads as artifact) → `build-native` + `build-cosmo` (matrix, depend on the headers artifact, include them in hull build). Bootstrap check fails the workflow if `HULL_PLATFORM_KEY` is empty in CI. Hull binaries now embed signed platform metadata but nothing reads it yet. | 1.5d |
+| 3 | `build:` | `hull build` integration: new `--no-verify-platform` flag (works on both `hull build` and runtime), `tool.platform_sig_get()` Lua binding wrapping `hl_platform_sig_extract_for_arch()`, `build.lua` computes SHA-256 of embedded `.a`, cross-checks against manifest entry, writes verified `(manifest + sig + arch_hash)` into `package.sig.platform`. Hard-reject paths with the messages in the behavior matrix above. | 1d |
+| 4 | `sig:` | `hull verify` + `--verify-sig` enforce platform layer at startup. Hard reject on empty/invalid with clear messages. `--no-verify-platform` opt-out at runtime mirrors the build-time flag. E2E test: build an app via the full release pipeline, mutate embedded `.a` bytes via hex editor, expect verify fails non-zero with the specific message. | 0.5d |
+| 5 | `sig:` | Restore real `HL_PLATFORM_PUBKEY_HEX` (revert the v0.1.1 placeholder's hex value; keep the `#ifndef` override guard). Update `test_signature.c`'s `create_test_package_sig` to support a `platform_kind` parameter so `verify_startup_good` can emit `platform: null` (the unit test doesn't intend to exercise pinning). Update `tests/e2e_build.sh` Step 14 to add `--no-verify-platform` when running developer-signed apps under `--verify-sig` (the test is acting as a fork developer, not a gethull-signed app). This is the commit that *activates* the pin. | 0.5d |
 | 6 | `docs:` | `docs/security.md §6` "shipped", `site/index.html` scorecard updates (move platform-sig bullet from "Not yet" to "Ships"), `site/verify.html` fixture with a real v0.1.3 example, roadmap section 3 → Shipped (v0.1.3), CHANGELOG entry. | 0.5d |
 
-**Total: ~5 days.** Slightly more than v0.1.2 (4 days) because the
-CI reorg in step 3 is higher-risk than v0.1.2's `build-wamrc`
-matrix addition (which was a parallel-add, not a topology change).
+**Total: ~4.5 days.** Slightly less than the prior 5-day estimate
+because the pubkey-restoration commit (C5) is bundled with the
+narrow e2e_build.sh update it depends on, rather than being a
+standalone 0.5d spike that turned out to need 0.5d of dependency
+work anyway. CI reorg in C2 remains the highest-risk piece.
 
 ### Release-time validation
 
@@ -238,25 +259,30 @@ run `tests/release_smoke.sh` (extended to also `hull verify` the
 published binaries and confirm the platform layer reports valid).
 Only tag clean `v0.1.3` after rc1 is green.
 
-### Tasks
+### Tasks (in dependency order — mirrors the commit table)
 
-- [ ] Restore real `HL_PLATFORM_PUBKEY_HEX` (revert the v0.1.1
-      placeholder commit's hex value; keep the `#ifndef` guard).
 - [ ] `src/hull/platform_sig.{c,h}` — manifest builder + signer +
       verifier + `extract_for_arch` helper. Unit tests including
-      mismatch + tamper cases.
+      mismatch + tamper cases. **[C1]**
 - [ ] `release.yml` reorg: `build-platform` matrix +
       `sign-platform-manifest` job + dependency on
       `build-native`/`build-cosmo` jobs + bootstrap check on
-      `HULL_PLATFORM_KEY` presence.
+      `HULL_PLATFORM_KEY` presence. Generates
+      `embedded_platform_sig.h` + `embedded_platform_hashes.h`. **[C2]**
 - [ ] `--no-verify-platform` flag on `hull build` + runtime.
-- [ ] `tool.platform_sig_get()` Lua binding + `build.lua`
+      `tool.platform_sig_get()` Lua binding + `build.lua`
       integration writing `package.sig.platform` with the verified
-      `(manifest + sig + arch_hash)`.
+      `(manifest + sig + arch_hash)`. **[C3]**
 - [ ] `hull verify` + `--verify-sig` runtime enforcement;
       hard-reject paths with the documented error messages.
-- [ ] E2E test: build app, mutate embedded `.a` bytes, expect
-      verify fails non-zero with specific message.
+      E2E test: build app, mutate embedded `.a` bytes, expect
+      verify fails non-zero with specific message. **[C4]**
+- [ ] Restore real `HL_PLATFORM_PUBKEY_HEX` (revert the v0.1.1
+      placeholder's hex value; keep the `#ifndef` guard). Update
+      `test_signature.c` to support `platform_kind` param so the
+      verify_startup unit test can emit `platform: null`. Update
+      `e2e_build.sh` Step 14 to add `--no-verify-platform` for the
+      developer-signed app path. **[C5]**
 - [ ] Audit pass (mirror v0.1.2): OOB defense on
       `hl_platform_sig_extract_for_arch`, constant-time SHA-256
       compare in the cross-check path, fsync/close on any new
