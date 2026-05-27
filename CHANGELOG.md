@@ -8,6 +8,10 @@ release-artifact layout).
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.1.3] — 2026-05-27
+
 ### Added
 
 - **Platform-sig chain end-to-end (v0.1.3).** The
@@ -82,6 +86,50 @@ release-artifact layout).
   canary was the placeholder integrity signal while the
   signed-manifest path was missing; v0.1.3's per-arch SHA-256s
   cover the same property without Makefile post-link gymnastics.
+
+### Fixed
+
+CI matrix repairs — four jobs that had been red since v0.1.2 went
+green during the v0.1.3 stabilization pass:
+
+- **Cosmopolitan (APE)** — test fixtures used `system("rm -rf ...")`
+  for cleanup, which Cosmo's toybox `rm` rejects (the `-r` flag fails
+  in any combined form: `-r`, `-rf`, `-fr`, `-Rf`). The failed cleanup
+  left tmpdirs intact and the next `mkdir` hit `EEXIST`, cascading-
+  failing the rest of the suite. Replaced with in-process
+  `nftw(FTW_DEPTH | FTW_PHYS)` recursive delete — POSIX, works on
+  Linux/macOS/cosmo uniformly, no flag-parsing dependency. Gated the
+  `_XOPEN_SOURCE` define on `__linux__` so the change doesn't hide
+  Darwin extensions on macOS.
+- **Static Analysis (scan-build + cppcheck)** — scan-build flagged
+  `agent/compute.c`'s `const char *platform = "unknown"` as a
+  dead-store on Linux x86_64 because subsequent `#ifdef` branches
+  reassigned it. Restructured as one `#if/#elif/#else` chain so
+  exactly one assignment runs per build. cppcheck flagged four false
+  positives — `agent/overview.c` `knownArgument`, three
+  `commands/tools.c` `knownConditionTrueFalse` on version-string
+  prefix-stripping — added suppressions for the defensive code
+  cppcheck couldn't model.
+- **Code Coverage** — `test_lua`'s link line referenced `$(PLEDGE_OBJS)`,
+  `$(BUILDDIR)/tool.o`, `$(BUILDDIR)/sandbox.o`, and several other
+  objects without listing them as prerequisites. Serial builds picked
+  them up via earlier test binaries' chains; the coverage and ASan
+  parallel builds didn't. Added explicit prereqs so make schedules
+  them unconditionally.
+- **MSan + UBSan** — vendor `*_CFLAGS` carried
+  `-fsanitize=memory,undefined`; UBSan flagged well-known
+  "technically UB but works on every target" patterns in
+  `tweetnacl` (left shift of negative values in field arithmetic)
+  and `quickjs` (function-pointer casts in `cutils`, signed-overflow
+  left shifts). Dropped `,undefined` from QJS/LUA/SQLITE/LOG/
+  SH_ARENA/SH_JSON/TWEETNACL/STB CFLAGS so vendor TUs get MSan
+  shadow tracking (the actual point of the job) but not UBSan.
+  Added MSan instrumentation to `MBEDTLS_CFLAGS` so MSan tracks
+  mbedtls writes to caller buffers (e.g. `mbedtls_sha256` →
+  caller-provided `digest[32]`); without it MSan reported every
+  subsequent read as use-of-uninitialized. Hull's own CFLAGS still
+  carry `-fsanitize=memory,undefined`, so Hull-code UBSan errors
+  still fail the build loudly.
 
 ## [0.1.2] — 2026-05-26
 
