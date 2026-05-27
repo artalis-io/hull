@@ -998,6 +998,161 @@ clean tag dance from v0.1.2 applies here too.
 
 ---
 
+## 3.1 Cosmo APE: tool-mode compiler invocation on Linux
+
+**Priority:** Medium. Discovered while gating v0.1.3 — the release
+workflow's platform-sig E2E smoke test passes on all three native
+arches (darwin-arm64, linux-x86_64, linux-aarch64) but had to be
+skipped for the Cosmopolitan APE build because `hull build` can't
+spawn a system compiler when run as a cosmo binary on Linux.
+
+**Symptom:**
+
+```
+/usr/bin/cc: error while loading shared libraries: libc.so.6:
+              failed to map segment from shared object
+/usr/bin/gcc: error while loading shared libraries: ...
+/usr/bin/clang: error while loading shared libraries: ...
+hull: compiler 'cosmocc' not found in PATH
+hull build: no C compiler available
+```
+
+Even with `--compiler cosmocc` and `/opt/cosmo/bin` on `$PATH`,
+hull's tool-mode sandbox (pledge/unveil polyfill provided by
+jart/cosmopolitan) restricts file-system access to a small allowlist
+that doesn't include the system loader paths needed by `cc`/`gcc`/
+`clang`, nor the cosmocc install location. The fork+exec succeeds
+but the child's dynamic loader can't map its dependencies.
+
+**Impact:**
+
+End-users running `hull-cosmo` on Linux can't run `hull build`
+(unless they bypass the sandbox, which we don't expose for tool
+mode). The cosmo binary is fine for `hull dev`, `hull test`,
+`hull <app>`, `hull update`, `hull tools install` — those don't
+spawn a system compiler. Only `hull build` is affected, and only
+when `hull-cosmo` is the binary doing the building.
+
+End-users have two workable paths today:
+
+1. Install a native hull (`hull-linux-x86_64` / `hull-linux-aarch64`)
+   for the platform doing the building, keep `hull-cosmo` for
+   distributing to mixed-OS targets.
+2. Build outside the sandbox manually (extract platform library +
+   invoke the compiler by hand).
+
+Neither is a great story for the "one binary for all OSes" cosmo
+promise.
+
+**Fix candidates** (one or more — design once we pick up the task):
+
+1. **Widen the tool-mode unveil set.** Add `/lib`, `/lib64`,
+   `/usr/lib`, `/usr/lib64`, and the `cosmocc` install dir
+   (`$HOME/.cosmocc/` and `/opt/cosmo/`) to the tool-mode allowlist.
+   The risk: a wider sandbox during `hull build` weakens the
+   capability story for build-time tooling. Possibly OK because the
+   build step is supposed to invoke a compiler.
+2. **Auto-detect `cosmocc` location.** `hl_compiler_select`'s system
+   candidates today are `cc, gcc, clang`. Add `cosmocc` and try a
+   few well-known install paths (`$HOME/.cosmocc/bin`,
+   `/opt/cosmo/bin`) before falling back to `$PATH`. Doesn't fix the
+   shared-library mmap issue for native compilers, but at least
+   lets `cosmocc` work.
+3. **Use embedded TinyCC on the cosmo binary too.** If TCC's
+   embedded codegen can target the cosmo runtime, `hull build` could
+   skip the system compiler entirely on cosmo. Requires investigating
+   whether the embedded TCC builds cleanly under cosmocc and produces
+   loadable APE/native output.
+4. **Run the cosmo-side E2E smoke test inside a chroot** that
+   doesn't apply the polyfill. Closes the CI gap without affecting
+   end-users.
+
+**Definition of done:**
+
+- `hull build --sign` works end-to-end from a `hull-cosmo` binary
+  on Linux, in the default sandbox, with the same `--verify-sig`
+  pass as the native builds.
+- Re-enable the cosmo case in `release.yml`'s "Platform-sig E2E
+  smoke test" step.
+
+---
+
+## 3.2 Auto-extract embedded `libhull_platform.a` for tool-mode commands
+
+**Priority:** Medium-High. The companion to §3.1 — both fall out of
+the same architectural gap.
+
+End-users installing a release binary via
+`curl -fsSL https://gethull.dev/install.sh | sh` get a hull binary
+with `libhull_platform.a` *embedded* (the `EMBED_PLATFORM=1` build
+flow). `hull build` knows how to extract the embedded archive to a
+tmpdir and feed it into the link step. But two other tool-mode
+commands hit a missing-file error because they don't:
+
+```
+$ hull eject
+hull eject: cannot find libhull_platform.a
+hint: run `make platform` first
+
+$ hull sign-platform --dir /some/dir/ key
+hull sign-platform: no platform libraries found in /some/dir/
+```
+
+The "run `make platform`" hint is only actionable for someone with
+the Hull source tree. End-users who installed via the release
+binary have only the `hull` executable — there's no make,
+no `vendor/`, no way to materialize the .a without rebuilding hull
+from scratch.
+
+**Impact:**
+
+- `hull eject` is unusable on installed release binaries. Eject's
+  whole purpose is "give me a self-contained scaffold I can build
+  from without hull" — exactly the audience that has only the
+  binary.
+- `hull sign-platform` (the v0.1.2 per-app developer-signed
+  platform layer) is unusable for the same reason. End-users who
+  want to ship signed apps with `hull build --sign` need to either
+  build hull from source or transplant a .a from somewhere.
+
+**Fix:**
+
+Both commands already have a clear extraction sink: the same
+embedded blob the `hl_embedded_platform_*` accessors expose to
+`hull build`. The fix is to call those accessors from
+`commands/eject.c` and `commands/sign_platform.c` (or their Lua
+stdlib equivalents), write the bytes to a tmpdir, and pass that
+path through to the existing logic. `build.lua` already does this
+pattern — it's just not factored into a shared helper that the
+other tool commands can reuse.
+
+Suggested factoring:
+
+- `hl_platform_lib_extract(tmpdir, &out_path)` in
+  `src/hull/build_assets.c` (where the embedded blob lives) —
+  writes `libhull_platform.a` (single-arch) or both cosmo arches to
+  `tmpdir/` and returns the path. Returns -1 if no platform is
+  embedded.
+- `stdlib/cli/lua/hull/eject.lua` calls this before scanning for
+  `libhull_platform.a`. Same for `stdlib/cli/lua/hull/sign_platform.lua`.
+
+Same blob, same trust chain (the embedded bytes are what
+sign-platform-manifest signed at release time), no new code paths
+through the sandbox.
+
+**Definition of done:**
+
+- `hull eject` works on an installed release binary, with no source
+  tree present.
+- `hull sign-platform` works the same way — produces a `platform.sig`
+  that `hull build --sign` accepts.
+- The "run `make platform` first" hint is replaced with the
+  extraction logic for binaries with embedded platforms; the hint
+  stays only for hulls built without `EMBED_PLATFORM=1` (where
+  there's genuinely no .a to extract).
+
+---
+
 ## 4. Background job queue (`hull.jobs`)
 
 **Priority:** Low — the existing transactional outbox + inbox patterns cover
