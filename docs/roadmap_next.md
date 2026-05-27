@@ -1153,6 +1153,100 @@ through the sandbox.
 
 ---
 
+## 3.3 Platform-sign chain follow-ups (rough edges)
+
+**Priority:** Low–Medium. The main chain works end-to-end and is
+CI-gated as of v0.1.3, so none of these block anything. Group them
+into one v0.1.4 cleanup batch alongside §3.1/§3.2.
+
+**1. Sandboxed `--verify-sig` smoke coverage.**
+
+The new platform-sig E2E smoke test in `release.yml` runs the
+output binary with `--no-sandbox -p 19888 ./app.lua` to avoid
+fighting the sandbox during CI. That means we've validated the
+signature chain works under `--verify-sig` *without* the runtime
+sandbox active. We haven't proven `--verify-sig` + full sandbox
+play nicely together on a release-built binary.
+
+Add a second variant of the smoke step that starts myapp with the
+sandbox on (default) and confirms the same `/` returns
+`{"ok":true}`. Catches any signature-chain code that accidentally
+needs paths/syscalls the sandbox blocks.
+
+**2. Gethull-key rotation story in `docs/security.md`.**
+
+`HL_PLATFORM_PUBKEY_HEX` is embedded into every hull binary at
+compile time. Today's `docs/security.md` describes the key but
+not what happens when it rotates (compromise; scheduled rotation;
+moving to a hardware-backed key). The implicit story is:
+
+  1. Generate new keypair offline.
+  2. Update `HL_PLATFORM_PUBKEY_HEX` in `include/hull/signature.h`,
+     update `GETHULL_DEV_PLATFORM_KEY` in `site/verify.html`, ship a
+     hull release. New release signs new manifests with the new key.
+  3. Old hull binaries keep working — they verify against the OLD
+     pubkey embedded in them, against the OLD signed manifests they
+     carry. Apps built with old hulls keep verifying.
+  4. New apps built with new hull verify against the new pubkey.
+  5. There is NO cross-validity: a new hull can't verify an old
+     app's gethull layer (different signing key). `--no-verify-platform`
+     is the documented escape for that case.
+
+This needs to be written down in `docs/security.md`, including the
+"what if someone publishes hull binaries claiming to be us with a
+key we control" scenario (release signature gates that — same
+HULL_RELEASE_KEY chain). One page; mostly documentation.
+
+**3. `hull verify --gethull-key <file>` parity in Lua.**
+
+`stdlib/js/hull/verify.js` accepts `--gethull-key <file>` to verify
+against an explicit pubkey (because the JS tool runtime can't reach
+the embedded `HL_PLATFORM_PUBKEY_HEX`). `stdlib/cli/lua/hull/verify.lua`
+relies entirely on `tool.platform_pubkey()` — no override. Add the
+same `--gethull-key` flag to the Lua verifier for symmetry:
+
+  - Use for offline auditing of a hull-signed app from a machine
+    with a different hull binary (or no hull at all, via the
+    browser verifier — which already accepts override).
+  - Use for verifying a fork's apps against the fork's pubkey
+    without rebuilding hull with `-DHL_PLATFORM_PUBKEY_HEX=…`.
+
+~30 lines of Lua plus a doc note.
+
+**4. Extend `tests/release_smoke.sh` to cover platform-sig.**
+
+The post-publish manual smoke today exercises `hull tools install
+wamrc` (release-sig path) but not `hull build --sign + --verify-sig`
+(platform-sig path). The reason was §3.2: an installed hull binary
+can't run `sign-platform` without an external .a. Once §3.2 lands
+and `sign-platform` works on installed binaries, extend
+`release_smoke.sh` with a platform-sig section:
+
+  ```sh
+  hull keygen dev
+  hull keygen plat
+  hull sign-platform --dir ~/.local/bin/ plat
+  hull build --sign dev.key -o /tmp/myapp some-tiny-app/
+  /tmp/myapp --verify-sig dev.pub --no-sandbox -p 19888 some-tiny-app/app.lua &
+  sleep 2
+  curl -fsS http://127.0.0.1:19888/ | grep ok
+  ```
+
+Same checks the CI smoke test runs, but post-publish against the
+actually-published binary. Catches any "the artifact uploaded
+isn't the artifact CI built" surprise.
+
+**Definition of done (collective):**
+
+- CI's platform-sig E2E smoke step has a sandboxed variant.
+- `docs/security.md` has a "Key rotation" subsection under §2.
+- `hull verify --gethull-key <file>` works in Lua, with a matching
+  `--help` line and a doc bullet in `docs/security.md §6.B`.
+- `tests/release_smoke.sh` exercises both the release-sig and
+  platform-sig paths post-publish.
+
+---
+
 ## 4. Background job queue (`hull.jobs`)
 
 **Priority:** Low — the existing transactional outbox + inbox patterns cover
