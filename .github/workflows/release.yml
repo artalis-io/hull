@@ -131,7 +131,12 @@ jobs:
 
       - name: Build canonical platform manifest
         # One line per arch: "<64-hex-sha256>  <arch>\n".
-        # Sorted by arch (LC_ALL=C) so the bytes are reproducible.
+        # Sort key: arch name (LC_ALL=C, second field). MUST match the
+        # arch_entry_cmp order in src/hull/platform_sig.c so the C
+        # builder and CI produce byte-identical manifests for the same
+        # input set — otherwise round-tripping through
+        # hl_platform_sig_build_manifest would yield a different SHA
+        # than the embedded blob.
         # Same format as hull.sha256; matches what
         # hl_release_io_find_checksum parses at runtime.
         run: |
@@ -152,7 +157,7 @@ jobs:
             sha256sum \
               platforms/platform-cosmo/libhull_platform.aarch64-cosmo.a \
               | awk '{print $1"  cosmo-aarch64"}'
-          } | LC_ALL=C sort > platform-manifest.txt
+          } | LC_ALL=C sort -k2,2 > platform-manifest.txt
           echo "--- platform-manifest.txt:"
           cat platform-manifest.txt
 
