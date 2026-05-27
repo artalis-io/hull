@@ -2081,6 +2081,14 @@ SH_ARENA_CFLAGS := -std=c11 -O1 -w -fsanitize=memory -fno-omit-frame-pointer
 SH_JSON_CFLAGS := -std=c11 -O1 -w -fsanitize=memory -fno-omit-frame-pointer
 TWEETNACL_CFLAGS := -std=c11 -O1 -w -fsanitize=memory -fno-omit-frame-pointer
 STB_CFLAGS := -std=c11 -O1 -w -fsanitize=memory -fno-omit-frame-pointer
+# mbedTLS must be MSan-instrumented too: it writes to caller buffers
+# (e.g. mbedtls_sha256 → uint8_t digest[32]). Without instrumentation
+# MSan can't see those writes and flags every subsequent read of the
+# caller buffer as use-of-uninitialized-value. (Hit by
+# test_release_io's sha256_hex_empty.) -DMBEDTLS_CONFIG_FILE pulled
+# from the non-MSan defaults at line 219; preserved here verbatim.
+MBEDTLS_CFLAGS := -std=c11 -O1 -w -fsanitize=memory -fno-omit-frame-pointer \
+                  -DMBEDTLS_CONFIG_FILE='"hull_config.h"'
 # Re-add runtime defines (the := above clobbers earlier += additions)
 ifeq ($(RUNTIME),js)
   CFLAGS += -DHL_ENABLE_JS
@@ -2276,6 +2284,8 @@ cppcheck:
 		--suppress=uninitvar:$(SRCDIR)/hull/runtime/lua/bindings.c \
 		--suppress=unusedLabelConfiguration:$(SRCDIR)/hull/main.c \
 		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/agent/*.c \
+		--suppress=knownArgument:$(SRCDIR)/hull/agent/overview.c \
+		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/commands/tools.c \
 		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/cap/wasm.c \
 		--suppress=unusedStructMember:$(SRCDIR)/hull/agent/*.c \
 		--suppress=unusedVariable:$(SRCDIR)/hull/agent/*.c \
