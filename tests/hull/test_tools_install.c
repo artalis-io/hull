@@ -1,3 +1,13 @@
+/* FTW_DEPTH / FTW_PHYS are XSI extensions to nftw; on glibc they're
+ * only declared when _XOPEN_SOURCE >= 500. macOS exposes them
+ * unconditionally AND uses _XOPEN_SOURCE to gate Darwin extensions
+ * the other way (defining it hides clock_gettime_nsec_np /
+ * CLOCK_UPTIME_RAW that utest.h needs), so this define has to stay
+ * Linux-only. */
+#if defined(__linux__) && !defined(_XOPEN_SOURCE)
+# define _XOPEN_SOURCE 700
+#endif
+
 /*
  * test_tools_install.c — Unit tests for the tool registry + path helpers.
  *
