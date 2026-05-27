@@ -6,8 +6,52 @@ on:
       - 'v*'
 
 jobs:
-  build-cosmo:
-    name: Build (Cosmopolitan APE)
+  # ────────────────────────────────────────────────────────────────────
+  # Stage 1: build the platform libraries (libhull_platform.a per arch).
+  # These artifacts feed into both sign-platform-manifest (which hashes
+  # them) and the hull-binary build jobs (which embed them). Splitting
+  # platform-build out of hull-build avoids the platform .a being
+  # rebuilt twice with potentially-different timestamps on different
+  # machines — sign-platform-manifest's manifest hash MUST match the .a
+  # bytes that build-native/build-cosmo embed, so the only way to
+  # guarantee bit-equality is to build the .a once and reuse it via
+  # GitHub Actions artifacts.
+  # ────────────────────────────────────────────────────────────────────
+
+  build-platform-native:
+    name: Build platform (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+          - name: darwin-arm64
+            os: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Write VERSION file
+        run: echo "${GITHUB_REF_NAME#v}" > VERSION
+
+      - name: Build platform library
+        run: make platform
+
+      - name: Upload libhull_platform.a
+        uses: actions/upload-artifact@v4
+        with:
+          name: platform-${{ matrix.name }}
+          path: build/libhull_platform.a
+
+  build-platform-cosmo:
+    name: Build platform (cosmo, multi-arch)
     runs-on: ubuntu-latest
 
     steps:
@@ -26,6 +70,178 @@ jobs:
       - name: Build platform (multi-arch)
         run: make platform-cosmo
 
+      - name: Upload cosmo platform archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: platform-cosmo
+          path: |
+            build/libhull_platform.x86_64-cosmo.a
+            build/libhull_platform.aarch64-cosmo.a
+
+  # ────────────────────────────────────────────────────────────────────
+  # Stage 2: build + sign the platform manifest. Generates the
+  # `embedded_platform_sig.h` header that gets baked into every hull
+  # binary in stage 3. Uses the previous stable hull (v0.1.2) to
+  # invoke `hull sign-release` for the Ed25519 signing — v0.1.2 hull
+  # is the most recent release; its sign-release subcommand is
+  # key-agnostic, so it signs whatever bytes we point it at with
+  # whichever secret we supply.
+  #
+  # Bootstrap check: hard-fail if HULL_PLATFORM_KEY is empty. This
+  # secret has been in the GH secrets since v0.1.0 (set when
+  # sign-platform was first wired); v0.1.3 is the first release that
+  # actually requires it at the workflow level.
+  # ────────────────────────────────────────────────────────────────────
+
+  sign-platform-manifest:
+    name: Sign platform manifest
+    runs-on: ubuntu-latest
+    needs: [build-platform-native, build-platform-cosmo]
+    env:
+      HULL_PLATFORM_KEY: ${{ secrets.HULL_PLATFORM_KEY }}
+      # Hull version used to invoke `hull sign-release`. Pinned to a
+      # known-good prior release so the bootstrap is deterministic.
+      # Update only when v0.1.2 stops being a usable signer.
+      HULL_BOOTSTRAP_VERSION: v0.1.2
+
+    steps:
+      - name: Bootstrap check
+        run: |
+          if [ -z "$HULL_PLATFORM_KEY" ]; then
+            echo "::error::HULL_PLATFORM_KEY is empty. v0.1.3+ requires"
+            echo "::error::it for the signed platform manifest. The secret"
+            echo "::error::has been provisioned since v0.1.0 — check the"
+            echo "::error::repo secrets configuration."
+            exit 1
+          fi
+
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: platform-*
+          path: platforms/
+
+      - name: Install hull ${{ env.HULL_BOOTSTRAP_VERSION }} (signer)
+        run: |
+          curl -fsSL --retry 3 \
+            "https://github.com/artalis-io/hull/releases/download/${HULL_BOOTSTRAP_VERSION}/hull-linux-x86_64" \
+            -o /tmp/hull-signer
+          chmod +x /tmp/hull-signer
+          /tmp/hull-signer version
+
+      - name: Build canonical platform manifest
+        # One line per arch: "<64-hex-sha256>  <arch>\n".
+        # Sorted by arch (LC_ALL=C) so the bytes are reproducible.
+        # Same format as hull.sha256; matches what
+        # hl_release_io_find_checksum parses at runtime.
+        run: |
+          set -eu
+          {
+            sha256sum \
+              platforms/platform-linux-x86_64/libhull_platform.a \
+              | awk '{print $1"  linux-x86_64"}'
+            sha256sum \
+              platforms/platform-linux-aarch64/libhull_platform.a \
+              | awk '{print $1"  linux-aarch64"}'
+            sha256sum \
+              platforms/platform-darwin-arm64/libhull_platform.a \
+              | awk '{print $1"  darwin-arm64"}'
+            sha256sum \
+              platforms/platform-cosmo/libhull_platform.x86_64-cosmo.a \
+              | awk '{print $1"  cosmo-x86_64"}'
+            sha256sum \
+              platforms/platform-cosmo/libhull_platform.aarch64-cosmo.a \
+              | awk '{print $1"  cosmo-aarch64"}'
+          } | LC_ALL=C sort > platform-manifest.txt
+          echo "--- platform-manifest.txt:"
+          cat platform-manifest.txt
+
+      - name: Sign platform manifest (Ed25519)
+        run: |
+          set -eu
+          umask 077
+          printf '%s\n' "$HULL_PLATFORM_KEY" > /tmp/platform.key
+          # hull sign-release writes <input>.sig — works for any text
+          # manifest, not just hull.sha256. Same signing primitive.
+          /tmp/hull-signer sign-release platform-manifest.txt --key /tmp/platform.key
+          rm -f /tmp/platform.key
+          test -s platform-manifest.txt.sig
+          echo "--- platform-manifest.txt.sig:"
+          cat platform-manifest.txt.sig
+
+      - name: Generate embedded_platform_sig.h
+        # xxd emits "unsigned char <name>[] = { ... };" and
+        # "unsigned int <name>_len = ...;". The -n flag sets <name>;
+        # we use the exact symbol names the source expects (see
+        # src/hull/embedded_platform_sig.c).
+        run: |
+          set -eu
+          mkdir -p build
+          {
+            echo '/* Auto-generated by .github/workflows/release.yml */'
+            echo '/* sign-platform-manifest step. Do not edit. */'
+            xxd -i -n hl_embedded_platform_sig_manifest \
+                platform-manifest.txt
+            xxd -i -n hl_embedded_platform_sig_signature \
+                platform-manifest.txt.sig
+          } > build/embedded_platform_sig.h
+          echo "--- embedded_platform_sig.h ($(wc -c < build/embedded_platform_sig.h) bytes):"
+          head -20 build/embedded_platform_sig.h
+          echo "..."
+
+      - name: Upload signed manifest header
+        uses: actions/upload-artifact@v4
+        with:
+          name: embedded-platform-sig
+          path: build/embedded_platform_sig.h
+
+  # ────────────────────────────────────────────────────────────────────
+  # Stage 3: build hull binaries with the signed manifest embedded.
+  # These jobs DOWNLOAD their respective libhull_platform.a from stage
+  # 1's artifacts (rather than rebuilding) — guarantees the embedded .a
+  # bytes match what sign-platform-manifest hashed. They also download
+  # the signed manifest header so HL_EMBED_PLATFORM_SIG gets defined
+  # and embedded_platform_sig.c links the real signed blob.
+  # ────────────────────────────────────────────────────────────────────
+
+  build-cosmo:
+    name: Build (Cosmopolitan APE)
+    runs-on: ubuntu-latest
+    needs: [build-platform-cosmo, sign-platform-manifest]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Write VERSION file
+        run: echo "${GITHUB_REF_NAME#v}" > VERSION
+
+      - name: Install cosmocc
+        run: |
+          COSMOCC_DIR=/opt/cosmo make fetch-cosmocc
+          echo "/opt/cosmo/bin" >> "$GITHUB_PATH"
+
+      - name: Download cosmo platform archives
+        uses: actions/download-artifact@v4
+        with:
+          name: platform-cosmo
+          path: build/
+
+      - name: Download signed manifest header
+        uses: actions/download-artifact@v4
+        with:
+          name: embedded-platform-sig
+          path: build/
+
+      - name: Mark platform archives fresh
+        # make's hull-link rule has libhull_platform.*.a as prereqs.
+        # The downloaded .a files have a stale mtime relative to source
+        # changes from `actions/checkout`. Touch so make doesn't try to
+        # rebuild — we want to embed the EXACT bytes that
+        # sign-platform-manifest hashed.
+        run: touch build/libhull_platform.*.a
+
       - name: Build hull (cosmo APE)
         run: make CC=cosmocc EMBED_PLATFORM=cosmo
 
@@ -43,6 +259,7 @@ jobs:
   build-native:
     name: Build (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
+    needs: [build-platform-native, sign-platform-manifest]
 
     strategy:
       fail-fast: false
@@ -66,16 +283,27 @@ jobs:
       - name: Write VERSION file
         run: echo "${GITHUB_REF_NAME#v}" > VERSION
 
-      - name: Build platform library
-        run: make platform
+      - name: Download libhull_platform.a (this arch)
+        uses: actions/download-artifact@v4
+        with:
+          name: platform-${{ matrix.name }}
+          path: build/
+
+      - name: Download signed manifest header
+        uses: actions/download-artifact@v4
+        with:
+          name: embedded-platform-sig
+          path: build/
+
+      - name: Mark platform archive fresh
+        # See same step in build-cosmo for rationale.
+        run: touch build/libhull_platform.a
 
       - name: Build hull with embedded platform
         # EMBED_PLATFORM=1 xxd's libhull_platform.a into the binary so
         # `hull build` works on end-user machines that don't have hull
-        # source. Without this, hull doctor on a freshly installed
-        # release reports `Platform library: embedded no` and refuses
-        # to build apps. Cosmo job above does the same thing via
-        # `EMBED_PLATFORM=cosmo`.
+        # source. The .a is the one sign-platform-manifest hashed —
+        # touched in the previous step so make doesn't try to rebuild.
         run: make EMBED_PLATFORM=1
 
       - name: Smoke-test version + platform

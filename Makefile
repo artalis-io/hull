@@ -1000,6 +1000,26 @@ TOOLS_INSTALL_OBJ := $(BUILDDIR)/tools_install.o
 # (find_checksum). Always built — verify path uses it on every signed
 # app, regardless of HL_ENABLE_HTTP_CLIENT.
 PLATFORM_SIG_OBJ := $(BUILDDIR)/platform_sig.o
+# Accessor for the embedded signed platform-sig blob. CI's
+# sign-platform-manifest job emits the header it includes; local
+# builds get a placeholder that signals "no embedded blob" via the
+# accessor's -1 return. NOT in PLATFORM_OBJS — apps don't need the
+# embedded blob (they carry their own copy in package.sig.platform);
+# only the hull binary itself reads it.
+EMBEDDED_PLATFORM_SIG_OBJ := $(BUILDDIR)/embedded_platform_sig.o
+EMBEDDED_PLATFORM_SIG_H   := $(BUILDDIR)/embedded_platform_sig.h
+# Auto-detect whether the real (CI-signed) header is present. If the
+# file exists AND is non-trivial (>1 KB, since real signed blob runs
+# ~hundreds of bytes per arch + sig), enable HL_EMBED_PLATFORM_SIG.
+# Otherwise the placeholder accessor short-circuits.
+ifneq ($(wildcard $(EMBEDDED_PLATFORM_SIG_H)),)
+HL_EMBED_PLATFORM_SIG := $(shell test $$(wc -c < $(EMBEDDED_PLATFORM_SIG_H) 2>/dev/null || echo 0) -gt 1024 && echo 1 || echo 0)
+else
+HL_EMBED_PLATFORM_SIG := 0
+endif
+ifeq ($(HL_EMBED_PLATFORM_SIG),1)
+CFLAGS += -DHL_EMBED_PLATFORM_SIG
+endif
 # test_runner.c uses KlRouter to dispatch in-process test requests —
 # server-only.
 ifeq ($(HL_ENABLE_HTTP_SERVER),0)
@@ -1411,6 +1431,10 @@ all: $(BUILDDIR)/hull
 # Platform static library — everything except entry.o and build_assets.o
 # Used by `hull build` to produce standalone app binaries.
 # Exports hull_main() (subcommand dispatch + server logic).
+# NOTE: $(EMBEDDED_PLATFORM_SIG_OBJ) is intentionally NOT in
+# PLATFORM_OBJS. The signed manifest is hull-binary-level metadata;
+# apps built via `hull build` carry their own copy in
+# `package.sig.platform`, not as embedded bytes inside the .a.
 PLATFORM_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(CACERT_OBJ) $(APP_CONTEXT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) \
 	$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) \
 	$(COMPILER_OBJ) $(COMPILER_TCC_OBJ)
@@ -1538,8 +1562,8 @@ $(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H)
 endif
 
 # Hull binary
-$(BUILDDIR)/hull: $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(CACERT_OBJ) $(APP_CONTEXT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(COMPILER_TCC_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB)
-	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(CACERT_OBJ) $(APP_CONTEXT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(COMPILER_TCC_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) \
+$(BUILDDIR)/hull: $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(CACERT_OBJ) $(APP_CONTEXT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(COMPILER_TCC_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB)
+	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(CACERT_OBJ) $(APP_CONTEXT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(COMPILER_TCC_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) \
 		$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB) $(WGPU_LIB) $(WGPU_FRAMEWORKS) -lm -lpthread
 
 # Capability sources
@@ -1649,6 +1673,38 @@ $(TOOLS_INSTALL_OBJ): $(SRCDIR)/hull/tools_install.c $(INCDIR)/hull/tools_instal
 # Platform manifest builder + signer + verifier + per-arch extractor.
 # Var defined earlier (near TOOLS_INSTALL_OBJ) so PLATFORM_OBJS sees it.
 $(PLATFORM_SIG_OBJ): $(SRCDIR)/hull/platform_sig.c $(INCDIR)/hull/platform_sig.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+# Embedded platform-sig accessor. CI's sign-platform-manifest job
+# generates the real header before this rule runs; locally we generate
+# a placeholder so the build doesn't fail. The placeholder defines
+# zero-length arrays + matching length vars; the accessor's
+# `len == 0` check (via the absent HL_EMBED_PLATFORM_SIG macro) is
+# what actually short-circuits — the symbols just have to compile.
+#
+# Note the lack of a SOURCE prereq — make never RErefreshes the
+# placeholder. Once generated, the file stays. CI overwrites it
+# wholesale BEFORE invoking make, so the placeholder is bypassed
+# in release builds.
+$(EMBEDDED_PLATFORM_SIG_H): | $(BUILDDIR)
+	@if [ -f $@ ]; then \
+	    echo "embedded_platform_sig: keeping existing $@ ($$(wc -c < $@) bytes)"; \
+	else \
+	    echo "embedded_platform_sig: generating placeholder $@"; \
+	    printf '%s\n' \
+	        '/* Auto-generated placeholder. CI overwrites this with the' \
+	        ' * signed manifest+sig from sign-platform-manifest. The' \
+	        ' * symbols exist so embedded_platform_sig.c compiles; the' \
+	        ' * absent HL_EMBED_PLATFORM_SIG macro makes the accessor' \
+	        ' * return -1 (no embedded blob present). */' \
+	        'unsigned char hl_embedded_platform_sig_manifest[1] = { 0 };' \
+	        'unsigned int  hl_embedded_platform_sig_manifest_len = 0;' \
+	        'unsigned char hl_embedded_platform_sig_signature[1] = { 0 };' \
+	        'unsigned int  hl_embedded_platform_sig_signature_len = 0;' \
+	        > $@; \
+	fi
+
+$(EMBEDDED_PLATFORM_SIG_OBJ): $(SRCDIR)/hull/embedded_platform_sig.c $(INCDIR)/hull/embedded_platform_sig.h $(EMBEDDED_PLATFORM_SIG_H) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Shared test runner (commands/test.c + agent_lib::test)
