@@ -1948,15 +1948,24 @@ $(BUILDDIR)/test_dispatch: $(TESTDIR)/hull/commands/test_dispatch.c $(CMD_OBJS) 
 		$(KEEL_LIB) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(WGPU_LIB) $(WGPU_FRAMEWORKS) -lm -lpthread
 
 # Signature verification test — needs crypto + app_entries_default + vfs.
-# Uses the production signature.o; the all-zeros placeholder in
-# HL_PLATFORM_PUBKEY_HEX activates the pinning bypass that the test
-# relies on. When the platform-sig chain is fully wired
-# (roadmap_next.md §2) and the real pubkey is embedded, this rule
-# should grow a -DHL_PLATFORM_PUBKEY_HEX="\"0...0\"" override so the
-# test's locally-generated platform keypair isn't rejected by pinning.
-$(BUILDDIR)/test_signature: $(TESTDIR)/hull/test_signature.c $(SIG_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(CACERT_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(TEST_COMMON_DEPS) | $(BUILDDIR)
+# Override HL_PLATFORM_PUBKEY_HEX to the all-zeros placeholder for this
+# test only: the fixture's create_test_package_sig generates a fresh
+# local platform keypair on every run, so the production (gethull.dev)
+# pinning check at signature.c §5 would always reject it. Both §5
+# (per-app platform layer) and §5b (v0.1.3 gethull layer) treat the
+# all-zeros sentinel as "no pinned key, skip pinning", which is exactly
+# what the test wants. The override must apply to signature.c, not just
+# the test TU, so we compile a test-specific signature object.
+# Each test consumer also passes no_verify_platform=1 to
+# hl_verify_startup as belt-and-suspenders.
+$(BUILDDIR)/signature_testpk.o: src/hull/signature.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) \
+		'-DHL_PLATFORM_PUBKEY_HEX="0000000000000000000000000000000000000000000000000000000000000000"' \
+		-c -o $@ $<
+
+$(BUILDDIR)/test_signature: $(TESTDIR)/hull/test_signature.c $(BUILDDIR)/signature_testpk.o $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(CACERT_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(SIG_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) \
+		$(BUILDDIR)/signature_testpk.o $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) \
 		$(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(CACERT_OBJ) \
 		$(APP_ENTRIES_DEFAULT_OBJ) $(TEST_COMMON_LIBS)
 

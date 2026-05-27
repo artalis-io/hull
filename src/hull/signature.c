@@ -640,29 +640,20 @@ int hl_verify_startup(const char *pubkey_path, const char *entry_point,
         }
     }
 
-    /* 5. Verify platform signature if present */
+    /* 5. v0.1.2 per-app platform layer (self-consistency only).
+     *
+     * The developer's `hull sign-platform` workflow signed the
+     * platforms object with whatever key the developer chose locally.
+     * We verify that signature is self-consistent (sig matches
+     * platform.public_key) but no longer pin platform.public_key
+     * against HL_PLATFORM_PUBKEY_HEX — that pinning moved to §5b
+     * (v0.1.3 gethull layer), which uses a signed manifest the gethull
+     * release pipeline produces. Forks and self-signing devs continue
+     * to work without conflicting with the upstream gethull pubkey. */
     if (sig.platform.signature_hex && sig.platform.public_key_hex) {
-        /* Decode platform public key */
         uint8_t platform_pk[32];
         if (strlen(sig.platform.public_key_hex) == 64 &&
             hex_decode(sig.platform.public_key_hex, 64, platform_pk, 32) == 0) {
-
-            /* Pin against compiled-in platform key */
-            uint8_t expected_pk[32];
-            if (hex_decode(HL_PLATFORM_PUBKEY_HEX, 64, expected_pk, 32) == 0) {
-                /* All-zeros means placeholder — skip pinning check */
-                int all_zero = 1;
-                for (int i = 0; i < 32; i++) {
-                    if (expected_pk[i] != 0) { all_zero = 0; break; }
-                }
-                if (!all_zero &&
-                    memcmp(platform_pk, expected_pk, 32) != 0) {
-                    log_error("[sig] platform key does not match compiled-in key");
-                    hl_sig_free(&sig);
-                    return -1;
-                }
-            }
-
             if (hl_sig_verify_platform(&sig, platform_pk) != 0) {
                 log_error("[sig] platform signature verification failed");
                 hl_sig_free(&sig);

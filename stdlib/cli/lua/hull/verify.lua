@@ -155,39 +155,36 @@ local function main()
         issues = issues + 1
     end
 
-    -- ── Platform layer verification ────────────────────────────────
+    -- ── v0.1.2 per-app platform layer (self-consistency only) ──────
+    -- The developer's `hull sign-platform` step produced this block
+    -- with their own platform key. We verify the signature is
+    -- self-consistent (covers the platforms object with the embedded
+    -- pubkey) but do NOT pin against any upstream key — that pinning
+    -- moved to the v0.1.3 gethull layer above, which uses a signed
+    -- manifest from the gethull release pipeline. --platform-key is
+    -- still honored as an explicit override for forks that want to
+    -- compare against an expected developer pubkey.
     if sig.platform and sig.platform.signature and sig.platform.public_key then
         local platform_key_hex = read_key(opts.platform_key)
-        if not platform_key_hex or
-           platform_key_hex == GETHULL_DEV_PLATFORM_KEY_PLACEHOLDER then
-            tool.stderr("Platform layer: SKIPPED — no platform key provided\n")
-            tool.stderr("  hint: pass --platform-key <path-to-gethull.dev.pub> " ..
-                        "to verify the platform signature\n")
-            issues = issues + 1
-            platform_key_hex = nil
-        end
-
-        -- Check if platform key matches
-        if platform_key_hex and sig.platform.public_key == platform_key_hex then
-            -- Verify platform signature
-            local plat_payload = json.encode(sig.platform.platforms)
-            local plat_ok = crypto.ed25519_verify(plat_payload,
-                sig.platform.signature, sig.platform.public_key)
-
-            if plat_ok then
-                print("Platform layer: VALID (signed by Hull Platform)")
-            else
-                tool.stderr("Platform layer: FAILED — signature invalid\n")
-                issues = issues + 1
-            end
-        elseif platform_key_hex then
-            tool.stderr("Platform layer: WARNING — key mismatch (expected " ..
-                platform_key_hex:sub(1, 16) .. "..., got " ..
-                sig.platform.public_key:sub(1, 16) .. "...)\n")
+        if platform_key_hex and platform_key_hex ~=
+                GETHULL_DEV_PLATFORM_KEY_PLACEHOLDER and
+                sig.platform.public_key ~= platform_key_hex then
+            tool.stderr("Platform layer: WARNING — key does not match " ..
+                "--platform-key (expected " .. platform_key_hex:sub(1, 16) ..
+                "..., got " .. sig.platform.public_key:sub(1, 16) .. "...)\n")
             issues = issues + 1
         end
 
-        -- Show platform architectures
+        local plat_payload = json.encode(sig.platform.platforms)
+        local plat_ok = crypto.ed25519_verify(plat_payload,
+            sig.platform.signature, sig.platform.public_key)
+        if plat_ok then
+            print("Platform layer: VALID (self-consistent)")
+        else
+            tool.stderr("Platform layer: FAILED — signature invalid\n")
+            issues = issues + 1
+        end
+
         if sig.platform.platforms then
             local archs = {}
             for arch, _ in pairs(sig.platform.platforms) do

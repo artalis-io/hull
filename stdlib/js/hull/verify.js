@@ -111,29 +111,22 @@ if (noVerifyPlatform) {
     issues++;
 }
 
-// ── Platform layer verification ────────────────────────────────────
+// ── v0.1.2 per-app platform layer (self-consistency only) ──────────
+// The pinning role moved to the v0.1.3 gethull layer above.
 if (sig.platform?.signature && sig.platform?.public_key) {
-    let platformKeyHex = readKey(platformKeySource);
-    if (!platformKeyHex || platformKeyHex === GETHULL_DEV_PLATFORM_KEY_PLACEHOLDER) {
-        tool.stderr("Platform layer: SKIPPED — no platform key provided\n");
-        tool.stderr("  hint: pass --platform-key <path-to-gethull.dev.pub> " +
-                    "to verify the platform signature\n");
+    const platformKeyHex = readKey(platformKeySource);
+    if (platformKeyHex && platformKeyHex !== GETHULL_DEV_PLATFORM_KEY_PLACEHOLDER &&
+        sig.platform.public_key !== platformKeyHex) {
+        tool.stderr("Platform layer: WARNING — key does not match --platform-key\n");
         issues++;
-        platformKeyHex = null;
     }
 
-    if (platformKeyHex && sig.platform.public_key === platformKeyHex) {
-        const platPayload = JSON.stringify(sig.platform.platforms);
-        const platOk = ed25519Verify(platPayload, sig.platform.signature, sig.platform.public_key);
-
-        if (platOk) {
-            console.log("Platform layer: VALID (signed by Hull Platform)");
-        } else {
-            tool.stderr("Platform layer: FAILED — signature invalid\n");
-            issues++;
-        }
-    } else if (platformKeyHex) {
-        tool.stderr(`Platform layer: WARNING — key mismatch\n`);
+    const platPayload = JSON.stringify(sig.platform.platforms);
+    const platOk = ed25519Verify(platPayload, sig.platform.signature, sig.platform.public_key);
+    if (platOk) {
+        console.log("Platform layer: VALID (self-consistent)");
+    } else {
+        tool.stderr("Platform layer: FAILED — signature invalid\n");
         issues++;
     }
 

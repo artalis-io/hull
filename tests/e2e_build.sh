@@ -289,7 +289,7 @@ fi
 echo ""
 echo "=== Step 7: hull verify (valid signature) ==="
 
-VERIFY_OUT=$("$HULL" verify --platform-key "$WORKDIR/developer.pub" "$WORKDIR/myapp" 2>&1); RC=$?
+VERIFY_OUT=$("$HULL" verify --no-verify-platform --platform-key "$WORKDIR/developer.pub" "$WORKDIR/myapp" 2>&1); RC=$?
 check_exit "verify exits 0" 0 $RC
 check_contains "verify reports OK" "$VERIFY_OUT" "OK"
 check_contains "verify reports valid" "$VERIFY_OUT" "all checks passed"
@@ -320,7 +320,7 @@ cp "$WORKDIR/myapp/app.lua" "$WORKDIR/myapp/app.lua.bak"
 # Tamper with the file
 echo '-- tampered' >> "$WORKDIR/myapp/app.lua"
 
-VERIFY_OUT=$("$HULL" verify --platform-key "$WORKDIR/developer.pub" "$WORKDIR/myapp" 2>&1); RC=$?
+VERIFY_OUT=$("$HULL" verify --no-verify-platform --platform-key "$WORKDIR/developer.pub" "$WORKDIR/myapp" 2>&1); RC=$?
 check_exit "verify detects tamper (exit 1)" 1 $RC
 check_contains "verify reports FAILED" "$VERIFY_OUT" "FAILED"
 check_contains "verify mentions modified files" "$VERIFY_OUT" "Modified files"
@@ -329,7 +329,7 @@ check_contains "verify mentions modified files" "$VERIFY_OUT" "Modified files"
 mv "$WORKDIR/myapp/app.lua.bak" "$WORKDIR/myapp/app.lua"
 
 # Verify it passes again after restore
-VERIFY_OUT=$("$HULL" verify --platform-key "$WORKDIR/developer.pub" "$WORKDIR/myapp" 2>&1); RC=$?
+VERIFY_OUT=$("$HULL" verify --no-verify-platform --platform-key "$WORKDIR/developer.pub" "$WORKDIR/myapp" 2>&1); RC=$?
 check_exit "verify passes after restore" 0 $RC
 
 # ── Step 10: Multi-file app ──────────────────────────────────────────
@@ -385,7 +385,7 @@ fi
 stop_server
 
 # Verify multi-file signature
-VERIFY_OUT=$("$HULL" verify --platform-key "$WORKDIR/developer.pub" "$WORKDIR/multiapp" 2>&1); RC=$?
+VERIFY_OUT=$("$HULL" verify --no-verify-platform --platform-key "$WORKDIR/developer.pub" "$WORKDIR/multiapp" 2>&1); RC=$?
 check_exit "multi-file verify passes" 0 $RC
 
 # Inspect multi-file app (manifest may be nil if app has require() deps)
@@ -481,7 +481,7 @@ echo ""
 echo "=== Step 14: --verify-sig ==="
 
 # Start signed app with --verify-sig → should start and serve
-"$WORKDIR/myapp/myapp" --verify-sig "$WORKDIR/developer.pub" -p 19872 "$WORKDIR/myapp/app.lua" >/dev/null 2>&1 &
+"$WORKDIR/myapp/myapp" --verify-sig "$WORKDIR/developer.pub" --no-verify-platform -p 19872 "$WORKDIR/myapp/app.lua" >/dev/null 2>&1 &
 SERVER_PID=$!
 
 if wait_for_server 19872; then
@@ -500,7 +500,7 @@ stop_server
 cp "$WORKDIR/myapp/package.sig" "$WORKDIR/myapp/package.sig.bak"
 echo "corrupted" > "$WORKDIR/myapp/package.sig"
 
-"$WORKDIR/myapp/myapp" --verify-sig "$WORKDIR/developer.pub" -p 19873 "$WORKDIR/myapp/app.lua" >/dev/null 2>&1 &
+"$WORKDIR/myapp/myapp" --verify-sig "$WORKDIR/developer.pub" --no-verify-platform -p 19873 "$WORKDIR/myapp/app.lua" >/dev/null 2>&1 &
 TPID=$!
 sleep 2
 
@@ -524,7 +524,7 @@ mv "$WORKDIR/myapp/package.sig.bak" "$WORKDIR/myapp/package.sig"
 
 # Test with wrong key → should refuse
 "$HULL" keygen "$WORKDIR/wrong_key" >/dev/null 2>&1
-"$WORKDIR/myapp/myapp" --verify-sig "$WORKDIR/wrong_key.pub" -p 19874 "$WORKDIR/myapp/app.lua" >/dev/null 2>&1 &
+"$WORKDIR/myapp/myapp" --verify-sig "$WORKDIR/wrong_key.pub" --no-verify-platform -p 19874 "$WORKDIR/myapp/app.lua" >/dev/null 2>&1 &
 TPID=$!
 sleep 2
 
@@ -539,6 +539,36 @@ else
         pass "--verify-sig refuses wrong key (exit $TEXIT)"
     else
         fail "--verify-sig should exit non-zero for wrong key"
+    fi
+fi
+
+# ── Step 14b: --verify-sig strict default rejects missing gethull layer ──
+#
+# Apps built by a dev hull (no embedded signed manifest) cannot carry a
+# package.sig.platform.gethull block. With a real HL_PLATFORM_PUBKEY_HEX
+# baked in, --verify-sig must refuse such an app unless the operator
+# explicitly opts out with --no-verify-platform. This test confirms the
+# strict path actually fires — without it, the v0.1.3 enforcement is
+# effectively silent and provides no protection.
+
+echo ""
+echo "=== Step 14b: --verify-sig strict default (no gethull → reject) ==="
+
+"$WORKDIR/myapp/myapp" --verify-sig "$WORKDIR/developer.pub" -p 19876 "$WORKDIR/myapp/app.lua" >/dev/null 2>&1 &
+TPID=$!
+sleep 2
+
+if kill -0 "$TPID" 2>/dev/null; then
+    fail "--verify-sig strict default should refuse app without gethull block"
+    kill "$TPID" 2>/dev/null
+    wait "$TPID" 2>/dev/null
+else
+    wait "$TPID" 2>/dev/null
+    TEXIT=$?
+    if [ "$TEXIT" -ne 0 ]; then
+        pass "--verify-sig strict default refuses missing gethull (exit $TEXIT)"
+    else
+        fail "--verify-sig strict default should exit non-zero"
     fi
 fi
 
