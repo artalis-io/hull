@@ -281,26 +281,12 @@ jobs:
           done
           [ "$fail" = 0 ] || exit 1
 
-      - name: Pin downloaded .a mtime to the far future
-        # Make's $(PLATFORM_LIB) rule has source prereqs (PLATFORM_OBJS,
-        # CANARY_OBJ); if any of them are newer than the .a (and
-        # actions/checkout makes source files current-time), make
-        # rebuilds the .a from scratch and drifts away from what
-        # sign-platform-manifest signed. Touching to year 2030 makes
-        # the downloaded .a unambiguously the freshest input — make
-        # won't rebuild it.
-        #
-        # Note: `make -o <file>` (--assume-old) was tried first but
-        # is too aggressive: it also blocks dependents (the
-        # embedded_platform_a.h header xxd'd from .a) from
-        # regenerating, leaving build_assets.c with undefined
-        # `hl_embedded_platform_a` symbols. The touch approach lets
-        # make's normal dep propagation work.
-        run: |
-          touch -t 203012312359 build/libhull_platform.x86_64-cosmo.a \
-                                build/libhull_platform.aarch64-cosmo.a
-
       - name: Build hull (cosmo APE)
+        # No TRUST_PLATFORM_LIB needed for cosmo: the .a's at
+        # build/libhull_platform.{x86_64,aarch64}-cosmo.a have no
+        # build rule in the Makefile (they're produced by the
+        # .PHONY platform-cosmo target during native development).
+        # Make treats them as leaf inputs — won't rebuild.
         run: make CC=cosmocc EMBED_PLATFORM=cosmo
 
       - name: Smoke-test version
@@ -329,7 +315,12 @@ jobs:
           app.get("/", function(req, res) res:json({ok=true}) end)
           LUA
           "${GITHUB_WORKSPACE}/build/hull" keygen dev
-          "${GITHUB_WORKSPACE}/build/hull" build --sign dev.key -o myapp .
+          # --compiler cosmocc: the cosmo hull's auto-compiler-select
+          # (hl_compiler_select in src/hull/compiler.c) tries tcc → cc
+          # → gcc → clang, none of which work as cosmo's compiler.
+          # Be explicit; cosmocc is in PATH from the earlier install
+          # step.
+          "${GITHUB_WORKSPACE}/build/hull" build --sign dev.key --compiler cosmocc -o myapp .
           test -x myapp
           ./myapp --verify-sig dev.pub --no-sandbox -p 19888 ./app.lua &
           SVR=$!
@@ -411,17 +402,18 @@ jobs:
           fi
           echo "✓ ${{ matrix.name }} .a SHA matches signed manifest: $actual"
 
-      - name: Pin downloaded .a mtime to the far future
-        # See same step in build-cosmo. Touch the downloaded .a to
-        # year 2030 so make never decides its source prereqs are
-        # "newer" and rebuilds it from scratch (which would drift
-        # from what sign-platform-manifest signed). Dependents like
-        # embedded_platform_a.h still regenerate normally — only the
-        # .a itself is pinned.
-        run: touch -t 203012312359 build/libhull_platform.a
-
       - name: Build hull with embedded platform
-        run: make EMBED_PLATFORM=1
+        # TRUST_PLATFORM_LIB=1 short-circuits $(PLATFORM_LIB)'s
+        # rebuild rule in the Makefile — make treats the downloaded
+        # .a as a pristine leaf input, never re-archives it from
+        # source. The downloaded .a's bytes are the ones
+        # sign-platform-manifest hashed, and they get embedded as-is.
+        # Without this, make sees PLATFORM_OBJS / CANARY_OBJ as
+        # newer than the .a and rebuilds it from scratch; the
+        # rebuilt bytes differ from the signed manifest entry on a
+        # different GH Actions VM (non-reproducible toolchain
+        # artifacts), breaking the gethull cross-check.
+        run: make EMBED_PLATFORM=1 TRUST_PLATFORM_LIB=1
 
       - name: Smoke-test version + platform
         run: |

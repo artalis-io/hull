@@ -1459,6 +1459,22 @@ $(CANARY_C): $(PLATFORM_OBJS) | $(BUILDDIR)
 $(CANARY_OBJ): $(CANARY_C) | $(BUILDDIR)
 	$(CC) -std=c11 -O2 -w -c -o $@ $<
 
+# When TRUST_PLATFORM_LIB=1, treat $(PLATFORM_LIB) as a pre-built
+# leaf — make doesn't re-link it from source prereqs. This is the
+# release-time path: CI downloads the .a artifact that
+# sign-platform-manifest hashed and we MUST embed those exact bytes
+# (touch+mtime tricks aren't reliable enough — they didn't survive
+# downstream make logic across multiple attempts). TRUST_PLATFORM_LIB
+# bypasses the rebuild rule entirely; the .a must already exist on
+# disk or the build fails with a clear error.
+#
+# Local devs and CI's normal `make` invocations leave it unset and
+# get the usual rebuild-from-source behavior.
+ifeq ($(TRUST_PLATFORM_LIB),1)
+$(PLATFORM_LIB): | $(BUILDDIR)
+	@test -f $@ || (echo "ERROR: TRUST_PLATFORM_LIB=1 but $@ is missing"; exit 1)
+	@echo "$@: trusting pre-built artifact (TRUST_PLATFORM_LIB=1)"
+else
 $(PLATFORM_LIB): $(PLATFORM_OBJS) $(CANARY_OBJ) $(KEEL_LIB) | $(BUILDDIR)
 	@rm -f $@
 	$(AR) rcs $@ $(PLATFORM_OBJS) $(CANARY_OBJ)
@@ -1470,6 +1486,7 @@ $(PLATFORM_LIB): $(PLATFORM_OBJS) $(CANARY_OBJ) $(KEEL_LIB) | $(BUILDDIR)
 		rm -rf $$tmpdir
 	@# Record the CC used so hull build can auto-detect
 	@echo "$(CC)" > $(BUILDDIR)/platform_cc
+endif
 
 platform: $(PLATFORM_LIB)
 
