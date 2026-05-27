@@ -25,6 +25,9 @@
 #include "hull/build_assets.h"
 #include "hull/compiler.h"
 #include "hull/tools_install.h"
+#include "hull/embedded_platform_sig.h"
+#include "hull/platform_sig.h"
+#include "hull/release_io.h"
 
 #include <signal.h>
 #include <sys/wait.h>
@@ -576,11 +579,100 @@ static int l_tool_find_tool(lua_State *L)
     return 1;
 }
 
+/* ── tool.platform_name() → "darwin-arm64" | "linux-x86_64" | ... ──
+ *
+ * Returns the running hull's platform identifier, matching the
+ * arch-name format used in the embedded signed platform manifest
+ * and in `hl_release_io_platform()`. Used by build.lua to look up
+ * the expected SHA-256 for THIS arch when cross-checking the
+ * libhull_platform.a it's about to embed in an app.
+ *
+ * Returns "cosmo" for cosmocc binaries (the manifest stores per-arch
+ * entries under "cosmo-x86_64" / "cosmo-aarch64"; cosmo build.lua
+ * code path checks BOTH explicitly, doesn't use this generic name).
+ */
+static int l_tool_platform_name(lua_State *L)
+{
+    lua_pushstring(L, hl_release_io_platform());
+    return 1;
+}
+
+/* ── tool.platform_sig_get() → table | nil ────────────────────────
+ *
+ * Returns the embedded signed platform manifest as a Lua table:
+ *
+ *   { manifest = "<text bytes>", signature = "<hex+nl bytes>" }
+ *
+ * or nil when no signed blob is embedded (local dev builds, opt-out
+ * builds, anything that hasn't run sign-platform-manifest in CI).
+ *
+ * Used by build.lua to:
+ *   - Detect whether the running hull was built with platform-sig
+ *     wired through, so it can decide whether to enforce or
+ *     opt-out at app-build time.
+ *   - Pass the raw bytes verbatim into package.sig.platform's new
+ *     embedded fields (additive — doesn't replace today's developer-
+ *     signed JSON shape).
+ */
+static int l_tool_platform_sig_get(lua_State *L)
+{
+    const unsigned char *manifest = NULL, *signature = NULL;
+    size_t manifest_len = 0, sig_len = 0;
+    if (hl_embedded_platform_sig(&manifest, &manifest_len,
+                                 &signature, &sig_len) != 0 ||
+        manifest_len == 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_createtable(L, 0, 2);
+    lua_pushlstring(L, (const char *)manifest, manifest_len);
+    lua_setfield(L, -2, "manifest");
+    lua_pushlstring(L, (const char *)signature, sig_len);
+    lua_setfield(L, -2, "signature");
+    return 1;
+}
+
+/* ── tool.platform_sig_arch_hash(arch_name) → hex_string | nil ───
+ *
+ * Look up the expected SHA-256 hex of the libhull_platform.a for
+ * a given arch in the embedded signed manifest. Returns nil if the
+ * arch isn't in the manifest (older release manifest predates the
+ * arch) OR no embedded blob is present.
+ *
+ * build.lua uses this to cross-check the actual SHA-256 of the .a
+ * it's about to embed in an app against what the release pipeline
+ * signed for that arch. Mismatch → hard reject (unless
+ * --no-verify-platform).
+ */
+static int l_tool_platform_sig_arch_hash(lua_State *L)
+{
+    const char *arch = luaL_checkstring(L, 1);
+    const unsigned char *manifest = NULL;
+    size_t manifest_len = 0;
+    if (hl_embedded_platform_sig(&manifest, &manifest_len,
+                                 NULL, NULL) != 0 ||
+        manifest_len == 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+    char hex[65];
+    if (hl_platform_sig_extract_for_arch((const char *)manifest,
+                                         manifest_len, arch, hex) != 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushstring(L, hex);
+    return 1;
+}
+
 static const luaL_Reg tool_funcs[] = {
-    { "spawn",                  l_tool_spawn },
-    { "spawn_read",             l_tool_spawn_read },
-    { "find_files",             l_tool_find_files },
-    { "find_tool",              l_tool_find_tool },
+    { "spawn",                       l_tool_spawn },
+    { "spawn_read",                  l_tool_spawn_read },
+    { "find_files",                  l_tool_find_files },
+    { "find_tool",                   l_tool_find_tool },
+    { "platform_name",               l_tool_platform_name },
+    { "platform_sig_get",            l_tool_platform_sig_get },
+    { "platform_sig_arch_hash",      l_tool_platform_sig_arch_hash },
     { "copy",                   l_tool_copy },
     { "mkdir",                  l_tool_mkdir },
     { "rmdir",                  l_tool_rmdir },

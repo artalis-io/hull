@@ -217,7 +217,7 @@ check_contains "manifest has hosts" "$MANIFEST_OUT" "api.stripe.com"
 echo ""
 echo "=== Step 4: hull build (unsigned) ==="
 
-BUILD_OUT=$("$HULL" build --compiler "$BUILD_CC" -o "$WORKDIR/myapp/myapp" "$WORKDIR/myapp" 2>&1); RC=$?
+BUILD_OUT=$("$HULL" build --no-verify-platform --compiler "$BUILD_CC" -o "$WORKDIR/myapp/myapp" "$WORKDIR/myapp" 2>&1); RC=$?
 check_exit "build exits 0" 0 $RC
 check_contains "build reports compiling" "$BUILD_OUT" "compiling"
 check_contains "build reports linking" "$BUILD_OUT" "linking"
@@ -269,7 +269,7 @@ echo "=== Step 6: hull build --sign ==="
 # Remove previous build artifacts
 rm -f "$WORKDIR/myapp/myapp" "$WORKDIR/myapp/package.sig"
 
-BUILD_OUT=$("$HULL" build --compiler "$BUILD_CC" --sign "$WORKDIR/developer.key" -o "$WORKDIR/myapp/myapp" "$WORKDIR/myapp" 2>&1); RC=$?
+BUILD_OUT=$("$HULL" build --no-verify-platform --compiler "$BUILD_CC" --sign "$WORKDIR/developer.key" -o "$WORKDIR/myapp/myapp" "$WORKDIR/myapp" 2>&1); RC=$?
 check_exit "signed build exits 0" 0 $RC
 check_file_exists "signed binary exists" "$WORKDIR/myapp/myapp"
 check_file_exists "package.sig exists" "$WORKDIR/myapp/package.sig"
@@ -363,7 +363,7 @@ end
 return M
 LIBEOF
 
-BUILD_OUT=$("$HULL" build --compiler "$BUILD_CC" --sign "$WORKDIR/developer.key" -o "$WORKDIR/multiapp/multiapp" "$WORKDIR/multiapp" 2>&1); RC=$?
+BUILD_OUT=$("$HULL" build --no-verify-platform --compiler "$BUILD_CC" --sign "$WORKDIR/developer.key" -o "$WORKDIR/multiapp/multiapp" "$WORKDIR/multiapp" 2>&1); RC=$?
 check_exit "multi-file build exits 0" 0 $RC
 check_contains "multi-file build finds 2 files" "$BUILD_OUT" "2 Lua file"
 check_file_exists "multi-file binary exists" "$WORKDIR/multiapp/multiapp"
@@ -413,7 +413,7 @@ echo "=== Step 12: Error cases ==="
 
 # Build with no .lua files
 mkdir -p "$WORKDIR/emptyapp"
-BUILD_OUT=$("$HULL" build --compiler "$BUILD_CC" "$WORKDIR/emptyapp" 2>&1); RC=$?
+BUILD_OUT=$("$HULL" build --no-verify-platform --compiler "$BUILD_CC" "$WORKDIR/emptyapp" 2>&1); RC=$?
 check_exit "build empty app fails" 1 $RC
 check_contains "build reports no files" "$BUILD_OUT" "no .lua or .js files"
 
@@ -431,7 +431,7 @@ MANIFEST_OUT=$("$HULL" manifest "$WORKDIR/emptyapp" 2>&1); RC=$?
 check_exit "manifest without app.lua fails" 1 $RC
 
 # Sign with nonexistent key
-BUILD_OUT=$("$HULL" build --compiler "$BUILD_CC" --sign "/nonexistent/key.key" "$WORKDIR/myapp" 2>&1); RC=$?
+BUILD_OUT=$("$HULL" build --no-verify-platform --compiler "$BUILD_CC" --sign "/nonexistent/key.key" "$WORKDIR/myapp" 2>&1); RC=$?
 check_exit "build with bad key fails" 1 $RC
 
 # ── Step 13: Self-build chain (hull → hull2 → hull3) ─────────────────
@@ -446,7 +446,7 @@ app.get("/", function(req, res) res:json({status = "ok"}) end)
 APPEOF
 
 # hull → hull2
-BUILD_OUT=$("$HULL" build --compiler "$BUILD_CC" -o "$WORKDIR/hull2" "$WORKDIR/nullapp" 2>&1); RC=$?
+BUILD_OUT=$("$HULL" build --no-verify-platform --compiler "$BUILD_CC" -o "$WORKDIR/hull2" "$WORKDIR/nullapp" 2>&1); RC=$?
 check_exit "self-build hull→hull2 exits 0" 0 $RC
 check_file_executable "hull2 exists and executable" "$WORKDIR/hull2"
 
@@ -462,7 +462,7 @@ fi
 # hull2 → hull3: use original hull to build hull3 from nullapp
 # (hull2 is a built app — it has platform stubs, not embedded assets,
 # so it cannot build new binaries itself. Only the original hull can.)
-BUILD_OUT=$("$HULL" build --compiler "$BUILD_CC" -o "$WORKDIR/hull3" "$WORKDIR/nullapp" 2>&1); RC=$?
+BUILD_OUT=$("$HULL" build --no-verify-platform --compiler "$BUILD_CC" -o "$WORKDIR/hull3" "$WORKDIR/nullapp" 2>&1); RC=$?
 check_exit "hull→hull3 exits 0" 0 $RC
 check_file_executable "hull3 exists and executable" "$WORKDIR/hull3"
 

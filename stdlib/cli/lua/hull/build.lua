@@ -25,6 +25,11 @@ local function parse_args()
         target = nil,     -- cross-compilation target arch (e.g. "x86_64", "aarch64")
         build_compute = true, -- Auto-rebuild compute/<name>/<name>.c → .wasm
                               -- (--no-build-compute to disable)
+        verify_platform = true, -- Cross-check libhull_platform.a SHA-256
+                                -- against the embedded signed manifest.
+                                -- --no-verify-platform skips it; use for
+                                -- dev hulls (no embedded manifest) or
+                                -- forks signing with their own platform key.
     }
 
     local i = 1
@@ -56,6 +61,8 @@ local function parse_args()
         elseif a == "--target" then
             i = i + 1
             opts.target = arg[i]
+        elseif a == "--no-verify-platform" then
+            opts.verify_platform = false
         elseif a:sub(1, 1) ~= "-" then
             opts.app_dir = a
         end
@@ -407,6 +414,27 @@ local function sign_app(app_dir, key_file, sign_ctx, files)
         tool.exit(1)
     end
 
+    -- ── v0.1.3: embed the gethull-signed platform manifest blob ──
+    -- The existing `platform` table from platform.sig is the
+    -- developer's local-signing layer (kept for backward compat +
+    -- fork-deployable setups). The new `gethull` sub-table is the
+    -- release-side signed manifest from the hull binary that's doing
+    -- the build. Runtime --verify-sig (C4) will validate the
+    -- gethull.signature against HL_PLATFORM_PUBKEY_HEX.
+    --
+    -- Absent when --no-verify-platform was passed AND this hull has
+    -- no embedded blob (purely local dev). Empty arch_hashes when
+    -- --no-verify-platform was passed but a blob exists (the manifest
+    -- + signature get inherited from the building hull but no per-arch
+    -- cross-check was performed).
+    if sign_ctx.platform_sig_blob then
+        platform.gethull = {
+            manifest  = sign_ctx.platform_sig_blob.manifest,
+            signature = sign_ctx.platform_sig_blob.signature,
+            arch_hashes = sign_ctx.platform_arch_hashes or {},
+        }
+    end
+
     -- Capture compiler version
     local cc_version = tool.compiler and tool.compiler.version() or nil
 
@@ -756,6 +784,96 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
         tool.exit(1)
     end
 
+    -- ── Platform-sig cross-check ──
+    -- Hash the libhull_platform.a we're about to embed and compare
+    -- against the gethull-signed manifest baked into this hull binary.
+    -- A mismatch means either:
+    --   (a) this hull was built locally (no embedded manifest), OR
+    --   (b) the .a was modified between hull install and now
+    -- (a) is the dev workflow; (b) is what the platform-sig chain is
+    -- designed to catch.
+    --
+    -- The signed manifest blob, signature, and the cross-checked
+    -- per-arch hashes get written into package.sig.platform later in
+    -- sign_app() for runtime verify (C4 will enforce them).
+    local platform_sig_blob = nil    -- {manifest, signature} or nil
+    local platform_arch_hashes = nil -- {arch: hex, ...} the cross-checked entries
+    if opts.verify_platform then
+        platform_sig_blob = tool.platform_sig_get()
+        if not platform_sig_blob then
+            tool.stderr(
+                "hull build: this hull has no embedded platform manifest\n" ..
+                "       (built locally or from a release that predates platform-sig).\n" ..
+                "       Use --no-verify-platform to build anyway; runtime --verify-sig\n" ..
+                "       will reject the resulting app unless it too uses --no-verify-platform.\n")
+            tool.rmdir(tmpdir)
+            tool.exit(1)
+        end
+
+        -- Build the list of arches whose .a hashes we cross-check.
+        -- Native: just the running arch. Cosmo: both cosmo arches.
+        -- Cross-compile (--target=...) skips with a soft warning since
+        -- we don't have the target .a's hash in the running hull's
+        -- manifest (target arch may differ from build arch).
+        local arches_to_check = {}
+        if is_cosmo then
+            arches_to_check = {
+                { arch = "cosmo-x86_64",  path = tmpdir .. "/libhull_platform.a" },
+                { arch = "cosmo-aarch64", path = tmpdir .. "/.aarch64/libhull_platform.a" },
+            }
+        elseif opts.target then
+            tool.stderr(
+                "hull build: --target=" .. opts.target ..
+                ": skipping platform-sig cross-check (cross-compile target\n" ..
+                "       differs from running hull's arch). Use --no-verify-platform\n" ..
+                "       to silence this warning.\n")
+        else
+            arches_to_check = {
+                { arch = tool.platform_name(), path = tmpdir .. "/libhull_platform.a" },
+            }
+        end
+
+        platform_arch_hashes = {}
+        for _, entry in ipairs(arches_to_check) do
+            if not file_exists(entry.path) then
+                tool.stderr("hull build: missing platform archive for cross-check: " .. entry.path .. "\n")
+                tool.rmdir(tmpdir)
+                tool.exit(1)
+            end
+            local actual = crypto.sha256(read_file(entry.path))
+            local expected = tool.platform_sig_arch_hash(entry.arch)
+            if not expected then
+                tool.stderr(
+                    "hull build: arch '" .. entry.arch .. "' not in embedded\n" ..
+                    "       platform manifest. The hull binary may be older than the\n" ..
+                    "       release that publishes this arch, or this is a dev build\n" ..
+                    "       with an incomplete manifest. Use --no-verify-platform to skip.\n")
+                tool.rmdir(tmpdir)
+                tool.exit(1)
+            end
+            if actual ~= expected then
+                tool.stderr(
+                    "hull build: libhull_platform.a hash does not match the embedded\n" ..
+                    "       signed manifest for arch '" .. entry.arch .. "':\n" ..
+                    "         expected: " .. expected .. "\n" ..
+                    "         actual:   " .. actual .. "\n" ..
+                    "       The platform archive was modified between hull install\n" ..
+                    "       and now, OR this hull was rebuilt against a different\n" ..
+                    "       libhull_platform.a than CI signed. Use --no-verify-platform\n" ..
+                    "       to override (runtime verify will then reject the app).\n")
+                tool.rmdir(tmpdir)
+                tool.exit(1)
+            end
+            platform_arch_hashes[entry.arch] = actual
+        end
+    else
+        -- --no-verify-platform: try to fetch the blob anyway so apps
+        -- built with this flag still inherit the manifest (just without
+        -- the cross-check guarantee). If there's no embedded blob, the
+        -- app's package.sig.platform omits the new fields entirely.
+        platform_sig_blob = tool.platform_sig_get()
+    end
+
     -- Validate compiler matches platform (cc already resolved above)
     if platform_dir then
         local cc_data = read_file(platform_dir .. "platform_cc")
@@ -832,6 +950,13 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
             binary_hash = nil,
             trampoline_hash = crypto.sha256(app_main),
             platform_sig_path = platform_sig_path,
+            -- v0.1.3 platform-sig chain. Populated by the cross-check
+            -- block above. nil when --no-verify-platform was passed AND
+            -- this hull has no embedded blob; an empty table when the
+            -- flag was passed but a blob is available; populated when
+            -- the cross-check actually ran.
+            platform_sig_blob   = platform_sig_blob,
+            platform_arch_hashes = platform_arch_hashes,
         }
 
         -- Compute binary_hash (SHA256 of the linked output binary)
