@@ -281,18 +281,27 @@ jobs:
           done
           [ "$fail" = 0 ] || exit 1
 
-      - name: Build hull (cosmo APE)
-        # `make -o` tells make to treat the downloaded .a files as
-        # "very old, don't rebuild" — without this, $(PLATFORM_LIB)'s
-        # source prerequisites (PLATFORM_OBJS, CANARY_OBJ) trigger a
-        # rebuild and the embedded bytes drift from what
-        # sign-platform-manifest signed. (Different GH Actions VMs
-        # produce non-byte-identical .o → .a output even from
-        # identical source.)
+      - name: Pin downloaded .a mtime to the far future
+        # Make's $(PLATFORM_LIB) rule has source prereqs (PLATFORM_OBJS,
+        # CANARY_OBJ); if any of them are newer than the .a (and
+        # actions/checkout makes source files current-time), make
+        # rebuilds the .a from scratch and drifts away from what
+        # sign-platform-manifest signed. Touching to year 2030 makes
+        # the downloaded .a unambiguously the freshest input — make
+        # won't rebuild it.
+        #
+        # Note: `make -o <file>` (--assume-old) was tried first but
+        # is too aggressive: it also blocks dependents (the
+        # embedded_platform_a.h header xxd'd from .a) from
+        # regenerating, leaving build_assets.c with undefined
+        # `hl_embedded_platform_a` symbols. The touch approach lets
+        # make's normal dep propagation work.
         run: |
-          make -o build/libhull_platform.x86_64-cosmo.a \
-               -o build/libhull_platform.aarch64-cosmo.a \
-               CC=cosmocc EMBED_PLATFORM=cosmo
+          touch -t 203012312359 build/libhull_platform.x86_64-cosmo.a \
+                                build/libhull_platform.aarch64-cosmo.a
+
+      - name: Build hull (cosmo APE)
+        run: make CC=cosmocc EMBED_PLATFORM=cosmo
 
       - name: Smoke-test version
         run: ./build/hull version
@@ -402,14 +411,17 @@ jobs:
           fi
           echo "✓ ${{ matrix.name }} .a SHA matches signed manifest: $actual"
 
+      - name: Pin downloaded .a mtime to the far future
+        # See same step in build-cosmo. Touch the downloaded .a to
+        # year 2030 so make never decides its source prereqs are
+        # "newer" and rebuilds it from scratch (which would drift
+        # from what sign-platform-manifest signed). Dependents like
+        # embedded_platform_a.h still regenerate normally — only the
+        # .a itself is pinned.
+        run: touch -t 203012312359 build/libhull_platform.a
+
       - name: Build hull with embedded platform
-        # `make -o` tells make to treat the downloaded .a as "very old,
-        # don't rebuild" — without this, $(PLATFORM_LIB)'s source
-        # prerequisites trigger a rebuild and the embedded bytes drift
-        # from what sign-platform-manifest signed. (Different GH
-        # Actions VMs produce non-byte-identical .o → .a output even
-        # from identical source.)
-        run: make -o build/libhull_platform.a EMBED_PLATFORM=1
+        run: make EMBED_PLATFORM=1
 
       - name: Smoke-test version + platform
         run: |
