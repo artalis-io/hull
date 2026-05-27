@@ -605,9 +605,45 @@ typedef struct {
         print("hull build: " .. #shader_files .. " shader(s) from " .. shaders_dir)
     end
 
-    -- Resolve CC early (needed for AOT arch detection below)
-    local cc = opts.cc or tool.cc or tool.default_cc or "cosmocc"
-    local is_cosmo = cc:find("cosmocc") ~= nil
+    -- Resolve CC early (needed for AOT arch detection below).
+    -- Priority:
+    --   1. Explicit --compiler flag (opts.cc).
+    --   2. tool.compiler.name() — the new compiler-vtable API,
+    --      reports what hull is actually configured to use
+    --      (system cc / tcc / cosmocc, matches the running hull's
+    --      build target).
+    --   3. tool.cc — legacy compile-time HL_DEFAULT_CC (always
+    --      "cosmocc"); kept as a last-resort fallback because some
+    --      older code paths still set it explicitly.
+    -- Bare "cosmocc" fallback removed: it made native (non-cosmo)
+    -- hulls misidentify as cosmo and look up cosmo .a hashes in
+    -- the platform-sig cross-check.
+    local cc = opts.cc
+        or (tool.compiler and tool.compiler.name())
+        or tool.cc
+        or "cc"
+    -- is_cosmo detection: must reflect what's EMBEDDED in this hull
+    -- binary (cosmo embeds both x86_64+aarch64 .a's, native embeds
+    -- one .a), not what compiler the USER has available. The CC
+    -- variable above can mislead — a cosmo hull running on a Linux
+    -- box may resolve `tool.compiler.name()` to "cc" because tcc
+    -- isn't viable on cosmo. The platform_archs table is the
+    -- authoritative signal: multiple "cosmo-*" entries → cosmo
+    -- build; single non-cosmo entry → native build; nil → unsigned
+    -- local build (no embedded platform).
+    local is_cosmo = false
+    if tool.platform_archs then
+        for _, arch in ipairs(tool.platform_archs() or {}) do
+            if arch:find("^cosmo-") then is_cosmo = true; break end
+        end
+    end
+    -- Last-resort fallback for hull builds where platform_archs
+    -- isn't available (very old hulls, mocked test harnesses):
+    -- fall back to the compiler name. The cosmocc CC name is a
+    -- reliable cosmo signal — a real cosmo build invokes cosmocc.
+    if not is_cosmo then
+        is_cosmo = cc:find("cosmocc") ~= nil
+    end
 
     -- Guard: ensure compiler vtable is available
     if not tool.compiler then
