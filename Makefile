@@ -1402,6 +1402,19 @@ BUILD_CONFIG_FILE := $(BUILDDIR)/.build-config
 # agent_*, async_*, net_*, plus the small set of unprefixed Hull
 # objects under build/) and the binaries that link them. Vendor
 # objects, WAMR, mbedTLS, QuickJS, Lua, SQLite stay put.
+#
+# libhull_platform.a is conditionally included: when
+# TRUST_PLATFORM_LIB=1, the .a is a pre-downloaded artifact (CI
+# release build) that we MUST NOT delete — there's no rule to
+# rebuild it, deletion makes the build fail with "TRUST_PLATFORM_LIB=1
+# but .a is missing." The fingerprint check still runs and clears
+# Hull .o files; .a is just excluded from that purge.
+ifeq ($(TRUST_PLATFORM_LIB),1)
+PLATFORM_LIB_PURGE :=
+else
+PLATFORM_LIB_PURGE := $(BUILDDIR)/libhull_platform.a
+endif
+
 $(shell mkdir -p $(BUILDDIR))
 $(shell test "$$(cat $(BUILD_CONFIG_FILE) 2>/dev/null)" = "$(BUILD_FINGERPRINT)" || { \
     rm -f $(BUILDDIR)/cap_*.o $(BUILDDIR)/cmd_*.o $(BUILDDIR)/js_*.o $(BUILDDIR)/lua_rt_*.o \
@@ -1417,7 +1430,7 @@ $(shell test "$$(cat $(BUILD_CONFIG_FILE) 2>/dev/null)" = "$(BUILD_FINGERPRINT)"
           $(BUILDDIR)/hull_alloc.o $(BUILDDIR)/hull_async.o $(BUILDDIR)/hull_compress.o \
           $(BUILDDIR)/worker_db.o $(BUILDDIR)/worker_wasm.o $(BUILDDIR)/worker_gpu.o \
           $(BUILDDIR)/stdlib_registry.o $(BUILDDIR)/app_entries_default.o \
-          $(BUILDDIR)/hull $(BUILDDIR)/libhull_platform.a \
+          $(BUILDDIR)/hull $(PLATFORM_LIB_PURGE) \
           $(BUILDDIR)/test_* 2>/dev/null; \
     printf '%s\n' '$(BUILD_FINGERPRINT)' > $(BUILD_CONFIG_FILE); \
 })
