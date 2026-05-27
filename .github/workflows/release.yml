@@ -311,7 +311,7 @@ jobs:
           TMP=$(mktemp -d)
           cd "$TMP"
           cat > app.lua <<'LUA'
-          app.manifest({})
+          app.manifest({modules = {"hull/http-server@1"}})
           app.get("/", function(req, res) res:json({ok=true}) end)
           LUA
           "${GITHUB_WORKSPACE}/build/hull" keygen dev
@@ -436,7 +436,7 @@ jobs:
           TMP=$(mktemp -d)
           cd "$TMP"
           cat > app.lua <<'LUA'
-          app.manifest({})
+          app.manifest({modules = {"hull/http-server@1"}})
           app.get("/", function(req, res) res:json({ok=true}) end)
           LUA
           "${GITHUB_WORKSPACE}/build/hull" keygen dev
