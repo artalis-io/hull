@@ -12,6 +12,8 @@
 #include "hull/compiler.h"
 #include "hull/cap/tool.h"
 
+#include <errno.h>
+#include <ftw.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,11 +38,24 @@ static int write_file(const char *path, const char *content)
     return 0;
 }
 
+static int rm_rf_entry(const char *path, const struct stat *sb,
+                       int typeflag, struct FTW *ftwbuf)
+{
+    (void)sb; (void)typeflag; (void)ftwbuf;
+    return remove(path);
+}
+
 static void rm_rf(const char *dir)
 {
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd), "rm -rf %s", dir);
-    (void)system(cmd);
+    /* In-process recursive delete via nftw(FTW_DEPTH). Cosmopolitan's
+     * toybox rm rejects `-r` ("rm: illegal option -- r"), and a leaked
+     * tmpdir cascades into the next test failing on mkdir EEXIST.
+     * nftw is POSIX and works on Linux, macOS, and cosmo. ENOENT means
+     * the dir's already gone — fine. */
+    if (nftw(dir, rm_rf_entry, 16, FTW_DEPTH | FTW_PHYS) != 0
+        && errno != ENOENT) {
+        /* Best-effort cleanup; don't mask test failures. */
+    }
 }
 
 /* ── Tests: hl_compiler_system_new ─────────────────────────────── */

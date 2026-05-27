@@ -23,6 +23,7 @@
 #include "hull/tools_install.h"
 
 #include <errno.h>
+#include <ftw.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,13 +41,27 @@ struct tools_fixture {
     int  had_path;
 };
 
+static int rm_recursive_entry(const char *path, const struct stat *sb,
+                              int typeflag, struct FTW *ftwbuf)
+{
+    (void)sb; (void)typeflag; (void)ftwbuf;
+    return remove(path);
+}
+
 static int rm_recursive(const char *path)
 {
-    /* Tiny synchronous rm -rf; the sandbox only ever has a handful of
-     * shallow files, so we don't need anything clever. */
-    char cmd[PATH_MAX + 64];
-    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", path);
-    return system(cmd);
+    /* In-process recursive delete via nftw(FTW_DEPTH). Replaces
+     * `system("rm -rf ...")` because Cosmopolitan's toybox rm
+     * rejects `-r` ("rm: illegal option -- r"), and a missing
+     * cleanup leaves the next mkdir hitting EEXIST and the rest
+     * of the suite cascading-failing. POSIX nftw works on Linux,
+     * macOS, and cosmo uniformly. Ignore ENOENT — missing-path
+     * is the steady state we're trying to reach anyway. */
+    if (nftw(path, rm_recursive_entry, 16, FTW_DEPTH | FTW_PHYS) != 0
+        && errno != ENOENT) {
+        return -1;
+    }
+    return 0;
 }
 
 UTEST_F_SETUP(tools_fixture) {

@@ -9,6 +9,8 @@
 
 #include "utest.h"
 #include "hull/cap/fs.h"
+#include <errno.h>
+#include <ftw.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,12 +28,25 @@ static void setup_fs(void)
     test_cfg.base_len = strlen(test_dir);
 }
 
+static int teardown_rm_entry(const char *path, const struct stat *sb,
+                             int typeflag, struct FTW *ftwbuf)
+{
+    (void)sb; (void)typeflag; (void)ftwbuf;
+    return remove(path);
+}
+
 static void teardown_fs(void)
 {
-    /* Clean up test files */
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd), "rm -rf %s", test_dir);
-    system(cmd);
+    /* In-process recursive delete via nftw(FTW_DEPTH). Cosmopolitan's
+     * toybox rm rejects `-r` ("rm: illegal option -- r"), and
+     * `system("rm -rf ...")` leaves the next test hitting EEXIST on
+     * setup_fs's mkdir. nftw is POSIX and works uniformly on Linux,
+     * macOS, and cosmo. ENOENT is fine — that's the goal. */
+    if (nftw(test_dir, teardown_rm_entry, 16, FTW_DEPTH | FTW_PHYS) != 0
+        && errno != ENOENT) {
+        /* Best-effort cleanup; test failures shouldn't mask the
+         * actual assertion that failed. */
+    }
 }
 
 /* ── Path validation tests ──────────────────────────────────────────── */

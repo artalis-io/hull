@@ -197,19 +197,20 @@ static void emit_wamrc_state(ShJsonWriter *w, const char *hull_exe)
     sh_json_write_object_start(w);
 
     const HlToolSpec *spec = hl_tools_find("wamrc");
-    const char *platform = "unknown";
-#ifdef __APPLE__
-# ifdef __aarch64__
+    /* Pick exactly one assignment per build so scan-build doesn't
+     * flag the default as a dead-store on platforms where the next
+     * branch overwrites it. */
+    const char *platform;
+#if defined(__APPLE__) && defined(__aarch64__)
     platform = "darwin-arm64";
-# endif
-#elif defined(__linux__)
-# if defined(__x86_64__)
+#elif defined(__linux__) && defined(__x86_64__)
     platform = "linux-x86_64";
-# elif defined(__aarch64__) || defined(__arm64__)
+#elif defined(__linux__) && (defined(__aarch64__) || defined(__arm64__))
     platform = "linux-aarch64";
-# endif
 #elif defined(__COSMOPOLITAN__)
     platform = "cosmo";
+#else
+    platform = "unknown";
 #endif
 
     char path[HL_AGENT_PATH_MAX];
