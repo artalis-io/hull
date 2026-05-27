@@ -12,6 +12,15 @@ _Nothing yet._
 
 ## [0.1.3] — 2026-05-27
 
+> The first published v0.1.3 build was found to ship with a broken
+> gethull layer (the `libhull_platform.a` embedded into the hull
+> binary had different bytes than the .a `sign-platform-manifest`
+> hashed, so `hull build --sign` against that binary failed the
+> cross-check). The original tag + GitHub release were deleted and
+> v0.1.3 was retagged with the release-process fix described under
+> "Fixed — release process" below. End-users who installed the
+> first v0.1.3 should `hull update` to pick up the corrected build.
+
 ### Added
 
 - **Platform-sig chain end-to-end (v0.1.3).** The
@@ -86,6 +95,32 @@ _Nothing yet._
   canary was the placeholder integrity signal while the
   signed-manifest path was missing; v0.1.3's per-arch SHA-256s
   cover the same property without Makefile post-link gymnastics.
+
+### Fixed — release process
+
+- **Platform-sig embed drift in `release.yml`.** `make EMBED_PLATFORM=1`
+  was rebuilding `libhull_platform.a` from source during the
+  `build-native` / `build-cosmo` jobs, replacing the downloaded
+  artifact (the one `sign-platform-manifest` had hashed) with a
+  freshly-built .a that produces different bytes on a different
+  GH Actions VM. Result: the hull binary embedded one set of bytes
+  and a manifest signature pointing at a different set, breaking
+  the gethull cross-check for every app built with v0.1.3.
+  - Fixed by switching to `make -o build/libhull_platform.a` —
+    GNU make's `--assume-old` flag tells make to treat the .a as
+    pristine and never rebuild it.
+- **Verify-before-embed step** in every build job: sha256sum the
+  downloaded .a, compare against its line in the signed manifest,
+  fail loudly on mismatch. Defense in depth if the rebuild guard
+  ever regresses.
+- **Platform-sig E2E smoke test inside CI** (`release.yml`): each
+  `build-native` / `build-cosmo` job now does `hull keygen` +
+  `hull sign-platform` + `hull build --sign` + run with
+  `--verify-sig` on the freshly-baked hull binary. Both signature
+  layers (per-app v0.1.2 + gethull v0.1.3) are exercised end-to-end
+  before the artifact is uploaded. Tests `tests/release_smoke.sh`
+  still cover the release-sig path (post-publish, manual); the new
+  in-CI test covers the gap that let v0.1.3-rc ship broken.
 
 ### Fixed
 

@@ -194,11 +194,26 @@ jobs:
           head -20 build/embedded_platform_sig.h
           echo "..."
 
-      - name: Upload signed manifest header
+      - name: Stage signed manifest for upload
+        # Co-locate manifest text + .sig + .h so downstream jobs get a
+        # single directory with everything they need:
+        #   embedded_platform_sig.h — the C symbol embedded in hull
+        #   platform-manifest.txt   — raw text (one line per arch),
+        #                              used by build-* to sha256-verify
+        #                              the .a they're about to embed
+        #   platform-manifest.txt.sig — signature for offline audit
+        run: |
+          set -eu
+          cp platform-manifest.txt platform-manifest.txt.sig build/
+
+      - name: Upload signed manifest + header
         uses: actions/upload-artifact@v4
         with:
           name: embedded-platform-sig
-          path: build/embedded_platform_sig.h
+          path: |
+            build/embedded_platform_sig.h
+            build/platform-manifest.txt
+            build/platform-manifest.txt.sig
 
   # ────────────────────────────────────────────────────────────────────
   # Stage 3: build hull binaries with the signed manifest embedded.
@@ -239,19 +254,86 @@ jobs:
           name: embedded-platform-sig
           path: build/
 
-      - name: Mark platform archives fresh
-        # make's hull-link rule has libhull_platform.*.a as prereqs.
-        # The downloaded .a files have a stale mtime relative to source
-        # changes from `actions/checkout`. Touch so make doesn't try to
-        # rebuild — we want to embed the EXACT bytes that
-        # sign-platform-manifest hashed.
-        run: touch build/libhull_platform.*.a
+      - name: Verify downloaded .a files match signed manifest
+        # Catch any drift between sign-platform-manifest's input and
+        # what we're about to embed BEFORE wasting compute on the build.
+        # Without this guard, a .a mismatch would silently ship a hull
+        # binary that can't pass its own platform-sig cross-check at
+        # `hull build --sign` time (exactly the v0.1.3-rc bug).
+        run: |
+          set -eu
+          fail=0
+          for entry in "cosmo-x86_64:build/libhull_platform.x86_64-cosmo.a" \
+                       "cosmo-aarch64:build/libhull_platform.aarch64-cosmo.a"; do
+            arch="${entry%%:*}"
+            file="${entry##*:}"
+            actual=$(sha256sum "$file" | awk '{print $1}')
+            expected=$(awk -v a="$arch" '$2==a {print $1}' build/platform-manifest.txt)
+            if [ -z "$expected" ]; then
+              echo "::error::arch '$arch' not in signed manifest"
+              fail=1
+            elif [ "$actual" != "$expected" ]; then
+              echo "::error::$file SHA mismatch: expected=$expected actual=$actual"
+              fail=1
+            else
+              echo "✓ $arch .a SHA matches signed manifest: $actual"
+            fi
+          done
+          [ "$fail" = 0 ] || exit 1
 
       - name: Build hull (cosmo APE)
-        run: make CC=cosmocc EMBED_PLATFORM=cosmo
+        # `make -o` tells make to treat the downloaded .a files as
+        # "very old, don't rebuild" — without this, $(PLATFORM_LIB)'s
+        # source prerequisites (PLATFORM_OBJS, CANARY_OBJ) trigger a
+        # rebuild and the embedded bytes drift from what
+        # sign-platform-manifest signed. (Different GH Actions VMs
+        # produce non-byte-identical .o → .a output even from
+        # identical source.)
+        run: |
+          make -o build/libhull_platform.x86_64-cosmo.a \
+               -o build/libhull_platform.aarch64-cosmo.a \
+               CC=cosmocc EMBED_PLATFORM=cosmo
 
       - name: Smoke-test version
         run: ./build/hull version
+
+      - name: Platform-sig E2E smoke test
+        # Build a signed app with the freshly-baked hull binary, exercising
+        # the full chain: hull build cross-checks the .a's SHA against the
+        # gethull manifest IT embeds, then the output binary runs under
+        # --verify-sig and re-verifies the gethull layer at startup. This
+        # is the test that would have caught the v0.1.3-rc bug; release
+        # cannot proceed past this point if either layer is broken.
+        run: |
+          set -eu
+          # Sign platform in-place in build/ so hull build can find
+          # platform.sig via the "alongside the hull binary" lookup.
+          "${GITHUB_WORKSPACE}/build/hull" keygen "${GITHUB_WORKSPACE}/build/plat"
+          "${GITHUB_WORKSPACE}/build/hull" sign-platform \
+              --dir "${GITHUB_WORKSPACE}/build/" \
+              "${GITHUB_WORKSPACE}/build/plat.key"
+          # App in tmpdir.
+          TMP=$(mktemp -d)
+          cd "$TMP"
+          cat > app.lua <<'LUA'
+          app.manifest({})
+          app.get("/", function(req, res) res:json({ok=true}) end)
+          LUA
+          "${GITHUB_WORKSPACE}/build/hull" keygen dev
+          "${GITHUB_WORKSPACE}/build/hull" build --sign dev.key -o myapp .
+          test -x myapp
+          ./myapp --verify-sig dev.pub --no-sandbox -p 19888 ./app.lua &
+          SVR=$!
+          sleep 3
+          if ! kill -0 "$SVR" 2>/dev/null; then
+            echo "::error::myapp failed to start under --verify-sig (platform-sig check broken)"
+            exit 1
+          fi
+          RESP=$(curl -fsS http://127.0.0.1:19888/ || echo FAIL)
+          kill "$SVR" 2>/dev/null || true
+          wait "$SVR" 2>/dev/null || true
+          echo "$RESP" | grep -q '"ok":true' || { echo "::error::wrong response: $RESP"; exit 1; }
+          echo "✓ platform-sig E2E (build --sign + --verify-sig) passes"
 
       - name: Rename artifact
         run: cp build/hull hull-cosmo
@@ -300,21 +382,74 @@ jobs:
           name: embedded-platform-sig
           path: build/
 
-      - name: Mark platform archive fresh
+      - name: Verify downloaded .a matches signed manifest
+        # Catch any drift between sign-platform-manifest's input and
+        # what we're about to embed BEFORE wasting compute on the build.
         # See same step in build-cosmo for rationale.
-        run: touch build/libhull_platform.a
+        run: |
+          set -eu
+          actual=$(sha256sum build/libhull_platform.a | awk '{print $1}')
+          expected=$(awk -v a="${{ matrix.name }}" '$2==a {print $1}' build/platform-manifest.txt)
+          if [ -z "$expected" ]; then
+            echo "::error::arch '${{ matrix.name }}' not in signed manifest"
+            exit 1
+          fi
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::libhull_platform.a SHA mismatch"
+            echo "  expected (signed manifest): $expected"
+            echo "  actual   (downloaded .a):   $actual"
+            exit 1
+          fi
+          echo "✓ ${{ matrix.name }} .a SHA matches signed manifest: $actual"
 
       - name: Build hull with embedded platform
-        # EMBED_PLATFORM=1 xxd's libhull_platform.a into the binary so
-        # `hull build` works on end-user machines that don't have hull
-        # source. The .a is the one sign-platform-manifest hashed —
-        # touched in the previous step so make doesn't try to rebuild.
-        run: make EMBED_PLATFORM=1
+        # `make -o` tells make to treat the downloaded .a as "very old,
+        # don't rebuild" — without this, $(PLATFORM_LIB)'s source
+        # prerequisites trigger a rebuild and the embedded bytes drift
+        # from what sign-platform-manifest signed. (Different GH
+        # Actions VMs produce non-byte-identical .o → .a output even
+        # from identical source.)
+        run: make -o build/libhull_platform.a EMBED_PLATFORM=1
 
       - name: Smoke-test version + platform
         run: |
           ./build/hull version
           ./build/hull doctor | grep -E "embedded\s+yes|hull build" || (echo "::error::Platform library not embedded"; exit 1)
+
+      - name: Platform-sig E2E smoke test
+        # Build a signed app with the freshly-baked hull binary, exercising
+        # the full chain: hull build cross-checks the .a's SHA against the
+        # gethull manifest IT embeds, then the output binary runs under
+        # --verify-sig and re-verifies the gethull layer at startup. This
+        # is the test that would have caught the v0.1.3-rc bug; release
+        # cannot proceed past this point if either layer is broken.
+        run: |
+          set -eu
+          "${GITHUB_WORKSPACE}/build/hull" keygen "${GITHUB_WORKSPACE}/build/plat"
+          "${GITHUB_WORKSPACE}/build/hull" sign-platform \
+              --dir "${GITHUB_WORKSPACE}/build/" \
+              "${GITHUB_WORKSPACE}/build/plat.key"
+          TMP=$(mktemp -d)
+          cd "$TMP"
+          cat > app.lua <<'LUA'
+          app.manifest({})
+          app.get("/", function(req, res) res:json({ok=true}) end)
+          LUA
+          "${GITHUB_WORKSPACE}/build/hull" keygen dev
+          "${GITHUB_WORKSPACE}/build/hull" build --sign dev.key -o myapp .
+          test -x myapp
+          ./myapp --verify-sig dev.pub --no-sandbox -p 19888 ./app.lua &
+          SVR=$!
+          sleep 3
+          if ! kill -0 "$SVR" 2>/dev/null; then
+            echo "::error::myapp failed to start under --verify-sig (platform-sig check broken)"
+            exit 1
+          fi
+          RESP=$(curl -fsS http://127.0.0.1:19888/ || echo FAIL)
+          kill "$SVR" 2>/dev/null || true
+          wait "$SVR" 2>/dev/null || true
+          echo "$RESP" | grep -q '"ok":true' || { echo "::error::wrong response: $RESP"; exit 1; }
+          echo "✓ platform-sig E2E (build --sign + --verify-sig) passes"
 
       - name: Rename artifact
         run: cp build/hull ${{ matrix.artifact }}
