@@ -213,7 +213,7 @@ wasm_mtime_before=$(stat -f %m compute/score.wasm 2>/dev/null || \
 
 # Run hull build; tolerate non-zero exit (platform-archive errors are
 # fine here, the rebuild step runs first).
-"$HULL_ABS" build -o app . > /tmp/buildlog.txt 2>&1 || true
+"$HULL_ABS" build --no-verify-platform -o app . > /tmp/buildlog.txt 2>&1 || true
 
 wasm_mtime_after=$(stat -f %m compute/score.wasm 2>/dev/null || \
                    stat -c %Y compute/score.wasm 2>/dev/null)
@@ -237,7 +237,7 @@ touch compute/score/score.c
 wasm_mtime_before=$(stat -f %m compute/score.wasm 2>/dev/null || \
                     stat -c %Y compute/score.wasm 2>/dev/null)
 
-"$HULL_ABS" build --no-build-compute -o app . > /tmp/buildlog2.txt 2>&1 || true
+"$HULL_ABS" build --no-verify-platform --no-build-compute -o app . > /tmp/buildlog2.txt 2>&1 || true
 
 wasm_mtime_after=$(stat -f %m compute/score.wasm 2>/dev/null || \
                    stat -c %Y compute/score.wasm 2>/dev/null)

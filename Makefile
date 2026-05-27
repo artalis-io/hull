@@ -2223,10 +2223,14 @@ hull-test-examples: $(BUILDDIR)/hull
 
 self-build: $(BUILDDIR)/hull platform
 	@echo "=== Self-build: hull -> hull2 -> hull3 ==="
+	@# --no-verify-platform: this hull is built without EMBED_PLATFORM=1
+	@# (the dev/CI default) so it has no embedded signed manifest and
+	@# can't satisfy the v0.1.3 platform-sig cross-check. Self-build is
+	@# verifying the build pipeline itself, not the trust chain.
 	@TMPDIR=$$(mktemp -d) && \
-	$(BUILDDIR)/hull build -o "$$TMPDIR/hull2" tests/fixtures/null_app && \
+	$(BUILDDIR)/hull build --no-verify-platform -o "$$TMPDIR/hull2" tests/fixtures/null_app && \
 	"$$TMPDIR/hull2" keygen "$$TMPDIR/key" && test -f "$$TMPDIR/key.pub" && \
-	"$$TMPDIR/hull2" build -o "$$TMPDIR/hull3" tests/fixtures/null_app && \
+	"$$TMPDIR/hull2" build --no-verify-platform -o "$$TMPDIR/hull3" tests/fixtures/null_app && \
 	"$$TMPDIR/hull3" keygen "$$TMPDIR/key2" && test -f "$$TMPDIR/key2.pub" && \
 	echo "PASS: self-build chain verified (hull -> hull2 -> hull3)" && \
 	rm -rf "$$TMPDIR" || \

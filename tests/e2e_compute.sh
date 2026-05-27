@@ -324,7 +324,7 @@ EOF
 
 # hull build --no-aot should succeed at the Lua level (will fail at link
 # unless platform is embedded, but we just check it doesn't crash on AOT logic)
-OUTPUT=$($HULL build "$NOAOT_DIR" --cc cc --no-aot 2>&1) || true
+OUTPUT=$($HULL build --no-verify-platform "$NOAOT_DIR" --cc cc --no-aot 2>&1) || true
 if echo "$OUTPUT" | grep -q "AOT"; then
     fail "hull build --no-aot should not mention AOT"
     echo "$OUTPUT"

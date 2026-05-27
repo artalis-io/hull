@@ -96,7 +96,7 @@ if [ "$TCC_VIABLE" = "1" ]; then
     echo ""
     echo "Test: hull build --compiler=tcc produces working binary"
 
-    "$HULL" build --compiler=tcc -o "$WORKDIR/hello.tcc" . > "$WORKDIR/build.log" 2>&1
+    "$HULL" build --no-verify-platform --compiler=tcc -o "$WORKDIR/hello.tcc" . > "$WORKDIR/build.log" 2>&1
     BUILD_RC=$?
     if [ "$BUILD_RC" -ne 0 ]; then
         echo "  --- build.log (exit $BUILD_RC) ---"
@@ -129,7 +129,7 @@ if [ "$TCC_VIABLE" = "1" ]; then
     # Confirm auto-select also picks tcc on Linux
     echo ""
     echo "Test: hull build (no --compiler) selects tcc by default on Linux"
-    "$HULL" build -o "$WORKDIR/hello.auto" . > "$WORKDIR/auto.log" 2>&1
+    "$HULL" build --no-verify-platform -o "$WORKDIR/hello.auto" . > "$WORKDIR/auto.log" 2>&1
     AUTO_RC=$?
     if [ "$AUTO_RC" -ne 0 ]; then
         echo "  --- auto.log (exit $AUTO_RC) ---"
@@ -144,7 +144,7 @@ else
     # ── macOS/cosmo: --compiler=tcc must fail with a clear error ─
     echo ""
     echo "Test: hull build --compiler=tcc rejected on $PLATFORM"
-    "$HULL" build --compiler=tcc -o "$WORKDIR/hello.tcc" . > "$WORKDIR/build.log" 2>&1
+    "$HULL" build --no-verify-platform --compiler=tcc -o "$WORKDIR/hello.tcc" . > "$WORKDIR/build.log" 2>&1
     BUILD_RC=$?
     assert "hull build --compiler=tcc exits non-zero on $PLATFORM" \
            [ "$BUILD_RC" -ne 0 ]
@@ -154,7 +154,7 @@ else
     # System cc default must still work
     echo ""
     echo "Test: hull build (default) still works on $PLATFORM"
-    "$HULL" build -o "$WORKDIR/hello.sys" . >/dev/null 2>&1
+    "$HULL" build --no-verify-platform -o "$WORKDIR/hello.sys" . >/dev/null 2>&1
     assert "default build exits 0" [ $? -eq 0 ]
     assert "default-built binary exists" [ -x "$WORKDIR/hello.sys" ]
 fi
