@@ -10,6 +10,7 @@
 
 #include "hull/signature.h"
 #include "hull/cap/crypto.h"
+#include "hull/platform_sig.h"
 
 #include "log.h"
 
@@ -203,6 +204,25 @@ int hl_sig_read(const char *sig_path, HlSignature *sig)
                                 sh_json_get(m->value, "canary"), NULL);
                     }
                 }
+            }
+        }
+
+        /* v0.1.3: gethull-signed manifest blob (written by `hull build`
+         * when the building hull had an embedded platform-sig). Strings
+         * point into the arena; safe across the function's lifetime. */
+        ShJsonValue *gethull = sh_json_get(platform, "gethull");
+        if (gethull && sh_json_type(gethull) == SH_JSON_OBJECT) {
+            sig->platform.gethull_manifest = sh_json_as_string(
+                sh_json_get(gethull, "manifest"), NULL);
+            if (sig->platform.gethull_manifest) {
+                sig->platform.gethull_manifest_len =
+                    strlen(sig->platform.gethull_manifest);
+            }
+            sig->platform.gethull_signature_hex = sh_json_as_string(
+                sh_json_get(gethull, "signature"), NULL);
+            if (sig->platform.gethull_signature_hex) {
+                sig->platform.gethull_signature_hex_len =
+                    strlen(sig->platform.gethull_signature_hex);
             }
         }
     }
@@ -537,7 +557,7 @@ void hl_sig_free(HlSignature *sig)
 /* ── Full startup verification ────────────────────────────────────── */
 
 int hl_verify_startup(const char *pubkey_path, const char *entry_point,
-                      const HlVfs *app_vfs)
+                      const HlVfs *app_vfs, int no_verify_platform)
 {
     if (!pubkey_path || !entry_point) return -1;
 
@@ -645,6 +665,63 @@ int hl_verify_startup(const char *pubkey_path, const char *entry_point,
 
             if (hl_sig_verify_platform(&sig, platform_pk) != 0) {
                 log_error("[sig] platform signature verification failed");
+                hl_sig_free(&sig);
+                return -1;
+            }
+        }
+    }
+
+    /* 5b. v0.1.3 gethull platform-sig layer.
+     *
+     * The gethull manifest+signature embedded by `hull build` proves
+     * the platform .a's hash was signed by the gethull.dev platform
+     * key at release time. Verify the signature against the embedded
+     * HL_PLATFORM_PUBKEY_HEX.
+     *
+     * Three skip paths, in priority order:
+     *   1. --no-verify-platform → skip with no message (caller explicit)
+     *   2. HL_PLATFORM_PUBKEY_HEX is all-zeros (placeholder build) →
+     *      skip with a one-time warning. Same bootstrap behavior as
+     *      hull update's HL_RELEASE_PUBKEY_HEX placeholder. v0.1.3 C5
+     *      restores the real pubkey; until then this path always fires.
+     *   3. gethull block absent in package.sig.platform AND real pubkey
+     *      embedded → hard reject. Apps built with --no-verify-platform
+     *      or against pre-v0.1.3 hulls hit this; they need
+     *      --no-verify-platform at runtime too.
+     *
+     * The "older" platform.{platforms,public_key,signature} layer
+     * (checked above) is independent — it's the developer-signed
+     * fork-deployable layer and remains enforceable on its own. */
+    if (!no_verify_platform) {
+        uint8_t embedded_pk[32];
+        int placeholder_pk = 0;
+        if (hex_decode(HL_PLATFORM_PUBKEY_HEX, 64, embedded_pk, 32) == 0) {
+            placeholder_pk = 1;
+            for (int i = 0; i < 32; i++) {
+                if (embedded_pk[i] != 0) { placeholder_pk = 0; break; }
+            }
+        }
+
+        if (placeholder_pk) {
+            /* Skip-with-warning (matches v0.1.0 release-pubkey bootstrap). */
+            log_warn("[sig] HL_PLATFORM_PUBKEY_HEX is the all-zeros "
+                     "placeholder — skipping gethull platform-sig check");
+        } else if (!sig.platform.gethull_manifest ||
+                   !sig.platform.gethull_signature_hex ||
+                   sig.platform.gethull_manifest_len == 0) {
+            log_error("[sig] app was built without a gethull platform-sig "
+                      "(rebuild against a release-built hull >=0.1.3, or "
+                      "pass --no-verify-platform to skip this check)");
+            hl_sig_free(&sig);
+            return -1;
+        } else {
+            if (hl_platform_sig_verify(
+                    sig.platform.gethull_manifest,
+                    sig.platform.gethull_manifest_len,
+                    sig.platform.gethull_signature_hex,
+                    sig.platform.gethull_signature_hex_len,
+                    NULL /* use HL_PLATFORM_PUBKEY_HEX */) != 0) {
+                log_error("[sig] gethull platform-sig verification failed");
                 hl_sig_free(&sig);
                 return -1;
             }

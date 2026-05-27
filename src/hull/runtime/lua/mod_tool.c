@@ -28,6 +28,7 @@
 #include "hull/embedded_platform_sig.h"
 #include "hull/platform_sig.h"
 #include "hull/release_io.h"
+#include "hull/signature.h"  /* HL_PLATFORM_PUBKEY_HEX */
 
 #include <signal.h>
 #include <sys/wait.h>
@@ -665,6 +666,28 @@ static int l_tool_platform_sig_arch_hash(lua_State *L)
     return 1;
 }
 
+/* ── tool.platform_pubkey() → hex_string | nil ────────────────────
+ *
+ * Returns the build-time-pinned gethull.dev platform Ed25519 public
+ * key as 64 lowercase hex chars, or nil when the running hull was
+ * compiled with the all-zeros placeholder (dev hull / fork without
+ * platform-sig wired). verify.lua uses this to verify the
+ * package.sig.platform.gethull layer signed by gethull.dev at
+ * release time.
+ */
+static int l_tool_platform_pubkey(lua_State *L)
+{
+    static const char zeros[] =
+        "0000000000000000000000000000000000000000000000000000000000000000";
+    const char *hex = HL_PLATFORM_PUBKEY_HEX;
+    if (!hex || strcmp(hex, zeros) == 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushstring(L, hex);
+    return 1;
+}
+
 static const luaL_Reg tool_funcs[] = {
     { "spawn",                       l_tool_spawn },
     { "spawn_read",                  l_tool_spawn_read },
@@ -673,6 +696,7 @@ static const luaL_Reg tool_funcs[] = {
     { "platform_name",               l_tool_platform_name },
     { "platform_sig_get",            l_tool_platform_sig_get },
     { "platform_sig_arch_hash",      l_tool_platform_sig_arch_hash },
+    { "platform_pubkey",             l_tool_platform_pubkey },
     { "copy",                   l_tool_copy },
     { "mkdir",                  l_tool_mkdir },
     { "rmdir",                  l_tool_rmdir },

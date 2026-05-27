@@ -1,12 +1,19 @@
 /*
- * hull:verify — Verify app signature (dual-layer)
+ * hull:verify — Verify app signature (dual-layer + v0.1.3 gethull)
+ *
+ * NOTE: the CLI `hull verify` always runs the Lua implementation
+ * (stdlib/cli/lua/hull/verify.lua) — this JS module is kept for
+ * parity / library use only. The Lua version checks the v0.1.3
+ * gethull layer using a tool.platform_pubkey() binding; that
+ * binding isn't exposed to the JS tool runtime today, so this
+ * module gates the gethull layer on --no-verify-platform or
+ * --gethull-key <file> instead.
  *
  * Usage: hull verify [options] [app_dir]
- *   --platform-key <file>    Platform public key (default: hardcoded gethull.dev key)
- *   --developer-key <file>   Developer public key (required for full verification)
- *
- * Reads package.sig (or hull.sig for backwards compat), verifies platform
- * and app layer Ed25519 signatures, and checks file hashes.
+ *   --platform-key <file>    Per-app platform key (v0.1.2 layer)
+ *   --developer-key <file>   Developer public key (app layer)
+ *   --gethull-key <file>     gethull.dev pubkey for the v0.1.3 layer
+ *   --no-verify-platform     Skip the v0.1.3 gethull layer
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -23,6 +30,8 @@ const GETHULL_DEV_PLATFORM_KEY_PLACEHOLDER =
 let appDir = ".";
 let platformKeySource = null;
 let developerKeySource = null;
+let gethullKeySource = null;
+let noVerifyPlatform = false;
 
 const args = globalThis.arg ?? [];
 for (let i = 1; i < args.length; i++) {
@@ -30,6 +39,10 @@ for (let i = 1; i < args.length; i++) {
         platformKeySource = args[++i];
     } else if (args[i] === "--developer-key" && i + 1 < args.length) {
         developerKeySource = args[++i];
+    } else if (args[i] === "--gethull-key" && i + 1 < args.length) {
+        gethullKeySource = args[++i];
+    } else if (args[i] === "--no-verify-platform") {
+        noVerifyPlatform = true;
     } else if (!args[i].startsWith("-")) {
         appDir = args[i];
     }
@@ -75,6 +88,28 @@ if (!sig || typeof sig !== "object" ||
 }
 
 let issues = 0;
+
+// ── gethull layer (v0.1.3) ─────────────────────────────────────────
+const gethullKeyHex = readKey(gethullKeySource);
+if (noVerifyPlatform) {
+    console.log("gethull layer: SKIPPED (--no-verify-platform)");
+} else if (!gethullKeyHex) {
+    console.log("gethull layer: SKIPPED (--gethull-key not provided)");
+} else if (sig.platform?.gethull?.manifest && sig.platform?.gethull?.signature) {
+    const gethullOk = ed25519Verify(
+        sig.platform.gethull.manifest,
+        sig.platform.gethull.signature,
+        gethullKeyHex);
+    if (gethullOk) {
+        console.log("gethull layer: VALID (signed by gethull.dev)");
+    } else {
+        tool.stderr("gethull layer: FAILED — signature invalid\n");
+        issues++;
+    }
+} else if (!isLegacy) {
+    tool.stderr("gethull layer: MISSING — package.sig has no platform.gethull block\n");
+    issues++;
+}
 
 // ── Platform layer verification ────────────────────────────────────
 if (sig.platform?.signature && sig.platform?.public_key) {

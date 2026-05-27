@@ -229,6 +229,8 @@ static void usage(const char *prog)
             "  --tls-cert PATH      TLS certificate file (PEM)\n"
             "  --tls-key PATH       TLS private key file (PEM)\n"
             "  --verify-sig PUBKEY  Verify app signature before startup\n"
+            "  --no-verify-platform Skip gethull platform-sig check (v0.1.3+; for\n"
+            "                       dev hulls or forks signing with their own key)\n"
             "  --drain-timeout MS   Graceful shutdown drain timeout (default: 5000)\n"
             "  --no-migrate         Skip auto-run migrations on startup\n"
             "  --no-ca-bundle       Skip TLS certificate verification (dev mode)\n"
@@ -317,6 +319,7 @@ typedef struct {
     int no_sandbox;
     int no_db;
     int no_compress;
+    int no_verify_platform;  /* skip gethull platform-sig check on --verify-sig */
     int skip_ca_bundle;
     const char *ca_bundle_override; /* --ca-bundle=PATH */
     int agent_mode;
@@ -395,6 +398,8 @@ static int hl_parse_serve_args(int argc, char **argv, HlServeConfig *cfg)
             cfg->no_migrate = 1;
         } else if (strcmp(argv[i], "--no-sandbox") == 0) {
             cfg->no_sandbox = 1;
+        } else if (strcmp(argv[i], "--no-verify-platform") == 0) {
+            cfg->no_verify_platform = 1;
         } else if (strcmp(argv[i], "--no-db") == 0) {
             cfg->no_db = 1;
         } else if (strcmp(argv[i], "--no-compress") == 0) {
@@ -959,7 +964,8 @@ static int hl_serve_load_app(HlServerState *s)
     /* RT-01: Verify app signature BEFORE loading — malicious code never
      * executes if verification fails. */
     if (s->cfg.verify_sig_path) {
-        if (hl_verify_startup(s->cfg.verify_sig_path, s->entry_point, app_vfs) != 0) {
+        if (hl_verify_startup(s->cfg.verify_sig_path, s->entry_point, app_vfs,
+                              s->cfg.no_verify_platform) != 0) {
             log_error("[hull:c] signature verification failed — refusing to start");
             return -1;
         }

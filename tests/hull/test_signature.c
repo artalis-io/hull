@@ -521,7 +521,13 @@ UTEST(hl_sig, verify_startup_good)
     HlVfs app_vfs;
     hl_vfs_init(&app_vfs, hl_app_entries, test_dir);
 
-    int rc = hl_verify_startup(pk_path, entry_point, &app_vfs);
+    /* no_verify_platform=1: the test fixture's package.sig has no
+     * gethull block (built before C3 added it), and the embedded
+     * HL_PLATFORM_PUBKEY_HEX is still the all-zeros placeholder in
+     * this commit anyway (C5 restores the real key). Passing 1 keeps
+     * the test focused on the developer-key layer regardless of the
+     * platform-sig state. */
+    int rc = hl_verify_startup(pk_path, entry_point, &app_vfs, 1);
     ASSERT_EQ(rc, 0);
 }
 
@@ -545,7 +551,13 @@ UTEST(hl_sig, verify_startup_bad_key)
     HlVfs app_vfs;
     hl_vfs_init(&app_vfs, hl_app_entries, test_dir);
 
-    int rc = hl_verify_startup(pk_path, entry_point, &app_vfs);
+    /* no_verify_platform=1: the test fixture's package.sig has no
+     * gethull block (built before C3 added it), and the embedded
+     * HL_PLATFORM_PUBKEY_HEX is still the all-zeros placeholder in
+     * this commit anyway (C5 restores the real key). Passing 1 keeps
+     * the test focused on the developer-key layer regardless of the
+     * platform-sig state. */
+    int rc = hl_verify_startup(pk_path, entry_point, &app_vfs, 1);
     ASSERT_EQ(rc, -1);
 }
 

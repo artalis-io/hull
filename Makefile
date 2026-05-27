@@ -1954,9 +1954,11 @@ $(BUILDDIR)/test_dispatch: $(TESTDIR)/hull/commands/test_dispatch.c $(CMD_OBJS) 
 # (roadmap_next.md §2) and the real pubkey is embedded, this rule
 # should grow a -DHL_PLATFORM_PUBKEY_HEX="\"0...0\"" override so the
 # test's locally-generated platform keypair isn't rejected by pinning.
-$(BUILDDIR)/test_signature: $(TESTDIR)/hull/test_signature.c $(SIG_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(TEST_COMMON_DEPS) | $(BUILDDIR)
+$(BUILDDIR)/test_signature: $(TESTDIR)/hull/test_signature.c $(SIG_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(CACERT_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(SIG_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(TEST_COMMON_LIBS)
+		$(SIG_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) \
+		$(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(CACERT_OBJ) \
+		$(APP_ENTRIES_DEFAULT_OBJ) $(TEST_COMMON_LIBS)
 
 # Release manifest sign/verify test — needs release.c + crypto
 $(BUILDDIR)/test_release: $(TESTDIR)/hull/test_release.c $(RELEASE_OBJ) $(TEST_COMMON_DEPS) | $(BUILDDIR)

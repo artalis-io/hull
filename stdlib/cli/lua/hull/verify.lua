@@ -1,12 +1,30 @@
 --
--- hull.verify — Verify app signature (dual-layer)
+-- hull.verify — Verify app signature (dual-layer + v0.1.3 gethull)
 --
 -- Usage: hull verify [options] [app_dir]
---   --platform-key <file|url>   Platform public key (default: hardcoded gethull.dev key)
---   --developer-key <file|url>  Developer public key (required for full verification)
+--   --platform-key <file|url>   Per-app platform key (the v0.1.2 platforms
+--                               object is signed by the app developer here,
+--                               not by gethull.dev — distinct from the
+--                               gethull layer below)
+--   --developer-key <file|url>  Developer public key for the app layer
+--   --no-verify-platform        Skip the v0.1.3 gethull platform-sig check
+--                               (package.sig.platform.gethull). Use this for
+--                               apps built with a dev hull (no embedded
+--                               manifest) or with a fork that signs platform
+--                               with its own key.
 --
--- Reads package.sig (or hull.sig for backwards compat), verifies platform
--- and app layer Ed25519 signatures, and checks file hashes.
+-- Verification layers, in order:
+--   1. gethull layer (v0.1.3): package.sig.platform.gethull — the signed
+--      libhull_platform.a manifest carried forward from the hull binary
+--      that ran `hull build`. Pubkey is the build-time-pinned
+--      HL_PLATFORM_PUBKEY_HEX (queried via tool.platform_pubkey()).
+--   2. app's per-build platform layer (v0.1.2): package.sig.platform.{
+--      platforms, public_key, signature} — the JSON object the developer
+--      signed alongside their app.
+--   3. app layer: package.sig.{files, signature, public_key} — Ed25519
+--      over the canonical-JSON payload of {binary_hash, build, files,
+--      manifest, platform, trampoline_hash[, modules_resolved]}.
+--   4. file hashes — each path in files{} re-hashed and compared.
 --
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 --
@@ -50,6 +68,7 @@ local function parse_args()
         app_dir = ".",
         platform_key = nil,
         developer_key = nil,
+        no_verify_platform = false,
     }
 
     local i = 1
@@ -61,6 +80,8 @@ local function parse_args()
         elseif a == "--developer-key" then
             i = i + 1
             opts.developer_key = arg[i]
+        elseif a == "--no-verify-platform" then
+            opts.no_verify_platform = true
         elseif a:sub(1, 1) ~= "-" then
             opts.app_dir = a
         end
@@ -94,6 +115,44 @@ local function main()
     if not sig or not sig.files or not sig.signature or not sig.public_key then
         tool.stderr("hull verify: invalid signature format\n")
         tool.exit(1)
+    end
+
+    -- ── gethull layer (v0.1.3) ─────────────────────────────────────
+    -- The signed libhull_platform.a manifest carried forward from the
+    -- hull binary that ran `hull build`. The signing key is gethull.dev's
+    -- platform key, pinned at build time in HL_PLATFORM_PUBKEY_HEX.
+    -- This whole block is no-op when:
+    --   * --no-verify-platform is set, or
+    --   * this verify hull was built with the all-zeros placeholder
+    --     pubkey (dev hulls / forks without their own pinned key) —
+    --     we cannot validate anyway, and apps built by such a hull
+    --     legitimately have no gethull block.
+    local verify_pubkey_hex = tool.platform_pubkey()
+    if opts.no_verify_platform then
+        print("gethull layer: SKIPPED (--no-verify-platform)")
+    elseif not verify_pubkey_hex then
+        print("gethull layer: SKIPPED (this hull has no pinned platform " ..
+            "pubkey — placeholder build)")
+    elseif sig.platform and sig.platform.gethull and
+           sig.platform.gethull.manifest and sig.platform.gethull.signature then
+        local gethull_ok = crypto.ed25519_verify(
+            sig.platform.gethull.manifest,
+            sig.platform.gethull.signature,
+            verify_pubkey_hex)
+        if gethull_ok then
+            print("gethull layer: VALID (signed by gethull.dev)")
+        else
+            tool.stderr("gethull layer: FAILED — signature invalid\n")
+            tool.stderr("  the embedded libhull_platform.a does not " ..
+                "match what gethull.dev signed at release time\n")
+            issues = issues + 1
+        end
+    elseif not is_legacy then
+        tool.stderr("gethull layer: MISSING — package.sig has no " ..
+            "platform.gethull block\n")
+        tool.stderr("  hint: rebuild with a hull v0.1.3+ that has " ..
+            "platform-sig wired through, or pass --no-verify-platform\n")
+        issues = issues + 1
     end
 
     -- ── Platform layer verification ────────────────────────────────

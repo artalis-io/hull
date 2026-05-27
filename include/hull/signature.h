@@ -91,6 +91,16 @@ typedef struct {
     ShJsonValue *platforms_value;  /* parsed DOM for canonical reconstruction */
     const char *signature_hex;    /* 128 hex chars */
     const char *public_key_hex;   /* 64 hex chars */
+
+    /* v0.1.3: gethull.dev-signed manifest blob inherited from the
+     * hull binary that built the app. The runtime verifier checks
+     * `gethull_signature_hex` against `HL_PLATFORM_PUBKEY_HEX` over
+     * the `gethull_manifest` bytes. NULL fields when the building
+     * hull had no embedded blob (placeholder mode / dev hull). */
+    const char *gethull_manifest;
+    size_t      gethull_manifest_len;
+    const char *gethull_signature_hex;
+    size_t      gethull_signature_hex_len;
 } HlPlatformSig;
 
 /* ── Parsed package.sig ───────────────────────────────────────────── */
@@ -180,15 +190,23 @@ void hl_sig_free(HlSignature *sig);
  * @brief Full startup verification path.
  *
  * Reads the developer pubkey, reads `package.sig`, verifies both signature
- * layers, then verifies file hashes against embedded entries (build mode)
- * or filesystem files (dev mode, derived from the entry-point path).
+ * layers (including the v0.1.3 gethull platform-sig layer), then verifies
+ * file hashes against embedded entries (build mode) or filesystem files
+ * (dev mode, derived from the entry-point path).
  *
- * @param pubkey_path Path to developer `.pub` file (64 hex chars).
- * @param entry_point Path to the app entry point — used to locate sig.
- * @param app_vfs     App VFS for embedded entry lookup.
+ * @param pubkey_path        Path to developer `.pub` file (64 hex chars).
+ * @param entry_point        Path to the app entry point — used to locate sig.
+ * @param app_vfs            App VFS for embedded entry lookup.
+ * @param no_verify_platform If non-zero, skip the v0.1.3 gethull
+ *                           platform-sig layer (`package.sig.platform.gethull`).
+ *                           Pass 1 for dev hulls (no embedded manifest) or
+ *                           forks signing with their own platform key. The
+ *                           older `platform.{platforms,public_key,signature}`
+ *                           layer is always checked when present (only the
+ *                           gethull layer is gated by this flag).
  * @return 0 on success, -1 on any verification failure.
  */
 int hl_verify_startup(const char *pubkey_path, const char *entry_point,
-                      const HlVfs *app_vfs);
+                      const HlVfs *app_vfs, int no_verify_platform);
 
 #endif /* HL_SIGNATURE_H */
