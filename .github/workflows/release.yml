@@ -320,7 +320,7 @@ jobs:
           "${GITHUB_WORKSPACE}/build/hull" keygen "${GITHUB_WORKSPACE}/build/plat"
           "${GITHUB_WORKSPACE}/build/hull" sign-platform \
               --dir "${GITHUB_WORKSPACE}/build/" \
-              "${GITHUB_WORKSPACE}/build/plat.key"
+              "${GITHUB_WORKSPACE}/build/plat"
           # App in tmpdir.
           TMP=$(mktemp -d)
           cd "$TMP"
@@ -440,7 +440,7 @@ jobs:
           "${GITHUB_WORKSPACE}/build/hull" keygen "${GITHUB_WORKSPACE}/build/plat"
           "${GITHUB_WORKSPACE}/build/hull" sign-platform \
               --dir "${GITHUB_WORKSPACE}/build/" \
-              "${GITHUB_WORKSPACE}/build/plat.key"
+              "${GITHUB_WORKSPACE}/build/plat"
           TMP=$(mktemp -d)
           cd "$TMP"
           cat > app.lua <<'LUA'
