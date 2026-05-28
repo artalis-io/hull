@@ -292,33 +292,52 @@ jobs:
       - name: Smoke-test version
         run: ./build/hull version
 
-      - name: Platform-sig E2E smoke test (SKIPPED for cosmo)
-        # The native build jobs (darwin-arm64, linux-x86_64,
-        # linux-aarch64) all run this smoke test and prove the
-        # signature chain works end-to-end (`hull build --sign` +
-        # `--verify-sig` on the output).
+      - name: Platform-sig E2E smoke test
+        # Build a signed app with the freshly-baked hull binary, exercising
+        # the full chain: hull build cross-checks the .a's SHA against the
+        # gethull manifest IT embeds, then the output binary runs under
+        # --verify-sig and re-verifies the gethull layer at startup. This
+        # is the test that would have caught the v0.1.3-rc bug; release
+        # cannot proceed past this point if either layer is broken.
         #
-        # The cosmo APE on a Linux runner can't run this test
-        # cleanly:
-        #
-        #   - `hull build` invokes the system compiler. Cosmo's
-        #     pledge/unveil polyfill restricts file/library mmap in
-        #     tool mode, so spawning /usr/bin/cc fails with
-        #     "libc.so.6: failed to map segment from shared object."
-        #   - `--compiler cosmocc` fails the PATH lookup for the
-        #     same reason: /opt/cosmo isn't in the sandbox's
-        #     unveiled paths.
-        #
-        # The native-build coverage is sufficient gating for the
-        # gethull signature chain (same C verification code, same
-        # canonical-JSON reconstruction). Cosmo-specific E2E
-        # coverage would need a separate runner harness — tracked
-        # for v0.1.4.
+        # Was disabled in f3311cd because cosmo's pledge/unveil polyfill
+        # blocked /opt/cosmo (cosmocc install dir) and tool-mode auto-
+        # detect didn't try cosmocc. §3.1 of roadmap_next.md widens the
+        # Linux/cosmo unveil set with /opt + $HOME/.cosmocc + $HOME/cosmocc
+        # AND teaches hl_compiler_select to try cosmocc when running as a
+        # cosmo APE — so both the explicit and the auto paths now work.
         run: |
-          echo "Platform-sig E2E smoke test: SKIPPED for cosmo build."
-          echo "Native builds (darwin-arm64, linux-x86_64, linux-aarch64)"
-          echo "exercise the same signature chain end-to-end; their"
-          echo "success is the gate for the gethull layer."
+          set -eu
+          # Sign platform in-place in build/ so hull build can find
+          # platform.sig via the "alongside the hull binary" lookup.
+          "${GITHUB_WORKSPACE}/build/hull" keygen "${GITHUB_WORKSPACE}/build/plat"
+          "${GITHUB_WORKSPACE}/build/hull" sign-platform \
+              --dir "${GITHUB_WORKSPACE}/build/" \
+              "${GITHUB_WORKSPACE}/build/plat"
+          # App in tmpdir.
+          TMP=$(mktemp -d)
+          cd "$TMP"
+          cat > app.lua <<'LUA'
+          app.manifest({modules = {"hull/http-server@1"}})
+          app.get("/", function(req, res) res:json({ok=true}) end)
+          LUA
+          "${GITHUB_WORKSPACE}/build/hull" keygen dev
+          # Auto-detect: cosmo hull now finds cosmocc via /opt/cosmo
+          # (CI install dir) under the widened tool-mode unveil set.
+          "${GITHUB_WORKSPACE}/build/hull" build --sign dev.key -o myapp .
+          test -x myapp
+          ./myapp --verify-sig dev.pub --no-sandbox -p 19888 ./app.lua &
+          SVR=$!
+          sleep 3
+          if ! kill -0 "$SVR" 2>/dev/null; then
+            echo "::error::myapp failed to start under --verify-sig (platform-sig check broken)"
+            exit 1
+          fi
+          RESP=$(curl -fsS http://127.0.0.1:19888/ || echo FAIL)
+          kill "$SVR" 2>/dev/null || true
+          wait "$SVR" 2>/dev/null || true
+          echo "$RESP" | grep -q '"ok":true' || { echo "::error::wrong response: $RESP"; exit 1; }
+          echo "✓ platform-sig E2E (build --sign + --verify-sig) passes"
 
       - name: Rename artifact
         run: cp build/hull hull-cosmo

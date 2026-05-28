@@ -464,10 +464,11 @@ WAMR_OBJS := $(patsubst $(WAMR_DIR)/%.c,$(BUILDDIR)/wamr_%.o,$(WAMR_SRCS))
 # When SIMD is enabled, float register slots are 128-bit (v128), so the assembly
 # invoker must use the _simd variant to match the buffer layout.
 WAMR_INVOKE_OBJ := $(BUILDDIR)/wamr_invoke_native.o
-ifeq ($(UNAME_S),Darwin)
-  WAMR_INVOKE_SRC := $(WAMR_IWASM)/common/arch/invokeNative_osx_universal.s
-  WAMR_INVOKE_FLAGS := -DBH_PLATFORM_DARWIN -DWASM_ENABLE_SIMD=1
-else ifeq ($(notdir $(CC)),cosmocc)
+# Target-compiler checks must come BEFORE host-platform (UNAME_S=Darwin),
+# otherwise cross-building cosmo on macOS picks invokeNative_osx_universal.s
+# (Mach-O) for a cosmo (ELF/APE) link and the linker errors with
+# "missing elf symbol table". §3.1 of roadmap_next.md.
+ifeq ($(notdir $(CC)),cosmocc)
   # Cosmopolitan fat binary: need arch-specific assembly invokers for both
   # x86_64 and aarch64. The generic C invoker mangles 64-bit arguments.
   # cosmocc links two architectures; we compile each with the arch-specific
@@ -479,6 +480,9 @@ else ifneq ($(findstring x86_64-unknown-cosmo,$(CC)),)
   WAMR_INVOKE_SRC := $(WAMR_IWASM)/common/arch/invokeNative_em64_simd.s
 else ifneq ($(findstring aarch64-unknown-cosmo,$(CC)),)
   WAMR_INVOKE_SRC := $(WAMR_IWASM)/common/arch/invokeNative_aarch64_simd.s
+else ifeq ($(UNAME_S),Darwin)
+  WAMR_INVOKE_SRC := $(WAMR_IWASM)/common/arch/invokeNative_osx_universal.s
+  WAMR_INVOKE_FLAGS := -DBH_PLATFORM_DARWIN -DWASM_ENABLE_SIMD=1
 else ifeq ($(shell uname -m),x86_64)
   WAMR_INVOKE_SRC := $(WAMR_IWASM)/common/arch/invokeNative_em64_simd.s
 else ifeq ($(shell uname -m),aarch64)

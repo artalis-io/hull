@@ -20,6 +20,7 @@
 
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ── Platform pledge/unveil providers ──────────────────────────────── */
@@ -67,8 +68,8 @@ static int sb_supported(void) { return 1; }
  * Phase 1 (pledge) is a no-op on macOS; phase 2 applies the full
  * Seatbelt profile.
  */
-/* sandbox.h is deprecated since macOS 10.8 — use free() for error strings */
-#include <stdlib.h> /* free */
+/* sandbox.h is deprecated since macOS 10.8 — use free() for error strings.
+ * stdlib.h is included at the top of the file. */
 
 extern int sandbox_init_with_parameters(const char *profile,
                                          uint64_t flags,
@@ -473,6 +474,23 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
     hl_tool_unveil_add(ctx, "/bin", "rx");   /* APE shebang invokes /bin/sh */
     hl_tool_unveil_add(ctx, "/lib", "rx");   /* shared libs need execute for mmap */
     hl_tool_unveil_add(ctx, "/lib64", "rx");
+    /* /opt: `make fetch-cosmocc COSMOCC_DIR=/opt/cosmo` (CI) and other
+     * package managers commonly install toolchains here. */
+    hl_tool_unveil_add(ctx, "/opt", "rx");
+    /* $HOME/.cosmocc and $HOME/cosmocc: cosmocc.zip default user-install
+     * paths. Narrow — only the .cosmocc / cosmocc subtree, not all of $HOME. */
+    {
+        const char *home = getenv("HOME");
+        if (home && *home) {
+            char path[PATH_MAX];
+            int n = snprintf(path, sizeof(path), "%s/.cosmocc", home);
+            if (n > 0 && (size_t)n < sizeof(path))
+                hl_tool_unveil_add(ctx, path, "rx");
+            n = snprintf(path, sizeof(path), "%s/cosmocc", home);
+            if (n > 0 && (size_t)n < sizeof(path))
+                hl_tool_unveil_add(ctx, path, "rx");
+        }
+    }
 #endif
 
 #ifdef __APPLE__
@@ -500,6 +518,19 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
         unveil("/bin", "rx");   /* APE shebang invokes /bin/sh */
         unveil("/lib", "rx");   /* shared libs need execute for mmap */
         unveil("/lib64", "rx");
+        unveil("/opt", "rx");
+        {
+            const char *home = getenv("HOME");
+            if (home && *home) {
+                char path[PATH_MAX];
+                int n = snprintf(path, sizeof(path), "%s/.cosmocc", home);
+                if (n > 0 && (size_t)n < sizeof(path))
+                    unveil(path, "rx");
+                n = snprintf(path, sizeof(path), "%s/cosmocc", home);
+                if (n > 0 && (size_t)n < sizeof(path))
+                    unveil(path, "rx");
+            }
+        }
 #endif
 #ifdef __APPLE__
         unveil("/opt", "rx");

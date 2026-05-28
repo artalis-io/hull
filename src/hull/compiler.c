@@ -146,6 +146,50 @@ HlCompiler *hl_compiler_select(const char *explicit_cc)
     }
 #endif
 
+#ifdef __COSMOPOLITAN__
+    /* Cosmo hull: prefer cosmocc since the embedded platform .a's are
+     * cosmo-format archives. Native cc/gcc/clang link them to ELF/Mach-O
+     * (not APE), so the output wouldn't be a portable cosmo binary
+     * anyway. Check known install locations before $PATH because the
+     * cosmocc.zip installer typically doesn't put cosmocc on PATH by
+     * default. §3.1 of roadmap_next.md. */
+    {
+        const char *home = getenv("HOME");
+        char path[512];
+
+        /* User-install paths first (cosmocc.zip default layouts) */
+        if (home && *home) {
+            int n = snprintf(path, sizeof(path),
+                             "%s/.cosmocc/bin/cosmocc", home);
+            if (n > 0 && (size_t)n < sizeof(path)) {
+                HlCompiler *c = hl_compiler_system_new(path);
+                if (c && hl_compiler_is_available(c)) return c;
+                if (c) hl_compiler_destroy(c);
+            }
+            n = snprintf(path, sizeof(path),
+                         "%s/cosmocc/bin/cosmocc", home);
+            if (n > 0 && (size_t)n < sizeof(path)) {
+                HlCompiler *c = hl_compiler_system_new(path);
+                if (c && hl_compiler_is_available(c)) return c;
+                if (c) hl_compiler_destroy(c);
+            }
+        }
+        /* System-wide install (`make fetch-cosmocc COSMOCC_DIR=/opt/cosmo`,
+         * package managers) */
+        HlCompiler *c = hl_compiler_system_new("/opt/cosmo/bin/cosmocc");
+        if (c && hl_compiler_is_available(c)) return c;
+        if (c) hl_compiler_destroy(c);
+        /* $PATH fallback */
+        c = hl_compiler_system_new("cosmocc");
+        if (c && hl_compiler_is_available(c)) return c;
+        if (c) hl_compiler_destroy(c);
+        /* Fall through to cc/gcc/clang below. Those won't actually
+         * produce a working APE against cosmo .a's, but letting them
+         * try gives a clearer link-time error than a silent
+         * "no compiler found." */
+    }
+#endif
+
     /* Auto: try system compilers in PATH */
     static const char *candidates[] = { "cc", "gcc", "clang", NULL };
     for (const char **p = candidates; *p; p++) {
