@@ -2322,13 +2322,21 @@ self-build: $(BUILDDIR)/hull platform
 # same path, then copying aside, isolates the question we actually care
 # about: "is the link output deterministic for fixed inputs?" Same trick
 # works on Linux (it's a no-op there since GNU ld doesn't path-hash).
+#
+# Forces `--compiler=system` so the test exercises the gcc/clang
+# backend's `sys_compile`, which passes `-ffile-prefix-map=<srcdir>=.`
+# to strip the per-build random tempdir from the .o file's embedded
+# source-name. TCC's compile path doesn't yet have the equivalent
+# (its `-ffile-prefix-map` support is patchy), so TCC-default builds
+# can still produce per-tempdir .o variance on Linux. TCC-mode
+# determinism is a separate, smaller-impact follow-up.
 reproducible-check: $(BUILDDIR)/hull
 	@echo "=== Reproducibility: byte-identical `hull build` outputs ==="
 	@TMPDIR=$$(mktemp -d) && \
 	OUT="$$TMPDIR/app" && \
-	$(BUILDDIR)/hull build --no-verify-platform -o "$$OUT" tests/fixtures/null_app && \
+	$(BUILDDIR)/hull build --compiler=system --no-verify-platform -o "$$OUT" tests/fixtures/null_app && \
 	cp "$$OUT" "$$TMPDIR/snap1" && \
-	$(BUILDDIR)/hull build --no-verify-platform -o "$$OUT" tests/fixtures/null_app && \
+	$(BUILDDIR)/hull build --compiler=system --no-verify-platform -o "$$OUT" tests/fixtures/null_app && \
 	cp "$$OUT" "$$TMPDIR/snap2" && \
 	if cmp -s "$$TMPDIR/snap1" "$$TMPDIR/snap2"; then \
 		echo "PASS: builds are byte-identical ($$(wc -c < "$$TMPDIR/snap1") bytes)"; \

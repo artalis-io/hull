@@ -55,8 +55,36 @@ static int sys_compile(HlCompiler *c, const char *src, const char *obj,
     SysCtx *ctx = (SysCtx *)c->ctx;
     const char *argv[HL_COMPILER_MAX_ARGS];
     int n = 0;
+
+    /* Reproducibility: strip the tempdir absolute path from the .o
+     * file's embedded source-name (STT_FILE on ELF, N_OSO on Mach-O).
+     * `hull build` creates a random `/tmp/hull_XXXXXX/` tempdir per
+     * invocation; without this, two builds of the same source produce
+     * .o files whose embedded paths differ, which on Linux feeds into
+     * the link-time Build-ID hash and breaks byte-identity.
+     *
+     * `-ffile-prefix-map` is gcc 8+ / clang 10+; both are present on
+     * supported Linux distros and macOS Xcode. TCC ignores unknown
+     * flags silently (its determinism story is separate).
+     *
+     * The buffer lives on the stack for the lifetime of this call,
+     * which is fine since hl_tool_spawn() runs execve and returns
+     * before we exit. */
+    char map_buf[PATH_MAX + 32];
+    char srcdir[PATH_MAX];
+    snprintf(srcdir, sizeof(srcdir), "%s", src);
+    char *slash = strrchr(srcdir, '/');
+    if (slash) {
+        *slash = '\0';
+        snprintf(map_buf, sizeof(map_buf), "-ffile-prefix-map=%s=.", srcdir);
+    } else {
+        /* src has no directory component; nothing to map */
+        map_buf[0] = '\0';
+    }
+
     argv[n++] = ctx->cc;
     argv[n++] = "-std=c11"; argv[n++] = "-O2"; argv[n++] = "-w";
+    if (map_buf[0]) argv[n++] = map_buf;
     argv[n++] = "-c";
     if (include_dir) { argv[n++] = "-I"; argv[n++] = include_dir; }
     argv[n++] = "-o"; argv[n++] = obj;
