@@ -89,6 +89,29 @@ ifndef COSMO
     CFLAGS  += -D_DEFAULT_SOURCE
     LDFLAGS += -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack
   endif
+
+  # Reproducibility: strip linker-embedded entropy that makes otherwise-
+  # identical builds differ byte-for-byte.
+  #
+  # Linux: `ld` embeds a random Build-ID GUID by default. --build-id=none
+  # suppresses it. Safe — Linux executables don't require Build-ID at
+  # runtime, only debuggers/crash-reporters use it.
+  #
+  # macOS: `ld64` embeds a random LC_UUID per link. We CANNOT suppress
+  # it: modern dyld requires LC_UUID to be present and aborts with
+  # "missing LC_UUID load command" on Apple Silicon if -no_uuid is used.
+  # Apple's intended path for reproducible macOS builds is to feed the
+  # linker deterministic inputs (no embedded timestamps) so it produces
+  # a content-addressed LC_UUID. That requires upstream work in vendored
+  # ar invocations (Keel, mbedTLS, etc. — all use `ar rcs` without `D`).
+  # Tracked in roadmap_next.md.
+  #
+  # Net: `make reproducible-check` is reliable on Linux; macOS builds
+  # currently differ by ~47 bytes per link (16 LC_UUID + 34 downstream
+  # code-sig data). CI gate runs on ubuntu-latest, so the gate works.
+  ifeq ($(UNAME_S),Linux)
+    LDFLAGS += -Wl,--build-id=none
+  endif
 endif
 
 # Build mode
@@ -2285,6 +2308,28 @@ self-build: $(BUILDDIR)/hull platform
 	echo "PASS: self-build chain verified (hull -> hull2 -> hull3)" && \
 	rm -rf "$$TMPDIR" || \
 	(echo "FAIL: self-build chain" && rm -rf "$$TMPDIR" && exit 1)
+
+# ── Reproducibility check (byte-identical builds) ───────────────────
+# Tests the MANIFESTO claim "same source + same hull version = same binary"
+# by having hull build the same fixture twice and verifying the outputs
+# are byte-identical. This is a stronger property than self-build:
+# self-build proves hull can bootstrap, this proves `hull build` is
+# deterministic for any given input.
+reproducible-check: $(BUILDDIR)/hull
+	@echo "=== Reproducibility: byte-identical `hull build` outputs ==="
+	@TMPDIR=$$(mktemp -d) && \
+	$(BUILDDIR)/hull build --no-verify-platform -o "$$TMPDIR/app1" tests/fixtures/null_app && \
+	$(BUILDDIR)/hull build --no-verify-platform -o "$$TMPDIR/app2" tests/fixtures/null_app && \
+	if cmp -s "$$TMPDIR/app1" "$$TMPDIR/app2"; then \
+		echo "PASS: builds are byte-identical ($$(wc -c < "$$TMPDIR/app1") bytes)"; \
+		rm -rf "$$TMPDIR"; \
+	else \
+		echo "FAIL: builds differ"; \
+		ls -l "$$TMPDIR/app1" "$$TMPDIR/app2"; \
+		shasum -a 256 "$$TMPDIR/app1" "$$TMPDIR/app2" 2>/dev/null || true; \
+		rm -rf "$$TMPDIR"; \
+		exit 1; \
+	fi
 
 # ── Full check (sanitized build + test + e2e) ───────────────────────
 

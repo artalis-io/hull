@@ -44,7 +44,7 @@ Hull is **one binary** (`hull`) that does five jobs:
 
 | Job | Subcommand | What runs |
 |---|---|---|
-| Dev server | `hull <app>` / `hull dev` | Loads `app.lua` or `app.js`; sandboxed; hot-reloads on file change |
+| Dev server | `hull <app>` / `hull dev` | Loads `app.lua` or `app.js` under the capability-secure runtime; hot-reloads on file change |
 | Test runner | `hull test` | In-process HTTP dispatch against the loaded app; no real TCP |
 | Build tool | `hull build` | Compiles the app + Hull's `libhull_platform.a` to a standalone binary |
 | Release tool | `hull update`, `sign-release`, `verify-release` | Self-update over HTTPS with Ed25519 signature |
@@ -349,7 +349,7 @@ Grouped by purpose. Run `hull <cmd> --help` for full per-command flags.
 │   ↓ uses globals: app, db, http, fs, crypto, ...        │
 ├─────────────────────────────────────────────────────────┤
 │ Runtimes (Lua 5.4 / QuickJS)                            │
-│   sandboxed interpreters, instruction-metered           │
+│   capability-secure interpreters, instruction-metered   │
 ├─────────────────────────────────────────────────────────┤
 │ Capability Layer (src/hull/cap/*.c, hl_cap_* functions) │
 │   the C enforcement boundary                            │

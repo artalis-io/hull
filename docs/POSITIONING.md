@@ -84,6 +84,63 @@ Rotate these; don't repeat the same one twice on one page.
 - "W^X. No runtime codegen."
 - "The binary is the product."
 
+## Precision notes (the small qualifications)
+
+Honest small print on the "Always say" phrases. Use these expansions
+when the audience asks; don't lead with them.
+
+- **"Single static binary"** is true for Hull's own dependencies: Lua, JS,
+  SQLite, mbedTLS, TweetNaCl, miniz, the CA bundle, WAMR, and TinyCC are
+  all baked in, no external `.so`/`.dylib` required. On macOS, every
+  executable links `libSystem.B.dylib` (Apple-mandated since 10.7+);
+  this is not a Hull-specific dependency, just how macOS executables
+  work. GPU-enabled builds (`HL_ENABLE_GPU=1`) additionally link the
+  OS-provided Metal/Vulkan/DX12 stack at runtime.
+
+- **"No telemetry, no phone-home"** is true at runtime: a Hull app
+  serving traffic never initiates outbound network calls except those
+  the manifest's `hosts` allowlist explicitly permits. Two CLI
+  commands DO make explicit user-invoked network calls — `hull update`
+  (downloads release artifacts from GitHub) and `hull tools install`
+  (downloads optional tools from the same release). Both are user-
+  initiated, both use the embedded Mozilla CA bundle, both verify
+  Ed25519 signatures before atomic install. They are not telemetry.
+
+- **"No auto-updates fetching code from the internet at build time"**
+  is true: nothing in `make` or `hull build` autonomously fetches
+  upstream artifacts. The `fetch-*` Makefile targets
+  (`fetch-ca-bundle`, `fetch-cosmocc`, `fetch-wgpu`, `fetch-unicode`)
+  are explicit, user-invoked, and pinned to specific versions with
+  SHA-256 verification where applicable. They are documented escape
+  hatches for refreshing vendored assets, not part of the default
+  build.
+
+- **"`hull build` requires no separately-installed C compiler"** is
+  true via embedded TinyCC, but the system linker (`cc`/`ld`) is still
+  used for the link step. The "zero compiler dependency" claim covers
+  the compile side; the linker side falls back to whatever the system
+  provides. On platforms where TinyCC isn't available (macOS Mach-O,
+  cosmo APE), `hull build` requires a system compiler.
+
+- **"Kernel-enforced boundary the script cannot cross"** holds for
+  fs/network capabilities (pledge/unveil filters the syscall). For
+  env-var reads the boundary is enforced purely at the C cap layer
+  (`hl_cap_env_get`'s manifest allowlist check); env reads don't
+  traverse a syscall the kernel filters. The marketing claim is
+  correct for the load-bearing capabilities; pedantic readers will
+  note the env-var nuance.
+
+- **"Reproducible builds"** is byte-identical on Linux (gated in CI via
+  `make reproducible-check`, which suppresses the linker's random
+  Build-ID via `-Wl,--build-id=none`). On macOS, two builds of the
+  same source differ by ~47 bytes per link: `ld64` embeds a random
+  LC_UUID that modern dyld REQUIRES at startup; suppressing it via
+  `-Wl,-no_uuid` produces a binary that aborts with "missing LC_UUID
+  load command." Apple's reproducibility path needs deterministic
+  input ordering (vendored `ar` calls use `rcs` without the `D` flag,
+  embedding mtimes that feed the LC_UUID hash). Tracked in
+  `docs/roadmap_next.md`. CI runs on Linux, so the CI gate is honest.
+
 ## The asymmetry to always restate
 
 This is what differentiates Hull from "yet another sandbox". Restate it whenever someone asks "why now?":

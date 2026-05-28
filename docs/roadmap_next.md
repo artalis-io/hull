@@ -1,6 +1,6 @@
 # Hull. Next Features Roadmap
 
-Status: **Active** | Last reviewed: 2026-05-27
+Status: **Active** | Last reviewed: 2026-05-28
 
 Companion to [`roadmap.md`](roadmap.md). That doc records what's built;
 this one tracks the **next** feature batches in priority order.
@@ -18,6 +18,102 @@ For completed historical roadmaps see [`archive/roadmaps/`](archive/roadmaps/).
 - ✅ **`hull deploy`**. Dockerfile, systemd, fly.toml targets; `hull agent deploy` JSON readiness analysis.
 - ✅ **Extended `hull agent`**. 16 new subcommands (Phase 6) covering manifest preview, request preview, single-file validate, eval, schema-diff, sql-named, vfs/compute/gpu/perf/logs/template/compute-call. Wired into MCP. See [`agent_guide.md`](agent_guide.md) §5.
 - ✅ **v0.1.2 batch**. `hull tools install/list/uninstall` (first tool: wamrc), shared `release_io.{c,h}` extracted from `commands/update.c`, top-level `hull help`, audit fixes (OOB defense, JSON escape, fsync/close checks, constant-time SHA-256 compare), agent surface expansion (`hull agent tools/overview` + `agent context --list` + wamrc state in agent compute), six new opinionated context docs (orientation, quickstart × 3, gpu, tools), discoverability breadcrumbs in `hull --help` + bare-hull + install.sh, `build-wamrc` CI matrix. See [`../CHANGELOG.md#012`](../CHANGELOG.md).
+
+---
+
+## 0. Audit-pass follow-ups (small, named separately because they came
+##    out of cross-surface positioning audits, not feature planning)
+
+### 0.1 `hull sbom` subcommand. Vendored-component manifest as a live command
+
+Convert the static vendored-dependency table in `LICENSING.md` into a
+live, verifiable command. Closes the loop for compliance buyers
+(defense, regulated, sovereign-AI): instead of trusting a doc, they
+run one command on the binary in their hand and get the complete
+provenance chain.
+
+**Surface:**
+
+- `hull sbom` (default: human-readable table; mirrors LICENSING.md
+  style).
+- `hull sbom --format=json` (flat array, agent-friendly).
+- `hull sbom --format=cyclonedx` (industry standard, NTIA-aligned,
+  preferred by defense/government).
+- `hull sbom --format=spdx` (industry standard, more common in OSS
+  compliance).
+- `hull agent sbom` (alias for `--format=json`, fits the existing
+  `hull agent` family).
+
+**Per-component fields:**
+
+- Name
+- Version (semver where applicable, else `n/a`)
+- Pinned commit hash (git submodule SHA at build time, baked in via
+  `-DHULL_VENDOR_<NAME>_COMMIT="..."`)
+- License (SPDX identifier preferred)
+- Upstream source URL
+- Author / maintainer
+- Optional: SHA-256 of the embedded blob (CA bundle, TCC bytes, etc.)
+  for tamper detection
+
+**Must-include entries (beyond third-party):**
+
+- Hull itself: name, version from `HL_VERSION`, commit, AGPL-3.0,
+  link to repo.
+- If `EMBED_PLATFORM=1`: the platform library's signed manifest hash
+  and the gethull pubkey fingerprint. That closes the provenance
+  chain end-to-end.
+
+**Generation strategy:**
+
+- Vendor versions, commits, licenses, URLs in a single C array in
+  `src/hull/sbom.c` (or alongside `build_assets.c`).
+- Populated at build time by the Makefile via
+  `-DHULL_VENDOR_<NAME>_COMMIT=$(shell git -C vendor/<name> rev-parse HEAD)`
+  for each submodule, plus static fields (license, URL) from a
+  table-of-record in the source.
+- Build flags (`HL_ENABLE_WASM`, `HL_ENABLE_GPU`, `HL_ENABLE_DB`,
+  etc.) gate which entries are reported. A compute-only build's SBOM
+  correctly omits SQLite.
+
+**Why a separate subcommand, not a flag on `hull doctor`:** `doctor`
+is the "is this install ready to build/run?" check (toolchain, CA
+bundle, embedded platform). `sbom` is "what provenance does this
+binary have?" Different concern; mixing them dilutes both.
+
+**Effort:** ~50-line subcommand + ~80-line static table + 3
+Makefile lines per vendored dep. Small relative to the credibility
+win for compliance personas.
+
+**Priority:** Tier 1 audit-credibility booster. Enterprise/compliance
+buyers (Lisa-the-Defense-Contractor persona) buy this directly.
+
+### 0.2 Byte-reproducible builds on macOS
+
+CI now gates `make reproducible-check` on Linux via
+`-Wl,--build-id=none`. macOS builds still differ by ~47 bytes per
+link because `ld64` embeds a random LC_UUID that modern dyld
+REQUIRES at startup (suppressing it with `-Wl,-no_uuid` produces a
+binary that aborts with "missing LC_UUID load command").
+
+Apple's intended path for reproducible macOS builds is to feed `ld64`
+deterministic inputs so it computes a content-addressed LC_UUID. The
+work:
+
+- Patch vendored `Makefile`s (Keel, mbedTLS, WAMR, etc.) to invoke
+  `ar Drcs` instead of `ar rcs` so archive members don't embed
+  build-time mtimes that bleed into the link-time LC_UUID hash.
+- Audit object-file embeds for any other entropy (compiler temp
+  paths, ifdef'd build dates).
+- Re-run `make reproducible-check` on macOS until it passes; then
+  add a macOS job to the `reproducibility` workflow.
+
+**Acceptance:** `make reproducible-check` passes on both Linux and
+macOS CI. MANIFESTO's "Reproducible builds" claim becomes fully true
+without platform qualification.
+
+**Effort:** Medium. Mostly upstream coordination with Keel and other
+vendored projects (or local patches). 1-3 days of focused work.
 
 ---
 

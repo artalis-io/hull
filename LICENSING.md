@@ -68,7 +68,7 @@ Every license below is AGPL-3.0-compatible.
 | wgpu-native | MPL-2.0 / Apache-2.0 dual | Optional (`HL_ENABLE_GPU=1`, default off). |
 | miniz | MIT | gzip compression. |
 | Mozilla CA bundle | MPL-2.0 | Embedded for HTTPS without a system store. |
-| **TinyCC** | **LGPL-2.1+** | Embedded so `hull build` works with no system compiler. |
+| **TinyCC** | **LGPL-2.1+** | Embedded so `hull build` does not require a separately-installed C compiler. The system linker is still used for the link step. |
 
 **The TinyCC note.** TinyCC is the one LGPL component. LGPL is GPL/AGPL-compatible,
 but static linking under LGPL §6 requires either (a) the recipient's ability to

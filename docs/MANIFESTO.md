@@ -105,7 +105,7 @@ Four core beliefs:
 - **Ship as a file**. One binary, runs on any OS, no installer, no runtime, no admin privileges
 - **Built-in licensing**. Ed25519 signed keys, offline verification, tax-ID binding for compliance
 - **Digital signatures**. Platform and app signatures prove integrity and authorship
-- **Reproducible builds**. Same source + same Hull version = same binary, verifiable by anyone
+- **Reproducible builds (Linux)**. `hull build` is deterministic on Linux: same source + same hull version = byte-identical binary. Gated in CI via `make reproducible-check`. On macOS, builds differ by ~47 bytes per link because `ld64` embeds a random LC_UUID that dyld requires at runtime (suppressing it breaks the binary); deterministic LC_UUID via input ordering is tracked in `docs/roadmap_next.md`. (`make self-build` separately verifies hull is self-hostable across all platforms: hull can build hull2 can build hull3.)
 
 ## Thesis
 
@@ -163,7 +163,7 @@ Hull is a capability-secure application runtime that embeds the entire stack (HT
 | [log.c](https://github.com/rxi/log.c), [sh_arena](https://github.com/sailorhg/sh_arena), [sh_json](https://github.com/sailorhg/sh_json) | Logging, arena allocator, streaming JSON |
 | [miniz](https://github.com/richgel999/miniz) | gzip response compression + client decompression |
 | Mozilla CA bundle | ~145 root certificates embedded for HTTPS without a system store |
-| Embedded TinyCC | ~400 KB compiler embedded so `hull build` works with zero system dependencies |
+| Embedded TinyCC | ~400 KB compiler embedded so `hull build` does not require a separately-installed C compiler (the system linker is still used for the link step) |
 | [WAMR](https://github.com/bytecodealliance/wasm-micro-runtime) *(optional)* | WebAssembly compute plugins (interpreter + AOT, SIMD128, Memory64) |
 | [wgpu-native](https://github.com/gfx-rs/wgpu-native) *(optional)* | GPU compute shaders (Vulkan/Metal/DX12) |
 
