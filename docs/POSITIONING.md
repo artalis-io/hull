@@ -130,16 +130,16 @@ when the audience asks; don't lead with them.
   correct for the load-bearing capabilities; pedantic readers will
   note the env-var nuance.
 
-- **"Reproducible builds"** is byte-identical on Linux (gated in CI via
-  `make reproducible-check`, which suppresses the linker's random
-  Build-ID via `-Wl,--build-id=none`). On macOS, two builds of the
-  same source differ by ~47 bytes per link: `ld64` embeds a random
-  LC_UUID that modern dyld REQUIRES at startup; suppressing it via
-  `-Wl,-no_uuid` produces a binary that aborts with "missing LC_UUID
-  load command." Apple's reproducibility path needs deterministic
-  input ordering (vendored `ar` calls use `rcs` without the `D` flag,
-  embedding mtimes that feed the LC_UUID hash). Tracked in
-  `docs/roadmap_next.md`. CI runs on Linux, so the CI gate is honest.
+- **"Reproducible builds"** is in progress. `make reproducible-check`
+  is available as a local diagnostic but is NOT currently gated in
+  CI on either platform: macOS fails by ~47 bytes per link (random
+  LC_UUID that dyld requires; suppressing it breaks the binary);
+  Linux fails because vendored `ar rcs` invocations embed archive-
+  member mtimes that feed the link-time content hash. Both root
+  causes are tracked in `docs/roadmap_next.md §0.2`. CI gates `make
+  self-build` (hull can bootstrap itself, a weaker but real
+  property) until the inputs are deterministic enough to gate
+  byte-identity.
 
 ## The asymmetry to always restate
 

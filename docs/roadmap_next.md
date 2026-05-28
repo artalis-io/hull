@@ -88,32 +88,52 @@ win for compliance personas.
 **Priority:** Tier 1 audit-credibility booster. Enterprise/compliance
 buyers (Lisa-the-Defense-Contractor persona) buy this directly.
 
-### 0.2 Byte-reproducible builds on macOS
+### 0.2 Byte-reproducible builds (both platforms)
 
-CI now gates `make reproducible-check` on Linux via
-`-Wl,--build-id=none`. macOS builds still differ by ~47 bytes per
-link because `ld64` embeds a random LC_UUID that modern dyld
-REQUIRES at startup (suppressing it with `-Wl,-no_uuid` produces a
-binary that aborts with "missing LC_UUID load command").
+`make reproducible-check` exists as a local diagnostic but is NOT
+gated in CI yet. Two distinct root causes need to be addressed:
 
-Apple's intended path for reproducible macOS builds is to feed `ld64`
-deterministic inputs so it computes a content-addressed LC_UUID. The
-work:
+**Linux (the closer one).** Linux fails byte-identity because
+vendored archive builds use `ar rcs` (not `ar Drcs`), so archive
+members embed build-time mtimes. Those mtimes feed into the
+link-time content hash GNU ld uses for the default
+`--build-id=sha1`, so identical source produces different
+Build-IDs. Fix: patch vendored Makefiles (Keel, mbedTLS, WAMR,
+etc.) to use `ar Drcs` (the `D` flag makes ar deterministic by
+zeroing mtimes/uids/gids in archive members). Once that lands,
+Linux Build-IDs become content-addressed in a true sense and
+`make reproducible-check` passes on Linux. Effort: low; mostly a
+1-2 line change per vendored Makefile.
 
-- Patch vendored `Makefile`s (Keel, mbedTLS, WAMR, etc.) to invoke
-  `ar Drcs` instead of `ar rcs` so archive members don't embed
-  build-time mtimes that bleed into the link-time LC_UUID hash.
-- Audit object-file embeds for any other entropy (compiler temp
-  paths, ifdef'd build dates).
-- Re-run `make reproducible-check` on macOS until it passes; then
-  add a macOS job to the `reproducibility` workflow.
+**macOS (the harder one).** macOS `ld64` embeds a random LC_UUID
+per link that modern dyld REQUIRES at startup; suppressing it with
+`-Wl,-no_uuid` produces a binary that aborts with "missing LC_UUID
+load command." Apple's intended path is to feed `ld64` deterministic
+inputs so it computes a content-addressed LC_UUID. Same fix as
+Linux is necessary (ar -D) plus auditing for any other entropy
+sources (compiler temp paths, etc.). Once inputs are clean, the
+LC_UUID becomes deterministic.
 
-**Acceptance:** `make reproducible-check` passes on both Linux and
-macOS CI. MANIFESTO's "Reproducible builds" claim becomes fully true
-without platform qualification.
+**Acceptance:** `make reproducible-check` passes on Linux and macOS
+CI. MANIFESTO's "Reproducible builds" claim becomes fully true.
 
-**Effort:** Medium. Mostly upstream coordination with Keel and other
-vendored projects (or local patches). 1-3 days of focused work.
+**Order of operations:**
+1. Patch vendored Makefiles to use `ar Drcs` (Linux + macOS shared
+   fix).
+2. Re-run `make reproducible-check` on Linux; should pass.
+3. Gate `reproducible-check` in CI's bootstrap job for Linux.
+4. Test on macOS; if LC_UUID is now deterministic, gate macOS too.
+   If not, audit remaining entropy sources.
+
+**Effort:** Medium. The ar-D patches are mechanical; the macOS
+LC_UUID audit can be longer if there are non-obvious entropy
+sources. 1-3 days of focused work.
+
+**Why this matters for positioning:** MANIFESTO's "Reproducible
+builds" claim is currently aspirational — the gate exists but is
+not enforced. Compliance and defense buyers (Lisa-the-Defense-
+Contractor persona) ask for reproducibility as a hard requirement.
+Closing this turns a doc claim into a CI-enforced reality.
 
 ---
 

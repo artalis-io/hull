@@ -105,7 +105,7 @@ Four core beliefs:
 - **Ship as a file**. One binary, runs on any OS, no installer, no runtime, no admin privileges
 - **Built-in licensing**. Ed25519 signed keys, offline verification, tax-ID binding for compliance
 - **Digital signatures**. Platform and app signatures prove integrity and authorship
-- **Reproducible builds (Linux)**. `hull build` is deterministic on Linux: same source + same hull version = byte-identical binary. Gated in CI via `make reproducible-check`. On macOS, builds differ by ~47 bytes per link because `ld64` embeds a random LC_UUID that dyld requires at runtime (suppressing it breaks the binary); deterministic LC_UUID via input ordering is tracked in `docs/roadmap_next.md`. (`make self-build` separately verifies hull is self-hostable across all platforms: hull can build hull2 can build hull3.)
+- **Reproducible builds (in progress)**. `make reproducible-check` is available as a local diagnostic. It currently fails on both Linux and macOS: macOS by ~47 bytes per link (random LC_UUID dyld requires), Linux by archive-member mtimes in vendored `ar rcs` invocations bleeding into the link-time content hash. Both fixes are tracked in `docs/roadmap_next.md §0.2`. CI gates `make self-build` (hull can bootstrap itself: hull -> hull2 -> hull3) which is a weaker but enforced property; full byte-identity gates once the inputs are deterministic.
 
 ## Thesis
 
