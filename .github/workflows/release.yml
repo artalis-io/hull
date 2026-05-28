@@ -427,18 +427,40 @@ jobs:
           "${GITHUB_WORKSPACE}/build/hull" keygen dev
           "${GITHUB_WORKSPACE}/build/hull" build --sign dev.key -o myapp .
           test -x myapp
+          # Variant A: --no-sandbox. Primary gate; confirms the
+          # signature chain works end-to-end without fighting the
+          # runtime sandbox during CI (which has its own polyfill
+          # quirks per platform).
           ./myapp --verify-sig dev.pub --no-sandbox -p 19888 ./app.lua &
           SVR=$!
           sleep 3
           if ! kill -0 "$SVR" 2>/dev/null; then
-            echo "::error::myapp failed to start under --verify-sig (platform-sig check broken)"
+            echo "::error::myapp failed to start under --verify-sig --no-sandbox (platform-sig check broken)"
             exit 1
           fi
           RESP=$(curl -fsS http://127.0.0.1:19888/ || echo FAIL)
           kill "$SVR" 2>/dev/null || true
           wait "$SVR" 2>/dev/null || true
           echo "$RESP" | grep -q '"ok":true' || { echo "::error::wrong response: $RESP"; exit 1; }
-          echo "✓ platform-sig E2E (build --sign + --verify-sig) passes"
+          echo "✓ platform-sig E2E variant A (build --sign + --verify-sig --no-sandbox) passes"
+
+          # Variant B: full sandbox. Catches any signature-chain code
+          # that accidentally needs paths/syscalls the sandbox blocks.
+          # Same myapp binary, same keys — only the sandbox is
+          # different.
+          ./myapp --verify-sig dev.pub -p 19889 ./app.lua &
+          SVR=$!
+          sleep 3
+          if ! kill -0 "$SVR" 2>/dev/null; then
+            echo "::error::myapp failed to start under --verify-sig + sandbox"
+            echo "::error::the sig chain works without sandbox but breaks under it"
+            exit 1
+          fi
+          RESP=$(curl -fsS http://127.0.0.1:19889/ || echo FAIL)
+          kill "$SVR" 2>/dev/null || true
+          wait "$SVR" 2>/dev/null || true
+          echo "$RESP" | grep -q '"ok":true' || { echo "::error::wrong response under sandbox: $RESP"; exit 1; }
+          echo "✓ platform-sig E2E variant B (build --sign + --verify-sig WITH sandbox) passes"
 
       - name: Rename artifact
         run: cp build/hull ${{ matrix.artifact }}

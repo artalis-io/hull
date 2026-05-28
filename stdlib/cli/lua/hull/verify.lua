@@ -7,6 +7,14 @@
 --                               not by gethull.dev — distinct from the
 --                               gethull layer below)
 --   --developer-key <file|url>  Developer public key for the app layer
+--   --gethull-key <file|url>    Cross-check: the file's pubkey must match
+--                               this hull's embedded HL_PLATFORM_PUBKEY_HEX
+--                               AND the signature must verify against it.
+--                               Defends against tampered hull binaries
+--                               where the embedded key has been swapped.
+--                               Note: stricter than verify.js's same-named
+--                               flag, which uses the file as an override
+--                               (JS can't reach the embedded key).
 --   --no-verify-platform        Skip the v0.1.3 gethull platform-sig check
 --                               (package.sig.platform.gethull). Use this for
 --                               apps built with a dev hull (no embedded
@@ -80,6 +88,7 @@ local function parse_args()
         app_dir = ".",
         platform_key = nil,
         developer_key = nil,
+        gethull_key = nil,
         no_verify_platform = false,
     }
 
@@ -92,6 +101,9 @@ local function parse_args()
         elseif a == "--developer-key" then
             i = i + 1
             opts.developer_key = arg[i]
+        elseif a == "--gethull-key" then
+            i = i + 1
+            opts.gethull_key = arg[i]
         elseif a == "--no-verify-platform" then
             opts.no_verify_platform = true
         elseif a:sub(1, 1) ~= "-" then
@@ -139,6 +151,17 @@ local function main()
     --     pubkey (dev hulls / forks without their own pinned key) —
     --     we cannot validate anyway, and apps built by such a hull
     --     legitimately have no gethull block.
+    --
+    -- --gethull-key <file>: cross-check semantics (stricter than the
+    -- JS verifier, which can't reach the embedded pubkey and so uses
+    -- the file as an override). When passed:
+    --   1. The signature MUST verify against the embedded
+    --      HL_PLATFORM_PUBKEY_HEX (the normal gethull check).
+    --   2. AND the file's key MUST match the embedded pubkey.
+    -- Both gates have to pass. Catches the case where someone
+    -- tampered with this hull's embedded pubkey AND produced a
+    -- matching signature: the operator's expected key (from the
+    -- file) won't match the tampered embedded one.
     local verify_pubkey_hex = tool.platform_pubkey()
     if opts.no_verify_platform then
         print("gethull layer: SKIPPED (--no-verify-platform)")
@@ -147,6 +170,23 @@ local function main()
             "pubkey — placeholder build)")
     elseif sig.platform and sig.platform.gethull and
            sig.platform.gethull.manifest and sig.platform.gethull.signature then
+        -- Optional cross-check: --gethull-key
+        if opts.gethull_key then
+            local expected_hex = read_key(opts.gethull_key)
+            if not expected_hex then
+                tool.stderr("gethull layer: FAILED — could not read " ..
+                    "--gethull-key file " .. opts.gethull_key .. "\n")
+                issues = issues + 1
+            elseif expected_hex ~= verify_pubkey_hex then
+                tool.stderr("gethull layer: FAILED — --gethull-key does " ..
+                    "not match this hull's embedded HL_PLATFORM_PUBKEY_HEX\n")
+                tool.stderr("  expected: " .. expected_hex:sub(1, 16) .. "...\n")
+                tool.stderr("  embedded: " .. verify_pubkey_hex:sub(1, 16) .. "...\n")
+                tool.stderr("  this hull binary may have been tampered with,\n")
+                tool.stderr("  or you passed the wrong --gethull-key file\n")
+                issues = issues + 1
+            end
+        end
         local gethull_ok = crypto.ed25519_verify(
             sig.platform.gethull.manifest,
             sig.platform.gethull.signature,

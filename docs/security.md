@@ -68,6 +68,68 @@ The platform layer split into two sub-layers in v0.1.3:
 - Manually cross-referenced by user against trusted source
 - Passed explicitly: `hull verify --developer-key dev.pub`
 
+### Key rotation
+
+`HL_PLATFORM_PUBKEY_HEX` and `HL_RELEASE_PUBKEY_HEX` are baked into
+every hull binary at compile time, so rotation is **release-driven,
+not in-place**. There is no key-distribution service to ping; users
+get a new key by installing a new hull binary, and old hulls keep
+working under the old key they shipped with.
+
+**Scheduled rotation** (planned key change for hygiene):
+
+1. Generate a new keypair offline. Store the secret half in the
+   same locations as the current key: `~/.hull/keys/<key>.key`
+   (with offline backup) and the `HULL_PLATFORM_KEY` /
+   `HULL_RELEASE_KEY` GitHub Actions secret.
+2. Update `HL_PLATFORM_PUBKEY_HEX` in
+   `include/hull/signature.h` (and `HL_RELEASE_PUBKEY_HEX` in
+   `include/hull/release.h` if rotating that key). Update
+   `GETHULL_DEV_PLATFORM_KEY` / `GETHULL_DEV_RELEASE_KEY` in
+   `site/verify.html` to match.
+3. Ship a hull release. The release-time signing job uses the new
+   secret; the binary embeds the new pubkey. Every artifact in this
+   release (the hull binary itself + every app built with it) is
+   signed under the new key.
+4. Document the rotation in `CHANGELOG.md`. The note should name
+   the new pubkey hex so users with `gpg --verify`-style workflows
+   can cross-check.
+
+**Post-compromise rotation** (suspected or confirmed secret-key
+disclosure):
+
+Same procedure, expedited, plus:
+
+5. Revoke the compromised key by publishing a notice on
+   `gethull.dev` and the GitHub repo. The honest disclosure is
+   "any hull binary built with secret `<old key>` between
+   `<dates>` may have been signed by an unknown party."
+6. Users running the affected hull binaries should `hull update`
+   (which fetches the new release, verified with the *old* embedded
+   release pubkey since the user's still running the old hull). If
+   the compromise was of the release key itself, users have to
+   download a known-good hull manually and verify it out-of-band
+   (e.g. compare SHA-256 against the published value on a separate
+   trusted channel).
+
+**Non-cross-validity is the design.** A new hull cannot verify a
+gethull-layer signature produced by the old key, because the new
+hull only has the new pubkey embedded. This is intentional:
+old-app + new-hull combinations correctly fail
+`--verify-sig`, surfacing the rotation rather than silently
+accepting both keys. Users who need to keep verifying old apps
+should keep the matching old hull binary around, OR rebuild the
+app with the new hull.
+
+**Why we can't impersonate ourselves.** An attacker who publishes
+a hull binary claiming to be gethull-built must produce a
+`hull.sha256.sig` that verifies against the embedded
+`HL_RELEASE_PUBKEY_HEX` in the user's current hull. Without the
+release secret half, this is computationally infeasible. The
+release-sig chain protects against impersonation of the
+distribution channel; the gethull layer adds the per-platform
+binary-integrity property on top of it.
+
 ---
 
 ## 3. Attack Model

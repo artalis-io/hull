@@ -12,7 +12,15 @@
  * Usage: hull verify [options] [app_dir]
  *   --platform-key <file>    Per-app platform key (v0.1.2 layer)
  *   --developer-key <file>   Developer public key (app layer)
- *   --gethull-key <file>     gethull.dev pubkey for the v0.1.3 layer
+ *   --gethull-key <file>     gethull.dev pubkey for the v0.1.3 layer.
+ *                            OVERRIDE semantics here (since the JS
+ *                            runtime can't read the embedded
+ *                            HL_PLATFORM_PUBKEY_HEX) — the file's
+ *                            key replaces what would be the embedded
+ *                            one. The Lua verifier's same-named flag
+ *                            is stricter (cross-check: file MUST
+ *                            equal embedded, AND signature must
+ *                            verify). Documented asymmetry.
  *   --no-verify-platform     Skip the v0.1.3 gethull layer
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
