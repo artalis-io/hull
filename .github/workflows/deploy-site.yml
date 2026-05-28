@@ -16,6 +16,13 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
 
+    # Promote the CF distribution ID to job-level env so step-level `if:`
+    # conditions can read it. (`secrets` context is not allowed in `if:`;
+    # `env` is — but only env set at workflow/job scope, not at the same
+    # step's env: block since step env is applied AFTER if: evaluates.)
+    env:
+      CF_DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -41,18 +48,12 @@ jobs:
           aws s3 sync site/build/ s3://${{ secrets.S3_BUCKET }} \
             --delete
 
-      # Optional: only runs if the secret is configured. Lets the
-      # workflow ship today without a CloudFront distribution; add the
-      # secret later to enable invalidation.
-      #
-      # Bug fix: the condition originally checked `env.CF_DISTRIBUTION_ID`
-      # but env: is applied AFTER if: in the same step, so the env value
-      # was always empty at evaluation time and this step never ran.
-      # Check the secret directly instead.
+      # Optional: only runs if the CLOUDFRONT_DISTRIBUTION_ID secret is
+      # configured (promoted to job-level env above). Lets the workflow
+      # ship without a CloudFront distribution; add the secret later to
+      # enable invalidation.
       - name: Invalidate CloudFront cache
-        if: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID != '' }}
-        env:
-          CF_DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
+        if: ${{ env.CF_DISTRIBUTION_ID != '' }}
         run: |
           aws cloudfront create-invalidation \
             --distribution-id "$CF_DISTRIBUTION_ID" \
