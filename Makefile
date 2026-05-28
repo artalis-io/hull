@@ -2315,18 +2315,28 @@ self-build: $(BUILDDIR)/hull platform
 # are byte-identical. This is a stronger property than self-build:
 # self-build proves hull can bootstrap, this proves `hull build` is
 # deterministic for any given input.
+#
+# Methodology note: both builds use the SAME output path. macOS ld64
+# hashes the output path into LC_UUID; building to different paths
+# yields different UUIDs even with identical content. Building to the
+# same path, then copying aside, isolates the question we actually care
+# about: "is the link output deterministic for fixed inputs?" Same trick
+# works on Linux (it's a no-op there since GNU ld doesn't path-hash).
 reproducible-check: $(BUILDDIR)/hull
 	@echo "=== Reproducibility: byte-identical `hull build` outputs ==="
 	@TMPDIR=$$(mktemp -d) && \
-	$(BUILDDIR)/hull build --no-verify-platform -o "$$TMPDIR/app1" tests/fixtures/null_app && \
-	$(BUILDDIR)/hull build --no-verify-platform -o "$$TMPDIR/app2" tests/fixtures/null_app && \
-	if cmp -s "$$TMPDIR/app1" "$$TMPDIR/app2"; then \
-		echo "PASS: builds are byte-identical ($$(wc -c < "$$TMPDIR/app1") bytes)"; \
+	OUT="$$TMPDIR/app" && \
+	$(BUILDDIR)/hull build --no-verify-platform -o "$$OUT" tests/fixtures/null_app && \
+	cp "$$OUT" "$$TMPDIR/snap1" && \
+	$(BUILDDIR)/hull build --no-verify-platform -o "$$OUT" tests/fixtures/null_app && \
+	cp "$$OUT" "$$TMPDIR/snap2" && \
+	if cmp -s "$$TMPDIR/snap1" "$$TMPDIR/snap2"; then \
+		echo "PASS: builds are byte-identical ($$(wc -c < "$$TMPDIR/snap1") bytes)"; \
 		rm -rf "$$TMPDIR"; \
 	else \
 		echo "FAIL: builds differ"; \
-		ls -l "$$TMPDIR/app1" "$$TMPDIR/app2"; \
-		shasum -a 256 "$$TMPDIR/app1" "$$TMPDIR/app2" 2>/dev/null || true; \
+		ls -l "$$TMPDIR/snap1" "$$TMPDIR/snap2"; \
+		shasum -a 256 "$$TMPDIR/snap1" "$$TMPDIR/snap2" 2>/dev/null || true; \
 		rm -rf "$$TMPDIR"; \
 		exit 1; \
 	fi

@@ -105,7 +105,7 @@ Four core beliefs:
 - **Ship as a file**. One binary, runs on any OS, no installer, no runtime, no admin privileges
 - **Built-in licensing**. Ed25519 signed keys, offline verification, tax-ID binding for compliance
 - **Digital signatures**. Platform and app signatures prove integrity and authorship
-- **Reproducible builds (in progress)**. `make reproducible-check` is available as a local diagnostic. It currently fails on both Linux and macOS: macOS by ~47 bytes per link (random LC_UUID dyld requires), Linux by archive-member mtimes in vendored `ar rcs` invocations bleeding into the link-time content hash. Both fixes are tracked in `docs/roadmap_next.md §0.2`. CI gates `make self-build` (hull can bootstrap itself: hull -> hull2 -> hull3) which is a weaker but enforced property; full byte-identity gates once the inputs are deterministic.
+- **Reproducible builds**. `hull build` is deterministic: same source + same hull version + same output path = byte-identical binary. Gated in CI via `make reproducible-check` on Linux; verified locally on macOS as well. (Note on same-path: macOS `ld64` hashes the output path into LC_UUID, so the test builds to the same path twice and snapshots between; that's the right question to ask anyway, since end-users build to a known target name.) `make self-build` separately verifies hull is self-hostable across all platforms.
 
 ## Thesis
 

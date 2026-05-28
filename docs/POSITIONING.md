@@ -130,16 +130,15 @@ when the audience asks; don't lead with them.
   correct for the load-bearing capabilities; pedantic readers will
   note the env-var nuance.
 
-- **"Reproducible builds"** is in progress. `make reproducible-check`
-  is available as a local diagnostic but is NOT currently gated in
-  CI on either platform: macOS fails by ~47 bytes per link (random
-  LC_UUID that dyld requires; suppressing it breaks the binary);
-  Linux fails because vendored `ar rcs` invocations embed archive-
-  member mtimes that feed the link-time content hash. Both root
-  causes are tracked in `docs/roadmap_next.md §0.2`. CI gates `make
-  self-build` (hull can bootstrap itself, a weaker but real
-  property) until the inputs are deterministic enough to gate
-  byte-identity.
+- **"Reproducible builds"** holds end-to-end: `hull build` is
+  byte-deterministic for same source + same hull version + same
+  output path. Gated in CI via `make reproducible-check`. One
+  methodology caveat to keep in mind when verifying: macOS `ld64`
+  hashes the output path into LC_UUID, so building the same source
+  to two different paths yields different UUIDs even though the
+  link logic is deterministic. The CI test builds to the same path
+  twice and snapshots between, which is the right question to ask
+  (end-users build to a known target name, not random paths).
 
 ## The asymmetry to always restate
 
