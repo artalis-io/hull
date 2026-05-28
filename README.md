@@ -4,21 +4,17 @@
 
 # Hull
 
-A capability-secure runtime for local-first, agent-native software. Runs Lua/JS and WASM under declared permissions, SQLite storage, and single-binary deployment.
+Hardened, capability-secure runtime infrastructure for AI-native systems. Lua, JavaScript, and WASM execute under declared, kernel-enforced capability boundaries. SQLite storage. Single static binary.
 
-Hull is a sandboxed runtime where application code executes within declared capability boundaries. The app specifies what it can access — files, environment variables, outbound hosts, and database resources — and the runtime enforces those permissions.
+**Code became disposable. Trust is not.** AI generates code endlessly. Hull constrains what that code can actually do, at a kernel-enforced boundary the script cannot cross.
 
-Write backend logic in Lua or JavaScript, frontend in HTML5, and store data in SQLite. `hull build` produces a single portable executable — under 10 MB — that runs on Linux, macOS, Windows, FreeBSD, OpenBSD, and NetBSD.
-
-Everything is packaged together: code, schema, static assets, tests, and signatures. No external services, no hidden dependencies. The resulting binary is the product.
-
-AI coding agents get structured JSON access to routes, schema, tests, and HTTP responses through the built-in `hull agent` command — no plugins, no MCP servers, no configuration.
+The app declares its capabilities — files, environment variables, outbound hosts, database resources — in a manifest. The runtime enforces those bounds. `hull build` produces a single static executable (under 10 MB) that runs on Linux, macOS, Windows, FreeBSD, OpenBSD, and NetBSD. Code, schema, static assets, tests, and signatures all packaged together. The resulting binary is the product.
 
 ## Why
 
-AI coding agents solved code generation. They created two new problems: deployment and trust.
+AI made code abundant. Trusted execution did not get cheaper. The runtime is now the scarce layer — the only place where you can still say *what code is allowed to do* and have it stick.
 
-Hull addresses both. Applications are distributed as a single file, with no infrastructure required. Each app declares its capabilities in a manifest enforced by the runtime, so users can verify exactly what it can access.
+Hull is that layer. Applications are distributed as a single file with no infrastructure required. Each app declares its capabilities in a manifest enforced by the runtime, so users can verify exactly what it can access.
 
 In a world where AI writes code, the runtime becomes the trust boundary. Hull is that boundary.
 
@@ -1403,18 +1399,11 @@ manifest rather than each binary individually are in
 
 ## Status
 
-Hull is approaching v0.1.0. The complete distribution lifecycle is in place:
+Hull is at **v0.1.4**. Pre-stable: APIs and the manifest schema may change. Pin versions and read the [changelog](https://github.com/artalis-io/hull/releases) before upgrading.
 
-| Phase | What | Status |
-|-------|------|--------|
-| D1 | Version + GitHub Actions release pipeline | Done |
-| D2 | `install.sh` + `hull init` + `hull doctor` + shell completions | Done |
-| D3 | Embedded TinyCC — zero-dependency `hull build` | Done |
-| D4 | Embedded Mozilla CA bundle — zero-dependency HTTPS | Done |
-| D5 | `hull update` — verified self-update from GitHub releases | Done |
-| D6 | `hull.com` landing + docs site | External |
+**Platform coverage.** Linux (gcc + clang, x86_64 + aarch64), macOS (arm64), and Cosmopolitan APE (multi-arch fat binary). Capability sandbox enforced via pledge/unveil (Linux / Cosmo / OpenBSD) or Seatbelt (macOS). All releases are signed with Ed25519 — verify with `hull verify-release` or in-browser at [verify.gethull.dev](https://verify.gethull.dev).
 
-All core features are implemented and tested across Linux (gcc + clang), macOS, and Cosmopolitan APE; capability sandbox enforced via pledge/unveil (Linux/Cosmo/OpenBSD) or Seatbelt (macOS). See [docs/roadmap.md](docs/roadmap.md) for what's next after v0.1.0 (PostgreSQL backend, module ecosystem, HTTP/2, agent platform Phase 5).
+See [docs/roadmap.md](docs/roadmap.md) for what's next (PostgreSQL backend, module ecosystem, HTTP/2, agent platform Phase 5).
 
 ## Changelog & Contributing
 
@@ -1432,3 +1421,7 @@ Hull is dual-licensed:
 - **Commercial license** for closed-source embedding and proprietary distribution. email <licensing+site@artalis.io>.
 
 See [LICENSING.md](LICENSING.md) for which license applies to your use case, or [`docs/MANIFESTO.md`](docs/MANIFESTO.md#licensing) for the longer rationale.
+
+---
+
+<sub>Engineered in Europe for sovereign, deploy-anywhere AI infrastructure.</sub>

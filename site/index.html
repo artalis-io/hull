@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Hull. Hardened runtime for AI-native systems</title>
-  <meta name="description" content="Code became disposable. Trust is not. Hull is a hardened, capability-secure runtime for AI-native systems. Local-first, single static binary, every capability declared in the manifest and checked at a C boundary the script cannot cross.">
+  <meta name="description" content="Code became disposable. Trust is not. Hull is a hardened, capability-secure runtime for AI-native systems. Local-first, single static binary, every capability declared in the manifest and checked at a kernel-enforced boundary the script cannot cross.">
   <meta name="theme-color" content="#0a0a0a">
 
   <meta property="og:title" content="Hull. Hardened runtime for AI-native systems">
@@ -32,7 +32,7 @@
     "applicationCategory": "DeveloperApplication",
     "applicationSubCategory": "Runtime",
     "operatingSystem": "Linux, macOS, Windows (via Cosmopolitan), FreeBSD, OpenBSD, NetBSD",
-    "description": "Hardened, capability-secure runtime for AI-native systems. Code became disposable; trust is not. Every external capability (filesystem, network, env, process) is declared in the manifest and checked at a C boundary the script cannot cross. Local-first, single static binary, only the bootstrap registration API is intrinsic.",
+    "description": "Hardened, capability-secure runtime for AI-native systems. Code became disposable; trust is not. Every external capability (filesystem, network, env, process) is declared in the manifest and checked at a kernel-enforced boundary the script cannot cross. Local-first, single static binary, only the bootstrap registration API is intrinsic.",
     "softwareVersion": "0.1.4",
     "url": "https://gethull.dev/",
     "downloadUrl": "https://github.com/artalis-io/hull/releases",
@@ -272,8 +272,8 @@
           <p class="mt-6 text-base md:text-lg text-mute-400 max-w-xl leading-relaxed">
             Hardened, capability-secure runtime infrastructure for
             AI-native systems. AI generates code endlessly &mdash;
-            Hull constrains what it can actually do, at a C boundary
-            the script cannot cross.
+            Hull constrains what it can actually do, at a
+            kernel-enforced boundary the script cannot cross.
           </p>
 
           <div class="mt-8 flex flex-wrap items-center gap-3">
@@ -1333,7 +1333,7 @@ hull v0.1.4  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
               </li>
               <li class="flex gap-2">
                 <span class="text-accent mt-0.5">&check;</span>
-                <span><strong class="text-paper-100">Manifest-declared capabilities.</strong> Every <code class="text-paper-100 text-[0.78rem]">fs/env/host</code> access checked at a C boundary the script can&rsquo;t cross.</span>
+                <span><strong class="text-paper-100">Manifest-declared capabilities.</strong> Every <code class="text-paper-100 text-[0.78rem]">fs/env/host</code> access checked at a capability boundary the kernel enforces.</span>
               </li>
               <li class="flex gap-2">
                 <span class="text-accent mt-0.5">&check;</span>
