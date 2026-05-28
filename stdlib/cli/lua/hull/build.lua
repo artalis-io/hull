@@ -959,18 +959,28 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
 
     -- Sign if requested
     if opts.sign then
-        -- Find platform.sig alongside the platform library
+        -- Find platform.sig. Search order:
+        --   1. platform_dir — the dir we extracted the .a from
+        --      (source-tree workflow: build/ on a hull-from-source).
+        --   2. tmpdir/platform.sig — fallback when embedded extraction
+        --      put the .a in tmpdir but the user pre-signed there.
+        --   3. dirname(hull_exe)/platform.sig — when the user signed
+        --      next to the hull binary itself.
+        --   4. ./build/platform.sig (CWD) — sign-platform's default
+        --      output dir for the source-tree workflow. Catches the
+        --      `hull sign-platform plat && hull build --sign` pattern
+        --      run from the same shell.
+        --   5. ./platform.sig (CWD) — fallback for users who pass
+        --      --dir=. to sign-platform.
         local platform_sig_path = nil
         if platform_dir then
             platform_sig_path = platform_dir .. "platform.sig"
         end
-        -- Also check tmpdir (extracted embedded builds)
         if not platform_sig_path or not file_exists(platform_sig_path) then
             if file_exists(tmpdir .. "/platform.sig") then
                 platform_sig_path = tmpdir .. "/platform.sig"
             end
         end
-        -- Also check hull binary directory (embedded platform may not set platform_dir)
         if not platform_sig_path or not file_exists(platform_sig_path) then
             local hull_dir = ""
             if __hull_exe then
@@ -978,6 +988,13 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
             end
             if hull_dir ~= "" and file_exists(hull_dir .. "platform.sig") then
                 platform_sig_path = hull_dir .. "platform.sig"
+            end
+        end
+        if not platform_sig_path or not file_exists(platform_sig_path) then
+            if file_exists("build/platform.sig") then
+                platform_sig_path = "build/platform.sig"
+            elseif file_exists("./platform.sig") then
+                platform_sig_path = "./platform.sig"
             end
         end
 

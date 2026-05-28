@@ -166,14 +166,37 @@ local function main()
         tool.exit(1)
     end
 
-    -- Find platform library
+    -- Find platform library.
+    --
+    -- Search order:
+    --   1. Embedded blob — release binaries (built with EMBED_PLATFORM=1)
+    --      ship the .a inside the hull binary. Extract to a tmpdir;
+    --      tmpdir becomes the canonical search-path entry. End-users who
+    --      installed via `gethull.dev/install.sh` end up here.
+    --   2. dirname(hull_exe) — adjacent .a from `make platform` or a
+    --      previous extraction.
+    --   3. ./build/ and ../build/ — Hull source-tree conventional spots.
     local platform_lib = nil
     local platform_lib_arm = nil  -- aarch64 cosmo archive (if multi-arch)
     local hull_dir = ""
     if __hull_exe then
         hull_dir = __hull_exe:match("(.*/)" ) or ""
     end
+
+    -- Try the embedded blob first. Both extractors return true/false; the
+    -- ones that fit nothing (no embedded blob, wrong arch shape) are a
+    -- no-op and we continue with the disk search.
+    local extracted_dir = tool.tmpdir()
+    local extracted_ok = false
+    if tool.extract_platform_cosmo then
+        extracted_ok = tool.extract_platform_cosmo(extracted_dir) or extracted_ok
+    end
+    if not extracted_ok and tool.extract_platform then
+        extracted_ok = tool.extract_platform(extracted_dir) or extracted_ok
+    end
+
     local search_paths = {
+        extracted_dir .. "/",
         hull_dir,
         "build/",
         "../build/",
@@ -202,7 +225,10 @@ local function main()
 
     if not platform_lib then
         tool.stderr("hull eject: cannot find libhull_platform.a\n")
-        tool.stderr("hint: run `make platform` first\n")
+        tool.stderr("hint: this hull binary has no embedded platform library\n")
+        tool.stderr("      and none was found in PATH-adjacent locations.\n")
+        tool.stderr("      install a release binary from https://gethull.dev,\n")
+        tool.stderr("      or run `make platform` in a hull source tree.\n")
         tool.exit(1)
     end
 

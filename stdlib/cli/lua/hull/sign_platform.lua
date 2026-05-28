@@ -125,64 +125,103 @@ local function main()
         tool.exit(1)
     end
 
-    -- Find platform library files
+    -- Find platform library files.
+    --
+    -- Search order:
+    --   1. The dir the user passed (defaults to "build/") — preserves
+    --      the existing source-tree workflow where the .a is already
+    --      sitting in build/ after `make platform`.
+    --   2. The embedded blob from the running hull binary — extract to
+    --      a tmpdir and treat it as a second search location. End-users
+    --      with a `gethull.dev/install.sh`-installed release binary
+    --      land here. platform.sig is still written to the user-
+    --      specified dir (creating it if needed).
     local platforms = {}
     local found = false
 
-    -- Check for single platform build (libhull_platform.a)
-    local single_lib = dir .. "libhull_platform.a"
-    if file_exists(single_lib) then
-        local arch = detect_arch(dir, "libhull_platform.a")
-        local lib_data = read_file(single_lib)
-        if lib_data then
-            local lib_hash = crypto.sha256(lib_data)
+    -- Helper closure: scan a directory for libhull_platform*.a and
+    -- accumulate into `platforms`. Returns true if it found anything.
+    local function scan_dir(scan_dir_path)
+        local hit = false
 
-            -- Read canary hash
-            local canary_data = read_file(dir .. "platform_canary_hash")
-            local canary_hash = canary_data and canary_data:match("^(%x+)") or nil
-            if not canary_hash then
-                tool.stderr("hull sign-platform: warning: no platform_canary_hash found\n")
+        -- Single-arch build (libhull_platform.a)
+        local single_lib = scan_dir_path .. "libhull_platform.a"
+        if file_exists(single_lib) then
+            local arch = detect_arch(scan_dir_path, "libhull_platform.a")
+            local lib_data = read_file(single_lib)
+            if lib_data then
+                local lib_hash = crypto.sha256(lib_data)
+                -- Read canary hash (informational; absent on extracted
+                -- embedded blobs since the canary lives next to the .a
+                -- in the source tree only).
+                local canary_data = read_file(scan_dir_path .. "platform_canary_hash")
+                local canary_hash = canary_data and canary_data:match("^(%x+)") or nil
+                platforms[arch] = {
+                    hash = lib_hash,
+                    canary = canary_hash,
+                }
+                hit = true
             end
-
-            platforms[arch] = {
-                hash = lib_hash,
-                canary = canary_hash,
-            }
-            found = true
         end
-    end
 
-    -- Check for multi-arch builds (libhull_platform.<arch>.a)
-    local multi_libs = tool.find_files(dir, "libhull_platform.*.a")
-    if multi_libs then
-        for _, path in ipairs(multi_libs) do
-            local filename = path:match("([^/]+)$")
-            local arch = filename:match("libhull_platform%.(.-)%.a$")
-            if arch then
-                local lib_data = read_file(path)
-                if lib_data then
-                    local lib_hash = crypto.sha256(lib_data)
-
-                    -- Read per-arch canary hash if available
-                    local canary_path = dir .. "platform_canary_hash." .. arch
-                    local canary_data = read_file(canary_path)
-                    if not canary_data then
-                        canary_data = read_file(dir .. "platform_canary_hash")
+        -- Multi-arch builds (libhull_platform.<arch>.a)
+        local multi_libs = tool.find_files(scan_dir_path, "libhull_platform.*.a")
+        if multi_libs then
+            for _, path in ipairs(multi_libs) do
+                local filename = path:match("([^/]+)$")
+                local arch = filename:match("libhull_platform%.(.-)%.a$")
+                if arch then
+                    local lib_data = read_file(path)
+                    if lib_data then
+                        local lib_hash = crypto.sha256(lib_data)
+                        local canary_path = scan_dir_path .. "platform_canary_hash." .. arch
+                        local canary_data = read_file(canary_path)
+                        if not canary_data then
+                            canary_data = read_file(scan_dir_path .. "platform_canary_hash")
+                        end
+                        local canary_hash = canary_data and canary_data:match("^(%x+)") or nil
+                        platforms[arch] = {
+                            hash = lib_hash,
+                            canary = canary_hash,
+                        }
+                        hit = true
                     end
-                    local canary_hash = canary_data and canary_data:match("^(%x+)") or nil
-
-                    platforms[arch] = {
-                        hash = lib_hash,
-                        canary = canary_hash,
-                    }
-                    found = true
                 end
             end
+        end
+
+        return hit
+    end
+
+    -- 1) Try the user's --dir (defaults to "build/").
+    found = scan_dir(dir)
+
+    -- 2) No .a's in --dir? Fall back to the embedded blob.
+    if not found then
+        local extracted = tool.tmpdir()
+        local extracted_ok = false
+        if tool.extract_platform_cosmo then
+            extracted_ok = tool.extract_platform_cosmo(extracted) or extracted_ok
+        end
+        if not extracted_ok and tool.extract_platform then
+            extracted_ok = tool.extract_platform(extracted) or extracted_ok
+        end
+        if extracted_ok then
+            print("hull sign-platform: no .a in " .. dir ..
+                  ", using embedded platform from this hull binary")
+            found = scan_dir(extracted .. "/")
+            -- The user's dir might not exist yet (e.g. CWD has no
+            -- build/). Make it so platform.sig can be written there.
+            if found then tool.mkdir(dir) end
         end
     end
 
     if not found then
-        tool.stderr("hull sign-platform: no platform libraries found in " .. dir .. "\n")
+        tool.stderr("hull sign-platform: no platform libraries found\n")
+        tool.stderr("  searched: " .. dir .. "\n")
+        tool.stderr("  this hull binary has no embedded platform library either\n")
+        tool.stderr("  install a release binary from https://gethull.dev,\n")
+        tool.stderr("  or run `make platform` in a hull source tree.\n")
         tool.exit(1)
     end
 
