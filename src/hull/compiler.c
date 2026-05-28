@@ -73,14 +73,14 @@ static int sys_link(HlCompiler *c, const char *output,
     int n = 0;
     argv[n++] = ctx->cc;
     argv[n++] = "-o"; argv[n++] = output;
-    /* Reproducibility: strip Linux Build-ID GUID so two builds of the
-     * same app are byte-identical. macOS ld64 embeds a random LC_UUID
-     * that cannot be suppressed (dyld requires it); macOS builds
-     * therefore differ by ~47 bytes per link. See MANIFESTO.md
-     * "Reproducible builds" and roadmap_next.md. */
-#if defined(__linux__)
-    argv[n++] = "-Wl,--build-id=none";
-#endif
+    /* Reproducibility note: GNU ld's default `--build-id=sha1` already
+     * produces content-addressed Build-IDs (deterministic for identical
+     * inputs) so apps `hull build` produces on Linux are reproducible
+     * without an explicit flag. An earlier attempt to inject
+     * `-Wl,--build-id=none` here broke test_compiler's link tests via
+     * the TCC backend's sys_link delegation; the default behavior is
+     * already correct, so no flag is needed. macOS LC_UUID is a
+     * separate (unfixable-here) story tracked in roadmap_next.md §0.2. */
     for (int i = 0; objs && objs[i] && n < HL_COMPILER_MAX_ARGS - 2; i++)
         argv[n++] = objs[i];
     for (int i = 0; libs && libs[i] && n < HL_COMPILER_MAX_ARGS - 2; i++)
