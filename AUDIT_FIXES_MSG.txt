@@ -1,0 +1,100 @@
+docs+site+ci: close audit gaps + fix em-dash sweep collateral
+
+  Acting on the positioning-vs-implementation audit. Four real gaps
+  closed, plus three sentences fixed where today's em-dash sweep
+  over-matched.
+
+  1. Site CDN self-hosting (the biggest inconsistency). gethull.dev
+     was loading from three third-party CDNs while promoting a
+     "local-first, no cloud, no runtime dependencies" runtime. Fixed:
+
+       - Tailwind Play CDN script vendored to site/vendor/tailwind-
+         3.4.17.js (pinned version, 398 KB).
+       - Lucide icon loader vendored to site/vendor/lucide-0.471.0.js
+         (pinned version, 358 KB).
+       - Inter (weights 400/500/600/700, OFL) and JetBrains Mono
+         (weights 400/500, OFL) vendored to site/fonts/ as .woff2.
+       - @font-face declarations inlined into <style> blocks of both
+         site/index.html and site/verify.html.
+       - All preconnect/preload links to fonts.googleapis.com,
+         fonts.gstatic.com, cdn.tailwindcss.com removed.
+       - verify.html CSP tightened: dropped CDN allowances; now
+         default-src 'none'; script-src 'self' 'unsafe-inline'
+         'unsafe-eval' (last needed for Tailwind Play JIT);
+         style-src 'self' 'unsafe-inline'; font-src 'self'.
+       - site/Makefile extended with SUBDIRS = vendor fonts so the
+         deploy step copies the new asset trees.
+
+     Net effect: gethull.dev now serves every byte from its own origin.
+     Visitor IPs no longer leak to Google / Cloudflare / Unpkg for
+     normal page loads. Page weight up ~1 MB (the JS bundles), down
+     N round-trips to remote DNS+TLS+TCP for first paint.
+
+  2. verify.html had no OG/Twitter meta tags at all (only <title> +
+     description). Adding them so social-share previews show the
+     canonical thesis + the verify-page-specific framing instead of
+     blank or scraped fallback content.
+
+  3. CI reproducibility gate. `make self-build` (hull -> hull2 ->
+     hull3 byte-identical chain) was implemented but unverified per
+     commit. Added a new `reproducibility` job to .github/workflows/
+     ci.yml that runs `make self-build` on Linux. MANIFESTO claim
+     "Reproducible builds. Same source + same Hull version = same
+     binary, verifiable by anyone" is now gated per commit.
+
+  4. macOS sandbox precision. POSITIONING / site hero said
+     "kernel-enforced boundary" without qualification. CLAUDE.md and
+     INVESTORS qualified honestly (Seatbelt is best-effort on macOS;
+     sandbox_init is a private deprecated Apple API; the C cap layer
+     carries more load on macOS). Fixed the tech-stack chip below the
+     hero from "pledge · unveil · seatbelt" to "pledge + unveil
+     (Linux/OpenBSD/cosmo) · Seatbelt (macOS)" so the platform split
+     is visible above the fold without rewriting the hero copy. The
+     deeper "Hull is not" section continues to disclose the macOS
+     caveat explicitly.
+
+  5. LICENSING.md vendored-dependency table. Listed every static-
+     linked third-party library with its license (mostly MIT / BSD /
+     Apache / ISC / public-domain). Added an explicit TinyCC note:
+     it is LGPL-2.1+, which is the only non-permissive vendored
+     dependency. LGPL is AGPL-compatible, but static linking under
+     LGPL §6 requires either the recipient's ability to relink
+     against a modified LGPL or bundling LGPL source. Both are
+     satisfied because Hull is AGPL-3.0 and ships vendor/tcc/ at
+     the pinned commit. The same holds for commercial licensees.
+
+  6. Latent workflow bug in .github/workflows/deploy-site.yml. The
+     CloudFront invalidation step was conditioned on
+     `if: ${{ env.CF_DISTRIBUTION_ID != '' }}`, but env: is applied
+     AFTER if: in the same step, so the env value was always empty
+     at evaluation time and the step never ran. Switched the
+     condition to check the secret directly:
+     `if: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID != '' }}`. If the
+     secret is configured in the repo, CloudFront cache invalidation
+     will now actually fire on each deploy (so HTML updates propagate
+     within minutes instead of waiting for edge TTL to expire). If
+     the secret is not configured, behavior is unchanged: deploys
+     still succeed, only the invalidation step is skipped.
+
+  7. Em-dash sweep collateral. Today's regex sweep over-matched in
+     three cases where a sentence had three em-dashes on one line
+     (the regex treated em-dashes 1+2 as a parenthetical pair,
+     mangling the sentence around em-dash 3). Fixed:
+
+       - docs/INVESTORS.md:69. "...declared capabilities. Not by
+         convention but by kernel enforcement..." was wrongly
+         wrapped into nested parentheses spanning four sentences.
+       - docs/MANIFESTO.md:27. "Vibecoded apps are cloud apps by
+         default: React + Node.js + Postgres + Vercel/AWS..." was
+         similarly mis-wrapped.
+       - docs/MANIFESTO.md:46. "Own your security" bullet definition
+         had three em-dashes (bullet separator + appositive pair);
+         the regex wrapped the appositive correctly but left the
+         bullet separator dangling.
+
+     No regression in the corpus-wide em-dash count (still 0 in
+     prose; only the meta-reference in docs/POSITIONING.md line 109
+     remains, intentionally).
+
+  No technical behavior changes in the runtime. Site is a heavier
+  page now (~1 MB more JS) but loads zero third-party fetches.

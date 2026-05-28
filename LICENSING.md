@@ -48,6 +48,36 @@ and we'll send terms.
 If you're not sure which applies, email <licensing+site@artalis.io> and describe
 what you're building.
 
+## Vendored dependencies
+
+Hull statically links the following third-party libraries (all in `vendor/`).
+Every license below is AGPL-3.0-compatible.
+
+| Library | License | Notes |
+|---|---|---|
+| Keel | MIT | Hull's HTTP server (own project, separate repo). |
+| Lua 5.4 | MIT | |
+| QuickJS | MIT | |
+| SQLite | Public domain | |
+| mbedTLS | Apache-2.0 / GPL-2.0 dual | TLS client. |
+| TweetNaCl | Public domain | Ed25519 + secretbox. |
+| pledge/unveil | ISC | jart's polyfill. |
+| log.c | MIT | |
+| sh_arena, sh_json | MIT | |
+| WAMR | Apache-2.0 | Optional (`HL_ENABLE_WASM=1`, default on). |
+| wgpu-native | MPL-2.0 / Apache-2.0 dual | Optional (`HL_ENABLE_GPU=1`, default off). |
+| miniz | MIT | gzip compression. |
+| Mozilla CA bundle | MPL-2.0 | Embedded for HTTPS without a system store. |
+| **TinyCC** | **LGPL-2.1+** | Embedded so `hull build` works with no system compiler. |
+
+**The TinyCC note.** TinyCC is the one LGPL component. LGPL is GPL/AGPL-compatible,
+but static linking under LGPL §6 requires either (a) the recipient's ability to
+relink against a modified LGPL version, or (b) bundling LGPL source. Since Hull
+is AGPL-3.0 and ships full source (including `vendor/tcc/` at the pinned commit),
+both conditions are satisfied: the recipient has the source needed to rebuild
+hull against a modified TinyCC. This holds equally for the commercial license —
+commercial customers receive (or can pull) the same `vendor/tcc/` tree.
+
 ## Why dual-license
 
 Hull is built to be useful in two places that don't share a license model.

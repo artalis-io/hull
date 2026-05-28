@@ -51,12 +51,7 @@
     }
   }
   </script>
-  <link rel="preconnect" href="https://cdn.tailwindcss.com">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-
-  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="vendor/tailwind-3.4.17.js"></script>
   <script>
     tailwind.config = {
       theme: {
@@ -78,6 +73,14 @@
   </script>
 
   <style>
+    /* Vendored fonts — served from gethull.dev, no third-party CDN. */
+    @font-face { font-family: 'Inter'; font-weight: 400; font-style: normal; font-display: swap; src: url('fonts/Inter-Regular.woff2') format('woff2'); }
+    @font-face { font-family: 'Inter'; font-weight: 500; font-style: normal; font-display: swap; src: url('fonts/Inter-Medium.woff2') format('woff2'); }
+    @font-face { font-family: 'Inter'; font-weight: 600; font-style: normal; font-display: swap; src: url('fonts/Inter-SemiBold.woff2') format('woff2'); }
+    @font-face { font-family: 'Inter'; font-weight: 700; font-style: normal; font-display: swap; src: url('fonts/Inter-Bold.woff2') format('woff2'); }
+    @font-face { font-family: 'JetBrains Mono'; font-weight: 400; font-style: normal; font-display: swap; src: url('fonts/JetBrainsMono-Regular.woff2') format('woff2'); }
+    @font-face { font-family: 'JetBrains Mono'; font-weight: 500; font-style: normal; font-display: swap; src: url('fonts/JetBrainsMono-Medium.woff2') format('woff2'); }
+
     html, body { background: #0a0a0a; color: #f4f4f5; -webkit-font-smoothing: antialiased; }
     /* Belt-and-braces against any rogue horizontal overflow on
      * narrow screens (iPhone SE = 375px). We set it on BOTH html and
@@ -298,7 +301,7 @@
             </div>
             <div class="flex items-center gap-2">
               <i data-lucide="shield-check" class="w-3.5 h-3.5"></i>
-              <span>pledge &middot; unveil &middot; seatbelt</span>
+              <span>pledge + unveil (Linux/OpenBSD/cosmo) &middot; Seatbelt (macOS)</span>
             </div>
             <div class="flex items-center gap-2">
               <i data-lucide="hard-drive" class="w-3.5 h-3.5"></i>
@@ -1538,7 +1541,7 @@ $ hull agent routes my-tool
     </div>
   </footer>
 
-  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <script src="vendor/lucide-0.471.0.js"></script>
   <script>
     // Render icons. lucide.createIcons() walks the DOM and replaces
     // [data-lucide] placeholders with the SVG. Stays minimal. No

@@ -44,8 +44,13 @@ jobs:
       # Optional: only runs if the secret is configured. Lets the
       # workflow ship today without a CloudFront distribution; add the
       # secret later to enable invalidation.
+      #
+      # Bug fix: the condition originally checked `env.CF_DISTRIBUTION_ID`
+      # but env: is applied AFTER if: in the same step, so the env value
+      # was always empty at evaluation time and this step never ran.
+      # Check the secret directly instead.
       - name: Invalidate CloudFront cache
-        if: ${{ env.CF_DISTRIBUTION_ID != '' }}
+        if: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID != '' }}
         env:
           CF_DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
         run: |

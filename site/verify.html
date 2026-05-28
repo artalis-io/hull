@@ -8,21 +8,30 @@
   <meta name="theme-color" content="#0a0a0a">
   <meta name="robots" content="index, follow">
 
-  <!-- CSP. Strict by design. Local verification only; no fetches except
-       optional https:// dev-key lookups. Same posture as the production
-       runtime: capability-declared. -->
+  <meta property="og:title" content="Verify a Hull signature. Gethull.dev">
+  <meta property="og:description" content="Code became disposable. Trust is not. Verify a Hull package.sig or hull.sig signature in your browser. Ed25519 runs locally via vendored TweetNaCl; nothing is uploaded.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://gethull.dev/verify.html">
+  <meta property="og:image" content="https://gethull.dev/og-card.svg">
+  <meta property="og:image:type" content="image/svg+xml">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Hull. Code became disposable. Trust is not. Hardened runtime infrastructure for AI-native systems.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://gethull.dev/og-card.svg">
+  <meta name="twitter:image:alt" content="Hull. Code became disposable. Trust is not.">
+
+  <!-- CSP. Strict by design. Local verification only; no third-party
+       fetches. All assets (Tailwind, fonts, Lucide) are vendored under
+       /vendor and /fonts. Same posture as the production runtime:
+       capability-declared. -->
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'none'; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.tailwindcss.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src https:">
+        content="default-src 'none'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src https:">
 
   <link rel="canonical" href="https://gethull.dev/verify.html">
   <link rel="icon" type="image/svg+xml" href="mark.svg">
 
-  <link rel="preconnect" href="https://cdn.tailwindcss.com">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-
-  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="vendor/tailwind-3.4.17.js"></script>
   <script>
     tailwind.config = {
       theme: {
@@ -44,6 +53,14 @@
   </script>
 
   <style>
+    /* Vendored fonts — served from gethull.dev, no third-party CDN. */
+    @font-face { font-family: 'Inter'; font-weight: 400; font-style: normal; font-display: swap; src: url('fonts/Inter-Regular.woff2') format('woff2'); }
+    @font-face { font-family: 'Inter'; font-weight: 500; font-style: normal; font-display: swap; src: url('fonts/Inter-Medium.woff2') format('woff2'); }
+    @font-face { font-family: 'Inter'; font-weight: 600; font-style: normal; font-display: swap; src: url('fonts/Inter-SemiBold.woff2') format('woff2'); }
+    @font-face { font-family: 'Inter'; font-weight: 700; font-style: normal; font-display: swap; src: url('fonts/Inter-Bold.woff2') format('woff2'); }
+    @font-face { font-family: 'JetBrains Mono'; font-weight: 400; font-style: normal; font-display: swap; src: url('fonts/JetBrainsMono-Regular.woff2') format('woff2'); }
+    @font-face { font-family: 'JetBrains Mono'; font-weight: 500; font-style: normal; font-display: swap; src: url('fonts/JetBrainsMono-Medium.woff2') format('woff2'); }
+
     html, body { background: #0a0a0a; color: #f4f4f5; -webkit-font-smoothing: antialiased; }
     html, body { overflow-x: hidden; max-width: 100%; }
     /* See site/index.html: grid items default to min-width: auto

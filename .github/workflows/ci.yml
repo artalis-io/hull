@@ -96,6 +96,21 @@ jobs:
         timeout-minutes: 2
         run: make hull-test-examples
 
+  # Reproducibility gate. Runs once on Linux (single OS is enough — same
+  # source on the same hardware should produce the same byte-for-byte
+  # binary). MANIFESTO claims `make self-build` produces hull -> hull2
+  # -> hull3 identical; this step enforces it per commit.
+  reproducibility:
+    name: Reproducible build (self-build chain)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Build hull + run self-build chain
+        timeout-minutes: 10
+        run: make self-build
+
   build-pipeline:
     strategy:
       fail-fast: false
