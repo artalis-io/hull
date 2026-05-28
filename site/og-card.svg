@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="Hull. Built for code you almost trust. A sealed, capability-secure runtime.">
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="Hull. Code became disposable. Trust is not. Hardened runtime infrastructure for AI-native systems.">
   <defs>
     <!-- Subtle grid pattern, faded at the bottom -->
     <pattern id="grid" width="48" height="48" patternUnits="userSpaceOnUse">
@@ -34,7 +34,7 @@
     <g transform="translate(118, 8)">
       <rect width="78" height="26" rx="13" fill="rgba(255,255,255,0.025)" stroke="rgba(255,255,255,0.10)"/>
       <circle cx="14" cy="13" r="3" fill="#fafafa"/>
-      <text x="24" y="17" font-family="ui-monospace, 'SF Mono', Menlo, Monaco, monospace" font-size="11" fill="#d4d4d8" letter-spacing="0.04em">v0.1.0</text>
+      <text x="24" y="17" font-family="ui-monospace, 'SF Mono', Menlo, Monaco, monospace" font-size="11" fill="#d4d4d8" letter-spacing="0.04em">v0.1.4</text>
     </g>
   </g>
 
@@ -44,12 +44,12 @@
   </g>
 
   <!-- Headline (mirrors the H1 on the page) -->
-  <text x="80" y="290" font-family="Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif" font-size="84" font-weight="600" fill="#fafafa" letter-spacing="-0.025em">Built for code</text>
-  <text x="80" y="376" font-family="Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif" font-size="84" font-weight="600" fill="#fafafa" letter-spacing="-0.025em">you almost trust.</text>
+  <text x="80" y="290" font-family="Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif" font-size="84" font-weight="600" fill="#fafafa" letter-spacing="-0.025em">Code became disposable.</text>
+  <text x="80" y="376" font-family="Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif" font-size="84" font-weight="600" fill="#fafafa" letter-spacing="-0.025em">Trust is not.</text>
 
   <!-- Supporting line -->
-  <text x="80" y="448" font-family="Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif" font-size="26" fill="#a1a1aa" letter-spacing="-0.01em">A sealed, capability-secure runtime for agentic</text>
-  <text x="80" y="484" font-family="Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif" font-size="26" fill="#a1a1aa" letter-spacing="-0.01em">and local-first software.</text>
+  <text x="80" y="448" font-family="Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif" font-size="26" fill="#a1a1aa" letter-spacing="-0.01em">Hardened runtime infrastructure for AI-native systems.</text>
+  <text x="80" y="484" font-family="Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif" font-size="26" fill="#a1a1aa" letter-spacing="-0.01em">Capability-secure. Local-first. Single static binary.</text>
 
   <!-- Bottom hairline -->
   <line x1="0" y1="540" x2="1200" y2="540" stroke="rgba(255,255,255,0.08)" stroke-width="1"/>

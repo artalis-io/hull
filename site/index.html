@@ -3,22 +3,22 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Hull. A sealed runtime for programmable tools</title>
-  <meta name="description" content="Hull is a capability-secure, local-first runtime. Every external capability is declared in the manifest and checked at a C boundary the script cannot cross.">
+  <title>Hull. Hardened runtime for AI-native systems</title>
+  <meta name="description" content="Code became disposable. Trust is not. Hull is a hardened, capability-secure runtime for AI-native systems. Local-first, single static binary, every capability declared in the manifest and checked at a C boundary the script cannot cross.">
   <meta name="theme-color" content="#0a0a0a">
 
-  <meta property="og:title" content="Hull. A sealed runtime for programmable tools">
-  <meta property="og:description" content="Built for code you almost trust. A sealed runtime for agentic and local-first software. Capability-declared, kernel-sandboxed, W^X, single static binary.">
+  <meta property="og:title" content="Hull. Hardened runtime for AI-native systems">
+  <meta property="og:description" content="Code became disposable. Trust is not. Hardened, capability-secure runtime for AI-native systems. Local-first, single static binary, kernel-sandboxed, W^X.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://gethull.dev/">
   <meta property="og:image" content="https://gethull.dev/og-card.svg">
   <meta property="og:image:type" content="image/svg+xml">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="Hull. Built for code you almost trust. A sealed, capability-secure runtime for agentic and local-first software.">
+  <meta property="og:image:alt" content="Hull. Code became disposable. Trust is not. Hardened runtime infrastructure for AI-native systems.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:image" content="https://gethull.dev/og-card.svg">
-  <meta name="twitter:image:alt" content="Hull. Built for code you almost trust.">
+  <meta name="twitter:image:alt" content="Hull. Code became disposable. Trust is not.">
   <link rel="canonical" href="https://gethull.dev/">
 
   <link rel="icon" type="image/svg+xml" href="mark.svg">
@@ -32,8 +32,8 @@
     "applicationCategory": "DeveloperApplication",
     "applicationSubCategory": "Runtime",
     "operatingSystem": "Linux, macOS, Windows (via Cosmopolitan), FreeBSD, OpenBSD, NetBSD",
-    "description": "A sealed, capability-secure runtime for agentic and local-first software. Every external capability (filesystem, network, env, process) is declared in the manifest and checked at a C boundary the script cannot cross. Only the bootstrap registration API is intrinsic.",
-    "softwareVersion": "0.1.2",
+    "description": "Hardened, capability-secure runtime for AI-native systems. Code became disposable; trust is not. Every external capability (filesystem, network, env, process) is declared in the manifest and checked at a C boundary the script cannot cross. Local-first, single static binary, only the bootstrap registration API is intrinsic.",
+    "softwareVersion": "0.1.4",
     "url": "https://gethull.dev/",
     "downloadUrl": "https://github.com/artalis-io/hull/releases",
     "codeRepository": "https://github.com/artalis-io/hull",
@@ -260,20 +260,20 @@
         <div class="lg:col-span-7">
           <a href="#agents" class="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-white/10 bg-white/[0.025] hover:bg-white/[0.05] hover:border-white/20 transition text-[11px] text-mute-400 hover:text-paper-100 mb-6">
             <i data-lucide="zap" class="w-3 h-3 shrink-0"></i>
-            <span>Designed for agent tools &amp; constrained AI-generated code</span>
+            <span>Built for code you almost trust</span>
             <i data-lucide="arrow-right" class="w-3 h-3 shrink-0"></i>
           </a>
 
           <h1 class="text-[2rem] sm:text-4xl md:text-5xl lg:text-6xl font-semibold leading-[1.05] tracking-tight text-paper-50">
-            Built for code
-            you almost trust.
+            Code became disposable.
+            Trust is not.
           </h1>
 
           <p class="mt-6 text-base md:text-lg text-mute-400 max-w-xl leading-relaxed">
-            Hull puts the capability check inside the process, at a
-            C boundary the script cannot cross. Not in a
-            sidecar, not in a reverse proxy, not in a YAML policy
-            someone forgot to update.
+            Hardened, capability-secure runtime infrastructure for
+            AI-native systems. AI generates code endlessly &mdash;
+            Hull constrains what it can actually do, at a C boundary
+            the script cannot cross.
           </p>
 
           <div class="mt-8 flex flex-wrap items-center gap-3">
@@ -1489,9 +1489,14 @@ $ hull agent routes my-tool
             <rect x="3" y="3" width="18" height="18" rx="4"/>
             <path d="M8 8.5v7"/><path d="M16 8.5v7"/><path d="M8 12h8"/>
           </svg>
-          <span class="text-sm text-mute-400">
-            Hull. Capability-secure runtime
-          </span>
+          <div class="flex flex-col gap-0.5">
+            <span class="text-sm text-mute-400">
+              Hull. Capability-secure runtime
+            </span>
+            <span class="text-[11px] text-mute-500 leading-relaxed">
+              Built in Europe for sovereign infrastructure.
+            </span>
+          </div>
         </div>
         <div class="flex items-center gap-2 text-xs text-mute-500 leading-relaxed">
           <i data-lucide="shield-check" class="w-3.5 h-3.5 text-accent shrink-0"></i>
