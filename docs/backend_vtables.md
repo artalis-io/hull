@@ -1,6 +1,6 @@
-# Async & Net Backend Vtables — Design
+# Async & Net Backend Vtables. Design
 
-Replacing direct Keel coupling with two pluggable vtables — `HlAsyncBackend`
+Replacing direct Keel coupling with two pluggable vtables. `HlAsyncBackend`
 for the lower-level async/event-loop layer, `HlNetBackend` for the
 HTTP/WebSocket server layer. Mirrors the `HlDbBackend` pattern that
 already lets `db.*` consume SQLite (today) or Postgres (later) through one
@@ -15,17 +15,17 @@ builds with a poll-based mini-loop". That's a one-shot fix for a single
 need. The vtable framing solves the same need *and* opens three other
 doors we already know we want:
 
-1. **CLI builds drop Keel entirely** — `HlAsyncBackend` = poll backend
+1. **CLI builds drop Keel entirely**. `HlAsyncBackend` = poll backend
    gives `make HL_ENABLE_HTTP=0` a 1MB+ binary win and removes Keel
    from the link.
-2. **Async-in-app.main on CLI builds** — today's `serve_cli.c` can't
+2. **Async-in-app.main on CLI builds**. Today's `serve_cli.c` can't
    run `hull.sleep` / `compute.async` / `gpu.async` / `db.async` /
    `http.fetch` because no event loop drives them. A poll backend
    provides that loop.
-3. **Future HTTP server alternatives** — `HlNetBackend` slot lets us
+3. **Future HTTP server alternatives**. `HlNetBackend` slot lets us
    eventually swap Keel for libuv, a sandboxed mini-server, an
-   io_uring-tuned server, etc. — without touching the runtime layer.
-4. **Better testability** — backends can be mocked. Test fixtures
+   io_uring-tuned server, etc.. Without touching the runtime layer.
+4. **Better testability**. Backends can be mocked. Test fixtures
    become trivial.
 
 Cost: bigger upfront refactor (~1-2 weeks across two passes vs ~3 days
@@ -67,7 +67,7 @@ errors): used only when serving or making HTTP requests. ~85 symbols,
 
 ## Two vtables
 
-### HlAsyncBackend — async core
+### HlAsyncBackend. Async core
 
 ```c
 typedef struct HlAsyncBackend {
@@ -86,20 +86,20 @@ typedef struct HlAsyncBackend {
     /* Monotonic time */
     uint64_t (*monotonic_ms)(void);
 
-    /* Timers — fire `cb(user)` after `ms`. Returns opaque handle for
+    /* Timers. Fire `cb(user)` after `ms`. Returns opaque handle for
      * cancel; 0 on alloc failure. */
     uint64_t (*timer_add)(void *ctx, uint64_t ms,
                           void (*cb)(void *user), void *user);
     void   (*timer_cancel)(void *ctx, uint64_t handle);
 
-    /* FD watcher — fires when fd is ready for read/write. */
+    /* FD watcher. Fires when fd is ready for read/write. */
     int    (*watcher_add)(void *ctx, int fd, int mask,
                           void (*cb)(int fd, int ready, void *user),
                           void *user);
     int    (*watcher_mod)(void *ctx, int fd, int mask);
     void   (*watcher_del)(void *ctx, int fd);
 
-    /* Thread pool — offload blocking work to a worker; done_fn runs
+    /* Thread pool. Offload blocking work to a worker; done_fn runs
      * back on the event-loop thread. */
     int    (*pool_create)(void **pool, void *ctx, int num_workers,
                           int queue_capacity);
@@ -110,12 +110,12 @@ typedef struct HlAsyncBackend {
                           void (*cancel_fn)(void *user),
                           void *user);
 
-    /* Detached async op — runtime-agnostic suspension point.
+    /* Detached async op. Runtime-agnostic suspension point.
      * Hull's HlAsyncCtx already wraps this; we just route it through
      * the vtable so Keel and poll backends both fit.
      *
      * suspend(): start tracking an in-flight op. The backend doesn't
-     *   care what it is — it only owns the on_resume/on_cancel/on_deadline
+     *   care what it is. It only owns the on_resume/on_cancel/on_deadline
      *   callbacks attached to it.
      * complete(): the runtime signals the op is done; backend schedules
      *   on_resume to fire on the event-loop thread.
@@ -127,7 +127,7 @@ typedef struct HlAsyncBackend {
 } HlAsyncBackend;
 ```
 
-### HlNetBackend — HTTP/WebSocket server
+### HlNetBackend. HTTP/WebSocket server
 
 ```c
 typedef struct HlNetBackend {
@@ -178,7 +178,7 @@ typedef struct HlNetBackend {
                         const char *data);
     void   (*sse_end)(HlResHandle *res);
 
-    /* Compression hook (optional — backend may bake it in) */
+    /* Compression hook (optional. Backend may bake it in) */
     int    (*body_compress)(HlResHandle *res, int level);
 
     /* TLS config (optional) */
@@ -234,8 +234,8 @@ split:
 | `poll` | `HlAsyncBackend` | `HL_ENABLE_HTTP=0` (CLI builds) | New minimal impl: `poll(2)` event loop, `pthread`-based pool, software timer min-heap |
 
 Future:
-- `libuv` — cross-platform async, replaces both keel async and poll
-- `io_uring` — Linux high-perf async
+- `libuv`. Cross-platform async, replaces both keel async and poll
+- `io_uring`. Linux high-perf async
 - A future sandboxed mini-server for `HlNetBackend` that's smaller
   than Keel for embedded/edge use
 
@@ -277,20 +277,20 @@ kl_async_suspend(server, conn, &ctx->op);
 
 ## Migration phases
 
-### Phase 3d-1 — define the vtables, leave Keel in place
+### Phase 3d-1. Define the vtables, leave Keel in place
 - Author `include/hull/async_backend.h` and `include/hull/net_backend.h`
 - Define opaque handle types (`HlAsyncOpHandle`, `HlReqHandle`, etc.)
 - No consumers yet; everything still uses `kl_*` directly
 - Outcome: API surface scoped. No behavior change. ~2 days.
 
-### Phase 3d-2 — write Keel-backed implementations
-- `src/hull/net/async_keel.c` — wraps Keel calls behind `HlAsyncBackend`
-- `src/hull/net/net_keel.c` — wraps Keel server behind `HlNetBackend`
-- `src/hull/net/http_client_keel.c` — wraps `KlClient` behind `HlHttpClientBackend`
+### Phase 3d-2. Write Keel-backed implementations
+- `src/hull/net/async_keel.c`. Wraps Keel calls behind `HlAsyncBackend`
+- `src/hull/net/net_keel.c`. Wraps Keel server behind `HlNetBackend`
+- `src/hull/net/http_client_keel.c`. Wraps `KlClient` behind `HlHttpClientBackend`
 - Unit-tested in isolation
 - Outcome: backends exist; Hull still uses `kl_*` directly. ~3 days.
 
-### Phase 3d-3 — migrate consumers (mechanical)
+### Phase 3d-3. Migrate consumers (mechanical)
 
 Done:
 
@@ -306,7 +306,7 @@ Done:
     HlRuntime, HlAppContextOpts, HlRuntimeBaseConfig, HlServerState,
     and every `hl_*_submit` signature. Stale KlThreadPool
     forward-declarations cleaned up.
-  ✓ `kl_watcher_*` — single comment reference remains (`mod_http.c`);
+  ✓ `kl_watcher_*`. Single comment reference remains (`mod_http.c`);
     effectively done.
 
 Also done (Phase 3d-2 deferred slice + Phase 3d-3 follow-through):
@@ -329,16 +329,16 @@ Also done (Phase 3d-2 deferred slice + Phase 3d-3 follow-through):
   reaches async / suspend / complete primitives only through the
   vtable.
 
-### Phase 3d-4 — write the poll backend
+### Phase 3d-4. Write the poll backend
 
 Done:
 
-  ✓ `src/hull/async/poll.c` — ~470 lines: minimal `poll(2)` + `pthread`
+  ✓ `src/hull/async/poll.c`. ~470 lines: minimal `poll(2)` + `pthread`
     impl. Event-loop tick, software timer min-heap (pointer-stable
     ids, lazy cancellation), flat FD-watcher table, bounded
     ring-buffer thread pool, self-pipe for cross-thread wakeup, full
     op_suspend/op_complete with deadline timers. No Keel symbols.
-  ✓ `tests/hull/test_async_backend_poll.c` — 10 cases: lifecycle,
+  ✓ `tests/hull/test_async_backend_poll.c`. 10 cases: lifecycle,
     monotonic, timer fire + cancel, multi-timer ordering, op_complete
     fires on-loop, op_deadline races op_complete, pool runs work+done
     with done on the event-loop thread, pool_free fires cancel_fn
@@ -356,7 +356,7 @@ passes the same tests as the keel backend. The CLI driver (Phase
 3d-5 + the cli_mode work) gets a working event loop without any
 HTTP server library in the link.
 
-### Phase 3d-5 — drop Keel from `HL_ENABLE_HTTP=0` link
+### Phase 3d-5. Drop Keel from `HL_ENABLE_HTTP=0` link
 
 Done:
 
@@ -380,7 +380,7 @@ Done:
     of `kl_server_run` / `kl_server_stop`. Removes the
     HTTP-server-shaped gate on a generic async-in-main primitive.
   ✓ `hull.sleep` gates on `rt->async_ctx` instead of `lua->server`
-    (Keel's KlServer*) — the architectural mistake of muddling
+    (Keel's KlServer*). The architectural mistake of muddling
     layer-2 HTTP state with the layer-1 async primitive is cleaned
     up.
   ✓ Binary size drop: 5.0 MB → 4.4 MB (~600 KB, ~12%). Short of the
@@ -395,7 +395,7 @@ Done:
 Limitations still in place (Phase 3d-6+ work):
 
   - `db.async`, `compute.async`, `gpu.async`, `http.fetch` are
-    request-bound today — they require `active_conn`, which on CLI
+    request-bound today. They require `active_conn`, which on CLI
     builds is always NULL. Synchronous variants of all four work.
   - `hull update` (Keel-dependent HTTPS client), `hull test`
     (in-process HTTP harness), `hull dev` (forks a server),
@@ -430,14 +430,14 @@ keeps both build flavors green.
 - **Async-op suspension is the trickiest interface.** Keel's
   `KlAsyncOp` is tied to a connection (resumes when the deadline fires
   or `kl_async_complete` is called by another thread). The poll
-  backend has no connection — it just needs "track this op, fire its
+  backend has no connection. It just needs "track this op, fire its
   resume callback on the event loop thread when complete". Both fit
   the same `op_suspend`/`op_complete` shape, but the implementation
   details differ. Spend extra time on the vtable signature here.
 
 - **Performance regression.** Every `kl_*` call gains a vtable
   indirection. For request dispatch (hot path), this is ~6 extra
-  indirect calls per request — measurable in microbenchmarks but
+  indirect calls per request. Measurable in microbenchmarks but
   unlikely to be material vs network/database costs. Worth a
   before/after bench run during phase 3d-3.
 
@@ -447,7 +447,7 @@ keeps both build flavors green.
   the same e2e against both backends.
 
 - **Two-phase build (3d-3 then 3d-4) leaves a window where the only
-  shipping backend is Keel.** This is fine — every commit keeps the
+  shipping backend is Keel.** This is fine. Every commit keeps the
   default build green. The poll backend is additive at the end.
 
 ## Open questions for implementation

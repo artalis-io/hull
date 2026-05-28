@@ -1,4 +1,4 @@
-# Hull — Agent & Developer Guide
+# Hull. Agent & Developer Guide
 
 **Audience:** AI coding agents and developers writing, debugging, building, or
 deploying Hull applications.
@@ -52,10 +52,10 @@ Hull is **one binary** (`hull`) that does five jobs:
 
 The architecture has **two planes**:
 
-- **Orchestration plane** — Lua 5.4 or QuickJS (your choice, file-extension
+- **Orchestration plane**. Lua 5.4 or QuickJS (your choice, file-extension
   selects). Sandboxed. Handles routing, middleware, DB queries, template
   rendering. Capability access mediated by a C boundary.
-- **Compute plane** — WASM (WAMR) or GPU (wgpu-native). Pure functions, no
+- **Compute plane**. WASM (WAMR) or GPU (wgpu-native). Pure functions, no
   I/O. Gas/timeout-metered. For CPU-heavy work, dispatched from the
   orchestration layer.
 
@@ -166,7 +166,7 @@ Everything goes through `app.*` (routing) and capability globals (`db`, `http`,
 `hull`):
 
 ```lua
--- app.lua — minimal pattern
+-- app.lua. Minimal pattern
 app.manifest({})                              -- declare capabilities (see §7)
 
 app.get("/", function(req, res)
@@ -175,7 +175,7 @@ end)
 ```
 
 ```javascript
-// app.js — same in JS
+// app.js. Same in JS
 app.manifest({});
 
 app.get("/", (req, res) => {
@@ -375,7 +375,7 @@ Hull separates control-plane orchestration from data-plane computation:
   template rendering, HTTP fetch, file I/O, crypto. Full mediated capability
   access.
 - **Compute** (WASM/GPU, timeout-metered, no I/O): pure functions over byte
-  buffers. Score, transform, dedupe, sign — anything CPU-intensive.
+  buffers. Score, transform, dedupe, sign. Anything CPU-intensive.
 
 The orchestration layer **dispatches** to compute (`compute.call`,
 `gpu.dispatch`). Compute never calls out to I/O.
@@ -410,7 +410,7 @@ hl_cap_*()                       ← src/hull/cap/*.c (C boundary)
 SQLite / FS / network / crypto
 ```
 
-### Capability layer — symbol map
+### Capability layer. Symbol map
 
 | Module | Source | Key functions |
 |---|---|---|
@@ -484,13 +484,13 @@ app.manifest({
 
 Two-phase enforcement in `sandbox.c`:
 
-**Phase 1** — `hl_sandbox_apply_pledge()` (called before `load_app()`):
+**Phase 1**. `hl_sandbox_apply_pledge()` (called before `load_app()`):
 - **Linux/Cosmo**: `pledge("stdio inet rpath wpath cpath flock dns unveil")`
-  — blocks `exec`, `proc`, `fork` during module loading.
+ . Blocks `exec`, `proc`, `fork` during module loading.
 - **macOS**: no-op (Seatbelt's `sandbox_init` is irreversible; full profile
   applied in phase 2).
 
-**Phase 2** — `hl_sandbox_apply()` (after manifest extraction):
+**Phase 2**. `hl_sandbox_apply()` (after manifest extraction):
 - **Linux/Cosmo**: unveils declared paths, seals filesystem, applies pledge syscall filter.
 - **macOS**: builds dynamic SBPL profile from manifest, applies via
   `sandbox_init_with_parameters`. Deny-default with selective allows.
@@ -503,30 +503,30 @@ Violation = `SIGABRT` on OpenBSD, `SIGKILL` on Linux/Cosmo, `EPERM` on macOS.
 These are the guarantees Hull provides. If you find any of them violated,
 that's a bug:
 
-1. **SQL injection impossible** — all DB access uses `sqlite3_bind_*`
+1. **SQL injection impossible**. All DB access uses `sqlite3_bind_*`
    parameterised binding. SQL is always a literal string. Identifier
    interpolation (e.g. `search.lua` for FTS5 table names) goes through a
    strict allowlist regex + denylist check.
-2. **Internal tables protected** — `hl_cap_db_check_namespace()`
+2. **Internal tables protected**. `hl_cap_db_check_namespace()`
    (`cap/db.c`) blocks user code from accessing `_hull_*` tables. Enforcement
    uses call-stack inspection: Lua checks `ar.source` for `hull.` prefix; JS
    checks module name for `hull:` prefix. Stdlib bypasses transparently;
    user code is rejected.
-3. **Path traversal blocked** — `hl_cap_fs_validate()` rejects absolute paths,
+3. **Path traversal blocked**. `hl_cap_fs_validate()` rejects absolute paths,
    `..` components, and symlink escapes via `realpath()` ancestor check.
    Plus kernel `unveil` on Linux/Cosmo.
-4. **Host allowlist enforced** — `hl_cap_http_request()` validates target
+4. **Host allowlist enforced**. `hl_cap_http_request()` validates target
    host against manifest's `hosts` array.
-5. **Env allowlist enforced** — `hl_cap_env_get()` checks against `env`
+5. **Env allowlist enforced**. `hl_cap_env_get()` checks against `env`
    allowlist (max 32 entries).
-6. **No shell invocation in user code** — `tool.spawn()` is build-mode only
+6. **No shell invocation in user code**. `tool.spawn()` is build-mode only
    (CLI tools), uses an explicit compiler allowlist, never `system()`/`popen()`.
-7. **Key material zeroed** — `hull_secure_zero()` (volatile memset) scrubs
+7. **Key material zeroed**. `hull_secure_zero()` (volatile memset) scrubs
    crypto material from stack buffers before return.
-8. **Instruction limits** — Lua via `lua_sethook(LUA_MASKCOUNT)`, JS via
+8. **Instruction limits**. Lua via `lua_sethook(LUA_MASKCOUNT)`, JS via
    `JS_SetInterruptHandler`. Default 100M/req. Override with
    `--max-instructions N` or `HULL_MAX_INSTRUCTIONS=N`.
-9. **Audit logging** — `--audit` flag emits one JSON line per capability call.
+9. **Audit logging**. `--audit` flag emits one JSON line per capability call.
    Zero overhead when off (single branch on `hl_audit_enabled` global).
 
 ---
@@ -579,19 +579,19 @@ JS uses identical names: `app.use`, `app.usePost`, `app.ws`, `app.sse`,
 
 **Lua `req` (table) fields:**
 - `req.method`, `req.path`, `req.url`, `req.query` (table)
-- `req.headers[name]` — keys are lowercased
-- `req.body` — string (lazy; reading triggers body capture)
-- `req.params[name]` — captured route parameters
-- `req.ctx` — per-request mutable table for middleware-to-handler data
+- `req.headers[name]`. Keys are lowercased
+- `req.body`. String (lazy; reading triggers body capture)
+- `req.params[name]`. Captured route parameters
+- `req.ctx`. Per-request mutable table for middleware-to-handler data
 
 **Lua `res` (userdata) methods:**
-- `res:status(code)` — chainable
-- `res:header(name, value)` — chainable
-- `res:json(value)` — sends, `Content-Type: application/json`
-- `res:text(string)`, `res:html(string)` — same, with content type
-- `res:redirect(url, [code])` — default 302
-- `res:cookie(name, value, opts)` — sets `Set-Cookie`
-- `res:file(path)` — zero-copy sendfile (path is cap-validated)
+- `res:status(code)`. Chainable
+- `res:header(name, value)`. Chainable
+- `res:json(value)`. Sends, `Content-Type: application/json`
+- `res:text(string)`, `res:html(string)`. Same, with content type
+- `res:redirect(url, [code])`. Default 302
+- `res:cookie(name, value, opts)`. Sets `Set-Cookie`
+- `res:file(path)`. Zero-copy sendfile (path is cap-validated)
 
 **JS** is the same with `camelCase`: `req.headers[name]`, `res.status(code)`,
 `res.json(value)`, `res.sendFile(path)`.
@@ -632,7 +632,7 @@ app.use("*", "/*", mw)                  -- 0 = continue, 1 = short-circuit
 | `auth` | Session or JWT auth | `cookie_name`, `optional`, `login_path`, `secret` |
 | `session` | Server-side sessions | `ttl` (call `session.init()` first) |
 | `logger` | Logfmt access logs | `skip`, `include_headers` (or `includeHeaders` in JS) |
-| `transaction` | Wrap mutations in `db.batch` | (none) — call `transaction.run(fn)` inside handlers |
+| `transaction` | Wrap mutations in `db.batch` | (none). Call `transaction.run(fn)` inside handlers |
 | `idempotency` | Idempotency-Key replay | `header_name`, `get_principal`, `methods`, `ttl` |
 | `outbox` | Transactional outbox | `max_attempts` (default 5) |
 | `inbox` | Inbox dedup | `ttl` |
@@ -766,11 +766,11 @@ modules that require DB.
 ### Querying
 
 ```lua
--- SELECT — returns array of rows (each row a table)
+-- SELECT. Returns array of rows (each row a table)
 local rows = db.query("SELECT id, name FROM users WHERE active = ?", { true })
 for _, r in ipairs(rows) do print(r.id, r.name) end
 
--- INSERT/UPDATE/DELETE — returns affected row count
+-- INSERT/UPDATE/DELETE. Returns affected row count
 local n = db.exec("UPDATE users SET name = ? WHERE id = ?", { "Bob", 42 })
 
 -- Last inserted ID
@@ -782,7 +782,7 @@ db.batch(function()
     db.exec("INSERT INTO audit (action) VALUES (?)", { "create user" })
 end)
 
--- Async (yields to event loop — frees worker for other requests)
+-- Async (yields to event loop. Frees worker for other requests)
 local rows = db.async.query("SELECT ... ", { ... })
 ```
 
@@ -797,7 +797,7 @@ Always use `?` placeholders. Bound types map cleanly:
 
 **Never** concatenate user input into SQL. The C layer guarantees
 parameterised access; the only way to construct dynamic identifiers
-(table/column names) is through a vetted allowlist — see `search.lua` for the
+(table/column names) is through a vetted allowlist. See `search.lua` for the
 pattern.
 
 ### Migrations
@@ -817,11 +817,11 @@ CREATE INDEX idx_users_name ON users(name);
 ```
 
 **Commands:**
-- `hull migrate [app]` — run pending
-- `hull migrate status` — list applied / pending
-- `hull migrate new <name>` — scaffold next file
-- `hull dev` — auto-runs on startup (unless `--no-migrate`)
-- `hull agent migrate` — JSON migration status
+- `hull migrate [app]`. Run pending
+- `hull migrate status`. List applied / pending
+- `hull migrate new <name>`. Scaffold next file
+- `hull dev`. Auto-runs on startup (unless `--no-migrate`)
+- `hull agent migrate`. JSON migration status
 
 **Tip:** migrations are embedded in built binaries (via VFS), so
 `hull build`-then-deploy needs no separate migration step.
@@ -875,7 +875,7 @@ hull compute check score        # smoke-test load in WAMR
 hull build .                    # embeds .wasm (and AOT if wamrc available)
 ```
 
-`hull build` automatically rebuilds stale `.c` sources before embedding —
+`hull build` automatically rebuilds stale `.c` sources before embedding.
 no separate `hull compute build` step required during release builds.
 Pass `--no-build-compute` for hermetic CI builds that ship pre-committed
 `.wasm` artifacts.
@@ -933,7 +933,7 @@ All compute and GPU functions accept any of these as input
 |---|---|
 | String | Literals / `string.pack` (Lua) / N/A (JS uses ArrayBuffer) |
 | ArrayBuffer | JS typed arrays (JS-only) |
-| MappedBuffer | `fs.mmap(path)` — disk-mapped |
+| MappedBuffer | `fs.mmap(path)`. Disk-mapped |
 | WasmBuffer | `compute.call(name, input, { buffer = true })` |
 
 Chain them without round-tripping through script string copies:
@@ -1147,7 +1147,7 @@ global branch).
 ### Run `/c-audit`, `/js-audit`, `/lua-audit`
 
 Periodic audits live in [`docs/audit_2026_05_15.md`](audit_2026_05_15.md).
-The audit skills in `.claude/skills/` produce the same reports — rerun on
+The audit skills in `.claude/skills/` produce the same reports. Rerun on
 significant changes.
 
 ---
@@ -1192,7 +1192,7 @@ hull test tests/test_users.lua   # one file
 hull agent test            # same, JSON output
 ```
 
-Tests run in-process — the request goes through the same dispatcher as a real
+Tests run in-process. The request goes through the same dispatcher as a real
 HTTP request but no socket is opened. DB is `:memory:` (migrations auto-applied).
 
 ### Test helpers
@@ -1386,11 +1386,11 @@ See [`docs/release_signing.md`](release_signing.md) for full design.
 
 When `--agent` is passed:
 
-- **`.hull/dev.json`** — written on start. Schema:
+- **`.hull/dev.json`**. Written on start. Schema:
   ```json
   { "port": 3000, "pid": 12345, "runtime": "lua", "started_at": 1747325420 }
   ```
-- **`.hull/last_error.json`** — written on load failure. Schema:
+- **`.hull/last_error.json`**. Written on load failure. Schema:
   ```json
   {
     "file": "app.lua",
@@ -1464,17 +1464,17 @@ Sixteen additional subcommands close common agent productivity gaps:
 | Subcommand | Output |
 |---|---|
 | `manifest [app]` | `{ declared, runtime, fs:{read,write}, env, hosts, csp, cors, wasm, gpu, compute }` |
-| `endpoint METHOD PATH [app]` | `{ method, path, middleware:[...], middleware_count, routes:[...], route_count, would_match }` — preview the request without running it |
-| `middleware METHOD PATH [app]` | `{ method, path, middleware:[...], count }` — focused subset of `routes` |
+| `endpoint METHOD PATH [app]` | `{ method, path, middleware:[...], middleware_count, routes:[...], route_count, would_match }`. Preview the request without running it |
+| `middleware METHOD PATH [app]` | `{ method, path, middleware:[...], count }`. Focused subset of `routes` |
 | `capabilities [app]` | `{ runtime, manifest_declared, capabilities:[{name, used, declared_or_unrestricted, status}], used_but_undeclared_count }` |
 | `validate <file>` | `{ file, runtime, ok, error?, findings:[{severity, pattern, message, line}] }` |
-| `vfs [app]` | `{ app_dir, app:[{name,size,bucket}], stdlib:[...] }` — every embedded file |
+| `vfs [app]` | `{ app_dir, app:[{name,size,bucket}], stdlib:[...] }`. Every embedded file |
 | `compute [app]` | `{ available, modules:[{name,size,aot,aot_arch}] }` |
 | `gpu [app]` | `{ available, shaders:[{name,size}] }` |
 | `perf [app]` | `{ runtime, features:{lua,js,wasm,gpu,db,tcc}, limits:{...}, live_stats_hint }` |
 | `logs [app] [--tail N]` | `{ path, exists, total_lines_in_tail, truncated, lines:[...] }` |
-| `eval <code> [app]` | `{ ok, result\|error }` — runs the snippet against the loaded app, JSON-serialises the return value |
-| `template <name> [data.json] [app]` | `{ template, output, bytes }` — renders via the loaded runtime's template engine |
+| `eval <code> [app]` | `{ ok, result\|error }`. Runs the snippet against the loaded app, JSON-serialises the return value |
+| `template <name> [data.json] [app]` | `{ template, output, bytes }`. Renders via the loaded runtime's template engine |
 | `compute-call <mod> <input> [app]` | scheduled-execution status with input size |
 | `schema-diff [app] [-d path]` | `{ expected_tables, actual_tables, drift_tables, drift_indexes, missing_tables, in_sync }` |
 | `sql named <qname> [--params JSON] [app]` | runs a pre-defined query from `app/queries.json` with named parameter binding |
@@ -1655,7 +1655,7 @@ app.daily("03:00", function() outbox.cleanup(86400 * 30) end)
 | Issuing 100 `gpu.dispatch` calls per request | ~260 ms in submit overhead | Use `gpu.pipeline()` (single submission) |
 | Storing `Set-Cookie` in idempotency cache | Replayed long after session revocation | The middleware now allowlists replayable headers; user headers should be `X-*` |
 | Manual `==` comparison of HMAC digests | Timing attack | Use `crypto.constant_time_eq` or the constant-time helpers in `jwt.lua` / `csrf.lua` |
-| `eval()` / `Function()` / `load()` in app code | Sandbox bypass attempt — fails at runtime; sandbox audit will reject | Use the template engine's `_template.compile()` C bridge if you need codegen |
+| `eval()` / `Function()` / `load()` in app code | Sandbox bypass attempt. Fails at runtime; sandbox audit will reject | Use the template engine's `_template.compile()` C bridge if you need codegen |
 | Modifying `Object.prototype` (JS) or `_G` (Lua) | Pollutes other modules; sandbox audit will flag | Use module-local state |
 
 ---
@@ -1671,7 +1671,7 @@ app.daily("03:00", function() outbox.cleanup(86400 * 30) end)
 | **Runtime** | Either Lua 5.4 or QuickJS. Chosen per-project by entry file extension. |
 | **Sandbox** | Kernel-level enforcement (pledge/unveil/seatbelt) of the manifest. Not the same as runtime sandbox (Lua/JS interpreter restrictions). |
 | **VFS** | Virtual filesystem of embedded files (templates, static, migrations, app modules, stdlib). Sorted `HlEntry` arrays with O(log n) lookup. |
-| **Tool mode** | Build-time CLI execution of `hull` (e.g. `hull build`, `hull migrate new`). Has access to `tool.spawn`, `tool.find_files`, etc. — not available at request time. |
+| **Tool mode** | Build-time CLI execution of `hull` (e.g. `hull build`, `hull migrate new`). Has access to `tool.spawn`, `tool.find_files`, etc.. Not available at request time. |
 | **Cap layer** | The C boundary (`hl_cap_*` functions, `src/hull/cap/`). Enforces the manifest, validates inputs. |
 | **Stdlib** | The embedded Lua/JS modules under `stdlib/lua/hull/` and `stdlib/js/hull/`. Loaded via `require()` / `import`. |
 | **Plugin** | A WASM compute module exporting `hull_process`. Called via `compute.call`. |
@@ -1717,20 +1717,20 @@ templates/                     Build templates (app_main.c, entry.h)
 
 ### Reading order for new contributors
 
-1. [`CLAUDE.md`](../CLAUDE.md) — the canonical project guide (this file is a
+1. [`CLAUDE.md`](../CLAUDE.md). The canonical project guide (this file is a
    curated agent-focused projection of it).
-2. `include/hull/runtime.h` + `include/hull/app_context.h` — the polymorphic
+2. `include/hull/runtime.h` + `include/hull/app_context.h`. The polymorphic
    boundary between core and runtimes.
-3. `src/hull/cap/db.c` — read one cap module end-to-end to internalise the
+3. `src/hull/cap/db.c`. Read one cap module end-to-end to internalise the
    pattern.
-4. `examples/hello/app.lua` — minimal working app.
-5. `examples/crud_with_auth/app.lua` — realistic app with auth + migrations.
-6. [`docs/wamr_architecture.md`](wamr_architecture.md) — compute design.
-7. [`docs/security.md`](security.md) — threat model.
+4. `examples/hello/app.lua`. Minimal working app.
+5. `examples/crud_with_auth/app.lua`. Realistic app with auth + migrations.
+6. [`docs/wamr_architecture.md`](wamr_architecture.md). Compute design.
+7. [`docs/security.md`](security.md). Threat model.
 
 ---
 
-## Agent gap analysis — closed (Phase 6, 2026-05-15)
+## Agent gap analysis. Closed (Phase 6, 2026-05-15)
 
 All sixteen identified gaps have been implemented. See § Extended
 introspection above for the full subcommand reference. Implementation

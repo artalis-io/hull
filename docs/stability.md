@@ -6,7 +6,7 @@ This document defines what's stable, what's experimental, and what's internal in
 
 Hull's surface is split into four stability tiers. Semver applies separately to each.
 
-### Tier 1 — Stable
+### Tier 1. Stable
 
 Semver-versioned. Breaking changes require a major bump (v0.x → v0.(x+1) pre-1.0; major bump 1.0+).
 
@@ -17,16 +17,16 @@ Semver-versioned. Breaking changes require a major bump (v0.x → v0.(x+1) pre-1
 - **CLI subcommand names** and the stable flag set (enumerated below).
 - **Embedded file layout** (`templates/`, `static/`, `compute/`, `shaders/`, `migrations/`).
 
-### Tier 2 — Stable but new
+### Tier 2. Stable but new
 
 Semver-versioned; may grow but won't shrink.
 
 - `hull dev --agent` sidecar files (`.hull/dev.json`, `.hull/last_error.json`).
 - `hull agent <subcommand>` JSON output schemas.
 - `hull doctor --json` schema.
-- `hull update` — JSON request/response shape from GitHub API + the SHA-256 checksum manifest format.
+- `hull update`. JSON request/response shape from GitHub API + the SHA-256 checksum manifest format.
 
-### Tier 3 — Experimental
+### Tier 3. Experimental
 
 May change between minor versions. Marked as such in CLAUDE.md / inline docs.
 
@@ -36,19 +36,19 @@ May change between minor versions. Marked as such in CLAUDE.md / inline docs.
 - GPU textures (`gpu.texture`, `gpu.texture_read`).
 - `gpu.pipeline` output spec (Lua 1-indexed / JS 0-indexed asymmetry; may unify).
 - Memory64 WASM modules.
-- `app.every` / `app.daily` — minimum interval, `return false` cancellation, `{localtime}` option.
+- `app.every` / `app.daily`. Minimum interval, `return false` cancellation, `{localtime}` option.
 - `hull mcp` server output schema.
 - `--audit` JSON event shape.
-- Any `_hull_*` SQLite table (idempotency, sessions, outbox, etc.) — internal storage, user code MUST NOT touch directly.
+- Any `_hull_*` SQLite table (idempotency, sessions, outbox, etc.). Internal storage, user code MUST NOT touch directly.
 
-### Tier 4 — Internal
+### Tier 4. Internal
 
 No stability promise. Do not depend on these from outside Hull.
 
 - C headers in `include/hull/` (used internally by the build pipeline). The exception: `include/hull/entry.h` (the `HlEntry` registry layout), part of the eject contract.
 - `__hull_*` globals in JS / `__hull_*` Lua registry keys.
 - Worker queue ops (`HlWorkerDbOp`, `HlWorkerWasmOp`, `HlWorkerGpuOp`).
-- `HlLua` / `HlJS` struct internals — although the structs are in public headers today, the field layout is not API. Treat as opaque.
+- `HlLua` / `HlJS` struct internals. Although the structs are in public headers today, the field layout is not API. Treat as opaque.
 - `HlStmtCache` internals.
 
 ## Stable CLI flag set (v0.1.0)
@@ -109,7 +109,7 @@ Concept names map between runtimes by this rule:
 
 - `snake_case` in Lua → `camelCase` in JS for **two-word identifiers**: `now_ms` ↔ `nowMs`, `hash_password` ↔ `hashPassword`.
 - **Concatenated nouns stay lowercase as a unit**: `datetime` (not `dateTime`), `secretbox` (not `secretBox`), `base64` (not `base64`).
-- **Acronyms are upper in JS even mid-word**: `hmacSha256`, `boxKeypair`. (Adopt-as-you-add — not retro-applied if it'd break a Tier 1 surface.)
+- **Acronyms are upper in JS even mid-word**: `hmacSha256`, `boxKeypair`. (Adopt-as-you-add. Not retro-applied if it'd break a Tier 1 surface.)
 
 ### Error conventions in async APIs
 
@@ -128,7 +128,7 @@ Functions that return a single primitive or a result table return the same shape
 ### Body access
 
 - `req.body` is always raw bytes (a string in Lua, an ArrayBuffer in JS).
-- Use the stdlib for parsed access: `json.decode(req.body)`, `form.parse(req.body)`. No magic `req:json()` / `req.json()` accessor — that path is reserved for future and currently NOT implemented.
+- Use the stdlib for parsed access: `json.decode(req.body)`, `form.parse(req.body)`. No magic `req:json()` / `req.json()` accessor. That path is reserved for future and currently NOT implemented.
 
 ### Header case
 
@@ -148,14 +148,14 @@ We reserve the right to:
 
 - Remove Tier 3 surface between minor versions with one release of advance notice in release notes.
 - Restructure Tier 4 freely.
-- Add new Tier 1 surface (manifest keys, flags, functions) — these are additive and don't break existing apps.
+- Add new Tier 1 surface (manifest keys, flags, functions). These are additive and don't break existing apps.
 
 ## Resolved before v0.1.0 (no longer experimental)
 
 The pre-v0.1.0 API review landed these decisions (see `docs/api_review.md`):
 
-- **Async error convention** — All `*.async.*` APIs throw on error (uniform with sync). `db.async.query`/`db.async.exec`/`compute.async.call` no longer return `{error}` objects.
-- **HTTP route methods** — `app.delete` is canonical; `app.del` is a deprecated alias kept for one release cycle.
-- **HTTP client** — `http.fetch` removed. Use `http.<method>(url, ...)` for sync or `http.async.<method>(url, ...)` for async.
-- **CLI compiler flag** — Only `--compiler` is accepted; `--cc` removed.
-- **`--no-ca-bundle`** — Canonical name; `--skip-ca-bundle` accepted as a deprecated alias.
+- **Async error convention**. All `*.async.*` APIs throw on error (uniform with sync). `db.async.query`/`db.async.exec`/`compute.async.call` no longer return `{error}` objects.
+- **HTTP route methods**. `app.delete` is canonical; `app.del` is a deprecated alias kept for one release cycle.
+- **HTTP client**. `http.fetch` removed. Use `http.<method>(url, ...)` for sync or `http.async.<method>(url, ...)` for async.
+- **CLI compiler flag**. Only `--compiler` is accepted; `--cc` removed.
+- **`--no-ca-bundle`**. Canonical name; `--skip-ca-bundle` accepted as a deprecated alias.

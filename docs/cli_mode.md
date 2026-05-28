@@ -1,4 +1,4 @@
-# CLI / Compute-Only Mode — Design
+# CLI / Compute-Only Mode. Design
 
 `HL_ENABLE_HTTP=0` builds. `app.main(fn)` entry point. Sealed Hull as a CLI
 runtime for compute pipelines, ETL, image processing, build tooling, and
@@ -49,9 +49,9 @@ app.manifest({ modules = { "hull/fs@1" } })
 app.main(function(ctx)
     -- ctx.args   : array (1-indexed) of argv, excluding the binary name
     -- ctx.env    : table of env vars the manifest's `env` allowlist admits
-    -- ctx.stdin  : reader  — :read("*l" | "*a" | bytes_n) → string|nil, :close()
-    -- ctx.stdout : writer  — :write(str), :flush()
-    -- ctx.stderr : writer  — :write(str), :flush()
+    -- ctx.stdin  : reader . :read("*l" | "*a" | bytes_n) → string|nil, :close()
+    -- ctx.stdout : writer . :write(str), :flush()
+    -- ctx.stderr : writer . :write(str), :flush()
 
     local name = ctx.args[1] or "world"
     ctx.stdout:write("hello " .. name .. "\n")
@@ -67,7 +67,7 @@ app.manifest({ modules: ["hull/fs@1"] });
 app.main(async (ctx) => {
     // ctx.args   : Array<string>
     // ctx.env    : Object<string, string>
-    // ctx.stdin  : { readLine(), readAll(), read(n), close() } — all return Promise<string|null>
+    // ctx.stdin  : { readLine(), readAll(), read(n), close() }. All return Promise<string|null>
     // ctx.stdout : { write(str), flush() }
     // ctx.stderr : { write(str), flush() }
 
@@ -77,7 +77,7 @@ app.main(async (ctx) => {
 });
 ```
 
-`ctx` is a flat bag — no methods beyond what's listed. Apps wanting richer
+`ctx` is a flat bag. No methods beyond what's listed. Apps wanting richer
 IO (random-access file read, mmap, fifo) use `require("hull.fs")` exactly as
 HTTP apps do today.
 
@@ -106,7 +106,7 @@ HTTP apps do today.
 │ 6. Call app.main(ctx) on the event-loop thread                  │
 │      • Full capability surface available                        │
 │      • compute.async / gpu.async / http.fetch all yield via     │
-│        coroutine (Lua) / Promise (JS) — main awaits naturally   │
+│        coroutine (Lua) / Promise (JS). Main awaits naturally   │
 │ 7. main returns (or throws) → cleanup                           │
 │ 8. Drain mmap / WASM / GPU caches; scrub key material; close DB │
 │ 9. Process exits with main's return code                        │
@@ -134,9 +134,9 @@ event-loop thread. When it hits `compute.async.call`, `gpu.async.dispatch`,
 `http.fetch`, `db.async.query`, etc., it yields; the work runs on the
 thread pool; the result resumes main. The process exits when main returns,
 not when "the event loop empties" (no Node.js-style "why doesn't my CLI
-exit?" footgun — main's return is authoritative).
+exit?" footgun. Main's return is authoritative).
 
-## Build flag — `HL_ENABLE_HTTP`
+## Build flag. `HL_ENABLE_HTTP`
 
 Default `1`. Same pattern as `HL_ENABLE_DB`, `HL_ENABLE_WASM`, etc.
 
@@ -187,7 +187,7 @@ Annotate the registry entries that need it:
 | `hull/middleware/*` (all 13) | yes |
 | `hull/email` | yes (uses outbound HTTP/SMTP via Keel) |
 
-Resolver behavior is the same as for `HL_MOD_CAP_DB` / `WASM` / `GPU` —
+Resolver behavior is the same as for `HL_MOD_CAP_DB` / `WASM` / `GPU`.
 build-time-disabled modules produce:
 
 ```
@@ -230,7 +230,7 @@ return 1;
 
 | Command | HTTP=1 build | HTTP=0 build |
 |---------|--------------|--------------|
-| `hull run [app]` | **new** — load + invoke main, exit with rc. Works in both modes. | same |
+| `hull run [app]` | **new**. Load + invoke main, exit with rc. Works in both modes. | same |
 | `hull dev [app]` | unchanged | absent (with hint: "use `hull run` for CLI apps") |
 | `hull test [app]` | unchanged (gates modules per recent work) | same; only loads CLI apps |
 | `hull build [app]` | detects mode from app, errors if mode mismatches build caps | refuses to build a server app |
@@ -238,7 +238,7 @@ return 1;
 | `hull doctor` | reports HTTP=yes | reports HTTP=no |
 | `hull agent manifest` | adds `"mode": "server"\|"cli"\|"unknown"` | adds `"mode": "cli"\|"unknown"` |
 | `hull modules available` | shows all modules | shows all modules, with `requires_http` flag on the affected ones |
-| `hull new --cli` | **new** scaffold flag — generates a CLI app skeleton | same; default in HTTP=0 builds |
+| `hull new --cli` | **new** scaffold flag. Generates a CLI app skeleton | same; default in HTTP=0 builds |
 | `hull init` | detects mode from existing app, scaffolds accordingly | same |
 
 ## `hull build` interaction
@@ -327,7 +327,7 @@ loaded app is CLI mode (`app.main` registered, no routes).
 
 ## Manifest
 
-No new top-level field needed — mode is derived from whether `app.main`
+No new top-level field needed. Mode is derived from whether `app.main`
 was called. The manifest's `modules = {...}` already declares the
 capability surface; that's the right grain of declaration.
 
@@ -338,7 +338,7 @@ build-capability cross-check.
 
 ## Implementation phases
 
-### Phase 1 — `app.main` registration + lifecycle (default HTTP=1 build)
+### Phase 1. `app.main` registration + lifecycle (default HTTP=1 build)
 - Add `app.main(fn)` binding in `mod_app.c` for both runtimes
 - `HlRuntime.has_main` flag + main-runner vtable entry
 - `ctx` object construction (args, env, stdio handles)
@@ -348,20 +348,20 @@ build-capability cross-check.
 - Outcome: `hull` binary can load a CLI app, run main, exit. No build
   changes required.
 
-### Phase 2 — `hull run` command + scaffolding
-- `src/hull/commands/run.c` — load + invoke main, exit with rc
-- `hull new --cli` — scaffold a minimal CLI app skeleton
-- `hull init` — detect CLI vs server from existing `app.{lua,js}`
+### Phase 2. `hull run` command + scaffolding
+- `src/hull/commands/run.c`. Load + invoke main, exit with rc
+- `hull new --cli`. Scaffold a minimal CLI app skeleton
+- `hull init`. Detect CLI vs server from existing `app.{lua,js}`
 - Templates in `stdlib/cli/lua/hull/new.lua` and `init.lua`
 - E2E test against a few sample CLI apps (line counter, CSV reformatter)
 - Outcome: full dev workflow for CLI apps on a standard hull build.
 
-### Phase 3 — `HL_ENABLE_HTTP=0` build flag
+### Phase 3. `HL_ENABLE_HTTP=0` build flag
 
 Split into 3a (foundation, no behavior change) and 3b (the actual no-HTTP
 build, multi-session refactor).
 
-**Phase 3a — foundation: shipped**
+**Phase 3a. Foundation: shipped**
 - `HL_MOD_CAP_HTTP` registry bit; `hull/http`, `hull/ws`, `hull/server`,
   `hull/smtp`, and every `hull/middleware/*` entry now require it.
 - Resolver: `build_provided_caps()` includes `HL_MOD_CAP_HTTP` when
@@ -376,9 +376,9 @@ build, multi-session refactor).
   `HL_ENABLE_HTTP=0` build can swap `serve.c` for a Keel-free
   counterpart without touching the dispatcher.
 
-**Phase 3b — actual `HL_ENABLE_HTTP=0` build: not yet shipped**
+**Phase 3b. Actual `HL_ENABLE_HTTP=0` build: not yet shipped**
 
-Scope is genuinely a multi-day refactor — 58 source files touch Keel
+Scope is genuinely a multi-day refactor. 58 source files touch Keel
 symbols (`KlServer` / `KlRequest` / `KlResponse` / `KlConn` /
 `KlAsyncOp` / `kl_*`). The work breaks into ~7 independent slices,
 each landable as its own commit:
@@ -394,7 +394,7 @@ each landable as its own commit:
    from the Makefile entirely.
 3. **Runtime support files**: `routes.c`, `dispatch.c`, `sse.c`,
    `ws.c`, `timers.c` excluded when `HL_ENABLE_HTTP=0`. `async.c`
-   needs care — it's used by both HTTP handlers and `app.main`'s
+   needs care. It's used by both HTTP handlers and `app.main`'s
    coroutine driver. Either trim it to the detached/timer path only,
    or split into `async_core.c` (kept) + `async_http.c` (dropped).
 4. **Stdlib middleware**: skip embedding `stdlib/{lua,js}/hull/middleware/*`
@@ -406,7 +406,7 @@ each landable as its own commit:
    either `#ifdef`s out `serve.c` and replaces it with a tiny
    `serve_cli.c` (load app → invoke `app.main` → exit) OR keeps
    `serve.c` but ifdef's out the Keel-only branches. The latter is
-   probably simpler — only the route-wiring and event-loop sections
+   probably simpler. Only the route-wiring and event-loop sections
    need guards.
 6. **Commands**: `hull dev` excluded when `HL_ENABLE_HTTP=0` (it forks
    a serve subprocess; no point without a server). `hull agent` /
@@ -422,14 +422,14 @@ After 3b: `hull doctor` reports HTTP=no, `hull dev` is absent, binary
 shrinks by ~1.5MB (Keel + middleware source + bindings). The CLI app
 written for an HTTP=1 build runs unchanged on the HTTP=0 binary.
 
-**Phase 3c — sandbox narrowing & cosmo support**
+**Phase 3c. Sandbox narrowing & cosmo support**
 - Drop `inet` pledge promise + macOS network SBPL clauses when no HTTP
   module is declared (or when `HL_ENABLE_HTTP=0`).
-- `make platform-cosmo HL_ENABLE_HTTP=0` — verify multi-arch builds.
+- `make platform-cosmo HL_ENABLE_HTTP=0`. Verify multi-arch builds.
 - Binary-size verification (target ≥ 1 MB reduction).
 - E2E: build + test the same CLI apps on a no-HTTP hull.
 
-### Phase 4 — Polish & documentation
+### Phase 4. Polish & documentation
 - `hull build` mode validation against build's HTTP cap
 - `hull agent manifest` `mode` field
 - Sample CLI examples in `examples/cli/` (CSV transformer, image batch,
@@ -469,7 +469,7 @@ Total: ~1 week of focused work.
 - **macOS sandbox SBPL generation**. The dynamic SBPL build in
   `sandbox.c` adds network clauses unconditionally today. Phase 3 must
   make those conditional on "HTTP modules declared OR HL_ENABLE_HTTP=0
-  build" — otherwise CLI apps on HTTP-enabled hulls would still get an
+  build". Otherwise CLI apps on HTTP-enabled hulls would still get an
   oversized profile. Existing tests in `e2e_sandbox.sh` catch regressions.
 
 - **`hull test` for CLI apps**. Existing tests assume HTTP. The

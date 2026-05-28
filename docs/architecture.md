@@ -1,4 +1,4 @@
-# Hull — Architecture
+# Hull. Architecture
 
 ## System Layers
 
@@ -79,7 +79,7 @@ The server startup sequence:
 11. Create client connection pool (if `hosts` declared)
 12. Initialize compression config (gzip via miniz, unless `--no-compress`)
 13. Register CORS middleware (if manifest declares `cors`)
-14. Apply kernel sandbox — always active, scoped by manifest (`hl_sandbox_apply`)
+14. Apply kernel sandbox. Always active, scoped by manifest (`hl_sandbox_apply`)
 15. Run Keel event loop
 
 ### Manifest Extraction (`manifest.c`)
@@ -106,7 +106,7 @@ Extraction reads the stored manifest table from the runtime:
 
 Result: `HlManifest` struct with up to 32 entries per category (`fs_read`, `fs_write`, `env`, `hosts`), optional `csp` policy string, and optional `cors` configuration (origins, methods, headers, credentials, max_age).
 
-`app.manifest()` is **one-shot** — calling it a second time raises a runtime error. The manifest is extracted into a C struct during startup, capabilities are wired from that struct, and the kernel sandbox is sealed. After sealing, the runtime-side registry key is irrelevant — C-level configs and kernel restrictions are immutable.
+`app.manifest()` is **one-shot** (calling it a second time raises a runtime error. The manifest is extracted into a C struct during startup, capabilities are wired from that struct, and the kernel sandbox is sealed. After sealing, the runtime-side registry key is irrelevant) C-level configs and kernel restrictions are immutable.
 
 ### Content-Security-Policy (CSP)
 
@@ -134,19 +134,19 @@ After manifest extraction, `hl_sandbox_apply()` always locks down the process (e
 | 1 | `unveil(path, "r")` for each `fs.read` path | Filesystem read-only |
 | 2 | `unveil(path, "rwc")` for each `fs.write` path | Filesystem read-write |
 | 3 | `unveil(db_path, "rwc")` for SQLite | Database access |
-| 4 | `unveil(NULL, NULL)` | Seal — no more paths can be added |
+| 4 | `unveil(NULL, NULL)` | Seal. No more paths can be added |
 | 5 | `pledge("stdio inet rpath wpath cpath flock [dns]")` | Syscall filter |
 
 After sealing, any attempt to access undeclared paths triggers SIGKILL (Linux/Cosmo) or returns ENOENT.
 
-The sandbox is **always applied**, even if `app.manifest()` is not called. An app without a manifest is sandboxed identically to `app.manifest({})` — only the database file and TLS certificate paths are accessible.
+The sandbox is **always applied**, even if `app.manifest()` is not called. An app without a manifest is sandboxed identically to `app.manifest({})`. Only the database file and TLS certificate paths are accessible.
 
 ### Virtual Filesystem (`vfs.c`)
 
 All embedded file lookups go through the unified VFS module. Two `HlVfs` instances are created at startup:
 
-- **`app_vfs`** — sorted `hl_app_entries[]` + `app_dir` for filesystem fallback. Used by static serving, templates, migrations, app modules, signature verification.
-- **`platform_vfs`** — sorted `hl_stdlib_entries[]`, no filesystem fallback. Used by Lua/JS stdlib module loading.
+- **`app_vfs`**. Sorted `hl_app_entries[]` + `app_dir` for filesystem fallback. Used by static serving, templates, migrations, app modules, signature verification.
+- **`platform_vfs`**. Sorted `hl_stdlib_entries[]`, no filesystem fallback. Used by Lua/JS stdlib module loading.
 
 The VFS provides O(log n) binary search (`hl_vfs_find`) for exact lookups and prefix queries (`hl_vfs_prefix`) for discovering all entries under a path like `migrations/` or `static/`. Entry arrays must be sorted by name in C `strcmp` order at build time.
 
@@ -178,19 +178,19 @@ Every capability is a C function that validates inputs before performing the ope
 
 ### Filesystem (`cap/fs.c`)
 
-- `hl_cap_fs_validate(path, base_dir)` — Rejects absolute paths, `..` components, symlink escapes via `realpath()` ancestor check
-- `hl_cap_fs_read(path, base_dir, ...)` — Read file within base directory
-- `hl_cap_fs_write(path, base_dir, ...)` — Write file, auto-creates parent directories
-- `hl_cap_fs_exists()` / `hl_cap_fs_delete()` — Existence check and deletion
+- `hl_cap_fs_validate(path, base_dir)`. Rejects absolute paths, `..` components, symlink escapes via `realpath()` ancestor check
+- `hl_cap_fs_read(path, base_dir, ...)`. Read file within base directory
+- `hl_cap_fs_write(path, base_dir, ...)`. Write file, auto-creates parent directories
+- `hl_cap_fs_exists()` / `hl_cap_fs_delete()`. Existence check and deletion
 
 All paths must be relative and resolve within the declared base directory.
 
 ### Database (`cap/db.c`)
 
-- `hl_cap_db_query(cache, sql, params, callback)` — SELECT with parameterized binding
-- `hl_cap_db_exec(cache, sql, params)` — INSERT/UPDATE/DELETE with parameterized binding
-- `hl_cap_db_begin/commit/rollback(db)` — explicit transaction control
-- `db.batch(fn)` — Lua/JS API wrapping fn() in BEGIN IMMEDIATE..COMMIT
+- `hl_cap_db_query(cache, sql, params, callback)`. SELECT with parameterized binding
+- `hl_cap_db_exec(cache, sql, params)`. INSERT/UPDATE/DELETE with parameterized binding
+- `hl_cap_db_begin/commit/rollback(db)`. Explicit transaction control
+- `db.batch(fn)`. Lua/JS API wrapping fn() in BEGIN IMMEDIATE..COMMIT
 
 SQL is always a literal string from app code. Parameters are bound via SQLite's `sqlite3_bind_*` family. No string concatenation. SQL injection is structurally impossible.
 
@@ -229,36 +229,36 @@ Key material is zeroed from stack buffers after use via `hull_secure_zero()` (vo
 
 ### Time (`cap/time.c`)
 
-- `hl_cap_time_now()` — Unix timestamp (seconds)
-- `hl_cap_time_now_ms()` — Milliseconds
-- `hl_cap_time_clock()` — Monotonic clock (benchmarking)
-- `hl_cap_time_date()` / `hl_cap_time_datetime()` — Formatted output
+- `hl_cap_time_now()`. Unix timestamp (seconds)
+- `hl_cap_time_now_ms()`. Milliseconds
+- `hl_cap_time_clock()`. Monotonic clock (benchmarking)
+- `hl_cap_time_date()` / `hl_cap_time_datetime()`. Formatted output
 
 ### Environment (`cap/env.c`)
 
-- `hl_cap_env_get(name, config)` — Returns env var only if `name` is in the declared allowlist
+- `hl_cap_env_get(name, config)`. Returns env var only if `name` is in the declared allowlist
 
 Allowlist comes from manifest's `env` array (max 32 entries).
 
 ### HTTP Client (`cap/http.c`)
 
-- `hl_cap_http_request(method, url, body, config)` — Outbound HTTP with host validation
+- `hl_cap_http_request(method, url, body, config)`. Outbound HTTP with host validation
 
 Only hosts declared in manifest's `hosts` array are allowed.
 
-### Tool (`cap/tool.c`) — Build Mode Only
+### Tool (`cap/tool.c`). Build Mode Only
 
-- `hl_tool_spawn(argv, ...)` — Fork/exec with compiler allowlist (`cc`, `gcc`, `clang`, `cosmocc`, `cosmoar`, `ar`)
-- `hl_tool_find_files(dir, pattern)` — Recursive glob (skips dotdirs, vendor, node_modules)
-- `hl_tool_copy()` / `hl_tool_mkdir()` / `hl_tool_rmdir()` — Filesystem ops with unveil validation
+- `hl_tool_spawn(argv, ...)`. Fork/exec with compiler allowlist (`cc`, `gcc`, `clang`, `cosmocc`, `cosmoar`, `ar`)
+- `hl_tool_find_files(dir, pattern)`. Recursive glob (skips dotdirs, vendor, node_modules)
+- `hl_tool_copy()` / `hl_tool_mkdir()` / `hl_tool_rmdir()`. Filesystem ops with unveil validation
 
 No shell invocation (`system()`, `popen()`). Only allowlisted executables can be spawned.
 
 ### Test (`cap/test.c`)
 
-- In-process test runner — direct router dispatch without TCP
-- `test.get("/path")`, `test.post("/path", body)` — simulate HTTP requests
-- `test.eq(a, b)`, `test.ok(val)`, `test.err(fn, pattern)` — assertions
+- In-process test runner. Direct router dispatch without TCP
+- `test.get("/path")`, `test.post("/path", body)`. Simulate HTTP requests
+- `test.eq(a, b)`, `test.ok(val)`, `test.err(fn, pattern)`. Assertions
 
 ---
 
@@ -312,7 +312,7 @@ typedef struct {
 - Instruction counter reset before each dispatch
 
 **Middleware context (`req.ctx`):**
-- Same serialization model as Lua — JSON round-trip through `KlRequest.ctx`
+- Same serialization model as Lua. JSON round-trip through `KlRequest.ctx`
 - Auth middleware attaches `{ sessionId, session }` or `{ token, claims }` to ctx
 
 ---
@@ -326,10 +326,10 @@ Embedded Lua/JS modules in `stdlib/`:
 | `hull.json` | Canonical JSON encode/decode (sorted keys for deterministic signatures) |
 | `hull.cookie` | Cookie parsing (`parse`) and serialization (`serialize`, `clear`) with secure defaults |
 | `hull.middleware.session` | Server-side sessions backed by SQLite (create, load, update, destroy, cleanup) |
-| `hull.jwt` | JWT HS256 sign/verify/decode — constant-time signature comparison, no "none" algorithm |
-| `hull.middleware.csrf` | Stateless CSRF tokens via HMAC-SHA256 — generate, verify, middleware factory |
-| `hull.middleware.auth` | Authentication middleware factories — session auth, JWT Bearer auth, login/logout helpers |
-| `hull.template` | Compile-once render-many HTML template engine — inheritance, includes, filters, auto-escaping |
+| `hull.jwt` | JWT HS256 sign/verify/decode. Constant-time signature comparison, no "none" algorithm |
+| `hull.middleware.csrf` | Stateless CSRF tokens via HMAC-SHA256. Generate, verify, middleware factory |
+| `hull.middleware.auth` | Authentication middleware factories. Session auth, JWT Bearer auth, login/logout helpers |
+| `hull.template` | Compile-once render-many HTML template engine. Inheritance, includes, filters, auto-escaping |
 | `hull.build` | Full build pipeline: extract platform, collect files, generate trampoline, compile, link, sign |
 | `hull.verify` | Dual-layer signature verification (CLI tool) |
 | `hull.inspect` | Display capabilities + signature status |
@@ -345,22 +345,22 @@ The template engine (`hull.template`) compiles HTML templates to native runtime 
 ```
 Template source (.html file or string)
         ↓
-    Lexer — tokenize on {{ }}, {% %}, {{{ }}}, {# #}
+    Lexer. Tokenize on {{ }}, {% %}, {{{ }}}, {# #}
         ↓
-    Parser — recursive descent → AST
+    Parser. Recursive descent → AST
         ↓
-    Inheritance resolver — extends → load parent → merge blocks
+    Inheritance resolver. Extends → load parent → merge blocks
         ↓
-    Include resolver — inline partial AST nodes
+    Include resolver. Inline partial AST nodes
         ↓
-    Code generator — AST → native Lua or JS source string
+    Code generator. AST → native Lua or JS source string
         ↓
-    C bridge — luaL_loadbuffer (Lua) / JS_Eval (JS) → compiled function
+    C bridge. LuaL_loadbuffer (Lua) / JS_Eval (JS) → compiled function
         ↓
-    Cache — keyed by template name, reused across requests
+    Cache. Keyed by template name, reused across requests
 ```
 
-The C bridge functions (`_template._compile` / `_template._load_raw`) live in the runtime module loaders (`runtime/lua/modules.c`, `runtime/js/modules.c`). They use the same trust model as stdlib module loading — callable only from embedded stdlib code, not from user application code.
+The C bridge functions (`_template._compile` / `_template._load_raw`) live in the runtime module loaders (`runtime/lua/modules.c`, `runtime/js/modules.c`). They use the same trust model as stdlib module loading. Callable only from embedded stdlib code, not from user application code.
 
 Template files are embedded at build time as raw byte arrays in the sorted `hl_app_entries[]` array (with `templates/` prefix) and looked up via `hl_vfs_find(app_vfs, "templates/name")`. In dev mode, templates are loaded from `app_dir/templates/` on disk.
 
@@ -383,7 +383,7 @@ Three supported compiler paths:
 1. Extract `libhull_platform.a` from embedded assets
 2. Extract `app_main.c` template
 3. Collect app source files (Lua/JS/HTML/CSS)
-4. Generate sorted `app_registry.c` — xxd byte arrays of all app files (sorted by name for VFS binary search)
+4. Generate sorted `app_registry.c`. Xxd byte arrays of all app files (sorted by name for VFS binary search)
 5. Generate `app_main.c` from template + route registry
 6. Compile `app_main.c` + `app_registry.c` with selected compiler
 7. Link against `libhull_platform.a`
@@ -434,7 +434,7 @@ make platform-cosmo
 make CC=cosmocc EMBED_PLATFORM=cosmo   # xxd both archives into embedded_platform.h
 ```
 
-The embedded header contains `hl_embedded_platforms[]` — a self-describing metadata array with arch name, data pointer, and length for each platform archive.
+The embedded header contains `hl_embedded_platforms[]`. A self-describing metadata array with arch name, data pointer, and length for each platform archive.
 
 ---
 
@@ -466,7 +466,7 @@ The embedded header contains `hl_embedded_platforms[]` — a self-describing met
 
 **macOS (gcc/clang):**
 - Kernel sandbox: **Seatbelt** via `sandbox_init_with_parameters()` (deny-default SBPL profile built from manifest)
-- Phase 1 (pledge) is a no-op on macOS — Seatbelt is irreversible, so the full profile is applied in phase 2
+- Phase 1 (pledge) is a no-op on macOS. Seatbelt is irreversible, so the full profile is applied in phase 2
 - Phase 2 builds dynamic SBPL with selective allows for app_dir, db files, manifest paths, network
 - Violation behavior: EPERM (operation denied, process continues)
 - C-level validation: defense-in-depth layer alongside Seatbelt

@@ -1,12 +1,12 @@
 # Hull Release Signing Design
 
-**Status:** Design draft — pre-v0.1.0
+**Status:** Shipped (as of v0.1.3). The embedded gethull release key is live; every release manifest carries an Ed25519 signature verified by `hull verify-release` and by `hull update` before atomic install.
 **Scope:** Ed25519 signatures over GitHub release artifacts (separate from app/platform signing of built apps).
 
 ## Goals
 
-1. **Tamper detection on update.** When `hull update` pulls a new binary from GitHub, it must be able to prove the binary came from the same private key that signed previous releases — not from a compromised release process, hijacked GitHub account, or MITM (already prevented by HTTPS, but the signature gives a second layer).
-2. **No external dependencies in the verifier.** `hull update` must verify with what's already in the binary — TweetNaCl Ed25519 (already vendored), no `gpg`, no `minisign` on the user's system.
+1. **Tamper detection on update.** When `hull update` pulls a new binary from GitHub, it must be able to prove the binary came from the same private key that signed previous releases. Not from a compromised release process, hijacked GitHub account, or MITM (already prevented by HTTPS, but the signature gives a second layer).
+2. **No external dependencies in the verifier.** `hull update` must verify with what's already in the binary. TweetNaCl Ed25519 (already vendored), no `gpg`, no `minisign` on the user's system.
 3. **No new attack surface in `install.sh`.** The shell installer stays SHA-256-only. Verified updates are the responsibility of `hull update` (running the installed binary, which embeds the release public key).
 
 Non-goals (deferred post-v0.1.0):
@@ -21,7 +21,7 @@ Non-goals (deferred post-v0.1.0):
 | Adversary | Goal | Mitigation |
 |-----------|------|------------|
 | Network MITM on `api.github.com` / `objects.githubusercontent.com` | Substitute binary | HTTPS via embedded Mozilla CA bundle (D4) |
-| Compromised GitHub release publishing flow | Push a malicious binary tagged with a real release | **Release signature** — attacker needs the offline release private key, not just the GitHub token |
+| Compromised GitHub release publishing flow | Push a malicious binary tagged with a real release | **Release signature**. Attacker needs the offline release private key, not just the GitHub token |
 | Compromised GitHub account / Action secret leak | Sign a malicious binary with the legitimate key | **Out of scope for v0.1.0.** Mitigation = rotate key + invalidate old releases. Tracked in roadmap. |
 | Tampered `hull.sha256` manifest | Get a benign-looking checksum that matches a malicious binary | Manifest is what's signed; attacker can't forge it without the key |
 | Tampered `hull.sha256.sig` | Replace signature with one over an attacker manifest | Signature is verified against the embedded `HL_RELEASE_PUBKEY_HEX`, not whatever's on disk |
@@ -39,7 +39,7 @@ d4e5f6...  hull-linux-x86_64
 
 The chain is: signature binds `hull.sha256` → SHA-256 binds each binary. Standard practice (`signify`, OpenBSD `SHA256.sig`, Sigstore manifests).
 
-Trade-off accepted: one signature per release covers all three platform binaries. Simpler key management, simpler verification, slightly weaker fault isolation (a corrupted binary still has a valid signature on the manifest until the manifest is regenerated — but `hull update` always verifies the binary's SHA-256 against the signed manifest, so this is moot in practice).
+Trade-off accepted: one signature per release covers all three platform binaries. Simpler key management, simpler verification, slightly weaker fault isolation (a corrupted binary still has a valid signature on the manifest until the manifest is regenerated. But `hull update` always verifies the binary's SHA-256 against the signed manifest, so this is moot in practice).
 
 ## Artifact layout
 
@@ -97,7 +97,7 @@ char *sig_hex = NULL;
 size_t sig_len = 0;
 if (download(sig_url, &sig_hex, &sig_len) < 0) {
     fprintf(stderr, "hull update: %s missing (release not signed)\n", sig_url);
-    return -1;  /* hard-fail on v0.1.x — every signed release ships .sig */
+    return -1;  /* hard-fail on v0.1.x. Every signed release ships .sig */
 }
 if (hl_release_verify_manifest_sig(manifest, manifest_len,
                                     sig_hex, sig_len) != 0) {
@@ -141,7 +141,7 @@ The upload step adds `hull.sha256.sig` to the asset list.
 Trust-on-first-use. SHA-256 only. Users wanting cryptographic verification on first install can:
 
 1. Install Hull via `install.sh` (SHA-256-verified download).
-2. Run `hull verify-release hull.sha256 hull.sha256.sig` on the downloaded files — uses the embedded pubkey.
+2. Run `hull verify-release hull.sha256 hull.sha256.sig` on the downloaded files. Uses the embedded pubkey.
 
 The bootstrapping circularity (trusting the binary you're verifying with) is fundamental to T-O-F-U. The alternative (forcing users to install `minisign` first) is a worse UX trade-off for v0.1.x.
 
@@ -150,7 +150,7 @@ We may revisit when there's a clean static `hull-verify` standalone or a vendore
 ## Compatibility & migration
 
 - Existing app/platform `package.sig` is unchanged. Release signing is a third independent key, signing different bytes.
-- The `HL_RELEASE_PUBKEY_HEX` placeholder is all-zeros in source; the v0.1.0 release commits the actual public key bytes. Until then, `hull update` against a release that has `hull.sha256.sig` would fail with the placeholder — so we keep `hull update` in SHA-256-only mode until the placeholder is replaced (gated by a compile-time check: if the pubkey is all-zeros, skip signature verification + warn once).
+- The `HL_RELEASE_PUBKEY_HEX` placeholder is all-zeros in source; the v0.1.0 release commits the actual public key bytes. Until then, `hull update` against a release that has `hull.sha256.sig` would fail with the placeholder. So we keep `hull update` in SHA-256-only mode until the placeholder is replaced (gated by a compile-time check: if the pubkey is all-zeros, skip signature verification + warn once).
 - Users on pre-0.1.0 builds keep getting SHA-256-only updates. After the v0.1.0 binary is widely installed, every subsequent release ships a signed manifest, and every installed `hull` enforces it.
 
 ## Tests
@@ -163,14 +163,14 @@ We may revisit when there's a clean static `hull-verify` standalone or a vendore
 
 ## Implementation order
 
-1. `src/hull/release.{c,h}` — verify primitive + embedded pubkey constant
-2. `src/hull/commands/sign_release.c` — signing command
-3. `src/hull/commands/verify_release.c` — manual verification command
-4. Hook into `src/hull/commands/dispatch.c` — two new rows
+1. `src/hull/release.{c,h}`. Verify primitive + embedded pubkey constant
+2. `src/hull/commands/sign_release.c`. Signing command
+3. `src/hull/commands/verify_release.c`. Manual verification command
+4. Hook into `src/hull/commands/dispatch.c`. Two new rows
 5. `tests/hull/test_release_sig.c` + Makefile entry
 6. `tests/e2e_release_sig.sh` + Makefile target
-7. `src/hull/commands/update.c` — add the manifest-signature step (gated on non-zero pubkey)
-8. `.github/workflows/release.yml` — sign step + asset upload
+7. `src/hull/commands/update.c`. Add the manifest-signature step (gated on non-zero pubkey)
+8. `.github/workflows/release.yml`. Sign step + asset upload
 9. Generate the release keypair (out of band) → commit pubkey → store secret
 10. Tag v0.1.0
 
@@ -179,5 +179,5 @@ Items 1–7 land in one PR before the v0.1.0 tag. Items 8–9 are operational an
 ## Open questions
 
 - **Q1.** Are we ok with hex-encoded signatures vs base64? Hex is slightly more verbose (128 vs 88 chars) but trivially handled by shell + already used elsewhere in Hull. Default: **hex**.
-- **Q2.** Should `hull verify-release` accept a public-key argument (for offline verification with non-default keys)? Default: **yes** — add `--pubkey <hex>` optional flag, defaults to embedded.
+- **Q2.** Should `hull verify-release` accept a public-key argument (for offline verification with non-default keys)? Default: **yes**. Add `--pubkey <hex>` optional flag, defaults to embedded.
 - **Q3.** Should we ship a `hull.minisign` companion signature for users who want third-party verification before installing? Default: **no for v0.1.0**, revisit if asked.

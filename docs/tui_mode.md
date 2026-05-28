@@ -1,7 +1,7 @@
-# TUI Mode — Design
+# TUI Mode. Design
 
 `hull/tui@1` module. One canonical entry point: `tui.run({...})`. Built
-on top of CLI mode (`app.main`). Primary driver: dogfood — `hull dev`,
+on top of CLI mode (`app.main`). Primary driver: dogfood. `hull dev`,
 `hull doctor`, `hull agent` get real interactive UIs by writing Lua
 tool modules against the public `hull.tui` API. By-product: Hull apps
 can ship terminal UIs (file pickers, dashboards, log tailers, REPLs)
@@ -15,13 +15,13 @@ This document is the design plan. Status: not yet implemented.
    `hull dev` request log, and `hull agent context --interactive` all
    feel native." Those tools are Lua modules invoked from C (same
    pattern as `hull init` today), so they use the same script API apps
-   use — no private bindings, no second surface to keep in sync.
+   use. No private bindings, no second surface to keep in sync.
 2. **One canonical API.** `tui.run({ draw, on_event, tick_ms })` is
    *the* API. Raw primitives (`tui.poll`, `tui.print`, `tui.move`) are
    exposed for the rare escape-hatch case but are not what docs,
    scaffolding, or examples lead with. No widget framework in v1.
 3. **`hull dev` reload is a non-issue.** `hull dev` already runs the
-   served app as a fork+exec'd child process — reload kills the child
+   served app as a fork+exec'd child process. Reload kills the child
    and respawns it. The dev controller's runtime (and any TUI it
    owns) lives in the parent process, untouched. No special
    persistence engineering required.
@@ -29,7 +29,7 @@ This document is the design plan. Status: not yet implemented.
    build flavor. Default `HL_ENABLE_TUI=1`; `=0` drops it for size-
    constrained builds. Works on `HL_ENABLE_HTTP=0` (CLI-only) hulls
    identically to default hulls.
-5. **Cosmo-supported.** POSIX termios + ANSI sequences only — no
+5. **Cosmo-supported.** POSIX termios + ANSI sequences only. No
    platform libraries. Full APE compatibility.
 6. **Sandbox-compatible.** TUI needs only stdin/stdout/termios; nothing
    network, nothing filesystem-write by default. The manifest's `tui`
@@ -47,7 +47,7 @@ This document is the design plan. Status: not yet implemented.
   the parent decision notes.) Mouse *click* events through SGR-mouse
   ANSI sequences are in scope as an opt-in.
 - **Coexistence with HTTP server.** TUI requires `app.main`. Server
-  apps (`app.get/post/use/...`) cannot also call `tui.run` — same
+  apps (`app.get/post/use/...`) cannot also call `tui.run`. Same
   rationale as CLI mode itself. If a server app wants a console, it
   uses `hull dev`'s interactive console (which is a TUI client of the
   server, not in-process).
@@ -145,8 +145,8 @@ app.main(async (ctx) => {
 ### Raw primitives (escape hatch)
 
 `tui.run` covers ~95% of real use. The few cases that need to drive
-the loop themselves — embedding a TUI inside a coroutine that wraps
-something `tui.run` can't express — can fall back to raw primitives:
+the loop themselves. Embedding a TUI inside a coroutine that wraps
+something `tui.run` can't express. Can fall back to raw primitives:
 
 ```lua
 local tui = require("hull.tui")
@@ -164,7 +164,7 @@ Lifecycle responsibility is the same either way: `tui.enter` /
 `tui.leave` are idempotent, the cap layer's `atexit` and signal
 handlers guarantee restore even on panic. The reason `tui.run` is the
 canonical path is that it gets resize, tick scheduling, and signal
-interactions right by default — re-implementing all of that in script
+interactions right by default. Re-implementing all of that in script
 is unnecessary work.
 
 If you find yourself reaching for the raw API more than rarely, that's
@@ -247,7 +247,7 @@ tui.run({
 loop. Mechanically it's the same `HlAsyncCtx.detached` machinery that
 timers already use internally; this is just the first script-facing
 binding for it. Lives under `hull.tui` (not `hull.*`) because TUI is
-its only caller today — see the stdlib table note.
+its only caller today. See the stdlib table note.
 
 ### Run-loop control flow
 
@@ -313,7 +313,7 @@ falls out trivially because each process has one runtime that owns
 one ctx. The invariant exists to catch programming errors, not to
 solve a real ambiguity.
 
-## Build flag — `HL_ENABLE_TUI`
+## Build flag. `HL_ENABLE_TUI`
 
 Default `1`. Same pattern as `HL_ENABLE_WASM`, `HL_ENABLE_DB`, etc.
 
@@ -382,7 +382,7 @@ demand `manifest.gpu`; the resolver enforces it after build-cap check.
 Identical to every other module: declaring `hull/tui@1` causes the
 resolver to:
 
-1. Look up the spec by name — O(log n) binary search.
+1. Look up the spec by name. O(log n) binary search.
 2. Check build caps: `(spec.required_caps & build_caps) == spec.required_caps`.
    If not, error: `module 'hull/tui@1' requires HL_ENABLE_TUI, but it
    is disabled in this hull build`.
@@ -402,7 +402,7 @@ graph is covered by the Ed25519 signature.
 ### Tool exposure
 
 `tool.modules_resolve` (used by `hull build`, `hull check`,
-`hull modules`) handles `hull/tui` transparently — no new tool code.
+`hull modules`) handles `hull/tui` transparently. No new tool code.
 
 `hull modules available [--json]` lists it. `hull modules explain
 hull/tui` returns its spec. `hull agent modules` includes it in the
@@ -415,10 +415,10 @@ declared / available arrays.
 | `hull/tui/widgets@1` | Higher-level table/tree/modal widgets; depends on `hull/tui@1` |
 | `hull/tui/syntax@1` | Pluggable syntax highlighting for code views; depends on `hull/tui@1` |
 
-These follow the same framework — added to the registry as separate
-specs with `deps = ["hull/tui"]` — when they ship.
+These follow the same framework. Added to the registry as separate
+specs with `deps = ["hull/tui"]`. When they ship.
 
-## Manifest field — `tui`
+## Manifest field. `tui`
 
 New top-level boolean field, parallel to `gpu`:
 
@@ -448,7 +448,7 @@ script actually calls into the module on a given invocation.
 New files: `src/hull/cap/tui.c`, `include/hull/cap/tui.h`. Self-contained;
 no external deps.
 
-The API takes an `HlTuiCtx *` everywhere — same shape as `HlGpuCtx`,
+The API takes an `HlTuiCtx *` everywhere. Same shape as `HlGpuCtx`,
 `HlDbHandle`, `HlWasmCtx`. The ctx is opaque to callers; its lifetime
 is controlled by `acquire`/`release`. The cap layer enforces a process-
 level invariant that **at most one `HlTuiCtx` is live per process** (the
@@ -531,7 +531,7 @@ const char *hl_cap_tui_theme(HlTuiCtx *ctx);
 /* Write `text` to system clipboard via OSC 52
  * (\x1b]52;c;<base64>\x07). Returns 0 on success, -ENOTSUP if
  * HL_TUI_CAP_OSC52 isn't set. Clipboard *read* deliberately not
- * exposed — most modern terminals refuse it, and pasting via
+ * exposed. Most modern terminals refuse it, and pasting via
  * bracketed paste is the supported input path. */
 int  hl_cap_tui_clipboard_set(HlTuiCtx *ctx, const char *text, size_t len);
 ```
@@ -546,7 +546,7 @@ without changing code. Mechanics:
   inside the ctx. Each cell stores `{ codepoint, width, fg, bg, attr }`.
   Allocated on acquire, reallocated on SIGWINCH.
 - `tui.write` / `tui.print` / `tui.move` / `tui.style` mutate a *pending*
-  buffer (same shape) — no immediate ANSI emit.
+  buffer (same shape). No immediate ANSI emit.
 - `tui.flush` walks both buffers row by row, finds dirty runs, emits
   cursor-move + SGR-attr + the changed bytes for each run, then swaps
   buffer pointers. Worst case (full repaint) is the same byte count as
@@ -557,7 +557,7 @@ without changing code. Mechanics:
   zeros the shadow too, so next flush emits everything.)
 - Unicode width: ship a checked-in `vendor/unicode/eaw.h` (~3 KB
   generated from EastAsianWidth.txt + UnicodeData.txt; same pattern
-  as `vendor/cacert/cacert.pem`). Used on all platforms — no host
+  as `vendor/cacert/cacert.pem`). Used on all platforms. No host
   `wcwidth(3)` dependency means consistent rendering between
   glibc/musl/cosmo/macOS. Refresh via `make fetch-unicode` (analogous
   to `make fetch-ca-bundle`). Wide characters occupy two adjacent
@@ -566,7 +566,7 @@ without changing code. Mechanics:
   either half changes.
 - Combining characters: appended to the preceding cell's codepoint
   list (small inline buffer, falls back to allocation past 4
-  combining chars per cell — rare in practice).
+  combining chars per cell. Rare in practice).
 
 Size cost: ~150 lines of C + a ~3KB width table + 16 bytes per cell
 × rows × cols of state. For a 200×60 terminal that's 192 KB of buffer
@@ -576,7 +576,7 @@ state per ctx, well within budget.
 
 At `acquire`, the cap layer:
 
-1. Checks `$NO_COLOR` — if set, theme stays `"unknown"`, caller
+1. Checks `$NO_COLOR`. If set, theme stays `"unknown"`, caller
    treats as monochrome.
 2. Sends OSC 11 query (`\x1b]11;?\x07`), waits 50ms for a response.
    Parses the reply (`\x1b]11;rgb:RRRR/GGGG/BBBB\x07`), computes
@@ -584,7 +584,7 @@ At `acquire`, the cap layer:
 3. If no OSC 11 reply, checks `$COLORFGBG` (rxvt convention,
    `"<fg>;<bg>"`); maps `bg` 0–6 → dark, 7–15 → light.
 4. If nothing responds, defaults to `"dark"` (covers ~80% of
-   developer terminals — black/dark backgrounds dominate).
+   developer terminals. Black/dark backgrounds dominate).
 
 The result is cached in the ctx; `hl_cap_tui_theme` is a pointer
 return, no re-query. Apps that want to re-detect after the user
@@ -611,7 +611,7 @@ v2 work: a `tui.re_detect_theme()` that re-runs the query.)
   keyboard protocol (opt-in via `tui.run({ kitty_kbd = true })`),
   bracketed paste, focus in/out, SGR mouse. Parser state in the ctx
   means a partial CSI sequence in flight at the moment a Lua/JS GC
-  event releases the userdata wrapper would survive — but only the
+  event releases the userdata wrapper would survive. But only the
   *cap-layer* state does; events queued for a dead VM are dropped.
 - **Output buffering.** All `write` calls append to the pending
   shadow buffer (not raw stdout). `flush` emits the diff vs the
@@ -629,7 +629,7 @@ These are what docs, examples, and scaffolding lead with.
 
 | Lua | JS | Purpose |
 |-----|-----|---------|
-| `tui.run(opts)` | `tui.run(opts)` → `Promise<string>` | immediate-mode loop — *the entry point* |
+| `tui.run(opts)` | `tui.run(opts)` → `Promise<string>` | immediate-mode loop. *the entry point* |
 | `tui.frame(opts, fn)` | `tui.frame(opts, fn)` | bordered area + nested cursor scope |
 | `tui.list(items, opts)` | `tui.list(items, opts)` | scrollable list; returns picked index or nil |
 | `tui.input(prompt, opts?)` | `tui.input(prompt, opts?)` | line input with editing; returns string or nil |
@@ -642,10 +642,10 @@ These are what docs, examples, and scaffolding lead with.
 
 Helpers are pure Lua/JS over `tui.run` + `tui.frame`. They live in
 stdlib (not the cap layer) so an app can drop in its own replacement
-easily — `tui.list` in particular is opinionated about styling.
+easily. `tui.list` in particular is opinionated about styling.
 
 `tui.async(fn)` only lives here because it has no other caller today
-— it exists so `tui.run`'s event handlers can kick off background work
+. It exists so `tui.run`'s event handlers can kick off background work
 without blocking the next frame. If a second consumer materializes
 (e.g., a background timer-driven cap in a future feature), we'll
 promote it to `hull.async`.
@@ -655,8 +655,8 @@ reason not to):
 
 | Lua | JS | Purpose |
 |-----|-----|---------|
-| `tui.enter(opts?)` | `tui.enter(opts?)` | idempotent acquire — enter alt screen, raw mode |
-| `tui.leave()` | `tui.leave()` | idempotent release — restore terminal |
+| `tui.enter(opts?)` | `tui.enter(opts?)` | idempotent acquire. Enter alt screen, raw mode |
+| `tui.leave()` | `tui.leave()` | idempotent release. Restore terminal |
 | `tui.size()` → `cols, rows` | `tui.size()` → `{cols, rows}` | current size |
 | `tui.caps()` | `tui.caps()` | capability flags |
 | `tui.clear()` | `tui.clear()` | clear screen |
@@ -668,7 +668,7 @@ reason not to):
 | `tui.poll(timeout_ms)` | `tui.poll(timeoutMs)` → `Promise<event\|null>` | next event |
 
 These are present mainly to make `tui.run` implementable in pure
-Lua/JS — once they exist for that, exposing them costs nothing. If
+Lua/JS. Once they exist for that, exposing them costs nothing. If
 you find yourself building a real app on top of them, that's a signal
 something is missing from `tui.run`.
 
@@ -694,14 +694,14 @@ the run-loop guarantees is consistent for the current frame.)
 ## Dispatch
 
 In `src/hull/main.c` / `serve.c`, dispatch logic remains unchanged from
-CLI mode — TUI lives entirely inside `app.main`. No new top-level
+CLI mode. TUI lives entirely inside `app.main`. No new top-level
 branch in the lifecycle. The only changes are:
 
 1. **Manifest extraction** picks up `tui = true` (analogous to existing
    `gpu = true`).
 2. **Resolver** validates `hull/tui@1` declarations against the cap.
 3. **Sandbox phase 2** keeps stdin readable and `tcsetattr` allowed when
-   `tui = true` is set — otherwise stdin remains usable via `ctx.stdin`
+   `tui = true` is set. Otherwise stdin remains usable via `ctx.stdin`
    but termios writes are blocked (current cli_mode.md sandbox already
    omits `tty` from the unveil/pledge set; this re-adds it under the
    `tui` cap).
@@ -742,7 +742,7 @@ TUI logic is Lua. This means:
 - Adding a new interactive tool means writing one Lua file, not
   touching C.
 - The tool modules ship as embedded stdlib (already routed through the
-  VFS) — no separate distribution, no platform-specific bits.
+  VFS). No separate distribution, no platform-specific bits.
 
 Concrete deliverables in the rollout:
 
@@ -758,7 +758,7 @@ Concrete deliverables in the rollout:
 `hull dev --tui` is the headline target. The parent process gains a
 Lua tool runtime that runs `dev_tui.lua`, drawing a request log from
 the child's stderr. The child (the served app) is fork+exec'd as
-before and reloads via kill+respawn — completely independent of the
+before and reloads via kill+respawn. Completely independent of the
 TUI in the parent.
 
 `hull doctor --tui` is the simplest end-to-end exercise: one screen,
@@ -807,14 +807,14 @@ Ship under `examples/cli/`:
 | Example | Demonstrates |
 |---------|--------------|
 | `tui_picker` | Minimal `tui.run` with `tui.list` |
-| `tui_log_tailer` | Async — tails a file while updating UI without blocking |
+| `tui_log_tailer` | Async. Tails a file while updating UI without blocking |
 | `tui_dashboard` | Multi-pane with `tui.frame`; mock metrics |
 | `tui_repl` | `tui.input` + history; evaluates Lua/JS expressions |
 | `tui_chat` | Split pane, async `http.fetch` for a fake chat backend |
 
 ## Implementation phases
 
-### Phase 1 — cap layer + `tui.run`
+### Phase 1. Cap layer + `tui.run`
 
 The canonical API ships in v1. Raw primitives are exposed but
 secondary; the doc and examples lead with `tui.run`.
@@ -830,7 +830,7 @@ secondary; the doc and examples lead with `tui.run`.
   (~3 KB, generated from EastAsianWidth.txt + UnicodeData.txt by a
   small script also checked in at `vendor/unicode/gen.lua`). `make
   fetch-unicode` re-runs the generator against fresh upstream data
-  and rewrites `eaw.h` — same pattern as `make fetch-ca-bundle`.
+  and rewrites `eaw.h`. Same pattern as `make fetch-ca-bundle`.
   Builds are hermetic; no network or external Unicode data files
   required at build time.
 - `mod_tui.c` in both runtimes. Bindings expose: `tui.run`,
@@ -852,15 +852,15 @@ secondary; the doc and examples lead with `tui.run`.
   cleanly, restores terminal on panic/signal, renders flicker-free
   via cell diffing.
 
-Estimated effort: ~4 days (was 3 — cell-diffing + theme + clipboard
+Estimated effort: ~4 days (was 3. Cell-diffing + theme + clipboard
 add ~1 day).
 
-### Phase 2 — stdlib helpers + `hull doctor --tui`
+### Phase 2. Stdlib helpers + `hull doctor --tui`
 
 - `stdlib/lua/hull/tui.lua`, `stdlib/js/hull/tui.js`: helpers built on
-  `tui.run` — `tui.frame`, `tui.list`, `tui.input`, `tui.progress`,
+  `tui.run`. `tui.frame`, `tui.list`, `tui.input`, `tui.progress`,
   `tui.spinner`, `tui.confirm`.
-- `stdlib/cli/lua/hull/doctor_tui.lua` — the `--tui` rendering for
+- `stdlib/cli/lua/hull/doctor_tui.lua`. The `--tui` rendering for
   `hull doctor`. `src/hull/commands/doctor.c` gets a `--tui` arg that
   dispatches into this Lua module. First end-to-end exercise of the
   whole stack (C dispatcher → Lua tool module → `tui.run` → cap layer).
@@ -870,9 +870,9 @@ add ~1 day).
 
 Estimated effort: ~2 days.
 
-### Phase 3 — `hull dev --tui` + `hull agent` pickers
+### Phase 3. `hull dev --tui` + `hull agent` pickers
 
-Make Hull's own CLI feel native. No special infrastructure — `hull
+Make Hull's own CLI feel native. No special infrastructure. `hull
 dev` already fork+execs the served app, so the TUI just lives in the
 parent process alongside the existing file watcher.
 
@@ -887,17 +887,17 @@ parent process alongside the existing file watcher.
   default). Bottom pane: keybindings + child status (PID, uptime,
   last reload time). `r` triggers reload (sends SIGTERM to child, dev
   parent respawns), `q` quits, `e` opens the last error.
-- `hull agent context --interactive` and `hull agent errors --tui` —
+- `hull agent context --interactive` and `hull agent errors --tui`.
   Lua tool modules that use `tui.list` / `tui.frame` for picker /
   scroller variants of the existing JSON outputs.
-- Theme-aware styling — Lua tool modules read `tui.theme()` and pick
+- Theme-aware styling. Lua tool modules read `tui.theme()` and pick
   fg/bg accordingly. Validated against light + dark terminal schemes.
 - Outcome: `hull dev --tui` works on Linux, macOS, Cosmo. Lua tool
   module pattern proven for the most stateful case.
 
 Estimated effort: ~2 days.
 
-### Phase 4 — docs, examples, optional helpers
+### Phase 4. Docs, examples, optional helpers
 
 - README + AGENTS + CLAUDE.md sections.
 - `docs/tui_mode.md` (this doc) updated with measured binary-size
@@ -912,13 +912,13 @@ Estimated effort: ~1 day.
 ### Total
 
 ~1.5 weeks of focused work (was ~1 week; cell-diffing pushed it).
-Shape still matches CLI mode itself — TUI is "CLI mode + alternate
+Shape still matches CLI mode itself. TUI is "CLI mode + alternate
 screen + input parser + cell-diffed render loop."
 
 ## Cosmopolitan support
 
 Cosmo APE is a first-class build target for Hull. The TUI module
-should run on it without modification — every syscall it uses is in
+should run on it without modification. Every syscall it uses is in
 Cosmo's libc:
 
 | Used by | Calls |
@@ -931,7 +931,7 @@ no macOS-specific (`kqueue`, `EvFilt*`), no GNU extensions.
 
 The platform-specific `#define` gates in `tests/hull/cap/test_tui_lifecycle.c`
 and `tests/e2e_tui_drive.c` cover `__APPLE__ / __linux__ / __FreeBSD__ /
-__OpenBSD__` but not Cosmo — on a Cosmo build the PTY harnesses
+__OpenBSD__` but not Cosmo. On a Cosmo build the PTY harnesses
 gracefully skip (`SKIP: no forkpty on this platform`). The width-table
 and parser unit tests are pure C and run unchanged.
 
@@ -948,7 +948,7 @@ make test CC=cosmocc HL_ENABLE_TUI=1
 ```
 
 The PTY-based e2e (`tests/e2e_tui.sh`) requires forkpty and therefore
-does not run on Cosmo today — apps are exercised manually. A
+does not run on Cosmo today. Apps are exercised manually. A
 follow-up could port the PTY harness to use Cosmo's `pty_open`
 equivalent or shell out to `script(1)`.
 
@@ -977,7 +977,7 @@ equivalent or shell out to `script(1)`.
   `forkpty` need verification on cosmo for the test harness. If
   unavailable, gate `tests/hull/cap/test_tui.c` off on cosmo and rely
   on E2E (which uses real ttys via `script(1)` on the host). The
-  runtime itself doesn't need PTY — that's only for testing.
+  runtime itself doesn't need PTY. That's only for testing.
 - **Windows Terminal compatibility.** TUI is POSIX-first. On
   Cosmopolitan builds running on Windows, raw mode goes through
   cosmo's polyfilled termios; ANSI rendering works on Windows
@@ -993,17 +993,17 @@ equivalent or shell out to `script(1)`.
 - **Tool-VM compatibility.** `hull build`, `hull manifest`,
   `hull check` load apps in a stub VM. Same pattern CLI mode uses:
   `app.main(fn)` is registered as a no-op stub. `tui` module functions
-  similarly stub out — `require("hull.tui")` returns a table of
+  similarly stub out. `require("hull.tui")` returns a table of
   no-op closures. App top-level never actually opens a tty during
   manifest extraction; the stubs only need to not crash.
 - **Shadow buffer correctness.** Cell diffing is in v1, so any bug in
   the shadow / pending buffer comparison shows up as visible rendering
-  corruption — characters left behind, attributes carrying across
+  corruption. Characters left behind, attributes carrying across
   unrelated cells, wide-character halves split between frames. The
   test plan: golden-frame tests that drive a sequence of writes and
   diff against a recorded byte stream. Categories: ASCII only, ASCII
   with SGR transitions, CJK wide chars, combining marks, emoji ZWJ
-  sequences (deferred — flag in docs but don't test in v1), resize
+  sequences (deferred. Flag in docs but don't test in v1), resize
   mid-render (shadow reallocates; pending discarded; full repaint on
   next flush).
 - **Unicode width drift.** The checked-in `vendor/unicode/eaw.h` is
@@ -1036,7 +1036,7 @@ equivalent or shell out to `script(1)`.
   only mode, so this is a non-issue.
 - **Child stderr → parent log format.** `hull dev`'s TUI mode needs
   a wire format for log lines from the child. Options: logfmt (the
-  existing logger middleware default — easy parse), JSON-per-line
+  existing logger middleware default. Easy parse), JSON-per-line
   (more verbose but unambiguous), or a structured `HULL-LOG:` prefix
   the parent recognizes vs passes through. Pick during phase 3
   implementation; defaulting to logfmt because that's already what

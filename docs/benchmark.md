@@ -23,21 +23,21 @@ Dedicated SQLite benchmark (`bench/bench_db.sh`) measuring isolated workloads:
 |----------|-------|--------|-------------|-------------|
 | Single INSERT | 29,096 | 29,096 | 4.35ms | One INSERT per request |
 | Batch INSERT (10/txn) | 15,237 | 152,370 | 7.47ms | 10 INSERTs wrapped in `db.batch()` |
-| SELECT 20 rows | 6,303 | — | 16.20ms | Indexed ORDER BY + LIMIT 20 |
-| Mixed (INSERT + SELECT) | 5,635 | — | 17.84ms | 1 write + 1 read per request |
+| SELECT 20 rows | 6,303 |. | 16.20ms | Indexed ORDER BY + LIMIT 20 |
+| Mixed (INSERT + SELECT) | 5,635 |. | 17.84ms | 1 write + 1 read per request |
 
 **Key tuning improvements** (vs untuned baseline):
 
 | Change | Single write | Batch write (rows/s) |
 |--------|-------------|---------------------|
-| Before (WAL + defaults) | 18,120 req/s | — (no batch API) |
+| Before (WAL + defaults) | 18,120 req/s |. (no batch API) |
 | After (full PRAGMA tuning + stmt cache + db.batch) | 29,096 req/s | 152,370 rows/s |
 | **Improvement** | **+61%** | **8.4x** |
 
 The biggest wins come from:
-1. `synchronous=NORMAL` — eliminates per-commit fsync in WAL mode (+40-60% writes)
-2. `db.batch()` transaction wrapping — amortizes commit overhead across N operations (8x+ for batch writes)
-3. Prepared statement cache — eliminates repeated `sqlite3_prepare_v2()` for hot queries
+1. `synchronous=NORMAL`. Eliminates per-commit fsync in WAL mode (+40-60% writes)
+2. `db.batch()` transaction wrapping. Amortizes commit overhead across N operations (8x+ for batch writes)
+3. Prepared statement cache. Eliminates repeated `sqlite3_prepare_v2()` for hot queries
 
 ## Template Rendering
 
@@ -50,9 +50,9 @@ Dedicated template benchmark (`bench/bench_template.sh`) measuring rendering thr
 | GET /loop | 21,974 | 7,647 | 50-item loop + conditionals |
 | GET /full | 12,839 | 3,345 | Inheritance + include + loop + filters |
 
-Simple variable substitution is essentially free (~1% drop vs JSON in Lua). The cost scales with loop iterations and template features — the full-featured template (extends + include + 50-row loop + `upper` filter) is ~5.5x slower than simple in Lua and ~13x in JS.
+Simple variable substitution is essentially free (~1% drop vs JSON in Lua). The cost scales with loop iterations and template features. The full-featured template (extends + include + 50-row loop + `upper` filter) is ~5.5x slower than simple in Lua and ~13x in JS.
 
-Even the heaviest template on the slowest runtime (3.3k req/s on QuickJS) handles 200k requests/minute — far more than enough for typical workloads. SQLite remains the bottleneck for any app doing real work.
+Even the heaviest template on the slowest runtime (3.3k req/s on QuickJS) handles 200k requests/minute. Far more than enough for typical workloads. SQLite remains the bottleneck for any app doing real work.
 
 ## Keel (raw HTTP server) Baseline
 
@@ -144,7 +144,7 @@ Hull applies SQLite performance PRAGMAs automatically at startup. These defaults
 
 | PRAGMA | Default | Effect |
 |--------|---------|--------|
-| `journal_mode` | WAL | Write-Ahead Logging — concurrent readers during writes |
+| `journal_mode` | WAL | Write-Ahead Logging. Concurrent readers during writes |
 | `synchronous` | NORMAL | Sync on WAL checkpoint only (not every commit). Safe in WAL mode; only risk is losing the last transaction on OS crash (not app crash). |
 | `foreign_keys` | ON | Enforce referential integrity |
 | `busy_timeout` | 5000 | Wait up to 5s on lock contention instead of failing immediately |
@@ -185,5 +185,5 @@ Without `db.batch()`, each `db.exec()` is an implicit auto-commit transaction. B
 ### Shutdown Optimization
 
 On graceful shutdown, Hull runs:
-1. `PRAGMA optimize` — updates query planner statistics
-2. `wal_checkpoint(TRUNCATE)` — merges WAL back into the main DB file
+1. `PRAGMA optimize`. Updates query planner statistics
+2. `wal_checkpoint(TRUNCATE)`. Merges WAL back into the main DB file

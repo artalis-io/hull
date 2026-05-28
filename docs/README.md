@@ -1,4 +1,4 @@
-# Hull — Documentation Index
+# Hull. Documentation Index
 
 This directory holds Hull's reference documentation. Top-level docs live at
 the repo root: [`README.md`](../README.md), [`CLAUDE.md`](../CLAUDE.md),
@@ -9,7 +9,7 @@ the repo root: [`README.md`](../README.md), [`CLAUDE.md`](../CLAUDE.md),
 | If you're… | Read this |
 |---|---|
 | A new developer writing a Hull app | [`../README.md`](../README.md) → [`agent_guide.md`](agent_guide.md) §1–§5 |
-| Looking up a specific function | **[`api/`](api/) — per-function reference, Javadoc-style.** `api/c.md` / `api/lua.md` / `api/js.md`. |
+| Looking up a specific function | **[`api/`](api/). Per-function reference, Javadoc-style.** `api/c.md` / `api/lua.md` / `api/js.md`. |
 | An AI agent introspecting a Hull project | [`../AGENTS.md`](../AGENTS.md) + [`agent_guide.md`](agent_guide.md) §17 (Agent workflow) |
 | A contributor to the Hull core | [`../CLAUDE.md`](../CLAUDE.md) → [`architecture.md`](architecture.md) → [`api/c.md`](api/c.md) |
 | Auditing Hull's security posture | [`security.md`](security.md) → [`audit_2026_05_15.md`](audit_2026_05_15.md) → [`audit_2026_05_15_phase6.md`](audit_2026_05_15_phase6.md) → [`audit_2026_05_15_phase6_reaudit.md`](audit_2026_05_15_phase6_reaudit.md) |
@@ -43,7 +43,7 @@ specific signature, parameter list, or return value.
 
 | Doc | What it covers |
 |---|---|
-| [`wamr_architecture.md`](wamr_architecture.md) | WASM compute design — WAMR integration, ABI, gas metering, pooling, segments, streaming, AOT, Memory64. |
+| [`wamr_architecture.md`](wamr_architecture.md) | WASM compute design. WAMR integration, ABI, gas metering, pooling, segments, streaming, AOT, Memory64. |
 | [`release_signing.md`](release_signing.md) | Three-layer signature system + the release-key flow (`HL_RELEASE_PUBKEY_HEX` embedding, GitHub Actions sign step, `hull update` verification). |
 | [`api_review.md`](api_review.md) | Pre-v0.1.0 public-surface review findings + pending decisions. |
 
@@ -82,9 +82,9 @@ evaluating fit, design discussion).
 Historical material preserved for reproducibility but no longer the
 current state of record:
 
-- [`archive/audits/`](archive/) — six pre-Phase-5 audit reports (all
+- [`archive/audits/`](archive/). Six pre-Phase-5 audit reports (all
   findings closed). Useful for tracing the project's security history.
-- [`archive/roadmaps/`](archive/) — four fully-completed roadmaps
+- [`archive/roadmaps/`](archive/). Four fully-completed roadmaps
   (architecture A–L, db-vtable, wasm-improvement, v0-to-v1 prep).
 
 See [`archive/README.md`](archive/README.md) for the inventory.

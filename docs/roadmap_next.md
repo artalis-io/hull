@@ -1,4 +1,4 @@
-# Hull — Next Features Roadmap
+# Hull. Next Features Roadmap
 
 Status: **Active** | Last reviewed: 2026-05-27
 
@@ -11,19 +11,19 @@ For completed historical roadmaps see [`archive/roadmaps/`](archive/roadmaps/).
 
 ## Shipped since this file was last revised
 
-- ✅ **v0.1.0 release** — Ed25519-signed `hull.sha256` manifest, four native+APE binaries (linux-x86_64, linux-aarch64, darwin-arm64, cosmo), one-line install script, `hull update` with signature verification. See [`../CHANGELOG.md`](../CHANGELOG.md).
-- ✅ **gethull.dev landing site** — S3 + CloudFront, deploy-site workflow, browser verifier at `/verify.html` covering all three signature tiers, trust-chain section + honest scorecard.
-- ✅ **WebSocket support** — `app.ws(path, handlers)` server + `ws.connect(url, …)` client, broadcast, per-connection state, host allowlist on client. Documented in [`../CLAUDE.md`](../CLAUDE.md) "WebSocket Endpoints".
-- ✅ **SSE support** — `app.sse(path, handler)` with `stream:event(name, data, [id])` and `stream:close()`.
-- ✅ **`hull deploy`** — Dockerfile, systemd, fly.toml targets; `hull agent deploy` JSON readiness analysis.
-- ✅ **Extended `hull agent`** — 16 new subcommands (Phase 6) covering manifest preview, request preview, single-file validate, eval, schema-diff, sql-named, vfs/compute/gpu/perf/logs/template/compute-call. Wired into MCP. See [`agent_guide.md`](agent_guide.md) §5.
-- ✅ **v0.1.2 batch** — `hull tools install/list/uninstall` (first tool: wamrc), shared `release_io.{c,h}` extracted from `commands/update.c`, top-level `hull help`, audit fixes (OOB defense, JSON escape, fsync/close checks, constant-time SHA-256 compare), agent surface expansion (`hull agent tools/overview` + `agent context --list` + wamrc state in agent compute), six new opinionated context docs (orientation, quickstart × 3, gpu, tools), discoverability breadcrumbs in `hull --help` + bare-hull + install.sh, `build-wamrc` CI matrix. See [`../CHANGELOG.md#012`](../CHANGELOG.md).
+- ✅ **v0.1.0 release**. Ed25519-signed `hull.sha256` manifest, four native+APE binaries (linux-x86_64, linux-aarch64, darwin-arm64, cosmo), one-line install script, `hull update` with signature verification. See [`../CHANGELOG.md`](../CHANGELOG.md).
+- ✅ **gethull.dev landing site**. S3 + CloudFront, deploy-site workflow, browser verifier at `/verify.html` covering all three signature tiers, trust-chain section + honest scorecard.
+- ✅ **WebSocket support**. `app.ws(path, handlers)` server + `ws.connect(url, …)` client, broadcast, per-connection state, host allowlist on client. Documented in [`../CLAUDE.md`](../CLAUDE.md) "WebSocket Endpoints".
+- ✅ **SSE support**. `app.sse(path, handler)` with `stream:event(name, data, [id])` and `stream:close()`.
+- ✅ **`hull deploy`**. Dockerfile, systemd, fly.toml targets; `hull agent deploy` JSON readiness analysis.
+- ✅ **Extended `hull agent`**. 16 new subcommands (Phase 6) covering manifest preview, request preview, single-file validate, eval, schema-diff, sql-named, vfs/compute/gpu/perf/logs/template/compute-call. Wired into MCP. See [`agent_guide.md`](agent_guide.md) §5.
+- ✅ **v0.1.2 batch**. `hull tools install/list/uninstall` (first tool: wamrc), shared `release_io.{c,h}` extracted from `commands/update.c`, top-level `hull help`, audit fixes (OOB defense, JSON escape, fsync/close checks, constant-time SHA-256 compare), agent surface expansion (`hull agent tools/overview` + `agent context --list` + wamrc state in agent compute), six new opinionated context docs (orientation, quickstart × 3, gpu, tools), discoverability breadcrumbs in `hull --help` + bare-hull + install.sh, `build-wamrc` CI matrix. See [`../CHANGELOG.md#012`](../CHANGELOG.md).
 
 ---
 
 ## 1. PostgreSQL backend (HlDbBackend)
 
-**Priority:** Medium-High — first non-SQLite backend; validates the DB-vtable
+**Priority:** Medium-High. First non-SQLite backend; validates the DB-vtable
 abstraction that already powers `HL_ENABLE_DB=0` compute-only builds.
 
 **Approach:**
@@ -31,7 +31,7 @@ abstraction that already powers `HL_ENABLE_DB=0` compute-only builds.
 - `HlDbBackend` implementation using libpq.
 - Connection string via `--db postgres://…` or per-handler config.
 - Statement caching via `PQprepare`.
-- Async queries via libpq's async protocol (not worker threads — avoids the
+- Async queries via libpq's async protocol (not worker threads. Avoids the
   extra hop and gives us pipelining).
 - Hull internals (`_hull_*` tables) **stay on embedded SQLite** so apps can
   be ported incrementally; only application tables move to Postgres.
@@ -40,8 +40,8 @@ abstraction that already powers `HL_ENABLE_DB=0` compute-only builds.
 
 - [ ] Vendor or dynamic-link libpq (choose: more deps but real prod use vs.
       simpler distribution)
-- [ ] `src/hull/cap/db_postgres.c` — backend vtable impl
-- [ ] Connection pooling (single connection vs. pool — start with pool)
+- [ ] `src/hull/cap/db_postgres.c`. Backend vtable impl
+- [ ] Connection pooling (single connection vs. pool. Start with pool)
 - [ ] Parameter binding (Hull's `?` placeholder → Postgres `$1, $2…` rewrite)
 - [ ] Type mapping (HlValue ↔ Postgres OIDs)
 - [ ] Migration runner compatibility (Postgres dialect for `_hull_migrations`)
@@ -53,7 +53,7 @@ commit). Apps that mix both must accept eventual consistency.
 
 ## 1.5 Hypermedia web application profile (HTMX + Pico)
 
-**Priority:** High — fills the gap between full-page SSR apps and
+**Priority:** High. Fills the gap between full-page SSR apps and
 React-style SPAs for business workflow software. The target use case is
 internal tools such as IT asset trackers, admin consoles, inventory systems,
 approval workflows, CRM-like dashboards, and other CRUD-heavy applications
@@ -135,7 +135,7 @@ Hull provides the server-side conventions and helpers.
 
 ## 1.6 Native sidecar services (`hull.services`)
 
-**Priority:** High — enables large native accelerators such as bitnet.c /
+**Priority:** High. Enables large native accelerators such as bitnet.c /
 llama.cpp-style inference engines without embedding them into Hull's trusted
 core and without pretending they are as safe as WASM plugins. Native sidecars
 are lower-trust, out-of-process services with explicit capabilities, narrow
@@ -319,13 +319,13 @@ operators do not confuse "native sidecar" with WASM-grade containment.
 
 Keep failure classes distinct:
 
-- `rpc_error` — valid JSON-RPC error returned by a method.
-- `protocol_error` — malformed JSON, bad frame, invalid id, unsupported method.
-- `transport_error` — EOF, EPIPE, timeout, reset.
-- `service_exit` — process exited with status/signal.
-- `sandbox_violation` — OS denied/killed the sidecar.
-- `supervisor_error` — launch failed, bad tool, denied path/resource/capability.
-- `app_error` — Lua/JS misuse of the service API.
+- `rpc_error`. Valid JSON-RPC error returned by a method.
+- `protocol_error`. Malformed JSON, bad frame, invalid id, unsupported method.
+- `transport_error`. EOF, EPIPE, timeout, reset.
+- `service_exit`. Process exited with status/signal.
+- `sandbox_violation`. OS denied/killed the sidecar.
+- `supervisor_error`. Launch failed, bad tool, denied path/resource/capability.
+- `app_error`. Lua/JS misuse of the service API.
 
 **Phased plan:**
 
@@ -379,7 +379,7 @@ orchestration, and claiming sidecars are equivalent to WASM sandboxing.
 
 ## 1.7 Native sandbox runner and services (`hull sandbox`)
 
-**Priority:** Medium-High — follow-on to native sidecar services. Reuses the
+**Priority:** Medium-High. Follow-on to native sidecar services. Reuses the
 same process-supervision, resource-passing, sandbox, and limit machinery to
 run native executables under declared capability manifests, either as
 foreground one-shot processes or supervised daemon processes.
@@ -709,20 +709,20 @@ apps or WASM plugins.
 
 ---
 
-## 2. `hull tools install` — side-loaded optional tools  ✅ Shipped (v0.1.2)
+## 2. `hull tools install`. Side-loaded optional tools  ✅ Shipped (v0.1.2)
 
 **Design:** [`tools_install.md`](tools_install.md). What landed:
 
 - `hull tools install <name>` / `list [--json]` / `uninstall` subcommands.
 - Tools land in `$HOME/.hull/tools/` (mode 0755), isolated from PATH.
 - Trust chain reuses the same Ed25519-signed `hull.sha256` manifest as
-  `hull update` — no new keys, no new ceremonies.
+  `hull update`. No new keys, no new ceremonies.
 - Version-coupled: pulls from the SAME release as the running hull
   binary (not "latest"), so e.g. wamrc stays at the WAMR commit hull
   was compiled against.
 - First concrete tool: `wamrc` (WAMR AOT compiler), published for
   linux-x86_64 / linux-aarch64 / darwin-arm64. Cosmo unsupported
-  (LLVM doesn't fit a fat APE binary) — cosmo users `make wamrc`.
+  (LLVM doesn't fit a fat APE binary). Cosmo users `make wamrc`.
 - Shared `release_io.{c,h}` extracted from `commands/update.c` so both
   self-update and tool-install paths share the same HTTPS / SHA-256 /
   signature-verification / atomic-rename plumbing.
@@ -742,7 +742,7 @@ architecture change), system-wide install path (stay user-scoped),
 
 ---
 
-## 3. Platform-sig completion — make `HL_PLATFORM_PUBKEY_HEX` meaningful
+## 3. Platform-sig completion. Make `HL_PLATFORM_PUBKEY_HEX` meaningful
 
 **Status: SHIPPED in v0.1.3 (six commits, landed on `main`).** The
 release pipeline now signs the per-arch `libhull_platform.a`
@@ -761,7 +761,7 @@ The original plan and execution order are preserved below as
 historical context for future readers tracing similar trust-chain
 work.
 
-**Priority:** High for v0.1.3 — this was the loudest remaining gap on
+**Priority:** High for v0.1.3. This was the loudest remaining gap on
 the v0.1.x "honest scorecard" and the symmetric companion to the
 release-sig trust chain that shipped fully in v0.1.0 (release-side)
 and matured in v0.1.2 (audit-hardened constant-time compare, OOB
@@ -777,7 +777,7 @@ code paths (`hull verify`, browser verifier) all exist. But:
 
 - `HL_PLATFORM_PUBKEY_HEX` is the all-zeros placeholder. v0.1.1
   reverted it from the real key after a test-only override Makefile
-  rule got removed — the real key is in the GH secrets, just not
+  rule got removed. The real key is in the GH secrets, just not
   embedded.
 - No signed platform artefact is produced at release time, so
   `package.sig`'s `platform` field is empty in every built app and
@@ -791,7 +791,7 @@ v0.1.2 established the patterns this work needs to copy:
 
 | v0.1.2 shipped | Reused here |
 |---|---|
-| `release_io.{c,h}` — HTTPS GET, signed-manifest verify, SHA-256, atomic write | Same module verifies the embedded platform-sig blob (no new code paths) |
+| `release_io.{c,h}`. HTTPS GET, signed-manifest verify, SHA-256, atomic write | Same module verifies the embedded platform-sig blob (no new code paths) |
 | Audit-hardened trust chain (constant-time compare, OOB defense, fsync checks) | Platform-sig path is implemented against the same hardened helpers |
 | `release.yml` matrix: build artifact → sha256 → Ed25519 sign → publish | Same shape applies to per-arch platform archives |
 | Hex pubkey override via `-DHL_*_PUBKEY_HEX=…` in `release.h` | Already in `signature.h` too; tests can flip back to placeholder |
@@ -821,12 +821,12 @@ resolved:
 - **Hard reject on empty/invalid `package.sig.platform`** in the
   explicit verify paths (`hull verify <app>` and `--verify-sig` at
   startup). Default `hull <app>` startup (no verify flag) keeps
-  running unsigned apps — same opt-in behavior as today, so legacy
+  running unsigned apps. Same opt-in behavior as today, so legacy
   v0.1.0–v0.1.2 apps continue working at runtime.
 
 ### Manifest format
 
-Mirror `hull.sha256`'s shape — line-based text, not JSON:
+Mirror `hull.sha256`'s shape. Line-based text, not JSON:
 
 ```
 0000000000000000000000000000000000000000000000000000000000000001  linux-x86_64
@@ -838,7 +838,7 @@ Mirror `hull.sha256`'s shape — line-based text, not JSON:
 
 Why: avoids JSON canonicalization headaches entirely (deterministic
 key order, whitespace, escaping). Signed against the file bytes.
-Reuses every helper from `release_io.{c,h}` —
+Reuses every helper from `release_io.{c,h}`.
 `hl_release_io_find_checksum`, `hl_release_io_sha256_hex`,
 `hl_release_verify_manifest_sig`. Zero new format code.
 
@@ -881,14 +881,14 @@ hard-reject on empty (legacy apps) or invalid signature.
 | Release-built hull, `.a` SHA-256 mismatch (user re-ran `make platform` locally on a release hull) | `hull build` **hard rejects** with: `"libhull_platform.a hash does not match the embedded signed manifest"` (use `--no-verify-platform` to override) |
 | Self-built hull (no embedded manifest, dev workflow) | `hull build` **hard rejects** with: `"this hull was built locally and has no embedded platform manifest"` (use `--no-verify-platform` to build anyway; runtime verify will fail) |
 | App with empty `package.sig.platform` at runtime + `--verify-sig` | **Hard reject**: `"app was built without platform-sig (rebuild against a release-built hull >=0.1.3)"` |
-| App with empty `package.sig.platform` at runtime WITHOUT `--verify-sig` | No change from today — runs as-is. Default `hull <app>` doesn't verify signatures unless asked. |
+| App with empty `package.sig.platform` at runtime WITHOUT `--verify-sig` | No change from today. Runs as-is. Default `hull <app>` doesn't verify signatures unless asked. |
 | `--no-verify-platform` passed at any step | Skip the check, log once at info level. |
 
 The `--no-verify-platform` flag exists on both `hull build` and the
 runtime serve path. It's the documented escape valve for
 dev-built hulls and for forensic-mode operation; expected to be
 rare in production. Without it, self-built dev hulls can't build
-production-ready apps — an acceptable strict-default tradeoff
+production-ready apps. An acceptable strict-default tradeoff
 matching the v0.1.2 audit-hardening posture.
 
 ### Six commits, ordered
@@ -900,7 +900,7 @@ hard-rejects any app whose `package.sig.platform.public_key_hex`
 doesn't match the embedded key. Today's
 `hull sign-platform` + `hull build --sign` developer flow (exercised
 by `e2e_build.sh` Step 14) signs platforms with the developer's own
-key — so the moment the real gethull pubkey is embedded, every
+key. So the moment the real gethull pubkey is embedded, every
 existing dev-signed app fails verify. The same failure mode triggered
 the `ff0a39b` reversion during v0.1.1. C1 is therefore a *dependent*
 commit, not an independent one.
@@ -914,7 +914,7 @@ consumer of the pin can opt out of it.
 
 | # | Prefix | Summary | Effort |
 |---|---|---|---|
-| 1 | `sig:` | `src/hull/platform_sig.{c,h}` — manifest builder, signer, verifier, `extract_for_arch` helper. Pure data; reuses `release_io` helpers (`find_checksum`, `verify_manifest_sig`, `sha256_hex`). Unit tests with synthetic hashes including mismatch + tamper cases. Standalone — no runtime behavior change. | 1d |
+| 1 | `sig:` | `src/hull/platform_sig.{c,h}` (manifest builder, signer, verifier, `extract_for_arch` helper. Pure data; reuses `release_io` helpers (`find_checksum`, `verify_manifest_sig`, `sha256_hex`). Unit tests with synthetic hashes including mismatch + tamper cases. Standalone) no runtime behavior change. | 1d |
 | 2 | `ci:` | `release.yml` reorg per Option A: `build-platform` (matrix, uploads `.a`) → `sign-platform-manifest` (single Linux job, signs with `HULL_PLATFORM_KEY`, emits `build/embedded_platform_sig.h` + `build/embedded_platform_hashes.h`, uploads as artifact) → `build-native` + `build-cosmo` (matrix, depend on the headers artifact, include them in hull build). Bootstrap check fails the workflow if `HULL_PLATFORM_KEY` is empty in CI. Hull binaries now embed signed platform metadata but nothing reads it yet. | 1.5d |
 | 3 | `build:` | `hull build` integration: new `--no-verify-platform` flag (works on both `hull build` and runtime), `tool.platform_sig_get()` Lua binding wrapping `hl_platform_sig_extract_for_arch()`, `build.lua` computes SHA-256 of embedded `.a`, cross-checks against manifest entry, writes verified `(manifest + sig + arch_hash)` into `package.sig.platform`. Hard-reject paths with the messages in the behavior matrix above. | 1d |
 | 4 | `sig:` | `hull verify` + `--verify-sig` enforce platform layer at startup. Hard reject on empty/invalid with clear messages. `--no-verify-platform` opt-out at runtime mirrors the build-time flag. E2E test: build an app via the full release pipeline, mutate embedded `.a` bytes via hex editor, expect verify fails non-zero with the specific message. | 0.5d |
@@ -934,9 +934,9 @@ run `tests/release_smoke.sh` (extended to also `hull verify` the
 published binaries and confirm the platform layer reports valid).
 Only tag clean `v0.1.3` after rc1 is green.
 
-### Tasks (in dependency order — mirrors the commit table)
+### Tasks (in dependency order. Mirrors the commit table)
 
-- [ ] `src/hull/platform_sig.{c,h}` — manifest builder + signer +
+- [ ] `src/hull/platform_sig.{c,h}`. Manifest builder + signer +
       verifier + `extract_for_arch` helper. Unit tests including
       mismatch + tamper cases. **[C1]**
 - [ ] `release.yml` reorg: `build-platform` matrix +
@@ -986,7 +986,7 @@ Only tag clean `v0.1.3` after rc1 is green.
   `package.sig.platform`. They continue to run on v0.1.3+ hull
   normally (default `hull <app>` doesn't signature-check). They
   only fail under `hull verify` or `--verify-sig`, which is the
-  documented intended behavior — opt-in stricter verification.
+  documented intended behavior. Opt-in stricter verification.
   Rebuild against v0.1.3+ hull to make those apps pass.
 
 ### Effort
@@ -1000,7 +1000,7 @@ clean tag dance from v0.1.2 applies here too.
 
 ## 3.1 Cosmo APE: tool-mode compiler invocation on Linux
 
-**Priority:** Medium. Discovered while gating v0.1.3 — the release
+**Priority:** Medium. Discovered while gating v0.1.3. The release
 workflow's platform-sig E2E smoke test passes on all three native
 arches (darwin-arm64, linux-x86_64, linux-aarch64) but had to be
 skipped for the Cosmopolitan APE build because `hull build` can't
@@ -1029,7 +1029,7 @@ but the child's dynamic loader can't map its dependencies.
 End-users running `hull-cosmo` on Linux can't run `hull build`
 (unless they bypass the sandbox, which we don't expose for tool
 mode). The cosmo binary is fine for `hull dev`, `hull test`,
-`hull <app>`, `hull update`, `hull tools install` — those don't
+`hull <app>`, `hull update`, `hull tools install`. Those don't
 spawn a system compiler. Only `hull build` is affected, and only
 when `hull-cosmo` is the binary doing the building.
 
@@ -1044,7 +1044,7 @@ End-users have two workable paths today:
 Neither is a great story for the "one binary for all OSes" cosmo
 promise.
 
-**Fix candidates** (one or more — design once we pick up the task):
+**Fix candidates** (one or more. Design once we pick up the task):
 
 1. **Widen the tool-mode unveil set.** Add `/lib`, `/lib64`,
    `/usr/lib`, `/usr/lib64`, and the `cosmocc` install dir
@@ -1079,7 +1079,7 @@ promise.
 
 ## 3.2 Auto-extract embedded `libhull_platform.a` for tool-mode commands
 
-**Priority:** Medium-High. The companion to §3.1 — both fall out of
+**Priority:** Medium-High. The companion to §3.1. Both fall out of
 the same architectural gap.
 
 End-users installing a release binary via
@@ -1100,7 +1100,7 @@ hull sign-platform: no platform libraries found in /some/dir/
 
 The "run `make platform`" hint is only actionable for someone with
 the Hull source tree. End-users who installed via the release
-binary have only the `hull` executable — there's no make,
+binary have only the `hull` executable. There's no make,
 no `vendor/`, no way to materialize the .a without rebuilding hull
 from scratch.
 
@@ -1108,7 +1108,7 @@ from scratch.
 
 - `hull eject` is unusable on installed release binaries. Eject's
   whole purpose is "give me a self-contained scaffold I can build
-  from without hull" — exactly the audience that has only the
+  from without hull". Exactly the audience that has only the
   binary.
 - `hull sign-platform` (the v0.1.2 per-app developer-signed
   platform layer) is unusable for the same reason. End-users who
@@ -1123,13 +1123,13 @@ embedded blob the `hl_embedded_platform_*` accessors expose to
 `commands/eject.c` and `commands/sign_platform.c` (or their Lua
 stdlib equivalents), write the bytes to a tmpdir, and pass that
 path through to the existing logic. `build.lua` already does this
-pattern — it's just not factored into a shared helper that the
+pattern. It's just not factored into a shared helper that the
 other tool commands can reuse.
 
 Suggested factoring:
 
 - `hl_platform_lib_extract(tmpdir, &out_path)` in
-  `src/hull/build_assets.c` (where the embedded blob lives) —
+  `src/hull/build_assets.c` (where the embedded blob lives).
   writes `libhull_platform.a` (single-arch) or both cosmo arches to
   `tmpdir/` and returns the path. Returns -1 if no platform is
   embedded.
@@ -1144,7 +1144,7 @@ through the sandbox.
 
 - `hull eject` works on an installed release binary, with no source
   tree present.
-- `hull sign-platform` works the same way — produces a `platform.sig`
+- `hull sign-platform` works the same way. Produces a `platform.sig`
   that `hull build --sign` accepts.
 - The "run `make platform` first" hint is replaced with the
   extraction logic for binaries with embedded platforms; the hint
@@ -1184,7 +1184,7 @@ moving to a hardware-backed key). The implicit story is:
   2. Update `HL_PLATFORM_PUBKEY_HEX` in `include/hull/signature.h`,
      update `GETHULL_DEV_PLATFORM_KEY` in `site/verify.html`, ship a
      hull release. New release signs new manifests with the new key.
-  3. Old hull binaries keep working — they verify against the OLD
+  3. Old hull binaries keep working. They verify against the OLD
      pubkey embedded in them, against the OLD signed manifests they
      carry. Apps built with old hulls keep verifying.
   4. New apps built with new hull verify against the new pubkey.
@@ -1194,7 +1194,7 @@ moving to a hardware-backed key). The implicit story is:
 
 This needs to be written down in `docs/security.md`, including the
 "what if someone publishes hull binaries claiming to be us with a
-key we control" scenario (release signature gates that — same
+key we control" scenario (release signature gates that. Same
 HULL_RELEASE_KEY chain). One page; mostly documentation.
 
 **3. `hull verify --gethull-key <file>` parity in Lua.**
@@ -1202,12 +1202,12 @@ HULL_RELEASE_KEY chain). One page; mostly documentation.
 `stdlib/js/hull/verify.js` accepts `--gethull-key <file>` to verify
 against an explicit pubkey (because the JS tool runtime can't reach
 the embedded `HL_PLATFORM_PUBKEY_HEX`). `stdlib/cli/lua/hull/verify.lua`
-relies entirely on `tool.platform_pubkey()` — no override. Add the
+relies entirely on `tool.platform_pubkey()`. No override. Add the
 same `--gethull-key` flag to the Lua verifier for symmetry:
 
   - Use for offline auditing of a hull-signed app from a machine
     with a different hull binary (or no hull at all, via the
-    browser verifier — which already accepts override).
+    browser verifier. Which already accepts override).
   - Use for verifying a fork's apps against the fork's pubkey
     without rebuilding hull with `-DHL_PLATFORM_PUBKEY_HEX=…`.
 
@@ -1249,7 +1249,7 @@ isn't the artifact CI built" surprise.
 
 ## 4. Background job queue (`hull.jobs`)
 
-**Priority:** Low — the existing transactional outbox + inbox patterns cover
+**Priority:** Low. The existing transactional outbox + inbox patterns cover
 most reliable side-effect use cases. Add this when an explicit user need
 appears (background image processing, scheduled cleanup, async chains).
 
@@ -1271,8 +1271,8 @@ end, { batch = 10, retry = 3 })
 **Tasks:**
 
 - [ ] `_hull_jobs` table schema (type, data, status, attempts, scheduled_at, last_error)
-- [ ] `jobs.enqueue()` — insert with optional delay
-- [ ] `jobs.process()` — atomic claim + execute + update status
+- [ ] `jobs.enqueue()`. Insert with optional delay
+- [ ] `jobs.process()`. Atomic claim + execute + update status
 - [ ] Retry with exponential backoff (reuse `outbox.backoffDelay` math)
 - [ ] Dead-letter queue for permanently-failed jobs
 - [ ] JS parity
@@ -1281,7 +1281,7 @@ end, { batch = 10, retry = 3 })
 
 ## 5. Email retry/backoff (Phase 7 candidate from Phase 6 audit)
 
-**Priority:** Low — Phase 6 wrapped `email.js` / `email.lua` providers in
+**Priority:** Low. Phase 6 wrapped `email.js` / `email.lua` providers in
 try/catch; now that errors surface cleanly as `{ok:false, error}`, retry on
 transient failures is a small follow-up.
 
@@ -1295,9 +1295,9 @@ exponential backoff math as `outbox.backoffDelay`.
 
 Three items the audits flagged as deserving unit tests (currently e2e-only):
 
-- [ ] **`hl_migrate_*`** — `src/hull/migrate.c` has no unit-test suite. Edge cases (checksum mismatch, missing migrations table, concurrent attempts) deserve in-process tests.
-- [ ] **Sandbox profile builder** (`sandbox.c::build_seatbelt_profile` / unveil-path builder) — only e2e-covered today, and only on the platforms CI runs. A unit test calling the profile-build helper and asserting on the generated SBPL/unveil list would catch regressions on platforms CI doesn't run.
-- [ ] **`hl_snprintf_append` helper** — Phase 5 audit recommendation. Replaces the brittle `req_len += snprintf(...)` idiom that recurs in `agent/request.c`, `cap/smtp.c`, and template codegen. Land the helper + tests + sweep the call sites.
+- [ ] **`hl_migrate_*`**. `src/hull/migrate.c` has no unit-test suite. Edge cases (checksum mismatch, missing migrations table, concurrent attempts) deserve in-process tests.
+- [ ] **Sandbox profile builder** (`sandbox.c::build_seatbelt_profile` / unveil-path builder). Only e2e-covered today, and only on the platforms CI runs. A unit test calling the profile-build helper and asserting on the generated SBPL/unveil list would catch regressions on platforms CI doesn't run.
+- [ ] **`hl_snprintf_append` helper**. Phase 5 audit recommendation. Replaces the brittle `req_len += snprintf(...)` idiom that recurs in `agent/request.c`, `cap/smtp.c`, and template codegen. Land the helper + tests + sweep the call sites.
 
 ---
 
@@ -1314,7 +1314,7 @@ Five operational steps that gated the v0.1.0 tag. All executed
 4. ✅ Platform keypair generated symmetrically and embedded as
    `HL_PLATFORM_PUBKEY_HEX` in `include/hull/signature.h` (commit
    `bad31b9`). `HULL_PLATFORM_KEY` secret installed too, even though
-   the platform-sig wire format isn't active yet — see section 2.
+   the platform-sig wire format isn't active yet. See section 2.
 5. ✅ `v0.1.0` tagged 2026-05-25, release workflow signed
    `hull.sha256` and published all six artefacts.
 

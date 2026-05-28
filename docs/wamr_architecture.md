@@ -10,9 +10,9 @@
 ## A) Executive Summary
 
 - **WAMR embedded in-process** as an optional vendored C library (~256 KB compiled with interpreter + AOT loader + shared-heap support, included in the ~5 MB default Hull binary).
-- **Entirely optional:** most Hull apps don't need WAMR — Lua is 10-30× faster than Python and 5-10× faster than Ruby, fast enough for HTTP handlers, business logic, and database queries. WAMR is for apps that hit a wall on CPU-bound computation; GPU compute (`HL_ENABLE_GPU=1`) covers the data-parallel side.
+- **Entirely optional:** most Hull apps don't need WAMR. Lua is 10-30× faster than Python and 5-10× faster than Ruby, fast enough for HTTP handlers, business logic, and database queries. WAMR is for apps that hit a wall on CPU-bound computation; GPU compute (`HL_ENABLE_GPU=1`) covers the data-parallel side.
 - **Compute-only:** NO WASI imports, NO ambient I/O, NO filesystem/network/time/env/random.
-- **Capability layer remains the sole I/O gate** — only Lua/JS/host code can perform I/O via `hl_cap_*`. A WASM module is a pure function from input bytes to output bytes.
+- **Capability layer remains the sole I/O gate**. Only Lua/JS/host code can perform I/O via `hl_cap_*`. A WASM module is a pure function from input bytes to output bytes.
 - **Request flow:** HTTP → Keel C router → Lua/JS middleware → optional WAMR plugin → Lua/JS → response.
 - **Minimal ABI:** single `host_call(opcode, ptr, len) -> int` import, length-prefixed binary framing. Opcodes: `LOG=0x01`, `DATA_INFO=0x02`, `STREAM=0x03`, `CALLBACK=0x10`.
 - **Two invocation modes shipped:** synchronous `compute.call` (gas-limited, blocking) and asynchronous `compute.async.call` (dispatches to the thread pool, yields to the event loop, resolves via Lua coroutine / JS Promise).
@@ -21,10 +21,10 @@
 - **AOT shipped:** `wamrc` pre-compiles `.wasm` → `.aot.<arch>` for near-native speed. `hull build` auto-AOT-compiles when `wamrc` is available; for cosmocc fat binaries both `x86_64` and `aarch64` AOTs are emitted.
 - **Memory64 shipped:** `(memory i64 N)` modules detected automatically; the runtime dispatches the correct calling convention. Memory64 is AOT-only (the fast interpreter doesn't support it). `hull build` passes `--enable-memory64` to `wamrc` when it detects a Memory64 module.
 - **SIMD128 shipped:** `-DWASM_ENABLE_SIMD=1`, AOT maps WASM SIMD to native SSE4.1 / NEON. Interpreter cannot load v128 modules (graceful `HL_WASM_ERR_LOAD`).
-- **Shared data segments shipped:** `compute.segment(module, name, bytes)` loads up to 16 named read-only segments per module via WAMR's shared-heap mechanism — multi-GB datasets readable at native speed by every instance (pooled and persistent).
-- **Persistent instances shipped:** `compute.instance(name, opts)` creates a long-lived WASM instance that retains linear memory across calls. Not pooled — exclusively owned by the caller. Used for stateful workloads (ML weights, pre-built indexes).
+- **Shared data segments shipped:** `compute.segment(module, name, bytes)` loads up to 16 named read-only segments per module via WAMR's shared-heap mechanism. Multi-GB datasets readable at native speed by every instance (pooled and persistent).
+- **Persistent instances shipped:** `compute.instance(name, opts)` creates a long-lived WASM instance that retains linear memory across calls. Not pooled. Exclusively owned by the caller. Used for stateful workloads (ML weights, pre-built indexes).
 - **Streaming I/O shipped:** `compute.stream(name, input, output, opts)` processes datasets larger than memory in fixed-size chunks. Persistent instance internally; state preserved between chunks; modules query chunk metadata via `host_call(0x03)`.
-- **Unified buffer protocol:** WASM input accepts strings, JS `ArrayBuffer`s, `WasmBuffer` (output of a previous `compute.call`), and `MappedBuffer` (`fs.mmap`) — all zero-copy where the source layout permits.
+- **Unified buffer protocol:** WASM input accepts strings, JS `ArrayBuffer`s, `WasmBuffer` (output of a previous `compute.call`), and `MappedBuffer` (`fs.mmap`). All zero-copy where the source layout permits.
 - **BYO language:** C/C++ (clang `--target=wasm32 -nostdlib`), Rust (`wasm32-unknown-unknown`), Zig (`wasm32-freestanding`), TinyGo, AssemblyScript.
 - **Plugins embed** into the APE binary alongside Lua/JS modules and static assets via the unified VFS (`compute/*.wasm` + `compute/*.aot.<arch>`, sorted, O(log n) lookup).
 - **Single-threaded interpreter, multi-threaded async dispatch:** synchronous calls run on the event loop; `compute.async.call` dispatches to the thread pool.
@@ -75,7 +75,7 @@
 
 1. **Browser ↔ Keel:** HTTP over localhost (network boundary)
 2. **Keel ↔ Lua:** C↔Lua binding layer (`lua_bindings.c`)
-3. **Lua ↔ WAMR:** C bridge (`lua_wasm.c`) — WAMR linear memory is separate from Lua/host memory
+3. **Lua ↔ WAMR:** C bridge (`lua_wasm.c`). WAMR linear memory is separate from Lua/host memory
 
 ## C) Compute-Only Plugin Contract
 
@@ -156,7 +156,7 @@ int32_t hull_version(void);  // Returns ABI version (currently 1)
 
 - **Version byte:** `0x01` (current ABI)
 - **Length:** little-endian u32, max 16 MB (configurable)
-- **Payload:** opaque bytes (JSON, MessagePack, protobuf, raw — plugin decides)
+- **Payload:** opaque bytes (JSON, MessagePack, protobuf, raw. Plugin decides)
 
 ### Memory model
 
@@ -170,7 +170,7 @@ int32_t hull_version(void);  // Returns ABI version (currently 1)
 
 | Return value | Meaning |
 |---|---|
-| >= 0 | Success — number of bytes written to output buffer |
+| >= 0 | Success. Number of bytes written to output buffer |
 | -1 | Generic error |
 | -2 | Output buffer too small (host can retry with larger buffer) |
 | -3 | Invalid input |
@@ -187,7 +187,7 @@ int32_t hull_version(void);  // Returns ABI version (currently 1)
 | Instruction budget | 10M | 100B | `--wasm-gas` |
 
 Three-tier resolution: **per-call opts > CLI/manifest ceiling > compile-time default**.
-Compile-time maximums are `#ifndef`-guarded — override via `make HL_WASM_MAX_HEAP_MB=512`.
+Compile-time maximums are `#ifndef`-guarded. Override via `make HL_WASM_MAX_HEAP_MB=512`.
 
 ## E) Resource Limiting & Non-Blocking Execution
 
@@ -195,12 +195,12 @@ Compile-time maximums are `#ifndef`-guarded — override via `make HL_WASM_MAX_H
 
 - WAMR's `WAMR_BUILD_INSTRUCTION_METERING=1` enables instruction counting
 - `wasm_runtime_set_instruction_count_limit(exec_env, limit)` enforces gas budget
-- When budget exhausted, WAMR returns error — host reports timeout to Lua
+- When budget exhausted, WAMR returns error. Host reports timeout to Lua
 - Synchronous call: Lua blocks until plugin returns (gas-limited, so bounded)
 - For short computations (< 10 ms), this is zero-overhead and simple
 - Integration with Hull event loop: not needed for sync calls (they're bounded by gas)
 
-### Async variant (shipped — Model 1b)
+### Async variant (shipped. Model 1b)
 
 - `compute.async.call(name, input, opts)` dispatches the WASM execution to
   the thread pool (`--workers N`, default 4).
@@ -209,7 +209,7 @@ Compile-time maximums are `#ifndef`-guarded — override via `make HL_WASM_MAX_H
 - On completion the worker thread resumes the handler with the result bytes
   (or error). Persistent instance + streaming variants follow the same
   pattern.
-- No `hull_resume` callback is required from the plugin — the thread
+- No `hull_resume` callback is required from the plugin. The thread
   isolation does the cooperation for us.
 
 ### Model 2: Subprocess worker (not implemented; explicit non-goal)
@@ -350,7 +350,7 @@ typedef struct {
 // plugins/score.c
 // Compile: clang --target=wasm32 -nostdlib -O2 -o score.wasm score.c
 
-// Host import (optional — only if you need logging)
+// Host import (optional. Only if you need logging)
 extern int host_call(int opcode, int ptr, int len);
 
 // Required export: process input → output
@@ -393,7 +393,7 @@ assert(#out == 1, "expected 1 byte output")
 print("score: " .. string.byte(out, 1))
 ```
 
-Run with `hull test` — same test framework as all other Hull tests.
+Run with `hull test`. Same test framework as all other Hull tests.
 
 ## Implementation Status (all shipped)
 
@@ -419,7 +419,7 @@ WAMR is built with `-DWASM_ENABLE_SIMD=1`, enabling 128-bit SIMD vector operatio
 - Zig: `-mcpu=generic+simd128`
 
 **Execution modes:**
-- **AOT (recommended):** WAMR maps WASM SIMD to native instructions — SSE4.1 on x86_64, NEON on aarch64. Near-native vector throughput.
+- **AOT (recommended):** WAMR maps WASM SIMD to native instructions. SSE4.1 on x86_64, NEON on aarch64. Near-native vector throughput.
 - **Interpreter:** Cannot load modules with `v128` types (graceful `HL_WASM_ERR_LOAD`, no crash). SIMDe vendoring would enable interpreter SIMD but is not yet done.
 
 **Performance (aarch64 AOT benchmarks):**
@@ -450,7 +450,7 @@ Every `compute.call()` previously created a fresh WASM instance (~2.5ms allocati
 - Per-module pool of `(instance, exec_env, process_fn)` tuples, keyed by `(heap_size, stack_size)`
 - Pool max: `HL_WASM_POOL_MAX` (default 8) per module
 - Instances with heap > `HL_WASM_POOL_HEAP_THRESHOLD` (4 MB) are never pooled
-- Failed calls destroy the instance — never pooled
+- Failed calls destroy the instance. Never pooled
 - Single `pthread_mutex_t` guards all pool operations; WASM execution is outside the lock
 - Linear memory is not reset between calls (safe: compute plugins are pure functions)
 
@@ -478,14 +478,14 @@ WASM-backed buffers keep the pooled instance checked out until `close()` / GC. N
 
 | Item | Status |
 |------|--------|
-| AOT support | ✅ Shipped — `wamrc`, `.aot.<arch>` loading, auto-AOT during `hull build`, multi-arch under cosmocc |
-| Async dispatch | ✅ Shipped — `compute.async.call` via thread pool |
-| Persistent instances | ✅ Shipped — `compute.instance` |
-| Shared data segments | ✅ Shipped — `compute.segment` (up to 16 per module via WAMR shared heaps) |
-| Streaming I/O | ✅ Shipped — `compute.stream` with chunk metadata via `host_call(0x03)` |
-| Memory64 | ✅ Shipped — AOT-only, detected at load time, auto-passed to `wamrc` |
-| Plugin scaffolding (`hull compute new` / `build` / `test` / `check`) | ✅ Shipped — full dev lifecycle including auto-rebuild during `hull build` and per-module enumeration in `hull agent deploy`. See [`../README.md#authoring-compute-modules`](../README.md#authoring-compute-modules). |
-| Sample compute modules | ✅ Shipped (initial set) — `examples/compute/` covers vector_ops, sort, hash, json_extract, scoring, text. |
-| Rust scaffolding (`hull compute new --lang=rust`) | Planned ([`roadmap.md`](roadmap.md)) — manually-authored Rust modules work today (only need `hull_process` + `hull_version` exports); only the scaffolding shortcut is C-only. |
-| Plugin signatures | Considered — `package.sig` already covers embedded `.wasm`/`.aot` bytes; per-module signing is a separable concern |
-| Plugin-to-plugin composition | Available today — `WasmBuffer` outputs flow into the next `compute.call` zero-copy via the unified buffer protocol |
+| AOT support | ✅ Shipped. `wamrc`, `.aot.<arch>` loading, auto-AOT during `hull build`, multi-arch under cosmocc |
+| Async dispatch | ✅ Shipped. `compute.async.call` via thread pool |
+| Persistent instances | ✅ Shipped. `compute.instance` |
+| Shared data segments | ✅ Shipped. `compute.segment` (up to 16 per module via WAMR shared heaps) |
+| Streaming I/O | ✅ Shipped. `compute.stream` with chunk metadata via `host_call(0x03)` |
+| Memory64 | ✅ Shipped. AOT-only, detected at load time, auto-passed to `wamrc` |
+| Plugin scaffolding (`hull compute new` / `build` / `test` / `check`) | ✅ Shipped. Full dev lifecycle including auto-rebuild during `hull build` and per-module enumeration in `hull agent deploy`. See [`../README.md#authoring-compute-modules`](../README.md#authoring-compute-modules). |
+| Sample compute modules | ✅ Shipped (initial set). `examples/compute/` covers vector_ops, sort, hash, json_extract, scoring, text. |
+| Rust scaffolding (`hull compute new --lang=rust`) | Planned ([`roadmap.md`](roadmap.md)). Manually-authored Rust modules work today (only need `hull_process` + `hull_version` exports); only the scaffolding shortcut is C-only. |
+| Plugin signatures | Considered. `package.sig` already covers embedded `.wasm`/`.aot` bytes; per-module signing is a separable concern |
+| Plugin-to-plugin composition | Available today. `WasmBuffer` outputs flow into the next `compute.call` zero-copy via the unified buffer protocol |
