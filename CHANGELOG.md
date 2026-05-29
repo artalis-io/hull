@@ -8,7 +8,54 @@ release-artifact layout).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **Byte-reproducible builds, three layers, CI-gated.** Same source tree → byte-identical `build/hull` between rebuilds. Same source + same hull version → byte-identical app binary from `hull build`. Plus `make self-build` proves hull is self-hostable across all platforms. New CI job `reproducibility` enforces all three on every commit. Mechanism: deterministic ar archives via `ZERO_AR_DATE=1`; `-ffile-prefix-map=<srcdir>=.` in `sys_compile` to strip per-build tempdir paths from .o file content; same-path methodology for the `hull build` test (macOS `ld64` hashes output path into LC_UUID, so end-user same-target-name behavior is what's tested). Documented in `docs/MANIFESTO.md` "Reproducible builds" and `docs/POSITIONING.md` precision notes; full investigation arc preserved in `docs/roadmap_next.md §0.2` as lessons-learned.
+- **`docs/POSITIONING.md` (new, 153 lines).** Standalone messaging-style guide encoding the canonical thesis, descriptor, target audiences, tone, vocabulary table, geographic positioning, typography rules, surface-update cadence, and authoring checklist. Lives separately from `MANIFESTO.md` (which is narrative WHY); POSITIONING is operational reference for anyone writing about Hull (humans or AI agents).
+- **New canonical thesis surfaced across every Hull-mentioning surface:** *"Code became disposable. Trust is not."* Hero on gethull.dev, README opener, MANIFESTO callout, INVESTORS callout, GitHub repo About. Canonical descriptor unified to *"Hardened, capability-secure runtime infrastructure for AI-native systems."*
+- **Self-hosted site assets.** gethull.dev no longer fetches from third-party CDNs. Tailwind, Lucide, Inter + JetBrains Mono fonts all vendored under `site/vendor/` and `site/fonts/`. Verify.html CSP tightened to `default-src 'none'` with `'self'` for everything except `connect-src https:` (for the dev-key fetch path).
+- **OG card PNG variant.** `site/og-card.png` (1200×630, rendered from the SVG via `rsvg-convert`) added so LinkedIn and Facebook social previews render correctly (those platforms don't render SVG OG images).
+- **OG metadata on `verify.html`.** Previously had only `<title>` + `<meta name="description">`; social shares of the verifier URL showed blank/scraped previews. Now has full `og:*` + `twitter:*` block with the canonical thesis.
+- **`Engineered in Europe for sovereign, deploy-anywhere AI infrastructure.`** Imprint-style line added to site footer and README license area. Restrained provenance, no flag.
+- **LICENSING.md vendored-dependency table.** Every static-linked third-party library listed with license (mostly MIT/BSD/Apache/ISC/PD). Explicit TinyCC note: LGPL-2.1+ is the only non-permissive dependency; compliance with §6 is satisfied by Hull shipping full vendored source under AGPL.
+
+### Changed
+
+- **README, MANIFESTO, AGENTS, INVESTORS positioning aligned** to the new canonical thesis. README's lead tagline + Why section rewritten. MANIFESTO title vocabulary updated (`Agent-Native, Local-First Applications` → `Hardened, Capability-Secure Runtime for AI-Native Systems`). AGENTS.md opening line uses canonical descriptor. INVESTORS adds thesis callout at top and refreshes Status section (was stuck at "approaching v0.1.0" — now correctly states v0.1.4 shipped 2026-05-28 with detailed shipped-features list). All `agent-native` → `AI-native`, `secure runtime` → `hardened, capability-secure runtime`. "Zero system dependencies" wording corrected: embedded TinyCC removes the system-compiler requirement, but the system linker is still used.
+- **`docs/release_signing.md` status line** updated from `Design draft — pre-v0.1.0` to `Shipped (as of v0.1.3). The embedded gethull release key is live; every release manifest carries an Ed25519 signature verified by hull verify-release and by hull update before atomic install.`
+- **Em-dash sweep across all prose files.** 1100+ em-dashes replaced with period + capitalize for between-clause breaks, parentheses for parentheticals, colons for elaborations. Same pattern as commit 6b6f394 precedent. Applies to README, AGENTS, CLAUDE, MANIFESTO, INVESTORS, PERSONAS, POSITIONING, all `docs/*.md`, and site HTML. Two UI-placeholder em-dashes in `site/verify.html` status badges became middle dots (`·`).
+- **Deploy-site workflow CF-invalidation bug fixed.** Conditional was `if: ${{ env.CF_DISTRIBUTION_ID != '' }}` but `env:` was set in the same step (applied after `if:`), so the invalidation step never ran. Promoted to job-level env; now fires correctly when the secret is configured.
+- **Documentation archive cleanup.** Five superseded docs moved to `docs/archive/`: three Phase-6 audits, `ASSESSMENT.md` ("approaching v0.1.0" snapshot), `api_review.md` (pre-v0.1.0 public-surface review). Archive index (`docs/archive/README.md`) updated with new entries and reorganized sections.
+
+### Fixed
+
+- **macOS sandbox claim precision.** Hero/site tech-stack chip clarified to `pledge + unveil (Linux/OpenBSD/cosmo) · Seatbelt (macOS)` so the platform split is visible without restructuring copy. Aligns the marketing claim with the truth disclosed deeper in the "Hull is not" section.
+
+## [0.1.4] — 2026-05-28
+
+§3.1, §3.2, §3.3 from `docs/roadmap_next.md`. Closes the v0.1.4 batch from the platform-sign-chain follow-ups roadmap.
+
+### Added
+
+- **§3.1 — Cosmo APE `hull build` works on Linux.**
+  - Tool-mode sandbox unveils widened with `/opt` + `$HOME/.cosmocc` + `$HOME/cosmocc` so the cosmocc toolchain's install locations aren't sealed off (`src/hull/sandbox.c`).
+  - `hl_compiler_select()` auto-detects cosmocc when running as a cosmo APE: checks `$HOME/.cosmocc/bin/cosmocc`, `$HOME/cosmocc/bin/cosmocc`, `/opt/cosmo/bin/cosmocc`, then `$PATH`. No need to pass `--compiler cosmocc` explicitly (`src/hull/compiler.c`).
+  - Makefile `WAMR_INVOKE_SRC` selection reordered: target-compiler checks (cosmocc / `*-unknown-cosmo-cc`) precede `UNAME_S=Darwin` so cross-building a cosmo APE from a macOS host picks the correct asm invoker (was previously failing with "missing elf symbol table").
+  - Known limitation: cosmo platform-sig E2E smoke test in `release.yml` stays SKIPPED. The jart pledge polyfill on Linux rejects child `mmap(PROT_EXEC)` independently of unveil policy, so spawning `/bin/sh` or `/usr/bin/cc` from inside the polyfill always fails on Linux runners. Native build jobs (darwin-arm64, linux-x86_64, linux-aarch64) gate the gethull signature chain end-to-end.
+
+- **§3.2 — `hull eject` and `hull sign-platform` work on installed binaries.**
+  - Both commands auto-extract the embedded `libhull_platform.a` to a tempdir when no `build/` tree is present. End-users who only have the binary can now eject or sign-platform without first cloning the repo (`stdlib/cli/lua/hull/{eject,sign_platform,build}.lua`).
+  - New Lua bindings: `tool.extract_platform()` (single-arch) and `tool.extract_platform_cosmo()` (multi-arch).
+
+- **§3.3 — Platform-sign chain polish (four follow-ups).**
+  - Variant A (`--no-sandbox`) + Variant B (with sandbox active) for the native platform-sig E2E smoke test in `release.yml`. Variant A is the primary gate; Variant B re-runs the same `myapp` with the full pledge/unveil sandbox active and confirms `--verify-sig` still works under it.
+  - Key-rotation story added as a new section in `docs/security.md` §2. Covers scheduled rotation, post-compromise rotation, the non-cross-validity property (intentional), and the impersonation gate.
+  - `hull verify --gethull-key <file>` parity in Lua (`stdlib/cli/lua/hull/verify.lua`). CROSS-CHECK semantics: the file's pubkey must match this hull's embedded `HL_PLATFORM_PUBKEY_HEX` AND the signature must verify against it. Documented asymmetry with `verify.js` (JS uses override semantics because it can't reach the embedded key from QuickJS).
+  - `tests/release_smoke.sh` extended with platform-sig E2E section. Post-publish on the actually-uploaded artifact, runs sign-platform + build --sign + --verify-sig. Catches CDN-tampering / upload-integrity surprises the in-CI smoke can't see.
+
+### Fixed
+
+- **Cosmo platform-sig E2E re-disabled in `release.yml`.** Round-1 audit attempt re-enabled it under the §3.1 sandbox/compiler fixes; CI demonstrated the deeper polyfill mmap restriction (`/bin/sh: libc.so.6: failed to map segment from shared object`) is independent of unveil policy. Re-skipped with honest comment naming the actual mmap-vs-unveil distinction. Native build jobs continue to gate the gethull signature chain.
 
 ## [0.1.3] — 2026-05-27
 

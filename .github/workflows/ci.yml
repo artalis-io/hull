@@ -96,26 +96,28 @@ jobs:
         timeout-minutes: 2
         run: make hull-test-examples
 
-  # Reproducibility gate. Two properties tested independently:
+  # Reproducibility gate. Three properties tested independently:
   #
   #   1. Self-build (bootstrap): hull can build hull2 can build hull3.
   #      Proves the build pipeline produces working binaries that can
   #      themselves produce working binaries.
   #
-  #   2. Reproducible-check (byte-identity): `hull build` is
-  #      deterministic. Build the same fixture twice with the same hull
-  #      to the SAME output path, and verify the two snapshots are
-  #      byte-identical. (Same-path matters: macOS ld64 hashes the
-  #      output path into LC_UUID, so building to different paths
-  #      yields different UUIDs even for identical content. Same-path
-  #      isolates the question we actually care about: link output
-  #      stability for fixed inputs. See Makefile comment on the
-  #      target.)
+  #   2. Hull-itself reproducibility: `make` from a clean tree
+  #      produces a byte-identical `build/hull` between runs. Gates
+  #      MANIFESTO's "same source = same binary" claim at the runtime
+  #      level (not just for apps `hull build` produces).
   #
-  # Both run on Linux. A separate macOS check exists as a local
-  # diagnostic (works there too after the same-path methodology fix).
+  #   3. Hull-build reproducibility: `hull build` produces byte-
+  #      identical outputs for the same input. Build the same fixture
+  #      twice to the SAME output path (macOS ld64 hashes the output
+  #      path into LC_UUID; same-path isolates the question we
+  #      actually care about — link output stability for fixed
+  #      inputs).
+  #
+  # All three run on Linux. macOS verification is via local
+  # `make reproducible-check` (works there too).
   reproducibility:
-    name: Reproducible build (self-build + byte-identity)
+    name: Reproducible build (self-build + hull byte-identity + hull-build byte-identity)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -127,7 +129,21 @@ jobs:
       - name: Self-build chain (hull -> hull2 -> hull3)
         timeout-minutes: 5
         run: make self-build
-      - name: Reproducibility (byte-identical builds, same output path)
+      - name: Hull-itself reproducibility (`make` twice → cmp)
+        timeout-minutes: 10
+        run: |
+          set -eu
+          cp build/hull /tmp/hull-rep-1
+          make clean
+          make
+          if cmp -s /tmp/hull-rep-1 build/hull; then
+            echo "PASS: build/hull is byte-identical across rebuilds ($(wc -c < build/hull) bytes)"
+          else
+            echo "FAIL: build/hull differs between rebuilds"
+            shasum -a 256 /tmp/hull-rep-1 build/hull
+            exit 1
+          fi
+      - name: Reproducibility (`hull build` byte-identical, same output path)
         timeout-minutes: 5
         run: make reproducible-check
 

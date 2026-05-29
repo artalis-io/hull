@@ -159,8 +159,8 @@ This is the primary threat model. Hull exists to make it possible to trust apps 
   class as any local malware with file-system write access. Not
   something the signature scheme can prevent. Defense lives at the
   OS layer (signed system updates, FIM, SELinux/AppArmor, etc.).
-  Reproducible builds (Phase 9) make the bytes-on-disk
-  cross-checkable against the published source.
+  Reproducible builds (`make reproducible-check`, CI-gated) make
+  the bytes-on-disk cross-checkable against the published source.
 
 **Attack: Declare minimal manifest but access more at runtime**
 
@@ -339,7 +339,11 @@ default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; form-action 'self
 
 **Attack: Backdoor the build service**
 
-- **Prevention:** Reproducible builds. Anyone can rebuild from source with the recorded `cc_version` + `flags` and compare `binary_hash`. The build service is a convenience, not a trust requirement.
+- **Prevention:** Reproducible builds (CI-gated on Linux via `make reproducible-check`). Anyone can rebuild from source with the recorded `cc_version` + `flags` and compare `binary_hash`. The build service is a convenience, not a trust requirement. See §7 for the Tier 4 verification surface.
+
+**Attack: Compromise app developer's machine (sign a binary that doesn't match the published source)**
+
+- **Prevention:** Same mechanism, different attacker. The signature chain alone cannot detect this (the signature is valid; the developer's identity is intact). Reproducible builds close it: anyone re-deriving from source sees the hash mismatch immediately. This is the attack Tier 4 of the trust chain exists for; see §7.1.
 
 ### D. End User Who Doesn't Trust Anyone
 
@@ -621,34 +625,96 @@ hull verify [--no-verify-platform] [--platform-key <file|url>] \
 
 ---
 
-## 7. Trusted Rebuild Infrastructure (Future. Phase 9)
+## 7. Reproducibility and Trusted Rebuild Infrastructure
+
+### 7.1. Byte-reproducible builds (shipped)
+
+CI-gated on Linux via `make reproducible-check`; verified locally
+on macOS. Three independent properties:
+
+1. **`make` is deterministic.** Same source tree produces a
+   byte-identical `build/hull` between rebuilds.
+2. **`hull build` is deterministic.** Same source + same hull
+   version + same output path produces a byte-identical app binary.
+3. **`make self-build` proves hull is self-hostable.** Hull can
+   build hull2 can build hull3 across all platforms.
+
+#### What this proves
+
+A passing reproducibility check proves the developer **could not
+have** injected custom native code. The binary is provably just
+"Hull platform + declared source files." Anyone with the source
+can rebuild from the recorded `cc_version` + `flags` in
+`package.sig` and compare hashes. If the hashes don't match, the
+signing process was compromised or the developer lied about what's
+in the binary.
+
+This is the **Tier 4 verification surface** described on the
+gethull.dev trust-chain panel: it complements the three signature
+tiers (release, platform, app) by closing the one attack the
+signature chain alone cannot catch. A compromise of the signer's
+own machine (the developer's identity is intact, the signature is
+valid, but the binary doesn't match the source they published).
+Tier 4 makes that detectable as soon as anyone re-derives.
+
+#### Why it works
+
+1. App developers cannot write C. Only Lua/JS source.
+2. Platform binary is hash-pinned. `platform.sig` locks exact bytes.
+3. Trampoline (`app_main.c`) is deterministic. Generated from
+   template.
+4. Build inputs are deterministic. `ZERO_AR_DATE=1` makes ar
+   archives mtime-free; `-ffile-prefix-map` strips per-build
+   tempdir paths from `.o` file content; same-output-path
+   methodology isolates macOS `ld64`'s path-hashed LC_UUID.
+5. Build metadata is signed. `cc_version` + `flags` are attested
+   by the developer in `package.sig`.
+6. Cosmopolitan produces deterministic output. Static linking, no
+   timestamps.
+
+#### Self-hosted alternative
+
+Run your own build host. Pin your own platform key. Your customers
+trust you, not gethull.dev.
+
+#### Known follow-up
+
+The `hull build --compiler=tcc` codepath still has per-tempdir
+variance because TCC doesn't support `-ffile-prefix-map`. The
+reproducibility CI test forces `--compiler=system` (the documented
+production path). TCC determinism is a smaller separate work item;
+tracked in `docs/roadmap_next.md §0.2`.
+
+### 7.2. Hosted rebuild attestation service (Future. Phase 9)
+
+The byte-reproducibility property above lets anyone with source
+verify a binary matches its source. A hosted **rebuild attestation
+service** would make that one HTTP call instead of a local rebuild,
+producing a portable cryptographic statement third parties can rely on.
 
 **Service:** `api.gethull.dev/ci/v1`
 
-### Flow
+#### Flow
 
 1. Developer pushes source to GitHub
 2. CI calls `api.gethull.dev/ci/v1/build`
-3. Service rebuilds with exact `cc_version` + `flags` from `package.sig`
+3. Service rebuilds with the recorded `cc_version` + `flags` from
+   `package.sig`
 4. Compares `binary_hash`
-5. If match → issues "Reproducible Build Verified" attestation
-6. Attestation is an Ed25519 signature over `{binary_hash, timestamp, builder_version}`
+5. If match, issues a "Reproducible Build Verified" attestation
+6. Attestation is an Ed25519 signature over
+   `{binary_hash, timestamp, builder_version}`
 
-### What This Proves
+#### What the service adds over Tier 4
 
-A passing reproducible build check proves the developer **could not have** injected custom native code. The binary is provably just "Hull platform + declared source files."
+Tier 4 lets a determined auditor re-derive locally. The hosted
+service lets a non-auditor (a buyer, a regulator, a compliance team)
+trust that someone independent did the re-derivation, with a signed
+attestation they can attach to a SBOM or procurement record.
 
-### Why It Works
-
-1. App developers cannot write C. Only Lua/JS source
-2. Platform binary is hash-pinned. `platform.sig` locks exact bytes
-3. Trampoline (`app_main.c`) is deterministic. Generated from template
-4. Cosmopolitan produces deterministic output. Static linking, no timestamps
-5. Build metadata is signed. `cc_version` + `flags` attested by developer
-
-### Self-Hosted Alternative
-
-Run your own rebuild service. Pin your own platform key. Your customers trust you, not gethull.dev.
+A self-hosted alternative is identical in shape: run your own
+attestation service, sign with your own key, pin your own trust
+root in your customers' apps.
 
 ---
 
@@ -679,7 +745,7 @@ These are real, not theoretical:
 |------------|--------|------------|
 | macOS Seatbelt returns EPERM, not SIGKILL | App survives sandbox violations (operation denied, process continues) | C-level caps also return errors; net effect is the same |
 | Lua instruction hook is per-VM, not per-coroutine-instruction | Hook fires every N VM instructions globally; coroutine yields reset the counter | Both runtimes enforce the same default 100M instruction limit |
-| Canary is not foolproof | Attacker could embed magic bytes in custom binary | Reproducible builds (Phase 9) eliminate this |
+| Canary is not foolproof | Attacker could embed magic bytes in custom binary | Reproducible builds (`make reproducible-check`, CI-gated) eliminate this |
 | `realpath()` is TOCTOU | Race between check and use | Kernel unveil prevents actual access |
 | Default CSP blocks client-side JS | Apps needing fetch/AJAX must customize CSP | `app.manifest({ csp = "default-src 'self'; connect-src 'self'" })` |
 | 32-entry limit per manifest category | Large apps may hit ceiling | Sufficient for most production apps |

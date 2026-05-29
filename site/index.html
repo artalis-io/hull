@@ -73,7 +73,7 @@
   </script>
 
   <style>
-    /* Vendored fonts — served from gethull.dev, no third-party CDN. */
+    /* Vendored fonts: served from gethull.dev, no third-party CDN. */
     @font-face { font-family: 'Inter'; font-weight: 400; font-style: normal; font-display: swap; src: url('fonts/Inter-Regular.woff2') format('woff2'); }
     @font-face { font-family: 'Inter'; font-weight: 500; font-style: normal; font-display: swap; src: url('fonts/Inter-Medium.woff2') format('woff2'); }
     @font-face { font-family: 'Inter'; font-weight: 600; font-style: normal; font-display: swap; src: url('fonts/Inter-SemiBold.woff2') format('woff2'); }
@@ -367,6 +367,61 @@
             fail at module load; undeclared hosts, paths, and env
             vars fail at the capability boundary. Only the
             registration API (<code class="text-paper-100 text-[0.72rem]">app</code>) is intrinsic.
+          </p>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────────────────
+       WHY / WHAT / HOW. Quick orientation panel for first-time visitors.
+       Three load-bearing claims, one short paragraph each. Sits between
+       the hero and the install path so visitors who don't yet know
+       whether Hull is for them can decide before they hit a shell command.
+       ───────────────────────────────────────────────────────────────── -->
+  <section class="hairline-t bg-ink-900/40">
+    <div class="max-w-6xl mx-auto px-6 py-14 md:py-16">
+      <div class="grid md:grid-cols-3 gap-px bg-white/[0.06] border border-white/[0.06] rounded-md overflow-hidden">
+
+        <div class="bg-ink-900 p-6">
+          <div class="text-xs uppercase tracking-widest text-mute-500 mb-3">Why</div>
+          <h3 class="text-paper-50 font-medium leading-snug mb-3">
+            Code became disposable. Trust did not.
+          </h3>
+          <p class="text-sm text-mute-400 leading-relaxed">
+            AI generates code endlessly. Sandboxing is decades old; what
+            changed is that the layer asking <em>what is this code allowed
+            to do?</em> is now the scarce one. Hull is that layer.
+          </p>
+        </div>
+
+        <div class="bg-ink-900 p-6">
+          <div class="text-xs uppercase tracking-widest text-mute-500 mb-3">What</div>
+          <h3 class="text-paper-50 font-medium leading-snug mb-3">
+            Hardened runtime infrastructure for AI-native systems.
+          </h3>
+          <p class="text-sm text-mute-400 leading-relaxed">
+            Lua, JavaScript, and WASM execute under declared, kernel-enforced
+            capability boundaries. SQLite storage. Single static binary,
+            around five megabytes. Runs on every desktop OS from one file.
+            No daemon, no service mesh, no installer.
+          </p>
+        </div>
+
+        <div class="bg-ink-900 p-6">
+          <div class="text-xs uppercase tracking-widest text-mute-500 mb-3">How</div>
+          <h3 class="text-paper-50 font-medium leading-snug mb-3">
+            Every external capability is declared. The kernel enforces it.
+          </h3>
+          <p class="text-sm text-mute-400 leading-relaxed">
+            The app&rsquo;s manifest lists files, hosts, env vars, and GPU
+            devices. Undeclared access fails at load.
+            <code class="text-paper-100 text-[0.78rem]">pledge</code> +
+            <code class="text-paper-100 text-[0.78rem]">unveil</code>
+            (Linux/Cosmo/OpenBSD) or Seatbelt (macOS) backs the policy at
+            the syscall layer. Signed releases and reproducible builds
+            make the whole chain auditable end-to-end.
           </p>
         </div>
 
@@ -1240,6 +1295,43 @@ hull v0.1.4  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
               </p>
             </div>
           </div>
+
+          <!-- Tier 4: Reproducibility (source-to-binary re-derivation) -->
+          <div class="surface" style="background:#0f0f10;border:1px solid rgba(255,255,255,0.08);border-radius:.5rem;overflow:hidden">
+            <div class="px-5 py-4 hairline-b flex items-center justify-between">
+              <div class="flex items-center gap-2.5">
+                <span class="text-[0.7rem] uppercase tracking-widest text-mute-500 font-medium">Tier 4</span>
+                <span class="text-sm font-semibold text-paper-50">Source-to-binary re-derivation</span>
+              </div>
+              <span class="text-[0.7rem] text-mute-500"><code class="text-[0.78rem]">make reproducible-check</code></span>
+            </div>
+            <div class="px-5 py-4">
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-x-6 gap-y-3 text-[0.8125rem]">
+                <div>
+                  <div class="text-[0.65rem] uppercase tracking-widest text-mute-500 mb-1">Signed object</div>
+                  <div class="text-paper-100">None. This is a re-derivation, not a signature. Build twice, hashes match.</div>
+                </div>
+                <div>
+                  <div class="text-[0.65rem] uppercase tracking-widest text-mute-500 mb-1">Signer key</div>
+                  <div class="text-paper-100">None. The auditor is whoever has the source and the compiler.</div>
+                </div>
+                <div>
+                  <div class="text-[0.65rem] uppercase tracking-widest text-mute-500 mb-1">Verifier</div>
+                  <div class="text-paper-100"><code class="text-[0.78rem]">make reproducible-check</code>, Linux CI-gated</div>
+                </div>
+              </div>
+              <p class="mt-3 text-xs text-mute-400 leading-relaxed">
+                Closes the one attack the signature chain alone cannot catch:
+                a compromise of the signer&rsquo;s own machine. The developer
+                signs a malicious binary; the signature is &ldquo;valid.&rdquo;
+                But anyone with the source can rebuild and compare hashes:
+                if they don&rsquo;t match, the signing process was compromised.
+                Three layers gated: <code class="text-[0.78rem]">make</code> itself,
+                <code class="text-[0.78rem]">hull build</code> output, and the
+                <code class="text-[0.78rem]">make self-build</code> bootstrap chain.
+              </p>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -1348,6 +1440,10 @@ hull v0.1.4  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
               </li>
               <li class="flex gap-2">
                 <span class="text-accent mt-0.5">&check;</span>
+                <span><strong class="text-paper-100">Reproducible builds (Linux CI-gated).</strong> Same source + same hull version produces a byte-identical binary, verified per commit via <code class="text-paper-100 text-[0.78rem]">make reproducible-check</code>. Three layers gated: <code class="text-paper-100 text-[0.78rem]">make</code> itself, <code class="text-paper-100 text-[0.78rem]">hull build</code> output, and the <code class="text-paper-100 text-[0.78rem]">make self-build</code> bootstrap chain. Anyone with the source can rebuild the binary they downloaded and prove its bytes match.</span>
+              </li>
+              <li class="flex gap-2">
+                <span class="text-accent mt-0.5">&check;</span>
                 <span><strong class="text-paper-100">Self-sovereignty path.</strong> AGPL source; fork, rotate the two pubkeys, ship your own trust root.</span>
               </li>
             </ul>
@@ -1362,11 +1458,7 @@ hull v0.1.4  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
             <ul class="space-y-3 text-sm text-mute-400 leading-relaxed">
               <li class="flex gap-2">
                 <span class="text-mute-500 mt-0.5">&ndash;</span>
-                <span><strong class="text-paper-100">Post-install binary integrity is out of scope.</strong> The signature chain protects the bytes from publisher to disk. Once <code class="text-paper-100 text-[0.78rem]">hull</code> is on your machine, defending the binary against an attacker with local write access is the OS&rsquo;s job (signed system updates, FIM, SELinux/AppArmor). Reproducible builds (Phase 9) make the bytes-on-disk cross-checkable against the published source.</span>
-              </li>
-              <li class="flex gap-2">
-                <span class="text-mute-500 mt-0.5">&ndash;</span>
-                <span><strong class="text-paper-100">No reproducible builds.</strong> The signature proves the binary <em>was</em> the one the developer published. It doesn&rsquo;t prove the developer didn&rsquo;t sneak custom native code in. Reproducible builds + a trusted rebuild service close this; Phase 9 on the roadmap.</span>
+                <span><strong class="text-paper-100">Post-install binary integrity is out of scope.</strong> The signature chain protects the bytes from publisher to disk. Once <code class="text-paper-100 text-[0.78rem]">hull</code> is on your machine, defending the binary against an attacker with local write access is the OS&rsquo;s job (signed system updates, FIM, SELinux/AppArmor). Reproducible builds (<code class="text-paper-100 text-[0.78rem]">make reproducible-check</code>, CI-gated) make the bytes-on-disk cross-checkable against the published source.</span>
               </li>
               <li class="flex gap-2">
                 <span class="text-mute-500 mt-0.5">&ndash;</span>

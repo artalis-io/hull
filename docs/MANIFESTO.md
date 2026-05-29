@@ -105,7 +105,12 @@ Four core beliefs:
 - **Ship as a file**. One binary, runs on any OS, no installer, no runtime, no admin privileges
 - **Built-in licensing**. Ed25519 signed keys, offline verification, tax-ID binding for compliance
 - **Digital signatures**. Platform and app signatures prove integrity and authorship
-- **Reproducible builds**. `hull build` is deterministic: same source + same hull version + same output path = byte-identical binary. Gated in CI via `make reproducible-check` on Linux; verified locally on macOS as well. (Note on same-path: macOS `ld64` hashes the output path into LC_UUID, so the test builds to the same path twice and snapshots between; that's the right question to ask anyway, since end-users build to a known target name.) `make self-build` separately verifies hull is self-hostable across all platforms.
+- **Reproducible builds**. Three independent properties, all CI-gated on Linux and verified locally on macOS:
+  1. **`make` is deterministic.** Same source tree → byte-identical `build/hull` between rebuilds.
+  2. **`hull build` is deterministic.** Same source + same hull version → byte-identical app binary (built to the same output path; macOS `ld64` hashes output path into LC_UUID, so the test snapshots between rebuilds to the same path — which is the right question to ask anyway, since end-users build to a known target name).
+  3. **`make self-build` proves hull is self-hostable.** Hull can build hull2 can build hull3 across all platforms.
+
+  The three together close the "verifiable provenance" loop: anyone with the source can rebuild bit-for-bit, and anyone with hull can rebuild any app bit-for-bit. Vendored `ar` archives are kept deterministic via `ZERO_AR_DATE=1`; system linker defaults (`--build-id=sha1` on Linux, path-hashed LC_UUID on macOS) provide content-addressed identifiers without further flags.
 
 ## Thesis
 

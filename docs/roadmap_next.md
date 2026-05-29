@@ -90,30 +90,67 @@ buyers (Lisa-the-Defense-Contractor persona) buy this directly.
 
 ### 0.2 Byte-reproducible builds  ✅ Shipped
 
-`make reproducible-check` is gated in CI on Linux and verified
-locally on macOS. Both pass for same source + same hull version +
-same output path.
+Three reproducibility properties, all CI-gated on Linux and
+verified locally on macOS:
 
-The investigation that got us here is worth recording for posterity:
-an earlier audit-round attempt at this concluded (wrongly) that
-macOS LC_UUID was unfixable and Linux ar-mtimes were a separate
-blocker. Both were red herrings. The actual root cause of the
-"~47 bytes differ per build" we kept observing was a test
-methodology bug: the test built to two different output paths
-(`/tmp/.../app1` and `/tmp/.../app2`), and macOS `ld64` hashes the
-output PATH into the LC_UUID. Identical inputs to different paths
-→ different UUIDs → "different" binaries, even though the link
-logic was already deterministic.
+1. `make` produces a byte-identical `build/hull` from the same
+   source tree, between rebuilds.
+2. `hull build` produces a byte-identical app binary from the same
+   source + same hull version (built to the same output path; see
+   below on why path matters).
+3. `make self-build` proves hull is self-hostable across all
+   platforms (hull builds hull2 builds hull3).
 
-Fix was a one-line change to `Makefile`'s `reproducible-check`
-target: build to the same path twice, snapshot between, then cmp.
-Both platforms now pass. ar -D and LC_UUID flag hacks are not
-needed.
+Investigation arc — recorded for posterity because the wrong turns
+were instructive:
 
-Lesson learned: when an audit finding hinges on a test result,
-verify the test's methodology before declaring the underlying
-system broken. Multiple commits chased phantom issues here before
-the path-hash detail was discovered.
+- Initial assumption: linker-embedded entropy (random LC_UUID on
+  macOS, random Build-ID GUID on Linux) was the blocker.
+  Wrong on both counts.
+- Tried `-Wl,-no_uuid` on macOS — broke binary (modern dyld
+  REQUIRES LC_UUID, aborts with "missing LC_UUID load command").
+- Tried `-Wl,--build-id=none` in `hull build` link path — broke
+  test_compiler's link tests (TCC backend delegates to system
+  sys_link).
+- Tried `ZERO_AR_DATE=1` for macOS ar mtimes — made vendored
+  archives deterministic, but the final-link delta persisted.
+- Real macOS finding: `ld64` hashes the **output path** into
+  LC_UUID. Same input + same output path → same LC_UUID. The
+  "~47 bytes differ" the test reported was because it built to
+  two different output paths. Fix: same-path methodology.
+- Real Linux finding: `hull build` creates a random tempdir per
+  invocation (`/tmp/hull_XXXXXX/`). On Linux, the .o file's
+  embedded source-name (STT_FILE symbol) hashes into GNU ld's
+  Build-ID — different tempdir → different .o → different
+  Build-ID → different binary. Fix: `-ffile-prefix-map=<srcdir>=.`
+  in `sys_compile` to strip the tempdir from .o content. Also
+  forces `--compiler=system` in the test because TCC doesn't have
+  the equivalent flag (its determinism story is a smaller
+  follow-up).
+- libhull_platform.a was non-reproducible across rebuilds: BSD ar
+  on macOS embeds mtimes by default. Fix: `export ZERO_AR_DATE := 1`
+  in Hull's Makefile (no-op on Linux where GNU ar is already
+  deterministic by distro default; effective on macOS).
+
+Total: at least 6 commits across two audit rounds chasing this.
+Final state: three CI gates, all green, MANIFESTO claim true at
+all three layers.
+
+**Lesson learned (the meta-one):** when an audit finding hinges on
+a test result, verify the test's METHODOLOGY before declaring the
+underlying system broken. The "macOS LC_UUID is unfixable" and
+"Linux ar mtimes are the blocker" theories were both produced by
+tests with subtle methodology bugs (wrong output paths, ignored
+flags). Real determinism investigation needs same-input + same-
+operation comparison; anything else measures the test, not the
+system.
+
+**TCC follow-up (minor):** the `--compiler=tcc` codepath still has
+the tempdir-in-.o issue because TCC doesn't support
+`-ffile-prefix-map`. The reproducibility CI test sidesteps this
+with `--compiler=system`, which is the documented production path.
+Closing TCC determinism would need either a TCC patch or a
+post-compile path-strip pass.
 
 ---
 

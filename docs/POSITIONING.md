@@ -130,15 +130,14 @@ when the audience asks; don't lead with them.
   correct for the load-bearing capabilities; pedantic readers will
   note the env-var nuance.
 
-- **"Reproducible builds"** holds end-to-end: `hull build` is
-  byte-deterministic for same source + same hull version + same
-  output path. Gated in CI via `make reproducible-check`. One
-  methodology caveat to keep in mind when verifying: macOS `ld64`
-  hashes the output path into LC_UUID, so building the same source
-  to two different paths yields different UUIDs even though the
-  link logic is deterministic. The CI test builds to the same path
-  twice and snapshots between, which is the right question to ask
-  (end-users build to a known target name, not random paths).
+- **"Reproducible builds"** holds at three layers, all CI-gated on
+  Linux: (1) `make` produces a byte-identical `build/hull` from the
+  same source, (2) `hull build` produces a byte-identical app binary
+  from the same source + same hull version, (3) `make self-build`
+  proves hull is self-hostable. Same-path caveat for macOS: `ld64`
+  hashes the output path into LC_UUID, so the test builds to the
+  same path twice and snapshots between. End-users always build to
+  a known target name anyway, so this matches real usage.
 
 ## The asymmetry to always restate
 

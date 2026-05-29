@@ -90,29 +90,25 @@ ifndef COSMO
     LDFLAGS += -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack
   endif
 
-  # Reproducibility: strip linker-embedded entropy that makes otherwise-
-  # identical builds differ byte-for-byte.
-  #
-  # Linux: `ld` embeds a random Build-ID GUID by default. --build-id=none
-  # suppresses it. Safe — Linux executables don't require Build-ID at
-  # runtime, only debuggers/crash-reporters use it.
-  #
-  # macOS: `ld64` embeds a random LC_UUID per link. We CANNOT suppress
-  # it: modern dyld requires LC_UUID to be present and aborts with
-  # "missing LC_UUID load command" on Apple Silicon if -no_uuid is used.
-  # Apple's intended path for reproducible macOS builds is to feed the
-  # linker deterministic inputs (no embedded timestamps) so it produces
-  # a content-addressed LC_UUID. That requires upstream work in vendored
-  # ar invocations (Keel, mbedTLS, etc. — all use `ar rcs` without `D`).
-  # Tracked in roadmap_next.md.
-  #
-  # Net: `make reproducible-check` is reliable on Linux; macOS builds
-  # currently differ by ~47 bytes per link (16 LC_UUID + 34 downstream
-  # code-sig data). CI gate runs on ubuntu-latest, so the gate works.
-  ifeq ($(UNAME_S),Linux)
-    LDFLAGS += -Wl,--build-id=none
-  endif
+  # (Earlier audit rounds added `-Wl,--build-id=none` here under the
+  # wrong theory that Linux Build-ID was random. Reality: GNU ld's
+  # default `--build-id=sha1` is content-addressed — identical inputs
+  # produce identical Build-IDs. Keeping the default preserves the
+  # Build-ID for debuggers/crash reporters without sacrificing
+  # reproducibility. Same applies to macOS LC_UUID: deterministic given
+  # same output path + same input content. See roadmap_next.md §0.2 for
+  # the full investigation arc.)
 endif
+
+# Reproducibility: deterministic ar archives. Without this, ar embeds
+# the mtime + uid + gid of each member, so `libhull_platform.a` and
+# `libkeel.a` differ between builds and the final link inherits the
+# delta. GNU ar accepts the `D` flag for this; BSD ar (macOS) respects
+# the `ZERO_AR_DATE=1` env var. Exporting it covers both via the
+# shared toolchain envelope; harmless when the tool already defaults
+# to deterministic (modern binutils does, with
+# --enable-deterministic-archives configured at distro level).
+export ZERO_AR_DATE := 1
 
 # Build mode
 ifdef DEBUG
