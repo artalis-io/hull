@@ -23,6 +23,7 @@
 
 #include "hull/commands/agent.h"
 #include "hull/agent_lib.h"
+#include "hull/sbom.h"
 #include "hull/tool.h"
 
 #include <stdio.h>
@@ -752,6 +753,12 @@ int hl_cmd_agent(int argc, char **argv, const HlCommandEnv *env)
      * Agents on CLI-flavor builds can still see the registry; the install
      * command itself is the only thing gated by HTTP_CLIENT. */
     if (strcmp(sub, "tools") == 0)        return cmd_tools_sub(sub_argc, sub_argv);
+    /* SBOM. Same data as `hull sbom --format=json`, no app_dir argument.
+     * Independent of capability layer; pure compile-time data. */
+    if (strcmp(sub, "sbom") == 0) {
+        (void)sub_argc; (void)sub_argv;
+        return hl_sbom_format(HL_SBOM_JSON, stdout) == 0 ? 0 : 1;
+    }
     /* Composite project summary — one call to orient an agent. */
     if (strcmp(sub, "overview") == 0)     return cmd_overview(sub_argc, sub_argv);
 #ifdef HL_ENABLE_DB

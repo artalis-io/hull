@@ -100,7 +100,7 @@ when the audience asks; don't lead with them.
 - **"No telemetry, no phone-home"** is true at runtime: a Hull app
   serving traffic never initiates outbound network calls except those
   the manifest's `hosts` allowlist explicitly permits. Two CLI
-  commands DO make explicit user-invoked network calls — `hull update`
+  commands DO make explicit user-invoked network calls. `hull update`
   (downloads release artifacts from GitHub) and `hull tools install`
   (downloads optional tools from the same release). Both are user-
   initiated, both use the embedded Mozilla CA bundle, both verify
@@ -131,13 +131,14 @@ when the audience asks; don't lead with them.
   note the env-var nuance.
 
 - **"Reproducible builds"** holds at three layers, all CI-gated on
-  Linux: (1) `make` produces a byte-identical `build/hull` from the
-  same source, (2) `hull build` produces a byte-identical app binary
-  from the same source + same hull version, (3) `make self-build`
-  proves hull is self-hostable. Same-path caveat for macOS: `ld64`
-  hashes the output path into LC_UUID, so the test builds to the
-  same path twice and snapshots between. End-users always build to
-  a known target name anyway, so this matches real usage.
+  both Linux and macOS: (1) `make` produces a byte-identical
+  `build/hull` from the same source, (2) `hull build` produces a
+  byte-identical app binary from the same source + same hull version,
+  (3) `make self-build` proves hull is self-hostable. Same-path
+  methodology for macOS: `ld64` hashes the output path into LC_UUID,
+  so the test builds to the same path twice and snapshots between.
+  End-users always build to a known target name anyway, so this
+  matches real usage.
 
 ## The asymmetry to always restate
 

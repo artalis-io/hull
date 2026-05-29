@@ -629,8 +629,8 @@ hull verify [--no-verify-platform] [--platform-key <file|url>] \
 
 ### 7.1. Byte-reproducible builds (shipped)
 
-CI-gated on Linux via `make reproducible-check`; verified locally
-on macOS. Three independent properties:
+CI-gated on both Linux and macOS via `make reproducible-check`.
+Three independent properties:
 
 1. **`make` is deterministic.** Same source tree produces a
    byte-identical `build/hull` between rebuilds.

@@ -1440,7 +1440,11 @@ hull v0.1.4  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
               </li>
               <li class="flex gap-2">
                 <span class="text-accent mt-0.5">&check;</span>
-                <span><strong class="text-paper-100">Reproducible builds (Linux CI-gated).</strong> Same source + same hull version produces a byte-identical binary, verified per commit via <code class="text-paper-100 text-[0.78rem]">make reproducible-check</code>. Three layers gated: <code class="text-paper-100 text-[0.78rem]">make</code> itself, <code class="text-paper-100 text-[0.78rem]">hull build</code> output, and the <code class="text-paper-100 text-[0.78rem]">make self-build</code> bootstrap chain. Anyone with the source can rebuild the binary they downloaded and prove its bytes match.</span>
+                <span><strong class="text-paper-100">Reproducible builds (Linux + macOS CI-gated).</strong> Same source + same hull version produces a byte-identical binary, verified per commit via <code class="text-paper-100 text-[0.78rem]">make reproducible-check</code>. Three layers gated: <code class="text-paper-100 text-[0.78rem]">make</code> itself, <code class="text-paper-100 text-[0.78rem]">hull build</code> output, and the <code class="text-paper-100 text-[0.78rem]">make self-build</code> bootstrap chain. Anyone with the source can rebuild the binary they downloaded and prove its bytes match.</span>
+              </li>
+              <li class="flex gap-2">
+                <span class="text-accent mt-0.5">&check;</span>
+                <span><strong class="text-paper-100">Live SBOM (<code class="text-paper-100 text-[0.78rem]">hull sbom</code>).</strong> Every binary self-describes its actual vendored contents. Submodule SHAs baked in at build time, snapshot versions in a static table, build-flag gating means a compute-only build correctly omits SQLite. Four output formats: human / JSON / CycloneDX 1.5 / SPDX 2.3. Compliance pipelines feed straight in; the static doc is now a live verifiable command.</span>
               </li>
               <li class="flex gap-2">
                 <span class="text-accent mt-0.5">&check;</span>

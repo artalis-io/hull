@@ -1,0 +1,61 @@
+/*
+ * sbom.h. Software Bill of Materials surface for `hull sbom` / `hull agent sbom`.
+ *
+ * Read-only data exporter. Pure compile-time data table + a few output
+ * formatters. No runtime dependencies on db/fs/http/etc. capabilities.
+ * Self-contained. Orthogonal to the rest of the runtime.
+ *
+ * Data flow (per-build auto-refresh):
+ *   Makefile reads vendor submodule SHAs via `git -C vendor/<name> rev-parse HEAD`
+ *   and passes each as -DHULL_VENDOR_<NAME>_COMMIT="...". The static entry
+ *   table in sbom.c references those defines. Result: every binary
+ *   self-describes its actual vendored contents.
+ *
+ * Build-flag gating: entries are conditional on HL_ENABLE_* flags so a
+ *   `make HL_ENABLE_DB=0` build correctly omits SQLite from the SBOM.
+ *
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ */
+
+#ifndef HL_SBOM_H
+#define HL_SBOM_H
+
+#include <stdio.h>
+#include <stddef.h>
+
+/* Output formats. */
+typedef enum {
+    HL_SBOM_HUMAN = 0,   /* default: ANSI-ish table mirroring LICENSING.md */
+    HL_SBOM_JSON,        /* flat array; also what `hull agent sbom` returns */
+    HL_SBOM_CYCLONEDX,   /* CycloneDX 1.5 JSON; NTIA-aligned */
+    HL_SBOM_SPDX,        /* SPDX 2.3 JSON */
+} HlSbomFormat;
+
+/* Per-component entry. All string pointers are static; never freed. */
+typedef struct {
+    const char *name;          /* e.g. "keel", "hull", "Lua 5.4" */
+    const char *version;       /* semver, "n/a", or "" if unknown */
+    const char *commit;        /* git SHA at build time, or "" if not vendored */
+    const char *license_spdx;  /* SPDX identifier, e.g. "MIT", "AGPL-3.0-or-later" */
+    const char *url;           /* upstream source URL */
+    const char *role;          /* one-line role in Hull, e.g. "HTTP server" */
+    /* SHA-256 of an embedded blob (CA bundle, TCC bytes, etc.) computed
+     * at runtime from the actual bytes. Returns a static hex string
+     * (cached on first call) or NULL if no embedded blob. */
+    const char *(*embedded_blob_sha256)(void);
+} HlSbomEntry;
+
+/* Returns a pointer to the static entry table. Sets *count to its length.
+ * Build-flag gating (HL_ENABLE_*) is applied at compile time.
+ * The returned pointer is valid for the lifetime of the process. */
+const HlSbomEntry *hl_sbom_entries(size_t *count);
+
+/* Format the SBOM and write to `fp`. Returns 0 on success, -1 on error.
+ * Errors are printed to stderr. */
+int hl_sbom_format(HlSbomFormat format, FILE *fp);
+
+/* Parse a format string. Returns the enum value or -1 if unknown.
+ * Accepted: "human", "json", "cyclonedx", "spdx". */
+int hl_sbom_parse_format(const char *str);
+
+#endif /* HL_SBOM_H */
