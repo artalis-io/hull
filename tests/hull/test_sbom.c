@@ -92,15 +92,24 @@ UTEST(sbom, parse_format_rejects_unknown)
 
 /* ── Format output: helper to capture to memory ───────────────────── */
 
+/* Capture sbom output to a heap string. Uses tmpfile()/ftell()/fread()
+ * rather than open_memstream() because open_memstream is a GNU/POSIX-2008
+ * extension not declared in cosmocc's <stdio.h>. tmpfile() + ftell() +
+ * fread() is C89 and works everywhere Hull targets. */
 static char *format_to_string(HlSbomFormat fmt)
 {
-    char *buf = NULL;
-    size_t size = 0;
-    FILE *fp = open_memstream(&buf, &size);
+    FILE *fp = tmpfile();
     if (!fp) return NULL;
-    int rc = hl_sbom_format(fmt, fp);
+    if (hl_sbom_format(fmt, fp) != 0) { fclose(fp); return NULL; }
+    if (fflush(fp) != 0) { fclose(fp); return NULL; }
+    long size = ftell(fp);
+    if (size < 0) { fclose(fp); return NULL; }
+    rewind(fp);
+    char *buf = malloc((size_t)size + 1);
+    if (!buf) { fclose(fp); return NULL; }
+    size_t n = fread(buf, 1, (size_t)size, fp);
+    buf[n] = '\0';
     fclose(fp);
-    if (rc != 0) { free(buf); return NULL; }
     return buf;
 }
 
@@ -241,14 +250,10 @@ UTEST(sbom, format_rejects_unknown_enum)
     /* Defensive: an out-of-range enum value should error, not crash.
      * Cast through int to bypass enum type-check; production callers
      * shouldn't do this, but the function shouldn't trust them. */
-    char *buf = NULL; size_t size = 0;
-    FILE *fp = open_memstream(&buf, &size);
-    /* ASSERT_TRUE instead of ASSERT_NE(fp, NULL): cosmocc -Wpointer-arith
-     * rejects utest.h's _Generic type-printer when it sees FILE*. */
+    FILE *fp = tmpfile();
     ASSERT_TRUE(fp != NULL);
     int rc = hl_sbom_format((HlSbomFormat)999, fp);
     fclose(fp);
-    free(buf);
     ASSERT_EQ(rc, -1);
 }
 
