@@ -24,7 +24,16 @@ For completed historical roadmaps see [`archive/roadmaps/`](archive/roadmaps/).
 ## 0. Audit-pass follow-ups (small, named separately because they came
 ##    out of cross-surface positioning audits, not feature planning)
 
-### 0.1 `hull sbom` subcommand. Vendored-component manifest as a live command
+### 0.1 `hull sbom` subcommand. Vendored-component manifest as a live command  ✅ Shipped (v0.1.5)
+
+Shipped in v0.1.5 substantially as designed below: `hull sbom` with
+four formats (human / json / cyclonedx / spdx), `hull agent sbom`
+alias for the JSON shape, per-build auto-refresh via Makefile
+`-D` defines, build-flag gating (compute-only builds omit SQLite),
+runtime SHA-256 over embedded blobs (Mozilla CA bundle, cached),
+and the orthogonality canary in the test link. 16 test cases.
+
+Below is the original design note, kept for context.
 
 Convert the static vendored-dependency table in `LICENSING.md` into a
 live, verifiable command. Closes the loop for compliance buyers
@@ -90,8 +99,8 @@ buyers (Lisa-the-Defense-Contractor persona) buy this directly.
 
 ### 0.2 Byte-reproducible builds  ✅ Shipped
 
-Three reproducibility properties, all CI-gated on Linux and
-verified locally on macOS:
+Three reproducibility properties, all CI-gated on both Linux and
+macOS as of v0.1.5:
 
 1. `make` produces a byte-identical `build/hull` from the same
    source tree, between rebuilds.
@@ -151,6 +160,188 @@ the tempdir-in-.o issue because TCC doesn't support
 with `--compiler=system`, which is the documented production path.
 Closing TCC determinism would need either a TCC patch or a
 post-compile path-strip pass.
+
+---
+
+### 0.3 Trust-chain hardening (post-v0.1.5 gap analysis)
+
+The v0.1.5 trust story is stronger than 99% of dev-tool shipping
+today: reproducible builds on Linux + macOS, three-layer Ed25519
+signature chain, live SBOM, embedded CA bundle with runtime hash,
+`hull update` with sig + SHA-256 verification, browser verifier.
+
+These items separate "verifiable" from "verifiable against a
+serious adversary." Procurement / compliance / sovereign-deployment
+buyers WILL ask about most of them in the first conversation, so
+prioritise accordingly. Items are grouped by load-bearing severity,
+not implementation cost.
+
+#### Tier 1. Load-bearing (the trust claim depends on these)
+
+- [ ] **0.3.1. Pin the CI build environment.** `ubuntu-latest` and
+  `macos-latest` are mutable labels. GitHub rotates the runner
+  image without notice. Reproducibility passes today against
+  today's image. Six months from now, a rebuild of v0.1.5 source
+  against the new image may not reproduce. **Fix:** at minimum pin
+  to a specific runner version (e.g. `ubuntu-24.04`-with-image-SHA),
+  ideally move to a digest-pinned Docker base or a Nix flake. Without
+  this, "reproducible" has a sliding expiry date and the
+  reproducibility-from-clean-room claim is only true in a narrow
+  time window. **Effort:** low for runner-pin; medium for Docker
+  base; high for Nix flake. Start with runner-pin.
+
+- [ ] **0.3.2. Bootstrap trust path.** The `curl ... | sh` install
+  is TOFU on top of TLS to `raw.githubusercontent.com` + GitHub
+  account integrity + `install.sh` content trust. A new user has
+  no out-of-band way to verify they got the real installer before
+  running it. Once installed, the chain is tight; getting there is
+  not. **Fix:** publish a detached PGP signature on `install.sh`
+  itself, or a Sigstore signature, with verification instructions
+  on gethull.dev. Chicken-and-egg: the verification path can't
+  require an existing hull. PGP via a well-known maintainer key
+  (or a Sigstore identity tied to gethull's GitHub) is the realistic
+  option. Document the "I don't trust GitHub: how do I verify
+  install.sh" path. **Effort:** medium. Mostly social-engineering
+  (key publication, KEYS file maintenance, docs) rather than code.
+
+- [ ] **0.3.3. Move release signing off GitHub Actions secrets.**
+  The release private key currently lives encrypted in GitHub's
+  KMS as a workflow secret. Compromise of the gethull GitHub org
+  gives an attacker the ability to sign arbitrary artifacts as
+  gethull. No HSM, no hardware token, no offline ceremony, no
+  multi-party signing. **Fix progression:** (a) document the
+  current threat model honestly in `release_signing.md`; (b) move
+  to a YubiKey OpenPGP / Ed25519 token operated by a person, with
+  CI just preparing the manifest for human-attested signing; (c)
+  multi-party signing for major releases. **Effort:** (a) hours,
+  (b) days + operational discipline, (c) weeks + organisational
+  process. Even (a) materially improves the story.
+
+- [ ] **0.3.4. Publish to a transparency log.** Without an
+  append-only public log of `(release_tag, commit_sha,
+  manifest_sha256, signature)`, a future key compromise could
+  backdate releases or sign retroactive artifacts and there's no
+  proof-of-non-existence. **Fix:** publish each release triple to
+  Sigstore's free public Rekor log on tag. Hull's own embedded
+  pubkey continues to sign; Rekor provides the "we couldn't have
+  signed this earlier" timestamp. **Effort:** low. One workflow
+  step using `cosign sign-blob --rekor-url`.
+
+#### Tier 2. Industry standards Hull doesn't meet yet
+
+- [ ] **0.3.5. SLSA build provenance.** GitHub Actions natively
+  supports `actions/attest-build-provenance` which produces a
+  Sigstore-signed attestation tying a binary to a specific commit
+  + workflow run + runner image. This is free, requires no Hull
+  signing key, and gives anyone "GitHub built this from this
+  commit" without trusting gethull's own keys. **Fix:** add one
+  workflow step per release artifact. Publish attestations
+  alongside `hull.sha256.sig`. **Effort:** hours. Genuinely
+  low-hanging fruit and high credibility win.
+
+- [ ] **0.3.6. SHA-pin GitHub Actions invocations.** Workflows
+  use mutable tags (`actions/checkout@v4`, `actions/setup-node@v4`,
+  etc.). A compromised action publisher could ship code under the
+  existing tag and Hull's CI would silently pick it up. **Fix:**
+  pin every action invocation to a commit SHA. Dependabot supports
+  SHA-pinned actions natively and will PR updates. **Effort:** one
+  pass through `.github/workflows/*.yml`.
+
+- [ ] **0.3.7. Cosmo APE in the reproducibility matrix.** The
+  current `Reproducible build` job matrixes Linux + macOS only.
+  Cosmo is built and shipped (`hull-cosmo` is a release asset)
+  but its byte-reproducibility is untested. Either add Cosmo to
+  the matrix or explicitly document that Cosmo repro is out of
+  scope. **Effort:** medium. Cosmo's two-arch link adds
+  complexity; investigate whether `cosmocc` + `apelink` produce
+  deterministic output before committing.
+
+- [ ] **0.3.8. `hull verify-self` command.** A running hull binary
+  can be tampered with on disk. There's no built-in command to
+  verify the running binary against its own signed release
+  manifest. Today users have to manually `hull verify-release` +
+  `sha256sum` + manual hash compare. **Fix:** one subcommand that
+  reads its own argv[0] path, computes SHA-256, fetches (or uses
+  embedded) release manifest, verifies sig, compares hashes. Honest
+  errors if the running binary is local-dev (not in the manifest).
+  **Effort:** small. Reuses `release_io.{c,h}` plumbing.
+
+- [ ] **0.3.9. Sign the SBOM output.** `hull sbom` produces JSON
+  that's cryptographically unbounded. A tampered hull could lie
+  about its SBOM. **Fix:** two options, not mutually exclusive:
+  (a) publish `hull-<arch>.sbom.json` + `hull-<arch>.sbom.json.sig`
+  as release artifacts so the SBOM is independently verifiable; or
+  (b) include `hull_binary_sha256` and the release-signature
+  bytes inside the SBOM itself, so the SBOM output cross-references
+  the release manifest. Option (b) is more elegant; (a) is more
+  inspectable. Do both. **Effort:** small. Extends the static
+  entry table + adds a release-workflow step.
+
+- [ ] **0.3.10. Key rotation and revocation procedure.**
+  `docs/release_signing.md` describes how signing works but not
+  what happens when (not if) the release or platform key is
+  compromised. No documented rotation cadence, no kill-switch
+  process, no chain-of-trust progression where the next pubkey is
+  signed by the current pubkey. **Fix:** written rotation playbook
+  + ideally a built-in mechanism for hull to accept a successor
+  pubkey announcement signed by the current pubkey. Without this,
+  a compromise is recovery-by-public-statement, which is fragile.
+  **Effort:** medium for docs; high for the in-binary successor
+  mechanism.
+
+#### Tier 3. Polish (closes the loop but doesn't unblock claims)
+
+- [ ] **0.3.11. SBOM includes the hull binary's own SHA-256.**
+  Low-effort addition that lets `hull sbom` output self-verify
+  against the release manifest. Pair with 0.3.9. **Effort:** trivial.
+
+- [ ] **0.3.12. CPE strings in the SBOM.** CycloneDX supports
+  Common Platform Enumerators for automated CVE mapping.
+  Downstream scanners currently have to fuzzy-match component
+  names. **Fix:** add `cpe` field to the static entry table for
+  the major deps (`cpe:2.3:a:lua:lua:5.4:*:*:*:*:*:*:*` etc.).
+  **Effort:** small. One field per entry plus a CycloneDX
+  formatter line.
+
+- [ ] **0.3.13. Vendored static archives reproducibility check.**
+  The submodule SHA pin is trusted; nobody independently verifies
+  that rebuilding e.g. WAMR from `c3a78cd159e5` produces a
+  byte-identical `.a`. Probably fine for most deps, but currently
+  undocumented as either a goal or non-goal. **Fix:** either add
+  a per-vendor `make verify-vendor-repro` target or explicitly
+  document this as a non-goal. **Effort:** low for docs; medium
+  for full per-dep verification.
+
+- [ ] **0.3.14. Published build-environment manifest.** Specify
+  what ubuntu image, what Xcode version, what cosmocc commit, what
+  wgpu-native commit was used to build each release. Some of this
+  is in the SBOM now; the rest (Xcode, system libs at link time,
+  CI runner image version) isn't. **Fix:** dump a `BUILD_ENV.json`
+  alongside `hull.sha256` capturing the CI runner image SHA,
+  toolchain versions, and link-time system library versions.
+  Pairs with 0.3.1 and 0.3.5. **Effort:** small.
+
+- [ ] **0.3.15. Self-sovereignty fork playbook.** AGPL gives the
+  right; the docs don't tell you the steps. Document the
+  fork-and-rebrand procedure: rotate the two embedded pubkeys
+  (`HL_RELEASE_PUBKEY_HEX`, `HL_PLATFORM_PUBKEY_HEX`), fork the
+  release workflow, replace the install URL, regenerate the
+  install.sh, run your own CI. The MANIFESTO claims the
+  self-sovereignty path; the docs should walk through it.
+  **Effort:** small`. `docs/fork_playbook.md` (~150 lines).
+
+**Priority ordering for execution:**
+
+1. Cheapest, highest immediate signal: 0.3.5 (SLSA provenance) +
+   0.3.6 (SHA-pin actions). Days of work, immediately auditable,
+   no design decisions. Do both before any Tier 1 item.
+2. Most credibility per dollar: 0.3.4 (transparency log) + 0.3.8
+   (`hull verify-self`). These close the "I have the binary" →
+   "I can prove what built it without trusting gethull" loop.
+3. Hardest but most important long-term: 0.3.3 (signing off
+   GitHub Actions secrets) + 0.3.1 (pin CI environment). These
+   are organisational/procedural changes more than code, and they
+   determine whether the trust story survives serious scrutiny.
 
 ---
 
