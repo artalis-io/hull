@@ -158,6 +158,12 @@ UTEST(sbom, format_cyclonedx_structure)
                   "must have components array");
     ASSERT_NE_MSG(strstr(out, "\"type\":\"library\""), NULL,
                   "components must be typed as library");
+    /* CPE strings present for the components that have one registered
+     * (currently lua, quickjs, sqlite, mbedtls, tinycc). The mbedTLS
+     * entry is unconditional in any build with HTTP enabled, so this
+     * assertion holds on the default test build. */
+    ASSERT_NE_MSG(strstr(out, "\"cpe\":\"cpe:2.3:a:arm:mbed_tls"), NULL,
+                  "CycloneDX must emit cpe for mbedTLS");
     free(out);
 }
 
@@ -297,7 +303,10 @@ UTEST(sbom, binary_sha256_present_when_path_set)
     FILE *fp = fdopen(fd, "wb");
     if (!fp) { close(fd); unlink(path); return; }
     const char *fixture = "hull-sbom-test-fixture";
-    fwrite(fixture, 1, strlen(fixture), fp);
+    size_t fixlen = strlen(fixture);
+    if (fwrite(fixture, 1, fixlen, fp) != fixlen) {
+        fclose(fp); unlink(path); return;
+    }
     fclose(fp);
 
     hl_sbom_set_binary_path(path);

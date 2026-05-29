@@ -31,7 +31,11 @@
 
 #define HL_SHA256_HEX_BUF 65U
 #define HL_VERIFY_SELF_PATH_MAX 4096U
-#define HL_VERIFY_SELF_READ_CHUNK 65536U
+/* Cap on the binary we'll hash for verify-self. Hull binaries are ~5-15 MB
+ * across all build flavors; 256 MiB is well past any plausible value and
+ * guards against accidentally hashing a giant file if --asset / argv[0]
+ * is mis-targeted. */
+#define HL_VERIFY_SELF_BINARY_MAX_BYTES (256U * 1024U * 1024U)
 
 #include "mbedtls/sha256.h"
 
@@ -96,30 +100,32 @@ static int read_file(const char *path, char **out_buf, size_t *out_len)
     return 0;
 }
 
-/* Streaming SHA-256 of the binary at @p path -> hex. */
+/* SHA-256 of the file at @p path -> hex. Uses one-shot mbedtls_sha256
+ * (same primitive as release_io's sha256_hex; MSan-verified). Reads the
+ * whole file into memory rather than streaming because MSan-instrumented
+ * mbedTLS misreports uninitialized context state through the
+ * _starts/_update/_finish API (see src/hull/sbom.c §0.3.11 fix for the
+ * same pattern). Hull binaries are bounded at ~15 MiB so the whole-file
+ * malloc is trivially OK. The MAX_BYTES cap guards mis-targeted paths. */
 static int sha256_file_hex(const char *path, char hex_out[HL_SHA256_HEX_BUF])
 {
     FILE *fp = fopen(path, "rb");
     if (!fp) return -1;
-
-    mbedtls_sha256_context ctx;
-    mbedtls_sha256_init(&ctx);
-    if (mbedtls_sha256_starts(&ctx, 0) != 0) {
-        mbedtls_sha256_free(&ctx); fclose(fp); return -1;
+    if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return -1; }
+    long sz = ftell(fp);
+    if (sz < 0 || (size_t)sz > HL_VERIFY_SELF_BINARY_MAX_BYTES) {
+        fclose(fp); return -1;
     }
-    unsigned char buf[HL_VERIFY_SELF_READ_CHUNK];
-    size_t n;
-    int io_ok = 1;
-    while ((n = fread(buf, 1, sizeof(buf), fp)) > 0) {
-        if (mbedtls_sha256_update(&ctx, buf, n) != 0) { io_ok = 0; break; }
-    }
-    if (io_ok && ferror(fp)) io_ok = 0;
+    rewind(fp);
+    unsigned char *buf = (unsigned char *)malloc((size_t)sz);
+    if (!buf) { fclose(fp); return -1; }
+    size_t got = fread(buf, 1, (size_t)sz, fp);
     fclose(fp);
-    if (!io_ok) { mbedtls_sha256_free(&ctx); return -1; }
+    if (got != (size_t)sz) { free(buf); return -1; }
 
     unsigned char digest[32];
-    int rc = mbedtls_sha256_finish(&ctx, digest);
-    mbedtls_sha256_free(&ctx);
+    int rc = mbedtls_sha256(buf, got, digest, 0);
+    free(buf);
     if (rc != 0) return -1;
 
     static const char hex[] = "0123456789abcdef";

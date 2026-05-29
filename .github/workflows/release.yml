@@ -587,16 +587,51 @@ jobs:
           ./hull-linux-x86_64 sbom --format=spdx      > hull.sbom.spdx.json
           ls -la hull.sbom.*
 
+      - name: Generate build-environment manifest
+        # §0.3.14. Capture the release-workflow runner identity, commit,
+        # and workflow-run URL into hull.build-env.json. Goes into
+        # hull.sha256 below so it inherits all three signature layers
+        # (Ed25519 + Sigstore + SLSA). Per-platform compile environment
+        # (cc version, runner image per matrix arch, build flags) is
+        # captured separately by the SLSA build-provenance attestation
+        # for each binary; query via:
+        #   gh attestation list --repo artalis-io/hull
+        # The note inside the JSON points consumers there. Full per-arch
+        # env capture in this file is §0.3.14b (deferred; needs each
+        # build-native matrix job to upload its own env artifact).
+        working-directory: dist
+        run: |
+          cat > hull.build-env.json <<EOF
+          {
+            "release_tag": "${GITHUB_REF_NAME}",
+            "commit_sha": "${GITHUB_SHA}",
+            "workflow_run_id": "${GITHUB_RUN_ID}",
+            "workflow_run_url": "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}",
+            "repository": "${GITHUB_REPOSITORY}",
+            "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "release_runner": {
+              "os": "${ImageOS:-unknown}",
+              "image_version": "${ImageVersion:-unknown}",
+              "runner_arch": "${RUNNER_ARCH:-unknown}",
+              "uname": "$(uname -srm)"
+            },
+            "per_binary_provenance_hint": "Per-platform build-runner details are recorded in the SLSA build-provenance attestation for each binary; query via 'gh attestation list --repo ${GITHUB_REPOSITORY}'."
+          }
+          EOF
+          cat hull.build-env.json
+
       - name: Compute SHA-256 checksums
         # `hull tools install <name>` looks up entries by exact asset
         # name in this manifest — keep the file list in sync with the
         # tool registry in src/hull/tools_install.c.
-        # SBOM files included here so they inherit the release signature.
+        # SBOM + build-env files included here so they inherit the
+        # release signature (Ed25519 + Sigstore + SLSA).
         working-directory: dist
         run: |
           sha256sum hull-cosmo hull-linux-x86_64 hull-linux-aarch64 hull-darwin-arm64 \
                     hull-wamrc-linux-x86_64 hull-wamrc-linux-aarch64 hull-wamrc-darwin-arm64 \
                     hull.sbom.json hull.sbom.cdx.json hull.sbom.spdx.json \
+                    hull.build-env.json \
                     > hull.sha256
           cat hull.sha256
 
@@ -669,6 +704,7 @@ jobs:
             dist/hull.sbom.json
             dist/hull.sbom.cdx.json
             dist/hull.sbom.spdx.json
+            dist/hull.build-env.json
 
       - name: Create GitHub release
         env:
@@ -687,6 +723,7 @@ jobs:
             dist/hull.sbom.json
             dist/hull.sbom.cdx.json
             dist/hull.sbom.spdx.json
+            dist/hull.build-env.json
             dist/hull.sha256.cosign.sig
             dist/hull.sha256.cosign.pem
           )

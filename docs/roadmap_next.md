@@ -18,6 +18,10 @@ For completed historical roadmaps see [`archive/roadmaps/`](archive/roadmaps/).
 - ✅ **`hull deploy`**. Dockerfile, systemd, fly.toml targets; `hull agent deploy` JSON readiness analysis.
 - ✅ **Extended `hull agent`**. 16 new subcommands (Phase 6) covering manifest preview, request preview, single-file validate, eval, schema-diff, sql-named, vfs/compute/gpu/perf/logs/template/compute-call. Wired into MCP. See [`agent_guide.md`](agent_guide.md) §5.
 - ✅ **v0.1.2 batch**. `hull tools install/list/uninstall` (first tool: wamrc), shared `release_io.{c,h}` extracted from `commands/update.c`, top-level `hull help`, audit fixes (OOB defense, JSON escape, fsync/close checks, constant-time SHA-256 compare), agent surface expansion (`hull agent tools/overview` + `agent context --list` + wamrc state in agent compute), six new opinionated context docs (orientation, quickstart × 3, gpu, tools), discoverability breadcrumbs in `hull --help` + bare-hull + install.sh, `build-wamrc` CI matrix. See [`../CHANGELOG.md#012`](../CHANGELOG.md).
+- ✅ **v0.1.3 batch**. Embedded release pubkey activated (`HL_RELEASE_PUBKEY_HEX` no longer the placeholder); `hull update` enforces signature verification with no warn-and-skip bypass. Platform-sig chain wire-format active (gethull-layer + per-app-layer split). Five-step pre-v0.1.0 release-gate process executed and documented. See [`../CHANGELOG.md#013`](../CHANGELOG.md).
+- ✅ **v0.1.4 batch (§3.1 + §3.2 + §3.3)**. Cosmo APE `hull build` works on Linux (sandbox unveils widened for cosmocc; `hl_compiler_select` auto-detects cosmocc; Makefile WAMR invoker selection reordered). `hull eject` and `hull sign-platform` work on installed binaries via auto-extracted embedded platform library. Platform-sign chain polish: agent JSON output, doctor reporting, four follow-ups. See [`../CHANGELOG.md#014`](../CHANGELOG.md).
+- ✅ **v0.1.5 batch**. `hull sbom` and `hull agent sbom` (four formats: human / JSON / CycloneDX 1.5 / SPDX 2.3), per-build auto-refresh via Makefile-injected submodule SHAs, build-flag-gated entries, runtime SHA-256 over embedded CA bundle. macOS reproducibility CI gate (was Linux-only with "verified locally on macOS" caveat; now `make reproducible-check` matrix-tested on both). `docs/POSITIONING.md` operational messaging guide (153 lines). Canonical thesis ("Code became disposable. Trust is not.") + descriptor unified across every Hull-mentioning surface. Site self-hosted (no third-party CDNs). OG card PNG variant. `LICENSING.md` vendored-dependency table. Em-dash sweep across 1100+ instances in all prose files. See [`../CHANGELOG.md#015`](../CHANGELOG.md).
+- ✅ **v0.1.6 batch (§0.3.4 + §0.3.5 + §0.3.6 + §0.3.8 + §0.3.9 + §0.3.11 + §0.3.15)**. Trust chain end-to-end verifiable three independent ways: (a) the existing Ed25519 chain (gethull keys), (b) Sigstore + Rekor transparency log entry per release (`cosign verify-blob`), (c) SLSA build-provenance attestation per binary (`gh attestation verify`). `hull verify-self` one-command binary verification. Signed SBOM published as release artifacts (`hull.sbom.json` / `.cdx.json` / `.spdx.json`) covered by all three signature layers. `binary_sha256` field in `hull sbom` output. All GitHub Actions invocations SHA-pinned. Fork playbook (`docs/fork_playbook.md`, 259 lines) with substantive "why most organisations shouldn't fork" framing. Closes 7 of 15 trust-chain hardening items in [§0.3](#03-trust-chain-hardening-post-v015-gap-analysis). See [`../CHANGELOG.md#016`](../CHANGELOG.md).
 
 ---
 
@@ -298,7 +302,7 @@ not implementation cost.
   in CycloneDX, and `SPDXRef-Package-hull-binary.checksums` in SPDX. Pair
   with 0.3.9 (sign the SBOM itself, still pending).
 
-- [ ] **0.3.12. CPE strings in the SBOM.** CycloneDX supports
+- [x] **0.3.12. CPE strings in the SBOM. ✅ Shipped.** CycloneDX supports
   Common Platform Enumerators for automated CVE mapping.
   Downstream scanners currently have to fuzzy-match component
   names. **Fix:** add `cpe` field to the static entry table for
@@ -315,7 +319,7 @@ not implementation cost.
   document this as a non-goal. **Effort:** low for docs; medium
   for full per-dep verification.
 
-- [ ] **0.3.14. Published build-environment manifest.** Specify
+- [x] **0.3.14. Published build-environment manifest. ✅ Partial.** Specify
   what ubuntu image, what Xcode version, what cosmocc commit, what
   wgpu-native commit was used to build each release. Some of this
   is in the SBOM now; the rest (Xcode, system libs at link time,

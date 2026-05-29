@@ -39,6 +39,13 @@ typedef struct {
     const char *license_spdx;  /* SPDX identifier, e.g. "MIT", "AGPL-3.0-or-later" */
     const char *url;           /* upstream source URL */
     const char *role;          /* one-line role in Hull, e.g. "HTTP server" */
+    /* Common Platform Enumerator (CPE) 2.3 string for CVE-database
+     * cross-reference. NULL for components without a registered CPE
+     * (Hull itself, project-internal vendors, ad-hoc snapshots). When
+     * emitted, written into CycloneDX output as the component's `cpe`
+     * field; downstream scanners (Dependency-Track, Trivy, etc.)
+     * consume CPE for automated vulnerability matching. */
+    const char *cpe;
     /* SHA-256 of an embedded blob (CA bundle, TCC bytes, etc.) computed
      * at runtime from the actual bytes. Returns a static hex string
      * (cached on first call) or NULL if no embedded blob. */

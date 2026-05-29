@@ -198,6 +198,7 @@ static const HlSbomEntry sbom_entries[] = {
         .license_spdx = "MIT",
         .url = "https://www.lua.org/",
         .role = "application scripting runtime",
+        .cpe = "cpe:2.3:a:lua:lua:5.4:*:*:*:*:*:*:*",
         .embedded_blob_sha256 = NULL,
     },
 #endif
@@ -211,6 +212,7 @@ static const HlSbomEntry sbom_entries[] = {
         .license_spdx = "MIT",
         .url = "https://bellard.org/quickjs/",
         .role = "JavaScript (ES2023) runtime",
+        .cpe = "cpe:2.3:a:bellard:quickjs:*:*:*:*:*:*:*:*",
         .embedded_blob_sha256 = NULL,
     },
 #endif
@@ -224,6 +226,7 @@ static const HlSbomEntry sbom_entries[] = {
         .license_spdx = "blessing",   /* SQLite uses "Public Domain" / blessing */
         .url = "https://sqlite.org/",
         .role = "embedded database",
+        .cpe = "cpe:2.3:a:sqlite:sqlite:*:*:*:*:*:*:*:*",
         .embedded_blob_sha256 = NULL,
     },
 #endif
@@ -236,6 +239,7 @@ static const HlSbomEntry sbom_entries[] = {
         .license_spdx = "Apache-2.0",
         .url = "https://github.com/Mbed-TLS/mbedtls",
         .role = "TLS client + crypto primitives",
+        .cpe = "cpe:2.3:a:arm:mbed_tls:*:*:*:*:*:*:*:*",
         .embedded_blob_sha256 = NULL,
     },
 
@@ -340,6 +344,7 @@ static const HlSbomEntry sbom_entries[] = {
         .license_spdx = "LGPL-2.1-or-later",
         .url = "https://github.com/TinyCC/tinycc",
         .role = "embedded C compiler for `hull build`",
+        .cpe = "cpe:2.3:a:tinycc:tinycc:*:*:*:*:*:*:*:*",
         .embedded_blob_sha256 = NULL,
     },
 #endif
@@ -477,6 +482,9 @@ static void format_json(FILE *fp)
         fputs(",\"license_spdx\":", fp); json_escape(fp, e->license_spdx);
         fputs(",\"url\":", fp); json_escape(fp, e->url);
         fputs(",\"role\":", fp); json_escape(fp, e->role);
+        if (e->cpe && e->cpe[0]) {
+            fputs(",\"cpe\":", fp); json_escape(fp, e->cpe);
+        }
         if (e->embedded_blob_sha256) {
             const char *sha = e->embedded_blob_sha256();
             fputs(",\"embedded_blob_sha256\":", fp);
@@ -529,6 +537,12 @@ static void format_cyclonedx(FILE *fp)
         fputs(",\"externalReferences\":[{\"type\":\"website\",\"url\":", fp);
         json_escape(fp, e->url);
         fputs("}]", fp);
+        /* CycloneDX `cpe` is a top-level component field used by
+         * downstream scanners (Dependency-Track, Trivy, etc.) to
+         * auto-match against CVE feeds. Emit when known. */
+        if (e->cpe && e->cpe[0]) {
+            fputs(",\"cpe\":", fp); json_escape(fp, e->cpe);
+        }
         if (e->embedded_blob_sha256) {
             const char *sha = e->embedded_blob_sha256();
             if (sha) {
