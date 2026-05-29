@@ -42,7 +42,11 @@ static void usage(FILE *fp)
 
 int hl_cmd_sbom(int argc, char **argv, const HlCommandEnv *env)
 {
-    (void)env;
+    /* Make the running binary's path available to the SBOM module so it
+     * can emit binary_sha256 in json/cyclonedx/spdx output. argv[0] is
+     * usually a usable path (./hull, /usr/local/bin/hull, etc.); if it's
+     * just "hull" via $PATH lookup the SHA is silently omitted. */
+    if (env && env->hull_exe) hl_sbom_set_binary_path(env->hull_exe);
 
     HlSbomFormat fmt = HL_SBOM_HUMAN;
     for (int i = 1; i < argc; i++) {

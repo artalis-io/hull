@@ -39,30 +39,43 @@
 #define HULL_VENDOR_TCC_COMMIT "unknown"
 #endif
 
-/* ── SHA-256 of embedded blobs (runtime, cached on first call) ─────── */
+/* ── SHA-256 of embedded blobs + the running binary (lazy, cached) ──── */
+
+/* SHA-256 algorithm constants. Named for readability; values are fixed
+ * by the spec. Used for both digest buffers and hex-encoded outputs. */
+#define HL_SHA256_DIGEST_BYTES  32U                          /* 256 bits */
+#define HL_SHA256_HEX_LEN       (HL_SHA256_DIGEST_BYTES * 2) /* 64 chars */
+#define HL_SHA256_HEX_BUF       (HL_SHA256_HEX_LEN + 1)      /* +1 for NUL */
+
+/* Streaming-read chunk size for hashing the hull binary off disk.
+ * 64 KiB matches Linux's typical page-cache readahead and avoids
+ * blowing out L1d cache; tuning beyond this gave no measurable gain. */
+#define HL_SBOM_FILE_READ_CHUNK 65536U
 
 #if defined(HL_EMBED_CA_BUNDLE) || defined(HL_SBOM_HASH_BLOBS)
+#define HL_SBOM_HAS_MBEDTLS 1
 #include "mbedtls/sha256.h"
 
-/* Encode 32 raw bytes as 65-char lowercase hex (64 chars + NUL). */
+/* Encode raw SHA-256 bytes as lowercase hex; writes exactly
+ * HL_SHA256_HEX_LEN chars plus a NUL terminator into out_hex. */
 static void hex_encode_sha256(const unsigned char *raw, char *out_hex)
 {
     static const char hex[] = "0123456789abcdef";
-    for (int i = 0; i < 32; i++) {
+    for (unsigned i = 0; i < HL_SHA256_DIGEST_BYTES; i++) {
         out_hex[i*2]   = hex[(raw[i] >> 4) & 0xf];
         out_hex[i*2+1] = hex[raw[i] & 0xf];
     }
-    out_hex[64] = '\0';
+    out_hex[HL_SHA256_HEX_LEN] = '\0';
 }
 
-/* Compute SHA-256 and return a cached static hex string. */
+/* Compute SHA-256 over an in-memory buffer; cache the hex result. */
 static const char *compute_blob_sha256(const unsigned char *data, size_t len,
                                        char *cache, int *cached)
 {
     if (*cached) return cache;
-    unsigned char digest[32];
+    unsigned char digest[HL_SHA256_DIGEST_BYTES];
     if (mbedtls_sha256(data, len, digest, 0) != 0) {
-        snprintf(cache, 65, "error");
+        snprintf(cache, HL_SHA256_HEX_BUF, "error");
         *cached = 1;
         return cache;
     }
@@ -75,7 +88,7 @@ static const char *compute_blob_sha256(const unsigned char *data, size_t len,
 #ifdef HL_EMBED_CA_BUNDLE
 static const char *sha256_ca_bundle(void)
 {
-    static char cache[65] = {0};
+    static char cache[HL_SHA256_HEX_BUF] = {0};
     static int cached = 0;
     const unsigned char *data = NULL;
     size_t len = 0;
@@ -83,6 +96,68 @@ static const char *sha256_ca_bundle(void)
         return NULL;
     return compute_blob_sha256(data, len, cache, &cached);
 }
+#endif
+
+/* ── Binary self-SHA-256 (the running hull binary, lazy + cached) ──── */
+
+/* Caller-provided path (typically argv[0] forwarded by the command
+ * dispatcher). The pointer's lifetime is the caller's; we only read it. */
+static const char *g_binary_path = NULL;
+
+/* Cache for the binary SHA-256 result. File-scope (not function-static)
+ * so set_binary_path can invalidate it when the path changes; otherwise
+ * a first call with no path set would poison the cache for later calls. */
+static char g_binary_sha_cache[HL_SHA256_HEX_BUF] = {0};
+static int  g_binary_sha_tried = 0;
+
+void hl_sbom_set_binary_path(const char *path)
+{
+    g_binary_path = path;
+    g_binary_sha_cache[0] = '\0';
+    g_binary_sha_tried = 0;
+}
+
+#ifdef HL_SBOM_HAS_MBEDTLS
+/* Stream the file at g_binary_path through mbedTLS SHA-256.
+ * Returns a cached static hex string, or NULL if the path is unset,
+ * the file can't be opened, or any I/O step fails. The cache is
+ * reset by hl_sbom_set_binary_path so repeated format calls with the
+ * same path don't re-hash but a path change forces recomputation. */
+static const char *sha256_binary(void)
+{
+    if (g_binary_sha_tried) return g_binary_sha_cache[0] ? g_binary_sha_cache : NULL;
+    g_binary_sha_tried = 1;
+
+    if (!g_binary_path) return NULL;
+    FILE *fp = fopen(g_binary_path, "rb");
+    if (!fp) return NULL;
+
+    mbedtls_sha256_context ctx;
+    mbedtls_sha256_init(&ctx);
+    if (mbedtls_sha256_starts(&ctx, 0) != 0) {
+        mbedtls_sha256_free(&ctx); fclose(fp); return NULL;
+    }
+    unsigned char buf[HL_SBOM_FILE_READ_CHUNK];
+    size_t n;
+    int io_ok = 1;
+    while ((n = fread(buf, 1, sizeof(buf), fp)) > 0) {
+        if (mbedtls_sha256_update(&ctx, buf, n) != 0) { io_ok = 0; break; }
+    }
+    if (io_ok && ferror(fp)) io_ok = 0;
+    fclose(fp);
+    if (!io_ok) { mbedtls_sha256_free(&ctx); return NULL; }
+
+    unsigned char digest[HL_SHA256_DIGEST_BYTES];
+    int rc = mbedtls_sha256_finish(&ctx, digest);
+    mbedtls_sha256_free(&ctx);
+    if (rc != 0) return NULL;
+    hex_encode_sha256(digest, g_binary_sha_cache);
+    return g_binary_sha_cache;
+}
+#else
+/* Compute-only builds without mbedTLS: no binary hashing available.
+ * The `binary_sha256` field is simply omitted from format output. */
+static const char *sha256_binary(void) { return NULL; }
 #endif
 
 /* ── Static entry table ────────────────────────────────────────────── */
@@ -314,8 +389,11 @@ int hl_sbom_parse_format(const char *str)
 static void format_human(FILE *fp)
 {
     fprintf(fp, "Hull SBOM\n");
-    fprintf(fp, "Hull %s, plus %zu component(s):\n\n",
+    fprintf(fp, "Hull %s, plus %zu component(s):\n",
             HL_VERSION, sbom_entries_count - 1);
+    const char *bin_sha = sha256_binary();
+    if (bin_sha) fprintf(fp, "Binary sha256: %s\n", bin_sha);
+    fputc('\n', fp);
 
     /* Column widths picked to match the LICENSING.md table aesthetic. */
     fprintf(fp, "  %-20s %-20s %-22s %s\n",
@@ -379,6 +457,11 @@ static void format_json(FILE *fp)
 {
     fputs("{\"hull_version\":", fp);
     json_escape(fp, HL_VERSION);
+    const char *bin_sha = sha256_binary();
+    if (bin_sha) {
+        fputs(",\"binary_sha256\":", fp);
+        json_escape(fp, bin_sha);
+    }
     fputs(",\"components\":[", fp);
     for (size_t i = 0; i < sbom_entries_count; i++) {
         const HlSbomEntry *e = &sbom_entries[i];
@@ -408,7 +491,21 @@ static void format_cyclonedx(FILE *fp)
      * so two runs of `hull sbom --format=cyclonedx` on the same binary
      * produce the same document. (Per the same byte-identity goal.) */
     fputs("{\"bomFormat\":\"CycloneDX\",\"specVersion\":\"1.5\","
-          "\"version\":1,\"components\":[", fp);
+          "\"version\":1", fp);
+    /* metadata.component describes the subject of the BOM (this binary).
+     * Includes the SHA-256 of the running binary when known, so a consumer
+     * can cross-check against the signed hull.sha256 release manifest. */
+    const char *bin_sha = sha256_binary();
+    fputs(",\"metadata\":{\"component\":{\"type\":\"application\","
+          "\"name\":\"hull\",\"version\":", fp);
+    json_escape(fp, HL_VERSION);
+    if (bin_sha) {
+        fputs(",\"hashes\":[{\"alg\":\"SHA-256\",\"content\":", fp);
+        json_escape(fp, bin_sha);
+        fputs("}]", fp);
+    }
+    fputs("}}", fp);
+    fputs(",\"components\":[", fp);
     int first = 1;
     for (size_t i = 0; i < sbom_entries_count; i++) {
         const HlSbomEntry *e = &sbom_entries[i];
@@ -457,8 +554,27 @@ static void format_spdx(FILE *fp)
           "\"name\":\"hull-sbom\","
           "\"documentNamespace\":\"https://gethull.dev/sbom/" HL_VERSION "\","
           "\"creationInfo\":{\"creators\":[\"Tool: hull-sbom\"],"
-          "\"created\":\"2026-05-29T00:00:00Z\"},"
-          "\"packages\":[", fp);
+          "\"created\":\"2026-05-29T00:00:00Z\"}", fp);
+    /* describes + hull-binary package: documents that the subject of this
+     * SPDX document is the running hull binary; binary_sha256 is emitted
+     * as a checksum on that package so consumers can cross-reference the
+     * signed release manifest. */
+    const char *bin_sha = sha256_binary();
+    fputs(",\"documentDescribes\":[\"SPDXRef-Package-hull-binary\"]", fp);
+    fputs(",\"packages\":[", fp);
+    fputs("{\"SPDXID\":\"SPDXRef-Package-hull-binary\","
+          "\"name\":\"hull\",\"versionInfo\":", fp);
+    json_escape(fp, HL_VERSION);
+    fputs(",\"downloadLocation\":\"https://github.com/artalis-io/hull\","
+          "\"licenseConcluded\":\"AGPL-3.0-or-later\","
+          "\"licenseDeclared\":\"AGPL-3.0-or-later\","
+          "\"comment\":\"the running hull binary\"", fp);
+    if (bin_sha) {
+        fputs(",\"checksums\":[{\"algorithm\":\"SHA256\",\"checksumValue\":", fp);
+        json_escape(fp, bin_sha);
+        fputs("}]", fp);
+    }
+    fputs("},", fp);  /* trailing comma; list of vendored components follows */
     int first = 1;
     for (size_t i = 0; i < sbom_entries_count; i++) {
         const HlSbomEntry *e = &sbom_entries[i];

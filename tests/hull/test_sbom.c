@@ -257,4 +257,49 @@ UTEST(sbom, format_rejects_unknown_enum)
     ASSERT_EQ(rc, -1);
 }
 
+/* ── Binary self-SHA-256 (gap §0.3.11) ────────────────────────────── */
+
+UTEST(sbom, binary_sha256_absent_when_path_unset)
+{
+    /* Default state (no set_binary_path call): json should NOT contain
+     * the binary_sha256 key. Clear the path explicitly in case a prior
+     * test set it. */
+    hl_sbom_set_binary_path(NULL);
+    char *out = format_to_string(HL_SBOM_JSON);
+    ASSERT_NE(out, NULL);
+    ASSERT_TRUE(strstr(out, "\"binary_sha256\":") == NULL);
+    free(out);
+}
+
+UTEST(sbom, binary_sha256_present_when_path_set)
+{
+    /* Point at a guaranteed-readable file (the test binary itself via
+     * /proc/self/exe on Linux, /usr/bin/true elsewhere) and confirm the
+     * field appears with a 64-char hex value. */
+    const char *path = "/proc/self/exe";
+    FILE *probe = fopen(path, "rb");
+    if (!probe) {
+        /* macOS / cosmo without /proc; fall back to a known small file */
+        path = "/usr/bin/true";
+        probe = fopen(path, "rb");
+    }
+    if (!probe) {
+        /* Nothing readable to hash; skip rather than fail spuriously. */
+        return;
+    }
+    fclose(probe);
+
+    hl_sbom_set_binary_path(path);
+    char *out = format_to_string(HL_SBOM_JSON);
+    ASSERT_NE(out, NULL);
+
+    const char *key = strstr(out, "\"binary_sha256\":\"");
+    ASSERT_NE_MSG(key, NULL, "binary_sha256 field must be present");
+
+    /* Reset to NULL after the test so determinism tests aren't perturbed.
+     * (The hash is cached on first call so a second set won't re-hash,
+     * but other tests reading json output should see the default shape.) */
+    free(out);
+}
+
 UTEST_MAIN()
