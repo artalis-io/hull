@@ -2326,8 +2326,8 @@ self-build: $(BUILDDIR)/hull platform
 # (its `-ffile-prefix-map` support is patchy), so TCC-default builds
 # can still produce per-tempdir .o variance on Linux. TCC-mode
 # determinism is a separate, smaller-impact follow-up.
-reproducible-check: $(BUILDDIR)/hull
-	@echo "=== Reproducibility: byte-identical `hull build` outputs ==="
+reproducible-check: $(BUILDDIR)/hull platform
+	@echo '=== Reproducibility: byte-identical hull build outputs ==='
 	@TMPDIR=$$(mktemp -d) && \
 	OUT="$$TMPDIR/app" && \
 	$(BUILDDIR)/hull build --compiler=system --no-verify-platform -o "$$OUT" tests/fixtures/null_app && \
