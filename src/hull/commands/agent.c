@@ -757,6 +757,7 @@ int hl_cmd_agent(int argc, char **argv, const HlCommandEnv *env)
      * Independent of capability layer; pure compile-time data. */
     if (strcmp(sub, "sbom") == 0) {
         (void)sub_argc; (void)sub_argv;
+        if (env && env->hull_exe) hl_sbom_set_binary_path(env->hull_exe);
         return hl_sbom_format(HL_SBOM_JSON, stdout) == 0 ? 0 : 1;
     }
     /* Composite project summary — one call to orient an agent. */

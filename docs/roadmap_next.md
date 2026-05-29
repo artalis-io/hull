@@ -229,7 +229,7 @@ not implementation cost.
 
 #### Tier 2. Industry standards Hull doesn't meet yet
 
-- [ ] **0.3.5. SLSA build provenance.** GitHub Actions natively
+- [x] **0.3.5. SLSA build provenance. ✅ Shipped.** GitHub Actions natively
   supports `actions/attest-build-provenance` which produces a
   Sigstore-signed attestation tying a binary to a specific commit
   + workflow run + runner image. This is free, requires no Hull
@@ -239,7 +239,7 @@ not implementation cost.
   alongside `hull.sha256.sig`. **Effort:** hours. Genuinely
   low-hanging fruit and high credibility win.
 
-- [ ] **0.3.6. SHA-pin GitHub Actions invocations.** Workflows
+- [x] **0.3.6. SHA-pin GitHub Actions invocations. ✅ Shipped.** Workflows
   use mutable tags (`actions/checkout@v4`, `actions/setup-node@v4`,
   etc.). A compromised action publisher could ship code under the
   existing tag and Hull's CI would silently pick it up. **Fix:**
@@ -291,9 +291,12 @@ not implementation cost.
 
 #### Tier 3. Polish (closes the loop but doesn't unblock claims)
 
-- [ ] **0.3.11. SBOM includes the hull binary's own SHA-256.**
-  Low-effort addition that lets `hull sbom` output self-verify
-  against the release manifest. Pair with 0.3.9. **Effort:** trivial.
+- [x] **0.3.11. SBOM includes the hull binary's own SHA-256. ✅ Shipped.**
+  `hl_sbom_set_binary_path()` wired into `hull sbom` + `hull agent sbom`;
+  streams the binary through mbedTLS SHA-256 on first format call (cached;
+  64 KiB chunks). Emitted as `binary_sha256` in JSON, `metadata.component.hashes`
+  in CycloneDX, and `SPDXRef-Package-hull-binary.checksums` in SPDX. Pair
+  with 0.3.9 (sign the SBOM itself, still pending).
 
 - [ ] **0.3.12. CPE strings in the SBOM.** CycloneDX supports
   Common Platform Enumerators for automated CVE mapping.
@@ -321,14 +324,18 @@ not implementation cost.
   toolchain versions, and link-time system library versions.
   Pairs with 0.3.1 and 0.3.5. **Effort:** small.
 
-- [ ] **0.3.15. Self-sovereignty fork playbook.** AGPL gives the
-  right; the docs don't tell you the steps. Document the
-  fork-and-rebrand procedure: rotate the two embedded pubkeys
-  (`HL_RELEASE_PUBKEY_HEX`, `HL_PLATFORM_PUBKEY_HEX`), fork the
-  release workflow, replace the install URL, regenerate the
-  install.sh, run your own CI. The MANIFESTO claims the
-  self-sovereignty path; the docs should walk through it.
-  **Effort:** small`. `docs/fork_playbook.md` (~150 lines).
+- [x] **0.3.15. Self-sovereignty fork playbook. ✅ Shipped.**
+  `docs/fork_playbook.md` (259 lines): when to fork, what it gets
+  you (and what it doesn't), a substantial "why most organisations
+  shouldn't fork" framing (AGPL §13 obligations propagate, security
+  posture inheritance, support burden, super-linear divergence cost,
+  trust non-transitivity, three lighter-weight alternatives that
+  satisfy most "we need our own trust root" requirements without a
+  fork), the five-step procedure (fork source, generate keypairs,
+  embed pubkeys, fork release workflow, replace install URL),
+  verification checklist, and honest threat-model notes about what a
+  fork does NOT solve (CI drift, vendored-dep trust, key custody
+  are still §0.3.1-3 problems in any fork).
 
 **Priority ordering for execution:**
 

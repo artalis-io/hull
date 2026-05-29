@@ -58,4 +58,12 @@ int hl_sbom_format(HlSbomFormat format, FILE *fp);
  * Accepted: "human", "json", "cyclonedx", "spdx". */
 int hl_sbom_parse_format(const char *str);
 
+/* Register the path of the running hull binary (typically argv[0]).
+ * The SHA-256 of that file is computed lazily on the first format()
+ * call and emitted as `binary_sha256` in json / cyclonedx / spdx
+ * output, letting consumers cross-reference the live binary against
+ * the signed `hull.sha256` release manifest. Pass NULL to clear.
+ * The pointer is stored; the caller owns the lifetime. */
+void hl_sbom_set_binary_path(const char *path);
+
 #endif /* HL_SBOM_H */
