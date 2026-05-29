@@ -2058,6 +2058,14 @@ $(BUILDDIR)/test_release_io: $(TESTDIR)/hull/test_release_io.c $(RELEASE_IO_OBJ)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(RELEASE_IO_OBJ) $(CACERT_OBJ) $(MBEDTLS_OBJS) $(KEEL_LIB) -lm -lpthread
 endif
 
+# Verify-self helpers test. Reuses release_io.{c,h} for asset-name,
+# checksum-line lookup, SHA-256, and self-path resolution. Same link
+# dependencies as test_release_io.
+ifneq ($(HL_ENABLE_HTTP_CLIENT),0)
+$(BUILDDIR)/test_verify_self: $(TESTDIR)/hull/test_verify_self.c $(RELEASE_IO_OBJ) $(CACERT_OBJ) $(MBEDTLS_OBJS) $(KEEL_LIB) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(RELEASE_IO_OBJ) $(CACERT_OBJ) $(MBEDTLS_OBJS) $(KEEL_LIB) -lm -lpthread
+endif
+
 # Platform-sig helpers — reuses release.c (sign/verify) +
 # release_io.c (find_checksum), so the test pulls those plus their
 # transitive crypto deps. Available on all builds.

@@ -17,6 +17,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include <unistd.h>
 
 /* ── Table integrity ──────────────────────────────────────────────── */
 
@@ -273,33 +274,30 @@ UTEST(sbom, binary_sha256_absent_when_path_unset)
 
 UTEST(sbom, binary_sha256_present_when_path_set)
 {
-    /* Point at a guaranteed-readable file (the test binary itself via
-     * /proc/self/exe on Linux, /usr/bin/true elsewhere) and confirm the
-     * field appears with a 64-char hex value. */
-    const char *path = "/proc/self/exe";
-    FILE *probe = fopen(path, "rb");
-    if (!probe) {
-        /* macOS / cosmo without /proc; fall back to a known small file */
-        path = "/usr/bin/true";
-        probe = fopen(path, "rb");
-    }
-    if (!probe) {
-        /* Nothing readable to hash; skip rather than fail spuriously. */
-        return;
-    }
-    fclose(probe);
+    /* Create a tiny temp file with known content and point set_binary_path
+     * at it. Avoids env dependencies (/proc/self/exe absent under some
+     * MSan-instrumented Linux runners; /usr/bin/true absent on minimal
+     * containers; argv[0] not always a real path). */
+    char path[] = "/tmp/hull_sbom_test_XXXXXX";
+    int fd = mkstemp(path);
+    if (fd < 0) return;  /* skip cleanly on sandboxed envs */
+    FILE *fp = fdopen(fd, "wb");
+    if (!fp) { close(fd); unlink(path); return; }
+    const char *fixture = "hull-sbom-test-fixture";
+    fwrite(fixture, 1, strlen(fixture), fp);
+    fclose(fp);
 
     hl_sbom_set_binary_path(path);
     char *out = format_to_string(HL_SBOM_JSON);
+    unlink(path);
     ASSERT_NE(out, NULL);
 
     const char *key = strstr(out, "\"binary_sha256\":\"");
     ASSERT_NE_MSG(key, NULL, "binary_sha256 field must be present");
 
-    /* Reset to NULL after the test so determinism tests aren't perturbed.
-     * (The hash is cached on first call so a second set won't re-hash,
-     * but other tests reading json output should see the default shape.) */
     free(out);
+    /* Reset to NULL so determinism tests see the default shape. */
+    hl_sbom_set_binary_path(NULL);
 }
 
 UTEST_MAIN()

@@ -217,7 +217,7 @@ not implementation cost.
   (b) days + operational discipline, (c) weeks + organisational
   process. Even (a) materially improves the story.
 
-- [ ] **0.3.4. Publish to a transparency log.** Without an
+- [x] **0.3.4. Publish to a transparency log. ✅ Shipped.** Without an
   append-only public log of `(release_tag, commit_sha,
   manifest_sha256, signature)`, a future key compromise could
   backdate releases or sign retroactive artifacts and there's no
@@ -256,7 +256,7 @@ not implementation cost.
   complexity; investigate whether `cosmocc` + `apelink` produce
   deterministic output before committing.
 
-- [ ] **0.3.8. `hull verify-self` command.** A running hull binary
+- [x] **0.3.8. `hull verify-self` command. ✅ Shipped.** A running hull binary
   can be tampered with on disk. There's no built-in command to
   verify the running binary against its own signed release
   manifest. Today users have to manually `hull verify-release` +
@@ -266,7 +266,7 @@ not implementation cost.
   errors if the running binary is local-dev (not in the manifest).
   **Effort:** small. Reuses `release_io.{c,h}` plumbing.
 
-- [ ] **0.3.9. Sign the SBOM output.** `hull sbom` produces JSON
+- [x] **0.3.9. Sign the SBOM output. ✅ Shipped.** `hull sbom` produces JSON
   that's cryptographically unbounded. A tampered hull could lie
   about its SBOM. **Fix:** two options, not mutually exclusive:
   (a) publish `hull-<arch>.sbom.json` + `hull-<arch>.sbom.json.sig`

@@ -572,14 +572,31 @@ jobs:
       - name: Make binaries executable
         run: chmod +x dist/*
 
+      - name: Generate SBOM (single canonical, from linux-x86_64 binary)
+        # §0.3.9. Generate the SBOM AS a release artifact, then include
+        # it in hull.sha256 so it inherits the release signature. The
+        # linux-x86_64 binary is used to generate; the resulting JSON
+        # describes the vendored components shared across all platforms
+        # (binary_sha256 inside reflects the linux-x86_64 hash; consumers
+        # verifying other platforms use hull verify-self for that).
+        working-directory: dist
+        run: |
+          chmod +x ./hull-linux-x86_64
+          ./hull-linux-x86_64 sbom --format=json      > hull.sbom.json
+          ./hull-linux-x86_64 sbom --format=cyclonedx > hull.sbom.cdx.json
+          ./hull-linux-x86_64 sbom --format=spdx      > hull.sbom.spdx.json
+          ls -la hull.sbom.*
+
       - name: Compute SHA-256 checksums
         # `hull tools install <name>` looks up entries by exact asset
         # name in this manifest — keep the file list in sync with the
         # tool registry in src/hull/tools_install.c.
+        # SBOM files included here so they inherit the release signature.
         working-directory: dist
         run: |
           sha256sum hull-cosmo hull-linux-x86_64 hull-linux-aarch64 hull-darwin-arm64 \
                     hull-wamrc-linux-x86_64 hull-wamrc-linux-aarch64 hull-wamrc-darwin-arm64 \
+                    hull.sbom.json hull.sbom.cdx.json hull.sbom.spdx.json \
                     > hull.sha256
           cat hull.sha256
 
@@ -607,9 +624,34 @@ jobs:
           echo "--- hull.sha256.sig:"
           cat hull.sha256.sig
 
+      - name: Install cosign
+        # §0.3.4 prerequisite. Installs the Sigstore cosign binary so we
+        # can publish the release manifest to the Rekor transparency log.
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac  # v3
+
+      - name: Publish manifest to Rekor transparency log
+        # §0.3.4. Sign hull.sha256 via Sigstore (OIDC -> Fulcio short-lived
+        # cert) and submit the signature + cert + manifest digest to
+        # https://rekor.sigstore.dev. The Rekor log entry is append-only
+        # and externally auditable; anyone can prove a release wasn't
+        # backdated. Independent of HULL_RELEASE_KEY (separate trust
+        # root); HULL_RELEASE_KEY signing remains the primary path for
+        # `hull update` clients with no Sigstore dependency.
+        working-directory: dist
+        run: |
+          cosign sign-blob hull.sha256 \
+            --rekor-url=https://rekor.sigstore.dev \
+            --yes \
+            --output-signature=hull.sha256.cosign.sig \
+            --output-certificate=hull.sha256.cosign.pem
+          echo "--- hull.sha256.cosign.sig (Sigstore):"
+          cat hull.sha256.cosign.sig
+          echo "--- hull.sha256.cosign.pem (first 3 lines):"
+          head -3 hull.sha256.cosign.pem
+
       - name: Attest build provenance (SLSA)
-        # Sigstore-signed attestation linking each binary to this commit
-        # + workflow run + runner image. Verifiable with
+        # §0.3.5. Sigstore-signed attestation linking each binary to this
+        # commit + workflow run + runner image. Verifiable with
         # `gh attestation verify <binary> --repo artalis-io/hull`.
         # Independent of HULL_RELEASE_KEY: provenance is signed via
         # GitHub OIDC + Fulcio short-lived cert, not the gethull key.
@@ -624,6 +666,9 @@ jobs:
             dist/hull-wamrc-linux-aarch64
             dist/hull-wamrc-darwin-arm64
             dist/hull.sha256
+            dist/hull.sbom.json
+            dist/hull.sbom.cdx.json
+            dist/hull.sbom.spdx.json
 
       - name: Create GitHub release
         env:
@@ -639,6 +684,11 @@ jobs:
             dist/hull-wamrc-linux-aarch64
             dist/hull-wamrc-darwin-arm64
             dist/hull.sha256
+            dist/hull.sbom.json
+            dist/hull.sbom.cdx.json
+            dist/hull.sbom.spdx.json
+            dist/hull.sha256.cosign.sig
+            dist/hull.sha256.cosign.pem
           )
           if [ -f dist/hull.sha256.sig ]; then
             assets+=(dist/hull.sha256.sig)
