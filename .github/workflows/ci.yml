@@ -96,7 +96,8 @@ jobs:
         timeout-minutes: 2
         run: make hull-test-examples
 
-  # Reproducibility gate. Three properties tested independently:
+  # Reproducibility gate. Three properties tested independently on
+  # both Linux and macOS via matrix strategy:
   #
   #   1. Self-build (bootstrap): hull can build hull2 can build hull3.
   #      Proves the build pipeline produces working binaries that can
@@ -109,16 +110,21 @@ jobs:
   #
   #   3. Hull-build reproducibility: `hull build` produces byte-
   #      identical outputs for the same input. Build the same fixture
-  #      twice to the SAME output path (macOS ld64 hashes the output
+  #      twice to the SAME output path. (macOS ld64 hashes the output
   #      path into LC_UUID; same-path isolates the question we
-  #      actually care about — link output stability for fixed
-  #      inputs).
-  #
-  # All three run on Linux. macOS verification is via local
-  # `make reproducible-check` (works there too).
+  #      actually care about: link output stability for fixed
+  #      inputs. See Makefile comment on the target.)
   reproducibility:
-    name: Reproducible build (self-build + hull byte-identity + hull-build byte-identity)
-    runs-on: ubuntu-latest
+    name: Reproducible build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+          - name: macOS
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -129,7 +135,7 @@ jobs:
       - name: Self-build chain (hull -> hull2 -> hull3)
         timeout-minutes: 5
         run: make self-build
-      - name: Hull-itself reproducibility (`make` twice → cmp)
+      - name: Hull-itself reproducibility (make twice, then cmp)
         timeout-minutes: 10
         run: |
           set -eu
@@ -143,7 +149,7 @@ jobs:
             shasum -a 256 /tmp/hull-rep-1 build/hull
             exit 1
           fi
-      - name: Reproducibility (`hull build` byte-identical, same output path)
+      - name: Reproducibility (hull build byte-identical, same output path)
         timeout-minutes: 5
         run: make reproducible-check
 
