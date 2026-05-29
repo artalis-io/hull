@@ -243,7 +243,9 @@ UTEST(sbom, format_rejects_unknown_enum)
      * shouldn't do this, but the function shouldn't trust them. */
     char *buf = NULL; size_t size = 0;
     FILE *fp = open_memstream(&buf, &size);
-    ASSERT_NE(fp, NULL);
+    /* ASSERT_TRUE instead of ASSERT_NE(fp, NULL): cosmocc -Wpointer-arith
+     * rejects utest.h's _Generic type-printer when it sees FILE*. */
+    ASSERT_TRUE(fp != NULL);
     int rc = hl_sbom_format((HlSbomFormat)999, fp);
     fclose(fp);
     free(buf);
