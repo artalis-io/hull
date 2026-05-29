@@ -47,10 +47,11 @@
 #define HL_SHA256_HEX_LEN       (HL_SHA256_DIGEST_BYTES * 2) /* 64 chars */
 #define HL_SHA256_HEX_BUF       (HL_SHA256_HEX_LEN + 1)      /* +1 for NUL */
 
-/* Streaming-read chunk size for hashing the hull binary off disk.
- * 64 KiB matches Linux's typical page-cache readahead and avoids
- * blowing out L1d cache; tuning beyond this gave no measurable gain. */
-#define HL_SBOM_FILE_READ_CHUNK 65536U
+/* Cap on the size of the binary we'll hash for binary_sha256. The hull
+ * binary itself is ~5-15 MB across all build flavors; 256 MB is well
+ * past any plausible value and guards against accidentally hashing a
+ * giant file when set_binary_path is mis-targeted. */
+#define HL_SBOM_BINARY_MAX_BYTES (256U * 1024U * 1024U)
 
 #if defined(HL_EMBED_CA_BUNDLE) || defined(HL_SBOM_HASH_BLOBS)
 #define HL_SBOM_HAS_MBEDTLS 1
@@ -118,11 +119,18 @@ void hl_sbom_set_binary_path(const char *path)
 }
 
 #ifdef HL_SBOM_HAS_MBEDTLS
-/* Stream the file at g_binary_path through mbedTLS SHA-256.
- * Returns a cached static hex string, or NULL if the path is unset,
- * the file can't be opened, or any I/O step fails. The cache is
- * reset by hl_sbom_set_binary_path so repeated format calls with the
- * same path don't re-hash but a path change forces recomputation. */
+/* Read the file at g_binary_path into a buffer and hash via the one-shot
+ * mbedTLS SHA-256 API (same primitive used by release_io's sha256_hex
+ * and by compute_blob_sha256 above; MSan-verified everywhere it's used).
+ * Returns a cached static hex string, or NULL if the path is unset, the
+ * file can't be opened, exceeds the size cap, or any I/O step fails.
+ *
+ * Implementation note: we initially used the streaming _starts/_update/
+ * _finish API for memory friendliness but MSan-instrumented mbedTLS
+ * misreports uninitialized context state through that path. The one-shot
+ * API is well-trodden across Hull and ~15 MB of malloc for the binary is
+ * trivially OK. The HL_SBOM_BINARY_MAX_BYTES cap prevents accidental
+ * runaway allocation if the path is mis-targeted at a giant file. */
 static const char *sha256_binary(void)
 {
     if (g_binary_sha_tried) return g_binary_sha_cache[0] ? g_binary_sha_cache : NULL;
@@ -131,25 +139,21 @@ static const char *sha256_binary(void)
     if (!g_binary_path) return NULL;
     FILE *fp = fopen(g_binary_path, "rb");
     if (!fp) return NULL;
-
-    mbedtls_sha256_context ctx;
-    mbedtls_sha256_init(&ctx);
-    if (mbedtls_sha256_starts(&ctx, 0) != 0) {
-        mbedtls_sha256_free(&ctx); fclose(fp); return NULL;
+    if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return NULL; }
+    long sz = ftell(fp);
+    if (sz < 0 || (size_t)sz > HL_SBOM_BINARY_MAX_BYTES) {
+        fclose(fp); return NULL;
     }
-    unsigned char buf[HL_SBOM_FILE_READ_CHUNK];
-    size_t n;
-    int io_ok = 1;
-    while ((n = fread(buf, 1, sizeof(buf), fp)) > 0) {
-        if (mbedtls_sha256_update(&ctx, buf, n) != 0) { io_ok = 0; break; }
-    }
-    if (io_ok && ferror(fp)) io_ok = 0;
+    rewind(fp);
+    unsigned char *buf = malloc((size_t)sz);
+    if (!buf) { fclose(fp); return NULL; }
+    size_t got = fread(buf, 1, (size_t)sz, fp);
     fclose(fp);
-    if (!io_ok) { mbedtls_sha256_free(&ctx); return NULL; }
+    if (got != (size_t)sz) { free(buf); return NULL; }
 
     unsigned char digest[HL_SHA256_DIGEST_BYTES];
-    int rc = mbedtls_sha256_finish(&ctx, digest);
-    mbedtls_sha256_free(&ctx);
+    int rc = mbedtls_sha256(buf, got, digest, 0);
+    free(buf);
     if (rc != 0) return NULL;
     hex_encode_sha256(digest, g_binary_sha_cache);
     return g_binary_sha_cache;
