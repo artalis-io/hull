@@ -1,7 +1,7 @@
 --
 -- hull.init — Initialize a Hull project in the current (or specified) directory
 --
--- Usage: hull init [dir] [--runtime lua|js] [--cli]
+-- Usage: hull init [dir] [--runtime lua|js] [--cli] [--profile <name>]
 --
 -- Unlike `hull new`, init is idempotent: it creates missing files but never
 -- overwrites existing ones. Works in-place like `git init`.
@@ -9,6 +9,10 @@
 -- If an app file already exists, mode (CLI vs server) is detected from its
 -- contents (presence of `app.main(`). Otherwise the --cli flag picks mode;
 -- default is server.
+--
+-- --profile <name>: opt into a richer scaffold for a specific app shape.
+--   Currently supported: "htmx" (HTMX + Pico classless + per-request CSP
+--   nonce + session + CSRF). Default: minimal "hello world" + /health.
 --
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 --
@@ -148,6 +152,534 @@ templates.migration_init = [[-- Migration: 001_init
 -- Add your initial schema here
 ]]
 
+-- ── HTMX profile templates ───────────────────────────────────────────
+-- The "htmx" profile scaffolds a fuller starter app: per-request CSP
+-- nonce, vendored HTMX + Pico classless CSS (fetched via `make
+-- fetch-vendor`), CSRF on htmx requests, a sample todos endpoint with
+-- partial-fragment rendering. Both runtimes use the same template HTML
+-- (the only differences are in app.{lua,js}).
+
+templates.htmx_lua_app = [[-- HTMX + Pico hypermedia app scaffold.
+-- Returns full pages for plain navigation; returns fragments when
+-- HX-Request is set. CSRF + per-request CSP nonce wired in by default.
+local htmx     = require("hull.htmx")
+local csp      = require("hull.middleware.csp")
+local csrf     = require("hull.middleware.csrf")
+local session  = require("hull.middleware.session")
+local template = require("hull.template")
+local form     = require("hull.form")
+local log      = require("hull.log")
+
+app.manifest({
+    modules = {
+        "hull/http-server@1",
+        "hull/htmx@1",
+        "hull/middleware/csp@1",
+        "hull/middleware/csrf@1",
+        "hull/middleware/session@1",
+        "hull/template@1",
+        "hull/form@1",
+        "hull/db@1",
+        "hull/log@1",
+    },
+})
+
+-- Sessions table (sets up _hull_sessions).
+session.init()
+
+-- Pre-body middleware (runs before req.body is read):
+--   1. CSP nonce. Populates req.ctx.csp_nonce + sets the header.
+--   2. Session. Populates req.ctx.session_id when the cookie exists.
+app.use("*", "/*", csp.htmx())
+app.use("*", "/*", session.middleware({ optional = true }))
+
+-- Post-body middleware (runs after req.body is parsed):
+--   3. CSRF. Verifies on unsafe methods; injects token on safe.
+app.use_post("*", "/*", csrf.middleware({ secret = "CHANGE-ME-IN-PRODUCTION" }))
+
+local function todos_data()
+    return db.query("SELECT id, title, done FROM todos ORDER BY id DESC")
+end
+
+app.get("/", function(req, res)
+    local data = {
+        csp_nonce  = req.ctx.csp_nonce,
+        csrf_token = req.ctx.csrf_token,
+        todos      = todos_data(),
+    }
+    res:html(template.render("pages/home.html", data))
+end)
+
+app.post("/todos", function(req, res)
+    local fields = form.parse(req.body or "")
+    local title = (fields.title or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if title == "" then
+        -- Validation error fragment (replaces the input area).
+        htmx.retarget(res, "#new-todo")
+        res:html('<p id="new-todo" role="alert">Title cannot be empty.</p>')
+        return
+    end
+    db.exec("INSERT INTO todos (title, done) VALUES (?, 0)", { title })
+    local id = db.query("SELECT last_insert_rowid() AS id")[1].id
+
+    if htmx.is(req) then
+        -- HTMX: return the new row to insert + a fresh empty form.
+        res:html(template.render("partials/todo_row.html",
+            { id = id, title = title, done = false })
+            .. template.render("partials/todo_form.html",
+                { csrf_token = req.ctx.csrf_token }))
+    else
+        -- Plain form post: redirect back to /, browser reloads.
+        res:redirect("/")
+    end
+end)
+
+app.post("/todos/:id/toggle", function(req, res)
+    local id = tonumber(req.params.id)
+    db.exec("UPDATE todos SET done = NOT done WHERE id = ?", { id })
+    local row = db.query("SELECT id, title, done FROM todos WHERE id = ?", { id })[1]
+    if not row then res:status(404); return end
+    if htmx.is(req) then
+        res:html(template.render("partials/todo_row.html", row))
+    else
+        res:redirect("/")
+    end
+end)
+
+app.delete("/todos/:id", function(req, res)
+    local id = tonumber(req.params.id)
+    db.exec("DELETE FROM todos WHERE id = ?", { id })
+    if htmx.is(req) then
+        res:html("")  -- htmx swap-mode=delete removes the row.
+    else
+        res:redirect("/")
+    end
+end)
+
+log.info("hypermedia app loaded")
+]]
+
+templates.htmx_js_app = [[// HTMX + Pico hypermedia app scaffold.
+// Returns full pages for plain navigation; returns fragments when
+// HX-Request is set. CSRF + per-request CSP nonce wired in by default.
+import { app }      from "hull:app";
+import { htmx }     from "hull:htmx";
+import { csp }      from "hull:middleware:csp";
+import { csrf }     from "hull:middleware:csrf";
+import { session }  from "hull:middleware:session";
+import { template } from "hull:template";
+import { form }     from "hull:form";
+import { log }      from "hull:log";
+import { db }       from "hull:db";
+
+app.manifest({
+    modules: [
+        "hull/http-server@1",
+        "hull/htmx@1",
+        "hull/middleware/csp@1",
+        "hull/middleware/csrf@1",
+        "hull/middleware/session@1",
+        "hull/template@1",
+        "hull/form@1",
+        "hull/db@1",
+        "hull/log@1",
+    ],
+});
+
+session.init();
+
+app.use("*", "/*", csp.htmx());
+app.use("*", "/*", session.middleware({ optional: true }));
+app.use_post("*", "/*", csrf.middleware({ secret: "CHANGE-ME-IN-PRODUCTION" }));
+
+function todosData() {
+    return db.query("SELECT id, title, done FROM todos ORDER BY id DESC");
+}
+
+app.get("/", (req, res) => {
+    res.html(template.render("pages/home.html", {
+        cspNonce:  req.ctx.cspNonce,
+        csrfToken: req.ctx.csrfToken,
+        todos:     todosData(),
+    }));
+});
+
+app.post("/todos", (req, res) => {
+    const fields = form.parse(req.body || "");
+    const title = (fields.title || "").trim();
+    if (!title) {
+        htmx.retarget(res, "#new-todo");
+        res.html('<p id="new-todo" role="alert">Title cannot be empty.</p>');
+        return;
+    }
+    db.exec("INSERT INTO todos (title, done) VALUES (?, 0)", [title]);
+    const id = db.query("SELECT last_insert_rowid() AS id")[0].id;
+    if (htmx.is(req)) {
+        res.html(
+            template.render("partials/todo_row.html",  { id, title, done: false })
+            + template.render("partials/todo_form.html", { csrfToken: req.ctx.csrfToken })
+        );
+    } else {
+        res.redirect("/");
+    }
+});
+
+app.post("/todos/:id/toggle", (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    db.exec("UPDATE todos SET done = NOT done WHERE id = ?", [id]);
+    const row = db.query("SELECT id, title, done FROM todos WHERE id = ?", [id])[0];
+    if (!row) { res.status(404); return; }
+    if (htmx.is(req)) {
+        res.html(template.render("partials/todo_row.html", row));
+    } else {
+        res.redirect("/");
+    }
+});
+
+app.delete("/todos/:id", (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    db.exec("DELETE FROM todos WHERE id = ?", [id]);
+    if (htmx.is(req)) {
+        res.html("");
+    } else {
+        res.redirect("/");
+    }
+});
+
+log.info("hypermedia app loaded");
+]]
+
+templates.htmx_base_html = [[<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Hull HTMX app{% endblock %}</title>
+  <link rel="stylesheet" nonce="{{ csp_nonce }}" href="/static/vendor/pico.classless.min.css">
+  <link rel="stylesheet" nonce="{{ csp_nonce }}" href="/static/app.css">
+  <script nonce="{{ csp_nonce }}" src="/static/vendor/htmx.min.js"></script>
+</head>
+<body>
+  <main>
+    {% block body %}{% endblock %}
+  </main>
+</body>
+</html>
+]]
+
+templates.htmx_page_home = [[{% extends "base.html" %}
+
+{% block title %}Todos{% endblock %}
+
+{% block body %}
+<h1>Todos</h1>
+
+{% include "partials/todo_form.html" %}
+
+<ul id="todos">
+{% for t in todos %}
+  {% include "partials/todo_row.html" %}
+{% end %}
+</ul>
+{% endblock %}
+]]
+
+templates.htmx_partial_todo_form = [[<form id="new-todo"
+      hx-post="/todos"
+      hx-target="#todos"
+      hx-swap="afterbegin">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <input type="text" name="title" placeholder="New todo" required autofocus>
+  <button type="submit">Add</button>
+</form>
+]]
+
+templates.htmx_partial_todo_row = [[<li id="todo-{{ id }}">
+  <input type="checkbox"
+         {% if done %}checked{% end %}
+         hx-post="/todos/{{ id }}/toggle"
+         hx-target="#todo-{{ id }}"
+         hx-swap="outerHTML">
+  <span {% if done %}style="text-decoration: line-through"{% end %}>{{ title }}</span>
+  <button hx-delete="/todos/{{ id }}"
+          hx-target="#todo-{{ id }}"
+          hx-swap="delete"
+          hx-confirm="Delete this todo?">×</button>
+</li>
+]]
+
+templates.htmx_app_css = [[/* hypermedia_todo custom styles. Layer on top of Pico's classless base. */
+:root {
+  --pico-form-element-spacing-vertical: 0.5rem;
+}
+
+ul#todos {
+  list-style: none;
+  padding-left: 0;
+}
+
+ul#todos li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.25rem 0;
+}
+
+ul#todos li button {
+  margin-left: auto;
+  padding: 0 0.5rem;
+}
+]]
+
+templates.htmx_migration = [[-- Migration: 001_init
+-- Schema for the htmx todos demo.
+
+CREATE TABLE IF NOT EXISTS todos (
+    id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    done  INTEGER NOT NULL DEFAULT 0
+);
+]]
+
+templates.htmx_test_lua = [[-- Tests for both plain HTML and HTMX request paths.
+
+test("GET / returns full HTML page", function()
+    local res = test.get("/")
+    test.eq(res.status, 200)
+    test.ok(string.find(res.body, "<!doctype html>"), "should be a full page")
+    test.ok(string.find(res.body, "id=\"todos\""), "should contain todo list")
+end)
+
+test("POST /todos with hx-request returns fragment, not redirect", function()
+    -- Get a CSRF token by hitting / first.
+    local home = test.get("/")
+    local token = string.match(home.body, 'name="_csrf" value="([^"]+)"')
+    test.ok(token, "csrf token should be in form")
+    -- Send htmx-flavored POST with token + cookie.
+    local res = test.post("/todos",
+        "title=buy+milk&_csrf=" .. token,
+        { headers = {
+            ["hx-request"] = "true",
+            ["content-type"] = "application/x-www-form-urlencoded",
+            ["cookie"] = home.headers["set-cookie"] or "",
+            ["x-csrf-token"] = token,
+        }})
+    test.eq(res.status, 200)
+    test.ok(string.find(res.body, "buy milk"), "fragment should contain new todo")
+    test.ok(not string.find(res.body, "<!doctype"), "fragment must NOT be full page")
+end)
+
+test("POST /todos with empty title returns validation fragment", function()
+    local home = test.get("/")
+    local token = string.match(home.body, 'name="_csrf" value="([^"]+)"')
+    local res = test.post("/todos",
+        "title=&_csrf=" .. token,
+        { headers = {
+            ["hx-request"] = "true",
+            ["content-type"] = "application/x-www-form-urlencoded",
+            ["cookie"] = home.headers["set-cookie"] or "",
+            ["x-csrf-token"] = token,
+        }})
+    test.eq(res.status, 200)
+    test.ok(string.find(res.body, "cannot be empty"), "should show validation error")
+    test.eq(res.headers["hx-retarget"], "#new-todo",
+            "should retarget to the form, not the list")
+end)
+]]
+
+templates.htmx_test_js = [[// Tests for both plain HTML and HTMX request paths.
+
+test("GET / returns full HTML page", async () => {
+    const res = await test.get("/");
+    test.eq(res.status, 200);
+    test.ok(res.body.includes("<!doctype html>"), "should be a full page");
+    test.ok(res.body.includes('id="todos"'), "should contain todo list");
+});
+
+test("POST /todos with hx-request returns fragment, not redirect", async () => {
+    const home = await test.get("/");
+    const token = home.body.match(/name="_csrf" value="([^"]+)"/)?.[1];
+    test.ok(token, "csrf token should be in form");
+    const res = await test.post(
+        "/todos",
+        "title=buy+milk&_csrf=" + token,
+        { headers: {
+            "hx-request": "true",
+            "content-type": "application/x-www-form-urlencoded",
+            "cookie": home.headers["set-cookie"] || "",
+            "x-csrf-token": token,
+        }}
+    );
+    test.eq(res.status, 200);
+    test.ok(res.body.includes("buy milk"), "fragment should contain new todo");
+    test.ok(!res.body.includes("<!doctype"), "fragment must NOT be full page");
+});
+
+test("POST /todos with empty title returns validation fragment", async () => {
+    const home = await test.get("/");
+    const token = home.body.match(/name="_csrf" value="([^"]+)"/)?.[1];
+    const res = await test.post(
+        "/todos",
+        "title=&_csrf=" + token,
+        { headers: {
+            "hx-request": "true",
+            "content-type": "application/x-www-form-urlencoded",
+            "cookie": home.headers["set-cookie"] || "",
+            "x-csrf-token": token,
+        }}
+    );
+    test.eq(res.status, 200);
+    test.ok(res.body.includes("cannot be empty"), "should show validation error");
+    test.eq(res.headers["hx-retarget"], "#new-todo",
+            "should retarget to the form, not the list");
+});
+]]
+
+-- Asset metadata: pinned versions + SHA-256 of htmx + pico. Mirrors
+-- the values in Hull's own Makefile (vendor/htmx, vendor/pico). Keep
+-- in sync when Hull bumps; user apps can bump independently in their
+-- own Makefile.
+local HTMX_VERSION    = "v2.0.9"
+local HTMX_SHA256     = "57d9191515339922bd1356d7b2d80b1ee3b29f1b3a2c65a078bb8b2e8fd9ae5f"
+local PICO_VERSION    = "v2.1.1"
+local PICO_SHA256     = "61207a40ffc02a42d1e50143651c121beab70ed413c934c1ff84fa263ba436b0"
+
+templates.htmx_makefile = string.format([[# Generated by `hull init --profile htmx`.
+# Bump HTMX/Pico versions + SHAs when you upgrade; the SHA verification
+# stops on a mismatch.
+
+HTMX_VERSION    := %s
+HTMX_SHA256     := %s
+HTMX_URL        := https://github.com/bigskysoftware/htmx/releases/download/$(HTMX_VERSION)/htmx.min.js
+
+PICO_VERSION    := %s
+PICO_SHA256     := %s
+PICO_URL        := https://raw.githubusercontent.com/picocss/pico/$(PICO_VERSION)/css/pico.classless.min.css
+
+VENDOR_DIR      := static/vendor
+
+.PHONY: dev test build fetch-vendor verify-vendor clean
+
+dev:
+	hull dev
+
+test:
+	hull test
+
+build:
+	hull build
+
+fetch-vendor: $(VENDOR_DIR)/htmx.min.js $(VENDOR_DIR)/pico.classless.min.css
+	@echo "Vendor assets in place."
+
+verify-vendor:
+	@actual=$$(shasum -a 256 $(VENDOR_DIR)/htmx.min.js | awk '{print $$1}'); \
+	if [ "$$actual" != "$(HTMX_SHA256)" ]; then \
+	    echo "htmx.min.js SHA-256 mismatch (expected $(HTMX_SHA256), got $$actual)"; exit 1; fi
+	@actual=$$(shasum -a 256 $(VENDOR_DIR)/pico.classless.min.css | awk '{print $$1}'); \
+	if [ "$$actual" != "$(PICO_SHA256)" ]; then \
+	    echo "pico.classless.min.css SHA-256 mismatch (expected $(PICO_SHA256), got $$actual)"; exit 1; fi
+	@echo "Vendor SHAs OK."
+
+$(VENDOR_DIR)/htmx.min.js:
+	@mkdir -p $(VENDOR_DIR)
+	curl -fsSL $(HTMX_URL) -o $@
+	@actual=$$(shasum -a 256 $@ | awk '{print $$1}'); \
+	if [ "$$actual" != "$(HTMX_SHA256)" ]; then \
+	    echo "htmx.min.js SHA-256 mismatch (expected $(HTMX_SHA256), got $$actual)"; \
+	    rm -f $@; exit 1; fi
+	@echo "htmx $(HTMX_VERSION) OK ($$(wc -c < $@) bytes)."
+
+$(VENDOR_DIR)/pico.classless.min.css:
+	@mkdir -p $(VENDOR_DIR)
+	curl -fsSL $(PICO_URL) -o $@
+	@actual=$$(shasum -a 256 $@ | awk '{print $$1}'); \
+	if [ "$$actual" != "$(PICO_SHA256)" ]; then \
+	    echo "pico SHA-256 mismatch (expected $(PICO_SHA256), got $$actual)"; \
+	    rm -f $@; exit 1; fi
+	@echo "pico $(PICO_VERSION) OK ($$(wc -c < $@) bytes)."
+
+clean:
+	rm -rf build data.db data.db-*
+]], HTMX_VERSION, HTMX_SHA256, PICO_VERSION, PICO_SHA256)
+
+templates.htmx_readme = [[# HTMX + Pico app
+
+Hypermedia-driven app scaffolded by `hull init --profile htmx`.
+
+## First-run setup
+
+```sh
+make fetch-vendor   # downloads htmx + pico into static/vendor/ (SHA-pinned)
+make dev            # starts hull dev server on :8080
+```
+
+`make fetch-vendor` is one-time: the assets get committed to your repo.
+Re-run it (or `make verify-vendor`) when bumping HTMX or Pico versions
+in the Makefile.
+
+## What's wired in
+
+- **HTMX** for partial page updates (full-page render on plain GET;
+  fragment render on `HX-Request`).
+- **Pico v2 classless** for default styling. Drop into `static/app.css`
+  for custom rules.
+- **Per-request CSP nonce** (`hull/middleware/csp@1` with the htmx
+  profile: nonce-required for `<script>` and `<style>` blocks; inline
+  `style="…"` attributes allowed for Pico's component styles).
+- **Session-cookie storage** (basic, optional). Customize in `app.{lua,js}`.
+- **CSRF protection** on unsafe methods (form posts + htmx requests).
+  Change `secret = "CHANGE-ME-IN-PRODUCTION"` before deploying.
+
+## Layout
+
+```
+app.{lua,js}             handlers + middleware
+templates/
+  base.html              <head>+<body> skeleton with nonce'd <script>/<link>
+  pages/home.html        full-page render
+  partials/
+    todo_form.html       reusable form + CSRF token field
+    todo_row.html        single-row fragment for htmx swaps
+static/
+  vendor/htmx.min.js          (fetched by make fetch-vendor)
+  vendor/pico.classless.min.css   (fetched by make fetch-vendor)
+  app.css                custom styles
+migrations/
+  001_init.sql           todos table
+tests/
+  test_app.{lua,js}      covers plain + htmx paths
+```
+
+## Pattern: when to return a fragment vs a full page
+
+```
+if htmx.is(req) then
+    res:html(template.render("partials/foo.html", data))
+else
+    res:html(template.render("pages/foo.html", data))
+end
+```
+
+See `docs/htmx.md` (in the Hull repo) for the full pattern guide.
+
+## Next steps
+
+- Replace `CHANGE-ME-IN-PRODUCTION` in `app.{lua,js}` with a real
+  high-entropy secret loaded from env.
+- Run `hull build` to produce a single binary with templates + static
+  assets embedded.
+]]
+
+templates.htmx_gitignore = [[data.db
+data.db-*
+*.key
+hull.sig
+build/
+
+# static/vendor/ is committed; fetched once via `make fetch-vendor`.
+]]
+
 -- ── Helpers ──────────────────────────────────────────────────────────
 
 local function file_exists(path)
@@ -198,6 +730,7 @@ local function parse_args()
         dir     = ".",
         runtime = nil,   -- nil = auto-detect from existing files, else "lua"/"js"
         cli     = nil,   -- nil = auto-detect or default server; true = force CLI
+        profile = nil,   -- nil = default minimal scaffold; "htmx" = HTMX + Pico
     }
 
     local i = 1
@@ -208,6 +741,11 @@ local function parse_args()
             opts.runtime = arg[i]
         elseif a == "--cli" then
             opts.cli = true
+        elseif a == "--profile" then
+            i = i + 1
+            opts.profile = arg[i]
+        elseif a:sub(1, 10) == "--profile=" then
+            opts.profile = a:sub(11)
         elseif a:sub(1, 1) ~= "-" then
             opts.dir = a
         end
@@ -215,6 +753,55 @@ local function parse_args()
     end
 
     return opts
+end
+
+-- Scaffold extra files for the `htmx` profile. Called from main()
+-- AFTER the default scaffold has run, so it only adds files that
+-- don't conflict with the base set. Uses the same track_file/track_dir
+-- helpers (passed in) so created/skipped output stays consistent.
+local function scaffold_htmx(dir, runtime, track_file, track_dir)
+    local ext  = (runtime == "js") and ".js" or ".lua"
+    local app_template  = (runtime == "js") and templates.htmx_js_app  or templates.htmx_lua_app
+    local test_template = (runtime == "js") and templates.htmx_test_js or templates.htmx_test_lua
+
+    -- Override the default app.lua and test_app.lua with the htmx
+    -- versions. ensure_file is no-op when the file exists, so this
+    -- only writes when the default scaffold didn't have to (first run
+    -- in an empty dir). For idempotency in subsequent runs the user's
+    -- modified copy is preserved.
+    track_file(dir .. "/app" .. ext,            app_template)
+    track_file(dir .. "/tests/test_app" .. ext, test_template)
+
+    -- Template hierarchy.
+    track_dir(dir .. "/templates")
+    track_dir(dir .. "/templates/pages")
+    track_dir(dir .. "/templates/partials")
+    track_file(dir .. "/templates/base.html",
+               templates.htmx_base_html)
+    track_file(dir .. "/templates/pages/home.html",
+               templates.htmx_page_home)
+    track_file(dir .. "/templates/partials/todo_form.html",
+               templates.htmx_partial_todo_form)
+    track_file(dir .. "/templates/partials/todo_row.html",
+               templates.htmx_partial_todo_row)
+
+    -- Static assets (custom CSS lands directly; vendor files come
+    -- via `make fetch-vendor` because Hull doesn't carry curl in its
+    -- tool-spawn allowlist).
+    track_dir(dir .. "/static")
+    track_dir(dir .. "/static/vendor")
+    track_file(dir .. "/static/app.css", templates.htmx_app_css)
+
+    -- Override the default 001_init.sql + .gitignore with the htmx
+    -- versions. ensure_file is no-op if a real one already exists.
+    track_file(dir .. "/migrations/001_init.sql",
+               templates.htmx_migration)
+    track_file(dir .. "/.gitignore", templates.htmx_gitignore)
+
+    -- Makefile + README only land for the htmx profile (the default
+    -- scaffold doesn't generate either).
+    track_file(dir .. "/Makefile", templates.htmx_makefile)
+    track_file(dir .. "/README.md", templates.htmx_readme)
 end
 
 -- ── Main ─────────────────────────────────────────────────────────────
@@ -280,6 +867,26 @@ local function main()
     end
     track_dir(dir .. "/tests")
 
+    -- Profile scaffolds run FIRST so their files exist before the
+    -- generic versions try to write; ensure_file is no-op on conflict.
+    -- Validation of the profile name happens here, not at arg-parse
+    -- time, so the error message can mention the supported list.
+    if opts.profile then
+        if opts.profile == "htmx" then
+            if cli_mode then
+                tool.stderr("hull init: --profile htmx requires server mode (omit --cli)\n")
+                tool.exit(1)
+            end
+            scaffold_htmx(dir, runtime, track_file, track_dir)
+        else
+            tool.stderr("hull init: unknown profile '" .. opts.profile ..
+                        "' (supported: htmx)\n")
+            tool.exit(1)
+        end
+    end
+
+    -- Generic / fallback files. ensure_file (track_file) won't
+    -- overwrite a profile's version that was just written above.
     track_file(dir .. "/app" .. ext,            app_template)
     track_file(dir .. "/tests/test_app" .. ext, test_template)
     if not cli_mode then
@@ -296,6 +903,9 @@ local function main()
     end
     print("  runtime   " .. runtime)
     print("  mode      " .. (cli_mode and "cli" or "server"))
+    if opts.profile then
+        print("  profile   " .. opts.profile)
+    end
     print("")
 
     if #created > 0 then
@@ -316,7 +926,12 @@ local function main()
 
     local app_path = (dir == "." and "" or dir .. "/") .. "app" .. ext
     print("Next steps:")
-    if cli_mode then
+    if opts.profile == "htmx" then
+        local cd_prefix = (dir == ".") and "" or ("cd " .. dir .. " && ")
+        print("  " .. cd_prefix .. "make fetch-vendor   # download htmx + pico (SHA-pinned)")
+        print("  " .. cd_prefix .. "make dev            # serve on :8080")
+        print("  " .. cd_prefix .. "make test           # run the htmx + plain-form tests")
+    elseif cli_mode then
         print("  hull run " .. app_path .. " -- world")
     else
         print("  hull " .. app_path)
