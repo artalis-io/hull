@@ -48,6 +48,62 @@ and we'll send terms.
 If you're not sure which applies, email <licensing+site@artalis.io> and describe
 what you're building.
 
+## What's in each tier
+
+### Community tier (AGPL-3.0-or-later)
+
+Everything in the public `artalis-io/hull` repo. Includes the full runtime
+(Lua + JS), capability layer, kernel sandbox, trust artifacts (SBOM,
+Sigstore + Rekor, SLSA attestations, `hull verify-self`, fork playbook),
+basic web stdlib (sessions, basic CSRF, basic role-based RBAC, HTTP
+server/client, templates, forms, validation, ETag, health, i18n, CSV),
+HTMX core profile, basic multipart + attachment helpers, build / sign /
+verify / update / doctor commands, agent platform, examples, and
+documentation.
+
+The community tier never shrinks. Nothing currently shipped in the OSS
+repo will ever move behind a commercial gate. Enterprise-tier features
+are *additions*, not *removals*.
+
+### Enterprise tier (commercial license)
+
+Built in the separate `artalis-io/hull-enterprise` repository (private,
+commercial-license only). Hull binaries built with enterprise features
+have the relevant commercial code statically linked at build time via
+the same `HL_ENABLE_*` flag pattern. The OSS Hull binary runs without
+any commercial code; community-tier users get a 100% AGPL binary.
+
+Planned / shipped enterprise-tier features:
+
+- **Enterprise SSO middleware.** OIDC, SAML, LDAP, SCIM connectors with
+  group / claim mapping, JIT provisioning, and session-bridge helpers.
+  Basic session and JWT auth stays in the community tier.
+- **Advanced RBAC.** ABAC (attribute-based access control), policy-as-code,
+  role hierarchies, dynamic permission resolution, audit-grade decision
+  logging. Basic role-based RBAC stays in the community tier.
+- **Compliance audit log.** Retention policies, structured export (SIEM,
+  S3, Splunk), tamper-evident hash chain, redaction rules, regulator-ready
+  retrieval. Basic per-request audit logging stays in the community tier.
+- **Hardware-token + KMS signing.** YubiKey (OpenPGP / PIV), AWS KMS, GCP
+  KMS, Azure Key Vault integrations for `hull sign-release` and
+  `hull sign-platform`. Multi-party signing ceremonies. Software-key
+  signing stays in the community tier.
+
+This list grows over time as additional enterprise-only capabilities ship.
+See `docs/roadmap_next.md` items tagged `[COMMERCIAL]` for what's planned
+but not yet built.
+
+### Hosted tier (subscription)
+
+Hosted services run on infrastructure operated by Artalis. Live in the
+separate `artalis-io/hull-hosted-services` repo. Not distributed as
+source under any license. Planned services include:
+
+- Hull Build (hosted compile)
+- Hull Verify with enterprise SSO + audit log
+- Hosted rebuild-attestation service (see `docs/security.md` §7.4)
+- Hosted SBOM repository with continuous CVE alerts
+
 ## Vendored dependencies
 
 Hull statically links the following third-party libraries (all in `vendor/`).
