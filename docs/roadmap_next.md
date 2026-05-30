@@ -389,21 +389,25 @@ commit). Apps that mix both must accept eventual consistency.
 ## 1.5 Hypermedia web application profile (HTMX + Pico)
 
 **Priority:** High. Fills the gap between full-page SSR apps and
-React-style SPAs for business workflow software. The target use case is
-internal tools such as IT asset trackers, admin consoles, inventory systems,
-approval workflows, CRM-like dashboards, and other CRUD-heavy applications
-where the server should remain the source of truth.
+React-style SPAs for business workflow software. Target use case: internal
+tools such as IT asset trackers, admin consoles, inventory systems, approval
+workflows, CRM-like dashboards, and other CRUD-heavy applications where the
+server should remain the source of truth.
 
-**Thesis:**
+**Thesis.** Hull already has the right backend primitives for secure SSR:
+templates, forms, sessions, CSRF, RBAC, SQLite, migrations, static files,
+search, CSV, email, audit logging, and single-binary deployment. HTMX adds
+partial page updates while preserving HTML as the application protocol.
+Pico.css provides a classless baseline that rewards semantic templates and
+avoids a frontend build pipeline.
 
-Hull already has the right backend primitives for secure SSR: templates,
-forms, sessions, CSRF, RBAC, SQLite, migrations, static files, search, CSV,
-email, audit logging, and single-binary deployment. HTMX adds partial page
-updates while preserving HTML as the application protocol. Pico.css provides a
-classless baseline that rewards semantic templates and avoids a frontend build
-pipeline.
+**Split into three sub-items.** §1.5.a is the HTMX core (target v0.1.8).
+§1.5.b is multipart uploads + attachment storage (target v0.1.9). §1.5.c
+collects the broader enterprise-internal-app gaps that the profile makes
+visible but are independent of HTMX itself (OIDC, app audit log, admin UI
+conventions, import/export workflows).
 
-The desired application profile is:
+**The desired application profile is:**
 
 ```
 templates/
@@ -419,52 +423,113 @@ static/
 No CDN by default. Assets are vendored into `static/`, embedded by
 `hull build`, served from `/static/*`, and covered by a self-hosted CSP.
 
-**Tasks:**
+**Out of scope (for the entire §1.5).** Adopting React/Vue/Svelte,
+client-side hydration, npm as a required app build step, or making HTMX a
+runtime dependency of Hull itself. HTMX and Pico remain vendored static
+assets at the application layer; Hull provides the server-side conventions
+and helpers.
 
-- [ ] Add a small `hull.htmx` helper module:
-      `is(req)`, `boosted(req)`, `redirect(req, res, path)`,
-      `retarget(res, selector)`, `reswap(res, mode)`,
-      `trigger(res, event, payload)`.
-- [ ] Add `hull new --profile htmx` / scaffold support with vendored HTMX,
-      vendored Pico classless CSS, base layout, fragment layout, CSRF forms,
-      and no JavaScript build step.
-- [ ] Add a named CSP profile for self-hosted hypermedia apps, equivalent to
-      `script-src 'self'`, `style-src 'self' 'unsafe-inline'`, `img-src 'self'`,
-      `form-action 'self'`, and `frame-ancestors 'none'`.
-- [ ] Add `examples/hypermedia_todo` or `examples/asset_tracker` showing
-      progressive enhancement: normal links/forms work without JavaScript,
-      HTMX requests receive fragments, and full browser navigation receives
-      complete pages.
-- [ ] Extend the test helpers and examples to send `HX-Request: true` and
-      assert fragment responses, redirects, retargeting, and triggered events.
-- [ ] Document the pattern: "return full pages for ordinary navigation,
-      fragments for `HX-Request`", including CSRF, validation errors, flash
-      messages, and empty states.
+### 1.5.a HTMX core (target v0.1.8)
 
-**Enterprise/internal-app gaps this profile should unblock or make explicit:**
+**Locked design decisions (2026-05-30):**
 
-- [ ] Streaming multipart uploads. Current request bodies are capped at 1 MB;
-      real asset trackers need photos, invoices, receipts, PDFs, and bulk
-      import files.
-- [ ] Attachment/document storage helpers: declared `fs_write` location,
-      checksum, MIME type, size limits, metadata table, and secure download
-      routes.
-- [ ] OIDC middleware for enterprise SSO. SAML/LDAP/SCIM can follow, but OIDC
-      should be the first supported path for company identity providers.
-- [ ] First-party app audit-log helper distinct from capability audit logs:
-      record who changed which business object, before/after values, source
-      request, timestamp, and optional reason.
+- **CSS framework:** Pico v2 classless. SHA-pinned vendored copy under
+  `vendor/pico/`. Scaffold copies into `static/vendor/pico.classless.min.css`.
+- **CSP profile:** `style-src 'self' 'nonce-{rand}'` + `style-src-attr
+  'unsafe-inline'` + `script-src 'self' 'nonce-{rand}'` + `default-src
+  'self'` + `img-src 'self' data:` + `form-action 'self'` + `frame-ancestors
+  'none'` + `base-uri 'self'`. Per-request 128-bit nonce. `style-src-attr
+  'unsafe-inline'` exists only because Pico uses inline `style="…"`
+  attributes for some components (`<details>`, `<dialog>`, form controls).
+  HTML `<style>` blocks and `<script>` tags still require nonce.
+- **Runtime parity:** Both Lua and JS. Helper module, middleware, and
+  example app all exist in both runtimes.
+- **Example app:** New minimal `examples/hypermedia_todo` (Lua + JS). Not
+  reusing existing `examples/todo` to keep the HTMX patterns visible and
+  uncluttered.
+- **Scaffold trigger:** `hull init --profile htmx`. Extends existing
+  `init.lua`; no new top-level command.
+
+**Tasks (v0.1.8):**
+
+- [ ] §1.5.a-1. `hull/htmx@1` helper module (Lua + JS). API: `is(req)`,
+      `boosted(req)`, `redirect(req, res, path)`, `retarget(res, selector)`,
+      `reswap(res, mode)`, `trigger(res, event, payload)`, plus the
+      obvious additions `location(res, opts)`, `push_url(res, url)`,
+      `refresh(res)`. Module registry entry. Unit tests.
+- [ ] §1.5.a-2. `hull/middleware/csp@1` (Lua + JS). `csp.htmx()` factory
+      returns middleware that generates a per-request nonce, exposes via
+      `req.ctx.csp_nonce`, sets the full CSP header. `csp.strict()` variant
+      (no `style-src-attr 'unsafe-inline'`) for non-Pico apps. Tests.
+- [ ] §1.5.a-3. Test helper extension. Surface `HX-Request` and friends
+      via Lua/JS `t.request(...)` headers option. The cap/test.c C layer
+      already supports custom headers; just needs the binding.
+- [ ] §1.5.a-4. Vendor HTMX 2.x + Pico v2 classless. `make fetch-htmx`
+      and `make fetch-pico` targets like `fetch-ca-bundle`, with SHA-256
+      verification.
+- [ ] §1.5.a-5. `hull init --profile htmx` scaffold. Generates
+      `app.{lua,js}` + `templates/{base.html, pages/, partials/}` +
+      `static/{vendor/htmx.min.js, vendor/pico.classless.min.css, app.css}`
+      + `Makefile` + `.gitignore` + `tests/`. CSRF + session + CSP
+      middleware preconfigured.
+- [ ] §1.5.a-6. `examples/hypermedia_todo` (Lua + JS). Demonstrates the
+      pattern: full-page render on plain GET, fragment render on
+      `HX-Request`, optimistic row replacement, validation errors as a
+      fragment, flash messages, CSRF on htmx requests. Tests for both
+      htmx and plain-form paths.
+- [ ] §1.5.a-7. `docs/htmx.md` pattern guide. Architectural pattern,
+      response-header helpers, CSP nonce integration, CSRF on htmx
+      requests, validation errors as fragments, flash messages, empty
+      states, testing patterns.
+
+### 1.5.b Streaming multipart + attachment storage (target v0.1.9)
+
+**Locked design decisions (2026-05-30):**
+
+- **Keel multipart parser is in scope.** Bumps Hull's Keel pin when the
+  parser lands. Per-part disposition + size + MIME parsed; body streams
+  to a caller-provided callback rather than buffering.
+- **Runtime parity:** Lua + JS for `hull/attachment` and the multipart
+  bindings.
+- **Photo upload demo lands in `examples/hypermedia_todo`** rather than a
+  new example. v0.1.8 ships the example without uploads; v0.1.9 adds them.
+
+**Tasks (v0.1.9):**
+
+- [ ] §1.5.b-1. Streaming multipart parser in Keel. Per-part
+      content-disposition, filename, content-type, size. Streaming write
+      via callback. Tests + sanitizer coverage.
+- [ ] §1.5.b-2. `hull/attachment@1` module (Lua + JS). Manifest declares
+      `fs_write` location, MIME allowlist, size limits. Metadata table
+      (id, original_name, mime, size, sha256, uploaded_at, uploader).
+      Secure download routes with auth + path validation. GC for
+      orphaned files.
+- [ ] §1.5.b-3. Photo upload demo in `examples/hypermedia_todo` (Lua +
+      JS). Drag-and-drop or file-input upload, attachment listing,
+      delete with confirm. Tests.
+- [ ] §1.5.b-4. Docs: extend `docs/htmx.md` with the upload pattern.
+      New `docs/attachments.md` covering MIME-validation, storage layout,
+      GC strategy.
+
+### 1.5.c Enterprise / internal-app gaps surfaced by §1.5 (deferred, no target)
+
+These are real gaps any internal-tools developer will hit, but they are
+independent of HTMX itself. Tracked here so they don't get lost; each
+needs its own design pass + estimate before scheduling.
+
+- [ ] OIDC middleware for enterprise SSO. SAML/LDAP/SCIM follow if
+      demand warrants; OIDC is the first supported path for company
+      identity providers.
+- [ ] First-party app audit-log helper distinct from capability audit
+      logs: record who changed which business object, before/after values,
+      source request, timestamp, optional reason.
 - [ ] Reusable admin UI conventions for paginated tables, filter forms,
-      inline validation, confirm-delete flows, flash messages, and optimistic
-      row replacement.
-- [ ] Import/export workflow helpers: CSV preview, per-row validation errors,
-      dry-run mode, commit step, and background processing hooks for large
-      imports.
-
-**Out of scope:** adopting React/Vue/Svelte, client-side hydration, npm as a
-required app build step, or making HTMX a runtime dependency of Hull itself.
-HTMX and Pico should remain vendored static assets at the application layer;
-Hull provides the server-side conventions and helpers.
+      inline validation, confirm-delete flows, flash messages, optimistic
+      row replacement (as a stdlib doc + helper module rather than just
+      example boilerplate).
+- [ ] Import/export workflow helpers: CSV preview, per-row validation
+      errors, dry-run mode, commit step, background processing hooks for
+      large imports.
 
 ---
 
