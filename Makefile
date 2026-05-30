@@ -681,6 +681,67 @@ fetch-ca-bundle:
 	    || shasum -a 256 -c cacert.pem.sha256)
 	@echo "Done — $$(grep -c '^-----BEGIN CERTIFICATE-----' $(CACERT_PEM)) certificates."
 
+# ── HTMX + Pico (vendored assets for `hull init --profile htmx`) ───
+#
+# Pinned releases. Bumping versions: update the version + SHA-256
+# variables below, run `make fetch-htmx fetch-pico`, sanity-check
+# that the new bytes serve a working HTMX scaffold, then commit.
+#
+# These files are committed under vendor/htmx/ and vendor/pico/ at
+# the pinned versions. They get embedded by the scaffold step (see
+# §1.5.a-5 — `hull init --profile htmx`) when generating a new app's
+# static/vendor/ directory. Apps own their copies after scaffolding;
+# bumping Hull's pinned versions doesn't touch existing apps.
+
+HTMX_DIR        := vendor/htmx
+HTMX_VERSION    := v2.0.9
+HTMX_MIN_SHA256 := 57d9191515339922bd1356d7b2d80b1ee3b29f1b3a2c65a078bb8b2e8fd9ae5f
+HTMX_URL        := https://github.com/bigskysoftware/htmx/releases/download/$(HTMX_VERSION)/htmx.min.js
+HTMX_MIN_JS     := $(HTMX_DIR)/htmx.min.js
+
+PICO_DIR             := vendor/pico
+PICO_VERSION         := v2.1.1
+PICO_CLASSLESS_SHA256 := 61207a40ffc02a42d1e50143651c121beab70ed413c934c1ff84fa263ba436b0
+PICO_URL             := https://raw.githubusercontent.com/picocss/pico/$(PICO_VERSION)/css/pico.classless.min.css
+PICO_CLASSLESS_CSS   := $(PICO_DIR)/pico.classless.min.css
+
+.PHONY: fetch-htmx
+fetch-htmx:
+	@mkdir -p $(HTMX_DIR)
+	@echo "Fetching HTMX $(HTMX_VERSION) from github.com/bigskysoftware/htmx …"
+	curl -fsSL $(HTMX_URL) -o $(HTMX_MIN_JS)
+	@echo "Verifying SHA-256 (pinned: $(HTMX_MIN_SHA256)) …"
+	@actual=$$(shasum -a 256 $(HTMX_MIN_JS) | awk '{print $$1}'); \
+	if [ "$$actual" != "$(HTMX_MIN_SHA256)" ]; then \
+	    echo "SHA-256 mismatch for HTMX!"; \
+	    echo "  expected: $(HTMX_MIN_SHA256)"; \
+	    echo "  actual:   $$actual"; \
+	    rm -f $(HTMX_MIN_JS); \
+	    exit 1; \
+	fi
+	@echo "$(HTMX_VERSION)" > $(HTMX_DIR)/VERSION
+	@echo "Done — htmx.min.js ($$(wc -c < $(HTMX_MIN_JS)) bytes)."
+
+.PHONY: fetch-pico
+fetch-pico:
+	@mkdir -p $(PICO_DIR)
+	@echo "Fetching Pico classless $(PICO_VERSION) from github.com/picocss/pico …"
+	curl -fsSL $(PICO_URL) -o $(PICO_CLASSLESS_CSS)
+	@echo "Verifying SHA-256 (pinned: $(PICO_CLASSLESS_SHA256)) …"
+	@actual=$$(shasum -a 256 $(PICO_CLASSLESS_CSS) | awk '{print $$1}'); \
+	if [ "$$actual" != "$(PICO_CLASSLESS_SHA256)" ]; then \
+	    echo "SHA-256 mismatch for Pico!"; \
+	    echo "  expected: $(PICO_CLASSLESS_SHA256)"; \
+	    echo "  actual:   $$actual"; \
+	    rm -f $(PICO_CLASSLESS_CSS); \
+	    exit 1; \
+	fi
+	@echo "$(PICO_VERSION)" > $(PICO_DIR)/VERSION
+	@echo "Done — pico.classless.min.css ($$(wc -c < $(PICO_CLASSLESS_CSS)) bytes)."
+
+.PHONY: fetch-htmx-pico
+fetch-htmx-pico: fetch-htmx fetch-pico
+
 # ── Unicode width data (refresh + regenerate) ──────────────────────
 #
 # `make fetch-unicode` downloads fresh EastAsianWidth.txt and
