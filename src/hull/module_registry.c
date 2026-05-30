@@ -192,6 +192,18 @@ static const HlModuleSpec REGISTRY[] = {
         .required_caps = HL_MOD_CAP_HTTP_SERVER, .deps = {"hull/http-server", 0},
     },
     {
+        /* Content-Security-Policy with per-request nonce. Pure
+         * header-setter middleware; reads no state. Depends on
+         * hull/crypto for the nonce RNG + base64url encoder. The
+         * htmx() profile is Pico-compatible; strict() is the no-
+         * inline-style variant. Apps that need a different shape
+         * compose their own using csp.nonce(). */
+        .name = "hull/middleware/csp",
+        .api_major = 1, .intrinsic = 0, .pure = 1,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER,
+        .deps = {"hull/http-server", "hull/crypto", 0},
+    },
+    {
         .name = "hull/middleware/csrf",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HTTP_SERVER,
