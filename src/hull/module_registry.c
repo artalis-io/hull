@@ -94,6 +94,17 @@ static const HlModuleSpec REGISTRY[] = {
         .required_caps = HL_MOD_CAP_GPU, .deps = {0},
     },
     {
+        /* HTMX request inspection + response-header helpers. Pure
+         * functions; no I/O. Reads request headers, mutates response
+         * headers. Apps using it almost always also need hull/http-server
+         * but that's a soft dep (htmx works inside any handler).
+         * Sort note: "hull/htmx" < "hull/http-*" because 'm' < 't' at
+         * position 7. */
+        .name = "hull/htmx",
+        .api_major = 1, .intrinsic = 0, .pure = 1,
+        .required_caps = 0, .deps = {0},
+    },
+    {
         /* Outbound HTTPS client — http.fetch. Renamed from
          * hull/http@1 (which was misleading; it was always the
          * client). The server-side counterpart is hull/http-server@1. */
