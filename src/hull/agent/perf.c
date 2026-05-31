@@ -3,7 +3,7 @@
  *
  * Emits configuration limits + a brief feature-flag summary. For live
  * stats while a server is running, prefer the dev-server's /ready
- * endpoint (see hull.middleware.health) which exposes connection
+ * endpoint (see hull.web.middleware.health) which exposes connection
  * counts and uptime.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -100,7 +100,7 @@ int hl_agent_perf_ctx(HlAppContext *ctx, ShJsonBuf *out)
     /* Tip pointing the agent at /ready if it needs live stats */
     sh_json_write_kv_string(&w, "live_stats_hint",
         "for live connection counts and uptime, GET /ready against the dev "
-        "server (requires hull.middleware.health to be installed).");
+        "server (requires hull.web.middleware.health to be installed).");
 
     sh_json_write_object_end(&w);
     return 0;

@@ -232,7 +232,7 @@ int hull_tool(const char *module, int argc, char **argv, const char *hull_exe)
      *       the manifest.
      *
      *   (b) Promote every entry in LUA_LOADED_TABLE to a global of the
-     *       same short name (hull.crypto → crypto, hull.middleware.session
+     *       same short name (hull.crypto → crypto, hull.web.middleware.session
      *       → session, …). Restores phase-2a tool-mode globals. */
     {
         lua_State *L = lua.L;
