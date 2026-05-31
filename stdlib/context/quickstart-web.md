@@ -5,6 +5,13 @@ Hull serves web apps from a single `app.lua` file with route
 registration via `app.get/post/put/delete/use`. Sandboxed runtime,
 in-process SQLite, hot reload, signed binary build — one command each.
 
+**For server-rendered apps with partial-page updates (HTMX), prefer
+`hull init --profile htmx`.** It ships a complete starter app with
+HTMX + Pico classless + per-request CSP nonce + session + CSRF wired
+together. Full details: `hull agent context --task=htmx`.
+
+For a minimal hello-world without the HTMX wiring, omit `--profile`:
+
 ```bash
 hull init myapp --runtime=lua    # scaffold (creates app.lua + tests/ + .gitignore)
 cd myapp

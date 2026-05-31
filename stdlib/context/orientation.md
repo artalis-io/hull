@@ -98,6 +98,16 @@ hull test                          # in-process HTTP harness
 hull build .                       # standalone signed binary
 ```
 
+**Profile selection at scaffold time.** `hull init` takes a `--profile`
+flag for richer starter apps. For server-rendered web apps that need
+partial-page updates (forms, lists, optimistic UI), pick the `htmx`
+profile. It ships HTMX + Pico classless + per-request CSP nonce +
+session + CSRF wired together:
+
+```bash
+hull init myapp --profile htmx     # full details: hull agent context --task=htmx
+```
+
 For non-server apps (CLI / TUI), `app.main(fn)` replaces route registration
 — see `quickstart-cli` / `quickstart-tui`.
 
