@@ -197,6 +197,67 @@ app.post("/todos/:id/toggle", function(req, res)
     end
 end)
 
+-- Inline edit. Triad of routes:
+--   GET   /todos/:id/edit   -> swap row to inline edit form
+--   GET   /todos/:id        -> show a single row (used by Cancel)
+--   PATCH /todos/:id        -> save edit, return row fragment (or
+--                               re-render edit form on validation error)
+-- Order matters: register the MORE SPECIFIC path (/edit) first.
+-- Hull's router is first-match, and the bare /todos/:id pattern
+-- would otherwise greedily capture "123/edit" as the :id.
+-- Plain-form fallback for PATCH: see docs/htmx.md (Rails-style
+-- POST + _method=PATCH override). The example is HTMX-only.
+
+app.get("/todos/:id/edit", function(req, res)
+    local id = tonumber(req.params.id)
+    local row = db.query(
+        "SELECT id, title, done FROM todos WHERE id = ?", { id })[1]
+    if not row then res:status(404); return end
+    res:html(template.render("partials/_todo_edit_form.html", {
+        t = row,
+        csrf_token = req.ctx.csrf_token,
+    }))
+end)
+
+app.get("/todos/:id", function(req, res)
+    local id = tonumber(req.params.id)
+    local row = db.query(
+        "SELECT id, title, done FROM todos WHERE id = ?", { id })[1]
+    if not row then res:status(404); return end
+    if htmx.is(req) then
+        res:html(template.render("partials/todo_row.html", { t = row }))
+    else
+        res:redirect("/")
+    end
+end)
+
+app.patch("/todos/:id", function(req, res)
+    local id = tonumber(req.params.id)
+    local fields = form.parse(req.body or "")
+    local title = (fields.title or "")
+                    :gsub("^%s+", ""):gsub("%s+$", "")
+    if title == "" then
+        -- Re-render the edit form with an inline error. hx-retarget
+        -- so the response targets the row even though the form's
+        -- hx-target was already #todo-{id}.
+        local existing = db.query(
+            "SELECT id, title, done FROM todos WHERE id = ?", { id })[1]
+        if not existing then res:status(404); return end
+        existing.title = ""  -- keep the empty value the user submitted
+        res:html(template.render("partials/_todo_edit_form.html", {
+            t = existing,
+            csrf_token = req.ctx.csrf_token,
+            error = "Title cannot be empty.",
+        }))
+        return
+    end
+    db.exec("UPDATE todos SET title = ? WHERE id = ?", { title, id })
+    local row = db.query(
+        "SELECT id, title, done FROM todos WHERE id = ?", { id })[1]
+    if not row then res:status(404); return end
+    res:html(template.render("partials/todo_row.html", { t = row }))
+end)
+
 app.delete("/todos/:id", function(req, res)
     local id = tonumber(req.params.id)
     db.exec("DELETE FROM todos WHERE id = ?", { id })

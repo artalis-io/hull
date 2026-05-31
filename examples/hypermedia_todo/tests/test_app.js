@@ -145,6 +145,85 @@ test("GET /search filters by title (HTMX fragment)", async () => {
     test.ok(all.body.includes("write report"));
 });
 
+test("inline edit: GET /todos/:id/edit returns form, PATCH saves + returns row", async () => {
+    const { db } = await import("hull:db");
+    db.exec("DELETE FROM todos");
+    db.exec("INSERT INTO todos (title, done) VALUES ('original title', 0)");
+    const id = db.query("SELECT id FROM todos LIMIT 1")[0].id;
+
+    const home = await test.get("/", { middleware: true });
+    const token = home.body.match(/name="_csrf" value="([^"]+)"/)?.[1];
+    const cookieHdr = home.headers["set-cookie"] || "";
+    const hxHeaders = {
+        "hx-request": "true",
+        "cookie": cookieHdr,
+        "x-csrf-token": token,
+    };
+
+    const edit = await test.get("/todos/" + id + "/edit",
+        { middleware: true, headers: hxHeaders });
+    test.eq(edit.status, 200);
+    test.ok(edit.body.includes('hx-patch="/todos/' + id + '"'),
+            "edit form should use hx-patch");
+    test.ok(edit.body.includes('value="original title"'),
+            "edit form should pre-fill current title");
+
+    const saved = await test.patch("/todos/" + id, {
+        middleware: true,
+        body: "title=updated+title&_csrf=" + token,
+        headers: {
+            ...hxHeaders,
+            "content-type": "application/x-www-form-urlencoded",
+        },
+    });
+    test.eq(saved.status, 200);
+    test.ok(saved.body.includes("updated title"),
+            "PATCH response should contain new title");
+    test.ok(!saved.body.includes('hx-patch="'),
+            "PATCH success should return the row, NOT the edit form");
+
+    const stored = db.query(
+        "SELECT title FROM todos WHERE id = ?", [id])[0].title;
+    test.eq(stored, "updated title");
+
+    const cancel = await test.get("/todos/" + id,
+        { middleware: true, headers: hxHeaders });
+    test.eq(cancel.status, 200);
+    test.ok(cancel.body.includes("updated title"));
+    test.ok(!cancel.body.includes('hx-patch="'));
+});
+
+test("inline edit: PATCH with empty title re-renders edit form with error", async () => {
+    const { db } = await import("hull:db");
+    db.exec("DELETE FROM todos");
+    db.exec("INSERT INTO todos (title, done) VALUES ('keep me', 0)");
+    const id = db.query("SELECT id FROM todos LIMIT 1")[0].id;
+
+    const home = await test.get("/", { middleware: true });
+    const token = home.body.match(/name="_csrf" value="([^"]+)"/)?.[1];
+    const cookieHdr = home.headers["set-cookie"] || "";
+
+    const res = await test.patch("/todos/" + id, {
+        middleware: true,
+        body: "title=&_csrf=" + token,
+        headers: {
+            "hx-request": "true",
+            "content-type": "application/x-www-form-urlencoded",
+            "cookie": cookieHdr,
+            "x-csrf-token": token,
+        },
+    });
+    test.eq(res.status, 200);
+    test.ok(res.body.includes("Title cannot be empty"),
+            "validation error should be in the body");
+    test.ok(res.body.includes('hx-patch="/todos/' + id + '"'),
+            "response should re-render the edit form");
+
+    const stored = db.query(
+        "SELECT title FROM todos WHERE id = ?", [id])[0].title;
+    test.eq(stored, "keep me");
+});
+
 test("POST /todos with empty title returns validation fragment", async () => {
     const home = await test.get("/", { middleware: true });
     const token = home.body.match(/name="_csrf" value="([^"]+)"/)?.[1];

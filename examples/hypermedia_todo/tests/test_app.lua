@@ -156,6 +156,93 @@ test("GET /search filters by title (HTMX fragment)", function()
     test.ok(string.find(all.body, "write report", 1, true))
 end)
 
+test("inline edit: GET /todos/:id/edit returns form, PATCH saves + returns row", function()
+    -- Seed one todo we can edit.
+    local db = require("hull.db")
+    db.exec("DELETE FROM todos")
+    db.exec("INSERT INTO todos (title, done) VALUES ('original title', 0)")
+    local id = db.query("SELECT id FROM todos LIMIT 1")[1].id
+
+    -- Get a CSRF token (and session cookie) by hitting /.
+    local home = test.get("/", { middleware = true })
+    local token = string.match(home.body, 'name="_csrf" value="([^"]+)"')
+    local cookie_hdr = home.headers["set-cookie"] or ""
+    local hx_headers = {
+        ["hx-request"] = "true",
+        ["cookie"] = cookie_hdr,
+        ["x-csrf-token"] = token,
+    }
+
+    -- GET /todos/:id/edit -> inline edit form fragment.
+    local edit = test.get("/todos/" .. id .. "/edit",
+        { middleware = true, headers = hx_headers })
+    test.eq(edit.status, 200)
+    test.ok(string.find(edit.body, 'hx-patch="/todos/' .. id .. '"', 1, true),
+            "edit form should use hx-patch")
+    test.ok(string.find(edit.body, 'value="original title"'),
+            "edit form should pre-fill current title")
+
+    -- PATCH /todos/:id -> save + return updated row fragment.
+    local patched_headers = {}
+    for k, v in pairs(hx_headers) do patched_headers[k] = v end
+    patched_headers["content-type"] = "application/x-www-form-urlencoded"
+    local saved = test.patch("/todos/" .. id, {
+        middleware = true,
+        body = "title=updated+title&_csrf=" .. token,
+        headers = patched_headers,
+    })
+    test.eq(saved.status, 200)
+    test.ok(string.find(saved.body, "updated title", 1, true),
+            "PATCH response should contain new title")
+    test.ok(not string.find(saved.body, 'hx-patch="', 1, true),
+            "PATCH success should return the row, NOT the edit form")
+
+    -- Confirm DB persisted.
+    local stored = db.query(
+        "SELECT title FROM todos WHERE id = ?", { id })[1].title
+    test.eq(stored, "updated title")
+
+    -- GET /todos/:id -> single row fragment (cancel-edit path).
+    local cancel = test.get("/todos/" .. id,
+        { middleware = true, headers = hx_headers })
+    test.eq(cancel.status, 200)
+    test.ok(string.find(cancel.body, "updated title", 1, true))
+    test.ok(not string.find(cancel.body, 'hx-patch="', 1, true),
+            "GET /todos/:id should return the row, not the edit form")
+end)
+
+test("inline edit: PATCH with empty title re-renders edit form with error", function()
+    local db = require("hull.db")
+    db.exec("DELETE FROM todos")
+    db.exec("INSERT INTO todos (title, done) VALUES ('keep me', 0)")
+    local id = db.query("SELECT id FROM todos LIMIT 1")[1].id
+
+    local home = test.get("/", { middleware = true })
+    local token = string.match(home.body, 'name="_csrf" value="([^"]+)"')
+    local cookie_hdr = home.headers["set-cookie"] or ""
+
+    local res = test.patch("/todos/" .. id, {
+        middleware = true,
+        body = "title=&_csrf=" .. token,
+        headers = {
+            ["hx-request"] = "true",
+            ["content-type"] = "application/x-www-form-urlencoded",
+            ["cookie"] = cookie_hdr,
+            ["x-csrf-token"] = token,
+        },
+    })
+    test.eq(res.status, 200)
+    test.ok(string.find(res.body, "Title cannot be empty"),
+            "validation error should be in the body")
+    test.ok(string.find(res.body, 'hx-patch="/todos/' .. id .. '"', 1, true),
+            "response should re-render the edit form")
+
+    -- DB unchanged.
+    local stored = db.query(
+        "SELECT title FROM todos WHERE id = ?", { id })[1].title
+    test.eq(stored, "keep me")
+end)
+
 test("POST /todos with empty title returns validation fragment", function()
     local home = test.get("/", { middleware = true })
     local token = string.match(home.body, 'name="_csrf" value="([^"]+)"')

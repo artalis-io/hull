@@ -352,6 +352,56 @@ app.post("/todos/:id/toggle", function(req, res)
     end
 end)
 
+-- Inline edit triad. Order matters: register the more specific path
+-- (/edit) before the bare /:id pattern so the router doesn't
+-- greedily capture "123/edit" as :id.
+app.get("/todos/:id/edit", function(req, res)
+    local id = tonumber(req.params.id)
+    local row = db.query(
+        "SELECT id, title, done FROM todos WHERE id = ?", { id })[1]
+    if not row then res:status(404); return end
+    res:html(template.render("partials/_todo_edit_form.html", {
+        t = row,
+        csrf_token = req.ctx.csrf_token,
+    }))
+end)
+
+app.get("/todos/:id", function(req, res)
+    local id = tonumber(req.params.id)
+    local row = db.query(
+        "SELECT id, title, done FROM todos WHERE id = ?", { id })[1]
+    if not row then res:status(404); return end
+    if htmx.is(req) then
+        res:html(template.render("partials/todo_row.html", { t = row }))
+    else
+        res:redirect("/")
+    end
+end)
+
+app.patch("/todos/:id", function(req, res)
+    local id = tonumber(req.params.id)
+    local fields = form.parse(req.body or "")
+    local title = (fields.title or "")
+                    :gsub("^%s+", ""):gsub("%s+$", "")
+    if title == "" then
+        local existing = db.query(
+            "SELECT id, title, done FROM todos WHERE id = ?", { id })[1]
+        if not existing then res:status(404); return end
+        existing.title = ""
+        res:html(template.render("partials/_todo_edit_form.html", {
+            t = existing,
+            csrf_token = req.ctx.csrf_token,
+            error = "Title cannot be empty.",
+        }))
+        return
+    end
+    db.exec("UPDATE todos SET title = ? WHERE id = ?", { title, id })
+    local row = db.query(
+        "SELECT id, title, done FROM todos WHERE id = ?", { id })[1]
+    if not row then res:status(404); return end
+    res:html(template.render("partials/todo_row.html", { t = row }))
+end)
+
 app.delete("/todos/:id", function(req, res)
     local id = tonumber(req.params.id)
     db.exec("DELETE FROM todos WHERE id = ?", { id })
@@ -558,6 +608,55 @@ app.post("/todos/:id/toggle", (req, res) => {
     }
 });
 
+// Inline edit triad. Order matters: register the more specific path
+// (/edit) before the bare /:id pattern so the router doesn't greedily
+// capture "123/edit" as :id.
+app.get("/todos/:id/edit", (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const row = db.query(
+        "SELECT id, title, done FROM todos WHERE id = ?", [id])[0];
+    if (!row) { res.status(404); return; }
+    res.html(template.render("partials/_todo_edit_form.html", {
+        t: row,
+        csrf_token: req.ctx.csrf_token,
+    }));
+});
+
+app.get("/todos/:id", (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const row = db.query(
+        "SELECT id, title, done FROM todos WHERE id = ?", [id])[0];
+    if (!row) { res.status(404); return; }
+    if (htmx.is(req)) {
+        res.html(template.render("partials/todo_row.html", { t: row }));
+    } else {
+        res.redirect("/");
+    }
+});
+
+app.patch("/todos/:id", (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const fields = form.parse(req.body || "");
+    const title = (fields.title || "").trim();
+    if (title === "") {
+        const existing = db.query(
+            "SELECT id, title, done FROM todos WHERE id = ?", [id])[0];
+        if (!existing) { res.status(404); return; }
+        existing.title = "";
+        res.html(template.render("partials/_todo_edit_form.html", {
+            t: existing,
+            csrf_token: req.ctx.csrf_token,
+            error: "Title cannot be empty.",
+        }));
+        return;
+    }
+    db.exec("UPDATE todos SET title = ? WHERE id = ?", [title, id]);
+    const row = db.query(
+        "SELECT id, title, done FROM todos WHERE id = ?", [id])[0];
+    if (!row) { res.status(404); return; }
+    res.html(template.render("partials/todo_row.html", { t: row }));
+});
+
 app.delete("/todos/:id", (req, res) => {
     const id = parseInt(req.params.id, 10);
     db.exec("DELETE FROM todos WHERE id = ?", [id]);
@@ -644,10 +743,33 @@ templates.htmx_partial_todo_row = [[<li id="todo-{{ t.id }}">
          hx-target="#todo-{{ t.id }}"
          hx-swap="outerHTML">
   <span {% if t.done %}style="text-decoration: line-through"{% end %}>{{ t.title }}</span>
+  <button hx-get="/todos/{{ t.id }}/edit"
+          hx-target="#todo-{{ t.id }}"
+          hx-swap="outerHTML"
+          aria-label="Edit">✎</button>
   <button hx-delete="/todos/{{ t.id }}"
           hx-target="#todo-{{ t.id }}"
           hx-swap="delete"
           hx-confirm="Delete this todo?">×</button>
+</li>
+]]
+
+templates.htmx_partial_todo_edit_form = [[<li id="todo-{{ t.id }}" class="todo-edit">
+  <form hx-patch="/todos/{{ t.id }}"
+        hx-target="#todo-{{ t.id }}"
+        hx-swap="outerHTML">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="text" name="title" value="{{ t.title }}"
+           aria-label="Edit todo title" required autofocus>
+    <button type="submit">Save</button>
+    <button type="button"
+            hx-get="/todos/{{ t.id }}"
+            hx-target="#todo-{{ t.id }}"
+            hx-swap="outerHTML">Cancel</button>
+  </form>
+  {% if error %}
+  <small role="alert" class="error">{{ error }}</small>
+  {% end %}
 </li>
 ]]
 
@@ -822,6 +944,39 @@ test("GET /search filters by title (HTMX fragment)", function()
     test.ok(string.find(miss.body, "No matches", 1, true))
 end)
 
+test("inline edit: GET /todos/:id/edit -> form, PATCH -> saved row", function()
+    local db = require("hull.db")
+    db.exec("DELETE FROM todos")
+    db.exec("INSERT INTO todos (title, done) VALUES ('original', 0)")
+    local id = db.query("SELECT id FROM todos LIMIT 1")[1].id
+
+    local home = test.get("/", { middleware = true })
+    local token = string.match(home.body, 'name="_csrf" value="([^"]+)"')
+    local cookie_hdr = home.headers["set-cookie"] or ""
+    local hx = {
+        ["hx-request"] = "true",
+        ["cookie"] = cookie_hdr,
+        ["x-csrf-token"] = token,
+    }
+
+    local edit = test.get("/todos/" .. id .. "/edit",
+        { middleware = true, headers = hx })
+    test.eq(edit.status, 200)
+    test.ok(string.find(edit.body, 'hx-patch="/todos/' .. id .. '"', 1, true),
+            "edit form should use hx-patch")
+
+    local patched_h = {}
+    for k, v in pairs(hx) do patched_h[k] = v end
+    patched_h["content-type"] = "application/x-www-form-urlencoded"
+    local saved = test.patch("/todos/" .. id, {
+        middleware = true,
+        body = "title=updated&_csrf=" .. token,
+        headers = patched_h,
+    })
+    test.eq(saved.status, 200)
+    test.ok(string.find(saved.body, "updated", 1, true))
+end)
+
 test("POST /todos with empty title returns validation fragment", function()
     local home = test.get("/", { middleware = true })
     local token = string.match(home.body, 'name="_csrf" value="([^"]+)"')
@@ -950,6 +1105,36 @@ test("GET /search filters by title (HTMX fragment)", async () => {
     const miss = await test.get("/search?q=zzzzz",
         { middleware: true, headers: { "hx-request": "true" } });
     test.ok(miss.body.includes("No matches"));
+});
+
+test("inline edit: GET /todos/:id/edit -> form, PATCH -> saved row", async () => {
+    const { db } = await import("hull:db");
+    db.exec("DELETE FROM todos");
+    db.exec("INSERT INTO todos (title, done) VALUES ('original', 0)");
+    const id = db.query("SELECT id FROM todos LIMIT 1")[0].id;
+
+    const home = await test.get("/", { middleware: true });
+    const token = home.body.match(/name="_csrf" value="([^"]+)"/)?.[1];
+    const cookieHdr = home.headers["set-cookie"] || "";
+    const hx = {
+        "hx-request": "true",
+        "cookie": cookieHdr,
+        "x-csrf-token": token,
+    };
+
+    const edit = await test.get("/todos/" + id + "/edit",
+        { middleware: true, headers: hx });
+    test.eq(edit.status, 200);
+    test.ok(edit.body.includes('hx-patch="/todos/' + id + '"'),
+            "edit form should use hx-patch");
+
+    const saved = await test.patch("/todos/" + id, {
+        middleware: true,
+        body: "title=updated&_csrf=" + token,
+        headers: { ...hx, "content-type": "application/x-www-form-urlencoded" },
+    });
+    test.eq(saved.status, 200);
+    test.ok(saved.body.includes("updated"));
 });
 
 test("POST /todos with empty title returns validation fragment", async () => {
@@ -1255,6 +1440,8 @@ local function scaffold_htmx(dir, runtime, track_file, track_dir)
                templates.htmx_partial_todo_form)
     track_file(dir .. "/templates/partials/todo_row.html",
                templates.htmx_partial_todo_row)
+    track_file(dir .. "/templates/partials/_todo_edit_form.html",
+               templates.htmx_partial_todo_edit_form)
     track_file(dir .. "/templates/partials/_flash.html",
                templates.htmx_partial_flash)
     track_file(dir .. "/templates/partials/_pagination.html",

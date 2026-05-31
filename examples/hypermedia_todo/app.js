@@ -198,6 +198,64 @@ app.post("/todos/:id/toggle", (req, res) => {
     }
 });
 
+// Inline edit. Triad of routes:
+//   GET   /todos/:id/edit   -> swap row to inline edit form
+//   GET   /todos/:id        -> show a single row (used by Cancel)
+//   PATCH /todos/:id        -> save edit, return row fragment (or
+//                              re-render edit form on validation error)
+// Order matters: register the MORE SPECIFIC path (/edit) first.
+// Hull's router is first-match, and the bare /todos/:id pattern
+// would otherwise greedily capture "123/edit" as the :id.
+// Plain-form fallback for PATCH: see docs/htmx.md (Rails-style
+// POST + _method=PATCH override). The example is HTMX-only.
+
+app.get("/todos/:id/edit", (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const row = db.query(
+        "SELECT id, title, done FROM todos WHERE id = ?", [id])[0];
+    if (!row) { res.status(404); return; }
+    res.html(template.render("partials/_todo_edit_form.html", {
+        t: row,
+        csrf_token: req.ctx.csrf_token,
+    }));
+});
+
+app.get("/todos/:id", (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const row = db.query(
+        "SELECT id, title, done FROM todos WHERE id = ?", [id])[0];
+    if (!row) { res.status(404); return; }
+    if (htmx.is(req)) {
+        res.html(template.render("partials/todo_row.html", { t: row }));
+    } else {
+        res.redirect("/");
+    }
+});
+
+app.patch("/todos/:id", (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const fields = form.parse(req.body || "");
+    const title = (fields.title || "").trim();
+    if (title === "") {
+        // Re-render the edit form with an inline error.
+        const existing = db.query(
+            "SELECT id, title, done FROM todos WHERE id = ?", [id])[0];
+        if (!existing) { res.status(404); return; }
+        existing.title = "";
+        res.html(template.render("partials/_todo_edit_form.html", {
+            t: existing,
+            csrf_token: req.ctx.csrf_token,
+            error: "Title cannot be empty.",
+        }));
+        return;
+    }
+    db.exec("UPDATE todos SET title = ? WHERE id = ?", [title, id]);
+    const row = db.query(
+        "SELECT id, title, done FROM todos WHERE id = ?", [id])[0];
+    if (!row) { res.status(404); return; }
+    res.html(template.render("partials/todo_row.html", { t: row }));
+});
+
 app.delete("/todos/:id", (req, res) => {
     const id = parseInt(req.params.id, 10);
     db.exec("DELETE FROM todos WHERE id = ?", [id]);

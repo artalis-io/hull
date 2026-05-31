@@ -1,0 +1,17 @@
+<li id="todo-{{ t.id }}" class="todo-edit">
+  <form hx-patch="/todos/{{ t.id }}"
+        hx-target="#todo-{{ t.id }}"
+        hx-swap="outerHTML">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="text" name="title" value="{{ t.title }}"
+           aria-label="Edit todo title" required autofocus>
+    <button type="submit">Save</button>
+    <button type="button"
+            hx-get="/todos/{{ t.id }}"
+            hx-target="#todo-{{ t.id }}"
+            hx-swap="outerHTML">Cancel</button>
+  </form>
+  {% if error %}
+  <small role="alert" class="error">{{ error }}</small>
+  {% end %}
+</li>

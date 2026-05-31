@@ -5,6 +5,10 @@
          hx-target="#todo-{{ t.id }}"
          hx-swap="outerHTML">
   <span {% if t.done %}style="text-decoration: line-through"{% end %}>{{ t.title }}</span>
+  <button hx-get="/todos/{{ t.id }}/edit"
+          hx-target="#todo-{{ t.id }}"
+          hx-swap="outerHTML"
+          aria-label="Edit">✎</button>
   <button hx-delete="/todos/{{ t.id }}"
           hx-target="#todo-{{ t.id }}"
           hx-swap="delete"

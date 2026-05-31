@@ -320,6 +320,124 @@ handling).
 
 ---
 
+## Inline edit (click row → form → save → row)
+
+The canonical CRUD-row UX: click an edit affordance on a row, the row
+becomes an inline form, submit replaces the form with the updated
+row, cancel restores the original row. Three routes do all the work:
+
+| Verb  | Path                | Returns                          |
+|-------|---------------------|----------------------------------|
+| GET   | `/todos/:id/edit`   | inline edit form (replaces row) |
+| GET   | `/todos/:id`        | the row (used by Cancel)        |
+| PATCH | `/todos/:id`        | updated row, or re-rendered edit form on validation error |
+
+**Route registration order matters.** Register the more specific
+path (`/edit`) BEFORE the bare `/:id` so the router doesn't greedily
+capture `123/edit` as the `:id` param. The example does this; if you
+add inline-edit to your own list view, mirror the order.
+
+The Edit button on the row swaps the whole `<li>` with the edit form:
+
+```html
+<button hx-get="/todos/{{ t.id }}/edit"
+        hx-target="#todo-{{ t.id }}"
+        hx-swap="outerHTML"
+        aria-label="Edit">✎</button>
+```
+
+The edit form posts via `hx-patch` (HTMX wraps the PATCH verb on a
+form automatically — the browser still sends POST, but HTMX adds the
+right `X-HTTP-Method-Override` semantics):
+
+```html
+<li id="todo-{{ t.id }}" class="todo-edit">
+  <form hx-patch="/todos/{{ t.id }}"
+        hx-target="#todo-{{ t.id }}"
+        hx-swap="outerHTML">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="text" name="title" value="{{ t.title }}" required autofocus>
+    <button type="submit">Save</button>
+    <button type="button"
+            hx-get="/todos/{{ t.id }}"
+            hx-target="#todo-{{ t.id }}"
+            hx-swap="outerHTML">Cancel</button>
+  </form>
+</li>
+```
+
+Server PATCH handler returns the row on success, OR re-renders the
+same edit form with an inline error on validation failure:
+
+```lua
+app.patch("/todos/:id", function(req, res)
+    local fields = form.parse(req.body or "")
+    local title = (fields.title or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if title == "" then
+        local existing = db.query(...)[1]
+        existing.title = ""  -- keep the (empty) value the user typed
+        res:html(template.render("partials/_todo_edit_form.html", {
+            t = existing,
+            csrf_token = req.ctx.csrf_token,
+            error = "Title cannot be empty.",
+        }))
+        return
+    end
+    db.exec("UPDATE todos SET title = ? WHERE id = ?", { title, id })
+    res:html(template.render("partials/todo_row.html", { t = updated_row }))
+end)
+```
+
+### Plain-form fallback (Rails-style `_method=PATCH`)
+
+HTMX-only is fine for most internal tools, but if you need to degrade
+gracefully to non-HTMX clients (curl, accessibility tools that don't
+run JS), expose a POST alias that reads a `_method` override field:
+
+```html
+<form method="POST" action="/todos/{{ t.id }}">
+  <input type="hidden" name="_method" value="PATCH">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <input type="text" name="title" value="{{ t.title }}">
+  <button>Save</button>
+</form>
+```
+
+```lua
+app.post("/todos/:id", function(req, res)
+    local fields = form.parse(req.body or "")
+    if fields._method == "PATCH" then
+        return patch_todo(req, res, fields)  -- shared handler
+    end
+    res:status(405)
+end)
+```
+
+The example is HTMX-only; this is documented for apps that want
+progressive enhancement.
+
+### CSRF token freshness
+
+The CSRF middleware's default `max_age = 3600` (1hr) is usually fine
+for single-form submits. Inline edit changes the math: a user might
+open `/todos/123/edit`, leave it open all afternoon, then submit —
+the token in the form has expired.
+
+Two ways to handle:
+
+1. **Bump `max_age` for HTMX apps.** `csrf.middleware({ secret = ...,
+   max_age = 4 * 3600 })` (4 hours). Sessions almost certainly out-live
+   the token at that point; the binding is still session-scoped.
+2. **Re-fetch the edit form before submit.** HTMX `hx-trigger="focus"`
+   on the input can re-issue `GET /todos/:id/edit` so the form
+   always carries a fresh token. Heavier; usually overkill.
+
+The example ships with the default 1-hour `max_age` (good for the
+demo); production deployments with long inline-edit cycles should
+pick option 1.
+
+---
+
 ## Empty states
 
 Hull's template engine treats empty Lua tables as truthy. To branch on emptiness:
