@@ -324,11 +324,11 @@ Embedded Lua/JS modules in `stdlib/`:
 | Module | Purpose |
 |--------|---------|
 | `hull.json` | Canonical JSON encode/decode (sorted keys for deterministic signatures) |
-| `hull.cookie` | Cookie parsing (`parse`) and serialization (`serialize`, `clear`) with secure defaults |
-| `hull.middleware.session` | Server-side sessions backed by SQLite (create, load, update, destroy, cleanup) |
+| `hull.web.cookie` | Cookie parsing (`parse`) and serialization (`serialize`, `clear`) with secure defaults |
+| `hull.web.middleware.session` | Server-side sessions backed by SQLite (create, load, update, destroy, cleanup) |
 | `hull.jwt` | JWT HS256 sign/verify/decode. Constant-time signature comparison, no "none" algorithm |
-| `hull.middleware.csrf` | Stateless CSRF tokens via HMAC-SHA256. Generate, verify, middleware factory |
-| `hull.middleware.auth` | Authentication middleware factories. Session auth, JWT Bearer auth, login/logout helpers |
+| `hull.web.middleware.csrf` | Stateless CSRF tokens via HMAC-SHA256. Generate, verify, middleware factory |
+| `hull.web.middleware.auth` | Authentication middleware factories. Session auth, JWT Bearer auth, login/logout helpers |
 | `hull.template` | Compile-once render-many HTML template engine. Inheritance, includes, filters, auto-escaping |
 | `hull.build` | Full build pipeline: extract platform, collect files, generate trampoline, compile, link, sign |
 | `hull.verify` | Dual-layer signature verification (CLI tool) |

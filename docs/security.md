@@ -248,12 +248,12 @@ This is the primary threat model. Hull exists to make it possible to trust apps 
 
 **Attack: Session hijacking via cookie theft**
 
-- **Prevention:** `hull.cookie` defaults to `HttpOnly=true`, `Secure=true`, `SameSite=Lax`. HttpOnly prevents JavaScript access (XSS-based theft). Secure prevents plaintext transmission. SameSite=Lax blocks cross-origin POST requests from carrying session cookies.
+- **Prevention:** `hull.web.cookie` defaults to `HttpOnly=true`, `Secure=true`, `SameSite=Lax`. HttpOnly prevents JavaScript access (XSS-based theft). Secure prevents plaintext transmission. SameSite=Lax blocks cross-origin POST requests from carrying session cookies.
 - **Remaining risk:** Same-origin XSS can still read `req.ctx.session` data. Hull's template engine (`hull.template`) auto-escapes all `{{ }}` output by default (`& < > " '` → HTML entities), which prevents most reflected and stored XSS vectors. Raw output via `{{{ }}}` or the `| raw` filter bypasses escaping and should only be used with trusted content.
 
 **Attack: CSRF. Forged state-changing requests from another origin**
 
-- **Prevention:** `hull.middleware.csrf` middleware generates HMAC-based tokens tied to the session ID and timestamp. State-changing methods (POST/PUT/DELETE/PATCH) require a valid CSRF token in the `X-CSRF-Token` header or `_csrf` form field. Tokens expire (default 1h). Safe methods (GET/HEAD/OPTIONS) are automatically skipped. Constant-time comparison prevents timing attacks.
+- **Prevention:** `hull.web.middleware.csrf` middleware generates HMAC-based tokens tied to the session ID and timestamp. State-changing methods (POST/PUT/DELETE/PATCH) require a valid CSRF token in the `X-CSRF-Token` header or `_csrf` form field. Tokens expire (default 1h). Safe methods (GET/HEAD/OPTIONS) are automatically skipped. Constant-time comparison prevents timing attacks.
 - **Remaining risk:** If the CSRF secret is leaked, tokens can be forged. The secret must be stored securely (e.g., `env.get("SECRET_KEY")`).
 
 **Attack: JWT token forgery**
@@ -263,7 +263,7 @@ This is the primary threat model. Hull exists to make it possible to trust apps 
 
 **Attack: Session fixation / brute-force session IDs**
 
-- **Prevention:** `hull.middleware.session` generates 32 random bytes (256-bit entropy) via `crypto.random()` for session IDs. IDs are hex-encoded (64 chars). Sessions are server-side (SQLite) with sliding expiry. Expired sessions are automatically pruned.
+- **Prevention:** `hull.web.middleware.session` generates 32 random bytes (256-bit entropy) via `crypto.random()` for session IDs. IDs are hex-encoded (64 chars). Sessions are server-side (SQLite) with sliding expiry. Expired sessions are automatically pruned.
 
 ### Browser-Level Security Headers
 
@@ -511,8 +511,8 @@ app.manifest({
         "hull/db@1",
         "hull/time@1",
         "hull/validate@1",
-        "hull/middleware/auth@1",
-        "hull/middleware/session@1",
+        "hull/web/middleware/auth@1",
+        "hull/web/middleware/session@1",
     },
     fs    = { read = {"data/"} },
     hosts = {"api.stripe.com"},
@@ -533,7 +533,7 @@ Each entry is a canonical spec `"<vendor>/<name>@<major>"`. First-party modules 
 | **Every external capability is declared** | Lua/JS intrinsics (string, table, math, JSON in JS) plus a minimal Hull core are always available. The intrinsic core is just `hull/app` (the registration API; it must be intrinsic because the manifest is expressed via `app.manifest(...)`. Every other first-party module) `hull/log`, `hull/json`, `hull/crypto`, `hull/db`, `hull/http`, every middleware, every stdlib helper. Must be in `modules` or imports fail. |
 | **Import-only exposure** | Declared modules are reached via `require("hull.X")` (Lua) / `import "hull:X"` (JS). They are NOT globals. Apps that don't declare a module cannot use it even by accident. |
 | **Capability + module separate gates** | Declaring `hull/http-client@1` does not also open the network. Apps still need a non-empty `hosts` allowlist. The resolver rejects `hull/http` declared without `hosts`. Same for `hull/fs` (needs `fs.read`/`write`) and `hull/env` (needs `env`). |
-| **Explicit dependencies** | If `hull/middleware/session` internally uses `hull/db`, `hull/crypto`, and `hull/time`, the app must declare *all four*. No silent pull-in. The resolver lists the missing dep in its error. |
+| **Explicit dependencies** | If `hull/web/middleware/session` internally uses `hull/db`, `hull/crypto`, and `hull/time`, the app must declare *all four*. No silent pull-in. The resolver lists the missing dep in its error. |
 | **Sealed at startup, no runtime install** | The resolved module set is computed once after manifest extraction, frozen for the lifetime of the process. Runtime code cannot install, fetch, discover, or load new modules. The set's contents are signed into `package.sig` as `modules_resolved`. |
 | **Build-time subsystems gate too** | Modules whose backing C is compile-time-optional (`hull/db`, `hull/compute`, `hull/gpu`) are rejected if the build wasn't compiled with the corresponding `HL_ENABLE_*` flag. The resolver reports the missing build flag by name. |
 
@@ -835,5 +835,5 @@ These are real, not theoretical:
 | Default CSP blocks client-side JS | Apps needing fetch/AJAX must customize CSP | `app.manifest({ csp = "default-src 'self'; connect-src 'self'" })` |
 | 32-entry limit per manifest category | Large apps may hit ceiling | Sufficient for most production apps |
 | `req.ctx` uses raw malloc (not tracked) | ctx JSON bypasses runtime memory limits | Capped at 64KB; bounded by runtime heap indirectly |
-| HMAC-SHA256 binding returns hex string | Callers must use constant-time comparison | `hull.jwt` and `hull.middleware.csrf` stdlib use constant-time internally |
+| HMAC-SHA256 binding returns hex string | Callers must use constant-time comparison | `hull.jwt` and `hull.web.middleware.csrf` stdlib use constant-time internally |
 | `--no-sandbox` is the only W^X downgrade | Apps run under `--no-sandbox` lose every kernel-enforced guarantee, not only W^X | Use only for local development; production startup fails closed when the manifest opts into dynamic code / dynamic libraries. The Hardened-Runtime `csops` probe under `HL_RELEASE_BUILD` and the WAMR-JIT `#error` build assertions add additional fail-loud layers. |

@@ -27,25 +27,25 @@
 
 ### Standard Library (Lua + JS)
 - `hull.json`. Canonical JSON encode/decode (sorted keys for deterministic signatures)
-- `hull.cookie`. Cookie parsing and serialization with secure defaults
-- `hull.middleware.session`. Server-side SQLite-backed sessions with sliding expiry
+- `hull.web.cookie`. Cookie parsing and serialization with secure defaults
+- `hull.web.middleware.session`. Server-side SQLite-backed sessions with sliding expiry
 - `hull.jwt`. JWT HS256 sign/verify/decode (no "none" algorithm, constant-time comparison)
-- `hull.middleware.csrf`. Stateless CSRF tokens via HMAC-SHA256
-- `hull.middleware.auth`. Authentication middleware factories (session auth, JWT Bearer auth)
-- `hull.middleware.logger`. Request logging with logfmt output and auto-assigned request IDs
-- `hull.middleware.transaction`. Wraps handlers in SQLite BEGIN IMMEDIATE..COMMIT
-- `hull.middleware.idempotency`. Idempotency-Key middleware with response caching and fingerprinting
-- `hull.middleware.outbox`. Transactional outbox for reliable webhook/HTTP delivery with exponential backoff
-- `hull.middleware.inbox`. Inbox deduplication for incoming events/webhooks
+- `hull.web.middleware.csrf`. Stateless CSRF tokens via HMAC-SHA256
+- `hull.web.middleware.auth`. Authentication middleware factories (session auth, JWT Bearer auth)
+- `hull.web.middleware.logger`. Request logging with logfmt output and auto-assigned request IDs
+- `hull.web.middleware.transaction`. Wraps handlers in SQLite BEGIN IMMEDIATE..COMMIT
+- `hull.web.middleware.idempotency`. Idempotency-Key middleware with response caching and fingerprinting
+- `hull.web.middleware.outbox`. Transactional outbox for reliable webhook/HTTP delivery with exponential backoff
+- `hull.web.middleware.inbox`. Inbox deduplication for incoming events/webhooks
 - `hull.validate`. Declarative input validation with schema rules
-- `hull.form`. URL-encoded form body parsing
+- `hull.web.form`. URL-encoded form body parsing
 - `hull.i18n`. Internationalization with locale detection, message bundles, formatting helpers
 - `hull.template`. Compile-once render-many HTML template engine with inheritance, includes, filters, auto-escaping
 - `hull.csv`. CSV parse/encode (RFC 4180)
 - `hull.search`. Full-text search (SQLite FTS5)
-- `hull.middleware.rbac`. Role-based access control
-- `hull.middleware.cors`. CORS headers + preflight handling
-- `hull.middleware.ratelimit`. In-memory rate limiting with configurable windows
+- `hull.web.middleware.rbac`. Role-based access control
+- `hull.web.middleware.cors`. CORS headers + preflight handling
+- `hull.web.middleware.ratelimit`. In-memory rate limiting with configurable windows
 - Static file serving. Convention-based (`static/` → `/static/*`), MIME detection, ETag/304, embedded in builds, zero-copy sendfile in dev
 
 ### Background Work
@@ -209,23 +209,23 @@ One download. Zero dependencies. Full lifecycle.
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| CORS middleware | **Done** | `hull.middleware.cors`. Configurable origins, preflight handling |
+| CORS middleware | **Done** | `hull.web.middleware.cors`. Configurable origins, preflight handling |
 | Template engine (`{{ }}` HTML templates) | **Done** | `hull.template`. Inheritance, includes, filters, compiled & cached |
 | Input validation (schema-based) | **Done** | `hull.validate`. Declarative field validation |
-| Rate limiting middleware | **Done** | `hull.middleware.ratelimit`. Sliding window, per-key |
+| Rate limiting middleware | **Done** | `hull.web.middleware.ratelimit`. Sliding window, per-key |
 | Static file serving (`/static/*` convention) | **Done** | MIME detection, ETag/304, embedded in builds, zero-copy sendfile in dev |
 | i18n (locale detection + translations) | **Done** | `hull.i18n`. Locale detection, message bundles, format helpers |
-| Request logging middleware | **Done** | `hull.middleware.logger`. Logfmt output, request IDs |
-| Transaction middleware | **Done** | `hull.middleware.transaction`. BEGIN IMMEDIATE..COMMIT wrappers |
-| Idempotency-Key middleware | **Done** | `hull.middleware.idempotency`. Response caching, fingerprinting, 409 on mismatch |
-| Transactional outbox | **Done** | `hull.middleware.outbox`. Reliable delivery with exponential backoff |
-| Inbox deduplication | **Done** | `hull.middleware.inbox`. Incoming event dedup with TTL |
+| Request logging middleware | **Done** | `hull.web.middleware.logger`. Logfmt output, request IDs |
+| Transaction middleware | **Done** | `hull.web.middleware.transaction`. BEGIN IMMEDIATE..COMMIT wrappers |
+| Idempotency-Key middleware | **Done** | `hull.web.middleware.idempotency`. Response caching, fingerprinting, 409 on mismatch |
+| Transactional outbox | **Done** | `hull.web.middleware.outbox`. Reliable delivery with exponential backoff |
+| Inbox deduplication | **Done** | `hull.web.middleware.inbox`. Incoming event dedup with TTL |
 | CSV encode/decode (RFC 4180) | **Done** | `hull.csv`. RFC 4180 parse/encode |
 | FTS5 search wrapper | **Done** | `hull.search`. Full-text search backed by SQLite FTS5 |
-| RBAC (role-based access control) | **Done** | `hull.middleware.rbac`. Role/permission middleware |
+| RBAC (role-based access control) | **Done** | `hull.web.middleware.rbac`. Role/permission middleware |
 | Email (SMTP / API) | **Done** | Outbound SMTP via C capability + stdlib |
-| Health + readiness endpoints | **Done** | `hull.middleware.health`. Liveness + readiness with custom checks |
-| ETag response helpers | **Done** | `hull.middleware.etag`. Compute + compare + 304 |
+| Health + readiness endpoints | **Done** | `hull.web.middleware.health`. Liveness + readiness with custom checks |
+| ETag response helpers | **Done** | `hull.web.middleware.etag`. Compute + compare + 304 |
 | Deployment config generator | **Done** | `hull deploy`. Dockerfile, systemd, fly.toml from manifest |
 | License key system | Planned | Ed25519 offline verification for commercial distribution |
 
@@ -1079,7 +1079,7 @@ Outputs:
 | Background work / timers | **Done** | `app.every()`, `app.daily()`. Async-capable repeating timers |
 | Compression (gzip) | **Done** | Keel-integrated response compression via miniz |
 | Connection pooling | **Done** | Outbound HTTP reuses TCP+TLS connections (32 pool, 4 per host, 60s idle) |
-| ETag support | **Done** | `hull.middleware.etag`. Compute + compare + 304 Not Modified |
+| ETag support | **Done** | `hull.web.middleware.etag`. Compute + compare + 304 Not Modified |
 | PostgreSQL support | Planned | Behind same `db.query()`/`db.exec()` capability interface |
 | Database encryption at rest | Planned | SQLite SEE or custom VFS |
 | HTTP/2 full support | [Plan](http2_plan.md) | Currently h2c upgrade only |

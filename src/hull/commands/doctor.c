@@ -436,9 +436,9 @@ static void print_human(FILE *f, CompilerInfo *ci, int nci,
         fprintf(f, "  HL_ENABLE_GPU   \xe2\x97\x8b  off — hull/gpu will fail to resolve\n");
 #endif
 #ifdef HL_ENABLE_HTTP
-        fprintf(f, "  HL_ENABLE_HTTP  \xe2\x9c\x93  hull/http, hull/ws, hull/server, hull/middleware/* importable\n");
+        fprintf(f, "  HL_ENABLE_HTTP  \xe2\x9c\x93  hull/http-server, hull/http-client, hull/web/* (ws/sse/middleware) importable\n");
 #else
-        fprintf(f, "  HL_ENABLE_HTTP  \xe2\x97\x8b  off — CLI / compute-only build; all middleware + http/ws/server modules will fail to resolve\n");
+        fprintf(f, "  HL_ENABLE_HTTP  \xe2\x97\x8b  off — CLI / compute-only build; hull/http-*, hull/web/ws-*, hull/web/sse, and hull/web/middleware/* will fail to resolve\n");
 #endif
         size_t total = 0;
         (void)hl_module_registry_all(&total);

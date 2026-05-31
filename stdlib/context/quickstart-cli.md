@@ -54,8 +54,9 @@ end)
 
 If your tool doesn't need an HTTP server, build with
 `HL_ENABLE_HTTP_SERVER=0`. Binary drops ~600 KB; modules
-`hull/server`, `hull/ws`, `hull/web/sse`, every `hull/middleware/*` are
-unavailable at module-resolve time.
+`hull/http-server`, `hull/web/ws-server`, `hull/web/ws-client`,
+`hull/web/sse`, and every `hull/web/middleware/*` are unavailable
+at module-resolve time.
 
 ```bash
 make HL_ENABLE_HTTP_SERVER=0 EMBED_PLATFORM=1

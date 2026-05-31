@@ -1008,7 +1008,7 @@ hull v0.1.4  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
         <span class="tk-str">"hull/http-server@1"</span>,
         <span class="tk-str">"hull/db@1"</span>,
         <span class="tk-str">"hull/crypto@1"</span>,
-        <span class="tk-str">"hull/middleware/session@1"</span>,
+        <span class="tk-str">"hull/web/middleware/session@1"</span>,
     },
     <span class="tk-key">hosts</span> = { <span class="tk-str">"api.example.com"</span> },
     <span class="tk-key">fs</span>    = { <span class="tk-key">read</span> = { <span class="tk-str">"./assets/*"</span> } },
@@ -1028,7 +1028,7 @@ hull v0.1.4  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
         <span class="tk-str">"hull/http-server@1"</span>,
         <span class="tk-str">"hull/db@1"</span>,
         <span class="tk-str">"hull/crypto@1"</span>,
-        <span class="tk-str">"hull/middleware/session@1"</span>,
+        <span class="tk-str">"hull/web/middleware/session@1"</span>,
     ],
     <span class="tk-key">hosts</span>: [<span class="tk-str">"api.example.com"</span>],
     <span class="tk-key">fs</span>:    { <span class="tk-key">read</span>: [<span class="tk-str">"./assets/*"</span>] },
@@ -1566,7 +1566,7 @@ $ hull agent routes my-tool
 {
   <span class="tk-key">"app"</span>: <span class="tk-str">"my-tool"</span>,
   <span class="tk-key">"runtime"</span>: <span class="tk-str">"lua"</span>,
-  <span class="tk-key">"modules"</span>: [<span class="tk-str">"hull/http-server@1"</span>, <span class="tk-str">"hull/db@1"</span>, <span class="tk-str">"hull/middleware/session@1"</span>],
+  <span class="tk-key">"modules"</span>: [<span class="tk-str">"hull/http-server@1"</span>, <span class="tk-str">"hull/db@1"</span>, <span class="tk-str">"hull/web/middleware/session@1"</span>],
   <span class="tk-key">"routes"</span>: [
     { <span class="tk-key">"method"</span>: <span class="tk-str">"GET"</span>,  <span class="tk-key">"path"</span>: <span class="tk-str">"/items"</span>,  <span class="tk-key">"handler"</span>: <span class="tk-str">"app.lua:32"</span> },
     { <span class="tk-key">"method"</span>: <span class="tk-str">"POST"</span>, <span class="tk-key">"path"</span>: <span class="tk-str">"/items"</span>,  <span class="tk-key">"handler"</span>: <span class="tk-str">"app.lua:48"</span> }

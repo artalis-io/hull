@@ -224,7 +224,7 @@ falls back to `time level [tag] message`. To get structured logs in agent
 workflows, install the logger middleware first and tail the stderr:
 
 ```lua
-app.use("*", "/*", require("hull.middleware.logger").middleware({
+app.use("*", "/*", require("hull.web.middleware.logger").middleware({
     skip = { "/health" },
 }))
 ```
@@ -601,11 +601,11 @@ JS uses identical names: `app.use`, `app.usePost`, `app.ws`, `app.sse`,
 | Module | Lua | JS | What it does |
 |---|---|---|---|
 | **json** | `hull.json` | (built-in `json`) | Encode/decode |
-| **cookie** | `hull.cookie` | `hull:cookie` | Parse / serialize / clear |
+| **cookie** | `hull.web.cookie` | `hull:web:cookie` | Parse / serialize / clear |
 | **jwt** | `hull.jwt` | `hull:jwt` | Sign / verify HS256 |
 | **template** | `hull.template` | `hull:template` | HTML templates (auto-escape) |
 | **validate** | `hull.validate` | `hull:validate` | Schema validation |
-| **form** | `hull.form` | `hull:form` | URL-encoded form parse |
+| **form** | `hull.web.form` | `hull:web:form` | URL-encoded form parse |
 | **i18n** | `hull.i18n` | `hull:i18n` | Locale + translations |
 | **csv** | `hull.csv` | `hull:csv` | Parse / encode RFC 4180 |
 | **search** | `hull.search` | `hull:search` | FTS5 full-text search |
@@ -643,15 +643,15 @@ app.use("*", "/*", mw)                  -- 0 = continue, 1 = short-circuit
 #### Recommended middleware stack
 
 ```lua
-local cors        = require("hull.middleware.cors")
-local ratelimit   = require("hull.middleware.ratelimit")
-local auth        = require("hull.middleware.auth")
-local csrf        = require("hull.middleware.csrf")
-local session     = require("hull.middleware.session")
-local logger      = require("hull.middleware.logger")
-local health      = require("hull.middleware.health")
-local transaction = require("hull.middleware.transaction")
-local idempotency = require("hull.middleware.idempotency")
+local cors        = require("hull.web.middleware.cors")
+local ratelimit   = require("hull.web.middleware.ratelimit")
+local auth        = require("hull.web.middleware.auth")
+local csrf        = require("hull.web.middleware.csrf")
+local session     = require("hull.web.middleware.session")
+local logger      = require("hull.web.middleware.logger")
+local health      = require("hull.web.middleware.health")
+local transaction = require("hull.web.middleware.transaction")
+local idempotency = require("hull.web.middleware.idempotency")
 
 session.init()                   -- create hull_sessions table
 idempotency.init()               -- create _hull_idempotency_keys
@@ -735,11 +735,11 @@ end)
 
 ```lua
 app.every(5000, function()                          -- every 5s
-    require("hull.middleware.session").cleanup()
+    require("hull.web.middleware.session").cleanup()
 end)
 
 app.daily("02:00", function()                       -- daily at UTC 02:00
-    require("hull.middleware.outbox").cleanup(86400 * 30)
+    require("hull.web.middleware.outbox").cleanup(86400 * 30)
 end)
 
 -- Return false to self-cancel:
@@ -1574,10 +1574,10 @@ These are not benchmarks you should depend on without your own measurement.
 **Cookie-session auth with CSRF + transaction:**
 
 ```lua
-local session     = require("hull.middleware.session")
-local auth        = require("hull.middleware.auth")
-local csrf        = require("hull.middleware.csrf")
-local transaction = require("hull.middleware.transaction")
+local session     = require("hull.web.middleware.session")
+local auth        = require("hull.web.middleware.auth")
+local csrf        = require("hull.web.middleware.csrf")
+local transaction = require("hull.web.middleware.transaction")
 
 session.init()
 
@@ -1598,7 +1598,7 @@ end)
 **Idempotent POST:**
 
 ```lua
-local idempotency = require("hull.middleware.idempotency")
+local idempotency = require("hull.web.middleware.idempotency")
 idempotency.init()
 
 app.use_post("POST", "/api/*", idempotency.middleware({
@@ -1636,7 +1636,7 @@ end)
 **Background outbox + daily cleanup:**
 
 ```lua
-local outbox = require("hull.middleware.outbox")
+local outbox = require("hull.web.middleware.outbox")
 outbox.init()
 
 app.every(5000, function() outbox.flush() end)

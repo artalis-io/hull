@@ -22,9 +22,9 @@ For prose / patterns see [`../../CLAUDE.md`](../../CLAUDE.md) and
   - [`log.*`](#logtable-logging)
   - WebSocket, SSE, compute, gpu, image, smtp — _coming next_
 - [Stdlib modules](#stdlib-modules)
-  - [`hull.json`](#hulljson) · [`hull.cookie`](#hullcookie) · [`hull.jwt`](#hulljwt) · _and others coming_
+  - [`hull.json`](#hulljson) · [`hull.web.cookie`](#hullcookie) · [`hull.jwt`](#hulljwt) · _and others coming_
 - [Middleware modules](#middleware-modules)
-  - [`hull.middleware.cors`](#hullmiddlewarecors) · _and others_
+  - [`hull.web.middleware.cors`](#hullmiddlewarecors) · _and others_
 
 ---
 
@@ -73,7 +73,7 @@ Suitable for auth, rate limiting, CORS, logging.
 **Example:**
 
 ```lua
-local cors = require("hull.middleware.cors").middleware({ origins = { "https://app.com" } })
+local cors = require("hull.web.middleware.cors").middleware({ origins = { "https://app.com" } })
 app.use("*", "/api/*", cors)
 ```
 
@@ -107,7 +107,7 @@ route is registered.
 | `hosts`        | `string[]`                            | Outbound HTTP host allowlist for `http.*` / `ws.connect`. Supports `*.domain.com`. |
 | `env`          | `string[]`                            | Env var names that `env.get` is permitted to read. Max 32 entries. |
 | `gpu`          | `boolean` or `table{ devices = … }`   | Enable `gpu.*` global. `false` (default) hides it. |
-| `cors`         | `table{ origins, methods, … }`        | Built-in CORS config (skips needing `hull.middleware.cors`). |
+| `cors`         | `table{ origins, methods, … }`        | Built-in CORS config (skips needing `hull.web.middleware.cors`). |
 | `csp`          | `string`                              | Override the default Content-Security-Policy. |
 | `wasm`         | `table{ heap, stack, gas, max_input, max_output }` | Per-app WASM limits (overrides CLI flags). |
 
@@ -143,7 +143,7 @@ Passed to every handler / middleware as the first argument. Fields:
 | `req.body`   | `string`  | Raw body bytes. Reading it triggers body capture; available in `app.use_post` and handlers. Not available in `app.use` (pre-body). |
 | `req.ctx`    | `table`   | Mutable per-request scratch space for middleware-to-handler data passing. Starts as `{}`. |
 
-**Notes:** `req.body` for `application/x-www-form-urlencoded` requests is the raw URL-encoded string; use `require("hull.form").parse(req.body)` to decode. For JSON request bodies use `json.decode(req.body)`.
+**Notes:** `req.body` for `application/x-www-form-urlencoded` requests is the raw URL-encoded string; use `require("hull.web.form").parse(req.body)` to decode. For JSON request bodies use `json.decode(req.body)`.
 
 ---
 
@@ -221,7 +221,7 @@ Set a cookie via `Set-Cookie`.
 |---------|----------|-------------|
 | `name`  | `string` | Cookie name. |
 | `value` | `string` | Cookie value. |
-| `opts`  | `table`  | Options: `path`, `httponly`, `secure`, `samesite`, `max_age`, `domain`. Same set as `hull.cookie.serialize`. |
+| `opts`  | `table`  | Options: `path`, `httponly`, `secure`, `samesite`, `max_age`, `domain`. Same set as `hull.web.cookie.serialize`. |
 
 **Returns:** `res` (chainable).
 

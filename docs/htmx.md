@@ -49,7 +49,7 @@ The benefit: a plain browser without JS gets the full page. The same URL, hit fr
 
 ---
 
-## `hull.htmx` API
+## `hull.web.htmx` API
 
 Pure functions. No state. Both runtimes (snake_case in Lua, camelCase in JS. Lua names below; JS sibling is `currentUrl`/`triggerName`/etc.).
 
@@ -82,7 +82,7 @@ Pure functions. No state. Both runtimes (snake_case in Lua, camelCase in JS. Lua
 
 ## CSP integration
 
-The scaffolded app wires `hull/middleware/csp@1` with the `htmx` profile:
+The scaffolded app wires `hull/web/middleware/csp@1` with the `htmx` profile:
 
 ```
 Content-Security-Policy:
@@ -319,9 +319,9 @@ Same template HTML files work for both runtimes; only the handler module changes
 ## See also
 
 - `examples/hypermedia_todo/`. the canonical scaffolded app, both runtimes.
-- `stdlib/lua/hull/htmx.lua` / `stdlib/js/hull/htmx.js`. the helper module source.
-- `stdlib/lua/hull/middleware/csp.lua` / `stdlib/js/hull/middleware/csp.js`. the CSP middleware.
-- `stdlib/lua/hull/middleware/csrf.lua` / `stdlib/js/hull/middleware/csrf.js`. CSRF tokens, HMAC-SHA256.
+- `stdlib/lua/hull/web/htmx.lua` / `stdlib/js/hull/web/htmx.js`. the helper module source.
+- `stdlib/lua/hull/web/middleware/csp.lua` / `stdlib/js/hull/web/middleware/csp.js`. the CSP middleware.
+- `stdlib/lua/hull/web/middleware/csrf.lua` / `stdlib/js/hull/web/middleware/csrf.js`. CSRF tokens, HMAC-SHA256.
 - `stdlib/lua/hull/template.lua`. template engine, full syntax reference at the top of the file.
 - HTMX docs: <https://htmx.org/docs/>.
 - Pico v2 docs: <https://picocss.com/docs/>.

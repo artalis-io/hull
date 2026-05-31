@@ -123,8 +123,8 @@ Hull's distribution is one binary; what's compiled into it is controlled by a sm
 | `HL_ENABLE_TCC` | 1 | Drop embedded TinyCC (`hull build --compiler=tcc` rejected) |
 | `HL_EMBED_CA_BUNDLE` | 1 | Drop Mozilla CA bundle (~200 KB, breaks HTTPS without system store) |
 | `HL_ENABLE_DB` | 1 | Drop SQLite + `db.*` + `migrate.*` + worker-DB connections + DB-backed stdlib (session, ratelimit, idempotency, outbox, inbox, rbac, search). ~1.4 MB smaller. See "Compute-only builds" below. |
-| `HL_ENABLE_HTTP_SERVER` | 1 | Drop the inbound HTTP server: serve.c (KlServer setup), routing, body reader, WebSocket server (cap/ws), middleware, SSE, in-process test harness (cap/test, test_runner), and `hull dev/test/agent/mcp` commands. Apps must use `app.main(fn)` and may not declare `hull/ws`, `hull/server`, `hull/sse`, or any `hull/middleware/*`. See "HTTP build flavors" below. |
-| `HL_ENABLE_HTTP_CLIENT` | 1 | Drop the outbound HTTP/HTTPS client: `http.fetch` (cap/http + cap/http_async), SMTP send (cap/smtp), and `hull update` (which uses Keel's HTTPS client). Apps may not declare `hull/http`, `hull/smtp`, or `hull/email`. |
+| `HL_ENABLE_HTTP_SERVER` | 1 | Drop the inbound HTTP server: serve.c (KlServer setup), routing, body reader, WebSocket server (cap/ws), middleware, SSE, in-process test harness (cap/test, test_runner), and `hull dev/test/agent/mcp` commands. Apps must use `app.main(fn)` and may not declare `hull/http-server`, `hull/web/ws-server`, `hull/web/ws-client`, `hull/web/sse`, or any `hull/web/middleware/*`. See "HTTP build flavors" below. |
+| `HL_ENABLE_HTTP_CLIENT` | 1 | Drop the outbound HTTP/HTTPS client: `http.fetch` (cap/http + cap/http_async), SMTP send (cap/smtp), and `hull update` (which uses Keel's HTTPS client). Apps may not declare `hull/http-client`, `hull/smtp`, or `hull/email`. |
 | `HL_ENABLE_HTTP` | 1 | **Back-compat alias.** Setting `HL_ENABLE_HTTP=0` pins both `HL_ENABLE_HTTP_SERVER` and `HL_ENABLE_HTTP_CLIENT` to 0. The macro stays defined when either granular flag is on, so existing source guards continue to mean "any HTTP at all". |
 | `HL_ENABLE_TUI` | 1 | Drop the terminal UI capability: `cap/tui.c`, `cap/tui_input.c`, the runtime bindings, the `hull.tui` stdlib module, and the `--tui` flag on `hull doctor / dev / agent context / agent errors / modules available`. `cap/tui_width.c` (data-table lookup) stays. ~80–150 KB. See "Terminal UI module" below. |
 
@@ -613,7 +613,7 @@ Both are stored in `HlRuntime` and accessible to all consumers.
 - Static serving: `hl_vfs_find(vfs, "static/style.css")`
 - Migrations: `hl_vfs_prefix(vfs, "migrations/", &first)`
 - Templates: `hl_vfs_find(vfs, "templates/base.html")`
-- Module loading: `hl_vfs_find(vfs, "hull:cookie")` (JS), `hl_vfs_find(vfs, "hull.json")` (Lua)
+- Module loading: `hl_vfs_find(vfs, "hull:web:cookie")` (JS), `hl_vfs_find(vfs, "hull.json")` (Lua)
 - Signature: `hl_vfs_find(vfs, "./app.lua")` for hash verification
 
 ## Platform Builds
@@ -713,9 +713,12 @@ Violation = SIGABRT on OpenBSD, SIGKILL on Linux/Cosmo, EPERM on macOS. `--no-sa
 
 Apps declare which first-party Hull stdlib modules they import via `manifest.modules`. Three principles:
 
+> **v0.2.0 namespace note.** Strictly-web modules live under `hull/web/*`. The 20 affected modules are `hull/web/{cookie,form,htmx,sse,ws-client,ws-server}` plus the 14 `hull/web/middleware/*` modules. Cross-cutting modules stay flat: `hull/jwt`, `hull/http-server`, `hull/http-client`, `hull/template`, `hull/email`, `hull/smtp`, plus all the runtime-agnostic utilities. Apps using pre-v0.2.0 names get an explicit fix-it message from the resolver pointing at the new path.
+
+
 1. **Every external capability is declared.** Language intrinsics (Lua: `string/table/math/utf8/coroutine`; JS: `Object/Array/Math/JSON`) and Hull's intrinsic core are always available; everything else must appear in `manifest.modules`. The intrinsic core is the minimum needed to bootstrap an app: **`hull/app`** alone, providing `app.manifest`, `app.get/post/use`, `app.router`, `app.ws/sse`, and `app.main`. `app` stays intrinsic because the manifest itself is expressed via `app.manifest(...)` (it must exist before the manifest is parsed. **Module-conditional decoration:** some declared modules don't just enable imports, they add methods to the `app` intrinsic. Today: `"hull/timers@1"` decorates `app` with `app.every(ms, fn)` and `app.daily(hhmm, fn)`. Without the declaration those methods don't exist on `app` at all (calling them raises "attempt to call a nil value" / "is not a function")) the C# partial-class metaphor. `hull/log` and `hull/json` are also declared modules; apps that call `log.X` or `json.X` directly must put `"hull/log@1"` / `"hull/json@1"` in `manifest.modules`. Response helpers (`res:json(...)`) and internal JSON marshalling work without either declaration. They bypass user-visible imports at the C layer.
-2. **Import-only exposure.** Declared modules are reached via `require("hull.X")` (Lua) / `import "hull:X"` (JS). They are NOT exposed as globals.
-3. **Capability + module are independent gates, and deps auto-resolve.** Declaring `hull/http-client@1` makes `require("hull.http-client")` resolve; it does not open the network. The per-call cap layer (`hl_cap_http_request`, `hl_cap_fs_validate`, `hl_cap_env_get`) fails closed against an empty allowlist, so an unused module is harmless. The resolver only hard-blocks build-time gates (`HL_ENABLE_*`); manifest `fs/env/hosts` sections are validated at call time. **Transitive deps are auto-admitted**. Declaring `hull/middleware/session@1` implicitly admits `hull/db`, `hull/crypto`, `hull/json`, `hull/time`, `hull/http-server` (and triggers the matching `app` decorations). The dep graph lives in the registry; `hull modules list` shows the resolved set. Apps don't need to re-declare every transitive utility. **Top-of-file imports/requires are tracked** during the pre-manifest window (before `app.manifest()` runs the resolver) and validated against the resolved set immediately after; an undeclared `import { db } from "hull:db"` at the top of an app.js fails app load synchronously with a clear message instead of silently slipping through (the gate isn't wired yet at import time). See `hl_import_tracker_record` / `_validate` in `module_resolver.c`.
+2. **Import-only exposure.** Declared modules are reached via `require("hull.X")` (Lua) / `import "hull:X"` (JS). They are NOT exposed as globals. The two-level `hull.web.X` / `hull:web:X` form (also `hull.web.middleware.X` / `hull:web:middleware:X`) works identically — segment depth is unrestricted, the resolver just translates separator-to-`/` for canonical lookup.
+3. **Capability + module are independent gates, and deps auto-resolve.** Declaring `hull/http-client@1` makes `require("hull.http-client")` resolve; it does not open the network. The per-call cap layer (`hl_cap_http_request`, `hl_cap_fs_validate`, `hl_cap_env_get`) fails closed against an empty allowlist, so an unused module is harmless. The resolver only hard-blocks build-time gates (`HL_ENABLE_*`); manifest `fs/env/hosts` sections are validated at call time. **Transitive deps are auto-admitted**. Declaring `hull/web/middleware/session@1` implicitly admits `hull/db`, `hull/crypto`, `hull/json`, `hull/time`, `hull/http-server` (and triggers the matching `app` decorations). The dep graph lives in the registry; `hull modules list` shows the resolved set. Apps don't need to re-declare every transitive utility. **Top-of-file imports/requires are tracked** during the pre-manifest window (before `app.manifest()` runs the resolver) and validated against the resolved set immediately after; an undeclared `import { db } from "hull:db"` at the top of an app.js fails app load synchronously with a clear message instead of silently slipping through (the gate isn't wired yet at import time). See `hl_import_tracker_record` / `_validate` in `module_resolver.c`.
 
 ```lua
 app.manifest({
@@ -723,8 +726,8 @@ app.manifest({
         "hull/crypto@1",
         "hull/db@1",
         "hull/time@1",
-        "hull/middleware/auth@1",
-        "hull/middleware/session@1",     -- needs db, crypto, time (declare each)
+        "hull/web/middleware/auth@1",
+        "hull/web/middleware/session@1",     -- needs db, crypto, time (declare each)
     },
     hosts = {"api.stripe.com"},          -- required if http is declared
 })
@@ -757,7 +760,7 @@ local fetcher = require("hull.http-client")
 | `http.fetch: host 'api.example.com' not in manifest hosts allowlist` | Module is declared and loaded fine, but the per-call cap layer rejects the URL | Add the host to `manifest.hosts` (or use `fs.read = {...}` / `env = {...}` for the corresponding modules. Capability sections are checked at call time, not at module load) |
 | `module 'hull/gpu@1' requires HL_ENABLE_GPU (build-time)` | The build wasn't compiled with the subsystem | Rebuild hull with `make HL_ENABLE_GPU=1 …` or remove the module declaration |
 | `module 'hull/http-client@1' requires HL_ENABLE_HTTP_CLIENT (build-time)` | App declares an outbound HTTP module (`hull/http`, `hull/smtp`, `hull/email`) on a build with `HL_ENABLE_HTTP_CLIENT=0` | Rebuild with `HL_ENABLE_HTTP_CLIENT=1` (the default) or remove the module declaration. |
-| `module 'hull/http-server@1' requires HL_ENABLE_HTTP_SERVER (build-time)` | App declares an inbound HTTP module (`hull/server`, `hull/ws`, `hull/sse`, any `hull/middleware/*`) on a build with `HL_ENABLE_HTTP_SERVER=0` | Rebuild with `HL_ENABLE_HTTP_SERVER=1` (the default) or remove the module declaration. See [docs/cli_mode.md](docs/cli_mode.md). |
+| `module 'hull/http-server@1' requires HL_ENABLE_HTTP_SERVER (build-time)` | App declares an inbound HTTP module (`hull/server`, `hull/ws`, `hull/web/sse`, any `hull/middleware/*`) on a build with `HL_ENABLE_HTTP_SERVER=0` | Rebuild with `HL_ENABLE_HTTP_SERVER=1` (the default) or remove the module declaration. See [docs/cli_mode.md](docs/cli_mode.md). |
 | `unknown module 'X' in app.manifest.modules` | Typo or non-existent module | Run `hull modules available` for the canonical list |
 
 **CLI surface:**
@@ -849,30 +852,32 @@ Register with `app.use(method, pattern, mw)`:
 
 | Module | Lua | JS | Purpose |
 |--------|-----|-----|---------|
-| `cors` | `hull.middleware.cors` | `hull:middleware:cors` | CORS headers + preflight handling |
-| `ratelimit` | `hull.middleware.ratelimit` | `hull:middleware:ratelimit` | In-memory rate limiting with configurable windows |
-| `csrf` | `hull.middleware.csrf` | `hull:middleware:csrf` | Stateless CSRF token generation/verification |
-| `auth` | `hull.middleware.auth` | `hull:middleware:auth` | Session-based and JWT-based authentication middleware |
-| `session` | `hull.middleware.session` | `hull:middleware:session` | Server-side sessions backed by SQLite |
-| `logger` | `hull.middleware.logger` | `hull:middleware:logger` | Request logging with logfmt output and request IDs |
-| `transaction` | `hull.middleware.transaction` | `hull:middleware:transaction` | Wraps handlers in `db.batch()` (BEGIN IMMEDIATE..COMMIT) |
-| `idempotency` | `hull.middleware.idempotency` | `hull:middleware:idempotency` | Idempotency-Key middleware with response caching |
-| `outbox` | `hull.middleware.outbox` | `hull:middleware:outbox` | Transactional outbox for reliable side-effect delivery |
-| `inbox` | `hull.middleware.inbox` | `hull:middleware:inbox` | Inbox deduplication for incoming events/webhooks |
-| `cookie` | `hull.cookie` | `hull:cookie` | Cookie parse/serialize helpers |
+| `cors` | `hull.web.middleware.cors` | `hull:web:middleware:cors` | CORS headers + preflight handling |
+| `ratelimit` | `hull.web.middleware.ratelimit` | `hull:web:middleware:ratelimit` | In-memory rate limiting with configurable windows |
+| `csrf` | `hull.web.middleware.csrf` | `hull:web:middleware:csrf` | Stateless CSRF token generation/verification |
+| `auth` | `hull.web.middleware.auth` | `hull:web:middleware:auth` | Session-based and JWT-based authentication middleware |
+| `session` | `hull.web.middleware.session` | `hull:web:middleware:session` | Server-side sessions backed by SQLite |
+| `logger` | `hull.web.middleware.logger` | `hull:web:middleware:logger` | Request logging with logfmt output and request IDs |
+| `transaction` | `hull.web.middleware.transaction` | `hull:web:middleware:transaction` | Wraps handlers in `db.batch()` (BEGIN IMMEDIATE..COMMIT) |
+| `idempotency` | `hull.web.middleware.idempotency` | `hull:web:middleware:idempotency` | Idempotency-Key middleware with response caching |
+| `outbox` | `hull.web.middleware.outbox` | `hull:web:middleware:outbox` | Transactional outbox for reliable side-effect delivery |
+| `inbox` | `hull.web.middleware.inbox` | `hull:web:middleware:inbox` | Inbox deduplication for incoming events/webhooks |
+| `cookie` | `hull.web.cookie` | `hull:web:cookie` | Cookie parse/serialize helpers |
 | `jwt` | `hull.jwt` | `hull:jwt` | JWT sign/verify (HMAC-SHA256) |
 | `template` | `hull.template` | `hull:template` | HTML template engine with inheritance, includes, filters |
 | `validate` | `hull.validate` | `hull:validate` | Declarative input validation with schema rules |
-| `form` | `hull.form` | `hull:form` | URL-encoded form body parsing |
+| `form` | `hull.web.form` | `hull:web:form` | URL-encoded form body parsing |
 | `i18n` | `hull.i18n` | `hull:i18n` | Internationalization: locale detection, translations, formatting |
 | `csv` | `hull.csv` | `hull:csv` | CSV parse/encode (RFC 4180) |
 | `search` | `hull.search` | `hull:search` | Full-text search (SQLite FTS5) |
-| `rbac` | `hull.middleware.rbac` | `hull:middleware:rbac` | Role-based access control |
-| `health` | `hull.middleware.health` | `hull:middleware:health` | Health check + readiness endpoints |
-| `etag` | `hull.middleware.etag` | `hull:middleware:etag` | ETag response helpers with 304 Not Modified |
+| `rbac` | `hull.web.middleware.rbac` | `hull:web:middleware:rbac` | Role-based access control |
+| `health` | `hull.web.middleware.health` | `hull:web:middleware:health` | Health check + readiness endpoints |
+| `etag` | `hull.web.middleware.etag` | `hull:web:middleware:etag` | ETag response helpers with 304 Not Modified |
 | `db.udf` | `db.udf.register/unregister` | `db.udf.register/unregister` | User-defined SQL functions (Lua/JS callbacks or WASM) |
 | `image` | `hull.image` | `hull:image` | Image decode/encode (stb_image), raw pixel buffers |
-| `ws` | `hull.ws` (global) | `hull:ws` | WebSocket server + client (broadcast, connect) |
+| `ws-server` | `hull.web.ws-server` | `hull:web:ws-server` | WebSocket server (`app.ws`, `broadcast`, `connections`) |
+| `ws-client` | `hull.web.ws-client` | `hull:web:ws-client` | WebSocket client (`ws.connect`) |
+| `sse` | `hull.web.sse` (decorates `app.sse`) | `hull:web:sse` (decorates `app.sse`) | Server-Sent Events |
 | `json` | `hull.json` | (built-in) | JSON encode/decode |
 
 ### Module APIs
@@ -1159,7 +1164,7 @@ app.ws("/ws/chat", {
 
 **JavaScript:**
 ```javascript
-import { wsServer } from "hull:ws-server";
+import { wsServer } from "hull:web:ws-server";
 app.ws("/ws/chat", {
     onOpen(conn) { log.info("connected: " + conn.id); },
     onMessage(conn, msg, isBinary) { ws.broadcast("/ws/chat", msg); },
@@ -1265,16 +1270,16 @@ Embedding paths:
 Order matters. Each middleware runs before the next:
 
 ```lua
-local cors        = require("hull.middleware.cors")
-local ratelimit   = require("hull.middleware.ratelimit")
-local auth        = require("hull.middleware.auth")
-local csrf        = require("hull.middleware.csrf")
-local session     = require("hull.middleware.session")
-local logger      = require("hull.middleware.logger")
-local health      = require("hull.middleware.health")
-local etag        = require("hull.middleware.etag")
-local transaction = require("hull.middleware.transaction")
-local idempotency = require("hull.middleware.idempotency")
+local cors        = require("hull.web.middleware.cors")
+local ratelimit   = require("hull.web.middleware.ratelimit")
+local auth        = require("hull.web.middleware.auth")
+local csrf        = require("hull.web.middleware.csrf")
+local session     = require("hull.web.middleware.session")
+local logger      = require("hull.web.middleware.logger")
+local health      = require("hull.web.middleware.health")
+local etag        = require("hull.web.middleware.etag")
+local transaction = require("hull.web.middleware.transaction")
+local idempotency = require("hull.web.middleware.idempotency")
 
 session.init()       -- create hull_sessions table
 idempotency.init()   -- create _hull_idempotency_keys table

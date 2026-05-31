@@ -279,8 +279,9 @@ endif
 #     test harness (cap/test, test_runner), and `hull dev/test/agent/mcp`
 #     commands. Drops mod_{server,ws,sse,test} + routes/dispatch/timers/
 #     bindings glue in both runtimes. Apps with HL_ENABLE_HTTP_SERVER=0
-#     must use `app.main(fn)` and may not declare hull/ws, hull/server,
-#     hull/sse, or any hull/middleware/*.
+#     must use `app.main(fn)` and may not declare hull/http-server,
+#     hull/web/ws-server, hull/web/ws-client, hull/web/sse, or any
+#     hull/web/middleware/*.
 #
 #   HL_ENABLE_HTTP_CLIENT (default 1)
 #     The outbound network stack: `http.fetch` (cap/http + cap/http_async),

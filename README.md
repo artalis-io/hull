@@ -303,8 +303,8 @@ app.manifest({
         "hull/crypto@1",
         "hull/db@1",
         "hull/time@1",
-        "hull/middleware/auth@1",
-        "hull/middleware/session@1",   -- the resolver enforces that its
+        "hull/web/middleware/auth@1",
+        "hull/web/middleware/session@1",   -- the resolver enforces that its
                                        -- deps (db, crypto, time) are
                                        -- also declared
     },
@@ -314,7 +314,7 @@ app.manifest({
 
 -- require/import are standard Lua/JS. Choose any local binding name:
 local crypto = require("hull.crypto")
-local cookie = require("hull.cookie")
+local cookie = require("hull.web.cookie")
 ```
 
 Each entry is a canonical spec `"<vendor>/<name>@<major>"`. The manifest declares *what's in scope*; the `require()` / `import` call site picks *what to call it locally*. First-party modules use `hull/`; future third-party packages would use the same form (`"acme/widgets@2"`).
@@ -339,27 +339,27 @@ Hull ships a full set of middleware and utility modules for building secure back
 
 | Module | Lua | JS | Purpose |
 |--------|-----|-----|---------|
-| `cors` | `hull.middleware.cors` | `hull:middleware:cors` | CORS headers + preflight handling |
-| `ratelimit` | `hull.middleware.ratelimit` | `hull:middleware:ratelimit` | In-memory rate limiting with configurable windows |
-| `csrf` | `hull.middleware.csrf` | `hull:middleware:csrf` | Stateless CSRF token generation/verification |
-| `auth` | `hull.middleware.auth` | `hull:middleware:auth` | Session-based and JWT-based authentication middleware |
-| `session` | `hull.middleware.session` | `hull:middleware:session` | Server-side sessions backed by SQLite |
-| `cookie` | `hull.cookie` | `hull:cookie` | Cookie parse/serialize helpers |
+| `cors` | `hull.web.middleware.cors` | `hull:web:middleware:cors` | CORS headers + preflight handling |
+| `ratelimit` | `hull.web.middleware.ratelimit` | `hull:web:middleware:ratelimit` | In-memory rate limiting with configurable windows |
+| `csrf` | `hull.web.middleware.csrf` | `hull:web:middleware:csrf` | Stateless CSRF token generation/verification |
+| `auth` | `hull.web.middleware.auth` | `hull:web:middleware:auth` | Session-based and JWT-based authentication middleware |
+| `session` | `hull.web.middleware.session` | `hull:web:middleware:session` | Server-side sessions backed by SQLite |
+| `cookie` | `hull.web.cookie` | `hull:web:cookie` | Cookie parse/serialize helpers |
 | `jwt` | `hull.jwt` | `hull:jwt` | JWT sign/verify (HMAC-SHA256) |
 | `template` | `hull.template` | `hull:template` | HTML template engine with inheritance, includes, filters |
 | `csv` | `hull.csv` | `hull:csv` | CSV parse/encode (RFC 4180) |
 | `search` | `hull.search` | `hull:search` | Full-text search (SQLite FTS5) |
-| `rbac` | `hull.middleware.rbac` | `hull:middleware:rbac` | Role-based access control |
-| `logger` | `hull.middleware.logger` | `hull:middleware:logger` | Request logging with logfmt output and request IDs |
-| `transaction` | `hull.middleware.transaction` | `hull:middleware:transaction` | Wraps handlers in SQLite BEGIN IMMEDIATE..COMMIT |
-| `idempotency` | `hull.middleware.idempotency` | `hull:middleware:idempotency` | Idempotency-Key middleware with response caching |
-| `outbox` | `hull.middleware.outbox` | `hull:middleware:outbox` | Transactional outbox for reliable webhook delivery |
-| `inbox` | `hull.middleware.inbox` | `hull:middleware:inbox` | Inbox deduplication for incoming events/webhooks |
+| `rbac` | `hull.web.middleware.rbac` | `hull:web:middleware:rbac` | Role-based access control |
+| `logger` | `hull.web.middleware.logger` | `hull:web:middleware:logger` | Request logging with logfmt output and request IDs |
+| `transaction` | `hull.web.middleware.transaction` | `hull:web:middleware:transaction` | Wraps handlers in SQLite BEGIN IMMEDIATE..COMMIT |
+| `idempotency` | `hull.web.middleware.idempotency` | `hull:web:middleware:idempotency` | Idempotency-Key middleware with response caching |
+| `outbox` | `hull.web.middleware.outbox` | `hull:web:middleware:outbox` | Transactional outbox for reliable webhook delivery |
+| `inbox` | `hull.web.middleware.inbox` | `hull:web:middleware:inbox` | Inbox deduplication for incoming events/webhooks |
 | `validate` | `hull.validate` | `hull:validate` | Declarative input validation with schema rules |
-| `form` | `hull.form` | `hull:form` | URL-encoded form body parsing |
+| `form` | `hull.web.form` | `hull:web:form` | URL-encoded form body parsing |
 | `i18n` | `hull.i18n` | `hull:i18n` | Internationalization: locale detection, translations, formatting |
-| `health` | `hull.middleware.health` | `hull:middleware:health` | Health check + readiness endpoints |
-| `etag` | `hull.middleware.etag` | `hull:middleware:etag` | ETag response helpers with 304 Not Modified |
+| `health` | `hull.web.middleware.health` | `hull:web:middleware:health` | Health check + readiness endpoints |
+| `etag` | `hull.web.middleware.etag` | `hull:web:middleware:etag` | ETag response helpers with 304 Not Modified |
 | `json` | `hull.json` | (built-in) | JSON encode/decode |
 
 All middleware modules follow the same factory pattern: `module.middleware(opts)` returns a function `(req, res) -> 0|1` where `0` = continue, `1` = short-circuit.
@@ -433,10 +433,10 @@ In dev mode, files are read from disk with zero-copy sendfile and `Cache-Control
 Recommended middleware stack for a typical API backend:
 
 ```lua
-local cors = require("hull.middleware.cors")
-local ratelimit = require("hull.middleware.ratelimit")
-local auth = require("hull.middleware.auth")
-local session = require("hull.middleware.session")
+local cors = require("hull.web.middleware.cors")
+local ratelimit = require("hull.web.middleware.ratelimit")
+local auth = require("hull.web.middleware.auth")
+local session = require("hull.web.middleware.session")
 
 session.init()
 
@@ -450,7 +450,7 @@ app.get("/api/me", function(req, res)
 end)
 ```
 
-Key principles: rate limit before auth (reject early), CORS before auth (preflight must not require credentials), scope middleware to paths (`"/api/*"` not `"/*"`). For simple CORS needs, use `cors` in `app.manifest()`. It registers Keel-level CORS middleware automatically. Use the stdlib `hull.middleware.cors` for per-route or conditional CORS logic. See [examples/middleware/](examples/middleware/) and [CLAUDE.md](CLAUDE.md) for full API reference.
+Key principles: rate limit before auth (reject early), CORS before auth (preflight must not require credentials), scope middleware to paths (`"/api/*"` not `"/*"`). For simple CORS needs, use `cors` in `app.manifest()`. It registers Keel-level CORS middleware automatically. Use the stdlib `hull.web.middleware.cors` for per-route or conditional CORS logic. See [examples/middleware/](examples/middleware/) and [CLAUDE.md](CLAUDE.md) for full API reference.
 
 ### Vendored Libraries
 
