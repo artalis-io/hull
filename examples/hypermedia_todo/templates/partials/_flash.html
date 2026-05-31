@@ -1,0 +1,9 @@
+{% if has_flash %}
+<div id="flash-zone" role="status" aria-live="polite">
+  {% for msg in flash %}
+  <article class="flash flash-{{ msg.kind }}">{{ msg.text }}</article>
+  {% end %}
+</div>
+{% else %}
+<div id="flash-zone" role="status" aria-live="polite"></div>
+{% end %}

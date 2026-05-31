@@ -11,7 +11,8 @@
  * checks `required_caps` against those).
  *
  * v0.2.0 reorganization (§1.3): strictly-web modules moved under
- * hull/web/* — see docs/roadmap_next.md §1.3 for the move table.
+ * the hull/web/ namespace — see docs/roadmap_next.md §1.3 for the
+ * move table.
  * Modules kept flat: hull/jwt (cross-cutting), hull/http-server
  * (foundational primitive), hull/template (content-type agnostic),
  * hull/http-client / hull/email / hull/smtp (cross-cutting non-web).
@@ -111,9 +112,10 @@ static const HlModuleSpec REGISTRY[] = {
          * the vestigial hull/server@1 module — middleware modules
          * now depend on hull/http-server.
          *
-         * Stays flat in v0.2.0: foundational primitive that
-         * hull/web/* is built on top of. Convention is that hull/web/*
-         * modules are CONSUMERS of http-server, not http-server itself. */
+         * Stays flat in v0.2.0: foundational primitive that the
+         * hull/web/ namespace is built on top of. Convention is that
+         * hull/web/X modules are CONSUMERS of http-server, not
+         * http-server itself. */
         .name = "hull/http-server",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HTTP_SERVER, .deps = {0},
@@ -221,13 +223,26 @@ static const HlModuleSpec REGISTRY[] = {
 
     /* ── Web stdlib namespace (v0.2.0) ────────────────────────────────
      * Strictly-web modules: HTTP-protocol concerns (cookie, form),
-     * HTML rendering (htmx), real-time delivery (sse, ws-*), and the
-     * 14 hull/web/middleware/* modules. Sort note: "hull/web/*" sorts
-     * before "hull/worker" because at position 6 'e' < 'o'. */
+     * HTML rendering (htmx), real-time delivery (sse, ws-client,
+     * ws-server), flash messages, and the 14 hull/web/middleware
+     * entries. Sort note: hull/web/<name> sorts before hull/worker
+     * because at position 6 'e' < 'o'. */
     {
         .name = "hull/web/cookie",
         .api_major = 1, .intrinsic = 0, .pure = 1,
         .required_caps = 0, .deps = {0},
+    },
+    {
+        /* One-shot user notifications across POST/redirect/GET. Two
+         * emission paths: session-backed (set/consume — needs
+         * middleware/session) and HTMX HX-Trigger (trigger — pure
+         * header set, no session). Session is a hard dep so the
+         * session-backed path always works once the module is
+         * declared. */
+        .name = "hull/web/flash",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = 0,
+        .deps = {"hull/json", "hull/web/middleware/session", 0},
     },
     {
         .name = "hull/web/form",

@@ -3,6 +3,7 @@
 // HX-Request is set. CSRF + per-request CSP nonce wired in by default.
 import { app }      from "hull:app";
 import { htmx }     from "hull:web:htmx";
+import { flash }    from "hull:web:flash";
 import { csp }      from "hull:web:middleware:csp";
 import { csrf }     from "hull:web:middleware:csrf";
 import { session }  from "hull:web:middleware:session";
@@ -16,6 +17,7 @@ app.manifest({
     modules: [
         "hull/http-server@1",
         "hull/web/htmx@1",
+        "hull/web/flash@1",
         "hull/web/middleware/csp@1",
         "hull/web/middleware/csrf@1",
         "hull/web/middleware/session@1",
@@ -80,13 +82,19 @@ function todosData() {
 }
 
 app.get("/", (req, res) => {
+    // flash.consume drains any pending one-shot messages from the
+    // previous POST/redirect/GET cycle and clears them from session.
+    //
     // Template literal keys are snake_case to match the Lua sibling +
     // the actual ctx keys (csp.js writes csp_nonce; csrf.js writes
     // csrf_token). Same template HTML works for both runtimes.
+    const msgs = flash.consume(req);
     res.html(template.render("pages/home.html", {
         csp_nonce:  req.ctx.csp_nonce,
         csrf_token: req.ctx.csrf_token,
         todos:      todosData(),
+        flash:      msgs,
+        has_flash:  msgs.length > 0,
     }));
 });
 
@@ -101,11 +109,19 @@ app.post("/todos", (req, res) => {
     db.exec("INSERT INTO todos (title, done) VALUES (?, 0)", [title]);
     const id = db.query("SELECT last_insert_rowid() AS id")[0].id;
     if (htmx.is(req)) {
+        // HTMX: row + fresh form fragment.
+        // flash.trigger fires a client-side 'flash' event that any
+        // listener (e.g. a toast widget) can render. Independent of
+        // the OOB swap path; HTMX-only.
+        flash.trigger(res, "Added: " + title, "success");
         res.html(
             template.render("partials/todo_row.html",  { id, title, done: false })
             + template.render("partials/todo_form.html", { csrf_token: req.ctx.csrf_token })
         );
     } else {
+        // Plain form post: stash a message in session, redirect.
+        // The next GET / will consume + render it.
+        flash.set(req, "Added: " + title, "success");
         res.redirect("/");
     }
 });

@@ -31,6 +31,61 @@ test("POST /todos with hx-request returns fragment, not redirect", function()
     test.ok(not string.find(res.body, "<!doctype"), "fragment must NOT be full page")
 end)
 
+test("HTMX POST /todos fires flash trigger via HX-Trigger header", function()
+    local home = test.get("/", { middleware = true })
+    local token = string.match(home.body, 'name="_csrf" value="([^"]+)"')
+    local res = test.post("/todos", {
+        middleware = true,
+        body = "title=eggs&_csrf=" .. token,
+        headers = {
+            ["hx-request"] = "true",
+            ["content-type"] = "application/x-www-form-urlencoded",
+            ["cookie"] = home.headers["set-cookie"] or "",
+            ["x-csrf-token"] = token,
+        },
+    })
+    test.eq(res.status, 200)
+    local trig = res.headers["hx-trigger"]
+    test.ok(trig and trig:find('"flash"', 1, true),
+            "HX-Trigger should carry flash event, got: " .. tostring(trig))
+    test.ok(trig:find("Added: eggs", 1, true),
+            "flash payload should include the message")
+end)
+
+test("plain POST /todos sets session flash; next GET renders it", function()
+    -- POST without hx-request → redirect path → flash.set
+    local home = test.get("/", { middleware = true })
+    local token = string.match(home.body, 'name="_csrf" value="([^"]+)"')
+    local cookie_hdr = home.headers["set-cookie"] or ""
+    local post = test.post("/todos", {
+        middleware = true,
+        body = "title=plain+post+todo&_csrf=" .. token,
+        headers = {
+            ["content-type"] = "application/x-www-form-urlencoded",
+            ["cookie"] = cookie_hdr,
+            ["x-csrf-token"] = token,
+        },
+    })
+    -- Redirect path on plain form post.
+    test.ok(post.status == 302 or post.status == 303,
+            "plain POST should redirect, got: " .. tostring(post.status))
+    -- Next GET on same session should render the flash.
+    local next_get = test.get("/", {
+        middleware = true,
+        headers = { ["cookie"] = cookie_hdr },
+    })
+    test.eq(next_get.status, 200)
+    test.ok(string.find(next_get.body, "Added: plain post todo"),
+            "next render should include flash message")
+    -- And the message is one-shot — a SECOND GET should not contain it.
+    local third_get = test.get("/", {
+        middleware = true,
+        headers = { ["cookie"] = cookie_hdr },
+    })
+    test.ok(not string.find(third_get.body, "Added: plain post todo"),
+            "flash is one-shot; second render must not include it")
+end)
+
 test("POST /todos with empty title returns validation fragment", function()
     local home = test.get("/", { middleware = true })
     local token = string.match(home.body, 'name="_csrf" value="([^"]+)"')

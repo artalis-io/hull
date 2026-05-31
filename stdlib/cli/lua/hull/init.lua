@@ -163,6 +163,7 @@ templates.htmx_lua_app = [[-- HTMX + Pico hypermedia app scaffold.
 -- Returns full pages for plain navigation; returns fragments when
 -- HX-Request is set. CSRF + per-request CSP nonce wired in by default.
 local htmx     = require("hull.web.htmx")
+local flash    = require("hull.web.flash")
 local csp      = require("hull.web.middleware.csp")
 local csrf     = require("hull.web.middleware.csrf")
 local session  = require("hull.web.middleware.session")
@@ -176,6 +177,7 @@ app.manifest({
     modules = {
         "hull/http-server@1",
         "hull/web/htmx@1",
+        "hull/web/flash@1",
         "hull/web/middleware/csp@1",
         "hull/web/middleware/csrf@1",
         "hull/web/middleware/session@1",
@@ -240,10 +242,15 @@ local function todos_data()
 end
 
 app.get("/", function(req, res)
+    -- flash.consume drains any pending one-shot messages from the
+    -- previous POST/redirect/GET cycle and clears them from session.
+    local msgs = flash.consume(req)
     local data = {
         csp_nonce  = req.ctx.csp_nonce,
         csrf_token = req.ctx.csrf_token,
         todos      = todos_data(),
+        flash      = msgs,
+        has_flash  = #msgs > 0,
     }
     res:html(template.render("pages/home.html", data))
 end)
@@ -262,12 +269,16 @@ app.post("/todos", function(req, res)
 
     if htmx.is(req) then
         -- HTMX: return the new row to insert + a fresh empty form.
+        -- flash.trigger fires a client-side 'flash' event for any
+        -- listener (toast widget, etc.). Independent of OOB swap.
+        flash.trigger(res, "Added: " .. title, "success")
         res:html(template.render("partials/todo_row.html",
             { id = id, title = title, done = false })
             .. template.render("partials/todo_form.html",
                 { csrf_token = req.ctx.csrf_token }))
     else
-        -- Plain form post: redirect back to /, browser reloads.
+        -- Plain form post: stash in session, redirect; next GET / renders.
+        flash.set(req, "Added: " .. title, "success")
         res:redirect("/")
     end
 end)
@@ -302,6 +313,7 @@ templates.htmx_js_app = [[// HTMX + Pico hypermedia app scaffold.
 // HX-Request is set. CSRF + per-request CSP nonce wired in by default.
 import { app }      from "hull:app";
 import { htmx }     from "hull:web:htmx";
+import { flash }    from "hull:web:flash";
 import { csp }      from "hull:web:middleware:csp";
 import { csrf }     from "hull:web:middleware:csrf";
 import { session }  from "hull:web:middleware:session";
@@ -315,6 +327,7 @@ app.manifest({
     modules: [
         "hull/http-server@1",
         "hull/web/htmx@1",
+        "hull/web/flash@1",
         "hull/web/middleware/csp@1",
         "hull/web/middleware/csrf@1",
         "hull/web/middleware/session@1",
@@ -379,13 +392,19 @@ function todosData() {
 }
 
 app.get("/", (req, res) => {
+    // flash.consume drains any pending one-shot messages from the
+    // previous POST/redirect/GET cycle and clears them from session.
+    //
     // Template literal keys are snake_case to match the Lua sibling +
     // the actual ctx keys (csp.js writes csp_nonce; csrf.js writes
     // csrf_token). Same template HTML works for both runtimes.
+    const msgs = flash.consume(req);
     res.html(template.render("pages/home.html", {
         csp_nonce:  req.ctx.csp_nonce,
         csrf_token: req.ctx.csrf_token,
         todos:      todosData(),
+        flash:      msgs,
+        has_flash:  msgs.length > 0,
     }));
 });
 
@@ -400,11 +419,16 @@ app.post("/todos", (req, res) => {
     db.exec("INSERT INTO todos (title, done) VALUES (?, 0)", [title]);
     const id = db.query("SELECT last_insert_rowid() AS id")[0].id;
     if (htmx.is(req)) {
+        // flash.trigger fires a client-side 'flash' event for any
+        // listener (toast widget, etc.). Independent of OOB swap.
+        flash.trigger(res, "Added: " + title, "success");
         res.html(
             template.render("partials/todo_row.html",  { id, title, done: false })
             + template.render("partials/todo_form.html", { csrf_token: req.ctx.csrf_token })
         );
     } else {
+        // Plain form post: stash in session, redirect; next GET / renders.
+        flash.set(req, "Added: " + title, "success");
         res.redirect("/");
     }
 });
@@ -446,10 +470,22 @@ templates.htmx_base_html = [[<!doctype html>
 </head>
 <body>
   <main>
+    {% include "partials/_flash.html" %}
     {% block body %}{% end %}
   </main>
 </body>
 </html>
+]]
+
+templates.htmx_partial_flash = [[{% if has_flash %}
+<div id="flash-zone" role="status" aria-live="polite">
+  {% for msg in flash %}
+  <article class="flash flash-{{ msg.kind }}">{{ msg.text }}</article>
+  {% end %}
+</div>
+{% else %}
+<div id="flash-zone" role="status" aria-live="polite"></div>
+{% end %}
 ]]
 
 templates.htmx_page_home = [[{% extends "base.html" %}
@@ -559,6 +595,48 @@ test("POST /todos with hx-request returns fragment, not redirect", function()
     test.ok(not string.find(res.body, "<!doctype"), "fragment must NOT be full page")
 end)
 
+test("HTMX POST /todos fires flash trigger via HX-Trigger header", function()
+    local home = test.get("/", { middleware = true })
+    local token = string.match(home.body, 'name="_csrf" value="([^"]+)"')
+    local res = test.post("/todos", {
+        middleware = true,
+        body = "title=eggs&_csrf=" .. token,
+        headers = {
+            ["hx-request"] = "true",
+            ["content-type"] = "application/x-www-form-urlencoded",
+            ["cookie"] = home.headers["set-cookie"] or "",
+            ["x-csrf-token"] = token,
+        },
+    })
+    test.eq(res.status, 200)
+    local trig = res.headers["hx-trigger"]
+    test.ok(trig and trig:find('"flash"', 1, true),
+            "HX-Trigger should carry flash event")
+end)
+
+test("plain POST /todos sets session flash; next GET renders it", function()
+    local home = test.get("/", { middleware = true })
+    local token = string.match(home.body, 'name="_csrf" value="([^"]+)"')
+    local cookie_hdr = home.headers["set-cookie"] or ""
+    local post = test.post("/todos", {
+        middleware = true,
+        body = "title=plain+post&_csrf=" .. token,
+        headers = {
+            ["content-type"] = "application/x-www-form-urlencoded",
+            ["cookie"] = cookie_hdr,
+            ["x-csrf-token"] = token,
+        },
+    })
+    test.ok(post.status == 302 or post.status == 303,
+            "plain POST should redirect")
+    local next_get = test.get("/", {
+        middleware = true,
+        headers = { ["cookie"] = cookie_hdr },
+    })
+    test.ok(string.find(next_get.body, "Added: plain post"),
+            "next render should include flash message")
+end)
+
 test("POST /todos with empty title returns validation fragment", function()
     local home = test.get("/", { middleware = true })
     local token = string.match(home.body, 'name="_csrf" value="([^"]+)"')
@@ -608,6 +686,48 @@ test("POST /todos with hx-request returns fragment, not redirect", async () => {
     test.eq(res.status, 200);
     test.ok(res.body.includes("buy milk"), "fragment should contain new todo");
     test.ok(!res.body.includes("<!doctype"), "fragment must NOT be full page");
+});
+
+test("HTMX POST /todos fires flash trigger via HX-Trigger header", async () => {
+    const home = await test.get("/", { middleware: true });
+    const token = home.body.match(/name="_csrf" value="([^"]+)"/)?.[1];
+    const res = await test.post("/todos", {
+        middleware: true,
+        body: "title=eggs&_csrf=" + token,
+        headers: {
+            "hx-request": "true",
+            "content-type": "application/x-www-form-urlencoded",
+            "cookie": home.headers["set-cookie"] || "",
+            "x-csrf-token": token,
+        },
+    });
+    test.eq(res.status, 200);
+    const trig = res.headers["hx-trigger"];
+    test.ok(trig && trig.includes('"flash"'),
+            "HX-Trigger should carry flash event");
+});
+
+test("plain POST /todos sets session flash; next GET renders it", async () => {
+    const home = await test.get("/", { middleware: true });
+    const token = home.body.match(/name="_csrf" value="([^"]+)"/)?.[1];
+    const cookieHdr = home.headers["set-cookie"] || "";
+    const post = await test.post("/todos", {
+        middleware: true,
+        body: "title=plain+post&_csrf=" + token,
+        headers: {
+            "content-type": "application/x-www-form-urlencoded",
+            "cookie": cookieHdr,
+            "x-csrf-token": token,
+        },
+    });
+    test.ok(post.status === 302 || post.status === 303,
+            "plain POST should redirect");
+    const nextGet = await test.get("/", {
+        middleware: true,
+        headers: { "cookie": cookieHdr },
+    });
+    test.ok(nextGet.body.includes("Added: plain post"),
+            "next render should include flash message");
 });
 
 test("POST /todos with empty title returns validation fragment", async () => {
@@ -913,6 +1033,8 @@ local function scaffold_htmx(dir, runtime, track_file, track_dir)
                templates.htmx_partial_todo_form)
     track_file(dir .. "/templates/partials/todo_row.html",
                templates.htmx_partial_todo_row)
+    track_file(dir .. "/templates/partials/_flash.html",
+               templates.htmx_partial_flash)
 
     -- Static assets (custom CSS lands directly; vendor files come
     -- via `make fetch-vendor` because Hull doesn't carry curl in its

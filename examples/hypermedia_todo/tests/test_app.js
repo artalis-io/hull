@@ -29,6 +29,60 @@ test("POST /todos with hx-request returns fragment, not redirect", async () => {
     test.ok(!res.body.includes("<!doctype"), "fragment must NOT be full page");
 });
 
+test("HTMX POST /todos fires flash trigger via HX-Trigger header", async () => {
+    const home = await test.get("/", { middleware: true });
+    const token = home.body.match(/name="_csrf" value="([^"]+)"/)?.[1];
+    const res = await test.post("/todos", {
+        middleware: true,
+        body: "title=eggs&_csrf=" + token,
+        headers: {
+            "hx-request": "true",
+            "content-type": "application/x-www-form-urlencoded",
+            "cookie": home.headers["set-cookie"] || "",
+            "x-csrf-token": token,
+        },
+    });
+    test.eq(res.status, 200);
+    const trig = res.headers["hx-trigger"];
+    test.ok(trig && trig.includes('"flash"'),
+            "HX-Trigger should carry flash event, got: " + trig);
+    test.ok(trig.includes("Added: eggs"),
+            "flash payload should include the message");
+});
+
+test("plain POST /todos sets session flash; next GET renders it", async () => {
+    // POST without hx-request → redirect path → flash.set
+    const home = await test.get("/", { middleware: true });
+    const token = home.body.match(/name="_csrf" value="([^"]+)"/)?.[1];
+    const cookieHdr = home.headers["set-cookie"] || "";
+    const post = await test.post("/todos", {
+        middleware: true,
+        body: "title=plain+post+todo&_csrf=" + token,
+        headers: {
+            "content-type": "application/x-www-form-urlencoded",
+            "cookie": cookieHdr,
+            "x-csrf-token": token,
+        },
+    });
+    test.ok(post.status === 302 || post.status === 303,
+            "plain POST should redirect, got: " + post.status);
+    // Next GET on same session should render the flash.
+    const nextGet = await test.get("/", {
+        middleware: true,
+        headers: { "cookie": cookieHdr },
+    });
+    test.eq(nextGet.status, 200);
+    test.ok(nextGet.body.includes("Added: plain post todo"),
+            "next render should include flash message");
+    // And the message is one-shot — a SECOND GET should not contain it.
+    const thirdGet = await test.get("/", {
+        middleware: true,
+        headers: { "cookie": cookieHdr },
+    });
+    test.ok(!thirdGet.body.includes("Added: plain post todo"),
+            "flash is one-shot; second render must not include it");
+});
+
 test("POST /todos with empty title returns validation fragment", async () => {
     const home = await test.get("/", { middleware: true });
     const token = home.body.match(/name="_csrf" value="([^"]+)"/)?.[1];

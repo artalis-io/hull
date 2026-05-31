@@ -2,6 +2,7 @@
 -- Returns full pages for plain navigation; returns fragments when
 -- HX-Request is set. CSRF + per-request CSP nonce wired in by default.
 local htmx     = require("hull.web.htmx")
+local flash    = require("hull.web.flash")
 local csp      = require("hull.web.middleware.csp")
 local csrf     = require("hull.web.middleware.csrf")
 local session  = require("hull.web.middleware.session")
@@ -15,6 +16,7 @@ app.manifest({
     modules = {
         "hull/http-server@1",
         "hull/web/htmx@1",
+        "hull/web/flash@1",
         "hull/web/middleware/csp@1",
         "hull/web/middleware/csrf@1",
         "hull/web/middleware/session@1",
@@ -79,10 +81,15 @@ local function todos_data()
 end
 
 app.get("/", function(req, res)
+    -- flash.consume drains any pending one-shot messages from the
+    -- previous POST/redirect/GET cycle and clears them from session.
+    local msgs = flash.consume(req)
     local data = {
         csp_nonce  = req.ctx.csp_nonce,
         csrf_token = req.ctx.csrf_token,
         todos      = todos_data(),
+        flash      = msgs,
+        has_flash  = #msgs > 0,
     }
     res:html(template.render("pages/home.html", data))
 end)
@@ -101,12 +108,18 @@ app.post("/todos", function(req, res)
 
     if htmx.is(req) then
         -- HTMX: return the new row to insert + a fresh empty form.
+        -- flash.trigger fires a client-side 'flash' event that any
+        -- listener (e.g. a toast widget) can render. Independent of
+        -- the OOB swap path; HTMX-only.
+        flash.trigger(res, "Added: " .. title, "success")
         res:html(template.render("partials/todo_row.html",
             { id = id, title = title, done = false })
             .. template.render("partials/todo_form.html",
                 { csrf_token = req.ctx.csrf_token }))
     else
-        -- Plain form post: redirect back to /, browser reloads.
+        -- Plain form post: stash a message in session, redirect.
+        -- The next GET / will consume + render it.
+        flash.set(req, "Added: " .. title, "success")
         res:redirect("/")
     end
 end)
