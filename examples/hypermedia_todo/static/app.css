@@ -1,0 +1,21 @@
+/* hypermedia_todo custom styles. Layer on top of Pico's classless base. */
+:root {
+  --pico-form-element-spacing-vertical: 0.5rem;
+}
+
+ul#todos {
+  list-style: none;
+  padding-left: 0;
+}
+
+ul#todos li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.25rem 0;
+}
+
+ul#todos li button {
+  margin-left: auto;
+  padding: 0 0.5rem;
+}

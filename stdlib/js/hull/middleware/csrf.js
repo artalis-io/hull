@@ -148,6 +148,7 @@ function middleware(opts) {
     const secret = o.secret;
     const maxAge = o.maxAge !== undefined ? o.maxAge : 3600;
     const cookieName = o.cookieName || "hull.sid";
+    const sessionKey = o.sessionKey || "session_id";
     const headerName = o.headerName || "X-CSRF-Token";
     const fieldName = o.fieldName || "_csrf";
     const requireSession = o.requireSession || false;
@@ -156,10 +157,18 @@ function middleware(opts) {
     if (!secret)
         throw new Error("csrf.middleware requires opts.secret");
 
+    // Resolve session id with the same precedence as the Lua sibling:
+    // prefer req.ctx[sessionKey] (set by upstream session middleware
+    // on the SAME request), fall back to parsing the cookie.
+    function resolveSessionId(req) {
+        if (req.ctx && req.ctx[sessionKey]) return req.ctx[sessionKey];
+        return parseCookieSessionId(req, cookieName);
+    }
+
     return function(req, res) {
         if (safeMethods[req.method]) {
             // Generate token on safe methods for templates
-            const sessionId = parseCookieSessionId(req, cookieName);
+            const sessionId = resolveSessionId(req);
             if (sessionId) {
                 if (!req.ctx) req.ctx = {};
                 req.ctx.csrf_token = generate(sessionId, secret);
@@ -167,7 +176,7 @@ function middleware(opts) {
             return 0;
         }
 
-        const sessionId = parseCookieSessionId(req, cookieName);
+        const sessionId = resolveSessionId(req);
 
         // CSRF only applies to authenticated sessions by default.
         // Set requireSession: true to reject unauthenticated unsafe requests.

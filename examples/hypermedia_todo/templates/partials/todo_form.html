@@ -1,0 +1,8 @@
+<form id="new-todo"
+      hx-post="/todos"
+      hx-target="#todos"
+      hx-swap="afterbegin">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <input type="text" name="title" placeholder="New todo" required autofocus>
+  <button type="submit">Add</button>
+</form>

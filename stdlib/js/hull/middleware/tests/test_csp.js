@@ -69,12 +69,12 @@ test("two nonces differ (RNG sanity)", () => {
 
 // ── csp.htmx() ───────────────────────────────────────────────────────
 
-test("htmx() sets CSP header and exposes cspNonce in ctx", () => {
+test("htmx() sets CSP header and exposes csp_nonce in ctx", () => {
     const mw = csp.htmx();
     const req = mockReq(), res = mockRes();
     const rc = mw(req, res);
     assertEq(rc, 0, "middleware should pass through");
-    assertTrue(req.ctx.cspNonce !== undefined, "ctx.cspNonce must be set");
+    assertTrue(req.ctx.csp_nonce !== undefined, "ctx.csp_nonce must be set");
     const hdr = res.headersSet["Content-Security-Policy"];
     assertTrue(hdr !== undefined, "CSP header must be set");
     assertContains(hdr, "default-src 'self'");
@@ -83,8 +83,8 @@ test("htmx() sets CSP header and exposes cspNonce in ctx", () => {
     assertContains(hdr, "style-src-attr 'unsafe-inline'");
     assertContains(hdr, "frame-ancestors 'none'");
     assertContains(hdr, "base-uri 'self'");
-    assertContains(hdr, "'nonce-" + req.ctx.cspNonce + "'",
-                   "header nonce must equal ctx.cspNonce");
+    assertContains(hdr, "'nonce-" + req.ctx.csp_nonce + "'",
+                   "header nonce must equal ctx.csp_nonce");
 });
 
 test("htmx() generates a fresh nonce per request", () => {
@@ -93,7 +93,7 @@ test("htmx() generates a fresh nonce per request", () => {
     const req2 = mockReq(), res2 = mockRes();
     mw(req1, res1);
     mw(req2, res2);
-    assertTrue(req1.ctx.cspNonce !== req2.ctx.cspNonce,
+    assertTrue(req1.ctx.csp_nonce !== req2.ctx.csp_nonce,
                "per-request nonces must differ");
 });
 

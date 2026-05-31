@@ -166,9 +166,11 @@ local htmx     = require("hull.htmx")
 local csp      = require("hull.middleware.csp")
 local csrf     = require("hull.middleware.csrf")
 local session  = require("hull.middleware.session")
+local cookie   = require("hull.cookie")
 local template = require("hull.template")
 local form     = require("hull.form")
 local log      = require("hull.log")
+local db       = require("hull.db")
 
 app.manifest({
     modules = {
@@ -177,6 +179,7 @@ app.manifest({
         "hull/middleware/csp@1",
         "hull/middleware/csrf@1",
         "hull/middleware/session@1",
+        "hull/cookie@1",
         "hull/template@1",
         "hull/form@1",
         "hull/db@1",
@@ -184,14 +187,33 @@ app.manifest({
     },
 })
 
--- Sessions table (sets up _hull_sessions).
-session.init()
+-- Sessions table (creates _hull_sessions on first run).
+session.init({ ttl = 86400 })
+
+-- Bootstrap an anonymous session on every request. CSRF binds to
+-- this session id; without one, csrf.generate would fail. Creates a
+-- new session on first visit (sets cookie); loads existing on
+-- subsequent requests. Production apps would replace this with a
+-- real login flow (auth.session_middleware).
+local function session_bootstrap(req, res)
+    req.ctx = req.ctx or {}
+    local cookies = cookie.parse(req.headers["cookie"] or "")
+    local sid = cookies.hull_session
+    if sid and session.load(sid) then
+        req.ctx.session_id = sid
+        return 0
+    end
+    sid = session.create({})
+    req.ctx.session_id = sid
+    res:header("Set-Cookie", cookie.serialize("hull_session", sid))
+    return 0
+end
 
 -- Pre-body middleware (runs before req.body is read):
 --   1. CSP nonce. Populates req.ctx.csp_nonce + sets the header.
---   2. Session. Populates req.ctx.session_id when the cookie exists.
+--   2. Session bootstrap. Populates req.ctx.session_id.
 app.use("*", "/*", csp.htmx())
-app.use("*", "/*", session.middleware({ optional = true }))
+app.use("*", "/*", session_bootstrap)
 
 -- Post-body middleware (runs after req.body is parsed):
 --   3. CSRF. Verifies on unsafe methods; injects token on safe.
@@ -267,6 +289,7 @@ import { htmx }     from "hull:htmx";
 import { csp }      from "hull:middleware:csp";
 import { csrf }     from "hull:middleware:csrf";
 import { session }  from "hull:middleware:session";
+import { cookie }   from "hull:cookie";
 import { template } from "hull:template";
 import { form }     from "hull:form";
 import { log }      from "hull:log";
@@ -279,6 +302,7 @@ app.manifest({
         "hull/middleware/csp@1",
         "hull/middleware/csrf@1",
         "hull/middleware/session@1",
+        "hull/cookie@1",
         "hull/template@1",
         "hull/form@1",
         "hull/db@1",
@@ -286,21 +310,58 @@ app.manifest({
     ],
 });
 
-session.init();
+session.init({ ttl: 86400 });
+
+// Bootstrap anonymous session per request (same shape as Lua sibling).
+//
+// Cross-runtime note: the JS csrf middleware reads the session id from
+// `req.headers.cookie`, not from `req.ctx`. When we create a new session
+// here we also splice the cookie into req.headers so the downstream
+// csrf middleware finds it on the SAME request (otherwise the first
+// GET would render the form with an empty csrf token).
+function sessionBootstrap(req, res) {
+    req.ctx = req.ctx || {};
+    const cookies = cookie.parse(req.headers["cookie"] || "");
+    let sid = cookies.hull_session;
+    if (sid && session.load(sid)) {
+        req.ctx.session_id = sid;
+        return 0;
+    }
+    sid = session.create({});
+    req.ctx.session_id = sid;
+    const setCookie = cookie.serialize("hull_session", sid);
+    res.header("Set-Cookie", setCookie);
+    // Make the new cookie visible to downstream middleware on this same
+    // request. We only need the name=value part for csrf's parser.
+    const prev = req.headers["cookie"] || "";
+    req.headers["cookie"] = prev
+        ? prev + "; hull_session=" + sid
+        : "hull_session=" + sid;
+    return 0;
+}
 
 app.use("*", "/*", csp.htmx());
-app.use("*", "/*", session.middleware({ optional: true }));
-app.use_post("*", "/*", csrf.middleware({ secret: "CHANGE-ME-IN-PRODUCTION" }));
+app.use("*", "/*", sessionBootstrap);
+// cookieName matches sessionBootstrap's cookie. JS csrf's default is
+// `hull.sid` (stdlib-internal convention) while JS auth uses
+// `hull_session`; we anchor to the session-cookie name we actually set.
+app.usePost("*", "/*", csrf.middleware({
+    secret: "CHANGE-ME-IN-PRODUCTION",
+    cookieName: "hull_session",
+}));
 
 function todosData() {
     return db.query("SELECT id, title, done FROM todos ORDER BY id DESC");
 }
 
 app.get("/", (req, res) => {
+    // Template literal keys are snake_case to match the Lua sibling +
+    // the actual ctx keys (csp.js writes csp_nonce; csrf.js writes
+    // csrf_token). Same template HTML works for both runtimes.
     res.html(template.render("pages/home.html", {
-        cspNonce:  req.ctx.cspNonce,
-        csrfToken: req.ctx.csrfToken,
-        todos:     todosData(),
+        csp_nonce:  req.ctx.csp_nonce,
+        csrf_token: req.ctx.csrf_token,
+        todos:      todosData(),
     }));
 });
 
@@ -317,7 +378,7 @@ app.post("/todos", (req, res) => {
     if (htmx.is(req)) {
         res.html(
             template.render("partials/todo_row.html",  { id, title, done: false })
-            + template.render("partials/todo_form.html", { csrfToken: req.ctx.csrfToken })
+            + template.render("partials/todo_form.html", { csrf_token: req.ctx.csrf_token })
         );
     } else {
         res.redirect("/");
@@ -354,14 +415,14 @@ templates.htmx_base_html = [[<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}Hull HTMX app{% endblock %}</title>
+  <title>{% block title %}Hull HTMX app{% end %}</title>
   <link rel="stylesheet" nonce="{{ csp_nonce }}" href="/static/vendor/pico.classless.min.css">
   <link rel="stylesheet" nonce="{{ csp_nonce }}" href="/static/app.css">
   <script nonce="{{ csp_nonce }}" src="/static/vendor/htmx.min.js"></script>
 </head>
 <body>
   <main>
-    {% block body %}{% endblock %}
+    {% block body %}{% end %}
   </main>
 </body>
 </html>
@@ -369,7 +430,7 @@ templates.htmx_base_html = [[<!doctype html>
 
 templates.htmx_page_home = [[{% extends "base.html" %}
 
-{% block title %}Todos{% endblock %}
+{% block title %}Todos{% end %}
 
 {% block body %}
 <h1>Todos</h1>
@@ -381,7 +442,7 @@ templates.htmx_page_home = [[{% extends "base.html" %}
   {% include "partials/todo_row.html" %}
 {% end %}
 </ul>
-{% endblock %}
+{% end %}
 ]]
 
 templates.htmx_partial_todo_form = [[<form id="new-todo"
@@ -442,44 +503,51 @@ CREATE TABLE IF NOT EXISTS todos (
 ]]
 
 templates.htmx_test_lua = [[-- Tests for both plain HTML and HTMX request paths.
+-- All requests use opts.middleware = true so the full middleware chain
+-- (CSP nonce, session bootstrap, CSRF) runs; without it test.get/post
+-- dispatches the handler directly and skips middleware.
 
 test("GET / returns full HTML page", function()
-    local res = test.get("/")
+    local res = test.get("/", { middleware = true })
     test.eq(res.status, 200)
     test.ok(string.find(res.body, "<!doctype html>"), "should be a full page")
     test.ok(string.find(res.body, "id=\"todos\""), "should contain todo list")
 end)
 
 test("POST /todos with hx-request returns fragment, not redirect", function()
-    -- Get a CSRF token by hitting / first.
-    local home = test.get("/")
+    -- Get a CSRF token + session cookie by hitting / first.
+    local home = test.get("/", { middleware = true })
     local token = string.match(home.body, 'name="_csrf" value="([^"]+)"')
-    test.ok(token, "csrf token should be in form")
+    test.ok(token and #token > 0, "csrf token should be in form")
     -- Send htmx-flavored POST with token + cookie.
-    local res = test.post("/todos",
-        "title=buy+milk&_csrf=" .. token,
-        { headers = {
+    local res = test.post("/todos", {
+        middleware = true,
+        body = "title=buy+milk&_csrf=" .. token,
+        headers = {
             ["hx-request"] = "true",
             ["content-type"] = "application/x-www-form-urlencoded",
             ["cookie"] = home.headers["set-cookie"] or "",
             ["x-csrf-token"] = token,
-        }})
+        },
+    })
     test.eq(res.status, 200)
     test.ok(string.find(res.body, "buy milk"), "fragment should contain new todo")
     test.ok(not string.find(res.body, "<!doctype"), "fragment must NOT be full page")
 end)
 
 test("POST /todos with empty title returns validation fragment", function()
-    local home = test.get("/")
+    local home = test.get("/", { middleware = true })
     local token = string.match(home.body, 'name="_csrf" value="([^"]+)"')
-    local res = test.post("/todos",
-        "title=&_csrf=" .. token,
-        { headers = {
+    local res = test.post("/todos", {
+        middleware = true,
+        body = "title=&_csrf=" .. token,
+        headers = {
             ["hx-request"] = "true",
             ["content-type"] = "application/x-www-form-urlencoded",
             ["cookie"] = home.headers["set-cookie"] or "",
             ["x-csrf-token"] = token,
-        }})
+        },
+    })
     test.eq(res.status, 200)
     test.ok(string.find(res.body, "cannot be empty"), "should show validation error")
     test.eq(res.headers["hx-retarget"], "#new-todo",
@@ -488,46 +556,49 @@ end)
 ]]
 
 templates.htmx_test_js = [[// Tests for both plain HTML and HTMX request paths.
+// All requests pass `middleware: true` so the full middleware chain
+// (CSP nonce, session bootstrap, CSRF) runs; without it test.get/post
+// dispatches the handler directly and skips middleware.
 
 test("GET / returns full HTML page", async () => {
-    const res = await test.get("/");
+    const res = await test.get("/", { middleware: true });
     test.eq(res.status, 200);
     test.ok(res.body.includes("<!doctype html>"), "should be a full page");
     test.ok(res.body.includes('id="todos"'), "should contain todo list");
 });
 
 test("POST /todos with hx-request returns fragment, not redirect", async () => {
-    const home = await test.get("/");
+    const home = await test.get("/", { middleware: true });
     const token = home.body.match(/name="_csrf" value="([^"]+)"/)?.[1];
-    test.ok(token, "csrf token should be in form");
-    const res = await test.post(
-        "/todos",
-        "title=buy+milk&_csrf=" + token,
-        { headers: {
+    test.ok(token && token.length > 0, "csrf token should be in form");
+    const res = await test.post("/todos", {
+        middleware: true,
+        body: "title=buy+milk&_csrf=" + token,
+        headers: {
             "hx-request": "true",
             "content-type": "application/x-www-form-urlencoded",
             "cookie": home.headers["set-cookie"] || "",
             "x-csrf-token": token,
-        }}
-    );
+        },
+    });
     test.eq(res.status, 200);
     test.ok(res.body.includes("buy milk"), "fragment should contain new todo");
     test.ok(!res.body.includes("<!doctype"), "fragment must NOT be full page");
 });
 
 test("POST /todos with empty title returns validation fragment", async () => {
-    const home = await test.get("/");
+    const home = await test.get("/", { middleware: true });
     const token = home.body.match(/name="_csrf" value="([^"]+)"/)?.[1];
-    const res = await test.post(
-        "/todos",
-        "title=&_csrf=" + token,
-        { headers: {
+    const res = await test.post("/todos", {
+        middleware: true,
+        body: "title=&_csrf=" + token,
+        headers: {
             "hx-request": "true",
             "content-type": "application/x-www-form-urlencoded",
             "cookie": home.headers["set-cookie"] || "",
             "x-csrf-token": token,
-        }}
-    );
+        },
+    });
     test.eq(res.status, 200);
     test.ok(res.body.includes("cannot be empty"), "should show validation error");
     test.eq(res.headers["hx-retarget"], "#new-todo",

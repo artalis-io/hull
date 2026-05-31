@@ -1,0 +1,7 @@
+data.db
+data.db-*
+*.key
+hull.sig
+build/
+
+# static/vendor/ is committed; fetched once via `make fetch-vendor`.

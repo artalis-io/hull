@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+
+{% block title %}Todos{% end %}
+
+{% block body %}
+<h1>Todos</h1>
+
+{% include "partials/todo_form.html" %}
+
+<ul id="todos">
+{% for t in todos %}
+  {% include "partials/todo_row.html" %}
+{% end %}
+</ul>
+{% end %}
