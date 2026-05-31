@@ -191,6 +191,56 @@ int hl_module_resolver_resolve(const HlManifest *manifest,
         const HlModuleSpec *spec = hl_module_registry_find_short(m->name);
 
         if (!spec) {
+            /* v0.2.0 rename table: explicit fix-it for the 20 modules
+             * moved into the hull/web/ namespace. Hits before the
+             * fuzzy-suggest path so users see "renamed to X in v0.2.0"
+             * instead of the more vague "did you mean X?". Entries can
+             * be removed after a few releases once the migration
+             * window closes. */
+            static const struct { const char *old; const char *new; }
+                V0_2_0_RENAMES[] = {
+                {"hull/cookie",                   "hull/web/cookie"},
+                {"hull/form",                     "hull/web/form"},
+                {"hull/htmx",                     "hull/web/htmx"},
+                {"hull/middleware/auth",          "hull/web/middleware/auth"},
+                {"hull/middleware/cors",          "hull/web/middleware/cors"},
+                {"hull/middleware/csp",           "hull/web/middleware/csp"},
+                {"hull/middleware/csrf",          "hull/web/middleware/csrf"},
+                {"hull/middleware/etag",          "hull/web/middleware/etag"},
+                {"hull/middleware/health",        "hull/web/middleware/health"},
+                {"hull/middleware/idempotency",   "hull/web/middleware/idempotency"},
+                {"hull/middleware/inbox",         "hull/web/middleware/inbox"},
+                {"hull/middleware/logger",        "hull/web/middleware/logger"},
+                {"hull/middleware/outbox",        "hull/web/middleware/outbox"},
+                {"hull/middleware/ratelimit",     "hull/web/middleware/ratelimit"},
+                {"hull/middleware/rbac",          "hull/web/middleware/rbac"},
+                {"hull/middleware/session",       "hull/web/middleware/session"},
+                {"hull/middleware/transaction",   "hull/web/middleware/transaction"},
+                {"hull/sse",                      "hull/web/sse"},
+                {"hull/ws-client",                "hull/web/ws-client"},
+                {"hull/ws-server",                "hull/web/ws-server"},
+            };
+
+            /* Normalize the input the same way find_short does: prepend
+             * "hull/" if absent, so both "cookie" and "hull/cookie"
+             * trigger the rename hint. */
+            char canon[HL_MODULE_NAME_MAX];
+            const char *check = m->name;
+            if (strncmp(check, "hull/", 5) != 0) {
+                int n = snprintf(canon, sizeof(canon), "hull/%s", check);
+                if (n > 0 && (size_t)n < sizeof(canon)) check = canon;
+            }
+            for (size_t r = 0; r < sizeof(V0_2_0_RENAMES) / sizeof(V0_2_0_RENAMES[0]); r++) {
+                if (strcmp(check, V0_2_0_RENAMES[r].old) == 0) {
+                    ERR3("module '%s@%u' was renamed to '%s@1' in v0.2.0; "
+                         "update app.manifest.modules (and any "
+                         "require/import sites)",
+                         m->name, (unsigned)m->api_major,
+                         V0_2_0_RENAMES[r].new);
+                    return -1;
+                }
+            }
+
             const HlModuleSpec *guess = hl_module_registry_suggest(m->name);
             if (guess) {
                 ERR3("unknown module '%s' in app.manifest.modules — "

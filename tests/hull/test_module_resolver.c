@@ -213,6 +213,55 @@ UTEST(module_resolver, unknown_module_rejected)
     ASSERT_NE(strstr(err, "nonexistent"), NULL);
 }
 
+UTEST(module_resolver, v0_2_0_rename_hint_flat_module)
+{
+    /* User declaring the OLD pre-v0.2.0 name 'hull/cookie@1' should
+     * get an explicit rename hint, not a generic "unknown module"
+     * or fuzzy "did you mean". */
+    HlManifest m;
+    clear_manifest(&m);
+    add_module(&m, "cookie", 1);
+
+    HlResolvedModuleSet s = {0};
+    char err[256] = {0};
+    int rc = hl_module_resolver_resolve(&m, &s, err, sizeof(err));
+    ASSERT_EQ(rc, -1);
+    ASSERT_NE(strstr(err, "was renamed to"), NULL);
+    ASSERT_NE(strstr(err, "hull/web/cookie"), NULL);
+    ASSERT_NE(strstr(err, "v0.2.0"), NULL);
+}
+
+UTEST(module_resolver, v0_2_0_rename_hint_middleware)
+{
+    /* Same hint for the middleware/* subtree rename. */
+    HlManifest m;
+    clear_manifest(&m);
+    add_module(&m, "middleware/csrf", 1);
+
+    HlResolvedModuleSet s = {0};
+    char err[256] = {0};
+    int rc = hl_module_resolver_resolve(&m, &s, err, sizeof(err));
+    ASSERT_EQ(rc, -1);
+    ASSERT_NE(strstr(err, "was renamed to"), NULL);
+    ASSERT_NE(strstr(err, "hull/web/middleware/csrf"), NULL);
+    ASSERT_NE(strstr(err, "v0.2.0"), NULL);
+}
+
+UTEST(module_resolver, v0_2_0_rename_hint_with_hull_prefix)
+{
+    /* Same hint when the user wrote the canonical 'hull/' form. */
+    HlManifest m;
+    clear_manifest(&m);
+    add_module(&m, "hull/ws-server", 1);
+
+    HlResolvedModuleSet s = {0};
+    char err[256] = {0};
+    int rc = hl_module_resolver_resolve(&m, &s, err, sizeof(err));
+    ASSERT_EQ(rc, -1);
+    ASSERT_NE(strstr(err, "was renamed to"), NULL);
+    ASSERT_NE(strstr(err, "hull/web/ws-server"), NULL);
+}
+
 UTEST(module_resolver, version_mismatch_rejected)
 {
     HlManifest m;
