@@ -593,6 +593,19 @@ HTMX scaffold (§1.5) wires them in opportunistically.
   do fragment swaps. Same generic-with-HTMX-opt-in shape as
   `hull/web/flash@1`. Pairs with `hull/web/pagination@1` for the
   canonical CRUD list view.
+- `hull/web/seo@1` — Open Graph / Twitter Card / JSON-LD helpers.
+  Template-friendly: `seo.tags({ title, description, image, type,
+  card = "summary_large_image" })` returns the full `<meta>` set
+  for the page `<head>`. `seo.json_ld(structured_data)` renders the
+  `<script type="application/ld+json">` block. Pairs with the
+  canonical-URL middleware (below).
+- `hull/web/openapi@1` — Spec generator for the JSON half of
+  HTMX-hybrid apps (HTMX routes returning HTML coexist with
+  `/api/*` routes returning JSON). Walks `app.get/post/...`
+  registrations, infers params from `:path/:vars`, accepts
+  `app.get("/api/x", { schema = {...} }, handler)` overrides
+  for explicit request/response shapes. Emits OpenAPI 3.1 JSON +
+  serves Swagger UI at `/docs`.
 - Request ID propagation helpers.
 - Canonical-URL / trailing-slash redirect middleware.
 - Content negotiation helper.
@@ -911,6 +924,40 @@ prioritized.
       that accepts the browser's CSP violation reports, parses the JSON,
       and emits one structured log line per violation. Useful during
       rollout to catch nonce regressions. ~50 lines.
+- [ ] §1.5.d-10. Client-side toast renderer for `flash.trigger`. Today
+      the trigger path fires `HX-Trigger: {"flash":...}` but the
+      scaffold has no listener — the event is invisible without
+      app-side JS. Ship a ~30-line inline `<script nonce>` snippet in
+      the scaffold's `base.html` that listens for the `flash` event
+      and appends an `<article>` to `#flash-zone` with a
+      `prefers-reduced-motion`-aware CSS fade-out. Five lines of CSS
+      for the slide-in animation. Without this, `flash.trigger` is a
+      half-finished API.
+- [ ] §1.5.d-11. Form auto-save / draft pattern. Long forms shouldn't
+      lose data on refresh. Pattern: every form field has
+      `hx-trigger="input changed delay:500ms"` + `hx-post="/drafts/X"`,
+      server writes to a `_hull_drafts` table keyed by
+      `(session_id, form_id)`. On GET of the form, server pre-fills
+      from the latest draft. Doc recipe + tiny `hull/web/drafts@1`
+      module (~80 lines) + demo on `examples/hypermedia_todo`'s new
+      todo form.
+- [ ] §1.5.d-12. Rich text editor recipe. `hull/web/rte@1` or just a
+      doc pattern: drop-in `<trix-editor>` (Trix is small, CSP-safe,
+      no build step) with `hx-post` on the wrapping form. Server-side
+      HTML sanitization via a small allowlist helper. Two-paragraph
+      doc + Pico-styled CSS.
+- [ ] §1.5.d-13. Date/time picker recipe. Native `<input type="date">`
+      / `type="datetime-local">` are now well-supported and accessible.
+      Doc the timezone gotcha (browser sends local time, server should
+      treat as user's TZ unless the form explicitly carries the
+      offset). Recipe for the common "convert to UTC on the server"
+      pattern.
+- [ ] §1.5.d-14. Drag-and-drop sorting. Vendor Sortable.js (or
+      document the recipe inline). Pattern: items have
+      `data-id` attributes, Sortable callback fires
+      `hx-post="/items/reorder"` with the new order array. Server
+      updates `display_order` columns in a single `db.batch()`.
+      `examples/hypermedia_todo` reorderable list.
 
 ### 1.5.e HTMX polish. Tier 3 (no target)
 
@@ -945,6 +992,18 @@ adjacent code.
       sample `locales/en.json` + `locales/de.json`, template
       `{{ "todo.title" | t }}` usage. Doc note in `docs/htmx.md`
       about RTL handling + `Accept-Language` detection.
+- [ ] §1.5.e-6. Subresource Integrity (SRI) for vendored assets.
+      `<script src="/static/vendor/htmx.min.js" integrity="sha384-...">`
+      catches tampered vendored files. SHA-pin already exists in
+      `make fetch-htmx`; just propagate the hash into the scaffold's
+      `base.html` via a template helper or build-time substitution.
+      Defense-in-depth even with `script-src 'self'` CSP.
+- [ ] §1.5.e-7. Charts / data viz recipe. Pick one CSP-friendly
+      no-build option (Chart.js works with nonce script tags; vega-lite
+      for declarative spec-driven; or just `<svg>` for simple bars/
+      sparklines). Doc the pattern, don't vendor (these libs are too
+      big to ship by default). Pairs with `hull/web/table@1` for
+      "table + matching chart" admin dashboards.
 
 ### 1.5.f Enterprise / internal-app gaps surfaced by §1.5 (deferred, no target)
 
@@ -954,10 +1013,43 @@ needs its own design pass + estimate before scheduling. Items marked
 `[COMMERCIAL]` are intended for the enterprise tier
 (see [Licensing tiers](#licensing-tiers-planning-convention) above).
 
-- [ ] **[COMMERCIAL]** Enterprise SSO middleware. OIDC first, then SAML,
-      LDAP, SCIM. Includes group/claim mapping, JIT provisioning,
-      session-bridge helpers. The community-tier basic session and JWT
-      auth stays free; this is the enterprise-IdP integration layer.
+- [ ] OAuth 2.0 / OIDC sign-in for consumer providers (community tier).
+      `hull/web/middleware/oauth@1`. Built-in providers for Google,
+      GitHub, GitLab, Microsoft consumer accounts. Standard
+      authorization-code flow with PKCE; ID-token verification via
+      JWKS. Account-linking helper for users that sign in with
+      multiple providers. Settles "Sign in with Google" as the
+      table-stakes consumer-app pattern; line vs. commercial below is
+      "consumer IdPs" (free) vs. "enterprise IdPs + provisioning"
+      (paid).
+- [ ] Two-factor auth (TOTP). `hull/web/middleware/totp@1`. RFC 6238
+      time-based one-time passwords (Google Authenticator / 1Password
+      / Authy compatible). QR-code provisioning helper (renders
+      `otpauth://` URL as SVG without an external lib). Recovery codes
+      generation + verification. Plays with the existing session
+      middleware: after password verify, set `req.ctx.session.pending_2fa
+      = true`, gate sensitive routes on it.
+- [ ] Account lockout / suspicious-login detection.
+      `hull/web/middleware/auth_lockout@1`. Tracks failed-attempt count
+      per `(account_id, ip_prefix)` in a small table, blocks with
+      exponential backoff (1s → 5s → 30s → 5m → 30m → lockout).
+      Optional integration with the existing audit log so security
+      events show up alongside business events. Pairs with a "your
+      account is temporarily locked" template fragment.
+- [ ] Transactional email flow recipes. The `hull/email` module exists
+      but the scaffold doesn't ship templates or routes for the
+      universal-need-list: welcome, verify-email, password-reset
+      request, password-reset complete, account-deletion confirm,
+      magic-link sign-in. Add a `hull/web/auth-flows@1` (or extend
+      `auth-middleware`) that wires the routes + bundles `_text.md` /
+      `_html.html` template pairs in `templates/email/`. Compose with
+      §5's email retry/backoff.
+- [ ] **[COMMERCIAL]** Enterprise SSO middleware. SAML 2.0, LDAP, SCIM
+      provisioning, IdP-initiated SSO, JIT provisioning, group/claim
+      mapping, session-bridge helpers. The community-tier OAuth/OIDC
+      (consumer providers, above) stays free; this is the
+      enterprise-IdP integration layer (Okta, Azure AD, Auth0
+      enterprise tier, Ping, ADFS, etc.).
 - [ ] **[COMMERCIAL]** Advanced RBAC. ABAC (attribute-based access
       control), policy-as-code, role hierarchies, dynamic permission
       resolution, audit-grade decision logging. The community-tier
@@ -2161,9 +2253,18 @@ isn't the artifact CI built" surprise.
 
 ## 4. Background job queue (`hull.jobs`)
 
-**Priority:** Low. The existing transactional outbox + inbox patterns cover
-most reliable side-effect use cases. Add this when an explicit user need
-appears (background image processing, scheduled cleanup, async chains).
+**Priority:** High (bumped from Low after the §1.5.c HTMX surface
+landed). The existing transactional outbox + inbox patterns cover
+reliable side-effect delivery for *outgoing* events, and `app.every` /
+`app.daily` timers handle simple schedules. What's missing: durable
+queueing of user-triggered work — image resizing, CSV import, PDF
+rendering, sending a batch of emails after a paid plan upgrade,
+scheduled report generation. Any non-trivial web app needs at least
+one of these within the first month.
+
+Adjacent to §5: the email transactional flows shipped there should
+schedule retries via this queue rather than each carrying their own
+backoff logic.
 
 **API sketch:**
 
@@ -2191,15 +2292,39 @@ end, { batch = 10, retry = 3 })
 
 ---
 
-## 5. Email retry/backoff (Phase 7 candidate from Phase 6 audit)
+## 5. Email retry/backoff + transactional flow recipes
 
-**Priority:** Low. Phase 6 wrapped `email.js` / `email.lua` providers in
-try/catch; now that errors surface cleanly as `{ok:false, error}`, retry on
-transient failures is a small follow-up.
+**Priority:** High (bumped from Low). Phase 6 wrapped `email.js` /
+`email.lua` providers in try/catch so errors now surface cleanly as
+`{ok:false, error}`. The retry envelope is the easy half; the harder
+half is that **the scaffold doesn't show how to actually USE email**
+for the standard set of flows every web app needs.
 
-**Approach:** wrap `email.send` itself (not each provider) in an
-`opts.retry = { max_attempts, base_delay_ms }` envelope. Use the same
-exponential backoff math as `outbox.backoffDelay`.
+**Retry envelope (the easy half).** Wrap `email.send` itself (not
+each provider) in an `opts.retry = { max_attempts, base_delay_ms }`
+envelope. Use the same exponential backoff math as
+`outbox.backoffDelay`. Once §4 lands, schedule retries through
+`hull.jobs` instead of inline `app.every` callbacks.
+
+**Transactional flow recipes (the load-bearing half).** Ship
+template pairs and scaffold routes for the universal flows:
+
+- Welcome email on signup
+- Email verification (token-link + tap to confirm)
+- Password reset request → email with reset link
+- Password reset complete → confirmation email
+- Magic-link sign-in (passwordless)
+- Account deletion confirmation
+- Notification digest (daily/weekly opt-in)
+
+Each ships as a Pico-styled `<table>`-based HTML template + plain-text
+counterpart under `templates/email/`. Scaffolded `app.{lua,js}` wires
+the routes. Email previews via a dev-only route `/__email/preview/<name>`
+that renders the template with sample data (no actual send) — invaluable
+when iterating.
+
+Pairs with §1.5.f's `hull/web/middleware/auth-flows@1` (the route +
+session-management half).
 
 ---
 
@@ -2210,6 +2335,58 @@ Three items the audits flagged as deserving unit tests (currently e2e-only):
 - [ ] **`hl_migrate_*`**. `src/hull/migrate.c` has no unit-test suite. Edge cases (checksum mismatch, missing migrations table, concurrent attempts) deserve in-process tests.
 - [ ] **Sandbox profile builder** (`sandbox.c::build_seatbelt_profile` / unveil-path builder). Only e2e-covered today, and only on the platforms CI runs. A unit test calling the profile-build helper and asserting on the generated SBPL/unveil list would catch regressions on platforms CI doesn't run.
 - [ ] **`hl_snprintf_append` helper**. Phase 5 audit recommendation. Replaces the brittle `req_len += snprintf(...)` idiom that recurs in `agent/request.c`, `cap/smtp.c`, and template codegen. Land the helper + tests + sweep the call sites.
+
+---
+
+## 7. Observability (OpenTelemetry + structured logs + metrics)
+
+**Priority:** High. Hull has `--audit` which emits JSON capability
+events to stderr, and `hull.middleware.logger` emits logfmt request
+lines. Both are useful for local dev. Neither is what a production
+deployment expects in 2026: traces in Jaeger/Tempo, metrics in
+Prometheus/Datadog, logs ingested by Loki/Splunk/CloudWatch. Modern
+SaaS apps can't run blind in production — when a request takes 8s,
+you need to know if it was the DB or an outbound API.
+
+This is the missing piece between "Hull demos cleanly" and "I'd ship
+real revenue on this".
+
+**Three sub-items, ordered by user impact:**
+
+### 7.1 Structured-JSON request log alongside logfmt
+
+Today `logger.middleware` emits one logfmt line per request. Add an
+`opts.format = "json" | "logfmt"` (default logfmt for human dev,
+JSON for production). JSON shape matches the de-facto common
+contract Datadog / Loki / Splunk Cloud accept:
+`{timestamp, level, msg, method, path, status, duration_ms, request_id,
+session_id, user_id?, ...}`. Small change, large operational win.
+
+### 7.2 Prometheus-format metrics exporter
+
+`hull/web/middleware/metrics@1` exposes `/metrics` in Prometheus
+exposition format. Built-in metrics: request-count, request-duration
+histogram (per method + status), in-flight requests, DB-query count,
+WASM/GPU call count + duration. Apps add custom counters via
+`metrics.counter("name", { labels = {...} }):inc()`. Pull-based
+scraping is the most operationally-friendly default — no exporter
+process, no push-gateway. Optionally a `--metrics-port` flag to
+separate the scrape endpoint from the public listener.
+
+### 7.3 OpenTelemetry traces (W3C `traceparent` propagation)
+
+`hull/web/middleware/otel@1`. Reads incoming `traceparent` header,
+generates spans for the request lifecycle (route match, middleware
+chain, handler, DB queries, outbound HTTP, WASM/GPU dispatch).
+Exports via OTLP/HTTP to a collector (no embedded vendor SDK
+dependency). Adds `traceparent` to outbound `http.fetch` calls so
+the trace propagates across services. Each span carries the
+`request_id` so traces correlate with logs and metrics.
+
+Implementation cost is real (spans, context propagation, exporter
+buffering, batching) but unavoidable for serious production
+deployments. Look at OpenTelemetry-C / OpenTelemetry-Lua for prior
+art; the OTLP/HTTP wire format is the most stable surface.
 
 ---
 
