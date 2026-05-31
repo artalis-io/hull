@@ -228,6 +228,38 @@ test("inline edit: PATCH with empty title re-renders edit form with error", asyn
     test.eq(stored, "keep me");
 });
 
+test("idempotency: repeating POST with same Idempotency-Key writes once", async () => {
+    const { db } = await import("hull:db");
+    db.exec("DELETE FROM todos");
+
+    const home = await test.get("/", { middleware: true });
+    const token = home.body.match(/name="_csrf" value="([^"]+)"/)?.[1];
+    const cookieHdr = home.headers["set-cookie"] || "";
+    const body = "title=idem+probe&_csrf=" + token;
+    const headers = {
+        "hx-request": "true",
+        "content-type": "application/x-www-form-urlencoded",
+        "cookie": cookieHdr,
+        "x-csrf-token": token,
+        "idempotency-key": "test-key-001",
+    };
+
+    const first = await test.post("/todos", {
+        middleware: true, body, headers,
+    });
+    test.eq(first.status, 200);
+
+    const second = await test.post("/todos", {
+        middleware: true, body, headers,
+    });
+    test.eq(second.status, 200);
+    test.eq(second.headers["x-idempotency-replay"], "true",
+            "second submit should be a replay");
+
+    const cnt = db.query("SELECT COUNT(*) AS n FROM todos")[0].n;
+    test.eq(cnt, 1, "should not have double-inserted");
+});
+
 test("POST /todos with empty title re-renders form with error", async () => {
     const home = await test.get("/", { middleware: true });
     const token = home.body.match(/name="_csrf" value="([^"]+)"/)?.[1];

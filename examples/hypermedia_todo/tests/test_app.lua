@@ -248,6 +248,42 @@ test("inline edit: PATCH with empty title re-renders edit form with error", func
     test.eq(stored, "keep me")
 end)
 
+test("idempotency: repeating POST with same Idempotency-Key writes once", function()
+    local db = require("hull.db")
+    db.exec("DELETE FROM todos")
+
+    local home = test.get("/", { middleware = true })
+    local token = string.match(home.body, 'name="_csrf" value="([^"]+)"')
+    local cookie_hdr = home.headers["set-cookie"] or ""
+    local body = "title=idem+probe&_csrf=" .. token
+    local headers = {
+        ["hx-request"] = "true",
+        ["content-type"] = "application/x-www-form-urlencoded",
+        ["cookie"] = cookie_hdr,
+        ["x-csrf-token"] = token,
+        ["idempotency-key"] = "test-key-001",
+    }
+
+    -- First submit: real INSERT.
+    local first = test.post("/todos", {
+        middleware = true, body = body, headers = headers,
+    })
+    test.eq(first.status, 200)
+
+    -- Second submit with SAME key + SAME body: replayed, no second insert.
+    local second = test.post("/todos", {
+        middleware = true, body = body, headers = headers,
+    })
+    test.eq(second.status, 200)
+    -- Cached responses carry an X-Idempotency-Replay header.
+    test.eq(second.headers["x-idempotency-replay"], "true",
+            "second submit should be a replay")
+
+    -- DB still has exactly one row.
+    local cnt = db.query("SELECT COUNT(*) AS n FROM todos")[1].n
+    test.eq(cnt, 1, "should not have double-inserted")
+end)
+
 test("POST /todos with empty title re-renders form with error", function()
     local home = test.get("/", { middleware = true })
     local token = string.match(home.body, 'name="_csrf" value="([^"]+)"')

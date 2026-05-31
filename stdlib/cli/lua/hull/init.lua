@@ -162,18 +162,19 @@ templates.migration_init = [[-- Migration: 001_init
 templates.htmx_lua_app = [[-- HTMX + Pico hypermedia app scaffold.
 -- Returns full pages for plain navigation; returns fragments when
 -- HX-Request is set. CSRF + per-request CSP nonce wired in by default.
-local htmx       = require("hull.web.htmx")
-local flash      = require("hull.web.flash")
-local pagination = require("hull.web.pagination")
-local validate   = require("hull.validate")
-local csp        = require("hull.web.middleware.csp")
-local csrf       = require("hull.web.middleware.csrf")
-local session    = require("hull.web.middleware.session")
-local cookie     = require("hull.web.cookie")
-local template   = require("hull.template")
-local form       = require("hull.web.form")
-local log        = require("hull.log")
-local db         = require("hull.db")
+local htmx        = require("hull.web.htmx")
+local flash       = require("hull.web.flash")
+local pagination  = require("hull.web.pagination")
+local validate    = require("hull.validate")
+local csp         = require("hull.web.middleware.csp")
+local csrf        = require("hull.web.middleware.csrf")
+local session     = require("hull.web.middleware.session")
+local idempotency = require("hull.web.middleware.idempotency")
+local cookie      = require("hull.web.cookie")
+local template    = require("hull.template")
+local form        = require("hull.web.form")
+local log         = require("hull.log")
+local db          = require("hull.db")
 
 -- Small default so pagination is visible in the demo with only a
 -- handful of todos. Real apps would set this to 20-50.
@@ -189,6 +190,7 @@ app.manifest({
         "hull/web/middleware/csp@1",
         "hull/web/middleware/csrf@1",
         "hull/web/middleware/session@1",
+        "hull/web/middleware/idempotency@1",
         "hull/web/cookie@1",
         "hull/template@1",
         "hull/web/form@1",
@@ -199,6 +201,14 @@ app.manifest({
 
 -- Sessions table (creates _hull_sessions on first run).
 session.init({ ttl = 86400 })
+
+-- Idempotency-key cache (creates _hull_idempotency_keys on first run).
+-- Only kicks in when the client sends an `Idempotency-Key: <uuid>`
+-- header; without it, requests pass through normally. HTMX doesn't
+-- send the header by default; opt in with
+-- `hx-headers='{"Idempotency-Key":"..."}'` on forms that must not
+-- double-write on retry. See docs/htmx.md § Idempotency.
+idempotency.init({ ttl = 86400 })
 
 -- CSRF secret. CHANGE-ME-IN-PRODUCTION is the placeholder shipped by
 -- the scaffold; load from env (or a sealed secret) before deploying.
@@ -243,7 +253,15 @@ app.use("*", "/*", session_bootstrap)
 
 -- Post-body middleware (runs after req.body is parsed):
 --   3. CSRF. Verifies on unsafe methods; injects token on safe.
-app.use_post("*", "/*", csrf.middleware({ secret = CSRF_SECRET }))
+--   4. Idempotency. Only takes effect when the client sends an
+--      `Idempotency-Key` header. Scoped to mutating methods.
+app.use_post("*",     "/*", csrf.middleware({ secret = CSRF_SECRET }))
+app.use_post("POST",  "/*", idempotency.middleware({
+    get_principal = function(req) return req.ctx.session_id or "__anon" end,
+}))
+app.use_post("PATCH", "/*", idempotency.middleware({
+    get_principal = function(req) return req.ctx.session_id or "__anon" end,
+}))
 
 app.get("/", function(req, res)
     -- flash.consume drains any pending one-shot messages from the
@@ -314,10 +332,14 @@ app.post("/todos", function(req, res)
         -- todo_row.html uses `{{ t.X }}` so the same partial works
         -- both here (single render) and inside the GET / for-loop.
         flash.trigger(res, "Added: " .. title, "success")
-        res:html(template.render("partials/todo_row.html",
+        local html = template.render("partials/todo_row.html",
             { t = { id = id, title = title, done = false } })
             .. template.render("partials/todo_form.html",
-                { csrf_token = req.ctx.csrf_token }))
+                { csrf_token = req.ctx.csrf_token })
+        -- idempotency.respond_html caches the HTML so a retry with
+        -- the same Idempotency-Key gets the cached response back
+        -- without re-running the handler. No-op when no key is active.
+        idempotency.respond_html(req, res, 200, html)
     else
         -- Plain form post: stash in session, redirect; next GET / renders.
         flash.set(req, "Added: " .. title, "success")
@@ -436,19 +458,20 @@ log.info("hypermedia app loaded")
 templates.htmx_js_app = [[// HTMX + Pico hypermedia app scaffold.
 // Returns full pages for plain navigation; returns fragments when
 // HX-Request is set. CSRF + per-request CSP nonce wired in by default.
-import { app }        from "hull:app";
-import { htmx }       from "hull:web:htmx";
-import { flash }      from "hull:web:flash";
-import { pagination } from "hull:web:pagination";
-import { validate }   from "hull:validate";
-import { csp }        from "hull:web:middleware:csp";
-import { csrf }       from "hull:web:middleware:csrf";
-import { session }    from "hull:web:middleware:session";
-import { cookie }     from "hull:web:cookie";
-import { template }   from "hull:template";
-import { form }       from "hull:web:form";
-import { log }        from "hull:log";
-import { db }         from "hull:db";
+import { app }         from "hull:app";
+import { htmx }        from "hull:web:htmx";
+import { flash }       from "hull:web:flash";
+import { pagination }  from "hull:web:pagination";
+import { validate }    from "hull:validate";
+import { csp }         from "hull:web:middleware:csp";
+import { csrf }        from "hull:web:middleware:csrf";
+import { session }     from "hull:web:middleware:session";
+import { idempotency } from "hull:web:middleware:idempotency";
+import { cookie }      from "hull:web:cookie";
+import { template }    from "hull:template";
+import { form }        from "hull:web:form";
+import { log }         from "hull:log";
+import { db }          from "hull:db";
 
 // Small default so pagination is visible in the demo with only a
 // handful of todos. Real apps would set this to 20-50.
@@ -464,6 +487,7 @@ app.manifest({
         "hull/web/middleware/csp@1",
         "hull/web/middleware/csrf@1",
         "hull/web/middleware/session@1",
+        "hull/web/middleware/idempotency@1",
         "hull/web/cookie@1",
         "hull/template@1",
         "hull/web/form@1",
@@ -473,6 +497,14 @@ app.manifest({
 });
 
 session.init({ ttl: 86400 });
+
+// Idempotency-key cache (creates _hull_idempotency_keys on first run).
+// Only kicks in when the client sends an `Idempotency-Key: <uuid>`
+// header; without it, requests pass through normally. HTMX doesn't
+// send the header by default; opt in with
+// `hx-headers='{"Idempotency-Key":"..."}'` on forms that must not
+// double-write on retry. See docs/htmx.md § Idempotency.
+idempotency.init({ ttl: 86400 });
 
 // CSRF secret. CHANGE-ME-IN-PRODUCTION is the placeholder shipped by
 // the scaffold; load from env (or a sealed secret) before deploying.
@@ -518,6 +550,14 @@ app.use("*", "/*", sessionBootstrap);
 app.usePost("*", "/*", csrf.middleware({
     secret: CSRF_SECRET,
     cookieName: "hull_session",
+}));
+// Idempotency. Only takes effect when the client sends an
+// `Idempotency-Key` header. Scoped to mutating methods.
+app.usePost("POST",  "/*", idempotency.middleware({
+    getPrincipal: (req) => req.ctx.session_id || "__anon",
+}));
+app.usePost("PATCH", "/*", idempotency.middleware({
+    getPrincipal: (req) => req.ctx.session_id || "__anon",
 }));
 
 app.get("/", (req, res) => {
@@ -589,10 +629,13 @@ app.post("/todos", (req, res) => {
         // todo_row.html uses `{{ t.X }}` so the same partial works
         // both here (single render) and inside the GET / for-loop.
         flash.trigger(res, "Added: " + title, "success");
-        res.html(
+        const html =
             template.render("partials/todo_row.html",  { t: { id, title, done: false } })
-            + template.render("partials/todo_form.html", { csrf_token: req.ctx.csrf_token })
-        );
+            + template.render("partials/todo_form.html", { csrf_token: req.ctx.csrf_token });
+        // idempotency.respondHtml caches the HTML so a retry with the
+        // same Idempotency-Key gets the cached response back without
+        // re-running the handler. No-op when no key is active.
+        idempotency.respondHtml(req, res, 200, html);
     } else {
         // Plain form post: stash in session, redirect; next GET / renders.
         flash.set(req, "Added: " + title, "success");

@@ -262,20 +262,31 @@ function idempotency.middleware(opts)
                 -- Completed: return cached response
                 if row.state == "complete" and row.status then
                     res:status(row.status)
-                    -- Restore cached headers (M-3: allowlist + CRLF reject)
+                    -- Restore cached headers (M-3: allowlist + CRLF reject).
+                    -- Content-Type is one of these — respond() and
+                    -- respond_html() both stash it in the headers blob —
+                    -- so the cached value drives the replayed mime type.
+                    local replayed_ct = nil
                     if row.response_headers then
                         local headers = json.decode(row.response_headers)
                         if headers then
                             for k, v in pairs(headers) do
                                 if is_replayable_header(k) and header_value_safe(v) then
                                     res:header(k, v)
+                                    if k:lower() == "content-type" then
+                                        replayed_ct = v
+                                    end
                                 end
                             end
                         end
                     end
                     res:header("X-Idempotency-Replay", "true")
                     if row.response_body then
-                        res:header("Content-Type", "application/json")
+                        -- Default to application/json for back-compat with
+                        -- old cached rows from before respond_html() existed.
+                        if not replayed_ct then
+                            res:header("Content-Type", "application/json")
+                        end
                         res:text(row.response_body)
                     else
                         res:text("")
@@ -328,11 +339,10 @@ end
 -- @tparam[opt]  table extra_headers Map of `Header-Name -> value`.
 -- @usage
 --   idempotency.respond(req, res, 201, { event_id = 42 })
-function idempotency.respond(req, res, status_code, data, extra_headers)
-    local body_str = json.encode(data)
-
-    -- Send the actual response (M-3: same allowlist/CRLF check as the
-    -- replay path so credentials never end up in the cached row).
+-- Shared cache-write path. `body_str` is the literal response bytes;
+-- `content_type` is folded into the cached headers blob so the replay
+-- path serves the response with the correct mime.
+local function cache_and_send(req, res, status_code, body_str, content_type, extra_headers, send_fn)
     res:status(status_code)
     if extra_headers then
         for k, v in pairs(extra_headers) do
@@ -341,32 +351,56 @@ function idempotency.respond(req, res, status_code, data, extra_headers)
             end
         end
     end
-    res:json(data)
+    send_fn(res, body_str)
 
-    -- Cache if idempotency key is active.
-    -- Phase 6 audit M-3: filter headers through the same allowlist before
-    -- writing to SQLite, so credential headers never persist on disk for
-    -- the TTL even if the replay path would have dropped them anyway.
     if req.ctx._idem_key then
-        local headers_str = nil
+        -- Phase 6 audit M-3: filter headers through the allowlist
+        -- before writing to SQLite so credential headers never
+        -- persist on disk for the TTL.
+        local filtered = { ["Content-Type"] = content_type }
         if extra_headers then
-            local filtered = {}
             for k, v in pairs(extra_headers) do
                 if is_replayable_header(k) and header_value_safe(v) then
                     filtered[k] = v
                 end
             end
-            -- Only encode if there's at least one header to store.
-            if next(filtered) ~= nil then
-                headers_str = json.encode(filtered)
-            end
         end
-
+        local headers_str = json.encode(filtered)
         db.exec(
             "UPDATE _hull_idempotency_keys SET state = 'complete', status = ?, response_body = ?, response_headers = ? WHERE principal_id = ? AND key = ?",
             { status_code, body_str, headers_str, req.ctx._idem_principal, req.ctx._idem_key }
         )
     end
+end
+
+function idempotency.respond(req, res, status_code, data, extra_headers)
+    cache_and_send(req, res, status_code,
+        json.encode(data), "application/json",
+        extra_headers,
+        function(r, _) r:json(data) end)
+end
+
+--- Send an HTML response and cache it for idempotency replay.
+--
+-- HTMX form retries against the same `Idempotency-Key` get the cached
+-- HTML fragment back verbatim, with `Content-Type: text/html;
+-- charset=utf-8`. Without this helper the replay path would serve the
+-- cached body as JSON.
+--
+-- `extra_headers` is filtered through the same allowlist used by the
+-- replay path, so credential headers never persist on disk.
+--
+-- @function idempotency.respond_html
+-- @tparam table  req           The request object.
+-- @tparam table  res           The response object.
+-- @tparam number status_code   HTTP status to send + cache.
+-- @tparam string html          Response body (HTML).
+-- @tparam[opt]  table extra_headers Map of `Header-Name -> value`.
+function idempotency.respond_html(req, res, status_code, html, extra_headers)
+    cache_and_send(req, res, status_code,
+        html, "text/html; charset=utf-8",
+        extra_headers,
+        function(r, body) r:html(body) end)
 end
 
 --- Mark an idempotency key as complete without caching a response.

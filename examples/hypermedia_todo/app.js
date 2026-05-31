@@ -1,19 +1,20 @@
 // HTMX + Pico hypermedia app scaffold.
 // Returns full pages for plain navigation; returns fragments when
 // HX-Request is set. CSRF + per-request CSP nonce wired in by default.
-import { app }        from "hull:app";
-import { htmx }       from "hull:web:htmx";
-import { flash }      from "hull:web:flash";
-import { pagination } from "hull:web:pagination";
-import { validate }   from "hull:validate";
-import { csp }        from "hull:web:middleware:csp";
-import { csrf }       from "hull:web:middleware:csrf";
-import { session }    from "hull:web:middleware:session";
-import { cookie }     from "hull:web:cookie";
-import { template }   from "hull:template";
-import { form }       from "hull:web:form";
-import { log }        from "hull:log";
-import { db }         from "hull:db";
+import { app }         from "hull:app";
+import { htmx }        from "hull:web:htmx";
+import { flash }       from "hull:web:flash";
+import { pagination }  from "hull:web:pagination";
+import { validate }    from "hull:validate";
+import { csp }         from "hull:web:middleware:csp";
+import { csrf }        from "hull:web:middleware:csrf";
+import { session }     from "hull:web:middleware:session";
+import { idempotency } from "hull:web:middleware:idempotency";
+import { cookie }      from "hull:web:cookie";
+import { template }    from "hull:template";
+import { form }        from "hull:web:form";
+import { log }         from "hull:log";
+import { db }          from "hull:db";
 
 // Small default so pagination is visible in the demo with only a
 // handful of todos. Real apps would set this to 20-50.
@@ -29,6 +30,7 @@ app.manifest({
         "hull/web/middleware/csp@1",
         "hull/web/middleware/csrf@1",
         "hull/web/middleware/session@1",
+        "hull/web/middleware/idempotency@1",
         "hull/web/cookie@1",
         "hull/template@1",
         "hull/web/form@1",
@@ -38,6 +40,13 @@ app.manifest({
 });
 
 session.init({ ttl: 86400 });
+
+// Idempotency-key cache (creates _hull_idempotency_keys on first run).
+// Only kicks in when the client sends an `Idempotency-Key: <uuid>` header
+// - without it, requests pass through normally. HTMX doesn't send the
+// header by default; opt in with `hx-headers='{"Idempotency-Key":"..."}'`
+// on the form. See docs/htmx.md § Idempotency for the client recipe.
+idempotency.init({ ttl: 86400 });
 
 // CSRF secret. CHANGE-ME-IN-PRODUCTION is the placeholder shipped by
 // the scaffold; load from env (or a sealed secret) before deploying.
@@ -83,6 +92,15 @@ app.use("*", "/*", sessionBootstrap);
 app.usePost("*", "/*", csrf.middleware({
     secret: CSRF_SECRET,
     cookieName: "hull_session",
+}));
+// Idempotency. Only takes effect when the client sends an
+// `Idempotency-Key` header (HTMX double-clicks land here when the
+// form opts in via `hx-headers`). Scoped to mutating methods.
+app.usePost("POST",  "/*", idempotency.middleware({
+    getPrincipal: (req) => req.ctx.session_id || "__anon",
+}));
+app.usePost("PATCH", "/*", idempotency.middleware({
+    getPrincipal: (req) => req.ctx.session_id || "__anon",
 }));
 
 app.get("/", (req, res) => {
@@ -162,10 +180,13 @@ app.post("/todos", (req, res) => {
         // both here (single render) and inside the GET / for-loop
         // (`{% for t in todos %}{% include %}{% end %}`).
         flash.trigger(res, "Added: " + title, "success");
-        res.html(
+        const html =
             template.render("partials/todo_row.html",  { t: { id, title, done: false } })
-            + template.render("partials/todo_form.html", { csrf_token: req.ctx.csrf_token })
-        );
+            + template.render("partials/todo_form.html", { csrf_token: req.ctx.csrf_token });
+        // idempotency.respondHtml caches the rendered HTML so a
+        // retry with the same Idempotency-Key gets the same response
+        // without re-running the handler. No-op when no key is active.
+        idempotency.respondHtml(req, res, 200, html);
     } else {
         // Plain form post: stash a message in session, redirect.
         // The next GET / will consume + render it.

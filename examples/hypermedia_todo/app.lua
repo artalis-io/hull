@@ -1,18 +1,19 @@
 -- HTMX + Pico hypermedia app scaffold.
 -- Returns full pages for plain navigation; returns fragments when
 -- HX-Request is set. CSRF + per-request CSP nonce wired in by default.
-local htmx       = require("hull.web.htmx")
-local flash      = require("hull.web.flash")
-local pagination = require("hull.web.pagination")
-local validate   = require("hull.validate")
-local csp        = require("hull.web.middleware.csp")
-local csrf       = require("hull.web.middleware.csrf")
-local session    = require("hull.web.middleware.session")
-local cookie     = require("hull.web.cookie")
-local template   = require("hull.template")
-local form       = require("hull.web.form")
-local log        = require("hull.log")
-local db         = require("hull.db")
+local htmx        = require("hull.web.htmx")
+local flash       = require("hull.web.flash")
+local pagination  = require("hull.web.pagination")
+local validate    = require("hull.validate")
+local csp         = require("hull.web.middleware.csp")
+local csrf        = require("hull.web.middleware.csrf")
+local session     = require("hull.web.middleware.session")
+local idempotency = require("hull.web.middleware.idempotency")
+local cookie      = require("hull.web.cookie")
+local template    = require("hull.template")
+local form        = require("hull.web.form")
+local log         = require("hull.log")
+local db          = require("hull.db")
 
 -- Small default so pagination is visible in the demo with only a
 -- handful of todos. Real apps would set this to 20-50.
@@ -28,6 +29,7 @@ app.manifest({
         "hull/web/middleware/csp@1",
         "hull/web/middleware/csrf@1",
         "hull/web/middleware/session@1",
+        "hull/web/middleware/idempotency@1",
         "hull/web/cookie@1",
         "hull/template@1",
         "hull/web/form@1",
@@ -38,6 +40,13 @@ app.manifest({
 
 -- Sessions table (creates _hull_sessions on first run).
 session.init({ ttl = 86400 })
+
+-- Idempotency-key cache (creates _hull_idempotency_keys on first run).
+-- Only kicks in when the client sends an `Idempotency-Key: <uuid>` header
+-- — without it, requests pass through normally. HTMX doesn't send the
+-- header by default; opt in with `hx-headers='{"Idempotency-Key":"..."}'`
+-- on the form. See docs/htmx.md § Idempotency for the client recipe.
+idempotency.init({ ttl = 86400 })
 
 -- CSRF secret. CHANGE-ME-IN-PRODUCTION is the placeholder shipped by
 -- the scaffold; load from env (or a sealed secret) before deploying.
@@ -82,7 +91,17 @@ app.use("*", "/*", session_bootstrap)
 
 -- Post-body middleware (runs after req.body is parsed):
 --   3. CSRF. Verifies on unsafe methods; injects token on safe.
-app.use_post("*", "/*", csrf.middleware({ secret = CSRF_SECRET }))
+--   4. Idempotency. Only takes effect when the client sends an
+--      `Idempotency-Key` header (HTMX double-clicks land here when
+--      the form opts in via `hx-headers`). Scoped to mutating
+--      methods so safe GETs don't pay the dispatcher cost.
+app.use_post("*",     "/*",     csrf.middleware({ secret = CSRF_SECRET }))
+app.use_post("POST",  "/*",     idempotency.middleware({
+    get_principal = function(req) return req.ctx.session_id or "__anon" end,
+}))
+app.use_post("PATCH", "/*",     idempotency.middleware({
+    get_principal = function(req) return req.ctx.session_id or "__anon" end,
+}))
 
 app.get("/", function(req, res)
     -- flash.consume drains any pending one-shot messages from the
@@ -158,10 +177,15 @@ app.post("/todos", function(req, res)
         -- both here (single render) and inside the GET / for-loop
         -- (`{% for t in todos %}{% include %}{% end %}`).
         flash.trigger(res, "Added: " .. title, "success")
-        res:html(template.render("partials/todo_row.html",
+        local html = template.render("partials/todo_row.html",
             { t = { id = id, title = title, done = false } })
             .. template.render("partials/todo_form.html",
-                { csrf_token = req.ctx.csrf_token }))
+                { csrf_token = req.ctx.csrf_token })
+        -- idempotency.respond_html caches the rendered HTML so a
+        -- retry with the same Idempotency-Key gets the same response
+        -- without re-running the handler (no second todo inserted).
+        -- No-op when no idempotency key is active.
+        idempotency.respond_html(req, res, 200, html)
     else
         -- Plain form post: stash a message in session, redirect.
         -- The next GET / will consume + render it.

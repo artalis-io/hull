@@ -642,6 +642,87 @@ fields, the for-loop + partial pattern saves a lot of HTML.
 
 ---
 
+## Idempotency (double-submit protection)
+
+HTMX form submits are vulnerable to double-clicks: a user mashes the
+Save button, two POSTs go out, two rows get inserted. `hx-disabled-elt`
+helps at the UI level, but the server-side fix is HTTP-standard
+`Idempotency-Key`: client mints a UUID per logical action, server
+caches the response keyed by `(principal, key)` and replays it on
+retry.
+
+### The scaffold wires it in
+
+`hull init --profile htmx` ships a manifest that declares
+`hull/web/middleware/idempotency@1` and calls
+`idempotency.init({ ttl = 86400 })` at startup. The middleware is
+registered for `POST` and `PATCH`:
+
+```lua
+app.use_post("POST",  "/*", idempotency.middleware({
+    get_principal = function(req) return req.ctx.session_id or "__anon" end,
+}))
+app.use_post("PATCH", "/*", idempotency.middleware({
+    get_principal = function(req) return req.ctx.session_id or "__anon" end,
+}))
+```
+
+Without an `Idempotency-Key` header the middleware is a no-op: every
+request runs the handler normally. With the header, the middleware
+caches the response on first execution and replays it (with
+`X-Idempotency-Replay: true`) on retry.
+
+### Handler side: `idempotency.respond_html`
+
+For the cache → replay path to actually work for HTML fragments, the
+handler must use `idempotency.respond_html` (or `respond` for JSON)
+instead of `res:html(...)` directly:
+
+```lua
+app.post("/todos", function(req, res)
+    ...
+    local html = template.render("partials/todo_row.html", { t = row })
+    -- caches HTML + content-type when an Idempotency-Key is in flight,
+    -- otherwise just sends the response normally.
+    idempotency.respond_html(req, res, 200, html)
+end)
+```
+
+Why the helper? The middleware needs to know the response status,
+body, and content-type to cache. `res:html(...)` alone doesn't reach
+the middleware. Without `respond_html` the cache row stays `inflight`
+and a retry returns `409 already in progress`.
+
+### Client side: opt in via `hx-headers`
+
+HTMX doesn't send `Idempotency-Key` automatically. Forms that need
+double-submit protection opt in:
+
+```html
+<form hx-post="/todos"
+      hx-headers='{"Idempotency-Key": "{{ random_uuid }}"}'>
+  ...
+</form>
+```
+
+Generate the UUID once per render (server-side, in the template
+context). The client sends the same key on every retry of the same
+logical action. The scaffold ships the middleware but does NOT add
+`hx-headers` by default — apps add it on the forms that need it.
+
+### Semantics
+
+- **Same key + same body** → cached response replayed; handler skipped.
+- **Same key + DIFFERENT body** → `409 Conflict` (the key was used
+  before with a different request).
+- **Same key, still inflight** → `409 already in progress`.
+- **No key** → handler runs normally; nothing is cached.
+
+The body fingerprint is `SHA-256(method || path || body)`. Reuse of
+a key with a different body is treated as a bug and rejected loudly.
+
+---
+
 ## Empty states
 
 Hull's template engine treats empty Lua tables as truthy. To branch on emptiness:
