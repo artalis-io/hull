@@ -7,8 +7,8 @@ local crypto   = require("hull.crypto")
 local db       = require("hull.db")
 local time     = require("hull.time")
 local validate = require("hull.validate")
-local session  = require("hull.middleware.session")
-local auth     = require("hull.middleware.auth")
+local session  = require("hull.web.middleware.session")
+local auth     = require("hull.web.middleware.auth")
 
 local log = require("hull.log")
 local json = require("hull.json")
@@ -21,8 +21,8 @@ app.manifest({
         "hull/db@1",
         "hull/time@1",
         "hull/validate@1",
-        "hull/middleware/auth@1",
-        "hull/middleware/session@1",
+        "hull/web/middleware/auth@1",
+        "hull/web/middleware/session@1",
     },
 })
 

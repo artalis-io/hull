@@ -129,11 +129,11 @@ app.use("*", "/api/*", (req, res) => {
 ## Full Stack Example
 
 ```lua
-local cors      = require("hull.middleware.cors")
-local ratelimit = require("hull.middleware.ratelimit")
-local auth      = require("hull.middleware.auth")
-local logger    = require("hull.middleware.logger")
-local session   = require("hull.middleware.session")
+local cors      = require("hull.web.middleware.cors")
+local ratelimit = require("hull.web.middleware.ratelimit")
+local auth      = require("hull.web.middleware.auth")
+local logger    = require("hull.web.middleware.logger")
+local session   = require("hull.web.middleware.session")
 
 session.init()
 

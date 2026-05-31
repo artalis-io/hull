@@ -534,7 +534,7 @@ static int hl_lua_require(lua_State *L)
         const HlModuleSpec *guess = hl_module_registry_suggest(short_name);
         if (guess) {
             /* Convert the suggested canonical name back to require()
-             * syntax: hull/middleware/session → hull.middleware.session */
+             * syntax: hull/web/middleware/session → hull.web.middleware.session */
             char hint[128];
             const char *g = guess->name;
             size_t hpos = 0;

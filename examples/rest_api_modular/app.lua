@@ -7,14 +7,14 @@
 
 -- Declare every first-party module the app + subfiles import. The
 -- runtime tracker validates this list against actual imports at load
--- time, so missing entries surface immediately. `hull/middleware/session`
+-- time, so missing entries surface immediately. `hull/web/middleware/session`
 -- and friends auto-pull their own deps (json, time, crypto, db) via
 -- the registry's deps graph — but anything imported only by user files
 -- (routes/, models/, lib/) must be listed here explicitly.
 app.manifest({
     modules = {
         "hull/http-server@1",
-        "hull/middleware/logger@1",
+        "hull/web/middleware/logger@1",
         "hull/log@1",
         "hull/db@1",           -- models/user.lua
         "hull/crypto@1",       -- models/user.lua (random id)
@@ -25,7 +25,7 @@ app.manifest({
 })
 
 local log    = require("hull.log")
-local logger = require("hull.middleware.logger")
+local logger = require("hull.web.middleware.logger")
 
 -- Cross-cutting middleware first: request logging on every path.
 app.use("*", "/*", logger.middleware({}))

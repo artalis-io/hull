@@ -1,5 +1,5 @@
 /*
- * mod_ws_client.c — hull.ws-client module (outbound WebSocket connect)
+ * mod_ws_client.c — hull.web.ws-client module (outbound WebSocket connect)
  *
  * Exposes: ws.connect(url, handlers)
  *          client connection methods: conn:send / conn:send_binary / conn:close / conn:ping

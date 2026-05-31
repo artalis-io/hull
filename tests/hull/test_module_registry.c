@@ -76,7 +76,7 @@ UTEST(module_registry, side_effect_modules_are_not_intrinsic)
     const char *side_effecting[] = {
         "hull/crypto", "hull/db", "hull/env", "hull/fs",
         "hull/http-client", "hull/http-server",
-        "hull/ws-client", "hull/ws-server", "hull/sse",
+        "hull/web/ws-client", "hull/web/ws-server", "hull/web/sse",
         "hull/time", "hull/timers", "hull/compute", "hull/gpu",
         NULL,
     };
@@ -167,7 +167,7 @@ UTEST(module_registry, jwt_depends_on_crypto)
 
 UTEST(module_registry, session_depends_on_db_and_crypto)
 {
-    const HlModuleSpec *s = hl_module_registry_find("hull/middleware/session");
+    const HlModuleSpec *s = hl_module_registry_find("hull/web/middleware/session");
     ASSERT_NE(s, NULL);
     ASSERT_TRUE(dep_list_contains(s, "hull/db"));
     ASSERT_TRUE(dep_list_contains(s, "hull/crypto"));
@@ -257,7 +257,7 @@ UTEST(module_registry, suggest_finds_long_name_typo)
     /* middleware/session typo: tolerance is 3 for ≥ 9-char input */
     const HlModuleSpec *g = hl_module_registry_suggest("middleware/sesssion");
     ASSERT_NE(g, NULL);
-    ASSERT_STREQ(g->name, "hull/middleware/session");
+    ASSERT_STREQ(g->name, "hull/web/middleware/session");
 }
 
 UTEST(module_registry, suggest_returns_null_for_unrelated_input)

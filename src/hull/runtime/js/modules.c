@@ -116,7 +116,7 @@ int hl_js_register_modules(HlJS *js)
 #endif
 
 #ifdef HL_ENABLE_HTTP_SERVER
-    /* hull:ws-server + hull:ws-client (now in mod_ws_server.c +
+    /* hull:web:ws-server + hull:web:ws-client (now in mod_ws_server.c +
      * mod_ws_client.c respectively), plus SSE class. */
     hl_js_sse_register_class(js->ctx);
     if (hl_js_init_ws_server_module(js->ctx, js) != 0)

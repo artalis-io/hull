@@ -710,10 +710,10 @@ static JSValue js_app_manifest(JSContext *ctx, JSValueConst this_val,
     if (js_manifest_declares_module(ctx, argv[0], "hull/http-server")) {
         js_install_app_http_server(ctx);
     }
-    if (js_manifest_declares_module(ctx, argv[0], "hull/ws-server")) {
+    if (js_manifest_declares_module(ctx, argv[0], "hull/web/ws-server")) {
         js_install_app_ws_server(ctx);
     }
-    if (js_manifest_declares_module(ctx, argv[0], "hull/sse")) {
+    if (js_manifest_declares_module(ctx, argv[0], "hull/web/sse")) {
         js_install_app_sse(ctx);
     }
     if (js_manifest_declares_module(ctx, argv[0], "hull/timers")) {
@@ -776,8 +776,8 @@ static int js_app_module_init(JSContext *ctx, JSModuleDef *m)
      * manifest declares:
      *   hull/http-server@1 → get/post/put/delete/del/patch/options +
      *                         use/usePost + router
-     *   hull/ws-server@1   → ws
-     *   hull/sse@1         → sse
+     *   hull/web/ws-server@1   → ws
+     *   hull/web/sse@1         → sse
      *   hull/timers@1      → every/daily
      */
     JS_SetPropertyStr(ctx, app, "main",

@@ -1,10 +1,10 @@
 -- Health check + ETag example
 --
--- Demonstrates hull.middleware.health and hull.middleware.etag
+-- Demonstrates hull.web.middleware.health and hull.web.middleware.etag
 
 local db     = require("hull.db")
-local health = require("hull.middleware.health")
-local etag   = require("hull.middleware.etag")
+local health = require("hull.web.middleware.health")
+local etag   = require("hull.web.middleware.etag")
 
 local json = require("hull.json")
 app.manifest({
@@ -14,8 +14,8 @@ app.manifest({
         "hull/crypto@1",
         "hull/db@1",
         "hull/time@1",
-        "hull/middleware/etag@1",
-        "hull/middleware/health@1",
+        "hull/web/middleware/etag@1",
+        "hull/web/middleware/health@1",
     },
 })
 

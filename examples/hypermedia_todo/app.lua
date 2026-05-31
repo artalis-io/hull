@@ -1,26 +1,26 @@
 -- HTMX + Pico hypermedia app scaffold.
 -- Returns full pages for plain navigation; returns fragments when
 -- HX-Request is set. CSRF + per-request CSP nonce wired in by default.
-local htmx     = require("hull.htmx")
-local csp      = require("hull.middleware.csp")
-local csrf     = require("hull.middleware.csrf")
-local session  = require("hull.middleware.session")
-local cookie   = require("hull.cookie")
+local htmx     = require("hull.web.htmx")
+local csp      = require("hull.web.middleware.csp")
+local csrf     = require("hull.web.middleware.csrf")
+local session  = require("hull.web.middleware.session")
+local cookie   = require("hull.web.cookie")
 local template = require("hull.template")
-local form     = require("hull.form")
+local form     = require("hull.web.form")
 local log      = require("hull.log")
 local db       = require("hull.db")
 
 app.manifest({
     modules = {
         "hull/http-server@1",
-        "hull/htmx@1",
-        "hull/middleware/csp@1",
-        "hull/middleware/csrf@1",
-        "hull/middleware/session@1",
-        "hull/cookie@1",
+        "hull/web/htmx@1",
+        "hull/web/middleware/csp@1",
+        "hull/web/middleware/csrf@1",
+        "hull/web/middleware/session@1",
+        "hull/web/cookie@1",
         "hull/template@1",
-        "hull/form@1",
+        "hull/web/form@1",
         "hull/db@1",
         "hull/log@1",
     },

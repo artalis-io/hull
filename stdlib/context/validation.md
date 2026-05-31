@@ -31,7 +31,7 @@ if (!ok) return res.status(400).json({ errors });
 
 **Form parsing:**
 ```lua
-local form = require("hull.form")
+local form = require("hull.web.form")
 local data = form.parse(req.body)  -- URL-encoded form -> table
 ```
 
@@ -62,7 +62,7 @@ local data = form.parse(req.body)  -- URL-encoded form -> table
 ## Form Parsing
 
 ```lua
-local form = require("hull.form")
+local form = require("hull.web.form")
 -- Parses: "name=Alice&email=alice%40test.com&role=admin"
 local data = form.parse(req.body)
 -- data = { name = "Alice", email = "alice@test.com", role = "admin" }
@@ -77,7 +77,7 @@ local data = form.parse(req.body)
 
 ```lua
 local validate = require("hull.validate")
-local form = require("hull.form")
+local form = require("hull.web.form")
 
 app.post("/api/users", function(req, res)
     local ok, errors = validate.check(req.body, {

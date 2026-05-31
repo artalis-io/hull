@@ -19,7 +19,7 @@ in the Makefile.
   fragment render on `HX-Request`).
 - **Pico v2 classless** for default styling. Drop into `static/app.css`
   for custom rules.
-- **Per-request CSP nonce** (`hull/middleware/csp@1` with the htmx
+- **Per-request CSP nonce** (`hull/web/middleware/csp@1` with the htmx
   profile: nonce-required for `<script>` and `<style>` blocks; inline
   `style="…"` attributes allowed for Pico's component styles).
 - **Session-cookie storage** (basic, optional). Customize in `app.{lua,js}`.

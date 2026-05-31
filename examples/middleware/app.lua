@@ -5,8 +5,8 @@
 
 local http_server    = require("hull.http-server")
 local time      = require("hull.time")
-local cors      = require("hull.middleware.cors")
-local ratelimit = require("hull.middleware.ratelimit")
+local cors      = require("hull.web.middleware.cors")
+local ratelimit = require("hull.web.middleware.ratelimit")
 
 local log = require("hull.log")
 local json = require("hull.json")
@@ -16,8 +16,8 @@ app.manifest({
         "hull/json@1",
         "hull/log@1",
         "hull/time@1",
-        "hull/middleware/cors@1",
-        "hull/middleware/ratelimit@1",
+        "hull/web/middleware/cors@1",
+        "hull/web/middleware/ratelimit@1",
     },
 })
 

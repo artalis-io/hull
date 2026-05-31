@@ -9,14 +9,14 @@
 --   GET /ws/connections   — current WebSocket connection count
 
 local time = require("hull.time")
-local ws_server   = require("hull.ws-server")
+local ws_server   = require("hull.web.ws-server")
 
 local log = require("hull.log")
 local json = require("hull.json")
 app.manifest({
     modules = {
-        "hull/ws-server@1",
-        "hull/sse@1",
+        "hull/web/ws-server@1",
+        "hull/web/sse@1",
         "hull/http-server@1",
         "hull/json@1",
         "hull/log@1",

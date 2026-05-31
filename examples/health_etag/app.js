@@ -1,10 +1,10 @@
 // Health check + ETag example
 //
-// Demonstrates hull:middleware:health and hull:middleware:etag
+// Demonstrates hull:web:middleware:health and hull:web:middleware:etag
 
 import { db } from "hull:db";
-import { etag } from "hull:middleware:etag";
-import { health } from "hull:middleware:health";
+import { etag } from "hull:web:middleware:etag";
+import { health } from "hull:web:middleware:health";
 
 app.manifest({
     modules: [
@@ -12,8 +12,8 @@ app.manifest({
         "hull/crypto@1",
         "hull/db@1",
         "hull/time@1",
-        "hull/middleware/etag@1",
-        "hull/middleware/health@1",
+        "hull/web/middleware/etag@1",
+        "hull/web/middleware/health@1",
     ],
 });
 

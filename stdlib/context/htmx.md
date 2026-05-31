@@ -46,18 +46,18 @@ only the fragment that changed. Same URL, same handler, both audiences.
 - **Pico v2.1.1 classless** (`static/vendor/pico.classless.min.css`).
   Semantic-HTML-first; no class names needed. Customize via
   `static/app.css`.
-- **`hull/htmx@1`** helper module. Request inspection (`is`, `boosted`,
+- **`hull/web/htmx@1`** helper module. Request inspection (`is`, `boosted`,
   `current_url`, `target`, `trigger_name`) + response mutation
   (`redirect`, `retarget`, `reswap`, `trigger`, `trigger_after_swap`,
   `trigger_after_settle`, `refresh`, `push_url`, `replace_url`,
   `location`).
-- **`hull/middleware/csp@1`** with the `htmx` profile. Generates a
+- **`hull/web/middleware/csp@1`** with the `htmx` profile. Generates a
   fresh 128-bit nonce per request, exposes as `req.ctx.csp_nonce`,
   sets `script-src 'self' 'nonce-{rand}'; style-src 'self'
   'nonce-{rand}'; style-src-attr 'unsafe-inline'` (the last is the
   Pico concession, allows inline `style="..."` attrs but not
   `<style>` blocks).
-- **`hull/middleware/csrf@1`**. HMAC-SHA256 tokens bound to session id.
+- **`hull/web/middleware/csrf@1`**. HMAC-SHA256 tokens bound to session id.
   Reads from `req.ctx.session_id` first (matching the Lua sibling).
 - **Anonymous session bootstrap.** A tiny inline middleware creates a
   session on first visit and loads it on subsequent requests. Production
@@ -148,13 +148,13 @@ The scaffold pre-fills these; reference for custom apps:
 ```lua
 modules = {
     "hull/http-server@1",            -- enables app.get / app.use / etc.
-    "hull/htmx@1",                   -- the response-header helpers
-    "hull/middleware/csp@1",         -- nonce + CSP header
-    "hull/middleware/csrf@1",        -- HMAC token verification
-    "hull/middleware/session@1",     -- session storage
-    "hull/cookie@1",                 -- cookie parse / serialize
+    "hull/web/htmx@1",                   -- the response-header helpers
+    "hull/web/middleware/csp@1",         -- nonce + CSP header
+    "hull/web/middleware/csrf@1",        -- HMAC token verification
+    "hull/web/middleware/session@1",     -- session storage
+    "hull/web/cookie@1",                 -- cookie parse / serialize
     "hull/template@1",               -- HTML template engine
-    "hull/form@1",                   -- url-encoded body parsing
+    "hull/web/form@1",                   -- url-encoded body parsing
     "hull/db@1",                     -- SQLite for app state
     "hull/log@1",
 }

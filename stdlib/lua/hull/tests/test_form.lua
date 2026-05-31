@@ -1,9 +1,9 @@
--- test_form.lua — Tests for hull.form
+-- test_form.lua — Tests for hull.web.form
 --
 -- Tests pure-function URL-encoded body parsing (no runtime globals needed).
 -- Run via: the C test harness (test_lua_runtime.c) loads and executes this.
 
-local form = require('hull.form')
+local form = require('hull.web.form')
 
 local pass = 0
 local fail = 0

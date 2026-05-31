@@ -162,26 +162,26 @@ templates.migration_init = [[-- Migration: 001_init
 templates.htmx_lua_app = [[-- HTMX + Pico hypermedia app scaffold.
 -- Returns full pages for plain navigation; returns fragments when
 -- HX-Request is set. CSRF + per-request CSP nonce wired in by default.
-local htmx     = require("hull.htmx")
-local csp      = require("hull.middleware.csp")
-local csrf     = require("hull.middleware.csrf")
-local session  = require("hull.middleware.session")
-local cookie   = require("hull.cookie")
+local htmx     = require("hull.web.htmx")
+local csp      = require("hull.web.middleware.csp")
+local csrf     = require("hull.web.middleware.csrf")
+local session  = require("hull.web.middleware.session")
+local cookie   = require("hull.web.cookie")
 local template = require("hull.template")
-local form     = require("hull.form")
+local form     = require("hull.web.form")
 local log      = require("hull.log")
 local db       = require("hull.db")
 
 app.manifest({
     modules = {
         "hull/http-server@1",
-        "hull/htmx@1",
-        "hull/middleware/csp@1",
-        "hull/middleware/csrf@1",
-        "hull/middleware/session@1",
-        "hull/cookie@1",
+        "hull/web/htmx@1",
+        "hull/web/middleware/csp@1",
+        "hull/web/middleware/csrf@1",
+        "hull/web/middleware/session@1",
+        "hull/web/cookie@1",
         "hull/template@1",
-        "hull/form@1",
+        "hull/web/form@1",
         "hull/db@1",
         "hull/log@1",
     },
@@ -301,26 +301,26 @@ templates.htmx_js_app = [[// HTMX + Pico hypermedia app scaffold.
 // Returns full pages for plain navigation; returns fragments when
 // HX-Request is set. CSRF + per-request CSP nonce wired in by default.
 import { app }      from "hull:app";
-import { htmx }     from "hull:htmx";
-import { csp }      from "hull:middleware:csp";
-import { csrf }     from "hull:middleware:csrf";
-import { session }  from "hull:middleware:session";
-import { cookie }   from "hull:cookie";
+import { htmx }     from "hull:web:htmx";
+import { csp }      from "hull:web:middleware:csp";
+import { csrf }     from "hull:web:middleware:csrf";
+import { session }  from "hull:web:middleware:session";
+import { cookie }   from "hull:web:cookie";
 import { template } from "hull:template";
-import { form }     from "hull:form";
+import { form }     from "hull:web:form";
 import { log }      from "hull:log";
 import { db }       from "hull:db";
 
 app.manifest({
     modules: [
         "hull/http-server@1",
-        "hull/htmx@1",
-        "hull/middleware/csp@1",
-        "hull/middleware/csrf@1",
-        "hull/middleware/session@1",
-        "hull/cookie@1",
+        "hull/web/htmx@1",
+        "hull/web/middleware/csp@1",
+        "hull/web/middleware/csrf@1",
+        "hull/web/middleware/session@1",
+        "hull/web/cookie@1",
         "hull/template@1",
-        "hull/form@1",
+        "hull/web/form@1",
         "hull/db@1",
         "hull/log@1",
     ],
@@ -719,7 +719,7 @@ in the Makefile.
   fragment render on `HX-Request`).
 - **Pico v2 classless** for default styling. Drop into `static/app.css`
   for custom rules.
-- **Per-request CSP nonce** (`hull/middleware/csp@1` with the htmx
+- **Per-request CSP nonce** (`hull/web/middleware/csp@1` with the htmx
   profile: nonce-required for `<script>` and `<style>` blocks; inline
   `style="…"` attributes allowed for Pico's component styles).
 - **Session-cookie storage** (basic, optional). Customize in `app.{lua,js}`.

@@ -6,8 +6,8 @@
 import { app } from "hull:app";
 import { httpServer } from "hull:http-server";
 import { log } from "hull:log";
-import { cors } from "hull:middleware:cors";
-import { ratelimit } from "hull:middleware:ratelimit";
+import { cors } from "hull:web:middleware:cors";
+import { ratelimit } from "hull:web:middleware:ratelimit";
 import { time } from "hull:time";
 
 app.manifest({
@@ -15,8 +15,8 @@ app.manifest({
         "hull/http-server@1",
         "hull/log@1",
         "hull/time@1",
-        "hull/middleware/cors@1",
-        "hull/middleware/ratelimit@1",
+        "hull/web/middleware/cors@1",
+        "hull/web/middleware/ratelimit@1",
     ],
 });
 

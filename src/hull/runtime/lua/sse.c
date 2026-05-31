@@ -131,7 +131,7 @@ void hl_lua_sse_handler(KlRequest *req, KlResponse *res,
     } else {
         /* Error — end stream, log */
         const char *err = lua_tostring(co, -1);
-        log_error("[hull:sse] handler error: %s", err ? err : "unknown");
+        log_error("[hull:web:sse] handler error: %s", err ? err : "unknown");
 
         if (!stream_ud->closed)
             kl_sse_end(&stream_ud->sse);

@@ -70,7 +70,7 @@ Migrations run automatically on `hull dev` startup and during `hull test`. Each 
 For request-scoped transactions, use the transaction middleware:
 
 ```lua
-local transaction = require("hull.middleware.transaction")
+local transaction = require("hull.web.middleware.transaction")
 app.use_post("POST", "/api/*", transaction.middleware())
 
 app.post("/api/transfer", function(req, res)

@@ -1814,7 +1814,7 @@ UTEST(js_cap, crypto_base64url_roundtrip)
     cleanup_js_caps();
 }
 
-/* ── hull:cookie tests ─────────────────────────────────────────────── */
+/* ── hull:web:cookie tests ─────────────────────────────────────────────── */
 
 UTEST(js_stdlib, cookie_parse)
 {
@@ -1822,7 +1822,7 @@ UTEST(js_stdlib, cookie_parse)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
-        "import { cookie } from 'hull:cookie';\n"
+        "import { cookie } from 'hull:web:cookie';\n"
         "const r = cookie.parse('session=abc; theme=dark');\n"
         "globalThis.__test_cp = (r.session === 'abc' && r.theme === 'dark') ? 1 : 0;\n"
         "const e = cookie.parse('');\n"
@@ -1847,7 +1847,7 @@ UTEST(js_stdlib, cookie_serialize)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
-        "import { cookie } from 'hull:cookie';\n"
+        "import { cookie } from 'hull:web:cookie';\n"
         "globalThis.__test_cs = cookie.serialize('sid', 'abc123');\n";
 
     JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
@@ -1875,7 +1875,7 @@ UTEST(js_stdlib, cookie_clear)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
-        "import { cookie } from 'hull:cookie';\n"
+        "import { cookie } from 'hull:web:cookie';\n"
         "globalThis.__test_cc = cookie.clear('sid');\n";
 
     JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
@@ -1894,7 +1894,7 @@ UTEST(js_stdlib, cookie_clear)
     cleanup_js_caps();
 }
 
-/* ── hull:middleware:session tests ─────────────────────────────────── */
+/* ── hull:web:middleware:session tests ─────────────────────────────────── */
 
 UTEST(js_stdlib, session_create_and_load)
 {
@@ -1902,7 +1902,7 @@ UTEST(js_stdlib, session_create_and_load)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
-        "import { session } from 'hull:middleware:session';\n"
+        "import { session } from 'hull:web:middleware:session';\n"
         "session.init({ ttl: 3600 });\n"
         "const id = session.create({ userId: 42, email: 'test@example.com' });\n"
         "globalThis.__test_sid_len = id ? id.length : 0;\n"
@@ -1928,7 +1928,7 @@ UTEST(js_stdlib, session_destroy)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
-        "import { session } from 'hull:middleware:session';\n"
+        "import { session } from 'hull:web:middleware:session';\n"
         "session.init();\n"
         "const id = session.create({ foo: 'bar' });\n"
         "session.destroy(id);\n"
@@ -2020,7 +2020,7 @@ UTEST(js_stdlib, jwt_decode_without_verify)
     cleanup_js_caps();
 }
 
-/* ── hull:middleware:csrf tests ────────────────────────────────────── */
+/* ── hull:web:middleware:csrf tests ────────────────────────────────────── */
 
 UTEST(js_stdlib, csrf_generate_and_verify)
 {
@@ -2028,7 +2028,7 @@ UTEST(js_stdlib, csrf_generate_and_verify)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
-        "import { csrf } from 'hull:middleware:csrf';\n"
+        "import { csrf } from 'hull:web:middleware:csrf';\n"
         "const token = csrf.generate('session123', 'my_csrf_secret');\n"
         "globalThis.__test_cg = token ? 1 : 0;\n"
         "globalThis.__test_cv = csrf.verify(token, 'session123', 'my_csrf_secret') ? 1 : 0;\n";
@@ -2052,7 +2052,7 @@ UTEST(js_stdlib, csrf_wrong_session_rejected)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
-        "import { csrf } from 'hull:middleware:csrf';\n"
+        "import { csrf } from 'hull:web:middleware:csrf';\n"
         "const token = csrf.generate('session123', 'secret');\n"
         "globalThis.__test_cws = csrf.verify(token, 'other_session', 'secret') ? 0 : 1;\n";
 
@@ -2079,7 +2079,7 @@ UTEST(js_stdlib, csrf_cross_runtime_reference_token)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
-        "import { csrf } from 'hull:middleware:csrf';\n"
+        "import { csrf } from 'hull:web:middleware:csrf';\n"
         "const ref = '1.6ae78d056ed813a207a55074947fdbeef0ae8c7850acab486cb52bae058956da';\n"
         "globalThis.__test_csrf_ref_ok = csrf.verify(ref, 's1', 'k', 4294967295) ? 1 : 0;\n"
         /* Flip one bit of the MAC — must reject. */
@@ -2099,7 +2099,7 @@ UTEST(js_stdlib, csrf_cross_runtime_reference_token)
     cleanup_js_caps();
 }
 
-/* ── hull:middleware:auth tests (smoke — modules load and expose API) */
+/* ── hull:web:middleware:auth tests (smoke — modules load and expose API) */
 
 UTEST(js_cap, crypto_hmac_sha256_verify)
 {
@@ -2140,7 +2140,7 @@ UTEST(js_stdlib, auth_module_loads)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
-        "import { auth } from 'hull:middleware:auth';\n"
+        "import { auth } from 'hull:web:middleware:auth';\n"
         "globalThis.__test_am = ("
         "  typeof auth.sessionMiddleware === 'function' &&\n"
         "  typeof auth.jwtMiddleware === 'function' &&\n"
@@ -2160,7 +2160,7 @@ UTEST(js_stdlib, auth_module_loads)
     cleanup_js_caps();
 }
 
-/* ── hull:form tests ─────────────────────────────────────────────────── */
+/* ── hull:web:form tests ─────────────────────────────────────────────────── */
 
 UTEST(js_stdlib, form_parse)
 {
@@ -2168,7 +2168,7 @@ UTEST(js_stdlib, form_parse)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
-        "import { form } from 'hull:form';\n"
+        "import { form } from 'hull:web:form';\n"
         "const r = form.parse('email=a%40b.com&pass=hello+world');\n"
         "globalThis.__test_fp = (r.email === 'a@b.com' && r.pass === 'hello world') ? 1 : 0;\n"
         "const e = form.parse('');\n"
@@ -2705,7 +2705,7 @@ UTEST(js_stdlib, search_tokenize_grammar_parity)
     cleanup_js_caps();
 }
 
-/* ── hull:middleware:rbac tests ───────────────────────────────────────── */
+/* ── hull:web:middleware:rbac tests ───────────────────────────────────────── */
 
 UTEST(js_stdlib, rbac_init_and_assign)
 {
@@ -2713,7 +2713,7 @@ UTEST(js_stdlib, rbac_init_and_assign)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
-        "import { rbac } from 'hull:middleware:rbac';\n"
+        "import { rbac } from 'hull:web:middleware:rbac';\n"
         "rbac.init();\n"
         "rbac.defineRole('admin');\n"
         "rbac.definePermission('users.read');\n"
@@ -2739,7 +2739,7 @@ UTEST(js_stdlib, rbac_has_role)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
-        "import { rbac } from 'hull:middleware:rbac';\n"
+        "import { rbac } from 'hull:web:middleware:rbac';\n"
         "rbac.init();\n"
         "rbac.defineRole('admin');\n"
         "rbac.assign('user1', 'admin');\n"
@@ -2764,7 +2764,7 @@ UTEST(js_stdlib, rbac_has_permission)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
-        "import { rbac } from 'hull:middleware:rbac';\n"
+        "import { rbac } from 'hull:web:middleware:rbac';\n"
         "rbac.init();\n"
         "rbac.defineRole('admin');\n"
         "rbac.definePermission('users.read');\n"
@@ -2792,7 +2792,7 @@ UTEST(js_stdlib, rbac_middleware_deny)
     ASSERT_TRUE(js_initialized);
 
     const char *code =
-        "import { rbac } from 'hull:middleware:rbac';\n"
+        "import { rbac } from 'hull:web:middleware:rbac';\n"
         "rbac.init();\n"
         "const mw = rbac.requireRole('admin');\n"
         "globalThis.__test_rmd = (typeof mw === 'function') ? 1 : 0;\n";

@@ -101,7 +101,7 @@ void hl_js_sse_handler(KlRequest *req, KlResponse *res,
     if (JS_IsException(ret)) {
         JSValue exc = JS_GetException(ctx);
         const char *msg = JS_ToCString(ctx, exc);
-        log_error("[hull:sse] handler error: %s", msg ? msg : "unknown");
+        log_error("[hull:web:sse] handler error: %s", msg ? msg : "unknown");
         if (msg) JS_FreeCString(ctx, msg);
         JS_FreeValue(ctx, exc);
         hl_js_sse_stream_force_close(ctx, stream_obj);

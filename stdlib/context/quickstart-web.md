@@ -89,10 +89,10 @@ queries.
 ## Middleware stack (recommended order)
 
 ```lua
-local logger     = require("hull.middleware.logger")
-local cors       = require("hull.middleware.cors")
-local ratelimit  = require("hull.middleware.ratelimit")
-local auth       = require("hull.middleware.auth")
+local logger     = require("hull.web.middleware.logger")
+local cors       = require("hull.web.middleware.cors")
+local ratelimit  = require("hull.web.middleware.ratelimit")
+local auth       = require("hull.web.middleware.auth")
 
 app.use("*", "/*",       logger.middleware({ skip = {"/health"} }))
 app.use("*", "/api/*",   ratelimit.middleware({ limit = 60, window = 60 }))

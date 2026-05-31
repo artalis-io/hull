@@ -3,7 +3,7 @@
 -- The health endpoint is intentionally trivial and unauthenticated:
 -- a loadbalancer or container orchestrator hits it to decide whether
 -- to route traffic to this process. Anything heavier (DB ping etc.)
--- belongs in /ready, which can use the stdlib `hull.middleware.health`
+-- belongs in /ready, which can use the stdlib `hull.web.middleware.health`
 -- module when you're ready to wire it up.
 
 local M = {}

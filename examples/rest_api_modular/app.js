@@ -7,7 +7,7 @@
 
 import { app }    from "hull:app";
 import { log }    from "hull:log";
-import { logger } from "hull:middleware:logger";
+import { logger } from "hull:web:middleware:logger";
 
 import { register as registerHealth } from "./routes/health.js";
 import { register as registerUsers }  from "./routes/users.js";
@@ -18,7 +18,7 @@ import { register as registerUsers }  from "./routes/users.js";
 app.manifest({
     modules: [
         "hull/http-server@1",
-        "hull/middleware/logger@1",
+        "hull/web/middleware/logger@1",
         "hull/log@1",
         "hull/db@1",           // models/user.js
         "hull/crypto@1",       // models/user.js (random id)

@@ -1,8 +1,8 @@
-// test_htmx.js. Tests for hull:htmx
+// test_htmx.js. Tests for hull:web:htmx
 //
 // Lua parity: same coverage as stdlib/lua/hull/tests/test_htmx.lua.
 
-import { htmx } from "hull:htmx";
+import { htmx } from "hull:web:htmx";
 
 let pass = 0;
 let fail = 0;
@@ -186,5 +186,5 @@ test("redirect on plain request falls back to res.redirect", () => {
 
 // ── Done ─────────────────────────────────────────────────────────────
 
-print(`hull:htmx: ${pass} passed, ${fail} failed`);
-if (fail > 0) throw new Error("hull:htmx tests failed");
+print(`hull:web:htmx: ${pass} passed, ${fail} failed`);
+if (fail > 0) throw new Error("hull:web:htmx tests failed");

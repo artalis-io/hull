@@ -1,8 +1,8 @@
-// test_form.js — Tests for hull:form
+// test_form.js — Tests for hull:web:form
 //
 // Tests pure-function URL-encoded body parsing (no runtime globals needed).
 
-import { form } from "hull:form";
+import { form } from "hull:web:form";
 
 let pass = 0;
 let fail = 0;

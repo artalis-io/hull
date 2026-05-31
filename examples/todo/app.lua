@@ -11,24 +11,24 @@
 -- Run:  hull dev examples/todo/app.lua -d /tmp/todo.db
 --
 
-local cookie      = require("hull.cookie")
+local cookie      = require("hull.web.cookie")
 local crypto      = require("hull.crypto")
 local csv         = require("hull.csv")
 local db          = require("hull.db")
-local form        = require("hull.form")
+local form        = require("hull.web.form")
 local http_client        = require("hull.http-client")
 local i18n        = require("hull.i18n")
 local search      = require("hull.search")
 local template    = require("hull.template")
 local time        = require("hull.time")
 local validate    = require("hull.validate")
-local auth        = require("hull.middleware.auth")
-local csrf        = require("hull.middleware.csrf")
-local logger      = require("hull.middleware.logger")
-local ratelimit   = require("hull.middleware.ratelimit")
-local rbac        = require("hull.middleware.rbac")
-local session     = require("hull.middleware.session")
-local transaction = require("hull.middleware.transaction")
+local auth        = require("hull.web.middleware.auth")
+local csrf        = require("hull.web.middleware.csrf")
+local logger      = require("hull.web.middleware.logger")
+local ratelimit   = require("hull.web.middleware.ratelimit")
+local rbac        = require("hull.web.middleware.rbac")
+local session     = require("hull.web.middleware.session")
+local transaction = require("hull.web.middleware.transaction")
 
 local log = require("hull.log")
 app.manifest({
@@ -36,24 +36,24 @@ app.manifest({
     modules = {
         "hull/http-server@1",
         "hull/log@1",
-        "hull/cookie@1",
+        "hull/web/cookie@1",
         "hull/crypto@1",
         "hull/csv@1",
         "hull/db@1",
-        "hull/form@1",
+        "hull/web/form@1",
         "hull/http-client@1",
         "hull/i18n@1",
         "hull/search@1",
         "hull/template@1",
         "hull/time@1",
         "hull/validate@1",
-        "hull/middleware/auth@1",
-        "hull/middleware/csrf@1",
-        "hull/middleware/logger@1",
-        "hull/middleware/ratelimit@1",
-        "hull/middleware/rbac@1",
-        "hull/middleware/session@1",
-        "hull/middleware/transaction@1",
+        "hull/web/middleware/auth@1",
+        "hull/web/middleware/csrf@1",
+        "hull/web/middleware/logger@1",
+        "hull/web/middleware/ratelimit@1",
+        "hull/web/middleware/rbac@1",
+        "hull/web/middleware/session@1",
+        "hull/web/middleware/transaction@1",
     },
 })
 

@@ -97,10 +97,10 @@ const HlModuleSpec *hl_module_registry_find_short(const char *short_name);
 /*
  * Look up a module by its runtime-syntax name and a separator char:
  *
- *   Lua: "hull.crypto"           sep='.' → "hull/crypto"
- *        "hull.middleware.session"      → "hull/middleware/session"
- *   JS:  "hull:crypto"           sep=':' → "hull/crypto"
- *        "hull:middleware:session"      → "hull/middleware/session"
+ *   Lua: "hull.crypto"                  sep='.' → "hull/crypto"
+ *        "hull.web.middleware.session"          → "hull/web/middleware/session"
+ *   JS:  "hull:crypto"                  sep=':' → "hull/crypto"
+ *        "hull:web:middleware:session"          → "hull/web/middleware/session"
  *
  * Used by the per-runtime require/import gating in module_resolver.h.
  * Returns NULL if the canonical name is not in the registry, or if the

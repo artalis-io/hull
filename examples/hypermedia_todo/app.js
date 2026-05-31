@@ -2,26 +2,26 @@
 // Returns full pages for plain navigation; returns fragments when
 // HX-Request is set. CSRF + per-request CSP nonce wired in by default.
 import { app }      from "hull:app";
-import { htmx }     from "hull:htmx";
-import { csp }      from "hull:middleware:csp";
-import { csrf }     from "hull:middleware:csrf";
-import { session }  from "hull:middleware:session";
-import { cookie }   from "hull:cookie";
+import { htmx }     from "hull:web:htmx";
+import { csp }      from "hull:web:middleware:csp";
+import { csrf }     from "hull:web:middleware:csrf";
+import { session }  from "hull:web:middleware:session";
+import { cookie }   from "hull:web:cookie";
 import { template } from "hull:template";
-import { form }     from "hull:form";
+import { form }     from "hull:web:form";
 import { log }      from "hull:log";
 import { db }       from "hull:db";
 
 app.manifest({
     modules: [
         "hull/http-server@1",
-        "hull/htmx@1",
-        "hull/middleware/csp@1",
-        "hull/middleware/csrf@1",
-        "hull/middleware/session@1",
-        "hull/cookie@1",
+        "hull/web/htmx@1",
+        "hull/web/middleware/csp@1",
+        "hull/web/middleware/csrf@1",
+        "hull/web/middleware/session@1",
+        "hull/web/cookie@1",
         "hull/template@1",
-        "hull/form@1",
+        "hull/web/form@1",
         "hull/db@1",
         "hull/log@1",
     ],

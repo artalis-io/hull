@@ -10,6 +10,12 @@
  * compile in is gated separately by HL_ENABLE_* flags (the resolver
  * checks `required_caps` against those).
  *
+ * v0.2.0 reorganization (§1.3): strictly-web modules moved under
+ * hull/web/* — see docs/roadmap_next.md §1.3 for the move table.
+ * Modules kept flat: hull/jwt (cross-cutting), hull/http-server
+ * (foundational primitive), hull/template (content-type agnostic),
+ * hull/http-client / hull/email / hull/smtp (cross-cutting non-web).
+ *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
@@ -37,16 +43,11 @@ static const HlModuleSpec REGISTRY[] = {
         .required_caps = 0, .deps = {0},
     },
 
-    /* ── C-native side-effect modules ─────────────────────────────── */
+    /* ── C-native side-effect modules + cross-cutting utilities ───── */
     {
         .name = "hull/compute",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_WASM, .deps = {0},
-    },
-    {
-        .name = "hull/cookie",
-        .api_major = 1, .intrinsic = 0, .pure = 1,
-        .required_caps = 0, .deps = {0},
     },
     {
         .name = "hull/crypto",
@@ -79,11 +80,6 @@ static const HlModuleSpec REGISTRY[] = {
         .required_caps = HL_MOD_CAP_ENV, .deps = {0},
     },
     {
-        .name = "hull/form",
-        .api_major = 1, .intrinsic = 0, .pure = 1,
-        .required_caps = 0, .deps = {0},
-    },
-    {
         .name = "hull/fs",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_FS, .deps = {0},
@@ -94,20 +90,11 @@ static const HlModuleSpec REGISTRY[] = {
         .required_caps = HL_MOD_CAP_GPU, .deps = {0},
     },
     {
-        /* HTMX request inspection + response-header helpers. Pure
-         * functions; no I/O. Reads request headers, mutates response
-         * headers. Apps using it almost always also need hull/http-server
-         * but that's a soft dep (htmx works inside any handler).
-         * Sort note: "hull/htmx" < "hull/http-*" because 'm' < 't' at
-         * position 7. */
-        .name = "hull/htmx",
-        .api_major = 1, .intrinsic = 0, .pure = 1,
-        .required_caps = 0, .deps = {0},
-    },
-    {
         /* Outbound HTTPS client — http.fetch. Renamed from
          * hull/http@1 (which was misleading; it was always the
-         * client). The server-side counterpart is hull/http-server@1. */
+         * client). The server-side counterpart is hull/http-server@1.
+         * Stays flat in v0.2.0: cross-cutting (CLI tools, batch
+         * jobs, and service-to-service calls all fetch URLs). */
         .name = "hull/http-client",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HOSTS | HL_MOD_CAP_HTTP_CLIENT,
@@ -122,7 +109,11 @@ static const HlModuleSpec REGISTRY[] = {
          * Without it, those methods don't exist on `app` at all
          * (attempt to call a nil value / not a function). Replaces
          * the vestigial hull/server@1 module — middleware modules
-         * now depend on hull/http-server. */
+         * now depend on hull/http-server.
+         *
+         * Stays flat in v0.2.0: foundational primitive that
+         * hull/web/* is built on top of. Convention is that hull/web/*
+         * modules are CONSUMERS of http-server, not http-server itself. */
         .name = "hull/http-server",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HTTP_SERVER, .deps = {0},
@@ -155,6 +146,8 @@ static const HlModuleSpec REGISTRY[] = {
         .required_caps = 0, .deps = {0},
     },
     {
+        /* JWT stays flat in v0.2.0: cross-cutting (API auth, CLI
+         * tokens, service-to-service signing — not strictly web). */
         .name = "hull/jwt",
         .api_major = 1, .intrinsic = 0, .pure = 1,
         .required_caps = 0,
@@ -173,111 +166,6 @@ static const HlModuleSpec REGISTRY[] = {
         .required_caps = 0, .deps = {0},
     },
 
-    /* ── Middleware ───────────────────────────────────────────────────
-     * Every middleware consumes KlRequest/KlResponse and registers via
-     * app.use() / app.use_post(), all of which need Keel's HTTP server.
-     * They share HL_MOD_CAP_HTTP_SERVER — apps targeting an
-     * HL_ENABLE_HTTP_SERVER=0 build can't declare any of them. */
-    {
-        .name = "hull/middleware/auth",
-        .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = HL_MOD_CAP_HTTP_SERVER,
-        /* Wraps cookie + jwt + session: session-cookie or bearer-token auth. */
-        .deps = {"hull/http-server", "hull/db", "hull/crypto", "hull/cookie", "hull/jwt",
-                 "hull/middleware/session", 0},
-    },
-    {
-        .name = "hull/middleware/cors",
-        .api_major = 1, .intrinsic = 0, .pure = 1,
-        .required_caps = HL_MOD_CAP_HTTP_SERVER, .deps = {"hull/http-server", 0},
-    },
-    {
-        /* Content-Security-Policy with per-request nonce. Pure
-         * header-setter middleware; reads no state. Depends on
-         * hull/crypto for the nonce RNG + base64url encoder. The
-         * htmx() profile is Pico-compatible; strict() is the no-
-         * inline-style variant. Apps that need a different shape
-         * compose their own using csp.nonce(). */
-        .name = "hull/middleware/csp",
-        .api_major = 1, .intrinsic = 0, .pure = 1,
-        .required_caps = HL_MOD_CAP_HTTP_SERVER,
-        .deps = {"hull/http-server", "hull/crypto", 0},
-    },
-    {
-        .name = "hull/middleware/csrf",
-        .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = HL_MOD_CAP_HTTP_SERVER,
-        /* HMAC token + max-age check; needs crypto + time. */
-        .deps = {"hull/http-server", "hull/crypto", "hull/time", 0},
-    },
-    {
-        .name = "hull/middleware/etag",
-        .api_major = 1, .intrinsic = 0, .pure = 1,
-        .required_caps = HL_MOD_CAP_HTTP_SERVER,
-        /* SHA-256 of body + json encode for the response payload. */
-        .deps = {"hull/http-server", "hull/crypto", "hull/json", 0},
-    },
-    {
-        .name = "hull/middleware/health",
-        .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = HL_MOD_CAP_HTTP_SERVER,
-        /* health pings the DB and inspects server stats; both are hard
-         * deps even when db_check is disabled at runtime, because the
-         * required modules need to be importable. */
-        .deps = {"hull/db", "hull/http-server", "hull/time", 0},
-    },
-    {
-        .name = "hull/middleware/idempotency",
-        .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = HL_MOD_CAP_HTTP_SERVER,
-        /* Key fingerprint (crypto), JSON payload caching, TTL clock. */
-        .deps = {"hull/http-server", "hull/db", "hull/crypto", "hull/json", "hull/time", 0},
-    },
-    {
-        .name = "hull/middleware/inbox",
-        .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = HL_MOD_CAP_HTTP_SERVER,
-        .deps = {"hull/http-server", "hull/db", "hull/time", 0},
-    },
-    {
-        .name = "hull/middleware/logger",
-        .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = HL_MOD_CAP_HTTP_SERVER,
-        .deps = {"hull/http-server", "hull/log", 0},
-    },
-    {
-        .name = "hull/middleware/outbox",
-        .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = HL_MOD_CAP_HTTP_SERVER,
-        /* Webhook payload as JSON, retry backoff via time. */
-        .deps = {"hull/http-server", "hull/db", "hull/http-client", "hull/json", "hull/time", 0},
-    },
-    {
-        .name = "hull/middleware/ratelimit",
-        .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = HL_MOD_CAP_HTTP_SERVER,
-        .deps = {"hull/http-server", "hull/time", 0},
-    },
-    {
-        .name = "hull/middleware/rbac",
-        .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = HL_MOD_CAP_HTTP_SERVER,
-        .deps = {"hull/http-server", "hull/db", 0},
-    },
-    {
-        .name = "hull/middleware/session",
-        .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = HL_MOD_CAP_HTTP_SERVER,
-        /* Session payload is JSON; ID is crypto.random; expiry needs time. */
-        .deps = {"hull/http-server", "hull/db", "hull/crypto", "hull/json", "hull/time", 0},
-    },
-    {
-        .name = "hull/middleware/transaction",
-        .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = HL_MOD_CAP_HTTP_SERVER,
-        .deps = {"hull/http-server", "hull/db", 0},
-    },
-
     /* ── Pure stdlib + remaining side-effect ─────────────────────── */
     {
         .name = "hull/search",
@@ -293,14 +181,9 @@ static const HlModuleSpec REGISTRY[] = {
         .deps = {0},
     },
     {
-        /* Server-Sent Events — declaring this decorates the `app`
-         * intrinsic with app.sse(path, handler). Server-push protocol
-         * only; no client API in Hull. */
-        .name = "hull/sse",
-        .api_major = 1, .intrinsic = 0, .pure = 0,
-        .required_caps = HL_MOD_CAP_HTTP_SERVER, .deps = {0},
-    },
-    {
+        /* Template engine stays flat in v0.2.0: content-type
+         * agnostic. The engine itself doesn't know HTML — apps render
+         * any text (emails, configs, codegen). */
         .name = "hull/template",
         .api_major = 1, .intrinsic = 0, .pure = 1,
         /* The `| json` filter encodes data as JSON in templates. */
@@ -335,16 +218,152 @@ static const HlModuleSpec REGISTRY[] = {
         .api_major = 1, .intrinsic = 0, .pure = 1,
         .required_caps = 0, .deps = {0},
     },
+
+    /* ── Web stdlib namespace (v0.2.0) ────────────────────────────────
+     * Strictly-web modules: HTTP-protocol concerns (cookie, form),
+     * HTML rendering (htmx), real-time delivery (sse, ws-*), and the
+     * 14 hull/web/middleware/* modules. Sort note: "hull/web/*" sorts
+     * before "hull/worker" because at position 6 'e' < 'o'. */
     {
-        .name = "hull/worker",
-        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .name = "hull/web/cookie",
+        .api_major = 1, .intrinsic = 0, .pure = 1,
         .required_caps = 0, .deps = {0},
+    },
+    {
+        .name = "hull/web/form",
+        .api_major = 1, .intrinsic = 0, .pure = 1,
+        .required_caps = 0, .deps = {0},
+    },
+    {
+        /* HTMX request inspection + response-header helpers. Pure
+         * functions; no I/O. Reads request headers, mutates response
+         * headers. Apps using it almost always also need
+         * hull/http-server but that's a soft dep (htmx works inside
+         * any handler). */
+        .name = "hull/web/htmx",
+        .api_major = 1, .intrinsic = 0, .pure = 1,
+        .required_caps = 0, .deps = {0},
+    },
+
+    /* ── Web middleware ──────────────────────────────────────────────
+     * Every middleware consumes KlRequest/KlResponse and registers via
+     * app.use() / app.use_post(), all of which need Keel's HTTP server.
+     * They share HL_MOD_CAP_HTTP_SERVER — apps targeting an
+     * HL_ENABLE_HTTP_SERVER=0 build can't declare any of them. */
+    {
+        .name = "hull/web/middleware/auth",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER,
+        /* Wraps cookie + jwt + session: session-cookie or bearer-token auth. */
+        .deps = {"hull/http-server", "hull/db", "hull/crypto", "hull/web/cookie", "hull/jwt",
+                 "hull/web/middleware/session", 0},
+    },
+    {
+        .name = "hull/web/middleware/cors",
+        .api_major = 1, .intrinsic = 0, .pure = 1,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER, .deps = {"hull/http-server", 0},
+    },
+    {
+        /* Content-Security-Policy with per-request nonce. Pure
+         * header-setter middleware; reads no state. Depends on
+         * hull/crypto for the nonce RNG + base64url encoder. The
+         * htmx() profile is Pico-compatible; strict() is the no-
+         * inline-style variant. Apps that need a different shape
+         * compose their own using csp.nonce(). */
+        .name = "hull/web/middleware/csp",
+        .api_major = 1, .intrinsic = 0, .pure = 1,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER,
+        .deps = {"hull/http-server", "hull/crypto", 0},
+    },
+    {
+        .name = "hull/web/middleware/csrf",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER,
+        /* HMAC token + max-age check; needs crypto + time. */
+        .deps = {"hull/http-server", "hull/crypto", "hull/time", 0},
+    },
+    {
+        .name = "hull/web/middleware/etag",
+        .api_major = 1, .intrinsic = 0, .pure = 1,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER,
+        /* SHA-256 of body + json encode for the response payload. */
+        .deps = {"hull/http-server", "hull/crypto", "hull/json", 0},
+    },
+    {
+        .name = "hull/web/middleware/health",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER,
+        /* health pings the DB and inspects server stats; both are hard
+         * deps even when db_check is disabled at runtime, because the
+         * required modules need to be importable. */
+        .deps = {"hull/db", "hull/http-server", "hull/time", 0},
+    },
+    {
+        .name = "hull/web/middleware/idempotency",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER,
+        /* Key fingerprint (crypto), JSON payload caching, TTL clock. */
+        .deps = {"hull/http-server", "hull/db", "hull/crypto", "hull/json", "hull/time", 0},
+    },
+    {
+        .name = "hull/web/middleware/inbox",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER,
+        .deps = {"hull/http-server", "hull/db", "hull/time", 0},
+    },
+    {
+        .name = "hull/web/middleware/logger",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER,
+        .deps = {"hull/http-server", "hull/log", 0},
+    },
+    {
+        .name = "hull/web/middleware/outbox",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER,
+        /* Webhook payload as JSON, retry backoff via time. */
+        .deps = {"hull/http-server", "hull/db", "hull/http-client", "hull/json", "hull/time", 0},
+    },
+    {
+        .name = "hull/web/middleware/ratelimit",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER,
+        .deps = {"hull/http-server", "hull/time", 0},
+    },
+    {
+        .name = "hull/web/middleware/rbac",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER,
+        .deps = {"hull/http-server", "hull/db", 0},
+    },
+    {
+        .name = "hull/web/middleware/session",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER,
+        /* Session payload is JSON; ID is crypto.random; expiry needs time. */
+        .deps = {"hull/http-server", "hull/db", "hull/crypto", "hull/json", "hull/time", 0},
+    },
+    {
+        .name = "hull/web/middleware/transaction",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER,
+        .deps = {"hull/http-server", "hull/db", 0},
+    },
+
+    /* ── Web real-time + WebSocket ──────────────────────────────────── */
+    {
+        /* Server-Sent Events — declaring this decorates the `app`
+         * intrinsic with app.sse(path, handler). Server-push protocol
+         * only; no client API in Hull. */
+        .name = "hull/web/sse",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER, .deps = {0},
     },
     {
         /* WebSocket client — outbound ws.connect(). Requires a
          * non-empty hosts allowlist (capability gate enforced at
          * call time inside ws.connect). */
-        .name = "hull/ws-client",
+        .name = "hull/web/ws-client",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HOSTS | HL_MOD_CAP_HTTP_SERVER, .deps = {0},
     },
@@ -354,9 +373,15 @@ static const HlModuleSpec REGISTRY[] = {
          * ws.broadcast(path, msg) and ws.connections(path) helpers
          * for managing connected clients. Split from the old
          * hull/ws@1 which mixed server and client. */
-        .name = "hull/ws-server",
+        .name = "hull/web/ws-server",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HTTP_SERVER, .deps = {0},
+    },
+
+    {
+        .name = "hull/worker",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = 0, .deps = {0},
     },
 };
 
@@ -385,8 +410,8 @@ const HlModuleSpec *hl_module_registry_find_short(const char *short_name)
 
     /* Names that already start with the "hull/" canonical prefix are
      * looked up as-is. Anything else — including names with embedded
-     * slashes like "middleware/session" — is treated as a short alias
-     * inside the hull/ namespace and gets the prefix prepended.
+     * slashes like "web/middleware/session" — is treated as a short
+     * alias inside the hull/ namespace and gets the prefix prepended.
      *
      * Once third-party vendors are supported the rule will need to be
      * "starts with any recognized vendor prefix"; for v1, hull/ is the
@@ -465,8 +490,8 @@ void hl_module_registry_format_deps(const HlModuleSpec *spec,
 
 /* ── Suggestion (Levenshtein) ───────────────────────────────────────── */
 
-/* Longest registry name today is "middleware/idempotency" (22 chars) — pad
- * generously so future entries don't silently bust the bound. */
+/* Longest registry name today is "web/middleware/idempotency" (26 chars) —
+ * pad generously so future entries don't silently bust the bound. */
 #define SUGGEST_MAX_LEN 64
 
 /* Two-row Levenshtein. O(m*n) time, O(min(m,n)) extra space. */
@@ -504,14 +529,18 @@ static int levenshtein(const char *a, size_t alen,
     return prev[blen];
 }
 
-/* Normalize an input into a short form: strip "hull/", lowercase nothing
- * (we match case-sensitively — registry names are all lowercase). Output
- * buffer must be SUGGEST_MAX_LEN+1 bytes. Returns the strlen of out, or
- * SIZE_MAX if input is too long / NULL. */
+/* Normalize an input into a short form: strip "hull/" and "web/"
+ * prefixes so the v0.2.0 namespace shift doesn't make typos of old
+ * short names (e.g. "middleware/sesssion") fall out of suggestion
+ * range. Lowercase nothing — registry names are all lowercase, so
+ * we match case-sensitively. Output buffer must be SUGGEST_MAX_LEN+1
+ * bytes. Returns the strlen of out, or SIZE_MAX if input is too
+ * long / NULL. */
 static size_t normalize_input(const char *input, char *out)
 {
     if (!input) return (size_t)-1;
     if (strncmp(input, "hull/", 5) == 0) input += 5;
+    if (strncmp(input, "web/", 4) == 0)  input += 4;
     size_t len = strlen(input);
     if (len > SUGGEST_MAX_LEN) return (size_t)-1;
     memcpy(out, input, len);
@@ -543,6 +572,7 @@ const HlModuleSpec *hl_module_registry_suggest(const char *input)
     for (size_t i = 0; i < REGISTRY_COUNT; i++) {
         const char *cand = REGISTRY[i].name;
         if (strncmp(cand, "hull/", 5) == 0) cand += 5;
+        if (strncmp(cand, "web/", 4) == 0)  cand += 4;
         size_t clen = strlen(cand);
 
         /* Cheap reject: if the length difference alone exceeds the

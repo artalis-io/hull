@@ -5,8 +5,8 @@ Reliable webhook delivery (outbox), incoming deduplication (inbox), and response
 
 ```lua
 -- Lua
-local outbox = require("hull.middleware.outbox")
-local inbox  = require("hull.middleware.inbox")
+local outbox = require("hull.web.middleware.outbox")
+local inbox  = require("hull.web.middleware.inbox")
 
 outbox.init()
 inbox.init()
@@ -26,8 +26,8 @@ if inbox.check_and_mark(message_id) then return end  -- duplicate, skip
 
 ```javascript
 // JS
-import { outbox } from "hull:middleware:outbox";
-import { inbox } from "hull:middleware:inbox";
+import { outbox } from "hull:web:middleware:outbox";
+import { inbox } from "hull:web:middleware:inbox";
 
 outbox.init();
 inbox.init();
@@ -77,7 +77,7 @@ Prevents processing the same incoming webhook twice.
 Caches POST responses by `Idempotency-Key` header. Replay the same key = get cached response.
 
 ```lua
-local idempotency = require("hull.middleware.idempotency")
+local idempotency = require("hull.web.middleware.idempotency")
 idempotency.init()
 app.use_post("POST", "/api/*", idempotency.middleware())
 ```
@@ -92,9 +92,9 @@ app.use_post("POST", "/api/*", idempotency.middleware())
 ## Complete Webhook Pattern
 
 ```lua
-local outbox      = require("hull.middleware.outbox")
-local inbox       = require("hull.middleware.inbox")
-local transaction = require("hull.middleware.transaction")
+local outbox      = require("hull.web.middleware.outbox")
+local inbox       = require("hull.web.middleware.inbox")
+local transaction = require("hull.web.middleware.transaction")
 
 outbox.init()
 inbox.init()
@@ -144,8 +144,8 @@ end)
 ```
 
 ```javascript
-import { outbox } from "hull:middleware:outbox";
-import { inbox } from "hull:middleware:inbox";
+import { outbox } from "hull:web:middleware:outbox";
+import { inbox } from "hull:web:middleware:inbox";
 
 outbox.init();
 inbox.init();

@@ -522,7 +522,7 @@ static void install_app_http_server(lua_State *L)
     hl_lua_install_app_router(L);
 }
 
-/* Install app.sse on the `app` global. Called when "hull/sse@1"
+/* Install app.sse on the `app` global. Called when "hull/web/sse@1"
  * is declared. */
 static void install_app_sse(lua_State *L)
 {
@@ -534,9 +534,9 @@ static void install_app_sse(lua_State *L)
     lua_pop(L, 1);
 }
 
-/* Install app.ws on the `app` global. Called when "hull/ws-server@1"
+/* Install app.ws on the `app` global. Called when "hull/web/ws-server@1"
  * is declared. The ws.broadcast/ws.connections helpers come from
- * the require("hull.ws-server") module (see mod_ws.c). */
+ * the require("hull.web.ws-server") module (see mod_ws.c). */
 static void install_app_ws_server(lua_State *L)
 {
     lua_getglobal(L, "app");
@@ -572,10 +572,10 @@ static int lua_app_manifest(lua_State *L)
     if (manifest_declares_module(L, 1, "hull/http-server")) {
         install_app_http_server(L);
     }
-    if (manifest_declares_module(L, 1, "hull/ws-server")) {
+    if (manifest_declares_module(L, 1, "hull/web/ws-server")) {
         install_app_ws_server(L);
     }
-    if (manifest_declares_module(L, 1, "hull/sse")) {
+    if (manifest_declares_module(L, 1, "hull/web/sse")) {
         install_app_sse(L);
     }
     if (manifest_declares_module(L, 1, "hull/timers")) {
@@ -622,8 +622,8 @@ static int lua_app_main(lua_State *L)
  *
  *   hull/http-server@1 → get/post/put/delete/del/patch/options
  *                         use/use_post/router
- *   hull/ws-server@1   → ws
- *   hull/sse@1         → sse
+ *   hull/web/ws-server@1   → ws
+ *   hull/web/sse@1         → sse
  *   hull/timers@1      → every/daily (existing)
  *
  * Without the declaration, those methods literally don't exist on

@@ -1,5 +1,5 @@
 /*
- * mod_ws_client.c — hull:ws-client module (outbound WebSocket connect)
+ * mod_ws_client.c — hull:web:ws-client module (outbound WebSocket connect)
  *
  * Exposes: ws.connect(url, handlers)
  *          client connection methods: send / sendBinary / close / ping
@@ -428,8 +428,8 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
 
 static int js_ws_client_module_init(JSContext *ctx, JSModuleDef *m)
 {
-    if (hl_js_check_module_declared(ctx, "hull/ws-client",
-                                    "hull:ws-client") != 0) return -1;
+    if (hl_js_check_module_declared(ctx, "hull/web/ws-client",
+                                    "hull:web:ws-client") != 0) return -1;
 
     JSValue ws = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, ws, "connect",
@@ -451,7 +451,7 @@ int hl_js_init_ws_client_module(JSContext *ctx, HlJS *js)
                                sizeof(js_ws_client_conn_proto_funcs[0]));
     JS_SetClassProto(ctx, js_ws_client_conn_class_id, client_proto);
 
-    JSModuleDef *m = JS_NewCModule(ctx, "hull:ws-client", js_ws_client_module_init);
+    JSModuleDef *m = JS_NewCModule(ctx, "hull:web:ws-client", js_ws_client_module_init);
     if (!m) return -1;
     JS_AddModuleExport(ctx, m, "wsClient");
     return 0;

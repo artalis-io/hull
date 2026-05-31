@@ -5,8 +5,8 @@
 
 ```lua
 -- Lua
-local auth = require("hull.middleware.auth")
-local session = require("hull.middleware.session")
+local auth = require("hull.web.middleware.auth")
+local session = require("hull.web.middleware.session")
 session.init({ ttl = 86400 })
 
 app.use("*", "/app/*", auth.session_middleware({ cookie_name = "hull_session" }))
@@ -16,8 +16,8 @@ auth.logout(req, res)                    -- destroys session, clears cookie
 
 ```javascript
 // JS
-import { auth } from "hull:middleware:auth";
-import { session } from "hull:middleware:session";
+import { auth } from "hull:web:middleware:auth";
+import { session } from "hull:web:middleware:session";
 session.init({ ttl: 86400 });
 
 app.use("*", "/app/*", auth.sessionMiddleware({ cookieName: "hull_session" }));
@@ -53,7 +53,7 @@ app.use("*", "/api/*", auth.jwt_middleware({ secret = "my-secret" }))
 
 **Session management:**
 ```lua
-local session = require("hull.middleware.session")
+local session = require("hull.web.middleware.session")
 session.init({ ttl = 86400 })        -- call once at startup
 session.create({ user_id = 1 })      -- returns 64-char hex ID
 session.load(session_id)             -- returns data or nil, auto-extends expiry
@@ -68,8 +68,8 @@ session.cleanup()                    -- delete expired sessions, returns count
 ## Complete Login/Logout Flow
 
 ```lua
-local auth    = require("hull.middleware.auth")
-local session = require("hull.middleware.session")
+local auth    = require("hull.web.middleware.auth")
+local session = require("hull.web.middleware.session")
 local crypto  = require("hull.crypto")
 
 session.init()
@@ -102,7 +102,7 @@ end)
 ## JWT API Pattern
 
 ```javascript
-import { auth } from "hull:middleware:auth";
+import { auth } from "hull:web:middleware:auth";
 import { jwt } from "hull:jwt";
 
 const SECRET = env.get("JWT_SECRET");

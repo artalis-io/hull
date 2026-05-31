@@ -31,30 +31,30 @@ local crypto   = require("hull.crypto")
 local db       = require("hull.db")
 local time     = require("hull.time")
 local validate = require("hull.validate")
-local ws_server        = require("hull.ws-server")  -- broadcast, connections (server)
-local ws_client = require("hull.ws-client")  -- connect (outbound federation)
-local session  = require("hull.middleware.session")
-local auth     = require("hull.middleware.auth")
+local ws_server        = require("hull.web.ws-server")  -- broadcast, connections (server)
+local ws_client = require("hull.web.ws-client")  -- connect (outbound federation)
+local session  = require("hull.web.middleware.session")
+local auth     = require("hull.web.middleware.auth")
 local log = require("hull.log")
 local json = require("hull.json")
-local _cookie  = require("hull.cookie") -- luacheck: ignore
+local _cookie  = require("hull.web.cookie") -- luacheck: ignore
 
 app.manifest({
     hosts = {"127.0.0.1"},
     modules = {
-        "hull/ws-server@1",
+        "hull/web/ws-server@1",
         "hull/http-server@1",
         "hull/timers@1",
         "hull/json@1",
         "hull/log@1",
-        "hull/cookie@1",
+        "hull/web/cookie@1",
         "hull/crypto@1",
         "hull/db@1",
         "hull/time@1",
         "hull/validate@1",
-        "hull/ws-client@1",
-        "hull/middleware/auth@1",
-        "hull/middleware/session@1",
+        "hull/web/ws-client@1",
+        "hull/web/middleware/auth@1",
+        "hull/web/middleware/session@1",
     },
 })
 session.init({ ttl = 7200 })

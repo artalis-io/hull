@@ -1,5 +1,5 @@
 /*
- * mod_ws_server.c — hull.ws-server module (server-side WebSocket helpers + conn userdata)
+ * mod_ws_server.c — hull.web.ws-server module (server-side WebSocket helpers + conn userdata)
  *
  * Exposes: ws.broadcast(path, data [, binary])
  *          ws.connections(path)
@@ -290,8 +290,8 @@ static int lua_ws_connections(lua_State *L)
 }
 
 /* Split into server-side and client-side reg tables. The single
- * old hull/ws@1 module is replaced by hull/ws-server@1 (broadcast,
- * connections, plus app.ws decoration) and hull/ws-client@1
+ * old hull/ws@1 module is replaced by hull/web/ws-server@1 (broadcast,
+ * connections, plus app.ws decoration) and hull/web/ws-client@1
  * (connect, gated on hosts allowlist at call time). */
 
 /* ── Module opener ─────────────────────────────────────────────────── */

@@ -14,9 +14,9 @@ local db          = require("hull.db")
 local env         = require("hull.env")
 local time        = require("hull.time")
 local validate    = require("hull.validate")
-local idempotency = require("hull.middleware.idempotency")
-local inbox       = require("hull.middleware.inbox")
-local outbox      = require("hull.middleware.outbox")
+local idempotency = require("hull.web.middleware.idempotency")
+local inbox       = require("hull.web.middleware.inbox")
+local outbox      = require("hull.web.middleware.outbox")
 
 local log = require("hull.log")
 local json = require("hull.json")
@@ -34,9 +34,9 @@ app.manifest({
         "hull/http-client@1",
         "hull/time@1",
         "hull/validate@1",
-        "hull/middleware/idempotency@1",
-        "hull/middleware/inbox@1",
-        "hull/middleware/outbox@1",
+        "hull/web/middleware/idempotency@1",
+        "hull/web/middleware/inbox@1",
+        "hull/web/middleware/outbox@1",
     },
 })
 

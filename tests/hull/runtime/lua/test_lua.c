@@ -2098,7 +2098,7 @@ UTEST(lua_cap, crypto_base64url_roundtrip)
     cleanup_lua_caps();
 }
 
-/* ── hull.cookie tests ─────────────────────────────────────────────── */
+/* ── hull.web.cookie tests ─────────────────────────────────────────────── */
 
 UTEST(lua_stdlib, cookie_parse)
 {
@@ -2107,7 +2107,7 @@ UTEST(lua_stdlib, cookie_parse)
 
     int ok = eval_int(
         "(function() "
-        "  local c = require('hull.cookie') "
+        "  local c = require('hull.web.cookie') "
         "  local r = c.parse('session=abc; theme=dark') "
         "  return r.session == 'abc' and r.theme == 'dark' and 1 or 0 "
         "end)()");
@@ -2116,7 +2116,7 @@ UTEST(lua_stdlib, cookie_parse)
     /* Empty string returns empty table */
     int empty = eval_int(
         "(function() "
-        "  local c = require('hull.cookie') "
+        "  local c = require('hull.web.cookie') "
         "  local r = c.parse('') "
         "  return next(r) == nil and 1 or 0 "
         "end)()");
@@ -2132,7 +2132,7 @@ UTEST(lua_stdlib, cookie_serialize)
 
     /* Default options: HttpOnly, Secure, SameSite=Lax, Path=/ */
     char *cookie = eval_str(
-        "require('hull.cookie').serialize('sid', 'abc123')");
+        "require('hull.web.cookie').serialize('sid', 'abc123')");
     ASSERT_NE(cookie, NULL);
     ASSERT_NE(strstr(cookie, "sid=abc123"), NULL);
     ASSERT_NE(strstr(cookie, "HttpOnly"), NULL);
@@ -2150,7 +2150,7 @@ UTEST(lua_stdlib, cookie_clear)
     ASSERT_TRUE(lua_initialized);
 
     char *cookie = eval_str(
-        "require('hull.cookie').clear('sid')");
+        "require('hull.web.cookie').clear('sid')");
     ASSERT_NE(cookie, NULL);
     ASSERT_NE(strstr(cookie, "sid="), NULL);
     ASSERT_NE(strstr(cookie, "Max-Age=0"), NULL);
@@ -2159,7 +2159,7 @@ UTEST(lua_stdlib, cookie_clear)
     cleanup_lua_caps();
 }
 
-/* ── hull.middleware.session tests ─────────────────────────────────── */
+/* ── hull.web.middleware.session tests ─────────────────────────────────── */
 
 UTEST(lua_stdlib, session_create_and_load)
 {
@@ -2168,7 +2168,7 @@ UTEST(lua_stdlib, session_create_and_load)
 
     int ok = eval_int(
         "(function() "
-        "  local s = require('hull.middleware.session') "
+        "  local s = require('hull.web.middleware.session') "
         "  s.init({ ttl = 3600 }) "
         "  local id = s.create({ user_id = 42, email = 'test@example.com' }) "
         "  if not id or #id ~= 64 then return 0 end "
@@ -2188,7 +2188,7 @@ UTEST(lua_stdlib, session_destroy)
 
     int ok = eval_int(
         "(function() "
-        "  local s = require('hull.middleware.session') "
+        "  local s = require('hull.web.middleware.session') "
         "  s.init() "
         "  local id = s.create({ foo = 'bar' }) "
         "  s.destroy(id) "
@@ -2270,7 +2270,7 @@ UTEST(lua_stdlib, jwt_malformed_rejected)
     cleanup_lua_caps();
 }
 
-/* ── hull.middleware.csrf tests ────────────────────────────────────── */
+/* ── hull.web.middleware.csrf tests ────────────────────────────────────── */
 
 UTEST(lua_stdlib, csrf_generate_and_verify)
 {
@@ -2279,7 +2279,7 @@ UTEST(lua_stdlib, csrf_generate_and_verify)
 
     int ok = eval_int(
         "(function() "
-        "  local csrf = require('hull.middleware.csrf') "
+        "  local csrf = require('hull.web.middleware.csrf') "
         "  local token = csrf.generate('session123', 'my_csrf_secret') "
         "  if not token then return 0 end "
         "  return csrf.verify(token, 'session123', 'my_csrf_secret') and 1 or 0 "
@@ -2296,7 +2296,7 @@ UTEST(lua_stdlib, csrf_wrong_session_rejected)
 
     int ok = eval_int(
         "(function() "
-        "  local csrf = require('hull.middleware.csrf') "
+        "  local csrf = require('hull.web.middleware.csrf') "
         "  local token = csrf.generate('session123', 'secret') "
         "  return csrf.verify(token, 'other_session', 'secret') and 0 or 1 "
         "end)()");
@@ -2319,7 +2319,7 @@ UTEST(lua_stdlib, csrf_cross_runtime_reference_token)
      * fixture valid forever for the purposes of this test. */
     int ok = eval_int(
         "(function() "
-        "  local csrf = require('hull.middleware.csrf') "
+        "  local csrf = require('hull.web.middleware.csrf') "
         "  local ref = '1.6ae78d056ed813a207a55074947fdbeef0ae8c7850acab486cb52bae058956da' "
         "  return csrf.verify(ref, 's1', 'k', 4294967295) and 1 or 0 "
         "end)()");
@@ -2328,7 +2328,7 @@ UTEST(lua_stdlib, csrf_cross_runtime_reference_token)
     /* Flip one bit of the MAC — must reject. */
     int rej = eval_int(
         "(function() "
-        "  local csrf = require('hull.middleware.csrf') "
+        "  local csrf = require('hull.web.middleware.csrf') "
         "  local bad = '1.7ae78d056ed813a207a55074947fdbeef0ae8c7850acab486cb52bae058956da' "
         "  return csrf.verify(bad, 's1', 'k', 4294967295) and 0 or 1 "
         "end)()");
@@ -2337,7 +2337,7 @@ UTEST(lua_stdlib, csrf_cross_runtime_reference_token)
     cleanup_lua_caps();
 }
 
-/* ── hull.middleware.auth tests (smoke — modules load and expose API) */
+/* ── hull.web.middleware.auth tests (smoke — modules load and expose API) */
 
 UTEST(lua_cap, crypto_hmac_sha256_verify)
 {
@@ -2376,7 +2376,7 @@ UTEST(lua_stdlib, auth_module_loads)
 
     int ok = eval_int(
         "(function() "
-        "  local auth = require('hull.middleware.auth') "
+        "  local auth = require('hull.web.middleware.auth') "
         "  return type(auth.session_middleware) == 'function' "
         "     and type(auth.jwt_middleware) == 'function' "
         "     and type(auth.login) == 'function' "
@@ -2388,7 +2388,7 @@ UTEST(lua_stdlib, auth_module_loads)
     cleanup_lua_caps();
 }
 
-/* ── hull.form tests ─────────────────────────────────────────────────── */
+/* ── hull.web.form tests ─────────────────────────────────────────────────── */
 
 UTEST(lua_stdlib, form_parse)
 {
@@ -2397,7 +2397,7 @@ UTEST(lua_stdlib, form_parse)
 
     int ok = eval_int(
         "(function() "
-        "  local form = require('hull.form') "
+        "  local form = require('hull.web.form') "
         "  local r = form.parse('email=a%40b.com&pass=hello+world') "
         "  return r.email == 'a@b.com' and r.pass == 'hello world' and 1 or 0 "
         "end)()");
@@ -2406,7 +2406,7 @@ UTEST(lua_stdlib, form_parse)
     /* Empty/nil returns empty table */
     int empty = eval_int(
         "(function() "
-        "  local form = require('hull.form') "
+        "  local form = require('hull.web.form') "
         "  local r = form.parse('') "
         "  return next(r) == nil and 1 or 0 "
         "end)()");
@@ -2768,7 +2768,7 @@ UTEST(lua_stdlib, search_snippet)
     cleanup_lua_caps();
 }
 
-/* ── hull.middleware.rbac tests ───────────────────────────────────────── */
+/* ── hull.web.middleware.rbac tests ───────────────────────────────────────── */
 
 UTEST(lua_stdlib, rbac_init_and_assign)
 {
@@ -2777,7 +2777,7 @@ UTEST(lua_stdlib, rbac_init_and_assign)
 
     int ok = eval_int(
         "(function() "
-        "  local rbac = require('hull.middleware.rbac') "
+        "  local rbac = require('hull.web.middleware.rbac') "
         "  rbac.init() "
         "  rbac.define_role('admin') "
         "  rbac.define_permission('users.read') "
@@ -2797,7 +2797,7 @@ UTEST(lua_stdlib, rbac_has_role)
 
     int ok = eval_int(
         "(function() "
-        "  local rbac = require('hull.middleware.rbac') "
+        "  local rbac = require('hull.web.middleware.rbac') "
         "  rbac.init() "
         "  rbac.define_role('admin') "
         "  rbac.assign('user1', 'admin') "
@@ -2816,7 +2816,7 @@ UTEST(lua_stdlib, rbac_has_permission)
 
     int ok = eval_int(
         "(function() "
-        "  local rbac = require('hull.middleware.rbac') "
+        "  local rbac = require('hull.web.middleware.rbac') "
         "  rbac.init() "
         "  rbac.define_role('admin') "
         "  rbac.define_permission('users.read') "
@@ -2838,7 +2838,7 @@ UTEST(lua_stdlib, rbac_middleware_deny)
 
     int ok = eval_int(
         "(function() "
-        "  local rbac = require('hull.middleware.rbac') "
+        "  local rbac = require('hull.web.middleware.rbac') "
         "  rbac.init() "
         "  local mw = rbac.require_role('admin') "
         "  return type(mw) == 'function' and 1 or 0 "

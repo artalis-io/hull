@@ -14,9 +14,9 @@ import { crypto } from "hull:crypto";
 import { db } from "hull:db";
 import { env } from "hull:env";
 import { log } from "hull:log";
-import { idempotency } from "hull:middleware:idempotency";
-import { inbox } from "hull:middleware:inbox";
-import { outbox } from "hull:middleware:outbox";
+import { idempotency } from "hull:web:middleware:idempotency";
+import { inbox } from "hull:web:middleware:inbox";
+import { outbox } from "hull:web:middleware:outbox";
 import { time } from "hull:time";
 import { validate } from "hull:validate";
 
@@ -33,9 +33,9 @@ app.manifest({
         "hull/http-client@1",
         "hull/time@1",
         "hull/validate@1",
-        "hull/middleware/idempotency@1",
-        "hull/middleware/inbox@1",
-        "hull/middleware/outbox@1",
+        "hull/web/middleware/idempotency@1",
+        "hull/web/middleware/inbox@1",
+        "hull/web/middleware/outbox@1",
     ],
 });
 

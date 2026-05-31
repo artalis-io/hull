@@ -10,32 +10,32 @@
 // See app.lua header for full endpoint + WebSocket protocol documentation.
 
 import { app } from "hull:app";
-import { cookie } from "hull:cookie";
+import { cookie } from "hull:web:cookie";
 import { crypto } from "hull:crypto";
 import { db } from "hull:db";
 import { log } from "hull:log";
-import { auth } from "hull:middleware:auth";
-import { session } from "hull:middleware:session";
+import { auth } from "hull:web:middleware:auth";
+import { session } from "hull:web:middleware:session";
 import { time } from "hull:time";
 import { validate } from "hull:validate";
-import { wsClient } from "hull:ws-client";  // connect (outbound federation)
-import { wsServer } from "hull:ws-server";              // broadcast, connections
+import { wsClient } from "hull:web:ws-client";  // connect (outbound federation)
+import { wsServer } from "hull:web:ws-server";              // broadcast, connections
 
 app.manifest({
     hosts: ["127.0.0.1"],
     modules: [
-        "hull/ws-server@1",
+        "hull/web/ws-server@1",
         "hull/http-server@1",
         "hull/timers@1",
         "hull/log@1",
-        "hull/cookie@1",
+        "hull/web/cookie@1",
         "hull/crypto@1",
         "hull/db@1",
         "hull/time@1",
         "hull/validate@1",
-        "hull/ws-client@1",
-        "hull/middleware/auth@1",
-        "hull/middleware/session@1",
+        "hull/web/ws-client@1",
+        "hull/web/middleware/auth@1",
+        "hull/web/middleware/session@1",
     ],
 });
 session.init({ ttl: 7200 });

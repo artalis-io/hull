@@ -10,20 +10,20 @@
 // Run:  hull dev examples/todo/app.js -d /tmp/todo.db
 
 import { app } from "hull:app";
-import { cookie } from "hull:cookie";
+import { cookie } from "hull:web:cookie";
 import { crypto } from "hull:crypto";
 import { csv } from "hull:csv";
 import { db } from "hull:db";
-import { form } from "hull:form";
+import { form } from "hull:web:form";
 import { httpClient } from "hull:http-client";
 import { i18n } from "hull:i18n";
 import { log } from "hull:log";
-import { auth } from "hull:middleware:auth";
-import { csrf } from "hull:middleware:csrf";
-import { logger } from "hull:middleware:logger";
-import { ratelimit } from "hull:middleware:ratelimit";
-import { rbac } from "hull:middleware:rbac";
-import { session } from "hull:middleware:session";
+import { auth } from "hull:web:middleware:auth";
+import { csrf } from "hull:web:middleware:csrf";
+import { logger } from "hull:web:middleware:logger";
+import { ratelimit } from "hull:web:middleware:ratelimit";
+import { rbac } from "hull:web:middleware:rbac";
+import { session } from "hull:web:middleware:session";
 import { search } from "hull:search";
 import { template } from "hull:template";
 import { time } from "hull:time";
@@ -36,23 +36,23 @@ app.manifest({
     modules: [
         "hull/http-server@1",
         "hull/log@1",
-        "hull/cookie@1",
+        "hull/web/cookie@1",
         "hull/crypto@1",
         "hull/csv@1",
         "hull/db@1",
-        "hull/form@1",
+        "hull/web/form@1",
         "hull/http-client@1",
         "hull/i18n@1",
         "hull/search@1",
         "hull/template@1",
         "hull/time@1",
         "hull/validate@1",
-        "hull/middleware/auth@1",
-        "hull/middleware/csrf@1",
-        "hull/middleware/logger@1",
-        "hull/middleware/ratelimit@1",
-        "hull/middleware/rbac@1",
-        "hull/middleware/session@1",
+        "hull/web/middleware/auth@1",
+        "hull/web/middleware/csrf@1",
+        "hull/web/middleware/logger@1",
+        "hull/web/middleware/ratelimit@1",
+        "hull/web/middleware/rbac@1",
+        "hull/web/middleware/session@1",
     ],
 });
 

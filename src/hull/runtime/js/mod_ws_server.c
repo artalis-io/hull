@@ -1,5 +1,5 @@
 /*
- * mod_ws_server.c — hull:ws-server module (server-side WebSocket helpers + conn class)
+ * mod_ws_server.c — hull:web:ws-server module (server-side WebSocket helpers + conn class)
  *
  * Exposes: ws.broadcast(path, data [, binary])
  *          ws.connections(path)
@@ -338,8 +338,8 @@ static JSValue js_ws_connections(JSContext *ctx, JSValueConst this_val,
 
 static int js_ws_server_module_init(JSContext *ctx, JSModuleDef *m)
 {
-    if (hl_js_check_module_declared(ctx, "hull/ws-server",
-                                    "hull:ws-server") != 0) return -1;
+    if (hl_js_check_module_declared(ctx, "hull/web/ws-server",
+                                    "hull:web:ws-server") != 0) return -1;
 
     JSValue ws = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, ws, "broadcast",
@@ -362,7 +362,7 @@ int hl_js_init_ws_server_module(JSContext *ctx, HlJS *js)
                                sizeof(js_ws_conn_proto_funcs[0]));
     JS_SetClassProto(ctx, js_ws_conn_class_id, proto);
 
-    JSModuleDef *m = JS_NewCModule(ctx, "hull:ws-server", js_ws_server_module_init);
+    JSModuleDef *m = JS_NewCModule(ctx, "hull:web:ws-server", js_ws_server_module_init);
     if (!m) return -1;
     JS_AddModuleExport(ctx, m, "wsServer");
     return 0;

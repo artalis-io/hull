@@ -1,8 +1,8 @@
 -- Tests for health check + ETag middleware
 -- Run: hull test examples/health_etag
 
-local health = require("hull.middleware.health")
-local etag = require("hull.middleware.etag")
+local health = require("hull.web.middleware.health")
+local etag = require("hull.web.middleware.etag")
 
 -- ═══════════════════════════════════════════════════════════════════
 -- Health Check Tests

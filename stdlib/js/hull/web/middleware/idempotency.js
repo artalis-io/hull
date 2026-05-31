@@ -1,0 +1,390 @@
+/**
+ * @file hull:web:middleware:idempotency
+ * @module hull:web:middleware:idempotency
+ * @description Idempotency-Key middleware for safe POST retries. Lua parity:
+ *   `hull.web.middleware.idempotency`.
+ *
+ * Prevents duplicate side effects when clients retry the same request by
+ * caching the response keyed by `(principal_id, idempotency_key)`. A
+ * `SHA-256(method || path || body)` fingerprint detects key reuse with a
+ * different body (returns `409 Conflict`).
+ *
+ * **Replay semantics:**
+ *   - Same key, same body → cached response returned (handler skipped).
+ *   - Same key, different body → `409`.
+ *   - Same key, still inflight → `409` (`request already in progress`).
+ *   - No `Idempotency-Key` header → handler runs normally (no caching).
+ *
+ * **Header allowlist:** Only safe response headers are persisted/replayed.
+ * `Set-Cookie`, `Authorization`, `Cookie`, and `X-*` credential patterns
+ * (`x-auth`, `x-api-key`, …) are never cached, so a stored replay can't
+ * outlive a revoked session.
+ *
+ * @license AGPL-3.0-or-later
+ */
+
+import { db } from "hull:db";
+import { crypto } from "hull:crypto";
+import { time } from "hull:time";
+import { json } from "hull:json";
+
+let idemTtl = 86400;
+const HEADER_NAME = "idempotency-key";
+
+/* M-7 (Phase 5) + Phase 6 audit M-1: allowlist of headers safe to replay
+ * or cache from a previous response. Excludes credential-bearing /
+ * session-binding headers; explicitly allowlists common security
+ * response headers (HSTS/CSP/etc.) so they aren't silently dropped on
+ * replay. NO blanket X-* — the previous version was too permissive
+ * (would replay X-Auth-Token, X-API-Key, X-CSRF-Token, etc.). */
+const REPLAYABLE_HEADERS = {
+    "content-type": 1,
+    "content-language": 1,
+    "content-encoding": 1,
+    "location": 1,
+    "etag": 1,
+    "last-modified": 1,
+    "cache-control": 1,
+    "vary": 1,
+    // Safe X-* (stdlib-emitted or widely-used non-credential):
+    "x-request-id": 1,
+    "x-ratelimit-limit": 1,
+    "x-ratelimit-remaining": 1,
+    "x-ratelimit-reset": 1,
+    "x-idempotency-replay": 1,
+    "x-content-type-options": 1,
+    "x-frame-options": 1,
+    // Other safe response-shaping headers:
+    "strict-transport-security": 1,
+    "content-security-policy": 1,
+    "referrer-policy": 1,
+    "permissions-policy": 1,
+};
+
+// X-* substrings we explicitly deny even if a future allowlist entry
+// would catch them by name. Belt and braces.
+const X_CREDENTIAL_PATTERNS = [
+    "x-auth", "x-api-key", "x-csrf", "x-token",
+    "x-forwarded-authorization", "x-amz-security-token",
+    "x-aws-", "x-google-", "x-vault-", "x-jwt-",
+];
+
+function isReplayableHeader(name) {
+    if (typeof name !== "string" || !name) return false;
+    const lc = name.toLowerCase();
+    // Always-deny credential headers (run FIRST so an accidental
+    // allowlist addition can't override the deny — defense in depth
+    // that actually defends; the previous order made the deny loop
+    // dead code because the function fell through to `return false`).
+    if (lc === "set-cookie" || lc === "authorization" ||
+        lc === "cookie" || lc === "proxy-authenticate" ||
+        lc === "www-authenticate") return false;
+    for (let i = 0; i < X_CREDENTIAL_PATTERNS.length; i++) {
+        if (lc.indexOf(X_CREDENTIAL_PATTERNS[i]) !== -1) return false;
+    }
+    // Then check allowlist.
+    if (REPLAYABLE_HEADERS[lc]) return true;
+    // Anything not on the allowlist is denied (no blanket X-*).
+    return false;
+}
+
+/**
+ * Initialize the `_hull_idempotency_keys` SQLite table. Idempotent.
+ *
+ * @param {Object} [opts]
+ * @param {number} [opts.ttl=86400]  Key lifetime in seconds.
+ */
+function init(opts) {
+    const o = opts || {};
+    if (o.ttl !== undefined) idemTtl = o.ttl;
+
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _hull_idempotency_keys (" +
+        "  key            TEXT NOT NULL," +
+        "  principal_id   TEXT NOT NULL DEFAULT '__anon'," +
+        "  fingerprint    TEXT NOT NULL," +
+        "  endpoint       TEXT NOT NULL," +
+        "  status         INTEGER," +
+        "  response_body  TEXT," +
+        "  response_headers TEXT," +
+        "  state          TEXT NOT NULL DEFAULT 'inflight'," +
+        "  created_at     INTEGER NOT NULL," +
+        "  expires_at     INTEGER NOT NULL," +
+        "  PRIMARY KEY (principal_id, key)" +
+        ")"
+    );
+    db.exec(
+        "CREATE INDEX IF NOT EXISTS idx_hull_idem_expires " +
+        "ON _hull_idempotency_keys(expires_at)"
+    );
+}
+
+/**
+ * Compute a request fingerprint: SHA-256(method + path + body).
+ */
+function computeFingerprint(req) {
+    const data = (req.method || "") + "\0" + (req.path || "") + "\0" + (req.body || "");
+    return crypto.sha256(data);
+}
+
+/**
+ * Build a post-body idempotency middleware.
+ *
+ * Reads the key from `req.header(headerName)`. Same key+body → cached
+ * replay; different body → 409; missing header → handler runs.
+ *
+ * @param {Object} [opts]
+ * @param {(req) => string} [opts.getPrincipal]
+ *   Returns a stable per-user key for scoping. Default:
+ *   `req.ctx.session.user_id` or `"__anon"`.
+ * @param {number}   [opts.ttl]        Override module TTL for this instance.
+ * @param {string}   [opts.headerName="idempotency-key"]
+ * @param {string[]} [opts.methods=["POST"]]
+ * @returns {(req, res) => number}
+ *
+ * @example
+ * app.usePost("POST", "/api/*", idempotency.middleware({
+ *     getPrincipal: (req) => req.ctx?.session?.user_id || "__anon",
+ * }));
+ */
+function middleware(opts) {
+    const o = opts || {};
+
+    const getPrincipal = o.getPrincipal || function(req) {
+        if (req.ctx && req.ctx.session && req.ctx.session.user_id)
+            return String(req.ctx.session.user_id);
+        return "__anon";
+    };
+
+    const ttl = o.ttl !== undefined ? o.ttl : idemTtl;
+    const headerName = o.headerName || HEADER_NAME;
+
+    const methodList = o.methods || ["POST"];
+    const methods = {};
+    for (let i = 0; i < methodList.length; i++)
+        methods[methodList[i]] = true;
+
+    // Counter for probabilistic cleanup (every 100 requests)
+    let requestCount = 0;
+    const CLEANUP_INTERVAL = 100;
+
+    return function(req, res) {
+        if (!methods[req.method])
+            return 0;
+
+        const key = req.header(headerName);
+        if (!key || key === "")
+            return 0;
+
+        if (!req.ctx) req.ctx = {};
+
+        const principalId = getPrincipal(req);
+        const fingerprint = computeFingerprint(req);
+        const endpoint = req.method + " " + req.path;
+        const now = time.now();
+
+        // Periodic cleanup
+        requestCount++;
+        if (requestCount >= CLEANUP_INTERVAL) {
+            requestCount = 0;
+            db.exec("DELETE FROM _hull_idempotency_keys WHERE expires_at <= ?", [now]);
+        }
+
+        // Check for existing key
+        const rows = db.query(
+            "SELECT fingerprint, state, status, response_body, response_headers, expires_at " +
+            "FROM _hull_idempotency_keys WHERE principal_id = ? AND key = ?",
+            [principalId, key]
+        );
+
+        if (rows && rows.length > 0) {
+            const row = rows[0];
+
+            if (row.expires_at <= now) {
+                // Expired: delete and treat as new
+                db.exec(
+                    "DELETE FROM _hull_idempotency_keys WHERE principal_id = ? AND key = ?",
+                    [principalId, key]
+                );
+            } else {
+                // Fingerprint mismatch. Constant-time comparison even though
+                // fingerprints are SHA-256 of public inputs (method+path+body),
+                // for consistency with jwt.js / csrf.js.
+                let diff = (row.fingerprint || "").length === fingerprint.length ? 0 : 1;
+                for (let i = 0; i < fingerprint.length && i < (row.fingerprint || "").length; i++)
+                    diff |= row.fingerprint.charCodeAt(i) ^ fingerprint.charCodeAt(i);
+                if (diff !== 0) {
+                    res.status(409);
+                    res.json({ error: "idempotency key already used with different request body" });
+                    return 1;
+                }
+
+                // Still in-flight
+                if (row.state === "inflight") {
+                    res.status(409);
+                    res.json({ error: "request with this idempotency key is already in progress" });
+                    return 1;
+                }
+
+                // Completed with cached response
+                if (row.state === "complete" && row.status) {
+                    res.status(row.status);
+                    if (row.response_headers) {
+                        let headers;
+                        try { headers = json.decode(row.response_headers); }
+                        catch (_e) { headers = null; }
+                        if (headers && typeof headers === "object") {
+                            const keys = Object.keys(headers);
+                            for (let i = 0; i < keys.length; i++) {
+                                const k = keys[i];
+                                const v = headers[k];
+                                // M-7: defense-in-depth — drop credential-
+                                // affecting headers from a replayed response
+                                // (stale Set-Cookie / Authorization could
+                                // outlive a revoked session) and reject any
+                                // CRLF/NUL injection attempt.
+                                if (!isReplayableHeader(k)) continue;
+                                if (typeof v !== "string") continue;
+                                if (/[\r\n\x00]/.test(v)) continue;
+                                res.header(k, v);
+                            }
+                        }
+                    }
+                    res.header("X-Idempotency-Replay", "true");
+                    if (row.response_body) {
+                        res.header("Content-Type", "application/json");
+                        res.text(row.response_body);
+                    } else {
+                        res.text("");
+                    }
+                    return 1;
+                }
+
+                // Complete but no cached response: delete and re-run
+                db.exec(
+                    "DELETE FROM _hull_idempotency_keys WHERE principal_id = ? AND key = ?",
+                    [principalId, key]
+                );
+            }
+        }
+
+        // Insert in-flight record (OR IGNORE prevents race with concurrent request)
+        const inserted = db.exec(
+            "INSERT OR IGNORE INTO _hull_idempotency_keys " +
+            "(key, principal_id, fingerprint, endpoint, state, created_at, expires_at) " +
+            "VALUES (?, ?, ?, ?, 'inflight', ?, ?)",
+            [key, principalId, fingerprint, endpoint, now, now + ttl]
+        );
+        if (inserted === 0) {
+            res.status(409);
+            res.json({ error: "request with this idempotency key is already in progress" });
+            return 1;
+        }
+
+        // Store key info in context for respond() to use
+        req.ctx._idem_key = key;
+        req.ctx._idem_principal = principalId;
+
+        return 0;
+    };
+}
+
+/**
+ * Send a JSON response and cache it for idempotency replay.
+ *
+ * Call from inside a handler that has an idempotency key active.
+ * `extraHeaders` is filtered through the same allowlist as the replay
+ * path, so credential headers never persist on disk.
+ *
+ * @param {Object}   req
+ * @param {Object}   res
+ * @param {number}   statusCode  HTTP status to send + cache.
+ * @param {Object}   data        Body data (JSON-encoded).
+ * @param {Object<string,string>} [extraHeaders]  Optional response headers.
+ *
+ * @example
+ * idempotency.respond(req, res, 201, { event_id: 42 });
+ */
+function respond(req, res, statusCode, data, extraHeaders) {
+    const bodyStr = json.encode(data);
+
+    res.status(statusCode);
+    if (extraHeaders) {
+        const keys = Object.keys(extraHeaders);
+        for (let i = 0; i < keys.length; i++) {
+            const k = keys[i];
+            const v = extraHeaders[k];
+            // M-7: same allowlist/CRLF policy as the replay path so the
+            // stored set never contains credential headers in the first
+            // place.
+            if (!isReplayableHeader(k)) continue;
+            if (typeof v !== "string") continue;
+            if (/[\r\n\x00]/.test(v)) continue;
+            res.header(k, v);
+        }
+    }
+    res.json(data);
+
+    // Cache if idempotency key is active. Phase 6 audit M-3 parity:
+    // filter headers through the same allowlist before writing to
+    // SQLite, so credential headers never persist on disk for the TTL
+    // even if the replay path would have dropped them anyway.
+    if (req.ctx && req.ctx._idem_key) {
+        let headersStr = null;
+        if (extraHeaders) {
+            const filtered = {};
+            const keys = Object.keys(extraHeaders);
+            let any = false;
+            for (let i = 0; i < keys.length; i++) {
+                const k = keys[i];
+                const v = extraHeaders[k];
+                if (!isReplayableHeader(k)) continue;
+                if (typeof v !== "string") continue;
+                if (/[\r\n\x00]/.test(v)) continue;
+                filtered[k] = v;
+                any = true;
+            }
+            if (any) headersStr = json.encode(filtered);
+        }
+
+        db.exec(
+            "UPDATE _hull_idempotency_keys SET state = 'complete', status = ?, " +
+            "response_body = ?, response_headers = ? WHERE principal_id = ? AND key = ?",
+            [statusCode, bodyStr, headersStr, req.ctx._idem_principal, req.ctx._idem_key]
+        );
+    }
+}
+
+/**
+ * Mark an idempotency key as complete without caching a response.
+ *
+ * Useful when the handler sends a response via `res.json()` directly.
+ * The key prevents concurrent duplicates but retries will re-execute
+ * the handler (no cached body to replay).
+ *
+ * @param {Object} req
+ */
+function complete(req) {
+    if (req.ctx && req.ctx._idem_key) {
+        db.exec(
+            "UPDATE _hull_idempotency_keys SET state = 'complete' " +
+            "WHERE principal_id = ? AND key = ?",
+            [req.ctx._idem_principal, req.ctx._idem_key]
+        );
+    }
+}
+
+/**
+ * Delete expired idempotency keys.
+ *
+ * Call periodically (e.g. from `app.every(3600_000, idempotency.cleanup)`).
+ *
+ * @returns {number} Count of deleted rows.
+ */
+function cleanup() {
+    const now = time.now();
+    return db.exec("DELETE FROM _hull_idempotency_keys WHERE expires_at <= ?", [now]);
+}
+
+const idempotency = { init, middleware, respond, complete, cleanup };
+export { idempotency };

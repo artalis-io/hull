@@ -1,9 +1,9 @@
--- test_htmx.lua. Tests for hull.htmx
+-- test_htmx.lua. Tests for hull.web.htmx
 --
 -- Pure-function helpers; no runtime globals beyond hull.json (used
 -- internally by the HX-Trigger encoders).
 
-local htmx = require('hull.htmx')
+local htmx = require('hull.web.htmx')
 
 local pass = 0
 local fail = 0
@@ -191,5 +191,5 @@ end)
 
 -- ── Done ─────────────────────────────────────────────────────────────
 
-print(string.format("hull.htmx: %d passed, %d failed", pass, fail))
-if fail > 0 then error("hull.htmx tests failed") end
+print(string.format("hull.web.htmx: %d passed, %d failed", pass, fail))
+if fail > 0 then error("hull.web.htmx tests failed") end

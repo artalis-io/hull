@@ -36,14 +36,14 @@ lua_files["app.lua"] = [[-- Modular REST API scaffold.
 
 -- Declare every first-party module the app + subfiles import. The
 -- runtime tracker validates this list against actual imports at load
--- time, so missing entries surface immediately. `hull/middleware/session`
+-- time, so missing entries surface immediately. `hull/web/middleware/session`
 -- and friends auto-pull their own deps (json, time, crypto, db) via
 -- the registry's deps graph — but anything imported only by user files
 -- (routes/, models/, lib/) must be listed here explicitly.
 app.manifest({
     modules = {
         "hull/http-server@1",
-        "hull/middleware/logger@1",
+        "hull/web/middleware/logger@1",
         "hull/log@1",
         "hull/db@1",           -- models/user.lua
         "hull/crypto@1",       -- models/user.lua (random id)
@@ -54,7 +54,7 @@ app.manifest({
 })
 
 local log    = require("hull.log")
-local logger = require("hull.middleware.logger")
+local logger = require("hull.web.middleware.logger")
 
 -- Cross-cutting middleware first: request logging on every path.
 app.use("*", "/*", logger.middleware({}))
@@ -71,7 +71,7 @@ lua_files["routes/health.lua"] = [[-- routes/health.lua — liveness + readiness
 -- The health endpoint is intentionally trivial and unauthenticated:
 -- a loadbalancer or container orchestrator hits it to decide whether
 -- to route traffic to this process. Anything heavier (DB ping etc.)
--- belongs in /ready, which can use the stdlib `hull.middleware.health`
+-- belongs in /ready, which can use the stdlib `hull.web.middleware.health`
 -- module when you're ready to wire it up.
 
 local M = {}
@@ -233,14 +233,14 @@ return M
 lua_files["middleware/require_auth.lua"] = [[-- middleware/require_auth.lua — App-specific auth wrapper.
 --
 -- This is where app-specific authentication policy lives: the stdlib
--- module `hull.middleware.auth` provides the session-cookie / JWT
+-- module `hull.web.middleware.auth` provides the session-cookie / JWT
 -- primitives; this wrapper composes them with app conventions like
 -- "redirect to /login instead of 401" or "always require a verified
 -- email."
 --
 -- Empty by default — uncomment and adapt when you add login.
 
--- local auth = require("hull.middleware.auth")
+-- local auth = require("hull.web.middleware.auth")
 --
 -- local M = {}
 --
@@ -316,7 +316,7 @@ js_files["app.js"] = [[// Modular REST API scaffold.
 
 import { app }    from "hull:app";
 import { log }    from "hull:log";
-import { logger } from "hull:middleware:logger";
+import { logger } from "hull:web:middleware:logger";
 
 import { register as registerHealth } from "./routes/health.js";
 import { register as registerUsers }  from "./routes/users.js";
@@ -327,7 +327,7 @@ import { register as registerUsers }  from "./routes/users.js";
 app.manifest({
     modules: [
         "hull/http-server@1",
-        "hull/middleware/logger@1",
+        "hull/web/middleware/logger@1",
         "hull/log@1",
         "hull/db@1",           // models/user.js
         "hull/crypto@1",       // models/user.js (random id)
@@ -480,7 +480,7 @@ js_files["middleware/require_auth.js"] = [[// middleware/require_auth.js — App
 //
 // Empty by default — uncomment and adapt when you add login.
 
-// import { auth } from "hull:middleware:auth";
+// import { auth } from "hull:web:middleware:auth";
 //
 // export function requireUser() {
 //     return auth.sessionMiddleware({ loginPath: "/login" });

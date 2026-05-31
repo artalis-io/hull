@@ -317,7 +317,7 @@ UTEST(module_resolver, session_auto_admits_db_and_crypto)
 {
     HlManifest m;
     clear_manifest(&m);
-    add_module(&m, "middleware/session", 1);
+    add_module(&m, "web/middleware/session", 1);
 
     HlResolvedModuleSet s = {0};
     char err[256] = {0};
@@ -325,7 +325,7 @@ UTEST(module_resolver, session_auto_admits_db_and_crypto)
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(err[0], '\0');
 
-    const HlModuleSpec *session = hl_module_registry_find_short("middleware/session");
+    const HlModuleSpec *session = hl_module_registry_find_short("web/middleware/session");
     const HlModuleSpec *db      = hl_module_registry_find_short("db");
     const HlModuleSpec *crypto  = hl_module_registry_find_short("crypto");
     ASSERT_TRUE(session != NULL);

@@ -241,7 +241,7 @@ curl http://localhost:3000/sent/1
 
 ### health_etag
 
-Health check and ETag middleware — demonstrates `hull.middleware.health` for liveness/readiness endpoints and `hull.middleware.etag` for conditional responses with `304 Not Modified`. Custom health checks, automatic ETag generation for JSON/text/HTML responses.
+Health check and ETag middleware — demonstrates `hull.web.middleware.health` for liveness/readiness endpoints and `hull.web.middleware.etag` for conditional responses with `304 Not Modified`. Custom health checks, automatic ETag generation for JSON/text/HTML responses.
 
 ```bash
 ./build/hull -p 3000 examples/health_etag/app.lua
@@ -742,6 +742,6 @@ Every example has both `app.lua` and `app.js`. The APIs are identical except for
 | Globals | `app`, `db`, `time`, `log`, `json`, `crypto` are auto-injected | Must `import { app } from "hull:app"` etc. |
 | Method calls | `res:json(data)` (colon syntax) | `res.json(data)` (dot syntax) |
 | Tables/Objects | `{ key = "value" }` | `{ key: "value" }` |
-| Stdlib imports | `require("hull.middleware.session")` | `import { session } from "hull:middleware:session"` |
+| Stdlib imports | `require("hull.web.middleware.session")` | `import { session } from "hull:web:middleware:session"` |
 | Naming | `snake_case` — `hash_password` | `camelCase` — `hashPassword` |
 | Arrays | 1-indexed — `rows[1]` | 0-indexed — `rows[0]` |

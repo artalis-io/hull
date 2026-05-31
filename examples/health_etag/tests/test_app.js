@@ -1,8 +1,8 @@
 // Tests for health check + ETag middleware
 // Run: hull test examples/health_etag
 
-import { etag } from "hull:middleware:etag";
-import { health } from "hull:middleware:health";
+import { etag } from "hull:web:middleware:etag";
+import { health } from "hull:web:middleware:health";
 
 // ═══════════════════════════════════════════════════════════════════
 // Health Check Tests
