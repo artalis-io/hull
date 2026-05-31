@@ -1,23 +1,29 @@
 // HTMX + Pico hypermedia app scaffold.
 // Returns full pages for plain navigation; returns fragments when
 // HX-Request is set. CSRF + per-request CSP nonce wired in by default.
-import { app }      from "hull:app";
-import { htmx }     from "hull:web:htmx";
-import { flash }    from "hull:web:flash";
-import { csp }      from "hull:web:middleware:csp";
-import { csrf }     from "hull:web:middleware:csrf";
-import { session }  from "hull:web:middleware:session";
-import { cookie }   from "hull:web:cookie";
-import { template } from "hull:template";
-import { form }     from "hull:web:form";
-import { log }      from "hull:log";
-import { db }       from "hull:db";
+import { app }        from "hull:app";
+import { htmx }       from "hull:web:htmx";
+import { flash }      from "hull:web:flash";
+import { pagination } from "hull:web:pagination";
+import { csp }        from "hull:web:middleware:csp";
+import { csrf }       from "hull:web:middleware:csrf";
+import { session }    from "hull:web:middleware:session";
+import { cookie }     from "hull:web:cookie";
+import { template }   from "hull:template";
+import { form }       from "hull:web:form";
+import { log }        from "hull:log";
+import { db }         from "hull:db";
+
+// Small default so pagination is visible in the demo with only a
+// handful of todos. Real apps would set this to 20-50.
+const PER_PAGE_DEFAULT = 3;
 
 app.manifest({
     modules: [
         "hull/http-server@1",
         "hull/web/htmx@1",
         "hull/web/flash@1",
+        "hull/web/pagination@1",
         "hull/web/middleware/csp@1",
         "hull/web/middleware/csrf@1",
         "hull/web/middleware/session@1",
@@ -77,10 +83,6 @@ app.usePost("*", "/*", csrf.middleware({
     cookieName: "hull_session",
 }));
 
-function todosData() {
-    return db.query("SELECT id, title, done FROM todos ORDER BY id DESC");
-}
-
 app.get("/", (req, res) => {
     // flash.consume drains any pending one-shot messages from the
     // previous POST/redirect/GET cycle and clears them from session.
@@ -89,10 +91,31 @@ app.get("/", (req, res) => {
     // the actual ctx keys (csp.js writes csp_nonce; csrf.js writes
     // csrf_token). Same template HTML works for both runtimes.
     const msgs = flash.consume(req);
+
+    // pagination.fromQuery reads ?page=N&per_page=M; builds
+    // SQL-ready offset+limit. render produces a nav structure
+    // with windowed links + ellipses for large page counts.
+    const p = pagination.fromQuery(req, {
+        defaultPerPage: PER_PAGE_DEFAULT,
+    });
+    const total = db.query("SELECT COUNT(*) AS n FROM todos")[0].n;
+    const todos = db.query(
+        "SELECT id, title, done FROM todos ORDER BY id DESC "
+        + "LIMIT ? OFFSET ?",
+        [p.limit, p.offset]
+    );
+    const nav = pagination.render(total, {
+        page:           p.page,
+        per_page:       p.per_page,
+        defaultPerPage: PER_PAGE_DEFAULT,
+        baseUrl:        "/",
+    });
+
     res.html(template.render("pages/home.html", {
         csp_nonce:  req.ctx.csp_nonce,
         csrf_token: req.ctx.csrf_token,
-        todos:      todosData(),
+        todos:      todos,
+        pagination: nav,
         flash:      msgs,
         has_flash:  msgs.length > 0,
     }));
@@ -113,9 +136,12 @@ app.post("/todos", (req, res) => {
         // flash.trigger fires a client-side 'flash' event that any
         // listener (e.g. a toast widget) can render. Independent of
         // the OOB swap path; HTMX-only.
+        // todo_row.html uses `{{ t.X }}` so the same partial works
+        // both here (single render) and inside the GET / for-loop
+        // (`{% for t in todos %}{% include %}{% end %}`).
         flash.trigger(res, "Added: " + title, "success");
         res.html(
-            template.render("partials/todo_row.html",  { id, title, done: false })
+            template.render("partials/todo_row.html",  { t: { id, title, done: false } })
             + template.render("partials/todo_form.html", { csrf_token: req.ctx.csrf_token })
         );
     } else {
@@ -132,7 +158,7 @@ app.post("/todos/:id/toggle", (req, res) => {
     const row = db.query("SELECT id, title, done FROM todos WHERE id = ?", [id])[0];
     if (!row) { res.status(404); return; }
     if (htmx.is(req)) {
-        res.html(template.render("partials/todo_row.html", row));
+        res.html(template.render("partials/todo_row.html", { t: row }));
     } else {
         res.redirect("/");
     }

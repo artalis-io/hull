@@ -364,6 +364,15 @@ static const HlModuleSpec REGISTRY[] = {
         .required_caps = HL_MOD_CAP_HTTP_SERVER,
         .deps = {"hull/http-server", "hull/db", 0},
     },
+    {
+        /* Server-side offset-based pagination helper. Pure: reads
+         * req.query, builds offset/limit + a nav structure with
+         * windowed links and ellipses. Useful for REST endpoints,
+         * server-rendered pages, and HTMX fragment swaps alike. */
+        .name = "hull/web/pagination",
+        .api_major = 1, .intrinsic = 0, .pure = 1,
+        .required_caps = 0, .deps = {0},
+    },
 
     /* ── Web real-time + WebSocket ──────────────────────────────────── */
     {

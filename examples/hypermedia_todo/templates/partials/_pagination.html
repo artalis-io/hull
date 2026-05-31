@@ -1,0 +1,23 @@
+{% if pagination.show %}
+<nav class="pagination" aria-label="Pagination">
+  <ul>
+    {% if pagination.has_prev %}
+    <li><a href="{{ pagination.prev }}" rel="prev" aria-label="Previous page">&larr;</a></li>
+    {% end %}
+    {% for link in pagination.links %}
+      {% if link.ellipsis %}
+      <li aria-hidden="true">&hellip;</li>
+      {% else %}
+        {% if link.active %}
+        <li><a href="{{ link.url }}" aria-current="page"><strong>{{ link.page }}</strong></a></li>
+        {% else %}
+        <li><a href="{{ link.url }}">{{ link.page }}</a></li>
+        {% end %}
+      {% end %}
+    {% end %}
+    {% if pagination.has_next %}
+    <li><a href="{{ pagination.next }}" rel="next" aria-label="Next page">&rarr;</a></li>
+    {% end %}
+  </ul>
+</nav>
+{% end %}

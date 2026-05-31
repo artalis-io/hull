@@ -1,12 +1,12 @@
-<li id="todo-{{ id }}">
+<li id="todo-{{ t.id }}">
   <input type="checkbox"
-         {% if done %}checked{% end %}
-         hx-post="/todos/{{ id }}/toggle"
-         hx-target="#todo-{{ id }}"
+         {% if t.done %}checked{% end %}
+         hx-post="/todos/{{ t.id }}/toggle"
+         hx-target="#todo-{{ t.id }}"
          hx-swap="outerHTML">
-  <span {% if done %}style="text-decoration: line-through"{% end %}>{{ title }}</span>
-  <button hx-delete="/todos/{{ id }}"
-          hx-target="#todo-{{ id }}"
+  <span {% if t.done %}style="text-decoration: line-through"{% end %}>{{ t.title }}</span>
+  <button hx-delete="/todos/{{ t.id }}"
+          hx-target="#todo-{{ t.id }}"
           hx-swap="delete"
           hx-confirm="Delete this todo?">×</button>
 </li>

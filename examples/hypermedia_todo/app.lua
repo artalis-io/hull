@@ -1,22 +1,28 @@
 -- HTMX + Pico hypermedia app scaffold.
 -- Returns full pages for plain navigation; returns fragments when
 -- HX-Request is set. CSRF + per-request CSP nonce wired in by default.
-local htmx     = require("hull.web.htmx")
-local flash    = require("hull.web.flash")
-local csp      = require("hull.web.middleware.csp")
-local csrf     = require("hull.web.middleware.csrf")
-local session  = require("hull.web.middleware.session")
-local cookie   = require("hull.web.cookie")
-local template = require("hull.template")
-local form     = require("hull.web.form")
-local log      = require("hull.log")
-local db       = require("hull.db")
+local htmx       = require("hull.web.htmx")
+local flash      = require("hull.web.flash")
+local pagination = require("hull.web.pagination")
+local csp        = require("hull.web.middleware.csp")
+local csrf       = require("hull.web.middleware.csrf")
+local session    = require("hull.web.middleware.session")
+local cookie     = require("hull.web.cookie")
+local template   = require("hull.template")
+local form       = require("hull.web.form")
+local log        = require("hull.log")
+local db         = require("hull.db")
+
+-- Small default so pagination is visible in the demo with only a
+-- handful of todos. Real apps would set this to 20-50.
+local PER_PAGE_DEFAULT = 3
 
 app.manifest({
     modules = {
         "hull/http-server@1",
         "hull/web/htmx@1",
         "hull/web/flash@1",
+        "hull/web/pagination@1",
         "hull/web/middleware/csp@1",
         "hull/web/middleware/csrf@1",
         "hull/web/middleware/session@1",
@@ -76,18 +82,34 @@ app.use("*", "/*", session_bootstrap)
 --   3. CSRF. Verifies on unsafe methods; injects token on safe.
 app.use_post("*", "/*", csrf.middleware({ secret = CSRF_SECRET }))
 
-local function todos_data()
-    return db.query("SELECT id, title, done FROM todos ORDER BY id DESC")
-end
-
 app.get("/", function(req, res)
     -- flash.consume drains any pending one-shot messages from the
     -- previous POST/redirect/GET cycle and clears them from session.
     local msgs = flash.consume(req)
+
+    -- pagination.from_query reads ?page=N&per_page=M; builds
+    -- SQL-ready offset+limit. Render produces a nav structure
+    -- with windowed links + ellipses for large page counts.
+    local p = pagination.from_query(req, {
+        default_per_page = PER_PAGE_DEFAULT,
+    })
+    local total = db.query("SELECT COUNT(*) AS n FROM todos")[1].n
+    local todos = db.query(
+        "SELECT id, title, done FROM todos ORDER BY id DESC "
+        .. "LIMIT ? OFFSET ?",
+        { p.limit, p.offset })
+    local nav = pagination.render(total, {
+        page     = p.page,
+        per_page = p.per_page,
+        default_per_page = PER_PAGE_DEFAULT,
+        base_url = "/",
+    })
+
     local data = {
         csp_nonce  = req.ctx.csp_nonce,
         csrf_token = req.ctx.csrf_token,
-        todos      = todos_data(),
+        todos      = todos,
+        pagination = nav,
         flash      = msgs,
         has_flash  = #msgs > 0,
     }
@@ -111,9 +133,12 @@ app.post("/todos", function(req, res)
         -- flash.trigger fires a client-side 'flash' event that any
         -- listener (e.g. a toast widget) can render. Independent of
         -- the OOB swap path; HTMX-only.
+        -- todo_row.html uses `{{ t.X }}` so the same partial works
+        -- both here (single render) and inside the GET / for-loop
+        -- (`{% for t in todos %}{% include %}{% end %}`).
         flash.trigger(res, "Added: " .. title, "success")
         res:html(template.render("partials/todo_row.html",
-            { id = id, title = title, done = false })
+            { t = { id = id, title = title, done = false } })
             .. template.render("partials/todo_form.html",
                 { csrf_token = req.ctx.csrf_token }))
     else
@@ -130,7 +155,7 @@ app.post("/todos/:id/toggle", function(req, res)
     local row = db.query("SELECT id, title, done FROM todos WHERE id = ?", { id })[1]
     if not row then res:status(404); return end
     if htmx.is(req) then
-        res:html(template.render("partials/todo_row.html", row))
+        res:html(template.render("partials/todo_row.html", { t = row }))
     else
         res:redirect("/")
     end

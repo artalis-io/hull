@@ -83,6 +83,39 @@ test("plain POST /todos sets session flash; next GET renders it", async () => {
             "flash is one-shot; second render must not include it");
 });
 
+test("GET / paginates with ?page=N (default per_page=3 in this demo)", async () => {
+    // Distinctive titles so substring matches don't false-positive.
+    const { db } = await import("hull:db");
+    db.exec("DELETE FROM todos");
+    for (let i = 1; i <= 7; i++) {
+        db.exec("INSERT INTO todos (title, done) VALUES (?, 0)",
+                ["pgN-" + i + "-end"]);
+    }
+    const cnt = db.query("SELECT COUNT(*) AS n FROM todos")[0].n;
+    test.eq(cnt, 7, "expected 7 todos after seed");
+
+    const page1 = await test.get("/", { middleware: true });
+    test.eq(page1.status, 200);
+    test.ok(page1.body.includes('class="pagination"'),
+            "page 1 should render pagination nav");
+    test.ok(page1.body.includes("pgN-7-end"),
+            "page 1 should contain newest todo");
+    test.ok(!page1.body.includes("pgN-1-end"),
+            "page 1 should NOT contain oldest todo");
+
+    const page2 = await test.get("/?page=2", { middleware: true });
+    test.eq(page2.status, 200);
+    test.ok(page2.body.includes("pgN-3-end"),
+            "page 2 should contain mid-range todo");
+    test.ok(!page2.body.includes("pgN-7-end"),
+            "page 2 should NOT contain page-1 todo");
+
+    const page3 = await test.get("/?page=3", { middleware: true });
+    test.eq(page3.status, 200);
+    test.ok(page3.body.includes("pgN-1-end"),
+            "page 3 should contain oldest todo");
+});
+
 test("POST /todos with empty title returns validation fragment", async () => {
     const home = await test.get("/", { middleware: true });
     const token = home.body.match(/name="_csrf" value="([^"]+)"/)?.[1];

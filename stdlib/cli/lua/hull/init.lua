@@ -162,22 +162,28 @@ templates.migration_init = [[-- Migration: 001_init
 templates.htmx_lua_app = [[-- HTMX + Pico hypermedia app scaffold.
 -- Returns full pages for plain navigation; returns fragments when
 -- HX-Request is set. CSRF + per-request CSP nonce wired in by default.
-local htmx     = require("hull.web.htmx")
-local flash    = require("hull.web.flash")
-local csp      = require("hull.web.middleware.csp")
-local csrf     = require("hull.web.middleware.csrf")
-local session  = require("hull.web.middleware.session")
-local cookie   = require("hull.web.cookie")
-local template = require("hull.template")
-local form     = require("hull.web.form")
-local log      = require("hull.log")
-local db       = require("hull.db")
+local htmx       = require("hull.web.htmx")
+local flash      = require("hull.web.flash")
+local pagination = require("hull.web.pagination")
+local csp        = require("hull.web.middleware.csp")
+local csrf       = require("hull.web.middleware.csrf")
+local session    = require("hull.web.middleware.session")
+local cookie     = require("hull.web.cookie")
+local template   = require("hull.template")
+local form       = require("hull.web.form")
+local log        = require("hull.log")
+local db         = require("hull.db")
+
+-- Small default so pagination is visible in the demo with only a
+-- handful of todos. Real apps would set this to 20-50.
+local PER_PAGE_DEFAULT = 3
 
 app.manifest({
     modules = {
         "hull/http-server@1",
         "hull/web/htmx@1",
         "hull/web/flash@1",
+        "hull/web/pagination@1",
         "hull/web/middleware/csp@1",
         "hull/web/middleware/csrf@1",
         "hull/web/middleware/session@1",
@@ -237,18 +243,34 @@ app.use("*", "/*", session_bootstrap)
 --   3. CSRF. Verifies on unsafe methods; injects token on safe.
 app.use_post("*", "/*", csrf.middleware({ secret = CSRF_SECRET }))
 
-local function todos_data()
-    return db.query("SELECT id, title, done FROM todos ORDER BY id DESC")
-end
-
 app.get("/", function(req, res)
     -- flash.consume drains any pending one-shot messages from the
     -- previous POST/redirect/GET cycle and clears them from session.
     local msgs = flash.consume(req)
+
+    -- pagination.from_query reads ?page=N&per_page=M; builds
+    -- SQL-ready offset+limit. render produces a nav structure
+    -- with windowed links + ellipses for large page counts.
+    local p = pagination.from_query(req, {
+        default_per_page = PER_PAGE_DEFAULT,
+    })
+    local total = db.query("SELECT COUNT(*) AS n FROM todos")[1].n
+    local todos = db.query(
+        "SELECT id, title, done FROM todos ORDER BY id DESC "
+        .. "LIMIT ? OFFSET ?",
+        { p.limit, p.offset })
+    local nav = pagination.render(total, {
+        page             = p.page,
+        per_page         = p.per_page,
+        default_per_page = PER_PAGE_DEFAULT,
+        base_url         = "/",
+    })
+
     local data = {
         csp_nonce  = req.ctx.csp_nonce,
         csrf_token = req.ctx.csrf_token,
-        todos      = todos_data(),
+        todos      = todos,
+        pagination = nav,
         flash      = msgs,
         has_flash  = #msgs > 0,
     }
@@ -271,9 +293,11 @@ app.post("/todos", function(req, res)
         -- HTMX: return the new row to insert + a fresh empty form.
         -- flash.trigger fires a client-side 'flash' event for any
         -- listener (toast widget, etc.). Independent of OOB swap.
+        -- todo_row.html uses `{{ t.X }}` so the same partial works
+        -- both here (single render) and inside the GET / for-loop.
         flash.trigger(res, "Added: " .. title, "success")
         res:html(template.render("partials/todo_row.html",
-            { id = id, title = title, done = false })
+            { t = { id = id, title = title, done = false } })
             .. template.render("partials/todo_form.html",
                 { csrf_token = req.ctx.csrf_token }))
     else
@@ -289,7 +313,7 @@ app.post("/todos/:id/toggle", function(req, res)
     local row = db.query("SELECT id, title, done FROM todos WHERE id = ?", { id })[1]
     if not row then res:status(404); return end
     if htmx.is(req) then
-        res:html(template.render("partials/todo_row.html", row))
+        res:html(template.render("partials/todo_row.html", { t = row }))
     else
         res:redirect("/")
     end
@@ -311,23 +335,29 @@ log.info("hypermedia app loaded")
 templates.htmx_js_app = [[// HTMX + Pico hypermedia app scaffold.
 // Returns full pages for plain navigation; returns fragments when
 // HX-Request is set. CSRF + per-request CSP nonce wired in by default.
-import { app }      from "hull:app";
-import { htmx }     from "hull:web:htmx";
-import { flash }    from "hull:web:flash";
-import { csp }      from "hull:web:middleware:csp";
-import { csrf }     from "hull:web:middleware:csrf";
-import { session }  from "hull:web:middleware:session";
-import { cookie }   from "hull:web:cookie";
-import { template } from "hull:template";
-import { form }     from "hull:web:form";
-import { log }      from "hull:log";
-import { db }       from "hull:db";
+import { app }        from "hull:app";
+import { htmx }       from "hull:web:htmx";
+import { flash }      from "hull:web:flash";
+import { pagination } from "hull:web:pagination";
+import { csp }        from "hull:web:middleware:csp";
+import { csrf }       from "hull:web:middleware:csrf";
+import { session }    from "hull:web:middleware:session";
+import { cookie }     from "hull:web:cookie";
+import { template }   from "hull:template";
+import { form }       from "hull:web:form";
+import { log }        from "hull:log";
+import { db }         from "hull:db";
+
+// Small default so pagination is visible in the demo with only a
+// handful of todos. Real apps would set this to 20-50.
+const PER_PAGE_DEFAULT = 3;
 
 app.manifest({
     modules: [
         "hull/http-server@1",
         "hull/web/htmx@1",
         "hull/web/flash@1",
+        "hull/web/pagination@1",
         "hull/web/middleware/csp@1",
         "hull/web/middleware/csrf@1",
         "hull/web/middleware/session@1",
@@ -387,10 +417,6 @@ app.usePost("*", "/*", csrf.middleware({
     cookieName: "hull_session",
 }));
 
-function todosData() {
-    return db.query("SELECT id, title, done FROM todos ORDER BY id DESC");
-}
-
 app.get("/", (req, res) => {
     // flash.consume drains any pending one-shot messages from the
     // previous POST/redirect/GET cycle and clears them from session.
@@ -399,10 +425,31 @@ app.get("/", (req, res) => {
     // the actual ctx keys (csp.js writes csp_nonce; csrf.js writes
     // csrf_token). Same template HTML works for both runtimes.
     const msgs = flash.consume(req);
+
+    // pagination.fromQuery reads ?page=N&per_page=M; builds
+    // SQL-ready offset+limit. render produces a nav structure
+    // with windowed links + ellipses for large page counts.
+    const p = pagination.fromQuery(req, {
+        defaultPerPage: PER_PAGE_DEFAULT,
+    });
+    const total = db.query("SELECT COUNT(*) AS n FROM todos")[0].n;
+    const todos = db.query(
+        "SELECT id, title, done FROM todos ORDER BY id DESC "
+        + "LIMIT ? OFFSET ?",
+        [p.limit, p.offset]
+    );
+    const nav = pagination.render(total, {
+        page:           p.page,
+        per_page:       p.per_page,
+        defaultPerPage: PER_PAGE_DEFAULT,
+        baseUrl:        "/",
+    });
+
     res.html(template.render("pages/home.html", {
         csp_nonce:  req.ctx.csp_nonce,
         csrf_token: req.ctx.csrf_token,
-        todos:      todosData(),
+        todos:      todos,
+        pagination: nav,
         flash:      msgs,
         has_flash:  msgs.length > 0,
     }));
@@ -421,9 +468,11 @@ app.post("/todos", (req, res) => {
     if (htmx.is(req)) {
         // flash.trigger fires a client-side 'flash' event for any
         // listener (toast widget, etc.). Independent of OOB swap.
+        // todo_row.html uses `{{ t.X }}` so the same partial works
+        // both here (single render) and inside the GET / for-loop.
         flash.trigger(res, "Added: " + title, "success");
         res.html(
-            template.render("partials/todo_row.html",  { id, title, done: false })
+            template.render("partials/todo_row.html",  { t: { id, title, done: false } })
             + template.render("partials/todo_form.html", { csrf_token: req.ctx.csrf_token })
         );
     } else {
@@ -439,7 +488,7 @@ app.post("/todos/:id/toggle", (req, res) => {
     const row = db.query("SELECT id, title, done FROM todos WHERE id = ?", [id])[0];
     if (!row) { res.status(404); return; }
     if (htmx.is(req)) {
-        res.html(template.render("partials/todo_row.html", row));
+        res.html(template.render("partials/todo_row.html", { t: row }));
     } else {
         res.redirect("/");
     }
@@ -502,6 +551,8 @@ templates.htmx_page_home = [[{% extends "base.html" %}
   {% include "partials/todo_row.html" %}
 {% end %}
 </ul>
+
+{% include "partials/_pagination.html" %}
 {% end %}
 ]]
 
@@ -515,18 +566,43 @@ templates.htmx_partial_todo_form = [[<form id="new-todo"
 </form>
 ]]
 
-templates.htmx_partial_todo_row = [[<li id="todo-{{ id }}">
+templates.htmx_partial_todo_row = [[<li id="todo-{{ t.id }}">
   <input type="checkbox"
-         {% if done %}checked{% end %}
-         hx-post="/todos/{{ id }}/toggle"
-         hx-target="#todo-{{ id }}"
+         {% if t.done %}checked{% end %}
+         hx-post="/todos/{{ t.id }}/toggle"
+         hx-target="#todo-{{ t.id }}"
          hx-swap="outerHTML">
-  <span {% if done %}style="text-decoration: line-through"{% end %}>{{ title }}</span>
-  <button hx-delete="/todos/{{ id }}"
-          hx-target="#todo-{{ id }}"
+  <span {% if t.done %}style="text-decoration: line-through"{% end %}>{{ t.title }}</span>
+  <button hx-delete="/todos/{{ t.id }}"
+          hx-target="#todo-{{ t.id }}"
           hx-swap="delete"
           hx-confirm="Delete this todo?">×</button>
 </li>
+]]
+
+templates.htmx_partial_pagination = [[{% if pagination.show %}
+<nav class="pagination" aria-label="Pagination">
+  <ul>
+    {% if pagination.has_prev %}
+    <li><a href="{{ pagination.prev }}" rel="prev" aria-label="Previous page">&larr;</a></li>
+    {% end %}
+    {% for link in pagination.links %}
+      {% if link.ellipsis %}
+      <li aria-hidden="true">&hellip;</li>
+      {% else %}
+        {% if link.active %}
+        <li><a href="{{ link.url }}" aria-current="page"><strong>{{ link.page }}</strong></a></li>
+        {% else %}
+        <li><a href="{{ link.url }}">{{ link.page }}</a></li>
+        {% end %}
+      {% end %}
+    {% end %}
+    {% if pagination.has_next %}
+    <li><a href="{{ pagination.next }}" rel="next" aria-label="Next page">&rarr;</a></li>
+    {% end %}
+  </ul>
+</nav>
+{% end %}
 ]]
 
 templates.htmx_app_css = [[/* hypermedia_todo custom styles. Layer on top of Pico's classless base. */
@@ -637,6 +713,27 @@ test("plain POST /todos sets session flash; next GET renders it", function()
             "next render should include flash message")
 end)
 
+test("GET / paginates with ?page=N", function()
+    -- Distinctive titles so substring matches don't false-positive.
+    local db = require("hull.db")
+    db.exec("DELETE FROM todos")
+    for i = 1, 7 do
+        db.exec("INSERT INTO todos (title, done) VALUES (?, 0)",
+                { "pgN-" .. i .. "-end" })
+    end
+    local page1 = test.get("/", { middleware = true })
+    test.eq(page1.status, 200)
+    test.ok(string.find(page1.body, 'class="pagination"'),
+            "page 1 should render pagination nav")
+    test.ok(string.find(page1.body, "pgN-7-end", 1, true),
+            "page 1 should contain newest todo")
+    test.ok(not string.find(page1.body, "pgN-1-end", 1, true),
+            "page 1 should NOT contain oldest todo")
+    local page3 = test.get("/?page=3", { middleware = true })
+    test.ok(string.find(page3.body, "pgN-1-end", 1, true),
+            "page 3 should contain oldest todo")
+end)
+
 test("POST /todos with empty title returns validation fragment", function()
     local home = test.get("/", { middleware = true })
     local token = string.match(home.body, 'name="_csrf" value="([^"]+)"')
@@ -728,6 +825,26 @@ test("plain POST /todos sets session flash; next GET renders it", async () => {
     });
     test.ok(nextGet.body.includes("Added: plain post"),
             "next render should include flash message");
+});
+
+test("GET / paginates with ?page=N", async () => {
+    const { db } = await import("hull:db");
+    db.exec("DELETE FROM todos");
+    for (let i = 1; i <= 7; i++) {
+        db.exec("INSERT INTO todos (title, done) VALUES (?, 0)",
+                ["pgN-" + i + "-end"]);
+    }
+    const page1 = await test.get("/", { middleware: true });
+    test.eq(page1.status, 200);
+    test.ok(page1.body.includes('class="pagination"'),
+            "page 1 should render pagination nav");
+    test.ok(page1.body.includes("pgN-7-end"),
+            "page 1 should contain newest todo");
+    test.ok(!page1.body.includes("pgN-1-end"),
+            "page 1 should NOT contain oldest todo");
+    const page3 = await test.get("/?page=3", { middleware: true });
+    test.ok(page3.body.includes("pgN-1-end"),
+            "page 3 should contain oldest todo");
 });
 
 test("POST /todos with empty title returns validation fragment", async () => {
@@ -1035,6 +1152,8 @@ local function scaffold_htmx(dir, runtime, track_file, track_dir)
                templates.htmx_partial_todo_row)
     track_file(dir .. "/templates/partials/_flash.html",
                templates.htmx_partial_flash)
+    track_file(dir .. "/templates/partials/_pagination.html",
+               templates.htmx_partial_pagination)
 
     -- Static assets (custom CSS lands directly; vendor files come
     -- via `make fetch-vendor` because Hull doesn't carry curl in its
