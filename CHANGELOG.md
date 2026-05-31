@@ -8,6 +8,34 @@ release-artifact layout).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-05-31
+
+Hypermedia profile + web stdlib namespace reorganization. `hull init --profile htmx` now produces a complete HTMX + Pico app with CSP nonce, CSRF, session, flash, pagination, search, inline edit, loading indicator, form re-population, and idempotency wiring out of the box. Strictly-web stdlib modules moved under `hull/web/*` to parallel the existing `hull/middleware/*` precedent (full release notes: the GitHub release page or the GitHub release).
+
+### Added
+
+- **HTMX hypermedia profile.** `hull init --profile htmx` scaffolds a complete working app: HTMX 2.0.9 + Pico v2.1.1 classless (vendored, SHA-pinned), per-request CSP nonce, CSRF, session, flash messages, pagination, search-with-debounce, inline edit, loading indicator, form re-population, idempotency. 8/8 scaffold tests pass.
+- **`hull/web/flash@1`** (Lua + JS). One-shot user notifications. Session-backed `flash.set` / `flash.consume` for POST/redirect/GET; `flash.trigger` for HTMX `HX-Trigger: {flash:...}` events. Hard dep on `hull/web/middleware/session@1`.
+- **`hull/web/pagination@1`** (Lua + JS). Offset-based pagination. `pagination.from_query(req)` parses `?page=N&per_page=M`; `pagination.render(total, opts)` produces a windowed-links nav structure with ellipses for big page counts. Snake_case keys in both runtimes so the same template works for both.
+- **`idempotency.respond_html(req, res, status, html, headers?)`** parallels existing `respond()` for HTML fragments. Replay path now reads content-type from cached headers blob instead of hardcoding `application/json` — HTMX double-clicks against the cached-response path now actually work for HTML.
+- **`docs/htmx.md`** (~700 lines). Long-form pattern guide: architecture, CSP, CSRF, fragment-vs-page rendering, flash, delete confirmation, search + debounce, inline edit, loading indicator, form re-population, idempotency, empty states, testing.
+- **`stdlib/context/htmx.md`** — agent-discoverable task-context doc; `hull agent context --task=htmx` returns it.
+- **Resolver fix-it hint for renamed modules.** Apps declaring old names get an explicit `module 'hull/X@1' was renamed to 'hull/web/X@1' in v0.2.0` message before the fuzzy-suggest path. `hull_module_registry_suggest` also strips `web/` from candidates so typos of old short names still resolve to the new canonical.
+- **`hull modules available`** now groups output into four sections (Intrinsic / Core / Web / Web middleware). `--json` output unchanged.
+- **README + completions** surface `hull sbom`, `hull verify-self`, `hull verify-release`, `hull sign-release`, `hull modules` (with subcommands) — these existed but were missing from the README table and the bash/zsh/fish completion files.
+
+### Changed (BREAKING)
+
+- **20 strictly-web stdlib modules moved under `hull/web/*`.** Full move table in the GitHub release page. Modules that stay flat: `hull/jwt`, `hull/http-server`, `hull/http-client`, `hull/template`, `hull/email`, `hull/smtp`, plus all general utilities. Migration: see the perl one-liner in the release notes — idempotent, run from repo root. Old names emit a fix-it hint at app load.
+
+### Fixed
+
+- **Pre-existing template scoping bug in `examples/hypermedia_todo`** caught by the new pagination tests: `partials/todo_row.html` used `{{ id }}` as a bare name, which resolved to outer-scope nil when included inside `{% for t in todos %}{% include %}{% end %}`. The fragment-render path worked because POST handlers passed `{id, title, done}` directly. Now uses `{{ t.X }}` consistently; both contexts work.
+- **Stale module-name references** in `src/hull/commands/doctor.c` and `stdlib/context/quickstart-cli.md` — `hull/http`, `hull/ws`, `hull/server` (deprecated names that pre-dated v0.2.0) cleaned up alongside the rename.
+- **HTMX dev-mode session cookies** across `examples/{auth, todo, hypermedia_todo}`: `secure = true` was browser-dropping the cookie on plain-HTTP `hull dev`, breaking the CSRF binding. Now explicit `secure = false` with a doc comment about flipping for HTTPS.
+- **CSRF placeholder warning** at app startup if scaffold-generated apps still have the literal `"CHANGE-ME-IN-PRODUCTION"` secret.
+- **JS sessionBootstrap dead-code removal** — `req.headers["cookie"] = ...` patch was load-bearing before v0.1.8's `csrf.sessionKey` and became dead afterwards.
+
 ## [0.1.6] — 2026-05-29
 
 Trust chain end-to-end verifiable, three independent ways. Closes the cheap and medium-cheap items from `roadmap_next.md` §0.3 (trust-chain hardening). After this release, anyone can prove a hull binary came from a specific commit, was built by a specific workflow, hasn't been tampered with, and that its SBOM was signed by the same release process. No single-party trust required.
