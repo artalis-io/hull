@@ -7,6 +7,13 @@
 
 {% include "partials/todo_form.html" %}
 
+<input type="search" name="q"
+       placeholder="Search todos…"
+       autocomplete="off"
+       hx-get="/search"
+       hx-trigger="keyup changed delay:300ms, search"
+       hx-target="#todos">
+
 <ul id="todos">
 {% for t in todos %}
   {% include "partials/todo_row.html" %}

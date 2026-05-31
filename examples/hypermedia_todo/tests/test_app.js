@@ -116,6 +116,35 @@ test("GET / paginates with ?page=N (default per_page=3 in this demo)", async () 
             "page 3 should contain oldest todo");
 });
 
+test("GET /search filters by title (HTMX fragment)", async () => {
+    const { db } = await import("hull:db");
+    db.exec("DELETE FROM todos");
+    db.exec("INSERT INTO todos (title, done) VALUES ('buy milk', 0)");
+    db.exec("INSERT INTO todos (title, done) VALUES ('buy eggs', 0)");
+    db.exec("INSERT INTO todos (title, done) VALUES ('write report', 0)");
+
+    const hit = await test.get("/search?q=milk",
+        { middleware: true, headers: { "hx-request": "true" } });
+    test.eq(hit.status, 200);
+    test.ok(hit.body.includes("buy milk"),
+            "matching todo should be in result");
+    test.ok(!hit.body.includes("report"),
+            "non-matching todo should NOT be in result");
+
+    const miss = await test.get("/search?q=zzzzz",
+        { middleware: true, headers: { "hx-request": "true" } });
+    test.eq(miss.status, 200);
+    test.ok(miss.body.includes("No matches"),
+            "empty result should render the empty-state row");
+
+    const all = await test.get("/search?q=",
+        { middleware: true, headers: { "hx-request": "true" } });
+    test.eq(all.status, 200);
+    test.ok(all.body.includes("buy milk"));
+    test.ok(all.body.includes("buy eggs"));
+    test.ok(all.body.includes("write report"));
+});
+
 test("POST /todos with empty title returns validation fragment", async () => {
     const home = await test.get("/", { middleware: true });
     const token = home.body.match(/name="_csrf" value="([^"]+)"/)?.[1];

@@ -126,6 +126,36 @@ test("GET / paginates with ?page=N (default per_page=3 in this demo)", function(
             "page 3 should contain oldest todo")
 end)
 
+test("GET /search filters by title (HTMX fragment)", function()
+    local db = require("hull.db")
+    db.exec("DELETE FROM todos")
+    db.exec("INSERT INTO todos (title, done) VALUES ('buy milk', 0)")
+    db.exec("INSERT INTO todos (title, done) VALUES ('buy eggs', 0)")
+    db.exec("INSERT INTO todos (title, done) VALUES ('write report', 0)")
+
+    local hit = test.get("/search?q=milk",
+        { middleware = true, headers = { ["hx-request"] = "true" } })
+    test.eq(hit.status, 200)
+    test.ok(string.find(hit.body, "buy milk", 1, true),
+            "matching todo should be in result")
+    test.ok(not string.find(hit.body, "report", 1, true),
+            "non-matching todo should NOT be in result")
+
+    local miss = test.get("/search?q=zzzzz",
+        { middleware = true, headers = { ["hx-request"] = "true" } })
+    test.eq(miss.status, 200)
+    test.ok(string.find(miss.body, "No matches", 1, true),
+            "empty result should render the empty-state row")
+
+    -- Empty query returns all (up to 20).
+    local all = test.get("/search?q=",
+        { middleware = true, headers = { ["hx-request"] = "true" } })
+    test.eq(all.status, 200)
+    test.ok(string.find(all.body, "buy milk", 1, true))
+    test.ok(string.find(all.body, "buy eggs", 1, true))
+    test.ok(string.find(all.body, "write report", 1, true))
+end)
+
 test("POST /todos with empty title returns validation fragment", function()
     local home = test.get("/", { middleware = true })
     local token = string.match(home.body, 'name="_csrf" value="([^"]+)"')

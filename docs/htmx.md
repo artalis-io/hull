@@ -236,6 +236,90 @@ res:html(template.render("partials/flash.html",
 
 ---
 
+## Search + debounce
+
+Type-as-you-search is one of HTMX's signature wins. Two attributes do
+all the work:
+
+```html
+<input type="search" name="q"
+       placeholder="Search todos…"
+       autocomplete="off"
+       hx-get="/search"
+       hx-trigger="keyup changed delay:300ms, search"
+       hx-target="#todos">
+```
+
+What each piece does:
+
+- `hx-trigger="keyup changed delay:300ms, search"` — HTMX waits 300ms
+  after the LAST keystroke before firing. The `changed` qualifier
+  means the request only goes out if the value actually changed
+  (typing then deleting the same chars is a no-op). The second trigger
+  `search` catches the browser's native input-clear button.
+- `hx-target="#todos"` — the response replaces the `<ul id="todos">`
+  inner content. Server returns just the `<li>` rows; no need to
+  re-render the wrapper.
+- `autocomplete="off"` — the browser's history dropdown is noise here.
+
+Server side: a tiny route that runs `LIKE` and returns the row
+fragments. Handle the empty-result case explicitly so the user knows
+the query reached the server:
+
+```lua
+app.get("/search", function(req, res)
+    local q = ((req.query and req.query.q) or "")
+                :gsub("^%s+", ""):gsub("%s+$", "")
+    local rows = (q == "")
+        and db.query("SELECT id, title, done FROM todos "
+                  .. "ORDER BY id DESC LIMIT 20")
+        or  db.query("SELECT id, title, done FROM todos "
+                  .. "WHERE title LIKE ? ORDER BY id DESC LIMIT 20",
+                     { "%" .. q .. "%" })
+    if htmx.is(req) then
+        if #rows == 0 then
+            res:html('<li class="muted">No matches.</li>')
+        else
+            local parts = {}
+            for _, row in ipairs(rows) do
+                parts[#parts + 1] = template.render(
+                    "partials/todo_row.html", { t = row })
+            end
+            res:html(table.concat(parts))
+        end
+    else
+        res:redirect("/")  -- plain GET fallback
+    end
+end)
+```
+
+JS shape is the same; see `examples/hypermedia_todo/app.js`.
+
+### Rate-limit the search endpoint
+
+Debounce limits CLIENT-side traffic. To bound SERVER-side cost (e.g.
+keep typing-bots from blowing up a full-text search) add the existing
+ratelimit middleware scoped to `/search`:
+
+```lua
+local ratelimit = require("hull.web.middleware.ratelimit")
+
+-- Up to 30 search queries per minute per session. Reject early.
+app.use("GET", "/search", ratelimit.middleware({
+    limit  = 30,
+    window = 60,
+    key    = function(req) return req.ctx.session_id or req.headers["x-forwarded-for"] end,
+}))
+```
+
+The default 429 JSON response works fine for fetch-based clients; for
+HTMX you can pair this with §1.5.d-3's planned `htmx_response` option
+on the middleware (not yet shipped — until then, returning JSON is
+acceptable because HTMX 429s land in `htmx:responseError` for app
+handling).
+
+---
+
 ## Empty states
 
 Hull's template engine treats empty Lua tables as truthy. To branch on emptiness:

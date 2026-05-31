@@ -152,6 +152,40 @@ app.post("/todos", (req, res) => {
     }
 });
 
+// Search with debounced HTMX trigger. The input on home.html fires
+// `hx-get="/search"` on `keyup changed delay:300ms` so a user can
+// type freely; only the final settled value hits the server. The
+// response is just the <li> rows; hx-target="#todos" replaces the
+// inner HTML of the list. Pagination is intentionally not part of
+// the search result — searches always show up to 20 matches.
+app.get("/search", (req, res) => {
+    const q = (((req.query && req.query.q) || "")).trim();
+    let rows;
+    if (q === "") {
+        rows = db.query(
+            "SELECT id, title, done FROM todos "
+            + "ORDER BY id DESC LIMIT 20"
+        );
+    } else {
+        rows = db.query(
+            "SELECT id, title, done FROM todos "
+            + "WHERE title LIKE ? ORDER BY id DESC LIMIT 20",
+            ["%" + q + "%"]
+        );
+    }
+    if (htmx.is(req)) {
+        if (rows.length === 0) {
+            res.html('<li class="muted">No matches.</li>');
+        } else {
+            const parts = rows.map(row =>
+                template.render("partials/todo_row.html", { t: row }));
+            res.html(parts.join(""));
+        }
+    } else {
+        res.redirect("/");
+    }
+});
+
 app.post("/todos/:id/toggle", (req, res) => {
     const id = parseInt(req.params.id, 10);
     db.exec("UPDATE todos SET done = NOT done WHERE id = ?", [id]);

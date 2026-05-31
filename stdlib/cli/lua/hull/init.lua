@@ -307,6 +307,39 @@ app.post("/todos", function(req, res)
     end
 end)
 
+-- Search with debounced HTMX trigger. The input on home.html fires
+-- `hx-get="/search"` on `keyup changed delay:300ms` so a user can
+-- type freely; only the final settled value hits the server.
+app.get("/search", function(req, res)
+    local q = ((req.query and req.query.q) or "")
+                :gsub("^%s+", ""):gsub("%s+$", "")
+    local rows
+    if q == "" then
+        rows = db.query(
+            "SELECT id, title, done FROM todos "
+            .. "ORDER BY id DESC LIMIT 20")
+    else
+        rows = db.query(
+            "SELECT id, title, done FROM todos "
+            .. "WHERE title LIKE ? ORDER BY id DESC LIMIT 20",
+            { "%" .. q .. "%" })
+    end
+    if htmx.is(req) then
+        local parts = {}
+        for _, row in ipairs(rows) do
+            parts[#parts + 1] = template.render(
+                "partials/todo_row.html", { t = row })
+        end
+        if #parts == 0 then
+            res:html('<li class="muted">No matches.</li>')
+        else
+            res:html(table.concat(parts))
+        end
+    else
+        res:redirect("/")
+    end
+end)
+
 app.post("/todos/:id/toggle", function(req, res)
     local id = tonumber(req.params.id)
     db.exec("UPDATE todos SET done = NOT done WHERE id = ?", { id })
@@ -482,6 +515,37 @@ app.post("/todos", (req, res) => {
     }
 });
 
+// Search with debounced HTMX trigger. The input on home.html fires
+// `hx-get="/search"` on `keyup changed delay:300ms` so a user can
+// type freely; only the final settled value hits the server.
+app.get("/search", (req, res) => {
+    const q = (((req.query && req.query.q) || "")).trim();
+    let rows;
+    if (q === "") {
+        rows = db.query(
+            "SELECT id, title, done FROM todos "
+            + "ORDER BY id DESC LIMIT 20"
+        );
+    } else {
+        rows = db.query(
+            "SELECT id, title, done FROM todos "
+            + "WHERE title LIKE ? ORDER BY id DESC LIMIT 20",
+            ["%" + q + "%"]
+        );
+    }
+    if (htmx.is(req)) {
+        if (rows.length === 0) {
+            res.html('<li class="muted">No matches.</li>');
+        } else {
+            const parts = rows.map(row =>
+                template.render("partials/todo_row.html", { t: row }));
+            res.html(parts.join(""));
+        }
+    } else {
+        res.redirect("/");
+    }
+});
+
 app.post("/todos/:id/toggle", (req, res) => {
     const id = parseInt(req.params.id, 10);
     db.exec("UPDATE todos SET done = NOT done WHERE id = ?", [id]);
@@ -545,6 +609,13 @@ templates.htmx_page_home = [[{% extends "base.html" %}
 <h1>Todos</h1>
 
 {% include "partials/todo_form.html" %}
+
+<input type="search" name="q"
+       placeholder="Search todos…"
+       autocomplete="off"
+       hx-get="/search"
+       hx-trigger="keyup changed delay:300ms, search"
+       hx-target="#todos">
 
 <ul id="todos">
 {% for t in todos %}
@@ -734,6 +805,23 @@ test("GET / paginates with ?page=N", function()
             "page 3 should contain oldest todo")
 end)
 
+test("GET /search filters by title (HTMX fragment)", function()
+    local db = require("hull.db")
+    db.exec("DELETE FROM todos")
+    db.exec("INSERT INTO todos (title, done) VALUES ('buy milk', 0)")
+    db.exec("INSERT INTO todos (title, done) VALUES ('write report', 0)")
+
+    local hit = test.get("/search?q=milk",
+        { middleware = true, headers = { ["hx-request"] = "true" } })
+    test.eq(hit.status, 200)
+    test.ok(string.find(hit.body, "buy milk", 1, true))
+    test.ok(not string.find(hit.body, "report", 1, true))
+
+    local miss = test.get("/search?q=zzzzz",
+        { middleware = true, headers = { ["hx-request"] = "true" } })
+    test.ok(string.find(miss.body, "No matches", 1, true))
+end)
+
 test("POST /todos with empty title returns validation fragment", function()
     local home = test.get("/", { middleware = true })
     local token = string.match(home.body, 'name="_csrf" value="([^"]+)"')
@@ -845,6 +933,23 @@ test("GET / paginates with ?page=N", async () => {
     const page3 = await test.get("/?page=3", { middleware: true });
     test.ok(page3.body.includes("pgN-1-end"),
             "page 3 should contain oldest todo");
+});
+
+test("GET /search filters by title (HTMX fragment)", async () => {
+    const { db } = await import("hull:db");
+    db.exec("DELETE FROM todos");
+    db.exec("INSERT INTO todos (title, done) VALUES ('buy milk', 0)");
+    db.exec("INSERT INTO todos (title, done) VALUES ('write report', 0)");
+
+    const hit = await test.get("/search?q=milk",
+        { middleware: true, headers: { "hx-request": "true" } });
+    test.eq(hit.status, 200);
+    test.ok(hit.body.includes("buy milk"));
+    test.ok(!hit.body.includes("report"));
+
+    const miss = await test.get("/search?q=zzzzz",
+        { middleware: true, headers: { "hx-request": "true" } });
+    test.ok(miss.body.includes("No matches"));
 });
 
 test("POST /todos with empty title returns validation fragment", async () => {

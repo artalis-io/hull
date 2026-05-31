@@ -149,6 +149,42 @@ app.post("/todos", function(req, res)
     end
 end)
 
+-- Search with debounced HTMX trigger. The input on home.html fires
+-- `hx-get="/search"` on `keyup changed delay:300ms` so a user can
+-- type freely; only the final settled value hits the server. The
+-- response is just the `<li>` rows; hx-target="#todos" replaces
+-- the inner HTML of the list. Pagination is intentionally not part
+-- of the search result — searches always show up to 20 matches.
+app.get("/search", function(req, res)
+    local q = ((req.query and req.query.q) or "")
+                :gsub("^%s+", ""):gsub("%s+$", "")
+    local rows
+    if q == "" then
+        rows = db.query(
+            "SELECT id, title, done FROM todos "
+            .. "ORDER BY id DESC LIMIT 20")
+    else
+        rows = db.query(
+            "SELECT id, title, done FROM todos "
+            .. "WHERE title LIKE ? ORDER BY id DESC LIMIT 20",
+            { "%" .. q .. "%" })
+    end
+    if htmx.is(req) then
+        local parts = {}
+        for _, row in ipairs(rows) do
+            parts[#parts + 1] = template.render(
+                "partials/todo_row.html", { t = row })
+        end
+        if #parts == 0 then
+            res:html('<li class="muted">No matches.</li>')
+        else
+            res:html(table.concat(parts))
+        end
+    else
+        res:redirect("/")
+    end
+end)
+
 app.post("/todos/:id/toggle", function(req, res)
     local id = tonumber(req.params.id)
     db.exec("UPDATE todos SET done = NOT done WHERE id = ?", { id })
