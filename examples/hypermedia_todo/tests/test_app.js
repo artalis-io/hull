@@ -228,7 +228,7 @@ test("inline edit: PATCH with empty title re-renders edit form with error", asyn
     test.eq(stored, "keep me");
 });
 
-test("POST /todos with empty title returns validation fragment", async () => {
+test("POST /todos with empty title re-renders form with error", async () => {
     const home = await test.get("/", { middleware: true });
     const token = home.body.match(/name="_csrf" value="([^"]+)"/)?.[1];
     const res = await test.post("/todos", {
@@ -245,4 +245,29 @@ test("POST /todos with empty title returns validation fragment", async () => {
     test.ok(res.body.includes("cannot be empty"), "should show validation error");
     test.eq(res.headers["hx-retarget"], "#new-todo",
             "should retarget to the form, not the list");
+    test.ok(res.body.includes('name="title"'),
+            "should re-render the form with the title input");
+    test.ok(res.body.includes('aria-invalid="true"'),
+            "field should be marked aria-invalid");
+});
+
+test("POST /todos with too-long title preserves submitted value in re-render", async () => {
+    const home = await test.get("/", { middleware: true });
+    const token = home.body.match(/name="_csrf" value="([^"]+)"/)?.[1];
+    const longTitle = "a".repeat(201);
+    const res = await test.post("/todos", {
+        middleware: true,
+        body: "title=" + longTitle + "&_csrf=" + token,
+        headers: {
+            "hx-request": "true",
+            "content-type": "application/x-www-form-urlencoded",
+            "cookie": home.headers["set-cookie"] || "",
+            "x-csrf-token": token,
+        },
+    });
+    test.eq(res.status, 200);
+    test.ok(res.body.includes('value="' + longTitle + '"'),
+            "submitted (too-long) value should be pre-filled in the input");
+    test.ok(res.body.includes('<small role="alert"'),
+            "should show a per-field error message");
 });

@@ -531,6 +531,117 @@ button-state changes. Pick whichever fits the UX better.
 
 ---
 
+## Form re-population on validation error
+
+The canonical HTMX form pattern: submit → server validates → server
+returns the same form fragment with the user's input pre-filled and
+per-field error messages inline. The user fixes the error without
+losing what they typed.
+
+### The template-driven shape
+
+Form template uses `{{ values.X }}` for value preservation and
+`{% if errors.X %}<small role="alert">{{ errors.X }}</small>{% end %}`
+for inline errors:
+
+```html
+<form id="new-todo" hx-post="/todos" hx-target="#todos" hx-swap="afterbegin">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <input type="text" name="title" placeholder="New todo"
+         value="{{ values.title }}"
+         aria-invalid="{% if errors.title %}true{% else %}false{% end %}"
+         required autofocus>
+  {% if errors.title %}
+  <small role="alert" id="new-todo-error">{{ errors.title }}</small>
+  {% end %}
+  <button type="submit">Add</button>
+</form>
+```
+
+Handler uses `hull.validate.check` (one declarative call) and on
+failure re-renders the same partial with `values` + `errors` in
+the data context:
+
+```lua
+local validate = require("hull.validate")
+
+app.post("/todos", function(req, res)
+    local fields = form.parse(req.body or "")
+    local ok, errors = validate.check(fields, {
+        title = {
+            required = true, trim = true, min = 1, max = 200,
+            message = "Title cannot be empty.",
+        },
+    })
+    if not ok then
+        htmx.retarget(res, "#new-todo")
+        htmx.reswap(res, "outerHTML")
+        res:html(template.render("partials/todo_form.html", {
+            csrf_token = req.ctx.csrf_token,
+            values     = fields,
+            errors     = errors,
+        }))
+        return
+    end
+    -- success: fields.title is already trimmed by validate
+    db.exec("INSERT INTO todos (title, done) VALUES (?, 0)", { fields.title })
+    ...
+end)
+```
+
+`trim = true` on the rule strips whitespace into the SAME `fields`
+table in-place, so the post-validate `fields.title` is the cleaned
+value — no separate variable needed.
+
+`htmx.retarget(res, "#new-todo") + htmx.reswap(res, "outerHTML")`
+overrides the form's own `hx-target="#todos"` so the validation
+response replaces the form element itself, not the list.
+
+### Why not just check `if fields.title == ""`?
+
+Could you. But `hull.validate` already handles trim, length bounds,
+type coercion, regex, allowlist, email, custom function — all
+declaratively. Mixing one schema for one field with hand-rolled
+checks for another gets messy fast. Use the validator for everything
+and the error block in the template handles each case uniformly.
+
+### Multi-field forms: the `partials/_form_field.html` partial
+
+For forms with more than 1-2 fields, repeating the
+`value="{{ values.X }}"` + `aria-invalid` + `<small role="alert">`
+block per field gets noisy. The scaffold ships a
+`partials/_form_field.html` that bundles all three. Hull templates
+can't pass per-call args to `{% include %}`, so use it inside a
+for-loop where the loop variable provides each iteration's `field`
+context:
+
+```lua
+local fields_spec = {
+    { name = "email", label = "Email", type = "email",
+      required = true, autofocus = true,
+      value = req_values.email, error = errors and errors.email },
+    { name = "password", label = "Password", type = "password",
+      required = true,
+      value = req_values.password, error = errors and errors.password },
+}
+res:html(template.render("pages/signup.html", { fields = fields_spec, ... }))
+```
+
+```html
+<form hx-post="/signup" hx-target="#signup-form" hx-swap="outerHTML">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  {% for field in fields %}
+    {% include "partials/_form_field.html" %}
+  {% end %}
+  <button type="submit">Sign up</button>
+</form>
+```
+
+For single-field forms (the todo demo), inline is simpler. For 3+
+fields, the for-loop + partial pattern saves a lot of HTML.
+
+---
+
 ## Empty states
 
 Hull's template engine treats empty Lua tables as truthy. To branch on emptiness:

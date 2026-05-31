@@ -4,6 +4,7 @@
 local htmx       = require("hull.web.htmx")
 local flash      = require("hull.web.flash")
 local pagination = require("hull.web.pagination")
+local validate   = require("hull.validate")
 local csp        = require("hull.web.middleware.csp")
 local csrf       = require("hull.web.middleware.csrf")
 local session    = require("hull.web.middleware.session")
@@ -23,6 +24,7 @@ app.manifest({
         "hull/web/htmx@1",
         "hull/web/flash@1",
         "hull/web/pagination@1",
+        "hull/validate@1",
         "hull/web/middleware/csp@1",
         "hull/web/middleware/csrf@1",
         "hull/web/middleware/session@1",
@@ -118,13 +120,32 @@ end)
 
 app.post("/todos", function(req, res)
     local fields = form.parse(req.body or "")
-    local title = (fields.title or ""):gsub("^%s+", ""):gsub("%s+$", "")
-    if title == "" then
-        -- Validation error fragment (replaces the input area).
+
+    -- Validate via hull.validate. `trim = true` strips whitespace
+    -- into the same `fields` table in-place, so a post-validate
+    -- `fields.title` is already the cleaned value.
+    local ok, errors = validate.check(fields, {
+        title = {
+            required = true, trim = true, min = 1, max = 200,
+            message = "Title cannot be empty.",
+        },
+    })
+    if not ok then
+        -- Re-render the form fragment with submitted values + per-field
+        -- error messages. hx-retarget so the response lands on the form
+        -- itself (the form's own hx-target is #todos, but the validation
+        -- response should replace #new-todo).
         htmx.retarget(res, "#new-todo")
-        res:html('<p id="new-todo" role="alert">Title cannot be empty.</p>')
+        htmx.reswap(res, "outerHTML")
+        res:html(template.render("partials/todo_form.html", {
+            csrf_token = req.ctx.csrf_token,
+            values     = fields,
+            errors     = errors,
+        }))
         return
     end
+
+    local title = fields.title  -- already trimmed by validate
     db.exec("INSERT INTO todos (title, done) VALUES (?, 0)", { title })
     local id = db.query("SELECT last_insert_rowid() AS id")[1].id
 

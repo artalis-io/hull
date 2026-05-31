@@ -3,6 +3,12 @@
       hx-target="#todos"
       hx-swap="afterbegin">
   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-  <input type="text" name="title" placeholder="New todo" required autofocus>
+  <input type="text" name="title" placeholder="New todo"
+         value="{{ values.title }}"
+         aria-invalid="{% if errors.title %}true{% else %}false{% end %}"
+         required autofocus>
+  {% if errors.title %}
+  <small role="alert" id="new-todo-error">{{ errors.title }}</small>
+  {% end %}
   <button type="submit">Add</button>
 </form>

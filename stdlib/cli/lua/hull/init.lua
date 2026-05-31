@@ -165,6 +165,7 @@ templates.htmx_lua_app = [[-- HTMX + Pico hypermedia app scaffold.
 local htmx       = require("hull.web.htmx")
 local flash      = require("hull.web.flash")
 local pagination = require("hull.web.pagination")
+local validate   = require("hull.validate")
 local csp        = require("hull.web.middleware.csp")
 local csrf       = require("hull.web.middleware.csrf")
 local session    = require("hull.web.middleware.session")
@@ -184,6 +185,7 @@ app.manifest({
         "hull/web/htmx@1",
         "hull/web/flash@1",
         "hull/web/pagination@1",
+        "hull/validate@1",
         "hull/web/middleware/csp@1",
         "hull/web/middleware/csrf@1",
         "hull/web/middleware/session@1",
@@ -279,13 +281,29 @@ end)
 
 app.post("/todos", function(req, res)
     local fields = form.parse(req.body or "")
-    local title = (fields.title or ""):gsub("^%s+", ""):gsub("%s+$", "")
-    if title == "" then
-        -- Validation error fragment (replaces the input area).
+
+    -- Validate via hull.validate. `trim = true` strips whitespace
+    -- into the same `fields` table in-place.
+    local ok, errors = validate.check(fields, {
+        title = {
+            required = true, trim = true, min = 1, max = 200,
+            message = "Title cannot be empty.",
+        },
+    })
+    if not ok then
+        -- Re-render the form fragment with submitted values + per-field
+        -- error messages, retargeted to replace #new-todo.
         htmx.retarget(res, "#new-todo")
-        res:html('<p id="new-todo" role="alert">Title cannot be empty.</p>')
+        htmx.reswap(res, "outerHTML")
+        res:html(template.render("partials/todo_form.html", {
+            csrf_token = req.ctx.csrf_token,
+            values     = fields,
+            errors     = errors,
+        }))
         return
     end
+
+    local title = fields.title  -- already trimmed by validate
     db.exec("INSERT INTO todos (title, done) VALUES (?, 0)", { title })
     local id = db.query("SELECT last_insert_rowid() AS id")[1].id
 
@@ -422,6 +440,7 @@ import { app }        from "hull:app";
 import { htmx }       from "hull:web:htmx";
 import { flash }      from "hull:web:flash";
 import { pagination } from "hull:web:pagination";
+import { validate }   from "hull:validate";
 import { csp }        from "hull:web:middleware:csp";
 import { csrf }       from "hull:web:middleware:csrf";
 import { session }    from "hull:web:middleware:session";
@@ -441,6 +460,7 @@ app.manifest({
         "hull/web/htmx@1",
         "hull/web/flash@1",
         "hull/web/pagination@1",
+        "hull/validate@1",
         "hull/web/middleware/csp@1",
         "hull/web/middleware/csrf@1",
         "hull/web/middleware/session@1",
@@ -540,12 +560,27 @@ app.get("/", (req, res) => {
 
 app.post("/todos", (req, res) => {
     const fields = form.parse(req.body || "");
-    const title = (fields.title || "").trim();
-    if (!title) {
+
+    // Validate via hull.validate. `trim: true` strips whitespace into
+    // the same `fields` object in-place.
+    const [ok, errors] = validate.check(fields, {
+        title: {
+            required: true, trim: true, min: 1, max: 200,
+            message: "Title cannot be empty.",
+        },
+    });
+    if (!ok) {
         htmx.retarget(res, "#new-todo");
-        res.html('<p id="new-todo" role="alert">Title cannot be empty.</p>');
+        htmx.reswap(res, "outerHTML");
+        res.html(template.render("partials/todo_form.html", {
+            csrf_token: req.ctx.csrf_token,
+            values:     fields,
+            errors:     errors,
+        }));
         return;
     }
+
+    const title = fields.title;  // already trimmed by validate
     db.exec("INSERT INTO todos (title, done) VALUES (?, 0)", [title]);
     const id = db.query("SELECT last_insert_rowid() AS id")[0].id;
     if (htmx.is(req)) {
@@ -732,9 +767,44 @@ templates.htmx_partial_todo_form = [[<form id="new-todo"
       hx-target="#todos"
       hx-swap="afterbegin">
   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-  <input type="text" name="title" placeholder="New todo" required autofocus>
+  <input type="text" name="title" placeholder="New todo"
+         value="{{ values.title }}"
+         aria-invalid="{% if errors.title %}true{% else %}false{% end %}"
+         required autofocus>
+  {% if errors.title %}
+  <small role="alert" id="new-todo-error">{{ errors.title }}</small>
+  {% end %}
   <button type="submit">Add</button>
 </form>
+]]
+
+-- Reusable form-field partial. Hull templates can't pass per-call
+-- args to {% include %}, so this is meant to be used inside a
+-- for-loop where each iteration sets `field` in scope:
+--   {% for field in fields %}{% include "partials/_form_field.html" %}{% end %}
+-- For single-field forms, inline value/error handling in the form
+-- template itself is simpler (see todo_form.html for the canonical
+-- example). For multi-field forms, switching to this partial avoids
+-- repeating the value="{{ ... }}" + aria-invalid + error block per
+-- field. The partial expects each `field` table to have at minimum
+-- a `name`; `label`/`placeholder`/`required`/`autofocus`/`value`/`error`
+-- are optional.
+templates.htmx_partial_form_field = [[<div class="field">
+  {% if field.label %}
+  <label for="field-{{ field.name }}">{{ field.label }}</label>
+  {% end %}
+  <input id="field-{{ field.name }}"
+         type="{{ field.type | default: "text" }}"
+         name="{{ field.name }}"
+         value="{{ field.value }}"
+         {% if field.placeholder %}placeholder="{{ field.placeholder }}"{% end %}
+         aria-invalid="{% if field.error %}true{% else %}false{% end %}"
+         {% if field.required %}required{% end %}
+         {% if field.autofocus %}autofocus{% end %}>
+  {% if field.error %}
+  <small role="alert" id="field-{{ field.name }}-error">{{ field.error }}</small>
+  {% end %}
+</div>
 ]]
 
 templates.htmx_partial_todo_row = [[<li id="todo-{{ t.id }}">
@@ -1478,6 +1548,8 @@ local function scaffold_htmx(dir, runtime, track_file, track_dir)
                templates.htmx_partial_todo_row)
     track_file(dir .. "/templates/partials/_todo_edit_form.html",
                templates.htmx_partial_todo_edit_form)
+    track_file(dir .. "/templates/partials/_form_field.html",
+               templates.htmx_partial_form_field)
     track_file(dir .. "/templates/partials/_flash.html",
                templates.htmx_partial_flash)
     track_file(dir .. "/templates/partials/_pagination.html",

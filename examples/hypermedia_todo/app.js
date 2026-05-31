@@ -5,6 +5,7 @@ import { app }        from "hull:app";
 import { htmx }       from "hull:web:htmx";
 import { flash }      from "hull:web:flash";
 import { pagination } from "hull:web:pagination";
+import { validate }   from "hull:validate";
 import { csp }        from "hull:web:middleware:csp";
 import { csrf }       from "hull:web:middleware:csrf";
 import { session }    from "hull:web:middleware:session";
@@ -24,6 +25,7 @@ app.manifest({
         "hull/web/htmx@1",
         "hull/web/flash@1",
         "hull/web/pagination@1",
+        "hull/validate@1",
         "hull/web/middleware/csp@1",
         "hull/web/middleware/csrf@1",
         "hull/web/middleware/session@1",
@@ -123,12 +125,32 @@ app.get("/", (req, res) => {
 
 app.post("/todos", (req, res) => {
     const fields = form.parse(req.body || "");
-    const title = (fields.title || "").trim();
-    if (!title) {
+
+    // Validate via hull.validate. `trim: true` strips whitespace into
+    // the same `fields` object in-place, so a post-validate
+    // `fields.title` is already the cleaned value.
+    const [ok, errors] = validate.check(fields, {
+        title: {
+            required: true, trim: true, min: 1, max: 200,
+            message: "Title cannot be empty.",
+        },
+    });
+    if (!ok) {
+        // Re-render the form fragment with submitted values + per-field
+        // error messages. hx-retarget so the response lands on the form
+        // itself (the form's own hx-target is #todos, but the validation
+        // response should replace #new-todo).
         htmx.retarget(res, "#new-todo");
-        res.html('<p id="new-todo" role="alert">Title cannot be empty.</p>');
+        htmx.reswap(res, "outerHTML");
+        res.html(template.render("partials/todo_form.html", {
+            csrf_token: req.ctx.csrf_token,
+            values:     fields,
+            errors:     errors,
+        }));
         return;
     }
+
+    const title = fields.title;  // already trimmed by validate
     db.exec("INSERT INTO todos (title, done) VALUES (?, 0)", [title]);
     const id = db.query("SELECT last_insert_rowid() AS id")[0].id;
     if (htmx.is(req)) {

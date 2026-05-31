@@ -248,7 +248,7 @@ test("inline edit: PATCH with empty title re-renders edit form with error", func
     test.eq(stored, "keep me")
 end)
 
-test("POST /todos with empty title returns validation fragment", function()
+test("POST /todos with empty title re-renders form with error", function()
     local home = test.get("/", { middleware = true })
     local token = string.match(home.body, 'name="_csrf" value="([^"]+)"')
     local res = test.post("/todos", {
@@ -265,4 +265,33 @@ test("POST /todos with empty title returns validation fragment", function()
     test.ok(string.find(res.body, "cannot be empty"), "should show validation error")
     test.eq(res.headers["hx-retarget"], "#new-todo",
             "should retarget to the form, not the list")
+    -- Form re-rendered (not just the error text): the input element is back.
+    test.ok(string.find(res.body, 'name="title"', 1, true),
+            "should re-render the form with the title input")
+    test.ok(string.find(res.body, 'aria-invalid="true"', 1, true),
+            "field should be marked aria-invalid")
+end)
+
+test("POST /todos with too-long title preserves submitted value in re-render", function()
+    local home = test.get("/", { middleware = true })
+    local token = string.match(home.body, 'name="_csrf" value="([^"]+)"')
+    -- 201 chars, exceeds the max=200 validation rule.
+    local long_title = string.rep("a", 201)
+    local res = test.post("/todos", {
+        middleware = true,
+        body = "title=" .. long_title .. "&_csrf=" .. token,
+        headers = {
+            ["hx-request"] = "true",
+            ["content-type"] = "application/x-www-form-urlencoded",
+            ["cookie"] = home.headers["set-cookie"] or "",
+            ["x-csrf-token"] = token,
+        },
+    })
+    test.eq(res.status, 200)
+    -- Submitted value preserved in the input via {{ values.title }}.
+    test.ok(string.find(res.body, 'value="' .. long_title .. '"', 1, true),
+            "submitted (too-long) value should be pre-filled in the input")
+    -- Some error message present.
+    test.ok(string.find(res.body, '<small role="alert"', 1, true),
+            "should show a per-field error message")
 end)
