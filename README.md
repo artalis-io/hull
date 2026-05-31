@@ -84,7 +84,7 @@ Tab-completion for bash, zsh, and fish is shipped in [`completions/`](completion
 
 ## Hull Tools
 
-Hull ships 20 subcommands for the full development lifecycle:
+Hull ships 26 subcommands for the full development lifecycle:
 
 | Command | Purpose |
 |---------|---------|
@@ -98,6 +98,10 @@ Hull ships 20 subcommands for the full development lifecycle:
 | <code>hull agent &lt;subcommand&gt;</code> | [AI agent interface](#using-hull-with-ai-agents). Routes, schema, tests, requests as JSON |
 | <code>hull inspect &lt;dir&gt;</code> | Display declared capabilities and signature status |
 | <code>hull verify [--developer-key &lt;key&gt;]</code> | Verify Ed25519 signatures and file integrity |
+| <code>hull verify-self [--manifest PATH]</code> | Verify the running `hull` binary against its release manifest + Ed25519 signature |
+| <code>hull verify-release &lt;manifest&gt; &lt;sig&gt; [--pubkey HEX]</code> | Offline-audit any release manifest against the embedded release pubkey |
+| <code>hull sign-release &lt;manifest&gt; --key &lt;key&gt;</code> | Sign a release manifest with the Ed25519 release key (CI use) |
+| <code>hull sbom [--format=human\|json\|cyclonedx\|spdx]</code> | Print the Software Bill of Materials baked into this binary. CycloneDX 1.5 / SPDX 2.3 outputs for compliance pipelines |
 | <code>hull eject &lt;dir&gt;</code> | Export to a standalone Makefile project |
 | <code>hull keygen &lt;name&gt;</code> | Generate Ed25519 signing keypair |
 | <code>hull sign-platform &lt;key&gt;</code> | Sign platform library with per-arch hashes |

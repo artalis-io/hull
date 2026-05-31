@@ -20,8 +20,10 @@ _hull() {
         cword=$COMP_CWORD
     }
 
-    local commands="keygen build verify inspect manifest test new init dev eject sign-platform migrate agent mcp check compute deploy version doctor update tools help"
+    local commands="keygen build verify verify-self verify-release sign-release sbom inspect manifest test new init dev eject sign-platform migrate modules agent mcp check compute deploy version doctor update tools help"
     local tools_subs="list install uninstall"
+    local modules_subs="list available explain analyze"
+    local sbom_formats="human json cyclonedx spdx"
     # Keep in sync with src/hull/commands/agent.c hl_cmd_agent() dispatch table.
     local agent_subs="routes db request status errors test context migrate deploy manifest vfs compute compute-call gpu capabilities validate logs endpoint middleware eval perf template schema-diff sql tools overview"
     # Keep in sync with stdlib/context/*.md filenames.
@@ -238,6 +240,66 @@ _hull() {
 
         mcp)
             COMPREPLY=($(compgen -d -- "$cur"))
+            ;;
+
+        sbom)
+            if [[ "$cur" == --format=* ]]; then
+                COMPREPLY=($(compgen -W "$sbom_formats" -- "${cur#--format=}"))
+                return
+            fi
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=($(compgen -W "--format= --json" -- "$cur"))
+            fi
+            ;;
+
+        verify-self)
+            case "$prev" in
+                --manifest|--signature) COMPREPLY=($(compgen -f -- "$cur")); return ;;
+                --pubkey|--asset) return ;;
+            esac
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=($(compgen -W "--manifest --signature --asset --pubkey" -- "$cur"))
+            fi
+            ;;
+
+        verify-release)
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=($(compgen -W "--pubkey" -- "$cur"))
+            else
+                COMPREPLY=($(compgen -f -- "$cur"))
+            fi
+            ;;
+
+        sign-release)
+            case "$prev" in
+                --key|--output) COMPREPLY=($(compgen -f -- "$cur")); return ;;
+            esac
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=($(compgen -W "--key --output" -- "$cur"))
+            else
+                COMPREPLY=($(compgen -f -- "$cur"))
+            fi
+            ;;
+
+        modules)
+            # `hull modules <verb> [args]`.
+            if [ "$cword" -eq 2 ]; then
+                COMPREPLY=($(compgen -W "$modules_subs" -- "$cur"))
+            else
+                local verb="${words[2]}"
+                case "$verb" in
+                    list|analyze)
+                        if [[ "$cur" == -* ]]; then
+                            COMPREPLY=($(compgen -W "--json" -- "$cur"))
+                        else
+                            COMPREPLY=($(compgen -d -- "$cur"))
+                        fi
+                        ;;
+                    available)
+                        COMPREPLY=($(compgen -W "--json --tui" -- "$cur"))
+                        ;;
+                esac
+            fi
             ;;
     esac
 }

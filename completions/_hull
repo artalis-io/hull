@@ -19,6 +19,10 @@ _hull() {
         'keygen:Generate Ed25519 keypair'
         'build:Compile app into a standalone binary'
         'verify:Verify Ed25519 signatures and file integrity'
+        'verify-self:Verify this hull binary against its signed release manifest'
+        'verify-release:Verify a release manifest signature (offline audit)'
+        'sign-release:Sign a release manifest with the Ed25519 release key (CI)'
+        'sbom:Print Software Bill of Materials (human/json/cyclonedx/spdx)'
         'inspect:Display declared capabilities and signature status'
         'manifest:Extract and print manifest as JSON'
         'test:Run app tests (in-process, in-memory SQLite)'
@@ -28,6 +32,7 @@ _hull() {
         'eject:Export to a standalone Makefile project'
         'sign-platform:Sign platform library with per-arch hashes'
         'migrate:Run SQL migrations'
+        'modules:Inspect first-party module registry and app declarations'
         'agent:Machine-readable introspection for AI coding agents'
         'mcp:Model Context Protocol server'
         'check:Pre-flight checks on a hull project'
@@ -39,6 +44,14 @@ _hull() {
         'tools:Install / list / uninstall side-loaded tools (e.g. wamrc)'
         'help:Show top-level usage'
     )
+    local -a modules_subs sbom_formats
+    modules_subs=(
+        'list:Print modules an app declares'
+        'available:Print the full first-party module registry'
+        'explain:Print the spec for one module'
+        'analyze:Walk source for undeclared imports / unused declarations'
+    )
+    sbom_formats=('human' 'json' 'cyclonedx' 'spdx')
     local -a tools_subs
     tools_subs=(
         'list:Print the registry + install state'
@@ -287,6 +300,55 @@ _hull() {
 
                 keygen|sign-platform)
                     _files
+                    ;;
+
+                sbom)
+                    _arguments \
+                        '--format=[SBOM format]:format:('"${sbom_formats[@]}"')' \
+                        '--json[Shortcut for --format=json]'
+                    ;;
+
+                verify-self)
+                    _arguments \
+                        '--manifest[Manifest file]:file:_files' \
+                        '--signature[Signature file]:file:_files' \
+                        '--asset[Asset name in the manifest]:asset:' \
+                        '--pubkey[Override the embedded release public key]:hex:'
+                    ;;
+
+                verify-release)
+                    _arguments \
+                        '--pubkey[Override the embedded release public key]:hex:' \
+                        '*:file:_files'
+                    ;;
+
+                sign-release)
+                    _arguments \
+                        '--key[Ed25519 secret key file]:file:_files' \
+                        '--output[Output signature path]:file:_files' \
+                        '*:file:_files'
+                    ;;
+
+                modules)
+                    if (( CURRENT == 2 )); then
+                        _describe -t modules-subs 'modules subcommand' modules_subs
+                    else
+                        case "$words[2]" in
+                            list|analyze)
+                                _arguments \
+                                    '--json[Machine-readable JSON output]' \
+                                    '*:app dir:_files -/'
+                                ;;
+                            available)
+                                _arguments \
+                                    '--json[Machine-readable JSON output]' \
+                                    '--tui[Interactive picker]'
+                                ;;
+                            explain)
+                                _arguments '*:module name:'
+                                ;;
+                        esac
+                    fi
                     ;;
             esac
             ;;

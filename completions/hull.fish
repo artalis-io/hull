@@ -26,7 +26,7 @@ end
 
 function __hull_no_subcommand
     set -l cmd (commandline -opc)
-    set -l commands keygen build verify inspect manifest test new init dev eject sign-platform migrate agent mcp check compute deploy version doctor update tools help
+    set -l commands keygen build verify verify-self verify-release sign-release sbom inspect manifest test new init dev eject sign-platform migrate modules agent mcp check compute deploy version doctor update tools help
     for c in $cmd[2..-1]
         if contains -- $c $commands
             return 1
@@ -37,28 +37,33 @@ end
 
 # ── Top-level commands ───────────────────────────────────────────────
 
-complete -c hull -n __hull_no_subcommand -f -a keygen        -d 'Generate Ed25519 keypair'
-complete -c hull -n __hull_no_subcommand -f -a build         -d 'Compile app into a standalone binary'
-complete -c hull -n __hull_no_subcommand -f -a verify        -d 'Verify Ed25519 signatures'
-complete -c hull -n __hull_no_subcommand -f -a inspect       -d 'Display declared capabilities'
-complete -c hull -n __hull_no_subcommand -f -a manifest      -d 'Extract and print manifest as JSON'
-complete -c hull -n __hull_no_subcommand -f -a test          -d 'Run app tests (in-process)'
-complete -c hull -n __hull_no_subcommand -f -a new           -d 'Scaffold a new hull project'
-complete -c hull -n __hull_no_subcommand -f -a init          -d 'Initialize hull in current directory'
-complete -c hull -n __hull_no_subcommand -f -a dev           -d 'Development server with hot reload'
-complete -c hull -n __hull_no_subcommand -f -a eject         -d 'Export to standalone Makefile project'
-complete -c hull -n __hull_no_subcommand -f -a sign-platform -d 'Sign platform library'
-complete -c hull -n __hull_no_subcommand -f -a migrate       -d 'Run SQL migrations'
-complete -c hull -n __hull_no_subcommand -f -a agent         -d 'Agent introspection (JSON)'
-complete -c hull -n __hull_no_subcommand -f -a mcp           -d 'Model Context Protocol server'
-complete -c hull -n __hull_no_subcommand -f -a check         -d 'Pre-flight checks on a project'
-complete -c hull -n __hull_no_subcommand -f -a compute       -d 'WASM compute plugin tools'
-complete -c hull -n __hull_no_subcommand -f -a deploy        -d 'Generate deployment configs'
-complete -c hull -n __hull_no_subcommand -f -a version       -d 'Print hull version'
-complete -c hull -n __hull_no_subcommand -f -a doctor        -d 'Check hull build readiness'
-complete -c hull -n __hull_no_subcommand -f -a update        -d 'Self-update from GitHub releases'
-complete -c hull -n __hull_no_subcommand -f -a tools         -d 'Install / list / uninstall side-loaded tools'
-complete -c hull -n __hull_no_subcommand -f -a help          -d 'Show top-level usage'
+complete -c hull -n __hull_no_subcommand -f -a keygen         -d 'Generate Ed25519 keypair'
+complete -c hull -n __hull_no_subcommand -f -a build          -d 'Compile app into a standalone binary'
+complete -c hull -n __hull_no_subcommand -f -a verify         -d 'Verify Ed25519 signatures'
+complete -c hull -n __hull_no_subcommand -f -a verify-self    -d 'Verify hull binary against signed release manifest'
+complete -c hull -n __hull_no_subcommand -f -a verify-release -d 'Verify a release manifest signature (offline)'
+complete -c hull -n __hull_no_subcommand -f -a sign-release   -d 'Sign a release manifest (CI use)'
+complete -c hull -n __hull_no_subcommand -f -a sbom           -d 'Print Software Bill of Materials (human/json/cyclonedx/spdx)'
+complete -c hull -n __hull_no_subcommand -f -a inspect        -d 'Display declared capabilities'
+complete -c hull -n __hull_no_subcommand -f -a manifest       -d 'Extract and print manifest as JSON'
+complete -c hull -n __hull_no_subcommand -f -a test           -d 'Run app tests (in-process)'
+complete -c hull -n __hull_no_subcommand -f -a new            -d 'Scaffold a new hull project'
+complete -c hull -n __hull_no_subcommand -f -a init           -d 'Initialize hull in current directory'
+complete -c hull -n __hull_no_subcommand -f -a dev            -d 'Development server with hot reload'
+complete -c hull -n __hull_no_subcommand -f -a eject          -d 'Export to standalone Makefile project'
+complete -c hull -n __hull_no_subcommand -f -a sign-platform  -d 'Sign platform library'
+complete -c hull -n __hull_no_subcommand -f -a migrate        -d 'Run SQL migrations'
+complete -c hull -n __hull_no_subcommand -f -a modules        -d 'Inspect first-party module registry + app declarations'
+complete -c hull -n __hull_no_subcommand -f -a agent          -d 'Agent introspection (JSON)'
+complete -c hull -n __hull_no_subcommand -f -a mcp            -d 'Model Context Protocol server'
+complete -c hull -n __hull_no_subcommand -f -a check          -d 'Pre-flight checks on a project'
+complete -c hull -n __hull_no_subcommand -f -a compute        -d 'WASM compute plugin tools'
+complete -c hull -n __hull_no_subcommand -f -a deploy         -d 'Generate deployment configs'
+complete -c hull -n __hull_no_subcommand -f -a version        -d 'Print hull version'
+complete -c hull -n __hull_no_subcommand -f -a doctor         -d 'Check hull build readiness'
+complete -c hull -n __hull_no_subcommand -f -a update         -d 'Self-update from GitHub releases'
+complete -c hull -n __hull_no_subcommand -f -a tools          -d 'Install / list / uninstall side-loaded tools'
+complete -c hull -n __hull_no_subcommand -f -a help           -d 'Show top-level usage'
 
 complete -c hull -n __hull_no_subcommand -s v -l version     -d 'Print hull version'
 complete -c hull -n __hull_no_subcommand -s h -l help        -d 'Show top-level usage'
@@ -259,3 +264,63 @@ complete -c hull -n '__hull_subcommand version' -l json -d 'Machine-readable JSO
 complete -c hull -n '__hull_subcommand update' -l check -d 'Check for an update without installing'
 complete -c hull -n '__hull_subcommand update' -l force -d 'Reinstall even if version matches'
 complete -c hull -n '__hull_subcommand update' -l repo  -r -d 'GitHub repo'
+
+# ── sbom ─────────────────────────────────────────────────────────────
+
+complete -c hull -n '__hull_subcommand sbom' -l format -r -d 'Output format' \
+    -xa 'human json cyclonedx spdx'
+complete -c hull -n '__hull_subcommand sbom' -l json   -d 'Shortcut for --format=json'
+
+# ── verify-self / verify-release / sign-release ──────────────────────
+
+complete -c hull -n '__hull_subcommand verify-self' -l manifest  -r -d 'Manifest file'
+complete -c hull -n '__hull_subcommand verify-self' -l signature -r -d 'Signature file'
+complete -c hull -n '__hull_subcommand verify-self' -l asset     -r -d 'Asset name in the manifest'
+complete -c hull -n '__hull_subcommand verify-self' -l pubkey    -r -d 'Override embedded release public key'
+
+complete -c hull -n '__hull_subcommand verify-release' -l pubkey -r -d 'Override embedded release public key'
+
+complete -c hull -n '__hull_subcommand sign-release' -l key    -r -d 'Ed25519 secret key file'
+complete -c hull -n '__hull_subcommand sign-release' -l output -r -d 'Output signature path'
+
+# ── modules ──────────────────────────────────────────────────────────
+
+function __hull_modules_no_verb
+    set -l cmd (commandline -opc)
+    set -l verbs list available explain analyze
+    set -l seen 0
+    for c in $cmd[2..-1]
+        if test "$c" = "modules"
+            set seen 1
+        else if test $seen -eq 1
+            if contains -- $c $verbs
+                return 1
+            end
+        end
+    end
+    test $seen -eq 1
+end
+
+function __hull_modules_verb_is
+    set -l cmd (commandline -opc)
+    set -l want $argv[1]
+    set -l seen 0
+    for c in $cmd[2..-1]
+        if test "$c" = "modules"
+            set seen 1
+        else if test $seen -eq 1; and test "$c" = "$want"
+            return 0
+        end
+    end
+    return 1
+end
+
+complete -c hull -n __hull_modules_no_verb -f -a list      -d 'Print modules an app declares'
+complete -c hull -n __hull_modules_no_verb -f -a available -d 'Print the first-party module registry'
+complete -c hull -n __hull_modules_no_verb -f -a explain   -d 'Print the spec for one module'
+complete -c hull -n __hull_modules_no_verb -f -a analyze   -d 'Walk source for undeclared imports'
+
+complete -c hull -n '__hull_modules_verb_is list'      -l json -d 'Machine-readable JSON output'
+complete -c hull -n '__hull_modules_verb_is available' -l json -d 'Machine-readable JSON output'
+complete -c hull -n '__hull_modules_verb_is available' -l tui  -d 'Interactive picker'
+complete -c hull -n '__hull_modules_verb_is analyze'   -l json -d 'Machine-readable JSON output'
