@@ -29,11 +29,27 @@ app.manifest({
 -- Sessions table (creates _hull_sessions on first run).
 session.init({ ttl = 86400 })
 
+-- CSRF secret. CHANGE-ME-IN-PRODUCTION is the placeholder shipped by
+-- the scaffold; load from env (or a sealed secret) before deploying.
+-- The scaffold logs a one-time warning at startup if it's still the
+-- placeholder so a deploy can't silently inherit it.
+local CSRF_SECRET = "CHANGE-ME-IN-PRODUCTION"
+if CSRF_SECRET == "CHANGE-ME-IN-PRODUCTION" then
+    log.warn("WARNING: CSRF secret is the scaffold placeholder. " ..
+             "Replace `CSRF_SECRET` in app.lua with a real high-entropy " ..
+             "value before deploying (load from env, etc.).")
+end
+
 -- Bootstrap an anonymous session on every request. CSRF binds to
 -- this session id; without one, csrf.generate would fail. Creates a
 -- new session on first visit (sets cookie); loads existing on
 -- subsequent requests. Production apps would replace this with a
 -- real login flow (auth.session_middleware).
+--
+-- `secure = false` on the cookie is intentional for the scaffold: it
+-- lets `hull dev` (plain HTTP on :8080) work in a real browser.
+-- Production over HTTPS should pass `{ secure = true }` so the cookie
+-- is only sent over TLS.
 local function session_bootstrap(req, res)
     req.ctx = req.ctx or {}
     local cookies = cookie.parse(req.headers["cookie"] or "")
@@ -44,7 +60,7 @@ local function session_bootstrap(req, res)
     end
     sid = session.create({})
     req.ctx.session_id = sid
-    res:header("Set-Cookie", cookie.serialize("hull_session", sid))
+    res:header("Set-Cookie", cookie.serialize("hull_session", sid, { secure = false }))
     return 0
 end
 
@@ -56,7 +72,7 @@ app.use("*", "/*", session_bootstrap)
 
 -- Post-body middleware (runs after req.body is parsed):
 --   3. CSRF. Verifies on unsafe methods; injects token on safe.
-app.use_post("*", "/*", csrf.middleware({ secret = "CHANGE-ME-IN-PRODUCTION" }))
+app.use_post("*", "/*", csrf.middleware({ secret = CSRF_SECRET }))
 
 local function todos_data()
     return db.query("SELECT id, title, done FROM todos ORDER BY id DESC")

@@ -29,13 +29,26 @@ app.manifest({
 
 session.init({ ttl: 86400 });
 
-// Bootstrap anonymous session per request (same shape as Lua sibling).
+// CSRF secret. CHANGE-ME-IN-PRODUCTION is the placeholder shipped by
+// the scaffold; load from env (or a sealed secret) before deploying.
+// The scaffold logs a one-time warning at startup if it's still the
+// placeholder so a deploy can't silently inherit it.
+const CSRF_SECRET = "CHANGE-ME-IN-PRODUCTION";
+if (CSRF_SECRET === "CHANGE-ME-IN-PRODUCTION") {
+    log.warn(
+        "WARNING: CSRF secret is the scaffold placeholder. " +
+        "Replace `CSRF_SECRET` in app.js with a real high-entropy " +
+        "value before deploying (load from env, etc.)."
+    );
+}
+
+// Bootstrap anonymous session per request. `secure: false` is
+// intentional for the scaffold: it lets `hull dev` (plain HTTP on
+// :8080) work in a real browser. Production over HTTPS should set
+// `secure: true` so the cookie is only sent over TLS.
 //
-// Cross-runtime note: the JS csrf middleware reads the session id from
-// `req.headers.cookie`, not from `req.ctx`. When we create a new session
-// here we also splice the cookie into req.headers so the downstream
-// csrf middleware finds it on the SAME request (otherwise the first
-// GET would render the form with an empty csrf token).
+// CSRF reads the session id from req.ctx.session_id (we set it
+// below), so no req.headers patching is needed on this same request.
 function sessionBootstrap(req, res) {
     req.ctx = req.ctx || {};
     const cookies = cookie.parse(req.headers["cookie"] || "");
@@ -46,24 +59,19 @@ function sessionBootstrap(req, res) {
     }
     sid = session.create({});
     req.ctx.session_id = sid;
-    const setCookie = cookie.serialize("hull_session", sid);
-    res.header("Set-Cookie", setCookie);
-    // Make the new cookie visible to downstream middleware on this same
-    // request. We only need the name=value part for csrf's parser.
-    const prev = req.headers["cookie"] || "";
-    req.headers["cookie"] = prev
-        ? prev + "; hull_session=" + sid
-        : "hull_session=" + sid;
+    res.header("Set-Cookie", cookie.serialize("hull_session", sid, { secure: false }));
     return 0;
 }
 
 app.use("*", "/*", csp.htmx());
 app.use("*", "/*", sessionBootstrap);
-// cookieName matches sessionBootstrap's cookie. JS csrf's default is
-// `hull.sid` (stdlib-internal convention) while JS auth uses
-// `hull_session`; we anchor to the session-cookie name we actually set.
+// cookieName matches sessionBootstrap's cookie name (the default
+// `hull.sid` would not). Falls back to req.ctx.session_id first
+// thanks to the v0.1.8 sessionKey addition, so this is belt-and-
+// suspenders for cases where the cookie is the only available source
+// (e.g., a request with no upstream session middleware).
 app.usePost("*", "/*", csrf.middleware({
-    secret: "CHANGE-ME-IN-PRODUCTION",
+    secret: CSRF_SECRET,
     cookieName: "hull_session",
 }));
 

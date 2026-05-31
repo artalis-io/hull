@@ -218,8 +218,11 @@ end)
 app.get("/lang/:code", function(req, res)
     local code = req.params.code
     if code ~= "en" and code ~= "hu" then code = "en" end
+    -- secure = false lets `hull dev` (plain HTTP on :8080) work in a
+    -- real browser. Production over HTTPS should flip to true (or
+    -- remove the opt; default is true) so the cookie is HTTPS-only.
     res:header("Set-Cookie", cookie.serialize("hull.lang", code, {
-        path = "/", max_age = 365 * 24 * 3600, httponly = false,
+        path = "/", max_age = 365 * 24 * 3600, httponly = false, secure = false,
     }))
     -- Redirect back to referrer or home (validate to prevent open redirect)
     local referer = req.headers["referer"]

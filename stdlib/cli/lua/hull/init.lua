@@ -190,11 +190,27 @@ app.manifest({
 -- Sessions table (creates _hull_sessions on first run).
 session.init({ ttl = 86400 })
 
+-- CSRF secret. CHANGE-ME-IN-PRODUCTION is the placeholder shipped by
+-- the scaffold; load from env (or a sealed secret) before deploying.
+-- The scaffold logs a one-time warning at startup if it's still the
+-- placeholder so a deploy can't silently inherit it.
+local CSRF_SECRET = "CHANGE-ME-IN-PRODUCTION"
+if CSRF_SECRET == "CHANGE-ME-IN-PRODUCTION" then
+    log.warn("WARNING: CSRF secret is the scaffold placeholder. " ..
+             "Replace `CSRF_SECRET` in app.lua with a real high-entropy " ..
+             "value before deploying (load from env, etc.).")
+end
+
 -- Bootstrap an anonymous session on every request. CSRF binds to
 -- this session id; without one, csrf.generate would fail. Creates a
 -- new session on first visit (sets cookie); loads existing on
 -- subsequent requests. Production apps would replace this with a
 -- real login flow (auth.session_middleware).
+--
+-- `secure = false` on the cookie is intentional for the scaffold: it
+-- lets `hull dev` (plain HTTP on :8080) work in a real browser.
+-- Production over HTTPS should pass `{ secure = true }` so the cookie
+-- is only sent over TLS.
 local function session_bootstrap(req, res)
     req.ctx = req.ctx or {}
     local cookies = cookie.parse(req.headers["cookie"] or "")
@@ -205,7 +221,7 @@ local function session_bootstrap(req, res)
     end
     sid = session.create({})
     req.ctx.session_id = sid
-    res:header("Set-Cookie", cookie.serialize("hull_session", sid))
+    res:header("Set-Cookie", cookie.serialize("hull_session", sid, { secure = false }))
     return 0
 end
 
@@ -217,7 +233,7 @@ app.use("*", "/*", session_bootstrap)
 
 -- Post-body middleware (runs after req.body is parsed):
 --   3. CSRF. Verifies on unsafe methods; injects token on safe.
-app.use_post("*", "/*", csrf.middleware({ secret = "CHANGE-ME-IN-PRODUCTION" }))
+app.use_post("*", "/*", csrf.middleware({ secret = CSRF_SECRET }))
 
 local function todos_data()
     return db.query("SELECT id, title, done FROM todos ORDER BY id DESC")
@@ -312,13 +328,26 @@ app.manifest({
 
 session.init({ ttl: 86400 });
 
-// Bootstrap anonymous session per request (same shape as Lua sibling).
+// CSRF secret. CHANGE-ME-IN-PRODUCTION is the placeholder shipped by
+// the scaffold; load from env (or a sealed secret) before deploying.
+// The scaffold logs a one-time warning at startup if it's still the
+// placeholder so a deploy can't silently inherit it.
+const CSRF_SECRET = "CHANGE-ME-IN-PRODUCTION";
+if (CSRF_SECRET === "CHANGE-ME-IN-PRODUCTION") {
+    log.warn(
+        "WARNING: CSRF secret is the scaffold placeholder. " +
+        "Replace `CSRF_SECRET` in app.js with a real high-entropy " +
+        "value before deploying (load from env, etc.)."
+    );
+}
+
+// Bootstrap anonymous session per request. `secure: false` is
+// intentional for the scaffold: it lets `hull dev` (plain HTTP on
+// :8080) work in a real browser. Production over HTTPS should set
+// `secure: true` so the cookie is only sent over TLS.
 //
-// Cross-runtime note: the JS csrf middleware reads the session id from
-// `req.headers.cookie`, not from `req.ctx`. When we create a new session
-// here we also splice the cookie into req.headers so the downstream
-// csrf middleware finds it on the SAME request (otherwise the first
-// GET would render the form with an empty csrf token).
+// CSRF reads the session id from req.ctx.session_id (we set it
+// below), so no req.headers patching is needed on this same request.
 function sessionBootstrap(req, res) {
     req.ctx = req.ctx || {};
     const cookies = cookie.parse(req.headers["cookie"] || "");
@@ -329,24 +358,19 @@ function sessionBootstrap(req, res) {
     }
     sid = session.create({});
     req.ctx.session_id = sid;
-    const setCookie = cookie.serialize("hull_session", sid);
-    res.header("Set-Cookie", setCookie);
-    // Make the new cookie visible to downstream middleware on this same
-    // request. We only need the name=value part for csrf's parser.
-    const prev = req.headers["cookie"] || "";
-    req.headers["cookie"] = prev
-        ? prev + "; hull_session=" + sid
-        : "hull_session=" + sid;
+    res.header("Set-Cookie", cookie.serialize("hull_session", sid, { secure: false }));
     return 0;
 }
 
 app.use("*", "/*", csp.htmx());
 app.use("*", "/*", sessionBootstrap);
-// cookieName matches sessionBootstrap's cookie. JS csrf's default is
-// `hull.sid` (stdlib-internal convention) while JS auth uses
-// `hull_session`; we anchor to the session-cookie name we actually set.
+// cookieName matches sessionBootstrap's cookie name (the default
+// `hull.sid` would not). Falls back to req.ctx.session_id first
+// thanks to the v0.1.8 sessionKey addition, so this is belt-and-
+// suspenders for cases where the cookie is the only available source
+// (e.g., a request with no upstream session middleware).
 app.usePost("*", "/*", csrf.middleware({
-    secret: "CHANGE-ME-IN-PRODUCTION",
+    secret: CSRF_SECRET,
     cookieName: "hull_session",
 }));
 
@@ -796,18 +820,52 @@ end
 
 -- ── Argument parsing ─────────────────────────────────────────────────
 
+local function print_usage()
+    print([[Usage: hull init [dir] [options]
+
+Initialize a Hull project in the current (or specified) directory.
+Idempotent. Creates missing files without overwriting existing ones
+(like `git init`).
+
+Options:
+  --runtime lua|js     Pick the runtime. Default: auto-detect from
+                       existing files; else lua.
+  --cli                Scaffold a CLI app (app.main) instead of a
+                       server. Mutually exclusive with --profile.
+  --profile <name>     Opt into a richer scaffold. Supported:
+                         htmx   HTMX + Pico classless + per-request
+                                CSP nonce + session + CSRF + sample
+                                /todos endpoint. Server-mode only.
+                       Default (no --profile): minimal hello-world
+                       + /health.
+  -h, --help           Show this message.
+
+Examples:
+  hull init                            # minimal server in cwd
+  hull init my-app --runtime js        # minimal JS server in ./my-app
+  hull init my-cli --cli               # minimal CLI tool
+  hull init blog --profile htmx        # HTMX + Pico starter
+
+See also:
+  hull agent context --task=htmx       Pattern guide for the HTMX profile
+  docs/htmx.md                          Full pattern reference]])
+end
+
 local function parse_args()
     local opts = {
         dir     = ".",
         runtime = nil,   -- nil = auto-detect from existing files, else "lua"/"js"
         cli     = nil,   -- nil = auto-detect or default server; true = force CLI
         profile = nil,   -- nil = default minimal scaffold; "htmx" = HTMX + Pico
+        help    = false,
     }
 
     local i = 1
     while i <= #arg do
         local a = arg[i]
-        if a == "--runtime" then
+        if a == "-h" or a == "--help" then
+            opts.help = true
+        elseif a == "--runtime" then
             i = i + 1
             opts.runtime = arg[i]
         elseif a == "--cli" then
@@ -879,7 +937,13 @@ end
 
 local function main()
     local opts = parse_args()
-    local dir  = opts.dir
+
+    if opts.help then
+        print_usage()
+        return
+    end
+
+    local dir = opts.dir
 
     -- Validate runtime flag if given
     if opts.runtime and opts.runtime ~= "lua" and opts.runtime ~= "js" then

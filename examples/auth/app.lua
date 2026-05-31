@@ -119,7 +119,11 @@ app.post("/login", function(req, res)
         return res:status(401):json({ error = "invalid credentials" })
     end
 
-    auth.login(req, res, { user_id = user.id, email = user.email })
+    -- secure = false lets `hull dev` (plain HTTP on :8080) work in a
+    -- real browser. Production over HTTPS should remove this opt
+    -- (defaults to true) so the cookie is only sent over TLS.
+    auth.login(req, res, { user_id = user.id, email = user.email },
+               { cookie_opts = { secure = false } })
     res:json({ id = user.id, email = user.email, name = user.name })
 end)
 
