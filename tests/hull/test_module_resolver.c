@@ -227,6 +227,10 @@ UTEST(module_resolver, v0_2_0_rename_hint_flat_module)
     int rc = hl_module_resolver_resolve(&m, &s, err, sizeof(err));
     ASSERT_EQ(rc, -1);
     ASSERT_NE(strstr(err, "was renamed to"), NULL);
+    /* Asserts the rename hint SHORT-CIRCUITED before the
+     * fuzzy-suggest path. Without this, a passing test could be
+     * accidentally satisfied by the "did you mean" fallback. */
+    ASSERT_EQ(strstr(err, "did you mean"), NULL);
     ASSERT_NE(strstr(err, "hull/web/cookie"), NULL);
     ASSERT_NE(strstr(err, "v0.2.0"), NULL);
 }
@@ -243,6 +247,10 @@ UTEST(module_resolver, v0_2_0_rename_hint_middleware)
     int rc = hl_module_resolver_resolve(&m, &s, err, sizeof(err));
     ASSERT_EQ(rc, -1);
     ASSERT_NE(strstr(err, "was renamed to"), NULL);
+    /* Asserts the rename hint SHORT-CIRCUITED before the
+     * fuzzy-suggest path. Without this, a passing test could be
+     * accidentally satisfied by the "did you mean" fallback. */
+    ASSERT_EQ(strstr(err, "did you mean"), NULL);
     ASSERT_NE(strstr(err, "hull/web/middleware/csrf"), NULL);
     ASSERT_NE(strstr(err, "v0.2.0"), NULL);
 }
@@ -259,6 +267,10 @@ UTEST(module_resolver, v0_2_0_rename_hint_with_hull_prefix)
     int rc = hl_module_resolver_resolve(&m, &s, err, sizeof(err));
     ASSERT_EQ(rc, -1);
     ASSERT_NE(strstr(err, "was renamed to"), NULL);
+    /* Asserts the rename hint SHORT-CIRCUITED before the
+     * fuzzy-suggest path. Without this, a passing test could be
+     * accidentally satisfied by the "did you mean" fallback. */
+    ASSERT_EQ(strstr(err, "did you mean"), NULL);
     ASSERT_NE(strstr(err, "hull/web/ws-server"), NULL);
 }
 

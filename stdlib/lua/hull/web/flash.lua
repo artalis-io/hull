@@ -32,6 +32,14 @@
 local json = require("hull.json")
 local session = require("hull.web.middleware.session")
 
+-- Bounds the flash queue so a misbehaving handler (or a tight
+-- POST → validate-error → flash.set → redirect loop without
+-- intervening consume) can't grow `session.flash` unboundedly.
+-- The whole queue is JSON-encoded into the session row on every
+-- write; an unbounded queue would also balloon session storage.
+local FLASH_MAX_ENTRIES = 16
+local FLASH_MAX_TEXT_BYTES = 4096
+
 local flash = {}
 
 -- Resolve the current session table from req.ctx, hydrating from
@@ -73,8 +81,18 @@ function flash.set(req, text, kind)
             .. "hull/web/middleware/session first)", 2)
     end
     sess.flash = sess.flash or {}
+    -- Drop silently when the queue is already at the cap. A handler
+    -- that's accumulating messages without consuming them is buggy;
+    -- silently discarding extras is preferable to either erroring
+    -- (which masks the original handler bug) or growing the session
+    -- row to several KB on every render.
+    if #sess.flash >= FLASH_MAX_ENTRIES then return end
+    local s = tostring(text)
+    if #s > FLASH_MAX_TEXT_BYTES then
+        s = s:sub(1, FLASH_MAX_TEXT_BYTES)
+    end
     table.insert(sess.flash, {
-        text = tostring(text),
+        text = s,
         kind = kind or "info",
     })
     session.update(sid, sess)

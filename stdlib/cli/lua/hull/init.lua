@@ -359,10 +359,15 @@ app.get("/search", function(req, res)
             "SELECT id, title, done FROM todos "
             .. "ORDER BY id DESC LIMIT 20")
     else
+        -- Escape LIKE wildcards (% _ \) so a search for "100%"
+        -- matches the literal "100%" instead of "everything after
+        -- 100". Parameterization protects against injection.
+        local esc = q:gsub("[\\%%_]", "\\%0")
         rows = db.query(
             "SELECT id, title, done FROM todos "
-            .. "WHERE title LIKE ? ORDER BY id DESC LIMIT 20",
-            { "%" .. q .. "%" })
+            .. "WHERE title LIKE ? ESCAPE '\\' "
+            .. "ORDER BY id DESC LIMIT 20",
+            { "%" .. esc .. "%" })
     end
     if htmx.is(req) then
         local parts = {}
@@ -554,10 +559,12 @@ app.usePost("*", "/*", csrf.middleware({
 // Idempotency. Only takes effect when the client sends an
 // `Idempotency-Key` header. Scoped to mutating methods.
 app.usePost("POST",  "/*", idempotency.middleware({
-    getPrincipal: (req) => req.ctx.session_id || "__anon",
+    getPrincipal: (req) => req.ctx.session_id != null
+                            ? String(req.ctx.session_id) : "__anon",
 }));
 app.usePost("PATCH", "/*", idempotency.middleware({
-    getPrincipal: (req) => req.ctx.session_id || "__anon",
+    getPrincipal: (req) => req.ctx.session_id != null
+                            ? String(req.ctx.session_id) : "__anon",
 }));
 
 app.get("/", (req, res) => {
@@ -655,10 +662,15 @@ app.get("/search", (req, res) => {
             + "ORDER BY id DESC LIMIT 20"
         );
     } else {
+        // Escape LIKE wildcards (% _ \) so a search for "100%"
+        // matches the literal "100%" instead of everything after.
+        // Parameterization protects against injection.
+        const esc = q.replace(/[\\%_]/g, "\\$&");
         rows = db.query(
             "SELECT id, title, done FROM todos "
-            + "WHERE title LIKE ? ORDER BY id DESC LIMIT 20",
-            ["%" + q + "%"]
+            + "WHERE title LIKE ? ESCAPE '\\' "
+            + "ORDER BY id DESC LIMIT 20",
+            ["%" + esc + "%"]
         );
     }
     if (htmx.is(req)) {
@@ -675,7 +687,8 @@ app.get("/search", (req, res) => {
 });
 
 app.post("/todos/:id/toggle", (req, res) => {
-    const id = parseInt(req.params.id, 10);
+    const id = Number.parseInt(req.params.id, 10);
+    if (!Number.isInteger(id) || id < 1) { res.status(404); return; }
     db.exec("UPDATE todos SET done = NOT done WHERE id = ?", [id]);
     const row = db.query("SELECT id, title, done FROM todos WHERE id = ?", [id])[0];
     if (!row) { res.status(404); return; }
@@ -690,7 +703,8 @@ app.post("/todos/:id/toggle", (req, res) => {
 // (/edit) before the bare /:id pattern so the router doesn't greedily
 // capture "123/edit" as :id.
 app.get("/todos/:id/edit", (req, res) => {
-    const id = parseInt(req.params.id, 10);
+    const id = Number.parseInt(req.params.id, 10);
+    if (!Number.isInteger(id) || id < 1) { res.status(404); return; }
     const row = db.query(
         "SELECT id, title, done FROM todos WHERE id = ?", [id])[0];
     if (!row) { res.status(404); return; }
@@ -701,7 +715,8 @@ app.get("/todos/:id/edit", (req, res) => {
 });
 
 app.get("/todos/:id", (req, res) => {
-    const id = parseInt(req.params.id, 10);
+    const id = Number.parseInt(req.params.id, 10);
+    if (!Number.isInteger(id) || id < 1) { res.status(404); return; }
     const row = db.query(
         "SELECT id, title, done FROM todos WHERE id = ?", [id])[0];
     if (!row) { res.status(404); return; }
@@ -713,7 +728,8 @@ app.get("/todos/:id", (req, res) => {
 });
 
 app.patch("/todos/:id", (req, res) => {
-    const id = parseInt(req.params.id, 10);
+    const id = Number.parseInt(req.params.id, 10);
+    if (!Number.isInteger(id) || id < 1) { res.status(404); return; }
     const fields = form.parse(req.body || "");
     const title = (fields.title || "").trim();
     if (title === "") {
@@ -736,7 +752,8 @@ app.patch("/todos/:id", (req, res) => {
 });
 
 app.delete("/todos/:id", (req, res) => {
-    const id = parseInt(req.params.id, 10);
+    const id = Number.parseInt(req.params.id, 10);
+    if (!Number.isInteger(id) || id < 1) { res.status(404); return; }
     db.exec("DELETE FROM todos WHERE id = ?", [id]);
     if (htmx.is(req)) {
         res.html("");
@@ -1560,6 +1577,30 @@ local function parse_args()
     return opts
 end
 
+-- Generate a 64-char hex CSRF secret at scaffold time so apps don't
+-- ship with the literal `CHANGE-ME-IN-PRODUCTION` placeholder. The
+-- secret is HMAC-key material; SHA-256 of 32 random bytes gives a
+-- canonical 256-bit value with a fixed shape. The warning code in
+-- the template stays in place — it now only fires for legacy /
+-- manually-pasted placeholders, not for fresh scaffolds.
+local function fresh_csrf_secret()
+    local crypto = require("hull.crypto")
+    return crypto.sha256(crypto.random(32))
+end
+
+-- Replace the FIRST quoted occurrence of "CHANGE-ME-IN-PRODUCTION"
+-- in the template with the generated secret. The second occurrence
+-- (the if-condition check) stays — it remains useful if someone
+-- copies the placeholder string back in by hand.
+local function inject_csrf_secret(template_str, secret)
+    local placeholder = '"CHANGE-ME-IN-PRODUCTION"'
+    local i = template_str:find(placeholder, 1, true)
+    if not i then return template_str end
+    return template_str:sub(1, i - 1)
+        .. '"' .. secret .. '"'
+        .. template_str:sub(i + #placeholder)
+end
+
 -- Scaffold extra files for the `htmx` profile. Called from main()
 -- AFTER the default scaffold has run, so it only adds files that
 -- don't conflict with the base set. Uses the same track_file/track_dir
@@ -1568,6 +1609,9 @@ local function scaffold_htmx(dir, runtime, track_file, track_dir)
     local ext  = (runtime == "js") and ".js" or ".lua"
     local app_template  = (runtime == "js") and templates.htmx_js_app  or templates.htmx_lua_app
     local test_template = (runtime == "js") and templates.htmx_test_js or templates.htmx_test_lua
+
+    -- Bake a fresh CSRF secret into this scaffold's app file.
+    app_template = inject_csrf_secret(app_template, fresh_csrf_secret())
 
     -- Override the default app.lua and test_app.lua with the htmx
     -- versions. ensure_file is no-op when the file exists, so this

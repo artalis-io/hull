@@ -36,6 +36,13 @@
 import { json } from "hull:json";
 import { session } from "hull:web:middleware:session";
 
+// Bounds the flash queue so a misbehaving handler can't grow
+// session.flash unboundedly. The whole queue is JSON-encoded into
+// the session row on every write; an unbounded queue balloons
+// session storage.
+const FLASH_MAX_ENTRIES = 16;
+const FLASH_MAX_TEXT_BYTES = 4096;
+
 // Resolve the current session object from req.ctx, hydrating from
 // session.load() if the middleware hasn't populated it yet. Returns
 // [sessObject, sessionId] or [null, null] if no session.
@@ -76,9 +83,17 @@ function set(req, text, kind) {
         );
     }
     if (!sess.flash) sess.flash = [];
+    // Silently drop when the queue is at the cap — a handler
+    // accumulating without consuming is buggy; growing the session
+    // row to multiple KB on every render is worse than dropping.
+    if (sess.flash.length >= FLASH_MAX_ENTRIES) return;
+    let s = String(text);
+    if (s.length > FLASH_MAX_TEXT_BYTES) {
+        s = s.slice(0, FLASH_MAX_TEXT_BYTES);
+    }
     sess.flash.push({
-        text: String(text),
-        kind: kind || "info",
+        text: s,
+        kind: kind == null ? "info" : String(kind),
     });
     session.update(sid, sess);
 }
@@ -128,7 +143,10 @@ function trigger(res, text, kind) {
         throw new Error("flash.trigger: text is required");
     }
     const payload = json.encode({
-        flash: { text: String(text), kind: kind || "info" },
+        flash: {
+            text: String(text),
+            kind: kind == null ? "info" : String(kind),
+        },
     });
     res.header("HX-Trigger", payload);
 }

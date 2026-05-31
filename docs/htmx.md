@@ -234,6 +234,19 @@ res:html(template.render("partials/flash.html",
 
 `hx-swap-oob` ("out of band") tells HTMX: this element targets `#flash-zone` regardless of the request's main `hx-target`. Auto-dismiss via a small inline script with the page nonce, or via a CSS animation.
 
+### Composing `flash.trigger` with other `HX-Trigger` events
+
+`flash.trigger(res, text, kind?)` sets `HX-Trigger` directly. A handler that ALSO calls `htmx.trigger(res, "saved")` would overwrite the flash event (last write wins). To fire multiple events in one response, skip `flash.trigger` and call `htmx.trigger` once with a table:
+
+```lua
+htmx.trigger(res, {
+    saved = { id = 42 },
+    flash = { text = "Saved.", kind = "success" },
+})
+```
+
+The client-side `htmx:on:flash` listener fires the same way; the multi-event payload is HTMX-native.
+
 ---
 
 ## Search + debounce

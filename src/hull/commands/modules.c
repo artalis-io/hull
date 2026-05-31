@@ -27,25 +27,40 @@
 
 /* ── Helpers ─────────────────────────────────────────────────────── */
 
+/* Canonical cap-bit → label table. Keep in sync with the bits in
+ * include/hull/module_registry.h (HL_MOD_CAP_*). Used by both the
+ * human formatter (above) and the JSON writer (below) so the two
+ * outputs never drift. HL_MOD_CAP_HTTP is the back-compat alias
+ * for HTTP_CLIENT | HTTP_SERVER; we don't print it separately
+ * because every module that has it also has one of the two
+ * granular bits set. */
+static const struct {
+    uint32_t bit;
+    const char *name;
+} CAP_TABLE[] = {
+    { HL_MOD_CAP_FS,          "fs"               },
+    { HL_MOD_CAP_HOSTS,       "hosts"            },
+    { HL_MOD_CAP_ENV,         "env"              },
+    { HL_MOD_CAP_DB,          "build:db"         },
+    { HL_MOD_CAP_WASM,        "build:wasm"       },
+    { HL_MOD_CAP_GPU,         "build:gpu"        },
+    { HL_MOD_CAP_HTTP_CLIENT, "build:http-client" },
+    { HL_MOD_CAP_HTTP_SERVER, "build:http-server" },
+    { HL_MOD_CAP_TUI,         "build:tui"        },
+    { 0, NULL }
+};
+
 static void format_caps_human(uint32_t caps, char *out, size_t cap)
 {
     /* Append a comma-separated list of human cap names. */
     if (!caps) { snprintf(out, cap, "none"); return; }
     out[0] = '\0';
-    const struct { uint32_t bit; const char *name; } table[] = {
-        { HL_MOD_CAP_FS,    "fs"      },
-        { HL_MOD_CAP_HOSTS, "hosts"   },
-        { HL_MOD_CAP_ENV,   "env"     },
-        { HL_MOD_CAP_DB,    "build:db"   },
-        { HL_MOD_CAP_WASM,  "build:wasm" },
-        { HL_MOD_CAP_GPU,   "build:gpu"  },
-        { 0, NULL }
-    };
     int first = 1;
-    for (int i = 0; table[i].name; i++) {
-        if (caps & table[i].bit) {
+    for (int i = 0; CAP_TABLE[i].name; i++) {
+        if (caps & CAP_TABLE[i].bit) {
             size_t n = strlen(out);
-            snprintf(out + n, cap - n, "%s%s", first ? "" : ", ", table[i].name);
+            snprintf(out + n, cap - n, "%s%s",
+                     first ? "" : ", ", CAP_TABLE[i].name);
             first = 0;
         }
     }
@@ -61,18 +76,10 @@ static void write_spec_json(ShJsonWriter *w, const HlModuleSpec *s)
 
     sh_json_write_key(w, "required_caps");
     sh_json_write_array_start(w);
-    const struct { uint32_t bit; const char *name; } table[] = {
-        { HL_MOD_CAP_FS,    "fs"      },
-        { HL_MOD_CAP_HOSTS, "hosts"   },
-        { HL_MOD_CAP_ENV,   "env"     },
-        { HL_MOD_CAP_DB,    "build:db"   },
-        { HL_MOD_CAP_WASM,  "build:wasm" },
-        { HL_MOD_CAP_GPU,   "build:gpu"  },
-        { 0, NULL }
-    };
-    for (int i = 0; table[i].name; i++)
-        if (s->required_caps & table[i].bit)
-            sh_json_write_string(w, table[i].name);
+    /* Same CAP_TABLE as format_caps_human (single source of truth). */
+    for (int i = 0; CAP_TABLE[i].name; i++)
+        if (s->required_caps & CAP_TABLE[i].bit)
+            sh_json_write_string(w, CAP_TABLE[i].name);
     sh_json_write_array_end(w);
 
     sh_json_write_key(w, "deps");

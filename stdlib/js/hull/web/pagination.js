@@ -35,7 +35,17 @@ function toInt(x, defaultVal) {
 
 // Build the URL for a given page, preserving (and not duplicating)
 // the per_page param when it differs from the default.
+//
+// Contract for `base`: a path + optional query string (no fragment,
+// no CRLF). Reject CRLF/NUL hard — if a caller fed user input here,
+// a malformed base could land in a Location/Link header and become
+// a response-splitting vector. The function does NOT dedupe an
+// existing `page=` / `per_page=` in the base query string; callers
+// that pass a query-bearing base must own that themselves.
 function urlFor(base, page, perPage, defaultPerPage) {
+    if (base && /[\r\n\x00]/.test(base)) {
+        throw new Error("pagination: baseUrl must not contain CR / LF / NUL");
+    }
     if (!base) {
         let url = "?page=" + page;
         if (perPage && perPage !== defaultPerPage) {
@@ -75,10 +85,18 @@ function urlFor(base, page, perPage, defaultPerPage) {
  */
 function fromQuery(req, opts) {
     opts = opts || {};
-    const defaultPerPage = opts.defaultPerPage || 20;
-    const maxPerPage     = opts.maxPerPage || 100;
+    // Use ?? not || so a developer passing { defaultPerPage: 0 } gets
+    // a coerced toInt fallback (still meaningful) instead of silently
+    // becoming 20. The clamp below then enforces >=1 either way.
+    const defaultPerPage = opts.defaultPerPage ?? 20;
+    const maxPerPage     = opts.maxPerPage ?? 100;
     const query = (req && req.query) || {};
-    const page = clamp(toInt(query.page, 1), 1, Number.MAX_SAFE_INTEGER);
+    // Upper bound on page is 1e9. Without it, `?page=9007199254740992`
+    // (anywhere near MAX_SAFE_INTEGER) flows into `offset = (page-1)
+    // * per_page` producing trillion-row SQL offsets — SQLite handles
+    // them in O(1) before scanning, but the math is wasted and the
+    // bound should be small enough to fit in any sane integer type.
+    const page = clamp(toInt(query.page, 1), 1, 1e9);
     const perPage = clamp(toInt(query.per_page, defaultPerPage),
                           1, maxPerPage);
     return {
@@ -112,15 +130,16 @@ function fromQuery(req, opts) {
  */
 function render(total, opts) {
     opts = opts || {};
-    const perPage = opts.per_page || 20;
-    const defaultPerPage = opts.defaultPerPage || perPage;
-    const base = opts.baseUrl || "";
+    // ?? not || so caller-supplied 0 doesn't silently collapse.
+    const perPage = opts.per_page ?? 20;
+    const defaultPerPage = opts.defaultPerPage ?? perPage;
+    const base = opts.baseUrl ?? "";
     let window = opts.window == null ? 2 : opts.window;
     if (window < 0) window = 0;
     if (total < 0) total = 0;
 
     const pages = Math.max(1, Math.ceil(total / perPage));
-    const page = clamp(opts.page || 1, 1, pages);
+    const page = clamp(opts.page ?? 1, 1, pages);
 
     // Collect target page numbers as a set, then sort numerically.
     const targets = new Set([1, pages, page]);

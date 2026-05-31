@@ -109,4 +109,58 @@ test("consume returns empty when req is nil", function()
     assert_eq(#msgs, 0)
 end)
 
+-- ── session-backed round trip ───────────────────────────────────────
+
+local session = require('hull.web.middleware.session')
+session.init({ ttl = 60 })
+
+local function ctx_for_new_session()
+    local sid = session.create({})
+    return { ctx = { session_id = sid } }
+end
+
+test("set + consume round-trip persists and clears in one cycle", function()
+    local req = ctx_for_new_session()
+    flash.set(req, "First message.", "info")
+    flash.set(req, "Second message.", "success")
+    local msgs = flash.consume(req)
+    assert_eq(#msgs, 2)
+    assert_eq(msgs[1].text, "First message.")
+    assert_eq(msgs[1].kind, "info")
+    assert_eq(msgs[2].text, "Second message.")
+    assert_eq(msgs[2].kind, "success")
+    -- Second consume on the same req → empty (one-shot semantics).
+    local empty = flash.consume(req)
+    assert_eq(#empty, 0)
+end)
+
+test("consume across separate requests in the same session", function()
+    local sid = session.create({})
+    -- Request A: stash.
+    flash.set({ ctx = { session_id = sid } }, "across requests")
+    -- Request B (separate req table, same session id): consume.
+    local msgs = flash.consume({ ctx = { session_id = sid } })
+    assert_eq(#msgs, 1)
+    assert_eq(msgs[1].text, "across requests")
+end)
+
+test("set bounded at FLASH_MAX_ENTRIES (16); excess silently dropped", function()
+    local req = ctx_for_new_session()
+    for i = 1, 25 do
+        flash.set(req, "msg-" .. i, "info")
+    end
+    local msgs = flash.consume(req)
+    assert_eq(#msgs, 16, "queue capped at 16")
+    assert_eq(msgs[1].text, "msg-1", "first-in preserved")
+    assert_eq(msgs[16].text, "msg-16", "later messages dropped")
+end)
+
+test("set truncates text exceeding 4 KiB", function()
+    local req = ctx_for_new_session()
+    flash.set(req, string.rep("a", 5000), "info")
+    local msgs = flash.consume(req)
+    assert_eq(#msgs, 1)
+    assert_eq(#msgs[1].text, 4096)
+end)
+
 return { pass = pass, fail = fail }

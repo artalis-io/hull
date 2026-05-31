@@ -97,10 +97,12 @@ app.usePost("*", "/*", csrf.middleware({
 // `Idempotency-Key` header (HTMX double-clicks land here when the
 // form opts in via `hx-headers`). Scoped to mutating methods.
 app.usePost("POST",  "/*", idempotency.middleware({
-    getPrincipal: (req) => req.ctx.session_id || "__anon",
+    getPrincipal: (req) => req.ctx.session_id != null
+                            ? String(req.ctx.session_id) : "__anon",
 }));
 app.usePost("PATCH", "/*", idempotency.middleware({
-    getPrincipal: (req) => req.ctx.session_id || "__anon",
+    getPrincipal: (req) => req.ctx.session_id != null
+                            ? String(req.ctx.session_id) : "__anon",
 }));
 
 app.get("/", (req, res) => {
@@ -210,10 +212,17 @@ app.get("/search", (req, res) => {
             + "ORDER BY id DESC LIMIT 20"
         );
     } else {
+        // Escape LIKE wildcards (% _ \) so a search for "100%"
+        // matches the literal "100%" instead of "everything after
+        // 100". The ESCAPE '\' clause tells SQLite which char is
+        // our escape. Parameterization protects against SQL
+        // injection separately.
+        const esc = q.replace(/[\\%_]/g, "\\$&");
         rows = db.query(
             "SELECT id, title, done FROM todos "
-            + "WHERE title LIKE ? ORDER BY id DESC LIMIT 20",
-            ["%" + q + "%"]
+            + "WHERE title LIKE ? ESCAPE '\\' "
+            + "ORDER BY id DESC LIMIT 20",
+            ["%" + esc + "%"]
         );
     }
     if (htmx.is(req)) {
@@ -230,7 +239,8 @@ app.get("/search", (req, res) => {
 });
 
 app.post("/todos/:id/toggle", (req, res) => {
-    const id = parseInt(req.params.id, 10);
+    const id = Number.parseInt(req.params.id, 10);
+    if (!Number.isInteger(id) || id < 1) { res.status(404); return; }
     db.exec("UPDATE todos SET done = NOT done WHERE id = ?", [id]);
     const row = db.query("SELECT id, title, done FROM todos WHERE id = ?", [id])[0];
     if (!row) { res.status(404); return; }
@@ -253,7 +263,8 @@ app.post("/todos/:id/toggle", (req, res) => {
 // POST + _method=PATCH override). The example is HTMX-only.
 
 app.get("/todos/:id/edit", (req, res) => {
-    const id = parseInt(req.params.id, 10);
+    const id = Number.parseInt(req.params.id, 10);
+    if (!Number.isInteger(id) || id < 1) { res.status(404); return; }
     const row = db.query(
         "SELECT id, title, done FROM todos WHERE id = ?", [id])[0];
     if (!row) { res.status(404); return; }
@@ -264,7 +275,8 @@ app.get("/todos/:id/edit", (req, res) => {
 });
 
 app.get("/todos/:id", (req, res) => {
-    const id = parseInt(req.params.id, 10);
+    const id = Number.parseInt(req.params.id, 10);
+    if (!Number.isInteger(id) || id < 1) { res.status(404); return; }
     const row = db.query(
         "SELECT id, title, done FROM todos WHERE id = ?", [id])[0];
     if (!row) { res.status(404); return; }
@@ -276,7 +288,8 @@ app.get("/todos/:id", (req, res) => {
 });
 
 app.patch("/todos/:id", (req, res) => {
-    const id = parseInt(req.params.id, 10);
+    const id = Number.parseInt(req.params.id, 10);
+    if (!Number.isInteger(id) || id < 1) { res.status(404); return; }
     const fields = form.parse(req.body || "");
     const title = (fields.title || "").trim();
     if (title === "") {
@@ -300,7 +313,8 @@ app.patch("/todos/:id", (req, res) => {
 });
 
 app.delete("/todos/:id", (req, res) => {
-    const id = parseInt(req.params.id, 10);
+    const id = Number.parseInt(req.params.id, 10);
+    if (!Number.isInteger(id) || id < 1) { res.status(404); return; }
     db.exec("DELETE FROM todos WHERE id = ?", [id]);
     if (htmx.is(req)) {
         res.html("");

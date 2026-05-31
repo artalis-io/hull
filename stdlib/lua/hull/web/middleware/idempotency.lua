@@ -357,11 +357,19 @@ local function cache_and_send(req, res, status_code, body_str, content_type, ext
         -- Phase 6 audit M-3: filter headers through the allowlist
         -- before writing to SQLite so credential headers never
         -- persist on disk for the TTL.
-        local filtered = { ["Content-Type"] = content_type }
+        --
+        -- All keys are normalised to lowercase before stash. The
+        -- replay path matches case-insensitively on read, so a
+        -- caller passing `Content-Type` (mixed) and our own
+        -- `content-type` (lower) would otherwise both land in the
+        -- blob and emit two headers on replay. Lowercase keeps the
+        -- blob clean and matches the convention of every HTTP
+        -- spec since 7230.
+        local filtered = { ["content-type"] = content_type }
         if extra_headers then
             for k, v in pairs(extra_headers) do
                 if is_replayable_header(k) and header_value_safe(v) then
-                    filtered[k] = v
+                    filtered[k:lower()] = v
                 end
             end
         end

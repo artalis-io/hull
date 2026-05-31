@@ -98,21 +98,6 @@ int hl_module_set_count(const HlResolvedModuleSet *s)
 #define ERR4(fmt, a, b, c, d) \
     do { if (errbuf && errlen) snprintf(errbuf, errlen, fmt, (a), (b), (c), (d)); } while (0)
 
-/* Capabilities the *manifest* claims (versus what the build provides). */
-static uint32_t manifest_provided_caps(const HlManifest *m)
-{
-    uint32_t caps = 0;
-    if (!m) return 0;
-    if (m->fs_read_count > 0 || m->fs_write_count > 0) caps |= HL_MOD_CAP_FS;
-    if (m->hosts_count > 0)                            caps |= HL_MOD_CAP_HOSTS;
-    if (m->env_count > 0)                              caps |= HL_MOD_CAP_ENV;
-    /* DB / WASM / GPU are compile-time gated AND manifest-gated;
-     * the resolver only checks the compile-time bit here. The manifest
-     * fields (compute, gpu) are surfaced by the runtime wiring, not by
-     * the module declaration. */
-    return caps;
-}
-
 /* Capabilities the *build* provides (compile-time flags). */
 static uint32_t build_provided_caps(void)
 {
@@ -178,7 +163,6 @@ int hl_module_resolver_resolve(const HlManifest *manifest,
     /* No manifest, or manifest with no `modules` key: intrinsic only. */
     if (!manifest || !manifest->modules_declared) return 0;
 
-    const uint32_t prov_manifest = manifest_provided_caps(manifest);
     const uint32_t prov_build    = build_provided_caps();
     const uint32_t build_cap_mask = HL_MOD_CAP_DB | HL_MOD_CAP_WASM
                                     | HL_MOD_CAP_GPU | HL_MOD_CAP_HTTP
@@ -196,7 +180,14 @@ int hl_module_resolver_resolve(const HlManifest *manifest,
              * fuzzy-suggest path so users see "renamed to X in v0.2.0"
              * instead of the more vague "did you mean X?". Entries can
              * be removed after a few releases once the migration
-             * window closes. */
+             * window closes.
+             *
+             * Ordering note: this fires before the api_major check
+             * below — a user declaring `cookie@99` gets the rename
+             * hint, not a version-mismatch error. Intentional: the
+             * rename is the dominant cause of name resolution failure
+             * in v0.2.0; a misleading version mismatch would push the
+             * user toward fixing the wrong thing. */
             static const struct { const char *old; const char *new; }
                 V0_2_0_RENAMES[] = {
                 {"hull/cookie",                   "hull/web/cookie"},
@@ -279,9 +270,15 @@ int hl_module_resolver_resolve(const HlManifest *manifest,
          * is documentation, not a load-time requirement. */
         uint32_t need = spec->required_caps;
         uint32_t need_build = need & build_cap_mask;
-        (void)prov_manifest;  /* manifest-cap surfacing intentional; see above */
 
-        for (uint32_t bit = 1; bit; bit <<= 1) {
+        /* Walk the cap-bit space by index instead of shifting until
+         * overflow. Cap bits are at indices 0..8 today (see
+         * include/hull/module_registry.h); 32 iterations is a no-op
+         * upper bound that lets the loop terminate without relying on
+         * unsigned-wrap-to-zero. Counter is `bi` (not `i`) so it
+         * doesn't shadow the outer manifest-modules loop counter. */
+        for (int bi = 0; bi < 32; bi++) {
+            uint32_t bit = 1u << bi;
             if (!(need_build & bit)) continue;
             if (!(prov_build & bit)) {
                 ERR2("module '%s' requires %s, but it is disabled in "
@@ -348,9 +345,11 @@ int hl_module_resolver_resolve(const HlManifest *manifest,
                 if (get_bit(out, dep_idx)) continue;  /* already in */
 
                 /* Re-check build-time gates for the dep — auto-admit
-                 * must not bypass HL_ENABLE_* requirements. */
+                 * must not bypass HL_ENABLE_* requirements. Same
+                 * counter-based loop as Pass 1 (see comment there). */
                 uint32_t need_build = dep_spec->required_caps & build_cap_mask;
-                for (uint32_t bit = 1; bit; bit <<= 1) {
+                for (int bi = 0; bi < 32; bi++) {
+                    uint32_t bit = 1u << bi;
                     if (!(need_build & bit)) continue;
                     if (!(prov_build & bit)) {
                         ERR3("module '%s' transitively requires '%s', "

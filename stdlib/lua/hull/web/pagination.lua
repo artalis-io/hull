@@ -33,7 +33,18 @@ end
 
 -- Build the URL for a given page, preserving (and not duplicating)
 -- the per_page param when it differs from the default.
+--
+-- Contract for `base`: a path + optional query string (no fragment,
+-- no CRLF). Reject CRLF/NUL hard — if a caller fed user input here,
+-- a malformed base could land in a Location/Link header and become
+-- a response-splitting vector. The function does NOT dedupe an
+-- existing `page=` / `per_page=` in the base query string; callers
+-- that pass a query-bearing base must own that themselves (cheaper
+-- than re-parsing the query for every link in the nav).
 local function url_for(base, page, per_page, default_per_page)
+    if base and base:find("[\r\n%z]") then
+        error("pagination: base_url must not contain CR / LF / NUL", 2)
+    end
     if not base or base == "" then
         local url = "?page=" .. page
         if per_page and per_page ~= default_per_page then
@@ -71,7 +82,12 @@ function pagination.from_query(req, opts)
     local default_per_page = opts.default_per_page or 20
     local max_per_page     = opts.max_per_page or 100
     local query = (req and req.query) or {}
-    local page = clamp(to_int(query.page, 1), 1, 2^53)
+    -- Upper bound on page is 1e9. Without it, `?page=9007199254740992`
+    -- (anywhere near 2^53) flows into `offset = (page-1) * per_page`
+    -- producing trillion-row SQL offsets — SQLite handles them in
+    -- O(1) before scanning, but the math is wasted and the bound
+    -- should be small enough to fit in any sane integer type.
+    local page = clamp(to_int(query.page, 1), 1, 1e9)
     local per_page = clamp(to_int(query.per_page, default_per_page),
                            1, max_per_page)
     return {

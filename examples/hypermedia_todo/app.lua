@@ -209,10 +209,16 @@ app.get("/search", function(req, res)
             "SELECT id, title, done FROM todos "
             .. "ORDER BY id DESC LIMIT 20")
     else
+        -- Escape LIKE wildcards (% _ \) so a search for "100%"
+        -- matches the literal "100%" instead of "everything after
+        -- 100". ESCAPE '\' tells SQLite which char is our escape.
+        -- Parameterization protects against SQL injection separately.
+        local esc = q:gsub("[\\%%_]", "\\%0")
         rows = db.query(
             "SELECT id, title, done FROM todos "
-            .. "WHERE title LIKE ? ORDER BY id DESC LIMIT 20",
-            { "%" .. q .. "%" })
+            .. "WHERE title LIKE ? ESCAPE '\\' "
+            .. "ORDER BY id DESC LIMIT 20",
+            { "%" .. esc .. "%" })
     end
     if htmx.is(req) then
         local parts = {}

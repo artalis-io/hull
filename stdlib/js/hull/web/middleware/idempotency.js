@@ -210,9 +210,13 @@ function middleware(opts) {
                 // Fingerprint mismatch. Constant-time comparison even though
                 // fingerprints are SHA-256 of public inputs (method+path+body),
                 // for consistency with jwt.js / csrf.js.
-                let diff = (row.fingerprint || "").length === fingerprint.length ? 0 : 1;
-                for (let i = 0; i < fingerprint.length && i < (row.fingerprint || "").length; i++)
-                    diff |= row.fingerprint.charCodeAt(i) ^ fingerprint.charCodeAt(i);
+                // Hoist `rfp` so the `charCodeAt` call below can't read off a
+                // (theoretically) null row.fingerprint — schema has NOT NULL
+                // so it's defensive, but explicit > implicit (audit J#3).
+                const rfp = row.fingerprint || "";
+                let diff = rfp.length === fingerprint.length ? 0 : 1;
+                for (let i = 0; i < fingerprint.length && i < rfp.length; i++)
+                    diff |= rfp.charCodeAt(i) ^ fingerprint.charCodeAt(i);
                 if (diff !== 0) {
                     res.status(409);
                     res.json({ error: "idempotency key already used with different request body" });
@@ -229,6 +233,12 @@ function middleware(opts) {
                 // Completed with cached response
                 if (row.state === "complete" && row.status) {
                     res.status(row.status);
+                    // Decode once. Walk once. M-7 filtering AND
+                    // Content-Type detection both happen in the
+                    // single pass so a corrupted blob can't throw
+                    // an uncaught SyntaxError from a second decode
+                    // path (audit J#1).
+                    let replayedCt = null;
                     if (row.response_headers) {
                         let headers;
                         try { headers = json.decode(row.response_headers); }
@@ -247,28 +257,18 @@ function middleware(opts) {
                                 if (typeof v !== "string") continue;
                                 if (/[\r\n\x00]/.test(v)) continue;
                                 res.header(k, v);
-                            }
-                        }
-                    }
-                    // Replay Content-Type from cached headers if present
-                    // (respond() / respondHtml() always stash one). Default
-                    // to application/json for back-compat with old cached
-                    // rows from before respondHtml() existed.
-                    let replayedCt = null;
-                    if (row.response_headers) {
-                        const headers2 = json.decode(row.response_headers);
-                        if (headers2) {
-                            const keys2 = Object.keys(headers2);
-                            for (let j = 0; j < keys2.length; j++) {
-                                if (keys2[j].toLowerCase() === "content-type") {
-                                    replayedCt = headers2[keys2[j]];
-                                    break;
+                                if (k.toLowerCase() === "content-type") {
+                                    replayedCt = v;
                                 }
                             }
                         }
                     }
                     res.header("X-Idempotency-Replay", "true");
                     if (row.response_body) {
+                        // Default to application/json for back-compat
+                        // with old cached rows from before respondHtml()
+                        // existed; respond()/respondHtml() always stash
+                        // a Content-Type now so this branch is rare.
                         if (!replayedCt) {
                             res.header("Content-Type", "application/json");
                         }
@@ -346,7 +346,13 @@ function cacheAndSend(req, res, statusCode, bodyStr, contentType, extraHeaders, 
         // Phase 6 audit M-3: filter headers through the allowlist
         // before writing to SQLite so credential headers never
         // persist on disk for the TTL.
-        const filtered = { "Content-Type": contentType };
+        //
+        // All keys normalised to lowercase before stash. The replay
+        // path matches case-insensitively on read, so a caller passing
+        // `Content-Type` (mixed) and our own `content-type` (lower)
+        // would otherwise both land in the blob and emit two headers
+        // on replay (audit J#2).
+        const filtered = { "content-type": contentType };
         if (extraHeaders) {
             const keys = Object.keys(extraHeaders);
             for (let i = 0; i < keys.length; i++) {
@@ -355,7 +361,7 @@ function cacheAndSend(req, res, statusCode, bodyStr, contentType, extraHeaders, 
                 if (!isReplayableHeader(k)) continue;
                 if (typeof v !== "string") continue;
                 if (/[\r\n\x00]/.test(v)) continue;
-                filtered[k] = v;
+                filtered[k.toLowerCase()] = v;
             }
         }
         const headersStr = json.encode(filtered);
