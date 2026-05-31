@@ -8,6 +8,11 @@ test("GET / returns full HTML page", function()
     test.eq(res.status, 200)
     test.ok(string.find(res.body, "<!doctype html>"), "should be a full page")
     test.ok(string.find(res.body, "id=\"todos\""), "should contain todo list")
+    -- Loading indicator wired up at the body level + spinner div present.
+    test.ok(string.find(res.body, 'hx-indicator="#spinner"', 1, true),
+            "body should declare hx-indicator")
+    test.ok(string.find(res.body, 'id="spinner"', 1, true),
+            "spinner div should be in the page")
 end)
 
 test("POST /todos with hx-request returns fragment, not redirect", function()

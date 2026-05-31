@@ -438,6 +438,99 @@ pick option 1.
 
 ---
 
+## Loading indicator
+
+Every htmx request is a network round-trip. Slow responses without
+visual feedback feel broken. HTMX has a built-in mechanism:
+
+1. Mark an element as the indicator with `class="htmx-indicator"`.
+2. Reference it via `hx-indicator="#id"` on whichever element fires
+   the request (or on a parent — the attribute inherits to children).
+3. While a request is in-flight, HTMX adds `class="htmx-request"` to
+   the indicator. CSS reveals it.
+
+### Global indicator (the scaffold ships this)
+
+A single spinner in the top-right corner, used for every request:
+
+```html
+<body hx-indicator="#spinner">
+  <div id="spinner" class="htmx-indicator" aria-hidden="true"></div>
+  ...
+</body>
+```
+
+```css
+#spinner {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  width: 1.5rem;
+  height: 1.5rem;
+  border: 0.2rem solid var(--pico-muted-border-color, #ccc);
+  border-top-color: var(--pico-primary, #1095c1);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  pointer-events: none;
+  z-index: 1000;
+}
+.htmx-indicator {
+  opacity: 0;
+  transition: opacity 200ms ease-in;
+}
+.htmx-indicator.htmx-request,
+.htmx-request .htmx-indicator {
+  opacity: 1;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+```
+
+The 200ms transition delay means fast (<200ms) responses don't flash
+a spinner, which would feel jittery. Slow ones fade in smoothly.
+
+### Per-element indicator
+
+Override the inherited body-level indicator on specific requests
+(e.g., a "Save" button that should show inline feedback inside its
+own form):
+
+```html
+<form hx-patch="/todos/{{ t.id }}"
+      hx-target="#todo-{{ t.id }}"
+      hx-indicator="#row-saving-{{ t.id }}">
+  ...
+  <button type="submit">Save</button>
+  <span id="row-saving-{{ t.id }}" class="htmx-indicator">saving…</span>
+</form>
+```
+
+The CSS `.htmx-request .htmx-indicator { opacity: 1 }` rule also
+covers the case where the indicator is a child of the triggering
+form — htmx adds `htmx-request` to the form during the request.
+
+### Pico's `aria-busy="true"` alternative
+
+Pico v2 has built-in styling for `aria-busy="true"` (renders a small
+spinner inline). Apps that prefer Pico's native idiom can wire htmx
+events to toggle the attribute via tiny JS:
+
+```html
+<button id="save-btn" hx-patch="/todos/42"
+        onclick="this.setAttribute('aria-busy','true')">Save</button>
+<script nonce="{{ csp_nonce }}">
+  document.body.addEventListener("htmx:afterRequest", (e) => {
+    if (e.target.id === "save-btn") e.target.removeAttribute("aria-busy");
+  });
+</script>
+```
+
+The `.htmx-indicator` mechanism is simpler when you don't need
+button-state changes. Pick whichever fits the UX better.
+
+---
+
 ## Empty states
 
 Hull's template engine treats empty Lua tables as truthy. To branch on emptiness:

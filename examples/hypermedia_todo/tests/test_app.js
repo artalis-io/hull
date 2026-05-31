@@ -8,6 +8,10 @@ test("GET / returns full HTML page", async () => {
     test.eq(res.status, 200);
     test.ok(res.body.includes("<!doctype html>"), "should be a full page");
     test.ok(res.body.includes('id="todos"'), "should contain todo list");
+    test.ok(res.body.includes('hx-indicator="#spinner"'),
+            "body should declare hx-indicator");
+    test.ok(res.body.includes('id="spinner"'),
+            "spinner div should be in the page");
 });
 
 test("POST /todos with hx-request returns fragment, not redirect", async () => {

@@ -680,7 +680,8 @@ templates.htmx_base_html = [[<!doctype html>
   <link rel="stylesheet" nonce="{{ csp_nonce }}" href="/static/app.css">
   <script nonce="{{ csp_nonce }}" src="/static/vendor/htmx.min.js"></script>
 </head>
-<body>
+<body hx-indicator="#spinner">
+  <div id="spinner" class="htmx-indicator" aria-hidden="true"></div>
   <main>
     {% include "partials/_flash.html" %}
     {% block body %}{% end %}
@@ -819,6 +820,37 @@ ul#todos li button {
   margin-left: auto;
   padding: 0 0.5rem;
 }
+
+/* HTMX loading indicator. The base layout sets
+ * `<body hx-indicator="#spinner">` so every htmx-driven request
+ * inherits the target. htmx adds `class="htmx-request"` to #spinner
+ * while a request is in-flight; the transition delay means quick
+ * (<200ms) responses don't flash a spinner. The double selector
+ * keeps per-element `hx-indicator` overrides working too. */
+#spinner {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  width: 1.5rem;
+  height: 1.5rem;
+  border: 0.2rem solid var(--pico-muted-border-color, #ccc);
+  border-top-color: var(--pico-primary, #1095c1);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  pointer-events: none;
+  z-index: 1000;
+}
+.htmx-indicator {
+  opacity: 0;
+  transition: opacity 200ms ease-in;
+}
+.htmx-indicator.htmx-request,
+.htmx-request .htmx-indicator {
+  opacity: 1;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
 ]]
 
 templates.htmx_migration = [[-- Migration: 001_init
@@ -841,6 +873,8 @@ test("GET / returns full HTML page", function()
     test.eq(res.status, 200)
     test.ok(string.find(res.body, "<!doctype html>"), "should be a full page")
     test.ok(string.find(res.body, "id=\"todos\""), "should contain todo list")
+    test.ok(string.find(res.body, 'hx-indicator="#spinner"', 1, true),
+            "body should declare hx-indicator")
 end)
 
 test("POST /todos with hx-request returns fragment, not redirect", function()
@@ -1007,6 +1041,8 @@ test("GET / returns full HTML page", async () => {
     test.eq(res.status, 200);
     test.ok(res.body.includes("<!doctype html>"), "should be a full page");
     test.ok(res.body.includes('id="todos"'), "should contain todo list");
+    test.ok(res.body.includes('hx-indicator="#spinner"'),
+            "body should declare hx-indicator");
 });
 
 test("POST /todos with hx-request returns fragment, not redirect", async () => {
