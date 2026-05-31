@@ -155,10 +155,40 @@ static int cmd_available(int argc, char **argv, const HlCommandEnv *env)
         return 0;
     }
 
-    printf("First-party Hull module registry — %zu entries\n\n", total);
-    for (size_t i = 0; i < total; i++) {
-        print_spec_human(&all[i]);
-        printf("\n");
+    printf("First-party Hull module registry — %zu entries\n", total);
+
+    /* Section grouping (v0.2.0): show the namespace shape so a user
+     * eyeballing the list sees the web/ cluster as a unit. Registry
+     * sort order doesn't naturally cluster sections (hull/worker
+     * sorts after hull/web entries), so iterate once per section.
+     * The order is intrinsic -> general utilities -> web
+     * (HTTP/HTML/realtime) -> web middleware. */
+    static const struct {
+        const char *header;
+        int         sec_id;
+    } SECTIONS[] = {
+        { "Intrinsic (always declared)",              0 },
+        { "Core (runtime + cross-cutting utilities)", 1 },
+        { "Web (HTTP / HTML / real-time)",            2 },
+        { "Web middleware",                           3 },
+    };
+    for (size_t s = 0; s < sizeof(SECTIONS) / sizeof(SECTIONS[0]); s++) {
+        int printed_header = 0;
+        for (size_t i = 0; i < total; i++) {
+            const char *name = all[i].name;
+            int section;
+            if      (strcmp(name, "hull/app") == 0)                  section = 0;
+            else if (strncmp(name, "hull/web/middleware/", 20) == 0) section = 3;
+            else if (strncmp(name, "hull/web/", 9) == 0)             section = 2;
+            else                                                     section = 1;
+            if (section != SECTIONS[s].sec_id) continue;
+            if (!printed_header) {
+                printf("\n== %s ==\n\n", SECTIONS[s].header);
+                printed_header = 1;
+            }
+            print_spec_human(&all[i]);
+            printf("\n");
+        }
     }
     return 0;
 }
