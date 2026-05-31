@@ -410,6 +410,198 @@ commit). Apps that mix both must accept eventual consistency.
 
 ---
 
+## 1.3 Web stdlib namespace reorganization (target v0.2.0)
+
+**Priority:** High. Foundational — `hull/web/*` is the namespace the
+§1.4 future helpers (`flash`, `pagination`, `table`) are born under;
+this section moves the *existing* strictly-web modules to match. Done
+once, before the surface grows further.
+
+**Motivation.** Today the stdlib registry mixes strictly-web modules
+(`hull/cookie`, `hull/form`, `hull/htmx`, `hull/sse`, `hull/ws-*`) with
+runtime-agnostic ones (`hull/db`, `hull/log`, `hull/crypto`, `hull/i18n`,
+…) at the same flat namespace level. As the web surface grows
+(§1.4 flash/pagination/table, §1.5.d styled-confirm/CSP-report, etc.)
+the flat namespace becomes a soup. Moving the strictly-web modules
+under `hull/web/*` mirrors the established `hull/middleware/*`
+precedent and lets `hull modules available` group output meaningfully.
+
+**Locked design decisions (2026-05-31):**
+
+- **Namespace name: `hull/web/*`.** Broad enough to cover HTTP-protocol
+  concerns (cookie, session, CSRF, form), HTML rendering (htmx, future
+  flash/pagination/table), and real-time delivery (ws, sse). Matches
+  the standard ecosystem term ("web framework", "web middleware").
+- **Hard break in v0.2.0, no back-compat aliases.** Old names fail at
+  module-load with a fix-it hint: `module 'hull/cookie@1' was renamed
+  to 'hull/web/cookie@1' in v0.2.0`. Pre-1.0 conventions allow
+  breaking changes in minors; soft-landing aliases would carry
+  indefinitely and pollute `hull modules available` output.
+- **v0.2.0 is the version bump.** Pre-1.0 minor. Tag carries
+  `BREAKING:` lead and a migration table in the release notes.
+- **`hull/jwt@1` stays flat.** Cross-cutting: API auth, CLI tokens,
+  service-to-service. Not strictly web.
+- **`hull/http-server@1` stays flat.** Foundational — the layer
+  `hull/web/*` is built on top of. Convention: `hull/web/*` are
+  *consumers* of http-server, not http-server itself.
+- **`hull/template@1` stays flat.** The engine itself is content-type
+  agnostic. Theoretically reusable for emails, configs, codegen.
+- **`hull/http-client@1`, `hull/email@1`, `hull/smtp@1` stay flat.**
+  Cross-cutting (CLI fetches APIs, batch jobs send mail, etc.).
+
+**Move table:**
+
+| Today | v0.2.0 |
+|---|---|
+| `hull/cookie@1` | `hull/web/cookie@1` |
+| `hull/form@1` | `hull/web/form@1` |
+| `hull/htmx@1` | `hull/web/htmx@1` |
+| `hull/sse@1` | `hull/web/sse@1` |
+| `hull/ws-server@1` | `hull/web/ws-server@1` |
+| `hull/ws-client@1` | `hull/web/ws-client@1` |
+| `hull/middleware/auth@1` | `hull/web/middleware/auth@1` |
+| `hull/middleware/cors@1` | `hull/web/middleware/cors@1` |
+| `hull/middleware/csp@1` | `hull/web/middleware/csp@1` |
+| `hull/middleware/csrf@1` | `hull/web/middleware/csrf@1` |
+| `hull/middleware/etag@1` | `hull/web/middleware/etag@1` |
+| `hull/middleware/health@1` | `hull/web/middleware/health@1` |
+| `hull/middleware/idempotency@1` | `hull/web/middleware/idempotency@1` |
+| `hull/middleware/inbox@1` | `hull/web/middleware/inbox@1` |
+| `hull/middleware/logger@1` | `hull/web/middleware/logger@1` |
+| `hull/middleware/outbox@1` | `hull/web/middleware/outbox@1` |
+| `hull/middleware/ratelimit@1` | `hull/web/middleware/ratelimit@1` |
+| `hull/middleware/rbac@1` | `hull/web/middleware/rbac@1` |
+| `hull/middleware/session@1` | `hull/web/middleware/session@1` |
+| `hull/middleware/transaction@1` | `hull/web/middleware/transaction@1` |
+
+(Unchanged: `hull/jwt`, `hull/http-server`, `hull/http-client`,
+`hull/template`, `hull/email`, `hull/smtp`, `hull/app`, `hull/db`,
+`hull/log`, `hull/json`, `hull/crypto`, `hull/time`, `hull/env`,
+`hull/fs`, `hull/i18n`, `hull/validate`, `hull/csv`, `hull/search`,
+`hull/image`, `hull/compute`, `hull/gpu`, `hull/timers`, `hull/worker`,
+`hull/tui`, `hull/inspect`.)
+
+**Coupling with §1.4 and §1.5.c.** The flash/pagination/table helpers
+are already designed for `hull/web/*`. To avoid a two-step migration
+for users (adopt `hull/web/flash@1` in v0.1.10, then re-migrate
+existing modules in v0.2.0), §1.4 and §1.5.c are likely best
+bundled into v0.2.0 itself — one coherent "web stdlib reorganization
++ companion expansion" release. v0.1.9 (multipart) ships under the
+current names; v0.2.0 ships the rename and the new helpers together.
+
+**Tasks (v0.2.0):**
+
+- [ ] §1.3-1. Module registry: rename the 20 affected entries in
+      `src/hull/module_registry.c`. Resort the table by canonical name
+      (`hull/middleware/*` rows disappear, `hull/web/middleware/*`
+      rows take their place at the new sort position; `hull/cookie`
+      rows likewise). Update inline comments noting the rename.
+- [ ] §1.3-2. Resolver fix-it hint. When an app declares one of the
+      20 old names, emit `module 'hull/cookie@1' was renamed to
+      'hull/web/cookie@1' in v0.2.0; update app.manifest.modules` and
+      fail fast. Test fixture for each renamed module.
+- [ ] §1.3-3. Stdlib cross-references. Every stdlib module that
+      `require`s / `import`s a renamed module updates to the new path.
+      Run `grep -rn 'require("hull.cookie")' stdlib/lua/` (and the
+      JS / middleware equivalents) to find them all.
+- [ ] §1.3-4. Examples sweep. `examples/auth`, `examples/todo`,
+      `examples/hypermedia_todo`, `examples/jwt_api`, and any other
+      example that uses a renamed module updates its
+      `app.manifest.modules` + require/import sites + tests.
+- [ ] §1.3-5. Scaffold sweep. `stdlib/cli/lua/hull/init.lua` (every
+      profile including `--profile htmx`) emits the new names.
+- [ ] §1.3-6. Docs sweep. CLAUDE.md, README.md, docs/htmx.md,
+      docs/agent_guide.md, docs/security.md, every
+      `stdlib/context/*.md` topic doc that references a renamed
+      module. Single PR; sed-able for most cases but tables need
+      hand-review.
+- [ ] §1.3-7. Completion sweep. Update `hull modules available --tui`
+      grouping (group `hull/web/*` and `hull/web/middleware/*` together
+      in the picker) and the bash/zsh/fish completion tables that list
+      modules.
+- [ ] §1.3-8. `hull modules available` output format. Group rows by
+      first segment (`hull/`, `hull/web/`, `hull/web/middleware/`,
+      etc.) with section headers. Improves discoverability of the
+      reorganized surface.
+- [ ] §1.3-9. Release notes for v0.2.0. Lead with `BREAKING:` and the
+      full move table. Migration recipe: a one-liner sed for `app.lua`
+      / `app.js` plus the manifest update.
+
+**Out of scope:** automated codemod tool. Hand-edit + sed is enough
+for the surface area; a one-shot subcommand would take longer to
+write than the migration takes for any real app.
+
+---
+
+## 1.4 General web stdlib companions (runtime-agnostic)
+
+**Priority:** Medium. A handful of small modules that any web app
+needs regardless of frontend strategy (REST API, server-rendered,
+HTMX, hybrid). Grouped here so they don't get pulled into
+HTMX-specific batches and so non-HTMX apps can still find them. The
+HTMX scaffold (§1.5) wires them in opportunistically.
+
+**Locked design principles:**
+
+- **General-purpose, not HTMX-coupled.** HTMX-specific emission paths
+  exist as additional optional methods on each module, never as the
+  module's reason to exist.
+- **One stdlib module per concern.** Lua + JS parity, manifest
+  declaration, unit tests. Cross-referenced from §1.5 where the
+  HTMX scaffold should wire them in.
+- **Namespace: `hull/web/*`.** Matches the existing `hull/middleware/*`
+  precedent — a sub-namespace for "convenience helpers a web app
+  needs on top of the foundational primitives." Foundational
+  web modules that predate this convention (`hull/template@1`,
+  `hull/cookie@1`, `hull/form@1`, `hull/jwt@1`, etc.) keep their
+  flat names; the `web/` namespace is for new layered helpers
+  going forward.
+
+**Tasks (target v0.1.10):**
+
+- [ ] §1.4-1. `hull/web/flash@1` (Lua + JS). One-shot user notifications.
+      The classic POST/redirect/GET helper, applicable to any web
+      app. `flash.set(req, text, kind?)` stashes in session;
+      `flash.consume(req)` drains for the next render. HTMX bonus
+      path: `flash.trigger(res, text, kind?)` emits
+      `HX-Trigger: {"flash":{...}}` for fragment-swap paths that
+      bypass the redirect. Template partial `partials/_flash.html`
+      for default rendering. Unit tests for both emission paths.
+      Wire into `examples/hypermedia_todo` (POST handlers) and
+      optionally `examples/auth` (login success).
+- [ ] §1.4-2. `hull/web/pagination@1` (Lua + JS). Server-side helper
+      for `?page=N&per_page=M` paginated lists. Useful for REST
+      JSON endpoints, server-rendered pages, and HTMX fragment
+      swaps alike. `pagination.from_query(req, opts)` returns
+      `{page, per_page, offset, limit}`; `pagination.render(total,
+      opts)` returns `{total, pages, page, prev, next, links[]}`
+      suitable for templates or JSON serialization. Partial
+      `partials/_pagination.html` for HTML rendering. Scoped to
+      offset-based pagination; cursor-based deferred. Demo:
+      paginated todo list in `examples/hypermedia_todo`.
+
+**Future candidates (no target):**
+
+- `hull/web/table@1` — server-rendered sortable/filterable list
+  helper. Generic core: parse `?sort=col&dir=asc&filter[k]=v` from
+  the query; validate sort/filter columns against an allowlist
+  (prevents enumeration + SQL injection); build `ORDER BY` / `WHERE`
+  fragments; render a plain HTML `<table>` partial with
+  `<th><a href="?sort=...">Header</a></th>` headers that work
+  without JS. HTMX opt-in: `{ htmx = { target = "#table-body" } }`
+  swaps the anchor `href` for `hx-get` + `hx-target` so header clicks
+  do fragment swaps. Same generic-with-HTMX-opt-in shape as
+  `hull/web/flash@1`. Pairs with `hull/web/pagination@1` for the
+  canonical CRUD list view.
+- Request ID propagation helpers.
+- Canonical-URL / trailing-slash redirect middleware.
+- Content negotiation helper.
+- `robots.txt` / `sitemap.xml` generator.
+
+Add here when surfaced by a real app build-out.
+
+---
+
 ## 1.5 Hypermedia web application profile (HTMX + Pico)
 
 **Priority:** High. Fills the gap between full-page SSR apps and
@@ -499,43 +691,262 @@ and helpers.
 - [ ] §1.5.a-6. `examples/hypermedia_todo` (Lua + JS). Demonstrates the
       pattern: full-page render on plain GET, fragment render on
       `HX-Request`, optimistic row replacement, validation errors as a
-      fragment, flash messages, CSRF on htmx requests. Tests for both
+      fragment, flash messages (documented OOB pattern; proper module
+      helper lands in §1.4-1), CSRF on htmx requests. Tests for both
       htmx and plain-form paths.
 - [ ] §1.5.a-7. `docs/htmx.md` pattern guide. Architectural pattern,
       response-header helpers, CSP nonce integration, CSRF on htmx
-      requests, validation errors as fragments, flash messages, empty
-      states, testing patterns.
+      requests, validation errors as fragments, flash messages
+      (documented `hx-swap-oob` recipe; promoted to a stdlib module
+      in §1.4-1), empty states, testing patterns.
 
 ### 1.5.b Streaming multipart + attachment storage (target v0.1.9)
 
-**Locked design decisions (2026-05-30):**
+**Locked design decisions (2026-05-31):**
 
 - **Keel multipart parser is in scope.** Bumps Hull's Keel pin when the
   parser lands. Per-part disposition + size + MIME parsed; body streams
-  to a caller-provided callback rather than buffering.
+  via an iterator (no full-body buffering).
 - **Runtime parity:** Lua + JS for `hull/attachment` and the multipart
   bindings.
 - **Photo upload demo lands in `examples/hypermedia_todo`** rather than a
   new example. v0.1.8 ships the example without uploads; v0.1.9 adds them.
+- **Multipart API shape: iterator.** Most Hull-idiomatic, matches how
+  `db.query` streams rows.
+  - Lua: `for part in req:multipart() do ... end` where each `part` has
+    `name`, `filename`, `content_type`, `headers`, and `part:chunks(n)`
+    iterator for streaming bytes.
+  - JS: `for await (const part of req.multipart()) { ... }` where each
+    `part` has `name`, `filename`, `contentType`, `headers`, and an
+    async `part.chunks(n)` iterator.
+  - Per-part cap, total-body cap, and max-parts count enforced by the
+    parser; exceeded caps abort with 413.
+- **MIME validation: header + sniff (defense-in-depth).** Reject by
+  client `Content-Type` against the manifest allowlist on the fast
+  path; then content-sniff the first 4 KiB on accepted parts and
+  record the sniffed MIME in metadata. If sniffed MIME disagrees
+  with the header on a stored part, the metadata row's `mime` is the
+  sniffed value (truth-by-bytes); `declared_mime` retains the header
+  for audit. Sniffer covers PNG/JPEG/GIF/WebP/PDF/PNG/SVG/plain-text
+  via magic bytes; CSV / JSON fall through to header.
+- **Storage layout + manifest contract: piggyback on `fs.write` +
+  module init.** Manifest declares `fs = { write = {"data/attachments"} }`;
+  app calls `attachment.init({dir, max_size, max_total, mime_allowlist,
+  sniff = true})` explicitly. Storage layout:
+  `<dir>/<sha256[0:2]>/<sha256>` (content-addressed; dedup is free).
+  Metadata in SQLite table `_hull_attachments` (id, sha256,
+  original_name, mime, declared_mime, size, uploaded_by, uploaded_at,
+  refcount).
+- **GC strategy: refcount-based, opportunistic + scheduled.**
+  Application code calls `attachment.delete(id)` which decrements the
+  refcount; when refcount hits zero, the row is marked `pending_gc`.
+  An `attachment.cleanup()` helper (called from `app.daily(...)` in
+  the scaffold) sweeps `pending_gc` rows older than 24h and removes
+  the on-disk content. Background scan to detect orphaned files
+  (on disk but not in DB) is a separate `attachment.scrub()` for
+  ops use, NOT scheduled by default.
 
 **Tasks (v0.1.9):**
 
 - [ ] §1.5.b-1. Streaming multipart parser in Keel. Per-part
-      content-disposition, filename, content-type, size. Streaming write
-      via callback. Tests + sanitizer coverage.
-- [ ] §1.5.b-2. `hull/attachment@1` module (Lua + JS). Manifest declares
-      `fs_write` location, MIME allowlist, size limits. Metadata table
-      (id, original_name, mime, size, sha256, uploaded_at, uploader).
-      Secure download routes with auth + path validation. GC for
-      orphaned files.
-- [ ] §1.5.b-3. Photo upload demo in `examples/hypermedia_todo` (Lua +
-      JS). Drag-and-drop or file-input upload, attachment listing,
-      delete with confirm. Tests.
-- [ ] §1.5.b-4. Docs: extend `docs/htmx.md` with the upload pattern.
-      New `docs/attachments.md` covering MIME-validation, storage layout,
-      GC strategy.
+      content-disposition, filename, content-type, size. Iterator-shaped
+      API exposed to Hull via `kl_request_multipart_next(...)`. Per-part
+      cap, total-body cap, max-parts count enforced; 413 on overflow.
+      Tests + sanitizer coverage.
+- [ ] §1.5.b-2. Hull-side iterator bindings for Lua + JS.
+      `req:multipart()` (Lua iterator) and `req.multipart()` (JS async
+      iterator). Each part exposes `part:chunks(n)` /  `part.chunks(n)`
+      for streaming reads. Tests covering single-part, multi-part,
+      large-file, cap-exceeded, malformed-boundary, premature-close.
+- [ ] §1.5.b-3. Content-MIME sniffer in `src/hull/cap/mime.c`. Magic-byte
+      table for PNG/JPEG/GIF/WebP/PDF/SVG/plain-text. Header
+      `hl_cap_mime_sniff(buf, len)` returns canonical MIME or NULL.
+      Unit tests with fixture files.
+- [ ] §1.5.b-4. `hull/attachment@1` module (Lua + JS). Reads
+      `attachment.init(opts)` config; calls into multipart bindings;
+      writes content-addressed under `opts.dir`. Metadata via
+      `_hull_attachments` table (migration auto-applied on first init).
+      API: `attachment.store(part, opts) -> id`,
+      `attachment.read(id) -> stream`, `attachment.read_to_file(id, dst)`,
+      `attachment.metadata(id)`, `attachment.delete(id)`,
+      `attachment.cleanup()`, `attachment.scrub()` (ops-only).
+      Secure download route helper: `attachment.serve(req, res, id,
+      { auth_check = fn })`. Tests for happy path, MIME-mismatch,
+      cap-exceeded, refcount, dedup, GC.
+- [ ] §1.5.b-5. Photo upload demo in `examples/hypermedia_todo` (Lua +
+      JS). File-input upload (drag-and-drop deferred to §1.5.e), per-todo
+      attachment listing, delete with confirm. Tests covering upload +
+      list + delete cycle.
+- [ ] §1.5.b-6. Docs: extend `docs/htmx.md` with the upload pattern
+      (form encoding, progress events via HTMX, validation feedback for
+      rejected MIMEs). New `docs/attachments.md` covering API surface,
+      MIME-validation (header + sniff), storage layout, refcount GC,
+      `attachment.scrub()` for ops, manifest declaration.
 
-### 1.5.c Enterprise / internal-app gaps surfaced by §1.5 (deferred, no target)
+### 1.5.c HTMX-specific stdlib companions. Tier 1 (target v0.1.10)
+
+**Motivation.** v0.1.8 shipped the HTMX core (helper module, CSP, CSRF,
+session, scaffold, example, docs). v0.1.9 adds multipart for file
+uploads. Both close obvious gaps, but a developer building a real
+internal tool on top of `hull init --profile htmx` still has to
+hand-roll several patterns that every HTMX app needs in week one. This
+section groups the HTMX-specific ones; the generic ones live in §1.4.
+
+**Locked design principles:**
+
+- **Stdlib modules, not example boilerplate.** Each pattern lands as
+  `hull/<name>@1` with Lua + JS parity, manifest declaration, unit
+  tests. Examples then demonstrate, not invent.
+- **`examples/hypermedia_todo` is the showcase.** All patterns visible
+  in the canonical example without bloating it past ~400 lines per
+  runtime.
+- **No new vendored JS unless the cost is justified.** The HTMX
+  `response-targets` extension is the only candidate; everything else
+  is server-side helper + template + CSS.
+
+**Cross-references to §1.4** (generic web helpers that the HTMX
+scaffold should also wire in during the same v0.1.10 release):
+
+- §1.4-1 `hull/web/flash@1` — replace the silent POST/redirect/GET
+  success in `examples/hypermedia_todo`; document the
+  `HX-Trigger: flash` path in `docs/htmx.md`.
+- §1.4-2 `hull/web/pagination@1` — paginate the todo list demo;
+  document the fragment-swap pattern for "load more" / page-link
+  navigation in `docs/htmx.md`.
+
+**Tasks (v0.1.10, HTMX-specific):**
+
+- [ ] §1.5.c-1. Search + debounce snippet pattern. NOT a stdlib module.
+      Just a documented `hx-get` + `hx-trigger="keyup changed delay:300ms"`
+      + ratelimit middleware recipe in `docs/htmx.md` and a
+      `/search` route in `examples/hypermedia_todo` that filters
+      todos by title. Tests for empty + matching + non-matching
+      queries.
+- [ ] §1.5.c-2. Inline-edit pattern. Click row → swap to form → submit
+      → swap back. Add canonical `GET /todos/:id/edit` (returns form
+      fragment) and `PATCH /todos/:id` (returns row fragment) to
+      `examples/hypermedia_todo`. **HTMX-only** for the example
+      (uses `hx-patch`); doc note in `docs/htmx.md` about the
+      Rails-style `POST /todos/:id?_method=PATCH` recipe for apps
+      that want plain-form degradation. CSRF token freshness: doc
+      note recommending `max_age = 4 * 3600` for HTMX apps + a
+      `csrf.refresh(req, res)` helper that re-issues the token on
+      any fragment response (so long-running edit cycles don't expire
+      mid-flow).
+- [ ] §1.5.c-3. Loading-indicator scaffold. Add a Pico-compatible
+      `.htmx-indicator` spinner block to scaffold `static/app.css`
+      and a one-line `<div id="spinner" class="htmx-indicator">…</div>`
+      to `templates/base.html`. Document `hx-indicator="#spinner"`
+      and per-element spinners in `docs/htmx.md`.
+- [ ] §1.5.c-4. Form re-population on validation error. The canonical
+      HTMX form pattern: submit → server validates → server returns the
+      same form fragment with submitted values pre-filled and per-field
+      error messages inline. Doc recipe in `docs/htmx.md` showing the
+      template-driven approach (`{{ values.title }}` + `{% if
+      errors.title %}<small role="alert">{{ errors.title }}</small>{% end
+      %}`). Add a `partials/_form_field.html` to the scaffold that
+      bundles label + input + error + value-preservation. The
+      `examples/hypermedia_todo` create form uses it. Wire the existing
+      `hull.validate` output shape into the partial so handlers stay
+      one-liner.
+- [ ] §1.5.c-5. Wire `hull/middleware/idempotency@1` into the scaffold
+      for POST/PATCH routes by default. Today the module exists but
+      apps must opt in. Scaffolded `app.{lua,js}` calls
+      `idempotency.init()` + `app.use_post("POST", "/*",
+      idempotency.middleware({ get_principal = ... }))` so HTMX
+      double-clicks return the cached response instead of double-writing.
+      Doc note in `docs/htmx.md` § Idempotency.
+
+### 1.5.d HTMX stdlib companions. Tier 2 patterns (no target)
+
+**Motivation.** These are real gaps that show up once the app has
+real users, but are not blocking week-one development. Batch when
+prioritized.
+
+**Tasks:**
+
+- [ ] §1.5.d-1. Vendor `htmx-ext-response-targets.min.js` (SHA-pinned
+      via `make fetch-htmx`). Add `htmx.error_target(res, "#err")` helper.
+      Scaffold opts in via `<body hx-ext="response-targets">`. Doc
+      note in `docs/htmx.md` covering the success-vs-error swap-target
+      split.
+- [ ] §1.5.d-2. Out-of-band swap helper. `htmx.oob(fragment_html,
+      selector?, swap?)` composes safely; `htmx.compose(primary,
+      oob_blocks)` concatenates with the right markup. Avoids hand
+      string-building of `hx-swap-oob="…"` attributes. Tests covering
+      multi-OOB composition.
+- [ ] §1.5.d-3. HTMX-friendly ratelimit response. Extend
+      `hull/middleware/ratelimit@1` with a `htmx_response` option.
+      Behavior when set + `HX-Request: true`: first try to push a
+      flash entry via `hull/web/flash@1` if it's declared (`flash.push(req,
+      "Rate limit exceeded", "error")`), fall back to
+      `HX-Trigger: {"rate-limited":{"retry_after_s": N}}` for apps
+      without flash. Status code remains 429 either way. Default
+      behavior (JSON 429 for non-HTMX requests) unchanged.
+- [ ] §1.5.d-4. Vendor `htmx-ext-sse.min.js` + HTMX-SSE bridge demo.
+      SHA-pinned via `make fetch-htmx`. Add to `examples/hypermedia_todo`
+      (live "items just changed" feed) rather than a new example. Both
+      runtimes. Tests for the SSE-fragment-swap round trip.
+- [ ] §1.5.d-5. Vendor `htmx-ext-ws.min.js` + HTMX-WS bridge demo.
+      SHA-pinned via `make fetch-htmx`. Pair with `app.ws("/chat", ...)`
+      in a separate `examples/hypermedia_chat` (Lua + JS) — the
+      bidirectional pattern is distinct enough from todo to warrant its
+      own example. Tests.
+- [ ] §1.5.d-6. History / back-button doc section in `docs/htmx.md`.
+      Cover `hx-push-url="true"`, the trade-off vs. fragment-only swap
+      (Back may show stale DOM), HTMX's history snapshot mechanism, and
+      the canonical "if you push URL, also wire up the full-page
+      fallback" pattern. No new code; pure docs.
+- [ ] §1.5.d-7. Polling pattern doc section in `docs/htmx.md`.
+      `hx-trigger="every 5s"` as the lightweight alternative to SSE for
+      dashboards. Caveats: pair with ETag + 304 for cheap polls, server
+      load scaling with N clients. ~30 lines of docs.
+- [ ] §1.5.d-8. Styled confirmation dialog. `hx-confirm` triggers the
+      ugly browser `window.confirm()`. Add `htmx.confirm_dialog(opts)`
+      helper + a Pico `<dialog>`-based partial `partials/_confirm.html`
+      that wires to `htmx:confirm` event. Scaffold opt-in. Tests for the
+      confirm-then-submit and cancel paths.
+- [ ] §1.5.d-9. CSP report-uri endpoint helper. Optional
+      `csp.report_handler({path = "/csp-report", log_fn = ...})` middleware
+      that accepts the browser's CSP violation reports, parses the JSON,
+      and emits one structured log line per violation. Useful during
+      rollout to catch nonce regressions. ~50 lines.
+
+### 1.5.e HTMX polish. Tier 3 (no target)
+
+**Motivation.** Nice-to-have. Pick off opportunistically when touching
+adjacent code.
+
+**Tasks:**
+
+- [ ] §1.5.e-1. View Transitions API integration. Document the
+      `hx-swap="transition:true"` recipe + a `prefers-reduced-motion`
+      fallback. Scaffold opt-in via base template.
+- [ ] §1.5.e-2. Static asset fingerprinting for **all of `/static/*`**
+      (not just vendored). Template helper `{{ static('app.css') }}` in
+      Lua templates and `{{ static('vendor/htmx.min.js') }}` style across
+      both runtimes, rendering to `/static/<path>?v=<sha8>` (or
+      `/static/<sha8>/<path>` if we go content-hashed). At `hull build`
+      time, walk `static/`, compute SHA-256 of each file's bytes, emit
+      a name → 8-hex manifest baked into the binary. Fingerprinted
+      requests get `Cache-Control: public, max-age=31536000, immutable`;
+      unfingerprinted requests keep today's `max-age=86400` behavior.
+      Dev mode: helper returns mtime-based suffix so hot reload works
+      without rebuilding. Doc note about how to opt out per asset.
+- [ ] §1.5.e-3. ARIA live region in base template for fragment-swap
+      announcements. `<div aria-live="polite" id="sr-announce" class="visually-hidden"></div>`
+      + `htmx.on("htmx:afterSwap", announce)` snippet documented.
+- [ ] §1.5.e-4. Dark-mode toggle. Pico v2 supports `data-theme` natively;
+      add a `<details role="list">` theme picker partial to the
+      scaffold with `localStorage` persistence. ~30 lines of JS,
+      nonce-friendly.
+- [ ] §1.5.e-5. i18n wired into the scaffold. `hull/i18n@1` exists
+      but the scaffold doesn't use it. Add an `i18n.init(...)` call,
+      sample `locales/en.json` + `locales/de.json`, template
+      `{{ "todo.title" | t }}` usage. Doc note in `docs/htmx.md`
+      about RTL handling + `Accept-Language` detection.
+
+### 1.5.f Enterprise / internal-app gaps surfaced by §1.5 (deferred, no target)
 
 These are real gaps any internal-tools developer will hit, but they are
 independent of HTMX itself. Tracked here so they don't get lost; each
@@ -562,10 +973,19 @@ needs its own design pass + estimate before scheduling. Items marked
       of the above without retention / SIEM / hash-chain. Records who
       changed which business object, before/after values, source request,
       timestamp, optional reason.
-- [ ] Reusable admin UI conventions for paginated tables, filter forms,
-      inline validation, confirm-delete flows, flash messages, optimistic
-      row replacement (as a stdlib doc + helper module rather than just
-      example boilerplate).
+- [ ] Reusable admin UI conventions for the patterns not already covered
+      by §1.4 (flash, pagination) or §1.5.c-§1.5.e (inline edit, search
+      debounce, loading indicator, styled confirm, form re-population):
+      filter forms, optimistic row replacement (with rollback on server
+      error), bulk-select + bulk-action toolbars, sortable table headers
+      (`hx-get="?sort=..."`). Stdlib doc + helper module rather than
+      example boilerplate.
+- [ ] Optimistic concurrency control for the lost-update problem
+      (two users edit the same record; last write silently wins).
+      Standard fix: `If-Match: <etag>` on PATCH, or a `version`
+      column with `WHERE version = ?`. Helper `concurrency.guard(req,
+      res, current_version)` that returns 412 Precondition Failed when
+      stale. Doc note in `docs/htmx.md` about pairing with inline edit.
 - [ ] Import/export workflow helpers: CSV preview, per-row validation
       errors, dry-run mode, commit step, background processing hooks for
       large imports.
