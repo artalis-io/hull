@@ -593,12 +593,16 @@ HTMX scaffold (§1.5) wires them in opportunistically.
   do fragment swaps. Same generic-with-HTMX-opt-in shape as
   `hull/web/flash@1`. Pairs with `hull/web/pagination@1` for the
   canonical CRUD list view.
-- `hull/web/seo@1` — Open Graph / Twitter Card / JSON-LD helpers.
-  Template-friendly: `seo.tags({ title, description, image, type,
-  card = "summary_large_image" })` returns the full `<meta>` set
-  for the page `<head>`. `seo.json_ld(structured_data)` renders the
+- `hull/web/seo@1` *(cloud-deployed apps only)* — Open Graph /
+  Twitter Card / JSON-LD helpers. Template-friendly: `seo.tags({
+  title, description, image, type, card = "summary_large_image" })`
+  returns the full `<meta>` set for the page `<head>`.
+  `seo.json_ld(structured_data)` renders the
   `<script type="application/ld+json">` block. Pairs with the
-  canonical-URL middleware (below).
+  canonical-URL middleware (below). Out of scope for Hull's
+  local-first majority (internal tools, CLI utilities, auth-walled
+  admin apps don't need any of this); relevant only for the
+  public-facing cloud-deployed slice.
 - `hull/web/openapi@1` — Spec generator for the JSON half of
   HTMX-hybrid apps (HTMX routes returning HTML coexist with
   `/api/*` routes returning JSON). Walks `app.get/post/...`
@@ -2338,55 +2342,66 @@ Three items the audits flagged as deserving unit tests (currently e2e-only):
 
 ---
 
-## 7. Observability (OpenTelemetry + structured logs + metrics)
+## 7. Observability (structured logs + metrics + traces)
 
-**Priority:** High. Hull has `--audit` which emits JSON capability
-events to stderr, and `hull.middleware.logger` emits logfmt request
-lines. Both are useful for local dev. Neither is what a production
-deployment expects in 2026: traces in Jaeger/Tempo, metrics in
-Prometheus/Datadog, logs ingested by Loki/Splunk/CloudWatch. Modern
-SaaS apps can't run blind in production — when a request takes 8s,
-you need to know if it was the DB or an outbound API.
+Hull's local-first majority gets observability for free: `--audit`
+emits JSON capability events, `hull.middleware.logger` emits logfmt
+request lines, both go to stderr where `tail -f` / `grep` / `jq`
+work fine. The local-deployment case (single binary, single host,
+single process) is fully covered by what's already shipped.
 
-This is the missing piece between "Hull demos cleanly" and "I'd ship
-real revenue on this".
-
-**Three sub-items, ordered by user impact:**
+This section is for the **cloud-deployed multi-service slice**:
+apps running behind a load balancer where requests flow through
+multiple Hull instances, where stderr is captured by a log
+aggregator, where ops needs to answer "which of these 12 instances
+served the request that took 8s, and was it the DB or an outbound
+API?" That's not Hull's identity question; it's a complementary
+deployment mode. The priorities below reflect that.
 
 ### 7.1 Structured-JSON request log alongside logfmt
 
+**Priority:** Medium. Useful for ANY deployment that pipes logs to
+an aggregator — that includes some local-first setups (Loki on a
+homelab, journald → systemd-cat → jq), so the win isn't strictly
+cloud-only.
+
 Today `logger.middleware` emits one logfmt line per request. Add an
 `opts.format = "json" | "logfmt"` (default logfmt for human dev,
-JSON for production). JSON shape matches the de-facto common
-contract Datadog / Loki / Splunk Cloud accept:
-`{timestamp, level, msg, method, path, status, duration_ms, request_id,
-session_id, user_id?, ...}`. Small change, large operational win.
+JSON when set). Shape matches the de-facto contract Datadog / Loki
+/ Splunk Cloud / journald accept: `{timestamp, level, msg, method,
+path, status, duration_ms, request_id, session_id, user_id?, ...}`.
+Small change, broadly useful.
 
 ### 7.2 Prometheus-format metrics exporter
+
+**Priority:** Low for local apps; Medium for cloud-deployed apps.
+Single-instance local apps see `hull doctor` / a quick `htop` and
+move on. Multi-instance fleets need pull-scraped metrics.
 
 `hull/web/middleware/metrics@1` exposes `/metrics` in Prometheus
 exposition format. Built-in metrics: request-count, request-duration
 histogram (per method + status), in-flight requests, DB-query count,
 WASM/GPU call count + duration. Apps add custom counters via
-`metrics.counter("name", { labels = {...} }):inc()`. Pull-based
-scraping is the most operationally-friendly default — no exporter
-process, no push-gateway. Optionally a `--metrics-port` flag to
-separate the scrape endpoint from the public listener.
+`metrics.counter("name", { labels = {...} }):inc()`. Optional
+`--metrics-port` to separate the scrape endpoint from the public
+listener.
 
 ### 7.3 OpenTelemetry traces (W3C `traceparent` propagation)
 
-`hull/web/middleware/otel@1`. Reads incoming `traceparent` header,
-generates spans for the request lifecycle (route match, middleware
-chain, handler, DB queries, outbound HTTP, WASM/GPU dispatch).
-Exports via OTLP/HTTP to a collector (no embedded vendor SDK
-dependency). Adds `traceparent` to outbound `http.fetch` calls so
-the trace propagates across services. Each span carries the
-`request_id` so traces correlate with logs and metrics.
+**Priority:** Low. Distributed tracing solves "where did this request
+spend its 8s across 5 services?" — which is a problem local-first
+apps don't have (they ARE the whole system). Add when there's an
+explicit user asking; until then the implementation cost (spans,
+context propagation, exporter buffering, batching) isn't worth
+carrying.
 
-Implementation cost is real (spans, context propagation, exporter
-buffering, batching) but unavoidable for serious production
-deployments. Look at OpenTelemetry-C / OpenTelemetry-Lua for prior
-art; the OTLP/HTTP wire format is the most stable surface.
+If/when built: `hull/web/middleware/otel@1`. Reads incoming
+`traceparent` header, generates spans for the request lifecycle
+(route match, middleware chain, handler, DB queries, outbound HTTP,
+WASM/GPU dispatch). Exports via OTLP/HTTP to a collector (no
+embedded vendor SDK dependency). Adds `traceparent` to outbound
+`http.fetch` calls. Spans carry the `request_id` so traces correlate
+with logs.
 
 ---
 
