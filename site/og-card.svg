@@ -34,7 +34,7 @@
     <g transform="translate(118, 8)">
       <rect width="78" height="26" rx="13" fill="rgba(255,255,255,0.025)" stroke="rgba(255,255,255,0.10)"/>
       <circle cx="14" cy="13" r="3" fill="#fafafa"/>
-      <text x="24" y="17" font-family="ui-monospace, 'SF Mono', Menlo, Monaco, monospace" font-size="11" fill="#d4d4d8" letter-spacing="0.04em">v0.1.4</text>
+      <text x="24" y="17" font-family="ui-monospace, 'SF Mono', Menlo, Monaco, monospace" font-size="11" fill="#d4d4d8" letter-spacing="0.04em">v0.2.0</text>
     </g>
   </g>
 

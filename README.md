@@ -78,6 +78,17 @@ examples: [`examples/rest_api_modular/`](examples/rest_api_modular/),
 [`examples/cli_modular/`](examples/cli_modular/),
 [`examples/tui_modular/`](examples/tui_modular/).
 
+For server-rendered HTMX apps, scaffold a hypermedia project in place:
+
+```bash
+hull init --profile htmx
+```
+
+This wires up HTMX 2 + Pico CSS, CSRF + per-request CSP nonce, session-backed
+flash messages, pagination, and an idempotency-aware POST cache. See
+[`examples/hypermedia_todo/`](examples/hypermedia_todo/) for the reference
+app and [docs/htmx.md](docs/htmx.md) for the integration guide.
+
 ### Shell completions
 
 Tab-completion for bash, zsh, and fish is shipped in [`completions/`](completions/). See [completions/README.md](completions/README.md) for install instructions.
@@ -347,6 +358,9 @@ Hull ships a full set of middleware and utility modules for building secure back
 | `cookie` | `hull.web.cookie` | `hull:web:cookie` | Cookie parse/serialize helpers |
 | `jwt` | `hull.jwt` | `hull:jwt` | JWT sign/verify (HMAC-SHA256) |
 | `template` | `hull.template` | `hull:template` | HTML template engine with inheritance, includes, filters |
+| `htmx` | `hull.web.htmx` | `hull:web:htmx` | HTMX server helpers: `is()`, `trigger()`, `reswap()`, `redirect()`, response headers |
+| `flash` | `hull.web.flash` | `hull:web:flash` | Session-backed flash messages with HX-Trigger integration |
+| `pagination` | `hull.web.pagination` | `hull:web:pagination` | Page/per_page query parsing + safe URL builder + offset/limit math |
 | `csv` | `hull.csv` | `hull:csv` | CSV parse/encode (RFC 4180) |
 | `search` | `hull.search` | `hull:search` | Full-text search (SQLite FTS5) |
 | `rbac` | `hull.web.middleware.rbac` | `hull:web:middleware:rbac` | Role-based access control |
@@ -983,6 +997,7 @@ Example apps in both Lua and JavaScript:
 | [webhooks](examples/webhooks/) | Webhook delivery with HMAC-SHA256 signatures |
 | [templates](examples/templates/) | Template engine: inheritance, includes, filters |
 | [todo](examples/todo/) | Full CRUD todo app with HTML frontend and migrations |
+| [hypermedia_todo](examples/hypermedia_todo/) | HTMX hypermedia todo: search, inline edit, flash, pagination, idempotency-cached POST |
 | [bench_db](examples/bench_db/) | SQLite performance benchmarks with migrations |
 | [async_http](examples/async_http/) | Non-blocking HTTP requests via event loop |
 | [timers](examples/timers/) | Background timers with `app.every()` and self-cancellation |
@@ -1403,7 +1418,7 @@ manifest rather than each binary individually are in
 
 ## Status
 
-Hull is at **v0.1.4**. Pre-stable: APIs and the manifest schema may change. Pin versions and read the [changelog](https://github.com/artalis-io/hull/releases) before upgrading.
+Hull is at **v0.2.0**. Pre-stable: APIs and the manifest schema may change. Pin versions and read the [changelog](https://github.com/artalis-io/hull/releases) before upgrading.
 
 **Platform coverage.** Linux (gcc + clang, x86_64 + aarch64), macOS (arm64), and Cosmopolitan APE (multi-arch fat binary). Capability sandbox enforced via pledge/unveil (Linux / Cosmo / OpenBSD) or Seatbelt (macOS). All releases are signed with Ed25519. Verify with `hull verify-release` or in-browser at [verify.gethull.dev](https://verify.gethull.dev).
 

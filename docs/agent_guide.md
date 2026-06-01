@@ -84,7 +84,7 @@ release, verifies the SHA-256 from `hull.sha256`, and installs to
 
 | Variable | Effect |
 |---|---|
-| `HULL_VERSION=v0.1.0` | Pin to a specific tag (default: latest) |
+| `HULL_VERSION=v0.2.0` | Pin to a specific tag (default: latest) |
 | `HULL_PREFIX=~/bin` | Install location |
 | `HULL_FLAVOR=cosmo` | Force the universal binary |
 | `HULL_FORCE=1` | Overwrite existing install |
@@ -1353,7 +1353,7 @@ hull verify --pubkey=$(cat myapp.pub) built/myapp
 
 | Step | Who | What |
 |---|---|---|
-| Tag `v0.1.0` | Maintainer | `git tag v0.1.0 && git push --tags` |
+| Tag `v0.2.0` | Maintainer | `git tag v0.2.0 && git push --tags` |
 | Build | GitHub Actions | Compiles `hull` for linux-x86_64, darwin-arm64, cosmo |
 | Hash | Workflow | Writes `hull.sha256` (3 lines, SHA-256 each) |
 | Sign | Workflow | Uses `HULL_RELEASE_SIGNING_KEY` secret → `hull.sha256.sig` |

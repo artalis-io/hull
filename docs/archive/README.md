@@ -23,7 +23,7 @@ For the current state see [`../README.md`](../README.md).
 
 | Document | Date | Scope | Why archived |
 |---|---|---|---|
-| [`ASSESSMENT.md`](ASSESSMENT.md) | 2026-05-16 | Platform self-assessment ("approaching v0.1.0") | Snapshot before v0.1.0 shipped. Hull is at v0.1.4 now; current investor-facing state lives in [`../INVESTORS.md`](../INVESTORS.md) and the v0.1.4 release notes. |
+| [`ASSESSMENT.md`](ASSESSMENT.md) | 2026-05-16 | Platform self-assessment ("approaching v0.1.0") | Snapshot before v0.1.0 shipped. Hull is at v0.2.0 now; current investor-facing state lives in [`../INVESTORS.md`](../INVESTORS.md) and the v0.2.0 release notes. |
 | [`api_review.md`](api_review.md) | Pre-v0.1.0 | Public-surface review, companion to `stability.md` | One-shot pre-release review; findings either landed or were intentionally rejected. The current API contract lives in [`../stability.md`](../stability.md). |
 
 ## Completed roadmaps (`roadmaps/`)
