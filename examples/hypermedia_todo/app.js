@@ -2,19 +2,19 @@
 // Returns full pages for plain navigation; returns fragments when
 // HX-Request is set. CSRF + per-request CSP nonce wired in by default.
 import { app }         from "hull:app";
-import { htmx }        from "hull:web:htmx";
-import { flash }       from "hull:web:flash";
-import { pagination }  from "hull:web:pagination";
+import { db }          from "hull:db";
+import { log }         from "hull:log";
+import { template }    from "hull:template";
 import { validate }    from "hull:validate";
+import { cookie }      from "hull:web:cookie";
+import { flash }       from "hull:web:flash";
+import { form }        from "hull:web:form";
+import { htmx }        from "hull:web:htmx";
 import { csp }         from "hull:web:middleware:csp";
 import { csrf }        from "hull:web:middleware:csrf";
-import { session }     from "hull:web:middleware:session";
 import { idempotency } from "hull:web:middleware:idempotency";
-import { cookie }      from "hull:web:cookie";
-import { template }    from "hull:template";
-import { form }        from "hull:web:form";
-import { log }         from "hull:log";
-import { db }          from "hull:db";
+import { session }     from "hull:web:middleware:session";
+import { pagination }  from "hull:web:pagination";
 
 // Small default so pagination is visible in the demo with only a
 // handful of todos. Real apps would set this to 20-50.
@@ -70,7 +70,7 @@ if (CSRF_SECRET === "CHANGE-ME-IN-PRODUCTION") {
 // below), so no req.headers patching is needed on this same request.
 function sessionBootstrap(req, res) {
     req.ctx = req.ctx || {};
-    const cookies = cookie.parse(req.headers["cookie"] || "");
+    const cookies = cookie.parse(req.headers.cookie || "");
     let sid = cookies.hull_session;
     if (sid && session.load(sid)) {
         req.ctx.session_id = sid;
@@ -181,7 +181,7 @@ app.post("/todos", (req, res) => {
         // todo_row.html uses `{{ t.X }}` so the same partial works
         // both here (single render) and inside the GET / for-loop
         // (`{% for t in todos %}{% include %}{% end %}`).
-        flash.trigger(res, "Added: " + title, "success");
+        flash.trigger(res, `Added: ${title}`, "success");
         const html =
             template.render("partials/todo_row.html",  { t: { id, title, done: false } })
             + template.render("partials/todo_form.html", { csrf_token: req.ctx.csrf_token });
@@ -192,7 +192,7 @@ app.post("/todos", (req, res) => {
     } else {
         // Plain form post: stash a message in session, redirect.
         // The next GET / will consume + render it.
-        flash.set(req, "Added: " + title, "success");
+        flash.set(req, `Added: ${title}`, "success");
         res.redirect("/");
     }
 });
@@ -204,7 +204,7 @@ app.post("/todos", (req, res) => {
 // inner HTML of the list. Pagination is intentionally not part of
 // the search result — searches always show up to 20 matches.
 app.get("/search", (req, res) => {
-    const q = (((req.query && req.query.q) || "")).trim();
+    const q = (((req.query?.q) || "")).trim();
     let rows;
     if (q === "") {
         rows = db.query(
@@ -222,7 +222,7 @@ app.get("/search", (req, res) => {
             "SELECT id, title, done FROM todos "
             + "WHERE title LIKE ? ESCAPE '\\' "
             + "ORDER BY id DESC LIMIT 20",
-            ["%" + esc + "%"]
+            [`%${esc}%`]
         );
     }
     if (htmx.is(req)) {

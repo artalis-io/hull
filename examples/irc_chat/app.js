@@ -10,14 +10,14 @@
 // See app.lua header for full endpoint + WebSocket protocol documentation.
 
 import { app } from "hull:app";
-import { cookie } from "hull:web:cookie";
 import { crypto } from "hull:crypto";
 import { db } from "hull:db";
 import { log } from "hull:log";
-import { auth } from "hull:web:middleware:auth";
-import { session } from "hull:web:middleware:session";
 import { time } from "hull:time";
 import { validate } from "hull:validate";
+import { cookie } from "hull:web:cookie";
+import { auth } from "hull:web:middleware:auth";
+import { session } from "hull:web:middleware:session";
 import { wsClient } from "hull:web:ws-client";  // connect (outbound federation)
 import { wsServer } from "hull:web:ws-server";              // broadcast, connections
 

@@ -6,9 +6,9 @@
 import { app } from "hull:app";
 import { httpServer } from "hull:http-server";
 import { log } from "hull:log";
+import { time } from "hull:time";
 import { cors } from "hull:web:middleware:cors";
 import { ratelimit } from "hull:web:middleware:ratelimit";
-import { time } from "hull:time";
 
 app.manifest({
     modules: [

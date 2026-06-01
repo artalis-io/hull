@@ -4,14 +4,14 @@
 // Session-based auth API: register, login, logout, protected routes
 
 import { app } from "hull:app";
-import { cookie } from "hull:web:cookie";
 import { crypto } from "hull:crypto";
 import { db } from "hull:db";
 import { log } from "hull:log";
-import { auth } from "hull:web:middleware:auth";
-import { session } from "hull:web:middleware:session";
 import { time } from "hull:time";
 import { validate } from "hull:validate";
+import { cookie } from "hull:web:cookie";
+import { auth } from "hull:web:middleware:auth";
+import { session } from "hull:web:middleware:session";
 
 app.manifest({
     modules: [

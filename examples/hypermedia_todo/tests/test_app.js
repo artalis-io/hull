@@ -20,7 +20,7 @@ test("POST /todos with hx-request returns fragment, not redirect", async () => {
     test.ok(token && token.length > 0, "csrf token should be in form");
     const res = await test.post("/todos", {
         middleware: true,
-        body: "title=buy+milk&_csrf=" + token,
+        body: `title=buy+milk&_csrf=${token}`,
         headers: {
             "hx-request": "true",
             "content-type": "application/x-www-form-urlencoded",
@@ -38,7 +38,7 @@ test("HTMX POST /todos fires flash trigger via HX-Trigger header", async () => {
     const token = home.body.match(/name="_csrf" value="([^"]+)"/)?.[1];
     const res = await test.post("/todos", {
         middleware: true,
-        body: "title=eggs&_csrf=" + token,
+        body: `title=eggs&_csrf=${token}`,
         headers: {
             "hx-request": "true",
             "content-type": "application/x-www-form-urlencoded",
@@ -48,8 +48,8 @@ test("HTMX POST /todos fires flash trigger via HX-Trigger header", async () => {
     });
     test.eq(res.status, 200);
     const trig = res.headers["hx-trigger"];
-    test.ok(trig && trig.includes('"flash"'),
-            "HX-Trigger should carry flash event, got: " + trig);
+    test.ok(trig?.includes('"flash"'),
+            `HX-Trigger should carry flash event, got: ${trig}`);
     test.ok(trig.includes("Added: eggs"),
             "flash payload should include the message");
 });
@@ -61,7 +61,7 @@ test("plain POST /todos sets session flash; next GET renders it", async () => {
     const cookieHdr = home.headers["set-cookie"] || "";
     const post = await test.post("/todos", {
         middleware: true,
-        body: "title=plain+post+todo&_csrf=" + token,
+        body: `title=plain+post+todo&_csrf=${token}`,
         headers: {
             "content-type": "application/x-www-form-urlencoded",
             "cookie": cookieHdr,
@@ -69,7 +69,7 @@ test("plain POST /todos sets session flash; next GET renders it", async () => {
         },
     });
     test.ok(post.status === 302 || post.status === 303,
-            "plain POST should redirect, got: " + post.status);
+            `plain POST should redirect, got: ${post.status}`);
     // Next GET on same session should render the flash.
     const nextGet = await test.get("/", {
         middleware: true,
@@ -93,7 +93,7 @@ test("GET / paginates with ?page=N (default per_page=3 in this demo)", async () 
     db.exec("DELETE FROM todos");
     for (let i = 1; i <= 7; i++) {
         db.exec("INSERT INTO todos (title, done) VALUES (?, 0)",
-                ["pgN-" + i + "-end"]);
+                [`pgN-${i}-end`]);
     }
     const cnt = db.query("SELECT COUNT(*) AS n FROM todos")[0].n;
     test.eq(cnt, 7, "expected 7 todos after seed");
@@ -164,17 +164,17 @@ test("inline edit: GET /todos/:id/edit returns form, PATCH saves + returns row",
         "x-csrf-token": token,
     };
 
-    const edit = await test.get("/todos/" + id + "/edit",
+    const edit = await test.get(`/todos/${id}/edit`,
         { middleware: true, headers: hxHeaders });
     test.eq(edit.status, 200);
-    test.ok(edit.body.includes('hx-patch="/todos/' + id + '"'),
+    test.ok(edit.body.includes(`hx-patch="/todos/${id}"`),
             "edit form should use hx-patch");
     test.ok(edit.body.includes('value="original title"'),
             "edit form should pre-fill current title");
 
-    const saved = await test.patch("/todos/" + id, {
+    const saved = await test.patch(`/todos/${id}`, {
         middleware: true,
-        body: "title=updated+title&_csrf=" + token,
+        body: `title=updated+title&_csrf=${token}`,
         headers: {
             ...hxHeaders,
             "content-type": "application/x-www-form-urlencoded",
@@ -190,7 +190,7 @@ test("inline edit: GET /todos/:id/edit returns form, PATCH saves + returns row",
         "SELECT title FROM todos WHERE id = ?", [id])[0].title;
     test.eq(stored, "updated title");
 
-    const cancel = await test.get("/todos/" + id,
+    const cancel = await test.get(`/todos/${id}`,
         { middleware: true, headers: hxHeaders });
     test.eq(cancel.status, 200);
     test.ok(cancel.body.includes("updated title"));
@@ -207,9 +207,9 @@ test("inline edit: PATCH with empty title re-renders edit form with error", asyn
     const token = home.body.match(/name="_csrf" value="([^"]+)"/)?.[1];
     const cookieHdr = home.headers["set-cookie"] || "";
 
-    const res = await test.patch("/todos/" + id, {
+    const res = await test.patch(`/todos/${id}`, {
         middleware: true,
-        body: "title=&_csrf=" + token,
+        body: `title=&_csrf=${token}`,
         headers: {
             "hx-request": "true",
             "content-type": "application/x-www-form-urlencoded",
@@ -220,7 +220,7 @@ test("inline edit: PATCH with empty title re-renders edit form with error", asyn
     test.eq(res.status, 200);
     test.ok(res.body.includes("Title cannot be empty"),
             "validation error should be in the body");
-    test.ok(res.body.includes('hx-patch="/todos/' + id + '"'),
+    test.ok(res.body.includes(`hx-patch="/todos/${id}"`),
             "response should re-render the edit form");
 
     const stored = db.query(
@@ -235,7 +235,7 @@ test("idempotency: repeating POST with same Idempotency-Key writes once", async 
     const home = await test.get("/", { middleware: true });
     const token = home.body.match(/name="_csrf" value="([^"]+)"/)?.[1];
     const cookieHdr = home.headers["set-cookie"] || "";
-    const body = "title=idem+probe&_csrf=" + token;
+    const body = `title=idem+probe&_csrf=${token}`;
     const headers = {
         "hx-request": "true",
         "content-type": "application/x-www-form-urlencoded",
@@ -265,7 +265,7 @@ test("POST /todos with empty title re-renders form with error", async () => {
     const token = home.body.match(/name="_csrf" value="([^"]+)"/)?.[1];
     const res = await test.post("/todos", {
         middleware: true,
-        body: "title=&_csrf=" + token,
+        body: `title=&_csrf=${token}`,
         headers: {
             "hx-request": "true",
             "content-type": "application/x-www-form-urlencoded",
@@ -289,7 +289,7 @@ test("POST /todos with too-long title preserves submitted value in re-render", a
     const longTitle = "a".repeat(201);
     const res = await test.post("/todos", {
         middleware: true,
-        body: "title=" + longTitle + "&_csrf=" + token,
+        body: `title=${longTitle}&_csrf=${token}`,
         headers: {
             "hx-request": "true",
             "content-type": "application/x-www-form-urlencoded",
@@ -298,7 +298,7 @@ test("POST /todos with too-long title preserves submitted value in re-render", a
         },
     });
     test.eq(res.status, 200);
-    test.ok(res.body.includes('value="' + longTitle + '"'),
+    test.ok(res.body.includes(`value="${longTitle}"`),
             "submitted (too-long) value should be pre-filled in the input");
     test.ok(res.body.includes('<small role="alert"'),
             "should show a per-field error message");
