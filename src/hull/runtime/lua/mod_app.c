@@ -35,12 +35,28 @@ static int lua_app_reject_if_main(lua_State *L, const char *call)
     return 0;
 }
 
-/* Helper: register a route with given method string */
+/* Helper: register a route with given method string.
+ *
+ * Signature: app.<verb>(pattern, handler [, opts])
+ *
+ *   opts.multipart = { max_part_size?, max_total_size?, max_parts?,
+ *                      max_headers_size?, max_input_buffer? }
+ *     When present, this route uses Keel's streaming-multipart body
+ *     reader instead of the default buffered reader. The handler can
+ *     iterate parts via req:multipart() (see §1.5.b-2 iterator
+ *     bindings). All caps are integers; 0 or missing = unlimited.
+ *     The whole opts.multipart subtable is stashed on the route def
+ *     and re-read in routes.c (which allocates the KlMultipartConfig
+ *     and registers the route via kl_server_route_streaming).
+ */
 static int lua_app_route(lua_State *L, const char *method)
 {
     lua_app_reject_if_main(L, "app.get/post/put/delete/patch/options");
     const char *pattern = luaL_checkstring(L, 1);
     luaL_checktype(L, 2, LUA_TFUNCTION);
+    /* Arg 3 is the optional opts table — type-check only if present. */
+    int has_opts = !lua_isnoneornil(L, 3);
+    if (has_opts) luaL_checktype(L, 3, LUA_TTABLE);
 
     /* Ensure __hull_routes table exists in registry */
     lua_getfield(L, LUA_REGISTRYINDEX, "__hull_routes");
@@ -79,6 +95,19 @@ static int lua_app_route(lua_State *L, const char *method)
     lua_setfield(L, -2, "pattern");
     lua_pushinteger(L, handler_id);
     lua_setfield(L, -2, "handler_id");
+
+    /* Stash opts.multipart (if a table) verbatim on the def. routes.c
+     * reads the integer caps off this subtable when materializing the
+     * KlMultipartConfig. */
+    if (has_opts) {
+        lua_getfield(L, 3, "multipart");
+        if (lua_istable(L, -1)) {
+            lua_setfield(L, -2, "multipart");  /* def.multipart = opts.multipart */
+        } else {
+            lua_pop(L, 1);
+        }
+    }
+
     lua_rawseti(L, -2, def_idx); /* defs[def_idx] = def */
 
     lua_pop(L, 2); /* pop routes_table, defs_table */

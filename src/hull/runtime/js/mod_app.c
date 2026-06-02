@@ -26,7 +26,20 @@ static int js_app_throw_if_main(JSContext *ctx, const char *call)
     return 0;
 }
 
-/* Helper: register a route with given method string */
+/* Helper: register a route with given method string.
+ *
+ * Signature: app.<verb>(pattern, handler [, opts])
+ *
+ *   opts.multipart = { maxPartSize?, maxTotalSize?, maxParts?,
+ *                      maxHeadersSize?, maxInputBuffer? }
+ *     When present, this route uses Keel's streaming-multipart body
+ *     reader instead of the default buffered reader. The handler can
+ *     iterate parts via req.multipart() (see §1.5.b-2 iterator
+ *     bindings). All caps are numbers; 0 or missing = unlimited.
+ *     The whole opts.multipart subobject is stashed on the route def
+ *     and re-read in routes.c (which allocates the KlMultipartConfig
+ *     and registers the route via kl_server_route_streaming).
+ */
 static JSValue js_app_route(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv, int magic)
 {
@@ -51,6 +64,14 @@ static JSValue js_app_route(JSContext *ctx, JSValueConst this_val,
     if (!JS_IsFunction(ctx, argv[1])) {
         JS_FreeCString(ctx, pattern);
         return JS_ThrowTypeError(ctx, "handler must be a function");
+    }
+
+    /* Arg 2 is the optional opts object — must be a plain object if present. */
+    int has_opts = (argc >= 3) && !JS_IsUndefined(argv[2]) && !JS_IsNull(argv[2]);
+    if (has_opts && !JS_IsObject(argv[2])) {
+        JS_FreeCString(ctx, pattern);
+        return JS_ThrowTypeError(ctx, "app.%s opts must be an object",
+                                 method_names[magic]);
     }
 
     JSValue global = JS_GetGlobalObject(ctx);
@@ -84,6 +105,19 @@ static JSValue js_app_route(JSContext *ctx, JSValueConst this_val,
                       JS_NewString(ctx, method_names[magic]));
     JS_SetPropertyStr(ctx, def, "pattern", JS_NewString(ctx, pattern));
     JS_SetPropertyStr(ctx, def, "handler_id", JS_NewInt32(ctx, idx));
+
+    /* Stash opts.multipart (if a plain object) verbatim on the def.
+     * routes.c reads the integer caps off this sub-object when
+     * materializing the KlMultipartConfig. */
+    if (has_opts) {
+        JSValue mp = JS_GetPropertyStr(ctx, argv[2], "multipart");
+        if (JS_IsObject(mp) && !JS_IsFunction(ctx, mp) && !JS_IsArray(ctx, mp)) {
+            JS_SetPropertyStr(ctx, def, "multipart", mp); /* takes ownership */
+        } else {
+            JS_FreeValue(ctx, mp);
+        }
+    }
+
     JS_SetPropertyUint32(ctx, defs, (uint32_t)idx, def);
 
     JS_FreeValue(ctx, defs);

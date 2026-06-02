@@ -234,10 +234,20 @@ void hl_js_dump_error(HlJS *js);
 
 /*
  * Per-route context: associates a Keel route with a JS handler.
+ *
+ * multipart_config is set when the route was registered with
+ *   app.post("/upload", handler, { multipart: {...} })
+ * Non-NULL flags this as a streaming route: routes.c uses
+ * kl_server_route_streaming + the multipart factory shim instead of
+ * the regular kl_server_route + buffer factory. Stored as void* so
+ * this public header doesn't pull in keel's body_reader_multipart.h
+ * (the actual type is `KlMultipartConfig *`); freed alongside the
+ * route in hl_js_free.
  */
 typedef struct {
     HlJS *js;
-    int    handler_id;
+    int   handler_id;
+    void *multipart_config;  /* (KlMultipartConfig *), NULL = not streaming */
 } HlJSRoute;
 
 /*

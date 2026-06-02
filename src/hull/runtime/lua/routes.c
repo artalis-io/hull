@@ -22,10 +22,12 @@
 #include "lauxlib.h"
 
 #include <keel/keel.h>
+#include <keel/body_reader_multipart.h>
 #include <keel/websocket_server.h>
 
 #include "log.h"
 
+#include <limits.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -113,6 +115,7 @@ int hl_lua_wire_routes(HlLua *lua, KlRouter *router)
             if (route) {
                 route->lua = lua;
                 route->handler_id = handler_id;
+                route->multipart_config = NULL;
                 if (hl_lua_track_route(lua, route) != 0) {
                     hl_alloc_free(lua->base.alloc, route, sizeof(HlLuaRoute));
                 } else {
@@ -205,6 +208,61 @@ int hl_lua_wire_routes(HlLua *lua, KlRouter *router)
 
 /* ── Server route wiring (with body reader factory) ────────────────── */
 
+/* Read a non-negative integer field from a Lua table at stack idx -1,
+ * default to 0 if missing or non-numeric. Caps are size_t in Keel's
+ * config; we round-trip through lua_Integer to reject negatives. */
+static size_t lua_read_size_field(lua_State *L, const char *key)
+{
+    lua_getfield(L, -1, key);
+    size_t v = 0;
+    if (lua_isnumber(L, -1)) {
+        lua_Integer i = lua_tointeger(L, -1);
+        if (i > 0) v = (size_t)i;
+    }
+    lua_pop(L, 1);
+    return v;
+}
+
+/* Same as lua_read_size_field but returns int (for max_parts). */
+static int lua_read_int_field(lua_State *L, const char *key)
+{
+    lua_getfield(L, -1, key);
+    int v = 0;
+    if (lua_isnumber(L, -1)) {
+        lua_Integer i = lua_tointeger(L, -1);
+        if (i > 0 && i <= INT_MAX) v = (int)i;
+    }
+    lua_pop(L, 1);
+    return v;
+}
+
+/* Build a heap-allocated KlMultipartConfig from a Lua subtable at -1.
+ * Caller frees with hl_alloc_free(...,sizeof(KlMultipartConfig)).
+ * Returns NULL on allocation failure. */
+static KlMultipartConfig *lua_build_multipart_config(HlLua *lua)
+{
+    KlMultipartConfig *cfg = hl_alloc_malloc(lua->base.alloc,
+                                              sizeof(KlMultipartConfig));
+    if (!cfg) return NULL;
+    cfg->max_part_size    = lua_read_size_field(lua->L, "max_part_size");
+    cfg->max_total_size   = lua_read_size_field(lua->L, "max_total_size");
+    cfg->max_parts        = lua_read_int_field (lua->L, "max_parts");
+    cfg->max_headers_size = lua_read_size_field(lua->L, "max_headers_size");
+    cfg->max_input_buffer = lua_read_size_field(lua->L, "max_input_buffer");
+    return cfg;
+}
+
+/* Body factory shim for streaming-multipart routes: forwards to
+ * kl_body_reader_multipart with the per-route config stashed on the
+ * HlLuaRoute by hl_lua_wire_routes_server. */
+static KlBodyReader *hl_lua_multipart_factory(KlAllocator *alloc,
+                                               const KlRequest *req,
+                                               void *user_data)
+{
+    HlLuaRoute *route = (HlLuaRoute *)user_data;
+    return kl_body_reader_multipart(alloc, req, route->multipart_config);
+}
+
 int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
                                void *(*alloc_fn)(size_t))
 {
@@ -249,8 +307,27 @@ int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
             if (route) {
                 route->lua = lua;
                 route->handler_id = handler_id;
+                route->multipart_config = NULL;
+
+                /* Peek def.multipart — present → streaming route. */
+                lua_getfield(L, -4, "multipart");
+                int is_streaming = lua_istable(L, -1);
+                if (is_streaming) {
+                    route->multipart_config = lua_build_multipart_config(lua);
+                    if (!route->multipart_config) is_streaming = 0;
+                }
+                lua_pop(L, 1); /* multipart subtable */
+
                 if (hl_lua_track_route(lua, route) != 0) {
+                    if (route->multipart_config) {
+                        hl_alloc_free(lua->base.alloc, route->multipart_config,
+                                      sizeof(KlMultipartConfig));
+                    }
                     hl_alloc_free(lua->base.alloc, route, sizeof(HlLuaRoute));
+                } else if (is_streaming) {
+                    kl_server_route_streaming(server, method_str, pattern,
+                                              hl_lua_keel_handler, route,
+                                              hl_lua_multipart_factory);
                 } else {
                     kl_server_route(server, method_str, pattern,
                                     hl_lua_keel_handler, route,

@@ -18,10 +18,12 @@
 #include "hull/cap/ws.h"
 
 #include <keel/keel.h>
+#include <keel/body_reader_multipart.h>
 #include <keel/websocket_server.h>
 
 #include "log.h"
 
+#include <limits.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -108,6 +110,7 @@ int hl_js_wire_routes(HlJS *js, KlRouter *router)
             if (route) {
                 route->js = js;
                 route->handler_id = handler_id;
+                route->multipart_config = NULL;
                 hl_js_track_route(js, route);
                 kl_router_add(router, method_str, pattern,
                               hl_js_keel_handler, route, NULL);
@@ -150,6 +153,7 @@ int hl_js_wire_routes(HlJS *js, KlRouter *router)
                 if (r) {
                     r->js = js;
                     r->handler_id = hid;
+                    r->multipart_config = NULL;
                     hl_js_track_route(js, r);
                     kl_router_use(router, m, p, hl_js_keel_middleware, r);
                 }
@@ -191,6 +195,7 @@ int hl_js_wire_routes(HlJS *js, KlRouter *router)
                 if (r) {
                     r->js = js;
                     r->handler_id = hid;
+                    r->multipart_config = NULL;
                     hl_js_track_route(js, r);
                     kl_router_use_post(router, m, p, hl_js_keel_middleware, r);
                 }
@@ -212,6 +217,75 @@ int hl_js_wire_routes(HlJS *js, KlRouter *router)
 }
 
 /* ── Server route wiring (with body reader factory) ────────────────── */
+
+/* Read a non-negative size_t field off a JS object at `obj`; default 0.
+ * Caller still owns `obj`. */
+static size_t js_read_size_field(JSContext *ctx, JSValueConst obj,
+                                  const char *key)
+{
+    JSValue v = JS_GetPropertyStr(ctx, obj, key);
+    size_t out = 0;
+    if (JS_IsNumber(v)) {
+        int64_t i = 0;
+        if (JS_ToInt64(ctx, &i, v) == 0 && i > 0) out = (size_t)i;
+    }
+    JS_FreeValue(ctx, v);
+    return out;
+}
+
+/* Same but returns int (for max_parts). */
+static int js_read_int_field(JSContext *ctx, JSValueConst obj,
+                              const char *key)
+{
+    JSValue v = JS_GetPropertyStr(ctx, obj, key);
+    int out = 0;
+    if (JS_IsNumber(v)) {
+        int64_t i = 0;
+        if (JS_ToInt64(ctx, &i, v) == 0 && i > 0 && i <= INT_MAX)
+            out = (int)i;
+    }
+    JS_FreeValue(ctx, v);
+    return out;
+}
+
+/* Allocate KlMultipartConfig from JS subobject; caller frees with
+ * hl_alloc_free(...,sizeof(KlMultipartConfig)). */
+static KlMultipartConfig *js_build_multipart_config(HlJS *js, JSValueConst mp)
+{
+    KlMultipartConfig *cfg = hl_alloc_malloc(js->base.alloc,
+                                              sizeof(KlMultipartConfig));
+    if (!cfg) return NULL;
+    JSContext *ctx = js->ctx;
+    /* Accept both snake_case and camelCase for cross-runtime ergonomics —
+     * Lua uses snake_case in the same opt names; JS app code idiomatically
+     * passes camelCase. Snake-case takes priority if both are present. */
+    size_t mps = js_read_size_field(ctx, mp, "max_part_size");
+    if (!mps) mps = js_read_size_field(ctx, mp, "maxPartSize");
+    size_t mts = js_read_size_field(ctx, mp, "max_total_size");
+    if (!mts) mts = js_read_size_field(ctx, mp, "maxTotalSize");
+    int    mp_ = js_read_int_field (ctx, mp, "max_parts");
+    if (!mp_) mp_ = js_read_int_field (ctx, mp, "maxParts");
+    size_t mhs = js_read_size_field(ctx, mp, "max_headers_size");
+    if (!mhs) mhs = js_read_size_field(ctx, mp, "maxHeadersSize");
+    size_t mib = js_read_size_field(ctx, mp, "max_input_buffer");
+    if (!mib) mib = js_read_size_field(ctx, mp, "maxInputBuffer");
+    cfg->max_part_size    = mps;
+    cfg->max_total_size   = mts;
+    cfg->max_parts        = mp_;
+    cfg->max_headers_size = mhs;
+    cfg->max_input_buffer = mib;
+    return cfg;
+}
+
+/* Streaming-multipart factory shim: forwards to kl_body_reader_multipart
+ * with the per-route config stashed on the HlJSRoute. */
+static KlBodyReader *hl_js_multipart_factory(KlAllocator *alloc,
+                                              const KlRequest *req,
+                                              void *user_data)
+{
+    HlJSRoute *route = (HlJSRoute *)user_data;
+    return kl_body_reader_multipart(alloc, req, route->multipart_config);
+}
 
 int hl_js_wire_routes_server(HlJS *js, KlServer *server,
                               void *(*alloc_fn)(size_t))
@@ -242,6 +316,7 @@ int hl_js_wire_routes_server(HlJS *js, KlServer *server,
         JSValue method_val = JS_GetPropertyStr(ctx, def, "method");
         JSValue pattern_val = JS_GetPropertyStr(ctx, def, "pattern");
         JSValue id_val = JS_GetPropertyStr(ctx, def, "handler_id");
+        JSValue mp_val = JS_GetPropertyStr(ctx, def, "multipart");
 
         const char *method_str = JS_ToCString(ctx, method_val);
         const char *pattern = JS_ToCString(ctx, pattern_val);
@@ -254,15 +329,33 @@ int hl_js_wire_routes_server(HlJS *js, KlServer *server,
             if (route) {
                 route->js = js;
                 route->handler_id = handler_id;
+                route->multipart_config = NULL;
+
+                int is_streaming = JS_IsObject(mp_val) &&
+                                   !JS_IsFunction(ctx, mp_val) &&
+                                   !JS_IsArray(ctx, mp_val);
+                if (is_streaming) {
+                    route->multipart_config =
+                        js_build_multipart_config(js, mp_val);
+                    if (!route->multipart_config) is_streaming = 0;
+                }
+
                 hl_js_track_route(js, route);
-                kl_server_route(server, method_str, pattern,
-                                hl_js_keel_handler, route,
-                                hl_cap_body_factory);
+                if (is_streaming) {
+                    kl_server_route_streaming(server, method_str, pattern,
+                                              hl_js_keel_handler, route,
+                                              hl_js_multipart_factory);
+                } else {
+                    kl_server_route(server, method_str, pattern,
+                                    hl_js_keel_handler, route,
+                                    hl_cap_body_factory);
+                }
             }
         }
 
         if (pattern) JS_FreeCString(ctx, pattern);
         if (method_str) JS_FreeCString(ctx, method_str);
+        JS_FreeValue(ctx, mp_val);
         JS_FreeValue(ctx, id_val);
         JS_FreeValue(ctx, pattern_val);
         JS_FreeValue(ctx, method_val);

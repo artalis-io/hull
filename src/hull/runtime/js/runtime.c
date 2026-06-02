@@ -26,6 +26,7 @@
 #include "hull/runtime/test.h"
 
 #include <keel/keel.h>
+#include <keel/body_reader_multipart.h>
 #include <keel/websocket_server.h>
 
 #include "hull/cap/ws.h"
@@ -873,9 +874,16 @@ void hl_js_free(HlJS *js)
         js->timer_cap = 0;
     }
 
-    /* Free tracked route allocations */
-    for (size_t i = 0; i < js->route_count; i++)
-        hl_alloc_free(js->base.alloc, js->routes[i], sizeof(HlJSRoute));
+    /* Free tracked route allocations (and per-route multipart configs
+     * stashed by hl_js_wire_routes_server). */
+    for (size_t i = 0; i < js->route_count; i++) {
+        HlJSRoute *r = (HlJSRoute *)js->routes[i];
+        if (r && r->multipart_config) {
+            hl_alloc_free(js->base.alloc, r->multipart_config,
+                          sizeof(KlMultipartConfig));
+        }
+        hl_alloc_free(js->base.alloc, r, sizeof(HlJSRoute));
+    }
     if (js->routes) {
         hl_alloc_free(js->base.alloc, js->routes,
                       js->route_cap * sizeof(void *));

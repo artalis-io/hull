@@ -28,6 +28,7 @@
 #include "lauxlib.h"
 
 #include <keel/keel.h>
+#include <keel/body_reader_multipart.h>
 #include <keel/websocket_server.h>
 
 #include <sh_arena.h>
@@ -337,9 +338,16 @@ void hl_lua_free(HlLua *lua)
         lua->timer_cap = 0;
     }
 
-    /* Free tracked route allocations */
-    for (size_t i = 0; i < lua->route_count; i++)
-        hl_alloc_free(lua->base.alloc, lua->routes[i], sizeof(HlLuaRoute));
+    /* Free tracked route allocations (and per-route multipart configs
+     * stashed by hl_lua_wire_routes_server). */
+    for (size_t i = 0; i < lua->route_count; i++) {
+        HlLuaRoute *r = (HlLuaRoute *)lua->routes[i];
+        if (r && r->multipart_config) {
+            hl_alloc_free(lua->base.alloc, r->multipart_config,
+                          sizeof(KlMultipartConfig));
+        }
+        hl_alloc_free(lua->base.alloc, r, sizeof(HlLuaRoute));
+    }
     if (lua->routes) {
         hl_alloc_free(lua->base.alloc, lua->routes,
                       lua->route_cap * sizeof(void *));
