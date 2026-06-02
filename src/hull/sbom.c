@@ -27,8 +27,9 @@
 #define HL_VERSION "dev"
 #endif
 
-/* Build-time submodule commit defines. Fall back to "unknown" if the
- * Makefile didn't inject them (out-of-tree compile / hand-build). */
+/* Build-time submodule commit + describe-tag defines. Fall back to
+ * "unknown" if the Makefile didn't inject them (out-of-tree compile /
+ * hand-build). */
 #ifndef HULL_VENDOR_KEEL_COMMIT
 #define HULL_VENDOR_KEEL_COMMIT "unknown"
 #endif
@@ -37,6 +38,15 @@
 #endif
 #ifndef HULL_VENDOR_TCC_COMMIT
 #define HULL_VENDOR_TCC_COMMIT "unknown"
+#endif
+#ifndef HULL_VENDOR_KEEL_VERSION
+#define HULL_VENDOR_KEEL_VERSION ""
+#endif
+#ifndef HULL_VENDOR_WAMR_VERSION
+#define HULL_VENDOR_WAMR_VERSION ""
+#endif
+#ifndef HULL_VENDOR_TCC_VERSION
+#define HULL_VENDOR_TCC_VERSION ""
 #endif
 
 /* ── SHA-256 of embedded blobs + the running binary (lazy, cached) ──── */
@@ -181,7 +191,7 @@ static const HlSbomEntry sbom_entries[] = {
     /* ── Submodule: HTTP server library (own project) ── */
     {
         .name = "keel",
-        .version = "",
+        .version = HULL_VENDOR_KEEL_VERSION,
         .commit = HULL_VENDOR_KEEL_COMMIT,
         .license_spdx = "MIT",
         .url = "https://github.com/artalis-io/keel",
@@ -313,7 +323,7 @@ static const HlSbomEntry sbom_entries[] = {
     /* ── Submodule: WAMR ── */
     {
         .name = "wamr",
-        .version = "",
+        .version = HULL_VENDOR_WAMR_VERSION,
         .commit = HULL_VENDOR_WAMR_COMMIT,
         .license_spdx = "Apache-2.0",
         .url = "https://github.com/bytecodealliance/wasm-micro-runtime",
@@ -339,7 +349,7 @@ static const HlSbomEntry sbom_entries[] = {
     /* ── Submodule: TinyCC ── */
     {
         .name = "tinycc",
-        .version = "",
+        .version = HULL_VENDOR_TCC_VERSION,
         .commit = HULL_VENDOR_TCC_COMMIT,
         .license_spdx = "LGPL-2.1-or-later",
         .url = "https://github.com/TinyCC/tinycc",
@@ -416,10 +426,14 @@ static void format_human(FILE *fp)
     for (size_t i = 0; i < sbom_entries_count; i++) {
         const HlSbomEntry *e = &sbom_entries[i];
         char vc[40];
-        if (e->commit && e->commit[0]) {
-            snprintf(vc, sizeof(vc), "%.12s", e->commit);
-        } else if (e->version && e->version[0]) {
+        /* Prefer a tagged version string over the raw commit SHA — it
+         * reads better in human output. Falls back to commit if no
+         * version is set, then "n/a". Matches the precedence used by
+         * the CycloneDX and SPDX formatters. */
+        if (e->version && e->version[0]) {
             snprintf(vc, sizeof(vc), "%s", e->version);
+        } else if (e->commit && e->commit[0]) {
+            snprintf(vc, sizeof(vc), "%.12s", e->commit);
         } else {
             snprintf(vc, sizeof(vc), "n/a");
         }

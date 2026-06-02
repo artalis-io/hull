@@ -128,17 +128,24 @@ endif
 
 CFLAGS += -DHL_VERSION=\"$(HL_VERSION)\"
 
-# SBOM: bake submodule SHAs in at compile time. `git rev-parse` is
-# called per-build; the result is embedded in the binary so
-# `hull sbom` self-describes the actual vendored contents without
-# needing the source tree at runtime. Falls back to "unknown" if
-# git is unavailable.
-HULL_VENDOR_KEEL_COMMIT := $(shell git -C vendor/keel rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
-HULL_VENDOR_WAMR_COMMIT := $(shell git -C vendor/wamr rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
-HULL_VENDOR_TCC_COMMIT  := $(shell git -C vendor/tcc  rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+# SBOM: bake submodule commits AND describe-tags in at compile time.
+# `git rev-parse` + `git describe` are called per-build; the result is
+# embedded in the binary so `hull sbom` self-describes the actual
+# vendored contents without needing the source tree at runtime. Falls
+# back to "unknown" if git is unavailable. `describe --tags --always`
+# gives a clean tag ("v2.0.0") when one exists, else "<tag>-N-g<sha>".
+HULL_VENDOR_KEEL_COMMIT  := $(shell git -C vendor/keel rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+HULL_VENDOR_WAMR_COMMIT  := $(shell git -C vendor/wamr rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+HULL_VENDOR_TCC_COMMIT   := $(shell git -C vendor/tcc  rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+HULL_VENDOR_KEEL_VERSION := $(shell git -C vendor/keel describe --tags --always 2>/dev/null || echo unknown)
+HULL_VENDOR_WAMR_VERSION := $(shell git -C vendor/wamr describe --tags --always 2>/dev/null || echo unknown)
+HULL_VENDOR_TCC_VERSION  := $(shell git -C vendor/tcc  describe --tags --always 2>/dev/null || echo unknown)
 CFLAGS += -DHULL_VENDOR_KEEL_COMMIT=\"$(HULL_VENDOR_KEEL_COMMIT)\"
 CFLAGS += -DHULL_VENDOR_WAMR_COMMIT=\"$(HULL_VENDOR_WAMR_COMMIT)\"
 CFLAGS += -DHULL_VENDOR_TCC_COMMIT=\"$(HULL_VENDOR_TCC_COMMIT)\"
+CFLAGS += -DHULL_VENDOR_KEEL_VERSION=\"$(HULL_VENDOR_KEEL_VERSION)\"
+CFLAGS += -DHULL_VENDOR_WAMR_VERSION=\"$(HULL_VENDOR_WAMR_VERSION)\"
+CFLAGS += -DHULL_VENDOR_TCC_VERSION=\"$(HULL_VENDOR_TCC_VERSION)\"
 
 .DEFAULT_GOAL := all
 
