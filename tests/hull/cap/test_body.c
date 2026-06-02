@@ -235,35 +235,61 @@ UTEST(hl_cap_multipart, park_null_unparks) {
     br->destroy(br);
 }
 
+/* Dummy vtable functions for the wrong-reader-kind tests. Building a
+ * KlBodyReader here in test-instrumented code (rather than via
+ * kl_body_reader_buffer) avoids MSan false positives: keel is built
+ * without MSan instrumentation in the msan target, so reads of vtable
+ * bytes written by libkeel.a code would trip use-of-uninitialized-
+ * value warnings. Constructing the struct in this file ensures the
+ * shadow bytes are properly tracked. */
+static int   dummy_on_data(KlBodyReader *s, const char *d, size_t n) {
+    (void)s; (void)d; (void)n; return 0;
+}
+static void  dummy_on_complete(KlBodyReader *s) { (void)s; }
+static void  dummy_on_error(KlBodyReader *s)    { (void)s; }
+static void  dummy_destroy(KlBodyReader *s)     { (void)s; }
+
 UTEST(hl_cap_multipart, inner_returns_NULL_for_wrong_reader_kind) {
-    /* Pass a buffer reader to hl_cap_multipart_inner — must safely
-     * return NULL (vtable-identity check on the wrapper's on_data). */
-    KlAllocator a = kl_allocator_default();
-    KlRequest req = {0};
-    KlBodyReader *bufr = kl_body_reader_buffer(&a, &req, NULL);
-    ASSERT_TRUE(bufr != NULL);
-
-    ASSERT_TRUE(hl_cap_multipart_inner(bufr) == NULL);
-
-    bufr->destroy(bufr);
+    /* Pass a non-multipart reader to hl_cap_multipart_inner — must
+     * safely return NULL via the vtable-identity check on on_data. */
+    KlBodyReader fake = {
+        .on_data     = dummy_on_data,
+        .on_complete = dummy_on_complete,
+        .on_error    = dummy_on_error,
+        .destroy     = dummy_destroy,
+    };
+    ASSERT_TRUE(hl_cap_multipart_inner(&fake) == NULL);
 }
 
 UTEST(hl_cap_multipart, park_returns_error_for_wrong_reader_kind) {
-    KlAllocator a = kl_allocator_default();
-    KlRequest req = {0};
-    KlBodyReader *bufr = kl_body_reader_buffer(&a, &req, NULL);
-
+    KlBodyReader fake = {
+        .on_data     = dummy_on_data,
+        .on_complete = dummy_on_complete,
+        .on_error    = dummy_on_error,
+        .destroy     = dummy_destroy,
+    };
     ResumeTracker t = {0};
-    ASSERT_EQ(hl_cap_multipart_park(bufr, test_resume_cb, &t), -1);
+    ASSERT_EQ(hl_cap_multipart_park(&fake, test_resume_cb, &t), -1);
     ASSERT_EQ(t.calls, 0);
-
-    bufr->destroy(bufr);
 }
 
+/* End-to-end test that drives kl_multipart_next directly. SKIPPED
+ * under MemorySanitizer: keel is built without -fsanitize=memory in
+ * Hull's msan target, so reads of kl_multipart_next's return value
+ * (and the keel-populated meta/data slots) are flagged as
+ * use-of-uninitialized-value — MSan didn't see the writes. The
+ * wrapper's forward-to-inner correctness is still verified by the
+ * other tests (park_fires_on_data, park_is_single_shot, etc.) which
+ * exercise the on_data/on_complete/on_error paths without
+ * propagating keel-typed values into instrumented assertions.
+ *
+ * `__has_feature` is a clang builtin; GCC doesn't define it. The
+ * fallback below makes the guard parse cleanly on both. */
+#ifndef __has_feature
+#  define __has_feature(x) 0
+#endif
+#if !__has_feature(memory_sanitizer)
 UTEST(hl_cap_multipart, inner_drives_kl_multipart_next_normally) {
-    /* End-to-end: feed a multipart body through the wrapper, then walk
-     * the inner reader via kl_multipart_next. Proves the wrapper
-     * doesn't break the parser's semantics. */
     KlAllocator a = kl_allocator_default();
     KlRequest req = mp_make_req("multipart/form-data; boundary=AB");
     KlBodyReader *br = hl_cap_multipart_factory(&a, &req, NULL);
@@ -300,5 +326,6 @@ UTEST(hl_cap_multipart, inner_drives_kl_multipart_next_normally) {
 
     br->destroy(br);
 }
+#endif
 
 UTEST_MAIN();

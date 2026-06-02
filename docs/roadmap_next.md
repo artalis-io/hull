@@ -700,11 +700,56 @@ and helpers.
 - [ ] §1.5.a-4. Vendor HTMX 2.x + Pico v2 classless. `make fetch-htmx`
       and `make fetch-pico` targets like `fetch-ca-bundle`, with SHA-256
       verification.
-- [ ] §1.5.a-5. `hull init --profile htmx` scaffold. Generates
-      `app.{lua,js}` + `templates/{base.html, pages/, partials/}` +
-      `static/{vendor/htmx.min.js, vendor/pico.classless.min.css, app.css}`
-      + `Makefile` + `.gitignore` + `tests/`. CSRF + session + CSP
-      middleware preconfigured.
+- [ ] §1.5.a-5. **HTMX scaffolding as a profile, composable with every
+      existing layout.** Today the scaffold surface is two orthogonal
+      axes that don't yet talk to each other: `--type {flat,rest,cli,
+      tui}` picks **layout**, and (planned) `--profile htmx` picks the
+      **content shape** (HTMX vs JSON-API handlers, manifest cluster,
+      vendored assets, layout-template skeleton). Ship the profile axis
+      so it composes with every layout instead of forking a new
+      `--type` per content shape:
+        - `--profile htmx`: HTMX manifest (`hull/web/htmx@1`,
+          `hull/template@1`, `hull/web/middleware/csrf@1`,
+          `hull/web/middleware/session@1`, `hull/web/middleware/csp@1`,
+          `hull/web/flash@1`, `hull/web/pagination@1`,
+          `hull/web/cookie@1`, `hull/web/form@1`); vendored
+          `static/vendor/htmx.min.js` + Pico (SHA-pinned via the
+          existing `make fetch-htmx` / `make fetch-pico` targets);
+          `templates/layout.html` with `<body hx-boost="true">`, CSRF
+          meta, flash slot, `htmx:configRequest` → `X-CSRF-Token`
+          wiring; sample resource (or `app.lua` index handler in flat
+          layouts) that dispatches `if htmx.is(req) then res:html(
+          partial) else res:html(full_page) end`; matching tests that
+          assert both fragment and full-page paths.
+        - `--profile json`: today's `--type rest` content shape,
+          extracted so it composes with `--type flat` too. Becomes the
+          default for `--type rest` for back-compat.
+        - `--profile empty`: bare manifest + bare `hello world` handler;
+          for users who want to compose their own stack.
+      Composition matrix once shipped:
+        - `hull new --type flat --profile htmx <name>` (replaces what
+          this item was originally specced as — `hull init --profile
+          htmx`; `hull init` retains the same form for init-in-place)
+        - `hull new --type rest --profile htmx <name>` (the modular
+          HTMX app pattern — what the Trimble HU asset-inventory
+          project needs, and what surfaced this design)
+        - `hull new --type rest --profile json <name>` (today's
+          `--type rest` default)
+        - `--type cli` and `--type tui` ignore `--profile` (no web
+          surface)
+      Implementation: extract the manifest cluster + vendored assets +
+      layout template + handler-pattern snippets into a shared
+      `stdlib/cli/lua/hull/profiles_htmx.lua` consumed by
+      `templates_flat.lua` and `templates_rest.lua`; add `--profile`
+      parsing to `stdlib/cli/lua/hull/new.lua` and to the existing
+      `hull init` flow; doc update in `docs/agent_guide.md`.
+      **Surfaced 2026-06 by the Trimble HU asset-inventory project**
+      (`asset_inventory_assessment.md` §e.2) — that app is a 50+ route
+      HTMX application and bootstrapping it cleanly today requires
+      either accepting the JSON-scaffold mismatch or hand-laying the
+      whole structure. The orthogonal-axis design avoids forking
+      `--type hypermedia` (and `--type htmx-cli`, `--type htmx-flat`,
+      …) just to combine layout × content shape.
 - [ ] §1.5.a-6. `examples/hypermedia_todo` (Lua + JS). Demonstrates the
       pattern: full-page render on plain GET, fragment render on
       `HX-Request`, optimistic row replacement, validation errors as a
@@ -1017,6 +1062,35 @@ needs its own design pass + estimate before scheduling. Items marked
 `[COMMERCIAL]` are intended for the enterprise tier
 (see [Licensing tiers](#licensing-tiers-planning-convention) above).
 
+- [ ] Asymmetric-signature *verification* exposed through `crypto.*`
+      (RSA-PKCS1v15, RSA-PSS, ECDSA P-256, ECDSA P-384). Prerequisite
+      for the OAuth/OIDC item below: every mainstream IdP signs
+      ID tokens with RS256 or ES256, and Hull's `hull/jwt` is HS256-
+      only today. mbedTLS is **already linked** in every build with
+      `HL_ENABLE_HTTP_CLIENT=1` (for the HTTPS client) and exposes
+      `mbedtls_pk_verify` + the RSA/ECDSA primitives — they're just
+      not bound to Lua/JS. Scope:
+        - New cap functions in `src/hull/cap/crypto.c`:
+          `hl_cap_crypto_rsa_verify(pubkey_pem, alg, data, sig)`
+          and `hl_cap_crypto_ecdsa_verify(pubkey_pem, curve, data,
+          sig)`. Public-key inputs accept PEM (SubjectPublicKeyInfo)
+          and JWK (so JWKS responses don't need PEM conversion).
+        - Lua + JS bindings: `crypto.verify(alg, pubkey, data, sig)`
+          with `alg ∈ {"rs256","rs384","rs512","ps256","es256","es384"}`.
+        - `hull/jwt` extended: dispatch by the token's `alg` header,
+          accept a key-resolver callback (`function(kid) → pubkey`)
+          so callers can plug in JWKS caches.
+        - `alg=none` rejected unconditionally; alg-confusion attacks
+          (HS256 token presented against an RSA pubkey) rejected by
+          requiring the caller to pre-commit to an algorithm family.
+      No new vendored deps. Roughly the same shape as the existing
+      Ed25519 path in `cap/crypto.c`. Unlocks: native OIDC (next
+      item), webhook signature verification for inbound webhooks
+      (GitHub, Stripe, etc.), and SAML if the [COMMERCIAL] tier
+      reaches it. **Surfaced 2026-06 by the Trimble HU asset-
+      inventory project** (`asset_inventory_assessment.md` §b
+      item 3) — that app needs Entra ID OIDC and is blocked on this
+      primitive.
 - [ ] OAuth 2.0 / OIDC sign-in for consumer providers (community tier).
       `hull/web/middleware/oauth@1`. Built-in providers for Google,
       GitHub, GitLab, Microsoft consumer accounts. Standard
@@ -1025,7 +1099,7 @@ needs its own design pass + estimate before scheduling. Items marked
       multiple providers. Settles "Sign in with Google" as the
       table-stakes consumer-app pattern; line vs. commercial below is
       "consumer IdPs" (free) vs. "enterprise IdPs + provisioning"
-      (paid).
+      (paid). **Depends on the asymmetric-verify item above.**
 - [ ] Two-factor auth (TOTP). `hull/web/middleware/totp@1`. RFC 6238
       time-based one-time passwords (Google Authenticator / 1Password
       / Authy compatible). QR-code provisioning helper (renders
