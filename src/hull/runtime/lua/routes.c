@@ -252,15 +252,17 @@ static KlMultipartConfig *lua_build_multipart_config(HlLua *lua)
     return cfg;
 }
 
-/* Body factory shim for streaming-multipart routes: forwards to
- * kl_body_reader_multipart with the per-route config stashed on the
- * HlLuaRoute by hl_lua_wire_routes_server. */
+/* Body factory shim for streaming-multipart routes: routes the request
+ * through hl_cap_multipart_factory (the parkable wrapper around Keel's
+ * kl_body_reader_multipart) so the Lua iterator can hl_cap_multipart_park
+ * on NEED_DATA. The wrapper forwards our per-route config to the inner
+ * Keel reader. */
 static KlBodyReader *hl_lua_multipart_factory(KlAllocator *alloc,
                                                const KlRequest *req,
                                                void *user_data)
 {
     HlLuaRoute *route = (HlLuaRoute *)user_data;
-    return kl_body_reader_multipart(alloc, req, route->multipart_config);
+    return hl_cap_multipart_factory(alloc, req, route->multipart_config);
 }
 
 int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,

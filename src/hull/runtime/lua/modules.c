@@ -14,6 +14,7 @@
  */
 
 #include "mod_buffer.h"
+#include "internal.h"  /* hl_lua_request_register, hl_lua_sse_register_mt */
 
 /* Register a native module so `require("hull.X")` finds it via the
  * _LOADED bridge in hl_lua_require, but do NOT set it as a global. */
@@ -114,6 +115,11 @@ int hl_lua_register_modules(HlLua *lua)
 #ifdef HL_ENABLE_HTTP_SERVER
     /* SSE stream metatable (used by app.sse handler dispatch). */
     hl_lua_sse_register_mt(L);
+
+    /* Streaming-multipart request bindings (req:multipart() / Part / Chunks
+     * metatables). Only meaningful for server flavors — CLI builds don't
+     * have routes to register. */
+    hl_lua_request_register(L);
 #endif
 
     return 0;

@@ -142,4 +142,14 @@ int hl_lua_track_route(HlLua *lua, void *route);
 int hl_lua_track_alloc(HlLua *lua, void ***arr, size_t *count,
                        size_t *cap, void *ptr);
 
+/* ── Defined in mod_request.c, called from bindings.c + modules.c. */
+struct KlBodyReader;
+/* Register HlMpIter / HlMpPart / HlMpChunks metatables (once per VM). */
+void hl_lua_request_register(lua_State *L);
+/* Install `req.multipart` closure on the request table at -1 when the
+ * route was registered with kl_server_route_streaming. No-op for
+ * non-streaming routes (body_reader is not a multipart wrapper). */
+void hl_lua_request_install_multipart(lua_State *L, HlLua *lua,
+                                       struct KlBodyReader *body_reader);
+
 #endif /* HL_RUNTIME_LUA_INTERNAL_H */

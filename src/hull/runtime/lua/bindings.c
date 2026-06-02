@@ -13,6 +13,7 @@
 #include "hull/limits/core.h"
 #include "hull/cap/body.h"
 #include "hull/compress.h"
+#include "internal.h"  /* hl_lua_request_install_multipart */
 
 #include "lua.h"
 #include "lualib.h"
@@ -132,8 +133,14 @@ void hl_lua_make_request(lua_State *L, KlRequest *req)
     }
     lua_setfield(L, -2, "headers");
 
-    /* body — extract from buffer reader if available */
-    if (req->body_reader) {
+    /* body — extract from buffer reader if available. For streaming-
+     * multipart routes the body_reader is the parkable wrapper (not a
+     * buffer reader), so body is nil and req:multipart() is the only
+     * way to read bytes — installed just below. */
+    int is_multipart_stream =
+        req->body_reader != NULL &&
+        hl_cap_multipart_inner(req->body_reader) != NULL;
+    if (req->body_reader && !is_multipart_stream) {
         const char *data;
         size_t len = hl_cap_body_data(req->body_reader, &data);
         if (len > 0)
@@ -144,6 +151,12 @@ void hl_lua_make_request(lua_State *L, KlRequest *req)
         lua_pushnil(L);
     }
     lua_setfield(L, -2, "body");
+
+    /* req.multipart() — only installed for streaming-multipart routes
+     * (no-op otherwise). Defined in mod_request.c. */
+    if (is_multipart_stream)
+        hl_lua_request_install_multipart(L, get_hl_lua_from_L(L),
+                                          req->body_reader);
 
     /* ctx — per-request context table (middleware → handler).
      * If req->ctx carries a native Lua ref, retrieve it directly;
