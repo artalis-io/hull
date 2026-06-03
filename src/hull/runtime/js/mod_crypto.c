@@ -17,17 +17,24 @@ static JSValue js_crypto_sha256(JSContext *ctx, JSValueConst this_val,
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "crypto.sha256 requires (data)");
 
-    size_t len;
-    const char *data = JS_ToCStringLen(ctx, &len, argv[0]);
-    if (!data)
-        return JS_EXCEPTION;
+    /* Accept either ArrayBuffer (binary-safe — preferred for file
+     * contents, multipart bodies, etc.) or string (UTF-8 encoded
+     * via JS_ToCStringLen). Trying ArrayBuffer first means binary
+     * data never round-trips through UTF-8 encoding. */
+    size_t len = 0;
+    const uint8_t *bytes = JS_GetArrayBuffer(ctx, &len, argv[0]);
+    const char *cstr = NULL;
+    if (!bytes) {
+        cstr = JS_ToCStringLen(ctx, &len, argv[0]);
+        if (!cstr) return JS_EXCEPTION;
+        bytes = (const uint8_t *)cstr;
+    }
 
     uint8_t hash[32];
-    if (hl_cap_crypto_sha256(data, len, hash) != 0) {
-        JS_FreeCString(ctx, data);
+    int rc = hl_cap_crypto_sha256((const char *)bytes, len, hash);
+    if (cstr) JS_FreeCString(ctx, cstr);
+    if (rc != 0)
         return JS_ThrowInternalError(ctx, "sha256 failed");
-    }
-    JS_FreeCString(ctx, data);
 
     /* Convert to hex string */
     char hex[65];

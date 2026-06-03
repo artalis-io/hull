@@ -2313,6 +2313,9 @@ e2e-build:
 e2e-http: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_http.sh
 
+e2e-multipart: $(BUILDDIR)/hull
+	RUNTIME=$(RUNTIME) sh tests/e2e_multipart.sh
+
 e2e-sandbox: $(BUILDDIR)/hull
 	sh tests/e2e_sandbox.sh
 
