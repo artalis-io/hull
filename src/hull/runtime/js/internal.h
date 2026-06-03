@@ -147,4 +147,14 @@ int hl_js_check_module_declared(JSContext *ctx,
                                  const char *canonical_name,
                                  const char *runtime_name);
 
+/* ── Defined in mod_request.c, called from bindings.c + modules.c. */
+struct KlBodyReader;
+/* Register MultipartIter / MultipartPart / MultipartChunks classes
+ * (once per VM, called from hl_js_register_modules). */
+void hl_js_request_register(JSContext *ctx);
+/* Install req.multipart() on the request object — no-op for non-
+ * streaming routes (body_reader is not a multipart wrapper). */
+void hl_js_request_install_multipart(JSContext *ctx, JSValue req_obj,
+                                      struct KlBodyReader *body_reader);
+
 #endif /* HL_RUNTIME_JS_INTERNAL_H */

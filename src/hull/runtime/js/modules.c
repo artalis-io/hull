@@ -9,6 +9,7 @@
  */
 
 #include "mod_buffer.h"
+#include "internal.h"  /* hl_js_request_register, hl_js_sse_register_class */
 
 /* ════════════════════════════════════════════════════════════════════
  * Module registry — called by hl_js_init() to register all
@@ -123,6 +124,10 @@ int hl_js_register_modules(HlJS *js)
         return -1;
     if (hl_js_init_ws_client_module(js->ctx, js) != 0)
         return -1;
+
+    /* Streaming-multipart request classes (MultipartIter / MultipartPart /
+     * MultipartChunks). Only meaningful for server flavors. */
+    hl_js_request_register(js->ctx);
 #endif
 
     return 0;

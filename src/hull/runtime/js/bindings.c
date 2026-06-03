@@ -13,6 +13,7 @@
 #include "hull/limits/core.h"
 #include "hull/cap/body.h"
 #include "hull/compress.h"
+#include "internal.h"  /* hl_js_request_install_multipart */
 #include "quickjs.h"
 
 _Static_assert(sizeof(JSValue) <= sizeof(((HlReqCtx *)0)->js_val_bytes),
@@ -151,8 +152,13 @@ JSValue hl_js_make_request(JSContext *ctx, KlRequest *req)
     }
     JS_SetPropertyStr(ctx, obj, "headers", headers_obj);
 
-    /* body — extract from buffer reader if available */
-    if (req->body_reader) {
+    /* body — extract from buffer reader if available. Streaming-multipart
+     * routes have a wrapper reader (not a KlBufReader), so body = null
+     * and the handler iterates via req.multipart() (installed below). */
+    int is_multipart_stream =
+        req->body_reader != NULL &&
+        hl_cap_multipart_inner(req->body_reader) != NULL;
+    if (req->body_reader && !is_multipart_stream) {
         const char *data;
         size_t len = hl_cap_body_data(req->body_reader, &data);
         if (len > 0)
@@ -163,6 +169,11 @@ JSValue hl_js_make_request(JSContext *ctx, KlRequest *req)
     } else {
         JS_SetPropertyStr(ctx, obj, "body", JS_NULL);
     }
+
+    /* req.multipart() — only installed for streaming-multipart routes.
+     * Defined in mod_request.c. */
+    if (is_multipart_stream)
+        hl_js_request_install_multipart(ctx, obj, req->body_reader);
 
     /* ctx — per-request context object (middleware → handler).
      * If req->ctx carries a native JS ref, retrieve it directly;

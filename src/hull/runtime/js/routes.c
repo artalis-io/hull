@@ -277,21 +277,17 @@ static KlMultipartConfig *js_build_multipart_config(HlJS *js, JSValueConst mp)
     return cfg;
 }
 
-/* Streaming-multipart factory shim: forwards to kl_body_reader_multipart
- * with the per-route config stashed on the HlJSRoute.
- *
- * Note (§1.5.b-2 Slice 2): the Lua side routes through hl_cap_multipart_
- * factory (the parkable wrapper) so the iterator can park on NEED_DATA;
- * the JS side will follow in Slice 3 when the JS req.multipart() iterator
- * binding lands. Until then, leaving JS on the bare Keel reader keeps
- * the existing JS streaming-route behavior (handler runs, body drains
- * in the background, no iterator surface yet). */
+/* Streaming-multipart factory shim: routes the request through
+ * hl_cap_multipart_factory (the parkable wrapper around Keel's
+ * kl_body_reader_multipart) so the JS iterator can hl_cap_multipart_park
+ * on NEED_DATA. The wrapper forwards our per-route config to the inner
+ * Keel reader. */
 static KlBodyReader *hl_js_multipart_factory(KlAllocator *alloc,
                                               const KlRequest *req,
                                               void *user_data)
 {
     HlJSRoute *route = (HlJSRoute *)user_data;
-    return kl_body_reader_multipart(alloc, req, route->multipart_config);
+    return hl_cap_multipart_factory(alloc, req, route->multipart_config);
 }
 
 int hl_js_wire_routes_server(HlJS *js, KlServer *server,

@@ -258,16 +258,50 @@ HlAsyncCont *hl_js_async_cont_create(HlJS *js,
 }
 
 /*
+ * Forward declaration: defined by mod_request.c. Called below when the
+ * cont is one of mod_request.c's HlJsMpCont (different layout — its
+ * handler_promise lives at a different struct offset).
+ */
+extern void hl_js_mp_cont_set_handler_promise(HlAsyncCont *cont,
+                                                JSContext *ctx,
+                                                JSValue promise);
+
+/*
  * Set the outer handler promise on a continuation.
  * Called by hl_js_dispatch after detecting a PENDING handler return,
  * since the handler promise only exists after JS_Call returns.
+ *
+ * The cont may be a standard HlJsAsyncCont (hull.sleep, http.fetch, …)
+ * OR an HlJsMpCont (req.multipart() iterator). They have different
+ * struct layouts, so we dispatch on the resume vtable pointer.
  */
 void hl_js_async_cont_set_handler_promise(HlAsyncCont *cont,
                                             JSContext *ctx,
                                             JSValue promise)
 {
-    HlJsAsyncCont *jc = (HlJsAsyncCont *)cont;
-    jc->handler_promise = JS_DupValue(ctx, promise);
+    if (cont->resume == hl_js_async_resume) {
+        HlJsAsyncCont *jc = (HlJsAsyncCont *)cont;
+        jc->handler_promise = JS_DupValue(ctx, promise);
+    } else {
+        /* HlJsMpCont — let mod_request.c reach the right offset. */
+        hl_js_mp_cont_set_handler_promise(cont, ctx, promise);
+    }
+}
+
+/*
+ * Identity check: is `cont` an HlJsAsyncCont produced by this file?
+ *
+ * The multipart pump (mod_request.c) needs to differentiate between
+ * HlJsAsyncCont and its own HlJsMpCont when transferring an outer
+ * handler_promise between continuations across an await — they have
+ * different struct layouts. Comparing the resume function pointer is
+ * the simplest identity test, but hl_js_async_resume is `static` so
+ * its address isn't reachable from another TU. This wrapper exposes
+ * the comparison without exposing the function pointer itself.
+ */
+int hl_js_async_cont_is_standard(HlAsyncCont *cont)
+{
+    return cont && cont->resume == hl_js_async_resume;
 }
 
 /* ── hull.sleep(ms) ───────────────────────────────────────────────── */
