@@ -59,12 +59,124 @@ UTEST(hl_cap_crypto, sha256_longer)
 
 UTEST(hl_cap_crypto, sha256_null)
 {
+    /* (NULL, 0) is the well-defined "hash the empty input" case —
+     * SHA-256("") = e3b0c4...b855. (NULL, len>0) and (any, NULL out)
+     * are still hard errors. */
     uint8_t hash[32];
     int rc = hl_cap_crypto_sha256(NULL, 0, hash);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(hash[0], 0xe3);
+    ASSERT_EQ(hash[1], 0xb0);
+    ASSERT_EQ(hash[2], 0xc4);
+
+    rc = hl_cap_crypto_sha256(NULL, 1, hash);
     ASSERT_EQ(rc, -1);
 
     rc = hl_cap_crypto_sha256("abc", 3, NULL);
     ASSERT_EQ(rc, -1);
+}
+
+/* ── Incremental SHA-256 ───────────────────────────────────────────── */
+
+/* Helper: format a 32-byte digest as 64-char lowercase hex. */
+static void hex32(const uint8_t in[32], char out[65])
+{
+    for (int i = 0; i < 32; i++) sprintf(out + i*2, "%02x", in[i]);
+    out[64] = '\0';
+}
+
+UTEST(hl_cap_crypto, sha256_inc_matches_oneshot_empty)
+{
+    HlSha256Ctx ctx;
+    hl_cap_crypto_sha256_init(&ctx);
+    uint8_t out[32];
+    ASSERT_EQ(hl_cap_crypto_sha256_final(&ctx, out), 0);
+    char hex[65]; hex32(out, hex);
+    ASSERT_STREQ(hex,
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+}
+
+UTEST(hl_cap_crypto, sha256_inc_matches_oneshot_short)
+{
+    HlSha256Ctx ctx;
+    hl_cap_crypto_sha256_init(&ctx);
+    ASSERT_EQ(hl_cap_crypto_sha256_update(&ctx, "abc", 3), 0);
+    uint8_t out[32];
+    ASSERT_EQ(hl_cap_crypto_sha256_final(&ctx, out), 0);
+    char hex[65]; hex32(out, hex);
+    /* RFC 6234 §8.5 test vector. */
+    ASSERT_STREQ(hex,
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+}
+
+UTEST(hl_cap_crypto, sha256_inc_chunked_equals_oneshot)
+{
+    /* Hash the same 1 KiB of pseudo-random data three ways and check
+     * the digests all match: one-shot, byte-at-a-time, and in
+     * boundary-straddling 17-byte chunks. */
+    uint8_t data[1024];
+    for (size_t i = 0; i < sizeof(data); i++)
+        data[i] = (uint8_t)(i * 31u + 7u);
+
+    uint8_t want[32];
+    ASSERT_EQ(hl_cap_crypto_sha256(data, sizeof(data), want), 0);
+
+    /* Byte-at-a-time */
+    {
+        HlSha256Ctx ctx;
+        hl_cap_crypto_sha256_init(&ctx);
+        for (size_t i = 0; i < sizeof(data); i++)
+            ASSERT_EQ(hl_cap_crypto_sha256_update(&ctx, &data[i], 1), 0);
+        uint8_t out[32];
+        ASSERT_EQ(hl_cap_crypto_sha256_final(&ctx, out), 0);
+        ASSERT_EQ(memcmp(out, want, 32), 0);
+    }
+
+    /* 17-byte chunks — straddles 64-byte block boundaries. */
+    {
+        HlSha256Ctx ctx;
+        hl_cap_crypto_sha256_init(&ctx);
+        size_t off = 0;
+        while (off < sizeof(data)) {
+            size_t step = (off + 17 <= sizeof(data)) ? 17 : (sizeof(data) - off);
+            ASSERT_EQ(hl_cap_crypto_sha256_update(&ctx, data + off, step), 0);
+            off += step;
+        }
+        uint8_t out[32];
+        ASSERT_EQ(hl_cap_crypto_sha256_final(&ctx, out), 0);
+        ASSERT_EQ(memcmp(out, want, 32), 0);
+    }
+}
+
+UTEST(hl_cap_crypto, sha256_inc_zero_update_is_noop)
+{
+    /* Calling update with len=0 must not change the digest. */
+    HlSha256Ctx ctx;
+    hl_cap_crypto_sha256_init(&ctx);
+    ASSERT_EQ(hl_cap_crypto_sha256_update(&ctx, NULL, 0), 0);  /* NULL OK at len=0 */
+    ASSERT_EQ(hl_cap_crypto_sha256_update(&ctx, "abc", 3), 0);
+    ASSERT_EQ(hl_cap_crypto_sha256_update(&ctx, "", 0), 0);
+    uint8_t out[32];
+    ASSERT_EQ(hl_cap_crypto_sha256_final(&ctx, out), 0);
+    char hex[65]; hex32(out, hex);
+    ASSERT_STREQ(hex,
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+}
+
+UTEST(hl_cap_crypto, sha256_inc_null_args)
+{
+    uint8_t out[32];
+    /* NULL ctx is always -1 */
+    ASSERT_EQ(hl_cap_crypto_sha256_update(NULL, "abc", 3), -1);
+    ASSERT_EQ(hl_cap_crypto_sha256_final(NULL, out), -1);
+
+    /* Update with len>0 and NULL data is -1 */
+    HlSha256Ctx ctx;
+    hl_cap_crypto_sha256_init(&ctx);
+    ASSERT_EQ(hl_cap_crypto_sha256_update(&ctx, NULL, 5), -1);
+
+    /* Final with NULL out is -1 */
+    ASSERT_EQ(hl_cap_crypto_sha256_final(&ctx, NULL), -1);
 }
 
 /* ── Random bytes tests ─────────────────────────────────────────────── */

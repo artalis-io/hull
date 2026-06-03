@@ -86,36 +86,76 @@ static void sha256_transform(uint32_t state[8], const uint8_t block[64])
     state[4] += e; state[5] += f; state[6] += g; state[7] += h;
 }
 
-int hl_cap_crypto_sha256(const void *data, size_t len, uint8_t out[32])
+void hl_cap_crypto_sha256_init(HlSha256Ctx *ctx)
 {
-    if (!data || !out)
-        return -1;
-
-    uint32_t state[8] = {
+    if (!ctx) return;
+    static const uint32_t iv[8] = {
         0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
         0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
     };
+    memcpy(ctx->state, iv, sizeof(iv));
+    ctx->buf_len    = 0;
+    ctx->total_bits = 0;
+}
+
+int hl_cap_crypto_sha256_update(HlSha256Ctx *ctx,
+                                  const void *data, size_t len)
+{
+    if (!ctx) return -1;
+    if (len == 0) return 0;
+    if (!data) return -1;
+
+    ctx->total_bits += (uint64_t)len * 8;
 
     const uint8_t *p = (const uint8_t *)data;
-    size_t remaining = len;
 
-    while (remaining >= 64) {
-        sha256_transform(state, p);
-        p += 64;
-        remaining -= 64;
+    /* Fill any partial block first. */
+    if (ctx->buf_len > 0) {
+        size_t need = 64 - ctx->buf_len;
+        if (len < need) {
+            memcpy(ctx->buf + ctx->buf_len, p, len);
+            ctx->buf_len += len;
+            return 0;
+        }
+        memcpy(ctx->buf + ctx->buf_len, p, need);
+        sha256_transform(ctx->state, ctx->buf);
+        p   += need;
+        len -= need;
+        ctx->buf_len = 0;
     }
 
-    uint8_t block[64];
-    memset(block, 0, 64);
-    memcpy(block, p, remaining);
-    block[remaining] = 0x80;
+    /* Bulk full blocks straight from the input. */
+    while (len >= 64) {
+        sha256_transform(ctx->state, p);
+        p   += 64;
+        len -= 64;
+    }
 
-    if (remaining >= 56) {
-        sha256_transform(state, block);
+    /* Stash remainder for next call. */
+    if (len > 0) {
+        memcpy(ctx->buf, p, len);
+        ctx->buf_len = len;
+    }
+    return 0;
+}
+
+int hl_cap_crypto_sha256_final(HlSha256Ctx *ctx, uint8_t out[32])
+{
+    if (!ctx || !out) return -1;
+
+    /* Standard SHA-256 padding: 0x80, zeros, then 64-bit big-endian
+     * total bit count in the last 8 bytes of the final block. */
+    uint8_t block[64];
+    memcpy(block, ctx->buf, ctx->buf_len);
+    block[ctx->buf_len] = 0x80;
+    memset(block + ctx->buf_len + 1, 0, 63 - ctx->buf_len);
+
+    if (ctx->buf_len >= 56) {
+        sha256_transform(ctx->state, block);
         memset(block, 0, 64);
     }
 
-    uint64_t bits = (uint64_t)len * 8;
+    uint64_t bits = ctx->total_bits;
     block[56] = (uint8_t)(bits >> 56);
     block[57] = (uint8_t)(bits >> 48);
     block[58] = (uint8_t)(bits >> 40);
@@ -125,16 +165,30 @@ int hl_cap_crypto_sha256(const void *data, size_t len, uint8_t out[32])
     block[62] = (uint8_t)(bits >>  8);
     block[63] = (uint8_t)(bits);
 
-    sha256_transform(state, block);
+    sha256_transform(ctx->state, block);
 
     for (int i = 0; i < 8; i++) {
-        out[i*4+0] = (uint8_t)(state[i] >> 24);
-        out[i*4+1] = (uint8_t)(state[i] >> 16);
-        out[i*4+2] = (uint8_t)(state[i] >>  8);
-        out[i*4+3] = (uint8_t)(state[i]);
+        out[i*4+0] = (uint8_t)(ctx->state[i] >> 24);
+        out[i*4+1] = (uint8_t)(ctx->state[i] >> 16);
+        out[i*4+2] = (uint8_t)(ctx->state[i] >>  8);
+        out[i*4+3] = (uint8_t)(ctx->state[i]);
     }
-
+    /* Scrub the working buffers so a stale stack frame can't leak
+     * partial input back through the context after free. */
+    memset(block, 0, 64);
+    memset(ctx,   0, sizeof(*ctx));
     return 0;
+}
+
+int hl_cap_crypto_sha256(const void *data, size_t len, uint8_t out[32])
+{
+    if (!out || (!data && len > 0))
+        return -1;
+    HlSha256Ctx ctx;
+    hl_cap_crypto_sha256_init(&ctx);
+    if (hl_cap_crypto_sha256_update(&ctx, data, len) != 0)
+        return -1;
+    return hl_cap_crypto_sha256_final(&ctx, out);
 }
 
 /* ── Random bytes ───────────────────────────────────────────────────── */

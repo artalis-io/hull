@@ -994,14 +994,121 @@ static JSValue js_crypto_base64url_decode(JSContext *ctx, JSValueConst this_val,
     return result;
 }
 
+/* ── Incremental SHA-256 hasher class ───────────────────────────────
+ *
+ *   const h = crypto.createSha256();
+ *   h.update(chunk);     // accepts ArrayBuffer or string; chainable
+ *   const hex = h.digest();   // 64-char hex; further calls throw
+ */
+
+static JSClassID hl_js_sha256_hasher_class_id;
+
+typedef struct {
+    HlSha256Ctx ctx;
+    int         done;
+} HlJsSha256Hasher;
+
+static void js_sha256_hasher_finalizer(JSRuntime *rt, JSValue val)
+{
+    (void)rt;
+    HlJsSha256Hasher *h = JS_GetOpaque(val, hl_js_sha256_hasher_class_id);
+    if (!h) return;
+    /* Scrub any in-flight state from abandoned hashers — _final does the
+     * same on the normal path. */
+    if (!h->done) memset(&h->ctx, 0, sizeof(h->ctx));
+    free(h);
+}
+
+static JSClassDef js_sha256_hasher_class = {
+    "Sha256Hasher",
+    .finalizer = js_sha256_hasher_finalizer,
+};
+
+static JSValue js_sha256_hasher_update(JSContext *ctx, JSValueConst this_val,
+                                        int argc, JSValueConst *argv)
+{
+    HlJsSha256Hasher *h = JS_GetOpaque2(ctx, this_val, hl_js_sha256_hasher_class_id);
+    if (!h) return JS_EXCEPTION;
+    if (h->done)
+        return JS_ThrowInternalError(ctx, "sha256.update() after digest()");
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "sha256.update requires (data)");
+
+    /* Accept ArrayBuffer (binary-safe) or string (UTF-8 via JS_ToCStringLen). */
+    size_t len = 0;
+    const uint8_t *bytes = JS_GetArrayBuffer(ctx, &len, argv[0]);
+    const char *cstr = NULL;
+    if (!bytes) {
+        cstr = JS_ToCStringLen(ctx, &len, argv[0]);
+        if (!cstr) return JS_EXCEPTION;
+        bytes = (const uint8_t *)cstr;
+    }
+    int rc = hl_cap_crypto_sha256_update(&h->ctx, bytes, len);
+    if (cstr) JS_FreeCString(ctx, cstr);
+    if (rc != 0)
+        return JS_ThrowInternalError(ctx, "sha256.update() failed");
+    return JS_DupValue(ctx, this_val);  /* chainable */
+}
+
+static JSValue js_sha256_hasher_digest(JSContext *ctx, JSValueConst this_val,
+                                        int argc, JSValueConst *argv)
+{
+    (void)argc; (void)argv;
+    HlJsSha256Hasher *h = JS_GetOpaque2(ctx, this_val, hl_js_sha256_hasher_class_id);
+    if (!h) return JS_EXCEPTION;
+    if (h->done)
+        return JS_ThrowInternalError(ctx, "sha256.digest() already called");
+    uint8_t out[32];
+    if (hl_cap_crypto_sha256_final(&h->ctx, out) != 0)
+        return JS_ThrowInternalError(ctx, "sha256.digest() failed");
+    h->done = 1;
+    char hex[65];
+    for (int i = 0; i < 32; i++) snprintf(hex + i*2, 3, "%02x", out[i]);
+    hex[64] = '\0';
+    return JS_NewStringLen(ctx, hex, 64);
+}
+
+static JSValue js_crypto_create_sha256(JSContext *ctx, JSValueConst this_val,
+                                     int argc, JSValueConst *argv)
+{
+    (void)this_val; (void)argc; (void)argv;
+    HlJsSha256Hasher *h = malloc(sizeof(*h));
+    if (!h) return JS_ThrowOutOfMemory(ctx);
+    hl_cap_crypto_sha256_init(&h->ctx);
+    h->done = 0;
+
+    JSValue obj = JS_NewObjectClass(ctx, (int)hl_js_sha256_hasher_class_id);
+    if (JS_IsException(obj)) { free(h); return obj; }
+    JS_SetOpaque(obj, h);
+    return obj;
+}
+
+static void js_register_sha256_hasher_class(JSContext *ctx)
+{
+    JSRuntime *rt = JS_GetRuntime(ctx);
+    JS_NewClassID(&hl_js_sha256_hasher_class_id);
+    JS_NewClass(rt, hl_js_sha256_hasher_class_id, &js_sha256_hasher_class);
+
+    JSValue proto = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, proto, "update",
+        JS_NewCFunction(ctx, js_sha256_hasher_update, "update", 1));
+    JS_SetPropertyStr(ctx, proto, "digest",
+        JS_NewCFunction(ctx, js_sha256_hasher_digest, "digest", 0));
+    JS_SetClassProto(ctx, hl_js_sha256_hasher_class_id, proto);
+}
+
 static int js_crypto_module_init(JSContext *ctx, JSModuleDef *m)
 {
     if (hl_js_check_module_declared(ctx, "hull/crypto", "hull:crypto") != 0)
         return -1;
 
+    js_register_sha256_hasher_class(ctx);
+
     JSValue crypto = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, crypto, "sha256",
                       JS_NewCFunction(ctx, js_crypto_sha256, "sha256", 1));
+    JS_SetPropertyStr(ctx, crypto, "createSha256",
+                      JS_NewCFunction(ctx, js_crypto_create_sha256, "createSha256", 0));
     JS_SetPropertyStr(ctx, crypto, "sha512",
                       JS_NewCFunction(ctx, js_crypto_sha512, "sha512", 1));
     JS_SetPropertyStr(ctx, crypto, "random",

@@ -1246,6 +1246,59 @@ app.sse("/sse/events", async (req, stream) => {
 
 **Implementation:** Uses Keel's `kl_sse_begin` / `kl_sse_event` / `kl_sse_end` over chunked transfer encoding. The handler runs as a coroutine (Lua) or async function (JS) that can yield with `hull.sleep()` between events.
 
+### Streaming Multipart Uploads
+
+Routes can opt into streaming `multipart/form-data` parsing via `opts.multipart` on `app.<verb>(...)`. The handler runs before the body is buffered and pulls bytes out of the socket on demand via an iterator. There is no `req.body` for these routes — `req:multipart()` / `req.multipart()` is the only way to read the body.
+
+```lua
+app.post("/upload", function(req, res)
+    for part in req:multipart() do
+        if part.filename then
+            for chunk in part:chunks() do
+                -- handle binary chunk (Lua byte string, #chunk = bytes)
+            end
+        else
+            local value = part:read()
+        end
+    end
+    res:json({ ok = true })
+end, { multipart = { max_part_size = 64 * 1024 * 1024, max_total_size = 256 * 1024 * 1024, max_parts = 32 } })
+```
+
+```javascript
+app.post("/upload", async (req, res) => {
+    for await (const part of req.multipart()) {
+        if (part.filename) {
+            for await (const chunk of part.chunks()) {
+                // chunk is an ArrayBuffer; binary-safe (.byteLength = bytes)
+            }
+        } else {
+            const buf = await part.read();   // ArrayBuffer
+        }
+    }
+    res.json({ ok: true });
+}, { multipart: { maxPartSize: 64 * 1024 * 1024, maxTotalSize: 256 * 1024 * 1024, maxParts: 32 } });
+```
+
+**Caps** (all default to `0` = unlimited): `max_part_size` / `maxPartSize`, `max_total_size` / `maxTotalSize`, `max_parts` / `maxParts`, `max_headers_size` / `maxHeadersSize`, `max_input_buffer` / `maxInputBuffer`. Exceeding any cap mid-stream raises a parser error which the handler can `pcall` / try-catch; uncaught errors → 500. JS accepts both naming conventions; snake_case wins if both appear.
+
+**Part fields:** `name` (always), `filename` (`nil`/`null` for text fields), `content_type` (Lua) / `contentType` (JS).
+
+**Binary safety:** Lua chunks/`read()` return byte-clean Lua strings. JS chunks/`read()` return `ArrayBuffer` (never JS strings — `JS_NewStringLen` would UTF-8-mangle binary input). To decode text fields in JS, use `new TextDecoder().decode(buf)` (BYOP — QuickJS doesn't bundle it; ASCII can use a manual loop).
+
+**Implementation:**
+- Route is registered via `kl_server_route_streaming` + a per-runtime factory shim (`hl_{lua,js}_multipart_factory` in `runtime/{lua,js}/routes.c`) that wraps Keel's `kl_body_reader_multipart` with the parkable `hl_cap_multipart_factory` wrapper (`src/hull/cap/body.c`).
+- The iterator drives `kl_multipart_next()` and on `NEED_DATA` parks the handler via `hl_cap_multipart_park`, sets `c->state = KL_CONN_READING_BODY`, and yields (Lua coroutine / pending JS Promise). The body reader's `on_data` callback fires the park and resumes.
+- Bindings live in `src/hull/runtime/lua/mod_request.c` and `src/hull/runtime/js/mod_request.c`.
+
+**Known limitations:**
+- Live connection required — in-process `hull test` dispatch raises on first `NEED_DATA`. End-to-end coverage is in `tests/e2e_multipart.sh` (run via `make e2e-multipart`).
+- `Part` is invalidated after the next iter step (parser is forward-only — don't stash parts past their iteration).
+- `chunks(n)` accepts a min-bytes hint that's currently advisory (each parser event = one chunk; coalescing is a follow-up).
+- Mid-stream connection close leaks the parked continuation — production deployments should run behind a reverse proxy with request timeouts.
+
+See [docs/multipart.md](docs/multipart.md) for the full API + `examples/multipart_upload/` for a runnable Lua + JS demo.
+
 ### Static File Serving
 
 Convention-based: place files in `app_dir/static/`, they're served at `/static/*`.

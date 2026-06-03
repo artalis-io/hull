@@ -43,6 +43,57 @@
  */
 int hl_cap_crypto_sha256(const void *data, size_t len, uint8_t out[32]);
 
+/* ── Incremental SHA-256 ──────────────────────────────────────────── */
+
+/**
+ * @brief Incremental SHA-256 hasher state.
+ *
+ * Opaque to callers — fields are public so the struct can be stack- or
+ * userdata-allocated, but only the init/update/final functions should
+ * touch them. Hashing one buffer of `N` bytes incrementally produces
+ * the exact same 32-byte digest as `hl_cap_crypto_sha256(buf, N)`.
+ */
+typedef struct {
+    uint32_t state[8];   /**< Working SHA-256 state. */
+    uint8_t  buf[64];    /**< Partial-block buffer (< 64 unprocessed bytes). */
+    size_t   buf_len;    /**< Bytes currently in `buf`. */
+    uint64_t total_bits; /**< Bits absorbed so far (for the length pad). */
+} HlSha256Ctx;
+
+/**
+ * @brief Initialize an incremental SHA-256 context.
+ *
+ * Always succeeds; the context is ready for `_update` calls on return.
+ */
+void hl_cap_crypto_sha256_init(HlSha256Ctx *ctx);
+
+/**
+ * @brief Feed bytes into an incremental SHA-256 context.
+ *
+ * Safe to call any number of times with any chunk size, including 0.
+ *
+ * @param ctx   Initialized context.
+ * @param data  Bytes to absorb.
+ * @param len   Byte count (0 is a no-op).
+ *
+ * @return `0` on success, `-1` on NULL ctx/data.
+ */
+int hl_cap_crypto_sha256_update(HlSha256Ctx *ctx,
+                                  const void *data, size_t len);
+
+/**
+ * @brief Finalize an incremental SHA-256 and write the digest.
+ *
+ * The context must not be used after `_final` — call `_init` again to
+ * reuse it.
+ *
+ * @param ctx  Context to finalize.
+ * @param out  32-byte output buffer.
+ *
+ * @return `0` on success, `-1` on NULL ctx/out.
+ */
+int hl_cap_crypto_sha256_final(HlSha256Ctx *ctx, uint8_t out[32]);
+
 /**
  * @brief Compute SHA-512 of a byte buffer.
  *

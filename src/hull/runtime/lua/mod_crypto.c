@@ -758,8 +758,97 @@ static int lua_crypto_base64url_decode(lua_State *L)
     return 1;
 }
 
+/* ── Incremental SHA-256 hasher ─────────────────────────────────────
+ *
+ *   local h = crypto.create_sha256()
+ *   h:update(chunk)         -- repeat as needed
+ *   local hex = h:digest()  -- finalises; further update/digest = error
+ *
+ * Backed by HlSha256Ctx; the userdata holds the context + a 'done' flag
+ * so we can reject double-digest + post-digest updates cleanly. */
+
+#define HL_SHA256_HASHER_MT "HlSha256Hasher"
+
+typedef struct {
+    HlSha256Ctx ctx;
+    int         done;
+} HlLuaSha256Hasher;
+
+static HlLuaSha256Hasher *check_hasher(lua_State *L, int idx)
+{
+    return (HlLuaSha256Hasher *)luaL_checkudata(L, idx, HL_SHA256_HASHER_MT);
+}
+
+static int lua_crypto_create_sha256(lua_State *L)
+{
+    HlLuaSha256Hasher *h = (HlLuaSha256Hasher *)
+        lua_newuserdatauv(L, sizeof(*h), 0);
+    hl_cap_crypto_sha256_init(&h->ctx);
+    h->done = 0;
+    luaL_setmetatable(L, HL_SHA256_HASHER_MT);
+    return 1;
+}
+
+static int lua_sha256_hasher_update(lua_State *L)
+{
+    HlLuaSha256Hasher *h = check_hasher(L, 1);
+    if (h->done)
+        return luaL_error(L, "sha256:update() after digest()");
+    size_t len = 0;
+    const char *data = luaL_checklstring(L, 2, &len);
+    if (hl_cap_crypto_sha256_update(&h->ctx, data, len) != 0)
+        return luaL_error(L, "sha256:update() failed");
+    /* Return the hasher so calls can chain. */
+    lua_settop(L, 1);
+    return 1;
+}
+
+static int lua_sha256_hasher_digest(lua_State *L)
+{
+    HlLuaSha256Hasher *h = check_hasher(L, 1);
+    if (h->done)
+        return luaL_error(L, "sha256:digest() already called");
+    uint8_t out[32];
+    if (hl_cap_crypto_sha256_final(&h->ctx, out) != 0)
+        return luaL_error(L, "sha256:digest() failed");
+    h->done = 1;
+    char hex[65];
+    for (int i = 0; i < 32; i++) snprintf(hex + i*2, 3, "%02x", out[i]);
+    hex[64] = '\0';
+    lua_pushlstring(L, hex, 64);
+    return 1;
+}
+
+static int lua_sha256_hasher_gc(lua_State *L)
+{
+    HlLuaSha256Hasher *h = check_hasher(L, 1);
+    /* If digest() wasn't called, scrub the in-flight state — it may
+     * contain partial input bytes. _final zeros the ctx on success;
+     * do the same here for the abandoned-without-final path. */
+    if (!h->done) memset(&h->ctx, 0, sizeof(h->ctx));
+    return 0;
+}
+
+static const luaL_Reg sha256_hasher_methods[] = {
+    {"update", lua_sha256_hasher_update},
+    {"digest", lua_sha256_hasher_digest},
+    {NULL, NULL}
+};
+
+static void register_sha256_hasher_mt(lua_State *L)
+{
+    luaL_newmetatable(L, HL_SHA256_HASHER_MT);
+    lua_pushvalue(L, -1);
+    lua_setfield(L, -2, "__index");
+    luaL_setfuncs(L, sha256_hasher_methods, 0);
+    lua_pushcfunction(L, lua_sha256_hasher_gc);
+    lua_setfield(L, -2, "__gc");
+    lua_pop(L, 1);
+}
+
 static const luaL_Reg crypto_funcs[] = {
     {"sha256",            lua_crypto_sha256},
+    {"create_sha256",        lua_crypto_create_sha256},
     {"sha512",            lua_crypto_sha512},
     {"random",            lua_crypto_random},
     {"hash_password",     lua_crypto_hash_password},
@@ -783,6 +872,7 @@ static const luaL_Reg crypto_funcs[] = {
 
 int luaopen_hull_crypto(lua_State *L)
 {
+    register_sha256_hasher_mt(L);
     luaL_newlib(L, crypto_funcs);
     return 1;
 }
