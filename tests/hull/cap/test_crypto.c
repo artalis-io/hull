@@ -78,10 +78,11 @@ UTEST(hl_cap_crypto, sha256_null)
 
 /* ── Incremental SHA-256 ───────────────────────────────────────────── */
 
-/* Helper: format a 32-byte digest as 64-char lowercase hex. */
+/* Helper: format a 32-byte digest as 64-char lowercase hex.
+ * snprintf to match the convention used by the runtime bindings. */
 static void hex32(const uint8_t in[32], char out[65])
 {
-    for (int i = 0; i < 32; i++) sprintf(out + i*2, "%02x", in[i]);
+    for (int i = 0; i < 32; i++) snprintf(out + i*2, 3, "%02x", in[i]);
     out[64] = '\0';
 }
 

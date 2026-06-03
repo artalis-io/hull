@@ -408,7 +408,9 @@ static int l_tool_extract_manifest_js(lua_State *L)
     JSValue manifest = JS_GetPropertyStr(ctx, global, "__hull_manifest");
     JS_FreeValue(ctx, global);
 
-    if (JS_IsUndefined(manifest) || JS_IsNull(manifest)) {
+    /* Treat exception, undefined, and null all as "no manifest
+     * declared" — only a real object proceeds to JSON.stringify. */
+    if (JS_IsException(manifest) || JS_IsUndefined(manifest) || JS_IsNull(manifest)) {
         JS_FreeValue(ctx, manifest);
         hl_js_free(js);
         free(js);

@@ -1010,13 +1010,12 @@ typedef struct {
 
 static void js_sha256_hasher_finalizer(JSRuntime *rt, JSValue val)
 {
-    (void)rt;
     HlJsSha256Hasher *h = JS_GetOpaque(val, hl_js_sha256_hasher_class_id);
     if (!h) return;
     /* Scrub any in-flight state from abandoned hashers — _final does the
      * same on the normal path. */
     if (!h->done) memset(&h->ctx, 0, sizeof(h->ctx));
-    free(h);
+    js_free_rt(rt, h);
 }
 
 static JSClassDef js_sha256_hasher_class = {
@@ -1072,13 +1071,17 @@ static JSValue js_crypto_create_sha256(JSContext *ctx, JSValueConst this_val,
                                      int argc, JSValueConst *argv)
 {
     (void)this_val; (void)argc; (void)argv;
-    HlJsSha256Hasher *h = malloc(sizeof(*h));
+    /* js_malloc routes through QuickJS's allocator, so the runtime's
+     * configured memory cap covers Hasher instances — raw malloc would
+     * silently bypass JS_SetMemoryLimit. js_free_rt in the finalizer
+     * matches the same allocator. */
+    HlJsSha256Hasher *h = js_malloc(ctx, sizeof(*h));
     if (!h) return JS_ThrowOutOfMemory(ctx);
     hl_cap_crypto_sha256_init(&h->ctx);
     h->done = 0;
 
     JSValue obj = JS_NewObjectClass(ctx, (int)hl_js_sha256_hasher_class_id);
-    if (JS_IsException(obj)) { free(h); return obj; }
+    if (JS_IsException(obj)) { js_free(ctx, h); return obj; }
     JS_SetOpaque(obj, h);
     return obj;
 }
