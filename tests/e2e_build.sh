@@ -647,6 +647,69 @@ check_file_exists "ejected app.lua exists" "$WORKDIR/ejected/app/app.lua"
 "$HULL" eject "$WORKDIR/myapp" -o "$WORKDIR/ejected" >/dev/null 2>&1; RC=$?
 check_exit "hull eject existing dir fails" 1 $RC
 
+# ── Step 18: JS-runtime roundtrip (manifest extract → inspect) ──────
+#
+# Regression guard for two bugs we just fixed:
+#   * `hull manifest <jsapp>` used to refuse with "no app.lua found"
+#     because manifest.lua hard-coded the Lua entry. The new
+#     tool.extract_manifest_js spins up a transient JS runtime so the
+#     JS-side app.manifest({...}) is read into the build pipeline.
+#   * `hull inspect` on a freshly signed app used to print
+#     `Status: INVALID` for Lua apps because the verify-side payload
+#     reconstruction omitted `modules_resolved`. Asserting VALID on a
+#     fresh build for BOTH runtimes catches any future drift between
+#     build.lua's sign payload and inspect.lua's verify payload.
+
+echo ""
+echo "=== Step 18: JS-runtime roundtrip ==="
+
+mkdir -p "$WORKDIR/jsapp"
+cat > "$WORKDIR/jsapp/app.js" << 'EOF'
+import { app } from "hull:app";
+app.manifest({
+    name: "jsapp",
+    version: "0.0.1",
+    modules: ["hull/http-server@1"],
+    fs: { read: ["data/"], write: ["uploads/"] },
+    env: ["PORT"],
+    hosts: ["api.stripe.com"],
+});
+app.get("/", async (_q, r) => r.text("ok"));
+EOF
+
+# hull manifest on a JS app — should now succeed and emit JSON
+MANIFEST_OUT=$("$HULL" manifest "$WORKDIR/jsapp" 2>&1); RC=$?
+check_exit "js manifest exits 0" 0 $RC
+check_contains "js manifest shows name"    "$MANIFEST_OUT" '"jsapp"'
+check_contains "js manifest shows fs.read" "$MANIFEST_OUT" 'data/'
+check_contains "js manifest shows env"     "$MANIFEST_OUT" 'PORT'
+
+# Build + sign the JS app
+"$HULL" build --no-verify-platform --sign "$WORKDIR/developer.key" "$WORKDIR/jsapp" \
+    >/dev/null 2>&1; RC=$?
+check_exit "js build --sign exits 0" 0 $RC
+check_file_exists "js package.sig exists" "$WORKDIR/jsapp/package.sig"
+
+# Inspect the JS app — Status should be VALID and the Capabilities
+# section MUST be present (the JS-manifest-extraction fix is what
+# makes this so).
+INSPECT_OUT=$("$HULL" inspect "$WORKDIR/jsapp" 2>&1); RC=$?
+check_exit "js inspect exits 0" 0 $RC
+check_contains "js inspect shows VALID"      "$INSPECT_OUT" "Status:    VALID"
+check_contains "js inspect shows Capabilities" "$INSPECT_OUT" "Capabilities:"
+check_contains "js inspect shows fs.read"    "$INSPECT_OUT" "fs.read:  data/"
+check_contains "js inspect shows fs.write"   "$INSPECT_OUT" "fs.write: uploads/"
+check_contains "js inspect shows env"        "$INSPECT_OUT" "env:      PORT"
+check_contains "js inspect shows hosts"      "$INSPECT_OUT" "hosts:    api.stripe.com"
+
+# Re-inspect the original Lua app (built way back in Step 6) — Status
+# should ALSO be VALID. This catches the inspect.lua payload-
+# reconstruction bug that previously printed INVALID on a genuinely
+# valid Lua signature because `modules_resolved` was missing.
+LUA_INSPECT_OUT=$("$HULL" inspect "$WORKDIR/myapp" 2>&1); RC=$?
+check_exit "lua re-inspect exits 0" 0 $RC
+check_contains "lua re-inspect shows VALID"  "$LUA_INSPECT_OUT" "Status:    VALID"
+
 # ── Summary ───────────────────────────────────────────────────────────
 
 echo ""

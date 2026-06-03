@@ -118,15 +118,20 @@ local function main()
 
     -- Verify app signature
     if sig.signature and sig.public_key and sig.files then
+        -- Rebuild the exact payload that build.lua signed. The key set
+        -- here MUST match build.lua's sign_app() — adding a new field
+        -- there means adding it here too, or the verify will report
+        -- INVALID on a genuinely-valid signature.
         local payload
         if sig.binary_hash then
             payload = json.encode({
-                binary_hash = sig.binary_hash,
-                build = sig.build,
-                files = sig.files,
-                manifest = sig.manifest,
-                platform = sig.platform,
-                trampoline_hash = sig.trampoline_hash,
+                binary_hash      = sig.binary_hash,
+                build            = sig.build,
+                files            = sig.files,
+                manifest         = sig.manifest,
+                modules_resolved = sig.modules_resolved,
+                platform         = sig.platform,
+                trampoline_hash  = sig.trampoline_hash,
             })
         else
             payload = json.encode({

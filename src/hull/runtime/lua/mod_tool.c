@@ -30,6 +30,11 @@
 #include "hull/release_io.h"
 #include "hull/signature.h"  /* HL_PLATFORM_PUBKEY_HEX */
 
+#ifdef HL_ENABLE_JS
+#include "hull/runtime/js.h"  /* HlJS, hl_js_init, hl_js_load_app, hl_js_free */
+#include "quickjs.h"
+#endif
+
 #include <signal.h>
 #include <sys/wait.h>
 
@@ -355,6 +360,92 @@ static int l_tool_loadfile(lua_State *L)
         return 2;
     }
     return 1; /* chunk function on stack */
+}
+
+/* ── tool.extract_manifest_js(path) → JSON string | nil ────────────── *
+ *
+ * Used by build.lua / manifest.lua / inspect.lua to read app.manifest({...})
+ * out of a JS entry-point. The Lua tool runtime can't execute JS, so we
+ * spin up a transient HlJS, load the file (which runs its top-level —
+ * including the app.manifest() call), serialize globalThis.__hull_manifest
+ * with JSON.stringify, and tear the runtime back down. The caller decodes
+ * the JSON string into a Lua table for use exactly as if it had come
+ * from app.get_manifest() on the Lua side.
+ *
+ * Returns nil if the app didn't declare a manifest. Raises a Lua error
+ * if hull was built without HL_ENABLE_JS, or if the runtime / load
+ * fails. */
+static int l_tool_extract_manifest_js(lua_State *L)
+{
+#ifndef HL_ENABLE_JS
+    (void)L;
+    return luaL_error(L,
+        "tool.extract_manifest_js: this hull was built without HL_ENABLE_JS");
+#else
+    const char *path = luaL_checkstring(L, 1);
+
+    HlJS *js = calloc(1, sizeof(*js));
+    if (!js)
+        return luaL_error(L, "tool.extract_manifest_js: out of memory");
+
+    HlJSConfig cfg = HL_JS_CONFIG_DEFAULT;
+    if (hl_js_init(js, &cfg) != 0) {
+        free(js);
+        return luaL_error(L, "tool.extract_manifest_js: hl_js_init failed");
+    }
+
+    if (hl_js_load_app(js, path) != 0) {
+        hl_js_free(js);
+        free(js);
+        return luaL_error(L,
+            "tool.extract_manifest_js: failed to load %s "
+            "(syntax error, throw at top-level, or unresolved import?)",
+            path);
+    }
+
+    JSContext *ctx = js->ctx;
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue manifest = JS_GetPropertyStr(ctx, global, "__hull_manifest");
+    JS_FreeValue(ctx, global);
+
+    if (JS_IsUndefined(manifest) || JS_IsNull(manifest)) {
+        JS_FreeValue(ctx, manifest);
+        hl_js_free(js);
+        free(js);
+        lua_pushnil(L);
+        return 1;
+    }
+
+    JSValue json = JS_JSONStringify(ctx, manifest, JS_UNDEFINED, JS_UNDEFINED);
+    JS_FreeValue(ctx, manifest);
+    if (JS_IsException(json)) {
+        JS_FreeValue(ctx, json);
+        hl_js_free(js);
+        free(js);
+        return luaL_error(L,
+            "tool.extract_manifest_js: JSON.stringify(manifest) failed");
+    }
+
+    size_t json_len = 0;
+    const char *json_str = JS_ToCStringLen(ctx, &json_len, json);
+    if (!json_str) {
+        JS_FreeValue(ctx, json);
+        hl_js_free(js);
+        free(js);
+        return luaL_error(L,
+            "tool.extract_manifest_js: cannot convert JSON value to string");
+    }
+
+    /* Copy into Lua's own string storage BEFORE we tear down the JS
+     * runtime — the JS cstring lifetime ends with JS_FreeCString. */
+    lua_pushlstring(L, json_str, json_len);
+
+    JS_FreeCString(ctx, json_str);
+    JS_FreeValue(ctx, json);
+    hl_js_free(js);
+    free(js);
+    return 1;
+#endif
 }
 
 /* ── tool.extract_platform(dir) → bool ─────────────────────────────── */
@@ -709,6 +800,7 @@ static const luaL_Reg tool_funcs[] = {
     { "file_mtime",             l_tool_file_mtime },
     { "stderr",                 l_tool_stderr },
     { "loadfile",               l_tool_loadfile },
+    { "extract_manifest_js",    l_tool_extract_manifest_js },
     { "extract_platform",       l_tool_extract_platform },
     { "extract_platform_cosmo", l_tool_extract_platform_cosmo },
     { "platform_archs",         l_tool_platform_archs },

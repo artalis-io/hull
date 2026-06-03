@@ -369,17 +369,35 @@ local function sign_app(app_dir, key_file, sign_ctx, files)
         end
     end
 
-    -- Execute app to capture manifest
+    -- Execute the app entry to capture its manifest. Lua entry runs
+    -- in this same VM; JS entry runs in a transient HlJS spun up by
+    -- tool.extract_manifest_js and the resulting JSON-stringified
+    -- manifest is decoded into the same shape app.get_manifest() would
+    -- return on the Lua side. Either path is fine — the rest of the
+    -- build pipeline only cares about the resulting table.
     local manifest = nil
-    local entry = app_dir .. "/app.lua"
-    if file_exists(entry) then
-        local chunk = tool.loadfile(entry)
+    local lua_entry = app_dir .. "/app.lua"
+    local js_entry  = app_dir .. "/app.js"
+    if file_exists(lua_entry) then
+        local chunk = tool.loadfile(lua_entry)
         if chunk then
             local ok, err = pcall(chunk)
             if ok then
                 manifest = app.get_manifest()
             else
-                tool.stderr("hull build: warning: manifest extraction failed: " .. tostring(err) .. "\n")
+                tool.stderr("hull build: warning: Lua manifest extraction failed: " .. tostring(err) .. "\n")
+            end
+        end
+    elseif file_exists(js_entry) then
+        local ok, js_json_or_err = pcall(tool.extract_manifest_js, js_entry)
+        if not ok then
+            tool.stderr("hull build: warning: JS manifest extraction failed: " .. tostring(js_json_or_err) .. "\n")
+        elseif js_json_or_err then
+            local decoded, decode_err = json.decode(js_json_or_err)
+            if decoded then
+                manifest = decoded
+            else
+                tool.stderr("hull build: warning: JS manifest JSON decode failed: " .. tostring(decode_err) .. "\n")
             end
         end
     end
