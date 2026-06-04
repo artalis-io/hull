@@ -274,19 +274,31 @@ isn't constrained by host allowlists.
   reverse proxy that enforces request timeouts as a defensive layer.
   A follow-up will wire `on_destroy` of the wrapper to cancel the
   continuation.
-- **Parser caps that fire before the first part may close the connection
-  with empty reply.** `max_total_size` (and `max_headers_size` when the
-  *first* part's headers exceed the cap) reject inside the body-reader's
-  `on_data` callback before the handler has had a chance to drive the
-  iterator. The wrapper's `-1` return causes Keel to close the
-  connection immediately, so the client sees an empty reply instead of
-  a structured response. **The cap IS enforced — bytes are not
-  processed past the limit — but no JSON error is returned.** Caps that
-  fire *between* PART_BEGIN events (`max_parts`, `max_headers_size` on a
-  later part, `max_part_size` on body bytes) let the handler intercept
-  via `pcall` / `try-catch` and return a structured 413. Production
-  apps should set conservative caps and rely on the proxy / load
-  balancer's own size limits as the first wall of defense.
+- **Parser caps that fire before the streaming handler is invoked
+  close the connection with empty reply.** Practically: caps that fire
+  while Keel is processing the *initial* socket read's leftover bytes
+  (`conn_dispatch_request`, before the streaming handler runs). For
+  small bodies that fit entirely in one socket read, this means
+  `max_total_size` and `max_headers_size` (on the first part) reject
+  before the handler can prepare a response — the client sees an empty
+  reply.
+
+  **The cap IS enforced in all cases — bytes are not processed past
+  the limit — but no structured JSON error is returned for the single-
+  read case.** Once the handler is parked on `NEED_DATA` (which happens
+  after the first read for multi-read bodies, or via Keel v2.1.2's
+  error-path mid-stream early-exit for caps that fire during
+  `READING_BODY`), a `pcall` / `try-catch` around the iterator surfaces
+  the parser error and the handler's structured 413 response is
+  delivered. This covers `max_parts`, `max_headers_size` on later
+  parts, `max_part_size` on body bytes, and `max_total_size` whenever
+  the body spans multiple socket reads.
+
+  Production apps should set conservative caps and rely on the proxy
+  / load balancer's own size limits as the first wall of defense. The
+  remaining single-read gap closes when Keel reorders
+  `conn_dispatch_request` to invoke the streaming handler before
+  feeding leftover body bytes (tracked upstream).
 - **`chunks(n)` hint is currently advisory.** Each parser event yields
   one chunk; small chunks aren't coalesced. A future revision can
   buffer to a minimum size.
