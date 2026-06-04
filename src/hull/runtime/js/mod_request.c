@@ -57,11 +57,11 @@
 
 /* ── Forward declarations (cross-runtime helpers) ────────────────────── */
 
-/* Defined in async.c. hl_js_async_cont_is_standard() lets us tell the
- * standard HlJsAsyncCont (e.g. produced by hull.sleep / http.fetch)
- * apart from our HlJsMpCont when transferring handler_promise between
- * conts — they have incompatible layouts. */
-extern int  hl_js_async_cont_is_standard(HlAsyncCont *cont);
+/* Defined in async.c. Used by mp_js_pump to transfer the outer
+ * handler-Promise to whichever cont type the handler creates next
+ * (could be our own HlJsMpCont or a standard HlJsAsyncCont — the
+ * dispatcher routes through the cont's set_handler_promise vtable
+ * slot, so this file doesn't have to know which type). */
 extern void hl_js_async_cont_set_handler_promise(HlAsyncCont *cont,
                                                   JSContext *ctx,
                                                   JSValue promise);
@@ -291,6 +291,20 @@ static JSValue make_js_chunks(JSContext *ctx, HlJsMpIter *it)
 
 static void mp_js_pump(HlAsyncCont *self, void *driver);
 static void mp_js_park_thunk(void *ctx, HlMultipartResumeReason reason);
+
+/* set_handler_promise vtable slot for HlJsMpCont — wired into the
+ * cont via jc->base.set_handler_promise = mp_js_cont_set_handler_promise_impl
+ * at every alloc site. The public dispatcher in async.c dispatches
+ * through this slot without needing to know the concrete cont type. */
+static void mp_js_cont_set_handler_promise_impl(HlAsyncCont *self,
+                                                  void *ctx_v,
+                                                  void *promise_v)
+{
+    HlJsMpCont *jc = (HlJsMpCont *)self;
+    JSContext *ctx = (JSContext *)ctx_v;
+    JSValue promise = *(JSValue *)promise_v;
+    jc->handler_promise = JS_DupValue(ctx, promise);
+}
 
 /* Drive the parser; return either:
  *   { ready = 1, result = <JSValue to resolve with>, error = JS_UNDEFINED }
@@ -580,21 +594,13 @@ static void mp_js_pump(HlAsyncCont *self, void *driver)
             conn->state = KL_CONN_SENDING;
         }
     } else if (!JS_IsUndefined(jc->handler_promise)) {
-        /* PENDING — handler awaited again. A new cont may have been
-         * created during the microtask drain; transfer the handler-
-         * promise to it. The new cont may be ours (HlJsMpCont) or the
-         * standard HlJsAsyncCont (e.g. handler awaited hull.sleep). */
+        /* PENDING — handler awaited again. A new cont was created
+         * during the microtask drain; transfer the handler-Promise
+         * via the cont's vtable (could be HlJsMpCont or the standard
+         * HlJsAsyncCont — the slot dispatches to the right setter). */
         if (js->last_async_cont) {
-            HlAsyncCont *nc = (HlAsyncCont *)js->last_async_cont;
-            if (hl_js_async_cont_is_standard(nc)) {
-                hl_js_async_cont_set_handler_promise(
-                    nc, ctx, jc->handler_promise);
-            } else {
-                /* Assume it's HlJsMpCont — only other type that ever
-                 * shows up in js->last_async_cont via this codepath. */
-                HlJsMpCont *new_jc = (HlJsMpCont *)nc;
-                new_jc->handler_promise = JS_DupValue(ctx, jc->handler_promise);
-            }
+            hl_js_async_cont_set_handler_promise(
+                (HlAsyncCont *)js->last_async_cont, ctx, jc->handler_promise);
             js->last_async_cont = NULL;
         }
         JS_FreeValue(ctx, jc->handler_promise);
@@ -663,9 +669,10 @@ static int mp_js_park(JSContext *ctx, HlJsMpIter *it, MpMode mode,
     HlJsMpCont *jc = hl_alloc_malloc(it->alloc, sizeof(*jc));
     if (!jc) return -1;
 
-    jc->base.resume  = mp_js_pump;
-    jc->base.cancel  = mp_js_cont_cancel;
-    jc->base.destroy = mp_js_cont_destroy;
+    jc->base.resume              = mp_js_pump;
+    jc->base.cancel              = mp_js_cont_cancel;
+    jc->base.destroy             = mp_js_cont_destroy;
+    jc->base.set_handler_promise = mp_js_cont_set_handler_promise_impl;
     jc->js              = js;
     jc->alloc           = it->alloc;
     jc->resolve         = resolve;
@@ -817,9 +824,10 @@ static JSValue js_part_read(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowOutOfMemory(ctx);
     }
     memset(jc, 0, sizeof(*jc));
-    jc->base.resume  = mp_js_pump;
-    jc->base.cancel  = mp_js_cont_cancel;
-    jc->base.destroy = mp_js_cont_destroy;
+    jc->base.resume              = mp_js_pump;
+    jc->base.cancel              = mp_js_cont_cancel;
+    jc->base.destroy             = mp_js_cont_destroy;
+    jc->base.set_handler_promise = mp_js_cont_set_handler_promise_impl;
     jc->js              = it->js;
     jc->alloc           = it->alloc;
     jc->resolve         = resolving[0];
@@ -1047,22 +1055,6 @@ static JSValue js_req_multipart(JSContext *ctx, JSValueConst this_val,
     }
     JS_SetOpaque(obj, it);
     return obj;
-}
-
-/* ── Cross-TU helper for handler_promise wiring ─────────────────────── */
-
-/*
- * Set handler_promise on an HlJsMpCont. Declared in async.c and called
- * by hl_js_async_cont_set_handler_promise() when it discovers the cont
- * isn't a standard HlJsAsyncCont — the two structs have different
- * layouts so the field has to be reached through the correct type.
- */
-void hl_js_mp_cont_set_handler_promise(HlAsyncCont *cont,
-                                        JSContext *ctx,
-                                        JSValue promise)
-{
-    HlJsMpCont *jc = (HlJsMpCont *)cont;
-    jc->handler_promise = JS_DupValue(ctx, promise);
 }
 
 /* ── Public installer ───────────────────────────────────────────────── */

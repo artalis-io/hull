@@ -1043,7 +1043,7 @@ else
 WORKER_DB_OBJ  := $(BUILDDIR)/worker_db.o
 endif
 WORKER_WASM_OBJ := $(BUILDDIR)/worker_wasm.o
-MANIFEST_OBJ     := $(BUILDDIR)/manifest.o $(BUILDDIR)/manifest_lua.o $(BUILDDIR)/manifest_js.o
+MANIFEST_OBJ     := $(BUILDDIR)/manifest.o $(BUILDDIR)/manifest_lua.o $(BUILDDIR)/manifest_js.o $(BUILDDIR)/manifest_extract_file.o
 MODULE_REGISTRY_OBJ := $(BUILDDIR)/module_registry.o
 MODULE_RESOLVER_OBJ := $(BUILDDIR)/module_resolver.o
 MODULE_OBJ       := $(MODULE_REGISTRY_OBJ) $(MODULE_RESOLVER_OBJ)
@@ -1771,6 +1771,14 @@ $(BUILDDIR)/manifest_lua.o: $(SRCDIR)/hull/manifest_lua.c $(SRCDIR)/hull/manifes
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 $(BUILDDIR)/manifest_js.o: $(SRCDIR)/hull/manifest_js.c $(SRCDIR)/hull/manifest_internal.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+# manifest_extract_file.o — runtime-neutral helper that spins up a
+# transient HlJS to read app.manifest({...}) from a .js entry point.
+# Lives outside the manifest_lua/manifest_js split because it ties the
+# JS extractor to a file-on-disk + transient-runtime workflow, not the
+# pre-existing "runtime is already running" extractor flow.
+$(BUILDDIR)/manifest_extract_file.o: $(SRCDIR)/hull/manifest_extract_file.c $(INCDIR)/hull/manifest_extract_file.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Module registry — canonical sorted table of first-party modules

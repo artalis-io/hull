@@ -55,6 +55,14 @@ typedef struct HlJsAsyncCont {
 void hl_js_timer_reschedule(HlJSTimer *t);
 #endif
 
+/* Forward decl — vtable slot impl defined just below hl_js_async_resume.
+ * hl_js_async_resume's PENDING branch uses it as a discriminator to
+ * decide whether the new cont is a standard HlJsAsyncCont (and thus
+ * has a timer_ctx field to transfer). */
+static void hl_js_async_cont_set_handler_promise_impl(HlAsyncCont *self,
+                                                         void *ctx_v,
+                                                         void *promise_v);
+
 static void hl_js_async_resume(HlAsyncCont *self, void *driver)
 {
     HlJsAsyncCont *jc = (HlJsAsyncCont *)self;
@@ -172,12 +180,22 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
 #endif
     } else {
         /* PENDING — handler re-yielded (another async op in flight).
-         * Transfer handler promise and timer_ctx to the new continuation. */
+         * Transfer the handler-promise to the new cont via the vtable
+         * (it may be an HlJsAsyncCont OR an HlJsMpCont, different
+         * layouts). Timer-ctx transfer stays direct: only HlJsAsyncCont
+         * carries a timer_ctx, and timer paths only ever create that
+         * type (timers can't originate streaming-multipart routes). */
         if (js->last_async_cont) {
-            HlJsAsyncCont *new_jc = (HlJsAsyncCont *)js->last_async_cont;
-            new_jc->handler_promise = JS_DupValue(ctx, jc->handler_promise);
-            new_jc->timer_ctx = jc->timer_ctx;
-            jc->timer_ctx = NULL;
+            HlAsyncCont *nc = (HlAsyncCont *)js->last_async_cont;
+            if (nc->set_handler_promise)
+                nc->set_handler_promise(nc, ctx, &jc->handler_promise);
+            /* Only transfer timer_ctx when the new cont is a standard
+             * HlJsAsyncCont (the only type that has the field). */
+            if (nc->set_handler_promise == hl_js_async_cont_set_handler_promise_impl) {
+                HlJsAsyncCont *new_jc = (HlJsAsyncCont *)nc;
+                new_jc->timer_ctx = jc->timer_ctx;
+                jc->timer_ctx = NULL;
+            }
             js->last_async_cont = NULL;
         }
         JS_FreeValue(ctx, jc->handler_promise);
@@ -226,6 +244,21 @@ static void hl_js_async_destroy(HlAsyncCont *self)
  * push_result: called on resume to convert driver result to JSValue.
  *              NULL for sleep (no result to push).
  */
+/* set_handler_promise vtable slot for HlJsAsyncCont — accessed via
+ * the public hl_js_async_cont_set_handler_promise dispatcher (which
+ * just calls cont->set_handler_promise). Each JS cont type defines
+ * its own setter; the dispatcher no longer cares about the concrete
+ * cont type. */
+static void hl_js_async_cont_set_handler_promise_impl(HlAsyncCont *self,
+                                                         void *ctx_v,
+                                                         void *promise_v)
+{
+    HlJsAsyncCont *jc = (HlJsAsyncCont *)self;
+    JSContext *ctx = (JSContext *)ctx_v;
+    JSValue promise = *(JSValue *)promise_v;
+    jc->handler_promise = JS_DupValue(ctx, promise);
+}
+
 HlAsyncCont *hl_js_async_cont_create(HlJS *js,
                                               JSValue resolve,
                                               JSValue reject,
@@ -235,9 +268,10 @@ HlAsyncCont *hl_js_async_cont_create(HlJS *js,
     HlJsAsyncCont *jc = hl_alloc_malloc(alloc, sizeof(HlJsAsyncCont));
     if (!jc) return NULL;
 
-    jc->base.resume  = hl_js_async_resume;
-    jc->base.cancel  = hl_js_async_cancel;
-    jc->base.destroy = hl_js_async_destroy;
+    jc->base.resume              = hl_js_async_resume;
+    jc->base.cancel              = hl_js_async_cancel;
+    jc->base.destroy             = hl_js_async_destroy;
+    jc->base.set_handler_promise = hl_js_async_cont_set_handler_promise_impl;
     jc->js          = js;
     jc->resolve     = resolve;
     jc->reject      = reject;
@@ -258,50 +292,20 @@ HlAsyncCont *hl_js_async_cont_create(HlJS *js,
 }
 
 /*
- * Forward declaration: defined by mod_request.c. Called below when the
- * cont is one of mod_request.c's HlJsMpCont (different layout — its
- * handler_promise lives at a different struct offset).
- */
-extern void hl_js_mp_cont_set_handler_promise(HlAsyncCont *cont,
-                                                JSContext *ctx,
-                                                JSValue promise);
-
-/*
  * Set the outer handler promise on a continuation.
- * Called by hl_js_dispatch after detecting a PENDING handler return,
- * since the handler promise only exists after JS_Call returns.
  *
- * The cont may be a standard HlJsAsyncCont (hull.sleep, http.fetch, …)
- * OR an HlJsMpCont (req.multipart() iterator). They have different
- * struct layouts, so we dispatch on the resume vtable pointer.
+ * Called by hl_js_dispatch after detecting a PENDING handler return,
+ * since the handler promise only exists after JS_Call returns. The
+ * cont may be any JS cont type (HlJsAsyncCont, HlJsMpCont, …) — each
+ * sets its own `set_handler_promise` vtable slot in async.h's
+ * HlAsyncCont, so this dispatcher is just a thin pass-through.
  */
 void hl_js_async_cont_set_handler_promise(HlAsyncCont *cont,
                                             JSContext *ctx,
                                             JSValue promise)
 {
-    if (cont->resume == hl_js_async_resume) {
-        HlJsAsyncCont *jc = (HlJsAsyncCont *)cont;
-        jc->handler_promise = JS_DupValue(ctx, promise);
-    } else {
-        /* HlJsMpCont — let mod_request.c reach the right offset. */
-        hl_js_mp_cont_set_handler_promise(cont, ctx, promise);
-    }
-}
-
-/*
- * Identity check: is `cont` an HlJsAsyncCont produced by this file?
- *
- * The multipart pump (mod_request.c) needs to differentiate between
- * HlJsAsyncCont and its own HlJsMpCont when transferring an outer
- * handler_promise between continuations across an await — they have
- * different struct layouts. Comparing the resume function pointer is
- * the simplest identity test, but hl_js_async_resume is `static` so
- * its address isn't reachable from another TU. This wrapper exposes
- * the comparison without exposing the function pointer itself.
- */
-int hl_js_async_cont_is_standard(HlAsyncCont *cont)
-{
-    return cont && cont->resume == hl_js_async_resume;
+    if (cont && cont->set_handler_promise)
+        cont->set_handler_promise(cont, ctx, &promise);
 }
 
 /* ── hull.sleep(ms) ───────────────────────────────────────────────── */

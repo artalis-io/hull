@@ -48,6 +48,30 @@ typedef struct HlAsyncCont {
      * the runtime struct (HlLua/HlJS).
      */
     void (*destroy)(struct HlAsyncCont *self);
+
+    /*
+     * JS-only: attach the outer handler-Promise to this cont.
+     *
+     * Called by hl_js_dispatch after detecting a PENDING handler
+     * return, and by JS conts transferring the handler-Promise to a
+     * newly-created cont when the handler re-yields inside microtasks.
+     *
+     * `ctx` is a `JSContext*`, `promise` is a `JSValue` passed by
+     * pointer (the cont implementation does the cast — keeps the
+     * generic vtable runtime-independent).
+     *
+     * NULL on Lua conts (Lua tracks handler completion directly via
+     * lua_resume status, not through a stored promise on the cont).
+     *
+     * Each JS cont type sets this slot to its own setter so the public
+     * helper hl_js_async_cont_set_handler_promise can dispatch without
+     * caring about the concrete type — avoids the vtable-identity
+     * trick that used to live in async.c (which would silently
+     * corrupt memory if a new cont type was added without updating
+     * the dispatcher).
+     */
+    void (*set_handler_promise)(struct HlAsyncCont *self,
+                                  void *ctx, void *promise);
 } HlAsyncCont;
 
 /* ── HlAsyncCtx — runtime-agnostic async glue ─────────────────────── */

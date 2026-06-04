@@ -187,6 +187,78 @@ app.post("/upload-skip", function(req, res)
     end
     res:json({ ok = true, names = names })
 end, { multipart = { max_part_size = 64 * 1024 * 1024 } })
+
+-- Cap-enforcement routes — handler wraps the iterator in pcall so
+-- we get a structured 4xx response (the realistic user-code pattern
+-- for handling parser errors).
+local function run_cap_route(req, res)
+    local count = 0
+    local ok, err = pcall(function()
+        for _ in req:multipart() do count = count + 1 end
+    end)
+    if ok then
+        res:json({ ok = true, count = count })
+    else
+        res:status(413)
+        res:json({ ok = false, count = count, error = tostring(err) })
+    end
+end
+
+-- max_parts: count cap. > N parts → TOO_MANY_PARTS. Cap fires
+-- between PART_END and the next PART_BEGIN — handler is alive at
+-- that point, pcall catches the error, structured 413 is flushed
+-- before Keel closes the connection.
+app.post("/upload-parts-cap", run_cap_route,
+    { multipart = { max_parts = 2 } })
+
+-- max_headers_size: per-part header byte cap. With a short first
+-- part the handler is alive when the cap fires on the SECOND part's
+-- header parse → pcall catches → structured 413.
+--
+-- (NOTE: max_total_size is intentionally NOT tested as an e2e: that
+-- cap fires inside the body-reader's on_data callback BEFORE the
+-- handler has a chance to flush a response, and the wrapper's -1
+-- return tells Keel to close the connection immediately. A clean
+-- 413 from the Hull side would require teaching the wrapper to
+-- buffer-then-emit-a-response-before-close, which is its own
+-- design problem. The cap IS enforced — the connection just closes
+-- with empty reply instead of returning a structured error. This
+-- is documented in docs/multipart.md as a known limitation.)
+app.post("/upload-headers-cap", run_cap_route,
+    { multipart = { max_headers_size = 128 } })
+
+-- Hasher edge-case routes (TC4-6): chained update, double digest,
+-- update-after-digest. Each route returns either the digest or the
+-- error message captured via pcall.
+local function safe_hash_op(fn)
+    local ok, val = pcall(fn)
+    if ok then return { ok = true, value = val } end
+    return { ok = false, error = tostring(val) }
+end
+
+app.get("/hash-chained", function(_req, res)
+    res:json(safe_hash_op(function()
+        local h = crypto.create_sha256()
+        return h:update("a"):update("b"):update("c"):digest()
+    end))
+end)
+
+app.get("/hash-double-digest", function(_req, res)
+    res:json(safe_hash_op(function()
+        local h = crypto.create_sha256()
+        h:update("abc"):digest()
+        return h:digest()  -- should error
+    end))
+end)
+
+app.get("/hash-update-after-digest", function(_req, res)
+    res:json(safe_hash_op(function()
+        local h = crypto.create_sha256()
+        h:update("abc"):digest()
+        h:update("more")  -- should error
+        return "should-not-reach"
+    end))
+end)
 EOF
 
 # ── JS fixture ───────────────────────────────────────────────────────
@@ -256,6 +328,55 @@ app.post("/upload-skip", async (req, res) => {
     }
     res.json({ ok: true, names });
 }, { multipart: { maxPartSize: 64 * 1024 * 1024 } });
+
+// Cap-enforcement routes — handler wraps the iterator in try/catch
+// so we get a structured 413 response (the realistic user-code
+// pattern for handling parser errors).
+async function runCapRoute(req, res) {
+    let count = 0;
+    try {
+        for await (const _ of req.multipart()) { count++; }
+        res.json({ ok: true, count });
+    } catch (e) {
+        res.status(413);
+        res.json({ ok: false, count, error: String(e && e.message || e) });
+    }
+}
+
+// (See the Lua fixture's comment block above for why max_total_size
+// isn't tested as an e2e — known interop limitation, not a Hull bug.)
+app.post("/upload-parts-cap",   runCapRoute, { multipart: { maxParts: 2 } });
+app.post("/upload-headers-cap", runCapRoute, { multipart: { maxHeadersSize: 128 } });
+
+// Hasher edge-case routes (TC4-6).
+function safeHashOp(fn) {
+    try { return { ok: true, value: fn() }; }
+    catch (e) { return { ok: false, error: String(e && e.message || e) }; }
+}
+
+app.get("/hash-chained", async (_req, res) => {
+    res.json(safeHashOp(() => {
+        const h = crypto.createSha256();
+        return h.update("a").update("b").update("c").digest();
+    }));
+});
+
+app.get("/hash-double-digest", async (_req, res) => {
+    res.json(safeHashOp(() => {
+        const h = crypto.createSha256();
+        h.update("abc").digest();
+        return h.digest();
+    }));
+});
+
+app.get("/hash-update-after-digest", async (_req, res) => {
+    res.json(safeHashOp(() => {
+        const h = crypto.createSha256();
+        h.update("abc").digest();
+        h.update("more");
+        return "should-not-reach";
+    }));
+});
 EOF
 
 # ── Step 2: per-runtime test run ─────────────────────────────────────
@@ -374,6 +495,49 @@ run_multipart_tests() {
     check_contains "$LABEL skip: alpha listed"             "$RESP" 'alpha'
     check_contains "$LABEL skip: beta listed"              "$RESP" 'beta'
     check_contains "$LABEL skip: gamma listed"             "$RESP" 'gamma'
+
+    # ── Scenario 11: max_parts enforcement ──
+    # /upload-parts-cap caps at 2 parts. Four parts → the parser raises
+    # TOO_MANY_PARTS on the 3rd PART_BEGIN. By that point the handler
+    # has iterated 2 parts and is alive — pcall/try-catch surfaces the
+    # error and the handler flushes a structured 413.
+    RESP=$(curl --max-time 5 -sS -o /tmp/.mp_resp -w '%{http_code}' \
+        -X POST "http://127.0.0.1:$PORT/upload-parts-cap" \
+        -F "a=1" -F "b=2" -F "c=3" -F "d=4" 2>/dev/null)
+    check_contains "$LABEL max_parts: 413 status"      "$RESP" "413"
+    check_contains "$LABEL max_parts: ok=false"        "$(cat /tmp/.mp_resp)" '"ok":false'
+    check_contains "$LABEL max_parts: count=2 before error" "$(cat /tmp/.mp_resp)" '"count":2'
+
+    # ── Scenario 12: max_headers_size enforcement ──
+    # /upload-headers-cap caps per-part headers at 128 bytes. We send a
+    # short first part (under the cap) followed by a part with a very
+    # long field name. The cap fires when the parser hits the SECOND
+    # part's Content-Disposition line — handler is alive, pcall catches.
+    HUGE_NAME=$(printf 'name_%0.s' {1..50})  # 250+ chars
+    RESP=$(curl --max-time 5 -sS -o /tmp/.mp_resp -w '%{http_code}' \
+        -X POST "http://127.0.0.1:$PORT/upload-headers-cap" \
+        -F "ok=first" \
+        -F "${HUGE_NAME}=second" 2>/dev/null)
+    check_contains "$LABEL max_headers_size: 413 status" "$RESP" "413"
+    check_contains "$LABEL max_headers_size: ok=false"   "$(cat /tmp/.mp_resp)" '"ok":false'
+    rm -f /tmp/.mp_resp
+
+    # ── Scenario 14: chained hasher (TC4) ──
+    # h.update("a").update("b").update("c").digest() === sha256("abc")
+    RESP=$(curl -sS "http://127.0.0.1:$PORT/hash-chained")
+    check_contains "$LABEL hash chained: ok"    "$RESP" '"ok":true'
+    check_contains "$LABEL hash chained: value" "$RESP" \
+        '"value":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"'
+
+    # ── Scenario 15: double digest rejected (TC5) ──
+    RESP=$(curl -sS "http://127.0.0.1:$PORT/hash-double-digest")
+    check_contains "$LABEL hash double-digest: not ok"      "$RESP" '"ok":false'
+    check_contains "$LABEL hash double-digest: error text"  "$RESP" 'digest'
+
+    # ── Scenario 16: update after digest rejected (TC6) ──
+    RESP=$(curl -sS "http://127.0.0.1:$PORT/hash-update-after-digest")
+    check_contains "$LABEL hash update-after-digest: not ok"     "$RESP" '"ok":false'
+    check_contains "$LABEL hash update-after-digest: error text" "$RESP" 'after digest'
 
     # ── Sanity: post-multipart requests still work (no per-request
     # leak that wedges the connection state) ──

@@ -11,8 +11,9 @@ buffered and drives parsing on demand. There is no `req.body` to read
 > dedup, refcount GC, MIME sniffing, manifest-declared write dirs) is
 > a separate stdlib module landing in a later release on top of this
 > primitive — see `docs/roadmap_next.md §1.5.b`. Until then, app code
-> that wants to persist uploads writes them with the iterator directly,
-> using `fs.write` and a manifest-declared write path.
+> that wants to persist uploads has to bring its own storage layer
+> (Hull's `fs.*` module doesn't yet expose a user-facing write today;
+> the example here hashes parts in memory and returns metadata).
 
 ## When to use it
 
@@ -246,10 +247,10 @@ handler persists those bytes is a separate question.
 `hull/attachment@1` (a later stdlib module — see
 [`docs/roadmap_next.md` §1.5.b](roadmap_next.md)) will wrap this
 iterator with content-addressed disk storage, dedup, MIME sniffing,
-and refcount GC, and that module will be the one declaring
-`fs.write` against a manifest-allowlisted directory. Until it lands,
-applications that need to persist uploads have to bring their own
-storage layer — Redis, S3, or whatever — and use the iterator as the
+and refcount GC, and will own the manifest-allowlisted write path it
+needs. Until it lands, applications that need to persist uploads
+have to bring their own storage layer — Redis, S3, or whatever — and
+use the iterator as the
 ingest primitive.
 
 The host allowlist (`manifest.hosts`) is unrelated — inbound HTTP
@@ -273,6 +274,19 @@ isn't constrained by host allowlists.
   reverse proxy that enforces request timeouts as a defensive layer.
   A follow-up will wire `on_destroy` of the wrapper to cancel the
   continuation.
+- **Parser caps that fire before the first part may close the connection
+  with empty reply.** `max_total_size` (and `max_headers_size` when the
+  *first* part's headers exceed the cap) reject inside the body-reader's
+  `on_data` callback before the handler has had a chance to drive the
+  iterator. The wrapper's `-1` return causes Keel to close the
+  connection immediately, so the client sees an empty reply instead of
+  a structured response. **The cap IS enforced — bytes are not
+  processed past the limit — but no JSON error is returned.** Caps that
+  fire *between* PART_BEGIN events (`max_parts`, `max_headers_size` on a
+  later part, `max_part_size` on body bytes) let the handler intercept
+  via `pcall` / `try-catch` and return a structured 413. Production
+  apps should set conservative caps and rely on the proxy / load
+  balancer's own size limits as the first wall of defense.
 - **`chunks(n)` hint is currently advisory.** Each parser event yields
   one chunk; small chunks aren't coalesced. A future revision can
   buffer to a minimum size.
