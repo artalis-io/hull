@@ -833,10 +833,20 @@ and helpers.
       max_parts cap, max_headers_size cap, max_total_size cap (single-
       read), sync-completion keep-alive force-off, hasher edge cases.
       See `docs/multipart.md`.
-- [ ] §1.5.b-3. Content-MIME sniffer in `src/hull/cap/mime.c`. Magic-byte
-      table for PNG/JPEG/GIF/WebP/PDF/SVG/plain-text. Header
-      `hl_cap_mime_sniff(buf, len)` returns canonical MIME or NULL.
-      Unit tests with fixture files.
+- [x] §1.5.b-3. Content-MIME sniffer in `src/hull/cap/mime.c`. Magic-
+      byte table for PNG/JPEG/GIF/WebP/PDF/SVG/HTML (HTML added beyond
+      the original scope — same XSS surface as SVG, useful when users
+      upload reports). UTF-8 plain-text fallback (rejects NUL bytes,
+      overlong encodings, UTF-16 surrogates, code points > U+10FFFF).
+      JSON / CSV correctly fall through to text/plain (valid UTF-8 text
+      by definition) — callers needing finer discrimination use the
+      declared Content-Type header. Header `hl_cap_mime_sniff(buf,
+      len)` returns canonical MIME or NULL; statically allocated, do
+      not free. 45 unit tests: 31 embedded-byte cases covering magic
+      detection, truncation, case-insensitive shape matching, UTF-8
+      edge cases (overlong, surrogate, NUL), plus 7 fixture-file smoke
+      tests against real PNG/JPEG/GIF/WebP/PDF/SVG/HTML files in
+      `tests/fixtures/mime/`.
 - [ ] §1.5.b-4. `hull/attachment@1` module (Lua + JS). Reads
       `attachment.init(opts)` config; calls into multipart bindings;
       writes content-addressed under `opts.dir`. Metadata via
