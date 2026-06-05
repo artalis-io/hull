@@ -327,9 +327,14 @@ int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
                     }
                     hl_alloc_free(lua->base.alloc, route, sizeof(HlLuaRoute));
                 } else if (is_streaming) {
-                    kl_server_route_streaming(server, method_str, pattern,
-                                              hl_lua_keel_handler, route,
-                                              hl_lua_multipart_factory);
+                    /* streaming-async (v2.2.0+) — handler is invoked
+                     * BEFORE leftover body bytes are fed via on_data.
+                     * Closes the single-read leftover-cap UX gap so
+                     * parser caps fire structured 4xx responses even
+                     * when the body fits in the first kernel read. */
+                    kl_server_route_streaming_async(server, method_str, pattern,
+                                                     hl_lua_keel_handler, route,
+                                                     hl_lua_multipart_factory);
                 } else {
                     kl_server_route(server, method_str, pattern,
                                     hl_lua_keel_handler, route,

@@ -240,8 +240,8 @@ void hl_lua_make_response(lua_State *L, KlResponse *res);
  * multipart_config is set when the route was registered with
  *   app.post("/upload", handler, { multipart = {...} })
  * Non-NULL flags this as a streaming route: routes.c uses
- * kl_server_route_streaming + the multipart factory shim instead of
- * the regular kl_server_route + buffer factory. Stored as void* so
+ * kl_server_route_streaming_async + the multipart factory shim
+ * instead of the regular kl_server_route + buffer factory. Stored as void* so
  * this public header doesn't pull in keel's body_reader_multipart.h
  * (the actual type is `KlMultipartConfig *`); freed alongside the
  * route in hl_lua_free.

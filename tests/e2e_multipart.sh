@@ -214,18 +214,28 @@ app.post("/upload-parts-cap", run_cap_route,
 -- max_headers_size: per-part header byte cap. With a short first
 -- part the handler is alive when the cap fires on the SECOND part's
 -- header parse → pcall catches → structured 413.
---
--- (NOTE: max_total_size is intentionally NOT tested as an e2e: that
--- cap fires inside the body-reader's on_data callback BEFORE the
--- handler has a chance to flush a response, and the wrapper's -1
--- return tells Keel to close the connection immediately. A clean
--- 413 from the Hull side would require teaching the wrapper to
--- buffer-then-emit-a-response-before-close, which is its own
--- design problem. The cap IS enforced — the connection just closes
--- with empty reply instead of returning a structured error. This
--- is documented in docs/multipart.md as a known limitation.)
 app.post("/upload-headers-cap", run_cap_route,
     { multipart = { max_headers_size = 128 } })
+
+-- max_total_size: whole-body byte cap. The cap fires inside the
+-- body-reader's on_data when accumulated bytes exceed the limit.
+-- Closed end-to-end by Keel v2.2.0 streaming-async: the handler is
+-- invoked BEFORE leftover is fed, parks on NEED_DATA, then on_data
+-- resumes it with HL_MP_RESUME_ERROR — pcall catches, 413 lands.
+app.post("/upload-total-cap", run_cap_route,
+    { multipart = { max_total_size = 512 } })
+
+-- Streaming-async sync-completion: handler returns 401 BEFORE
+-- iterating req:multipart(). Exercises Keel v2.2.0's H1 keep-alive
+-- force-off contract — leftover body bytes are stranded, so the
+-- dispatch layer must NOT keep the connection alive. We assert the
+-- absence of "Connection: keep-alive" in the response (Keel only
+-- emits that header when keep_alive=1, so its absence is the signal
+-- that the force-off fired).
+app.post("/upload-sync-reject", function(_req, res)
+    res:status(401)
+    res:json({ ok = false, error = "unauthorized" })
+end, { multipart = { max_total_size = 64 * 1024 * 1024 } })
 
 -- Hasher edge-case routes (TC4-6): chained update, double digest,
 -- update-after-digest. Each route returns either the digest or the
@@ -343,10 +353,16 @@ async function runCapRoute(req, res) {
     }
 }
 
-// (See the Lua fixture's comment block above for why max_total_size
-// isn't tested as an e2e — known interop limitation, not a Hull bug.)
+// max_total_size closed end-to-end by Keel v2.2.0 (see Lua sibling).
 app.post("/upload-parts-cap",   runCapRoute, { multipart: { maxParts: 2 } });
 app.post("/upload-headers-cap", runCapRoute, { multipart: { maxHeadersSize: 128 } });
+app.post("/upload-total-cap",   runCapRoute, { multipart: { maxTotalSize: 512 } });
+
+// Streaming-async sync-completion (see Lua sibling for the contract).
+app.post("/upload-sync-reject", async (_req, res) => {
+    res.status(401);
+    res.json({ ok: false, error: "unauthorized" });
+}, { multipart: { maxTotalSize: 64 * 1024 * 1024 } });
 
 // Hasher edge-case routes (TC4-6).
 function safeHashOp(fn) {
@@ -520,7 +536,43 @@ run_multipart_tests() {
         -F "${HUGE_NAME}=second" 2>/dev/null)
     check_contains "$LABEL max_headers_size: 413 status" "$RESP" "413"
     check_contains "$LABEL max_headers_size: ok=false"   "$(cat /tmp/.mp_resp)" '"ok":false'
+
+    # ── Scenario 13: max_total_size enforcement (Keel v2.2.0) ──
+    # /upload-total-cap caps total body bytes at 512. We POST a single
+    # field whose value alone exceeds the cap. The handler is invoked
+    # BEFORE leftover is fed (streaming-async dispatch), parks on
+    # NEED_DATA, then on_data resumes it with ERROR when the cap
+    # trips — pcall/try-catch catches and a structured 413 lands.
+    BIG_VAL=$(head -c 2048 /dev/urandom | xxd -p | tr -d '\n')
+    RESP=$(curl --max-time 5 -sS -o /tmp/.mp_resp -w '%{http_code}' \
+        -X POST "http://127.0.0.1:$PORT/upload-total-cap" \
+        -F "blob=$BIG_VAL" 2>/dev/null)
+    check_contains "$LABEL max_total_size: 413 status" "$RESP" "413"
+    check_contains "$LABEL max_total_size: ok=false"   "$(cat /tmp/.mp_resp)" '"ok":false'
     rm -f /tmp/.mp_resp
+
+    # ── Scenario 13b: streaming-async sync-completion (Keel v2.2.0 H1) ──
+    # /upload-sync-reject is a streaming-multipart route whose handler
+    # responds 401 WITHOUT iterating req:multipart(). The body bytes
+    # are stranded — Keel's H1 fix must force keep-alive off so they
+    # don't bleed into a subsequent request on the same connection.
+    # Curl `-D` dumps response headers; we assert (a) status 401 and
+    # (b) absence of "Connection: keep-alive" (Keel only emits that
+    # header when keep_alive=1, so its absence is the signal).
+    BODY=$(head -c 4096 /dev/urandom | xxd -p | tr -d '\n')
+    RESP=$(curl --max-time 5 -sS -o /tmp/.mp_resp -D /tmp/.mp_hdrs \
+                -w '%{http_code}' \
+        -X POST "http://127.0.0.1:$PORT/upload-sync-reject" \
+        -F "blob=$BODY" 2>/dev/null)
+    check_contains "$LABEL sync-reject: 401 status" "$RESP" "401"
+    check_contains "$LABEL sync-reject: error body" \
+        "$(cat /tmp/.mp_resp)" '"error":"unauthorized"'
+    if grep -qi "Connection: keep-alive" /tmp/.mp_hdrs 2>/dev/null; then
+        fail "$LABEL sync-reject: keep-alive NOT forced off (H1 regression)"
+    else
+        pass "$LABEL sync-reject: keep-alive forced off"
+    fi
+    rm -f /tmp/.mp_resp /tmp/.mp_hdrs
 
     # ── Scenario 14: chained hasher (TC4) ──
     # h.update("a").update("b").update("c").digest() === sha256("abc")

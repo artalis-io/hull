@@ -274,31 +274,19 @@ isn't constrained by host allowlists.
   reverse proxy that enforces request timeouts as a defensive layer.
   A follow-up will wire `on_destroy` of the wrapper to cancel the
   continuation.
-- **Parser caps that fire before the streaming handler is invoked
-  close the connection with empty reply.** Practically: caps that fire
-  while Keel is processing the *initial* socket read's leftover bytes
-  (`conn_dispatch_request`, before the streaming handler runs). For
-  small bodies that fit entirely in one socket read, this means
-  `max_total_size` and `max_headers_size` (on the first part) reject
-  before the handler can prepare a response — the client sees an empty
-  reply.
+- **Parser-cap errors surface as structured 413 responses.** Hull
+  uses Keel v2.2.0's `kl_server_route_streaming_async` for every
+  multipart route, which dispatches the streaming handler BEFORE
+  feeding leftover body bytes. The handler parks on `NEED_DATA`
+  immediately; `on_data` then fires with the handler alive, so any
+  parser cap (`max_parts`, `max_part_size`, `max_headers_size`,
+  `max_total_size`) is caught by a `pcall` / `try-catch` around the
+  iterator and the handler's structured 413 response is delivered —
+  whether the body fits in one socket read or spans many.
 
-  **The cap IS enforced in all cases — bytes are not processed past
-  the limit — but no structured JSON error is returned for the single-
-  read case.** Once the handler is parked on `NEED_DATA` (which happens
-  after the first read for multi-read bodies, or via Keel v2.1.2's
-  error-path mid-stream early-exit for caps that fire during
-  `READING_BODY`), a `pcall` / `try-catch` around the iterator surfaces
-  the parser error and the handler's structured 413 response is
-  delivered. This covers `max_parts`, `max_headers_size` on later
-  parts, `max_part_size` on body bytes, and `max_total_size` whenever
-  the body spans multiple socket reads.
-
-  Production apps should set conservative caps and rely on the proxy
-  / load balancer's own size limits as the first wall of defense. The
-  remaining single-read gap closes when Keel reorders
-  `conn_dispatch_request` to invoke the streaming handler before
-  feeding leftover body bytes (tracked upstream).
+  Production apps should still set conservative caps and rely on the
+  proxy / load balancer's own size limits as the first wall of
+  defense.
 - **`chunks(n)` hint is currently advisory.** Each parser event yields
   one chunk; small chunks aren't coalesced. A future revision can
   buffer to a minimum size.

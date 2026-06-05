@@ -345,9 +345,10 @@ int hl_js_wire_routes_server(HlJS *js, KlServer *server,
 
                 hl_js_track_route(js, route);
                 if (is_streaming) {
-                    kl_server_route_streaming(server, method_str, pattern,
-                                              hl_js_keel_handler, route,
-                                              hl_js_multipart_factory);
+                    /* streaming-async (v2.2.0+) — see Lua sibling. */
+                    kl_server_route_streaming_async(server, method_str, pattern,
+                                                     hl_js_keel_handler, route,
+                                                     hl_js_multipart_factory);
                 } else {
                     kl_server_route(server, method_str, pattern,
                                     hl_js_keel_handler, route,
