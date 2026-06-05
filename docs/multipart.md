@@ -315,9 +315,13 @@ curl -F "user=alice" -F "f=@README.md" http://localhost:3000/upload
   that fires when more body bytes arrive
   (`src/hull/cap/body.c::hl_cap_multipart_factory`).
 - **Phase 2 Slice 1** (route plumbing): `app.<verb>(..., { multipart })`
-  registers the route via `kl_server_route_streaming` and a per-runtime
-  factory shim that allocates the `KlMultipartConfig` from
-  `opts.multipart`.
+  registers the route via `kl_server_route_streaming_async` (Keel
+  v2.2.0+) and a per-runtime factory shim that allocates the
+  `KlMultipartConfig` from `opts.multipart`. The async variant invokes
+  the handler BEFORE feeding leftover body bytes, so parser caps that
+  trip during single-read leftover processing reach a parked handler
+  and surface as structured 4xx responses (closing the v2.1.2 single-
+  read gap).
 - **Phase 2 Slice 2/3** (iterator): the Lua + JS iterators each call
   `kl_multipart_next()`, set `c->state = KL_CONN_READING_BODY` before
   yielding on `NEED_DATA`, and resume from

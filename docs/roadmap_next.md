@@ -810,16 +810,29 @@ and helpers.
 
 **Tasks (v0.1.9):**
 
-- [ ] §1.5.b-1. Streaming multipart parser in Keel. Per-part
-      content-disposition, filename, content-type, size. Iterator-shaped
-      API exposed to Hull via `kl_request_multipart_next(...)`. Per-part
-      cap, total-body cap, max-parts count enforced; 413 on overflow.
-      Tests + sanitizer coverage.
-- [ ] §1.5.b-2. Hull-side iterator bindings for Lua + JS.
+- [x] §1.5.b-1. Streaming multipart parser in Keel (v2.0.0 / v2.1.0 /
+      v2.1.1 / v2.1.2 / v2.2.0). Per-part content-disposition, filename,
+      content-type, size. Iterator-shaped API via
+      `kl_body_reader_multipart` + `kl_multipart_next`. Per-part cap,
+      total-body cap, max-parts count, max-headers-size, max-input-
+      buffer enforced. Streaming-handler dispatch (v2.1.0) + mid-stream
+      early-exit success/error paths (v2.1.1/v2.1.2) + streaming-async
+      pre-body dispatch (v2.2.0) so every cap surfaces as a structured
+      4xx in both single-read and multi-read scenarios. Fuzz + ASan
+      coverage in upstream CI.
+- [x] §1.5.b-2. Hull-side iterator bindings for Lua + JS.
       `req:multipart()` (Lua iterator) and `req.multipart()` (JS async
       iterator). Each part exposes `part:chunks(n)` /  `part.chunks(n)`
-      for streaming reads. Tests covering single-part, multi-part,
-      large-file, cap-exceeded, malformed-boundary, premature-close.
+      for streaming reads, plus `part:read()` / `part.read()` for whole-
+      part buffering. Binary-safe (Lua byte strings, JS `ArrayBuffer`).
+      Incremental SHA-256 hasher (`crypto.create_sha256()` Lua /
+      `crypto.createSha256()` JS) for streaming digest. Coverage:
+      94 e2e cases in `tests/e2e_multipart.sh` across both runtimes —
+      tiny field, 10 fields, small bin, 2 MB bin, 5 MB bin, mixed,
+      empty file, 10x keep-alive, max-part-size, skip/auto-drain,
+      max_parts cap, max_headers_size cap, max_total_size cap (single-
+      read), sync-completion keep-alive force-off, hasher edge cases.
+      See `docs/multipart.md`.
 - [ ] §1.5.b-3. Content-MIME sniffer in `src/hull/cap/mime.c`. Magic-byte
       table for PNG/JPEG/GIF/WebP/PDF/SVG/plain-text. Header
       `hl_cap_mime_sniff(buf, len)` returns canonical MIME or NULL.

@@ -1280,15 +1280,16 @@ app.post("/upload", async (req, res) => {
 }, { multipart: { maxPartSize: 64 * 1024 * 1024, maxTotalSize: 256 * 1024 * 1024, maxParts: 32 } });
 ```
 
-**Caps** (all default to `0` = unlimited): `max_part_size` / `maxPartSize`, `max_total_size` / `maxTotalSize`, `max_parts` / `maxParts`, `max_headers_size` / `maxHeadersSize`, `max_input_buffer` / `maxInputBuffer`. Exceeding any cap mid-stream raises a parser error which the handler can `pcall` / try-catch; uncaught errors → 500. JS accepts both naming conventions; snake_case wins if both appear.
+**Caps** (all default to `0` = unlimited): `max_part_size` / `maxPartSize`, `max_total_size` / `maxTotalSize`, `max_parts` / `maxParts`, `max_headers_size` / `maxHeadersSize`, `max_input_buffer` / `maxInputBuffer`. Exceeding any cap raises a parser error which the handler can `pcall` / try-catch to write a structured 4xx response; uncaught errors → 500. Works for both single-read and multi-read bodies — Keel v2.2.0's streaming-async dispatch invokes the handler BEFORE feeding leftover body bytes, so the handler is alive when the cap trips in `on_data`. JS accepts both naming conventions; snake_case wins if both appear.
 
 **Part fields:** `name` (always), `filename` (`nil`/`null` for text fields), `content_type` (Lua) / `contentType` (JS).
 
 **Binary safety:** Lua chunks/`read()` return byte-clean Lua strings. JS chunks/`read()` return `ArrayBuffer` (never JS strings — `JS_NewStringLen` would UTF-8-mangle binary input). To decode text fields in JS, use `new TextDecoder().decode(buf)` (BYOP — QuickJS doesn't bundle it; ASCII can use a manual loop).
 
 **Implementation:**
-- Route is registered via `kl_server_route_streaming` + a per-runtime factory shim (`hl_{lua,js}_multipart_factory` in `runtime/{lua,js}/routes.c`) that wraps Keel's `kl_body_reader_multipart` with the parkable `hl_cap_multipart_factory` wrapper (`src/hull/cap/body.c`).
+- Route is registered via `kl_server_route_streaming_async` (Keel v2.2.0+) + a per-runtime factory shim (`hl_{lua,js}_multipart_factory` in `runtime/{lua,js}/routes.c`) that wraps Keel's `kl_body_reader_multipart` with the parkable `hl_cap_multipart_factory` wrapper (`src/hull/cap/body.c`). The async variant means Keel invokes the handler BEFORE feeding leftover body bytes; the handler parks on `NEED_DATA` immediately, and `on_data` resumes it for both leftover and subsequent socket reads.
 - The iterator drives `kl_multipart_next()` and on `NEED_DATA` parks the handler via `hl_cap_multipart_park`, sets `c->state = KL_CONN_READING_BODY`, and yields (Lua coroutine / pending JS Promise). The body reader's `on_data` callback fires the park and resumes.
+- Handlers that respond without iterating (e.g. auth rejection): Keel forces `keep_alive=0` so stranded body bytes don't bleed into a re-used connection's next request.
 - Bindings live in `src/hull/runtime/lua/mod_request.c` and `src/hull/runtime/js/mod_request.c`.
 
 **Known limitations:**

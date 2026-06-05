@@ -8,6 +8,20 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Added
+
+- **Streaming multipart iterator (`req:multipart()` Lua / `req.multipart()` JS).** Routes opt in via `app.<verb>(..., { multipart = {...} })`. Iterator-shaped: each part yields `{name, filename, content_type}` plus `part:chunks(n)` / `part.chunks(n)` for byte-streaming reads and `part:read()` / `part.read()` for whole-part buffering. Binary-safe — Lua returns byte strings, JS returns `ArrayBuffer`. Caps (`max_part_size`, `max_total_size`, `max_parts`, `max_headers_size`, `max_input_buffer`) surface as parser errors the handler can `pcall` / try-catch to write structured 4xx responses. Tied to incremental SHA-256 hasher (`crypto.create_sha256()` Lua / `crypto.createSha256()` JS) for streaming digest. 94/94 e2e cases in `tests/e2e_multipart.sh` across both runtimes. See [docs/multipart.md](docs/multipart.md). Roadmap §1.5.b-2.
+- **Incremental SHA-256 hasher.** `crypto.create_sha256()` / `crypto.createSha256()` returns an object with chainable `:update(bytes)` / `.update(bytes)` and a one-shot `:digest()` / `.digest()` (lowercase hex). Update-after-digest and double-digest both raise. Designed for streaming multipart digests but works for any incremental hashing use.
+
+### Changed
+
+- **Bumped vendored Keel to v2.2.0** (was v2.1.2). Adds opt-in `kl_server_route_streaming_async()` that dispatches streaming handlers BEFORE feeding leftover body bytes, plus a state-honoring fix on the leftover-rc<0 / KL_PARSE_ERROR branches and a synchronous-completion keep-alive force-off. Hull's multipart factory shims (Lua + JS) switch to the async variant. Closes the previously-documented single-read `max_total_size` known limitation end-to-end — every parser cap now surfaces as a structured 413 in both single-read and multi-read body shapes.
+- **`docs/multipart.md` known-limitations entry rewritten.** All four caps (`max_parts`, `max_part_size`, `max_headers_size`, `max_total_size`) now produce structured responses; the single-read gap that v2.1.2 left behind is closed.
+
+### Fixed
+
+- **`hull manifest` and `hull inspect` on JS apps.** Previously the JS-runtime manifest-extractor was only reachable via the JS-bindings TU, so `hull inspect` (a build-tool command that doesn't link the JS runtime) failed on `app.js`. Extractor now lives in a runtime-neutral TU (`src/hull/manifest_extract_file.c`) reachable from both runtimes and from the build-tool commands.
+
 ## [0.2.0] — 2026-05-31
 
 Hypermedia profile + web stdlib namespace reorganization. `hull init --profile htmx` now produces a complete HTMX + Pico app with CSP nonce, CSRF, session, flash, pagination, search, inline edit, loading indicator, form re-population, and idempotency wiring out of the box. Strictly-web stdlib modules moved under `hull/web/*` to parallel the existing `hull/middleware/*` precedent (full release notes: the GitHub release page or the GitHub release).
