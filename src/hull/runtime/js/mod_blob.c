@@ -150,9 +150,18 @@ static JSValue js_blob_init(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "blob.init requires (opts)");
 
     JSValue dir_v = JS_GetPropertyStr(ctx, argv[0], "dir");
+    /* Explicit undefined check — JS_GetPropertyStr returns JS_UNDEFINED
+     * for a missing property, and JS_ToCString on undefined returns
+     * the literal string "undefined" which would silently propagate
+     * through to the cap layer's error message ("…declares
+     * 'undefined'") instead of a clean "dir required". */
+    if (JS_IsUndefined(dir_v) || JS_IsNull(dir_v)) {
+        JS_FreeValue(ctx, dir_v);
+        return JS_ThrowTypeError(ctx, "blob.init: opts.dir required");
+    }
     const char *dir = JS_ToCString(ctx, dir_v);
     JS_FreeValue(ctx, dir_v);
-    if (!dir) return JS_ThrowTypeError(ctx, "blob.init: dir required");
+    if (!dir) return JS_EXCEPTION;
 
     JSValue sd_v = JS_GetPropertyStr(ctx, argv[0], "shardDepth");
     int shard_depth = 1;
@@ -463,8 +472,11 @@ static JSValue js_blob_get(JSContext *ctx, JSValueConst this_val,
     JS_FreeCString(ctx, id);
     if (rc != 0) return JS_NULL;
 
+    /* Empty-blob contract: (NULL, 0). JS_NewArrayBufferCopy accepts
+     * NULL when len is 0 and returns an empty ArrayBuffer — no
+     * allocation to free. */
     JSValue ab = JS_NewArrayBufferCopy(ctx, buf, len);
-    hl_alloc_free(js->base.alloc, buf, len == 0 ? 1 : len);
+    if (buf) hl_alloc_free(js->base.alloc, buf, len);
     return ab;
 }
 
@@ -552,6 +564,10 @@ static int iter_collect_cb(const char *id, size_t size, void *user)
     IterAcc *a = user;
     if (a->count == a->capacity) {
         size_t new_cap = a->capacity == 0 ? 64 : a->capacity * 2;
+        /* L1: refuse multiplication overflow (only reachable at
+         * billions of blobs but the sibling cap-layer entries_push
+         * has the check — keep parity). */
+        if (new_cap > SIZE_MAX / sizeof(IterItem)) { a->oom = 1; return -1; }
         IterItem *grown = js_realloc(a->ctx, a->items,
                                        new_cap * sizeof(IterItem));
         if (!grown) { a->oom = 1; return -1; }

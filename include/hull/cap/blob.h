@@ -182,16 +182,21 @@ void hl_cap_blob_writer_abort(HlBlobWriter *w);
 /**
  * @brief Read the full blob into a freshly allocated buffer.
  *
- * Caller frees `*out_buf` via the same allocator passed to
- * hl_cap_blob_init().
+ * On success, caller frees `*out_buf` via the same allocator passed
+ * to hl_cap_blob_init() with size `*out_len`. For empty blobs (the
+ * SHA-256("") entry), returns `*out_buf = NULL`, `*out_len = 0` and
+ * NO allocation is made — caller must skip the free. This avoids
+ * the placeholder-allocation pitfall where callers had to remember
+ * to free a 1-byte sentinel.
  *
  * @param b             Blob store handle.
  * @param id            SHA-256 hex (case-insensitive; 64 chars).
  * @param track_access  Non-zero to bump the file's atime via utimes()
  *                      after the read (for LRU policy). Zero to skip
  *                      the syscall (for hot read paths).
- * @param out_buf       Receives the allocated buffer.
- * @param out_len       Receives the byte count.
+ * @param out_buf       Receives the allocated buffer, or NULL for
+ *                      empty blobs.
+ * @param out_len       Receives the byte count. Zero for empty blobs.
  *
  * @return 0 on success; -1 on missing blob, I/O failure, or
  *         allocation failure.

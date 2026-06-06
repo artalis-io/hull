@@ -203,6 +203,31 @@ UTEST(hl_cap_blob, put_empty_buffer_is_valid)
     env_free(&e);
 }
 
+UTEST(hl_cap_blob, get_empty_returns_null_buffer)
+{
+    /* M2 contract: an empty blob is fetched with out_buf=NULL,
+     * out_len=0, and no allocation is made — caller can skip the
+     * free entirely. */
+    TestEnv e; env_init(&e);
+    HlBlob *b = NULL;
+    hl_cap_blob_init(&b, &e.fs_cfg, &e.alloc, "blobs", 1, 0);
+
+    char id[HL_BLOB_ID_BUF_SIZE];
+    ASSERT_EQ(hl_cap_blob_put(b, NULL, 0, NULL, id), 0);
+
+    uint8_t *buf = (uint8_t *)0xDEADBEEF;   /* sentinel — must be cleared */
+    size_t   len = 999;                      /* sentinel — must be 0 */
+    ASSERT_EQ(hl_cap_blob_get(b, id, 0, &buf, &len), 0);
+    ASSERT_TRUE(buf == NULL);
+    ASSERT_EQ(len, (size_t)0);
+    /* Deliberately no hl_alloc_free here — the contract is "no free
+     * needed for empty blobs". If this leaks, ASan in `make debug`
+     * would catch it. */
+
+    hl_cap_blob_free(b);
+    env_free(&e);
+}
+
 UTEST(hl_cap_blob, put_verified_accepts_correct_sha)
 {
     TestEnv e; env_init(&e);

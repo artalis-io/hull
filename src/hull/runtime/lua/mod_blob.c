@@ -307,19 +307,23 @@ static int lua_reader_read(lua_State *L)
         lua_pushlstring(L, "", 0);
         return 1;
     }
-    uint8_t *buf = malloc((size_t)cap);
+    HlLua *lua = get_hl_lua(L);
+    /* Route through the Lua memory tracker (lua->base.alloc) so the
+     * runtime's memory cap covers transient read buffers — bare
+     * malloc would silently bypass JS_SetMemoryLimit's Lua sibling. */
+    uint8_t *buf = hl_alloc_malloc(lua->base.alloc, (size_t)cap);
     if (!buf) return luaL_error(L, "blob.reader: out of memory");
     size_t got = 0;
     if (hl_cap_blob_reader_read(ud->r, buf, (size_t)cap, &got) != 0) {
-        free(buf);
+        hl_alloc_free(lua->base.alloc, buf, (size_t)cap);
         return luaL_error(L, "blob.reader: read failed");
     }
     if (got == 0) {
-        free(buf);
+        hl_alloc_free(lua->base.alloc, buf, (size_t)cap);
         lua_pushnil(L);
     } else {
         lua_pushlstring(L, (const char *)buf, got);
-        free(buf);
+        hl_alloc_free(lua->base.alloc, buf, (size_t)cap);
     }
     return 1;
 }
@@ -354,10 +358,10 @@ static int lua_blob_get(lua_State *L)
         lua_pushnil(L);
         return 1;
     }
+    /* Empty-blob contract: (NULL, 0). lua_pushlstring accepts NULL when
+     * len is 0 and pushes an empty string — no allocation to free. */
     lua_pushlstring(L, (const char *)buf, len);
-    /* hl_cap_blob_get allocates via the blob's allocator (same as
-     * lua->base.alloc); free with the matching allocator. */
-    hl_alloc_free(lua->base.alloc, buf, len == 0 ? 1 : len);
+    if (buf) hl_alloc_free(lua->base.alloc, buf, len);
     return 1;
 }
 
@@ -416,18 +420,30 @@ typedef struct {
     size_t  size;
 } IterItem;
 
+/* Iter accumulator and the persisted iterator state both route
+ * through `lua->base.alloc` so the runtime's memory cap covers the
+ * snapshot array. Bare malloc/realloc/free would bypass the tracker
+ * and turn a 10⁶-blob iter() into an off-tracker DoS vector. The
+ * matching free in lua_iter_state_gc needs the same allocator and
+ * the same capacity it was grown to — stash both on the state. */
+
 typedef struct {
-    IterItem *items;
-    size_t    count;
-    size_t    capacity;
+    HlAllocator *alloc;
+    IterItem    *items;
+    size_t       count;
+    size_t       capacity;
 } IterAcc;
 
 static int iter_collect_cb(const char *id, size_t size, void *user)
 {
     IterAcc *a = user;
     if (a->count == a->capacity) {
-        size_t new_cap = a->capacity == 0 ? 64 : a->capacity * 2;
-        IterItem *grown = realloc(a->items, new_cap * sizeof(IterItem));
+        size_t old_cap = a->capacity;
+        size_t new_cap = old_cap == 0 ? 64 : old_cap * 2;
+        if (new_cap > SIZE_MAX / sizeof(IterItem)) return -1;  /* L1 */
+        IterItem *grown = hl_alloc_realloc(a->alloc, a->items,
+                                            old_cap * sizeof(IterItem),
+                                            new_cap * sizeof(IterItem));
         if (!grown) return -1;
         a->items = grown;
         a->capacity = new_cap;
@@ -439,17 +455,25 @@ static int iter_collect_cb(const char *id, size_t size, void *user)
 }
 
 /* Iterator state stored as a single userdata that holds the items
- * array. __gc frees it. Closure upvalue holds (state, position). */
+ * array. __gc frees it. Closure upvalue holds (state, position).
+ * Carries `alloc` and `capacity` so the free matches the original
+ * tracked allocation exactly. */
 typedef struct {
-    IterItem *items;
-    size_t    count;
-    size_t    pos;
+    HlAllocator *alloc;
+    IterItem    *items;
+    size_t       count;
+    size_t       capacity;
+    size_t       pos;
 } IterState;
 
 static int lua_iter_state_gc(lua_State *L)
 {
     IterState *st = (IterState *)lua_touserdata(L, 1);
-    if (st && st->items) { free(st->items); st->items = NULL; }
+    if (st && st->items) {
+        hl_alloc_free(st->alloc, st->items,
+                      st->capacity * sizeof(IterItem));
+        st->items = NULL;
+    }
     return 0;
 }
 
@@ -469,18 +493,23 @@ static int lua_iter_step(lua_State *L)
 static int lua_blob_iter(lua_State *L)
 {
     HlBlob *b = get_store(L);
+    HlLua *lua = get_hl_lua(L);
 
-    IterAcc acc = {0, 0, 0};
+    IterAcc acc = { lua->base.alloc, NULL, 0, 0 };
     if (hl_cap_blob_iter(b, iter_collect_cb, &acc) != 0) {
-        free(acc.items);
+        if (acc.items)
+            hl_alloc_free(acc.alloc, acc.items,
+                          acc.capacity * sizeof(IterItem));
         return luaL_error(L, "blob.iter: walk failed");
     }
 
     /* Move the collected array into a userdata so __gc cleans it. */
     IterState *st = (IterState *)lua_newuserdatauv(L, sizeof(*st), 0);
-    st->items = acc.items;
-    st->count = acc.count;
-    st->pos   = 0;
+    st->alloc    = acc.alloc;
+    st->items    = acc.items;
+    st->count    = acc.count;
+    st->capacity = acc.capacity;
+    st->pos      = 0;
 
     /* Metatable with __gc. */
     if (luaL_newmetatable(L, "HlBlobIterState")) {

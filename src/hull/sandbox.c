@@ -289,21 +289,51 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
         const char *wpath = policy->fs_write[i];
         struct stat st;
         if (stat(wpath, &st) != 0) {
-            /* Recursive create — best-effort. Mirrors mkdir -p. */
-            char buf[SEATBELT_PATH_SIZE];
-            size_t plen = strlen(wpath);
-            if (plen > 0 && plen < sizeof(buf)) {
-                memcpy(buf, wpath, plen + 1);
-                /* Trim trailing slash for cleaner iteration. */
-                while (plen > 1 && buf[plen - 1] == '/') buf[--plen] = '\0';
-                for (size_t k = 1; k <= plen; k++) {
-                    if (buf[k] == '/' || buf[k] == '\0') {
-                        char saved = buf[k];
-                        buf[k] = '\0';
-                        (void)mkdir(buf, 0755);
-                        buf[k] = saved;
+            /* Recursive create — best-effort. Mirrors mkdir -p. The
+             * pre-mkdir is what makes hull/blob@1 (and any other
+             * module that creates its own root dir lazily) work on
+             * first boot under the seatbelt: realpath() needs the
+             * path to exist to canonicalize it.
+             *
+             * Validate the path shape BEFORE mkdir so a manifest
+             * with "../escape" or "/etc" can't escape the app
+             * sandbox at sandbox-init time. The manifest parser
+             * doesn't currently validate fs.write paths beyond
+             * truncation, so defense-in-depth here. */
+            int rejected = 0;
+            if (wpath[0] == '/' || wpath[0] == '\0') rejected = 1;
+            if (!rejected) {
+                const char *p = wpath;
+                while (*p) {
+                    if (p[0] == '.' && p[1] == '.' &&
+                        (p[2] == '/' || p[2] == '\0')) { rejected = 1; break; }
+                    const char *slash = strchr(p, '/');
+                    if (!slash) break;
+                    p = slash + 1;
+                }
+            }
+            if (!rejected) {
+                char buf[SEATBELT_PATH_SIZE];
+                size_t plen = strlen(wpath);
+                if (plen > 0 && plen < sizeof(buf)) {
+                    memcpy(buf, wpath, plen + 1);
+                    /* Trim trailing slash for cleaner iteration. */
+                    while (plen > 1 && buf[plen - 1] == '/') buf[--plen] = '\0';
+                    for (size_t k = 1; k <= plen; k++) {
+                        if (buf[k] == '/' || buf[k] == '\0') {
+                            char saved = buf[k];
+                            buf[k] = '\0';
+                            (void)mkdir(buf, 0755);
+                            buf[k] = saved;
+                        }
                     }
                 }
+            } else {
+                log_warn("[sandbox] fs.write path '%s' is absolute or "
+                         "contains '..' — skipping pre-mkdir; the "
+                         "seatbelt allow rule will fall through to a "
+                         "no-match subpath. Fix the manifest.",
+                         wpath);
             }
         }
         if (realpath(wpath, scratch->fs_write_real[i]))

@@ -545,18 +545,30 @@ int hl_cap_blob_get(HlBlob *b, const char *id, int track_access,
     size_t size = 0;
     if (hl_cap_blob_stat(b, id, &size, NULL) != 0) return -1;
 
+    /* Empty blob: no allocation, return (NULL, 0). Callers can skip
+     * the free entirely — avoids the placeholder-allocation footgun
+     * where every caller had to remember to encode size==0 → free(buf, 1). */
+    if (size == 0) {
+        /* Still open the reader to enforce that the blob exists +
+         * honor track_access. */
+        HlBlobReader *r = NULL;
+        if (hl_cap_blob_reader_open(b, id, track_access, &r) != 0)
+            return -1;
+        hl_cap_blob_reader_close(r);
+        return 0;
+    }
+
     HlBlobReader *r = NULL;
     if (hl_cap_blob_reader_open(b, id, track_access, &r) != 0) return -1;
 
-    uint8_t *buf = (size == 0) ? hl_alloc_malloc(b->alloc, 1)
-                               : hl_alloc_malloc(b->alloc, size);
+    uint8_t *buf = hl_alloc_malloc(b->alloc, size);
     if (!buf) { hl_cap_blob_reader_close(r); return -1; }
 
     size_t got = 0;
     while (got < size) {
         size_t n = 0;
         if (hl_cap_blob_reader_read(r, buf + got, size - got, &n) != 0) {
-            hl_alloc_free(b->alloc, buf, size == 0 ? 1 : size);
+            hl_alloc_free(b->alloc, buf, size);
             hl_cap_blob_reader_close(r);
             return -1;
         }
@@ -566,7 +578,7 @@ int hl_cap_blob_get(HlBlob *b, const char *id, int track_access,
     hl_cap_blob_reader_close(r);
 
     if (got != size) {
-        hl_alloc_free(b->alloc, buf, size == 0 ? 1 : size);
+        hl_alloc_free(b->alloc, buf, size);
         return -1;
     }
     *out_buf = buf;
