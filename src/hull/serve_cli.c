@@ -188,7 +188,7 @@ int hull_serve(int argc, char **argv)
      * (fs.read paths, env allowlist, http hosts + TLS) work out of
      * app.main. */
     HlFsConfig fs_cfg = {0};
-    if (manifest.fs_read_count > 0) {
+    if (manifest.fs_read_count > 0 || manifest.fs_write_count > 0) {
         fs_cfg.base_dir = app_dir;
         fs_cfg.base_len = strlen(app_dir);
         rt->fs_cfg = &fs_cfg;

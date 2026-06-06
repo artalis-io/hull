@@ -1150,9 +1150,10 @@ static int hl_serve_wire_caps(HlServerState *s)
     }
 #endif
 
-    /* Wire fs_cfg from manifest (if app declares fs.read paths) */
+    /* Wire fs_cfg from manifest (if app declares fs.read OR fs.write
+     * paths — both blob.* and fs.mmap need the cfg). */
     memset(&s->fs_cfg_storage, 0, sizeof(s->fs_cfg_storage));
-    if (s->manifest.fs_read_count > 0) {
+    if (s->manifest.fs_read_count > 0 || s->manifest.fs_write_count > 0) {
         s->fs_cfg_storage.base_dir = s->app_dir;
         s->fs_cfg_storage.base_len = strlen(s->app_dir);
         rt->fs_cfg = &s->fs_cfg_storage;

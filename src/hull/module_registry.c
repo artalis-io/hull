@@ -46,6 +46,14 @@ static const HlModuleSpec REGISTRY[] = {
 
     /* ── C-native side-effect modules + cross-cutting utilities ───── */
     {
+        /* Content-addressed blob storage. Caller declares a fs.write
+         * path; blob.init() validates against it. No SQLite dep —
+         * works under HL_ENABLE_DB=0 (compute-only builds). */
+        .name = "hull/blob",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = HL_MOD_CAP_FS, .deps = {0},
+    },
+    {
         .name = "hull/compute",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_WASM, .deps = {0},

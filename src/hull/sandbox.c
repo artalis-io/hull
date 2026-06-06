@@ -22,6 +22,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 /* ── Platform pledge/unveil providers ──────────────────────────────── */
 
@@ -273,8 +275,37 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
     for (int i = 0; i < policy->fs_write_count; i++) {
         snprintf(scratch->fs_write_keys[i],
                  sizeof(scratch->fs_write_keys[i]), "FS_W_%d", i);
-        /* Resolve symlinks — Seatbelt matches real paths */
+        /* Resolve symlinks — Seatbelt matches real paths. If the
+         * declared write directory doesn't exist yet, pre-create it
+         * so realpath() can canonicalize. Without this, modules like
+         * `hull/blob@1` that mkdir their root on init would race the
+         * sandbox: by the time the app calls blob.init() to mkdir,
+         * the sandbox is already active with a bogus relative path
+         * mapping. Pre-creating is safe — the path was declared
+         * writable, the sandbox is about to allow writes under it.
+         * mkdir-p the path's parent first if the path itself needs
+         * intermediate dirs; mkdir(2) returns EEXIST harmlessly when
+         * the path already exists. */
         const char *wpath = policy->fs_write[i];
+        struct stat st;
+        if (stat(wpath, &st) != 0) {
+            /* Recursive create — best-effort. Mirrors mkdir -p. */
+            char buf[SEATBELT_PATH_SIZE];
+            size_t plen = strlen(wpath);
+            if (plen > 0 && plen < sizeof(buf)) {
+                memcpy(buf, wpath, plen + 1);
+                /* Trim trailing slash for cleaner iteration. */
+                while (plen > 1 && buf[plen - 1] == '/') buf[--plen] = '\0';
+                for (size_t k = 1; k <= plen; k++) {
+                    if (buf[k] == '/' || buf[k] == '\0') {
+                        char saved = buf[k];
+                        buf[k] = '\0';
+                        (void)mkdir(buf, 0755);
+                        buf[k] = saved;
+                    }
+                }
+            }
+        }
         if (realpath(wpath, scratch->fs_write_real[i]))
             wpath = scratch->fs_write_real[i];
         PARAM_ADD(scratch->fs_write_keys[i], wpath);
