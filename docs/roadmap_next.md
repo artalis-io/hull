@@ -847,7 +847,7 @@ and helpers.
       edge cases (overlong, surrogate, NUL), plus 7 fixture-file smoke
       tests against real PNG/JPEG/GIF/WebP/PDF/SVG/HTML files in
       `tests/fixtures/mime/`.
-- [ ] §1.5.b-3.5. `hull/blob@1` module (Lua + JS). Pure content-
+- [x] §1.5.b-3.5. `hull/blob@1` module (Lua + JS). Pure content-
       addressed disk storage. Bytes in → SHA-256-keyed ID; bytes out by
       ID. Streaming put with **on-the-fly SHA-256** (hashed in lockstep
       with the temp-file write — never buffered just to hash). Atomic

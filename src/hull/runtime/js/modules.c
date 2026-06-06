@@ -89,6 +89,11 @@ int hl_js_register_modules(HlJS *js)
     if (hl_js_init_fs_module(js->ctx, js) != 0)
         return -1;
 
+    /* Register hull:blob module — always available; per-function checks
+     * gate on the singleton created by blob.init(). */
+    if (hl_js_init_blob_module(js->ctx, js) != 0)
+        return -1;
+
     /* Register hull:image module — always available */
     if (hl_js_init_image_module(js->ctx, js) != 0)
         return -1;
