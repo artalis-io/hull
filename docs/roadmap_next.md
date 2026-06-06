@@ -847,17 +847,61 @@ and helpers.
       edge cases (overlong, surrogate, NUL), plus 7 fixture-file smoke
       tests against real PNG/JPEG/GIF/WebP/PDF/SVG/HTML files in
       `tests/fixtures/mime/`.
-- [ ] §1.5.b-4. `hull/attachment@1` module (Lua + JS). Reads
-      `attachment.init(opts)` config; calls into multipart bindings;
-      writes content-addressed under `opts.dir`. Metadata via
-      `_hull_attachments` table (migration auto-applied on first init).
-      API: `attachment.store(part, opts) -> id`,
-      `attachment.read(id) -> stream`, `attachment.read_to_file(id, dst)`,
-      `attachment.metadata(id)`, `attachment.delete(id)`,
-      `attachment.cleanup()`, `attachment.scrub()` (ops-only).
-      Secure download route helper: `attachment.serve(req, res, id,
-      { auth_check = fn })`. Tests for happy path, MIME-mismatch,
-      cap-exceeded, refcount, dedup, GC.
+- [ ] §1.5.b-3.5. `hull/blob@1` module (Lua + JS). Pure content-
+      addressed disk storage. Bytes in → SHA-256-keyed ID; bytes out by
+      ID. Streaming put with **on-the-fly SHA-256** (hashed in lockstep
+      with the temp-file write — never buffered just to hash). Atomic
+      writes via temp + `rename(2)`. Sharded layout (`<dir>/<hash[0:2]>/
+      <hash>`); 1-level default, 2-level opt-in. Self-verifying
+      (filename IS the SHA). **Zero SQLite dependency** — compiles and
+      runs cleanly under `HL_ENABLE_DB=0`, important because the
+      compute AOT cache and Lua bytecode cache are exactly where
+      compute-only builds need it most. API: `blob.init({dir,
+      shard_depth, tmp_max_age})`, `blob.put(bytes) -> id, size`,
+      `blob.put_verified(bytes, expected_id)`, `blob.writer()` →
+      streaming writer with `:write()` / `:finalize()` / `:abort()`,
+      `blob.get(id, { track_access = false }?)`, `blob.reader(id)`,
+      `blob.exists/size/atime/delete`, `blob.iter` for ops scans,
+      `blob.cleanup({max_total_size, max_age, strategy = "lru" |
+      "fifo", dry_run})` for opt-in eviction. Cap-layer in
+      `src/hull/cap/blob.c` reuses incremental SHA from §1.5.b-2 and
+      routes all I/O through `hl_cap_fs_*`. **Six known consumers**
+      (drives the design): (1) `hull/web/attachment@1` (§1.5.b-4
+      below), (2) `hull tools install` migration (JSON sidecar map),
+      (3) compute AOT cache migration (JSON sidecar map, system-wide
+      `~/.hull/cache/compute/`), (4) Lua bytecode cache (sidecar-less
+      — key IS the SHA), (5) LLM artifact cache (v0.1.11+), (6)
+      template-AST cache (v0.1.10+). Full design + migration map in
+      [docs/blob.md](blob.md). Tests: C-layer (put/get/streaming
+      hash correctness/atomic rename/EXDEV fallback/concurrent put/iter/
+      cleanup), Lua + JS binding integration, e2e against live `hull
+      dev`. Migrations 1-2 land in v0.1.10 (after blob ships +
+      battle-tested by attachment in v0.1.9); migrations 3-6 follow.
+- [ ] §1.5.b-4. `hull/web/attachment@1` module (Lua + JS), built on
+      `hull/blob@1`. Lives under `hull/web/*` per the v0.2.0
+      reorganization — its primary input is a multipart `Part`, its
+      primary output is the auth-gated `attachment.serve(req, res, id,
+      { auth_check = fn })` route helper, and its `_hull_attachments`
+      table mirrors the shape of `_hull_sessions` /
+      `_hull_idempotency_keys` already living under
+      `hull/web/middleware/*`. Thin layer: `_hull_attachments`
+      metadata (id, blob_id, original_name, mime, declared_mime, size,
+      uploaded_by, uploaded_at, refcount) + MIME validation via
+      `hl_cap_mime_sniff` on the first chunk + auth-gated `serve()`
+      helper, with the actual disk I/O delegated to `blob.writer()` /
+      `blob.reader()` / `blob.delete()`. attachment owns the refcount;
+      blob doesn't know one exists. `attachment.delete(id)` decrements;
+      at refcount=0 sets `pending_gc=true`; `attachment.cleanup()`
+      (called from `app.daily`) sweeps `pending_gc` rows older than
+      24h and calls `blob.delete()`. API: `attachment.init(opts)`,
+      `attachment.store(part, opts) -> id`,
+      `attachment.read(id) -> stream`, `attachment.read_to_file(id,
+      dst)`, `attachment.metadata(id)`, `attachment.delete(id)`,
+      `attachment.cleanup()`, `attachment.scrub()` (ops-only),
+      `attachment.serve(req, res, id, { auth_check = fn })`. Tests for
+      happy path, MIME-mismatch, cap-exceeded, refcount, dedup, GC.
+      SQLite-bound here (consistent with other `hull/web/*` modules
+      that store state); blob underneath stays SQLite-free.
 - [ ] §1.5.b-5. Photo upload demo in `examples/hypermedia_todo` (Lua +
       JS). File-input upload (drag-and-drop deferred to §1.5.e), per-todo
       attachment listing, delete with confirm. Tests covering upload +
