@@ -2873,6 +2873,9 @@ static void bc_with_tmp_home(char tmpdir[256])
     /* Make sure no stale opt-out from a previous test leaks in. */
     unsetenv("HULL_NO_CACHE");
     unsetenv("HULL_NO_BYTECODE_CACHE");
+    /* Tear down the process-wide store singleton so the next call
+     * resolves to the freshly-redirected $HOME. */
+    hl_lua_bytecode_cache_reset();
 }
 
 static void bc_cleanup_tmp_home(const char *tmpdir)
@@ -2888,20 +2891,32 @@ static const char *BC_PROBE_SRC =
     "local function probe(n) return n * 2 + 3 end\n"
     "return probe(7)\n";
 
+/* Count cached bytecode files. The store is sharded under
+ * blobs/runtime/lua-bytecode/blobs/<XX>/<sha256-hex>, so we walk
+ * the two-level shard tree and tally files whose name looks like a
+ * 64-char hex id. */
 static int bc_count_luac(const char *dir)
 {
-    /* "lua-bytecode/" subdir under $HOME/.hull/cache/ */
-    char path[512];
-    snprintf(path, sizeof(path), "%s/.hull/cache/lua-bytecode", dir);
-    DIR *d = opendir(path);
-    if (!d) return 0;
+    char root[512];
+    snprintf(root, sizeof(root),
+             "%s/.hull/blobs/runtime/lua-bytecode/blobs", dir);
+    DIR *r = opendir(root);
+    if (!r) return 0;
     int n = 0;
-    struct dirent *e;
-    while ((e = readdir(d))) {
-        size_t l = strlen(e->d_name);
-        if (l > 5 && strcmp(e->d_name + l - 5, ".luac") == 0) n++;
+    struct dirent *sh;
+    while ((sh = readdir(r))) {
+        if (sh->d_name[0] == '.') continue;
+        char shard[512];
+        snprintf(shard, sizeof(shard), "%s/%s", root, sh->d_name);
+        DIR *d = opendir(shard);
+        if (!d) continue;
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            if (strlen(e->d_name) == 64) n++;
+        }
+        closedir(d);
     }
-    closedir(d);
+    closedir(r);
     return n;
 }
 
@@ -3011,24 +3026,34 @@ UTEST(lua_bytecode_cache, corrupt_cache_falls_back_to_source)
     lua_pop(L, 1);
     ASSERT_EQ(1, bc_count_luac(tmp));
 
-    /* Corrupt every .luac file. */
-    char dirpath[512];
-    snprintf(dirpath, sizeof(dirpath),
-             "%s/.hull/cache/lua-bytecode", tmp);
-    DIR *d = opendir(dirpath);
-    ASSERT_NE(d, NULL);
-    struct dirent *e;
-    while ((e = readdir(d))) {
-        size_t l = strlen(e->d_name);
-        if (l <= 5 || strcmp(e->d_name + l - 5, ".luac") != 0) continue;
-        char full[1024];
-        snprintf(full, sizeof(full), "%s/%s", dirpath, e->d_name);
-        FILE *f = fopen(full, "wb");
-        ASSERT_NE(f, NULL);
-        fwrite("\x00\x00\x00\x00garbage", 1, 11, f);
-        fclose(f);
+    /* Corrupt every cached entry. Walk the sharded layout
+     * (blobs/runtime/lua-bytecode/blobs/<XX>/<hex>) and overwrite
+     * each 64-char-hex-named file with garbage. */
+    char root[512];
+    snprintf(root, sizeof(root),
+             "%s/.hull/blobs/runtime/lua-bytecode/blobs", tmp);
+    DIR *r = opendir(root);
+    ASSERT_NE(r, NULL);
+    struct dirent *sh;
+    while ((sh = readdir(r))) {
+        if (sh->d_name[0] == '.') continue;
+        char shard[512];
+        snprintf(shard, sizeof(shard), "%s/%s", root, sh->d_name);
+        DIR *d = opendir(shard);
+        if (!d) continue;
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            if (strlen(e->d_name) != 64) continue;
+            char full[1024];
+            snprintf(full, sizeof(full), "%s/%s", shard, e->d_name);
+            FILE *f = fopen(full, "wb");
+            if (!f) continue;
+            fwrite("\x00\x00\x00\x00garbage", 1, 11, f);
+            fclose(f);
+        }
+        closedir(d);
     }
-    closedir(d);
+    closedir(r);
 
     /* Reload — must recover, re-compile from source, repopulate cache. */
     int rc = hl_lua_load_cached(L, BC_PROBE_SRC, strlen(BC_PROBE_SRC), "=probe");

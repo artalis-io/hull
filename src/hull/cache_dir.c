@@ -48,6 +48,14 @@ int hl_hull_cache_dir(char *out, size_t out_sz)
     const char *home = getenv("HOME");
     if (!home || !*home) { errno = ENOENT; return -1; }
 
+    /* Runtime caches share the same on-disk pool as app blobs but
+     * live under a `runtime/` subtree. Apps' blob stores live
+     * elsewhere (manifest-declared); runtime caches partition under
+     * blobs/runtime/<kind>/ so a single `hull cache list` walk
+     * (future §1.5.b-X-5) can enumerate them cleanly. The env-var
+     * surface (HULL_NO_CACHE etc.) keeps "cache" nomenclature
+     * because that's the user-facing intent — these directories ARE
+     * caches even though the on-disk layout is the blob shape. */
     char hull_dir[PATH_MAX];
     int n = snprintf(hull_dir, sizeof(hull_dir), "%s/.hull", home);
     if (n < 0 || (size_t)n >= sizeof(hull_dir)) {
@@ -55,15 +63,22 @@ int hl_hull_cache_dir(char *out, size_t out_sz)
     }
     if (ensure_dir(hull_dir, 0755) != 0) return -1;
 
-    char cache_dir[PATH_MAX];
-    n = snprintf(cache_dir, sizeof(cache_dir), "%s/cache", hull_dir);
-    if (n < 0 || (size_t)n >= sizeof(cache_dir)) {
+    char blobs_dir[PATH_MAX];
+    n = snprintf(blobs_dir, sizeof(blobs_dir), "%s/blobs", hull_dir);
+    if (n < 0 || (size_t)n >= sizeof(blobs_dir)) {
         errno = ENAMETOOLONG; return -1;
     }
-    if (ensure_dir(cache_dir, 0755) != 0) return -1;
+    if (ensure_dir(blobs_dir, 0755) != 0) return -1;
+
+    char runtime_dir[PATH_MAX];
+    n = snprintf(runtime_dir, sizeof(runtime_dir), "%s/runtime", blobs_dir);
+    if (n < 0 || (size_t)n >= sizeof(runtime_dir)) {
+        errno = ENAMETOOLONG; return -1;
+    }
+    if (ensure_dir(runtime_dir, 0755) != 0) return -1;
 
     /* Trailing slash for easy concatenation. */
-    n = snprintf(out, out_sz, "%s/", cache_dir);
+    n = snprintf(out, out_sz, "%s/", runtime_dir);
     if (n < 0 || (size_t)n >= out_sz) {
         errno = ENAMETOOLONG; return -1;
     }

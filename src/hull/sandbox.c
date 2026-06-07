@@ -360,20 +360,21 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
         SBPL_LIT("(allow file-read* (literal (param \"TLS_KEY\")))\n");
     }
 
-    /* ── Hull runtime cache root ($HOME/.hull/cache/) ─────────
+    /* ── Hull runtime cache root ($HOME/.hull/blobs/runtime/) ──
      *
      * Runtime-infrastructure caches (Lua bytecode, compute AOT,
-     * template AST) live in a shared system-wide pool, NOT in the
-     * app's manifest. The sandbox auto-allows them like the CA
-     * bundle — apps can't opt out per-app, but the global
-     * HULL_NO_CACHE=1 env var disables every consumer at runtime.
-     * See docs/blob.md §"Runtime-infrastructure caches".
+     * template AST) live in a shared system-wide blob pool under
+     * `blobs/runtime/<kind>/`, NOT in the app's manifest. The
+     * sandbox auto-allows them like the CA bundle — apps can't opt
+     * out per-app, but the global HULL_NO_CACHE=1 env var disables
+     * every consumer at runtime. See docs/blob.md §"Runtime-
+     * infrastructure caches".
      *
-     * hl_hull_cache_dir() creates $HOME/.hull/cache/ as a side
-     * effect so the subpath rule resolves to a real inode under
-     * seatbelt. If $HOME is unset (rare — happens in some CI
-     * sandboxes), the call fails and we skip the allow rule — the
-     * cache consumers then fail-closed on their own. */
+     * hl_hull_cache_dir() creates the path as a side effect so the
+     * subpath rule resolves to a real inode under seatbelt. If
+     * $HOME is unset (rare — happens in some CI sandboxes), the
+     * call fails and we skip the allow rule — the cache consumers
+     * then fail-closed on their own. */
     {
         static char cache_real[SEATBELT_PATH_SIZE];
         char cache_raw[SEATBELT_PATH_SIZE];
@@ -592,6 +593,17 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
     if (output_dir)
         hl_tool_unveil_add(ctx, output_dir, "rwc");
 
+    /* Hull runtime cache root — `hull build` writes AOT artifacts
+     * into $HOME/.hull/cache/compute-aot/ for cross-app reuse. Same
+     * auto-allow rationale as the bytecode cache (see seatbelt
+     * counterpart in hl_sandbox_apply). hl_hull_cache_dir() mkdirs
+     * the path as a side effect. */
+    {
+        char cache_path[PATH_MAX];
+        if (hl_hull_cache_dir(cache_path, sizeof(cache_path)) == 0)
+            hl_tool_unveil_add(ctx, cache_path, "rwc");
+    }
+
     /* Platform library + hull binary: read + execute */
     if (platform_dir)
         hl_tool_unveil_add(ctx, platform_dir, "rx");
@@ -627,6 +639,11 @@ int hl_tool_sandbox_init(HlToolUnveilCtx *ctx,
 #endif
         if (output_dir)   unveil(output_dir, "rwc");
         if (platform_dir) unveil(platform_dir, "rx");
+        {
+            char cache_path[PATH_MAX];
+            if (hl_hull_cache_dir(cache_path, sizeof(cache_path)) == 0)
+                unveil(cache_path, "rwc");
+        }
         unveil(NULL, NULL); /* seal */
 
         /* Pledge for tool mode: needs proc + exec for fork/execvp */

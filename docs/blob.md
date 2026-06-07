@@ -210,6 +210,64 @@ blob.totalSize();  blob.count();
 blob.cleanup({ maxTotalSize, maxAge, strategy, dryRun });
 ```
 
+## Two C layers: low-level store + cap-layer wrapper
+
+The implementation is split in two so that the bytecode cache, AOT
+cache, future template-AST cache, and any other internal consumer
+can share the atomic-rename + sharded-shard + LRU-cleanup
+primitives without dragging in the manifest gate that exists only
+to constrain *app* code.
+
+```
+                ┌─────────────────────────────────────┐
+                │ App code                            │
+                │   Lua:  require("hull.blob")        │
+                │   JS:   import "hull:blob"          │
+                └────────────────┬────────────────────┘
+                                 │ manifest fs.write checked
+                                 ▼
+   include/hull/cap/blob.h ──── cap/blob.c (thin)
+     HlBlob* (alias)              · hl_cap_blob_init: manifest gate
+     hl_cap_blob_*                · all other entry points forward
+                                 │
+                                 ▼
+   include/hull/blob_store.h  blob_store.c (low-level)
+     HlBlobStore*                · pure CAS — no policy
+     hl_blob_store_*             · atomic tmp+rename
+                                 · sharded shards
+                                 · LRU/FIFO cleanup
+                                 · NEW: hl_blob_store_put_keyed
+                                   (caller-supplied filename,
+                                   bytes NOT content-hashed —
+                                   for key-value caches)
+                                 ▲
+                                 │
+                ┌────────────────┴────────────────────┐
+                │ Runtime infrastructure              │
+                │   src/hull/runtime/lua/             │
+                │      bytecode_cache.c               │
+                │   stdlib/cli/lua/hull/aot_cache.lua │
+                │      via tool.blob_store_*          │
+                └─────────────────────────────────────┘
+```
+
+`HlBlob` is now a typedef alias for `HlBlobStore`; all the
+`hl_cap_blob_*` entry points are one-line forwarders that exist so
+the cap layer can grow policy (audit emission, per-call permission
+checks) without restructuring callers later.
+
+### Per-store discipline: CAS *or* keyed, never both
+
+`hl_blob_store_put` is content-addressed (filename =
+`sha256(content)`). `hl_blob_store_put_keyed` is caller-keyed
+(filename = caller-supplied 64-hex; bytes aren't hashed). Both
+share the same atomic-rename + sharded layout, but **each store is
+exclusively one or the other** — mixing them in the same root
+breaks the "filename IS the SHA" invariant CAS callers rely on.
+
+Apps' blob stores stay CAS. The runtime caches each get a
+dedicated keyed store under `$HOME/.hull/blobs/runtime/<kind>/`.
+
 ## C cap layer (`src/hull/cap/blob.h`, `src/hull/cap/blob.c`)
 
 ```c

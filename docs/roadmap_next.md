@@ -938,39 +938,83 @@ new external user-facing feature.
 
 Tasks (target v0.1.10):
 
+- [x] §1.5.b-X-0. Cap/store split. **Landed (prerequisite).** The
+      low-level CAS implementation moved from `src/hull/cap/blob.c`
+      to a new `src/hull/blob_store.c` (~600 LOC) exposing
+      `hl_blob_store_*`. The cap layer (`cap/blob.c`) shrunk to a
+      thin wrapper that adds manifest fs.write validation at init
+      and forwards everything else to the store. `HlBlob` is now a
+      typedef alias for `HlBlobStore` so existing callers compile
+      unchanged.
+      A new `hl_blob_store_put_keyed` variant lets runtime caches
+      use the same atomic-rename + sharded layout in keyed-value
+      mode (filename is caller-supplied, not content-derived) —
+      the bytecode and AOT caches are key-value, not CAS, so this
+      bridges the abstraction gap. Per-store discipline: each
+      store is exclusively CAS *or* keyed; apps' blob stores stay
+      CAS, runtime caches use keyed.
+      The runtime caches share the layout but partition under
+      `$HOME/.hull/blobs/runtime/<kind>/`, while app blobs live
+      wherever the app's manifest declares them (typically inside
+      the app dir). Single tree to walk for the future
+      `hull cache list` command.
+      Verified: 42/42 unit + 23/23 blob unit + 36/36 e2e_blob +
+      12/12 e2e_aot_cache + 118/118 e2e build + 18/18 e2e sandbox
+      + 280/280 e2e examples — all behave identically to before.
+
 - [x] §1.5.b-X-1. Lua bytecode cache (runtime-infrastructure,
       sidecar-less). **Landed.** Cache key = `sha256(LUA_VERSION ||
       arch || endian || source)`. `hl_lua_load_cached()` is a
       drop-in replacement for `luaL_loadbuffer` wired into
       `mod_fs.c::hl_lua_register_stdlib` for both stdlib and app
       module loading. Stores raw `lua_dump`'d bytecode (strip=0 to
-      preserve `ar.source` for the `_hull_*` namespace gate). Path:
-      `$HOME/.hull/cache/lua-bytecode/<hex>.luac`. Sandbox
-      auto-allows the cache root on both seatbelt (macOS) and
-      pledge/unveil (Linux/Cosmo). Honors `HULL_NO_CACHE=1` and
+      preserve `ar.source` for the `_hull_*` namespace gate).
+      Sandbox auto-allows the cache root on both seatbelt (macOS)
+      and pledge/unveil (Linux/Cosmo). Honors `HULL_NO_CACHE=1` and
       `HULL_NO_BYTECODE_CACHE=1`. Falls back transparently to
-      `luaL_loadbuffer` on any cache I/O failure (corrupt file →
-      unlink + recompile + persist). 5 unit tests in `test_lua`
-      (`lua_bytecode_cache.*`). Microbench
-      (`make bench-bytecode-cache`): on synthetic 3.7 KB chunks,
-      warm cache delivers 1.3× speedup vs no cache; cold cache is
-      4.6× the no-cache cost (one-time per source).
-      Direct-implementation rather than going through `hull/blob@1`
-      because (a) the cap-layer dep would pull blob into HL_ENABLE_*
-      flags it doesn't belong in, (b) the cache lives outside the
-      app manifest so the blob-cap's manifest gates don't apply.
-      Files: `include/hull/cache_dir.h`, `src/hull/cache_dir.c`,
-      `include/hull/runtime/lua_bytecode_cache.h`,
-      `src/hull/runtime/lua/bytecode_cache.c`,
-      `bench/bytecode_cache/bench_bytecode_cache.c`.
-- [ ] §1.5.b-X-2. Compute AOT cache migration. Replace per-app
-      `compute/<name>.aot.<arch>` with system-wide blob storage at
-      `~/.hull/cache/compute/`. JSON sidecar `index.json` maps
-      `(source_sha, arch_tag) → blob_id`. Build step (in
-      `stdlib/lua/hull/compute_build.lua`) checks blob, skips wamrc
-      on hit. Honors `HULL_NO_AOT_CACHE=1` and `hull build
-      --no-cache`. Win: cross-app AOT dedup, content-based
-      correctness vs current mtime-based.
+      `luaL_loadbuffer` on any cache I/O failure. 5 unit tests in
+      `test_lua` (`lua_bytecode_cache.*`).
+      **Routed through `hl_blob_store_*` as of the cap/store
+      split:** the on-disk layout is now
+      `$HOME/.hull/blobs/runtime/lua-bytecode/blobs/<XX>/<sha256>`
+      (sharded), shared infrastructure with `hull/blob@1` and the
+      AOT cache.
+- [x] §1.5.b-X-2. Compute AOT cache migration. **Landed.**
+      Memoizes `wamrc` output at
+      `$HOME/.hull/blobs/runtime/compute-aot/blobs/<XX>/<sha256>`
+      (sharded; same blob_store layout as the bytecode cache and
+      `hull/blob@1`). Key folds in `sha256(wasm_bytes) || arch ||
+      memory64_flag || wamrc_version`, so each unique tuple
+      compiles at most once per machine. Sidecar-less — the
+      filename IS the key. Cross-app dedup falls out naturally
+      (two apps using the same `score.wasm` for the same arch
+      share one cache entry).
+      No JSON sidecar — the design we sketched is replaced by a
+      sidecar-less CAS layout (filename = key). Cleaner: no index
+      file to corrupt, atomic via tmp+rename, concurrent build
+      processes are benign because identical inputs produce
+      identical bytes.
+      New CLI module `stdlib/cli/lua/hull/aot_cache.lua` provides
+      the cache surface (`key`, `lookup`, `store`,
+      `wamrc_version`). Wired into the AOT loop in
+      `stdlib/cli/lua/hull/build.lua`; build summary now reports
+      hits + writes (`8 AOT module(s) compiled (8 from cache)`).
+      New `tool.*` bindings landed alongside:
+        - `tool.hull_cache_dir([kind])` — resolve cache subdir
+        - `tool.hull_cache_disabled([kind])` — env-opt-out probe
+        - `tool.rename(src, dst)` — POSIX-atomic rename (for CAS)
+        - `tool.remove_file(path)` — gated unlink (tmp cleanup)
+      Sandbox auto-allows the cache root in tool mode too (`hull
+      build` runs under a tighter sandbox than apps).
+      Honors `HULL_NO_AOT_CACHE=1`, `HULL_NO_CACHE=1`, and the new
+      `hull build --no-cache` flag.
+      Verification: examples/compute (8 modules) on M-series:
+      cold build ~1.0s, warm build ~0.06s — 16× speedup. Warm-
+      cache binary boots and serves requests with `aot=1` log
+      confirming AOT path active. 12/12 cases in new
+      `tests/e2e_aot_cache.sh` (cold/warm/HULL_NO_AOT_CACHE/
+      HULL_NO_CACHE/--no-cache/cross-invocation reuse/binary
+      still runs).
 - [ ] §1.5.b-X-3. `hull tools install` migration. Store downloaded
       tool binaries via `blob.put_verified(bytes, signed_sha)` at
       `~/.hull/blobs/`. JSON sidecar at `~/.hull/tools/index.json`

@@ -86,7 +86,8 @@ static int rm_entry(const char *path, const struct stat *st, int type, struct FT
 static void wipe_cache(const char *home)
 {
     char path[512];
-    snprintf(path, sizeof(path), "%s/.hull/cache/lua-bytecode", home);
+    snprintf(path, sizeof(path),
+             "%s/.hull/blobs/runtime/lua-bytecode", home);
     nftw(path, rm_entry, 16, FTW_DEPTH | FTW_PHYS);
 }
 
@@ -128,7 +129,7 @@ int main(void)
     printf("  Chunks:        %d\n", N_CHUNKS);
     printf("  Avg src size:  %zu bytes\n", total / N_CHUNKS);
     printf("  Total src:     %zu KB\n", total / 1024);
-    printf("  Cache root:    %s/.hull/cache/lua-bytecode/\n", tmp);
+    printf("  Cache root:    %s/.hull/blobs/runtime/lua-bytecode/\n", tmp);
     printf("─────────────────────────────────────────────────────\n\n");
 
     /* Cold pass: empty cache. Every load = parse + dump + rename. */

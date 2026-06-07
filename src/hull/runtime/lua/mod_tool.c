@@ -21,6 +21,8 @@
  */
 
 #include "hull/cap/tool.h"
+#include "hull/cache_dir.h"
+#include "hull/blob_store.h"
 #include "hull/runtime/tool.h"
 #include "hull/build_assets.h"
 #include "hull/compiler.h"
@@ -187,6 +189,54 @@ static int l_tool_copy(lua_State *L)
 
     int rc = hl_tool_copy(src, dst, ctx);
     lua_pushboolean(L, rc == 0);
+    return 1;
+}
+
+/* ── tool.rename(src, dst) → bool ──────────────────────────────────
+ *
+ * POSIX-atomic rename. Used by the AOT cache (and any other
+ * content-addressed writer) to publish a tmp file under the final
+ * cache name without observers ever seeing a partially-written
+ * artifact. Both paths get unveil-checked: 'r' on the source, 'w'
+ * on the destination, so the call respects the tool-mode sandbox.
+ */
+static int l_tool_rename(lua_State *L)
+{
+    const char *src = luaL_checkstring(L, 1);
+    const char *dst = luaL_checkstring(L, 2);
+    HlToolUnveilCtx *ctx = get_unveil_ctx(L);
+    if (ctx) {
+        if (hl_tool_unveil_check(ctx, src, 'r') != 0 ||
+            hl_tool_unveil_check(ctx, dst, 'w') != 0) {
+            lua_pushboolean(L, 0);
+            return 1;
+        }
+    }
+    lua_pushboolean(L, rename(src, dst) == 0);
+    return 1;
+}
+
+/* ── tool.remove_file(path) → bool ─────────────────────────────────
+ *
+ * Best-effort unlink, gated by tool-mode unveil ('w'). Returns true
+ * if the file is gone after the call (either we unlinked it or it
+ * was already absent), false otherwise. Used to clean up tmp files
+ * left over from cache writes.
+ */
+static int l_tool_remove_file(lua_State *L)
+{
+    const char *path = luaL_checkstring(L, 1);
+    HlToolUnveilCtx *ctx = get_unveil_ctx(L);
+    if (ctx && hl_tool_unveil_check(ctx, path, 'w') != 0) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    int rc = unlink(path);
+    if (rc == 0 || errno == ENOENT) {
+        lua_pushboolean(L, 1);
+    } else {
+        lua_pushboolean(L, 0);
+    }
     return 1;
 }
 
@@ -619,6 +669,195 @@ static int l_tool_find_tool(lua_State *L)
     return 1;
 }
 
+/* ── tool.hull_cache_dir([kind]) → "<path>/" | nil, err ──
+ *
+ * Resolve `$HOME/.hull/cache/[<kind>/]`, creating the directories on
+ * demand. With no argument returns the cache root; with a name like
+ * "compute-aot" returns the subdir for that cache kind. Returns the
+ * path WITH a trailing slash, ready for concatenation.
+ *
+ * Used by the AOT cache (build.lua → aot_cache.lua), the bytecode
+ * cache (C-side), and future cache consumers. Honors the same
+ * HULL_NO_CACHE / HULL_NO_<KIND>_CACHE env vars as
+ * `hl_hull_cache_disabled` — but the disable check is the caller's
+ * responsibility (we just resolve the path).
+ *
+ * Returns nil + error string on failure (no $HOME / mkdir failed /
+ * invalid kind).
+ */
+static int l_tool_hull_cache_dir(lua_State *L)
+{
+    const char *kind = luaL_optstring(L, 1, NULL);
+    char out[PATH_MAX];
+    int rc = kind
+        ? hl_hull_cache_subdir(kind, out, sizeof(out))
+        : hl_hull_cache_dir(out, sizeof(out));
+    if (rc != 0) {
+        lua_pushnil(L);
+        lua_pushstring(L,
+            "cache dir unavailable (HOME unset or mkdir failed)");
+        return 2;
+    }
+    lua_pushstring(L, out);
+    return 1;
+}
+
+/* ── tool.hull_cache_disabled([kind]) → boolean ──
+ *
+ * Mirrors the C-side `hl_hull_cache_disabled` so Lua callers don't
+ * have to re-implement env-name composition. Pass nil for `kind` to
+ * check only the global HULL_NO_CACHE switch.
+ */
+static int l_tool_hull_cache_disabled(lua_State *L)
+{
+    const char *kind = luaL_optstring(L, 1, NULL);
+    lua_pushboolean(L, hl_hull_cache_disabled(kind) != 0);
+    return 1;
+}
+
+/* ── tool.blob_store_* — keyed CAS-style cache for tool-mode ──────
+ *
+ * Backed by hull/blob_store in keyed mode (see
+ * hl_blob_store_put_keyed). The compute AOT cache uses this from
+ * stdlib/cli/lua/hull/aot_cache.lua; future template-AST cache and
+ * any other tool-side cache should reuse it.
+ *
+ * Stores are memoized per-process by kind so repeat lookups don't
+ * re-resolve $HOME/.hull/blobs/runtime/<kind>/ on every call. */
+
+#define HL_TOOL_MAX_STORES 8
+
+typedef struct {
+    char         kind[32];
+    HlBlobStore *store;
+} ToolStoreEntry;
+
+static ToolStoreEntry g_tool_stores[HL_TOOL_MAX_STORES];
+static int            g_tool_store_count = 0;
+
+/* Resolve (and memoize) the blob store for `kind`. Returns NULL on
+ * error (HOME unset, mkdir failed, invalid kind). */
+static HlBlobStore *tool_store_for(const char *kind)
+{
+    if (!kind) return NULL;
+    for (int i = 0; i < g_tool_store_count; i++) {
+        if (strcmp(g_tool_stores[i].kind, kind) == 0)
+            return g_tool_stores[i].store;
+    }
+    if (g_tool_store_count >= HL_TOOL_MAX_STORES) return NULL;
+
+    char root[PATH_MAX];
+    if (hl_hull_cache_subdir(kind, root, sizeof(root)) != 0) return NULL;
+    size_t rl = strlen(root);
+    if (rl > 1 && root[rl - 1] == '/') root[rl - 1] = '\0';
+
+    HlBlobStore *s = NULL;
+    if (hl_blob_store_open(&s, NULL, root, /*shard_depth=*/1, 0) != 0)
+        return NULL;
+
+    int slot = g_tool_store_count++;
+    snprintf(g_tool_stores[slot].kind, sizeof(g_tool_stores[slot].kind),
+             "%s", kind);
+    g_tool_stores[slot].store = s;
+    return s;
+}
+
+/* tool.blob_store_exists(kind, key) → boolean */
+static int l_tool_blob_store_exists(lua_State *L)
+{
+    const char *kind = luaL_checkstring(L, 1);
+    const char *key  = luaL_checkstring(L, 2);
+    HlBlobStore *s = tool_store_for(kind);
+    if (!s) { lua_pushboolean(L, 0); return 1; }
+    lua_pushboolean(L, hl_blob_store_exists(s, key) == 1);
+    return 1;
+}
+
+/* tool.blob_store_get_to(kind, key, dest_path) → bool
+ *
+ * If a cache entry exists for `key`, copy its bytes to `dest_path`
+ * (creating it). Returns true on success, false on miss or copy
+ * failure. The destination is unveil-checked via the tool sandbox
+ * ('w'); source path is internal so the check is skipped. */
+static int l_tool_blob_store_get_to(lua_State *L)
+{
+    const char *kind     = luaL_checkstring(L, 1);
+    const char *key      = luaL_checkstring(L, 2);
+    const char *dest     = luaL_checkstring(L, 3);
+    HlBlobStore *s = tool_store_for(kind);
+    if (!s) { lua_pushboolean(L, 0); return 1; }
+
+    uint8_t *bytes = NULL;
+    size_t   len   = 0;
+    if (hl_blob_store_get(s, key, /*track_access=*/1, &bytes, &len) != 0) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    HlToolUnveilCtx *ctx = get_unveil_ctx(L);
+    if (ctx && hl_tool_unveil_check(ctx, dest, 'w') != 0) {
+        free(bytes);
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    FILE *out = fopen(dest, "wb");
+    if (!out) {
+        free(bytes);
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    size_t wrote = (len > 0) ? fwrite(bytes, 1, len, out) : 0;
+    int ok = (fclose(out) == 0) && (wrote == len);
+    free(bytes);
+    if (!ok) unlink(dest);
+    lua_pushboolean(L, ok);
+    return 1;
+}
+
+/* tool.blob_store_put_from(kind, key, src_path) → bool
+ *
+ * Read `src_path` and store its bytes under `key`. Source path is
+ * unveil-checked ('r'). Returns true on success. */
+static int l_tool_blob_store_put_from(lua_State *L)
+{
+    const char *kind = luaL_checkstring(L, 1);
+    const char *key  = luaL_checkstring(L, 2);
+    const char *src  = luaL_checkstring(L, 3);
+    HlBlobStore *s = tool_store_for(kind);
+    if (!s) { lua_pushboolean(L, 0); return 1; }
+
+    HlToolUnveilCtx *ctx = get_unveil_ctx(L);
+    if (ctx && hl_tool_unveil_check(ctx, src, 'r') != 0) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    FILE *in = fopen(src, "rb");
+    if (!in) { lua_pushboolean(L, 0); return 1; }
+    if (fseek(in, 0, SEEK_END) != 0) {
+        fclose(in); lua_pushboolean(L, 0); return 1;
+    }
+    long sz = ftell(in);
+    if (sz < 0 || sz > 256 * 1024 * 1024) {  /* 256 MB sanity cap */
+        fclose(in); lua_pushboolean(L, 0); return 1;
+    }
+    rewind(in);
+
+    uint8_t *bytes = (uint8_t *)malloc((size_t)sz > 0 ? (size_t)sz : 1);
+    if (!bytes) { fclose(in); lua_pushboolean(L, 0); return 1; }
+    size_t got = (sz > 0) ? fread(bytes, 1, (size_t)sz, in) : 0;
+    fclose(in);
+    if (got != (size_t)sz) {
+        free(bytes); lua_pushboolean(L, 0); return 1;
+    }
+
+    int rc = hl_blob_store_put_keyed(s, key, bytes, (size_t)sz);
+    free(bytes);
+    lua_pushboolean(L, rc == 0);
+    return 1;
+}
+
 /* ── tool.platform_name() → "darwin-arm64" | "linux-x86_64" | ... ──
  *
  * Returns the running hull's platform identifier, matching the
@@ -733,11 +972,18 @@ static const luaL_Reg tool_funcs[] = {
     { "spawn_read",                  l_tool_spawn_read },
     { "find_files",                  l_tool_find_files },
     { "find_tool",                   l_tool_find_tool },
+    { "hull_cache_dir",              l_tool_hull_cache_dir },
+    { "hull_cache_disabled",         l_tool_hull_cache_disabled },
+    { "blob_store_exists",           l_tool_blob_store_exists },
+    { "blob_store_get_to",           l_tool_blob_store_get_to },
+    { "blob_store_put_from",         l_tool_blob_store_put_from },
     { "platform_name",               l_tool_platform_name },
     { "platform_sig_get",            l_tool_platform_sig_get },
     { "platform_sig_arch_hash",      l_tool_platform_sig_arch_hash },
     { "platform_pubkey",             l_tool_platform_pubkey },
     { "copy",                   l_tool_copy },
+    { "rename",                 l_tool_rename },
+    { "remove_file",            l_tool_remove_file },
     { "mkdir",                  l_tool_mkdir },
     { "rmdir",                  l_tool_rmdir },
     { "tmpdir",                 l_tool_tmpdir },

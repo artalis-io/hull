@@ -50,4 +50,13 @@ int hl_lua_load_cached(struct lua_State *L,
                        const char *src, size_t src_len,
                        const char *chunkname);
 
+/**
+ * @brief Tear down the process-wide bytecode store handle.
+ *
+ * Tests that redirect `$HOME` need to drop the cached store so the
+ * next call resolves the new path. Not for production use — the
+ * store is meant to live for the lifetime of the process.
+ */
+void hl_lua_bytecode_cache_reset(void);
+
 #endif /* HL_LUA_BYTECODE_CACHE_H */

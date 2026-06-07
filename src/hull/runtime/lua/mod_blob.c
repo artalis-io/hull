@@ -57,7 +57,7 @@
  * when the runtime tears down. */
 typedef struct {
     HlBlob *b;
-} HlBlobStore;
+} LuaBlobUd;
 
 /* Fetch the singleton; raise if blob.init() hasn't been called. */
 static HlBlob *get_store(lua_State *L)
@@ -68,7 +68,7 @@ static HlBlob *get_store(lua_State *L)
         luaL_error(L, "blob: call blob.init({dir=...}) first");
         return NULL;  /* unreachable */
     }
-    HlBlobStore *s = (HlBlobStore *)luaL_checkudata(L, -1, HL_BLOB_MT);
+    LuaBlobUd *s = (LuaBlobUd *)luaL_checkudata(L, -1, HL_BLOB_MT);
     HlBlob *b = s ? s->b : NULL;
     lua_pop(L, 1);
     if (!b) {
@@ -80,7 +80,7 @@ static HlBlob *get_store(lua_State *L)
 
 static int lua_blob_store_gc(lua_State *L)
 {
-    HlBlobStore *s = (HlBlobStore *)luaL_checkudata(L, 1, HL_BLOB_MT);
+    LuaBlobUd *s = (LuaBlobUd *)luaL_checkudata(L, 1, HL_BLOB_MT);
     if (s && s->b) {
         hl_cap_blob_free(s->b);
         s->b = NULL;
@@ -116,7 +116,7 @@ static int lua_blob_init(lua_State *L)
 
     /* Drop any previous singleton (re-init is allowed). The old
      * userdata's __gc will fire on GC, freeing the old HlBlob. */
-    HlBlobStore *s = (HlBlobStore *)lua_newuserdatauv(L, sizeof(*s), 0);
+    LuaBlobUd *s = (LuaBlobUd *)lua_newuserdatauv(L, sizeof(*s), 0);
     s->b = b;
     luaL_setmetatable(L, HL_BLOB_MT);
     lua_pushvalue(L, -1);

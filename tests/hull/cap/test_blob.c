@@ -8,6 +8,7 @@
 #include "hull/cap/blob.h"
 #include "hull/cap/fs.h"
 #include "hull/cap/crypto.h"
+#include "hull/blob_store.h"
 #include "hull/alloc.h"
 #include <dirent.h>
 #include <errno.h>
@@ -735,6 +736,145 @@ UTEST(hl_cap_blob, cleanup_age_only)
 
     hl_cap_blob_free(b);
     env_free(&e);
+}
+
+/* ── hl_blob_store_put_keyed (low-level keyed mode) ────────────────
+ *
+ * Used by the bytecode cache and AOT cache where the cache key is
+ * not the content hash. The cap layer never touches put_keyed —
+ * these tests exercise the low-level store directly. */
+
+/* Open a store rooted at a tmpdir, bypassing the cap layer. */
+static HlBlobStore *open_keyed_store(char tmpdir[256])
+{
+    snprintf(tmpdir, 256, "/tmp/hull-blob-keyed-XXXXXX");
+    if (!mkdtemp(tmpdir)) return NULL;
+    HlBlobStore *s = NULL;
+    if (hl_blob_store_open(&s, NULL, tmpdir, /*shard_depth=*/1, 0) != 0)
+        return NULL;
+    return s;
+}
+
+UTEST(hl_blob_store_keyed, put_get_roundtrip)
+{
+    char tmp[256];
+    HlBlobStore *s = open_keyed_store(tmp);
+    ASSERT_NE(s, NULL);
+
+    /* Use any 64-char lowercase hex — caller-keyed mode does NOT
+     * verify the content hashes to it. */
+    const char *key =
+        "0000000000000000000000000000000000000000000000000000000000000001";
+    const char *bytes = "anything at all — content is unrelated to key";
+    size_t len = strlen(bytes);
+
+    ASSERT_EQ(hl_blob_store_put_keyed(s, key, (const uint8_t *)bytes, len), 0);
+    ASSERT_EQ(hl_blob_store_exists(s, key), 1);
+
+    uint8_t *out = NULL;
+    size_t   olen = 0;
+    ASSERT_EQ(hl_blob_store_get(s, key, /*track=*/1, &out, &olen), 0);
+    ASSERT_EQ(olen, len);
+    ASSERT_EQ(memcmp(out, bytes, len), 0);
+    free(out);
+
+    hl_blob_store_close(s);
+    rm_rf(tmp);
+}
+
+UTEST(hl_blob_store_keyed, put_is_idempotent_for_same_key)
+{
+    char tmp[256];
+    HlBlobStore *s = open_keyed_store(tmp);
+    ASSERT_NE(s, NULL);
+
+    const char *key =
+        "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+    const char *bytes = "payload 1";
+
+    ASSERT_EQ(hl_blob_store_put_keyed(s, key, (const uint8_t *)bytes,
+                                       strlen(bytes)), 0);
+    /* Second put with the same key + same bytes is a no-op fast-path
+     * (exists check up front). Same key + different bytes also
+     * returns 0 — the existing file wins. The cache's design contract
+     * says same key implies same bytes, so the latter is moot in
+     * practice. */
+    ASSERT_EQ(hl_blob_store_put_keyed(s, key, (const uint8_t *)bytes,
+                                       strlen(bytes)), 0);
+    ASSERT_EQ(hl_blob_store_count(s), (uint64_t)1);
+
+    hl_blob_store_close(s);
+    rm_rf(tmp);
+}
+
+UTEST(hl_blob_store_keyed, rejects_non_hex_key)
+{
+    char tmp[256];
+    HlBlobStore *s = open_keyed_store(tmp);
+    ASSERT_NE(s, NULL);
+
+    /* Wrong length. */
+    ASSERT_EQ(hl_blob_store_put_keyed(s, "abc",
+                                       (const uint8_t *)"x", 1), -1);
+    /* Non-hex char. */
+    ASSERT_EQ(hl_blob_store_put_keyed(s,
+        "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+        (const uint8_t *)"x", 1), -1);
+    /* Uppercase rejected — store keeps filenames canonical lowercase. */
+    ASSERT_EQ(hl_blob_store_put_keyed(s,
+        "ABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCD",
+        (const uint8_t *)"x", 1), -1);
+
+    hl_blob_store_close(s);
+    rm_rf(tmp);
+}
+
+UTEST(hl_blob_store_keyed, empty_payload_is_valid)
+{
+    char tmp[256];
+    HlBlobStore *s = open_keyed_store(tmp);
+    ASSERT_NE(s, NULL);
+
+    const char *key =
+        "1111111111111111111111111111111111111111111111111111111111111111";
+    /* len=0 with buf=NULL is allowed. */
+    ASSERT_EQ(hl_blob_store_put_keyed(s, key, NULL, 0), 0);
+    ASSERT_EQ(hl_blob_store_exists(s, key), 1);
+
+    uint8_t *out = (uint8_t *)0xdead;  /* poison */
+    size_t   olen = 999;
+    ASSERT_EQ(hl_blob_store_get(s, key, 0, &out, &olen), 0);
+    ASSERT_EQ(out, NULL);              /* empty-blob contract */
+    ASSERT_EQ(olen, (size_t)0);
+
+    hl_blob_store_close(s);
+    rm_rf(tmp);
+}
+
+UTEST(hl_blob_store_keyed, sharded_layout_matches_cas_layout)
+{
+    /* Caller-keyed puts go through the same shard-builder as CAS
+     * puts. A key starting with "ab..." lands at blobs/ab/<full>,
+     * which is exactly what the disclosure walker (future
+     * `hull cache list`) will find. */
+    char tmp[256];
+    HlBlobStore *s = open_keyed_store(tmp);
+    ASSERT_NE(s, NULL);
+
+    const char *key =
+        "ab00000000000000000000000000000000000000000000000000000000000000";
+    ASSERT_EQ(hl_blob_store_put_keyed(s, key,
+                                       (const uint8_t *)"x", 1), 0);
+
+    char expected[512];
+    snprintf(expected, sizeof(expected),
+             "%s/blobs/ab/%s", tmp, key);
+    struct stat st;
+    ASSERT_EQ(stat(expected, &st), 0);
+    ASSERT_TRUE(S_ISREG(st.st_mode));
+
+    hl_blob_store_close(s);
+    rm_rf(tmp);
 }
 
 UTEST_MAIN()

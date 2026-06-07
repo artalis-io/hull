@@ -22,10 +22,14 @@
 #include <stddef.h>
 
 /**
- * @brief Resolve `$HOME/.hull/cache/`, creating it (and `$HOME/.hull`)
- *        if missing.
+ * @brief Resolve `$HOME/.hull/blobs/runtime/`, creating all layers.
  *
  * Returns a path WITH trailing slash for easy concatenation.
+ *
+ * The name retains "cache" terminology because that's the
+ * user-facing intent — the directories under this root are caches
+ * even though the disk layout is now the blob shape (shared with
+ * hull/blob@1 via hl_blob_store_*).
  *
  * @param out      Caller-supplied buffer (≥ PATH_MAX bytes recommended).
  * @param out_sz   Buffer size.
@@ -34,10 +38,12 @@
 int hl_hull_cache_dir(char *out, size_t out_sz);
 
 /**
- * @brief Resolve `$HOME/.hull/cache/<name>/`, creating all layers.
+ * @brief Resolve `$HOME/.hull/blobs/runtime/<name>/`, creating all
+ *        layers.
  *
- * @param name     Cache subdir name (e.g. "lua-bytecode", "compute").
- *                 Validated: must match `[A-Za-z0-9_-]+`.
+ * @param name     Cache subdir name (e.g. "lua-bytecode",
+ *                 "compute-aot"). Validated: must match
+ *                 `[A-Za-z0-9_-]+`.
  * @param out      Caller-supplied buffer.
  * @param out_sz   Buffer size.
  * @return 0 on success; -1 on invalid name, $HOME unset, or mkdir

@@ -22,6 +22,10 @@ local function parse_args()
         output = nil,
         app_dir = ".",
         aot = true,       -- AOT compile WASM modules (--no-aot to disable)
+        cache = true,     -- Use the AOT artifact cache at
+                          -- $HOME/.hull/cache/compute-aot/. --no-cache
+                          -- forces a fresh wamrc invocation (still
+                          -- writes results back to the cache).
         target = nil,     -- cross-compilation target arch (e.g. "x86_64", "aarch64")
         build_compute = true, -- Auto-rebuild compute/<name>/<name>.c → .wasm
                               -- (--no-build-compute to disable)
@@ -56,6 +60,8 @@ local function parse_args()
             opts.output = arg[i]
         elseif a == "--no-aot" then
             opts.aot = false
+        elseif a == "--no-cache" then
+            opts.cache = false
         elseif a == "--no-build-compute" then
             opts.build_compute = false
         elseif a == "--target" then
@@ -692,6 +698,12 @@ typedef struct {
             end
 
             if #targets > 0 then
+                local aot_cache = require("hull.aot_cache")
+                local wamrc_id = aot_cache.wamrc_version(wamrc)
+                local cache_enabled = opts.cache and aot_cache.is_enabled()
+                local cache_hits = 0
+                local cache_writes = 0
+
                 for _, wasm_path in ipairs(wasm_only) do
                     local rel = wasm_path:sub(#opts.app_dir + 2) -- e.g. "compute/score.wasm"
                     for _, arch in ipairs(targets) do
@@ -700,13 +712,43 @@ typedef struct {
                         tool.mkdir(tmpdir .. "/compute")
 
                         local mem64 = is_memory64_wasm(wasm_path)
-                        local wamrc_args = {wamrc, "--target=" .. arch, "-o", aot_path, wasm_path}
-                        if mem64 then
-                            table.insert(wamrc_args, 3, "--enable-memory64")
+
+                        -- Cache lookup. Key folds in wasm content,
+                        -- arch, memory64 flag, and wamrc identity —
+                        -- anything that can change the AOT bytes.
+                        local key, hit
+                        if cache_enabled then
+                            key = aot_cache.key(wasm_path, arch, mem64, wamrc_id)
+                            if key then
+                                hit = aot_cache.lookup(key, aot_path)
+                            end
                         end
-                        print("hull build: AOT " .. rel .. " -> " .. arch ..
-                              (mem64 and " (memory64)" or ""))
-                        local ok = tool.spawn(wamrc_args)
+
+                        local ok
+                        if hit then
+                            cache_hits = cache_hits + 1
+                            print("hull build: AOT " .. rel ..
+                                  " -> " .. arch ..
+                                  (mem64 and " (memory64)" or "") ..
+                                  " [cache hit]")
+                            ok = true
+                        else
+                            local wamrc_args = {wamrc, "--target=" .. arch,
+                                                "-o", aot_path, wasm_path}
+                            if mem64 then
+                                table.insert(wamrc_args, 3, "--enable-memory64")
+                            end
+                            print("hull build: AOT " .. rel ..
+                                  " -> " .. arch ..
+                                  (mem64 and " (memory64)" or ""))
+                            ok = tool.spawn(wamrc_args)
+                            if ok and cache_enabled and key then
+                                if aot_cache.store(key, aot_path) then
+                                    cache_writes = cache_writes + 1
+                                end
+                            end
+                        end
+
                         if ok then
                             compute_aot[#compute_aot + 1] = {
                                 path = aot_path,
@@ -719,7 +761,14 @@ typedef struct {
                     end
                 end
                 if #compute_aot > 0 then
-                    print("hull build: " .. #compute_aot .. " AOT module(s) compiled")
+                    print("hull build: " .. #compute_aot ..
+                          " AOT module(s) compiled" ..
+                          (cache_hits > 0
+                              and (" (" .. cache_hits .. " from cache)")
+                              or "") ..
+                          (cache_writes > 0
+                              and (", " .. cache_writes .. " written to cache")
+                              or ""))
                 end
             else
                 print("hull build: warning: cannot detect target arch, skipping AOT")
