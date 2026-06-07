@@ -9,6 +9,7 @@
 
 #include "utest.h"
 #include "hull/runtime/lua.h"
+#include "hull/runtime/lua_bytecode_cache.h"
 #include "hull/reqctx.h"
 #include "hull/vfs.h"
 #include "hull/cap/db.h"
@@ -2846,6 +2847,200 @@ UTEST(lua_stdlib, rbac_middleware_deny)
     ASSERT_EQ(ok, 1);
 
     cleanup_lua_caps();
+}
+
+/* ── Bytecode cache ─────────────────────────────────────────────────
+ *
+ * The cache lives at $HOME/.hull/cache/lua-bytecode/. Tests redirect
+ * $HOME into a tmpdir so they can stat the produced .luac files
+ * without polluting the developer's real cache. */
+
+#include <dirent.h>
+#include <ftw.h>
+
+static int bc_rm_entry(const char *path, const struct stat *st,
+                       int type, struct FTW *ftw)
+{
+    (void)st; (void)type; (void)ftw;
+    return remove(path);
+}
+
+static void bc_with_tmp_home(char tmpdir[256])
+{
+    snprintf(tmpdir, 256, "/tmp/hull_bc_cache_XXXXXX");
+    mkdtemp(tmpdir);
+    setenv("HOME", tmpdir, 1);
+    /* Make sure no stale opt-out from a previous test leaks in. */
+    unsetenv("HULL_NO_CACHE");
+    unsetenv("HULL_NO_BYTECODE_CACHE");
+}
+
+static void bc_cleanup_tmp_home(const char *tmpdir)
+{
+    nftw(tmpdir, bc_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+}
+
+/* Source has to clear the 256-byte minimum cache threshold. */
+static const char *BC_PROBE_SRC =
+    "-- pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+    "-- pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+    "-- pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+    "local function probe(n) return n * 2 + 3 end\n"
+    "return probe(7)\n";
+
+static int bc_count_luac(const char *dir)
+{
+    /* "lua-bytecode/" subdir under $HOME/.hull/cache/ */
+    char path[512];
+    snprintf(path, sizeof(path), "%s/.hull/cache/lua-bytecode", dir);
+    DIR *d = opendir(path);
+    if (!d) return 0;
+    int n = 0;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        size_t l = strlen(e->d_name);
+        if (l > 5 && strcmp(e->d_name + l - 5, ".luac") == 0) n++;
+    }
+    closedir(d);
+    return n;
+}
+
+UTEST(lua_bytecode_cache, miss_then_hit_populates_disk)
+{
+    char tmp[256];
+    bc_with_tmp_home(tmp);
+
+    lua_State *L = luaL_newstate();
+    ASSERT_NE_MSG(L, NULL, "newstate");
+
+    /* First call: cache miss, should compile + persist. */
+    ASSERT_EQ(0, bc_count_luac(tmp));
+    int rc = hl_lua_load_cached(L, BC_PROBE_SRC, strlen(BC_PROBE_SRC), "=probe");
+    ASSERT_EQ_MSG(rc, LUA_OK, "first load");
+    ASSERT_EQ(1, bc_count_luac(tmp));
+
+    /* Run it to make sure the loaded chunk is functional. */
+    ASSERT_EQ(LUA_OK, lua_pcall(L, 0, 1, 0));
+    ASSERT_EQ(17, (int)lua_tointeger(L, -1));
+    lua_pop(L, 1);
+
+    /* Second call: cache hit — function loads, no extra file. */
+    rc = hl_lua_load_cached(L, BC_PROBE_SRC, strlen(BC_PROBE_SRC), "=probe");
+    ASSERT_EQ(LUA_OK, rc);
+    ASSERT_EQ(1, bc_count_luac(tmp));
+    ASSERT_EQ(LUA_OK, lua_pcall(L, 0, 1, 0));
+    ASSERT_EQ(17, (int)lua_tointeger(L, -1));
+    lua_pop(L, 1);
+
+    lua_close(L);
+    bc_cleanup_tmp_home(tmp);
+}
+
+UTEST(lua_bytecode_cache, opt_out_via_env_skips_disk)
+{
+    char tmp[256];
+    bc_with_tmp_home(tmp);
+    setenv("HULL_NO_BYTECODE_CACHE", "1", 1);
+
+    lua_State *L = luaL_newstate();
+    int rc = hl_lua_load_cached(L, BC_PROBE_SRC, strlen(BC_PROBE_SRC), "=probe");
+    ASSERT_EQ(LUA_OK, rc);
+    ASSERT_EQ_MSG(0, bc_count_luac(tmp), "no luac written when opted out");
+    ASSERT_EQ(LUA_OK, lua_pcall(L, 0, 1, 0));
+    ASSERT_EQ(17, (int)lua_tointeger(L, -1));
+    lua_pop(L, 1);
+    lua_close(L);
+
+    unsetenv("HULL_NO_BYTECODE_CACHE");
+    bc_cleanup_tmp_home(tmp);
+}
+
+UTEST(lua_bytecode_cache, tiny_source_skips_cache)
+{
+    /* Under 256 bytes — cache shouldn't bother to memoize. */
+    char tmp[256];
+    bc_with_tmp_home(tmp);
+
+    const char *src = "return 1 + 2\n";
+    lua_State *L = luaL_newstate();
+    int rc = hl_lua_load_cached(L, src, strlen(src), "=tiny");
+    ASSERT_EQ(LUA_OK, rc);
+    ASSERT_EQ_MSG(0, bc_count_luac(tmp), "tiny chunks bypass cache");
+    ASSERT_EQ(LUA_OK, lua_pcall(L, 0, 1, 0));
+    ASSERT_EQ(3, (int)lua_tointeger(L, -1));
+    lua_pop(L, 1);
+    lua_close(L);
+
+    bc_cleanup_tmp_home(tmp);
+}
+
+UTEST(lua_bytecode_cache, parse_error_returns_no_cache_write)
+{
+    char tmp[256];
+    bc_with_tmp_home(tmp);
+
+    /* Padded but syntactically invalid. */
+    const char *bad =
+        "-- pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+        "-- pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+        "-- pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+        "this is = not = valid Lua )(\n";
+
+    lua_State *L = luaL_newstate();
+    int rc = hl_lua_load_cached(L, bad, strlen(bad), "=bad");
+    ASSERT_NE_MSG(rc, LUA_OK, "parse error reported");
+    /* Error string on the stack — matches luaL_loadbuffer contract. */
+    ASSERT_TRUE(lua_isstring(L, -1));
+    ASSERT_EQ(0, bc_count_luac(tmp));
+    lua_pop(L, 1);
+    lua_close(L);
+
+    bc_cleanup_tmp_home(tmp);
+}
+
+UTEST(lua_bytecode_cache, corrupt_cache_falls_back_to_source)
+{
+    char tmp[256];
+    bc_with_tmp_home(tmp);
+
+    /* Prime the cache. */
+    lua_State *L = luaL_newstate();
+    ASSERT_EQ(LUA_OK,
+        hl_lua_load_cached(L, BC_PROBE_SRC, strlen(BC_PROBE_SRC), "=probe"));
+    ASSERT_EQ(LUA_OK, lua_pcall(L, 0, 1, 0));
+    lua_pop(L, 1);
+    ASSERT_EQ(1, bc_count_luac(tmp));
+
+    /* Corrupt every .luac file. */
+    char dirpath[512];
+    snprintf(dirpath, sizeof(dirpath),
+             "%s/.hull/cache/lua-bytecode", tmp);
+    DIR *d = opendir(dirpath);
+    ASSERT_NE(d, NULL);
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        size_t l = strlen(e->d_name);
+        if (l <= 5 || strcmp(e->d_name + l - 5, ".luac") != 0) continue;
+        char full[1024];
+        snprintf(full, sizeof(full), "%s/%s", dirpath, e->d_name);
+        FILE *f = fopen(full, "wb");
+        ASSERT_NE(f, NULL);
+        fwrite("\x00\x00\x00\x00garbage", 1, 11, f);
+        fclose(f);
+    }
+    closedir(d);
+
+    /* Reload — must recover, re-compile from source, repopulate cache. */
+    int rc = hl_lua_load_cached(L, BC_PROBE_SRC, strlen(BC_PROBE_SRC), "=probe");
+    ASSERT_EQ(LUA_OK, rc);
+    ASSERT_EQ(LUA_OK, lua_pcall(L, 0, 1, 0));
+    ASSERT_EQ(17, (int)lua_tointeger(L, -1));
+    lua_pop(L, 1);
+    /* Still one file — corrupt one evicted, fresh one persisted. */
+    ASSERT_EQ(1, bc_count_luac(tmp));
+
+    lua_close(L);
+    bc_cleanup_tmp_home(tmp);
 }
 
 UTEST_MAIN();

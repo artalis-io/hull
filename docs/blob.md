@@ -513,6 +513,57 @@ hardware acceleration, `put_verified` short-circuit, durable opt-in,
   `blob.cleanup` with refcounted consumers on the same root.
   Use separate blob roots if you need both policies.
 
+## Runtime-infrastructure caches and the manifest line
+
+Several v0.1.10 migration consumers (Lua bytecode cache, compute AOT
+cache, template AST cache, `hull tools install`) use blob as their
+backing store but DO NOT appear in user apps' `app.manifest.fs.write`.
+The reasoning:
+
+| Path | Goes in manifest? | Why |
+|---|---|---|
+| `data/uploads/` (app's storage for user files) | **Yes** | App-chosen, app-visible, app-managed |
+| `data/blobs/` (app-managed blob root for `hull/web/attachment@1`) | **Yes** | Same — app declares the dir |
+| `~/.hull/cache/lua-bytecode/` | **No** | Runtime infrastructure; app didn't ask for the cache |
+| `~/.hull/cache/compute/` | **No** | Build-tool artifact cache; runs from `hull build`, not at app runtime |
+| `~/.hull/cache/templates/` | **No** | Runtime infrastructure |
+| `~/.hull/tools/` | **No** | `hull tools install` runs from the shell, not from inside an app |
+
+The line is **what the app deliberately produces or consumes vs. what
+the runtime decides to cache to make the app faster**. The latter is
+infrastructure, like a JIT cache in a language runtime or a system
+shader cache in a graphics driver — not part of the app's capability
+surface.
+
+Precedent: Hull's sandbox already auto-allows infrastructure paths
+the app never declared (embedded CA bundle when found, SQLite WAL/SHM
+siblings, `~/.hull/tools/` resolution path). Runtime caches join that
+list — see `src/hull/sandbox.c::wire_caps`.
+
+Worst-case attack surface: a compromised app filling
+`~/.hull/cache/` with junk → cache miss + re-derive on next use →
+self-healing. The filename IS the SHA, so stale or wrong entries can't
+be served (any read would fail validation OR the caller would
+re-compute and overwrite). Bytecode/AOT/template caches are
+deterministic content-addressed storage; a corrupted entry can't
+trick the runtime into executing unintended code.
+
+### What disclosure DOES exist
+
+To preserve Hull's "code's visible permissions" property even when
+runtime caches live outside the manifest:
+
+- **`hull doctor`** reports cache locations and their sizes (similar
+  to how it reports the CA bundle and tools status today).
+- **`hull inspect`** surfaces "this binary uses caches at:
+  `~/.hull/cache/...`" — informational, not a permission.
+- **Opt-out env vars**: `HULL_NO_CACHE=1` disables all runtime caches;
+  `HULL_NO_BYTECODE_CACHE=1`, `HULL_NO_AOT_CACHE=1`,
+  `HULL_NO_TEMPLATE_CACHE=1` for granular control. Always-honored;
+  disabling forces re-derive on every load.
+- **`hull cache list|prune|clear`** subcommand surfaces what's
+  actually stored, evicts old entries, or wipes everything.
+
 ## Migration map — existing implementations
 
 ### 1. `hull tools install` (`src/hull/tools_install.c`) — **migrate**

@@ -9,6 +9,7 @@
 #include "hull/module_registry.h"
 #include "hull/module_resolver.h"
 #include "hull/path_normalize.h"
+#include "hull/runtime/lua_bytecode_cache.h"
 #include "hull/vfs.h"
 
 #include "log.h"
@@ -572,7 +573,7 @@ int hl_lua_register_stdlib(HlLua *lua)
         for (size_t i = 0; i < lua->base.platform_vfs->count; i++) {
             const HlEntry *e = &lua->base.platform_vfs->entries[i];
             if (strchr(e->name, ':')) continue; /* skip JS modules */
-            if (luaL_loadbuffer(L, (const char *)e->data, e->len, e->name) != LUA_OK) {
+            if (hl_lua_load_cached(L, (const char *)e->data, e->len, e->name) != LUA_OK) {
                 log_error("[hull:c] failed to load stdlib module '%s': %s",
                           e->name, lua_tostring(L, -1));
                 lua_pop(L, 2); /* pop error + modules table */
@@ -596,7 +597,7 @@ int hl_lua_register_stdlib(HlLua *lua)
                 /* JSON data — store as raw string, decoded on first require() */
                 lua_pushlstring(L, (const char *)e->data, e->len);
             } else {
-                if (luaL_loadbuffer(L, (const char *)e->data, e->len, e->name) != LUA_OK) {
+                if (hl_lua_load_cached(L, (const char *)e->data, e->len, e->name) != LUA_OK) {
                     log_error("[hull:c] failed to load app module '%s': %s",
                               e->name, lua_tostring(L, -1));
                     lua_pop(L, 2); /* pop error + modules table */

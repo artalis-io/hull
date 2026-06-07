@@ -912,6 +912,97 @@ and helpers.
       MIME-validation (header + sniff), storage layout, refcount GC,
       `attachment.scrub()` for ops, manifest declaration.
 
+### 1.5.b-X. hull/blob@1 migrations (target v0.1.10)
+
+Six known consumers identified during the §1.5.b-3.5 design. All
+backed by `hull/blob@1`. Four are runtime-infrastructure caches
+that live OUTSIDE `app.manifest.fs` (cache is Hull's decision to
+accelerate the app, not part of the app's I/O surface — see
+[docs/blob.md §Runtime-infrastructure caches](blob.md) for the full
+manifest-line rationale). One is a build-tool migration; one is a
+new external user-facing feature.
+
+**Disclosure that DOES exist** even though these aren't in
+`app.manifest`:
+
+- `hull doctor` reports cache locations and their sizes (similar to
+  how it reports the CA bundle and tools status today).
+- `hull inspect` surfaces "this binary uses caches at:
+  `~/.hull/cache/...`" — informational, not a permission.
+- Opt-out env vars: `HULL_NO_CACHE=1` disables all runtime caches;
+  `HULL_NO_BYTECODE_CACHE=1`, `HULL_NO_AOT_CACHE=1`,
+  `HULL_NO_TEMPLATE_CACHE=1` for granular control. Always-honored;
+  disabling forces re-derive on every load.
+- New `hull cache list|prune|clear` subcommand surfaces what's
+  actually stored, evicts old entries, or wipes everything.
+
+Tasks (target v0.1.10):
+
+- [x] §1.5.b-X-1. Lua bytecode cache (runtime-infrastructure,
+      sidecar-less). **Landed.** Cache key = `sha256(LUA_VERSION ||
+      arch || endian || source)`. `hl_lua_load_cached()` is a
+      drop-in replacement for `luaL_loadbuffer` wired into
+      `mod_fs.c::hl_lua_register_stdlib` for both stdlib and app
+      module loading. Stores raw `lua_dump`'d bytecode (strip=0 to
+      preserve `ar.source` for the `_hull_*` namespace gate). Path:
+      `$HOME/.hull/cache/lua-bytecode/<hex>.luac`. Sandbox
+      auto-allows the cache root on both seatbelt (macOS) and
+      pledge/unveil (Linux/Cosmo). Honors `HULL_NO_CACHE=1` and
+      `HULL_NO_BYTECODE_CACHE=1`. Falls back transparently to
+      `luaL_loadbuffer` on any cache I/O failure (corrupt file →
+      unlink + recompile + persist). 5 unit tests in `test_lua`
+      (`lua_bytecode_cache.*`). Microbench
+      (`make bench-bytecode-cache`): on synthetic 3.7 KB chunks,
+      warm cache delivers 1.3× speedup vs no cache; cold cache is
+      4.6× the no-cache cost (one-time per source).
+      Direct-implementation rather than going through `hull/blob@1`
+      because (a) the cap-layer dep would pull blob into HL_ENABLE_*
+      flags it doesn't belong in, (b) the cache lives outside the
+      app manifest so the blob-cap's manifest gates don't apply.
+      Files: `include/hull/cache_dir.h`, `src/hull/cache_dir.c`,
+      `include/hull/runtime/lua_bytecode_cache.h`,
+      `src/hull/runtime/lua/bytecode_cache.c`,
+      `bench/bytecode_cache/bench_bytecode_cache.c`.
+- [ ] §1.5.b-X-2. Compute AOT cache migration. Replace per-app
+      `compute/<name>.aot.<arch>` with system-wide blob storage at
+      `~/.hull/cache/compute/`. JSON sidecar `index.json` maps
+      `(source_sha, arch_tag) → blob_id`. Build step (in
+      `stdlib/lua/hull/compute_build.lua`) checks blob, skips wamrc
+      on hit. Honors `HULL_NO_AOT_CACHE=1` and `hull build
+      --no-cache`. Win: cross-app AOT dedup, content-based
+      correctness vs current mtime-based.
+- [ ] §1.5.b-X-3. `hull tools install` migration. Store downloaded
+      tool binaries via `blob.put_verified(bytes, signed_sha)` at
+      `~/.hull/blobs/`. JSON sidecar at `~/.hull/tools/index.json`
+      maps `<tool>-<version>-<platform> → blob_id`.
+      `hl_tools_lookup_path()` resolves through the index. One
+      release ships symlinks from old `~/.hull/tools/<name>` paths
+      for backward compat; drop in v0.1.11+. Win: cleaner layout,
+      dedup-ready, `put_verified` short-circuit fast-paths
+      re-install.
+- [ ] §1.5.b-X-4. Template AST cache (runtime-infrastructure,
+      sidecar-less). Persist compiled template source (or
+      `string.dump` bytecode) via blob keyed by template-source
+      SHA. In-process function cache stays in front for warm path;
+      blob is the cold/reload-survival layer. Path:
+      `~/.hull/cache/templates/`. Honors `HULL_NO_TEMPLATE_CACHE=1`.
+      Win: `hull dev` reload survival, cross-process reuse.
+- [ ] §1.5.b-X-5. `hull cache list|prune|clear` subcommand. Surfaces
+      all cache roots Hull manages, lists contents (count + total
+      size per cache), runs `blob.cleanup({max_total_size, max_age,
+      strategy})` to prune, or wipes a cache root entirely. Plays
+      with `--dry-run`.
+- [ ] §1.5.b-X-6. `hull doctor` cache reporting. Add cache locations
+      + sizes to the doctor output (already reports CA bundle and
+      tools status; this is the same pattern).
+- [ ] §1.5.b-X-7. `hull inspect` cache disclosure. New section in
+      the inspect output: "Runtime caches this binary will read/
+      write" — informational, not a permission.
+- [ ] §1.5.b-X-8. LLM artifact cache (latent, v0.1.11+). Deferred
+      until a real LLM consumer in Hull exists. Key shape:
+      `sha256(prompt || context || model_id || temperature)`. LRU
+      via `blob.cleanup`. Honors `HULL_NO_CACHE=1`.
+
 ### 1.5.c HTMX-specific stdlib companions. Tier 1 (target v0.1.10)
 
 **Motivation.** v0.1.8 shipped the HTMX core (helper module, CSP, CSRF,

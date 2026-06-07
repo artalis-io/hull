@@ -16,6 +16,7 @@
  */
 
 #include "hull/sandbox.h"
+#include "hull/cache_dir.h"
 #include "log.h"
 
 #include <limits.h>
@@ -357,6 +358,33 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
     if (tls_key_path) {
         PARAM_ADD("TLS_KEY", tls_key_path);
         SBPL_LIT("(allow file-read* (literal (param \"TLS_KEY\")))\n");
+    }
+
+    /* ── Hull runtime cache root ($HOME/.hull/cache/) ─────────
+     *
+     * Runtime-infrastructure caches (Lua bytecode, compute AOT,
+     * template AST) live in a shared system-wide pool, NOT in the
+     * app's manifest. The sandbox auto-allows them like the CA
+     * bundle — apps can't opt out per-app, but the global
+     * HULL_NO_CACHE=1 env var disables every consumer at runtime.
+     * See docs/blob.md §"Runtime-infrastructure caches".
+     *
+     * hl_hull_cache_dir() creates $HOME/.hull/cache/ as a side
+     * effect so the subpath rule resolves to a real inode under
+     * seatbelt. If $HOME is unset (rare — happens in some CI
+     * sandboxes), the call fails and we skip the allow rule — the
+     * cache consumers then fail-closed on their own. */
+    {
+        static char cache_real[SEATBELT_PATH_SIZE];
+        char cache_raw[SEATBELT_PATH_SIZE];
+        if (hl_hull_cache_dir(cache_raw, sizeof(cache_raw)) == 0) {
+            const char *cp = cache_raw;
+            if (realpath(cache_raw, cache_real)) cp = cache_real;
+            PARAM_ADD("HULL_CACHE", cp);
+            SBPL_LIT("; Hull runtime cache (auto-allowed, not in manifest)\n"
+                     "(allow file-read* file-write*\n"
+                     "    (subpath (param \"HULL_CACHE\")))\n");
+        }
     }
 
     SBPL_LIT("\n");
@@ -762,6 +790,19 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
         if (unveil(ca_bundle_path, "r") != 0)
             log_warn("[sandbox] unveil failed for CA bundle: %s",
                      ca_bundle_path);
+    }
+
+    /* Hull runtime cache root ($HOME/.hull/cache/) — see SBPL
+     * counterpart above. Auto-allowed read/write/create so the
+     * bytecode/AOT/template caches work without polluting the app
+     * manifest. */
+    {
+        char cache_path[PATH_MAX];
+        if (hl_hull_cache_dir(cache_path, sizeof(cache_path)) == 0) {
+            if (unveil(cache_path, "rwc") != 0)
+                log_warn("[sandbox] unveil failed for Hull cache: %s",
+                         cache_path);
+        }
     }
 
     /* DNS resolution: when manifest declares outbound hosts, glibc's
