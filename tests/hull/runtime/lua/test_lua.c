@@ -10,6 +10,7 @@
 #include "utest.h"
 #include "hull/runtime/lua.h"
 #include "hull/runtime/lua_bytecode_cache.h"
+#include "hull/runtime/lua_template_cache.h"
 #include "hull/reqctx.h"
 #include "hull/vfs.h"
 #include "hull/cap/db.h"
@@ -3066,6 +3067,179 @@ UTEST(lua_bytecode_cache, corrupt_cache_falls_back_to_source)
 
     lua_close(L);
     bc_cleanup_tmp_home(tmp);
+}
+
+/* ── Template cache ─────────────────────────────────────────────────
+ *
+ * Mirrors the bytecode-cache test layout but exercises
+ * hl_lua_template_compile_cached. The cache stores the inner
+ * render function (post-pcall), so a hit returns a callable
+ * function directly. */
+
+static void tc_with_tmp_home(char tmpdir[256])
+{
+    snprintf(tmpdir, 256, "/tmp/hull_tc_cache_XXXXXX");
+    mkdtemp(tmpdir);
+    setenv("HOME", tmpdir, 1);
+    unsetenv("HULL_NO_CACHE");
+    unsetenv("HULL_NO_TEMPLATE_CACHE");
+    hl_lua_template_cache_reset();
+}
+
+static int tc_count(const char *dir)
+{
+    char root[512];
+    snprintf(root, sizeof(root),
+             "%s/.hull/blobs/runtime/templates/blobs", dir);
+    DIR *r = opendir(root);
+    if (!r) return 0;
+    int n = 0;
+    struct dirent *sh;
+    while ((sh = readdir(r))) {
+        if (sh->d_name[0] == '.') continue;
+        char shard[512];
+        snprintf(shard, sizeof(shard), "%s/%s", root, sh->d_name);
+        DIR *d = opendir(shard);
+        if (!d) continue;
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            if (strlen(e->d_name) == 64) n++;
+        }
+        closedir(d);
+    }
+    closedir(r);
+    return n;
+}
+
+/* Stand-in for what hull.template's compile_source would produce:
+ * a Lua chunk that returns an inner render function. Padded to
+ * clear the 256-byte minimum. */
+static const char *TC_PROBE_CODE =
+    "-- pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+    "-- pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+    "-- pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+    "return function(data)\n"
+    "    local x = (data and data.x) or 0\n"
+    "    return tostring(x * 2 + 3)\n"
+    "end\n";
+
+UTEST(lua_template_cache, miss_then_hit_populates_disk)
+{
+    char tmp[256];
+    tc_with_tmp_home(tmp);
+
+    lua_State *L = luaL_newstate();
+    ASSERT_NE_MSG(L, NULL, "newstate");
+    /* The probe calls tostring(), so load stdlibs in the test state. */
+    luaL_openlibs(L);
+
+    ASSERT_EQ(0, tc_count(tmp));
+    int rc = hl_lua_template_compile_cached(L, TC_PROBE_CODE,
+                                            strlen(TC_PROBE_CODE),
+                                            "=tpl_probe");
+    ASSERT_EQ_MSG(rc, LUA_OK, "first compile");
+    ASSERT_EQ(1, tc_count(tmp));
+
+    /* The cache stores the render function directly — call it with
+     * data and check the result is the right type. */
+    lua_newtable(L);
+    lua_pushinteger(L, 7);
+    lua_setfield(L, -2, "x");
+    ASSERT_EQ(LUA_OK, lua_pcall(L, 1, 1, 0));
+    ASSERT_STREQ("17", lua_tostring(L, -1));
+    lua_pop(L, 1);
+
+    /* Second call: cache hit, no extra file. */
+    rc = hl_lua_template_compile_cached(L, TC_PROBE_CODE,
+                                        strlen(TC_PROBE_CODE),
+                                        "=tpl_probe");
+    ASSERT_EQ(LUA_OK, rc);
+    ASSERT_EQ(1, tc_count(tmp));
+    lua_newtable(L);
+    lua_pushinteger(L, 7);
+    lua_setfield(L, -2, "x");
+    ASSERT_EQ(LUA_OK, lua_pcall(L, 1, 1, 0));
+    ASSERT_STREQ("17", lua_tostring(L, -1));
+    lua_pop(L, 1);
+
+    lua_close(L);
+    nftw(tmp, bc_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+}
+
+UTEST(lua_template_cache, opt_out_via_env_skips_disk)
+{
+    char tmp[256];
+    tc_with_tmp_home(tmp);
+    setenv("HULL_NO_TEMPLATE_CACHE", "1", 1);
+    hl_lua_template_cache_reset();
+
+    lua_State *L = luaL_newstate();
+    int rc = hl_lua_template_compile_cached(L, TC_PROBE_CODE,
+                                            strlen(TC_PROBE_CODE),
+                                            "=tpl_probe");
+    ASSERT_EQ(LUA_OK, rc);
+    ASSERT_EQ_MSG(0, tc_count(tmp),
+                  "no entry written when opted out");
+    lua_close(L);
+
+    unsetenv("HULL_NO_TEMPLATE_CACHE");
+    nftw(tmp, bc_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+}
+
+UTEST(lua_template_cache, generated_code_change_invalidates)
+{
+    /* The cache is keyed by the generated code, NOT the template
+     * name. Two different code strings produce two different
+     * entries — the natural invalidation that the design relies on
+     * when extends/include targets change. */
+    char tmp[256];
+    tc_with_tmp_home(tmp);
+
+    lua_State *L = luaL_newstate();
+    ASSERT_EQ(LUA_OK,
+        hl_lua_template_compile_cached(L, TC_PROBE_CODE,
+                                       strlen(TC_PROBE_CODE), "=t1"));
+    lua_pop(L, 1);
+
+    const char *alt =
+        "-- pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+        "-- pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+        "-- pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+        "-- pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+        "return function(data)\n"
+        "    return 'different output line one\\n'\n"
+        "end\n";
+    ASSERT_EQ(LUA_OK,
+        hl_lua_template_compile_cached(L, alt, strlen(alt), "=t2"));
+    lua_pop(L, 1);
+
+    ASSERT_EQ_MSG(2, tc_count(tmp),
+                  "distinct generated code produces distinct entries");
+
+    lua_close(L);
+    nftw(tmp, bc_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+}
+
+UTEST(lua_template_cache, parse_error_returns_no_cache_write)
+{
+    char tmp[256];
+    tc_with_tmp_home(tmp);
+
+    const char *bad =
+        "-- pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+        "-- pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+        "-- pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+        "this is = not = valid Lua )(\n";
+
+    lua_State *L = luaL_newstate();
+    int rc = hl_lua_template_compile_cached(L, bad, strlen(bad), "=bad");
+    ASSERT_NE_MSG(rc, LUA_OK, "parse error reported");
+    ASSERT_TRUE(lua_isstring(L, -1));
+    ASSERT_EQ(0, tc_count(tmp));
+    lua_pop(L, 1);
+    lua_close(L);
+
+    nftw(tmp, bc_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
 }
 
 UTEST_MAIN();

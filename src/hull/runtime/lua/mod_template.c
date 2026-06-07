@@ -5,6 +5,7 @@
 
 #include "mod_buffer.h"
 #include "hull/limits/core.h"
+#include "hull/runtime/lua_template_cache.h"
 #include "hull/vfs.h"
 
 #include <sh_arena.h>
@@ -20,21 +21,24 @@
  * _template._load_raw(name)   → raw template string or nil
  * ════════════════════════════════════════════════════════════════════ */
 
-/* _template._compile(code) — compile generated Lua source to a function */
+/* _template._compile(code) — compile generated Lua source to a function.
+ *
+ * Routes through hl_lua_template_compile_cached: on a cache hit the
+ * dumped render function is loaded directly (no parse, no pcall);
+ * on a cache miss we run the original luaL_loadbuffer + pcall pair
+ * and persist the result. Cache lives at
+ * $HOME/.hull/blobs/runtime/templates/ — see
+ * include/hull/runtime/lua_template_cache.h. */
 static int lua_template_compile(lua_State *L)
 {
     size_t len;
     const char *code = luaL_checklstring(L, 1, &len);
     const char *name = luaL_optstring(L, 2, "=template");
 
-    if (luaL_loadbuffer(L, code, len, name) != LUA_OK)
-        return lua_error(L); /* propagate compile error */
+    if (hl_lua_template_compile_cached(L, code, len, name) != LUA_OK)
+        return lua_error(L); /* propagate compile / pcall error */
 
-    /* loadbuffer pushes a function — call it to get the inner function */
-    if (lua_pcall(L, 0, 1, 0) != LUA_OK)
-        return lua_error(L);
-
-    return 1; /* compiled function on stack */
+    return 1; /* render function on stack */
 }
 
 /* _template._load_raw(name) — load raw template bytes from embedded

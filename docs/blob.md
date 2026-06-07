@@ -582,10 +582,10 @@ The reasoning:
 |---|---|---|
 | `data/uploads/` (app's storage for user files) | **Yes** | App-chosen, app-visible, app-managed |
 | `data/blobs/` (app-managed blob root for `hull/web/attachment@1`) | **Yes** | Same — app declares the dir |
-| `~/.hull/cache/lua-bytecode/` | **No** | Runtime infrastructure; app didn't ask for the cache |
-| `~/.hull/cache/compute/` | **No** | Build-tool artifact cache; runs from `hull build`, not at app runtime |
-| `~/.hull/cache/templates/` | **No** | Runtime infrastructure |
-| `~/.hull/tools/` | **No** | `hull tools install` runs from the shell, not from inside an app |
+| `~/.hull/blobs/runtime/lua-bytecode/` | **No** | Runtime infrastructure; app didn't ask for the cache |
+| `~/.hull/blobs/runtime/compute-aot/` | **No** | Build-tool artifact cache; runs from `hull build`, not at app runtime |
+| `~/.hull/blobs/runtime/templates/` | **No** | Runtime infrastructure |
+| `~/.hull/blobs/tools/` | **No** | `hull tools install` runs from the shell, not from inside an app |
 
 The line is **what the app deliberately produces or consumes vs. what
 the runtime decides to cache to make the app faster**. The latter is
@@ -621,6 +621,55 @@ runtime caches live outside the manifest:
   disabling forces re-derive on every load.
 - **`hull cache list|prune|clear`** subcommand surfaces what's
   actually stored, evicts old entries, or wipes everything.
+  Registry-driven via `include/hull/cache_registry.h` so adding a
+  new cache kind automatically picks up disclosure + management.
+
+### Per-app cache isolation (`HULL_CACHE_DIR`)
+
+The default shared pool at `~/.hull/blobs/runtime/` is the right
+tradeoff for development workstations (cross-app dedup of stdlib
+bytecode is real). It's the wrong tradeoff on multi-tenant boxes,
+CI runners with overlapping jobs, or systemd / k8s / Docker
+deployments where one compromised process shouldn't be able to
+poison another deployment's cache entries.
+
+Setting `HULL_CACHE_DIR=/absolute/path` redirects the entire
+runtime cache pool to that directory. Each deployment supplies
+its own value; no two apps share a cache root:
+
+```sh
+# systemd unit
+[Service]
+Environment=HULL_CACHE_DIR=/var/lib/myapp/hull-cache
+
+# k8s pod spec
+env:
+  - name: HULL_CACHE_DIR
+    value: /run/cache/hull
+
+# Docker
+docker run -e HULL_CACHE_DIR=/cache -v cache_vol:/cache myapp
+```
+
+Rules:
+
+- **Must be absolute.** Relative paths are rejected — keeps the
+  resolved location obvious to the sandbox.
+- **The sandbox auto-allows it.** No manifest changes required.
+- **Opt-outs still apply.** `HULL_NO_CACHE=1` etc. work regardless
+  of where the cache root resolves.
+- **Tools storage is NOT redirected.** `~/.hull/blobs/tools/`
+  stays at its stable system home — those are signed durable
+  downloads, not per-app caches, and `hull tools install` runs
+  from the shell at a different time than the apps themselves.
+- **`hull cache list` shows the override active** so users can
+  see when their per-app cache is in effect.
+
+A planned later iteration (Layer C, optional) adds automatic
+per-app isolation derived from app identity (`HULL_CACHE_PER_APP=1`
+→ derive subdir from app signature). Today's manual override
+covers the security-critical deployments; auto-isolation is a
+convenience for paranoid defaults.
 
 ## Migration map — existing implementations
 

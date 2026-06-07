@@ -179,6 +179,47 @@ local function main()
         print("")
     end
 
+    -- ── Runtime caches (disclosure) ─────────────────────────────────
+    --
+    -- These paths are NOT declared in the app manifest — they're
+    -- infrastructure the runtime decides to memoize for speed (Lua
+    -- bytecode, compute AOT, template render functions, signed tool
+    -- downloads). The auditor sees them here so "what does this
+    -- binary touch on disk" is fully accounted for, matching the
+    -- manifest-disclosure property of fs.write / hosts / env.
+    --
+    -- Registry-driven (tool.cache_kinds() reads hl_cache_registry()
+    -- in C) — adding a new cache kind in REGISTRY[] automatically
+    -- picks up inspect disclosure here.
+    if tool.cache_kinds then
+        local kinds = tool.cache_kinds()
+        if kinds and #kinds > 0 then
+            print("Runtime caches (auto-allowed, not in manifest):")
+            for _, k in ipairs(kinds) do
+                local kind_tag = k.is_runtime and "runtime" or "system"
+                local path = (k.path ~= "") and k.path
+                                  or "(unresolvable: HOME unset)"
+                print(string.format("  %-12s [%s]  %s",
+                                    k.name, kind_tag, path))
+                if k.description and k.description ~= "" then
+                    print(string.format("                %s",
+                                        k.description))
+                end
+            end
+            -- Tool mode strips `os` from the sandbox; use the
+            -- dedicated `tool.cache_override()` binding instead.
+            local override = tool.cache_override and tool.cache_override() or nil
+            if override then
+                print("  HULL_CACHE_DIR override active: " .. override)
+                print("  (runtime caches re-rooted for per-app isolation;")
+                print("   `tools` is unaffected — durable signed downloads)")
+            end
+            print("  manage via `hull cache list|prune|clear`,")
+            print("  opt out with HULL_NO_CACHE=1")
+            print("")
+        end
+    end
+
     -- ── Migrations ──────────────────────────────────────────────────
     if sig.files then
         local migration_names = {}

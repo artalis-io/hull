@@ -19,13 +19,16 @@
  */
 
 #include "hull/commands/doctor.h"
+#include "hull/blob_store.h"
 #include "hull/build_assets.h"
+#include "hull/cache_registry.h"
 #include "hull/cacert.h"
 #include "hull/compiler.h"
 #include "hull/module_registry.h"
 #include "hull/tool.h"
 #include "hull/tools_install.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -281,6 +284,44 @@ static void detect_compute(ComputeInfo *info, const char *self_path)
     info->has_wasm_ld = find_in_path("wasm-ld", wasm_ld_path, sizeof(wasm_ld_path));
 }
 
+/* ── Cache info helpers (shared by human + JSON renderers) ─────── */
+
+/* Open the blob store for `kind` and read its count + total size.
+ * NULL store (path unavailable, mkdir failed, etc.) → reports
+ * (0, 0). Mirrors the helper in commands/cache.c but kept local
+ * so doctor doesn't depend on the cache command. */
+static void cache_stats(const HlCacheKind *kind,
+                        char *path_out, size_t path_out_sz,
+                        uint64_t *out_count, uint64_t *out_size)
+{
+    *out_count = 0;
+    *out_size  = 0;
+    path_out[0] = '\0';
+
+    if (hl_cache_resolve_path(kind, path_out, path_out_sz) != 0) return;
+
+    HlBlobStore *s = NULL;
+    if (hl_blob_store_open(&s, NULL, path_out, /*shard_depth=*/1, 0) != 0)
+        return;
+    *out_count = hl_blob_store_count(s);
+    *out_size  = hl_blob_store_total_size(s);
+    hl_blob_store_close(s);
+}
+
+/* Compact size formatter — mirrors commands/cache.c::format_size so
+ * doctor and `hull cache list` report identically. */
+static void doctor_format_size(uint64_t bytes, char *out, size_t out_sz)
+{
+    if (bytes >= (1ULL << 30))
+        snprintf(out, out_sz, "%.1f GB", bytes / (double)(1ULL << 30));
+    else if (bytes >= (1ULL << 20))
+        snprintf(out, out_sz, "%.1f MB", bytes / (double)(1ULL << 20));
+    else if (bytes >= (1ULL << 10))
+        snprintf(out, out_sz, "%.1f KB", bytes / (double)(1ULL << 10));
+    else
+        snprintf(out, out_sz, "%llu B", (unsigned long long)bytes);
+}
+
 /* ── Human-readable output ──────────────────────────────────────── */
 
 static void print_check(FILE *f, const char *label, int ok, const char *detail)
@@ -447,6 +488,54 @@ static void print_human(FILE *f, CompilerInfo *ci, int nci,
         fprintf(f, "\n");
     }
 
+    /* ── Caches ── */
+    /* Walks the same registry that powers `hull cache list` so the
+     * two surfaces are always in lockstep. Status indicators:
+     *   ✓  store exists with entries on disk
+     *   ○  no entries yet (cache cold)
+     *   ✗  path unresolvable (e.g. HOME unset)
+     * The footer line surfaces an active HULL_CACHE_DIR override so
+     * users running multi-tenant deployments can see at a glance
+     * which path their caches are landing in. */
+    {
+        fprintf(f, "Caches  (runtime + tools storage)\n");
+        uint64_t runtime_count = 0, runtime_bytes = 0;
+        for (const HlCacheKind *k = hl_cache_registry(); k->name; k++) {
+            char path[PATH_MAX];
+            uint64_t cnt = 0, size = 0;
+            cache_stats(k, path, sizeof(path), &cnt, &size);
+
+            const char *mark;
+            if (path[0] == '\0')   mark = "\xe2\x9c\x97";  /* ✗ */
+            else if (cnt == 0)     mark = "\xe2\x97\x8b";  /* ○ */
+            else                   mark = "\xe2\x9c\x93";  /* ✓ */
+
+            char size_str[32];
+            doctor_format_size(size, size_str, sizeof(size_str));
+            fprintf(f, "  %-12s %s  %llu entries, %s\n",
+                    k->name, mark, (unsigned long long)cnt, size_str);
+            if (path[0] != '\0')
+                fprintf(f, "                %s%s\n", path,
+                        k->is_runtime ? "" : "  (system store)");
+            if (k->is_runtime) {
+                runtime_count += cnt;
+                runtime_bytes += size;
+            }
+        }
+        char total_str[32];
+        doctor_format_size(runtime_bytes, total_str, sizeof(total_str));
+        fprintf(f, "                runtime total: %llu entries, %s\n",
+                (unsigned long long)runtime_count, total_str);
+
+        const char *override = getenv("HULL_CACHE_DIR");
+        if (override && *override) {
+            fprintf(f, "                HULL_CACHE_DIR active: %s\n",
+                    override);
+        }
+        fprintf(f, "                manage via `hull cache list|prune|clear`\n");
+        fprintf(f, "\n");
+    }
+
     /* ── Summary ── */
     fprintf(f, "hull build    ");
     if (embed == PLATFORM_NONE) {
@@ -596,6 +685,34 @@ static void print_json(FILE *f, CompilerInfo *ci, int nci,
     fprintf(f, ", \"http\": false");
 #endif
     fprintf(f, "},\n");
+    /* Cache status — same registry as `hull cache list`. */
+    fprintf(f, "  \"caches\": [");
+    int cf = 1;
+    for (const HlCacheKind *k = hl_cache_registry(); k->name; k++) {
+        char path[PATH_MAX];
+        uint64_t cnt = 0, size = 0;
+        cache_stats(k, path, sizeof(path), &cnt, &size);
+
+        if (!cf) fprintf(f, ", ");
+        cf = 0;
+        fprintf(f, "{\"name\": ");
+        json_str(f, k->name);
+        fprintf(f, ", \"is_runtime\": %s",
+                k->is_runtime ? "true" : "false");
+        fprintf(f, ", \"path\": ");
+        if (path[0]) json_str(f, path); else fprintf(f, "null");
+        fprintf(f, ", \"count\": %llu", (unsigned long long)cnt);
+        fprintf(f, ", \"size_bytes\": %llu", (unsigned long long)size);
+        fprintf(f, "}");
+    }
+    fprintf(f, "],\n");
+    {
+        const char *override = getenv("HULL_CACHE_DIR");
+        fprintf(f, "  \"hull_cache_dir\": ");
+        if (override && *override) json_str(f, override);
+        else                       fprintf(f, "null");
+        fprintf(f, ",\n");
+    }
     fprintf(f, "  \"hull_build\": \"%s\"\n", ready_str);
     fprintf(f, "}\n");
 }

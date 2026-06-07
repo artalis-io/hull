@@ -47,6 +47,7 @@
 #include "hull/commands/verify_release.h"
 #include "hull/commands/verify_self.h"
 #include "hull/commands/sbom.h"
+#include "hull/commands/cache.h"
 #include "hull/commands/help.h"
 
 #include <string.h>
@@ -90,6 +91,7 @@ static const HlCommand commands[] = {
     { "verify-release", hl_cmd_verify_release },
     { "verify-self",    hl_cmd_verify_self },
     { "sbom",           hl_cmd_sbom },
+    { "cache",          hl_cmd_cache },
     { "help",           hl_cmd_help },
     { NULL, NULL }  /* sentinel */
 };

@@ -22,7 +22,14 @@
 #include <stddef.h>
 
 /**
- * @brief Resolve `$HOME/.hull/blobs/runtime/`, creating all layers.
+ * @brief Resolve the runtime-cache root, creating all layers.
+ *
+ * Resolution order:
+ *   1. `HULL_CACHE_DIR` env (must be absolute) — for per-app cache
+ *      isolation in shared / multi-tenant deployments. Set per-
+ *      service in systemd / k8s / Docker and the entire runtime
+ *      cache pool lives under that path with no `$HOME` exposure.
+ *   2. `$HOME/.hull/blobs/runtime/` — default shared pool.
  *
  * Returns a path WITH trailing slash for easy concatenation.
  *
@@ -33,7 +40,8 @@
  *
  * @param out      Caller-supplied buffer (≥ PATH_MAX bytes recommended).
  * @param out_sz   Buffer size.
- * @return 0 on success; -1 on $HOME unset or mkdir failure.
+ * @return 0 on success; -1 on HOME unset (with no HULL_CACHE_DIR),
+ *         invalid override path, or mkdir failure.
  */
 int hl_hull_cache_dir(char *out, size_t out_sz);
 

@@ -1052,24 +1052,121 @@ Tasks (target v0.1.10):
       creates symlink + exec works through symlink; second
       install hits short-circuit (no rewrite); `hull doctor`
       reports the tool as managed.
-- [ ] §1.5.b-X-4. Template AST cache (runtime-infrastructure,
-      sidecar-less). Persist compiled template source (or
-      `string.dump` bytecode) via blob keyed by template-source
-      SHA. In-process function cache stays in front for warm path;
-      blob is the cold/reload-survival layer. Path:
-      `~/.hull/cache/templates/`. Honors `HULL_NO_TEMPLATE_CACHE=1`.
-      Win: `hull dev` reload survival, cross-process reuse.
-- [ ] §1.5.b-X-5. `hull cache list|prune|clear` subcommand. Surfaces
-      all cache roots Hull manages, lists contents (count + total
-      size per cache), runs `blob.cleanup({max_total_size, max_age,
-      strategy})` to prune, or wipes a cache root entirely. Plays
-      with `--dry-run`.
-- [ ] §1.5.b-X-6. `hull doctor` cache reporting. Add cache locations
-      + sizes to the doctor output (already reports CA bundle and
-      tools status; this is the same pattern).
-- [ ] §1.5.b-X-7. `hull inspect` cache disclosure. New section in
-      the inspect output: "Runtime caches this binary will read/
-      write" — informational, not a permission.
+- [x] §1.5.b-X-4. Template AST cache. **Landed.**
+      `_template._compile` now routes through
+      `hl_lua_template_compile_cached`. Cache key =
+      `sha256(LUA_VERSION || arch || endian || generated_code)`.
+      Cached value = `lua_dump()` of the inner render function
+      (post-pcall) — on a hit we skip BOTH the parse pass and the
+      pcall to unwrap the outer chunk.
+      The in-process function cache (Lua-side, keyed by template
+      name) stays in front for the warm path; the blob cache is
+      the cold-start / reload-survival layer.
+      Key insight: hashing the *generated* code (post-resolve of
+      extends + includes) gives automatic invalidation when any
+      referenced template changes. No dependency tracking
+      needed — a different generated code is a different key.
+      Store: `$HOME/.hull/blobs/runtime/templates/blobs/<XX>/<sha>`
+      via the same `hl_blob_store_put_keyed` primitive that backs
+      the bytecode + AOT caches.
+      Honors `HULL_NO_CACHE=1` and `HULL_NO_TEMPLATE_CACHE=1`.
+      Falls back to a fresh compile on any cache I/O failure.
+      Files: `include/hull/runtime/lua_template_cache.h`,
+      `src/hull/runtime/lua/template_cache.c`,
+      `src/hull/runtime/lua/mod_template.c` (one-line swap from
+      `luaL_loadbuffer + pcall` to `hl_lua_template_compile_cached`),
+      4 new utests in `test_lua`
+      (`lua_template_cache.miss_then_hit_populates_disk`,
+      `opt_out_via_env_skips_disk`,
+      `generated_code_change_invalidates`,
+      `parse_error_returns_no_cache_write`).
+      Verified: 42/42 unit, 40/40 e2e_templates, 36/36 e2e_blob,
+      12/12 e2e_aot_cache. End-to-end smoke against a real
+      template: first boot creates blob, second boot hits it,
+      output is byte-identical.
+- [x] §1.5.b-X-5. `hull cache list|prune|clear` subcommand
+      **+ per-app cache isolation via `HULL_CACHE_DIR`. Landed.**
+      Registry-driven (`include/hull/cache_registry.h`) — single
+      source of truth for cache kinds, used by `cache list`, the
+      planned `doctor` cache section (X-6), the planned `inspect`
+      disclosure (X-7), and any future consumer.
+      Commands:
+        - `cache list [--json]` — one line per registered kind with
+          path, entry count, total size, runtime/system flag.
+        - `cache prune [--kind=K] [--max-size=N] [--max-age=N]
+          [--strategy=lru|fifo] [--dry-run]` — runs
+          `hl_blob_store_cleanup` over runtime caches (system stores
+          like `tools` skipped by default; explicit `--kind=tools`
+          still works).
+        - `cache clear [--kind=K] --yes` — iter + delete every entry
+          (not policy-based; works even on sub-second-old files).
+      `--yes` required to prevent accidental wipe.
+      **Per-app isolation: `HULL_CACHE_DIR=/abs/path`** overrides
+      the default `$HOME/.hull/blobs/runtime/` for the entire
+      runtime cache pool. For multi-tenant boxes, systemd / k8s /
+      Docker deployments where each app must have its own cache
+      and not see / be seen by another deployment. Must be
+      absolute (relative paths rejected). Tools storage
+      (`$HOME/.hull/blobs/tools/`) is intentionally NOT redirected
+      — those are signed durable downloads with a stable system
+      home. `HULL_NO_CACHE=1` etc. opt-outs still apply.
+      Designed so optional layer C (automatic per-app isolation
+      derived from app identity) can be added later without
+      restructuring: it'd just compose under the same
+      `hl_hull_cache_dir()` resolver — the override stays as the
+      explicit / deployment-controlled mode and layer C becomes
+      the convenience default for paranoid deployments.
+      Files: `include/hull/cache_registry.h`,
+      `src/hull/cache_registry.c`,
+      `include/hull/commands/cache.h`,
+      `src/hull/commands/cache.c`,
+      sandbox auto-allow + cache_dir.c teach `HULL_CACHE_DIR`,
+      dispatch.c + help.c register `cache`,
+      `tests/e2e_cache.sh` (24 cases incl. isolation),
+      `docs/blob.md` (per-app isolation section),
+      `CLAUDE.md` (HULL_CACHE_DIR section).
+- [x] §1.5.b-X-6. `hull doctor` cache reporting. **Landed.**
+      `hull doctor` now has a Caches section between Module
+      subsystems and the build-ready summary. One row per
+      registered cache kind with status mark (✓ populated /
+      ○ cold / ✗ unresolvable), entry count, total size, and
+      on-disk path. Annotates `tools` as a system store.
+      Reports active `HULL_CACHE_DIR` override when set.
+      Footer points users at `hull cache list|prune|clear`.
+      JSON variant adds a `"caches": [...]` array (mirroring
+      `hull cache list --json`) plus a top-level
+      `"hull_cache_dir"` field.
+      Single source of truth via `hl_cache_registry()` —
+      doctor and `hull cache` always agree.
+      Files: `src/hull/commands/doctor.c` (+90 LOC for the
+      Caches section in both human + JSON renderers, plus
+      `cache_stats` + `doctor_format_size` helpers shared
+      between them).
+      Verified: 32/32 e2e_cache (+8 new doctor assertions),
+      42/42 unit, 36/36 e2e_blob, 12/12 e2e_aot_cache, 40/40
+      e2e_templates. (`hull doctor --tui` will surface the
+      new fields when its panel renderer is extended — the JSON
+      already exposes the data; Lua-side TUI work is separate.)
+- [x] §1.5.b-X-7. `hull inspect` cache disclosure. **Landed.**
+      New "Runtime caches (auto-allowed, not in manifest)"
+      section in `hull inspect` between Capabilities and
+      Migrations. One row per registered cache kind with
+      `[runtime]` or `[system]` tag, on-disk path, and the
+      one-line description from the registry. Surfaces active
+      `HULL_CACHE_DIR` override with a per-app-isolation note.
+      Footer points at `hull cache list|prune|clear` and the
+      `HULL_NO_CACHE=1` opt-out.
+      Two new tool bindings (no Lua-side `os` needed):
+        - `tool.cache_kinds()` → list of
+          `{name, description, is_runtime, path}` tables
+          (registry-driven; new kinds auto-disclose).
+        - `tool.cache_override()` → current `HULL_CACHE_DIR`
+          string or nil.
+      Files: `src/hull/runtime/lua/mod_tool.c` (+two bindings),
+      `stdlib/cli/lua/hull/inspect.lua` (+disclosure section),
+      `tests/e2e_cache.sh` (+7 inspect assertions).
+      Verified: 39/39 e2e_cache, 42/42 unit, 36/36 e2e_blob,
+      118/118 e2e_build, 40/40 e2e_templates.
 - [ ] §1.5.b-X-8. LLM artifact cache (latent, v0.1.11+). Deferred
       until a real LLM consumer in Hull exists. Key shape:
       `sha256(prompt || context || model_id || temperature)`. LRU

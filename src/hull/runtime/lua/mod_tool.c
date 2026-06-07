@@ -22,6 +22,7 @@
 
 #include "hull/cap/tool.h"
 #include "hull/cache_dir.h"
+#include "hull/cache_registry.h"
 #include "hull/blob_store.h"
 #include "hull/runtime/tool.h"
 #include "hull/build_assets.h"
@@ -715,6 +716,56 @@ static int l_tool_hull_cache_disabled(lua_State *L)
     return 1;
 }
 
+/* ── tool.cache_override() → string | nil
+ *
+ * Returns the current `HULL_CACHE_DIR` env value, or nil when
+ * unset / empty. Tool mode doesn't expose `os.getenv`, so disclosure
+ * surfaces (hull inspect, future hull doctor lua tooling) need
+ * this dedicated binding to surface the override status. */
+static int l_tool_cache_override(lua_State *L)
+{
+    const char *v = getenv("HULL_CACHE_DIR");
+    if (v && *v) lua_pushstring(L, v);
+    else         lua_pushnil(L);
+    return 1;
+}
+
+/* ── tool.cache_kinds() → { {name, description, is_runtime, path}, ... }
+ *
+ * Exposes the C-side cache registry (hl_cache_registry()) to Lua
+ * so tooling like `hull inspect` can enumerate every runtime
+ * cache the binary will touch without hard-coding the list.
+ * Returns the resolved on-disk path for each kind so callers can
+ * surface them directly. `path` is empty when the kind is
+ * unresolvable on this host (e.g. HOME unset).
+ *
+ * Single source of truth: adding a new entry to REGISTRY[] in
+ * cache_registry.c automatically picks up disclosure here. */
+static int l_tool_cache_kinds(lua_State *L)
+{
+    lua_newtable(L);
+    int idx = 1;
+    for (const HlCacheKind *k = hl_cache_registry(); k->name; k++) {
+        lua_newtable(L);
+        lua_pushstring(L, k->name);
+        lua_setfield(L, -2, "name");
+        lua_pushstring(L, k->description);
+        lua_setfield(L, -2, "description");
+        lua_pushboolean(L, k->is_runtime);
+        lua_setfield(L, -2, "is_runtime");
+
+        char path[PATH_MAX];
+        if (hl_cache_resolve_path(k, path, sizeof(path)) == 0)
+            lua_pushstring(L, path);
+        else
+            lua_pushstring(L, "");
+        lua_setfield(L, -2, "path");
+
+        lua_rawseti(L, -2, idx++);
+    }
+    return 1;
+}
+
 /* ── tool.blob_store_* — keyed CAS-style cache for tool-mode ──────
  *
  * Backed by hull/blob_store in keyed mode (see
@@ -974,6 +1025,8 @@ static const luaL_Reg tool_funcs[] = {
     { "find_tool",                   l_tool_find_tool },
     { "hull_cache_dir",              l_tool_hull_cache_dir },
     { "hull_cache_disabled",         l_tool_hull_cache_disabled },
+    { "cache_kinds",                 l_tool_cache_kinds },
+    { "cache_override",              l_tool_cache_override },
     { "blob_store_exists",           l_tool_blob_store_exists },
     { "blob_store_get_to",           l_tool_blob_store_get_to },
     { "blob_store_put_from",         l_tool_blob_store_put_from },

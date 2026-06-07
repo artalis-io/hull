@@ -42,20 +42,75 @@ static int name_valid(const char *name)
     return 1;
 }
 
+/* Walk path components and mkdir each missing piece. */
+static int mkdir_p(const char *path)
+{
+    char buf[PATH_MAX];
+    size_t len = strlen(path);
+    if (len == 0 || len >= sizeof(buf)) { errno = ENAMETOOLONG; return -1; }
+    memcpy(buf, path, len + 1);
+    for (size_t i = 1; i <= len; i++) {
+        if (buf[i] == '/' || buf[i] == '\0') {
+            char saved = buf[i];
+            buf[i] = '\0';
+            if (ensure_dir(buf, 0755) != 0) return -1;
+            buf[i] = saved;
+        }
+    }
+    return 0;
+}
+
 int hl_hull_cache_dir(char *out, size_t out_sz)
 {
     if (!out || out_sz < 2) return -1;
+
+    /* HULL_CACHE_DIR override — used for per-app cache isolation in
+     * shared / multi-tenant environments where the default
+     * $HOME/.hull/blobs/runtime/ pool would expose cache content to
+     * any process running under the same user. Set per-deployment
+     * (systemd EnvironmentFile, k8s env, Docker -e):
+     *
+     *   HULL_CACHE_DIR=/var/lib/myapp/cache hull myapp.lua
+     *
+     * Must be an absolute path. The directory tree is created on
+     * demand; the sandbox auto-allows it (via this function's
+     * return value).
+     *
+     * Tools storage ($HOME/.hull/blobs/tools/) is NOT affected by
+     * this override — tools are durable signed downloads with a
+     * stable system home, not per-app caches. See cache_registry.c
+     * for the registry-wide path-resolution rules. */
+    const char *override = getenv("HULL_CACHE_DIR");
+    if (override && *override) {
+        if (override[0] != '/') { errno = EINVAL; return -1; }
+        size_t olen = strlen(override);
+        /* Strip trailing slashes for canonical form. */
+        while (olen > 1 && override[olen - 1] == '/') olen--;
+        if (olen + 2 > out_sz) { errno = ENAMETOOLONG; return -1; }
+        memcpy(out, override, olen);
+        out[olen]     = '/';
+        out[olen + 1] = '\0';
+
+        /* mkdir -p the override path. Use a private buffer to avoid
+         * mutating `out`. */
+        char abspath[PATH_MAX];
+        if (olen >= sizeof(abspath)) { errno = ENAMETOOLONG; return -1; }
+        memcpy(abspath, override, olen);
+        abspath[olen] = '\0';
+        if (mkdir_p(abspath) != 0) return -1;
+        return 0;
+    }
+
+    /* Default: $HOME/.hull/blobs/runtime/. Runtime caches share the
+     * on-disk blob layout (sha-keyed, sharded shards) with apps'
+     * blob stores but partition under blobs/runtime/<kind>/ so
+     * `hull cache list` can enumerate them in one tree walk. The
+     * env-var surface (HULL_NO_CACHE etc.) keeps "cache"
+     * nomenclature — these directories ARE caches even though the
+     * disk layout is the blob shape. */
     const char *home = getenv("HOME");
     if (!home || !*home) { errno = ENOENT; return -1; }
 
-    /* Runtime caches share the same on-disk pool as app blobs but
-     * live under a `runtime/` subtree. Apps' blob stores live
-     * elsewhere (manifest-declared); runtime caches partition under
-     * blobs/runtime/<kind>/ so a single `hull cache list` walk
-     * (future §1.5.b-X-5) can enumerate them cleanly. The env-var
-     * surface (HULL_NO_CACHE etc.) keeps "cache" nomenclature
-     * because that's the user-facing intent — these directories ARE
-     * caches even though the on-disk layout is the blob shape. */
     char hull_dir[PATH_MAX];
     int n = snprintf(hull_dir, sizeof(hull_dir), "%s/.hull", home);
     if (n < 0 || (size_t)n >= sizeof(hull_dir)) {
