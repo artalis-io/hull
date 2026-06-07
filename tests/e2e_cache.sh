@@ -307,6 +307,77 @@ case "$OUT" in
 esac
 rm -rf "$ISO3" "$INSP_DIR"
 
+# ── 17. Status column reflects per-cache opt-out ─────────────────
+# Baseline: nothing set → every kind shows "ok" (or "n/a" for system)
+OUT=$("$HULL" cache list 2>&1)
+case "$OUT" in
+    *"lua-bytecode runtime  ok"*) pass "list: lua-bytecode is ok by default" ;;
+    *) fail "list: lua-bytecode default status" "got: $OUT" ;;
+esac
+case "$OUT" in
+    *"tools        system   n/a"*) pass "list: tools shows n/a (no opt-out)" ;;
+    *) fail "list: tools n/a status" ;;
+esac
+
+# Per-cache opt-out flips lua-bytecode to "off (env)", others stay ok.
+OUT=$(HULL_NO_LUA_BYTECODE_CACHE=1 "$HULL" cache list 2>&1)
+case "$OUT" in
+    *"lua-bytecode runtime  off (env)"*)
+        pass "list: per-cache env disable shows 'off (env)'" ;;
+    *) fail "list: lua-bytecode off (env)" ;;
+esac
+case "$OUT" in
+    *"js-bytecode  runtime  ok"*)
+        pass "list: per-cache disable doesn't affect other kinds" ;;
+    *) fail "list: js-bytecode still ok" ;;
+esac
+case "$OUT" in
+    *"HULL_NO_LUA_BYTECODE_CACHE=1 active"*)
+        pass "list footer names the active opt-out var" ;;
+    *) fail "list footer per-cache opt-out" ;;
+esac
+
+# Global kill-switch flips ALL runtime kinds to "off (all)".
+OUT=$(HULL_NO_CACHE=1 "$HULL" cache list 2>&1)
+case "$OUT" in
+    *"lua-bytecode runtime  off (all)"*)
+        pass "list: HULL_NO_CACHE shows 'off (all)' on lua" ;;
+    *) fail "list: HULL_NO_CACHE on lua" ;;
+esac
+case "$OUT" in
+    *"js-bytecode  runtime  off (all)"*)
+        pass "list: HULL_NO_CACHE shows 'off (all)' on js too" ;;
+    *) fail "list: HULL_NO_CACHE on js" ;;
+esac
+
+# JSON output exposes env_var + disabled fields.
+JSON=$("$HULL" cache list --json 2>&1)
+case "$JSON" in
+    *'"env_var":"HULL_NO_LUA_BYTECODE_CACHE"'*)
+        pass "json includes env_var per kind" ;;
+    *) fail "json env_var field" ;;
+esac
+case "$JSON" in
+    *'"disabled":false'*) pass "json includes disabled flag" ;;
+    *) fail "json disabled field" ;;
+esac
+
+# JSON under disable: lua-bytecode disabled=true, others stay false.
+JSON=$(HULL_NO_LUA_BYTECODE_CACHE=1 "$HULL" cache list --json 2>&1)
+case "$JSON" in
+    *'"name":"lua-bytecode"'*'"disabled":true'*)
+        pass "json reflects per-cache disable for lua-bytecode" ;;
+    *) fail "json disable reflection" ;;
+esac
+
+# ── 18. The OLD HULL_NO_BYTECODE_CACHE no longer disables anything
+OUT=$(HULL_NO_BYTECODE_CACHE=1 "$HULL" cache list 2>&1)
+case "$OUT" in
+    *"lua-bytecode runtime  ok"*)
+        pass "old HULL_NO_BYTECODE_CACHE is inert (renamed)" ;;
+    *) fail "old HULL_NO_BYTECODE_CACHE should be ignored now" ;;
+esac
+
 echo ""
 echo "$PASS/$((PASS + FAIL)) e2e cache tests passed"
 [ "$FAIL" -eq 0 ]

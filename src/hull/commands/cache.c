@@ -30,6 +30,7 @@
 
 #include "hull/commands/cache.h"
 #include "hull/blob_store.h"
+#include "hull/cache_dir.h"
 #include "hull/cache_registry.h"
 
 #include <errno.h>
@@ -76,6 +77,27 @@ static void json_emit_str(FILE *f, const char *s)
     fputc('"', f);
 }
 
+/* Build the HULL_NO_<KIND>_CACHE env-var name for a registry
+ * entry. Mirrors the composition rule in cache_dir.c's
+ * hl_hull_cache_disabled. Returns an empty string for system
+ * stores (env_kind == NULL — no per-cache opt-out applies). */
+static void env_var_for(const HlCacheKind *kind, char *out, size_t out_sz)
+{
+    if (!kind->env_kind) { out[0] = '\0'; return; }
+    size_t pre = strlen("HULL_NO_");
+    size_t suf = strlen("_CACHE");
+    size_t kl  = strlen(kind->env_kind);
+    if (pre + kl + suf + 1 > out_sz) { out[0] = '\0'; return; }
+    memcpy(out, "HULL_NO_", pre);
+    for (size_t j = 0; j < kl; j++) {
+        char c = kind->env_kind[j];
+        if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+        out[pre + j] = c;
+    }
+    memcpy(out + pre + kl, "_CACHE", suf);
+    out[pre + kl + suf] = '\0';
+}
+
 /* Try to open the blob store for `kind`. Returns NULL silently if
  * the store doesn't exist on disk yet (a kind that has never been
  * populated). Caller is responsible for closing. */
@@ -94,11 +116,19 @@ static HlBlobStore *open_kind(const HlCacheKind *kind)
 
 static int cache_list_text(void)
 {
+    /* Status column shows the per-cache opt-out state:
+     *   ok          — cache active
+     *   off (env)   — HULL_NO_<KIND>_CACHE truthy in this process
+     *   off (all)   — HULL_NO_CACHE truthy (overrides everything)
+     *   n/a         — system store; no opt-out concept
+     */
+    int global_off = hl_hull_cache_disabled(NULL);
+
     fprintf(stdout,
-        "Cache        Kind     Path                                                 "
+        "Cache        Kind     Status     Path                                            "
         "Entries  Size\n"
-        "──────────── ──────── "
-        "──────────────────────────────────────────────────── "
+        "──────────── ──────── ────────── "
+        "─────────────────────────────────────────────── "
         "─────── ──────────\n");
 
     uint64_t runtime_count = 0, runtime_bytes = 0;
@@ -121,11 +151,23 @@ static int cache_list_text(void)
             hl_blob_store_close(s);
         }
 
+        const char *status;
+        if (!k->env_kind) {
+            status = "n/a";  /* system store — not a cache, no opt-out */
+        } else if (global_off) {
+            status = "off (all)";
+        } else if (hl_hull_cache_disabled(k->env_kind)) {
+            status = "off (env)";
+        } else {
+            status = "ok";
+        }
+
         char size_str[32];
         format_size(size, size_str, sizeof(size_str));
-        fprintf(stdout, "%-12s %-8s %-52s %7llu  %s\n",
+        fprintf(stdout, "%-12s %-8s %-10s %-47s %7llu  %s\n",
                 k->name,
                 k->is_runtime ? "runtime" : "system",
+                status,
                 path,
                 (unsigned long long)cnt, size_str);
 
@@ -144,6 +186,25 @@ static int cache_list_text(void)
         "Total (incl system): %llu entries, %s\n",
         (unsigned long long)runtime_count, runtime_str,
         (unsigned long long)total_count,   total_str);
+
+    /* Footer: surface the active opt-outs explicitly so users see
+     * WHY a cache shows `off`. Only emit when something is set. */
+    int any_off_emitted = 0;
+    if (global_off) {
+        fprintf(stdout, "\nHULL_NO_CACHE=1 active — all runtime caches disabled.\n");
+        any_off_emitted = 1;
+    } else {
+        for (const HlCacheKind *k = hl_cache_registry(); k->name; k++) {
+            if (!k->env_kind) continue;
+            if (!hl_hull_cache_disabled(k->env_kind)) continue;
+            char env_name[64];
+            env_var_for(k, env_name, sizeof(env_name));
+            if (!any_off_emitted) fputc('\n', stdout);
+            fprintf(stdout, "%s=1 active — %s cache disabled.\n",
+                    env_name, k->name);
+            any_off_emitted = 1;
+        }
+    }
 
     const char *override = getenv("HULL_CACHE_DIR");
     if (override && *override) {
@@ -174,6 +235,12 @@ static int cache_list_json(void)
             hl_blob_store_close(s);
         }
 
+        char env_name[64];
+        env_var_for(k, env_name, sizeof(env_name));
+        int disabled = (hl_hull_cache_disabled(NULL) != 0) ||
+                       (k->env_kind &&
+                        hl_hull_cache_disabled(k->env_kind) != 0);
+
         fputs("{\"name\":", stdout);
         json_emit_str(stdout, k->name);
         fputs(",\"description\":", stdout);
@@ -182,6 +249,10 @@ static int cache_list_json(void)
         json_emit_str(stdout, resolved ? path : "");
         fprintf(stdout, ",\"is_runtime\":%s",
                 k->is_runtime ? "true" : "false");
+        fputs(",\"env_var\":", stdout);
+        json_emit_str(stdout, env_name);
+        fprintf(stdout, ",\"disabled\":%s",
+                disabled ? "true" : "false");
         fprintf(stdout, ",\"count\":%llu", (unsigned long long)cnt);
         fprintf(stdout, ",\"size_bytes\":%llu", (unsigned long long)size);
         fputc('}', stdout);

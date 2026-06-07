@@ -9,6 +9,7 @@
 
 #include "utest.h"
 #include "hull/runtime/js.h"
+#include "hull/runtime/js_bytecode_cache.h"
 #include "hull/reqctx.h"
 #include "hull/manifest.h"
 #include "hull/vfs.h"
@@ -3170,6 +3171,208 @@ UTEST(js_test_runner, mixed_results_in_one_file)
 
     kl_router_free(&router);
     cleanup_js();
+}
+
+/* ── JS bytecode cache ──────────────────────────────────────────
+ *
+ * Mirrors the lua_bytecode_cache.* tests. Uses a stock QuickJS
+ * runtime (no Hull host wiring) so the cache helper is the only
+ * piece under test. */
+
+#include <dirent.h>
+#include <ftw.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+static int jbc_rm_entry(const char *p, const struct stat *st,
+                        int t, struct FTW *f)
+{
+    (void)st; (void)t; (void)f;
+    return remove(p);
+}
+
+static void jbc_with_tmp_home(char tmpdir[256])
+{
+    snprintf(tmpdir, 256, "/tmp/hull_jbc_cache_XXXXXX");
+    mkdtemp(tmpdir);
+    setenv("HOME", tmpdir, 1);
+    unsetenv("HULL_NO_CACHE");
+    unsetenv("HULL_NO_JS_BYTECODE_CACHE");
+    hl_js_bytecode_cache_reset();
+}
+
+static int jbc_count(const char *dir)
+{
+    char root[512];
+    snprintf(root, sizeof(root),
+             "%s/.hull/blobs/runtime/js-bytecode/blobs", dir);
+    DIR *r = opendir(root);
+    if (!r) return 0;
+    int n = 0;
+    struct dirent *sh;
+    while ((sh = readdir(r))) {
+        if (sh->d_name[0] == '.') continue;
+        char shard[512];
+        snprintf(shard, sizeof(shard), "%s/%s", root, sh->d_name);
+        DIR *d = opendir(shard);
+        if (!d) continue;
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            if (strlen(e->d_name) == 64) n++;
+        }
+        closedir(d);
+    }
+    closedir(r);
+    return n;
+}
+
+/* A module that comfortably clears the 256-byte minimum cache
+ * threshold. Pure ES module syntax — exports a default function
+ * that returns a deterministic value we can assert on. */
+static const char *JBC_PROBE =
+    "// pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+    "// pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+    "// pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+    "// pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+    "export default function probe(x) {\n"
+    "    return x * 2 + 3;\n"
+    "}\n";
+
+UTEST(js_bytecode_cache, miss_then_hit_populates_disk)
+{
+    char tmp[256];
+    jbc_with_tmp_home(tmp);
+
+    JSRuntime *rt = JS_NewRuntime();
+    ASSERT_NE(rt, NULL);
+    JSContext *ctx = JS_NewContext(rt);
+    ASSERT_NE(ctx, NULL);
+
+    ASSERT_EQ(0, jbc_count(tmp));
+
+    JSValue v = hl_js_compile_module_cached(ctx, JBC_PROBE,
+                                            strlen(JBC_PROBE),
+                                            "test:probe");
+    ASSERT_FALSE(JS_IsException(v));
+    JS_FreeValue(ctx, v);
+    ASSERT_EQ(1, jbc_count(tmp));
+
+    /* Second call: cache hit, same key, no extra file. */
+    v = hl_js_compile_module_cached(ctx, JBC_PROBE,
+                                    strlen(JBC_PROBE),
+                                    "test:probe");
+    ASSERT_FALSE(JS_IsException(v));
+    JS_FreeValue(ctx, v);
+    ASSERT_EQ(1, jbc_count(tmp));
+
+    JS_FreeContext(ctx);
+    JS_FreeRuntime(rt);
+    nftw(tmp, jbc_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+}
+
+UTEST(js_bytecode_cache, opt_out_via_env_skips_disk)
+{
+    char tmp[256];
+    jbc_with_tmp_home(tmp);
+    setenv("HULL_NO_JS_BYTECODE_CACHE", "1", 1);
+    hl_js_bytecode_cache_reset();
+
+    JSRuntime *rt = JS_NewRuntime();
+    JSContext *ctx = JS_NewContext(rt);
+
+    JSValue v = hl_js_compile_module_cached(ctx, JBC_PROBE,
+                                            strlen(JBC_PROBE),
+                                            "test:probe");
+    ASSERT_FALSE(JS_IsException(v));
+    JS_FreeValue(ctx, v);
+    ASSERT_EQ_MSG(0, jbc_count(tmp),
+                  "no entry written when opted out");
+
+    JS_FreeContext(ctx);
+    JS_FreeRuntime(rt);
+    unsetenv("HULL_NO_JS_BYTECODE_CACHE");
+    nftw(tmp, jbc_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+}
+
+UTEST(js_bytecode_cache, tiny_source_skips_cache)
+{
+    char tmp[256];
+    jbc_with_tmp_home(tmp);
+
+    const char *tiny = "export default 1;\n";  /* < 256 bytes */
+    JSRuntime *rt = JS_NewRuntime();
+    JSContext *ctx = JS_NewContext(rt);
+
+    JSValue v = hl_js_compile_module_cached(ctx, tiny, strlen(tiny),
+                                            "test:tiny");
+    ASSERT_FALSE(JS_IsException(v));
+    JS_FreeValue(ctx, v);
+    ASSERT_EQ_MSG(0, jbc_count(tmp),
+                  "tiny modules bypass cache");
+
+    JS_FreeContext(ctx);
+    JS_FreeRuntime(rt);
+    nftw(tmp, jbc_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+}
+
+UTEST(js_bytecode_cache, module_name_in_key)
+{
+    /* The cache key folds in module_name because QuickJS bakes the
+     * name into the bytecode. Same source under two different
+     * names → two distinct entries. */
+    char tmp[256];
+    jbc_with_tmp_home(tmp);
+
+    JSRuntime *rt = JS_NewRuntime();
+    JSContext *ctx = JS_NewContext(rt);
+
+    JSValue v1 = hl_js_compile_module_cached(ctx, JBC_PROBE,
+                                             strlen(JBC_PROBE),
+                                             "test:name_a");
+    ASSERT_FALSE(JS_IsException(v1));
+    JS_FreeValue(ctx, v1);
+
+    JSValue v2 = hl_js_compile_module_cached(ctx, JBC_PROBE,
+                                             strlen(JBC_PROBE),
+                                             "test:name_b");
+    ASSERT_FALSE(JS_IsException(v2));
+    JS_FreeValue(ctx, v2);
+
+    ASSERT_EQ_MSG(2, jbc_count(tmp),
+                  "distinct module names produce distinct entries");
+
+    JS_FreeContext(ctx);
+    JS_FreeRuntime(rt);
+    nftw(tmp, jbc_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+}
+
+UTEST(js_bytecode_cache, parse_error_returns_no_cache_write)
+{
+    char tmp[256];
+    jbc_with_tmp_home(tmp);
+
+    const char *bad =
+        "// pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+        "// pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+        "// pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+        "// pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+        "this is = not = valid JS )( syntax error here\n";
+
+    JSRuntime *rt = JS_NewRuntime();
+    JSContext *ctx = JS_NewContext(rt);
+
+    JSValue v = hl_js_compile_module_cached(ctx, bad, strlen(bad),
+                                            "test:bad");
+    ASSERT_TRUE(JS_IsException(v));
+    /* Drain the exception. */
+    JSValue exc = JS_GetException(ctx);
+    JS_FreeValue(ctx, exc);
+    JS_FreeValue(ctx, v);
+    ASSERT_EQ(0, jbc_count(tmp));
+
+    JS_FreeContext(ctx);
+    JS_FreeRuntime(rt);
+    nftw(tmp, jbc_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
 }
 
 UTEST_MAIN();

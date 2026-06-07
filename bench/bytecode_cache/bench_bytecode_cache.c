@@ -114,7 +114,7 @@ int main(void)
     mkdtemp(tmp);
     setenv("HOME", tmp, 1);
     unsetenv("HULL_NO_CACHE");
-    unsetenv("HULL_NO_BYTECODE_CACHE");
+    unsetenv("HULL_NO_LUA_BYTECODE_CACHE");
 
     Chunk chunks[N_CHUNKS];
     size_t total = 0;
@@ -144,9 +144,9 @@ int main(void)
             warm * 1000.0, warm * 1.0e6 / N_CHUNKS);
 
     /* Bypass pass: cache disabled — same as pre-cache baseline. */
-    setenv("HULL_NO_BYTECODE_CACHE", "1", 1);
+    setenv("HULL_NO_LUA_BYTECODE_CACHE", "1", 1);
     double bypass = run_pass(chunks, N_CHUNKS);
-    unsetenv("HULL_NO_BYTECODE_CACHE");
+    unsetenv("HULL_NO_LUA_BYTECODE_CACHE");
     printf("BYPASS (no cache):   %.3f ms total   %.1f µs/load\n",
             bypass * 1000.0, bypass * 1.0e6 / N_CHUNKS);
 

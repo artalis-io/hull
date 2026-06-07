@@ -615,14 +615,42 @@ runtime caches live outside the manifest:
   to how it reports the CA bundle and tools status today).
 - **`hull inspect`** surfaces "this binary uses caches at:
   `~/.hull/cache/...`" — informational, not a permission.
-- **Opt-out env vars**: `HULL_NO_CACHE=1` disables all runtime caches;
-  `HULL_NO_BYTECODE_CACHE=1`, `HULL_NO_AOT_CACHE=1`,
-  `HULL_NO_TEMPLATE_CACHE=1` for granular control. Always-honored;
-  disabling forces re-derive on every load.
-- **`hull cache list|prune|clear`** subcommand surfaces what's
-  actually stored, evicts old entries, or wipes everything.
-  Registry-driven via `include/hull/cache_registry.h` so adding a
-  new cache kind automatically picks up disclosure + management.
+- **Opt-out env vars** — checked on every cache call (not memoized
+  at process start), so flipping mid-process takes effect on the
+  next access:
+
+  | Variable | Effect when truthy |
+  |---|---|
+  | `HULL_NO_CACHE` | Disables every runtime cache (lua-bytecode, js-bytecode, compute-aot, templates). Tools store unaffected. |
+  | `HULL_NO_LUA_BYTECODE_CACHE` | Lua bytecode cache only. |
+  | `HULL_NO_JS_BYTECODE_CACHE` | QuickJS bytecode cache only. |
+  | `HULL_NO_AOT_CACHE` | Compute AOT cache only. |
+  | `HULL_NO_TEMPLATE_CACHE` | Template render-fn cache only. |
+
+  Truthy = anything not in {empty, `0`, `false`, `FALSE`, leading
+  `f`/`F`}. Disabling forces re-derive on every load.
+
+- **`hull cache list|prune|clear`** surfaces what's actually
+  stored, evicts old entries, or wipes everything. The Status
+  column reflects per-cache opt-out state (`ok` / `off (env)` /
+  `off (all)` / `n/a` for system stores) and a footer line names
+  the active env var. JSON output includes `env_var` + `disabled`
+  fields per kind.
+
+- **Registry-driven**: `include/hull/cache_registry.h` is the
+  single source of truth for cache kinds (display name +
+  description + runtime/system flag + env_kind). Adding a new
+  cache kind = one entry in `REGISTRY[]` and the new kind
+  automatically gets:
+    - matching `HULL_NO_<KIND>_CACHE` env var (composed from
+      `env_kind`),
+    - Status column in `hull cache list`,
+    - a row in `hull doctor` Caches section,
+    - a row in `hull inspect` runtime-caches disclosure,
+    - participation in `hull cache prune` (if runtime) and
+      `hull cache clear`.
+
+  Zero per-surface code beyond the registry row.
 
 ### Per-app cache isolation (`HULL_CACHE_DIR`)
 

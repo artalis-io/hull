@@ -42,6 +42,18 @@ typedef struct {
      *      `cache clear --kind=<name>`. Used for durable signed
      *      artifacts (tools install). */
     int is_runtime;
+
+    /** Kind string to pass to `hl_hull_cache_disabled()` for the
+     *  per-cache opt-out. The function uppercases the string and
+     *  builds `HULL_NO_<env_kind_upper>_CACHE` — e.g.
+     *  `"lua_bytecode"` → `HULL_NO_LUA_BYTECODE_CACHE`. NULL =
+     *  no opt-out (system stores like `tools` aren't caches, so
+     *  there's nothing to skip).
+     *
+     *  Stored separately from `name` so display names can stay in
+     *  kebab-case (`"lua-bytecode"`) while env-var names follow
+     *  the SCREAMING_SNAKE convention. */
+    const char *env_kind;
 } HlCacheKind;
 
 /**

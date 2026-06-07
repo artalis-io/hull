@@ -19,12 +19,17 @@
  *
  * Order matters for `cache list` output — runtime caches first
  * (most-relevant for prune), system stores at the end. */
+/* env_kind maps to HULL_NO_<UPPER>_CACHE — see hl_hull_cache_disabled
+ * in cache_dir.c. Display names stay kebab-case for path / UI;
+ * env-var kinds are snake_case so the SCREAMING_SNAKE result reads
+ * naturally. */
 static const HlCacheKind REGISTRY[] = {
-    { "lua-bytecode", "Lua stdlib + app bytecode (luaL_loadbuffer skip)",     1 },
-    { "compute-aot",  "WASM AOT artifacts (wamrc output, sha-keyed)",          1 },
-    { "templates",    "Template render functions (parse + pcall skip)",        1 },
-    { "tools",        "Signed side-loaded tool binaries (wamrc, ...)",         0 },
-    { NULL, NULL, 0 }
+    { "lua-bytecode", "Lua stdlib + app bytecode (luaL_loadbuffer skip)",     1, "lua_bytecode" },
+    { "js-bytecode",  "QuickJS module bytecode (JS_Eval parse skip)",          1, "js_bytecode"  },
+    { "compute-aot",  "WASM AOT artifacts (wamrc output, sha-keyed)",          1, "aot"          },
+    { "templates",    "Template render functions (parse + pcall skip)",        1, "template"     },
+    { "tools",        "Signed side-loaded tool binaries (wamrc, ...)",         0, NULL           },
+    { NULL, NULL, 0, NULL }
 };
 
 const HlCacheKind *hl_cache_registry(void)

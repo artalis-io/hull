@@ -62,16 +62,28 @@ int hl_hull_cache_subdir(const char *name, char *out, size_t out_sz);
 /**
  * @brief Check whether runtime caches are globally disabled.
  *
- * Honors:
- *   - `HULL_NO_CACHE=1`         — disables everything
- *   - `HULL_NO_BYTECODE_CACHE=1` — disables Lua bytecode cache only
- *   - `HULL_NO_AOT_CACHE=1`     — disables compute AOT cache only
- *   - `HULL_NO_TEMPLATE_CACHE=1` — disables template AST cache only
+ * Composes the env-var name `HULL_NO_<KIND_UPPER>_CACHE` from
+ * `kind`, then returns truthy if EITHER `HULL_NO_CACHE` (global
+ * kill-switch) OR that per-kind variable is set to a truthy value
+ * (anything not in {"", "0", "false", "FALSE", "f*", "F*"}).
  *
- * Pass NULL for `kind` to check only the global switch.
+ * Granular env vars are derived from each cache module's chosen
+ * kind string and the registry's `env_kind` field — the canonical
+ * set today is:
  *
- * @param kind  Per-cache specifier ("bytecode", "aot", "template"),
- *              or NULL for global-only.
+ *   - `HULL_NO_CACHE=1`                — global kill-switch
+ *   - `HULL_NO_LUA_BYTECODE_CACHE=1`   — Lua bytecode cache
+ *   - `HULL_NO_JS_BYTECODE_CACHE=1`    — QuickJS bytecode cache
+ *   - `HULL_NO_AOT_CACHE=1`            — WASM AOT artifacts
+ *   - `HULL_NO_TEMPLATE_CACHE=1`       — template render fns
+ *
+ * Pass NULL for `kind` to check only the global switch. Pass the
+ * per-cache kind (lowercase, e.g. `"lua_bytecode"`) to also
+ * consult the granular variable.
+ *
+ * @param kind  Per-cache specifier (e.g. `"lua_bytecode"`,
+ *              `"js_bytecode"`, `"aot"`, `"template"`), or NULL
+ *              for global-only.
  * @return Non-zero if caches (of the specified kind) are disabled.
  */
 int hl_hull_cache_disabled(const char *kind);

@@ -22,7 +22,7 @@
  * vanilla luaL_loadbuffer on the source. The cache is an
  * optimization; correctness never depends on it.
  *
- * Disable via HULL_NO_CACHE=1 or HULL_NO_BYTECODE_CACHE=1.
+ * Disable via HULL_NO_CACHE=1 or HULL_NO_LUA_BYTECODE_CACHE=1.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */

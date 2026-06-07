@@ -930,7 +930,7 @@ new external user-facing feature.
 - `hull inspect` surfaces "this binary uses caches at:
   `~/.hull/cache/...`" — informational, not a permission.
 - Opt-out env vars: `HULL_NO_CACHE=1` disables all runtime caches;
-  `HULL_NO_BYTECODE_CACHE=1`, `HULL_NO_AOT_CACHE=1`,
+  `HULL_NO_LUA_BYTECODE_CACHE=1`, `HULL_NO_AOT_CACHE=1`,
   `HULL_NO_TEMPLATE_CACHE=1` for granular control. Always-honored;
   disabling forces re-derive on every load.
 - New `hull cache list|prune|clear` subcommand surfaces what's
@@ -971,7 +971,7 @@ Tasks (target v0.1.10):
       preserve `ar.source` for the `_hull_*` namespace gate).
       Sandbox auto-allows the cache root on both seatbelt (macOS)
       and pledge/unveil (Linux/Cosmo). Honors `HULL_NO_CACHE=1` and
-      `HULL_NO_BYTECODE_CACHE=1`. Falls back transparently to
+      `HULL_NO_LUA_BYTECODE_CACHE=1`. Falls back transparently to
       `luaL_loadbuffer` on any cache I/O failure. 5 unit tests in
       `test_lua` (`lua_bytecode_cache.*`).
       **Routed through `hl_blob_store_*` as of the cap/store
@@ -1167,6 +1167,48 @@ Tasks (target v0.1.10):
       `tests/e2e_cache.sh` (+7 inspect assertions).
       Verified: 39/39 e2e_cache, 42/42 unit, 36/36 e2e_blob,
       118/118 e2e_build, 40/40 e2e_templates.
+- [x] §1.5.b-X-9. QuickJS bytecode cache. **Landed (JS-side
+      parity with X-1).** `hl_js_compile_module_cached` wraps
+      `JS_Eval(JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY)`
+      with on-disk memoization. On hit, `JS_ReadObject` with
+      `JS_READ_OBJ_BYTECODE` skips the parse pass entirely.
+      Cache key = sha256(QJS_TAG || arch || endian ||
+      module_name || source). `module_name` is in the key
+      because QuickJS bakes it into the bytecode for traceback.
+      Store: `$HOME/.hull/blobs/runtime/js-bytecode/` via the
+      same `hl_blob_store_put_keyed` primitive backing every
+      other runtime cache.
+      Wired into all three JS module-load sites (platform_vfs,
+      app_vfs, filesystem dev mode) in `runtime/js/runtime.c`
+      with a one-line swap from `JS_Eval(...)` to the cached
+      helper.
+      QJS_TAG (currently `"qjs-2024-01-13"`) tracks the
+      vendored snapshot — must bump together with any
+      `vendor/quickjs/` change to avoid loading stale bytecode
+      into an incompatible runtime.
+      Auto-registered in `hl_cache_registry()` as `"js-bytecode"`
+      so it picks up `hull cache list|prune|clear`, `hull doctor`
+      Caches section, and `hull inspect` runtime-caches
+      disclosure with zero per-surface code.
+      Honors `HULL_NO_CACHE=1` and `HULL_NO_JS_BYTECODE_CACHE=1`.
+      Falls back to fresh `JS_Eval` on any cache I/O failure
+      (corrupt file → unlink + recompile + repersist).
+      Files: `include/hull/runtime/js_bytecode_cache.h`,
+      `src/hull/runtime/js/bytecode_cache.c`,
+      `src/hull/runtime/js/runtime.c` (3-site swap),
+      `src/hull/cache_registry.c` (+1 row),
+      `bench/bytecode_cache/bench_js_bytecode_cache.c`,
+      5 new utests in `test_js`
+      (`js_bytecode_cache.*`).
+      Verified: 42/42 unit suites, 280/280 e2e_examples
+      (every JS example boots and serves through the cached
+      path), 39/39 e2e_cache.
+      Microbench (M-series, 70 synthetic 3.8 KB modules):
+        - COLD:   974 µs/load (parse + serialize + write)
+        - WARM:   202 µs/load (read + JS_ReadObject)
+        - BYPASS: 262 µs/load (parse, no persist)
+        - Warm speedup: 1.30× — matches the Lua cache exactly.
+
 - [ ] §1.5.b-X-8. LLM artifact cache (latent, v0.1.11+). Deferred
       until a real LLM consumer in Hull exists. Key shape:
       `sha256(prompt || context || model_id || temperature)`. LRU

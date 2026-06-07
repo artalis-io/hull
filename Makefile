@@ -2595,6 +2595,16 @@ $(BUILDDIR)/bench_bytecode_cache: bench/bytecode_cache/bench_bytecode_cache.c $(
 bench-bytecode-cache: $(BUILDDIR)/bench_bytecode_cache
 	$(BUILDDIR)/bench_bytecode_cache
 
+# QuickJS bytecode cache cold/warm microbench (JS-side parity).
+$(BUILDDIR)/bench_js_bytecode_cache: bench/bytecode_cache/bench_js_bytecode_cache.c $(BUILDDIR)/js_bytecode_cache.o $(TEST_COMMON_DEPS) $(QJS_OBJS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ \
+		bench/bytecode_cache/bench_js_bytecode_cache.c \
+		$(BUILDDIR)/js_bytecode_cache.o \
+		$(TEST_COMMON_LIBS) $(QJS_OBJS)
+
+bench-js-bytecode-cache: $(BUILDDIR)/bench_js_bytecode_cache
+	$(BUILDDIR)/bench_js_bytecode_cache
+
 # GPU vs WASM vs native benchmark (requires HL_ENABLE_GPU=1)
 BENCH_GPU_ARCH := $(shell uname -m | sed 's/arm64/aarch64/')
 BENCH_GPU_AOT  := bench/gpu/cosine.aot.$(BENCH_GPU_ARCH)

@@ -15,6 +15,7 @@
 
 #include "internal.h"
 
+#include "hull/runtime/js_bytecode_cache.h"
 #include "hull/alloc.h"
 #include "hull/async_backend.h"
 #include "hull/limits/runtime.h"
@@ -244,10 +245,8 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
                 if (!src) return NULL;
                 memcpy(src, e->data, e->len);
                 src[e->len] = '\0';
-                JSValue func = JS_Eval(ctx, src, e->len,
-                                       module_name,
-                                       JS_EVAL_TYPE_MODULE |
-                                       JS_EVAL_FLAG_COMPILE_ONLY);
+                JSValue func = hl_js_compile_module_cached(
+                    ctx, src, e->len, module_name);
                 js_free(ctx, src);
                 if (JS_IsException(func))
                     return NULL;
@@ -367,9 +366,8 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
                     src_len = pos + slen;
                 }
 
-                JSValue func = JS_Eval(ctx, src, src_len, module_name,
-                                       JS_EVAL_TYPE_MODULE |
-                                       JS_EVAL_FLAG_COMPILE_ONLY);
+                JSValue func = hl_js_compile_module_cached(
+                    ctx, src, src_len, module_name);
                 if (buf) js_free(ctx, buf);
                 if (JS_IsException(func))
                     return NULL;
@@ -485,9 +483,8 @@ static JSModuleDef *hl_js_module_loader(JSContext *ctx,
         nread = pos + suffix_len;
     }
 
-    /* Compile as module */
-    JSValue func = JS_Eval(ctx, buf, nread, module_name,
-                           JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+    /* Compile as module (with bytecode cache transparently in front) */
+    JSValue func = hl_js_compile_module_cached(ctx, buf, nread, module_name);
     js_free(ctx, buf);
 
     if (JS_IsException(func))

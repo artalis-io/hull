@@ -172,9 +172,12 @@ int hl_lua_load_cached(lua_State *L,
                        const char *src, size_t src_len,
                        const char *chunkname)
 {
-    /* Fast bail: cache disabled, source too tiny to bother. */
+    /* Fast bail: cache disabled, source too tiny to bother.
+     * Kind string is "lua_bytecode" so the env-var builder
+     * produces HULL_NO_LUA_BYTECODE_CACHE — symmetric with
+     * HULL_NO_JS_BYTECODE_CACHE on the JS side. */
     if (!src || src_len < 256 ||
-        hl_hull_cache_disabled("bytecode")) {
+        hl_hull_cache_disabled("lua_bytecode")) {
         return luaL_loadbuffer(L, src, src_len, chunkname);
     }
 

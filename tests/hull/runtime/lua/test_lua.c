@@ -2873,7 +2873,7 @@ static void bc_with_tmp_home(char tmpdir[256])
     setenv("HOME", tmpdir, 1);
     /* Make sure no stale opt-out from a previous test leaks in. */
     unsetenv("HULL_NO_CACHE");
-    unsetenv("HULL_NO_BYTECODE_CACHE");
+    unsetenv("HULL_NO_LUA_BYTECODE_CACHE");
     /* Tear down the process-wide store singleton so the next call
      * resolves to the freshly-redirected $HOME. */
     hl_lua_bytecode_cache_reset();
@@ -2956,7 +2956,7 @@ UTEST(lua_bytecode_cache, opt_out_via_env_skips_disk)
 {
     char tmp[256];
     bc_with_tmp_home(tmp);
-    setenv("HULL_NO_BYTECODE_CACHE", "1", 1);
+    setenv("HULL_NO_LUA_BYTECODE_CACHE", "1", 1);
 
     lua_State *L = luaL_newstate();
     int rc = hl_lua_load_cached(L, BC_PROBE_SRC, strlen(BC_PROBE_SRC), "=probe");
@@ -2967,7 +2967,7 @@ UTEST(lua_bytecode_cache, opt_out_via_env_skips_disk)
     lua_pop(L, 1);
     lua_close(L);
 
-    unsetenv("HULL_NO_BYTECODE_CACHE");
+    unsetenv("HULL_NO_LUA_BYTECODE_CACHE");
     bc_cleanup_tmp_home(tmp);
 }
 

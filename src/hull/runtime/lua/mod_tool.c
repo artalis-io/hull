@@ -730,19 +730,23 @@ static int l_tool_cache_override(lua_State *L)
     return 1;
 }
 
-/* ── tool.cache_kinds() → { {name, description, is_runtime, path}, ... }
+/* ── tool.cache_kinds() → list of cache-kind tables.
  *
- * Exposes the C-side cache registry (hl_cache_registry()) to Lua
- * so tooling like `hull inspect` can enumerate every runtime
- * cache the binary will touch without hard-coding the list.
- * Returns the resolved on-disk path for each kind so callers can
- * surface them directly. `path` is empty when the kind is
- * unresolvable on this host (e.g. HOME unset).
+ * Each entry: { name, description, is_runtime, path, env_var,
+ *               disabled }.
+ *
+ *   env_var   — the granular opt-out env var ("HULL_NO_<X>_CACHE")
+ *               or empty string for system stores (tools — no
+ *               opt-out because it isn't a cache).
+ *   disabled  — true if either HULL_NO_CACHE or env_var is set
+ *               truthy in the current process.
  *
  * Single source of truth: adding a new entry to REGISTRY[] in
  * cache_registry.c automatically picks up disclosure here. */
 static int l_tool_cache_kinds(lua_State *L)
 {
+    int global_off = hl_hull_cache_disabled(NULL);
+
     lua_newtable(L);
     int idx = 1;
     for (const HlCacheKind *k = hl_cache_registry(); k->name; k++) {
@@ -760,6 +764,37 @@ static int l_tool_cache_kinds(lua_State *L)
         else
             lua_pushstring(L, "");
         lua_setfield(L, -2, "path");
+
+        /* Build the env-var name from env_kind, mirroring
+         * cache_dir.c's hl_hull_cache_disabled composition.
+         * NULL env_kind → system store (no per-cache opt-out). */
+        if (k->env_kind) {
+            char env_name[64];
+            size_t pre = strlen("HULL_NO_");
+            size_t suf = strlen("_CACHE");
+            size_t kl  = strlen(k->env_kind);
+            if (pre + kl + suf + 1 <= sizeof(env_name)) {
+                memcpy(env_name, "HULL_NO_", pre);
+                for (size_t j = 0; j < kl; j++) {
+                    char c = k->env_kind[j];
+                    if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+                    env_name[pre + j] = c;
+                }
+                memcpy(env_name + pre + kl, "_CACHE", suf);
+                env_name[pre + kl + suf] = '\0';
+                lua_pushstring(L, env_name);
+            } else {
+                lua_pushstring(L, "");
+            }
+        } else {
+            lua_pushstring(L, "");
+        }
+        lua_setfield(L, -2, "env_var");
+
+        int per_kind_off = k->env_kind
+            ? hl_hull_cache_disabled(k->env_kind) : 0;
+        lua_pushboolean(L, global_off || per_kind_off);
+        lua_setfield(L, -2, "disabled");
 
         lua_rawseti(L, -2, idx++);
     }
