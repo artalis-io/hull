@@ -451,15 +451,21 @@ hardware acceleration, `put_verified` short-circuit, durable opt-in,
   expected SHA from the manifest, blob's check becomes a one-stat fast
   path on hit.
 
-- **ARMv8 SHA2 acceleration delivers ~10× speedup over portable
+- **Hardware SHA-256 acceleration delivers ~10× speedup over portable
   software SHA-256.** Raw SHA throughput went from ~200 MB/s
   (sha256_transform_portable) to ~2 GB/s (sha256_transform_armv8) on
   M-series. Compounds with the put pipeline: large-blob put almost
   tripled (140 → 370 MB/s), and 64 KiB put nearly doubled (98 → 181
-  MB/s). On Apple Silicon the FEAT_SHA2 path is always-on (no runtime
-  detection — every shipped Apple Silicon has SHA2). Linux/Cosmo arm64
-  runtime detection (`getauxval(AT_HWCAP) & HWCAP_SHA2`) is deferred
-  to v0.1.10; x86_64 SHA-NI same.
+  MB/s). Three platform paths, runtime-dispatched on first transform
+  call (one branch on a cached `int`):
+    * **ARMv8-A FEAT_SHA2** — always-on for `__APPLE__` (Apple
+      Silicon guarantees it on every shipped chip), runtime-detected
+      via `getauxval(AT_HWCAP) & HWCAP_SHA2` for Linux/Cosmo arm64.
+    * **x86_64 SHA Extensions** (Goldmont Plus / Skylake-X /
+      Tiger Lake / Alder Lake / Zen+ and later) — runtime-detected
+      via `CPUID.7.0:EBX[29]`.
+    * **Portable C** — fallback for everything else (32-bit ARM,
+      RISC-V, older x86 without SHA-NI).
 
 - **Durable put costs ~12% throughput** on APFS (2.9K → 2.6K ops/s for
   64 KiB blobs, with `fsync(fd)` before close + `fsync(dirfd)` after

@@ -57,6 +57,27 @@ UTEST(hl_cap_crypto, sha256_longer)
         "d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592");
 }
 
+UTEST(hl_cap_crypto, sha256_multi_block)
+{
+    /* Exercises the hardware-acceleration paths (ARMv8 SHA2 + x86
+     * SHA-NI) across block boundaries. 1 MiB of zeros = 16384
+     * blocks; any bug in state-carryover between blocks would
+     * produce the wrong digest. */
+    size_t n = 1024 * 1024;
+    uint8_t *buf = calloc(1, n);
+    ASSERT_TRUE(buf != NULL);
+    uint8_t hash[32];
+    int rc = hl_cap_crypto_sha256(buf, n, hash);
+    free(buf);
+    ASSERT_EQ(rc, 0);
+
+    char hex[65];
+    hex_encode(hash, 32, hex);
+    /* SHA-256 of 1 MiB of zero bytes — well-known constant. */
+    ASSERT_STREQ(hex,
+        "30e14955ebf1352266dc2ff8067e68104607e750abb9d3b36582b8af909fcb58");
+}
+
 UTEST(hl_cap_crypto, sha256_null)
 {
     /* (NULL, 0) is the well-defined "hash the empty input" case —
