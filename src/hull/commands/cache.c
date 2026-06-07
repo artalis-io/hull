@@ -77,6 +77,89 @@ static void json_emit_str(FILE *f, const char *s)
     fputc('"', f);
 }
 
+/* Parse a duration string with an optional unit suffix:
+ *   "30"  → 30 seconds (bare number; legacy behaviour)
+ *   "30s" → 30 seconds
+ *   "5m"  → 300 seconds
+ *   "2h"  → 7 200 seconds
+ *   "7d"  → 604 800 seconds
+ *   "2w"  → 1 209 600 seconds
+ *   "1y"  → 31 536 000 seconds (365 days, calendar-agnostic)
+ *
+ * Returns the duration in seconds, or 0 + sets `*err` on failure.
+ * 0 is also the "no bound" sentinel for cleanup opts, so callers
+ * distinguish "unset" from "invalid" via the error pointer.
+ *
+ * Single unit only (no "1d12h" composites) — keeps the parser
+ * trivial and the CLI predictable. */
+static uint64_t parse_duration(const char *s, const char **err)
+{
+    *err = NULL;
+    if (!s || !*s) { *err = "empty duration"; return 0; }
+
+    char *endp = NULL;
+    errno = 0;
+    unsigned long long v = strtoull(s, &endp, 10);
+    if (errno || endp == s) { *err = "not a number"; return 0; }
+
+    uint64_t mult;
+    if (*endp == '\0' || *endp == 's')      mult = 1;
+    else if (*endp == 'm' && endp[1] == '\0') mult = 60;
+    else if (*endp == 'h' && endp[1] == '\0') mult = 3600;
+    else if (*endp == 'd' && endp[1] == '\0') mult = 86400;
+    else if (*endp == 'w' && endp[1] == '\0') mult = 604800;
+    else if (*endp == 'y' && endp[1] == '\0') mult = 31536000ULL;
+    else { *err = "bad unit (use s/m/h/d/w/y)"; return 0; }
+
+    /* Overflow guard. */
+    if (mult > 1 && v > UINT64_MAX / mult) { *err = "overflow"; return 0; }
+    return (uint64_t)v * mult;
+}
+
+/* Parse a size string with an optional unit suffix (binary,
+ * 1024-based, matching how `format_size` displays them):
+ *   "1048576" → 1 048 576 bytes (bare number; legacy behaviour)
+ *   "1024"    → 1 024 bytes
+ *   "1K"      → 1 024 bytes
+ *   "10M"     → 10 485 760 bytes
+ *   "1G"      → 1 073 741 824 bytes
+ *
+ * Lowercase suffixes (`k`/`m`/`g`) accepted. Trailing `B` ignored
+ * (so `10MB` is also valid). 0 + non-NULL `*err` on failure. */
+static uint64_t parse_size(const char *s, const char **err)
+{
+    *err = NULL;
+    if (!s || !*s) { *err = "empty size"; return 0; }
+
+    char *endp = NULL;
+    errno = 0;
+    unsigned long long v = strtoull(s, &endp, 10);
+    if (errno || endp == s) { *err = "not a number"; return 0; }
+
+    /* Strip an optional trailing 'B'/'b' so "10MB" and "10M" both
+     * work. Check unit-letter first since we then look at what
+     * follows for the B. */
+    char unit = *endp;
+    uint64_t mult;
+    if (unit == '\0' || unit == 'B' || unit == 'b') mult = 1;
+    else if (unit == 'K' || unit == 'k')            mult = 1024ULL;
+    else if (unit == 'M' || unit == 'm')            mult = 1024ULL * 1024;
+    else if (unit == 'G' || unit == 'g')            mult = 1024ULL * 1024 * 1024;
+    else { *err = "bad unit (use K/M/G; B optional)"; return 0; }
+
+    /* If we matched a multiplier, allow an optional trailing 'B'. */
+    if (mult > 1) {
+        endp++;
+        if (*endp == 'B' || *endp == 'b') endp++;
+    } else if (unit == 'B' || unit == 'b') {
+        endp++;
+    }
+    if (*endp != '\0') { *err = "trailing garbage"; return 0; }
+
+    if (mult > 1 && v > UINT64_MAX / mult) { *err = "overflow"; return 0; }
+    return (uint64_t)v * mult;
+}
+
 /* Build the HULL_NO_<KIND>_CACHE env-var name for a registry
  * entry. Mirrors the composition rule in cache_dir.c's
  * hl_hull_cache_disabled. Returns an empty string for system
@@ -290,11 +373,28 @@ static int cmd_prune(int argc, char **argv)
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
+        const char *parse_err = NULL;
         if (strncmp(a, "--kind=", 7) == 0)        kind_name = a + 7;
-        else if (strncmp(a, "--max-size=", 11) == 0)
-            max_size = strtoull(a + 11, NULL, 10);
-        else if (strncmp(a, "--max-age=", 10) == 0)
-            max_age  = strtoull(a + 10, NULL, 10);
+        else if (strncmp(a, "--max-size=", 11) == 0) {
+            max_size = parse_size(a + 11, &parse_err);
+            if (parse_err) {
+                fprintf(stderr,
+                    "hull cache prune: bad --max-size value '%s' (%s)\n"
+                    "  examples: --max-size=100M  --max-size=2G  --max-size=1048576\n",
+                    a + 11, parse_err);
+                return 2;
+            }
+        }
+        else if (strncmp(a, "--max-age=", 10) == 0) {
+            max_age = parse_duration(a + 10, &parse_err);
+            if (parse_err) {
+                fprintf(stderr,
+                    "hull cache prune: bad --max-age value '%s' (%s)\n"
+                    "  examples: --max-age=30d  --max-age=24h  --max-age=2592000\n",
+                    a + 10, parse_err);
+                return 2;
+            }
+        }
         else if (strcmp(a, "--strategy=lru") == 0)  strategy = HL_BLOB_STORE_LRU;
         else if (strcmp(a, "--strategy=fifo") == 0) strategy = HL_BLOB_STORE_FIFO;
         else if (strcmp(a, "--dry-run") == 0)       dry_run = 1;
@@ -493,6 +593,10 @@ static void usage(FILE *f)
 "                                 Evict from runtime caches by age / total\n"
 "                                 size. System stores (tools) are skipped\n"
 "                                 unless --kind=tools is set.\n"
+"                                 --max-size accepts K / M / G suffixes\n"
+"                                   (binary, 1024-based; B optional).\n"
+"                                 --max-age accepts s / m / h / d / w / y\n"
+"                                   suffixes (bare numbers = seconds).\n"
 "  clear [--kind=K] --yes         Wipe runtime caches entirely. With\n"
 "                                 --kind=K, restrict to one cache.\n"
 "\n"
@@ -505,8 +609,9 @@ static void usage(FILE *f)
 "\n"
 "Examples:\n"
 "  hull cache list\n"
-"  hull cache prune --max-size=$((100*1024*1024))\n"
-"  hull cache prune --max-age=$((30*86400)) --strategy=lru\n"
+"  hull cache prune --max-size=100M\n"
+"  hull cache prune --max-age=30d --strategy=lru\n"
+"  hull cache prune --max-age=24h --dry-run\n"
 "  hull cache clear --kind=lua-bytecode --yes\n"
 "  HULL_CACHE_DIR=/var/lib/myapp/cache hull cache list\n");
 }

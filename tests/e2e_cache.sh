@@ -378,6 +378,65 @@ case "$OUT" in
     *) fail "old HULL_NO_BYTECODE_CACHE should be ignored now" ;;
 esac
 
+# ── 19. Time-string + size-string parsers for `cache prune` ───────
+# --max-age accepts unit suffixes (s/m/h/d/w/y).
+RC=0
+OUT=$("$HULL" cache prune --max-age=30d --dry-run 2>&1) || RC=$?
+[ "$RC" -eq 0 ] && pass "prune --max-age=30d parses cleanly" \
+                || fail "prune --max-age=30d" "rc=$RC out=$OUT"
+RC=0
+OUT=$("$HULL" cache prune --max-age=24h --dry-run 2>&1) || RC=$?
+[ "$RC" -eq 0 ] && pass "prune --max-age=24h parses cleanly" \
+                || fail "prune --max-age=24h"
+# Bare seconds still work (back-compat).
+RC=0
+OUT=$("$HULL" cache prune --max-age=2592000 --dry-run 2>&1) || RC=$?
+[ "$RC" -eq 0 ] && pass "prune --max-age=2592000 (bare seconds) still accepted" \
+                || fail "bare-seconds max-age regressed"
+# Bad unit rejected with hint.
+RC=0
+OUT=$("$HULL" cache prune --max-age=30days --dry-run 2>&1) || RC=$?
+[ "$RC" -ne 0 ] && pass "prune rejects unknown duration unit" \
+                || fail "prune accepted bad unit"
+case "$OUT" in
+    *"examples: --max-age=30d"*)
+        pass "prune error includes example" ;;
+    *) fail "prune error example missing" ;;
+esac
+
+# --max-size accepts K/M/G suffixes.
+RC=0
+OUT=$("$HULL" cache prune --max-size=100M --dry-run 2>&1) || RC=$?
+[ "$RC" -eq 0 ] && pass "prune --max-size=100M parses cleanly" \
+                || fail "prune --max-size=100M"
+RC=0
+OUT=$("$HULL" cache prune --max-size=100MB --dry-run 2>&1) || RC=$?
+[ "$RC" -eq 0 ] && pass "prune --max-size=100MB (trailing B) parses" \
+                || fail "prune --max-size=100MB"
+RC=0
+OUT=$("$HULL" cache prune --max-size=104857600 --dry-run 2>&1) || RC=$?
+[ "$RC" -eq 0 ] && pass "prune --max-size=104857600 (bare bytes) still accepted" \
+                || fail "bare-bytes max-size regressed"
+
+# ── 20. doctor surfaces a "large cache" warning past the threshold
+LARGE_HOME=$(mktemp -d)
+mkdir -p "$LARGE_HOME/.hull/blobs/runtime/lua-bytecode/blobs/aa"
+# 300 MB of zeros — comfortably past the 250 MB per-kind threshold.
+# bs=1m is a macOS-ism (Linux uses 1M); use 1024*1024 bytes for both.
+dd if=/dev/zero of="$LARGE_HOME/.hull/blobs/runtime/lua-bytecode/blobs/aa/aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899" \
+    bs=1048576 count=300 >/dev/null 2>&1
+OUT=$(HOME="$LARGE_HOME" "$HULL" doctor 2>&1)
+case "$OUT" in
+    *"lua-bytecode"*"large"*) pass "doctor flags large per-kind cache" ;;
+    *) fail "doctor large-kind warning" ;;
+esac
+case "$OUT" in
+    *"hull cache prune --max-age=30d"*)
+        pass "doctor surfaces actionable prune hint" ;;
+    *) fail "doctor prune hint" ;;
+esac
+rm -rf "$LARGE_HOME"
+
 echo ""
 echo "$PASS/$((PASS + FAIL)) e2e cache tests passed"
 [ "$FAIL" -eq 0 ]

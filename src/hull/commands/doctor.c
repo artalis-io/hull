@@ -494,12 +494,23 @@ static void print_human(FILE *f, CompilerInfo *ci, int nci,
      *   ✓  store exists with entries on disk
      *   ○  no entries yet (cache cold)
      *   ✗  path unresolvable (e.g. HOME unset)
+     *
      * The footer line surfaces an active HULL_CACHE_DIR override so
      * users running multi-tenant deployments can see at a glance
-     * which path their caches are landing in. */
+     * which path their caches are landing in.
+     *
+     * Size-bloat hints: caches are unbounded by design (correctness
+     * doesn't depend on freshness — stale entries are harmless
+     * orphans). But once any single kind passes 250 MB or the
+     * runtime total passes 1 GB, surface a `⚠` next to the size
+     * and suggest a prune. These thresholds are deliberately
+     * conservative — most dev workstations should never see them. */
+    #define HL_DOCTOR_CACHE_KIND_WARN_BYTES   (250ULL * 1024 * 1024)
+    #define HL_DOCTOR_CACHE_TOTAL_WARN_BYTES  (1024ULL * 1024 * 1024)
     {
         fprintf(f, "Caches  (runtime + tools storage)\n");
         uint64_t runtime_count = 0, runtime_bytes = 0;
+        int large_kinds = 0;
         for (const HlCacheKind *k = hl_cache_registry(); k->name; k++) {
             char path[PATH_MAX];
             uint64_t cnt = 0, size = 0;
@@ -512,8 +523,14 @@ static void print_human(FILE *f, CompilerInfo *ci, int nci,
 
             char size_str[32];
             doctor_format_size(size, size_str, sizeof(size_str));
-            fprintf(f, "  %-12s %s  %llu entries, %s\n",
-                    k->name, mark, (unsigned long long)cnt, size_str);
+            const char *warn = "";
+            if (size >= HL_DOCTOR_CACHE_KIND_WARN_BYTES) {
+                warn = "  \xe2\x9a\xa0 large";  /* ⚠ large */
+                large_kinds++;
+            }
+            fprintf(f, "  %-12s %s  %llu entries, %s%s\n",
+                    k->name, mark,
+                    (unsigned long long)cnt, size_str, warn);
             if (path[0] != '\0')
                 fprintf(f, "                %s%s\n", path,
                         k->is_runtime ? "" : "  (system store)");
@@ -524,8 +541,12 @@ static void print_human(FILE *f, CompilerInfo *ci, int nci,
         }
         char total_str[32];
         doctor_format_size(runtime_bytes, total_str, sizeof(total_str));
-        fprintf(f, "                runtime total: %llu entries, %s\n",
-                (unsigned long long)runtime_count, total_str);
+        const char *total_warn =
+            (runtime_bytes >= HL_DOCTOR_CACHE_TOTAL_WARN_BYTES)
+                ? "  \xe2\x9a\xa0 large" : "";
+        fprintf(f, "                runtime total: %llu entries, %s%s\n",
+                (unsigned long long)runtime_count, total_str,
+                total_warn);
 
         const char *override = getenv("HULL_CACHE_DIR");
         if (override && *override) {
@@ -533,6 +554,18 @@ static void print_human(FILE *f, CompilerInfo *ci, int nci,
                     override);
         }
         fprintf(f, "                manage via `hull cache list|prune|clear`\n");
+
+        /* If anything tripped the warning, surface a concrete hint
+         * — bare "manage via" doesn't tell users what to actually
+         * type. */
+        if (large_kinds > 0 ||
+            runtime_bytes >= HL_DOCTOR_CACHE_TOTAL_WARN_BYTES) {
+            fprintf(f,
+                "                hint: `hull cache prune "
+                "--max-age=30d --strategy=lru`\n"
+                "                       reclaims entries not "
+                "touched in the last 30 days.\n");
+        }
         fprintf(f, "\n");
     }
 
