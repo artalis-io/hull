@@ -149,14 +149,28 @@ static const char *check_id(lua_State *L, int idx)
 
 /* ── blob.put / blob.put_verified ────────────────────────────────── */
 
+/* Read `durable` from an optional opts table at `idx` (1 = true, 0 = false). */
+static int read_durable_opt(lua_State *L, int idx)
+{
+    if (!lua_istable(L, idx)) return 0;
+    lua_getfield(L, idx, "durable");
+    int durable = lua_toboolean(L, -1);
+    lua_pop(L, 1);
+    return durable;
+}
+
 static int lua_blob_put(lua_State *L)
 {
     HlBlob *b = get_store(L);
     size_t len = 0;
     const char *bytes = luaL_checklstring(L, 1, &len);
+    int durable = read_durable_opt(L, 2);
 
     char id[HL_BLOB_ID_BUF_SIZE];
-    if (hl_cap_blob_put(b, (const uint8_t *)bytes, len, NULL, id) != 0)
+    int rc = durable
+        ? hl_cap_blob_put_durable(b, (const uint8_t *)bytes, len, NULL, id)
+        : hl_cap_blob_put        (b, (const uint8_t *)bytes, len, NULL, id);
+    if (rc != 0)
         return luaL_error(L, "blob.put: failed");
 
     lua_pushlstring(L, id, HL_BLOB_ID_HEX_LEN);
@@ -170,9 +184,13 @@ static int lua_blob_put_verified(lua_State *L)
     size_t len = 0;
     const char *bytes = luaL_checklstring(L, 1, &len);
     const char *expected = check_id(L, 2);
+    int durable = read_durable_opt(L, 3);
 
     char id[HL_BLOB_ID_BUF_SIZE];
-    if (hl_cap_blob_put(b, (const uint8_t *)bytes, len, expected, id) != 0)
+    int rc = durable
+        ? hl_cap_blob_put_durable(b, (const uint8_t *)bytes, len, expected, id)
+        : hl_cap_blob_put        (b, (const uint8_t *)bytes, len, expected, id);
+    if (rc != 0)
         return luaL_error(L, "blob.put_verified: SHA mismatch or I/O failure");
 
     lua_pushlstring(L, id, HL_BLOB_ID_HEX_LEN);
@@ -195,15 +213,22 @@ static int lua_blob_writer_new(lua_State *L)
 {
     HlBlob *b = get_store(L);
     const char *expected = NULL;
+    int durable = 0;
     if (lua_istable(L, 1)) {
         lua_getfield(L, 1, "expected");
         if (!lua_isnil(L, -1)) expected = check_id(L, -1);
         /* leave expected on stack — won't be popped because length-check
          * runs after; harmless. */
+        lua_getfield(L, 1, "durable");
+        durable = lua_toboolean(L, -1);
+        lua_pop(L, 1);
     }
 
     HlBlobWriter *w = NULL;
-    if (hl_cap_blob_writer_open(b, expected, &w) != 0)
+    int open_rc = durable
+        ? hl_cap_blob_writer_open_durable(b, expected, &w)
+        : hl_cap_blob_writer_open(b, expected, &w);
+    if (open_rc != 0)
         return luaL_error(L, "blob.writer: open failed");
 
     HlBlobWriterLua *ud = (HlBlobWriterLua *)

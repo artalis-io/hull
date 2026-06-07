@@ -128,16 +128,24 @@ blob.init({
 })
 
 -- Whole-buffer put (small blobs)
-local id, size = blob.put(bytes)                          -- bytes = Lua string
-local id       = blob.put_verified(bytes, expected_id)    -- raises on SHA mismatch
+local id, size = blob.put(bytes)                            -- bytes = Lua string
+local id, size = blob.put(bytes, { durable = true })        -- fsync fd+dir
+local id       = blob.put_verified(bytes, expected_id)      -- raises on SHA mismatch
+local id       = blob.put_verified(bytes, expected_id, { durable = true })
 
 -- Streaming put (large blobs) — SHA computed incrementally
-local w = blob.writer()                          -- or blob.writer({ expected = "..." })
+local w = blob.writer()                          -- or { expected = "...", durable = true }
 w:write(chunk1)
 w:write(chunk2)
 local id, size = w:finalize()                    -- atomic rename; w is now closed
 -- OR
 w:abort()                                        -- removes tmp file
+
+-- put_verified short-circuit: when the caller provides `expected_id`
+-- AND that blob already exists, blob.put skips the tmp+hash entirely
+-- and returns the expected_id in ~2 µs (vs ~200 µs for the full
+-- write-then-dedup path). Use for verified-install workflows where
+-- the expected SHA came from a signed manifest.
 
 -- Reads
 local bytes = blob.get(id)                       -- nil if missing
@@ -180,9 +188,11 @@ import { blob } from "hull:blob";
 blob.init({ dir: "data/blobs", shardDepth: 1, tmpMaxAge: 3600 });
 
 const { id, size } = blob.put(bytes);                  // bytes = ArrayBuffer
+const { id, size } = blob.put(bytes, { durable: true });
 const id2 = blob.putVerified(bytes, expectedId);
+const id3 = blob.putVerified(bytes, expectedId, { durable: true });
 
-const w = blob.writer();                               // or { expected: "..." }
+const w = blob.writer();                               // or { expected: "...", durable: true }
 w.write(chunk1);
 w.write(chunk2);
 const { id, size } = w.finalize();
@@ -305,12 +315,197 @@ and Lua bytecode cache live.
 5. **Init sweeps stale tmps.** Files in `tmp/` older than `tmp_max_age`
    (default 1h) are deleted on `blob.init()`. Prevents unbounded
    growth from crashed writers.
-6. **No fsync on every write.** Performance > durability for a cache
-   layer. Callers needing durability can call a future `blob.sync()`;
-   hardware-fail = re-fetch / re-compute.
+6. **No fsync on the default put path** (cache-layer trade-off).
+   Callers needing crash-survival use `blob.put(bytes, { durable =
+   true })` / `blob.writer({ durable = true })` which fsync the tmp
+   fd before close + fsync the shard directory after rename. The
+   durable path costs ~12% throughput on APFS. Use for content that
+   can't be cheaply re-derived (user uploads, release artifacts);
+   keep default for re-derivable caches (compute AOT, bytecode, LLM).
 7. **`atime` updates are opt-out per call.** Default ON so LRU works
    correctly; `{ track_access = false }` for hot read paths
    (e.g. stdlib bytecode lookups).
+
+## Concurrency model
+
+Blob's safety story relies on three properties, all of which are
+provided by the underlying POSIX filesystem; blob adds no locks of its
+own.
+
+### Single-process
+
+Hull runs the event loop on one thread, so concurrent blob calls from
+within a single Hull process can't happen unless the worker pool
+(`thread_pool`) is used. None of the current binding code dispatches
+blob to the pool — all calls execute on the main thread. If a future
+`blob.async.put` lands, it must coordinate via the worker queue (one
+operation in flight per pool slot); blob itself is not reentrant.
+
+### Multi-process (shared blob root)
+
+When multiple Hull processes share a blob root (system-wide compute
+AOT cache, `~/.hull/cache/compute/`; `hull tools install`; LLM cache),
+the safety properties are:
+
+| Scenario | Behavior |
+|---|---|
+| Concurrent put of identical bytes | Both writers write to distinct tmps (the `.blob-<16-hex>.tmp` suffix is from `crypto.random` — collisions cryptographically impossible). Both finalize: one renames, the other sees `stat(dest) == 0` and drops its tmp. **Safe — content is identical by SHA.** |
+| Concurrent put + read of the same SHA | `rename(2)` is atomic on the same filesystem; the file at the blob path either exists with the full bytes or doesn't exist at all (never a partial-bytes state). Readers see all-or-nothing. |
+| Concurrent delete + read | POSIX semantics: a reader holding an open fd can keep reading even after `unlink` removes the directory entry; the inode lives until the last fd closes. `blob.get`'s open-then-read sequence may see ENOENT if delete races between stat and open — returns -1, caller retries. |
+| Concurrent cleanup + cleanup | Both processes collect snapshots independently and try to unlink the same files; first wins, second gets ENOENT (treated as "already gone", `removed_out` stays accurate). Safe but wasteful — for ops bins where this happens often, serialize via a per-host advisory lock above blob. |
+| Concurrent cleanup + put | Cleanup's snapshot is materialized at call time; a put landing after `collect_entries` won't be in the snapshot, so it's never evicted by this pass. The new file is preserved as a side-effect of cleanup's snapshot semantics. |
+| Concurrent cleanup + read | If cleanup unlinks while the reader has an open fd, POSIX keeps the inode alive; subsequent opens of the same id fail ENOENT (caller's problem — likely racing eviction with active use). |
+| `EXDEV` fallback (tmp + final on different filesystems) | Non-atomic: `fopen` dest → loop `fread`/`fwrite` → `fclose` → `unlink` tmp. A crash between fclose and unlink leaves both files; next `blob.init()`'s stale-tmp sweep cleans up. **Practically rare** — init creates `tmp/` and `blobs/` as siblings under `root`, so EXDEV only triggers if `root` straddles a mount, which is unusual. |
+
+### Weak spots
+
+1. ~~**No `fsync`/`fdatasync` anywhere.**~~ **Resolved** via opt-in
+   `{ durable = true }` on `put` / `writer`. Default path stays
+   non-durable for cache workloads; durable path costs ~12%
+   throughput.
+
+2. ~~**`bump_atime` race.**~~ **Resolved** by switching from
+   `utimes(path)` to `futimes(fd)`. The atime bump now binds to the
+   exact inode the reader has open, eliminating the path-lookup race
+   (file unlinked/renamed-over between open and utimes used to land
+   the bump on a different inode or fail silently).
+
+3. **No cross-process advisory lock for `cleanup`.** Two cleanup
+   passes racing the same blob is correct (second unlink gets ENOENT,
+   counts still accurate) but wasteful — twice the directory walks,
+   twice the I/O. Blob deliberately doesn't take a lock because:
+   (a) the common case is single-process (a daily `app.daily(...)`
+   cleanup from one Hull process); (b) cross-process lock semantics
+   vary across OSes (`flock` vs `fcntl(F_SETLK)`); (c) when multiple
+   hosts share a blob root (NFS-style) the right answer is a
+   higher-level coordinator (etcd, a leader-election sidecar), not
+   `flock`. **If you do run cleanup from cron on the same host**,
+   wrap the invocation:
+   ```sh
+   flock -n /var/lock/hull-blob-cleanup.lock -c "hull cleanup-blob ..."
+   ```
+   Adds a `/var/lock/hull-blob-cleanup.lock` sentinel; `flock -n`
+   returns immediately when another holder is active so the duplicate
+   cleanup is skipped, not queued.
+
+4. **`iter()` snapshot memory is O(N).** ~80 bytes per blob (64-byte
+   SHA hex + 8-byte size + 16 bytes of alignment / atime / mtime). At
+   1 M blobs: ~80 MiB. Doesn't bound — a multi-million-blob store can
+   exhaust the runtime's memory cap on a single `iter` call. Mitigate
+   by capping store size via `cleanup` policy, or by switching ops
+   scans to direct `opendir` walks of the shard tree.
+
+5. **`shard_depth = 2` with sparse store wastes opendir syscalls.**
+   `iter` walks 256×256 = 65 K possible shard directories. With most
+   shards empty (e.g. < 1000 blobs total), iter does ~65 K syscalls
+   for a few entries. Acceptable for ops scans; if it becomes a
+   hot-path concern, add a "known shards" sidecar.
+
+6. **Path length: caller must keep `app_dir + dir + shard + hash`
+   under `PATH_MAX`** (1024 on macOS, 4096 on Linux/Cosmo). Worst case
+   for `shard_depth = 2`: `app_dir/dir/blobs/XX/YY/<64-hex>` =
+   `app_dir + dir + 1 + 6 + 3 + 3 + 64 = app_dir + dir + 77`. With
+   `app_dir + dir` up to ~947 chars, fits on macOS. Hull's init
+   checks via `snprintf` return so overruns become a clean `-1` at
+   `blob.init()`, but the error message is generic ("init failed").
+   In practice, app_dir is rooted under cwd which is rarely deeper
+   than 100 chars; the limit only bites when users explicitly stash
+   blobs under a deeply-nested system path (e.g.
+   `/Library/Application Support/.../some/very/deep/cache/dir/`).
+   Easiest mitigation: keep `dir` short (`"blobs"`, `"cache"`) and
+   let app_dir absorb the depth.
+
+## Performance baseline
+
+Measured via `make bench-blob` on Apple M-series, APFS, default
+allocator (no memory limit). Reproducible from `bench/blob/bench_blob.c`.
+Numbers below reflect the post-§1.5.b-3.5+follow-up state: ARMv8 SHA2
+hardware acceleration, `put_verified` short-circuit, durable opt-in,
+`futimes`-on-fd atime bump.
+
+| Workload | Throughput | Per-op cost |
+|---|---|---|
+| Put 4 KiB blob (buffer) | 5.5 K ops/s · 21 MB/s | 182 µs/op |
+| Get 4 KiB blob (no atime) | 45 K ops/s · 176 MB/s | 22 µs/op |
+| Get 4 KiB blob (atime on) | 24 K ops/s · 93 MB/s | 42 µs/op |
+| Put 64 KiB (buffer) | 2.9 K ops/s · 181 MB/s | 346 µs/op |
+| Put 64 KiB (stream, 16 chunks) | 2.6 K ops/s · 161 MB/s | 389 µs/op |
+| Get 64 KiB (buffer, hot) | 38 K ops/s · 2.4 GB/s | 26 µs/op |
+| **Idempotent put 64 KiB (no expected)** | **5.1 K ops/s · 320 MB/s** | **196 µs/op** |
+| **`put_verified` short-circuit 64 KiB** | **518 K ops/s · 32 GB/s** | **1.9 µs/op** |
+| **Durable put 64 KiB (fsync fd+dir)** | **2.6 K ops/s · 161 MB/s** | **388 µs/op** |
+| Put 4 MiB (buffer) | 93 ops/s · 370 MB/s | 11 ms/op |
+| Get 4 MiB (buffer, hot) | 3.1 K ops/s · 12 GB/s | 320 µs/op |
+| Iter 10 K blobs | 260 K entries/s | 3.9 µs/entry |
+| Iter 100 K blobs | ~300 K entries/s | 3.3 µs/entry |
+| **SHA-256 raw (4 MiB)** | **2.0 GB/s** | (ARMv8 FEAT_SHA2) |
+
+### Observations
+
+- **`put_verified` short-circuit is ~270× faster than the idempotent
+  put path.** When the caller supplies `expected` AND the blob already
+  exists on disk, blob skips the tmp+hash+write entirely (two syscalls:
+  validate_id + stat). 1.9 µs/op vs 196 µs/op. **Use this aggressively
+  for verified-install workloads** (`hull tools install`, AOT cache
+  lookups, signed-manifest fetches) — the metadata layer derives the
+  expected SHA from the manifest, blob's check becomes a one-stat fast
+  path on hit.
+
+- **ARMv8 SHA2 acceleration delivers ~10× speedup over portable
+  software SHA-256.** Raw SHA throughput went from ~200 MB/s
+  (sha256_transform_portable) to ~2 GB/s (sha256_transform_armv8) on
+  M-series. Compounds with the put pipeline: large-blob put almost
+  tripled (140 → 370 MB/s), and 64 KiB put nearly doubled (98 → 181
+  MB/s). On Apple Silicon the FEAT_SHA2 path is always-on (no runtime
+  detection — every shipped Apple Silicon has SHA2). Linux/Cosmo arm64
+  runtime detection (`getauxval(AT_HWCAP) & HWCAP_SHA2`) is deferred
+  to v0.1.10; x86_64 SHA-NI same.
+
+- **Durable put costs ~12% throughput** on APFS (2.9K → 2.6K ops/s for
+  64 KiB blobs, with `fsync(fd)` before close + `fsync(dirfd)` after
+  rename). The cost is dominated by fsync(dirfd) — APFS journals
+  directory entries quickly. Use the durable variant for content that
+  can't be cheaply re-derived (user-uploaded files via attachment,
+  release-artifact local cache); keep the default non-durable path
+  for re-derivable caches (compute AOT, Lua bytecode, template AST,
+  LLM artifacts).
+
+- **Get is fast** when atime tracking is off; the `futimes(2)` syscall
+  is the main overhead (~20 µs per read). **Always pass
+  `{ track_access = false }` on hot read paths** like Lua bytecode
+  lookup. The LRU policy can rely on filesystem `mtime` for those
+  blobs (FIFO) or write a periodic atime-bump from a background timer.
+
+- **Streaming vs buffer put is within 5%.** The chunk-loop overhead is
+  trivial compared to SHA + I/O. Choose stream mode for memory-safety
+  (don't buffer multi-MB uploads), buffer mode for code simplicity.
+
+- **Iter scales sub-linearly per entry** at higher N (3.3 µs/entry at
+  100 K, 4 µs/entry at 10 K) — directory readdir amortizes well over
+  larger shards. Below ~1000 blobs the per-entry cost rises (~12–30
+  µs) because the readdir overhead dominates the per-entry cost.
+
+## Architectural notes (orthogonality + coupling)
+
+- **Orthogonal API axes**: lifecycle (init/free), write (put/writer),
+  read (get/reader), metadata (exists/size/atime/delete), enumeration
+  (iter/count/total_size), eviction (cleanup). Each axis is
+  independently testable.
+- **Convenience-over-orthogonality**: `put` and `get` are convenience
+  wrappers over `writer` / `reader`. `count` and `total_size` re-walk
+  the shard tree each call; for hot accounting, cache results above
+  blob or call once and snapshot.
+- **Sandbox coupling is intentional**: the v0.1.9 sandbox change
+  (`src/hull/sandbox.c`) pre-mkdirs declared `fs.write` paths so
+  `realpath()` can canonicalize them for the seatbelt subpath rule.
+  Driven by blob's lazy-init pattern but useful for any module that
+  creates its own root directory at first use.
+- **Refcount lives at the consumer**: blob doesn't know that
+  `hull/web/attachment@1` will track refcounts in
+  `_hull_attachments`. Cleanup driven from blob (LRU eviction)
+  won't coordinate with consumer refcounts — never mix
+  `blob.cleanup` with refcounted consumers on the same root.
+  Use separate blob roots if you need both policies.
 
 ## Migration map — existing implementations
 

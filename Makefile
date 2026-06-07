@@ -2542,6 +2542,14 @@ $(BUILDDIR)/bench_wasm: $(BENCH_WASM_SRCS) $(TEST_COMMON_DEPS) | $(BUILDDIR)
 bench-wasm: $(BUILDDIR)/bench_wasm
 	$(BUILDDIR)/bench_wasm
 
+# Blob storage R/W throughput benchmark (cap-layer; bypasses bindings)
+$(BUILDDIR)/bench_blob: bench/blob/bench_blob.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ \
+		bench/blob/bench_blob.c $(TEST_COMMON_LIBS)
+
+bench-blob: $(BUILDDIR)/bench_blob
+	$(BUILDDIR)/bench_blob
+
 # GPU vs WASM vs native benchmark (requires HL_ENABLE_GPU=1)
 BENCH_GPU_ARCH := $(shell uname -m | sed 's/arm64/aarch64/')
 BENCH_GPU_AOT  := bench/gpu/cosine.aot.$(BENCH_GPU_ARCH)

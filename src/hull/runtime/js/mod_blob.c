@@ -99,6 +99,18 @@ static int read_track_access(JSContext *ctx, int argc, JSValueConst *argv, int i
     return track;
 }
 
+/* Extract durable from optional options object at argv[idx]. */
+static int read_durable(JSContext *ctx, int argc, JSValueConst *argv, int idx)
+{
+    if (idx >= argc) return 0;
+    JSValueConst v = argv[idx];
+    if (JS_IsUndefined(v) || JS_IsNull(v) || !JS_IsObject(v)) return 0;
+    JSValue d = JS_GetPropertyStr(ctx, v, "durable");
+    int durable = JS_IsUndefined(d) ? 0 : JS_ToBool(ctx, d);
+    JS_FreeValue(ctx, d);
+    return durable;
+}
+
 /* ── Store class (singleton wrapping HlBlob*) ─────────────────────── */
 
 static JSClassID hl_js_blob_store_class_id;
@@ -238,9 +250,12 @@ static JSValue js_blob_put(JSContext *ctx, JSValueConst this_val,
     const char *cstr = NULL;
     const uint8_t *bytes = bytes_arg(ctx, argv[0], &len, &cstr);
     if (!bytes) return JS_EXCEPTION;
+    int durable = read_durable(ctx, argc, argv, 1);
 
     char id[HL_BLOB_ID_BUF_SIZE];
-    int rc = hl_cap_blob_put(b, bytes, len, NULL, id);
+    int rc = durable
+        ? hl_cap_blob_put_durable(b, bytes, len, NULL, id)
+        : hl_cap_blob_put        (b, bytes, len, NULL, id);
     if (cstr) JS_FreeCString(ctx, cstr);
     if (rc != 0)
         return JS_ThrowInternalError(ctx, "blob.put: failed");
@@ -262,9 +277,12 @@ static JSValue js_blob_put_verified(JSContext *ctx, JSValueConst this_val,
     if (!bytes) return JS_EXCEPTION;
     const char *expected = check_id(ctx, argv[1]);
     if (!expected) { if (cstr) JS_FreeCString(ctx, cstr); return JS_EXCEPTION; }
+    int durable = read_durable(ctx, argc, argv, 2);
 
     char id[HL_BLOB_ID_BUF_SIZE];
-    int rc = hl_cap_blob_put(b, bytes, len, expected, id);
+    int rc = durable
+        ? hl_cap_blob_put_durable(b, bytes, len, expected, id)
+        : hl_cap_blob_put        (b, bytes, len, expected, id);
     JS_FreeCString(ctx, expected);
     if (cstr) JS_FreeCString(ctx, cstr);
     if (rc != 0)
@@ -298,6 +316,7 @@ static JSValue js_blob_writer_new(JSContext *ctx, JSValueConst this_val,
 
     const char *expected = NULL;
     char id_buf[HL_BLOB_ID_BUF_SIZE];
+    int durable = read_durable(ctx, argc, argv, 0);
     if (argc > 0 && JS_IsObject(argv[0])) {
         JSValue ev = JS_GetPropertyStr(ctx, argv[0], "expected");
         if (!JS_IsUndefined(ev) && !JS_IsNull(ev)) {
@@ -311,7 +330,10 @@ static JSValue js_blob_writer_new(JSContext *ctx, JSValueConst this_val,
     }
 
     HlBlobWriter *w = NULL;
-    if (hl_cap_blob_writer_open(b, expected, &w) != 0)
+    int open_rc = durable
+        ? hl_cap_blob_writer_open_durable(b, expected, &w)
+        : hl_cap_blob_writer_open        (b, expected, &w);
+    if (open_rc != 0)
         return JS_ThrowInternalError(ctx, "blob.writer: open failed");
 
     JSValue obj = JS_NewObjectClass(ctx, (int)hl_js_blob_writer_class_id);

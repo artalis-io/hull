@@ -83,6 +83,24 @@
 #define MBEDTLS_SHA384_C
 #define MBEDTLS_SHA512_C
 
+/* NOTE on hardware SHA-256 acceleration: enabling
+ * MBEDTLS_SHA256_USE_ARMV8_A_CRYPTO_IF_PRESENT here is a no-op for
+ * hull/blob@1 because Hull's cap layer uses a *hand-rolled* SHA-256
+ * implementation in src/hull/cap/crypto.c (see HlSha256Ctx /
+ * sha256_transform). The hand-roll is intentional — keeps the
+ * incremental API working in HL_ENABLE_HTTP_SERVER=0 +
+ * HL_ENABLE_HTTP_CLIENT=0 builds where mbedTLS is dropped entirely.
+ *
+ * Real acceleration needs one of:
+ *   - Direct ARMv8 SHA2 (FEAT_SHA256) intrinsics in cap/crypto.c
+ *     (NEON / arm_neon_sha2.h — best, no dependency)
+ *   - Compile-time switch to mbedTLS's sha256 when linked
+ *     (couples blob perf to HTTP build flavor — awkward)
+ *
+ * Tracked in docs/blob.md §Performance baseline as a v0.1.10+
+ * optimization. Until then, large-blob put on Apple Silicon is
+ * SHA-bound at ~200 MB/s. */
+
 /* Entropy + RNG */
 #define MBEDTLS_ENTROPY_C
 #define MBEDTLS_CTR_DRBG_C

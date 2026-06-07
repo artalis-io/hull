@@ -50,6 +50,7 @@ struct HlBlobWriter {
     size_t       written;
     HlSha256Ctx  hash;
     char         expected[HL_BLOB_ID_BUF_SIZE];  /* "" if no expected */
+    int          durable;     /* fsync(fd) + fsync(dirfd) on finalize */
 };
 
 struct HlBlobReader {
@@ -281,7 +282,9 @@ void hl_cap_blob_free(HlBlob *b)
 
 /* ── Writer ──────────────────────────────────────────────────────── */
 
-int hl_cap_blob_writer_open(HlBlob *b, const char *expected,
+/* Shared open path; the public _open / _open_durable wrappers just
+ * fix the `durable` flag. */
+static int writer_open_full(HlBlob *b, const char *expected, int durable,
                               HlBlobWriter **out)
 {
     if (!b || !out) return -1;
@@ -312,6 +315,7 @@ int hl_cap_blob_writer_open(HlBlob *b, const char *expected,
     w->fd       = fd;
     w->tmp_path = tmp_path;
     w->written  = 0;
+    w->durable  = durable;
     hl_cap_crypto_sha256_init(&w->hash);
     if (expected)
         memcpy(w->expected, expected, HL_BLOB_ID_BUF_SIZE);
@@ -320,6 +324,18 @@ int hl_cap_blob_writer_open(HlBlob *b, const char *expected,
 
     *out = w;
     return 0;
+}
+
+int hl_cap_blob_writer_open(HlBlob *b, const char *expected,
+                              HlBlobWriter **out)
+{
+    return writer_open_full(b, expected, /*durable=*/0, out);
+}
+
+int hl_cap_blob_writer_open_durable(HlBlob *b, const char *expected,
+                                       HlBlobWriter **out)
+{
+    return writer_open_full(b, expected, /*durable=*/1, out);
 }
 
 int hl_cap_blob_writer_write(HlBlobWriter *w,
@@ -376,6 +392,15 @@ int hl_cap_blob_writer_finalize(HlBlobWriter *w,
     char id[HL_BLOB_ID_BUF_SIZE];
     hex_encode(digest, 32, id);
 
+    /* Durability: fsync the tmp file BEFORE close so pages hit disk,
+     * not just the page cache. Cheap if non-durable (skipped). */
+    if (w->durable && fsync(w->fd) < 0) {
+        close(w->fd); w->fd = -1;
+        unlink(w->tmp_path);
+        writer_release(w);
+        return -1;
+    }
+
     /* Close the tmp fd before rename. */
     if (close(w->fd) < 0) {
         w->fd = -1;
@@ -407,8 +432,10 @@ int hl_cap_blob_writer_finalize(HlBlobWriter *w,
     }
 
     /* If destination already exists, blob is already stored — drop tmp.
-     * (Content is identical by SHA so we don't need to overwrite.) */
+     * (Content is identical by SHA so we don't need to overwrite.) The
+     * existing file is presumed durable enough; we don't re-fsync it. */
     struct stat st;
+    int renamed_into_place = 0;
     if (stat(dest, &st) == 0) {
         unlink(w->tmp_path);
     } else if (rename(w->tmp_path, dest) < 0) {
@@ -444,6 +471,22 @@ int hl_cap_blob_writer_finalize(HlBlobWriter *w,
             return -1;
         }
         unlink(w->tmp_path);
+        renamed_into_place = 1;     /* EXDEV fallback — count as placed */
+    } else {
+        renamed_into_place = 1;
+    }
+
+    /* Durability: fsync the shard directory so the rename / unlink
+     * is persisted (metadata journal entry hits disk). Skipped if
+     * the file was already there (no dirent change). */
+    if (w->durable && renamed_into_place) {
+        int dfd = open(shard, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (dfd >= 0) {
+            (void)fsync(dfd);    /* best-effort — failure here doesn't
+                                  * undo the rename, just leaves it
+                                  * un-fsynced. */
+            close(dfd);
+        }
     }
 
     if (out_id) memcpy(out_id, id, HL_BLOB_ID_BUF_SIZE);
@@ -462,15 +505,41 @@ void hl_cap_blob_writer_abort(HlBlobWriter *w)
 
 /* ── Buffer-mode put ─────────────────────────────────────────────── */
 
-int hl_cap_blob_put(HlBlob *b, const uint8_t *buf, size_t len,
-                      const char *expected, char *out_id)
+/* Shared put implementation; durable=0 → existing semantics,
+ * durable=1 → fsync(fd)+fsync(dirfd) in finalize. */
+static int blob_put_full(HlBlob *b, const uint8_t *buf, size_t len,
+                           const char *expected, int durable, char *out_id)
 {
     if (!b) return -1;
     /* Empty buffer is valid: it's the sha256("") blob. */
     if (len > 0 && !buf) return -1;
 
+    /* Cache-hit short-circuit: when the caller supplies an `expected`
+     * SHA and that blob already exists on disk, skip the tmp write +
+     * SHA computation entirely. Two-syscall fast path (validate id +
+     * stat) instead of the full write+hash+rename. This benefits
+     * verified-install workflows (hull tools install, AOT-cache
+     * lookups) where the caller derived `expected` from a signed
+     * manifest and the bytes-in-hand were already known to hash to
+     * that value. If the existing blob's content doesn't actually
+     * match `expected`, the filesystem layout is corrupt — but the
+     * filename IS the SHA, so consistency is guaranteed by
+     * construction. */
+    if (expected && validate_id(expected) == 0) {
+        int rc = hl_cap_blob_exists(b, expected);
+        if (rc == 1) {
+            if (out_id) memcpy(out_id, expected, HL_BLOB_ID_BUF_SIZE);
+            return 0;
+        }
+        /* rc == 0 (not present) or rc < 0 (stat failure) — fall through
+         * to the full write path. */
+    }
+
     HlBlobWriter *w = NULL;
-    if (hl_cap_blob_writer_open(b, expected, &w) != 0) return -1;
+    int open_rc = durable
+        ? hl_cap_blob_writer_open_durable(b, expected, &w)
+        : hl_cap_blob_writer_open(b, expected, &w);
+    if (open_rc != 0) return -1;
     if (len > 0 && hl_cap_blob_writer_write(w, buf, len) != 0) {
         hl_cap_blob_writer_abort(w);
         return -1;
@@ -478,14 +547,32 @@ int hl_cap_blob_put(HlBlob *b, const uint8_t *buf, size_t len,
     return hl_cap_blob_writer_finalize(w, out_id, NULL);
 }
 
+int hl_cap_blob_put(HlBlob *b, const uint8_t *buf, size_t len,
+                      const char *expected, char *out_id)
+{
+    return blob_put_full(b, buf, len, expected, /*durable=*/0, out_id);
+}
+
+int hl_cap_blob_put_durable(HlBlob *b, const uint8_t *buf, size_t len,
+                              const char *expected, char *out_id)
+{
+    return blob_put_full(b, buf, len, expected, /*durable=*/1, out_id);
+}
+
 /* ── Reader ──────────────────────────────────────────────────────── */
 
-static void bump_atime(const char *path)
+/* Bump atime + mtime via the open fd, NOT via path. utimes(path,...)
+ * has a TOCTOU race: file may be renamed/unlinked between the reader's
+ * open() and the utimes(); on the path-based call, the utimes would
+ * silently land on a different inode (or fail). futimes(fd,...) binds
+ * the atime bump to the same inode the reader is reading from, so the
+ * LRU bookkeeping is always consistent with the data the reader saw. */
+static void bump_atime_fd(int fd)
 {
     struct timeval tv[2];
     if (gettimeofday(&tv[0], NULL) != 0) return;
     tv[1] = tv[0];                       /* atime + mtime */
-    utimes(path, tv);
+    (void)futimes(fd, tv);
 }
 
 int hl_cap_blob_reader_open(HlBlob *b, const char *id, int track_access,
@@ -505,7 +592,7 @@ int hl_cap_blob_reader_open(HlBlob *b, const char *id, int track_access,
     r->store = b;
     r->fd    = fd;
 
-    if (track_access) bump_atime(path);
+    if (track_access) bump_atime_fd(fd);
 
     *out = r;
     return 0;

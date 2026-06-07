@@ -117,6 +117,23 @@ int hl_cap_blob_put(HlBlob *b,
                       const char *expected,
                       char *out_id);
 
+/**
+ * @brief Durable buffer-mode put. Same contract as #hl_cap_blob_put,
+ *        plus the file's data and the shard directory entry are
+ *        fsync'd before return. Survives kernel crash up to disk's
+ *        own write-cache durability guarantees.
+ *
+ * Slower than #hl_cap_blob_put — call this only for blobs that can't
+ * be cheaply re-derived (user-uploaded files via the attachment
+ * module; release-artifact storage). The compute AOT cache, Lua
+ * bytecode cache, template AST cache, and LLM artifact cache should
+ * keep using the non-durable variant — they're re-derivable on miss.
+ */
+int hl_cap_blob_put_durable(HlBlob *b,
+                              const uint8_t *buf, size_t len,
+                              const char *expected,
+                              char *out_id);
+
 /* Streaming writer. Open then any number of write() calls then
  * finalize OR abort. The writer holds an open file descriptor for
  * its private tmp file plus an incremental SHA-256 context updated
@@ -142,6 +159,16 @@ typedef struct HlBlobWriter HlBlobWriter;
  */
 int hl_cap_blob_writer_open(HlBlob *b, const char *expected,
                               HlBlobWriter **out);
+
+/**
+ * @brief Open a streaming writer that calls fsync on finalize.
+ *        Same contract as #hl_cap_blob_writer_open, plus
+ *        finalize() fsyncs the tmp fd before rename and fsyncs the
+ *        shard directory after rename so the new directory entry
+ *        survives a kernel crash.
+ */
+int hl_cap_blob_writer_open_durable(HlBlob *b, const char *expected,
+                                       HlBlobWriter **out);
 
 /**
  * @brief Feed bytes into the writer. May be called any number of

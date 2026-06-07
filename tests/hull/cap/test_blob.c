@@ -203,6 +203,94 @@ UTEST(hl_cap_blob, put_empty_buffer_is_valid)
     env_free(&e);
 }
 
+UTEST(hl_cap_blob, put_verified_short_circuits_when_present)
+{
+    /* When `expected` is supplied and the blob already exists on
+     * disk, put skips the tmp-write + hash entirely. Verify by:
+     *  (a) writing a blob once
+     *  (b) re-putting different bytes claiming the SAME id — the
+     *      short-circuit accepts (existing file's SHA is trusted)
+     *  (c) reading back: bytes are the original, not the "lie" */
+    TestEnv e; env_init(&e);
+    HlBlob *b = NULL;
+    hl_cap_blob_init(&b, &e.fs_cfg, &e.alloc, "blobs", 1, 0);
+
+    const char *original = "the original bytes";
+    char id[HL_BLOB_ID_BUF_SIZE];
+    ASSERT_EQ(hl_cap_blob_put(b, (const uint8_t *)original,
+                                strlen(original), NULL, id), 0);
+
+    /* Now put_verified with DIFFERENT bytes but claim the same id.
+     * Short-circuit returns 0 immediately because the id exists. */
+    const char *liar = "totally different bytes";
+    char id2[HL_BLOB_ID_BUF_SIZE];
+    ASSERT_EQ(hl_cap_blob_put(b, (const uint8_t *)liar,
+                                strlen(liar), id, id2), 0);
+    ASSERT_STREQ(id2, id);
+
+    /* Confirm only ONE blob landed and the original bytes survived. */
+    ASSERT_EQ(hl_cap_blob_count(b), (uint64_t)1);
+    uint8_t *got = NULL; size_t got_len = 0;
+    ASSERT_EQ(hl_cap_blob_get(b, id, 0, &got, &got_len), 0);
+    ASSERT_EQ(got_len, strlen(original));
+    ASSERT_TRUE(memcmp(got, original, got_len) == 0);
+    if (got) hl_alloc_free(&e.alloc, got, got_len);
+
+    hl_cap_blob_free(b);
+    env_free(&e);
+}
+
+UTEST(hl_cap_blob, put_durable_round_trips)
+{
+    /* Durable put hits fsync(fd) + fsync(dirfd). Hard to assert
+     * syscalls directly; this just verifies the durable path
+     * produces correct output (same SHA + read-back match). */
+    TestEnv e; env_init(&e);
+    HlBlob *b = NULL;
+    hl_cap_blob_init(&b, &e.fs_cfg, &e.alloc, "blobs", 1, 0);
+
+    const char *msg = "durable bytes";
+    char id[HL_BLOB_ID_BUF_SIZE];
+    ASSERT_EQ(hl_cap_blob_put_durable(b, (const uint8_t *)msg,
+                                         strlen(msg), NULL, id), 0);
+
+    char expected[65];
+    ref_sha256_hex((const uint8_t *)msg, strlen(msg), expected);
+    ASSERT_STREQ(id, expected);
+
+    uint8_t *got = NULL; size_t got_len = 0;
+    ASSERT_EQ(hl_cap_blob_get(b, id, 0, &got, &got_len), 0);
+    ASSERT_EQ(got_len, strlen(msg));
+    ASSERT_TRUE(memcmp(got, msg, got_len) == 0);
+    if (got) hl_alloc_free(&e.alloc, got, got_len);
+
+    hl_cap_blob_free(b);
+    env_free(&e);
+}
+
+UTEST(hl_cap_blob, writer_durable_round_trips)
+{
+    /* Same correctness check via the streaming writer. */
+    TestEnv e; env_init(&e);
+    HlBlob *b = NULL;
+    hl_cap_blob_init(&b, &e.fs_cfg, &e.alloc, "blobs", 1, 0);
+
+    HlBlobWriter *w = NULL;
+    ASSERT_EQ(hl_cap_blob_writer_open_durable(b, NULL, &w), 0);
+    hl_cap_blob_writer_write(w, (const uint8_t *)"foo", 3);
+    hl_cap_blob_writer_write(w, (const uint8_t *)"bar", 3);
+    char id[HL_BLOB_ID_BUF_SIZE]; size_t size = 0;
+    ASSERT_EQ(hl_cap_blob_writer_finalize(w, id, &size), 0);
+    ASSERT_EQ(size, (size_t)6);
+
+    char expected[65];
+    ref_sha256_hex((const uint8_t *)"foobar", 6, expected);
+    ASSERT_STREQ(id, expected);
+
+    hl_cap_blob_free(b);
+    env_free(&e);
+}
+
 UTEST(hl_cap_blob, get_empty_returns_null_buffer)
 {
     /* M2 contract: an empty blob is fetched with out_buf=NULL,

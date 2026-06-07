@@ -60,7 +60,9 @@ static const uint32_t sha256_k[64] = {
 #define s0(x)        (ROR32(x, 7) ^ ROR32(x,18) ^ ((x) >> 3))
 #define s1(x)        (ROR32(x,17) ^ ROR32(x,19) ^ ((x) >> 10))
 
-static void sha256_transform(uint32_t state[8], const uint8_t block[64])
+__attribute__((unused))    /* dropped when sha256_transform aliases _armv8 */
+static void sha256_transform_portable(uint32_t state[8],
+                                        const uint8_t block[64])
 {
     uint32_t w[64];
     for (int i = 0; i < 16; i++) {
@@ -85,6 +87,124 @@ static void sha256_transform(uint32_t state[8], const uint8_t block[64])
     state[0] += a; state[1] += b; state[2] += c; state[3] += d;
     state[4] += e; state[5] += f; state[6] += g; state[7] += h;
 }
+
+/* ── ARMv8 SHA2 acceleration ─────────────────────────────────────────
+ *
+ * Uses FEAT_SHA256 instructions (vsha256{h,h2,su0,su1}q_u32) via the
+ * `__attribute__((target("crypto")))` clang/gcc attribute so the
+ * intrinsics compile without needing a global `-march=armv8-a+crypto`
+ * change.
+ *
+ * Apple Silicon guarantees FEAT_SHA256 on every shipped chip (M1+),
+ * so on __APPLE__ + __aarch64__ we always dispatch to the hardware
+ * path with no runtime detection. Linux/Cosmo arm64 detection
+ * (getauxval(AT_HWCAP) & HWCAP_SHA2) is deferred to a follow-up; for
+ * now those platforms keep using sha256_transform_portable.
+ *
+ * x86_64 SHA-NI is also feasible (4-7x speedup on Skylake-X+ / Zen+
+ * via _mm_sha256{msg1,msg2,rnds2}_epu32) but requires runtime CPUID
+ * detection. Deferred to the same follow-up.
+ *
+ * Adapted from mbedtls/library/sha256.c — Apache 2.0 / GPL 2 dual
+ * (Hull is AGPL 3+, compatible). */
+
+#if defined(__APPLE__) && defined(__aarch64__) && defined(__ARM_NEON)
+
+#include <arm_neon.h>
+
+__attribute__((target("crypto")))
+static void sha256_transform_armv8(uint32_t state[8],
+                                     const uint8_t block[64])
+{
+    /* Structure follows mbedTLS's sha256.c reference: each 4-round
+     * group composes su0+su1 to produce one fresh message vector
+     * (the variable used as `wk` two rounds out), then does the
+     * 4-round hash. Cleaner than interleaving su0 before the hash
+     * and su1 after — and verified-correct against the SHA-256
+     * known-answer test vectors. */
+
+    uint32x4_t abcd = vld1q_u32(&state[0]);
+    uint32x4_t efgh = vld1q_u32(&state[4]);
+    uint32x4_t abcd_orig = abcd;
+    uint32x4_t efgh_orig = efgh;
+
+    /* Load message (big-endian → host endian). */
+    uint32x4_t s0 = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(block)));
+    uint32x4_t s1 = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(block + 16)));
+    uint32x4_t s2 = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(block + 32)));
+    uint32x4_t s3 = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(block + 48)));
+
+    uint32x4_t tmp, abcd_prev;
+
+    /* Rounds 0-3 */
+    tmp = vaddq_u32(s0, vld1q_u32(&sha256_k[0]));
+    abcd_prev = abcd;
+    abcd = vsha256hq_u32(abcd_prev, efgh, tmp);
+    efgh = vsha256h2q_u32(efgh, abcd_prev, tmp);
+
+    /* Rounds 4-7 */
+    tmp = vaddq_u32(s1, vld1q_u32(&sha256_k[4]));
+    abcd_prev = abcd;
+    abcd = vsha256hq_u32(abcd_prev, efgh, tmp);
+    efgh = vsha256h2q_u32(efgh, abcd_prev, tmp);
+
+    /* Rounds 8-11 */
+    tmp = vaddq_u32(s2, vld1q_u32(&sha256_k[8]));
+    abcd_prev = abcd;
+    abcd = vsha256hq_u32(abcd_prev, efgh, tmp);
+    efgh = vsha256h2q_u32(efgh, abcd_prev, tmp);
+
+    /* Rounds 12-15 */
+    tmp = vaddq_u32(s3, vld1q_u32(&sha256_k[12]));
+    abcd_prev = abcd;
+    abcd = vsha256hq_u32(abcd_prev, efgh, tmp);
+    efgh = vsha256h2q_u32(efgh, abcd_prev, tmp);
+
+    /* Rounds 16-63 — 3 iterations of 16 rounds each. Message
+     * expansion happens at the top of each 4-round group:
+     *   sched_X = su1(su0(sched_X, sched_X+1), sched_X+2, sched_X+3)
+     * cycling X = 0,1,2,3,0,1,2,3,... */
+    for (int t = 16; t < 64; t += 16) {
+        s0 = vsha256su1q_u32(vsha256su0q_u32(s0, s1), s2, s3);
+        tmp = vaddq_u32(s0, vld1q_u32(&sha256_k[t]));
+        abcd_prev = abcd;
+        abcd = vsha256hq_u32(abcd_prev, efgh, tmp);
+        efgh = vsha256h2q_u32(efgh, abcd_prev, tmp);
+
+        s1 = vsha256su1q_u32(vsha256su0q_u32(s1, s2), s3, s0);
+        tmp = vaddq_u32(s1, vld1q_u32(&sha256_k[t + 4]));
+        abcd_prev = abcd;
+        abcd = vsha256hq_u32(abcd_prev, efgh, tmp);
+        efgh = vsha256h2q_u32(efgh, abcd_prev, tmp);
+
+        s2 = vsha256su1q_u32(vsha256su0q_u32(s2, s3), s0, s1);
+        tmp = vaddq_u32(s2, vld1q_u32(&sha256_k[t + 8]));
+        abcd_prev = abcd;
+        abcd = vsha256hq_u32(abcd_prev, efgh, tmp);
+        efgh = vsha256h2q_u32(efgh, abcd_prev, tmp);
+
+        s3 = vsha256su1q_u32(vsha256su0q_u32(s3, s0), s1, s2);
+        tmp = vaddq_u32(s3, vld1q_u32(&sha256_k[t + 12]));
+        abcd_prev = abcd;
+        abcd = vsha256hq_u32(abcd_prev, efgh, tmp);
+        efgh = vsha256h2q_u32(efgh, abcd_prev, tmp);
+    }
+
+    /* Accumulate into running state. */
+    abcd = vaddq_u32(abcd, abcd_orig);
+    efgh = vaddq_u32(efgh, efgh_orig);
+
+    vst1q_u32(&state[0], abcd);
+    vst1q_u32(&state[4], efgh);
+}
+
+#define sha256_transform sha256_transform_armv8
+
+#else
+
+#define sha256_transform sha256_transform_portable
+
+#endif
 
 void hl_cap_crypto_sha256_init(HlSha256Ctx *ctx)
 {
