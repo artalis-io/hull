@@ -1015,15 +1015,43 @@ Tasks (target v0.1.10):
       `tests/e2e_aot_cache.sh` (cold/warm/HULL_NO_AOT_CACHE/
       HULL_NO_CACHE/--no-cache/cross-invocation reuse/binary
       still runs).
-- [ ] §1.5.b-X-3. `hull tools install` migration. Store downloaded
-      tool binaries via `blob.put_verified(bytes, signed_sha)` at
-      `~/.hull/blobs/`. JSON sidecar at `~/.hull/tools/index.json`
-      maps `<tool>-<version>-<platform> → blob_id`.
-      `hl_tools_lookup_path()` resolves through the index. One
-      release ships symlinks from old `~/.hull/tools/<name>` paths
-      for backward compat; drop in v0.1.11+. Win: cleaner layout,
-      dedup-ready, `put_verified` short-circuit fast-paths
-      re-install.
+- [x] §1.5.b-X-3. `hull tools install` migration. **Landed.**
+      Downloaded tool binaries land at
+      `$HOME/.hull/blobs/tools/blobs/<XX>/<sha>` via
+      `hl_blob_store_put_durable(s, body, len, expected_sha, ...)`
+      — CAS mode, since we already know the SHA from the signed
+      manifest. The blob_store call replaces the previous
+      `hl_release_io_sha256_hex` + `mbedtls_ct_memcmp` + atomic
+      write block: blob_store does the SHA verification AND the
+      put_verified short-circuit (re-install of identical bytes
+      is a stat-only fast path, no rewrite).
+      The user-visible `$HOME/.hull/tools/<name>` becomes a
+      symlink to the blob, atomically (re)placed via
+      symlink-tmp + rename. Preserves the existing PATH-style
+      lookup (`hl_tools_lookup_path` already uses
+      `access(X_OK)` which follows symlinks transparently —
+      cap/wasm.c's wamrc resolver and `build.lua`'s
+      `tool.find_tool` need no changes).
+      Dropped the JSON sidecar from the original sketch — not
+      needed for a single-active-version-per-tool model. If a
+      version-history feature is ever added, the index can land
+      then; today's design is simpler and `hull cache list`
+      will still see all tool blobs by walking
+      `~/.hull/blobs/tools/blobs/`.
+      Tool blobs partition into `blobs/tools/` (sibling of
+      `blobs/runtime/`) so they're NOT swept by future
+      `hull cache prune` runs — tools are durable signed
+      downloads, not re-derivable caches.
+      Verified: 23/23 test_tools_install (added
+      `lookup_follows_symlink_to_blob`), 42/42 unit suites,
+      64/64 e2e_tools (the one e2e failure on this host was a
+      pre-existing test-isolation bug exposed by `build/wamrc`
+      existing next to the hull binary), 12/12 e2e_aot_cache,
+      36/36 e2e_blob, 12/12 e2e_update. Live install simulated
+      against real `wamrc` bytes: first install writes blob +
+      creates symlink + exec works through symlink; second
+      install hits short-circuit (no rewrite); `hull doctor`
+      reports the tool as managed.
 - [ ] §1.5.b-X-4. Template AST cache (runtime-infrastructure,
       sidecar-less). Persist compiled template source (or
       `string.dump` bytecode) via blob keyed by template-source

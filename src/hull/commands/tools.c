@@ -14,9 +14,14 @@
  *      hull binary it's meant for).
  *   2. Download `hull.sha256` + `hull.sha256.sig`.
  *   3. Verify the manifest signature with `hl_release_verify_manifest_sig`.
- *   4. Download the tool asset; verify its SHA-256 against the manifest.
- *   5. Atomic install via `hl_release_io_atomic_write` to
- *      `~/.hull/tools/<name>`.
+ *   4. Download the tool asset.
+ *   5. Persist via hull/blob_store at `~/.hull/blobs/tools/`. The store
+ *      verifies the SHA-256 against the manifest entry (passed as
+ *      `expected`) AND short-circuits via stat() on re-install of
+ *      identical bytes. The on-disk blob is chmod'd 0755.
+ *   6. Atomically (re)place the symlink `~/.hull/tools/<name>` →
+ *      blob path so existing PATH-style lookups (cap/wasm.c,
+ *      build.lua via tool.find_tool) continue to work unchanged.
  *
  * On builds with an all-zeros release pubkey (pre-v0.1.0 placeholders)
  * the signature step is skipped with a visible warning, matching
@@ -26,13 +31,13 @@
  */
 
 #include "hull/commands/tools.h"
+#include "hull/blob_store.h"
 #include "hull/release.h"
 #include "hull/release_io.h"
 #include "hull/tools_install.h"
 
 #include <keel/allocator.h>
 #include <keel/tls_mbedtls.h>
-#include <mbedtls/constant_time.h>
 
 #include <errno.h>
 #include <limits.h>
@@ -326,52 +331,136 @@ static int install_one(const HlToolSpec *spec, const char *platform,
     }
     fprintf(stdout, "hull tools: downloaded %zu bytes\n", body_len);
 
-    /* SHA-256 verify. */
-    char actual[65];
-    if (hl_release_io_sha256_hex((const unsigned char *)body, body_len,
-                                 actual) != 0) {
-        fprintf(stderr, "hull tools: SHA-256 computation failed\n");
-        kl_free(alloc, body, body_len);
-        return -1;
-    }
-    /* Constant-time compare. The values themselves are public (the
-     * manifest checksum and the computed digest of a downloaded asset),
-     * so a timing side-channel doesn't leak anything sensitive. We
-     * still use mbedtls_ct_memcmp for symmetry with the Ed25519
-     * verification path and to keep "compare hash" code uniformly
-     * timing-safe across the codebase. Both buffers are exactly 64
-     * hex chars + NUL; we compare the 64 chars. */
-    if (mbedtls_ct_memcmp(expected, actual, 64) != 0) {
-        fprintf(stderr, "hull tools: SHA-256 mismatch for %s\n", asset);
-        fprintf(stderr, "  expected: %s\n  actual:   %s\n", expected, actual);
-        kl_free(alloc, body, body_len);
-        return -1;
-    }
-    fprintf(stdout, "hull tools: SHA-256 verified (%s)\n", actual);
+    /* ── Persist via hull/blob_store (CAS mode) ──────────────────────
+     *
+     * Tool binaries live at $HOME/.hull/blobs/tools/blobs/<XX>/<sha>
+     * — the same content-addressed layout that apps' blob stores +
+     * runtime caches use. We pass `expected` (the signed SHA from the
+     * verified manifest) so blob_store does the SHA verification AND
+     * the put_verified short-circuit for us:
+     *
+     *   - First install: writes body to a tmp file, hashes during
+     *     the write (no buffered double-pass), atomic-renames to
+     *     blobs/<XX>/<sha>, fsyncs the dirent (put_durable).
+     *   - Re-install of bytes that already exist on disk: stat-only
+     *     fast path. No write, no SHA recompute.
+     *   - SHA mismatch: blob_store fails closed and unlinks the tmp;
+     *     we report it and abort. Same security envelope as before.
+     *
+     * The user-visible name (~/.hull/tools/<name>) becomes a symlink
+     * to the blob — preserves the existing PATH-style lookup
+     * (`hl_tools_lookup_path` uses `access(X_OK)` which follows
+     * symlinks transparently) while letting multiple tool versions
+     * coexist in the CAS pool and dedup against `hull update`'s
+     * future use of the same store. */
 
-    /* Atomic install. ~/.hull/tools/ is created on demand. */
+    char blobs_root[PATH_MAX];
+    {
+        const char *home = getenv("HOME");
+        if (!home || !*home) {
+            fprintf(stderr, "hull tools: HOME not set\n");
+            kl_free(alloc, body, body_len);
+            return -1;
+        }
+        int n = snprintf(blobs_root, sizeof(blobs_root),
+                         "%s/.hull/blobs/tools", home);
+        if (n < 0 || (size_t)n >= sizeof(blobs_root)) {
+            fprintf(stderr, "hull tools: blob path overflow\n");
+            kl_free(alloc, body, body_len);
+            return -1;
+        }
+    }
+
+    HlBlobStore *store = NULL;
+    if (hl_blob_store_open(&store, NULL, blobs_root,
+                           /*shard_depth=*/1, 0) != 0) {
+        fprintf(stderr, "hull tools: cannot open blob store at %s: %s\n",
+                blobs_root, strerror(errno));
+        kl_free(alloc, body, body_len);
+        return -1;
+    }
+
+    char blob_id[65];
+    if (hl_blob_store_put_durable(store, (const uint8_t *)body, body_len,
+                                  expected, blob_id) != 0) {
+        fprintf(stderr,
+                "hull tools: SHA-256 mismatch or write failure for %s "
+                "(expected %s)\n", asset, expected);
+        hl_blob_store_close(store);
+        kl_free(alloc, body, body_len);
+        return -1;
+    }
+    fprintf(stdout, "hull tools: SHA-256 verified, blob stored (%s)\n",
+            blob_id);
+    kl_free(alloc, body, body_len);
+
+    /* Compose the on-disk blob path so we can chmod it executable and
+     * symlink to it. shard_depth=1 → blobs/<XX>/<id>. Caller-side
+     * composition is fine here because the layout is part of the
+     * blob_store API contract (documented in include/hull/blob_store.h).
+     */
+    char blob_path[PATH_MAX];
+    int n = snprintf(blob_path, sizeof(blob_path),
+                     "%s/blobs/%c%c/%s",
+                     blobs_root, blob_id[0], blob_id[1], blob_id);
+    if (n < 0 || (size_t)n >= sizeof(blob_path)) {
+        fprintf(stderr, "hull tools: blob path overflow\n");
+        hl_blob_store_close(store);
+        return -1;
+    }
+
+    /* Tools need to be exec(2)-able. The blob layer writes 0644 by
+     * design (apps' content blobs aren't executable); we widen
+     * permissions here because we KNOW this blob is a tool. Sharing
+     * a blob across multiple tools is fine — all the symlinks point
+     * at the same exec-capable file. */
+    if (chmod(blob_path, 0755) != 0) {
+        fprintf(stderr,
+                "hull tools: warning: chmod 0755 failed for %s: %s\n",
+                blob_path, strerror(errno));
+        /* Non-fatal — the symlink might still resolve if the blob
+         * was already executable from a prior install of the same
+         * bytes. */
+    }
+    hl_blob_store_close(store);
+
+    /* Atomically (re)place the user-visible symlink at
+     * ~/.hull/tools/<name> → <blob_path>. symlink(2) doesn't
+     * overwrite, so we go via a per-pid tmp + rename(2) — that gives
+     * us the same atomicity guarantee blob_store gives for blobs. */
     char tools_dir[PATH_MAX];
     if (hl_tools_dir(tools_dir, sizeof(tools_dir)) != 0) {
         fprintf(stderr, "hull tools: cannot create ~/.hull/tools: %s\n",
                 strerror(errno));
-        kl_free(alloc, body, body_len);
         return -1;
     }
-
     char target[PATH_MAX];
     if (hl_tools_install_path(spec->name, target, sizeof(target)) != 0) {
         fprintf(stderr, "hull tools: cannot compose install path\n");
-        kl_free(alloc, body, body_len);
         return -1;
     }
 
-    if (hl_release_io_atomic_write(target, body, body_len, 0755) != 0) {
-        kl_free(alloc, body, body_len);
+    char tmp_link[PATH_MAX];
+    n = snprintf(tmp_link, sizeof(tmp_link), "%s.tmp.%d", target, (int)getpid());
+    if (n < 0 || (size_t)n >= sizeof(tmp_link)) {
+        fprintf(stderr, "hull tools: symlink tmp path overflow\n");
         return -1;
     }
-    kl_free(alloc, body, body_len);
+    (void)unlink(tmp_link);                /* clear any stale tmp */
+    if (symlink(blob_path, tmp_link) != 0) {
+        fprintf(stderr, "hull tools: symlink %s → %s failed: %s\n",
+                tmp_link, blob_path, strerror(errno));
+        return -1;
+    }
+    if (rename(tmp_link, target) != 0) {
+        fprintf(stderr, "hull tools: rename %s → %s failed: %s\n",
+                tmp_link, target, strerror(errno));
+        (void)unlink(tmp_link);
+        return -1;
+    }
 
-    fprintf(stdout, "hull tools: installed %s → %s\n", spec->name, target);
+    fprintf(stdout, "hull tools: installed %s → %s (blob %.12s…)\n",
+            spec->name, target, blob_id);
     return 0;
 }
 

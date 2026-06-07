@@ -309,6 +309,54 @@ UTEST_F(tools_fixture, lookup_finds_canonical_install) {
     ASSERT_STREQ(out, target);
 }
 
+UTEST_F(tools_fixture, lookup_follows_symlink_to_blob) {
+    /* The post-§1.5.b-X-3 install layout: the canonical
+     * ~/.hull/tools/<name> path is a symlink into the
+     * ~/.hull/blobs/tools/blobs/<XX>/<sha>/ pool. Lookup must
+     * accept the symlink transparently because access(X_OK)
+     * follows symlinks by default. This test mocks that layout
+     * without going through a real network install. */
+
+    /* 1. Create the blob target — pretend `hull tools install`
+     *    put it there via hl_blob_store_put_durable + chmod 0755. */
+    char blob_dir[PATH_MAX];
+    snprintf(blob_dir, sizeof(blob_dir),
+             "%s/.hull/blobs/tools/blobs/ab", utest_fixture->tmpdir);
+    /* mkdir -p: .hull/blobs/tools/blobs/ab */
+    char step[PATH_MAX];
+    snprintf(step, sizeof(step), "%s/.hull", utest_fixture->tmpdir);
+    mkdir(step, 0755);
+    snprintf(step, sizeof(step), "%s/.hull/blobs", utest_fixture->tmpdir);
+    mkdir(step, 0755);
+    snprintf(step, sizeof(step), "%s/.hull/blobs/tools", utest_fixture->tmpdir);
+    mkdir(step, 0755);
+    snprintf(step, sizeof(step), "%s/.hull/blobs/tools/blobs",
+             utest_fixture->tmpdir);
+    mkdir(step, 0755);
+    ASSERT_EQ(mkdir(blob_dir, 0755), 0);
+
+    char blob_path[PATH_MAX];
+    snprintf(blob_path, sizeof(blob_path),
+             "%s/ab1234567890abcdef1234567890abcdef1234567890abcdef"
+             "1234567890ab12", blob_dir);
+    ASSERT_EQ(touch_exec(blob_path), 0);
+
+    /* 2. Plant the symlink at the canonical lookup path. */
+    char dir[PATH_MAX];
+    ASSERT_EQ(hl_tools_dir(dir, sizeof(dir)), 0);
+    char link_path[PATH_MAX];
+    snprintf(link_path, sizeof(link_path), "%swamrc", dir);
+    ASSERT_EQ(symlink(blob_path, link_path), 0);
+
+    /* 3. lookup_path finds it. access(X_OK) follows the symlink, so
+     *    a 0755 blob target satisfies the check. The returned path
+     *    is the symlink path (not the resolved blob path) — exec(2)
+     *    callers transparently follow the link. */
+    char out[PATH_MAX];
+    ASSERT_EQ(hl_tools_lookup_path("wamrc", NULL, out, sizeof(out)), 0);
+    ASSERT_STREQ(out, link_path);
+}
+
 UTEST_F(tools_fixture, lookup_finds_sibling_of_hull_exe) {
     /* No canonical install; place stub next to "hull". */
     char hull_dir[PATH_MAX];
