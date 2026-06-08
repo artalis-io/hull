@@ -34,10 +34,12 @@
 #include "hull/cache_registry.h"
 #include "hull/cap/crypto.h"
 #include "hull/runtime/cache_common.h"  /* hex_encode shared helper */
+#include "sh_json.h"
 
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -62,24 +64,16 @@ static void format_size(uint64_t bytes, char *out, size_t out_sz)
         snprintf(out, out_sz, "%llu B", (unsigned long long)bytes);
 }
 
-/* JSON string escape — matches the minimal escaper sh_json uses. */
-static void json_emit_str(FILE *f, const char *s)
+/* Generic FILE* writer for ShJsonWriter — used by every JSON-emitting
+ * command below. Matches the audit.c pattern but parameterises on the
+ * FILE so the same helper serves both stdout (results) and stderr
+ * (audit log). Failed writes flip the writer's error flag, which
+ * downstream sh_json_write_* calls observe and turn into no-ops; we
+ * report once at the end via sh_json_writer_error(). */
+static int stdio_write_fn(void *ctx, const char *data, size_t len)
 {
-    fputc('"', f);
-    for (const char *p = s; *p; p++) {
-        unsigned char c = (unsigned char)*p;
-        switch (c) {
-            case '"':  fputs("\\\"", f); break;
-            case '\\': fputs("\\\\", f); break;
-            case '\n': fputs("\\n", f);  break;
-            case '\r': fputs("\\r", f);  break;
-            case '\t': fputs("\\t", f);  break;
-            default:
-                if (c < 0x20) fprintf(f, "\\u%04x", c);
-                else          fputc(c, f);
-        }
-    }
-    fputc('"', f);
+    FILE *fp = (FILE *)ctx;
+    return fwrite(data, 1, len, fp) == len ? 0 : -1;
 }
 
 /* Parse a duration string with an optional unit suffix:
@@ -300,12 +294,13 @@ static int cache_list_text(void)
 
 static int cache_list_json(void)
 {
-    fputs("{\"caches\":[", stdout);
-    int first = 1;
-    for (const HlCacheKind *k = hl_cache_registry(); k->name; k++) {
-        if (!first) fputc(',', stdout);
-        first = 0;
+    ShJsonWriter w;
+    sh_json_writer_init(&w, stdio_write_fn, stdout);
+    sh_json_write_object_start(&w);
+    sh_json_write_key(&w, "caches");
+    sh_json_write_array_start(&w);
 
+    for (const HlCacheKind *k = hl_cache_registry(); k->name; k++) {
         char path[PATH_MAX];
         int resolved = (hl_cache_resolve_path(k, path, sizeof(path)) == 0);
 
@@ -323,29 +318,25 @@ static int cache_list_json(void)
                        (k->env_kind &&
                         hl_hull_cache_disabled(k->env_kind) != 0);
 
-        fputs("{\"name\":", stdout);
-        json_emit_str(stdout, k->name);
-        fputs(",\"description\":", stdout);
-        json_emit_str(stdout, k->description);
-        fputs(",\"path\":", stdout);
-        json_emit_str(stdout, resolved ? path : "");
-        fprintf(stdout, ",\"is_runtime\":%s",
-                k->is_runtime ? "true" : "false");
-        fputs(",\"env_var\":", stdout);
-        json_emit_str(stdout, env_name);
-        fprintf(stdout, ",\"disabled\":%s",
-                disabled ? "true" : "false");
-        fprintf(stdout, ",\"count\":%llu", (unsigned long long)cnt);
-        fprintf(stdout, ",\"size_bytes\":%llu", (unsigned long long)size);
-        fputc('}', stdout);
+        sh_json_write_object_start(&w);
+        sh_json_write_kv_string(&w, "name",        k->name);
+        sh_json_write_kv_string(&w, "description", k->description);
+        sh_json_write_kv_string(&w, "path",        resolved ? path : "");
+        sh_json_write_kv_bool  (&w, "is_runtime",  k->is_runtime != 0);
+        sh_json_write_kv_string(&w, "env_var",     env_name);
+        sh_json_write_kv_bool  (&w, "disabled",    disabled != 0);
+        sh_json_write_kv_int   (&w, "count",       (int64_t)cnt);
+        sh_json_write_kv_int   (&w, "size_bytes",  (int64_t)size);
+        sh_json_write_object_end(&w);
     }
-    fputs("]", stdout);
+    sh_json_write_array_end(&w);
 
     const char *override = getenv("HULL_CACHE_DIR");
-    fprintf(stdout, ",\"hull_cache_dir\":");
-    json_emit_str(stdout, (override && *override) ? override : "");
-    fputs("}\n", stdout);
-    return 0;
+    sh_json_write_kv_string(&w, "hull_cache_dir",
+                            (override && *override) ? override : "");
+    sh_json_write_object_end(&w);
+    fputc('\n', stdout);
+    return sh_json_writer_error(&w) ? 1 : 0;
 }
 
 static int cmd_list(int argc, char **argv)
@@ -435,9 +426,14 @@ static int cmd_prune(int argc, char **argv)
 
     uint64_t total_removed = 0, total_freed = 0;
     int rc_overall = 0;
-    int json_first = 1;
 
-    if (json) fputs("{\"results\":[", stdout);
+    ShJsonWriter w;
+    if (json) {
+        sh_json_writer_init(&w, stdio_write_fn, stdout);
+        sh_json_write_object_start(&w);
+        sh_json_write_key(&w, "results");
+        sh_json_write_array_start(&w);
+    }
 
     for (const HlCacheKind *k = hl_cache_registry(); k->name; k++) {
         if (only && k != only) continue;
@@ -449,12 +445,12 @@ static int cmd_prune(int argc, char **argv)
         HlBlobStore *s = open_kind(k);
         if (!s) {
             if (json) {
-                if (!json_first) fputc(',', stdout);
-                json_first = 0;
-                fputs("{\"name\":", stdout);
-                json_emit_str(stdout, k->name);
-                fputs(",\"removed\":0,\"freed_bytes\":0,"
-                      "\"no_store\":true}", stdout);
+                sh_json_write_object_start(&w);
+                sh_json_write_kv_string(&w, "name",         k->name);
+                sh_json_write_kv_int   (&w, "removed",      0);
+                sh_json_write_kv_int   (&w, "freed_bytes",  0);
+                sh_json_write_kv_bool  (&w, "no_store",     true);
+                sh_json_write_object_end(&w);
             } else {
                 fprintf(stdout, "  %-12s (no store)\n", k->name);
             }
@@ -467,13 +463,12 @@ static int cmd_prune(int argc, char **argv)
         if (rc != 0) rc_overall = 1;
 
         if (json) {
-            if (!json_first) fputc(',', stdout);
-            json_first = 0;
-            fputs("{\"name\":", stdout);
-            json_emit_str(stdout, k->name);
-            fprintf(stdout, ",\"removed\":%llu", (unsigned long long)removed);
-            fprintf(stdout, ",\"freed_bytes\":%llu", (unsigned long long)freed);
-            fprintf(stdout, ",\"rc\":%d}", rc);
+            sh_json_write_object_start(&w);
+            sh_json_write_kv_string(&w, "name",        k->name);
+            sh_json_write_kv_int   (&w, "removed",     (int64_t)removed);
+            sh_json_write_kv_int   (&w, "freed_bytes", (int64_t)freed);
+            sh_json_write_kv_int   (&w, "rc",          rc);
+            sh_json_write_object_end(&w);
         } else {
             char size_str[32];
             format_size(freed, size_str, sizeof(size_str));
@@ -487,11 +482,13 @@ static int cmd_prune(int argc, char **argv)
     }
 
     if (json) {
-        fputs("]", stdout);
-        fprintf(stdout, ",\"total_removed\":%llu", (unsigned long long)total_removed);
-        fprintf(stdout, ",\"total_freed_bytes\":%llu", (unsigned long long)total_freed);
-        fprintf(stdout, ",\"dry_run\":%s", dry_run ? "true" : "false");
-        fputs("}\n", stdout);
+        sh_json_write_array_end(&w);
+        sh_json_write_kv_int   (&w, "total_removed",     (int64_t)total_removed);
+        sh_json_write_kv_int   (&w, "total_freed_bytes", (int64_t)total_freed);
+        sh_json_write_kv_bool  (&w, "dry_run",           dry_run != 0);
+        sh_json_write_object_end(&w);
+        fputc('\n', stdout);
+        if (sh_json_writer_error(&w)) rc_overall = 1;
     } else {
         char total_str[32];
         format_size(total_freed, total_str, sizeof(total_str));
@@ -608,9 +605,14 @@ static int cmd_clear(int argc, char **argv)
 
     uint64_t total_removed = 0, total_bytes = 0;
     int rc_overall = 0;
-    int json_first = 1;
 
-    if (json) fputs("{\"results\":[", stdout);
+    ShJsonWriter w;
+    if (json) {
+        sh_json_writer_init(&w, stdio_write_fn, stdout);
+        sh_json_write_object_start(&w);
+        sh_json_write_key(&w, "results");
+        sh_json_write_array_start(&w);
+    }
 
     for (const HlCacheKind *k = hl_cache_registry(); k->name; k++) {
         if (only && k != only) continue;
@@ -625,14 +627,14 @@ static int cmd_clear(int argc, char **argv)
         if (rc != 0) rc_overall = 1;
 
         if (json) {
-            if (!json_first) fputc(',', stdout);
-            json_first = 0;
-            fputs("{\"name\":", stdout);
-            json_emit_str(stdout, k->name);
-            fprintf(stdout, ",\"removed\":%llu", (unsigned long long)removed);
-            fprintf(stdout, ",\"freed_bytes\":%llu", (unsigned long long)bytes);
-            if (no_store) fputs(",\"no_store\":true", stdout);
-            fprintf(stdout, ",\"rc\":%d}", rc);
+            sh_json_write_object_start(&w);
+            sh_json_write_kv_string(&w, "name",        k->name);
+            sh_json_write_kv_int   (&w, "removed",     (int64_t)removed);
+            sh_json_write_kv_int   (&w, "freed_bytes", (int64_t)bytes);
+            if (no_store)
+                sh_json_write_kv_bool(&w, "no_store",  true);
+            sh_json_write_kv_int   (&w, "rc",          rc);
+            sh_json_write_object_end(&w);
         } else {
             if (no_store) {
                 fprintf(stdout, "  %-12s (no store)\n", k->name);
@@ -648,10 +650,12 @@ static int cmd_clear(int argc, char **argv)
     }
 
     if (json) {
-        fputs("]", stdout);
-        fprintf(stdout, ",\"total_removed\":%llu", (unsigned long long)total_removed);
-        fprintf(stdout, ",\"total_freed_bytes\":%llu", (unsigned long long)total_bytes);
-        fputs("}\n", stdout);
+        sh_json_write_array_end(&w);
+        sh_json_write_kv_int(&w, "total_removed",     (int64_t)total_removed);
+        sh_json_write_kv_int(&w, "total_freed_bytes", (int64_t)total_bytes);
+        sh_json_write_object_end(&w);
+        fputc('\n', stdout);
+        if (sh_json_writer_error(&w)) rc_overall = 1;
     }
     return rc_overall;
 }
@@ -685,13 +689,14 @@ typedef struct {
 } VerifyStats;
 
 /* Iter state — passed through hl_blob_store_iter via the
- * callback's `user` pointer, plus the kind and store handle. */
+ * callback's `user` pointer. `w` is non-NULL in JSON mode; the
+ * writer manages comma-separation automatically so we no longer
+ * need a json_first flag here. */
 typedef struct {
     const HlCacheKind *kind;
     HlBlobStore       *store;
     int                repair;
-    int                json;
-    int                json_first;  /* for comma-separation */
+    ShJsonWriter      *w;       /* NULL = text mode */
     VerifyStats        stats;
 } VerifyCtx;
 
@@ -744,7 +749,7 @@ static int verify_visit(const char *id, size_t size, void *user)
         /* Can't even compose the path — count as corrupt but no
          * repair possible. */
         v->stats.corrupt++;
-        if (!v->json) {
+        if (!v->w) {
             fprintf(stdout, "    %s  path-overflow\n", id);
         }
         return 0;
@@ -805,16 +810,12 @@ static int verify_visit(const char *id, size_t size, void *user)
         v->stats.ok++;
     }
 
-    if (v->json) {
-        if (!v->json_first) fputc(',', stdout);
-        v->json_first = 0;
-        fputs("{\"id\":", stdout);
-        json_emit_str(stdout, id);
-        fputs(",\"status\":", stdout);
-        json_emit_str(stdout, why);
-        fprintf(stdout, ",\"size_bytes\":%llu",
-                (unsigned long long)size);
-        fputc('}', stdout);
+    if (v->w) {
+        sh_json_write_object_start(v->w);
+        sh_json_write_kv_string(v->w, "id",         id);
+        sh_json_write_kv_string(v->w, "status",     why);
+        sh_json_write_kv_int   (v->w, "size_bytes", (int64_t)size);
+        sh_json_write_object_end(v->w);
     } else if (bad) {
         fprintf(stdout, "    %s  %s%s\n",
                 id, why,
@@ -832,8 +833,8 @@ typedef struct {
     uint64_t checked, ok, corrupt, repaired;
 } VerifyTotals;
 
-static int verify_one_kind(const HlCacheKind *k, int repair, int json,
-                           int *json_first, VerifyTotals *totals)
+static int verify_one_kind(const HlCacheKind *k, int repair,
+                           ShJsonWriter *w, VerifyTotals *totals)
 {
     /* Path resolution can fail when the cache subdir path resolves
      * to something other than a directory (e.g. a regular file
@@ -847,45 +848,45 @@ static int verify_one_kind(const HlCacheKind *k, int repair, int json,
                    hl_blob_store_open(&s, NULL, root,
                                       /*shard_depth=*/1, 0) == 0);
     if (!open_ok) {
-        if (json) {
-            if (!*json_first) fputc(',', stdout);
-            *json_first = 0;
-            fputs("{\"name\":", stdout);
-            json_emit_str(stdout, k->name);
-            fputs(",\"open_failed\":true,\"entries\":[]}", stdout);
+        if (w) {
+            sh_json_write_object_start(w);
+            sh_json_write_kv_string(w, "name",         k->name);
+            sh_json_write_kv_bool  (w, "open_failed",  true);
+            sh_json_write_key      (w, "entries");
+            sh_json_write_array_start(w);
+            sh_json_write_array_end(w);
+            sh_json_write_object_end(w);
         } else {
             fprintf(stdout, "  %-12s (cannot open store)\n", k->name);
         }
         return 1;
     }
 
-    if (json) {
-        if (!*json_first) fputc(',', stdout);
-        *json_first = 0;
-        fputs("{\"name\":", stdout);
-        json_emit_str(stdout, k->name);
-        fprintf(stdout, ",\"is_cas\":%s",
-                k->is_cas ? "true" : "false");
-        fputs(",\"entries\":[", stdout);
+    if (w) {
+        sh_json_write_object_start(w);
+        sh_json_write_kv_string(w, "name",   k->name);
+        sh_json_write_kv_bool  (w, "is_cas", k->is_cas != 0);
+        sh_json_write_key      (w, "entries");
+        sh_json_write_array_start(w);
     } else {
         fprintf(stdout, "  %-12s (%s mode)\n", k->name,
                 k->is_cas ? "CAS — sha-checked" : "keyed — structural only");
     }
 
     VerifyCtx v = {
-        .kind = k, .store = s, .repair = repair, .json = json,
-        .json_first = 1, .stats = {0, 0, 0, 0},
+        .kind = k, .store = s, .repair = repair, .w = w,
+        .stats = {0, 0, 0, 0},
     };
     (void)hl_blob_store_iter(s, verify_visit, &v);
     hl_blob_store_close(s);
 
-    if (json) {
-        fputs("]", stdout);
-        fprintf(stdout, ",\"checked\":%llu", (unsigned long long)v.stats.checked);
-        fprintf(stdout, ",\"ok\":%llu",      (unsigned long long)v.stats.ok);
-        fprintf(stdout, ",\"corrupt\":%llu", (unsigned long long)v.stats.corrupt);
-        fprintf(stdout, ",\"repaired\":%llu",(unsigned long long)v.stats.repaired);
-        fputc('}', stdout);
+    if (w) {
+        sh_json_write_array_end(w);
+        sh_json_write_kv_int(w, "checked",  (int64_t)v.stats.checked);
+        sh_json_write_kv_int(w, "ok",       (int64_t)v.stats.ok);
+        sh_json_write_kv_int(w, "corrupt",  (int64_t)v.stats.corrupt);
+        sh_json_write_kv_int(w, "repaired", (int64_t)v.stats.repaired);
+        sh_json_write_object_end(w);
     } else {
         fprintf(stdout, "    %llu checked, %llu ok, %llu corrupt%s\n",
                 (unsigned long long)v.stats.checked,
@@ -932,42 +933,46 @@ static int cmd_verify(int argc, char **argv)
     VerifyTotals totals = {0, 0, 0, 0};
     int rc_overall = 0;
 
-    if (json) fputs("{\"results\":[", stdout);
-    int json_first = 1;
+    ShJsonWriter w;
+    ShJsonWriter *wp = NULL;
+    if (json) {
+        sh_json_writer_init(&w, stdio_write_fn, stdout);
+        wp = &w;
+        sh_json_write_object_start(wp);
+        sh_json_write_key(wp, "results");
+        sh_json_write_array_start(wp);
+    }
 
     for (const HlCacheKind *k = hl_cache_registry(); k->name; k++) {
         if (only && k != only) continue;
-        if (verify_one_kind(k, repair, json, &json_first, &totals) != 0)
+        if (verify_one_kind(k, repair, wp, &totals) != 0)
             rc_overall = 1;
     }
 
-    uint64_t total_checked  = totals.checked;
-    uint64_t total_ok       = totals.ok;
-    uint64_t total_corrupt  = totals.corrupt;
-    uint64_t total_repaired = totals.repaired;
-
-    if (json) {
-        fputs("]", stdout);
-        fprintf(stdout, ",\"total_checked\":%llu",  (unsigned long long)total_checked);
-        fprintf(stdout, ",\"total_ok\":%llu",       (unsigned long long)total_ok);
-        fprintf(stdout, ",\"total_corrupt\":%llu",  (unsigned long long)total_corrupt);
-        fprintf(stdout, ",\"total_repaired\":%llu", (unsigned long long)total_repaired);
-        fputs("}\n", stdout);
+    if (wp) {
+        sh_json_write_array_end(wp);
+        sh_json_write_kv_int(wp, "total_checked",  (int64_t)totals.checked);
+        sh_json_write_kv_int(wp, "total_ok",       (int64_t)totals.ok);
+        sh_json_write_kv_int(wp, "total_corrupt",  (int64_t)totals.corrupt);
+        sh_json_write_kv_int(wp, "total_repaired", (int64_t)totals.repaired);
+        sh_json_write_object_end(wp);
+        fputc('\n', stdout);
+        if (sh_json_writer_error(wp)) rc_overall = 1;
     } else {
         fprintf(stdout, "\nTotal: %llu checked, %llu ok, %llu corrupt",
-                (unsigned long long)total_checked,
-                (unsigned long long)total_ok,
-                (unsigned long long)total_corrupt);
-        if (total_repaired)
+                (unsigned long long)totals.checked,
+                (unsigned long long)totals.ok,
+                (unsigned long long)totals.corrupt);
+        if (totals.repaired)
             fprintf(stdout, " (%llu repaired)",
-                    (unsigned long long)total_repaired);
+                    (unsigned long long)totals.repaired);
         fputc('\n', stdout);
     }
 
     /* Exit 1 if anything is corrupt AND we didn't repair (or
      * repair couldn't fix every issue). Exit 0 if --repair
      * brought everything to OK. */
-    if (total_corrupt > total_repaired) rc_overall = 1;
+    if (totals.corrupt > totals.repaired) rc_overall = 1;
     return rc_overall;
 }
 
