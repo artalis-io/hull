@@ -522,11 +522,15 @@ int hl_sandbox_apply_pledge(void)
      * since seccomp filters can only restrict on Linux, not widen.
      * On Linux, "netlink" is required so glibc getaddrinfo() can open
      * AF_NETLINK sockets to enumerate interfaces; "unix" is required so
-     * nsswitch can talk to systemd-resolved / nscd via AF_UNIX. */
+     * nsswitch can talk to systemd-resolved / nscd via AF_UNIX.
+     * `fattr` is required because module loading (between phase 1 and
+     * phase 2) can hit the bytecode/template cache which calls
+     * futimes() via bump_atime_fd for LRU tracking. Without it the
+     * JS / Lua runtime gets killed during stdlib module compilation. */
 #if defined(__linux__) && !defined(__COSMOPOLITAN__)
-    const char *phase1 = "stdio inet unix rpath wpath cpath flock dns netlink unveil";
+    const char *phase1 = "stdio inet unix rpath wpath cpath flock fattr dns netlink unveil";
 #else
-    const char *phase1 = "stdio inet rpath wpath cpath flock dns unveil";
+    const char *phase1 = "stdio inet rpath wpath cpath flock fattr dns unveil";
 #endif
     if (pledge(phase1, NULL) != 0) {
         log_error("[sandbox] phase 1 pledge failed");
