@@ -897,6 +897,14 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
      *   wpath  — SQLite WAL writes
      *   cpath  — SQLite journal/WAL creation
      *   flock  — SQLite locking
+     *   fattr  — futimes() on owned blob-cache fds (LRU atime touch
+     *            in hl_blob_store_reader_open when track_access=1).
+     *            Glibc since 2.6.22 implements futimes() as utimensat(),
+     *            which pledge categorises under fattr. Scope is narrow:
+     *            owned fds we just opened from $HOME/.hull/blobs/runtime/,
+     *            unveil prevents any other path from being touched. The
+     *            bytecode and template caches need this to drive their
+     *            LRU eviction policy.
      *
      * Conditional:
      *   inet   — socket-family syscalls. Needed when the app serves
@@ -908,7 +916,7 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
      */
     char promises[256];
     int plen = snprintf(promises, sizeof(promises),
-                        "stdio rpath wpath cpath flock");
+                        "stdio rpath wpath cpath flock fattr");
     if (plen > 0 && (size_t)plen < sizeof(promises) &&
         (policy->network_inbound || policy->network_outbound)) {
         int n = snprintf(promises + plen, sizeof(promises) - (size_t)plen,
