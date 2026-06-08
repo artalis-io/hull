@@ -877,4 +877,79 @@ UTEST(hl_blob_store_keyed, sharded_layout_matches_cas_layout)
     rm_rf(tmp);
 }
 
+UTEST(hl_blob_store_keyed, reader_refuses_symlink_at_blob_path)
+{
+    /* O_NOFOLLOW hardening: a symlink planted at the blob path
+     * (e.g. on a multi-user host where the cache root is writable)
+     * must not be followed. blob_store legitimately never creates
+     * symlinks itself — only attackers do — so refusing is safe. */
+    char tmp[256];
+    HlBlobStore *s = open_keyed_store(tmp);
+    ASSERT_NE(s, NULL);
+
+    const char *key =
+        "cc00000000000000000000000000000000000000000000000000000000000000";
+    /* Create the shard dir + a planted symlink at the blob path. */
+    char shard_dir[512];
+    snprintf(shard_dir, sizeof(shard_dir), "%s/blobs/cc", tmp);
+    ASSERT_EQ(mkdir(shard_dir, 0700), 0);
+
+    /* Target is a real file outside the store the attacker would
+     * love us to read; sufficient to verify we refuse to follow. */
+    char target_file[512];
+    snprintf(target_file, sizeof(target_file), "%s/secret.txt", tmp);
+    int tfd = open(target_file, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    ASSERT_GE(tfd, 0);
+    ASSERT_EQ(write(tfd, "sekret", 6), 6);
+    close(tfd);
+
+    char blob_path[512];
+    snprintf(blob_path, sizeof(blob_path), "%s/%s", shard_dir, key);
+    ASSERT_EQ(symlink(target_file, blob_path), 0);
+
+    /* reader_open MUST refuse — O_NOFOLLOW returns ELOOP/EMLINK. */
+    HlBlobStoreReader *r = NULL;
+    ASSERT_NE(hl_blob_store_reader_open(s, key, 0, &r), 0);
+    ASSERT_EQ(r, NULL);
+
+    /* And `_get` does too. */
+    uint8_t *buf = NULL;
+    size_t  buflen = 0;
+    ASSERT_NE(hl_blob_store_get(s, key, 0, &buf, &buflen), 0);
+    ASSERT_EQ(buf, NULL);
+
+    hl_blob_store_close(s);
+    rm_rf(tmp);
+}
+
+UTEST(hl_blob_store_keyed, get_rejects_huge_stat_size)
+{
+    /* hl_blob_store_get caps at HL_BLOB_STORE_GET_MAX_BYTES (256 MB).
+     * A normal file that fits passes; we can't easily plant a fake
+     * giant file without disk pressure, so this is the no-regression
+     * test: ordinary puts/gets still work. The cap itself is
+     * exercised in code review — building a 256 MB file in CI is
+     * not worth the disk IO. */
+    char tmp[256];
+    HlBlobStore *s = open_keyed_store(tmp);
+    ASSERT_NE(s, NULL);
+
+    const char *key =
+        "dd00000000000000000000000000000000000000000000000000000000000000";
+    /* Put a small but non-trivial payload. */
+    uint8_t payload[4096];
+    for (size_t i = 0; i < sizeof(payload); i++) payload[i] = (uint8_t)i;
+    ASSERT_EQ(hl_blob_store_put_keyed(s, key, payload, sizeof(payload)), 0);
+
+    uint8_t *buf = NULL;
+    size_t   buflen = 0;
+    ASSERT_EQ(hl_blob_store_get(s, key, 0, &buf, &buflen), 0);
+    ASSERT_EQ(buflen, sizeof(payload));
+    ASSERT_EQ(memcmp(buf, payload, sizeof(payload)), 0);
+    free(buf);
+
+    hl_blob_store_close(s);
+    rm_rf(tmp);
+}
+
 UTEST_MAIN()

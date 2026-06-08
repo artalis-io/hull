@@ -309,16 +309,30 @@ local function generate_app_registry(app_dir, files)
         add_file(path, rel, "shader_")
     end
 
-    -- AOT-compiled compute modules (generated in tmpdir, explicit entry names)
+    -- AOT-compiled compute modules (generated in tmpdir, explicit entry names).
+    -- By the time we reach this loop the AOT loop above has either compiled
+    -- via wamrc or populated `item.path` from a warm cache hit; in BOTH cases
+    -- the file is supposed to exist. A nil read here means the build pipeline
+    -- silently lost an artifact (truncated cache hit, race with cleanup, etc.)
+    -- — silently omitting the AOT entry from the embedded registry would
+    -- produce a binary that boots fine but quietly falls back to the WASM
+    -- interpreter for that module. Better to fail the build loudly.
     for _, item in ipairs(files.compute_aot or {}) do
         local data = read_file(item.path)
-        if data then
-            local varname = "aot_" .. item.entry_name:gsub("[/.]", "_")
-            parts[#parts + 1] = xxd_data(varname, data)
-            parts[#parts + 1] = ""
-            entries[#entries + 1] = string.format(
-                '    { "%s", %s, sizeof(%s) },', item.entry_name, varname, varname)
+        if not data then
+            error(string.format(
+                "hull build: AOT artifact missing or unreadable: %s (entry %s). "
+                .. "This indicates a corrupted cache hit or a tmpdir race. "
+                .. "Re-run with --no-cache to bypass the AOT cache, or run "
+                .. "`hull cache verify --kind=compute-aot --repair` to clear "
+                .. "the corrupt entry.",
+                item.path, item.entry_name))
         end
+        local varname = "aot_" .. item.entry_name:gsub("[/.]", "_")
+        parts[#parts + 1] = xxd_data(varname, data)
+        parts[#parts + 1] = ""
+        entries[#entries + 1] = string.format(
+            '    { "%s", %s, sizeof(%s) },', item.entry_name, varname, varname)
     end
 
     -- Sort entries by name for O(log n) binary search in HlVfs

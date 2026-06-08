@@ -114,14 +114,25 @@ JSValue hl_js_compile_module_cached(JSContext *ctx,
     uint8_t *bc     = NULL;
     size_t   bc_len = 0;
     if (hl_blob_store_get(store, key, /*track_access=*/1, &bc, &bc_len) == 0) {
-        JSValue rv = JS_ReadObject(ctx, bc, bc_len,
-                                   JS_READ_OBJ_BYTECODE);
-        free(bc);
-        if (!JS_IsException(rv)) return rv;
-        /* Stale / corrupt bytecode — drop the exception, evict,
-         * fall through to source compile + repersist. */
-        JS_FreeValue(ctx, JS_GetException(ctx));
-        (void)hl_blob_store_delete(store, key);
+        /* Defensive: an empty or NULL blob slips past JS_ReadObject's
+         * version-check (it dereferences buf to read BC_VERSION).
+         * blob_store doesn't currently produce zero-byte entries on
+         * the keyed-put path, but a truncated file from a crashed
+         * writer or a hostile planted file in HULL_CACHE_DIR could.
+         * Evict + fall through to source compile rather than crash. */
+        if (!bc || bc_len == 0) {
+            free(bc);
+            (void)hl_blob_store_delete(store, key);
+        } else {
+            JSValue rv = JS_ReadObject(ctx, bc, bc_len,
+                                       JS_READ_OBJ_BYTECODE);
+            free(bc);
+            if (!JS_IsException(rv)) return rv;
+            /* Stale / corrupt bytecode — drop the exception, evict,
+             * fall through to source compile + repersist. */
+            JS_FreeValue(ctx, JS_GetException(ctx));
+            (void)hl_blob_store_delete(store, key);
+        }
     }
 
     /* ── Cache miss: compile, then persist. ────────────────────── */

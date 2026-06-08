@@ -125,6 +125,13 @@ JSValue hl_js_template_compile_cached(JSContext *ctx,
     uint8_t *bc     = NULL;
     size_t   bc_len = 0;
     if (hl_blob_store_get(store, key, /*track_access=*/1, &bc, &bc_len) == 0) {
+        /* Defensive: empty/NULL blob would dereference NULL inside
+         * JS_ReadObject. Evict + recompile rather than crash. */
+        if (!bc || bc_len == 0) {
+            free(bc);
+            (void)hl_blob_store_delete(store, key);
+            goto fresh;
+        }
         JSValue chunk = JS_ReadObject(ctx, bc, bc_len,
                                       JS_READ_OBJ_BYTECODE);
         free(bc);
@@ -147,6 +154,7 @@ JSValue hl_js_template_compile_cached(JSContext *ctx,
         (void)hl_blob_store_delete(store, key);
     }
 
+fresh:
     /* ── Cache miss: compile-only, persist the chunk, then run. ─
      *
      * Compile twice? No — JS_Eval with COMPILE_ONLY produces the
@@ -155,6 +163,7 @@ JSValue hl_js_template_compile_cached(JSContext *ctx,
      * JS_WriteObject + store-put. The next boot pays only the
      * JS_ReadObject + JS_EvalFunction cost, which is what we're
      * trying to amortize. */
+    {} /* label needs a statement before the declarations below */
     JSValue chunk = JS_Eval(ctx, code, code_len, name,
                             JS_EVAL_TYPE_GLOBAL |
                             JS_EVAL_FLAG_STRICT |

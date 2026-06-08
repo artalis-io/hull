@@ -591,7 +591,15 @@ int hl_blob_store_reader_open(HlBlobStore *s, const char *id, int track_access,
     char path[PATH_MAX];
     if (build_blob_path(s, id, path, sizeof(path)) != 0) return -1;
 
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    /* O_NOFOLLOW: refuse to follow a symlink at the blob path.
+     * Nothing in the legitimate write path ever creates a symlink
+     * inside the store, so a symlink here means someone planted
+     * one — refuse to read what's at the other end. Matters on
+     * multi-user hosts or shared HULL_CACHE_DIR mounts where the
+     * cache root might be writable by an unprivileged user.
+     * Symlink → ELOOP (Linux) / EMLINK (BSD) → blob_store_get
+     * returns failure, caller falls back to fresh compile. */
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return -1;
 
     HlBlobStoreReader *r = hl_alloc_malloc(s->alloc, sizeof(*r));
@@ -629,6 +637,18 @@ void hl_blob_store_reader_close(HlBlobStoreReader *r)
     hl_alloc_free(r->store->alloc, r, sizeof(*r));
 }
 
+/* Defensive ceiling on any single blob the in-memory `_get` path
+ * will materialise. Mirrors the limit used by `cache verify` and
+ * is comfortably above every legitimate cache entry today (the
+ * largest stdlib bytecode is ~50 KB; the largest AOT module is
+ * a few hundred KB). Hostile or corrupted blob entries — e.g. a
+ * stat that reports billions of bytes due to filesystem state
+ * corruption, or a planted file in a shared HULL_CACHE_DIR —
+ * are rejected rather than crashing the allocator. Callers that
+ * need to stream larger payloads use the reader_open / _read
+ * API directly. */
+#define HL_BLOB_STORE_GET_MAX_BYTES ((size_t)(256u * 1024u * 1024u))
+
 int hl_blob_store_get(HlBlobStore *s, const char *id, int track_access,
                       uint8_t **out_buf, size_t *out_len)
 {
@@ -638,6 +658,11 @@ int hl_blob_store_get(HlBlobStore *s, const char *id, int track_access,
 
     size_t size = 0;
     if (hl_blob_store_stat(s, id, &size, NULL) != 0) return -1;
+
+    if (size > HL_BLOB_STORE_GET_MAX_BYTES) {
+        errno = EFBIG;
+        return -1;
+    }
 
     if (size == 0) {
         HlBlobStoreReader *r = NULL;
