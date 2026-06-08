@@ -42,6 +42,7 @@
 #include "hull/cap/audit.h"
 #include "hull/cap/env.h"
 #include "hull/cap/fs.h"
+#include "sh_json.h"
 #include "hull/cap/http.h"
 #include "hull/cap/smtp.h"
 
@@ -90,6 +91,17 @@
 #define HL_DEFAULT_CSP \
     "default-src 'none'; style-src 'self'; " \
     "img-src 'self'; form-action 'self'; frame-ancestors 'none'"
+
+/* ── JSON writer plumbing ──────────────────────────────────────────── */
+
+/* FILE* writer callback for ShJsonWriter — used by the agent-mode
+ * .hull/last_error.json emitter below. Same shape as the helpers in
+ * commands/cache.c / sbom.c / commands/doctor.c. */
+static int serve_stdio_write(void *ctx, const char *data, size_t len)
+{
+    FILE *fp = (FILE *)ctx;
+    return fwrite(data, 1, len, fp) == len ? 0 : -1;
+}
 
 /* ── Logging ───────────────────────────────────────────────────────── */
 
@@ -993,8 +1005,21 @@ static int hl_serve_load_app(HlServerState *s)
                 mkdir(err_dir, 0755);
                 FILE *ef = fopen(err_path, "w");
                 if (ef) {
-                    fprintf(ef, "{\"error\":\"failed to load %s\",\"timestamp\":%ld}\n",
-                            s->entry_point, (long)time(NULL));
+                    /* entry_point is app-config-derived (controlled
+                     * today) but routing through sh_json removes the
+                     * latent escape vector if it ever takes external
+                     * input. */
+                    char msg[512];
+                    snprintf(msg, sizeof(msg),
+                             "failed to load %s", s->entry_point);
+                    ShJsonWriter w;
+                    sh_json_writer_init(&w, serve_stdio_write, ef);
+                    sh_json_write_object_start(&w);
+                    sh_json_write_kv_string(&w, "error", msg);
+                    sh_json_write_kv_int   (&w, "timestamp",
+                                            (int64_t)time(NULL));
+                    sh_json_write_object_end(&w);
+                    fputc('\n', ef);
                     fclose(ef);
                 }
             }

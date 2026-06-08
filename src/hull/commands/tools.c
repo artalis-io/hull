@@ -36,12 +36,15 @@
 #include "hull/release.h"
 #include "hull/release_io.h"
 #include "hull/tools_install.h"
+#include "sh_json.h"
 
 #include <keel/allocator.h>
 #include <keel/tls_mbedtls.h>
 
 #include <errno.h>
 #include <limits.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -84,32 +87,12 @@ static void format_size(size_t bytes, char *out, size_t out_sz)
     }
 }
 
-/* Minimal JSON string escaper for fields with arbitrary content. Emits
- * raw bytes inside `"..."` with the six escapes RFC 8259 §7 requires —
- * `\"`, `\\`, and the C0 control set encoded as `\b`/`\f`/`\n`/`\r`/`\t`
- * or `\u00XX`. UTF-8 multi-byte sequences pass through unchanged (valid
- * JSON per §8.1). Used for tool descriptions, which today are clean but
- * shouldn't have to stay that way for the output to remain valid JSON. */
-static void json_emit_str(FILE *f, const char *s)
+/* Generic FILE* writer for ShJsonWriter (same shape as in
+ * commands/cache.c, sbom.c, commands/doctor.c). */
+static int stdio_write_fn(void *ctx, const char *data, size_t len)
 {
-    fputc('"', f);
-    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
-        unsigned char c = *p;
-        switch (c) {
-            case '"':  fputs("\\\"", f); break;
-            case '\\': fputs("\\\\", f); break;
-            case '\b': fputs("\\b",  f); break;
-            case '\f': fputs("\\f",  f); break;
-            case '\n': fputs("\\n",  f); break;
-            case '\r': fputs("\\r",  f); break;
-            case '\t': fputs("\\t",  f); break;
-            default:
-                if (c < 0x20) fprintf(f, "\\u%04x", c);
-                else          fputc((int)c, f);
-                break;
-        }
-    }
-    fputc('"', f);
+    FILE *fp = (FILE *)ctx;
+    return fwrite(data, 1, len, fp) == len ? 0 : -1;
 }
 
 /* Returns 1 if a tool is installed at $HOME/.hull/tools/<name>. The
@@ -172,48 +155,43 @@ static int print_list_json(const char *platform)
 {
     const char *version = HL_VERSION;
     if (version[0] == 'v') version++;
-    fprintf(stdout, "{\n  \"hull_version\": \"%s\",\n", version);
-    fprintf(stdout, "  \"platform\": \"%s\",\n", platform);
-    fprintf(stdout, "  \"tools\": [");
 
-    int first = 1;
+    ShJsonWriter w;
+    sh_json_writer_init(&w, stdio_write_fn, stdout);
+    sh_json_write_object_start(&w);
+    sh_json_write_kv_string(&w, "hull_version", version);
+    sh_json_write_kv_string(&w, "platform",     platform);
+    sh_json_write_key      (&w, "tools");
+    sh_json_write_array_start(&w);
+
     for (const HlToolSpec *t = hl_tools_registry(); t->name; t++) {
-        if (!first) fprintf(stdout, ",");
-        fprintf(stdout, "\n    {\n");
-        /* Tool names are `[A-Za-z0-9_-]+` per hl_tools_name_valid, so
-         * they need no escaping; descriptions are free-form and DO. */
-        fprintf(stdout, "      \"name\": \"%s\",\n", t->name);
-        fprintf(stdout, "      \"description\": ");
-        json_emit_str(stdout, t->description);
-        fprintf(stdout, ",\n");
+        sh_json_write_object_start(&w);
+        sh_json_write_kv_string(&w, "name",        t->name);
+        sh_json_write_kv_string(&w, "description", t->description);
 
         int published = hl_tools_published_for(t, platform);
-        fprintf(stdout, "      \"available\": %s,\n",
-                published ? "true" : "false");
+        sh_json_write_kv_bool(&w, "available", published != 0);
 
         char inst_path[PATH_MAX];
         size_t inst_size = 0;
         int installed = tool_installed(t->name,
                                        inst_path, sizeof(inst_path),
                                        &inst_size);
-        fprintf(stdout, "      \"installed\": %s",
-                installed ? "true" : "false");
+        sh_json_write_kv_bool(&w, "installed", installed != 0);
         if (installed) {
-            /* Path may contain spaces or other JSON-sensitive chars on
-             * user-controlled $HOME — escape it. */
-            fprintf(stdout, ",\n      \"path\": ");
-            json_emit_str(stdout, inst_path);
-            fprintf(stdout, ",\n      \"size_bytes\": %zu", inst_size);
+            sh_json_write_kv_string(&w, "path",       inst_path);
+            sh_json_write_kv_int   (&w, "size_bytes", (int64_t)inst_size);
         }
         if (published) {
             char asset[128];
             hl_tools_asset_name(t, platform, asset, sizeof(asset));
-            fprintf(stdout, ",\n      \"asset_name\": \"%s\"", asset);
+            sh_json_write_kv_string(&w, "asset_name", asset);
         }
-        fprintf(stdout, "\n    }");
-        first = 0;
+        sh_json_write_object_end(&w);
     }
-    fprintf(stdout, "\n  ]\n}\n");
+    sh_json_write_array_end(&w);
+    sh_json_write_object_end(&w);
+    fputc('\n', stdout);
     return 0;
 }
 

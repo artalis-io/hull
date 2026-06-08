@@ -11,9 +11,17 @@
  */
 
 #include "hull/commands/version.h"
+#include "sh_json.h"
 
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+
+static int stdio_write_fn(void *ctx, const char *data, size_t len)
+{
+    FILE *fp = (FILE *)ctx;
+    return fwrite(data, 1, len, fp) == len ? 0 : -1;
+}
 
 #ifndef HL_VERSION
 #define HL_VERSION "dev"
@@ -75,13 +83,17 @@ int hl_cmd_version(int argc, char **argv, const HlCommandEnv *env)
     }
 
     if (json) {
-        fprintf(stdout,
-                "{\"version\":\"%s\",\"runtime\":\"%s\","
-                "\"platform\":\"%s\",\"build\":\"%s\"}\n",
-                HL_VERSION,
-                hl_version_runtime(),
-                hl_version_platform(),
-                hl_version_build());
+        /* Tiny output but structured emission removes a future
+         * escape-vector if any field ever takes user input. */
+        ShJsonWriter w;
+        sh_json_writer_init(&w, stdio_write_fn, stdout);
+        sh_json_write_object_start(&w);
+        sh_json_write_kv_string(&w, "version",  HL_VERSION);
+        sh_json_write_kv_string(&w, "runtime",  hl_version_runtime());
+        sh_json_write_kv_string(&w, "platform", hl_version_platform());
+        sh_json_write_kv_string(&w, "build",    hl_version_build());
+        sh_json_write_object_end(&w);
+        fputc('\n', stdout);
     } else {
         fprintf(stdout, "hull %s\n", HL_VERSION);
     }

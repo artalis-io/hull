@@ -27,7 +27,9 @@
 #include "hull/module_registry.h"
 #include "hull/tool.h"
 #include "hull/tools_install.h"
+#include "sh_json.h"
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -593,17 +595,20 @@ static void print_human(FILE *f, CompilerInfo *ci, int nci,
 
 /* ── JSON output ────────────────────────────────────────────────── */
 
-/* Minimal JSON escaping for string values. */
-static void json_str(FILE *f, const char *s)
+/* Generic FILE* writer for ShJsonWriter (same shape as in
+ * commands/cache.c and sbom.c). */
+static int stdio_write_fn(void *ctx, const char *data, size_t len)
 {
-    fputc('"', f);
-    for (; *s; s++) {
-        if (*s == '"')       fputs("\\\"", f);
-        else if (*s == '\\') fputs("\\\\", f);
-        else if (*s == '\n') fputs("\\n",  f);
-        else                 fputc(*s, f);
-    }
-    fputc('"', f);
+    FILE *fp = (FILE *)ctx;
+    return fwrite(data, 1, len, fp) == len ? 0 : -1;
+}
+
+/* Helper: write a string value, or null if the C string is empty. */
+static void emit_string_or_null(ShJsonWriter *w, const char *key,
+                                const char *val)
+{
+    if (val && *val) sh_json_write_kv_string(w, key, val);
+    else             sh_json_write_kv_null(w, key);
 }
 
 static void print_json(FILE *f, CompilerInfo *ci, int nci,
@@ -623,31 +628,29 @@ static void print_json(FILE *f, CompilerInfo *ci, int nci,
         (embed == PLATFORM_NONE)              ? "no-platform" :
         (!any_compiler && !tcc_avail_json)    ? "no-compiler"  : "ready";
 
-    fprintf(f, "{\n");
-    fprintf(f, "  \"version\": \"%s\",\n", HL_VERSION);
-    fprintf(f, "  \"runtime\": \"%s\",\n", doctor_runtime());
-    fprintf(f, "  \"platform\": \"%s\",\n", doctor_platform());
-    fprintf(f, "  \"build\": \"%s\",\n", doctor_build());
-    fprintf(f, "  \"platform_embedded\": \"%s\",\n", embed_str);
-    fprintf(f, "  \"compilers\": [");
-    int first = 1;
+    ShJsonWriter w;
+    sh_json_writer_init(&w, stdio_write_fn, f);
+    sh_json_write_object_start(&w);
+    sh_json_write_kv_string(&w, "version",            HL_VERSION);
+    sh_json_write_kv_string(&w, "runtime",            doctor_runtime());
+    sh_json_write_kv_string(&w, "platform",           doctor_platform());
+    sh_json_write_kv_string(&w, "build",              doctor_build());
+    sh_json_write_kv_string(&w, "platform_embedded",  embed_str);
+
+    sh_json_write_key(&w, "compilers");
+    sh_json_write_array_start(&w);
     for (int i = 0; i < nci; i++) {
-        if (!first) fprintf(f, ", ");
-        first = 0;
-        fprintf(f, "{\"name\": ");
-        json_str(f, ci[i].name);
-        fprintf(f, ", \"path\": ");
-        if (ci[i].path[0])
-            json_str(f, ci[i].path);
-        else
-            fprintf(f, "null");
-        fprintf(f, "}");
+        sh_json_write_object_start(&w);
+        sh_json_write_kv_string(&w, "name", ci[i].name);
+        emit_string_or_null(&w, "path", ci[i].path);
+        sh_json_write_object_end(&w);
     }
-    fprintf(f, "],\n");
+    sh_json_write_array_end(&w);
+
 #ifdef HL_ENABLE_TCC
-    fprintf(f, "  \"tcc_embedded\": %s,\n",
-            tcc_is_embedded() ? "true" : "false");
+    sh_json_write_kv_bool(&w, "tcc_embedded", tcc_is_embedded() != 0);
 #endif
+
     /* CA bundle status */
     {
         const unsigned char *cab_data = NULL;
@@ -663,91 +666,82 @@ static void print_json(FILE *f, CompilerInfo *ci, int nci,
         for (const char **p = system_paths; *p; p++) {
             if (access(*p, R_OK) == 0) { system_found = *p; break; }
         }
-        fprintf(f, "  \"ca_bundle\": {");
-        fprintf(f, "\"system\": ");
-        if (system_found) json_str(f, system_found); else fprintf(f, "null");
-        fprintf(f, ", \"embedded\": %s",
-                cab_embedded ? "true" : "false");
-        if (cab_embedded) {
-            fprintf(f, ", \"embedded_label\": ");
-            json_str(f, hl_embedded_ca_bundle_label());
-        }
-        fprintf(f, "},\n");
+        sh_json_write_key(&w, "ca_bundle");
+        sh_json_write_object_start(&w);
+        emit_string_or_null(&w, "system", system_found);
+        sh_json_write_kv_bool(&w, "embedded", cab_embedded != 0);
+        if (cab_embedded)
+            sh_json_write_kv_string(&w, "embedded_label",
+                                    hl_embedded_ca_bundle_label());
+        sh_json_write_object_end(&w);
     }
+
     /* Compute capability surface. */
-    fprintf(f, "  \"compute\": {");
-    fprintf(f, "\"wasm_enabled\": %s",
-            cmp->wasm_enabled ? "true" : "false");
-    fprintf(f, ", \"gpu_enabled\": %s",
-            cmp->gpu_enabled ? "true" : "false");
-    fprintf(f, ", \"wamrc\": ");
-    if (cmp->wamrc_path[0]) json_str(f, cmp->wamrc_path);
-    else                    fprintf(f, "null");
-    fprintf(f, ", \"wamrc_managed\": %s",
-            cmp->wamrc_managed ? "true" : "false");
-    fprintf(f, ", \"clang\": ");
-    if (cmp->clang_path[0]) json_str(f, cmp->clang_path);
-    else                    fprintf(f, "null");
-    fprintf(f, ", \"wasm_ld\": %s",
-            cmp->has_wasm_ld ? "true" : "false");
-    /* aot_ready: hull build will produce AOT outputs end-to-end. */
-    int aot_ready = cmp->wasm_enabled && cmp->wamrc_path[0] != '\0';
-    fprintf(f, ", \"aot_ready\": %s", aot_ready ? "true" : "false");
-    fprintf(f, "},\n");
-    /* Module-subsystem capability bits — what the build's resolver will
-     * admit. Mirrors the build_provided_caps() set in module_resolver.c. */
-    fprintf(f, "  \"subsystems\": {");
+    {
+        int aot_ready = cmp->wasm_enabled && cmp->wamrc_path[0] != '\0';
+        sh_json_write_key(&w, "compute");
+        sh_json_write_object_start(&w);
+        sh_json_write_kv_bool  (&w, "wasm_enabled",   cmp->wasm_enabled != 0);
+        sh_json_write_kv_bool  (&w, "gpu_enabled",    cmp->gpu_enabled  != 0);
+        emit_string_or_null    (&w, "wamrc",          cmp->wamrc_path);
+        sh_json_write_kv_bool  (&w, "wamrc_managed",  cmp->wamrc_managed != 0);
+        emit_string_or_null    (&w, "clang",          cmp->clang_path);
+        sh_json_write_kv_bool  (&w, "wasm_ld",        cmp->has_wasm_ld != 0);
+        sh_json_write_kv_bool  (&w, "aot_ready",      aot_ready != 0);
+        sh_json_write_object_end(&w);
+    }
+
+    /* Module-subsystem capability bits — mirrors build_provided_caps()
+     * in module_resolver.c. */
+    sh_json_write_key(&w, "subsystems");
+    sh_json_write_object_start(&w);
 #ifdef HL_ENABLE_DB
-    fprintf(f, "\"db\": true");
+    sh_json_write_kv_bool(&w, "db", true);
 #else
-    fprintf(f, "\"db\": false");
+    sh_json_write_kv_bool(&w, "db", false);
 #endif
 #ifdef HL_ENABLE_WASM
-    fprintf(f, ", \"wasm\": true");
+    sh_json_write_kv_bool(&w, "wasm", true);
 #else
-    fprintf(f, ", \"wasm\": false");
+    sh_json_write_kv_bool(&w, "wasm", false);
 #endif
 #ifdef HL_ENABLE_GPU
-    fprintf(f, ", \"gpu\": true");
+    sh_json_write_kv_bool(&w, "gpu", true);
 #else
-    fprintf(f, ", \"gpu\": false");
+    sh_json_write_kv_bool(&w, "gpu", false);
 #endif
 #ifdef HL_ENABLE_HTTP
-    fprintf(f, ", \"http\": true");
+    sh_json_write_kv_bool(&w, "http", true);
 #else
-    fprintf(f, ", \"http\": false");
+    sh_json_write_kv_bool(&w, "http", false);
 #endif
-    fprintf(f, "},\n");
+    sh_json_write_object_end(&w);
+
     /* Cache status — same registry as `hull cache list`. */
-    fprintf(f, "  \"caches\": [");
-    int cf = 1;
+    sh_json_write_key(&w, "caches");
+    sh_json_write_array_start(&w);
     for (const HlCacheKind *k = hl_cache_registry(); k->name; k++) {
         char path[PATH_MAX];
         uint64_t cnt = 0, size = 0;
         cache_stats(k, path, sizeof(path), &cnt, &size);
 
-        if (!cf) fprintf(f, ", ");
-        cf = 0;
-        fprintf(f, "{\"name\": ");
-        json_str(f, k->name);
-        fprintf(f, ", \"is_runtime\": %s",
-                k->is_runtime ? "true" : "false");
-        fprintf(f, ", \"path\": ");
-        if (path[0]) json_str(f, path); else fprintf(f, "null");
-        fprintf(f, ", \"count\": %llu", (unsigned long long)cnt);
-        fprintf(f, ", \"size_bytes\": %llu", (unsigned long long)size);
-        fprintf(f, "}");
+        sh_json_write_object_start(&w);
+        sh_json_write_kv_string(&w, "name",       k->name);
+        sh_json_write_kv_bool  (&w, "is_runtime", k->is_runtime != 0);
+        emit_string_or_null    (&w, "path",       path);
+        sh_json_write_kv_int   (&w, "count",      (int64_t)cnt);
+        sh_json_write_kv_int   (&w, "size_bytes", (int64_t)size);
+        sh_json_write_object_end(&w);
     }
-    fprintf(f, "],\n");
+    sh_json_write_array_end(&w);
+
     {
         const char *override = getenv("HULL_CACHE_DIR");
-        fprintf(f, "  \"hull_cache_dir\": ");
-        if (override && *override) json_str(f, override);
-        else                       fprintf(f, "null");
-        fprintf(f, ",\n");
+        emit_string_or_null(&w, "hull_cache_dir", override);
     }
-    fprintf(f, "  \"hull_build\": \"%s\"\n", ready_str);
-    fprintf(f, "}\n");
+    sh_json_write_kv_string(&w, "hull_build", ready_str);
+    sh_json_write_object_end(&w);
+    fputc('\n', f);
 }
 
 /* ── Public collector ────────────────────────────────────────────── */
