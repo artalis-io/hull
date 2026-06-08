@@ -17,7 +17,9 @@
 
 #include "hull/sbom.h"
 #include "hull/cacert.h"
+#include "sh_json.h"
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -450,63 +452,67 @@ static void format_human(FILE *fp)
     }
 }
 
-/* ── JSON helpers (string escape) ──────────────────────────────────── */
+/* ── JSON writer plumbing ──────────────────────────────────────────── */
 
-static void json_escape(FILE *fp, const char *s)
+/* Generic FILE* writer for ShJsonWriter — same shape as the helper
+ * in commands/cache.c. Could be promoted to a shared header if a
+ * third caller materializes; for now keep it local. */
+static int stdio_write_fn(void *ctx, const char *data, size_t len)
 {
-    fputc('"', fp);
-    if (!s) { fputc('"', fp); return; }
-    for (; *s; s++) {
-        unsigned char c = (unsigned char)*s;
-        switch (c) {
-            case '"':  fputs("\\\"", fp); break;
-            case '\\': fputs("\\\\", fp); break;
-            case '\n': fputs("\\n", fp); break;
-            case '\r': fputs("\\r", fp); break;
-            case '\t': fputs("\\t", fp); break;
-            case '\b': fputs("\\b", fp); break;
-            case '\f': fputs("\\f", fp); break;
-            default:
-                if (c < 0x20) fprintf(fp, "\\u%04x", c);
-                else fputc(c, fp);
-        }
+    FILE *fp = (FILE *)ctx;
+    return fwrite(data, 1, len, fp) == len ? 0 : -1;
+}
+
+/* Sanitize an SBOM component name into an SPDX-legal identifier:
+ * [A-Za-z0-9.-]+ only; everything else collapses to '-'. Result is
+ * written into `out` (caller-provided), NUL-terminated. */
+static void spdx_sanitize_name(const char *src, char *out, size_t out_sz)
+{
+    size_t j = 0;
+    for (const char *p = src; *p && j + 1 < out_sz; p++) {
+        char c = *p;
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '.' || c == '-')
+            out[j++] = c;
+        else
+            out[j++] = '-';
     }
-    fputc('"', fp);
+    out[j] = '\0';
 }
 
 /* ── Format: json (flat array, agent-friendly) ─────────────────────── */
 
 static void format_json(FILE *fp)
 {
-    fputs("{\"hull_version\":", fp);
-    json_escape(fp, HL_VERSION);
+    ShJsonWriter w;
+    sh_json_writer_init(&w, stdio_write_fn, fp);
+    sh_json_write_object_start(&w);
+    sh_json_write_kv_string(&w, "hull_version", HL_VERSION);
     const char *bin_sha = sha256_binary();
-    if (bin_sha) {
-        fputs(",\"binary_sha256\":", fp);
-        json_escape(fp, bin_sha);
-    }
-    fputs(",\"components\":[", fp);
+    if (bin_sha)
+        sh_json_write_kv_string(&w, "binary_sha256", bin_sha);
+    sh_json_write_key(&w, "components");
+    sh_json_write_array_start(&w);
     for (size_t i = 0; i < sbom_entries_count; i++) {
         const HlSbomEntry *e = &sbom_entries[i];
-        if (i > 0) fputc(',', fp);
-        fputc('{', fp);
-        fputs("\"name\":", fp); json_escape(fp, e->name);
-        fputs(",\"version\":", fp); json_escape(fp, e->version);
-        fputs(",\"commit\":", fp); json_escape(fp, e->commit);
-        fputs(",\"license_spdx\":", fp); json_escape(fp, e->license_spdx);
-        fputs(",\"url\":", fp); json_escape(fp, e->url);
-        fputs(",\"role\":", fp); json_escape(fp, e->role);
-        if (e->cpe && e->cpe[0]) {
-            fputs(",\"cpe\":", fp); json_escape(fp, e->cpe);
-        }
+        sh_json_write_object_start(&w);
+        sh_json_write_kv_string(&w, "name",         e->name);
+        sh_json_write_kv_string(&w, "version",      e->version);
+        sh_json_write_kv_string(&w, "commit",       e->commit);
+        sh_json_write_kv_string(&w, "license_spdx", e->license_spdx);
+        sh_json_write_kv_string(&w, "url",          e->url);
+        sh_json_write_kv_string(&w, "role",         e->role);
+        if (e->cpe && e->cpe[0])
+            sh_json_write_kv_string(&w, "cpe", e->cpe);
         if (e->embedded_blob_sha256) {
             const char *sha = e->embedded_blob_sha256();
-            fputs(",\"embedded_blob_sha256\":", fp);
-            json_escape(fp, sha ? sha : "");
+            sh_json_write_kv_string(&w, "embedded_blob_sha256", sha ? sha : "");
         }
-        fputc('}', fp);
+        sh_json_write_object_end(&w);
     }
-    fputs("]}\n", fp);
+    sh_json_write_array_end(&w);
+    sh_json_write_object_end(&w);
+    fputc('\n', fp);
 }
 
 /* ── Format: CycloneDX 1.5 ─────────────────────────────────────────── */
@@ -515,134 +521,193 @@ static void format_cyclonedx(FILE *fp)
 {
     /* Reproducible serialNumber: deterministic, derived from hull version
      * so two runs of `hull sbom --format=cyclonedx` on the same binary
-     * produce the same document. (Per the same byte-identity goal.) */
-    fputs("{\"bomFormat\":\"CycloneDX\",\"specVersion\":\"1.5\","
-          "\"version\":1", fp);
+     * produce the same document. */
+    ShJsonWriter w;
+    sh_json_writer_init(&w, stdio_write_fn, fp);
+    sh_json_write_object_start(&w);
+    sh_json_write_kv_string(&w, "bomFormat",   "CycloneDX");
+    sh_json_write_kv_string(&w, "specVersion", "1.5");
+    sh_json_write_kv_int   (&w, "version",     1);
+
     /* metadata.component describes the subject of the BOM (this binary).
      * Includes the SHA-256 of the running binary when known, so a consumer
      * can cross-check against the signed hull.sha256 release manifest. */
     const char *bin_sha = sha256_binary();
-    fputs(",\"metadata\":{\"component\":{\"type\":\"application\","
-          "\"name\":\"hull\",\"version\":", fp);
-    json_escape(fp, HL_VERSION);
+    sh_json_write_key(&w, "metadata");
+    sh_json_write_object_start(&w);
+    sh_json_write_key(&w, "component");
+    sh_json_write_object_start(&w);
+    sh_json_write_kv_string(&w, "type",    "application");
+    sh_json_write_kv_string(&w, "name",    "hull");
+    sh_json_write_kv_string(&w, "version", HL_VERSION);
     if (bin_sha) {
-        fputs(",\"hashes\":[{\"alg\":\"SHA-256\",\"content\":", fp);
-        json_escape(fp, bin_sha);
-        fputs("}]", fp);
+        sh_json_write_key(&w, "hashes");
+        sh_json_write_array_start(&w);
+        sh_json_write_object_start(&w);
+        sh_json_write_kv_string(&w, "alg",     "SHA-256");
+        sh_json_write_kv_string(&w, "content", bin_sha);
+        sh_json_write_object_end(&w);
+        sh_json_write_array_end(&w);
     }
-    fputs("}}", fp);
-    fputs(",\"components\":[", fp);
-    int first = 1;
+    sh_json_write_object_end(&w);  /* component */
+    sh_json_write_object_end(&w);  /* metadata  */
+
+    sh_json_write_key(&w, "components");
+    sh_json_write_array_start(&w);
     for (size_t i = 0; i < sbom_entries_count; i++) {
         const HlSbomEntry *e = &sbom_entries[i];
-        if (!first) fputc(',', fp);
-        first = 0;
-        fputs("{\"type\":\"library\",\"name\":", fp);
-        json_escape(fp, e->name);
+        sh_json_write_object_start(&w);
+        sh_json_write_kv_string(&w, "type", "library");
+        sh_json_write_kv_string(&w, "name", e->name);
         if (e->version && e->version[0]) {
-            fputs(",\"version\":", fp); json_escape(fp, e->version);
+            sh_json_write_kv_string(&w, "version", e->version);
         } else if (e->commit && e->commit[0]) {
             /* CycloneDX uses "version" loosely. Commit SHA is fine. */
-            fputs(",\"version\":", fp); json_escape(fp, e->commit);
+            sh_json_write_kv_string(&w, "version", e->commit);
         }
-        fputs(",\"licenses\":[{\"license\":{\"id\":", fp);
-        json_escape(fp, e->license_spdx);
-        fputs("}}]", fp);
-        fputs(",\"externalReferences\":[{\"type\":\"website\",\"url\":", fp);
-        json_escape(fp, e->url);
-        fputs("}]", fp);
+        sh_json_write_key(&w, "licenses");
+        sh_json_write_array_start(&w);
+        sh_json_write_object_start(&w);
+        sh_json_write_key(&w, "license");
+        sh_json_write_object_start(&w);
+        sh_json_write_kv_string(&w, "id", e->license_spdx);
+        sh_json_write_object_end(&w);
+        sh_json_write_object_end(&w);
+        sh_json_write_array_end(&w);
+
+        sh_json_write_key(&w, "externalReferences");
+        sh_json_write_array_start(&w);
+        sh_json_write_object_start(&w);
+        sh_json_write_kv_string(&w, "type", "website");
+        sh_json_write_kv_string(&w, "url",  e->url);
+        sh_json_write_object_end(&w);
+        sh_json_write_array_end(&w);
+
         /* CycloneDX `cpe` is a top-level component field used by
          * downstream scanners (Dependency-Track, Trivy, etc.) to
          * auto-match against CVE feeds. Emit when known. */
-        if (e->cpe && e->cpe[0]) {
-            fputs(",\"cpe\":", fp); json_escape(fp, e->cpe);
-        }
+        if (e->cpe && e->cpe[0])
+            sh_json_write_kv_string(&w, "cpe", e->cpe);
         if (e->embedded_blob_sha256) {
             const char *sha = e->embedded_blob_sha256();
             if (sha) {
-                fputs(",\"hashes\":[{\"alg\":\"SHA-256\",\"content\":", fp);
-                json_escape(fp, sha);
-                fputs("}]", fp);
+                sh_json_write_key(&w, "hashes");
+                sh_json_write_array_start(&w);
+                sh_json_write_object_start(&w);
+                sh_json_write_kv_string(&w, "alg",     "SHA-256");
+                sh_json_write_kv_string(&w, "content", sha);
+                sh_json_write_object_end(&w);
+                sh_json_write_array_end(&w);
             }
         }
-        fputs(",\"description\":", fp); json_escape(fp, e->role);
-        fputc('}', fp);
+        sh_json_write_kv_string(&w, "description", e->role);
+        sh_json_write_object_end(&w);
     }
-    fputs("]}\n", fp);
+    sh_json_write_array_end(&w);
+    sh_json_write_object_end(&w);
+    fputc('\n', fp);
 }
 
 /* ── Format: SPDX 2.3 ──────────────────────────────────────────────── */
 
 static void format_spdx(FILE *fp)
 {
-    /* Namespace is built via preprocessor string concatenation so the
-     * URL is a single well-formed JSON string. HL_VERSION is a controlled
-     * literal (no chars needing JSON-escape). The "created" timestamp is
-     * intentionally stable (not `now()`) so two runs of `hull sbom
-     * --format=spdx` on the same binary produce byte-identical output. */
-    fputs("{\"spdxVersion\":\"SPDX-2.3\","
-          "\"dataLicense\":\"CC0-1.0\","
-          "\"SPDXID\":\"SPDXRef-DOCUMENT\","
-          "\"name\":\"hull-sbom\","
-          "\"documentNamespace\":\"https://gethull.dev/sbom/" HL_VERSION "\","
-          "\"creationInfo\":{\"creators\":[\"Tool: hull-sbom\"],"
-          "\"created\":\"2026-05-29T00:00:00Z\"}", fp);
+    /* HL_VERSION is a controlled literal (no chars needing JSON-escape).
+     * The "created" timestamp is intentionally stable (not `now()`) so
+     * two runs of `hull sbom --format=spdx` on the same binary produce
+     * byte-identical output. */
+    ShJsonWriter w;
+    sh_json_writer_init(&w, stdio_write_fn, fp);
+    sh_json_write_object_start(&w);
+    sh_json_write_kv_string(&w, "spdxVersion", "SPDX-2.3");
+    sh_json_write_kv_string(&w, "dataLicense", "CC0-1.0");
+    sh_json_write_kv_string(&w, "SPDXID",      "SPDXRef-DOCUMENT");
+    sh_json_write_kv_string(&w, "name",        "hull-sbom");
+    {
+        char ns[128];
+        snprintf(ns, sizeof(ns), "https://gethull.dev/sbom/%s", HL_VERSION);
+        sh_json_write_kv_string(&w, "documentNamespace", ns);
+    }
+    sh_json_write_key(&w, "creationInfo");
+    sh_json_write_object_start(&w);
+    sh_json_write_key(&w, "creators");
+    sh_json_write_array_start(&w);
+    sh_json_write_string(&w, "Tool: hull-sbom");
+    sh_json_write_array_end(&w);
+    sh_json_write_kv_string(&w, "created", "2026-05-29T00:00:00Z");
+    sh_json_write_object_end(&w);
+
     /* describes + hull-binary package: documents that the subject of this
      * SPDX document is the running hull binary; binary_sha256 is emitted
      * as a checksum on that package so consumers can cross-reference the
      * signed release manifest. */
     const char *bin_sha = sha256_binary();
-    fputs(",\"documentDescribes\":[\"SPDXRef-Package-hull-binary\"]", fp);
-    fputs(",\"packages\":[", fp);
-    fputs("{\"SPDXID\":\"SPDXRef-Package-hull-binary\","
-          "\"name\":\"hull\",\"versionInfo\":", fp);
-    json_escape(fp, HL_VERSION);
-    fputs(",\"downloadLocation\":\"https://github.com/artalis-io/hull\","
-          "\"licenseConcluded\":\"AGPL-3.0-or-later\","
-          "\"licenseDeclared\":\"AGPL-3.0-or-later\","
-          "\"comment\":\"the running hull binary\"", fp);
+    sh_json_write_key(&w, "documentDescribes");
+    sh_json_write_array_start(&w);
+    sh_json_write_string(&w, "SPDXRef-Package-hull-binary");
+    sh_json_write_array_end(&w);
+
+    sh_json_write_key(&w, "packages");
+    sh_json_write_array_start(&w);
+    /* The hull-binary package itself. */
+    sh_json_write_object_start(&w);
+    sh_json_write_kv_string(&w, "SPDXID",           "SPDXRef-Package-hull-binary");
+    sh_json_write_kv_string(&w, "name",             "hull");
+    sh_json_write_kv_string(&w, "versionInfo",      HL_VERSION);
+    sh_json_write_kv_string(&w, "downloadLocation", "https://github.com/artalis-io/hull");
+    sh_json_write_kv_string(&w, "licenseConcluded", "AGPL-3.0-or-later");
+    sh_json_write_kv_string(&w, "licenseDeclared",  "AGPL-3.0-or-later");
+    sh_json_write_kv_string(&w, "comment",          "the running hull binary");
     if (bin_sha) {
-        fputs(",\"checksums\":[{\"algorithm\":\"SHA256\",\"checksumValue\":", fp);
-        json_escape(fp, bin_sha);
-        fputs("}]", fp);
+        sh_json_write_key(&w, "checksums");
+        sh_json_write_array_start(&w);
+        sh_json_write_object_start(&w);
+        sh_json_write_kv_string(&w, "algorithm",     "SHA256");
+        sh_json_write_kv_string(&w, "checksumValue", bin_sha);
+        sh_json_write_object_end(&w);
+        sh_json_write_array_end(&w);
     }
-    fputs("},", fp);  /* trailing comma; list of vendored components follows */
-    int first = 1;
+    sh_json_write_object_end(&w);
+
+    /* Vendored components. */
     for (size_t i = 0; i < sbom_entries_count; i++) {
         const HlSbomEntry *e = &sbom_entries[i];
-        if (!first) fputc(',', fp);
-        first = 0;
-        fputs("{\"SPDXID\":\"SPDXRef-Package-", fp);
-        /* SPDX IDs must match [A-Za-z0-9.-]+; sanitize the name. */
-        for (const char *p = e->name; *p; p++) {
-            char c = *p;
-            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-                (c >= '0' && c <= '9') || c == '.' || c == '-')
-                fputc(c, fp);
-            else
-                fputc('-', fp);
+        sh_json_write_object_start(&w);
+        {
+            /* SPDX IDs must match [A-Za-z0-9.-]+; sanitize the name. */
+            char spdxid[128];
+            char sanitized[96];
+            spdx_sanitize_name(e->name, sanitized, sizeof(sanitized));
+            snprintf(spdxid, sizeof(spdxid),
+                     "SPDXRef-Package-%s", sanitized);
+            sh_json_write_kv_string(&w, "SPDXID", spdxid);
         }
-        fputs("\",\"name\":", fp); json_escape(fp, e->name);
-        if (e->version && e->version[0]) {
-            fputs(",\"versionInfo\":", fp); json_escape(fp, e->version);
-        } else if (e->commit && e->commit[0]) {
-            fputs(",\"versionInfo\":", fp); json_escape(fp, e->commit);
-        }
-        fputs(",\"downloadLocation\":", fp); json_escape(fp, e->url);
-        fputs(",\"licenseConcluded\":", fp); json_escape(fp, e->license_spdx);
-        fputs(",\"licenseDeclared\":", fp); json_escape(fp, e->license_spdx);
-        fputs(",\"comment\":", fp); json_escape(fp, e->role);
+        sh_json_write_kv_string(&w, "name", e->name);
+        if (e->version && e->version[0])
+            sh_json_write_kv_string(&w, "versionInfo", e->version);
+        else if (e->commit && e->commit[0])
+            sh_json_write_kv_string(&w, "versionInfo", e->commit);
+        sh_json_write_kv_string(&w, "downloadLocation", e->url);
+        sh_json_write_kv_string(&w, "licenseConcluded", e->license_spdx);
+        sh_json_write_kv_string(&w, "licenseDeclared",  e->license_spdx);
+        sh_json_write_kv_string(&w, "comment",          e->role);
         if (e->embedded_blob_sha256) {
             const char *sha = e->embedded_blob_sha256();
             if (sha) {
-                fputs(",\"checksums\":[{\"algorithm\":\"SHA256\",\"checksumValue\":", fp);
-                json_escape(fp, sha);
-                fputs("}]", fp);
+                sh_json_write_key(&w, "checksums");
+                sh_json_write_array_start(&w);
+                sh_json_write_object_start(&w);
+                sh_json_write_kv_string(&w, "algorithm",     "SHA256");
+                sh_json_write_kv_string(&w, "checksumValue", sha);
+                sh_json_write_object_end(&w);
+                sh_json_write_array_end(&w);
             }
         }
-        fputc('}', fp);
+        sh_json_write_object_end(&w);
     }
-    fputs("]}\n", fp);
+    sh_json_write_array_end(&w);
+    sh_json_write_object_end(&w);
+    fputc('\n', fp);
 }
 
 /* ── Public dispatcher ─────────────────────────────────────────────── */

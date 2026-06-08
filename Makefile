@@ -2218,8 +2218,8 @@ $(BUILDDIR)/test_vfs: $(TESTDIR)/hull/test_vfs.c $(VFS_OBJ) $(PATH_NORM_OBJ) | $
 # embedded-blob SHA-256 cache. Links against sbom.o + cacert.o + mbedTLS;
 # nothing else. If SBOM accidentally pulls in other Hull subsystems,
 # this link line will need to grow — that's the orthogonality canary.
-$(BUILDDIR)/test_sbom: $(TESTDIR)/hull/test_sbom.c $(SBOM_OBJ) $(CACERT_OBJ) $(MBEDTLS_OBJS) | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SBOM_OBJ) $(CACERT_OBJ) $(MBEDTLS_OBJS)
+$(BUILDDIR)/test_sbom: $(TESTDIR)/hull/test_sbom.c $(SBOM_OBJ) $(CACERT_OBJ) $(SH_JSON_OBJ) $(SH_ARENA_OBJ) $(MBEDTLS_OBJS) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(SBOM_OBJ) $(CACERT_OBJ) $(SH_JSON_OBJ) $(SH_ARENA_OBJ) $(MBEDTLS_OBJS)
 
 # Path-normalize test — standalone, exercises hl_path_normalize directly
 # so a regression in the helper is caught here rather than only via the
