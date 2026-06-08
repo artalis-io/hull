@@ -314,8 +314,10 @@ static void sha256_transform_shani(uint32_t state[8],
     m_c = _mm_sha256msg1_epu32(m_c, m_cur); \
 } while (0)
 
-    /* Rounds 16-19 */
-    SHA256_ROUND(0xE49B69C1EFBE4786ULL, 0x0FC19DC6240CA1CCULL,
+    /* Rounds 16-19. K constants are packed two-per-uint64 in
+     * little-endian (K[i] in low 32, K[i+1] in high 32), matching
+     * the pattern used in rounds 0-15 and 20-63. */
+    SHA256_ROUND(0xEFBE4786E49B69C1ULL, 0x240CA1CC0FC19DC6ULL,
                  MSG0, MSG1, /*m_b unused in this round set*/ MSG1, MSG3, MSG3);
 
     /* The macro above hides the m_b/m_d cycling that the Walton
