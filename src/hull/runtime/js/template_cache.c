@@ -18,6 +18,7 @@
  */
 
 #include "hull/runtime/js_template_cache.h"
+#include "hull/runtime/cache_common.h"
 #include "hull/blob_store.h"
 #include "hull/cache_dir.h"
 #include "hull/cap/crypto.h"
@@ -36,29 +37,6 @@
 
 #define JTC_STORE_KIND  "js-templates"
 
-static const char *arch_tag(void)
-{
-#if defined(__x86_64__) || defined(_M_X64)
-    return "x86_64";
-#elif defined(__aarch64__) || defined(_M_ARM64)
-    return "aarch64";
-#elif defined(__i386__) || defined(_M_IX86)
-    return "i386";
-#elif defined(__arm__)
-    return "arm";
-#elif defined(__riscv) && __riscv_xlen == 64
-    return "riscv64";
-#else
-    return "unknown";
-#endif
-}
-
-static const char *endian_tag(void)
-{
-    uint16_t probe = 0x0102;
-    return (*(const uint8_t *)&probe == 0x01) ? "be" : "le";
-}
-
 static int compute_key(const char *name,
                        const char *code, size_t code_len,
                        char hex_out[HL_BLOB_STORE_ID_BUF_SIZE])
@@ -67,8 +45,8 @@ static int compute_key(const char *name,
     hl_cap_crypto_sha256_init(&ctx);
 
     const char *tag  = QJS_TAG;
-    const char *arch = arch_tag();
-    const char *end  = endian_tag();
+    const char *arch = hl_runtime_cache_arch_tag();
+    const char *end  = hl_runtime_cache_endian_tag();
     const char *nm   = name ? name : "";
 
     if (hl_cap_crypto_sha256_update(&ctx, tag, strlen(tag))    != 0) return -1;
@@ -84,49 +62,24 @@ static int compute_key(const char *name,
     uint8_t digest[32];
     if (hl_cap_crypto_sha256_final(&ctx, digest) != 0) return -1;
 
-    static const char hex[] = "0123456789abcdef";
-    for (int i = 0; i < 32; i++) {
-        hex_out[i * 2]     = hex[digest[i] >> 4];
-        hex_out[i * 2 + 1] = hex[digest[i] & 0xF];
-    }
-    hex_out[64] = '\0';
+    hl_runtime_cache_hex_encode(digest, 32, hex_out);
     return 0;
 }
 
-/* ── Process-wide store singleton ─────────────────────────────── */
+/* ── Process-wide store singleton (via shared helper) ─────────── */
 
 static HlBlobStore *jtc_store = NULL;
 static int          jtc_store_failed = 0;
 
 static HlBlobStore *get_store(void)
 {
-    if (jtc_store) return jtc_store;
-    if (jtc_store_failed) return NULL;
-
-    char root[PATH_MAX];
-    if (hl_hull_cache_subdir(JTC_STORE_KIND, root, sizeof(root)) != 0) {
-        jtc_store_failed = 1;
-        return NULL;
-    }
-    size_t rl = strlen(root);
-    if (rl > 1 && root[rl - 1] == '/') root[rl - 1] = '\0';
-
-    HlBlobStore *s = NULL;
-    if (hl_blob_store_open(&s, NULL, root, /*shard_depth=*/1, 0) != 0) {
-        jtc_store_failed = 1;
-        return NULL;
-    }
-    jtc_store = s;
-    return jtc_store;
+    return hl_runtime_cache_singleton(JTC_STORE_KIND,
+                                      &jtc_store, &jtc_store_failed);
 }
 
 void hl_js_template_cache_reset(void)
 {
-    if (jtc_store) {
-        hl_blob_store_close(jtc_store);
-        jtc_store = NULL;
-    }
-    jtc_store_failed = 0;
+    hl_runtime_cache_singleton_reset(&jtc_store, &jtc_store_failed);
 }
 
 /* Fresh compile + execute, matching what the original

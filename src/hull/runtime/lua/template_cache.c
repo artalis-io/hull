@@ -18,6 +18,7 @@
  */
 
 #include "hull/runtime/lua_template_cache.h"
+#include "hull/runtime/cache_common.h"
 #include "hull/blob_store.h"
 #include "hull/cache_dir.h"
 #include "hull/cap/crypto.h"
@@ -37,29 +38,6 @@
 
 #define TC_STORE_KIND  "templates"
 
-static const char *arch_tag(void)
-{
-#if defined(__x86_64__) || defined(_M_X64)
-    return "x86_64";
-#elif defined(__aarch64__) || defined(_M_ARM64)
-    return "aarch64";
-#elif defined(__i386__) || defined(_M_IX86)
-    return "i386";
-#elif defined(__arm__)
-    return "arm";
-#elif defined(__riscv) && __riscv_xlen == 64
-    return "riscv64";
-#else
-    return "unknown";
-#endif
-}
-
-static const char *endian_tag(void)
-{
-    uint16_t probe = 0x0102;
-    return (*(const uint8_t *)&probe == 0x01) ? "be" : "le";
-}
-
 static int compute_key(const char *code, size_t code_len,
                        char hex_out[HL_BLOB_STORE_ID_BUF_SIZE])
 {
@@ -67,8 +45,8 @@ static int compute_key(const char *code, size_t code_len,
     hl_cap_crypto_sha256_init(&ctx);
 
     const char *ver  = LUA_VERSION;
-    const char *arch = arch_tag();
-    const char *end  = endian_tag();
+    const char *arch = hl_runtime_cache_arch_tag();
+    const char *end  = hl_runtime_cache_endian_tag();
 
     if (hl_cap_crypto_sha256_update(&ctx, ver, strlen(ver))    != 0) return -1;
     if (hl_cap_crypto_sha256_update(&ctx, "|", 1)              != 0) return -1;
@@ -81,12 +59,7 @@ static int compute_key(const char *code, size_t code_len,
     uint8_t digest[32];
     if (hl_cap_crypto_sha256_final(&ctx, digest) != 0) return -1;
 
-    static const char hex[] = "0123456789abcdef";
-    for (int i = 0; i < 32; i++) {
-        hex_out[i * 2]     = hex[digest[i] >> 4];
-        hex_out[i * 2 + 1] = hex[digest[i] & 0xF];
-    }
-    hex_out[64] = '\0';
+    hl_runtime_cache_hex_encode(digest, 32, hex_out);
     return 0;
 }
 
@@ -97,33 +70,13 @@ static int          tc_store_failed = 0;
 
 static HlBlobStore *get_store(void)
 {
-    if (tc_store) return tc_store;
-    if (tc_store_failed) return NULL;
-
-    char root[PATH_MAX];
-    if (hl_hull_cache_subdir(TC_STORE_KIND, root, sizeof(root)) != 0) {
-        tc_store_failed = 1;
-        return NULL;
-    }
-    size_t rl = strlen(root);
-    if (rl > 1 && root[rl - 1] == '/') root[rl - 1] = '\0';
-
-    HlBlobStore *s = NULL;
-    if (hl_blob_store_open(&s, NULL, root, /*shard_depth=*/1, 0) != 0) {
-        tc_store_failed = 1;
-        return NULL;
-    }
-    tc_store = s;
-    return tc_store;
+    return hl_runtime_cache_singleton(TC_STORE_KIND,
+                                      &tc_store, &tc_store_failed);
 }
 
 void hl_lua_template_cache_reset(void)
 {
-    if (tc_store) {
-        hl_blob_store_close(tc_store);
-        tc_store = NULL;
-    }
-    tc_store_failed = 0;
+    hl_runtime_cache_singleton_reset(&tc_store, &tc_store_failed);
 }
 
 /* ── lua_dump accumulator ─────────────────────────────────────── */

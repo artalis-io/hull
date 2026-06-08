@@ -10,6 +10,7 @@
  */
 
 #include "hull/runtime/js_bytecode_cache.h"
+#include "hull/runtime/cache_common.h"
 #include "hull/blob_store.h"
 #include "hull/cache_dir.h"
 #include "hull/cap/crypto.h"
@@ -28,34 +29,10 @@
 
 #define JBC_STORE_KIND  "js-bytecode"
 
-/* ── Arch / endian tags (shared shape with the Lua cache) ──── */
-
-static const char *arch_tag(void)
-{
-#if defined(__x86_64__) || defined(_M_X64)
-    return "x86_64";
-#elif defined(__aarch64__) || defined(_M_ARM64)
-    return "aarch64";
-#elif defined(__i386__) || defined(_M_IX86)
-    return "i386";
-#elif defined(__arm__)
-    return "arm";
-#elif defined(__riscv) && __riscv_xlen == 64
-    return "riscv64";
-#else
-    return "unknown";
-#endif
-}
-
-static const char *endian_tag(void)
-{
-    uint16_t probe = 0x0102;
-    return (*(const uint8_t *)&probe == 0x01) ? "be" : "le";
-}
-
 /* Cache-key digest. `module_name` is in the key because QuickJS
  * embeds it in the bytecode (debug/traceback) — two different
- * names with identical source produce different bytecode. */
+ * names with identical source produce different bytecode.
+ * arch/endian tags via the shared helper. */
 static int compute_key(const char *module_name,
                        const char *src, size_t src_len,
                        char hex_out[HL_BLOB_STORE_ID_BUF_SIZE])
@@ -64,8 +41,8 @@ static int compute_key(const char *module_name,
     hl_cap_crypto_sha256_init(&ctx);
 
     const char *tag  = QJS_TAG;
-    const char *arch = arch_tag();
-    const char *end  = endian_tag();
+    const char *arch = hl_runtime_cache_arch_tag();
+    const char *end  = hl_runtime_cache_endian_tag();
     const char *name = module_name ? module_name : "";
 
     if (hl_cap_crypto_sha256_update(&ctx, tag, strlen(tag))    != 0) return -1;
@@ -81,49 +58,24 @@ static int compute_key(const char *module_name,
     uint8_t digest[32];
     if (hl_cap_crypto_sha256_final(&ctx, digest) != 0) return -1;
 
-    static const char hex[] = "0123456789abcdef";
-    for (int i = 0; i < 32; i++) {
-        hex_out[i * 2]     = hex[digest[i] >> 4];
-        hex_out[i * 2 + 1] = hex[digest[i] & 0xF];
-    }
-    hex_out[64] = '\0';
+    hl_runtime_cache_hex_encode(digest, 32, hex_out);
     return 0;
 }
 
-/* ── Process-wide store singleton ─────────────────────────────── */
+/* ── Process-wide store singleton (via shared helper) ─────────── */
 
 static HlBlobStore *jbc_store = NULL;
 static int          jbc_store_failed = 0;
 
 static HlBlobStore *get_store(void)
 {
-    if (jbc_store) return jbc_store;
-    if (jbc_store_failed) return NULL;
-
-    char root[PATH_MAX];
-    if (hl_hull_cache_subdir(JBC_STORE_KIND, root, sizeof(root)) != 0) {
-        jbc_store_failed = 1;
-        return NULL;
-    }
-    size_t rl = strlen(root);
-    if (rl > 1 && root[rl - 1] == '/') root[rl - 1] = '\0';
-
-    HlBlobStore *s = NULL;
-    if (hl_blob_store_open(&s, NULL, root, /*shard_depth=*/1, 0) != 0) {
-        jbc_store_failed = 1;
-        return NULL;
-    }
-    jbc_store = s;
-    return jbc_store;
+    return hl_runtime_cache_singleton(JBC_STORE_KIND,
+                                      &jbc_store, &jbc_store_failed);
 }
 
 void hl_js_bytecode_cache_reset(void)
 {
-    if (jbc_store) {
-        hl_blob_store_close(jbc_store);
-        jbc_store = NULL;
-    }
-    jbc_store_failed = 0;
+    hl_runtime_cache_singleton_reset(&jbc_store, &jbc_store_failed);
 }
 
 /* Fresh compile path. Returns whatever JS_Eval returns. Leaves
