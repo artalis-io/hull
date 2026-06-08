@@ -97,6 +97,41 @@ static JSValue fresh_eval(JSContext *ctx,
                    JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_STRICT);
 }
 
+/* Cache-miss path: compile-only, persist the chunk, then run.
+ *
+ * Compile twice? No — JS_Eval with COMPILE_ONLY produces the
+ * chunk, then JS_EvalFunction runs it. Same total work as the
+ * direct JS_Eval the old code path did, plus the JS_WriteObject
+ * + store-put. The next boot pays only the JS_ReadObject +
+ * JS_EvalFunction cost, which is what we're trying to amortize.
+ *
+ * Extracted from the cache-miss tail of
+ * hl_js_template_compile_cached so the goto/label pattern that
+ * previously stitched the cache-hit and cache-miss halves
+ * together is no longer needed. */
+static JSValue compile_persist_run(JSContext *ctx,
+                                    const char *code, size_t code_len,
+                                    const char *name,
+                                    HlBlobStore *store,
+                                    const char *key)
+{
+    JSValue chunk = JS_Eval(ctx, code, code_len, name,
+                            JS_EVAL_TYPE_GLOBAL |
+                            JS_EVAL_FLAG_STRICT |
+                            JS_EVAL_FLAG_COMPILE_ONLY);
+    if (JS_IsException(chunk)) return chunk;
+
+    size_t out_len = 0;
+    uint8_t *bytecode = JS_WriteObject(ctx, &out_len, chunk,
+                                       JS_WRITE_OBJ_BYTECODE);
+    if (bytecode) {
+        (void)hl_blob_store_put_keyed(store, key, bytecode, out_len);
+        js_free(ctx, bytecode);
+    }
+    /* JS_EvalFunction consumes `chunk` — no JS_FreeValue afterward. */
+    return JS_EvalFunction(ctx, chunk);
+}
+
 JSValue hl_js_template_compile_cached(JSContext *ctx,
                                       const char *code, size_t code_len,
                                       const char *name)
@@ -131,57 +166,29 @@ JSValue hl_js_template_compile_cached(JSContext *ctx,
     if (hl_blob_store_get(store, key, /*track_access=*/1, &bc, &bc_len) == 0) {
         /* Defensive: empty/NULL blob would dereference NULL inside
          * JS_ReadObject. Evict + recompile rather than crash. */
-        if (!bc || bc_len == 0) {
+        if (bc && bc_len > 0) {
+            JSValue chunk = JS_ReadObject(ctx, bc, bc_len,
+                                          JS_READ_OBJ_BYTECODE);
             free(bc);
-            (void)hl_blob_store_delete(store, key);
-            goto fresh;
-        }
-        JSValue chunk = JS_ReadObject(ctx, bc, bc_len,
-                                      JS_READ_OBJ_BYTECODE);
-        free(bc);
-        if (!JS_IsException(chunk)) {
-            /* JS_EvalFunction takes ownership of `chunk` (consumes
-             * the reference). On success it returns the script's
-             * result value — for our IIFE that's the render fn. */
-            JSValue rv = JS_EvalFunction(ctx, chunk);
-            if (!JS_IsException(rv)) return rv;
-            /* Runtime error from a cached chunk shouldn't normally
-             * happen — code that compiled and ran successfully
-             * before should keep doing so. Drop the exception and
-             * fall through to a fresh compile + eval. */
-            JS_FreeValue(ctx, JS_GetException(ctx));
-            JS_FreeValue(ctx, rv);
+            if (!JS_IsException(chunk)) {
+                /* JS_EvalFunction takes ownership of `chunk`. On
+                 * success it returns the script's result value —
+                 * for our IIFE that's the render fn. */
+                JSValue rv = JS_EvalFunction(ctx, chunk);
+                if (!JS_IsException(rv)) return rv;
+                /* Runtime error from a cached chunk: drop the
+                 * exception. `rv` is the JS_EXCEPTION sentinel
+                 * (no refcount). */
+                JS_FreeValue(ctx, JS_GetException(ctx));
+            } else {
+                /* Stale / corrupt entry. */
+                JS_FreeValue(ctx, JS_GetException(ctx));
+            }
         } else {
-            /* Stale / corrupt entry — evict and recompile. */
-            JS_FreeValue(ctx, JS_GetException(ctx));
+            free(bc);
         }
         (void)hl_blob_store_delete(store, key);
     }
 
-fresh:
-    /* ── Cache miss: compile-only, persist the chunk, then run. ─
-     *
-     * Compile twice? No — JS_Eval with COMPILE_ONLY produces the
-     * chunk, then JS_EvalFunction runs it. Same total work as
-     * the direct JS_Eval the old code path did, plus the
-     * JS_WriteObject + store-put. The next boot pays only the
-     * JS_ReadObject + JS_EvalFunction cost, which is what we're
-     * trying to amortize. */
-    {} /* label needs a statement before the declarations below */
-    JSValue chunk = JS_Eval(ctx, code, code_len, name,
-                            JS_EVAL_TYPE_GLOBAL |
-                            JS_EVAL_FLAG_STRICT |
-                            JS_EVAL_FLAG_COMPILE_ONLY);
-    if (JS_IsException(chunk)) return chunk;
-
-    size_t out_len = 0;
-    uint8_t *bytecode = JS_WriteObject(ctx, &out_len, chunk,
-                                       JS_WRITE_OBJ_BYTECODE);
-    if (bytecode) {
-        (void)hl_blob_store_put_keyed(store, key, bytecode, out_len);
-        js_free(ctx, bytecode);
-    }
-
-    /* JS_EvalFunction consumes `chunk` — no JS_FreeValue afterward. */
-    return JS_EvalFunction(ctx, chunk);
+    return compile_persist_run(ctx, code, code_len, name, store, key);
 }

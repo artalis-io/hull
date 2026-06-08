@@ -165,6 +165,23 @@ int hl_blob_store_stat(HlBlobStore *s, const char *id,
 int hl_blob_store_delete(HlBlobStore *s, const char *id);
 
 /**
+ * @brief Maximum bytes any in-memory `_get` / `verify_read_all`
+ *        will materialise from a single blob.
+ *
+ * Defensive ceiling against a corrupt-stat or planted-huge-file
+ * scenario. Comfortably above every legitimate cache entry today
+ * (largest stdlib bytecode ~50 KB; largest AOT module a few
+ * hundred KB). Callers that need to stream larger payloads use
+ * the reader_open / _read API directly.
+ *
+ * Single source of truth shared by `hl_blob_store_get` (in-process
+ * lookup path) and `commands/cache.c::verify_read_all` (cache
+ * verify offline path). Bumping this is one edit.
+ */
+#define HL_BLOB_STORE_MAX_IN_MEMORY_BYTES \
+    ((size_t)(256u * 1024u * 1024u))
+
+/**
  * @brief Compose the absolute path of the blob @p id under store @p s.
  *
  * Writes `<root>/blobs/<shard>/<id>` (shard depth determined by

@@ -638,16 +638,12 @@ void hl_blob_store_reader_close(HlBlobStoreReader *r)
 }
 
 /* Defensive ceiling on any single blob the in-memory `_get` path
- * will materialise. Mirrors the limit used by `cache verify` and
- * is comfortably above every legitimate cache entry today (the
- * largest stdlib bytecode is ~50 KB; the largest AOT module is
- * a few hundred KB). Hostile or corrupted blob entries — e.g. a
+ * will materialise. Hostile or corrupted blob entries — e.g. a
  * stat that reports billions of bytes due to filesystem state
  * corruption, or a planted file in a shared HULL_CACHE_DIR —
- * are rejected rather than crashing the allocator. Callers that
- * need to stream larger payloads use the reader_open / _read
- * API directly. */
-#define HL_BLOB_STORE_GET_MAX_BYTES ((size_t)(256u * 1024u * 1024u))
+ * are rejected rather than crashing the allocator. Constant lives
+ * in the header (HL_BLOB_STORE_MAX_IN_MEMORY_BYTES); shared with
+ * cache verify so both paths bump together. */
 
 int hl_blob_store_get(HlBlobStore *s, const char *id, int track_access,
                       uint8_t **out_buf, size_t *out_len)
@@ -659,7 +655,7 @@ int hl_blob_store_get(HlBlobStore *s, const char *id, int track_access,
     size_t size = 0;
     if (hl_blob_store_stat(s, id, &size, NULL) != 0) return -1;
 
-    if (size > HL_BLOB_STORE_GET_MAX_BYTES) {
+    if (size > HL_BLOB_STORE_MAX_IN_MEMORY_BYTES) {
         errno = EFBIG;
         return -1;
     }

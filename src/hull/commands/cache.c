@@ -33,6 +33,7 @@
 #include "hull/cache_dir.h"
 #include "hull/cache_registry.h"
 #include "hull/cap/crypto.h"
+#include "hull/runtime/cache_common.h"  /* hex_encode shared helper */
 
 #include <errno.h>
 #include <fcntl.h>
@@ -705,8 +706,10 @@ static int verify_read_all(const char *path,
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
         close(fd); return -1;
     }
-    if ((size_t)st.st_size > 256ULL * 1024 * 1024) {
-        /* 256 MB sanity cap — a legit cache blob is much smaller. */
+    if ((size_t)st.st_size > HL_BLOB_STORE_MAX_IN_MEMORY_BYTES) {
+        /* Shared cap with `hl_blob_store_get`. A legit cache blob
+         * is orders of magnitude smaller — see the constant's
+         * docstring in include/hull/blob_store.h. */
         close(fd); return -1;
     }
     size_t sz = (size_t)st.st_size;
@@ -762,12 +765,7 @@ static int verify_visit(const char *id, size_t size, void *user)
             if (hl_cap_crypto_sha256(bytes, len, digest) != 0) {
                 bad = 1; why = "sha-failed";
             } else {
-                static const char HEX[] = "0123456789abcdef";
-                for (int i = 0; i < 32; i++) {
-                    digest_hex[i*2]     = HEX[(digest[i] >> 4) & 0xF];
-                    digest_hex[i*2 + 1] = HEX[digest[i] & 0xF];
-                }
-                digest_hex[64] = '\0';
+                hl_runtime_cache_hex_encode(digest, 32, digest_hex);
                 if (memcmp(digest_hex, id, 64) != 0) {
                     bad = 1; why = "sha-mismatch";
                 }
@@ -825,6 +823,84 @@ static int verify_visit(const char *id, size_t size, void *user)
     return 0;
 }
 
+/* Verify one cache kind. Emits the per-kind text or JSON section
+ * (header + per-entry results + footer), accumulates into totals,
+ * and returns 1 if anything was unrecoverable (open_failed or
+ * un-repaired corruption). Extracted to keep cmd_verify scoped to
+ * arg parsing + loop control + the grand-total footer. */
+typedef struct {
+    uint64_t checked, ok, corrupt, repaired;
+} VerifyTotals;
+
+static int verify_one_kind(const HlCacheKind *k, int repair, int json,
+                           int *json_first, VerifyTotals *totals)
+{
+    /* Path resolution can fail when the cache subdir path resolves
+     * to something other than a directory (e.g. a regular file
+     * planted there by a misconfigured deployment, or stale state
+     * from a different Hull version). Treat that identically to
+     * a blob_store_open failure — emit `open_failed`, bump rc.
+     * Silent skip misleads CI gates consuming `verify --json`. */
+    char root[PATH_MAX];
+    HlBlobStore *s = NULL;
+    int open_ok = (hl_cache_resolve_path(k, root, sizeof(root)) == 0 &&
+                   hl_blob_store_open(&s, NULL, root,
+                                      /*shard_depth=*/1, 0) == 0);
+    if (!open_ok) {
+        if (json) {
+            if (!*json_first) fputc(',', stdout);
+            *json_first = 0;
+            fputs("{\"name\":", stdout);
+            json_emit_str(stdout, k->name);
+            fputs(",\"open_failed\":true,\"entries\":[]}", stdout);
+        } else {
+            fprintf(stdout, "  %-12s (cannot open store)\n", k->name);
+        }
+        return 1;
+    }
+
+    if (json) {
+        if (!*json_first) fputc(',', stdout);
+        *json_first = 0;
+        fputs("{\"name\":", stdout);
+        json_emit_str(stdout, k->name);
+        fprintf(stdout, ",\"is_cas\":%s",
+                k->is_cas ? "true" : "false");
+        fputs(",\"entries\":[", stdout);
+    } else {
+        fprintf(stdout, "  %-12s (%s mode)\n", k->name,
+                k->is_cas ? "CAS — sha-checked" : "keyed — structural only");
+    }
+
+    VerifyCtx v = {
+        .kind = k, .store = s, .repair = repair, .json = json,
+        .json_first = 1, .stats = {0, 0, 0, 0},
+    };
+    (void)hl_blob_store_iter(s, verify_visit, &v);
+    hl_blob_store_close(s);
+
+    if (json) {
+        fputs("]", stdout);
+        fprintf(stdout, ",\"checked\":%llu", (unsigned long long)v.stats.checked);
+        fprintf(stdout, ",\"ok\":%llu",      (unsigned long long)v.stats.ok);
+        fprintf(stdout, ",\"corrupt\":%llu", (unsigned long long)v.stats.corrupt);
+        fprintf(stdout, ",\"repaired\":%llu",(unsigned long long)v.stats.repaired);
+        fputc('}', stdout);
+    } else {
+        fprintf(stdout, "    %llu checked, %llu ok, %llu corrupt%s\n",
+                (unsigned long long)v.stats.checked,
+                (unsigned long long)v.stats.ok,
+                (unsigned long long)v.stats.corrupt,
+                v.stats.repaired ? " (repaired)" : "");
+    }
+
+    totals->checked  += v.stats.checked;
+    totals->ok       += v.stats.ok;
+    totals->corrupt  += v.stats.corrupt;
+    totals->repaired += v.stats.repaired;
+    return 0;
+}
+
 static int cmd_verify(int argc, char **argv)
 {
     const char *kind_name = NULL;
@@ -853,8 +929,7 @@ static int cmd_verify(int argc, char **argv)
         }
     }
 
-    uint64_t total_checked = 0, total_ok = 0;
-    uint64_t total_corrupt = 0, total_repaired = 0;
+    VerifyTotals totals = {0, 0, 0, 0};
     int rc_overall = 0;
 
     if (json) fputs("{\"results\":[", stdout);
@@ -862,80 +937,14 @@ static int cmd_verify(int argc, char **argv)
 
     for (const HlCacheKind *k = hl_cache_registry(); k->name; k++) {
         if (only && k != only) continue;
-
-        char root[PATH_MAX];
-        /* Path resolution can fail when the cache subdir path resolves
-         * to something other than a directory (e.g. a regular file
-         * planted there by a misconfigured deployment, or stale state
-         * from a different Hull version). Treat that identically to
-         * a blob_store_open failure — emit `open_failed`, bump rc.
-         * Same reasoning as the open_failed branch below: silent skip
-         * misleads CI gates consuming `verify --json`. */
-        HlBlobStore *s = NULL;
-        int open_ok = (hl_cache_resolve_path(k, root, sizeof(root)) == 0 &&
-                       hl_blob_store_open(&s, NULL, root,
-                                          /*shard_depth=*/1, 0) == 0);
-        if (!open_ok) {
-            if (json) {
-                if (!json_first) fputc(',', stdout);
-                json_first = 0;
-                fputs("{\"name\":", stdout);
-                json_emit_str(stdout, k->name);
-                fputs(",\"open_failed\":true,\"entries\":[]}", stdout);
-            } else {
-                fprintf(stdout, "  %-12s (cannot open store)\n", k->name);
-            }
+        if (verify_one_kind(k, repair, json, &json_first, &totals) != 0)
             rc_overall = 1;
-            continue;
-        }
-
-        if (json) {
-            if (!json_first) fputc(',', stdout);
-            json_first = 0;
-            fputs("{\"name\":", stdout);
-            json_emit_str(stdout, k->name);
-            fprintf(stdout, ",\"is_cas\":%s",
-                    k->is_cas ? "true" : "false");
-            fputs(",\"entries\":[", stdout);
-        } else {
-            fprintf(stdout, "  %-12s (%s mode)\n",
-                    k->name,
-                    k->is_cas ? "CAS — sha-checked" : "keyed — structural only");
-        }
-
-        VerifyCtx v = {
-            .kind        = k,
-            .store       = s,
-            .repair      = repair,
-            .json        = json,
-            .json_first  = 1,
-            .stats       = {0, 0, 0, 0},
-        };
-        (void)hl_blob_store_iter(s, verify_visit, &v);
-        hl_blob_store_close(s);
-
-        if (json) {
-            fputs("]", stdout);
-            fprintf(stdout, ",\"checked\":%llu", (unsigned long long)v.stats.checked);
-            fprintf(stdout, ",\"ok\":%llu",      (unsigned long long)v.stats.ok);
-            fprintf(stdout, ",\"corrupt\":%llu", (unsigned long long)v.stats.corrupt);
-            fprintf(stdout, ",\"repaired\":%llu",(unsigned long long)v.stats.repaired);
-            fputc('}', stdout);
-        } else {
-            fprintf(stdout,
-                "    %llu checked, %llu ok, %llu corrupt%s\n",
-                (unsigned long long)v.stats.checked,
-                (unsigned long long)v.stats.ok,
-                (unsigned long long)v.stats.corrupt,
-                v.stats.repaired
-                    ? " (repaired)" : "");
-        }
-
-        total_checked  += v.stats.checked;
-        total_ok       += v.stats.ok;
-        total_corrupt  += v.stats.corrupt;
-        total_repaired += v.stats.repaired;
     }
+
+    uint64_t total_checked  = totals.checked;
+    uint64_t total_ok       = totals.ok;
+    uint64_t total_corrupt  = totals.corrupt;
+    uint64_t total_repaired = totals.repaired;
 
     if (json) {
         fputs("]", stdout);

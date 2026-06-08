@@ -46,7 +46,10 @@ local M = {}
 local CACHE_KIND = "compute-aot"
 
 local function disabled()
-    return tool.hull_cache_disabled("AOT") or tool.hull_cache_disabled(nil)
+    -- hull_cache_disabled("AOT") already checks HULL_NO_CACHE first
+    -- (cache_dir.c:198 short-circuits before the per-kind check),
+    -- so the global kill-switch is covered by this single call.
+    return tool.hull_cache_disabled("AOT")
 end
 
 -- wamrc identity capture — memoized per (binary path, process).

@@ -44,6 +44,8 @@
 #include "hull/cap/fs.h"
 #include "hull/alloc.h"
 
+#include <limits.h>
+#include <stdio.h>
 #include <string.h>
 
 #define HL_BLOB_STASH_PROP "__hullBlobInternal"
@@ -196,18 +198,17 @@ static JSValue js_blob_init(JSContext *ctx, JSValueConst this_val,
     HlBlob *b = NULL;
     int rc = hl_cap_blob_init(&b, js->base.fs_cfg, js->base.alloc,
                                 dir, shard_depth, tmp_max_age);
-    JSValue dir_copy = JS_NewString(ctx, dir);    /* for error message */
-    JS_FreeCString(ctx, dir);
     if (rc != 0) {
-        const char *d = JS_ToCString(ctx, dir_copy);
-        JSValue err = JS_ThrowInternalError(ctx,
+        /* Stash dir into a stack buffer for the error message before
+         * releasing the cstring — paths fit comfortably in PATH_MAX. */
+        char dir_buf[PATH_MAX];
+        snprintf(dir_buf, sizeof(dir_buf), "%s", dir);
+        JS_FreeCString(ctx, dir);
+        return JS_ThrowInternalError(ctx,
             "blob.init: failed (check fs.write declares '%s')",
-            d ? d : "<dir>");
-        if (d) JS_FreeCString(ctx, d);
-        JS_FreeValue(ctx, dir_copy);
-        return err;
+            dir_buf);
     }
-    JS_FreeValue(ctx, dir_copy);
+    JS_FreeCString(ctx, dir);
 
     /* Wrap in a Store JSValue + stash on globalThis. Replacing any
      * previous stash drops its refcount → finalizer runs → previous
