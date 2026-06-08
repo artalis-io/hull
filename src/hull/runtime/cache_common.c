@@ -9,7 +9,9 @@
 #include "hull/cache_dir.h"
 
 #include <limits.h>
+#include <pthread.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 const char *hl_runtime_cache_arch_tag(void)
@@ -49,17 +51,40 @@ void hl_runtime_cache_hex_encode(const uint8_t *src, size_t src_len,
     hex_out[src_len * 2] = '\0';
 }
 
-HlBlobStore *hl_runtime_cache_singleton(const char *kind,
-                                        HlBlobStore **store_slot,
-                                        int          *failed_slot)
+/* One process-wide mutex serialises the lazy-open + atexit-register
+ * dance across all cache kinds. The slot itself is caller-owned
+ * static storage; the mutex is owned here. The fast path (store
+ * already open) holds the mutex for one pointer read — concurrent
+ * cache hits on the same kind cost a mutex acquire + a load + a
+ * release. That's fine for a cache lookup that's already an order
+ * of magnitude faster than the parse it skips.
+ *
+ * PTHREAD_MUTEX_INITIALIZER works for static storage without a
+ * constructor / pthread_once dance; it's the cleanest answer to
+ * "I need a process-wide lock with no init step". */
+static pthread_mutex_t g_singleton_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+HlBlobStore *hl_runtime_cache_singleton(const char         *kind,
+                                        HlRuntimeCacheSlot *slot,
+                                        void              (*atexit_close)(void))
 {
-    if (!kind || !store_slot || !failed_slot) return NULL;
-    if (*store_slot)  return *store_slot;
-    if (*failed_slot) return NULL;
+    if (!kind || !slot) return NULL;
+
+    pthread_mutex_lock(&g_singleton_mutex);
+    if (slot->store) {
+        HlBlobStore *s = slot->store;
+        pthread_mutex_unlock(&g_singleton_mutex);
+        return s;
+    }
+    if (slot->failed) {
+        pthread_mutex_unlock(&g_singleton_mutex);
+        return NULL;
+    }
 
     char root[PATH_MAX];
     if (hl_hull_cache_subdir(kind, root, sizeof(root)) != 0) {
-        *failed_slot = 1;
+        slot->failed = 1;
+        pthread_mutex_unlock(&g_singleton_mutex);
         return NULL;
     }
     /* hl_hull_cache_subdir returns a path with a trailing slash;
@@ -69,20 +94,35 @@ HlBlobStore *hl_runtime_cache_singleton(const char *kind,
 
     HlBlobStore *s = NULL;
     if (hl_blob_store_open(&s, NULL, root, /*shard_depth=*/1, 0) != 0) {
-        *failed_slot = 1;
+        slot->failed = 1;
+        pthread_mutex_unlock(&g_singleton_mutex);
         return NULL;
     }
-    *store_slot = s;
+    slot->store = s;
+
+    /* Register the close hook exactly once per slot. Idempotent
+     * across re-opens after a reset — once atexit owns the
+     * callback we don't re-arm it. */
+    if (atexit_close && !slot->atexit_registered) {
+        slot->atexit_registered = 1;
+        (void)atexit(atexit_close);
+    }
+
+    pthread_mutex_unlock(&g_singleton_mutex);
     return s;
 }
 
-void hl_runtime_cache_singleton_reset(HlBlobStore **store_slot,
-                                      int          *failed_slot)
+void hl_runtime_cache_singleton_reset(HlRuntimeCacheSlot *slot)
 {
-    if (!store_slot || !failed_slot) return;
-    if (*store_slot) {
-        hl_blob_store_close(*store_slot);
-        *store_slot = NULL;
+    if (!slot) return;
+    pthread_mutex_lock(&g_singleton_mutex);
+    if (slot->store) {
+        hl_blob_store_close(slot->store);
+        slot->store = NULL;
     }
-    *failed_slot = 0;
+    slot->failed = 0;
+    /* atexit_registered intentionally NOT cleared — see header
+     * docstring. The atexit handler stays armed; re-opening a
+     * slot must not re-register or we'd double-close on exit. */
+    pthread_mutex_unlock(&g_singleton_mutex);
 }

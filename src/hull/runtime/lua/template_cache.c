@@ -65,29 +65,22 @@ static int compute_key(const char *code, size_t code_len,
 
 /* ── Process-wide template store singleton ─────────────────────── */
 
-static HlBlobStore *tc_store = NULL;
-static int          tc_store_failed = 0;
+static HlRuntimeCacheSlot tc_slot;
 
 static void atexit_close_store(void)
 {
-    hl_runtime_cache_singleton_reset(&tc_store, &tc_store_failed);
+    hl_runtime_cache_singleton_reset(&tc_slot);
 }
 
 static HlBlobStore *get_store(void)
 {
-    static int atexit_registered = 0;
-    HlBlobStore *s = hl_runtime_cache_singleton(TC_STORE_KIND,
-                                                 &tc_store, &tc_store_failed);
-    if (s && !atexit_registered) {
-        atexit_registered = 1;
-        atexit(atexit_close_store);
-    }
-    return s;
+    return hl_runtime_cache_singleton(TC_STORE_KIND, &tc_slot,
+                                      atexit_close_store);
 }
 
 void hl_lua_template_cache_reset(void)
 {
-    hl_runtime_cache_singleton_reset(&tc_store, &tc_store_failed);
+    hl_runtime_cache_singleton_reset(&tc_slot);
 }
 
 /* ── lua_dump accumulator ─────────────────────────────────────── */

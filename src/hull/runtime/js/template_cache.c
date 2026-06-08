@@ -68,30 +68,22 @@ static int compute_key(const char *name,
 
 /* ── Process-wide store singleton (via shared helper) ─────────── */
 
-static HlBlobStore *jtc_store = NULL;
-static int          jtc_store_failed = 0;
+static HlRuntimeCacheSlot jtc_slot;
 
 static void atexit_close_store(void)
 {
-    hl_runtime_cache_singleton_reset(&jtc_store, &jtc_store_failed);
+    hl_runtime_cache_singleton_reset(&jtc_slot);
 }
 
 static HlBlobStore *get_store(void)
 {
-    static int atexit_registered = 0;
-    HlBlobStore *s = hl_runtime_cache_singleton(JTC_STORE_KIND,
-                                                 &jtc_store,
-                                                 &jtc_store_failed);
-    if (s && !atexit_registered) {
-        atexit_registered = 1;
-        atexit(atexit_close_store);
-    }
-    return s;
+    return hl_runtime_cache_singleton(JTC_STORE_KIND, &jtc_slot,
+                                      atexit_close_store);
 }
 
 void hl_js_template_cache_reset(void)
 {
-    hl_runtime_cache_singleton_reset(&jtc_store, &jtc_store_failed);
+    hl_runtime_cache_singleton_reset(&jtc_slot);
 }
 
 /* Fresh compile + execute, matching what the original

@@ -64,33 +64,25 @@ static int compute_key(const char *module_name,
 
 /* ── Process-wide store singleton (via shared helper) ─────────── */
 
-static HlBlobStore *jbc_store = NULL;
-static int          jbc_store_failed = 0;
+static HlRuntimeCacheSlot jbc_slot;
 
 static void atexit_close_store(void)
 {
     /* Free the open handle + close the underlying file descriptors
      * on process exit. The kernel reclaims fds either way; the
      * value is cleanly-zero leak reports under ASan/valgrind. */
-    hl_runtime_cache_singleton_reset(&jbc_store, &jbc_store_failed);
+    hl_runtime_cache_singleton_reset(&jbc_slot);
 }
 
 static HlBlobStore *get_store(void)
 {
-    static int atexit_registered = 0;
-    HlBlobStore *s = hl_runtime_cache_singleton(JBC_STORE_KIND,
-                                                 &jbc_store,
-                                                 &jbc_store_failed);
-    if (s && !atexit_registered) {
-        atexit_registered = 1;
-        atexit(atexit_close_store);
-    }
-    return s;
+    return hl_runtime_cache_singleton(JBC_STORE_KIND, &jbc_slot,
+                                      atexit_close_store);
 }
 
 void hl_js_bytecode_cache_reset(void)
 {
-    hl_runtime_cache_singleton_reset(&jbc_store, &jbc_store_failed);
+    hl_runtime_cache_singleton_reset(&jbc_slot);
 }
 
 /* Fresh compile path. Returns whatever JS_Eval returns. Leaves

@@ -59,36 +59,64 @@ void hl_runtime_cache_hex_encode(const uint8_t *src, size_t src_len,
                                  char *hex_out);
 
 /**
+ * @brief Per-cache slot state. Caller owns the storage (one static
+ *        instance per cache module); the helper owns the mutation.
+ *
+ * Zero-initialised at file scope (C guarantees zero init for
+ * static storage), so callers don't need an explicit initializer.
+ * Fields are not part of the public API — treat as opaque.
+ */
+typedef struct {
+    HlBlobStore *store;             /* opened store, NULL until first call */
+    int          failed;            /* 1 = open failed, don't retry */
+    int          atexit_registered; /* 1 = close hook registered */
+} HlRuntimeCacheSlot;
+
+/**
  * @brief Lazy process-wide `HlBlobStore` singleton for @p kind.
  *
- * @p store_slot and @p failed_slot point to two static variables
- * owned by the caller (one `HlBlobStore *` initialised to NULL,
- * one `int` initialised to 0). The first call resolves the
- * cache subdir via `hl_hull_cache_subdir`, opens the store with
- * `shard_depth=1`, caches it in `*store_slot`, and returns it.
- * Subsequent calls return the cached handle. On open failure
- * `*failed_slot` is set to 1 and subsequent calls short-circuit
- * to NULL — failures aren't re-attempted to avoid log spam on a
- * permanent issue (HOME unset, permission denied, full disk).
+ * On first successful open: resolves the cache subdir via
+ * `hl_hull_cache_subdir`, opens the store with `shard_depth=1`,
+ * caches it in `slot->store`, and (if @p atexit_close is non-NULL)
+ * registers @p atexit_close via `atexit(3)` so the store is closed
+ * cleanly at process exit. On open failure `slot->failed` is set
+ * and subsequent calls short-circuit to NULL — failures aren't
+ * re-attempted to avoid log spam on a permanent issue (HOME unset,
+ * permission denied, full disk).
+ *
+ * Thread-safe. An internal mutex serialises the open + atexit
+ * registration so concurrent first-touches from multiple threads
+ * neither leak a duplicate store nor double-register the close
+ * hook. The fast path (store already open) holds the mutex briefly
+ * around a single pointer read.
  *
  * Allocator is NULL → blob_store falls back to libc malloc/free
  * (cache I/O isn't charged to any HlRuntime's memory limit).
  *
+ * @param kind         Registered cache kind (e.g. "lua-bytecode").
+ * @param slot         Caller-owned per-cache slot (static storage).
+ * @param atexit_close Optional close hook; called once at process
+ *                     exit via atexit(3). Caller-provided because
+ *                     it needs to close the caller's specific slot.
+ *                     Pass NULL to skip atexit registration (tests).
  * @return the open store, or NULL on failure.
  */
-HlBlobStore *hl_runtime_cache_singleton(const char *kind,
-                                        HlBlobStore **store_slot,
-                                        int          *failed_slot);
+HlBlobStore *hl_runtime_cache_singleton(const char         *kind,
+                                        HlRuntimeCacheSlot *slot,
+                                        void              (*atexit_close)(void));
 
 /**
  * @brief Close + reset a cache singleton opened by
  *        `hl_runtime_cache_singleton`. Idempotent.
  *
- * After this call `*store_slot == NULL` and `*failed_slot == 0`,
- * so the next `_singleton` call retries the open. Intended for
- * test teardown and the eventual atexit hook.
+ * After this call `slot->store == NULL` and `slot->failed == 0`,
+ * so the next `_singleton` call retries the open. The
+ * `atexit_registered` flag is preserved — once registered, the
+ * atexit handler stays registered for the process lifetime
+ * (re-registering on a fresh open would double-fire on exit).
+ *
+ * Intended for test teardown and the atexit hook itself.
  */
-void hl_runtime_cache_singleton_reset(HlBlobStore **store_slot,
-                                      int          *failed_slot);
+void hl_runtime_cache_singleton_reset(HlRuntimeCacheSlot *slot);
 
 #endif /* HL_RUNTIME_CACHE_COMMON_H */
