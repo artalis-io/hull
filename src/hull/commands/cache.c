@@ -64,7 +64,7 @@ static void format_size(uint64_t bytes, char *out, size_t out_sz)
         snprintf(out, out_sz, "%llu B", (unsigned long long)bytes);
 }
 
-/* Generic FILE* writer for ShJsonWriter — used by every JSON-emitting
+/* Generic FILE* writer for ShJsonWriter: used by every JSON-emitting
  * command below. Matches the audit.c pattern but parameterises on the
  * FILE so the same helper serves both stdout (results) and stderr
  * (audit log). Failed writes flip the writer's error flag, which
