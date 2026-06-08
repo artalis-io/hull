@@ -22,6 +22,7 @@ For completed historical roadmaps see [`archive/roadmaps/`](archive/roadmaps/).
 - ✅ **v0.1.4 batch (§3.1 + §3.2 + §3.3)**. Cosmo APE `hull build` works on Linux (sandbox unveils widened for cosmocc; `hl_compiler_select` auto-detects cosmocc; Makefile WAMR invoker selection reordered). `hull eject` and `hull sign-platform` work on installed binaries via auto-extracted embedded platform library. Platform-sign chain polish: agent JSON output, doctor reporting, four follow-ups. See [`../CHANGELOG.md#014`](../CHANGELOG.md).
 - ✅ **v0.1.5 batch**. `hull sbom` and `hull agent sbom` (four formats: human / JSON / CycloneDX 1.5 / SPDX 2.3), per-build auto-refresh via Makefile-injected submodule SHAs, build-flag-gated entries, runtime SHA-256 over embedded CA bundle. macOS reproducibility CI gate (was Linux-only with "verified locally on macOS" caveat; now `make reproducible-check` matrix-tested on both). `docs/POSITIONING.md` operational messaging guide (153 lines). Canonical thesis ("Code became disposable. Trust is not.") + descriptor unified across every Hull-mentioning surface. Site self-hosted (no third-party CDNs). OG card PNG variant. `LICENSING.md` vendored-dependency table. Em-dash sweep across 1100+ instances in all prose files. See [`../CHANGELOG.md#015`](../CHANGELOG.md).
 - ✅ **v0.1.6 batch (§0.3.4 + §0.3.5 + §0.3.6 + §0.3.8 + §0.3.9 + §0.3.11 + §0.3.15)**. Trust chain end-to-end verifiable three independent ways: (a) the existing Ed25519 chain (gethull keys), (b) Sigstore + Rekor transparency log entry per release (`cosign verify-blob`), (c) SLSA build-provenance attestation per binary (`gh attestation verify`). `hull verify-self` one-command binary verification. Signed SBOM published as release artifacts (`hull.sbom.json` / `.cdx.json` / `.spdx.json`) covered by all three signature layers. `binary_sha256` field in `hull sbom` output. All GitHub Actions invocations SHA-pinned. Fork playbook (`docs/fork_playbook.md`, 259 lines) with substantive "why most organisations shouldn't fork" framing. Closes 7 of 15 trust-chain hardening items in [§0.3](#03-trust-chain-hardening-post-v015-gap-analysis). See [`../CHANGELOG.md#016`](../CHANGELOG.md).
+- ✅ **v0.1.10 batch (§1.4 + §1.5.b-X + §1.5.c)**. Three sections of the v0.1.10 milestone fully shipped: (a) generic web stdlib — `hull/web/flash@1` POST/redirect/GET one-shot notifications with both session-stash and `HX-Trigger` paths, and `hull/web/pagination@1` offset-based paginated lists; (b) hull/blob@1 migrations + runtime-infrastructure caches — `hl_blob_store_*` low-level CAS extraction, four runtime caches (Lua/JS bytecode, Lua/JS template), compute-AOT cache via wamrc memoization, tools install via signed blob_store, `hull cache list|prune|clear|verify` CLI surface, `HULL_CACHE_DIR` per-app isolation, `docs/cache.md` standalone reference; (c) HTMX Tier 1 patterns — search+debounce, inline-edit with `csrf.refresh`, loading-indicator scaffold, form re-population on validation error with `partials/_form_field.html`, idempotency-by-default for POST/PATCH including HTML response replay. §1.5.b-X subsystem audit-closed after four passes ([§1.5.b-X](#15b-x-hullblob1-migrations-target-v0110)).
 
 ---
 
@@ -559,26 +560,29 @@ HTMX scaffold (§1.5) wires them in opportunistically.
 
 **Tasks (target v0.1.10):**
 
-- [ ] §1.4-1. `hull/web/flash@1` (Lua + JS). One-shot user notifications.
-      The classic POST/redirect/GET helper, applicable to any web
-      app. `flash.set(req, text, kind?)` stashes in session;
-      `flash.consume(req)` drains for the next render. HTMX bonus
-      path: `flash.trigger(res, text, kind?)` emits
-      `HX-Trigger: {"flash":{...}}` for fragment-swap paths that
-      bypass the redirect. Template partial `partials/_flash.html`
-      for default rendering. Unit tests for both emission paths.
-      Wire into `examples/hypermedia_todo` (POST handlers) and
-      optionally `examples/auth` (login success).
-- [ ] §1.4-2. `hull/web/pagination@1` (Lua + JS). Server-side helper
-      for `?page=N&per_page=M` paginated lists. Useful for REST
-      JSON endpoints, server-rendered pages, and HTMX fragment
-      swaps alike. `pagination.from_query(req, opts)` returns
-      `{page, per_page, offset, limit}`; `pagination.render(total,
+- [x] §1.4-1. `hull/web/flash@1` (Lua + JS). **Landed (commit 43e460b).**
+      One-shot user notifications. Classic POST/redirect/GET
+      helper, applicable to any web app. `flash.set(req, text, kind?)`
+      stashes in session; `flash.consume(req)` drains for the next
+      render. HTMX bonus path: `flash.trigger(res, text, kind?)`
+      emits `HX-Trigger: {"flash":{...}}` for fragment-swap paths
+      that bypass the redirect. Template partial `partials/_flash.html`
+      for default rendering. Unit tests cover both emission paths
+      (test_flash.{lua,js}). Wired into `examples/hypermedia_todo`
+      POST handlers; HTMX trigger path verified by both Lua + JS
+      e2e tests asserting on the `HX-Trigger` header shape.
+- [x] §1.4-2. `hull/web/pagination@1` (Lua + JS). **Landed (commit 0385c5b).**
+      Server-side helper for `?page=N&per_page=M` paginated lists.
+      Useful for REST JSON endpoints, server-rendered pages, and
+      HTMX fragment swaps alike. `pagination.from_query(req, opts)`
+      returns `{page, per_page, offset, limit}`; `pagination.render(total,
       opts)` returns `{total, pages, page, prev, next, links[]}`
       suitable for templates or JSON serialization. Partial
       `partials/_pagination.html` for HTML rendering. Scoped to
       offset-based pagination; cursor-based deferred. Demo:
-      paginated todo list in `examples/hypermedia_todo`.
+      paginated todo list in `examples/hypermedia_todo`. Also
+      fixed a pre-existing template scoping bug in the example
+      surfaced during integration.
 
 **Future candidates (no target):**
 
@@ -1357,46 +1361,41 @@ scaffold should also wire in during the same v0.1.10 release):
 
 **Tasks (v0.1.10, HTMX-specific):**
 
-- [ ] §1.5.c-1. Search + debounce snippet pattern. NOT a stdlib module.
-      Just a documented `hx-get` + `hx-trigger="keyup changed delay:300ms"`
-      + ratelimit middleware recipe in `docs/htmx.md` and a
-      `/search` route in `examples/hypermedia_todo` that filters
-      todos by title. Tests for empty + matching + non-matching
-      queries.
-- [ ] §1.5.c-2. Inline-edit pattern. Click row → swap to form → submit
-      → swap back. Add canonical `GET /todos/:id/edit` (returns form
-      fragment) and `PATCH /todos/:id` (returns row fragment) to
-      `examples/hypermedia_todo`. **HTMX-only** for the example
-      (uses `hx-patch`); doc note in `docs/htmx.md` about the
-      Rails-style `POST /todos/:id?_method=PATCH` recipe for apps
-      that want plain-form degradation. CSRF token freshness: doc
-      note recommending `max_age = 4 * 3600` for HTMX apps + a
-      `csrf.refresh(req, res)` helper that re-issues the token on
-      any fragment response (so long-running edit cycles don't expire
-      mid-flow).
-- [ ] §1.5.c-3. Loading-indicator scaffold. Add a Pico-compatible
-      `.htmx-indicator` spinner block to scaffold `static/app.css`
-      and a one-line `<div id="spinner" class="htmx-indicator">…</div>`
-      to `templates/base.html`. Document `hx-indicator="#spinner"`
-      and per-element spinners in `docs/htmx.md`.
-- [ ] §1.5.c-4. Form re-population on validation error. The canonical
-      HTMX form pattern: submit → server validates → server returns the
-      same form fragment with submitted values pre-filled and per-field
-      error messages inline. Doc recipe in `docs/htmx.md` showing the
-      template-driven approach (`{{ values.title }}` + `{% if
-      errors.title %}<small role="alert">{{ errors.title }}</small>{% end
-      %}`). Add a `partials/_form_field.html` to the scaffold that
-      bundles label + input + error + value-preservation. The
-      `examples/hypermedia_todo` create form uses it. Wire the existing
-      `hull.validate` output shape into the partial so handlers stay
-      one-liner.
-- [ ] §1.5.c-5. Wire `hull/middleware/idempotency@1` into the scaffold
-      for POST/PATCH routes by default. Today the module exists but
-      apps must opt in. Scaffolded `app.{lua,js}` calls
-      `idempotency.init()` + `app.use_post("POST", "/*",
-      idempotency.middleware({ get_principal = ... }))` so HTMX
-      double-clicks return the cached response instead of double-writing.
-      Doc note in `docs/htmx.md` § Idempotency.
+- [x] §1.5.c-1. Search + debounce snippet pattern. **Landed (commit 447fa77).**
+      NOT a stdlib module — documented `hx-get` +
+      `hx-trigger="keyup changed delay:300ms"` + ratelimit recipe
+      in `docs/htmx.md` plus a `/search` route in
+      `examples/hypermedia_todo` filtering todos by title. Tests
+      for empty + matching + non-matching queries.
+- [x] §1.5.c-2. Inline-edit pattern. **Landed (commit ce37af7).**
+      Click row → swap to form → submit → swap back. Canonical
+      `GET /todos/:id/edit` (form fragment) and `PATCH /todos/:id`
+      (row fragment) in `examples/hypermedia_todo`. HTMX-only for
+      the example (uses `hx-patch`); doc note in `docs/htmx.md`
+      covers the Rails-style `POST /todos/:id?_method=PATCH`
+      recipe for plain-form degradation. CSRF freshness handled
+      via `max_age = 4 * 3600` recommendation + `csrf.refresh(req, res)`
+      helper for long-running edit cycles.
+- [x] §1.5.c-3. Loading-indicator scaffold. **Landed (commit 9caa49f).**
+      Pico-compatible `.htmx-indicator` spinner block in scaffold
+      `static/app.css`; `<div id="spinner" class="htmx-indicator">`
+      in `templates/base.html`. Both `hx-indicator="#spinner"` and
+      per-element spinners documented in `docs/htmx.md`.
+- [x] §1.5.c-4. Form re-population on validation error. **Landed (commit 90c554e).**
+      Submit → server validates → server returns same form fragment
+      with submitted values pre-filled and per-field error messages
+      inline. `partials/_form_field.html` in the scaffold bundles
+      label + input + error + value-preservation; uses `hull.validate`
+      output shape so handlers stay one-liner. `examples/hypermedia_todo`
+      create form wired up. Doc recipe in `docs/htmx.md`.
+- [x] §1.5.c-5. Wire `hull/middleware/idempotency@1` into the scaffold
+      for POST/PATCH routes by default. **Landed (commit 77a4033).**
+      Scaffolded `app.{lua,js}` calls `idempotency.init()` plus
+      `app.use_post("POST"/"PATCH", "/*", idempotency.middleware({
+      get_principal = ... }))` so HTMX double-clicks return the
+      cached response instead of double-writing. Bonus: HTML
+      response cache path added so HTMX fragment responses replay
+      correctly, not just JSON. Doc note in `docs/htmx.md` § Idempotency.
 
 ### 1.5.d HTMX stdlib companions. Tier 2 patterns (no target)
 
