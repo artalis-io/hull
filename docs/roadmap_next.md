@@ -914,6 +914,25 @@ and helpers.
 
 ### 1.5.b-X. hull/blob@1 migrations (target v0.1.10)
 
+> **Subsystem status: CLOSED.** Three audit cycles converged on
+> "no further work." `commands/cache.c` graded A, runtime cache
+> files graded A-, every other module unchanged at A. Adding a
+> new cache kind is now one registry row + one ~100-LOC file +
+> one Makefile entry — list / prune / clear / verify / doctor /
+> inspect / opt-out env var all automatic. The next person who
+> touches this subsystem should be adding a new kind, not
+> refactoring the existing six. See [docs/cache.md](cache.md)
+> for the operator reference and [docs/blob.md](blob.md) for
+> the CAS-primitive design. Open audit items at close-of-cycle:
+> two cosmetic Lows (compile_persist_run's `JS_WriteObject` OOM
+> attributed to `JS_EvalFunction`; `verify_one_kind` docstring
+> wording mismatch) — both explicitly recommended NOT to fix
+> by the auditors (no behaviour change, would-be-DRY-for-DRY
+> territory). Audit history: pass-1 closed real layering
+> issues; pass-2 closed real polish gaps (commits A-E); pass-3
+> closed minor smells (commits F-G); pass-4 (post-G) found
+> nothing worth fixing.
+
 Six known consumers identified during the §1.5.b-3.5 design. All
 backed by `hull/blob@1`. Four are runtime-infrastructure caches
 that live OUTSIDE `app.manifest.fs` (cache is Hull's decision to
