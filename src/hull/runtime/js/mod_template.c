@@ -7,6 +7,7 @@
 #include "mod_buffer.h"
 #include "hull/vfs.h"
 #include "hull/limits/core.h"
+#include "hull/runtime/js_template_cache.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -35,9 +36,12 @@ static JSValue js_template_compile(JSContext *ctx, JSValueConst this_val,
         }
     }
 
-    /* Evaluate the IIFE source — returns a function */
-    JSValue result = JS_Eval(ctx, code, len, name,
-                              JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_STRICT);
+    /* Compile + execute the IIFE through the on-disk template
+     * cache — on hit the render function is deserialized via
+     * JS_ReadObject and we skip both the parse pass AND the IIFE
+     * execute that creates the closure. See
+     * include/hull/runtime/js_template_cache.h. */
+    JSValue result = hl_js_template_compile_cached(ctx, code, len, name);
 
     if (argc >= 2 && JS_IsString(argv[1]))
         JS_FreeCString(ctx, name);

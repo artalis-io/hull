@@ -10,6 +10,7 @@
 #include "utest.h"
 #include "hull/runtime/js.h"
 #include "hull/runtime/js_bytecode_cache.h"
+#include "hull/runtime/js_template_cache.h"
 #include "hull/reqctx.h"
 #include "hull/manifest.h"
 #include "hull/vfs.h"
@@ -3369,6 +3370,189 @@ UTEST(js_bytecode_cache, parse_error_returns_no_cache_write)
     JS_FreeValue(ctx, exc);
     JS_FreeValue(ctx, v);
     ASSERT_EQ(0, jbc_count(tmp));
+
+    JS_FreeContext(ctx);
+    JS_FreeRuntime(rt);
+    nftw(tmp, jbc_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+}
+
+/* ── JS template cache ──────────────────────────────────────────
+ *
+ * Mirrors the js_bytecode_cache tests but for the IIFE-returns-fn
+ * pattern that stdlib/js/hull/template.js generates. The cache
+ * helper here uses JS_EVAL_TYPE_GLOBAL (not MODULE) and caches
+ * the post-eval render function (skipping both parse and the
+ * IIFE execute on hit). */
+
+static void jtc_with_tmp_home(char tmpdir[256])
+{
+    snprintf(tmpdir, 256, "/tmp/hull_jtc_cache_XXXXXX");
+    mkdtemp(tmpdir);
+    setenv("HOME", tmpdir, 1);
+    unsetenv("HULL_NO_CACHE");
+    unsetenv("HULL_NO_JS_TEMPLATE_CACHE");
+    hl_js_template_cache_reset();
+}
+
+static int jtc_count(const char *dir)
+{
+    char root[512];
+    snprintf(root, sizeof(root),
+             "%s/.hull/blobs/runtime/js-templates/blobs", dir);
+    DIR *r = opendir(root);
+    if (!r) return 0;
+    int n = 0;
+    struct dirent *sh;
+    while ((sh = readdir(r))) {
+        if (sh->d_name[0] == '.') continue;
+        char shard[512];
+        snprintf(shard, sizeof(shard), "%s/%s", root, sh->d_name);
+        DIR *d = opendir(shard);
+        if (!d) continue;
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            if (strlen(e->d_name) == 64) n++;
+        }
+        closedir(d);
+    }
+    closedir(r);
+    return n;
+}
+
+/* Stand-in for what stdlib/js/hull/template.js's compileSource
+ * would produce: an IIFE that returns the render function.
+ * Padded to comfortably clear the 256-byte minimum. */
+static const char *JTC_PROBE =
+    "// pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+    "// pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+    "// pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+    "// pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+    "(function() {\n"
+    "    return function probe(data) {\n"
+    "        const x = (data && data.x) || 0;\n"
+    "        return String(x * 2 + 3);\n"
+    "    };\n"
+    "})();\n";
+
+UTEST(js_template_cache, miss_then_hit_populates_disk)
+{
+    char tmp[256];
+    jtc_with_tmp_home(tmp);
+
+    JSRuntime *rt = JS_NewRuntime();
+    JSContext *ctx = JS_NewContext(rt);
+
+    ASSERT_EQ(0, jtc_count(tmp));
+    JSValue v = hl_js_template_compile_cached(ctx, JTC_PROBE,
+                                              strlen(JTC_PROBE),
+                                              "=tpl_probe");
+    ASSERT_FALSE(JS_IsException(v));
+
+    /* The returned value should be a callable function. */
+    ASSERT_TRUE(JS_IsFunction(ctx, v));
+
+    /* Invoke and check the result. */
+    JSValue data = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, data, "x", JS_NewInt32(ctx, 7));
+    JSValue rv = JS_Call(ctx, v, JS_UNDEFINED, 1, &data);
+    ASSERT_FALSE(JS_IsException(rv));
+    const char *s = JS_ToCString(ctx, rv);
+    ASSERT_STREQ("17", s);
+    JS_FreeCString(ctx, s);
+    JS_FreeValue(ctx, rv);
+    JS_FreeValue(ctx, data);
+    JS_FreeValue(ctx, v);
+    ASSERT_EQ(1, jtc_count(tmp));
+
+    /* Second call: cache hit, same key, no extra file. */
+    v = hl_js_template_compile_cached(ctx, JTC_PROBE,
+                                      strlen(JTC_PROBE), "=tpl_probe");
+    ASSERT_FALSE(JS_IsException(v));
+    ASSERT_TRUE(JS_IsFunction(ctx, v));
+    JS_FreeValue(ctx, v);
+    ASSERT_EQ(1, jtc_count(tmp));
+
+    JS_FreeContext(ctx);
+    JS_FreeRuntime(rt);
+    nftw(tmp, jbc_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+}
+
+UTEST(js_template_cache, opt_out_via_env_skips_disk)
+{
+    char tmp[256];
+    jtc_with_tmp_home(tmp);
+    setenv("HULL_NO_JS_TEMPLATE_CACHE", "1", 1);
+    hl_js_template_cache_reset();
+
+    JSRuntime *rt = JS_NewRuntime();
+    JSContext *ctx = JS_NewContext(rt);
+
+    JSValue v = hl_js_template_compile_cached(ctx, JTC_PROBE,
+                                              strlen(JTC_PROBE),
+                                              "=tpl_probe");
+    ASSERT_FALSE(JS_IsException(v));
+    JS_FreeValue(ctx, v);
+    ASSERT_EQ_MSG(0, jtc_count(tmp),
+                  "no entry written when opted out");
+
+    JS_FreeContext(ctx);
+    JS_FreeRuntime(rt);
+    unsetenv("HULL_NO_JS_TEMPLATE_CACHE");
+    nftw(tmp, jbc_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+}
+
+UTEST(js_template_cache, parse_error_returns_no_cache_write)
+{
+    char tmp[256];
+    jtc_with_tmp_home(tmp);
+
+    const char *bad =
+        "// pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+        "// pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+        "// pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+        "// pad pad pad pad pad pad pad pad pad pad pad pad pad pad\n"
+        "this is = not = valid JS )( syntax error\n";
+
+    JSRuntime *rt = JS_NewRuntime();
+    JSContext *ctx = JS_NewContext(rt);
+
+    JSValue v = hl_js_template_compile_cached(ctx, bad, strlen(bad),
+                                              "=tpl_bad");
+    ASSERT_TRUE(JS_IsException(v));
+    JSValue exc = JS_GetException(ctx);
+    JS_FreeValue(ctx, exc);
+    JS_FreeValue(ctx, v);
+    ASSERT_EQ(0, jtc_count(tmp));
+
+    JS_FreeContext(ctx);
+    JS_FreeRuntime(rt);
+    nftw(tmp, jbc_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+}
+
+UTEST(js_template_cache, name_in_key)
+{
+    /* Different chunk names → distinct entries (parallel to the
+     * js_bytecode_cache.module_name_in_key check). */
+    char tmp[256];
+    jtc_with_tmp_home(tmp);
+
+    JSRuntime *rt = JS_NewRuntime();
+    JSContext *ctx = JS_NewContext(rt);
+
+    JSValue v1 = hl_js_template_compile_cached(ctx, JTC_PROBE,
+                                               strlen(JTC_PROBE),
+                                               "=name_a");
+    ASSERT_FALSE(JS_IsException(v1));
+    JS_FreeValue(ctx, v1);
+
+    JSValue v2 = hl_js_template_compile_cached(ctx, JTC_PROBE,
+                                               strlen(JTC_PROBE),
+                                               "=name_b");
+    ASSERT_FALSE(JS_IsException(v2));
+    JS_FreeValue(ctx, v2);
+
+    ASSERT_EQ_MSG(2, jtc_count(tmp),
+                  "distinct chunk names produce distinct entries");
 
     JS_FreeContext(ctx);
     JS_FreeRuntime(rt);

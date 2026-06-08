@@ -32,14 +32,18 @@
 #include "hull/blob_store.h"
 #include "hull/cache_dir.h"
 #include "hull/cache_registry.h"
+#include "hull/cap/crypto.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>
 
 /* ── Helpers ─────────────────────────────────────────────────────── */
 
@@ -370,11 +374,13 @@ static int cmd_prune(int argc, char **argv)
     uint64_t max_size = 0, max_age = 0;
     HlBlobStoreCleanupStrategy strategy = HL_BLOB_STORE_LRU;
     int dry_run = 0;
+    int json    = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         const char *parse_err = NULL;
-        if (strncmp(a, "--kind=", 7) == 0)        kind_name = a + 7;
+        if (strcmp(a, "--json") == 0)             json = 1;
+        else if (strncmp(a, "--kind=", 7) == 0)   kind_name = a + 7;
         else if (strncmp(a, "--max-size=", 11) == 0) {
             max_size = parse_size(a + 11, &parse_err);
             if (parse_err) {
@@ -434,6 +440,9 @@ static int cmd_prune(int argc, char **argv)
 
     uint64_t total_removed = 0, total_freed = 0;
     int rc_overall = 0;
+    int json_first = 1;
+
+    if (json) fputs("{\"results\":[", stdout);
 
     for (const HlCacheKind *k = hl_cache_registry(); k->name; k++) {
         if (only && k != only) continue;
@@ -444,7 +453,16 @@ static int cmd_prune(int argc, char **argv)
 
         HlBlobStore *s = open_kind(k);
         if (!s) {
-            fprintf(stdout, "  %-12s (no store)\n", k->name);
+            if (json) {
+                if (!json_first) fputc(',', stdout);
+                json_first = 0;
+                fputs("{\"name\":", stdout);
+                json_emit_str(stdout, k->name);
+                fputs(",\"removed\":0,\"freed_bytes\":0,"
+                      "\"no_store\":true}", stdout);
+            } else {
+                fprintf(stdout, "  %-12s (no store)\n", k->name);
+            }
             continue;
         }
 
@@ -453,22 +471,40 @@ static int cmd_prune(int argc, char **argv)
         hl_blob_store_close(s);
         if (rc != 0) rc_overall = 1;
 
-        char size_str[32];
-        format_size(freed, size_str, sizeof(size_str));
-        fprintf(stdout, "  %-12s %s %llu entries, %s\n",
-                k->name,
-                dry_run ? "would remove" : "removed",
-                (unsigned long long)removed, size_str);
+        if (json) {
+            if (!json_first) fputc(',', stdout);
+            json_first = 0;
+            fputs("{\"name\":", stdout);
+            json_emit_str(stdout, k->name);
+            fprintf(stdout, ",\"removed\":%llu", (unsigned long long)removed);
+            fprintf(stdout, ",\"freed_bytes\":%llu", (unsigned long long)freed);
+            fprintf(stdout, ",\"rc\":%d}", rc);
+        } else {
+            char size_str[32];
+            format_size(freed, size_str, sizeof(size_str));
+            fprintf(stdout, "  %-12s %s %llu entries, %s\n",
+                    k->name,
+                    dry_run ? "would remove" : "removed",
+                    (unsigned long long)removed, size_str);
+        }
         total_removed += removed;
         total_freed   += freed;
     }
 
-    char total_str[32];
-    format_size(total_freed, total_str, sizeof(total_str));
-    fprintf(stdout,
-        "\nTotal %s: %llu entries, %s\n",
-        dry_run ? "would-be removed" : "removed",
-        (unsigned long long)total_removed, total_str);
+    if (json) {
+        fputs("]", stdout);
+        fprintf(stdout, ",\"total_removed\":%llu", (unsigned long long)total_removed);
+        fprintf(stdout, ",\"total_freed_bytes\":%llu", (unsigned long long)total_freed);
+        fprintf(stdout, ",\"dry_run\":%s", dry_run ? "true" : "false");
+        fputs("}\n", stdout);
+    } else {
+        char total_str[32];
+        format_size(total_freed, total_str, sizeof(total_str));
+        fprintf(stdout,
+            "\nTotal %s: %llu entries, %s\n",
+            dry_run ? "would-be removed" : "removed",
+            (unsigned long long)total_removed, total_str);
+    }
     return rc_overall;
 }
 
@@ -502,13 +538,19 @@ static int collect_ids(const char *id, size_t size, void *user)
     return 0;
 }
 
-static int clear_one(const HlCacheKind *k)
+/* Returns: removed count via out_removed, bytes freed via
+ * out_bytes, blob-store rc as the return value. Renders nothing —
+ * caller picks human vs JSON output shape. */
+static int clear_one(const HlCacheKind *k,
+                     uint64_t *out_removed, uint64_t *out_bytes,
+                     int *out_no_store)
 {
+    *out_removed = 0;
+    *out_bytes   = 0;
+    *out_no_store = 0;
+
     HlBlobStore *s = open_kind(k);
-    if (!s) {
-        fprintf(stdout, "  %-12s (no store)\n", k->name);
-        return 0;
-    }
+    if (!s) { *out_no_store = 1; return 0; }
 
     /* "Clear" means "remove every entry", not "evict by policy" —
      * so iter + delete rather than blob_store_cleanup. The
@@ -525,21 +567,21 @@ static int clear_one(const HlCacheKind *k)
     free(c.ids);
     hl_blob_store_close(s);
 
-    char size_str[32];
-    format_size(c.bytes, size_str, sizeof(size_str));
-    fprintf(stdout, "  %-12s cleared %llu entries, %s\n",
-            k->name, (unsigned long long)removed, size_str);
+    *out_removed = removed;
+    *out_bytes   = c.bytes;
     return rc;
 }
 
 static int cmd_clear(int argc, char **argv)
 {
     const char *kind_name = NULL;
-    int yes = 0;
+    int yes  = 0;
+    int json = 0;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
-        if (strncmp(a, "--kind=", 7) == 0) kind_name = a + 7;
-        else if (strcmp(a, "--yes") == 0)  yes = 1;
+        if (strcmp(a, "--json") == 0)            json = 1;
+        else if (strncmp(a, "--kind=", 7) == 0)  kind_name = a + 7;
+        else if (strcmp(a, "--yes") == 0)        yes = 1;
         else {
             fprintf(stderr, "hull cache clear: unknown flag '%s'\n", a);
             return 2;
@@ -558,6 +600,9 @@ static int cmd_clear(int argc, char **argv)
     }
 
     if (!yes) {
+        /* Use stderr even in JSON mode — refusal is a process
+         * error, not a structured result. Mirrors the prune
+         * behaviour for invalid flags. */
         fprintf(stderr,
             "hull cache clear: refusing to wipe without --yes\n"
             "  target: %s\n"
@@ -566,15 +611,366 @@ static int cmd_clear(int argc, char **argv)
         return 2;
     }
 
+    uint64_t total_removed = 0, total_bytes = 0;
     int rc_overall = 0;
+    int json_first = 1;
+
+    if (json) fputs("{\"results\":[", stdout);
+
     for (const HlCacheKind *k = hl_cache_registry(); k->name; k++) {
         if (only && k != only) continue;
         /* Without --kind, only wipe runtime caches. Explicit
          * --kind=tools still works for the rare "really nuke the
          * signed binaries too" case. */
         if (!only && !k->is_runtime) continue;
-        if (clear_one(k) != 0) rc_overall = 1;
+
+        uint64_t removed = 0, bytes = 0;
+        int no_store = 0;
+        int rc = clear_one(k, &removed, &bytes, &no_store);
+        if (rc != 0) rc_overall = 1;
+
+        if (json) {
+            if (!json_first) fputc(',', stdout);
+            json_first = 0;
+            fputs("{\"name\":", stdout);
+            json_emit_str(stdout, k->name);
+            fprintf(stdout, ",\"removed\":%llu", (unsigned long long)removed);
+            fprintf(stdout, ",\"freed_bytes\":%llu", (unsigned long long)bytes);
+            if (no_store) fputs(",\"no_store\":true", stdout);
+            fprintf(stdout, ",\"rc\":%d}", rc);
+        } else {
+            if (no_store) {
+                fprintf(stdout, "  %-12s (no store)\n", k->name);
+            } else {
+                char size_str[32];
+                format_size(bytes, size_str, sizeof(size_str));
+                fprintf(stdout, "  %-12s cleared %llu entries, %s\n",
+                        k->name, (unsigned long long)removed, size_str);
+            }
+        }
+        total_removed += removed;
+        total_bytes   += bytes;
     }
+
+    if (json) {
+        fputs("]", stdout);
+        fprintf(stdout, ",\"total_removed\":%llu", (unsigned long long)total_removed);
+        fprintf(stdout, ",\"total_freed_bytes\":%llu", (unsigned long long)total_bytes);
+        fputs("}\n", stdout);
+    }
+    return rc_overall;
+}
+
+/* ── verify [--repair] ────────────────────────────────────────────
+ *
+ * Walks every entry of every kind (or just --kind=K), checks
+ * structural integrity, and for CAS-mode kinds also recomputes
+ * sha256(contents) and compares to the filename.
+ *
+ * Checks per entry:
+ *   - filename is 64 lowercase hex (already enforced by the
+ *     store's iter walker, but we re-check defensively)
+ *   - file is readable + non-empty (zero-byte files are the
+ *     valid SHA-256("") entry only — separate check)
+ *   - is_cas kinds: sha256(contents) == filename
+ *
+ * On failure:
+ *   - default: report only, exit 1
+ *   - --repair: unlink the bad entry, exit 0 if all repairs OK
+ *
+ * Output: human table by default, --json for structured.
+ */
+
+/* Per-kind verify result. */
+typedef struct {
+    uint64_t checked;
+    uint64_t ok;
+    uint64_t corrupt;
+    uint64_t repaired;
+} VerifyStats;
+
+/* Iter state — passed through hl_blob_store_iter via the
+ * callback's `user` pointer, plus the kind and store handle. */
+typedef struct {
+    const HlCacheKind *kind;
+    HlBlobStore       *store;
+    char              *root;        /* for path composition */
+    int                shard_depth; /* 1 for all today's kinds */
+    int                repair;
+    int                json;
+    int                json_first;  /* for comma-separation */
+    VerifyStats        stats;
+} VerifyCtx;
+
+/* Compose <root>/blobs/<XX>/<id> for shard_depth=1. We don't
+ * expose this from blob_store, so duplicate the layout rule
+ * here. */
+static int verify_compose_path(const char *root, const char *id,
+                               char *out, size_t out_sz)
+{
+    int n = snprintf(out, out_sz, "%s/blobs/%c%c/%s",
+                     root, id[0], id[1], id);
+    return (n > 0 && (size_t)n < out_sz) ? 0 : -1;
+}
+
+/* Read a file fully into a malloc'd buffer. Returns 0 + (*out,
+ * *out_len) on success, -1 on failure. Used for sha re-check. */
+static int verify_read_all(const char *path,
+                           uint8_t **out, size_t *out_len)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        close(fd); return -1;
+    }
+    if ((size_t)st.st_size > 256ULL * 1024 * 1024) {
+        /* 256 MB sanity cap — a legit cache blob is much smaller. */
+        close(fd); return -1;
+    }
+    size_t sz = (size_t)st.st_size;
+    uint8_t *buf = (uint8_t *)malloc(sz > 0 ? sz : 1);
+    if (!buf) { close(fd); return -1; }
+    size_t got = 0;
+    while (got < sz) {
+        ssize_t n = read(fd, buf + got, sz - got);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            free(buf); close(fd); return -1;
+        }
+        if (n == 0) { free(buf); close(fd); return -1; }
+        got += (size_t)n;
+    }
+    close(fd);
+    *out = buf;
+    *out_len = sz;
+    return 0;
+}
+
+/* Per-entry verify callback. */
+static int verify_visit(const char *id, size_t size, void *user)
+{
+    VerifyCtx *v = (VerifyCtx *)user;
+    v->stats.checked++;
+
+    /* Hex-validity already enforced by iter. We rely on it. */
+
+    char path[PATH_MAX];
+    if (verify_compose_path(v->root, id, path, sizeof(path)) != 0) {
+        /* Can't even compose the path — count as corrupt but no
+         * repair possible. */
+        v->stats.corrupt++;
+        if (!v->json) {
+            fprintf(stdout, "    %s  path-overflow\n", id);
+        }
+        return 0;
+    }
+
+    int bad = 0;
+    const char *why = "ok";
+
+    if (v->kind->is_cas) {
+        /* Recompute sha256(contents); compare to filename. */
+        uint8_t *bytes = NULL;
+        size_t   len   = 0;
+        if (verify_read_all(path, &bytes, &len) != 0) {
+            bad = 1; why = "read-failed";
+        } else {
+            uint8_t digest[32];
+            char    digest_hex[HL_BLOB_STORE_ID_BUF_SIZE];
+            if (hl_cap_crypto_sha256(bytes, len, digest) != 0) {
+                bad = 1; why = "sha-failed";
+            } else {
+                static const char HEX[] = "0123456789abcdef";
+                for (int i = 0; i < 32; i++) {
+                    digest_hex[i*2]     = HEX[(digest[i] >> 4) & 0xF];
+                    digest_hex[i*2 + 1] = HEX[digest[i] & 0xF];
+                }
+                digest_hex[64] = '\0';
+                if (memcmp(digest_hex, id, 64) != 0) {
+                    bad = 1; why = "sha-mismatch";
+                }
+            }
+            free(bytes);
+        }
+    } else {
+        /* Keyed-mode: structural check only. Per-kind
+         * deserializer-load checks would couple cache.c to
+         * lua/quickjs/wamr; we let the runtime catch semantic
+         * corruption lazily (the cache modules already
+         * unlink+recompile on load failure).
+         *
+         * A zero-byte runtime cache entry is always corrupt —
+         * none of the bytecode/template caches write empty
+         * blobs. Read-failure also flags. */
+        struct stat st;
+        if (stat(path, &st) != 0) {
+            bad = 1; why = "stat-failed";
+        } else if (!S_ISREG(st.st_mode)) {
+            bad = 1; why = "not-regular-file";
+        } else if (st.st_size == 0) {
+            bad = 1; why = "zero-size";
+        }
+        (void)size;  /* iter-time size unused for keyed mode */
+    }
+
+    if (bad) {
+        v->stats.corrupt++;
+        if (v->repair) {
+            if (hl_blob_store_delete(v->store, id) > 0) {
+                v->stats.repaired++;
+                why = "unlinked";
+            }
+        }
+    } else {
+        v->stats.ok++;
+    }
+
+    if (v->json) {
+        if (!v->json_first) fputc(',', stdout);
+        v->json_first = 0;
+        fputs("{\"id\":", stdout);
+        json_emit_str(stdout, id);
+        fputs(",\"status\":", stdout);
+        json_emit_str(stdout, why);
+        fprintf(stdout, ",\"size_bytes\":%llu",
+                (unsigned long long)size);
+        fputc('}', stdout);
+    } else if (bad) {
+        fprintf(stdout, "    %s  %s%s\n",
+                id, why,
+                v->repair ? "" : "  (re-run with --repair to evict)");
+    }
+    return 0;
+}
+
+static int cmd_verify(int argc, char **argv)
+{
+    const char *kind_name = NULL;
+    int repair = 0;
+    int json   = 0;
+
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (strncmp(a, "--kind=", 7) == 0)  kind_name = a + 7;
+        else if (strcmp(a, "--repair") == 0) repair = 1;
+        else if (strcmp(a, "--json") == 0)   json = 1;
+        else {
+            fprintf(stderr, "hull cache verify: unknown flag '%s'\n", a);
+            return 2;
+        }
+    }
+
+    const HlCacheKind *only = NULL;
+    if (kind_name) {
+        only = hl_cache_find(kind_name);
+        if (!only) {
+            fprintf(stderr,
+                "hull cache verify: unknown kind '%s' "
+                "(see `hull cache list`)\n", kind_name);
+            return 2;
+        }
+    }
+
+    uint64_t total_checked = 0, total_ok = 0;
+    uint64_t total_corrupt = 0, total_repaired = 0;
+    int rc_overall = 0;
+
+    if (json) fputs("{\"results\":[", stdout);
+    int json_first = 1;
+
+    for (const HlCacheKind *k = hl_cache_registry(); k->name; k++) {
+        if (only && k != only) continue;
+
+        char root[PATH_MAX];
+        if (hl_cache_resolve_path(k, root, sizeof(root)) != 0) continue;
+
+        HlBlobStore *s = NULL;
+        if (hl_blob_store_open(&s, NULL, root, /*shard_depth=*/1, 0) != 0) {
+            if (json) {
+                if (!json_first) fputc(',', stdout);
+                json_first = 0;
+                fputs("{\"name\":", stdout);
+                json_emit_str(stdout, k->name);
+                fputs(",\"open_failed\":true,\"entries\":[]}", stdout);
+            } else {
+                fprintf(stdout, "  %-12s (cannot open store)\n", k->name);
+            }
+            continue;
+        }
+
+        if (json) {
+            if (!json_first) fputc(',', stdout);
+            json_first = 0;
+            fputs("{\"name\":", stdout);
+            json_emit_str(stdout, k->name);
+            fprintf(stdout, ",\"is_cas\":%s",
+                    k->is_cas ? "true" : "false");
+            fputs(",\"entries\":[", stdout);
+        } else {
+            fprintf(stdout, "  %-12s (%s mode)\n",
+                    k->name,
+                    k->is_cas ? "CAS — sha-checked" : "keyed — structural only");
+        }
+
+        VerifyCtx v = {
+            .kind        = k,
+            .store       = s,
+            .root        = root,
+            .shard_depth = 1,
+            .repair      = repair,
+            .json        = json,
+            .json_first  = 1,
+            .stats       = {0, 0, 0, 0},
+        };
+        (void)hl_blob_store_iter(s, verify_visit, &v);
+        hl_blob_store_close(s);
+
+        if (json) {
+            fputs("]", stdout);
+            fprintf(stdout, ",\"checked\":%llu", (unsigned long long)v.stats.checked);
+            fprintf(stdout, ",\"ok\":%llu",      (unsigned long long)v.stats.ok);
+            fprintf(stdout, ",\"corrupt\":%llu", (unsigned long long)v.stats.corrupt);
+            fprintf(stdout, ",\"repaired\":%llu",(unsigned long long)v.stats.repaired);
+            fputc('}', stdout);
+        } else {
+            fprintf(stdout,
+                "    %llu checked, %llu ok, %llu corrupt%s\n",
+                (unsigned long long)v.stats.checked,
+                (unsigned long long)v.stats.ok,
+                (unsigned long long)v.stats.corrupt,
+                v.stats.repaired
+                    ? " (repaired)" : "");
+        }
+
+        total_checked  += v.stats.checked;
+        total_ok       += v.stats.ok;
+        total_corrupt  += v.stats.corrupt;
+        total_repaired += v.stats.repaired;
+    }
+
+    if (json) {
+        fputs("]", stdout);
+        fprintf(stdout, ",\"total_checked\":%llu",  (unsigned long long)total_checked);
+        fprintf(stdout, ",\"total_ok\":%llu",       (unsigned long long)total_ok);
+        fprintf(stdout, ",\"total_corrupt\":%llu",  (unsigned long long)total_corrupt);
+        fprintf(stdout, ",\"total_repaired\":%llu", (unsigned long long)total_repaired);
+        fputs("}\n", stdout);
+    } else {
+        fprintf(stdout, "\nTotal: %llu checked, %llu ok, %llu corrupt",
+                (unsigned long long)total_checked,
+                (unsigned long long)total_ok,
+                (unsigned long long)total_corrupt);
+        if (total_repaired)
+            fprintf(stdout, " (%llu repaired)",
+                    (unsigned long long)total_repaired);
+        fputc('\n', stdout);
+    }
+
+    /* Exit 1 if anything is corrupt AND we didn't repair (or
+     * repair couldn't fix every issue). Exit 0 if --repair
+     * brought everything to OK. */
+    if (total_corrupt > total_repaired) rc_overall = 1;
     return rc_overall;
 }
 
@@ -589,7 +985,7 @@ static void usage(FILE *f)
 "  list [--json]                  Show every registered cache: name, path,\n"
 "                                 entries, size.\n"
 "  prune [--kind=K] [--max-size=N] [--max-age=N]\n"
-"        [--strategy=lru|fifo] [--dry-run]\n"
+"        [--strategy=lru|fifo] [--dry-run] [--json]\n"
 "                                 Evict from runtime caches by age / total\n"
 "                                 size. System stores (tools) are skipped\n"
 "                                 unless --kind=tools is set.\n"
@@ -597,8 +993,21 @@ static void usage(FILE *f)
 "                                   (binary, 1024-based; B optional).\n"
 "                                 --max-age accepts s / m / h / d / w / y\n"
 "                                   suffixes (bare numbers = seconds).\n"
-"  clear [--kind=K] --yes         Wipe runtime caches entirely. With\n"
+"                                 --json emits one result object per kind\n"
+"                                   plus total_removed + total_freed_bytes.\n"
+"  clear [--kind=K] --yes [--json]\n"
+"                                 Wipe runtime caches entirely. With\n"
 "                                 --kind=K, restrict to one cache.\n"
+"                                 --json emits the same shape as prune.\n"
+"  verify [--kind=K] [--repair] [--json]\n"
+"                                 Walk every entry: structural check\n"
+"                                 (filename shape, readability); for\n"
+"                                 CAS-mode kinds (tools) also recompute\n"
+"                                 sha256 and compare to the filename.\n"
+"                                 Exits 1 if anything is corrupt and\n"
+"                                 --repair wasn't able to fix it.\n"
+"                                 --repair unlinks corrupt entries\n"
+"                                 (the next compile / lookup repopulates).\n"
 "\n"
 "Cache layout:\n"
 "  Runtime caches live at $HOME/.hull/blobs/runtime/<kind>/.\n"
@@ -627,9 +1036,10 @@ int hl_cmd_cache(int argc, char **argv, const HlCommandEnv *env)
     }
 
     const char *verb = argv[1];
-    if (strcmp(verb, "list")  == 0) return cmd_list(argc - 1,  argv + 1);
-    if (strcmp(verb, "prune") == 0) return cmd_prune(argc - 1, argv + 1);
-    if (strcmp(verb, "clear") == 0) return cmd_clear(argc - 1, argv + 1);
+    if (strcmp(verb, "list")   == 0) return cmd_list(argc - 1,   argv + 1);
+    if (strcmp(verb, "prune")  == 0) return cmd_prune(argc - 1,  argv + 1);
+    if (strcmp(verb, "clear")  == 0) return cmd_clear(argc - 1,  argv + 1);
+    if (strcmp(verb, "verify") == 0) return cmd_verify(argc - 1, argv + 1);
 
     fprintf(stderr, "hull cache: unknown verb '%s'\n\n", verb);
     usage(stderr);

@@ -1557,7 +1557,7 @@ $(shell test "$$(cat $(BUILD_CONFIG_FILE) 2>/dev/null)" = "$(BUILD_FINGERPRINT)"
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan e2e e2e-build e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-compute-dev e2e-aot-cache e2e-cache e2e-tcc e2e-install e2e-ca-bundle e2e-update e2e-tools hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-gpu bench-bytecode-cache wamrc coverage lint-lua lint-js lint platform platform-cosmo
+.PHONY: all clean test debug msan e2e e2e-build e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-tcc e2e-install e2e-ca-bundle e2e-update e2e-tools hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-gpu bench-bytecode-cache wamrc coverage lint-lua lint-js lint platform platform-cosmo
 
 all: $(BUILDDIR)/hull
 
@@ -2393,6 +2393,24 @@ e2e-aot-cache: $(BUILDDIR)/hull
 # `hull cache list|prune|clear` + HULL_CACHE_DIR isolation.
 e2e-cache: $(BUILDDIR)/hull
 	sh tests/e2e_cache.sh
+
+# Concurrent-writer stress test: N hull processes hammer the same
+# cache root. Slow (~30s, spawns ~16 hull instances) — kept out of
+# the default `make e2e` runs; CI invokes explicitly.
+e2e-cache-concurrent: $(BUILDDIR)/hull
+	sh tests/e2e_cache_concurrent.sh
+
+# Run the cache e2e suite against a cosmopolitan-built hull. Slow
+# (rebuilds platform + hull with cosmocc). CI invokes on a Linux
+# x86_64 runner. The wrapper script verifies the binary is a cosmo
+# APE, then delegates to e2e_cache.sh with HULL overridden.
+e2e-cache-cosmo:
+	@command -v cosmocc >/dev/null 2>&1 || { \
+		echo "SKIP: cosmocc not on PATH"; exit 0; }
+	$(MAKE) platform-cosmo
+	$(MAKE) clean
+	$(MAKE) CC=cosmocc EMBED_PLATFORM=cosmo -j8
+	HULL=$(BUILDDIR)/hull sh tests/e2e_cache_cosmo.sh
 
 e2e-tcc: $(BUILDDIR)/hull $(BUILDDIR)/libhull_platform.a
 	sh tests/e2e_tcc.sh

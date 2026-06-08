@@ -54,6 +54,16 @@ typedef struct {
      *  kebab-case (`"lua-bytecode"`) while env-var names follow
      *  the SCREAMING_SNAKE convention. */
     const char *env_kind;
+
+    /** 1 = content-addressed (filename IS sha256(contents) — apps'
+     *      blobs and `tools` belong here). `hull cache verify` can
+     *      recompute the sha for each entry and compare to its
+     *      filename to detect corruption.
+     *  0 = caller-keyed (filename is a sha derived from inputs that
+     *      doesn't equal sha256(contents) — runtime caches belong
+     *      here). `hull cache verify` falls back to structural
+     *      checks only (filename shape, readability). */
+    int is_cas;
 } HlCacheKind;
 
 /**

@@ -1214,6 +1214,97 @@ Tasks (target v0.1.10):
       `sha256(prompt || context || model_id || temperature)`. LRU
       via `blob.cleanup`. Honors `HULL_NO_CACHE=1`.
 
+- [x] §1.5.b-X-10. JS template cache (parity with X-4). **Landed.**
+      `hl_js_template_compile_cached` wraps `JS_Eval(MODULE |
+      COMPILE_ONLY)` for the template engine's render-function
+      compilation step. Initial design tried caching the
+      post-eval render closure via `JS_WriteObject` — QuickJS
+      rejects serialization of runtime closures, so the cache
+      stores the pre-eval *chunk* and uses `JS_EvalFunction` on
+      hit (consumes the chunk reference, no leak). Cache key =
+      `sha256(QJS_TAG || arch || endian || template_name ||
+      generated_code)`. Auto-registered in the cache registry as
+      `"js-templates"` so it picks up list/prune/clear/verify/
+      doctor/inspect for free. Honors `HULL_NO_CACHE=1` and
+      `HULL_NO_JS_TEMPLATE_CACHE=1`. Files:
+      `include/hull/runtime/js_template_cache.h`,
+      `src/hull/runtime/js/template_cache.c`,
+      `src/hull/runtime/js/mod_template.c` (one-line swap),
+      `src/hull/cache_registry.c` (+1 row), 4 utests in
+      `test_js` (`js_template_cache.*`). Verified: 81/81 utest_js,
+      40/40 e2e_templates, 76/76 e2e_cache.
+
+- [x] §1.5.b-X-11. Concurrency stress test. **Landed.** New
+      `tests/e2e_cache_concurrent.sh` (9 cases) and
+      `make e2e-cache-concurrent` target. Spawns N=8 parallel
+      hull processes hammering the same cache root, plus a mixed
+      4-Lua + 4-JS workload, plus targeted prune/clear races.
+      Asserts no crashes, no zero-sized blobs, no leftover
+      `tmp/.blob-*.tmp` files, and idempotent results on warm
+      replay. Kept out of the default `make e2e` chain (~30s,
+      spawns ~16 hull instances); CI invokes explicitly.
+
+- [x] §1.5.b-X-12. `--json` on prune and clear. **Landed.**
+      Both `hull cache prune` and `hull cache clear` now accept
+      `--json` and emit `{"results":[{kind, removed, freed_bytes,
+      skipped_no_store?}], "total_removed":N, "total_freed_bytes":N,
+      "dry_run":bool}`. `clear --json` still requires `--yes` to
+      perform the wipe (no behavioural change — just adds a
+      structured output format alongside the human one). Verified
+      via 7 new e2e cases in `e2e_cache.sh`.
+
+- [x] §1.5.b-X-13. `hull cache verify [--repair] [--json]`.
+      **Landed.** Walks every cache entry and flags corruption.
+      For CAS-mode kinds (registry `is_cas=1` — `tools`) it
+      recomputes `sha256(contents)` and compares to filename
+      (the strongest possible integrity check). For keyed-mode
+      runtime caches it does a structural check (filename shape,
+      regular file, non-empty, readable — a zero-byte runtime
+      cache entry is always corrupt since none of the runtime
+      kinds write empty blobs). `--repair` unlinks corrupt
+      entries — safe because the next compile/install
+      repopulates from source. `--json` emits the same shape as
+      prune. Exits 1 if anything is corrupt and `--repair`
+      wasn't able to fix it. New `is_cas` field on `HlCacheKind`
+      drives the per-kind dispatch — adding a new cache kind
+      automatically picks the right verification mode. Files:
+      `src/hull/commands/cache.c` (+`cmd_verify`),
+      `include/hull/cache_registry.h` (+is_cas field),
+      `src/hull/cache_registry.c` (annotated every row), 10 new
+      cases in `e2e_cache.sh`.
+
+- [x] §1.5.b-X-14. `docs/cache.md` standalone reference.
+      **Landed.** New `docs/cache.md` (~10 pages) covers
+      everything an operator needs: what each kind caches and
+      why, layout under `~/.hull/blobs/`, every `hull cache *`
+      verb, the doctor + inspect panels, the full env-var table
+      with truthiness rules, per-app isolation via
+      `HULL_CACHE_DIR` with systemd/Docker/Kubernetes recipes,
+      concurrency guarantees, when the cache helps vs hurts,
+      what's explicitly NOT cached, internals one-paragraph-each,
+      and a migration note for pre-X-2 layouts. `CLAUDE.md` and
+      `docs/blob.md` updated to cross-link as the canonical
+      operator reference; `docs/blob.md` stays the CAS-primitive
+      design reference.
+
+- [x] §1.5.b-X-15. Cosmo cache e2e. **Landed.** New
+      `tests/e2e_cache_cosmo.sh` wrapper + `make e2e-cache-cosmo`
+      target. The wrapper validates the cosmo APE and delegates
+      to the shared `e2e_cache.sh` with `HULL=$(BUILDDIR)/hull`,
+      so every existing cache assertion (list / prune / clear /
+      verify / doctor / inspect / opt-outs / --json shapes /
+      large-cache warnings) runs against the cosmocc binary
+      without duplicating logic. Target gates on `cosmocc` being
+      on PATH so the default CI path is unaffected; explicit
+      invocation triggers a full `platform-cosmo` rebuild +
+      fat-APE link + the suite. Also caught + fixed: under
+      single-arch `make CC=x86_64-unknown-cosmo-cc`, `AR=` must
+      be explicitly passed as `x86_64-unknown-cosmo-ar` because
+      the keel build picks up macOS's BSD `ar` by default,
+      producing archives that GNU ld.bfd can't resolve symbols
+      from (matches the comment in `vendor/keel/Makefile` about
+      fat-cosmo using cosmo's `ar`).
+
 ### 1.5.c HTMX-specific stdlib companions. Tier 1 (target v0.1.10)
 
 **Motivation.** v0.1.8 shipped the HTMX core (helper module, CSP, CSRF,

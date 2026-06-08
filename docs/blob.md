@@ -2,6 +2,12 @@
 
 **Status:** Design locked — implementation pending (§1.5.b-3.5).
 
+> **Operator note.** This document is the design reference for the
+> CAS primitive. If you're here to manage Hull's on-disk caches
+> (`lua-bytecode`, `js-bytecode`, `compute-aot`, `templates`,
+> `js-templates`, `tools`) — environment variables, sizing, isolation,
+> deployment recipes — that's [docs/cache.md](cache.md).
+
 ## Overview
 
 `hull/blob@1` is a pure content-addressed disk storage primitive. Take

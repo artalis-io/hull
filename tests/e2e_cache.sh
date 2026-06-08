@@ -437,6 +437,123 @@ case "$OUT" in
 esac
 rm -rf "$LARGE_HOME"
 
+# ── 21. `prune --json` shape ─────────────────────────────────────
+JSON=$("$HULL" cache prune --max-age=30d --dry-run --json 2>&1)
+case "$JSON" in
+    *'"results":['*'"total_removed":'*'"total_freed_bytes":'*'"dry_run":true'*)
+        pass "prune --json includes results + totals + dry_run" ;;
+    *) fail "prune --json shape" "got: $JSON" ;;
+esac
+# Echo into python json.tool for a stricter validity check (no
+# trailing-comma or whitespace bugs).
+if echo "$JSON" | python3 -m json.tool >/dev/null 2>&1; then
+    pass "prune --json is valid JSON"
+else
+    fail "prune --json invalid JSON" "got: $JSON"
+fi
+
+# ── 22. `clear --json` shape ─────────────────────────────────────
+# Clear refuses without --yes even in JSON mode (refusal is a
+# process error, not a structured result).
+RC=0
+OUT=$("$HULL" cache clear --json 2>&1) || RC=$?
+[ "$RC" -ne 0 ] && pass "clear --json without --yes still refuses" \
+                || fail "clear --json bypassed --yes"
+
+# Populate the cache so clear has something to do, then JSON-wipe.
+INSP_HOME=$(mktemp -d)
+HOME="$INSP_HOME" "$HULL" examples/hello/app.lua -p 19961 \
+    --no-sandbox --no-migrate >/dev/null 2>&1 &
+PID=$!
+sleep 2
+kill -INT $PID 2>/dev/null || true
+sleep 1
+kill -KILL $PID 2>/dev/null || true
+wait $PID 2>/dev/null || true
+
+JSON=$(HOME="$INSP_HOME" "$HULL" cache clear --yes --json 2>&1)
+case "$JSON" in
+    *'"results":['*'"total_removed":'*'"total_freed_bytes":'*)
+        pass "clear --json includes results + totals" ;;
+    *) fail "clear --json shape" "got: $JSON" ;;
+esac
+if echo "$JSON" | python3 -m json.tool >/dev/null 2>&1; then
+    pass "clear --json is valid JSON"
+else
+    fail "clear --json invalid JSON" "got: $JSON"
+fi
+# After clear --yes --json, runtime caches should actually be empty.
+remain=$(find "$INSP_HOME/.hull/blobs/runtime" -type f 2>/dev/null \
+              | wc -l | tr -d ' ')
+[ "$remain" = "0" ] \
+    && pass "clear --yes --json actually wiped runtime caches" \
+    || fail "clear --yes --json left $remain files behind"
+rm -rf "$INSP_HOME"
+
+# ── 23. `verify` finds corruption + `verify --repair` fixes ──
+VERIFY_HOME=$(mktemp -d)
+HOME="$VERIFY_HOME" "$HULL" examples/hello/app.lua -p 19975 \
+    --no-sandbox --no-migrate >/dev/null 2>&1 &
+PID=$!
+sleep 2
+kill -INT $PID 2>/dev/null || true; sleep 1; kill -KILL $PID 2>/dev/null || true
+wait $PID 2>/dev/null || true
+
+# Clean state should verify clean.
+OUT=$(HOME="$VERIFY_HOME" "$HULL" cache verify 2>&1)
+RC=$?
+case "$OUT" in
+    *"0 corrupt"*) pass "verify on clean cache reports 0 corrupt" ;;
+    *) fail "verify clean output" "got: $OUT" ;;
+esac
+[ "$RC" -eq 0 ] && pass "verify on clean cache exits 0" \
+                || fail "verify clean rc" "rc=$RC"
+
+# Corrupt one file by truncating it to zero bytes.
+SOMEFILE=$(find "$VERIFY_HOME/.hull/blobs/runtime/lua-bytecode/blobs" \
+                -type f | head -1)
+if [ -n "$SOMEFILE" ]; then
+    truncate -s 0 "$SOMEFILE"
+    RC=0
+    OUT=$(HOME="$VERIFY_HOME" "$HULL" cache verify 2>&1) || RC=$?
+    case "$OUT" in
+        *"zero-size"*) pass "verify detects zero-size corruption" ;;
+        *) fail "verify zero-size detection" "got: $OUT" ;;
+    esac
+    [ "$RC" -ne 0 ] && pass "verify exits non-zero on corruption" \
+                    || fail "verify rc on corruption" "got rc=$RC"
+    case "$OUT" in
+        *"re-run with --repair"*) pass "verify suggests --repair" ;;
+        *) fail "verify --repair suggestion missing" ;;
+    esac
+
+    # --repair unlinks the corrupt entry.
+    RC=0
+    OUT=$(HOME="$VERIFY_HOME" "$HULL" cache verify --repair 2>&1) || RC=$?
+    case "$OUT" in
+        *"unlinked"*) pass "verify --repair reports unlink" ;;
+        *) fail "verify --repair output" "got: $OUT" ;;
+    esac
+    [ "$RC" -eq 0 ] && pass "verify --repair exits 0 after fix" \
+                    || fail "verify --repair rc" "got rc=$RC"
+    [ ! -f "$SOMEFILE" ] && pass "verify --repair actually unlinked the file" \
+                         || fail "verify --repair left file behind"
+
+    # JSON output shape.
+    JSON=$(HOME="$VERIFY_HOME" "$HULL" cache verify --json 2>&1)
+    case "$JSON" in
+        *'"results":['*'"total_checked":'*'"total_corrupt":'*)
+            pass "verify --json shape" ;;
+        *) fail "verify --json shape" "got: $JSON" ;;
+    esac
+    if echo "$JSON" | python3 -m json.tool >/dev/null 2>&1; then
+        pass "verify --json is valid JSON"
+    else
+        fail "verify --json invalid JSON"
+    fi
+fi
+rm -rf "$VERIFY_HOME"
+
 echo ""
 echo "$PASS/$((PASS + FAIL)) e2e cache tests passed"
 [ "$FAIL" -eq 0 ]
