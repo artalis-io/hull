@@ -29,6 +29,14 @@
 #include <time.h>
 #include <unistd.h>
 
+/* O_NOATIME: Linux-only flag that suppresses atime updates on read.
+ * No-op elsewhere — macOS, BSDs, and Cosmo all lack it; reader_open
+ * then relies on the kernel's mount-time atime policy (relatime by
+ * default on modern distros, no-op on macOS, etc.). */
+#ifndef O_NOATIME
+#define O_NOATIME 0
+#endif
+
 #define HL_BLOB_STORE_TMP_PREFIX      ".blob-"
 #define HL_BLOB_STORE_TMP_RAND_BYTES  8                                  /* 16 hex chars */
 #define HL_BLOB_STORE_TMP_RAND_HEX    (HL_BLOB_STORE_TMP_RAND_BYTES * 2) /* 16 */
@@ -598,8 +606,24 @@ int hl_blob_store_reader_open(HlBlobStore *s, const char *id, int track_access,
      * multi-user hosts or shared HULL_CACHE_DIR mounts where the
      * cache root might be writable by an unprivileged user.
      * Symlink → ELOOP (Linux) / EMLINK (BSD) → blob_store_get
-     * returns failure, caller falls back to fresh compile. */
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+     * returns failure, caller falls back to fresh compile.
+     *
+     * O_NOATIME (track_access=0 path only): suppress kernel atime
+     * updates so the caller's track_access contract is honored
+     * even on filesystems mounted with strictatime, or with
+     * relatime when atime happens to be older than ctime/mtime.
+     * Without it, the open() itself bumps atime before we get a
+     * chance to apply the policy. Linux-only; defined as 0 below
+     * for portability so this is a no-op elsewhere. Falls back to
+     * a plain open() on EPERM (O_NOATIME requires owner-or-CAP),
+     * since lacking permission to suppress atime updates isn't
+     * fatal — worst case the policy degrades to "best-effort". */
+    int open_flags = O_RDONLY | O_CLOEXEC | O_NOFOLLOW;
+    if (!track_access) open_flags |= O_NOATIME;
+    int fd = open(path, open_flags);
+    if (fd < 0 && errno == EPERM && !track_access) {
+        fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    }
     if (fd < 0) return -1;
 
     HlBlobStoreReader *r = hl_alloc_malloc(s->alloc, sizeof(*r));
