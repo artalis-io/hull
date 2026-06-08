@@ -264,21 +264,25 @@ static int cache_list_text(void)
         (unsigned long long)total_count,   total_str);
 
     /* Footer: surface the active opt-outs explicitly so users see
-     * WHY a cache shows `off`. Only emit when something is set. */
-    int any_off_emitted = 0;
+     * WHY a cache shows `off`. Only emit when something is set.
+     * `need_leading_newline` is set only on the first emission
+     * inside the loop; subsequent assignments would be dead stores
+     * (scan-build flags those with deadcode.DeadStores). */
     if (global_off) {
-        fprintf(stdout, "\nHULL_NO_CACHE=1 active — all runtime caches disabled.\n");
-        any_off_emitted = 1;
+        fprintf(stdout, "\nHULL_NO_CACHE=1 active - all runtime caches disabled.\n");
     } else {
+        int need_leading_newline = 1;
         for (const HlCacheKind *k = hl_cache_registry(); k->name; k++) {
             if (!k->env_kind) continue;
             if (!hl_hull_cache_disabled(k->env_kind)) continue;
             char env_name[64];
             env_var_for(k, env_name, sizeof(env_name));
-            if (!any_off_emitted) fputc('\n', stdout);
-            fprintf(stdout, "%s=1 active — %s cache disabled.\n",
+            if (need_leading_newline) {
+                fputc('\n', stdout);
+                need_leading_newline = 0;
+            }
+            fprintf(stdout, "%s=1 active - %s cache disabled.\n",
                     env_name, k->name);
-            any_off_emitted = 1;
         }
     }
 

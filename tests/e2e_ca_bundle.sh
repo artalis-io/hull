@@ -74,7 +74,10 @@ assert "human output has 'CA bundle' section" [ $? -eq 0 ]
 echo "$DOCTOR_JSON" | grep -q '"ca_bundle"'
 assert "JSON output has ca_bundle field" [ $? -eq 0 ]
 
-echo "$DOCTOR_JSON" | grep -q '"embedded": true'
+# sh_json emits compact JSON ("embedded":true, no space after colon)
+# since the post-v0.2.0 doctor.c migration. Accept both forms so the
+# test stays robust if formatting ever changes back.
+echo "$DOCTOR_JSON" | grep -Eq '"embedded": ?true'
 assert "JSON reports embedded: true (this build)" [ $? -eq 0 ]
 
 echo ""

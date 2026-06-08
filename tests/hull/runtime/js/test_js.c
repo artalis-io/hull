@@ -1,11 +1,23 @@
 /*
- * test_js_runtime.c — Tests for QuickJS runtime integration
+ * test_js_runtime.c - Tests for QuickJS runtime integration
  *
  * Tests: VM init, sandbox, module loading, route registration,
  * instruction limits, memory limits, GC.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
+
+/* nftw() comes from XSI (X/Open System Interface). On Linux glibc
+ * with strict feature-test macros, <ftw.h> only exposes nftw when
+ * one of _XOPEN_SOURCE>=500, _POSIX_C_SOURCE>=200809, or _GNU_SOURCE
+ * is defined BEFORE the include. macOS clang exposes it unconditionally.
+ *
+ * _XOPEN_SOURCE alone hides macOS extensions (mkdtemp, the
+ * clock_gettime_nsec_np used by utest.h's timer). _DARWIN_C_SOURCE
+ * brings them back. Define both so the source compiles on both
+ * platforms; the macOS define is a no-op on Linux. */
+#define _XOPEN_SOURCE 700
+#define _DARWIN_C_SOURCE
 
 #include "utest.h"
 #include "hull/runtime/js.h"
