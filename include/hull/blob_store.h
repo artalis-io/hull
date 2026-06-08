@@ -164,6 +164,25 @@ int hl_blob_store_stat(HlBlobStore *s, const char *id,
 
 int hl_blob_store_delete(HlBlobStore *s, const char *id);
 
+/**
+ * @brief Compose the absolute path of the blob @p id under store @p s.
+ *
+ * Writes `<root>/blobs/<shard>/<id>` (shard depth determined by
+ * the store's open-time configuration). Does NOT touch the
+ * filesystem — pure string construction. Validates @p id as a
+ * lowercase 64-char hex string before composing.
+ *
+ * Useful for callers that need direct filesystem access to a blob
+ * file (e.g. `cache verify` recomputing the sha; `tools install`
+ * chmod'ing the freshly-stored binary). Routing through this helper
+ * keeps shard-layout knowledge inside the storage layer — the same
+ * code that wrote the file owns the rule for naming it.
+ *
+ * @return 0 on success, -1 on invalid id, store, or undersized buffer.
+ */
+int hl_blob_store_compose_path(HlBlobStore *s, const char *id,
+                               char *out, size_t out_cap);
+
 /* ── Enumeration ─────────────────────────────────────────────────── */
 
 typedef int (*HlBlobStoreIterCb)(const char *id, size_t size, void *user);

@@ -694,24 +694,11 @@ typedef struct {
 typedef struct {
     const HlCacheKind *kind;
     HlBlobStore       *store;
-    char              *root;        /* for path composition */
-    int                shard_depth; /* 1 for all today's kinds */
     int                repair;
     int                json;
     int                json_first;  /* for comma-separation */
     VerifyStats        stats;
 } VerifyCtx;
-
-/* Compose <root>/blobs/<XX>/<id> for shard_depth=1. We don't
- * expose this from blob_store, so duplicate the layout rule
- * here. */
-static int verify_compose_path(const char *root, const char *id,
-                               char *out, size_t out_sz)
-{
-    int n = snprintf(out, out_sz, "%s/blobs/%c%c/%s",
-                     root, id[0], id[1], id);
-    return (n > 0 && (size_t)n < out_sz) ? 0 : -1;
-}
 
 /* Read a file fully into a malloc'd buffer. Returns 0 + (*out,
  * *out_len) on success, -1 on failure. Used for sha re-check. */
@@ -756,7 +743,7 @@ static int verify_visit(const char *id, size_t size, void *user)
     /* Hex-validity already enforced by iter. We rely on it. */
 
     char path[PATH_MAX];
-    if (verify_compose_path(v->root, id, path, sizeof(path)) != 0) {
+    if (hl_blob_store_compose_path(v->store, id, path, sizeof(path)) != 0) {
         /* Can't even compose the path — count as corrupt but no
          * repair possible. */
         v->stats.corrupt++;
@@ -916,8 +903,6 @@ static int cmd_verify(int argc, char **argv)
         VerifyCtx v = {
             .kind        = k,
             .store       = s,
-            .root        = root,
-            .shard_depth = 1,
             .repair      = repair,
             .json        = json,
             .json_first  = 1,

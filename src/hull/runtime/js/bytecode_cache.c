@@ -24,19 +24,9 @@
 #include <string.h>
 #include <unistd.h>
 
-#define JBC_STORE_KIND  "js-bytecode"
+#include "hull/runtime/quickjs_tag.h"  /* QJS_TAG */
 
-/* QuickJS doesn't expose a runtime version constant. The bytecode
- * format ("BC_VERSION" inside quickjs.c) changes whenever we
- * vendor a new snapshot. This string tracks the vendored release
- * we built against and MUST be bumped together with `make
- * fetch-quickjs` or any other QuickJS source change — otherwise
- * stale bytecode might be loaded into an incompatible runtime.
- *
- * The Makefile defines CONFIG_VERSION="2024-01-13" for the
- * vendored snapshot; we mirror that here so the two surfaces are
- * easy to keep in sync. */
-#define QJS_TAG "qjs-2024-01-13"
+#define JBC_STORE_KIND  "js-bytecode"
 
 /* ── Arch / endian tags (shared shape with the Lua cache) ──── */
 

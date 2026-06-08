@@ -711,6 +711,14 @@ int hl_blob_store_delete(HlBlobStore *s, const char *id)
     return -1;
 }
 
+int hl_blob_store_compose_path(HlBlobStore *s, const char *id,
+                               char *out, size_t out_cap)
+{
+    if (!s || !id || !out || out_cap == 0) return -1;
+    if (validate_id(id) != 0) return -1;
+    return build_blob_path(s, id, out, out_cap);
+}
+
 /* ── Enumeration (snapshot semantics) ────────────────────────────── */
 
 typedef struct {

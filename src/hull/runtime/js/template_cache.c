@@ -32,14 +32,9 @@
 #include <string.h>
 #include <unistd.h>
 
-#define JTC_STORE_KIND  "js-templates"
+#include "hull/runtime/quickjs_tag.h"  /* QJS_TAG (shared with bytecode cache) */
 
-/* Same QJS_TAG as the bytecode cache. Bump together with any
- * vendor/quickjs/ change — incompatible bytecode formats would
- * make JS_ReadObject reject stale entries (caught below; we
- * unlink + recompile), but invalidating proactively at the key
- * level is cleaner. */
-#define QJS_TAG "qjs-2024-01-13"
+#define JTC_STORE_KIND  "js-templates"
 
 static const char *arch_tag(void)
 {

@@ -32,6 +32,7 @@
 
 #include "hull/commands/tools.h"
 #include "hull/blob_store.h"
+#include "hull/cache_registry.h"
 #include "hull/release.h"
 #include "hull/release_io.h"
 #include "hull/tools_install.h"
@@ -354,18 +355,18 @@ static int install_one(const HlToolSpec *spec, const char *platform,
      * coexist in the CAS pool and dedup against `hull update`'s
      * future use of the same store. */
 
+    /* Resolve the tools-store root via the cache registry — same
+     * source of truth as `hull cache list|verify`, `hull doctor`,
+     * and `hull inspect`, so a layout change in one place reaches
+     * all consumers. */
     char blobs_root[PATH_MAX];
     {
-        const char *home = getenv("HOME");
-        if (!home || !*home) {
-            fprintf(stderr, "hull tools: HOME not set\n");
-            kl_free(alloc, body, body_len);
-            return -1;
-        }
-        int n = snprintf(blobs_root, sizeof(blobs_root),
-                         "%s/.hull/blobs/tools", home);
-        if (n < 0 || (size_t)n >= sizeof(blobs_root)) {
-            fprintf(stderr, "hull tools: blob path overflow\n");
+        const HlCacheKind *tools_kind = hl_cache_find("tools");
+        if (!tools_kind ||
+            hl_cache_resolve_path(tools_kind,
+                                  blobs_root, sizeof(blobs_root)) != 0) {
+            fprintf(stderr, "hull tools: cannot resolve tools-store path "
+                            "(HOME unset or registry missing)\n");
             kl_free(alloc, body, body_len);
             return -1;
         }
@@ -395,15 +396,12 @@ static int install_one(const HlToolSpec *spec, const char *platform,
     kl_free(alloc, body, body_len);
 
     /* Compose the on-disk blob path so we can chmod it executable and
-     * symlink to it. shard_depth=1 → blobs/<XX>/<id>. Caller-side
-     * composition is fine here because the layout is part of the
-     * blob_store API contract (documented in include/hull/blob_store.h).
-     */
+     * symlink to it. Routing through hl_blob_store_compose_path keeps
+     * shard-layout knowledge inside blob_store — see the helper's
+     * docstring in include/hull/blob_store.h. */
     char blob_path[PATH_MAX];
-    int n = snprintf(blob_path, sizeof(blob_path),
-                     "%s/blobs/%c%c/%s",
-                     blobs_root, blob_id[0], blob_id[1], blob_id);
-    if (n < 0 || (size_t)n >= sizeof(blob_path)) {
+    if (hl_blob_store_compose_path(store, blob_id,
+                                   blob_path, sizeof(blob_path)) != 0) {
         fprintf(stderr, "hull tools: blob path overflow\n");
         hl_blob_store_close(store);
         return -1;
@@ -441,7 +439,7 @@ static int install_one(const HlToolSpec *spec, const char *platform,
     }
 
     char tmp_link[PATH_MAX];
-    n = snprintf(tmp_link, sizeof(tmp_link), "%s.tmp.%d", target, (int)getpid());
+    int n = snprintf(tmp_link, sizeof(tmp_link), "%s.tmp.%d", target, (int)getpid());
     if (n < 0 || (size_t)n >= sizeof(tmp_link)) {
         fprintf(stderr, "hull tools: symlink tmp path overflow\n");
         return -1;
