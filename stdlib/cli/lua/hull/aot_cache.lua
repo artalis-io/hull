@@ -49,7 +49,24 @@ local function disabled()
     return tool.hull_cache_disabled("AOT") or tool.hull_cache_disabled(nil)
 end
 
--- wamrc version capture — memoized per (binary path, process).
+-- wamrc identity capture — memoized per (binary path, process).
+--
+-- Cache invalidation correctness depends on this being a true
+-- content fingerprint. Two wamrc binaries that produce different
+-- AOT bytes must produce different ids here, otherwise the cache
+-- silently serves the wrong artifact for a swapped compiler.
+--
+-- Earlier versions used `wamrc --help`'s first line + binary mtime.
+-- That fingerprint failed under realistic operational scenarios —
+-- `cp -p`, `rsync --times`, and tar restore-from-backup all
+-- preserve mtime, and wamrc's --help banner has historically been
+-- stable across releases. A swapped binary with preserved mtime
+-- collided to the same id as its predecessor.
+--
+-- sha256(contents) is the only fingerprint that's correct by
+-- construction. wamrc binaries are tens of MB, but this runs once
+-- per process and is memoized; the build pipeline is doing
+-- megabyte-scale work elsewhere anyway.
 local wamrc_version_memo = {}
 
 function M.wamrc_version(wamrc_bin)
@@ -57,14 +74,14 @@ function M.wamrc_version(wamrc_bin)
     if wamrc_version_memo[wamrc_bin] then
         return wamrc_version_memo[wamrc_bin]
     end
-    -- wamrc has no --version flag; `--help` first line carries the
-    -- identifying banner ("WAMR Ahead-of-Time compiler"). Combine
-    -- with binary mtime for change detection — banner is stable
-    -- across builds but mtime moves whenever wamrc is rebuilt.
-    local mtime = tool.file_mtime(wamrc_bin) or 0
-    local banner = tool.spawn_read({wamrc_bin, "--help"}) or ""
-    local first = banner:match("([^\n]+)") or ""
-    local id = string.format("%s|mtime=%d", first:sub(1, 80), mtime)
+    local bytes = tool.read_file(wamrc_bin)
+    if not bytes then
+        -- Fail closed: no fingerprint → no cache key → no cache.
+        -- Better than fingerprinting `nil` and colliding every
+        -- failing-probe run together.
+        return nil
+    end
+    local id = "wamrc-sha256=" .. crypto.sha256(bytes)
     wamrc_version_memo[wamrc_bin] = id
     return id
 end

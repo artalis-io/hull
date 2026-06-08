@@ -870,10 +870,18 @@ static int cmd_verify(int argc, char **argv)
         if (only && k != only) continue;
 
         char root[PATH_MAX];
-        if (hl_cache_resolve_path(k, root, sizeof(root)) != 0) continue;
-
+        /* Path resolution can fail when the cache subdir path resolves
+         * to something other than a directory (e.g. a regular file
+         * planted there by a misconfigured deployment, or stale state
+         * from a different Hull version). Treat that identically to
+         * a blob_store_open failure — emit `open_failed`, bump rc.
+         * Same reasoning as the open_failed branch below: silent skip
+         * misleads CI gates consuming `verify --json`. */
         HlBlobStore *s = NULL;
-        if (hl_blob_store_open(&s, NULL, root, /*shard_depth=*/1, 0) != 0) {
+        int open_ok = (hl_cache_resolve_path(k, root, sizeof(root)) == 0 &&
+                       hl_blob_store_open(&s, NULL, root,
+                                          /*shard_depth=*/1, 0) == 0);
+        if (!open_ok) {
             if (json) {
                 if (!json_first) fputc(',', stdout);
                 json_first = 0;
@@ -883,6 +891,7 @@ static int cmd_verify(int argc, char **argv)
             } else {
                 fprintf(stdout, "  %-12s (cannot open store)\n", k->name);
             }
+            rc_overall = 1;
             continue;
         }
 

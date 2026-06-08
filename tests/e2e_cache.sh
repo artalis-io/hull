@@ -554,6 +554,37 @@ if [ -n "$SOMEFILE" ]; then
 fi
 rm -rf "$VERIFY_HOME"
 
+# ── 24. `verify` exits non-zero when a cache store can't be opened ──
+# Plant a regular file where the lua-bytecode cache dir is supposed
+# to be — blob_store_open's mkdir fails, hl_blob_store_open returns
+# non-zero, the verify codepath records "open_failed" + bumps rc.
+# CI gates consuming `verify --json` need this so "couldn't even
+# inspect some kinds" never reads as "all clean".
+OF_HOME=$(mktemp -d)
+mkdir -p "$OF_HOME/.hull/blobs/runtime"
+# Plant a regular file where the lua-bytecode subdir would live.
+echo "blocker" > "$OF_HOME/.hull/blobs/runtime/lua-bytecode"
+
+RC=0
+OUT=$(HOME="$OF_HOME" "$HULL" cache verify 2>&1) || RC=$?
+[ "$RC" -ne 0 ] && pass "verify rc=1 when a store can't open" \
+                || fail "verify open_failed exit code" "rc=$RC out=$OUT"
+case "$OUT" in
+    *"cannot open store"*) pass "verify text reports cannot-open" ;;
+    *) fail "verify cannot-open message" "got: $OUT" ;;
+esac
+
+RC=0
+JSON=$(HOME="$OF_HOME" "$HULL" cache verify --json 2>&1) || RC=$?
+[ "$RC" -ne 0 ] && pass "verify --json rc=1 on open_failed" \
+                || fail "verify --json open_failed rc" "rc=$RC"
+case "$JSON" in
+    *'"open_failed":true'*) pass "verify --json marks open_failed kinds" ;;
+    *) fail "verify --json open_failed field" "got: $JSON" ;;
+esac
+
+rm -rf "$OF_HOME"
+
 echo ""
 echo "$PASS/$((PASS + FAIL)) e2e cache tests passed"
 [ "$FAIL" -eq 0 ]
