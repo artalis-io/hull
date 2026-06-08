@@ -21,7 +21,35 @@
 
 #define MCP_MAX_LINE (64 * 1024)
 
-/* ── Tool schema definitions (static JSON) ─────────────────────────── */
+/* ── Tool schema definitions (static JSON) ─────────────────────────────
+ *
+ * The strings below are MCP tool schemas: JSON-shaped *constants*,
+ * not runtime-emitted JSON. They are compile-time `const char[]`
+ * literals served verbatim to clients (Claude Code, Cursor, etc.) on
+ * the `tools/list` MCP method.
+ *
+ * Why these are NOT migrated to `sh_json` like every other JSON site
+ * in the codebase (cache.c, sbom.c, doctor.c, tools.c, version.c,
+ * serve.c, audit.c, agent_*.c all use ShJsonWriter as of v0.2.0):
+ *
+ *   1. **Static rodata vs runtime allocation.** These literals live in
+ *      the binary's `.rodata` section at zero runtime cost. Building
+ *      them via `sh_json_buf` would add startup work, heap allocation,
+ *      and a cleanup path for what is currently free.
+ *   2. **No injection surface.** A JSON-shaped string literal cannot
+ *      have an escape vulnerability: the bytes are fixed at compile
+ *      time. The original audit (2026-06) flagged them as "Low /
+ *      defensible" for exactly this reason.
+ *   3. **Schema authoring readability.** A reader of the schema can
+ *      compare it 1:1 against the MCP spec text without mentally
+ *      compiling `sh_json_write_kv_string` calls. Schemas evolve by
+ *      copy-paste from the spec; literal JSON minimises drift.
+ *
+ * If a runtime-generated schema is ever needed (e.g. tool list that
+ * varies by `HL_ENABLE_*` build flags beyond the few `#ifdef`s
+ * already here), at that point convert the affected schema to
+ * `sh_json_buf`-built rather than escalating to a full rewrite.
+ */
 
 static const char SCHEMA_ROUTES[] =
     "{\"type\":\"object\",\"properties\":{\"app_dir\":{\"type\":\"string\","
