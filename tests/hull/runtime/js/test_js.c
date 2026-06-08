@@ -7,17 +7,16 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-/* nftw() comes from XSI (X/Open System Interface). On Linux glibc
- * with strict feature-test macros, <ftw.h> only exposes nftw when
- * one of _XOPEN_SOURCE>=500, _POSIX_C_SOURCE>=200809, or _GNU_SOURCE
- * is defined BEFORE the include. macOS clang exposes it unconditionally.
- *
- * _XOPEN_SOURCE alone hides macOS extensions (mkdtemp, the
- * clock_gettime_nsec_np used by utest.h's timer). _DARWIN_C_SOURCE
- * brings them back. Define both so the source compiles on both
- * platforms; the macOS define is a no-op on Linux. */
-#define _XOPEN_SOURCE 700
-#define _DARWIN_C_SOURCE
+/* FTW_DEPTH / FTW_PHYS are XSI extensions to nftw; on glibc they're
+ * only declared when _XOPEN_SOURCE >= 500. macOS exposes them
+ * unconditionally AND uses _XOPEN_SOURCE to gate Darwin extensions
+ * the other way (defining it hides clock_gettime_nsec_np /
+ * CLOCK_UPTIME_RAW that utest.h needs), so this define has to stay
+ * Linux-only. Matches the convention in tests/hull/test_tools_install.c
+ * and tests/hull/cap/test_fs.c. */
+#if defined(__linux__) && !defined(_XOPEN_SOURCE)
+# define _XOPEN_SOURCE 700
+#endif
 
 #include "utest.h"
 #include "hull/runtime/js.h"

@@ -1,11 +1,22 @@
 /*
- * test_lua_runtime.c — Tests for Lua 5.4 runtime integration
+ * test_lua_runtime.c - Tests for Lua 5.4 runtime integration
  *
  * Tests: VM init, sandbox, module loading, route registration,
  * memory limits, GC.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
+
+/* FTW_DEPTH / FTW_PHYS are XSI extensions to nftw; on glibc they're
+ * only declared when _XOPEN_SOURCE >= 500. macOS exposes them
+ * unconditionally AND uses _XOPEN_SOURCE to gate Darwin extensions
+ * the other way (defining it hides clock_gettime_nsec_np /
+ * CLOCK_UPTIME_RAW that utest.h needs), so this define has to stay
+ * Linux-only. Matches the convention in tests/hull/test_tools_install.c
+ * and tests/hull/cap/test_fs.c. */
+#if defined(__linux__) && !defined(_XOPEN_SOURCE)
+# define _XOPEN_SOURCE 700
+#endif
 
 #include "utest.h"
 #include "hull/runtime/lua.h"

@@ -710,7 +710,14 @@ utest_type_printer(long long unsigned int i) {
           _Pragma("clang diagnostic pop")
 /* clang-format on */
 #else
-#define UTEST_AUTO(x) __typeof__(x + 0)
+/* Hull patch: the upstream `__typeof__(x + 0)` does pointer arithmetic
+ * to strip cv-qualifiers, which forces GCC to compute `sizeof(*x)` and
+ * errors out on pointers to opaque/incomplete types
+ * (`struct HlBlobStore`, `struct lua_State`, `void *` under strict
+ * mode, etc.). `__auto_type` is GCC's exact equivalent of clang's
+ * branch above and has the same qualifier-stripping semantics without
+ * the pointer-arithmetic requirement. Supported since GCC 4.9. */
+#define UTEST_AUTO(x) __auto_type
 #endif
 
 #else
