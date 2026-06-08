@@ -396,6 +396,7 @@ int hl_js_wire_routes_server(HlJS *js, KlServer *server,
                 if (mw_ctx) {
                     mw_ctx->js = js;
                     mw_ctx->handler_id = handler_id;
+                    mw_ctx->multipart_config = NULL;
                     hl_js_track_route(js, mw_ctx);
                     kl_server_use(server, method_str, pattern,
                                   hl_js_keel_middleware, mw_ctx);
@@ -440,6 +441,7 @@ int hl_js_wire_routes_server(HlJS *js, KlServer *server,
                 if (mw_ctx) {
                     mw_ctx->js = js;
                     mw_ctx->handler_id = handler_id;
+                    mw_ctx->multipart_config = NULL;
                     hl_js_track_route(js, mw_ctx);
                     kl_server_use_post(server, method_str, pattern,
                                        hl_js_keel_middleware, mw_ctx);

@@ -153,6 +153,7 @@ int hl_lua_wire_routes(HlLua *lua, KlRouter *router)
                 if (ctx) {
                     ctx->lua = lua;
                     ctx->handler_id = mw_handler_id;
+                    ctx->multipart_config = NULL;
                     if (hl_lua_track_route(lua, ctx) != 0)
                         hl_alloc_free(lua->base.alloc, ctx, sizeof(HlLuaRoute));
                     else
@@ -189,6 +190,7 @@ int hl_lua_wire_routes(HlLua *lua, KlRouter *router)
                 if (ctx) {
                     ctx->lua = lua;
                     ctx->handler_id = mw_handler_id;
+                    ctx->multipart_config = NULL;
                     if (hl_lua_track_route(lua, ctx) != 0)
                         hl_alloc_free(lua->base.alloc, ctx, sizeof(HlLuaRoute));
                     else
@@ -374,6 +376,7 @@ int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
                 if (ctx) {
                     ctx->lua = lua;
                     ctx->handler_id = handler_id;
+                    ctx->multipart_config = NULL;
                     if (hl_lua_track_route(lua, ctx) != 0) {
                         hl_alloc_free(lua->base.alloc, ctx, sizeof(HlLuaRoute));
                     } else {
@@ -414,6 +417,7 @@ int hl_lua_wire_routes_server(HlLua *lua, KlServer *server,
                 if (ctx) {
                     ctx->lua = lua;
                     ctx->handler_id = handler_id;
+                    ctx->multipart_config = NULL;
                     if (hl_lua_track_route(lua, ctx) != 0) {
                         hl_alloc_free(lua->base.alloc, ctx, sizeof(HlLuaRoute));
                     } else {
