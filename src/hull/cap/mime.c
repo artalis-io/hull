@@ -203,7 +203,6 @@ static int is_plain_text(const uint8_t *buf, size_t len)
         /* Tolerate truncation at the very end of the window — partial
          * multibyte sequence is fine for sniffing. */
         if (i + (size_t)extra >= cap) {
-            i = cap;
             break;
         }
 

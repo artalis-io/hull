@@ -660,7 +660,12 @@ int hl_cap_smtp_send(const HlSmtpConfig *cfg, const HlSmtpMessage *msg,
             goto cleanup;
         }
 
-        snprintf(cmd, sizeof(cmd), "AUTH PLAIN %s\r\n", b64);
+        int n = snprintf(cmd, sizeof(cmd), "AUTH PLAIN %s\r\n", b64);
+        if (n < 0 || (size_t)n >= sizeof(cmd)) {
+            log_warn("smtp: AUTH PLAIN credentials too large for send buffer");
+            if (err_msg) *err_msg = "auth_encode_failed";
+            goto cleanup;
+        }
         code = smtp_send_command(fd, tls, cmd, 235, timeout_ms);
         if (code < 0) {
             log_warn("smtp: AUTH PLAIN failed");

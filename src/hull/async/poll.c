@@ -145,8 +145,12 @@ static void wakeup_write(HlAsyncBackendCtx *ctx)
     char b = 'x';
     /* EAGAIN means the pipe already has a wakeup pending — that's fine,
      * one byte is enough. Other errors are ignored: a missed wakeup
-     * only delays handling by one tick. */
-    (void)write(ctx->wakeup_pipe[1], &b, 1);
+     * only delays handling by one tick. The `if (n < 0) {}` form is
+     * needed (instead of a `(void)` cast) because glibc declares
+     * write() with __attribute__((warn_unused_result)) and GCC
+     * doesn't suppress that warning via the void cast. */
+    ssize_t n = write(ctx->wakeup_pipe[1], &b, 1);
+    if (n < 0) { /* intentionally ignored, see comment above */ }
 }
 
 static void wakeup_drain(HlAsyncBackendCtx *ctx)

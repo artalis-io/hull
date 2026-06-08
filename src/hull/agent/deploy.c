@@ -235,9 +235,11 @@ int hl_agent_deploy(const char *app_dir, ShJsonBuf *out)
                     wasm_mtime = wasm_st.st_mtime;
                 }
 
-                /* Look for compute/<name>.aot.* siblings. */
+                /* Look for compute/<name>.aot.* siblings. Buffer sized
+                 * for sizeof(name) (256) + ".aot.*\0" (8) with a small
+                 * safety margin. */
                 int has_aot = 0;
-                char aot_pattern[64];
+                char aot_pattern[sizeof(name) + 16];
                 snprintf(aot_pattern, sizeof(aot_pattern), "%s.aot.*", name);
                 char **aot_files = hl_tool_find_files(compute_dir, aot_pattern, NULL);
                 if (aot_files) {
@@ -246,13 +248,18 @@ int hl_agent_deploy(const char *app_dir, ShJsonBuf *out)
                     free(aot_files);
                 }
 
-                /* Look for compute/<name>/<name>.c source. */
+                /* Look for compute/<name>/<name>.c source. Path may exceed
+                 * PATH_MAX with deeply nested compute_dir + long name; skip
+                 * source-stale check in that pathological case. */
                 char src_path[PATH_MAX];
-                snprintf(src_path, sizeof(src_path), "%s/%s/%s.c",
-                         compute_dir, name, name);
-                struct stat src_st;
-                int has_source = (stat(src_path, &src_st) == 0);
-                int source_stale = has_source && (src_st.st_mtime > wasm_mtime);
+                int sp_n = snprintf(src_path, sizeof(src_path), "%s/%s/%s.c",
+                                    compute_dir, name, name);
+                int has_source = 0, source_stale = 0;
+                if (sp_n > 0 && (size_t)sp_n < sizeof(src_path)) {
+                    struct stat src_st;
+                    has_source = (stat(src_path, &src_st) == 0);
+                    source_stale = has_source && (src_st.st_mtime > wasm_mtime);
+                }
 
                 sh_json_write_object_start(&w);
                 sh_json_write_kv_string(&w, "name", name);
@@ -312,8 +319,9 @@ int hl_agent_deploy(const char *app_dir, ShJsonBuf *out)
                 memcpy(name, base, copy_len);
                 name[copy_len] = '\0';
                 char src_path[PATH_MAX];
-                snprintf(src_path, sizeof(src_path), "%s/%s/%s.c",
-                         compute_dir, name, name);
+                int sp_n = snprintf(src_path, sizeof(src_path), "%s/%s/%s.c",
+                                    compute_dir, name, name);
+                if (sp_n < 0 || (size_t)sp_n >= sizeof(src_path)) continue;
                 struct stat src_st, wasm_st;
                 if (stat(src_path, &src_st) == 0 &&
                     stat(*fp, &wasm_st) == 0 &&

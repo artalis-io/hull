@@ -32,14 +32,16 @@
 static void agent_ensure_dir(const char *app_dir)
 {
     char path[PATH_MAX];
-    snprintf(path, sizeof(path), "%s/.hull", app_dir);
+    int n = snprintf(path, sizeof(path), "%s/.hull", app_dir);
+    if (n < 0 || (size_t)n >= sizeof(path)) return;
     mkdir(path, 0755);
 }
 
 static void agent_write_dev_json(const char *app_dir, int port, pid_t pid)
 {
     char path[PATH_MAX];
-    snprintf(path, sizeof(path), "%s/.hull/dev.json", app_dir);
+    int n = snprintf(path, sizeof(path), "%s/.hull/dev.json", app_dir);
+    if (n < 0 || (size_t)n >= sizeof(path)) return;
 
     FILE *f = fopen(path, "w");
     if (!f) return;
@@ -51,7 +53,8 @@ static void agent_write_dev_json(const char *app_dir, int port, pid_t pid)
 static void agent_remove_dev_json(const char *app_dir)
 {
     char path[PATH_MAX];
-    snprintf(path, sizeof(path), "%s/.hull/dev.json", app_dir);
+    int n = snprintf(path, sizeof(path), "%s/.hull/dev.json", app_dir);
+    if (n < 0 || (size_t)n >= sizeof(path)) return;
     unlink(path);
 }
 
@@ -109,7 +112,8 @@ static time_t scan_mtime(const char *dir)
         size_t dlen = strlen(dir);
         size_t nlen = strlen(ent->d_name);
         if (dlen + 1 + nlen + 1 > PATH_MAX) continue;
-        snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name);
+        int pn = snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name);
+        if (pn < 0 || (size_t)pn >= sizeof(path)) continue;
 
         struct stat st;
         if (lstat(path, &st) != 0) continue;
@@ -339,7 +343,12 @@ static int run_dev_tui(int argc, char **argv,
     g_dev_state.child_argv  = child_argv;
     g_dev_state.child_argc  = child_argc;
     g_dev_state.hull_exe    = hull_exe;
-    strncpy(g_dev_state.app_dir, app_dir, sizeof g_dev_state.app_dir - 1);
+    int adn = snprintf(g_dev_state.app_dir, sizeof g_dev_state.app_dir,
+                       "%s", app_dir);
+    if (adn < 0 || (size_t)adn >= sizeof g_dev_state.app_dir) {
+        fprintf(stderr, "hull dev --tui: app_dir too long\n");
+        return -1;
+    }
     g_dev_state_inited = 1;
 
     /* First child spawn — uses the reload path so the pipe + bookkeeping

@@ -343,7 +343,8 @@ static int find_files_recurse(const char *dir, const char *pattern,
         if (dlen + 1 + nlen + 1 > PATH_MAX) continue;
 
         char path[PATH_MAX];
-        snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name);
+        int pn = snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name);
+        if (pn < 0 || (size_t)pn >= sizeof(path)) continue;
 
         struct stat st;
         if (lstat(path, &st) != 0) continue;
@@ -484,7 +485,8 @@ static int rmdir_recurse(const char *path)
         if (plen + 1 + nlen + 1 > PATH_MAX) { ret = -1; continue; }
 
         char child[PATH_MAX];
-        snprintf(child, sizeof(child), "%s/%s", path, ent->d_name);
+        int cn = snprintf(child, sizeof(child), "%s/%s", path, ent->d_name);
+        if (cn < 0 || (size_t)cn >= sizeof(child)) { ret = -1; continue; }
 
         struct stat st;
         if (lstat(child, &st) != 0) { ret = -1; continue; }

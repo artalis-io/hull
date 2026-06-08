@@ -123,7 +123,12 @@ int hl_manifest_extract_js_from_file(const char *path,
     hl_js_free(js);
     free(js);
 
-    if (out_json)     *out_json = copy;
+    if (out_json) {
+        *out_json = copy;
+    } else {
+        /* Caller doesn't want the buffer — don't leak it. */
+        free(copy);
+    }
     if (out_json_len) *out_json_len = json_len;
     return 0;
 }

@@ -345,8 +345,10 @@ static void writer_release(HlBlobStoreWriter *w)
     if (!w) return;
     if (w->fd >= 0) close(w->fd);
     HlAllocator *alloc = w->store->alloc;
-    size_t tmp_len = strlen(w->tmp_path) + 1;
-    hl_alloc_free(alloc, w->tmp_path, tmp_len);
+    if (w->tmp_path) {
+        size_t tmp_len = strlen(w->tmp_path) + 1;
+        hl_alloc_free(alloc, w->tmp_path, tmp_len);
+    }
     hl_alloc_free(alloc, w, sizeof(*w));
 }
 
