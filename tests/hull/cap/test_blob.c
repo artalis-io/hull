@@ -4,6 +4,16 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+/* Convention used throughout this file: assert pointer-non-null with
+ * `ASSERT_TRUE(p != NULL)`, NOT `ASSERT_NE(p, NULL)`. The latter
+ * expands to `UTEST_AUTO(p) xEval = (p)` which on GCC is
+ * `__typeof__(p + 0)` and that does pointer arithmetic; for opaque
+ * forward-declared types like `HlBlobStore` it errors at compile
+ * time with "invalid use of undefined type 'struct HlBlobStore'".
+ * clang accepts it via `__auto_type`, so the issue only fires on
+ * GCC (CI's ASan + aarch64 runners). ASSERT_TRUE bypasses
+ * UTEST_AUTO and works on every compiler. */
+
 #include "utest.h"
 #include "hull/cap/blob.h"
 #include "hull/cap/fs.h"
@@ -759,7 +769,7 @@ UTEST(hl_blob_store_keyed, put_get_roundtrip)
 {
     char tmp[256];
     HlBlobStore *s = open_keyed_store(tmp);
-    ASSERT_NE(s, NULL);
+    ASSERT_TRUE(s != NULL);
 
     /* Use any 64-char lowercase hex — caller-keyed mode does NOT
      * verify the content hashes to it. */
@@ -786,7 +796,7 @@ UTEST(hl_blob_store_keyed, put_is_idempotent_for_same_key)
 {
     char tmp[256];
     HlBlobStore *s = open_keyed_store(tmp);
-    ASSERT_NE(s, NULL);
+    ASSERT_TRUE(s != NULL);
 
     const char *key =
         "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
@@ -811,7 +821,7 @@ UTEST(hl_blob_store_keyed, rejects_non_hex_key)
 {
     char tmp[256];
     HlBlobStore *s = open_keyed_store(tmp);
-    ASSERT_NE(s, NULL);
+    ASSERT_TRUE(s != NULL);
 
     /* Wrong length. */
     ASSERT_EQ(hl_blob_store_put_keyed(s, "abc",
@@ -833,7 +843,7 @@ UTEST(hl_blob_store_keyed, empty_payload_is_valid)
 {
     char tmp[256];
     HlBlobStore *s = open_keyed_store(tmp);
-    ASSERT_NE(s, NULL);
+    ASSERT_TRUE(s != NULL);
 
     const char *key =
         "1111111111111111111111111111111111111111111111111111111111111111";
@@ -859,7 +869,7 @@ UTEST(hl_blob_store_keyed, sharded_layout_matches_cas_layout)
      * `hull cache list`) will find. */
     char tmp[256];
     HlBlobStore *s = open_keyed_store(tmp);
-    ASSERT_NE(s, NULL);
+    ASSERT_TRUE(s != NULL);
 
     const char *key =
         "ab00000000000000000000000000000000000000000000000000000000000000";
@@ -885,7 +895,7 @@ UTEST(hl_blob_store_keyed, reader_refuses_symlink_at_blob_path)
      * symlinks itself — only attackers do — so refusing is safe. */
     char tmp[256];
     HlBlobStore *s = open_keyed_store(tmp);
-    ASSERT_NE(s, NULL);
+    ASSERT_TRUE(s != NULL);
 
     const char *key =
         "cc00000000000000000000000000000000000000000000000000000000000000";
@@ -932,7 +942,7 @@ UTEST(hl_blob_store_keyed, get_rejects_huge_stat_size)
      * not worth the disk IO. */
     char tmp[256];
     HlBlobStore *s = open_keyed_store(tmp);
-    ASSERT_NE(s, NULL);
+    ASSERT_TRUE(s != NULL);
 
     const char *key =
         "dd00000000000000000000000000000000000000000000000000000000000000";

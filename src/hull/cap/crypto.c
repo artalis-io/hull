@@ -128,7 +128,11 @@ static void sha256_transform_portable(uint32_t state[8],
 
 #include <arm_neon.h>
 
-__attribute__((target("crypto")))
+/* GCC 11+ on aarch64 requires the '+' prefix for arch extensions:
+ * plain "crypto" errors with "arch extension 'crypto' should be
+ * prefixed by '+'". Both clang and older GCC accept the '+' form,
+ * so it is the canonical spelling. */
+__attribute__((target("+crypto")))
 static void sha256_transform_armv8(uint32_t state[8],
                                      const uint8_t block[64])
 {
