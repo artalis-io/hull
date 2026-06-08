@@ -677,7 +677,13 @@ utest_type_printer(long long unsigned int i) {
       float: "%f",                                                             \
       double: "%f",                                                            \
       long double: "%Lf",                                                      \
-      default: _Generic((val - val), ptrdiff_t: "%p", default: "undef")),      \
+      /* Hull patch: upstream used `_Generic((val - val), ptrdiff_t: "%p", ...)`
+       * as a pointer-detection trick, but `val - val` does pointer
+       * arithmetic that requires sizeof(*val). Errors on opaque
+       * types (struct HlBlobStore, lua_State) and void *. The
+       * default case is always reached only for types not matched
+       * above (numerics), in practice pointers; print as %p. */     \
+      default: "%p"),                                                          \
       (val))
 #else
 /*
