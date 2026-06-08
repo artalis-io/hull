@@ -207,16 +207,18 @@ not implementation cost.
 
 #### Tier 1. Load-bearing (the trust claim depends on these)
 
-- [ ] **0.3.1. Pin the CI build environment.** `ubuntu-latest` and
-  `macos-latest` are mutable labels. GitHub rotates the runner
+- [ ] **0.3.1. Pin the CI build environment.** **Partial.** ARM
+  runners now pin `ubuntu-24.04-arm`; the rest of `ci.yml` and
+  `release.yml` still uses mutable `ubuntu-latest` / `macos-latest`
+  labels at ~10 sites. No Docker base or Nix flake yet. `ubuntu-latest`
+  and `macos-latest` are mutable labels. GitHub rotates the runner
   image without notice. Reproducibility passes today against
   today's image. Six months from now, a rebuild of v0.1.5 source
-  against the new image may not reproduce. **Fix:** at minimum pin
-  to a specific runner version (e.g. `ubuntu-24.04`-with-image-SHA),
-  ideally move to a digest-pinned Docker base or a Nix flake. Without
-  this, "reproducible" has a sliding expiry date and the
-  reproducibility-from-clean-room claim is only true in a narrow
-  time window. **Effort:** low for runner-pin; medium for Docker
+  against the new image may not reproduce. **Fix (remainder):** complete
+  the pin across all `runs-on:` entries (digest-pinned Docker base or
+  a Nix flake). Without this, "reproducible" has a sliding expiry date
+  and the reproducibility-from-clean-room claim is only true in a
+  narrow time window. **Effort:** low for runner-pin; medium for Docker
   base; high for Nix flake. Start with runner-pin.
 
 - [ ] **0.3.2. Bootstrap trust path.** The `curl ... | sh` install
@@ -306,17 +308,15 @@ not implementation cost.
   inspectable. Do both. **Effort:** small. Extends the static
   entry table + adds a release-workflow step.
 
-- [ ] **0.3.10. Key rotation and revocation procedure.**
-  `docs/release_signing.md` describes how signing works but not
-  what happens when (not if) the release or platform key is
-  compromised. No documented rotation cadence, no kill-switch
-  process, no chain-of-trust progression where the next pubkey is
-  signed by the current pubkey. **Fix:** written rotation playbook
-  + ideally a built-in mechanism for hull to accept a successor
-  pubkey announcement signed by the current pubkey. Without this,
-  a compromise is recovery-by-public-statement, which is fragile.
-  **Effort:** medium for docs; high for the in-binary successor
-  mechanism.
+- [ ] **0.3.10. Key rotation and revocation procedure.** **Partial.**
+  Written rotation playbook landed in v0.1.4 — `docs/security.md`
+  §"Key rotation" covers scheduled rotation + post-compromise
+  procedure for both `HL_PLATFORM_PUBKEY_HEX` and `HL_RELEASE_PUBKEY_HEX`,
+  including GitHub-secret update + CHANGELOG note flow. **Remainder:**
+  in-binary successor mechanism (hull accepts a successor pubkey
+  announcement signed by the current pubkey) NOT shipped — current
+  model is recovery-by-rebuild, not chain-of-trust progression.
+  **Effort (remainder):** high for the in-binary successor mechanism.
 
 #### Tier 3. Polish (closes the loop but doesn't unblock claims)
 
@@ -689,22 +689,33 @@ and helpers.
 
 **Tasks (v0.1.8):**
 
-- [ ] §1.5.a-1. `hull/htmx@1` helper module (Lua + JS). API: `is(req)`,
-      `boosted(req)`, `redirect(req, res, path)`, `retarget(res, selector)`,
-      `reswap(res, mode)`, `trigger(res, event, payload)`, plus the
-      obvious additions `location(res, opts)`, `push_url(res, url)`,
-      `refresh(res)`. Module registry entry. Unit tests.
-- [ ] §1.5.a-2. `hull/middleware/csp@1` (Lua + JS). `csp.htmx()` factory
-      returns middleware that generates a per-request nonce, exposes via
-      `req.ctx.csp_nonce`, sets the full CSP header. `csp.strict()` variant
-      (no `style-src-attr 'unsafe-inline'`) for non-Pico apps. Tests.
-- [ ] §1.5.a-3. Test helper extension. Surface `HX-Request` and friends
-      via Lua/JS `t.request(...)` headers option. The cap/test.c C layer
-      already supports custom headers; just needs the binding.
-- [ ] §1.5.a-4. Vendor HTMX 2.x + Pico v2 classless. `make fetch-htmx`
-      and `make fetch-pico` targets like `fetch-ca-bundle`, with SHA-256
-      verification.
-- [ ] §1.5.a-5. **HTMX scaffolding as a profile, composable with every
+- [x] §1.5.a-1. `hull/htmx@1` helper module. **Landed v0.2.0 (commit
+      6327efe).** Registered as `hull/web/htmx` after the §1.3 reorg.
+      API: `is(req)`, `boosted(req)`, `redirect`, `retarget`, `reswap`,
+      `trigger`, `location`, `push_url`, `refresh`. Lua + JS parity,
+      unit tests.
+- [x] §1.5.a-2. `hull/middleware/csp@1`. **Landed v0.2.0 (commit
+      38cd508).** Registered as `hull/web/middleware/csp` after the §1.3
+      reorg. `csp.htmx()` + `csp.strict()` factories; per-request nonce
+      via `req.ctx.csp_nonce`. Tests cover both factories.
+- [x] §1.5.a-3. Test helper extension. **Landed.** `cap/test.c:38,71-86`
+      accepts `header_names`/`header_values`; example usage in
+      `examples/hypermedia_todo/tests/test_app.{lua,js}` with
+      `{ headers = { ["hx-request"] = "true" } }`.
+- [x] §1.5.a-4. Vendor HTMX 2.x + Pico v2 classless. **Landed v0.2.0
+      (commit 67c1688).** HTMX v2.0.9 + Pico v2.1.1, SHA-pinned via
+      `make fetch-htmx` / `make fetch-pico`.
+- [x] §1.5.a-5. **HTMX scaffolding as a profile.** **Landed v0.2.0
+      (commit 17ed2d1).** `hull init --profile htmx` (Lua + JS) ships
+      manifest cluster + vendored assets + layout template + handler
+      pattern. **Note:** the broader `hull new --type X --profile Y`
+      orthogonal-axis composition described below remained the planned
+      design intent (see "Surfaced 2026-06 by the Trimble HU project"
+      note); verify whether the `--type rest --profile htmx` matrix is
+      actually wired or still pending before considering this fully
+      done. Original spec preserved verbatim:
+
+      **HTMX scaffolding as a profile, composable with every
       existing layout.** Today the scaffold surface is two orthogonal
       axes that don't yet talk to each other: `--type {flat,rest,cli,
       tui}` picks **layout**, and (planned) `--profile htmx` picks the
@@ -754,13 +765,13 @@ and helpers.
       whole structure. The orthogonal-axis design avoids forking
       `--type hypermedia` (and `--type htmx-cli`, `--type htmx-flat`,
       …) just to combine layout × content shape.
-- [ ] §1.5.a-6. `examples/hypermedia_todo` (Lua + JS). Demonstrates the
-      pattern: full-page render on plain GET, fragment render on
-      `HX-Request`, optimistic row replacement, validation errors as a
-      fragment, flash messages (documented OOB pattern; proper module
-      helper lands in §1.4-1), CSRF on htmx requests. Tests for both
-      htmx and plain-form paths.
-- [ ] §1.5.a-7. `docs/htmx.md` pattern guide. Architectural pattern,
+- [x] §1.5.a-6. `examples/hypermedia_todo`. **Landed v0.2.0 (commit
+      d30123f).** Both Lua + JS variants. Demonstrates full-page +
+      fragment paths, optimistic row replacement, validation-error
+      fragment, flash messages (now via `hull/web/flash@1`), CSRF
+      on HTMX requests. Tests for both paths.
+- [x] §1.5.a-7. `docs/htmx.md` pattern guide. **Landed v0.2.0 (commit
+      d2d61a4).** Architectural pattern,
       response-header helpers, CSP nonce integration, CSRF on htmx
       requests, validation errors as fragments, flash messages
       (documented `hx-swap-oob` recipe; promoted to a stdlib module
@@ -2496,41 +2507,43 @@ Only tag clean `v0.1.3` after rc1 is green.
 
 ### Tasks (in dependency order. Mirrors the commit table)
 
-- [ ] `src/hull/platform_sig.{c,h}`. Manifest builder + signer +
-      verifier + `extract_for_arch` helper. Unit tests including
-      mismatch + tamper cases. **[C1]**
-- [ ] `release.yml` reorg: `build-platform` matrix +
+- [x] `src/hull/platform_sig.{c,h}`. **Landed v0.1.3 (commit 88848da).**
+      Manifest builder + signer + verifier + `extract_for_arch` helper.
+      Unit tests including mismatch + tamper cases. **[C1]**
+- [x] `release.yml` reorg: `build-platform` matrix +
       `sign-platform-manifest` job + dependency on
       `build-native`/`build-cosmo` jobs + bootstrap check on
-      `HULL_PLATFORM_KEY` presence. Generates
-      `embedded_platform_sig.h` + `embedded_platform_hashes.h`. **[C2]**
-- [ ] `--no-verify-platform` flag on `hull build` + runtime.
+      `HULL_PLATFORM_KEY` presence. **Landed v0.1.3 (commit 9284aea).**
+      Generates `embedded_platform_sig.h` + `embedded_platform_hashes.h`. **[C2]**
+- [x] `--no-verify-platform` flag on `hull build` + runtime.
       `tool.platform_sig_get()` Lua binding + `build.lua`
-      integration writing `package.sig.platform` with the verified
-      `(manifest + sig + arch_hash)`. **[C3]**
-- [ ] `hull verify` + `--verify-sig` runtime enforcement;
-      hard-reject paths with the documented error messages.
-      E2E test: build app, mutate embedded `.a` bytes, expect
-      verify fails non-zero with specific message. **[C4]**
-- [ ] Restore real `HL_PLATFORM_PUBKEY_HEX` (revert the v0.1.1
-      placeholder's hex value; keep the `#ifndef` guard). Update
-      `test_signature.c` to support `platform_kind` param so the
-      verify_startup unit test can emit `platform: null`. Update
-      `e2e_build.sh` Step 14 to add `--no-verify-platform` for the
-      developer-signed app path. **[C5]**
-- [ ] Audit pass (mirror v0.1.2): OOB defense on
-      `hl_platform_sig_extract_for_arch`, constant-time SHA-256
-      compare in the cross-check path, fsync/close on any new
-      atomic writes.
-- [ ] Update `docs/security.md §6` to flip "platform layer
-      inactive" → "shipped".
-- [ ] Update `site/index.html` honest-scorecard: move
-      platform-sig bullet from "Not yet" to "Ships".
-- [ ] Update `site/verify.html` fixture with a real v0.1.3
-      example.
-- [ ] Post-release smoke: extend `tests/release_smoke.sh` to run
-      `hull verify` against the published artifacts and confirm
-      the platform layer reports valid.
+      integration writing `package.sig.platform`. **Landed v0.1.3.**
+      Wired through `src/hull/serve.c:401`, `mod_tool.c:972`,
+      `stdlib/cli/lua/hull/build.lua:929,1001`. **[C3]**
+- [x] `hull verify` + `--verify-sig` runtime enforcement.
+      **Landed v0.1.3 (commit 39602e1).** Hard-reject paths with the
+      documented error messages; E2E test mutates embedded `.a` bytes
+      and expects non-zero verify. **[C4]**
+- [x] Restore real `HL_PLATFORM_PUBKEY_HEX`. **Landed v0.1.3 (commit
+      77d68f4).** Reverts the v0.1.1 placeholder; updates
+      `test_signature.c` for the `platform_kind` param;
+      `e2e_build.sh` Step 14 adds `--no-verify-platform` for the
+      developer-signed-app path. **[C5]**
+- [x] Audit pass (mirror v0.1.2). **Landed v0.1.4 (commit 6dfcd47).**
+      Fixes embed drift; adds verify-before-embed + E2E smoke; OOB
+      defense + constant-time SHA-256 compare + fsync/close on the
+      atomic writes audited.
+- [x] Update `docs/security.md §6` flip "platform layer inactive"
+      → "shipped". **Landed v0.1.3 (commit ca7c8ef).** Document now
+      reads "platform layer split into two sub-layers in v0.1.3".
+- [x] Update `site/index.html` honest-scorecard. **Landed v0.1.3.**
+      Scorecard at `site/index.html:1439` reads "Signed platform-sig
+      chain (v0.1.3)".
+- [x] Update `site/verify.html` fixture with a real v0.1.3 example.
+      **Landed v0.1.3 (bundled in ca7c8ef).**
+- [x] Post-release smoke: extend `tests/release_smoke.sh`.
+      **Landed v0.1.3.** Lines 145-184 run `sign-platform` +
+      `build --sign` + verify dance against published artifacts.
 
 ### Out of scope
 
