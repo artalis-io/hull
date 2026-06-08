@@ -770,10 +770,10 @@ static int verify_visit(const char *id, size_t size, void *user)
             bad = 1; why = "read-failed";
         } else {
             uint8_t digest[32];
-            char    digest_hex[HL_BLOB_STORE_ID_BUF_SIZE];
             if (hl_cap_crypto_sha256(bytes, len, digest) != 0) {
                 bad = 1; why = "sha-failed";
             } else {
+                char digest_hex[HL_BLOB_STORE_ID_BUF_SIZE];
                 hl_runtime_cache_hex_encode(digest, 32, digest_hex);
                 if (memcmp(digest_hex, id, 64) != 0) {
                     bad = 1; why = "sha-mismatch";

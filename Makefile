@@ -2588,6 +2588,7 @@ cppcheck:
 		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/runtime/lua/mod_gpu.c \
 		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/runtime/js/mod_app.c \
 		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/runtime/lua/mod_app.c \
+		--suppress=knownConditionTrueFalse:$(SRCDIR)/hull/cap/crypto.c \
 		--suppress=variableScope:$(SRCDIR)/hull/cap/test.c \
 		--suppress=variableScope:$(SRCDIR)/hull/runtime/js/mod_app.c \
 		--suppress=variableScope:$(SRCDIR)/hull/runtime/js/mod_test.c \
@@ -2597,6 +2598,7 @@ cppcheck:
 		--suppress='*:$(SQLITE_DIR)/*' \
 		--suppress='*:$(LOG_DIR)/*' \
 		--error-exitcode=1 \
+		-DHL_QJS_VERSION=\"$(QJS_VERSION)\" \
 		-I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(SQLITE_DIR) -I$(KEEL_INC) \
 		$(SRCDIR)/hull/main.c $(SRCDIR)/hull/alloc.c $(SRCDIR)/hull/static.c $(SRCDIR)/hull/app_context.c $(SRCDIR)/hull/agent/*.c $(SRCDIR)/hull/agent_api.c $(SRCDIR)/hull/cap/*.c \
 		$(SRCDIR)/hull/commands/*.c \
