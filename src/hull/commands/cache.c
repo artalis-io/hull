@@ -164,25 +164,19 @@ static uint64_t parse_size(const char *s, const char **err)
     return (uint64_t)v * mult;
 }
 
-/* Build the HULL_NO_<KIND>_CACHE env-var name for a registry
- * entry. Mirrors the composition rule in cache_dir.c's
- * hl_hull_cache_disabled. Returns an empty string for system
- * stores (env_kind == NULL — no per-cache opt-out applies). */
+/* Build the HULL_NO_<KIND>_CACHE env-var name for a registry entry.
+ * Returns an empty string for system stores (env_kind == NULL — no
+ * per-cache opt-out applies). Forwarding wrapper around the
+ * canonical composer in cache_dir.h. */
 static void env_var_for(const HlCacheKind *kind, char *out, size_t out_sz)
 {
-    if (!kind->env_kind) { out[0] = '\0'; return; }
-    size_t pre = strlen("HULL_NO_");
-    size_t suf = strlen("_CACHE");
-    size_t kl  = strlen(kind->env_kind);
-    if (pre + kl + suf + 1 > out_sz) { out[0] = '\0'; return; }
-    memcpy(out, "HULL_NO_", pre);
-    for (size_t j = 0; j < kl; j++) {
-        char c = kind->env_kind[j];
-        if (c >= 'a' && c <= 'z') c = (char)(c - 32);
-        out[pre + j] = c;
+    if (!kind->env_kind || out_sz == 0) {
+        if (out_sz > 0) out[0] = '\0';
+        return;
     }
-    memcpy(out + pre + kl, "_CACHE", suf);
-    out[pre + kl + suf] = '\0';
+    if (hl_hull_cache_env_name(kind->env_kind, out, out_sz) != 0) {
+        out[0] = '\0';
+    }
 }
 
 /* Try to open the blob store for `kind`. Returns NULL silently if

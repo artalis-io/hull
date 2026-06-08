@@ -77,10 +77,24 @@ static int compute_key(const char *src, size_t src_len,
 static HlBlobStore *bc_store = NULL;
 static int          bc_store_failed = 0;
 
+static void atexit_close_store(void)
+{
+    /* Free the open handle + close the underlying file descriptors
+     * on process exit. The kernel reclaims fds either way; the
+     * value is cleanly-zero leak reports under ASan/valgrind. */
+    hl_runtime_cache_singleton_reset(&bc_store, &bc_store_failed);
+}
+
 static HlBlobStore *get_store(void)
 {
-    return hl_runtime_cache_singleton(BC_STORE_KIND,
-                                      &bc_store, &bc_store_failed);
+    static int atexit_registered = 0;
+    HlBlobStore *s = hl_runtime_cache_singleton(BC_STORE_KIND,
+                                                 &bc_store, &bc_store_failed);
+    if (s && !atexit_registered) {
+        atexit_registered = 1;
+        atexit(atexit_close_store);
+    }
+    return s;
 }
 
 void hl_lua_bytecode_cache_reset(void)

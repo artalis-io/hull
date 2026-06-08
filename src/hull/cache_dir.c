@@ -173,24 +173,36 @@ static int env_truthy(const char *name)
     return 1;
 }
 
+int hl_hull_cache_env_name(const char *kind, char *out, size_t out_sz)
+{
+    if (!kind || !out) return -1;
+    size_t prefix_len = strlen("HULL_NO_");
+    size_t suffix_len = strlen("_CACHE");
+    size_t kind_len   = strlen(kind);
+    if (kind_len == 0) return -1;
+    if (prefix_len + kind_len + suffix_len + 1 > out_sz) return -1;
+
+    memcpy(out, "HULL_NO_", prefix_len);
+    for (size_t j = 0; j < kind_len; j++) {
+        char c = kind[j];
+        if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+        out[prefix_len + j] = c;
+    }
+    memcpy(out + prefix_len + kind_len, "_CACHE", suffix_len);
+    out[prefix_len + kind_len + suffix_len] = '\0';
+    return 0;
+}
+
 int hl_hull_cache_disabled(const char *kind)
 {
     if (env_truthy("HULL_NO_CACHE")) return 1;
     if (!kind) return 0;
 
-    /* Build `HULL_NO_<KIND>_CACHE`, uppercasing `kind`. */
     char env_name[64];
-    size_t prefix_len = strlen("HULL_NO_");
-    size_t suffix_len = strlen("_CACHE");
-    size_t kind_len   = strlen(kind);
-    if (prefix_len + kind_len + suffix_len + 1 > sizeof(env_name)) return 0;
-    memcpy(env_name, "HULL_NO_", prefix_len);
-    for (size_t j = 0; j < kind_len; j++) {
-        char c = kind[j];
-        if (c >= 'a' && c <= 'z') c = (char)(c - 32);
-        env_name[prefix_len + j] = c;
+    if (hl_hull_cache_env_name(kind, env_name, sizeof(env_name)) != 0) {
+        /* Kind name too long to fit the buffer — fail open (cache
+         * stays active). Mirrors the previous inline behaviour. */
+        return 0;
     }
-    memcpy(env_name + prefix_len + kind_len, "_CACHE", suffix_len);
-    env_name[prefix_len + kind_len + suffix_len] = '\0';
     return env_truthy(env_name);
 }

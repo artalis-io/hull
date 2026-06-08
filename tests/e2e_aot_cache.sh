@@ -103,6 +103,16 @@ echo "$OUT3" | grep -q "\[cache hit\]" \
     && fail "HULL_NO_AOT_CACHE should disable lookups too" \
     || pass "HULL_NO_AOT_CACHE skipped cache lookups"
 
+# Diagnostic: when env disables the cache (but user didn't pass
+# --no-cache), build prints a one-line note so the operator can
+# trace the slowdown.
+echo "$OUT3" | grep -q "AOT cache disabled via HULL_NO_CACHE" \
+    && pass "HULL_NO_AOT_CACHE surfaces actionable diagnostic" \
+    || fail "diagnostic line missing under HULL_NO_AOT_CACHE"
+
+# Counter-case: --no-cache (user intent, not env) must NOT print
+# the env-disabled diagnostic — it's the wrong message.
+
 # ── 4. --no-cache CLI flag bypasses the cache ────────────────────
 wipe_cache
 OUT4=$("$HULL" build "$APP_DIR" --output "$OUT/app4" --runtime lua \
@@ -110,6 +120,12 @@ OUT4=$("$HULL" build "$APP_DIR" --output "$OUT/app4" --runtime lua \
 N4=$(count_cache)
 [ "$N4" = "0" ] && pass "--no-cache skipped writes" \
                 || fail "--no-cache write count" "got $N4, want 0"
+# Counter-case: --no-cache means opts.cache=false, so the env-var
+# diagnostic must NOT fire (would be the wrong message — the user
+# already knows why the cache is off; they typed the flag).
+echo "$OUT4" | grep -q "AOT cache disabled via HULL_NO_CACHE" \
+    && fail "--no-cache wrongly prints env-disabled diagnostic" \
+    || pass "--no-cache stays silent (correct: user typed the flag)"
 
 # ── 5. HULL_NO_CACHE=1 global kill-switch ────────────────────────
 wipe_cache

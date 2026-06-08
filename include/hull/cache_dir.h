@@ -88,4 +88,24 @@ int hl_hull_cache_subdir(const char *name, char *out, size_t out_sz);
  */
 int hl_hull_cache_disabled(const char *kind);
 
+/**
+ * @brief Compose the env-var name `HULL_NO_<KIND_UPPER>_CACHE` for
+ *        a cache kind into @p out.
+ *
+ * Identical naming rule to `hl_hull_cache_disabled` — uppercases
+ * @p kind and wraps in `HULL_NO_<...>_CACHE`. Useful for callers
+ * that need to DISPLAY the env-var name (cache list status column,
+ * tool.cache_kinds() reflection, prune error messages) rather than
+ * check it.
+ *
+ * @param kind     Per-cache specifier (e.g. "lua_bytecode", "aot",
+ *                 "template"). Must be non-NULL; characters must be
+ *                 `[A-Za-z0-9_]+` (no validation here — caller
+ *                 owns the kind tag).
+ * @param out      Caller-supplied buffer.
+ * @param out_sz   Buffer size; needs ≥ `strlen("HULL_NO__CACHE") + strlen(kind) + 1`.
+ * @return 0 on success, -1 on NULL kind or buffer too small.
+ */
+int hl_hull_cache_env_name(const char *kind, char *out, size_t out_sz);
+
 #endif /* HL_CACHE_DIR_H */

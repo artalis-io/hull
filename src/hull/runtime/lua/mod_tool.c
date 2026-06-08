@@ -765,23 +765,13 @@ static int l_tool_cache_kinds(lua_State *L)
             lua_pushstring(L, "");
         lua_setfield(L, -2, "path");
 
-        /* Build the env-var name from env_kind, mirroring
-         * cache_dir.c's hl_hull_cache_disabled composition.
-         * NULL env_kind → system store (no per-cache opt-out). */
+        /* Surface the env-var name via the canonical composer in
+         * cache_dir.h. NULL env_kind → system store (no per-cache
+         * opt-out applies; emit empty string). */
         if (k->env_kind) {
             char env_name[64];
-            size_t pre = strlen("HULL_NO_");
-            size_t suf = strlen("_CACHE");
-            size_t kl  = strlen(k->env_kind);
-            if (pre + kl + suf + 1 <= sizeof(env_name)) {
-                memcpy(env_name, "HULL_NO_", pre);
-                for (size_t j = 0; j < kl; j++) {
-                    char c = k->env_kind[j];
-                    if (c >= 'a' && c <= 'z') c = (char)(c - 32);
-                    env_name[pre + j] = c;
-                }
-                memcpy(env_name + pre + kl, "_CACHE", suf);
-                env_name[pre + kl + suf] = '\0';
+            if (hl_hull_cache_env_name(k->env_kind,
+                                       env_name, sizeof(env_name)) == 0) {
                 lua_pushstring(L, env_name);
             } else {
                 lua_pushstring(L, "");

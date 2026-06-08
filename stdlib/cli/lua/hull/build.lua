@@ -714,7 +714,17 @@ typedef struct {
             if #targets > 0 then
                 local aot_cache = require("hull.aot_cache")
                 local wamrc_id = aot_cache.wamrc_version(wamrc)
+                -- Disambiguate the two reasons the cache might be off:
+                -- the user passed --no-cache (opts.cache == false) vs
+                -- an env var (HULL_NO_CACHE / HULL_NO_AOT_CACHE). A silent
+                -- flag collapse hides "you set HULL_NO_AOT_CACHE=1 in your
+                -- shell three months ago and forgot" from CI users
+                -- debugging slow builds.
                 local cache_enabled = opts.cache and aot_cache.is_enabled()
+                if opts.cache and not aot_cache.is_enabled() then
+                    print("hull build: AOT cache disabled via " ..
+                          "HULL_NO_CACHE / HULL_NO_AOT_CACHE")
+                end
                 local cache_hits = 0
                 local cache_writes = 0
 
