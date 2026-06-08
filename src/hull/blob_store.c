@@ -30,11 +30,22 @@
 #include <unistd.h>
 
 /* O_NOATIME: Linux-only flag that suppresses atime updates on read.
- * No-op elsewhere — macOS, BSDs, and Cosmo all lack it; reader_open
- * then relies on the kernel's mount-time atime policy (relatime by
- * default on modern distros, no-op on macOS, etc.). */
-#ifndef O_NOATIME
-#define O_NOATIME 0
+ * glibc only exposes the symbol when _GNU_SOURCE is defined; the
+ * rest of the codebase compiles with _DEFAULT_SOURCE only, so on
+ * Linux we hardcode the kernel constant directly rather than
+ * conditionally widening the feature-test surface for the whole
+ * translation unit. Value verified stable across all Linux archs
+ * (asm-generic/fcntl.h: 01000000 octal = 0x40000 hex). On macOS,
+ * BSDs, and Cosmo there is no equivalent — define to 0 so it's a
+ * no-op in the open() flags. */
+#if defined(__linux__)
+#  ifndef O_NOATIME
+#    define O_NOATIME 01000000
+#  endif
+#else
+#  ifndef O_NOATIME
+#    define O_NOATIME 0
+#  endif
 #endif
 
 #define HL_BLOB_STORE_TMP_PREFIX      ".blob-"
