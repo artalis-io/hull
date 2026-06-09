@@ -94,6 +94,10 @@ int hl_js_register_modules(HlJS *js)
     if (hl_js_init_blob_module(js->ctx, js) != 0)
         return -1;
 
+    /* Register hull:mime module — pure utility, always available */
+    if (hl_js_init_mime_module(js->ctx, js) != 0)
+        return -1;
+
     /* Register hull:image module — always available */
     if (hl_js_init_image_module(js->ctx, js) != 0)
         return -1;

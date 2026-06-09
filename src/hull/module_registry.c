@@ -46,6 +46,19 @@ static const HlModuleSpec REGISTRY[] = {
 
     /* ── C-native side-effect modules + cross-cutting utilities ───── */
     {
+        /* Attachment storage: content-addressed disk via hull/blob,
+         * metadata + dedup-by-refcount via hull/db. Flat top-level
+         * (not under hull/web/) — the core API (store/read/metadata/
+         * delete) is FS+DB only and works in CLI tools. The web-
+         * specific auth-gated serve(req, res, id) lives in a separate
+         * hull/web/attachment-serve@1 module. */
+        .name = "hull/attachment",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = 0,
+        .deps = {"hull/blob", "hull/crypto", "hull/db",
+                 "hull/mime", "hull/time", 0},
+    },
+    {
         /* Content-addressed blob storage. Caller declares a fs.write
          * path; blob.init() validates against it. No SQLite dep —
          * works under HL_ENABLE_DB=0 (compute-only builds). */
@@ -173,6 +186,15 @@ static const HlModuleSpec REGISTRY[] = {
          * intrinsic at the C level. */
         .name = "hull/log",
         .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = 0, .deps = {0},
+    },
+    {
+        /* Content-MIME sniffer. Thin binding around hl_cap_mime_sniff:
+         * mime.sniff(bytes) returns the sniffed MIME string or nil.
+         * Pure — no fs/network/db access — usable in CLI tools as
+         * well as servers. */
+        .name = "hull/mime",
+        .api_major = 1, .intrinsic = 0, .pure = 1,
         .required_caps = 0, .deps = {0},
     },
 

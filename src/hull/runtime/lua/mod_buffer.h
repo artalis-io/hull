@@ -66,6 +66,7 @@ int luaopen_hull_server(lua_State *L);
 int luaopen_hull_fs(lua_State *L);
 int luaopen_hull_image(lua_State *L);
 int luaopen_hull_blob(lua_State *L);
+int luaopen_hull_mime(lua_State *L);
 
 #ifdef HL_ENABLE_WASM
 int luaopen_hull_compute(lua_State *L);

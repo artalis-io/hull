@@ -82,6 +82,7 @@ int hl_js_init_worker_module(JSContext *ctx, HlJS *js);
 int hl_js_init_server_module(JSContext *ctx, HlJS *js);
 int hl_js_init_fs_module(JSContext *ctx, HlJS *js);
 int hl_js_init_blob_module(JSContext *ctx, HlJS *js);
+int hl_js_init_mime_module(JSContext *ctx, HlJS *js);
 int hl_js_init_image_module(JSContext *ctx, HlJS *js);
 
 #ifdef HL_ENABLE_WASM
