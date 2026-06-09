@@ -493,14 +493,16 @@ run_multipart_tests() {
     # writes a 500. We just check the status code via -w because the
     # body is intentionally not structured JSON in this case.
     #
-    # `|| echo 000` absorbs curl exit 55 ("Send failure: Broken pipe")
-    # — the server may close the connection mid-upload faster than curl
-    # can finish sending, which exits curl non-zero with no http_code
-    # written. That timing race is itself proof the cap fired server-
-    # side, so we treat it as a pass.
+    # The server may close the connection mid-upload faster than curl
+    # can finish sending, which exits curl non-zero with no usable
+    # http_code (curl may have already emitted "100" for an interim
+    # Continue response). Two-step assign-with-fallback is the right
+    # idiom: STATUS=stdout on success, "000" on curl error. Earlier
+    # version used `|| echo 000` inside the subshell which APPENDED
+    # to partial output → STATUS="100000" → case didn't match.
     STATUS=$(curl -sS -o /dev/null -w '%{http_code}' \
         -X POST "http://127.0.0.1:$PORT/upload-tiny" \
-        -F "f=@$TMPDIR_WORK/medium.bin" 2>/dev/null || echo 000)
+        -F "f=@$TMPDIR_WORK/medium.bin" 2>/dev/null) || STATUS=000
     case "$STATUS" in
         5*)   pass "$LABEL max-part-size enforced (got $STATUS)" ;;
         4*)   pass "$LABEL max-part-size enforced (got $STATUS)" ;;
