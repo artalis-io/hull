@@ -45,6 +45,93 @@ static JSValue js_mmap_get_length(JSContext *ctx, JSValueConst this_val,
     return JS_NewInt64(ctx, (int64_t)buf->len);
 }
 
+/* fs.read(path) — returns an ArrayBuffer with the whole file contents.
+ * Two-pass: first call hl_cap_fs_read with buf=NULL to learn the size,
+ * then allocate + read. Throws on error to match Hull JS conventions
+ * (callers can try/catch). */
+static JSValue js_fs_read(JSContext *ctx, JSValueConst this_val,
+                          int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->base.fs_cfg)
+        return JS_ThrowInternalError(ctx,
+            "fs.read: not available (declare fs.read in manifest)");
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "fs.read requires (path)");
+
+    const char *path = JS_ToCString(ctx, argv[0]);
+    if (!path) return JS_EXCEPTION;
+
+    const char *err_msg = NULL;
+    int64_t size = hl_cap_fs_read(js->base.fs_cfg, path, NULL, 0, &err_msg);
+    if (size < 0) {
+        JSValue exc = JS_ThrowInternalError(ctx, "fs.read: %s",
+                                             err_msg ? err_msg : "read_failed");
+        JS_FreeCString(ctx, path);
+        return exc;
+    }
+    if (size == 0) {
+        JS_FreeCString(ctx, path);
+        return JS_NewArrayBufferCopy(ctx, (const uint8_t *)"", 0);
+    }
+
+    uint8_t *buf = hl_alloc_malloc(js->base.alloc, (size_t)size);
+    if (!buf) {
+        JS_FreeCString(ctx, path);
+        return JS_ThrowOutOfMemory(ctx);
+    }
+    int64_t got = hl_cap_fs_read(js->base.fs_cfg, path,
+                                  (char *)buf, (size_t)size, &err_msg);
+    if (got < 0) {
+        JSValue exc = JS_ThrowInternalError(ctx, "fs.read: %s",
+                                             err_msg ? err_msg : "read_failed");
+        hl_alloc_free(js->base.alloc, buf, (size_t)size);
+        JS_FreeCString(ctx, path);
+        return exc;
+    }
+    JSValue ab = JS_NewArrayBufferCopy(ctx, buf, (size_t)got);
+    hl_alloc_free(js->base.alloc, buf, (size_t)size);
+    JS_FreeCString(ctx, path);
+    return ab;
+}
+
+/* fs.write(path, bytes) — accepts ArrayBuffer / TypedArray / string.
+ * Throws on error; returns true on success. */
+static JSValue js_fs_write(JSContext *ctx, JSValueConst this_val,
+                           int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->base.fs_cfg)
+        return JS_ThrowInternalError(ctx,
+            "fs.write: not available (declare fs.write in manifest)");
+    if (argc < 2)
+        return JS_ThrowTypeError(ctx, "fs.write requires (path, bytes)");
+
+    const char *path = JS_ToCString(ctx, argv[0]);
+    if (!path) return JS_EXCEPTION;
+
+    HlBufferView view = {0};
+    const char *str = NULL;
+    int needs_free = 0;
+    if (!js_get_buffer(ctx, argv[1], &view, &str, &needs_free)) {
+        JS_FreeCString(ctx, path);
+        return JS_ThrowTypeError(ctx,
+            "fs.write: bytes must be an ArrayBuffer, TypedArray, or string");
+    }
+
+    const char *err_msg = NULL;
+    int rc = hl_cap_fs_write(js->base.fs_cfg, path,
+                              (const char *)view.data, view.len, &err_msg);
+    if (needs_free && str) JS_FreeCString(ctx, str);
+    JS_FreeCString(ctx, path);
+    if (rc != 0)
+        return JS_ThrowInternalError(ctx, "fs.write: %s",
+                                     err_msg ? err_msg : "write_failed");
+    return JS_TRUE;
+}
+
 static JSValue js_fs_mmap(JSContext *ctx, JSValueConst this_val,
                           int argc, JSValueConst *argv)
 {
@@ -82,6 +169,10 @@ static int js_fs_module_init(JSContext *ctx, JSModuleDef *m)
     if (hl_js_check_module_declared(ctx, "hull/fs", "hull:fs") != 0) return -1;
 
     JSValue fs = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, fs, "read",
+                      JS_NewCFunction(ctx, js_fs_read, "read", 1));
+    JS_SetPropertyStr(ctx, fs, "write",
+                      JS_NewCFunction(ctx, js_fs_write, "write", 2));
     JS_SetPropertyStr(ctx, fs, "mmap",
                       JS_NewCFunction(ctx, js_fs_mmap, "mmap", 1));
     JS_SetModuleExport(ctx, m, "fs", fs);

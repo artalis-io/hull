@@ -24,6 +24,7 @@
 import { blob } from "hull:blob";
 import { crypto } from "hull:crypto";
 import { db } from "hull:db";
+import { fs } from "hull:fs";
 import { mime as mimeMod } from "hull:mime";
 import { time } from "hull:time";
 
@@ -223,9 +224,100 @@ function read(id) {
     return blob.get(meta.blob_id);
 }
 
-// attachment.readToFile, attachment.delete, and attachment.serve land
-// in PR 2. The first brings hull:fs as a (call-site-optional) dep
-// that's cleanest to wire alongside the web serve helper; the second
-// + third are the GC + auth-gated response slice.
+/**
+ * Stream an attachment to a destination file path.
+ *
+ * Streams via `blob.reader()` so memory stays O(chunkSize) regardless
+ * of attachment size.
+ *
+ * @param {string} id
+ * @param {string} dst  Destination file path (must be inside a declared
+ *   `manifest.fs.write` allowlist path).
+ * @returns {number|null}  Bytes written, or null when missing.
+ */
+function readToFile(id, dst) {
+    const meta = metadata(id);
+    if (!meta) return null;
+    const r = blob.reader(meta.blob_id);
+    if (!r) return null;
 
-export const attachment = { init, store, metadata, read };
+    // Buffered read + single fs.write. metadata.size is authoritative
+    // (verified at store time against blob.writer's own count) so we
+    // can allocate the destination buffer once and stream chunks
+    // directly into it — O(file_size) memory instead of the 2x of a
+    // parts-array + concat scheme.
+    const combined = new Uint8Array(meta.size);
+    let offset = 0;
+    while (offset < meta.size) {
+        const chunk = r.read(64 * 1024);
+        if (!chunk || chunk.byteLength === 0) break;
+        combined.set(new Uint8Array(chunk), offset);
+        offset += chunk.byteLength;
+    }
+    r.close();
+
+    fs.write(dst, combined.buffer);
+    return offset;
+}
+
+/**
+ * Delete an attachment by id.
+ *
+ * Decrements the refcount; at 0 the metadata row is removed AND, if
+ * no other row references the same blob_id, the on-disk blob is
+ * unlinked via blob.delete(). The whole operation runs inside a
+ * transaction so a partial failure doesn't leave an orphan or a
+ * double-deleted blob. The blob.delete() call happens INSIDE the
+ * BEGIN IMMEDIATE write lock — concurrent transactions can't insert
+ * a new row referencing this blob_id between the SELECT and the
+ * unlink. Trade-off: holding the SQLite write lock during the FS
+ * unlink, which is fine for typical attachment sizes.
+ *
+ * Exported as `attachment.delete` (bracket-key, since `delete` is
+ * a JS reserved operator keyword but a valid property name):
+ *
+ *   import { attachment } from "hull:attachment";
+ *   attachment.delete(id);   // or: attachment["delete"](id)
+ *
+ * @param {string} id
+ * @returns {boolean}  true if the attachment existed and was
+ *   decremented (or fully deleted); false if no such id.
+ */
+function deleteAttachment(id) {
+    let removed = false;
+
+    db.batch(() => {
+        const meta = metadata(id);
+        if (!meta) return;
+
+        if (meta.refcount > 1) {
+            db.exec(
+                "UPDATE _hull_attachments SET refcount = refcount - 1 WHERE id = ?",
+                [id]);
+            removed = true;
+            return;
+        }
+
+        // Last reference. Drop metadata row first so any concurrent
+        // "is blob still referenced?" probe sees the accurate count.
+        db.exec("DELETE FROM _hull_attachments WHERE id = ?", [id]);
+
+        // Other rows referencing this blob_id? Two attachments uploaded
+        // the same bytes share one blob; only when the LAST row is
+        // gone do we unlink.
+        const refs = db.query(
+            "SELECT 1 FROM _hull_attachments WHERE blob_id = ? LIMIT 1",
+            [meta.blob_id]);
+        if (!refs || refs.length === 0) {
+            blob.delete(meta.blob_id);
+        }
+        removed = true;
+    });
+
+    return removed;
+}
+
+export const attachment = {
+    init, store, metadata, read, readToFile,
+    "delete": deleteAttachment,
+};

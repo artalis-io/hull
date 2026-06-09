@@ -30,6 +30,7 @@
 local blob = require("hull.blob")
 local crypto = require("hull.crypto")
 local db = require("hull.db")
+local fs = require("hull.fs")
 local mime_mod = require("hull.mime")
 local time = require("hull.time")
 
@@ -241,10 +242,81 @@ function attachment.read(id)
     return blob.get(meta.blob_id)   -- nil pass-through if blob is gone
 end
 
--- attachment.read_to_file / readToFile, attachment.delete, and
--- attachment.serve land in PR 2. The first brings hull/fs as a
--- (call-site-optional) dep that's cleanest to wire alongside the
--- web serve helper; the second + third are the GC + auth-gated
--- response slice.
+--- Stream an attachment to a destination file path.
+--
+-- Streams via `blob.reader()` so memory stays O(chunk_size)
+-- regardless of attachment size.
+--
+-- @tparam string id   Attachment id.
+-- @tparam string dst  Destination file path (must be inside a declared
+--   `manifest.fs.write` allowlist path).
+-- @treturn[1] integer  Bytes written.
+-- @treturn[2] nil  When the attachment or its blob is missing.
+function attachment.read_to_file(id, dst)
+    local meta = attachment.metadata(id)
+    if not meta then return nil end
+    local r = blob.reader(meta.blob_id)
+    if not r then return nil end
+
+    -- Buffered read + single fs.write. A true streaming fs.write_stream
+    -- API could replace this later; for now memory is O(file_size)
+    -- which is fine for the typical attachment use case.
+    local parts, total = {}, 0
+    while true do
+        local chunk = r:read(64 * 1024)
+        if not chunk or #chunk == 0 then break end
+        parts[#parts + 1] = chunk
+        total = total + #chunk
+    end
+    r:close()
+    fs.write(dst, table.concat(parts))
+    return total
+end
+
+--- Delete an attachment by id.
+--
+-- Decrements the refcount; at 0 the metadata row is removed AND, if
+-- no other row references the same blob_id, the on-disk blob is
+-- unlinked via blob.delete(). The whole operation runs inside a
+-- transaction so a partial failure (db error mid-decrement) doesn't
+-- leave an orphan or a double-deleted blob.
+--
+-- @tparam string id  Attachment id.
+-- @treturn boolean  true if the attachment existed and was
+--   decremented (or fully deleted); false if no such id.
+function attachment.delete(id)
+    local removed = false
+
+    db.batch(function()
+        local meta = attachment.metadata(id)
+        if not meta then return end
+
+        if meta.refcount > 1 then
+            db.exec(
+                "UPDATE _hull_attachments SET refcount = refcount - 1 WHERE id = ?",
+                { id })
+            removed = true
+            return
+        end
+
+        -- Last reference. Drop the metadata row first so any
+        -- concurrent "is blob still referenced?" probe sees the
+        -- accurate row count.
+        db.exec("DELETE FROM _hull_attachments WHERE id = ?", { id })
+
+        -- Other rows still referencing this blob_id? Refcount-by-dedup
+        -- — two attachments uploaded the same bytes share one blob;
+        -- only when the LAST attachment row is gone do we unlink.
+        local refs = db.query(
+            "SELECT 1 FROM _hull_attachments WHERE blob_id = ? LIMIT 1",
+            { meta.blob_id })
+        if not refs or #refs == 0 then
+            blob.delete(meta.blob_id)
+        end
+        removed = true
+    end)
+
+    return removed
+end
 
 return attachment

@@ -305,6 +305,29 @@ static int lua_res_text(lua_State *L)
     return 0;
 }
 
+/* res:bytes(string) — binary-safe response primitive.
+ *
+ * Unlike res:text/res:html/res:json, this does NOT set Content-Type
+ * (caller's responsibility; binary content can be anything from
+ * image/png to application/zip to application/octet-stream) and does
+ * NOT route through hl_maybe_compress (Content-Encoding: gzip on
+ * already-compressed payloads is pointless and hides the SHA from
+ * any ETag computed on the response bytes).
+ *
+ * The body is copied into a response-owned buffer via
+ * kl_response_body_copy, so the Lua string can be GC'd safely. Lua
+ * strings are binary-safe (#str gives the byte count), so this is
+ * a true bytes API. */
+static int lua_res_bytes(lua_State *L)
+{
+    KlResponse *res = check_response(L, 1);
+    size_t len;
+    const char *bytes = luaL_checklstring(L, 2, &len);
+    if (kl_response_body_copy(res, bytes, len) != 0)
+        return luaL_error(L, "res:bytes: out of memory");
+    return 0;
+}
+
 /* res:redirect(url, code?) */
 static int lua_res_redirect(lua_State *L)
 {
@@ -328,6 +351,7 @@ static const luaL_Reg response_methods[] = {
     {"json",     lua_res_json},
     {"html",     lua_res_html},
     {"text",     lua_res_text},
+    {"bytes",    lua_res_bytes},
     {"redirect", lua_res_redirect},
     {NULL, NULL}
 };

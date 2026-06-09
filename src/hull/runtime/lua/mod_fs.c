@@ -4,6 +4,7 @@
  */
 
 #include "mod_buffer.h"
+#include "hull/alloc.h"
 #include "hull/cap/fs.h"
 #include "hull/limits/core.h"
 #include "hull/module_registry.h"
@@ -22,8 +23,85 @@
 /* ════════════════════════════════════════════════════════════════════
  * hull.fs module — filesystem capabilities
  *
- * fs.mmap(path) -> MappedBuffer userdata
+ * fs.read(path)        -> string | nil, err  (binary-safe)
+ * fs.write(path, bytes) -> true | nil, err
+ * fs.mmap(path)        -> MappedBuffer userdata
+ *
+ * All three go through hl_cap_fs_* which enforces manifest fs_read /
+ * fs_write allowlists. Paths are relative to the app's base_dir;
+ * absolute paths and `..` traversal are rejected at the cap layer.
  * ════════════════════════════════════════════════════════════════════ */
+
+/* fs.read(path) — returns the whole file contents as a binary-safe
+ * Lua string, or (nil, err). Two-pass: first call hl_cap_fs_read
+ * with buf=NULL to learn the size, then allocate + read. */
+static int lua_fs_read(lua_State *L)
+{
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->base.fs_cfg) {
+        lua_pushnil(L);
+        lua_pushstring(L, "fs.read: not available (declare fs.read in manifest)");
+        return 2;
+    }
+    const char *path = luaL_checkstring(L, 1);
+
+    const char *err_msg = NULL;
+    int64_t size = hl_cap_fs_read(lua->base.fs_cfg, path, NULL, 0, &err_msg);
+    if (size < 0) {
+        lua_pushnil(L);
+        lua_pushstring(L, err_msg ? err_msg : "read_failed");
+        return 2;
+    }
+    if (size == 0) {
+        lua_pushlstring(L, "", 0);
+        return 1;
+    }
+
+    /* Route allocation through the Lua memory tracker so the runtime's
+     * memory cap covers this transient buffer. */
+    uint8_t *buf = hl_alloc_malloc(lua->base.alloc, (size_t)size);
+    if (!buf) {
+        lua_pushnil(L);
+        lua_pushstring(L, "out_of_memory");
+        return 2;
+    }
+    int64_t got = hl_cap_fs_read(lua->base.fs_cfg, path,
+                                  (char *)buf, (size_t)size, &err_msg);
+    if (got < 0) {
+        hl_alloc_free(lua->base.alloc, buf, (size_t)size);
+        lua_pushnil(L);
+        lua_pushstring(L, err_msg ? err_msg : "read_failed");
+        return 2;
+    }
+    lua_pushlstring(L, (const char *)buf, (size_t)got);
+    hl_alloc_free(lua->base.alloc, buf, (size_t)size);
+    return 1;
+}
+
+/* fs.write(path, bytes) — writes bytes to path (binary-safe). Creates
+ * parent dirs as needed. Returns true or (nil, err). */
+static int lua_fs_write(lua_State *L)
+{
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->base.fs_cfg) {
+        lua_pushnil(L);
+        lua_pushstring(L, "fs.write: not available (declare fs.write in manifest)");
+        return 2;
+    }
+    const char *path = luaL_checkstring(L, 1);
+    size_t len;
+    const char *bytes = luaL_checklstring(L, 2, &len);
+
+    const char *err_msg = NULL;
+    int rc = hl_cap_fs_write(lua->base.fs_cfg, path, bytes, len, &err_msg);
+    if (rc != 0) {
+        lua_pushnil(L);
+        lua_pushstring(L, err_msg ? err_msg : "write_failed");
+        return 2;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
 
 static int lua_fs_mmap(lua_State *L)
 {
@@ -124,7 +202,9 @@ static void lua_register_mmap_metatable(lua_State *L)
 }
 
 static const luaL_Reg fs_funcs[] = {
-    {"mmap", lua_fs_mmap},
+    {"read",  lua_fs_read},
+    {"write", lua_fs_write},
+    {"mmap",  lua_fs_mmap},
     {NULL, NULL}
 };
 

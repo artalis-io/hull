@@ -13,6 +13,7 @@
 #include "hull/limits/core.h"
 #include "hull/cap/body.h"
 #include "hull/compress.h"
+#include "mod_buffer.h"  /* js_get_buffer + HlBufferView (for res.bytes) */
 #include "internal.h"  /* hl_js_request_install_multipart */
 #include "quickjs.h"
 
@@ -369,6 +370,35 @@ static JSValue js_res_text(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+/* res.bytes(buf) — binary-safe response primitive.
+ *
+ * Accepts an ArrayBuffer, TypedArray, or string. Does NOT set
+ * Content-Type (caller's responsibility — binary content can be
+ * anything) and does NOT route through hl_maybe_compress (avoids
+ * gzipping already-compressed payloads + keeps the response bytes
+ * identical to a downstream SHA / ETag check). The body is copied
+ * into a response-owned buffer so the JS value can be GC'd safely. */
+static JSValue js_res_bytes(JSContext *ctx, JSValueConst this_val,
+                             int argc, JSValueConst *argv)
+{
+    KlResponse *res = get_response(ctx, this_val);
+    if (!res || argc < 1)
+        return JS_EXCEPTION;
+
+    HlBufferView view = {0};
+    const char *str = NULL;
+    int needs_free = 0;
+    if (!js_get_buffer(ctx, argv[0], &view, &str, &needs_free))
+        return JS_ThrowTypeError(ctx,
+            "res.bytes: expected ArrayBuffer, TypedArray, or string");
+
+    int rc = kl_response_body_copy(res, (const char *)view.data, view.len);
+    if (needs_free && str) JS_FreeCString(ctx, str);
+    if (rc != 0)
+        return JS_ThrowInternalError(ctx, "res.bytes: out of memory");
+    return JS_UNDEFINED;
+}
+
 /* res.redirect(url, code?) */
 static JSValue js_res_redirect(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv)
@@ -419,6 +449,8 @@ static int hl_js_ensure_response_class(HlJS *js)
                       JS_NewCFunction(js->ctx, js_res_html, "html", 1));
     JS_SetPropertyStr(js->ctx, proto, "text",
                       JS_NewCFunction(js->ctx, js_res_text, "text", 1));
+    JS_SetPropertyStr(js->ctx, proto, "bytes",
+                      JS_NewCFunction(js->ctx, js_res_bytes, "bytes", 1));
     JS_SetPropertyStr(js->ctx, proto, "redirect",
                       JS_NewCFunction(js->ctx, js_res_redirect, "redirect", 2));
 

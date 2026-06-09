@@ -55,7 +55,9 @@ static const HlModuleSpec REGISTRY[] = {
         .name = "hull/attachment",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = 0,
-        .deps = {"hull/blob", "hull/crypto", "hull/db",
+        /* hull/fs is needed by attachment.read_to_file (PR 2 of
+         * §1.5.b-4) which streams a blob.reader through fs.write. */
+        .deps = {"hull/blob", "hull/crypto", "hull/db", "hull/fs",
                  "hull/mime", "hull/time", 0},
     },
     {
@@ -257,6 +259,17 @@ static const HlModuleSpec REGISTRY[] = {
      * ws-server), flash messages, and the 14 hull/web/middleware
      * entries. Sort note: hull/web/<name> sorts before hull/worker
      * because at position 6 'e' < 'o'. */
+    {
+        /* Auth-gated HTTP response helper for hull/attachment. Thin
+         * web layer: takes (req, res, id, opts) and returns a 4xx
+         * (no auth or missing) or 200 with Content-Type, RFC 5987
+         * Content-Disposition, strong ETag (=blob_id), and If-None-
+         * Match → 304. Default-deny auth_check semantics. */
+        .name = "hull/web/attachment-serve",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = 0,
+        .deps = {"hull/attachment", "hull/blob", "hull/http-server", 0},
+    },
     {
         .name = "hull/web/cookie",
         .api_major = 1, .intrinsic = 0, .pure = 1,
