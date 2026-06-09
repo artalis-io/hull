@@ -35,8 +35,16 @@ int js_get_buffer(JSContext *ctx, JSValueConst val,
     *str_needs_free = 0;
     *str_out = NULL;
 
+    /* Probe each opaque type via JS_GetOpaque (non-throwing). The
+     * throwing variant JS_GetOpaque2 sets a TypeError in the ctx on
+     * every mismatch — for a multi-type probe like this one we'd
+     * leak a pending exception on every successful "second-choice"
+     * match, which can later confuse callers that test JSValues
+     * against exceptions. JS_GetOpaque just returns NULL on
+     * class-id mismatch. (Caught in c-audit on §1.5.b-4 PR 1.) */
+
     /* MappedBuffer */
-    HlMappedBuffer *mb = JS_GetOpaque2(ctx, val, js_mmap_class_id);
+    HlMappedBuffer *mb = JS_GetOpaque(val, js_mmap_class_id);
     if (mb && !mb->closed) {
         out->data = mb->addr;
         out->len = mb->len;
@@ -45,7 +53,7 @@ int js_get_buffer(JSContext *ctx, JSValueConst val,
 #ifdef HL_ENABLE_WASM
     /* WasmBuffer — js_wasm_buf_class_id is defined in this file */
     {
-        HlWasmBuffer *wb = JS_GetOpaque2(ctx, val, js_wasm_buf_class_id);
+        HlWasmBuffer *wb = JS_GetOpaque(val, js_wasm_buf_class_id);
         if (wb && !wb->closed) {
             out->data = hl_wasm_buffer_data(wb);
             out->len = hl_wasm_buffer_len(wb);
@@ -55,7 +63,7 @@ int js_get_buffer(JSContext *ctx, JSValueConst val,
 #endif
     /* HlImage (pixel data) */
     if (js_image_class_id) {
-        HlImage *img = JS_GetOpaque2(ctx, val, js_image_class_id);
+        HlImage *img = JS_GetOpaque(val, js_image_class_id);
         if (img) {
             out->data = img->pixels;
             out->len = img->pixel_len;

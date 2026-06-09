@@ -52,6 +52,10 @@ local _mime_allowlist = nil    -- nil = any MIME allowed; otherwise set<string>
 --     (default unlimited). Sniffed MIME is checked first; declared
 --     `Content-Type` is recorded separately for audit but NOT trusted
 --     for the allowlist.
+--
+-- Re-init semantics: only options explicitly present in the second
+-- (or later) call are updated; omitted keys preserve their prior
+-- value. Effectively "sticky" — call once with the full config.
 function attachment.init(opts)
     opts = opts or {}
     if opts.max_size ~= nil then
@@ -117,6 +121,15 @@ end
 -- @treturn string  The fresh attachment id (32-char hex).
 -- @error On size cap exceeded, MIME not in allowlist, or part is not
 --   a file upload.
+--
+-- Sniffer note: the MIME type is determined from the FIRST non-empty
+-- chunk only. If the multipart parser delivers the first chunk in
+-- fewer than ~8 bytes (rare in practice), the sniffer may not see
+-- enough magic to identify the format and will fall back to
+-- "application/octet-stream" — which then fails the allowlist if one
+-- is configured. Callers that need bullet-proof sniffing on a very
+-- bursty connection should buffer the first 512 bytes themselves
+-- before constructing a Part-like object.
 function attachment.store(part, opts)
     opts = opts or {}
     assert(part, "attachment.store: part required")
