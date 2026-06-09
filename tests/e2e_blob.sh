@@ -59,7 +59,13 @@ local blob = require("hull.blob")
 app.manifest({
     name = "blob-e2e-lua", version = "0.0.1",
     modules = { "hull/blob@1" },
-    fs = { write = { "data/blobs/" } },
+    -- Declare the parent dir, not data/blobs itself, because Linux
+    -- Landlock unveil rejects paths that don't exist yet — and
+    -- data/blobs is exactly what blob.init is supposed to create.
+    -- data/ exists implicitly under the cwd (we cd into TMPDIR which
+    -- exists), so unveil succeeds; blob.init's mkdir under it is
+    -- still within the write allowlist.
+    fs = { write = { "data/" } },
 })
 
 app.main(function()
@@ -167,7 +173,9 @@ import { blob } from "hull:blob";
 app.manifest({
     name: "blob-e2e-js", version: "0.0.1",
     modules: ["hull/blob@1"],
-    fs: { write: ["data/blobs/"] },
+    // See Lua sibling for the parent-dir rationale: Linux Landlock
+    // unveil rejects paths that don't exist yet.
+    fs: { write: ["data/"] },
 });
 
 app.main(() => {
@@ -282,7 +290,13 @@ local blob = require("hull.blob")
 app.manifest({
     name = "blob-shard2", version = "0.0.1",
     modules = { "hull/blob@1" },
-    fs = { write = { "data/blobs/" } },
+    -- Declare the parent dir, not data/blobs itself, because Linux
+    -- Landlock unveil rejects paths that don't exist yet — and
+    -- data/blobs is exactly what blob.init is supposed to create.
+    -- data/ exists implicitly under the cwd (we cd into TMPDIR which
+    -- exists), so unveil succeeds; blob.init's mkdir under it is
+    -- still within the write allowlist.
+    fs = { write = { "data/" } },
 })
 app.main(function()
     blob.init({ dir = "data/blobs", shard_depth = 2 })
