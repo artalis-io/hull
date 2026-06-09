@@ -120,7 +120,9 @@ end)
 EOF
 
 cd "$TMPDIR"
-LUA_RAW=$($HULL app.lua 2>&1)
+# Both `|| true` are required: hull may exit non-zero (set -e would
+# kill us mid-script otherwise), and grep returns 1 when no matches.
+LUA_RAW=$($HULL app.lua 2>&1) || true
 LUA_OUT=$(printf '%s\n' "$LUA_RAW" | grep -E "^(PUT|GET|STREAM|DUP|COUNT|EXISTS|SIZE|TOTAL|ITER|VERIFIED|AFTER|CLEANUP)") || true
 cd - >/dev/null
 
@@ -220,7 +222,8 @@ app.main(() => {
 EOF
 
 cd "$TMPDIR"
-JS_RAW=$($HULL app.js 2>&1)
+# See Lua sibling for the dual `|| true` rationale.
+JS_RAW=$($HULL app.js 2>&1) || true
 JS_OUT=$(printf '%s\n' "$JS_RAW" | grep -E "(PUT|GET|STREAM|DUP|COUNT|EXISTS|SIZE|TOTAL|ITER|VERIFIED|AFTER|CLEANUP)") || true
 cd - >/dev/null
 
