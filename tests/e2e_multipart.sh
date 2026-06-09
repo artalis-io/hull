@@ -536,7 +536,10 @@ run_multipart_tests() {
     # short first part (under the cap) followed by a part with a very
     # long field name. The cap fires when the parser hits the SECOND
     # part's Content-Disposition line — handler is alive, pcall catches.
-    HUGE_NAME=$(printf 'name_%0.s' {1..50})  # 250+ chars
+    # `{1..50}` brace expansion is a bashism; dash leaves it literal,
+    # which makes HUGE_NAME = "name_" and the headers cap never fires.
+    # `seq` is POSIX and portable across macOS + Ubuntu + Cosmo.
+    HUGE_NAME=$(printf 'name_%.0s' $(seq 1 50))  # 250 chars
     RESP=$(curl --max-time 5 -sS -o /tmp/.mp_resp -w '%{http_code}' \
         -X POST "http://127.0.0.1:$PORT/upload-headers-cap" \
         -F "ok=first" \
