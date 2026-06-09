@@ -64,6 +64,18 @@ jobs:
         timeout-minutes: 2
         run: make e2e
 
+      - name: Blob storage E2E tests
+        timeout-minutes: 2
+        run: make e2e-blob
+
+      - name: Multipart upload E2E tests
+        timeout-minutes: 3
+        run: make e2e-multipart
+
+      - name: Attachment E2E tests
+        timeout-minutes: 2
+        run: make e2e-attachment
+
       - name: Sandbox tests
         timeout-minutes: 2
         run: make e2e-sandbox
@@ -259,6 +271,18 @@ jobs:
       - name: Example E2E tests
         timeout-minutes: 5
         run: make e2e-examples CC=cosmocc
+
+      - name: Blob storage E2E tests
+        timeout-minutes: 2
+        run: make e2e-blob CC=cosmocc
+
+      - name: Multipart upload E2E tests
+        timeout-minutes: 3
+        run: make e2e-multipart CC=cosmocc
+
+      - name: Attachment E2E tests
+        timeout-minutes: 2
+        run: make e2e-attachment CC=cosmocc
 
       - name: Compute E2E tests
         timeout-minutes: 2

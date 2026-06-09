@@ -129,37 +129,55 @@ function attachment.store(part, opts)
     local w = blob.writer()
     local size = 0
     local sniffed = nil
+    local blob_id = nil
 
-    -- Stream the part. Sniff MIME on the first chunk (before commit)
-    -- so we can fail fast — writer:abort() unlinks the temp file.
-    for chunk in part:chunks() do
-        if sniffed == nil and #chunk > 0 then
-            sniffed = mime_mod.sniff(chunk) or "application/octet-stream"
-            if _mime_allowlist and not _mime_allowlist[sniffed] then
-                w:abort()
-                error("attachment.store: MIME not allowed: " .. sniffed)
+    -- Wrap the streaming write + finalize in pcall so ANY error path
+    -- (chunks() raising, sniff() raising, write() raising, size cap,
+    -- MIME allowlist, finalize size mismatch) reliably calls
+    -- writer:abort() — without this, an exception from inside the
+    -- iterator would leak the temp file. We also call blob.delete()
+    -- if finalize already committed the blob before the
+    -- size-mismatch check fires; the blob is content-addressed so
+    -- deletion is safe even on dedup (we just decrement and the
+    -- store handles the actual unlink).
+    local ok, err = pcall(function()
+        for chunk in part:chunks() do
+            if sniffed == nil and #chunk > 0 then
+                sniffed = mime_mod.sniff(chunk) or "application/octet-stream"
+                if _mime_allowlist and not _mime_allowlist[sniffed] then
+                    error("attachment.store: MIME not allowed: " .. sniffed)
+                end
             end
+            size = size + #chunk
+            if _max_size and size > _max_size then
+                error("attachment.store: PART_TOO_LARGE (size " .. size ..
+                      " > max " .. _max_size .. ")")
+            end
+            w:write(chunk)
         end
-        size = size + #chunk
-        if _max_size and size > _max_size then
-            w:abort()
-            error("attachment.store: PART_TOO_LARGE (size " .. size ..
-                  " > max " .. _max_size .. ")")
+
+        -- Empty parts: nothing to sniff; record as octet-stream and
+        -- skip the allowlist (no content to gate).
+        sniffed = sniffed or "application/octet-stream"
+
+        local fid, blob_size = w:finalize()
+        blob_id = fid
+        if blob_size ~= size then
+            error("attachment.store: blob writer size mismatch (" .. blob_size ..
+                  " vs " .. size .. ")")
         end
-        w:write(chunk)
-    end
+    end)
 
-    -- Empty parts have nothing to sniff; record as octet-stream and
-    -- skip the allowlist check (allowlist applies to actual content,
-    -- and 0 bytes has no content to gate).
-    sniffed = sniffed or "application/octet-stream"
-
-    local blob_id, blob_size = w:finalize()
-    -- blob.writer returns the size it wrote — should match our running
-    -- counter unless something went sideways. Cheap sanity check.
-    if blob_size ~= size then
-        error("attachment.store: blob writer size mismatch (" .. blob_size ..
-              " vs " .. size .. ")")
+    if not ok then
+        -- abort() is a no-op after successful finalize, so this is
+        -- safe regardless of which step in the pcall failed. The
+        -- size-mismatch path however IS post-finalize — clean up the
+        -- already-committed blob if we have its id.
+        pcall(function() w:abort() end)
+        if blob_id then
+            pcall(function() blob.delete(blob_id) end)
+        end
+        error(err)
     end
 
     local id = generate_id()
@@ -193,19 +211,21 @@ end
 --- Read an attachment's bytes.
 --
 -- Materialises the whole blob in memory. For large files prefer
--- `attachment.read_to_file` (streams directly to disk) or open a
--- reader via `blob.reader(metadata.blob_id)` and consume chunks.
+-- `attachment.read_to_file` (streams directly to disk; lands in
+-- PR 2) or open a reader via `blob.reader(metadata.blob_id)` and
+-- consume chunks.
 --
 -- @tparam string id  Attachment id.
 -- @treturn[1] string  Raw bytes (binary-safe).
--- @treturn[2] nil, string  `nil` plus error reason on missing id or
---   missing blob.
+-- @treturn[2] nil  When no attachment exists with that id, or the
+--   underlying blob is missing. JS parity: bare nil/null with no
+--   reason (the missing-id-vs-missing-blob distinction isn't
+--   actionable to callers and was an unintended divergence — see
+--   PR 1 audit).
 function attachment.read(id)
     local meta = attachment.metadata(id)
-    if not meta then return nil, "attachment not found" end
-    local bytes = blob.get(meta.blob_id)
-    if not bytes then return nil, "blob not found" end
-    return bytes
+    if not meta then return nil end
+    return blob.get(meta.blob_id)   -- nil pass-through if blob is gone
 end
 
 -- attachment.read_to_file / readToFile, attachment.delete, and

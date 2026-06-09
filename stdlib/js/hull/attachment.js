@@ -114,40 +114,53 @@ async function store(part, opts) {
     const w = blob.writer();
     let size = 0;
     let sniffed = null;
+    let blobId = null;
 
+    // Single try/catch covers chunks() / sniff() / write() / finalize()
+    // / size-mismatch. abort() is a no-op after successful finalize;
+    // if finalize already committed the blob and the size-mismatch
+    // check then fires, also call blob.delete() so the on-disk blob
+    // doesn't become an orphan (no metadata row will ever reference
+    // it because we throw before the INSERT).
     try {
         for await (const chunk of part.chunks()) {
-            const bytes = new Uint8Array(chunk);
-            if (sniffed === null && bytes.length > 0) {
+            const len = chunk.byteLength;
+            if (sniffed === null && len > 0) {
                 sniffed = mimeMod.sniff(chunk) || "application/octet-stream";
                 if (mimeAllowlist && !mimeAllowlist.has(sniffed)) {
-                    w.abort();
                     throw new Error("attachment.store: MIME not allowed: " + sniffed);
                 }
             }
-            size += bytes.length;
+            size += len;
             if (maxSize !== null && size > maxSize) {
-                w.abort();
                 throw new Error("attachment.store: PART_TOO_LARGE (size " +
                                 size + " > max " + maxSize + ")");
             }
             w.write(chunk);
         }
+
+        // Empty parts: nothing to sniff; record as octet-stream and
+        // skip the allowlist (no content to gate).
+        if (sniffed === null) sniffed = "application/octet-stream";
+
+        const fin = w.finalize();
+        blobId = fin.id;
+        if (fin.size !== size) {
+            throw new Error("attachment.store: blob writer size mismatch (" +
+                            fin.size + " vs " + size + ")");
+        }
     } catch (e) {
-        // writer.abort() is idempotent on the JS side — safe to call again.
-        try { w.abort(); } catch (_) { /* already aborted */ }
+        try { w.abort(); } catch (_) { /* idempotent post-finalize */ }
+        if (blobId) {
+            try { blob.delete(blobId); } catch (_) { /* best effort */ }
+        }
         throw e;
     }
 
-    // Empty parts: nothing to sniff; record as octet-stream and skip
-    // the allowlist check (no content to gate).
-    if (sniffed === null) sniffed = "application/octet-stream";
-
-    const { id: blobId, size: blobSize } = w.finalize();
-    if (blobSize !== size) {
-        throw new Error("attachment.store: blob writer size mismatch (" +
-                        blobSize + " vs " + size + ")");
-    }
+    // Preserve nil/undefined-vs-empty-string distinction for
+    // uploaded_by — matches Lua's behaviour (Lua binds the value
+    // directly; nil → SQL NULL, empty string → empty TEXT).
+    const uploadedBy = o.uploadedBy !== undefined ? o.uploadedBy : null;
 
     const id = generateId();
     db.exec(
@@ -156,7 +169,7 @@ async function store(part, opts) {
         " size, uploaded_by, uploaded_at, refcount) " +
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)",
         [id, blobId, part.filename, sniffed, declared,
-         size, o.uploadedBy || null, time.now()]
+         size, uploadedBy, time.now()]
     );
 
     return id;
