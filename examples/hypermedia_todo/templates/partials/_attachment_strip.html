@@ -1,0 +1,17 @@
+<figure class="attachment-strip" id="attachments-{{ t.id }}">
+  {% for a in t.attachments %}
+    <figure class="attachment" id="att-{{ a.id }}">
+      <img src="/todos/{{ t.id }}/photos/{{ a.id }}"
+           alt="{{ a.original_name }}"
+           loading="lazy">
+      <figcaption>
+        <span class="filename" title="{{ a.original_name }}">{{ a.original_name }}</span>
+        <button hx-delete="/todos/{{ t.id }}/photos/{{ a.id }}"
+                hx-target="#att-{{ a.id }}"
+                hx-swap="delete"
+                hx-confirm="Delete this photo?"
+                aria-label="Delete photo">×</button>
+      </figcaption>
+    </figure>
+  {% end %}
+</figure>

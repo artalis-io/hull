@@ -1,22 +1,36 @@
 {% if pagination.show %}
-<nav class="pagination" aria-label="Pagination">
+<nav id="pagination-nav" class="pagination" aria-label="Pagination">
   <ul>
     {% if pagination.has_prev %}
-    <li><a href="{{ pagination.prev }}" rel="prev" aria-label="Previous page">&larr;</a></li>
+    <li><a hx-get="{{ pagination.prev }}"
+           hx-target="#todo-feed"
+           hx-swap="innerHTML"
+           hx-push-url="true"
+           href="{{ pagination.prev }}"
+           rel="prev" aria-label="Previous page">&larr;</a></li>
     {% end %}
     {% for link in pagination.links %}
       {% if link.ellipsis %}
       <li aria-hidden="true">&hellip;</li>
       {% else %}
         {% if link.active %}
-        <li><a href="{{ link.url }}" aria-current="page"><strong>{{ link.page }}</strong></a></li>
+        <li><a aria-current="page" class="active">{{ link.page }}</a></li>
         {% else %}
-        <li><a href="{{ link.url }}">{{ link.page }}</a></li>
+        <li><a hx-get="{{ link.url }}"
+               hx-target="#todo-feed"
+               hx-swap="innerHTML"
+               hx-push-url="true"
+               href="{{ link.url }}">{{ link.page }}</a></li>
         {% end %}
       {% end %}
     {% end %}
     {% if pagination.has_next %}
-    <li><a href="{{ pagination.next }}" rel="next" aria-label="Next page">&rarr;</a></li>
+    <li><a hx-get="{{ pagination.next }}"
+           hx-target="#todo-feed"
+           hx-swap="innerHTML"
+           hx-push-url="true"
+           href="{{ pagination.next }}"
+           rel="next" aria-label="Next page">&rarr;</a></li>
     {% end %}
   </ul>
 </nav>

@@ -1,4 +1,10 @@
 <li id="todo-{{ t.id }}">
+  {# t.done comes back from SQLite as INTEGER 0/1 in Lua; the row
+     hydration helper coerces it to a proper boolean so this template
+     works in both runtimes (Lua treats 0 as truthy — only nil/false
+     are falsy — so a raw `{% if t.done %}` would always render
+     `checked`). The engine doesn't support `==` expressions, so the
+     coercion has to happen in the handler. #}
   <input type="checkbox"
          {% if t.done %}checked{% end %}
          hx-post="/todos/{{ t.id }}/toggle"
@@ -12,5 +18,8 @@
   <button hx-delete="/todos/{{ t.id }}"
           hx-target="#todo-{{ t.id }}"
           hx-swap="delete"
-          hx-confirm="Delete this todo?">×</button>
+          hx-confirm="Delete this todo? (photos will be removed too)">×</button>
+
+  {% include "partials/_attachment_strip.html" %}
+  {% include "partials/_attachment_upload.html" %}
 </li>

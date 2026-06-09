@@ -816,6 +816,199 @@ Same template HTML files work for both runtimes; only the handler module changes
 
 ---
 
+## Photo uploads
+
+Multipart file uploads are the one place where the usual form-encoded
+HTMX pattern needs an extra knob: the form has to send
+`multipart/form-data` (not `application/x-www-form-urlencoded`), and
+the request body is streamed in chunks. Hull's
+[`hull/attachment@1`](attachments.md) module + the
+`hull/web/attachment-serve@1` HTTP helper handle the server side; the
+client side is plain HTMX with one extra attribute.
+
+### Markup
+
+```html
+<form hx-post="/todos/{{ t.id }}/photos"
+      hx-encoding="multipart/form-data"
+      hx-target="#attachments-{{ t.id }}"
+      hx-swap="outerHTML">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <label>
+    Attach photo
+    <input type="file"
+           name="photo"
+           accept="image/png,image/jpeg,image/gif,image/webp"
+           hx-trigger="change"
+           required>
+  </label>
+</form>
+```
+
+Three knobs vs a normal HTMX form:
+
+| Attribute | Why |
+|---|---|
+| `hx-encoding="multipart/form-data"` | Tells HTMX to send `multipart/form-data` instead of the default `application/x-www-form-urlencoded`. Without it, the file's filename + bytes don't make it through. |
+| `hx-trigger="change"` on the `<input type="file">` | Submits as soon as the user picks a file (no separate Submit button needed). Drop this to require an explicit submit. |
+| `accept="image/png,..."` | Native browser file-picker filter. **Not authoritative** — server-side `mime_allowlist` is the real gate (clients can spoof Content-Type). The `accept` is just UX so a phone gallery doesn't show 50 PDFs. |
+
+CSRF still has to be wired through. The middleware reads the token
+from the `X-CSRF-Token` header OR the `_csrf` form field; for
+multipart, the header path is cleaner. HTMX 2.x sets the header
+automatically when `meta name="htmx-config"` configures it; or just
+include the hidden input as above (csrf middleware checks both).
+
+### Server side
+
+Inside the handler, read the multipart iterator and pass each file
+part to `attachment.store`:
+
+```lua
+app.post("/todos/:id/photos", function(req, res)
+    local todo_id = tonumber(req.params.id)
+    local new_ids = {}
+    local ok, err = pcall(function()
+        for part in req:multipart() do
+            if part.filename then
+                local id = attachment.store(part, {
+                    uploaded_by = req.ctx.session_id,
+                })
+                db.exec(
+                    "INSERT INTO todo_attachments (todo_id, attachment_id, created_at) VALUES (?, ?, ?)",
+                    { todo_id, id, time.now() })
+                new_ids[#new_ids + 1] = id
+            end
+        end
+    end)
+    if not ok then
+        res:status(413)
+        res:html('<small role="alert">Upload failed: ' .. tostring(err) .. '</small>')
+        return
+    end
+    -- Re-render the photo strip for this todo as the response.
+    res:html(template.render("partials/_attachment_strip.html", {
+        t = { id = todo_id, attachments = list_attachments_for_todo(todo_id) }
+    }))
+end, { multipart = { max_part_size = 8 * 1024 * 1024 } })
+```
+
+```javascript
+app.post("/todos/:id/photos", async (req, res) => {
+    const todoId = Number.parseInt(req.params.id, 10);
+    try {
+        for await (const part of req.multipart()) {
+            if (part.filename) {
+                const id = await attachment.store(part, {
+                    uploadedBy: req.ctx.session_id,
+                });
+                db.exec(
+                    "INSERT INTO todo_attachments (todo_id, attachment_id, created_at) VALUES (?, ?, ?)",
+                    [todoId, id, time.now()]);
+            }
+        }
+    } catch (e) {
+        res.status(413);
+        res.html('<small role="alert">Upload failed: ' +
+                 String(e.message || e) + '</small>');
+        return;
+    }
+    res.html(template.render("partials/_attachment_strip.html", {
+        t: { id: todoId, attachments: listAttachmentsForTodo(todoId) }
+    }));
+}, { multipart: { maxPartSize: 8 * 1024 * 1024 } });
+```
+
+The route-level `multipart = { max_part_size = ... }` is the
+multipart parser's cap (set generously). The `attachment.init({
+max_size = ... })` cap fires inside `attachment.store` and is the
+one that gates "is this upload too big for our app." Put the
+multipart cap above the attachment cap; the attachment cap is what
+produces the user-facing error.
+
+### Validation feedback on rejected MIMEs
+
+If `attachment.init` was called with a `mime_allowlist`, an upload of
+a disallowed file (e.g. PDF when only images are allowed) raises
+inside `attachment.store`. The `pcall` / `try-catch` above catches
+it and emits a structured 413 with a small `role="alert"` fragment.
+HTMX swaps it into the form's `hx-target` so the user sees the error
+inline without a page reload.
+
+For more elaborate UX (per-field validation messages, multi-error
+display), use the same `_form_field.html` partial pattern documented
+in the [Form re-population](#form-re-population-on-validation-error)
+section above — pass `errors = { photo = "MIME not allowed" }` to
+the form template and let `_form_field.html` render the error block.
+
+### Progress events
+
+HTMX 2.x fires `htmx:xhr:progress` events for in-flight uploads. The
+`upload` event detail carries `loaded` / `total`:
+
+```html
+<script nonce="{{ csp_nonce }}">
+  document.body.addEventListener('htmx:xhr:progress', (e) => {
+    const pct = (e.detail.loaded / e.detail.total) * 100;
+    const bar = document.getElementById('upload-progress');
+    if (bar) bar.style.width = pct.toFixed(1) + '%';
+  });
+</script>
+```
+
+For a single global progress bar, that's enough. For per-file progress
+on multi-file uploads, switch to `htmx:beforeRequest` / `htmx:afterRequest`
+and key the bar by the form element.
+
+### Serving the uploaded photo
+
+The `<img>` tag points at a route that calls `attachment-serve.serve`:
+
+```html
+<figure id="att-{{ a.id }}">
+  <img src="/todos/{{ t.id }}/photos/{{ a.id }}"
+       alt="{{ a.original_name }}"
+       loading="lazy">
+  <button hx-delete="/todos/{{ t.id }}/photos/{{ a.id }}"
+          hx-target="#att-{{ a.id }}"
+          hx-swap="delete"
+          hx-confirm="Delete this photo?">×</button>
+</figure>
+```
+
+```lua
+app.get("/todos/:id/photos/:att_id", function(req, res)
+    attachment_serve.serve(req, res, req.params.att_id, {
+        auth_check = function(req, meta)
+            -- Gate however your app wants. The demo gates on
+            -- "is this attachment attached to this todo?" via a
+            -- join table. A real multi-user app would compare
+            -- meta.uploaded_by against req.ctx.user_id.
+            return owns_attachment(tonumber(req.params.id), req.params.att_id)
+        end,
+    })
+end)
+```
+
+`attachment-serve.serve` handles `If-None-Match` → 304 automatically
+(the ETag is the blob's SHA-256, so unchanged images hit cache),
+sets `Content-Disposition` with the original filename, and uses
+`res:bytes` for binary-safe transfer (no gzip on already-compressed
+images).
+
+`loading="lazy"` on the `<img>` makes the browser only fetch
+attachments as they scroll into view — useful for todo lists with
+many attachments.
+
+### Working example
+
+See [`examples/hypermedia_todo`](../examples/hypermedia_todo) for the
+end-to-end demo: per-todo photo strip, file-input upload with
+type-filtering, delete-with-confirm, the auth_check pattern, and
+the strip-swap response. The end-to-end test in
+[`tests/e2e_hypermedia_todo_upload.sh`](../tests/e2e_hypermedia_todo_upload.sh)
+exercises the full flow.
+
 ## See also
 
 - `examples/hypermedia_todo/`. the canonical scaffolded app, both runtimes.
@@ -825,4 +1018,5 @@ Same template HTML files work for both runtimes; only the handler module changes
 - `stdlib/lua/hull/template.lua`. template engine, full syntax reference at the top of the file.
 - HTMX docs: <https://htmx.org/docs/>.
 - Pico v2 docs: <https://picocss.com/docs/>.
-- `docs/roadmap_next.md` §1.5.b for the streaming-multipart / attachment work landing in v0.1.9.
+- `docs/attachments.md`. the attachment storage module reference (`hull/attachment@1`).
+- `docs/roadmap_next.md` §1.5.b for the streaming-multipart / attachment work.

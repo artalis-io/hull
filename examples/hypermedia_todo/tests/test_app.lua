@@ -149,7 +149,7 @@ test("GET /search filters by title (HTMX fragment)", function()
     local miss = test.get("/search?q=zzzzz",
         { middleware = true, headers = { ["hx-request"] = "true" } })
     test.eq(miss.status, 200)
-    test.ok(string.find(miss.body, "No matches", 1, true),
+    test.ok(string.find(miss.body, "No todos match", 1, true),
             "empty result should render the empty-state row")
 
     -- Empty query returns all (up to 20).

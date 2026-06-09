@@ -138,7 +138,7 @@ test("GET /search filters by title (HTMX fragment)", async () => {
     const miss = await test.get("/search?q=zzzzz",
         { middleware: true, headers: { "hx-request": "true" } });
     test.eq(miss.status, 200);
-    test.ok(miss.body.includes("No matches"),
+    test.ok(miss.body.includes("No todos match"),
             "empty result should render the empty-state row");
 
     const all = await test.get("/search?q=",

@@ -3,14 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <title>{% block title %}Hull HTMX app{% end %}</title>
-  <link rel="stylesheet" nonce="{{ csp_nonce }}" href="/static/vendor/pico.classless.min.css">
   <link rel="stylesheet" nonce="{{ csp_nonce }}" href="/static/app.css">
   <script nonce="{{ csp_nonce }}" src="/static/vendor/htmx.min.js"></script>
 </head>
-<body hx-indicator="#spinner">
+<body hx-indicator="#spinner"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
   <div id="spinner" class="htmx-indicator" aria-hidden="true"></div>
-  <main>
+  <main class="container">
     {% include "partials/_flash.html" %}
     {% block body %}{% end %}
   </main>

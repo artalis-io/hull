@@ -3,22 +3,24 @@
 {% block title %}Todos{% end %}
 
 {% block body %}
-<h1>Todos</h1>
+<header class="app-header">
+  <h1>Todos</h1>
+  <p class="muted">A hypermedia photo-tracking demo built with Hull + HTMX.</p>
+</header>
 
 {% include "partials/todo_form.html" %}
 
-<input type="search" name="q"
+<input type="search" name="q" id="search-input"
        placeholder="Search todos…"
        autocomplete="off"
+       value="{{ q }}"
        hx-get="/search"
        hx-trigger="keyup changed delay:300ms, search"
-       hx-target="#todos">
+       hx-target="#todo-feed"
+       hx-swap="innerHTML"
+       hx-push-url="true">
 
-<ul id="todos">
-{% for t in todos %}
-  {% include "partials/todo_row.html" %}
-{% end %}
-</ul>
-
-{% include "partials/_pagination.html" %}
+<div id="todo-feed" class="todo-feed">
+  {% include "partials/_todo_feed.html" %}
+</div>
 {% end %}

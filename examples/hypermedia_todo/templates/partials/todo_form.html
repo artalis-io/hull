@@ -1,7 +1,8 @@
 <form id="new-todo"
       hx-post="/todos"
       hx-target="#todos"
-      hx-swap="afterbegin">
+      hx-swap="afterbegin"
+      hx-on::after-request="if (event.detail.successful) this.reset()">
   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
   <input type="text" name="title" placeholder="New todo"
          value="{{ values.title }}"
