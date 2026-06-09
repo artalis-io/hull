@@ -321,7 +321,12 @@ cd - >/dev/null
 
 SHARD_ID=$(echo "$SHARD_OUT" | cut -d= -f2)
 if [ -n "$SHARD_ID" ]; then
-    EXPECTED_PATH="$TMPDIR/data/blobs/blobs/${SHARD_ID:0:2}/${SHARD_ID:2:2}/${SHARD_ID}"
+    # `${var:offset:length}` is a bashism that dash (Ubuntu's /bin/sh)
+    # rejects with "Bad substitution". Use POSIX `cut` instead so this
+    # works on both macOS (bash) and Ubuntu (dash).
+    SHARD_A=$(printf '%s' "$SHARD_ID" | cut -c1-2)
+    SHARD_B=$(printf '%s' "$SHARD_ID" | cut -c3-4)
+    EXPECTED_PATH="$TMPDIR/data/blobs/blobs/$SHARD_A/$SHARD_B/$SHARD_ID"
     if [ -f "$EXPECTED_PATH" ]; then
         pass "shard_depth=2 file at <XX>/<YY>/<id>"
     else
