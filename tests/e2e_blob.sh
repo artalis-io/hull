@@ -126,6 +126,13 @@ end)
 EOF
 
 cd "$TMPDIR"
+# Pre-create the fs.write declared directory so Linux Landlock's
+# unveil(2) can pin it — Landlock rejects unveil on non-existent
+# paths, leaving the write allowlist empty and breaking blob.init's
+# mkdir of data/blobs/. macOS Seatbelt is permissive about this so
+# the bug had been latent until we ran e2e_blob in CI for the first
+# time.
+mkdir -p data
 # Both `|| true` are required: hull may exit non-zero (set -e would
 # kill us mid-script otherwise), and grep returns 1 when no matches.
 LUA_RAW=$($HULL app.lua 2>&1) || true
@@ -230,6 +237,7 @@ app.main(() => {
 EOF
 
 cd "$TMPDIR"
+mkdir -p data   # See Lua sibling for the Linux Landlock rationale.
 # See Lua sibling for the dual `|| true` rationale.
 JS_RAW=$($HULL app.js 2>&1) || true
 JS_OUT=$(printf '%s\n' "$JS_RAW" | grep -E "(PUT|GET|STREAM|DUP|COUNT|EXISTS|SIZE|TOTAL|ITER|VERIFIED|AFTER|CLEANUP)") || true
@@ -307,6 +315,7 @@ end)
 EOF
 
 cd "$TMPDIR"
+mkdir -p data   # See earlier Lua/JS sections for the Landlock rationale.
 SHARD_OUT=$($HULL app.lua 2>&1 | grep ^SHARD2_ID=) || true
 cd - >/dev/null
 

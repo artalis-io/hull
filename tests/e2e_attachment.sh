@@ -249,6 +249,11 @@ run_suite() {
     # Fresh DB + blob dir per suite so dedup count is deterministic.
     rm -rf "$TMPDIR_WORK/data" "$TMPDIR_WORK/db.sqlite"
     cd "$TMPDIR_WORK"
+    # Pre-create the fs.write declared dir so Linux Landlock's
+    # unveil(2) can pin it — Landlock rejects unveil on non-existent
+    # paths, leaving the write allowlist empty and breaking
+    # blob.init's mkdir. macOS Seatbelt is permissive about this.
+    mkdir -p data
     "$HULL" "$APP" -p "$PORT" > "$TMPDIR_WORK/server-$SUITE.log" 2>&1 &
     SERVER_PID=$!
     cd - >/dev/null
