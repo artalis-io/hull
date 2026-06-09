@@ -120,8 +120,17 @@ end)
 EOF
 
 cd "$TMPDIR"
-LUA_OUT=$($HULL app.lua 2>&1 | grep -E "^(PUT|GET|STREAM|DUP|COUNT|EXISTS|SIZE|TOTAL|ITER|VERIFIED|AFTER|CLEANUP)") || true
+LUA_RAW=$($HULL app.lua 2>&1)
+LUA_OUT=$(printf '%s\n' "$LUA_RAW" | grep -E "^(PUT|GET|STREAM|DUP|COUNT|EXISTS|SIZE|TOTAL|ITER|VERIFIED|AFTER|CLEANUP)") || true
 cd - >/dev/null
+
+# Debug: if hull produced no matching output, dump the raw stderr+stdout
+# so we can diagnose. Test had been working on macOS but the first
+# Linux/Cosmo CI run revealed empty output — this surfaces why.
+if [ -z "$LUA_OUT" ]; then
+    echo "  [DEBUG] hull (Lua) produced no matching output. Raw:"
+    printf '%s\n' "$LUA_RAW" | sed 's/^/    > /' | head -40
+fi
 
 contains "lua buffer put SHA"        "PUT_ID=$EXPECTED_SHA_HELLO"     "$LUA_OUT"
 contains "lua buffer put size"       "PUT_SIZE=17"                    "$LUA_OUT"
@@ -211,8 +220,14 @@ app.main(() => {
 EOF
 
 cd "$TMPDIR"
-JS_OUT=$($HULL app.js 2>&1 | grep -E "(PUT|GET|STREAM|DUP|COUNT|EXISTS|SIZE|TOTAL|ITER|VERIFIED|AFTER|CLEANUP)") || true
+JS_RAW=$($HULL app.js 2>&1)
+JS_OUT=$(printf '%s\n' "$JS_RAW" | grep -E "(PUT|GET|STREAM|DUP|COUNT|EXISTS|SIZE|TOTAL|ITER|VERIFIED|AFTER|CLEANUP)") || true
 cd - >/dev/null
+
+if [ -z "$JS_OUT" ]; then
+    echo "  [DEBUG] hull (JS) produced no matching output. Raw:"
+    printf '%s\n' "$JS_RAW" | sed 's/^/    > /' | head -40
+fi
 
 contains "js buffer put SHA"         "PUT_ID=$EXPECTED_SHA_HELLO"     "$JS_OUT"
 contains "js buffer put size"        "PUT_SIZE=17"                    "$JS_OUT"
