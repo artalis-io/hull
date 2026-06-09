@@ -213,6 +213,33 @@ static KlResponse *check_response(lua_State *L, int idx)
     return *pp;
 }
 
+/* Has a header with this name (case-insensitive) already been added to
+ * the response? Used by res:html to avoid stamping Hull's default CSP
+ * on top of one already set by application middleware — without this
+ * the browser sees two Content-Security-Policy headers and enforces
+ * the strict intersection, which typically blocks the page's own
+ * scripts. Scans res->hdr_buf line by line; headers are appended as
+ * "Name: value\r\n" by kl_response_header. */
+static int hl_response_has_header(KlResponse *res, const char *name)
+{
+    if (!res || !res->hdr_buf || !name) return 0;
+    size_t name_len = strlen(name);
+    if (res->hdr_len < name_len + 2) return 0;
+    const char *p   = res->hdr_buf;
+    const char *end = res->hdr_buf + res->hdr_len;
+    while (p < end) {
+        const char *eol = memchr(p, '\n', (size_t)(end - p));
+        size_t line_len = eol ? (size_t)(eol - p) : (size_t)(end - p);
+        if (line_len > name_len && p[name_len] == ':' &&
+            strncasecmp(p, name, name_len) == 0) {
+            return 1;
+        }
+        if (!eol) break;
+        p = eol + 1;
+    }
+    return 0;
+}
+
 /* res:status(code) */
 static int lua_res_status(lua_State *L)
 {
@@ -282,7 +309,12 @@ static int lua_res_html(lua_State *L)
     size_t len;
     const char *html = luaL_checklstring(L, 2, &len);
     kl_response_header(res, "Content-Type", "text/html; charset=utf-8");
-    if (hlua && hlua->base.csp_policy)
+    /* Skip the default CSP if middleware already wrote one — two CSP
+     * headers cause browsers to enforce the strict intersection
+     * (typically blocking the page's own scripts). The app-supplied
+     * one wins. */
+    if (hlua && hlua->base.csp_policy &&
+        !hl_response_has_header(res, "Content-Security-Policy"))
         kl_response_header(res, "Content-Security-Policy",
                            hlua->base.csp_policy);
     hl_maybe_compress(hlua ? hlua->active_req : NULL, res,

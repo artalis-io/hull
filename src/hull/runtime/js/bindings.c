@@ -244,6 +244,34 @@ static KlResponse *get_response(JSContext *ctx, JSValueConst this_val)
     return (KlResponse *)JS_GetOpaque(this_val, (JSClassID)js->response_class_id);
 }
 
+/* Has a header with this name (case-insensitive) already been added to
+ * the response? Used by js_res_html to avoid stamping Hull's default
+ * CSP on top of one already set by application middleware — without
+ * this the browser sees two Content-Security-Policy headers and
+ * enforces the strict intersection, which typically blocks the page's
+ * own scripts. Scans res->hdr_buf line by line; headers are appended
+ * as "Name: value\r\n" by kl_response_header. Sibling of Lua's
+ * hl_response_has_header in src/hull/runtime/lua/bindings.c. */
+static int hl_response_has_header(KlResponse *res, const char *name)
+{
+    if (!res || !res->hdr_buf || !name) return 0;
+    size_t name_len = strlen(name);
+    if (res->hdr_len < name_len + 2) return 0;
+    const char *p   = res->hdr_buf;
+    const char *end = res->hdr_buf + res->hdr_len;
+    while (p < end) {
+        const char *eol = memchr(p, '\n', (size_t)(end - p));
+        size_t line_len = eol ? (size_t)(eol - p) : (size_t)(end - p);
+        if (line_len > name_len && p[name_len] == ':' &&
+            strncasecmp(p, name, name_len) == 0) {
+            return 1;
+        }
+        if (!eol) break;
+        p = eol + 1;
+    }
+    return 0;
+}
+
 /* res.status(code) */
 static JSValue js_res_status(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv)
@@ -336,7 +364,12 @@ static JSValue js_res_html(JSContext *ctx, JSValueConst this_val,
         size_t html_len = strlen(html);
         HlJS *js_rt = (HlJS *)JS_GetContextOpaque(ctx);
         kl_response_header(res, "Content-Type", "text/html; charset=utf-8");
-        if (js_rt && js_rt->base.csp_policy)
+        /* Skip the default CSP if middleware already wrote one — two
+         * CSP headers cause browsers to enforce the strict intersection
+         * (typically blocking the page's own scripts). The app-supplied
+         * one wins. */
+        if (js_rt && js_rt->base.csp_policy &&
+            !hl_response_has_header(res, "Content-Security-Policy"))
             kl_response_header(res, "Content-Security-Policy",
                                js_rt->base.csp_policy);
         hl_maybe_compress(js_rt ? js_rt->active_req : NULL, res,
