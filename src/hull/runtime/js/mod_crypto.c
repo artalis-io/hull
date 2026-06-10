@@ -367,6 +367,83 @@ static JSValue js_crypto_ed25519_verify(JSContext *ctx, JSValueConst this_val,
     return rc == 0 ? JS_TRUE : JS_FALSE;
 }
 
+/* crypto.verify(alg, pubkeyPem, data, sig) -> boolean
+ *
+ *  alg        - "RS256" / "RS384" / "RS512" / "PS256" / "ES256" / "ES384"
+ *  pubkeyPem  - PEM-encoded SubjectPublicKeyInfo (string).
+ *  data       - message bytes (string).
+ *  sig        - raw signature bytes (string). ECDSA must be JOSE
+ *               r||s, NOT DER.
+ *
+ *  Returns true on a valid signature, false otherwise. Throws on
+ *  programming errors (unknown alg) so callers can't silently get
+ *  false on misuse. Mirrors Lua's crypto.verify exactly.
+ */
+#include "hull/cap/asym.h"
+
+static JSValue js_crypto_verify(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 4)
+        return JS_ThrowTypeError(ctx,
+            "crypto.verify requires (alg, pubkeyPem, data, sig)");
+
+    /* alg + pubkey are always ASCII (alg short, PEM base64 body) so
+     * the string path is fine. data + sig are arbitrary bytes and
+     * must go through js_get_buffer to stay binary-safe: a JS string
+     * with high bytes round-trips through JS_ToCStringLen as UTF-8
+     * and ends up longer than its source, which corrupts RSA / ECDSA
+     * signatures. ArrayBuffer / WasmBuffer / MappedBuffer all reach
+     * verify() with the original bytes intact. */
+    size_t alg_len = 0, pk_len = 0;
+    const char *alg_str = JS_ToCStringLen(ctx, &alg_len, argv[0]);
+    if (!alg_str) return JS_EXCEPTION;
+    const char *pk = JS_ToCStringLen(ctx, &pk_len, argv[1]);
+    if (!pk) { JS_FreeCString(ctx, alg_str); return JS_EXCEPTION; }
+
+    HlBufferView data_view = {0}, sig_view = {0};
+    const char *data_str = NULL, *sig_str = NULL;
+    int data_needs_free = 0, sig_needs_free = 0;
+
+    if (!js_get_buffer(ctx, argv[2], &data_view, &data_str, &data_needs_free)) {
+        JS_FreeCString(ctx, alg_str);
+        JS_FreeCString(ctx, pk);
+        return JS_ThrowTypeError(ctx,
+            "crypto.verify: data must be ArrayBuffer or string");
+    }
+    if (!js_get_buffer(ctx, argv[3], &sig_view, &sig_str, &sig_needs_free)) {
+        JS_FreeCString(ctx, alg_str);
+        JS_FreeCString(ctx, pk);
+        if (data_needs_free) JS_FreeCString(ctx, data_str);
+        return JS_ThrowTypeError(ctx,
+            "crypto.verify: sig must be ArrayBuffer or string");
+    }
+
+    HlAsymAlg alg = hl_asym_alg_from_string(alg_str, alg_len);
+    JSValue out;
+    if (alg == HL_ASYM_NONE) {
+        out = JS_ThrowTypeError(ctx,
+            "crypto.verify: unsupported alg '%.*s' (use one of "
+            "RS256/RS384/RS512/PS256/ES256/ES384; HS256 is "
+            "crypto.hmacSha256Verify; 'none' is rejected)",
+            (int)alg_len, alg_str);
+    } else {
+        int rc = hl_cap_asym_verify_default(pk, pk_len, alg,
+                                             data_view.data, data_view.len,
+                                             sig_view.data,  sig_view.len);
+        /* Collapse all failure modes to `false`. The cap layer's
+         * -1 vs -2 distinction is for audit-mode logging, not for
+         * callers (avoids leaking an oracle). */
+        out = rc == 0 ? JS_TRUE : JS_FALSE;
+    }
+    JS_FreeCString(ctx, alg_str);
+    JS_FreeCString(ctx, pk);
+    if (data_needs_free) JS_FreeCString(ctx, data_str);
+    if (sig_needs_free)  JS_FreeCString(ctx, sig_str);
+    return out;
+}
+
 /* ── SHA-512 ──────────────────────────────────────────────────────── */
 
 static JSValue js_crypto_sha512(JSContext *ctx, JSValueConst this_val,
@@ -1126,6 +1203,8 @@ static int js_crypto_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_crypto_ed25519_sign, "ed25519Sign", 2));
     JS_SetPropertyStr(ctx, crypto, "ed25519Verify",
                       JS_NewCFunction(ctx, js_crypto_ed25519_verify, "ed25519Verify", 3));
+    JS_SetPropertyStr(ctx, crypto, "verify",
+                      JS_NewCFunction(ctx, js_crypto_verify, "verify", 4));
     JS_SetPropertyStr(ctx, crypto, "auth",
                       JS_NewCFunction(ctx, js_crypto_auth, "auth", 2));
     JS_SetPropertyStr(ctx, crypto, "authVerify",

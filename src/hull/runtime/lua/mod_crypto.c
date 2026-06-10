@@ -290,6 +290,52 @@ static int lua_crypto_ed25519_verify(lua_State *L)
     return 1;
 }
 
+/* crypto.verify(alg, pubkey_pem, data, sig) -> boolean
+ *
+ *  alg        - "RS256" / "RS384" / "RS512" / "PS256" / "ES256" / "ES384"
+ *               (case-insensitive). "HS256" / "none" / anything else
+ *               raises (this surface is asymmetric-only by design;
+ *               HMAC verification is crypto.hmac_sha256_verify).
+ *  pubkey_pem - PEM-encoded SubjectPublicKeyInfo (a Lua string).
+ *  data       - message bytes (Lua string).
+ *  sig        - raw signature bytes (Lua string). For ECDSA, this is
+ *               JOSE r||s (NOT DER) - matches the JWT wire format.
+ *
+ *  Returns true if the signature verifies, false otherwise. Raises
+ *  on programming errors (unknown alg, NULL, etc.) so callers don't
+ *  silently get a false-on-misuse oracle. Errors and false-returns
+ *  are not distinguishable to the caller for the sig itself - the
+ *  cap layer doesn't leak whether the failure was bad-sig vs bad-pem.
+ */
+#include "hull/cap/asym.h"
+
+static int lua_crypto_verify(lua_State *L)
+{
+    size_t alg_len, pk_len, data_len, sig_len;
+    const char *alg_str = luaL_checklstring(L, 1, &alg_len);
+    const char *pk      = luaL_checklstring(L, 2, &pk_len);
+    const char *data    = luaL_checklstring(L, 3, &data_len);
+    const char *sig     = luaL_checklstring(L, 4, &sig_len);
+
+    HlAsymAlg alg = hl_asym_alg_from_string(alg_str, alg_len);
+    if (alg == HL_ASYM_NONE)
+        return luaL_error(L,
+            "crypto.verify: unsupported alg '%.*s' (use one of "
+            "RS256/RS384/RS512/PS256/ES256/ES384; HS256 is "
+            "crypto.hmac_sha256_verify; 'none' is rejected)",
+            (int)alg_len, alg_str);
+
+    int rc = hl_cap_asym_verify_default(pk, pk_len, alg,
+                                         data, data_len, sig, sig_len);
+    /* rc == 0 -> verified. rc < 0 -> any failure (bad sig, bad PEM,
+     * wrong key type, etc.). We collapse all failure modes to `false`
+     * so the script can't observe which class of failure happened.
+     * The cap layer's distinction is logged separately when audit
+     * mode is on. */
+    lua_pushboolean(L, rc == 0);
+    return 1;
+}
+
 /* ── SHA-512 ───────────────────────────────────────────────────────── */
 
 /* crypto.sha512(data) → hex string (128 chars) */
@@ -856,6 +902,7 @@ static const luaL_Reg crypto_funcs[] = {
     {"ed25519_keypair",   lua_crypto_ed25519_keypair},
     {"ed25519_sign",      lua_crypto_ed25519_sign},
     {"ed25519_verify",    lua_crypto_ed25519_verify},
+    {"verify",            lua_crypto_verify},
     {"auth",              lua_crypto_auth},
     {"auth_verify",       lua_crypto_auth_verify},
     {"secretbox",         lua_crypto_secretbox},
