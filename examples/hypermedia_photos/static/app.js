@@ -10,7 +10,7 @@
 // (innerHTML), which destroys + replaces the form's surroundings but
 // keeps the form itself; we just need to wipe its inputs.
 document.addEventListener("htmx:afterRequest", (e) => {
-    const form = e.detail && e.detail.elt;
+    const form = e.detail?.elt;
     if (form && form.id === "new-entry" && e.detail.successful) {
         form.reset();
     }

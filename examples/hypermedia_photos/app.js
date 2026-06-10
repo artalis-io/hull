@@ -9,6 +9,7 @@ import { log }              from "hull:log";
 import { template }         from "hull:template";
 import { time }             from "hull:time";
 import { validate }         from "hull:validate";
+import { attachmentServe }  from "hull:web:attachment-serve";
 import { cookie }           from "hull:web:cookie";
 import { flash }            from "hull:web:flash";
 import { form }             from "hull:web:form";
@@ -18,7 +19,6 @@ import { csrf }             from "hull:web:middleware:csrf";
 import { idempotency }      from "hull:web:middleware:idempotency";
 import { session }          from "hull:web:middleware:session";
 import { pagination }       from "hull:web:pagination";
-import { attachmentServe }  from "hull:web:attachment-serve";
 
 // Small default so pagination is visible in the demo with only a
 // handful of entries. Real apps would set this to 20-50.
@@ -118,9 +118,7 @@ function attachmentsForMany(entryIds) {
     for (const id of entryIds) result.set(id, []);
     const placeholders = entryIds.map(() => "?").join(",");
     const rows = db.query(
-        "SELECT entry_id, attachment_id FROM entry_attachments "
-        + "WHERE entry_id IN (" + placeholders + ") "
-        + "ORDER BY entry_id, created_at DESC",
+        `SELECT entry_id, attachment_id FROM entry_attachments WHERE entry_id IN (${placeholders}) ORDER BY entry_id, created_at DESC`,
         entryIds);
     for (const r of rows || []) {
         const meta = attachment.metadata(r.attachment_id);
@@ -184,7 +182,8 @@ function urlEncode(s) { return encodeURIComponent(s); }
 // full-page GET / and the fragment-only GET /search.
 function feedData(req, q) {
     const p = pagination.fromQuery(req, { defaultPerPage: PER_PAGE_DEFAULT });
-    let total, entries;
+    let total;
+    let entries;
     if (q === "") {
         total = db.query("SELECT COUNT(*) AS n FROM entries")[0].n;
         entries = db.query(
@@ -195,7 +194,7 @@ function feedData(req, q) {
         // LIKE-escape % _ \ so "100%" matches the literal "100%"
         // instead of "everything after 100".
         const esc = q.replace(/[\\%_]/g, "\\$&");
-        const pattern = "%" + esc + "%";
+        const pattern = `%${esc}%`;
         total = db.query(
             "SELECT COUNT(*) AS n FROM entries "
             + "WHERE title LIKE ? ESCAPE '\\'", [pattern])[0].n;
@@ -213,7 +212,7 @@ function feedData(req, q) {
     // Pagination links must preserve the current query so paging
     // through a filtered list stays filtered.
     let base = "/search";
-    if (q !== "") base += "?q=" + urlEncode(q);
+    if (q !== "") base += `?q=${urlEncode(q)}`;
     const nav = pagination.render(total, {
         page:           p.page,
         per_page:       p.per_page,
@@ -236,7 +235,7 @@ app.get("/", (req, res) => {
     // flash.consume drains any pending one-shot messages from the
     // previous POST/redirect/GET cycle and clears them from session.
     const msgs = flash.consume(req);
-    const q = ((req.query && req.query.q) || "").trim();
+    const q = ((req.query?.q) || "").trim();
     const data = feedData(req, q);
     data.flash = msgs;
     data.has_flash = msgs.length > 0;
@@ -272,7 +271,7 @@ app.post("/entries", (req, res) => {
 
     const title = fields.title;  // already trimmed by validate
     db.exec("INSERT INTO entries (title, done) VALUES (?, 0)", [title]);
-    const id = db.query("SELECT last_insert_rowid() AS id")[0].id;
+    const _id = db.query("SELECT last_insert_rowid() AS id")[0].id;
     if (htmx.is(req)) {
         // HTMX: return the full feed partial so pagination nav (which
         // lives INSIDE #entry-feed) refreshes too — otherwise crossing
@@ -310,7 +309,7 @@ app.get("/search", (req, res) => {
         const data = feedData(req, q);
         res.html(template.render("partials/_entry_feed.html", data));
     } else {
-        res.redirect(q === "" ? "/" : "/?q=" + urlEncode(q));
+        res.redirect(q === "" ? "/" : `/?q=${urlEncode(q)}`);
     }
 });
 
@@ -441,7 +440,7 @@ app.post("/entries/:id/photos", async (req, res) => {
             }
         }
     } catch (e) {
-        const msg = String((e && e.message) || e);
+        const msg = String((e?.message) || e);
         if (htmx.is(req)) {
             // Render via template.renderString so {{ err }} is HTML-
             // escaped. msg can carry user-influenced text (filename,
@@ -453,7 +452,7 @@ app.post("/entries/:id/photos", async (req, res) => {
                 '<small role="alert" class="error">Upload failed: {{ err }}</small>',
                 { err: msg }));
         } else {
-            flash.set(req, "Upload failed: " + msg, "error");
+            flash.set(req, `Upload failed: ${msg}`, "error");
             res.redirect("/");
         }
         return;
