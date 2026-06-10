@@ -1050,25 +1050,38 @@ static JSValue js_crypto_base64url_encode(JSContext *ctx, JSValueConst this_val,
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "crypto.base64urlEncode requires (data)");
 
-    size_t len;
-    const char *data = JS_ToCStringLen(ctx, &len, argv[0]);
-    if (!data) return JS_EXCEPTION;
+    /* Accept ArrayBuffer / TypedArray / MappedBuffer / WasmBuffer /
+     * string via the unified buffer protocol. The previous
+     * JS_ToCStringLen-only path was binary-unsafe: an ArrayBuffer
+     * would .toString() to "[object ArrayBuffer]" and a Uint8Array
+     * full of bytes >= 0x80 would UTF-8-inflate. */
+    HlBufferView view = {0};
+    const char *str = NULL;
+    int needs_free = 0;
+    if (!js_get_buffer(ctx, argv[0], &view, &str, &needs_free))
+        return JS_ThrowTypeError(ctx,
+            "crypto.base64urlEncode: data must be ArrayBuffer, "
+            "TypedArray, MappedBuffer, WasmBuffer, or string");
 
-    if (len > SIZE_MAX / 4) {
-        JS_FreeCString(ctx, data);
+    if (view.len > SIZE_MAX / 4) {
+        if (needs_free) JS_FreeCString(ctx, str);
         return JS_ThrowRangeError(ctx, "input too large for base64url");
     }
-    size_t out_size = ((len * 4) + 2) / 3 + 1;
+    size_t out_size = ((view.len * 4) + 2) / 3 + 1;
     char *out = js_malloc(ctx, out_size);
-    if (!out) { JS_FreeCString(ctx, data); return JS_EXCEPTION; }
+    if (!out) {
+        if (needs_free) JS_FreeCString(ctx, str);
+        return JS_EXCEPTION;
+    }
 
     size_t out_len;
-    if (hl_cap_crypto_base64url_encode(data, len, out, out_size, &out_len) != 0) {
-        JS_FreeCString(ctx, data);
+    if (hl_cap_crypto_base64url_encode(view.data, view.len,
+                                       out, out_size, &out_len) != 0) {
+        if (needs_free) JS_FreeCString(ctx, str);
         js_free(ctx, out);
         return JS_ThrowInternalError(ctx, "base64urlEncode failed");
     }
-    JS_FreeCString(ctx, data);
+    if (needs_free) JS_FreeCString(ctx, str);
 
     JSValue result = JS_NewStringLen(ctx, out, out_len);
     js_free(ctx, out);

@@ -1827,6 +1827,68 @@ UTEST(js_cap, crypto_base64url_roundtrip)
     cleanup_js_caps();
 }
 
+/* Regression: crypto.base64urlEncode used to call JS_ToCStringLen
+ * unconditionally, which (a) .toString()s an ArrayBuffer to
+ * "[object ArrayBuffer]" and (b) UTF-8-inflates any byte >= 0x80 in
+ * a Uint8Array.  The encoder now takes the unified-buffer path
+ * (js_get_buffer), so ArrayBuffer + Uint8Array round-trip cleanly.
+ *
+ * Caught when PKCE in hull/web/middleware/oauth was sending
+ * `code_verifier=W29iamVjdCBBcnJheUJ1ZmZlcl0` (== base64url of the
+ * literal string "[object ArrayBuffer]") instead of the actual
+ * random bytes — IdP rejected with pkce_mismatch. */
+UTEST(js_cap, crypto_base64url_encode_arraybuffer)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { crypto } from 'hull:crypto';\n"
+        /* 3 bytes -> 4 base64url chars, no padding. ABC = 0x41 0x42 0x43.
+         * base64url(0x41 0x42 0x43) = "QUJD". */
+        "const u8 = new Uint8Array([0x41, 0x42, 0x43]);\n"
+        "globalThis.__test_b64_ab  = crypto.base64urlEncode(u8.buffer);\n"
+        "globalThis.__test_b64_u8  = crypto.base64urlEncode(u8);\n"
+        /* High bytes — proves no UTF-8 inflation. 0xFF 0xFE 0xFD
+         * base64url is "//79" → "__79" (url-alphabet). */
+        "const hi = new Uint8Array([0xff, 0xfe, 0xfd]);\n"
+        "globalThis.__test_b64_hi  = crypto.base64urlEncode(hi.buffer);\n"
+        /* Round-trip 32 random bytes via crypto.random (ArrayBuffer)
+         * → encode → decode-as-Uint8Array → byte-by-byte compare.
+         * Decode goes through base64urlDecode which is still a
+         * string return, so we only assert length here. */
+        "const r = crypto.random(32);\n"
+        "const enc = crypto.base64urlEncode(r);\n"
+        /* 32 bytes base64url no-pad = 43 chars. */
+        "globalThis.__test_b64_len = enc.length;\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    char *ab = eval_str("globalThis.__test_b64_ab");
+    ASSERT_NE(ab, NULL);
+    ASSERT_STREQ(ab, "QUJD");
+    free(ab);
+
+    char *u8s = eval_str("globalThis.__test_b64_u8");
+    ASSERT_NE(u8s, NULL);
+    ASSERT_STREQ(u8s, "QUJD");
+    free(u8s);
+
+    char *hi = eval_str("globalThis.__test_b64_hi");
+    ASSERT_NE(hi, NULL);
+    ASSERT_STREQ(hi, "__79");
+    free(hi);
+
+    ASSERT_EQ(eval_int("globalThis.__test_b64_len"), 43);
+
+    cleanup_js_caps();
+}
+
 /* ── hull:web:cookie tests ─────────────────────────────────────────────── */
 
 UTEST(js_stdlib, cookie_parse)

@@ -128,38 +128,8 @@ function hexToBytes(h) {
     return u8;
 }
 
-// crypto.base64urlEncode runs JS_ToCStringLen on its argument, which
-// stringifies an ArrayBuffer to "[object ArrayBuffer]" — useless for
-// binary. JWT.js has the same problem and works around it with a
-// Uint8Array-based decoder; we need the encoder direction here.
-const B64_ENC =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-function bytesToBase64url(u8) {
-    const n = u8.length;
-    const groups = (n / 3) | 0;
-    const tail = n % 3;
-    let out = "";
-    for (let i = 0; i < groups; i++) {
-        const a = u8[i * 3], b = u8[i * 3 + 1], c = u8[i * 3 + 2];
-        out += B64_ENC[a >> 2]
-             + B64_ENC[((a & 0x3) << 4) | (b >> 4)]
-             + B64_ENC[((b & 0xf) << 2) | (c >> 6)]
-             + B64_ENC[c & 0x3f];
-    }
-    if (tail === 1) {
-        const a = u8[n - 1];
-        out += B64_ENC[a >> 2] + B64_ENC[(a & 0x3) << 4];
-    } else if (tail === 2) {
-        const a = u8[n - 2], b = u8[n - 1];
-        out += B64_ENC[a >> 2]
-             + B64_ENC[((a & 0x3) << 4) | (b >> 4)]
-             + B64_ENC[(b & 0xf) << 2];
-    }
-    return out;
-}
-
 function randomUrlsafe(nBytes) {
-    return bytesToBase64url(new Uint8Array(crypto.random(nBytes)));
+    return crypto.base64urlEncode(crypto.random(nBytes));
 }
 
 // PKCE per RFC 7636: verifier is 32 random bytes (~43 base64url chars),
@@ -167,7 +137,7 @@ function randomUrlsafe(nBytes) {
 function pkcePair() {
     const verifier = randomUrlsafe(32);
     const shaHex = crypto.sha256(verifier);
-    const challenge = bytesToBase64url(hexToBytes(shaHex));
+    const challenge = crypto.base64urlEncode(hexToBytes(shaHex).buffer);
     return [verifier, challenge];
 }
 

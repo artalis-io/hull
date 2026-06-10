@@ -374,17 +374,12 @@ local function handle_callback(req, res)
     for k, v in pairs(body_params) do
         body_parts[#body_parts + 1] = urlenc(k) .. "=" .. urlenc(v)
     end
-    -- http_client.async.post's body-positional form silently drops
-    -- the body — the C shim only forwards (method, url, opts) into
-    -- lua_http_fetch, so the middle "body" arg never reaches it.
-    -- Pass the body via opts.body to keep it on the wire.
-    local resp = http_client.async.post(cfg.token_endpoint, {
-        body = table.concat(body_parts, "&"),
-        headers = {
+    local resp = http_client.async.post(cfg.token_endpoint,
+        table.concat(body_parts, "&"),
+        { headers = {
             ["Content-Type"] = "application/x-www-form-urlencoded",
             ["Accept"] = "application/json",
-        },
-    })
+        }})
     if not resp or resp.status ~= 200 or not resp.body then
         log.warn("oauth: token exchange failed: " ..
                  tostring(resp and resp.status))

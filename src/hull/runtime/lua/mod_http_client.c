@@ -377,43 +377,99 @@ static int lua_http_async_request(lua_State *L)
     return lua_http_fetch(L);
 }
 
-/* Helper: insert method string at position 1 and delegate to lua_http_fetch.
- * Caller's args are (url, ...) → becomes (method, url, ...) */
-static int lua_http_async_method(lua_State *L, const char *method)
+/* Helper for no-body methods (GET/DELETE).
+ * Caller's args are (url, opts?) → becomes (method, url, opts?). */
+static int lua_http_async_no_body(lua_State *L, const char *method)
 {
     lua_pushstring(L, method);
     lua_insert(L, 1);
     return lua_http_fetch(L);
 }
 
+/* Helper for body-bearing methods (POST/PUT/PATCH).
+ *
+ * Caller's args are (url, body?, opts?) — body is a string (or nil),
+ * opts is a table with `headers`. The async path delegates to
+ * lua_http_fetch which takes (method, url, opts), so we must fold
+ * the positional body into a synthesized opts.body BEFORE delegating.
+ * Without this fold, the body silently never reaches the wire — and
+ * a typed `Content-Type` header still rides along, which makes the
+ * bug invisible in network captures (the empty POST looks like an
+ * intended ping). Mirrors js_http_async_with_body in mod_http_client.c
+ * on the JS side. */
+static int lua_http_async_with_body(lua_State *L, const char *method)
+{
+    /* Snapshot the URL + body + caller-opts before we rearrange. */
+    const char *url = luaL_checkstring(L, 1);
+    int has_body = lua_isstring(L, 2);
+    int has_user_opts = lua_istable(L, 3);
+
+    /* Build the merged opts table at the top of the stack. */
+    lua_newtable(L);                  /* opts */
+    if (has_body) {
+        lua_pushvalue(L, 2);          /* opts, body */
+        lua_setfield(L, -2, "body");  /* opts.body = body */
+    }
+    if (has_user_opts) {
+        /* Copy user-supplied opts (headers etc.) into the new table,
+         * but never let user-supplied `body` override the positional
+         * one — positional wins, like the sync POST helper. */
+        lua_pushnil(L);
+        while (lua_next(L, 3) != 0) {  /* opts, key, val */
+            if (lua_type(L, -2) == LUA_TSTRING) {
+                const char *k = lua_tostring(L, -2);
+                int keep = !has_body || strcmp(k, "body") != 0;
+                if (keep) {
+                    lua_pushvalue(L, -2);  /* opts, key, val, key */
+                    lua_pushvalue(L, -2);  /* opts, key, val, key, val */
+                    lua_settable(L, -5);   /* opts[key] = val */
+                }
+            }
+            lua_pop(L, 1);              /* opts, key */
+        }
+    }
+    /* Stack now: url, body?, user_opts?, merged_opts */
+    /* Drop everything except url + merged_opts, then prepend method.  */
+    lua_replace(L, 2);                /* url, merged_opts (drops body) */
+    /* If user_opts was present at slot 3, the replace above shifted
+     * merged_opts to slot 2 and slot 3 still holds the old user_opts.
+     * Pop until only (url, merged_opts) remain. */
+    while (lua_gettop(L) > 2) lua_remove(L, 3);
+
+    lua_pushstring(L, method);
+    lua_insert(L, 1);                 /* method, url, merged_opts */
+    (void)url;                        /* silence: only snapshot to assert */
+    return lua_http_fetch(L);
+}
+
 /* http.async.get(url, opts?) */
 static int lua_http_async_get(lua_State *L)
 {
-    return lua_http_async_method(L, "GET");
+    return lua_http_async_no_body(L, "GET");
 }
 
 /* http.async.post(url, body, opts?) */
 static int lua_http_async_post(lua_State *L)
 {
-    return lua_http_async_method(L, "POST");
+    return lua_http_async_with_body(L, "POST");
 }
 
 /* http.async.put(url, body, opts?) */
 static int lua_http_async_put(lua_State *L)
 {
-    return lua_http_async_method(L, "PUT");
+    return lua_http_async_with_body(L, "PUT");
 }
 
 /* http.async.patch(url, body, opts?) */
 static int lua_http_async_patch(lua_State *L)
 {
-    return lua_http_async_method(L, "PATCH");
+    return lua_http_async_with_body(L, "PATCH");
 }
 
 /* http.async.delete(url, opts?) */
 static int lua_http_async_delete(lua_State *L)
 {
-    return lua_http_async_method(L, "DELETE");
+    return lua_http_async_no_body(L, "DELETE");
 }
 
 static const luaL_Reg http_async_funcs[] = {

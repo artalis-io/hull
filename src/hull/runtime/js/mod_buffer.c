@@ -78,6 +78,32 @@ int js_get_buffer(JSContext *ctx, JSValueConst val,
         out->len = ab_len;
         return 1;
     }
+    /* TypedArray (Uint8Array, Int8Array, Uint16Array, ...). Without
+     * this branch a Uint8Array would fall through to the string path
+     * and base64url-encode literally "65,66,67" (the toString output)
+     * instead of the underlying bytes. Resolve the backing buffer +
+     * byte offset and slice the view to the typed array's window. */
+    {
+        size_t byte_offset = 0, byte_length = 0, bytes_per_element = 0;
+        JSValue tab = JS_GetTypedArrayBuffer(ctx, val,
+                                              &byte_offset,
+                                              &byte_length,
+                                              &bytes_per_element);
+        if (!JS_IsException(tab)) {
+            uint8_t *raw = JS_GetArrayBuffer(ctx, &ab_len, tab);
+            JS_FreeValue(ctx, tab);
+            if (raw && byte_offset + byte_length <= ab_len) {
+                out->data = raw + byte_offset;
+                out->len = byte_length;
+                return 1;
+            }
+        } else {
+            /* Drain the pending exception so the string fallback
+             * doesn't see it. JS_GetTypedArrayBuffer raises on a
+             * non-TypedArray which is fine here — we're probing. */
+            JS_FreeValue(ctx, JS_GetException(ctx));
+        }
+    }
     /* String (caller must free) */
     size_t slen;
     const char *s = JS_ToCStringLen(ctx, &slen, val);
