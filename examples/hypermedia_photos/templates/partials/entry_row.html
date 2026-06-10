@@ -1,16 +1,20 @@
-<li id="entry-{{ t.id }}">
+<li id="entry-{{ t.id }}" {% if t.done %}class="entry-done"{% end %}>
   {# t.done comes back from SQLite as INTEGER 0/1 in Lua; the row
      hydration helper coerces it to a proper boolean so this template
      works in both runtimes (Lua treats 0 as truthy — only nil/false
      are falsy — so a raw `{% if t.done %}` would always render
      `checked`). The engine doesn't support `==` expressions, so the
-     coercion has to happen in the handler. #}
+     coercion has to happen in the handler.
+
+     The "done" affordance is a CSS class on the <li>, not an inline
+     style. That keeps style-src-attr off the demo's CSP shopping
+     list. #}
   <input type="checkbox"
          {% if t.done %}checked{% end %}
          hx-post="/entries/{{ t.id }}/toggle"
          hx-target="#entry-{{ t.id }}"
          hx-swap="outerHTML">
-  <span {% if t.done %}style="text-decoration: line-through"{% end %}>{{ t.title }}</span>
+  <span>{{ t.title }}</span>
   <button hx-get="/entries/{{ t.id }}/edit"
           hx-target="#entry-{{ t.id }}"
           hx-swap="outerHTML"

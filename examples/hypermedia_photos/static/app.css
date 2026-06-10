@@ -87,6 +87,11 @@ main.container { max-width: 44rem; }
   overflow-wrap: anywhere;
 }
 
+.entry-list > li.entry-done > span {
+  text-decoration: line-through;
+  color: var(--htod-muted);
+}
+
 /* Tertiary / icon buttons inside rows */
 .entry-list button {
   background: transparent;

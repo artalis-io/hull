@@ -25,7 +25,6 @@ local PER_PAGE_DEFAULT = 3
 
 app.manifest({
     modules = {
-        "hull/http-server@1",
         "hull/web/htmx@1",
         "hull/web/flash@1",
         "hull/web/pagination@1",
@@ -39,12 +38,13 @@ app.manifest({
         "hull/web/form@1",
         "hull/db@1",
         "hull/log@1",
-        -- Photo attachments (§1.5.b-5).
+        -- Photo attachments (§1.5.b-5). fs / mime are transitive
+        -- (used by blob + attachment internally), not imported here.
+        -- http-server is intrinsic via app.get/post/... — never put
+        -- it in modules.
         "hull/attachment@1",
         "hull/web/attachment-serve@1",
         "hull/blob@1",
-        "hull/fs@1",
-        "hull/mime@1",
         "hull/time@1",
     },
     -- Attachments live under data/. blob.init creates data/blobs/ on
@@ -338,7 +338,7 @@ end)
 -- Paginated search. Hit by the search input's hx-get (debounced
 -- keyup) AND by the pagination nav's hx-get links — both target
 -- the same #entry-feed wrapper so a single response shape (the
--- _todo_feed.html partial = ul + nav) refreshes BOTH the row list
+-- _entry_feed.html partial = ul + nav) refreshes BOTH the row list
 -- AND the page links in one swap. Plain (non-HTMX) navigation falls
 -- through to a redirect to / with the query preserved so back/forward
 -- still work.

@@ -26,7 +26,6 @@ const PER_PAGE_DEFAULT = 3;
 
 app.manifest({
     modules: [
-        "hull/http-server@1",
         "hull/web/htmx@1",
         "hull/web/flash@1",
         "hull/web/pagination@1",
@@ -40,12 +39,13 @@ app.manifest({
         "hull/web/form@1",
         "hull/db@1",
         "hull/log@1",
-        // Photo attachments (§1.5.b-5).
+        // Photo attachments (§1.5.b-5). fs / mime are transitive
+        // (used by blob + attachment internally), not imported here.
+        // http-server is intrinsic via app.get/post/... - never put
+        // it in modules.
         "hull/attachment@1",
         "hull/web/attachment-serve@1",
         "hull/blob@1",
-        "hull/fs@1",
-        "hull/mime@1",
         "hull/time@1",
     ],
     fs: { write: ["data/"] },

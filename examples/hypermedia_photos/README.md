@@ -34,8 +34,8 @@ templates/
   base.html              <head>+<body> skeleton with nonce'd <script>/<link>
   pages/home.html        full-page render
   partials/
-    todo_form.html       reusable form + CSRF token field
-    todo_row.html        single-row fragment for htmx swaps
+    entry_form.html      reusable form + CSRF token field
+    entry_row.html       single-row fragment for htmx swaps
 static/
   vendor/htmx.min.js          (fetched by make fetch-vendor)
   vendor/pico.classless.min.css   (fetched by make fetch-vendor)
