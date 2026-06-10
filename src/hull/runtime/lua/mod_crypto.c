@@ -743,6 +743,44 @@ static int lua_crypto_hmac_sha256(lua_State *L)
     return 1;
 }
 
+/* crypto.hmac_sha1(data, key_hex) → 40-char hex string.
+ *
+ * HOTP/TOTP compatibility only — see hl_cap_crypto_hmac_sha1 docstring.
+ * The key is hex-encoded to match the hmac_sha256 binding convention;
+ * binary keys go through bytes_to_hex at the call site.
+ */
+static int lua_crypto_hmac_sha1(lua_State *L)
+{
+    size_t data_len;
+    const char *data = luaL_checklstring(L, 1, &data_len);
+    size_t key_hex_len;
+    const char *key_hex = luaL_checklstring(L, 2, &key_hex_len);
+
+    if (key_hex_len % 2 != 0 || key_hex_len == 0 || key_hex_len > 256)
+        return luaL_error(L, "key must be 1-128 bytes (2-256 hex chars)");
+
+    size_t key_len = key_hex_len / 2;
+    uint8_t key[128];
+    if (hex_decode(key_hex, key_hex_len, key, key_len) != 0)
+        return luaL_error(L, "invalid hex in key");
+
+    uint8_t out[20];
+    if (hl_cap_crypto_hmac_sha1(key, key_len,
+                                (const uint8_t *)data, data_len, out) != 0) {
+        secure_zero(key, sizeof(key));
+        return luaL_error(L, "hmac_sha1 failed");
+    }
+    secure_zero(key, sizeof(key));
+
+    char hex[41];
+    for (int i = 0; i < 20; i++)
+        snprintf(hex + i * 2, 3, "%02x", out[i]);
+    hex[40] = '\0';
+
+    lua_pushstring(L, hex);
+    return 1;
+}
+
 /* crypto.hmac_sha256_verify(data, key_hex, expected_hex) → boolean */
 static int lua_crypto_hmac_sha256_verify(lua_State *L)
 {
@@ -937,6 +975,7 @@ static const luaL_Reg crypto_funcs[] = {
     {"box_keypair",       lua_crypto_box_keypair},
     {"hmac_sha256",       lua_crypto_hmac_sha256},
     {"hmac_sha256_verify", lua_crypto_hmac_sha256_verify},
+    {"hmac_sha1",         lua_crypto_hmac_sha1},
     {"base64url_encode",  lua_crypto_base64url_encode},
     {"base64url_decode",  lua_crypto_base64url_decode},
     {NULL, NULL}

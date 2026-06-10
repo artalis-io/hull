@@ -775,6 +775,26 @@ int hl_cap_crypto_hmac_sha256(const uint8_t *key, size_t key_len,
     return 0;
 }
 
+/* ── HMAC-SHA1 (HOTP/TOTP compatibility, vtable-dispatched) ────────── */
+
+int hl_cap_crypto_hmac_sha1(const uint8_t *key, size_t key_len,
+                            const uint8_t *msg, size_t msg_len,
+                            uint8_t out[20])
+{
+    /* New symmetric primitives in cap/ go through a backend vtable so
+     * the impl can be swapped (mbedTLS today; could be BoringSSL,
+     * WolfSSL, hardware token later) without disturbing the cap
+     * surface or the Lua / JS bindings. Same convention as
+     * HlCryptoAsymBackend.  The existing hl_cap_crypto_hmac_sha256
+     * call mbedTLS/TweetNaCl directly because they shipped before
+     * the vtable convention; hmac_sha1 is new and ships through the
+     * vtable from day one. */
+    return hl_crypto_hmac_backend_mbedtls.compute(
+        &hl_crypto_hmac_backend_mbedtls,
+        HL_CRYPTO_HMAC_SHA1,
+        key, key_len, msg, msg_len, out, 20);
+}
+
 /* ── HMAC-SHA256 verify (constant-time) ────────────────────────────── */
 
 int hl_cap_crypto_hmac_sha256_verify(const uint8_t *key, size_t key_len,

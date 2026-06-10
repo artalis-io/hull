@@ -158,6 +158,78 @@ int hl_cap_crypto_hmac_sha256_verify(const uint8_t *key, size_t key_len,
                                       const uint8_t *msg, size_t msg_len,
                                       const uint8_t expected[32]);
 
+/* ── HMAC backend vtable + HMAC-SHA1 (HOTP/TOTP only) ──────────────── */
+
+/** HMAC algorithm identifier. Values are stable wire-level integers;
+ *  backend impls and tests rely on them as dispatch keys. Don't
+ *  renumber.
+ */
+typedef enum {
+    HL_CRYPTO_HMAC_NONE   = 0, /**< Sentinel: rejected by every compute path. */
+    HL_CRYPTO_HMAC_SHA1   = 1, /**< HMAC-SHA1, 20-byte output. HOTP/TOTP only. */
+    HL_CRYPTO_HMAC_SHA256 = 2, /**< HMAC-SHA256, 32-byte output. */
+    HL_CRYPTO_HMAC_SHA512 = 3, /**< HMAC-SHA512, 64-byte output. */
+} HlCryptoHmacAlg;
+
+/** Backend vtable for HMAC compute. Same swap-friendly convention as
+ *  HlCryptoAsymBackend / HlCompilerVtable / HlGpuBackendVtable.
+ *
+ *  The existing hl_cap_crypto_hmac_sha256 calls mbedTLS / TweetNaCl
+ *  directly (it shipped before the vtable convention); new HMAC work
+ *  goes through this interface from day one so impls can be swapped
+ *  (mbedTLS today; could be WolfSSL, BoringSSL, a hardware token
+ *  later) without disturbing the cap surface or the Lua / JS
+ *  bindings.
+ */
+typedef struct HlCryptoHmacBackend {
+    /** Returns 1 if the backend can compute HMAC under this alg. */
+    int (*supports)(HlCryptoHmacAlg alg);
+
+    /** Compute HMAC(key, msg) under @p alg. @p out_len must equal the
+     *  alg's digest size (20 for SHA1, 32 for SHA256, 64 for SHA512);
+     *  truncation is the caller's responsibility. Returns 0 on
+     *  success, -1 on internal failure or unsupported alg.
+     */
+    int (*compute)(const struct HlCryptoHmacBackend *self,
+                   HlCryptoHmacAlg alg,
+                   const uint8_t *key, size_t key_len,
+                   const uint8_t *msg, size_t msg_len,
+                   uint8_t *out, size_t out_len);
+} HlCryptoHmacBackend;
+
+/** Built-in mbedTLS HMAC backend. Always present in builds that link
+ *  mbedTLS (any build with `HL_ENABLE_HTTP_CLIENT=1` or
+ *  `HL_ENABLE_HTTP_SERVER=1`). On builds without mbedTLS the symbol
+ *  still exists but every compute call returns -1.
+ */
+extern const HlCryptoHmacBackend hl_crypto_hmac_backend_mbedtls;
+
+/**
+ * @brief Compute HMAC-SHA1.
+ *
+ * SHA-1 is cryptographically deprecated for general hashing. This
+ * primitive exists ONLY to implement HOTP (RFC 4226) and TOTP
+ * (RFC 6238), both of which fix HMAC-SHA1 in the on-the-wire format
+ * that authenticator apps (Google Authenticator, Authy, 1Password,
+ * etc.) interoperate over. Do NOT use this for new MAC schemes —
+ * use `hl_cap_crypto_hmac_sha256` instead.
+ *
+ * Dispatched through @ref HlCryptoHmacBackend so the impl can be
+ * swapped. No raw SHA-1 primitive is exposed.
+ *
+ * @param key      HMAC key bytes.
+ * @param key_len  Key length. Keys longer than 64 bytes are hashed
+ *                 first (RFC 2104 step 1) by the backend.
+ * @param msg      Message bytes.
+ * @param msg_len  Message length.
+ * @param out      20-byte output buffer.
+ *
+ * @return `0` on success, `-1` on internal failure.
+ */
+int hl_cap_crypto_hmac_sha1(const uint8_t *key, size_t key_len,
+                            const uint8_t *msg, size_t msg_len,
+                            uint8_t out[20]);
+
 /* ── HMAC-SHA512/256 (NaCl crypto_auth) ────────────────────────────── */
 
 /**

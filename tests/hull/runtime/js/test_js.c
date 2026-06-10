@@ -1791,6 +1791,55 @@ UTEST(js_cap, crypto_hmac_sha256)
     cleanup_js_caps();
 }
 
+UTEST(js_cap, crypto_hmac_sha1)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    /* RFC 2202 Test Case 2 + RFC 6238 TOTP counter=1 reference vector.
+     * The HMAC-SHA1 cap dispatches through HlCryptoHmacBackend; this
+     * proves the binding routes through the vtable to mbedTLS
+     * correctly. Pre-TOTP smoke check before the TOTP module ships.
+     *
+     * For the TOTP vector, the 8-byte big-endian counter is built
+     * via Uint8Array — js_get_buffer's TypedArray branch (fixed in
+     * the prior commit) makes that pass cleanly through hmacSha1's
+     * data argument as a string. The counter is the literal bytes
+     * 00 00 00 00 00 00 00 01 — encoded as Latin-1 string so each
+     * char code maps to one byte (TOTP message is short so the
+     * UTF-8-vs-bytes pitfall doesn't fire; bytes are all < 0x80
+     * except possibly the last position). */
+    const char *code =
+        "import { crypto } from 'hull:crypto';\n"
+        /* Test 1: RFC 2202 case 2 — text input, no binary pitfalls. */
+        "globalThis.__test_h1_rfc = crypto.hmacSha1("
+        "  'what do ya want for nothing?', '4a656665');\n"
+        /* Test 2: RFC 6238 TOTP counter=1, key='12345678901234567890'.
+         * Counter built as 8-byte BE string via String.fromCharCode. */
+        "const counter = String.fromCharCode(0,0,0,0,0,0,0,1);\n"
+        "globalThis.__test_h1_totp = crypto.hmacSha1("
+        "  counter, '3132333435363738393031323334353637383930');\n";
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    char *rfc = eval_str("globalThis.__test_h1_rfc");
+    ASSERT_NE(rfc, NULL);
+    ASSERT_STREQ(rfc, "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79");
+    free(rfc);
+
+    char *totp = eval_str("globalThis.__test_h1_totp");
+    ASSERT_NE(totp, NULL);
+    ASSERT_STREQ(totp, "75a48a19d4cbe100644e8ac1397eea747a2d33ab");
+    free(totp);
+
+    cleanup_js_caps();
+}
+
 UTEST(js_cap, crypto_base64url_roundtrip)
 {
     init_js_with_caps();

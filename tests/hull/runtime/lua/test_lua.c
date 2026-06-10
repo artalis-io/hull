@@ -2078,6 +2078,38 @@ UTEST(lua_cap, crypto_hmac_sha256)
     cleanup_lua_caps();
 }
 
+UTEST(lua_cap, crypto_hmac_sha1)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* RFC 2202 Test Case 2: key="Jefe", data="what do ya want for nothing?".
+     * Provides binding-level proof that the vtable dispatches correctly
+     * to mbedTLS for SHA-1. */
+    char *hmac = eval_str(
+        "crypto.hmac_sha1('what do ya want for nothing?', '4a656665')");
+    ASSERT_NE(hmac, NULL);
+    ASSERT_STREQ(hmac, "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79");
+    free(hmac);
+
+    /* RFC 6238 TOTP HMAC-SHA1 reference vector for T = 59 (counter = 1).
+     *
+     * The spec uses key "12345678901234567890" (ASCII) which is hex
+     * 3132333435363738393031323334353637383930. Counter 1 encodes
+     * to the big-endian 8-byte value 0x0000000000000001.
+     *
+     * Build the 8-byte BE counter in Lua via string.pack — proves
+     * the full TOTP-style call sequence works through the binding. */
+    char *vec = eval_str(
+        "crypto.hmac_sha1(string.pack('>I8', 1), "
+        "'3132333435363738393031323334353637383930')");
+    ASSERT_NE(vec, NULL);
+    ASSERT_STREQ(vec, "75a48a19d4cbe100644e8ac1397eea747a2d33ab");
+    free(vec);
+
+    cleanup_lua_caps();
+}
+
 UTEST(lua_cap, crypto_base64url_roundtrip)
 {
     init_lua_with_caps();

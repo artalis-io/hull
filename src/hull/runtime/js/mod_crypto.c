@@ -977,6 +977,59 @@ static JSValue js_crypto_hmac_sha256(JSContext *ctx, JSValueConst this_val,
     return JS_NewString(ctx, hex);
 }
 
+/* crypto.hmacSha1(data, keyHex) -> 40-char hex string.
+ *
+ * HOTP/TOTP compatibility only — see hl_cap_crypto_hmac_sha1 docstring.
+ * The key is hex-encoded to match the hmacSha256 binding convention.
+ */
+static JSValue js_crypto_hmac_sha1(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 2)
+        return JS_ThrowTypeError(ctx, "crypto.hmacSha1 requires (data, keyHex)");
+
+    size_t data_len;
+    const char *data = JS_ToCStringLen(ctx, &data_len, argv[0]);
+    if (!data) return JS_EXCEPTION;
+
+    size_t key_hex_len;
+    const char *key_hex = JS_ToCStringLen(ctx, &key_hex_len, argv[1]);
+    if (!key_hex) { JS_FreeCString(ctx, data); return JS_EXCEPTION; }
+
+    if (key_hex_len % 2 != 0 || key_hex_len == 0 || key_hex_len > 256) {
+        JS_FreeCString(ctx, data);
+        JS_FreeCString(ctx, key_hex);
+        return JS_ThrowTypeError(ctx, "key must be 1-128 bytes (2-256 hex chars)");
+    }
+
+    size_t key_len = key_hex_len / 2;
+    uint8_t key[128];
+    if (hex_decode(key_hex, key_hex_len, key, key_len) != 0) {
+        JS_FreeCString(ctx, data);
+        JS_FreeCString(ctx, key_hex);
+        return JS_ThrowTypeError(ctx, "invalid hex in key");
+    }
+    JS_FreeCString(ctx, key_hex);
+
+    uint8_t out[20];
+    if (hl_cap_crypto_hmac_sha1(key, key_len,
+                                (const uint8_t *)data, data_len, out) != 0) {
+        JS_FreeCString(ctx, data);
+        secure_zero(key, sizeof(key));
+        return JS_ThrowInternalError(ctx, "hmacSha1 failed");
+    }
+    JS_FreeCString(ctx, data);
+    secure_zero(key, sizeof(key));
+
+    char hex[41];
+    for (int i = 0; i < 20; i++)
+        snprintf(hex + i * 2, 3, "%02x", out[i]);
+    hex[40] = '\0';
+
+    return JS_NewString(ctx, hex);
+}
+
 /* crypto.hmacSha256Verify(data, keyHex, expectedHex) -> boolean */
 static JSValue js_crypto_hmac_sha256_verify(JSContext *ctx, JSValueConst this_val,
                                              int argc, JSValueConst *argv)
@@ -1270,6 +1323,8 @@ static int js_crypto_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_crypto_box_keypair, "boxKeypair", 0));
     JS_SetPropertyStr(ctx, crypto, "hmacSha256",
                       JS_NewCFunction(ctx, js_crypto_hmac_sha256, "hmacSha256", 2));
+    JS_SetPropertyStr(ctx, crypto, "hmacSha1",
+                      JS_NewCFunction(ctx, js_crypto_hmac_sha1, "hmacSha1", 2));
     JS_SetPropertyStr(ctx, crypto, "hmacSha256Verify",
                       JS_NewCFunction(ctx, js_crypto_hmac_sha256_verify, "hmacSha256Verify", 3));
     JS_SetPropertyStr(ctx, crypto, "base64urlEncode",
