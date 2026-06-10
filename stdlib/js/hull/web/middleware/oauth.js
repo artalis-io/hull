@@ -1,0 +1,578 @@
+/**
+ * @file hull:web:middleware:oauth
+ * @module hull:web:middleware:oauth
+ * @description OAuth 2.0 / OIDC Authorization Code flow with PKCE.
+ *
+ * Lua parity: `hull.web.middleware.oauth` (snake_case keys ↔ camelCase
+ * here). Same three-route surface, same PKCE/state/JWKS semantics.
+ *
+ * @license AGPL-3.0-or-later
+ *
+ * ## What this module does
+ *
+ *   GET /auth/:provider/login    -> 302 to IdP authorize endpoint with
+ *                                   PKCE challenge + signed state cookie.
+ *   GET /auth/:provider/callback -> exchanges code for tokens, verifies
+ *                                   ID token via JWKS x5c, validates
+ *                                   iss / aud / exp / nonce, calls
+ *                                   onLogin(req, res, provider, claims,
+ *                                   tokens), 302s to return URL.
+ *   GET /auth/logout             -> clears state cookies; optional
+ *                                   onLogout clears app session.
+ *
+ * ## Security
+ *
+ *   - State + nonce HMAC-signed cookie; the IdP echoes them back, the
+ *     callback rejects on mismatch (CSRF + cross-provider replay).
+ *   - PKCE S256 protects against auth-code interception.
+ *   - ID token verified via JWKS (cached per process, kid-based
+ *     refresh). x5c base64-DER -> SPKI PEM via crypto.x509PubkeyPem.
+ *   - `alg = "none"` rejected unconditionally; allowed-alg list
+ *     enforced before any key lookup (jwt.verify's gate).
+ *   - State cookie is HttpOnly + SameSite=Lax + 10-minute TTL.
+ *
+ * @example
+ *   import { oauth } from "hull:web:middleware:oauth";
+ *   oauth.init({
+ *       stateSecret: env.get("OAUTH_STATE_SECRET"),
+ *       providers: {
+ *           entra: {
+ *               preset: "microsoft",
+ *               tenant: "00000000-0000-0000-0000-000000000000",
+ *               clientId: env.get("ENTRA_CLIENT_ID"),
+ *               clientSecret: env.get("ENTRA_CLIENT_SECRET"),
+ *               scopes: ["openid", "profile", "email"],
+ *           },
+ *           google: {
+ *               preset: "google",
+ *               clientId: env.get("GOOGLE_CLIENT_ID"),
+ *               clientSecret: env.get("GOOGLE_CLIENT_SECRET"),
+ *           },
+ *       },
+ *       onLogin: async (req, res, provider, claims, tokens) => {
+ *           const user = await findOrCreateUser(claims.sub, claims.email);
+ *           session.createForUser(req, res, user.id);
+ *           return "/";
+ *       },
+ *   });
+ *   oauth.routes(app);
+ */
+
+import { crypto } from "hull:crypto";
+import { cookie } from "hull:web:cookie";
+import { json } from "hull:json";
+import { jwt } from "hull:jwt";
+import { time } from "hull:time";
+import { httpClient } from "hull:http-client";
+import { log } from "hull:log";
+
+// ── Module state ───────────────────────────────────────────────────
+
+const _state = {
+    stateSecretHex: null,
+    stateCookie:    "_oauth_state",
+    stateTtl:       600,
+    providers:      {},  // name -> resolved cfg
+    onLogin:        null,
+    onLogout:       null,
+    loginPath:      "/auth/{provider}/login",
+    callbackPath:   "/auth/{provider}/callback",
+    logoutPath:     "/auth/logout",
+    _jwksCache:     {},  // name -> { fetchedAt, byKid: { kid: pem } }
+};
+
+// ── Provider presets ───────────────────────────────────────────────
+
+const PRESETS = {
+    google: (_opts) => ({
+        authorizationEndpoint: "https://accounts.google.com/o/oauth2/v2/auth",
+        tokenEndpoint:         "https://oauth2.googleapis.com/token",
+        jwksUri:               "https://www.googleapis.com/oauth2/v3/certs",
+        issuer:                "https://accounts.google.com",
+    }),
+    microsoft: (opts) => {
+        // Tenant default `common` accepts any Microsoft account.
+        // For a specific Entra tenant pass GUID or domain.
+        // Note: on /common the ID token's `iss` is the tenant id (not
+        // "common"); apps pinning to a specific tenant should pass
+        // `tenant = "<tid>"` so this issuer string matches exactly.
+        const tenant = opts.tenant || "common";
+        const base = "https://login.microsoftonline.com/" + tenant;
+        return {
+            authorizationEndpoint: base + "/oauth2/v2.0/authorize",
+            tokenEndpoint:         base + "/oauth2/v2.0/token",
+            jwksUri:               base + "/discovery/v2.0/keys",
+            issuer:                base + "/v2.0",
+        };
+    },
+};
+
+// ── Helpers ────────────────────────────────────────────────────────
+
+// crypto.hmacSha256 takes the key as a hex string. We pre-encode the
+// secret bytes once at init and reuse the hex form.
+function bytesToHex(s) {
+    let h = "";
+    for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        h += (c < 16 ? "0" : "") + c.toString(16);
+    }
+    return h;
+}
+
+function hexToBytes(h) {
+    const u8 = new Uint8Array(h.length >> 1);
+    for (let i = 0, j = 0; i < h.length; i += 2, j++) {
+        u8[j] = parseInt(h.substr(i, 2), 16);
+    }
+    return u8;
+}
+
+// crypto.base64urlEncode runs JS_ToCStringLen on its argument, which
+// stringifies an ArrayBuffer to "[object ArrayBuffer]" — useless for
+// binary. JWT.js has the same problem and works around it with a
+// Uint8Array-based decoder; we need the encoder direction here.
+const B64_ENC =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+function bytesToBase64url(u8) {
+    const n = u8.length;
+    const groups = (n / 3) | 0;
+    const tail = n % 3;
+    let out = "";
+    for (let i = 0; i < groups; i++) {
+        const a = u8[i * 3], b = u8[i * 3 + 1], c = u8[i * 3 + 2];
+        out += B64_ENC[a >> 2]
+             + B64_ENC[((a & 0x3) << 4) | (b >> 4)]
+             + B64_ENC[((b & 0xf) << 2) | (c >> 6)]
+             + B64_ENC[c & 0x3f];
+    }
+    if (tail === 1) {
+        const a = u8[n - 1];
+        out += B64_ENC[a >> 2] + B64_ENC[(a & 0x3) << 4];
+    } else if (tail === 2) {
+        const a = u8[n - 2], b = u8[n - 1];
+        out += B64_ENC[a >> 2]
+             + B64_ENC[((a & 0x3) << 4) | (b >> 4)]
+             + B64_ENC[(b & 0xf) << 2];
+    }
+    return out;
+}
+
+function randomUrlsafe(nBytes) {
+    return bytesToBase64url(new Uint8Array(crypto.random(nBytes)));
+}
+
+// PKCE per RFC 7636: verifier is 32 random bytes (~43 base64url chars),
+// challenge = base64url(SHA-256(verifier)).
+function pkcePair() {
+    const verifier = randomUrlsafe(32);
+    const shaHex = crypto.sha256(verifier);
+    const challenge = bytesToBase64url(hexToBytes(shaHex));
+    return [verifier, challenge];
+}
+
+function urlenc(s) {
+    return encodeURIComponent(s).replace(/[!'()*]/g, (c) =>
+        "%" + c.charCodeAt(0).toString(16).toUpperCase());
+}
+
+// Sorted query params for deterministic test output.
+function buildUrl(base, params) {
+    const parts = [];
+    for (const k in params) {
+        if (Object.prototype.hasOwnProperty.call(params, k)) {
+            parts.push(urlenc(k) + "=" + urlenc(params[k]));
+        }
+    }
+    parts.sort();
+    if (parts.length === 0) return base;
+    const sep = base.indexOf("?") >= 0 ? "&" : "?";
+    return base + sep + parts.join("&");
+}
+
+// Standard base64 (JWKS x5c) -> base64url for direct binary decoding.
+function b64ToB64url(s) {
+    return s.replace(/[\s\r\n]/g, "")
+            .replace(/=/g, "")
+            .replace(/\+/g, "-")
+            .replace(/\//g, "_");
+}
+
+// QuickJS strings corrupt binary > 127 through UTF-8 inflation. JWKS
+// x5c is binary DER, so we use a Uint8Array decoder (mirrors jwt.js's
+// approach for binary JWS signatures).
+const B64_DEC = (() => {
+    const t = new Int8Array(256).fill(-1);
+    const a = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    for (let i = 0; i < a.length; i++) t[a.charCodeAt(i)] = i;
+    t["+".charCodeAt(0)] = 62;
+    t["/".charCodeAt(0)] = 63;
+    return t;
+})();
+function b64Lookup(s, i) {
+    const c = s.charCodeAt(i);
+    if (c > 255) return -1;
+    return B64_DEC[c];
+}
+function base64urlToBytes(s) {
+    let n = s.length;
+    while (n > 0 && s.charCodeAt(n - 1) === 61) n--;
+    const groups = n >> 2;
+    const tail = n & 3;
+    if (tail === 1) return null;
+    let outLen = groups * 3;
+    if (tail === 2) outLen += 1;
+    else if (tail === 3) outLen += 2;
+    const u8 = new Uint8Array(outLen);
+    let si = 0, di = 0;
+    for (let g = 0; g < groups; g++) {
+        const a = b64Lookup(s, si++);
+        const b = b64Lookup(s, si++);
+        const c = b64Lookup(s, si++);
+        const d = b64Lookup(s, si++);
+        if ((a | b | c | d) < 0) return null;
+        u8[di++] = (a << 2) | (b >> 4);
+        u8[di++] = ((b & 0xf) << 4) | (c >> 2);
+        u8[di++] = ((c & 0x3) << 6) | d;
+    }
+    if (tail === 2) {
+        const a = b64Lookup(s, si++);
+        const b = b64Lookup(s, si++);
+        if ((a | b) < 0) return null;
+        u8[di++] = (a << 2) | (b >> 4);
+    } else if (tail === 3) {
+        const a = b64Lookup(s, si++);
+        const b = b64Lookup(s, si++);
+        const c = b64Lookup(s, si++);
+        if ((a | b | c) < 0) return null;
+        u8[di++] = (a << 2) | (b >> 4);
+        u8[di++] = ((b & 0xf) << 4) | (c >> 2);
+    }
+    return u8;
+}
+
+// ── State cookie ───────────────────────────────────────────────────
+
+function signState(envelope) {
+    envelope.exp = time.now() + _state.stateTtl;
+    const body = crypto.base64urlEncode(json.encode(envelope));
+    const tag = crypto.hmacSha256(body, _state.stateSecretHex);
+    return body + "." + tag;
+}
+
+function verifyState(cookieValue) {
+    if (!cookieValue) return [null, "empty"];
+    const dot = cookieValue.indexOf(".");
+    if (dot < 0) return [null, "malformed"];
+    const body = cookieValue.substring(0, dot);
+    const tag = cookieValue.substring(dot + 1);
+    // Constant-time verify in the cap layer.
+    const ok = crypto.hmacSha256Verify(body, _state.stateSecretHex, tag);
+    if (!ok) return [null, "bad tag"];
+    const raw = crypto.base64urlDecode(body);
+    if (raw === null || raw === undefined) return [null, "bad encoding"];
+    let env;
+    try { env = json.decode(raw); }
+    catch (_e) { return [null, "bad json"]; }
+    if (!env || typeof env !== "object") return [null, "bad json"];
+    if (typeof env.exp !== "number" || time.now() >= env.exp) {
+        return [null, "expired"];
+    }
+    return [env, null];
+}
+
+// ── JWKS cache ─────────────────────────────────────────────────────
+
+async function refreshJwks(providerName) {
+    const cfg = _state.providers[providerName];
+    if (!cfg) return null;
+    const resp = await httpClient.async.get(cfg.jwksUri);
+    if (!resp || resp.status !== 200 || !resp.body) return null;
+    let doc;
+    try { doc = json.decode(resp.body); }
+    catch (_e) { return null; }
+    if (!doc || !Array.isArray(doc.keys)) return null;
+    const byKid = {};
+    for (const k of doc.keys) {
+        if (k && k.kid && Array.isArray(k.x5c) && typeof k.x5c[0] === "string") {
+            const u8 = base64urlToBytes(b64ToB64url(k.x5c[0]));
+            if (u8) {
+                const pem = crypto.x509PubkeyPem(u8.buffer);
+                if (pem) byKid[k.kid] = pem;
+            }
+        }
+    }
+    _state._jwksCache[providerName] = { fetchedAt: time.now(), byKid };
+    return byKid;
+}
+
+function jwksResolver(providerName) {
+    return async (kid, _alg) => {
+        const cache = _state._jwksCache[providerName];
+        if (cache && cache.byKid[kid]) return cache.byKid[kid];
+        const byKid = await refreshJwks(providerName);
+        return byKid ? (byKid[kid] || null) : null;
+    };
+}
+
+// ── Route handlers ─────────────────────────────────────────────────
+
+function computeRedirectUri(req, providerName) {
+    const proto = req.headers["x-forwarded-proto"] || "http";
+    const host  = req.headers["x-forwarded-host"]
+                  || req.headers.host || "localhost";
+    return proto + "://" + host
+        + _state.callbackPath.replace("{provider}", providerName);
+}
+
+function handleLogin(req, res) {
+    const providerName = req.params && req.params.provider;
+    const cfg = providerName ? _state.providers[providerName] : null;
+    if (!cfg) { res.status(404).html("unknown provider"); return; }
+
+    const [verifier, challenge] = pkcePair();
+    const stateValue = randomUrlsafe(16);
+    const nonceValue = randomUrlsafe(16);
+    const returnTo = (req.query && req.query.return_to) || "/";
+
+    // Bind envelope to this provider so a cookie minted for
+    // /auth/microsoft/login can't be replayed against /auth/google/callback.
+    const signed = signState({
+        provider:  providerName,
+        verifier:  verifier,
+        state:     stateValue,
+        nonce:     nonceValue,
+        return_to: returnTo,
+    });
+    res.header("Set-Cookie", cookie.serialize(
+        _state.stateCookie, signed,
+        { httpOnly: true, sameSite: "Lax",
+          path: "/", maxAge: _state.stateTtl }));
+
+    const params = {
+        client_id:     cfg.clientId,
+        redirect_uri:  computeRedirectUri(req, providerName),
+        response_type: "code",
+        scope:         cfg.scopes.join(" "),
+        state:         stateValue,
+        nonce:         nonceValue,
+        code_challenge:        challenge,
+        code_challenge_method: "S256",
+    };
+    res.redirect(buildUrl(cfg.authorizationEndpoint, params));
+}
+
+async function handleCallback(req, res) {
+    const providerName = req.params && req.params.provider;
+    const cfg = providerName ? _state.providers[providerName] : null;
+    if (!cfg) { res.status(404).html("unknown provider"); return; }
+
+    // 1. Read + verify state cookie.
+    const cookies = cookie.parse(req.headers.cookie || "");
+    const [env, err] = verifyState(cookies[_state.stateCookie]);
+    if (!env) {
+        log.warn("oauth: state verify failed: " + String(err));
+        res.status(400).html("auth failed"); return;
+    }
+    if (env.provider !== providerName) {
+        res.status(400).html("auth failed"); return;
+    }
+
+    // 2. Query state.
+    const q = req.query || {};
+    if (q.error) {
+        log.warn("oauth: provider returned error: " + String(q.error));
+        res.status(400).html("auth failed"); return;
+    }
+    if (!q.code || q.state !== env.state) {
+        res.status(400).html("auth failed"); return;
+    }
+
+    // 3. Token exchange.
+    const redirectUri = computeRedirectUri(req, providerName);
+    const bodyParams = {
+        grant_type:    "authorization_code",
+        code:          q.code,
+        redirect_uri:  redirectUri,
+        client_id:     cfg.clientId,
+        code_verifier: env.verifier,
+    };
+    if (cfg.clientSecret) bodyParams.client_secret = cfg.clientSecret;
+    const bodyParts = [];
+    for (const k in bodyParams) {
+        if (Object.prototype.hasOwnProperty.call(bodyParams, k)) {
+            bodyParts.push(urlenc(k) + "=" + urlenc(bodyParams[k]));
+        }
+    }
+    const resp = await httpClient.async.post(cfg.tokenEndpoint,
+        bodyParts.join("&"),
+        { headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+        }});
+    if (!resp || resp.status !== 200 || !resp.body) {
+        log.warn("oauth: token exchange failed: " +
+                 String(resp && resp.status));
+        res.status(502).html("auth failed"); return;
+    }
+    let tokens;
+    try { tokens = json.decode(resp.body); }
+    catch (_e) { res.status(502).html("auth failed"); return; }
+    if (!tokens || typeof tokens.id_token !== "string") {
+        res.status(502).html("auth failed"); return;
+    }
+
+    // 4. Verify ID token. HS256 excluded - OIDC IdPs use asym.
+    const resolver = jwksResolver(providerName);
+    // jwt.verify's resolver is called synchronously in our codepath
+    // (jwt.verify is sync). To support async JWKS fetch we pre-warm
+    // the cache by attempting one refresh before verify.
+    if (!_state._jwksCache[providerName]) {
+        await refreshJwks(providerName);
+    }
+    const syncResolver = (kid, _alg) => {
+        const cache = _state._jwksCache[providerName];
+        return (cache && cache.byKid[kid]) ? cache.byKid[kid] : null;
+    };
+    let claims, jerr;
+    [claims, jerr] = jwt.verify(tokens.id_token, syncResolver,
+        { algs: ["RS256", "RS384", "RS512", "PS256", "ES256", "ES384"] });
+    if (!claims) {
+        // Cache miss on a rotated kid? Re-fetch and retry once.
+        await refreshJwks(providerName);
+        [claims, jerr] = jwt.verify(tokens.id_token, syncResolver,
+            { algs: ["RS256", "RS384", "RS512", "PS256", "ES256", "ES384"] });
+    }
+    if (!claims) {
+        log.warn("oauth: id_token verify failed: " + String(jerr));
+        res.status(400).html("auth failed"); return;
+    }
+
+    // 5. OIDC claim checks beyond signature + exp.
+    if (claims.iss !== cfg.issuer) {
+        log.warn("oauth: iss mismatch: " + String(claims.iss));
+        res.status(400).html("auth failed"); return;
+    }
+    let audOk = false;
+    if (typeof claims.aud === "string") {
+        audOk = (claims.aud === cfg.clientId);
+    } else if (Array.isArray(claims.aud)) {
+        for (const a of claims.aud) {
+            if (a === cfg.clientId) { audOk = true; break; }
+        }
+    }
+    if (!audOk) { res.status(400).html("auth failed"); return; }
+    if (claims.nonce !== env.nonce) {
+        res.status(400).html("auth failed"); return;
+    }
+
+    // 6. Single-use state cookie - clear.
+    res.header("Set-Cookie", cookie.clear(_state.stateCookie, { path: "/" }));
+
+    // 7. Hand off to app. String return overrides target.
+    let target = env.return_to || "/";
+    if (_state.onLogin) {
+        const v = await _state.onLogin(req, res, providerName, claims, tokens);
+        if (typeof v === "string") target = v;
+    }
+    res.redirect(target);
+}
+
+async function handleLogout(req, res) {
+    res.header("Set-Cookie", cookie.clear(_state.stateCookie, { path: "/" }));
+    let target = "/";
+    if (_state.onLogout) {
+        const v = await _state.onLogout(req, res);
+        if (typeof v === "string") target = v;
+    }
+    res.redirect(target);
+}
+
+// ── Public API ─────────────────────────────────────────────────────
+
+function init(opts) {
+    if (!opts || typeof opts !== "object") {
+        throw new Error("oauth.init: opts object required");
+    }
+    if (typeof opts.stateSecret !== "string" || opts.stateSecret.length < 16) {
+        throw new Error("oauth.init: stateSecret must be a string >= 16 bytes");
+    }
+    _state.stateSecretHex = bytesToHex(opts.stateSecret);
+    _state.stateCookie = opts.stateCookie || _state.stateCookie;
+    _state.stateTtl    = opts.stateTtl    || _state.stateTtl;
+    _state.onLogin     = opts.onLogin     || null;
+    _state.onLogout    = opts.onLogout    || null;
+
+    if (!opts.providers || typeof opts.providers !== "object") {
+        throw new Error("oauth.init: providers object required");
+    }
+    _state.providers = {};
+    for (const name in opts.providers) {
+        if (!Object.prototype.hasOwnProperty.call(opts.providers, name)) continue;
+        const p = opts.providers[name];
+        if (!p || typeof p !== "object") {
+            throw new Error("oauth.init: provider '" + name + "' must be an object");
+        }
+        let resolved = {};
+        if (p.preset) {
+            const fn = PRESETS[p.preset];
+            if (!fn) {
+                throw new Error("oauth.init: unknown preset '" + p.preset +
+                                "' (known: google, microsoft)");
+            }
+            resolved = fn(p);
+        }
+        for (const k of ["authorizationEndpoint", "tokenEndpoint",
+                          "jwksUri", "issuer"]) {
+            if (p[k]) resolved[k] = p[k];
+        }
+        for (const k of ["authorizationEndpoint", "tokenEndpoint",
+                          "jwksUri", "issuer"]) {
+            if (typeof resolved[k] !== "string") {
+                throw new Error("oauth.init: provider '" + name +
+                                "' missing " + k +
+                                " (use a preset or supply explicitly)");
+            }
+        }
+        if (typeof p.clientId !== "string") {
+            throw new Error("oauth.init: provider '" + name + "' missing clientId");
+        }
+        resolved.clientId     = p.clientId;
+        resolved.clientSecret = p.clientSecret || null;
+        resolved.scopes       = p.scopes || ["openid", "profile", "email"];
+        if (!Array.isArray(resolved.scopes)) {
+            throw new Error("oauth.init: provider '" + name +
+                            "' scopes must be an array");
+        }
+        _state.providers[name] = resolved;
+    }
+}
+
+function routes(app) {
+    if (!_state.stateSecretHex) {
+        throw new Error("oauth.routes: oauth.init() must be called first");
+    }
+    app.get(_state.loginPath.replace("{provider}", ":provider"), handleLogin);
+    app.get(_state.callbackPath.replace("{provider}", ":provider"), handleCallback);
+    app.get(_state.logoutPath, handleLogout);
+}
+
+// Test helpers (not public surface).
+const _test = {
+    pkcePair,
+    signState,
+    verifyState,
+    b64ToB64url,
+    base64urlToBytes,
+    refreshJwks,
+    reset: () => {
+        _state.stateSecretHex = null;
+        _state.providers      = {};
+        _state.onLogin        = null;
+        _state.onLogout       = null;
+        _state._jwksCache     = {};
+    },
+};
+
+const oauth = { init, routes, _test };
+export { oauth };

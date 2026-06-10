@@ -879,6 +879,7 @@ Register with `app.use(method, pattern, mw)`:
 | `ratelimit` | `hull.web.middleware.ratelimit` | `hull:web:middleware:ratelimit` | In-memory rate limiting with configurable windows |
 | `csrf` | `hull.web.middleware.csrf` | `hull:web:middleware:csrf` | Stateless CSRF token generation/verification |
 | `auth` | `hull.web.middleware.auth` | `hull:web:middleware:auth` | Session-based and JWT-based authentication middleware |
+| `oauth` | `hull.web.middleware.oauth` | `hull:web:middleware:oauth` | OIDC / OAuth 2.0 Authorization Code + PKCE (Google, Microsoft, generic IdPs) |
 | `session` | `hull.web.middleware.session` | `hull:web:middleware:session` | Server-side sessions backed by SQLite |
 | `logger` | `hull.web.middleware.logger` | `hull:web:middleware:logger` | Request logging with logfmt output and request IDs |
 | `transaction` | `hull.web.middleware.transaction` | `hull:web:middleware:transaction` | Wraps handlers in `db.batch()` (BEGIN IMMEDIATE..COMMIT) |
@@ -955,6 +956,33 @@ Register with `app.use(method, pattern, mw)`:
 **auth.login(req, res, user_data, opts)**. Creates session, sets cookie. Returns `session_id`.
 
 **auth.logout(req, res, opts)**. Destroys session, clears cookie.
+
+**oauth**. OIDC / OAuth 2.0 Authorization Code flow with PKCE. Owns three
+routes (`/auth/:provider/login`, `/auth/:provider/callback`, `/auth/logout`);
+verifies ID token signatures against the IdP's JWKS (x5c → SPKI PEM via
+`crypto.x509_pubkey_pem`); HMAC-signs the per-request state + nonce + PKCE
+verifier into an HttpOnly cookie so the callback can't be replayed
+cross-provider or by a CSRF.
+
+- `oauth.init(opts)`. Call once at app startup. Required: `state_secret`
+  (≥16 bytes), `providers = { name = {...}, ... }`. Optional: `state_cookie`,
+  `state_ttl`, `on_login(req, res, provider, claims, tokens) -> path?`,
+  `on_logout(req, res) -> path?`.
+- `oauth.routes(app)`. Mounts the three routes on the given app.
+- Provider config. Either `preset = "google" | "microsoft"` (plus
+  `client_id`, optional `client_secret`, `scopes`, `tenant` for Microsoft)
+  or fully-explicit `{ authorization_endpoint, token_endpoint, jwks_uri,
+  issuer, client_id, client_secret?, scopes? }`.
+- Allowed signing algs: `RS256 / RS384 / RS512 / PS256 / ES256 / ES384`
+  (HS256 excluded — OIDC IdPs don't sign ID tokens with HMAC).
+- App must declare `hull/web/middleware/oauth@1` in `manifest.modules` plus
+  add the IdP host (e.g. `accounts.google.com`, `login.microsoftonline.com`)
+  to `manifest.hosts`.
+- JS API: same shape with camelCase keys (`stateSecret`, `clientId`,
+  `clientSecret`, `onLogin`, `onLogout`).
+- See `tests/fixtures/oauth_client_lua/app.lua` for a complete worked
+  example, exercised end-to-end against a Python mock IdP via
+  `tests/e2e_oauth.sh`.
 
 **session**. Server-side sessions backed by SQLite. Requires `session.init()` at startup.
 - `session.init(opts)`. Creates `hull_sessions` table. `opts.ttl` = lifetime in seconds (default: `86400`).

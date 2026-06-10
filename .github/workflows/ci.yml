@@ -84,6 +84,10 @@ jobs:
         timeout-minutes: 2
         run: make e2e-jwt-asym
 
+      - name: OIDC OAuth flow E2E tests
+        timeout-minutes: 3
+        run: make e2e-oauth
+
       - name: Sandbox tests
         timeout-minutes: 2
         run: make e2e-sandbox

@@ -2391,6 +2391,9 @@ e2e-hypermedia-photos-upload: $(BUILDDIR)/hull
 e2e-jwt-asym: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_jwt_asym.sh
 
+e2e-oauth: $(BUILDDIR)/hull
+	RUNTIME=$(RUNTIME) sh tests/e2e_oauth.sh
+
 e2e-sandbox: $(BUILDDIR)/hull
 	sh tests/e2e_sandbox.sh
 

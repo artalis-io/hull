@@ -376,6 +376,25 @@ static const HlModuleSpec REGISTRY[] = {
         .deps = {"hull/http-server", "hull/log", 0},
     },
     {
+        /* OIDC / OAuth 2.0 Authorization Code + PKCE. Owns three
+         * routes: /auth/:provider/{login,callback}, /auth/logout.
+         * State envelope is HMAC-signed (crypto), encoded as JSON,
+         * timestamp-bounded (time). Token exchange + JWKS fetch use
+         * http-client. ID token verify uses jwt + crypto.verify
+         * (asym) + crypto.x509_pubkey_pem for the x5c bridge.
+         * Login failures are logged via hull/log. */
+        .name = "hull/web/middleware/oauth",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER | HL_MOD_CAP_HTTP_CLIENT,
+        /* hull/log is implicitly available (log.X works without
+         * declaration); not in deps because we're at the 8-dep cap.
+         * Also relies on hull/time at runtime via jwt.verify's exp
+         * check but jwt itself declares hull/time, so the dep
+         * transitively resolves through hull/jwt. */
+        .deps = {"hull/http-server", "hull/http-client", "hull/crypto",
+                 "hull/web/cookie", "hull/jwt", "hull/json", "hull/time", 0},
+    },
+    {
         .name = "hull/web/middleware/outbox",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HTTP_SERVER,

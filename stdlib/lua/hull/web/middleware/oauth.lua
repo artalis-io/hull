@@ -1,0 +1,543 @@
+--- OAuth 2.0 / OIDC Authorization Code flow with PKCE.
+--
+-- @module hull.web.middleware.oauth
+-- @license AGPL-3.0-or-later
+--
+-- Implements RFC 6749 (OAuth 2.0) + RFC 7636 (PKCE) + OIDC Core 1.0.
+-- Designed for confidential or public OIDC clients that authenticate
+-- users against a hosted IdP (Entra ID, Google, Auth0, Okta, etc.)
+-- without rolling their own crypto + flow plumbing.
+--
+-- ## What this module does
+--
+-- Three routes per OIDC client app:
+--   GET /auth/:provider/login    -> 302 to the IdP's authorize
+--                                   endpoint with PKCE challenge +
+--                                   signed state cookie.
+--   GET /auth/:provider/callback -> exchanges the auth code for
+--                                   tokens, verifies the ID token
+--                                   signature against the IdP's JWKS
+--                                   (x5c -> PEM), validates iss / aud
+--                                   / exp / nonce, then calls
+--                                   on_login(req, res, provider,
+--                                   claims, tokens) and 302s to the
+--                                   return URL.
+--   GET /auth/logout             -> clears state cookies; app's
+--                                   on_logout (optional) clears its
+--                                   own session.
+--
+-- ## What this module does NOT do
+--
+--   * Token refresh. The flow returns tokens; refresh_token (if
+--     granted) is in the `tokens` table passed to on_login - the app
+--     owns refresh strategy.
+--   * Account linking. v1 is single-provider-per-user; linking the
+--     same user across providers is a separately-reviewable feature.
+--   * SAML, LDAP, enterprise SSO. OIDC-only.
+--
+-- ## Security
+--
+--   * State + nonce bound to the request via an HMAC-signed cookie
+--     that the IdP echoes back; callback rejects on mismatch.
+--     Defense against CSRF + cross-provider replay.
+--   * PKCE (S256) protects against authorization-code interception
+--     even when the redirect path is observable.
+--   * ID token signature verified via the IdP's JWKS, fetched at
+--     callback time and cached per process with kid-based refresh.
+--   * `alg = "none"` rejected unconditionally; allowed-alg list
+--     enforced before any key lookup (jwt.verify's gate).
+--   * State cookie is HttpOnly + SameSite=Lax + 10-minute TTL.
+--
+-- ## Usage
+--
+--     local oauth = require("hull.web.middleware.oauth")
+--     oauth.init({
+--         state_secret = env.get("OAUTH_STATE_SECRET"),
+--         providers = {
+--             entra = {
+--                 preset      = "microsoft",
+--                 tenant      = "00000000-0000-0000-0000-000000000000",
+--                 client_id   = env.get("ENTRA_CLIENT_ID"),
+--                 client_secret = env.get("ENTRA_CLIENT_SECRET"),
+--                 scopes      = { "openid", "profile", "email" },
+--             },
+--             google = {
+--                 preset      = "google",
+--                 client_id   = env.get("GOOGLE_CLIENT_ID"),
+--                 client_secret = env.get("GOOGLE_CLIENT_SECRET"),
+--             },
+--         },
+--         on_login = function(req, res, provider, claims, tokens)
+--             local user = find_or_create_user(claims.sub, claims.email)
+--             session.create_for_user(req, res, user.id)
+--             return "/"  -- where to redirect after login
+--         end,
+--     })
+--     oauth.routes(app)
+
+local crypto      = require("hull.crypto")
+local cookie      = require("hull.web.cookie")
+local json        = require("hull.json")
+local jwt         = require("hull.jwt")
+local time        = require("hull.time")
+local http_client = require("hull.http-client")
+local log         = require("hull.log")
+
+local oauth = {}
+
+-- ── Module state ───────────────────────────────────────────────────
+
+local _state = {
+    state_secret_hex = nil,  -- secret bytes pre-encoded as hex (HMAC takes hex)
+    state_cookie     = "_oauth_state",
+    state_ttl        = 600,
+    providers        = {},
+    on_login         = nil,
+    on_logout        = nil,
+    -- Route templates - `{provider}` is replaced with `:provider` at
+    -- mount time so app.get sees Hull's native path-param syntax.
+    login_path       = "/auth/{provider}/login",
+    callback_path    = "/auth/{provider}/callback",
+    logout_path      = "/auth/logout",
+    -- JWKS cache: provider_name -> { fetched_at, by_kid = { kid -> pem } }
+    _jwks_cache      = {},
+}
+
+-- ── Provider presets ───────────────────────────────────────────────
+
+local PRESETS = {
+    google = function(_opts)
+        return {
+            authorization_endpoint = "https://accounts.google.com/o/oauth2/v2/auth",
+            token_endpoint         = "https://oauth2.googleapis.com/token",
+            jwks_uri               = "https://www.googleapis.com/oauth2/v3/certs",
+            issuer                 = "https://accounts.google.com",
+        }
+    end,
+    microsoft = function(opts)
+        -- Tenant default `common` accepts any Microsoft account
+        -- (consumer or work/school). For a specific Entra tenant pass
+        -- its GUID or domain. `consumers` = personal only,
+        -- `organizations` = work/school only.
+        --
+        -- Note on the `common` issuer: when using /common the ID
+        -- token's `iss` claim is the tenant id (not "common"). Apps
+        -- pinning to a specific tenant should pass `tenant = "<tid>"`
+        -- to make this preset's `issuer` match exactly.
+        local tenant = opts.tenant or "common"
+        local base = "https://login.microsoftonline.com/" .. tenant
+        return {
+            authorization_endpoint = base .. "/oauth2/v2.0/authorize",
+            token_endpoint         = base .. "/oauth2/v2.0/token",
+            jwks_uri               = base .. "/discovery/v2.0/keys",
+            issuer                 = base .. "/v2.0",
+        }
+    end,
+}
+
+-- ── Helpers ────────────────────────────────────────────────────────
+
+-- Cap layer's hmac_sha256 takes the key as a hex string. We pre-
+-- encode the secret bytes once at init and reuse the hex form.
+local function bytes_to_hex(s)
+    local parts = {}
+    for i = 1, #s do
+        parts[i] = string.format("%02x", string.byte(s, i))
+    end
+    return table.concat(parts)
+end
+
+local function hex_to_bytes(h)
+    local parts = {}
+    for i = 1, #h, 2 do
+        parts[#parts + 1] = string.char(tonumber(h:sub(i, i + 1), 16))
+    end
+    return table.concat(parts)
+end
+
+-- Cryptographically-random URL-safe string (base64url-encoded).
+local function random_urlsafe(n_bytes)
+    return crypto.base64url_encode(crypto.random(n_bytes))
+end
+
+-- PKCE per RFC 7636: verifier is 32 random bytes (~43 base64url chars);
+-- challenge = base64url(SHA-256(verifier)).
+local function pkce_pair()
+    local verifier = random_urlsafe(32)
+    local sha_hex = crypto.sha256(verifier)
+    local challenge = crypto.base64url_encode(hex_to_bytes(sha_hex))
+    return verifier, challenge
+end
+
+-- URL-encode a value (RFC 3986 unreserved set untouched).
+local function urlenc(s)
+    return (s:gsub("([^A-Za-z0-9%-._~])", function(c)
+        return string.format("%%%02X", string.byte(c))
+    end))
+end
+
+-- Build a URL with sorted query params (deterministic for tests).
+local function build_url(base, params)
+    local parts = {}
+    for k, v in pairs(params) do
+        parts[#parts + 1] = urlenc(k) .. "=" .. urlenc(v)
+    end
+    table.sort(parts)
+    if #parts == 0 then return base end
+    local sep = base:find("?", 1, true) and "&" or "?"
+    return base .. sep .. table.concat(parts, "&")
+end
+
+-- Standard base64 (JWKS x5c) -> base64url, so crypto.base64url_decode
+-- can consume it. Strips whitespace + padding, converts +/=- mapping.
+local function b64_to_b64url(s)
+    s = s:gsub("[%s\n\r]", "")
+    s = s:gsub("=", "")
+    s = s:gsub("+", "-")
+    s = s:gsub("/", "_")
+    return s
+end
+
+-- ── State cookie: sign + verify ────────────────────────────────────
+--
+-- Envelope: { provider, verifier, state, nonce, return_to, exp }.
+-- We base64url-encode the JSON body and append an HMAC-SHA256 tag
+-- computed over the encoded body. Format: `<body_b64>.<hmac_hex>`.
+-- Verify uses crypto.hmac_sha256_verify (constant-time at the C
+-- layer) and checks exp.
+
+local function sign_state(envelope)
+    envelope.exp = time.now() + _state.state_ttl
+    local body = crypto.base64url_encode(json.encode(envelope))
+    local tag = crypto.hmac_sha256(body, _state.state_secret_hex)
+    return body .. "." .. tag
+end
+
+local function verify_state(cookie_value)
+    if not cookie_value or cookie_value == "" then return nil, "empty" end
+    local dot = cookie_value:find(".", 1, true)
+    if not dot then return nil, "malformed" end
+    local body = cookie_value:sub(1, dot - 1)
+    local tag = cookie_value:sub(dot + 1)
+    -- Constant-time HMAC verify (the cap layer does the timing-safe
+    -- compare; we don't roll our own).
+    local ok = crypto.hmac_sha256_verify(body, _state.state_secret_hex, tag)
+    if not ok then return nil, "bad tag" end
+    local raw = crypto.base64url_decode(body)
+    if not raw then return nil, "bad encoding" end
+    local env = json.decode(raw)
+    if type(env) ~= "table" then return nil, "bad json" end
+    if type(env.exp) ~= "number" or time.now() >= env.exp then
+        return nil, "expired"
+    end
+    return env
+end
+
+-- ── JWKS cache ─────────────────────────────────────────────────────
+--
+-- JWKS endpoints publish a JSON object `{keys: [{kty, kid, x5c, alg,
+-- use, ...}, ...]}`. We fetch lazily, cache by provider, and rebuild
+-- on a kid miss (handles IdP key rotation). x5c[0] is a base64-DER
+-- X.509 cert; crypto.x509_pubkey_pem extracts the SPKI as PEM so
+-- jwt.verify (via crypto.verify) can consume it.
+
+local function refresh_jwks(provider_name)
+    local cfg = _state.providers[provider_name]
+    if not cfg then return nil, "unknown provider" end
+    local resp = http_client.async.get(cfg.jwks_uri)
+    if not resp or resp.status ~= 200 or not resp.body then
+        return nil, "jwks fetch failed: " .. tostring(resp and resp.status)
+    end
+    local doc = json.decode(resp.body)
+    if type(doc) ~= "table" or type(doc.keys) ~= "table" then
+        return nil, "jwks: malformed response"
+    end
+    local by_kid = {}
+    for _, k in ipairs(doc.keys) do
+        if type(k) == "table" and k.kid and type(k.x5c) == "table"
+           and type(k.x5c[1]) == "string" then
+            local der = crypto.base64url_decode(b64_to_b64url(k.x5c[1]))
+            if der then
+                local pem = crypto.x509_pubkey_pem(der)
+                if pem then by_kid[k.kid] = pem end
+            end
+        end
+    end
+    _state._jwks_cache[provider_name] = {
+        fetched_at = time.now(),
+        by_kid = by_kid,
+    }
+    return by_kid
+end
+
+local function jwks_resolver(provider_name)
+    return function(kid, _alg)
+        local cache = _state._jwks_cache[provider_name]
+        if cache and cache.by_kid[kid] then
+            return cache.by_kid[kid]
+        end
+        local by_kid = refresh_jwks(provider_name)
+        if by_kid then return by_kid[kid] end
+        return nil
+    end
+end
+
+-- ── Route handlers ─────────────────────────────────────────────────
+
+local function compute_redirect_uri(req, provider_name)
+    local proto = req.headers["x-forwarded-proto"] or "http"
+    local host  = req.headers["x-forwarded-host"]
+                  or req.headers.host or "localhost"
+    return proto .. "://" .. host
+        .. _state.callback_path:gsub("{provider}", provider_name)
+end
+
+-- GET /auth/:provider/login
+local function handle_login(req, res)
+    local provider_name = req.params and req.params.provider
+    local cfg = provider_name and _state.providers[provider_name]
+    if not cfg then return res:status(404):html("unknown provider") end
+
+    local verifier, challenge = pkce_pair()
+    local state_value = random_urlsafe(16)
+    local nonce_value = random_urlsafe(16)
+    local return_to = (req.query and req.query.return_to) or "/"
+
+    -- Bind the envelope to this provider so a cookie minted for
+    -- /auth/microsoft/login can't be replayed against /auth/google/callback.
+    local signed = sign_state({
+        provider  = provider_name,
+        verifier  = verifier,
+        state     = state_value,
+        nonce     = nonce_value,
+        return_to = return_to,
+    })
+    res:header("Set-Cookie", cookie.serialize(
+        _state.state_cookie, signed,
+        { httponly = true, samesite = "Lax",
+          path = "/", max_age = _state.state_ttl }))
+
+    local params = {
+        client_id     = cfg.client_id,
+        redirect_uri  = compute_redirect_uri(req, provider_name),
+        response_type = "code",
+        scope         = table.concat(cfg.scopes, " "),
+        state         = state_value,
+        nonce         = nonce_value,
+        code_challenge        = challenge,
+        code_challenge_method = "S256",
+    }
+    res:redirect(build_url(cfg.authorization_endpoint, params))
+end
+
+-- GET /auth/:provider/callback?code=...&state=...
+local function handle_callback(req, res)
+    local provider_name = req.params and req.params.provider
+    local cfg = provider_name and _state.providers[provider_name]
+    if not cfg then return res:status(404):html("unknown provider") end
+
+    -- 1. Read + verify state cookie.
+    local cookies = cookie.parse(req.headers.cookie or "")
+    local env, err = verify_state(cookies[_state.state_cookie])
+    if not env then
+        log.warn("oauth: state verify failed: " .. tostring(err))
+        return res:status(400):html("auth failed")
+    end
+    if env.provider ~= provider_name then
+        return res:status(400):html("auth failed")
+    end
+
+    -- 2. Match query state against envelope.
+    local q = req.query or {}
+    if q.error then
+        log.warn("oauth: provider returned error: " .. tostring(q.error))
+        return res:status(400):html("auth failed")
+    end
+    if not q.code or q.state ~= env.state then
+        return res:status(400):html("auth failed")
+    end
+
+    -- 3. Token exchange. redirect_uri MUST match the one sent at
+    --    /login per OAuth 2.0; we compute it the same way both times.
+    local redirect_uri = compute_redirect_uri(req, provider_name)
+    local body_params = {
+        grant_type    = "authorization_code",
+        code          = q.code,
+        redirect_uri  = redirect_uri,
+        client_id     = cfg.client_id,
+        code_verifier = env.verifier,
+    }
+    if cfg.client_secret then
+        body_params.client_secret = cfg.client_secret
+    end
+    local body_parts = {}
+    for k, v in pairs(body_params) do
+        body_parts[#body_parts + 1] = urlenc(k) .. "=" .. urlenc(v)
+    end
+    -- http_client.async.post's body-positional form silently drops
+    -- the body — the C shim only forwards (method, url, opts) into
+    -- lua_http_fetch, so the middle "body" arg never reaches it.
+    -- Pass the body via opts.body to keep it on the wire.
+    local resp = http_client.async.post(cfg.token_endpoint, {
+        body = table.concat(body_parts, "&"),
+        headers = {
+            ["Content-Type"] = "application/x-www-form-urlencoded",
+            ["Accept"] = "application/json",
+        },
+    })
+    if not resp or resp.status ~= 200 or not resp.body then
+        log.warn("oauth: token exchange failed: " ..
+                 tostring(resp and resp.status))
+        return res:status(502):html("auth failed")
+    end
+    local tokens = json.decode(resp.body)
+    if type(tokens) ~= "table" or type(tokens.id_token) ~= "string" then
+        return res:status(502):html("auth failed")
+    end
+
+    -- 4. Verify ID token. The allowlist is the union of asymmetric
+    --    algs supported by major IdPs; HS256 is excluded because OIDC
+    --    providers don't sign ID tokens with HMAC.
+    local claims, jerr = jwt.verify(tokens.id_token,
+        jwks_resolver(provider_name),
+        { algs = { "RS256", "RS384", "RS512", "PS256",
+                   "ES256", "ES384" }})
+    if not claims then
+        log.warn("oauth: id_token verify failed: " .. tostring(jerr))
+        return res:status(400):html("auth failed")
+    end
+
+    -- 5. Required OIDC claim checks beyond signature + exp.
+    if claims.iss ~= cfg.issuer then
+        log.warn("oauth: iss mismatch: " .. tostring(claims.iss))
+        return res:status(400):html("auth failed")
+    end
+    local aud_ok = false
+    if type(claims.aud) == "string" then
+        aud_ok = (claims.aud == cfg.client_id)
+    elseif type(claims.aud) == "table" then
+        for _, a in ipairs(claims.aud) do
+            if a == cfg.client_id then aud_ok = true; break end
+        end
+    end
+    if not aud_ok then return res:status(400):html("auth failed") end
+    if claims.nonce ~= env.nonce then
+        return res:status(400):html("auth failed")
+    end
+
+    -- 6. Clear the single-use state cookie.
+    res:header("Set-Cookie",
+        cookie.clear(_state.state_cookie, { path = "/" }))
+
+    -- 7. Hand off to the app. Return value (if a string) overrides
+    --    the post-login redirect target.
+    local target = env.return_to or "/"
+    if _state.on_login then
+        local v = _state.on_login(req, res, provider_name, claims, tokens)
+        if type(v) == "string" then target = v end
+    end
+    res:redirect(target)
+end
+
+-- GET /auth/logout
+local function handle_logout(req, res)
+    res:header("Set-Cookie",
+        cookie.clear(_state.state_cookie, { path = "/" }))
+    local target = "/"
+    if _state.on_logout then
+        local v = _state.on_logout(req, res)
+        if type(v) == "string" then target = v end
+    end
+    res:redirect(target)
+end
+
+-- ── Public API ─────────────────────────────────────────────────────
+
+--- Initialize the module. Must be called once at app startup.
+function oauth.init(opts)
+    if type(opts) ~= "table" then
+        error("oauth.init: opts table required")
+    end
+    if type(opts.state_secret) ~= "string" or #opts.state_secret < 16 then
+        error("oauth.init: state_secret must be a string >= 16 bytes")
+    end
+    _state.state_secret_hex = bytes_to_hex(opts.state_secret)
+    _state.state_cookie = opts.state_cookie or _state.state_cookie
+    _state.state_ttl    = opts.state_ttl or _state.state_ttl
+    _state.on_login     = opts.on_login
+    _state.on_logout    = opts.on_logout
+
+    if type(opts.providers) ~= "table" then
+        error("oauth.init: providers table required")
+    end
+    _state.providers = {}
+    for name, p in pairs(opts.providers) do
+        if type(p) ~= "table" then
+            error("oauth.init: provider '" .. name .. "' must be a table")
+        end
+        local resolved = {}
+        if p.preset then
+            local fn = PRESETS[p.preset]
+            if not fn then
+                error("oauth.init: unknown preset '" .. tostring(p.preset)
+                      .. "' (known: google, microsoft)")
+            end
+            for k, v in pairs(fn(p)) do resolved[k] = v end
+        end
+        -- Explicit values override the preset.
+        for _, k in ipairs({"authorization_endpoint", "token_endpoint",
+                            "jwks_uri", "issuer"}) do
+            if p[k] then resolved[k] = p[k] end
+        end
+        for _, k in ipairs({"authorization_endpoint", "token_endpoint",
+                            "jwks_uri", "issuer"}) do
+            if type(resolved[k]) ~= "string" then
+                error("oauth.init: provider '" .. name ..
+                      "' missing " .. k ..
+                      " (use a preset or supply explicitly)")
+            end
+        end
+        if type(p.client_id) ~= "string" then
+            error("oauth.init: provider '" .. name .. "' missing client_id")
+        end
+        resolved.client_id     = p.client_id
+        resolved.client_secret = p.client_secret  -- optional (PKCE-only)
+        resolved.scopes        = p.scopes or { "openid", "profile", "email" }
+        if type(resolved.scopes) ~= "table" then
+            error("oauth.init: provider '" .. name ..
+                  "' scopes must be a table")
+        end
+        _state.providers[name] = resolved
+    end
+end
+
+--- Mount the three OIDC routes on `app`. Call after oauth.init().
+function oauth.routes(app)
+    if not _state.state_secret_hex then
+        error("oauth.routes: oauth.init() must be called first")
+    end
+    app.get(_state.login_path:gsub("{provider}", ":provider"),
+            handle_login)
+    app.get(_state.callback_path:gsub("{provider}", ":provider"),
+            handle_callback)
+    app.get(_state.logout_path, handle_logout)
+end
+
+-- Test helpers (not part of the public contract). Lets tests round-
+-- trip sign/verify without going through the full HTTP flow.
+oauth._test = {
+    pkce_pair     = pkce_pair,
+    sign_state    = sign_state,
+    verify_state  = verify_state,
+    b64_to_b64url = b64_to_b64url,
+    refresh_jwks  = refresh_jwks,
+    reset = function()
+        _state.state_secret_hex = nil
+        _state.providers        = {}
+        _state.on_login         = nil
+        _state.on_logout        = nil
+        _state._jwks_cache      = {}
+    end,
+}
+
+return oauth
