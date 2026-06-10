@@ -208,8 +208,7 @@ end
 -- Build the data needed by partials/_entry_feed.html (entries + pagination)
 -- plus the page-level extras (csrf_token + csp_nonce). Used by both the
 -- full-page GET / and the fragment-only GET /search.
-local function _feed_data(req, q, opts)
-    opts = opts or {}
+local function _feed_data(req, q)
     local p = pagination.from_query(req, {
         default_per_page = PER_PAGE_DEFAULT,
     })
@@ -311,7 +310,6 @@ app.post("/entries", function(req, res)
 
     local title = fields.title  -- already trimmed by validate
     db.exec("INSERT INTO entries (title, done) VALUES (?, 0)", { title })
-    local id = db.query("SELECT last_insert_rowid() AS id")[1].id
 
     if htmx.is(req) then
         -- HTMX: return the full feed partial so pagination nav (which

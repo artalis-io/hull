@@ -224,7 +224,13 @@ function verify(token, keyOrResolver, opts) {
     if (parts.length !== 3)
         return [null, "malformed token"];
 
-    const [headerB64, payloadB64, sigB64] = parts;
+    // Index access rather than array destructuring: QuickJS's parser
+    // trips an MSan use-of-uninit warning on `const [a,b,c] = parts;`
+    // when this module is compiled fresh through the bytecode cache.
+    // The parser bug is upstream; the workaround is cheap.
+    const headerB64  = parts[0];
+    const payloadB64 = parts[1];
+    const sigB64     = parts[2];
 
     const headerJson = crypto.base64urlDecode(headerB64);
     if (headerJson === null) return [null, "invalid header encoding"];
