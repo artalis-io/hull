@@ -41,7 +41,7 @@ static/
   vendor/pico.classless.min.css   (fetched by make fetch-vendor)
   app.css                custom styles
 migrations/
-  001_init.sql           todos table
+  001_init.sql           entries table
 tests/
   test_app.{lua,js}      covers plain + htmx paths
 ```

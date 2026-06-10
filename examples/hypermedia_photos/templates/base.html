@@ -4,9 +4,16 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
+  {# htmx injects a built-in <style> block for .htmx-indicator on
+     load; without the page nonce it trips style-src CSP. Our app.css
+     defines the same selectors, so disable htmx's copy. #}
+  <meta name="htmx-config" content='{"includeIndicatorStyles":false}'>
   <title>{% block title %}Hull HTMX app{% end %}</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='14'>&#128247;</text></svg>">
+  <link rel="stylesheet" nonce="{{ csp_nonce }}" href="/static/vendor/pico.classless.min.css">
   <link rel="stylesheet" nonce="{{ csp_nonce }}" href="/static/app.css">
   <script nonce="{{ csp_nonce }}" src="/static/vendor/htmx.min.js"></script>
+  <script nonce="{{ csp_nonce }}" src="/static/app.js" defer></script>
 </head>
 <body hx-indicator="#spinner"
       hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>

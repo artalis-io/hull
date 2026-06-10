@@ -1,14 +1,14 @@
-<li id="todo-{{ t.id }}" class="todo-edit">
-  <form hx-patch="/todos/{{ t.id }}"
-        hx-target="#todo-{{ t.id }}"
+<li id="entry-{{ t.id }}" class="entry-edit">
+  <form hx-patch="/entries/{{ t.id }}"
+        hx-target="#entry-{{ t.id }}"
         hx-swap="outerHTML">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <input type="text" name="title" value="{{ t.title }}"
-           aria-label="Edit todo title" required autofocus>
+           aria-label="Edit entry title" required autofocus>
     <button type="submit">Save</button>
     <button type="button"
-            hx-get="/todos/{{ t.id }}"
-            hx-target="#todo-{{ t.id }}"
+            hx-get="/entries/{{ t.id }}"
+            hx-target="#entry-{{ t.id }}"
             hx-swap="outerHTML">Cancel</button>
   </form>
   {% if error %}

@@ -1,14 +1,14 @@
 #!/bin/sh
 # E2E tests for the photo upload feature added to
-# examples/hypermedia_todo (§1.5.b-5). Drives a real `hull dev`
+# examples/hypermedia_photos (§1.5.b-5). Drives a real `hull dev`
 # server via curl through the full HTML/HTMX flow:
 #
 #   1. GET / → bootstrap session + CSRF token (parsed from the form).
-#   2. POST /todos → create a todo.
-#   3. POST /todos/:id/photos with multipart/form-data → upload a PNG.
-#   4. GET /todos/:id/photos/:att_id → retrieve, verify bytes.
+#   2. POST /entries → create a entry.
+#   3. POST /entries/:id/photos with multipart/form-data → upload a PNG.
+#   4. GET /entries/:id/photos/:att_id → retrieve, verify bytes.
 #   5. GET / → photo appears in the listing.
-#   6. DELETE /todos/:id/photos/:att_id → remove.
+#   6. DELETE /entries/:id/photos/:att_id → remove.
 #   7. GET / → photo is gone.
 #
 # Both Lua and JS variants. The example apps share templates, so the
@@ -20,14 +20,14 @@ set -e
 
 SRCDIR="$(cd "$(dirname "$0")/.." && pwd)"
 HULL="$SRCDIR/build/hull"
-APP_DIR="$SRCDIR/examples/hypermedia_todo"
+APP_DIR="$SRCDIR/examples/hypermedia_photos"
 PASS=0
 FAIL=0
 RUNTIME=${RUNTIME:-all}
 SERVER_PID=""
 
 if [ ! -x "$HULL" ]; then
-    echo "e2e_hypermedia_todo_upload: hull binary not found at $HULL — run 'make' first"
+    echo "e2e_hypermedia_photos_upload: hull binary not found at $HULL — run 'make' first"
     exit 1
 fi
 
@@ -100,7 +100,7 @@ run_suite() {
     ENTRY=$2
     PORT=$3
     echo
-    echo "=== E2E: hypermedia_todo upload ($SUITE) ==="
+    echo "=== E2E: hypermedia_photos upload ($SUITE) ==="
 
     prepare_workdir "$SUITE" "$ENTRY"
     cd "$TMPDIR_WORK/$SUITE"
@@ -122,7 +122,7 @@ run_suite() {
     rm -f "$COOKIE_JAR"
 
     # 1. GET / — bootstrap session cookie + CSRF token. The CSRF
-    # token is rendered into the new-todo form as
+    # token is rendered into the new-entry form as
     #   <input type="hidden" name="_csrf" value="...">
     HOME=$(curl -s -c "$COOKIE_JAR" "http://127.0.0.1:$PORT/")
     CSRF=$(printf '%s' "$HOME" | sed -n 's/.*name="_csrf" value="\([^"]*\)".*/\1/p' | head -1)
@@ -132,23 +132,23 @@ run_suite() {
     fi
     pass "$SUITE bootstrap: cookie + CSRF token acquired"
 
-    # 2. POST /todos — create a todo. HX-Request: true tells the app
+    # 2. POST /entries — create a entry. HX-Request: true tells the app
     # to return a fragment (the new row) instead of redirecting.
     R_TODO=$(curl -s -b "$COOKIE_JAR" -c "$COOKIE_JAR" \
-        -X POST "http://127.0.0.1:$PORT/todos" \
+        -X POST "http://127.0.0.1:$PORT/entries" \
         -H "HX-Request: true" \
         -H "X-CSRF-Token: $CSRF" \
         -d "title=Photo+test&_csrf=$CSRF")
-    contains "$SUITE create todo" "Photo test" "$R_TODO"
-    TODO_ID=$(printf '%s' "$R_TODO" | sed -n 's/.*id="todo-\([0-9]*\)".*/\1/p' | head -1)
+    contains "$SUITE create entry" "Photo test" "$R_TODO"
+    TODO_ID=$(printf '%s' "$R_TODO" | sed -n 's/.*id="entry-\([0-9]*\)".*/\1/p' | head -1)
     if [ -z "$TODO_ID" ]; then
-        fail "$SUITE — couldn't extract todo id from POST response"
+        fail "$SUITE — couldn't extract entry id from POST response"
         stop_server; return
     fi
 
-    # 3. POST /todos/:id/photos — multipart upload.
+    # 3. POST /entries/:id/photos — multipart upload.
     R_UP=$(curl -s -b "$COOKIE_JAR" \
-        -X POST "http://127.0.0.1:$PORT/todos/$TODO_ID/photos" \
+        -X POST "http://127.0.0.1:$PORT/entries/$TODO_ID/photos" \
         -H "HX-Request: true" \
         -H "X-CSRF-Token: $CSRF" \
         -F "photo=@$TMPDIR_WORK/photo.png" \
@@ -164,10 +164,10 @@ run_suite() {
         stop_server; return
     fi
 
-    # 4. GET /todos/:id/photos/:att_id — bytes round-trip.
+    # 4. GET /entries/:id/photos/:att_id — bytes round-trip.
     curl -s -b "$COOKIE_JAR" \
         -o "$TMPDIR_WORK/back-$SUITE.png" \
-        "http://127.0.0.1:$PORT/todos/$TODO_ID/photos/$ATT_ID"
+        "http://127.0.0.1:$PORT/entries/$TODO_ID/photos/$ATT_ID"
     if cmp -s "$TMPDIR_WORK/photo.png" "$TMPDIR_WORK/back-$SUITE.png"; then
         pass "$SUITE serve: bytes round-trip"
     else
@@ -179,21 +179,21 @@ run_suite() {
     contains "$SUITE listing shows attachment" "att-$ATT_ID" "$HOME2"
     contains "$SUITE listing shows filename"   "photo.png"    "$HOME2"
 
-    # Auth gate: a GUESSED attachment id (not attached to this todo)
+    # Auth gate: a GUESSED attachment id (not attached to this entry)
     # must hit the default-deny branch and return 4xx, NOT leak bytes.
     # The demo's auth_check gates on join-row ownership, so any
     # arbitrary 32-hex string that isn't actually attached fails.
     GUESS=$(curl -s -o /dev/null -w '%{http_code}' \
         -b "$COOKIE_JAR" \
-        "http://127.0.0.1:$PORT/todos/$TODO_ID/photos/00000000000000000000000000000000")
+        "http://127.0.0.1:$PORT/entries/$TODO_ID/photos/00000000000000000000000000000000")
     case "$GUESS" in
         403|404) pass "$SUITE auth gate rejects guessed id (got $GUESS)" ;;
         *)       fail "$SUITE auth gate rejects guessed id" "got $GUESS" ;;
     esac
 
-    # 6. DELETE /todos/:id/photos/:att_id — remove.
+    # 6. DELETE /entries/:id/photos/:att_id — remove.
     DEL_STATUS=$(curl -s -b "$COOKIE_JAR" -o /dev/null -w '%{http_code}' \
-        -X DELETE "http://127.0.0.1:$PORT/todos/$TODO_ID/photos/$ATT_ID" \
+        -X DELETE "http://127.0.0.1:$PORT/entries/$TODO_ID/photos/$ATT_ID" \
         -H "HX-Request: true" \
         -H "X-CSRF-Token: $CSRF")
     contains "$SUITE delete: 200" "200" "$DEL_STATUS"
@@ -209,7 +209,7 @@ run_suite() {
     # row was removed). attachment metadata might also be gone if no
     # other refs existed; both produce 403 or 404 from serve().
     AFTER_STATUS=$(curl -s -b "$COOKIE_JAR" -o /dev/null -w '%{http_code}' \
-        "http://127.0.0.1:$PORT/todos/$TODO_ID/photos/$ATT_ID")
+        "http://127.0.0.1:$PORT/entries/$TODO_ID/photos/$ATT_ID")
     case "$AFTER_STATUS" in
         403|404) pass "$SUITE serve after delete: 4xx (got $AFTER_STATUS)" ;;
         *)       fail "$SUITE serve after delete" "got $AFTER_STATUS" ;;

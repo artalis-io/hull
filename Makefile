@@ -1580,7 +1580,7 @@ $(shell test "$$(cat $(BUILD_CONFIG_FILE) 2>/dev/null)" = "$(BUILD_FINGERPRINT)"
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan e2e e2e-build e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-tcc e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-hypermedia-todo-upload hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-gpu bench-bytecode-cache wamrc coverage lint-lua lint-js lint platform platform-cosmo
+.PHONY: all clean test debug msan e2e e2e-build e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-tcc e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-hypermedia-photos-upload hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-gpu bench-bytecode-cache wamrc coverage lint-lua lint-js lint platform platform-cosmo
 
 all: $(BUILDDIR)/hull
 
@@ -2385,8 +2385,8 @@ e2e-attachment: $(BUILDDIR)/hull
 e2e-blob: $(BUILDDIR)/hull
 	sh tests/e2e_blob.sh
 
-e2e-hypermedia-todo-upload: $(BUILDDIR)/hull
-	RUNTIME=$(RUNTIME) sh tests/e2e_hypermedia_todo_upload.sh
+e2e-hypermedia-photos-upload: $(BUILDDIR)/hull
+	RUNTIME=$(RUNTIME) sh tests/e2e_hypermedia_photos_upload.sh
 
 e2e-sandbox: $(BUILDDIR)/hull
 	sh tests/e2e_sandbox.sh
@@ -2485,7 +2485,7 @@ e2e-tui: $(E2E_TUI_DEPS)
 hull-test-examples: $(BUILDDIR)/hull
 	@for dir in examples/hello examples/rest_api examples/bench_db examples/auth \
 	            examples/jwt_api examples/crud_with_auth examples/middleware examples/webhooks \
-	            examples/todo examples/timers; do \
+	            examples/entry examples/timers; do \
 		echo "=== hull test $$dir ===" && \
 		output=$$($(BUILDDIR)/hull test "$$dir" 2>&1; true) && \
 		echo "$$output" && \

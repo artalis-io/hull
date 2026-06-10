@@ -1,0 +1,14 @@
+<form id="new-entry"
+      hx-post="/entries"
+      hx-target="#entry-feed"
+      hx-swap="innerHTML">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <input type="text" name="title" placeholder="New entry"
+         value="{{ values.title }}"
+         aria-invalid="{% if errors.title %}true{% else %}false{% end %}"
+         required autofocus>
+  {% if errors.title %}
+  <small role="alert" id="new-entry-error">{{ errors.title }}</small>
+  {% end %}
+  <button type="submit">Add</button>
+</form>

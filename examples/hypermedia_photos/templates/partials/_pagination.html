@@ -3,7 +3,7 @@
   <ul>
     {% if pagination.has_prev %}
     <li><a hx-get="{{ pagination.prev }}"
-           hx-target="#todo-feed"
+           hx-target="#entry-feed"
            hx-swap="innerHTML"
            hx-push-url="true"
            href="{{ pagination.prev }}"
@@ -17,7 +17,7 @@
         <li><a aria-current="page" class="active">{{ link.page }}</a></li>
         {% else %}
         <li><a hx-get="{{ link.url }}"
-               hx-target="#todo-feed"
+               hx-target="#entry-feed"
                hx-swap="innerHTML"
                hx-push-url="true"
                href="{{ link.url }}">{{ link.page }}</a></li>
@@ -26,7 +26,7 @@
     {% end %}
     {% if pagination.has_next %}
     <li><a hx-get="{{ pagination.next }}"
-           hx-target="#todo-feed"
+           hx-target="#entry-feed"
            hx-swap="innerHTML"
            hx-push-url="true"
            href="{{ pagination.next }}"

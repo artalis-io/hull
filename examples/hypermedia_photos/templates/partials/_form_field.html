@@ -3,7 +3,7 @@
    For Hull templates, this means either:
      - Inside a for-loop:  {% for field in fields %}{% include "..." %}{% end %}
      - Direct call:        template.render("partials/_form_field.html", { field = {...} })
-   For single-field forms (like the todo create form) inline value/error
+   For single-field forms (like the entry create form) inline value/error
    handling in the form template itself is simpler — see todo_form.html. #}
 <div class="field">
   {% if field.label %}

@@ -1,26 +1,26 @@
 {% extends "base.html" %}
 
-{% block title %}Todos{% end %}
+{% block title %}Photo Log{% end %}
 
 {% block body %}
 <header class="app-header">
-  <h1>Todos</h1>
-  <p class="muted">A hypermedia photo-tracking demo built with Hull + HTMX.</p>
+  <h1>Photo Log</h1>
+  <p class="muted">A hypermedia photo diary built with Hull + HTMX.</p>
 </header>
 
-{% include "partials/todo_form.html" %}
+{% include "partials/entry_form.html" %}
 
 <input type="search" name="q" id="search-input"
-       placeholder="Search todos…"
+       placeholder="Search entries…"
        autocomplete="off"
        value="{{ q }}"
        hx-get="/search"
        hx-trigger="keyup changed delay:300ms, search"
-       hx-target="#todo-feed"
+       hx-target="#entry-feed"
        hx-swap="innerHTML"
        hx-push-url="true">
 
-<div id="todo-feed" class="todo-feed">
-  {% include "partials/_todo_feed.html" %}
+<div id="entry-feed" class="entry-feed">
+  {% include "partials/_entry_feed.html" %}
 </div>
 {% end %}

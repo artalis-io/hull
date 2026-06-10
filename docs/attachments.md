@@ -246,4 +246,4 @@ separate enhancement.
 
 - [`docs/htmx.md` § Photo uploads](htmx.md) — client-side upload patterns
 - [`docs/blob.md`](blob.md) — the underlying content-addressed store
-- [`examples/hypermedia_todo`](../examples/hypermedia_todo) — working end-to-end demo
+- [`examples/hypermedia_photos`](../examples/hypermedia_photos) — working end-to-end demo

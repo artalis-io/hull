@@ -20,7 +20,7 @@ local blob        = require("hull.blob")
 local time        = require("hull.time")
 
 -- Small default so pagination is visible in the demo with only a
--- handful of todos. Real apps would set this to 20-50.
+-- handful of entries. Real apps would set this to 20-50.
 local PER_PAGE_DEFAULT = 3
 
 app.manifest({
@@ -115,21 +115,45 @@ end
 -- Pre-body middleware (runs before req.body is read):
 --   1. CSP nonce. Populates req.ctx.csp_nonce + sets the header.
 --   2. Session bootstrap. Populates req.ctx.session_id.
--- Helper: load attachments for a todo. The _hull_attachments table
+-- Helper: load attachments for a entry. The _hull_attachments table
 -- is internal (capability layer blocks direct access), so we go
 -- through attachment.metadata(id). Used wherever a single row is
 -- rendered so the photo strip survives toggle / edit / patch.
-local function _attachments_for(todo_id)
+local function _attachments_for(entry_id)
     local refs = db.query(
-        "SELECT attachment_id FROM todo_attachments WHERE todo_id = ? "
+        "SELECT attachment_id FROM entry_attachments WHERE entry_id = ? "
         .. "ORDER BY created_at DESC",
-        { todo_id })
+        { entry_id })
     local out = {}
     for _, r in ipairs(refs or {}) do
         local meta = attachment.metadata(r.attachment_id)
         if meta then out[#out + 1] = meta end
     end
     return out
+end
+
+-- Bulk-load attachments for a batch of entry ids in ONE join query
+-- (vs. N per-row SELECTs). Returns a map entry_id -> attachments[].
+-- Still does one attachment.metadata() call per attachment because
+-- the metadata table is namespaced-internal and only that API is
+-- exposed; for a feed of 3 entries with at most a few photos each
+-- this is still a big win over N+1.
+local function _attachments_for_many(entry_ids)
+    local result = {}
+    if not entry_ids or #entry_ids == 0 then return result end
+    for _, id in ipairs(entry_ids) do result[id] = {} end
+    local placeholders = {}
+    for i = 1, #entry_ids do placeholders[i] = "?" end
+    local rows = db.query(
+        "SELECT entry_id, attachment_id FROM entry_attachments "
+        .. "WHERE entry_id IN (" .. table.concat(placeholders, ",") .. ") "
+        .. "ORDER BY entry_id, created_at DESC",
+        entry_ids)
+    for _, r in ipairs(rows or {}) do
+        local meta = attachment.metadata(r.attachment_id)
+        if meta then table.insert(result[r.entry_id], meta) end
+    end
+    return result
 end
 
 -- Coerce SQLite's INTEGER done (0/1) to a Lua boolean and load the
@@ -148,11 +172,6 @@ local function _row_data(row, req)
     return { t = _hydrate_row(row), csrf_token = req.ctx.csrf_token }
 end
 
--- Diagnostic: log every request so we can see what the browser sends.
-app.use("*", "/*", function(req, _res)
-    log.info(("REQ %s %s"):format(req.method or "?", req.path or "/"))
-    return 0
-end)
 app.use("*", "/*", csp.htmx())
 app.use("*", "/*", session_bootstrap)
 
@@ -170,6 +189,15 @@ app.use_post("PATCH", "/*",     idempotency.middleware({
     get_principal = function(req) return req.ctx.session_id or "__anon" end,
 }))
 
+-- Coerce a route param like "42" into a positive integer, or nil if
+-- it isn't one. Mirrors JS's `Number.isInteger(id) && id >= 1` guard
+-- so neither runtime ever passes garbage straight to SQL.
+local function _valid_id(s)
+    local n = tonumber(s)
+    if n and n >= 1 and n == math.floor(n) then return n end
+    return nil
+end
+
 -- Percent-encode for use as a query-string value.
 local function _url_encode(s)
     return (s:gsub("([^A-Za-z0-9%-._~])", function(c)
@@ -177,7 +205,7 @@ local function _url_encode(s)
     end))
 end
 
--- Build the data needed by partials/_todo_feed.html (todos + pagination)
+-- Build the data needed by partials/_entry_feed.html (entries + pagination)
 -- plus the page-level extras (csrf_token + csp_nonce). Used by both the
 -- full-page GET / and the fragment-only GET /search.
 local function _feed_data(req, q, opts)
@@ -185,11 +213,11 @@ local function _feed_data(req, q, opts)
     local p = pagination.from_query(req, {
         default_per_page = PER_PAGE_DEFAULT,
     })
-    local total, todos
+    local total, entries
     if q == "" then
-        total = db.query("SELECT COUNT(*) AS n FROM todos")[1].n
-        todos = db.query(
-            "SELECT id, title, done FROM todos ORDER BY id DESC "
+        total = db.query("SELECT COUNT(*) AS n FROM entries")[1].n
+        entries = db.query(
+            "SELECT id, title, done FROM entries ORDER BY id DESC "
             .. "LIMIT ? OFFSET ?",
             { p.limit, p.offset })
     else
@@ -200,15 +228,23 @@ local function _feed_data(req, q, opts)
         local esc = q:gsub("[\\%%_]", "\\%0")
         local pattern = "%" .. esc .. "%"
         total = db.query(
-            "SELECT COUNT(*) AS n FROM todos "
+            "SELECT COUNT(*) AS n FROM entries "
             .. "WHERE title LIKE ? ESCAPE '\\'", { pattern })[1].n
-        todos = db.query(
-            "SELECT id, title, done FROM todos "
+        entries = db.query(
+            "SELECT id, title, done FROM entries "
             .. "WHERE title LIKE ? ESCAPE '\\' "
             .. "ORDER BY id DESC LIMIT ? OFFSET ?",
             { pattern, p.limit, p.offset })
     end
-    for _, t in ipairs(todos) do _hydrate_row(t) end
+    -- Coerce `done` (Lua 0-is-truthy gotcha) + batch-load attachments
+    -- in one join query instead of N per-row SELECTs.
+    local ids = {}
+    for _, t in ipairs(entries) do
+        t.done = (t.done == 1) or t.done == true
+        ids[#ids + 1] = t.id
+    end
+    local atts = _attachments_for_many(ids)
+    for _, t in ipairs(entries) do t.attachments = atts[t.id] or {} end
 
     -- Pagination links must preserve the current query so that
     -- clicking page 2 of a filtered list stays filtered.
@@ -226,8 +262,8 @@ local function _feed_data(req, q, opts)
         csp_nonce  = req.ctx.csp_nonce,
         q          = q,
         has_query  = q ~= "",
-        todos      = todos,
-        has_todos  = #todos > 0,
+        entries      = entries,
+        has_entries  = #entries > 0,
         pagination = nav,
     }
 end
@@ -246,7 +282,7 @@ app.get("/", function(req, res)
     res:html(template.render("pages/home.html", data))
 end)
 
-app.post("/todos", function(req, res)
+app.post("/entries", function(req, res)
     local fields = form.parse(req.body or "")
 
     -- Validate via hull.validate. `trim = true` strips whitespace
@@ -261,11 +297,11 @@ app.post("/todos", function(req, res)
     if not ok then
         -- Re-render the form fragment with submitted values + per-field
         -- error messages. hx-retarget so the response lands on the form
-        -- itself (the form's own hx-target is #todos, but the validation
-        -- response should replace #new-todo).
-        htmx.retarget(res, "#new-todo")
+        -- itself (the form's own hx-target is #entries, but the validation
+        -- response should replace #new-entry).
+        htmx.retarget(res, "#new-entry")
         htmx.reswap(res, "outerHTML")
-        res:html(template.render("partials/todo_form.html", {
+        res:html(template.render("partials/entry_form.html", {
             csrf_token = req.ctx.csrf_token,
             values     = fields,
             errors     = errors,
@@ -274,30 +310,22 @@ app.post("/todos", function(req, res)
     end
 
     local title = fields.title  -- already trimmed by validate
-    db.exec("INSERT INTO todos (title, done) VALUES (?, 0)", { title })
+    db.exec("INSERT INTO entries (title, done) VALUES (?, 0)", { title })
     local id = db.query("SELECT last_insert_rowid() AS id")[1].id
 
     if htmx.is(req) then
-        -- HTMX: return the new row to insert + a fresh empty form.
-        -- flash.trigger fires a client-side 'flash' event that any
-        -- listener (e.g. a toast widget) can render. Independent of
-        -- the OOB swap path; HTMX-only.
-        -- todo_row.html uses `{{ t.X }}` so the same partial works
-        -- both here (single render) and inside the GET / for-loop
-        -- (`{% for t in todos %}{% include %}{% end %}`).
+        -- HTMX: return the full feed partial so pagination nav (which
+        -- lives INSIDE #entry-feed) refreshes too — otherwise crossing
+        -- the per_page threshold leaves stale nav from the last render.
+        -- The #new-entry form resets via /static/app.js, independent
+        -- of the response. flash.trigger fires a client-side 'flash'
+        -- event any listener can render.
         flash.trigger(res, "Added: " .. title, "success")
-        -- Return ONLY the new row. The existing #new-todo form
-        -- resets its input via hx-on::after-request, so no need to
-        -- re-render it (which would create a 2nd form with the same
-        -- id inside the <ul> via afterbegin — visible bug in earlier
-        -- demo versions).
-        local html = template.render("partials/todo_row.html",
-            { t = { id = id, title = title, done = false, attachments = {} },
-              csrf_token = req.ctx.csrf_token })
-        -- idempotency.respond_html caches the rendered HTML so a
-        -- retry with the same Idempotency-Key gets the same response
-        -- without re-running the handler (no second todo inserted).
-        -- No-op when no idempotency key is active.
+        local html = template.render("partials/_entry_feed.html",
+            _feed_data(req, ""))
+        -- idempotency.respond_html caches the rendered HTML so a retry
+        -- with the same Idempotency-Key gets the same response without
+        -- re-running the handler. No-op when no key is active.
         idempotency.respond_html(req, res, 200, html)
     else
         -- Plain form post: stash a message in session, redirect.
@@ -309,7 +337,7 @@ end)
 
 -- Paginated search. Hit by the search input's hx-get (debounced
 -- keyup) AND by the pagination nav's hx-get links — both target
--- the same #todo-feed wrapper so a single response shape (the
+-- the same #entry-feed wrapper so a single response shape (the
 -- _todo_feed.html partial = ul + nav) refreshes BOTH the row list
 -- AND the page links in one swap. Plain (non-HTMX) navigation falls
 -- through to a redirect to / with the query preserved so back/forward
@@ -319,7 +347,7 @@ app.get("/search", function(req, res)
                 :gsub("^%s+", ""):gsub("%s+$", "")
     if htmx.is(req) then
         local data = _feed_data(req, q)
-        res:html(template.render("partials/_todo_feed.html", data))
+        res:html(template.render("partials/_entry_feed.html", data))
     else
         local dest = "/"
         if q ~= "" then dest = "/?q=" .. _url_encode(q) end
@@ -327,120 +355,129 @@ app.get("/search", function(req, res)
     end
 end)
 
-app.post("/todos/:id/toggle", function(req, res)
-    local id = tonumber(req.params.id)
-    db.exec("UPDATE todos SET done = NOT done WHERE id = ?", { id })
-    local row = db.query("SELECT id, title, done FROM todos WHERE id = ?", { id })[1]
+app.post("/entries/:id/toggle", function(req, res)
+    local id = _valid_id(req.params.id)
+    if not id then res:status(404); return end
+    db.exec("UPDATE entries SET done = NOT done WHERE id = ?", { id })
+    local row = db.query("SELECT id, title, done FROM entries WHERE id = ?", { id })[1]
     if not row then res:status(404); return end
     if htmx.is(req) then
-        res:html(template.render("partials/todo_row.html", _row_data(row, req)))
+        res:html(template.render("partials/entry_row.html", _row_data(row, req)))
     else
         res:redirect("/")
     end
 end)
 
 -- Inline edit. Triad of routes:
---   GET   /todos/:id/edit   -> swap row to inline edit form
---   GET   /todos/:id        -> show a single row (used by Cancel)
---   PATCH /todos/:id        -> save edit, return row fragment (or
+--   GET   /entries/:id/edit   -> swap row to inline edit form
+--   GET   /entries/:id        -> show a single row (used by Cancel)
+--   PATCH /entries/:id        -> save edit, return row fragment (or
 --                               re-render edit form on validation error)
 -- Order matters: register the MORE SPECIFIC path (/edit) first.
--- Hull's router is first-match, and the bare /todos/:id pattern
+-- Hull's router is first-match, and the bare /entries/:id pattern
 -- would otherwise greedily capture "123/edit" as the :id.
 -- Plain-form fallback for PATCH: see docs/htmx.md (Rails-style
 -- POST + _method=PATCH override). The example is HTMX-only.
 
-app.get("/todos/:id/edit", function(req, res)
-    local id = tonumber(req.params.id)
+app.get("/entries/:id/edit", function(req, res)
+    local id = _valid_id(req.params.id)
+    if not id then res:status(404); return end
     local row = db.query(
-        "SELECT id, title, done FROM todos WHERE id = ?", { id })[1]
+        "SELECT id, title, done FROM entries WHERE id = ?", { id })[1]
     if not row then res:status(404); return end
-    res:html(template.render("partials/_todo_edit_form.html", {
+    res:html(template.render("partials/_entry_edit_form.html", {
         t = row,
         csrf_token = req.ctx.csrf_token,
     }))
 end)
 
-app.get("/todos/:id", function(req, res)
-    local id = tonumber(req.params.id)
+app.get("/entries/:id", function(req, res)
+    local id = _valid_id(req.params.id)
+    if not id then res:status(404); return end
     local row = db.query(
-        "SELECT id, title, done FROM todos WHERE id = ?", { id })[1]
+        "SELECT id, title, done FROM entries WHERE id = ?", { id })[1]
     if not row then res:status(404); return end
     if htmx.is(req) then
-        res:html(template.render("partials/todo_row.html", _row_data(row, req)))
+        res:html(template.render("partials/entry_row.html", _row_data(row, req)))
     else
         res:redirect("/")
     end
 end)
 
-app.patch("/todos/:id", function(req, res)
-    local id = tonumber(req.params.id)
+app.patch("/entries/:id", function(req, res)
+    local id = _valid_id(req.params.id)
+    if not id then res:status(404); return end
     local fields = form.parse(req.body or "")
     local title = (fields.title or "")
                     :gsub("^%s+", ""):gsub("%s+$", "")
     if title == "" then
         -- Re-render the edit form with an inline error. hx-retarget
         -- so the response targets the row even though the form's
-        -- hx-target was already #todo-{id}.
+        -- hx-target was already #entry-{id}.
         local existing = db.query(
-            "SELECT id, title, done FROM todos WHERE id = ?", { id })[1]
+            "SELECT id, title, done FROM entries WHERE id = ?", { id })[1]
         if not existing then res:status(404); return end
         existing.title = ""  -- keep the empty value the user submitted
-        res:html(template.render("partials/_todo_edit_form.html", {
+        res:html(template.render("partials/_entry_edit_form.html", {
             t = existing,
             csrf_token = req.ctx.csrf_token,
             error = "Title cannot be empty.",
         }))
         return
     end
-    db.exec("UPDATE todos SET title = ? WHERE id = ?", { title, id })
+    db.exec("UPDATE entries SET title = ? WHERE id = ?", { title, id })
     local row = db.query(
-        "SELECT id, title, done FROM todos WHERE id = ?", { id })[1]
+        "SELECT id, title, done FROM entries WHERE id = ?", { id })[1]
     if not row then res:status(404); return end
-    res:html(template.render("partials/todo_row.html", _row_data(row, req)))
+    res:html(template.render("partials/entry_row.html", _row_data(row, req)))
 end)
 
-app.delete("/todos/:id", function(req, res)
-    local id = tonumber(req.params.id)
+app.delete("/entries/:id", function(req, res)
+    local id = _valid_id(req.params.id)
+    if not id then res:status(404); return end
     -- Drop the join rows first; capture them to also drop the
     -- attachments themselves. attachment.delete handles the refcount
     -- so the on-disk blob unlinks only when no other rows reference it.
     local refs = db.query(
-        "SELECT attachment_id FROM todo_attachments WHERE todo_id = ?",
+        "SELECT attachment_id FROM entry_attachments WHERE entry_id = ?",
         { id })
-    db.exec("DELETE FROM todo_attachments WHERE todo_id = ?", { id })
+    db.exec("DELETE FROM entry_attachments WHERE entry_id = ?", { id })
     for _, r in ipairs(refs or {}) do
         attachment.delete(r.attachment_id)
     end
-    db.exec("DELETE FROM todos WHERE id = ?", { id })
+    db.exec("DELETE FROM entries WHERE id = ?", { id })
     if htmx.is(req) then
-        res:html("")  -- htmx swap-mode=delete removes the row.
+        -- Refresh the whole feed so pagination nav reflects the new
+        -- total. The button targets #entry-feed innerHTML so the entire
+        -- list (rows + nav) is replaced in one swap.
+        res:html(template.render("partials/_entry_feed.html",
+            _feed_data(req, "")))
     else
         res:redirect("/")
     end
 end)
 
 -- ── Photo attachments (§1.5.b-5) ─────────────────────────────────────
--- All routes are scoped under a specific todo. The example pairs an
+-- All routes are scoped under a specific entry. The example pairs an
 -- in-process gating story (anonymous-session = owns everything in the
 -- demo's single-user model) with the attachment-serve helper's
 -- default-deny semantics. A real multi-user app would consult the
--- todo's owner column against req.ctx.session_user_id; for the demo
+-- entry's owner column against req.ctx.session_user_id; for the demo
 -- we just enforce that the join row exists.
 
--- Helper: did the current session post this attachment to this todo?
-local function _owns_attachment(todo_id, attachment_id)
+-- Helper: did the current session post this attachment to this entry?
+local function _owns_attachment(entry_id, attachment_id)
     local rows = db.query(
-        "SELECT 1 FROM todo_attachments WHERE todo_id = ? AND attachment_id = ?",
-        { todo_id, attachment_id })
+        "SELECT 1 FROM entry_attachments WHERE entry_id = ? AND attachment_id = ?",
+        { entry_id, attachment_id })
     return rows and #rows > 0
 end
 
--- POST /todos/:id/photos — file-input upload via multipart/form-data.
-app.post("/todos/:id/photos", function(req, res)
-    local todo_id = tonumber(req.params.id)
-    if not todo_id then res:status(400); return end
-    local exists = db.query("SELECT id FROM todos WHERE id = ?", { todo_id })[1]
+-- POST /entries/:id/photos — file-input upload via multipart/form-data.
+app.post("/entries/:id/photos", function(req, res)
+    local entry_id = _valid_id(req.params.id)
+    if not entry_id then res:status(404); return end
+    local exists = db.query("SELECT id FROM entries WHERE id = ?", { entry_id })[1]
     if not exists then res:status(404); return end
 
     local new_attachments = {}
@@ -451,17 +488,22 @@ app.post("/todos/:id/photos", function(req, res)
                     uploaded_by = req.ctx.session_id or "anonymous",
                 })
                 db.exec(
-                    "INSERT INTO todo_attachments (todo_id, attachment_id, created_at) VALUES (?, ?, ?)",
-                    { todo_id, att_id, time.now() })
+                    "INSERT INTO entry_attachments (entry_id, attachment_id, created_at) VALUES (?, ?, ?)",
+                    { entry_id, att_id, time.now() })
                 new_attachments[#new_attachments + 1] = att_id
             end
         end
     end)
     if not ok then
         if htmx.is(req) then
-            res:status(413):html(
-                '<small role="alert" class="error">Upload failed: '
-                .. tostring(err) .. "</small>")
+            -- Render via template.render_string so {{ err }} is HTML-
+            -- escaped. err may carry user-influenced text (filename,
+            -- mime, etc.) so raw `..` concat into HTML would be an XSS
+            -- sink. flash.set() (else branch) goes through the flash
+            -- partial and is auto-escaped already.
+            res:status(413):html(template.render_string(
+                '<small role="alert" class="error">Upload failed: {{ err }}</small>',
+                { err = tostring(err) }))
         else
             flash.set(req, "Upload failed: " .. tostring(err), "error")
             res:redirect("/")
@@ -471,38 +513,40 @@ app.post("/todos/:id/photos", function(req, res)
 
     if htmx.is(req) then
         res:html(template.render("partials/_attachment_strip.html", {
-            t = { id = todo_id, attachments = _attachments_for(todo_id) },
+            t = { id = entry_id, attachments = _attachments_for(entry_id) },
         }))
     else
         res:redirect("/")
     end
 end, { multipart = { max_part_size = 8 * 1024 * 1024 } })
 
--- GET /todos/:id/photos/:att_id — auth-gated serve. The default-deny
+-- GET /entries/:id/photos/:att_id — auth-gated serve. The default-deny
 -- of attachment-serve is overridden here with our own _owns_attachment
--- check (which also gates against malicious cross-todo ID guessing).
-app.get("/todos/:id/photos/:att_id", function(req, res)
-    local todo_id = tonumber(req.params.id)
+-- check (which also gates against malicious cross-entry ID guessing).
+app.get("/entries/:id/photos/:att_id", function(req, res)
+    local entry_id = _valid_id(req.params.id)
+    if not entry_id then res:status(404); return end
     local att_id  = req.params.att_id
     attachment_serve.serve(req, res, att_id, {
         auth_check = function(_, _meta)
-            return todo_id and _owns_attachment(todo_id, att_id)
+            return entry_id and _owns_attachment(entry_id, att_id)
         end,
     })
 end)
 
--- DELETE /todos/:id/photos/:att_id — drop the join row + decrement
+-- DELETE /entries/:id/photos/:att_id — drop the join row + decrement
 -- the attachment refcount. The on-disk blob unlinks automatically
--- when refcount hits 0 (no other todos reference the same content).
-app.delete("/todos/:id/photos/:att_id", function(req, res)
-    local todo_id = tonumber(req.params.id)
+-- when refcount hits 0 (no other entries reference the same content).
+app.delete("/entries/:id/photos/:att_id", function(req, res)
+    local entry_id = _valid_id(req.params.id)
+    if not entry_id then res:status(404); return end
     local att_id  = req.params.att_id
-    if not _owns_attachment(todo_id, att_id) then
+    if not _owns_attachment(entry_id, att_id) then
         res:status(404); return
     end
     db.exec(
-        "DELETE FROM todo_attachments WHERE todo_id = ? AND attachment_id = ?",
-        { todo_id, att_id })
+        "DELETE FROM entry_attachments WHERE entry_id = ? AND attachment_id = ?",
+        { entry_id, att_id })
     attachment.delete(att_id)
     if htmx.is(req) then
         res:html("")  -- htmx swap-mode=delete removes the figure.

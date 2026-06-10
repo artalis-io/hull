@@ -1,8 +1,13 @@
 /*
  * static.c — Static file serving middleware for Hull
  *
- * Serves files from the /static/ prefix. Build mode uses embedded entries;
- * dev mode reads from the filesystem with sendfile (zero-copy).
+ * Serves files from the /static/ prefix. Build mode uses embedded entries
+ * via kl_response_body_borrow (zero-copy pointer to the binary's data
+ * segment); dev mode reads from the filesystem into a heap buffer and
+ * uses kl_response_body_copy. The previous dev-mode implementation used
+ * kl_response_file() which dispatched to sendfile(2) — on macOS that's
+ * classified as network-outbound by Seatbelt and broke under the
+ * default-deny profile for any app without a manifest.hosts allowlist.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -14,9 +19,17 @@
 
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+/* Upper bound on a dev-mode static file we will buffer into memory.
+ * Production builds embed static assets in the binary, so this cap
+ * only governs `hull dev` and is well above any realistic CSS/JS/
+ * image asset. Files larger than this return 0 so the route lookup
+ * continues (route handlers can still stream big files explicitly). */
+#define HL_STATIC_DEV_MAX_BYTES (16 * 1024 * 1024)
 
 /* ── MIME type lookup ─────────────────────────────────────────────── */
 
@@ -204,12 +217,43 @@ int hl_static_middleware(KlRequest *req, KlResponse *res, void *user_data)
             return 1;
         }
 
+        /* Read the file into a heap buffer and hand it to Keel via
+         * kl_response_body_copy(). The previous implementation passed
+         * the fd to kl_response_file() which dispatched to sendfile(2).
+         * On macOS, sendfile() to an already-accepted inbound socket
+         * is classified by Seatbelt as network-outbound — so an app
+         * with no manifest.hosts (which leaves network-outbound off by
+         * design) silently failed: headers went out via write() but
+         * the body never appeared on the wire. read() + copy avoids
+         * the sendfile classification entirely. Production builds use
+         * the embedded VFS via kl_response_body_borrow() above, so
+         * this cost is dev-mode only. */
+        if (st.st_size <= 0 || st.st_size > HL_STATIC_DEV_MAX_BYTES) {
+            close(fd);
+            return 0;
+        }
+        char *buf = malloc((size_t)st.st_size);
+        if (!buf) {
+            close(fd);
+            return 0;
+        }
+        ssize_t got = 0;
+        while (got < st.st_size) {
+            ssize_t r = read(fd, buf + got, (size_t)(st.st_size - got));
+            if (r < 0) { free(buf); close(fd); return 0; }
+            if (r == 0) break;
+            got += r;
+        }
+        close(fd);
+        if (got != st.st_size) { free(buf); return 0; }
+
         kl_response_status(res, 200);
         kl_response_header(res, "Content-Type", mime);
         kl_response_header(res, "Cache-Control", "no-cache");
         if (elen > 0)
             kl_response_header(res, "ETag", etag);
-        kl_response_file(res, fd, st.st_size);
+        kl_response_body_copy(res, buf, (size_t)st.st_size);
+        free(buf);  /* Keel made its own copy */
         return 1;
     }
 

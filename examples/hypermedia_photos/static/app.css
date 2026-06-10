@@ -1,0 +1,303 @@
+/* hypermedia_photos - overlay on Pico classless.
+ * Adds: color tokens, entry cards, pagination pills, attachment strip,
+ * flash messages, HTMX spinner. Form controls, buttons, typography
+ * come from Pico (light + dark via prefers-color-scheme). */
+
+:root {
+  --htod-card-bg:    var(--pico-card-background-color, #fff);
+  --htod-border:     var(--pico-card-border-color, #e2e5ee);
+  --htod-muted:      var(--pico-muted-color, #5b6478);
+  --htod-accent:     var(--pico-primary, #1095c1);
+  --htod-accent-bg:  var(--pico-primary-background, #1095c1);
+  --htod-accent-fg:  var(--pico-primary-inverse, #fff);
+  --htod-danger:     #e23c4e;
+  --htod-danger-bg:  rgba(226, 60, 78, 0.08);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --htod-danger:    #ff6072;
+    --htod-danger-bg: rgba(255, 96, 114, 0.12);
+  }
+}
+
+main.container { max-width: 44rem; }
+
+.app-header { margin: 0 0 1.5rem; }
+.app-header h1 { margin: 0 0 0.25rem; letter-spacing: -0.02em; }
+.muted { color: var(--htod-muted); margin: 0; }
+
+/* ── New-entry form (input + Add button on one row) ──────────────── */
+#new-entry {
+  display: flex;
+  align-items: stretch;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+#new-entry input[type="text"] {
+  flex: 1 1 12rem;
+  min-width: 0;
+  margin-bottom: 0;
+}
+#new-entry button {
+  flex: 0 0 auto;
+  width: auto;
+  margin: 0;
+  white-space: nowrap;
+}
+#new-entry small[role="alert"] {
+  flex: 1 0 100%;
+  color: var(--htod-danger);
+}
+
+/* ── Search input ────────────────────────────────────────────────── */
+#search-input { margin-bottom: 1.25rem; }
+
+/* ── Entry cards ─────────────────────────────────────────────────── */
+.entry-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.entry-list > li {
+  background: var(--htod-card-bg);
+  border: 1px solid var(--htod-border);
+  border-radius: var(--pico-border-radius, 0.5rem);
+  padding: 0.75rem 0.85rem;
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  align-items: center;
+  gap: 0.6rem;
+  transition: border-color 120ms ease;
+}
+.entry-list > li:hover { border-color: var(--htod-accent); }
+
+.entry-list > li > input[type="checkbox"] {
+  margin: 0;
+  cursor: pointer;
+}
+
+.entry-list > li > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Tertiary / icon buttons inside rows */
+.entry-list button {
+  background: transparent;
+  color: var(--htod-muted);
+  border: none;
+  padding: 0.25rem 0.5rem;
+  margin: 0;
+  font-weight: 600;
+  width: auto;
+}
+.entry-list button:hover {
+  background: var(--pico-secondary-background, rgba(0,0,0,0.05));
+  color: var(--pico-color);
+}
+.entry-list button[hx-delete]:hover {
+  background: var(--htod-danger-bg);
+  color: var(--htod-danger);
+}
+
+.entry-empty {
+  background: var(--htod-card-bg);
+  border: 1px dashed var(--htod-border);
+  border-radius: var(--pico-border-radius, 0.5rem);
+  padding: 1.25rem;
+  text-align: center;
+  color: var(--htod-muted);
+  font-style: italic;
+}
+
+/* Inline edit row: form input + Save + Cancel on one line */
+.entry-edit { display: block !important; }
+.entry-edit form {
+  display: flex;
+  align-items: stretch;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin: 0;
+}
+.entry-edit form input[type="text"] {
+  flex: 1 1 10rem;
+  min-width: 0;
+  margin-bottom: 0;
+}
+.entry-edit form button {
+  flex: 0 0 auto;
+  width: auto;
+  margin: 0;
+  white-space: nowrap;
+}
+.entry-edit small.error {
+  display: block;
+  margin-top: 0.4rem;
+  color: var(--htod-danger);
+}
+
+/* ── Attachment strip ────────────────────────────────────────────── */
+.attachment-strip {
+  grid-column: 1 / -1;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.attachment-strip:empty { display: none; }
+
+.attachment {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  width: 5.5rem;
+  background: var(--pico-secondary-background, #eef0f7);
+  border: 1px solid var(--htod-border);
+  border-radius: var(--pico-border-radius, 0.5rem);
+  overflow: hidden;
+}
+.attachment img {
+  display: block;
+  width: 100%;
+  height: 5.5rem;
+  object-fit: cover;
+}
+.attachment figcaption {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.2rem 0.35rem;
+  font-size: 0.7rem;
+  color: var(--htod-muted);
+}
+.attachment .filename {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attachment figcaption button {
+  background: transparent;
+  border: none;
+  padding: 0 0.3rem;
+  margin: 0;
+  width: auto;
+  font-size: 0.9rem;
+  line-height: 1;
+  color: var(--htod-muted);
+}
+.attachment figcaption button:hover {
+  color: var(--htod-danger);
+  background: var(--htod-danger-bg);
+}
+
+/* ── Attachment uploader (label-as-button) ───────────────────────── */
+.attachment-upload {
+  grid-column: 1 / -1;
+  margin: 0.35rem 0 0;
+}
+.attachment-upload .upload-button {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--htod-muted);
+  padding: 0.3rem 0.55rem;
+  border-radius: var(--pico-border-radius, 0.5rem);
+  background: var(--pico-secondary-background, #eef0f7);
+  transition: background 120ms ease, color 120ms ease;
+}
+.attachment-upload .upload-button:hover {
+  background: var(--pico-primary-background, var(--htod-accent));
+  color: var(--htod-accent-fg);
+}
+.attachment-upload input[type="file"] {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0,0,0,0);
+  white-space: nowrap; border: 0;
+}
+
+/* ── Pagination pills ────────────────────────────────────────────── */
+.pagination { margin: 1.25rem 0 0; }
+.pagination ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  justify-content: center;
+}
+.pagination li a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2rem;
+  padding: 0.3rem 0.6rem;
+  border-radius: var(--pico-border-radius, 0.5rem);
+  background: var(--htod-card-bg);
+  border: 1px solid var(--htod-border);
+  color: var(--htod-muted);
+  text-decoration: none;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.pagination li a:hover {
+  border-color: var(--htod-accent);
+  color: var(--htod-accent);
+}
+.pagination li a.active,
+.pagination li a[aria-current="page"] {
+  background: var(--htod-accent-bg);
+  border-color: var(--htod-accent-bg);
+  color: var(--htod-accent-fg);
+  cursor: default;
+}
+.pagination li[aria-hidden="true"] {
+  padding: 0.3rem 0.4rem;
+  color: var(--htod-muted);
+  opacity: 0.6;
+}
+
+/* ── Flash messages ──────────────────────────────────────────────── */
+#flash-zone:empty { display: none; }
+.flash {
+  margin: 0 0 0.5rem;
+  padding: 0.7rem 0.9rem;
+  border-radius: var(--pico-border-radius, 0.5rem);
+  border: 1px solid var(--htod-border);
+  background: var(--htod-card-bg);
+}
+.flash-success { border-color: #28a86b; color: #28a86b; }
+.flash-error   { border-color: var(--htod-danger); color: var(--htod-danger); }
+.flash-warn    { border-color: #b97a00; color: #b97a00; }
+
+/* ── HTMX loading spinner ────────────────────────────────────────── */
+#spinner {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  width: 1.25rem;
+  height: 1.25rem;
+  border: 0.18rem solid var(--htod-border);
+  border-top-color: var(--htod-accent);
+  border-radius: 50%;
+  animation: htod-spin 0.8s linear infinite;
+  pointer-events: none;
+  z-index: 1000;
+}
+.htmx-indicator { opacity: 0; transition: opacity 200ms ease-in; }
+.htmx-indicator.htmx-request,
+.htmx-request .htmx-indicator { opacity: 1; }
+@keyframes htod-spin { to { transform: rotate(360deg); } }

@@ -56,6 +56,38 @@ static HlLua *get_hl_lua_from_L(lua_State *L)
  *     ctx     = {}
  *   }
  */
+/* Percent-decode a query-string token in place (also turns `+` into
+ * space, per application/x-www-form-urlencoded convention). Returns
+ * the new length. Invalid `%XX` (truncated or non-hex) is left as-is
+ * so we never silently drop bytes from a malformed URL. */
+static size_t hl_query_decode_inplace(char *s, size_t len)
+{
+    size_t r = 0, w = 0;
+    while (r < len) {
+        unsigned char c = (unsigned char)s[r];
+        if (c == '+') {
+            s[w++] = ' '; r++;
+        } else if (c == '%' && r + 2 < len) {
+            int hi = s[r + 1], lo = s[r + 2];
+            int hv = (hi >= '0' && hi <= '9') ? hi - '0'
+                   : (hi >= 'a' && hi <= 'f') ? hi - 'a' + 10
+                   : (hi >= 'A' && hi <= 'F') ? hi - 'A' + 10 : -1;
+            int lv = (lo >= '0' && lo <= '9') ? lo - '0'
+                   : (lo >= 'a' && lo <= 'f') ? lo - 'a' + 10
+                   : (lo >= 'A' && lo <= 'F') ? lo - 'A' + 10 : -1;
+            if (hv >= 0 && lv >= 0) {
+                s[w++] = (char)((hv << 4) | lv);
+                r += 3;
+            } else {
+                s[w++] = s[r++];
+            }
+        } else {
+            s[w++] = s[r++];
+        }
+    }
+    return w;
+}
+
 void hl_lua_make_request(lua_State *L, KlRequest *req)
 {
     lua_newtable(L);
@@ -87,14 +119,26 @@ void hl_lua_make_request(lua_State *L, KlRequest *req)
         char *pair = strtok_r(qbuf, "&", &saveptr);
         while (pair) {
             char *eq = strchr(pair, '=');
+            size_t klen, vlen;
+            const char *val;
             if (eq) {
                 *eq = '\0';
-                lua_pushstring(L, eq + 1);
-                lua_setfield(L, -2, pair);
+                klen = (size_t)(eq - pair);
+                val  = eq + 1;
+                vlen = strlen(val);
             } else {
-                lua_pushstring(L, "");
-                lua_setfield(L, -2, pair);
+                klen = strlen(pair);
+                val  = "";
+                vlen = 0;
             }
+            klen = hl_query_decode_inplace(pair, klen);
+            pair[klen] = '\0';
+            if (vlen > 0) {
+                vlen = hl_query_decode_inplace((char *)val, vlen);
+                ((char *)val)[vlen] = '\0';
+            }
+            lua_pushlstring(L, val, vlen);
+            lua_setfield(L, -2, pair);
             pair = strtok_r(NULL, "&", &saveptr);
         }
     }

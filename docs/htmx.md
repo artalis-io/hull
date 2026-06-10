@@ -23,7 +23,7 @@ make dev             # serves :8080
 make test            # in-process tests for plain + htmx paths
 ```
 
-The scaffold writes a runnable HTMX + Pico app: per-request CSP nonce, anonymous session, CSRF on htmx requests, a sample `/todos` endpoint demonstrating fragment vs full-page rendering, and tests that cover both paths. See `examples/hypermedia_todo/` in the Hull repo for the same output checked in.
+The scaffold writes a runnable HTMX + Pico app: per-request CSP nonce, anonymous session, CSRF on htmx requests, a sample `/entries` endpoint demonstrating fragment vs full-page rendering, and tests that cover both paths. See `examples/hypermedia_photos/` in the Hull repo for the same output checked in.
 
 ---
 
@@ -35,7 +35,7 @@ A hypermedia endpoint returns one of two shapes based on the inbound `HX-Request
 app.get("/", function(req, res)
     if htmx.is(req) then
         -- htmx-driven request: return only the changed fragment
-        res:html(template.render("partials/todo_row.html", data))
+        res:html(template.render("partials/entry_row.html", data))
     else
         -- plain browser navigation: return the full page
         res:html(template.render("pages/home.html", data))
@@ -124,7 +124,7 @@ app.use_post("*", "/*", csrf.middleware({ secret = "..." }))
 On safe methods (GET/HEAD/OPTIONS), CSRF generates a token and attaches it to `req.ctx.csrf_token`. Templates embed it in forms:
 
 ```html
-<form hx-post="/todos" hx-target="#todos" hx-swap="afterbegin">
+<form hx-post="/entries" hx-target="#entries" hx-swap="afterbegin">
   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
   <input type="text" name="title">
   <button type="submit">Add</button>
@@ -136,7 +136,7 @@ HTMX automatically sends the form body on `hx-post`, so the CSRF field is includ
 If you'd rather pass the token via the `X-CSRF-Token` header (e.g., for `hx-vals`-driven JSON-body requests), HTMX has an `hx-headers` attribute:
 
 ```html
-<button hx-post="/todos" hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>Add</button>
+<button hx-post="/entries" hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>Add</button>
 ```
 
 **Session bootstrap.** CSRF tokens are bound to a session id. The scaffold ships a `session_bootstrap` middleware that creates an anonymous session on first visit (sets a `hull_session` cookie) and loads it on subsequent requests. Apps that already have a login flow (e.g., via `auth.session_middleware`) should use that instead and remove the bootstrap.
@@ -150,7 +150,7 @@ If you'd rather pass the token via the `X-CSRF-Token` header (e.g., for `hx-vals
 A POST handler that creates a resource and returns it as an htmx swap fragment:
 
 ```lua
-app.post("/todos", function(req, res)
+app.post("/entries", function(req, res)
     local fields = form.parse(req.body or "")
     local title = (fields.title or ""):gsub("^%s+", ""):gsub("%s+$", "")
 
@@ -158,21 +158,21 @@ app.post("/todos", function(req, res)
         -- Validation error: retarget so the error lands in the form's
         -- own container, not the list. The browser SEES the fragment
         -- swap into the right spot.
-        htmx.retarget(res, "#new-todo")
-        res:html('<p id="new-todo" role="alert">Title cannot be empty.</p>')
+        htmx.retarget(res, "#new-entry")
+        res:html('<p id="new-entry" role="alert">Title cannot be empty.</p>')
         return
     end
 
-    db.exec("INSERT INTO todos (title, done) VALUES (?, 0)", { title })
+    db.exec("INSERT INTO entries (title, done) VALUES (?, 0)", { title })
     local id = db.query("SELECT last_insert_rowid() AS id")[1].id
 
     if htmx.is(req) then
         -- Compose: the new row goes into the list (the form's
-        -- hx-target="#todos" hx-swap="afterbegin"), and a fresh form
+        -- hx-target="#entries" hx-swap="afterbegin"), and a fresh form
         -- replaces itself in place.
-        res:html(template.render("partials/todo_row.html",
+        res:html(template.render("partials/entry_row.html",
             { id = id, title = title, done = false })
-            .. template.render("partials/todo_form.html",
+            .. template.render("partials/entry_form.html",
                 { csrf_token = req.ctx.csrf_token }))
     else
         -- Plain form post: full reload.
@@ -185,25 +185,25 @@ Things to notice:
 
 - Validation errors are fragments too. `htmx.retarget` redirects the swap to a different container so the error appears in context (not at the top of the list).
 - Composing multiple fragments into one response is just string concatenation. HTMX swaps the whole response into the target.
-- Form refresh after submit: include a fresh `{% include "partials/todo_form.html" %}` in the response so the form's empty state is restored.
+- Form refresh after submit: include a fresh `{% include "partials/entry_form.html" %}` in the response so the form's empty state is restored.
 
 ---
 
 ## Delete with confirm
 
 ```html
-<button hx-delete="/todos/{{ id }}"
-        hx-target="#todo-{{ id }}"
+<button hx-delete="/entries/{{ id }}"
+        hx-target="#entry-{{ id }}"
         hx-swap="delete"
-        hx-confirm="Delete this todo?">×</button>
+        hx-confirm="Delete this entry?">×</button>
 ```
 
 The handler returns an empty body; `hx-swap="delete"` removes the target element from the DOM.
 
 ```lua
-app.delete("/todos/:id", function(req, res)
+app.delete("/entries/:id", function(req, res)
     local id = tonumber(req.params.id)
-    db.exec("DELETE FROM todos WHERE id = ?", { id })
+    db.exec("DELETE FROM entries WHERE id = ?", { id })
     if htmx.is(req) then
         res:html("")
     else
@@ -221,7 +221,7 @@ Flash messages are fragments that appear once and dismiss. The simplest pattern:
 ```lua
 res:html(template.render("partials/flash.html",
     { kind = "ok", message = "Saved." })
-    .. template.render("partials/todo_row.html", data))
+    .. template.render("partials/entry_row.html", data))
 ```
 
 ```html
@@ -256,11 +256,11 @@ all the work:
 
 ```html
 <input type="search" name="q"
-       placeholder="Search todos…"
+       placeholder="Search entries…"
        autocomplete="off"
        hx-get="/search"
        hx-trigger="keyup changed delay:300ms, search"
-       hx-target="#todos">
+       hx-target="#entries">
 ```
 
 What each piece does:
@@ -270,7 +270,7 @@ What each piece does:
   means the request only goes out if the value actually changed
   (typing then deleting the same chars is a no-op). The second trigger
   `search` catches the browser's native input-clear button.
-- `hx-target="#todos"` — the response replaces the `<ul id="todos">`
+- `hx-target="#entries"` — the response replaces the `<ul id="entries">`
   inner content. Server returns just the `<li>` rows; no need to
   re-render the wrapper.
 - `autocomplete="off"` — the browser's history dropdown is noise here.
@@ -284,9 +284,9 @@ app.get("/search", function(req, res)
     local q = ((req.query and req.query.q) or "")
                 :gsub("^%s+", ""):gsub("%s+$", "")
     local rows = (q == "")
-        and db.query("SELECT id, title, done FROM todos "
+        and db.query("SELECT id, title, done FROM entries "
                   .. "ORDER BY id DESC LIMIT 20")
-        or  db.query("SELECT id, title, done FROM todos "
+        or  db.query("SELECT id, title, done FROM entries "
                   .. "WHERE title LIKE ? ORDER BY id DESC LIMIT 20",
                      { "%" .. q .. "%" })
     if htmx.is(req) then
@@ -296,7 +296,7 @@ app.get("/search", function(req, res)
             local parts = {}
             for _, row in ipairs(rows) do
                 parts[#parts + 1] = template.render(
-                    "partials/todo_row.html", { t = row })
+                    "partials/entry_row.html", { t = row })
             end
             res:html(table.concat(parts))
         end
@@ -306,7 +306,7 @@ app.get("/search", function(req, res)
 end)
 ```
 
-JS shape is the same; see `examples/hypermedia_todo/app.js`.
+JS shape is the same; see `examples/hypermedia_photos/app.js`.
 
 ### Rate-limit the search endpoint
 
@@ -341,9 +341,9 @@ row, cancel restores the original row. Three routes do all the work:
 
 | Verb  | Path                | Returns                          |
 |-------|---------------------|----------------------------------|
-| GET   | `/todos/:id/edit`   | inline edit form (replaces row) |
-| GET   | `/todos/:id`        | the row (used by Cancel)        |
-| PATCH | `/todos/:id`        | updated row, or re-rendered edit form on validation error |
+| GET   | `/entries/:id/edit`   | inline edit form (replaces row) |
+| GET   | `/entries/:id`        | the row (used by Cancel)        |
+| PATCH | `/entries/:id`        | updated row, or re-rendered edit form on validation error |
 
 **Route registration order matters.** Register the more specific
 path (`/edit`) BEFORE the bare `/:id` so the router doesn't greedily
@@ -353,8 +353,8 @@ add inline-edit to your own list view, mirror the order.
 The Edit button on the row swaps the whole `<li>` with the edit form:
 
 ```html
-<button hx-get="/todos/{{ t.id }}/edit"
-        hx-target="#todo-{{ t.id }}"
+<button hx-get="/entries/{{ t.id }}/edit"
+        hx-target="#entry-{{ t.id }}"
         hx-swap="outerHTML"
         aria-label="Edit">✎</button>
 ```
@@ -364,16 +364,16 @@ form automatically — the browser still sends POST, but HTMX adds the
 right `X-HTTP-Method-Override` semantics):
 
 ```html
-<li id="todo-{{ t.id }}" class="todo-edit">
-  <form hx-patch="/todos/{{ t.id }}"
-        hx-target="#todo-{{ t.id }}"
+<li id="entry-{{ t.id }}" class="entry-edit">
+  <form hx-patch="/entries/{{ t.id }}"
+        hx-target="#entry-{{ t.id }}"
         hx-swap="outerHTML">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <input type="text" name="title" value="{{ t.title }}" required autofocus>
     <button type="submit">Save</button>
     <button type="button"
-            hx-get="/todos/{{ t.id }}"
-            hx-target="#todo-{{ t.id }}"
+            hx-get="/entries/{{ t.id }}"
+            hx-target="#entry-{{ t.id }}"
             hx-swap="outerHTML">Cancel</button>
   </form>
 </li>
@@ -383,21 +383,21 @@ Server PATCH handler returns the row on success, OR re-renders the
 same edit form with an inline error on validation failure:
 
 ```lua
-app.patch("/todos/:id", function(req, res)
+app.patch("/entries/:id", function(req, res)
     local fields = form.parse(req.body or "")
     local title = (fields.title or ""):gsub("^%s+", ""):gsub("%s+$", "")
     if title == "" then
         local existing = db.query(...)[1]
         existing.title = ""  -- keep the (empty) value the user typed
-        res:html(template.render("partials/_todo_edit_form.html", {
+        res:html(template.render("partials/_entry_edit_form.html", {
             t = existing,
             csrf_token = req.ctx.csrf_token,
             error = "Title cannot be empty.",
         }))
         return
     end
-    db.exec("UPDATE todos SET title = ? WHERE id = ?", { title, id })
-    res:html(template.render("partials/todo_row.html", { t = updated_row }))
+    db.exec("UPDATE entries SET title = ? WHERE id = ?", { title, id })
+    res:html(template.render("partials/entry_row.html", { t = updated_row }))
 end)
 ```
 
@@ -408,7 +408,7 @@ gracefully to non-HTMX clients (curl, accessibility tools that don't
 run JS), expose a POST alias that reads a `_method` override field:
 
 ```html
-<form method="POST" action="/todos/{{ t.id }}">
+<form method="POST" action="/entries/{{ t.id }}">
   <input type="hidden" name="_method" value="PATCH">
   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
   <input type="text" name="title" value="{{ t.title }}">
@@ -417,7 +417,7 @@ run JS), expose a POST alias that reads a `_method` override field:
 ```
 
 ```lua
-app.post("/todos/:id", function(req, res)
+app.post("/entries/:id", function(req, res)
     local fields = form.parse(req.body or "")
     if fields._method == "PATCH" then
         return patch_todo(req, res, fields)  -- shared handler
@@ -433,7 +433,7 @@ progressive enhancement.
 
 The CSRF middleware's default `max_age = 3600` (1hr) is usually fine
 for single-form submits. Inline edit changes the math: a user might
-open `/todos/123/edit`, leave it open all afternoon, then submit —
+open `/entries/123/edit`, leave it open all afternoon, then submit —
 the token in the form has expired.
 
 Two ways to handle:
@@ -442,7 +442,7 @@ Two ways to handle:
    max_age = 4 * 3600 })` (4 hours). Sessions almost certainly out-live
    the token at that point; the binding is still session-scoped.
 2. **Re-fetch the edit form before submit.** HTMX `hx-trigger="focus"`
-   on the input can re-issue `GET /todos/:id/edit` so the form
+   on the input can re-issue `GET /entries/:id/edit` so the form
    always carries a fresh token. Heavier; usually overkill.
 
 The example ships with the default 1-hour `max_age` (good for the
@@ -510,8 +510,8 @@ Override the inherited body-level indicator on specific requests
 own form):
 
 ```html
-<form hx-patch="/todos/{{ t.id }}"
-      hx-target="#todo-{{ t.id }}"
+<form hx-patch="/entries/{{ t.id }}"
+      hx-target="#entry-{{ t.id }}"
       hx-indicator="#row-saving-{{ t.id }}">
   ...
   <button type="submit">Save</button>
@@ -530,7 +530,7 @@ spinner inline). Apps that prefer Pico's native idiom can wire htmx
 events to toggle the attribute via tiny JS:
 
 ```html
-<button id="save-btn" hx-patch="/todos/42"
+<button id="save-btn" hx-patch="/entries/42"
         onclick="this.setAttribute('aria-busy','true')">Save</button>
 <script nonce="{{ csp_nonce }}">
   document.body.addEventListener("htmx:afterRequest", (e) => {
@@ -558,14 +558,14 @@ Form template uses `{{ values.X }}` for value preservation and
 for inline errors:
 
 ```html
-<form id="new-todo" hx-post="/todos" hx-target="#todos" hx-swap="afterbegin">
+<form id="new-entry" hx-post="/entries" hx-target="#entries" hx-swap="afterbegin">
   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-  <input type="text" name="title" placeholder="New todo"
+  <input type="text" name="title" placeholder="New entry"
          value="{{ values.title }}"
          aria-invalid="{% if errors.title %}true{% else %}false{% end %}"
          required autofocus>
   {% if errors.title %}
-  <small role="alert" id="new-todo-error">{{ errors.title }}</small>
+  <small role="alert" id="new-entry-error">{{ errors.title }}</small>
   {% end %}
   <button type="submit">Add</button>
 </form>
@@ -578,7 +578,7 @@ the data context:
 ```lua
 local validate = require("hull.validate")
 
-app.post("/todos", function(req, res)
+app.post("/entries", function(req, res)
     local fields = form.parse(req.body or "")
     local ok, errors = validate.check(fields, {
         title = {
@@ -587,9 +587,9 @@ app.post("/todos", function(req, res)
         },
     })
     if not ok then
-        htmx.retarget(res, "#new-todo")
+        htmx.retarget(res, "#new-entry")
         htmx.reswap(res, "outerHTML")
-        res:html(template.render("partials/todo_form.html", {
+        res:html(template.render("partials/entry_form.html", {
             csrf_token = req.ctx.csrf_token,
             values     = fields,
             errors     = errors,
@@ -597,7 +597,7 @@ app.post("/todos", function(req, res)
         return
     end
     -- success: fields.title is already trimmed by validate
-    db.exec("INSERT INTO todos (title, done) VALUES (?, 0)", { fields.title })
+    db.exec("INSERT INTO entries (title, done) VALUES (?, 0)", { fields.title })
     ...
 end)
 ```
@@ -606,8 +606,8 @@ end)
 table in-place, so the post-validate `fields.title` is the cleaned
 value — no separate variable needed.
 
-`htmx.retarget(res, "#new-todo") + htmx.reswap(res, "outerHTML")`
-overrides the form's own `hx-target="#todos"` so the validation
+`htmx.retarget(res, "#new-entry") + htmx.reswap(res, "outerHTML")`
+overrides the form's own `hx-target="#entries"` so the validation
 response replaces the form element itself, not the list.
 
 ### Why not just check `if fields.title == ""`?
@@ -650,7 +650,7 @@ res:html(template.render("pages/signup.html", { fields = fields_spec, ... }))
 </form>
 ```
 
-For single-field forms (the todo demo), inline is simpler. For 3+
+For single-field forms (the entry demo), inline is simpler. For 3+
 fields, the for-loop + partial pattern saves a lot of HTML.
 
 ---
@@ -692,9 +692,9 @@ handler must use `idempotency.respond_html` (or `respond` for JSON)
 instead of `res:html(...)` directly:
 
 ```lua
-app.post("/todos", function(req, res)
+app.post("/entries", function(req, res)
     ...
-    local html = template.render("partials/todo_row.html", { t = row })
+    local html = template.render("partials/entry_row.html", { t = row })
     -- caches HTML + content-type when an Idempotency-Key is in flight,
     -- otherwise just sends the response normally.
     idempotency.respond_html(req, res, 200, html)
@@ -712,7 +712,7 @@ HTMX doesn't send `Idempotency-Key` automatically. Forms that need
 double-submit protection opt in:
 
 ```html
-<form hx-post="/todos"
+<form hx-post="/entries"
       hx-headers='{"Idempotency-Key": "{{ random_uuid }}"}'>
   ...
 </form>
@@ -742,21 +742,21 @@ Hull's template engine treats empty Lua tables as truthy. To branch on emptiness
 
 ```html
 {% if has_items %}
-<ul id="todos">
-  {% for t in todos %}{% include "partials/todo_row.html" %}{% end %}
+<ul id="entries">
+  {% for t in entries %}{% include "partials/entry_row.html" %}{% end %}
 </ul>
 {% else %}
-<p class="empty">No todos yet. Add one above.</p>
+<p class="empty">No entries yet. Add one above.</p>
 {% end %}
 ```
 
 In the handler:
 
 ```lua
-local todos = db.query("SELECT id, title, done FROM todos ORDER BY id DESC")
+local entries = db.query("SELECT id, title, done FROM entries ORDER BY id DESC")
 res:html(template.render("pages/home.html", {
-    todos = todos,
-    has_items = #todos > 0,
+    entries = entries,
+    has_items = #entries > 0,
     csrf_token = req.ctx.csrf_token,
     csp_nonce = req.ctx.csp_nonce,
 }))
@@ -775,12 +775,12 @@ test("GET / returns full HTML page", function()
     test.ok(string.find(res.body, "<!doctype html>"))
 end)
 
-test("POST /todos with htmx returns fragment", function()
+test("POST /entries with htmx returns fragment", function()
     -- 1. GET / to obtain the CSRF token + session cookie.
     local home = test.get("/", { middleware = true })
     local token = string.match(home.body, 'name="_csrf" value="([^"]+)"')
     -- 2. Send the POST with the cookie + token.
-    local res = test.post("/todos", {
+    local res = test.post("/entries", {
         middleware = true,
         body = "title=buy+milk&_csrf=" .. token,
         headers = {
@@ -796,7 +796,7 @@ test("POST /todos with htmx returns fragment", function()
 end)
 ```
 
-The same shape exists for JS (`await test.get / test.post`, `body:` instead of `body =`, `[k]:` JS keys). See `examples/hypermedia_todo/tests/test_app.{lua,js}` for the full set.
+The same shape exists for JS (`await test.get / test.post`, `body:` instead of `body =`, `[k]:` JS keys). See `examples/hypermedia_photos/tests/test_app.{lua,js}` for the full set.
 
 ---
 
@@ -829,7 +829,7 @@ client side is plain HTMX with one extra attribute.
 ### Markup
 
 ```html
-<form hx-post="/todos/{{ t.id }}/photos"
+<form hx-post="/entries/{{ t.id }}/photos"
       hx-encoding="multipart/form-data"
       hx-target="#attachments-{{ t.id }}"
       hx-swap="outerHTML">
@@ -865,8 +865,8 @@ Inside the handler, read the multipart iterator and pass each file
 part to `attachment.store`:
 
 ```lua
-app.post("/todos/:id/photos", function(req, res)
-    local todo_id = tonumber(req.params.id)
+app.post("/entries/:id/photos", function(req, res)
+    local entry_id = tonumber(req.params.id)
     local new_ids = {}
     local ok, err = pcall(function()
         for part in req:multipart() do
@@ -875,8 +875,8 @@ app.post("/todos/:id/photos", function(req, res)
                     uploaded_by = req.ctx.session_id,
                 })
                 db.exec(
-                    "INSERT INTO todo_attachments (todo_id, attachment_id, created_at) VALUES (?, ?, ?)",
-                    { todo_id, id, time.now() })
+                    "INSERT INTO entry_attachments (entry_id, attachment_id, created_at) VALUES (?, ?, ?)",
+                    { entry_id, id, time.now() })
                 new_ids[#new_ids + 1] = id
             end
         end
@@ -886,16 +886,16 @@ app.post("/todos/:id/photos", function(req, res)
         res:html('<small role="alert">Upload failed: ' .. tostring(err) .. '</small>')
         return
     end
-    -- Re-render the photo strip for this todo as the response.
+    -- Re-render the photo strip for this entry as the response.
     res:html(template.render("partials/_attachment_strip.html", {
-        t = { id = todo_id, attachments = list_attachments_for_todo(todo_id) }
+        t = { id = entry_id, attachments = list_attachments_for_todo(entry_id) }
     }))
 end, { multipart = { max_part_size = 8 * 1024 * 1024 } })
 ```
 
 ```javascript
-app.post("/todos/:id/photos", async (req, res) => {
-    const todoId = Number.parseInt(req.params.id, 10);
+app.post("/entries/:id/photos", async (req, res) => {
+    const entryId = Number.parseInt(req.params.id, 10);
     try {
         for await (const part of req.multipart()) {
             if (part.filename) {
@@ -903,8 +903,8 @@ app.post("/todos/:id/photos", async (req, res) => {
                     uploadedBy: req.ctx.session_id,
                 });
                 db.exec(
-                    "INSERT INTO todo_attachments (todo_id, attachment_id, created_at) VALUES (?, ?, ?)",
-                    [todoId, id, time.now()]);
+                    "INSERT INTO entry_attachments (entry_id, attachment_id, created_at) VALUES (?, ?, ?)",
+                    [entryId, id, time.now()]);
             }
         }
     } catch (e) {
@@ -914,7 +914,7 @@ app.post("/todos/:id/photos", async (req, res) => {
         return;
     }
     res.html(template.render("partials/_attachment_strip.html", {
-        t: { id: todoId, attachments: listAttachmentsForTodo(todoId) }
+        t: { id: entryId, attachments: listAttachmentsForTodo(entryId) }
     }));
 }, { multipart: { maxPartSize: 8 * 1024 * 1024 } });
 ```
@@ -966,10 +966,10 @@ The `<img>` tag points at a route that calls `attachment-serve.serve`:
 
 ```html
 <figure id="att-{{ a.id }}">
-  <img src="/todos/{{ t.id }}/photos/{{ a.id }}"
+  <img src="/entries/{{ t.id }}/photos/{{ a.id }}"
        alt="{{ a.original_name }}"
        loading="lazy">
-  <button hx-delete="/todos/{{ t.id }}/photos/{{ a.id }}"
+  <button hx-delete="/entries/{{ t.id }}/photos/{{ a.id }}"
           hx-target="#att-{{ a.id }}"
           hx-swap="delete"
           hx-confirm="Delete this photo?">×</button>
@@ -977,11 +977,11 @@ The `<img>` tag points at a route that calls `attachment-serve.serve`:
 ```
 
 ```lua
-app.get("/todos/:id/photos/:att_id", function(req, res)
+app.get("/entries/:id/photos/:att_id", function(req, res)
     attachment_serve.serve(req, res, req.params.att_id, {
         auth_check = function(req, meta)
             -- Gate however your app wants. The demo gates on
-            -- "is this attachment attached to this todo?" via a
+            -- "is this attachment attached to this entry?" via a
             -- join table. A real multi-user app would compare
             -- meta.uploaded_by against req.ctx.user_id.
             return owns_attachment(tonumber(req.params.id), req.params.att_id)
@@ -997,21 +997,21 @@ sets `Content-Disposition` with the original filename, and uses
 images).
 
 `loading="lazy"` on the `<img>` makes the browser only fetch
-attachments as they scroll into view — useful for todo lists with
+attachments as they scroll into view — useful for entry lists with
 many attachments.
 
 ### Working example
 
-See [`examples/hypermedia_todo`](../examples/hypermedia_todo) for the
-end-to-end demo: per-todo photo strip, file-input upload with
+See [`examples/hypermedia_photos`](../examples/hypermedia_photos) for the
+end-to-end demo: per-entry photo strip, file-input upload with
 type-filtering, delete-with-confirm, the auth_check pattern, and
 the strip-swap response. The end-to-end test in
-[`tests/e2e_hypermedia_todo_upload.sh`](../tests/e2e_hypermedia_todo_upload.sh)
+[`tests/e2e_hypermedia_photos_upload.sh`](../tests/e2e_hypermedia_photos_upload.sh)
 exercises the full flow.
 
 ## See also
 
-- `examples/hypermedia_todo/`. the canonical scaffolded app, both runtimes.
+- `examples/hypermedia_photos/`. the canonical scaffolded app, both runtimes.
 - `stdlib/lua/hull/web/htmx.lua` / `stdlib/js/hull/web/htmx.js`. the helper module source.
 - `stdlib/lua/hull/web/middleware/csp.lua` / `stdlib/js/hull/web/middleware/csp.js`. the CSP middleware.
 - `stdlib/lua/hull/web/middleware/csrf.lua` / `stdlib/js/hull/web/middleware/csrf.js`. CSRF tokens, HMAC-SHA256.

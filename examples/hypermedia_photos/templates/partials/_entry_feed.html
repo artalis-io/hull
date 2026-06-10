@@ -1,0 +1,15 @@
+<ul id="entries" class="entry-list">
+{% if has_entries %}
+  {% for t in entries %}
+    {% include "partials/entry_row.html" %}
+  {% end %}
+{% else %}
+  {% if has_query %}
+  <li class="entry-empty">No entries match "{{ q }}".</li>
+  {% else %}
+  <li class="entry-empty">Nothing here yet - add your first entry above.</li>
+  {% end %}
+{% end %}
+</ul>
+
+{% include "partials/_pagination.html" %}

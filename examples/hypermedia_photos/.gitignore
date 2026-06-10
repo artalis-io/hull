@@ -1,5 +1,6 @@
 data.db
 data.db-*
+data/
 *.key
 hull.sig
 build/

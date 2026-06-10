@@ -1,6 +1,7 @@
 <form class="attachment-upload"
-      hx-post="/todos/{{ t.id }}/photos"
+      hx-post="/entries/{{ t.id }}/photos"
       hx-encoding="multipart/form-data"
+      hx-trigger="change"
       hx-target="#attachments-{{ t.id }}"
       hx-swap="outerHTML">
   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
@@ -9,7 +10,6 @@
     <input type="file"
            name="photo"
            accept="image/png,image/jpeg,image/gif,image/webp"
-           hx-trigger="change"
            required>
   </label>
 </form>
