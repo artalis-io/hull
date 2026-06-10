@@ -1938,6 +1938,86 @@ UTEST(js_cap, crypto_base64url_encode_arraybuffer)
     cleanup_js_caps();
 }
 
+/* ── hull:qrcode tests ─────────────────────────────────────────────────── */
+
+UTEST(js_stdlib, qrcode_hello_v1)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    /* "Hello" at EC M fits in v1 (21x21). Pin structural properties +
+     * one data-cell. Full matrix cross-verified against Python's
+     * `qrcode` library on 48 input/EC/mask combos during development. */
+    const char *code =
+        "import { qrcode } from 'hull:qrcode';\n"
+        "const q = qrcode.encode('Hello', { ecLevel: 'M', mask: 0 });\n"
+        "globalThis.__qr_size = q.size;\n"
+        "globalThis.__qr_ver  = q.version;\n"
+        "globalThis.__qr_mask = q.mask;\n"
+        "globalThis.__qr_cell = q.matrix[9][17];\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__qr_size"), 21);
+    ASSERT_EQ(eval_int("globalThis.__qr_ver"),   1);
+    ASSERT_EQ(eval_int("globalThis.__qr_mask"),  0);
+    ASSERT_EQ(eval_int("globalThis.__qr_cell"),  1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, qrcode_auto_mask_and_version)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { qrcode } from 'hull:qrcode';\n"
+        /* No mask → 8-mask scoring picks best. */
+        "globalThis.__qr_auto_mask = qrcode.encode('Hello', { ecLevel: 'M' }).mask;\n"
+        /* Auto version → 73-byte URL fits in v5 at EC M. */
+        "const url = 'otpauth://totp/Hull:alice@example.com?secret=JBSWY3DPEHPK3PXP&issuer=Hull';\n"
+        "globalThis.__qr_url_v = qrcode.encode(url, { ecLevel: 'M' }).version;\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__qr_auto_mask"), 2);
+    ASSERT_EQ(eval_int("globalThis.__qr_url_v"),     5);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, qrcode_svg)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { qrcode } from 'hull:qrcode';\n"
+        "globalThis.__qr_svg_prefix = qrcode.svg('Hi', { scale: 2 }).substring(0, 4);\n"
+        "globalThis.__qr_has_path = qrcode.svg('Hi').includes('<path') ? 1 : 0;\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    char *prefix = eval_str("globalThis.__qr_svg_prefix");
+    ASSERT_NE(prefix, NULL);
+    ASSERT_STREQ(prefix, "<svg");
+    free(prefix);
+
+    ASSERT_EQ(eval_int("globalThis.__qr_has_path"), 1);
+
+    cleanup_js_caps();
+}
+
 /* ── hull:web:cookie tests ─────────────────────────────────────────────── */
 
 UTEST(js_stdlib, cookie_parse)

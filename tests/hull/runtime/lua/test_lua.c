@@ -2143,6 +2143,108 @@ UTEST(lua_cap, crypto_base64url_roundtrip)
     cleanup_lua_caps();
 }
 
+/* ── hull.qrcode tests ─────────────────────────────────────────────────── */
+
+UTEST(lua_stdlib, qrcode_hello_v1)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* "Hello" at EC M fits in v1 (21x21). Pin a few known structural
+     * properties (size, version, mask) and one data-cell that varies
+     * by encoding correctness. The full matrix was cross-verified
+     * against Python's `qrcode` library (RFC-style reference impl) on
+     * 48 input/EC/mask combinations during development. */
+    int size = eval_int(
+        "(function() "
+        "  local qr = require('hull.qrcode') "
+        "  local q = qr.encode('Hello', { ec_level = 'M', mask = 0 }) "
+        "  return q.size "
+        "end)()");
+    ASSERT_EQ(size, 21);
+
+    int version = eval_int(
+        "(function() "
+        "  local qr = require('hull.qrcode') "
+        "  return qr.encode('Hello', { ec_level = 'M', mask = 0 }).version "
+        "end)()");
+    ASSERT_EQ(version, 1);
+
+    /* Mask 0 was forced; encoder should honor it. */
+    int mask = eval_int(
+        "(function() "
+        "  local qr = require('hull.qrcode') "
+        "  return qr.encode('Hello', { ec_level = 'M', mask = 0 }).mask "
+        "end)()");
+    ASSERT_EQ(mask, 0);
+
+    /* Data cell at (9, 17) per the Python reference for ('Hello', M, 0).
+     * If the encoding or placement regresses, this cell flips. */
+    int cell = eval_int(
+        "(function() "
+        "  local qr = require('hull.qrcode') "
+        "  local q = qr.encode('Hello', { ec_level = 'M', mask = 0 }) "
+        "  return q.matrix[9][17] "
+        "end)()");
+    ASSERT_EQ(cell, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, qrcode_auto_mask_and_version)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* No mask arg → encoder scores all 8 and picks the best one.
+     * For "Hello" at EC M, the Python reference picks mask 2; pinning
+     * this catches regressions in the score-based selector. */
+    int mask = eval_int(
+        "(function() "
+        "  local qr = require('hull.qrcode') "
+        "  return qr.encode('Hello', { ec_level = 'M' }).mask "
+        "end)()");
+    ASSERT_EQ(mask, 2);
+
+    /* Auto version selection — 73-byte URL fits in v5 at EC M. */
+    int version = eval_int(
+        "(function() "
+        "  local qr = require('hull.qrcode') "
+        "  local url = 'otpauth://totp/Hull:alice@example.com?secret=JBSWY3DPEHPK3PXP&issuer=Hull' "
+        "  return qr.encode(url, { ec_level = 'M' }).version "
+        "end)()");
+    ASSERT_EQ(version, 5);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, qrcode_svg)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* SVG output has the expected wrapper + at least one path element. */
+    char *prefix = eval_str(
+        "(function() "
+        "  local qr = require('hull.qrcode') "
+        "  local s = qr.svg('Hi', { scale = 2 }) "
+        "  return s:sub(1, 4) "
+        "end)()");
+    ASSERT_NE(prefix, NULL);
+    ASSERT_STREQ(prefix, "<svg");
+    free(prefix);
+
+    int has_path = eval_int(
+        "(function() "
+        "  local qr = require('hull.qrcode') "
+        "  local s = qr.svg('Hi') "
+        "  return s:find('<path', 1, true) and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(has_path, 1);
+
+    cleanup_lua_caps();
+}
+
 /* ── hull.web.cookie tests ─────────────────────────────────────────────── */
 
 UTEST(lua_stdlib, cookie_parse)

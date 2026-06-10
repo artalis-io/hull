@@ -893,6 +893,7 @@ Register with `app.use(method, pattern, mw)`:
 | `form` | `hull.web.form` | `hull:web:form` | URL-encoded form body parsing |
 | `i18n` | `hull.i18n` | `hull:i18n` | Internationalization: locale detection, translations, formatting |
 | `csv` | `hull.csv` | `hull:csv` | CSV parse/encode (RFC 4180) |
+| `qrcode` | `hull.qrcode` | `hull:qrcode` | QR Code generator (ISO/IEC 18004), pure Lua/JS |
 | `search` | `hull.search` | `hull:search` | Full-text search (SQLite FTS5) |
 | `rbac` | `hull.web.middleware.rbac` | `hull:web:middleware:rbac` | Role-based access control |
 | `health` | `hull.web.middleware.health` | `hull:web:middleware:health` | Health check + readiness endpoints |
@@ -1133,6 +1134,29 @@ template.clearCache();                           // clear compiled function cach
 - `opts.headers`. Rows are objects; emit header row (default: `false`)
 - `opts.separator`. Field delimiter (default: `","`)
 - Returns CSV string.
+
+**qrcode**. QR Code generator (ISO/IEC 18004). Pure Lua / JS, byte
+mode, all four EC levels, versions 1-40, all 8 mask patterns scored
+per spec. Algorithm structure adapted from Project Nayuki's
+MIT-licensed QR Code generator library; tables transcribed from
+ISO/IEC 18004:2015 Annex E + Table 9 and cross-verified against
+Python's `qrcode` library on 48 input / EC / mask combinations.
+
+- `qrcode.encode(text, opts?)` → `{ matrix, size, version, ec_level, mask }`.
+  Matrix is 1-indexed; cells are 0 (light) or 1 (dark).
+  - `opts.ec_level` (Lua) / `opts.ecLevel` (JS). `"L"|"M"|"Q"|"H"`, default `"M"`.
+  - `opts.mask`. `0..7` to force a specific mask; omitted runs the
+    8-mask score-and-pick selector per spec 8.8.2.
+- `qrcode.svg(text, opts?)` → SVG string.
+  - `opts.scale`. Pixel size per module (default 4).
+  - `opts.margin`. Quiet-zone modules around the QR (default 4).
+  - `opts.dark` / `opts.light`. Colors (default `"#000"` / `"#fff"`).
+    Pass `light: "none"` for transparent background.
+- Input is treated as bytes (Latin-1 / ASCII). For non-ASCII payloads,
+  encode to UTF-8 bytes at the call site before passing to `encode`.
+
+Used by `hull/web/middleware/totp` for enrollment QR rendering;
+also useful for WiFi codes, contact cards, payment links, etc.
 
 **search**. Full-text search backed by SQLite FTS5.
 - `search.create_index(name, columns, opts?)`. Create FTS5 virtual table.

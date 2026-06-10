@@ -202,6 +202,16 @@ static const HlModuleSpec REGISTRY[] = {
 
     /* ── Pure stdlib + remaining side-effect ─────────────────────── */
     {
+        /* QR Code generator (ISO/IEC 18004). Pure transformation of
+         * text → matrix → SVG. Used by hull/web/middleware/totp for
+         * enrollment QR codes, but content-agnostic so it stays flat
+         * (not under hull/web/). Also useful for WiFi sharing codes,
+         * contact cards, payment links, etc. */
+        .name = "hull/qrcode",
+        .api_major = 1, .intrinsic = 0, .pure = 1,
+        .required_caps = 0, .deps = {0},
+    },
+    {
         .name = "hull/search",
         .api_major = 1, .intrinsic = 0, .pure = 1,
         .required_caps = 0,
