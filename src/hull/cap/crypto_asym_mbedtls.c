@@ -1,7 +1,7 @@
 /*
  * cap/asym_mbedtls.c - mbedTLS backend for asymmetric verify.
  *
- * Implements the HlAsymBackend vtable using mbedTLS's PK API. Covers
+ * Implements the HlCryptoAsymBackend vtable using mbedTLS's PK API. Covers
  * RSA-PKCS1v15 / RSA-PSS (RS256-512, PS256) and ECDSA (ES256, ES384)
  * with the JOSE-flavored raw r||s signature encoding.
  *
@@ -16,7 +16,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#include "hull/cap/asym.h"
+#include "hull/cap/crypto.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -42,10 +42,10 @@
 
 /* Per-alg static descriptor: hash type + hash size + (for ECDSA)
  * curve identifier. We don't allocate; the table is read-only and
- * indexed by the enum value, with HL_ASYM_NONE = 0 as a sentinel
+ * indexed by the enum value, with HL_CRYPTO_ASYM_NONE = 0 as a sentinel
  * row that returns NULL on lookup. */
 typedef struct {
-    HlAsymAlg            alg;
+    HlCryptoAsymAlg            alg;
     mbedtls_md_type_t    md;
     size_t               hash_len;
     int                  is_ecdsa;
@@ -56,15 +56,15 @@ typedef struct {
 
 static const AlgDesc ALG_DESCS[] = {
     /* alg,         md,                 hash, ec, curve,                    coord, pss */
-    { HL_ASYM_RS256, MBEDTLS_MD_SHA256, 32,   0, MBEDTLS_ECP_DP_NONE,        0,    0 },
-    { HL_ASYM_RS384, MBEDTLS_MD_SHA384, 48,   0, MBEDTLS_ECP_DP_NONE,        0,    0 },
-    { HL_ASYM_RS512, MBEDTLS_MD_SHA512, 64,   0, MBEDTLS_ECP_DP_NONE,        0,    0 },
-    { HL_ASYM_PS256, MBEDTLS_MD_SHA256, 32,   0, MBEDTLS_ECP_DP_NONE,        0,    1 },
-    { HL_ASYM_ES256, MBEDTLS_MD_SHA256, 32,   1, MBEDTLS_ECP_DP_SECP256R1, 32,    0 },
-    { HL_ASYM_ES384, MBEDTLS_MD_SHA384, 48,   1, MBEDTLS_ECP_DP_SECP384R1, 48,    0 },
+    { HL_CRYPTO_ASYM_RS256, MBEDTLS_MD_SHA256, 32,   0, MBEDTLS_ECP_DP_NONE,        0,    0 },
+    { HL_CRYPTO_ASYM_RS384, MBEDTLS_MD_SHA384, 48,   0, MBEDTLS_ECP_DP_NONE,        0,    0 },
+    { HL_CRYPTO_ASYM_RS512, MBEDTLS_MD_SHA512, 64,   0, MBEDTLS_ECP_DP_NONE,        0,    0 },
+    { HL_CRYPTO_ASYM_PS256, MBEDTLS_MD_SHA256, 32,   0, MBEDTLS_ECP_DP_NONE,        0,    1 },
+    { HL_CRYPTO_ASYM_ES256, MBEDTLS_MD_SHA256, 32,   1, MBEDTLS_ECP_DP_SECP256R1, 32,    0 },
+    { HL_CRYPTO_ASYM_ES384, MBEDTLS_MD_SHA384, 48,   1, MBEDTLS_ECP_DP_SECP384R1, 48,    0 },
 };
 
-static const AlgDesc *desc_for(HlAsymAlg alg)
+static const AlgDesc *desc_for(HlCryptoAsymAlg alg)
 {
     for (size_t i = 0; i < sizeof(ALG_DESCS) / sizeof(ALG_DESCS[0]); i++)
         if (ALG_DESCS[i].alg == alg) return &ALG_DESCS[i];
@@ -201,13 +201,13 @@ out:
     return rc;
 }
 
-static int mbed_supports(HlAsymAlg alg)
+static int mbed_supports(HlCryptoAsymAlg alg)
 {
     return desc_for(alg) != NULL ? 1 : 0;
 }
 
 static int mbed_verify(const void *pubkey_pem, size_t pubkey_len,
-                       HlAsymAlg alg,
+                       HlCryptoAsymAlg alg,
                        const void *data, size_t data_len,
                        const void *sig,  size_t sig_len)
 {
@@ -295,16 +295,16 @@ done:
     return rc;
 }
 
-const HlAsymBackend hl_asym_backend_mbedtls = {
+const HlCryptoAsymBackend hl_crypto_asym_backend_mbedtls = {
     .supports = mbed_supports,
     .verify   = mbed_verify,
 };
 
 #else /* !HL_ENABLE_HTTP - mbedTLS is not linked */
 
-static int stub_supports(HlAsymAlg alg) { (void)alg; return 0; }
+static int stub_supports(HlCryptoAsymAlg alg) { (void)alg; return 0; }
 static int stub_verify(const void *pk, size_t plen,
-                       HlAsymAlg alg,
+                       HlCryptoAsymAlg alg,
                        const void *d, size_t dlen,
                        const void *s, size_t slen)
 {
@@ -312,7 +312,7 @@ static int stub_verify(const void *pk, size_t plen,
     (void)d;  (void)dlen; (void)s;  (void)slen;
     return -2;
 }
-const HlAsymBackend hl_asym_backend_mbedtls = {
+const HlCryptoAsymBackend hl_crypto_asym_backend_mbedtls = {
     .supports = stub_supports,
     .verify   = stub_verify,
 };
@@ -333,51 +333,51 @@ static int ieq_n(const char *a, const char *b, size_t n)
     return 1;
 }
 
-HlAsymAlg hl_asym_alg_from_string(const char *s, size_t len)
+HlCryptoAsymAlg hl_crypto_asym_alg_from_string(const char *s, size_t len)
 {
-    if (!s || len != 5) return HL_ASYM_NONE;
-    if (ieq_n(s, "rs256", 5)) return HL_ASYM_RS256;
-    if (ieq_n(s, "rs384", 5)) return HL_ASYM_RS384;
-    if (ieq_n(s, "rs512", 5)) return HL_ASYM_RS512;
-    if (ieq_n(s, "ps256", 5)) return HL_ASYM_PS256;
-    if (ieq_n(s, "es256", 5)) return HL_ASYM_ES256;
-    if (ieq_n(s, "es384", 5)) return HL_ASYM_ES384;
-    return HL_ASYM_NONE;
+    if (!s || len != 5) return HL_CRYPTO_ASYM_NONE;
+    if (ieq_n(s, "rs256", 5)) return HL_CRYPTO_ASYM_RS256;
+    if (ieq_n(s, "rs384", 5)) return HL_CRYPTO_ASYM_RS384;
+    if (ieq_n(s, "rs512", 5)) return HL_CRYPTO_ASYM_RS512;
+    if (ieq_n(s, "ps256", 5)) return HL_CRYPTO_ASYM_PS256;
+    if (ieq_n(s, "es256", 5)) return HL_CRYPTO_ASYM_ES256;
+    if (ieq_n(s, "es384", 5)) return HL_CRYPTO_ASYM_ES384;
+    return HL_CRYPTO_ASYM_NONE;
 }
 
-const char *hl_asym_alg_to_string(HlAsymAlg alg)
+const char *hl_crypto_asym_alg_to_string(HlCryptoAsymAlg alg)
 {
     switch (alg) {
-        case HL_ASYM_RS256: return "RS256";
-        case HL_ASYM_RS384: return "RS384";
-        case HL_ASYM_RS512: return "RS512";
-        case HL_ASYM_PS256: return "PS256";
-        case HL_ASYM_ES256: return "ES256";
-        case HL_ASYM_ES384: return "ES384";
-        case HL_ASYM_NONE:  /* fallthrough */
+        case HL_CRYPTO_ASYM_RS256: return "RS256";
+        case HL_CRYPTO_ASYM_RS384: return "RS384";
+        case HL_CRYPTO_ASYM_RS512: return "RS512";
+        case HL_CRYPTO_ASYM_PS256: return "PS256";
+        case HL_CRYPTO_ASYM_ES256: return "ES256";
+        case HL_CRYPTO_ASYM_ES384: return "ES384";
+        case HL_CRYPTO_ASYM_NONE:  /* fallthrough */
         default:            return NULL;
     }
 }
 
-int hl_cap_asym_verify(const HlAsymBackend *backend,
+int hl_cap_crypto_asym_verify(const HlCryptoAsymBackend *backend,
                        const void *pubkey_pem, size_t pubkey_len,
-                       HlAsymAlg alg,
+                       HlCryptoAsymAlg alg,
                        const void *data, size_t data_len,
                        const void *sig,  size_t sig_len)
 {
     if (!backend || !backend->verify) return -2;
-    if (alg == HL_ASYM_NONE) return -2;
+    if (alg == HL_CRYPTO_ASYM_NONE) return -2;
     if (!backend->supports || !backend->supports(alg)) return -2;
     return backend->verify(pubkey_pem, pubkey_len, alg,
                            data, data_len, sig, sig_len);
 }
 
-int hl_cap_asym_verify_default(const void *pubkey_pem, size_t pubkey_len,
-                               HlAsymAlg alg,
+int hl_cap_crypto_asym_verify_default(const void *pubkey_pem, size_t pubkey_len,
+                               HlCryptoAsymAlg alg,
                                const void *data, size_t data_len,
                                const void *sig,  size_t sig_len)
 {
-    return hl_cap_asym_verify(&hl_asym_backend_mbedtls,
+    return hl_cap_crypto_asym_verify(&hl_crypto_asym_backend_mbedtls,
                               pubkey_pem, pubkey_len,
                               alg, data, data_len, sig, sig_len);
 }

@@ -13,7 +13,7 @@
  */
 
 #include "utest.h"
-#include "hull/cap/asym.h"
+#include "hull/cap/crypto.h"
 
 #include <string.h>
 
@@ -151,47 +151,47 @@ static const unsigned char SIG_ES384[] = {
 
 UTEST(hl_cap_asym, alg_from_string)
 {
-    ASSERT_EQ(HL_ASYM_RS256, hl_asym_alg_from_string("RS256", 5));
-    ASSERT_EQ(HL_ASYM_RS256, hl_asym_alg_from_string("rs256", 5));
-    ASSERT_EQ(HL_ASYM_RS384, hl_asym_alg_from_string("RS384", 5));
-    ASSERT_EQ(HL_ASYM_RS512, hl_asym_alg_from_string("RS512", 5));
-    ASSERT_EQ(HL_ASYM_PS256, hl_asym_alg_from_string("PS256", 5));
-    ASSERT_EQ(HL_ASYM_ES256, hl_asym_alg_from_string("ES256", 5));
-    ASSERT_EQ(HL_ASYM_ES384, hl_asym_alg_from_string("ES384", 5));
-    ASSERT_EQ(HL_ASYM_NONE,  hl_asym_alg_from_string("HS256", 5));
-    ASSERT_EQ(HL_ASYM_NONE,  hl_asym_alg_from_string("none",  4));
-    ASSERT_EQ(HL_ASYM_NONE,  hl_asym_alg_from_string(NULL,    5));
-    ASSERT_EQ(HL_ASYM_NONE,  hl_asym_alg_from_string("RS256", 0));
+    ASSERT_EQ(HL_CRYPTO_ASYM_RS256, hl_crypto_asym_alg_from_string("RS256", 5));
+    ASSERT_EQ(HL_CRYPTO_ASYM_RS256, hl_crypto_asym_alg_from_string("rs256", 5));
+    ASSERT_EQ(HL_CRYPTO_ASYM_RS384, hl_crypto_asym_alg_from_string("RS384", 5));
+    ASSERT_EQ(HL_CRYPTO_ASYM_RS512, hl_crypto_asym_alg_from_string("RS512", 5));
+    ASSERT_EQ(HL_CRYPTO_ASYM_PS256, hl_crypto_asym_alg_from_string("PS256", 5));
+    ASSERT_EQ(HL_CRYPTO_ASYM_ES256, hl_crypto_asym_alg_from_string("ES256", 5));
+    ASSERT_EQ(HL_CRYPTO_ASYM_ES384, hl_crypto_asym_alg_from_string("ES384", 5));
+    ASSERT_EQ(HL_CRYPTO_ASYM_NONE,  hl_crypto_asym_alg_from_string("HS256", 5));
+    ASSERT_EQ(HL_CRYPTO_ASYM_NONE,  hl_crypto_asym_alg_from_string("none",  4));
+    ASSERT_EQ(HL_CRYPTO_ASYM_NONE,  hl_crypto_asym_alg_from_string(NULL,    5));
+    ASSERT_EQ(HL_CRYPTO_ASYM_NONE,  hl_crypto_asym_alg_from_string("RS256", 0));
 }
 
 UTEST(hl_cap_asym, alg_to_string)
 {
-    ASSERT_STREQ("RS256", hl_asym_alg_to_string(HL_ASYM_RS256));
-    ASSERT_STREQ("ES384", hl_asym_alg_to_string(HL_ASYM_ES384));
-    ASSERT_TRUE(hl_asym_alg_to_string(HL_ASYM_NONE) == NULL);
+    ASSERT_STREQ("RS256", hl_crypto_asym_alg_to_string(HL_CRYPTO_ASYM_RS256));
+    ASSERT_STREQ("ES384", hl_crypto_asym_alg_to_string(HL_CRYPTO_ASYM_ES384));
+    ASSERT_TRUE(hl_crypto_asym_alg_to_string(HL_CRYPTO_ASYM_NONE) == NULL);
 }
 
 /* Compact macro for the happy path: alg, pubkey, sig. */
 #define VERIFY_OK(ALG, PEM, SIG) do { \
-    ASSERT_EQ(0, hl_cap_asym_verify_default( \
+    ASSERT_EQ(0, hl_cap_crypto_asym_verify_default( \
         (PEM), sizeof(PEM) - 1, (ALG), \
         MSG, MSG_LEN, (SIG), sizeof(SIG))); \
 } while (0)
 
-UTEST(hl_cap_asym, verify_rs256_ok) { VERIFY_OK(HL_ASYM_RS256, RSA_PUB_PEM, SIG_RS256); }
-UTEST(hl_cap_asym, verify_rs384_ok) { VERIFY_OK(HL_ASYM_RS384, RSA_PUB_PEM, SIG_RS384); }
-UTEST(hl_cap_asym, verify_rs512_ok) { VERIFY_OK(HL_ASYM_RS512, RSA_PUB_PEM, SIG_RS512); }
-UTEST(hl_cap_asym, verify_ps256_ok) { VERIFY_OK(HL_ASYM_PS256, RSA_PUB_PEM, SIG_PS256); }
-UTEST(hl_cap_asym, verify_es256_ok) { VERIFY_OK(HL_ASYM_ES256, EC256_PUB_PEM, SIG_ES256); }
-UTEST(hl_cap_asym, verify_es384_ok) { VERIFY_OK(HL_ASYM_ES384, EC384_PUB_PEM, SIG_ES384); }
+UTEST(hl_cap_asym, verify_rs256_ok) { VERIFY_OK(HL_CRYPTO_ASYM_RS256, RSA_PUB_PEM, SIG_RS256); }
+UTEST(hl_cap_asym, verify_rs384_ok) { VERIFY_OK(HL_CRYPTO_ASYM_RS384, RSA_PUB_PEM, SIG_RS384); }
+UTEST(hl_cap_asym, verify_rs512_ok) { VERIFY_OK(HL_CRYPTO_ASYM_RS512, RSA_PUB_PEM, SIG_RS512); }
+UTEST(hl_cap_asym, verify_ps256_ok) { VERIFY_OK(HL_CRYPTO_ASYM_PS256, RSA_PUB_PEM, SIG_PS256); }
+UTEST(hl_cap_asym, verify_es256_ok) { VERIFY_OK(HL_CRYPTO_ASYM_ES256, EC256_PUB_PEM, SIG_ES256); }
+UTEST(hl_cap_asym, verify_es384_ok) { VERIFY_OK(HL_CRYPTO_ASYM_ES384, EC384_PUB_PEM, SIG_ES384); }
 
 UTEST(hl_cap_asym, verify_rs256_tampered_msg)
 {
     unsigned char bad_msg[sizeof(MSG)];
     memcpy(bad_msg, MSG, sizeof(MSG));
     bad_msg[0] ^= 0x01;
-    ASSERT_EQ(-1, hl_cap_asym_verify_default(
-        RSA_PUB_PEM, RSA_PUB_PEM_LEN, HL_ASYM_RS256,
+    ASSERT_EQ(-1, hl_cap_crypto_asym_verify_default(
+        RSA_PUB_PEM, RSA_PUB_PEM_LEN, HL_CRYPTO_ASYM_RS256,
         bad_msg, sizeof(bad_msg), SIG_RS256, sizeof(SIG_RS256)));
 }
 
@@ -200,8 +200,8 @@ UTEST(hl_cap_asym, verify_rs256_tampered_sig)
     unsigned char bad_sig[sizeof(SIG_RS256)];
     memcpy(bad_sig, SIG_RS256, sizeof(SIG_RS256));
     bad_sig[10] ^= 0x01;
-    ASSERT_EQ(-1, hl_cap_asym_verify_default(
-        RSA_PUB_PEM, RSA_PUB_PEM_LEN, HL_ASYM_RS256,
+    ASSERT_EQ(-1, hl_cap_crypto_asym_verify_default(
+        RSA_PUB_PEM, RSA_PUB_PEM_LEN, HL_CRYPTO_ASYM_RS256,
         MSG, MSG_LEN, bad_sig, sizeof(bad_sig)));
 }
 
@@ -210,8 +210,8 @@ UTEST(hl_cap_asym, verify_es256_tampered_sig)
     unsigned char bad_sig[sizeof(SIG_ES256)];
     memcpy(bad_sig, SIG_ES256, sizeof(SIG_ES256));
     bad_sig[10] ^= 0x01;
-    ASSERT_EQ(-1, hl_cap_asym_verify_default(
-        EC256_PUB_PEM, EC256_PUB_PEM_LEN, HL_ASYM_ES256,
+    ASSERT_EQ(-1, hl_cap_crypto_asym_verify_default(
+        EC256_PUB_PEM, EC256_PUB_PEM_LEN, HL_CRYPTO_ASYM_ES256,
         MSG, MSG_LEN, bad_sig, sizeof(bad_sig)));
 }
 
@@ -219,47 +219,47 @@ UTEST(hl_cap_asym, verify_es256_tampered_sig)
  * layer must reject by key-type mismatch BEFORE doing any verify. */
 UTEST(hl_cap_asym, alg_confusion_rsa_under_es256)
 {
-    ASSERT_EQ(-1, hl_cap_asym_verify_default(
-        RSA_PUB_PEM, RSA_PUB_PEM_LEN, HL_ASYM_ES256,
+    ASSERT_EQ(-1, hl_cap_crypto_asym_verify_default(
+        RSA_PUB_PEM, RSA_PUB_PEM_LEN, HL_CRYPTO_ASYM_ES256,
         MSG, MSG_LEN, SIG_ES256, sizeof(SIG_ES256)));
 }
 
 UTEST(hl_cap_asym, alg_confusion_ec_under_rs256)
 {
-    ASSERT_EQ(-1, hl_cap_asym_verify_default(
-        EC256_PUB_PEM, EC256_PUB_PEM_LEN, HL_ASYM_RS256,
+    ASSERT_EQ(-1, hl_cap_crypto_asym_verify_default(
+        EC256_PUB_PEM, EC256_PUB_PEM_LEN, HL_CRYPTO_ASYM_RS256,
         MSG, MSG_LEN, SIG_RS256, sizeof(SIG_RS256)));
 }
 
 /* Curve mismatch: P-256 key claimed as P-384 (ES384). */
 UTEST(hl_cap_asym, curve_mismatch_p256_under_es384)
 {
-    ASSERT_EQ(-1, hl_cap_asym_verify_default(
-        EC256_PUB_PEM, EC256_PUB_PEM_LEN, HL_ASYM_ES384,
+    ASSERT_EQ(-1, hl_cap_crypto_asym_verify_default(
+        EC256_PUB_PEM, EC256_PUB_PEM_LEN, HL_CRYPTO_ASYM_ES384,
         MSG, MSG_LEN, SIG_ES384, sizeof(SIG_ES384)));
 }
 
 UTEST(hl_cap_asym, none_alg_rejected)
 {
-    ASSERT_EQ(-2, hl_cap_asym_verify_default(
-        RSA_PUB_PEM, RSA_PUB_PEM_LEN, HL_ASYM_NONE,
+    ASSERT_EQ(-2, hl_cap_crypto_asym_verify_default(
+        RSA_PUB_PEM, RSA_PUB_PEM_LEN, HL_CRYPTO_ASYM_NONE,
         MSG, MSG_LEN, SIG_RS256, sizeof(SIG_RS256)));
 }
 
 UTEST(hl_cap_asym, null_args_rejected)
 {
     /* NULL pubkey */
-    ASSERT_EQ(-2, hl_cap_asym_verify_default(
-        NULL, 0, HL_ASYM_RS256,
+    ASSERT_EQ(-2, hl_cap_crypto_asym_verify_default(
+        NULL, 0, HL_CRYPTO_ASYM_RS256,
         MSG, MSG_LEN, SIG_RS256, sizeof(SIG_RS256)));
     /* NULL sig */
-    ASSERT_EQ(-2, hl_cap_asym_verify_default(
-        RSA_PUB_PEM, RSA_PUB_PEM_LEN, HL_ASYM_RS256,
+    ASSERT_EQ(-2, hl_cap_crypto_asym_verify_default(
+        RSA_PUB_PEM, RSA_PUB_PEM_LEN, HL_CRYPTO_ASYM_RS256,
         MSG, MSG_LEN, NULL, 0));
     /* NULL backend via the explicit helper */
-    ASSERT_EQ(-2, hl_cap_asym_verify(
+    ASSERT_EQ(-2, hl_cap_crypto_asym_verify(
         NULL,
-        RSA_PUB_PEM, RSA_PUB_PEM_LEN, HL_ASYM_RS256,
+        RSA_PUB_PEM, RSA_PUB_PEM_LEN, HL_CRYPTO_ASYM_RS256,
         MSG, MSG_LEN, SIG_RS256, sizeof(SIG_RS256)));
 }
 
@@ -268,29 +268,29 @@ UTEST(hl_cap_asym, malformed_pem_rejected)
     static const char garbage[] = "-----BEGIN PUBLIC KEY-----\n"
                                   "this is not actually base64-encoded\n"
                                   "-----END PUBLIC KEY-----\n";
-    ASSERT_EQ(-1, hl_cap_asym_verify_default(
-        garbage, sizeof(garbage) - 1, HL_ASYM_RS256,
+    ASSERT_EQ(-1, hl_cap_crypto_asym_verify_default(
+        garbage, sizeof(garbage) - 1, HL_CRYPTO_ASYM_RS256,
         MSG, MSG_LEN, SIG_RS256, sizeof(SIG_RS256)));
 }
 
 /* ECDSA: sig_len must equal exactly 2*coord. Truncated sig: reject. */
 UTEST(hl_cap_asym, es256_wrong_sig_len)
 {
-    ASSERT_EQ(-1, hl_cap_asym_verify_default(
-        EC256_PUB_PEM, EC256_PUB_PEM_LEN, HL_ASYM_ES256,
+    ASSERT_EQ(-1, hl_cap_crypto_asym_verify_default(
+        EC256_PUB_PEM, EC256_PUB_PEM_LEN, HL_CRYPTO_ASYM_ES256,
         MSG, MSG_LEN, SIG_ES256, sizeof(SIG_ES256) - 1));
-    ASSERT_EQ(-1, hl_cap_asym_verify_default(
-        EC256_PUB_PEM, EC256_PUB_PEM_LEN, HL_ASYM_ES256,
+    ASSERT_EQ(-1, hl_cap_crypto_asym_verify_default(
+        EC256_PUB_PEM, EC256_PUB_PEM_LEN, HL_CRYPTO_ASYM_ES256,
         MSG, MSG_LEN, SIG_ES256, sizeof(SIG_ES384)));
 }
 
 UTEST(hl_cap_asym, backend_supports)
 {
-    ASSERT_EQ(1, hl_asym_backend_mbedtls.supports(HL_ASYM_RS256));
-    ASSERT_EQ(1, hl_asym_backend_mbedtls.supports(HL_ASYM_PS256));
-    ASSERT_EQ(1, hl_asym_backend_mbedtls.supports(HL_ASYM_ES384));
-    ASSERT_EQ(0, hl_asym_backend_mbedtls.supports(HL_ASYM_NONE));
-    ASSERT_EQ(0, hl_asym_backend_mbedtls.supports((HlAsymAlg)99));
+    ASSERT_EQ(1, hl_crypto_asym_backend_mbedtls.supports(HL_CRYPTO_ASYM_RS256));
+    ASSERT_EQ(1, hl_crypto_asym_backend_mbedtls.supports(HL_CRYPTO_ASYM_PS256));
+    ASSERT_EQ(1, hl_crypto_asym_backend_mbedtls.supports(HL_CRYPTO_ASYM_ES384));
+    ASSERT_EQ(0, hl_crypto_asym_backend_mbedtls.supports(HL_CRYPTO_ASYM_NONE));
+    ASSERT_EQ(0, hl_crypto_asym_backend_mbedtls.supports((HlCryptoAsymAlg)99));
 }
 
 UTEST_MAIN();

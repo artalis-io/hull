@@ -286,6 +286,92 @@ int hl_cap_crypto_ed25519_sign(const uint8_t *msg, size_t msg_len,
  */
 int hl_cap_crypto_ed25519_keypair(uint8_t out_pk[32], uint8_t out_sk[64]);
 
+/* ── Asymmetric verify (RSA / ECDSA, PEM-keyed) ────────────────────── */
+
+/** Asymmetric-signature algorithm identifier. Values are stable wire-
+ *  level integers; backend impls and tests rely on them as dispatch
+ *  keys. Don't renumber.
+ */
+typedef enum {
+    HL_CRYPTO_ASYM_NONE  = 0, /**< Sentinel: rejected by every verify path. */
+    HL_CRYPTO_ASYM_RS256 = 1, /**< RSA-PKCS1v15, SHA-256. */
+    HL_CRYPTO_ASYM_RS384 = 2, /**< RSA-PKCS1v15, SHA-384. */
+    HL_CRYPTO_ASYM_RS512 = 3, /**< RSA-PKCS1v15, SHA-512. */
+    HL_CRYPTO_ASYM_PS256 = 4, /**< RSA-PSS, SHA-256, MGF1-SHA256, salt=32. */
+    HL_CRYPTO_ASYM_ES256 = 5, /**< ECDSA P-256, SHA-256, raw r||s. */
+    HL_CRYPTO_ASYM_ES384 = 6, /**< ECDSA P-384, SHA-384, raw r||s. */
+} HlCryptoAsymAlg;
+
+/** Backend vtable for asymmetric verify. The vtable so the impl can
+ *  be swapped later (mbedTLS today; could be BoringSSL, WolfSSL, a
+ *  hardware token, etc.) without disturbing the cap surface or the
+ *  Lua / JS bindings - same pattern as `HlCompilerVtable` /
+ *  `HlGpuBackendVtable`. The existing primitives in this header
+ *  (SHA / HMAC / Ed25519) call mbedTLS / TweetNaCl directly because
+ *  they shipped before the vtable convention; new asymmetric work
+ *  goes through this interface from day one.
+ */
+typedef struct HlCryptoAsymBackend {
+    /** Returns 1 if the backend can verify with this alg, 0 otherwise. */
+    int (*supports)(HlCryptoAsymAlg alg);
+
+    /** Verify a signature. Same contract as @ref
+     *  hl_cap_crypto_asym_verify (this is the underlying call the
+     *  cap surface wraps).
+     */
+    int (*verify)(const void *pubkey_pem, size_t pubkey_len,
+                  HlCryptoAsymAlg alg,
+                  const void *data, size_t data_len,
+                  const void *sig,  size_t sig_len);
+} HlCryptoAsymBackend;
+
+/** Built-in mbedTLS backend. Always present in builds that link
+ *  mbedTLS (any build with `HL_ENABLE_HTTP_CLIENT=1` or
+ *  `HL_ENABLE_HTTP_SERVER=1`). On builds without mbedTLS the symbol
+ *  still exists but its `verify` returns -2 (input error).
+ */
+extern const HlCryptoAsymBackend hl_crypto_asym_backend_mbedtls;
+
+/** Parse an alg string ("RS256", "rs256", ...) into the numeric tag.
+ *  Case-insensitive. Returns HL_CRYPTO_ASYM_NONE on unknown alg.
+ */
+HlCryptoAsymAlg hl_crypto_asym_alg_from_string(const char *s, size_t len);
+
+/** Inverse: numeric tag to canonical uppercase string. Returns NULL
+ *  for HL_CRYPTO_ASYM_NONE.
+ */
+const char *hl_crypto_asym_alg_to_string(HlCryptoAsymAlg alg);
+
+/** Verify @p sig over @p data with @p pubkey under @p alg.
+ *
+ *  Public-key input is PEM-encoded SubjectPublicKeyInfo. ECDSA
+ *  signatures must be JOSE raw r||s (NOT DER), matching the JWT
+ *  wire format. Caller-supplied length, NUL termination not
+ *  required (the backend handles both with/without trailing
+ *  newline).
+ *
+ *  @return  0 on a valid signature.
+ *          -1 if the signature does not verify (bad sig OR malformed
+ *             PEM OR wrong key type for alg OR mismatched sig_len).
+ *          -2 on a programming error: NULL pointer, zero-length
+ *             input where one is required, unsupported alg.
+ *
+ *  Treat the -1 / -2 distinction as advisory. Callers should fail
+ *  closed on anything non-zero and avoid surfacing the distinction
+ *  to end users (it's an oracle).
+ */
+int hl_cap_crypto_asym_verify(const HlCryptoAsymBackend *backend,
+                              const void *pubkey_pem, size_t pubkey_len,
+                              HlCryptoAsymAlg alg,
+                              const void *data, size_t data_len,
+                              const void *sig,  size_t sig_len);
+
+/** Convenience wrapper: verify via the built-in mbedTLS backend. */
+int hl_cap_crypto_asym_verify_default(const void *pubkey_pem, size_t pubkey_len,
+                                      HlCryptoAsymAlg alg,
+                                      const void *data, size_t data_len,
+                                      const void *sig,  size_t sig_len);
+
 /* ── Secret-key authenticated encryption (XSalsa20+Poly1305) ───────── */
 
 #define HL_SECRETBOX_KEYBYTES   32 /**< Symmetric key size (bytes). */

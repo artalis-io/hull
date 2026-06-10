@@ -379,7 +379,6 @@ static JSValue js_crypto_ed25519_verify(JSContext *ctx, JSValueConst this_val,
  *  programming errors (unknown alg) so callers can't silently get
  *  false on misuse. Mirrors Lua's crypto.verify exactly.
  */
-#include "hull/cap/asym.h"
 
 static JSValue js_crypto_verify(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv)
@@ -420,16 +419,16 @@ static JSValue js_crypto_verify(JSContext *ctx, JSValueConst this_val,
             "crypto.verify: sig must be ArrayBuffer or string");
     }
 
-    HlAsymAlg alg = hl_asym_alg_from_string(alg_str, alg_len);
+    HlCryptoAsymAlg alg = hl_crypto_asym_alg_from_string(alg_str, alg_len);
     JSValue out;
-    if (alg == HL_ASYM_NONE) {
+    if (alg == HL_CRYPTO_ASYM_NONE) {
         out = JS_ThrowTypeError(ctx,
             "crypto.verify: unsupported alg '%.*s' (use one of "
             "RS256/RS384/RS512/PS256/ES256/ES384; HS256 is "
             "crypto.hmacSha256Verify; 'none' is rejected)",
             (int)alg_len, alg_str);
     } else {
-        int rc = hl_cap_asym_verify_default(pk, pk_len, alg,
+        int rc = hl_cap_crypto_asym_verify_default(pk, pk_len, alg,
                                              data_view.data, data_view.len,
                                              sig_view.data,  sig_view.len);
         /* Collapse all failure modes to `false`. The cap layer's

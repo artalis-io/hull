@@ -307,7 +307,6 @@ static int lua_crypto_ed25519_verify(lua_State *L)
  *  are not distinguishable to the caller for the sig itself - the
  *  cap layer doesn't leak whether the failure was bad-sig vs bad-pem.
  */
-#include "hull/cap/asym.h"
 
 static int lua_crypto_verify(lua_State *L)
 {
@@ -317,15 +316,15 @@ static int lua_crypto_verify(lua_State *L)
     const char *data    = luaL_checklstring(L, 3, &data_len);
     const char *sig     = luaL_checklstring(L, 4, &sig_len);
 
-    HlAsymAlg alg = hl_asym_alg_from_string(alg_str, alg_len);
-    if (alg == HL_ASYM_NONE)
+    HlCryptoAsymAlg alg = hl_crypto_asym_alg_from_string(alg_str, alg_len);
+    if (alg == HL_CRYPTO_ASYM_NONE)
         return luaL_error(L,
             "crypto.verify: unsupported alg '%.*s' (use one of "
             "RS256/RS384/RS512/PS256/ES256/ES384; HS256 is "
             "crypto.hmac_sha256_verify; 'none' is rejected)",
             (int)alg_len, alg_str);
 
-    int rc = hl_cap_asym_verify_default(pk, pk_len, alg,
+    int rc = hl_cap_crypto_asym_verify_default(pk, pk_len, alg,
                                          data, data_len, sig, sig_len);
     /* rc == 0 -> verified. rc < 0 -> any failure (bad sig, bad PEM,
      * wrong key type, etc.). We collapse all failure modes to `false`
