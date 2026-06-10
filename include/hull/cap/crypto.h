@@ -372,6 +372,29 @@ int hl_cap_crypto_asym_verify_default(const void *pubkey_pem, size_t pubkey_len,
                                       const void *data, size_t data_len,
                                       const void *sig,  size_t sig_len);
 
+/** Extract the SubjectPublicKeyInfo PEM from an X.509 certificate.
+ *
+ *  Use case: OIDC JWKS endpoints typically include an `x5c` field
+ *  with the X.509 cert chain (base64-DER); this helper bridges from
+ *  that DER blob to the PEM that @ref hl_cap_crypto_asym_verify
+ *  consumes, without forcing the caller to do ASN.1 + DER assembly
+ *  from raw JWK components.
+ *
+ *  @param der        DER-encoded X.509 certificate bytes.
+ *  @param der_len    Length of @p der.
+ *  @param out_pem    Output buffer for the PEM-encoded public key
+ *                    (NUL-terminated, headers "BEGIN PUBLIC KEY").
+ *  @param out_size   Capacity of @p out_pem (recommend >= 4096 to
+ *                    accommodate RSA-4096 + line wrapping).
+ *  @param out_len    Out: number of bytes written (excluding NUL).
+ *
+ *  @return  0 on success, -1 on parse error, NULL input, or
+ *           insufficient output capacity.
+ */
+int hl_cap_crypto_x509_pubkey_pem(const void *der, size_t der_len,
+                                  char *out_pem, size_t out_size,
+                                  size_t *out_len);
+
 /* ── Secret-key authenticated encryption (XSalsa20+Poly1305) ───────── */
 
 #define HL_SECRETBOX_KEYBYTES   32 /**< Symmetric key size (bytes). */

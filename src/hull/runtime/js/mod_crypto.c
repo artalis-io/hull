@@ -443,6 +443,40 @@ static JSValue js_crypto_verify(JSContext *ctx, JSValueConst this_val,
     return out;
 }
 
+/* crypto.x509PubkeyPem(der) -> pemString or null
+ *
+ *  Bridge from a base64-decoded X.509 certificate (DER) to the PEM-
+ *  encoded SubjectPublicKeyInfo that crypto.verify consumes. Lets
+ *  OIDC apps consume JWKS `x5c` entries directly. der must be an
+ *  ArrayBuffer / Uint8Array (binary-safe); a JS string would
+ *  UTF-8-inflate the cert bytes through JS_ToCStringLen.
+ */
+static JSValue js_crypto_x509_pubkey_pem(JSContext *ctx,
+                                          JSValueConst this_val,
+                                          int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx,
+            "crypto.x509PubkeyPem requires (der)");
+
+    HlBufferView view = {0};
+    const char *str = NULL;
+    int needs_free = 0;
+    if (!js_get_buffer(ctx, argv[0], &view, &str, &needs_free))
+        return JS_ThrowTypeError(ctx,
+            "crypto.x509PubkeyPem: der must be ArrayBuffer or string");
+
+    char pem[4096];
+    size_t pem_len = 0;
+    int rc = hl_cap_crypto_x509_pubkey_pem(view.data, view.len,
+                                            pem, sizeof(pem), &pem_len);
+    if (needs_free) JS_FreeCString(ctx, str);
+
+    if (rc != 0) return JS_NULL;
+    return JS_NewStringLen(ctx, pem, pem_len);
+}
+
 /* ── SHA-512 ──────────────────────────────────────────────────────── */
 
 static JSValue js_crypto_sha512(JSContext *ctx, JSValueConst this_val,
@@ -1204,6 +1238,9 @@ static int js_crypto_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_crypto_ed25519_verify, "ed25519Verify", 3));
     JS_SetPropertyStr(ctx, crypto, "verify",
                       JS_NewCFunction(ctx, js_crypto_verify, "verify", 4));
+    JS_SetPropertyStr(ctx, crypto, "x509PubkeyPem",
+                      JS_NewCFunction(ctx, js_crypto_x509_pubkey_pem,
+                                       "x509PubkeyPem", 1));
     JS_SetPropertyStr(ctx, crypto, "auth",
                       JS_NewCFunction(ctx, js_crypto_auth, "auth", 2));
     JS_SetPropertyStr(ctx, crypto, "authVerify",

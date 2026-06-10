@@ -335,6 +335,31 @@ static int lua_crypto_verify(lua_State *L)
     return 1;
 }
 
+/* crypto.x509_pubkey_pem(der) -> pem_string or nil, err
+ *
+ *  Bridge from a base64-decoded X.509 certificate (DER) to the PEM-
+ *  encoded SubjectPublicKeyInfo that crypto.verify consumes. Lets
+ *  OIDC apps consume JWKS `x5c` entries directly.
+ */
+static int lua_crypto_x509_pubkey_pem(lua_State *L)
+{
+    size_t der_len;
+    const char *der = luaL_checklstring(L, 1, &der_len);
+
+    /* mbedtls_pk_write_pubkey_pem needs ~800 bytes for RSA-2048 SPKI
+     * and ~2 KiB for RSA-4096; 4 KiB is generous and stack-safe. */
+    char pem[4096];
+    size_t pem_len = 0;
+    if (hl_cap_crypto_x509_pubkey_pem(der, der_len,
+                                       pem, sizeof(pem), &pem_len) != 0) {
+        lua_pushnil(L);
+        lua_pushstring(L, "x509_pubkey_pem: parse or write failed");
+        return 2;
+    }
+    lua_pushlstring(L, pem, pem_len);
+    return 1;
+}
+
 /* ── SHA-512 ───────────────────────────────────────────────────────── */
 
 /* crypto.sha512(data) → hex string (128 chars) */
@@ -902,6 +927,7 @@ static const luaL_Reg crypto_funcs[] = {
     {"ed25519_sign",      lua_crypto_ed25519_sign},
     {"ed25519_verify",    lua_crypto_ed25519_verify},
     {"verify",            lua_crypto_verify},
+    {"x509_pubkey_pem",   lua_crypto_x509_pubkey_pem},
     {"auth",              lua_crypto_auth},
     {"auth_verify",       lua_crypto_auth_verify},
     {"secretbox",         lua_crypto_secretbox},

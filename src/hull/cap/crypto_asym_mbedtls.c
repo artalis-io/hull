@@ -39,6 +39,8 @@
 #include <mbedtls/asn1write.h>
 #include <mbedtls/sha256.h>
 #include <mbedtls/sha512.h>
+#include <mbedtls/x509_crt.h>
+#include <mbedtls/base64.h>
 
 /* Per-alg static descriptor: hash type + hash size + (for ECDSA)
  * curve identifier. We don't allocate; the table is read-only and
@@ -300,6 +302,95 @@ const HlCryptoAsymBackend hl_crypto_asym_backend_mbedtls = {
     .verify   = mbed_verify,
 };
 
+/* ── X.509 -> SPKI PEM (for OIDC JWKS x5c entries) ───────────────── */
+
+int hl_cap_crypto_x509_pubkey_pem(const void *der, size_t der_len,
+                                  char *out_pem, size_t out_size,
+                                  size_t *out_len)
+{
+    if (!der || der_len == 0 || !out_pem || out_size == 0 || !out_len)
+        return -1;
+    /* Defensive cap on input: an RSA-4096 cert is ~2 KiB; 64 KiB is
+     * orders of magnitude past what any sane JWKS x5c entry can hold,
+     * and protects against pathological input from an unverified
+     * source (the JWKS response isn't authenticated until AFTER this
+     * parse, so we treat it as untrusted). */
+    if (der_len > 64 * 1024) return -1;
+
+    mbedtls_x509_crt crt;
+    mbedtls_x509_crt_init(&crt);
+    int rc = -1;
+
+    if (mbedtls_x509_crt_parse_der(&crt, (const unsigned char *)der,
+                                    der_len) != 0)
+        goto done;
+
+    /* crt.pk_raw points at the SubjectPublicKeyInfo bytes already
+     * encoded as DER inside the cert. PEM-format = b64 of those bytes
+     * wrapped in BEGIN/END PUBLIC KEY headers. This avoids needing
+     * MBEDTLS_PK_WRITE_C / MBEDTLS_PEM_WRITE_C (which would bloat the
+     * binary by ~10 KiB for a feature only this one cap uses). */
+    const unsigned char *spki_der = crt.pk_raw.p;
+    size_t spki_der_len = crt.pk_raw.len;
+    if (!spki_der || spki_der_len == 0) goto done;
+
+    /* Probe the base64 output size first. */
+    size_t b64_len = 0;
+    mbedtls_base64_encode(NULL, 0, &b64_len, spki_der, spki_der_len);
+    if (b64_len == 0) goto done;
+
+    /* PEM = 27 (header + NL) + base64 with one NL per 64 chars +
+     * 26 (footer + NL) + 1 (final NL) + 1 (NUL). Base64 line-wrap
+     * adds ceil(b64_len/64) newlines. Add slack for the NUL byte
+     * mbedtls_base64_encode writes implicitly. */
+    static const char HDR[] = "-----BEGIN PUBLIC KEY-----\n";
+    static const char FTR[] = "-----END PUBLIC KEY-----\n";
+    size_t hdr_len = sizeof(HDR) - 1;
+    size_t ftr_len = sizeof(FTR) - 1;
+    size_t wrapped_b64_len = b64_len + (b64_len / 64) + 1;
+    size_t total = hdr_len + wrapped_b64_len + ftr_len;
+    if (total + 1 > out_size) goto done;
+
+    /* Emit header. */
+    memcpy(out_pem, HDR, hdr_len);
+    size_t pos = hdr_len;
+
+    /* Emit base64 into a scratch buffer, then re-emit into out_pem
+     * with a newline every 64 chars (PEM convention). */
+    unsigned char *scratch = (unsigned char *)malloc(b64_len + 1);
+    if (!scratch) goto done;
+    size_t written = 0;
+    if (mbedtls_base64_encode(scratch, b64_len + 1, &written,
+                              spki_der, spki_der_len) != 0) {
+        free(scratch);
+        goto done;
+    }
+
+    for (size_t i = 0; i < written; i += 64) {
+        size_t chunk = (written - i) > 64 ? 64 : (written - i);
+        if (pos + chunk + 1 > out_size) {
+            free(scratch);
+            goto done;
+        }
+        memcpy(out_pem + pos, scratch + i, chunk);
+        pos += chunk;
+        out_pem[pos++] = '\n';
+    }
+    free(scratch);
+
+    if (pos + ftr_len + 1 > out_size) goto done;
+    memcpy(out_pem + pos, FTR, ftr_len);
+    pos += ftr_len;
+    out_pem[pos] = '\0';
+
+    *out_len = pos;
+    rc = 0;
+
+done:
+    mbedtls_x509_crt_free(&crt);
+    return rc;
+}
+
 #else /* !HL_ENABLE_HTTP - mbedTLS is not linked */
 
 static int stub_supports(HlCryptoAsymAlg alg) { (void)alg; return 0; }
@@ -316,6 +407,14 @@ const HlCryptoAsymBackend hl_crypto_asym_backend_mbedtls = {
     .supports = stub_supports,
     .verify   = stub_verify,
 };
+
+int hl_cap_crypto_x509_pubkey_pem(const void *der, size_t der_len,
+                                  char *out_pem, size_t out_size,
+                                  size_t *out_len)
+{
+    (void)der; (void)der_len; (void)out_pem; (void)out_size; (void)out_len;
+    return -1;
+}
 
 #endif /* HL_ENABLE_HTTP */
 
