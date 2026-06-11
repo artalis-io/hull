@@ -989,16 +989,29 @@ static JSValue js_crypto_hmac_sha1(JSContext *ctx, JSValueConst this_val,
     if (argc < 2)
         return JS_ThrowTypeError(ctx, "crypto.hmacSha1 requires (data, keyHex)");
 
-    size_t data_len;
-    const char *data = JS_ToCStringLen(ctx, &data_len, argv[0]);
-    if (!data) return JS_EXCEPTION;
+    /* Accept ArrayBuffer / TypedArray / MappedBuffer / WasmBuffer /
+     * string via the unified buffer protocol. JS_ToCStringLen alone
+     * UTF-8-inflates any byte >= 0x80 (and stringifies an ArrayBuffer
+     * to "[object ArrayBuffer]"), which silently corrupted TOTP
+     * counters whose dynamic-truncation bytes crossed 0x80. Same
+     * fix-shape as crypto.base64urlEncode. */
+    HlBufferView data_view = {0};
+    const char *data_str = NULL;
+    int data_needs_free = 0;
+    if (!js_get_buffer(ctx, argv[0], &data_view, &data_str, &data_needs_free))
+        return JS_ThrowTypeError(ctx,
+            "crypto.hmacSha1: data must be ArrayBuffer, TypedArray, "
+            "MappedBuffer, WasmBuffer, or string");
 
     size_t key_hex_len;
     const char *key_hex = JS_ToCStringLen(ctx, &key_hex_len, argv[1]);
-    if (!key_hex) { JS_FreeCString(ctx, data); return JS_EXCEPTION; }
+    if (!key_hex) {
+        if (data_needs_free) JS_FreeCString(ctx, data_str);
+        return JS_EXCEPTION;
+    }
 
     if (key_hex_len % 2 != 0 || key_hex_len == 0 || key_hex_len > 256) {
-        JS_FreeCString(ctx, data);
+        if (data_needs_free) JS_FreeCString(ctx, data_str);
         JS_FreeCString(ctx, key_hex);
         return JS_ThrowTypeError(ctx, "key must be 1-128 bytes (2-256 hex chars)");
     }
@@ -1006,7 +1019,7 @@ static JSValue js_crypto_hmac_sha1(JSContext *ctx, JSValueConst this_val,
     size_t key_len = key_hex_len / 2;
     uint8_t key[128];
     if (hex_decode(key_hex, key_hex_len, key, key_len) != 0) {
-        JS_FreeCString(ctx, data);
+        if (data_needs_free) JS_FreeCString(ctx, data_str);
         JS_FreeCString(ctx, key_hex);
         return JS_ThrowTypeError(ctx, "invalid hex in key");
     }
@@ -1014,12 +1027,13 @@ static JSValue js_crypto_hmac_sha1(JSContext *ctx, JSValueConst this_val,
 
     uint8_t out[20];
     if (hl_cap_crypto_hmac_sha1(key, key_len,
-                                (const uint8_t *)data, data_len, out) != 0) {
-        JS_FreeCString(ctx, data);
+                                (const uint8_t *)data_view.data,
+                                data_view.len, out) != 0) {
+        if (data_needs_free) JS_FreeCString(ctx, data_str);
         secure_zero(key, sizeof(key));
         return JS_ThrowInternalError(ctx, "hmacSha1 failed");
     }
-    JS_FreeCString(ctx, data);
+    if (data_needs_free) JS_FreeCString(ctx, data_str);
     secure_zero(key, sizeof(key));
 
     char hex[41];

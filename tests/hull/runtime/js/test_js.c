@@ -2018,6 +2018,171 @@ UTEST(js_stdlib, qrcode_svg)
     cleanup_js_caps();
 }
 
+/* ── hull:web:middleware:totp tests ────────────────────────────────────── */
+
+UTEST(js_stdlib, totp_rfc_vectors)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    /* RFC 4648 Base32 + RFC 6238 Appendix B vectors. Mirrors the Lua
+     * suite so any divergence between runtimes shows up immediately. */
+    const char *code =
+        "import { totp } from 'hull:web:middleware:totp';\n"
+        "const t = totp._test;\n"
+        "globalThis.__b32 = t.base32Encode('foobar');\n"
+        "globalThis.__b32_rt = "
+        "  t.base32Decode(t.base32Encode('12345678901234567890')) === "
+        "  '12345678901234567890' ? 1 : 0;\n"
+        "const s = '12345678901234567890';\n"
+        "globalThis.__v1 = t.totpAtStep(s,        1, 8);\n"
+        "globalThis.__v2 = t.totpAtStep(s, 37037036, 8);\n"
+        "globalThis.__v3 = t.totpAtStep(s, 41152263, 8);\n"
+        "globalThis.__v4 = t.totpAtStep(s, 66666666, 8);\n"
+        "globalThis.__v1_6 = t.totpAtStep(s, 1, 6);\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    char *b = eval_str("globalThis.__b32");
+    ASSERT_NE(b, NULL); ASSERT_STREQ(b, "MZXW6YTBOI"); free(b);
+    ASSERT_EQ(eval_int("globalThis.__b32_rt"), 1);
+
+    char *v1 = eval_str("globalThis.__v1");
+    ASSERT_NE(v1, NULL); ASSERT_STREQ(v1, "94287082"); free(v1);
+    char *v2 = eval_str("globalThis.__v2");
+    ASSERT_NE(v2, NULL); ASSERT_STREQ(v2, "07081804"); free(v2);
+    char *v3 = eval_str("globalThis.__v3");
+    ASSERT_NE(v3, NULL); ASSERT_STREQ(v3, "89005924"); free(v3);
+    char *v4 = eval_str("globalThis.__v4");
+    ASSERT_NE(v4, NULL); ASSERT_STREQ(v4, "69279037"); free(v4);
+    char *v1_6 = eval_str("globalThis.__v1_6");
+    ASSERT_NE(v1_6, NULL); ASSERT_STREQ(v1_6, "287082"); free(v1_6);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, totp_enroll_confirm_verify)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { totp } from 'hull:web:middleware:totp';\n"
+        "function run() {\n"
+        "  totp._test.reset();\n"
+        "  totp.init({ issuer: 'TestApp' });\n"
+        "  const r = totp.enroll('user-1');\n"
+        "  if (typeof r.secretBase32 !== 'string') return 0;\n"
+        "  if (!r.qrSvg.includes('<svg')) return 0;\n"
+        "  if (r.recoveryCodes.length !== 10) return 0;\n"
+        "  if (!r.otpauthUrl.includes('otpauth://totp/TestApp:user-1')) return 0;\n"
+        "  const secret = totp._test.base32Decode(r.secretBase32);\n"
+        "  const step = totp._test.currentStep();\n"
+        "  const code = totp._test.totpAtStep(secret, step, 6);\n"
+        "  if (!totp.confirm('user-1', code)) return 0;\n"
+        "  if (!totp.enrolled('user-1')) return 0;\n"
+        "  const replay = totp.verify('user-1', code);\n"
+        "  if (replay[0]) return 0;\n"
+        "  const nextCode = totp._test.totpAtStep(secret, step + 1, 6);\n"
+        "  const v = totp.verify('user-1', nextCode);\n"
+        "  if (!v[0] || v[1] !== 'totp') return 0;\n"
+        "  if (totp.verify('user-1', nextCode)[0]) return 0;\n"
+        "  return 1;\n"
+        "}\n"
+        "globalThis.__totp_flow = run();\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__totp_flow"), 1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, totp_recovery_and_disable)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { totp } from 'hull:web:middleware:totp';\n"
+        "function run() {\n"
+        "  totp._test.reset();\n"
+        "  totp.init({ issuer: 'TestApp', recoveryCodes: 3 });\n"
+        "  const r = totp.enroll('user-2');\n"
+        "  const secret = totp._test.base32Decode(r.secretBase32);\n"
+        "  const code = totp._test.totpAtStep(secret, "
+        "    totp._test.currentStep(), 6);\n"
+        "  if (!totp.confirm('user-2', code)) return 0;\n"
+        "  const rc = r.recoveryCodes[0];\n"
+        "  const v1 = totp.verify('user-2', rc);\n"
+        "  if (!v1[0] || v1[1] !== 'recovery') return 0;\n"
+        "  if (totp.verify('user-2', rc)[0]) return 0;\n"
+        "  const v2 = totp.verify('user-2', r.recoveryCodes[1]);\n"
+        "  if (!v2[0] || v2[1] !== 'recovery') return 0;\n"
+        "  if (!totp.disable('user-2')) return 0;\n"
+        "  if (totp.enrolled('user-2')) return 0;\n"
+        "  if (totp.disable('user-2')) return 0;\n"
+        "  return 1;\n"
+        "}\n"
+        "globalThis.__totp_rec = run();\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__totp_rec"), 1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, totp_encryption_round_trip)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    /* Encryption end-to-end: enroll with a 32-byte KEK stores an
+     * encrypted secret blob, confirm + verify decrypt successfully,
+     * and the encrypt/decrypt helpers round-trip. Direct row
+     * inspection is blocked by Hull's _hull_* guard, same as Lua. */
+    const char *code =
+        "import { totp } from 'hull:web:middleware:totp';\n"
+        "function run() {\n"
+        "  totp._test.reset();\n"
+        "  totp.init({ issuer: 'TestApp', encryptionKey: 'k'.repeat(32) });\n"
+        "  const r = totp.enroll('user-4');\n"
+        "  const secret = totp._test.base32Decode(r.secretBase32);\n"
+        "  const code = totp._test.totpAtStep(secret, "
+        "    totp._test.currentStep(), 6);\n"
+        "  if (!totp.confirm('user-4', code)) return 0;\n"
+        "  const next = totp._test.totpAtStep(secret, "
+        "    totp._test.currentStep() + 1, 6);\n"
+        "  const v = totp.verify('user-4', next);\n"
+        "  if (!v[0]) return 0;\n"
+        "  const enc = totp._test.encryptSecret(secret);\n"
+        "  if (enc[1] !== 1) return 0;\n"
+        "  if (enc[0].length <= secret.length) return 0;\n"
+        "  if (totp._test.decryptSecret(enc[0], 1) !== secret) return 0;\n"
+        "  return 1;\n"
+        "}\n"
+        "globalThis.__totp_enc = run();\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__totp_enc"), 1);
+
+    cleanup_js_caps();
+}
+
 /* ── hull:web:cookie tests ─────────────────────────────────────────────── */
 
 UTEST(js_stdlib, cookie_parse)

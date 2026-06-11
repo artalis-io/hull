@@ -880,6 +880,7 @@ Register with `app.use(method, pattern, mw)`:
 | `csrf` | `hull.web.middleware.csrf` | `hull:web:middleware:csrf` | Stateless CSRF token generation/verification |
 | `auth` | `hull.web.middleware.auth` | `hull:web:middleware:auth` | Session-based and JWT-based authentication middleware |
 | `oauth` | `hull.web.middleware.oauth` | `hull:web:middleware:oauth` | OIDC / OAuth 2.0 Authorization Code + PKCE (Google, Microsoft, generic IdPs) |
+| `totp` | `hull.web.middleware.totp` | `hull:web:middleware:totp` | RFC 6238 TOTP 2FA with QR enrollment, recovery codes, replay-protection, optional at-rest encryption |
 | `session` | `hull.web.middleware.session` | `hull:web:middleware:session` | Server-side sessions backed by SQLite |
 | `logger` | `hull.web.middleware.logger` | `hull:web:middleware:logger` | Request logging with logfmt output and request IDs |
 | `transaction` | `hull.web.middleware.transaction` | `hull:web:middleware:transaction` | Wraps handlers in `db.batch()` (BEGIN IMMEDIATE..COMMIT) |
@@ -984,6 +985,46 @@ cross-provider or by a CSRF.
 - See `tests/fixtures/oauth_client_lua/app.lua` for a complete worked
   example, exercised end-to-end against a Python mock IdP via
   `tests/e2e_oauth.sh`.
+
+**totp**. RFC 6238 Time-based One-Time Password 2FA. Composes with
+the existing `auth` + `session` modules — after password verify, the
+app sets `req.ctx.session.pending_2fa = true`; this module's
+middleware gates sensitive routes until a valid TOTP code (or recovery
+code) is presented. Algorithm is fixed at HMAC-SHA1 (RFC 6238 default,
+what every mainstream authenticator app — Google Authenticator,
+Authy, 1Password — supports).
+
+- `totp.init(opts)`. Required at app startup. Creates `_hull_totp` +
+  `_hull_totp_recovery` tables.
+  - `opts.issuer` (default `"Hull"`) — label shown in authenticator.
+  - `opts.digits` (default `6`; also accepts `8`).
+  - `opts.period` (default `30s`, RFC default).
+  - `opts.window` (default `±1` step → ~90s clock-skew tolerance).
+  - `opts.recovery_codes` (default `10`).
+  - `opts.encryption_key` — optional 32-byte string. When set,
+    secrets are NaCl-secretbox-encrypted at rest with a fresh nonce
+    per enrollment. Caller manages the key (env, fs.read, etc.).
+- `totp.enroll(user_id)` → `{ secret_base32, otpauth_url, qr_svg,
+  recovery_codes }`. Recovery codes are returned ONCE; only PBKDF2
+  hashes persist. Re-enrolling overwrites — intentional, it's the
+  recovery path when both authenticator and codes are lost.
+- `totp.confirm(user_id, code)` → bool. Pairs the authenticator;
+  flips the row's `confirmed` flag.
+- `totp.verify(user_id, code)` → `(ok, "totp"|"recovery"|nil)`. TOTP
+  path first; replay-protected via `last_used_step` (atomic
+  compare-and-set in the UPDATE WHERE). Recovery-code path scans
+  unused rows; consumed codes get `used_at` stamped.
+- `totp.disable(user_id)` — deletes secret + recovery codes.
+- `totp.enrolled(user_id)` → bool. Confirmed enrollment check.
+- `totp.middleware({ redirect_path, session_key, skip_paths })`.
+  Returns a middleware that 302s to `redirect_path` (default `/2fa`)
+  while the session's `pending_2fa` flag is true.
+- JS API mirrors the Lua surface with camelCase (`ecLevel` →
+  `digits`/`period`/`window` and `secretBase32` / `otpauthUrl` /
+  `qrSvg` / `recoveryCodes` in the enroll return).
+- Local-first note: TOTP needs no network at verify time (works
+  air-gapped). Clock skew matters more off-cloud — raise `opts.window`
+  on devices without NTP.
 
 **session**. Server-side sessions backed by SQLite. Requires `session.init()` at startup.
 - `session.init(opts)`. Creates `hull_sessions` table. `opts.ttl` = lifetime in seconds (default: `86400`).

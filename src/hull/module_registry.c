@@ -431,6 +431,18 @@ static const HlModuleSpec REGISTRY[] = {
         .deps = {"hull/http-server", "hull/db", "hull/crypto", "hull/json", "hull/time", 0},
     },
     {
+        /* RFC 6238 TOTP (2FA). HMAC-SHA1 via crypto.hmac_sha1 (the
+         * vtable-backed cap added earlier in this branch); secret +
+         * recovery-code storage in db; enrollment QR via hull/qrcode.
+         * Standalone middleware that gates routes when the session's
+         * pending_2fa flag is set. */
+        .name = "hull/web/middleware/totp",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER | HL_MOD_CAP_DB,
+        .deps = {"hull/http-server", "hull/db", "hull/crypto",
+                 "hull/qrcode", "hull/time", 0},
+    },
+    {
         .name = "hull/web/middleware/transaction",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HTTP_SERVER,

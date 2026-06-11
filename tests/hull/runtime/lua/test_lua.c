@@ -158,7 +158,7 @@ static char *eval_str(const char *code)
         return NULL;
 
     /* Wrap in return statement for expression evaluation */
-    char buf[4096];
+    char buf[16384];
     snprintf(buf, sizeof(buf), "return tostring(%s)", code);
 
     if (luaL_dostring(lua_rt.L, buf) != LUA_OK) {
@@ -180,7 +180,7 @@ static int eval_int(const char *code)
     if (!lua_initialized || !lua_rt.L)
         return -9999;
 
-    char buf[4096];
+    char buf[16384];
     snprintf(buf, sizeof(buf), "return %s", code);
 
     if (luaL_dostring(lua_rt.L, buf) != LUA_OK) {
@@ -2241,6 +2241,207 @@ UTEST(lua_stdlib, qrcode_svg)
         "  return s:find('<path', 1, true) and 1 or 0 "
         "end)()");
     ASSERT_EQ(has_path, 1);
+
+    cleanup_lua_caps();
+}
+
+/* ── hull.web.middleware.totp tests ────────────────────────────────────── */
+
+/* Pure-function RFC vectors: Base32 (RFC 4648) + TOTP step digest
+ * (RFC 6238 Appendix B). These exercise the math without the DB
+ * round-trip — if these fail, the whole module is broken at the
+ * foundation. */
+UTEST(lua_stdlib, totp_rfc_vectors)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* Base32 RFC 4648 vector: "foobar" -> "MZXW6YTBOI". */
+    char *b32 = eval_str(
+        "(function() "
+        "  local totp = require('hull.web.middleware.totp') "
+        "  return totp._test.base32_encode('foobar') "
+        "end)()");
+    ASSERT_NE(b32, NULL);
+    ASSERT_STREQ(b32, "MZXW6YTBOI");
+    free(b32);
+
+    /* Base32 round-trip on the 20-byte RFC 6238 key. */
+    int rt = eval_int(
+        "(function() "
+        "  local t = require('hull.web.middleware.totp')._test "
+        "  local s = '12345678901234567890' "
+        "  return t.base32_decode(t.base32_encode(s)) == s and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(rt, 1);
+
+    /* RFC 6238 Appendix B, SHA-1, 8-digit, key='12345678901234567890':
+     *   T=59         step=1        -> 94287082
+     *   T=1111111109 step=37037036 -> 07081804
+     *   T=1234567890 step=41152263 -> 89005924
+     *   T=2000000000 step=66666666 -> 69279037
+     * The HMAC-SHA1 path comes through the hl_crypto_hmac_backend vtable,
+     * so this also pins the HMAC integration. */
+    char *v1 = eval_str(
+        "require('hull.web.middleware.totp')._test"
+        ".totp_at_step('12345678901234567890', 1, 8)");
+    ASSERT_NE(v1, NULL); ASSERT_STREQ(v1, "94287082"); free(v1);
+
+    char *v2 = eval_str(
+        "require('hull.web.middleware.totp')._test"
+        ".totp_at_step('12345678901234567890', 37037036, 8)");
+    ASSERT_NE(v2, NULL); ASSERT_STREQ(v2, "07081804"); free(v2);
+
+    char *v3 = eval_str(
+        "require('hull.web.middleware.totp')._test"
+        ".totp_at_step('12345678901234567890', 41152263, 8)");
+    ASSERT_NE(v3, NULL); ASSERT_STREQ(v3, "89005924"); free(v3);
+
+    char *v4 = eval_str(
+        "require('hull.web.middleware.totp')._test"
+        ".totp_at_step('12345678901234567890', 66666666, 8)");
+    ASSERT_NE(v4, NULL); ASSERT_STREQ(v4, "69279037"); free(v4);
+
+    /* 6-digit truncation of the same step uses the same dynamic offset;
+     * value should match the last 6 digits of the 8-digit form (mod 10^6). */
+    char *v1_6 = eval_str(
+        "require('hull.web.middleware.totp')._test"
+        ".totp_at_step('12345678901234567890', 1, 6)");
+    ASSERT_NE(v1_6, NULL); ASSERT_STREQ(v1_6, "287082"); free(v1_6);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, totp_enroll_confirm_verify)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* The end-to-end happy path: init -> enroll -> confirm with a code
+     * we generate the same way the verify-side generates -> verify
+     * with the next step's code.
+     *
+     * Code generation uses totp._test.totp_at_step against the secret
+     * the enroll returned (decoded from base32), so the test mirrors
+     * what a real authenticator app would do without needing one
+     * present. */
+    int ok = eval_int(
+        "(function() "
+        "  local totp = require('hull.web.middleware.totp') "
+        "  totp._test.reset() "
+        "  totp.init({ issuer = 'TestApp' }) "
+        "  local r = totp.enroll('user-1') "
+        "  if type(r.secret_base32) ~= 'string' then return 0 end "
+        "  if not r.qr_svg:find('<svg', 1, true) then return 0 end "
+        "  if #r.recovery_codes ~= 10 then return 0 end "
+        "  if not r.otpauth_url:find('otpauth://totp/TestApp:user%-1') then return 0 end "
+        "  local secret = totp._test.base32_decode(r.secret_base32) "
+        "  local step = totp._test.current_step() "
+        "  local code = totp._test.totp_at_step(secret, step, 6) "
+        "  if not totp.confirm('user-1', code) then return 0 end "
+        "  if not totp.enrolled('user-1') then return 0 end "
+        "  if totp.verify('user-1', code) then return 0 end "
+        "  local next_code = totp._test.totp_at_step(secret, step + 1, 6) "
+        "  local v_ok, kind = totp.verify('user-1', next_code) "
+        "  if not v_ok or kind ~= 'totp' then return 0 end "
+        "  if totp.verify('user-1', next_code) then return 0 end "
+        "  return 1 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, totp_recovery_code_single_use)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* Recovery code: first use accepts + returns kind='recovery';
+     * second use of the same code rejects (used_at flag). */
+    int ok = eval_int(
+        "(function() "
+        "  local totp = require('hull.web.middleware.totp') "
+        "  totp._test.reset() "
+        "  totp.init({ issuer = 'TestApp', recovery_codes = 3 }) "
+        "  local r = totp.enroll('user-2') "
+        "  local secret = totp._test.base32_decode(r.secret_base32) "
+        "  local code = totp._test.totp_at_step(secret, "
+        "    totp._test.current_step(), 6) "
+        "  if not totp.confirm('user-2', code) then return 0 end "
+        "  local rc = r.recovery_codes[1] "
+        "  local v_ok, kind = totp.verify('user-2', rc) "
+        "  if not v_ok or kind ~= 'recovery' then return 0 end "
+        "  if totp.verify('user-2', rc) then return 0 end "
+        "  local v2_ok, k2 = totp.verify('user-2', r.recovery_codes[2]) "
+        "  if not v2_ok or k2 ~= 'recovery' then return 0 end "
+        "  return 1 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, totp_disable_clears_secret_and_recovery)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local totp = require('hull.web.middleware.totp') "
+        "  totp._test.reset() "
+        "  totp.init({ issuer = 'TestApp' }) "
+        "  totp.enroll('user-3') "
+        "  if not totp.disable('user-3') then return 0 end "
+        "  if totp.enrolled('user-3') then return 0 end "
+        "  if totp.disable('user-3') then return 0 end "
+        "  return 1 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, totp_encryption_at_rest)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* With encryption_key set, the on-disk secret is a secretbox
+     * blob — round-trip via load_secret should still yield the
+     * plaintext, but raw row inspection should NOT show the original
+     * 20 bytes. The blob also has to be longer than 20 bytes
+     * (nonce=24 + MAC=16 = 40 extra bytes added). */
+    int ok = eval_int(
+        /* End-to-end round-trip with encryption on: enroll stores
+         * the secret encrypted, confirm + verify go through the
+         * decrypt path. Direct row inspection (to assert the blob
+         * is NOT the plaintext) is blocked by Hull's _hull_* table
+         * access guard from user code, so we exercise the
+         * encrypt+decrypt invariant via the public API: if enroll
+         * silently dropped the key OR decrypt failed, neither
+         * confirm nor verify could succeed. Pairs with the unit
+         * test of the encrypt/decrypt helpers below. */
+        "(function() "
+        "  local totp = require('hull.web.middleware.totp') "
+        "  totp._test.reset() "
+        "  totp.init({ issuer = 'TestApp', "
+        "              encryption_key = ('k'):rep(32) }) "
+        "  local r = totp.enroll('user-4') "
+        "  local secret = totp._test.base32_decode(r.secret_base32) "
+        "  local step = totp._test.current_step() "
+        "  local code = totp._test.totp_at_step(secret, step, 6) "
+        "  if not totp.confirm('user-4', code) then return 0 end "
+        "  local next_code = totp._test.totp_at_step(secret, step + 1, 6) "
+        "  if not totp.verify('user-4', next_code) then return 0 end "
+        "  local plain, enc_flag = totp._test.encrypt_secret(secret) "
+        "  if enc_flag ~= 1 then return 0 end "
+        "  if #plain <= #secret then return 0 end "
+        "  if totp._test.decrypt_secret(plain, 1) ~= secret then return 0 end "
+        "  return 1 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
 
     cleanup_lua_caps();
 }
