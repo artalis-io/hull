@@ -2394,6 +2394,9 @@ e2e-jwt-asym: $(BUILDDIR)/hull
 e2e-oauth: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_oauth.sh
 
+e2e-totp: $(BUILDDIR)/hull
+	RUNTIME=$(RUNTIME) sh tests/e2e_totp.sh
+
 e2e-sandbox: $(BUILDDIR)/hull
 	sh tests/e2e_sandbox.sh
 
