@@ -188,9 +188,10 @@ local function base32_decode(s)
     local buf, bits = 0, 0
     for i = 1, #s do
         local c = s:sub(i, i):upper():byte()
-        if c == 32 or c == 9 or c == 10 or c == 13 or c == 0x3D then
-            -- whitespace or "=" padding — skip
-        else
+        -- Skip whitespace + "=" padding (some authenticators echo
+        -- it back); inverting the condition avoids the lint warning
+        -- about an empty if-branch.
+        if c ~= 32 and c ~= 9 and c ~= 10 and c ~= 13 and c ~= 0x3D then
             local v = B32_INV[c]
             if v == nil then return nil, "invalid base32 char" end
             buf = (buf << 5) | v
