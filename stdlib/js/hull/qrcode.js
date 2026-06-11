@@ -212,7 +212,14 @@ function encodePayload(text, version, ec) {
 
 function buildCodewordStream(data, version, ec) {
     const row = EC_TABLE[ec][version - 1];
-    const [ecPerBlock, g1Blocks, g1Data, g2Blocks, g2Data] = row;
+    // Avoid array destructuring — QuickJS's js_parse_destructuring_element
+    // trips a known MSan use-of-uninitialized-value warning (also caught
+    // in jwt.js's history). Indexed access is the workaround.
+    const ecPerBlock = row[0];
+    const g1Blocks   = row[1];
+    const g1Data     = row[2];
+    const g2Blocks   = row[3];
+    const g2Data     = row[4];
 
     const blocks = [];
     let off = 0;
@@ -493,7 +500,11 @@ function encode(text, opts) {
     const data = encodePayload(text, version, ec);
     const stream = buildCodewordStream(data, version, ec);
     const size = 17 + 4 * version;
-    const { g, f } = newGrid(size);
+    // Object destructuring also trips the same QuickJS MSan path; use
+    // property access instead.
+    const grid = newGrid(size);
+    const g = grid.g;
+    const f = grid.f;
     drawFunctionPatterns(g, f, version, size);
     placeCodewords(g, f, size, stream);
     placeVersionInfo(g, version, size);
