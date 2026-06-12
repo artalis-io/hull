@@ -81,6 +81,9 @@ app.post("/confirm", (req, res) => {
 app.post("/verify", (req, res) => {
     const body = readJsonBody(req);
     if (!body) return res.status(400).json({ error: "bad json" });
-    const result = totp.verify(body.user_id, body.code);
+    // verifyWithKind preserves the [ok, kind] tuple so this fixture
+    // can assert on both pieces; production callers should use the
+    // bare totp.verify (returns boolean).
+    const result = totp.verifyWithKind(body.user_id, body.code);
     res.json({ ok: result[0], kind: result[1] });
 });
