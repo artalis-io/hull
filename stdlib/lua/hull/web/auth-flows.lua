@@ -174,13 +174,6 @@ local ACTIONS = {
     email_change      = "email_change",
 }
 
--- Convert bytes → hex (used for token hash + nonce display).
-local function bytes_to_hex(s)
-    local p = {}
-    for i = 1, #s do p[i] = string.format("%02x", string.byte(s, i)) end
-    return table.concat(p)
-end
-
 -- Token = base64url(JSON{user_id, action, exp, nonce, extra...})
 --         "." hex(HMAC-SHA256(state_secret, body))
 -- The HMAC is over the body bytes only — exactly the OAuth state
