@@ -881,6 +881,7 @@ Register with `app.use(method, pattern, mw)`:
 | `auth` | `hull.web.middleware.auth` | `hull:web:middleware:auth` | Session-based and JWT-based authentication middleware |
 | `oauth` | `hull.web.middleware.oauth` | `hull:web:middleware:oauth` | OIDC / OAuth 2.0 Authorization Code + PKCE (Google, Microsoft, generic IdPs) |
 | `totp` | `hull.web.middleware.totp` | `hull:web:middleware:totp` | RFC 6238 TOTP 2FA with QR enrollment, recovery codes, replay-protection, optional at-rest encryption |
+| `auth-flows` | `hull.web.auth-flows` | `hull:web:auth-flows` | Registration, email-verify, login, password-reset, magic-link, email-change. HMAC-signed single-use tokens, PBKDF2, app-provided storage + templates |
 | `session` | `hull.web.middleware.session` | `hull:web:middleware:session` | Server-side sessions backed by SQLite |
 | `logger` | `hull.web.middleware.logger` | `hull:web:middleware:logger` | Request logging with logfmt output and request IDs |
 | `transaction` | `hull.web.middleware.transaction` | `hull:web:middleware:transaction` | Wraps handlers in `db.batch()` (BEGIN IMMEDIATE..COMMIT) |
@@ -1025,6 +1026,55 @@ Authy, 1Password — supports).
 - Local-first note: TOTP needs no network at verify time (works
   air-gapped). Clock skew matters more off-cloud — raise `opts.window`
   on devices without NTP.
+
+**auth-flows**. Transactional auth-flow recipes. Bundle of routes that
+cover registration / email-verify / login / password-reset / magic-link
+/ email-change. The module owns the auth-internal bookkeeping tables
+(`_hull_auth_used_tokens`, `_hull_auth_pending_email_changes`) but
+does NOT own the users table — the app provides `user_*` callbacks so
+existing user models drop in. 2FA is the app's concern; compose with
+`hull/web/middleware/totp` separately.
+
+- `authflows.init(opts)`. Required at app startup. Validates all
+  callbacks up front + creates internal tables.
+  - `opts.state_secret` (≥32 bytes). HMAC key for the signed tokens.
+  - `opts.email_send(to, subject, html, text)`. App-provided.
+  - `opts.templates = { welcome, verify, magic_link, password_reset,
+    email_change }`. Each is `function(ctx) → { subject, html?, text? }`.
+  - `opts.user_*` callbacks (find_by_email, get, create, set_password,
+    set_email, set_email_verified). All required; missing ones are
+    reported together at init time.
+  - `opts.on_login(req, res, user)` / `opts.on_logout(req, res)`. App
+    issues its own session (cookie, JWT, whatever) here. Module is
+    session-agnostic.
+  - `opts.require_verified_email` (default `true`). Block login until
+    email is verified. Opt-out for apps that gate per-route on the
+    `email_verified` flag instead.
+  - `opts.magic_link_auto_signup` (default `false`). Silent no-op
+    when magic-link is requested for an unknown email (enumeration-
+    safe). Opt-in to auto-create a passwordless user instead.
+  - `opts.enumeration_safe` (default `true`). Register / reset /
+    magic-link / email-change return identical success shapes
+    regardless of whether the email exists.
+  - `opts.verify_ttl` (86400s), `opts.reset_ttl` (3600s),
+    `opts.magic_link_ttl` (600s), `opts.email_change_ttl` (86400s).
+  - `opts.prefix` (default `"/auth"`).
+- `authflows.routes(app)`. Mounts the 10 routes under `prefix`:
+  POST `/register`, GET `/verify`, POST `/login`, POST `/logout`,
+  POST `/magic-link`, GET `/magic-link/consume`,
+  POST `/password-reset/request`, POST `/password-reset/confirm`,
+  POST `/email-change`, GET `/email-change/confirm`.
+- `authflows.send_verify_email(user, url_prefix)`,
+  `authflows.send_password_reset(email, url_prefix)`,
+  `authflows.send_magic_link(email, url_prefix)`. Standalone helpers
+  for admin/programmatic triggers (resend, etc.).
+- Token format: `base64url(JSON{sub, action, exp, nonce}) "." hmac_hex`.
+  Single-use enforced via `_hull_auth_used_tokens` (sha256 of full
+  token as PK, atomic INSERT OR IGNORE → 0 rowcount = replay).
+- JS API: camelCase keys (`stateSecret`, `emailSend`, `userFindByEmail`,
+  `onLogin`, `magicLinkAutoSignup`, `requireVerifiedEmail`).
+- Email-change flow re-verifies on the NEW address — old email stays
+  active until the user clicks the link sent to the new one.
 
 **session**. Server-side sessions backed by SQLite. Requires `session.init()` at startup.
 - `session.init(opts)`. Creates `hull_sessions` table. `opts.ttl` = lifetime in seconds (default: `86400`).

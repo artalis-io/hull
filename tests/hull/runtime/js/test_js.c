@@ -2250,6 +2250,170 @@ UTEST(js_stdlib, totp_encryption_round_trip)
     cleanup_js_caps();
 }
 
+/* ── hull:web:auth-flows tests ─────────────────────────────────────────── */
+
+#define AF_INIT_JS \
+    "import { authFlows } from 'hull:web:auth-flows';\n" \
+    "authFlows._test.reset();\n" \
+    "globalThis._users = {}; globalThis._byId = {}; globalThis._sent = [];\n" \
+    "function defaults() { return { " \
+    "  stateSecret: 'k'.repeat(32), " \
+    "  emailSend: (to, sub, html, text) => " \
+    "    globalThis._sent.push({to, sub, html, text}), " \
+    "  templates: { " \
+    "    welcome:        c => ({subject:'w', text:'link:' + c.verify_url}), " \
+    "    verify:         () => ({subject:'v', text:'x'}), " \
+    "    magic_link:     c => ({subject:'m', text:'link:' + c.link}), " \
+    "    password_reset: c => ({subject:'p', text:'link:' + c.link}), " \
+    "    email_change:   c => ({subject:'e', text:'link:' + c.link}), " \
+    "  }, " \
+    "  userFindByEmail: e => globalThis._users[e], " \
+    "  userGet: id => globalThis._byId[id], " \
+    "  userCreate: (e, ph) => { " \
+    "    const id = 'u' + (Object.keys(globalThis._byId).length + 1); " \
+    "    const u = {id, email: e, password_hash: ph, email_verified: false}; " \
+    "    globalThis._users[e] = u; globalThis._byId[id] = u; return id; " \
+    "  }, " \
+    "  userSetPassword: (id, ph) => globalThis._byId[id].password_hash = ph, " \
+    "  userSetEmail: (id, e) => { " \
+    "    const u = globalThis._byId[id]; delete globalThis._users[u.email]; " \
+    "    u.email = e; globalThis._users[e] = u; " \
+    "  }, " \
+    "  userSetEmailVerified: (id, v) => globalThis._byId[id].email_verified = v, " \
+    "  onLogin: (req, res, user) => res.json({ok: true, id: user.id}), " \
+    "}; }\n"
+
+UTEST(js_stdlib, auth_flows_token_round_trip)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code = AF_INIT_JS
+        "authFlows.init(defaults());\n"
+        "const A = authFlows._test.ACTIONS;\n"
+        "function run() {\n"
+        "  const tok = authFlows._test.issueToken('u1', A.verify_email, 60);\n"
+        "  const [env] = authFlows._test.consumeToken(tok, A.verify_email);\n"
+        "  if (!env || env.sub !== 'u1') return 0;\n"
+        "  const [env2, err2] = authFlows._test.consumeToken(tok, A.verify_email);\n"
+        "  if (env2 || err2 !== 'replayed') return 0;\n"
+        "  return 1;\n"
+        "}\n"
+        "function rejections() {\n"
+        "  const tok = authFlows._test.issueToken('u1', A.verify_email, 60);\n"
+        "  const [, err]  = authFlows._test.consumeToken(tok, A.password_reset);\n"
+        "  if (err !== 'wrong action') return 0;\n"
+        "  const tampered = tok.slice(0, -2) + (tok.slice(-1) === 'a' ? 'bb' : 'aa');\n"
+        "  const [, err2] = authFlows._test.consumeToken(tampered, A.verify_email);\n"
+        "  if (err2 !== 'bad tag') return 0;\n"
+        "  const [, err3] = authFlows._test.consumeToken('garbage', A.verify_email);\n"
+        "  if (err3 !== 'malformed') return 0;\n"
+        "  return 1;\n"
+        "}\n"
+        "globalThis.__af_rt = run();\n"
+        "globalThis.__af_rj = rejections();\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__af_rt"), 1);
+    ASSERT_EQ(eval_int("globalThis.__af_rj"), 1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, auth_flows_register_verify_login)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code = AF_INIT_JS
+        "authFlows.init(defaults());\n"
+        "const A = authFlows._test.ACTIONS;\n"
+        "function run() {\n"
+        "  authFlows.sendVerifyEmail({id: 'u1', email: 'a@x.com'}, 'http://t.io');\n"
+        "  if (globalThis._sent.length !== 1) return 0;\n"
+        "  const link = globalThis._sent[0].text;\n"
+        "  const tok = link.match(/token=(.+)/)[1];\n"
+        "  const [env] = authFlows._test.consumeToken(tok, A.verify_email);\n"
+        "  return (env && env.sub === 'u1') ? 1 : 0;\n"
+        "}\n"
+        "globalThis.__af_flow = run();\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__af_flow"), 1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, auth_flows_input_validation)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { authFlows } from 'hull:web:auth-flows';\n"
+        "authFlows._test.reset();\n"
+        "const t = authFlows._test;\n"
+        "function run() {\n"
+        "  if (!t.isEmailIsh('a@b.co')) return 0;\n"
+        "  if ( t.isEmailIsh('')) return 0;\n"
+        "  if ( t.isEmailIsh('no-at-sign')) return 0;\n"
+        "  if ( t.isEmailIsh('@leading')) return 0;\n"
+        "  if ( t.isEmailIsh('trailing@')) return 0;\n"
+        "  if ( t.isEmailIsh('a@b')) return 0;\n"
+        "  if ( t.isEmailIsh('a@b.')) return 0;\n"
+        "  return 1;\n"
+        "}\n"
+        "globalThis.__af_iv = run();\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__af_iv"), 1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, auth_flows_magic_link_auto_signup_opt_in)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code = AF_INIT_JS
+        "function run() {\n"
+        "  authFlows.init(defaults());\n"
+        "  authFlows.sendMagicLink('unknown@x.com', 'http://t.io');\n"
+        "  if (globalThis._sent.length !== 0) return 0;\n"
+        "  authFlows._test.reset();\n"
+        "  globalThis._sent = []; globalThis._users = {}; globalThis._byId = {};\n"
+        "  const o = defaults();\n"
+        "  o.magicLinkAutoSignup = true;\n"
+        "  authFlows.init(o);\n"
+        "  authFlows.sendMagicLink('new@x.com', 'http://t.io');\n"
+        "  return (globalThis._sent.length === 1 "
+        "          && globalThis._users['new@x.com']) ? 1 : 0;\n"
+        "}\n"
+        "globalThis.__af_ml = run();\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__af_ml"), 1);
+
+    cleanup_js_caps();
+}
+
 /* ── hull:web:cookie tests ─────────────────────────────────────────────── */
 
 UTEST(js_stdlib, cookie_parse)

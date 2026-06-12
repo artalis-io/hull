@@ -2534,6 +2534,209 @@ UTEST(lua_stdlib, totp_encryption_at_rest)
     cleanup_lua_caps();
 }
 
+/* ── hull.web.auth-flows tests ─────────────────────────────────────────── */
+
+/* Lua tests for auth-flows share an init-helper string because each
+ * test rebuilds the in-memory user store + init() call from scratch.
+ * Kept under the 16 KiB eval buffer limit by skipping doc comments
+ * and inlining only what each test needs. */
+#define AF_INIT_LUA \
+"local af = require('hull.web.auth-flows') " \
+"af._test.reset() " \
+"_G._users = {} _G._by_id = {} _G._sent = {} " \
+"af.init({ " \
+"  state_secret = ('k'):rep(32), " \
+"  email_send = function(to, sub, html, text) " \
+"    _G._sent[#_G._sent+1] = {to=to, sub=sub, html=html, text=text} " \
+"  end, " \
+"  templates = { " \
+"    welcome = function(c) return {subject='w',text='link:'..c.verify_url} end, " \
+"    verify = function(c) return {subject='v',text='x'} end, " \
+"    magic_link = function(c) return {subject='m',text='link:'..c.link} end, " \
+"    password_reset = function(c) return {subject='p',text='link:'..c.link} end, " \
+"    email_change = function(c) return {subject='e',text='link:'..c.link} end, " \
+"  }, " \
+"  user_find_by_email = function(e) return _G._users[e] end, " \
+"  user_get = function(id) return _G._by_id[id] end, " \
+"  user_create = function(e, ph) " \
+"    local id = 'u'..tostring(1 + select(2, next(_G._by_id) and #_G._by_id or 0)) " \
+"    local i = 0; for _ in pairs(_G._by_id) do i = i + 1 end; id = 'u'..(i+1) " \
+"    local u = {id=id, email=e, password_hash=ph, email_verified=false} " \
+"    _G._users[e] = u; _G._by_id[id] = u; return id " \
+"  end, " \
+"  user_set_password = function(id, ph) _G._by_id[id].password_hash = ph end, " \
+"  user_set_email = function(id, ne) " \
+"    local u = _G._by_id[id] _G._users[u.email] = nil " \
+"    u.email = ne _G._users[ne] = u " \
+"  end, " \
+"  user_set_email_verified = function(id, v) _G._by_id[id].email_verified = v end, " \
+"  on_login = function(req, res, user) " \
+"    _G._last_login = user.id; res:json({ok=true,id=user.id}) " \
+"  end, " \
+"}) "
+
+UTEST(lua_stdlib, auth_flows_token_round_trip)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() " AF_INIT_LUA
+        "  local af = require('hull.web.auth-flows') "
+        "  local A = af._test.ACTIONS "
+        "  local tok = af._test.issue_token('u1', A.verify_email, 60) "
+        "  local env, err = af._test.consume_token(tok, A.verify_email) "
+        "  if not env or env.sub ~= 'u1' then return 0 end "
+        "  local env2, err2 = af._test.consume_token(tok, A.verify_email) "
+        "  if env2 or err2 ~= 'replayed' then return 0 end "
+        "  return 1 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    int rejections = eval_int(
+        "(function() " AF_INIT_LUA
+        "  local af = require('hull.web.auth-flows') "
+        "  local A = af._test.ACTIONS "
+        "  local tok = af._test.issue_token('u1', A.verify_email, 60) "
+        "  local _, err = af._test.consume_token(tok, A.password_reset) "
+        "  if err ~= 'wrong action' then return 0 end "
+        "  local tampered = tok:sub(1, -3) .. 'zz' "
+        "  local _, err2 = af._test.consume_token(tampered, A.verify_email) "
+        "  if err2 ~= 'bad tag' then return 0 end "
+        "  local _, err3 = af._test.consume_token('garbage', A.verify_email) "
+        "  if err3 ~= 'malformed' then return 0 end "
+        "  return 1 "
+        "end)()");
+    ASSERT_EQ(rejections, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, auth_flows_register_verify_login)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* End-to-end through the route handlers via the test runner is
+     * possible but heavier than needed here; the smoke-test ran the
+     * full HTTP path. This test exercises the token + storage
+     * invariants directly. */
+    int ok = eval_int(
+        "(function() " AF_INIT_LUA
+        "  local af = require('hull.web.auth-flows') "
+        "  local A = af._test.ACTIONS "
+        "  af.send_verify_email("
+        "    { id='u1', email='a@x.com' }, 'http://t.io') "
+        "  if #_G._sent ~= 1 then return 0 end "
+        "  local link = _G._sent[1].text "
+        "  local tok = link:match('token=(.+)') "
+        "  if not tok then return 0 end "
+        "  local env, err = af._test.consume_token(tok, A.verify_email) "
+        "  if not env or env.sub ~= 'u1' then return 0 end "
+        "  return 1 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, auth_flows_input_validation)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() "
+        "  local af = require('hull.web.auth-flows') "
+        "  af._test.reset() "
+        "  local t = af._test "
+        "  if not t.is_email_ish('a@b.co') then return 0 end "
+        "  if t.is_email_ish('') then return 0 end "
+        "  if t.is_email_ish('no-at-sign') then return 0 end "
+        "  if t.is_email_ish('@leading') then return 0 end "
+        "  if t.is_email_ish('trailing@') then return 0 end "
+        "  if t.is_email_ish('a@b') then return 0 end "
+        "  if t.is_email_ish('a@b.') then return 0 end "
+        "  return 1 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, auth_flows_password_reset_helper)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    int ok = eval_int(
+        "(function() " AF_INIT_LUA
+        "  local af = require('hull.web.auth-flows') "
+        "  _G._users['a@x.com'] = {id='u1', email='a@x.com'} "
+        "  _G._by_id['u1'] = _G._users['a@x.com'] "
+        "  af.send_password_reset('a@x.com', 'http://t.io') "
+        "  if #_G._sent ~= 1 then return 0 end "
+        "  af.send_password_reset('missing@x.com', 'http://t.io') "
+        "  if #_G._sent ~= 1 then return 0 end "
+        "  return 1 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, auth_flows_magic_link_auto_signup_opt_in)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* Default: unknown email → silent no-op (no email sent). */
+    int silent = eval_int(
+        "(function() " AF_INIT_LUA
+        "  local af = require('hull.web.auth-flows') "
+        "  af.send_magic_link('unknown@x.com', 'http://t.io') "
+        "  return #_G._sent == 0 and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(silent, 1);
+
+    /* Opt-in: re-init with auto_signup → creates user + sends. */
+    int auto_signup = eval_int(
+        "(function() " AF_INIT_LUA
+        "  local af = require('hull.web.auth-flows') "
+        "  af._test.reset() "
+        "  af.init({ "
+        "    state_secret = ('k'):rep(32), "
+        "    email_send = function(to, s, h, t) "
+        "      _G._sent[#_G._sent+1] = {to=to} "
+        "    end, "
+        "    templates = { "
+        "      welcome = function() return {subject='w',text='x'} end, "
+        "      verify = function() return {subject='v',text='x'} end, "
+        "      magic_link = function() return {subject='m',text='x'} end, "
+        "      password_reset = function() return {subject='p',text='x'} end, "
+        "      email_change = function() return {subject='e',text='x'} end, "
+        "    }, "
+        "    user_find_by_email = function(e) return _G._users[e] end, "
+        "    user_get = function(id) return _G._by_id[id] end, "
+        "    user_create = function(e, ph) "
+        "      local u = {id='auto', email=e, password_hash=ph} "
+        "      _G._users[e] = u; _G._by_id['auto'] = u; return 'auto' "
+        "    end, "
+        "    user_set_password = function() end, "
+        "    user_set_email = function() end, "
+        "    user_set_email_verified = function() end, "
+        "    on_login = function() end, "
+        "    magic_link_auto_signup = true, "
+        "  }) "
+        "  af.send_magic_link('new@x.com', 'http://t.io') "
+        "  return (#_G._sent == 1 and _G._users['new@x.com'] ~= nil) "
+        "    and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(auto_signup, 1);
+
+    cleanup_lua_caps();
+}
+
 /* ── hull.web.cookie tests ─────────────────────────────────────────────── */
 
 UTEST(lua_stdlib, cookie_parse)

@@ -281,6 +281,22 @@ static const HlModuleSpec REGISTRY[] = {
         .deps = {"hull/attachment", "hull/blob", "hull/http-server", 0},
     },
     {
+        /* Auth-flow recipes: registration, email-verify, login,
+         * password-reset, magic-link, email-change. HMAC-signed
+         * single-use tokens (state_secret), PBKDF2 password hash
+         * (crypto.hash_password / verify_password), JSON or
+         * url-encoded request bodies. App provides user-storage
+         * callbacks + email_send + templates; the module owns the
+         * auth-internal bookkeeping tables (_hull_auth_used_tokens,
+         * _hull_auth_pending_email_changes). TOTP / 2FA is the app's
+         * concern (compose with hull/web/middleware/totp). */
+        .name = "hull/web/auth-flows",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = HL_MOD_CAP_HTTP_SERVER | HL_MOD_CAP_DB,
+        .deps = {"hull/http-server", "hull/db", "hull/crypto",
+                 "hull/json", "hull/time", 0},
+    },
+    {
         .name = "hull/web/cookie",
         .api_major = 1, .intrinsic = 0, .pure = 1,
         .required_caps = 0, .deps = {0},
