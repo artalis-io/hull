@@ -65,10 +65,7 @@ authFlows.init({
     userSetEmailVerified: (id, v) => { usersById[id].email_verified = v; },
     enableTotp:       true,
     userTotpEnrolled: userId => totp.enrolled(userId),
-    // totp.verify returns [ok, kind] as a tuple — an array is
-    // truthy in JS, so we MUST unwrap it before handing to
-    // auth-flows (which does `if (!ok) ...`).
-    totpVerify:       (user, code) => totp.verify(user.id || user.user_id, code)[0],
+    totpVerify:       (user, code) => totp.verify(user.id || user.user_id, code),
     onLogin: (req, res, user) => {
         const sid = session.create({ user_id: user.id, email: user.email });
         res.header("Set-Cookie", cookie.serialize("session", sid,

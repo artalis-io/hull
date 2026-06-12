@@ -1090,10 +1090,10 @@ verify step between successful first-factor auth and `on_login` when
 - JS API: camelCase keys (`stateSecret`, `emailSend`, `userFindByEmail`,
   `onLogin`, `magicLinkAutoSignup`, `requireVerifiedEmail`, `enableTotp`,
   `userTotpEnrolled`, `totpVerify`, `totpPendingTtl`, `totpPendingRedirect`).
-  Note: when wiring `totpVerify` from JS, the `totp.verify` return is
-  `[ok, kind]` (a tuple-as-array — truthy regardless of `ok`) so the
-  wrapper must unwrap explicitly: `totpVerify: (user, code) =>
-  totp.verify(user.id, code)[0]`.
+  `totp.verify(userId, code)` returns a bare boolean (the historical
+  `[ok, kind]` tuple lives behind `totp.verifyWithKind` now — see
+  the TOTP section), so a `totpVerify: (user, code) => totp.verify(
+  user.id, code)` delegate is safe by default.
 - Email-change flow re-verifies on the NEW address — old email stays
   active until the user clicks the link sent to the new one.
 

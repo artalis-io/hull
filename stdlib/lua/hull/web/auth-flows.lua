@@ -199,6 +199,15 @@ local ACTIONS = {
     totp_pending      = "totp_pending",
 }
 
+-- Tolerate either `user.id` (canonical) or `user.user_id` (legacy)
+-- on app-supplied user objects. Centralized so the contract is one
+-- line to revisit if we ever want to harden it. JS mirrors this
+-- with `userId(user)` in stdlib/js/hull/web/auth-flows.js.
+local function user_uid(user)
+    if type(user) ~= "table" then return nil end
+    return user.id or user.user_id
+end
+
 -- Token = base64url(JSON{user_id, action, exp, nonce, extra...})
 --         "." hex(HMAC-SHA256(state_secret, body))
 -- The HMAC is over the body bytes only — exactly the OAuth state
@@ -447,7 +456,7 @@ end
 -- channel. POST (JSON login) → JSON; GET (magic-link click) →
 -- HTML form or redirect.
 local function start_totp_pending(req, res, user)
-    local uid = user.id or user.user_id
+    local uid = user_uid(user)
     local token = issue_token(uid, ACTIONS.totp_pending,
                                _state.totp_pending_ttl)
     if req.method == "POST" then
@@ -479,7 +488,7 @@ local function handle_login(req, res)
         return res:status(403):json({ error = "email not verified" })
     end
     if _state.enable_totp
-       and _state.user_totp_enrolled(user.id or user.user_id) then
+       and _state.user_totp_enrolled(user_uid(user)) then
         return start_totp_pending(req, res, user)
     end
     _state.on_login(req, res, user)
@@ -509,7 +518,7 @@ local function handle_magic_link(req, res)
         local user_id = _state.user_create(body.email, nil)
         user = _state.user_get(user_id)
     end
-    local token = issue_token(user.id or user.user_id,
+    local token = issue_token(user_uid(user),
         ACTIONS.magic_link, _state.magic_link_ttl)
     local link = (req.headers["x-forwarded-proto"] or "http")
         .. "://" .. (req.headers["x-forwarded-host"] or req.headers.host or "localhost")
@@ -532,12 +541,12 @@ local function handle_magic_link_consume(req, res)
     end
     -- Magic-link clicks count as proof of email ownership.
     if not user.email_verified then
-        _state.user_set_email_verified(user.id or user.user_id, true)
+        _state.user_set_email_verified(user_uid(user), true)
         user.email_verified = true
     end
     gc_expired()
     if _state.enable_totp
-       and _state.user_totp_enrolled(user.id or user.user_id) then
+       and _state.user_totp_enrolled(user_uid(user)) then
         return start_totp_pending(req, res, user)
     end
     _state.on_login(req, res, user)
@@ -584,7 +593,7 @@ local function handle_password_reset_request(req, res)
     end
     local user = _state.user_find_by_email(body.email)
     if not user then return generic_ok(res) end
-    local token = issue_token(user.id or user.user_id,
+    local token = issue_token(user_uid(user),
         ACTIONS.password_reset, _state.reset_ttl)
     local link = (req.headers["x-forwarded-proto"] or "http")
         .. "://" .. (req.headers["x-forwarded-host"] or req.headers.host or "localhost")
@@ -825,10 +834,10 @@ function M.send_verify_email(user, verify_url_prefix)
     if not _state._initialized then
         error("auth-flows: call init() before send_verify_email()")
     end
-    if type(user) ~= "table" or not (user.id or user.user_id) then
+    if type(user) ~= "table" or not (user_uid(user)) then
         error("auth-flows.send_verify_email: user table with id required")
     end
-    local user_id = user.id or user.user_id
+    local user_id = user_uid(user)
     local token = issue_token(user_id, ACTIONS.verify_email,
                                _state.verify_ttl)
     local verify_url = (verify_url_prefix or "")
@@ -847,7 +856,7 @@ function M.send_password_reset(email, reset_url_prefix)
     end
     local user = _state.user_find_by_email(email)
     if not user then return end  -- enumeration-safe; silently no-op
-    local user_id = user.id or user.user_id
+    local user_id = user_uid(user)
     local token = issue_token(user_id, ACTIONS.password_reset,
                                _state.reset_ttl)
     local link = (reset_url_prefix or "")
@@ -870,7 +879,7 @@ function M.send_magic_link(email, magic_url_prefix)
         local user_id = _state.user_create(email, nil)
         user = _state.user_get(user_id)
     end
-    local user_id = user.id or user.user_id
+    local user_id = user_uid(user)
     local token = issue_token(user_id, ACTIONS.magic_link,
                                _state.magic_link_ttl)
     local link = (magic_url_prefix or "")

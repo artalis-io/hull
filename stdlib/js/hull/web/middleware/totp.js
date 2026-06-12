@@ -15,7 +15,8 @@
  *               encryptionKey })
  *   totp.enroll(userId) -> { secretBase32, otpauthUrl, qrSvg, recoveryCodes }
  *   totp.confirm(userId, code) -> bool
- *   totp.verify(userId, code)  -> [ok, "totp" | "recovery" | null]
+ *   totp.verify(userId, code)  -> bool
+ *   totp.verifyWithKind(userId, code) -> [ok, "totp" | "recovery" | null]
  *   totp.disable(userId)
  *   totp.enrolled(userId)      -> bool
  *   totp.middleware({ redirectPath, sessionKey, skipPaths })
@@ -409,7 +410,20 @@ function confirm(userId, code) {
     return false;
 }
 
+// Verify a TOTP code or recovery code. Returns `true` on a
+// successful verify, `false` otherwise. Use `verifyWithKind` if
+// you need to know which of the two paths matched.
+//
+// History: this used to return a tuple-as-array `[ok, kind]` which
+// is truthy regardless of `ok` — a foot-gun for callers writing
+// `if (!totp.verify(...)) deny()`. The bare-boolean form is safe
+// by default; the tuple is available behind `verifyWithKind`.
 function verify(userId, code) {
+    const r = verifyWithKind(userId, code);
+    return r[0];
+}
+
+function verifyWithKind(userId, code) {
     checkInitialized();
     if (typeof userId !== "string" || typeof code !== "string") {
         return [false, null];
@@ -503,5 +517,5 @@ const _test = {
     },
 };
 
-const totp = { init, enroll, confirm, verify, disable, enrolled, middleware, _test };
+const totp = { init, enroll, confirm, verify, verifyWithKind, disable, enrolled, middleware, _test };
 export { totp };

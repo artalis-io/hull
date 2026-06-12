@@ -233,7 +233,12 @@ function isEmailIsh(s) {
 
 function genericOk(res) { res.json({ ok: true }); }
 
-function userId(user) { return user.id || user.user_id; }
+// Tolerate either `user.id` (canonical) or `user.user_id` (legacy)
+// on app-supplied user objects. Lua mirrors this with `user_uid`.
+function userId(user) {
+    if (!user || typeof user !== "object") return null;
+    return user.id || user.user_id || null;
+}
 
 function originFor(req) {
     const proto = (req.headers && req.headers["x-forwarded-proto"]) || "http";
@@ -601,10 +606,8 @@ function routes(app) {
 
 function sendVerifyEmail(user, verifyUrlPrefix) {
     if (!_state.initialized) throw new Error("auth-flows: call init() first");
-    if (!user || !(user.id || user.user_id)) {
-        throw new Error("auth-flows.sendVerifyEmail: user with id required");
-    }
     const uid = userId(user);
+    if (!uid) throw new Error("auth-flows.sendVerifyEmail: user with id required");
     const token = issueToken(uid, ACTIONS.verify_email, _state.verifyTtl);
     const verifyUrl = (verifyUrlPrefix || "") + _state.prefix
         + "/verify?token=" + token;
