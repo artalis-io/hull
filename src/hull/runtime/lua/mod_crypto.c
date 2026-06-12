@@ -100,14 +100,13 @@ static int lua_crypto_hash_password(lua_State *L)
     return 1;
 }
 
-/* ── Hex nibble helper (no sscanf — Cosmopolitan compat) ──────────── */
-
-static int hex_nibble(unsigned char c)
+/* Local 0/-1 wrapper over the cap-layer hex_decode, kept for the
+ * many existing callsites in this file. The actual decode lives
+ * in cap/crypto.c so all bindings share one implementation. */
+static int hex_decode(const char *hex, size_t hex_len, uint8_t *out, size_t out_len)
 {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
-    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
-    return -1;
+    if (hex_len != out_len * 2) return -1;
+    return hl_cap_crypto_hex_decode(hex, hex_len, out, out_len) >= 0 ? 0 : -1;
 }
 
 /* crypto.verify_password(password, hash_string) → boolean */
@@ -153,13 +152,9 @@ static int lua_crypto_verify_password(lua_State *L)
     memcpy(hash_hex, p, 64);
     hash_hex[64] = '\0';
 
-    /* Decode hex salt (manual — sscanf %x broken on Cosmopolitan) */
     uint8_t salt[16];
-    for (int i = 0; i < 16; i++) {
-        int hi = hex_nibble((unsigned char)salt_hex[i * 2]);
-        int lo = hex_nibble((unsigned char)salt_hex[i * 2 + 1]);
-        if (hi < 0 || lo < 0) { lua_pushboolean(L, 0); return 1; }
-        salt[i] = (uint8_t)((hi << 4) | lo);
+    if (hex_decode(salt_hex, 32, salt, sizeof(salt)) != 0) {
+        lua_pushboolean(L, 0); return 1;
     }
 
     /* Recompute hash */
@@ -170,13 +165,9 @@ static int lua_crypto_verify_password(lua_State *L)
         return 1;
     }
 
-    /* Decode stored hash and compare (constant-time) */
     uint8_t stored_hash[32];
-    for (int i = 0; i < 32; i++) {
-        int hi = hex_nibble((unsigned char)hash_hex[i * 2]);
-        int lo = hex_nibble((unsigned char)hash_hex[i * 2 + 1]);
-        if (hi < 0 || lo < 0) { lua_pushboolean(L, 0); return 1; }
-        stored_hash[i] = (uint8_t)((hi << 4) | lo);
+    if (hex_decode(hash_hex, 64, stored_hash, sizeof(stored_hash)) != 0) {
+        lua_pushboolean(L, 0); return 1;
     }
 
     /* Constant-time comparison */
@@ -190,22 +181,6 @@ static int lua_crypto_verify_password(lua_State *L)
 
     lua_pushboolean(L, diff == 0);
     return 1;
-}
-
-/* ── Hex decode helper (no sscanf — Cosmopolitan compat) ──────────── */
-
-static int hex_decode(const char *hex, size_t hex_len, uint8_t *out, size_t out_len)
-{
-    if (hex_len != out_len * 2)
-        return -1;
-    for (size_t i = 0; i < out_len; i++) {
-        int hi = hex_nibble((unsigned char)hex[i * 2]);
-        int lo = hex_nibble((unsigned char)hex[i * 2 + 1]);
-        if (hi < 0 || lo < 0)
-            return -1;
-        out[i] = (uint8_t)((hi << 4) | lo);
-    }
-    return 0;
 }
 
 /* ── Ed25519 bindings ──────────────────────────────────────────────── */
@@ -866,6 +841,58 @@ static int lua_crypto_base64url_decode(lua_State *L)
     return 1;
 }
 
+/* crypto.hex_encode(bytes) → lowercase hex string */
+static int lua_crypto_hex_encode(lua_State *L)
+{
+    size_t in_len;
+    const uint8_t *in = (const uint8_t *)luaL_checklstring(L, 1, &in_len);
+    if (in_len == 0) {
+        lua_pushliteral(L, "");
+        return 1;
+    }
+    if (in_len > SIZE_MAX / 2)
+        return luaL_error(L, "hex_encode: input too large");
+    size_t out_size = in_len * 2;
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->scratch)
+        return luaL_error(L, "runtime not available");
+    char *out = sh_arena_alloc(lua->scratch, out_size);
+    if (!out)
+        return luaL_error(L, "out of memory");
+    if (hl_cap_crypto_hex_encode(in, in_len, out, out_size) < 0)
+        return luaL_error(L, "hex_encode failed");
+    lua_pushlstring(L, out, out_size);
+    return 1;
+}
+
+/* crypto.hex_decode(hex) → bytes string, or nil on malformed input */
+static int lua_crypto_hex_decode(lua_State *L)
+{
+    size_t hex_len;
+    const char *hex = luaL_checklstring(L, 1, &hex_len);
+    if (hex_len == 0) {
+        lua_pushliteral(L, "");
+        return 1;
+    }
+    if (hex_len & 1u) {
+        lua_pushnil(L);
+        return 1;
+    }
+    size_t out_size = hex_len / 2;
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->scratch)
+        return luaL_error(L, "runtime not available");
+    uint8_t *out = sh_arena_alloc(lua->scratch, out_size);
+    if (!out)
+        return luaL_error(L, "out of memory");
+    if (hl_cap_crypto_hex_decode(hex, hex_len, out, out_size) < 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushlstring(L, (const char *)out, out_size);
+    return 1;
+}
+
 /* ── Incremental SHA-256 hasher ─────────────────────────────────────
  *
  *   local h = crypto.create_sha256()
@@ -978,6 +1005,8 @@ static const luaL_Reg crypto_funcs[] = {
     {"hmac_sha1",         lua_crypto_hmac_sha1},
     {"base64url_encode",  lua_crypto_base64url_encode},
     {"base64url_decode",  lua_crypto_base64url_decode},
+    {"hex_encode",        lua_crypto_hex_encode},
+    {"hex_decode",        lua_crypto_hex_decode},
     {NULL, NULL}
 };
 

@@ -605,4 +605,82 @@ UTEST(hl_cap_crypto, box_keypair_unique)
     ASSERT_NE(0, memcmp(sk1, sk2, 32));
 }
 
+/* ── Hex encode / decode ─────────────────────────────────────────── */
+
+UTEST(hl_cap_crypto, hex_encode_known_vector)
+{
+    const uint8_t in[] = { 0x00, 0x01, 0x7F, 0x80, 0xFF, 0xAB };
+    char out[12];
+    int n = hl_cap_crypto_hex_encode(in, sizeof(in), out, sizeof(out));
+    ASSERT_EQ(12, n);
+    ASSERT_EQ(0, memcmp(out, "00017f80ffab", 12));
+}
+
+UTEST(hl_cap_crypto, hex_encode_empty_is_ok)
+{
+    char out[1];
+    int n = hl_cap_crypto_hex_encode(NULL, 0, out, sizeof(out));
+    ASSERT_EQ(0, n);
+}
+
+UTEST(hl_cap_crypto, hex_encode_short_output_rejected)
+{
+    const uint8_t in[] = { 0xAB, 0xCD };
+    char out[3];                          /* need 4 */
+    ASSERT_EQ(-1, hl_cap_crypto_hex_encode(in, sizeof(in), out, sizeof(out)));
+}
+
+UTEST(hl_cap_crypto, hex_decode_round_trip_all_bytes)
+{
+    uint8_t in[256];
+    for (int i = 0; i < 256; i++) in[i] = (uint8_t)i;
+    char hex[512];
+    ASSERT_EQ(512, hl_cap_crypto_hex_encode(in, 256, hex, sizeof(hex)));
+    uint8_t back[256];
+    ASSERT_EQ(256, hl_cap_crypto_hex_decode(hex, 512, back, sizeof(back)));
+    ASSERT_EQ(0, memcmp(in, back, 256));
+}
+
+UTEST(hl_cap_crypto, hex_decode_uppercase_ok)
+{
+    const char *hex = "DEADBEEF";
+    uint8_t out[4];
+    ASSERT_EQ(4, hl_cap_crypto_hex_decode(hex, 8, out, sizeof(out)));
+    ASSERT_EQ(0xDE, out[0]); ASSERT_EQ(0xAD, out[1]);
+    ASSERT_EQ(0xBE, out[2]); ASSERT_EQ(0xEF, out[3]);
+}
+
+UTEST(hl_cap_crypto, hex_decode_mixed_case_ok)
+{
+    const char *hex = "dEaDbEeF";
+    uint8_t out[4];
+    ASSERT_EQ(4, hl_cap_crypto_hex_decode(hex, 8, out, sizeof(out)));
+    ASSERT_EQ(0xDE, out[0]);
+}
+
+UTEST(hl_cap_crypto, hex_decode_odd_length_rejected)
+{
+    uint8_t out[2];
+    ASSERT_EQ(-1, hl_cap_crypto_hex_decode("abc", 3, out, sizeof(out)));
+}
+
+UTEST(hl_cap_crypto, hex_decode_non_hex_char_rejected)
+{
+    uint8_t out[2];
+    ASSERT_EQ(-1, hl_cap_crypto_hex_decode("zzzz", 4, out, sizeof(out)));
+    ASSERT_EQ(-1, hl_cap_crypto_hex_decode("ab/d", 4, out, sizeof(out)));
+}
+
+UTEST(hl_cap_crypto, hex_decode_short_output_rejected)
+{
+    uint8_t out[1];
+    ASSERT_EQ(-1, hl_cap_crypto_hex_decode("abcd", 4, out, sizeof(out)));
+}
+
+UTEST(hl_cap_crypto, hex_decode_empty_is_ok)
+{
+    uint8_t out[1];
+    ASSERT_EQ(0, hl_cap_crypto_hex_decode(NULL, 0, out, sizeof(out)));
+}
+
 UTEST_MAIN();

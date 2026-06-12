@@ -84,6 +84,11 @@ const ACTIONS = {
     totp_pending:   "totp_pending",
 };
 
+// Kept local (not aliased to crypto.hexEncode) because state
+// secrets may contain code points >= 0x80; crypto.hexEncode for
+// string input goes through JS_ToCStringLen which UTF-8-inflates
+// them, breaking round-trips. The cap-layer helper is correct
+// for ArrayBuffer/Uint8Array; use it for those.
 function bytesToHex(s) {
     let h = "";
     for (let i = 0; i < s.length; i++) {

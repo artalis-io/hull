@@ -141,19 +141,11 @@ CREATE INDEX IF NOT EXISTS _hull_totp_recovery_user
 -- ── Helpers (private) ──────────────────────────────────────────────
 
 -- Hex helpers used at every cap layer that takes hex-encoded keys.
-local function bytes_to_hex(s)
-    local parts = {}
-    for i = 1, #s do parts[i] = string.format("%02x", string.byte(s, i)) end
-    return table.concat(parts)
-end
-
-local function hex_to_bytes(h)
-    local parts = {}
-    for i = 1, #h, 2 do
-        parts[#parts + 1] = string.char(tonumber(h:sub(i, i + 1), 16))
-    end
-    return table.concat(parts)
-end
+-- Thin aliases over crypto.hex_encode / crypto.hex_decode so call
+-- sites stay readable and a future rename of either side is one
+-- edit instead of N.
+local function bytes_to_hex(s) return crypto.hex_encode(s) end
+local function hex_to_bytes(h) return crypto.hex_decode(h) end
 
 -- RFC 4648 Base32 (no padding). 20 bytes → 32 chars exactly with no
 -- padding needed (160/5 = 32). The encoder accepts any byte string;

@@ -75,13 +75,13 @@ static JSValue js_crypto_random(JSContext *ctx, JSValueConst this_val,
     return ab;
 }
 
-/* Hex nibble helper (no sscanf — Cosmopolitan compat) */
-static int hex_nibble(unsigned char c)
+/* Local 0/-1 wrapper over the cap-layer hex_decode, kept for the
+ * many existing callsites in this file. The actual decode lives
+ * in cap/crypto.c so all bindings share one implementation. */
+static int hex_decode_compat(const char *hex, size_t hex_len, uint8_t *out, size_t out_len)
 {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
-    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
-    return -1;
+    if (hex_len != out_len * 2) return -1;
+    return hl_cap_crypto_hex_decode(hex, hex_len, out, out_len) >= 0 ? 0 : -1;
 }
 
 /* crypto.hashPassword(password) -> "pbkdf2:iterations:salt_hex:hash_hex" */
@@ -187,13 +187,9 @@ static JSValue js_crypto_verify_password(JSContext *ctx, JSValueConst this_val,
 
     JS_FreeCString(ctx, stored);
 
-    /* Decode hex salt (manual — sscanf %x broken on Cosmopolitan) */
     uint8_t salt[16];
-    for (int i = 0; i < 16; i++) {
-        int hi = hex_nibble((unsigned char)salt_hex[i * 2]);
-        int lo = hex_nibble((unsigned char)salt_hex[i * 2 + 1]);
-        if (hi < 0 || lo < 0) { JS_FreeCString(ctx, pw); return JS_FALSE; }
-        salt[i] = (uint8_t)((hi << 4) | lo);
+    if (hex_decode_compat(salt_hex, 32, salt, sizeof(salt)) != 0) {
+        JS_FreeCString(ctx, pw); return JS_FALSE;
     }
 
     /* Recompute hash */
@@ -205,14 +201,9 @@ static JSValue js_crypto_verify_password(JSContext *ctx, JSValueConst this_val,
     }
     JS_FreeCString(ctx, pw);
 
-    /* Decode stored hash and compare (constant-time) */
     uint8_t stored_hash[32];
-    for (int i = 0; i < 32; i++) {
-        int hi = hex_nibble((unsigned char)hash_hex[i * 2]);
-        int lo = hex_nibble((unsigned char)hash_hex[i * 2 + 1]);
-        if (hi < 0 || lo < 0) return JS_FALSE;
-        stored_hash[i] = (uint8_t)((hi << 4) | lo);
-    }
+    if (hex_decode_compat(hash_hex, 64, stored_hash, sizeof(stored_hash)) != 0)
+        return JS_FALSE;
 
     /* Constant-time comparison */
     volatile uint8_t diff = 0;
@@ -226,21 +217,6 @@ static JSValue js_crypto_verify_password(JSContext *ctx, JSValueConst this_val,
     return diff == 0 ? JS_TRUE : JS_FALSE;
 }
 
-/* ── Hex decode helper (no sscanf — Cosmopolitan compat) ──────────── */
-
-static int hex_decode(const char *hex, size_t hex_len, uint8_t *out, size_t out_len)
-{
-    if (hex_len != out_len * 2)
-        return -1;
-    for (size_t i = 0; i < out_len; i++) {
-        int hi = hex_nibble((unsigned char)hex[i * 2]);
-        int lo = hex_nibble((unsigned char)hex[i * 2 + 1]);
-        if (hi < 0 || lo < 0)
-            return -1;
-        out[i] = (uint8_t)((hi << 4) | lo);
-    }
-    return 0;
-}
 
 /* ── Ed25519 bindings ──────────────────────────────────────────────── */
 
@@ -293,7 +269,7 @@ static JSValue js_crypto_ed25519_sign(JSContext *ctx, JSValueConst this_val,
     }
 
     uint8_t sk[64];
-    if (hex_decode(sk_hex, sk_hex_len, sk, 64) != 0) {
+    if (hex_decode_compat(sk_hex, sk_hex_len, sk, 64) != 0) {
         JS_FreeCString(ctx, data);
         JS_FreeCString(ctx, sk_hex);
         secure_zero(sk, sizeof(sk));
@@ -350,8 +326,8 @@ static JSValue js_crypto_ed25519_verify(JSContext *ctx, JSValueConst this_val,
     }
 
     uint8_t sig[64], pk[32];
-    if (hex_decode(sig_hex, sig_hex_len, sig, 64) != 0 ||
-        hex_decode(pk_hex, pk_hex_len, pk, 32) != 0) {
+    if (hex_decode_compat(sig_hex, sig_hex_len, sig, 64) != 0 ||
+        hex_decode_compat(pk_hex, pk_hex_len, pk, 32) != 0) {
         JS_FreeCString(ctx, data);
         JS_FreeCString(ctx, sig_hex);
         JS_FreeCString(ctx, pk_hex);
@@ -530,7 +506,7 @@ static JSValue js_crypto_auth(JSContext *ctx, JSValueConst this_val,
     }
 
     uint8_t key[32];
-    if (hex_decode(key_hex, key_hex_len, key, 32) != 0) {
+    if (hex_decode_compat(key_hex, key_hex_len, key, 32) != 0) {
         JS_FreeCString(ctx, msg);
         JS_FreeCString(ctx, key_hex);
         return JS_ThrowTypeError(ctx, "invalid hex in key");
@@ -586,8 +562,8 @@ static JSValue js_crypto_auth_verify(JSContext *ctx, JSValueConst this_val,
     }
 
     uint8_t tag[32], key[32];
-    if (hex_decode(tag_hex, tag_hex_len, tag, 32) != 0 ||
-        hex_decode(key_hex, key_hex_len, key, 32) != 0) {
+    if (hex_decode_compat(tag_hex, tag_hex_len, tag, 32) != 0 ||
+        hex_decode_compat(key_hex, key_hex_len, key, 32) != 0) {
         JS_FreeCString(ctx, tag_hex);
         JS_FreeCString(ctx, msg);
         JS_FreeCString(ctx, key_hex);
@@ -635,8 +611,8 @@ static JSValue js_crypto_secretbox(JSContext *ctx, JSValueConst this_val,
     }
 
     uint8_t nonce[24], key[32];
-    if (hex_decode(nonce_hex, 48, nonce, 24) != 0 ||
-        hex_decode(key_hex, 64, key, 32) != 0) {
+    if (hex_decode_compat(nonce_hex, 48, nonce, 24) != 0 ||
+        hex_decode_compat(key_hex, 64, key, 32) != 0) {
         JS_FreeCString(ctx, msg);
         JS_FreeCString(ctx, nonce_hex);
         JS_FreeCString(ctx, key_hex);
@@ -715,8 +691,8 @@ static JSValue js_crypto_secretbox_open(JSContext *ctx, JSValueConst this_val,
     }
 
     uint8_t nonce[24], key[32];
-    if (hex_decode(nonce_hex, 48, nonce, 24) != 0 ||
-        hex_decode(key_hex, 64, key, 32) != 0) {
+    if (hex_decode_compat(nonce_hex, 48, nonce, 24) != 0 ||
+        hex_decode_compat(key_hex, 64, key, 32) != 0) {
         JS_FreeCString(ctx, ct_hex);
         JS_FreeCString(ctx, nonce_hex);
         JS_FreeCString(ctx, key_hex);
@@ -727,7 +703,7 @@ static JSValue js_crypto_secretbox_open(JSContext *ctx, JSValueConst this_val,
 
     uint8_t *ct = js_malloc(ctx, ct_len);
     if (!ct) { JS_FreeCString(ctx, ct_hex); secure_zero(key, sizeof(key)); return JS_EXCEPTION; }
-    if (hex_decode(ct_hex, ct_hex_len, ct, ct_len) != 0) {
+    if (hex_decode_compat(ct_hex, ct_hex_len, ct, ct_len) != 0) {
         JS_FreeCString(ctx, ct_hex);
         js_free(ctx, ct);
         secure_zero(key, sizeof(key));
@@ -786,9 +762,9 @@ static JSValue js_crypto_box(JSContext *ctx, JSValueConst this_val,
     }
 
     uint8_t nonce[24], pk[32], sk[32];
-    if (hex_decode(nh, 48, nonce, 24) != 0 ||
-        hex_decode(pkh, 64, pk, 32) != 0 ||
-        hex_decode(skh, 64, sk, 32) != 0) {
+    if (hex_decode_compat(nh, 48, nonce, 24) != 0 ||
+        hex_decode_compat(pkh, 64, pk, 32) != 0 ||
+        hex_decode_compat(skh, 64, sk, 32) != 0) {
         JS_FreeCString(ctx, msg); JS_FreeCString(ctx, nh);
         JS_FreeCString(ctx, pkh); JS_FreeCString(ctx, skh);
         return JS_ThrowTypeError(ctx, "invalid hex");
@@ -863,9 +839,9 @@ static JSValue js_crypto_box_open(JSContext *ctx, JSValueConst this_val,
     }
 
     uint8_t nonce[24], pk[32], sk[32];
-    if (hex_decode(nh, 48, nonce, 24) != 0 ||
-        hex_decode(pkh, 64, pk, 32) != 0 ||
-        hex_decode(skh, 64, sk, 32) != 0) {
+    if (hex_decode_compat(nh, 48, nonce, 24) != 0 ||
+        hex_decode_compat(pkh, 64, pk, 32) != 0 ||
+        hex_decode_compat(skh, 64, sk, 32) != 0) {
         JS_FreeCString(ctx, cth); JS_FreeCString(ctx, nh);
         JS_FreeCString(ctx, pkh); JS_FreeCString(ctx, skh);
         return JS_NULL;
@@ -876,7 +852,7 @@ static JSValue js_crypto_box_open(JSContext *ctx, JSValueConst this_val,
 
     uint8_t *ct = js_malloc(ctx, ct_len);
     if (!ct) { JS_FreeCString(ctx, cth); secure_zero(sk, sizeof(sk)); return JS_EXCEPTION; }
-    if (hex_decode(cth, cth_len, ct, ct_len) != 0) {
+    if (hex_decode_compat(cth, cth_len, ct, ct_len) != 0) {
         JS_FreeCString(ctx, cth);
         js_free(ctx, ct);
         secure_zero(sk, sizeof(sk));
@@ -952,7 +928,7 @@ static JSValue js_crypto_hmac_sha256(JSContext *ctx, JSValueConst this_val,
 
     size_t key_len = key_hex_len / 2;
     uint8_t key[128];
-    if (hex_decode(key_hex, key_hex_len, key, key_len) != 0) {
+    if (hex_decode_compat(key_hex, key_hex_len, key, key_len) != 0) {
         JS_FreeCString(ctx, data);
         JS_FreeCString(ctx, key_hex);
         return JS_ThrowTypeError(ctx, "invalid hex in key");
@@ -1018,7 +994,7 @@ static JSValue js_crypto_hmac_sha1(JSContext *ctx, JSValueConst this_val,
 
     size_t key_len = key_hex_len / 2;
     uint8_t key[128];
-    if (hex_decode(key_hex, key_hex_len, key, key_len) != 0) {
+    if (hex_decode_compat(key_hex, key_hex_len, key, key_len) != 0) {
         if (data_needs_free) JS_FreeCString(ctx, data_str);
         JS_FreeCString(ctx, key_hex);
         return JS_ThrowTypeError(ctx, "invalid hex in key");
@@ -1083,7 +1059,7 @@ static JSValue js_crypto_hmac_sha256_verify(JSContext *ctx, JSValueConst this_va
 
     size_t key_len = key_hex_len / 2;
     uint8_t key[128];
-    if (hex_decode(key_hex, key_hex_len, key, key_len) != 0) {
+    if (hex_decode_compat(key_hex, key_hex_len, key, key_len) != 0) {
         JS_FreeCString(ctx, data);
         JS_FreeCString(ctx, key_hex);
         JS_FreeCString(ctx, expected_hex);
@@ -1092,7 +1068,7 @@ static JSValue js_crypto_hmac_sha256_verify(JSContext *ctx, JSValueConst this_va
     JS_FreeCString(ctx, key_hex);
 
     uint8_t expected[32];
-    if (hex_decode(expected_hex, expected_hex_len, expected, 32) != 0) {
+    if (hex_decode_compat(expected_hex, expected_hex_len, expected, 32) != 0) {
         JS_FreeCString(ctx, data);
         JS_FreeCString(ctx, expected_hex);
         secure_zero(key, sizeof(key));
@@ -1180,6 +1156,87 @@ static JSValue js_crypto_base64url_decode(JSContext *ctx, JSValueConst this_val,
     JS_FreeCString(ctx, str);
 
     JSValue result = JS_NewStringLen(ctx, (const char *)out, out_len);
+    js_free(ctx, out);
+    return result;
+}
+
+/* crypto.hexEncode(bytes) -> lowercase hex string. Input may be
+ * ArrayBuffer, TypedArray, MappedBuffer, WasmBuffer, or string
+ * (treated as Latin-1 / binary-string — same as base64urlEncode). */
+static JSValue js_crypto_hex_encode(JSContext *ctx, JSValueConst this_val,
+                                     int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "crypto.hexEncode requires (bytes)");
+
+    /* Use the unified buffer protocol — the same path
+     * base64urlEncode takes. This is binary-safe for strings:
+     * js_get_buffer keeps charCodes as single bytes rather than
+     * UTF-8-inflating them, which JS_ToCStringLen would do. */
+    HlBufferView view = {0};
+    const char *str = NULL;
+    int needs_free = 0;
+    if (!js_get_buffer(ctx, argv[0], &view, &str, &needs_free))
+        return JS_ThrowTypeError(ctx,
+            "crypto.hexEncode: input must be ArrayBuffer, "
+            "TypedArray, MappedBuffer, WasmBuffer, or string");
+
+    if (view.len == 0) {
+        if (needs_free) JS_FreeCString(ctx, str);
+        return JS_NewStringLen(ctx, "", 0);
+    }
+    if (view.len > SIZE_MAX / 2) {
+        if (needs_free) JS_FreeCString(ctx, str);
+        return JS_ThrowRangeError(ctx, "crypto.hexEncode: input too large");
+    }
+    size_t out_size = view.len * 2;
+    char *out = js_malloc(ctx, out_size);
+    if (!out) {
+        if (needs_free) JS_FreeCString(ctx, str);
+        return JS_EXCEPTION;
+    }
+    int n = hl_cap_crypto_hex_encode((const uint8_t *)view.data, view.len, out, out_size);
+    if (needs_free) JS_FreeCString(ctx, str);
+    if (n < 0) {
+        js_free(ctx, out);
+        return JS_ThrowInternalError(ctx, "hexEncode failed");
+    }
+    JSValue result = JS_NewStringLen(ctx, out, out_size);
+    js_free(ctx, out);
+    return result;
+}
+
+/* crypto.hexDecode(hex) -> binary-string, or null on malformed input. */
+static JSValue js_crypto_hex_decode(JSContext *ctx, JSValueConst this_val,
+                                     int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "crypto.hexDecode requires (hex)");
+
+    size_t hex_len;
+    const char *hex = JS_ToCStringLen(ctx, &hex_len, argv[0]);
+    if (!hex) return JS_EXCEPTION;
+
+    if (hex_len == 0) {
+        JS_FreeCString(ctx, hex);
+        return JS_NewStringLen(ctx, "", 0);
+    }
+    if (hex_len & 1u) {
+        JS_FreeCString(ctx, hex);
+        return JS_NULL;
+    }
+    size_t out_size = hex_len / 2;
+    uint8_t *out = js_malloc(ctx, out_size);
+    if (!out) { JS_FreeCString(ctx, hex); return JS_EXCEPTION; }
+    int n = hl_cap_crypto_hex_decode(hex, hex_len, out, out_size);
+    JS_FreeCString(ctx, hex);
+    if (n < 0) {
+        js_free(ctx, out);
+        return JS_NULL;
+    }
+    JSValue result = JS_NewStringLen(ctx, (const char *)out, out_size);
     js_free(ctx, out);
     return result;
 }
@@ -1345,6 +1402,10 @@ static int js_crypto_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_crypto_base64url_encode, "base64urlEncode", 1));
     JS_SetPropertyStr(ctx, crypto, "base64urlDecode",
                       JS_NewCFunction(ctx, js_crypto_base64url_decode, "base64urlDecode", 1));
+    JS_SetPropertyStr(ctx, crypto, "hexEncode",
+                      JS_NewCFunction(ctx, js_crypto_hex_encode, "hexEncode", 1));
+    JS_SetPropertyStr(ctx, crypto, "hexDecode",
+                      JS_NewCFunction(ctx, js_crypto_hex_decode, "hexDecode", 1));
     JS_SetModuleExport(ctx, m, "crypto", crypto);
     return 0;
 }

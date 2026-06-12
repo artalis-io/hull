@@ -68,6 +68,14 @@ CREATE INDEX IF NOT EXISTS _hull_totp_recovery_user
 
 // ── Helpers ────────────────────────────────────────────────────────
 
+// Hex helpers used to bridge binary strings (built via
+// String.fromCharCode) to the cap-layer's hex-string-keyed
+// crypto APIs. Kept local because QuickJS's JS_ToCStringLen
+// (which crypto.hexEncode uses for strings) UTF-8-inflates
+// code points >= 0x80, which corrupts binary-string round-
+// trips. The cap-layer crypto.hexEncode / crypto.hexDecode
+// are binary-safe for ArrayBuffer/Uint8Array input — use
+// them when the input is already a typed array.
 function bytesToHex(s) {
     let h = "";
     for (let i = 0; i < s.length; i++) {

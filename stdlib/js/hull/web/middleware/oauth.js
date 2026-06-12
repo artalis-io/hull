@@ -110,7 +110,11 @@ const PRESETS = {
 // ── Helpers ────────────────────────────────────────────────────────
 
 // crypto.hmacSha256 takes the key as a hex string. We pre-encode the
-// secret bytes once at init and reuse the hex form.
+// secret bytes once at init and reuse the hex form. Kept local
+// (not aliased to crypto.hexEncode) because JS strings with code
+// points >= 0x80 UTF-8-inflate when crossing the C boundary via
+// JS_ToCStringLen; binary-string inputs (state secrets with high
+// bytes, ID-token hashes) must round-trip byte-identically.
 function bytesToHex(s) {
     let h = "";
     for (let i = 0; i < s.length; i++) {

@@ -139,21 +139,10 @@ local PRESETS = {
 
 -- Cap layer's hmac_sha256 takes the key as a hex string. We pre-
 -- encode the secret bytes once at init and reuse the hex form.
-local function bytes_to_hex(s)
-    local parts = {}
-    for i = 1, #s do
-        parts[i] = string.format("%02x", string.byte(s, i))
-    end
-    return table.concat(parts)
-end
-
-local function hex_to_bytes(h)
-    local parts = {}
-    for i = 1, #h, 2 do
-        parts[#parts + 1] = string.char(tonumber(h:sub(i, i + 1), 16))
-    end
-    return table.concat(parts)
-end
+-- Thin aliases over crypto.hex_encode / crypto.hex_decode so
+-- the implementation lives in one place (cap/crypto.c).
+local function bytes_to_hex(s) return crypto.hex_encode(s) end
+local function hex_to_bytes(h) return crypto.hex_decode(h) end
 
 -- Cryptographically-random URL-safe string (base64url-encoded).
 local function random_urlsafe(n_bytes)

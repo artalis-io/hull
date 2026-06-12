@@ -762,11 +762,7 @@ function M.init(opts)
 
     -- crypto.hmac_sha256 takes the key as a hex string; we encode
     -- once at init and reuse the hex form per request.
-    local parts = {}
-    for i = 1, #opts.state_secret do
-        parts[i] = string.format("%02x", string.byte(opts.state_secret, i))
-    end
-    _state.state_secret_hex = table.concat(parts)
+    _state.state_secret_hex = crypto.hex_encode(opts.state_secret)
     _state.email_send       = opts.email_send
     _state.templates        = opts.templates
     _state.user_find_by_email      = opts.user_find_by_email

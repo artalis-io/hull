@@ -293,6 +293,39 @@ int hl_cap_crypto_base64url_decode(const char *str, size_t str_len,
                                    uint8_t *out, size_t out_size,
                                    size_t *out_len);
 
+/* ── Lowercase hex encode / decode ─────────────────────────────────── */
+
+/**
+ * @brief Lowercase hex-encode a byte buffer.
+ *
+ * Writes exactly `2 * in_len` characters into @p out_hex (no NUL).
+ *
+ * @param in        Input bytes.
+ * @param in_len    Byte count.
+ * @param out_hex   Output buffer (caller-allocated).
+ * @param out_size  Capacity of @p out_hex (must be >= 2 * in_len).
+ *
+ * @return Number of characters written (`2 * in_len`) on success,
+ *         or `-1` if @p out_size is too small.
+ */
+int hl_cap_crypto_hex_encode(const uint8_t *in, size_t in_len,
+                             char *out_hex, size_t out_size);
+
+/**
+ * @brief Decode a lowercase or uppercase hex string into bytes.
+ *
+ * @param hex       Hex input (NOT required to be NUL-terminated).
+ * @param hex_len   Hex character count (must be even).
+ * @param out       Output buffer.
+ * @param out_size  Capacity of @p out (must be >= hex_len / 2).
+ *
+ * @return Bytes written (`hex_len / 2`) on success,
+ *         or `-1` on odd length, non-hex character, or insufficient
+ *         capacity.
+ */
+int hl_cap_crypto_hex_decode(const char *hex, size_t hex_len,
+                             uint8_t *out, size_t out_size);
+
 /* ── Password-based key derivation (PBKDF2-HMAC-SHA256) ────────────── */
 
 /**

@@ -930,6 +930,50 @@ int hl_cap_crypto_base64url_decode(const char *str, size_t str_len,
     return 0;
 }
 
+/* ── Hex encode / decode ───────────────────────────────────────────── */
+
+int hl_cap_crypto_hex_encode(const uint8_t *in, size_t in_len,
+                             char *out_hex, size_t out_size)
+{
+    if (!out_hex) return -1;
+    if (in_len > 0 && !in) return -1;
+    if (in_len > SIZE_MAX / 2) return -1;
+    if (out_size < in_len * 2) return -1;
+
+    static const char digits[16] = {
+        '0','1','2','3','4','5','6','7',
+        '8','9','a','b','c','d','e','f',
+    };
+    for (size_t i = 0; i < in_len; i++) {
+        out_hex[i * 2]     = digits[(in[i] >> 4) & 0x0F];
+        out_hex[i * 2 + 1] = digits[in[i] & 0x0F];
+    }
+    return (int)(in_len * 2);
+}
+
+int hl_cap_crypto_hex_decode(const char *hex, size_t hex_len,
+                             uint8_t *out, size_t out_size)
+{
+    if (!hex && hex_len > 0) return -1;
+    if (!out && hex_len > 0) return -1;
+    if (hex_len & 1u) return -1;             /* odd length */
+    if (out_size < hex_len / 2) return -1;
+
+    for (size_t i = 0; i < hex_len / 2; i++) {
+        unsigned char hi = (unsigned char)hex[i * 2];
+        unsigned char lo = (unsigned char)hex[i * 2 + 1];
+        int hv = (hi >= '0' && hi <= '9') ? hi - '0' :
+                 (hi >= 'a' && hi <= 'f') ? hi - 'a' + 10 :
+                 (hi >= 'A' && hi <= 'F') ? hi - 'A' + 10 : -1;
+        int lv = (lo >= '0' && lo <= '9') ? lo - '0' :
+                 (lo >= 'a' && lo <= 'f') ? lo - 'a' + 10 :
+                 (lo >= 'A' && lo <= 'F') ? lo - 'A' + 10 : -1;
+        if (hv < 0 || lv < 0) return -1;
+        out[i] = (uint8_t)((hv << 4) | lv);
+    }
+    return (int)(hex_len / 2);
+}
+
 /* ── PBKDF2-HMAC-SHA256 ────────────────────────────────────────────── */
 
 int hl_cap_crypto_pbkdf2(const char *password, size_t pw_len,
