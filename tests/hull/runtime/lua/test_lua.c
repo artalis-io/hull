@@ -2403,6 +2403,94 @@ UTEST(lua_stdlib, totp_disable_clears_secret_and_recovery)
     cleanup_lua_caps();
 }
 
+UTEST(lua_stdlib, totp_ct_eq_and_normalize)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* ct_eq: constant-time string compare. Pinning equal / unequal /
+     * different-length / non-string inputs. The "constant-time" part
+     * isn't directly testable from Lua, but the functional contract
+     * (returns boolean, no early exit) is. */
+    int ok = eval_int(
+        "(function() "
+        "  local t = require('hull.web.middleware.totp')._test "
+        "  if not t.ct_eq('287082', '287082') then return 0 end "
+        "  if t.ct_eq('287082', '287083') then return 0 end "
+        "  if t.ct_eq('287082', '2870820') then return 0 end "
+        "  if t.ct_eq('', '') then return 1 end "
+        "  return 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    int safe = eval_int(
+        "(function() "
+        "  local t = require('hull.web.middleware.totp')._test "
+        "  if t.ct_eq(nil, 'x') then return 0 end "
+        "  if t.ct_eq('x', nil) then return 0 end "
+        "  if t.ct_eq(42, 42) then return 0 end "
+        "  return 1 "
+        "end)()");
+    ASSERT_EQ(safe, 1);
+
+    /* normalize_recovery_code: strip non-alphanumerics, uppercase. */
+    char *n1 = eval_str(
+        "require('hull.web.middleware.totp')._test"
+        ".normalize_recovery_code('ABCD-EFGH-IJKL')");
+    ASSERT_NE(n1, NULL); ASSERT_STREQ(n1, "ABCDEFGHIJKL"); free(n1);
+
+    char *n2 = eval_str(
+        "require('hull.web.middleware.totp')._test"
+        ".normalize_recovery_code('abcdefghijkl')");
+    ASSERT_NE(n2, NULL); ASSERT_STREQ(n2, "ABCDEFGHIJKL"); free(n2);
+
+    char *n3 = eval_str(
+        "require('hull.web.middleware.totp')._test"
+        ".normalize_recovery_code('  abcd efgh ijkl  ')");
+    ASSERT_NE(n3, NULL); ASSERT_STREQ(n3, "ABCDEFGHIJKL"); free(n3);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, totp_recovery_accepts_user_typed_forms)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* The DB-backed end-to-end: a recovery code displayed as
+     * "ABCD-EFGH-IJKL" should also verify when the user types it
+     * without the hyphens, in lowercase, or with stray whitespace.
+     * Reuses the enroll → confirm path to bring a user to the state
+     * where verify is allowed. */
+    int ok = eval_int(
+        "(function() "
+        "  local totp = require('hull.web.middleware.totp') "
+        "  totp._test.reset() "
+        "  totp.init({ issuer = 'TestApp', recovery_codes = 4 }) "
+        "  local r = totp.enroll('rec-user') "
+        "  local secret = totp._test.base32_decode(r.secret_base32) "
+        "  local code = totp._test.totp_at_step(secret, "
+        "    totp._test.current_step(), 6) "
+        "  if not totp.confirm('rec-user', code) then return 0 end "
+        "  local rc = r.recovery_codes[1] "
+        "  local plain = rc:gsub('-', '') "
+        "  local lower = plain:lower() "
+        "  local spaced = '  ' .. plain .. '  ' "
+        "  local v_plain = totp.verify('rec-user', plain) "
+        "  if not v_plain then return 0 end "
+        "  local v_lower = totp.verify('rec-user', "
+        "    r.recovery_codes[2]:lower()) "
+        "  if not v_lower then return 0 end "
+        "  local v_spaced = totp.verify('rec-user', "
+        "    '  ' .. r.recovery_codes[3] .. '  ') "
+        "  if not v_spaced then return 0 end "
+        "  return 1 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
 UTEST(lua_stdlib, totp_encryption_at_rest)
 {
     init_lua_with_caps();

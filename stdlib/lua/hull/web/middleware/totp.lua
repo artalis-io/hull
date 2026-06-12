@@ -31,9 +31,16 @@
 --   * Replay protection: every successful verify records the
 --     consumed step on the secret row. Re-presenting the same code
 --     within the window is rejected.
---   * Constant-time TOTP comparison via crypto.hmac_sha256_verify-
---     style API on the digest path. Recovery codes go through
+--   * Constant-time TOTP digest comparison via a small xor-fold
+--     helper (`ct_eq`); both sides are zero-padded numeric strings
+--     of the same length, so the helper is straight constant-time
+--     work and matches RFC 6238 §4. Recovery codes go through
 --     crypto.verify_password (constant-time inside the cap).
+--   * Recovery code input is canonicalized (uppercased, non-
+--     alphanumerics stripped) before hashing and before verify, so
+--     "ABCD-EFGH-IJKL", "ABCDEFGHIJKL", and "abcd efgh ijkl" all
+--     compare equal — no UX trap that locks users out of their
+--     accounts for typing the displayed code without hyphens.
 --   * `alg=SHA1` is fixed at RFC 6238's default; every mainstream
 --     authenticator app expects it.
 --
@@ -244,22 +251,34 @@ end
 -- Alphabet skips 0/O/1/I/L (common confusables when transcribed).
 local RECOVERY_ALPHA = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  -- 31 chars
 
+-- Strip everything outside the recovery alphabet (hyphens, spaces,
+-- accidental punctuation) and uppercase. Stored hashes are computed
+-- against the normalized form so users can paste back the displayed
+-- "ABCD-EFGH-IJKL" or the unhyphenated "ABCDEFGHIJKL" interchangeably,
+-- and case sensitivity isn't a lockout trap.
+local function normalize_recovery_code(s)
+    if type(s) ~= "string" then return "" end
+    return (s:upper():gsub("[^A-Z0-9]", ""))
+end
+
 local function generate_recovery_codes(n)
     local codes, hashes = {}, {}
     for i = 1, n do
-        -- Need 12 chars × log2(31) ≈ 59.5 bits → 8 random bytes is
-        -- plenty (64 bits, modulo bias on 31 is negligible).
+        -- Need 12 chars × log2(31) ≈ 59.5 bits → 12 random bytes is
+        -- plenty. Modulo bias on 31 from a uniform byte is < 0.4%
+        -- per char and ignorable at this entropy scale.
         local raw = crypto.random(12)
         local parts = {}
         for j = 1, 12 do
             local b = string.byte(raw, j)
             parts[j] = RECOVERY_ALPHA:sub((b % 31) + 1, (b % 31) + 1)
         end
-        local code = parts[1] .. parts[2] .. parts[3] .. parts[4] .. "-"
-                  .. parts[5] .. parts[6] .. parts[7] .. parts[8] .. "-"
-                  .. parts[9] .. parts[10] .. parts[11] .. parts[12]
-        codes[i] = code
-        hashes[i] = crypto.hash_password(code)
+        local plain = table.concat(parts)  -- unhyphenated, used for hash
+        local display = parts[1] .. parts[2] .. parts[3] .. parts[4] .. "-"
+                      .. parts[5] .. parts[6] .. parts[7] .. parts[8] .. "-"
+                      .. parts[9] .. parts[10] .. parts[11] .. parts[12]
+        codes[i] = display
+        hashes[i] = crypto.hash_password(plain)
     end
     return codes, hashes
 end
@@ -267,11 +286,28 @@ end
 -- Recovery-code hash matches crypto.hash_password's pbkdf2 format,
 -- so verify uses crypto.verify_password (constant-time at C layer).
 local function hash_recovery_code(code)
-    return crypto.hash_password(code)
+    return crypto.hash_password(normalize_recovery_code(code))
 end
 
 local function verify_recovery_code(code, hash)
-    return crypto.verify_password(code, hash)
+    return crypto.verify_password(normalize_recovery_code(code), hash)
+end
+
+-- Constant-time string equality. Used for TOTP code matching where
+-- both sides are fixed-length zero-padded numeric strings; Lua's
+-- native `==` short-circuits on first mismatch, which is a
+-- measurable timing leak when an attacker can submit guesses at
+-- high rate. RFC 6238 §4 calls this out explicitly. Pair with
+-- account lockout (hull/web/middleware/auth_lockout, separate
+-- module) for defense in depth.
+local function ct_eq(a, b)
+    if type(a) ~= "string" or type(b) ~= "string" then return false end
+    if #a ~= #b then return false end
+    local diff = 0
+    for i = 1, #a do
+        diff = diff | (string.byte(a, i) ~ string.byte(b, i))
+    end
+    return diff == 0
 end
 
 -- At-rest encryption: nonce(24) || ct. NaCl secretbox auth-checks
@@ -488,7 +524,7 @@ function totp.confirm(user_id, code)
     local now_step = current_step()
     for offset = -_state.window, _state.window do
         local step = now_step + offset
-        if totp_at_step(row.secret, step, row.digits) == code then
+        if ct_eq(totp_at_step(row.secret, step, row.digits), code) then
             db.batch(function()
                 db.exec(
                     "UPDATE _hull_totp SET confirmed = 1, "
@@ -609,6 +645,8 @@ totp._test = {
     base32_decode           = base32_decode,
     totp_at_step            = totp_at_step,
     current_step            = current_step,
+    ct_eq                   = ct_eq,
+    normalize_recovery_code = normalize_recovery_code,
     generate_recovery_codes = generate_recovery_codes,
     hash_recovery_code      = hash_recovery_code,
     verify_recovery_code    = verify_recovery_code,

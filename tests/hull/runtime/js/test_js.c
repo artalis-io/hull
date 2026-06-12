@@ -2142,6 +2142,73 @@ UTEST(js_stdlib, totp_recovery_and_disable)
     cleanup_js_caps();
 }
 
+UTEST(js_stdlib, totp_ct_eq_and_normalize)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { totp } from 'hull:web:middleware:totp';\n"
+        "const t = totp._test;\n"
+        "function run() {\n"
+        "  if (!t.ctEq('287082', '287082')) return 0;\n"
+        "  if ( t.ctEq('287082', '287083')) return 0;\n"
+        "  if ( t.ctEq('287082', '2870820')) return 0;\n"
+        "  if (!t.ctEq('', '')) return 0;\n"
+        "  if ( t.ctEq(null, 'x')) return 0;\n"
+        "  if ( t.ctEq('x', undefined)) return 0;\n"
+        "  if ( t.ctEq(42, 42)) return 0;\n"
+        "  if (t.normalizeRecoveryCode('ABCD-EFGH-IJKL') !== 'ABCDEFGHIJKL') return 0;\n"
+        "  if (t.normalizeRecoveryCode('abcdefghijkl')   !== 'ABCDEFGHIJKL') return 0;\n"
+        "  if (t.normalizeRecoveryCode('  abcd efgh ijkl  ') !== 'ABCDEFGHIJKL') return 0;\n"
+        "  return 1;\n"
+        "}\n"
+        "globalThis.__ct = run();\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__ct"), 1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, totp_recovery_accepts_user_typed_forms)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { totp } from 'hull:web:middleware:totp';\n"
+        "function run() {\n"
+        "  totp._test.reset();\n"
+        "  totp.init({ issuer: 'TestApp', recoveryCodes: 4 });\n"
+        "  const r = totp.enroll('rec-user');\n"
+        "  const secret = totp._test.base32Decode(r.secretBase32);\n"
+        "  const code = totp._test.totpAtStep(secret,\n"
+        "    totp._test.currentStep(), 6);\n"
+        "  if (!totp.confirm('rec-user', code)) return 0;\n"
+        "  const rc = r.recoveryCodes[0];\n"
+        "  const plain = rc.replace(/-/g, '');\n"
+        "  if (!totp.verify('rec-user', plain)[0]) return 0;\n"
+        "  if (!totp.verify('rec-user', r.recoveryCodes[1].toLowerCase())[0]) return 0;\n"
+        "  if (!totp.verify('rec-user', '  ' + r.recoveryCodes[2] + '  ')[0]) return 0;\n"
+        "  return 1;\n"
+        "}\n"
+        "globalThis.__rec_forms = run();\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__rec_forms"), 1);
+
+    cleanup_js_caps();
+}
+
 UTEST(js_stdlib, totp_encryption_round_trip)
 {
     init_js_with_caps();

@@ -173,6 +173,16 @@ function totpAtStep(secretBytes, step, digits) {
 // is negligible at our scale. Returns plaintext + PBKDF2 hashes.
 const RECOVERY_ALPHA = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";  // 31 chars
 
+// Strip everything outside the recovery alphabet (hyphens, spaces,
+// accidental punctuation) and uppercase. Stored hashes are computed
+// against the normalized form so users can paste back "ABCD-EFGH-IJKL",
+// "ABCDEFGHIJKL", or "abcd efgh ijkl" interchangeably without a UX
+// lockout trap. Matches the Lua side's normalize_recovery_code.
+function normalizeRecoveryCode(s) {
+    if (typeof s !== "string") return "";
+    return s.toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
 function generateRecoveryCodes(n) {
     const codes = new Array(n);
     const hashes = new Array(n);
@@ -180,17 +190,35 @@ function generateRecoveryCodes(n) {
         const raw = new Uint8Array(crypto.random(12));
         const parts = new Array(12);
         for (let j = 0; j < 12; j++) parts[j] = RECOVERY_ALPHA[raw[j] % 31];
-        const code = parts[0] + parts[1] + parts[2] + parts[3] + "-"
-                   + parts[4] + parts[5] + parts[6] + parts[7] + "-"
-                   + parts[8] + parts[9] + parts[10] + parts[11];
-        codes[i]  = code;
-        hashes[i] = crypto.hashPassword(code);
+        const plain = parts.join("");  // unhyphenated, used for hash
+        const display = parts[0] + parts[1] + parts[2] + parts[3] + "-"
+                      + parts[4] + parts[5] + parts[6] + parts[7] + "-"
+                      + parts[8] + parts[9] + parts[10] + parts[11];
+        codes[i]  = display;
+        hashes[i] = crypto.hashPassword(plain);
     }
     return [codes, hashes];
 }
 
 function verifyRecoveryCode(code, hash) {
-    return crypto.verifyPassword(code, hash);
+    return crypto.verifyPassword(normalizeRecoveryCode(code), hash);
+}
+
+// Constant-time string equality. TOTP code matching where both
+// sides are zero-padded numeric strings of the same length; JS's
+// native `===` short-circuits on first code-unit mismatch, a
+// measurable timing leak when an attacker can submit guesses at
+// high rate. RFC 6238 §4 calls this out. Pair with account lockout
+// (hull/web/middleware/auth_lockout, separate module) for defense
+// in depth. Charcode XOR-fold mirrors the Lua side's ct_eq.
+function ctEq(a, b) {
+    if (typeof a !== "string" || typeof b !== "string") return false;
+    if (a.length !== b.length) return false;
+    let diff = 0;
+    for (let i = 0; i < a.length; i++) {
+        diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+    }
+    return diff === 0;
 }
 
 // At-rest encryption: nonce(24) || ct.  Same wire format as the Lua
@@ -367,7 +395,7 @@ function confirm(userId, code) {
     const nowStep = currentStep();
     for (let offset = -_state.window; offset <= _state.window; offset++) {
         const step = nowStep + offset;
-        if (totpAtStep(row.secret, step, row.digits) === code) {
+        if (ctEq(totpAtStep(row.secret, step, row.digits), code)) {
             db.batch(() => {
                 db.exec(
                     "UPDATE _hull_totp SET confirmed = 1, "
@@ -393,7 +421,7 @@ function verify(userId, code) {
     for (let offset = -_state.window; offset <= _state.window; offset++) {
         const step = nowStep + offset;
         if (step > row.lastUsedStep
-            && totpAtStep(row.secret, step, row.digits) === code) {
+            && ctEq(totpAtStep(row.secret, step, row.digits), code)) {
             if (markStepUsed(userId, step) === 1) return [true, "totp"];
             return [false, null];
         }
@@ -456,6 +484,8 @@ const _test = {
     base32Decode,
     totpAtStep,
     currentStep,
+    ctEq,
+    normalizeRecoveryCode,
     generateRecoveryCodes,
     verifyRecoveryCode,
     encryptSecret,
