@@ -2126,6 +2126,7 @@ make e2e                            # run all E2E tests (examples + build + sand
 | `e2e_install.sh` | `install.sh` dry-run across platform/flavor/prefix; shell-completion syntax + behavior |
 | `e2e_ca_bundle.sh` | Doctor output; real HTTPS handshake to `example.com` via embedded CA bundle (sandbox-active) |
 | `e2e_update.sh` | `hull update --check` against real public repo; full GitHub-API + JSON parse + version compare via embedded CA bundle |
+| `e2e_auth_flows.sh` | Auth flows: register → verify → login → logout → magic-link → password-reset → email-change, with replay/tamper assertions, against `tests/fixtures/auth_flows_{lua,js}` (24 assertions per runtime) |
 
 ## Runtime Sandboxes
 
