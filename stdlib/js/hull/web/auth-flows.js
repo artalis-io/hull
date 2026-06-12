@@ -40,6 +40,14 @@ const _state = {
     userSetEmailVerified:   null,
     onLogin:                null,
     onLogout:               null,
+    // TOTP composition. Off by default; opt in by setting
+    // enableTotp = true plus userTotpEnrolled + totpVerify. See
+    // the Lua module header for the security model.
+    enableTotp:             false,
+    userTotpEnrolled:       null,
+    totpVerify:             null,
+    totpPendingTtl:         300,
+    totpPendingRedirect:    null,
     verifyRedirect:      "/",
     loginRedirect:       "/",
     initialized:         false,
@@ -71,6 +79,9 @@ const ACTIONS = {
     password_reset: "reset",
     magic_link:     "magic",
     email_change:   "email_change",
+    // Pending 2FA token. Multi-use within TTL (allows retry on
+    // typo); burned on a successful code verify.
+    totp_pending:   "totp_pending",
 };
 
 function bytesToHex(s) {
@@ -101,7 +112,11 @@ function issueToken(userId, action, ttl, extra) {
     return body + "." + tag;
 }
 
-function consumeToken(token, expectedAction) {
+// Verify signature + action + expiry WITHOUT marking the token
+// used. Mirrors Lua's parse_token — the TOTP flow uses it
+// directly so the pending token stays usable across retry-on-
+// typo attempts and is burned only on successful code verify.
+function parseToken(token, expectedAction) {
     if (typeof token !== "string" || token === "") return [null, "missing"];
     const dot = token.indexOf(".");
     if (dot < 0) return [null, "malformed"];
@@ -127,14 +142,34 @@ function consumeToken(token, expectedAction) {
     if (typeof env.exp !== "number" || time.now() >= env.exp) {
         return [null, "expired"];
     }
+    return [env, null];
+}
 
+function markTokenUsed(token, exp) {
     const tokenHash = crypto.sha256(token);
     const rc = db.exec(
         "INSERT OR IGNORE INTO _hull_auth_used_tokens "
         + "(token_hash, used_at, expires_at) VALUES (?, ?, ?)",
-        [tokenHash, time.now(), env.exp]);
-    if (rc === 0) return [null, "replayed"];
+        [tokenHash, time.now(), exp]);
+    return rc > 0;
+}
 
+function tokenAlreadyUsed(token) {
+    const tokenHash = crypto.sha256(token);
+    const rows = db.query(
+        "SELECT 1 FROM _hull_auth_used_tokens WHERE token_hash = ? LIMIT 1",
+        [tokenHash]);
+    return rows !== null && rows !== undefined && rows.length > 0;
+}
+
+// Atomic verify + mark-used. Used by every flow except TOTP-
+// pending; two concurrent click-throughs of the same link must
+// not both succeed.
+function consumeToken(token, expectedAction) {
+    const r = parseToken(token, expectedAction);
+    if (r[1]) return [null, r[1]];
+    const env = r[0];
+    if (!markTokenUsed(token, env.exp)) return [null, "replayed"];
     return [env, null];
 }
 
@@ -246,6 +281,42 @@ function handleVerify(req, res) {
     res.redirect(_state.verifyRedirect);
 }
 
+// Minimal HTML form rendered on a magic-link click when 2FA is
+// required and the app hasn't configured `totpPendingRedirect`.
+// Only the pending token is interpolated; its alphabet is fixed
+// (base64url body + hex tag) so no escaping needed.
+function defaultTotpFormHtml(token) {
+    return '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+         + '<title>Two-factor verification</title></head>'
+         + '<body style="font-family:sans-serif;max-width:360px;'
+         + 'margin:4em auto;"><h1>Two-factor verification</h1>'
+         + '<form method="POST" action="' + _state.prefix + '/totp-verify">'
+         + '<input type="hidden" name="token" value="' + token + '">'
+         + '<p><label>Code: <input name="code" autofocus '
+         + 'autocomplete="one-time-code" inputmode="numeric" '
+         + 'pattern="[0-9A-Za-z-]+"></label></p>'
+         + '<button type="submit">Verify</button></form>'
+         + '<p style="color:#666;font-size:smaller">Lost your device? '
+         + 'Enter a recovery code instead.</p></body></html>';
+}
+
+function startTotpPending(req, res, user) {
+    const uid = userId(user);
+    const token = issueToken(uid, ACTIONS.totp_pending,
+                              _state.totpPendingTtl);
+    if (req.method === "POST") {
+        return res.json({
+            ok: true, pending_2fa: true, totp_token: token,
+        });
+    }
+    if (_state.totpPendingRedirect) {
+        const sep = _state.totpPendingRedirect.indexOf("?") >= 0 ? "&" : "?";
+        return res.redirect(_state.totpPendingRedirect
+                             + sep + "token=" + token);
+    }
+    res.html(defaultTotpFormHtml(token));
+}
+
 function handleLogin(req, res) {
     const body = parseBody(req);
     if (!isEmailIsh(body.email) || typeof body.password !== "string") {
@@ -258,6 +329,9 @@ function handleLogin(req, res) {
     }
     if (_state.requireVerifiedEmail && !user.email_verified) {
         return res.status(403).json({ error: "email not verified" });
+    }
+    if (_state.enableTotp && _state.userTotpEnrolled(userId(user))) {
+        return startTotpPending(req, res, user);
     }
     _state.onLogin(req, res, user);
 }
@@ -297,6 +371,41 @@ function handleMagicLinkConsume(req, res) {
         _state.userSetEmailVerified(userId(user), true);
         user.email_verified = true;
     }
+    gcExpired();
+    if (_state.enableTotp && _state.userTotpEnrolled(userId(user))) {
+        return startTotpPending(req, res, user);
+    }
+    _state.onLogin(req, res, user);
+}
+
+// POST /auth/totp-verify { token, code } — second factor.
+// Apps SHOULD rate-limit this route (e.g. ratelimit.middleware
+// keyed on the body's token field) to bound brute-force on the
+// 6-digit code space. The pending token is multi-use within TTL
+// (lets users retry typos) and only burned on a successful code
+// verify.
+function handleTotpVerify(req, res) {
+    if (!_state.enableTotp) {
+        return res.status(404).json({ error: "totp not enabled" });
+    }
+    const body = parseBody(req);
+    if (typeof body.token !== "string" || typeof body.code !== "string") {
+        return res.status(400).json({ error: "missing token or code" });
+    }
+    const r = parseToken(body.token, ACTIONS.totp_pending);
+    if (!r[0]) {
+        return res.status(400).json({
+            error: "totp failed: " + (r[1] || "?") });
+    }
+    if (tokenAlreadyUsed(body.token)) {
+        return res.status(400).json({ error: "totp token already used" });
+    }
+    const env = r[0];
+    const user = _state.userGet(env.sub);
+    if (!user) return res.status(400).json({ error: "totp failed" });
+    const ok = _state.totpVerify(user, body.code);
+    if (!ok) return res.status(401).json({ error: "invalid code" });
+    markTokenUsed(body.token, env.exp);
     gcExpired();
     _state.onLogin(req, res, user);
 }
@@ -398,6 +507,9 @@ function registerRoutes(app) {
     app.post(p + "/password-reset/confirm",   handlePasswordResetConfirm);
     app.post(p + "/email-change",             handleEmailChange);
     app.get (p + "/email-change/confirm",     handleEmailChangeConfirm);
+    // Registered unconditionally; the handler returns 404 when
+    // enableTotp is false (clearer than a route-level 404).
+    app.post(p + "/totp-verify",              handleTotpVerify);
 }
 
 // ── Public API ─────────────────────────────────────────────────────
@@ -430,6 +542,16 @@ function init(opts) {
     if (typeof opts.onLogin !== "function") {
         throw new Error("auth-flows.init: onLogin(req, res, user) required");
     }
+    if (opts.enableTotp) {
+        if (typeof opts.userTotpEnrolled !== "function") {
+            throw new Error("auth-flows.init: userTotpEnrolled(userId) -> "
+                + "boolean required when enableTotp = true");
+        }
+        if (typeof opts.totpVerify !== "function") {
+            throw new Error("auth-flows.init: totpVerify(user, code) -> "
+                + "boolean required when enableTotp = true");
+        }
+    }
 
     _state.stateSecretHex = bytesToHex(opts.stateSecret);
     _state.emailSend      = opts.emailSend;
@@ -442,6 +564,12 @@ function init(opts) {
     _state.userSetEmailVerified = opts.userSetEmailVerified;
     _state.onLogin              = opts.onLogin;
     _state.onLogout             = opts.onLogout || null;
+    _state.enableTotp           = opts.enableTotp === true;
+    _state.userTotpEnrolled     = opts.userTotpEnrolled || null;
+    _state.totpVerify           = opts.totpVerify || null;
+    _state.totpPendingTtl       = opts.totpPendingTtl || _state.totpPendingTtl;
+    _state.totpPendingRedirect  = opts.totpPendingRedirect
+                                  || _state.totpPendingRedirect;
     _state.verifyTtl       = opts.verifyTtl       || _state.verifyTtl;
     _state.resetTtl        = opts.resetTtl        || _state.resetTtl;
     _state.magicLinkTtl    = opts.magicLinkTtl    || _state.magicLinkTtl;
@@ -514,6 +642,9 @@ function sendMagicLink(email, magicUrlPrefix) {
 const _test = {
     issueToken,
     consumeToken,
+    parseToken,
+    markTokenUsed,
+    tokenAlreadyUsed,
     renderTemplate,
     gcExpired,
     isEmailIsh,
@@ -531,6 +662,10 @@ const _test = {
         _state.userSetEmailVerified = null;
         _state.onLogin              = null;
         _state.onLogout             = null;
+        _state.enableTotp           = false;
+        _state.userTotpEnrolled     = null;
+        _state.totpVerify           = null;
+        _state.totpPendingRedirect  = null;
         _state.initialized          = false;
     },
 };

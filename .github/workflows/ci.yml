@@ -104,6 +104,10 @@ jobs:
         timeout-minutes: 3
         run: make e2e-auth-flows
 
+      - name: Auth flows + TOTP 2FA composition E2E tests
+        timeout-minutes: 3
+        run: make e2e-auth-flows-2fa
+
       - name: Sandbox tests
         timeout-minutes: 2
         run: make e2e-sandbox

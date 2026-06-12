@@ -133,6 +133,27 @@ local _state = {
     -- Session hooks.
     on_login              = nil,
     on_logout             = nil,
+    -- TOTP composition. Default off; opt in by setting enable_totp
+    -- and providing user_totp_enrolled + totp_verify. With it on,
+    -- a successful password login OR magic-link click for an
+    -- enrolled user does NOT immediately invoke on_login. Instead
+    -- the module issues a short-TTL "pending 2FA" token and waits
+    -- for a follow-up POST /auth/totp-verify before resuming the
+    -- normal on_login(req, res, user) handoff.
+    enable_totp           = false,
+    user_totp_enrolled    = nil,
+    totp_verify           = nil,
+    totp_pending_ttl      = 300,   -- 5 minutes; tight enough that
+                                   -- a stolen pending cookie can't
+                                   -- be brute-forced in practice
+                                   -- (apps SHOULD also rate-limit
+                                   -- /totp-verify; see the route
+                                   -- docstring).
+    totp_pending_redirect = nil,   -- nil = render default HTML form
+                                   -- on magic-link consume; set to
+                                   -- a path to redirect there with
+                                   -- ?token=... appended for a
+                                   -- custom 2FA UI.
     -- Optional post-action redirects.
     verify_redirect       = "/",
     login_redirect        = "/",
@@ -172,6 +193,10 @@ local ACTIONS = {
     password_reset    = "reset",
     magic_link        = "magic",
     email_change      = "email_change",
+    -- Pending 2FA token, issued after a successful first-factor
+    -- check (password or magic-link click). Single-use ON SUCCESS,
+    -- multi-use within TTL until then (lets users retry typos).
+    totp_pending      = "totp_pending",
 }
 
 -- Token = base64url(JSON{user_id, action, exp, nonce, extra...})
@@ -197,15 +222,16 @@ local function issue_token(user_id, action, ttl, extra)
     return body .. "." .. tag
 end
 
--- Verify + consume a token atomically. The atomicity matters
--- because two concurrent click-throughs of the same link must
--- not both succeed.
+-- Verify a token's signature + action + expiry WITHOUT marking
+-- it used. Returns (envelope, nil) or (nil, reason). Reason
+-- strings are intentionally vague at the response layer so an
+-- attacker can't tell "tampered" from "expired".
 --
--- Returns (envelope, nil) on success or (nil, reason) on failure.
--- The reason strings are intentionally vague at the response
--- layer so an attacker can't distinguish "tampered" from
--- "expired" from "replayed".
-local function consume_token(token, expected_action)
+-- Most flows wrap this in consume_token below (atomic verify +
+-- mark-used). The TOTP-pending flow uses parse_token directly so
+-- the token stays usable across retry-on-typo attempts and is
+-- only burned on a successful code verify.
+local function parse_token(token, expected_action)
     if type(token) ~= "string" or token == "" then
         return nil, "missing"
     end
@@ -233,20 +259,39 @@ local function consume_token(token, expected_action)
     if type(env.exp) ~= "number" or time.now() >= env.exp then
         return nil, "expired"
     end
+    return env, nil
+end
 
-    -- Single-use enforcement. Insert the token hash before
-    -- proceeding; PK conflict means "already consumed". sha256 of
-    -- the full token string (body + "." + tag) gives a stable
-    -- fixed-width key.
+-- Insert this token into the used set. Returns true if the
+-- insert won (first use) and false if a row already existed
+-- (replay / second consumer in a race).
+local function mark_token_used(token, exp)
     local token_hash = crypto.sha256(token)
-    -- INSERT OR IGNORE returns rowcount 0 on conflict — that's our
-    -- replay signal.
     local rc = db.exec(
         "INSERT OR IGNORE INTO _hull_auth_used_tokens "
         .. "(token_hash, used_at, expires_at) VALUES (?, ?, ?)",
-        { token_hash, time.now(), env.exp })
-    if rc == 0 then return nil, "replayed" end
+        { token_hash, time.now(), exp })
+    return rc > 0
+end
 
+local function token_already_used(token)
+    local token_hash = crypto.sha256(token)
+    local rows = db.query(
+        "SELECT 1 FROM _hull_auth_used_tokens WHERE token_hash = ? LIMIT 1",
+        { token_hash })
+    return rows ~= nil and #rows > 0
+end
+
+-- Atomic verify + mark-used. The atomicity matters for the
+-- click-through flows (verify, magic-link, reset, email-change)
+-- because two concurrent clicks of the same link must not both
+-- succeed.
+local function consume_token(token, expected_action)
+    local env, err = parse_token(token, expected_action)
+    if err then return nil, err end
+    if not mark_token_used(token, env.exp) then
+        return nil, "replayed"
+    end
     return env, nil
 end
 
@@ -376,6 +421,50 @@ local function handle_verify(req, res)
     res:redirect(_state.verify_redirect)
 end
 
+-- Build the minimal default HTML form rendered when a magic-link
+-- click lands and 2FA is required but the app hasn't configured a
+-- custom `totp_pending_redirect`. The only interpolated value is
+-- the pending token (HMAC base64url + hex tag — fixed alphabet),
+-- so no escaping concerns; we keep it ugly-but-functional so apps
+-- that care about UX point totp_pending_redirect at their own
+-- page.
+local function default_totp_form_html(token)
+    return '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        .. '<title>Two-factor verification</title></head>'
+        .. '<body style="font-family:sans-serif;max-width:360px;'
+        .. 'margin:4em auto;"><h1>Two-factor verification</h1>'
+        .. '<form method="POST" action="' .. _state.prefix .. '/totp-verify">'
+        .. '<input type="hidden" name="token" value="' .. token .. '">'
+        .. '<p><label>Code: <input name="code" autofocus '
+        .. 'autocomplete="one-time-code" inputmode="numeric" '
+        .. 'pattern="[0-9A-Za-z-]+"></label></p>'
+        .. '<button type="submit">Verify</button></form>'
+        .. '<p style="color:#666;font-size:smaller">Lost your device? '
+        .. 'Enter a recovery code instead.</p></body></html>'
+end
+
+-- Issue a pending-2FA token and respond appropriately for the
+-- channel. POST (JSON login) → JSON; GET (magic-link click) →
+-- HTML form or redirect.
+local function start_totp_pending(req, res, user)
+    local uid = user.id or user.user_id
+    local token = issue_token(uid, ACTIONS.totp_pending,
+                               _state.totp_pending_ttl)
+    if req.method == "POST" then
+        return res:json({
+            ok = true, pending_2fa = true, totp_token = token,
+        })
+    end
+    -- Browser GET (magic-link consume).
+    if _state.totp_pending_redirect then
+        local sep = _state.totp_pending_redirect:find("?", 1, true)
+                    and "&" or "?"
+        return res:redirect(_state.totp_pending_redirect
+                             .. sep .. "token=" .. token)
+    end
+    res:html(default_totp_form_html(token))
+end
+
 local function handle_login(req, res)
     local body = parse_body(req)
     if not is_email_ish(body.email) or type(body.password) ~= "string" then
@@ -388,6 +477,10 @@ local function handle_login(req, res)
     end
     if _state.require_verified_email and not user.email_verified then
         return res:status(403):json({ error = "email not verified" })
+    end
+    if _state.enable_totp
+       and _state.user_totp_enrolled(user.id or user.user_id) then
+        return start_totp_pending(req, res, user)
     end
     _state.on_login(req, res, user)
 end
@@ -442,6 +535,44 @@ local function handle_magic_link_consume(req, res)
         _state.user_set_email_verified(user.id or user.user_id, true)
         user.email_verified = true
     end
+    gc_expired()
+    if _state.enable_totp
+       and _state.user_totp_enrolled(user.id or user.user_id) then
+        return start_totp_pending(req, res, user)
+    end
+    _state.on_login(req, res, user)
+end
+
+-- POST /auth/totp-verify { token, code } — second factor.
+-- The pending token is NOT consumed on a failed code attempt
+-- (apps must rate-limit this route to bound retry; see the
+-- module header for the recommended ratelimit.middleware
+-- snippet). On success it's burned exactly like a single-use
+-- token, then on_login runs.
+local function handle_totp_verify(req, res)
+    if not _state.enable_totp then
+        return res:status(404):json({ error = "totp not enabled" })
+    end
+    local body = parse_body(req)
+    if type(body.token) ~= "string" or type(body.code) ~= "string" then
+        return res:status(400):json({ error = "missing token or code" })
+    end
+    local env, err = parse_token(body.token, ACTIONS.totp_pending)
+    if not env then
+        return res:status(400):json({ error = "totp failed: " .. (err or "?") })
+    end
+    if token_already_used(body.token) then
+        return res:status(400):json({ error = "totp token already used" })
+    end
+    local user = _state.user_get(env.sub)
+    if not user then
+        return res:status(400):json({ error = "totp failed" })
+    end
+    local ok = _state.totp_verify(user, body.code)
+    if not ok then
+        return res:status(401):json({ error = "invalid code" })
+    end
+    mark_token_used(body.token, env.exp)
     gc_expired()
     _state.on_login(req, res, user)
 end
@@ -567,6 +698,10 @@ local function register_routes(app)
     app.post(p .. "/password-reset/confirm",   handle_password_reset_confirm)
     app.post(p .. "/email-change",             handle_email_change)
     app.get (p .. "/email-change/confirm",     handle_email_change_confirm)
+    -- Always registered so the route doesn't 404 with a confusing
+    -- "no such route" when an app forgets enable_totp; the handler
+    -- itself returns 404 with a clear error in that case.
+    app.post(p .. "/totp-verify",              handle_totp_verify)
 end
 
 -- ── Public API ─────────────────────────────────────────────────────
@@ -605,6 +740,16 @@ function M.init(opts)
     if type(opts.on_login) ~= "function" then
         error("auth-flows.init: on_login(req, res, user) required")
     end
+    if opts.enable_totp then
+        if type(opts.user_totp_enrolled) ~= "function" then
+            error("auth-flows.init: user_totp_enrolled(user_id) -> "
+                  .. "boolean required when enable_totp = true")
+        end
+        if type(opts.totp_verify) ~= "function" then
+            error("auth-flows.init: totp_verify(user, code) -> boolean "
+                  .. "required when enable_totp = true")
+        end
+    end
 
     -- crypto.hmac_sha256 takes the key as a hex string; we encode
     -- once at init and reuse the hex form per request.
@@ -623,6 +768,13 @@ function M.init(opts)
     _state.user_set_email_verified = opts.user_set_email_verified
     _state.on_login                = opts.on_login
     _state.on_logout               = opts.on_logout
+    _state.enable_totp             = opts.enable_totp == true
+    _state.user_totp_enrolled      = opts.user_totp_enrolled
+    _state.totp_verify             = opts.totp_verify
+    _state.totp_pending_ttl        = opts.totp_pending_ttl
+                                     or _state.totp_pending_ttl
+    _state.totp_pending_redirect   = opts.totp_pending_redirect
+                                     or _state.totp_pending_redirect
     _state.verify_ttl       = opts.verify_ttl       or _state.verify_ttl
     _state.reset_ttl        = opts.reset_ttl        or _state.reset_ttl
     _state.magic_link_ttl   = opts.magic_link_ttl   or _state.magic_link_ttl
@@ -733,6 +885,9 @@ end
 M._test = {
     issue_token        = issue_token,
     consume_token      = consume_token,
+    parse_token        = parse_token,
+    mark_token_used    = mark_token_used,
+    token_already_used = token_already_used,
     render_template    = render_template,
     gc_expired         = gc_expired,
     is_email_ish       = is_email_ish,
@@ -750,6 +905,10 @@ M._test = {
         _state.user_set_email_verified = nil
         _state.on_login                = nil
         _state.on_logout               = nil
+        _state.enable_totp             = false
+        _state.user_totp_enrolled      = nil
+        _state.totp_verify             = nil
+        _state.totp_pending_redirect   = nil
         _state._initialized            = false
     end,
 }

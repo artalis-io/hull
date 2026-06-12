@@ -253,8 +253,28 @@ end)
 
 -- ── Adding TOTP 2FA on top: ─────────────────────────────────────────
 --
--- auth-flows is intentionally session-agnostic. To layer TOTP on
--- top, the on_login callback sets req.ctx.session.pending_2fa = true
--- if totp.enrolled(user.id) is true, and a separate route hands the
--- user the TOTP-verify form. See examples/totp/ (planned) for the
--- full composition.
+-- auth-flows composes with hull/web/middleware/totp via two
+-- callbacks. With these set, a successful password login or
+-- magic-link click for an enrolled user yields
+--   { ok: true, pending_2fa: true, totp_token: "..." }
+-- (JSON for POST /login, default HTML form for the magic-link GET)
+-- and waits for POST /auth/totp-verify {token, code} before
+-- handing off to on_login.
+--
+--   local totp = require("hull.web.middleware.totp")
+--   totp.init({ issuer = "my-app" })
+--   authflows.init({
+--       ...
+--       enable_totp = true,
+--       user_totp_enrolled = function(uid) return totp.enrolled(uid) end,
+--       -- totp.verify returns (ok, kind) — the second return is
+--       -- discarded by Lua's single-value assignment in auth-flows,
+--       -- so a plain delegate works. From JS the tuple-as-array
+--       -- needs explicit `[0]` unwrapping (see CLAUDE.md).
+--       totp_verify = function(user, code)
+--           return totp.verify(user.id, code)
+--       end,
+--   })
+--
+-- See tests/fixtures/auth_flows_2fa_lua/ for an end-to-end fixture
+-- and tests/e2e_auth_flows_2fa.sh for the wire flow.

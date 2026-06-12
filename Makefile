@@ -2400,6 +2400,9 @@ e2e-totp: $(BUILDDIR)/hull
 e2e-auth-flows: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_auth_flows.sh
 
+e2e-auth-flows-2fa: $(BUILDDIR)/hull
+	RUNTIME=$(RUNTIME) sh tests/e2e_auth_flows_2fa.sh
+
 e2e-sandbox: $(BUILDDIR)/hull
 	sh tests/e2e_sandbox.sh
 

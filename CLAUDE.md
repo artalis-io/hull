@@ -1032,8 +1032,9 @@ cover registration / email-verify / login / password-reset / magic-link
 / email-change. The module owns the auth-internal bookkeeping tables
 (`_hull_auth_used_tokens`, `_hull_auth_pending_email_changes`) but
 does NOT own the users table — the app provides `user_*` callbacks so
-existing user models drop in. 2FA is the app's concern; compose with
-`hull/web/middleware/totp` separately.
+existing user models drop in. Optional TOTP composition wedges a 2FA
+verify step between successful first-factor auth and `on_login` when
+`enable_totp = true` is set (see below).
 
 - `authflows.init(opts)`. Required at app startup. Validates all
   callbacks up front + creates internal tables.
@@ -1059,11 +1060,26 @@ existing user models drop in. 2FA is the app's concern; compose with
   - `opts.verify_ttl` (86400s), `opts.reset_ttl` (3600s),
     `opts.magic_link_ttl` (600s), `opts.email_change_ttl` (86400s).
   - `opts.prefix` (default `"/auth"`).
-- `authflows.routes(app)`. Mounts the 10 routes under `prefix`:
+  - `opts.enable_totp` (default `false`). Opt in to TOTP-as-second-
+    factor on successful password login OR magic-link click. Requires
+    `opts.user_totp_enrolled(user_id) -> boolean` and
+    `opts.totp_verify(user, code) -> boolean`. Apps typically delegate
+    to `hull/web/middleware/totp` from these two callbacks; the
+    recovery-code path flows transparently because `totp.verify`
+    accepts both 6-digit and recovery codes.
+  - `opts.totp_pending_ttl` (default `300`). Lifetime of the pending-
+    2FA token issued between first-factor success and `/totp-verify`.
+  - `opts.totp_pending_redirect`. When set, magic-link clicks that
+    require 2FA redirect to `<redirect>?token=<totp_token>` instead
+    of rendering the module's default minimal HTML form. POST-based
+    `/login` always responds with JSON
+    `{ ok: true, pending_2fa: true, totp_token: "…" }`.
+- `authflows.routes(app)`. Mounts the routes under `prefix`:
   POST `/register`, GET `/verify`, POST `/login`, POST `/logout`,
   POST `/magic-link`, GET `/magic-link/consume`,
   POST `/password-reset/request`, POST `/password-reset/confirm`,
-  POST `/email-change`, GET `/email-change/confirm`.
+  POST `/email-change`, GET `/email-change/confirm`,
+  POST `/totp-verify` (404s when `enable_totp` is off).
 - `authflows.send_verify_email(user, url_prefix)`,
   `authflows.send_password_reset(email, url_prefix)`,
   `authflows.send_magic_link(email, url_prefix)`. Standalone helpers
@@ -1072,7 +1088,12 @@ existing user models drop in. 2FA is the app's concern; compose with
   Single-use enforced via `_hull_auth_used_tokens` (sha256 of full
   token as PK, atomic INSERT OR IGNORE → 0 rowcount = replay).
 - JS API: camelCase keys (`stateSecret`, `emailSend`, `userFindByEmail`,
-  `onLogin`, `magicLinkAutoSignup`, `requireVerifiedEmail`).
+  `onLogin`, `magicLinkAutoSignup`, `requireVerifiedEmail`, `enableTotp`,
+  `userTotpEnrolled`, `totpVerify`, `totpPendingTtl`, `totpPendingRedirect`).
+  Note: when wiring `totpVerify` from JS, the `totp.verify` return is
+  `[ok, kind]` (a tuple-as-array — truthy regardless of `ok`) so the
+  wrapper must unwrap explicitly: `totpVerify: (user, code) =>
+  totp.verify(user.id, code)[0]`.
 - Email-change flow re-verifies on the NEW address — old email stays
   active until the user clicks the link sent to the new one.
 
@@ -2127,6 +2148,7 @@ make e2e                            # run all E2E tests (examples + build + sand
 | `e2e_ca_bundle.sh` | Doctor output; real HTTPS handshake to `example.com` via embedded CA bundle (sandbox-active) |
 | `e2e_update.sh` | `hull update --check` against real public repo; full GitHub-API + JSON parse + version compare via embedded CA bundle |
 | `e2e_auth_flows.sh` | Auth flows: register → verify → login → logout → magic-link → password-reset → email-change, with replay/tamper assertions, against `tests/fixtures/auth_flows_{lua,js}` (24 assertions per runtime) |
+| `e2e_auth_flows_2fa.sh` | Auth flows + TOTP composition: enroll → confirm → login (returns `pending_2fa` + `totp_token`) → wrong-code retry → right-code completes → totp_token single-use-on-success → recovery code path → magic-link with 2FA rendering default form, against `tests/fixtures/auth_flows_2fa_{lua,js}` (15 assertions per runtime) |
 
 ## Runtime Sandboxes
 
