@@ -19,7 +19,11 @@
  *   totp.verifyWithKind(userId, code) -> [ok, "totp" | "recovery" | null]
  *   totp.disable(userId)
  *   totp.enrolled(userId)      -> bool
- *   totp.middleware({ redirectPath, sessionKey, skipPaths })
+ *
+ * Login-time 2FA gating happens via hull/web/auth-flows (the
+ * authFlows.init `enableTotp / userTotpEnrolled / totpVerify`
+ * callbacks). There is no `pending_2fa` middleware here; the
+ * auth-flows envelope path is the single supported way.
  */
 
 import { crypto } from "hull:crypto";
@@ -483,23 +487,13 @@ function enrolled(userId) {
     return rows && rows.length > 0 && rows[0].confirmed === 1;
 }
 
-function middleware(opts) {
-    checkInitialized();
-    opts = opts || {};
-    const redirectPath = opts.redirectPath || "/2fa";
-    const sessionKey   = opts.sessionKey   || "pending_2fa";
-    const skipPaths    = opts.skipPaths    || ["/2fa", "/logout"];
-    const skip = {};
-    for (let i = 0; i < skipPaths.length; i++) skip[skipPaths[i]] = true;
-
-    return (req, res) => {
-        if (skip[req.path]) return 0;
-        const sess = req.ctx && req.ctx.session;
-        if (!sess || !sess[sessionKey]) return 0;
-        res.redirect(redirectPath);
-        return 1;
-    };
-}
+// (totp.middleware was a parallel pending-2FA gate that required apps
+// to create a session BEFORE the 2FA step, then flip a flag on it.
+// It overlapped with hull/web/auth-flows' totp_pending envelope, which
+// defers session creation until after 2FA succeeds. The two could not
+// interoperate. Standardized on the auth-flows envelope; apps wire
+// TOTP through authFlows.init's `enableTotp / userTotpEnrolled /
+// totpVerify` callbacks and let it own the /2fa form + verify route.)
 
 const _test = {
     base32Encode,
@@ -525,5 +519,5 @@ const _test = {
     },
 };
 
-const totp = { init, enroll, confirm, verify, verifyWithKind, disable, enrolled, middleware, _test };
+const totp = { init, enroll, confirm, verify, verifyWithKind, disable, enrolled, _test };
 export { totp };

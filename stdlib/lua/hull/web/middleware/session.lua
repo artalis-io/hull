@@ -291,7 +291,7 @@ end
 -- Sensible defaults for the cookie helper used by login_handler /
 -- logout_handler. Apps override via the opts table.
 local DEFAULT_LOGIN_HANDLER_OPTS = {
-    name        = "session",
+    name        = "hull_session",
     cookie_opts = { path = "/", httponly = true, samesite = "Lax" },
 }
 
@@ -303,7 +303,8 @@ local DEFAULT_LOGIN_HANDLER_OPTS = {
 --
 -- @tparam table cookie_mod  hull.web.cookie module reference.
 -- @tparam[opt] table opts
---   * `name`        — cookie name (default "session").
+--   * `name`        — cookie name (default "hull_session", matching
+--                     hull/web/middleware/auth's session_middleware).
 --   * `cookie_opts` — extra opts forwarded to cookie.serialize
 --                     (default { path="/", httponly=true, samesite="Lax" }).
 --   * `extract_data(user)` — fields to embed in the session row
@@ -316,6 +317,20 @@ local DEFAULT_LOGIN_HANDLER_OPTS = {
 --                     deliberately tracks pre- and post-login
 --                     state in one session).
 -- @treturn function  on_login compatible with auth-flows + oauth.
+--
+-- Additional opts (audit + new-device, shared across all login sources):
+--   * `audit_log`      — module ref (e.g. require("hull.web.middleware.audit-log")).
+--                        When set, records a login event after the session
+--                        is rotated/created. Off by default.
+--   * `audit_kind`     — event kind string (default "login").
+--   * `audit_metadata(user, ctx)` — table emitted as the event metadata.
+--                        Default derives `{ factors = ctx.factors }` (auth-flows)
+--                        or `{ factors = "oauth:" .. ctx.provider }` (oauth)
+--                        or `{ factors = "unknown" }` (no ctx).
+--   * `on_new_device(req, res, user)` — called before audit_log.record when
+--                        audit_log.is_new_device(user_id, req) returns true.
+--                        Requires audit_log. Wrapped in pcall so callback
+--                        bugs cannot fail the login.
 function session.login_handler(cookie_mod, opts)
     if not _initialized then
         error("session.login_handler: call session.init() first")
@@ -334,8 +349,24 @@ function session.login_handler(cookie_mod, opts)
     local respond = opts.respond or function(res, user, _sid)
         res:json({ ok = true, user_id = user.id, email = user.email })
     end
+    local audit_log    = opts.audit_log
+    local audit_kind   = opts.audit_kind or "login"
+    local on_new_dev   = opts.on_new_device
+    local audit_meta   = opts.audit_metadata or function(_user, ctx)
+        if type(ctx) == "table" then
+            if type(ctx.factors) == "string" then
+                return { factors = ctx.factors }
+            elseif type(ctx.provider) == "string" then
+                return { factors = "oauth:" .. ctx.provider }
+            end
+        end
+        return { factors = "unknown" }
+    end
 
-    return function(req, res, user)
+    return function(req, res, user, ctx)
+        if type(user) ~= "table" or user.id == nil or user.id == "" then
+            error("session.login_handler: user.id is required")
+        end
         local data = extract_data(user) or {}
         local sid
         if rotate then
@@ -351,6 +382,19 @@ function session.login_handler(cookie_mod, opts)
             sid = session.create(data, { req = req })
         end
         res:header("Set-Cookie", cookie_mod.serialize(name, sid, cookie_opts))
+
+        -- New-device + audit emission happen AFTER the session row exists
+        -- so the new-device check sees prior history (not the row we just
+        -- created), and the audit row carries the canonical session_id.
+        if audit_log then
+            if on_new_dev then
+                local ok, is_new = pcall(audit_log.is_new_device, user.id, req)
+                if ok and is_new then pcall(on_new_dev, req, res, user) end
+            end
+            pcall(audit_log.record, user.id, audit_kind, req,
+                  { session_id = sid, metadata = audit_meta(user, ctx) })
+        end
+
         respond(res, user, sid)
     end
 end

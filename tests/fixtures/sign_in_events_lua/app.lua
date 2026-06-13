@@ -72,29 +72,25 @@ authflows.init({
     user_set_email_verified = function(id, v)
         users_by_id[id].email_verified = v
     end,
-    on_login = function(req, res, user)
-        local sid = session.create(
-            { user_id = user.id, email = user.email },
-            { req = req })
-        res:header("Set-Cookie", cookie.serialize("session", sid,
-            { path = "/", httponly = true, samesite = "Lax" }))
-        res:json({ ok = true, user_id = user.id, email = user.email })
-    end,
-    on_logout = function(req, res)
-        local cookies = cookie.parse(req.headers.cookie or "")
-        if cookies.session then session.destroy(cookies.session) end
-        res:header("Set-Cookie", cookie.clear("session", { path = "/" }))
-        res:json({ ok = true })
-    end,
-    -- Sign-in events on. Wire the callbacks.
+    -- Canonical wiring: session.login_handler owns the audit row and
+    -- the new-device hook. Same line works for OAuth via oauth.init's
+    -- on_login. Cookie name is "session" here for fixture continuity
+    -- (the stdlib default is "hull_session").
+    on_login  = session.login_handler(cookie, {
+        name = "session",
+        cookie_opts = { path = "/", httponly = true, samesite = "Lax" },
+        audit_log = audit_log,
+        on_new_device = function(_req, _res, user)
+            new_device_alerts[#new_device_alerts + 1] = {
+                user_id = user.id, email = user.email,
+            }
+        end,
+    }),
+    on_logout = session.logout_handler(cookie, {
+        name = "session",
+    }),
+    -- Flow-completion audit (password_reset_completed, email_change_*).
     sign_in_log = true,
-    on_new_device = function(_req, _res, user)
-        -- Don't call os.time() — `os` is sandboxed out. Timestamp
-        -- isn't needed for the test anyway.
-        new_device_alerts[#new_device_alerts + 1] = {
-            user_id = user.id, email = user.email,
-        }
-    end,
     on_password_reset = function(_req, _res, user)
         -- Recommended pattern: revoke all sessions on reset.
         session.destroy_all(user.id)

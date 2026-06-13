@@ -34,7 +34,7 @@ function parseCookieHeader(req) {
 /**
  * Session-based authentication middleware.
  *
- * On match, populates `req.ctx.sessionId` and `req.ctx.session` (the
+ * On match, populates `req.ctx.session_id` and `req.ctx.session` (the
  * session data object). On miss:
  *   - sends `401 {error}` (default), OR
  *   - redirects to `opts.loginPath` (302), OR
@@ -96,9 +96,12 @@ function sessionMiddleware(opts) {
             return 1;
         }
 
-        // Attach session data to request context for downstream handlers
+        // Attach session data to request context for downstream handlers.
+        // Use the canonical snake_case keys so the same handler code works
+        // on Lua and JS, and so session.loginHandler's rotate path can read
+        // req.ctx.session_id without re-parsing the cookie.
         if (!req.ctx) req.ctx = {};
-        req.ctx.sessionId = sessionId;
+        req.ctx.session_id = sessionId;
         req.ctx.session = data;
 
         return 0;
@@ -158,10 +161,11 @@ function jwtMiddleware(opts) {
             return 1;
         }
 
-        // Attach decoded payload to request context
+        // Attach decoded payload to request context. Use req.ctx.user
+        // (matching Lua's jwt_middleware) so handler code reads the same
+        // key on both runtimes.
         if (!req.ctx) req.ctx = {};
-        req.ctx.token = token;
-        req.ctx.claims = result[0];
+        req.ctx.user = result[0];
 
         return 0;
     };

@@ -41,7 +41,7 @@ app.use("*", "/*", (req, _res) => {
         const data = session.load(sessionId);
         if (data) {
             if (!req.ctx) req.ctx = {};
-            req.ctx.sessionId = sessionId;
+            req.ctx.session_id = sessionId;
             req.ctx.session = data;
         }
     }

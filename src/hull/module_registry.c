@@ -312,13 +312,13 @@ static const HlModuleSpec REGISTRY[] = {
          * resolver admits them via the dep chain so they don't
          * need re-declaration here.
          *
-         * hull/web/pwned + hull/web/middleware/audit-log are
-         * statically imported in the JS module (QuickJS doesn't
-         * reliably support dynamic import()). They're listed here
-         * so the resolver admits them for every app declaring
-         * auth-flows, even those that don't enable
-         * check_pwned_passwords / sign_in_log respectively. The
-         * HIBP host (api.pwnedpasswords.com) is still gated at
+         * hull/web/pwned + hull/web/middleware/audit-log are now
+         * eager top-level requires on both runtimes (Lua dropped
+         * its pcall(require, ...) pattern so the transitive
+         * declaration footprint is symmetric — QuickJS can't
+         * dynamic-import). The check_pwned_passwords / sign_in_log
+         * opts still gate whether those modules' side-effects are
+         * triggered at request time. The HIBP host is gated at
          * call time via manifest.hosts; audit-log only writes
          * to the local DB. */
         .deps = {"hull/http-server", "hull/db",

@@ -89,22 +89,29 @@ function extractUa(req) {
     return req && req.headers && req.headers["user-agent"] || null;
 }
 
+// Binary-safe byte→hex. Local so audit-log doesn't depend on
+// auth-flows. Mirrors the same workaround used in auth-flows and
+// oauth: crypto.hexEncode for a string input goes through
+// JS_ToCStringLen which UTF-8-inflates any byte >= 0x80, so a raw
+// SHA-256 digest cannot be hexed via the cap helper without first
+// running it through this mask. Without this, fingerprints are
+// stable per-runtime but NOT byte-identical to Lua's, which means
+// a Lua→JS migration of the same DB would mark every existing user
+// as a new device on first request.
+function bytesToHex(s) {
+    let h = "";
+    for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i) & 0xff;
+        h += (c < 16 ? "0" : "") + c.toString(16);
+    }
+    return h;
+}
+
 function fingerprint(req) {
     const ua  = extractUa(req);
     const ip  = extractIp(req);
     const key = normalizeUa(ua) + "|" + ipPrefix(ip);
-    // `crypto.hexEncode` for a JS string goes through
-    // `JS_ToCStringLen` which UTF-8-inflates any byte >= 0x80.
-    // `crypto.sha256` returns a binary-string whose bytes range
-    // over the full 0..255, so the hex output is NOT byte-
-    // identical to a raw SHA-256 hexdigest. That's fine here —
-    // we just need a stable, deterministic per-runtime
-    // fingerprint, not cryptographic strength. Don't "fix" this
-    // unless you also switch to passing the sha256 output as
-    // an ArrayBuffer (Uint8Array.from(...).buffer); see the
-    // pwned/auth-flows local bytesToHex helpers for the
-    // binary-safe pattern when that matters.
-    return crypto.hexEncode(crypto.sha256(key)).substring(0, 16);
+    return bytesToHex(crypto.sha256(key)).substring(0, 16);
 }
 
 function record(userId, kind, req, opts) {

@@ -138,12 +138,12 @@ authflows.routes(app)
 -- user. Real apps would use hull/web/middleware/auth here.
 app.use("*", "/*", function(req, _res)
     local cookies = cookie.parse(req.headers.cookie or "")
-    if cookies.session then
-        local data = session.load(cookies.session)
+    if cookies.hull_session then
+        local data = session.load(cookies.hull_session)
         if data then
             req.ctx = req.ctx or {}
             req.ctx.session    = data
-            req.ctx.session_id = cookies.session
+            req.ctx.session_id = cookies.hull_session
             req.ctx.user_id    = data.user_id
         end
     end

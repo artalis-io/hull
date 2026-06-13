@@ -62,24 +62,20 @@ authFlows.init({
         usersByEmail[email] = u;
     },
     userSetEmailVerified: (id, v) => { usersById[id].email_verified = v; },
-    onLogin: (req, res, user) => {
-        const sid = session.create(
-            { user_id: user.id, email: user.email },
-            { req });
-        res.header("Set-Cookie", cookie.serialize("session", sid,
-            { path: "/", httpOnly: true, sameSite: "Lax" }));
-        res.json({ ok: true, user_id: user.id, email: user.email });
-    },
-    onLogout: (req, res) => {
-        const cookies = cookie.parse(req.headers.cookie || "");
-        if (cookies.session) session.destroy(cookies.session);
-        res.header("Set-Cookie", cookie.clear("session", { path: "/" }));
-        res.json({ ok: true });
-    },
+    // Canonical wiring: session.loginHandler owns the audit row and
+    // the new-device hook. Same line works for OAuth via oauth.init's
+    // onLogin. Cookie name is "session" here for fixture continuity
+    // (the stdlib default is "hull_session").
+    onLogin: session.loginHandler(cookie, {
+        name: "session",
+        cookieOpts: { path: "/", httpOnly: true, sameSite: "Lax" },
+        auditLog: auditLog,
+        onNewDevice: (_req, _res, user) => {
+            newDeviceAlerts.push({ user_id: user.id, email: user.email });
+        },
+    }),
+    onLogout: session.logoutHandler(cookie, { name: "session" }),
     signInLog: true,
-    onNewDevice: (_req, _res, user) => {
-        newDeviceAlerts.push({ user_id: user.id, email: user.email });
-    },
     onPasswordReset: (_req, _res, user) => {
         session.destroyAll(user.id);
     },

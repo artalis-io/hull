@@ -279,7 +279,7 @@ function rotate(oldSid, data, opts) {
 }
 
 const DEFAULT_LOGIN_HANDLER_OPTS = {
-    name:       "session",
+    name:       "hull_session",
     cookieOpts: { path: "/", httpOnly: true, sameSite: "Lax" },
 };
 
@@ -292,11 +292,26 @@ const DEFAULT_LOGIN_HANDLER_OPTS = {
  *
  * @param {Object} cookieMod  hull:web:cookie module reference.
  * @param {Object} [opts]
- *   - name        cookie name (default "session")
+ *   - name        cookie name (default "hull_session", matching
+ *                 hull:web:middleware:auth's sessionMiddleware)
  *   - cookieOpts  forwarded to cookie.serialize
  *   - extractData(user) -> obj for session.create
  *   - respond(res, user, sid) -> write response body
  *   - rotate      bool, rotate any prior session (default true)
+ *
+ * Audit + new-device opts (shared across all login sources):
+ *   - auditLog          module ref (e.g. `import * as auditLog from
+ *                       "hull:web:middleware:audit-log"`). When set,
+ *                       records a login event after the session is set.
+ *   - auditKind         event kind string (default "login").
+ *   - auditMetadata(user, ctx) -> object emitted as event metadata.
+ *                       Default derives `{ factors: ctx.factors }` (auth-flows)
+ *                       or `{ factors: "oauth:" + ctx.provider }` (oauth)
+ *                       or `{ factors: "unknown" }` (no ctx).
+ *   - onNewDevice(req, res, user) — called before auditLog.record when
+ *                       auditLog.isNewDevice(userId, req) returns true.
+ *                       Requires auditLog. Wrapped in try/catch so callback
+ *                       bugs cannot fail the login.
  */
 function loginHandler(cookieMod, opts) {
     if (!initialized) {
@@ -313,8 +328,21 @@ function loginHandler(cookieMod, opts) {
         ({ user_id: user.id, email: user.email }));
     const respond = opts.respond || ((res, user) =>
         res.json({ ok: true, user_id: user.id, email: user.email }));
+    const auditLog    = opts.auditLog || null;
+    const auditKind   = opts.auditKind || "login";
+    const onNewDev    = opts.onNewDevice || null;
+    const auditMeta   = opts.auditMetadata || ((_user, ctx) => {
+        if (ctx && typeof ctx === "object") {
+            if (typeof ctx.factors === "string") return { factors: ctx.factors };
+            if (typeof ctx.provider === "string")
+                return { factors: "oauth:" + ctx.provider };
+        }
+        return { factors: "unknown" };
+    });
 
-    return function (req, res, user) {
+    return function (req, res, user, ctx) {
+        if (!user || typeof user !== "object" || !user.id || user.id === "")
+            throw new Error("session.loginHandler: user.id is required");
         const data = extractData(user) || {};
         let sid;
         if (rotateOn) {
@@ -330,6 +358,23 @@ function loginHandler(cookieMod, opts) {
             sid = create(data, { req });
         }
         res.header("Set-Cookie", cookieMod.serialize(name, sid, cookieOpts));
+
+        // New-device + audit emission happen AFTER the session row exists
+        // so the new-device check sees prior history (not the row we just
+        // created), and the audit row carries the canonical session_id.
+        if (auditLog) {
+            if (onNewDev) {
+                try {
+                    if (auditLog.isNewDevice(user.id, req))
+                        try { onNewDev(req, res, user); } catch (_e) {}
+                } catch (_e) {}
+            }
+            try {
+                auditLog.record(user.id, auditKind, req,
+                    { session_id: sid, metadata: auditMeta(user, ctx) });
+            } catch (_e) {}
+        }
+
         respond(res, user, sid);
     };
 }

@@ -58,14 +58,17 @@ const _state = {
     // api.pwnedpasswords.com to manifest.hosts.
     checkPwnedPasswords:    false,
     pwnedEndpoint:          null,
-    // Sign-in events (opt-in). When signInLog = true, auth-flows
-    // records every login / password reset / email change via
-    // hull/web/middleware/audit-log. Pair with onNewDevice for
-    // the "you signed in from a new device" email; pair with
-    // onPasswordReset to revoke sessions (typically
+    // Flow-completion audit events (opt-in). When signInLog = true,
+    // auth-flows records password_reset_completed / email_change_revoked
+    // / email_changed via hull/web/middleware/audit-log. Pair
+    // with onPasswordReset to revoke sessions (typically
     // `(req, res, user) => session.destroyAll(user.id)`).
+    //
+    // LOGIN events and new-device detection are NOT emitted here
+    // anymore — they move to hull/web/middleware/session's
+    // loginHandler factory (auditLog + onNewDevice opts), so a
+    // single seam covers both password and OAuth logins.
     signInLog:              false,
-    onNewDevice:            null,
     onPasswordReset:        null,
     verifyRedirect:      "/",
     loginRedirect:       "/",
@@ -279,18 +282,13 @@ function emitEvent(uid, kind, req, opts) {
     catch (_e) { /* don't let the log break the login */ }
 }
 
+// Hand off to the app-supplied onLogin (typically
+// session.loginHandler) with the factors metadata in the ctx 4th arg.
+// The audit row + new-device hook are now emitted by
+// session.loginHandler — see hull:web:middleware:session's
+// auditLog/onNewDevice opts. That single seam covers OAuth too.
 function finishLogin(req, res, user, factors) {
-    const uid = userId(user);
-    if (_state.signInLog && _state.onNewDevice) {
-        let isNew = false;
-        try { isNew = auditLog.isNewDevice(uid, req); }
-        catch (_e) { isNew = false; }
-        if (isNew) {
-            try { _state.onNewDevice(req, res, user); } catch (_e) {}
-        }
-    }
-    emitEvent(uid, "login", req, { metadata: { factors: factors } });
-    _state.onLogin(req, res, user);
+    _state.onLogin(req, res, user, { factors: factors });
 }
 
 function parseBody(req) {
@@ -800,19 +798,19 @@ function init(opts) {
     // bulk-fills the 6 callbacks; explicit opts.userX still wins.
     // Adapter keys are short ("findByEmail", "create", etc.) so a
     // plain `users.create` reads naturally at the call site.
-    const adapterKeys = {
-        userFindByEmail:      "findByEmail",
-        userGet:              "get",
-        userCreate:           "create",
-        userSetPassword:      "setPassword",
-        userSetEmail:         "setEmail",
-        userSetEmailVerified: "setEmailVerified",
-    };
+    //
+    // Derive the short key from the long key by stripping the "user"
+    // prefix and lower-casing the next char (camelCase). Mirrors
+    // Lua's `k:sub(6)` prefix-strip so adding a new callback only
+    // needs editing requiredUser[] above — the adapter wiring picks
+    // it up automatically.
     if (opts.users && typeof opts.users === "object") {
-        for (const k in adapterKeys) {
+        for (let i = 0; i < requiredUser.length; i++) {
+            const k = requiredUser[i];
+            const short = k.charAt(4).toLowerCase() + k.substring(5);
             if (opts[k] === undefined
-                && typeof opts.users[adapterKeys[k]] === "function") {
-                opts[k] = opts.users[adapterKeys[k]];
+                && typeof opts.users[short] === "function") {
+                opts[k] = opts.users[short];
             }
         }
     }
@@ -864,7 +862,6 @@ function init(opts) {
     _state.checkPwnedPasswords  = opts.checkPwnedPasswords === true;
     _state.pwnedEndpoint        = opts.pwnedEndpoint || null;
     _state.signInLog            = opts.signInLog === true;
-    _state.onNewDevice          = opts.onNewDevice || null;
     _state.onPasswordReset      = opts.onPasswordReset || null;
     _state.verifyTtl       = opts.verifyTtl       || _state.verifyTtl;
     _state.resetTtl        = opts.resetTtl        || _state.resetTtl;
@@ -965,7 +962,6 @@ const _test = {
         _state.maxFailedLogins      = 5;
         _state.lockoutDuration      = 15 * 60;
         _state.signInLog            = false;
-        _state.onNewDevice          = null;
         _state.onPasswordReset      = null;
         _state.initialized          = false;
     },

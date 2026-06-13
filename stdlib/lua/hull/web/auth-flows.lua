@@ -35,10 +35,12 @@
 --   * Render email templates. The app supplies render functions
 --     that return `{ subject, html, text }`. Module errors at
 --     send-time if a required template is missing.
---   * 2FA. The app composes `hull/web/middleware/totp` separately;
---     `on_login` is where `req.ctx.session.pending_2fa = true`
---     belongs if the app has enrolled the user. See
---     `examples/auth_flows/app.lua` for a worked example.
+--   * 2FA. The app composes `hull/web/middleware/totp` separately
+--     by setting `enable_totp = true` + supplying `user_totp_enrolled`
+--     and `totp_verify` callbacks. auth-flows then short-circuits a
+--     successful password verify into POST /auth/totp-verify with a
+--     `totp_pending` envelope token; the session is only created
+--     once the code verifies. See `examples/auth_flows/app.lua`.
 --
 -- ## Security
 --
@@ -89,11 +91,13 @@
 --     })
 --     authflows.routes(app)
 
-local crypto   = require("hull.crypto")
-local envelope = require("hull.crypto.envelope")
-local db     = require("hull.db")
-local time   = require("hull.time")
-local json   = require("hull.json")
+local crypto    = require("hull.crypto")
+local envelope  = require("hull.crypto.envelope")
+local db        = require("hull.db")
+local time      = require("hull.time")
+local json      = require("hull.json")
+local pwned     = require("hull.web.pwned")
+local audit_log = require("hull.web.middleware.audit-log")
 
 local M = {}
 
@@ -174,17 +178,20 @@ local _state = {
     -- Override endpoint (tests pass localhost mock here).
     pwned_endpoint        = nil,
 
-    -- Sign-in events (opt-in). When sign_in_log = true, auth-flows
-    -- records every login / logout / password reset / email change
-    -- into _hull_audit_log via hull/web/middleware/audit-log. Pair
-    -- with on_new_device to send a "you signed in from a new
-    -- device" email; pair with on_password_reset to revoke
-    -- existing sessions on reset (apps typically wire it as
+    -- Flow-completion audit events (opt-in). When sign_in_log = true,
+    -- auth-flows records password_reset_completed / email_change_revoked
+    -- / email_changed into _hull_audit_log via hull/web/middleware/
+    -- audit-log. Pair with on_password_reset to revoke existing
+    -- sessions on reset (apps typically wire it as
     -- `function(req,res,user) session.destroy_all(user.id) end`).
+    --
+    -- LOGIN events and new-device detection are NOT emitted here
+    -- anymore — they move to hull/web/middleware/session's
+    -- login_handler factory (audit_log + on_new_device opts), so a
+    -- single seam covers both password and OAuth logins.
     sign_in_log         = false,
-    audit_log           = nil,   -- the module handle, lazy-required
-                                 -- when sign_in_log is enabled
-    on_new_device       = nil,
+    audit_log           = nil,   -- module handle, lazy-required when
+                                 -- sign_in_log is enabled
     on_password_reset   = nil,
 
     -- Optional post-action redirects.
@@ -414,7 +421,6 @@ end
 -- false otherwise (including HIBP-outage fail-open).
 local function check_pwned(password)
     if not _state.check_pwned_passwords then return false end
-    local pwned = require("hull.web.pwned")
     return pwned.check(password,
         _state.pwned_endpoint and { endpoint = _state.pwned_endpoint } or nil)
 end
@@ -429,22 +435,18 @@ local function emit_event(user_id, kind, req, opts)
     end
 end
 
--- Shared tail of every login path (password 1FA, magic-link,
--- 2FA verify). Order: new-device check -> emit "login" event ->
--- on_login. The is_new_device check runs BEFORE emit_event so
--- it sees the prior history, not this fresh event.
+-- Shared tail of every login path (password 1FA, magic-link, 2FA
+-- verify). Hands the user off to the app-supplied on_login callback
+-- (typically session.login_handler) with the factors metadata in the
+-- ctx 4th arg. The audit row + new-device hook are now emitted by
+-- session.login_handler — see hull/web/middleware/session.lua's
+-- audit_log/on_new_device opts. That single seam covers OAuth too.
+--
+-- emit_event (password_reset_completed / email_change_* further
+-- down) is still owned here because those are flow-completion
+-- events, not login events, and only auth-flows knows about them.
 local function finish_login(req, res, user, factors)
-    if _state.audit_log and _state.on_new_device then
-        local ok, is_new = pcall(_state.audit_log.is_new_device,
-                                  user_uid(user), req)
-        if ok and is_new then
-            -- Don't let a misbehaving callback take down the login.
-            pcall(_state.on_new_device, req, res, user)
-        end
-    end
-    emit_event(user_uid(user), "login", req,
-               { metadata = { factors = factors } })
-    _state.on_login(req, res, user)
+    _state.on_login(req, res, user, { factors = factors })
 end
 
 -- ── Body parsing ───────────────────────────────────────────────────
@@ -1117,19 +1119,11 @@ function M.init(opts)
     _state.check_pwned_passwords   = opts.check_pwned_passwords == true
     _state.pwned_endpoint          = opts.pwned_endpoint
     _state.sign_in_log             = opts.sign_in_log == true
-    _state.on_new_device           = opts.on_new_device
     _state.on_password_reset       = opts.on_password_reset
-    if _state.sign_in_log then
-        local ok, m = pcall(require, "hull.web.middleware.audit-log")
-        if not ok then
-            error("auth-flows.init: sign_in_log = true but "
-                  .. "hull/web/middleware/audit-log isn't loadable; "
-                  .. "add it to manifest.modules.")
-        end
-        _state.audit_log = m
-    else
-        _state.audit_log = nil
-    end
+    -- audit-log is a top-level require now (it's a hard dep of
+    -- hull/web/auth-flows in the module registry). The sign_in_log
+    -- knob still gates whether we *emit* flow-completion events.
+    _state.audit_log = _state.sign_in_log and audit_log or nil
     _state.verify_ttl       = opts.verify_ttl       or _state.verify_ttl
     _state.reset_ttl        = opts.reset_ttl        or _state.reset_ttl
     _state.magic_link_ttl   = opts.magic_link_ttl   or _state.magic_link_ttl
@@ -1270,7 +1264,6 @@ M._test = {
         _state.lockout_duration        = 15 * 60
         _state.sign_in_log             = false
         _state.audit_log               = nil
-        _state.on_new_device           = nil
         _state.on_password_reset       = nil
         _state._initialized            = false
     end,

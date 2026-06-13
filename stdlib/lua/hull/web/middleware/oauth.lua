@@ -458,8 +458,10 @@ function oauth.init(opts)
     if type(opts) ~= "table" then
         error("oauth.init: opts table required")
     end
-    if type(opts.state_secret) ~= "string" or #opts.state_secret < 16 then
-        error("oauth.init: state_secret must be a string >= 16 bytes")
+    if type(opts.state_secret) ~= "string" or #opts.state_secret < 32 then
+        error("oauth.init: state_secret must be a string >= 32 bytes "
+              .. "(same HMAC primitive as hull/web/auth-flows; pick "
+              .. "one floor)")
     end
     _state.state_secret_hex = bytes_to_hex(opts.state_secret)
     _state.state_cookie = opts.state_cookie or _state.state_cookie

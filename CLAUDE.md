@@ -1017,18 +1017,22 @@ Authy, 1Password — supports).
   recovery path when both authenticator and codes are lost.
 - `totp.confirm(user_id, code)` → bool. Pairs the authenticator;
   flips the row's `confirmed` flag.
-- `totp.verify(user_id, code)` → `(ok, "totp"|"recovery"|nil)`. TOTP
-  path first; replay-protected via `last_used_step` (atomic
-  compare-and-set in the UPDATE WHERE). Recovery-code path scans
-  unused rows; consumed codes get `used_at` stamped.
+- `totp.verify(user_id, code)` → bool. Bare boolean for the common
+  `if not totp.verify(...) then deny() end` shape; matches JS. Use
+  `totp.verify_with_kind(user_id, code)` → `(ok, "totp"|"recovery"|nil)`
+  when you need the kind for audit metadata. TOTP path first;
+  replay-protected via `last_used_step` (atomic compare-and-set in
+  the UPDATE WHERE). Recovery-code path scans unused rows; consumed
+  codes get `used_at` stamped.
 - `totp.disable(user_id)` — deletes secret + recovery codes.
 - `totp.enrolled(user_id)` → bool. Confirmed enrollment check.
-- `totp.middleware({ redirect_path, session_key, skip_paths })`.
-  Returns a middleware that 302s to `redirect_path` (default `/2fa`)
-  while the session's `pending_2fa` flag is true.
-- JS API mirrors the Lua surface with camelCase (`ecLevel` →
-  `digits`/`period`/`window` and `secretBase32` / `otpauthUrl` /
-  `qrSvg` / `recoveryCodes` in the enroll return).
+- Login-time 2FA gating happens via `hull/web/auth-flows`
+  (enable_totp + user_totp_enrolled + totp_verify callbacks). There
+  is no `totp.middleware` / `pending_2fa` mechanism — the auth-flows
+  envelope path is the single supported way.
+- JS API mirrors the Lua surface with camelCase
+  (`verifyWithKind` / `secretBase32` / `otpauthUrl` / `qrSvg` /
+  `recoveryCodes` in the enroll return).
 - Local-first note: TOTP needs no network at verify time (works
   air-gapped). Clock skew matters more off-cloud — raise `opts.window`
   on devices without NTP.
@@ -1168,8 +1172,14 @@ verify step between successful first-factor auth and `on_login` when
 - `session.destroy(session_id)`. Deletes session.
 - `session.cleanup()` → count of deleted expired sessions.
 - **Device management** — `session.list_for_user(user_id)` → array of `{id, created_at, last_accessed, ip, user_agent}`; `session.destroy_others(current_sid, user_id)` → "sign out everywhere else"; `session.destroy_all(user_id)` → "sign out everywhere" (used by auth-flows on password reset cascade).
-- **Login/logout factories** — `session.login_handler(cookie, opts?)` returns a turnkey `on_login(req, res, user)` callback that creates a session, sets the cookie, and responds. Defaults to session-fixation defense (`session.rotate(prior_sid, ...)`). `opts.name` (cookie name), `opts.cookie_opts` (forwarded to `cookie.serialize`), `opts.extract_data(user) -> data`, `opts.respond(res, user, sid)`, `opts.rotate` (default `true`). `session.logout_handler(cookie, opts?)` is the matching `on_logout`. Same factories work for `hull/web/auth-flows` AND `hull/web/middleware/oauth` (after the find_user split, see below).
+- **Login/logout factories** — `session.login_handler(cookie, opts?)` returns a turnkey `on_login(req, res, user, ctx?)` callback that creates a session, sets the cookie, and responds. Defaults to session-fixation defense (`session.rotate(prior_sid, ...)`). `opts.name` (cookie name, default `"hull_session"` — same as `auth.session_middleware`), `opts.cookie_opts` (forwarded to `cookie.serialize`), `opts.extract_data(user) -> data`, `opts.respond(res, user, sid)`, `opts.rotate` (default `true`), `opts.audit_log` (module ref — when set, records a login event after the session is set), `opts.audit_kind` (default `"login"`), `opts.audit_metadata(user, ctx) -> table` (default derives `{ factors = ctx.factors }` for auth-flows or `{ factors = "oauth:" .. ctx.provider }` for oauth), `opts.on_new_device(req, res, user)` (requires `audit_log` — called before record when `audit_log.is_new_device` returns true). `session.logout_handler(cookie, opts?)` is the matching `on_logout`. Same factories work for `hull/web/auth-flows` AND `hull/web/middleware/oauth` (the audit + new-device seam covers both for free).
 - `session.rotate(old_sid, data, opts)` — destroy + recreate, session-fixation defense primitive. Used by `login_handler`; apps doing custom on_login can call it directly.
+
+**The `on_login(req, res, user, ctx?)` contract.** Both `hull/web/auth-flows` and `hull/web/middleware/oauth` hand off through this single shape. Guarantees:
+- `user` is the **app's** user object (whatever `find_user` / `standard_users` / a custom adapter produced). `user.id` MUST be a non-empty string — `session.login_handler` enforces it and throws otherwise. `user.email` is conventionally present but not required.
+- `ctx` is `nil` for the simplest call sites, or a table carrying source-specific metadata. auth-flows passes `{ factors = "password" | "magic_link" | "password+totp" }`. oauth passes `{ provider, claims, tokens }` (the IdP claims + raw tokens, for apps that want to capture them).
+- Returning a string overrides the post-login redirect target (oauth honors this; auth-flows uses the redirect from `login_redirect` opt).
+- `on_logout(req, res)` is the matching shape — no `user` arg because the session row is the source of truth there.
 
 **cookie**. Cookie helpers (not middleware).
 - `cookie.parse(header)` → table `{ name = value, ... }`.

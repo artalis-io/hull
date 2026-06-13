@@ -482,8 +482,9 @@ function init(opts) {
     if (!opts || typeof opts !== "object") {
         throw new Error("oauth.init: opts object required");
     }
-    if (typeof opts.stateSecret !== "string" || opts.stateSecret.length < 16) {
-        throw new Error("oauth.init: stateSecret must be a string >= 16 bytes");
+    if (typeof opts.stateSecret !== "string" || opts.stateSecret.length < 32) {
+        throw new Error("oauth.init: stateSecret must be a string >= 32 bytes "
+            + "(same HMAC primitive as hull/web/auth-flows; pick one floor)");
     }
     _state.stateSecretHex = bytesToHex(opts.stateSecret);
     _state.stateCookie = opts.stateCookie || _state.stateCookie;

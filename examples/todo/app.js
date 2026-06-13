@@ -103,7 +103,7 @@ app.use("*", "/*", (req, _res) => {
         if (data) {
             if (!req.ctx) req.ctx = {};
             req.ctx.session = data;
-            req.ctx.sessionId = sessionId;
+            req.ctx.session_id = sessionId;
         }
     }
     return 0;

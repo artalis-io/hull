@@ -99,6 +99,9 @@ end)
 app.post("/verify", function(req, res)
     local body = read_json_body(req)
     if not body then return res:status(400):json({ error = "bad json" }) end
-    local ok, kind = totp.verify(body.user_id, body.code)
+    -- verify_with_kind preserves the (ok, kind) tuple this fixture
+    -- surfaces for the e2e. App code that only needs the bool can
+    -- use the simpler totp.verify (returns bare bool, no second).
+    local ok, kind = totp.verify_with_kind(body.user_id, body.code)
     res:json({ ok = ok, kind = kind })
 end)

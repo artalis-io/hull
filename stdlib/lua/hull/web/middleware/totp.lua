@@ -5,19 +5,18 @@
 --
 -- ## What this module provides
 --
--- A standalone 2FA layer that composes with the existing
--- `hull/web/middleware/auth` + `hull/web/middleware/session`
--- modules. After password verify, the session is marked
--- `pending_2fa = true`; the middleware here gates sensitive routes
--- until a valid TOTP (or recovery) code is presented.
---
---   GET / POST /2fa            -- enrollment form + verification form
---                              -- (the APP owns these routes; this
---                              -- module only provides the verify
---                              -- primitives + the middleware that
---                              -- redirects to them)
---   /private/* (anywhere)      -- gated by totp.middleware() until
---                              -- pending_2fa is cleared
+-- The TOTP primitive set: enroll, confirm (first-use proof-of-
+-- possession), verify (verifies TOTP code OR a single-use recovery
+-- code), enrolled (predicate), disable. Designed to compose with
+-- hull/web/auth-flows, which owns the login-time 2FA gate: enable
+-- TOTP there by passing `enable_totp = true / user_totp_enrolled =
+-- function(uid) return totp.enrolled(uid) end / totp_verify =
+-- function(user, code) return totp.verify(user.id, code) end`.
+-- auth-flows then short-circuits a successful password verify into
+-- a /auth/totp-verify form, defers session creation until the code
+-- checks out, and the canonical login event is recorded by
+-- session.login_handler. There is no `pending_2fa` flag and no
+-- middleware here — the auth-flows envelope path is the single way.
 --
 -- ## Security
 --
@@ -65,30 +64,18 @@
 --         encryption_key = env.get("TOTP_KEK"),  -- optional
 --     })
 --
---     app.use("*", "/private/*", totp.middleware({
---         redirect_path = "/2fa",
---         skip_paths = { "/2fa", "/logout" },
---     }))
---
---     -- Enrollment + verification routes (app owns these):
+--     -- App-owned enrollment + first-use confirm. auth-flows owns
+--     -- the login-time /auth/totp-verify route — see the auth-flows
+--     -- docstring for the wiring.
 --     app.post("/2fa/enroll", function(req, res)
 --         local r = totp.enroll(req.ctx.session.user_id)
 --         res:html(render_qr_page(r.qr_svg, r.recovery_codes))
 --     end)
 --     app.post("/2fa/confirm", function(req, res)
 --         if totp.confirm(req.ctx.session.user_id, req.form.code) then
---             req.ctx.session.pending_2fa = false
 --             res:redirect("/")
 --         else
 --             res:status(400):html("invalid code")
---         end
---     end)
---     app.post("/2fa/verify", function(req, res)
---         local ok, kind = totp.verify(req.ctx.session.user_id,
---                                       req.form.code)
---         if ok then
---             req.ctx.session.pending_2fa = false
---             res:redirect("/")
 --         end
 --     end)
 
@@ -537,7 +524,14 @@ end
 -- Recovery codes are single-use — verified hashes get `used_at`
 -- stamped, and a future verify with the same code finds the row
 -- but rejects it on the `used_at IS NULL` filter.
-function totp.verify(user_id, code)
+--
+-- Returns a bare boolean. If the caller needs to know whether the
+-- successful path was "totp" or "recovery" (for audit metadata),
+-- call `totp.verify_with_kind` instead — it returns `(ok, kind)`.
+-- Splitting the two surfaces matches the JS API and avoids the
+-- silent porting bug where `local ok = totp.verify(...)` discarded
+-- the second return.
+function totp.verify_with_kind(user_id, code)
     check_initialized()
     if type(user_id) ~= "string" or type(code) ~= "string" then
         return false, nil
@@ -583,6 +577,11 @@ function totp.verify(user_id, code)
     return false, nil
 end
 
+function totp.verify(user_id, code)
+    local ok = totp.verify_with_kind(user_id, code)
+    return ok
+end
+
 --- Delete a user's secret + every recovery code. Use on account
 -- deletion or user-initiated 2FA disable. Returns true if a row
 -- was actually removed, false otherwise.
@@ -610,26 +609,13 @@ function totp.enrolled(user_id)
     return rows and #rows > 0 and rows[1].confirmed == 1
 end
 
---- Mint a middleware function. Redirects to `opts.redirect_path`
--- whenever the current session has the pending-2FA flag set.
-function totp.middleware(opts)
-    check_initialized()
-    opts = opts or {}
-    local redirect_path = opts.redirect_path or "/2fa"
-    local session_key   = opts.session_key   or "pending_2fa"
-    local skip_paths    = opts.skip_paths    or { "/2fa", "/logout" }
-    -- Convert skip_paths to a set for O(1) lookup at request time.
-    local skip = {}
-    for i = 1, #skip_paths do skip[skip_paths[i]] = true end
-
-    return function(req, res)
-        if skip[req.path] then return 0 end
-        local sess = req.ctx and req.ctx.session
-        if not sess or not sess[session_key] then return 0 end
-        res:redirect(redirect_path)
-        return 1
-    end
-end
+-- (totp.middleware was a parallel pending-2FA gate that required apps
+-- to create a session BEFORE the 2FA step, then flip a flag on it.
+-- It overlapped with hull/web/auth-flows' totp_pending envelope, which
+-- defers session creation until after 2FA succeeds. The two could not
+-- interoperate. Standardized on the auth-flows envelope; apps wire
+-- TOTP through auth-flows.init's `enable_totp / user_totp_enrolled /
+-- totp_verify` callbacks and let it own the /2fa form + verify route.)
 
 -- ── Test helpers (not public; exposed for unit tests) ──────────────
 --
