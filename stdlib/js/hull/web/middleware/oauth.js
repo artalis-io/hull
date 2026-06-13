@@ -119,7 +119,11 @@ const PRESETS = {
 function bytesToHex(s) {
     let h = "";
     for (let i = 0; i < s.length; i++) {
-        const c = s.charCodeAt(i);
+        // & 0xff matches the sibling helpers in totp.js + auth-flows.js;
+        // without it, a state_secret with code points > 0xff (the
+        // case the comment block above claims to handle) emits 3+
+        // hex chars per char and the round-trip silently breaks.
+        const c = s.charCodeAt(i) & 0xff;
         h += (c < 16 ? "0" : "") + c.toString(16);
     }
     return h;

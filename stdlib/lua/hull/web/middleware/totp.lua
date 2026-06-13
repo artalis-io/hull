@@ -552,8 +552,12 @@ function totp.verify(user_id, code)
     local now_step = current_step()
     for offset = -_state.window, _state.window do
         local step = now_step + offset
+        -- ct_eq matches the constant-time compare in totp.confirm
+        -- (line ~519). The leak via plain `==` is theoretical at
+        -- 6-byte ASCII under network jitter, but the asymmetry was
+        -- the real audit smell; keep both paths uniform.
         if step > row.last_used_step
-           and totp_at_step(row.secret, step, row.digits) == code then
+           and ct_eq(totp_at_step(row.secret, step, row.digits), code) then
             if mark_step_used(user_id, step) == 1 then
                 return true, "totp"
             end
