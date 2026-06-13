@@ -946,13 +946,18 @@ end
 --- Initialize the module. Must be called once at app startup.
 -- @tparam table opts See module header for the full option list.
 --- Build a turnkey adapter for the 6 `user_*` callbacks against a
--- standard SQLite users table. Apps with a vanilla schema can
+-- "standard" users-table schema. Apps with a vanilla schema can
 -- pass the result as `opts.users` to M.init and skip ~30 lines of
 -- thin DB wrappers. Apps with a custom schema either override
 -- single callbacks (opts.user_create wins over opts.users.create)
 -- or skip the adapter entirely.
 --
--- Default schema assumed:
+-- The adapter is **DB-backend-agnostic** — it issues standard
+-- INSERT / UPDATE / SELECT against the `users` table via the
+-- `db` module, no SQLite-specific syntax. Works on whatever
+-- backend `hull/db` is wired to (SQLite today, Postgres planned).
+--
+-- Default schema assumed (portable across SQLite + Postgres):
 --   CREATE TABLE users (
 --       id            TEXT PRIMARY KEY,
 --       email         TEXT NOT NULL UNIQUE,
@@ -968,7 +973,7 @@ end
 --                 32 hex chars from crypto.random(16)).
 -- @treturn table  Six fields: find_by_email, get, create,
 --                 set_password, set_email, set_email_verified.
-function M.sqlite_users(opts)
+function M.standard_users(opts)
     opts = opts or {}
     local tbl    = opts.table or "users"
     local id_gen = opts.id_gen or function()
@@ -1047,10 +1052,11 @@ function M.init(opts)
         "user_set_password", "user_set_email",
         "user_set_email_verified",
     }
-    -- `opts.users` (typically from M.sqlite_users(...)) is a bulk
-    -- adapter — its 6 functions become the defaults; explicit
-    -- opts.user_X overrides still win. Keeps the orthogonality
-    -- of letting apps mix-and-match (e.g. swap user_create only).
+    -- `opts.users` (typically from M.standard_users(...)) is a
+    -- bulk adapter — its 6 functions become the defaults;
+    -- explicit opts.user_X overrides still win. Keeps the
+    -- orthogonality of letting apps mix-and-match (e.g. swap
+    -- user_create only).
     if type(opts.users) == "table" then
         for _, k in ipairs(required_user) do
             local short = k:sub(6)  -- strip "user_" prefix

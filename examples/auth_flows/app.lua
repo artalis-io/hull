@@ -5,8 +5,9 @@
 -- `users` table the app owns.
 --
 -- The wiring below uses the turnkey helpers:
---   * `authflows.sqlite_users({...})` fills the 6 user_* callbacks
---     for the standard schema in one line.
+--   * `authflows.standard_users({...})` fills the 6 user_*
+--     callbacks for the standard schema in one line. The adapter
+--     is DB-backend-agnostic.
 --   * `session.login_handler(cookie)` and `session.logout_handler(cookie)`
 --     produce the on_login / on_logout pair, including session-
 --     fixation defense (session.rotate on login).
@@ -122,7 +123,7 @@ authflows.init({
     -- schemas: skip `users = ...` and pass the 6 user_* callbacks
     -- directly. Mixed: pass `users` AND override one or two
     -- callbacks individually (explicit wins).
-    users = authflows.sqlite_users({ table = "users" }),
+    users = authflows.standard_users({ table = "users" }),
     -- Turnkey login/logout handlers backed by session + cookie.
     -- session-fixation defense (session.rotate) is on by default.
     on_login  = session.login_handler(cookie),

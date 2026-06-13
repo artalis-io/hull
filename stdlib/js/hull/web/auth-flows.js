@@ -704,19 +704,25 @@ function registerRoutes(app) {
 
 /**
  * Build a turnkey adapter for the 6 userX callbacks against a
- * standard SQLite users table. Pass the result as opts.users to
- * init() to skip the per-app DB-wrapper boilerplate. Apps with a
- * custom schema either override single callbacks (opts.userCreate
- * wins over opts.users.create) or skip the adapter.
+ * "standard" users-table schema. Pass the result as opts.users
+ * to init() to skip the per-app DB-wrapper boilerplate. Apps
+ * with a custom schema either override single callbacks
+ * (opts.userCreate wins over opts.users.create) or skip the
+ * adapter.
  *
- * Default schema (mirror of the Lua factory):
+ * DB-backend-agnostic — issues standard INSERT / UPDATE / SELECT
+ * via the `db` module with no SQLite-specific syntax. Works on
+ * whatever backend hull/db is wired to (SQLite today, Postgres
+ * planned).
+ *
+ * Default schema (portable across SQLite + Postgres):
  *   CREATE TABLE users (
  *       id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE,
  *       password_hash TEXT, email_verified INTEGER NOT NULL DEFAULT 0,
  *       created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
  *   )
  */
-function sqliteUsers(opts) {
+function standardUsers(opts) {
     opts = opts || {};
     const tbl = opts.table || "users";
     const idGen = opts.idGen || (() => crypto.hexEncode(crypto.random(16)));
@@ -789,8 +795,8 @@ function init(opts) {
         "userFindByEmail", "userGet", "userCreate",
         "userSetPassword", "userSetEmail", "userSetEmailVerified",
     ];
-    // opts.users (typically from authFlows.sqliteUsers(...)) bulk-
-    // fills the 6 callbacks; explicit opts.userX still wins.
+    // opts.users (typically from authFlows.standardUsers(...))
+    // bulk-fills the 6 callbacks; explicit opts.userX still wins.
     // Adapter keys are short ("findByEmail", "create", etc.) so a
     // plain `users.create` reads naturally at the call site.
     const adapterKeys = {
@@ -965,7 +971,7 @@ const _test = {
 };
 
 const authFlows = {
-    init, routes, sqliteUsers,
+    init, routes, standardUsers,
     sendVerifyEmail, sendPasswordReset, sendMagicLink,
     _test,
 };

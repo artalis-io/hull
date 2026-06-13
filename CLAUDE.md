@@ -1051,11 +1051,12 @@ verify step between successful first-factor auth and `on_login` when
   - `opts.user_*` callbacks (find_by_email, get, create, set_password,
     set_email, set_email_verified). All required; missing ones are
     reported together at init time. **Shortcut:** pass
-    `opts.users = authflows.sqlite_users({ table = "users" })` to
-    bulk-fill all six against the standard schema in one line; any
-    explicit `opts.user_X` still overrides. Apps with a custom
-    schema either pass the 6 callbacks directly or post-process the
-    adapter table.
+    `opts.users = authflows.standard_users({ table = "users" })`
+    to bulk-fill all six against the standard schema in one line;
+    any explicit `opts.user_X` still overrides. The adapter is
+    DB-backend-agnostic (works on whatever backend `hull/db` is
+    wired to). Apps with a custom schema either pass the 6
+    callbacks directly or post-process the adapter table.
   - `opts.on_login(req, res, user)` / `opts.on_logout(req, res)`. App
     issues its own session (cookie, JWT, whatever) here. Module is
     session-agnostic. **Shortcut:** wire
