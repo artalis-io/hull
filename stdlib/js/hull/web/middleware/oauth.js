@@ -74,6 +74,13 @@ const _state = {
     stateCookie:    "_oauth_state",
     stateTtl:       600,
     providers:      {},  // name -> resolved cfg
+    // findUser(provider, claims) -> user-object — required when
+    // onLogin is set. Lets onLogin use the same (req, res, user)
+    // signature as hull/web/auth-flows so a single login handler
+    // (typically session.loginHandler(cookie)) works for both
+    // auth sources. provider/claims/tokens are still available
+    // via the 4th `ctx` arg on onLogin.
+    findUser:       null,
     onLogin:        null,
     onLogout:       null,
     loginPath:      "/auth/{provider}/login",
@@ -440,10 +447,20 @@ async function handleCallback(req, res) {
     // 6. Single-use state cookie - clear.
     res.header("Set-Cookie", cookie.clear(_state.stateCookie, { path: "/" }));
 
-    // 7. Hand off to app. String return overrides target.
+    // 7. Resolve claims -> app's user via findUser, then hand off
+    //    via onLogin(req, res, user, ctx). The signature now
+    //    matches hull/web/auth-flows so a single
+    //    session.loginHandler(cookie) wires both. OIDC context
+    //    (provider, claims, tokens) is in the 4th `ctx` arg.
     let target = env.return_to || "/";
     if (_state.onLogin) {
-        const v = await _state.onLogin(req, res, providerName, claims, tokens);
+        const user = await _state.findUser(providerName, claims);
+        if (!user) {
+            res.status(400).html("auth failed: user resolution returned nil");
+            return;
+        }
+        const ctx = { provider: providerName, claims, tokens };
+        const v = await _state.onLogin(req, res, user, ctx);
         if (typeof v === "string") target = v;
     }
     res.redirect(target);
@@ -471,6 +488,11 @@ function init(opts) {
     _state.stateSecretHex = bytesToHex(opts.stateSecret);
     _state.stateCookie = opts.stateCookie || _state.stateCookie;
     _state.stateTtl    = opts.stateTtl    || _state.stateTtl;
+    if (opts.onLogin != null && typeof opts.findUser !== "function") {
+        throw new Error("oauth.init: findUser(provider, claims) -> user is "
+                        + "required when onLogin is set. See module docs.");
+    }
+    _state.findUser    = opts.findUser    || null;
     _state.onLogin     = opts.onLogin     || null;
     _state.onLogout    = opts.onLogout    || null;
 
@@ -539,6 +561,7 @@ const _test = {
     reset: () => {
         _state.stateSecretHex = null;
         _state.providers      = {};
+        _state.findUser       = null;
         _state.onLogin        = null;
         _state.onLogout       = null;
         _state._jwksCache     = {};

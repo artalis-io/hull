@@ -4,6 +4,18 @@
 -- bundled by hull/web/auth-flows@1, all wired against a plain
 -- `users` table the app owns.
 --
+-- The wiring below uses the turnkey helpers:
+--   * `authflows.sqlite_users({...})` fills the 6 user_* callbacks
+--     for the standard schema in one line.
+--   * `session.login_handler(cookie)` and `session.logout_handler(cookie)`
+--     produce the on_login / on_logout pair, including session-
+--     fixation defense (session.rotate on login).
+--
+-- Apps with a custom users schema or session shape can still
+-- override individual callbacks (opts.user_create wins over
+-- opts.users.create, etc.) — see the explicit-wiring fixture at
+-- tests/fixtures/auth_flows_lua/app.lua for that style.
+--
 -- Run: AUTH_FLOWS_SECRET=$(head -c 32 /dev/urandom | base64) \
 --      hull dev examples/auth_flows/app.lua -p 3000
 --
@@ -30,73 +42,13 @@ app.manifest({
 local authflows = require("hull.web.auth-flows")
 local session   = require("hull.web.middleware.session")
 local cookie    = require("hull.web.cookie")
-local crypto    = require("hull.crypto")
-local db        = require("hull.db")
 local env       = require("hull.env")
 local log       = require("hull.log")
-local time      = require("hull.time")
 
-session.init()  -- creates hull_sessions table
-
--- ── Users table helpers ─────────────────────────────────────────────
---
--- Thin wrappers over `users` SQL so the auth-flows callbacks below
--- stay readable. A real app would put these on its own user model
--- module; the example keeps them here for one-file legibility.
-
-local function gen_id()
-    local hex = ""
-    local bytes = crypto.random(16)
-    for i = 1, #bytes do
-        hex = hex .. string.format("%02x", string.byte(bytes, i))
-    end
-    return hex
-end
-
-local function user_row(r)
-    if not r then return nil end
-    return {
-        id             = r.id,
-        email          = r.email,
-        password_hash  = r.password_hash,
-        email_verified = r.email_verified == 1,
-    }
-end
-
-local function find_by_email(email)
-    local rows = db.query("SELECT * FROM users WHERE email = ?", { email })
-    return rows and rows[1] and user_row(rows[1]) or nil
-end
-
-local function get(id)
-    local rows = db.query("SELECT * FROM users WHERE id = ?", { id })
-    return rows and rows[1] and user_row(rows[1]) or nil
-end
-
-local function create(email, pwhash)
-    local id = gen_id()
-    local now = time.now()
-    db.exec(
-        "INSERT INTO users (id, email, password_hash, email_verified, "
-        .. "created_at, updated_at) VALUES (?, ?, ?, 0, ?, ?)",
-        { id, email, pwhash, now, now })
-    return id
-end
-
-local function set_password(id, pwhash)
-    db.exec("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
-            { pwhash, time.now(), id })
-end
-
-local function set_email(id, email)
-    db.exec("UPDATE users SET email = ?, updated_at = ? WHERE id = ?",
-            { email, time.now(), id })
-end
-
-local function set_email_verified(id, verified)
-    db.exec("UPDATE users SET email_verified = ?, updated_at = ? WHERE id = ?",
-            { verified and 1 or 0, time.now(), id })
-end
+-- Init the sessions table BEFORE the login_handler factory below
+-- inspects it (the factory errors clearly if session.init() hasn't
+-- been called).
+session.init()
 
 -- ── Email templates ─────────────────────────────────────────────────
 --
@@ -146,11 +98,10 @@ local templates = {
 
 -- ── auth-flows wiring ────────────────────────────────────────────────
 
--- env.get throws "env not configured" at module load time because
--- env_cfg gets wired AFTER the manifest is extracted (which is
--- AFTER this top-level code has run). pcall lets the same file
--- run in both contexts: dev/test uses the fallback, prod sets
--- AUTH_FLOWS_SECRET in the environment and env.get works.
+-- env.get throws at module load time when the manifest's env_cfg
+-- hasn't been wired yet (top-level code runs before that). pcall
+-- lets the same file run in both contexts: dev/test falls back to
+-- the placeholder, prod sets AUTH_FLOWS_SECRET in the environment.
 local function envget(k, default)
     local ok, v = pcall(env.get, k)
     if ok and v then return v end
@@ -167,28 +118,15 @@ authflows.init({
         log.info("--- email body ---\n" .. (text or html or "") .. "---")
     end,
     templates = templates,
-    user_find_by_email      = find_by_email,
-    user_get                = get,
-    user_create             = create,
-    user_set_password       = set_password,
-    user_set_email          = set_email,
-    user_set_email_verified = set_email_verified,
-    on_login = function(req, res, user)
-        -- Issue an app session. The session module's create() puts
-        -- the row in hull_sessions and returns a session ID we set
-        -- in a cookie. Real apps would attach more user fields to
-        -- the session (display name, role, etc.).
-        local sid = session.create({ user_id = user.id, email = user.email })
-        res:header("Set-Cookie", cookie.serialize("session", sid,
-            { path = "/", httponly = true, samesite = "Lax" }))
-        res:json({ ok = true, user_id = user.id, email = user.email })
-    end,
-    on_logout = function(req, res)
-        local cookies = cookie.parse(req.headers.cookie or "")
-        if cookies.session then session.destroy(cookies.session) end
-        res:header("Set-Cookie", cookie.clear("session", { path = "/" }))
-        res:json({ ok = true })
-    end,
+    -- Turnkey user-table adapter for the standard schema. Custom
+    -- schemas: skip `users = ...` and pass the 6 user_* callbacks
+    -- directly. Mixed: pass `users` AND override one or two
+    -- callbacks individually (explicit wins).
+    users = authflows.sqlite_users({ table = "users" }),
+    -- Turnkey login/logout handlers backed by session + cookie.
+    -- session-fixation defense (session.rotate) is on by default.
+    on_login  = session.login_handler(cookie),
+    on_logout = session.logout_handler(cookie),
 })
 
 authflows.routes(app)
@@ -203,8 +141,9 @@ app.use("*", "/*", function(req, _res)
         local data = session.load(cookies.session)
         if data then
             req.ctx = req.ctx or {}
-            req.ctx.session = data
-            req.ctx.user_id = data.user_id
+            req.ctx.session    = data
+            req.ctx.session_id = cookies.session
+            req.ctx.user_id    = data.user_id
         end
     end
     return 0
@@ -267,14 +206,36 @@ end)
 --       ...
 --       enable_totp = true,
 --       user_totp_enrolled = function(uid) return totp.enrolled(uid) end,
---       -- totp.verify returns (ok, kind) — the second return is
---       -- discarded by Lua's single-value assignment in auth-flows,
---       -- so a plain delegate works. From JS the tuple-as-array
---       -- needs explicit `[0]` unwrapping (see CLAUDE.md).
---       totp_verify = function(user, code)
+--       totp_verify        = function(user, code)
 --           return totp.verify(user.id, code)
 --       end,
 --   })
 --
 -- See tests/fixtures/auth_flows_2fa_lua/ for an end-to-end fixture
 -- and tests/e2e_auth_flows_2fa.sh for the wire flow.
+
+-- ── Adding Google OAuth on top: ─────────────────────────────────────
+--
+-- The OAuth on_login signature matches auth-flows after the
+-- find_user split, so the SAME session.login_handler(cookie) wires
+-- both auth sources.
+--
+--   local oauth = require("hull.web.middleware.oauth")
+--   oauth.init({
+--       state_secret = env.get("OAUTH_STATE_SECRET"),
+--       providers = { google = {
+--           preset        = "google",
+--           client_id     = env.get("GOOGLE_CLIENT_ID"),
+--           client_secret = env.get("GOOGLE_CLIENT_SECRET"),
+--       }},
+--       find_user = function(_provider, claims)
+--           -- Look up by claims.sub / claims.email; create if new.
+--           local u = users_by_email[claims.email]
+--           if u then return u end
+--           local id = users_adapter.create(claims.email, nil)
+--           return users_adapter.get(id)
+--       end,
+--       on_login  = session.login_handler(cookie),
+--       on_logout = session.logout_handler(cookie),
+--   })
+--   oauth.routes(app)

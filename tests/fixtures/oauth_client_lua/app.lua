@@ -49,15 +49,24 @@ oauth.init({
             scopes                 = { "openid", "profile", "email" },
         },
     },
-    on_login = function(_req, res, provider, claims, _tokens)
+    find_user = function(_provider, claims)
+        -- A real app would look up / create. The fixture just
+        -- shapes the claims into the user object on_login expects.
+        return {
+            id    = claims.sub,
+            email = claims.email,
+            name  = claims.name,
+        }
+    end,
+    on_login = function(_req, res, user, ctx)
         LOGGED_IN = {
-            provider = provider,
-            sub      = claims.sub,
-            email    = claims.email,
-            name     = claims.name,
+            provider = ctx.provider,
+            sub      = user.id,
+            email    = user.email,
+            name     = user.name,
         }
         res:header("Set-Cookie", cookie.serialize(
-            "fixture_session", claims.sub,
+            "fixture_session", user.id,
             { path = "/", httponly = true, samesite = "Lax" }))
         return "/me"
     end,

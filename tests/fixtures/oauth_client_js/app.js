@@ -43,15 +43,20 @@ oauth.init({
             scopes: ["openid", "profile", "email"],
         },
     },
-    onLogin: async (_req, res, provider, claims, _tokens) => {
+    findUser: (_provider, claims) => ({
+        id:    claims.sub,
+        email: claims.email,
+        name:  claims.name,
+    }),
+    onLogin: async (_req, res, user, ctx) => {
         LOGGED_IN = {
-            provider,
-            sub:   claims.sub,
-            email: claims.email,
-            name:  claims.name,
+            provider: ctx.provider,
+            sub:      user.id,
+            email:    user.email,
+            name:     user.name,
         };
         res.header("Set-Cookie", cookie.serialize(
-            "fixture_session", claims.sub,
+            "fixture_session", user.id,
             { path: "/", httpOnly: true, sameSite: "Lax" }));
         return "/me";
     },

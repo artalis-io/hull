@@ -702,6 +702,78 @@ function registerRoutes(app) {
 
 // ── Public API ─────────────────────────────────────────────────────
 
+/**
+ * Build a turnkey adapter for the 6 userX callbacks against a
+ * standard SQLite users table. Pass the result as opts.users to
+ * init() to skip the per-app DB-wrapper boilerplate. Apps with a
+ * custom schema either override single callbacks (opts.userCreate
+ * wins over opts.users.create) or skip the adapter.
+ *
+ * Default schema (mirror of the Lua factory):
+ *   CREATE TABLE users (
+ *       id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE,
+ *       password_hash TEXT, email_verified INTEGER NOT NULL DEFAULT 0,
+ *       created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+ *   )
+ */
+function sqliteUsers(opts) {
+    opts = opts || {};
+    const tbl = opts.table || "users";
+    const idGen = opts.idGen || (() => crypto.hexEncode(crypto.random(16)));
+
+    function row(r) {
+        if (!r) return null;
+        return {
+            id:             r.id,
+            email:          r.email,
+            password_hash:  r.password_hash,
+            email_verified: r.email_verified === 1,
+        };
+    }
+
+    return {
+        findByEmail(email) {
+            const rows = db.query(
+                "SELECT * FROM " + tbl + " WHERE email = ?", [email]);
+            return rows && rows[0] ? row(rows[0]) : null;
+        },
+        get(id) {
+            const rows = db.query(
+                "SELECT * FROM " + tbl + " WHERE id = ?", [id]);
+            return rows && rows[0] ? row(rows[0]) : null;
+        },
+        create(email, pwhash) {
+            const id = idGen();
+            const now = time.now();
+            db.exec(
+                "INSERT INTO " + tbl
+                + " (id, email, password_hash, email_verified, "
+                + "  created_at, updated_at) "
+                + "VALUES (?, ?, ?, 0, ?, ?)",
+                [id, email, pwhash, now, now]);
+            return id;
+        },
+        setPassword(id, pwhash) {
+            db.exec(
+                "UPDATE " + tbl
+                + " SET password_hash = ?, updated_at = ? WHERE id = ?",
+                [pwhash, time.now(), id]);
+        },
+        setEmail(id, email) {
+            db.exec(
+                "UPDATE " + tbl
+                + " SET email = ?, updated_at = ? WHERE id = ?",
+                [email, time.now(), id]);
+        },
+        setEmailVerified(id, verified) {
+            db.exec(
+                "UPDATE " + tbl
+                + " SET email_verified = ?, updated_at = ? WHERE id = ?",
+                [verified ? 1 : 0, time.now(), id]);
+        },
+    };
+}
+
 function init(opts) {
     opts = opts || {};
     if (typeof opts.stateSecret !== "string" || opts.stateSecret.length < 32) {
@@ -717,6 +789,26 @@ function init(opts) {
         "userFindByEmail", "userGet", "userCreate",
         "userSetPassword", "userSetEmail", "userSetEmailVerified",
     ];
+    // opts.users (typically from authFlows.sqliteUsers(...)) bulk-
+    // fills the 6 callbacks; explicit opts.userX still wins.
+    // Adapter keys are short ("findByEmail", "create", etc.) so a
+    // plain `users.create` reads naturally at the call site.
+    const adapterKeys = {
+        userFindByEmail:      "findByEmail",
+        userGet:              "get",
+        userCreate:           "create",
+        userSetPassword:      "setPassword",
+        userSetEmail:         "setEmail",
+        userSetEmailVerified: "setEmailVerified",
+    };
+    if (opts.users && typeof opts.users === "object") {
+        for (const k in adapterKeys) {
+            if (opts[k] === undefined
+                && typeof opts.users[adapterKeys[k]] === "function") {
+                opts[k] = opts.users[adapterKeys[k]];
+            }
+        }
+    }
     const missing = [];
     for (let i = 0; i < requiredUser.length; i++) {
         if (typeof opts[requiredUser[i]] !== "function") {
@@ -873,7 +965,7 @@ const _test = {
 };
 
 const authFlows = {
-    init, routes,
+    init, routes, sqliteUsers,
     sendVerifyEmail, sendPasswordReset, sendMagicLink,
     _test,
 };

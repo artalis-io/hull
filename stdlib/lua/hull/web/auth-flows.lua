@@ -945,6 +945,89 @@ end
 
 --- Initialize the module. Must be called once at app startup.
 -- @tparam table opts See module header for the full option list.
+--- Build a turnkey adapter for the 6 `user_*` callbacks against a
+-- standard SQLite users table. Apps with a vanilla schema can
+-- pass the result as `opts.users` to M.init and skip ~30 lines of
+-- thin DB wrappers. Apps with a custom schema either override
+-- single callbacks (opts.user_create wins over opts.users.create)
+-- or skip the adapter entirely.
+--
+-- Default schema assumed:
+--   CREATE TABLE users (
+--       id            TEXT PRIMARY KEY,
+--       email         TEXT NOT NULL UNIQUE,
+--       password_hash TEXT,
+--       email_verified INTEGER NOT NULL DEFAULT 0,
+--       created_at    INTEGER NOT NULL,
+--       updated_at    INTEGER NOT NULL
+--   )
+--
+-- @tparam ?table opts
+--   * `table`   — table name (default `"users"`).
+--   * `id_gen`  — `function() -> string` for new ids (default:
+--                 32 hex chars from crypto.random(16)).
+-- @treturn table  Six fields: find_by_email, get, create,
+--                 set_password, set_email, set_email_verified.
+function M.sqlite_users(opts)
+    opts = opts or {}
+    local tbl    = opts.table or "users"
+    local id_gen = opts.id_gen or function()
+        return crypto.hex_encode(crypto.random(16))
+    end
+
+    local function row(r)
+        if not r then return nil end
+        return {
+            id             = r.id,
+            email          = r.email,
+            password_hash  = r.password_hash,
+            email_verified = r.email_verified == 1,
+        }
+    end
+
+    return {
+        find_by_email = function(email)
+            local rows = db.query(
+                "SELECT * FROM " .. tbl .. " WHERE email = ?", { email })
+            return rows and rows[1] and row(rows[1]) or nil
+        end,
+        get = function(id)
+            local rows = db.query(
+                "SELECT * FROM " .. tbl .. " WHERE id = ?", { id })
+            return rows and rows[1] and row(rows[1]) or nil
+        end,
+        create = function(email, pwhash)
+            local id = id_gen()
+            local now = time.now()
+            db.exec(
+                "INSERT INTO " .. tbl
+                .. " (id, email, password_hash, email_verified, "
+                .. "  created_at, updated_at) "
+                .. "VALUES (?, ?, ?, 0, ?, ?)",
+                { id, email, pwhash, now, now })
+            return id
+        end,
+        set_password = function(id, pwhash)
+            db.exec(
+                "UPDATE " .. tbl
+                .. " SET password_hash = ?, updated_at = ? WHERE id = ?",
+                { pwhash, time.now(), id })
+        end,
+        set_email = function(id, email)
+            db.exec(
+                "UPDATE " .. tbl
+                .. " SET email = ?, updated_at = ? WHERE id = ?",
+                { email, time.now(), id })
+        end,
+        set_email_verified = function(id, verified)
+            db.exec(
+                "UPDATE " .. tbl
+                .. " SET email_verified = ?, updated_at = ? WHERE id = ?",
+                { verified and 1 or 0, time.now(), id })
+        end,
+    }
+end
+
 function M.init(opts)
     opts = opts or {}
     if type(opts.state_secret) ~= "string" or #opts.state_secret < 32 then
@@ -964,6 +1047,18 @@ function M.init(opts)
         "user_set_password", "user_set_email",
         "user_set_email_verified",
     }
+    -- `opts.users` (typically from M.sqlite_users(...)) is a bulk
+    -- adapter — its 6 functions become the defaults; explicit
+    -- opts.user_X overrides still win. Keeps the orthogonality
+    -- of letting apps mix-and-match (e.g. swap user_create only).
+    if type(opts.users) == "table" then
+        for _, k in ipairs(required_user) do
+            local short = k:sub(6)  -- strip "user_" prefix
+            if opts[k] == nil and type(opts.users[short]) == "function" then
+                opts[k] = opts.users[short]
+            end
+        end
+    end
     local missing = {}
     for _, k in ipairs(required_user) do
         if type(opts[k]) ~= "function" then

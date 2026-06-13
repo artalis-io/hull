@@ -18,10 +18,14 @@
 --                                   tokens, verifies the ID token
 --                                   signature against the IdP's JWKS
 --                                   (x5c -> PEM), validates iss / aud
---                                   / exp / nonce, then calls
---                                   on_login(req, res, provider,
---                                   claims, tokens) and 302s to the
---                                   return URL.
+--                                   / exp / nonce, calls
+--                                   find_user(provider, claims) ->
+--                                   user, then on_login(req, res,
+--                                   user, ctx) and 302s to the
+--                                   return URL. ctx exposes the
+--                                   provider name, raw claims, and
+--                                   tokens for callers that need
+--                                   them.
 --   GET /auth/logout             -> clears state cookies; app's
 --                                   on_logout (optional) clears its
 --                                   own session.
@@ -67,11 +71,13 @@
 --                 client_secret = env.get("GOOGLE_CLIENT_SECRET"),
 --             },
 --         },
---         on_login = function(req, res, provider, claims, tokens)
---             local user = find_or_create_user(claims.sub, claims.email)
---             session.create_for_user(req, res, user.id)
---             return "/"  -- where to redirect after login
+--         find_user = function(provider, claims)
+--             return find_or_create_user(claims.sub, claims.email)
 --         end,
+--         -- on_login matches hull/web/auth-flows shape so a single
+--         -- session.login_handler(cookie) wires both.
+--         on_login = session.login_handler(cookie),
+--         on_logout = session.logout_handler(cookie),
 --     })
 --     oauth.routes(app)
 
@@ -93,6 +99,13 @@ local _state = {
     state_cookie     = "_oauth_state",
     state_ttl        = 600,
     providers        = {},
+    -- find_user(provider, claims) -> user-object — required when
+    -- on_login is wired. Lets on_login use the same (req, res,
+    -- user) signature as hull/web/auth-flows so a single login
+    -- handler (typically session.login_handler(cookie)) works for
+    -- both auth sources. The provider + claims + tokens are still
+    -- available via the optional 4th `ctx` arg on on_login.
+    find_user        = nil,
     on_login         = nil,
     on_logout        = nil,
     -- Route templates - `{provider}` is replaced with `:provider` at
@@ -401,11 +414,26 @@ local function handle_callback(req, res)
     res:header("Set-Cookie",
         cookie.clear(_state.state_cookie, { path = "/" }))
 
-    -- 7. Hand off to the app. Return value (if a string) overrides
-    --    the post-login redirect target.
+    -- 7. Resolve claims -> app's user object via find_user, then
+    --    hand off via on_login(req, res, user, ctx). on_login's
+    --    signature now matches hull/web/auth-flows so a single
+    --    session.login_handler(cookie) can be wired for both
+    --    auth sources. The OIDC-specific context (provider name,
+    --    raw claims, tokens) is still available via the 4th arg
+    --    for apps that need it. Return value of on_login (if a
+    --    string) overrides the post-login redirect target.
     local target = env.return_to or "/"
     if _state.on_login then
-        local v = _state.on_login(req, res, provider_name, claims, tokens)
+        local user = _state.find_user(provider_name, claims)
+        if not user then
+            return res:status(400):html("auth failed: user resolution returned nil")
+        end
+        local ctx = {
+            provider = provider_name,
+            claims   = claims,
+            tokens   = tokens,
+        }
+        local v = _state.on_login(req, res, user, ctx)
         if type(v) == "string" then target = v end
     end
     res:redirect(target)
@@ -436,6 +464,11 @@ function oauth.init(opts)
     _state.state_secret_hex = bytes_to_hex(opts.state_secret)
     _state.state_cookie = opts.state_cookie or _state.state_cookie
     _state.state_ttl    = opts.state_ttl or _state.state_ttl
+    if opts.on_login ~= nil and type(opts.find_user) ~= "function" then
+        error("oauth.init: find_user(provider, claims) -> user is "
+              .. "required when on_login is set. See module docs.")
+    end
+    _state.find_user    = opts.find_user
     _state.on_login     = opts.on_login
     _state.on_logout    = opts.on_logout
 
@@ -506,6 +539,7 @@ oauth._test = {
     reset = function()
         _state.state_secret_hex = nil
         _state.providers        = {}
+        _state.find_user        = nil
         _state.on_login         = nil
         _state.on_logout        = nil
         _state._jwks_cache      = {}

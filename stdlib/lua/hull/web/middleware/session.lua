@@ -19,6 +19,14 @@ local session = {}
 -- Singleton TTL — session.init() must be called exactly once per application.
 local _ttl = 86400
 
+-- Set by session.init(). Factories like session.login_handler use
+-- this to fail loudly when an app forgets the init ordering
+-- (typical error: calling authflows.init -> wires login_handler ->
+-- request comes in -> session.create fails with a missing-table
+-- SQL error). With the guard the failure is at init time with a
+-- one-line fix.
+local _initialized = false
+
 --- Initialize the sessions table.
 --
 -- Creates the `_hull_sessions` table if absent and sets the module-level
@@ -73,6 +81,7 @@ function session.init(opts)
     db.exec(
         "CREATE INDEX IF NOT EXISTS idx__hull_sessions_user_id "
         .. "ON _hull_sessions(user_id)")
+    _initialized = true
 end
 
 --- Generate a 64-character hex session ID from 32 random bytes.
@@ -259,6 +268,115 @@ function session.destroy_all(user_id)
     return db.exec(
         "DELETE FROM _hull_sessions WHERE user_id = ?",
         { user_id }) or 0
+end
+
+-- ── Session-fixation defense + on_login factories ────────────────
+
+--- Rotate the session id. Destroys @p old_sid (if non-empty) and
+-- creates a fresh session row with the supplied data. Use during
+-- login to defend against session-fixation attacks: a pre-login
+-- session ID known to an attacker can't be elevated to an
+-- authenticated session because the id changes the moment
+-- credentials verify.
+-- @tparam ?string old_sid  Existing session to destroy (nil ok).
+-- @tparam table   data
+-- @tparam[opt] table opts  Same shape as session.create.
+-- @treturn string  New session id.
+function session.rotate(old_sid, data, opts)
+    if old_sid and old_sid ~= "" then session.destroy(old_sid) end
+    return session.create(data, opts)
+end
+
+-- Sensible defaults for the cookie helper used by login_handler /
+-- logout_handler. Apps override via the opts table.
+local DEFAULT_LOGIN_HANDLER_OPTS = {
+    name        = "session",
+    cookie_opts = { path = "/", httponly = true, samesite = "Lax" },
+}
+
+--- Build a standard on_login(req, res, user) callback for
+-- hull/web/auth-flows or hull/web/middleware/oauth. Eliminates the
+-- per-app boilerplate of "create session -> serialize cookie ->
+-- set Set-Cookie -> respond with JSON". Session-fixation defense
+-- (session.rotate) is on by default.
+--
+-- @tparam table cookie_mod  hull.web.cookie module reference.
+-- @tparam[opt] table opts
+--   * `name`        — cookie name (default "session").
+--   * `cookie_opts` — extra opts forwarded to cookie.serialize
+--                     (default { path="/", httponly=true, samesite="Lax" }).
+--   * `extract_data(user)` — fields to embed in the session row
+--                     (default `{ user_id = user.id, email = user.email }`).
+--   * `respond(res, user, sid)` — write the response body (default
+--                     `res:json({ ok = true, user_id = user.id,
+--                                  email = user.email })`).
+--   * `rotate`      — bool, rotate any prior session in the cookie
+--                     (default true; turn off only if your app
+--                     deliberately tracks pre- and post-login
+--                     state in one session).
+-- @treturn function  on_login compatible with auth-flows + oauth.
+function session.login_handler(cookie_mod, opts)
+    if not _initialized then
+        error("session.login_handler: call session.init() first")
+    end
+    if type(cookie_mod) ~= "table" or type(cookie_mod.serialize) ~= "function" then
+        error("session.login_handler: cookie module required")
+    end
+    opts = opts or {}
+    local name        = opts.name        or DEFAULT_LOGIN_HANDLER_OPTS.name
+    local cookie_opts = opts.cookie_opts or DEFAULT_LOGIN_HANDLER_OPTS.cookie_opts
+    local rotate      = opts.rotate
+    if rotate == nil then rotate = true end
+    local extract_data = opts.extract_data or function(user)
+        return { user_id = user.id, email = user.email }
+    end
+    local respond = opts.respond or function(res, user, _sid)
+        res:json({ ok = true, user_id = user.id, email = user.email })
+    end
+
+    return function(req, res, user)
+        local data = extract_data(user) or {}
+        local sid
+        if rotate then
+            local existing = nil
+            if req.ctx and req.ctx.session_id then
+                existing = req.ctx.session_id
+            else
+                local cookies = cookie_mod.parse(req.headers.cookie or "")
+                existing = cookies[name]
+            end
+            sid = session.rotate(existing, data, { req = req })
+        else
+            sid = session.create(data, { req = req })
+        end
+        res:header("Set-Cookie", cookie_mod.serialize(name, sid, cookie_opts))
+        respond(res, user, sid)
+    end
+end
+
+--- Build the matching on_logout(req, res) callback. Destroys the
+-- current session (from cookie) and clears it client-side.
+function session.logout_handler(cookie_mod, opts)
+    if type(cookie_mod) ~= "table" or type(cookie_mod.parse) ~= "function" then
+        error("session.logout_handler: cookie module required")
+    end
+    opts = opts or {}
+    local name        = opts.name        or DEFAULT_LOGIN_HANDLER_OPTS.name
+    local cookie_opts = opts.cookie_opts or DEFAULT_LOGIN_HANDLER_OPTS.cookie_opts
+    local respond = opts.respond or function(res) res:json({ ok = true }) end
+
+    return function(req, res)
+        local sid
+        if req.ctx and req.ctx.session_id then
+            sid = req.ctx.session_id
+        else
+            local cookies = cookie_mod.parse(req.headers.cookie or "")
+            sid = cookies[name]
+        end
+        if sid then session.destroy(sid) end
+        res:header("Set-Cookie", cookie_mod.clear(name, cookie_opts))
+        respond(res)
+    end
 end
 
 return session

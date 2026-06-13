@@ -972,8 +972,11 @@ cross-provider or by a CSRF.
 
 - `oauth.init(opts)`. Call once at app startup. Required: `state_secret`
   (≥16 bytes), `providers = { name = {...}, ... }`. Optional: `state_cookie`,
-  `state_ttl`, `on_login(req, res, provider, claims, tokens) -> path?`,
-  `on_logout(req, res) -> path?`.
+  `state_ttl`, `find_user(provider, claims) -> user` (required when
+  `on_login` is set), `on_login(req, res, user, ctx) -> path?` (signature
+  matches `hull/web/auth-flows` so a single `session.login_handler(cookie)`
+  wires both; `ctx = { provider, claims, tokens }` exposes OIDC-specific
+  data for callers that need it), `on_logout(req, res) -> path?`.
 - `oauth.routes(app)`. Mounts the three routes on the given app.
 - Provider config. Either `preset = "google" | "microsoft"` (plus
   `client_id`, optional `client_secret`, `scopes`, `tenant` for Microsoft)
@@ -1047,10 +1050,20 @@ verify step between successful first-factor auth and `on_login` when
     email_change }`. Each is `function(ctx) → { subject, html?, text? }`.
   - `opts.user_*` callbacks (find_by_email, get, create, set_password,
     set_email, set_email_verified). All required; missing ones are
-    reported together at init time.
+    reported together at init time. **Shortcut:** pass
+    `opts.users = authflows.sqlite_users({ table = "users" })` to
+    bulk-fill all six against the standard schema in one line; any
+    explicit `opts.user_X` still overrides. Apps with a custom
+    schema either pass the 6 callbacks directly or post-process the
+    adapter table.
   - `opts.on_login(req, res, user)` / `opts.on_logout(req, res)`. App
     issues its own session (cookie, JWT, whatever) here. Module is
-    session-agnostic.
+    session-agnostic. **Shortcut:** wire
+    `opts.on_login = session.login_handler(cookie)` and
+    `opts.on_logout = session.logout_handler(cookie)` to get
+    session creation + session-fixation defense + Set-Cookie + JSON
+    response in one line each. The same factories work for OAuth
+    after the find_user split (below).
   - `opts.require_verified_email` (default `true`). Block login until
     email is verified. Opt-out for apps that gate per-route on the
     `email_verified` flag instead.
@@ -1147,12 +1160,15 @@ verify step between successful first-factor auth and `on_login` when
   active until the user clicks the link sent to the new one.
 
 **session**. Server-side sessions backed by SQLite. Requires `session.init()` at startup.
-- `session.init(opts)`. Creates `hull_sessions` table. `opts.ttl` = lifetime in seconds (default: `86400`).
-- `session.create(data)` → 64-char hex session ID.
+- `session.init(opts)`. Creates `hull_sessions` table; runs PRAGMA-checked additive migrations (adds `user_id`, `ip`, `user_agent` columns for the device-management helpers). `opts.ttl` = lifetime in seconds (default: `86400`).
+- `session.create(data, opts?)` → 64-char hex session ID. `opts.req` lets it capture ip + ua + user_id columns at create time. `data.user_id` is auto-populated into the column.
 - `session.load(session_id)` → data table or nil. Auto-extends expiry.
 - `session.update(session_id, data)`. Updates session data.
 - `session.destroy(session_id)`. Deletes session.
 - `session.cleanup()` → count of deleted expired sessions.
+- **Device management** — `session.list_for_user(user_id)` → array of `{id, created_at, last_accessed, ip, user_agent}`; `session.destroy_others(current_sid, user_id)` → "sign out everywhere else"; `session.destroy_all(user_id)` → "sign out everywhere" (used by auth-flows on password reset cascade).
+- **Login/logout factories** — `session.login_handler(cookie, opts?)` returns a turnkey `on_login(req, res, user)` callback that creates a session, sets the cookie, and responds. Defaults to session-fixation defense (`session.rotate(prior_sid, ...)`). `opts.name` (cookie name), `opts.cookie_opts` (forwarded to `cookie.serialize`), `opts.extract_data(user) -> data`, `opts.respond(res, user, sid)`, `opts.rotate` (default `true`). `session.logout_handler(cookie, opts?)` is the matching `on_logout`. Same factories work for `hull/web/auth-flows` AND `hull/web/middleware/oauth` (after the find_user split, see below).
+- `session.rotate(old_sid, data, opts)` — destroy + recreate, session-fixation defense primitive. Used by `login_handler`; apps doing custom on_login can call it directly.
 
 **cookie**. Cookie helpers (not middleware).
 - `cookie.parse(header)` → table `{ name = value, ... }`.
