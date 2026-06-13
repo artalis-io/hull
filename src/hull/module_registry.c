@@ -517,7 +517,7 @@ static const HlModuleSpec REGISTRY[] = {
         .name = "hull/web/pwned",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HTTP_CLIENT | HL_MOD_CAP_HOSTS,
-        .deps = {"hull/http-client", "hull/crypto", "hull/log", 0},
+        .deps = {"hull/http-client", "hull/log", 0},
     },
 
     /* ── Web real-time + WebSocket ──────────────────────────────────── */

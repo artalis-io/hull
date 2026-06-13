@@ -22,7 +22,6 @@
 --       hosts   = { "api.pwnedpasswords.com" },
 --   })
 
-local crypto      = require("hull.crypto")
 local http_client = require("hull.http-client")
 local log         = require("hull.log")
 
