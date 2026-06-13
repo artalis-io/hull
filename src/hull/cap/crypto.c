@@ -739,7 +739,12 @@ int hl_cap_crypto_hmac_sha1(const uint8_t *key, size_t key_len,
      * HlCryptoHmacBackend so the impl can be swapped (mbedTLS today;
      * could be BoringSSL, WolfSSL, hardware token later) without
      * disturbing the cap surface or the Lua / JS bindings. Same
-     * convention as HlCryptoAsymBackend. */
+     * convention as HlCryptoAsymBackend.
+     *
+     * NULL guards mirror hl_cap_crypto_hmac_sha256 — defense in
+     * depth (the backend would reject too) but keeps the two
+     * cap entry points symmetric. */
+    if (!key || !msg || !out) return -1;
     return hl_crypto_hmac_backend_mbedtls.compute(
         &hl_crypto_hmac_backend_mbedtls,
         HL_CRYPTO_HMAC_SHA1,
