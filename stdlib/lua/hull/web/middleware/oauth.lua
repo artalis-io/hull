@@ -76,6 +76,7 @@
 --     oauth.routes(app)
 
 local crypto      = require("hull.crypto")
+local envelope    = require("hull.crypto.envelope")
 local cookie      = require("hull.web.cookie")
 local json        = require("hull.json")
 local jwt         = require("hull.jwt")
@@ -189,33 +190,20 @@ end
 
 -- ── State cookie: sign + verify ────────────────────────────────────
 --
--- Envelope: { provider, verifier, state, nonce, return_to, exp }.
--- We base64url-encode the JSON body and append an HMAC-SHA256 tag
--- computed over the encoded body. Format: `<body_b64>.<hmac_hex>`.
--- Verify uses crypto.hmac_sha256_verify (constant-time at the C
--- layer) and checks exp.
+-- Payload: { provider, verifier, state, nonce, return_to, exp }.
+-- Signature framing (base64url(JSON) || "." || hex(HMAC-SHA256))
+-- lives in hull.crypto.envelope; the expiry check is OAuth-
+-- specific and stays here.
 
-local function sign_state(envelope)
-    envelope.exp = time.now() + _state.state_ttl
-    local body = crypto.base64url_encode(json.encode(envelope))
-    local tag = crypto.hmac_sha256(body, _state.state_secret_hex)
-    return body .. "." .. tag
+local function sign_state(payload)
+    payload.exp = time.now() + _state.state_ttl
+    return envelope.sign(payload, _state.state_secret_hex)
 end
 
 local function verify_state(cookie_value)
     if not cookie_value or cookie_value == "" then return nil, "empty" end
-    local dot = cookie_value:find(".", 1, true)
-    if not dot then return nil, "malformed" end
-    local body = cookie_value:sub(1, dot - 1)
-    local tag = cookie_value:sub(dot + 1)
-    -- Constant-time HMAC verify (the cap layer does the timing-safe
-    -- compare; we don't roll our own).
-    local ok = crypto.hmac_sha256_verify(body, _state.state_secret_hex, tag)
-    if not ok then return nil, "bad tag" end
-    local raw = crypto.base64url_decode(body)
-    if not raw then return nil, "bad encoding" end
-    local env = json.decode(raw)
-    if type(env) ~= "table" then return nil, "bad json" end
+    local env, err = envelope.verify(cookie_value, _state.state_secret_hex)
+    if not env then return nil, err end
     if type(env.exp) ~= "number" or time.now() >= env.exp then
         return nil, "expired"
     end

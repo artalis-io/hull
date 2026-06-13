@@ -58,13 +58,14 @@
  *   oauth.routes(app);
  */
 
-import { crypto } from "hull:crypto";
-import { cookie } from "hull:web:cookie";
-import { json } from "hull:json";
-import { jwt } from "hull:jwt";
-import { time } from "hull:time";
+import { crypto }     from "hull:crypto";
+import { envelope }   from "hull:crypto:envelope";
+import { cookie }     from "hull:web:cookie";
+import { json }       from "hull:json";
+import { jwt }        from "hull:jwt";
+import { time }       from "hull:time";
 import { httpClient } from "hull:http-client";
-import { log } from "hull:log";
+import { log }        from "hull:log";
 
 // ── Module state ───────────────────────────────────────────────────
 
@@ -226,29 +227,21 @@ function base64urlToBytes(s) {
 }
 
 // ── State cookie ───────────────────────────────────────────────────
+//
+// Payload: { provider, verifier, state, nonce, return_to, exp }.
+// Signature framing comes from hull:crypto:envelope; the expiry
+// check is OAuth-specific and stays here.
 
-function signState(envelope) {
-    envelope.exp = time.now() + _state.stateTtl;
-    const body = crypto.base64urlEncode(json.encode(envelope));
-    const tag = crypto.hmacSha256(body, _state.stateSecretHex);
-    return body + "." + tag;
+function signState(payload) {
+    payload.exp = time.now() + _state.stateTtl;
+    return envelope.sign(payload, _state.stateSecretHex);
 }
 
 function verifyState(cookieValue) {
     if (!cookieValue) return [null, "empty"];
-    const dot = cookieValue.indexOf(".");
-    if (dot < 0) return [null, "malformed"];
-    const body = cookieValue.substring(0, dot);
-    const tag = cookieValue.substring(dot + 1);
-    // Constant-time verify in the cap layer.
-    const ok = crypto.hmacSha256Verify(body, _state.stateSecretHex, tag);
-    if (!ok) return [null, "bad tag"];
-    const raw = crypto.base64urlDecode(body);
-    if (raw === null || raw === undefined) return [null, "bad encoding"];
-    let env;
-    try { env = json.decode(raw); }
-    catch (_e) { return [null, "bad json"]; }
-    if (!env || typeof env !== "object") return [null, "bad json"];
+    const r = envelope.verify(cookieValue, _state.stateSecretHex);
+    if (!r[0]) return [null, r[1]];
+    const env = r[0];
     if (typeof env.exp !== "number" || time.now() >= env.exp) {
         return [null, "expired"];
     }

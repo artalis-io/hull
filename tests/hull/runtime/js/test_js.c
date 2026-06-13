@@ -2281,6 +2281,65 @@ UTEST(js_stdlib, totp_encryption_round_trip)
     "  onLogin: (req, res, user) => res.json({ok: true, id: user.id}), " \
     "}; }\n"
 
+UTEST(js_stdlib, crypto_envelope_round_trip)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { envelope } from 'hull:crypto:envelope';\n"
+        "function run() {\n"
+        "  const secret = 'aa'.repeat(32);\n"
+        "  const tok = envelope.sign({sub:'u1',action:'verify',exp:99}, secret);\n"
+        "  if (typeof tok !== 'string' || tok.indexOf('.') < 0) return 0;\n"
+        "  const r = envelope.verify(tok, secret);\n"
+        "  if (!r[0] || r[1] !== null) return 0;\n"
+        "  if (r[0].sub !== 'u1' || r[0].action !== 'verify' || r[0].exp !== 99) return 0;\n"
+        "  return 1;\n"
+        "}\n"
+        "globalThis.__env_rt = run();\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__env_rt"), 1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, crypto_envelope_failure_modes)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { envelope } from 'hull:crypto:envelope';\n"
+        "function run() {\n"
+        "  const secret = 'bb'.repeat(32);\n"
+        "  if (envelope.verify('', secret)[1] !== 'missing') return 0;\n"
+        "  if (envelope.verify('no-dot', secret)[1] !== 'malformed') return 0;\n"
+        "  const tok = envelope.sign({x:1}, secret);\n"
+        "  const tampered = tok.substring(0, tok.length - 2) + 'zz';\n"
+        "  if (envelope.verify(tampered, secret)[1] !== 'bad tag') return 0;\n"
+        "  if (envelope.verify('body.junkhex', secret)[1] !== 'bad tag') return 0;\n"
+        "  const wrong = 'cc'.repeat(32);\n"
+        "  if (envelope.verify(tok, wrong)[1] !== 'bad tag') return 0;\n"
+        "  return 1;\n"
+        "}\n"
+        "globalThis.__env_fm = run();\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__env_fm"), 1);
+
+    cleanup_js_caps();
+}
+
 UTEST(js_stdlib, auth_flows_token_round_trip)
 {
     init_js_with_caps();

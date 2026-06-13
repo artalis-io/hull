@@ -2575,6 +2575,56 @@ UTEST(lua_stdlib, totp_encryption_at_rest)
 "  end, " \
 "}) "
 
+UTEST(lua_stdlib, crypto_envelope_round_trip)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* sign + verify on a known payload, with a 64-hex secret. */
+    int ok = eval_int(
+        "(function() "
+        "  local env = require('hull.crypto.envelope') "
+        "  local secret = ('aa'):rep(32) "  /* 32 bytes hex = 64 chars */
+        "  local tok = env.sign({sub='u1',action='verify',exp=99}, secret) "
+        "  if type(tok) ~= 'string' then return 0 end "
+        "  if not tok:find('.', 1, true) then return 0 end "
+        "  local p, err = env.verify(tok, secret) "
+        "  if not p or err then return 0 end "
+        "  if p.sub ~= 'u1' or p.action ~= 'verify' or p.exp ~= 99 then return 0 end "
+        "  return 1 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+}
+
+UTEST(lua_stdlib, crypto_envelope_failure_modes)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* Each failure mode reports its vague reason. The TOTP-pending
+     * flow in auth-flows depends on these being distinct strings. */
+    int ok = eval_int(
+        "(function() "
+        "  local env = require('hull.crypto.envelope') "
+        "  local secret = ('bb'):rep(32) "
+        "  local _, e1 = env.verify('', secret) "
+        "  if e1 ~= 'missing' then return 0 end "
+        "  local _, e2 = env.verify('no-dot-here', secret) "
+        "  if e2 ~= 'malformed' then return 0 end "
+        "  local tok = env.sign({x=1}, secret) "
+        "  local tampered = tok:sub(1, -3) .. 'zz' "
+        "  local _, e3 = env.verify(tampered, secret) "
+        "  if e3 ~= 'bad tag' then return 0 end "
+        "  local _, e4 = env.verify('body.junkhex', secret) "
+        "  if e4 ~= 'bad tag' then return 0 end "
+        "  local wrong = ('cc'):rep(32) "
+        "  local _, e5 = env.verify(tok, wrong) "
+        "  if e5 ~= 'bad tag' then return 0 end "
+        "  return 1 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+}
+
 UTEST(lua_stdlib, auth_flows_token_round_trip)
 {
     init_lua_with_caps();

@@ -882,6 +882,7 @@ Register with `app.use(method, pattern, mw)`:
 | `oauth` | `hull.web.middleware.oauth` | `hull:web:middleware:oauth` | OIDC / OAuth 2.0 Authorization Code + PKCE (Google, Microsoft, generic IdPs) |
 | `totp` | `hull.web.middleware.totp` | `hull:web:middleware:totp` | RFC 6238 TOTP 2FA with QR enrollment, recovery codes, replay-protection, optional at-rest encryption |
 | `auth-flows` | `hull.web.auth-flows` | `hull:web:auth-flows` | Registration, email-verify, login, password-reset, magic-link, email-change. HMAC-signed single-use tokens, PBKDF2, app-provided storage + templates |
+| `envelope` | `hull.crypto.envelope` | `hull:crypto:envelope` | HMAC-signed JSON-payload stateless tokens (`base64url(payload) "." hex(HMAC)`). Used internally by `hull/web/auth-flows` and `hull/web/middleware/oauth`; available standalone for any app that wants a tamper-detectable signed envelope without DB state |
 | `session` | `hull.web.middleware.session` | `hull:web:middleware:session` | Server-side sessions backed by SQLite |
 | `logger` | `hull.web.middleware.logger` | `hull:web:middleware:logger` | Request logging with logfmt output and request IDs |
 | `transaction` | `hull.web.middleware.transaction` | `hull:web:middleware:transaction` | Wraps handlers in `db.batch()` (BEGIN IMMEDIATE..COMMIT) |
@@ -1085,8 +1086,13 @@ verify step between successful first-factor auth and `on_login` when
   `authflows.send_magic_link(email, url_prefix)`. Standalone helpers
   for admin/programmatic triggers (resend, etc.).
 - Token format: `base64url(JSON{sub, action, exp, nonce}) "." hmac_hex`.
-  Single-use enforced via `_hull_auth_used_tokens` (sha256 of full
-  token as PK, atomic INSERT OR IGNORE → 0 rowcount = replay).
+  Signature framing comes from `hull/crypto/envelope` (shared with
+  the OAuth state cookie); auth-flows layers single-use enforcement
+  via `_hull_auth_used_tokens` (sha256 of full token as PK, atomic
+  INSERT OR IGNORE → 0 rowcount = replay) plus action-tag + expiry
+  checks. The TOTP-pending flow uses the underlying envelope.verify
+  directly so the token stays usable across retry-on-typo attempts
+  and is only burned on a successful code verify.
 - JS API: camelCase keys (`stateSecret`, `emailSend`, `userFindByEmail`,
   `onLogin`, `magicLinkAutoSignup`, `requireVerifiedEmail`, `enableTotp`,
   `userTotpEnrolled`, `totpVerify`, `totpPendingTtl`, `totpPendingRedirect`).

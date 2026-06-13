@@ -89,7 +89,8 @@
 --     })
 --     authflows.routes(app)
 
-local crypto = require("hull.crypto")
+local crypto   = require("hull.crypto")
+local envelope = require("hull.crypto.envelope")
 local db     = require("hull.db")
 local time   = require("hull.time")
 local json   = require("hull.json")
@@ -208,27 +209,25 @@ local function user_uid(user)
     return user.id or user.user_id
 end
 
--- Token = base64url(JSON{user_id, action, exp, nonce, extra...})
---         "." hex(HMAC-SHA256(state_secret, body))
--- The HMAC is over the body bytes only — exactly the OAuth state
--- cookie pattern that's already in production in this stdlib.
+-- Signature framing (base64url(JSON) || "." || hex(HMAC)) lives
+-- in hull.crypto.envelope so the malformed-hex pcall, the body/
+-- tag split, and the vague-reason mapping aren't redone here.
+-- The action-tag, expiry, and single-use bookkeeping are
+-- auth-flows concerns and stay in this file.
 local function issue_token(user_id, action, ttl, extra)
     local payload = {
         sub    = user_id,
         action = action,
         exp    = time.now() + ttl,
-        -- 16 random bytes (base64url-encoded by crypto.random + the
-        -- urlsafe-encoder). Defends against guessable collisions
-        -- and lets two tokens issued in the same second still be
-        -- distinct.
+        -- 16 random bytes (base64url-encoded). Defends against
+        -- guessable collisions and lets two tokens issued in the
+        -- same second still be distinct.
         nonce  = crypto.base64url_encode(crypto.random(16)),
     }
     if extra then
         for k, v in pairs(extra) do payload[k] = v end
     end
-    local body = crypto.base64url_encode(json.encode(payload))
-    local tag = crypto.hmac_sha256(body, _state.state_secret_hex)
-    return body .. "." .. tag
+    return envelope.sign(payload, _state.state_secret_hex)
 end
 
 -- Verify a token's signature + action + expiry WITHOUT marking
@@ -241,29 +240,8 @@ end
 -- the token stays usable across retry-on-typo attempts and is
 -- only burned on a successful code verify.
 local function parse_token(token, expected_action)
-    if type(token) ~= "string" or token == "" then
-        return nil, "missing"
-    end
-    local dot = token:find(".", 1, true)
-    if not dot then return nil, "malformed" end
-    local body = token:sub(1, dot - 1)
-    local tag  = token:sub(dot + 1)
-
-    -- crypto.hmac_sha256_verify raises on malformed-hex inputs
-    -- (intentional at the cap layer — programmer error rather than
-    -- a verify result). Catch with pcall so a user-supplied token
-    -- with junk in the tag position returns a clean "bad tag"
-    -- result instead of crashing the request handler.
-    local ok, valid = pcall(crypto.hmac_sha256_verify, body,
-                             _state.state_secret_hex, tag)
-    if not ok or not valid then
-        return nil, "bad tag"
-    end
-
-    local raw = crypto.base64url_decode(body)
-    if not raw then return nil, "bad encoding" end
-    local env = json.decode(raw)
-    if type(env) ~= "table" then return nil, "bad json" end
+    local env, err = envelope.verify(token, _state.state_secret_hex)
+    if not env then return nil, err end
     if env.action ~= expected_action then return nil, "wrong action" end
     if type(env.exp) ~= "number" or time.now() >= env.exp then
         return nil, "expired"

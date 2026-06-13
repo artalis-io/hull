@@ -15,10 +15,11 @@
  * model notes, and the rationale for each option default.
  */
 
-import { crypto } from "hull:crypto";
-import { db }     from "hull:db";
-import { time }   from "hull:time";
-import { json }   from "hull:json";
+import { crypto }   from "hull:crypto";
+import { envelope } from "hull:crypto:envelope";
+import { db }       from "hull:db";
+import { time }     from "hull:time";
+import { json }     from "hull:json";
 
 const _state = {
     stateSecretHex:      null,
@@ -98,6 +99,10 @@ function bytesToHex(s) {
     return h;
 }
 
+// Signature framing lives in hull:crypto:envelope; this wrapper
+// just builds the payload and adds optional extra fields. The
+// action / expiry / single-use checks remain in parseToken /
+// consumeToken since they're auth-flows-specific.
 function issueToken(userId, action, ttl, extra) {
     const payload = {
         sub:    userId,
@@ -112,37 +117,16 @@ function issueToken(userId, action, ttl, extra) {
             }
         }
     }
-    const body = crypto.base64urlEncode(json.encode(payload));
-    const tag = crypto.hmacSha256(body, _state.stateSecretHex);
-    return body + "." + tag;
+    return envelope.sign(payload, _state.stateSecretHex);
 }
 
 // Verify signature + action + expiry WITHOUT marking the token
-// used. Mirrors Lua's parse_token — the TOTP flow uses it
-// directly so the pending token stays usable across retry-on-
-// typo attempts and is burned only on successful code verify.
+// used. Signature framing comes from hull:crypto:envelope; the
+// action and expiry checks are auth-flows-specific.
 function parseToken(token, expectedAction) {
-    if (typeof token !== "string" || token === "") return [null, "missing"];
-    const dot = token.indexOf(".");
-    if (dot < 0) return [null, "malformed"];
-    const body = token.substring(0, dot);
-    const tag  = token.substring(dot + 1);
-
-    // crypto.hmacSha256Verify throws on malformed-hex input — catch
-    // so a user-typed junk token returns a clean "bad tag".
-    let valid = false;
-    try {
-        valid = crypto.hmacSha256Verify(body, _state.stateSecretHex, tag);
-    } catch (_e) {
-        return [null, "bad tag"];
-    }
-    if (!valid) return [null, "bad tag"];
-
-    const raw = crypto.base64urlDecode(body);
-    if (raw === null || raw === undefined) return [null, "bad encoding"];
-    let env;
-    try { env = json.decode(raw); } catch (_e) { return [null, "bad json"]; }
-    if (!env || typeof env !== "object") return [null, "bad json"];
+    const r = envelope.verify(token, _state.stateSecretHex);
+    if (!r[0]) return [null, r[1]];
+    const env = r[0];
     if (env.action !== expectedAction) return [null, "wrong action"];
     if (typeof env.exp !== "number" || time.now() >= env.exp) {
         return [null, "expired"];

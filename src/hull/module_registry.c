@@ -79,6 +79,19 @@ static const HlModuleSpec REGISTRY[] = {
         .required_caps = 0, .deps = {0},
     },
     {
+        /* HMAC-signed, JSON-payload, stateless token framing
+         * (base64url(payload) "." hex(hmac)). Used internally by
+         * hull/web/auth-flows tokens and hull/web/middleware/oauth
+         * state cookies; the pattern is intentionally pulled out
+         * so the signature framing — including the pcall around
+         * hmac_sha256_verify that turns malformed-hex into a clean
+         * "bad tag" — lives in one place. */
+        .name = "hull/crypto/envelope",
+        .api_major = 1, .intrinsic = 0, .pure = 1,
+        .required_caps = 0,
+        .deps = {"hull/crypto", "hull/json", 0},
+    },
+    {
         .name = "hull/csv",
         .api_major = 1, .intrinsic = 0, .pure = 1,
         .required_caps = 0, .deps = {0},
@@ -293,8 +306,14 @@ static const HlModuleSpec REGISTRY[] = {
         .name = "hull/web/auth-flows",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HTTP_SERVER | HL_MOD_CAP_DB,
-        .deps = {"hull/http-server", "hull/db", "hull/crypto",
-                 "hull/json", "hull/time", 0},
+        /* hull/crypto/envelope transitively brings hull/crypto +
+         * hull/json — both are still imported directly by the
+         * module (hash_password, base64url, json) but the
+         * resolver admits them via the dep chain so they don't
+         * need re-declaration here. */
+        .deps = {"hull/http-server", "hull/db",
+                 "hull/crypto/envelope", "hull/crypto",
+                 "hull/time", 0},
     },
     {
         .name = "hull/web/cookie",
@@ -417,8 +436,14 @@ static const HlModuleSpec REGISTRY[] = {
          * Also relies on hull/time at runtime via jwt.verify's exp
          * check but jwt itself declares hull/time, so the dep
          * transitively resolves through hull/jwt. */
+        /* hull/json is dropped from direct deps — hull/crypto/envelope
+         * (used by state_sign / state_verify) brings it transitively
+         * via the resolver, freeing the slot needed for envelope
+         * without losing the implicit `local json = require(...)`
+         * inside this module. */
         .deps = {"hull/http-server", "hull/http-client", "hull/crypto",
-                 "hull/web/cookie", "hull/jwt", "hull/json", "hull/time", 0},
+                 "hull/crypto/envelope", "hull/web/cookie", "hull/jwt",
+                 "hull/time", 0},
     },
     {
         .name = "hull/web/middleware/outbox",
