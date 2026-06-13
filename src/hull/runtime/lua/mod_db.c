@@ -300,11 +300,220 @@ static int lua_db_batch(lua_State *L)
     return 0;
 }
 
+/* ── Dialect-aware helpers (backed by HlDbBackend methods) ─────────
+ *
+ * These let stdlib modules stay DB-backend-agnostic. The actual SQL
+ * for each call is constructed inside the backend (db_sqlite.c et al.)
+ * — these are thin marshalling layers that turn Lua tables into the
+ * HlValue / C-string arrays the backend method expects. */
+
+/* Marshal a Lua array of strings into a C string array allocated on
+ * the scratch arena. Returns NULL on bad input (puts an error on the
+ * Lua stack via lua_pushstring + raises). */
+static const char **lua_strings_from_array(lua_State *L, int idx, int *out_n,
+                                            HlLua *lua)
+{
+    if (lua_type(L, idx) != LUA_TTABLE) {
+        luaL_error(L, "expected array of strings at arg %d", idx);
+        return NULL;
+    }
+    int n = (int)luaL_len(L, idx);
+    if (n < 0) {
+        luaL_error(L, "negative array length at arg %d", idx);
+        return NULL;
+    }
+    const char **arr = sh_arena_alloc(lua->scratch, (size_t)n * sizeof(*arr));
+    if (!arr) {
+        luaL_error(L, "out of memory");
+        return NULL;
+    }
+    for (int i = 0; i < n; i++) {
+        lua_rawgeti(L, idx, i + 1);
+        if (lua_type(L, -1) != LUA_TSTRING) {
+            luaL_error(L, "non-string element at index %d", i + 1);
+            return NULL;
+        }
+        arr[i] = lua_tostring(L, -1);
+        lua_pop(L, 1);
+    }
+    *out_n = n;
+    return arr;
+}
+
+/* Marshal a Lua array of values into an HlValue[] on the scratch arena.
+ * Mirrors the conversion already done in lua_db_query / lua_db_exec
+ * but extracted so insert_if_absent / upsert can use it. */
+static HlValue *lua_values_from_array(lua_State *L, int idx, int *out_n,
+                                       HlLua *lua)
+{
+    if (lua_type(L, idx) != LUA_TTABLE) {
+        luaL_error(L, "expected values array at arg %d", idx);
+        return NULL;
+    }
+    int n = (int)luaL_len(L, idx);
+    HlValue *vals = sh_arena_alloc(lua->scratch, (size_t)n * sizeof(*vals));
+    if (!vals) {
+        luaL_error(L, "out of memory");
+        return NULL;
+    }
+    for (int i = 0; i < n; i++) {
+        lua_rawgeti(L, idx, i + 1);
+        switch (lua_type(L, -1)) {
+            case LUA_TNIL:
+                vals[i].type = HL_TYPE_NIL;
+                break;
+            case LUA_TBOOLEAN:
+                vals[i].type = HL_TYPE_BOOL;
+                vals[i].b    = lua_toboolean(L, -1);
+                break;
+            case LUA_TNUMBER:
+                if (lua_isinteger(L, -1)) {
+                    vals[i].type = HL_TYPE_INT;
+                    vals[i].i    = lua_tointeger(L, -1);
+                } else {
+                    vals[i].type = HL_TYPE_DOUBLE;
+                    vals[i].d    = lua_tonumber(L, -1);
+                }
+                break;
+            case LUA_TSTRING: {
+                size_t slen;
+                const char *s = lua_tolstring(L, -1, &slen);
+                vals[i].type = HL_TYPE_TEXT;
+                vals[i].s    = s;
+                vals[i].len  = slen;
+                break;
+            }
+            default:
+                luaL_error(L, "unsupported value type at index %d", i + 1);
+                return NULL;
+        }
+        lua_pop(L, 1);
+    }
+    *out_n = n;
+    return vals;
+}
+
+/* db.insert_if_absent(table, conflict_cols, columns, values)
+ *   conflict_cols: array of column names (the unique-constraint
+ *                  target). May be empty/nil to mean "ignore on
+ *                  any constraint violation".
+ *   columns:       array of column names to insert.
+ *   values:        array of values, same length as columns.
+ *
+ * Backend-dispatched: SQLite emits `INSERT OR IGNORE`, Postgres
+ * emits `INSERT ... ON CONFLICT(...) DO NOTHING`. */
+static int lua_db_insert_if_absent(lua_State *L)
+{
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->base.db_handle)
+        return luaL_error(L, "database not configured");
+
+    const char *table = luaL_checkstring(L, 1);
+    int n_conflict = 0;
+    const char **conflict_cols = NULL;
+    if (!lua_isnil(L, 2)) {
+        conflict_cols = lua_strings_from_array(L, 2, &n_conflict, lua);
+    }
+    int n_cols = 0;
+    const char **cols = lua_strings_from_array(L, 3, &n_cols, lua);
+    int n_vals = 0;
+    HlValue *vals = lua_values_from_array(L, 4, &n_vals, lua);
+    if (n_cols != n_vals)
+        return luaL_error(L, "columns/values length mismatch (%d vs %d)",
+                          n_cols, n_vals);
+
+    int is_stdlib = lua_is_stdlib_caller(L);
+    HlDbHandle *h = is_stdlib ? lua->base.hull_db_handle : lua->base.db_handle;
+
+    int rc = hl_db_insert_if_absent(h, table, conflict_cols, n_conflict,
+                                     cols, vals, n_cols);
+    if (rc < 0) {
+        return luaL_error(L, "db.insert_if_absent: %s", hl_db_errmsg(h));
+    }
+    lua_pushinteger(L, rc);
+    return 1;
+}
+
+/* db.upsert(table, conflict_cols, columns, values)
+ *   Backend-dispatched: SQLite emits `INSERT ... ON CONFLICT(...) DO
+ *   UPDATE SET col=excluded.col, ...` (the spec'd portable form,
+ *   equivalent to the old INSERT OR REPLACE pattern). */
+static int lua_db_upsert(lua_State *L)
+{
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->base.db_handle)
+        return luaL_error(L, "database not configured");
+
+    const char *table = luaL_checkstring(L, 1);
+    int n_conflict = 0;
+    const char **conflict_cols = lua_strings_from_array(L, 2, &n_conflict, lua);
+    if (n_conflict < 1)
+        return luaL_error(L, "db.upsert: conflict_cols must be non-empty");
+    int n_cols = 0;
+    const char **cols = lua_strings_from_array(L, 3, &n_cols, lua);
+    int n_vals = 0;
+    HlValue *vals = lua_values_from_array(L, 4, &n_vals, lua);
+    if (n_cols != n_vals)
+        return luaL_error(L, "columns/values length mismatch (%d vs %d)",
+                          n_cols, n_vals);
+
+    int is_stdlib = lua_is_stdlib_caller(L);
+    HlDbHandle *h = is_stdlib ? lua->base.hull_db_handle : lua->base.db_handle;
+
+    int rc = hl_db_upsert(h, table, conflict_cols, n_conflict,
+                           cols, vals, n_cols);
+    if (rc < 0) {
+        return luaL_error(L, "db.upsert: %s", hl_db_errmsg(h));
+    }
+    lua_pushinteger(L, rc);
+    return 1;
+}
+
+/* Row-callback adapter for db.table_columns: pushes each column name
+ * onto a Lua-side array stored at the top of the stack. */
+typedef struct {
+    lua_State *L;
+    int        i;
+} LuaColForwardCtx;
+
+static void lua_db_table_columns_cb(void *cb_ctx, const char *col_name)
+{
+    LuaColForwardCtx *fwd = (LuaColForwardCtx *)cb_ctx;
+    lua_pushstring(fwd->L, col_name);
+    lua_rawseti(fwd->L, -2, ++fwd->i);
+}
+
+/* db.table_columns(table) -> { "col1", "col2", ... }
+ *
+ * Backend-dispatched: SQLite uses PRAGMA table_info, Postgres
+ * uses information_schema. */
+static int lua_db_table_columns(lua_State *L)
+{
+    HlLua *lua = get_hl_lua(L);
+    if (!lua || !lua->base.db_handle)
+        return luaL_error(L, "database not configured");
+
+    const char *table = luaL_checkstring(L, 1);
+    int is_stdlib = lua_is_stdlib_caller(L);
+    HlDbHandle *h = is_stdlib ? lua->base.hull_db_handle : lua->base.db_handle;
+
+    lua_newtable(L);  /* result */
+    LuaColForwardCtx fwd = { L, 0 };
+    int rc = hl_db_table_columns(h, table, lua_db_table_columns_cb, &fwd);
+    if (rc < 0) {
+        return luaL_error(L, "db.table_columns: %s", hl_db_errmsg(h));
+    }
+    return 1;
+}
+
 static const luaL_Reg db_funcs[] = {
-    {"query",   lua_db_query},
-    {"exec",    lua_db_exec},
-    {"last_id", lua_db_last_id},
-    {"batch",   lua_db_batch},
+    {"query",            lua_db_query},
+    {"exec",             lua_db_exec},
+    {"last_id",          lua_db_last_id},
+    {"batch",            lua_db_batch},
+    {"insert_if_absent", lua_db_insert_if_absent},
+    {"upsert",           lua_db_upsert},
+    {"table_columns",    lua_db_table_columns},
     {NULL, NULL}
 };
 
@@ -891,6 +1100,21 @@ int luaopen_hull_db(lua_State *L)
     /* db.udf sub-table */
     luaL_newlib(L, db_udf_funcs);
     lua_setfield(L, -2, "udf");
+
+    /* Backend identity + dialect constants. Read from the
+     * HlDbBackend wired to this runtime so apps can branch on
+     * backend if they ever need to, and stdlib modules can pull
+     * the autoincrement DDL fragment when building CREATE TABLE
+     * statements. */
+    HlLua *lua = get_hl_lua(L);
+    const HlDbBackend *backend = (lua && lua->base.db_handle)
+        ? lua->base.db_handle->backend : NULL;
+    lua_pushstring(L, backend ? backend->name : "none");
+    lua_setfield(L, -2, "backend_name");
+    lua_pushstring(L, backend && backend->autoincrement_id_ddl
+                       ? backend->autoincrement_id_ddl
+                       : "INTEGER PRIMARY KEY");
+    lua_setfield(L, -2, "autoincrement_id_ddl");
 
     return 1;
 }

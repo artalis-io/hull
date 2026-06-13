@@ -15,6 +15,8 @@
 #include "hull/alloc.h"
 
 #include <sqlite3.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -118,20 +120,212 @@ static void sqlite_guard_stale_txn(void *ctx)
     hl_cap_db_guard_stale_txn(s->db);
 }
 
+/* ── Dialect-aware SQL helpers ───────────────────────────────────────
+ *
+ * These keep the stdlib (auth-flows, audit-log, session, rbac, etc.)
+ * free of SQLite-specific syntax. Each builds the right SQL for the
+ * SQLite dialect and dispatches to the existing exec path.
+ *
+ * Each helper allocates a temporary buffer on the stack-with-malloc-
+ * fallback pattern so a 4 KB SQL string fits without heap, and longer
+ * ones don't overflow the stack. */
+
+/* Conservative upper bound for a generated SQL string: every column
+ * name contributes once for the column list, once for VALUES (with a
+ * `?`), and in the upsert case once more for the DO UPDATE clause.
+ * We cap each identifier at 63 chars (SQL standard) and add fixed
+ * overhead for keywords. */
+static size_t sqlite_estimate_sql_size(const char *table,
+                                        int n_conflict, int n_cols,
+                                        int include_update)
+{
+    size_t per_ident = 64;       /* col name + comma + space */
+    size_t fixed = 200;          /* keywords, parens */
+    size_t cols_part = (size_t)n_cols * (per_ident + 4);   /* + "?, " */
+    size_t conflict_part = (size_t)n_conflict * per_ident;
+    size_t update_part = include_update
+        ? (size_t)n_cols * (per_ident * 2 + 16)  /* "col=excluded.col, " */
+        : 0;
+    return strlen(table) + fixed + cols_part + conflict_part + update_part;
+}
+
+/* Append helper — bounded snprintf into an offset cursor. Returns
+ * remaining capacity (or -1 on overflow). */
+static int sqlite_append(char *buf, size_t cap, size_t *off, const char *fmt, ...)
+{
+    if (*off >= cap) return -1;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf + *off, cap - *off, fmt, ap);
+    va_end(ap);
+    if (n < 0 || (size_t)n >= cap - *off) return -1;
+    *off += (size_t)n;
+    return (int)(cap - *off);
+}
+
+static int sqlite_insert_if_absent(void *ctx, const char *table,
+                                    const char *const *conflict_cols,
+                                    int n_conflict,
+                                    const char *const *cols,
+                                    const HlValue *values, int n_cols)
+{
+    if (!table || n_cols < 1 || !cols || !values) return -1;
+    /* conflict_cols may be NULL/0 — in that case we emit
+     * "INSERT OR IGNORE" without an explicit conflict target,
+     * which SQLite treats as "any constraint violation". */
+    HlDbSqliteCtx *s = (HlDbSqliteCtx *)ctx;
+    size_t cap = sqlite_estimate_sql_size(table, n_conflict, n_cols, 0);
+    char stack_buf[4096];
+    char *buf = (cap <= sizeof(stack_buf)) ? stack_buf : malloc(cap);
+    if (!buf) return -1;
+    size_t off = 0;
+
+    int rc = -1;
+    if (sqlite_append(buf, cap, &off, "INSERT OR IGNORE INTO %s (", table) < 0)
+        goto done;
+    for (int i = 0; i < n_cols; i++) {
+        if (sqlite_append(buf, cap, &off, "%s%s",
+                          i == 0 ? "" : ", ", cols[i]) < 0) goto done;
+    }
+    if (sqlite_append(buf, cap, &off, ") VALUES (") < 0) goto done;
+    for (int i = 0; i < n_cols; i++) {
+        if (sqlite_append(buf, cap, &off, "%s?", i == 0 ? "" : ", ") < 0)
+            goto done;
+    }
+    if (sqlite_append(buf, cap, &off, ")") < 0) goto done;
+
+    rc = hl_cap_db_exec(&s->cache, buf, values, n_cols);
+done:
+    if (buf != stack_buf) free(buf);
+    return rc;
+}
+
+static int sqlite_upsert(void *ctx, const char *table,
+                          const char *const *conflict_cols, int n_conflict,
+                          const char *const *cols,
+                          const HlValue *values, int n_cols)
+{
+    if (!table || n_cols < 1 || !cols || !values
+        || n_conflict < 1 || !conflict_cols) return -1;
+    HlDbSqliteCtx *s = (HlDbSqliteCtx *)ctx;
+    size_t cap = sqlite_estimate_sql_size(table, n_conflict, n_cols, 1);
+    char stack_buf[4096];
+    char *buf = (cap <= sizeof(stack_buf)) ? stack_buf : malloc(cap);
+    if (!buf) return -1;
+    size_t off = 0;
+
+    int rc = -1;
+    /* INSERT INTO t (c1, c2, ...) VALUES (?, ?, ...) */
+    if (sqlite_append(buf, cap, &off, "INSERT INTO %s (", table) < 0)
+        goto done;
+    for (int i = 0; i < n_cols; i++) {
+        if (sqlite_append(buf, cap, &off, "%s%s",
+                          i == 0 ? "" : ", ", cols[i]) < 0) goto done;
+    }
+    if (sqlite_append(buf, cap, &off, ") VALUES (") < 0) goto done;
+    for (int i = 0; i < n_cols; i++) {
+        if (sqlite_append(buf, cap, &off, "%s?", i == 0 ? "" : ", ") < 0)
+            goto done;
+    }
+    if (sqlite_append(buf, cap, &off, ") ON CONFLICT(") < 0) goto done;
+    for (int i = 0; i < n_conflict; i++) {
+        if (sqlite_append(buf, cap, &off, "%s%s",
+                          i == 0 ? "" : ", ", conflict_cols[i]) < 0)
+            goto done;
+    }
+    if (sqlite_append(buf, cap, &off, ") DO UPDATE SET ") < 0) goto done;
+    /* Skip conflict cols on the update side — they're the keys. */
+    int first = 1;
+    for (int i = 0; i < n_cols; i++) {
+        int is_conflict = 0;
+        for (int j = 0; j < n_conflict; j++) {
+            if (strcmp(cols[i], conflict_cols[j]) == 0) {
+                is_conflict = 1; break;
+            }
+        }
+        if (is_conflict) continue;
+        if (sqlite_append(buf, cap, &off, "%s%s=excluded.%s",
+                          first ? "" : ", ", cols[i], cols[i]) < 0)
+            goto done;
+        first = 0;
+    }
+    if (first) {
+        /* All columns are conflict columns — degenerate "INSERT
+         * OR IGNORE" semantics. Emit DO NOTHING. */
+        off -= strlen(" DO UPDATE SET ");
+        if (sqlite_append(buf, cap, &off, " DO NOTHING") < 0) goto done;
+    }
+
+    rc = hl_cap_db_exec(&s->cache, buf, values, n_cols);
+done:
+    if (buf != stack_buf) free(buf);
+    return rc;
+}
+
+/* Row callback for table_columns: PRAGMA table_info returns
+ * (cid, name, type, notnull, dflt_value, pk). We pull column 1
+ * ("name") and pass to the caller's HlDbColumnCallback. */
+typedef struct {
+    HlDbColumnCallback cb;
+    void              *cb_ctx;
+} HlDbColumnsForward;
+
+static int sqlite_table_columns_row_cb(void *ctx, HlColumn *cols, int ncols)
+{
+    HlDbColumnsForward *fwd = (HlDbColumnsForward *)ctx;
+    for (int i = 0; i < ncols; i++) {
+        if (cols[i].name && strcmp(cols[i].name, "name") == 0
+            && cols[i].value.type == HL_TYPE_TEXT
+            && cols[i].value.s) {
+            fwd->cb(fwd->cb_ctx, cols[i].value.s);
+            return 0;
+        }
+    }
+    return 0;
+}
+
+static int sqlite_table_columns(void *ctx, const char *table,
+                                 HlDbColumnCallback cb, void *cb_ctx)
+{
+    if (!table || !cb) return -1;
+    HlDbSqliteCtx *s = (HlDbSqliteCtx *)ctx;
+    /* PRAGMA table_info doesn't accept bound parameters in SQLite
+     * <3.41; substitute table name directly. The stdlib never
+     * passes user input here (table names come from module
+     * source). Still, sanitise to A-Z a-z 0-9 _ to be safe. */
+    for (const char *p = table; *p; p++) {
+        char c = *p;
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+              || (c >= '0' && c <= '9') || c == '_')) {
+            return -1;
+        }
+    }
+    char sql[160];
+    int n = snprintf(sql, sizeof(sql), "PRAGMA table_info(%s)", table);
+    if (n < 0 || (size_t)n >= sizeof(sql)) return -1;
+    HlDbColumnsForward fwd = { cb, cb_ctx };
+    return hl_cap_db_query(&s->cache, sql, NULL, 0,
+                           sqlite_table_columns_row_cb, &fwd, NULL);
+}
+
 /* ── Exported backend ─────────────────────────────────────────────── */
 
 const HlDbBackend hl_db_backend_sqlite = {
-    .name            = "sqlite",
-    .open            = sqlite_open,
-    .close           = sqlite_close,
-    .query           = sqlite_query,
-    .exec            = sqlite_exec,
-    .begin           = sqlite_begin,
-    .commit          = sqlite_commit,
-    .rollback        = sqlite_rollback,
-    .last_id         = sqlite_last_id,
-    .errmsg          = sqlite_errmsg,
-    .guard_stale_txn = sqlite_guard_stale_txn,
+    .name                  = "sqlite",
+    .autoincrement_id_ddl  = "INTEGER PRIMARY KEY AUTOINCREMENT",
+    .open                  = sqlite_open,
+    .close                 = sqlite_close,
+    .query                 = sqlite_query,
+    .exec                  = sqlite_exec,
+    .begin                 = sqlite_begin,
+    .commit                = sqlite_commit,
+    .rollback              = sqlite_rollback,
+    .last_id               = sqlite_last_id,
+    .errmsg                = sqlite_errmsg,
+    .guard_stale_txn       = sqlite_guard_stale_txn,
+    .insert_if_absent      = sqlite_insert_if_absent,
+    .upsert                = sqlite_upsert,
+    .table_columns         = sqlite_table_columns,
 };
 
 /* ── Accessors ────────────────────────────────────────────────────── */

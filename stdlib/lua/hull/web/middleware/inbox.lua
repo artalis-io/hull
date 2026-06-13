@@ -117,8 +117,10 @@ function inbox.mark_processed(message_id, source, opts)
     local now = time.now()
     local ttl = opts.ttl or _ttl
 
-    db.exec(
-        "INSERT OR REPLACE INTO _hull_inbox_processed (message_id, source, processed_at, expires_at) VALUES (?, ?, ?, ?)",
+    db.upsert(
+        "_hull_inbox_processed",
+        { "source", "message_id" },
+        { "message_id", "source", "processed_at", "expires_at" },
         { message_id, source, now, now + ttl }
     )
 end

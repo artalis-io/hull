@@ -59,23 +59,21 @@ function outbox.init(opts)
     if opts.max_attempts ~= nil then
         _max_attempts = opts.max_attempts
     end
-    db.exec([[
-        CREATE TABLE IF NOT EXISTS _hull_outbox (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            kind            TEXT NOT NULL,
-            destination     TEXT NOT NULL,
-            payload         TEXT NOT NULL,
-            headers         TEXT,
-            idempotency_key TEXT,
-            attempts        INTEGER NOT NULL DEFAULT 0,
-            max_attempts    INTEGER NOT NULL DEFAULT 5,
-            next_attempt_at INTEGER NOT NULL,
-            state           TEXT NOT NULL DEFAULT 'pending',
-            created_at      INTEGER NOT NULL,
-            delivered_at    INTEGER,
-            last_error      TEXT
-        )
-    ]])
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _hull_outbox ("
+        .. "id              " .. db.autoincrement_id_ddl .. ", "
+        .. "kind            TEXT NOT NULL,"
+        .. "destination     TEXT NOT NULL,"
+        .. "payload         TEXT NOT NULL,"
+        .. "headers         TEXT,"
+        .. "idempotency_key TEXT,"
+        .. "attempts        INTEGER NOT NULL DEFAULT 0,"
+        .. "max_attempts    INTEGER NOT NULL DEFAULT 5,"
+        .. "next_attempt_at INTEGER NOT NULL,"
+        .. "state           TEXT NOT NULL DEFAULT 'pending',"
+        .. "created_at      INTEGER NOT NULL,"
+        .. "delivered_at    INTEGER,"
+        .. "last_error      TEXT)")
     db.exec([[
         CREATE INDEX IF NOT EXISTS idx_hull_outbox_pending
         ON _hull_outbox(state, next_attempt_at)

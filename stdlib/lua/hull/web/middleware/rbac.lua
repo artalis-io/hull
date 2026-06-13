@@ -65,14 +65,14 @@ end
 -- @tparam string name         Role name (e.g. `"admin"`, `"editor"`).
 -- @tparam[opt] table permissions  Array of permission names to grant.
 function rbac.define_role(name, permissions)
-    db.exec("INSERT OR IGNORE INTO _hull_roles (name) VALUES (?)", { name })
+    db.insert_if_absent("_hull_roles", { "name" }, { "name" }, { name })
     if permissions then
         for _, perm in ipairs(permissions) do
-            db.exec("INSERT OR IGNORE INTO _hull_permissions (name) VALUES (?)", { perm })
-            db.exec(
-                "INSERT OR IGNORE INTO _hull_role_permissions (role, permission) VALUES (?, ?)",
-                { name, perm }
-            )
+            db.insert_if_absent("_hull_permissions", { "name" },
+                { "name" }, { perm })
+            db.insert_if_absent("_hull_role_permissions",
+                { "role", "permission" },
+                { "role", "permission" }, { name, perm })
         end
     end
 end
@@ -81,7 +81,7 @@ end
 -- @function rbac.define_permission
 -- @tparam string name
 function rbac.define_permission(name)
-    db.exec("INSERT OR IGNORE INTO _hull_permissions (name) VALUES (?)", { name })
+    db.insert_if_absent("_hull_permissions", { "name" }, { "name" }, { name })
 end
 
 --- Assign a role to a user. Idempotent.
@@ -89,10 +89,9 @@ end
 -- @tparam string user_id
 -- @tparam string role
 function rbac.assign(user_id, role)
-    db.exec(
-        "INSERT OR IGNORE INTO _hull_user_roles (user_id, role) VALUES (?, ?)",
-        { user_id, role }
-    )
+    db.insert_if_absent("_hull_user_roles",
+        { "user_id", "role" },
+        { "user_id", "role" }, { user_id, role })
 end
 
 --- Revoke a role from a user.
@@ -111,10 +110,9 @@ end
 -- @tparam string role
 -- @tparam string permission
 function rbac.grant(role, permission)
-    db.exec(
-        "INSERT OR IGNORE INTO _hull_role_permissions (role, permission) VALUES (?, ?)",
-        { role, permission }
-    )
+    db.insert_if_absent("_hull_role_permissions",
+        { "role", "permission" },
+        { "role", "permission" }, { role, permission })
 end
 
 --- Remove a permission from a role.

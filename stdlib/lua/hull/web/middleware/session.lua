@@ -63,11 +63,12 @@ function session.init(opts)
     -- Additive migration for the device-management helpers
     -- (session.list_for_user, destroy_others, destroy_all). Pre-
     -- existing rows keep working; they just carry NULL in the
-    -- new columns. SQLite has no ALTER TABLE ADD COLUMN IF NOT
-    -- EXISTS, so PRAGMA-check first.
+    -- new columns. Neither SQLite nor Postgres has ALTER TABLE
+    -- ADD COLUMN IF NOT EXISTS in every supported version, so
+    -- ask the backend for the current column set first.
     local existing = {}
-    for _, r in ipairs(db.query("PRAGMA table_info(_hull_sessions)") or {}) do
-        existing[r.name] = true
+    for _, name in ipairs(db.table_columns("_hull_sessions") or {}) do
+        existing[name] = true
     end
     if not existing.user_id then
         db.exec("ALTER TABLE _hull_sessions ADD COLUMN user_id TEXT")

@@ -71,14 +71,16 @@ function requireName(value, what) {
  */
 function defineRole(name, permissions) {
     const roleName = requireName(name, "role name");
-    db.exec("INSERT OR IGNORE INTO _hull_roles (name) VALUES (?)", [roleName]);
+    db.insertIfAbsent("_hull_roles", ["name"], ["name"], [roleName]);
 
     if (permissions) {
         for (let i = 0; i < permissions.length; i++) {
             const permName = requireName(permissions[i], "permission name");
-            db.exec("INSERT OR IGNORE INTO _hull_permissions (name) VALUES (?)", [permName]);
-            db.exec(
-                "INSERT OR IGNORE INTO _hull_role_permissions (role, permission) VALUES (?, ?)",
+            db.insertIfAbsent("_hull_permissions", ["name"], ["name"], [permName]);
+            db.insertIfAbsent(
+                "_hull_role_permissions",
+                ["role", "permission"],
+                ["role", "permission"],
                 [roleName, permName]
             );
         }
@@ -91,7 +93,7 @@ function defineRole(name, permissions) {
  */
 function definePermission(name) {
     const permName = requireName(name, "permission name");
-    db.exec("INSERT OR IGNORE INTO _hull_permissions (name) VALUES (?)", [permName]);
+    db.insertIfAbsent("_hull_permissions", ["name"], ["name"], [permName]);
 }
 
 // String() on null/undefined yields the literal "null"/"undefined", which
@@ -108,8 +110,10 @@ function normalizeUserId(userId) {
  * @param {string} role
  */
 function assign(userId, role) {
-    db.exec(
-        "INSERT OR IGNORE INTO _hull_user_roles (user_id, role) VALUES (?, ?)",
+    db.insertIfAbsent(
+        "_hull_user_roles",
+        ["user_id", "role"],
+        ["user_id", "role"],
         [normalizeUserId(userId), requireName(role, "role name")]
     );
 }
@@ -132,8 +136,10 @@ function revoke(userId, role) {
  * @param {string} permission
  */
 function grant(role, permission) {
-    db.exec(
-        "INSERT OR IGNORE INTO _hull_role_permissions (role, permission) VALUES (?, ?)",
+    db.insertIfAbsent(
+        "_hull_role_permissions",
+        ["role", "permission"],
+        ["role", "permission"],
         [requireName(role, "role name"), requireName(permission, "permission name")]
     );
 }

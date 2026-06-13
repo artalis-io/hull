@@ -38,7 +38,7 @@ function init(opts) {
 
     db.exec(
         "CREATE TABLE IF NOT EXISTS _hull_outbox (" +
-        "  id              INTEGER PRIMARY KEY AUTOINCREMENT," +
+        "  id              " + db.autoincrementIdDdl + "," +
         "  kind            TEXT NOT NULL," +
         "  destination     TEXT NOT NULL," +
         "  payload         TEXT NOT NULL," +

@@ -296,9 +296,10 @@ end
 -- (replay / second consumer in a race).
 local function mark_token_used(token, exp)
     local token_hash = crypto.sha256(token)
-    local rc = db.exec(
-        "INSERT OR IGNORE INTO _hull_auth_used_tokens "
-        .. "(token_hash, used_at, expires_at) VALUES (?, ?, ?)",
+    local rc = db.insert_if_absent(
+        "_hull_auth_used_tokens",
+        { "token_hash" },
+        { "token_hash", "used_at", "expires_at" },
         { token_hash, time.now(), exp })
     return rc > 0
 end
@@ -835,10 +836,10 @@ local function handle_email_change(req, res)
     local token = issue_token(user_id, ACTIONS.email_change,
         _state.email_change_ttl, { new_email = body.new_email })
     local token_hash = crypto.sha256(token)
-    db.exec(
-        "INSERT OR REPLACE INTO _hull_auth_pending_email_changes "
-        .. "(user_id, new_email, token_hash, created_at, expires_at) "
-        .. "VALUES (?, ?, ?, ?, ?)",
+    db.upsert(
+        "_hull_auth_pending_email_changes",
+        { "user_id" },
+        { "user_id", "new_email", "token_hash", "created_at", "expires_at" },
         { user_id, body.new_email, token_hash, now,
           now + _state.email_change_ttl })
 

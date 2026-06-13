@@ -164,9 +164,10 @@ function parseToken(token, expectedAction) {
 
 function markTokenUsed(token, exp) {
     const tokenHash = crypto.sha256(token);
-    const rc = db.exec(
-        "INSERT OR IGNORE INTO _hull_auth_used_tokens "
-        + "(token_hash, used_at, expires_at) VALUES (?, ?, ?)",
+    const rc = db.insertIfAbsent(
+        "_hull_auth_used_tokens",
+        ["token_hash"],
+        ["token_hash", "used_at", "expires_at"],
         [tokenHash, time.now(), exp]);
     return rc > 0;
 }
@@ -610,10 +611,10 @@ function handleEmailChange(req, res) {
     const token = issueToken(uid, ACTIONS.email_change,
         _state.emailChangeTtl, { new_email: body.new_email });
     const tokenHash = crypto.sha256(token);
-    db.exec(
-        "INSERT OR REPLACE INTO _hull_auth_pending_email_changes "
-        + "(user_id, new_email, token_hash, created_at, expires_at) "
-        + "VALUES (?, ?, ?, ?, ?)",
+    db.upsert(
+        "_hull_auth_pending_email_changes",
+        ["user_id"],
+        ["user_id", "new_email", "token_hash", "created_at", "expires_at"],
         [uid, body.new_email, tokenHash, now, now + _state.emailChangeTtl]);
 
     const user = _state.userGet(uid);

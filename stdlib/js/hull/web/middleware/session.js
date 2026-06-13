@@ -45,12 +45,13 @@ function init(opts) {
         "ON _hull_sessions(expires_at)"
     );
     // Additive migration for the device-management helpers
-    // (listForUser, destroyOthers, destroyAll). PRAGMA-checked
-    // because SQLite has no ALTER TABLE ADD COLUMN IF NOT
-    // EXISTS. Old rows keep working with NULL in new columns.
+    // (listForUser, destroyOthers, destroyAll). Both SQLite and
+    // Postgres expose the column set via the backend's vtable
+    // so we don't bake a dialect-specific PRAGMA query in here.
+    // Old rows keep working with NULL in new columns.
     const existing = {};
-    const cols = db.query("PRAGMA table_info(_hull_sessions)") || [];
-    for (let i = 0; i < cols.length; i++) existing[cols[i].name] = true;
+    const cols = db.tableColumns("_hull_sessions") || [];
+    for (let i = 0; i < cols.length; i++) existing[cols[i]] = true;
     if (!existing.user_id)
         db.exec("ALTER TABLE _hull_sessions ADD COLUMN user_id TEXT");
     if (!existing.ip)

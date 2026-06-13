@@ -401,4 +401,179 @@ UTEST(db_backend, query_with_params)
     hl_db_backend_sqlite.close(h.ctx);
 }
 
+/* ── Dialect-aware helpers (insert_if_absent / upsert / table_columns) ── */
+
+UTEST(db_backend, autoincrement_id_ddl_sqlite)
+{
+    ASSERT_STREQ(hl_db_backend_sqlite.autoincrement_id_ddl,
+                  "INTEGER PRIMARY KEY AUTOINCREMENT");
+}
+
+UTEST(db_backend, autoincrement_id_ddl_null_handle_safe)
+{
+    HlDbHandle h = {0};
+    ASSERT_STREQ(hl_db_autoincrement_id_ddl(&h), "INTEGER PRIMARY KEY");
+}
+
+UTEST(db_backend, insert_if_absent_first_wins_dup_ignored)
+{
+    HlDbHandle h = { .backend = &hl_db_backend_sqlite };
+    ASSERT_EQ(hl_db_backend_sqlite.open(&h.ctx, ":memory:", NULL), 0);
+
+    hl_db_exec(&h,
+        "CREATE TABLE u (k TEXT PRIMARY KEY, v INTEGER)", NULL, 0);
+
+    const char *conflict[] = { "k" };
+    const char *cols[]     = { "k", "v" };
+    HlValue vals1[] = {
+        { .type = HL_TYPE_TEXT, .s = "alpha", .len = 5 },
+        { .type = HL_TYPE_INT,  .i = 1 },
+    };
+    int rc = hl_db_insert_if_absent(&h, "u", conflict, 1, cols, vals1, 2);
+    ASSERT_EQ(rc, 1);
+
+    HlValue vals2[] = {
+        { .type = HL_TYPE_TEXT, .s = "alpha", .len = 5 },
+        { .type = HL_TYPE_INT,  .i = 99 },
+    };
+    rc = hl_db_insert_if_absent(&h, "u", conflict, 1, cols, vals2, 2);
+    ASSERT_EQ(rc, 0);
+
+    RowResult result = { .count = 0 };
+    hl_db_query(&h, "SELECT v AS n FROM u WHERE k = 'alpha'",
+                 NULL, 0, collect_vals_cb, &result, NULL);
+    ASSERT_EQ(result.count, 1);
+    ASSERT_EQ(result.ints[0], 1);
+
+    hl_db_backend_sqlite.close(h.ctx);
+}
+
+UTEST(db_backend, upsert_replaces_existing_row)
+{
+    HlDbHandle h = { .backend = &hl_db_backend_sqlite };
+    ASSERT_EQ(hl_db_backend_sqlite.open(&h.ctx, ":memory:", NULL), 0);
+
+    hl_db_exec(&h,
+        "CREATE TABLE u (k TEXT PRIMARY KEY, v INTEGER)", NULL, 0);
+
+    const char *conflict[] = { "k" };
+    const char *cols[]     = { "k", "v" };
+    HlValue vals1[] = {
+        { .type = HL_TYPE_TEXT, .s = "alpha", .len = 5 },
+        { .type = HL_TYPE_INT,  .i = 1 },
+    };
+    ASSERT_EQ(hl_db_upsert(&h, "u", conflict, 1, cols, vals1, 2), 1);
+
+    HlValue vals2[] = {
+        { .type = HL_TYPE_TEXT, .s = "alpha", .len = 5 },
+        { .type = HL_TYPE_INT,  .i = 42 },
+    };
+    int rc = hl_db_upsert(&h, "u", conflict, 1, cols, vals2, 2);
+    ASSERT_TRUE(rc >= 1);
+
+    RowResult result = { .count = 0 };
+    hl_db_query(&h, "SELECT v AS n FROM u WHERE k = 'alpha'",
+                 NULL, 0, collect_vals_cb, &result, NULL);
+    ASSERT_EQ(result.count, 1);
+    ASSERT_EQ(result.ints[0], 42);
+
+    hl_db_backend_sqlite.close(h.ctx);
+}
+
+UTEST(db_backend, upsert_composite_conflict_key)
+{
+    HlDbHandle h = { .backend = &hl_db_backend_sqlite };
+    ASSERT_EQ(hl_db_backend_sqlite.open(&h.ctx, ":memory:", NULL), 0);
+
+    hl_db_exec(&h,
+        "CREATE TABLE u (a TEXT, b TEXT, v INTEGER, "
+        " PRIMARY KEY (a, b))", NULL, 0);
+
+    const char *conflict[] = { "a", "b" };
+    const char *cols[]     = { "a", "b", "v" };
+    HlValue vals1[] = {
+        { .type = HL_TYPE_TEXT, .s = "x", .len = 1 },
+        { .type = HL_TYPE_TEXT, .s = "y", .len = 1 },
+        { .type = HL_TYPE_INT,  .i = 7 },
+    };
+    ASSERT_EQ(hl_db_upsert(&h, "u", conflict, 2, cols, vals1, 3), 1);
+
+    HlValue vals2[] = {
+        { .type = HL_TYPE_TEXT, .s = "x", .len = 1 },
+        { .type = HL_TYPE_TEXT, .s = "y", .len = 1 },
+        { .type = HL_TYPE_INT,  .i = 70 },
+    };
+    ASSERT_TRUE(hl_db_upsert(&h, "u", conflict, 2, cols, vals2, 3) >= 1);
+
+    RowResult result = { .count = 0 };
+    hl_db_query(&h,
+        "SELECT v AS n FROM u WHERE a = 'x' AND b = 'y'",
+        NULL, 0, collect_vals_cb, &result, NULL);
+    ASSERT_EQ(result.count, 1);
+    ASSERT_EQ(result.ints[0], 70);
+
+    hl_db_backend_sqlite.close(h.ctx);
+}
+
+typedef struct {
+    char names[8][32];
+    int  n;
+} ColumnsList;
+
+static void capture_columns_cb(void *cb_ctx, const char *name)
+{
+    ColumnsList *c = (ColumnsList *)cb_ctx;
+    if (c->n >= 8) return;
+    size_t len = strlen(name);
+    if (len > 31) len = 31;
+    memcpy(c->names[c->n], name, len);
+    c->names[c->n][len] = '\0';
+    c->n++;
+}
+
+UTEST(db_backend, table_columns_lists_schema)
+{
+    HlDbHandle h = { .backend = &hl_db_backend_sqlite };
+    ASSERT_EQ(hl_db_backend_sqlite.open(&h.ctx, ":memory:", NULL), 0);
+
+    hl_db_exec(&h,
+        "CREATE TABLE u (id INTEGER PRIMARY KEY, "
+        " name TEXT NOT NULL, "
+        " created_at INTEGER)", NULL, 0);
+
+    ColumnsList c = { .n = 0 };
+    int rc = hl_db_table_columns(&h, "u", capture_columns_cb, &c);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(c.n, 3);
+    ASSERT_STREQ(c.names[0], "id");
+    ASSERT_STREQ(c.names[1], "name");
+    ASSERT_STREQ(c.names[2], "created_at");
+
+    hl_db_backend_sqlite.close(h.ctx);
+}
+
+UTEST(db_backend, table_columns_missing_table_returns_empty)
+{
+    HlDbHandle h = { .backend = &hl_db_backend_sqlite };
+    ASSERT_EQ(hl_db_backend_sqlite.open(&h.ctx, ":memory:", NULL), 0);
+
+    ColumnsList c = { .n = 0 };
+    int rc = hl_db_table_columns(&h, "does_not_exist",
+                                   capture_columns_cb, &c);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(c.n, 0);
+
+    hl_db_backend_sqlite.close(h.ctx);
+}
+
+UTEST(db_backend, dialect_helpers_null_handle_safe)
+{
+    HlDbHandle h = {0};
+    const char *cols[]     = { "x" };
+    HlValue vals[] = { { .type = HL_TYPE_INT, .i = 0 } };
+    ASSERT_TRUE(hl_db_insert_if_absent(&h, "t", cols, 1, cols, vals, 1) < 0);
+    ASSERT_TRUE(hl_db_upsert(&h, "t", cols, 1, cols, vals, 1) < 0);
+    ASSERT_TRUE(hl_db_table_columns(&h, "t", NULL, NULL) < 0);
+}
+
 UTEST_MAIN();

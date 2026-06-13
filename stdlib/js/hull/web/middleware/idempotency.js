@@ -287,12 +287,15 @@ function middleware(opts) {
             }
         }
 
-        // Insert in-flight record (OR IGNORE prevents race with concurrent request)
-        const inserted = db.exec(
-            "INSERT OR IGNORE INTO _hull_idempotency_keys " +
-            "(key, principal_id, fingerprint, endpoint, state, created_at, expires_at) " +
-            "VALUES (?, ?, ?, ?, 'inflight', ?, ?)",
-            [key, principalId, fingerprint, endpoint, now, now + ttl]
+        // Insert in-flight record (insert-if-absent guards the race with
+        // a concurrent request claiming the same key).
+        const inserted = db.insertIfAbsent(
+            "_hull_idempotency_keys",
+            ["principal_id", "key"],
+            ["key", "principal_id", "fingerprint", "endpoint",
+             "state", "created_at", "expires_at"],
+            [key, principalId, fingerprint, endpoint,
+             "inflight", now, now + ttl]
         );
         if (inserted === 0) {
             res.status(409);

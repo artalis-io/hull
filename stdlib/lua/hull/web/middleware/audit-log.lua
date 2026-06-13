@@ -43,19 +43,17 @@ function audit_log.init(opts)
     if opts.retain_days ~= nil then
         _state.retain_days = opts.retain_days
     end
-    db.exec([[
-        CREATE TABLE IF NOT EXISTS _hull_audit_log (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id     TEXT    NOT NULL,
-            event_at    INTEGER NOT NULL,
-            kind        TEXT    NOT NULL,
-            ip          TEXT,
-            user_agent  TEXT,
-            fingerprint TEXT,
-            session_id  TEXT,
-            metadata    TEXT
-        )
-    ]])
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _hull_audit_log ("
+        .. "id          " .. db.autoincrement_id_ddl .. ", "
+        .. "user_id     TEXT    NOT NULL,"
+        .. "event_at    INTEGER NOT NULL,"
+        .. "kind        TEXT    NOT NULL,"
+        .. "ip          TEXT,"
+        .. "user_agent  TEXT,"
+        .. "fingerprint TEXT,"
+        .. "session_id  TEXT,"
+        .. "metadata    TEXT)")
     db.exec([[
         CREATE INDEX IF NOT EXISTS _hull_audit_log_user_at
             ON _hull_audit_log(user_id, event_at DESC)

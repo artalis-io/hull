@@ -151,6 +151,62 @@ static void js_free_hl_values(JSContext *ctx, HlValue *params, int count)
     js_free(ctx, params);
 }
 
+/* Marshal a JS array of strings into a `const char **` for the vtable
+ * helpers (insert_if_absent / upsert).  Returns 0 on success.  Caller must
+ * free each string via JS_FreeCString and the array via js_free. */
+static int js_to_string_array(JSContext *ctx, JSValueConst arr,
+                               const char ***out_strs, int *out_count)
+{
+    *out_strs = NULL;
+    *out_count = 0;
+
+    if (!JS_IsArray(ctx, arr))
+        return -1;
+
+    JSValue len_val = JS_GetPropertyStr(ctx, arr, "length");
+    int32_t len = 0;
+    JS_ToInt32(ctx, &len, len_val);
+    JS_FreeValue(ctx, len_val);
+
+    if (len <= 0)
+        return -1;
+
+    if ((size_t)len > SIZE_MAX / sizeof(char *))
+        return -1;
+
+    const char **strs = js_mallocz(ctx, (size_t)len * sizeof(char *));
+    if (!strs)
+        return -1;
+
+    for (int32_t i = 0; i < len; i++) {
+        JSValue v = JS_GetPropertyUint32(ctx, arr, (uint32_t)i);
+        const char *s = JS_ToCString(ctx, v);
+        JS_FreeValue(ctx, v);
+        if (!s) {
+            for (int32_t j = 0; j < i; j++)
+                JS_FreeCString(ctx, strs[j]);
+            js_free(ctx, strs);
+            return -1;
+        }
+        strs[i] = s;
+    }
+
+    *out_strs = strs;
+    *out_count = len;
+    return 0;
+}
+
+static void js_free_string_array(JSContext *ctx, const char **strs, int count)
+{
+    if (!strs)
+        return;
+    for (int i = 0; i < count; i++) {
+        if (strs[i])
+            JS_FreeCString(ctx, strs[i]);
+    }
+    js_free(ctx, strs);
+}
+
 /* Check if the immediate JS caller is a stdlib module (module name starts
  * with "hull:").  User modules start with "./" — so a simple prefix check
  * is sufficient.  Returns 1 for stdlib, 0 for user code.
@@ -325,6 +381,143 @@ static JSValue js_db_batch(JSContext *ctx, JSValueConst this_val,
     }
 
     return JS_UNDEFINED;
+}
+
+/* ── Dialect-aware helpers (insert_if_absent / upsert / table_columns) ── */
+
+/* Shared body for db.insertIfAbsent / db.upsert — they differ only in
+ * which vtable method they dispatch through. */
+static JSValue js_db_dialect_write(JSContext *ctx, int argc,
+                                    JSValueConst *argv, int is_upsert,
+                                    const char *name)
+{
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->base.db_handle)
+        return JS_ThrowInternalError(ctx, "database not available");
+
+    if (argc < 4)
+        return JS_ThrowTypeError(ctx,
+            "%s requires (table, conflictCols, cols, values)", name);
+
+    const char *table = JS_ToCString(ctx, argv[0]);
+    if (!table)
+        return JS_EXCEPTION;
+
+    int is_stdlib = js_is_stdlib_caller(ctx);
+    HlDbHandle *h = is_stdlib ? js->base.hull_db_handle : js->base.db_handle;
+
+    if (!is_stdlib && strncmp(table, "_hull_", 6) == 0) {
+        JS_FreeCString(ctx, table);
+        return JS_ThrowInternalError(ctx,
+            "access denied: _hull_* tables are reserved");
+    }
+
+    const char **conflict_cols = NULL;
+    int n_conflict = 0;
+    const char **cols = NULL;
+    int n_cols = 0;
+    HlValue *values = NULL;
+    int n_values = 0;
+
+    if (js_to_string_array(ctx, argv[1], &conflict_cols, &n_conflict) != 0) {
+        JS_FreeCString(ctx, table);
+        return JS_ThrowTypeError(ctx, "conflictCols must be a non-empty array");
+    }
+    if (js_to_string_array(ctx, argv[2], &cols, &n_cols) != 0) {
+        js_free_string_array(ctx, conflict_cols, n_conflict);
+        JS_FreeCString(ctx, table);
+        return JS_ThrowTypeError(ctx, "cols must be a non-empty array");
+    }
+    if (js_to_hl_values(ctx, argv[3], &values, &n_values) != 0
+        || n_values != n_cols) {
+        js_free_hl_values(ctx, values, n_values);
+        js_free_string_array(ctx, cols, n_cols);
+        js_free_string_array(ctx, conflict_cols, n_conflict);
+        JS_FreeCString(ctx, table);
+        return JS_ThrowTypeError(ctx, "values length must match cols length");
+    }
+
+    int rc = is_upsert
+        ? hl_db_upsert(h, table, conflict_cols, n_conflict,
+                       cols, values, n_cols)
+        : hl_db_insert_if_absent(h, table, conflict_cols, n_conflict,
+                                  cols, values, n_cols);
+
+    js_free_hl_values(ctx, values, n_values);
+    js_free_string_array(ctx, cols, n_cols);
+    js_free_string_array(ctx, conflict_cols, n_conflict);
+    JS_FreeCString(ctx, table);
+
+    if (rc < 0)
+        return JS_ThrowInternalError(ctx, "%s failed: %s",
+                                     name, hl_db_errmsg(h));
+
+    return JS_NewInt32(ctx, rc);
+}
+
+static JSValue js_db_insert_if_absent(JSContext *ctx, JSValueConst this_val,
+                                       int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    return js_db_dialect_write(ctx, argc, argv, 0, "db.insertIfAbsent");
+}
+
+static JSValue js_db_upsert(JSContext *ctx, JSValueConst this_val,
+                             int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    return js_db_dialect_write(ctx, argc, argv, 1, "db.upsert");
+}
+
+/* db.tableColumns(table) -> string[] */
+typedef struct {
+    JSContext *ctx;
+    JSValue    array;
+    uint32_t   n;
+} JsColumnsCtx;
+
+static void js_table_columns_cb(void *cb_ctx, const char *col_name)
+{
+    JsColumnsCtx *cc = (JsColumnsCtx *)cb_ctx;
+    JS_SetPropertyUint32(cc->ctx, cc->array, cc->n,
+                          JS_NewString(cc->ctx, col_name));
+    cc->n++;
+}
+
+static JSValue js_db_table_columns(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    if (!js || !js->base.db_handle)
+        return JS_ThrowInternalError(ctx, "database not available");
+
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "db.tableColumns requires (table)");
+
+    const char *table = JS_ToCString(ctx, argv[0]);
+    if (!table)
+        return JS_EXCEPTION;
+
+    int is_stdlib = js_is_stdlib_caller(ctx);
+    HlDbHandle *h = is_stdlib ? js->base.hull_db_handle : js->base.db_handle;
+
+    if (!is_stdlib && strncmp(table, "_hull_", 6) == 0) {
+        JS_FreeCString(ctx, table);
+        return JS_ThrowInternalError(ctx,
+            "access denied: _hull_* tables are reserved");
+    }
+
+    JsColumnsCtx cc = { .ctx = ctx, .array = JS_NewArray(ctx), .n = 0 };
+    int rc = hl_db_table_columns(h, table, js_table_columns_cb, &cc);
+    JS_FreeCString(ctx, table);
+
+    if (rc != 0) {
+        JS_FreeValue(ctx, cc.array);
+        return JS_ThrowInternalError(ctx, "db.tableColumns failed: %s",
+                                     hl_db_errmsg(h));
+    }
+    return cc.array;
 }
 
 /* ── db.async.query / db.async.exec ─────────────────────────────────── */
@@ -1020,6 +1213,29 @@ static int js_db_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_db_last_id, "lastId", 0));
     JS_SetPropertyStr(ctx, db, "batch",
                       JS_NewCFunction(ctx, js_db_batch, "batch", 1));
+
+    /* Dialect-aware helpers */
+    JS_SetPropertyStr(ctx, db, "insertIfAbsent",
+                      JS_NewCFunction(ctx, js_db_insert_if_absent,
+                                       "insertIfAbsent", 4));
+    JS_SetPropertyStr(ctx, db, "upsert",
+                      JS_NewCFunction(ctx, js_db_upsert, "upsert", 4));
+    JS_SetPropertyStr(ctx, db, "tableColumns",
+                      JS_NewCFunction(ctx, js_db_table_columns,
+                                       "tableColumns", 1));
+
+    /* Backend-introspection string fields */
+    HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
+    const char *backend_name = "none";
+    const char *autoinc_ddl  = "INTEGER PRIMARY KEY";
+    if (js && js->base.db_handle && js->base.db_handle->backend) {
+        backend_name = js->base.db_handle->backend->name;
+        if (js->base.db_handle->backend->autoincrement_id_ddl)
+            autoinc_ddl = js->base.db_handle->backend->autoincrement_id_ddl;
+    }
+    JS_SetPropertyStr(ctx, db, "backendName", JS_NewString(ctx, backend_name));
+    JS_SetPropertyStr(ctx, db, "autoincrementIdDdl",
+                      JS_NewString(ctx, autoinc_ddl));
 
     /* db.async sub-object */
     JSValue async_obj = JS_NewObject(ctx);

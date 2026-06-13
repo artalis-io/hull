@@ -97,9 +97,10 @@ function markProcessed(messageId, source, opts) {
     const now = time.now();
     const ttl = o.ttl !== undefined ? o.ttl : inboxTtl;
 
-    db.exec(
-        "INSERT OR REPLACE INTO _hull_inbox_processed " +
-        "(message_id, source, processed_at, expires_at) VALUES (?, ?, ?, ?)",
+    db.upsert(
+        "_hull_inbox_processed",
+        ["source", "message_id"],
+        ["message_id", "source", "processed_at", "expires_at"],
         [messageId, source, now, now + ttl]
     );
 }

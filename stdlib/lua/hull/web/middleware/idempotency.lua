@@ -301,10 +301,15 @@ function idempotency.middleware(opts)
             end
         end
 
-        -- Insert in-flight record (OR IGNORE prevents race with concurrent request)
-        local inserted = db.exec(
-            "INSERT OR IGNORE INTO _hull_idempotency_keys (key, principal_id, fingerprint, endpoint, state, created_at, expires_at) VALUES (?, ?, ?, ?, 'inflight', ?, ?)",
-            { key, principal_id, fingerprint, endpoint, now, now + ttl }
+        -- Insert in-flight record (insert-if-absent guards the race with
+        -- a concurrent request claiming the same key).
+        local inserted = db.insert_if_absent(
+            "_hull_idempotency_keys",
+            { "principal_id", "key" },
+            { "key", "principal_id", "fingerprint", "endpoint",
+              "state", "created_at", "expires_at" },
+            { key, principal_id, fingerprint, endpoint,
+              "inflight", now, now + ttl }
         )
         if inserted == 0 then
             -- Another request claimed this key between our SELECT and INSERT

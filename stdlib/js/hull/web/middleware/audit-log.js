@@ -28,19 +28,17 @@ const _state = { retainDays: 365, initialized: false };
 function init(opts) {
     opts = opts || {};
     if (opts.retainDays !== undefined) _state.retainDays = opts.retainDays;
-    db.exec(`
-        CREATE TABLE IF NOT EXISTS _hull_audit_log (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id     TEXT    NOT NULL,
-            event_at    INTEGER NOT NULL,
-            kind        TEXT    NOT NULL,
-            ip          TEXT,
-            user_agent  TEXT,
-            fingerprint TEXT,
-            session_id  TEXT,
-            metadata    TEXT
-        )
-    `);
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _hull_audit_log ("
+        + "id          " + db.autoincrementIdDdl + ", "
+        + "user_id     TEXT    NOT NULL,"
+        + "event_at    INTEGER NOT NULL,"
+        + "kind        TEXT    NOT NULL,"
+        + "ip          TEXT,"
+        + "user_agent  TEXT,"
+        + "fingerprint TEXT,"
+        + "session_id  TEXT,"
+        + "metadata    TEXT)");
     db.exec(`CREATE INDEX IF NOT EXISTS _hull_audit_log_user_at
              ON _hull_audit_log(user_id, event_at DESC)`);
     db.exec(`CREATE INDEX IF NOT EXISTS _hull_audit_log_user_fp
