@@ -338,7 +338,7 @@ function session.login_handler(cookie_mod, opts)
         local data = extract_data(user) or {}
         local sid
         if rotate then
-            local existing = nil
+            local existing
             if req.ctx and req.ctx.session_id then
                 existing = req.ctx.session_id
             else
