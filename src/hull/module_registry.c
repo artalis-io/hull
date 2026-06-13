@@ -310,10 +310,18 @@ static const HlModuleSpec REGISTRY[] = {
          * hull/json — both are still imported directly by the
          * module (hash_password, base64url, json) but the
          * resolver admits them via the dep chain so they don't
-         * need re-declaration here. */
+         * need re-declaration here.
+         *
+         * hull/web/pwned is statically imported in the JS module
+         * (QuickJS doesn't reliably support dynamic import()).
+         * It's listed here so the resolver admits it for every
+         * app declaring auth-flows, even those that don't enable
+         * the check_pwned_passwords option. The HIBP host
+         * (api.pwnedpasswords.com) is still gated at call time
+         * via manifest.hosts. */
         .deps = {"hull/http-server", "hull/db",
                  "hull/crypto/envelope", "hull/crypto",
-                 "hull/time", 0},
+                 "hull/time", "hull/web/pwned", 0},
     },
     {
         .name = "hull/web/cookie",
@@ -497,6 +505,19 @@ static const HlModuleSpec REGISTRY[] = {
         .name = "hull/web/pagination",
         .api_major = 1, .intrinsic = 0, .pure = 1,
         .required_caps = 0, .deps = {0},
+    },
+    {
+        /* k-anonymity pwned-password check via the HIBP range
+         * API. Hashes the password (SHA-1) client-side, sends
+         * only the first 5 hex chars over the wire, scans the
+         * returned suffix list locally. Apps that enable
+         * check_pwned_passwords in hull/web/auth-flows.init()
+         * must add api.pwnedpasswords.com to manifest.hosts.
+         * Fail-open on HIBP outage (logged via hull/log). */
+        .name = "hull/web/pwned",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = HL_MOD_CAP_HTTP_CLIENT | HL_MOD_CAP_HOSTS,
+        .deps = {"hull/http-client", "hull/crypto", "hull/log", 0},
     },
 
     /* ── Web real-time + WebSocket ──────────────────────────────────── */

@@ -108,6 +108,10 @@ jobs:
         timeout-minutes: 3
         run: make e2e-auth-flows-2fa
 
+      - name: Auth flows hardening (resend / lockout / revoke / pwned) E2E
+        timeout-minutes: 3
+        run: make e2e-auth-flows-hardening
+
       - name: Sandbox tests
         timeout-minutes: 2
         run: make e2e-sandbox

@@ -883,6 +883,7 @@ Register with `app.use(method, pattern, mw)`:
 | `totp` | `hull.web.middleware.totp` | `hull:web:middleware:totp` | RFC 6238 TOTP 2FA with QR enrollment, recovery codes, replay-protection, optional at-rest encryption |
 | `auth-flows` | `hull.web.auth-flows` | `hull:web:auth-flows` | Registration, email-verify, login, password-reset, magic-link, email-change. HMAC-signed single-use tokens, PBKDF2, app-provided storage + templates |
 | `envelope` | `hull.crypto.envelope` | `hull:crypto:envelope` | HMAC-signed JSON-payload stateless tokens (`base64url(payload) "." hex(HMAC)`). Used internally by `hull/web/auth-flows` and `hull/web/middleware/oauth`; available standalone for any app that wants a tamper-detectable signed envelope without DB state |
+| `pwned` | `hull.web.pwned` | `hull:web:pwned` | k-anonymity pwned-password check via HIBP range API. Hashes the password SHA-1 client-side, sends only the first 5 hex chars over the wire, scans the returned suffix list locally. Apps must add `api.pwnedpasswords.com` to `manifest.hosts`. Fail-open on HIBP outage. Used internally by `hull/web/auth-flows` when `check_pwned_passwords = true` |
 | `session` | `hull.web.middleware.session` | `hull:web:middleware:session` | Server-side sessions backed by SQLite |
 | `logger` | `hull.web.middleware.logger` | `hull:web:middleware:logger` | Request logging with logfmt output and request IDs |
 | `transaction` | `hull.web.middleware.transaction` | `hull:web:middleware:transaction` | Wraps handlers in `db.batch()` (BEGIN IMMEDIATE..COMMIT) |
@@ -1075,12 +1076,36 @@ verify step between successful first-factor auth and `on_login` when
     of rendering the module's default minimal HTML form. POST-based
     `/login` always responds with JSON
     `{ ok: true, pending_2fa: true, totp_token: "…" }`.
+  - **Hardening options** (all opt-in via init):
+    - `opts.max_failed_logins` (default `5`) + `opts.lockout_duration`
+      (default `900` = 15 min). After N consecutive failed-password
+      attempts, the user's row in `_hull_auth_login_attempts` trips
+      a `locked_until` window; `handle_login` responds 429 +
+      `Retry-After` during the window regardless of whether the
+      submitted password is right. Counter clears on successful
+      login OR `password-reset/confirm`.
+    - `opts.check_pwned_passwords` (default `false`). Routes
+      register + password-reset-confirm through `hull/web/pwned`
+      (HIBP k-anonymity). Apps must add `api.pwnedpasswords.com`
+      to `manifest.hosts`. Fail-open on HIBP outage. Tests can
+      override the endpoint via `opts.pwned_endpoint`.
+    - **Email-change notify+revoke** activates implicitly when the
+      app provides a `templates.email_change_notify` template. A
+      revoke link is sent to the OLD address on every email-change
+      request; the OLD-address holder can click it to delete the
+      pending change (`/email-change/revoke?token=…`) within
+      `email_change_ttl` even if the attacker holds a valid
+      session cookie.
 - `authflows.routes(app)`. Mounts the routes under `prefix`:
-  POST `/register`, GET `/verify`, POST `/login`, POST `/logout`,
-  POST `/magic-link`, GET `/magic-link/consume`,
-  POST `/password-reset/request`, POST `/password-reset/confirm`,
-  POST `/email-change`, GET `/email-change/confirm`,
+  POST `/register`, GET `/verify`, POST `/verify/resend`,
+  POST `/login`, POST `/logout`, POST `/magic-link`,
+  GET `/magic-link/consume`, POST `/password-reset/request`,
+  POST `/password-reset/confirm`, POST `/email-change`,
+  GET `/email-change/confirm`, GET `/email-change/revoke`,
   POST `/totp-verify` (404s when `enable_totp` is off).
+  `/verify/resend` is enumeration-safe — always returns `{ok:true}`
+  whether the user exists, is unverified, or is already verified.
+  Apps SHOULD rate-limit it (per-email key) to bound mail volume.
 - `authflows.send_verify_email(user, url_prefix)`,
   `authflows.send_password_reset(email, url_prefix)`,
   `authflows.send_magic_link(email, url_prefix)`. Standalone helpers
@@ -2155,6 +2180,7 @@ make e2e                            # run all E2E tests (examples + build + sand
 | `e2e_update.sh` | `hull update --check` against real public repo; full GitHub-API + JSON parse + version compare via embedded CA bundle |
 | `e2e_auth_flows.sh` | Auth flows: register → verify → login → logout → magic-link → password-reset → email-change, with replay/tamper assertions, against `tests/fixtures/auth_flows_{lua,js}` (24 assertions per runtime) |
 | `e2e_auth_flows_2fa.sh` | Auth flows + TOTP composition: enroll → confirm → login (returns `pending_2fa` + `totp_token`) → wrong-code retry → right-code completes → totp_token single-use-on-success → recovery code path → magic-link with 2FA rendering default form, against `tests/fixtures/auth_flows_2fa_{lua,js}` (15 assertions per runtime) |
+| `e2e_auth_flows_hardening.sh` | Auth flows hardening: re-send verify (incl. enumeration-safe silence post-verify) → account lockout after N failed logins (429 + `Retry-After`; correct password during window still locked; auto-clears after window) → email-change notify+revoke (revoke link aborts pending change; subsequent confirm fails 400) → pwned-password check via a localhost HIBP mock (rejects "password", accepts random). 20 assertions per runtime; fixtures at `tests/fixtures/auth_flows_hardening_{lua,js}` |
 
 ## Runtime Sandboxes
 

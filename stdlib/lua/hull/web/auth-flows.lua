@@ -155,6 +155,25 @@ local _state = {
                                    -- a path to redirect there with
                                    -- ?token=... appended for a
                                    -- custom 2FA UI.
+    -- Hardening: account lockout.
+    -- After max_failed_logins consecutive wrong-password attempts
+    -- the user's row in _hull_auth_login_attempts trips a
+    -- locked_until window. handle_login short-circuits with
+    -- 429 + Retry-After during that window. Counter clears on
+    -- successful login or password-reset confirm.
+    max_failed_logins     = 5,
+    lockout_duration      = 15 * 60,   -- 15 min
+
+    -- Hardening: pwned-password check (opt-in). When true, register
+    -- and password-reset confirm reject passwords that appear in
+    -- HIBP's breach corpus (k-anonymity range API; the password
+    -- itself never leaves the host). Apps MUST add
+    -- api.pwnedpasswords.com to manifest.hosts. Fail-open on HIBP
+    -- outage. See hull/web/pwned.
+    check_pwned_passwords = false,
+    -- Override endpoint (tests pass localhost mock here).
+    pwned_endpoint        = nil,
+
     -- Optional post-action redirects.
     verify_redirect       = "/",
     login_redirect        = "/",
@@ -178,6 +197,13 @@ CREATE TABLE IF NOT EXISTS _hull_auth_pending_email_changes (
     expires_at  INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS _hull_auth_login_attempts (
+    user_id        TEXT PRIMARY KEY,
+    failed_count   INTEGER NOT NULL DEFAULT 0,
+    last_failed_at INTEGER,
+    locked_until   INTEGER
+);
+
 CREATE INDEX IF NOT EXISTS _hull_auth_used_tokens_exp
     ON _hull_auth_used_tokens(expires_at);
 CREATE INDEX IF NOT EXISTS _hull_auth_pending_email_changes_exp
@@ -194,6 +220,9 @@ local ACTIONS = {
     password_reset    = "reset",
     magic_link        = "magic",
     email_change      = "email_change",
+    -- Sent to the OLD address on an email-change request so the
+    -- old-address holder can cancel a hostile change within TTL.
+    email_change_revoke = "email_change_revoke",
     -- Pending 2FA token, issued after a successful first-factor
     -- check (password or magic-link click). Single-use ON SUCCESS,
     -- multi-use within TTL until then (lets users retry typos).
@@ -313,6 +342,67 @@ local function gc_expired()
     db.exec("DELETE FROM _hull_auth_used_tokens WHERE expires_at < ?", { now })
     db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE expires_at < ?",
             { now })
+    -- Clear lockout rows whose window has fully elapsed AND no
+    -- recent failures (failed_count == 0 OR last_failed_at older
+    -- than 1 day) so the table doesn't bloat over time.
+    db.exec(
+        "DELETE FROM _hull_auth_login_attempts "
+        .. "WHERE (locked_until IS NULL OR locked_until < ?) "
+        .. "  AND (last_failed_at IS NULL OR last_failed_at < ?)",
+        { now, now - 86400 })
+end
+
+-- ── Lockout helpers ────────────────────────────────────────────────
+--
+-- Returns seconds-remaining on the lockout window (> 0) if user is
+-- currently locked, or 0 / nil otherwise. Returning the integer lets
+-- handle_login emit a Retry-After header without an extra query.
+local function lockout_remaining(user_id)
+    local rows = db.query(
+        "SELECT locked_until FROM _hull_auth_login_attempts WHERE user_id = ?",
+        { user_id })
+    if not rows or #rows == 0 then return 0 end
+    local lu = rows[1].locked_until
+    if not lu or lu == 0 then return 0 end
+    local now = time.now()
+    if lu > now then return lu - now end
+    return 0
+end
+
+local function bump_failed_login(user_id)
+    local now = time.now()
+    -- UPSERT: increment counter, set last_failed_at, set
+    -- locked_until if threshold tripped. SQLite's
+    -- INSERT ... ON CONFLICT supports this cleanly.
+    db.exec(
+        "INSERT INTO _hull_auth_login_attempts "
+        .. "(user_id, failed_count, last_failed_at, locked_until) "
+        .. "VALUES (?, 1, ?, NULL) "
+        .. "ON CONFLICT(user_id) DO UPDATE SET "
+        .. "  failed_count = failed_count + 1, "
+        .. "  last_failed_at = ?, "
+        .. "  locked_until = CASE WHEN failed_count + 1 >= ? "
+        .. "                      THEN ? + ? ELSE NULL END",
+        { user_id, now, now,
+          _state.max_failed_logins,
+          now, _state.lockout_duration })
+end
+
+local function clear_failed_logins(user_id)
+    db.exec("DELETE FROM _hull_auth_login_attempts WHERE user_id = ?",
+            { user_id })
+end
+
+-- ── Pwned-password check (opt-in) ──────────────────────────────────
+--
+-- Wraps hull.web.pwned with the init-time options. Returns true if
+-- the password is in the breach corpus (caller should reject);
+-- false otherwise (including HIBP-outage fail-open).
+local function check_pwned(password)
+    if not _state.check_pwned_passwords then return false end
+    local pwned = require("hull.web.pwned")
+    return pwned.check(password,
+        _state.pwned_endpoint and { endpoint = _state.pwned_endpoint } or nil)
 end
 
 -- ── Body parsing ───────────────────────────────────────────────────
@@ -372,6 +462,14 @@ local function handle_register(req, res)
     if type(body.password) ~= "string" or #body.password < 8 then
         return res:status(400):json({ error = "password too short" })
     end
+    -- Pwned-password check runs BEFORE user_find_by_email so a
+    -- breached password is rejected with the same error regardless
+    -- of whether the email already exists — enumeration-safe.
+    if check_pwned(body.password) then
+        return res:status(400):json({
+            error = "password appears in known data breaches; choose another",
+        })
+    end
     -- Enumeration-safe: returns ok whether the email exists or not.
     -- If it does exist, no email goes out (we don't want to spam
     -- existing users, and we don't want to leak existence).
@@ -391,6 +489,32 @@ local function handle_register(req, res)
         .. "://" .. (req.headers["x-forwarded-host"] or req.headers.host or "localhost")
         .. _state.prefix .. "/verify?token=" .. token
 
+    send_email(body.email, "welcome", {
+        user = user, verify_url = verify_url, token = token,
+    })
+    res:json({ ok = true })
+end
+
+-- POST /auth/verify/resend { email } — re-issue the welcome /
+-- verify email if the address belongs to an UNVERIFIED user.
+-- Enumeration-safe: always returns {ok:true} regardless of whether
+-- the user exists or is already verified, so an attacker can't
+-- learn which addresses are in the system or which still need
+-- verification. Apps SHOULD rate-limit this route (the standard
+-- ratelimit.middleware keyed by email body field works well).
+local function handle_verify_resend(req, res)
+    local body = parse_body(req)
+    if not is_email_ish(body.email) then
+        return res:status(400):json({ error = "invalid email" })
+    end
+    local user = _state.user_find_by_email(body.email)
+    if not user or user.email_verified then return generic_ok(res) end
+    local user_id = user_uid(user)
+    local token = issue_token(user_id, ACTIONS.verify_email,
+                               _state.verify_ttl)
+    local verify_url = (req.headers["x-forwarded-proto"] or "http")
+        .. "://" .. (req.headers["x-forwarded-host"] or req.headers.host or "localhost")
+        .. _state.prefix .. "/verify?token=" .. token
     send_email(body.email, "welcome", {
         user = user, verify_url = verify_url, token = token,
     })
@@ -458,13 +582,31 @@ local function handle_login(req, res)
         return res:status(400):json({ error = "invalid credentials" })
     end
     local user = _state.user_find_by_email(body.email)
+    -- Lockout check runs BEFORE the password check so a known-locked
+    -- account doesn't leak whether the password attempt was right or
+    -- wrong via response timing. We compute it only when the user
+    -- exists; for unknown emails the 401 below stays enumeration-safe.
+    if user then
+        local remain = lockout_remaining(user_uid(user))
+        if remain > 0 then
+            res:header("Retry-After", tostring(remain))
+            return res:status(429):json({
+                error = "too many failed attempts",
+                retry_after = remain,
+            })
+        end
+    end
     if not user or not user.password_hash
        or not crypto.verify_password(body.password, user.password_hash) then
+        if user then bump_failed_login(user_uid(user)) end
         return res:status(401):json({ error = "invalid credentials" })
     end
     if _state.require_verified_email and not user.email_verified then
         return res:status(403):json({ error = "email not verified" })
     end
+    -- Successful auth — clear the failed-attempts row so subsequent
+    -- typos don't accumulate against a long-standing baseline.
+    clear_failed_logins(user_uid(user))
     if _state.enable_totp
        and _state.user_totp_enrolled(user_uid(user)) then
         return start_totp_pending(req, res, user)
@@ -587,6 +729,13 @@ local function handle_password_reset_confirm(req, res)
     if type(body.password) ~= "string" or #body.password < 8 then
         return res:status(400):json({ error = "password too short" })
     end
+    -- Same pwned-password gate as register so a reset can't be used
+    -- to land on a breached password.
+    if check_pwned(body.password) then
+        return res:status(400):json({
+            error = "password appears in known data breaches; choose another",
+        })
+    end
     local env, err = consume_token(body.token, ACTIONS.password_reset)
     if not env then
         return res:status(400):json({ error = "reset failed: " .. (err or "?") })
@@ -596,6 +745,11 @@ local function handle_password_reset_confirm(req, res)
         return res:status(400):json({ error = "reset failed" })
     end
     _state.user_set_password(env.sub, crypto.hash_password(body.password))
+    -- A successful reset also unlocks the account: the user
+    -- demonstrably controls the email, so any prior lockout is
+    -- moot. (If they don't reset, the lockout window expires
+    -- naturally per lockout_duration.)
+    clear_failed_logins(env.sub)
     gc_expired()
     res:json({ ok = true })
 end
@@ -632,15 +786,46 @@ local function handle_email_change(req, res)
           now + _state.email_change_ttl })
 
     local user = _state.user_get(user_id)
-    local link = (req.headers["x-forwarded-proto"] or "http")
+    local origin = (req.headers["x-forwarded-proto"] or "http")
         .. "://" .. (req.headers["x-forwarded-host"] or req.headers.host or "localhost")
-        .. _state.prefix .. "/email-change/confirm?token=" .. token
+    local link = origin .. _state.prefix .. "/email-change/confirm?token=" .. token
     -- Send to the NEW address — proves the user controls it.
     send_email(body.new_email, "email_change", {
         user = user, link = link, token = token,
         new_email = body.new_email,
     })
+    -- Defense in depth: notify the OLD address with a revoke link
+    -- so a stolen session cookie can't quietly move the account.
+    -- Opt-in by providing templates.email_change_notify; apps that
+    -- don't have the template keep the v1 behavior.
+    if _state.templates.email_change_notify then
+        local revoke_tok = issue_token(user_id, ACTIONS.email_change_revoke,
+                                        _state.email_change_ttl)
+        local revoke_url = origin .. _state.prefix
+            .. "/email-change/revoke?token=" .. revoke_tok
+        send_email(user.email, "email_change_notify", {
+            user = user, revoke_url = revoke_url, revoke_token = revoke_tok,
+            new_email = body.new_email,
+        })
+    end
     res:json({ ok = true })
+end
+
+-- GET /auth/email-change/revoke?token=... — consumed by the
+-- OLD-address holder to cancel a pending email change. Single-use
+-- via the same _hull_auth_used_tokens table; deletes the pending
+-- row and (for paranoia) burns any matching email_change token
+-- whose envelope is still in flight by deleting BOTH rows.
+local function handle_email_change_revoke(req, res)
+    local token = req.query and req.query.token
+    local env, err = consume_token(token, ACTIONS.email_change_revoke)
+    if not env then
+        return res:status(400):html("revoke failed: " .. (err or "?"))
+    end
+    db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?",
+            { env.sub })
+    gc_expired()
+    res:html("Email change canceled.")
 end
 
 local function handle_email_change_confirm(req, res)
@@ -677,6 +862,7 @@ local function register_routes(app)
     local p = _state.prefix
     app.post(p .. "/register",                 handle_register)
     app.get (p .. "/verify",                   handle_verify)
+    app.post(p .. "/verify/resend",            handle_verify_resend)
     app.post(p .. "/login",                    handle_login)
     app.post(p .. "/logout",                   handle_logout)
     app.post(p .. "/magic-link",               handle_magic_link)
@@ -685,6 +871,7 @@ local function register_routes(app)
     app.post(p .. "/password-reset/confirm",   handle_password_reset_confirm)
     app.post(p .. "/email-change",             handle_email_change)
     app.get (p .. "/email-change/confirm",     handle_email_change_confirm)
+    app.get (p .. "/email-change/revoke",      handle_email_change_revoke)
     -- Always registered so the route doesn't 404 with a confusing
     -- "no such route" when an app forgets enable_totp; the handler
     -- itself returns 404 with a clear error in that case.
@@ -758,6 +945,12 @@ function M.init(opts)
                                      or _state.totp_pending_ttl
     _state.totp_pending_redirect   = opts.totp_pending_redirect
                                      or _state.totp_pending_redirect
+    _state.max_failed_logins       = opts.max_failed_logins
+                                     or _state.max_failed_logins
+    _state.lockout_duration        = opts.lockout_duration
+                                     or _state.lockout_duration
+    _state.check_pwned_passwords   = opts.check_pwned_passwords == true
+    _state.pwned_endpoint          = opts.pwned_endpoint
     _state.verify_ttl       = opts.verify_ttl       or _state.verify_ttl
     _state.reset_ttl        = opts.reset_ttl        or _state.reset_ttl
     _state.magic_link_ttl   = opts.magic_link_ttl   or _state.magic_link_ttl
@@ -892,6 +1085,10 @@ M._test = {
         _state.user_totp_enrolled      = nil
         _state.totp_verify             = nil
         _state.totp_pending_redirect   = nil
+        _state.check_pwned_passwords   = false
+        _state.pwned_endpoint          = nil
+        _state.max_failed_logins       = 5
+        _state.lockout_duration        = 15 * 60
         _state._initialized            = false
     end,
 }

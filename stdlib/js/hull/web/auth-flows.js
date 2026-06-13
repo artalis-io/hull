@@ -17,6 +17,7 @@
 
 import { crypto }   from "hull:crypto";
 import { envelope } from "hull:crypto:envelope";
+import { pwned }    from "hull:web:pwned";
 import { db }       from "hull:db";
 import { time }     from "hull:time";
 import { json }     from "hull:json";
@@ -49,6 +50,13 @@ const _state = {
     totpVerify:             null,
     totpPendingTtl:         300,
     totpPendingRedirect:    null,
+    // Hardening: account lockout. See the Lua module for the design.
+    maxFailedLogins:        5,
+    lockoutDuration:        15 * 60,
+    // Hardening: pwned-password check (opt-in). Apps must add
+    // api.pwnedpasswords.com to manifest.hosts.
+    checkPwnedPasswords:    false,
+    pwnedEndpoint:          null,
     verifyRedirect:      "/",
     loginRedirect:       "/",
     initialized:         false,
@@ -69,6 +77,13 @@ CREATE TABLE IF NOT EXISTS _hull_auth_pending_email_changes (
     expires_at  INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS _hull_auth_login_attempts (
+    user_id        TEXT PRIMARY KEY,
+    failed_count   INTEGER NOT NULL DEFAULT 0,
+    last_failed_at INTEGER,
+    locked_until   INTEGER
+);
+
 CREATE INDEX IF NOT EXISTS _hull_auth_used_tokens_exp
     ON _hull_auth_used_tokens(expires_at);
 CREATE INDEX IF NOT EXISTS _hull_auth_pending_email_changes_exp
@@ -80,6 +95,9 @@ const ACTIONS = {
     password_reset: "reset",
     magic_link:     "magic",
     email_change:   "email_change",
+    // Sent to the OLD address on email-change so the old-address
+    // holder can cancel a hostile change within TTL.
+    email_change_revoke: "email_change_revoke",
     // Pending 2FA token. Multi-use within TTL (allows retry on
     // typo); burned on a successful code verify.
     totp_pending:   "totp_pending",
@@ -186,6 +204,58 @@ function gcExpired() {
     db.exec("DELETE FROM _hull_auth_used_tokens WHERE expires_at < ?", [now]);
     db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE expires_at < ?",
             [now]);
+    db.exec(
+        "DELETE FROM _hull_auth_login_attempts "
+        + "WHERE (locked_until IS NULL OR locked_until < ?) "
+        + "  AND (last_failed_at IS NULL OR last_failed_at < ?)",
+        [now, now - 86400]);
+}
+
+// ── Lockout helpers ─────────────────────────────────────────────
+// Mirror of the Lua module. See its header for the design.
+
+function lockoutRemaining(userIdStr) {
+    const rows = db.query(
+        "SELECT locked_until FROM _hull_auth_login_attempts WHERE user_id = ?",
+        [userIdStr]);
+    if (!rows || rows.length === 0) return 0;
+    const lu = rows[0].locked_until;
+    if (!lu) return 0;
+    const now = time.now();
+    return lu > now ? (lu - now) : 0;
+}
+
+function bumpFailedLogin(userIdStr) {
+    const now = time.now();
+    db.exec(
+        "INSERT INTO _hull_auth_login_attempts "
+        + "(user_id, failed_count, last_failed_at, locked_until) "
+        + "VALUES (?, 1, ?, NULL) "
+        + "ON CONFLICT(user_id) DO UPDATE SET "
+        + "  failed_count = failed_count + 1, "
+        + "  last_failed_at = ?, "
+        + "  locked_until = CASE WHEN failed_count + 1 >= ? "
+        + "                      THEN ? + ? ELSE NULL END",
+        [userIdStr, now, now,
+         _state.maxFailedLogins, now, _state.lockoutDuration]);
+}
+
+function clearFailedLogins(userIdStr) {
+    db.exec("DELETE FROM _hull_auth_login_attempts WHERE user_id = ?",
+            [userIdStr]);
+}
+
+// ── Pwned-password check (opt-in) ──────────────────────────────
+// Statically imports hull:web:pwned (it's a transitive dep of
+// hull/web/auth-flows in the module registry, so the resolver
+// admits it for every app declaring auth-flows even if they
+// don't enable the check). Returns Promise<bool>: true if
+// pwned (caller should reject), false otherwise (incl. fail-
+// open on HIBP outage).
+async function checkPwned(password) {
+    if (!_state.checkPwnedPasswords) return false;
+    return pwned.check(password,
+        _state.pwnedEndpoint ? { endpoint: _state.pwnedEndpoint } : undefined);
 }
 
 function parseBody(req) {
@@ -239,13 +309,20 @@ function originFor(req) {
 
 // ── Route handlers ─────────────────────────────────────────────────
 
-function handleRegister(req, res) {
+async function handleRegister(req, res) {
     const body = parseBody(req);
     if (!isEmailIsh(body.email)) {
         return res.status(400).json({ error: "invalid email" });
     }
     if (typeof body.password !== "string" || body.password.length < 8) {
         return res.status(400).json({ error: "password too short" });
+    }
+    // Pwned check runs BEFORE userFindByEmail so the same error
+    // returns regardless of whether the email already exists.
+    if (await checkPwned(body.password)) {
+        return res.status(400).json({
+            error: "password appears in known data breaches; choose another",
+        });
     }
     const existing = _state.userFindByEmail(body.email);
     if (existing) return genericOk(res);
@@ -258,6 +335,22 @@ function handleRegister(req, res) {
             error: "user_create returned an id that user_get cannot resolve" });
     }
 
+    const token = issueToken(uid, ACTIONS.verify_email, _state.verifyTtl);
+    const verifyUrl = originFor(req) + _state.prefix + "/verify?token=" + token;
+    sendEmail(body.email, "welcome", { user, verify_url: verifyUrl, token });
+    res.json({ ok: true });
+}
+
+// POST /auth/verify/resend { email } — enumeration-safe re-issue
+// of the welcome / verify email for unverified users.
+function handleVerifyResend(req, res) {
+    const body = parseBody(req);
+    if (!isEmailIsh(body.email)) {
+        return res.status(400).json({ error: "invalid email" });
+    }
+    const user = _state.userFindByEmail(body.email);
+    if (!user || user.email_verified) return genericOk(res);
+    const uid = userId(user);
     const token = issueToken(uid, ACTIONS.verify_email, _state.verifyTtl);
     const verifyUrl = originFor(req) + _state.prefix + "/verify?token=" + token;
     sendEmail(body.email, "welcome", { user, verify_url: verifyUrl, token });
@@ -317,13 +410,28 @@ function handleLogin(req, res) {
         return res.status(400).json({ error: "invalid credentials" });
     }
     const user = _state.userFindByEmail(body.email);
+    // Lockout check before password check: a locked account
+    // shouldn't leak whether the attempted password was right
+    // via response timing.
+    if (user) {
+        const remain = lockoutRemaining(userId(user));
+        if (remain > 0) {
+            res.header("Retry-After", String(remain));
+            return res.status(429).json({
+                error: "too many failed attempts",
+                retry_after: remain,
+            });
+        }
+    }
     if (!user || !user.password_hash
         || !crypto.verifyPassword(body.password, user.password_hash)) {
+        if (user) bumpFailedLogin(userId(user));
         return res.status(401).json({ error: "invalid credentials" });
     }
     if (_state.requireVerifiedEmail && !user.email_verified) {
         return res.status(403).json({ error: "email not verified" });
     }
+    clearFailedLogins(userId(user));
     if (_state.enableTotp && _state.userTotpEnrolled(userId(user))) {
         return startTotpPending(req, res, user);
     }
@@ -419,10 +527,15 @@ function handlePasswordResetRequest(req, res) {
     res.json({ ok: true });
 }
 
-function handlePasswordResetConfirm(req, res) {
+async function handlePasswordResetConfirm(req, res) {
     const body = parseBody(req);
     if (typeof body.password !== "string" || body.password.length < 8) {
         return res.status(400).json({ error: "password too short" });
+    }
+    if (await checkPwned(body.password)) {
+        return res.status(400).json({
+            error: "password appears in known data breaches; choose another",
+        });
     }
     const result = consumeToken(body.token, ACTIONS.password_reset);
     if (!result[0]) {
@@ -432,6 +545,9 @@ function handlePasswordResetConfirm(req, res) {
     const user = _state.userGet(result[0].sub);
     if (!user) return res.status(400).json({ error: "reset failed" });
     _state.userSetPassword(result[0].sub, crypto.hashPassword(body.password));
+    // A successful reset demonstrates email control; clear any
+    // outstanding lockout so the new password works immediately.
+    clearFailedLogins(result[0].sub);
     gcExpired();
     res.json({ ok: true });
 }
@@ -458,12 +574,40 @@ function handleEmailChange(req, res) {
         [uid, body.new_email, tokenHash, now, now + _state.emailChangeTtl]);
 
     const user = _state.userGet(uid);
-    const link = originFor(req) + _state.prefix
+    const origin = originFor(req);
+    const link = origin + _state.prefix
         + "/email-change/confirm?token=" + token;
     sendEmail(body.new_email, "email_change", {
         user, link, token, new_email: body.new_email,
     });
+    // Defense in depth: notify the OLD address with a revoke link
+    // if templates.email_change_notify is provided.
+    if (_state.templates.email_change_notify) {
+        const revokeTok = issueToken(uid, ACTIONS.email_change_revoke,
+            _state.emailChangeTtl);
+        const revokeUrl = origin + _state.prefix
+            + "/email-change/revoke?token=" + revokeTok;
+        sendEmail(user.email, "email_change_notify", {
+            user, revoke_url: revokeUrl, revoke_token: revokeTok,
+            new_email: body.new_email,
+        });
+    }
     res.json({ ok: true });
+}
+
+// GET /auth/email-change/revoke?token=... — old-address holder
+// cancels a pending email change. Single-use via the shared
+// used-tokens table.
+function handleEmailChangeRevoke(req, res) {
+    const token = req.query && req.query.token;
+    const result = consumeToken(token, ACTIONS.email_change_revoke);
+    if (!result[0]) {
+        return res.status(400).html("revoke failed: " + (result[1] || "?"));
+    }
+    db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?",
+            [result[0].sub]);
+    gcExpired();
+    res.html("Email change canceled.");
 }
 
 function handleEmailChangeConfirm(req, res) {
@@ -493,6 +637,7 @@ function registerRoutes(app) {
     const p = _state.prefix;
     app.post(p + "/register",                 handleRegister);
     app.get (p + "/verify",                   handleVerify);
+    app.post(p + "/verify/resend",            handleVerifyResend);
     app.post(p + "/login",                    handleLogin);
     app.post(p + "/logout",                   handleLogout);
     app.post(p + "/magic-link",               handleMagicLink);
@@ -501,6 +646,7 @@ function registerRoutes(app) {
     app.post(p + "/password-reset/confirm",   handlePasswordResetConfirm);
     app.post(p + "/email-change",             handleEmailChange);
     app.get (p + "/email-change/confirm",     handleEmailChangeConfirm);
+    app.get (p + "/email-change/revoke",      handleEmailChangeRevoke);
     // Registered unconditionally; the handler returns 404 when
     // enableTotp is false (clearer than a route-level 404).
     app.post(p + "/totp-verify",              handleTotpVerify);
@@ -564,6 +710,12 @@ function init(opts) {
     _state.totpPendingTtl       = opts.totpPendingTtl || _state.totpPendingTtl;
     _state.totpPendingRedirect  = opts.totpPendingRedirect
                                   || _state.totpPendingRedirect;
+    _state.maxFailedLogins      = opts.maxFailedLogins
+                                  || _state.maxFailedLogins;
+    _state.lockoutDuration      = opts.lockoutDuration
+                                  || _state.lockoutDuration;
+    _state.checkPwnedPasswords  = opts.checkPwnedPasswords === true;
+    _state.pwnedEndpoint        = opts.pwnedEndpoint || null;
     _state.verifyTtl       = opts.verifyTtl       || _state.verifyTtl;
     _state.resetTtl        = opts.resetTtl        || _state.resetTtl;
     _state.magicLinkTtl    = opts.magicLinkTtl    || _state.magicLinkTtl;
@@ -658,6 +810,10 @@ const _test = {
         _state.userTotpEnrolled     = null;
         _state.totpVerify           = null;
         _state.totpPendingRedirect  = null;
+        _state.checkPwnedPasswords  = false;
+        _state.pwnedEndpoint        = null;
+        _state.maxFailedLogins      = 5;
+        _state.lockoutDuration      = 15 * 60;
         _state.initialized          = false;
     },
 };
