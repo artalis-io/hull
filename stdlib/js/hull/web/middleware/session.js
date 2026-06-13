@@ -40,6 +40,22 @@ function init(opts) {
         "CREATE INDEX IF NOT EXISTS idx__hull_sessions_expires " +
         "ON _hull_sessions(expires_at)"
     );
+    // Additive migration for the device-management helpers
+    // (listForUser, destroyOthers, destroyAll). PRAGMA-checked
+    // because SQLite has no ALTER TABLE ADD COLUMN IF NOT
+    // EXISTS. Old rows keep working with NULL in new columns.
+    const existing = {};
+    const cols = db.query("PRAGMA table_info(_hull_sessions)") || [];
+    for (let i = 0; i < cols.length; i++) existing[cols[i].name] = true;
+    if (!existing.user_id)
+        db.exec("ALTER TABLE _hull_sessions ADD COLUMN user_id TEXT");
+    if (!existing.ip)
+        db.exec("ALTER TABLE _hull_sessions ADD COLUMN ip TEXT");
+    if (!existing.user_agent)
+        db.exec("ALTER TABLE _hull_sessions ADD COLUMN user_agent TEXT");
+    db.exec(
+        "CREATE INDEX IF NOT EXISTS idx__hull_sessions_user_id " +
+        "ON _hull_sessions(user_id)");
 }
 
 function generateId() {
@@ -68,9 +84,25 @@ function create(data, opts) {
     const ttl = (opts && opts.ttl !== undefined) ? opts.ttl : sessionTtl;
     const encoded = json.encode(data || {});
 
+    // Capture device columns for audit-log + listForUser. user_id
+    // comes from the data blob (standard auth-flows pattern); ip
+    // + ua come from opts.req if supplied.
+    const userId = (data && typeof data === "object" && data.user_id) || null;
+    let ip = null, ua = null;
+    if (opts && opts.req) {
+        const h = opts.req.headers || {};
+        const xff = h["x-forwarded-for"];
+        if (xff) ip = (xff.split(",")[0] || xff).trim();
+        else ip = opts.req.remote_addr || null;
+        ua = h["user-agent"] || null;
+    }
+
     db.exec(
-        "INSERT INTO _hull_sessions (id, data, created_at, last_accessed, expires_at) VALUES (?, ?, ?, ?, ?)",
-        [id, encoded, now, now, now + ttl]
+        "INSERT INTO _hull_sessions "
+        + "(id, data, created_at, last_accessed, expires_at, "
+        + " user_id, ip, user_agent) "
+        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [id, encoded, now, now, now + ttl, userId, ip, ua]
     );
 
     return id;
@@ -190,5 +222,44 @@ function cleanup() {
     );
 }
 
-const session = { init, create, load, update, destroy, cleanup };
+/**
+ * List currently active sessions for a user.
+ * Returns rows {id, created_at, last_accessed, ip, user_agent}, newest
+ * first. Excludes expired rows.
+ */
+function listForUser(userId) {
+    if (typeof userId !== "string" || userId === "") return [];
+    const now = time.now();
+    return db.query(
+        "SELECT id, created_at, last_accessed, ip, user_agent "
+        + "FROM _hull_sessions "
+        + "WHERE user_id = ? AND expires_at > ? "
+        + "ORDER BY last_accessed DESC",
+        [userId, now]) || [];
+}
+
+/**
+ * Destroy every session for `userId` EXCEPT `currentSid`. Returns
+ * the number of rows removed.
+ */
+function destroyOthers(currentSid, userId) {
+    if (typeof userId !== "string" || userId === "") return 0;
+    return db.exec(
+        "DELETE FROM _hull_sessions WHERE user_id = ? AND id != ?",
+        [userId, currentSid || ""]) || 0;
+}
+
+/**
+ * Destroy every session for `userId`. Used by auth-flows on
+ * successful password reset when revokeSessionsOnPasswordReset is
+ * true (default).
+ */
+function destroyAll(userId) {
+    if (typeof userId !== "string" || userId === "") return 0;
+    return db.exec("DELETE FROM _hull_sessions WHERE user_id = ?",
+                   [userId]) || 0;
+}
+
+const session = { init, create, load, update, destroy, cleanup,
+                  listForUser, destroyOthers, destroyAll };
 export { session };

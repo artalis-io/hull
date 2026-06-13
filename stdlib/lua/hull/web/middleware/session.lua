@@ -52,6 +52,27 @@ function session.init(opts)
         CREATE INDEX IF NOT EXISTS idx__hull_sessions_expires
         ON _hull_sessions(expires_at)
     ]])
+    -- Additive migration for the device-management helpers
+    -- (session.list_for_user, destroy_others, destroy_all). Pre-
+    -- existing rows keep working; they just carry NULL in the
+    -- new columns. SQLite has no ALTER TABLE ADD COLUMN IF NOT
+    -- EXISTS, so PRAGMA-check first.
+    local existing = {}
+    for _, r in ipairs(db.query("PRAGMA table_info(_hull_sessions)") or {}) do
+        existing[r.name] = true
+    end
+    if not existing.user_id then
+        db.exec("ALTER TABLE _hull_sessions ADD COLUMN user_id TEXT")
+    end
+    if not existing.ip then
+        db.exec("ALTER TABLE _hull_sessions ADD COLUMN ip TEXT")
+    end
+    if not existing.user_agent then
+        db.exec("ALTER TABLE _hull_sessions ADD COLUMN user_agent TEXT")
+    end
+    db.exec(
+        "CREATE INDEX IF NOT EXISTS idx__hull_sessions_user_id "
+        .. "ON _hull_sessions(user_id)")
 end
 
 --- Generate a 64-character hex session ID from 32 random bytes.
@@ -76,9 +97,29 @@ function session.create(data, opts)
     local ttl = (opts and opts.ttl) or _ttl
     local encoded = json.encode(data or {})
 
+    -- Capture device columns for hull/web/middleware/audit-log
+    -- + session.list_for_user. user_id is taken from the data
+    -- blob (the standard auth-flows pattern is to put it there);
+    -- ip + ua come from opts.req if the caller passes it.
+    local user_id = (type(data) == "table" and data.user_id) or nil
+    local ip, ua
+    if opts and opts.req then
+        local h = opts.req.headers
+        local xff = h and h["x-forwarded-for"]
+        if xff then
+            ip = (xff:match("^([^,]+)") or xff):gsub("^%s+", ""):gsub("%s+$", "")
+        else
+            ip = opts.req.remote_addr
+        end
+        ua = h and h["user-agent"]
+    end
+
     db.exec(
-        "INSERT INTO _hull_sessions (id, data, created_at, last_accessed, expires_at) VALUES (?, ?, ?, ?, ?)",
-        { id, encoded, now, now, now + ttl }
+        "INSERT INTO _hull_sessions "
+        .. "(id, data, created_at, last_accessed, expires_at, "
+        .. " user_id, ip, user_agent) "
+        .. "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        { id, encoded, now, now, now + ttl, user_id, ip, ua }
     )
 
     return id
@@ -181,6 +222,43 @@ function session.cleanup()
         { now }
     )
     return count
+end
+
+--- List the currently active sessions for a user.
+-- Returns rows `{ id, created_at, last_accessed, ip, user_agent }`,
+-- newest-accessed first. Excludes expired rows. The session
+-- DATA blob is NOT included (apps don't typically need it for a
+-- device list — they want ip/ua/recency).
+-- @tparam string user_id
+-- @treturn table  Array (possibly empty).
+function session.list_for_user(user_id)
+    if type(user_id) ~= "string" or user_id == "" then return {} end
+    local now = time.now()
+    return db.query(
+        "SELECT id, created_at, last_accessed, ip, user_agent "
+        .. "FROM _hull_sessions "
+        .. "WHERE user_id = ? AND expires_at > ? "
+        .. "ORDER BY last_accessed DESC",
+        { user_id, now }) or {}
+end
+
+--- Destroy every session for a user EXCEPT `current_sid`.
+-- Standard "sign out everywhere else" UX. Returns the count.
+function session.destroy_others(current_sid, user_id)
+    if type(user_id) ~= "string" or user_id == "" then return 0 end
+    return db.exec(
+        "DELETE FROM _hull_sessions WHERE user_id = ? AND id != ?",
+        { user_id, current_sid or "" }) or 0
+end
+
+--- Destroy every session for a user.
+-- Used by hull/web/auth-flows on a successful password reset
+-- when opts.revoke_sessions_on_password_reset is true (default).
+function session.destroy_all(user_id)
+    if type(user_id) ~= "string" or user_id == "" then return 0 end
+    return db.exec(
+        "DELETE FROM _hull_sessions WHERE user_id = ?",
+        { user_id }) or 0
 end
 
 return session

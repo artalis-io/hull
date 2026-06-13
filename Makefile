@@ -2406,6 +2406,9 @@ e2e-auth-flows-2fa: $(BUILDDIR)/hull
 e2e-auth-flows-hardening: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_auth_flows_hardening.sh
 
+e2e-sign-in-events: $(BUILDDIR)/hull
+	RUNTIME=$(RUNTIME) sh tests/e2e_sign_in_events.sh
+
 e2e-sandbox: $(BUILDDIR)/hull
 	sh tests/e2e_sandbox.sh
 

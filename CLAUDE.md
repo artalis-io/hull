@@ -884,6 +884,7 @@ Register with `app.use(method, pattern, mw)`:
 | `auth-flows` | `hull.web.auth-flows` | `hull:web:auth-flows` | Registration, email-verify, login, password-reset, magic-link, email-change. HMAC-signed single-use tokens, PBKDF2, app-provided storage + templates |
 | `envelope` | `hull.crypto.envelope` | `hull:crypto:envelope` | HMAC-signed JSON-payload stateless tokens (`base64url(payload) "." hex(HMAC)`). Used internally by `hull/web/auth-flows` and `hull/web/middleware/oauth`; available standalone for any app that wants a tamper-detectable signed envelope without DB state |
 | `pwned` | `hull.web.pwned` | `hull:web:pwned` | k-anonymity pwned-password check via HIBP range API. Hashes the password SHA-1 client-side, sends only the first 5 hex chars over the wire, scans the returned suffix list locally. Apps must add `api.pwnedpasswords.com` to `manifest.hosts`. Fail-open on HIBP outage. Used internally by `hull/web/auth-flows` when `check_pwned_passwords = true` |
+| `audit-log` | `hull.web.middleware.audit-log` | `hull:web:middleware:audit-log` | Append-only sign-in / auth event log + per-device grouping. `record(user_id, kind, req, opts)`, `list(user_id, opts)`, `list_devices(user_id, opts)`, `is_new_device(user_id, req, opts)`. Fingerprint = `sha256(family_os|ip_prefix)[:16]`. Owns `_hull_audit_log`. Composes with auth-flows (emits events when `sign_in_log = true`), with session (per-device summary via `list_devices`), or standalone for app-recorded kinds (`api_token_issued`, `admin_impersonate`, etc.) |
 | `session` | `hull.web.middleware.session` | `hull:web:middleware:session` | Server-side sessions backed by SQLite |
 | `logger` | `hull.web.middleware.logger` | `hull:web:middleware:logger` | Request logging with logfmt output and request IDs |
 | `transaction` | `hull.web.middleware.transaction` | `hull:web:middleware:transaction` | Wraps handlers in `db.batch()` (BEGIN IMMEDIATE..COMMIT) |
@@ -1096,6 +1097,23 @@ verify step between successful first-factor auth and `on_login` when
       pending change (`/email-change/revoke?token=…`) within
       `email_change_ttl` even if the attacker holds a valid
       session cookie.
+    - `opts.sign_in_log` (default `false`). Routes every login /
+      password-reset-completed / email-changed / email-change-
+      revoked into `hull/web/middleware/audit-log` so apps can
+      surface a per-user device list, recent events, and "you
+      signed in from a new device" UX. Requires
+      `hull/web/middleware/audit-log` to be in scope (it's a
+      transitive dep of auth-flows so the resolver auto-admits).
+    - `opts.on_new_device(req, res, user)` (optional). Fires
+      from inside the login path when `audit_log.is_new_device`
+      returns true for this user + request fingerprint. App
+      typically sends a "you signed in from a new device" email.
+    - `opts.on_password_reset(req, res, user)` (optional). Fires
+      after a successful `password-reset/confirm` updates the
+      hash. Recommended implementation:
+      `function(req, res, user) session.destroy_all(user.id) end`
+      — revokes every existing session because a reset is the
+      standard recovery move after a suspected compromise.
 - `authflows.routes(app)`. Mounts the routes under `prefix`:
   POST `/register`, GET `/verify`, POST `/verify/resend`,
   POST `/login`, POST `/logout`, POST `/magic-link`,
@@ -2181,6 +2199,7 @@ make e2e                            # run all E2E tests (examples + build + sand
 | `e2e_auth_flows.sh` | Auth flows: register → verify → login → logout → magic-link → password-reset → email-change, with replay/tamper assertions, against `tests/fixtures/auth_flows_{lua,js}` (24 assertions per runtime) |
 | `e2e_auth_flows_2fa.sh` | Auth flows + TOTP composition: enroll → confirm → login (returns `pending_2fa` + `totp_token`) → wrong-code retry → right-code completes → totp_token single-use-on-success → recovery code path → magic-link with 2FA rendering default form, against `tests/fixtures/auth_flows_2fa_{lua,js}` (15 assertions per runtime) |
 | `e2e_auth_flows_hardening.sh` | Auth flows hardening: re-send verify (incl. enumeration-safe silence post-verify) → account lockout after N failed logins (429 + `Retry-After`; correct password during window still locked; auto-clears after window) → email-change notify+revoke (revoke link aborts pending change; subsequent confirm fails 400) → pwned-password check via a localhost HIBP mock (rejects "password", accepts random). 20 assertions per runtime; fixtures at `tests/fixtures/auth_flows_hardening_{lua,js}` |
+| `e2e_sign_in_events.sh` | Sign-in events + device management: login from "browser A" emits one new-device alert; login from "browser B" (different UA + IP) emits a second; re-login from A doesn't re-fire; email-change recorded as `email_changed`; `session.list_for_user` + `audit_log.list_devices` surface 2 devices; `destroy_others` kills B leaves A; password reset cascade kills A via `on_password_reset`. 20 assertions per runtime; fixtures at `tests/fixtures/sign_in_events_{lua,js}` |
 
 ## Runtime Sandboxes
 

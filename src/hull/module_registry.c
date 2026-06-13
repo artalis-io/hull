@@ -312,16 +312,19 @@ static const HlModuleSpec REGISTRY[] = {
          * resolver admits them via the dep chain so they don't
          * need re-declaration here.
          *
-         * hull/web/pwned is statically imported in the JS module
-         * (QuickJS doesn't reliably support dynamic import()).
-         * It's listed here so the resolver admits it for every
-         * app declaring auth-flows, even those that don't enable
-         * the check_pwned_passwords option. The HIBP host
-         * (api.pwnedpasswords.com) is still gated at call time
-         * via manifest.hosts. */
+         * hull/web/pwned + hull/web/middleware/audit-log are
+         * statically imported in the JS module (QuickJS doesn't
+         * reliably support dynamic import()). They're listed here
+         * so the resolver admits them for every app declaring
+         * auth-flows, even those that don't enable
+         * check_pwned_passwords / sign_in_log respectively. The
+         * HIBP host (api.pwnedpasswords.com) is still gated at
+         * call time via manifest.hosts; audit-log only writes
+         * to the local DB. */
         .deps = {"hull/http-server", "hull/db",
                  "hull/crypto/envelope", "hull/crypto",
-                 "hull/time", "hull/web/pwned", 0},
+                 "hull/time", "hull/web/pwned",
+                 "hull/web/middleware/audit-log", 0},
     },
     {
         .name = "hull/web/cookie",
@@ -361,6 +364,17 @@ static const HlModuleSpec REGISTRY[] = {
      * app.use() / app.use_post(), all of which need Keel's HTTP server.
      * They share HL_MOD_CAP_HTTP_SERVER — apps targeting an
      * HL_ENABLE_HTTP_SERVER=0 build can't declare any of them. */
+    {
+        /* Append-only sign-in / auth event log + per-device
+         * grouping. Composable with hull/web/auth-flows (which
+         * emits events when opts.sign_in_log is wired), with
+         * hull/web/middleware/session, or standalone for app-
+         * recorded events. Owns _hull_audit_log. */
+        .name = "hull/web/middleware/audit-log",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = HL_MOD_CAP_DB,
+        .deps = {"hull/db", "hull/crypto", "hull/time", "hull/json", 0},
+    },
     {
         .name = "hull/web/middleware/auth",
         .api_major = 1, .intrinsic = 0, .pure = 0,

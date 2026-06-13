@@ -18,6 +18,7 @@
 import { crypto }   from "hull:crypto";
 import { envelope } from "hull:crypto:envelope";
 import { pwned }    from "hull:web:pwned";
+import { auditLog } from "hull:web:middleware:audit-log";
 import { db }       from "hull:db";
 import { time }     from "hull:time";
 import { json }     from "hull:json";
@@ -57,6 +58,15 @@ const _state = {
     // api.pwnedpasswords.com to manifest.hosts.
     checkPwnedPasswords:    false,
     pwnedEndpoint:          null,
+    // Sign-in events (opt-in). When signInLog = true, auth-flows
+    // records every login / password reset / email change via
+    // hull/web/middleware/audit-log. Pair with onNewDevice for
+    // the "you signed in from a new device" email; pair with
+    // onPasswordReset to revoke sessions (typically
+    // `(req, res, user) => session.destroyAll(user.id)`).
+    signInLog:              false,
+    onNewDevice:            null,
+    onPasswordReset:        null,
     verifyRedirect:      "/",
     loginRedirect:       "/",
     initialized:         false,
@@ -258,6 +268,30 @@ async function checkPwned(password) {
         _state.pwnedEndpoint ? { endpoint: _state.pwnedEndpoint } : undefined);
 }
 
+// ── Sign-in event emit + finish-login helper ──────────────────
+//
+// Mirror of the Lua emit_event / finish_login. No-op when
+// signInLog isn't enabled.
+function emitEvent(uid, kind, req, opts) {
+    if (!_state.signInLog) return;
+    try { auditLog.record(uid, kind, req, opts); }
+    catch (_e) { /* don't let the log break the login */ }
+}
+
+function finishLogin(req, res, user, factors) {
+    const uid = userId(user);
+    if (_state.signInLog && _state.onNewDevice) {
+        let isNew = false;
+        try { isNew = auditLog.isNewDevice(uid, req); }
+        catch (_e) { isNew = false; }
+        if (isNew) {
+            try { _state.onNewDevice(req, res, user); } catch (_e) {}
+        }
+    }
+    emitEvent(uid, "login", req, { metadata: { factors: factors } });
+    _state.onLogin(req, res, user);
+}
+
 function parseBody(req) {
     const body = req.body || "";
     if (body.length === 0) return {};
@@ -435,10 +469,13 @@ function handleLogin(req, res) {
     if (_state.enableTotp && _state.userTotpEnrolled(userId(user))) {
         return startTotpPending(req, res, user);
     }
-    _state.onLogin(req, res, user);
+    finishLogin(req, res, user, "password");
 }
 
 function handleLogout(req, res) {
+    // user_id isn't known here without inspecting the session —
+    // app's responsibility. Apps that want a "logout" event can
+    // call auditLog.record inside their onLogout callback.
     if (_state.onLogout) _state.onLogout(req, res);
     else res.redirect("/");
 }
@@ -477,7 +514,7 @@ function handleMagicLinkConsume(req, res) {
     if (_state.enableTotp && _state.userTotpEnrolled(userId(user))) {
         return startTotpPending(req, res, user);
     }
-    _state.onLogin(req, res, user);
+    finishLogin(req, res, user, "magic_link");
 }
 
 // POST /auth/totp-verify { token, code } — second factor.
@@ -509,7 +546,7 @@ function handleTotpVerify(req, res) {
     if (!ok) return res.status(401).json({ error: "invalid code" });
     markTokenUsed(body.token, env.exp);
     gcExpired();
-    _state.onLogin(req, res, user);
+    finishLogin(req, res, user, "password+totp");
 }
 
 function handlePasswordResetRequest(req, res) {
@@ -548,6 +585,12 @@ async function handlePasswordResetConfirm(req, res) {
     // A successful reset demonstrates email control; clear any
     // outstanding lockout so the new password works immediately.
     clearFailedLogins(result[0].sub);
+    // Audit + app-side session revocation. Recommended onPasswordReset
+    // body: `(req, res, user) => session.destroyAll(user.id)`.
+    emitEvent(result[0].sub, "password_reset_completed", req);
+    if (_state.onPasswordReset) {
+        try { _state.onPasswordReset(req, res, user); } catch (_e) {}
+    }
     gcExpired();
     res.json({ ok: true });
 }
@@ -606,6 +649,8 @@ function handleEmailChangeRevoke(req, res) {
     }
     db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?",
             [result[0].sub]);
+    emitEvent(result[0].sub, "email_change_revoked", req,
+              { metadata: { by: "old_address" } });
     gcExpired();
     res.html("Email change canceled.");
 }
@@ -625,10 +670,13 @@ function handleEmailChangeConfirm(req, res) {
     if (!rows || rows.length === 0 || rows[0].new_email !== env.new_email) {
         return res.status(400).html("email change failed");
     }
+    const oldEmail = user.email;
     _state.userSetEmail(env.sub, env.new_email);
     _state.userSetEmailVerified(env.sub, true);
     db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?",
             [env.sub]);
+    emitEvent(env.sub, "email_changed", req,
+              { metadata: { old_email: oldEmail, new_email: env.new_email } });
     gcExpired();
     res.redirect(_state.verifyRedirect);
 }
@@ -716,6 +764,9 @@ function init(opts) {
                                   || _state.lockoutDuration;
     _state.checkPwnedPasswords  = opts.checkPwnedPasswords === true;
     _state.pwnedEndpoint        = opts.pwnedEndpoint || null;
+    _state.signInLog            = opts.signInLog === true;
+    _state.onNewDevice          = opts.onNewDevice || null;
+    _state.onPasswordReset      = opts.onPasswordReset || null;
     _state.verifyTtl       = opts.verifyTtl       || _state.verifyTtl;
     _state.resetTtl        = opts.resetTtl        || _state.resetTtl;
     _state.magicLinkTtl    = opts.magicLinkTtl    || _state.magicLinkTtl;
@@ -814,6 +865,9 @@ const _test = {
         _state.pwnedEndpoint        = null;
         _state.maxFailedLogins      = 5;
         _state.lockoutDuration      = 15 * 60;
+        _state.signInLog            = false;
+        _state.onNewDevice          = null;
+        _state.onPasswordReset      = null;
         _state.initialized          = false;
     },
 };

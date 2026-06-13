@@ -174,6 +174,19 @@ local _state = {
     -- Override endpoint (tests pass localhost mock here).
     pwned_endpoint        = nil,
 
+    -- Sign-in events (opt-in). When sign_in_log = true, auth-flows
+    -- records every login / logout / password reset / email change
+    -- into _hull_audit_log via hull/web/middleware/audit-log. Pair
+    -- with on_new_device to send a "you signed in from a new
+    -- device" email; pair with on_password_reset to revoke
+    -- existing sessions on reset (apps typically wire it as
+    -- `function(req,res,user) session.destroy_all(user.id) end`).
+    sign_in_log         = false,
+    audit_log           = nil,   -- the module handle, lazy-required
+                                 -- when sign_in_log is enabled
+    on_new_device       = nil,
+    on_password_reset   = nil,
+
     -- Optional post-action redirects.
     verify_redirect       = "/",
     login_redirect        = "/",
@@ -405,6 +418,34 @@ local function check_pwned(password)
         _state.pwned_endpoint and { endpoint = _state.pwned_endpoint } or nil)
 end
 
+-- ── Sign-in event emit + finish-login helper ──────────────────────
+--
+-- emit_event is a no-op when sign_in_log isn't enabled; the
+-- conditional lives here so call sites stay clean.
+local function emit_event(user_id, kind, req, opts)
+    if _state.audit_log then
+        _state.audit_log.record(user_id, kind, req, opts)
+    end
+end
+
+-- Shared tail of every login path (password 1FA, magic-link,
+-- 2FA verify). Order: new-device check -> emit "login" event ->
+-- on_login. The is_new_device check runs BEFORE emit_event so
+-- it sees the prior history, not this fresh event.
+local function finish_login(req, res, user, factors)
+    if _state.audit_log and _state.on_new_device then
+        local ok, is_new = pcall(_state.audit_log.is_new_device,
+                                  user_uid(user), req)
+        if ok and is_new then
+            -- Don't let a misbehaving callback take down the login.
+            pcall(_state.on_new_device, req, res, user)
+        end
+    end
+    emit_event(user_uid(user), "login", req,
+               { metadata = { factors = factors } })
+    _state.on_login(req, res, user)
+end
+
 -- ── Body parsing ───────────────────────────────────────────────────
 -- Accept either JSON or url-encoded form. Returns the parsed table
 -- or {} on parse failure (the route handler does field-presence
@@ -611,10 +652,14 @@ local function handle_login(req, res)
        and _state.user_totp_enrolled(user_uid(user)) then
         return start_totp_pending(req, res, user)
     end
-    _state.on_login(req, res, user)
+    finish_login(req, res, user, "password")
 end
 
 local function handle_logout(req, res)
+    -- We don't know the user_id here without inspecting the
+    -- session — that's the app's responsibility. Apps that want
+    -- a "logout" event in the audit log can call audit_log.record
+    -- inside their on_logout callback.
     if _state.on_logout then
         _state.on_logout(req, res)
     else
@@ -669,7 +714,7 @@ local function handle_magic_link_consume(req, res)
        and _state.user_totp_enrolled(user_uid(user)) then
         return start_totp_pending(req, res, user)
     end
-    _state.on_login(req, res, user)
+    finish_login(req, res, user, "magic_link")
 end
 
 -- POST /auth/totp-verify { token, code } — second factor.
@@ -703,7 +748,10 @@ local function handle_totp_verify(req, res)
     end
     mark_token_used(body.token, env.exp)
     gc_expired()
-    _state.on_login(req, res, user)
+    -- 2FA path — record both factors. Apps reading audit logs
+    -- can use this to distinguish "password-only" from "with
+    -- 2FA" logins for compliance reporting.
+    finish_login(req, res, user, "password+totp")
 end
 
 local function handle_password_reset_request(req, res)
@@ -750,6 +798,15 @@ local function handle_password_reset_confirm(req, res)
     -- moot. (If they don't reset, the lockout window expires
     -- naturally per lockout_duration.)
     clear_failed_logins(env.sub)
+    -- Audit + give the app a chance to invalidate existing
+    -- sessions. The recommended on_password_reset implementation
+    -- is `function(req,res,user) session.destroy_all(user.id) end`;
+    -- apps that want to keep the current session can filter it
+    -- out via session.destroy_others instead.
+    emit_event(env.sub, "password_reset_completed", req)
+    if _state.on_password_reset then
+        pcall(_state.on_password_reset, req, res, user)
+    end
     gc_expired()
     res:json({ ok = true })
 end
@@ -824,6 +881,8 @@ local function handle_email_change_revoke(req, res)
     end
     db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?",
             { env.sub })
+    emit_event(env.sub, "email_change_revoked", req,
+               { metadata = { by = "old_address" } })
     gc_expired()
     res:html("Email change canceled.")
 end
@@ -849,10 +908,14 @@ local function handle_email_change_confirm(req, res)
        or rows[1].new_email ~= env.new_email then
         return res:status(400):html("email change failed")
     end
+    local old_email = user.email
     _state.user_set_email(env.sub, env.new_email)
     _state.user_set_email_verified(env.sub, true)
     db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?",
             { env.sub })
+    emit_event(env.sub, "email_changed", req,
+               { metadata = { old_email = old_email,
+                              new_email = env.new_email } })
     gc_expired()
     res:redirect(_state.verify_redirect)
 end
@@ -951,6 +1014,20 @@ function M.init(opts)
                                      or _state.lockout_duration
     _state.check_pwned_passwords   = opts.check_pwned_passwords == true
     _state.pwned_endpoint          = opts.pwned_endpoint
+    _state.sign_in_log             = opts.sign_in_log == true
+    _state.on_new_device           = opts.on_new_device
+    _state.on_password_reset       = opts.on_password_reset
+    if _state.sign_in_log then
+        local ok, m = pcall(require, "hull.web.middleware.audit-log")
+        if not ok then
+            error("auth-flows.init: sign_in_log = true but "
+                  .. "hull/web/middleware/audit-log isn't loadable; "
+                  .. "add it to manifest.modules.")
+        end
+        _state.audit_log = m
+    else
+        _state.audit_log = nil
+    end
     _state.verify_ttl       = opts.verify_ttl       or _state.verify_ttl
     _state.reset_ttl        = opts.reset_ttl        or _state.reset_ttl
     _state.magic_link_ttl   = opts.magic_link_ttl   or _state.magic_link_ttl
@@ -1089,6 +1166,10 @@ M._test = {
         _state.pwned_endpoint          = nil
         _state.max_failed_logins       = 5
         _state.lockout_duration        = 15 * 60
+        _state.sign_in_log             = false
+        _state.audit_log               = nil
+        _state.on_new_device           = nil
+        _state.on_password_reset       = nil
         _state._initialized            = false
     end,
 }

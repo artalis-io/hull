@@ -112,6 +112,10 @@ jobs:
         timeout-minutes: 3
         run: make e2e-auth-flows-hardening
 
+      - name: Sign-in events + device management E2E
+        timeout-minutes: 3
+        run: make e2e-sign-in-events
+
       - name: Sandbox tests
         timeout-minutes: 2
         run: make e2e-sandbox
