@@ -30,7 +30,18 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* ── Hashes ────────────────────────────────────────────────────────── */
+/* ── Hashes ──────────────────────────────────────────────────────────
+ *
+ * SHA-256 / SHA-512 deliberately stay as direct TweetNaCl calls
+ * (with hardware-accelerated SHA-256 paths on platforms that have
+ * them) — they're tight, well-tested, and pure functions with no
+ * keyed-secret leak surface. Moving them behind a backend vtable
+ * would duplicate the hash infrastructure that HlCryptoAsymBackend's
+ * RSA / ECDSA verify already maintains internally, for no observable
+ * benefit. If a future need arises (FIPS box, HSM offload), this is
+ * the natural spot to drop in HlCryptoHashBackend; until then,
+ * direct dispatch is the right trade.
+ */
 
 /**
  * @brief Compute SHA-256 of a byte buffer.
@@ -39,7 +50,7 @@
  * @param len   Byte count.
  * @param out   32-byte output buffer.
  *
- * @return `0` on success, `-1` on internal failure (mbedTLS error).
+ * @return `0` on success, `-1` on internal failure.
  */
 int hl_cap_crypto_sha256(const void *data, size_t len, uint8_t out[32]);
 
@@ -174,12 +185,16 @@ typedef enum {
 /** Backend vtable for HMAC compute. Same swap-friendly convention as
  *  HlCryptoAsymBackend / HlCompilerVtable / HlGpuBackendVtable.
  *
- *  The existing hl_cap_crypto_hmac_sha256 calls mbedTLS / TweetNaCl
- *  directly (it shipped before the vtable convention); new HMAC work
- *  goes through this interface from day one so impls can be swapped
- *  (mbedTLS today; could be WolfSSL, BoringSSL, a hardware token
- *  later) without disturbing the cap surface or the Lua / JS
- *  bindings.
+ *  Every HMAC alg (SHA1 / SHA256 / SHA512) routes through this
+ *  interface — including hl_cap_crypto_hmac_sha256, which was
+ *  originally an in-tree HMAC construction over hl_cap_crypto_sha256
+ *  but was migrated to the vtable on 2026-06-13 so a future backend
+ *  swap covers all three algs in one drop-in (mbedTLS today; could
+ *  be WolfSSL, BoringSSL, a hardware token later) without disturbing
+ *  the cap surface or the Lua / JS bindings.
+ *
+ *  PBKDF2-HMAC-SHA256 (hl_cap_crypto_pbkdf2) transitively benefits
+ *  via its internal HMAC calls.
  */
 typedef struct HlCryptoHmacBackend {
     /** Returns 1 if the backend can compute HMAC under this alg. */

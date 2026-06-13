@@ -706,73 +706,27 @@ int hl_cap_crypto_random(void *buf, size_t len)
 #endif
 }
 
-/* ── HMAC-SHA256 ───────────────────────────────────────────────────── */
+/* ── HMAC-SHA256 (vtable-dispatched) ───────────────────────────────── */
 
 int hl_cap_crypto_hmac_sha256(const uint8_t *key, size_t key_len,
                               const uint8_t *msg, size_t msg_len,
                               uint8_t out[32])
 {
-    uint8_t k_ipad[64], k_opad[64];
-    uint8_t tk[32];
-
+    /* Migrated 2026-06-13 to dispatch through HlCryptoHmacBackend
+     * (same path as hmac_sha1). The previous in-tree HMAC
+     * construction over hl_cap_crypto_sha256 + TweetNaCl produced
+     * byte-identical output; the indirection just lets a future
+     * backend swap (BoringSSL / WolfSSL / hardware token) cover
+     * SHA1 + SHA256 + SHA512 in one drop-in.
+     *
+     * NULL guards stay on this side so a malformed call doesn't
+     * reach the backend implementation. */
     if (!key || !msg || !out)
         return -1;
-
-    /* If key is longer than block size, hash it first */
-    if (key_len > 64) {
-        hl_cap_crypto_sha256(key, key_len, tk);
-        key = tk;
-        key_len = 32;
-    }
-
-    memset(k_ipad, 0x36, 64);
-    memset(k_opad, 0x5c, 64);
-    for (size_t i = 0; i < key_len; i++) {
-        k_ipad[i] ^= key[i];
-        k_opad[i] ^= key[i];
-    }
-
-    /* inner hash: SHA256(k_ipad || msg)
-     *
-     * Hybrid stack/heap pattern: use a ~4 KB stack buffer for small
-     * messages, falling back to malloc for larger inputs. The 4096-byte
-     * threshold keeps stack usage well under 1% of typical thread stacks
-     * (1-2 MiB on Linux/macOS, same for Cosmopolitan). This pattern
-     * repeats across all crypto functions in this file. */
-    if (msg_len > SIZE_MAX / 2) {
-        hull_secure_zero(k_ipad, sizeof(k_ipad));
-        hull_secure_zero(k_opad, sizeof(k_opad));
-        hull_secure_zero(tk, sizeof(tk));
-        return -1;
-    }
-    size_t inner_len = 64 + msg_len;
-    uint8_t stack_inner[4160]; /* 64 + 4096 */
-    uint8_t *inner_buf = (inner_len <= sizeof(stack_inner)) ? stack_inner
-                                                             : malloc(inner_len);
-    if (!inner_buf) {
-        hull_secure_zero(k_ipad, sizeof(k_ipad));
-        hull_secure_zero(k_opad, sizeof(k_opad));
-        hull_secure_zero(tk, sizeof(tk));
-        return -1;
-    }
-    memcpy(inner_buf, k_ipad, 64);
-    memcpy(inner_buf + 64, msg, msg_len);
-    uint8_t inner_hash[32];
-    hl_cap_crypto_sha256(inner_buf, inner_len, inner_hash);
-    if (inner_buf != stack_inner) free(inner_buf);
-
-    /* outer hash: SHA256(k_opad || inner_hash) */
-    uint8_t outer[64 + 32];
-    memcpy(outer, k_opad, 64);
-    memcpy(outer + 64, inner_hash, 32);
-    hl_cap_crypto_sha256(outer, 96, out);
-
-    hull_secure_zero(k_ipad, sizeof(k_ipad));
-    hull_secure_zero(k_opad, sizeof(k_opad));
-    hull_secure_zero(tk, sizeof(tk));
-    hull_secure_zero(inner_hash, sizeof(inner_hash));
-    hull_secure_zero(outer, sizeof(outer));
-    return 0;
+    return hl_crypto_hmac_backend_mbedtls.compute(
+        &hl_crypto_hmac_backend_mbedtls,
+        HL_CRYPTO_HMAC_SHA256,
+        key, key_len, msg, msg_len, out, 32);
 }
 
 /* ── HMAC-SHA1 (HOTP/TOTP compatibility, vtable-dispatched) ────────── */
@@ -781,14 +735,11 @@ int hl_cap_crypto_hmac_sha1(const uint8_t *key, size_t key_len,
                             const uint8_t *msg, size_t msg_len,
                             uint8_t out[20])
 {
-    /* New symmetric primitives in cap/ go through a backend vtable so
-     * the impl can be swapped (mbedTLS today; could be BoringSSL,
-     * WolfSSL, hardware token later) without disturbing the cap
-     * surface or the Lua / JS bindings. Same convention as
-     * HlCryptoAsymBackend.  The existing hl_cap_crypto_hmac_sha256
-     * call mbedTLS/TweetNaCl directly because they shipped before
-     * the vtable convention; hmac_sha1 is new and ships through the
-     * vtable from day one. */
+    /* All three HMAC algs (SHA1 / SHA256 / SHA512) now route through
+     * HlCryptoHmacBackend so the impl can be swapped (mbedTLS today;
+     * could be BoringSSL, WolfSSL, hardware token later) without
+     * disturbing the cap surface or the Lua / JS bindings. Same
+     * convention as HlCryptoAsymBackend. */
     return hl_crypto_hmac_backend_mbedtls.compute(
         &hl_crypto_hmac_backend_mbedtls,
         HL_CRYPTO_HMAC_SHA1,
@@ -981,6 +932,10 @@ int hl_cap_crypto_pbkdf2(const char *password, size_t pw_len,
                            int iterations,
                            uint8_t *out, size_t out_len)
 {
+    /* PBKDF2-HMAC-SHA256. All per-iteration HMAC calls go through
+     * hl_cap_crypto_hmac_sha256 below, which now dispatches via
+     * HlCryptoHmacBackend — so a future backend swap covers PBKDF2
+     * transitively without touching this function. */
     if (!password || !salt || !out || iterations < 100000 || out_len == 0)
         return -1;
 

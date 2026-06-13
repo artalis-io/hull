@@ -239,6 +239,66 @@ UTEST(hl_cap_crypto, random_null)
     ASSERT_EQ(rc, -1);
 }
 
+/* ── HMAC-SHA256 vtable migration check ─────────────────────────────
+ *
+ * Direct cap-level coverage that the new vtable-dispatched
+ * hl_cap_crypto_hmac_sha256 still produces RFC 4231 § Test Case 1
+ * output byte-for-byte. The runtime / stdlib tests cover it
+ * transitively (auth-flows token sign/verify, oauth state cookie,
+ * PBKDF2 deterministic check below), but a focused vector test
+ * makes a backend swap regression unambiguous. */
+UTEST(hl_cap_crypto, hmac_sha256_rfc4231_vector1)
+{
+    uint8_t key[20];
+    for (int i = 0; i < 20; i++) key[i] = 0x0b;
+    const char *msg = "Hi There";
+    uint8_t out[32];
+    ASSERT_EQ(0, hl_cap_crypto_hmac_sha256(key, sizeof(key),
+                                            (const uint8_t *)msg, 8,
+                                            out));
+    /* RFC 4231 expected MAC. */
+    const uint8_t expected[32] = {
+        0xb0, 0x34, 0x4c, 0x61, 0xd8, 0xdb, 0x38, 0x53,
+        0x5c, 0xa8, 0xaf, 0xce, 0xaf, 0x0b, 0xf1, 0x2b,
+        0x88, 0x1d, 0xc2, 0x00, 0xc9, 0x83, 0x3d, 0xa7,
+        0x26, 0xe9, 0x37, 0x6c, 0x2e, 0x32, 0xcf, 0xf7,
+    };
+    ASSERT_EQ(0, memcmp(out, expected, 32));
+}
+
+UTEST(hl_cap_crypto, hmac_sha256_long_key_is_prehashed)
+{
+    /* Per RFC 2104 § 2 the HMAC construction prehashes any key
+     * longer than the block size (64 bytes for SHA-256). Sanity:
+     * a 65-byte key matches HMAC(SHA256(key), msg). */
+    uint8_t key[65];
+    for (int i = 0; i < 65; i++) key[i] = (uint8_t)i;
+    const char *msg = "vtable check";
+
+    uint8_t direct[32];
+    ASSERT_EQ(0, hl_cap_crypto_hmac_sha256(key, sizeof(key),
+                                            (const uint8_t *)msg, 12,
+                                            direct));
+
+    uint8_t hashed_key[32];
+    ASSERT_EQ(0, hl_cap_crypto_sha256(key, sizeof(key), hashed_key));
+    uint8_t indirect[32];
+    ASSERT_EQ(0, hl_cap_crypto_hmac_sha256(hashed_key, sizeof(hashed_key),
+                                            (const uint8_t *)msg, 12,
+                                            indirect));
+    ASSERT_EQ(0, memcmp(direct, indirect, 32));
+}
+
+UTEST(hl_cap_crypto, hmac_sha256_null_args)
+{
+    uint8_t out[32];
+    uint8_t key[16] = { 0 };
+    const char *msg = "x";
+    ASSERT_EQ(-1, hl_cap_crypto_hmac_sha256(NULL, 0, (const uint8_t *)msg, 1, out));
+    ASSERT_EQ(-1, hl_cap_crypto_hmac_sha256(key, sizeof(key), NULL, 0, out));
+    ASSERT_EQ(-1, hl_cap_crypto_hmac_sha256(key, sizeof(key), (const uint8_t *)msg, 1, NULL));
+}
+
 /* ── PBKDF2 tests ───────────────────────────────────────────────────── */
 
 UTEST(hl_cap_crypto, pbkdf2_basic)
