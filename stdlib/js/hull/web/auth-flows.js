@@ -17,8 +17,9 @@
 
 import { crypto }   from "hull:crypto";
 import { envelope } from "hull:crypto:envelope";
-import { pwned }    from "hull:web:pwned";
-import { auditLog } from "hull:web:middleware:audit-log";
+import { pwned }     from "hull:web:pwned";
+import { auditLog }  from "hull:web:middleware:audit-log";
+import { ratelimit } from "hull:web:middleware:ratelimit";
 import { db }       from "hull:db";
 import { time }     from "hull:time";
 import { json }     from "hull:json";
@@ -70,6 +71,13 @@ const _state = {
     // single seam covers both password and OAuth logins.
     signInLog:              false,
     onPasswordReset:        null,
+    // Login rate limit (opt-in). When loginRatelimit is truthy, a
+    // hull/web/middleware/ratelimit middleware is installed on POST
+    // /auth/login + /magic-link + /password-reset/request BEFORE the
+    // handlers. Defaults to 20 requests per IP per 5 minutes. Pass an
+    // object to override: { limit, window, key }. Apps with their own
+    // upstream rate-limiter should leave this off.
+    loginRatelimit:         false,
     verifyRedirect:      "/",
     loginRedirect:       "/",
     initialized:         false,
@@ -325,6 +333,18 @@ function isEmailIsh(s) {
 
 function genericOk(res) { res.json({ ok: true }); }
 
+// Apply the three security headers that every auth-flow HTML
+// response wants: clickjacking, cache, referrer. No opt-out because
+// there's no legitimate reason to frame your own auth flow, cache
+// it client-side, or leak the referrer when navigating off it.
+// Set BEFORE writing the body so res.html still owns content-type.
+function secureHtml(res) {
+    res.header("X-Frame-Options", "DENY");
+    res.header("Cache-Control", "no-store");
+    res.header("Referrer-Policy", "strict-origin-when-cross-origin");
+    return res;
+}
+
 // Tolerate either `user.id` (canonical) or `user.user_id` (legacy)
 // on app-supplied user objects. Lua mirrors this with `user_uid`.
 function userId(user) {
@@ -394,7 +414,7 @@ function handleVerify(req, res) {
     const token = req.query && req.query.token;
     const result = consumeToken(token, ACTIONS.verify_email);
     if (!result[0]) {
-        return res.status(400).html("verification failed: " + (result[1] || "?"));
+        return secureHtml(res).status(400).html("verification failed: " + (result[1] || "?"));
     }
     _state.userSetEmailVerified(result[0].sub, true);
     gcExpired();
@@ -434,7 +454,7 @@ function startTotpPending(req, res, user) {
         return res.redirect(_state.totpPendingRedirect
                              + sep + "token=" + token);
     }
-    res.html(defaultTotpFormHtml(token));
+    secureHtml(res).html(defaultTotpFormHtml(token));
 }
 
 function handleLogin(req, res) {
@@ -511,10 +531,10 @@ function handleMagicLinkConsume(req, res) {
     const token = req.query && req.query.token;
     const result = consumeToken(token, ACTIONS.magic_link);
     if (!result[0]) {
-        return res.status(400).html("magic link failed: " + (result[1] || "?"));
+        return secureHtml(res).status(400).html("magic link failed: " + (result[1] || "?"));
     }
     const user = _state.userGet(result[0].sub);
-    if (!user) return res.status(400).html("magic link failed");
+    if (!user) return secureHtml(res).status(400).html("magic link failed");
     if (!user.email_verified) {
         _state.userSetEmailVerified(userId(user), true);
         user.email_verified = true;
@@ -654,30 +674,30 @@ function handleEmailChangeRevoke(req, res) {
     const token = req.query && req.query.token;
     const result = consumeToken(token, ACTIONS.email_change_revoke);
     if (!result[0]) {
-        return res.status(400).html("revoke failed: " + (result[1] || "?"));
+        return secureHtml(res).status(400).html("revoke failed: " + (result[1] || "?"));
     }
     db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?",
             [result[0].sub]);
     emitEvent(result[0].sub, "email_change_revoked", req,
               { metadata: { by: "old_address" } });
     gcExpired();
-    res.html("Email change canceled.");
+    secureHtml(res).html("Email change canceled.");
 }
 
 function handleEmailChangeConfirm(req, res) {
     const token = req.query && req.query.token;
     const result = consumeToken(token, ACTIONS.email_change);
     if (!result[0]) {
-        return res.status(400).html("email change failed: " + (result[1] || "?"));
+        return secureHtml(res).status(400).html("email change failed: " + (result[1] || "?"));
     }
     const env = result[0];
     const user = _state.userGet(env.sub);
-    if (!user) return res.status(400).html("email change failed");
+    if (!user) return secureHtml(res).status(400).html("email change failed");
     const rows = db.query(
         "SELECT new_email FROM _hull_auth_pending_email_changes "
         + "WHERE user_id = ?", [env.sub]);
     if (!rows || rows.length === 0 || rows[0].new_email !== env.new_email) {
-        return res.status(400).html("email change failed");
+        return secureHtml(res).status(400).html("email change failed");
     }
     const oldEmail = user.email;
     _state.userSetEmail(env.sub, env.new_email);
@@ -692,6 +712,27 @@ function handleEmailChangeConfirm(req, res) {
 
 function registerRoutes(app) {
     const p = _state.prefix;
+    // Opt-in per-IP rate limit on /login + /password-reset/request +
+    // /magic-link. Installed BEFORE the handler so abusive traffic is
+    // rejected before any DB or PBKDF2 work. See loginRatelimit opt
+    // for the threat model. Per-IP key derived from x-forwarded-for
+    // then req.remote_addr; falls back to "_anon" so a malformed
+    // request can't bypass the bucket entirely.
+    if (_state.loginRatelimit) {
+        const rlOpts = typeof _state.loginRatelimit === "object"
+            ? _state.loginRatelimit : {};
+        const mw = ratelimit.middleware({
+            limit:  rlOpts.limit  || 20,
+            window: rlOpts.window || 300,
+            key:    rlOpts.key || ((req) =>
+                (req.headers && req.headers["x-forwarded-for"])
+                || req.remote_addr || "_anon"),
+        });
+        app.use("POST", p + "/login", mw);
+        app.use("POST", p + "/magic-link", mw);
+        app.use("POST", p + "/password-reset/request", mw);
+    }
+
     app.post(p + "/register",                 handleRegister);
     app.get (p + "/verify",                   handleVerify);
     app.post(p + "/verify/resend",            handleVerifyResend);
@@ -873,6 +914,8 @@ function init(opts) {
     _state.pwnedEndpoint        = opts.pwnedEndpoint || null;
     _state.signInLog            = opts.signInLog === true;
     _state.onPasswordReset      = opts.onPasswordReset || null;
+    _state.loginRatelimit       = opts.loginRatelimit !== undefined
+                                  ? opts.loginRatelimit : false;
 
     // Timing-safe email enumeration defense — see handleLogin. The
     // dummy hash is computed once at init() and reused per request,
@@ -982,6 +1025,7 @@ const _test = {
         _state.lockoutDuration      = 15 * 60;
         _state.signInLog            = false;
         _state.onPasswordReset      = null;
+        _state.loginRatelimit       = false;
         _state.initialized          = false;
     },
 };

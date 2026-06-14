@@ -37,7 +37,15 @@ local _state = {
 
 --- Initialize the audit-log table. Call once at app startup
 -- (typically right after session.init()).
--- @tparam[opt] table opts  `{ retain_days = integer }` (default 365).
+-- @tparam[opt] table opts
+--   * `retain_days` (default 365). Rows older than this are deleted
+--     by the scheduled cleanup.
+--   * `cleanup` (default true). When true, schedules a daily timer
+--     via app.daily that calls audit_log.cleanup(). Set false if you
+--     prefer to drive cleanup from a CRON job, a separate worker,
+--     or your own app.daily wiring.
+--   * `cleanup_at` (default "03:00", UTC). Wall-clock time for the
+--     daily cleanup. Off-peak by default.
 function audit_log.init(opts)
     opts = opts or {}
     if opts.retain_days ~= nil then
@@ -62,6 +70,19 @@ function audit_log.init(opts)
         CREATE INDEX IF NOT EXISTS _hull_audit_log_user_fp
             ON _hull_audit_log(user_id, fingerprint)
     ]])
+    -- Auto-schedule daily cleanup unless opted out. Prevents
+    -- _hull_audit_log from growing unboundedly for apps that
+    -- forget to wire a cleanup timer themselves. Guarded so a
+    -- second init() (test fixtures, hot reload) doesn't stack
+    -- timers — schedule once per process. app.daily comes from
+    -- hull/timers, declared as a hard dep in module_registry.
+    if opts.cleanup ~= false and not _state._cleanup_scheduled then
+        local at = opts.cleanup_at or "03:00"
+        if type(app) == "table" and type(app.daily) == "function" then
+            app.daily(at, function() audit_log.cleanup() end)
+            _state._cleanup_scheduled = true
+        end
+    end
     _state._initialized = true
 end
 

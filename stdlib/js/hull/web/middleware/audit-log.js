@@ -22,8 +22,13 @@ import { crypto } from "hull:crypto";
 import { db }     from "hull:db";
 import { time }   from "hull:time";
 import { json }   from "hull:json";
+import { app }    from "hull:app";
 
-const _state = { retainDays: 365, initialized: false };
+const _state = {
+    retainDays: 365,
+    initialized: false,
+    cleanupScheduled: false,
+};
 
 function init(opts) {
     opts = opts || {};
@@ -43,6 +48,19 @@ function init(opts) {
              ON _hull_audit_log(user_id, event_at DESC)`);
     db.exec(`CREATE INDEX IF NOT EXISTS _hull_audit_log_user_fp
              ON _hull_audit_log(user_id, fingerprint)`);
+    // Auto-schedule daily cleanup unless opted out. Prevents
+    // _hull_audit_log from growing unboundedly for apps that
+    // forget to wire a cleanup timer themselves. Guarded so a
+    // second init() (test fixtures, hot reload) doesn't stack
+    // timers. app.daily comes from hull/timers, declared as a
+    // hard dep of hull/web/middleware/audit-log.
+    if (opts.cleanup !== false && !_state.cleanupScheduled) {
+        const at = opts.cleanupAt || "03:00";
+        if (app && typeof app.daily === "function") {
+            app.daily(at, () => cleanup());
+            _state.cleanupScheduled = true;
+        }
+    }
     _state.initialized = true;
 }
 

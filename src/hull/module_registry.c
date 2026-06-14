@@ -324,7 +324,8 @@ static const HlModuleSpec REGISTRY[] = {
         .deps = {"hull/http-server", "hull/db",
                  "hull/crypto/envelope", "hull/crypto",
                  "hull/time", "hull/web/pwned",
-                 "hull/web/middleware/audit-log", 0},
+                 "hull/web/middleware/audit-log",
+                 "hull/web/middleware/ratelimit", 0},
     },
     {
         .name = "hull/web/cookie",
@@ -373,7 +374,13 @@ static const HlModuleSpec REGISTRY[] = {
         .name = "hull/web/middleware/audit-log",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_DB,
-        .deps = {"hull/db", "hull/crypto", "hull/time", "hull/json", 0},
+        /* hull/timers powers the auto-daily cleanup scheduled by
+         * audit_log.init() (opt-out via opts.cleanup = false). Apps
+         * that don't want the schedule still need it admitted because
+         * the module-conditional decoration that adds app.daily fires
+         * at app startup, not lazily. */
+        .deps = {"hull/db", "hull/crypto", "hull/time", "hull/json",
+                 "hull/timers", 0},
     },
     {
         .name = "hull/web/middleware/auth",

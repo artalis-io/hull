@@ -98,6 +98,7 @@ local time      = require("hull.time")
 local json      = require("hull.json")
 local pwned     = require("hull.web.pwned")
 local audit_log = require("hull.web.middleware.audit-log")
+local ratelimit = require("hull.web.middleware.ratelimit")
 
 local M = {}
 
@@ -193,6 +194,15 @@ local _state = {
     audit_log           = nil,   -- module handle, lazy-required when
                                  -- sign_in_log is enabled
     on_password_reset   = nil,
+
+    -- Login rate limit (opt-in). When login_ratelimit is truthy, an
+    -- hull/web/middleware/ratelimit middleware is installed on
+    -- POST /auth/login BEFORE the handler. Defaults to 20 requests
+    -- per IP per 5 minutes — tuned to make brute-force impractical
+    -- without blocking power-users with sticky typos. Pass a table
+    -- to override: { limit = N, window = SECONDS, key = function|str }.
+    -- Apps with their own upstream rate-limiter should leave this off.
+    login_ratelimit     = false,
 
     -- Optional post-action redirects.
     verify_redirect       = "/",
@@ -496,6 +506,18 @@ local function generic_ok(res)
     res:json({ ok = true })
 end
 
+-- Apply the three security headers that every auth-flow HTML
+-- response wants: clickjacking, cache, referrer. No opt-out because
+-- there's no legitimate reason to frame your own auth flow, cache
+-- it client-side, or leak the referrer when navigating off it.
+-- Set BEFORE writing the body so res:html still owns content-type.
+local function secure_html(res)
+    res:header("X-Frame-Options", "DENY")
+    res:header("Cache-Control", "no-store")
+    res:header("Referrer-Policy", "strict-origin-when-cross-origin")
+    return res
+end
+
 -- ── Route handlers ─────────────────────────────────────────────────
 
 local function handle_register(req, res)
@@ -569,7 +591,7 @@ local function handle_verify(req, res)
     local token = req.query and req.query.token
     local env, err = consume_token(token, ACTIONS.verify_email)
     if not env then
-        return res:status(400):html("verification failed: " .. (err or "?"))
+        return secure_html(res):status(400):html("verification failed: " .. (err or "?"))
     end
     _state.user_set_email_verified(env.sub, true)
     gc_expired()
@@ -617,7 +639,7 @@ local function start_totp_pending(req, res, user)
         return res:redirect(_state.totp_pending_redirect
                              .. sep .. "token=" .. token)
     end
-    res:html(default_totp_form_html(token))
+    secure_html(res):html(default_totp_form_html(token))
 end
 
 local function handle_login(req, res)
@@ -709,11 +731,11 @@ local function handle_magic_link_consume(req, res)
     local token = req.query and req.query.token
     local env, err = consume_token(token, ACTIONS.magic_link)
     if not env then
-        return res:status(400):html("magic link failed: " .. (err or "?"))
+        return secure_html(res):status(400):html("magic link failed: " .. (err or "?"))
     end
     local user = _state.user_get(env.sub)
     if not user then
-        return res:status(400):html("magic link failed")
+        return secure_html(res):status(400):html("magic link failed")
     end
     -- Magic-link clicks count as proof of email ownership.
     if not user.email_verified then
@@ -888,25 +910,25 @@ local function handle_email_change_revoke(req, res)
     local token = req.query and req.query.token
     local env, err = consume_token(token, ACTIONS.email_change_revoke)
     if not env then
-        return res:status(400):html("revoke failed: " .. (err or "?"))
+        return secure_html(res):status(400):html("revoke failed: " .. (err or "?"))
     end
     db.exec("DELETE FROM _hull_auth_pending_email_changes WHERE user_id = ?",
             { env.sub })
     emit_event(env.sub, "email_change_revoked", req,
                { metadata = { by = "old_address" } })
     gc_expired()
-    res:html("Email change canceled.")
+    secure_html(res):html("Email change canceled.")
 end
 
 local function handle_email_change_confirm(req, res)
     local token = req.query and req.query.token
     local env, err = consume_token(token, ACTIONS.email_change)
     if not env then
-        return res:status(400):html("email change failed: " .. (err or "?"))
+        return secure_html(res):status(400):html("email change failed: " .. (err or "?"))
     end
     local user = _state.user_get(env.sub)
     if not user then
-        return res:status(400):html("email change failed")
+        return secure_html(res):status(400):html("email change failed")
     end
     -- Double-check there's a pending row and that the new_email
     -- in the envelope matches it (defense in depth — the token
@@ -917,7 +939,7 @@ local function handle_email_change_confirm(req, res)
         .. "WHERE user_id = ?", { env.sub })
     if not rows or #rows == 0
        or rows[1].new_email ~= env.new_email then
-        return res:status(400):html("email change failed")
+        return secure_html(res):status(400):html("email change failed")
     end
     local old_email = user.email
     _state.user_set_email(env.sub, env.new_email)
@@ -934,6 +956,27 @@ end
 -- Route registration helper.
 local function register_routes(app)
     local p = _state.prefix
+    -- Opt-in per-IP rate limit on /login + /password-reset/request +
+    -- /magic-link. Installed BEFORE the handler so abusive traffic is
+    -- rejected before any DB or PBKDF2 work. Per-IP key derived from
+    -- x-forwarded-for then req.remote_addr; falls back to the literal
+    -- "_anon" so a malformed request can't bypass the bucket entirely.
+    if _state.login_ratelimit then
+        local rl_opts = type(_state.login_ratelimit) == "table"
+            and _state.login_ratelimit or {}
+        local mw = ratelimit.middleware({
+            limit  = rl_opts.limit  or 20,
+            window = rl_opts.window or 300,  -- 5 min
+            key    = rl_opts.key or function(req)
+                return (req.headers and req.headers["x-forwarded-for"])
+                    or req.remote_addr or "_anon"
+            end,
+        })
+        app.use("POST", p .. "/login", mw)
+        app.use("POST", p .. "/magic-link", mw)
+        app.use("POST", p .. "/password-reset/request", mw)
+    end
+
     app.post(p .. "/register",                 handle_register)
     app.get (p .. "/verify",                   handle_verify)
     app.post(p .. "/verify/resend",            handle_verify_resend)
@@ -1128,6 +1171,7 @@ function M.init(opts)
     _state.pwned_endpoint          = opts.pwned_endpoint
     _state.sign_in_log             = opts.sign_in_log == true
     _state.on_password_reset       = opts.on_password_reset
+    _state.login_ratelimit         = opts.login_ratelimit
     -- audit-log is a top-level require now (it's a hard dep of
     -- hull/web/auth-flows in the module registry). The sign_in_log
     -- knob still gates whether we *emit* flow-completion events.
@@ -1286,6 +1330,7 @@ M._test = {
         _state.sign_in_log             = false
         _state.audit_log               = nil
         _state.on_password_reset       = nil
+        _state.login_ratelimit         = false
         _state._initialized            = false
     end,
 }
