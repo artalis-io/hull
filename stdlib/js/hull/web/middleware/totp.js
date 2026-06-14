@@ -600,6 +600,12 @@ function init(opts) {
         }
     }
 
+    // Mark initialized BEFORE the lazy-catchup block so totp.cleanup
+    // — which guards on checkInitialized — can run from inside
+    // init's own cleanup pass. Pre-fix: the catchup catch swallowed
+    // "call totp.init(...) before any other function" on every load.
+    _state.initialized = true;
+
     // Round-8 LOW-13: lazy catchup + auto-schedule daily prune of
     // orphaned _hull_totp_pending rows. Mirrors session/audit-log.
     // _hull_totp (confirmed) is NEVER expired by this.
@@ -623,8 +629,6 @@ function init(opts) {
                 + "Wire your own cron/worker for steady-state.");
         }
     }
-
-    _state.initialized = true;
 }
 
 function cleanup() {

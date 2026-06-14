@@ -2395,8 +2395,11 @@ UTEST(lua_stdlib, totp_brute_force_lockout)
         "(function() "
         "  local totp = require('hull.web.middleware.totp') "
         "  totp._test.reset() "
+        /* recovery_codes = 0: each failed verify would otherwise
+         * walk all stored recovery codes with PBKDF2 (10×~1s under
+         * MSan). Drop them; the lockout path doesn't care. */
         "  totp.init({ max_failed_attempts = 3, lockout_duration = 60, "
-        "               window = 10 }) "
+        "               window = 10, recovery_codes = 0 }) "
         "  local r = totp.enroll('u1') "
         "  local secret = totp._test.base32_decode(r.secret_base32) "
         "  local step = totp._test.current_step() "

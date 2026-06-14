@@ -747,6 +747,13 @@ function totp.init(opts)
         end
     end
 
+    -- Mark initialized BEFORE the lazy-catchup block so totp.cleanup
+    -- — which guards on check_initialized — can run from inside
+    -- init's own cleanup pass. Pre-fix: the catchup pcall caught
+    -- "call totp.init(...) before any other function" and the log
+    -- spammed every CI run.
+    _state._initialized = true
+
     -- Round-8 LOW-13: lazy catchup + auto-schedule daily cleanup.
     -- Mirrors the round-7 audit-log / session pattern. _hull_totp
     -- (confirmed) is the user's real secret — never expired here.
@@ -774,8 +781,6 @@ function totp.init(opts)
                   .. "Wire your own cron/worker for steady-state.")
         end
     end
-
-    _state._initialized = true
 end
 
 --- Prune orphaned pending-enrollment rows older than pending_ttl
