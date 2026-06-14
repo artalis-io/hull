@@ -18,6 +18,12 @@ import { app } from "hull:app";
 import { log } from "hull:log";
 
 let sessionTtl = 86400;
+// Round-8 MEDIUM-8: absolute (hard) TTL cap from created_at.
+// Sliding sessionTtl extends expires_at on every hit; absolute caps
+// the session at created_at + absoluteTtl regardless of activity.
+// Default 86400 = 24h (OWASP-stricter); opt-out via
+// absoluteTtl = false. Reads created_at, which exists on every row.
+let absoluteTtl = 86400;
 let cleanupCatchupDone = false;
 let cleanupScheduled = false;
 // Set by init(). loginHandler / logoutHandler check this so a
@@ -29,7 +35,12 @@ let initialized = false;
  * Initialize the sessions table. Call once at startup.
  *
  * @param {Object} [opts]
- * @param {number}  [opts.ttl=86400]   Session lifetime in seconds.
+ * @param {number}  [opts.ttl=86400]   SLIDING lifetime in seconds.
+ * @param {number|false} [opts.absoluteTtl=86400]  HARD upper bound
+ *   from created_at. Sessions older than absoluteTtl fail to load
+ *   even if sliding TTL would have kept them alive. Pass false to
+ *   disable (apps that intentionally want forever-sessions stay
+ *   loud about it). Round-8 MEDIUM-8.
  * @param {boolean} [opts.cleanup=true]  When true, schedules a daily
  *   timer via app.daily that calls session.cleanup. Set false to
  *   drive cleanup from cron or your own wiring. Mirrors the auto-
@@ -40,6 +51,9 @@ let initialized = false;
 function init(opts) {
     const o = opts || {};
     sessionTtl = o.ttl !== undefined ? o.ttl : 86400;
+    if (o.absoluteTtl !== undefined) {
+        absoluteTtl = o.absoluteTtl === false ? null : o.absoluteTtl;
+    }
 
     db.exec(
         "CREATE TABLE IF NOT EXISTS _hull_sessions (" +
@@ -177,15 +191,24 @@ function load(sessionId, opts) {
 
     const now = time.now();
     const rows = db.query(
-        "SELECT data, expires_at FROM _hull_sessions WHERE id = ?",
+        "SELECT data, expires_at, created_at FROM _hull_sessions "
+        + "WHERE id = ?",
         [sessionId]
     );
 
     if (!rows || rows.length === 0)
         return null;
 
-    // Check expiry
+    // Check expiry (sliding)
     if (rows[0].expires_at <= now) {
+        db.exec("DELETE FROM _hull_sessions WHERE id = ?", [sessionId]);
+        return null;
+    }
+    // Round-8 MEDIUM-8: hard absolute-TTL cap. Refuse to extend past
+    // created_at + absoluteTtl regardless of sliding state. created_at
+    // may be null on legacy migrated rows; skip the cap in that case.
+    if (absoluteTtl && rows[0].created_at != null
+        && (rows[0].created_at + absoluteTtl) <= now) {
         db.exec("DELETE FROM _hull_sessions WHERE id = ?", [sessionId]);
         return null;
     }

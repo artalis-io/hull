@@ -197,9 +197,17 @@ function auth_health.routes(app, opts)
     local auth_check = opts.auth_check
     app.get(path, function(req, res)
         local ok, allowed = pcall(auth_check, req)
-        if not ok or not allowed then
-            return res:status(allowed == nil and 401 or 403)
-                      :json({ error = "forbidden" })
+        -- Round-8 LOW-12: split the two failure modes cleanly to
+        -- match the JS sibling and the docstring. Pre-round-8 the
+        -- shortcut `allowed == nil and 401 or 403` returned 403 on
+        -- throw too (because pcall's failure payload is the error
+        -- STRING, not nil), contradicting the documented
+        -- "throwing returns 401" contract.
+        if not ok then
+            return res:status(401):json({ error = "forbidden" })
+        end
+        if not allowed then
+            return res:status(403):json({ error = "forbidden" })
         end
         res:json(auth_health.check({ include_counts = include_counts }))
     end)

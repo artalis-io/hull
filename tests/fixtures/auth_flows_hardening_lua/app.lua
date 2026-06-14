@@ -54,6 +54,7 @@ local hibp_mock = "http://127.0.0.1:" .. HIBP_MOCK_PORT .. "/range/"
 
 authflows.init({
     state_secret = "fixture-state-secret-aaaaaaaaaaaa",
+    email_rate_limit = false,  -- see auth_flows_lua/app.lua
     email_send = function(to, subject, html, text)
         sent_emails[#sent_emails + 1] = {
             to = to, subject = subject, text = text or html,

@@ -141,10 +141,24 @@ function routes(app, opts) {
     const includeCounts = o.includeCounts === true;
     const authCheck = o.authCheck;
     app.get(path, (req, res) => {
-        let allowed = false;
+        let allowed;
         try { allowed = authCheck(req); }
         catch (_e) { return res.status(401).json({ error: "forbidden" }); }
-        if (!allowed) return res.status(403).json({ error: "forbidden" });
+        // Round-8 MEDIUM-5: strict-equality the boolean true. An
+        // `async authCheck` returns a Promise, which is truthy under
+        // `!allowed` — the gate silently fell open and the handler
+        // shipped operational state to anonymous callers. Reject any
+        // thenable explicitly so the gate-by-async-mistake fails
+        // closed AT the gate, not at the wire.
+        if (allowed && typeof allowed.then === "function") {
+            return res.status(500).json({
+                error: "authCheck must be synchronous; "
+                     + "received a thenable (Promise)",
+            });
+        }
+        if (allowed !== true) {
+            return res.status(403).json({ error: "forbidden" });
+        }
         res.json(check({ includeCounts: includeCounts }));
     });
 }

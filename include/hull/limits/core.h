@@ -17,10 +17,13 @@
 
 /* Module registry / resolver (capability-aware declaration system). */
 #define HL_MODULE_NAME_MAX           64    /* Max bytes for "hull/<x>" + NUL */
-#define HL_MODULE_MAX_DEPS           8     /* Max internal deps per spec (bumped from 4
-                                            * to fit middleware/auth's full chain:
-                                            * db, crypto, cookie, jwt, session + slack
-                                            * for documenting log/json deps on others) */
+#define HL_MODULE_MAX_DEPS           10    /* Max internal deps per spec. History: 4 →
+                                            * 8 for middleware/auth's chain (db, crypto,
+                                            * cookie, jwt, session + slack); 8 → 10
+                                            * for round-8's auth-flows hull/log dep
+                                            * (MEDIUM-9 pcall'd audit-log warning).
+                                            * Each unit costs ~16 bytes per registry
+                                            * entry — cheap. */
 #define HL_MODULE_BITSET_WORDS       2     /* 128 bits → registry headroom */
 #define HL_MODULE_RESOLVER_ERR_MAX   256   /* Resolver error message buffer */
 

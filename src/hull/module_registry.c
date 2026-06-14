@@ -325,7 +325,11 @@ static const HlModuleSpec REGISTRY[] = {
                  "hull/crypto/envelope", "hull/crypto",
                  "hull/time", "hull/web/pwned",
                  "hull/web/middleware/audit-log",
-                 "hull/web/middleware/ratelimit", 0},
+                 "hull/web/middleware/ratelimit",
+                 /* Round-8 MEDIUM-9: emit_event uses hull/log to warn
+                  * on a swallowed audit-log failure so the symptom
+                  * surfaces somewhere instead of being silent. */
+                 "hull/log", 0},
     },
     {
         /* Runtime health probes for the auth stack. Read-only —
@@ -531,8 +535,13 @@ static const HlModuleSpec REGISTRY[] = {
         .name = "hull/web/middleware/totp",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HTTP_SERVER | HL_MOD_CAP_DB,
+        /* Round-8 LOW-13: hull/timers + hull/log power the auto-
+         * daily prune of orphaned pending-enrollment rows. Module-
+         * conditional decoration in hull/timers adds app.daily,
+         * which init() schedules unless cleanup = false is passed. */
         .deps = {"hull/http-server", "hull/db", "hull/crypto",
-                 "hull/qrcode", "hull/time", 0},
+                 "hull/qrcode", "hull/time",
+                 "hull/timers", "hull/log", 0},
     },
     {
         .name = "hull/web/middleware/transaction",

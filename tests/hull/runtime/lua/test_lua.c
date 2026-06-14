@@ -2352,6 +2352,80 @@ UTEST(lua_stdlib, totp_enroll_confirm_verify)
     cleanup_lua_caps();
 }
 
+UTEST(lua_stdlib, totp_pending_cleanup)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* Round-8 LOW-13: cleanup() prunes orphaned pending rows older
+     * than pending_ttl. Confirmed _hull_totp rows are never touched. */
+    int ok = eval_int(
+        "(function() "
+        "  local totp = require('hull.web.middleware.totp') "
+        "  totp._test.reset() "
+        "  totp.init({ pending_ttl = 60, cleanup = false, window = 10 }) "
+        "  local r = totp.enroll('u-fresh') "
+        "  totp.enroll('u-stale') "
+        "  totp._test.force_pending_stale('u-stale') "
+        "  if totp.cleanup() ~= 1 then return 0 end "
+        "  if totp.cleanup() ~= 0 then return 0 end "
+        "  local secret = totp._test.base32_decode(r.secret_base32) "
+        "  local step = totp._test.current_step() "
+        "  local good = totp._test.totp_at_step(secret, step, 6) "
+        "  if not totp.confirm('u-fresh', good) then return 0 end "
+        "  if totp.confirm('u-stale', good) then return 0 end "
+        "  return 1 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, totp_brute_force_lockout)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* Round-8 HIGH-3: brute-force lockout baked into the module.
+     * After max_failed_attempts consecutive wrong codes the user is
+     * locked for lockout_duration seconds; verify returns false
+     * silently during the window. Successful TOTP verify clears the
+     * counter. Apps that want UX can read totp.lockout_remaining. */
+    int ok = eval_int(
+        "(function() "
+        "  local totp = require('hull.web.middleware.totp') "
+        "  totp._test.reset() "
+        "  totp.init({ max_failed_attempts = 3, lockout_duration = 60, "
+        "               window = 10 }) "
+        "  local r = totp.enroll('u1') "
+        "  local secret = totp._test.base32_decode(r.secret_base32) "
+        "  local step = totp._test.current_step() "
+        "  if not totp.confirm('u1', totp._test.totp_at_step(secret, step, 6)) "
+        "    then return 0 end "
+        "  if totp.verify('u1', '000000') then return 0 end "
+        "  if totp.verify('u1', '000001') then return 0 end "
+        "  if totp.lockout_remaining('u1') ~= 0 then return 0 end "
+        "  if totp.verify('u1', '000002') then return 0 end "
+        "  local remain = totp.lockout_remaining('u1') "
+        "  if remain <= 0 or remain > 60 then return 0 end "
+        "  local good = totp._test.totp_at_step(secret, step + 2, 6) "
+        "  if totp.verify('u1', good) then return 0 end "
+        "  totp._test.clear_failed_attempts('u1') "
+        "  if totp.lockout_remaining('u1') ~= 0 then return 0 end "
+        "  if totp.verify('u1', '000000') then return 0 end "
+        "  if totp.verify('u1', '000001') then return 0 end "
+        "  local good2 = totp._test.totp_at_step(secret, step + 3, 6) "
+        "  if not totp.verify('u1', good2) then return 0 end "
+        "  if totp.verify('u1', '000000') then return 0 end "
+        "  if totp.verify('u1', '000001') then return 0 end "
+        "  if totp.lockout_remaining('u1') ~= 0 then return 0 end "
+        "  return 1 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
 UTEST(lua_stdlib, totp_recovery_code_single_use)
 {
     init_lua_with_caps();
@@ -2918,6 +2992,149 @@ UTEST(lua_stdlib, auth_flows_magic_link_auto_signup_opt_in)
         "    and 1 or 0 "
         "end)()");
     ASSERT_EQ(auto_signup, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, auth_flows_state_secret_non_ascii_round_trip)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* Round-8 HIGH-2: state_secret may contain bytes >= 0x80 (e.g.
+     * a passphrase / random binary key); prior code piped the secret
+     * through crypto.hex_encode which UTF-8-inflated those bytes on
+     * the C boundary, producing a different HMAC key than the JS
+     * runtime's bytesToHex local. This test pins the byte-for-byte
+     * hex encoding (32 bytes of 0x80 -> "80" repeated 32x) AND
+     * verifies a token signed under the high-byte secret round-trips
+     * via issue_token / parse_token. */
+    int ok = eval_int(
+        "(function() "
+        "  local af = require('hull.web.auth-flows') "
+        "  af._test.reset() "
+        "  local secret = string.rep(string.char(0x80), 32) "
+        "  af.init({ "
+        "    state_secret = secret, "
+        "    email_send = function() end, "
+        "    templates = { "
+        "      welcome = function() return {subject='w',text='x'} end, "
+        "      verify = function() return {subject='v',text='x'} end, "
+        "      magic_link = function() return {subject='m',text='x'} end, "
+        "      password_reset = function() return {subject='p',text='x'} end, "
+        "      email_change = function() return {subject='e',text='x'} end, "
+        "    }, "
+        "    user_find_by_email = function() end, "
+        "    user_get = function() end, "
+        "    user_create = function() end, "
+        "    user_set_password = function() end, "
+        "    user_set_email = function() end, "
+        "    user_set_email_verified = function() end, "
+        "    on_login = function() end, "
+        "  }) "
+        "  local A = af._test.ACTIONS "
+        "  local tok = af._test.issue_token('u1', A.verify_email, 60) "
+        "  local env, err = af._test.parse_token(tok, A.verify_email) "
+        "  if not env or err then return 0 end "
+        "  if env.sub ~= 'u1' then return 0 end "
+        "  return 1 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, auth_flows_email_rate_limit_per_recipient)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* Round-8 HIGH-1: per-recipient email rate limit closes the
+     * attacker-chosen-recipient email-storm class. Gate sits inside
+     * send_email; blocked sends are silently dropped so the response
+     * shape stays enumeration-safe. Buckets are per (lower-cased)
+     * recipient with a sliding window. */
+    int ok = eval_int(
+        "(function() " AF_INIT_LUA
+        "  local af = require('hull.web.auth-flows') "
+        "  af._test.reset() "
+        "  af.init({ "
+        "    state_secret = ('k'):rep(32), "
+        "    email_rate_limit = { limit = 2, window = 60 }, "
+        "    email_send = function() end, "
+        "    templates = { "
+        "      welcome = function() return {subject='w',text='x'} end, "
+        "      verify = function() return {subject='v',text='x'} end, "
+        "      magic_link = function() return {subject='m',text='x'} end, "
+        "      password_reset = function() return {subject='p',text='x'} end, "
+        "      email_change = function() return {subject='e',text='x'} end, "
+        "    }, "
+        "    user_find_by_email = function() end, "
+        "    user_get = function() end, "
+        "    user_create = function() end, "
+        "    user_set_password = function() end, "
+        "    user_set_email = function() end, "
+        "    user_set_email_verified = function() end, "
+        "    on_login = function() end, "
+        "  }) "
+        "  local a1 = af._test.email_rate_allow('victim@x.com') "
+        "  local a2 = af._test.email_rate_allow('victim@x.com') "
+        "  local a3 = af._test.email_rate_allow('victim@x.com') "
+        "  local b1 = af._test.email_rate_allow('other@x.com') "
+        "  local c1 = af._test.email_rate_allow('VICTIM@x.com') "
+        "  af._test.email_rate_reset() "
+        "  local d1 = af._test.email_rate_allow('victim@x.com') "
+        "  return (a1 and a2 and not a3 and b1 and not c1 and d1) "
+        "    and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, auth_flows_email_rate_limit_drops_send)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* Integration check via send_magic_link + auto_signup. */
+    int ok = eval_int(
+        "(function() " AF_INIT_LUA
+        "  local af = require('hull.web.auth-flows') "
+        "  af._test.reset() "
+        "  af.init({ "
+        "    state_secret = ('k'):rep(32), "
+        "    email_rate_limit = { limit = 2, window = 60 }, "
+        "    magic_link_auto_signup = true, "
+        "    email_send = function(to) "
+        "      _G._sent[#_G._sent+1] = {to=to} "
+        "    end, "
+        "    templates = { "
+        "      welcome = function() return {subject='w',text='x'} end, "
+        "      verify = function() return {subject='v',text='x'} end, "
+        "      magic_link = function() return {subject='m',text='x'} end, "
+        "      password_reset = function() return {subject='p',text='x'} end, "
+        "      email_change = function() return {subject='e',text='x'} end, "
+        "    }, "
+        "    user_find_by_email = function(e) return _G._users[e] end, "
+        "    user_get = function(id) return _G._by_id[id] end, "
+        "    user_create = function(e, ph) "
+        "      local u = {id='u'..e, email=e, password_hash=ph} "
+        "      _G._users[e] = u; _G._by_id[u.id] = u; return u.id "
+        "    end, "
+        "    user_set_password = function() end, "
+        "    user_set_email = function() end, "
+        "    user_set_email_verified = function() end, "
+        "    on_login = function() end, "
+        "  }) "
+        "  af.send_magic_link('flood@x.com', 'http://t.io') "
+        "  af.send_magic_link('flood@x.com', 'http://t.io') "
+        "  af.send_magic_link('flood@x.com', 'http://t.io') "
+        "  af.send_magic_link('flood@x.com', 'http://t.io') "
+        "  af.send_magic_link('clean@x.com', 'http://t.io') "
+        "  return #_G._sent == 3 and 1 or 0 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
 
     cleanup_lua_caps();
 }

@@ -18,6 +18,13 @@ local session = {}
 -- Module-level TTL (seconds), default 24 hours.
 -- Singleton TTL — session.init() must be called exactly once per application.
 local _ttl = 86400
+-- Round-8 MEDIUM-8: absolute (hard) TTL. Sliding _ttl extends
+-- expires_at on every hit; absolute caps the session at
+-- created_at + _absolute_ttl regardless of activity. Default 24h
+-- (OWASP-stricter), opt-out by passing `absolute_ttl = false` to
+-- session.init. Reads `created_at`, which already lives on every
+-- row.
+local _absolute_ttl = 86400
 
 -- Set by session.init(). Factories like session.login_handler use
 -- this to fail loudly when an app forgets the init ordering
@@ -37,14 +44,20 @@ local _cleanup_scheduled = false
 -- the latter overrides.
 --
 -- @tparam[opt] table opts
---   * `ttl`        (integer, default 86400). Session lifetime in seconds.
---   * `cleanup`    (boolean, default true). When true, schedules a
---                  daily timer via app.daily that calls
---                  session.cleanup(). Set false to drive cleanup
---                  from cron or your own app.daily wiring. Mirrors
---                  the auto-schedule pattern in audit_log.init.
---   * `cleanup_at` (string, default "03:00", UTC). Wall-clock time
---                  for the daily cleanup.
+--   * `ttl`           (integer, default 86400). SLIDING lifetime in
+--                     seconds — every hit extends expires_at by ttl.
+--   * `absolute_ttl`  (integer, default 86400 = 24h, set false to
+--                     disable). HARD upper bound from created_at;
+--                     once a session is older than absolute_ttl it
+--                     fails to load even if sliding-ttl would have
+--                     kept it alive. Bounds the compromise window
+--                     for a stolen cookie. Round-8 MEDIUM-8.
+--   * `cleanup`       (boolean, default true). When true, schedules
+--                     a daily timer via app.daily that calls
+--                     session.cleanup(). Set false to drive cleanup
+--                     from cron or your own app.daily wiring.
+--   * `cleanup_at`    (string, default "03:00", UTC). Wall-clock time
+--                     for the daily cleanup.
 --
 -- @usage
 -- local session = require("hull.web.middleware.session")
@@ -55,6 +68,16 @@ function session.init(opts)
     -- default even when the caller passes ttl=0 (0 is truthy in Lua).
     if opts.ttl ~= nil then
         _ttl = opts.ttl
+    end
+    -- absolute_ttl: nil keeps default; false/0 disables; a positive
+    -- number sets the hard cap. `false` is the explicit opt-out so
+    -- apps that intentionally want forever-sessions stay loud about it.
+    if opts.absolute_ttl ~= nil then
+        if opts.absolute_ttl == false then
+            _absolute_ttl = nil
+        else
+            _absolute_ttl = opts.absolute_ttl
+        end
     end
 
     db.exec([[
@@ -200,7 +223,8 @@ function session.load(session_id, opts)
 
     local now = time.now()
     local rows = db.query(
-        "SELECT data, expires_at FROM _hull_sessions WHERE id = ?",
+        "SELECT data, expires_at, created_at FROM _hull_sessions "
+        .. "WHERE id = ?",
         { session_id }
     )
 
@@ -210,9 +234,19 @@ function session.load(session_id, opts)
 
     local row = rows[1]
 
-    -- Check expiry
+    -- Check expiry (sliding)
     if row.expires_at <= now then
         -- Expired -- clean it up
+        db.exec("DELETE FROM _hull_sessions WHERE id = ?", { session_id })
+        return nil
+    end
+    -- Round-8 MEDIUM-8: hard absolute-TTL cap. Even if sliding-TTL
+    -- would have kept the session alive, refuse to extend past
+    -- created_at + _absolute_ttl. Bounds the compromise window for
+    -- a stolen cookie. created_at may be NULL on rows that pre-date
+    -- the column (legacy migrated DBs); skip the cap in that case.
+    if _absolute_ttl and row.created_at
+       and (row.created_at + _absolute_ttl) <= now then
         db.exec("DELETE FROM _hull_sessions WHERE id = ?", { session_id })
         return nil
     end

@@ -208,7 +208,10 @@ run_flow() {
     else fail "$_label: resend post-verify sent email (count=$N)"
     fi
 
-    # 4. Account lockout — 3 wrong passwords then expect 429.
+    # 4. Account lockout — 3 wrong passwords then expect 401 (round-8
+    #    HIGH-4: the lockout response is no longer distinguishable
+    #    from wrong-password, so an enumerator can't trip the lockout
+    #    on a candidate email to confirm registration).
     for _i in 1 2 3; do
         curl -sS -o /dev/null -X POST -H 'Content-Type: application/json' \
             -d "{\"email\":\"$EMAIL\",\"password\":\"wrong-pw\"}" \
@@ -218,21 +221,27 @@ run_flow() {
         -H 'Content-Type: application/json' \
         -d "{\"email\":\"$EMAIL\",\"password\":\"wrong-pw\"}" \
         "$BASE/auth/login")
-    check_status "$_label: 4th wrong login locks out (429)" "$S" "429"
-    # Correct password during lockout window still 429.
+    check_status "$_label: 4th wrong login still 401 (locked, hidden)" "$S" "401"
+    # Correct password during lockout window still 401 (lockout
+    # internally blocks; wire response identical to wrong-pw).
     S=$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
         -H 'Content-Type: application/json' \
         -d "{\"email\":\"$EMAIL\",\"password\":\"$PW\"}" \
         "$BASE/auth/login")
-    check_status "$_label: correct login during lockout still 429" "$S" "429"
-    # Retry-After header is present. `curl -i` prints headers
-    # for a normal POST (`-I` would turn it into a HEAD request
-    # with the body still attached, which Hull doesn't route).
+    check_status "$_label: correct login during lockout still 401" "$S" "401"
+    # Retry-After header MUST NOT be present (it was the enumeration
+    # channel — its absence is the fix).
     H=$(curl -sS -i -X POST -H 'Content-Type: application/json' \
         -d "{\"email\":\"$EMAIL\",\"password\":\"$PW\"}" \
         "$BASE/auth/login" 2>/dev/null | grep -i '^retry-after' | head -1)
-    [ -n "$H" ] && pass "$_label: Retry-After header present" \
-        || fail "$_label: Retry-After header missing"
+    [ -z "$H" ] && pass "$_label: Retry-After header absent (no enum leak)" \
+        || fail "$_label: Retry-After header still present: $H"
+    # And unknown-email gets the same 401 with the same shape.
+    S=$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+        -H 'Content-Type: application/json' \
+        -d "{\"email\":\"nobody-here@example.test\",\"password\":\"any\"}" \
+        "$BASE/auth/login")
+    check_status "$_label: unknown email login 401 (parity w/ locked)" "$S" "401"
 
     # 5. Wait out lockout, login succeeds + lockout cleared.
     sleep 2.5

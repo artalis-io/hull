@@ -208,6 +208,21 @@ local _state = {
     -- Apps with their own upstream rate-limiter should leave this off.
     login_ratelimit     = false,
 
+    -- Per-recipient email send rate limit (ON by default). Gate
+    -- inside send_email; blocked sends are silently dropped so the
+    -- response stays enumeration-safe (matches the existing silent
+    -- path for unknown-email magic-link / reset). Defends against
+    -- the attacker-chosen-recipient email-storm class on
+    -- /auth/email-change, /auth/magic-link, /auth/password-reset/
+    -- request, and /auth/verify/resend. login_ratelimit (per-IP) is
+    -- orthogonal — a botnet defeats per-IP but not per-recipient.
+    --
+    -- Shape: { limit = N, window = SECONDS }. Pass `false` to
+    -- disable. In-memory sliding window; resets on restart.
+    -- Bounded to email_rate_limit_max_entries unique recipients.
+    email_rate_limit    = { limit = 3, window = 900 },
+    email_rate_limit_max_entries = 10000,
+
     -- Optional post-action redirects.
     verify_redirect       = "/",
     login_redirect        = "/",
@@ -363,7 +378,80 @@ local function render_template(name, ctx)
     return r
 end
 
+-- Per-recipient email send rate limit. Sliding window keyed by
+-- lower-cased recipient. Blocked sends are dropped silently so
+-- the response shape stays enumeration-safe.
+local _email_rl = {}
+local _email_rl_count = 0
+
+local function email_rate_allow(to)
+    local cfg = _state.email_rate_limit
+    if not cfg or type(cfg) ~= "table" then return true end
+    if type(to) ~= "string" or to == "" then return true end
+    local key = to:lower()
+    local now = time.now()
+    local cutoff = now - (cfg.window or 900)
+    local bucket = _email_rl[key]
+    if not bucket then
+        bucket = { ts = {} }
+        _email_rl[key] = bucket
+        _email_rl_count = _email_rl_count + 1
+        -- Soft cap on table size: when over the max, drop the
+        -- oldest buckets in one sweep. Anti-abuse memory bound;
+        -- the legitimate working-set is small.
+        if _email_rl_count > (_state.email_rate_limit_max_entries or 10000) then
+            local kept = {}
+            local kept_n = 0
+            for k, b in pairs(_email_rl) do
+                local fresh = false
+                for _, t in ipairs(b.ts) do
+                    if t > cutoff then fresh = true; break end
+                end
+                if fresh then
+                    kept[k] = b
+                    kept_n = kept_n + 1
+                end
+            end
+            _email_rl = kept
+            _email_rl_count = kept_n
+            _email_rl[key] = bucket
+        end
+    end
+    local fresh = {}
+    for _, t in ipairs(bucket.ts) do
+        if t > cutoff then fresh[#fresh + 1] = t end
+    end
+    bucket.ts = fresh
+    if #fresh >= (cfg.limit or 3) then return false end
+    bucket.ts[#bucket.ts + 1] = now
+    return true
+end
+
+-- Round-8 LOW-10: strip password_hash from any user object that's
+-- about to escape into a template ctx or an app callback. The
+-- standard_users adapter's `row()` includes password_hash (because
+-- handle_login uses it for verify_password), and a leaked PBKDF2
+-- hash in a welcome / password-reset / email-change email body or
+-- on_login's user blob is exactly the foot-gun the audit flagged.
+-- We strip at the boundary, not at row(), so handle_login's verify
+-- path keeps working without a refactor.
+local function strip_user_secrets(user)
+    if type(user) ~= "table" then return user end
+    local out = {}
+    for k, v in pairs(user) do
+        if k ~= "password_hash" then out[k] = v end
+    end
+    return out
+end
+
 local function send_email(to, template_name, ctx)
+    if not email_rate_allow(to) then return end
+    -- Belt-and-suspenders: scrub user.password_hash in the ctx so a
+    -- caller that forgot to use strip_user_secrets still doesn't
+    -- leak via a template.
+    if type(ctx) == "table" and type(ctx.user) == "table" then
+        ctx.user = strip_user_secrets(ctx.user)
+    end
     local r = render_template(template_name, ctx)
     _state.email_send(to, r.subject, r.html, r.text)
 end
@@ -443,9 +531,22 @@ end
 --
 -- emit_event is a no-op when sign_in_log isn't enabled; the
 -- conditional lives here so call sites stay clean.
+--
+-- Round-8 MEDIUM-9: pcall-wrap the audit-log write so a flaky DB row
+-- doesn't unwind out of password_reset_confirm /
+-- email_change_confirm / email_change_revoke AFTER the password (or
+-- email) has already been mutated. Pre-round-8 the bare call would
+-- 500 the response and the user would retry (sending another email).
+-- The JS sibling already had try/catch for the same reason.
 local function emit_event(user_id, kind, req, opts)
     if _state.audit_log then
-        _state.audit_log.record(user_id, kind, req, opts)
+        local ok, err = pcall(_state.audit_log.record,
+                              user_id, kind, req, opts)
+        if not ok then
+            local log = require("hull.log")
+            log.warn("auth-flows: audit_log.record('" .. tostring(kind)
+                  .. "') failed: " .. tostring(err))
+        end
     end
 end
 
@@ -460,7 +561,13 @@ end
 -- down) is still owned here because those are flow-completion
 -- events, not login events, and only auth-flows knows about them.
 local function finish_login(req, res, user, factors)
-    _state.on_login(req, res, user, { factors = factors })
+    -- Round-8 LOW-10: scrub password_hash before handing user to
+    -- the app callback. session.login_handler stashes the user blob
+    -- in the session payload, which is then JSON-encoded and read
+    -- back on every load; a leaked hash would persist on disk + in
+    -- session.list_for_user output.
+    _state.on_login(req, res, strip_user_secrets(user),
+                    { factors = factors })
 end
 
 -- ── Body parsing ───────────────────────────────────────────────────
@@ -662,21 +769,21 @@ local function handle_login(req, res)
         return res:status(400):json({ error = "invalid credentials" })
     end
     local user = _state.user_find_by_email(body.email)
-    -- Lockout check runs BEFORE the password check so a known-locked
-    -- account doesn't leak whether the password attempt was right or
-    -- wrong via response timing. We compute it only when the user
-    -- exists; the dummy-hash branch below keeps unknown-email
-    -- responses timing-equivalent to known-but-wrong.
-    if user then
-        local remain = lockout_remaining(user_uid(user))
-        if remain > 0 then
-            res:header("Retry-After", tostring(remain))
-            return res:status(429):json({
-                error = "too many failed attempts",
-                retry_after = remain,
-            })
-        end
-    end
+    -- Lockout: when the user exists AND is currently locked, short-
+    -- circuit to the SAME 401 + "invalid credentials" that the wrong-
+    -- password branch returns. Round-8 HIGH-4: prior code returned
+    -- 429 + Retry-After in this branch, which leaked account
+    -- existence — an attacker could deliberately trip a lockout
+    -- against a candidate address (5 bad guesses) and then enumerate
+    -- registered emails by observing 429 vs 401. The locked state is
+    -- preserved internally (the counter still ticks, the user still
+    -- can't log in until the window expires) but the wire response is
+    -- now indistinguishable from a wrong-password reply. Apps that
+    -- want to surface "you're locked, try again in N seconds" UX to a
+    -- user who's already authenticated through a different channel
+    -- (e.g. mobile app) can read the counter via the (private)
+    -- lockout_remaining helper on their own.
+    local pre_locked = user and lockout_remaining(user_uid(user)) > 0
     -- Run verify_password unconditionally when enumeration_safe is on,
     -- using a pre-computed dummy hash on the unknown-email branch so
     -- network timing is identical between known and unknown emails.
@@ -685,8 +792,8 @@ local function handle_login(req, res)
     local pwhash = (user and user.password_hash) or _state._dummy_pwhash
     local pw_ok  = (_state.enumeration_safe or user ~= nil)
                    and crypto.verify_password(body.password, pwhash)
-    if not user or not user.password_hash or not pw_ok then
-        if user then bump_failed_login(user_uid(user)) end
+    if pre_locked or not user or not user.password_hash or not pw_ok then
+        if user and not pre_locked then bump_failed_login(user_uid(user)) end
         return res:status(401):json({ error = "invalid credentials" })
     end
     if _state.require_verified_email and not user.email_verified then
@@ -793,7 +900,17 @@ local function handle_totp_verify(req, res)
     if not ok then
         return res:status(401):json({ error = "invalid code" })
     end
-    mark_token_used(body.token, env.exp)
+    -- Round-8 MEDIUM-6: the prior code discarded mark_token_used's
+    -- return value, so two concurrent POSTs of the same {token, code}
+    -- both passed the token_already_used probe, both verified, both
+    -- called finish_login → two sessions minted from one pending-2FA
+    -- token. The mark IS atomic at the DB layer (INSERT OR IGNORE
+    -- on the used-tokens table); we just have to ACT on its return.
+    -- If we lost the race, the OTHER concurrent request will mint
+    -- the session; we bail with the same shape as a stale-token reply.
+    if not mark_token_used(body.token, env.exp) then
+        return res:status(400):json({ error = "totp token already used" })
+    end
     gc_expired()
     -- 2FA path — record both factors. Apps reading audit logs
     -- can use this to distinguish "password-only" from "with
@@ -1176,7 +1293,26 @@ function M.init(opts)
 
     -- crypto.hmac_sha256 takes the key as a hex string; we encode
     -- once at init and reuse the hex form per request.
-    _state.state_secret_hex = crypto.hex_encode(opts.state_secret)
+    --
+    -- bytes_to_hex_local mirrors stdlib/js/hull/web/auth-flows.js
+    -- `bytesToHex`. Hand-rolled because crypto.hex_encode treats its
+    -- input as a *string* that's passed via Lua's C boundary; on the
+    -- JS side the equivalent UTF-8-inflates code points >= 0x80,
+    -- producing a different hex digest. State secrets that contain
+    -- any byte >= 0x80 (e.g. a passphrase with non-ASCII) would
+    -- silently derive different HMAC keys per runtime, breaking the
+    -- byte-identical wire-format guarantee the JS header promises
+    -- ("a Lua-Hull → JS-Hull migration works without re-issuing
+    -- pending tokens"). string.byte iterates the raw bytes.
+    local function bytes_to_hex_local(s)
+        local n = #s
+        local out = {}
+        for i = 1, n do
+            out[i] = string.format("%02x", string.byte(s, i))
+        end
+        return table.concat(out)
+    end
+    _state.state_secret_hex = bytes_to_hex_local(opts.state_secret)
     _state.email_send       = opts.email_send
     _state.templates        = opts.templates
     _state.user_find_by_email      = opts.user_find_by_email
@@ -1203,6 +1339,15 @@ function M.init(opts)
     _state.sign_in_log             = opts.sign_in_log == true
     _state.on_password_reset       = opts.on_password_reset
     _state.login_ratelimit         = opts.login_ratelimit
+    -- email_rate_limit: opts.email_rate_limit may be false (disabled),
+    -- a table { limit, window }, or nil (keep default). Reset the
+    -- per-process sliding-window state so re-init in tests starts
+    -- with a clean bucket pool.
+    if opts.email_rate_limit ~= nil then
+        _state.email_rate_limit = opts.email_rate_limit
+    end
+    _email_rl = {}
+    _email_rl_count = 0
     -- audit-log is a top-level require now (it's a hard dep of
     -- hull/web/auth-flows in the module registry). The sign_in_log
     -- knob still gates whether we *emit* flow-completion events.
@@ -1340,6 +1485,11 @@ M._test = {
     is_email_ish       = is_email_ish,
     parse_body         = parse_body,
     ACTIONS            = ACTIONS,
+    email_rate_allow   = function(to) return email_rate_allow(to) end,
+    email_rate_reset   = function()
+        _email_rl = {}
+        _email_rl_count = 0
+    end,
     reset = function()
         _state.state_secret_hex = nil
         _state.email_send       = nil

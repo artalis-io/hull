@@ -2103,6 +2103,88 @@ UTEST(js_stdlib, totp_enroll_confirm_verify)
     cleanup_js_caps();
 }
 
+UTEST(js_stdlib, totp_pending_cleanup)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    /* Round-8 LOW-13: cleanup() prunes orphaned pending rows. */
+    const char *code =
+        "import { totp } from 'hull:web:middleware:totp';\n"
+        "function run() {\n"
+        "  totp._test.reset();\n"
+        "  totp.init({ pendingTtl: 60, cleanup: false, window: 10 });\n"
+        "  const r = totp.enroll('u-fresh');\n"
+        "  totp.enroll('u-stale');\n"
+        "  totp._test.forcePendingStale('u-stale');\n"
+        "  if (totp.cleanup() !== 1) return 0;\n"
+        "  if (totp.cleanup() !== 0) return 0;\n"
+        "  const secret = totp._test.base32Decode(r.secretBase32);\n"
+        "  const step = totp._test.currentStep();\n"
+        "  const good = totp._test.totpAtStep(secret, step, 6);\n"
+        "  if (!totp.confirm('u-fresh', good)) return 0;\n"
+        "  if (totp.confirm('u-stale', good)) return 0;\n"
+        "  return 1;\n"
+        "}\n"
+        "globalThis.__totp_cl = run();\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__totp_cl"), 1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, totp_brute_force_lockout)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    /* Round-8 HIGH-3: brute-force lockout baked into the module.
+     * Mirror of lua_stdlib.totp_brute_force_lockout. */
+    const char *code =
+        "import { totp } from 'hull:web:middleware:totp';\n"
+        "function run() {\n"
+        "  totp._test.reset();\n"
+        "  totp.init({ maxFailedAttempts: 3, lockoutDuration: 60, window: 10 });\n"
+        "  const r = totp.enroll('u1');\n"
+        "  const secret = totp._test.base32Decode(r.secretBase32);\n"
+        "  const step = totp._test.currentStep();\n"
+        "  if (!totp.confirm('u1', totp._test.totpAtStep(secret, step, 6))) return 0;\n"
+        "  if (totp.verify('u1', '000000')) return 0;\n"
+        "  if (totp.verify('u1', '000001')) return 0;\n"
+        "  if (totp.lockoutRemaining('u1') !== 0) return 0;\n"
+        "  if (totp.verify('u1', '000002')) return 0;\n"
+        "  const remain = totp.lockoutRemaining('u1');\n"
+        "  if (remain <= 0 || remain > 60) return 0;\n"
+        "  const good = totp._test.totpAtStep(secret, step + 2, 6);\n"
+        "  if (totp.verify('u1', good)) return 0;\n"
+        "  totp._test.clearFailedAttempts('u1');\n"
+        "  if (totp.lockoutRemaining('u1') !== 0) return 0;\n"
+        "  if (totp.verify('u1', '000000')) return 0;\n"
+        "  if (totp.verify('u1', '000001')) return 0;\n"
+        "  const good2 = totp._test.totpAtStep(secret, step + 3, 6);\n"
+        "  if (!totp.verify('u1', good2)) return 0;\n"
+        "  if (totp.verify('u1', '000000')) return 0;\n"
+        "  if (totp.verify('u1', '000001')) return 0;\n"
+        "  if (totp.lockoutRemaining('u1') !== 0) return 0;\n"
+        "  return 1;\n"
+        "}\n"
+        "globalThis.__totp_bfl = run();\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__totp_bfl"), 1);
+
+    cleanup_js_caps();
+}
+
 UTEST(js_stdlib, totp_recovery_and_disable)
 {
     init_js_with_caps();
@@ -2546,6 +2628,118 @@ UTEST(js_stdlib, auth_flows_magic_link_auto_signup_opt_in)
     hl_js_run_jobs(&js);
 
     ASSERT_EQ(eval_int("globalThis.__af_ml"), 1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, auth_flows_state_secret_non_ascii_round_trip)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    /* Round-8 HIGH-2: the JS-side bytesToHex local already handled
+     * code points >= 0x80 correctly (long-standing). This test pins
+     * the contract so a future "clean up, just use crypto.hexEncode"
+     * refactor can't regress cross-runtime parity. Pairs with the
+     * Lua counterpart auth_flows_state_secret_non_ascii_round_trip. */
+    const char *code = AF_INIT_JS
+        "function run() {\n"
+        "  const o = defaults();\n"
+        "  o.stateSecret = String.fromCharCode(0x80).repeat(32);\n"
+        "  authFlows.init(o);\n"
+        "  const A = authFlows._test.ACTIONS;\n"
+        "  const tok = authFlows._test.issueToken('u1', A.verify_email, 60);\n"
+        "  const r = authFlows._test.parseToken(tok, A.verify_email);\n"
+        "  return (r && r[0] && r[1] === null && r[0].sub === 'u1') ? 1 : 0;\n"
+        "}\n"
+        "globalThis.__af_state = run();\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__af_state"), 1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, auth_flows_email_rate_limit_per_recipient)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    /* Round-8 HIGH-1: per-recipient email rate limit closes the
+     * attacker-chosen-recipient email-storm class. Gate sits inside
+     * sendEmail; blocked sends are silently dropped so the response
+     * shape stays enumeration-safe. Buckets are per (lower-cased)
+     * recipient with a sliding window. */
+    const char *code = AF_INIT_JS
+        "function run() {\n"
+        "  const o = defaults();\n"
+        "  o.emailRateLimit = { limit: 2, window: 60 };\n"
+        "  authFlows.init(o);\n"
+        "  const a1 = authFlows._test.emailRateAllow('victim@x.com');\n"
+        "  const a2 = authFlows._test.emailRateAllow('victim@x.com');\n"
+        "  const a3 = authFlows._test.emailRateAllow('victim@x.com');\n"
+        "  const b1 = authFlows._test.emailRateAllow('other@x.com');\n"
+        "  const c1 = authFlows._test.emailRateAllow('VICTIM@x.com');\n"
+        "  authFlows._test.emailRateReset();\n"
+        "  const d1 = authFlows._test.emailRateAllow('victim@x.com');\n"
+        "  /* Disabled cfg: every call allowed. */\n"
+        "  const o2 = defaults();\n"
+        "  o2.emailRateLimit = false;\n"
+        "  authFlows.init(o2);\n"
+        "  const off1 = authFlows._test.emailRateAllow('victim@x.com');\n"
+        "  const off2 = authFlows._test.emailRateAllow('victim@x.com');\n"
+        "  const off3 = authFlows._test.emailRateAllow('victim@x.com');\n"
+        "  return (a1 && a2 && !a3 && b1 && !c1 && d1 "
+        "          && off1 && off2 && off3) ? 1 : 0;\n"
+        "}\n"
+        "globalThis.__af_rl = run();\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__af_rl"), 1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, auth_flows_email_rate_limit_drops_send)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    /* Integration check: confirm the gate actually drops the
+     * downstream sendEmail call (not just returns false from
+     * emailRateAllow). The fixture exercises the path via
+     * sendMagicLink + magicLinkAutoSignup so we don't need
+     * route plumbing here. */
+    const char *code = AF_INIT_JS
+        "function run() {\n"
+        "  const o = defaults();\n"
+        "  o.emailRateLimit = { limit: 2, window: 60 };\n"
+        "  o.magicLinkAutoSignup = true;\n"
+        "  authFlows.init(o);\n"
+        "  authFlows.sendMagicLink('flood@x.com', 'http://t.io');\n"
+        "  authFlows.sendMagicLink('flood@x.com', 'http://t.io');\n"
+        "  authFlows.sendMagicLink('flood@x.com', 'http://t.io');\n"
+        "  authFlows.sendMagicLink('flood@x.com', 'http://t.io');\n"
+        "  /* Other recipient must still go through. */\n"
+        "  authFlows.sendMagicLink('clean@x.com', 'http://t.io');\n"
+        "  return globalThis._sent.length === 3 ? 1 : 0;\n"
+        "}\n"
+        "globalThis.__af_rl2 = run();\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__af_rl2"), 1);
 
     cleanup_js_caps();
 }

@@ -41,6 +41,10 @@ function userCreate(email, pwhash) {
 
 authFlows.init({
     stateSecret: "fixture-state-secret-aaaaaaaaaaaa",  // 32 chars
+    // Tests reuse the same `alice@example.test` across multiple flows.
+    // Disable per-recipient rate limit; round-8 e2e_auth_flows_email_
+    // ratelimit.sh exercises the gate itself with a fresh process.
+    emailRateLimit: false,
     emailSend: (to, subject, html, text) => {
         sentEmails.push({ to, subject, text: text || html });
     },

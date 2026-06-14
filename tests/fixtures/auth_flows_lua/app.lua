@@ -53,6 +53,12 @@ end
 
 authflows.init({
     state_secret = ("fixture-state-secret-aaaaaaaaaaaa"),  -- 32 chars
+    -- Tests reuse the same `alice@example.test` across multiple flows
+    -- (register, verify, magic-link, reset, email-change). Disable the
+    -- per-recipient email rate limit so the fixture doesn't trip the
+    -- default 3/15min gate. Round-8: a dedicated e2e_auth_flows_email_
+    -- ratelimit.sh exercises the gate itself with a fresh process.
+    email_rate_limit = false,
     email_send = function(to, subject, html, text)
         sent_emails[#sent_emails + 1] = {
             to = to, subject = subject, text = text or html,

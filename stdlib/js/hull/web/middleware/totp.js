@@ -30,6 +30,8 @@ import { crypto } from "hull:crypto";
 import { db }     from "hull:db";
 import { time }   from "hull:time";
 import { qrcode } from "hull:qrcode";
+import { app }    from "hull:app";
+import { log }    from "hull:log";
 
 // ── Module state ───────────────────────────────────────────────────
 
@@ -39,6 +41,13 @@ const _state = {
     period:           30,
     window:           1,
     recoveryCodes:    10,
+    // Brute-force lockout (round-8). See Lua sibling header.
+    maxFailedAttempts:  5,
+    lockoutDuration:    15 * 60,
+    // Pending-row TTL (round-8 LOW-13). See Lua sibling.
+    pendingTtl:         3600,
+    cleanupCatchupDone: false,
+    cleanupScheduled:   false,
     // Multi-key encryption state. See init() + encrypt/decrypt
     // comments for the wire format and the input shape.
     keys:               {},   // {[versionId]: keyHex}
@@ -83,6 +92,13 @@ CREATE TABLE IF NOT EXISTS _hull_totp_pending_recovery (
     user_id   TEXT NOT NULL,
     code_hash TEXT NOT NULL,
     PRIMARY KEY (user_id, code_hash)
+);
+
+CREATE TABLE IF NOT EXISTS _hull_totp_attempts (
+    user_id        TEXT PRIMARY KEY,
+    failed_count   INTEGER NOT NULL DEFAULT 0,
+    last_failed_at INTEGER,
+    locked_until   INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS _hull_totp_recovery_user
@@ -369,18 +385,19 @@ function loadSecret(userId) {
 // verify. Returns null when no pending enrollment exists.
 function loadPendingSecret(userId) {
     const rows = db.query(
-        "SELECT secret, encrypted, digits, period "
+        "SELECT secret, encrypted, digits, period, created_at "
         + "FROM _hull_totp_pending WHERE user_id = ?", [userId]);
     if (!rows || rows.length === 0) return null;
     const row = rows[0];
     const dec = decryptSecret(row.secret, row.encrypted);
     if (!dec[0]) return null;
     return {
-        secret:    dec[0],
-        stored:    row.secret,
-        encrypted: row.encrypted,
-        digits:    row.digits,
-        period:    row.period,
+        secret:     dec[0],
+        stored:     row.secret,
+        encrypted:  row.encrypted,
+        digits:     row.digits,
+        period:     row.period,
+        created_at: row.created_at,
     };
 }
 
@@ -414,6 +431,49 @@ function checkInitialized() {
     if (!_state.initialized) {
         throw new Error("totp: call totp.init(...) before any other function");
     }
+}
+
+// ── Brute-force lockout ───────────────────────────────────────────
+// Round-8 HIGH-3. Mirror of stdlib/lua/hull/web/middleware/totp.lua.
+// See its header for the threat model.
+
+function lockoutRemaining(userId) {
+    const r = db.query(
+        "SELECT locked_until FROM _hull_totp_attempts WHERE user_id = ?",
+        [userId]);
+    if (!r || r.length === 0 || r[0].locked_until == null) return 0;
+    const remain = r[0].locked_until - time.now();
+    return remain > 0 ? remain : 0;
+}
+
+function bumpFailedAttempt(userId) {
+    const now = time.now();
+    db.batch(() => {
+        const r = db.query(
+            "SELECT failed_count, locked_until FROM _hull_totp_attempts "
+            + "WHERE user_id = ?", [userId]);
+        let fc = (r && r[0] && r[0].failed_count) || 0;
+        let newFc = fc + 1;
+        let lockedUntil = (r && r[0] && r[0].locked_until) || null;
+        if (newFc >= _state.maxFailedAttempts) {
+            lockedUntil = now + _state.lockoutDuration;
+            newFc = 0;
+        }
+        db.exec(
+            "INSERT INTO _hull_totp_attempts "
+            + "(user_id, failed_count, last_failed_at, locked_until) "
+            + "VALUES (?, ?, ?, ?) "
+            + "ON CONFLICT(user_id) DO UPDATE SET "
+            + "  failed_count   = excluded.failed_count, "
+            + "  last_failed_at = excluded.last_failed_at, "
+            + "  locked_until   = excluded.locked_until",
+            [userId, newFc, now, lockedUntil]);
+    });
+}
+
+function clearFailedAttempts(userId) {
+    db.exec("DELETE FROM _hull_totp_attempts WHERE user_id = ?",
+            [userId]);
 }
 
 // ── Public API ─────────────────────────────────────────────────────
@@ -497,6 +557,13 @@ function init(opts) {
     _state.period         = opts.period         || _state.period;
     _state.window         = opts.window         !== undefined ? opts.window : _state.window;
     _state.recoveryCodes  = opts.recoveryCodes  || _state.recoveryCodes;
+    _state.maxFailedAttempts = opts.maxFailedAttempts
+                               || _state.maxFailedAttempts;
+    _state.lockoutDuration   = opts.lockoutDuration
+                               || _state.lockoutDuration;
+    if (opts.pendingTtl !== undefined) {
+        _state.pendingTtl = opts.pendingTtl;
+    }
     _state.keys                = keys;
     _state.currentKeyVersion   = current;
     _state.legacyKeyVersion    = legacyVersion;
@@ -533,7 +600,50 @@ function init(opts) {
         }
     }
 
+    // Round-8 LOW-13: lazy catchup + auto-schedule daily prune of
+    // orphaned _hull_totp_pending rows. Mirrors session/audit-log.
+    // _hull_totp (confirmed) is NEVER expired by this.
+    if (opts.cleanup !== false && !_state.cleanupCatchupDone) {
+        try { totp.cleanup(); }
+        catch (e) {
+            log.warn("totp: init-time cleanup failed: "
+                  + (e && e.message || e));
+        }
+        _state.cleanupCatchupDone = true;
+    }
+    if (opts.cleanup !== false && !_state.cleanupScheduled) {
+        const at = opts.cleanupAt || "03:00";
+        if (app && typeof app.daily === "function") {
+            app.daily(at, () => totp.cleanup());
+            _state.cleanupScheduled = true;
+        } else {
+            log.warn("totp: app.daily not available "
+                + "(CLI flavor or hull/timers not admitted) "
+                + "— pending-row prune runs only at init(). "
+                + "Wire your own cron/worker for steady-state.");
+        }
+    }
+
     _state.initialized = true;
+}
+
+function cleanup() {
+    checkInitialized();
+    const cutoff = time.now() - (_state.pendingTtl || 3600);
+    let removed = 0;
+    db.batch(() => {
+        const victims = db.query(
+            "SELECT user_id FROM _hull_totp_pending WHERE created_at < ?",
+            [cutoff]);
+        for (let i = 0; i < (victims || []).length; i++) {
+            db.exec("DELETE FROM _hull_totp_pending_recovery "
+                  + "WHERE user_id = ?", [victims[i].user_id]);
+            db.exec("DELETE FROM _hull_totp_pending WHERE user_id = ?",
+                    [victims[i].user_id]);
+            removed++;
+        }
+    });
+    return removed;
 }
 
 function enroll(userId) {
@@ -597,13 +707,22 @@ function confirm(userId, code) {
 
     // Confirm verifies against the PENDING enrollment. On success
     // it PROMOTES the pending row into _hull_totp, replacing any
-    // existing confirmed row + recovery codes. If no pending row
-    // exists, fall back to checking an already-confirmed row (UI
-    // calling confirm() twice on success).
+    // existing confirmed row + recovery codes.
+    //
+    // Round-8 LOW-11: pre-round-8 confirm() fell back to "is the
+    // user already enrolled?" when no pending row existed and
+    // returned true without verifying any code. Apps that treated
+    // confirm()'s boolean as proof-of-possession silently skipped
+    // the code check. Call totp.enrolled(userId) for the predicate;
+    // confirm() now strictly means "this code verifies pending".
     const pending = loadPendingSecret(userId);
     if (!pending) {
-        const existing = loadSecret(userId);
-        if (existing && existing.confirmed === 1) return true;
+        return false;
+    }
+    // Round-8 LOW-13: reject pending rows older than pendingTtl
+    // even before the daily prune catches them.
+    if (pending.created_at != null && _state.pendingTtl
+        && (pending.created_at + _state.pendingTtl) < time.now()) {
         return false;
     }
 
@@ -659,6 +778,12 @@ function verifyWithKind(userId, code) {
     if (typeof userId !== "string" || typeof code !== "string") {
         return [false, null];
     }
+    // Lockout check (round-8 HIGH-3). Returns silently to keep the
+    // locked state non-enumerable from the wire. Apps that need the
+    // state for UX can call totp.lockoutRemaining(userId) directly.
+    if (lockoutRemaining(userId) > 0) {
+        return [false, null];
+    }
     const row = loadSecret(userId);
     if (!row || row.confirmed !== 1) return [false, null];
 
@@ -668,6 +793,7 @@ function verifyWithKind(userId, code) {
         if (step > row.lastUsedStep
             && ctEq(totpAtStep(row.secret, step, row.digits), code)) {
             if (markStepUsed(userId, step) === 1) {
+                clearFailedAttempts(userId);
                 // Lazy rekey: re-encrypt under current if the row was
                 // stored under an older version.
                 if (_state.currentKeyVersion != null
@@ -689,6 +815,7 @@ function verifyWithKind(userId, code) {
                 "UPDATE _hull_totp_recovery SET used_at = ? "
                 + "WHERE user_id = ? AND code_hash = ?",
                 [time.now(), userId, rows[i].code_hash]);
+            clearFailedAttempts(userId);
             // Same lazy rekey on the recovery-code path.
             if (_state.currentKeyVersion != null
                 && row.version !== _state.currentKeyVersion) {
@@ -697,6 +824,7 @@ function verifyWithKind(userId, code) {
             return [true, "recovery"];
         }
     }
+    bumpFailedAttempt(userId);
     return [false, null];
 }
 
@@ -810,20 +938,42 @@ const _test = {
     encryptSecret,
     decryptSecret,
     buildOtpauthUrl,
+    lockoutRemaining,
+    bumpFailedAttempt,
+    clearFailedAttempts,
+    // Test-only: backdate a pending row's created_at so cleanup()
+    // finds it stale. See Lua sibling — must run inside the module
+    // so the stdlib-caller check admits the _hull_* write.
+    forcePendingStale: (userId) => {
+        db.exec("UPDATE _hull_totp_pending SET created_at = ? "
+              + "WHERE user_id = ?", [0, userId]);
+    },
     reset: () => {
         _state.issuer             = "Hull";
         _state.digits             = 6;
         _state.period             = 30;
         _state.window             = 1;
         _state.recoveryCodes      = 10;
+        _state.maxFailedAttempts  = 5;
+        _state.lockoutDuration    = 15 * 60;
+        _state.pendingTtl         = 3600;
         _state.keys               = {};
         _state.currentKeyVersion  = null;
         _state.legacyKeyVersion   = null;
         _state.encryptionKeyHex   = null;
+        _state.cleanupCatchupDone = false;
+        _state.cleanupScheduled   = false;
         _state.initialized        = false;
     },
 };
 
+function lockoutRemainingPublic(userId) {
+    checkInitialized();
+    if (typeof userId !== "string") return 0;
+    return lockoutRemaining(userId);
+}
+
 const totp = { init, enroll, confirm, verify, verifyWithKind,
-               rekey, rekeyStatus, disable, enrolled, _test };
+               rekey, rekeyStatus, disable, enrolled, cleanup,
+               lockoutRemaining: lockoutRemainingPublic, _test };
 export { totp };

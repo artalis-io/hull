@@ -78,6 +78,19 @@ const _state = {
     // object to override: { limit, window, key }. Apps with their own
     // upstream rate-limiter should leave this off.
     loginRatelimit:         false,
+    // Per-recipient email send rate limit (ON by default). Gate
+    // inside sendEmail; blocked sends are silently dropped so the
+    // response stays enumeration-safe. Defends against the
+    // attacker-chosen-recipient email-storm class on /auth/email-
+    // change, /auth/magic-link, /auth/password-reset/request,
+    // /auth/verify/resend, /auth/register. loginRatelimit (per-IP)
+    // is orthogonal — a botnet defeats per-IP but not per-recipient.
+    //
+    // Shape: { limit: N, window: SECONDS }. Pass false to disable.
+    // In-memory sliding window; resets on restart. Bounded to
+    // emailRateLimitMaxEntries unique recipients.
+    emailRateLimit:         { limit: 3, window: 900 },
+    emailRateLimitMaxEntries: 10000,
     verifyRedirect:      "/",
     loginRedirect:       "/",
     initialized:         false,
@@ -216,7 +229,60 @@ function renderTemplate(name, ctx) {
     return r;
 }
 
+// Per-recipient email send rate limit. Sliding window keyed by
+// lower-cased recipient. Blocked sends are dropped silently so
+// the response shape stays enumeration-safe.
+let _emailRl = new Map();
+
+function emailRateAllow(to) {
+    const cfg = _state.emailRateLimit;
+    if (!cfg || typeof cfg !== "object") return true;
+    if (typeof to !== "string" || to === "") return true;
+    const key = to.toLowerCase();
+    const now = time.now();
+    const window = cfg.window || 900;
+    const limit = cfg.limit || 3;
+    const cutoff = now - window;
+    let bucket = _emailRl.get(key);
+    if (!bucket) {
+        bucket = { ts: [] };
+        _emailRl.set(key, bucket);
+        const max = _state.emailRateLimitMaxEntries || 10000;
+        if (_emailRl.size > max) {
+            const kept = new Map();
+            for (const [k, b] of _emailRl) {
+                if (b.ts.some(t => t > cutoff)) kept.set(k, b);
+            }
+            _emailRl = kept;
+            _emailRl.set(key, bucket);
+        }
+    }
+    bucket.ts = bucket.ts.filter(t => t > cutoff);
+    if (bucket.ts.length >= limit) return false;
+    bucket.ts.push(now);
+    return true;
+}
+
+// Round-8 LOW-10: strip password_hash from any user object that's
+// about to escape into a template ctx or an app callback. See the
+// Lua sibling for the rationale (standard_users.row() includes the
+// hash; a leak via on_login / templates is the foot-gun the audit
+// flagged).
+function stripUserSecrets(user) {
+    if (!user || typeof user !== "object") return user;
+    const out = {};
+    for (const k in user) {
+        if (k !== "password_hash") out[k] = user[k];
+    }
+    return out;
+}
+
 function sendEmail(to, templateName, ctx) {
+    if (!emailRateAllow(to)) return;
+    if (ctx && typeof ctx === "object" && ctx.user
+        && typeof ctx.user === "object") {
+        ctx.user = stripUserSecrets(ctx.user);
+    }
     const r = renderTemplate(templateName, ctx);
     _state.emailSend(to, r.subject, r.html, r.text);
 }
@@ -296,7 +362,12 @@ function emitEvent(uid, kind, req, opts) {
 // session.loginHandler — see hull:web:middleware:session's
 // auditLog/onNewDevice opts. That single seam covers OAuth too.
 function finishLogin(req, res, user, factors) {
-    _state.onLogin(req, res, user, { factors: factors });
+    // Round-8 LOW-10: scrub password_hash before handing user to
+    // the app callback. session.loginHandler stashes the user blob
+    // in the session payload, which is JSON-encoded + persisted +
+    // re-read on every load; a leaked hash would persist on disk
+    // and surface in session.listForUser output.
+    _state.onLogin(req, res, stripUserSecrets(user), { factors: factors });
 }
 
 function parseBody(req) {
@@ -473,19 +544,17 @@ function handleLogin(req, res) {
         return res.status(400).json({ error: "invalid credentials" });
     }
     const user = _state.userFindByEmail(body.email);
-    // Lockout check before password check: a locked account
-    // shouldn't leak whether the attempted password was right
-    // via response timing.
-    if (user) {
-        const remain = lockoutRemaining(userId(user));
-        if (remain > 0) {
-            res.header("Retry-After", String(remain));
-            return res.status(429).json({
-                error: "too many failed attempts",
-                retry_after: remain,
-            });
-        }
-    }
+    // Lockout: when the user exists AND is currently locked, short-
+    // circuit to the SAME 401 + "invalid credentials" the wrong-
+    // password branch returns. Round-8 HIGH-4: prior code returned
+    // 429 + Retry-After in this branch, leaking account existence
+    // via the lockout signal (trip lockout against any candidate to
+    // enumerate registered emails). The lockout still applies
+    // internally — the counter ticks, the user still can't log in
+    // until the window expires — but the wire response is now
+    // indistinguishable from a wrong-password reply.
+    const preLocked = user
+                      && lockoutRemaining(userId(user)) > 0;
     // Timing-safe email enumeration defense. crypto.verifyPassword
     // (PBKDF2-SHA256, 600k iters by default) takes 50–200ms; a 401
     // that skipped the verify because the email was unknown would
@@ -497,8 +566,8 @@ function handleLogin(req, res) {
     const pwHash = (user && user.password_hash) || _state._dummyPwhash;
     const pwOk   = (_state.enumerationSafe || Boolean(user))
                    && crypto.verifyPassword(body.password, pwHash);
-    if (!user || !user.password_hash || !pwOk) {
-        if (user) bumpFailedLogin(userId(user));
+    if (preLocked || !user || !user.password_hash || !pwOk) {
+        if (user && !preLocked) bumpFailedLogin(userId(user));
         return res.status(401).json({ error: "invalid credentials" });
     }
     if (_state.requireVerifiedEmail && !user.email_verified) {
@@ -583,7 +652,14 @@ function handleTotpVerify(req, res) {
     if (!user) return res.status(400).json({ error: "totp failed" });
     const ok = _state.totpVerify(user, body.code);
     if (!ok) return res.status(401).json({ error: "invalid code" });
-    markTokenUsed(body.token, env.exp);
+    // Round-8 MEDIUM-6: prior code discarded markTokenUsed's return,
+    // so two concurrent verifies with the same {token, code} both
+    // minted a session from one pending-2FA token. Act on the return
+    // to bail when we lost the race; the OTHER request mints the
+    // session.
+    if (!markTokenUsed(body.token, env.exp)) {
+        return res.status(400).json({ error: "totp token already used" });
+    }
     gcExpired();
     finishLogin(req, res, user, "password+totp");
 }
@@ -942,6 +1018,13 @@ function init(opts) {
     _state.onPasswordReset      = opts.onPasswordReset || null;
     _state.loginRatelimit       = opts.loginRatelimit !== undefined
                                   ? opts.loginRatelimit : false;
+    // emailRateLimit: false disables, a {limit,window} object overrides,
+    // undefined keeps the default. Reset the per-process sliding-window
+    // state so re-init in tests starts with a clean bucket pool.
+    if (opts.emailRateLimit !== undefined) {
+        _state.emailRateLimit = opts.emailRateLimit;
+    }
+    _emailRl = new Map();
 
     // Timing-safe email enumeration defense — see handleLogin. The
     // dummy hash is computed once per process and reused per request
@@ -1029,6 +1112,8 @@ const _test = {
     isEmailIsh,
     parseBody,
     ACTIONS,
+    emailRateAllow: (to) => emailRateAllow(to),
+    emailRateReset: () => { _emailRl = new Map(); },
     reset: () => {
         _state.stateSecretHex = null;
         _state.emailSend      = null;

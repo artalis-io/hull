@@ -296,23 +296,48 @@ function isCleanupScheduled() {
  * Run ONCE after switching salts (or after the round-6 mandatory-
  * salt upgrade) to avoid a mass `is_new_device` storm.
  * Idempotent; returns { scanned, updated }.
+ *
+ * Round-8 MEDIUM-7: paged by id + per-page db.batch so the runtime
+ * doesn't materialize the full _hull_audit_log in memory and a
+ * partial run leaves a coherent batch boundary instead of N
+ * auto-committed singleton UPDATEs. See the Lua sibling for the
+ * page-size rationale.
  */
+const RECOMPUTE_PAGE = 5000;
+
 function recomputeFingerprints() {
-    const rows = db.query(
-        "SELECT id, ip, user_agent, fingerprint FROM _hull_audit_log");
     const salt = _state.fingerprintSalt || "";
     let scanned = 0, updated = 0;
-    for (let i = 0; i < (rows || []).length; i++) {
-        scanned++;
-        const r = rows[i];
-        const key = salt + "|" + normalizeUa(r.user_agent)
-                         + "|" + ipPrefix(r.ip);
-        const newFp = bytesToHex(crypto.sha256(key)).substring(0, 16);
-        if (newFp !== r.fingerprint) {
-            db.exec("UPDATE _hull_audit_log SET fingerprint = ? WHERE id = ?",
-                    [newFp, r.id]);
-            updated++;
+    let lastId = -1;
+    for (;;) {
+        const rows = db.query(
+            "SELECT id, ip, user_agent, fingerprint "
+            + "FROM _hull_audit_log "
+            + "WHERE id > ? ORDER BY id LIMIT ?",
+            [lastId, RECOMPUTE_PAGE]);
+        if (!rows || rows.length === 0) break;
+        const pageUpdates = [];
+        for (let i = 0; i < rows.length; i++) {
+            scanned++;
+            lastId = rows[i].id;
+            const key = salt + "|" + normalizeUa(rows[i].user_agent)
+                             + "|" + ipPrefix(rows[i].ip);
+            const newFp = bytesToHex(crypto.sha256(key)).substring(0, 16);
+            if (newFp !== rows[i].fingerprint) {
+                pageUpdates.push([newFp, rows[i].id]);
+            }
         }
+        if (pageUpdates.length > 0) {
+            db.batch(() => {
+                for (let i = 0; i < pageUpdates.length; i++) {
+                    db.exec(
+                        "UPDATE _hull_audit_log SET fingerprint = ? "
+                        + "WHERE id = ?", pageUpdates[i]);
+                }
+            });
+            updated += pageUpdates.length;
+        }
+        if (rows.length < RECOMPUTE_PAGE) break;
     }
     return { scanned: scanned, updated: updated };
 }

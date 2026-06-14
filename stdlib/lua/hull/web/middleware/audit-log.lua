@@ -366,21 +366,50 @@ end
 --
 -- The `ip` and `user_agent` columns are stored alongside the
 -- fingerprint, so no external data is needed.
+-- Round-8 MEDIUM-7: page through the table so the runtime doesn't
+-- hold the entire _hull_audit_log in memory and so a partial run
+-- (DB lock, crash, OOM) leaves a coherent batch boundary instead of
+-- thousands of auto-committed singleton UPDATEs. Page size is a
+-- compromise: small enough that a runaway run can be aborted with
+-- visible progress (returns counters even if you `kill -INT`), big
+-- enough that 365-day retention on a busy site finishes in minutes
+-- not hours. Each page runs inside db.batch so the per-page UPDATEs
+-- share one transaction.
+local RECOMPUTE_PAGE = 5000
+
 function audit_log.recompute_fingerprints()
-    local rows = db.query(
-        "SELECT id, ip, user_agent, fingerprint FROM _hull_audit_log")
     local salt = _state.fingerprint_salt or ""
     local scanned, updated = 0, 0
-    for _, r in ipairs(rows or {}) do
-        scanned = scanned + 1
-        local key = salt .. "|" .. normalize_ua(r.user_agent)
-                       .. "|" .. ip_prefix(r.ip)
-        local new_fp = crypto.hex_encode(crypto.sha256(key)):sub(1, 16)
-        if new_fp ~= r.fingerprint then
-            db.exec("UPDATE _hull_audit_log SET fingerprint = ? WHERE id = ?",
-                    { new_fp, r.id })
-            updated = updated + 1
+    local last_id = -1
+    while true do
+        local rows = db.query(
+            "SELECT id, ip, user_agent, fingerprint "
+            .. "FROM _hull_audit_log "
+            .. "WHERE id > ? ORDER BY id LIMIT ?",
+            { last_id, RECOMPUTE_PAGE })
+        if not rows or #rows == 0 then break end
+        local page_updates = {}
+        for _, r in ipairs(rows) do
+            scanned = scanned + 1
+            last_id = r.id
+            local key = salt .. "|" .. normalize_ua(r.user_agent)
+                           .. "|" .. ip_prefix(r.ip)
+            local new_fp = crypto.hex_encode(crypto.sha256(key)):sub(1, 16)
+            if new_fp ~= r.fingerprint then
+                page_updates[#page_updates + 1] = { new_fp, r.id }
+            end
         end
+        if #page_updates > 0 then
+            db.batch(function()
+                for _, u in ipairs(page_updates) do
+                    db.exec(
+                        "UPDATE _hull_audit_log SET fingerprint = ? "
+                        .. "WHERE id = ?", u)
+                end
+            end)
+            updated = updated + #page_updates
+        end
+        if #rows < RECOMPUTE_PAGE then break end
     end
     return { scanned = scanned, updated = updated }
 end

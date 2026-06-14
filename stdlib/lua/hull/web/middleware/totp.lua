@@ -42,6 +42,15 @@
 --     accounts for typing the displayed code without hyphens.
 --   * `alg=SHA1` is fixed at RFC 6238's default; every mainstream
 --     authenticator app expects it.
+--   * Brute-force lockout (round-8): after `max_failed_attempts`
+--     consecutive bad codes the user is locked for `lockout_duration`
+--     seconds; verify returns false silently during the window. A
+--     successful verify (TOTP or recovery) clears the counter.
+--     Defaults: 5 attempts / 15-minute window. Pre-round-8 the
+--     module shipped without this gate and the header pointed at a
+--     `hull/web/middleware/auth_lockout` module that never existed —
+--     /auth/totp-verify was effectively unlimited at the line-rate
+--     of the network. Tune via init() opts.
 --
 -- ## Local-first / offline notes
 --
@@ -94,6 +103,22 @@ local _state = {
     period              = 30,
     window              = 1,
     recovery_codes      = 10,
+    -- Brute-force lockout (round-8). See header §Security.
+    max_failed_attempts = 5,
+    lockout_duration    = 15 * 60,
+    -- Pending-row TTL (round-8 LOW-13). _hull_totp_pending stores
+    -- the new secret + (encrypted) recovery codes during the
+    -- enroll → confirm window. Without a TTL, abandoned enrollments
+    -- pile up plaintext-ish secrets in the DB forever. Default
+    -- 1 hour matches the natural UX timeout for "open QR code →
+    -- type code into form". Confirmed rows in _hull_totp are NEVER
+    -- expired by this — they're the user's real secret.
+    pending_ttl         = 3600,
+    -- See pending_ttl: opt-out wires up app.daily so accumulated
+    -- pending rows get pruned even when the app forgets to call
+    -- cleanup() explicitly. Mirrors session/audit-log.
+    _cleanup_catchup_done = false,
+    _cleanup_scheduled    = false,
     -- Multi-key encryption state. See totp.init for the input shape
     -- and the encrypt_secret / decrypt_secret comments for the wire
     -- format.
@@ -139,6 +164,13 @@ CREATE TABLE IF NOT EXISTS _hull_totp_pending_recovery (
     user_id   TEXT NOT NULL,
     code_hash TEXT NOT NULL,
     PRIMARY KEY (user_id, code_hash)
+);
+
+CREATE TABLE IF NOT EXISTS _hull_totp_attempts (
+    user_id        TEXT PRIMARY KEY,
+    failed_count   INTEGER NOT NULL DEFAULT 0,
+    last_failed_at INTEGER,
+    locked_until   INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS _hull_totp_recovery_user
@@ -296,9 +328,10 @@ end
 -- both sides are fixed-length zero-padded numeric strings; Lua's
 -- native `==` short-circuits on first mismatch, which is a
 -- measurable timing leak when an attacker can submit guesses at
--- high rate. RFC 6238 §4 calls this out explicitly. Pair with
--- account lockout (hull/web/middleware/auth_lockout, separate
--- module) for defense in depth.
+-- high rate. RFC 6238 §4 calls this out explicitly. Defense in
+-- depth: the brute-force lockout (lockout_remaining /
+-- bump_failed_attempt below) is the actual gate; ct_eq just keeps
+-- the per-comparison side-channel uniform.
 local function ct_eq(a, b)
     if type(a) ~= "string" or type(b) ~= "string" then return false end
     if #a ~= #b then return false end
@@ -449,18 +482,19 @@ end
 -- verify. Returns nil when no pending enrollment exists.
 local function load_pending_secret(user_id)
     local rows = db.query(
-        "SELECT secret, encrypted, digits, period "
+        "SELECT secret, encrypted, digits, period, created_at "
         .. "FROM _hull_totp_pending WHERE user_id = ?", { user_id })
     if not rows or #rows == 0 then return nil end
     local row = rows[1]
     local secret = decrypt_secret(row.secret, row.encrypted)
     if not secret then return nil end
     return {
-        secret    = secret,
-        stored    = row.secret,
-        encrypted = row.encrypted,
-        digits    = row.digits,
-        period    = row.period,
+        secret     = secret,
+        stored     = row.secret,
+        encrypted  = row.encrypted,
+        digits     = row.digits,
+        period     = row.period,
+        created_at = row.created_at,
     }
 end
 
@@ -504,6 +538,64 @@ local function check_initialized()
     if not _state._initialized then
         error("totp: call totp.init(...) before any other function")
     end
+end
+
+-- ── Brute-force lockout ───────────────────────────────────────────
+--
+-- Round-8 HIGH-3. Pre-round-8, the verify path was unrate-limited and
+-- the module header pointed at a phantom `auth_lockout` module. A 6-
+-- digit code in a ±1 step window had ~3 valid (step, code) tuples;
+-- with no gate, an attacker holding the user's password (and thus
+-- a valid pending-2FA envelope from auth-flows) could land a code in
+-- minutes at line rate. The bookkeeping mirrors auth-flows's login
+-- lockout: same shape, same column names, same defaults.
+--
+-- `lockout_remaining` returns the number of seconds the user is
+-- still locked for (0 if free). `bump_failed_attempt` increments the
+-- counter; on threshold, sets `locked_until = now + lockout_duration`
+-- and resets the counter so the NEXT lockout window starts from a
+-- clean 5. `clear_failed_attempts` is called on success.
+
+local function lockout_remaining(user_id)
+    local r = db.query(
+        "SELECT locked_until FROM _hull_totp_attempts WHERE user_id = ?",
+        { user_id })
+    if not r or #r == 0 or not r[1].locked_until then return 0 end
+    local remain = r[1].locked_until - time.now()
+    return remain > 0 and remain or 0
+end
+
+local function bump_failed_attempt(user_id)
+    local now = time.now()
+    -- Read-modify-write under db.batch so two concurrent failed
+    -- verifies don't both think they're the threshold-crossing one
+    -- and double-lock.
+    db.batch(function()
+        local r = db.query(
+            "SELECT failed_count, locked_until FROM _hull_totp_attempts "
+            .. "WHERE user_id = ?", { user_id })
+        local fc = (r and r[1] and r[1].failed_count) or 0
+        local new_fc = fc + 1
+        local locked_until = (r and r[1] and r[1].locked_until) or nil
+        if new_fc >= _state.max_failed_attempts then
+            locked_until = now + _state.lockout_duration
+            new_fc = 0  -- reset; next bad code restarts the counter
+        end
+        db.exec(
+            "INSERT INTO _hull_totp_attempts "
+            .. "(user_id, failed_count, last_failed_at, locked_until) "
+            .. "VALUES (?, ?, ?, ?) "
+            .. "ON CONFLICT(user_id) DO UPDATE SET "
+            .. "  failed_count   = excluded.failed_count, "
+            .. "  last_failed_at = excluded.last_failed_at, "
+            .. "  locked_until   = excluded.locked_until",
+            { user_id, new_fc, now, locked_until })
+    end)
+end
+
+local function clear_failed_attempts(user_id)
+    db.exec("DELETE FROM _hull_totp_attempts WHERE user_id = ?",
+            { user_id })
 end
 
 -- ── Public API ─────────────────────────────────────────────────────
@@ -603,6 +695,13 @@ function totp.init(opts)
     _state.period         = opts.period         or _state.period
     _state.window         = opts.window         or _state.window
     _state.recovery_codes = opts.recovery_codes or _state.recovery_codes
+    _state.max_failed_attempts = opts.max_failed_attempts
+                                 or _state.max_failed_attempts
+    _state.lockout_duration    = opts.lockout_duration
+                                 or _state.lockout_duration
+    if opts.pending_ttl ~= nil then
+        _state.pending_ttl = opts.pending_ttl
+    end
     _state.keys                 = keys
     _state.current_key_version  = current
     _state.legacy_key_version   = legacy_version
@@ -648,7 +747,64 @@ function totp.init(opts)
         end
     end
 
+    -- Round-8 LOW-13: lazy catchup + auto-schedule daily cleanup.
+    -- Mirrors the round-7 audit-log / session pattern. _hull_totp
+    -- (confirmed) is the user's real secret — never expired here.
+    -- _hull_totp_pending stages an in-flight enroll; rows older than
+    -- pending_ttl are orphans (network glitch, browser closed
+    -- mid-flow) and stay in the DB indefinitely without this prune.
+    if opts.cleanup ~= false and not _state._cleanup_catchup_done then
+        local ok, err = pcall(totp.cleanup)
+        if not ok then
+            local log = require("hull.log")
+            log.warn("totp: init-time cleanup failed: " .. tostring(err))
+        end
+        _state._cleanup_catchup_done = true
+    end
+    if opts.cleanup ~= false and not _state._cleanup_scheduled then
+        local at = opts.cleanup_at or "03:00"
+        if type(app) == "table" and type(app.daily) == "function" then
+            app.daily(at, function() totp.cleanup() end)
+            _state._cleanup_scheduled = true
+        else
+            local log = require("hull.log")
+            log.warn("totp: app.daily not available "
+                  .. "(CLI flavor or hull/timers not admitted) "
+                  .. "— pending-row prune runs only at init(). "
+                  .. "Wire your own cron/worker for steady-state.")
+        end
+    end
+
     _state._initialized = true
+end
+
+--- Prune orphaned pending-enrollment rows older than pending_ttl
+-- seconds. Confirmed _hull_totp rows are NEVER touched — those are
+-- the user's real secret. Returns the number of pending rows (and
+-- their recovery-code companions) removed. Auto-scheduled daily via
+-- app.daily unless `cleanup = false` is passed to init.
+function totp.cleanup()
+    check_initialized()
+    local cutoff = time.now() - (_state.pending_ttl or 3600)
+    local removed = 0
+    db.batch(function()
+        -- Find expired pending users first so we can also nuke their
+        -- staged recovery codes (the two tables aren't FK-linked,
+        -- since SQLite without PRAGMA foreign_keys=ON skips FKs;
+        -- driving the delete from a single id list is safe across
+        -- backends).
+        local victims = db.query(
+            "SELECT user_id FROM _hull_totp_pending WHERE created_at < ?",
+            { cutoff })
+        for _, r in ipairs(victims or {}) do
+            db.exec("DELETE FROM _hull_totp_pending_recovery "
+                    .. "WHERE user_id = ?", { r.user_id })
+            db.exec("DELETE FROM _hull_totp_pending WHERE user_id = ?",
+                    { r.user_id })
+            removed = removed + 1
+        end
+    end)
+    return removed
 end
 
 --- Enroll a user. Generates a new secret + recovery codes and
@@ -723,13 +879,27 @@ function totp.confirm(user_id, code)
     -- Confirm verifies the code against the PENDING enrollment.
     -- On success it PROMOTES the pending row into _hull_totp,
     -- replacing any existing confirmed row + recovery codes.
-    -- If no pending row exists (no enroll was called), fall back
-    -- to checking an already-confirmed row — common pattern when
-    -- a UI calls confirm() twice on a successful enrollment.
+    --
+    -- Round-8 LOW-11: pre-round-8 confirm() fell back to "is the user
+    -- already enrolled?" when no pending row existed and returned
+    -- true without verifying any code. The bypass required a user to
+    -- already be enrolled, but the name "confirm" implies code-
+    -- verified — apps that treated confirm()'s boolean as proof-of-
+    -- possession (the natural reading) silently skipped the code
+    -- check. Apps that just want the enrollment predicate should
+    -- call totp.enrolled(user_id) instead; confirm() now strictly
+    -- means "this code verifies the pending enrollment".
     local pending = load_pending_secret(user_id)
     if not pending then
-        local existing = load_secret(user_id)
-        if existing and existing.confirmed == 1 then return true end
+        return false
+    end
+    -- Round-8 LOW-13: reject pending rows older than pending_ttl
+    -- here too. The daily cleanup catches them eventually, but the
+    -- enroll → confirm window is ~minutes; a confirm-against-1-week-
+    -- old-pending is almost certainly a stale tab and shouldn't
+    -- silently work.
+    if pending.created_at and _state.pending_ttl
+       and (pending.created_at + _state.pending_ttl) < time.now() then
         return false
     end
 
@@ -791,6 +961,13 @@ function totp.verify_with_kind(user_id, code)
     if type(user_id) ~= "string" or type(code) ~= "string" then
         return false, nil
     end
+    -- Lockout check (round-8 HIGH-3). Return false silently — same
+    -- shape as a wrong code — so an enumerator can't tell "locked"
+    -- from "bad code". Apps that need the locked state for UX can
+    -- call totp.lockout_remaining(user_id) explicitly.
+    if lockout_remaining(user_id) > 0 then
+        return false, nil
+    end
     local row = load_secret(user_id)
     if not row or row.confirmed ~= 1 then return false, nil end
 
@@ -808,6 +985,7 @@ function totp.verify_with_kind(user_id, code)
         if step > row.last_used_step
            and ct_eq(totp_at_step(row.secret, step, row.digits), code) then
             if mark_step_used(user_id, step) == 1 then
+                clear_failed_attempts(user_id)
                 -- Lazy rekey: if the row's secret was decrypted under
                 -- a key version other than the current one (legacy v1
                 -- or an older v2 version after rotation), re-encrypt
@@ -835,6 +1013,7 @@ function totp.verify_with_kind(user_id, code)
                 "UPDATE _hull_totp_recovery SET used_at = ? "
                 .. "WHERE user_id = ? AND code_hash = ?",
                 { time.now(), user_id, r.code_hash })
+            clear_failed_attempts(user_id)
             -- Same lazy rekey on the recovery-code path — the
             -- decrypted secret is in hand so we might as well
             -- migrate it forward.
@@ -846,7 +1025,18 @@ function totp.verify_with_kind(user_id, code)
         end
     end
 
+    bump_failed_attempt(user_id)
     return false, nil
+end
+
+--- Seconds remaining in a brute-force lockout window (0 if not
+-- locked). Apps that want to surface "try again in N seconds" UX
+-- can call this directly; the verify path itself returns a plain
+-- false to keep the lockout state non-enumerable from the wire.
+function totp.lockout_remaining(user_id)
+    check_initialized()
+    if type(user_id) ~= "string" then return 0 end
+    return lockout_remaining(user_id)
 end
 
 function totp.verify(user_id, code)
@@ -992,16 +1182,32 @@ totp._test = {
     encrypt_secret          = encrypt_secret,
     decrypt_secret          = decrypt_secret,
     build_otpauth_url       = build_otpauth_url,
+    lockout_remaining       = lockout_remaining,
+    bump_failed_attempt     = bump_failed_attempt,
+    clear_failed_attempts   = clear_failed_attempts,
+    -- Test-only: backdate a pending row's created_at so cleanup()
+    -- finds it stale. Lives inside the module so db.exec passes
+    -- the lua_is_stdlib_caller check (user code can't touch
+    -- _hull_* directly).
+    force_pending_stale     = function(user_id)
+        db.exec("UPDATE _hull_totp_pending SET created_at = ? "
+                .. "WHERE user_id = ?", { 0, user_id })
+    end,
     reset = function()
         _state.issuer              = "Hull"
         _state.digits              = 6
         _state.period              = 30
         _state.window              = 1
         _state.recovery_codes      = 10
+        _state.max_failed_attempts = 5
+        _state.lockout_duration    = 15 * 60
+        _state.pending_ttl         = 3600
         _state.keys                = {}
         _state.current_key_version = nil
         _state.legacy_key_version  = nil
         _state.encryption_key_hex  = nil
+        _state._cleanup_catchup_done = false
+        _state._cleanup_scheduled    = false
         _state._initialized        = false
     end,
 }
