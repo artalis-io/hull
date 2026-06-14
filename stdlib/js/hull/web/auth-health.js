@@ -27,26 +27,26 @@ function rowCount(name) {
     return (rows && rows[0] && rows[0].n) || 0;
 }
 
-function probeSessions() {
+function probeSessions(includeCounts) {
     if (!tableExists("_hull_sessions")) {
         return { ok: false, reason: "table _hull_sessions not created "
                                  + "(call session.init())" };
     }
-    return { ok: true, sessions: rowCount("_hull_sessions") };
+    const out = { ok: true };
+    if (includeCounts) out.sessions = rowCount("_hull_sessions");
+    return out;
 }
 
-function probeAuditLog() {
+function probeAuditLog(includeCounts) {
     if (!tableExists("_hull_audit_log")) {
         return { ok: false, reason: "table _hull_audit_log not created "
                                  + "(call auditLog.init())" };
     }
     const scheduled = typeof auditLog.isCleanupScheduled === "function"
         ? auditLog.isCleanupScheduled() : null;
-    return {
-        ok: true,
-        events: rowCount("_hull_audit_log"),
-        cleanup_scheduled: scheduled,
-    };
+    const out = { ok: true, cleanup_scheduled: scheduled };
+    if (includeCounts) out.events = rowCount("_hull_audit_log");
+    return out;
 }
 
 function probePwned() {
@@ -54,50 +54,65 @@ function probePwned() {
         return { ok: false, reason: "hull/web/pwned not available" };
     }
     const h = pwned.health();
+    // Distinguish "no probe attempted yet" (h.ok == null) from
+    // "last probe succeeded" (true) and "last probe failed" (false).
+    let status;
+    if (h.ok == null)   status = "not_yet_checked";
+    else if (h.ok)      status = "reachable";
+    else                status = "fail_open";
     return {
-        // ok=true when either the last attempt succeeded OR no attempt
-        // has happened yet (process just started). Only the explicit
-        // false (fail-open) is a "not ok".
         ok:            h.ok !== false,
+        status:        status,
         last_check_at: h.last_check_at,
         last_error:    h.last_error,
     };
 }
 
-function probeTotp() {
+function probeTotp(includeCounts) {
     if (!tableExists("_hull_totp")) {
         return { ok: false, reason: "table _hull_totp not created "
                                  + "(call totp.init())" };
     }
-    const r = db.query(
-        "SELECT count(*) AS n FROM _hull_totp WHERE confirmed = 1");
-    return {
-        ok: true,
-        enrolled_users: (r && r[0] && r[0].n) || 0,
-    };
+    const out = { ok: true };
+    if (includeCounts) {
+        const r = db.query(
+            "SELECT count(*) AS n FROM _hull_totp WHERE confirmed = 1");
+        out.enrolled_users = (r && r[0] && r[0].n) || 0;
+    }
+    return out;
 }
 
-function probeRbac() {
+function probeRbac(includeCounts) {
     const rolesOk = tableExists("_hull_roles");
     const permsOk = tableExists("_hull_permissions");
     if (!rolesOk && !permsOk) {
         return { ok: false, reason: "rbac tables not created "
                                  + "(call rbac.init())" };
     }
-    return {
-        ok:          rolesOk && permsOk,
-        roles:       rowCount("_hull_roles"),
-        permissions: rowCount("_hull_permissions"),
-    };
+    const out = { ok: rolesOk && permsOk };
+    if (includeCounts) {
+        out.roles       = rowCount("_hull_roles");
+        out.permissions = rowCount("_hull_permissions");
+    }
+    return out;
 }
 
-function check() {
+/**
+ * Run all probes; return a JSON-ready object.
+ * opts.includeCounts (default false) gates enumeration counts
+ * (events, sessions, enrolled_users, roles, permissions). Default
+ * is FALSE — the endpoint surface is often reachable by anyone with
+ * admin access and the counts are recon material.
+ */
+function check(opts) {
+    const o = opts || {};
+    const include = o.includeCounts === true;
     const out = {
-        sessions:  probeSessions(),
-        audit_log: probeAuditLog(),
+        sessions:  probeSessions(include),
+        audit_log: probeAuditLog(include),
         pwned:     probePwned(),
-        totp:      probeTotp(),
-        rbac:      probeRbac(),
+        totp:      probeTotp(include),
+        rbac:      probeRbac(include),
     };
     let allOk = true;
     for (const k in out) {
@@ -107,10 +122,31 @@ function check() {
     return out;
 }
 
+/**
+ * Mount /admin/auth-status (overridable). opts.authCheck(req) is
+ * REQUIRED — the endpoint exposes session/enrollment counts and
+ * operational state, recon material if left open. Returning truthy
+ * admits the request; false returns 403; throwing returns 401.
+ * opts.includeCounts (default false) gates enumeration counts.
+ */
 function routes(app, opts) {
     const o = opts || {};
+    if (typeof o.authCheck !== "function") {
+        throw new Error("authHealth.routes: opts.authCheck function is "
+            + "required. The endpoint exposes session/enrollment counts "
+            + "and operational state — gate it behind your RBAC "
+            + "predicate or a token check.");
+    }
     const path = o.path || "/admin/auth-status";
-    app.get(path, (_req, res) => res.json(check()));
+    const includeCounts = o.includeCounts === true;
+    const authCheck = o.authCheck;
+    app.get(path, (req, res) => {
+        let allowed = false;
+        try { allowed = authCheck(req); }
+        catch (_e) { return res.status(401).json({ error: "forbidden" }); }
+        if (!allowed) return res.status(403).json({ error: "forbidden" });
+        res.json(check({ includeCounts: includeCounts }));
+    });
 }
 
 const authHealth = { check, routes };

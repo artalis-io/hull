@@ -65,15 +65,17 @@ end
 -- Probe individual subsystems. Each returns { ok, ...details }.
 -- Probes use pcall so a single failure doesn't take down the rest.
 
-local function probe_sessions()
+local function probe_sessions(include_counts)
     if not table_exists("_hull_sessions") then
         return { ok = false, reason = "table _hull_sessions not created "
                                    .. "(call session.init())" }
     end
-    return { ok = true, sessions = row_count("_hull_sessions") }
+    local out = { ok = true }
+    if include_counts then out.sessions = row_count("_hull_sessions") end
+    return out
 end
 
-local function probe_audit_log()
+local function probe_audit_log(include_counts)
     if not table_exists("_hull_audit_log") then
         return { ok = false, reason = "table _hull_audit_log not created "
                                    .. "(call audit_log.init())" }
@@ -83,11 +85,9 @@ local function probe_audit_log()
     if ok and mod and type(mod.is_cleanup_scheduled) == "function" then
         scheduled = mod.is_cleanup_scheduled()
     end
-    return {
-        ok = true,
-        events = row_count("_hull_audit_log"),
-        cleanup_scheduled = scheduled,
-    }
+    local out = { ok = true, cleanup_scheduled = scheduled }
+    if include_counts then out.events = row_count("_hull_audit_log") end
+    return out
 end
 
 local function probe_pwned()
@@ -96,51 +96,68 @@ local function probe_pwned()
         return { ok = false, reason = "hull/web/pwned not available" }
     end
     local h = mod.health()
+    -- Distinguish "no probe attempted yet" (h.ok == nil) from
+    -- "last probe succeeded" (h.ok == true) and "last probe failed"
+    -- (h.ok == false). The first two are healthy; only false is
+    -- not_ok. Surface the state so operators can tell a freshly-
+    -- started process from a confirmed-reachable HIBP.
+    local status
+    if h.ok == nil then status = "not_yet_checked"
+    elseif h.ok then    status = "reachable"
+    else                status = "fail_open" end
     return {
-        -- ok=true when either the last attempt succeeded OR no attempt
-        -- has happened yet (process just started). The fail-open
-        -- condition (ok=false) is what operators care about.
         ok            = h.ok ~= false,
+        status        = status,
         last_check_at = h.last_check_at,
         last_error    = h.last_error,
     }
 end
 
-local function probe_totp()
+local function probe_totp(include_counts)
     if not table_exists("_hull_totp") then
         return { ok = false, reason = "table _hull_totp not created "
                                    .. "(call totp.init())" }
     end
-    local enrolled = db.query(
-        "SELECT count(*) AS n FROM _hull_totp WHERE confirmed = 1")
-    return {
-        ok = true,
-        enrolled_users = (enrolled and enrolled[1] and enrolled[1].n) or 0,
-    }
+    local out = { ok = true }
+    if include_counts then
+        local enrolled = db.query(
+            "SELECT count(*) AS n FROM _hull_totp WHERE confirmed = 1")
+        out.enrolled_users = (enrolled and enrolled[1] and enrolled[1].n) or 0
+    end
+    return out
 end
 
-local function probe_rbac()
+local function probe_rbac(include_counts)
     local roles_ok = table_exists("_hull_roles")
     local perms_ok = table_exists("_hull_permissions")
     if not roles_ok and not perms_ok then
         return { ok = false, reason = "rbac tables not created "
                                    .. "(call rbac.init())" }
     end
-    return {
-        ok          = roles_ok and perms_ok,
-        roles       = row_count("_hull_roles"),
-        permissions = row_count("_hull_permissions"),
-    }
+    local out = { ok = roles_ok and perms_ok }
+    if include_counts then
+        out.roles       = row_count("_hull_roles")
+        out.permissions = row_count("_hull_permissions")
+    end
+    return out
 end
 
 --- Run all probes; return a JSON-ready table.
-function auth_health.check()
+-- @tparam[opt] table opts  `{ include_counts = false }`. With
+--   include_counts = true, the output also carries enumeration
+--   counts (events, sessions, enrolled_users, roles, permissions).
+--   Default is FALSE because the endpoint surface is often
+--   reachable by anyone with admin access and the counts are
+--   recon material. Enable only when you want the dashboard view.
+function auth_health.check(opts)
+    opts = opts or {}
+    local include = opts.include_counts == true
     local out = {
-        sessions  = probe_sessions(),
-        audit_log = probe_audit_log(),
+        sessions  = probe_sessions(include),
+        audit_log = probe_audit_log(include),
         pwned     = probe_pwned(),
-        totp      = probe_totp(),
-        rbac      = probe_rbac(),
+        totp      = probe_totp(include),
+        rbac      = probe_rbac(include),
     }
     local all_ok = true
     for _, p in pairs(out) do
@@ -152,12 +169,40 @@ end
 
 --- Convenience: mount a JSON status endpoint at `/admin/auth-status`
 -- (overridable). Backs the `hull agent auth-status` CLI.
+--
+-- `opts.auth_check(req) -> bool` is REQUIRED. The endpoint exposes
+-- session/enrollment counts and operational state — recon material
+-- if left open. Auth_check wires into the app's RBAC predicate or a
+-- token check. A 401 (no auth context) or 403 (no permission) is
+-- returned on failure. Returning true admits the request.
+--
 -- @tparam table app
--- @tparam[opt] table opts  { path = "/admin/auth-status" }
+-- @tparam table opts
+--   * `auth_check(req) -> bool`  REQUIRED. Gate for the endpoint.
+--   * `path` (default `/admin/auth-status`).
+--   * `include_counts` (default false). When false, the response
+--     omits enumeration counts (sessions, enrolled_users, etc.)
+--     and only returns ok/reason + operational fields.
 function auth_health.routes(app, opts)
     opts = opts or {}
+    if type(opts.auth_check) ~= "function" then
+        error("auth_health.routes: opts.auth_check function is required. "
+              .. "The endpoint exposes session/enrollment counts and "
+              .. "operational state — gate it behind your RBAC predicate "
+              .. "or a token check. Pass auth_check = function(req) "
+              .. "return ... end to wire the gate.")
+    end
     local path = opts.path or "/admin/auth-status"
-    app.get(path, function(_req, res) res:json(auth_health.check()) end)
+    local include_counts = opts.include_counts == true
+    local auth_check = opts.auth_check
+    app.get(path, function(req, res)
+        local ok, allowed = pcall(auth_check, req)
+        if not ok or not allowed then
+            return res:status(allowed == nil and 401 or 403)
+                      :json({ error = "forbidden" })
+        end
+        res:json(auth_health.check({ include_counts = include_counts }))
+    end)
 end
 
 return auth_health

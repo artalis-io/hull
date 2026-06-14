@@ -49,8 +49,12 @@ local _state = {
 --     output deployment-private.
 --     BREAKING: this opt is mandatory as of the round-6 hardening.
 --     Existing rows have unsalted fingerprints; they will not match
---     new ones, so is_new_device will fire for every active user once
---     on next sign-in. Plan accordingly.
+--     new ones, so is_new_device would fire for every active user
+--     once on next sign-in (mass "new device login" emails).
+--     Mitigation: run `audit_log.recompute_fingerprints()` ONCE
+--     during deploy, before traffic resumes on the new salt. The
+--     helper recomputes every row's fingerprint from its stored
+--     ip + user_agent under the current salt.
 --   * `retain_days` (default 365). Rows older than this are deleted
 --     by the scheduled cleanup.
 --   * `cleanup` (default true). When true, schedules a daily timer
@@ -346,6 +350,39 @@ end
 -- @treturn boolean
 function audit_log.is_cleanup_scheduled()
     return _state._catchup_done == true and _state._cleanup_scheduled == true
+end
+
+--- Migration helper: recompute every row's `fingerprint` column
+-- from its stored `ip` + `user_agent` under the current
+-- `fingerprint_salt`. Use ONCE after switching salts (or after
+-- the round-6 mandatory-salt upgrade) to avoid a mass
+-- `is_new_device` storm — without this, every active user's next
+-- sign-in would trigger the new-device path because the new
+-- salted fingerprint doesn't match the old unsalted one.
+--
+-- Idempotent: rows whose stored fingerprint already matches the
+-- recomputed value are skipped. Returns `{scanned, updated}`.
+-- Run during deploy, before traffic resumes on the new salt.
+--
+-- The `ip` and `user_agent` columns are stored alongside the
+-- fingerprint, so no external data is needed.
+function audit_log.recompute_fingerprints()
+    local rows = db.query(
+        "SELECT id, ip, user_agent, fingerprint FROM _hull_audit_log")
+    local salt = _state.fingerprint_salt or ""
+    local scanned, updated = 0, 0
+    for _, r in ipairs(rows or {}) do
+        scanned = scanned + 1
+        local key = salt .. "|" .. normalize_ua(r.user_agent)
+                       .. "|" .. ip_prefix(r.ip)
+        local new_fp = crypto.hex_encode(crypto.sha256(key)):sub(1, 16)
+        if new_fp ~= r.fingerprint then
+            db.exec("UPDATE _hull_audit_log SET fingerprint = ? WHERE id = ?",
+                    { new_fp, r.id })
+            updated = updated + 1
+        end
+    end
+    return { scanned = scanned, updated = updated }
 end
 
 -- Exposed for tests (mocking time, inspecting normalize behavior).

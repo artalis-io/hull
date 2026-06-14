@@ -126,6 +126,21 @@ CREATE TABLE IF NOT EXISTS _hull_totp_recovery (
     PRIMARY KEY (user_id, code_hash)
 );
 
+CREATE TABLE IF NOT EXISTS _hull_totp_pending (
+    user_id    TEXT PRIMARY KEY,
+    secret     BLOB NOT NULL,
+    encrypted  INTEGER NOT NULL DEFAULT 0,
+    digits     INTEGER NOT NULL DEFAULT 6,
+    period     INTEGER NOT NULL DEFAULT 30,
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS _hull_totp_pending_recovery (
+    user_id   TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    PRIMARY KEY (user_id, code_hash)
+);
+
 CREATE INDEX IF NOT EXISTS _hull_totp_recovery_user
     ON _hull_totp_recovery(user_id);
 ]]
@@ -429,6 +444,26 @@ local function load_secret(user_id)
     }
 end
 
+-- Load the pending-enrollment row, if any. Used by totp.confirm to
+-- promote the pending slot into _hull_totp on a successful code
+-- verify. Returns nil when no pending enrollment exists.
+local function load_pending_secret(user_id)
+    local rows = db.query(
+        "SELECT secret, encrypted, digits, period "
+        .. "FROM _hull_totp_pending WHERE user_id = ?", { user_id })
+    if not rows or #rows == 0 then return nil end
+    local row = rows[1]
+    local secret = decrypt_secret(row.secret, row.encrypted)
+    if not secret then return nil end
+    return {
+        secret    = secret,
+        stored    = row.secret,
+        encrypted = row.encrypted,
+        digits    = row.digits,
+        period    = row.period,
+    }
+end
+
 -- Lazy rekey: called after a successful verify when the stored row
 -- is on an older version than current. Re-encrypts the secret under
 -- the current key and writes the new blob. Best-effort — a transient
@@ -616,11 +651,16 @@ function totp.init(opts)
     _state._initialized = true
 end
 
---- Enroll a user. Generates a new secret + recovery codes; the row
--- is marked unconfirmed until @ref totp.confirm completes. Calling
--- enroll on an already-enrolled user OVERWRITES (intentional —
--- re-enrollment is the recovery path when a user loses both the
--- authenticator and the recovery codes).
+--- Enroll a user. Generates a new secret + recovery codes and
+-- writes them to the PENDING slot (_hull_totp_pending +
+-- _hull_totp_pending_recovery). The user's existing CONFIRMED
+-- enrollment in _hull_totp is left intact until totp.confirm
+-- succeeds — a user who loses the new codes mid-enrollment still
+-- has working 2FA via their prior enrollment.
+--
+-- A second enroll() before confirm() REPLACES the pending slot
+-- (intentional — the new authenticator scan is what the user is
+-- actively trying to set up). The confirmed slot stays untouched.
 function totp.enroll(user_id)
     check_initialized()
     if type(user_id) ~= "string" or user_id == "" then
@@ -636,21 +676,23 @@ function totp.enroll(user_id)
 
     local now = time.now()
     db.batch(function()
-        -- Wipe any prior enrollment (and its recovery codes).
-        db.exec("DELETE FROM _hull_totp WHERE user_id = ?", { user_id })
-        db.exec("DELETE FROM _hull_totp_recovery WHERE user_id = ?",
+        -- Replace any prior PENDING enrollment for this user; the
+        -- confirmed row in _hull_totp is untouched.
+        db.exec("DELETE FROM _hull_totp_pending WHERE user_id = ?",
+                { user_id })
+        db.exec("DELETE FROM _hull_totp_pending_recovery WHERE user_id = ?",
                 { user_id })
         db.exec(
-            "INSERT INTO _hull_totp "
-            .. "(user_id, secret, encrypted, confirmed, digits, period, "
-            .. " last_used_step, created_at, updated_at) "
-            .. "VALUES (?, ?, ?, 0, ?, ?, -1, ?, ?)",
+            "INSERT INTO _hull_totp_pending "
+            .. "(user_id, secret, encrypted, digits, period, created_at) "
+            .. "VALUES (?, ?, ?, ?, ?, ?)",
             { user_id, stored, encrypted_flag,
-              _state.digits, _state.period, now, now })
+              _state.digits, _state.period, now })
         for i = 1, #hashes do
             db.exec(
-                "INSERT INTO _hull_totp_recovery (user_id, code_hash) "
-                .. "VALUES (?, ?)", { user_id, hashes[i] })
+                "INSERT INTO _hull_totp_pending_recovery "
+                .. "(user_id, code_hash) VALUES (?, ?)",
+                { user_id, hashes[i] })
         end
     end)
 
@@ -677,20 +719,52 @@ function totp.confirm(user_id, code)
     if type(user_id) ~= "string" or type(code) ~= "string" then
         return false
     end
-    local row = load_secret(user_id)
-    if not row then return false end
-    if row.confirmed == 1 then return true end  -- already confirmed
+
+    -- Confirm verifies the code against the PENDING enrollment.
+    -- On success it PROMOTES the pending row into _hull_totp,
+    -- replacing any existing confirmed row + recovery codes.
+    -- If no pending row exists (no enroll was called), fall back
+    -- to checking an already-confirmed row — common pattern when
+    -- a UI calls confirm() twice on a successful enrollment.
+    local pending = load_pending_secret(user_id)
+    if not pending then
+        local existing = load_secret(user_id)
+        if existing and existing.confirmed == 1 then return true end
+        return false
+    end
 
     local now_step = current_step()
     for offset = -_state.window, _state.window do
         local step = now_step + offset
-        if ct_eq(totp_at_step(row.secret, step, row.digits), code) then
+        if ct_eq(totp_at_step(pending.secret,
+                              step, pending.digits), code) then
+            local now = time.now()
+            -- Promote pending → main. All in one batch so a crash
+            -- mid-promotion either leaves both rows intact (user
+            -- can retry) or both replaced (user is enrolled).
             db.batch(function()
+                db.exec("DELETE FROM _hull_totp WHERE user_id = ?",
+                        { user_id })
+                db.exec("DELETE FROM _hull_totp_recovery WHERE user_id = ?",
+                        { user_id })
                 db.exec(
-                    "UPDATE _hull_totp SET confirmed = 1, "
-                    .. "last_used_step = ?, updated_at = ? "
-                    .. "WHERE user_id = ?",
-                    { step, time.now(), user_id })
+                    "INSERT INTO _hull_totp "
+                    .. "(user_id, secret, encrypted, confirmed, digits, "
+                    .. " period, last_used_step, created_at, updated_at) "
+                    .. "VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)",
+                    { user_id, pending.stored, pending.encrypted,
+                      pending.digits, pending.period, step, now, now })
+                db.exec(
+                    "INSERT INTO _hull_totp_recovery "
+                    .. "(user_id, code_hash) "
+                    .. "SELECT user_id, code_hash FROM "
+                    .. "_hull_totp_pending_recovery WHERE user_id = ?",
+                    { user_id })
+                db.exec("DELETE FROM _hull_totp_pending WHERE user_id = ?",
+                        { user_id })
+                db.exec(
+                    "DELETE FROM _hull_totp_pending_recovery "
+                    .. "WHERE user_id = ?", { user_id })
             end)
             return true
         end
@@ -850,14 +924,23 @@ end
 function totp.disable(user_id)
     check_initialized()
     if type(user_id) ~= "string" then return false end
-    local removed = 0
+    local removed_main = 0
+    local removed_pending = 0
     db.batch(function()
-        removed = db.exec("DELETE FROM _hull_totp WHERE user_id = ?",
-                          { user_id })
+        removed_main = db.exec("DELETE FROM _hull_totp WHERE user_id = ?",
+                                { user_id })
         db.exec("DELETE FROM _hull_totp_recovery WHERE user_id = ?",
                 { user_id })
+        -- Round-7 item 5: also wipe any in-flight pending enrollment.
+        -- "Disabled" means "no enrollment activity for this user" in
+        -- either slot; report true if EITHER slot had a row.
+        removed_pending = db.exec(
+            "DELETE FROM _hull_totp_pending WHERE user_id = ?",
+            { user_id })
+        db.exec("DELETE FROM _hull_totp_pending_recovery WHERE user_id = ?",
+                { user_id })
     end)
-    return removed > 0
+    return (removed_main or 0) + (removed_pending or 0) > 0
 end
 
 --- Is the user enrolled AND confirmed? Cheap row check intended for

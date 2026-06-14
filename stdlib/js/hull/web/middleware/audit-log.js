@@ -290,6 +290,33 @@ function isCleanupScheduled() {
     return _state.catchupDone === true && _state.cleanupScheduled === true;
 }
 
+/**
+ * Migration helper: recompute every row's `fingerprint` from its
+ * stored `ip` + `user_agent` under the current fingerprintSalt.
+ * Run ONCE after switching salts (or after the round-6 mandatory-
+ * salt upgrade) to avoid a mass `is_new_device` storm.
+ * Idempotent; returns { scanned, updated }.
+ */
+function recomputeFingerprints() {
+    const rows = db.query(
+        "SELECT id, ip, user_agent, fingerprint FROM _hull_audit_log");
+    const salt = _state.fingerprintSalt || "";
+    let scanned = 0, updated = 0;
+    for (let i = 0; i < (rows || []).length; i++) {
+        scanned++;
+        const r = rows[i];
+        const key = salt + "|" + normalizeUa(r.user_agent)
+                         + "|" + ipPrefix(r.ip);
+        const newFp = bytesToHex(crypto.sha256(key)).substring(0, 16);
+        if (newFp !== r.fingerprint) {
+            db.exec("UPDATE _hull_audit_log SET fingerprint = ? WHERE id = ?",
+                    [newFp, r.id]);
+            updated++;
+        }
+    }
+    return { scanned: scanned, updated: updated };
+}
+
 const _test = {
     normalizeUa,
     ipPrefix,
@@ -303,5 +330,6 @@ const _test = {
 };
 
 const auditLog = { init, record, list, listDevices, isNewDevice,
-                    fingerprint, cleanup, isCleanupScheduled, _test };
+                    fingerprint, cleanup, isCleanupScheduled,
+                    recomputeFingerprints, _test };
 export { auditLog };

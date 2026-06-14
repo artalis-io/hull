@@ -70,6 +70,21 @@ CREATE TABLE IF NOT EXISTS _hull_totp_recovery (
     PRIMARY KEY (user_id, code_hash)
 );
 
+CREATE TABLE IF NOT EXISTS _hull_totp_pending (
+    user_id    TEXT PRIMARY KEY,
+    secret     BLOB NOT NULL,
+    encrypted  INTEGER NOT NULL DEFAULT 0,
+    digits     INTEGER NOT NULL DEFAULT 6,
+    period     INTEGER NOT NULL DEFAULT 30,
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS _hull_totp_pending_recovery (
+    user_id   TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    PRIMARY KEY (user_id, code_hash)
+);
+
 CREATE INDEX IF NOT EXISTS _hull_totp_recovery_user
     ON _hull_totp_recovery(user_id);
 `;
@@ -349,6 +364,26 @@ function loadSecret(userId) {
     };
 }
 
+// Load the pending-enrollment row, if any. Used by confirm to
+// promote the pending slot into _hull_totp on a successful code
+// verify. Returns null when no pending enrollment exists.
+function loadPendingSecret(userId) {
+    const rows = db.query(
+        "SELECT secret, encrypted, digits, period "
+        + "FROM _hull_totp_pending WHERE user_id = ?", [userId]);
+    if (!rows || rows.length === 0) return null;
+    const row = rows[0];
+    const dec = decryptSecret(row.secret, row.encrypted);
+    if (!dec[0]) return null;
+    return {
+        secret:    dec[0],
+        stored:    row.secret,
+        encrypted: row.encrypted,
+        digits:    row.digits,
+        period:    row.period,
+    };
+}
+
 // Lazy rekey: called after a successful verify when the stored row
 // is on an older version than current. Re-encrypts the secret under
 // the current key. Best-effort — verify already succeeded; a
@@ -522,20 +557,26 @@ function enroll(userId) {
     const hashes = rc[1];
 
     const now = time.now();
+    // Dual-row enrollment (round-7 item 5): write the new secret +
+    // recovery codes to the PENDING slot, leaving any existing
+    // confirmed enrollment untouched. confirm() promotes pending
+    // → main on successful code verify.
     db.batch(() => {
-        db.exec("DELETE FROM _hull_totp WHERE user_id = ?", [userId]);
-        db.exec("DELETE FROM _hull_totp_recovery WHERE user_id = ?", [userId]);
+        db.exec("DELETE FROM _hull_totp_pending WHERE user_id = ?",
+                [userId]);
+        db.exec("DELETE FROM _hull_totp_pending_recovery WHERE user_id = ?",
+                [userId]);
         db.exec(
-            "INSERT INTO _hull_totp "
-            + "(user_id, secret, encrypted, confirmed, digits, period, "
-            + " last_used_step, created_at, updated_at) "
-            + "VALUES (?, ?, ?, 0, ?, ?, -1, ?, ?)",
+            "INSERT INTO _hull_totp_pending "
+            + "(user_id, secret, encrypted, digits, period, created_at) "
+            + "VALUES (?, ?, ?, ?, ?, ?)",
             [userId, stored, encryptedFlag,
-             _state.digits, _state.period, now, now]);
+             _state.digits, _state.period, now]);
         for (let i = 0; i < hashes.length; i++) {
             db.exec(
-                "INSERT INTO _hull_totp_recovery (user_id, code_hash) "
-                + "VALUES (?, ?)", [userId, hashes[i]]);
+                "INSERT INTO _hull_totp_pending_recovery "
+                + "(user_id, code_hash) VALUES (?, ?)",
+                [userId, hashes[i]]);
         }
     });
 
@@ -553,20 +594,46 @@ function enroll(userId) {
 function confirm(userId, code) {
     checkInitialized();
     if (typeof userId !== "string" || typeof code !== "string") return false;
-    const row = loadSecret(userId);
-    if (!row) return false;
-    if (row.confirmed === 1) return true;
+
+    // Confirm verifies against the PENDING enrollment. On success
+    // it PROMOTES the pending row into _hull_totp, replacing any
+    // existing confirmed row + recovery codes. If no pending row
+    // exists, fall back to checking an already-confirmed row (UI
+    // calling confirm() twice on success).
+    const pending = loadPendingSecret(userId);
+    if (!pending) {
+        const existing = loadSecret(userId);
+        if (existing && existing.confirmed === 1) return true;
+        return false;
+    }
 
     const nowStep = currentStep();
     for (let offset = -_state.window; offset <= _state.window; offset++) {
         const step = nowStep + offset;
-        if (ctEq(totpAtStep(row.secret, step, row.digits), code)) {
+        if (ctEq(totpAtStep(pending.secret, step, pending.digits), code)) {
+            const now = time.now();
             db.batch(() => {
+                db.exec("DELETE FROM _hull_totp WHERE user_id = ?",
+                        [userId]);
+                db.exec("DELETE FROM _hull_totp_recovery WHERE user_id = ?",
+                        [userId]);
                 db.exec(
-                    "UPDATE _hull_totp SET confirmed = 1, "
-                    + "last_used_step = ?, updated_at = ? "
-                    + "WHERE user_id = ?",
-                    [step, time.now(), userId]);
+                    "INSERT INTO _hull_totp "
+                    + "(user_id, secret, encrypted, confirmed, digits, "
+                    + " period, last_used_step, created_at, updated_at) "
+                    + "VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)",
+                    [userId, pending.stored, pending.encrypted,
+                     pending.digits, pending.period, step, now, now]);
+                db.exec(
+                    "INSERT INTO _hull_totp_recovery (user_id, code_hash) "
+                    + "SELECT user_id, code_hash FROM "
+                    + "_hull_totp_pending_recovery WHERE user_id = ?",
+                    [userId]);
+                db.exec("DELETE FROM _hull_totp_pending WHERE user_id = ?",
+                        [userId]);
+                db.exec(
+                    "DELETE FROM _hull_totp_pending_recovery "
+                    + "WHERE user_id = ?", [userId]);
             });
             return true;
         }
@@ -699,12 +766,20 @@ function rekeyStatus() {
 function disable(userId) {
     checkInitialized();
     if (typeof userId !== "string") return false;
-    let removed = 0;
+    let removedMain = 0, removedPending = 0;
     db.batch(() => {
-        removed = db.exec("DELETE FROM _hull_totp WHERE user_id = ?", [userId]);
+        removedMain = db.exec("DELETE FROM _hull_totp WHERE user_id = ?",
+                               [userId]);
         db.exec("DELETE FROM _hull_totp_recovery WHERE user_id = ?", [userId]);
+        // Round-7 item 5: also wipe any in-flight pending enrollment.
+        // "Disabled" means "no enrollment activity for this user" in
+        // either slot; report true if EITHER slot had a row.
+        removedPending = db.exec(
+            "DELETE FROM _hull_totp_pending WHERE user_id = ?", [userId]);
+        db.exec("DELETE FROM _hull_totp_pending_recovery WHERE user_id = ?",
+                [userId]);
     });
-    return removed > 0;
+    return (removedMain || 0) + (removedPending || 0) > 0;
 }
 
 function enrolled(userId) {

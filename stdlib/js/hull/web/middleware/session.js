@@ -14,8 +14,12 @@ import { db } from "hull:db";
 import { crypto } from "hull:crypto";
 import { time } from "hull:time";
 import { json } from "hull:json";
+import { app } from "hull:app";
+import { log } from "hull:log";
 
 let sessionTtl = 86400;
+let cleanupCatchupDone = false;
+let cleanupScheduled = false;
 // Set by init(). loginHandler / logoutHandler check this so a
 // missing session.init() before authflows.init() throws at wire
 // time, not at first request.
@@ -25,7 +29,13 @@ let initialized = false;
  * Initialize the sessions table. Call once at startup.
  *
  * @param {Object} [opts]
- * @param {number} [opts.ttl=86400]  Session lifetime in seconds.
+ * @param {number}  [opts.ttl=86400]   Session lifetime in seconds.
+ * @param {boolean} [opts.cleanup=true]  When true, schedules a daily
+ *   timer via app.daily that calls session.cleanup. Set false to
+ *   drive cleanup from cron or your own wiring. Mirrors the auto-
+ *   schedule pattern in auditLog.init.
+ * @param {string}  [opts.cleanupAt="03:00"]  UTC wall-clock time
+ *   for the daily cleanup.
  */
 function init(opts) {
     const o = opts || {};
@@ -61,6 +71,30 @@ function init(opts) {
     db.exec(
         "CREATE INDEX IF NOT EXISTS idx__hull_sessions_user_id " +
         "ON _hull_sessions(user_id)");
+
+    // Lazy catchup + auto-schedule daily cleanup. Mirrors the
+    // auditLog pattern: bound _hull_sessions growth even when the
+    // app forgets to wire a cleanup timer.
+    if (o.cleanup !== false && !cleanupCatchupDone) {
+        try { cleanup(); }
+        catch (e) {
+            log.warn("session: init-time cleanup failed: " + (e && e.message || e));
+        }
+        cleanupCatchupDone = true;
+    }
+    if (o.cleanup !== false && !cleanupScheduled) {
+        const at = o.cleanupAt || "03:00";
+        if (app && typeof app.daily === "function") {
+            app.daily(at, () => cleanup());
+            cleanupScheduled = true;
+        } else {
+            log.warn("session: app.daily not available "
+                + "(CLI flavor or hull/timers not admitted) "
+                + "— auto-cleanup runs only at init(). "
+                + "Wire your own cron/worker for steady-state.");
+        }
+    }
+
     initialized = true;
 }
 

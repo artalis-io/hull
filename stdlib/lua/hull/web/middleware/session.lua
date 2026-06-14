@@ -26,6 +26,8 @@ local _ttl = 86400
 -- SQL error). With the guard the failure is at init time with a
 -- one-line fix.
 local _initialized = false
+local _cleanup_catchup_done = false
+local _cleanup_scheduled = false
 
 --- Initialize the sessions table.
 --
@@ -34,7 +36,15 @@ local _initialized = false
 -- function. Calling twice with different TTLs is silently allowed but
 -- the latter overrides.
 --
--- @tparam[opt] table opts  `{ ttl = integer }` (seconds, default `86400`).
+-- @tparam[opt] table opts
+--   * `ttl`        (integer, default 86400). Session lifetime in seconds.
+--   * `cleanup`    (boolean, default true). When true, schedules a
+--                  daily timer via app.daily that calls
+--                  session.cleanup(). Set false to drive cleanup
+--                  from cron or your own app.daily wiring. Mirrors
+--                  the auto-schedule pattern in audit_log.init.
+--   * `cleanup_at` (string, default "03:00", UTC). Wall-clock time
+--                  for the daily cleanup.
 --
 -- @usage
 -- local session = require("hull.web.middleware.session")
@@ -82,6 +92,34 @@ function session.init(opts)
     db.exec(
         "CREATE INDEX IF NOT EXISTS idx__hull_sessions_user_id "
         .. "ON _hull_sessions(user_id)")
+
+    -- Lazy catchup + auto-schedule daily cleanup. Mirrors the
+    -- audit-log pattern: bound _hull_sessions growth even when the
+    -- app forgets to wire a cleanup timer. Cheap — a DELETE WHERE
+    -- expires_at < now over an indexed range. Both passes guarded
+    -- against repeated init() calls (test fixtures, hot reload).
+    if opts.cleanup ~= false and not _cleanup_catchup_done then
+        local ok, err = pcall(session.cleanup)
+        if not ok then
+            local log = require("hull.log")
+            log.warn("session: init-time cleanup failed: " .. tostring(err))
+        end
+        _cleanup_catchup_done = true
+    end
+    if opts.cleanup ~= false and not _cleanup_scheduled then
+        local at = opts.cleanup_at or "03:00"
+        if type(app) == "table" and type(app.daily) == "function" then
+            app.daily(at, function() session.cleanup() end)
+            _cleanup_scheduled = true
+        else
+            local log = require("hull.log")
+            log.warn("session: app.daily not available "
+                  .. "(CLI flavor or hull/timers not admitted) "
+                  .. "— auto-cleanup runs only at init(). "
+                  .. "Wire your own cron/worker for steady-state.")
+        end
+    end
+
     _initialized = true
 end
 

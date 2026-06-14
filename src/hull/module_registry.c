@@ -514,8 +514,13 @@ static const HlModuleSpec REGISTRY[] = {
         .name = "hull/web/middleware/session",
         .api_major = 1, .intrinsic = 0, .pure = 0,
         .required_caps = HL_MOD_CAP_HTTP_SERVER,
-        /* Session payload is JSON; ID is crypto.random; expiry needs time. */
-        .deps = {"hull/http-server", "hull/db", "hull/crypto", "hull/json", "hull/time", 0},
+        /* Session payload is JSON; ID is crypto.random; expiry needs
+         * time. hull/timers backs the auto-daily cleanup (round-7
+         * item 3, mirroring audit-log). hull/log surfaces the
+         * cleanup-failed warnings. */
+        .deps = {"hull/http-server", "hull/db", "hull/crypto",
+                 "hull/json", "hull/time", "hull/timers",
+                 "hull/log", 0},
     },
     {
         /* RFC 6238 TOTP (2FA). HMAC-SHA1 via crypto.hmac_sha1 (the
