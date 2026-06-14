@@ -2233,8 +2233,8 @@ UTEST(js_stdlib, totp_encryption_round_trip)
         "  const enc = totp._test.encryptSecret(secret);\n"
         "  if (enc[1] !== 1) return 0;\n"
         "  if (enc[0].length <= secret.length) return 0;\n"
-        "  const [pt, version] = totp._test.decryptSecret(enc[0], 1);\n"
-        "  if (pt !== secret || version !== 1) return 0;\n"
+        "  const dec = totp._test.decryptSecret(enc[0], 1);\n"
+        "  if (dec[0] !== secret || dec[1] !== 1) return 0;\n"
         "  return 1;\n"
         "}\n"
         "globalThis.__totp_enc = run();\n";

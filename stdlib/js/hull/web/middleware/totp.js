@@ -333,11 +333,15 @@ function loadSecret(userId) {
         + "FROM _hull_totp WHERE user_id = ?", [userId]);
     if (!rows || rows.length === 0) return null;
     const row = rows[0];
-    const [secret, version] = decryptSecret(row.secret, row.encrypted);
-    if (!secret) return null;
+    // Plain assignment instead of destructuring — QuickJS's
+    // js_parse_destructuring_element fails an MSan use-of-uninit
+    // check at module-compile time, which fails the MSan + UBSan
+    // CI job. Refactored across this module until upstream fixes it.
+    const dec = decryptSecret(row.secret, row.encrypted);
+    if (!dec[0]) return null;
     return {
-        secret:        secret,
-        version:       version,  // 0 = plaintext/legacy v1; else key id
+        secret:        dec[0],
+        version:       dec[1],  // 0 = plaintext/legacy v1; else key id
         confirmed:     row.confirmed,
         digits:        row.digits,
         period:        row.period,
@@ -350,13 +354,13 @@ function loadSecret(userId) {
 // the current key. Best-effort — verify already succeeded; a
 // transient DB error here doesn't fail the user.
 function rekeyRow(userId, secretBytes) {
-    const [blob, encFlag] = encryptSecret(secretBytes);
-    if (encFlag !== 1) return;  // no current key, nothing to do
+    const enc = encryptSecret(secretBytes);
+    if (enc[1] !== 1) return;  // no current key, nothing to do
     try {
         db.exec(
             "UPDATE _hull_totp SET secret = ?, encrypted = 1, updated_at = ? "
             + "WHERE user_id = ?",
-            [blob, time.now(), userId]);
+            [enc[0], time.now(), userId]);
     } catch (_e) { /* best-effort */ }
 }
 
@@ -631,15 +635,15 @@ function rekey() {
     for (let i = 0; i < (rows || []).length; i++) {
         scanned++;
         const r = rows[i];
-        const [pt, version] = decryptSecret(r.secret, r.encrypted);
-        if (!pt) { failed++; continue; }
-        if (version !== cur) {
-            const [blob] = encryptSecret(pt);
+        const dec = decryptSecret(r.secret, r.encrypted);
+        if (!dec[0]) { failed++; continue; }
+        if (dec[1] !== cur) {
+            const enc = encryptSecret(dec[0]);
             try {
                 db.exec(
                     "UPDATE _hull_totp SET secret = ?, encrypted = 1, "
                     + "updated_at = ? WHERE user_id = ?",
-                    [blob, time.now(), r.user_id]);
+                    [enc[0], time.now(), r.user_id]);
                 rekeyed++;
             } catch (_e) { failed++; }
         }
