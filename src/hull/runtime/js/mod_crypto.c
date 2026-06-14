@@ -45,6 +45,39 @@ static JSValue js_crypto_sha256(JSContext *ctx, JSValueConst this_val,
     return JS_NewString(ctx, hex);
 }
 
+/* crypto.sha1(data) -> ArrayBuffer of 20 bytes.
+ *
+ * LEGACY INTEROP ONLY. SHA-1 is collision-broken; this exists for
+ * third-party protocols that hardcode it (HIBP range API, etc.).
+ * DO NOT use for new password hashing / MAC / digest needs — use
+ * crypto.sha256 / crypto.hmacSha256 / crypto.hashPassword instead.
+ * Returns raw bytes (not hex) so callers can render uppercase or
+ * lowercase via crypto.hexEncode(buf).toUpperCase() if needed. */
+static JSValue js_crypto_sha1(JSContext *ctx, JSValueConst this_val,
+                               int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "crypto.sha1 requires (data)");
+
+    size_t len = 0;
+    const uint8_t *bytes = JS_GetArrayBuffer(ctx, &len, argv[0]);
+    const char *cstr = NULL;
+    if (!bytes) {
+        cstr = JS_ToCStringLen(ctx, &len, argv[0]);
+        if (!cstr) return JS_EXCEPTION;
+        bytes = (const uint8_t *)cstr;
+    }
+
+    uint8_t hash[20];
+    int rc = hl_cap_crypto_sha1((const char *)bytes, len, hash);
+    if (cstr) JS_FreeCString(ctx, cstr);
+    if (rc != 0)
+        return JS_ThrowInternalError(ctx, "sha1 failed");
+
+    return JS_NewArrayBufferCopy(ctx, hash, 20);
+}
+
 static JSValue js_crypto_random(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv)
 {
@@ -1361,6 +1394,8 @@ static int js_crypto_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_crypto_create_sha256, "createSha256", 0));
     JS_SetPropertyStr(ctx, crypto, "sha512",
                       JS_NewCFunction(ctx, js_crypto_sha512, "sha512", 1));
+    JS_SetPropertyStr(ctx, crypto, "sha1",
+                      JS_NewCFunction(ctx, js_crypto_sha1, "sha1", 1));
     JS_SetPropertyStr(ctx, crypto, "random",
                       JS_NewCFunction(ctx, js_crypto_random, "random", 1));
     JS_SetPropertyStr(ctx, crypto, "hashPassword",

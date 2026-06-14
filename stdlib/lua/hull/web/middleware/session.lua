@@ -372,6 +372,32 @@ function session.login_handler(cookie_mod, opts)
         end
         return { factors = "unknown" }
     end
+    -- Defense in depth: scrub keys that must never reach the audit
+    -- store, no matter what the app's audit_metadata returned. OAuth
+    -- ctx (claims, tokens) is passed straight through to apps via
+    -- on_login's 4th arg, which makes `audit_metadata = function(_,c)
+    -- return c end` a one-keystroke leak of access_token /
+    -- refresh_token / raw ID-token into _hull_audit_log.metadata
+    -- (where it persists for opts.retain_days — default 365). The
+    -- list mirrors the JS half and covers OAuth, password, and TOTP
+    -- secret surfaces. If you need to log claim details, pull them
+    -- out by name in a custom audit_metadata — never pass the raw
+    -- ctx through.
+    local SCRUB_KEYS = {
+        tokens         = true, token        = true,
+        access_token   = true, refresh_token = true,
+        id_token       = true, claims       = true,
+        password       = true, password_hash = true,
+        pwhash         = true, secret       = true,
+    }
+    local function scrub(meta)
+        if type(meta) ~= "table" then return meta end
+        local out = {}
+        for k, v in pairs(meta) do
+            if not SCRUB_KEYS[k] then out[k] = v end
+        end
+        return out
+    end
 
     return function(req, res, user, ctx)
         if type(user) ~= "table" or user.id == nil or user.id == "" then
@@ -402,7 +428,7 @@ function session.login_handler(cookie_mod, opts)
                 if ok and is_new then pcall(on_new_dev, req, res, user) end
             end
             pcall(audit_log.record, user.id, audit_kind, req,
-                  { session_id = sid, metadata = audit_meta(user, ctx) })
+                  { session_id = sid, metadata = scrub(audit_meta(user, ctx)) })
         end
 
         respond(res, user, sid)

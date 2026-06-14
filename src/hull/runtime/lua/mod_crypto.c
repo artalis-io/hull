@@ -43,6 +43,27 @@ static int lua_crypto_sha256(lua_State *L)
     return 1;
 }
 
+/* crypto.sha1(data) → 20-byte binary digest.
+ *
+ * LEGACY INTEROP ONLY. SHA-1 is collision-broken; this exists for
+ * third-party protocols that hardcode it (HIBP range API, etc.).
+ * DO NOT use for new password hashing / MAC / digest needs — use
+ * crypto.sha256 / crypto.hmac_sha256 / crypto.hash_password instead.
+ * Returns raw bytes (not hex) so callers can render uppercase or
+ * lowercase as needed: `crypto.hex_encode(crypto.sha1(s)):upper()`. */
+static int lua_crypto_sha1(lua_State *L)
+{
+    size_t len;
+    const char *data = luaL_checklstring(L, 1, &len);
+
+    uint8_t hash[20];
+    if (hl_cap_crypto_sha1(data, len, hash) != 0)
+        return luaL_error(L, "sha1 failed");
+
+    lua_pushlstring(L, (const char *)hash, 20);
+    return 1;
+}
+
 static int lua_crypto_random(lua_State *L)
 {
     lua_Integer n = luaL_checkinteger(L, 1);
@@ -985,6 +1006,7 @@ static const luaL_Reg crypto_funcs[] = {
     {"sha256",            lua_crypto_sha256},
     {"create_sha256",        lua_crypto_create_sha256},
     {"sha512",            lua_crypto_sha512},
+    {"sha1",              lua_crypto_sha1},
     {"random",            lua_crypto_random},
     {"hash_password",     lua_crypto_hash_password},
     {"verify_password",   lua_crypto_verify_password},

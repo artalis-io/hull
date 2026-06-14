@@ -116,6 +116,26 @@ int hl_cap_crypto_sha256_final(HlSha256Ctx *ctx, uint8_t out[32]);
  */
 int hl_cap_crypto_sha512(const void *data, size_t len, uint8_t out[64]);
 
+/**
+ * @brief Compute SHA-1 of a byte buffer.
+ *
+ * **LEGACY INTEROP ONLY.** SHA-1 is cryptographically broken for
+ * collision-resistance (Stevens et al. 2017). Exposed strictly to
+ * drive legacy/3rd-party protocols whose wire format hardcodes
+ * SHA-1 (HIBP range API, certain CSV/PDF signing standards, etc.).
+ *
+ * **DO NOT USE for new cryptography** — for new password hashing,
+ * MAC, or digest needs use `hash_password` / `hmac_sha256` /
+ * `sha256` instead.
+ *
+ * @param data  Input bytes.
+ * @param len   Byte count.
+ * @param out   20-byte output buffer.
+ *
+ * @return `0` on success, `-1` on internal failure.
+ */
+int hl_cap_crypto_sha1(const void *data, size_t len, uint8_t out[20]);
+
 /* ── Random ────────────────────────────────────────────────────────── */
 
 /**

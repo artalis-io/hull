@@ -17,6 +17,57 @@ static void hex_encode(const uint8_t *data, size_t len, char *out)
         snprintf(out + i * 2, 3, "%02x", data[i]);
 }
 
+/* ── SHA-1 (legacy interop; HIBP only) ─────────────────────────────── */
+
+static void hex20(const uint8_t in[20], char out[41])
+{
+    for (int i = 0; i < 20; i++) snprintf(out + i*2, 3, "%02x", in[i]);
+    out[40] = '\0';
+}
+
+UTEST(hl_cap_crypto, sha1_empty)
+{
+    uint8_t hash[20];
+    ASSERT_EQ(hl_cap_crypto_sha1("", 0, hash), 0);
+    char hex[41]; hex20(hash, hex);
+    /* RFC 3174 test vector: SHA-1("") = da39a3ee5e6b4b0d3255bfef95601890afd80709 */
+    ASSERT_STREQ(hex, "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+}
+
+UTEST(hl_cap_crypto, sha1_abc)
+{
+    uint8_t hash[20];
+    ASSERT_EQ(hl_cap_crypto_sha1("abc", 3, hash), 0);
+    char hex[41]; hex20(hash, hex);
+    /* RFC 3174 test vector: SHA-1("abc") = a9993e364706816aba3e25717850c26c9cd0d89d */
+    ASSERT_STREQ(hex, "a9993e364706816aba3e25717850c26c9cd0d89d");
+}
+
+UTEST(hl_cap_crypto, sha1_password_for_hibp)
+{
+    /* HIBP test vector: SHA-1("password") = 5BAA61E4C9B93F3F0682250B6CF8331B7EE68FD8.
+     * This drives the realistic pwned-passwords flow that pwned.lua/.js
+     * now route through the cap layer instead of pure-script SHA-1. */
+    const char *pw = "password";
+    uint8_t hash[20];
+    ASSERT_EQ(hl_cap_crypto_sha1(pw, strlen(pw), hash), 0);
+    char hex[41]; hex20(hash, hex);
+    ASSERT_STREQ(hex, "5baa61e4c9b93f3f0682250b6cf8331b7ee68fd8");
+}
+
+UTEST(hl_cap_crypto, sha1_null)
+{
+    uint8_t hash[20];
+    /* (NULL, 0) hashes the empty input (matches SHA-256 cap semantics). */
+    ASSERT_EQ(hl_cap_crypto_sha1(NULL, 0, hash), 0);
+    char hex[41]; hex20(hash, hex);
+    ASSERT_STREQ(hex, "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+
+    /* (NULL, >0) and (any, NULL out) are hard errors. */
+    ASSERT_EQ(hl_cap_crypto_sha1(NULL, 1, hash), -1);
+    ASSERT_EQ(hl_cap_crypto_sha1("abc", 3, NULL), -1);
+}
+
 UTEST(hl_cap_crypto, sha256_empty)
 {
     uint8_t hash[32];

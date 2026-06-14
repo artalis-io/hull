@@ -10,6 +10,7 @@
 
 #include "hull/cap/crypto.h"
 #include "tweetnacl.h"
+#include <mbedtls/sha1.h>  /* LEGACY: only for hl_cap_crypto_sha1 */
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
@@ -1096,6 +1097,24 @@ int hl_cap_crypto_sha512(const void *data, size_t len, uint8_t out[64])
         return -1;
     return crypto_hash_sha512(out, (const unsigned char *)data,
                               (unsigned long long)len);
+}
+
+/* ── SHA-1 (via mbedTLS) ────────────────────────────────────────────────
+ *
+ * LEGACY INTEROP ONLY. SHA-1 is collision-broken; this exists strictly
+ * to drive third-party protocols that hardcode it (HIBP range API and
+ * similar). Hull never uses SHA-1 for password hashing, MAC, or any
+ * security boundary. The function is intentionally narrow — no
+ * incremental API, no streaming variant. Add neither without an
+ * audit-team-approved reason; surfacing more SHA-1 surface invites
+ * misuse.
+ */
+
+int hl_cap_crypto_sha1(const void *data, size_t len, uint8_t out[20])
+{
+    if (!out || (!data && len > 0))
+        return -1;
+    return mbedtls_sha1((const unsigned char *)data, len, out);
 }
 
 /* ── HMAC-SHA512/256 authentication ──────────────────────────────────

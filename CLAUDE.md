@@ -1181,6 +1181,8 @@ verify step between successful first-factor auth and `on_login` when
 - Returning a string overrides the post-login redirect target (oauth honors this; auth-flows uses the redirect from `login_redirect` opt).
 - `on_logout(req, res)` is the matching shape — no `user` arg because the session row is the source of truth there.
 
+**Audit-metadata scrub at the session.login_handler seam.** When `audit_log` is wired, the factory calls your `audit_metadata(user, ctx)` and then **strips** these keys from the result before passing it to `audit_log.record`: `tokens`, `token`, `access_token`, `refresh_token`, `id_token`, `claims`, `password`, `password_hash`, `pwhash`, `secret`. This is defense in depth — the **OAuth ctx already contains `claims` and `tokens`** (the raw IdP tokens), so a `audit_metadata = function(_,c) return c end` override would otherwise persist access_token + refresh_token in `_hull_audit_log.metadata` for `retain_days` (default 365). The scrub is top-level only; if you need to log claim details, pull them out by name in your custom `audit_metadata` (e.g. `return { factors = "oauth:" .. ctx.provider, sub = ctx.claims.sub }`) — never pass the raw `ctx` through.
+
 **cookie**. Cookie helpers (not middleware).
 - `cookie.parse(header)` → table `{ name = value, ... }`.
 - `cookie.serialize(name, value, opts)` → `Set-Cookie` header string.

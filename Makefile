@@ -701,6 +701,24 @@ fetch-ca-bundle:
 	    || shasum -a 256 -c cacert.pem.sha256)
 	@echo "Done — $$(grep -c '^-----BEGIN CERTIFICATE-----' $(CACERT_PEM)) certificates."
 
+# ── Embedded pwned-password blocklist (SecLists top 10K) ─────────────
+#
+# Refreshes stdlib/{lua,js}/hull/web/_pwned_blocklist.{lua,js} from
+# the upstream SecLists 10K most-common passwords list. Output is a
+# sorted, deduped list of 8-char uppercase SHA-1 prefixes, binary-
+# searched at request time by hull/web/pwned BEFORE the network
+# round-trip. Keeps the air-gapped fail-open from silently letting
+# every weak password through. Source license: CC-BY-3.0.
+
+PWNED_SRC_URL := https://raw.githubusercontent.com/danielmiessler/SecLists/master/Passwords/Common-Credentials/10k-most-common.txt
+PWNED_SRC_TMP := /tmp/seclists_top10k.txt
+
+.PHONY: fetch-pwned-blocklist
+fetch-pwned-blocklist:
+	@echo "Fetching SecLists top 10K from danielmiessler/SecLists …"
+	curl -fsSL $(PWNED_SRC_URL) -o $(PWNED_SRC_TMP)
+	@bash scripts/build_pwned_blocklist.sh $(PWNED_SRC_TMP)
+
 # ── HTMX + Pico (vendored assets for `hull init --profile htmx`) ───
 #
 # Pinned releases. Bumping versions: update the version + SHA-256

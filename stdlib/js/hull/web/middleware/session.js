@@ -339,6 +339,29 @@ function loginHandler(cookieMod, opts) {
         }
         return { factors: "unknown" };
     });
+    // Defense in depth: scrub keys that must never reach the audit
+    // store, no matter what the app's auditMetadata returned. OAuth
+    // ctx (claims, tokens) is passed straight through to apps via
+    // onLogin's 4th arg, which makes `auditMetadata: (_,c) => c` a
+    // one-keystroke leak of access_token / refresh_token / raw
+    // ID-token into _hull_audit_log.metadata (where it persists for
+    // opts.retainDays — default 365). The list mirrors the Lua half
+    // and covers OAuth, password, and TOTP secret surfaces. If you
+    // need to log claim details, pull them out by name in a custom
+    // auditMetadata — never pass the raw ctx through.
+    const SCRUB_KEYS = new Set([
+        "tokens", "token", "access_token", "refresh_token",
+        "id_token", "claims",
+        "password", "password_hash", "pwhash", "secret",
+    ]);
+    const scrub = (meta) => {
+        if (!meta || typeof meta !== "object") return meta;
+        const out = {};
+        for (const k in meta) {
+            if (!SCRUB_KEYS.has(k)) out[k] = meta[k];
+        }
+        return out;
+    };
 
     return function (req, res, user, ctx) {
         if (!user || typeof user !== "object")
@@ -377,7 +400,7 @@ function loginHandler(cookieMod, opts) {
             }
             try {
                 auditLog.record(user.id, auditKind, req,
-                    { session_id: sid, metadata: auditMeta(user, ctx) });
+                    { session_id: sid, metadata: scrub(auditMeta(user, ctx)) });
             } catch (_e) {}
         }
 
