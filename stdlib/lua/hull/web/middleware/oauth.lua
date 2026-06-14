@@ -97,6 +97,11 @@ local oauth = {}
 local _state = {
     state_secret_hex = nil,  -- secret bytes pre-encoded as hex (HMAC takes hex)
     state_cookie     = "_oauth_state",
+    -- Cookie path scoping. Defaults to "/auth" so the state cookie
+    -- isn't sent on every request (only those matching the auth
+    -- routes). Apps that mount login/callback at a non-/auth prefix
+    -- should override to the common ancestor of their custom paths.
+    state_cookie_path = "/auth",
     state_ttl        = 600,
     providers        = {},
     -- find_user(provider, claims) -> user-object — required when
@@ -327,7 +332,8 @@ local function handle_login(req, res)
     res:header("Set-Cookie", cookie.serialize(
         _state.state_cookie, signed,
         { httponly = true, samesite = "Lax",
-          path = "/", max_age = _state.state_ttl }))
+          path = _state.state_cookie_path,
+          max_age = _state.state_ttl }))
 
     local params = {
         client_id     = cfg.client_id,
@@ -434,7 +440,8 @@ local function handle_callback(req, res)
 
     -- 6. Clear the single-use state cookie.
     res:header("Set-Cookie",
-        cookie.clear(_state.state_cookie, { path = "/" }))
+        cookie.clear(_state.state_cookie,
+                     { path = _state.state_cookie_path }))
 
     -- 7. Resolve claims -> app's user object via find_user, then
     --    hand off via on_login(req, res, user, ctx). on_login's
@@ -464,7 +471,8 @@ end
 -- GET /auth/logout
 local function handle_logout(req, res)
     res:header("Set-Cookie",
-        cookie.clear(_state.state_cookie, { path = "/" }))
+        cookie.clear(_state.state_cookie,
+                     { path = _state.state_cookie_path }))
     local target = "/"
     if _state.on_logout then
         local v = _state.on_logout(req, res)
@@ -487,6 +495,8 @@ function oauth.init(opts)
     end
     _state.state_secret_hex = bytes_to_hex(opts.state_secret)
     _state.state_cookie = opts.state_cookie or _state.state_cookie
+    _state.state_cookie_path =
+        opts.state_cookie_path or _state.state_cookie_path
     _state.state_ttl    = opts.state_ttl or _state.state_ttl
     if opts.on_login ~= nil and type(opts.find_user) ~= "function" then
         error("oauth.init: find_user(provider, claims) -> user is "

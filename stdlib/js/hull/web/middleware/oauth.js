@@ -72,6 +72,11 @@ import { log }        from "hull:log";
 const _state = {
     stateSecretHex: null,
     stateCookie:    "_oauth_state",
+    // Cookie path scoping. Defaults to "/auth" so the state cookie
+    // isn't sent on every request (only those matching the auth
+    // routes). Apps that mount login/callback at a non-/auth prefix
+    // should override to the common ancestor of their custom paths.
+    stateCookiePath: "/auth",
     stateTtl:       600,
     providers:      {},  // name -> resolved cfg
     // findUser(provider, claims) -> user-object — required when
@@ -346,7 +351,7 @@ function handleLogin(req, res) {
     res.header("Set-Cookie", cookie.serialize(
         _state.stateCookie, signed,
         { httpOnly: true, sameSite: "Lax",
-          path: "/", maxAge: _state.stateTtl }));
+          path: _state.stateCookiePath, maxAge: _state.stateTtl }));
 
     const params = {
         client_id:     cfg.clientId,
@@ -466,7 +471,8 @@ async function handleCallback(req, res) {
     }
 
     // 6. Single-use state cookie - clear.
-    res.header("Set-Cookie", cookie.clear(_state.stateCookie, { path: "/" }));
+    res.header("Set-Cookie", cookie.clear(_state.stateCookie,
+                              { path: _state.stateCookiePath }));
 
     // 7. Resolve claims -> app's user via findUser, then hand off
     //    via onLogin(req, res, user, ctx). The signature now
@@ -488,7 +494,8 @@ async function handleCallback(req, res) {
 }
 
 async function handleLogout(req, res) {
-    res.header("Set-Cookie", cookie.clear(_state.stateCookie, { path: "/" }));
+    res.header("Set-Cookie", cookie.clear(_state.stateCookie,
+                              { path: _state.stateCookiePath }));
     let target = "/";
     if (_state.onLogout) {
         const v = await _state.onLogout(req, res);
@@ -509,6 +516,8 @@ function init(opts) {
     }
     _state.stateSecretHex = bytesToHex(opts.stateSecret);
     _state.stateCookie = opts.stateCookie || _state.stateCookie;
+    _state.stateCookiePath =
+        opts.stateCookiePath || _state.stateCookiePath;
     _state.stateTtl    = opts.stateTtl    || _state.stateTtl;
     if (opts.onLogin != null && typeof opts.findUser !== "function") {
         throw new Error("oauth.init: findUser(provider, claims) -> user is "

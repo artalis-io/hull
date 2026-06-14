@@ -27,6 +27,7 @@ local crypto = require("hull.crypto")
 local db     = require("hull.db")
 local time   = require("hull.time")
 local json   = require("hull.json")
+local log    = require("hull.log")
 
 local audit_log = {}
 
@@ -70,17 +71,42 @@ function audit_log.init(opts)
         CREATE INDEX IF NOT EXISTS _hull_audit_log_user_fp
             ON _hull_audit_log(user_id, fingerprint)
     ]])
+    -- Lazy catchup: run cleanup once at init so apps that
+    -- restart between scheduled fires (deploys, crashes) and
+    -- apps in CLI flavor (where the daily timer never fires
+    -- because app.main exits before 03:00) still bound their
+    -- _hull_audit_log growth. Cheap — a single DELETE WHERE
+    -- event_at < cutoff over an indexed range. Skipped only
+    -- when opts.cleanup = false.
+    if opts.cleanup ~= false then
+        local ok, err = pcall(audit_log.cleanup)
+        if not ok then
+            log.warn("audit-log: init-time cleanup failed: " .. tostring(err))
+        end
+    end
+
     -- Auto-schedule daily cleanup unless opted out. Prevents
     -- _hull_audit_log from growing unboundedly for apps that
     -- forget to wire a cleanup timer themselves. Guarded so a
     -- second init() (test fixtures, hot reload) doesn't stack
     -- timers — schedule once per process. app.daily comes from
     -- hull/timers, declared as a hard dep in module_registry.
+    --
+    -- CLI flavor (HL_ENABLE_HTTP_SERVER=0) has no serve loop, so
+    -- the timer would never fire. The lazy-catchup above is the
+    -- primary protection in that mode; warn once so operators
+    -- know to wire cron / a separate worker for steady-state
+    -- cleanup if the process lives more than a day.
     if opts.cleanup ~= false and not _state._cleanup_scheduled then
         local at = opts.cleanup_at or "03:00"
         if type(app) == "table" and type(app.daily) == "function" then
             app.daily(at, function() audit_log.cleanup() end)
             _state._cleanup_scheduled = true
+        else
+            log.warn("audit-log: app.daily not available "
+                  .. "(CLI flavor or hull/timers not admitted) "
+                  .. "— auto-cleanup runs only at init(). "
+                  .. "Wire your own cron/worker for steady-state.")
         end
     end
     _state._initialized = true
@@ -166,7 +192,12 @@ function audit_log.record(user_id, kind, req, opts)
     opts = opts or {}
     local ip = opts.ip ~= nil and opts.ip or extract_ip(req)
     local ua = opts.user_agent ~= nil and opts.user_agent or extract_ua(req)
+    -- App-supplied fingerprint overrides are accepted but capped at
+    -- 64 chars so apps that wire a header-derived fingerprint can't
+    -- land arbitrary-length values in the column. The auto-derived
+    -- fingerprint is always 16 chars (sha256 prefix).
     local fp = opts.fingerprint or audit_log.fingerprint(req)
+    if type(fp) == "string" and #fp > 64 then fp = fp:sub(1, 64) end
     local meta = nil
     if opts.metadata ~= nil then
         meta = json.encode(opts.metadata)

@@ -77,6 +77,13 @@ end
 -- Memory cap: 10_000 unique keys per limiter instance. Beyond that,
 -- expired entries are swept; if still full, new keys are rejected.
 --
+-- Concurrency: the bucket map is per-process and in-memory. Multi-
+-- process deployments (multiple Hull workers behind a load balancer,
+-- horizontal scaling) will multiply the effective limit by the
+-- worker count — each worker enforces independently. Apps that need
+-- a globally-coherent limit must front this with a shared store
+-- (Redis bucket, edge rate-limit at the LB, etc.).
+--
 -- @tparam[opt] table opts
 --
 --   - `limit`  (integer, default `60`): max requests per window.

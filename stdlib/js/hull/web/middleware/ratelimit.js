@@ -87,6 +87,13 @@ function check(store, key, limit, window, now) {
  * Memory cap: 10_000 unique keys per limiter instance (Phase 6 fix: now
  * per-instance, not module-global).
  *
+ * Concurrency: the bucket map is per-process and in-memory. Multi-
+ * process deployments (multiple Hull workers behind a load balancer,
+ * horizontal scaling) will multiply the effective limit by the
+ * worker count — each worker enforces independently. Apps that need
+ * a globally-coherent limit must front this with a shared store
+ * (Redis bucket, edge rate-limit at the LB, etc.).
+ *
  * @param {Object}  [opts]
  * @param {number}  [opts.limit=60]
  * @param {number}  [opts.window=60]  Seconds.

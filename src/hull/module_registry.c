@@ -378,9 +378,12 @@ static const HlModuleSpec REGISTRY[] = {
          * audit_log.init() (opt-out via opts.cleanup = false). Apps
          * that don't want the schedule still need it admitted because
          * the module-conditional decoration that adds app.daily fires
-         * at app startup, not lazily. */
+         * at app startup, not lazily.
+         *
+         * hull/log is used to surface init-time cleanup failures and
+         * the CLI-flavor "app.daily not available" warning. */
         .deps = {"hull/db", "hull/crypto", "hull/time", "hull/json",
-                 "hull/timers", 0},
+                 "hull/timers", "hull/log", 0},
     },
     {
         .name = "hull/web/middleware/auth",

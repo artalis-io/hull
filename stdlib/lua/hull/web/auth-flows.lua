@@ -59,9 +59,13 @@
 --   * Email-enumeration mitigation: register / password-reset /
 --     magic-link / email-change all return generic success/error
 --     shapes that don't reveal whether the email exists. The actual
---     email is only sent if the address is registered. (Standard
---     practice; can be disabled via `enumeration_safe = false` for
---     apps where convenience trumps the leak.)
+--     email is only sent if the address is registered. The login
+--     path runs a dummy PBKDF2 verify on unknown emails so response
+--     timing is identical to a known-but-wrong attempt (the previous
+--     ~50-200ms delta would otherwise leak account existence over
+--     the network). Controlled by `enumeration_safe` (default true).
+--     Set false ONLY in test fixtures that don't care about timing
+--     observables — never in production.
 --   * Re-verify-on-email-change: changing email puts the new
 --     address in `_hull_auth_pending_email_changes`; the row only
 --     swaps onto the user record after the user clicks the link
@@ -967,11 +971,26 @@ local function register_routes(app)
         local mw = ratelimit.middleware({
             limit  = rl_opts.limit  or 20,
             window = rl_opts.window or 300,  -- 5 min
+            -- Per-IP key. X-Forwarded-For can be a chain
+            -- ("client, proxy1, proxy2") when behind multiple
+            -- reverse proxies; the leftmost entry is the client
+            -- IP the edge proxy observed. Using the whole chain
+            -- as the bucket key would let a single client with
+            -- rotating downstream proxies mint a new bucket per
+            -- request. Take the first comma-separated value and
+            -- trim whitespace. App-supplied opts.key still wins.
             key    = rl_opts.key or function(req)
-                return (req.headers and req.headers["x-forwarded-for"])
-                    or req.remote_addr or "_anon"
+                local xff = req.headers and req.headers["x-forwarded-for"]
+                if xff and xff ~= "" then
+                    local comma = xff:find(",", 1, true)
+                    local first = comma and xff:sub(1, comma - 1) or xff
+                    local trimmed = first:match("^%s*(.-)%s*$")
+                    if trimmed and trimmed ~= "" then return trimmed end
+                end
+                return req.remote_addr or "_anon"
             end,
         })
+        app.use("POST", p .. "/register", mw)
         app.use("POST", p .. "/login", mw)
         app.use("POST", p .. "/magic-link", mw)
         app.use("POST", p .. "/password-reset/request", mw)

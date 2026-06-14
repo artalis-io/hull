@@ -23,6 +23,7 @@ import { db }     from "hull:db";
 import { time }   from "hull:time";
 import { json }   from "hull:json";
 import { app }    from "hull:app";
+import { log }    from "hull:log";
 
 const _state = {
     retainDays: 365,
@@ -48,17 +49,38 @@ function init(opts) {
              ON _hull_audit_log(user_id, event_at DESC)`);
     db.exec(`CREATE INDEX IF NOT EXISTS _hull_audit_log_user_fp
              ON _hull_audit_log(user_id, fingerprint)`);
+    // Lazy catchup: run cleanup once at init so apps that
+    // restart between scheduled fires (deploys, crashes) and
+    // apps in CLI flavor (where the daily timer never fires
+    // because app.main exits before 03:00) still bound their
+    // _hull_audit_log growth. Cheap — a single DELETE WHERE
+    // event_at < cutoff over an indexed range.
+    if (opts.cleanup !== false) {
+        try { cleanup(); }
+        catch (e) {
+            log.warn("audit-log: init-time cleanup failed: " + (e && e.message || e));
+        }
+    }
+
     // Auto-schedule daily cleanup unless opted out. Prevents
     // _hull_audit_log from growing unboundedly for apps that
     // forget to wire a cleanup timer themselves. Guarded so a
-    // second init() (test fixtures, hot reload) doesn't stack
-    // timers. app.daily comes from hull/timers, declared as a
-    // hard dep of hull/web/middleware/audit-log.
+    // second init() doesn't stack timers. app.daily comes from
+    // hull/timers, declared as a hard dep of audit-log.
+    //
+    // CLI flavor has no serve loop; the timer would never fire.
+    // The lazy-catchup above is the primary protection in that
+    // mode; warn once so operators wire cron for steady-state.
     if (opts.cleanup !== false && !_state.cleanupScheduled) {
         const at = opts.cleanupAt || "03:00";
         if (app && typeof app.daily === "function") {
             app.daily(at, () => cleanup());
             _state.cleanupScheduled = true;
+        } else {
+            log.warn("audit-log: app.daily not available "
+                + "(CLI flavor or hull/timers not admitted) "
+                + "— auto-cleanup runs only at init(). "
+                + "Wire your own cron/worker for steady-state.");
         }
     }
     _state.initialized = true;
@@ -138,7 +160,12 @@ function record(userId, kind, req, opts) {
     opts = opts || {};
     const ip = opts.ip !== undefined ? opts.ip : extractIp(req);
     const ua = opts.user_agent !== undefined ? opts.user_agent : extractUa(req);
-    const fp = opts.fingerprint || fingerprint(req);
+    // App-supplied fingerprint overrides are accepted but capped
+    // at 64 chars so apps that wire a header-derived fingerprint
+    // can't land arbitrary-length values in the column. The auto-
+    // derived fingerprint is always 16 chars (sha256 prefix).
+    let fp = opts.fingerprint || fingerprint(req);
+    if (typeof fp === "string" && fp.length > 64) fp = fp.substring(0, 64);
     const meta = opts.metadata !== undefined ? json.encode(opts.metadata) : null;
     db.exec(
         "INSERT INTO _hull_audit_log "
