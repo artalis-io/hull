@@ -112,6 +112,15 @@ end
 authflows.init({
     state_secret = envget("AUTH_FLOWS_SECRET",
         "dev-only-secret-replace-me-aaaaa"),  -- 32 chars; refuse to use in prod
+    -- Round-9 HIGH-1: REQUIRED. In production, set this to your real
+    -- public URL (e.g. https://app.example.com). Without it (or
+    -- trusted_hosts), every magic-link / password-reset URL would be
+    -- built from req.headers.host — a hostile Host header reroutes
+    -- the click to a phishing origin and leaks the token. Local-only
+    -- dev: keep this default; the env override flips it for staging /
+    -- prod.
+    public_origin = envget("AUTH_FLOWS_PUBLIC_ORIGIN",
+        "http://localhost:8080"),
     -- Stdout email sender — replace with hull/email for real sending.
     -- See the commented block at the bottom of this file.
     email_send = function(to, subject, html, text)

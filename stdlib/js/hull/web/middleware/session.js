@@ -52,7 +52,18 @@ function init(opts) {
     const o = opts || {};
     sessionTtl = o.ttl !== undefined ? o.ttl : 86400;
     if (o.absoluteTtl !== undefined) {
-        absoluteTtl = o.absoluteTtl === false ? null : o.absoluteTtl;
+        // Round-9 HIGH-3: <= 0 disabled WITH a warn (canonical
+        // opt-out is `false`). See Lua sibling for the threat.
+        if (o.absoluteTtl === false) {
+            absoluteTtl = null;
+        } else if (typeof o.absoluteTtl === "number" && o.absoluteTtl <= 0) {
+            log.warn("session.init: absoluteTtl <= 0 disables the cap; "
+                + "use `false` for the explicit opt-out so the intent "
+                + "is loud.");
+            absoluteTtl = null;
+        } else {
+            absoluteTtl = o.absoluteTtl;
+        }
     }
 
     db.exec(
@@ -154,6 +165,10 @@ function create(data, opts) {
         // only used for the /devices listing display.
         if (typeof ua === "string" && ua.length > 512) {
             ua = ua.substring(0, 512);
+        }
+        // Round-9 MEDIUM-7: cap IP. See Lua sibling for rationale.
+        if (typeof ip === "string" && ip.length > 64) {
+            ip = ip.substring(0, 64);
         }
     }
 

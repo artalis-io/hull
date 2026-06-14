@@ -43,6 +43,7 @@ function userCreate(email, pwhash) {
 authFlows.init({
     stateSecret: "fixture-state-secret-aaaaaaaaaaaa",
     emailRateLimit: false,  // see auth_flows_js/app.js
+    trustRequestHost: true, // see auth_flows_js/app.js (round-9 HIGH-1)
     emailSend: (to, subject, html, text) => {
         sentEmails.push({ to, subject, text: text || html });
     },
@@ -66,7 +67,8 @@ authFlows.init({
     userSetEmailVerified: (id, v) => { usersById[id].email_verified = v; },
     enableTotp:       true,
     userTotpEnrolled: userId => totp.enrolled(userId),
-    totpVerify:       (user, code) => totp.verify(user.id || user.user_id, code),
+    // Round-9 HIGH-4: pass req for per-IP gate (see Lua sibling).
+    totpVerify:       (user, code, req) => totp.verify(user.id || user.user_id, code, req),
     onLogin: (req, res, user) => {
         const sid = session.create({ user_id: user.id, email: user.email });
         res.header("Set-Cookie", cookie.serialize("session", sid,

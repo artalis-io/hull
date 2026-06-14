@@ -19,6 +19,7 @@ import { crypto }   from "hull:crypto";
 import { envelope } from "hull:crypto:envelope";
 import { pwned }     from "hull:web:pwned";
 import { auditLog }  from "hull:web:middleware:audit-log";
+import { log }       from "hull:log";
 import { ratelimit } from "hull:web:middleware:ratelimit";
 import { db }       from "hull:db";
 import { time }     from "hull:time";
@@ -268,16 +269,31 @@ function emailRateAllow(to) {
     return true;
 }
 
-// Round-8 LOW-10: strip password_hash from any user object that's
-// about to escape into a template ctx or an app callback. See the
-// Lua sibling for the rationale (standard_users.row() includes the
-// hash; a leak via on_login / templates is the foot-gun the audit
-// flagged).
+// Round-9 MEDIUM-6: strict allowlist + optional userSanitize hook.
+// See Lua sibling for the threat model.
+const SAFE_USER_FIELDS = {
+    id:             true,
+    user_id:        true,
+    email:          true,
+    email_verified: true,
+};
+
 function stripUserSecrets(user) {
     if (!user || typeof user !== "object") return user;
+    if (_state.userSanitize) {
+        try {
+            const sanitized = _state.userSanitize(user);
+            if (sanitized && typeof sanitized === "object") return sanitized;
+            log.warn("auth-flows: userSanitize returned non-object; "
+                + "falling back to strict allowlist");
+        } catch (_e) {
+            log.warn("auth-flows: userSanitize threw; falling back to "
+                + "strict allowlist");
+        }
+    }
     const out = {};
     for (const k in user) {
-        if (k !== "password_hash") out[k] = user[k];
+        if (SAFE_USER_FIELDS[k]) out[k] = user[k];
     }
     return out;
 }
@@ -320,16 +336,32 @@ function lockoutRemaining(userIdStr) {
 
 function bumpFailedLogin(userIdStr) {
     const now = time.now();
+    // Round-9 HIGH-2: reset failed_count to 1 when the previous
+    // lockout window has expired but gc_expired hasn't pruned the
+    // row yet. See the Lua sibling for the threat model — pre-fix
+    // the user got 1 attempt per 15min for the next 24h, not 5.
     db.exec(
         "INSERT INTO _hull_auth_login_attempts "
         + "(user_id, failed_count, last_failed_at, locked_until) "
         + "VALUES (?, 1, ?, NULL) "
         + "ON CONFLICT(user_id) DO UPDATE SET "
-        + "  failed_count = failed_count + 1, "
+        + "  failed_count = CASE "
+        + "    WHEN locked_until IS NOT NULL AND locked_until < ? "
+        + "      THEN 1 "
+        + "    ELSE failed_count + 1 "
+        + "  END, "
         + "  last_failed_at = ?, "
-        + "  locked_until = CASE WHEN failed_count + 1 >= ? "
-        + "                      THEN ? + ? ELSE NULL END",
-        [userIdStr, now, now,
+        + "  locked_until = CASE "
+        + "    WHEN locked_until IS NOT NULL AND locked_until < ? "
+        + "      THEN NULL "
+        + "    WHEN failed_count + 1 >= ? "
+        + "      THEN ? + ? "
+        + "    ELSE NULL "
+        + "  END",
+        [userIdStr, now,
+         now,                // failed_count CASE: window-expired check
+         now,                // last_failed_at
+         now,                // locked_until CASE: window-expired check
          _state.maxFailedLogins, now, _state.lockoutDuration]);
 }
 
@@ -400,6 +432,12 @@ function parseBody(req) {
 function isEmailIsh(s) {
     if (typeof s !== "string") return false;
     if (s.length < 3 || s.length > 254) return false;
+    // Round-9 MEDIUM-8: reject control chars (< 0x20 or 0x7f). See
+    // Lua sibling for the rate-limit-bypass + SMTP-truncation attack.
+    for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (c < 0x20 || c === 0x7f) return false;
+    }
     const at = s.indexOf("@");
     if (at < 1 || at === s.length - 1) return false;
     const dot = s.indexOf(".", at);
@@ -428,12 +466,32 @@ function userId(user) {
     return user.id || user.user_id || null;
 }
 
+// Round-9 HIGH-1: build a click-through URL origin from validated
+// sources only. publicOrigin (when set) wins unconditionally;
+// otherwise the request's host header must match a trustedHosts
+// entry exactly. See the Lua sibling for the threat model — a
+// hostile Host header pre-fix rerouted reset/magic-link tokens to
+// a phishing origin. Returns null when no valid origin can be
+// built; callers fall back to a generic-OK response (preserving
+// enumeration safety) without actually sending the link.
 function originFor(req) {
-    const proto = (req.headers && req.headers["x-forwarded-proto"]) || "http";
-    const host  = (req.headers && req.headers["x-forwarded-host"])
-                  || (req.headers && req.headers.host)
-                  || "localhost";
-    return proto + "://" + host;
+    if (_state.publicOrigin) return _state.publicOrigin;
+    const headers = (req && req.headers) || {};
+    const host = headers["x-forwarded-host"] || headers.host;
+    if (typeof host === "string" && _state.trustedHosts) {
+        for (let i = 0; i < _state.trustedHosts.length; i++) {
+            if (host === _state.trustedHosts[i]) {
+                const proto = headers["x-forwarded-proto"] || "https";
+                return proto + "://" + host;
+            }
+        }
+    }
+    // trust_request_host opt-out (dev/test). Last resort; init warned.
+    if (_state.trustRequestHost && typeof host === "string") {
+        const proto = headers["x-forwarded-proto"] || "http";
+        return proto + "://" + host;
+    }
+    return null;
 }
 
 // ── Route handlers ─────────────────────────────────────────────────
@@ -470,8 +528,11 @@ async function handleRegister(req, res) {
     }
 
     const token = issueToken(uid, ACTIONS.verify_email, _state.verifyTtl);
-    const verifyUrl = originFor(req) + _state.prefix + "/verify?token=" + token;
-    sendEmail(body.email, "welcome", { user, verify_url: verifyUrl, token });
+    const origin = originFor(req);
+    if (origin) {
+        const verifyUrl = origin + _state.prefix + "/verify?token=" + token;
+        sendEmail(body.email, "welcome", { user, verify_url: verifyUrl, token });
+    }
     res.json({ ok: true });
 }
 
@@ -486,8 +547,11 @@ function handleVerifyResend(req, res) {
     if (!user || user.email_verified) return genericOk(res);
     const uid = userId(user);
     const token = issueToken(uid, ACTIONS.verify_email, _state.verifyTtl);
-    const verifyUrl = originFor(req) + _state.prefix + "/verify?token=" + token;
-    sendEmail(body.email, "welcome", { user, verify_url: verifyUrl, token });
+    const origin = originFor(req);
+    if (origin) {
+        const verifyUrl = origin + _state.prefix + "/verify?token=" + token;
+        sendEmail(body.email, "welcome", { user, verify_url: verifyUrl, token });
+    }
     res.json({ ok: true });
 }
 
@@ -606,8 +670,11 @@ function handleMagicLink(req, res) {
     }
     const token = issueToken(userId(user), ACTIONS.magic_link,
         _state.magicLinkTtl);
-    const link = originFor(req) + _state.prefix + "/magic-link/consume?token=" + token;
-    sendEmail(body.email, "magic_link", { user, link, token });
+    const origin = originFor(req);
+    if (origin) {
+        const link = origin + _state.prefix + "/magic-link/consume?token=" + token;
+        sendEmail(body.email, "magic_link", { user, link, token });
+    }
     res.json({ ok: true });
 }
 
@@ -655,7 +722,8 @@ function handleTotpVerify(req, res) {
     const env = r[0];
     const user = _state.userGet(env.sub);
     if (!user) return res.status(400).json({ error: "totp failed" });
-    const ok = _state.totpVerify(user, body.code);
+    // Round-9 HIGH-4: pass `req` so totpVerify can gate per-IP too.
+    const ok = _state.totpVerify(user, body.code, req);
     if (!ok) return res.status(401).json({ error: "invalid code" });
     // Round-8 MEDIUM-6: prior code discarded markTokenUsed's return,
     // so two concurrent verifies with the same {token, code} both
@@ -678,9 +746,12 @@ function handlePasswordResetRequest(req, res) {
     if (!user) return genericOk(res);
     const token = issueToken(userId(user), ACTIONS.password_reset,
         _state.resetTtl);
-    const link = originFor(req) + _state.prefix
-        + "/password-reset/confirm?token=" + token;
-    sendEmail(body.email, "password_reset", { user, link, token });
+    const origin = originFor(req);
+    if (origin) {
+        const link = origin + _state.prefix
+            + "/password-reset/confirm?token=" + token;
+        sendEmail(body.email, "password_reset", { user, link, token });
+    }
     res.json({ ok: true });
 }
 
@@ -740,22 +811,24 @@ function handleEmailChange(req, res) {
 
     const user = _state.userGet(uid);
     const origin = originFor(req);
-    const link = origin + _state.prefix
-        + "/email-change/confirm?token=" + token;
-    sendEmail(body.new_email, "email_change", {
-        user, link, token, new_email: body.new_email,
-    });
-    // Defense in depth: notify the OLD address with a revoke link
-    // if templates.email_change_notify is provided.
-    if (_state.templates.email_change_notify) {
-        const revokeTok = issueToken(uid, ACTIONS.email_change_revoke,
-            _state.emailChangeTtl);
-        const revokeUrl = origin + _state.prefix
-            + "/email-change/revoke?token=" + revokeTok;
-        sendEmail(user.email, "email_change_notify", {
-            user, revoke_url: revokeUrl, revoke_token: revokeTok,
-            new_email: body.new_email,
+    if (origin) {
+        const link = origin + _state.prefix
+            + "/email-change/confirm?token=" + token;
+        sendEmail(body.new_email, "email_change", {
+            user, link, token, new_email: body.new_email,
         });
+        // Defense in depth: notify the OLD address with a revoke link
+        // if templates.email_change_notify is provided.
+        if (_state.templates.email_change_notify) {
+            const revokeTok = issueToken(uid, ACTIONS.email_change_revoke,
+                _state.emailChangeTtl);
+            const revokeUrl = origin + _state.prefix
+                + "/email-change/revoke?token=" + revokeTok;
+            sendEmail(user.email, "email_change_notify", {
+                user, revoke_url: revokeUrl, revoke_token: revokeTok,
+                new_email: body.new_email,
+            });
+        }
     }
     res.json({ ok: true });
 }
@@ -948,6 +1021,37 @@ function init(opts) {
     if (!opts.templates || typeof opts.templates !== "object") {
         throw new Error("auth-flows.init: templates object required");
     }
+    // Round-9 HIGH-1: require ONE of publicOrigin / trustedHosts.
+    // See the Lua sibling docstring for the threat model.
+    const hasOrigin = typeof opts.publicOrigin === "string"
+                      && opts.publicOrigin.length > 0;
+    const hasHosts = Array.isArray(opts.trustedHosts)
+                     && opts.trustedHosts.length > 0;
+    const trustReq = opts.trustRequestHost === true;
+    if (!hasOrigin && !hasHosts && !trustReq) {
+        throw new Error("auth-flows.init: pass `publicOrigin: "
+            + "\"https://app.example.com\"` OR `trustedHosts: "
+            + "[\"app.example.com\", ...]` OR `trustRequestHost: true` "
+            + "(dev/test only). Click-through URLs are built from "
+            + "this; without it, req.headers.host is attacker-"
+            + "controlled and a hostile Host header reroutes the "
+            + "link to a phishing origin.");
+    }
+    if (trustReq && !(hasOrigin || hasHosts)) {
+        log.warn("auth-flows: trustRequestHost = true — falling back to "
+            + "req.headers.host for URL construction. Vulnerable to "
+            + "host-header injection; use publicOrigin / trustedHosts "
+            + "in production.");
+    }
+    if (hasOrigin) {
+        if (!/^https?:\/\//.test(opts.publicOrigin)) {
+            throw new Error("auth-flows.init: publicOrigin must start "
+                + "with http:// or https://");
+        }
+        if (opts.publicOrigin.endsWith("/")) {
+            opts.publicOrigin = opts.publicOrigin.slice(0, -1);
+        }
+    }
     const requiredUser = [
         "userFindByEmail", "userGet", "userCreate",
         "userSetPassword", "userSetEmail", "userSetEmailVerified",
@@ -998,6 +1102,15 @@ function init(opts) {
 
     _state.stateSecretHex = bytesToHex(opts.stateSecret);
     _state.emailSend      = opts.emailSend;
+    _state.publicOrigin   = opts.publicOrigin || null;
+    _state.trustedHosts   = opts.trustedHosts || null;
+    _state.trustRequestHost = opts.trustRequestHost === true;
+    if (opts.userSanitize !== undefined
+        && typeof opts.userSanitize !== "function") {
+        throw new Error("auth-flows.init: userSanitize must be a "
+            + "function (user) -> safeUser");
+    }
+    _state.userSanitize   = opts.userSanitize || null;
     _state.templates      = opts.templates;
     _state.userFindByEmail      = opts.userFindByEmail;
     _state.userGet              = opts.userGet;
@@ -1122,6 +1235,10 @@ const _test = {
     reset: () => {
         _state.stateSecretHex = null;
         _state.emailSend      = null;
+        _state.publicOrigin   = null;
+        _state.trustedHosts   = null;
+        _state.trustRequestHost = false;
+        _state.userSanitize   = null;
         _state.templates      = {};
         _state.userFindByEmail      = null;
         _state.userGet              = null;

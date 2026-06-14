@@ -46,6 +46,7 @@ const hibpMock = "http://127.0.0.1:" + HIBP_MOCK_PORT + "/range/";
 authFlows.init({
     stateSecret: "fixture-state-secret-aaaaaaaaaaaa",
     emailRateLimit: false,  // see auth_flows_js/app.js
+    trustRequestHost: true, // see auth_flows_js/app.js (round-9 HIGH-1)
     emailSend: (to, subject, html, text) => {
         sentEmails.push({ to, subject, text: text || html });
     },

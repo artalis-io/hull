@@ -118,6 +118,36 @@ local _state = {
     -- Mount prefix. Defaults to "/auth"; apps in mixed-routing setups
     -- can change this.
     prefix                = "/auth",
+    -- Round-9 HIGH-1: URL origin gate. EVERY click-through URL (verify,
+    -- magic-link, password-reset, email-change) is interpolated into a
+    -- link inside an outbound email. Pre-round-9, the origin came
+    -- straight from req.headers["x-forwarded-host"] / req.headers.host
+    -- with no validation — an attacker submitting password-reset/request
+    -- for victim's email with `Host: attacker.com` got the victim a
+    -- "reset your password" mail pointing at attacker.com/auth/...?token=
+    -- whose click leaked a valid action-bound reset token. Trivial
+    -- account takeover.
+    --
+    -- Init now REQUIRES one of:
+    --   * `public_origin = "https://app.example.com"` — single canonical
+    --     URL; used as the sole authority for built links. The most
+    --     common shape; the right answer for ~every non-multi-tenant app.
+    --   * `trusted_hosts = {"app.example.com", "alt.example.com"}` —
+    --     allowlist. req.headers.host must match (exactly) or the URL
+    --     build refuses. Multi-tenant deployments where each customer
+    --     has a different domain.
+    --   * `trust_request_host = true` — DEV/TEST escape hatch. Falls
+    --     back to the pre-round-9 behaviour: uses req.headers.host
+    --     directly. Logs a one-shot warning at init. NEVER pass this
+    --     in production — that's exactly the foot-gun this gate exists
+    --     to close. Test fixtures use this because they bind a random
+    --     ephemeral port at startup and can't know the host at init.
+    -- public_origin (if set) wins; otherwise the host header must
+    -- match trusted_hosts; otherwise trust_request_host falls back;
+    -- otherwise no URL is built and the response stays generic.
+    public_origin         = nil,
+    trusted_hosts         = nil,
+    trust_request_host    = false,
     enumeration_safe      = true,
     -- Magic-link to an unknown email: silently no-op by default
     -- (enumeration-safe; matches the rest of the unknown-email
@@ -413,7 +443,14 @@ local function email_rate_allow(to)
                 end
             end
             _email_rl = kept
-            _email_rl_count = kept_n
+            -- Round-9 LOW-11: the just-created `bucket` was already
+            -- registered in _email_rl_count (line 398), got evicted by
+            -- the sweep (empty ts), and is re-added on the next line.
+            -- Without the +1 the counter under-counts by 1 per sweep
+            -- and the effective ceiling drifts above the configured
+            -- max over many sweeps. JS path uses Map.size and is
+            -- inherently correct.
+            _email_rl_count = kept_n + 1
             _email_rl[key] = bucket
         end
     end
@@ -427,21 +464,75 @@ local function email_rate_allow(to)
     return true
 end
 
--- Round-8 LOW-10: strip password_hash from any user object that's
--- about to escape into a template ctx or an app callback. The
--- standard_users adapter's `row()` includes password_hash (because
--- handle_login uses it for verify_password), and a leaked PBKDF2
--- hash in a welcome / password-reset / email-change email body or
--- on_login's user blob is exactly the foot-gun the audit flagged.
--- We strip at the boundary, not at row(), so handle_login's verify
--- path keeps working without a refactor.
+-- Round-9 MEDIUM-6: strict allowlist (round-8's 1-field denylist
+-- was the wrong shape — apps with `totp_secret`, `recovery_codes`,
+-- `api_key`, `oauth_refresh_token` etc. on their user records
+-- leaked them into on_login + email template ctx.user). Default
+-- allowlist is the canonical auth surface: id, email,
+-- email_verified. Apps that need to expose more (display_name,
+-- avatar_url, roles, etc.) pass `user_sanitize = function(user)
+-- return {...} end` which gets the raw user and returns what's
+-- safe to surface. Breaking change for apps reading custom user
+-- fields in templates / on_login — they must wire user_sanitize.
+local SAFE_USER_FIELDS = {
+    id             = true,
+    user_id        = true,  -- legacy callers may use either
+    email          = true,
+    email_verified = true,
+}
+
 local function strip_user_secrets(user)
     if type(user) ~= "table" then return user end
+    if _state.user_sanitize then
+        local ok, sanitized = pcall(_state.user_sanitize, user)
+        if ok and type(sanitized) == "table" then return sanitized end
+        -- user_sanitize threw or returned non-table: fall back to the
+        -- strict allowlist so the leak never reaches the boundary.
+        local log = require("hull.log")
+        log.warn("auth-flows: user_sanitize callback failed; falling "
+              .. "back to strict allowlist")
+    end
     local out = {}
     for k, v in pairs(user) do
-        if k ~= "password_hash" then out[k] = v end
+        if SAFE_USER_FIELDS[k] then out[k] = v end
     end
     return out
+end
+
+-- Round-9 HIGH-1: build a click-through URL origin from validated
+-- sources only. public_origin (when set) wins unconditionally;
+-- otherwise the request's host header must match a trusted_hosts
+-- entry exactly. If neither check admits a value, raise — letting
+-- a request through with a header-derived origin reintroduces the
+-- host-injection class. init.lua already validates that one of
+-- public_origin / trusted_hosts is set, so the raise is only
+-- reachable when an attacker submits a request whose host header
+-- isn't in the allowlist.
+local function origin_for(req)
+    if _state.public_origin then
+        return _state.public_origin
+    end
+    local h = (req and req.headers) or {}
+    local host = h["x-forwarded-host"] or h.host
+    if type(host) == "string" and _state.trusted_hosts then
+        for _, allowed in ipairs(_state.trusted_hosts) do
+            if host == allowed then
+                local proto = h["x-forwarded-proto"] or "https"
+                return proto .. "://" .. host
+            end
+        end
+    end
+    -- trust_request_host opt-out (dev/test). Last resort; the init
+    -- warning fires once so operators can spot it in startup logs.
+    if _state.trust_request_host and type(host) == "string" then
+        local proto = h["x-forwarded-proto"] or "http"
+        return proto .. "://" .. host
+    end
+    -- We get here only if a request lands with a host not in the
+    -- allowlist AND trust_request_host is off. Refuse to build a
+    -- URL; the handler returns the same generic enumeration-safe
+    -- response without actually sending the link.
+    return nil
 end
 
 local function send_email(to, template_name, ctx)
@@ -497,18 +588,38 @@ local function bump_failed_login(user_id)
     -- UPSERT: increment counter, set last_failed_at, set
     -- locked_until if threshold tripped. SQLite's
     -- INSERT ... ON CONFLICT supports this cleanly.
+    --
+    -- Round-9 HIGH-2: when the previous lockout window has expired
+    -- (locked_until IS NOT NULL AND < now) but the row hasn't been
+    -- gc'd yet (gc_expired needs last_failed_at < now-86400), the
+    -- stale failed_count = max-from-prior-cycle would push the
+    -- expression `failed_count + 1 >= max` straight into a fresh
+    -- lockout on the user's NEXT bad attempt. Net pre-fix: one
+    -- attempt per 15-min window for the next 24h, not five. Reset to
+    -- 1 when the prior window has elapsed.
     db.exec(
         "INSERT INTO _hull_auth_login_attempts "
         .. "(user_id, failed_count, last_failed_at, locked_until) "
         .. "VALUES (?, 1, ?, NULL) "
         .. "ON CONFLICT(user_id) DO UPDATE SET "
-        .. "  failed_count = failed_count + 1, "
+        .. "  failed_count = CASE "
+        .. "    WHEN locked_until IS NOT NULL AND locked_until < ? "
+        .. "      THEN 1 "
+        .. "    ELSE failed_count + 1 "
+        .. "  END, "
         .. "  last_failed_at = ?, "
-        .. "  locked_until = CASE WHEN failed_count + 1 >= ? "
-        .. "                      THEN ? + ? ELSE NULL END",
-        { user_id, now, now,
-          _state.max_failed_logins,
-          now, _state.lockout_duration })
+        .. "  locked_until = CASE "
+        .. "    WHEN locked_until IS NOT NULL AND locked_until < ? "
+        .. "      THEN NULL "
+        .. "    WHEN failed_count + 1 >= ? "
+        .. "      THEN ? + ? "
+        .. "    ELSE NULL "
+        .. "  END",
+        { user_id, now,
+          now,           -- failed_count CASE: window-expired check
+          now,           -- last_failed_at
+          now,           -- locked_until CASE: window-expired check
+          _state.max_failed_logins, now, _state.lockout_duration })
 end
 
 local function clear_failed_logins(user_id)
@@ -603,6 +714,18 @@ end
 local function is_email_ish(s)
     if type(s) ~= "string" then return false end
     if #s < 3 or #s > 254 then return false end
+    -- Round-9 MEDIUM-8: reject any control byte (< 0x20 or 0x7f).
+    -- Pre-fix, `"victim@x.com\0filler"` passed the @ + . shape check;
+    -- many SMTP transports truncate at NUL so the upstream actually
+    -- delivers to `victim@x.com`, while the per-recipient rate-limit
+    -- key (lowercased verbatim) hashes into a different bucket per
+    -- appended filler. The same trick worked for `\t`, `\r`, `\n`
+    -- (header-injection territory) and `\x7f`. Tightening here closes
+    -- the class at the gate.
+    for i = 1, #s do
+        local b = string.byte(s, i)
+        if b < 0x20 or b == 0x7f then return false end
+    end
     local at = s:find("@", 1, true)
     if not at or at == 1 or at == #s then return false end
     local dot = s:find(".", at, true)
@@ -667,13 +790,14 @@ local function handle_register(req, res)
 
     local token = issue_token(user_id,
         ACTIONS.verify_email, _state.verify_ttl)
-    local verify_url = (req.headers["x-forwarded-proto"] or "http")
-        .. "://" .. (req.headers["x-forwarded-host"] or req.headers.host or "localhost")
-        .. _state.prefix .. "/verify?token=" .. token
-
-    send_email(body.email, "welcome", {
-        user = user, verify_url = verify_url, token = token,
-    })
+    local origin = origin_for(req)
+    if origin then
+        local verify_url = origin .. _state.prefix
+                           .. "/verify?token=" .. token
+        send_email(body.email, "welcome", {
+            user = user, verify_url = verify_url, token = token,
+        })
+    end
     res:json({ ok = true })
 end
 
@@ -694,12 +818,14 @@ local function handle_verify_resend(req, res)
     local user_id = user_uid(user)
     local token = issue_token(user_id, ACTIONS.verify_email,
                                _state.verify_ttl)
-    local verify_url = (req.headers["x-forwarded-proto"] or "http")
-        .. "://" .. (req.headers["x-forwarded-host"] or req.headers.host or "localhost")
-        .. _state.prefix .. "/verify?token=" .. token
-    send_email(body.email, "welcome", {
-        user = user, verify_url = verify_url, token = token,
-    })
+    local origin = origin_for(req)
+    if origin then
+        local verify_url = origin .. _state.prefix
+                           .. "/verify?token=" .. token
+        send_email(body.email, "welcome", {
+            user = user, verify_url = verify_url, token = token,
+        })
+    end
     res:json({ ok = true })
 end
 
@@ -839,12 +965,14 @@ local function handle_magic_link(req, res)
     end
     local token = issue_token(user_uid(user),
         ACTIONS.magic_link, _state.magic_link_ttl)
-    local link = (req.headers["x-forwarded-proto"] or "http")
-        .. "://" .. (req.headers["x-forwarded-host"] or req.headers.host or "localhost")
-        .. _state.prefix .. "/magic-link/consume?token=" .. token
-    send_email(body.email, "magic_link", {
-        user = user, link = link, token = token,
-    })
+    local origin = origin_for(req)
+    if origin then
+        local link = origin .. _state.prefix
+                     .. "/magic-link/consume?token=" .. token
+        send_email(body.email, "magic_link", {
+            user = user, link = link, token = token,
+        })
+    end
     res:json({ ok = true })
 end
 
@@ -896,7 +1024,11 @@ local function handle_totp_verify(req, res)
     if not user then
         return res:status(400):json({ error = "totp failed" })
     end
-    local ok = _state.totp_verify(user, body.code)
+    -- Round-9 HIGH-4: pass `req` through so the totp_verify callback
+    -- can extract the remote IP and gate per-IP attempts in addition
+    -- to per-user. The default totp.verify accepts the 3rd arg;
+    -- custom callbacks that ignore it keep round-8 behaviour.
+    local ok = _state.totp_verify(user, body.code, req)
     if not ok then
         return res:status(401):json({ error = "invalid code" })
     end
@@ -927,12 +1059,14 @@ local function handle_password_reset_request(req, res)
     if not user then return generic_ok(res) end
     local token = issue_token(user_uid(user),
         ACTIONS.password_reset, _state.reset_ttl)
-    local link = (req.headers["x-forwarded-proto"] or "http")
-        .. "://" .. (req.headers["x-forwarded-host"] or req.headers.host or "localhost")
-        .. _state.prefix .. "/password-reset/confirm?token=" .. token
-    send_email(body.email, "password_reset", {
-        user = user, link = link, token = token,
-    })
+    local origin = origin_for(req)
+    if origin then
+        local link = origin .. _state.prefix
+                     .. "/password-reset/confirm?token=" .. token
+        send_email(body.email, "password_reset", {
+            user = user, link = link, token = token,
+        })
+    end
     res:json({ ok = true })
 end
 
@@ -1009,27 +1143,30 @@ local function handle_email_change(req, res)
           now + _state.email_change_ttl })
 
     local user = _state.user_get(user_id)
-    local origin = (req.headers["x-forwarded-proto"] or "http")
-        .. "://" .. (req.headers["x-forwarded-host"] or req.headers.host or "localhost")
-    local link = origin .. _state.prefix .. "/email-change/confirm?token=" .. token
-    -- Send to the NEW address — proves the user controls it.
-    send_email(body.new_email, "email_change", {
-        user = user, link = link, token = token,
-        new_email = body.new_email,
-    })
-    -- Defense in depth: notify the OLD address with a revoke link
-    -- so a stolen session cookie can't quietly move the account.
-    -- Opt-in by providing templates.email_change_notify; apps that
-    -- don't have the template keep the v1 behavior.
-    if _state.templates.email_change_notify then
-        local revoke_tok = issue_token(user_id, ACTIONS.email_change_revoke,
-                                        _state.email_change_ttl)
-        local revoke_url = origin .. _state.prefix
-            .. "/email-change/revoke?token=" .. revoke_tok
-        send_email(user.email, "email_change_notify", {
-            user = user, revoke_url = revoke_url, revoke_token = revoke_tok,
+    local origin = origin_for(req)
+    if origin then
+        local link = origin .. _state.prefix
+                     .. "/email-change/confirm?token=" .. token
+        -- Send to the NEW address — proves the user controls it.
+        send_email(body.new_email, "email_change", {
+            user = user, link = link, token = token,
             new_email = body.new_email,
         })
+        -- Defense in depth: notify the OLD address with a revoke link
+        -- so a stolen session cookie can't quietly move the account.
+        -- Opt-in by providing templates.email_change_notify; apps
+        -- without the template keep the v1 behavior.
+        if _state.templates.email_change_notify then
+            local revoke_tok = issue_token(user_id,
+                ACTIONS.email_change_revoke, _state.email_change_ttl)
+            local revoke_url = origin .. _state.prefix
+                .. "/email-change/revoke?token=" .. revoke_tok
+            send_email(user.email, "email_change_notify", {
+                user = user, revoke_url = revoke_url,
+                revoke_token = revoke_tok,
+                new_email = body.new_email,
+            })
+        end
     end
     res:json({ ok = true })
 end
@@ -1246,6 +1383,40 @@ function M.init(opts)
     if type(opts.templates) ~= "table" then
         error("auth-flows.init: templates table required")
     end
+    -- Round-9 HIGH-1: require ONE of public_origin / trusted_hosts.
+    -- See _state.public_origin docstring for the threat model.
+    local has_origin = type(opts.public_origin) == "string"
+                       and #opts.public_origin > 0
+    local has_hosts = type(opts.trusted_hosts) == "table"
+                      and #opts.trusted_hosts > 0
+    local trust_request = opts.trust_request_host == true
+    if not has_origin and not has_hosts and not trust_request then
+        error("auth-flows.init: pass `public_origin = \"https://app.example."
+              .. "com\"` OR `trusted_hosts = {\"app.example.com\", ...}` "
+              .. "OR `trust_request_host = true` (dev/test only). "
+              .. "Click-through URLs (verify / magic-link / password-reset "
+              .. "/ email-change) are built from this; without it, "
+              .. "req.headers.host is attacker-controlled and a hostile "
+              .. "Host header reroutes the link to a phishing origin.")
+    end
+    if trust_request and not (has_origin or has_hosts) then
+        local log = require("hull.log")
+        log.warn("auth-flows: trust_request_host = true — falling back to "
+              .. "req.headers.host for URL construction. Vulnerable to "
+              .. "host-header injection; use public_origin / trusted_hosts "
+              .. "in production.")
+    end
+    if has_origin then
+        -- Reject relative / scheme-less URLs early.
+        if not (opts.public_origin:find("^https?://") ) then
+            error("auth-flows.init: public_origin must start with "
+                  .. "http:// or https://")
+        end
+        -- Strip trailing slash so origin .. prefix .. ... composes cleanly.
+        if opts.public_origin:sub(-1) == "/" then
+            opts.public_origin = opts.public_origin:sub(1, -2)
+        end
+    end
     -- Required user-storage callbacks. Collected up front so the
     -- error message names them all rather than failing on the
     -- first missing one at request time.
@@ -1314,6 +1485,17 @@ function M.init(opts)
     end
     _state.state_secret_hex = bytes_to_hex_local(opts.state_secret)
     _state.email_send       = opts.email_send
+    _state.public_origin    = opts.public_origin
+    _state.trusted_hosts    = opts.trusted_hosts
+    _state.trust_request_host = opts.trust_request_host == true
+    -- Round-9 MEDIUM-6: optional user_sanitize callback. See
+    -- strip_user_secrets for the threat model.
+    if opts.user_sanitize ~= nil
+       and type(opts.user_sanitize) ~= "function" then
+        error("auth-flows.init: user_sanitize must be a function "
+              .. "(user) -> safe_user")
+    end
+    _state.user_sanitize    = opts.user_sanitize
     _state.templates        = opts.templates
     _state.user_find_by_email      = opts.user_find_by_email
     _state.user_get                = opts.user_get
@@ -1493,6 +1675,10 @@ M._test = {
     reset = function()
         _state.state_secret_hex = nil
         _state.email_send       = nil
+        _state.public_origin    = nil
+        _state.trusted_hosts    = nil
+        _state.trust_request_host = false
+        _state.user_sanitize    = nil
         _state.templates        = {}
         _state.user_find_by_email      = nil
         _state.user_get                = nil

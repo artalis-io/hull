@@ -106,6 +106,20 @@ local _state = {
     -- Brute-force lockout (round-8). See header §Security.
     max_failed_attempts = 5,
     lockout_duration    = 15 * 60,
+    -- Round-9 HIGH-4: per-IP lockout (in addition to per-user).
+    -- Pre-round-9 an attacker with one stolen password could fire 5
+    -- bad TOTP codes per victim user_id, locking arbitrary accounts
+    -- out for 15 min — and there was no IP-side gate to stop it
+    -- (verify_with_kind takes user_id only). The per-IP lockout
+    -- catches the cross-user fan-out: one IP can issue at most
+    -- max_failed_attempts_per_ip verifies in lockout_duration
+    -- seconds across ALL users before that IP is rejected. Tune to
+    -- match deployment scale; per-IP is intentionally looser than
+    -- per-user since shared NATs / mobile carriers do exist.
+    -- Apps SHOULD additionally wire ratelimit.middleware on
+    -- /auth/totp-verify for defense in depth.
+    max_failed_attempts_per_ip = 20,
+    lockout_duration_per_ip    = 15 * 60,
     -- Pending-row TTL (round-8 LOW-13). _hull_totp_pending stores
     -- the new secret + (encrypted) recovery codes during the
     -- enroll → confirm window. Without a TTL, abandoned enrollments
@@ -168,6 +182,13 @@ CREATE TABLE IF NOT EXISTS _hull_totp_pending_recovery (
 
 CREATE TABLE IF NOT EXISTS _hull_totp_attempts (
     user_id        TEXT PRIMARY KEY,
+    failed_count   INTEGER NOT NULL DEFAULT 0,
+    last_failed_at INTEGER,
+    locked_until   INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS _hull_totp_attempts_by_ip (
+    ip             TEXT PRIMARY KEY,
     failed_count   INTEGER NOT NULL DEFAULT 0,
     last_failed_at INTEGER,
     locked_until   INTEGER
@@ -598,6 +619,74 @@ local function clear_failed_attempts(user_id)
             { user_id })
 end
 
+-- Round-9 HIGH-4: per-IP gate. Same shape as the per-user pair
+-- above; keyed on a coarse IP bucket. Apps that proxy through
+-- many tiers should canonicalize req.headers["x-forwarded-for"] to
+-- the first hop before calling totp.verify / totp.verify_with_kind
+-- with the req argument.
+
+local function lockout_remaining_ip(ip)
+    if type(ip) ~= "string" or ip == "" then return 0 end
+    local r = db.query(
+        "SELECT locked_until FROM _hull_totp_attempts_by_ip "
+        .. "WHERE ip = ?", { ip })
+    if not r or #r == 0 or not r[1].locked_until then return 0 end
+    local remain = r[1].locked_until - time.now()
+    return remain > 0 and remain or 0
+end
+
+local function bump_failed_attempt_ip(ip)
+    if type(ip) ~= "string" or ip == "" then return end
+    local now = time.now()
+    db.batch(function()
+        local r = db.query(
+            "SELECT failed_count FROM _hull_totp_attempts_by_ip "
+            .. "WHERE ip = ?", { ip })
+        local fc = (r and r[1] and r[1].failed_count) or 0
+        local new_fc = fc + 1
+        local locked_until = nil
+        if new_fc >= _state.max_failed_attempts_per_ip then
+            locked_until = now + _state.lockout_duration_per_ip
+            new_fc = 0
+        end
+        db.exec(
+            "INSERT INTO _hull_totp_attempts_by_ip "
+            .. "(ip, failed_count, last_failed_at, locked_until) "
+            .. "VALUES (?, ?, ?, ?) "
+            .. "ON CONFLICT(ip) DO UPDATE SET "
+            .. "  failed_count   = excluded.failed_count, "
+            .. "  last_failed_at = excluded.last_failed_at, "
+            .. "  locked_until   = excluded.locked_until",
+            { ip, new_fc, now, locked_until })
+    end)
+end
+
+local function clear_failed_attempts_ip(ip)
+    if type(ip) ~= "string" or ip == "" then return end
+    db.exec("DELETE FROM _hull_totp_attempts_by_ip WHERE ip = ?",
+            { ip })
+end
+
+-- Extract a stable, single-hop IP from a request. Uses XFF first
+-- (proxied deployments), trims leading proxy hops to the leftmost
+-- client IP, falls back to remote_addr. Returns nil if neither
+-- yields a non-empty string; callers fall back to per-user only.
+local function extract_ip(req)
+    if type(req) ~= "table" then return nil end
+    local h = req.headers or {}
+    local xff = h["x-forwarded-for"]
+    if type(xff) == "string" and xff ~= "" then
+        local comma = xff:find(",", 1, true)
+        local first = comma and xff:sub(1, comma - 1) or xff
+        local trimmed = first:match("^%s*(.-)%s*$")
+        if trimmed and trimmed ~= "" then return trimmed end
+    end
+    if type(req.remote_addr) == "string" and req.remote_addr ~= "" then
+        return req.remote_addr
+    end
+    return nil
+end
+
 -- ── Public API ─────────────────────────────────────────────────────
 
 --- Initialize the module. Must be called once at app startup.
@@ -699,8 +788,28 @@ function totp.init(opts)
                                  or _state.max_failed_attempts
     _state.lockout_duration    = opts.lockout_duration
                                  or _state.lockout_duration
+    _state.max_failed_attempts_per_ip = opts.max_failed_attempts_per_ip
+                                        or _state.max_failed_attempts_per_ip
+    _state.lockout_duration_per_ip    = opts.lockout_duration_per_ip
+                                        or _state.lockout_duration_per_ip
+    -- Round-9 LOW-12: <= 0 or `false` → disabled (no TTL enforcement,
+    -- pending rows never expire here; cleanup task is a no-op). Lua 0
+    -- is truthy and pre-fix slipped through into
+    -- `created_at + 0 < now` which rejected every pending row,
+    -- silently breaking enrollment for any operator who passed `0`
+    -- intending "off". Same asymmetry as session.absolute_ttl.
     if opts.pending_ttl ~= nil then
-        _state.pending_ttl = opts.pending_ttl
+        if opts.pending_ttl == false then
+            _state.pending_ttl = nil
+        elseif type(opts.pending_ttl) == "number"
+               and opts.pending_ttl <= 0 then
+            local log = require("hull.log")
+            log.warn("totp.init: pending_ttl <= 0 disables the TTL; "
+                  .. "pass `false` for the explicit opt-out.")
+            _state.pending_ttl = nil
+        else
+            _state.pending_ttl = opts.pending_ttl
+        end
     end
     _state.keys                 = keys
     _state.current_key_version  = current
@@ -747,6 +856,17 @@ function totp.init(opts)
         end
     end
 
+    -- Round-9 HIGH-5: precompute a dummy PBKDF2 hash ONCE so
+    -- verify_with_kind's lockout path can run a single
+    -- crypto.verify_password against it. Collapses the wall-clock
+    -- gap between "locked" (was instant) and "unlocked-bad-code"
+    -- (one or more recovery-code PBKDF2 walks). Cache survives
+    -- re-init so test fixtures don't pay the 100ms boot cost on
+    -- every reset.
+    if not _state._dummy_pwhash then
+        _state._dummy_pwhash = crypto.hash_password(
+            "totp-dummy-sentinel-never-matches-real-code")
+    end
     -- Mark initialized BEFORE the lazy-catchup block so totp.cleanup
     -- — which guards on check_initialized — can run from inside
     -- init's own cleanup pass. Pre-fix: the catchup pcall caught
@@ -790,7 +910,10 @@ end
 -- app.daily unless `cleanup = false` is passed to init.
 function totp.cleanup()
     check_initialized()
-    local cutoff = time.now() - (_state.pending_ttl or 3600)
+    -- Round-9 LOW-12: when pending_ttl is disabled (nil), cleanup
+    -- is a no-op. The auto-daily timer still runs but does nothing.
+    if not _state.pending_ttl then return 0 end
+    local cutoff = time.now() - _state.pending_ttl
     local removed = 0
     db.batch(function()
         -- Find expired pending users first so we can also nuke their
@@ -961,9 +1084,24 @@ end
 -- Splitting the two surfaces matches the JS API and avoids the
 -- silent porting bug where `local ok = totp.verify(...)` discarded
 -- the second return.
-function totp.verify_with_kind(user_id, code)
+function totp.verify_with_kind(user_id, code, req)
     check_initialized()
     if type(user_id) ~= "string" or type(code) ~= "string" then
+        return false, nil
+    end
+    -- Round-9 HIGH-4: per-IP gate runs BEFORE the per-user gate so a
+    -- noisy IP is cut off before it can rack up per-user counters
+    -- against arbitrary victims. req is optional — apps that don't
+    -- pass it keep round-8 behaviour (per-user only).
+    local ip = req and extract_ip(req) or nil
+    if ip and lockout_remaining_ip(ip) > 0 then
+        -- Round-9 HIGH-5: pay the cost of one PBKDF2 verify so the
+        -- wall clock between "locked" and "unlocked-bad-code" is
+        -- within order of magnitude (the bad-code path walks
+        -- recovery codes; ~100ms × N). Without this, locked returns
+        -- in µs and the timing delta leaks the lockout state from
+        -- the wire, defeating the silent-lockout design.
+        crypto.verify_password("dummy", _state._dummy_pwhash)
         return false, nil
     end
     -- Lockout check (round-8 HIGH-3). Return false silently — same
@@ -971,6 +1109,8 @@ function totp.verify_with_kind(user_id, code)
     -- from "bad code". Apps that need the locked state for UX can
     -- call totp.lockout_remaining(user_id) explicitly.
     if lockout_remaining(user_id) > 0 then
+        -- Same timing-collapse dummy as the per-IP path above.
+        crypto.verify_password("dummy", _state._dummy_pwhash)
         return false, nil
     end
     local row = load_secret(user_id)
@@ -991,6 +1131,7 @@ function totp.verify_with_kind(user_id, code)
            and ct_eq(totp_at_step(row.secret, step, row.digits), code) then
             if mark_step_used(user_id, step) == 1 then
                 clear_failed_attempts(user_id)
+                if ip then clear_failed_attempts_ip(ip) end
                 -- Lazy rekey: if the row's secret was decrypted under
                 -- a key version other than the current one (legacy v1
                 -- or an older v2 version after rotation), re-encrypt
@@ -1019,6 +1160,7 @@ function totp.verify_with_kind(user_id, code)
                 .. "WHERE user_id = ? AND code_hash = ?",
                 { time.now(), user_id, r.code_hash })
             clear_failed_attempts(user_id)
+            if ip then clear_failed_attempts_ip(ip) end
             -- Same lazy rekey on the recovery-code path — the
             -- decrypted secret is in hand so we might as well
             -- migrate it forward.
@@ -1031,6 +1173,7 @@ function totp.verify_with_kind(user_id, code)
     end
 
     bump_failed_attempt(user_id)
+    if ip then bump_failed_attempt_ip(ip) end
     return false, nil
 end
 
@@ -1044,8 +1187,8 @@ function totp.lockout_remaining(user_id)
     return lockout_remaining(user_id)
 end
 
-function totp.verify(user_id, code)
-    local ok = totp.verify_with_kind(user_id, code)
+function totp.verify(user_id, code, req)
+    local ok = totp.verify_with_kind(user_id, code, req)
     return ok
 end
 
@@ -1190,6 +1333,10 @@ totp._test = {
     lockout_remaining       = lockout_remaining,
     bump_failed_attempt     = bump_failed_attempt,
     clear_failed_attempts   = clear_failed_attempts,
+    lockout_remaining_ip    = lockout_remaining_ip,
+    bump_failed_attempt_ip  = bump_failed_attempt_ip,
+    clear_failed_attempts_ip = clear_failed_attempts_ip,
+    extract_ip              = extract_ip,
     -- Test-only: backdate a pending row's created_at so cleanup()
     -- finds it stale. Lives inside the module so db.exec passes
     -- the lua_is_stdlib_caller check (user code can't touch
@@ -1206,6 +1353,8 @@ totp._test = {
         _state.recovery_codes      = 10
         _state.max_failed_attempts = 5
         _state.lockout_duration    = 15 * 60
+        _state.max_failed_attempts_per_ip = 20
+        _state.lockout_duration_per_ip    = 15 * 60
         _state.pending_ttl         = 3600
         _state.keys                = {}
         _state.current_key_version = nil

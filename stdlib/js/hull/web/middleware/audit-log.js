@@ -137,9 +137,15 @@ function ipPrefix(ip) {
 
 function extractIp(req) {
     if (!req || !req.headers) return null;
+    let ip;
     const xff = req.headers["x-forwarded-for"];
-    if (xff) return (xff.split(",")[0] || xff).trim();
-    return req.remote_addr || null;
+    if (xff) ip = (xff.split(",")[0] || xff).trim();
+    else ip = req.remote_addr || null;
+    // Round-9 MEDIUM-7: cap IP. See Lua sibling.
+    if (typeof ip === "string" && ip.length > 64) {
+        ip = ip.substring(0, 64);
+    }
+    return ip;
 }
 
 function extractUa(req) {
@@ -305,41 +311,53 @@ function isCleanupScheduled() {
  */
 const RECOMPUTE_PAGE = 5000;
 
+// Round-9 MEDIUM-9: in-process mutex. See Lua sibling.
+let _recomputeRunning = false;
+
 function recomputeFingerprints() {
-    const salt = _state.fingerprintSalt || "";
-    let scanned = 0, updated = 0;
-    let lastId = -1;
-    for (;;) {
-        const rows = db.query(
-            "SELECT id, ip, user_agent, fingerprint "
-            + "FROM _hull_audit_log "
-            + "WHERE id > ? ORDER BY id LIMIT ?",
-            [lastId, RECOMPUTE_PAGE]);
-        if (!rows || rows.length === 0) break;
-        const pageUpdates = [];
-        for (let i = 0; i < rows.length; i++) {
-            scanned++;
-            lastId = rows[i].id;
-            const key = salt + "|" + normalizeUa(rows[i].user_agent)
-                             + "|" + ipPrefix(rows[i].ip);
-            const newFp = bytesToHex(crypto.sha256(key)).substring(0, 16);
-            if (newFp !== rows[i].fingerprint) {
-                pageUpdates.push([newFp, rows[i].id]);
+    if (_recomputeRunning) {
+        return { scanned: 0, updated: 0, error: "already_running" };
+    }
+    _recomputeRunning = true;
+    try {
+        const salt = _state.fingerprintSalt || "";
+        let scanned = 0, updated = 0;
+        let lastId = -1;
+        for (;;) {
+            const rows = db.query(
+                "SELECT id, ip, user_agent, fingerprint "
+                + "FROM _hull_audit_log "
+                + "WHERE id > ? ORDER BY id LIMIT ?",
+                [lastId, RECOMPUTE_PAGE]);
+            // Round-9 MEDIUM-10: break ONLY on empty. See Lua sibling
+            // for the page-boundary race rationale.
+            if (!rows || rows.length === 0) break;
+            const pageUpdates = [];
+            for (let i = 0; i < rows.length; i++) {
+                scanned++;
+                lastId = rows[i].id;
+                const key = salt + "|" + normalizeUa(rows[i].user_agent)
+                                 + "|" + ipPrefix(rows[i].ip);
+                const newFp = bytesToHex(crypto.sha256(key)).substring(0, 16);
+                if (newFp !== rows[i].fingerprint) {
+                    pageUpdates.push([newFp, rows[i].id]);
+                }
+            }
+            if (pageUpdates.length > 0) {
+                db.batch(() => {
+                    for (let i = 0; i < pageUpdates.length; i++) {
+                        db.exec(
+                            "UPDATE _hull_audit_log SET fingerprint = ? "
+                            + "WHERE id = ?", pageUpdates[i]);
+                    }
+                });
+                updated += pageUpdates.length;
             }
         }
-        if (pageUpdates.length > 0) {
-            db.batch(() => {
-                for (let i = 0; i < pageUpdates.length; i++) {
-                    db.exec(
-                        "UPDATE _hull_audit_log SET fingerprint = ? "
-                        + "WHERE id = ?", pageUpdates[i]);
-                }
-            });
-            updated += pageUpdates.length;
-        }
-        if (rows.length < RECOMPUTE_PAGE) break;
+        return { scanned: scanned, updated: updated };
+    } finally {
+        _recomputeRunning = false;
     }
-    return { scanned: scanned, updated: updated };
 }
 
 const _test = {

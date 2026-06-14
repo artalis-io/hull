@@ -69,11 +69,26 @@ function session.init(opts)
     if opts.ttl ~= nil then
         _ttl = opts.ttl
     end
-    -- absolute_ttl: nil keeps default; false/0 disables; a positive
-    -- number sets the hard cap. `false` is the explicit opt-out so
-    -- apps that intentionally want forever-sessions stay loud about it.
+    -- absolute_ttl:
+    --   * nil    → keep module default (24h).
+    --   * false  → disabled (the canonical opt-out — apps that
+    --              intentionally want forever-sessions stay loud).
+    --   * <= 0   → disabled WITH a one-shot warn. Lua 0 is truthy,
+    --              so pre-round-9 `0` slipped through and the check
+    --              `created_at + 0 <= now` killed every session on
+    --              load. JS 0 is falsy, so the same value silently
+    --              disabled. Round-9 HIGH-3 makes both runtimes
+    --              treat any non-positive number the same way.
+    --   * > 0    → hard cap in seconds.
     if opts.absolute_ttl ~= nil then
         if opts.absolute_ttl == false then
+            _absolute_ttl = nil
+        elseif type(opts.absolute_ttl) == "number"
+               and opts.absolute_ttl <= 0 then
+            local log = require("hull.log")
+            log.warn("session.init: absolute_ttl <= 0 disables the cap; "
+                  .. "use `false` for the explicit opt-out so the "
+                  .. "intent is loud.")
             _absolute_ttl = nil
         else
             _absolute_ttl = opts.absolute_ttl
@@ -188,6 +203,15 @@ function session.create(data, opts)
         -- only used for the /devices listing display.
         if type(ua) == "string" and #ua > 512 then
             ua = ua:sub(1, 512)
+        end
+        -- Round-9 MEDIUM-7: cap IP too. IPv6 max is ~45 chars
+        -- (including embedded IPv4); 64 leaves headroom for the
+        -- bracketed `[::1]:port` form. Pre-fix an attacker could
+        -- submit a 64 KiB X-Forwarded-For header and the entire
+        -- string landed in the indexed column. UA was capped years
+        -- ago; IP path was missed.
+        if type(ip) == "string" and #ip > 64 then
+            ip = ip:sub(1, 64)
         end
     end
 

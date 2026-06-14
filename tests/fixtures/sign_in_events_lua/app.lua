@@ -49,6 +49,7 @@ end
 authflows.init({
     state_secret = "fixture-state-secret-aaaaaaaaaaaa",
     email_rate_limit = false,  -- see auth_flows_lua/app.lua
+    trust_request_host = true, -- see auth_flows_lua/app.lua (round-9 HIGH-1)
     email_send = function(to, subject, html, text)
         sent_emails[#sent_emails + 1] = {
             to = to, subject = subject, text = text or html,

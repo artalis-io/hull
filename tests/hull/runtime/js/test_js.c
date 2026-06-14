@@ -2416,6 +2416,7 @@ UTEST(js_stdlib, totp_rekey_batch_helper_js)
     "globalThis._users = {}; globalThis._byId = {}; globalThis._sent = [];\n" \
     "function defaults() { return { " \
     "  stateSecret: 'k'.repeat(32), " \
+    "  trustRequestHost: true, " \
     "  emailSend: (to, sub, html, text) => " \
     "    globalThis._sent.push({to, sub, html, text}), " \
     "  templates: { " \

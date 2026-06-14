@@ -44,6 +44,11 @@ const _state = {
     // Brute-force lockout (round-8). See Lua sibling header.
     maxFailedAttempts:  5,
     lockoutDuration:    15 * 60,
+    // Round-9 HIGH-4: per-IP lockout (in addition to per-user). See
+    // Lua sibling for the threat model. Looser default (20 vs 5)
+    // because shared-NAT / mobile-carrier IPs aggregate users.
+    maxFailedAttemptsPerIp: 20,
+    lockoutDurationPerIp:   15 * 60,
     // Pending-row TTL (round-8 LOW-13). See Lua sibling.
     pendingTtl:         3600,
     cleanupCatchupDone: false,
@@ -96,6 +101,13 @@ CREATE TABLE IF NOT EXISTS _hull_totp_pending_recovery (
 
 CREATE TABLE IF NOT EXISTS _hull_totp_attempts (
     user_id        TEXT PRIMARY KEY,
+    failed_count   INTEGER NOT NULL DEFAULT 0,
+    last_failed_at INTEGER,
+    locked_until   INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS _hull_totp_attempts_by_ip (
+    ip             TEXT PRIMARY KEY,
     failed_count   INTEGER NOT NULL DEFAULT 0,
     last_failed_at INTEGER,
     locked_until   INTEGER
@@ -476,6 +488,65 @@ function clearFailedAttempts(userId) {
             [userId]);
 }
 
+// Round-9 HIGH-4: per-IP gate. Same shape as the per-user pair.
+
+function lockoutRemainingIp(ip) {
+    if (typeof ip !== "string" || ip === "") return 0;
+    const r = db.query(
+        "SELECT locked_until FROM _hull_totp_attempts_by_ip "
+        + "WHERE ip = ?", [ip]);
+    if (!r || r.length === 0 || r[0].locked_until == null) return 0;
+    const remain = r[0].locked_until - time.now();
+    return remain > 0 ? remain : 0;
+}
+
+function bumpFailedAttemptIp(ip) {
+    if (typeof ip !== "string" || ip === "") return;
+    const now = time.now();
+    db.batch(() => {
+        const r = db.query(
+            "SELECT failed_count FROM _hull_totp_attempts_by_ip "
+            + "WHERE ip = ?", [ip]);
+        const fc = (r && r[0] && r[0].failed_count) || 0;
+        let newFc = fc + 1;
+        let lockedUntil = null;
+        if (newFc >= _state.maxFailedAttemptsPerIp) {
+            lockedUntil = now + _state.lockoutDurationPerIp;
+            newFc = 0;
+        }
+        db.exec(
+            "INSERT INTO _hull_totp_attempts_by_ip "
+            + "(ip, failed_count, last_failed_at, locked_until) "
+            + "VALUES (?, ?, ?, ?) "
+            + "ON CONFLICT(ip) DO UPDATE SET "
+            + "  failed_count   = excluded.failed_count, "
+            + "  last_failed_at = excluded.last_failed_at, "
+            + "  locked_until   = excluded.locked_until",
+            [ip, newFc, now, lockedUntil]);
+    });
+}
+
+function clearFailedAttemptsIp(ip) {
+    if (typeof ip !== "string" || ip === "") return;
+    db.exec("DELETE FROM _hull_totp_attempts_by_ip WHERE ip = ?", [ip]);
+}
+
+function extractIp(req) {
+    if (!req || typeof req !== "object") return null;
+    const h = req.headers || {};
+    const xff = h["x-forwarded-for"];
+    if (typeof xff === "string" && xff !== "") {
+        const comma = xff.indexOf(",");
+        const first = comma >= 0 ? xff.substring(0, comma) : xff;
+        const trimmed = first.trim();
+        if (trimmed !== "") return trimmed;
+    }
+    if (typeof req.remote_addr === "string" && req.remote_addr !== "") {
+        return req.remote_addr;
+    }
+    return null;
+}
+
 // ── Public API ─────────────────────────────────────────────────────
 
 /**
@@ -561,8 +632,22 @@ function init(opts) {
                                || _state.maxFailedAttempts;
     _state.lockoutDuration   = opts.lockoutDuration
                                || _state.lockoutDuration;
+    _state.maxFailedAttemptsPerIp = opts.maxFailedAttemptsPerIp
+                                    || _state.maxFailedAttemptsPerIp;
+    _state.lockoutDurationPerIp   = opts.lockoutDurationPerIp
+                                    || _state.lockoutDurationPerIp;
+    // Round-9 LOW-12: <= 0 or `false` → disabled. See Lua sibling.
     if (opts.pendingTtl !== undefined) {
-        _state.pendingTtl = opts.pendingTtl;
+        if (opts.pendingTtl === false) {
+            _state.pendingTtl = null;
+        } else if (typeof opts.pendingTtl === "number"
+                   && opts.pendingTtl <= 0) {
+            log.warn("totp.init: pendingTtl <= 0 disables the TTL; "
+                + "pass `false` for the explicit opt-out.");
+            _state.pendingTtl = null;
+        } else {
+            _state.pendingTtl = opts.pendingTtl;
+        }
     }
     _state.keys                = keys;
     _state.currentKeyVersion   = current;
@@ -600,6 +685,13 @@ function init(opts) {
         }
     }
 
+    // Round-9 HIGH-5: dummy PBKDF2 hash for the lockout timing-
+    // collapse path. See Lua sibling. Cached across re-init so test
+    // fixtures don't pay the 100ms boot cost on every reset.
+    if (!_state._dummyPwhash) {
+        _state._dummyPwhash = crypto.hashPassword(
+            "totp-dummy-sentinel-never-matches-real-code");
+    }
     // Mark initialized BEFORE the lazy-catchup block so totp.cleanup
     // — which guards on checkInitialized — can run from inside
     // init's own cleanup pass. Pre-fix: the catchup catch swallowed
@@ -633,7 +725,9 @@ function init(opts) {
 
 function cleanup() {
     checkInitialized();
-    const cutoff = time.now() - (_state.pendingTtl || 3600);
+    // Round-9 LOW-12: nil/null pendingTtl → no-op. See Lua sibling.
+    if (!_state.pendingTtl) return 0;
+    const cutoff = time.now() - _state.pendingTtl;
     let removed = 0;
     db.batch(() => {
         const victims = db.query(
@@ -772,20 +866,31 @@ function confirm(userId, code) {
 // is truthy regardless of `ok` — a foot-gun for callers writing
 // `if (!totp.verify(...)) deny()`. The bare-boolean form is safe
 // by default; the tuple is available behind `verifyWithKind`.
-function verify(userId, code) {
-    const r = verifyWithKind(userId, code);
+function verify(userId, code, req) {
+    const r = verifyWithKind(userId, code, req);
     return r[0];
 }
 
-function verifyWithKind(userId, code) {
+function verifyWithKind(userId, code, req) {
     checkInitialized();
     if (typeof userId !== "string" || typeof code !== "string") {
+        return [false, null];
+    }
+    // Round-9 HIGH-4: per-IP gate runs BEFORE the per-user gate so a
+    // noisy IP is cut off before it can lock arbitrary victims. req
+    // is optional — apps that don't pass it keep round-8 behaviour.
+    const ip = req ? extractIp(req) : null;
+    if (ip && lockoutRemainingIp(ip) > 0) {
+        // Round-9 HIGH-5: pay one PBKDF2 verify so the wall clock
+        // matches the recovery-code walk path. See Lua sibling.
+        crypto.verifyPassword("dummy", _state._dummyPwhash);
         return [false, null];
     }
     // Lockout check (round-8 HIGH-3). Returns silently to keep the
     // locked state non-enumerable from the wire. Apps that need the
     // state for UX can call totp.lockoutRemaining(userId) directly.
     if (lockoutRemaining(userId) > 0) {
+        crypto.verifyPassword("dummy", _state._dummyPwhash);
         return [false, null];
     }
     const row = loadSecret(userId);
@@ -798,6 +903,7 @@ function verifyWithKind(userId, code) {
             && ctEq(totpAtStep(row.secret, step, row.digits), code)) {
             if (markStepUsed(userId, step) === 1) {
                 clearFailedAttempts(userId);
+                if (ip) clearFailedAttemptsIp(ip);
                 // Lazy rekey: re-encrypt under current if the row was
                 // stored under an older version.
                 if (_state.currentKeyVersion != null
@@ -820,6 +926,7 @@ function verifyWithKind(userId, code) {
                 + "WHERE user_id = ? AND code_hash = ?",
                 [time.now(), userId, rows[i].code_hash]);
             clearFailedAttempts(userId);
+            if (ip) clearFailedAttemptsIp(ip);
             // Same lazy rekey on the recovery-code path.
             if (_state.currentKeyVersion != null
                 && row.version !== _state.currentKeyVersion) {
@@ -829,6 +936,7 @@ function verifyWithKind(userId, code) {
         }
     }
     bumpFailedAttempt(userId);
+    if (ip) bumpFailedAttemptIp(ip);
     return [false, null];
 }
 
@@ -945,6 +1053,10 @@ const _test = {
     lockoutRemaining,
     bumpFailedAttempt,
     clearFailedAttempts,
+    lockoutRemainingIp,
+    bumpFailedAttemptIp,
+    clearFailedAttemptsIp,
+    extractIp,
     // Test-only: backdate a pending row's created_at so cleanup()
     // finds it stale. See Lua sibling — must run inside the module
     // so the stdlib-caller check admits the _hull_* write.
@@ -960,6 +1072,8 @@ const _test = {
         _state.recoveryCodes      = 10;
         _state.maxFailedAttempts  = 5;
         _state.lockoutDuration    = 15 * 60;
+        _state.maxFailedAttemptsPerIp = 20;
+        _state.lockoutDurationPerIp   = 15 * 60;
         _state.pendingTtl         = 3600;
         _state.keys               = {};
         _state.currentKeyVersion  = null;

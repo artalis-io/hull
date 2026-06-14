@@ -188,12 +188,23 @@ end
 
 local function extract_ip(req)
     if not (req and req.headers) then return nil end
+    local ip
     local xff = req.headers["x-forwarded-for"]
     if xff then
         local first = xff:match("^([^,]+)")
-        if first then return first:gsub("^%s+", ""):gsub("%s+$", "") end
+        if first then
+            ip = first:gsub("^%s+", ""):gsub("%s+$", "")
+        end
     end
-    return req.remote_addr
+    ip = ip or req.remote_addr
+    -- Round-9 MEDIUM-7: cap IP length. Same rationale as the
+    -- session.create cap — an attacker submitting a 64 KiB XFF
+    -- header would land the whole string in the indexed _hull_
+    -- audit_log.ip column. 64 chars covers IPv6 with headroom.
+    if type(ip) == "string" and #ip > 64 then
+        ip = ip:sub(1, 64)
+    end
+    return ip
 end
 
 local function extract_ua(req)
@@ -377,41 +388,62 @@ end
 -- share one transaction.
 local RECOMPUTE_PAGE = 5000
 
+-- Round-9 MEDIUM-9: in-process mutex. The helper is publicly
+-- exported for ops to call ONCE at deploy time, but a misconfigured
+-- app could accidentally route it (`/admin/recompute`) or two
+-- operators could kick it off concurrently. Two concurrent callers
+-- would double-scan + double-write the same rows, blocking
+-- audit_log.record (which sits on every login) for minutes.
+local _recompute_running = false
+
 function audit_log.recompute_fingerprints()
-    local salt = _state.fingerprint_salt or ""
-    local scanned, updated = 0, 0
-    local last_id = -1
-    while true do
-        local rows = db.query(
-            "SELECT id, ip, user_agent, fingerprint "
-            .. "FROM _hull_audit_log "
-            .. "WHERE id > ? ORDER BY id LIMIT ?",
-            { last_id, RECOMPUTE_PAGE })
-        if not rows or #rows == 0 then break end
-        local page_updates = {}
-        for _, r in ipairs(rows) do
-            scanned = scanned + 1
-            last_id = r.id
-            local key = salt .. "|" .. normalize_ua(r.user_agent)
-                           .. "|" .. ip_prefix(r.ip)
-            local new_fp = crypto.hex_encode(crypto.sha256(key)):sub(1, 16)
-            if new_fp ~= r.fingerprint then
-                page_updates[#page_updates + 1] = { new_fp, r.id }
+    if _recompute_running then
+        return { scanned = 0, updated = 0, error = "already_running" }
+    end
+    _recompute_running = true
+    local ok, result = pcall(function()
+        local salt = _state.fingerprint_salt or ""
+        local scanned, updated = 0, 0
+        local last_id = -1
+        while true do
+            local rows = db.query(
+                "SELECT id, ip, user_agent, fingerprint "
+                .. "FROM _hull_audit_log "
+                .. "WHERE id > ? ORDER BY id LIMIT ?",
+                { last_id, RECOMPUTE_PAGE })
+            -- Round-9 MEDIUM-10: break ONLY when the page came back
+            -- empty. Pre-fix, `if #rows < PAGE then break` silently
+            -- skipped rows inserted past last_id during the final
+            -- short page. Costs one extra empty SELECT for
+            -- correctness when paging races inserts.
+            if not rows or #rows == 0 then break end
+            local page_updates = {}
+            for _, r in ipairs(rows) do
+                scanned = scanned + 1
+                last_id = r.id
+                local key = salt .. "|" .. normalize_ua(r.user_agent)
+                               .. "|" .. ip_prefix(r.ip)
+                local new_fp = crypto.hex_encode(crypto.sha256(key)):sub(1, 16)
+                if new_fp ~= r.fingerprint then
+                    page_updates[#page_updates + 1] = { new_fp, r.id }
+                end
+            end
+            if #page_updates > 0 then
+                db.batch(function()
+                    for _, u in ipairs(page_updates) do
+                        db.exec(
+                            "UPDATE _hull_audit_log SET fingerprint = ? "
+                            .. "WHERE id = ?", u)
+                    end
+                end)
+                updated = updated + #page_updates
             end
         end
-        if #page_updates > 0 then
-            db.batch(function()
-                for _, u in ipairs(page_updates) do
-                    db.exec(
-                        "UPDATE _hull_audit_log SET fingerprint = ? "
-                        .. "WHERE id = ?", u)
-                end
-            end)
-            updated = updated + #page_updates
-        end
-        if #rows < RECOMPUTE_PAGE then break end
-    end
-    return { scanned = scanned, updated = updated }
+        return { scanned = scanned, updated = updated }
+    end)
+    _recompute_running = false
+    if not ok then error(result) end
+    return result
 end
 
 -- Exposed for tests (mocking time, inspecting normalize behavior).

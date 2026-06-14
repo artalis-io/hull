@@ -52,6 +52,7 @@ end
 authflows.init({
     state_secret = "fixture-state-secret-aaaaaaaaaaaa",
     email_rate_limit = false,  -- see auth_flows_lua/app.lua
+    trust_request_host = true, -- see auth_flows_lua/app.lua (round-9 HIGH-1)
     email_send = function(to, subject, html, text)
         sent_emails[#sent_emails + 1] = {
             to = to, subject = subject, text = text or html,
@@ -89,8 +90,11 @@ authflows.init({
     -- transparently (canonicalized post-M2).
     enable_totp        = true,
     user_totp_enrolled = function(user_id) return totp.enrolled(user_id) end,
-    totp_verify        = function(user, code)
-        return totp.verify(user.id or user.user_id, code)
+    -- Round-9 HIGH-4: pass req through so totp.verify can apply the
+    -- per-IP lockout. Tests bind a single source IP (localhost) and
+    -- stay well under the default 20-attempts/15min cap.
+    totp_verify        = function(user, code, req)
+        return totp.verify(user.id or user.user_id, code, req)
     end,
     on_login = function(req, res, user)
         local sid = session.create({ user_id = user.id, email = user.email })

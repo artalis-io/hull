@@ -45,6 +45,10 @@ authFlows.init({
     // Disable per-recipient rate limit; round-8 e2e_auth_flows_email_
     // ratelimit.sh exercises the gate itself with a fresh process.
     emailRateLimit: false,
+    // Round-9 HIGH-1: e2e fixture binds an ephemeral port; we can't
+    // know publicOrigin at init. trustRequestHost is the dev/test
+    // escape hatch; production apps MUST use publicOrigin / trustedHosts.
+    trustRequestHost: true,
     emailSend: (to, subject, html, text) => {
         sentEmails.push({ to, subject, text: text || html });
     },

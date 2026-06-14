@@ -2759,6 +2759,7 @@ UTEST(lua_stdlib, totp_unknown_key_version_fails_clean)
 "_G._users = {} _G._by_id = {} _G._sent = {} " \
 "af.init({ " \
 "  state_secret = ('k'):rep(32), " \
+"  trust_request_host = true, " \
 "  email_send = function(to, sub, html, text) " \
 "    _G._sent[#_G._sent+1] = {to=to, sub=sub, html=html, text=text} " \
 "  end, " \
@@ -2969,6 +2970,7 @@ UTEST(lua_stdlib, auth_flows_magic_link_auto_signup_opt_in)
         "  af._test.reset() "
         "  af.init({ "
         "    state_secret = ('k'):rep(32), "
+        "    trust_request_host = true, "
         "    email_send = function(to, s, h, t) "
         "      _G._sent[#_G._sent+1] = {to=to} "
         "    end, "
@@ -3020,6 +3022,7 @@ UTEST(lua_stdlib, auth_flows_state_secret_non_ascii_round_trip)
         "  local secret = string.rep(string.char(0x80), 32) "
         "  af.init({ "
         "    state_secret = secret, "
+        "    trust_request_host = true, "
         "    email_send = function() end, "
         "    templates = { "
         "      welcome = function() return {subject='w',text='x'} end, "
@@ -3064,6 +3067,7 @@ UTEST(lua_stdlib, auth_flows_email_rate_limit_per_recipient)
         "  af._test.reset() "
         "  af.init({ "
         "    state_secret = ('k'):rep(32), "
+        "    trust_request_host = true, "
         "    email_rate_limit = { limit = 2, window = 60 }, "
         "    email_send = function() end, "
         "    templates = { "
@@ -3108,6 +3112,7 @@ UTEST(lua_stdlib, auth_flows_email_rate_limit_drops_send)
         "  af._test.reset() "
         "  af.init({ "
         "    state_secret = ('k'):rep(32), "
+        "    trust_request_host = true, "
         "    email_rate_limit = { limit = 2, window = 60 }, "
         "    magic_link_auto_signup = true, "
         "    email_send = function(to) "

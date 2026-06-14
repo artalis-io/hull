@@ -59,6 +59,11 @@ authflows.init({
     -- default 3/15min gate. Round-8: a dedicated e2e_auth_flows_email_
     -- ratelimit.sh exercises the gate itself with a fresh process.
     email_rate_limit = false,
+    -- Round-9 HIGH-1: e2e fixture binds an ephemeral port; we can't
+    -- know the public_origin at init time. trust_request_host is the
+    -- dev/test escape hatch; production apps MUST use public_origin
+    -- or trusted_hosts. A dedicated e2e exercises the gate itself.
+    trust_request_host = true,
     email_send = function(to, subject, html, text)
         sent_emails[#sent_emails + 1] = {
             to = to, subject = subject, text = text or html,
