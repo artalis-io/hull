@@ -157,6 +157,27 @@ function pkcePair() {
     return [verifier, challenge];
 }
 
+// Same-origin guard for the return_to query parameter. Without this,
+// a request like `/auth/google/login?return_to=https://evil.com`
+// signs evil.com into the state cookie; the callback then redirects
+// the just-authenticated user there. Classic open-redirect that
+// weaponizes the host's own login page for phishing.
+//
+// Accept only same-origin paths starting with "/" followed by NOT
+// "/" and NOT "\". Reject scheme-relative ("//evil.com"), backslash-
+// escapes that some clients normalize as paths ("/\evil.com"),
+// absolute URLs ("http://", "https://"), header-injection bytes,
+// and absurdly-long values. Fall back to "/" on any rejection.
+function safeReturnTo(s) {
+    if (typeof s !== "string" || s === "") return "/";
+    if (s.length > 200) return "/";
+    if (/[\r\n\0]/.test(s)) return "/";
+    if (s.charAt(0) !== "/") return "/";
+    const c2 = s.charAt(1);
+    if (c2 === "/" || c2 === "\\") return "/";
+    return s;
+}
+
 function urlenc(s) {
     return encodeURIComponent(s).replace(/[!'()*]/g, (c) =>
         "%" + c.charCodeAt(0).toString(16).toUpperCase());
@@ -311,7 +332,7 @@ function handleLogin(req, res) {
     const [verifier, challenge] = pkcePair();
     const stateValue = randomUrlsafe(16);
     const nonceValue = randomUrlsafe(16);
-    const returnTo = (req.query && req.query.return_to) || "/";
+    const returnTo = safeReturnTo(req.query && req.query.return_to);
 
     // Bind envelope to this provider so a cookie minted for
     // /auth/microsoft/login can't be replayed against /auth/google/callback.
@@ -559,6 +580,7 @@ const _test = {
     b64ToB64url,
     base64urlToBytes,
     refreshJwks,
+    safeReturnTo,
     reset: () => {
         _state.stateSecretHex = null;
         _state.providers      = {};

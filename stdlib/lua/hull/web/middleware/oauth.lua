@@ -172,6 +172,28 @@ local function pkce_pair()
     return verifier, challenge
 end
 
+-- Same-origin guard for the return_to query parameter. Without this,
+-- a request like `/auth/google/login?return_to=https://evil.com`
+-- signs evil.com into the state cookie; the callback then redirects
+-- the just-authenticated user there. Classic open-redirect that
+-- weaponizes the host's own login page for phishing.
+--
+-- Accept only same-origin paths starting with "/" followed by NOT
+-- "/" and NOT "\". Reject scheme-relative ("//evil.com"), backslash-
+-- escapes that some clients normalize as paths ("/\evil.com"),
+-- absolute URLs ("http://", "https://"), header-injection bytes,
+-- and absurdly-long values. Fall back to "/" on any rejection.
+local function safe_return_to(s)
+    if type(s) ~= "string" or s == "" then return "/" end
+    if #s > 200 then return "/" end
+    if s:find("[\r\n%z]") then return "/" end
+    -- First char must be "/", second char (if any) must not be "/" or "\".
+    if s:sub(1, 1) ~= "/" then return "/" end
+    local c2 = s:sub(2, 2)
+    if c2 == "/" or c2 == "\\" then return "/" end
+    return s
+end
+
 -- URL-encode a value (RFC 3986 unreserved set untouched).
 local function urlenc(s)
     return (s:gsub("([^A-Za-z0-9%-._~])", function(c)
@@ -291,7 +313,7 @@ local function handle_login(req, res)
     local verifier, challenge = pkce_pair()
     local state_value = random_urlsafe(16)
     local nonce_value = random_urlsafe(16)
-    local return_to = (req.query and req.query.return_to) or "/"
+    local return_to = safe_return_to(req.query and req.query.return_to)
 
     -- Bind the envelope to this provider so a cookie minted for
     -- /auth/microsoft/login can't be replayed against /auth/google/callback.
@@ -533,11 +555,12 @@ end
 -- Test helpers (not part of the public contract). Lets tests round-
 -- trip sign/verify without going through the full HTTP flow.
 oauth._test = {
-    pkce_pair     = pkce_pair,
-    sign_state    = sign_state,
-    verify_state  = verify_state,
-    b64_to_b64url = b64_to_b64url,
-    refresh_jwks  = refresh_jwks,
+    pkce_pair       = pkce_pair,
+    sign_state      = sign_state,
+    verify_state    = verify_state,
+    b64_to_b64url   = b64_to_b64url,
+    refresh_jwks    = refresh_jwks,
+    safe_return_to  = safe_return_to,
     reset = function()
         _state.state_secret_hex = nil
         _state.providers        = {}

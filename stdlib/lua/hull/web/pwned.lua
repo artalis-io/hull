@@ -35,6 +35,7 @@
 local crypto      = require("hull.crypto")
 local http_client = require("hull.http-client")
 local log         = require("hull.log")
+local time        = require("hull.time")
 local blocklist   = require("hull.web._pwned_blocklist")
 
 local DEFAULT_ENDPOINT = "https://api.pwnedpasswords.com/range/"
@@ -106,7 +107,7 @@ function M.check(password, opts)
     })
     if not ok or not resp or resp.status ~= 200 or not resp.body then
         _health.ok            = false
-        _health.last_check_at = nil  -- time.now is only safe inside requests
+        _health.last_check_at = time.now()
         _health.last_error    = "HIBP fetch failed"
         if not _warned_failopen then
             _warned_failopen = true
@@ -118,6 +119,7 @@ function M.check(password, opts)
     end
 
     _health.ok            = true
+    _health.last_check_at = time.now()
     _health.last_error    = nil
     _warned_failopen      = false  -- re-arm warning for the next outage
 

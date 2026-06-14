@@ -19,6 +19,7 @@
 import { crypto }     from "hull:crypto";
 import { httpClient } from "hull:http-client";
 import { log }        from "hull:log";
+import { time }       from "hull:time";
 import { blocklist }  from "hull:web:_pwned_blocklist";
 
 const DEFAULT_ENDPOINT = "https://api.pwnedpasswords.com/range/";
@@ -81,8 +82,9 @@ async function check(password, opts) {
             headers: { "User-Agent": "hull-pwned-check/1" },
         });
     } catch (_e) {
-        _health.ok         = false;
-        _health.last_error = "HIBP fetch failed";
+        _health.ok            = false;
+        _health.last_check_at = time.now();
+        _health.last_error    = "HIBP fetch failed";
         if (!_warnedFailopen) {
             _warnedFailopen = true;
             log.warn("pwned: HIBP fetch failed; failing open after local "
@@ -92,8 +94,9 @@ async function check(password, opts) {
         return false;
     }
     if (!resp || resp.status !== 200 || !resp.body) {
-        _health.ok         = false;
-        _health.last_error = "HIBP fetch failed";
+        _health.ok            = false;
+        _health.last_check_at = time.now();
+        _health.last_error    = "HIBP fetch failed";
         if (!_warnedFailopen) {
             _warnedFailopen = true;
             log.warn("pwned: HIBP fetch failed; failing open after local "
@@ -103,9 +106,10 @@ async function check(password, opts) {
         return false;
     }
 
-    _health.ok         = true;
-    _health.last_error = null;
-    _warnedFailopen    = false;
+    _health.ok            = true;
+    _health.last_check_at = time.now();
+    _health.last_error    = null;
+    _warnedFailopen       = false;
 
     const lines = resp.body.split(/\r?\n/);
     for (let i = 0; i < lines.length; i++) {

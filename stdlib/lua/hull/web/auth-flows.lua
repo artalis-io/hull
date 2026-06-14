@@ -629,7 +629,8 @@ local function handle_login(req, res)
     -- Lockout check runs BEFORE the password check so a known-locked
     -- account doesn't leak whether the password attempt was right or
     -- wrong via response timing. We compute it only when the user
-    -- exists; for unknown emails the 401 below stays enumeration-safe.
+    -- exists; the dummy-hash branch below keeps unknown-email
+    -- responses timing-equivalent to known-but-wrong.
     if user then
         local remain = lockout_remaining(user_uid(user))
         if remain > 0 then
@@ -640,8 +641,15 @@ local function handle_login(req, res)
             })
         end
     end
-    if not user or not user.password_hash
-       or not crypto.verify_password(body.password, user.password_hash) then
+    -- Run verify_password unconditionally when enumeration_safe is on,
+    -- using a pre-computed dummy hash on the unknown-email branch so
+    -- network timing is identical between known and unknown emails.
+    -- See init() for the dummy hash + the threat model. Opt-out via
+    -- enumeration_safe = false (test fixtures only).
+    local pwhash = (user and user.password_hash) or _state._dummy_pwhash
+    local pw_ok  = (_state.enumeration_safe or user ~= nil)
+                   and crypto.verify_password(body.password, pwhash)
+    if not user or not user.password_hash or not pw_ok then
         if user then bump_failed_login(user_uid(user)) end
         return res:status(401):json({ error = "invalid credentials" })
     end
@@ -1124,6 +1132,19 @@ function M.init(opts)
     -- hull/web/auth-flows in the module registry). The sign_in_log
     -- knob still gates whether we *emit* flow-completion events.
     _state.audit_log = _state.sign_in_log and audit_log or nil
+
+    -- Timing-safe email enumeration defense. crypto.verify_password
+    -- (PBKDF2-SHA256, 600k iters by default) takes 50–200ms; a 401
+    -- that skipped the verify because the email was unknown would
+    -- return ~instantly, letting an attacker enumerate registered
+    -- emails over the network by timing. Pre-compute a dummy hash
+    -- of a fixed sentinel so handle_login can run verify_password
+    -- against it on the unknown-email branch and pay the same cost.
+    -- The hash is computed once at init and reused per request.
+    -- enumeration_safe = false (opt-out) skips the dummy verify;
+    -- only set it for tests that don't care about timing observables.
+    _state._dummy_pwhash = crypto.hash_password(
+        "auth-flows-dummy-sentinel-never-matches-real-password")
     _state.verify_ttl       = opts.verify_ttl       or _state.verify_ttl
     _state.reset_ttl        = opts.reset_ttl        or _state.reset_ttl
     _state.magic_link_ttl   = opts.magic_link_ttl   or _state.magic_link_ttl

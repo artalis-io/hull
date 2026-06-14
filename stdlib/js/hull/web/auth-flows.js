@@ -456,8 +456,18 @@ function handleLogin(req, res) {
             });
         }
     }
-    if (!user || !user.password_hash
-        || !crypto.verifyPassword(body.password, user.password_hash)) {
+    // Timing-safe email enumeration defense. crypto.verifyPassword
+    // (PBKDF2-SHA256, 600k iters by default) takes 50–200ms; a 401
+    // that skipped the verify because the email was unknown would
+    // return ~instantly, letting an attacker enumerate registered
+    // emails by timing. Run verifyPassword unconditionally against a
+    // pre-computed dummy hash on the unknown-email branch. See
+    // init() for the dummy hash + the threat model. Opt-out with
+    // enumerationSafe = false (test fixtures only).
+    const pwHash = (user && user.password_hash) || _state._dummyPwhash;
+    const pwOk   = (_state.enumerationSafe || Boolean(user))
+                   && crypto.verifyPassword(body.password, pwHash);
+    if (!user || !user.password_hash || !pwOk) {
         if (user) bumpFailedLogin(userId(user));
         return res.status(401).json({ error: "invalid credentials" });
     }
@@ -863,6 +873,15 @@ function init(opts) {
     _state.pwnedEndpoint        = opts.pwnedEndpoint || null;
     _state.signInLog            = opts.signInLog === true;
     _state.onPasswordReset      = opts.onPasswordReset || null;
+
+    // Timing-safe email enumeration defense — see handleLogin. The
+    // dummy hash is computed once at init() and reused per request,
+    // so the per-request cost is one verifyPassword (matching the
+    // known-email branch). enumerationSafe = false (opt-out) skips
+    // the dummy verify; only set it for tests that don't care
+    // about timing observables.
+    _state._dummyPwhash = crypto.hashPassword(
+        "auth-flows-dummy-sentinel-never-matches-real-password");
     _state.verifyTtl       = opts.verifyTtl       || _state.verifyTtl;
     _state.resetTtl        = opts.resetTtl        || _state.resetTtl;
     _state.magicLinkTtl    = opts.magicLinkTtl    || _state.magicLinkTtl;
