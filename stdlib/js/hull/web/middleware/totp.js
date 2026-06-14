@@ -475,6 +475,29 @@ function init(opts) {
         }
     });
 
+    // Rotation-safety check (back-compat shorthand only). See the
+    // matching Lua comment for the threat model — silent data loss
+    // when ops bumps `encryption_key` without using the explicit
+    // encryption_keys map for rotation.
+    if (opts.encryptionKey != null && opts.encryptionKeys == null
+        && _state.currentKeyVersion != null) {
+        const sample = db.query(
+            "SELECT secret, encrypted FROM _hull_totp "
+            + "WHERE encrypted = 1 LIMIT 1");
+        if (sample && sample[0]) {
+            const dec = decryptSecret(sample[0].secret, sample[0].encrypted);
+            if (!dec[0]) {
+                throw new Error("totp.init: encryptionKey shorthand cannot "
+                    + "decrypt existing _hull_totp rows. This is silent "
+                    + "data loss waiting to happen — every enrolled user "
+                    + "would be locked out of 2FA. To rotate, switch to "
+                    + "the explicit `encryptionKeys: {1: OLD, 2: NEW}, "
+                    + "current: 2, legacyKeyVersion: 1` API and call "
+                    + "totp.rekey() to migrate rows.");
+            }
+        }
+    }
+
     _state.initialized = true;
 }
 
@@ -651,6 +674,28 @@ function rekey() {
     return { scanned: scanned, rekeyed: rekeyed, failed: failed };
 }
 
+/**
+ * Read-only count of _hull_totp rows grouped by stored key version.
+ * Lets operators plan a rotation without writing — call BEFORE
+ * rekey() to see how many users are on each version. Returns
+ * { [versionId]: count, ..., total: N }. version=0 buckets
+ * plaintext rows AND undecryptable rows (legacy v1 without
+ * legacyKeyVersion configured, or wrong key).
+ */
+function rekeyStatus() {
+    checkInitialized();
+    const rows = db.query("SELECT secret, encrypted FROM _hull_totp");
+    const counts = { total: 0 };
+    for (let i = 0; i < (rows || []).length; i++) {
+        counts.total++;
+        const r = rows[i];
+        const dec = decryptSecret(r.secret, r.encrypted);
+        const k = (dec && dec[1] != null) ? dec[1] : 0;
+        counts[k] = (counts[k] || 0) + 1;
+    }
+    return counts;
+}
+
 function disable(userId) {
     checkInitialized();
     if (typeof userId !== "string") return false;
@@ -704,5 +749,6 @@ const _test = {
     },
 };
 
-const totp = { init, enroll, confirm, verify, verifyWithKind, rekey, disable, enrolled, _test };
+const totp = { init, enroll, confirm, verify, verifyWithKind,
+               rekey, rekeyStatus, disable, enrolled, _test };
 export { totp };

@@ -32,13 +32,25 @@ local log    = require("hull.log")
 local audit_log = {}
 
 local _state = {
-    retain_days  = 365,
-    _initialized = false,
+    retain_days       = 365,
+    fingerprint_salt  = nil,  -- required at init time
+    _initialized      = false,
 }
 
 --- Initialize the audit-log table. Call once at app startup
 -- (typically right after session.init()).
--- @tparam[opt] table opts
+-- @tparam table opts
+--   * `fingerprint_salt` (REQUIRED, string ≥ 8 bytes). Deployment-
+--     private salt prepended to the sha256 input that produces the
+--     device fingerprint. Without a salt, the fingerprint algorithm
+--     is universal — an attacker with read access to _hull_audit_log
+--     could rainbow-table common (UA, IP) combinations against the
+--     published normalization to dehash entries. The salt makes the
+--     output deployment-private.
+--     BREAKING: this opt is mandatory as of the round-6 hardening.
+--     Existing rows have unsalted fingerprints; they will not match
+--     new ones, so is_new_device will fire for every active user once
+--     on next sign-in. Plan accordingly.
 --   * `retain_days` (default 365). Rows older than this are deleted
 --     by the scheduled cleanup.
 --   * `cleanup` (default true). When true, schedules a daily timer
@@ -49,6 +61,13 @@ local _state = {
 --     daily cleanup. Off-peak by default.
 function audit_log.init(opts)
     opts = opts or {}
+    if type(opts.fingerprint_salt) ~= "string"
+       or #opts.fingerprint_salt < 8 then
+        error("audit_log.init: fingerprint_salt (string >= 8 bytes) "
+              .. "is required. Pick a deployment-private value; "
+              .. "rotating it invalidates existing fingerprints.")
+    end
+    _state.fingerprint_salt = opts.fingerprint_salt
     if opts.retain_days ~= nil then
         _state.retain_days = opts.retain_days
     end
@@ -178,12 +197,18 @@ local function extract_ua(req)
 end
 
 --- Compute the (coarse) device fingerprint for a request.
--- Hex SHA-256(normalized_ua || "|" || ip_prefix), truncated to 16
--- chars (64 bits). See module header for the trade-offs.
+-- Hex SHA-256(salt || "|" || normalized_ua || "|" || ip_prefix),
+-- truncated to 16 chars (64 bits). The salt is deployment-private
+-- (from init's fingerprint_salt opt) so the fingerprint output is
+-- only meaningful within this deployment — an attacker with read
+-- access to _hull_audit_log can't rainbow-table common (UA, IP)
+-- combinations back to identifying data without also breaching
+-- the app's config.
 function audit_log.fingerprint(req)
     local ua  = extract_ua(req)
     local ip  = extract_ip(req)
-    local key = normalize_ua(ua) .. "|" .. ip_prefix(ip)
+    local salt = _state.fingerprint_salt or ""
+    local key = salt .. "|" .. normalize_ua(ua) .. "|" .. ip_prefix(ip)
     return crypto.hex_encode(crypto.sha256(key)):sub(1, 16)
 end
 
@@ -195,6 +220,10 @@ function audit_log.record(user_id, kind, req, opts)
     opts = opts or {}
     local ip = opts.ip ~= nil and opts.ip or extract_ip(req)
     local ua = opts.user_agent ~= nil and opts.user_agent or extract_ua(req)
+    -- Bound the user_agent column the same way session.create does.
+    -- Real UAs top out around 500 chars; bots and scanners can send
+    -- 100 KB UAs. 512 covers all real traffic.
+    if type(ua) == "string" and #ua > 512 then ua = ua:sub(1, 512) end
     -- App-supplied fingerprint overrides are accepted but capped at
     -- 64 chars so apps that wire a header-derived fingerprint can't
     -- land arbitrary-length values in the column. The auto-derived

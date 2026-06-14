@@ -22,7 +22,10 @@ app.manifest({
 });
 
 session.init();
-auditLog.init({ retainDays: 365 });
+auditLog.init({
+    retainDays: 365,
+    fingerprintSalt: "sign-in-events-fixture-fingerprint-salt",
+});
 
 const usersByEmail = {};
 const usersById    = {};

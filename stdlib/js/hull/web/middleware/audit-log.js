@@ -27,12 +27,26 @@ import { log }    from "hull:log";
 
 const _state = {
     retainDays: 365,
+    fingerprintSalt: null,  // required at init time
     initialized: false,
     cleanupScheduled: false,
+    catchupDone: false,
 };
 
 function init(opts) {
     opts = opts || {};
+    // fingerprintSalt is REQUIRED — see the matching Lua docstring
+    // for the threat model. BREAKING from round-6 hardening:
+    // existing rows have unsalted fingerprints and won't match new
+    // ones, so is_new_device fires for every active user on first
+    // sign-in after the upgrade.
+    if (typeof opts.fingerprintSalt !== "string"
+        || opts.fingerprintSalt.length < 8) {
+        throw new Error("auditLog.init: fingerprintSalt (string >= 8 bytes) "
+            + "is required. Pick a deployment-private value; rotating "
+            + "it invalidates existing fingerprints.");
+    }
+    _state.fingerprintSalt = opts.fingerprintSalt;
     if (opts.retainDays !== undefined) _state.retainDays = opts.retainDays;
     db.exec(
         "CREATE TABLE IF NOT EXISTS _hull_audit_log ("
@@ -150,10 +164,15 @@ function bytesToHex(s) {
     return h;
 }
 
+// Hex SHA-256(salt || "|" || normalized_ua || "|" || ip_prefix),
+// truncated to 16 chars (64 bits). Salt is deployment-private (from
+// init's fingerprintSalt opt) so output is only meaningful within
+// this deployment.
 function fingerprint(req) {
     const ua  = extractUa(req);
     const ip  = extractIp(req);
-    const key = normalizeUa(ua) + "|" + ipPrefix(ip);
+    const salt = _state.fingerprintSalt || "";
+    const key = salt + "|" + normalizeUa(ua) + "|" + ipPrefix(ip);
     return bytesToHex(crypto.sha256(key)).substring(0, 16);
 }
 
@@ -162,7 +181,11 @@ function record(userId, kind, req, opts) {
         || typeof kind !== "string" || kind === "") return;
     opts = opts || {};
     const ip = opts.ip !== undefined ? opts.ip : extractIp(req);
-    const ua = opts.user_agent !== undefined ? opts.user_agent : extractUa(req);
+    let ua = opts.user_agent !== undefined ? opts.user_agent : extractUa(req);
+    // Bound the user_agent column the same way session.create does.
+    // Real UAs top out around 500 chars; bots and scanners can send
+    // 100 KB UAs.
+    if (typeof ua === "string" && ua.length > 512) ua = ua.substring(0, 512);
     // App-supplied fingerprint overrides are accepted but capped
     // at 64 chars so apps that wire a header-derived fingerprint
     // can't land arbitrary-length values in the column. The auto-

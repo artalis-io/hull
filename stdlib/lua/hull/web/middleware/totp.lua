@@ -584,6 +584,35 @@ function totp.init(opts)
         end
     end)
 
+    -- Rotation-safety check (back-compat shorthand only). When the
+    -- caller passed encryption_key = X (not the explicit map), the
+    -- shorthand forces keys = {[1]=X}, current = 1. If the table
+    -- already contains rows encrypted under a DIFFERENT key under
+    -- the same v1 prefix, this new key won't decrypt them — silent
+    -- data loss. Sample one row; if decrypt fails, abort with a
+    -- clear message pointing at the explicit rotation API. The
+    -- explicit encryption_keys path is allowed to fail decryption
+    -- on individual rows (that's what legacy_key_version + rekey()
+    -- handle); only the shorthand triggers this guard.
+    if opts.encryption_key and not opts.encryption_keys
+       and _state.current_key_version then
+        local sample = db.query(
+            "SELECT secret, encrypted FROM _hull_totp "
+            .. "WHERE encrypted = 1 LIMIT 1")
+        if sample and sample[1] then
+            local pt = decrypt_secret(sample[1].secret, sample[1].encrypted)
+            if not pt then
+                error("totp.init: encryption_key shorthand cannot decrypt "
+                      .. "existing _hull_totp rows. This is silent data "
+                      .. "loss waiting to happen — every enrolled user "
+                      .. "would be locked out of 2FA. To rotate, switch "
+                      .. "to the explicit `encryption_keys = {[1]=OLD, "
+                      .. "[2]=NEW}, current = 2, legacy_key_version = 1` "
+                      .. "API and call totp.rekey() to migrate rows.")
+            end
+        end
+    end
+
     _state._initialized = true
 end
 
@@ -789,6 +818,30 @@ function totp.rekey()
         end
     end
     return { scanned = scanned, rekeyed = rekeyed, failed = failed }
+end
+
+--- Read-only count of _hull_totp rows grouped by stored key
+-- version. Lets operators plan a rotation without writing — call
+-- this BEFORE rekey() to see how many users are on each version.
+-- Returns a table { [version_id] = count, ... } plus a `total`
+-- field. version=0 buckets plaintext rows and undecryptable
+-- (legacy v1 without legacy_key_version, or wrong key) rows.
+-- @treturn table
+function totp.rekey_status()
+    check_initialized()
+    local rows = db.query(
+        "SELECT secret, encrypted FROM _hull_totp")
+    local counts = { total = 0 }
+    for _, r in ipairs(rows or {}) do
+        counts.total = counts.total + 1
+        local _, version = decrypt_secret(r.secret, r.encrypted)
+        -- version is nil on decrypt failure; use 0 as the "unknown
+        -- / unrecoverable" bucket (matches the version=0 used for
+        -- plaintext + legacy v1).
+        local k = version or 0
+        counts[k] = (counts[k] or 0) + 1
+    end
+    return counts
 end
 
 --- Delete a user's secret + every recovery code. Use on account

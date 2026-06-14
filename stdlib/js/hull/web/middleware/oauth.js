@@ -31,6 +31,26 @@
  *     enforced before any key lookup (jwt.verify's gate).
  *   - State cookie is HttpOnly + SameSite=Lax + 10-minute TTL.
  *
+ * ## Token handling (READ THIS BEFORE PERSISTING TOKENS)
+ *
+ *   - The 4th `ctx` arg passed to onLogin contains
+ *     { provider, claims, tokens }. `tokens` is the raw token
+ *     response from the IdP — including access_token,
+ *     refresh_token, and id_token. These are bearer credentials:
+ *     anyone with _hull_sessions.data read access could call the
+ *     IdP as the user.
+ *   - session.loginHandler's audit emission ALREADY scrubs
+ *     tokens + claims before writing to _hull_audit_log (round-3
+ *     hardening). The risk is the APPLICATION path.
+ *   - Apps that store tokens for later API calls MUST encrypt them
+ *     at rest. Recommended pattern: keep a 32-byte KEK in env (or
+ *     fs.read of a manifest-allowlisted file), use crypto.secretbox
+ *     to wrap each token, store ciphertext in the session row.
+ *     Decrypt on demand at API-call time.
+ *   - Refresh tokens specifically should be considered long-lived
+ *     credentials. If you don't need offline API access, drop them
+ *     from the captured set inside your onLogin before persisting.
+ *
  * @example
  *   import { oauth } from "hull:web:middleware:oauth";
  *   oauth.init({
@@ -77,6 +97,13 @@ const _state = {
     // routes). Apps that mount login/callback at a non-/auth prefix
     // should override to the common ancestor of their custom paths.
     stateCookiePath: "/auth",
+    // Cookie SameSite policy. Default "Lax" works for response_type=
+    // code (top-level GET redirect). OIDC flows using response_mode=
+    // form_post (Azure AD by default for hybrid flows, some
+    // enterprise IdPs) POST back from the IdP; Lax blocks the cookie
+    // on cross-origin POST. Override to "None" + require Secure=true
+    // to support those flows.
+    stateCookieSameSite: "Lax",
     stateTtl:       600,
     providers:      {},  // name -> resolved cfg
     // findUser(provider, claims) -> user-object — required when
@@ -350,8 +377,13 @@ function handleLogin(req, res) {
     });
     res.header("Set-Cookie", cookie.serialize(
         _state.stateCookie, signed,
-        { httpOnly: true, sameSite: "Lax",
-          path: _state.stateCookiePath, maxAge: _state.stateTtl }));
+        { httpOnly: true,
+          sameSite: _state.stateCookieSameSite,
+          // SameSite=None mandates Secure per spec, and browsers
+          // silently drop None-without-Secure. Set both together.
+          secure:   (_state.stateCookieSameSite === "None"),
+          path:     _state.stateCookiePath,
+          maxAge:   _state.stateTtl }));
 
     const params = {
         client_id:     cfg.clientId,
@@ -528,6 +560,14 @@ function init(opts) {
     _state.stateCookie = opts.stateCookie || _state.stateCookie;
     _state.stateCookiePath =
         opts.stateCookiePath || _state.stateCookiePath;
+    if (opts.stateCookieSameSite !== undefined) {
+        const s = opts.stateCookieSameSite;
+        if (s !== "Lax" && s !== "Strict" && s !== "None") {
+            throw new Error("oauth.init: stateCookieSameSite must be "
+                + "'Lax', 'Strict', or 'None'");
+        }
+        _state.stateCookieSameSite = s;
+    }
     _state.stateTtl    = opts.stateTtl    || _state.stateTtl;
     if (opts.onLogin != null && typeof opts.findUser !== "function") {
         throw new Error("oauth.init: findUser(provider, claims) -> user is "

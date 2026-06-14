@@ -25,7 +25,10 @@ local session   = require("hull.web.middleware.session")
 local cookie    = require("hull.web.cookie")
 
 session.init()
-audit_log.init({ retain_days = 365 })
+audit_log.init({
+    retain_days = 365,
+    fingerprint_salt = "sign-in-events-fixture-fingerprint-salt",
+})
 
 local users_by_email = {}
 local users_by_id    = {}

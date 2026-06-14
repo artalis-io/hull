@@ -52,6 +52,27 @@
 --     enforced before any key lookup (jwt.verify's gate).
 --   * State cookie is HttpOnly + SameSite=Lax + 10-minute TTL.
 --
+-- ## Token handling (READ THIS BEFORE PERSISTING TOKENS)
+--
+--   * The 4th `ctx` arg passed to on_login contains
+--     `{ provider, claims, tokens }`. `tokens` is the raw token
+--     response from the IdP — including `access_token`,
+--     `refresh_token`, and `id_token`. These are bearer
+--     credentials: anyone with `_hull_sessions.data` read access
+--     could call the IdP as the user.
+--   * `session.login_handler`'s audit emission ALREADY scrubs
+--     tokens + claims before writing to `_hull_audit_log` (see
+--     round-3 hardening). The risk is the APPLICATION path.
+--   * Apps that store tokens for later API calls MUST encrypt
+--     them at rest. Recommended pattern: keep a 32-byte KEK in
+--     env (or fs.read of a manifest-allowlisted file), use
+--     `crypto.secretbox` to wrap each token, store the ciphertext
+--     in the session row. Decrypt on demand at API-call time.
+--   * Refresh tokens specifically should be considered long-
+--     lived credentials. If you don't need offline API access,
+--     drop them from the captured set inside your on_login
+--     callback before persisting anything.
+--
 -- ## Usage
 --
 --     local oauth = require("hull.web.middleware.oauth")
@@ -102,6 +123,14 @@ local _state = {
     -- routes). Apps that mount login/callback at a non-/auth prefix
     -- should override to the common ancestor of their custom paths.
     state_cookie_path = "/auth",
+    -- Cookie SameSite policy. Default "Lax" works for the standard
+    -- response_type=code flow (IdP redirects back via top-level
+    -- GET, Lax permits). OIDC flows using response_mode=form_post
+    -- (Azure AD by default for hybrid flows, some enterprise IdPs)
+    -- have the IdP POST back; Lax blocks POSTs from cross-origin,
+    -- so the state cookie won't reach the callback. Override to
+    -- "None" + require Secure=true to support those flows.
+    state_cookie_samesite = "Lax",
     state_ttl        = 600,
     providers        = {},
     -- find_user(provider, claims) -> user-object — required when
@@ -331,9 +360,13 @@ local function handle_login(req, res)
     })
     res:header("Set-Cookie", cookie.serialize(
         _state.state_cookie, signed,
-        { httponly = true, samesite = "Lax",
-          path = _state.state_cookie_path,
-          max_age = _state.state_ttl }))
+        { httponly = true,
+          samesite = _state.state_cookie_samesite,
+          -- SameSite=None mandates Secure per spec, and browsers
+          -- silently drop None-without-Secure. Set both together.
+          secure   = (_state.state_cookie_samesite == "None"),
+          path     = _state.state_cookie_path,
+          max_age  = _state.state_ttl }))
 
     local params = {
         client_id     = cfg.client_id,
@@ -507,6 +540,14 @@ function oauth.init(opts)
     _state.state_cookie = opts.state_cookie or _state.state_cookie
     _state.state_cookie_path =
         opts.state_cookie_path or _state.state_cookie_path
+    if opts.state_cookie_samesite ~= nil then
+        local s = opts.state_cookie_samesite
+        if s ~= "Lax" and s ~= "Strict" and s ~= "None" then
+            error("oauth.init: state_cookie_samesite must be "
+                  .. "'Lax', 'Strict', or 'None'")
+        end
+        _state.state_cookie_samesite = s
+    end
     _state.state_ttl    = opts.state_ttl or _state.state_ttl
     if opts.on_login ~= nil and type(opts.find_user) ~= "function" then
         error("oauth.init: find_user(provider, claims) -> user is "
