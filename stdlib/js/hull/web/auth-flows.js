@@ -249,10 +249,15 @@ function emailRateAllow(to) {
         _emailRl.set(key, bucket);
         const max = _state.emailRateLimitMaxEntries || 10000;
         if (_emailRl.size > max) {
+            // Avoid `for (const [k, b] of _emailRl)` — QuickJS's
+            // js_parse_destructuring_element has an MSan use-of-
+            // uninitialized-value in its destructuring parser that
+            // tripped the round-8 MSan job. The forEach form sidesteps
+            // it without changing semantics.
             const kept = new Map();
-            for (const [k, b] of _emailRl) {
+            _emailRl.forEach((b, k) => {
                 if (b.ts.some(t => t > cutoff)) kept.set(k, b);
-            }
+            });
             _emailRl = kept;
             _emailRl.set(key, bucket);
         }
