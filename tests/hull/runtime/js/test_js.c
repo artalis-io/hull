@@ -2233,7 +2233,8 @@ UTEST(js_stdlib, totp_encryption_round_trip)
         "  const enc = totp._test.encryptSecret(secret);\n"
         "  if (enc[1] !== 1) return 0;\n"
         "  if (enc[0].length <= secret.length) return 0;\n"
-        "  if (totp._test.decryptSecret(enc[0], 1) !== secret) return 0;\n"
+        "  const [pt, version] = totp._test.decryptSecret(enc[0], 1);\n"
+        "  if (pt !== secret || version !== 1) return 0;\n"
         "  return 1;\n"
         "}\n"
         "globalThis.__totp_enc = run();\n";
@@ -2244,6 +2245,81 @@ UTEST(js_stdlib, totp_encryption_round_trip)
     hl_js_run_jobs(&js);
 
     ASSERT_EQ(eval_int("globalThis.__totp_enc"), 1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, totp_key_rotation_lazy_on_verify_js)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    /* JS mirror of the Lua rotation test: enroll under v1, init
+     * with v1+v2 (current=2), verify → lazy rekey → row on v2. */
+    const char *code =
+        "import { totp } from 'hull:web:middleware:totp';\n"
+        "function run() {\n"
+        "  totp._test.reset();\n"
+        "  const k1 = 'a'.repeat(32);\n"
+        "  const k2 = 'b'.repeat(32);\n"
+        "  totp.init({ encryptionKeys: {1: k1}, current: 1 });\n"
+        "  const r = totp.enroll('u');\n"
+        "  const secret = totp._test.base32Decode(r.secretBase32);\n"
+        "  const step = totp._test.currentStep();\n"
+        "  if (!totp.confirm('u', totp._test.totpAtStep(secret, step, 6))) return 2;\n"
+        "  totp.init({ encryptionKeys: {1: k1, 2: k2}, current: 2 });\n"
+        "  if (!totp.verify('u', totp._test.totpAtStep(secret, step + 1, 6))) return 3;\n"
+        "  const r2 = totp.rekey();\n"
+        "  if (r2.scanned !== 1) return 100 + r2.scanned;\n"
+        "  if (r2.rekeyed !== 0) return 200 + r2.rekeyed;\n"
+        "  if (r2.failed !== 0) return 300 + r2.failed;\n"
+        "  return 1;\n"
+        "}\n"
+        "globalThis.__totp_rot = run();\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__totp_rot"), 1);
+
+    cleanup_js_caps();
+}
+
+UTEST(js_stdlib, totp_rekey_batch_helper_js)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { totp } from 'hull:web:middleware:totp';\n"
+        "function run() {\n"
+        "  totp._test.reset();\n"
+        "  const k1 = 'a'.repeat(32);\n"
+        "  const k2 = 'b'.repeat(32);\n"
+        "  totp.init({ encryptionKeys: {1: k1}, current: 1 });\n"
+        "  for (let i = 1; i <= 3; i++) {\n"
+        "    const r = totp.enroll('u' + i);\n"
+        "    const secret = totp._test.base32Decode(r.secretBase32);\n"
+        "    const code = totp._test.totpAtStep(secret, totp._test.currentStep(), 6);\n"
+        "    if (!totp.confirm('u' + i, code)) return 0;\n"
+        "  }\n"
+        "  totp.init({ encryptionKeys: {1: k1, 2: k2}, current: 2 });\n"
+        "  const r1 = totp.rekey();\n"
+        "  if (r1.scanned !== 3 || r1.rekeyed !== 3 || r1.failed !== 0) return 0;\n"
+        "  const r2 = totp.rekey();\n"
+        "  if (r2.scanned !== 3 || r2.rekeyed !== 0 || r2.failed !== 0) return 0;\n"
+        "  return 1;\n"
+        "}\n"
+        "globalThis.__totp_rekey = run();\n";
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__totp_rekey"), 1);
 
     cleanup_js_caps();
 }

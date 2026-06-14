@@ -89,14 +89,19 @@ local totp = {}
 -- ── Module state ───────────────────────────────────────────────────
 
 local _state = {
-    issuer             = "Hull",
-    digits             = 6,
-    period             = 30,
-    window             = 1,
-    recovery_codes     = 10,
-    encryption_key     = nil,  -- raw 32 bytes when set
-    encryption_key_hex = nil,  -- pre-encoded for crypto.secretbox
-    _initialized       = false,
+    issuer              = "Hull",
+    digits              = 6,
+    period              = 30,
+    window              = 1,
+    recovery_codes      = 10,
+    -- Multi-key encryption state. See totp.init for the input shape
+    -- and the encrypt_secret / decrypt_secret comments for the wire
+    -- format.
+    keys                = {},   -- {[version_id] = key_hex}
+    current_key_version = nil,  -- id used for new encryptions
+    legacy_key_version  = nil,  -- id for pre-versioning rows, if any
+    encryption_key_hex  = nil,  -- retained for _test back-compat
+    _initialized        = false,
 }
 
 -- ── Schema ─────────────────────────────────────────────────────────
@@ -289,34 +294,96 @@ local function ct_eq(a, b)
     return diff == 0
 end
 
--- At-rest encryption: nonce(24) || ct. NaCl secretbox auth-checks
--- on open; corrupted ciphertext → nil. The nonce is fresh per
--- encryption, so the same secret bytes encrypted twice produce
--- different blobs (no oracle on enrollment status).
+-- At-rest encryption: versioned NaCl secretbox.
+--
+-- Wire format v1 (legacy):  nonce(24) || ct
+-- Wire format v2 (current): version(4 BE) || nonce(24) || ct
+--
+-- v1 was the format before key rotation was supported (single
+-- encryption_key opt). Apps that upgrade with existing rows keep
+-- v1 readable via _state.legacy_key_version + the corresponding
+-- entry in _state.keys; new writes ALWAYS use v2. The rekey()
+-- helper converts v1 rows to v2 on demand or lazily on verify.
+--
+-- Multi-key support: _state.keys is a map {version_id -> key_hex}.
+-- The current version (used for new encryptions) lives in
+-- _state.current_key_version. Decrypt reads the 4-byte version
+-- prefix, looks up the key in the map; if the version is unknown
+-- AND a legacy_key_version is configured, falls back to v1
+-- decryption with that key.
 local SECRETBOX_NONCE_LEN = 24
 local SECRETBOX_MAC_LEN   = 16
+local VERSION_PREFIX_LEN  = 4
+local MIN_V2_BLOB_LEN     = VERSION_PREFIX_LEN
+                          + SECRETBOX_NONCE_LEN + SECRETBOX_MAC_LEN
 
-local function encrypt_secret(secret_bytes)
-    if not _state.encryption_key_hex then return secret_bytes, 0 end
-    local nonce = crypto.random(SECRETBOX_NONCE_LEN)
-    local nonce_hex = bytes_to_hex(nonce)
-    local ct_hex = crypto.secretbox(secret_bytes, nonce_hex,
-                                     _state.encryption_key_hex)
-    -- Wire format: 24 raw nonce bytes + ciphertext (hex-decoded).
-    return nonce .. hex_to_bytes(ct_hex), 1
+local function pack_version_be(v)
+    return string.char((v >> 24) & 0xFF, (v >> 16) & 0xFF,
+                       (v >>  8) & 0xFF,  v        & 0xFF)
 end
 
-local function decrypt_secret(blob, encrypted)
-    if encrypted == 0 then return blob end
-    if not _state.encryption_key_hex then return nil end
-    if #blob < SECRETBOX_NONCE_LEN + SECRETBOX_MAC_LEN then return nil end
-    local nonce = blob:sub(1, SECRETBOX_NONCE_LEN)
-    local ct    = blob:sub(SECRETBOX_NONCE_LEN + 1)
+local function unpack_version_be(s)
+    return (string.byte(s, 1) << 24)
+         | (string.byte(s, 2) << 16)
+         | (string.byte(s, 3) <<  8)
+         |  string.byte(s, 4)
+end
+
+-- encrypt_secret returns (blob, encrypted_flag, version). When no
+-- encryption keys are configured, secret is stored plaintext;
+-- version is 0 (sentinel for "no encryption"). Otherwise the blob
+-- is versioned and version is _state.current_key_version.
+local function encrypt_secret(secret_bytes)
+    local cur = _state.current_key_version
+    local key_hex = cur and _state.keys[cur]
+    if not key_hex then return secret_bytes, 0, 0 end
+    local nonce = crypto.random(SECRETBOX_NONCE_LEN)
     local nonce_hex = bytes_to_hex(nonce)
-    local ct_hex = bytes_to_hex(ct)
-    local pt = crypto.secretbox_open(ct_hex, nonce_hex,
-                                      _state.encryption_key_hex)
-    return pt  -- nil on tamper / wrong key
+    local ct_hex = crypto.secretbox(secret_bytes, nonce_hex, key_hex)
+    return pack_version_be(cur) .. nonce .. hex_to_bytes(ct_hex), 1, cur
+end
+
+-- decrypt_secret returns (plaintext, version) on success, or nil on
+-- failure. Caller uses the returned version to decide whether to
+-- re-encrypt under current (lazy rekey-on-verify).
+local function decrypt_secret(blob, encrypted)
+    if encrypted == 0 then return blob, 0 end
+    if type(blob) ~= "string" then return nil end
+
+    -- Try v2 (versioned) first.
+    if #blob >= MIN_V2_BLOB_LEN then
+        local version = unpack_version_be(blob:sub(1, VERSION_PREFIX_LEN))
+        local key_hex = _state.keys[version]
+        if key_hex then
+            local nonce = blob:sub(VERSION_PREFIX_LEN + 1,
+                                   VERSION_PREFIX_LEN + SECRETBOX_NONCE_LEN)
+            local ct    = blob:sub(VERSION_PREFIX_LEN + SECRETBOX_NONCE_LEN + 1)
+            local pt = crypto.secretbox_open(bytes_to_hex(ct),
+                                              bytes_to_hex(nonce), key_hex)
+            if pt then return pt, version end
+            -- v2 with a recognized version that fails to decrypt is
+            -- a real corruption / wrong-key; don't paper over by
+            -- trying legacy.
+            return nil
+        end
+    end
+
+    -- v1 (legacy, no prefix). Only attempted if a legacy_key_version
+    -- is configured AND the blob length matches the v1 shape (nonce +
+    -- non-empty ct). Apps without legacy data have legacy_key_version
+    -- = nil; this branch never runs and decrypt returns nil for any
+    -- unrecognized version.
+    local legacy_v = _state.legacy_key_version
+    local legacy_key = legacy_v and _state.keys[legacy_v]
+    if legacy_key and #blob >= SECRETBOX_NONCE_LEN + SECRETBOX_MAC_LEN then
+        local nonce = blob:sub(1, SECRETBOX_NONCE_LEN)
+        local ct    = blob:sub(SECRETBOX_NONCE_LEN + 1)
+        local pt = crypto.secretbox_open(bytes_to_hex(ct),
+                                          bytes_to_hex(nonce), legacy_key)
+        if pt then return pt, 0 end  -- version=0 signals "legacy v1"
+    end
+
+    return nil
 end
 
 -- URL-encoding for the otpauth URI. Authenticator apps are strict
@@ -350,15 +417,38 @@ local function load_secret(user_id)
         .. "FROM _hull_totp WHERE user_id = ?", { user_id })
     if not rows or #rows == 0 then return nil end
     local row = rows[1]
-    local secret = decrypt_secret(row.secret, row.encrypted)
+    local secret, version = decrypt_secret(row.secret, row.encrypted)
     if not secret then return nil end  -- decrypt failure → treat as missing
     return {
         secret         = secret,
+        version        = version,   -- 0 = plaintext or legacy v1; else key id
         confirmed      = row.confirmed,
         digits         = row.digits,
         period         = row.period,
         last_used_step = row.last_used_step,
     }
+end
+
+-- Lazy rekey: called after a successful verify when the stored row
+-- is on an older version than current. Re-encrypts the secret under
+-- the current key and writes the new blob. Best-effort — a transient
+-- DB error here doesn't fail the verify (the user is already
+-- authenticated), but the row stays on the old version and we'll
+-- try again next verify. The condition guarding the call lives at
+-- the verify site so this never runs when keys aren't configured.
+-- NB: db.exec must be called directly (not via pcall) so the
+-- mod_db `lua_is_stdlib_caller` check sees this stdlib module's
+-- chunk frame at level 1, not pcall's C frame. We let any db.exec
+-- error propagate; the verify call site wraps the entire rekey
+-- attempt in pcall so a rare DB hiccup can't fail the user's
+-- already-successful authentication.
+local function rekey_row(user_id, secret_bytes)
+    local blob, enc_flag = encrypt_secret(secret_bytes)
+    if enc_flag ~= 1 then return end  -- no current key, nothing to do
+    db.exec(
+        "UPDATE _hull_totp SET secret = ?, encrypted = 1, updated_at = ? "
+        .. "WHERE user_id = ?",
+        { blob, time.now(), user_id })
 end
 
 -- Atomic step advance: only succeeds if `step > last_used_step`. The
@@ -397,30 +487,92 @@ end
 --                      ~90s total window).
 --   * `recovery_codes` Number of recovery codes minted at enroll
 --                      (default `10`).
---   * `encryption_key` Optional 32-byte string. When set, secrets
---                      are NaCl-secretbox-encrypted at rest. Caller
---                      manages the key (env var, fs.read of a
---                      manifest-allowlisted file, etc.).
+--   * `encryption_key`  Optional 32-byte string. Back-compat shorthand
+--                       for `encryption_keys = {[1] = X}, current = 1,
+--                       legacy_key_version = 1`. New apps should use
+--                       the explicit map.
+--   * `encryption_keys` Optional map of `{[id]=32_byte_key, ...}`.
+--                       Each id is a 32-bit unsigned integer that
+--                       gets written as a 4-byte prefix on encrypted
+--                       blobs. Required when planning a key rotation.
+--   * `current`         Required when `encryption_keys` is set. The
+--                       id of the key used for new encryptions. Old
+--                       rows still decrypt under whatever version
+--                       they were written with (must still be in the
+--                       map).
+--   * `legacy_key_version` Optional id pointing into encryption_keys.
+--                       Identifies the key used by pre-versioning
+--                       (v1 wire format) rows so they continue to
+--                       decrypt during the migration window. Once
+--                       rekey() reports zero v1 rows remaining, this
+--                       can be unset and the legacy-version key
+--                       removed from `encryption_keys`.
 function totp.init(opts)
     opts = opts or {}
     if opts.digits and opts.digits ~= 6 and opts.digits ~= 8 then
         error("totp.init: digits must be 6 or 8")
     end
-    if opts.encryption_key and type(opts.encryption_key) ~= "string" then
-        error("totp.init: encryption_key must be a string")
+
+    -- Build the keys map. Three input shapes:
+    --   1. encryption_keys + current  → multi-key (explicit).
+    --   2. encryption_key only        → back-compat shorthand,
+    --                                   translated to {[1]=X}, current=1,
+    --                                   legacy_key_version=1.
+    --   3. nothing                    → plaintext storage (no encryption).
+    local keys = {}
+    local current = nil
+    local legacy_version = nil
+    if opts.encryption_keys then
+        if type(opts.encryption_keys) ~= "table" then
+            error("totp.init: encryption_keys must be a {[id]=bytes,...} map")
+        end
+        if type(opts.current) ~= "number" then
+            error("totp.init: current (key id) required when "
+                  .. "encryption_keys is set")
+        end
+        for id, k in pairs(opts.encryption_keys) do
+            if type(id) ~= "number" or id < 0 or id > 0xFFFFFFFF then
+                error("totp.init: encryption_keys ids must be 0..2^32-1")
+            end
+            if type(k) ~= "string" or #k ~= 32 then
+                error("totp.init: encryption_keys[" .. tostring(id)
+                      .. "] must be exactly 32 bytes")
+            end
+            keys[id] = bytes_to_hex(k)
+        end
+        if not keys[opts.current] then
+            error("totp.init: current key id " .. tostring(opts.current)
+                  .. " not present in encryption_keys")
+        end
+        current = opts.current
+        if opts.legacy_key_version ~= nil then
+            if not keys[opts.legacy_key_version] then
+                error("totp.init: legacy_key_version "
+                      .. tostring(opts.legacy_key_version)
+                      .. " not present in encryption_keys")
+            end
+            legacy_version = opts.legacy_key_version
+        end
+    elseif opts.encryption_key then
+        if type(opts.encryption_key) ~= "string"
+           or #opts.encryption_key ~= 32 then
+            error("totp.init: encryption_key must be exactly 32 bytes")
+        end
+        keys[1] = bytes_to_hex(opts.encryption_key)
+        current = 1
+        legacy_version = 1  -- pre-versioning rows decrypt under this key
     end
-    if opts.encryption_key and #opts.encryption_key ~= 32 then
-        error("totp.init: encryption_key must be exactly 32 bytes")
-    end
+
     _state.issuer         = opts.issuer         or _state.issuer
     _state.digits         = opts.digits         or _state.digits
     _state.period         = opts.period         or _state.period
     _state.window         = opts.window         or _state.window
     _state.recovery_codes = opts.recovery_codes or _state.recovery_codes
-    _state.encryption_key = opts.encryption_key
-    _state.encryption_key_hex = opts.encryption_key
-        and bytes_to_hex(opts.encryption_key)
-        or nil
+    _state.keys                 = keys
+    _state.current_key_version  = current
+    _state.legacy_key_version   = legacy_version
+    -- Back-compat: a few _test helpers still expect this field.
+    _state.encryption_key_hex   = current and keys[current] or nil
 
     -- Idempotent table creation. db.batch wraps the multi-statement
     -- DDL in a transaction so a crash mid-init leaves a consistent
@@ -553,6 +705,16 @@ function totp.verify_with_kind(user_id, code)
         if step > row.last_used_step
            and ct_eq(totp_at_step(row.secret, step, row.digits), code) then
             if mark_step_used(user_id, step) == 1 then
+                -- Lazy rekey: if the row's secret was decrypted under
+                -- a key version other than the current one (legacy v1
+                -- or an older v2 version after rotation), re-encrypt
+                -- it under the current key. Best-effort — the verify
+                -- itself already succeeded; a transient DB error on
+                -- the rekey path doesn't block the user.
+                if _state.current_key_version
+                   and row.version ~= _state.current_key_version then
+                    rekey_row(user_id, row.secret)
+                end
                 return true, "totp"
             end
             return false, nil  -- raced; treat as failure
@@ -570,6 +732,13 @@ function totp.verify_with_kind(user_id, code)
                 "UPDATE _hull_totp_recovery SET used_at = ? "
                 .. "WHERE user_id = ? AND code_hash = ?",
                 { time.now(), user_id, r.code_hash })
+            -- Same lazy rekey on the recovery-code path — the
+            -- decrypted secret is in hand so we might as well
+            -- migrate it forward.
+            if _state.current_key_version
+               and row.version ~= _state.current_key_version then
+                rekey_row(user_id, row.secret)
+            end
             return true, "recovery"
         end
     end
@@ -580,6 +749,46 @@ end
 function totp.verify(user_id, code)
     local ok = totp.verify_with_kind(user_id, code)
     return ok
+end
+
+--- Batch re-encrypt every stored TOTP secret under the current key
+-- version. Use after a key rotation to actively migrate v1 / older
+-- v2 rows forward, instead of waiting for every user to sign in
+-- (lazy rekey-on-verify happens automatically). Scans the full
+-- _hull_totp table once. Returns `{scanned, rekeyed, failed}`:
+--   * scanned  — total rows considered.
+--   * rekeyed  — rows successfully re-encrypted under current.
+--   * failed   — rows that wouldn't decrypt under any known key
+--                (legacy_key_version missing? key removed too soon?)
+-- Operators can decommission an old key from `encryption_keys`
+-- once `rekey()` reports `failed = 0` AND a follow-up scan reports
+-- `rekeyed = 0` (every row is already on current).
+function totp.rekey()
+    check_initialized()
+    if not _state.current_key_version then
+        error("totp.rekey: no encryption_keys configured; nothing to do")
+    end
+    local cur = _state.current_key_version
+    local rows = db.query(
+        "SELECT user_id, secret, encrypted FROM _hull_totp")
+    local scanned, rekeyed, failed = 0, 0, 0
+    for _, r in ipairs(rows or {}) do
+        scanned = scanned + 1
+        local pt, version = decrypt_secret(r.secret, r.encrypted)
+        if not pt then
+            failed = failed + 1
+        elseif version ~= cur then
+            -- Use the rekey_row helper directly (it calls db.exec
+            -- without an intermediate pcall, so the stdlib-caller
+            -- check sees totp's frame at level 1). Wrap the whole
+            -- thing here so an error on one row doesn't abort the
+            -- batch scan.
+            local ok = pcall(rekey_row, r.user_id, pt)
+            if ok then rekeyed = rekeyed + 1
+            else failed = failed + 1 end
+        end
+    end
+    return { scanned = scanned, rekeyed = rekeyed, failed = failed }
 end
 
 --- Delete a user's secret + every recovery code. Use on account
@@ -622,9 +831,21 @@ end
 -- The TOTP / HOTP digest and the Base32 codec are pure functions
 -- with well-known RFC vectors. Test-only access lets the unit tests
 -- pin them against those vectors without exporting the surface.
+-- Debug-only: read a user's stored secret blob (post-encryption,
+-- pre-decryption) so unit tests can verify wire-format changes
+-- without poking through Hull's _hull_* namespace gate.
+local function debug_get_blob(user_id)
+    local rows = db.query(
+        "SELECT secret, encrypted FROM _hull_totp WHERE user_id = ?",
+        { user_id })
+    if not rows or #rows == 0 then return nil end
+    return rows[1].secret, rows[1].encrypted
+end
+
 totp._test = {
     base32_encode           = base32_encode,
     base32_decode           = base32_decode,
+    get_blob                = debug_get_blob,
     totp_at_step            = totp_at_step,
     current_step            = current_step,
     ct_eq                   = ct_eq,
@@ -636,14 +857,16 @@ totp._test = {
     decrypt_secret          = decrypt_secret,
     build_otpauth_url       = build_otpauth_url,
     reset = function()
-        _state.issuer             = "Hull"
-        _state.digits             = 6
-        _state.period             = 30
-        _state.window             = 1
-        _state.recovery_codes     = 10
-        _state.encryption_key     = nil
-        _state.encryption_key_hex = nil
-        _state._initialized       = false
+        _state.issuer              = "Hull"
+        _state.digits              = 6
+        _state.period              = 30
+        _state.window              = 1
+        _state.recovery_codes      = 10
+        _state.keys                = {}
+        _state.current_key_version = nil
+        _state.legacy_key_version  = nil
+        _state.encryption_key_hex  = nil
+        _state._initialized        = false
     end,
 }
 

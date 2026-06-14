@@ -2523,10 +2523,145 @@ UTEST(lua_stdlib, totp_encryption_at_rest)
         "  if not totp.confirm('user-4', code) then return 0 end "
         "  local next_code = totp._test.totp_at_step(secret, step + 1, 6) "
         "  if not totp.verify('user-4', next_code) then return 0 end "
-        "  local plain, enc_flag = totp._test.encrypt_secret(secret) "
-        "  if enc_flag ~= 1 then return 0 end "
-        "  if #plain <= #secret then return 0 end "
-        "  if totp._test.decrypt_secret(plain, 1) ~= secret then return 0 end "
+        "  local blob, enc_flag, version = totp._test.encrypt_secret(secret) "
+        "  if enc_flag ~= 1 or version ~= 1 then return 0 end "
+        "  if #blob <= #secret then return 0 end "
+        "  local pt, v = totp._test.decrypt_secret(blob, 1) "
+        "  if pt ~= secret or v ~= 1 then return 0 end "
+        "  return 1 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, totp_key_rotation_lazy_on_verify)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* Two-key rotation: enroll under key v1, then init() with the
+     * same key plus a new v2 + current=2. The on-disk blob is
+     * still v1-encrypted; the next successful verify should re-
+     * encrypt it under v2 (lazy rekey-on-verify). Proven by calling
+     * rekey() after — if the lazy path worked, rekey reports
+     * rekeyed=0 (everything already on current). */
+    int ok = eval_int(
+        "(function() "
+        "  local totp = require('hull.web.middleware.totp') "
+        "  totp._test.reset() "
+        "  local k1 = ('a'):rep(32) "
+        "  local k2 = ('b'):rep(32) "
+        "  totp.init({ encryption_keys = {[1]=k1}, current = 1 }) "
+        "  local r = totp.enroll('u') "
+        "  local secret = totp._test.base32_decode(r.secret_base32) "
+        "  local step = totp._test.current_step() "
+        "  if not totp.confirm('u', totp._test.totp_at_step(secret, step, 6)) "
+        "    then return 2 end "
+        "  local b1 = totp._test.get_blob('u') "
+        "  if not b1 then return 50 end "
+        "  local v1 = (string.byte(b1,1) << 24) | (string.byte(b1,2) << 16) "
+        "          | (string.byte(b1,3) << 8) | string.byte(b1,4) "
+        "  if v1 ~= 1 then return 60 + v1 end "
+        "  totp.init({ encryption_keys = {[1]=k1, [2]=k2}, current = 2 }) "
+        "  if not totp.verify('u', "
+        "       totp._test.totp_at_step(secret, step + 1, 6)) then return 3 end "
+        "  local b2 = totp._test.get_blob('u') "
+        "  if not b2 then return 70 end "
+        "  local v2 = (string.byte(b2,1) << 24) | (string.byte(b2,2) << 16) "
+        "          | (string.byte(b2,3) << 8) | string.byte(b2,4) "
+        "  if v2 ~= 2 then return 80 + v2 end "
+        "  return 1 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, totp_rekey_batch_helper)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* Enroll three users under v1, rotate to v2, call totp.rekey().
+     * Expect scanned=3, rekeyed=3, failed=0. Second rekey() reports
+     * scanned=3, rekeyed=0, failed=0 (all already on current). */
+    int ok = eval_int(
+        "(function() "
+        "  local totp = require('hull.web.middleware.totp') "
+        "  totp._test.reset() "
+        "  local k1 = ('a'):rep(32) "
+        "  local k2 = ('b'):rep(32) "
+        "  totp.init({ encryption_keys = {[1]=k1}, current = 1 }) "
+        "  for i = 1, 3 do "
+        "    local r = totp.enroll('u' .. i) "
+        "    local secret = totp._test.base32_decode(r.secret_base32) "
+        "    local code = totp._test.totp_at_step(secret, "
+        "      totp._test.current_step(), 6) "
+        "    if not totp.confirm('u' .. i, code) then return 0 end "
+        "  end "
+        "  totp.init({ encryption_keys = {[1]=k1, [2]=k2}, current = 2 }) "
+        "  local r1 = totp.rekey() "
+        "  if r1.scanned ~= 3 or r1.rekeyed ~= 3 or r1.failed ~= 0 then return 0 end "
+        "  local r2 = totp.rekey() "
+        "  if r2.scanned ~= 3 or r2.rekeyed ~= 0 or r2.failed ~= 0 then return 0 end "
+        "  return 1 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, totp_legacy_v1_format_decrypts_via_legacy_key_version)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* Simulate a pre-versioning row: encrypt_secret without a
+     * version prefix is what the OLD code would have written.
+     * After init with legacy_key_version pointing at the same key,
+     * decrypt_secret recovers it. */
+    int ok = eval_int(
+        "(function() "
+        "  local totp = require('hull.web.middleware.totp') "
+        "  local crypto = require('hull.crypto') "
+        "  totp._test.reset() "
+        "  local k1 = ('a'):rep(32) "
+        "  totp.init({ encryption_keys = {[1]=k1}, current = 1, "
+        "              legacy_key_version = 1 }) "
+        "  local secret = string.rep('S', 20) "
+        "  local nonce = crypto.random(24) "
+        "  local nonce_hex = crypto.hex_encode(nonce) "
+        "  local key_hex = crypto.hex_encode(k1) "
+        "  local ct_hex = crypto.secretbox(secret, nonce_hex, key_hex) "
+        "  local blob = nonce .. crypto.hex_decode(ct_hex) "
+        "  local pt, version = totp._test.decrypt_secret(blob, 1) "
+        "  if pt ~= secret then return 0 end "
+        "  if version ~= 0 then return 0 end "
+        "  return 1 "
+        "end)()");
+    ASSERT_EQ(ok, 1);
+
+    cleanup_lua_caps();
+}
+
+UTEST(lua_stdlib, totp_unknown_key_version_fails_clean)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    /* A blob with version=99 (not in encryption_keys map) and no
+     * legacy_key_version configured should return nil cleanly. */
+    int ok = eval_int(
+        "(function() "
+        "  local totp = require('hull.web.middleware.totp') "
+        "  local crypto = require('hull.crypto') "
+        "  totp._test.reset() "
+        "  local k1 = ('a'):rep(32) "
+        "  totp.init({ encryption_keys = {[1]=k1}, current = 1 }) "
+        "  local blob = string.char(0,0,0,99) .. string.rep('x', 24+36) "
+        "  local pt = totp._test.decrypt_secret(blob, 1) "
+        "  if pt ~= nil then return 0 end "
         "  return 1 "
         "end)()");
     ASSERT_EQ(ok, 1);

@@ -39,9 +39,13 @@ const _state = {
     period:           30,
     window:           1,
     recoveryCodes:    10,
-    encryptionKey:    null,
-    encryptionKeyHex: null,
-    initialized:      false,
+    // Multi-key encryption state. See init() + encrypt/decrypt
+    // comments for the wire format and the input shape.
+    keys:               {},   // {[versionId]: keyHex}
+    currentKeyVersion:  null, // id used for new encryptions
+    legacyKeyVersion:   null, // id for pre-versioning rows, if any
+    encryptionKeyHex:   null, // retained for _test back-compat
+    initialized:        false,
 };
 
 // ── Schema ─────────────────────────────────────────────────────────
@@ -234,33 +238,77 @@ function ctEq(a, b) {
     return diff === 0;
 }
 
-// At-rest encryption: nonce(24) || ct.  Same wire format as the Lua
-// module so a Lua-Hull migration to JS-Hull (or vice versa) on the
-// same DB works without re-enrolling users.
+// At-rest encryption: versioned NaCl secretbox. See the matching
+// Lua module's encrypt_secret / decrypt_secret comments for the
+// design — wire format v2 (current) is version(4 BE) || nonce(24) ||
+// ct; v1 (legacy, pre-rotation) was nonce(24) || ct. Both runtimes
+// produce identical byte sequences for the same key so a Lua↔JS
+// migration on the same DB works without re-enrolling.
 const NONCE_LEN = 24;
 const MAC_LEN   = 16;
+const VERSION_PREFIX_LEN = 4;
+const MIN_V2_BLOB_LEN    = VERSION_PREFIX_LEN + NONCE_LEN + MAC_LEN;
+
+function packVersionBE(v) {
+    return String.fromCharCode((v >>> 24) & 0xFF, (v >>> 16) & 0xFF,
+                               (v >>>  8) & 0xFF,  v         & 0xFF);
+}
+
+function unpackVersionBE(s) {
+    return ((s.charCodeAt(0) << 24)
+          | (s.charCodeAt(1) << 16)
+          | (s.charCodeAt(2) <<  8)
+          |  s.charCodeAt(3)) >>> 0;
+}
 
 function encryptSecret(secretBytes) {
-    if (!_state.encryptionKeyHex) return [secretBytes, 0];
+    const cur = _state.currentKeyVersion;
+    const keyHex = cur != null ? _state.keys[cur] : null;
+    if (!keyHex) return [secretBytes, 0, 0];
     const nonce = new Uint8Array(crypto.random(NONCE_LEN));
     let nonceStr = "";
     for (let i = 0; i < NONCE_LEN; i++) nonceStr += String.fromCharCode(nonce[i]);
-    const nonceHex = bytesToHex(nonceStr);
-    const ctHex = crypto.secretbox(secretBytes, nonceHex,
-                                    _state.encryptionKeyHex);
-    return [nonceStr + hexToBytes(ctHex), 1];
+    const ctHex = crypto.secretbox(secretBytes, bytesToHex(nonceStr), keyHex);
+    return [packVersionBE(cur) + nonceStr + hexToBytes(ctHex), 1, cur];
 }
 
+// Returns [plaintext, version] on success, [null, null] on failure.
+// version=0 signals "plaintext storage" OR "legacy v1 row". Callers
+// use the version to decide whether to lazily re-encrypt under
+// current.
 function decryptSecret(blob, encrypted) {
-    if (encrypted === 0) return blob;
-    if (!_state.encryptionKeyHex) return null;
-    if (blob.length < NONCE_LEN + MAC_LEN) return null;
-    const nonceStr = blob.substring(0, NONCE_LEN);
-    const ctStr    = blob.substring(NONCE_LEN);
-    const pt = crypto.secretboxOpen(bytesToHex(ctStr),
-                                     bytesToHex(nonceStr),
-                                     _state.encryptionKeyHex);
-    return pt;  // null on tamper / wrong key
+    if (encrypted === 0) return [blob, 0];
+    if (typeof blob !== "string") return [null, null];
+
+    // Try v2 (versioned) first.
+    if (blob.length >= MIN_V2_BLOB_LEN) {
+        const version = unpackVersionBE(blob.substring(0, VERSION_PREFIX_LEN));
+        const keyHex = _state.keys[version];
+        if (keyHex) {
+            const nonceStr = blob.substring(VERSION_PREFIX_LEN,
+                                            VERSION_PREFIX_LEN + NONCE_LEN);
+            const ctStr    = blob.substring(VERSION_PREFIX_LEN + NONCE_LEN);
+            const pt = crypto.secretboxOpen(bytesToHex(ctStr),
+                                             bytesToHex(nonceStr), keyHex);
+            if (pt) return [pt, version];
+            // Recognized version that fails to decrypt is a real
+            // corruption; don't paper over with a legacy attempt.
+            return [null, null];
+        }
+    }
+
+    // v1 (legacy) fallback. Only if a legacy_key_version is configured.
+    const legacyV = _state.legacyKeyVersion;
+    const legacyKey = legacyV != null ? _state.keys[legacyV] : null;
+    if (legacyKey && blob.length >= NONCE_LEN + MAC_LEN) {
+        const nonceStr = blob.substring(0, NONCE_LEN);
+        const ctStr    = blob.substring(NONCE_LEN);
+        const pt = crypto.secretboxOpen(bytesToHex(ctStr),
+                                         bytesToHex(nonceStr), legacyKey);
+        if (pt) return [pt, 0];
+    }
+
+    return [null, null];
 }
 
 function urlenc(s) {
@@ -285,15 +333,31 @@ function loadSecret(userId) {
         + "FROM _hull_totp WHERE user_id = ?", [userId]);
     if (!rows || rows.length === 0) return null;
     const row = rows[0];
-    const secret = decryptSecret(row.secret, row.encrypted);
+    const [secret, version] = decryptSecret(row.secret, row.encrypted);
     if (!secret) return null;
     return {
         secret:        secret,
+        version:       version,  // 0 = plaintext/legacy v1; else key id
         confirmed:     row.confirmed,
         digits:        row.digits,
         period:        row.period,
         lastUsedStep:  row.last_used_step,
     };
+}
+
+// Lazy rekey: called after a successful verify when the stored row
+// is on an older version than current. Re-encrypts the secret under
+// the current key. Best-effort — verify already succeeded; a
+// transient DB error here doesn't fail the user.
+function rekeyRow(userId, secretBytes) {
+    const [blob, encFlag] = encryptSecret(secretBytes);
+    if (encFlag !== 1) return;  // no current key, nothing to do
+    try {
+        db.exec(
+            "UPDATE _hull_totp SET secret = ?, encrypted = 1, updated_at = ? "
+            + "WHERE user_id = ?",
+            [blob, time.now(), userId]);
+    } catch (_e) { /* best-effort */ }
 }
 
 function markStepUsed(userId, step) {
@@ -315,28 +379,89 @@ function checkInitialized() {
 
 // ── Public API ─────────────────────────────────────────────────────
 
+/**
+ * init opts (encryption-related):
+ *   - encryptionKey   Optional 32-byte string. Back-compat shorthand
+ *                     for { encryptionKeys: {1: X}, current: 1,
+ *                     legacyKeyVersion: 1 }. New apps should use the
+ *                     explicit map.
+ *   - encryptionKeys  Optional object `{ [id]: 32_byte_key, ... }`.
+ *                     Each id is a 32-bit unsigned int that gets
+ *                     written as a 4-byte prefix on encrypted blobs.
+ *                     Required when planning a key rotation.
+ *   - current         Required when encryptionKeys is set. The id of
+ *                     the key used for new encryptions.
+ *   - legacyKeyVersion Optional id pointing into encryptionKeys.
+ *                     Identifies the key used by pre-versioning (v1
+ *                     wire format) rows so they continue to decrypt
+ *                     during the migration window. Once rekey()
+ *                     reports zero v1 rows remaining, unset it and
+ *                     remove the legacy-version key from the map.
+ */
 function init(opts) {
     opts = opts || {};
     if (opts.digits !== undefined && opts.digits !== 6 && opts.digits !== 8) {
         throw new Error("totp.init: digits must be 6 or 8");
     }
-    if (opts.encryptionKey !== undefined) {
-        if (typeof opts.encryptionKey !== "string") {
-            throw new Error("totp.init: encryptionKey must be a string");
+
+    // Build the keys map. Three input shapes:
+    //   1. encryptionKeys + current  -> multi-key (explicit)
+    //   2. encryptionKey only        -> back-compat shorthand
+    //   3. nothing                   -> plaintext storage
+    const keys = {};
+    let current = null;
+    let legacyVersion = null;
+    if (opts.encryptionKeys) {
+        if (typeof opts.encryptionKeys !== "object") {
+            throw new Error("totp.init: encryptionKeys must be a {[id]: bytes} map");
         }
-        if (opts.encryptionKey.length !== 32) {
+        if (typeof opts.current !== "number") {
+            throw new Error("totp.init: `current` (key id) required when "
+                + "encryptionKeys is set");
+        }
+        for (const idStr in opts.encryptionKeys) {
+            const id = Number(idStr);
+            if (!Number.isInteger(id) || id < 0 || id > 0xFFFFFFFF) {
+                throw new Error("totp.init: encryptionKeys ids must be 0..2^32-1");
+            }
+            const k = opts.encryptionKeys[idStr];
+            if (typeof k !== "string" || k.length !== 32) {
+                throw new Error("totp.init: encryptionKeys[" + id
+                    + "] must be exactly 32 bytes");
+            }
+            keys[id] = bytesToHex(k);
+        }
+        if (keys[opts.current] === undefined) {
+            throw new Error("totp.init: current key id " + opts.current
+                + " not present in encryptionKeys");
+        }
+        current = opts.current;
+        if (opts.legacyKeyVersion !== undefined && opts.legacyKeyVersion !== null) {
+            if (keys[opts.legacyKeyVersion] === undefined) {
+                throw new Error("totp.init: legacyKeyVersion "
+                    + opts.legacyKeyVersion + " not present in encryptionKeys");
+            }
+            legacyVersion = opts.legacyKeyVersion;
+        }
+    } else if (opts.encryptionKey !== undefined && opts.encryptionKey !== null) {
+        if (typeof opts.encryptionKey !== "string"
+            || opts.encryptionKey.length !== 32) {
             throw new Error("totp.init: encryptionKey must be exactly 32 bytes");
         }
+        keys[1] = bytesToHex(opts.encryptionKey);
+        current = 1;
+        legacyVersion = 1;  // pre-versioning rows decrypt under this key
     }
+
     _state.issuer         = opts.issuer         || _state.issuer;
     _state.digits         = opts.digits         || _state.digits;
     _state.period         = opts.period         || _state.period;
     _state.window         = opts.window         !== undefined ? opts.window : _state.window;
     _state.recoveryCodes  = opts.recoveryCodes  || _state.recoveryCodes;
-    _state.encryptionKey  = opts.encryptionKey  || null;
-    _state.encryptionKeyHex = opts.encryptionKey
-        ? bytesToHex(opts.encryptionKey)
-        : null;
+    _state.keys                = keys;
+    _state.currentKeyVersion   = current;
+    _state.legacyKeyVersion    = legacyVersion;
+    _state.encryptionKeyHex    = current != null ? keys[current] : null;
 
     db.batch(() => {
         const stmts = SCHEMA.split(";");
@@ -448,7 +573,15 @@ function verifyWithKind(userId, code) {
         const step = nowStep + offset;
         if (step > row.lastUsedStep
             && ctEq(totpAtStep(row.secret, step, row.digits), code)) {
-            if (markStepUsed(userId, step) === 1) return [true, "totp"];
+            if (markStepUsed(userId, step) === 1) {
+                // Lazy rekey: re-encrypt under current if the row was
+                // stored under an older version.
+                if (_state.currentKeyVersion != null
+                    && row.version !== _state.currentKeyVersion) {
+                    rekeyRow(userId, row.secret);
+                }
+                return [true, "totp"];
+            }
             return [false, null];
         }
     }
@@ -462,10 +595,56 @@ function verifyWithKind(userId, code) {
                 "UPDATE _hull_totp_recovery SET used_at = ? "
                 + "WHERE user_id = ? AND code_hash = ?",
                 [time.now(), userId, rows[i].code_hash]);
+            // Same lazy rekey on the recovery-code path.
+            if (_state.currentKeyVersion != null
+                && row.version !== _state.currentKeyVersion) {
+                rekeyRow(userId, row.secret);
+            }
             return [true, "recovery"];
         }
     }
     return [false, null];
+}
+
+/**
+ * Batch re-encrypt every stored TOTP secret under the current key
+ * version. Use after a key rotation to actively migrate v1 / older
+ * v2 rows forward, instead of waiting for every user to sign in
+ * (lazy rekey-on-verify happens automatically). Scans the full
+ * _hull_totp table once. Returns { scanned, rekeyed, failed }:
+ *   - scanned: total rows considered.
+ *   - rekeyed: rows successfully re-encrypted under current.
+ *   - failed:  rows that wouldn't decrypt under any known key.
+ * Operators can decommission an old key from encryptionKeys once
+ * rekey() reports failed = 0 AND a follow-up scan reports
+ * rekeyed = 0 (every row is already on current).
+ */
+function rekey() {
+    checkInitialized();
+    if (_state.currentKeyVersion == null) {
+        throw new Error("totp.rekey: no encryptionKeys configured; nothing to do");
+    }
+    const cur = _state.currentKeyVersion;
+    const rows = db.query(
+        "SELECT user_id, secret, encrypted FROM _hull_totp");
+    let scanned = 0, rekeyed = 0, failed = 0;
+    for (let i = 0; i < (rows || []).length; i++) {
+        scanned++;
+        const r = rows[i];
+        const [pt, version] = decryptSecret(r.secret, r.encrypted);
+        if (!pt) { failed++; continue; }
+        if (version !== cur) {
+            const [blob] = encryptSecret(pt);
+            try {
+                db.exec(
+                    "UPDATE _hull_totp SET secret = ?, encrypted = 1, "
+                    + "updated_at = ? WHERE user_id = ?",
+                    [blob, time.now(), r.user_id]);
+                rekeyed++;
+            } catch (_e) { failed++; }
+        }
+    }
+    return { scanned: scanned, rekeyed: rekeyed, failed: failed };
 }
 
 function disable(userId) {
@@ -508,16 +687,18 @@ const _test = {
     decryptSecret,
     buildOtpauthUrl,
     reset: () => {
-        _state.issuer            = "Hull";
-        _state.digits            = 6;
-        _state.period            = 30;
-        _state.window            = 1;
-        _state.recoveryCodes     = 10;
-        _state.encryptionKey     = null;
-        _state.encryptionKeyHex  = null;
-        _state.initialized       = false;
+        _state.issuer             = "Hull";
+        _state.digits             = 6;
+        _state.period             = 30;
+        _state.window             = 1;
+        _state.recoveryCodes      = 10;
+        _state.keys               = {};
+        _state.currentKeyVersion  = null;
+        _state.legacyKeyVersion   = null;
+        _state.encryptionKeyHex   = null;
+        _state.initialized        = false;
     },
 };
 
-const totp = { init, enroll, confirm, verify, verifyWithKind, disable, enrolled, _test };
+const totp = { init, enroll, confirm, verify, verifyWithKind, rekey, disable, enrolled, _test };
 export { totp };
