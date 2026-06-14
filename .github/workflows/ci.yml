@@ -257,7 +257,12 @@ jobs:
           sudo apt-get install -y clang
 
       - name: MSan test
-        timeout-minutes: 10
+        # Bumped from 10 → 15 min in round-8. The crypto-heavy auth-
+        # stack unit tests (TOTP enrollment / PBKDF2 verify) plus the
+        # round-8 additions push the total MSan runtime past 10 min on
+        # GitHub's shared runners. Bumping the cap is cheaper than
+        # cutting test coverage; PBKDF2 isn't going to get faster.
+        timeout-minutes: 15
         run: make msan
 
   analyze:
