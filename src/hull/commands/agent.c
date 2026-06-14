@@ -12,6 +12,8 @@
  *   hull agent db query "SQL" [app_dir]    — run read-only query
  *   hull agent request METHOD PATH [opts]  — HTTP request to dev server
  *   hull agent status                      — dev server status
+ *   hull agent auth-status [--path PATH]   — auth-stack health probe
+ *                                            (proxies hull/web/auth-health)
  *   hull agent errors                      — structured errors from last reload
  *   hull agent test [app_dir]              — run tests
  *   hull agent context --task=T --level=L  — task-relevant documentation
@@ -161,6 +163,38 @@ static int cmd_request(int argc, char **argv)
     ShJsonBuf out;
     sh_json_buf_init(&out);
     int rc = hl_agent_request(method, path, port, body, headers, header_count, &out);
+    return output_result(&out, rc);
+}
+
+/* hull agent auth-status [-p PORT] [--path PATH]
+ *
+ * Thin wrapper over `hull agent request GET <path>`. Default path
+ * is /admin/auth-status, matching hull/web/auth-health's default
+ * routes() mount point. Apps wire that handler in their startup;
+ * this command just fetches + pretty-prints the JSON for AI/ops use. */
+static int cmd_auth_status(int argc, char **argv)
+{
+    int port = 3000;
+    const char *path = "/admin/auth-status";
+
+    for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
+            char *e;
+            long v = strtol(argv[++i], &e, 10);
+            if (*e != '\0' || v < 1 || v > 65535) {
+                fprintf(stderr, "hull agent auth-status: "
+                                "invalid port: %s\n", argv[i]);
+                return 1;
+            }
+            port = (int)v;
+        } else if (strcmp(argv[i], "--path") == 0 && i + 1 < argc) {
+            path = argv[++i];
+        }
+    }
+
+    ShJsonBuf out;
+    sh_json_buf_init(&out);
+    int rc = hl_agent_request("GET", path, port, NULL, NULL, 0, &out);
     return output_result(&out, rc);
 }
 
@@ -722,6 +756,8 @@ int hl_cmd_agent(int argc, char **argv, const HlCommandEnv *env)
         return cmd_request(sub_argc, sub_argv);
     if (strcmp(sub, "status") == 0)
         return cmd_status(sub_argc, sub_argv);
+    if (strcmp(sub, "auth-status") == 0)
+        return cmd_auth_status(sub_argc, sub_argv);
     if (strcmp(sub, "errors") == 0)
         return cmd_errors(sub_argc, sub_argv, env);
     if (strcmp(sub, "test") == 0)

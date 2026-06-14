@@ -281,12 +281,27 @@ function cleanup() {
                     [cutoff]) || 0;
 }
 
+/**
+ * Read-only view: is the auto-daily cleanup timer scheduled in
+ * this process? Used by hull:web:auth-health to surface "audit log
+ * will be pruned" in the health JSON.
+ */
+function isCleanupScheduled() {
+    return _state.catchupDone === true && _state.cleanupScheduled === true;
+}
+
 const _test = {
     normalizeUa,
     ipPrefix,
-    reset: () => { _state.retainDays = 365; _state.initialized = false; },
+    reset: () => {
+        _state.retainDays      = 365;
+        _state.fingerprintSalt = null;
+        _state.catchupDone     = false;
+        _state.cleanupScheduled = false;
+        _state.initialized     = false;
+    },
 };
 
 const auditLog = { init, record, list, listDevices, isNewDevice,
-                    fingerprint, cleanup, _test };
+                    fingerprint, cleanup, isCleanupScheduled, _test };
 export { auditLog };

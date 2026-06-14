@@ -340,11 +340,25 @@ function audit_log.cleanup()
                     { cutoff }) or 0
 end
 
+--- Read-only view: is the auto-daily cleanup timer scheduled in
+-- this process? Used by hull/web/auth-health to surface "audit log
+-- will be pruned" in the health JSON.
+-- @treturn boolean
+function audit_log.is_cleanup_scheduled()
+    return _state._catchup_done == true and _state._cleanup_scheduled == true
+end
+
 -- Exposed for tests (mocking time, inspecting normalize behavior).
 audit_log._test = {
     normalize_ua = normalize_ua,
     ip_prefix    = ip_prefix,
-    reset = function() _state.retain_days = 365; _state._initialized = false end,
+    reset = function()
+        _state.retain_days       = 365
+        _state.fingerprint_salt  = nil
+        _state._catchup_done     = false
+        _state._cleanup_scheduled = false
+        _state._initialized      = false
+    end,
 }
 
 return audit_log

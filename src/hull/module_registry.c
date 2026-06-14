@@ -328,6 +328,20 @@ static const HlModuleSpec REGISTRY[] = {
                  "hull/web/middleware/ratelimit", 0},
     },
     {
+        /* Runtime health probes for the auth stack. Read-only —
+         * checks the shape of _hull_* tables, pwned.health() state,
+         * audit-log cleanup scheduling. Apps wire auth_health.routes
+         * to expose a JSON endpoint that the `hull agent auth-status`
+         * CLI consumes. Statically imports audit-log + pwned so the
+         * `cleanup_scheduled` and `pwned.health()` probes work
+         * without dynamic require (QuickJS limitation). */
+        .name = "hull/web/auth-health",
+        .api_major = 1, .intrinsic = 0, .pure = 0,
+        .required_caps = HL_MOD_CAP_DB,
+        .deps = {"hull/db", "hull/web/middleware/audit-log",
+                 "hull/web/pwned", 0},
+    },
+    {
         .name = "hull/web/cookie",
         .api_major = 1, .intrinsic = 0, .pure = 1,
         .required_caps = 0, .deps = {0},
