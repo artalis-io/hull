@@ -194,30 +194,40 @@ end
 -- @tparam string session_id
 -- @tparam table data  Replacement payload (JSON-encoded).
 -- @tparam[opt] table opts  `{ ttl = integer }`.
+-- @treturn boolean  true if a row was updated, false otherwise
+-- (unknown / expired session id). Mirrors JS.
 function session.update(session_id, data, opts)
     if not session_id or session_id == "" then
-        return
+        return false
     end
 
     local now = time.now()
     local ttl = (opts and opts.ttl) or _ttl
     local encoded = json.encode(data or {})
 
-    db.exec(
-        "UPDATE _hull_sessions SET data = ?, last_accessed = ?, expires_at = ? WHERE id = ?",
-        { encoded, now, now + ttl, session_id }
+    -- AND expires_at > ? prevents reviving a session that the user
+    -- already let expire. Matches the JS guard so apps that check
+    -- the return get the same semantics on both runtimes.
+    local affected = db.exec(
+        "UPDATE _hull_sessions SET data = ?, last_accessed = ?, expires_at = ? "
+        .. "WHERE id = ? AND expires_at > ?",
+        { encoded, now, now + ttl, session_id, now }
     )
+    return (affected or 0) > 0
 end
 
 --- Destroy a session by id.
 --
 -- @tparam string session_id  Empty / nil is a no-op.
+-- @treturn boolean  true if a row was deleted, false otherwise.
 function session.destroy(session_id)
     if not session_id or session_id == "" then
-        return
+        return false
     end
 
-    db.exec("DELETE FROM _hull_sessions WHERE id = ?", { session_id })
+    local affected = db.exec(
+        "DELETE FROM _hull_sessions WHERE id = ?", { session_id })
+    return (affected or 0) > 0
 end
 
 --- Delete all expired sessions.

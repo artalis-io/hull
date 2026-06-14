@@ -30,9 +30,14 @@ local auth = {}
 --
 -- @tparam[opt] table opts  Options:
 --
---   - `cookie_name` (string, default `"hull_session"`)
---   - `optional`    (boolean, default `false`)
---   - `login_path`  (string, default `nil`): on failure, redirect here
+--   - `cookie_name`   (string, default `"hull_session"`)
+--   - `cookie_opts`   (table): forwarded to @{hull.web.cookie.clear} on
+--                     stale-cookie cleanup.
+--   - `optional`      (boolean, default `false`)
+--   - `login_path`    (string, default `nil`): on failure, redirect here
+--   - `exclude_paths` (array of strings): skip this middleware on these
+--                     paths. Each entry is either an exact match
+--                     ("/health") or a "/prefix/*" pattern. Mirrors JS.
 --
 -- @treturn function  Middleware `(req, res) -> integer`.
 -- @usage
@@ -40,13 +45,27 @@ local auth = {}
 function auth.session_middleware(opts)
     opts = opts or {}
     local cookie_name = opts.cookie_name or "hull_session"
+    local cookie_opts = opts.cookie_opts
     local optional = opts.optional or false
     local login_path = opts.login_path
+    local exclude_paths = opts.exclude_paths or {}
 
     return function(req, res)
+        -- Path-prefix skip (cheap; runs first).
+        local p = req.path or ""
+        for i = 1, #exclude_paths do
+            local ep = exclude_paths[i]
+            if ep:sub(-2) == "/*" then
+                if p:sub(1, #ep - 1) == ep:sub(1, -2) then return 0 end
+            elseif p == ep then
+                return 0
+            end
+        end
+
         -- Parse cookies from request
         local cookies = cookie.parse(req.headers["cookie"])
         local session_id = cookies[cookie_name]
+        local stale = false
 
         if session_id then
             local data = session.load(session_id)
@@ -55,6 +74,13 @@ function auth.session_middleware(opts)
                 req.ctx.session_id = session_id
                 return 0
             end
+            stale = true  -- cookie present but session unknown/expired
+        end
+
+        -- Clear the stale cookie so the browser doesn't keep sending
+        -- it on subsequent requests (matches the JS behavior).
+        if stale then
+            res:header("Set-Cookie", cookie.clear(cookie_name, cookie_opts))
         end
 
         -- No valid session
@@ -86,8 +112,10 @@ end
 --
 -- @tparam table opts  Options:
 --
---   - `secret`   (string, **required**): HMAC-SHA256 secret used by @{hull.jwt.verify}.
---   - `optional` (boolean, default `false`): continue without a valid token.
+--   - `secret`        (string, **required**): HMAC-SHA256 secret used by @{hull.jwt.verify}.
+--   - `optional`      (boolean, default `false`): continue without a valid token.
+--   - `exclude_paths` (array of strings): skip this middleware on these
+--                     paths. Each entry is an exact match or "/prefix/*".
 --
 -- @treturn function  Middleware `(req, res) -> integer`.
 -- @raise At factory time if `opts.secret` is missing.
@@ -99,8 +127,19 @@ function auth.jwt_middleware(opts)
 
     local secret = opts.secret
     local optional = opts.optional or false
+    local exclude_paths = opts.exclude_paths or {}
 
     return function(req, res)
+        local p = req.path or ""
+        for i = 1, #exclude_paths do
+            local ep = exclude_paths[i]
+            if ep:sub(-2) == "/*" then
+                if p:sub(1, #ep - 1) == ep:sub(1, -2) then return 0 end
+            elseif p == ep then
+                return 0
+            end
+        end
+
         -- Read Authorization: Bearer <token>
         local auth_header = req.headers["authorization"]
         if not auth_header then
@@ -146,19 +185,29 @@ end
 --
 --   - `cookie_name` (string, default `"hull_session"`)
 --   - `cookie_opts` (table): forwarded to @{hull.web.cookie.serialize}.
+--   - `ttl`         (integer, seconds): convenience that auto-fills
+--                   `cookie_opts.max_age` when the caller didn't.
+--                   Mirrors the JS option.
 --
 -- @treturn string  Newly-created session id (hex).
 -- @usage
 -- app.post("/login", function(req, res)
 --     local user = authenticate(req)
 --     if not user then return res:status(401):json({ error = "bad credentials" }) end
---     auth.login(req, res, { user_id = user.id })
+--     auth.login(req, res, { user_id = user.id }, { ttl = 86400 })
 --     res:json({ ok = true })
 -- end)
 function auth.login(_req, res, user_data, opts)
     opts = opts or {}
     local cookie_name = opts.cookie_name or "hull_session"
     local cookie_opts = opts.cookie_opts or {}
+    if cookie_opts.max_age == nil and opts.ttl then
+        -- Copy on write so we don't mutate the caller's table.
+        local merged = {}
+        for k, v in pairs(cookie_opts) do merged[k] = v end
+        merged.max_age = opts.ttl
+        cookie_opts = merged
+    end
 
     local session_id = session.create(user_data)
 

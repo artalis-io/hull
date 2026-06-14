@@ -132,7 +132,7 @@ end
 -- @treturn {string,...}  Array of role names (possibly empty).
 function rbac.roles(user_id)
     local rows = db.query(
-        "SELECT role FROM _hull_user_roles WHERE user_id = ?",
+        "SELECT role FROM _hull_user_roles WHERE user_id = ? ORDER BY role",
         { user_id }
     )
     local result = {}
@@ -150,7 +150,7 @@ function rbac.permissions(user_id)
     local rows = db.query(
         [[SELECT DISTINCT rp.permission FROM _hull_user_roles ur
           JOIN _hull_role_permissions rp ON ur.role = rp.role
-          WHERE ur.user_id = ?]],
+          WHERE ur.user_id = ? ORDER BY rp.permission]],
         { user_id }
     )
     local result = {}

@@ -51,6 +51,7 @@ function sessionMiddleware(opts) {
     const o = opts || {};
     const cookieName = o.cookieName || "hull_session";
     const loginPath = o.loginPath || null;
+    const optional = o.optional === true;
     const excludePaths = o.excludePaths || [];
 
     return function sessionMw(req, res) {
@@ -70,6 +71,7 @@ function sessionMiddleware(opts) {
         const sessionId = cookies[cookieName];
 
         if (!sessionId) {
+            if (optional) return 0;
             if (loginPath) {
                 res.status(302);
                 res.header("Location", loginPath);
@@ -85,6 +87,7 @@ function sessionMiddleware(opts) {
         if (!data) {
             // Session expired or invalid -- clear the stale cookie
             res.header("Set-Cookie", cookie.clear(cookieName, o.cookieOpts));
+            if (optional) return 0;
             if (loginPath) {
                 res.status(302);
                 res.header("Location", loginPath);
@@ -125,6 +128,7 @@ function sessionMiddleware(opts) {
 function jwtMiddleware(opts) {
     const o = opts || {};
     const secret = o.secret;
+    const optional = o.optional === true;
     const excludePaths = o.excludePaths || [];
 
     if (!secret)
@@ -146,6 +150,7 @@ function jwtMiddleware(opts) {
         // Extract token from Authorization header
         const authHeader = req.header("Authorization");
         if (!authHeader || !authHeader.startsWith("Bearer ")) {
+            if (optional) return 0;
             res.status(401);
             res.json({ error: "missing bearer token" });
             return 1;
@@ -156,6 +161,7 @@ function jwtMiddleware(opts) {
 
         // jwt.verify returns [payload, null] on success, [null, "reason"] on failure
         if (!result[0]) {
+            if (optional) return 0;
             res.status(401);
             res.json({ error: result[1] || "invalid token" });
             return 1;

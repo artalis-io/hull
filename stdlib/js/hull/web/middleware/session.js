@@ -341,7 +341,13 @@ function loginHandler(cookieMod, opts) {
     });
 
     return function (req, res, user, ctx) {
-        if (!user || typeof user !== "object" || !user.id || user.id === "")
+        if (!user || typeof user !== "object")
+            throw new Error("session.loginHandler: user.id is required");
+        // Accept integer 0 as a valid id (mirrors Lua's nil/"" check);
+        // `!user.id` would reject 0 and break apps with INTEGER PRIMARY
+        // KEY user_ids seeded at 0.
+        const id = user.id;
+        if (id === undefined || id === null || id === "")
             throw new Error("session.loginHandler: user.id is required");
         const data = extractData(user) || {};
         let sid;
