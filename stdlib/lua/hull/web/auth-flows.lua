@@ -529,8 +529,13 @@ local function handle_register(req, res)
     if not is_email_ish(body.email) then
         return res:status(400):json({ error = "invalid email" })
     end
-    if type(body.password) ~= "string" or #body.password < 8 then
-        return res:status(400):json({ error = "password too short" })
+    -- 256 char upper bound prevents PBKDF2 amplification DoS — a
+    -- 10 MB submitted password would hash for multiple seconds at
+    -- the default 600k iters. 256 covers any realistic passphrase
+    -- (bcrypt's hard limit is 72 for comparison).
+    if type(body.password) ~= "string"
+       or #body.password < 8 or #body.password > 256 then
+        return res:status(400):json({ error = "invalid password length" })
     end
     -- Pwned-password check runs BEFORE user_find_by_email so a
     -- breached password is rejected with the same error regardless
@@ -648,7 +653,12 @@ end
 
 local function handle_login(req, res)
     local body = parse_body(req)
-    if not is_email_ish(body.email) or type(body.password) ~= "string" then
+    -- 256 char upper bound matches register; prevents PBKDF2
+    -- amplification DoS via mega-passwords. Generic error keeps
+    -- enumeration-safety (over-length is just another wrong cred).
+    if not is_email_ish(body.email)
+       or type(body.password) ~= "string"
+       or #body.password > 256 then
         return res:status(400):json({ error = "invalid credentials" })
     end
     local user = _state.user_find_by_email(body.email)
@@ -811,8 +821,10 @@ end
 
 local function handle_password_reset_confirm(req, res)
     local body = parse_body(req)
-    if type(body.password) ~= "string" or #body.password < 8 then
-        return res:status(400):json({ error = "password too short" })
+    -- Same upper bound as handle_register; see comment there.
+    if type(body.password) ~= "string"
+       or #body.password < 8 or #body.password > 256 then
+        return res:status(400):json({ error = "invalid password length" })
     end
     -- Same pwned-password gate as register so a reset can't be used
     -- to land on a breached password.
@@ -1203,11 +1215,13 @@ function M.init(opts)
     -- emails over the network by timing. Pre-compute a dummy hash
     -- of a fixed sentinel so handle_login can run verify_password
     -- against it on the unknown-email branch and pay the same cost.
-    -- The hash is computed once at init and reused per request.
-    -- enumeration_safe = false (opt-out) skips the dummy verify;
-    -- only set it for tests that don't care about timing observables.
-    _state._dummy_pwhash = crypto.hash_password(
-        "auth-flows-dummy-sentinel-never-matches-real-password")
+    -- The hash is computed once per process and reused per request
+    -- AND per re-init (test fixtures call init() many times; each
+    -- PBKDF2 was costing 50-200ms of boot time before this cache).
+    if not _state._dummy_pwhash then
+        _state._dummy_pwhash = crypto.hash_password(
+            "auth-flows-dummy-sentinel-never-matches-real-password")
+    end
     _state.verify_ttl       = opts.verify_ttl       or _state.verify_ttl
     _state.reset_ttl        = opts.reset_ttl        or _state.reset_ttl
     _state.magic_link_ttl   = opts.magic_link_ttl   or _state.magic_link_ttl

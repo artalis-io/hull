@@ -367,8 +367,13 @@ async function handleRegister(req, res) {
     if (!isEmailIsh(body.email)) {
         return res.status(400).json({ error: "invalid email" });
     }
-    if (typeof body.password !== "string" || body.password.length < 8) {
-        return res.status(400).json({ error: "password too short" });
+    // 256 char upper bound prevents PBKDF2 amplification DoS — a
+    // 10 MB submitted password would hash for multiple seconds at
+    // the default 600k iters. 256 covers any realistic passphrase
+    // (bcrypt's hard limit is 72 for comparison).
+    if (typeof body.password !== "string"
+        || body.password.length < 8 || body.password.length > 256) {
+        return res.status(400).json({ error: "invalid password length" });
     }
     // Pwned check runs BEFORE userFindByEmail so the same error
     // returns regardless of whether the email already exists.
@@ -459,7 +464,12 @@ function startTotpPending(req, res, user) {
 
 function handleLogin(req, res) {
     const body = parseBody(req);
-    if (!isEmailIsh(body.email) || typeof body.password !== "string") {
+    // 256 char upper bound matches register; prevents PBKDF2
+    // amplification DoS via mega-passwords. Generic error keeps
+    // enumeration-safety (over-length is just another wrong cred).
+    if (!isEmailIsh(body.email)
+        || typeof body.password !== "string"
+        || body.password.length > 256) {
         return res.status(400).json({ error: "invalid credentials" });
     }
     const user = _state.userFindByEmail(body.email);
@@ -595,8 +605,10 @@ function handlePasswordResetRequest(req, res) {
 
 async function handlePasswordResetConfirm(req, res) {
     const body = parseBody(req);
-    if (typeof body.password !== "string" || body.password.length < 8) {
-        return res.status(400).json({ error: "password too short" });
+    // Same upper bound as handleRegister; see comment there.
+    if (typeof body.password !== "string"
+        || body.password.length < 8 || body.password.length > 256) {
+        return res.status(400).json({ error: "invalid password length" });
     }
     if (await checkPwned(body.password)) {
         return res.status(400).json({
@@ -932,13 +944,13 @@ function init(opts) {
                                   ? opts.loginRatelimit : false;
 
     // Timing-safe email enumeration defense — see handleLogin. The
-    // dummy hash is computed once at init() and reused per request,
-    // so the per-request cost is one verifyPassword (matching the
-    // known-email branch). enumerationSafe = false (opt-out) skips
-    // the dummy verify; only set it for tests that don't care
-    // about timing observables.
-    _state._dummyPwhash = crypto.hashPassword(
-        "auth-flows-dummy-sentinel-never-matches-real-password");
+    // dummy hash is computed once per process and reused per request
+    // AND per re-init (test fixtures call init() many times; each
+    // PBKDF2 was costing 50-200ms of boot time before this cache).
+    if (!_state._dummyPwhash) {
+        _state._dummyPwhash = crypto.hashPassword(
+            "auth-flows-dummy-sentinel-never-matches-real-password");
+    }
     _state.verifyTtl       = opts.verifyTtl       || _state.verifyTtl;
     _state.resetTtl        = opts.resetTtl        || _state.resetTtl;
     _state.magicLinkTtl    = opts.magicLinkTtl    || _state.magicLinkTtl;

@@ -54,12 +54,15 @@ function init(opts) {
     // apps in CLI flavor (where the daily timer never fires
     // because app.main exits before 03:00) still bound their
     // _hull_audit_log growth. Cheap — a single DELETE WHERE
-    // event_at < cutoff over an indexed range.
-    if (opts.cleanup !== false) {
+    // event_at < cutoff over an indexed range. Guarded against
+    // repeated init() calls in the same process (test fixtures,
+    // hot reload) so the DB scan only runs once per startup.
+    if (opts.cleanup !== false && !_state.catchupDone) {
         try { cleanup(); }
         catch (e) {
             log.warn("audit-log: init-time cleanup failed: " + (e && e.message || e));
         }
+        _state.catchupDone = true;
     }
 
     // Auto-schedule daily cleanup unless opted out. Prevents
@@ -166,7 +169,20 @@ function record(userId, kind, req, opts) {
     // derived fingerprint is always 16 chars (sha256 prefix).
     let fp = opts.fingerprint || fingerprint(req);
     if (typeof fp === "string" && fp.length > 64) fp = fp.substring(0, 64);
-    const meta = opts.metadata !== undefined ? json.encode(opts.metadata) : null;
+    // Metadata column cap. Apps that accidentally put request bodies
+    // or debug dumps into metadata otherwise grow the column without
+    // bound (default 365-day retention compounds the damage). 4 KB
+    // is generous for the canonical { factors, sub } shape and small
+    // enough that 1M rows stay under 4 GB. Drop with a log.warn on
+    // overflow rather than truncating — a truncated JSON tail is
+    // unparseable.
+    const META_MAX = 4096;
+    let meta = opts.metadata !== undefined ? json.encode(opts.metadata) : null;
+    if (meta !== null && meta.length > META_MAX) {
+        log.warn("audit-log: metadata for kind '" + kind + "' is "
+            + meta.length + " bytes (max " + META_MAX + "); dropping");
+        meta = null;
+    }
     db.exec(
         "INSERT INTO _hull_audit_log "
         + "(user_id, event_at, kind, ip, user_agent, fingerprint, "

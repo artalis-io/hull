@@ -101,6 +101,12 @@ function create(data, opts) {
         if (xff) ip = (xff.split(",")[0] || xff).trim();
         else ip = opts.req.remote_addr || null;
         ua = h["user-agent"] || null;
+        // Real UAs top out around 500 chars; bots and scanners can
+        // send 100KB UAs. Cap to bound the row size — the value is
+        // only used for the /devices listing display.
+        if (typeof ua === "string" && ua.length > 512) {
+            ua = ua.substring(0, 512);
+        }
     }
 
     db.exec(

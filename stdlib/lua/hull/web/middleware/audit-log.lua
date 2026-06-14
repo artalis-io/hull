@@ -76,13 +76,16 @@ function audit_log.init(opts)
     -- apps in CLI flavor (where the daily timer never fires
     -- because app.main exits before 03:00) still bound their
     -- _hull_audit_log growth. Cheap — a single DELETE WHERE
-    -- event_at < cutoff over an indexed range. Skipped only
-    -- when opts.cleanup = false.
-    if opts.cleanup ~= false then
+    -- event_at < cutoff over an indexed range. Guarded against
+    -- repeated init() calls in the same process (test fixtures,
+    -- hot reload) so the DB scan only runs once per startup,
+    -- not per re-init. Skipped when opts.cleanup = false.
+    if opts.cleanup ~= false and not _state._catchup_done then
         local ok, err = pcall(audit_log.cleanup)
         if not ok then
             log.warn("audit-log: init-time cleanup failed: " .. tostring(err))
         end
+        _state._catchup_done = true
     end
 
     -- Auto-schedule daily cleanup unless opted out. Prevents
@@ -198,9 +201,23 @@ function audit_log.record(user_id, kind, req, opts)
     -- fingerprint is always 16 chars (sha256 prefix).
     local fp = opts.fingerprint or audit_log.fingerprint(req)
     if type(fp) == "string" and #fp > 64 then fp = fp:sub(1, 64) end
+    -- Metadata column cap. Apps that accidentally put request bodies
+    -- or debug dumps into metadata otherwise grow the column without
+    -- bound (default 365-day retention compounds the damage). 4 KB
+    -- is generous for the canonical { factors = ..., sub = ... }
+    -- shape and small enough that 1M rows stay under 4 GB. Drop
+    -- with a log.warn on overflow rather than truncating, since a
+    -- truncated JSON tail is unparseable.
+    local META_MAX = 4096
     local meta = nil
     if opts.metadata ~= nil then
         meta = json.encode(opts.metadata)
+        if #meta > META_MAX then
+            log.warn(string.format(
+                "audit-log: metadata for kind '%s' is %d bytes (max %d); dropping",
+                kind, #meta, META_MAX))
+            meta = nil
+        end
     end
     db.exec(
         "INSERT INTO _hull_audit_log "

@@ -354,6 +354,18 @@ local function handle_callback(req, res)
     local cfg = provider_name and _state.providers[provider_name]
     if not cfg then return res:status(404):html("unknown provider") end
 
+    -- Clear the state cookie unconditionally on every callback,
+    -- success or failure. State cookies are single-use by design;
+    -- a failed callback (state verify failure, token exchange
+    -- 502, id_token verify failure, etc.) used to leave the
+    -- cookie alive for state_ttl (600s default), giving an
+    -- attacker a window to spam failure paths and pin the
+    -- victim's cookie at a known value. Cleared here covers
+    -- every branch below.
+    res:header("Set-Cookie",
+        cookie.clear(_state.state_cookie,
+                     { path = _state.state_cookie_path }))
+
     -- 1. Read + verify state cookie.
     local cookies = cookie.parse(req.headers.cookie or "")
     local env, err = verify_state(cookies[_state.state_cookie])
@@ -438,10 +450,8 @@ local function handle_callback(req, res)
         return res:status(400):html("auth failed")
     end
 
-    -- 6. Clear the single-use state cookie.
-    res:header("Set-Cookie",
-        cookie.clear(_state.state_cookie,
-                     { path = _state.state_cookie_path }))
+    -- (State cookie was cleared at the top of the handler — every
+    -- callback consumes the cookie regardless of outcome.)
 
     -- 7. Resolve claims -> app's user object via find_user, then
     --    hand off via on_login(req, res, user, ctx). on_login's

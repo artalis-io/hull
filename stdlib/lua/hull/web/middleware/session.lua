@@ -122,6 +122,12 @@ function session.create(data, opts)
             ip = opts.req.remote_addr
         end
         ua = h and h["user-agent"]
+        -- Real UAs top out around 500 chars; bots and scanners can
+        -- send 100KB UAs. Cap to bound the row size — the value is
+        -- only used for the /devices listing display.
+        if type(ua) == "string" and #ua > 512 then
+            ua = ua:sub(1, 512)
+        end
     end
 
     db.exec(

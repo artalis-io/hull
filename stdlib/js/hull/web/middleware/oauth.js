@@ -371,6 +371,17 @@ async function handleCallback(req, res) {
     const cfg = providerName ? _state.providers[providerName] : null;
     if (!cfg) { res.status(404).html("unknown provider"); return; }
 
+    // Clear the state cookie unconditionally on every callback,
+    // success or failure. State cookies are single-use by design;
+    // a failed callback (state verify failure, token exchange
+    // 502, id_token verify failure, etc.) used to leave the
+    // cookie alive for stateTtl (600s default), giving an
+    // attacker a window to spam failure paths and pin the
+    // victim's cookie at a known value. Cleared here covers
+    // every branch below.
+    res.header("Set-Cookie", cookie.clear(_state.stateCookie,
+                              { path: _state.stateCookiePath }));
+
     // 1. Read + verify state cookie.
     const cookies = cookie.parse(req.headers.cookie || "");
     const [env, err] = verifyState(cookies[_state.stateCookie]);
@@ -470,9 +481,8 @@ async function handleCallback(req, res) {
         res.status(400).html("auth failed"); return;
     }
 
-    // 6. Single-use state cookie - clear.
-    res.header("Set-Cookie", cookie.clear(_state.stateCookie,
-                              { path: _state.stateCookiePath }));
+    // (State cookie was cleared at the top of the handler — every
+    // callback consumes the cookie regardless of outcome.)
 
     // 7. Resolve claims -> app's user via findUser, then hand off
     //    via onLogin(req, res, user, ctx). The signature now
