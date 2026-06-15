@@ -265,9 +265,34 @@ Analyze deployment readiness. Manifest, directory structure, existing configs.
 }
 ```
 
-### Extended introspection (Phase 6, 2026-05-15)
+### Extended introspection (Phase 6, 2026-05-15; auth-stack additions v0.3.0)
 
-Sixteen additional subcommands close the iterative-edit loop. All JSON to stdout.
+Eighteen additional subcommands close the iterative-edit loop. All JSON to stdout.
+
+#### `hull agent overview [app_dir]`
+
+One-shot snapshot. Composes manifest + modules + capabilities + routes + compute/gpu inventory + cache state into a single JSON document. Cheaper than calling each subcommand individually when an agent just wants "what's this app's overall shape".
+
+#### `hull agent auth-status [app_dir]` (v0.3.0)
+
+Auth-stack health probe. Same shape as `hull.web.auth_health.check({include_counts = true})`: session table presence + count, audit-log cleanup status (`"scheduled" | "external" | "missing"`), pwned reachability (`not_yet_checked | reachable | fail_open`), TOTP enrollment count, RBAC table presence. Used by ops dashboards to surface "did we wire the auth stack correctly?" from the CLI.
+
+```json
+{"sessions":{"ok":true,"sessions":42},
+ "audit_log":{"ok":true,"cleanup":"scheduled","events":1023},
+ "pwned":{"ok":true,"status":"reachable","last_check_at":1717920000},
+ "totp":{"ok":true,"enrolled_users":7},
+ "rbac":{"ok":true,"roles":3,"permissions":12},
+ "all_ok":true}
+```
+
+#### `hull agent tools`
+
+Tool-registry × install-state. Lists every registered side-loadable tool (today: `wamrc`), whether it's available for this platform, whether it's installed, the install path, the expected asset name, and a copy-paste install hint. Independent of `HL_ENABLE_HTTP_CLIENT` — CLI flavors without the installer still list what's registered.
+
+#### `hull agent sbom`
+
+Same data as `hull sbom --format=json`. No `app_dir` argument; reports the running hull binary's SBOM (binary SHA-256, all vendored components with versions, CycloneDX/SPDX co-formats available via `hull sbom`).
 
 #### `hull agent manifest [app_dir]`
 

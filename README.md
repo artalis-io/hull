@@ -95,12 +95,12 @@ Tab-completion for bash, zsh, and fish is shipped in [`completions/`](completion
 
 ## Hull Tools
 
-Hull ships 26 subcommands for the full development lifecycle:
+Hull ships 30+ subcommands for the full development lifecycle:
 
 | Command | Purpose |
 |---------|---------|
 | <code>hull new &lt;name&gt;</code> | Scaffold a new project in a new directory |
-| `hull init [dir]` | Initialize a hull project in-place (idempotent, like `git init`) |
+| `hull init [dir] [--profile htmx]` | Initialize a hull project in-place (idempotent, like `git init`). `--profile htmx` scaffolds a full HTMX + Pico app (CSP nonce, CSRF, session, flash, pagination, search, inline edit) |
 | <code>hull dev &lt;app&gt; [--tui]</code> | Development server with hot reload. [`--tui`](#terminal-ui) streams the child's log into an alt-screen pane with substring filtering, file-watch auto-reload, and `r` for manual reload |
 | <code>hull build -o &lt;out&gt; &lt;dir&gt;</code> | Compile app into a standalone binary |
 | <code>hull build --compiler=tcc\|system\|&lt;path&gt;</code> | Select compiler backend (default: embedded tcc if available, else system cc) |
@@ -125,6 +125,8 @@ Hull ships 26 subcommands for the full development lifecycle:
 | `hull version [--json]` | Print version string (`--json` for machine-readable output) |
 | `hull doctor [--json\|--tui]` | Check environment: compiler, platform embed, module subsystems (DB/WASM/GPU), build readiness. [`--tui`](#terminal-ui) opens a live, color-coded interactive readiness pane with `r` to reprobe and `c` to copy JSON to the clipboard |
 | `hull update [--check] [--force] [--channel=beta]` | Self-update from GitHub releases (verifies SHA-256, atomic replace) |
+| `hull tools install <name>` / `list` / `uninstall <name>` | Side-load optional tools (first: `wamrc`) routed through signed `blob_store` from the same release as the running hull |
+| `hull cache list \| prune \| clear \| verify` | Runtime cache management (Lua/JS bytecode, Lua/JS template, compute AOT, tools store). Per-app isolation via `HULL_CACHE_DIR` |
 | <code>hull &lt;app&gt; --max-instructions N</code> | Set per-request instruction limit (default: 100M) |
 | <code>hull &lt;app&gt; --audit</code> | Enable capability audit logging (JSON to stderr) |
 | <code>hull &lt;app&gt; --max-connections N</code> | Max concurrent connections (default: 256) |
@@ -348,32 +350,61 @@ The resolved set is recorded in `package.sig` as `modules_resolved` and covered 
 
 Hull ships a full set of middleware and utility modules for building secure backends:
 
+**Authentication & authorization** (v0.3.0; 13 audit rounds, converged in round 13):
+
+| Module | Lua | JS | Purpose |
+|--------|-----|-----|---------|
+| `auth-flows` | `hull.web.auth-flows` | `hull:web:auth-flows` | End-to-end auth flows: registration, email verify, login, password reset, magic link, email change, optional TOTP 2FA |
+| `totp` | `hull.web.middleware.totp` | `hull:web:middleware:totp` | RFC 6238 2FA. Dual-row enrollment, multi-key at-rest encryption + rekey, per-user + opt-in per-IP lockout |
+| `oauth` | `hull.web.middleware.oauth` | `hull:web:middleware:oauth` | OIDC Authorization Code + PKCE. Google + Microsoft Entra presets. RS256/384/512 + PS256 + ES256/384 ID-token verify |
+| `audit-log` | `hull.web.middleware.audit-log` | `hull:web:middleware:audit-log` | Append-only auth-event log with per-device fingerprint, tri-state cleanup status, paged salt-rotation helper |
+| `auth-health` | `hull.web.auth-health` | `hull:web:auth-health` | Probe for session / audit-log / pwned / TOTP / RBAC. Backs `hull agent auth-status` |
+| `pwned` | `hull.web.pwned` | `hull:web:pwned` | HIBP k-anonymity check + 80KB embedded offline blocklist |
+| `qrcode` | `hull.qrcode` | `hull:qrcode` | Pure Lua/JS QR Code generator (ISO/IEC 18004), SVG output |
+| `session` | `hull.web.middleware.session` | `hull:web:middleware:session` | Server-side sessions backed by SQLite. Sliding + absolute (24h default) expiry. Device fingerprinting. `login_handler` / `logout_handler` factories |
+| `cookie` | `hull.web.cookie` | `hull:web:cookie` | Cookie parse/serialize. CRLF/NUL/`;` rejection on path/domain/value |
+| `jwt` | `hull.jwt` | `hull:jwt` | JWT sign/verify. HS256 + RS256/384/512 + PS256 + ES256/384. Alg allowlist enforced BEFORE key resolution |
+| `csrf` | `hull.web.middleware.csrf` | `hull:web:middleware:csrf` | Stateless CSRF tokens via HMAC-SHA256. Per-form-pair + body-size caps |
+| `auth` | `hull.web.middleware.auth` | `hull:web:middleware:auth` | Session-based + JWT-based authentication middleware factories |
+| `rbac` | `hull.web.middleware.rbac` | `hull:web:middleware:rbac` | Role-based access control |
+| `csp` | `hull.web.middleware.csp` | `hull:web:middleware:csp` | Content-Security-Policy middleware with per-request nonce (htmx / strict profiles) |
+
+**Files, storage, MIME** (v0.3.0):
+
+| Module | Lua | JS | Purpose |
+|--------|-----|-----|---------|
+| `attachment` | `hull.attachment` | `hull:attachment` | File-attachment store backed by `hull/blob@1`. Multipart-part ingestion, content-addressed dedup, refcount GC |
+| `attachment-serve` | `hull.web.attachment-serve` | `hull:web:attachment-serve` | Serve attachments with Content-Type + ETag + Range |
+| `blob` | `hull.blob` | `hull:blob` | Streaming content-addressed blob storage (writer / reader / hard-link layout) |
+| `mime` | `hull.mime` | `hull:mime` | MIME type sniffer (magic-bytes + extension fallback) |
+
+**HTMX + page composition**:
+
+| Module | Lua | JS | Purpose |
+|--------|-----|-----|---------|
+| `template` | `hull.template` | `hull:template` | HTML template engine with inheritance, includes, filters, auto-escaping |
+| `htmx` | `hull.web.htmx` | `hull:web:htmx` | HTMX server helpers: `is()`, `trigger()`, `reswap()`, `redirect()`, response headers |
+| `flash` | `hull.web.flash` | `hull:web:flash` | Session-backed flash messages with HX-Trigger integration |
+| `pagination` | `hull.web.pagination` | `hull:web:pagination` | Page/per_page query parsing + safe URL builder + offset/limit math |
+| `form` | `hull.web.form` | `hull:web:form` | URL-encoded form body parsing |
+| `validate` | `hull.validate` | `hull:validate` | Declarative input validation with schema rules |
+| `i18n` | `hull.i18n` | `hull:i18n` | Internationalization: locale detection, translations, formatting |
+
+**Resilience & observability**:
+
 | Module | Lua | JS | Purpose |
 |--------|-----|-----|---------|
 | `cors` | `hull.web.middleware.cors` | `hull:web:middleware:cors` | CORS headers + preflight handling |
 | `ratelimit` | `hull.web.middleware.ratelimit` | `hull:web:middleware:ratelimit` | In-memory rate limiting with configurable windows |
-| `csrf` | `hull.web.middleware.csrf` | `hull:web:middleware:csrf` | Stateless CSRF token generation/verification |
-| `auth` | `hull.web.middleware.auth` | `hull:web:middleware:auth` | Session-based and JWT-based authentication middleware |
-| `session` | `hull.web.middleware.session` | `hull:web:middleware:session` | Server-side sessions backed by SQLite |
-| `cookie` | `hull.web.cookie` | `hull:web:cookie` | Cookie parse/serialize helpers |
-| `jwt` | `hull.jwt` | `hull:jwt` | JWT sign/verify (HMAC-SHA256) |
-| `template` | `hull.template` | `hull:template` | HTML template engine with inheritance, includes, filters |
-| `htmx` | `hull.web.htmx` | `hull:web:htmx` | HTMX server helpers: `is()`, `trigger()`, `reswap()`, `redirect()`, response headers |
-| `flash` | `hull.web.flash` | `hull:web:flash` | Session-backed flash messages with HX-Trigger integration |
-| `pagination` | `hull.web.pagination` | `hull:web:pagination` | Page/per_page query parsing + safe URL builder + offset/limit math |
-| `csv` | `hull.csv` | `hull:csv` | CSV parse/encode (RFC 4180) |
-| `search` | `hull.search` | `hull:search` | Full-text search (SQLite FTS5) |
-| `rbac` | `hull.web.middleware.rbac` | `hull:web:middleware:rbac` | Role-based access control |
 | `logger` | `hull.web.middleware.logger` | `hull:web:middleware:logger` | Request logging with logfmt output and request IDs |
 | `transaction` | `hull.web.middleware.transaction` | `hull:web:middleware:transaction` | Wraps handlers in SQLite BEGIN IMMEDIATE..COMMIT |
-| `idempotency` | `hull.web.middleware.idempotency` | `hull:web:middleware:idempotency` | Idempotency-Key middleware with response caching |
+| `idempotency` | `hull.web.middleware.idempotency` | `hull:web:middleware:idempotency` | Idempotency-Key middleware with response caching + HTML replay |
 | `outbox` | `hull.web.middleware.outbox` | `hull:web:middleware:outbox` | Transactional outbox for reliable webhook delivery |
 | `inbox` | `hull.web.middleware.inbox` | `hull:web:middleware:inbox` | Inbox deduplication for incoming events/webhooks |
-| `validate` | `hull.validate` | `hull:validate` | Declarative input validation with schema rules |
-| `form` | `hull.web.form` | `hull:web:form` | URL-encoded form body parsing |
-| `i18n` | `hull.i18n` | `hull:i18n` | Internationalization: locale detection, translations, formatting |
 | `health` | `hull.web.middleware.health` | `hull:web:middleware:health` | Health check + readiness endpoints |
 | `etag` | `hull.web.middleware.etag` | `hull:web:middleware:etag` | ETag response helpers with 304 Not Modified |
+| `csv` | `hull.csv` | `hull:csv` | CSV parse/encode (RFC 4180) |
+| `search` | `hull.search` | `hull:search` | Full-text search (SQLite FTS5) |
 | `json` | `hull.json` | (built-in) | JSON encode/decode |
 
 All middleware modules follow the same factory pattern: `module.middleware(opts)` returns a function `(req, res) -> 0|1` where `0` = continue, `1` = short-circuit.

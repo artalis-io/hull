@@ -11,9 +11,11 @@
 - HTTP/2 support (h2c upgrade)
 
 ### Capabilities (C enforcement layer)
-- **Crypto:** SHA-256, SHA-512, HMAC-SHA256, HMAC-SHA512/256, PBKDF2, base64url, random bytes, password hash/verify, Ed25519 (sign/verify/keypair), XSalsa20+Poly1305 secretbox, Curve25519 box
+- **Crypto:** SHA-256 (with SHA-NI runtime dispatch on Linux/Cosmo arm64 + x86_64), SHA-512, SHA-1, incremental SHA-256 hasher, HMAC-SHA256, HMAC-SHA512/256, HMAC-SHA1 (HOTP/TOTP), PBKDF2, base64url, random bytes, password hash/verify, Ed25519 (sign/verify/keypair), XSalsa20+Poly1305 secretbox, Curve25519 box, **asymmetric verify (RS256/384/512, PS256, ES256/384)** via mbedTLS, x509 → SPKI PEM extraction. HMAC backend behind a vtable (`HlHmacBackend`).
 - **Filesystem:** Sandboxed read/write/exists/delete/mmap with path traversal rejection, symlink escape prevention via realpath
-- **Database:** Query/exec with parameterized binding, batch transactions, statement cache, user-defined functions (Lua/JS/WASM)
+- **Database:** Query/exec with parameterized binding, batch transactions, statement cache, user-defined functions (Lua/JS/WASM). SQL dialect helpers behind `HlDbBackend` vtable (SQLite shipped; PostgreSQL backend planned).
+- **Blob storage:** Content-addressed blob store (`hl_blob_store_*`). Per-blob hard-link layout (free dedup), streaming writers + readers. Powers `hull/attachment@1`, runtime bytecode + template caches, compute AOT cache, signed tools install. CLI: `hull cache list|prune|clear|verify`; per-app isolation via `HULL_CACHE_DIR`.
+- **MIME sniffer:** Magic-bytes + extension fallback (`cap/mime.c`).
 - **HTTP client:** Outbound HTTP/HTTPS with host allowlist enforcement (mbedTLS), connection pooling, redirect following, async
 - **Environment:** Allowlist-enforced env var access
 - **Time:** now, now_ms, clock, date, datetime
@@ -27,16 +29,29 @@
 
 ### Standard Library (Lua + JS)
 - `hull.json`. Canonical JSON encode/decode (sorted keys for deterministic signatures)
-- `hull.web.cookie`. Cookie parsing and serialization with secure defaults
-- `hull.web.middleware.session`. Server-side SQLite-backed sessions with sliding expiry
-- `hull.jwt`. JWT HS256 sign/verify/decode (no "none" algorithm, constant-time comparison)
-- `hull.web.middleware.csrf`. Stateless CSRF tokens via HMAC-SHA256
+- `hull.web.cookie`. Cookie parsing and serialization with secure defaults (incl. CRLF/NUL/`;` rejection on path/domain/value)
+- `hull.web.middleware.session`. Server-side SQLite-backed sessions with sliding + absolute (24h default) expiry, device fingerprinting, `login_handler`/`logout_handler` factories
+- `hull.jwt`. JWT sign/verify/decode. HS256 + **RS256/384/512 + PS256 + ES256/384** (dispatched by alg with allowlist enforcement BEFORE key resolution to defeat alg-confusion). No `alg=none`; constant-time HMAC compare; numeric `exp`/`nbf` enforcement.
+- **`hull.web.auth-flows`. End-to-end auth flows: registration / email verification / login / password reset / magic link / email change / optional TOTP 2FA. HMAC-signed envelope tokens, per-recipient email-storm rate limit, `public_origin` / `trusted_hosts` URL-origin gate. 13 audit rounds.**
+- **`hull.web.middleware.totp`. RFC 6238 TOTP. Dual-row enrollment, multi-key at-rest encryption with lazy + batch rekey, per-user + opt-in per-IP brute-force lockout, auto-daily pending-row prune.**
+- **`hull.web.middleware.oauth`. OIDC Authorization Code + PKCE. Google + Microsoft Entra presets (Microsoft `common`/`organizations`/`consumers` auto-pattern). HMAC-signed state cookie binds (provider, state, nonce, PKCE verifier, return_to). `on_login` / `on_logout` callbacks.**
+- **`hull.web.middleware.audit-log`. Append-only sign-in / auth-event log with per-device fingerprint (HMAC-salted UA + IP-prefix). `is_new_device(user_id, req)`, `list_devices(user_id)`, auto-daily cleanup, `cleanup_status() -> "scheduled" | "external" | "missing"`, paged + mutex-guarded `recompute_fingerprints()` for salt rotation.**
+- **`hull.web.auth-health`. Probes for session / audit-log / pwned / TOTP / RBAC. `auth_health.check({include_counts = false})`. `auth_health.routes(app, {auth_check})` mounts `/admin/auth-status` behind a required gate (strict-true admit). Backs `hull agent auth-status`.**
+- **`hull.web.pwned`. HIBP k-anonymity check + 80KB embedded SecLists-10K offline blocklist. Single-flight cache, fail-open on outage with one-shot warn.**
+- **`hull.qrcode`. Pure Lua/JS QR Code generator (ISO/IEC 18004). SVG output with color allowlist on `opts.dark` / `opts.light`.**
+- **`hull.attachment`. File-attachment store backed by `hull/blob@1`. Multipart-part ingestion, content-addressed dedup, refcount GC, paired `hull/web/attachment-serve@1` for Content-Type + ETag + Range serving.**
+- **`hull.blob`. Streaming content-addressed blob storage (writer / reader / hard-link layout). Powers attachments, runtime caches, signed tools install.**
+- **`hull.mime`. MIME type sniffer (magic-bytes + extension fallback).**
+- `hull.web.flash`. Session-backed one-shot user notifications + HTMX `HX-Trigger: {flash:...}` events
+- `hull.web.pagination`. Offset-based pagination with windowed-links nav structure
+- `hull.web.middleware.csrf`. Stateless CSRF tokens via HMAC-SHA256, per-form-pair cap, body-size cap
 - `hull.web.middleware.auth`. Authentication middleware factories (session auth, JWT Bearer auth)
 - `hull.web.middleware.logger`. Request logging with logfmt output and auto-assigned request IDs
 - `hull.web.middleware.transaction`. Wraps handlers in SQLite BEGIN IMMEDIATE..COMMIT
-- `hull.web.middleware.idempotency`. Idempotency-Key middleware with response caching and fingerprinting
+- `hull.web.middleware.idempotency`. Idempotency-Key middleware with response caching, header allowlist+denylist, HTML response replay
 - `hull.web.middleware.outbox`. Transactional outbox for reliable webhook/HTTP delivery with exponential backoff
 - `hull.web.middleware.inbox`. Inbox deduplication for incoming events/webhooks
+- `hull.web.middleware.csp`. Content-Security-Policy middleware with per-request nonce (htmx / strict profiles)
 - `hull.validate`. Declarative input validation with schema rules
 - `hull.web.form`. URL-encoded form body parsing
 - `hull.i18n`. Internationalization with locale detection, message bundles, formatting helpers
@@ -46,6 +61,7 @@
 - `hull.web.middleware.rbac`. Role-based access control
 - `hull.web.middleware.cors`. CORS headers + preflight handling
 - `hull.web.middleware.ratelimit`. In-memory rate limiting with configurable windows
+- `hull.web.htmx`. HTMX server-side helpers (fragment vs page render, HX-Trigger, csrf.refresh)
 - Static file serving. Convention-based (`static/` → `/static/*`), MIME detection, ETag/304, embedded in builds, zero-copy sendfile in dev
 
 ### Background Work
@@ -57,34 +73,47 @@
 ### Build & Deployment
 - `hull build`. Compile Lua/JS apps into standalone binaries (auto-AOT for WASM, embeds all assets)
 - `hull new`. Project scaffolding with example routes and tests
+- `hull init [--profile htmx]`. Initialize a project in-place; `--profile htmx` scaffolds a full HTMX + Pico app
 - `hull dev`. Development server with hot reload
 - `hull test`. In-process test runner (no TCP, memory SQLite, both runtimes)
 - `hull deploy` (deployment config generator (Dockerfile, systemd, fly.toml)) manifest-aware
 - `hull eject`. Export to standalone Makefile project
-- `hull inspect`. Display capabilities and signature status
+- `hull inspect`. Display capabilities and signature status (works on built JS apps too post-v0.3.0)
 - `hull verify`. Dual-layer Ed25519 signature verification
+- `hull verify-self`. One-command running-binary verification (manifest + signature + SHA-256 of running binary)
+- `hull verify-release`. Verify an Ed25519 release-manifest signature (offline)
+- `hull sign-release`. Sign a release manifest (release authority only)
 - `hull keygen`. Ed25519 keypair generation
 - `hull sign-platform`. Sign platform libraries with per-arch hashes
-- `hull manifest`. Extract and print manifest as JSON
+- `hull manifest`. Extract and print manifest as JSON (works on built JS apps too post-v0.3.0)
 - `hull migrate`. SQL migration runner (auto-run on startup, embedded in builds)
 - `hull migrate new` / `hull migrate status`. Migration scaffolding and status
-- `hull agent`. 10 machine-readable subcommands (routes, db schema/query, request, status, errors, test, context, migrate, deploy)
+- `hull sbom`. SBOM output in four formats (human / JSON / CycloneDX 1.5 / SPDX 2.3), includes binary SHA-256, published as signed release artifacts
+- `hull modules available|list|explain`. Module-registry introspection (grouped: Intrinsic / Core / Web / Web middleware)
+- `hull cache list|prune|clear|verify`. Runtime cache management (Lua/JS bytecode, Lua/JS template, compute AOT, tools store)
+- `hull tools install|list|uninstall`. Side-loaded optional tools (first: `wamrc`) routed through signed `blob_store`
+- `hull update [--check]`. Self-update via signed release manifest (Ed25519 + Sigstore/Rekor + SLSA verification)
+- `hull doctor [--json]`. Environment + distribution readiness check
+- `hull agent`. ~25 machine-readable subcommands (routes, db schema/query, request, status, errors, test, context, migrate, deploy, sbom, tools, overview, modules, auth-status, etc.)
+- `hull agent auth-status`. Health probe for the auth stack (session / audit-log / pwned / TOTP / RBAC)
 - `hull mcp`. Stdio MCP server wrapping agent core
-- `hull compute`. WASM module management
+- `hull compute`. WASM module management (new / build / test / check / refresh-header)
 - `hull check`. Full validation (clean + ASan + test + e2e)
 - Multi-arch Cosmopolitan APE builds (`make platform-cosmo`)
 - Self-build reproducibility chain (hull → hull2 → hull3)
+- macOS + Linux reproducible-build CI gate
 
 ### Security
 - Kernel sandbox: pledge/unveil on Linux (seccomp-bpf + landlock) and Cosmopolitan
 - Manifest-driven capability declaration and enforcement
-- Dual-layer Ed25519 signatures (platform + app)
+- **Three-tier trust chain end-to-end verifiable three independent ways:** (a) Ed25519 chain (gethull keys, platform + app + release layers), (b) Sigstore + Rekor transparency log per release (`cosign verify-blob`), (c) SLSA build-provenance attestation per binary (`gh attestation verify`)
 - Platform canary with integrity hash
 - Browser verifier (offline, zero-dependency HTML tool)
 - Runtime startup verification (`--verify-sig`)
 - Shell-free tool mode with compiler allowlist
-- Lua sandbox (removed io/os/load, memory limit, custom allocator)
+- Lua sandbox (removed io/os/load, memory limit, custom allocator, instruction-count gas)
 - QuickJS sandbox (removed eval/std/os, memory limit, instruction-count gas metering)
+- **Auth stack hardened across 13 iterative audit rounds.** Host-header injection closed, host:port + IPv6 + comma-XFF normalized for the URL-origin gate, per-recipient email-storm rate limit, TOTP per-user + per-IP lockout (XFF opt-in), OIDC state cookie HMAC-bound to (provider, state, nonce, PKCE verifier, return_to), audit-log fingerprint salt mandatory, strict-allowlist user sanitization with optional callback.
 
 ### CI/CD
 - Linux, macOS, Cosmopolitan APE builds

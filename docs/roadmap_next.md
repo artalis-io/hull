@@ -1,6 +1,6 @@
 # Hull. Next Features Roadmap
 
-Status: **Active** | Last reviewed: 2026-05-28
+Status: **Active** | Last reviewed: 2026-06-15
 
 Companion to [`roadmap.md`](roadmap.md). That doc records what's built;
 this one tracks the **next** feature batches in priority order.
@@ -23,6 +23,8 @@ For completed historical roadmaps see [`archive/roadmaps/`](archive/roadmaps/).
 - ✅ **v0.1.5 batch**. `hull sbom` and `hull agent sbom` (four formats: human / JSON / CycloneDX 1.5 / SPDX 2.3), per-build auto-refresh via Makefile-injected submodule SHAs, build-flag-gated entries, runtime SHA-256 over embedded CA bundle. macOS reproducibility CI gate (was Linux-only with "verified locally on macOS" caveat; now `make reproducible-check` matrix-tested on both). `docs/POSITIONING.md` operational messaging guide (153 lines). Canonical thesis ("Code became disposable. Trust is not.") + descriptor unified across every Hull-mentioning surface. Site self-hosted (no third-party CDNs). OG card PNG variant. `LICENSING.md` vendored-dependency table. Em-dash sweep across 1100+ instances in all prose files. See [`../CHANGELOG.md#015`](../CHANGELOG.md).
 - ✅ **v0.1.6 batch (§0.3.4 + §0.3.5 + §0.3.6 + §0.3.8 + §0.3.9 + §0.3.11 + §0.3.15)**. Trust chain end-to-end verifiable three independent ways: (a) the existing Ed25519 chain (gethull keys), (b) Sigstore + Rekor transparency log entry per release (`cosign verify-blob`), (c) SLSA build-provenance attestation per binary (`gh attestation verify`). `hull verify-self` one-command binary verification. Signed SBOM published as release artifacts (`hull.sbom.json` / `.cdx.json` / `.spdx.json`) covered by all three signature layers. `binary_sha256` field in `hull sbom` output. All GitHub Actions invocations SHA-pinned. Fork playbook (`docs/fork_playbook.md`, 259 lines) with substantive "why most organisations shouldn't fork" framing. Closes 7 of 15 trust-chain hardening items in [§0.3](#03-trust-chain-hardening-post-v015-gap-analysis). See [`../CHANGELOG.md#016`](../CHANGELOG.md).
 - ✅ **v0.1.10 batch (§1.4 + §1.5.b-X + §1.5.c)**. Three sections of the v0.1.10 milestone fully shipped: (a) generic web stdlib — `hull/web/flash@1` POST/redirect/GET one-shot notifications with both session-stash and `HX-Trigger` paths, and `hull/web/pagination@1` offset-based paginated lists; (b) hull/blob@1 migrations + runtime-infrastructure caches — `hl_blob_store_*` low-level CAS extraction, four runtime caches (Lua/JS bytecode, Lua/JS template), compute-AOT cache via wamrc memoization, tools install via signed blob_store, `hull cache list|prune|clear|verify` CLI surface, `HULL_CACHE_DIR` per-app isolation, `docs/cache.md` standalone reference; (c) HTMX Tier 1 patterns — search+debounce, inline-edit with `csrf.refresh`, loading-indicator scaffold, form re-population on validation error with `partials/_form_field.html`, idempotency-by-default for POST/PATCH including HTML response replay. §1.5.b-X subsystem audit-closed after four passes ([§1.5.b-X](#15b-x-hullblob1-migrations-target-v0110)).
+- ✅ **v0.2.0 batch (§1.3 + §1.5.a)**. Hypermedia profile + web stdlib namespace reorganization. `hull init --profile htmx` scaffolds a complete HTMX + Pico app (CSP nonce, CSRF, session, flash, pagination, search-with-debounce, inline edit, loading indicator, form re-population, idempotency). 20 strictly-web stdlib modules moved under `hull/web/*` with fix-it migration hints. See [`../CHANGELOG.md#020`](../CHANGELOG.md).
+- ✅ **v0.3.0 batch (§1.5.b + §1.5.f, items 1–5 + first-party audit-log)**. Production-grade auth stack: `hull/web/auth-flows@1` (registration / verify / login / password-reset / magic-link / email-change / optional TOTP), `hull/web/middleware/totp@1` (RFC 6238 with dual-row enrollment + multi-key rotation + per-user + per-IP lockout), `hull/web/middleware/oauth@1` (OIDC Authorization Code + PKCE; Google + Microsoft Entra presets), `hull/web/middleware/audit-log@1` (append-only with per-device fingerprint + `cleanup_status` tri-state), `hull/web/auth-health@1` (probe + `hull agent auth-status`), `hull/web/pwned@1` (HIBP k-anonymity + 80KB embedded blocklist), `hull/qrcode@1`. Plus streaming multipart upload (`req:multipart()` / `req.multipart()`), `hull/attachment@1` + `hull/blob@1` + `hull/mime@1`, asymmetric crypto (RS256/384/512, PS256, ES256/384), SHA-NI runtime dispatch. **13 iterative security-audit rounds** converged in round 13 (zero findings, three independent reviewers). 132 commits since v0.2.0. See [`../CHANGELOG.md#030`](../CHANGELOG.md).
 
 ---
 
@@ -777,7 +779,14 @@ and helpers.
       (documented `hx-swap-oob` recipe; promoted to a stdlib module
       in §1.4-1), empty states, testing patterns.
 
-### 1.5.b Streaming multipart + attachment storage (target v0.1.9)
+### 1.5.b Streaming multipart + attachment storage  ✅ Shipped (v0.3.0)
+
+> **Shipped 2026-06-15.** Iterator-shaped `req:multipart()` / `req.multipart()`,
+> per-part + total caps surface as structured 4xx, `hull/attachment@1` +
+> `hull/blob@1` + `hull/mime@1` content-addressed storage with refcount
+> GC, photo-upload demo in `examples/hypermedia_photos`. See
+> [`../CHANGELOG.md#030`](../CHANGELOG.md). Locked design decisions below
+> preserved as historical record.
 
 **Locked design decisions (2026-05-31):**
 
@@ -927,7 +936,7 @@ and helpers.
       MIME-validation (header + sniff), storage layout, refcount GC,
       `attachment.scrub()` for ops, manifest declaration.
 
-### 1.5.b-X. hull/blob@1 migrations (target v0.1.10)
+### 1.5.b-X. hull/blob@1 migrations  ✅ Shipped (v0.1.10, audit-closed v0.3.0)
 
 > **Subsystem status: CLOSED.** Three audit cycles converged on
 > "no further work." `commands/cache.c` graded A, runtime cache
@@ -1339,7 +1348,7 @@ Tasks (target v0.1.10):
       from (matches the comment in `vendor/keel/Makefile` about
       fat-cosmo using cosmo's `ar`).
 
-### 1.5.c HTMX-specific stdlib companions. Tier 1 (target v0.1.10)
+### 1.5.c HTMX-specific stdlib companions. Tier 1  ✅ Shipped (v0.1.10)
 
 **Motivation.** v0.1.8 shipped the HTMX core (helper module, CSP, CSRF,
 session, scaffold, example, docs). v0.1.9 adds multipart for file
@@ -1551,66 +1560,40 @@ needs its own design pass + estimate before scheduling. Items marked
 `[COMMERCIAL]` are intended for the enterprise tier
 (see [Licensing tiers](#licensing-tiers-planning-convention) above).
 
-- [ ] Asymmetric-signature *verification* exposed through `crypto.*`
-      (RSA-PKCS1v15, RSA-PSS, ECDSA P-256, ECDSA P-384). Prerequisite
-      for the OAuth/OIDC item below: every mainstream IdP signs
-      ID tokens with RS256 or ES256, and Hull's `hull/jwt` is HS256-
-      only today. mbedTLS is **already linked** in every build with
-      `HL_ENABLE_HTTP_CLIENT=1` (for the HTTPS client) and exposes
-      `mbedtls_pk_verify` + the RSA/ECDSA primitives — they're just
-      not bound to Lua/JS. Scope:
-        - New cap functions in `src/hull/cap/crypto.c`:
-          `hl_cap_crypto_rsa_verify(pubkey_pem, alg, data, sig)`
-          and `hl_cap_crypto_ecdsa_verify(pubkey_pem, curve, data,
-          sig)`. Public-key inputs accept PEM (SubjectPublicKeyInfo)
-          and JWK (so JWKS responses don't need PEM conversion).
-        - Lua + JS bindings: `crypto.verify(alg, pubkey, data, sig)`
-          with `alg ∈ {"rs256","rs384","rs512","ps256","es256","es384"}`.
-        - `hull/jwt` extended: dispatch by the token's `alg` header,
-          accept a key-resolver callback (`function(kid) → pubkey`)
-          so callers can plug in JWKS caches.
-        - `alg=none` rejected unconditionally; alg-confusion attacks
-          (HS256 token presented against an RSA pubkey) rejected by
-          requiring the caller to pre-commit to an algorithm family.
-      No new vendored deps. Roughly the same shape as the existing
-      Ed25519 path in `cap/crypto.c`. Unlocks: native OIDC (next
-      item), webhook signature verification for inbound webhooks
-      (GitHub, Stripe, etc.), and SAML if the [COMMERCIAL] tier
-      reaches it. **Surfaced 2026-06 by the Trimble HU asset-
-      inventory project** (`asset_inventory_assessment.md` §b
-      item 3) — that app needs Entra ID OIDC and is blocked on this
-      primitive.
-- [ ] OAuth 2.0 / OIDC sign-in for consumer providers (community tier).
-      `hull/web/middleware/oauth@1`. Built-in providers for Google,
-      GitHub, GitLab, Microsoft consumer accounts. Standard
-      authorization-code flow with PKCE; ID-token verification via
-      JWKS. Account-linking helper for users that sign in with
-      multiple providers. Settles "Sign in with Google" as the
-      table-stakes consumer-app pattern; line vs. commercial below is
-      "consumer IdPs" (free) vs. "enterprise IdPs + provisioning"
-      (paid). **Depends on the asymmetric-verify item above.**
-- [ ] Two-factor auth (TOTP). `hull/web/middleware/totp@1`. RFC 6238
-      time-based one-time passwords (Google Authenticator / 1Password
-      / Authy compatible). QR-code provisioning helper (renders
-      `otpauth://` URL as SVG without an external lib). Recovery codes
-      generation + verification. Plays with the existing session
-      middleware: after password verify, set `req.ctx.session.pending_2fa
-      = true`, gate sensitive routes on it.
-- [ ] Account lockout / suspicious-login detection.
-      `hull/web/middleware/auth_lockout@1`. Tracks failed-attempt count
-      per `(account_id, ip_prefix)` in a small table, blocks with
-      exponential backoff (1s → 5s → 30s → 5m → 30m → lockout).
-      Optional integration with the existing audit log so security
-      events show up alongside business events. Pairs with a "your
-      account is temporarily locked" template fragment.
-- [ ] Transactional email flow recipes. The `hull/email` module exists
-      but the scaffold doesn't ship templates or routes for the
-      universal-need-list: welcome, verify-email, password-reset
-      request, password-reset complete, account-deletion confirm,
-      magic-link sign-in. Add a `hull/web/auth-flows@1` (or extend
-      `auth-middleware`) that wires the routes + bundles `_text.md` /
-      `_html.html` template pairs in `templates/email/`. Compose with
-      §5's email retry/backoff.
+- [x] **Asymmetric-signature verification ✅ Shipped (v0.3.0).** RS256/384/512,
+      PS256, ES256/384 via mbedTLS, fronted by an `HlAsymBackend` vtable in
+      `cap/crypto_asym_mbedtls.c`. Lua + JS expose `crypto.verify_asym(alg,
+      pem, message, sig)`; `crypto.x509_pubkey_pem(cert)` extracts the SPKI
+      PEM from x509 DER/PEM for JWKS `x5c` consumption. `hull/jwt`
+      dispatches by header `alg` with allowlist enforcement BEFORE key
+      resolution (alg-confusion defeated). Used by `hull/web/middleware/
+      oauth@1` for OIDC ID-token verify.
+- [x] **OAuth 2.0 / OIDC sign-in ✅ Shipped (v0.3.0).** `hull/web/middleware/
+      oauth@1`. Authorization Code + PKCE flow. Presets for Google and
+      Microsoft Entra (with `tenant=common`/`organizations`/`consumers`
+      auto-pattern issuer match). HMAC-signed state cookie binds
+      (provider, state, nonce, PKCE verifier, return_to). `on_login` /
+      `on_logout` callbacks; account-linking left to the app. 13 audit
+      rounds (rounds 5–13).
+- [x] **Two-factor auth (TOTP) ✅ Shipped (v0.3.0).** `hull/web/middleware/
+      totp@1`. RFC 6238. Dual-row staging (`_hull_totp_pending` vs
+      `_hull_totp`) so re-enroll doesn't lock out a user who lost new
+      recovery codes mid-flow. QR via the new pure-Lua/JS `hull/qrcode@1`.
+      Multi-key at-rest encryption (`encryption_keys = {[1]=OLD, [2]=NEW}`)
+      with lazy + batch rekey. Per-user brute-force lockout; per-IP
+      lockout opt-in via `trust_xff`. Auto-daily pending-row prune.
+- [x] **Account lockout ✅ Shipped (v0.3.0)** — folded into `auth-flows`
+      (login lockout: `_hull_auth_login_attempts`, default 5 failures
+      / 15 min window with proper window-expiry reset) and `totp`
+      (per-user + opt-in per-IP). The standalone `auth_lockout@1`
+      module was deliberately *not* shipped — folding into the
+      modules that need the gate matched the round-8 design decision.
+- [x] **Transactional email flow recipes ✅ Shipped (v0.3.0).**
+      `hull/web/auth-flows@1` wires welcome / verify / password-reset
+      / magic-link / email-change. Apps provide the templates via
+      `templates = { welcome = fn(ctx) → {subject, html?, text?}, ... }`
+      callbacks. Per-recipient rate limit gates the attacker-chosen-
+      recipient email-storm class (round-8 HIGH-1).
 - [ ] **[COMMERCIAL]** Enterprise SSO middleware. SAML 2.0, LDAP, SCIM
       provisioning, IdP-initiated SSO, JIT provisioning, group/claim
       mapping, session-bridge helpers. The community-tier OAuth/OIDC
@@ -1628,10 +1611,18 @@ needs its own design pass + estimate before scheduling. Items marked
       which records HTTP-level events; this one records *business-object*
       events (who changed which record, before/after values, source request)
       with the compliance-grade durability primitives.
-- [ ] First-party app audit-log helper (community tier). Basic version
-      of the above without retention / SIEM / hash-chain. Records who
-      changed which business object, before/after values, source request,
-      timestamp, optional reason.
+- [x] **First-party app audit-log helper ✅ Shipped (v0.3.0).**
+      `hull/web/middleware/audit-log@1`. Append-only sign-in / auth-event
+      log with per-device fingerprint (HMAC-salted hash of UA + IP-prefix,
+      deployment-private salt). Records `login_success`, `login_failure`,
+      `password_reset_completed`, `email_changed`, `email_change_revoked`,
+      and custom kinds. `audit_log.list_devices(user_id)` for the
+      /devices UI. Auto-daily cleanup; `cleanup_status() ->
+      "scheduled" | "external" | "missing"` tri-state probe. Migration
+      helper `recompute_fingerprints()` for salt rotation (paged,
+      max(id)-bounded, in-process mutex). The retention-policy /
+      structured-export / tamper-evident-hash-chain version is still
+      `[COMMERCIAL]` (above).
 - [ ] Reusable admin UI conventions for the patterns not already covered
       by §1.4 (flash, pagination) or §1.5.c-§1.5.e (inline edit, search
       debounce, loading indicator, styled confirm, form re-population):
