@@ -90,10 +90,16 @@ function serialize(name, value, opts) {
 
     let str = name + "=" + encoded;
 
-    // Path (default: "/")
+    // Path (default: "/"). Reject control bytes and `;` so a
+    // user-supplied path can't inject directives (e.g.
+    // `; HttpOnly=false`) or split the Set-Cookie header.
     const path = o.path !== undefined ? o.path : "/";
-    if (path)
+    if (path) {
+        if (/[;\r\n\x00]/.test(path))
+            throw new Error("cookie: invalid path (contains ';', "
+                + "CR, LF, or NUL)");
         str += "; Path=" + path;
+    }
 
     // Domain
     if (o.domain) {

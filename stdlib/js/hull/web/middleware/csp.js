@@ -19,12 +19,15 @@
  * snake-case `csrf_token` key, so apps can share templates across
  * the Lua and JS runtimes without naming churn.
  *
- * Three named profiles, identical to the Lua side:
+ * Two named profiles, identical to the Lua side:
  *
  *  - `csp.htmx()`. Pico-compatible (allows inline `style=` attributes
  *    via `style-src-attr 'unsafe-inline'`).
  *  - `csp.strict()`. No inline-style escape.
- *  - `csp.custom(opts)`. Caller-controlled directives.
+ *
+ * Apps needing fully custom directives should build their own
+ * `Content-Security-Policy` header in a middleware — the two
+ * presets cover the common cases.
  *
  * @license AGPL-3.0-or-later
  */

@@ -157,8 +157,11 @@ function health.middleware(opts)
                 uptime = uptime,
             }
 
-            -- Include server stats if available
-            if server and http_server.stats then
+            -- Include server stats if available. Pre-fix used
+            -- `server` (undefined free global, always nil in the
+            -- sandboxed VM) so the branch was dead and the docstring's
+            -- promised stats block never reached /ready responses.
+            if http_server and http_server.stats then
                 body.stats = http_server.stats()
             end
 

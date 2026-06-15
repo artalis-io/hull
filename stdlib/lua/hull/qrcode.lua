@@ -669,6 +669,28 @@ function M.svg(text, opts)
     local margin = opts.margin or 4
     local dark = opts.dark or "#000"
     local light = opts.light or "#fff"
+    -- Both colors are interpolated raw into SVG attributes below.
+    -- Reject anything that isn't a plain color literal so an app
+    -- that ever wires user input (e.g. `opts.dark = req.query.color`)
+    -- can't break out into arbitrary XML / script. Accepts CSS hex
+    -- (`#fff`, `#ffffff`), bare named colors (`red`, `white`), the
+    -- literal `none`, and rgb() / rgba() function notation.
+    local function valid_color(s)
+        if type(s) ~= "string" or #s == 0 or #s > 32 then return false end
+        if s == "none" then return true end
+        if s:match("^#?[%x]+$") then return true end
+        if s:match("^[A-Za-z]+$") then return true end
+        if s:match("^rgba?%(%s*[%d%s,%.]+%s*%)$") then return true end
+        return false
+    end
+    if not valid_color(dark) then
+        error("qrcode.svg: invalid opts.dark color '"
+              .. tostring(dark) .. "'")
+    end
+    if not valid_color(light) then
+        error("qrcode.svg: invalid opts.light color '"
+              .. tostring(light) .. "'")
+    end
     local full = (q.size + 2 * margin) * scale
 
     local parts = {}

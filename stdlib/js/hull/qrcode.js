@@ -539,6 +539,24 @@ function svg(text, opts) {
     const margin = opts.margin || 4;
     const dark = opts.dark || "#000";
     const light = opts.light || "#fff";
+    // Both colors interpolate raw into SVG attributes below. Reject
+    // anything that isn't a plain color literal so user-input ever
+    // wired here can't break out into arbitrary XML / script.
+    // Mirrors the Lua sibling.
+    const validColor = (s) => {
+        if (typeof s !== "string" || s.length === 0 || s.length > 32) return false;
+        if (s === "none") return true;
+        if (/^#?[0-9A-Fa-f]+$/.test(s)) return true;
+        if (/^[A-Za-z]+$/.test(s)) return true;
+        if (/^rgba?\(\s*[\d\s,.]+\s*\)$/.test(s)) return true;
+        return false;
+    };
+    if (!validColor(dark)) {
+        throw new Error("qrcode.svg: invalid opts.dark color '" + dark + "'");
+    }
+    if (!validColor(light)) {
+        throw new Error("qrcode.svg: invalid opts.light color '" + light + "'");
+    }
     const full = (q.size + 2 * margin) * scale;
 
     const parts = [];

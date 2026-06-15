@@ -274,10 +274,18 @@ function cleanup(maxAge, opts) {
     const cutoff = time.now() - maxAge;
     const alsoFailed = !!(opts && opts.alsoFailed);
     if (alsoFailed) {
+        // Failed rows have delivered_at = NULL (only the success
+        // path at line ~190 sets it). The pre-fix predicate
+        // `delivered_at <= ?` evaluates NULL for those rows in
+        // SQLite — NULL is falsy in WHERE, so failed rows were
+        // never deleted. Branch the SQL: gate `delivered` on
+        // delivered_at; gate `failed` on created_at (which is
+        // always set).
         return db.exec(
-            "DELETE FROM _hull_outbox WHERE delivered_at <= ? " +
-            "AND state IN ('delivered', 'failed')",
-            [cutoff]
+            "DELETE FROM _hull_outbox WHERE "
+            + "(state = 'delivered' AND delivered_at <= ?) "
+            + "OR (state = 'failed' AND created_at <= ?)",
+            [cutoff, cutoff]
         );
     }
     return db.exec(

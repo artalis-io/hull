@@ -20,7 +20,8 @@ local _counter = 0
 -- tracing add an upstream id (e.g. from a load balancer) and pass it
 -- through `req.headers["x-request-id"]` instead.
 --
--- @treturn string  16-char hex string.
+-- @treturn string  Hex string. Minimum 8 chars (counter < 2^32);
+--                  grows up to 12 chars before the cap at 2^48.
 function logger.generate_id()
     _counter = _counter + 1
     if _counter > 0xffffffffffff then _counter = 1 end

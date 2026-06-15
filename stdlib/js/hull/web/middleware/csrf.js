@@ -208,6 +208,15 @@ function middleware(opts) {
                 return 1;
             }
             const pairs = body.split("&");
+            // Parity with Lua sibling: cap pair count. A 1 MiB body
+            // of `a=b&a=b&…` can produce 500k+ pairs; bounded N keeps
+            // worst-case work flat. Auth flows submit a handful of
+            // fields; 256 is generous.
+            if (pairs.length > 256) {
+                res.status(413);
+                res.json({ error: "CSRF: too many form fields" });
+                return 1;
+            }
             for (let k = 0; k < pairs.length; k++) {
                 const eqIdx = pairs[k].indexOf("=");
                 if (eqIdx >= 0) {

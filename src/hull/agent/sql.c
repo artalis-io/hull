@@ -44,7 +44,11 @@ static char *read_queries_file(const char *app_dir, size_t *out_len)
         long n = ftell(f);
         if (n < 0 || n > HL_AGENT_QUERIES_MAX_FILE) { fclose(f); continue; }
         if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); continue; }
-        char *buf = malloc((size_t)n + 1);
+        /* calloc over malloc so static analysis traces the bound
+         * cleanly (n is already capped to HL_AGENT_QUERIES_MAX_FILE
+         * above, but the bound is not visible at the allocation
+         * call site). */
+        char *buf = calloc((size_t)n + 1, 1);
         if (!buf) { fclose(f); continue; }
         size_t got = fread(buf, 1, (size_t)n, f);
         int read_err = ferror(f);
