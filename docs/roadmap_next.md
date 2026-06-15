@@ -1623,13 +1623,14 @@ needs its own design pass + estimate before scheduling. Items marked
       max(id)-bounded, in-process mutex). The retention-policy /
       structured-export / tamper-evident-hash-chain version is still
       `[COMMERCIAL]` (above).
-- [ ] Reusable admin UI conventions for the patterns not already covered
-      by §1.4 (flash, pagination) or §1.5.c-§1.5.e (inline edit, search
-      debounce, loading indicator, styled confirm, form re-population):
-      filter forms, optimistic row replacement (with rollback on server
-      error), bulk-select + bulk-action toolbars, sortable table headers
-      (`hx-get="?sort=..."`). Stdlib doc + helper module rather than
-      example boilerplate.
+- [ ] **Reusable admin UI primitives tier** — promoted to its own
+      sub-section: see **§1.5.g** below. Absorbs the umbrella
+      conventions originally listed here (filter forms, optimistic
+      row replacement, bulk-select toolbars, sortable headers) plus
+      the scattered confirm / toast / form items in §1.5.d-8 /
+      §1.5.d-10 / §1.5.d-11, and adds the platform-side plumbing
+      they all depend on (stdlib-shipped static assets + template
+      partials).
 - [ ] Optimistic concurrency control for the lost-update problem
       (two users edit the same record; last write silently wins).
       Standard fix: `If-Match: <etag>` on PATCH, or a `version`
@@ -1639,6 +1640,130 @@ needs its own design pass + estimate before scheduling. Items marked
 - [ ] Import/export workflow helpers: CSV preview, per-row validation
       errors, dry-run mode, commit step, background processing hooks for
       large imports.
+
+### 1.5.g Admin-UI primitives tier (no target, designed)
+
+**Motivation.** §1.5.f's "reusable admin UI" bullet and the scattered
+items in §1.5.d (d-8 styled confirm, d-10 toast renderer, d-11 form
+drafts) cover the same problem from different angles: every internal-
+tools app rebuilds the same five-to-eight htmx interaction patterns
+by hand. The Trimble HU asset-inventory build plan (asset_inventory_
+assessment.md §5.1 item 5) was the forcing function — its MVP 1
+register page alone needs search + sort + pagination + inline-edit +
+confirm + toast + form-errors. Promoting the bullet to a named tier
+makes the surface a coherent first-party offering rather than
+example boilerplate.
+
+**Design constraints (non-negotiable):**
+
+| Constraint | Why |
+|---|---|
+| No client framework | HTMX + ~150 lines of plain JS *total* across all modules. Stays in the hypermedia-only profile §1.5 already committed to. |
+| CSP-friendly | No inline scripts, no `eval`/`Function`. Apps add `'self'` to script-src/style-src; nothing else. |
+| Theming via CSS variables | Ship minimal default + `--hull-admin-*` vars. Apps with no design system get a usable look immediately; apps with one rebrand by overriding vars. |
+| Server-rendered partials | Server owns HTML shape; client JS is event-glue only. Matches `flash.trigger` / `htmx.compose` conventions in §1.5.c–d. |
+| Audit-stack discipline carries over | `{{ }}` auto-escape, parameterized SQL, magic-byte validation where bytes flow in. Subject to the same parallel-reviewer audit cadence as the auth stack. |
+
+**Tasks:**
+
+- [ ] §1.5.g-0. **Phase 0 — platform plumbing (prereq, ~2 days of C/runtime work).**
+  - [ ] Stdlib-shipped static assets. Today `static/*` is app-only;
+        platform stdlib needs a second VFS prefix so modules can ship
+        CSS/JS files that get auto-served. Convention:
+        `static/hull/<module>/*` served at `/static/hull/<module>/*`.
+        Apps can override by writing the same path under their own
+        `static/`. Same MIME / ETag / 304 / cache-control machinery as
+        the existing app `static/` middleware.
+  - [ ] Stdlib-shipped template partials. Same shape: `templates/hull/
+        <module>/*` resolvable via the template engine; app-side
+        overrides win. Today's single-prefix template loader needs to
+        gain a fallback chain (platform VFS → app VFS, with app
+        winning on collision).
+  - [ ] Response helpers: `res:hx_trigger(name, data)` /
+        `res.hxTrigger(name, data)` (emits `HX-Trigger` with JSON-
+        encoded payload); `res:hx_redirect(path)`; `res:hx_refresh()`.
+        ~30 lines per side. Lua + JS bindings.
+
+- [ ] §1.5.g-1. **`hull/web/htmx/toast@1`.** Flash messages via
+      `HX-Trigger` header → styled toast that auto-dismisses. Client
+      JS (~40 lines) listens once at boot, renders + dismisses.
+      Replaces the half-finished `flash.trigger` listener originally
+      filed as §1.5.d-10; that item collapses into this one.
+- [ ] §1.5.g-2. **`hull/web/htmx/confirm@1`.** Styled `<dialog>`
+      replacement for `hx-confirm`'s native popup; a11y-clean,
+      themable, intercepts `htmx:confirm`. Replaces §1.5.d-8.
+- [ ] §1.5.g-3. **`hull/web/htmx/form@1`.** Field-level error
+      rendering (consumes a `validate.check` result), loading state on
+      submit button, error-target wiring (pairs with the
+      `htmx-ext-response-targets` work in §1.5.d-1). Does *not*
+      include form-draft autosave; that stays a separate concern in
+      §1.5.d-11.
+- [ ] §1.5.g-4. **`hull/web/htmx/search@1`.** Debounced search input
+      (`hx-trigger="input changed delay:300ms"`) with a results
+      partial. Server helper accepts a query + paginator; client side
+      is markup-only.
+- [ ] §1.5.g-5. **`hull/web/htmx/inline-edit@1`.** Click-to-edit
+      single field. `inline_edit.cell(name, value, edit_url)` renders
+      the editable cell; sibling endpoint accepts the PATCH and
+      returns the new cell HTML. Pairs with the optimistic-concurrency
+      `concurrency.guard()` helper in the §1.5.f open list.
+- [ ] §1.5.g-6. **`hull/web/htmx/sort@1`.** Sortable column-header
+      partial; parses `?sort=col[:asc|desc]` and renders the
+      direction arrow.
+- [ ] §1.5.g-7. **`hull/web/htmx/pagination@1`.** Server-paginated
+      list footer (next / prev swap a list body). Parses
+      `?page=N&per_page=M`; cursor or offset based on opts.
+- [ ] §1.5.g-8. **`hull/web/htmx/table@1`.** Composed widget:
+      `table.render(rows, schema)` where the schema declares which
+      columns are sortable / searchable / inline-editable. Wires
+      search + sort + pagination + inline-edit into one call.
+- [ ] §1.5.g-9. **`hull/web/admin-ui@1`** (aggregator). Declaring
+      this in `manifest.modules` pulls in all 8 above as transitive
+      dependencies. Granular declaration stays supported; the
+      aggregator is the one-line opt-in.
+- [ ] §1.5.g-10. **Example + docs.**
+      - `examples/admin_ui_register/` — tiny employee/asset CRUD that
+        exercises every module. Both runtimes.
+      - `docs/htmx_admin_ui.md` — usage guide; cross-reference from
+        `docs/htmx.md`.
+- [ ] §1.5.g-11. **Audit pass.** Parallel-reviewer audit using a new
+      `/admin-ui-audit` skill modeled on `/auth-audit`. Three slices
+      (toast/confirm/form, search/inline-edit, sort/pagination/table).
+      Converges when all three slices return zero findings.
+
+**Sequencing & estimate:**
+
+| Phase | Items | Estimate |
+|---|---|---|
+| 0 — platform plumbing | §1.5.g-0 | ~2 days |
+| 1 — primitives | §1.5.g-1 → §1.5.g-5 | 2–3 weeks |
+| 2 — composed widgets | §1.5.g-6 → §1.5.g-8 | 1–2 weeks |
+| 3 — example + docs + audit | §1.5.g-9 → §1.5.g-11 | ~1 week |
+| **Total** | | **~4–5 weeks** |
+
+Only Phase 0 touches C / runtime; phases 1–3 are pure stdlib +
+examples + docs.
+
+**Open decisions (defer until §1.5.g enters a release):**
+
+1. **Date-picker / combobox / file-drop:** in scope or separate
+   tier? Recommendation: defer. Ship the 8 + aggregator first;
+   add `date-picker` and `combobox` only if a concrete consumer
+   (Trimble MVP 5 stocktake) needs them. File-drop already has
+   server-side coverage via the multipart iterator + `hull/
+   attachment@1`; a small `htmx/upload` widget could land in a
+   follow-up tier.
+2. **Default CSS shipping:** minimal opinionated default + CSS
+   vars (recommended), or pure structural CSS with zero
+   appearance? Recommended option means apps get a working look
+   with zero theming work; pure-structural means every consumer
+   starts from zero. Decide before §1.5.g-1.
+3. **Bulk-action toolbars** (originally listed in the §1.5.f
+   bullet): bundle into §1.5.g-8 (`table@1`) as part of the
+   schema, or separate `bulk-action@1` module? Lean toward
+   bundling into `table@1` — the bulk-action selection state
+   couples to the table row state and splitting them invites
+   duplication.
 
 ---
 
