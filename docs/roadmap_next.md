@@ -1775,6 +1775,12 @@ core and without pretending they are as safe as WASM plugins. Native sidecars
 are lower-trust, out-of-process services with explicit capabilities, narrow
 RPC, supervised lifecycle, and OS sandboxing where available.
 
+**Status: Phase 0 complete.** Full design committed in
+[`docs/sidecar_design.md`](sidecar_design.md). The summary below
+is kept for the roadmap-level overview; load-bearing decisions
+(trust model, model lifecycle, RPC framing, concurrency, two-layer
+split) live in the design doc and shouldn't be re-litigated here.
+
 **Security stance:**
 
 Preserve the execution tiering:
@@ -1961,30 +1967,42 @@ Keep failure classes distinct:
 - `supervisor_error`. Launch failed, bad tool, denied path/resource/capability.
 - `app_error`. Lua/JS misuse of the service API.
 
-**Phased plan:**
+**Phased plan** (revised against the accepted design in
+[`docs/sidecar_design.md`](sidecar_design.md)):
 
-- [ ] Phase 0: design doc + threat model + repo survey. Decide the exact
-      static manifest pre-extraction subset and signing implications.
-- [ ] Phase 1: minimal `stdio-fd` Content-Length JSON-RPC client/server,
-      dedicated RPC FD, stderr log separation, `rpc.discover`, `health`, and
-      one request/response method.
-- [ ] Phase 2: Unix socket transport, including socketpair and filesystem
-      socket paths; consider FD passing for resources.
-- [ ] Phase 3: lifecycle supervision: launch, readiness, health checks,
-      crash detection, restart policy, log capture, graceful shutdown, and
-      `hull agent services`.
-- [ ] Phase 4: sandbox/resource limits: close inherited FDs, scrub env, set
-      cwd, rlimits, Linux seccomp/Landlock, OpenBSD pledge/unveil, macOS
-      Seatbelt profile, Windows/FreeBSD degraded backends.
-- [ ] Phase 5: TCP transport gated by explicit manifest capabilities.
-      Localhost-only default; no production remote bind without a declared
-      listen policy.
-- [ ] Phase 6: bitnet.c proof-of-concept sidecar installed through
-      `hull tools install`, using pre-opened model resources and no arbitrary
-      filesystem discovery.
-- [ ] Phase 7: signed sidecar packaging: tool metadata declares supported
-      needs, app manifest grants concrete resources, `hull verify` includes
-      sidecar tool identity/hash in the app's signed deployment surface.
+- [x] **Phase 0:** design doc + threat model + ABI lock + accepted
+      decisions on trust model (vendor pubkey + Sigstore hybrid),
+      model lifecycle (sidecar owns; Hull passes a directory FD),
+      RPC protocol (JSON-RPC + opt-in binary stream frames), and
+      concurrency (one process per service; sidecar manages inflight
+      and multi-model internally). See
+      [`docs/sidecar_design.md`](sidecar_design.md).
+- [ ] **Phase 1:** Hull-core: static `services` pre-extraction +
+      supervisor + stdio-fd JSON-RPC + `rpc.discover` + `health` +
+      sandbox stubs. `dev_exec` local-dev escape hatch.
+- [ ] **Phase 2:** binary stream fast-path; resource-FD passing
+      (`HULL_RESOURCE_*` env + inherited FDs); `hull/services@1`
+      stdlib with `services.stream` iterator.
+- [ ] **Phase 3:** full lifecycle supervision (readiness, restart
+      policy, log capture, graceful shutdown); `hull agent services`.
+- [ ] **Phase 4:** Linux seccomp + Landlock backend; macOS Seatbelt
+      backend; OpenBSD/Cosmo pledge/unveil backend; Windows Job
+      Object backend.
+- [ ] **Phase 5:** tool resolver extensions for `vendor_pubkey` +
+      `attestation_repo`; `hull tools install` verifies both paths.
+- [ ] **Phase 6:** new repo `artalis-io/hull-sidecar-sdk`
+      (independent). Documented ABI; Apache/MIT.
+- [ ] **Phase 7:** new repo `artalis-io/bitnet-sidecar`
+      (independent). First end-to-end demo: a Hull app summarizing
+      asset history via bitnet on a Trimble dev VM.
+- [ ] **Phase 8:** Hull-core hardening based on Phase 7 findings;
+      parallel-reviewer audit pass; Sigstore attestation flow
+      documented.
+- [ ] **Phase 9** (deferred): GPU sandbox design;
+      `artalis-io/llama-cpp-sidecar`; optional `hull/llm@1`
+      ergonomic wrapper.
+
+**Total Phase 0 → bitnet working end-to-end: ~10 weeks.**
 
 **Hard parts / security traps:**
 
