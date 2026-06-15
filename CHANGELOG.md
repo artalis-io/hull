@@ -8,19 +8,102 @@ release-artifact layout).
 
 ## [Unreleased]
 
-### Added
+## [0.3.0] — 2026-06-15
 
-- **Streaming multipart iterator (`req:multipart()` Lua / `req.multipart()` JS).** Routes opt in via `app.<verb>(..., { multipart = {...} })`. Iterator-shaped: each part yields `{name, filename, content_type}` plus `part:chunks(n)` / `part.chunks(n)` for byte-streaming reads and `part:read()` / `part.read()` for whole-part buffering. Binary-safe — Lua returns byte strings, JS returns `ArrayBuffer`. Caps (`max_part_size`, `max_total_size`, `max_parts`, `max_headers_size`, `max_input_buffer`) surface as parser errors the handler can `pcall` / try-catch to write structured 4xx responses. Tied to incremental SHA-256 hasher (`crypto.create_sha256()` Lua / `crypto.createSha256()` JS) for streaming digest. 94/94 e2e cases in `tests/e2e_multipart.sh` across both runtimes. See [docs/multipart.md](docs/multipart.md). Roadmap §1.5.b-2.
+Production-grade authentication & authorization stack, streaming multipart upload, content-addressed blob storage with runtime caches, and asymmetric crypto. The auth stack alone went through **13 iterative security-review rounds** (rounds 1–13); the final round returned zero findings across three independent reviewers, marking convergence. Eight new stdlib modules ship in this release: `hull/web/auth-flows@1`, `hull/web/middleware/totp@1`, `hull/web/middleware/oauth@1`, `hull/web/middleware/audit-log@1`, `hull/web/auth-health@1`, `hull/web/pwned@1`, `hull/qrcode@1`, `hull/attachment@1`, `hull/blob@1`, `hull/mime@1`. (132 commits since v0.2.0.)
+
+### Added — Authentication & authorization stack
+
+- **`hull/web/auth-flows@1`** (Lua + JS). End-to-end auth flows on top of HMAC-signed envelopes: registration, email verification, login, password reset, magic link, email change (with revoke from old address), optional TOTP 2FA. Owns `_hull_auth_used_tokens` (single-use replay protection), `_hull_auth_pending_email_changes`, `_hull_auth_login_attempts` (per-user lockout). Pluggable user-storage callbacks; turnkey `standard_users` adapter for the common schema. Per-recipient email-storm rate limit, `public_origin` / `trusted_hosts` URL-origin gate (host-header injection class closed), strict user-sanitize allowlist with optional `user_sanitize(user)` hook. Settled API after 13 audit rounds.
+- **`hull/web/middleware/totp@1`** (Lua + JS). RFC 6238 TOTP. Enroll → confirm → verify lifecycle with dual-row staging (pending vs confirmed) so re-enrollment doesn't lock out users who lost the new recovery codes mid-flow. Recovery codes single-use, PBKDF2-hashed, normalized (case + non-alphanumerics) so "ABCD-EFGH" and "abcdefgh" match. Constant-time digest compare. At-rest secrets stored under a versioned NaCl-secretbox scheme with multi-key rotation (`encryption_keys = {[1]=OLD, [2]=NEW}`); lazy-rekey on verify, batch `totp.rekey()` for active migration. Per-user brute-force lockout (`max_failed_attempts=5`, `lockout_duration=15min`); per-IP lockout opt-in via `trust_xff` flag. Auto-daily prune of orphaned pending rows via `app.daily`.
+- **`hull/web/middleware/oauth@1`** (Lua + JS). OIDC Authorization Code + PKCE. Verifies ID-token signatures against the IdP's JWKS (RS256/384/512, PS256, ES256/384). Presets for Google and Microsoft Entra; Microsoft `tenant=common` now passes via `issuer_pattern` (regex match) since the actual ID-token issuer is `/{tenant-guid}/v2.0`, not `/common/`. HMAC-signed state cookie binds (provider, state, nonce, PKCE verifier, return_to). Owns `/auth/:provider/login`, `/auth/:provider/callback`, `/auth/logout`. `on_login(req, res, provider, claims, tokens) -> path?` and `on_logout(req, res) -> path?` callbacks.
+- **`hull/web/middleware/audit-log@1`** (Lua + JS). Append-only sign-in / auth-event log with per-device fingerprint (HMAC-salted hash of UA + IP-prefix, deployment-private salt). Records `login_success`, `login_failure`, `password_reset_completed`, `email_changed`, `email_change_revoked`, custom kinds. `audit_log.list(user_id, opts)` and `list_devices(user_id)` for /devices UI. `is_new_device(user_id, req)` for new-device notifications. Auto-daily cleanup (`opts.retain_days = 365`); manual `audit_log.cleanup()`. Migration helper `recompute_fingerprints()` for salt rotation (paged + bounded by `max(id)` snapshot, in-process mutex with 1h staleness, breaks only on empty page). `cleanup_status() -> "scheduled" | "external" | "missing"` tri-state probe.
+- **`hull/web/auth-health@1`** (Lua + JS). Runtime health probes for the auth stack: session table presence + count, audit-log cleanup status, pwned reachability (`not_yet_checked` / `reachable` / `fail_open` tri-state), TOTP enrollment count, RBAC tables. `auth_health.check({include_counts = false})` for the JSON output (counts gated since enumeration is recon material). `auth_health.routes(app, {auth_check})` mounts `/admin/auth-status` behind a required gate (admit on literal `true` only; thenable returns 500; throw returns 401; falsy returns 403). Backs the `hull agent auth-status` CLI.
+- **`hull/web/pwned@1`** (Lua + JS). HIBP k-anonymity check (`api.pwnedpasswords.com/range/<first-5-hex-of-SHA1>`). 80KB embedded SecLists-10K blocklist for offline / air-gapped operation (binary-searched). Single-flight request cache, fail-open on network error with a one-shot warn. `pwned.health()` surfaces `{ok, status, last_check_at, last_error}` for the auth-health probe. Apps must add `api.pwnedpasswords.com` to `manifest.hosts`.
+- **`hull/qrcode@1`** (Lua + JS). Pure-Lua / pure-JS QR Code generator (ISO/IEC 18004). SVG output with EC level + scale options. Used by `totp.enroll()` to render the authenticator-app QR. Color allowlist on `opts.dark` / `opts.light` so user-input wiring doesn't break out into arbitrary SVG.
+
+### Added — Multipart upload, attachments, blob storage
+
+- **Streaming multipart iterator (`req:multipart()` Lua / `req.multipart()` JS).** Routes opt in via `app.<verb>(..., { multipart = {...} })`. Iterator-shaped: each part yields `{name, filename, content_type}` plus `part:chunks(n)` / `part.chunks(n)` for byte-streaming reads and `part:read()` / `part.read()` for whole-part buffering. Binary-safe — Lua returns byte strings, JS returns `ArrayBuffer`. Caps (`max_part_size`, `max_total_size`, `max_parts`, `max_headers_size`, `max_input_buffer`) surface as parser errors the handler can `pcall` / try-catch to write structured 4xx responses. 94/94 e2e cases in `tests/e2e_multipart.sh` across both runtimes. See [docs/multipart.md](docs/multipart.md). Roadmap §1.5.b-2.
 - **Incremental SHA-256 hasher.** `crypto.create_sha256()` / `crypto.createSha256()` returns an object with chainable `:update(bytes)` / `.update(bytes)` and a one-shot `:digest()` / `.digest()` (lowercase hex). Update-after-digest and double-digest both raise. Designed for streaming multipart digests but works for any incremental hashing use.
+- **`hull/attachment@1`** (Lua + JS). Store, retrieve, delete file attachments backed by `hull/blob@1`. `attachment.store(part)` ingests a multipart `Part` via `blob.writer()` (content-addressed, dedupes identical bytes). `attachment.metadata(id)`, `attachment.read(id)`, `attachment.read_to_file(id, path)`, `attachment.delete(id)`. Companion `hull/web/attachment-serve@1` for serving with Content-Type + ETag + Range. Reference apps: `examples/hypermedia_photos` (photo gallery), `examples/hypermedia_todo` (photo uploads). Roadmap §1.5.b-4.
+- **`hull/blob@1`** (Lua + JS). Content-addressed blob storage. `blob.writer()` returns a streaming writer (`:write(bytes)` / `.write(bytes)` + `:finalize()` / `.finalize()`) that returns the content-hash id. `blob.reader(id)` for streaming reads. Used as the low-level CAS layer for attachments, runtime bytecode caches, template caches, AOT compute caches, and `hull tools install`. Per-blob hard-link layout so duplicate writes are free. See `docs/blob.md`. Roadmap §1.5.b-3.5.
+- **`hull/mime@1`** (Lua + JS). MIME type sniffer (magic-bytes + extension fallback). Used by attachment-serve. Roadmap §1.5.b-3.
 
-### Changed
+### Added — Crypto cap + asymmetric verification
 
-- **Bumped vendored Keel to v2.2.0** (was v2.1.2). Adds opt-in `kl_server_route_streaming_async()` that dispatches streaming handlers BEFORE feeding leftover body bytes, plus a state-honoring fix on the leftover-rc<0 / KL_PARSE_ERROR branches and a synchronous-completion keep-alive force-off. Hull's multipart factory shims (Lua + JS) switch to the async variant. Closes the previously-documented single-read `max_total_size` known limitation end-to-end — every parser cap now surfaces as a structured 413 in both single-read and multi-read body shapes.
-- **`docs/multipart.md` known-limitations entry rewritten.** All four caps (`max_parts`, `max_part_size`, `max_headers_size`, `max_total_size`) now produce structured responses; the single-read gap that v2.1.2 left behind is closed.
+- **Asymmetric signature verification in the crypto cap.** RS256 / RS384 / RS512 / PS256 / ES256 / ES384 via mbedTLS. `cap/crypto_asym_mbedtls.c` backend behind a vtable; surfaces in stdlib as `crypto.verify_asym(alg, pem, message, sig)`. JWT module (`hull/jwt@1`) now dispatches on alg: HS256 (HMAC) AND RS/ES (asymmetric). Allowlist enforced BEFORE key resolution to defeat alg-confusion (e.g. token claims RS256 against an HS256-only allowlist → rejected before the key is ever hashed). Used by OAuth's OIDC ID-token verification.
+- **`crypto.x509_pubkey_pem(cert_der_or_pem)` helper.** Extracts the SPKI public key in PEM from an x509 cert. Used to convert IdP JWKS `x5c` entries to PEM for the asymmetric verifier.
+- **HMAC-SHA256 routed through a backend vtable** (`HlHmacBackend`). Same shape as the asymmetric and database vtables; mbedTLS is the default. Closes the round-1 audit finding that crypto primitives should follow Hull's vtable convention.
+- **HMAC-SHA1 added** (HOTP/TOTP prerequisite).
+- **`crypto.hex_encode` / `crypto.hex_decode` in the cap layer.** Lifted from per-module ad-hoc implementations; now a single binary-safe helper. (Stdlib modules that need byte-safe hex for non-ASCII bytes still use a local `bytesToHex` / `bytes_to_hex_local` because `crypto.hex_encode` for `string` input goes through QuickJS's UTF-8-inflating C boundary; documented in the relevant modules.)
+- **`crypto.sha256` SHA-NI runtime dispatch** on Linux/Cosmo for arm64 + x86_64 (`cap/crypto_sha256_*`). Falls back to mbedTLS when the CPU doesn't support the extensions.
+
+### Added — Runtime caches + CAS infrastructure
+
+- **`hull/blob@1` low-level CAS** (`hl_blob_store_*`) powering everything content-addressed in Hull: attachment storage, Lua + JS bytecode caches, Lua + JS template caches, compute AOT cache (`wamrc` output memoization), `hull tools install`. Per-blob hard-link layout so duplicate writes are free; LRU/FIFO eviction via `hull cache prune`.
+- **`hull cache` CLI surface.** `hull cache list` (per-kind entry count + size), `hull cache prune --max-size=N --max-age=N --kind=K [--dry-run]`, `hull cache clear --yes [--kind=K]`, `hull cache verify`. Plus `--json` output. Cache registry is a single source of truth shared between `hull doctor` and `hull inspect`.
+- **`HULL_CACHE_DIR` env var** for per-app cache isolation in multi-tenant deployments. The `tools/` store stays in `$HOME/.hull/` regardless (signed durable downloads).
+- **Persistent Lua + JS bytecode caches** at `~/.hull/blobs/runtime/{lua-bytecode,js-bytecode}/`. Reduce cold-start time on `hull dev` / re-init.
+- **Persistent Lua + JS template caches** at `~/.hull/blobs/runtime/{lua-template,js-template}/`. Templates compile once, reuse across processes.
+- **Compute AOT cache** keyed on the WASM bytes + `wamrc` invocation hash.
+- **`hull tools install`** now routes through `blob_store` with a symlink-as-tool layout so a single binary backs multiple symlink names.
+- **`stdlib/context/`** task-discoverable docs: `multipart.md`, `blob.md`, plus existing entries surface via `hull agent context --task=<name>`.
+
+### Added — Streaming-handler routes (Keel v2.1+ pre-body dispatch)
+
+- **`kl_server_route_streaming_async()` integration** lets Lua/JS handlers run BEFORE the body is fully buffered, enabling the multipart iterator and mid-stream early-exit on parser caps. Hull's body cap (`HL_ENABLE_HTTP_SERVER`'s 16 MiB default) is no longer the only knob — per-route multipart caps surface as structured 4xx without consuming server memory.
+
+### Added — Build / agent / CI
+
+- **`hull agent auth-status`** subcommand backs the auth-health probe over the CLI. Used by ops dashboards.
+- **`hull agent attachment`**, **`hull agent blob`**, **`hull agent mime`** subcommands surface the new modules.
+- **`hull modules available`** four-section grouping (Intrinsic / Core / Web / Web middleware) updated with the eight new modules.
+
+### Changed (BREAKING)
+
+- **`hull/web/auth-flows@1` API converged after 13 audit rounds.** Apps written against pre-v0.3.0 snapshots of any of `auth-flows` / `audit-log` / `oauth` / `totp` / `session` should re-read the module docstrings; option names and shapes were unified across runtimes during the audit cadence. Notable changes:
+  - `auth_flows.init` now REQUIRES one of `public_origin` (single canonical URL), `trusted_hosts` (allowlist array of bare hostnames), or `trust_request_host = true` (explicit dev/test escape, init-time warn). Pre-v0.3.0 silently honored `req.headers.host` — host-header injection class. See round-9 HIGH-1.
+  - `session.init({absolute_ttl = 86400})` is the new default (24 h hard cap on top of sliding TTL). Pass `false` to opt out; non-positive numeric values are coerced to nil with a warn.
+  - `audit_log.init({fingerprint_salt = ...})` is REQUIRED (was silently `""` if missing). Run `audit_log.recompute_fingerprints()` ONCE during deploy if you had pre-v0.3.0 rows. Round-6 hardening.
+  - `totp.verify(user_id, code, req)` now accepts an optional `req` for the per-IP gate. Apps wiring `totp_verify` callback in `auth-flows.init` should pass `req` through.
+  - `strip_user_secrets` flipped from 1-field denylist (`password_hash`) to strict allowlist (`{id, user_id, email, email_verified}`) with optional `user_sanitize(user) -> safe_user` callback. Apps reading custom user fields in templates / `on_login` must wire the callback. Round-9 MEDIUM-6.
+  - `is_email_ish` rejects bytes < 0x20 or == 0x7f.
+- **Vendored Keel bumped through v2.0.0 → v2.1.0 → v2.1.1 → v2.1.2 → v2.2.0.** Streaming handler routes, mid-stream early-exit on parser errors, streaming-async pre-body dispatch, state-honoring fix on leftover-rc<0 / KL_PARSE_ERROR branches, synchronous-completion keep-alive force-off. Closes the previously-documented single-read `max_total_size` known limitation end-to-end.
+- **DB SQL dialect helpers moved into the `HlDbBackend` vtable.** `db.table_columns()` and other dialect-aware queries dispatch via the backend rather than per-call SQL strings. SQLite is the only shipped backend today; PostgreSQL backend lands behind the same vtable.
 
 ### Fixed
 
+- **Auth-stack: 13 rounds of iterative fixes.** Full per-round breakdown lives in the `git log --grep='^auth: round-'` history. Highlights:
+  - Round 9 HIGH-1 — host-header injection in 5 click-through URL builders. Phishing-grade takeover via attacker-controlled `Host`. Pre-existing since auth-flows shipped.
+  - Round 9 HIGH-2 — lockout counter never reset after window expiry; user got 1 attempt per 15min for 24h, not 5.
+  - Round 9 HIGH-3 — `session.absolute_ttl = 0` killed every session on Lua (`0` is truthy in Lua, falsy in JS).
+  - Round 10 HIGH-3 — Microsoft `tenant=common` preset rejected every login; strict `iss` equality failed against per-tenant issuer.
+  - Round 10 HIGH-4 — `extract_ip` unconditionally honored X-Forwarded-For; trivially spoofable. `trust_xff` opt-in (default false).
+  - Round 10 HIGH-5 — round-9 timing-collapse dummy PBKDF2 turned lockout into a CPU amplifier. Reverted.
+  - Round 11 HIGH-1 — async `userSanitize` returning a Promise bypassed the round-10 allowlist (Promise is truthy object). Explicit thenable reject.
+  - Plus ~50 MEDIUM / LOW items across rounds 5-12 covering parity gaps, operator-visibility, edge cases.
 - **`hull manifest` and `hull inspect` on JS apps.** Previously the JS-runtime manifest-extractor was only reachable via the JS-bindings TU, so `hull inspect` (a build-tool command that doesn't link the JS runtime) failed on `app.js`. Extractor now lives in a runtime-neutral TU (`src/hull/manifest_extract_file.c`) reachable from both runtimes and from the build-tool commands.
+- **`cap/crypto` swapped K constants in SHA-NI rounds 16-19.** SHA-256 produced wrong digests on Linux/x86_64 with SHA-NI enabled. Caught by the SBOM `binary_sha256` cross-check.
+- **Multipart `multipart_config` zero-init on every route alloc** (Lua + JS). Stale config from a previous route could leak in if the struct wasn't zeroed. Caught by static analysis.
+- **`blob_store` O_NOATIME on Linux for `track_access=0` reads.** Cache reads no longer perturb atime → no spurious LRU touches → eviction policy behaves as specified.
+- **`hull/web/middleware/outbox` `cleanup({alsoFailed=true})` actually deletes failed rows** (JS only). Pre-fix `WHERE delivered_at <= ?` never matched failed rows (delivered_at IS NULL); now branched into `(state='delivered' AND delivered_at <= ?) OR (state='failed' AND created_at <= ?)`.
+- **`hull/web/middleware/health` `/ready` actually emits the `stats` block** (Lua). Pre-fix `if server and http_server.stats then` — `server` was an undefined free global, branch was dead since the code was written.
+- **`hull/qrcode` rejects malformed `opts.dark` / `opts.light`** so user-input wiring (e.g. `opts.dark = req.query.color`) can't break out into arbitrary SVG. Validates against a small color literal allowlist.
+- **`hull/web/cookie` rejects `;` / CRLF / NUL in `opts.path`** to defeat Set-Cookie directive injection.
+- **`hull/web/middleware/csrf` per-form-pair cap** (JS, parity with Lua). 256 pairs max.
+- **`auth-flows.js`: avoid for-of destructuring** (`for (const [k, b] of map)`). Triggers a MSan use-of-uninit in QuickJS's `js_parse_destructuring_element`; surfaced repeatedly on CI MSan job. Workaround: `.forEach((b, k) => ...)`. Same pattern dropped in totp.js, qrcode.js.
+- **MSan + UBSan CI job timeout** bumped from 10 → 15 min to fit the expanded auth-stack test surface.
+- **14 scan-build / `-Wformat-truncation` findings** closed in one analysis pass.
+- **2 cppcheck findings** closed; `HL_QJS_VERSION` propagated to cppcheck so QuickJS-version-dependent code stops being flagged.
+- **JSON serialization moved to `sh_json` writer** in `cache`, `sbom`, `doctor`, `tools`, `version`, `serve` for streaming-safe output (no buffer-the-world).
+- **Various e2e fixture fixes** for Linux Landlock (`data/` pre-creation), dash bashisms, and CI flakes exposed by first-time runs of new test suites.
+
+### Security
+
+- **13 iterative rounds of auth-stack security review** ran against `auth-flows` + `session` + `audit-log` + `totp` + `oauth` + `pwned` + `auth-health` between rounds 5 (initial) and 13 (convergence). Round 13 returned zero findings across three independent reviewers; the surface has converged. See `git log --grep='^auth: round-'` for the full per-round history.
+- **Single-pass `/c-audit` + `/js-audit` + `/lua-audit` ran on the non-auth surface** after round 13. Two MEDIUM findings (outbox cleanup no-op; health.lua dead branch) shipped along with five LOW hardening items.
+- **`/auth-audit` skill** (local, in `.claude/skills/`) encodes the iterative audit pattern: parallel-agent fan-out over three slices, git-log round-awareness, explicit "drop weak findings; zero is OK" instruction, report-only output. Not committed (`.claude/` is gitignored, matching `/c-audit` etc.); see the existing skill files for the convention.
 
 ## [0.2.0] — 2026-05-31
 
