@@ -40,6 +40,15 @@ other two intact.
 | **Any time (v0.1.6)** | **Independent verify** | **`cosign verify-blob hull.sha256 --certificate hull.sha256.cosign.pem --signature hull.sha256.cosign.sig`** | **Sigstore Fulcio CA + GitHub OIDC + Rekor transparency log entry. No gethull-managed key in the chain** |
 | **Any time (v0.1.6)** | **Per-binary provenance** | **`gh attestation verify hull-linux-x86_64 --repo artalis-io/hull`** | **GitHub Actions OIDC + Sigstore Fulcio + SLSA build-provenance attestation** |
 
+**Auth-stack audit convergence (v0.3.0).** Beyond the trust roots,
+the v0.3.0 web/auth surface (`auth-flows`, `session`, `audit-log`,
+`auth-health`, `totp`, `oauth`, `pwned`) went through **13 rounds
+of iterative parallel-reviewer audits**. Convergence was reached
+when three independent reviewer slices each returned zero findings
+across the auth-stack source. The convergence marker is reachable
+post-hoc via `git log --grep='^auth: round-'` on the main branch.
+See §3.A for the per-attack defense list this body of work landed.
+
 The platform layer split into two sub-layers in v0.1.3:
 
 - **Gethull layer** (`package.sig.platform.gethull`). The per-arch
@@ -258,8 +267,127 @@ This is the primary threat model. Hull exists to make it possible to trust apps 
 
 **Attack: JWT token forgery**
 
-- **Prevention:** `hull.jwt` uses HS256 with HMAC-SHA256 (no "none" algorithm, no algorithm negotiation). Signature verification uses constant-time comparison. Expired tokens are rejected.
-- **Remaining risk:** JWT secrets must be strong. JWTs are stateless. They cannot be revoked until they expire. For revocation, use sessions instead.
+- **Prevention:** `hull.jwt` ships HS256/384/512 (HMAC) plus
+  asymmetric verify for RS256/384/512, PS256, ES256/384 via the C
+  capability layer (mbedTLS-backed `hl_cap_asym_*` vtable). The
+  `none` algorithm is rejected unconditionally, and the verify path
+  rejects any token whose `alg` header doesn't match the algorithm
+  the caller asked for. There is no algorithm negotiation. HMAC
+  comparisons are constant-time; asymmetric verifications run
+  through the backend's own constant-time primitives. Expired and
+  not-yet-valid tokens are rejected.
+- **Remaining risk:** Symmetric secrets must be strong (≥32 random
+  bytes). Public-key JWTs need the IdP's signing certs pinned via
+  JWKS lookup (the `web/middleware/oauth` flow does this for you;
+  bare `hull.jwt.verify` callers must supply the pubkey
+  themselves). JWTs are stateless and cannot be revoked until they
+  expire. For revocation, use sessions instead.
+
+**Attack: OAuth / OIDC ID-token forgery or replay**
+
+- **Prevention:** `hull.web.middleware.oauth` runs a full
+  Authorization-Code-plus-PKCE flow with IdP-pinning at every step:
+  it fetches the IdP's JWKS, materializes the signing certificate
+  chain via `crypto.x509_pubkey_pem`, and only allows
+  `RS256/RS384/RS512/PS256/ES256/ES384` for ID-token verification
+  (HS256 is excluded because no OIDC IdP signs ID tokens with HMAC).
+  The per-request `state`, `nonce`, and PKCE verifier are HMAC-bound
+  into a single HttpOnly cookie keyed by `state_secret` so a
+  CSRF'd callback or a cross-provider replay can't forge a session.
+  Allowed Microsoft multi-tenant configs may set `issuer_pattern`
+  for the `/{tenant-guid}/v2.0` shape; without it Microsoft
+  `tenant=common` is rejected because issuer would never equal
+  `/common/v2.0`.
+- **Remaining risk:** Trust in the IdP's CA / cert-chain is
+  inherited. Operators who don't want this exposure should pin the
+  pubkey directly via the explicit-provider form instead of the
+  `preset = "google" | "microsoft"` shortcut.
+
+**Attack: TOTP code brute-force or replay**
+
+- **Prevention:** `hull.web.middleware.totp` enforces a small drift
+  window (±1 step by default), uses constant-time HMAC comparison
+  on every code, persists the last-used step per user, and refuses
+  any code at or below the high-water mark — so a single TOTP code
+  cannot be reused within its 30-second window even by the
+  legitimate user. Failed attempts are counted; the auth-flows
+  helper folds TOTP failures into the same lockout machinery as
+  password failures.
+- **Remaining risk:** Shared-secret leakage at enrollment time
+  (e.g. screenshot of the QR code) is out of scope. The dual-row
+  enrollment design exists specifically so the secret only persists
+  after a verified first code, capping the window where an
+  unconfirmed secret sits in the database.
+
+**Attack: Credential stuffing with a known-breached password**
+
+- **Prevention:** `hull.web.pwned` performs the Have-I-Been-Pwned
+  k-anonymity check at password set / change / reset time: it hashes
+  the candidate, sends only the first five hex characters of the
+  SHA-1 to `api.pwnedpasswords.com`, and rejects passwords that
+  appear in the breach corpus. The capability is **fail-open** by
+  design when the upstream service is unreachable, so an outage at
+  the HIBP API doesn't lock every user out of their account; the
+  `hull agent auth-status` JSON surfaces whether the most recent
+  check succeeded (`reachable | fail_open | not_yet_checked`).
+- **Remaining risk:** Fail-open trades off "block all password
+  changes during an outage" for "let users through with an
+  uncheckable password." Operators that prefer fail-closed should
+  wrap the call site themselves and reject when `pwned.check`
+  returns `nil, "unreachable"`.
+
+**Attack: Online password brute-force / account guessing**
+
+- **Prevention:** `hull.web.auth-flows` tracks per-account failure
+  counts in the same DB-backed table that drives the registration
+  / login / verify / magic-link / password-reset / email-change
+  flow. After N consecutive failures (configurable, default 5) the
+  account is locked for a backoff window. Token / verification
+  tables use cryptographically random IDs with a TTL; replay of a
+  consumed token is rejected because the consume path deletes the
+  row atomically.
+- **Remaining risk:** A patient attacker who knows the exact lockout
+  policy can still mount slow-rate guessing if rate-limit middleware
+  isn't also wired. The recommended stack is `ratelimit + auth-flows`
+  with the rate-limit key being the source IP or session id (see
+  `examples/auth_flows_*`).
+
+**Attack: Multipart upload payload injection / type confusion**
+
+- **Prevention:** The streaming multipart iterator (`req:multipart()`
+  / `req.multipart()`) decodes parts incrementally without
+  materializing the full body in memory; the per-part filename is
+  validated by `hull.web.attachment` (rejecting `..`, absolute
+  paths, control chars, and reserved Windows names) and the
+  declared Content-Type is cross-checked with `hull.mime`'s magic-
+  byte sniffer — a part claiming `image/png` whose bytes don't
+  start with the PNG signature is rejected before it reaches blob
+  storage. Bytes are streamed straight into the content-addressed
+  blob store (`hull.blob`), which keys by SHA-256, so two uploads
+  of the same content collapse to one on-disk file.
+- **Remaining risk:** Magic-byte sniffing is best-effort. Formats
+  with no fixed leading bytes (raw `application/octet-stream`,
+  some text formats) fall back to the declared Content-Type. Apps
+  that handle arbitrary uploads should pair the iterator with their
+  own per-format validator before exposing the blob to other
+  systems.
+
+**Attack: Audit-log tampering or evidence destruction**
+
+- **Prevention:** `hull.web.middleware.audit-log` writes a strict-
+  append-only event stream into a dedicated SQLite table. The
+  schema has no `UPDATE` path exposed; deletion is reserved to the
+  scheduled cleanup window which retains events for a configurable
+  window (default 90 days). Events carry actor, action, resource,
+  IP, user-agent, and request ID; the resource column is the
+  primary index. `hull agent auth-status` reports whether cleanup
+  is scheduled (`scheduled | external | missing`) so ops can
+  detect a misconfigured retention policy from the CLI.
+- **Remaining risk:** The audit log lives in the same SQLite file
+  as the app's other tables. Operators who need stronger non-
+  repudiation should ship the events to an external WORM store
+  (e.g. via the outbox helper) — set the `external` cleanup mode
+  to silence the auth-status warning.
 
 **Attack: Session fixation / brute-force session IDs**
 
@@ -511,17 +639,22 @@ app.manifest({
         "hull/db@1",
         "hull/time@1",
         "hull/validate@1",
-        "hull/web/middleware/auth@1",
+        "hull/web/middleware/audit-log@1",
+        "hull/web/middleware/oauth@1",
         "hull/web/middleware/session@1",
+        "hull/web/middleware/totp@1",
+        "hull/web/auth-flows@1",
+        "hull/web/pwned@1",
     },
     fs    = { read = {"data/"} },
-    hosts = {"api.stripe.com"},
+    hosts = {"accounts.google.com", "api.pwnedpasswords.com"},
 })
 
 -- import paths use the standard Lua/JS forms. Name the local
 -- variable whatever you want:
 local crypto = require("hull.crypto")
-local fetcher = require("hull.http-client")           -- bind to any local name
+local oauth  = require("hull.web.middleware.oauth")
+local flows  = require("hull.web.auth-flows")
 ```
 
 Each entry is a canonical spec `"<vendor>/<name>@<major>"`. First-party modules live under `hull/`; future third-party packages would follow the same pattern (`"acme/widgets@2"`). The manifest declares *what's in scope*; the `require()` / `import` call site picks *what to call it locally*.
@@ -837,3 +970,6 @@ These are real, not theoretical:
 | `req.ctx` uses raw malloc (not tracked) | ctx JSON bypasses runtime memory limits | Capped at 64KB; bounded by runtime heap indirectly |
 | HMAC-SHA256 binding returns hex string | Callers must use constant-time comparison | `hull.jwt` and `hull.web.middleware.csrf` stdlib use constant-time internally |
 | `--no-sandbox` is the only W^X downgrade | Apps run under `--no-sandbox` lose every kernel-enforced guarantee, not only W^X | Use only for local development; production startup fails closed when the manifest opts into dynamic code / dynamic libraries. The Hardened-Runtime `csops` probe under `HL_RELEASE_BUILD` and the WAMR-JIT `#error` build assertions add additional fail-loud layers. |
+| `hull.web.pwned` is fail-open on upstream outage | If `api.pwnedpasswords.com` is unreachable, password changes proceed without the breach check rather than locking every user out | Surfaced in `hull agent auth-status` JSON (`pwned.status = "fail_open"`). Operators who need fail-closed wrap the call site and reject on `nil, "unreachable"`. |
+| Multipart magic-byte sniffer is best-effort | Formats with no fixed leading bytes (raw `application/octet-stream`, plain text) fall back to the declared Content-Type | Apps handling arbitrary uploads should add per-format validators after the iterator and before exposing the blob to other systems. |
+| `hull.web.middleware.audit-log` writes to the app's SQLite file | A compromised app DB could in principle be edited offline by an attacker with file-system write access | For stronger non-repudiation ship events to an external WORM store via the outbox helper; set `cleanup = "external"` to silence the `auth-health` warning. |
