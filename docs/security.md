@@ -431,7 +431,8 @@ default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; form-action 'self
 |----------|----------|
 | No `app.manifest()` | Default strict CSP (defense in depth) |
 | `app.manifest({})` | Default strict CSP |
-| `app.manifest({ csp = "custom..." })` | Custom CSP string |
+| `app.manifest({ csp = "htmx" })` | Named preset expanded at startup: `default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'`. Right for htmx-driven SSR apps with stdlib JS / CSS served from `/static/`. Apps needing nonce-based stricter CSP should use `hull/web/middleware/csp@1` with the htmx profile instead of this static preset. |
+| `app.manifest({ csp = "custom..." })` | Custom CSP string (unknown preset names pass through as literal policies — no risk of typos silently becoming `default-src 'none'`). |
 | `app.manifest({ csp = false })` | CSP disabled (opt-out) |
 
 **Where CSP is injected:** At the C level in `lua_res_html()` and `js_res_html()`, not in application code. This means the CSP cannot be forgotten, bypassed, or misconfigured by app developers. It's structural, like parameterized SQL. Only `res:json()` and `res:text()` skip CSP (non-HTML content types are not vulnerable to script injection).

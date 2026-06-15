@@ -1205,6 +1205,11 @@ CACHE_REGISTRY_OBJ := $(BUILDDIR)/cache_registry.o
 # §"Runtime-infrastructure caches and the manifest line".
 CACHE_DIR_OBJ  := $(BUILDDIR)/cache_dir.o
 CACERT_OBJ     := $(BUILDDIR)/cacert.o
+# Content-Security-Policy preset registry. Tiny (~70 LOC, no deps
+# beyond <string.h>) so the test surface stays cheap. Resolves
+# `app.manifest({csp = "<name>"})` to a concrete header value at
+# startup; unknown names pass through as literal CSP strings.
+CSP_OBJ        := $(BUILDDIR)/csp.o
 SBOM_OBJ       := $(BUILDDIR)/sbom.o
 APP_CONTEXT_OBJ := $(BUILDDIR)/app_context.o
 AGENT_LIB_SRCS := $(wildcard $(SRCDIR)/hull/agent/*.c)
@@ -1321,6 +1326,57 @@ $(foreach f,$(CONTEXT_FILES),$(eval $(call CONTEXT_RULE,$(f))))
 
 CONTEXT_XXD_HDRS := $(CONTEXT_HDRS)
 
+# ── Stdlib-shipped static assets (xxd) ────────────────────────────────
+#
+# Files under stdlib/static/hull/<module>/* become embedded entries
+# named `static/hull/<module>/<file>`. The static middleware (src/hull/
+# static.c) falls back to the platform VFS after an app-VFS miss, so
+# `/static/hull/<module>/<file>` requests resolve here automatically.
+# Convention: stdlib widgets ship assets under their own subdirectory;
+# apps may override by writing the same path under their own static/.
+# Phase 0 ships no widget assets — discovery is wired and tested but
+# returns 0 entries until §1.5.g-1 lands.
+
+STDLIB_STATIC_FILES := $(shell find stdlib/static -type f \
+    -not -name '.gitkeep' 2>/dev/null)
+
+# Path flatten: stdlib/static/hull/htmx/toast/toast.css ->
+#               build/stdlib_static_hull_htmx_toast_toast.css.h
+stdlib_static_hdr = $(BUILDDIR)/stdlib_static_$(subst /,_,$(patsubst stdlib/static/%,%.h,$(1)))
+STDLIB_STATIC_HDRS := $(foreach f,$(STDLIB_STATIC_FILES),$(call stdlib_static_hdr,$(f)))
+
+define STDLIB_STATIC_RULE
+$(call stdlib_static_hdr,$(1)): $(1) | $(BUILDDIR)
+	xxd -i $$< > $$@
+endef
+$(foreach f,$(STDLIB_STATIC_FILES),$(eval $(call STDLIB_STATIC_RULE,$(f))))
+
+STDLIB_STATIC_XXD_HDRS := $(STDLIB_STATIC_HDRS)
+
+# ── Stdlib-shipped template partials (xxd) ────────────────────────────
+#
+# Files under stdlib/templates/hull/<module>/*.html become embedded
+# entries named `templates/hull/<module>/<file>`. The template engine
+# (stdlib/lua/hull/template.lua + JS sibling) falls back to the
+# platform VFS after an app-VFS miss; app-side templates at the same
+# path win. Phase 0 ships no widget templates.
+
+STDLIB_TPL_FILES := $(shell find stdlib/templates -name '*.html' \
+    -not -name '.gitkeep' 2>/dev/null)
+
+# Path flatten: stdlib/templates/hull/htmx/toast/toast.html ->
+#               build/stdlib_tpl_hull_htmx_toast_toast.h
+stdlib_tpl_hdr = $(BUILDDIR)/stdlib_tpl_$(subst /,_,$(patsubst stdlib/templates/%.html,%.h,$(1)))
+STDLIB_TPL_HDRS := $(foreach f,$(STDLIB_TPL_FILES),$(call stdlib_tpl_hdr,$(f)))
+
+define STDLIB_TPL_RULE
+$(call stdlib_tpl_hdr,$(1)): $(1) | $(BUILDDIR)
+	xxd -i $$< > $$@
+endef
+$(foreach f,$(STDLIB_TPL_FILES),$(eval $(call STDLIB_TPL_RULE,$(f))))
+
+STDLIB_TPL_XXD_HDRS := $(STDLIB_TPL_HDRS)
+
 # ── Unified stdlib registry (.c compiled once, linked by both runtimes) ──
 #
 # Merges Lua (dot names), JS (colon names), and context docs into
@@ -1330,9 +1386,9 @@ CONTEXT_XXD_HDRS := $(CONTEXT_HDRS)
 STDLIB_REGISTRY_C := $(BUILDDIR)/stdlib_registry.c
 STDLIB_REGISTRY_O := $(BUILDDIR)/stdlib_registry.o
 
-$(STDLIB_REGISTRY_C): $(STDLIB_LUA_XXD_HDRS) $(STDLIB_JS_XXD_HDRS) $(CONTEXT_XXD_HDRS) | $(BUILDDIR)
+$(STDLIB_REGISTRY_C): $(STDLIB_LUA_XXD_HDRS) $(STDLIB_JS_XXD_HDRS) $(CONTEXT_XXD_HDRS) $(STDLIB_STATIC_XXD_HDRS) $(STDLIB_TPL_XXD_HDRS) | $(BUILDDIR)
 	@echo "/* Auto-generated unified stdlib registry — do not edit */" > $@
-	@for hdr in $(STDLIB_LUA_XXD_HDRS) $(STDLIB_JS_XXD_HDRS) $(CONTEXT_XXD_HDRS); do \
+	@for hdr in $(STDLIB_LUA_XXD_HDRS) $(STDLIB_JS_XXD_HDRS) $(CONTEXT_XXD_HDRS) $(STDLIB_STATIC_XXD_HDRS) $(STDLIB_TPL_XXD_HDRS); do \
 		echo "#include \"$$(basename $$hdr)\""; \
 	done >> $@
 	@echo "" >> $@
@@ -1352,6 +1408,16 @@ $(STDLIB_REGISTRY_C): $(STDLIB_LUA_XXD_HDRS) $(STDLIB_JS_XXD_HDRS) $(CONTEXT_XXD
 		varname=$$(echo "$$f" | sed 's/[\/.\-]/_/g'); \
 		modname=$$(echo "$$f" | sed 's|^stdlib/context/||; s|\.md$$||'); \
 		echo "context:$$modname	    { \"context:$$modname\", $${varname}, sizeof($${varname}) },"; \
+	done; \
+	for f in $(STDLIB_STATIC_FILES); do \
+		varname=$$(echo "$$f" | sed 's/[\/.\-]/_/g'); \
+		modname=$$(echo "$$f" | sed 's|^stdlib/||'); \
+		echo "$$modname	    { \"$$modname\", $${varname}, sizeof($${varname}) },"; \
+	done; \
+	for f in $(STDLIB_TPL_FILES); do \
+		varname=$$(echo "$$f" | sed 's/[\/.\-]/_/g'); \
+		modname=$$(echo "$$f" | sed 's|^stdlib/||'); \
+		echo "$$modname	    { \"$$modname\", $${varname}, sizeof($${varname}) },"; \
 	done ) | LC_ALL=C sort | cut -f2- >> $@
 	@echo "    { 0, 0, 0 }" >> $@
 	@echo "};" >> $@
@@ -1612,7 +1678,7 @@ all: $(BUILDDIR)/hull
 # in tool mode (hull build, hull verify), never from app runtime.
 # Cost: ~hundreds of bytes per app (the embedded manifest+sig, dead
 # weight at app runtime). Trade we accept for a clean symbol graph.
-PLATFORM_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(SBOM_OBJ) $(APP_CONTEXT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) \
+PLATFORM_OBJS := $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(CSP_OBJ) $(SBOM_OBJ) $(APP_CONTEXT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_STUB_OBJ) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) \
 	$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) \
 	$(COMPILER_OBJ) $(COMPILER_TCC_OBJ)
 
@@ -1756,8 +1822,8 @@ $(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H)
 endif
 
 # Hull binary
-$(BUILDDIR)/hull: $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(SBOM_OBJ) $(APP_CONTEXT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(COMPILER_TCC_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB)
-	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(SBOM_OBJ) $(APP_CONTEXT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(COMPILER_TCC_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) \
+$(BUILDDIR)/hull: $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(CSP_OBJ) $(SBOM_OBJ) $(APP_CONTEXT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(COMPILER_TCC_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB)
+	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(CSP_OBJ) $(SBOM_OBJ) $(APP_CONTEXT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(COMPILER_TCC_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) \
 		$(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB) $(WGPU_LIB) $(WGPU_FRAMEWORKS) -lm -lpthread
 
 # Capability sources
@@ -2017,6 +2083,10 @@ $(CACERT_OBJ): $(SRCDIR)/hull/cacert.c $(INCDIR)/hull/cacert.h | $(BUILDDIR)
 endif
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
+# Content-Security-Policy preset registry.
+$(CSP_OBJ): $(SRCDIR)/hull/csp.c $(INCDIR)/hull/csp.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
 # QuickJS sources (relaxed warnings)
 $(BUILDDIR)/qjs_%.o: $(QJS_DIR)/%.c | $(BUILDDIR)
 	$(CC) $(QJS_CFLAGS) -I$(QJS_DIR) -c -o $@ $<
@@ -2129,6 +2199,10 @@ $(BUILDDIR)/test_%: $(TESTDIR)/hull/cap/test_%.c $(TEST_COMMON_DEPS) | $(BUILDDI
 $(BUILDDIR)/test_parse_size: $(TESTDIR)/hull/test_parse_size.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_COMMON_LIBS)
 
+# CSP preset registry — tiny, no deps beyond <string.h>.
+$(BUILDDIR)/test_csp: $(TESTDIR)/hull/test_csp.c $(CSP_OBJ) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(CSP_OBJ)
+
 # JS runtime test — needs QuickJS + JS runtime objects + manifest (JS-only to avoid Lua link deps)
 $(BUILDDIR)/test_js: $(TESTDIR)/hull/runtime/js/test_js.c $(TEST_COMMON_DEPS) $(MANIFEST_JS_OBJ) $(MODULE_OBJ) $(CAP_TEST_JS_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(VFS_OBJ) $(PATH_NORM_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(RUNTIME_CACHE_COMMON_OBJ) $(JS_RT_OBJS) $(QJS_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
@@ -2162,9 +2236,9 @@ $(BUILDDIR)/test_compiler: $(TESTDIR)/hull/compiler/test_compiler.c $(COMPILER_O
 		$(BUILDDIR)/cap_audit.o $(SH_JSON_OBJ) $(SH_ARENA_OBJ) -lm
 
 # Command dispatcher test — needs full command set (symbol resolution for command table)
-$(BUILDDIR)/test_dispatch: $(TESTDIR)/hull/commands/test_dispatch.c $(CMD_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(TOOL_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(SBOM_OBJ) $(APP_CONTEXT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TEST_COMMON_DEPS) $(RT_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(MANIFEST_OBJ) $(MODULE_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(COMPILER_TCC_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(PLEDGE_OBJS) | $(BUILDDIR)
+$(BUILDDIR)/test_dispatch: $(TESTDIR)/hull/commands/test_dispatch.c $(CMD_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(TOOL_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(CSP_OBJ) $(SBOM_OBJ) $(APP_CONTEXT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TEST_COMMON_DEPS) $(RT_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) $(MANIFEST_OBJ) $(MODULE_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(COMPILER_TCC_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(PLEDGE_OBJS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
-		$(CMD_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(TOOL_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(SBOM_OBJ) $(APP_CONTEXT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) \
+		$(CMD_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(TOOL_OBJ) $(SANDBOX_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(CSP_OBJ) $(SBOM_OBJ) $(APP_CONTEXT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) \
 		$(TEST_CAP_OBJS) $(RT_OBJS) $(MANIFEST_OBJ) $(MODULE_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(COMPILER_TCC_OBJ) $(APP_ENTRIES_DEFAULT_OBJ) $(STDLIB_REGISTRY_O) $(ALLOC_OBJ) $(ASYNC_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(WAMR_OBJS) $(VEND_OBJS) \
 		$(KEEL_LIB) $(MBEDTLS_OBJS) $(SQLITE_OBJ) $(LOG_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(WGPU_LIB) $(WGPU_FRAMEWORKS) -lm -lpthread
 

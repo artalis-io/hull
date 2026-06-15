@@ -69,22 +69,34 @@ static JSValue js_template_load_raw(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "invalid template name");
     }
 
-    /* 1. Search embedded template entries via VFS */
+    /* 1. Search embedded app templates via app VFS */
     HlJS *js = (HlJS *)JS_GetContextOpaque(ctx);
-    if (js && js->base.app_vfs) {
-        char tpl_name[HL_MODULE_PATH_MAX];
-        int tpl_n = snprintf(tpl_name, sizeof(tpl_name), "templates/%s", name);
-        if (tpl_n > 0 && (size_t)tpl_n < sizeof(tpl_name)) {
-            const HlEntry *e = hl_vfs_find(js->base.app_vfs, tpl_name);
-            if (e) {
-                JSValue result = JS_NewStringLen(ctx, (const char *)e->data, e->len);
-                JS_FreeCString(ctx, name);
-                return result;
-            }
+    char tpl_name[HL_MODULE_PATH_MAX];
+    int tpl_n = snprintf(tpl_name, sizeof(tpl_name), "templates/%s", name);
+    int tpl_ok = (tpl_n > 0 && (size_t)tpl_n < sizeof(tpl_name));
+    if (tpl_ok && js && js->base.app_vfs) {
+        const HlEntry *e = hl_vfs_find(js->base.app_vfs, tpl_name);
+        if (e) {
+            JSValue result = JS_NewStringLen(ctx, (const char *)e->data, e->len);
+            JS_FreeCString(ctx, name);
+            return result;
         }
     }
 
-    /* 2. Filesystem fallback (dev mode): app_dir/templates/<name> */
+    /* 2. Stdlib platform VFS (widget partials shipped under
+     *    templates/hull/<module>/<file>.html). App-shipped templates
+     *    at the same path won in step 1 above; this is the fallback
+     *    for stdlib-shipped widget partials. */
+    if (tpl_ok && js && js->base.platform_vfs) {
+        const HlEntry *e = hl_vfs_find(js->base.platform_vfs, tpl_name);
+        if (e) {
+            JSValue result = JS_NewStringLen(ctx, (const char *)e->data, e->len);
+            JS_FreeCString(ctx, name);
+            return result;
+        }
+    }
+
+    /* 3. Filesystem fallback (dev mode): app_dir/templates/<name> */
     if (js && js->app_dir) {
         /* Reject ".." components to prevent path traversal */
         const char *p = name;

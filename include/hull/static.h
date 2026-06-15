@@ -17,7 +17,17 @@
 #include <stddef.h>
 
 typedef struct {
-    const HlVfs *vfs;             /* unified VFS: embedded + filesystem */
+    /* App VFS: app's own static/ files (embedded or on disk in dev mode).
+     * Looked up first; app-shipped assets shadow stdlib-shipped ones
+     * with the same path. */
+    const HlVfs *vfs;
+
+    /* Platform VFS: stdlib-shipped assets (static/hull/<module>/<file>).
+     * Looked up after the app VFS miss. NULL is permitted — the
+     * middleware just skips this step. Used to serve assets from
+     * stdlib widgets (hull/web/htmx/toast etc.) without requiring
+     * the app to vendor them. */
+    const HlVfs *stdlib_vfs;
 } HlStaticCtx;
 
 /**

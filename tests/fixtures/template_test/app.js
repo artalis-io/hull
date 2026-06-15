@@ -171,3 +171,13 @@ app.get("/test/xss", (_req, res) => {
     const safe = !html.includes("<img");
     res.json(check("xss", safe, true));
 });
+
+// Test 21: stdlib-shipped template resolves via platform VFS fallback.
+// App has nothing at templates/hull/_probe/probe.html; the engine
+// must fall back to platform_vfs and find the build-system probe
+// (stdlib/templates/hull/_probe/probe.html).
+app.get("/test/stdlib-template", (_req, res) => {
+    const html = template.render("hull/_probe/probe.html", { value: "ok" });
+    const hit = html.includes("hull-probe") && html.includes("ok");
+    res.json(check("stdlib-template", hit, true));
+});

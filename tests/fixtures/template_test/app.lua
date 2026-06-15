@@ -170,3 +170,13 @@ app.get("/test/xss", function(req, res)
     local safe = not html:find("<img")
     res:json(check("xss", safe, true))
 end)
+
+-- Test 21: stdlib-shipped template resolves via platform VFS fallback.
+-- The app has nothing at templates/hull/_probe/probe.html; the engine
+-- must fall back to platform_vfs and find the build-system probe
+-- (stdlib/templates/hull/_probe/probe.html).
+app.get("/test/stdlib-template", function(req, res)
+    local html = template.render("hull/_probe/probe.html", { value = "ok" })
+    local hit = html:find('hull%-probe') and html:find('ok')
+    res:json(check("stdlib-template", hit and true or false, true))
+end)

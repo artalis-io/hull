@@ -228,4 +228,123 @@ UTEST(static_serve, post_method_skipped)
     ASSERT_EQ(0, rc);
 }
 
+/* ── Platform VFS fallback (stdlib-shipped widget assets) ─────────── */
+
+UTEST(static_serve, stdlib_fallback_hit)
+{
+    /* App VFS empty; stdlib VFS holds a widget's CSS. The middleware
+     * should serve from stdlib when the app has nothing at that path. */
+    static const HlEntry app_entries[] = { { NULL, NULL, 0 } };
+    static const unsigned char css[] = ".toast { display: none; }";
+    static const HlEntry stdlib_entries[] = {
+        { "static/hull/htmx/toast/toast.css", css, sizeof(css) - 1 },
+        { NULL, NULL, 0 },
+    };
+    HlVfs app_vfs, stdlib_vfs;
+    hl_vfs_init(&app_vfs, app_entries, NULL);
+    hl_vfs_init(&stdlib_vfs, stdlib_entries, NULL);
+
+    KlAllocator alloc = kl_allocator_default();
+    HlStaticCtx ctx = { .vfs = &app_vfs, .stdlib_vfs = &stdlib_vfs };
+
+    KlRequest req = make_request("GET", "/static/hull/htmx/toast/toast.css");
+    KlResponse res;
+    memset(&res, 0, sizeof(res));
+    kl_response_init(&res, &alloc);
+
+    int rc = hl_static_middleware(&req, &res, &ctx);
+    ASSERT_EQ(1, rc);
+    ASSERT_EQ(200, res.status);
+    ASSERT_EQ(sizeof(css) - 1, res.body_len);
+    ASSERT_EQ(0, memcmp(res.body, css, res.body_len));
+
+    kl_response_free(&res);
+}
+
+UTEST(static_serve, app_shadows_stdlib)
+{
+    /* Both VFS have the same path. App wins (override semantics). */
+    static const unsigned char app_css[] = ".app-version{}";
+    static const unsigned char stdlib_css[] = ".stdlib-version{}";
+    static const HlEntry app_entries[] = {
+        { "static/hull/htmx/toast/toast.css", app_css, sizeof(app_css) - 1 },
+        { NULL, NULL, 0 },
+    };
+    static const HlEntry stdlib_entries[] = {
+        { "static/hull/htmx/toast/toast.css", stdlib_css, sizeof(stdlib_css) - 1 },
+        { NULL, NULL, 0 },
+    };
+    HlVfs app_vfs, stdlib_vfs;
+    hl_vfs_init(&app_vfs, app_entries, NULL);
+    hl_vfs_init(&stdlib_vfs, stdlib_entries, NULL);
+
+    KlAllocator alloc = kl_allocator_default();
+    HlStaticCtx ctx = { .vfs = &app_vfs, .stdlib_vfs = &stdlib_vfs };
+
+    KlRequest req = make_request("GET", "/static/hull/htmx/toast/toast.css");
+    KlResponse res;
+    memset(&res, 0, sizeof(res));
+    kl_response_init(&res, &alloc);
+
+    int rc = hl_static_middleware(&req, &res, &ctx);
+    ASSERT_EQ(1, rc);
+    ASSERT_EQ(200, res.status);
+    ASSERT_EQ(sizeof(app_css) - 1, res.body_len);
+    ASSERT_EQ(0, memcmp(res.body, app_css, res.body_len));
+
+    kl_response_free(&res);
+}
+
+UTEST(static_serve, stdlib_miss_returns_zero)
+{
+    /* Neither VFS has the requested path: pass through (return 0)
+     * so the route lookup continues. */
+    static const unsigned char css[] = ".x{}";
+    static const HlEntry app_entries[] = { { NULL, NULL, 0 } };
+    static const HlEntry stdlib_entries[] = {
+        { "static/hull/htmx/toast/toast.css", css, sizeof(css) - 1 },
+        { NULL, NULL, 0 },
+    };
+    HlVfs app_vfs, stdlib_vfs;
+    hl_vfs_init(&app_vfs, app_entries, NULL);
+    hl_vfs_init(&stdlib_vfs, stdlib_entries, NULL);
+
+    HlStaticCtx ctx = { .vfs = &app_vfs, .stdlib_vfs = &stdlib_vfs };
+
+    KlRequest req = make_request("GET", "/static/hull/htmx/missing.css");
+    KlResponse res;
+    memset(&res, 0, sizeof(res));
+
+    int rc = hl_static_middleware(&req, &res, &ctx);
+    ASSERT_EQ(0, rc);
+}
+
+UTEST(static_serve, stdlib_vfs_null_is_safe)
+{
+    /* HlStaticCtx with NULL stdlib_vfs must not crash; it should
+     * behave exactly like the legacy single-VFS context. */
+    static const unsigned char css[] = ".app{}";
+    static const HlEntry entries[] = {
+        { "static/style.css", css, sizeof(css) - 1 },
+        { NULL, NULL, 0 },
+    };
+    HlVfs vfs;
+    hl_vfs_init(&vfs, entries, NULL);
+
+    KlAllocator alloc = kl_allocator_default();
+    HlStaticCtx ctx = { .vfs = &vfs, .stdlib_vfs = NULL };
+
+    KlRequest req = make_request("GET", "/static/style.css");
+    KlResponse res;
+    memset(&res, 0, sizeof(res));
+    kl_response_init(&res, &alloc);
+
+    int rc = hl_static_middleware(&req, &res, &ctx);
+    ASSERT_EQ(1, rc);
+    ASSERT_EQ(200, res.status);
+    ASSERT_EQ(sizeof(css) - 1, res.body_len);
+
+    kl_response_free(&res);
+}
+
 UTEST_MAIN()

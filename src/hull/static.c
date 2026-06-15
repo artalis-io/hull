@@ -189,6 +189,35 @@ int hl_static_middleware(KlRequest *req, KlResponse *res, void *user_data)
         return 1;
     }
 
+    /* ── Try stdlib platform VFS (stdlib-shipped widget assets) ──────
+     * Same lookup key as the app VFS; the registry stores stdlib
+     * assets under `static/hull/<module>/<file>` so the path matches
+     * directly. App-shipped assets at the same path won above because
+     * the app VFS was consulted first (override semantics). */
+    if (ctx->stdlib_vfs) {
+        const HlEntry *se = hl_vfs_find(ctx->stdlib_vfs, full_name);
+        if (se) {
+            char etag[64];
+            int elen = format_etag_embedded(etag, sizeof(etag), se->len);
+            if (elen > 0 && etag_matches(req, etag, (size_t)elen)) {
+                kl_response_status(res, 304);
+                kl_response_header(res, "ETag", etag);
+                kl_response_body_borrow(res, NULL, 0);
+                return 1;
+            }
+
+            kl_response_status(res, 200);
+            kl_response_header(res, "Content-Type", mime);
+            /* Stdlib assets are version-pinned by the hull binary's
+             * identity; aggressive caching is safe. */
+            kl_response_header(res, "Cache-Control", "public, max-age=86400");
+            if (elen > 0)
+                kl_response_header(res, "ETag", etag);
+            kl_response_body_borrow(res, (const char *)se->data, se->len);
+            return 1;
+        }
+    }
+
     /* ── Try filesystem (dev mode) ────────────────────────────────── */
     {
         char fpath[4096];

@@ -645,14 +645,26 @@ int hl_lua_register_stdlib(HlLua *lua)
     lua_setfield(L, LUA_REGISTRYINDEX, "__hull_loaded");
 
     /* Create __hull_modules table and populate with compiled chunks.
-     * Iterates the platform VFS entries, skipping JS modules
-     * (colon-separated names) — adding a new .lua file requires no C changes. */
+     * Iterates the platform VFS entries, skipping non-Lua-module
+     * entries — adding a new .lua file requires no C changes.
+     *
+     * Skip conditions:
+     *   - colon in name => JS module (hull:foo) or context doc
+     *     (context:bar). JS modules are loaded by the QuickJS
+     *     loader; context docs are not Lua source.
+     *   - "static/" prefix => stdlib-shipped static asset
+     *     (CSS / JS / image bytes), not Lua source.
+     *   - "templates/" prefix => stdlib-shipped template partial,
+     *     not Lua source. The template engine resolves these via
+     *     hl_vfs_find on the platform VFS at render time. */
     lua_newtable(L);
 
     if (lua->base.platform_vfs) {
         for (size_t i = 0; i < lua->base.platform_vfs->count; i++) {
             const HlEntry *e = &lua->base.platform_vfs->entries[i];
-            if (strchr(e->name, ':')) continue; /* skip JS modules */
+            if (strchr(e->name, ':')) continue;            /* JS / context */
+            if (strncmp(e->name, "static/", 7) == 0) continue;
+            if (strncmp(e->name, "templates/", 10) == 0) continue;
             if (hl_lua_load_cached(L, (const char *)e->data, e->len, e->name) != LUA_OK) {
                 log_error("[hull:c] failed to load stdlib module '%s': %s",
                           e->name, lua_tostring(L, -1));

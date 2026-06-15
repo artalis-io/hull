@@ -51,21 +51,33 @@ static int lua_template_load_raw(lua_State *L)
     if (name[0] == '/' || name[0] == '\0')
         return luaL_error(L, "invalid template name: %s", name);
 
-    /* 1. Search embedded template entries via VFS */
+    /* 1. Search embedded app templates via app VFS */
     HlLua *lua = get_hl_lua(L);
-    if (lua && lua->base.app_vfs) {
-        char tpl_name[HL_MODULE_PATH_MAX];
-        int n = snprintf(tpl_name, sizeof(tpl_name), "templates/%s", name);
-        if (n > 0 && (size_t)n < sizeof(tpl_name)) {
-            const HlEntry *e = hl_vfs_find(lua->base.app_vfs, tpl_name);
-            if (e) {
-                lua_pushlstring(L, (const char *)e->data, e->len);
-                return 1;
-            }
+    char tpl_name[HL_MODULE_PATH_MAX];
+    int tpl_n = snprintf(tpl_name, sizeof(tpl_name), "templates/%s", name);
+    int tpl_ok = (tpl_n > 0 && (size_t)tpl_n < sizeof(tpl_name));
+    if (tpl_ok && lua && lua->base.app_vfs) {
+        const HlEntry *e = hl_vfs_find(lua->base.app_vfs, tpl_name);
+        if (e) {
+            lua_pushlstring(L, (const char *)e->data, e->len);
+            return 1;
         }
     }
 
-    /* 2. Filesystem fallback (dev mode): app_dir/templates/<name> */
+    /* 2. Stdlib platform VFS (widget partials shipped under
+     *    templates/hull/<module>/<file>.html). App-shipped templates
+     *    at the same path won in step 1 above; this is the fallback
+     *    for stdlib-shipped widget partials. NULL platform_vfs is
+     *    fine — happens in test contexts. */
+    if (tpl_ok && lua && lua->base.platform_vfs) {
+        const HlEntry *e = hl_vfs_find(lua->base.platform_vfs, tpl_name);
+        if (e) {
+            lua_pushlstring(L, (const char *)e->data, e->len);
+            return 1;
+        }
+    }
+
+    /* 3. Filesystem fallback (dev mode): app_dir/templates/<name> */
     if (lua && lua->app_dir) {
         /* Reject ".." components to prevent path traversal */
         const char *p = name;

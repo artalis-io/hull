@@ -124,6 +124,7 @@ run_template_tests() {
     check_test      "$LABEL for-kv"         "$PORT" "/test/for-kv"
     check_test_multi "$LABEL if-for-else"   "$PORT" "/test/if-for-else"
     check_test      "$LABEL xss"            "$PORT" "/test/xss"
+    check_test      "$LABEL stdlib-template" "$PORT" "/test/stdlib-template"
 
     stop_server; rm -rf "$TMPDIR_TPL"
 }

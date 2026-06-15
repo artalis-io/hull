@@ -34,6 +34,7 @@
 #include "hull/net_backend.h"
 #include "hull/net/keel.h"
 #include "hull/cacert.h"
+#include "hull/csp.h"
 #ifdef HL_ENABLE_DB
 #include "hull/worker_db.h"
 #include "hull/cap/db.h"
@@ -1119,9 +1120,11 @@ static int hl_serve_wire_caps(HlServerState *s)
 
     /* Wire CSP policy to runtime.
      * Default CSP is always active — even without app.manifest().
-     * Explicit csp="custom" overrides; csp=false disables. */
+     * Explicit csp="custom" overrides; csp=false disables.
+     * csp="<preset>" expands at startup; unknown names pass through
+     * as literal CSP strings (see hl_csp_resolve docs above). */
     if (s->manifest.csp_set)
-        rt->csp_policy = s->manifest.csp;    /* custom or NULL (disabled) */
+        rt->csp_policy = hl_csp_resolve(s->manifest.csp);
     else
         rt->csp_policy = HL_DEFAULT_CSP;  /* default */
 
@@ -1353,19 +1356,29 @@ static int hl_serve_wire_routes(HlServerState *s)
         return -1;
     }
 
-    /* Auto-register static file serving (after sandbox is applied) */
+    /* Auto-register static file serving (after sandbox is applied).
+     *
+     * The middleware activates when the app has any static/ content
+     * OR the platform VFS ships stdlib assets under static/hull/
+     * (e.g. when an htmx widget module is linked in). Either trigger
+     * is enough — the lookup tries app VFS first, then stdlib VFS,
+     * then dev-mode filesystem. */
     {
-        int has_static = hl_vfs_has_prefix(app_vfs, "static/");
-        if (!has_static) {
+        const HlVfs *platform_vfs = hl_app_context_platform_vfs(s->app);
+        int has_app_static = hl_vfs_has_prefix(app_vfs, "static/");
+        if (!has_app_static) {
             char static_dir[4096];
             snprintf(static_dir, sizeof(static_dir), "%s/static", s->app_dir);
             struct stat sdir;
             if (stat(static_dir, &sdir) == 0 && S_ISDIR(sdir.st_mode))
-                has_static = 1;
+                has_app_static = 1;
         }
-        if (has_static) {
+        int has_stdlib_static = platform_vfs
+            && hl_vfs_has_prefix(platform_vfs, "static/hull/");
+        if (has_app_static || has_stdlib_static) {
             HlStaticCtx *sctx = track_route_alloc(sizeof(HlStaticCtx));
             sctx->vfs = hl_app_context_app_vfs(s->app);
+            sctx->stdlib_vfs = has_stdlib_static ? platform_vfs : NULL;
             kl_server_use(&s->server, "GET", "/static/*",
                           hl_static_middleware, sctx);
         }

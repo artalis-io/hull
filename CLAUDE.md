@@ -2196,7 +2196,7 @@ make e2e                            # run all E2E tests (examples + build + sand
 | `test_tool` | 52 | Tool-spawn allowlist, dangerous-flag validation |
 | `test_js` | 81 | QuickJS init, eval, sandbox, modules, GC, async, host bindings |
 | `test_lua` | 99 | Lua init, eval, sandbox, modules, GC, async, host bindings |
-| `test_static` | 18 | MIME detection, path traversal, embedded VFS lookup |
+| `test_static` | 22 | MIME detection, path traversal, embedded VFS lookup, stdlib platform-VFS fallback (app shadows stdlib, miss returns 0, NULL stdlib_vfs is safe) |
 | `test_vfs` | 19 | Binary search find, prefix queries, path construction, empty VFS |
 | `test_signature` | 20 | Ed25519 sign/verify round-trips, dual-layer signature |
 | `test_release` | 20 | Ed25519 release-manifest sign/verify, tamper detect, hex edge cases, secret-key file IO |
@@ -2204,8 +2204,9 @@ make e2e                            # run all E2E tests (examples + build + sand
 | `test_compiler` | 16 | Compiler vtable: system + tcc backends, allowlist, end-to-end on Linux |
 | `test_cacert` | 6 | Embedded Mozilla CA bundle: presence, NUL-termination, mbedTLS parse |
 | `test_dispatch` | 4 | Command dispatch table, unknown-command handling |
+| `test_csp` | 7 | CSP preset registry: `htmx` preset expansion, literal passthrough, NULL passthrough, reverse name lookup |
 
-27 suites, ~610 test cases total.
+28 suites, ~624 test cases total.
 
 \+ E2E suites (`e2e_build.sh`, `e2e_examples.sh`, `e2e_http.sh`, `e2e_sandbox.sh`, `e2e_tcc.sh`, `e2e_install.sh`, `e2e_ca_bundle.sh`, `e2e_update.sh`)
 
