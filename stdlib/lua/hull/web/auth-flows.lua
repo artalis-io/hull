@@ -520,12 +520,23 @@ local function origin_for(req)
     -- entry. Then strip an optional :PORT suffix so apps deployed
     -- on non-standard ports without a proxy that strips it match
     -- their bare-hostname allowlist entry.
+    --
+    -- Round-11 HIGH-3: IPv6 literals (`[::1]:8080`) are bracketed
+    -- per RFC 3986. The naive first-colon split eats the IPv6
+    -- colons; bare host becomes `[`. Detect the bracket and pull
+    -- the literal whole (keep brackets so it matches a bracketed
+    -- allowlist entry), then strip any trailing `:PORT`.
     if type(host) == "string" then
         local comma = host:find(",", 1, true)
         if comma then host = host:sub(1, comma - 1) end
         host = host:match("^%s*(.-)%s*$")
-        local colon = host:find(":", 1, true)
-        if colon then host = host:sub(1, colon - 1) end
+        if host:sub(1, 1) == "[" then
+            local close = host:find("]", 1, true)
+            if close then host = host:sub(1, close) end
+        else
+            local colon = host:find(":", 1, true)
+            if colon then host = host:sub(1, colon - 1) end
+        end
     end
     if type(host) == "string" and host ~= ""
        and _state.trusted_hosts then
@@ -561,6 +572,30 @@ local function origin_for(req)
     -- allowlist AND trust_request_host is off. Refuse to build a
     -- URL; the handler returns the same generic enumeration-safe
     -- response without actually sending the link.
+    --
+    -- Round-11 LOW-10: one-shot warn the first time this fires.
+    -- Pre-fix, a misconfigured trusted_hosts produced 100% silent
+    -- no-mail — operators learned from user complaints. The
+    -- enumeration-safe contract means we can't 4xx the request,
+    -- but a single log line at startup is enough for ops to spot
+    -- the misconfig.
+    if not _state.warned_host_mismatch then
+        _state.warned_host_mismatch = true
+        local raw = h["x-forwarded-host"] or h.host or "(nil)"
+        local hosts = _state.trusted_hosts
+        local list = "(none configured)"
+        if hosts then
+            list = table.concat(hosts, ", ")
+        end
+        local log = require("hull.log")
+        log.warn("auth-flows: origin_for refused host '"
+              .. tostring(raw) .. "' (normalized: '"
+              .. tostring(host or "") .. "'). trusted_hosts = ["
+              .. list .. "]. URL build skipped; subsequent email "
+              .. "sends to this user-flow will be silently dropped "
+              .. "until the host is added. Set public_origin or "
+              .. "trust_request_host = true to override.")
+    end
     return nil
 end
 
@@ -1171,6 +1206,26 @@ local function handle_email_change(req, res)
         return res:json({ ok = true })
     end
 
+    -- Round-11 MEDIUM-9: reject when a pending email-change for
+    -- this user already exists. Pre-fix the upsert silently
+    -- destroyed the prior pending row — when the user (or attacker)
+    -- clicked a stale link, email_change_confirm rejected at the
+    -- `new_email` mismatch guard, killing the legitimate flow with
+    -- a generic error and no retry path. Force the user to either
+    -- click revoke or wait email_change_ttl. Expired pending rows
+    -- are reaped by gc_expired so the user isn't blocked forever
+    -- if they abandoned the prior attempt.
+    local existing = db.query(
+        "SELECT new_email FROM _hull_auth_pending_email_changes "
+        .. "WHERE user_id = ? AND expires_at > ? LIMIT 1",
+        { user_id, time.now() })
+    if existing and #existing > 0 then
+        return res:status(409):json({
+            error = "pending email change exists",
+            new_email = existing[1].new_email,
+        })
+    end
+
     local now = time.now()
     local token = issue_token(user_id, ACTIONS.email_change,
         _state.email_change_ttl, { new_email = body.new_email })
@@ -1454,6 +1509,28 @@ function M.init(opts)
             opts.public_origin = opts.public_origin:sub(1, -2)
         end
     end
+    if has_hosts then
+        -- Round-11 MEDIUM-4: trusted_hosts entries must be bare hosts
+        -- (no :PORT). origin_for strips :PORT from the incoming Host
+        -- before comparison, so an entry like "app.com:8080" never
+        -- matches and the deployment silently sends zero emails. Catch
+        -- the defensive-typo at init. IPv6 bracketed literals
+        -- ([::1]) are allowed — colons inside the brackets are part
+        -- of the host.
+        for _, h in ipairs(opts.trusted_hosts) do
+            if type(h) ~= "string" or h == "" then
+                error("auth-flows.init: trusted_hosts entries must be "
+                      .. "non-empty strings (got " .. type(h) .. ")")
+            end
+            if h:sub(1, 1) ~= "[" and h:find(":", 1, true) then
+                error("auth-flows.init: trusted_hosts entry '" .. h
+                      .. "' contains ':' — entries must be bare host "
+                      .. "names; the URL preserves the request's port "
+                      .. "automatically. IPv6 literals must be "
+                      .. "bracketed (e.g. \"[::1]\").")
+            end
+        end
+    end
     -- Required user-storage callbacks. Collected up front so the
     -- error message names them all rather than failing on the
     -- first missing one at request time.
@@ -1716,6 +1793,7 @@ M._test = {
         _state.trusted_hosts    = nil
         _state.trust_request_host = false
         _state.user_sanitize    = nil
+        _state.warned_host_mismatch = false
         _state.templates        = {}
         _state.user_find_by_email      = nil
         _state.user_get                = nil

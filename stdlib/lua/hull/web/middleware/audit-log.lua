@@ -135,6 +135,11 @@ function audit_log.init(opts)
                   .. "Wire your own cron/worker for steady-state.")
         end
     end
+    -- Round-11 MEDIUM-7: track explicit opt-out so cleanup_status()
+    -- can distinguish "operator wired their own" from "forgot to
+    -- enable". is_cleanup_scheduled() boolean kept for back-compat;
+    -- new callers should use cleanup_status() for the three-way.
+    _state._cleanup_opted_out = opts.cleanup == false
     _state._initialized = true
 end
 
@@ -363,6 +368,25 @@ function audit_log.is_cleanup_scheduled()
     return _state._catchup_done == true and _state._cleanup_scheduled == true
 end
 
+--- Round-11 MEDIUM-7: tri-state cleanup status. Returns one of:
+--   * "scheduled" — auto-daily timer wired (cleanup ~= false; app.daily
+--                  available; catchup ran)
+--   * "external"  — operator opted out via init({cleanup = false}) and
+--                  is presumed to run cleanup from cron / a separate
+--                  worker. NOT a failure mode; surfaces correctly in
+--                  health probes.
+--   * "missing"   — neither path engaged (init never ran with cleanup
+--                  enabled AND no opt-out). This IS the misconfig
+--                  signal operators want to see.
+function audit_log.cleanup_status()
+    if _state._cleanup_opted_out then return "external" end
+    if _state._catchup_done == true
+       and _state._cleanup_scheduled == true then
+        return "scheduled"
+    end
+    return "missing"
+end
+
 --- Migration helper: recompute every row's `fingerprint` column
 -- from its stored `ip` + `user_agent` under the current
 -- `fingerprint_salt`. Use ONCE after switching salts (or after
@@ -426,8 +450,13 @@ function audit_log.recompute_fingerprints()
         -- so they don't need re-fingerprinting.
         local max_rows = db.query(
             "SELECT MAX(id) AS max_id FROM _hull_audit_log")
-        local start_max_id = max_rows and max_rows[1]
-                             and max_rows[1].max_id or 0
+        -- Round-11 MEDIUM-6: SQLite returns a number; the audit-log
+        -- module is otherwise backend-agnostic and Postgres-via-pg
+        -- could return a string. Coerce so `last_id < start_max_id`
+        -- isn't a string-vs-number comparison (Lua errors; JS
+        -- coerces silently).
+        local raw = max_rows and max_rows[1] and max_rows[1].max_id
+        local start_max_id = tonumber(raw) or 0
         local scanned, updated = 0, 0
         local last_id = -1
         while last_id < start_max_id do
@@ -476,6 +505,7 @@ audit_log._test = {
         _state.fingerprint_salt  = nil
         _state._catchup_done     = false
         _state._cleanup_scheduled = false
+        _state._cleanup_opted_out = false
         _state._initialized      = false
     end,
 }

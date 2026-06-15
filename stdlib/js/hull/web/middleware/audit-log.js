@@ -31,6 +31,7 @@ const _state = {
     initialized: false,
     cleanupScheduled: false,
     catchupDone: false,
+    cleanupOptedOut: false,
 };
 
 function init(opts) {
@@ -100,6 +101,8 @@ function init(opts) {
                 + "Wire your own cron/worker for steady-state.");
         }
     }
+    // Round-11 MEDIUM-7: track explicit opt-out for cleanupStatus().
+    _state.cleanupOptedOut = opts.cleanup === false;
     _state.initialized = true;
 }
 
@@ -216,8 +219,11 @@ function record(userId, kind, req, opts) {
         "INSERT INTO _hull_audit_log "
         + "(user_id, event_at, kind, ip, user_agent, fingerprint, "
         + " session_id, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        // Round-11 LOW-11: `||` would convert 0 / "" to null. Lua
+        // passes raw. Use explicit undefined check for parity.
         [userId, time.now(), kind, ip, ua, fp,
-         opts.session_id || null, meta]);
+         opts.session_id !== undefined ? opts.session_id : null,
+         meta]);
 }
 
 function list(userId, opts) {
@@ -296,6 +302,16 @@ function isCleanupScheduled() {
     return _state.catchupDone === true && _state.cleanupScheduled === true;
 }
 
+// Round-11 MEDIUM-7: tri-state status. See Lua sibling for the
+// distinction between scheduled / external / missing.
+function cleanupStatus() {
+    if (_state.cleanupOptedOut) return "external";
+    if (_state.catchupDone === true && _state.cleanupScheduled === true) {
+        return "scheduled";
+    }
+    return "missing";
+}
+
 /**
  * Migration helper: recompute every row's `fingerprint` from its
  * stored `ip` + `user_agent` under the current fingerprintSalt.
@@ -330,7 +346,10 @@ function recomputeFingerprints() {
         // loop. See Lua sibling for the starvation rationale.
         const maxRows = db.query(
             "SELECT MAX(id) AS max_id FROM _hull_audit_log");
-        const startMaxId = (maxRows && maxRows[0] && maxRows[0].max_id) || 0;
+        // Round-11 MEDIUM-6: coerce to number for cross-backend
+        // safety. See Lua sibling.
+        const rawMax = maxRows && maxRows[0] && maxRows[0].max_id;
+        const startMaxId = Number(rawMax) || 0;
         let scanned = 0, updated = 0;
         let lastId = -1;
         while (lastId < startMaxId) {
@@ -377,11 +396,12 @@ const _test = {
         _state.fingerprintSalt = null;
         _state.catchupDone     = false;
         _state.cleanupScheduled = false;
+        _state.cleanupOptedOut = false;
         _state.initialized     = false;
     },
 };
 
 const auditLog = { init, record, list, listDevices, isNewDevice,
                     fingerprint, cleanup, isCleanupScheduled,
-                    recomputeFingerprints, _test };
+                    cleanupStatus, recomputeFingerprints, _test };
 export { auditLog };

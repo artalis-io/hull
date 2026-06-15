@@ -42,9 +42,14 @@ function probeAuditLog(includeCounts) {
         return { ok: false, reason: "table _hull_audit_log not created "
                                  + "(call auditLog.init())" };
     }
+    // Round-11 MEDIUM-7: tri-state cleanup status. See Lua sibling.
+    const status = typeof auditLog.cleanupStatus === "function"
+        ? auditLog.cleanupStatus() : null;
     const scheduled = typeof auditLog.isCleanupScheduled === "function"
         ? auditLog.isCleanupScheduled() : null;
-    const out = { ok: true, cleanup_scheduled: scheduled };
+    const out = { ok: true,
+                  cleanup: status,
+                  cleanup_scheduled: scheduled };
     if (includeCounts) out.events = rowCount("_hull_audit_log");
     return out;
 }

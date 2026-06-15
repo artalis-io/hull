@@ -326,11 +326,13 @@ function listForUser(userId) {
     // Round-10 MEDIUM-9: filter past-absolute-ttl rows so list+load
     // stay in sync. See Lua sibling.
     if (absoluteTtl) {
+        // Round-11 HIGH-2: tolerate NULL created_at to match load().
+        // See Lua sibling.
         return db.query(
             "SELECT id, created_at, last_accessed, ip, user_agent "
             + "FROM _hull_sessions "
             + "WHERE user_id = ? AND expires_at > ? "
-            + "  AND created_at + ? > ? "
+            + "  AND (created_at IS NULL OR created_at + ? > ?) "
             + "ORDER BY last_accessed DESC",
             [userId, now, absoluteTtl, now]) || [];
     }
@@ -492,14 +494,30 @@ function loginHandler(cookieMod, opts) {
         if (auditLog) {
             if (onNewDev) {
                 try {
-                    if (auditLog.isNewDevice(user.id, req))
-                        try { onNewDev(req, res, user); } catch (_e) {}
-                } catch (_e) {}
+                    if (auditLog.isNewDevice(user.id, req)) {
+                        try { onNewDev(req, res, user); }
+                        catch (e) {
+                            // Round-11 MEDIUM-5: surface the swallowed
+                            // error. The request still succeeds (the
+                            // notification is best-effort), but a
+                            // silent catch left new-device alerts
+                            // broken for weeks in some deploys.
+                            log.warn("session.loginHandler: onNewDevice "
+                                + "callback threw: " + (e && e.message || e));
+                        }
+                    }
+                } catch (e) {
+                    log.warn("session.loginHandler: auditLog.isNewDevice "
+                        + "threw: " + (e && e.message || e));
+                }
             }
             try {
                 auditLog.record(user.id, auditKind, req,
                     { session_id: sid, metadata: scrub(auditMeta(user, ctx)) });
-            } catch (_e) {}
+            } catch (e) {
+                log.warn("session.loginHandler: auditLog.record threw: "
+                    + (e && e.message || e));
+            }
         }
 
         respond(res, user, sid);

@@ -119,6 +119,12 @@ CREATE TABLE IF NOT EXISTS _hull_totp_attempts_by_ip (
 
 CREATE INDEX IF NOT EXISTS _hull_totp_recovery_user
     ON _hull_totp_recovery(user_id);
+
+CREATE INDEX IF NOT EXISTS _hull_totp_attempts_lf
+    ON _hull_totp_attempts(last_failed_at);
+
+CREATE INDEX IF NOT EXISTS _hull_totp_attempts_by_ip_lf
+    ON _hull_totp_attempts_by_ip(last_failed_at);
 `;
 
 // ── Helpers ────────────────────────────────────────────────────────
@@ -535,17 +541,26 @@ function clearFailedAttemptsIp(ip) {
     db.exec("DELETE FROM _hull_totp_attempts_by_ip WHERE ip = ?", [ip]);
 }
 
+let _xffWarnDone = false;
 function extractIp(req) {
     if (!req || typeof req !== "object") return null;
+    const h = req.headers || {};
+    const xff = h["x-forwarded-for"];
     if (_state.trustXff) {
-        const h = req.headers || {};
-        const xff = h["x-forwarded-for"];
         if (typeof xff === "string" && xff !== "") {
             const comma = xff.indexOf(",");
             const first = comma >= 0 ? xff.substring(0, comma) : xff;
             const trimmed = first.trim();
             if (trimmed !== "") return trimmed;
         }
+    } else if (typeof xff === "string" && xff !== "" && !_xffWarnDone) {
+        // Round-11 MEDIUM-8: one-shot warn. See Lua sibling.
+        _xffWarnDone = true;
+        log.warn("totp: X-Forwarded-For seen but trustXff = false; "
+            + "per-IP gate is aggregating all requests under the "
+            + "proxy's remote_addr. If you're behind a trusted proxy "
+            + "that normalizes XFF, set totp.init({trustXff: true}) "
+            + "so each upstream client gets its own bucket.");
     }
     if (typeof req.remote_addr === "string" && req.remote_addr !== "") {
         return req.remote_addr;
@@ -1068,6 +1083,7 @@ const _test = {
     bumpFailedAttemptIp,
     clearFailedAttemptsIp,
     extractIp,
+    xffWarnReset: () => { _xffWarnDone = false; },
     // Test-only: backdate a pending row's created_at so cleanup()
     // finds it stale. See Lua sibling — must run inside the module
     // so the stdlib-caller check admits the _hull_* write.

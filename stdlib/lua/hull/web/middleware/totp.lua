@@ -205,6 +205,12 @@ CREATE TABLE IF NOT EXISTS _hull_totp_attempts_by_ip (
 
 CREATE INDEX IF NOT EXISTS _hull_totp_recovery_user
     ON _hull_totp_recovery(user_id);
+
+CREATE INDEX IF NOT EXISTS _hull_totp_attempts_lf
+    ON _hull_totp_attempts(last_failed_at);
+
+CREATE INDEX IF NOT EXISTS _hull_totp_attempts_by_ip_lf
+    ON _hull_totp_attempts_by_ip(last_failed_at);
 ]]
 
 -- ── Helpers (private) ──────────────────────────────────────────────
@@ -682,17 +688,33 @@ end
 -- trusted proxy that normalizes/replaces the header). Returns nil
 -- if no non-empty string is available; callers fall back to per-
 -- user only when nil.
+local _xff_warn_done = false
 local function extract_ip(req)
     if type(req) ~= "table" then return nil end
+    local h = req.headers or {}
+    local xff = h["x-forwarded-for"]
     if _state.trust_xff then
-        local h = req.headers or {}
-        local xff = h["x-forwarded-for"]
         if type(xff) == "string" and xff ~= "" then
             local comma = xff:find(",", 1, true)
             local first = comma and xff:sub(1, comma - 1) or xff
             local trimmed = first:match("^%s*(.-)%s*$")
             if trimmed and trimmed ~= "" then return trimmed end
         end
+    elseif type(xff) == "string" and xff ~= "" and not _xff_warn_done then
+        -- Round-11 MEDIUM-8: one-shot warn. trust_xff = false is
+        -- the safer default against XFF spoofing on direct-exposed
+        -- apps, but apps behind a proxy stripping/setting XFF would
+        -- have all users aggregated under one bucket (the proxy's
+        -- IP from remote_addr). Surface the misconfig on first
+        -- request that carries XFF so the operator notices.
+        _xff_warn_done = true
+        local log = require("hull.log")
+        log.warn("totp: X-Forwarded-For seen but trust_xff = false; "
+              .. "per-IP gate is aggregating all requests under the "
+              .. "proxy's remote_addr. If you're behind a trusted "
+              .. "proxy that normalizes XFF, set totp.init({trust_xff "
+              .. "= true}) so each upstream client gets its own "
+              .. "bucket.")
     end
     if type(req.remote_addr) == "string" and req.remote_addr ~= "" then
         return req.remote_addr
@@ -1360,6 +1382,7 @@ totp._test = {
     bump_failed_attempt_ip  = bump_failed_attempt_ip,
     clear_failed_attempts_ip = clear_failed_attempts_ip,
     extract_ip              = extract_ip,
+    xff_warn_reset          = function() _xff_warn_done = false end,
     -- Test-only: backdate a pending row's created_at so cleanup()
     -- finds it stale. Lives inside the module so db.exec passes
     -- the lua_is_stdlib_caller check (user code can't touch

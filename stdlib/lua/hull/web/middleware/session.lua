@@ -370,11 +370,17 @@ function session.list_for_user(user_id)
     -- _absolute_ttl is nil (disabled), the absolute_now param is
     -- nil and the SQL OR short-circuits true.
     if _absolute_ttl then
+        -- Round-11 HIGH-2: tolerate NULL created_at. Pre-fix
+        -- `created_at + N > now` was unknown→false for NULL rows
+        -- (legacy migrations / pre-column rows) — they silently
+        -- vanished from the device list while still cookie-loading
+        -- (load() correctly skips the cap when created_at is NULL).
+        -- Match load()'s NULL tolerance here so list+load agree.
         return db.query(
             "SELECT id, created_at, last_accessed, ip, user_agent "
             .. "FROM _hull_sessions "
             .. "WHERE user_id = ? AND expires_at > ? "
-            .. "  AND created_at + ? > ? "
+            .. "  AND (created_at IS NULL OR created_at + ? > ?) "
             .. "ORDER BY last_accessed DESC",
             { user_id, now, _absolute_ttl, now }) or {}
     end
@@ -547,12 +553,35 @@ function session.login_handler(cookie_mod, opts)
         -- so the new-device check sees prior history (not the row we just
         -- created), and the audit row carries the canonical session_id.
         if audit_log then
+            -- Round-11 MEDIUM-5: surface the swallowed errors. The
+            -- request still succeeds (new-device + audit are
+            -- best-effort) but a silent pcall left new-device alerts
+            -- broken for weeks in some deploys before anyone noticed.
             if on_new_dev then
-                local ok, is_new = pcall(audit_log.is_new_device, user.id, req)
-                if ok and is_new then pcall(on_new_dev, req, res, user) end
+                local ok, is_new = pcall(audit_log.is_new_device,
+                                          user.id, req)
+                if not ok then
+                    local log = require("hull.log")
+                    log.warn("session.login_handler: audit_log."
+                          .. "is_new_device threw: " .. tostring(is_new))
+                elseif is_new then
+                    local nd_ok, nd_err = pcall(on_new_dev, req, res, user)
+                    if not nd_ok then
+                        local log = require("hull.log")
+                        log.warn("session.login_handler: on_new_device "
+                              .. "callback threw: " .. tostring(nd_err))
+                    end
+                end
             end
-            pcall(audit_log.record, user.id, audit_kind, req,
-                  { session_id = sid, metadata = scrub(audit_meta(user, ctx)) })
+            local rec_ok, rec_err = pcall(audit_log.record,
+                user.id, audit_kind, req,
+                { session_id = sid,
+                  metadata = scrub(audit_meta(user, ctx)) })
+            if not rec_ok then
+                local log = require("hull.log")
+                log.warn("session.login_handler: audit_log.record "
+                      .. "threw: " .. tostring(rec_err))
+            end
         end
 
         respond(res, user, sid)

@@ -283,9 +283,26 @@ function stripUserSecrets(user) {
     if (_state.userSanitize) {
         try {
             const sanitized = _state.userSanitize(user);
-            if (sanitized && typeof sanitized === "object") return sanitized;
-            log.warn("auth-flows: userSanitize returned non-object; "
-                + "falling back to strict allowlist");
+            // Round-11 HIGH-1: reject Promises explicitly. A Promise
+            // is typeof === "object" and truthy, so the pre-fix
+            // check accepted it as the sanitized user. The Promise
+            // then got stuffed into the session payload as `{}`, and
+            // downstream `req.ctx.user.id` was undefined → auth
+            // checks degraded to anonymous. Round-10 review flagged
+            // this; the round-10 fix only handled sync-throw + non-
+            // table cases. Falling through to the allowlist on a
+            // thenable is fail-safe (still returns a usable user
+            // with the canonical fields).
+            if (sanitized && typeof sanitized.then === "function") {
+                log.warn("auth-flows: userSanitize returned a Promise "
+                    + "(async callback); userSanitize MUST be sync. "
+                    + "Falling back to strict allowlist.");
+            } else if (sanitized && typeof sanitized === "object") {
+                return sanitized;
+            } else {
+                log.warn("auth-flows: userSanitize returned non-object; "
+                    + "falling back to strict allowlist");
+            }
         } catch (_e) {
             log.warn("auth-flows: userSanitize threw; falling back to "
                 + "strict allowlist");
@@ -481,14 +498,20 @@ function originFor(req) {
     if (typeof rawHost !== "string") return null;
     // Round-10 MEDIUM-6: normalize for allowlist comparison —
     // strip comma-XFF chain to leftmost, strip :PORT suffix.
-    // See Lua sibling.
+    // Round-11 HIGH-3: IPv6 literals (`[::1]:8080`) — keep the
+    // bracketed literal whole. See Lua sibling for the bug.
     let firstHost = rawHost;
     const comma = firstHost.indexOf(",");
     if (comma >= 0) firstHost = firstHost.substring(0, comma);
     firstHost = firstHost.trim();
     let bareHost = firstHost;
-    const colon = bareHost.indexOf(":");
-    if (colon >= 0) bareHost = bareHost.substring(0, colon);
+    if (bareHost.charAt(0) === "[") {
+        const close = bareHost.indexOf("]");
+        if (close >= 0) bareHost = bareHost.substring(0, close + 1);
+    } else {
+        const colon = bareHost.indexOf(":");
+        if (colon >= 0) bareHost = bareHost.substring(0, colon);
+    }
     if (bareHost === "") return null;
     if (_state.trustedHosts) {
         for (let i = 0; i < _state.trustedHosts.length; i++) {
@@ -501,6 +524,21 @@ function originFor(req) {
     if (_state.trustRequestHost) {
         const proto = headers["x-forwarded-proto"] || "http";
         return proto + "://" + firstHost;
+    }
+    // Round-11 LOW-10: one-shot warn on first nil-return. See Lua
+    // sibling. Mute after the first hit so a hostile scanner can't
+    // flood the log.
+    if (!_state.warnedHostMismatch) {
+        _state.warnedHostMismatch = true;
+        const list = _state.trustedHosts
+            ? _state.trustedHosts.join(", ")
+            : "(none configured)";
+        log.warn("auth-flows: originFor refused host '"
+            + String(rawHost) + "' (normalized: '" + bareHost
+            + "'). trustedHosts = [" + list + "]. URL build "
+            + "skipped; subsequent email sends will be silently "
+            + "dropped until the host is added. Set publicOrigin "
+            + "or trustRequestHost: true to override.");
     }
     return null;
 }
@@ -818,6 +856,20 @@ function handleEmailChange(req, res) {
     const origin = originFor(req);
     if (!origin) return res.json({ ok: true });
 
+    // Round-11 MEDIUM-9: reject when a pending row already exists.
+    // See Lua sibling for the threat model — concurrent submit
+    // silently destroyed the prior pending change.
+    const existing = db.query(
+        "SELECT new_email FROM _hull_auth_pending_email_changes "
+        + "WHERE user_id = ? AND expires_at > ? LIMIT 1",
+        [uid, time.now()]);
+    if (existing && existing.length > 0) {
+        return res.status(409).json({
+            error: "pending email change exists",
+            new_email: existing[0].new_email,
+        });
+    }
+
     const now = time.now();
     const token = issueToken(uid, ACTIONS.email_change,
         _state.emailChangeTtl, { new_email: body.new_email });
@@ -1068,6 +1120,23 @@ function init(opts) {
             opts.publicOrigin = opts.publicOrigin.slice(0, -1);
         }
     }
+    if (hasHosts) {
+        // Round-11 MEDIUM-4: bare-host enforcement. See Lua sibling.
+        for (let i = 0; i < opts.trustedHosts.length; i++) {
+            const h = opts.trustedHosts[i];
+            if (typeof h !== "string" || h === "") {
+                throw new Error("auth-flows.init: trustedHosts entries "
+                    + "must be non-empty strings (got " + typeof h + ")");
+            }
+            if (h.charAt(0) !== "[" && h.indexOf(":") >= 0) {
+                throw new Error("auth-flows.init: trustedHosts entry '"
+                    + h + "' contains ':' — entries must be bare host "
+                    + "names; the URL preserves the request's port "
+                    + "automatically. IPv6 literals must be bracketed "
+                    + "(e.g. \"[::1]\").");
+            }
+        }
+    }
     const requiredUser = [
         "userFindByEmail", "userGet", "userCreate",
         "userSetPassword", "userSetEmail", "userSetEmailVerified",
@@ -1255,6 +1324,7 @@ const _test = {
         _state.trustedHosts   = null;
         _state.trustRequestHost = false;
         _state.userSanitize   = null;
+        _state.warnedHostMismatch = false;
         _state.templates      = {};
         _state.userFindByEmail      = null;
         _state.userGet              = null;

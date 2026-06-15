@@ -81,11 +81,24 @@ local function probe_audit_log(include_counts)
                                    .. "(call audit_log.init())" }
     end
     local ok, mod = pcall(require, "hull.web.middleware.audit-log")
-    local scheduled = nil
-    if ok and mod and type(mod.is_cleanup_scheduled) == "function" then
-        scheduled = mod.is_cleanup_scheduled()
+    -- Round-11 MEDIUM-7: prefer the tri-state cleanup_status() over
+    -- the boolean is_cleanup_scheduled(). The boolean returned false
+    -- for legit cleanup=false opt-outs (apps that wire cron / a
+    -- separate worker) — operator misread it as "forgot to enable".
+    -- New shape: cleanup = "scheduled" | "external" | "missing".
+    -- cleanup_scheduled is kept for back-compat callers.
+    local status, scheduled = nil, nil
+    if ok and mod then
+        if type(mod.cleanup_status) == "function" then
+            status = mod.cleanup_status()
+        end
+        if type(mod.is_cleanup_scheduled) == "function" then
+            scheduled = mod.is_cleanup_scheduled()
+        end
     end
-    local out = { ok = true, cleanup_scheduled = scheduled }
+    local out = { ok = true,
+                  cleanup = status,
+                  cleanup_scheduled = scheduled }
     if include_counts then out.events = row_count("_hull_audit_log") end
     return out
 end
