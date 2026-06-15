@@ -50,14 +50,23 @@ let initialized = false;
  */
 function init(opts) {
     const o = opts || {};
-    sessionTtl = o.ttl !== undefined ? o.ttl : 86400;
+    // Round-10 MEDIUM-7: only update when explicitly given. Pre-fix
+    // every init({}) clobbered prior sessionTtl back to 86400, while
+    // Lua kept the prior value on re-init. Apps that call init twice
+    // (first with custom ttl, second with just absoluteTtl) lost
+    // their ttl on JS. Now matches Lua semantics.
+    if (o.ttl !== undefined) sessionTtl = o.ttl;
     if (o.absoluteTtl !== undefined) {
-        // Round-9 HIGH-3: <= 0 disabled WITH a warn (canonical
-        // opt-out is `false`). See Lua sibling for the threat.
         if (o.absoluteTtl === false) {
             absoluteTtl = null;
-        } else if (typeof o.absoluteTtl === "number" && o.absoluteTtl <= 0) {
-            log.warn("session.init: absoluteTtl <= 0 disables the cap; "
+        } else if (typeof o.absoluteTtl === "number"
+                   && (!Number.isFinite(o.absoluteTtl)
+                       || o.absoluteTtl <= 0)) {
+            // Round-10 MEDIUM-8: NaN and Infinity slipped through.
+            // NaN <= 0 is false → stored as NaN → cap silently
+            // disabled. Infinity makes the comparison always false
+            // too. Reject non-finite explicitly. Same shape on Lua.
+            log.warn("session.init: absoluteTtl must be finite > 0; "
                 + "use `false` for the explicit opt-out so the intent "
                 + "is loud.");
             absoluteTtl = null;
@@ -314,6 +323,17 @@ function cleanup() {
 function listForUser(userId) {
     if (typeof userId !== "string" || userId === "") return [];
     const now = time.now();
+    // Round-10 MEDIUM-9: filter past-absolute-ttl rows so list+load
+    // stay in sync. See Lua sibling.
+    if (absoluteTtl) {
+        return db.query(
+            "SELECT id, created_at, last_accessed, ip, user_agent "
+            + "FROM _hull_sessions "
+            + "WHERE user_id = ? AND expires_at > ? "
+            + "  AND created_at + ? > ? "
+            + "ORDER BY last_accessed DESC",
+            [userId, now, absoluteTtl, now]) || [];
+    }
     return db.query(
         "SELECT id, created_at, last_accessed, ip, user_agent "
         + "FROM _hull_sessions "

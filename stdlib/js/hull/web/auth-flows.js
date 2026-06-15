@@ -477,19 +477,30 @@ function userId(user) {
 function originFor(req) {
     if (_state.publicOrigin) return _state.publicOrigin;
     const headers = (req && req.headers) || {};
-    const host = headers["x-forwarded-host"] || headers.host;
-    if (typeof host === "string" && _state.trustedHosts) {
+    const rawHost = headers["x-forwarded-host"] || headers.host;
+    if (typeof rawHost !== "string") return null;
+    // Round-10 MEDIUM-6: normalize for allowlist comparison —
+    // strip comma-XFF chain to leftmost, strip :PORT suffix.
+    // See Lua sibling.
+    let firstHost = rawHost;
+    const comma = firstHost.indexOf(",");
+    if (comma >= 0) firstHost = firstHost.substring(0, comma);
+    firstHost = firstHost.trim();
+    let bareHost = firstHost;
+    const colon = bareHost.indexOf(":");
+    if (colon >= 0) bareHost = bareHost.substring(0, colon);
+    if (bareHost === "") return null;
+    if (_state.trustedHosts) {
         for (let i = 0; i < _state.trustedHosts.length; i++) {
-            if (host === _state.trustedHosts[i]) {
+            if (bareHost === _state.trustedHosts[i]) {
                 const proto = headers["x-forwarded-proto"] || "https";
-                return proto + "://" + host;
+                return proto + "://" + firstHost;
             }
         }
     }
-    // trust_request_host opt-out (dev/test). Last resort; init warned.
-    if (_state.trustRequestHost && typeof host === "string") {
+    if (_state.trustRequestHost) {
         const proto = headers["x-forwarded-proto"] || "http";
-        return proto + "://" + host;
+        return proto + "://" + firstHost;
     }
     return null;
 }
@@ -799,6 +810,14 @@ function handleEmailChange(req, res) {
         return res.status(409).json({ error: "email already in use" });
     }
 
+    // Round-10 HIGH-1: compute origin FIRST. Pre-fix the upsert
+    // ran before the origin check, so a hostile Host header could
+    // clobber the victim's pending email-change row even though
+    // no mail was sent. Bailing here keeps the DB untouched while
+    // preserving the {ok:true} enumeration-safe response.
+    const origin = originFor(req);
+    if (!origin) return res.json({ ok: true });
+
     const now = time.now();
     const token = issueToken(uid, ACTIONS.email_change,
         _state.emailChangeTtl, { new_email: body.new_email });
@@ -810,25 +829,22 @@ function handleEmailChange(req, res) {
         [uid, body.new_email, tokenHash, now, now + _state.emailChangeTtl]);
 
     const user = _state.userGet(uid);
-    const origin = originFor(req);
-    if (origin) {
-        const link = origin + _state.prefix
-            + "/email-change/confirm?token=" + token;
-        sendEmail(body.new_email, "email_change", {
-            user, link, token, new_email: body.new_email,
+    const link = origin + _state.prefix
+        + "/email-change/confirm?token=" + token;
+    sendEmail(body.new_email, "email_change", {
+        user, link, token, new_email: body.new_email,
+    });
+    // Defense in depth: notify the OLD address with a revoke link
+    // if templates.email_change_notify is provided.
+    if (_state.templates.email_change_notify) {
+        const revokeTok = issueToken(uid, ACTIONS.email_change_revoke,
+            _state.emailChangeTtl);
+        const revokeUrl = origin + _state.prefix
+            + "/email-change/revoke?token=" + revokeTok;
+        sendEmail(user.email, "email_change_notify", {
+            user, revoke_url: revokeUrl, revoke_token: revokeTok,
+            new_email: body.new_email,
         });
-        // Defense in depth: notify the OLD address with a revoke link
-        // if templates.email_change_notify is provided.
-        if (_state.templates.email_change_notify) {
-            const revokeTok = issueToken(uid, ACTIONS.email_change_revoke,
-                _state.emailChangeTtl);
-            const revokeUrl = origin + _state.prefix
-                + "/email-change/revoke?token=" + revokeTok;
-            sendEmail(user.email, "email_change_notify", {
-                user, revoke_url: revokeUrl, revoke_token: revokeTok,
-                new_email: body.new_email,
-            });
-        }
     }
     res.json({ ok: true });
 }

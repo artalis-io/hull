@@ -168,18 +168,29 @@ local PRESETS = {
         -- its GUID or domain. `consumers` = personal only,
         -- `organizations` = work/school only.
         --
-        -- Note on the `common` issuer: when using /common the ID
-        -- token's `iss` claim is the tenant id (not "common"). Apps
-        -- pinning to a specific tenant should pass `tenant = "<tid>"`
-        -- to make this preset's `issuer` match exactly.
+        -- Round-10 HIGH-3: When using /common the ID token's `iss`
+        -- claim is the tenant id (not "common") — strict iss
+        -- equality would 100% reject. Multi-tenant presets now emit
+        -- an `issuer_pattern` (Lua: gsub-friendly regex) which
+        -- handle_callback checks as a fallback when strict `issuer`
+        -- equality misses. Single-tenant configs (tenant = "<guid>")
+        -- still get strict equality and nothing else.
         local tenant = opts.tenant or "common"
         local base = "https://login.microsoftonline.com/" .. tenant
-        return {
+        local cfg = {
             authorization_endpoint = base .. "/oauth2/v2.0/authorize",
             token_endpoint         = base .. "/oauth2/v2.0/token",
             jwks_uri               = base .. "/discovery/v2.0/keys",
             issuer                 = base .. "/v2.0",
         }
+        if tenant == "common" or tenant == "organizations"
+           or tenant == "consumers" then
+            -- Lua pattern: matches /{guid or domain}/v2.0 — Microsoft
+            -- emits either a 36-char tenant GUID OR a verified domain.
+            cfg.issuer_pattern =
+                "^https://login%.microsoftonline%.com/[%w%-%.]+/v2%.0$"
+        end
+        return cfg
     end,
 }
 
@@ -466,7 +477,15 @@ local function handle_callback(req, res)
     end
 
     -- 5. Required OIDC claim checks beyond signature + exp.
-    if claims.iss ~= cfg.issuer then
+    -- Round-10 HIGH-3: when the preset is multi-tenant (Microsoft
+    -- `common` / `organizations` / `consumers`), cfg.issuer_pattern
+    -- accepts any matching per-tenant issuer.
+    local iss_ok = (claims.iss == cfg.issuer)
+    if not iss_ok and type(cfg.issuer_pattern) == "string"
+       and type(claims.iss) == "string" then
+        iss_ok = claims.iss:match(cfg.issuer_pattern) ~= nil
+    end
+    if not iss_ok then
         log.warn("oauth: iss mismatch: " .. tostring(claims.iss))
         return res:status(400):html("auth failed")
     end

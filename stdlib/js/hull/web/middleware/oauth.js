@@ -133,17 +133,25 @@ const PRESETS = {
     microsoft: (opts) => {
         // Tenant default `common` accepts any Microsoft account.
         // For a specific Entra tenant pass GUID or domain.
-        // Note: on /common the ID token's `iss` is the tenant id (not
-        // "common"); apps pinning to a specific tenant should pass
-        // `tenant = "<tid>"` so this issuer string matches exactly.
+        // Round-10 HIGH-3: multi-tenant presets emit issuerPattern
+        // so handleCallback's iss check falls back to a pattern
+        // match. Without it, strict iss equality 100% rejects
+        // because Microsoft's id_token returns /{tenant-guid}/
+        // (not /common/). See Lua sibling.
         const tenant = opts.tenant || "common";
         const base = "https://login.microsoftonline.com/" + tenant;
-        return {
+        const cfg = {
             authorizationEndpoint: base + "/oauth2/v2.0/authorize",
             tokenEndpoint:         base + "/oauth2/v2.0/token",
             jwksUri:               base + "/discovery/v2.0/keys",
             issuer:                base + "/v2.0",
         };
+        if (tenant === "common" || tenant === "organizations"
+            || tenant === "consumers") {
+            cfg.issuerPattern =
+                /^https:\/\/login\.microsoftonline\.com\/[\w\-\.]+\/v2\.0$/;
+        }
+        return cfg;
     },
 };
 
@@ -496,7 +504,14 @@ async function handleCallback(req, res) {
     }
 
     // 5. OIDC claim checks beyond signature + exp.
-    if (claims.iss !== cfg.issuer) {
+    // Round-10 HIGH-3: multi-tenant presets fall back to a regex
+    // pattern when strict equality misses. See Lua sibling.
+    let issOk = (claims.iss === cfg.issuer);
+    if (!issOk && cfg.issuerPattern instanceof RegExp
+        && typeof claims.iss === "string") {
+        issOk = cfg.issuerPattern.test(claims.iss);
+    }
+    if (!issOk) {
         log.warn("oauth: iss mismatch: " + String(claims.iss));
         res.status(400).html("auth failed"); return;
     }

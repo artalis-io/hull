@@ -174,7 +174,10 @@ end
 -- session/enrollment counts and operational state — recon material
 -- if left open. Auth_check wires into the app's RBAC predicate or a
 -- token check. A 401 (no auth context) or 403 (no permission) is
--- returned on failure. Returning true admits the request.
+-- returned on failure. Must return the boolean `true` to admit;
+-- any other value (including truthy ones like `1` or `"yes"`) is
+-- rejected with 403. Round-10 MEDIUM-10: tightened from truthy to
+-- strict-true to match the JS sibling.
 --
 -- @tparam table app
 -- @tparam table opts
@@ -197,16 +200,18 @@ function auth_health.routes(app, opts)
     local auth_check = opts.auth_check
     app.get(path, function(req, res)
         local ok, allowed = pcall(auth_check, req)
-        -- Round-8 LOW-12: split the two failure modes cleanly to
-        -- match the JS sibling and the docstring. Pre-round-8 the
-        -- shortcut `allowed == nil and 401 or 403` returned 403 on
-        -- throw too (because pcall's failure payload is the error
-        -- STRING, not nil), contradicting the documented
-        -- "throwing returns 401" contract.
+        -- Round-8 LOW-12: split throw (401) from falsy (403).
+        -- Round-10 MEDIUM-10: require literal `true`, not truthy.
+        -- Pre-fix Lua admitted `1` / `"yes"` / any truthy; JS
+        -- already required strict true. Same shared config admits
+        -- on Lua, denies on JS — cross-runtime contract drift.
+        -- Admitting on accidental truthy is the worse failure mode
+        -- for an endpoint exposing recon material, so tighten to
+        -- match JS.
         if not ok then
             return res:status(401):json({ error = "forbidden" })
         end
-        if not allowed then
+        if allowed ~= true then
             return res:status(403):json({ error = "forbidden" })
         end
         res:json(auth_health.check({ include_counts = include_counts }))

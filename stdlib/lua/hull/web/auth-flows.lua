@@ -514,19 +514,48 @@ local function origin_for(req)
     end
     local h = (req and req.headers) or {}
     local host = h["x-forwarded-host"] or h.host
-    if type(host) == "string" and _state.trusted_hosts then
+    -- Round-10 MEDIUM-6: normalize before allowlist comparison.
+    -- X-Forwarded-Host can be a chain ("a.com, internal-lb") on
+    -- nginx+ALB deployments — take the leftmost (client-facing)
+    -- entry. Then strip an optional :PORT suffix so apps deployed
+    -- on non-standard ports without a proxy that strips it match
+    -- their bare-hostname allowlist entry.
+    if type(host) == "string" then
+        local comma = host:find(",", 1, true)
+        if comma then host = host:sub(1, comma - 1) end
+        host = host:match("^%s*(.-)%s*$")
+        local colon = host:find(":", 1, true)
+        if colon then host = host:sub(1, colon - 1) end
+    end
+    if type(host) == "string" and host ~= ""
+       and _state.trusted_hosts then
         for _, allowed in ipairs(_state.trusted_hosts) do
             if host == allowed then
+                -- Use the raw (un-normalized) host:port for the URL
+                -- so non-standard-port apps generate working links.
+                local raw_host = h["x-forwarded-host"] or h.host
+                local raw_comma = raw_host:find(",", 1, true)
+                if raw_comma then
+                    raw_host = raw_host:sub(1, raw_comma - 1)
+                end
+                raw_host = raw_host:match("^%s*(.-)%s*$")
                 local proto = h["x-forwarded-proto"] or "https"
-                return proto .. "://" .. host
+                return proto .. "://" .. raw_host
             end
         end
     end
     -- trust_request_host opt-out (dev/test). Last resort; the init
     -- warning fires once so operators can spot it in startup logs.
-    if _state.trust_request_host and type(host) == "string" then
+    if _state.trust_request_host and type(host) == "string"
+       and host ~= "" then
+        local raw_host = h["x-forwarded-host"] or h.host
+        local raw_comma = raw_host:find(",", 1, true)
+        if raw_comma then
+            raw_host = raw_host:sub(1, raw_comma - 1)
+        end
+        raw_host = raw_host:match("^%s*(.-)%s*$")
         local proto = h["x-forwarded-proto"] or "http"
-        return proto .. "://" .. host
+        return proto .. "://" .. raw_host
     end
     -- We get here only if a request lands with a host not in the
     -- allowlist AND trust_request_host is off. Refuse to build a
@@ -1131,6 +1160,17 @@ local function handle_email_change(req, res)
         return res:status(409):json({ error = "email already in use" })
     end
 
+    -- Round-10 HIGH-1: compute the origin FIRST. Pre-fix the
+    -- db.upsert ran before the origin check, so a request with a
+    -- hostile Host header (off-allowlist) clobbered the victim's
+    -- prior pending email-change row even though no link was ever
+    -- mailed. Bailing here preserves the {ok:true} enumeration-
+    -- safe shape AND leaves the DB untouched.
+    local origin = origin_for(req)
+    if not origin then
+        return res:json({ ok = true })
+    end
+
     local now = time.now()
     local token = issue_token(user_id, ACTIONS.email_change,
         _state.email_change_ttl, { new_email = body.new_email })
@@ -1143,30 +1183,27 @@ local function handle_email_change(req, res)
           now + _state.email_change_ttl })
 
     local user = _state.user_get(user_id)
-    local origin = origin_for(req)
-    if origin then
-        local link = origin .. _state.prefix
-                     .. "/email-change/confirm?token=" .. token
-        -- Send to the NEW address — proves the user controls it.
-        send_email(body.new_email, "email_change", {
-            user = user, link = link, token = token,
+    local link = origin .. _state.prefix
+                 .. "/email-change/confirm?token=" .. token
+    -- Send to the NEW address — proves the user controls it.
+    send_email(body.new_email, "email_change", {
+        user = user, link = link, token = token,
+        new_email = body.new_email,
+    })
+    -- Defense in depth: notify the OLD address with a revoke link
+    -- so a stolen session cookie can't quietly move the account.
+    -- Opt-in by providing templates.email_change_notify; apps
+    -- without the template keep the v1 behavior.
+    if _state.templates.email_change_notify then
+        local revoke_tok = issue_token(user_id,
+            ACTIONS.email_change_revoke, _state.email_change_ttl)
+        local revoke_url = origin .. _state.prefix
+            .. "/email-change/revoke?token=" .. revoke_tok
+        send_email(user.email, "email_change_notify", {
+            user = user, revoke_url = revoke_url,
+            revoke_token = revoke_tok,
             new_email = body.new_email,
         })
-        -- Defense in depth: notify the OLD address with a revoke link
-        -- so a stolen session cookie can't quietly move the account.
-        -- Opt-in by providing templates.email_change_notify; apps
-        -- without the template keep the v1 behavior.
-        if _state.templates.email_change_notify then
-            local revoke_tok = issue_token(user_id,
-                ACTIONS.email_change_revoke, _state.email_change_ttl)
-            local revoke_url = origin .. _state.prefix
-                .. "/email-change/revoke?token=" .. revoke_tok
-            send_email(user.email, "email_change_notify", {
-                user = user, revoke_url = revoke_url,
-                revoke_token = revoke_tok,
-                new_email = body.new_email,
-            })
-        end
     end
     res:json({ ok = true })
 end

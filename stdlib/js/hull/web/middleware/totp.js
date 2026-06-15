@@ -47,8 +47,12 @@ const _state = {
     // Round-9 HIGH-4: per-IP lockout (in addition to per-user). See
     // Lua sibling for the threat model. Looser default (20 vs 5)
     // because shared-NAT / mobile-carrier IPs aggregate users.
+    // Round-10 HIGH-4: trustXff default false. Direct-exposed apps
+    // would let attackers rotate XFF for fresh buckets per request.
+    // Apps behind a trusted reverse proxy set trustXff = true.
     maxFailedAttemptsPerIp: 20,
     lockoutDurationPerIp:   15 * 60,
+    trustXff:               false,
     // Pending-row TTL (round-8 LOW-13). See Lua sibling.
     pendingTtl:         3600,
     cleanupCatchupDone: false,
@@ -533,13 +537,15 @@ function clearFailedAttemptsIp(ip) {
 
 function extractIp(req) {
     if (!req || typeof req !== "object") return null;
-    const h = req.headers || {};
-    const xff = h["x-forwarded-for"];
-    if (typeof xff === "string" && xff !== "") {
-        const comma = xff.indexOf(",");
-        const first = comma >= 0 ? xff.substring(0, comma) : xff;
-        const trimmed = first.trim();
-        if (trimmed !== "") return trimmed;
+    if (_state.trustXff) {
+        const h = req.headers || {};
+        const xff = h["x-forwarded-for"];
+        if (typeof xff === "string" && xff !== "") {
+            const comma = xff.indexOf(",");
+            const first = comma >= 0 ? xff.substring(0, comma) : xff;
+            const trimmed = first.trim();
+            if (trimmed !== "") return trimmed;
+        }
     }
     if (typeof req.remote_addr === "string" && req.remote_addr !== "") {
         return req.remote_addr;
@@ -636,6 +642,7 @@ function init(opts) {
                                     || _state.maxFailedAttemptsPerIp;
     _state.lockoutDurationPerIp   = opts.lockoutDurationPerIp
                                     || _state.lockoutDurationPerIp;
+    _state.trustXff               = opts.trustXff === true;
     // Round-9 LOW-12: <= 0 or `false` → disabled. See Lua sibling.
     if (opts.pendingTtl !== undefined) {
         if (opts.pendingTtl === false) {
@@ -685,13 +692,6 @@ function init(opts) {
         }
     }
 
-    // Round-9 HIGH-5: dummy PBKDF2 hash for the lockout timing-
-    // collapse path. See Lua sibling. Cached across re-init so test
-    // fixtures don't pay the 100ms boot cost on every reset.
-    if (!_state._dummyPwhash) {
-        _state._dummyPwhash = crypto.hashPassword(
-            "totp-dummy-sentinel-never-matches-real-code");
-    }
     // Mark initialized BEFORE the lazy-catchup block so totp.cleanup
     // — which guards on checkInitialized — can run from inside
     // init's own cleanup pass. Pre-fix: the catchup catch swallowed
@@ -725,22 +725,38 @@ function init(opts) {
 
 function cleanup() {
     checkInitialized();
-    // Round-9 LOW-12: nil/null pendingTtl → no-op. See Lua sibling.
-    if (!_state.pendingTtl) return 0;
-    const cutoff = time.now() - _state.pendingTtl;
+    const now = time.now();
     let removed = 0;
-    db.batch(() => {
-        const victims = db.query(
-            "SELECT user_id FROM _hull_totp_pending WHERE created_at < ?",
-            [cutoff]);
-        for (let i = 0; i < (victims || []).length; i++) {
-            db.exec("DELETE FROM _hull_totp_pending_recovery "
-                  + "WHERE user_id = ?", [victims[i].user_id]);
-            db.exec("DELETE FROM _hull_totp_pending WHERE user_id = ?",
-                    [victims[i].user_id]);
-            removed++;
-        }
-    });
+    // Round-10 LOW-11: prune attempts tables too (per-user + per-IP).
+    // See Lua sibling for the unbounded-growth rationale.
+    if (_state.pendingTtl) {
+        const pendingCutoff = now - _state.pendingTtl;
+        db.batch(() => {
+            const victims = db.query(
+                "SELECT user_id FROM _hull_totp_pending "
+                + "WHERE created_at < ?", [pendingCutoff]);
+            for (let i = 0; i < (victims || []).length; i++) {
+                db.exec("DELETE FROM _hull_totp_pending_recovery "
+                      + "WHERE user_id = ?", [victims[i].user_id]);
+                db.exec("DELETE FROM _hull_totp_pending WHERE user_id = ?",
+                        [victims[i].user_id]);
+                removed++;
+            }
+        });
+    }
+    const attemptsCutoff = now - (_state.lockoutDuration || 0) * 2;
+    db.exec(
+        "DELETE FROM _hull_totp_attempts "
+        + "WHERE (locked_until IS NULL OR locked_until < ?) "
+        + "  AND (last_failed_at IS NULL OR last_failed_at < ?)",
+        [now, attemptsCutoff]);
+    const ipAttemptsCutoff = now
+                             - (_state.lockoutDurationPerIp || 0) * 2;
+    db.exec(
+        "DELETE FROM _hull_totp_attempts_by_ip "
+        + "WHERE (locked_until IS NULL OR locked_until < ?) "
+        + "  AND (last_failed_at IS NULL OR last_failed_at < ?)",
+        [now, ipAttemptsCutoff]);
     return removed;
 }
 
@@ -880,17 +896,12 @@ function verifyWithKind(userId, code, req) {
     // noisy IP is cut off before it can lock arbitrary victims. req
     // is optional — apps that don't pass it keep round-8 behaviour.
     const ip = req ? extractIp(req) : null;
+    // Round-10 HIGH-5: reverted the round-9 dummy PBKDF2. See
+    // Lua sibling for the CPU-amplifier reasoning.
     if (ip && lockoutRemainingIp(ip) > 0) {
-        // Round-9 HIGH-5: pay one PBKDF2 verify so the wall clock
-        // matches the recovery-code walk path. See Lua sibling.
-        crypto.verifyPassword("dummy", _state._dummyPwhash);
         return [false, null];
     }
-    // Lockout check (round-8 HIGH-3). Returns silently to keep the
-    // locked state non-enumerable from the wire. Apps that need the
-    // state for UX can call totp.lockoutRemaining(userId) directly.
     if (lockoutRemaining(userId) > 0) {
-        crypto.verifyPassword("dummy", _state._dummyPwhash);
         return [false, null];
     }
     const row = loadSecret(userId);
@@ -1074,6 +1085,7 @@ const _test = {
         _state.lockoutDuration    = 15 * 60;
         _state.maxFailedAttemptsPerIp = 20;
         _state.lockoutDurationPerIp   = 15 * 60;
+        _state.trustXff               = false;
         _state.pendingTtl         = 3600;
         _state.keys               = {};
         _state.currentKeyVersion  = null;

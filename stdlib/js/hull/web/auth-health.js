@@ -125,8 +125,10 @@ function check(opts) {
 /**
  * Mount /admin/auth-status (overridable). opts.authCheck(req) is
  * REQUIRED — the endpoint exposes session/enrollment counts and
- * operational state, recon material if left open. Returning truthy
- * admits the request; false returns 403; throwing returns 401.
+ * operational state, recon material if left open. Must return the
+ * boolean `true` to admit; any other value (including truthy ones
+ * like `1` or `"yes"`) is rejected with 403; throwing returns 401;
+ * returning a Promise (async authCheck) returns 500.
  * opts.includeCounts (default false) gates enumeration counts.
  */
 function routes(app, opts) {

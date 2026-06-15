@@ -394,28 +394,49 @@ local RECOMPUTE_PAGE = 5000
 -- operators could kick it off concurrently. Two concurrent callers
 -- would double-scan + double-write the same rows, blocking
 -- audit_log.record (which sits on every login) for minutes.
-local _recompute_running = false
+--
+-- Round-10 LOW-12: store the start time instead of a bool so a
+-- runtime panic that doesn't unwind the pcall doesn't strand the
+-- flag at `true` forever. After RECOMPUTE_STALE_AFTER seconds the
+-- flag is treated as stale and a fresh call proceeds. The actual
+-- work uses pcall so normal errors clear the flag; this is the
+-- escape hatch for C-level aborts.
+local _recompute_started_at = nil
+local RECOMPUTE_STALE_AFTER = 3600  -- 1 hour
 
 function audit_log.recompute_fingerprints()
-    if _recompute_running then
+    local now = time.now()
+    if _recompute_started_at
+       and (now - _recompute_started_at) < RECOMPUTE_STALE_AFTER then
         return { scanned = 0, updated = 0, error = "already_running" }
     end
-    _recompute_running = true
+    _recompute_started_at = now
     local ok, result = pcall(function()
         local salt = _state.fingerprint_salt or ""
+        -- Round-10 HIGH-2: snapshot the highest id at start. Round-9
+        -- MEDIUM-10 broke only on empty page, but under sustained
+        -- INSERT load (audit_log.record fires per login) the loop
+        -- never terminates — every SELECT finds new rows past
+        -- last_id. The single live caller would hold the writer
+        -- transaction periodically and grow page_updates without
+        -- bound. Bounding by start_max_id terminates correctly while
+        -- still covering everything that existed at call time.
+        -- Rows inserted DURING recompute are written with the
+        -- current salt already (audit_log.record uses the same salt)
+        -- so they don't need re-fingerprinting.
+        local max_rows = db.query(
+            "SELECT MAX(id) AS max_id FROM _hull_audit_log")
+        local start_max_id = max_rows and max_rows[1]
+                             and max_rows[1].max_id or 0
         local scanned, updated = 0, 0
         local last_id = -1
-        while true do
+        while last_id < start_max_id do
             local rows = db.query(
                 "SELECT id, ip, user_agent, fingerprint "
                 .. "FROM _hull_audit_log "
-                .. "WHERE id > ? ORDER BY id LIMIT ?",
-                { last_id, RECOMPUTE_PAGE })
-            -- Round-9 MEDIUM-10: break ONLY when the page came back
-            -- empty. Pre-fix, `if #rows < PAGE then break` silently
-            -- skipped rows inserted past last_id during the final
-            -- short page. Costs one extra empty SELECT for
-            -- correctness when paging races inserts.
+                .. "WHERE id > ? AND id <= ? "
+                .. "ORDER BY id LIMIT ?",
+                { last_id, start_max_id, RECOMPUTE_PAGE })
             if not rows or #rows == 0 then break end
             local page_updates = {}
             for _, r in ipairs(rows) do
@@ -441,7 +462,7 @@ function audit_log.recompute_fingerprints()
         end
         return { scanned = scanned, updated = updated }
     end)
-    _recompute_running = false
+    _recompute_started_at = nil
     if not ok then error(result) end
     return result
 end

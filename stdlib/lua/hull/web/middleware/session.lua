@@ -84,9 +84,16 @@ function session.init(opts)
         if opts.absolute_ttl == false then
             _absolute_ttl = nil
         elseif type(opts.absolute_ttl) == "number"
-               and opts.absolute_ttl <= 0 then
+               and (opts.absolute_ttl <= 0
+                    or opts.absolute_ttl ~= opts.absolute_ttl  -- NaN
+                    or opts.absolute_ttl == math.huge) then
+            -- Round-10 MEDIUM-8: NaN and math.huge slipped through
+            -- the `<= 0` check (NaN comparisons are always false,
+            -- math.huge is positive). Stored value would then make
+            -- `created_at + value <= now` always false → cap silently
+            -- disabled. Reject non-finite explicitly with a warn.
             local log = require("hull.log")
-            log.warn("session.init: absolute_ttl <= 0 disables the cap; "
+            log.warn("session.init: absolute_ttl must be finite > 0; "
                   .. "use `false` for the explicit opt-out so the "
                   .. "intent is loud.")
             _absolute_ttl = nil
@@ -356,6 +363,21 @@ end
 function session.list_for_user(user_id)
     if type(user_id) ~= "string" or user_id == "" then return {} end
     local now = time.now()
+    -- Round-10 MEDIUM-9: filter rows past the absolute_ttl cap too.
+    -- Pre-fix, the /devices UI showed sessions that load() would
+    -- refuse (sliding TTL alive but past created_at + absolute_ttl).
+    -- Adding the condition keeps list+load in sync. When
+    -- _absolute_ttl is nil (disabled), the absolute_now param is
+    -- nil and the SQL OR short-circuits true.
+    if _absolute_ttl then
+        return db.query(
+            "SELECT id, created_at, last_accessed, ip, user_agent "
+            .. "FROM _hull_sessions "
+            .. "WHERE user_id = ? AND expires_at > ? "
+            .. "  AND created_at + ? > ? "
+            .. "ORDER BY last_accessed DESC",
+            { user_id, now, _absolute_ttl, now }) or {}
+    end
     return db.query(
         "SELECT id, created_at, last_accessed, ip, user_agent "
         .. "FROM _hull_sessions "

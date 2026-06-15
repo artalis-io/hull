@@ -311,26 +311,35 @@ function isCleanupScheduled() {
  */
 const RECOMPUTE_PAGE = 5000;
 
-// Round-9 MEDIUM-9: in-process mutex. See Lua sibling.
-let _recomputeRunning = false;
+// Round-9 MEDIUM-9 + round-10 LOW-12: timestamp-based mutex so a
+// runtime panic that doesn't unwind try/finally doesn't strand the
+// flag forever. See Lua sibling.
+let _recomputeStartedAt = null;
+const RECOMPUTE_STALE_AFTER = 3600;  // 1 hour
 
 function recomputeFingerprints() {
-    if (_recomputeRunning) {
+    const now = time.now();
+    if (_recomputeStartedAt != null
+        && (now - _recomputeStartedAt) < RECOMPUTE_STALE_AFTER) {
         return { scanned: 0, updated: 0, error: "already_running" };
     }
-    _recomputeRunning = true;
+    _recomputeStartedAt = now;
     try {
         const salt = _state.fingerprintSalt || "";
+        // Round-10 HIGH-2: snapshot max(id) at start to bound the
+        // loop. See Lua sibling for the starvation rationale.
+        const maxRows = db.query(
+            "SELECT MAX(id) AS max_id FROM _hull_audit_log");
+        const startMaxId = (maxRows && maxRows[0] && maxRows[0].max_id) || 0;
         let scanned = 0, updated = 0;
         let lastId = -1;
-        for (;;) {
+        while (lastId < startMaxId) {
             const rows = db.query(
                 "SELECT id, ip, user_agent, fingerprint "
                 + "FROM _hull_audit_log "
-                + "WHERE id > ? ORDER BY id LIMIT ?",
-                [lastId, RECOMPUTE_PAGE]);
-            // Round-9 MEDIUM-10: break ONLY on empty. See Lua sibling
-            // for the page-boundary race rationale.
+                + "WHERE id > ? AND id <= ? "
+                + "ORDER BY id LIMIT ?",
+                [lastId, startMaxId, RECOMPUTE_PAGE]);
             if (!rows || rows.length === 0) break;
             const pageUpdates = [];
             for (let i = 0; i < rows.length; i++) {
@@ -356,7 +365,7 @@ function recomputeFingerprints() {
         }
         return { scanned: scanned, updated: updated };
     } finally {
-        _recomputeRunning = false;
+        _recomputeStartedAt = null;
     }
 }
 

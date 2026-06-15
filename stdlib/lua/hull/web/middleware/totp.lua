@@ -118,8 +118,17 @@ local _state = {
     -- per-user since shared NATs / mobile carriers do exist.
     -- Apps SHOULD additionally wire ratelimit.middleware on
     -- /auth/totp-verify for defense in depth.
+    --
+    -- Round-10 HIGH-4: `trust_xff` opt-in (DEFAULT FALSE). Round-9
+    -- unconditionally honored X-Forwarded-For — trivially spoofable
+    -- on direct-exposed apps (attacker rotates the header to get a
+    -- fresh bucket per request). With trust_xff = false the gate
+    -- uses req.remote_addr only; the per-IP table is then keyed on
+    -- the real TCP peer. Apps behind a trusted reverse proxy that
+    -- normalizes/replaces XFF set trust_xff = true to honor it.
     max_failed_attempts_per_ip = 20,
     lockout_duration_per_ip    = 15 * 60,
+    trust_xff                  = false,
     -- Pending-row TTL (round-8 LOW-13). _hull_totp_pending stores
     -- the new secret + (encrypted) recovery codes during the
     -- enroll → confirm window. Without a TTL, abandoned enrollments
@@ -667,19 +676,23 @@ local function clear_failed_attempts_ip(ip)
             { ip })
 end
 
--- Extract a stable, single-hop IP from a request. Uses XFF first
--- (proxied deployments), trims leading proxy hops to the leftmost
--- client IP, falls back to remote_addr. Returns nil if neither
--- yields a non-empty string; callers fall back to per-user only.
+-- Extract a stable, single-hop IP from a request. Default trust
+-- model (round-10 HIGH-4): use req.remote_addr ONLY. X-Forwarded-For
+-- is honored only when _state.trust_xff is true (apps behind a
+-- trusted proxy that normalizes/replaces the header). Returns nil
+-- if no non-empty string is available; callers fall back to per-
+-- user only when nil.
 local function extract_ip(req)
     if type(req) ~= "table" then return nil end
-    local h = req.headers or {}
-    local xff = h["x-forwarded-for"]
-    if type(xff) == "string" and xff ~= "" then
-        local comma = xff:find(",", 1, true)
-        local first = comma and xff:sub(1, comma - 1) or xff
-        local trimmed = first:match("^%s*(.-)%s*$")
-        if trimmed and trimmed ~= "" then return trimmed end
+    if _state.trust_xff then
+        local h = req.headers or {}
+        local xff = h["x-forwarded-for"]
+        if type(xff) == "string" and xff ~= "" then
+            local comma = xff:find(",", 1, true)
+            local first = comma and xff:sub(1, comma - 1) or xff
+            local trimmed = first:match("^%s*(.-)%s*$")
+            if trimmed and trimmed ~= "" then return trimmed end
+        end
     end
     if type(req.remote_addr) == "string" and req.remote_addr ~= "" then
         return req.remote_addr
@@ -792,6 +805,7 @@ function totp.init(opts)
                                         or _state.max_failed_attempts_per_ip
     _state.lockout_duration_per_ip    = opts.lockout_duration_per_ip
                                         or _state.lockout_duration_per_ip
+    _state.trust_xff                  = opts.trust_xff == true
     -- Round-9 LOW-12: <= 0 or `false` → disabled (no TTL enforcement,
     -- pending rows never expire here; cleanup task is a no-op). Lua 0
     -- is truthy and pre-fix slipped through into
@@ -856,17 +870,6 @@ function totp.init(opts)
         end
     end
 
-    -- Round-9 HIGH-5: precompute a dummy PBKDF2 hash ONCE so
-    -- verify_with_kind's lockout path can run a single
-    -- crypto.verify_password against it. Collapses the wall-clock
-    -- gap between "locked" (was instant) and "unlocked-bad-code"
-    -- (one or more recovery-code PBKDF2 walks). Cache survives
-    -- re-init so test fixtures don't pay the 100ms boot cost on
-    -- every reset.
-    if not _state._dummy_pwhash then
-        _state._dummy_pwhash = crypto.hash_password(
-            "totp-dummy-sentinel-never-matches-real-code")
-    end
     -- Mark initialized BEFORE the lazy-catchup block so totp.cleanup
     -- — which guards on check_initialized — can run from inside
     -- init's own cleanup pass. Pre-fix: the catchup pcall caught
@@ -910,28 +913,46 @@ end
 -- app.daily unless `cleanup = false` is passed to init.
 function totp.cleanup()
     check_initialized()
-    -- Round-9 LOW-12: when pending_ttl is disabled (nil), cleanup
-    -- is a no-op. The auto-daily timer still runs but does nothing.
-    if not _state.pending_ttl then return 0 end
-    local cutoff = time.now() - _state.pending_ttl
+    local now = time.now()
     local removed = 0
-    db.batch(function()
-        -- Find expired pending users first so we can also nuke their
-        -- staged recovery codes (the two tables aren't FK-linked,
-        -- since SQLite without PRAGMA foreign_keys=ON skips FKs;
-        -- driving the delete from a single id list is safe across
-        -- backends).
-        local victims = db.query(
-            "SELECT user_id FROM _hull_totp_pending WHERE created_at < ?",
-            { cutoff })
-        for _, r in ipairs(victims or {}) do
-            db.exec("DELETE FROM _hull_totp_pending_recovery "
-                    .. "WHERE user_id = ?", { r.user_id })
-            db.exec("DELETE FROM _hull_totp_pending WHERE user_id = ?",
-                    { r.user_id })
-            removed = removed + 1
-        end
-    end)
+    -- Round-9 LOW-12: pending_ttl disabled → skip pending sweep.
+    -- Round-10 LOW-11: attempts tables (per-user + per-IP) are
+    -- also pruned. Without this they grow unbounded on a busy auth
+    -- service — every bad attempt from a fresh IP writes a row that
+    -- never expires. Cutoff is generous (2× window) so a user who
+    -- just unlocked isn't immediately wiped from the table mid-
+    -- attempt.
+    if _state.pending_ttl then
+        local pending_cutoff = now - _state.pending_ttl
+        db.batch(function()
+            local victims = db.query(
+                "SELECT user_id FROM _hull_totp_pending "
+                .. "WHERE created_at < ?", { pending_cutoff })
+            for _, r in ipairs(victims or {}) do
+                db.exec("DELETE FROM _hull_totp_pending_recovery "
+                        .. "WHERE user_id = ?", { r.user_id })
+                db.exec("DELETE FROM _hull_totp_pending WHERE user_id = ?",
+                        { r.user_id })
+                removed = removed + 1
+            end
+        end)
+    end
+    -- Attempts tables: drop rows whose lockout window expired and
+    -- whose last failure is older than the cutoff. COALESCE handles
+    -- rows that never tripped a lockout (locked_until IS NULL).
+    local attempts_cutoff = now - (_state.lockout_duration or 0) * 2
+    db.exec(
+        "DELETE FROM _hull_totp_attempts "
+        .. "WHERE (locked_until IS NULL OR locked_until < ?) "
+        .. "  AND (last_failed_at IS NULL OR last_failed_at < ?)",
+        { now, attempts_cutoff })
+    local ip_attempts_cutoff = now
+                               - (_state.lockout_duration_per_ip or 0) * 2
+    db.exec(
+        "DELETE FROM _hull_totp_attempts_by_ip "
+        .. "WHERE (locked_until IS NULL OR locked_until < ?) "
+        .. "  AND (last_failed_at IS NULL OR last_failed_at < ?)",
+        { now, ip_attempts_cutoff })
     return removed
 end
 
@@ -1094,23 +1115,25 @@ function totp.verify_with_kind(user_id, code, req)
     -- against arbitrary victims. req is optional — apps that don't
     -- pass it keep round-8 behaviour (per-user only).
     local ip = req and extract_ip(req) or nil
+    -- Round-10 HIGH-5: reverted the round-9 dummy PBKDF2. The
+    -- timing-collapse was meant to hide lockout state from a wire
+    -- observer who'd otherwise distinguish "locked" (~µs) from
+    -- "unlocked-bad-code" (~1s recovery-code walk). The leak is
+    -- mostly theoretical (the attacker observing the timing is
+    -- the one who locked themselves out — they already know) and
+    -- the dummy turned each locked request into ~100ms of server
+    -- CPU. An attacker locked into a stuck-bucket state could spam
+    -- the endpoint at 10 req/s and saturate one core for the full
+    -- lockout window at zero client cost — strictly worse than the
+    -- pre-round-9 baseline.
     if ip and lockout_remaining_ip(ip) > 0 then
-        -- Round-9 HIGH-5: pay the cost of one PBKDF2 verify so the
-        -- wall clock between "locked" and "unlocked-bad-code" is
-        -- within order of magnitude (the bad-code path walks
-        -- recovery codes; ~100ms × N). Without this, locked returns
-        -- in µs and the timing delta leaks the lockout state from
-        -- the wire, defeating the silent-lockout design.
-        crypto.verify_password("dummy", _state._dummy_pwhash)
         return false, nil
     end
     -- Lockout check (round-8 HIGH-3). Return false silently — same
-    -- shape as a wrong code — so an enumerator can't tell "locked"
-    -- from "bad code". Apps that need the locked state for UX can
-    -- call totp.lockout_remaining(user_id) explicitly.
+    -- response shape as a wrong code. Apps that need the locked
+    -- state for UX can call totp.lockout_remaining(user_id)
+    -- explicitly.
     if lockout_remaining(user_id) > 0 then
-        -- Same timing-collapse dummy as the per-IP path above.
-        crypto.verify_password("dummy", _state._dummy_pwhash)
         return false, nil
     end
     local row = load_secret(user_id)
@@ -1355,6 +1378,7 @@ totp._test = {
         _state.lockout_duration    = 15 * 60
         _state.max_failed_attempts_per_ip = 20
         _state.lockout_duration_per_ip    = 15 * 60
+        _state.trust_xff                  = false
         _state.pending_ttl         = 3600
         _state.keys                = {}
         _state.current_key_version = nil
