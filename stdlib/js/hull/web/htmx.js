@@ -4,8 +4,8 @@
  * @description HTMX request inspection and response-header helpers.
  *
  * Lua parity: same surface as `hull.web.htmx` with camelCase function
- * names (`triggerAfterSwap` vs `trigger_after_swap`, `pushUrl` vs
- * `push_url`, etc.). All other semantics identical.
+ * names (`pushUrl` vs `push_url`, `currentUrl` vs `current_url`, etc.).
+ * All other semantics identical.
  *
  * Provides the small server-side surface for the HTMX hypermedia
  * pattern: detect whether an inbound request came from htmx (vs a
@@ -92,8 +92,33 @@ function reswap(res, mode) {
     res.header("HX-Reswap", mode);
 }
 
-// Shared encoder for the three HX-Trigger* headers.
-function _trigger(res, headerName, eventOrTable, payload) {
+/**
+ * Trigger one or more client-side events.
+ *
+ * `eventOrTable` can be a bare event name string or an object
+ * mapping event names to payloads. If a bare string is given with a
+ * non-null `payload`, the payload object is constructed automatically.
+ *
+ * Optional `opts.timing` selects when the event fires:
+ *   undefined -> HX-Trigger (immediate, default)
+ *   "swap"    -> HX-Trigger-After-Swap
+ *   "settle"  -> HX-Trigger-After-Settle
+ *
+ * When `eventOrTable` is an object (multi-event form), opts may be
+ * passed as the 3rd arg: trigger(res, {...}, { timing: "swap" }).
+ */
+function trigger(res, eventOrTable, payload, opts) {
+    if (typeof eventOrTable === "object" && eventOrTable !== null
+        && typeof payload === "object" && payload !== null
+        && opts === undefined && payload.timing !== undefined) {
+        opts = payload;
+        payload = undefined;
+    }
+
+    let header = "HX-Trigger";
+    if (opts && opts.timing === "swap") header = "HX-Trigger-After-Swap";
+    else if (opts && opts.timing === "settle") header = "HX-Trigger-After-Settle";
+
     let value;
     if (typeof eventOrTable === "object" && eventOrTable !== null) {
         value = JSON.stringify(eventOrTable);
@@ -102,31 +127,7 @@ function _trigger(res, headerName, eventOrTable, payload) {
     } else {
         value = eventOrTable;
     }
-    res.header(headerName, value);
-}
-
-/**
- * Trigger one or more client-side events.
- *
- * `eventOrTable` can be a bare event name string or an object
- * mapping event names to payloads. If a bare string is given with a
- * non-null `payload`, the payload object is constructed automatically.
- *
- * The triggered events fire on the swap target. Use
- * `triggerAfterSwap` / `triggerAfterSettle` for later lifecycle.
- */
-function trigger(res, eventOrTable, payload) {
-    _trigger(res, "HX-Trigger", eventOrTable, payload);
-}
-
-/** Trigger events after the swap completes. */
-function triggerAfterSwap(res, eventOrTable, payload) {
-    _trigger(res, "HX-Trigger-After-Swap", eventOrTable, payload);
-}
-
-/** Trigger events after the swap settles. */
-function triggerAfterSettle(res, eventOrTable, payload) {
-    _trigger(res, "HX-Trigger-After-Settle", eventOrTable, payload);
+    res.header(header, value);
 }
 
 /** Trigger a full client-side page refresh (HX-Refresh: true). */
@@ -168,7 +169,7 @@ function location(res, pathOrOpts) {
 export const htmx = {
     is, boosted, currentUrl, target, triggerName,
     redirect, retarget, reswap,
-    trigger, triggerAfterSwap, triggerAfterSettle,
+    trigger,
     refresh, pushUrl, replaceUrl, location,
 };
 

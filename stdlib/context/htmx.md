@@ -48,9 +48,10 @@ only the fragment that changed. Same URL, same handler, both audiences.
   `static/app.css`.
 - **`hull/web/htmx@1`** helper module. Request inspection (`is`, `boosted`,
   `current_url`, `target`, `trigger_name`) + response mutation
-  (`redirect`, `retarget`, `reswap`, `trigger`, `trigger_after_swap`,
-  `trigger_after_settle`, `refresh`, `push_url`, `replace_url`,
-  `location`).
+  (`redirect`, `retarget`, `reswap`, `trigger`, `refresh`,
+  `push_url`, `replace_url`, `location`). `trigger` accepts an
+  optional `{ timing = "swap" | "settle" }` for the HX-Trigger-
+  After-Swap / After-Settle header variants.
 - **`hull/web/middleware/csp@1`** with the `htmx` profile. Generates a
   fresh 128-bit nonce per request, exposes as `req.ctx.csp_nonce`,
   sets `script-src 'self' 'nonce-{rand}'; style-src 'self'
@@ -79,13 +80,15 @@ htmx.redirect(req, res, "/path")        -- dual-mode: HX-Redirect or 302
 htmx.retarget(res, "#errors")           -- HX-Retarget
 htmx.reswap(res, "outerHTML")           -- HX-Reswap
 htmx.trigger(res, "saved", { id = 1 }) -- HX-Trigger (event + payload)
+htmx.trigger(res, "settled", nil, { timing = "swap" })   -- HX-Trigger-After-Swap
+htmx.trigger(res, "done",    nil, { timing = "settle" }) -- HX-Trigger-After-Settle
 htmx.refresh(res)                       -- HX-Refresh: true
 htmx.push_url(res, "/items/42")         -- HX-Push-Url
 htmx.location(res, "/dashboard")        -- HX-Location
 ```
 
-JS naming: snake_case becomes camelCase (`htmx.triggerAfterSwap`,
-`htmx.pushUrl`, `htmx.currentUrl`). All other semantics identical.
+JS naming: snake_case becomes camelCase (`htmx.pushUrl`,
+`htmx.currentUrl`). All other semantics identical.
 
 ## Patterns
 
@@ -130,7 +133,7 @@ Handler returns empty body; `hx-swap="delete"` removes the element.
 | Lua | JS | Note |
 |---|---|---|
 | `htmx.is(req)` | `htmx.is(req)` | identical |
-| `htmx.trigger_after_swap(...)` | `htmx.triggerAfterSwap(...)` | snake_case ↔ camelCase |
+| `htmx.trigger(res, e, p, opts)` | `htmx.trigger(res, e, p, opts)` | `opts.timing = "swap" | "settle"` for after-swap / after-settle |
 | `app.use_post(...)` | `app.usePost(...)` | same convention |
 | `require("hull.X")` | `import { X } from "hull:X"` | `.` vs `:` separator |
 | `req.ctx.csp_nonce` | `req.ctx.csp_nonce` | snake_case in both (aligned v0.1.8) |

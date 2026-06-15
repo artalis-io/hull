@@ -141,16 +141,31 @@ test("trigger with table encodes table directly", function()
     assert_eq(string.find(v, '"refresh"') ~= nil, true)
 end)
 
-test("trigger_after_swap uses HX-Trigger-After-Swap", function()
+test("trigger with opts.timing='swap' uses HX-Trigger-After-Swap", function()
     local res = mock_res()
-    htmx.trigger_after_swap(res, "settled")
+    htmx.trigger(res, "settled", nil, { timing = "swap" })
     assert_eq(res.headers_set["HX-Trigger-After-Swap"], "settled")
 end)
 
-test("trigger_after_settle uses HX-Trigger-After-Settle", function()
+test("trigger with opts.timing='settle' uses HX-Trigger-After-Settle", function()
     local res = mock_res()
-    htmx.trigger_after_settle(res, "done")
+    htmx.trigger(res, "done", nil, { timing = "settle" })
     assert_eq(res.headers_set["HX-Trigger-After-Settle"], "done")
+end)
+
+test("trigger with opts as 3rd arg when event is a table", function()
+    local res = mock_res()
+    htmx.trigger(res, { saved = { id = 1 } }, { timing = "swap" })
+    local v = res.headers_set["HX-Trigger-After-Swap"]
+    assert_eq(string.find(v, '"saved"') ~= nil, true)
+end)
+
+test("trigger with opts.timing='swap' + payload encodes JSON", function()
+    local res = mock_res()
+    htmx.trigger(res, "saved", { id = 42 }, { timing = "swap" })
+    local v = res.headers_set["HX-Trigger-After-Swap"]
+    assert_eq(string.find(v, '"saved"') ~= nil, true)
+    assert_eq(string.find(v, '42') ~= nil, true)
 end)
 
 -- ── Location helpers ─────────────────────────────────────────────────

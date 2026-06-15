@@ -136,16 +136,31 @@ test("trigger with object encodes directly", () => {
     if (v.indexOf('"refresh"') < 0) throw new Error("should contain refresh");
 });
 
-test("triggerAfterSwap uses HX-Trigger-After-Swap", () => {
+test("trigger with opts.timing='swap' uses HX-Trigger-After-Swap", () => {
     const res = mockRes();
-    htmx.triggerAfterSwap(res, "settled");
+    htmx.trigger(res, "settled", null, { timing: "swap" });
     assertEq(res.headersSet["HX-Trigger-After-Swap"], "settled");
 });
 
-test("triggerAfterSettle uses HX-Trigger-After-Settle", () => {
+test("trigger with opts.timing='settle' uses HX-Trigger-After-Settle", () => {
     const res = mockRes();
-    htmx.triggerAfterSettle(res, "done");
+    htmx.trigger(res, "done", null, { timing: "settle" });
     assertEq(res.headersSet["HX-Trigger-After-Settle"], "done");
+});
+
+test("trigger with opts as 3rd arg when event is an object", () => {
+    const res = mockRes();
+    htmx.trigger(res, { saved: { id: 1 } }, { timing: "swap" });
+    const v = res.headersSet["HX-Trigger-After-Swap"];
+    if (v.indexOf('"saved"') < 0) throw new Error("should contain saved");
+});
+
+test("trigger with opts.timing='swap' + payload encodes JSON", () => {
+    const res = mockRes();
+    htmx.trigger(res, "saved", { id: 42 }, { timing: "swap" });
+    const v = res.headersSet["HX-Trigger-After-Swap"];
+    if (v.indexOf('"saved"') < 0) throw new Error("should contain saved");
+    if (v.indexOf("42") < 0) throw new Error("should contain 42");
 });
 
 // ── Location helpers ─────────────────────────────────────────────────

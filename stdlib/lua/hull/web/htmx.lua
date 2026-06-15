@@ -130,42 +130,42 @@ end
 
 --- Trigger one or more client-side events.
 --
--- `HX-Trigger` value can be a bare event name (`"saved"`) or a JSON
--- object mapping event names to payloads (`{ saved = { id = 42 } }`).
--- The payload form is passed through as JSON; the helper does the
--- encoding when a table is given.
+-- The HX-Trigger header value can be a bare event name (`"saved"`)
+-- or a JSON object mapping event names to payloads
+-- (`{ saved = { id = 42 } }`). The payload form is passed through
+-- as JSON; this helper does the encoding when a table is given.
 --
--- The triggered events fire on the swap target. Use
--- `htmx.trigger_after_swap` / `htmx.trigger_after_settle` for events
--- that should fire later in the htmx lifecycle.
+-- Three call shapes:
+--   htmx.trigger(res, "saved")                          bare event
+--   htmx.trigger(res, "saved", { id = 42 })             event + payload
+--   htmx.trigger(res, { saved = {...}, refresh = true }) multi-event
+--
+-- An optional final `opts` table selects when the event fires in
+-- the htmx lifecycle:
+--   opts.timing = nil     -> HX-Trigger (immediate, default)
+--   opts.timing = "swap"  -> HX-Trigger-After-Swap
+--   opts.timing = "settle"-> HX-Trigger-After-Settle
 --
 -- @tparam table        res             Response object.
--- @tparam string       event_or_table  Event name OR a table of name→payload.
+-- @tparam string|table event_or_table  Event name OR table.
 -- @tparam any|nil      payload         Payload for a bare event name.
-function htmx.trigger(res, event_or_table, payload)
-    htmx._trigger(res, "HX-Trigger", event_or_table, payload)
-end
+-- @tparam table|nil    opts            { timing = "swap" | "settle" | nil }.
+function htmx.trigger(res, event_or_table, payload, opts)
+    -- Allow opts as the 3rd arg when event_or_table is a table
+    -- (no per-event payload in that case): trigger(res, {...}, opts).
+    if type(event_or_table) == "table" and type(payload) == "table"
+       and opts == nil and payload.timing ~= nil then
+        opts = payload
+        payload = nil
+    end
 
---- Trigger events after the swap completes.
---
--- @tparam table  res             Response object.
--- @tparam string event_or_table  Event name OR table.
--- @tparam any|nil payload
-function htmx.trigger_after_swap(res, event_or_table, payload)
-    htmx._trigger(res, "HX-Trigger-After-Swap", event_or_table, payload)
-end
+    local header = "HX-Trigger"
+    if opts and opts.timing == "swap" then
+        header = "HX-Trigger-After-Swap"
+    elseif opts and opts.timing == "settle" then
+        header = "HX-Trigger-After-Settle"
+    end
 
---- Trigger events after the swap settles.
---
--- @tparam table  res             Response object.
--- @tparam string event_or_table  Event name OR table.
--- @tparam any|nil payload
-function htmx.trigger_after_settle(res, event_or_table, payload)
-    htmx._trigger(res, "HX-Trigger-After-Settle", event_or_table, payload)
-end
-
--- Shared encoder for the three HX-Trigger* headers.
-function htmx._trigger(res, header_name, event_or_table, payload)
     local value
     if type(event_or_table) == "table" then
         value = require("hull.json").encode(event_or_table)
@@ -174,7 +174,7 @@ function htmx._trigger(res, header_name, event_or_table, payload)
     else
         value = event_or_table
     end
-    res:header(header_name, value)
+    res:header(header, value)
 end
 
 --- Trigger a full client-side page refresh.

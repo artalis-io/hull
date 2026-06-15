@@ -70,9 +70,7 @@ Pure functions. No state. Both runtimes (snake_case in Lua, camelCase in JS. Lua
 | `htmx.redirect(req, res, path)` | Dual-mode: `HX-Redirect` + 204 for htmx; normal 302 for plain. |
 | `htmx.retarget(res, selector)` | Sets `HX-Retarget`. Overrides the swap target. |
 | `htmx.reswap(res, mode)` | Sets `HX-Reswap`. Overrides the swap mode. |
-| `htmx.trigger(res, event, payload?)` | Sets `HX-Trigger`. Fires a client-side event. |
-| `htmx.trigger_after_swap(res, ...)` | Same, but after the DOM swap completes. |
-| `htmx.trigger_after_settle(res, ...)` | Same, but after the swap settles. |
+| `htmx.trigger(res, event, payload?, opts?)` | Sets `HX-Trigger`. Fires a client-side event. `opts.timing = "swap"` → `HX-Trigger-After-Swap`; `opts.timing = "settle"` → `HX-Trigger-After-Settle`. Multi-event form: `htmx.trigger(res, { e1 = p1, e2 = p2 }, opts?)`. |
 | `htmx.refresh(res)` | Sets `HX-Refresh: true`. Hard reload. |
 | `htmx.push_url(res, url)` | Sets `HX-Push-Url`. Pushes to browser history. |
 | `htmx.replace_url(res, url)` | Sets `HX-Replace-Url`. Replaces in browser history. |
@@ -805,7 +803,7 @@ The same shape exists for JS (`await test.get / test.post`, `body:` instead of `
 | Lua | JS | Note |
 |---|---|---|
 | `htmx.is(req)` | `htmx.is(req)` | identical |
-| `htmx.trigger_after_swap(...)` | `htmx.triggerAfterSwap(...)` | snake_case ↔ camelCase |
+| `htmx.trigger(res, e, p, opts)` | `htmx.trigger(res, e, p, opts)` | `opts.timing = "swap" | "settle"` for after-swap / after-settle (replaces the prior `trigger_after_swap` / `triggerAfterSwap` variants) |
 | `app.use_post(...)` | `app.usePost(...)` | same convention |
 | `require("hull.X")` | `import { X } from "hull:X"` | `.` vs `:` separator |
 | Template `{{ csp_nonce }}` | Template `{{ csp_nonce }}` | snake_case in both; handlers pass `csp_nonce = req.ctx.csp_nonce` (Lua) / `csp_nonce: req.ctx.csp_nonce` (JS) |

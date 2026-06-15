@@ -1623,14 +1623,16 @@ needs its own design pass + estimate before scheduling. Items marked
       max(id)-bounded, in-process mutex). The retention-policy /
       structured-export / tamper-evident-hash-chain version is still
       `[COMMERCIAL]` (above).
-- [ ] **Reusable admin UI primitives tier** — promoted to its own
-      sub-section: see **§1.5.g** below. Absorbs the umbrella
-      conventions originally listed here (filter forms, optimistic
-      row replacement, bulk-select toolbars, sortable headers) plus
-      the scattered confirm / toast / form items in §1.5.d-8 /
-      §1.5.d-10 / §1.5.d-11, and adds the platform-side plumbing
-      they all depend on (stdlib-shipped static assets + template
-      partials).
+- [ ] **HTMX widgets tier** — promoted to its own sub-section: see
+      **§1.5.g** below (renamed from the earlier "admin-UI
+      primitives tier" framing, which was too narrow — these widgets
+      serve any data-list-heavy hypermedia app, not just internal
+      tools). Absorbs the umbrella conventions originally listed
+      here (filter forms, optimistic row replacement, bulk-select
+      toolbars, sortable headers) plus the scattered confirm /
+      toast / form items in §1.5.d-8 / §1.5.d-10 / §1.5.d-11, and
+      adds the platform-side plumbing they all depend on (stdlib-
+      shipped static assets + template partials + CSP preset).
 - [ ] Optimistic concurrency control for the lost-update problem
       (two users edit the same record; last write silently wins).
       Standard fix: `If-Match: <etag>` on PATCH, or a `version`
@@ -1641,18 +1643,28 @@ needs its own design pass + estimate before scheduling. Items marked
       errors, dry-run mode, commit step, background processing hooks for
       large imports.
 
-### 1.5.g Admin-UI primitives tier (no target, designed)
+### 1.5.g HTMX widgets tier (no target, designed)
+
+**Naming note.** Earlier drafts called this "admin-UI primitives"
+(matching §1.5.f's original bullet and the Trimble assessment's
+wording). The frame turned out to be too narrow — the same
+primitives are useful for any data-list-heavy hypermedia app
+(customer dashboards, B2B portals, marketplace listings), not
+just internal tools. Renamed to "HTMX widgets" so the tier names
+itself by *what it is* (server-rendered htmx UI primitives) rather
+than by *who's using it*. Module paths under `hull/web/htmx/...`
+were already correct.
 
 **Motivation.** §1.5.f's "reusable admin UI" bullet and the scattered
 items in §1.5.d (d-8 styled confirm, d-10 toast renderer, d-11 form
-drafts) cover the same problem from different angles: every internal-
-tools app rebuilds the same five-to-eight htmx interaction patterns
-by hand. The Trimble HU asset-inventory build plan (asset_inventory_
-assessment.md §5.1 item 5) was the forcing function — its MVP 1
-register page alone needs search + sort + pagination + inline-edit +
-confirm + toast + form-errors. Promoting the bullet to a named tier
-makes the surface a coherent first-party offering rather than
-example boilerplate.
+drafts) cover the same problem from different angles: every
+data-list-heavy hypermedia app rebuilds the same five-to-eight htmx
+interaction patterns by hand. The Trimble HU asset-inventory build
+plan (asset_inventory_assessment.md §5.1 item 5) was the forcing
+function — its MVP 1 register page alone needs search + sort +
+pagination + inline-edit + confirm + toast + form-errors. Promoting
+the bullet to a named tier makes the surface a coherent first-party
+offering rather than example boilerplate.
 
 **Design constraints (non-negotiable):**
 
@@ -1660,7 +1672,7 @@ example boilerplate.
 |---|---|
 | No client framework | HTMX + ~150 lines of plain JS *total* across all modules. Stays in the hypermedia-only profile §1.5 already committed to. |
 | CSP-friendly | No inline scripts, no `eval`/`Function`. Apps add `'self'` to script-src/style-src; nothing else. |
-| Theming via CSS variables | Ship minimal default + `--hull-admin-*` vars. Apps with no design system get a usable look immediately; apps with one rebrand by overriding vars. |
+| Theming via CSS variables | Ship minimal default + `--hull-htmx-*` vars. Apps with no design system get a usable look immediately; apps with one rebrand by overriding vars. |
 | Server-rendered partials | Server owns HTML shape; client JS is event-glue only. Matches `flash.trigger` / `htmx.compose` conventions in §1.5.c–d. |
 | Audit-stack discipline carries over | `{{ }}` auto-escape, parameterized SQL, magic-byte validation where bytes flow in. Subject to the same parallel-reviewer audit cadence as the auth stack. |
 
@@ -1679,10 +1691,18 @@ example boilerplate.
         overrides win. Today's single-prefix template loader needs to
         gain a fallback chain (platform VFS → app VFS, with app
         winning on collision).
-  - [ ] Response helpers: `res:hx_trigger(name, data)` /
-        `res.hxTrigger(name, data)` (emits `HX-Trigger` with JSON-
-        encoded payload); `res:hx_redirect(path)`; `res:hx_refresh()`.
-        ~30 lines per side. Lua + JS bindings.
+  - [ ] CSP preset table. `csp = "htmx"` in `app.manifest()` expands
+        at manifest-extract time to a known-good policy for htmx-
+        driven SSR apps with stdlib JS served from `/static/`.
+        Unknown preset names pass through as literal policies (zero
+        risk of typos silently becoming `default-src 'none'`).
+  - [x] Response helpers for the HX-Trigger header variants:
+        `htmx.trigger(res, event, payload?, opts?)` where
+        `opts.timing = "swap" | "settle"` maps to `HX-Trigger-After-
+        Swap` / `HX-Trigger-After-Settle`. Replaces the prior
+        `trigger_after_swap` / `trigger_after_settle` methods (single
+        canonical API, no half-finished alternatives). Lua + JS.
+        Shipped as part of Phase 0.
 
 - [ ] §1.5.g-1. **`hull/web/htmx/toast@1`.** Flash messages via
       `HX-Trigger` header → styled toast that auto-dismisses. Client
@@ -1717,19 +1737,23 @@ example boilerplate.
       `table.render(rows, schema)` where the schema declares which
       columns are sortable / searchable / inline-editable. Wires
       search + sort + pagination + inline-edit into one call.
-- [ ] §1.5.g-9. **`hull/web/admin-ui@1`** (aggregator). Declaring
-      this in `manifest.modules` pulls in all 8 above as transitive
-      dependencies. Granular declaration stays supported; the
-      aggregator is the one-line opt-in.
-- [ ] §1.5.g-10. **Example + docs.**
-      - `examples/admin_ui_register/` — tiny employee/asset CRUD that
-        exercises every module. Both runtimes.
-      - `docs/htmx_admin_ui.md` — usage guide; cross-reference from
+- [ ] §1.5.g-9. **Example + docs.**
+      - `examples/htmx_widgets_register/` — tiny employee/asset CRUD
+        that exercises every module. Both runtimes.
+      - `docs/htmx_widgets.md` — usage guide; cross-reference from
         `docs/htmx.md`.
-- [ ] §1.5.g-11. **Audit pass.** Parallel-reviewer audit using a new
-      `/admin-ui-audit` skill modeled on `/auth-audit`. Three slices
-      (toast/confirm/form, search/inline-edit, sort/pagination/table).
-      Converges when all three slices return zero findings.
+- [ ] §1.5.g-10. **Audit pass.** Parallel-reviewer audit using a new
+      `/htmx-widgets-audit` skill modeled on `/auth-audit`. Three
+      slices (toast/confirm/form, search/inline-edit, sort/pagination
+      /table). Converges when all three slices return zero findings.
+
+**No aggregator module.** Earlier drafts proposed
+`hull/web/admin-ui@1` as a one-line opt-in that pulled in all eight
+widgets transitively. Dropped: eight granular declarations isn't
+unreasonable, and explicit declaration keeps the manifest legible
+("which widgets are actually in scope?"). The aggregator's
+hide-the-detail benefit was outweighed by the manifest-as-audit-
+surface cost.
 
 **Sequencing & estimate:**
 
@@ -1738,7 +1762,7 @@ example boilerplate.
 | 0 — platform plumbing | §1.5.g-0 | ~2 days |
 | 1 — primitives | §1.5.g-1 → §1.5.g-5 | 2–3 weeks |
 | 2 — composed widgets | §1.5.g-6 → §1.5.g-8 | 1–2 weeks |
-| 3 — example + docs + audit | §1.5.g-9 → §1.5.g-11 | ~1 week |
+| 3 — example + docs + audit | §1.5.g-9 → §1.5.g-10 | ~1 week |
 | **Total** | | **~4–5 weeks** |
 
 Only Phase 0 touches C / runtime; phases 1–3 are pure stdlib +
@@ -1747,12 +1771,11 @@ examples + docs.
 **Open decisions (defer until §1.5.g enters a release):**
 
 1. **Date-picker / combobox / file-drop:** in scope or separate
-   tier? Recommendation: defer. Ship the 8 + aggregator first;
-   add `date-picker` and `combobox` only if a concrete consumer
-   (Trimble MVP 5 stocktake) needs them. File-drop already has
-   server-side coverage via the multipart iterator + `hull/
-   attachment@1`; a small `htmx/upload` widget could land in a
-   follow-up tier.
+   tier? Recommendation: defer. Ship the eight widgets first; add
+   `date-picker` and `combobox` only if a concrete consumer (Trimble
+   MVP 5 stocktake) needs them. File-drop already has server-side
+   coverage via the multipart iterator + `hull/attachment@1`; a
+   small `htmx/upload` widget could land in a follow-up tier.
 2. **Default CSS shipping:** minimal opinionated default + CSS
    vars (recommended), or pure structural CSS with zero
    appearance? Recommended option means apps get a working look
