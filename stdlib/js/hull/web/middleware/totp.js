@@ -658,6 +658,11 @@ function init(opts) {
     _state.lockoutDurationPerIp   = opts.lockoutDurationPerIp
                                     || _state.lockoutDurationPerIp;
     _state.trustXff               = opts.trustXff === true;
+    // Round-12 LOW-2: reset the one-shot XFF warn flag when the
+    // caller explicitly touched trustXff. See Lua sibling.
+    if (opts.trustXff !== undefined) {
+        _xffWarnDone = false;
+    }
     // Round-9 LOW-12: <= 0 or `false` → disabled. See Lua sibling.
     if (opts.pendingTtl !== undefined) {
         if (opts.pendingTtl === false) {

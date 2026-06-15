@@ -507,7 +507,17 @@ function originFor(req) {
     let bareHost = firstHost;
     if (bareHost.charAt(0) === "[") {
         const close = bareHost.indexOf("]");
-        if (close >= 0) bareHost = bareHost.substring(0, close + 1);
+        if (close >= 0) {
+            bareHost = bareHost.substring(0, close + 1);
+        } else if (!_state.warnedMalformedIpv6) {
+            // Round-12 LOW-5: separate one-shot warn for malformed
+            // IPv6 so it doesn't consume the generic
+            // warnedHostMismatch slot. See Lua sibling.
+            _state.warnedMalformedIpv6 = true;
+            log.warn("auth-flows: malformed IPv6 literal in Host "
+                + "header (no closing ']'): '" + bareHost + "'. "
+                + "RFC 3986 requires IPv6 literals to be bracketed.");
+        }
     } else {
         const colon = bareHost.indexOf(":");
         if (colon >= 0) bareHost = bareHost.substring(0, colon);
@@ -1190,6 +1200,11 @@ function init(opts) {
     _state.publicOrigin   = opts.publicOrigin || null;
     _state.trustedHosts   = opts.trustedHosts || null;
     _state.trustRequestHost = opts.trustRequestHost === true;
+    // Round-12 MEDIUM-1: reset the one-shot host-mismatch warn so a
+    // hot-reload that fixes / changes the allowlist gets a fresh
+    // diagnostic on the next bad host. See Lua sibling.
+    _state.warnedHostMismatch = false;
+    _state.warnedMalformedIpv6 = false;
     if (opts.userSanitize !== undefined
         && typeof opts.userSanitize !== "function") {
         throw new Error("auth-flows.init: userSanitize must be a "
@@ -1325,6 +1340,7 @@ const _test = {
         _state.trustRequestHost = false;
         _state.userSanitize   = null;
         _state.warnedHostMismatch = false;
+        _state.warnedMalformedIpv6 = false;
         _state.templates      = {};
         _state.userFindByEmail      = null;
         _state.userGet              = null;

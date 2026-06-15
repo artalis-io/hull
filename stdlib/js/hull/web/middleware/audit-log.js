@@ -102,6 +102,17 @@ function init(opts) {
         }
     }
     // Round-11 MEDIUM-7: track explicit opt-out for cleanupStatus().
+    // Round-12 LOW-4: warn on the auto-schedule → opt-out transition.
+    // See Lua sibling for the hull/timers gap rationale.
+    if (opts.cleanup === false && _state.cleanupScheduled
+        && !_state.cleanupOptedOut) {
+        log.warn("audit-log: init({cleanup: false}) on a process "
+            + "that already scheduled a daily cleanup via a prior "
+            + "init() — the timer is still wired (hull/timers has "
+            + "no unregister API) and will continue to fire "
+            + "alongside your external cron. Restart the process "
+            + "to clear the orphan timer.");
+    }
     _state.cleanupOptedOut = opts.cleanup === false;
     _state.initialized = true;
 }
@@ -299,6 +310,11 @@ function cleanup() {
  * will be pruned" in the health JSON.
  */
 function isCleanupScheduled() {
+    // Round-12 LOW-3: legacy boolean now also returns true on legit
+    // cleanup=false opt-out so dashboards stop reporting "cleanup
+    // not enabled" when cleanup="external" in the same probe. See
+    // Lua sibling.
+    if (_state.cleanupOptedOut) return true;
     return _state.catchupDone === true && _state.cleanupScheduled === true;
 }
 

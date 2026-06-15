@@ -139,6 +139,22 @@ function audit_log.init(opts)
     -- can distinguish "operator wired their own" from "forgot to
     -- enable". is_cleanup_scheduled() boolean kept for back-compat;
     -- new callers should use cleanup_status() for the three-way.
+    --
+    -- Round-12 LOW-4: detect the transition from auto-schedule to
+    -- opt-out. hull/timers has no unregister API, so the prior
+    -- app.daily timer keeps firing alongside the operator's
+    -- external cron. cleanup_status() would also lie ("external"
+    -- while the timer is still wired). Warn loud — easier than
+    -- introducing app.daily_cancel in hull/timers right now.
+    if opts.cleanup == false and _state._cleanup_scheduled
+       and not _state._cleanup_opted_out then
+        log.warn("audit-log: init({cleanup = false}) on a process "
+              .. "that already scheduled a daily cleanup via a prior "
+              .. "init() — the timer is still wired (hull/timers has "
+              .. "no unregister API) and will continue to fire "
+              .. "alongside your external cron. Restart the process "
+              .. "to clear the orphan timer.")
+    end
     _state._cleanup_opted_out = opts.cleanup == false
     _state._initialized = true
 end
@@ -365,6 +381,16 @@ end
 -- will be pruned" in the health JSON.
 -- @treturn boolean
 function audit_log.is_cleanup_scheduled()
+    -- Round-12 LOW-3: legacy boolean now also returns true when the
+    -- operator opted out via init({cleanup = false}). The semantic
+    -- shift is "someone is responsible for cleanup" (auto-daily OR
+    -- external cron) — both are fine. Pre-fix the bool said false
+    -- for legit opt-outs, contradicting the new cleanup="external"
+    -- tri-state in the same probe response. Use cleanup_status()
+    -- if you need the three-way distinction; this boolean is kept
+    -- for back-compat callers + the dashboard "did anyone wire
+    -- cleanup?" check.
+    if _state._cleanup_opted_out then return true end
     return _state._catchup_done == true and _state._cleanup_scheduled == true
 end
 

@@ -828,6 +828,14 @@ function totp.init(opts)
     _state.lockout_duration_per_ip    = opts.lockout_duration_per_ip
                                         or _state.lockout_duration_per_ip
     _state.trust_xff                  = opts.trust_xff == true
+    -- Round-12 LOW-2: reset the one-shot XFF warn flag when the
+    -- caller explicitly touched trust_xff. Lets a hot-reload that
+    -- flipped trust_xff on/off re-arm the diagnostic. Don't reset
+    -- unconditionally — re-init() for unrelated reasons (key
+    -- rotation, schema add) shouldn't re-warn.
+    if opts.trust_xff ~= nil then
+        _xff_warn_done = false
+    end
     -- Round-9 LOW-12: <= 0 or `false` → disabled (no TTL enforcement,
     -- pending rows never expire here; cleanup task is a no-op). Lua 0
     -- is truthy and pre-fix slipped through into

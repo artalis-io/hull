@@ -532,7 +532,21 @@ local function origin_for(req)
         host = host:match("^%s*(.-)%s*$")
         if host:sub(1, 1) == "[" then
             local close = host:find("]", 1, true)
-            if close then host = host:sub(1, close) end
+            if close then
+                host = host:sub(1, close)
+            elseif not _state.warned_malformed_ipv6 then
+                -- Round-12 LOW-5: surface the bad Host header on its
+                -- own one-shot warn so it doesn't consume the
+                -- generic warned_host_mismatch slot. The mismatch
+                -- itself still fires below; this just adds a
+                -- diagnostic line pointing at the malformation.
+                _state.warned_malformed_ipv6 = true
+                local log = require("hull.log")
+                log.warn("auth-flows: malformed IPv6 literal in "
+                      .. "Host header (no closing ']'): '"
+                      .. tostring(host) .. "'. RFC 3986 requires "
+                      .. "IPv6 literals to be bracketed.")
+            end
         else
             local colon = host:find(":", 1, true)
             if colon then host = host:sub(1, colon - 1) end
@@ -1602,6 +1616,13 @@ function M.init(opts)
     _state.public_origin    = opts.public_origin
     _state.trusted_hosts    = opts.trusted_hosts
     _state.trust_request_host = opts.trust_request_host == true
+    -- Round-12 MEDIUM-1: reset the one-shot host-mismatch warn so a
+    -- hot-reload that fixes / changes the allowlist gets a fresh
+    -- diagnostic on the next bad host. Without this, the warn fires
+    -- only once per process — an operator who "fixes" the config
+    -- but introduces a new typo wouldn't see the second warn.
+    _state.warned_host_mismatch = false
+    _state.warned_malformed_ipv6 = false
     -- Round-9 MEDIUM-6: optional user_sanitize callback. See
     -- strip_user_secrets for the threat model.
     if opts.user_sanitize ~= nil
@@ -1794,6 +1815,7 @@ M._test = {
         _state.trust_request_host = false
         _state.user_sanitize    = nil
         _state.warned_host_mismatch = false
+        _state.warned_malformed_ipv6 = false
         _state.templates        = {}
         _state.user_find_by_email      = nil
         _state.user_get                = nil
