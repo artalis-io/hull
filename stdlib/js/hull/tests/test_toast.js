@@ -89,5 +89,22 @@ test("shorthand opts override level if provided", () => {
     assertEq(decoded(res).toast.level, "success");
 });
 
+// ── Wire-payload type narrowing (M2 from the audit) ─────────────
+
+test("show drops non-number duration silently", () => {
+    const res = mockRes();
+    toast.show(res, "x", { duration: "8000" });
+    const d = decoded(res);
+    if (d.toast.duration !== undefined) {
+        throw new Error("non-number duration should not reach the wire payload");
+    }
+});
+
+test("show coerces non-string id to string", () => {
+    const res = mockRes();
+    toast.show(res, "x", { id: 42 });
+    assertEq(decoded(res).toast.id, "42");
+});
+
 console.log(`\n${pass}/${pass + fail} toast tests passed`);
 if (fail > 0) throw new Error("toast tests failed");

@@ -52,8 +52,13 @@ function inputAttrs(opts) {
     const target   = opts.target  || "#hull-search-results";
     const qName    = opts.name    || "q";
     const delayMs  = opts.delayMs || 300;
-    const method   = opts.method === "post" ? "post" : "get";
-    const hxAttr   = "hx-" + method;
+    // Normalize method case-insensitively so opts.method = "POST"
+    // doesn't silently downgrade to GET; throw on typos.
+    const rawMethod = opts.method ? String(opts.method).toLowerCase() : "get";
+    if (rawMethod !== "get" && rawMethod !== "post") {
+        throw new Error(`search.inputAttrs: method must be 'get' or 'post', got ${opts.method}`);
+    }
+    const hxAttr   = "hx-" + rawMethod;
     const trigger  = `input changed delay:${delayMs}ms`;
 
     const parts = [

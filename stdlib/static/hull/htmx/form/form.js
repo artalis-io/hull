@@ -58,8 +58,11 @@
         }
         var form = tag === "FORM" ? elt : elt.closest && elt.closest("form");
         if (form) {
+            // button:not([type="button"]) covers both <button> and
+            // <button type="submit"> (button's default is submit).
+            // input[type="submit"] is the separate form-submit input.
             return form.querySelector(
-                'button:not([type="button"]), button[type="submit"], input[type="submit"]'
+                'button:not([type="button"]), input[type="submit"]'
             );
         }
         return null;

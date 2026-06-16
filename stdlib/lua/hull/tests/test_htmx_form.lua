@@ -104,5 +104,31 @@ test("field_attrs id matches field_error id (a11y wiring)", function()
     assert_match(span,  'id="hull-form-error-email"')
 end)
 
+-- ── Defense-in-depth: field names with HTML metacharacters ────────
+
+test("errors collapses HTML-meta field-name chars to underscore in ids", function()
+    -- Defense in depth: a future dynamic-schema caller might pass
+    -- user-controlled field names. Anything outside [A-Za-z0-9_-]
+    -- collapses to "_" so id values stay valid and contain no
+    -- entity sequences.
+    local s = form.errors({ ["<script>"] = "bad" })
+    if s:find("hull-form-error-<script>", 1, true) then
+        error("raw < and > leaked into id")
+    end
+    if s:find("hull-form-error-&", 1, true) then
+        error("entity-escaped key leaked into id")
+    end
+    assert_match(s, "hull-form-error-_script_")
+end)
+
+test("field_attrs id matches field_error id even with meta name", function()
+    local errors = { ['user.name'] = "required" }
+    local attrs = form.field_attrs(errors, 'user.name')
+    local span  = form.field_error(errors, 'user.name')
+    -- Both helpers must collapse identically — that's the contract.
+    assert_match(attrs, "hull-form-error-user_name")
+    assert_match(span,  'id="hull-form-error-user_name"')
+end)
+
 print(string.format("\n%d/%d htmx-form tests passed", pass, pass + fail))
 if fail > 0 then os.exit(1) end

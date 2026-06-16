@@ -104,5 +104,29 @@ test("default input target and default results id pair correctly", () => {
     assertMatch(search.resultsAttrs(),             'id="hull-search-results"');
 });
 
+// ── Edge cases ──────────────────────────────────────────────────────
+
+test("inputAttrs with no opts is well-defined (url defaults to empty)", () => {
+    const s = search.inputAttrs();
+    assertMatch(s, 'type="search"');
+    assertMatch(s, 'hx-get=""');
+});
+
+test("inputAttrs method='POST' (uppercase) normalizes to post", () => {
+    const s = search.inputAttrs({ url: "/x", method: "POST" });
+    assertMatch(s, 'hx-post="/x"');
+    assertNoMatch(s, "hx-get");
+});
+
+test("inputAttrs invalid method throws a clear error", () => {
+    let err;
+    try { search.inputAttrs({ url: "/x", method: "put" }); }
+    catch (e) { err = e; }
+    if (!err) throw new Error("should have thrown");
+    if (err.message.indexOf("'get' or 'post'") < 0) {
+        throw new Error("expected error to mention valid options, got: " + err.message);
+    }
+});
+
 console.log(`\n${pass}/${pass + fail} htmx-search tests passed`);
 if (fail > 0) throw new Error("htmx-search tests failed");

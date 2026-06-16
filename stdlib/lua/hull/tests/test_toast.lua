@@ -97,5 +97,50 @@ test("shorthand opts override level if provided", function()
     assert_eq(decoded(res).toast.level, "success")
 end)
 
+-- ── Wire-payload type narrowing (M2 from the audit) ───────────────
+
+test("show drops non-number duration silently", function()
+    -- Documented contract: duration is ms-number. A caller passing
+    -- a string shouldn't make it onto the wire (would confuse the
+    -- client-side setTimeout call).
+    local res = mock_res()
+    toast.show(res, "x", { duration = "8000" })
+    local d = decoded(res)
+    if d.toast.duration ~= nil then
+        error("non-number duration should not reach the wire payload")
+    end
+end)
+
+test("show coerces non-string id to string", function()
+    -- A numeric id is acceptable but normalized to string so the
+    -- client-side dedup Map keys consistently.
+    local res = mock_res()
+    toast.show(res, "x", { id = 42 })
+    assert_eq(decoded(res).toast.id, "42")
+end)
+
+-- ── Composition: multiple HX-Trigger events on one response ───────
+
+test("toast composes with other HX-Trigger events on the same response", function()
+    -- The toast helper just sets HX-Trigger via htmx.trigger; a
+    -- subsequent htmx.trigger call on the same response replaces
+    -- the header (Hull's response API is last-write-wins for
+    -- headers). The documented composition story is "use the
+    -- multi-event form of htmx.trigger" — verify it works.
+    local htmx = require("hull.web.htmx")
+    local res = mock_res()
+    toast.success(res, "saved")
+    -- Then add a second event by reading the existing payload and
+    -- emitting a combined trigger.
+    local first = decoded(res)
+    htmx.trigger(res, {
+        toast = first.toast,
+        ["asset-saved"] = { id = 42 },
+    })
+    local combined = decoded(res)
+    assert_eq(combined.toast.level, "success")
+    assert_eq(combined["asset-saved"].id, 42)
+end)
+
 print(string.format("\n%d/%d toast tests passed", pass, pass + fail))
 if fail > 0 then os.exit(1) end

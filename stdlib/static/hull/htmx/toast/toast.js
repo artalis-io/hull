@@ -59,7 +59,9 @@
         if (!payload || typeof payload !== "object") return;
         var message = payload.message == null ? "" : String(payload.message);
         var level = KNOWN_LEVELS[payload.level] ? payload.level : "info";
-        var id = payload.id ? String(payload.id) : null;
+        // != null (not !) so id=0 or id="" still dedups. Lua side
+        // does the same (0 is truthy in Lua); cross-runtime parity.
+        var id = payload.id != null ? String(payload.id) : null;
         var duration = payload.duration;
         if (typeof duration !== "number" || isNaN(duration)) {
             duration = DEFAULT_DURATION_MS;

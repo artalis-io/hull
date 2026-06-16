@@ -69,9 +69,12 @@ function show(res, message, opts) {
     const payload = {
         message: String(message == null ? "" : message),
         level,
-        duration: opts.duration,
-        id: opts.id,
     };
+    // Type-narrow + conditional inclusion: keep the wire payload
+    // clean. Documented contract: duration is ms-number, id is
+    // string. Lua parity: stdlib/lua/hull/web/htmx/toast.lua.
+    if (typeof opts.duration === "number") payload.duration = opts.duration;
+    if (opts.id != null) payload.id = String(opts.id);
     htmx.trigger(res, "toast", payload);
 }
 

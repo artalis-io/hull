@@ -69,10 +69,16 @@ local function esc(s)
 end
 
 -- Stable per-field id used by `aria-describedby` <-> error span.
--- Hyphens already safe in id values; we only need to ensure the
--- name component doesn't escape the attribute itself.
+-- Field names from validate.check() are already constrained to
+-- ASCII identifiers; we collapse anything outside [A-Za-z0-9_-]
+-- to "_" as defense in depth in case a future caller passes a
+-- dynamic schema with user-controlled keys. The collapse keeps
+-- the id stable across the field_attrs / field_error pair (same
+-- input → same id) and keeps it valid as both an HTML id token
+-- and an attribute value.
 local function error_id(name)
-    return "hull-form-error-" .. esc(name)
+    local safe = tostring(name == nil and "" or name):gsub("[^%w_-]", "_")
+    return "hull-form-error-" .. safe
 end
 
 --- Render a whole-form error summary as an `<ul role="alert">`.

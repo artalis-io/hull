@@ -48,6 +48,11 @@
         dialog = document.createElement("dialog");
         dialog.id = DIALOG_ID;
         dialog.setAttribute("aria-labelledby", DIALOG_ID + "-title");
+        // STATIC LITERAL ONLY — never interpolate user data here.
+        // The only string in this template that varies is the
+        // dialog id, which is a compile-time constant. Server-
+        // controlled strings (question, custom labels, title) go
+        // exclusively through applyLabels()'s textContent path.
         dialog.innerHTML =
             '<h2 id="' + DIALOG_ID + '-title" class="hull-confirm-title"></h2>' +
             '<p class="hull-confirm-message"></p>' +

@@ -89,6 +89,18 @@ local function esc(s)
     return (tostring(s == nil and "" or s):gsub('[&"<>\']', ESC))
 end
 
+-- Reject non-string/number values at entry points so a caller
+-- passing a table accidentally produces a clear error rather than
+-- "table: 0x..." in the output. nil collapses to empty string
+-- via esc(); that's intentional.
+local function check_scalar(value, name)
+    if value == nil then return end
+    local t = type(value)
+    if t ~= "string" and t ~= "number" then
+        error("inline_edit: " .. name .. " must be a string or number, got " .. t, 3)
+    end
+end
+
 --- Render the display-mode cell (read-only span that swaps to
 --- the editor on click).
 --
@@ -112,6 +124,9 @@ end
 -- @treturn string  HTML, ready for `| raw` splicing.
 function inline_edit.cell(opts)
     opts = opts or {}
+    check_scalar(opts.value,    "value")
+    check_scalar(opts.edit_url, "edit_url")
+    check_scalar(opts.label,    "label")
     local value    = esc(opts.value)
     local edit_url = esc(opts.edit_url)
     local label    = esc(opts.label or "Edit")
@@ -153,6 +168,13 @@ end
 -- @treturn string  HTML, ready for `| raw` splicing.
 function inline_edit.editor(opts)
     opts = opts or {}
+    check_scalar(opts.value,        "value")
+    check_scalar(opts.save_url,     "save_url")
+    check_scalar(opts.cancel_url,   "cancel_url")
+    check_scalar(opts.name,         "name")
+    check_scalar(opts.label,        "label")
+    check_scalar(opts.save_label,   "save_label")
+    check_scalar(opts.cancel_label, "cancel_label")
     local value        = esc(opts.value)
     local save_url     = esc(opts.save_url)
     local cancel_url   = esc(opts.cancel_url)

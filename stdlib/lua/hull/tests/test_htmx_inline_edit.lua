@@ -171,5 +171,35 @@ test("editor custom aria-label", function()
     assert_match(s, 'aria-label="Asset name"')
 end)
 
+-- ── Edge cases ─────────────────────────────────────────────────────
+
+test("cell with omitted value renders empty span (no 'nil' text)", function()
+    local s = inline_edit.cell({ edit_url = "/x/edit" })
+    -- The display text should be empty, NOT the literal "nil".
+    if s:find(">nil<", 1, true) then
+        error("nil collapsed to literal 'nil' instead of empty")
+    end
+    assert_match(s, '<span')
+    assert_match(s, '></span>')  -- empty body
+end)
+
+test("cell with table-typed value raises a clear error", function()
+    local ok, err = pcall(inline_edit.cell, { value = {}, edit_url = "/x/edit" })
+    assert_eq(ok, false, "should have errored")
+    if not tostring(err):find("must be a string or number", 1, true) then
+        error("expected type-narrowing error, got: " .. tostring(err))
+    end
+end)
+
+test("editor with table-typed save_url raises a clear error", function()
+    local ok, err = pcall(inline_edit.editor, {
+        value = "x", save_url = {}, cancel_url = "/x/view",
+    })
+    assert_eq(ok, false, "should have errored")
+    if not tostring(err):find("must be a string or number", 1, true) then
+        error("expected type-narrowing error, got: " .. tostring(err))
+    end
+end)
+
 print(string.format("\n%d/%d inline-edit tests passed", pass, pass + fail))
 if fail > 0 then os.exit(1) end

@@ -24,14 +24,22 @@ const BODY_ESC = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "
 function esc(s) {
     return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => BODY_ESC[c]);
 }
+// Field names from validate.check() are already constrained to
+// ASCII identifiers; we collapse anything outside [A-Za-z0-9_-]
+// to "_" as defense in depth in case a future caller passes a
+// dynamic schema with user-controlled keys. Same collapse on
+// both sides of the field_attrs / field_error pair keeps the id
+// stable and valid as both an HTML id token and an attribute
+// value. Lua parity: stdlib/lua/hull/web/htmx/form.lua::error_id.
 function errorId(name) {
-    return "hull-form-error-" + esc(name);
+    return "hull-form-error-" + String(name == null ? "" : name).replace(/[^A-Za-z0-9_-]/g, "_");
 }
 
+// Object.keys ignores prototype-chain properties (matches Lua's
+// pairs() semantics) so a polluted Object.prototype doesn't make
+// every errors object look non-empty.
 function hasAny(errors) {
-    if (!errors) return false;
-    for (const _ in errors) return true;
-    return false;
+    return errors != null && Object.keys(errors).length > 0;
 }
 
 /**

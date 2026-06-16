@@ -87,8 +87,13 @@ function search.input_attrs(opts)
     local target    = opts.target or "#hull-search-results"
     local q_name    = opts.name or "q"
     local delay_ms  = opts.delay_ms or 300
-    local method    = (opts.method == "post") and "post" or "get"
-    local hx_attr   = "hx-" .. method
+    -- Normalize method case-insensitively so opts.method = "POST"
+    -- doesn't silently downgrade to GET; assert against typos.
+    local raw_method = opts.method and tostring(opts.method):lower() or "get"
+    assert(raw_method == "get" or raw_method == "post",
+           "search.input_attrs: method must be 'get' or 'post', got "
+           .. tostring(opts.method))
+    local hx_attr   = "hx-" .. raw_method
     local trigger   = "input changed delay:" .. tostring(delay_ms) .. "ms"
 
     local parts = {

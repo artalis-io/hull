@@ -75,9 +75,17 @@ function toast.show(res, message, opts)
     local payload = {
         message  = tostring(message or ""),
         level    = LEVELS[opts.level] and opts.level or "info",
-        duration = opts.duration,
-        id       = opts.id,
     }
+    -- Type-narrow + conditional inclusion: keep the wire payload
+    -- clean (nil-valued keys are dropped by hull.json anyway, but
+    -- being explicit catches accidental shape drift). Documented
+    -- contract: duration is ms-number, id is string.
+    if type(opts.duration) == "number" then
+        payload.duration = opts.duration
+    end
+    if opts.id ~= nil then
+        payload.id = tostring(opts.id)
+    end
     htmx.trigger(res, "toast", payload)
 end
 

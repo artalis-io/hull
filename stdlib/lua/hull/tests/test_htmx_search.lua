@@ -115,5 +115,32 @@ test("default input target and default results id pair correctly", function()
     assert_match(results, 'id="hull-search-results"')
 end)
 
+-- ── Edge cases ─────────────────────────────────────────────────────
+
+test("input_attrs with no opts is well-defined (url defaults to empty)", function()
+    -- No assertion of behavior beyond "doesn't crash and emits
+    -- the basic shape." The empty hx-get is intentionally cheap;
+    -- caller bugs (forgetting url) surface as a 404 on first
+    -- search rather than a hidden init-time error.
+    local s = search.input_attrs()
+    assert_match(s, 'type="search"')
+    assert_match(s, 'hx-get=""')
+end)
+
+test("input_attrs method=POST (uppercase) normalizes to post", function()
+    -- Case-insensitive method per the L4 audit fix.
+    local s = search.input_attrs({ url = "/x", method = "POST" })
+    assert_match(s, 'hx-post="/x"')
+    assert_no_match(s, 'hx-get')
+end)
+
+test("input_attrs invalid method raises a clear error", function()
+    local ok, err = pcall(search.input_attrs, { url = "/x", method = "put" })
+    assert_eq(ok, false, "should have errored")
+    if not tostring(err):find("'get' or 'post'", 1, true) then
+        error("expected error to mention valid options, got: " .. tostring(err))
+    end
+end)
+
 print(string.format("\n%d/%d htmx-search tests passed", pass, pass + fail))
 if fail > 0 then os.exit(1) end

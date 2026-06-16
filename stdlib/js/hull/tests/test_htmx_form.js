@@ -96,5 +96,26 @@ test("fieldAttrs id matches fieldError id (a11y wiring)", () => {
     assertMatch(span,  'id="hull-form-error-email"');
 });
 
+// ── Defense-in-depth: field names with HTML metacharacters ────────
+
+test("errors collapses HTML-meta field-name chars to underscore", () => {
+    const s = form.errors({ "<script>": "bad" });
+    if (s.indexOf("hull-form-error-<script>") >= 0) {
+        throw new Error("raw < and > leaked into id");
+    }
+    if (s.indexOf("hull-form-error-&") >= 0) {
+        throw new Error("entity-escaped key leaked into id");
+    }
+    assertMatch(s, "hull-form-error-_script_");
+});
+
+test("fieldAttrs id matches fieldError id even with meta name", () => {
+    const errors = { "user.name": "required" };
+    const attrs = form.fieldAttrs(errors, "user.name");
+    const span  = form.fieldError(errors, "user.name");
+    assertMatch(attrs, "hull-form-error-user_name");
+    assertMatch(span,  'id="hull-form-error-user_name"');
+});
+
 console.log(`\n${pass}/${pass + fail} htmx-form tests passed`);
 if (fail > 0) throw new Error("htmx-form tests failed");
