@@ -1,0 +1,41 @@
+/*
+ * Hull HTMX confirm widget — structural CSS.
+ *
+ * Structural-only by design: <dialog> browser default (centered
+ * modal), button row layout, focus ring preservation. No colors,
+ * borders, shadows, fonts, animations. Apps style appearance via:
+ *
+ *   dialog#hull-confirm { background: white; padding: 1.5rem; ... }
+ *   dialog#hull-confirm::backdrop { background: rgba(0,0,0,.5); }
+ *   dialog#hull-confirm .hull-confirm-yes[data-danger="true"] {
+ *       background: #c00; color: white;
+ *   }
+ *
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ */
+
+dialog#hull-confirm {
+    /* Browser default centers <dialog>s opened via .showModal();
+     * no positioning needed here. Just sensible width caps. */
+    max-width: min(28rem, calc(100vw - 2rem));
+}
+
+dialog#hull-confirm .hull-confirm-title {
+    margin: 0 0 0.5rem 0;
+}
+
+dialog#hull-confirm .hull-confirm-message {
+    margin: 0 0 1rem 0;
+    overflow-wrap: anywhere;
+}
+
+dialog#hull-confirm .hull-confirm-actions {
+    display: flex;
+    gap: 0.5rem;
+    justify-content: flex-end;
+}
+
+dialog#hull-confirm .hull-confirm-yes,
+dialog#hull-confirm .hull-confirm-no {
+    cursor: pointer;
+}

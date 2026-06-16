@@ -378,6 +378,23 @@ static const HlModuleSpec REGISTRY[] = {
         .required_caps = 0, .deps = {0},
     },
     {
+        /* HTMX confirm dialog widget — server-side helper that
+         * renders the attribute string the shipped client JS at
+         * /static/hull/htmx/confirm/confirm.js consumes. The
+         * client intercepts htmx:confirm, shows a native <dialog>
+         * in place of window.confirm(), and either calls
+         * issueRequest() on yes or drops the request on cancel /
+         * dismiss. Structural CSS only.
+         *
+         * Pure attribute-string builder; no I/O. No runtime
+         * dependencies (the json/htmx modules aren't touched
+         * server-side — the entire dialog flow is client-side). */
+        .name = "hull/web/htmx/confirm",
+        .api_major = 1, .intrinsic = 0, .pure = 1,
+        .required_caps = 0,
+        .deps = {"hull/web/htmx", 0},
+    },
+    {
         /* HTMX toast widget — server-side helper that emits the
          * HX-Trigger header consumed by the shipped client JS at
          * /static/hull/htmx/toast/toast.js. Structural CSS only;
