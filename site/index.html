@@ -226,7 +226,7 @@
         <span class="text-paper-100 font-semibold tracking-tight">Hull</span>
         <a href="https://github.com/artalis-io/hull/releases" class="chip ml-1.5 hidden sm:inline-flex hover:text-paper-50 transition" title="Release notes on GitHub">
           <span class="accent-dot"></span>
-          v0.2.0
+          v0.3.0
         </a>
       </a>
 
@@ -236,6 +236,7 @@
         <a href="#agents" class="link">Agents</a>
         <a href="#compare" class="link">Compare</a>
         <a href="#how" class="link">How</a>
+        <a href="#stdlib" class="link">Stdlib</a>
         <a href="#security" class="link">Security</a>
         <a href="#trust" class="link">Trust chain</a>
         <a href="/verify.html" class="link">Verify</a>
@@ -464,7 +465,7 @@
             </header>
 <pre><span class="tk-com"># 1. Install. install.sh verifies the SHA-256 manifest as it downloads.</span>
 $ curl -fsSL <span class="tk-str">https://gethull.dev/install.sh</span> | sh
-hull installed to ~/.local/bin/hull  (v0.2.0)
+hull installed to ~/.local/bin/hull  (v0.3.0)
 
 <span class="tk-com"># 2. Verify the release signature (Ed25519, embedded pubkey).</span>
 $ <span class="tk-kw">REL</span>=https://github.com/artalis-io/hull/releases/latest/download
@@ -474,7 +475,7 @@ $ hull verify-release hull.sha256 hull.sha256.sig
 
 <span class="tk-com"># 3. Inspect the toolchain.</span>
 $ hull doctor
-hull v0.2.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middot;  cc: ok
+hull v0.3.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middot;  cc: ok
 </pre>
           </div>
           <p class="mt-3 text-[11px] text-mute-400 leading-relaxed">
@@ -1088,6 +1089,110 @@ hull v0.2.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
   </section>
 
   <!-- ─────────────────────────────────────────────────────────────────
+       STDLIB AT A GLANCE
+       ─────────────────────────────────────────────────────────────────
+       What ships in the box, grouped. Not exhaustive; every module
+       is declarable in `manifest.modules` and is independently
+       audit-visible. See README.md for the full table.
+       ───────────────────────────────────────────────────────────────── -->
+  <section id="stdlib" class="hairline-t">
+    <div class="max-w-6xl mx-auto px-6 py-16 md:py-20">
+      <div class="grid lg:grid-cols-12 gap-8 lg:gap-12 items-start">
+
+        <div class="lg:col-span-4">
+          <div class="text-xs uppercase tracking-widest text-mute-500 mb-3">Stdlib</div>
+          <h2 class="text-2xl md:text-3xl font-semibold text-paper-50 tracking-tight">
+            What ships in the box.
+          </h2>
+          <p class="mt-4 text-sm text-mute-400 leading-relaxed">
+            First-party modules with the same audit posture as
+            Hull itself. Every module is independently declarable
+            in <code class="text-paper-100 text-[0.78rem]">manifest.modules</code>;
+            anything you don&rsquo;t declare isn&rsquo;t reachable.
+            Picked by category below; the full table lives in
+            <a href="https://github.com/artalis-io/hull/blob/main/README.md" class="link">README.md</a>.
+          </p>
+        </div>
+
+        <div class="lg:col-span-8 grid sm:grid-cols-2 gap-4">
+
+          <!-- Auth & authorization -->
+          <div class="border border-white/[0.08] rounded-md p-5 bg-white/[0.015]">
+            <div class="text-[11px] uppercase tracking-widest text-mute-500 mb-2">Auth &amp; authz</div>
+            <div class="text-sm text-paper-50 font-medium mb-2">Production-grade, audit-converged</div>
+            <ul class="text-xs text-mute-400 leading-relaxed space-y-1">
+              <li><code class="text-paper-100 text-[0.7rem]">auth-flows</code> &middot; <code class="text-paper-100 text-[0.7rem]">middleware/totp</code></li>
+              <li><code class="text-paper-100 text-[0.7rem]">middleware/oauth</code> (Google + Entra)</li>
+              <li><code class="text-paper-100 text-[0.7rem]">middleware/audit-log</code> &middot; <code class="text-paper-100 text-[0.7rem]">middleware/session</code></li>
+              <li><code class="text-paper-100 text-[0.7rem]">middleware/rbac</code> &middot; <code class="text-paper-100 text-[0.7rem]">pwned</code> &middot; <code class="text-paper-100 text-[0.7rem]">qrcode</code></li>
+            </ul>
+          </div>
+
+          <!-- HTMX widget tier -->
+          <div class="border border-white/[0.08] rounded-md p-5 bg-white/[0.015]">
+            <div class="text-[11px] uppercase tracking-widest text-mute-500 mb-2">HTMX widgets</div>
+            <div class="text-sm text-paper-50 font-medium mb-2">Server-rendered, structural-only CSS</div>
+            <ul class="text-xs text-mute-400 leading-relaxed space-y-1">
+              <li><code class="text-paper-100 text-[0.7rem]">htmx/toast</code> &middot; <code class="text-paper-100 text-[0.7rem]">htmx/confirm</code> (styled &lt;dialog&gt;)</li>
+              <li><code class="text-paper-100 text-[0.7rem]">htmx/form</code> (errors + auto loading state)</li>
+              <li><code class="text-paper-100 text-[0.7rem]">htmx/search</code> &middot; <code class="text-paper-100 text-[0.7rem]">htmx/inline-edit</code></li>
+              <li>~395 LOC of plain JS total across all 5 widgets</li>
+            </ul>
+          </div>
+
+          <!-- Files & uploads -->
+          <div class="border border-white/[0.08] rounded-md p-5 bg-white/[0.015]">
+            <div class="text-[11px] uppercase tracking-widest text-mute-500 mb-2">Files &amp; uploads</div>
+            <div class="text-sm text-paper-50 font-medium mb-2">Streaming, content-addressed, MIME-validated</div>
+            <ul class="text-xs text-mute-400 leading-relaxed space-y-1">
+              <li><code class="text-paper-100 text-[0.7rem]">req:multipart()</code> incremental iterator</li>
+              <li><code class="text-paper-100 text-[0.7rem]">attachment</code> &middot; <code class="text-paper-100 text-[0.7rem]">blob</code> (SHA-256 CAS) &middot; <code class="text-paper-100 text-[0.7rem]">mime</code></li>
+              <li><code class="text-paper-100 text-[0.7rem]">web/attachment-serve</code> with auth-check hook</li>
+            </ul>
+          </div>
+
+          <!-- Web fundamentals -->
+          <div class="border border-white/[0.08] rounded-md p-5 bg-white/[0.015]">
+            <div class="text-[11px] uppercase tracking-widest text-mute-500 mb-2">Web fundamentals</div>
+            <div class="text-sm text-paper-50 font-medium mb-2">Templates, routing, middleware, observability</div>
+            <ul class="text-xs text-mute-400 leading-relaxed space-y-1">
+              <li><code class="text-paper-100 text-[0.7rem]">template</code> (compile-cached, XSS-safe) &middot; <code class="text-paper-100 text-[0.7rem]">validate</code></li>
+              <li><code class="text-paper-100 text-[0.7rem]">middleware/csp</code> (nonces) &middot; <code class="text-paper-100 text-[0.7rem]">middleware/csrf</code> &middot; <code class="text-paper-100 text-[0.7rem]">middleware/cors</code></li>
+              <li><code class="text-paper-100 text-[0.7rem]">middleware/ratelimit</code> &middot; <code class="text-paper-100 text-[0.7rem]">middleware/idempotency</code></li>
+              <li><code class="text-paper-100 text-[0.7rem]">middleware/logger</code> &middot; <code class="text-paper-100 text-[0.7rem]">middleware/health</code> &middot; <code class="text-paper-100 text-[0.7rem]">middleware/etag</code></li>
+            </ul>
+          </div>
+
+          <!-- Compute & data -->
+          <div class="border border-white/[0.08] rounded-md p-5 bg-white/[0.015]">
+            <div class="text-[11px] uppercase tracking-widest text-mute-500 mb-2">Compute &amp; data</div>
+            <div class="text-sm text-paper-50 font-medium mb-2">WASM + WebGPU + SQLite</div>
+            <ul class="text-xs text-mute-400 leading-relaxed space-y-1">
+              <li><code class="text-paper-100 text-[0.7rem]">compute</code> (WAMR AOT) &middot; <code class="text-paper-100 text-[0.7rem]">gpu</code> (wgpu-native)</li>
+              <li><code class="text-paper-100 text-[0.7rem]">db</code> with parameterized binding (zero SQLi surface)</li>
+              <li><code class="text-paper-100 text-[0.7rem]">db.udf</code> Lua/JS/WASM user-defined functions</li>
+              <li><code class="text-paper-100 text-[0.7rem]">search</code> (SQLite FTS5) &middot; <code class="text-paper-100 text-[0.7rem]">image</code></li>
+            </ul>
+          </div>
+
+          <!-- Resilience -->
+          <div class="border border-white/[0.08] rounded-md p-5 bg-white/[0.015]">
+            <div class="text-[11px] uppercase tracking-widest text-mute-500 mb-2">Resilience &amp; delivery</div>
+            <div class="text-sm text-paper-50 font-medium mb-2">Outbox, inbox, timers, transactions</div>
+            <ul class="text-xs text-mute-400 leading-relaxed space-y-1">
+              <li><code class="text-paper-100 text-[0.7rem]">middleware/outbox</code> &middot; <code class="text-paper-100 text-[0.7rem]">middleware/inbox</code></li>
+              <li><code class="text-paper-100 text-[0.7rem]">middleware/transaction</code> (auto BEGIN IMMEDIATE / COMMIT)</li>
+              <li><code class="text-paper-100 text-[0.7rem]">app.every(ms, fn)</code> &middot; <code class="text-paper-100 text-[0.7rem]">app.daily("HH:MM", fn)</code></li>
+              <li><code class="text-paper-100 text-[0.7rem]">jwt</code> (HS256/384/512, RS256/384/512, PS256, ES256/384)</li>
+            </ul>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────────────────
        SECURITY MODEL
        ───────────────────────────────────────────────────────────────── -->
   <section id="security" class="hairline-t bg-ink-900">
@@ -1398,7 +1503,7 @@ hull v0.2.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
       <div>
         <div class="text-xs uppercase tracking-widest text-mute-500 mb-3">Honest scorecard</div>
         <h3 class="text-xl font-semibold text-paper-50 tracking-tight mb-6">
-          What v0.1 ships, and what it doesn&rsquo;t (yet).
+          What ships today, and what it doesn&rsquo;t (yet).
         </h3>
 
         <div class="grid md:grid-cols-2 gap-px bg-white/[0.06] border border-white/[0.06] rounded-md overflow-hidden">
@@ -1407,7 +1512,7 @@ hull v0.2.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
           <div class="bg-ink-900 p-6">
             <div class="flex items-center gap-2 mb-4">
               <i data-lucide="check-circle-2" class="w-4 h-4 text-accent"></i>
-              <span class="text-sm font-semibold text-paper-50">Ships in v0.1</span>
+              <span class="text-sm font-semibold text-paper-50">Shipped through v0.3.0</span>
             </div>
             <ul class="space-y-3 text-sm text-mute-400 leading-relaxed">
               <li class="flex gap-2">
@@ -1457,6 +1562,32 @@ hull v0.2.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
               <li class="flex gap-2">
                 <span class="text-accent mt-0.5">&check;</span>
                 <span><strong class="text-paper-100">Self-sovereignty path, documented.</strong> AGPL source. Fork, rotate the two embedded pubkeys, ship your own trust root. <code class="text-paper-100 text-[0.78rem]">docs/fork_playbook.md</code> walks through the five steps, the verification checklist, and an honest &ldquo;why most organisations shouldn&rsquo;t fork&rdquo; section enumerating the AGPL &sect;13 propagation, vendored-dep CVE inheritance, support burden, and three lighter-weight alternatives that satisfy most &ldquo;we need our own trust root&rdquo; requirements without forking.</span>
+              </li>
+              <li class="flex gap-2">
+                <span class="text-accent mt-0.5">&check;</span>
+                <span><strong class="text-paper-100">Production-grade auth stack (v0.3.0).</strong>
+                  <code class="text-paper-100 text-[0.78rem]">hull/web/auth-flows@1</code> wires welcome / verify / login / lockout / password-reset / magic-link / email-change against an audit-log;
+                  <code class="text-paper-100 text-[0.78rem]">hull/web/middleware/totp@1</code> for RFC&nbsp;6238 second factor with multi-key at-rest encryption;
+                  <code class="text-paper-100 text-[0.78rem]">hull/web/middleware/oauth@1</code> for Authorization Code + PKCE against Google / Microsoft Entra (alg-confusion-safe RS/PS/ES JWT verify, JWKS-pinned via mbedTLS);
+                  <code class="text-paper-100 text-[0.78rem]">hull/web/pwned@1</code> for HIBP k-anonymity check at password set/change. <strong class="text-paper-100">13 rounds of parallel-reviewer audits</strong>, converged in round&nbsp;13 with zero findings across three independent reviewers.</span>
+              </li>
+              <li class="flex gap-2">
+                <span class="text-accent mt-0.5">&check;</span>
+                <span><strong class="text-paper-100">Streaming multipart + content-addressed blob storage (v0.3.0).</strong>
+                  <code class="text-paper-100 text-[0.78rem]">req:multipart()</code> / <code class="text-paper-100 text-[0.78rem]">req.multipart()</code> iterator decodes parts incrementally without materializing the full body;
+                  <code class="text-paper-100 text-[0.78rem]">hull/blob@1</code> stores bytes as SHA-256-keyed CAS so duplicate uploads collapse to one on-disk file;
+                  <code class="text-paper-100 text-[0.78rem]">hull/attachment@1</code> validates filenames + cross-checks declared MIME against the magic-byte sniffer (<code class="text-paper-100 text-[0.78rem]">hull/mime@1</code>) before reaching storage.</span>
+              </li>
+              <li class="flex gap-2">
+                <span class="text-accent mt-0.5">&check;</span>
+                <span><strong class="text-paper-100">HTMX hypermedia profile + widget tier.</strong>
+                  <code class="text-paper-100 text-[0.78rem]">hull init --profile htmx</code> scaffolds a server-rendered htmx app;
+                  five first-party widgets (<code class="text-paper-100 text-[0.78rem]">toast</code>, <code class="text-paper-100 text-[0.78rem]">confirm</code>, <code class="text-paper-100 text-[0.78rem]">form</code>, <code class="text-paper-100 text-[0.78rem]">search</code>, <code class="text-paper-100 text-[0.78rem]">inline-edit</code>) ship server helpers + structural-only CSS + minimal browser JS via the platform VFS;
+                  <code class="text-paper-100 text-[0.78rem]">csp = "htmx"</code> preset expands at startup to a known-good policy for SSR apps with stdlib JS from <code class="text-paper-100 text-[0.78rem]">/static/</code>. Zero client framework; styled <code class="text-paper-100 text-[0.78rem]">&lt;dialog&gt;</code> replaces the browser&rsquo;s <code class="text-paper-100 text-[0.78rem]">window.confirm()</code>.</span>
+              </li>
+              <li class="flex gap-2">
+                <span class="text-accent mt-0.5">&check;</span>
+                <span><strong class="text-paper-100">Asymmetric crypto + HMAC vtable.</strong> RS256/384/512, PS256, ES256/384 verify via mbedTLS, fronted by an <code class="text-paper-100 text-[0.78rem]">HlAsymBackend</code> vtable. JWT alg is pinned BEFORE key resolution (alg-confusion defeated). <code class="text-paper-100 text-[0.78rem]">crypto.x509_pubkey_pem()</code> extracts SPKI PEM from x509 DER/PEM for JWKS <code class="text-paper-100 text-[0.78rem]">x5c</code> consumption. SHA-NI runtime dispatch on x86 where available.</span>
               </li>
             </ul>
           </div>
@@ -1636,7 +1767,7 @@ $ hull agent routes my-tool
       </div>
 
       <p class="text-[11px] text-mute-400 leading-relaxed">
-        Hull is at <span class="text-paper-100">v0.2.0</span>. APIs and the manifest schema are pre-stable, so pin your version and read the
+        Hull is at <span class="text-paper-100">v0.3.0</span>. APIs and the manifest schema are pre-stable, so pin your version and read the
         <a href="https://github.com/artalis-io/hull/releases" class="link">changelog</a>
         before upgrading.
         Page last updated <time datetime="2026-06">June&nbsp;2026</time>.
