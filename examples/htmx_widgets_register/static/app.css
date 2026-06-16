@@ -1,27 +1,52 @@
 /* App-specific styling. Demonstrates the "structural CSS + app
  * theme on top" pattern — the widgets ship structural CSS that
- * handles layout + a11y, this file adds the visual theming.
+ * handles layout + a11y; this file adds the visual theming.
+ *
+ * Concrete color values (not Pico vars) so the example is
+ * self-contained and doesn't depend on a particular Pico
+ * version's variable inventory. (Earlier draft used
+ * --pico-color-zinc-* names that Pico doesn't actually export —
+ * the result was a sea of empty `background: var(--missing)`
+ * declarations, which the browser falls back to "no background"
+ * and the page rendered unstyled.)
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
+
+:root {
+    --hull-grey-50:  #fafafa;
+    --hull-grey-100: #f5f5f5;
+    --hull-grey-200: #e5e5e5;
+    --hull-grey-300: #d4d4d4;
+    --hull-grey-500: #6b7280;
+    --hull-grey-700: #374151;
+    --hull-red:      #c62828;
+    --hull-red-bg:   #fee2e2;
+    --hull-red-fg:   #7f1d1d;
+    --hull-green-bg: #dcfce7;
+    --hull-green-fg: #166534;
+    --hull-amber-bg: #fef3c7;
+    --hull-amber-fg: #78350f;
+}
 
 /* ── Toast theming ────────────────────────────────────────────── */
 #hull-toast .hull-toast-item {
     padding: 0.75rem 1rem;
     border-radius: 0.375rem;
-    background: var(--pico-color-zinc-150);
-    border: 1px solid var(--pico-color-zinc-300);
-    color: var(--pico-color);
+    background: white;
+    border: 1px solid var(--hull-grey-300);
+    color: var(--hull-grey-700);
     box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    min-width: 14rem;
 }
 #hull-toast .hull-toast-item[data-level="success"] {
-    background: #e8f5e8; border-color: #43a047; color: #1b5e20;
+    background: var(--hull-green-bg); border-color: #4ade80; color: var(--hull-green-fg);
 }
 #hull-toast .hull-toast-item[data-level="warning"] {
-    background: #fff8e1; border-color: #f9a825; color: #6f4f00;
+    background: var(--hull-amber-bg); border-color: #f59e0b; color: var(--hull-amber-fg);
 }
 #hull-toast .hull-toast-item[data-level="error"] {
-    background: #fee; border-color: #c62828; color: #5d1313;
+    background: var(--hull-red-bg); border-color: var(--hull-red); color: var(--hull-red-fg);
 }
 #hull-toast .hull-toast-dismiss {
     font-size: 1.25rem; padding: 0 0.25rem; color: inherit;
@@ -30,24 +55,27 @@
 /* ── Confirm dialog theming ───────────────────────────────────── */
 dialog#hull-confirm {
     padding: 1.5rem;
-    border: 1px solid var(--pico-color-zinc-300);
+    border: 1px solid var(--hull-grey-300);
     border-radius: 0.5rem;
     box-shadow: 0 10px 25px rgba(0,0,0,0.25);
+    background: white;
 }
 dialog#hull-confirm::backdrop {
     background: rgba(0,0,0,0.5);
 }
 dialog#hull-confirm .hull-confirm-yes[data-danger="true"] {
-    background: #c62828; color: white; border-color: #c62828;
+    background: var(--hull-red); color: white; border-color: var(--hull-red);
 }
 
 /* ── Form errors ──────────────────────────────────────────────── */
 .hull-form-error {
-    color: #c62828;
+    color: var(--hull-red);
     font-size: 0.85rem;
+    display: block;
+    margin-top: 0.25rem;
 }
 input[aria-invalid="true"] {
-    border-color: #c62828 !important;
+    border-color: var(--hull-red) !important;
 }
 button[aria-busy="true"] {
     opacity: 0.6;
@@ -60,7 +88,7 @@ button[aria-busy="true"] {
     transition: background 0.1s;
 }
 .hull-inline-edit-view:hover {
-    background: var(--pico-color-zinc-150);
+    background: var(--hull-grey-100);
 }
 .hull-inline-edit-form input {
     padding: 0.125rem 0.25rem;
@@ -69,11 +97,11 @@ button[aria-busy="true"] {
 
 /* ── Sort headers ─────────────────────────────────────────────── */
 .hull-sort-header:hover {
-    background: var(--pico-color-zinc-150);
+    background: var(--hull-grey-100);
 }
 .hull-sort-header.hull-sort-asc,
 .hull-sort-header.hull-sort-desc {
-    background: var(--pico-color-zinc-100);
+    background: var(--hull-grey-50);
 }
 
 /* ── Pagination ───────────────────────────────────────────────── */
@@ -83,15 +111,17 @@ button[aria-busy="true"] {
 }
 .hull-pagination li a {
     padding: 0.25rem 0.5rem;
-    border: 1px solid var(--pico-color-zinc-300);
+    border: 1px solid var(--hull-grey-300);
     border-radius: 0.25rem;
     text-decoration: none;
     cursor: pointer;
+    color: var(--hull-grey-700);
+    background: white;
 }
 .hull-pagination a.hull-pagination-active {
-    background: var(--pico-primary);
+    background: #1f6feb;
     color: white;
-    border-color: var(--pico-primary);
+    border-color: #1f6feb;
 }
 
 /* ── Table ────────────────────────────────────────────────────── */
@@ -101,15 +131,15 @@ table.hull-table {
 table.hull-table th, table.hull-table td {
     padding: 0.5rem 0.75rem;
     text-align: left;
-    border-bottom: 1px solid var(--pico-color-zinc-200);
+    border-bottom: 1px solid var(--hull-grey-200);
 }
 table.hull-table th {
-    background: var(--pico-color-zinc-100);
+    background: var(--hull-grey-100);
     font-weight: 600;
 }
 .hull-table-empty td {
     text-align: center;
-    color: var(--pico-color-zinc-500);
+    color: var(--hull-grey-500);
     padding: 1.5rem !important;
 }
 
@@ -120,25 +150,26 @@ table.hull-table th {
     font-size: 0.8rem;
     font-weight: 500;
 }
-.badge-active      { background: #e8f5e8; color: #1b5e20; }
-.badge-maintenance { background: #fff8e1; color: #6f4f00; }
-.badge-retired     { background: #f5f5f5; color: #616161; }
+.badge-active      { background: var(--hull-green-bg); color: var(--hull-green-fg); }
+.badge-maintenance { background: var(--hull-amber-bg); color: var(--hull-amber-fg); }
+.badge-retired     { background: var(--hull-grey-100); color: var(--hull-grey-500); }
 
 /* ── Action bar (per-row delete buttons) ──────────────────────── */
 .action-bar {
     margin-top: 0.5rem;
     font-size: 0.85rem;
-    color: var(--pico-color-zinc-500);
+    color: var(--hull-grey-500);
 }
 .action-bar > * { margin-right: 0.25rem; }
 .del-btn {
     padding: 0.125rem 0.5rem;
-    background: transparent;
-    border: 1px solid var(--pico-color-zinc-300);
+    background: white;
+    border: 1px solid var(--hull-grey-300);
     border-radius: 0.25rem;
     cursor: pointer;
     font-size: 0.8rem;
+    color: var(--hull-grey-700);
 }
 .del-btn:hover {
-    background: #fee; border-color: #c62828; color: #5d1313;
+    background: var(--hull-red-bg); border-color: var(--hull-red); color: var(--hull-red-fg);
 }
