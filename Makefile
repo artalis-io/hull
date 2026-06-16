@@ -2480,6 +2480,14 @@ e2e-blob: $(BUILDDIR)/hull
 e2e-hypermedia-photos-upload: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_hypermedia_photos_upload.sh
 
+# Browser-driven E2E for HTMX example apps (chromium via Playwright).
+# Catches things curl misses: CSS actually applies, htmx swaps fire,
+# widget JS runs under the strict CSP preset. Skips cleanly when
+# node/npm are absent so the target is safe to wire into CI.
+# First run downloads ~150 MB into tests/.playwright/ (gitignored).
+e2e-htmx-playwright: $(BUILDDIR)/hull
+	sh tests/e2e_htmx_playwright.sh
+
 e2e-jwt-asym: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_jwt_asym.sh
 

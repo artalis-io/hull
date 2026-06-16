@@ -43,3 +43,9 @@ Thumbs.db
 # Generated version file (written by release workflow, overrides git describe)
 /VERSION
 .claude/
+
+# Playwright install cache for tests/e2e_htmx_playwright.sh.
+# ~150 MB after first run (node_modules + chromium browser);
+# regenerable on demand. Scoped to this path so other npm work
+# in the tree isn't accidentally swallowed.
+tests/.playwright/
