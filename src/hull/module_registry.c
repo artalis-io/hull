@@ -428,6 +428,17 @@ static const HlModuleSpec REGISTRY[] = {
         .deps = {"hull/web/htmx", 0},
     },
     {
+        /* HTMX pagination widget — htmx-attributed nav rendered
+         * over the existing hull/web/pagination@1 page-math.
+         * Replaces the ~30-line _pagination.html partial every
+         * hypermedia app writes by hand. Pure HTML-string builder;
+         * delegates page-math to the base module. */
+        .name = "hull/web/htmx/pagination",
+        .api_major = 1, .intrinsic = 0, .pure = 1,
+        .required_caps = 0,
+        .deps = {"hull/web/htmx", "hull/web/pagination", 0},
+    },
+    {
         /* HTMX search widget — server-side helpers that emit
          * htmx attributes for a debounced search input and the
          * a11y attributes for the results container. Pure
@@ -440,6 +451,32 @@ static const HlModuleSpec REGISTRY[] = {
         .api_major = 1, .intrinsic = 0, .pure = 1,
         .required_caps = 0,
         .deps = {"hull/web/htmx", 0},
+    },
+    {
+        /* HTMX sort widget — server-side helpers for sortable
+         * column headers driven by ?sort=col[:asc|desc]. Two
+         * functions: parse(req, opts) reads + allowlist-validates
+         * the param; header_attrs(col, current, opts) returns the
+         * htmx attrs + class for an app-owned <th>. Toggle
+         * cycles asc -> desc -> asc on subsequent clicks.
+         *
+         * Pure attribute-string builder; no I/O. */
+        .name = "hull/web/htmx/sort",
+        .api_major = 1, .intrinsic = 0, .pure = 1,
+        .required_caps = 0,
+        .deps = {"hull/web/htmx", 0},
+    },
+    {
+        /* HTMX table widget — schema-driven <table> renderer that
+         * composes sort + inline-edit per column. The grid pattern
+         * of every admin / data UI in one helper. Apps wire search
+         * input + pagination separately. Pure HTML-string builder;
+         * no I/O. */
+        .name = "hull/web/htmx/table",
+        .api_major = 1, .intrinsic = 0, .pure = 1,
+        .required_caps = 0,
+        .deps = {"hull/web/htmx", "hull/web/htmx/sort",
+                 "hull/web/htmx/inline-edit", 0},
     },
     {
         /* HTMX toast widget — server-side helper that emits the
