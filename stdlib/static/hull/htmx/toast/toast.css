@@ -1,0 +1,56 @@
+/*
+ * Hull HTMX toast widget — structural CSS.
+ *
+ * Structural-only by design: layout, stacking, list-reset, focus
+ * rings. No colors, no borders, no shadows, no fonts, no
+ * animations. Apps style appearance via [data-level] attributes
+ * on each item.
+ *
+ * Minimal theming hook example (in app CSS):
+ *
+ *   #hull-toast .hull-toast-item[data-level="error"] {
+ *       background: #fee; border-left: 4px solid #c00; padding: .75rem;
+ *   }
+ *   #hull-toast .hull-toast-item[data-level="success"] {
+ *       background: #efe; border-left: 4px solid #0a0; padding: .75rem;
+ *   }
+ *
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ */
+
+#hull-toast {
+    position: fixed;
+    inset-block-end: 1rem;
+    inset-inline-end: 1rem;
+    z-index: 1000;
+    max-width: min(24rem, calc(100vw - 2rem));
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    pointer-events: none;
+}
+
+#hull-toast .hull-toast-item {
+    pointer-events: auto;
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+}
+
+#hull-toast .hull-toast-message {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+#hull-toast .hull-toast-dismiss {
+    flex: 0 0 auto;
+    cursor: pointer;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    line-height: 1;
+}

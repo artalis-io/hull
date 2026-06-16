@@ -142,8 +142,13 @@ int hl_static_middleware(KlRequest *req, KlResponse *res, void *user_data)
 {
     const HlStaticCtx *ctx = (const HlStaticCtx *)user_data;
 
-    /* Only handle GET (kl_server_use already filters, but be safe) */
-    if (req->method_len != 3 || memcmp(req->method, "GET", 3) != 0)
+    /* Accept GET or HEAD. Keel's pattern matcher routes HEAD to
+     * GET-registered middleware (per RFC 7230 §4.3.2); Keel itself
+     * drops the response body on HEAD so we can respond identically
+     * to a GET without special-casing here. */
+    int is_get  = req->method_len == 3 && memcmp(req->method, "GET",  3) == 0;
+    int is_head = req->method_len == 4 && memcmp(req->method, "HEAD", 4) == 0;
+    if (!is_get && !is_head)
         return 0;
 
     /* Must start with /static/ (8 chars minimum + at least 1 char filename) */

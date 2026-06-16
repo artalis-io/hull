@@ -377,6 +377,20 @@ static const HlModuleSpec REGISTRY[] = {
         .api_major = 1, .intrinsic = 0, .pure = 1,
         .required_caps = 0, .deps = {0},
     },
+    {
+        /* HTMX toast widget — server-side helper that emits the
+         * HX-Trigger header consumed by the shipped client JS at
+         * /static/hull/htmx/toast/toast.js. Structural CSS only;
+         * apps style per-level appearance via [data-level] attrs.
+         *
+         * First widget in the §1.5.g htmx tier. Pure header-setter,
+         * no I/O. Wraps htmx.trigger; needs json for the payload
+         * encoder hull.web.htmx itself uses internally. */
+        .name = "hull/web/htmx/toast",
+        .api_major = 1, .intrinsic = 0, .pure = 1,
+        .required_caps = 0,
+        .deps = {"hull/web/htmx", "hull/json", 0},
+    },
 
     /* ── Web middleware ──────────────────────────────────────────────
      * Every middleware consumes KlRequest/KlResponse and registers via

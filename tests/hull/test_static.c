@@ -228,6 +228,38 @@ UTEST(static_serve, post_method_skipped)
     ASSERT_EQ(0, rc);
 }
 
+UTEST(static_serve, head_serves_same_as_get)
+{
+    /* Regression: pre-fix, the middleware strict-checked req->method
+     * for literal "GET" and returned 0 for HEAD. But Keel's pattern
+     * matcher routes HEAD to GET-registered middleware (RFC 7230
+     * §4.3.2), so HEAD requests reached our middleware and got
+     * silently dropped to 404. The fix accepts both GET and HEAD;
+     * Keel itself strips the body on the HEAD path so headers are
+     * the same. */
+    static const unsigned char css[] = ".x{}";
+    static const HlEntry entries[] = {
+        { "static/style.css", css, sizeof(css) - 1 },
+        { NULL, NULL, 0 },
+    };
+    HlVfs vfs;
+    hl_vfs_init(&vfs, entries, NULL);
+
+    KlAllocator alloc = kl_allocator_default();
+    HlStaticCtx ctx = { .vfs = &vfs };
+
+    KlRequest req = make_request("HEAD", "/static/style.css");
+    KlResponse res;
+    memset(&res, 0, sizeof(res));
+    kl_response_init(&res, &alloc);
+
+    int rc = hl_static_middleware(&req, &res, &ctx);
+    ASSERT_EQ(1, rc);
+    ASSERT_EQ(200, res.status);
+
+    kl_response_free(&res);
+}
+
 /* ── Platform VFS fallback (stdlib-shipped widget assets) ─────────── */
 
 UTEST(static_serve, stdlib_fallback_hit)
