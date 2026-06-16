@@ -136,6 +136,15 @@
     }
 
     function handleConfirm(evt) {
+        // htmx fires htmx:confirm for EVERY request, not just ones
+        // from elements with hx-confirm. Bail out early on requests
+        // that haven't opted in — otherwise the dialog would pop up
+        // on every search keystroke, every form submit, every
+        // hx-trigger fire. The presence of `evt.detail.question`
+        // is htmx's signal that hx-confirm was on the triggering
+        // element (htmx populates it from the attribute value).
+        if (!evt.detail || !evt.detail.question) return;
+
         // Pause htmx's request pipeline. issueRequest() is the only
         // way to resume; we call it from the confirm-button path.
         evt.preventDefault();
