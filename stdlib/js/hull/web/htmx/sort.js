@@ -99,6 +99,12 @@ function planToggle(column, current) {
  * @param {object} opts
  * @param {string} opts.url       Base URL (no query string).
  * @param {string} [opts.target]  Default "closest table".
+ * @param {string} [opts.swap]    hx-swap. When the target wraps
+ *                                table + nav + actions (`#grid`),
+ *                                pass "innerHTML". When the target
+ *                                is the table itself, pass
+ *                                "outerHTML". Omitted by default —
+ *                                htmx falls back to "innerHTML".
  * @param {boolean} [opts.pushUrl] Default true.
  * @returns {string}  Attribute string for unescaped splice into <th>.
  */
@@ -107,6 +113,7 @@ function headerAttrs(column, current, opts) {
     opts = opts || {};
     checkScalar(opts.url,    "opts.url");
     checkScalar(opts.target, "opts.target");
+    checkScalar(opts.swap,   "opts.swap");
     const url      = opts.url || "";
     const target   = opts.target || "closest table";
     const pushUrl  = opts.pushUrl !== false;
@@ -124,9 +131,13 @@ function headerAttrs(column, current, opts) {
         `aria-sort="${ARIA_SORT[thisDirection]}"`,
         `hx-get="${attrEscape(fullUrl)}"`,
         `hx-target="${attrEscape(target)}"`,
-        `hx-trigger="click, keyup[key=='Enter'] from:this, keyup[key==' '] from:this"`,
-        'hx-swap="outerHTML"',
+        // hx-trigger is just `click`; the keyboard half (Enter +
+        // Space) lives in /static/hull/htmx/sort/sort.js so it
+        // works under csp = "htmx" (the [expr] filter syntax needs
+        // Function() eval, which the strict preset rejects).
+        'hx-trigger="click"',
     ];
+    if (opts.swap) parts.push(`hx-swap="${attrEscape(opts.swap)}"`);
     if (pushUrl) parts.push('hx-push-url="true"');
     return parts.join(" ");
 }

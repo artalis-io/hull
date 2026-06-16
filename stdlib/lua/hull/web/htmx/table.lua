@@ -112,6 +112,17 @@ end
 --                                         and inline-edit URLs.
 -- @tparam[opt] string opts.target         hx-target for sort swaps.
 --                                         Default "closest table".
+-- @tparam[opt] string opts.swap           hx-swap for sort swaps.
+--                                         When opts.target wraps
+--                                         table + nav + actions
+--                                         (e.g. "#grid"), pass
+--                                         "innerHTML". When opts.target
+--                                         is the table itself
+--                                         (the default "closest table"),
+--                                         pass "outerHTML". Omitted
+--                                         by default — htmx then
+--                                         uses its own default,
+--                                         "innerHTML".
 -- @tparam[opt] ?table opts.current_sort   Output of sort.parse —
 --                                         drives the direction
 --                                         arrows / aria-sort on
@@ -139,6 +150,7 @@ function M.render(rows, schema, opts)
                 {
                     url      = opts.base_url,
                     target   = opts.target,
+                    swap     = opts.swap,
                     push_url = opts.push_url,
                 })
             parts[#parts + 1] = '<th ' .. attrs .. '>'

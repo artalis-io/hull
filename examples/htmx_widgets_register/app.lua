@@ -144,6 +144,9 @@ local function render_grid(state)
     local table_html = hxtable.render(state.rows, SCHEMA, {
         base_url     = base_url,
         target       = "#grid",
+        -- #grid is a container wrapping table + nav + actions;
+        -- replace its contents, don't replace the container itself.
+        swap         = "innerHTML",
         current_sort = state.current_sort,
         edit_url_for = function(row, col)
             return "/assets/" .. row.id .. "/" .. col .. "/edit"

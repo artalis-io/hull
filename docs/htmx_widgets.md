@@ -23,7 +23,7 @@ JS total across all 8 widgets, all loaded once per page.
 | [`form`](#form) | `errors / field_error / field_attrs` | ~75 LOC | structural |
 | [`search`](#search) | `input_attrs / results_attrs` | — | — |
 | [`inline-edit`](#inline-edit) | `cell(opts) / editor(opts)` | ~30 LOC | structural |
-| [`sort`](#sort) | `parse(req) / header_attrs(col, current, opts)` | — | structural |
+| [`sort`](#sort) | `parse(req) / header_attrs(col, current, opts)` | ~30 LOC | structural |
 | [`pagination`](#pagination) | `nav(total, opts)` | — | — |
 | [`table`](#table) | `render(rows, schema, opts)` | — | — |
 
@@ -108,6 +108,7 @@ Every app using the widget tier needs:
    <script src="/static/hull/htmx/confirm/confirm.js" defer></script>
    <script src="/static/hull/htmx/form/form.js" defer></script>
    <script src="/static/hull/htmx/inline-edit/inline-edit.js" defer></script>
+   <script src="/static/hull/htmx/sort/sort.js" defer></script>
    ```
 4. **Vendored htmx** at `static/vendor/htmx.min.js`. Hull doesn't
    ship htmx itself; vendor it (see `examples/hypermedia_photos/static/vendor/`).
@@ -367,14 +368,22 @@ activation), `aria-sort="ascending|descending|none"`, `data-sort-direction`
 + `class="hull-sort-{none|asc|desc}"` for styling, `hx-get="<url>?sort=col:dir"`
 with the toggled direction.
 
+`opts.swap` controls `hx-swap`: when `target` wraps the table + nav
++ actions (e.g. `"#grid"`), pass `"innerHTML"`. When `target` is the
+table itself (default `"closest table"`), pass `"outerHTML"`. Omitted
+by default — htmx then uses its own default, `"innerHTML"`.
+
 Toggle semantics: asc → desc → asc (clicking a sorted column flips;
 clicking a different column resets to asc).
 
 Column-name safety: anything outside `[A-Za-z0-9_-]` is silently
 collapsed to `_` AND the column is rejected if not in the allowlist.
 
-Structural CSS ships direction-indicator content (▲ ▼ ↕) via
-`::after` — apps override for custom icons.
+Client assets: `sort.css` ships direction-indicator content
+(▲ ▼ ↕) via `::after`; `sort.js` adds Enter / Space keyboard
+activation (the older htmx-trigger filter `keyup[key=='Enter']`
+needed `Function()` eval, which the `csp = "htmx"` strict preset
+rejects). Both are served from `/static/hull/htmx/sort/`.
 
 ---
 

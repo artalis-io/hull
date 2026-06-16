@@ -35,6 +35,15 @@ function esc(s) {
  * @param {string} [opts.target]               hx-target for sort
  *                                             swaps. Default
  *                                             "closest table".
+ * @param {string} [opts.swap]                 hx-swap for sort
+ *                                             swaps. When opts.target
+ *                                             wraps table + nav +
+ *                                             actions (e.g.
+ *                                             "#grid"), pass
+ *                                             "innerHTML". When
+ *                                             targeting the table
+ *                                             itself, pass
+ *                                             "outerHTML".
  * @param {?object} [opts.currentSort]         Output of sort.parse.
  * @param {boolean} [opts.pushUrl]             For sort. Default true.
  * @param {function} [opts.editUrlFor]         (row, colName) → string.
@@ -56,6 +65,7 @@ function render(rows, schema, opts) {
             const attrs = sortWidget.headerAttrs(col.name, opts.currentSort, {
                 url:     opts.baseUrl,
                 target:  opts.target,
+                swap:    opts.swap,
                 pushUrl: opts.pushUrl,
             });
             parts.push(`<th ${attrs}>${esc(col.label || col.name)}</th>`);

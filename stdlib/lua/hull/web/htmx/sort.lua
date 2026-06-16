@@ -72,11 +72,26 @@
 -- The emitted attrs include:
 --   - hx-get="<url>?sort=<col>[:dir]"  -- toggled URL
 --   - hx-target="<target>"
+--   - hx-swap="<swap>" (omitted when not set; htmx default = innerHTML)
 --   - hx-push-url="true" (when opts.push_url is truthy)
 --   - role="button" tabindex="0"  -- keyboard-activatable
 --   - data-sort-direction="asc|desc|none"  -- styling hook
 --   - class="hull-sort-header hull-sort-{asc|desc|none}"
 --   - aria-sort="ascending|descending|none"  -- a11y standard
+--
+-- Client assets:
+--
+--   - /static/hull/htmx/sort/sort.css  -- structural CSS (cursor,
+--                                         direction indicator)
+--   - /static/hull/htmx/sort/sort.js   -- keyboard activation
+--                                         (Enter / Space -> click).
+--                                         Required for accessibility
+--                                         under csp = "htmx" — the
+--                                         older hx-trigger filter
+--                                         `keyup[key=='Enter']`
+--                                         needed Function() eval,
+--                                         which the strict preset
+--                                         rejects.
 
 local sort = {}
 
@@ -195,6 +210,16 @@ local ARIA_SORT = { asc = "ascending", desc = "descending", none = "none" }
 -- @tparam[opt] string opts.target   hx-target. Defaults to
 --                                   "closest table" so the table
 --                                   it wraps is swapped.
+-- @tparam[opt] string opts.swap     hx-swap. When the target is
+--                                   a wrapping container (`#grid`)
+--                                   whose contents include the
+--                                   table + nav + actions, pass
+--                                   `"innerHTML"`. When the target
+--                                   is the table itself (the
+--                                   default `closest table`), pass
+--                                   `"outerHTML"`. Omitted by
+--                                   default — htmx falls back to
+--                                   its own default, `innerHTML`.
 -- @tparam[opt] bool opts.push_url   Emit hx-push-url="true".
 --                                   Default true (sorted URLs are
 --                                   bookmarkable / back-button
@@ -205,6 +230,7 @@ function sort.header_attrs(column, current, opts)
     opts = opts or {}
     check_scalar(opts.url,    "opts.url")
     check_scalar(opts.target, "opts.target")
+    check_scalar(opts.swap,   "opts.swap")
     local url        = opts.url or ""
     local target     = opts.target or "closest table"
     local push_url   = opts.push_url
@@ -223,9 +249,15 @@ function sort.header_attrs(column, current, opts)
         'aria-sort="' .. ARIA_SORT[this_direction] .. '"',
         'hx-get="' .. attr_escape(full_url) .. '"',
         'hx-target="' .. attr_escape(target) .. '"',
-        'hx-trigger="click, keyup[key==\'Enter\'] from:this, keyup[key==\' \'] from:this"',
-        'hx-swap="outerHTML"',
+        -- hx-trigger is just `click`; the keyboard half (Enter +
+        -- Space) lives in sort.js so it works under csp = "htmx"
+        -- (the [expr] filter syntax needs Function() eval, which
+        -- the strict preset rejects).
+        'hx-trigger="click"',
     }
+    if opts.swap then
+        parts[#parts + 1] = 'hx-swap="' .. attr_escape(opts.swap) .. '"'
+    end
     if push_url then
         parts[#parts + 1] = 'hx-push-url="true"'
     end
