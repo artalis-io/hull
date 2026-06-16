@@ -268,10 +268,13 @@ async function runWidgets(page) {
         }
     }
 
-    // ── sort widget — rendered attrs + click-fires-request ───────
-    // Last because the current hx-swap="outerHTML" on the <th>
-    // replaces the header with the whole grid response, breaking
-    // subsequent locators. Set up waitForResponse BEFORE clicking.
+    // ── sort widget — rendered attrs + activation paths ──────────
+    // Last because earlier the widget shipped hx-swap="outerHTML"
+    // on the <th>, which replaced the whole header with the grid
+    // response and corrupted later locators. The swap default is
+    // now innerHTML (the example app passes swap="innerHTML"
+    // explicitly), so DOM stays sane — but the ordering convention
+    // is preserved in case a future change reintroduces the issue.
     {
         const sortHeader = page.locator('th[data-sort-column="name"]').first();
         const hxGet = await sortHeader.getAttribute("hx-get");
@@ -287,6 +290,49 @@ async function runWidgets(page) {
         const resp = await respP;
         if (resp) ok(`sort widget: click triggered ${resp.url().split("?")[1]}`);
         else ko("sort widget: click did not trigger /search?sort=…");
+    }
+
+    // The click above swaps #grid contents (innerHTML); the th
+    // elements get rebuilt. Give htmx a tick to finish the swap so
+    // the keyboard tests below focus the NEW elements, not the
+    // stale ones in the dying DOM.
+    await sleep(200);
+
+    // ── sort widget — keyboard activation (regression for the
+    // strict-CSP fix). The widget puts role="button" tabindex="0"
+    // on a <th>, which doesn't natively dispatch click on
+    // Enter/Space — that's sort.js's job. Two checks: Enter and
+    // Space both fire the underlying click + hx-get.
+    {
+        // Enter on "category" header.
+        const enterHeader = page.locator('th[data-sort-column="category"]').first();
+        const respEnter = page.waitForResponse(
+            (r) => r.url().includes("/search?sort=category") && r.status() === 200,
+            { timeout: 3000 }).catch(() => null);
+        await enterHeader.focus();
+        await page.keyboard.press("Enter");
+        if (await respEnter) ok("sort widget: Enter key fires hx-get (keyboard a11y)");
+        else ko("sort widget: Enter key did not fire request");
+    }
+
+    // Same swap-settle reason as above — the Enter response
+    // replaces #grid contents and the status header gets rebuilt.
+    await sleep(200);
+
+    {
+        // Space on "status" header. Also implicitly verifies that
+        // sort.js preventDefault()s the Space keydown — without it,
+        // the browser would scroll the page instead of activating
+        // the header. (Playwright doesn't fail on scroll, so we
+        // catch the failure mode via the missing request.)
+        const spaceHeader = page.locator('th[data-sort-column="status"]').first();
+        const respSpace = page.waitForResponse(
+            (r) => r.url().includes("/search?sort=status") && r.status() === 200,
+            { timeout: 3000 }).catch(() => null);
+        await spaceHeader.focus();
+        await page.keyboard.press("Space");
+        if (await respSpace) ok("sort widget: Space key fires hx-get (keyboard a11y)");
+        else ko("sort widget: Space key did not fire request");
     }
 }
 
