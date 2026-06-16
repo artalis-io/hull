@@ -34,22 +34,27 @@
 --     <link rel="stylesheet" href="/static/hull/htmx/form/form.css">
 --     <script src="/static/hull/htmx/form/form.js" defer></script>
 --
---     -- handler:
+--     -- HANDLER: Hull's template engine has no function-call
+--     -- support, so widget helpers run server-side and the
+--     -- resulting strings flow into the template data.
 --     local ok, errors = validate.check(req.body, schema)
 --     if not ok then
 --         res:status(422)
---         res:html(template.render("partials/asset_form.html",
---                                  { values = req.body, errors = errors }))
---         return
 --     end
+--     res:html(template.render("partials/asset_form.html", {
+--         values        = req.body,
+--         errors_block  = form.errors(errors),                -- "" if no errors
+--         name_attrs    = form.field_attrs(errors, "name"),
+--         name_error    = form.field_error(errors, "name"),
+--     }))
 --
 --     -- partials/asset_form.html:
---     {{ form.errors(errors) | raw }}
+--     {{ errors_block | raw }}
 --     <div class="field">
 --       <label for="name">Name</label>
 --       <input id="name" name="name" value="{{ values.name }}"
---              {{ form.field_attrs(errors, "name") | raw }}>
---       {{ form.field_error(errors, "name") | raw }}
+--              {{ name_attrs | raw }}>
+--       {{ name_error | raw }}
 --     </div>
 
 local form = {}

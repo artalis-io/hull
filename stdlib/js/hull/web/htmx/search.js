@@ -14,12 +14,25 @@
  * Lua parity: same surface as `hull.web.htmx.search`. Names map
  * snake_case (Lua) → camelCase (JS).
  *
- *     // template:
- *     <input placeholder="Search assets…"
- *            {{{ search.inputAttrs({ url: "/assets/search" }) }}}>
- *     <div {{{ search.resultsAttrs() }}}></div>
+ *     // HANDLER: pre-render the attribute strings once at module
+ *     // load. Hull's template engine doesn't support function
+ *     // calls in {{ }} so widget helpers run server-side and the
+ *     // resulting strings flow into the template data.
+ *     const INPUT_ATTRS   = search.inputAttrs({ url: "/assets/search" });
+ *     const RESULTS_ATTRS = search.resultsAttrs();
  *
- *     // handler:
+ *     app.get("/", (req, res) => {
+ *         res.html(template.render("pages/assets.html", {
+ *             searchInputAttrs:   INPUT_ATTRS,
+ *             searchResultsAttrs: RESULTS_ATTRS,
+ *         }));
+ *     });
+ *
+ *     // template (pages/assets.html):
+ *     <input placeholder="Search assets…" {{{ searchInputAttrs }}}>
+ *     <div {{{ searchResultsAttrs }}}></div>
+ *
+ *     // search-results endpoint:
  *     app.get("/assets/search", (req, res) => {
  *         const q = req.query.q || "";
  *         if (q.length < 2) { res.html(""); return; }

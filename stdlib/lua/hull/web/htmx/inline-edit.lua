@@ -37,11 +37,25 @@
 --     <link rel="stylesheet" href="/static/hull/htmx/inline-edit/inline-edit.css">
 --     <script src="/static/hull/htmx/inline-edit/inline-edit.js" defer></script>
 --
---     -- Initial render of an editable field (e.g. in an asset row):
---     {{ inline_edit.cell({
---          value    = asset.name,
---          edit_url = "/assets/" .. asset.id .. "/name/edit",
---        }) | raw }}
+--     -- Initial render of an editable field. Hull's template
+--     -- engine has no function-call support, so call inline_edit
+--     -- helpers in the HANDLER and pass the pre-rendered string
+--     -- as template data:
+--     --
+--     --   app.get("/assets/:id", function(req, res)
+--     --       local asset = db.query("SELECT * FROM assets WHERE id=?",
+--     --                              { req.params.id })[1]
+--     --       res:html(template.render("pages/asset.html", {
+--     --           asset = asset,
+--     --           name_cell = inline_edit.cell({
+--     --               value    = asset.name,
+--     --               edit_url = "/assets/" .. asset.id .. "/name/edit",
+--     --           }),
+--     --       }))
+--     --   end)
+--     --
+--     -- Template (pages/asset.html):
+--     --   Name: {{ name_cell | raw }}
 --
 --     -- Edit endpoint:
 --     app.get("/assets/:id/name/edit", function(req, res)

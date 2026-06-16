@@ -5,10 +5,8 @@
   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
   <input type="text" name="title" placeholder="New entry"
          value="{{ values.title }}"
-         aria-invalid="{% if errors.title %}true{% else %}false{% end %}"
+         {{ title_attrs | raw }}
          required autofocus>
-  {% if errors.title %}
-  <small role="alert" id="new-entry-error">{{ errors.title }}</small>
-  {% end %}
-  <button type="submit">Add</button>
+  {{ title_error | raw }}
+  <button type="submit" data-loading-label="Adding…">Add</button>
 </form>

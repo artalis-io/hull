@@ -2,6 +2,9 @@
 -- Returns full pages for plain navigation; returns fragments when
 -- HX-Request is set. CSRF + per-request CSP nonce wired in by default.
 local htmx        = require("hull.web.htmx")
+local htmx_confirm = require("hull.web.htmx.confirm")
+local htmx_search  = require("hull.web.htmx.search")
+local htmx_form    = require("hull.web.htmx.form")
 local flash       = require("hull.web.flash")
 local pagination  = require("hull.web.pagination")
 local validate    = require("hull.validate")
@@ -26,6 +29,9 @@ local PER_PAGE_DEFAULT = 3
 app.manifest({
     modules = {
         "hull/web/htmx@1",
+        "hull/web/htmx/confirm@1",
+        "hull/web/htmx/search@1",
+        "hull/web/htmx/form@1",
         "hull/web/flash@1",
         "hull/web/pagination@1",
         "hull/validate@1",
@@ -50,6 +56,22 @@ app.manifest({
     -- Attachments live under data/. blob.init creates data/blobs/ on
     -- first run; the rest is hull-managed.
     fs = { write = { "data/" } },
+})
+
+-- Pre-rendered widget attribute strings. Hull's template engine
+-- supports nil-safe dot paths but NOT function calls, so widget
+-- helpers are called once at handler time and the resulting
+-- strings flow into the template data. Pattern: the constants
+-- below are static across requests (same widget config every
+-- render), so building them once at load time is enough.
+local DELETE_CONFIRM_ATTRS = htmx_confirm.attrs(
+    "Delete this entry? (photos will be removed too)",
+    { danger = true, yes = "Delete" })
+
+local SEARCH_INPUT_ATTRS = htmx_search.input_attrs({
+    url      = "/search",
+    target   = "#entry-feed",
+    push_url = true,
 })
 
 -- Sessions table (creates _hull_sessions on first run).
@@ -168,8 +190,15 @@ local function _hydrate_row(row)
 end
 
 -- Hydrate a db row + return template data (csrf_token comes from req).
+-- delete_confirm_attrs is the pre-rendered string for the delete
+-- button's `hx-confirm` + `data-confirm-*` set (see top-of-file
+-- constant). Same string on every row; cheap to splice.
 local function _row_data(row, req)
-    return { t = _hydrate_row(row), csrf_token = req.ctx.csrf_token }
+    return {
+        t                    = _hydrate_row(row),
+        csrf_token           = req.ctx.csrf_token,
+        delete_confirm_attrs = DELETE_CONFIRM_ATTRS,
+    }
 end
 
 app.use("*", "/*", csp.htmx())
@@ -264,6 +293,11 @@ local function _feed_data(req, q)
         entries      = entries,
         has_entries  = #entries > 0,
         pagination = nav,
+        -- Pre-rendered widget strings consumed by the partials
+        -- below (templates can't call functions; widgets pre-
+        -- render in the handler and the strings flow through).
+        search_input_attrs   = SEARCH_INPUT_ATTRS,
+        delete_confirm_attrs = DELETE_CONFIRM_ATTRS,
     }
 end
 
@@ -278,6 +312,12 @@ app.get("/", function(req, res)
     local data = _feed_data(req, q)
     data.flash     = msgs
     data.has_flash = #msgs > 0
+    -- Initial-page render: no validation errors, so the form
+    -- widget pre-rendered strings are both empty (the helpers
+    -- return "" for nil errors).
+    data.values      = data.values      or {}
+    data.title_attrs = htmx_form.field_attrs(nil, "title")
+    data.title_error = htmx_form.field_error(nil, "title")
     res:html(template.render("pages/home.html", data))
 end)
 
@@ -301,9 +341,16 @@ app.post("/entries", function(req, res)
         htmx.retarget(res, "#new-entry")
         htmx.reswap(res, "outerHTML")
         res:html(template.render("partials/entry_form.html", {
-            csrf_token = req.ctx.csrf_token,
-            values     = fields,
-            errors     = errors,
+            csrf_token  = req.ctx.csrf_token,
+            values      = fields,
+            errors      = errors,
+            -- Pre-rendered widget strings: aria-invalid +
+            -- aria-describedby on the input, plus the inline
+            -- <span> error. Both are empty strings on the
+            -- success path where errors is nil/empty — see the
+            -- initial-page render below.
+            title_attrs = htmx_form.field_attrs(errors, "title"),
+            title_error = htmx_form.field_error(errors, "title"),
         }))
         return
     end

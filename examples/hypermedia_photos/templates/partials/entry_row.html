@@ -22,7 +22,7 @@
   <button hx-delete="/entries/{{ t.id }}"
           hx-target="#entry-feed"
           hx-swap="innerHTML"
-          hx-confirm="Delete this entry? (photos will be removed too)">×</button>
+          {{ delete_confirm_attrs | raw }}>×</button>
 
   {% include "partials/_attachment_strip.html" %}
   {% include "partials/_attachment_upload.html" %}

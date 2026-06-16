@@ -1,9 +1,20 @@
 {# Reusable form field. Expects a `field` table in scope:
-   { name, label, type?, value?, error?, placeholder?, required?, autofocus? }
-   For Hull templates, this means either:
-     - Inside a for-loop:  {% for field in fields %}{% include "..." %}{% end %}
-     - Direct call:        template.render("partials/_form_field.html", { field = {...} })
-   For single-field forms (like the entry create form) inline value/error
+   { name, label, type?, value?, attrs?, error?, placeholder?, required?, autofocus? }
+
+   Hull's template engine doesn't support function calls in {{ }}
+   expressions, so the widget helpers are called in the HANDLER:
+
+       local form = require("hull.web.htmx.form")
+       local fields = { {
+           name  = "title",
+           label = "Title",
+           value = req.body.title,
+           attrs = form.field_attrs(errors, "title"),
+           error = form.field_error(errors, "title"),
+       } }
+       res:html(render("partials/_form_field.html", { field = fields[1] }))
+
+   For single-field forms (like the entry create form) inline error
    handling in the form template itself is simpler — see entry_form.html. #}
 <div class="field">
   {% if field.label %}
@@ -14,10 +25,8 @@
          name="{{ field.name }}"
          value="{{ field.value }}"
          {% if field.placeholder %}placeholder="{{ field.placeholder }}"{% end %}
-         aria-invalid="{% if field.error %}true{% else %}false{% end %}"
+         {{ field.attrs | raw }}
          {% if field.required %}required{% end %}
          {% if field.autofocus %}autofocus{% end %}>
-  {% if field.error %}
-  <small role="alert" id="field-{{ field.name }}-error">{{ field.error }}</small>
-  {% end %}
+  {{ field.error | raw }}
 </div>

@@ -20,12 +20,26 @@
 --         csp = "htmx",
 --     })
 --
---     -- template:
---     <input placeholder="Search assets…"
---            {{ search.input_attrs({ url = "/assets/search" }) | raw }}>
---     <div {{ search.results_attrs() | raw }}></div>
+--     -- HANDLER: pre-render the attribute strings once at module
+--     -- load (the config is the same across requests). Hull's
+--     -- template engine doesn't support function calls in {{ }}
+--     -- so widget helpers run server-side and the resulting
+--     -- strings flow into the template data.
+--     local INPUT_ATTRS   = search.input_attrs({ url = "/assets/search" })
+--     local RESULTS_ATTRS = search.results_attrs()
 --
---     -- handler:
+--     app.get("/", function(req, res)
+--         res:html(template.render("pages/assets.html", {
+--             search_input_attrs   = INPUT_ATTRS,
+--             search_results_attrs = RESULTS_ATTRS,
+--         }))
+--     end)
+--
+--     -- template (pages/assets.html):
+--     <input placeholder="Search assets…" {{ search_input_attrs | raw }}>
+--     <div {{ search_results_attrs | raw }}></div>
+--
+--     -- search-results endpoint:
 --     app.get("/assets/search", function(req, res)
 --         local q = req.query.q or ""
 --         if #q < 2 then res:html("") return end  -- placeholder/skip

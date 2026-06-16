@@ -11,8 +11,12 @@
   <title>{% block title %}Hull HTMX app{% end %}</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='14'>&#128247;</text></svg>">
   <link rel="stylesheet" nonce="{{ csp_nonce }}" href="/static/vendor/pico.classless.min.css">
+  <link rel="stylesheet" nonce="{{ csp_nonce }}" href="/static/hull/htmx/confirm/confirm.css">
+  <link rel="stylesheet" nonce="{{ csp_nonce }}" href="/static/hull/htmx/form/form.css">
   <link rel="stylesheet" nonce="{{ csp_nonce }}" href="/static/app.css">
   <script nonce="{{ csp_nonce }}" src="/static/vendor/htmx.min.js"></script>
+  <script nonce="{{ csp_nonce }}" src="/static/hull/htmx/confirm/confirm.js" defer></script>
+  <script nonce="{{ csp_nonce }}" src="/static/hull/htmx/form/form.js" defer></script>
   <script nonce="{{ csp_nonce }}" src="/static/app.js" defer></script>
 </head>
 <body hx-indicator="#spinner"

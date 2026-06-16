@@ -10,15 +10,8 @@
 
 {% include "partials/entry_form.html" %}
 
-<input type="search" name="q" id="search-input"
-       placeholder="Search entries…"
-       autocomplete="off"
-       value="{{ q }}"
-       hx-get="/search"
-       hx-trigger="keyup changed delay:300ms, search"
-       hx-target="#entry-feed"
-       hx-swap="innerHTML"
-       hx-push-url="true">
+<input id="search-input" placeholder="Search entries…" value="{{ q }}"
+       {{ search_input_attrs | raw }}>
 
 <div id="entry-feed" class="entry-feed">
   {% include "partials/_entry_feed.html" %}

@@ -26,14 +26,24 @@
 --     <link rel="stylesheet" href="/static/hull/htmx/confirm/confirm.css">
 --     <script src="/static/hull/htmx/confirm/confirm.js" defer></script>
 --
---     -- 3. Use on any htmx-triggering element:
+--     -- 3. Pre-render the attribute string in your HANDLER
+--     -- (Hull's template engine doesn't support function calls
+--     -- in {{ }} expressions; widget helpers run server-side
+--     -- and the resulting strings flow into the template data):
 --     local confirm = require("hull.web.htmx.confirm")
---     -- In a template:
---     <button hx-delete="/assets/{{ id }}"
---             {{ confirm.attrs('Delete this asset?',
---                              { danger=true, yes='Delete' }) | raw }}>
---       Delete
---     </button>
+--     local DELETE_ATTRS = confirm.attrs(
+--         "Delete this asset?", { danger = true, yes = "Delete" })
+--
+--     app.get("/assets", function(req, res)
+--         res:html(template.render("pages/assets.html", {
+--             assets = ...,
+--             delete_attrs = DELETE_ATTRS,
+--         }))
+--     end)
+--
+--     -- In the template:
+--     <button hx-delete="/assets/{{ asset.id }}"
+--             {{ delete_attrs | raw }}>Delete</button>
 
 local confirm = {}
 
