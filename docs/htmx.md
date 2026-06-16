@@ -3,6 +3,12 @@
 **Status:** Shipped in v0.1.8.
 **Audience:** developers writing server-rendered web apps in Hull who want partial-page updates without adopting a JS framework.
 
+> **For the widget tier** (toast, confirm, form, search, sort,
+> pagination, inline-edit, table) see the separate
+> [HTMX widgets guide](htmx_widgets.md). The page below covers the
+> broader profile — scaffolding, Pico, CSP nonces, htmx core
+> helpers — that the widgets sit on top of.
+
 Hypermedia means HTML is the application protocol. Browsers fetch HTML, render it, follow links, submit forms. HTMX (`htmx.org`, v2.x in Hull's profile) extends the HTML vocabulary so any element can issue any HTTP verb and swap the response into the page. The server's job is unchanged: return HTML. There is no JSON state machine, no client-side router, no build step.
 
 Hull's job is to make that pattern productive: a one-shot scaffold, a small helper module for HTMX response headers, a CSP profile that's strict enough to be useful and lax enough that Pico's component styles still work, and worked examples in both Lua and JS.

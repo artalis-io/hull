@@ -1,0 +1,22 @@
+<form id="new-form" hx-post="/assets" hx-target="#grid" hx-swap="innerHTML">
+  <h3>Add asset</h3>
+  <div class="grid">
+    <div>
+      <label for="f-name">Name</label>
+      <input id="f-name" type="text" name="name"
+             value="{{ values.name }}"
+             {{ name_attrs | raw }}
+             required>
+      {{ name_error | raw }}
+    </div>
+    <div>
+      <label for="f-category">Category</label>
+      <input id="f-category" type="text" name="category"
+             value="{{ values.category }}"
+             {{ category_attrs | raw }}
+             required>
+      {{ category_error | raw }}
+    </div>
+  </div>
+  <button type="submit" data-loading-label="Adding…">Add</button>
+</form>

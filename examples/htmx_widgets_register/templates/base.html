@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>{% block title %}HTMX widgets · Hull{% end %}</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='14'>&#129529;</text></svg>">
+
+  <link rel="stylesheet" href="/static/vendor/pico.classless.min.css">
+
+  {# §1.5.g widget assets — every widget that ships CSS or client JS.
+     Required for the matching widget to function visually. #}
+  <link rel="stylesheet" href="/static/hull/htmx/toast/toast.css">
+  <link rel="stylesheet" href="/static/hull/htmx/confirm/confirm.css">
+  <link rel="stylesheet" href="/static/hull/htmx/form/form.css">
+  <link rel="stylesheet" href="/static/hull/htmx/inline-edit/inline-edit.css">
+  <link rel="stylesheet" href="/static/hull/htmx/sort/sort.css">
+  <link rel="stylesheet" href="/static/app.css">
+
+  <script src="/static/vendor/htmx.min.js"></script>
+  <script src="/static/hull/htmx/toast/toast.js" defer></script>
+  <script src="/static/hull/htmx/confirm/confirm.js" defer></script>
+  <script src="/static/hull/htmx/form/form.js" defer></script>
+  <script src="/static/hull/htmx/inline-edit/inline-edit.js" defer></script>
+</head>
+<body>
+  <main class="container">
+    <header>
+      <h1>🧰 Asset register</h1>
+      <p><small>Exercises all 8 widgets in the §1.5.g htmx tier.
+        See <a href="https://github.com/artalis-io/hull/tree/main/examples/htmx_widgets_register#ux-test-checklist">the UX-test checklist</a>
+        for what to click.</small></p>
+    </header>
+    {% block body %}{% end %}
+  </main>
+</body>
+</html>

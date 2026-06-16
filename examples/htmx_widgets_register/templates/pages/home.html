@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block body %}
+
+<section aria-label="Search">
+  {# Search widget. Hand-coded input ATTRS via the helper. The
+     [results container] reference (#grid below) matches the
+     widget default; could also be set via opts.target. #}
+  <input id="search-input" placeholder="Search by name or category…"
+         value="{{ q }}" {{ search_input_attrs | raw }}>
+</section>
+
+<section aria-label="Results">
+  {# The grid container — table.render + pagination.nav land here.
+     Swap target for every widget that mutates this region: search,
+     sort headers, pagination links, delete. #}
+  <div id="grid">{{ grid_html | raw }}</div>
+</section>
+
+<section aria-label="Add asset">
+  {% include "partials/_form.html" %}
+</section>
+
+{% end %}
