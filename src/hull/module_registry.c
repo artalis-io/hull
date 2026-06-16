@@ -411,6 +411,20 @@ static const HlModuleSpec REGISTRY[] = {
         .deps = {"hull/web/htmx", 0},
     },
     {
+        /* HTMX search widget — server-side helpers that emit
+         * htmx attributes for a debounced search input and the
+         * a11y attributes for the results container. Pure
+         * htmx-native; no shipped client JS or CSS — the whole
+         * interaction is hx-trigger="input changed delay:..."
+         * + server-rendered results swapped into the container.
+         *
+         * Pure attribute-string builder; no I/O. */
+        .name = "hull/web/htmx/search",
+        .api_major = 1, .intrinsic = 0, .pure = 1,
+        .required_caps = 0,
+        .deps = {"hull/web/htmx", 0},
+    },
+    {
         /* HTMX toast widget — server-side helper that emits the
          * HX-Trigger header consumed by the shipped client JS at
          * /static/hull/htmx/toast/toast.js. Structural CSS only;
