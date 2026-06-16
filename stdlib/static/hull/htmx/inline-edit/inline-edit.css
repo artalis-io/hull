@@ -1,0 +1,30 @@
+/*
+ * Hull HTMX inline-edit widget — structural CSS.
+ *
+ * Structural-only: cursor cue on the read-only cell (signals
+ * interactivity), inline-flex layout for the editor's input +
+ * buttons. No colors, no borders, no animations. Apps style
+ * appearance via:
+ *
+ *   .hull-inline-edit-view:hover  { background: #f5f5f5; }
+ *   .hull-inline-edit-view:focus  { outline: 2px solid #06c; }
+ *   .hull-inline-edit-form input  { border: 1px solid #ccc; padding: .25rem; }
+ *
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ */
+
+.hull-inline-edit-view {
+    cursor: pointer;
+}
+
+.hull-inline-edit-form {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+}
+
+.hull-inline-edit-form input {
+    /* Sized by content but with a sensible floor so single-
+     * character values don't collapse the input to nothing. */
+    min-width: 8ch;
+}

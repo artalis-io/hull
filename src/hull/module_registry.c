@@ -411,6 +411,23 @@ static const HlModuleSpec REGISTRY[] = {
         .deps = {"hull/web/htmx", 0},
     },
     {
+        /* HTMX inline-edit widget — canonical click-to-edit
+         * pattern. Two server helpers (cell + editor) emit the
+         * htmx attributes for the GET→PATCH round trip. Two
+         * server endpoints per editable field; pure hypermedia
+         * mode switch (no client JS for that). A tiny shipped
+         * JS handles input focus after the editor swaps in
+         * (autofocus attr doesn't fire on dynamic inserts).
+         * Esc-to-cancel is wired via hx-trigger on the Cancel
+         * button. Structural CSS only.
+         *
+         * Pure HTML-string builder; no I/O. */
+        .name = "hull/web/htmx/inline-edit",
+        .api_major = 1, .intrinsic = 0, .pure = 1,
+        .required_caps = 0,
+        .deps = {"hull/web/htmx", 0},
+    },
+    {
         /* HTMX search widget — server-side helpers that emit
          * htmx attributes for a debounced search input and the
          * a11y attributes for the results container. Pure
