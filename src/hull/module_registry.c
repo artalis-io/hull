@@ -395,6 +395,22 @@ static const HlModuleSpec REGISTRY[] = {
         .deps = {"hull/web/htmx", 0},
     },
     {
+        /* HTMX form widget — server-side helpers for rendering
+         * field-level validation errors (consuming a hull/validate
+         * result) plus shipped client JS that puts the submit
+         * button into aria-busy / disabled / optional label-swap
+         * during htmx requests. Structural CSS only.
+         *
+         * Pure HTML-string builder; no I/O. Soft-coupled to
+         * hull/validate at the data shape level (a field-name ->
+         * message map) but doesn't require it — helpers accept
+         * the bare table and degrade cleanly when nil. */
+        .name = "hull/web/htmx/form",
+        .api_major = 1, .intrinsic = 0, .pure = 1,
+        .required_caps = 0,
+        .deps = {"hull/web/htmx", 0},
+    },
+    {
         /* HTMX toast widget — server-side helper that emits the
          * HX-Trigger header consumed by the shipped client JS at
          * /static/hull/htmx/toast/toast.js. Structural CSS only;

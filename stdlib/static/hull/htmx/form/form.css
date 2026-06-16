@@ -1,0 +1,31 @@
+/*
+ * Hull HTMX form widget — structural CSS.
+ *
+ * Structural-only by design: layout for the error summary and
+ * inline error spans; cursor cue for busy submit buttons. No
+ * colors, borders, shadows, fonts, animations. Apps style
+ * appearance via:
+ *
+ *   .hull-form-errors { background: #fee; border-left: 4px solid #c00; padding: .75rem; }
+ *   .hull-form-error  { color: #c00; }
+ *   button[aria-busy="true"] { opacity: 0.6; }
+ *
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ */
+
+.hull-form-errors {
+    margin: 0 0 1rem 0;
+    padding-inline-start: 1.25rem;
+}
+
+.hull-form-error {
+    display: block;
+    margin-block-start: 0.25rem;
+}
+
+/* Cursor cue is the only universally-safe "appearance" hint:
+ * apps that don't override see a wait cursor over the busy
+ * button, signalling that the click was received. */
+button[aria-busy="true"] {
+    cursor: wait;
+}
