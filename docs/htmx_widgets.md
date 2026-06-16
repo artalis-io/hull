@@ -76,7 +76,24 @@ Every app using the widget tier needs:
        csp = "htmx",                     -- preset for the SSR + stdlib-JS pattern
    })
    ```
-2. **Template assets** in your base template:
+2. **htmx-config meta tag** in `<head>` to opt out of htmx's
+   CSP-violating defaults (inline style injection + script eval).
+   The `csp = "htmx"` preset deliberately omits `'unsafe-eval'`
+   and `'unsafe-inline'` from `script-src`; htmx needs to be told
+   not to use either:
+   ```html
+   <meta name="htmx-config" content='{
+     "includeIndicatorStyles": false,
+     "allowEval":              false,
+     "allowScriptTags":        false
+   }'>
+   ```
+   **This is required** — without it, the browser console reports
+   `EvalError: Evaluating a string as JavaScript violates ... script-src`
+   on the first swap that contains any `<script>` content (or whose
+   trigger uses `hx-on`).
+
+3. **Template assets** in your base template:
    ```html
    <!-- One <link> per widget that ships CSS -->
    <link rel="stylesheet" href="/static/hull/htmx/toast/toast.css">
@@ -92,7 +109,7 @@ Every app using the widget tier needs:
    <script src="/static/hull/htmx/form/form.js" defer></script>
    <script src="/static/hull/htmx/inline-edit/inline-edit.js" defer></script>
    ```
-3. **Vendored htmx** at `static/vendor/htmx.min.js`. Hull doesn't
+4. **Vendored htmx** at `static/vendor/htmx.min.js`. Hull doesn't
    ship htmx itself; vendor it (see `examples/hypermedia_photos/static/vendor/`).
 
 The CSP preset `csp = "htmx"` expands to a known-good policy

@@ -7,6 +7,17 @@
   <title>{% block title %}HTMX widgets · Hull{% end %}</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='14'>&#129529;</text></svg>">
 
+  {# htmx defaults inject inline styles + try to eval <script> tags
+     in swapped HTML and `hx-on` attribute values. All three need a
+     CSP-strict opt-out for the `csp = "htmx"` preset to be safe to
+     ship with no `'unsafe-eval'` / `'unsafe-inline'` in script-src.
+     See docs/htmx_widgets.md § Setup. #}
+  <meta name="htmx-config" content='{
+    "includeIndicatorStyles": false,
+    "allowEval":              false,
+    "allowScriptTags":        false
+  }'>
+
   <link rel="stylesheet" href="/static/vendor/pico.classless.min.css">
 
   {# §1.5.g widget assets — every widget that ships CSS or client JS.

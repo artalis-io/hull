@@ -15,7 +15,7 @@
  *
  *   button[aria-busy="true"] {
  *       cursor: wait;
- *       /* optional: opacity, spinner background, etc. */
+ *       // optional: opacity, spinner background, etc.
  *   }
  *
  * Listens at the document level so a single subscription covers

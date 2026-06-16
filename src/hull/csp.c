@@ -26,16 +26,24 @@
 #include <string.h>
 
 /* "htmx" preset — htmx-driven SSR apps with stdlib JS / CSS served
- * from /static/. Allows same-origin scripts (htmx itself + any
- * widget JS shipped from stdlib/static/hull/...), inline styles (a
- * Pico classless concession), and same-origin XHR (htmx's bread and
- * butter — without connect-src 'self' every htmx request is blocked
- * by default-src 'none'). Apps that want stricter nonce-based CSP
- * should use the hull/web/middleware/csp@1 module with the htmx
- * profile instead of this static preset. */
+ * from /static/. Allows:
+ *   - same-origin scripts (htmx itself + any widget JS shipped
+ *     from stdlib/static/hull/...);
+ *   - inline styles (Pico classless concession);
+ *   - same-origin XHR (htmx's bread and butter — without
+ *     connect-src 'self' every htmx request is blocked by
+ *     default-src 'none');
+ *   - `data:` images (inline SVG favicons + Pico/Lucide-style
+ *     inline icons are a de-facto standard for hypermedia apps;
+ *     `data:` for images is XSS-safe — browsers don't interpret
+ *     SVG inside <img> as scriptable).
+ *
+ * Apps that want stricter nonce-based CSP should use the
+ * hull/web/middleware/csp@1 module with the htmx profile instead
+ * of this static preset. */
 #define HL_CSP_HTMX \
     "default-src 'none'; script-src 'self'; " \
-    "style-src 'self' 'unsafe-inline'; img-src 'self'; " \
+    "style-src 'self' 'unsafe-inline'; img-src 'self' data:; " \
     "connect-src 'self'; form-action 'self'; frame-ancestors 'none'"
 
 typedef struct {

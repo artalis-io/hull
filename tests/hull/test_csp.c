@@ -26,6 +26,7 @@ UTEST(hl_csp, resolve_htmx_preset_expands)
     ASSERT_TRUE(strstr(out, "default-src 'none'") != NULL);
     ASSERT_TRUE(strstr(out, "script-src 'self'") != NULL);
     ASSERT_TRUE(strstr(out, "style-src 'self' 'unsafe-inline'") != NULL);
+    ASSERT_TRUE(strstr(out, "img-src 'self' data:") != NULL);
     ASSERT_TRUE(strstr(out, "connect-src 'self'") != NULL);
     ASSERT_TRUE(strstr(out, "frame-ancestors 'none'") != NULL);
 }
