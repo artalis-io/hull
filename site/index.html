@@ -226,7 +226,7 @@
         <span class="text-paper-100 font-semibold tracking-tight">Hull</span>
         <a href="https://github.com/artalis-io/hull/releases" class="chip ml-1.5 hidden sm:inline-flex hover:text-paper-50 transition" title="Release notes on GitHub">
           <span class="accent-dot"></span>
-          v0.3.0
+          v0.4.0
         </a>
       </a>
 
@@ -465,7 +465,7 @@
             </header>
 <pre><span class="tk-com"># 1. Install. install.sh verifies the SHA-256 manifest as it downloads.</span>
 $ curl -fsSL <span class="tk-str">https://gethull.dev/install.sh</span> | sh
-hull installed to ~/.local/bin/hull  (v0.3.0)
+hull installed to ~/.local/bin/hull  (v0.4.0)
 
 <span class="tk-com"># 2. Verify the release signature (Ed25519, embedded pubkey).</span>
 $ <span class="tk-kw">REL</span>=https://github.com/artalis-io/hull/releases/latest/download
@@ -475,7 +475,7 @@ $ hull verify-release hull.sha256 hull.sha256.sig
 
 <span class="tk-com"># 3. Inspect the toolchain.</span>
 $ hull doctor
-hull v0.3.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middot;  cc: ok
+hull v0.4.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middot;  cc: ok
 </pre>
           </div>
           <p class="mt-3 text-[11px] text-mute-400 leading-relaxed">
@@ -1136,7 +1136,8 @@ hull v0.3.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
               <li><code class="text-paper-100 text-[0.7rem]">htmx/toast</code> &middot; <code class="text-paper-100 text-[0.7rem]">htmx/confirm</code> (styled &lt;dialog&gt;)</li>
               <li><code class="text-paper-100 text-[0.7rem]">htmx/form</code> (errors + auto loading state)</li>
               <li><code class="text-paper-100 text-[0.7rem]">htmx/search</code> &middot; <code class="text-paper-100 text-[0.7rem]">htmx/inline-edit</code></li>
-              <li>~395 LOC of plain JS total across all 5 widgets</li>
+              <li><code class="text-paper-100 text-[0.7rem]">htmx/sort</code> &middot; <code class="text-paper-100 text-[0.7rem]">htmx/pagination</code> &middot; <code class="text-paper-100 text-[0.7rem]">htmx/table</code> (schema-driven grid)</li>
+              <li>8 widgets, ~580 LOC of plain JS total; browser-tested via Playwright + axe-core a11y scan</li>
             </ul>
           </div>
 
@@ -1512,7 +1513,7 @@ hull v0.3.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
           <div class="bg-ink-900 p-6">
             <div class="flex items-center gap-2 mb-4">
               <i data-lucide="check-circle-2" class="w-4 h-4 text-accent"></i>
-              <span class="text-sm font-semibold text-paper-50">Shipped through v0.3.0</span>
+              <span class="text-sm font-semibold text-paper-50">Shipped through v0.4.0</span>
             </div>
             <ul class="space-y-3 text-sm text-mute-400 leading-relaxed">
               <li class="flex gap-2">
@@ -1565,7 +1566,7 @@ hull v0.3.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
               </li>
               <li class="flex gap-2">
                 <span class="text-accent mt-0.5">&check;</span>
-                <span><strong class="text-paper-100">Production-grade auth stack (v0.3.0).</strong>
+                <span><strong class="text-paper-100">Production-grade auth stack (v0.4.0).</strong>
                   <code class="text-paper-100 text-[0.78rem]">hull/web/auth-flows@1</code> wires welcome / verify / login / lockout / password-reset / magic-link / email-change against an audit-log;
                   <code class="text-paper-100 text-[0.78rem]">hull/web/middleware/totp@1</code> for RFC&nbsp;6238 second factor with multi-key at-rest encryption;
                   <code class="text-paper-100 text-[0.78rem]">hull/web/middleware/oauth@1</code> for Authorization Code + PKCE against Google / Microsoft Entra (alg-confusion-safe RS/PS/ES JWT verify, JWKS-pinned via mbedTLS);
@@ -1573,17 +1574,22 @@ hull v0.3.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
               </li>
               <li class="flex gap-2">
                 <span class="text-accent mt-0.5">&check;</span>
-                <span><strong class="text-paper-100">Streaming multipart + content-addressed blob storage (v0.3.0).</strong>
+                <span><strong class="text-paper-100">Streaming multipart + content-addressed blob storage (v0.4.0).</strong>
                   <code class="text-paper-100 text-[0.78rem]">req:multipart()</code> / <code class="text-paper-100 text-[0.78rem]">req.multipart()</code> iterator decodes parts incrementally without materializing the full body;
                   <code class="text-paper-100 text-[0.78rem]">hull/blob@1</code> stores bytes as SHA-256-keyed CAS so duplicate uploads collapse to one on-disk file;
                   <code class="text-paper-100 text-[0.78rem]">hull/attachment@1</code> validates filenames + cross-checks declared MIME against the magic-byte sniffer (<code class="text-paper-100 text-[0.78rem]">hull/mime@1</code>) before reaching storage.</span>
               </li>
               <li class="flex gap-2">
                 <span class="text-accent mt-0.5">&check;</span>
-                <span><strong class="text-paper-100">HTMX hypermedia profile + widget tier.</strong>
+                <span><strong class="text-paper-100">HTMX hypermedia profile + widget tier (v0.4.0).</strong>
                   <code class="text-paper-100 text-[0.78rem]">hull init --profile htmx</code> scaffolds a server-rendered htmx app;
-                  five first-party widgets (<code class="text-paper-100 text-[0.78rem]">toast</code>, <code class="text-paper-100 text-[0.78rem]">confirm</code>, <code class="text-paper-100 text-[0.78rem]">form</code>, <code class="text-paper-100 text-[0.78rem]">search</code>, <code class="text-paper-100 text-[0.78rem]">inline-edit</code>) ship server helpers + structural-only CSS + minimal browser JS via the platform VFS;
-                  <code class="text-paper-100 text-[0.78rem]">csp = "htmx"</code> preset expands at startup to a known-good policy for SSR apps with stdlib JS from <code class="text-paper-100 text-[0.78rem]">/static/</code>. Zero client framework; styled <code class="text-paper-100 text-[0.78rem]">&lt;dialog&gt;</code> replaces the browser&rsquo;s <code class="text-paper-100 text-[0.78rem]">window.confirm()</code>.</span>
+                  eight first-party widgets (<code class="text-paper-100 text-[0.78rem]">toast</code>, <code class="text-paper-100 text-[0.78rem]">confirm</code>, <code class="text-paper-100 text-[0.78rem]">form</code>, <code class="text-paper-100 text-[0.78rem]">search</code>, <code class="text-paper-100 text-[0.78rem]">inline-edit</code>, <code class="text-paper-100 text-[0.78rem]">sort</code>, <code class="text-paper-100 text-[0.78rem]">pagination</code>, <code class="text-paper-100 text-[0.78rem]">table</code>) ship server helpers + structural-only CSS + minimal browser JS via the platform VFS;
+                  <code class="text-paper-100 text-[0.78rem]">csp = "htmx"</code> preset expands at startup to a known-good policy for SSR apps with stdlib JS from <code class="text-paper-100 text-[0.78rem]">/static/</code>. Zero client framework; styled <code class="text-paper-100 text-[0.78rem]">&lt;dialog&gt;</code> replaces the browser&rsquo;s <code class="text-paper-100 text-[0.78rem]">window.confirm()</code>. <code class="text-paper-100 text-[0.78rem]">htmx/table</code> composes sort + inline-edit per column from a schema array.</span>
+              </li>
+              <li class="flex gap-2">
+                <span class="text-accent mt-0.5">&check;</span>
+                <span><strong class="text-paper-100">Browser-driven E2E suite (v0.4.0).</strong>
+                  <code class="text-paper-100 text-[0.78rem]">tests/e2e_htmx_playwright.sh</code> spins up the example apps and exercises them in headless Chromium via Playwright. 33 assertions per mode covering the widget tier, runtime parity (Lua AND JS variants of <code class="text-paper-100 text-[0.78rem]">hypermedia_photos</code>), CRUD round-trips with CSRF + session, keyboard accessibility, and a per-page <code class="text-paper-100 text-[0.78rem]">@axe-core/playwright</code> WCAG scan that FAILs on critical / serious violations. Two modes: <code class="text-paper-100 text-[0.78rem]">make e2e-htmx-playwright</code> (dev) and <code class="text-paper-100 text-[0.78rem]">make e2e-htmx-playwright-build</code> (against <code class="text-paper-100 text-[0.78rem]">hull build</code> standalone binaries, exercising the embedded-VFS code path). Failure runs upload Playwright traces + final-page screenshots via <code class="text-paper-100 text-[0.78rem]">actions/upload-artifact@v4</code>.</span>
               </li>
               <li class="flex gap-2">
                 <span class="text-accent mt-0.5">&check;</span>
@@ -1767,7 +1773,7 @@ $ hull agent routes my-tool
       </div>
 
       <p class="text-[11px] text-mute-400 leading-relaxed">
-        Hull is at <span class="text-paper-100">v0.3.0</span>. APIs and the manifest schema are pre-stable, so pin your version and read the
+        Hull is at <span class="text-paper-100">v0.4.0</span>. APIs and the manifest schema are pre-stable, so pin your version and read the
         <a href="https://github.com/artalis-io/hull/releases" class="link">changelog</a>
         before upgrading.
         Page last updated <time datetime="2026-06">June&nbsp;2026</time>.

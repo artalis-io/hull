@@ -8,6 +8,239 @@ release-artifact layout).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-06-17
+
+HTMX widget tier completed (8 widgets total: toast, confirm, form,
+search, inline-edit, sort, pagination, table) and shipped with
+browser-driven Playwright E2E coverage. Three production-affecting
+bug fixes in the `hull build` + sandbox pipeline: any app declaring
+`manifest.fs.write` was silently broken when shipped via standalone
+binary, and `static/vendor/*` assets weren't getting embedded.
+Confirm widget fixed twice (open only on `hx-confirm`; resume via
+`htmx.ajax` to work around htmx 2.0.9's deferred-`issueRequest`
+no-op). 31 commits since v0.3.0.
+
+### Added — HTMX widget tier (§1.5.g)
+
+- **`hull/web/htmx/toast@1`** (Lua + JS). Server-fired toasts via
+  `HX-Trigger` header — `toast.success(res, msg)` /
+  `toast.info(res, msg)` / `toast.warning` / `toast.error` /
+  `toast.show(res, msg, opts)`. Auto-dismiss with configurable
+  duration, deduplication by id (server-controllable), single-
+  instance container appended lazily on first toast. ~150 LOC of
+  structural CSS + client JS.
+- **`hull/web/htmx/confirm@1`** (Lua + JS). `confirm.attrs(question,
+  opts?)` produces `hx-confirm` + `data-confirm-*` attribute string
+  for splicing into delete buttons. Replaces the browser's
+  `window.confirm()` with a styled native `<dialog>`. ~140 LOC.
+  Single-instance dialog (second prompt overwrites first), Escape
+  + backdrop click both map to cancel.
+- **`hull/web/htmx/form@1`** (Lua + JS). Validation-error rendering
+  + auto loading state. `form.errors(validation_result) -> errs`,
+  `form.field_error(errs, "name") -> "<small class=...>" or ""`,
+  `form.field_attrs(errs, "name") -> "aria-invalid=true ..." or ""`.
+  Client JS toggles `aria-busy="true"` + `disabled` on submit
+  buttons during in-flight htmx requests; restores on
+  `htmx:afterRequest`. ~75 LOC.
+- **`hull/web/htmx/search@1`** (Lua + JS). `search.input_attrs(opts)`
+  produces a debounced `<input>` attribute string
+  (`hx-get` + `hx-trigger="input changed delay:Nms"` +
+  `hx-target` + optional `hx-push-url`).
+  `search.results_attrs(opts)` for the result container.
+- **`hull/web/htmx/inline-edit@1`** (Lua + JS). Click-to-edit single
+  fields: `inline_edit.cell(opts) -> read view`,
+  `inline_edit.editor(opts) -> edit form`. Two routes + one PATCH
+  pattern; ~30 LOC of server helpers.
+- **`hull/web/htmx/sort@1`** (Lua + JS). Sortable column headers
+  driven by `?sort=col[:asc|desc]`. `sort.parse(req, opts)` reads
+  + allowlist-validates the query param;
+  `sort.header_attrs(col, current, opts)` returns the htmx attrs
+  for a `<th>`. Configurable `opts.swap` for the swap target.
+  Client JS (sort.js) adds Enter / Space keyboard activation
+  without relying on htmx trigger filters (which need
+  `unsafe-eval` and conflict with the `csp = "htmx"` preset).
+  Native `<th>` semantics + `tabindex="0"` + `aria-sort` — no
+  `role="button"` override (would invalidate `aria-sort`).
+  ~30 LOC.
+- **`hull/web/htmx/pagination@1`** (Lua + JS). `pagination.nav(total,
+  opts)` wraps existing `hull/web/pagination@1` page-math and
+  emits htmx-attributed nav HTML. Replaces hand-written nav
+  partials.
+- **`hull/web/htmx/table@1`** (Lua + JS). `table.render(rows,
+  schema, opts)` composes sort + inline-edit per column via a
+  schema array. Custom `render(value, row)` callback for cells.
+  ~155 LOC; the grid pattern of every admin / data UI in one
+  helper.
+- **CSP preset `csp = "htmx"`.** Manifest sugar — expands at
+  startup to a known-good policy for SSR htmx apps with stdlib
+  JS from `/static/`: `default-src 'none'; script-src 'self';
+  style-src 'self' 'unsafe-inline'; img-src 'self' data:;
+  connect-src 'self'; form-action 'self'; frame-ancestors 'none'`.
+  Cheaper than the nonce-based `hull/web/middleware/csp@1` for
+  apps that don't need per-request nonces.
+- **Stdlib static + template VFS.** `stdlib/static/hull/<module>/*`
+  files are embedded in the platform library and served at
+  `/static/hull/<module>/*`. Widget CSS and client JS ship through
+  this path so apps just add one `<link>` and one `<script>` per
+  widget — no vendoring, no per-app bundling.
+- **`htmx.trigger(res, name, payload, opts?)`** with `opts.timing`
+  to pick `HX-Trigger` / `HX-Trigger-After-Settle` /
+  `HX-Trigger-After-Swap`. Replaces the older
+  `trigger_after_settle` / `trigger_after_swap` variants.
+- **`docs/htmx_widgets.md`** — long-form usage guide for the eight
+  widgets, the handler-pre-render pattern (templates can't call
+  functions; widget helpers run once in the handler and the
+  resulting strings flow into template data), setup checklist
+  with htmx-config requirements.
+- **`examples/htmx_widgets_register`** — exercises every widget in
+  one CRUD page (asset register). Doubles as the UX-test surface
+  and the playwright suite's primary target.
+
+### Added — Browser E2E suite (Playwright + axe-core)
+
+- **`tests/e2e_htmx_playwright.sh`** + **`tests/e2e_htmx_playwright.mjs`**.
+  Headless Chromium driven by Playwright; tests
+  `examples/htmx_widgets_register` (all 8 widgets) and
+  `examples/hypermedia_photos` (both Lua AND JS runtimes —
+  runtime-parity gaps surface as concrete FAIL lines). Catches
+  things curl can't: CSS actually applies, htmx swaps fire,
+  widget JS executes under the `csp = "htmx"` strict preset,
+  sort widget Enter / Space keyboard activation works, CRUD
+  round-trip with CSRF + session, confirm-yes-deletes-row.
+- **Two modes.** `make e2e-htmx-playwright` (dev) launches
+  `hull <app.lua>` so files come off disk;
+  `make e2e-htmx-playwright-build` (build) runs `hull build`
+  first and launches the standalone binary, exercising the
+  embedded-VFS code path. 33 assertions in either mode
+  (widgets 15 + photos[lua] 9 + photos[js] 9). Caught
+  the `static/vendor/*` and `fs.write` resolution bugs.
+- **`@axe-core/playwright` WCAG scan** on initial page load,
+  per suite. FAILs on `critical` / `serious` violations; logs
+  `moderate` / `minor` as informational. Caught three real
+  bugs (sort widget `aria-allowed-attr`, two `color-contrast`
+  cases, one `heading-order`) — all fixed in stdlib + the
+  example app.
+- **Failure artifacts.** Each suite writes a Playwright
+  `trace.zip` (per-action DOM snapshots, network log, console,
+  screenshots) and a `final.png` to `build/playwright-artifacts/`
+  on failure only (no spurious uploads on success). CI uploads
+  via `actions/upload-artifact@v4` gated on `if: failure()`.
+  Local runs print the `npx playwright show-trace` invocation.
+- **CI matrix.** New `htmx-browser` job runs both dev and build
+  modes on Linux + macOS. Playwright + Chromium install cached
+  via `actions/cache@v4`; skips cleanly when node / npm absent.
+
+### Added — Build / runtime infrastructure
+
+- **`hl_tool_find_files_ex(..., include_vendor)`** in the C tool
+  cap. `hl_tool_find_files` kept as a back-compat wrapper. Lua
+  binding accepts `opts.include_vendor = true` (default false)
+  so static-asset walks no longer silently drop `static/vendor/*`.
+- **`sandbox_resolve_manifest_path(app_dir, relpath, ...)`** —
+  shared cross-platform helper that joins app_dir + relpath,
+  pre-mkdirs, then `realpath()`s. Used by both seatbelt SBPL
+  build (macOS) and the unveil setup (Linux / OpenBSD / Cosmo)
+  so the sandbox allows the SAME absolute directory the
+  capability layer (`hl_cap_blob_init`, `hl_cap_fs_validate`)
+  resolves to.
+- **`hl_serve_resolve_entry` canonicalizes `app_dir` to an
+  absolute path** when the entry point has no slash (the standard
+  case for `hull build` standalone binaries). Downstream
+  `HlFsConfig.base_dir` is now always absolute, which
+  `hl_blob_store_open` requires.
+
+### Fixed
+
+- **`hull build` silently dropped `static/vendor/*` assets.**
+  `hl_tool_find_files`'s recursive walker hardcoded a skip on
+  any directory named `vendor` — correct for source-file walks
+  but wrong for `static/`, where apps put vendored CSS/JS
+  (pico, htmx, etc.). Standalone binaries returned 404 for
+  every `/static/vendor/*` request; pages rendered unstyled.
+  `hull dev` was unaffected (reads from disk, bypasses the
+  recursive walk). Caught by the new MODE=build playwright pass.
+- **Standalone binaries with `manifest.fs.write` failed
+  `blob.init`** (and any other capability that resolves paths
+  via `HlFsConfig.base_dir`). The sandbox processed
+  `policy->fs_write[i]` (e.g. `"data/"`) as cwd-relative for
+  unveil / realpath / seatbelt, but `hl_cap_blob_init` resolved
+  the same name against `app_dir`. When `cwd != app_dir` (always
+  true in CI / production), the two interpretations disagreed
+  and the app's writes were blocked at syscall time, with a
+  confusing "blob.init: failed (check fs.write declares
+  'data/blobs')" error that pointed at the wrong layer. Affects
+  every app that declares `manifest.fs.write` — including
+  `examples/hypermedia_photos` — when shipped via `hull build`.
+  Fixed by resolving manifest paths against `app_dir` in the
+  sandbox setup (both macOS seatbelt and Linux unveil paths).
+- **Confirm widget popped its dialog on every htmx request.**
+  `handleConfirm` did not check whether the triggering element
+  actually had `hx-confirm`, so any htmx swap (search keystroke,
+  form submit, sort header click) triggered the delete-confirm
+  dialog. Early-return when `evt.detail.question` is empty
+  (htmx sets it only when `hx-confirm` is present). Caught by
+  the playwright suite while typing into the search input.
+- **Confirm widget couldn't resume hx-delete requests.** In
+  htmx 2.0.9, `evt.detail.issueRequest()` is a silent no-op
+  for verbs like `hx-delete` on a standalone `<button>` — both
+  sync inside the event AND deferred after the dialog closes.
+  Verified by capturing the event externally and calling
+  `issueRequest()` at various points: no path makes it fire.
+  Workaround: `close()` now uses `htmx.ajax(verb, path, {source,
+  target})` with the same config the original click would have
+  produced, temporarily stripping `hx-confirm` from the source
+  element so the resumed request doesn't re-trigger the dialog.
+- **Sort widget broke keyboard accessibility under
+  `csp = "htmx"`.** Used `hx-trigger="click, keyup[key=='Enter']
+  from:this, keyup[key==' '] from:this"`. The `[expr]` filter
+  syntax goes through `new Function()` eval, which the strict
+  preset rejects (`allowEval:false`). htmx then dropped the
+  entire trigger string — so Enter / Space AND the bare `click`
+  both stopped working. Moved keyboard activation to a new
+  `sort.js` client file that listens for keydown Enter / Space
+  on `.hull-sort-header` and dispatches a real click. The
+  `hx-trigger` collapses to just `click`.
+- **Sort widget hard-coded `hx-swap="outerHTML"`.** When
+  `opts.target` was a wrapping container (e.g. `#grid` holding
+  table + nav + actions), outerHTML replaced the container
+  itself with the response, destroying the target for any
+  subsequent request that named `#grid`. Made `hx-swap`
+  configurable via `opts.swap`; omitted by default so htmx
+  uses its own default (`innerHTML`), which is correct for
+  the common container-wrapping pattern.
+- **Sort widget invalidated `aria-sort`.** Put `role="button"`
+  on `<th>`, which overrode the implicit `columnheader` role.
+  `aria-sort` is only valid on `columnheader` / `rowheader` /
+  `gridcell`, so axe-core flagged it as `aria-allowed-attr`
+  critical. Worse, screen readers said "Name, button" instead
+  of "Name, column header, sorted ascending". Dropped
+  `role="button"`; `tabindex="0"` + `sort.js` keyboard handler
+  preserves activation.
+- **`examples/hypermedia_photos/app.js` was never migrated to
+  the §1.5.g widget tier.** Lua sibling had been; JS rendered
+  `<input id="search-input">` with no `hx-*` attrs and delete
+  buttons without `hx-confirm`. Mirrored the Lua wiring
+  line-for-line: imports, manifest entries, pre-rendered
+  attribute constants, plumbing through `rowData()` /
+  `feedData()` / form re-render path.
+- **A11y polish in `examples/htmx_widgets_register`** (all
+  axe-surfaced): explicit text color on table headers so contrast
+  stays WCAG-AA in both light and dark Pico; `.badge-retired`
+  bumped from grey-500/grey-100 (~3.4:1, fail) to grey-700/grey-200
+  (~7.5:1, AAA); `_form.html` `<h3>` → `<h2>` so heading order
+  doesn't skip levels.
+
+### Changed
+
+- **`htmx.trigger(res, name, payload, opts?)`** with
+  `opts.timing` is the canonical surface for firing client
+  events. The earlier
+  `trigger_after_settle` / `trigger_after_swap` /
+  `triggerAfterSettle` / `triggerAfterSwap` variants are
+  removed. Migration is mechanical:
+  `htmx.trigger_after_settle(res, "foo", {x=1})` →
+  `htmx.trigger(res, "foo", {x=1}, {timing="after-settle"})`.
+
 ## [0.3.0] — 2026-06-15
 
 Production-grade authentication & authorization stack, streaming multipart upload, content-addressed blob storage with runtime caches, and asymmetric crypto. The auth stack alone went through **13 iterative security-review rounds** (rounds 1–13); the final round returned zero findings across three independent reviewers, marking convergence. Eight new stdlib modules ship in this release: `hull/web/auth-flows@1`, `hull/web/middleware/totp@1`, `hull/web/middleware/oauth@1`, `hull/web/middleware/audit-log@1`, `hull/web/auth-health@1`, `hull/web/pwned@1`, `hull/qrcode@1`, `hull/attachment@1`, `hull/blob@1`, `hull/mime@1`. (132 commits since v0.2.0.)
