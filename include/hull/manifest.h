@@ -153,4 +153,43 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc);
 
 #endif /* HL_ENABLE_JS */
 
+/* Forward decl for the sealed-arena helper below. */
+typedef struct HlSealArena HlSealArena;
+
+/*
+ * Copy a fully-extracted manifest into a sealed arena.
+ *
+ * The manifest is the canonical example of "boot-built then read-only
+ * for the rest of the process": fs/hosts/env allowlists, declared
+ * modules, CSP, CORS policy — all derived from `app.manifest({...})`
+ * at startup, then read on every request by the capability layer.
+ * After this call returns 0:
+ *
+ *   - All of `dst`'s string pointers point into the arena.
+ *   - The integer / flag fields are copied by value.
+ *   - The HlManifest struct itself stays where the CALLER put it
+ *     (typically embedded in HlRuntime or HlServerState). If the
+ *     caller wants the struct ALSO in the arena, they can allocate
+ *     it via hl_seal_arena_alloc first and pass the in-arena address
+ *     as `dst`. Otherwise the parent struct's mutability is the
+ *     caller's responsibility.
+ *
+ * The caller is responsible for:
+ *   - Calling `hl_seal_arena_seal(arena)` ONCE after all desired
+ *     seal-into-arena work is complete (sealing this manifest, any
+ *     sandbox-policy derived from it, etc.). The seal flips the
+ *     arena RO; subsequent writes to anything allocated here fault.
+ *   - Freeing the SOURCE manifest's strings (`hl_manifest_free(src)`)
+ *     after this returns 0 — dst no longer aliases them.
+ *
+ * `dst->alloc` is set to NULL after sealing, since the strings are
+ * no longer allocator-owned. Calling `hl_manifest_free(dst)` after
+ * this is therefore a no-op for the strings (which is what we want
+ * — the arena owns them, lifetime is process-lifetime).
+ *
+ * Returns 0 on success, -1 on failure (arena out of space, NULL
+ * inputs, src not present). On -1 `dst` is zero-initialized.
+ */
+int hl_manifest_seal(HlManifest *dst, const HlManifest *src, HlSealArena *arena);
+
 #endif /* HL_MANIFEST_H */

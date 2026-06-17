@@ -17,6 +17,7 @@
 
 #include "hull/manifest.h"
 #include "hull/alloc.h"
+#include "hull/seal_arena.h"
 #include "manifest_internal.h"
 #include "log.h"
 #include <string.h>
@@ -76,4 +77,75 @@ void hl_manifest_free(HlManifest *m)
         hl_manifest_str_free(a, &m->modules[i].name);
 
     memset(m, 0, sizeof(*m));
+}
+
+/* ── hl_manifest_seal ──────────────────────────────────────────────── */
+
+/* Shared helper: copy one string into the arena, store the in-arena
+ * pointer into *out, returning -1 on arena OOM. Treats NULL src as
+ * success-with-NULL (some manifest fields are legitimately optional). */
+static int seal_str(HlSealArena *arena, const char **out, const char *src)
+{
+    if (!src) { *out = NULL; return 0; }
+    char *dup = hl_seal_arena_strdup(arena, src);
+    if (!dup) return -1;
+    *out = dup;
+    return 0;
+}
+
+int hl_manifest_seal(HlManifest *dst, const HlManifest *src, HlSealArena *arena)
+{
+    if (!dst || !src || !arena) return -1;
+    if (!src->present) {
+        /* Nothing to seal — apps without a manifest declaration get
+         * a deny-default policy elsewhere. Zero dst to be safe. */
+        memset(dst, 0, sizeof(*dst));
+        return -1;
+    }
+    if (hl_seal_arena_is_sealed(arena)) {
+        /* Arena already sealed; can't allocate. Programming bug. */
+        memset(dst, 0, sizeof(*dst));
+        return -1;
+    }
+
+    /* Start with a value-copy of integer + bounded-array fields. We'll
+     * overwrite the pointer fields below. The wasm_*, gpu_*, compute,
+     * tui, allow_dynamic_*, present, *_count, *_set flags all travel
+     * as scalars and are immutable-by-copy here. */
+    *dst = *src;
+    /* The sealed manifest is NOT allocator-owned for its strings; clear
+     * the allocator pointer so hl_manifest_free on dst is a safe no-op. */
+    dst->alloc = NULL;
+
+    /* Strings: walk and dup each one into the arena. If any fails we
+     * bail with -1; the arena's already-allocated portion stays put
+     * (sealed-arena allocations can't be individually freed; the
+     * caller is expected to destroy the arena and start over on
+     * failure). */
+    for (int i = 0; i < src->fs_read_count; i++)
+        if (seal_str(arena, &dst->fs_read[i], src->fs_read[i]) != 0) goto fail;
+    for (int i = 0; i < src->fs_write_count; i++)
+        if (seal_str(arena, &dst->fs_write[i], src->fs_write[i]) != 0) goto fail;
+    for (int i = 0; i < src->env_count; i++)
+        if (seal_str(arena, &dst->env[i], src->env[i]) != 0) goto fail;
+    for (int i = 0; i < src->hosts_count; i++)
+        if (seal_str(arena, &dst->hosts[i], src->hosts[i]) != 0) goto fail;
+    if (seal_str(arena, &dst->csp, src->csp) != 0) goto fail;
+    for (int i = 0; i < src->cors_origin_count; i++)
+        if (seal_str(arena, &dst->cors_origins[i], src->cors_origins[i]) != 0)
+            goto fail;
+    if (seal_str(arena, &dst->cors_methods, src->cors_methods) != 0) goto fail;
+    if (seal_str(arena, &dst->cors_headers, src->cors_headers) != 0) goto fail;
+    for (int i = 0; i < src->modules_count; i++)
+        if (seal_str(arena, &dst->modules[i].name, src->modules[i].name) != 0)
+            goto fail;
+
+    return 0;
+
+fail:
+    /* Don't zero dst — partial pointers into the arena are valid reads
+     * (the arena is still mutable + alive); zeroing would also blow
+     * away the integer fields. Caller treats -1 as "destroy the arena
+     * and don't use dst". */
+    return -1;
 }
