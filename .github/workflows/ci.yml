@@ -436,9 +436,35 @@ jobs:
           path: tests/.playwright
           key: playwright-${{ runner.os }}-v1.48.0
 
-      - name: HTMX browser E2E
+      - name: HTMX browser E2E (dev)
         timeout-minutes: 6
         run: make e2e-htmx-playwright
+
+      # Same suite, but against `hull build` standalone binaries —
+      # exercises the embedded-VFS code path. Needs hull rebuilt
+      # with EMBED_PLATFORM=1, which we do inline so the
+      # MODE=dev step above still gets the lighter binary.
+      - name: HTMX browser E2E (build mode)
+        timeout-minutes: 8
+        run: |
+          make platform
+          make EMBED_PLATFORM=1
+          make e2e-htmx-playwright-build
+
+      # On failure either suite writes playwright traces + final-state
+      # screenshots under build/playwright-artifacts/. Upload them so
+      # the diff between "test failed in CI" and "test failed for me
+      # locally" disappears — `npx playwright show-trace trace.zip`
+      # opens an interactive timeline (network log, DOM snapshots,
+      # console events, screenshots per action).
+      - name: Upload playwright artifacts
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: htmx-playwright-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/playwright-artifacts/
+          retention-days: 7
+          if-no-files-found: ignore
 
   benchmark:
     name: Benchmark (${{ matrix.runtime }})

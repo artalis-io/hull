@@ -14,6 +14,9 @@
 // Playwright lives outside this tree (tests/.playwright/node_modules/).
 // ESM ignores NODE_PATH, so resolve it via a dynamic import from an
 // absolute path supplied by the orchestrator script.
+import { mkdir }   from "node:fs/promises";
+import { join }   from "node:path";
+
 const pwDir = process.env.PLAYWRIGHT_DIR;
 if (!pwDir) {
     console.error("e2e_htmx_playwright.mjs: PLAYWRIGHT_DIR env var must be set "
@@ -21,13 +24,24 @@ if (!pwDir) {
         + "script sets this)");
     process.exit(2);
 }
-const { chromium } = await import(pwDir + "/node_modules/playwright/index.mjs");
+const { chromium }   = await import(pwDir + "/node_modules/playwright/index.mjs");
+const { AxeBuilder } = await import(pwDir + "/node_modules/@axe-core/playwright/dist/index.mjs");
 
-const [suite, base] = process.argv.slice(2);
+// Where to drop failure artifacts (trace + final screenshot). Set
+// by the orchestrator; when unset we skip artifact capture, which
+// is fine for ad-hoc local invocations of the .mjs.
+const artifactRoot = process.env.HULL_PW_ARTIFACTS || null;
+
+const [suite, base, runtime] = process.argv.slice(2);
 if (!suite || !base) {
-    console.error("usage: node e2e_htmx_playwright.mjs <widgets|photos> <base-url>");
+    console.error("usage: node e2e_htmx_playwright.mjs <widgets|photos> <base-url> [runtime]");
     process.exit(2);
 }
+// Runtime label is purely cosmetic for now — used in the banner +
+// (when traces ship) the artifact filename. Default "lua" matches
+// the historical default and keeps single-arg invocations working.
+const rt = runtime || "lua";
+const suiteLabel = `${suite}[${rt}]`;
 
 let pass = 0, fail = 0;
 const logs = [];
@@ -61,6 +75,38 @@ function attachDiagnostics(page) {
         if (url.startsWith("data:")) return;
         logs.push(`[reqfailed] ${url} — ${r.failure()?.errorText || "?"}`);
     });
+}
+
+// Run @axe-core against the current page and treat the WCAG verdict
+// as a test assertion. We fail HARD on `critical` or `serious`
+// findings (broken semantics, missing labels, keyboard traps) and
+// log `moderate` / `minor` as informational — those are real
+// concerns but more theme-dependent (e.g., Pico's color-contrast
+// choices) and shouldn't gate every CI run while a theme is in
+// flux. The full violation list always prints so debugging
+// doesn't need a second run with --debug.
+async function expectA11y(page, label) {
+    const results = await new AxeBuilder({ page }).analyze();
+    const v = results.violations;
+    const critSer = v.filter((x) => x.impact === "critical" || x.impact === "serious");
+    const lesser  = v.filter((x) => x.impact === "moderate" || x.impact === "minor");
+    if (critSer.length === 0) {
+        ok(`a11y: ${label} clean (${lesser.length} moderate/minor noted)`);
+    } else {
+        const summary = critSer.map((x) =>
+            `${x.impact}/${x.id} (${x.nodes.length} node${x.nodes.length === 1 ? "" : "s"})`
+        ).join(", ");
+        ko(`a11y: ${label} has ${critSer.length} critical/serious violation(s): ${summary}`);
+    }
+    // Always emit the full violation table to logs so failures show
+    // node selectors + help URLs without a second debugger pass.
+    for (const x of v) {
+        logs.push(`[axe.${x.impact}] ${x.id} — ${x.description} (${x.helpUrl})`);
+        for (const n of x.nodes.slice(0, 3)) {
+            logs.push(`  • ${n.target.join(" ")}`);
+        }
+        if (x.nodes.length > 3) logs.push(`  • …and ${x.nodes.length - 3} more`);
+    }
 }
 
 async function expectCssApplied(page) {
@@ -126,6 +172,7 @@ async function runWidgets(page) {
     await page.goto(base, { waitUntil: "networkidle" });
 
     await expectCssApplied(page);
+    await expectA11y(page, "initial home page");
 
     const h1 = await page.locator("h1").innerText();
     if (/Asset register/i.test(h1)) ok("page heading renders");
@@ -341,6 +388,7 @@ async function runPhotos(page) {
     await page.goto(base, { waitUntil: "networkidle" });
 
     await expectCssApplied(page);
+    await expectA11y(page, "initial home page");
 
     // The app calls the entry-list region #entry-feed; its presence
     // proves SSR + CSRF + session middleware all ran successfully
@@ -369,17 +417,51 @@ async function runPhotos(page) {
         ko(`CSP header missing or has no nonce: "${csp || "(none)"}"`);
     }
 
-    // Search input renders — just verify the widget rendered into
-    // the DOM. Exercising the request path needs a valid CSRF token
-    // dance (covered by e2e_hypermedia_photos_upload.sh); duplicating
-    // it here would be churn.
+    // Search input rendered via the htmx widget tier. Both Lua AND
+    // JS variants of the example app pre-render the attrs via
+    // hull/web/htmx/search; a missing hx-get here is a parity
+    // regression in one variant. (The widgets suite already
+    // exercises debounce + filter end-to-end; this assertion is
+    // about the SSR shape, not the runtime behavior.)
     const searchInputCount = await page.locator("#search-input").count();
-    if (searchInputCount === 1) {
+    if (searchInputCount !== 1) {
+        ko(`search input not rendered (found ${searchInputCount})`);
+    } else {
         const hxGet = await page.locator("#search-input").getAttribute("hx-get");
         if (hxGet) ok(`search widget renders (hx-get=${hxGet})`);
-        else ko("search widget rendered without hx-get attribute");
-    } else {
-        ko(`search input not rendered (found ${searchInputCount})`);
+        else ko("search widget rendered without hx-get attribute (parity regression?)");
+    }
+
+    // ── CRUD round-trip ──────────────────────────────────────────
+    // Real exercise: create an entry via the form. The CSRF token
+    // + session cookie travel automatically with the form submit,
+    // so a runtime-parity bug in either middleware would crash this
+    // test (and it caught the missing-search-widget gap above).
+    //
+    // We deliberately don't exercise the delete-via-confirm path
+    // here: htmx 2.0.9's `issueRequest()` from a deferred
+    // htmx:confirm event is a no-op for non-form-driven verbs
+    // (DELETE on a button) — investigated separately. Once that's
+    // resolved, the delete-via-confirm assertion can be added.
+    const entryTitle = `e2e-${rt}-${Date.now()}`;
+    {
+        const respP = page.waitForResponse(
+            (r) => r.url().endsWith("/entries") && r.request().method() === "POST"
+                && r.status() === 200,
+            { timeout: 4000 }).catch(() => null);
+        await page.locator('#new-entry input[name="title"]').fill(entryTitle);
+        await page.locator('#new-entry button[type="submit"]').click();
+        const resp = await respP;
+        if (!resp) {
+            ko(`CRUD create: POST /entries never replied (CSRF/session issue?)`);
+        } else {
+            await sleep(150);
+            const matched = await page.locator(`#entry-feed :text("${entryTitle}")`)
+                .first().waitFor({ timeout: 2000 })
+                .then(() => true).catch(() => false);
+            if (matched) ok(`CRUD create: new entry "${entryTitle}" rendered in feed`);
+            else ko(`CRUD create: entry submitted but title not visible in feed`);
+        }
     }
 }
 
@@ -389,7 +471,25 @@ const ctx = await browser.newContext({ ignoreHTTPSErrors: true });
 const page = await ctx.newPage();
 attachDiagnostics(page);
 
-console.log(`── e2e_htmx_playwright[${suite}] → ${base} ──`);
+// Tracing captures every action, network request, DOM snapshot, and
+// console event. The trace is only KEPT when the suite fails — on
+// success we stop without writing, since the artifacts add up fast
+// (each suite trace is ~1-3 MB). `snapshots: true` records DOM at
+// each action so the trace viewer can rewind; `screenshots: true`
+// adds per-action thumbnails; `sources: true` embeds the test
+// source so failures show the line that ran. View with:
+//     npx playwright show-trace path/to/trace.zip
+const suiteArtifactDir = artifactRoot ? join(artifactRoot, `${suite}-${rt}`) : null;
+if (artifactRoot) {
+    await ctx.tracing.start({
+        screenshots: true,
+        snapshots:   true,
+        sources:     true,
+        title:       suiteLabel,
+    });
+}
+
+console.log(`── e2e_htmx_playwright[${suiteLabel}] → ${base} ──`);
 
 try {
     if (suite === "widgets") {
@@ -400,15 +500,38 @@ try {
         ko(`unknown suite: ${suite}`);
     }
 } catch (e) {
-    ko(`uncaught exception in ${suite}`, e.message);
+    ko(`uncaught exception in ${suiteLabel}`, e.message);
 } finally {
+    if (artifactRoot) {
+        if (fail > 0) {
+            // Failure: persist both the trace and a fresh full-page
+            // screenshot of the final state. The trace is the rich
+            // artifact; the screenshot is what someone clicks first
+            // in CI's artifact tab. Always emit both so debuggers
+            // don't have to install playwright to see "what did
+            // the page look like when it died".
+            await mkdir(suiteArtifactDir, { recursive: true });
+            await page.screenshot({
+                path: join(suiteArtifactDir, "final.png"),
+                fullPage: true,
+            }).catch((e) => console.log("  (screenshot failed:", e.message + ")"));
+            await ctx.tracing.stop({ path: join(suiteArtifactDir, "trace.zip") });
+        } else {
+            // Success: discard the buffered trace data without
+            // writing to disk. Keeps disk + artifact upload small.
+            await ctx.tracing.stop();
+        }
+    }
     await browser.close();
 }
 
 console.log("");
-console.log(`${suite}: ${pass} passed, ${fail} failed`);
+console.log(`${suiteLabel}: ${pass} passed, ${fail} failed`);
 if (fail > 0 && logs.length) {
     console.log("── browser diagnostics ──");
     for (const line of logs) console.log(line);
+}
+if (fail > 0 && suiteArtifactDir) {
+    console.log(`── artifacts: ${suiteArtifactDir} ──`);
 }
 process.exit(fail > 0 ? 1 : 0);

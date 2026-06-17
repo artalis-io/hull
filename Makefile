@@ -2488,6 +2488,19 @@ e2e-hypermedia-photos-upload: $(BUILDDIR)/hull
 e2e-htmx-playwright: $(BUILDDIR)/hull
 	sh tests/e2e_htmx_playwright.sh
 
+# Same suite, but against `hull build` standalone binaries instead
+# of `hull <app.lua>` (dev mode). Exercises the embedded-VFS code
+# path — static files, templates, migrations, stdlib widget assets
+# all loaded from the binary, not the filesystem. Needs hull built
+# with EMBED_PLATFORM=1 (the make-rule below ensures it).
+e2e-htmx-playwright-build: $(BUILDDIR)/hull $(BUILDDIR)/libhull_platform.a
+	@if ! $(BUILDDIR)/hull doctor --json 2>/dev/null | grep -q '"hull_build":"ready"'; then \
+	  echo "e2e-htmx-playwright-build: hull built without embedded platform."; \
+	  echo "Run: make platform && make EMBED_PLATFORM=1"; \
+	  exit 1; \
+	fi
+	MODE=build sh tests/e2e_htmx_playwright.sh
+
 e2e-jwt-asym: $(BUILDDIR)/hull
 	RUNTIME=$(RUNTIME) sh tests/e2e_jwt_asym.sh
 
