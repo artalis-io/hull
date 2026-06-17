@@ -833,7 +833,7 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
      * polyfill resolves relative to cwd, which often isn't
      * app_dir under e.g. CI / hull build). */
     for (int i = 0; i < policy->fs_read_count; i++) {
-        char abs[SEATBELT_PATH_SIZE];
+        char abs[SANDBOX_PATH_MAX];
         if (sandbox_resolve_manifest_path(app_dir, policy->fs_read[i],
                                            abs, sizeof(abs)) != 0 ||
             unveil(abs, "r") != 0) {
@@ -843,7 +843,7 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
     }
 
     for (int i = 0; i < policy->fs_write_count; i++) {
-        char abs[SEATBELT_PATH_SIZE];
+        char abs[SANDBOX_PATH_MAX];
         if (sandbox_resolve_manifest_path(app_dir, policy->fs_write[i],
                                            abs, sizeof(abs)) != 0 ||
             unveil(abs, "rwc") != 0) {
