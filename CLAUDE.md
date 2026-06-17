@@ -1,5 +1,19 @@
 # HULL. Development Guide
 
+## Building an application on Hull?
+
+If you're using Hull to build an app (rather than hacking on Hull
+itself), start at **[BOOTSTRAP.md](BOOTSTRAP.md)**. It's a single-file
+prompt for AI coding agents (Claude Code, Codex, OpenCode, Cursor) that
+covers installation, the required-reading order through this guide, a
+forced discovery / plan / implement workflow, the widget-tier reach
+order, the anti-pattern table, and a `PLATFORM_GAPS.md` protocol for
+flagging Hull-side gaps instead of coding around them. Same file works
+for any product spec — hand the agent BOOTSTRAP.md + the spec.
+
+The rest of THIS file is the Hull-internal development guide for
+contributors hacking on the runtime, stdlib, or build pipeline.
+
 ## Distribution
 
 ### HTTPS / CA bundle

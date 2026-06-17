@@ -1095,6 +1095,16 @@ Full index with start-here guidance by role lives in [`docs/README.md`](docs/REA
 
 ## Using Hull with AI Agents
 
+**Starting a new app with an AI coding agent?** Hand the agent
+**[BOOTSTRAP.md](BOOTSTRAP.md)** plus your product spec. It's a
+single-file prompt (Claude Code / Codex / OpenCode / Cursor compatible)
+that installs Hull, walks the agent through the required-reading order,
+forces a Phase 1 (discovery + clarifying questions) → Phase 2 (`PLAN.md`
+for human approval) → Phase 3 (implement, tests after each step)
+workflow, and sets up a `PLATFORM_GAPS.md` log so the agent flags
+Hull-side gaps instead of coding around them. Same prompt works for
+any product spec — fully app-agnostic.
+
 Hull provides structured JSON interfaces for AI coding agents via the `hull agent` command. The same interfaces work for any automation (CI scripts, service orchestrators, or human developers who prefer structured output. **Twenty-seven machine-readable subcommands** cover routes, database schema, test results, server status, HTTP responses, deployment readiness, capability analysis, request preview, one-shot eval, and more) no screen-scraping or log parsing required.
 
 ```
