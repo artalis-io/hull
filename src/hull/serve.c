@@ -35,6 +35,7 @@
 #include "hull/net/keel.h"
 #include "hull/cacert.h"
 #include "hull/csp.h"
+#include "hull/seal_arena.h"
 #ifdef HL_ENABLE_DB
 #include "hull/worker_db.h"
 #include "hull/cap/db.h"
@@ -652,6 +653,22 @@ typedef struct {
 
     /* Manifest + wired capability configs */
     HlManifest           manifest;
+    /* Page-backed RO storage for the sealed manifest's strings. The
+     * manifest itself stays as an embedded value above (no pointer
+     * indirection through HlRuntime / cap-config consumers required);
+     * after hl_manifest_seal(), every const char * inside `manifest`
+     * points into this arena, and the arena is mprotect()'d RO. The
+     * attacker we're defending against has a heap memory-write bug
+     * and is trying to expand fs.write / hosts / env allowlists
+     * post-boot; sealing turns that into SIGSEGV.
+     *
+     * Sized for the bounded manifest fields (HL_MANIFEST_MAX_PATHS +
+     * MODULES + HOSTS times reasonable path lengths) plus headroom;
+     * one page (4 KiB) is enough today, we round up to a few for
+     * future-proofing without measurable cost (~unused mmap pages
+     * never get faulted in). */
+    HlSealArena          seal_arena;
+    int                  manifest_sealed; /* 1 after successful seal */
     HlResolvedModuleSet  module_set; /* frozen after resolver; consulted by gating */
     HlFsConfig           fs_cfg_storage;
     HlEnvConfig          env_cfg_storage;
@@ -1103,6 +1120,41 @@ static int hl_serve_wire_caps(HlServerState *s)
                  s->manifest.fs_read_count, s->manifest.fs_write_count,
                  s->manifest.env_count, s->manifest.hosts_count,
                  s->manifest.modules_count);
+
+        /* Seal the manifest's strings into a read-only mmap arena BEFORE
+         * the resolver / sandbox / capability layer start consuming it.
+         * From this point on, every fs_read[i] / fs_write[i] / hosts[i]
+         * / env[i] / csp / cors_* / modules[i].name points into a
+         * mprotect(PROT_READ) page. An attacker with a heap memory-
+         * write bug who tries to expand the allowlists post-boot gets
+         * SIGSEGV instead of a silent capability escalation.
+         *
+         * Sealing failure is FATAL — the alternative is shipping with
+         * unsealed policy, which silently weakens the hardening
+         * guarantee. See docs/security.md §Sealed runtime tables. */
+        if (hl_seal_arena_init(&s->seal_arena, 16 * 1024,
+                                "manifest-policy") != 0) {
+            log_error("[hull:c] seal arena init failed (mmap)");
+            return -1;
+        }
+        HlManifest sealed;
+        if (hl_manifest_seal(&sealed, &s->manifest, &s->seal_arena) != 0) {
+            log_error("[hull:c] manifest seal failed (arena OOM?)");
+            hl_seal_arena_destroy(&s->seal_arena);
+            return -1;
+        }
+        /* Swap: free the original allocator-backed strings, then
+         * bitwise-copy the sealed struct in. sealed.alloc is NULL so
+         * subsequent hl_manifest_free(&s->manifest) is a safe no-op
+         * for strings (the arena owns them; destroyed at shutdown). */
+        hl_manifest_free(&s->manifest);
+        s->manifest = sealed;
+        if (hl_seal_arena_seal(&s->seal_arena) != 0) {
+            log_error("[hull:c] seal arena mprotect failed");
+            hl_seal_arena_destroy(&s->seal_arena);
+            return -1;
+        }
+        s->manifest_sealed = 1;
     }
 
     /* Resolve manifest.modules against the canonical registry. Always
@@ -1303,7 +1355,17 @@ static int hl_serve_wire_caps(HlServerState *s)
 /* Cleanup if a phase fails after wire_caps has succeeded. */
 static void hl_serve_undo_caps(HlServerState *s)
 {
+    /* hl_manifest_free is a safe no-op on a sealed manifest (alloc=NULL
+     * → hl_manifest_str_free returns immediately for every string).
+     * The actual sealed strings live in seal_arena and are released by
+     * its munmap below. Order: zero the manifest pointers first, then
+     * destroy the arena, so nothing holds dangling refs into munmap'd
+     * memory after this returns. */
     hl_manifest_free(&s->manifest);
+    if (s->manifest_sealed) {
+        hl_seal_arena_destroy(&s->seal_arena);
+        s->manifest_sealed = 0;
+    }
     s->manifest_extracted = 0;
     if (s->client_tls_ctx) {
         kl_tls_mbedtls_ctx_destroy(s->client_tls_ctx);
@@ -1447,11 +1509,19 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
         s->comp_ctx = NULL;
     }
 
-    /* Cleanup — free manifest strings AFTER server stops
-     * (env_cfg and http_cfg reference them during runtime) */
+    /* Cleanup — free manifest AFTER server stops (env_cfg and
+     * http_cfg reference its strings during runtime). For a sealed
+     * manifest the hl_manifest_free is a no-op for strings; the
+     * actual memory is released when the seal arena is destroyed
+     * below. Order matters: zero the struct's pointers BEFORE
+     * munmap so no consumer can dereference into a freed mapping. */
     if (s->manifest_extracted) {
         hl_manifest_free(&s->manifest);
         s->manifest_extracted = 0;
+    }
+    if (s->manifest_sealed) {
+        hl_seal_arena_destroy(&s->seal_arena);
+        s->manifest_sealed = 0;
     }
 
     /* Detach the borrowed async_ctx + net_ctx pointers from the runtime
@@ -1618,6 +1688,12 @@ static void hl_serve_cleanup(HlServerState *s)
     /* Free manifest if extracted but wire_and_start didn't finish */
     if (s->manifest_extracted)
         hl_manifest_free(&s->manifest);
+    /* Sealed manifest: hl_manifest_free above was a no-op (alloc=NULL);
+     * the actual mapping is freed here. */
+    if (s->manifest_sealed) {
+        hl_seal_arena_destroy(&s->seal_arena);
+        s->manifest_sealed = 0;
+    }
 
     /* Free thread pool BEFORE server (via the backend vtable) */
     if (s->thread_pool) {
