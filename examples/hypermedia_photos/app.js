@@ -14,6 +14,9 @@ import { cookie }           from "hull:web:cookie";
 import { flash }            from "hull:web:flash";
 import { form }             from "hull:web:form";
 import { htmx }             from "hull:web:htmx";
+import { confirm as htmxConfirm } from "hull:web:htmx:confirm";
+import { search  as htmxSearch  } from "hull:web:htmx:search";
+import { form    as htmxForm    } from "hull:web:htmx:form";
 import { csp }              from "hull:web:middleware:csp";
 import { csrf }             from "hull:web:middleware:csrf";
 import { idempotency }      from "hull:web:middleware:idempotency";
@@ -24,9 +27,28 @@ import { pagination }       from "hull:web:pagination";
 // handful of entries. Real apps would set this to 20-50.
 const PER_PAGE_DEFAULT = 3;
 
+// Pre-rendered widget attribute strings. The template engine
+// supports nil-safe dot paths but NOT function calls, so widget
+// helpers run once at module load and the resulting strings
+// flow into template data. These don't depend on per-request
+// state, so build them at load time. (Same shape + names as
+// `app.lua` — keep them in lockstep.)
+const DELETE_CONFIRM_ATTRS = htmxConfirm.attrs(
+    "Delete this entry? (photos will be removed too)",
+    { danger: true, yes: "Delete" });
+
+const SEARCH_INPUT_ATTRS = htmxSearch.inputAttrs({
+    url:     "/search",
+    target:  "#entry-feed",
+    pushUrl: true,
+});
+
 app.manifest({
     modules: [
         "hull/web/htmx@1",
+        "hull/web/htmx/confirm@1",
+        "hull/web/htmx/search@1",
+        "hull/web/htmx/form@1",
         "hull/web/flash@1",
         "hull/web/pagination@1",
         "hull/validate@1",
@@ -129,7 +151,11 @@ function attachmentsForMany(entryIds) {
 
 function rowData(row, req) {
     row.attachments = attachmentsFor(row.id);
-    return { t: row, csrf_token: req.ctx.csrf_token };
+    return {
+        t: row,
+        csrf_token: req.ctx.csrf_token,
+        delete_confirm_attrs: DELETE_CONFIRM_ATTRS,
+    };
 }
 
 function sessionBootstrap(req, res) {
@@ -228,6 +254,9 @@ function feedData(req, q) {
         entries:      entries,
         has_entries:  entries.length > 0,
         pagination: nav,
+        // Pre-rendered widget strings consumed by the partials.
+        search_input_attrs:   SEARCH_INPUT_ATTRS,
+        delete_confirm_attrs: DELETE_CONFIRM_ATTRS,
     };
 }
 
@@ -239,6 +268,11 @@ app.get("/", (req, res) => {
     const data = feedData(req, q);
     data.flash = msgs;
     data.has_flash = msgs.length > 0;
+    // Initial render: no validation errors yet. htmxForm helpers
+    // return "" / a clean attr string when passed null errors.
+    data.values = data.values || {};
+    data.title_attrs = htmxForm.fieldAttrs(null, "title");
+    data.title_error = htmxForm.fieldError(null, "title");
     res.html(template.render("pages/home.html", data));
 });
 
@@ -262,9 +296,11 @@ app.post("/entries", (req, res) => {
         htmx.retarget(res, "#new-entry");
         htmx.reswap(res, "outerHTML");
         res.html(template.render("partials/entry_form.html", {
-            csrf_token: req.ctx.csrf_token,
-            values:     fields,
-            errors:     errors,
+            csrf_token:  req.ctx.csrf_token,
+            values:      fields,
+            errors:      errors,
+            title_attrs: htmxForm.fieldAttrs(errors, "title"),
+            title_error: htmxForm.fieldError(errors, "title"),
         }));
         return;
     }
