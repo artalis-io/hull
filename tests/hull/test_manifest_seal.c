@@ -202,6 +202,13 @@ UTEST(manifest_seal, write_to_sealed_string_faults)
      * allowlist. */
     pid_t pid = fork();
     if (pid == 0) {
+        /* Reset SEGV/BUS handlers to SIG_DFL so the protection fault
+         * propagates as a termination (WIFSIGNALED) instead of being
+         * caught by a sanitizer runtime (ASan/MSan install their own
+         * handlers that print a diagnostic and _exit(1), which would
+         * also run leak detection on the still-live src manifest). */
+        signal(SIGSEGV, SIG_DFL);
+        signal(SIGBUS,  SIG_DFL);
         char *target = (char *)dst.fs_write[0];
         target[0] = '/';
         _exit(0);
