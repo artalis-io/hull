@@ -282,7 +282,6 @@ app.patch("/assets/:id/:col", function(req, res)
     local val  = trim(body.value)
     if val == "" then
         -- Re-render the editor with the same value so the user can fix.
-        local r = _row(id)
         res:html(inline_edit.editor({
             value      = val,
             save_url   = "/assets/" .. id .. "/" .. col,

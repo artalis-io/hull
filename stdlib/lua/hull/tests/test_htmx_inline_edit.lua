@@ -18,6 +18,13 @@ local function assert_no_match(s, sub, msg)
         error((msg or "") .. " did not expect '" .. sub .. "' in '" .. s .. "'")
     end
 end
+local function assert_eq(actual, expected, msg)
+    if actual ~= expected then
+        error((msg or "assertion failed")
+            .. " (expected " .. tostring(expected)
+            .. ", got " .. tostring(actual) .. ")")
+    end
+end
 
 -- ── cell() ──────────────────────────────────────────────────────────
 
