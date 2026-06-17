@@ -12,10 +12,17 @@
 
 #ifdef HL_EMBED_CA_BUNDLE
 #include "embedded_cacert.h"
-/* xxd emits:
- *   unsigned char embedded_cacert[];
- *   unsigned int  embedded_cacert_len;
- * (We append a trailing NUL during generation, so len includes it.) */
+/* Generated header emits (after Makefile post-process for `const`):
+ *   const unsigned char embedded_cacert[];
+ *   const unsigned int  embedded_cacert_len;
+ *
+ * The `const` lands the bundle in `.rodata` so the OS read-only
+ * segment protection prevents post-boot rewrites of the trust
+ * store. Defense-in-depth against an attacker with a heap memory-
+ * write bug who'd otherwise be able to add their own root CA.
+ *
+ * (We append a trailing NUL during generation, so len includes it
+ * — mbedtls_x509_crt_parse requires NUL-termination for PEM.) */
 #endif
 
 int hl_embedded_ca_bundle(const unsigned char **data, size_t *len)

@@ -679,12 +679,27 @@ CFLAGS += -DHL_EMBED_CA_BUNDLE
 # Pre-pend a temp file with the source bundle + a trailing NUL so the embedded
 # array is itself NUL-terminated when mbedtls_x509_crt_parse reads it.
 #
+# xxd emits `unsigned char embedded_cacert[]` (writable) by default.
+# Post-process to prepend `const` so the bundle lands in `.rodata` —
+# the OS read-only segment protection is then automatic. An attacker
+# with a heap memory-write bug can't rewrite the CA trust store
+# post-boot to add their own attacker-controlled root. The length
+# `embedded_cacert_len` gets the same treatment for symmetry.
+#
+# Sed BRE matches "unsigned char embedded_cacert" and "unsigned int
+# embedded_cacert_len" at line starts (xxd's deterministic output
+# format) and prepends `const ` to each declaration.
+#
 # Also extract the "last updated" line from the PEM header and emit it as
 # HL_CA_BUNDLE_DATE so `hull doctor` can display it.
 $(EMBEDDED_CACERT_H): $(CACERT_PEM) | $(BUILDDIR)
 	cp $(CACERT_PEM) $(BUILDDIR)/cacert.pem.tmp
 	printf '\0' >> $(BUILDDIR)/cacert.pem.tmp
 	xxd -i -n embedded_cacert $(BUILDDIR)/cacert.pem.tmp > $@
+	@sed -i.bak \
+		-e 's/^unsigned char embedded_cacert\[\]/const unsigned char embedded_cacert[]/' \
+		-e 's/^unsigned int embedded_cacert_len/const unsigned int embedded_cacert_len/' \
+		$@ && rm -f $@.bak
 	@date=$$(grep 'last updated on:' $(CACERT_PEM) | head -1 | sed 's/.*last updated on: *//;s/ *$$//'); \
 		printf '#define HL_CA_BUNDLE_DATE "%s"\n' "$$date" >> $@
 	rm -f $(BUILDDIR)/cacert.pem.tmp
