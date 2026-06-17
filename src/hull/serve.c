@@ -729,8 +729,25 @@ static int hl_serve_resolve_entry(HlServerState *s, const char *argv0)
             memcpy(s->app_dir, s->entry_point, len);
             s->app_dir[len] = '\0';
         } else {
-            s->app_dir[0] = '.';
-            s->app_dir[1] = '\0';
+            /* No slash means either dev mode with cwd entry (`hull
+             * app.lua`) or a built standalone binary whose entry
+             * is the embedded "./app". In both cases the app_dir
+             * "is" cwd. We MUST canonicalize to an absolute path:
+             * downstream consumers (hl_cap_blob_init,
+             * hl_cap_fs_validate) require base_dir to be absolute,
+             * otherwise blob_store_open rejects with -1 and the
+             * app's blob.init silently fails. realpath(".")
+             * resolves to the actual cwd at startup, which is
+             * what dev mode would produce if the file path had
+             * had a slash. */
+            if (realpath(".", s->app_dir) == NULL) {
+                /* Pathological: cwd unreadable or too long. Fall
+                 * back to "." so existing code paths still work
+                 * for the common dev case where everything's
+                 * cwd-relative anyway. */
+                s->app_dir[0] = '.';
+                s->app_dir[1] = '\0';
+            }
         }
     }
 
