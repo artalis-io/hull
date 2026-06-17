@@ -157,6 +157,40 @@ TESTDIR  := tests
 BUILDDIR := build
 VENDDIR  := vendor
 
+# ── xxd const-qualification helpers ──────────────────────────────────
+#
+# `xxd -i` emits `unsigned char NAME[]` and `unsigned int NAME_len`
+# — both writable. Without `const` they land in `.data`; with it they
+# land in `.rodata`, which the OS protects as read-only at the page
+# level. Defense-in-depth against heap memory-write bugs that would
+# otherwise be able to rewrite embedded modules, the CA bundle, the
+# TCC binary, the cosmo platform archives, etc., post-boot. See
+# docs/security.md §4b "Sealed runtime tables".
+#
+# Two forms, used by ~20 xxd invocations across the Makefile:
+#
+#   XXD_CONST_SEAL — in-place sed for `xxd ... > FILE` rules.
+#     Usage: `xxd -i $< > $@ && $(XXD_CONST_SEAL) $@ && rm -f $@.bak`
+#     The .bak dance is portable across BSD + GNU sed.
+#
+#   XXD_CONST_PIPE — stdin-to-stdout sed for `xxd ... | ... > FILE`
+#     pipelines (cosmo platform embedding, template embedding).
+#     Usage: `xxd -i FILE | sed 's/.../.../g' | $(XXD_CONST_PIPE) > $@`
+#
+# Defined unconditionally near the top so every rule sees them
+# regardless of HL_ENABLE_TCC / HL_EMBED_CA_BUNDLE / HL_ENABLE_LUA /
+# etc. (Previously buried inside ifeq HL_ENABLE_TCC, which meant
+# cosmocc builds — where TCC is disabled — silently lost the
+# const-qualification on the cacert + stdlib + cosmo-platform
+# rules and the redirect failed with "permission denied" because
+# the missing variable left a bare filename being execve'd.)
+XXD_CONST_SEAL := sed -i.bak \
+	-e 's/^unsigned char /const unsigned char /' \
+	-e 's/^unsigned int /const unsigned int /'
+XXD_CONST_PIPE := sed \
+	-e 's/^unsigned char /const unsigned char /' \
+	-e 's/^unsigned int /const unsigned int /'
+
 # ── QuickJS ──────────────────────────────────────────────────────────
 
 QJS_DIR  := $(VENDDIR)/quickjs
@@ -643,6 +677,7 @@ $(BUILDDIR)/tcc: $(TCC_DIR)/tcc.c | $(BUILDDIR)
 # (instead of silently shipping a stub that breaks --compiler=tcc).
 $(EMBEDDED_TCC_H): $(BUILDDIR)/tcc | $(BUILDDIR)
 	xxd -i -n embedded_tcc $(BUILDDIR)/tcc > $@
+	$(XXD_CONST_SEAL) $@ && rm -f $@.bak
 	tcc_ver=$$($(BUILDDIR)/tcc --version 2>&1 | head -1); \
 		printf 'static const char hl_tcc_version_str[] = "%s";\n' "$$tcc_ver" >> $@
 
@@ -679,27 +714,15 @@ CFLAGS += -DHL_EMBED_CA_BUNDLE
 # Pre-pend a temp file with the source bundle + a trailing NUL so the embedded
 # array is itself NUL-terminated when mbedtls_x509_crt_parse reads it.
 #
-# xxd emits `unsigned char embedded_cacert[]` (writable) by default.
-# Post-process to prepend `const` so the bundle lands in `.rodata` —
-# the OS read-only segment protection is then automatic. An attacker
-# with a heap memory-write bug can't rewrite the CA trust store
-# post-boot to add their own attacker-controlled root. The length
-# `embedded_cacert_len` gets the same treatment for symmetry.
-#
-# Sed BRE matches "unsigned char embedded_cacert" and "unsigned int
-# embedded_cacert_len" at line starts (xxd's deterministic output
-# format) and prepends `const ` to each declaration.
-#
+# XXD_CONST_SEAL post-processes to `const`-qualify the generated
+# symbols so the bundle lands in `.rodata` (see definition above).
 # Also extract the "last updated" line from the PEM header and emit it as
 # HL_CA_BUNDLE_DATE so `hull doctor` can display it.
 $(EMBEDDED_CACERT_H): $(CACERT_PEM) | $(BUILDDIR)
 	cp $(CACERT_PEM) $(BUILDDIR)/cacert.pem.tmp
 	printf '\0' >> $(BUILDDIR)/cacert.pem.tmp
 	xxd -i -n embedded_cacert $(BUILDDIR)/cacert.pem.tmp > $@
-	@sed -i.bak \
-		-e 's/^unsigned char embedded_cacert\[\]/const unsigned char embedded_cacert[]/' \
-		-e 's/^unsigned int embedded_cacert_len/const unsigned int embedded_cacert_len/' \
-		$@ && rm -f $@.bak
+	@$(XXD_CONST_SEAL) $@ && rm -f $@.bak
 	@date=$$(grep 'last updated on:' $(CACERT_PEM) | head -1 | sed 's/.*last updated on: *//;s/ *$$//'); \
 		printf '#define HL_CA_BUNDLE_DATE "%s"\n' "$$date" >> $@
 	rm -f $(BUILDDIR)/cacert.pem.tmp
@@ -1304,7 +1327,7 @@ STDLIB_LUA_HDRS  += $(foreach f,$(STDLIB_LUA_CLI_FILES),$(call stdlib_cli_hdr,$(
 # Generate per-file xxd rules (avoids % matching directory separators)
 define STDLIB_LUA_RULE
 $(call stdlib_hdr,$(1)): $(1) | $(BUILDDIR)
-	xxd -i $$< > $$@
+	xxd -i $$< > $$@ && $(XXD_CONST_SEAL) $$@ && rm -f $$@.bak
 endef
 $(foreach f,$(STDLIB_LUA_FILES),$(eval $(call STDLIB_LUA_RULE,$(f))))
 
@@ -1323,7 +1346,7 @@ STDLIB_JS_HDRS := $(foreach f,$(STDLIB_JS_FILES),$(call stdlib_js_hdr,$(f)))
 
 define STDLIB_JS_RULE
 $(call stdlib_js_hdr,$(1)): $(1) | $(BUILDDIR)
-	xxd -i $$< > $$@
+	xxd -i $$< > $$@ && $(XXD_CONST_SEAL) $$@ && rm -f $$@.bak
 endef
 $(foreach f,$(STDLIB_JS_FILES),$(eval $(call STDLIB_JS_RULE,$(f))))
 
@@ -1341,7 +1364,7 @@ CONTEXT_HDRS := $(foreach f,$(CONTEXT_FILES),$(call context_hdr,$(f)))
 
 define CONTEXT_RULE
 $(call context_hdr,$(1)): $(1) | $(BUILDDIR)
-	xxd -i $$< > $$@
+	xxd -i $$< > $$@ && $(XXD_CONST_SEAL) $$@ && rm -f $$@.bak
 endef
 $(foreach f,$(CONTEXT_FILES),$(eval $(call CONTEXT_RULE,$(f))))
 
@@ -1368,7 +1391,7 @@ STDLIB_STATIC_HDRS := $(foreach f,$(STDLIB_STATIC_FILES),$(call stdlib_static_hd
 
 define STDLIB_STATIC_RULE
 $(call stdlib_static_hdr,$(1)): $(1) | $(BUILDDIR)
-	xxd -i $$< > $$@
+	xxd -i $$< > $$@ && $(XXD_CONST_SEAL) $$@ && rm -f $$@.bak
 endef
 $(foreach f,$(STDLIB_STATIC_FILES),$(eval $(call STDLIB_STATIC_RULE,$(f))))
 
@@ -1392,7 +1415,7 @@ STDLIB_TPL_HDRS := $(foreach f,$(STDLIB_TPL_FILES),$(call stdlib_tpl_hdr,$(f)))
 
 define STDLIB_TPL_RULE
 $(call stdlib_tpl_hdr,$(1)): $(1) | $(BUILDDIR)
-	xxd -i $$< > $$@
+	xxd -i $$< > $$@ && $(XXD_CONST_SEAL) $$@ && rm -f $$@.bak
 endef
 $(foreach f,$(STDLIB_TPL_FILES),$(eval $(call STDLIB_TPL_RULE,$(f))))
 
@@ -1493,49 +1516,49 @@ APP_SHADER_HDRS := $(foreach f,$(APP_SHADER_FILES),$(call app_shader_hdr,$(f)))
 # xxd rules for each file type
 define APP_LUA_RULE
 $(call app_lua_hdr,$(1)): $(1) | $(BUILDDIR)
-	xxd -i $$< > $$@
+	xxd -i $$< > $$@ && $(XXD_CONST_SEAL) $$@ && rm -f $$@.bak
 endef
 $(foreach f,$(APP_LUA_FILES),$(eval $(call APP_LUA_RULE,$(f))))
 
 define APP_JS_RULE
 $(call app_js_hdr,$(1)): $(1) | $(BUILDDIR)
-	xxd -i $$< > $$@
+	xxd -i $$< > $$@ && $(XXD_CONST_SEAL) $$@ && rm -f $$@.bak
 endef
 $(foreach f,$(APP_JS_FILES),$(eval $(call APP_JS_RULE,$(f))))
 
 define APP_JSON_RULE
 $(call app_json_hdr,$(1)): $(1) | $(BUILDDIR)
-	xxd -i $$< > $$@
+	xxd -i $$< > $$@ && $(XXD_CONST_SEAL) $$@ && rm -f $$@.bak
 endef
 $(foreach f,$(APP_JSON_FILES),$(eval $(call APP_JSON_RULE,$(f))))
 
 define APP_TPL_RULE
 $(call app_tpl_hdr,$(1)): $(1) | $(BUILDDIR)
-	xxd -i $$< > $$@
+	xxd -i $$< > $$@ && $(XXD_CONST_SEAL) $$@ && rm -f $$@.bak
 endef
 $(foreach f,$(APP_TPL_FILES),$(eval $(call APP_TPL_RULE,$(f))))
 
 define APP_STATIC_RULE
 $(call app_static_hdr,$(1)): $(1) | $(BUILDDIR)
-	xxd -i $$< > $$@
+	xxd -i $$< > $$@ && $(XXD_CONST_SEAL) $$@ && rm -f $$@.bak
 endef
 $(foreach f,$(APP_STATIC_FILES),$(eval $(call APP_STATIC_RULE,$(f))))
 
 define APP_MIGRATION_RULE
 $(call app_migration_hdr,$(1)): $(1) | $(BUILDDIR)
-	xxd -i $$< > $$@
+	xxd -i $$< > $$@ && $(XXD_CONST_SEAL) $$@ && rm -f $$@.bak
 endef
 $(foreach f,$(APP_MIGRATION_FILES),$(eval $(call APP_MIGRATION_RULE,$(f))))
 
 define APP_COMPUTE_RULE
 $(call app_compute_hdr,$(1)): $(1) | $(BUILDDIR)
-	xxd -i $$< > $$@
+	xxd -i $$< > $$@ && $(XXD_CONST_SEAL) $$@ && rm -f $$@.bak
 endef
 $(foreach f,$(APP_COMPUTE_FILES),$(eval $(call APP_COMPUTE_RULE,$(f))))
 
 define APP_SHADER_RULE
 $(call app_shader_hdr,$(1)): $(1) | $(BUILDDIR)
-	xxd -i $$< > $$@
+	xxd -i $$< > $$@ && $(XXD_CONST_SEAL) $$@ && rm -f $$@.bak
 endef
 $(foreach f,$(APP_SHADER_FILES),$(eval $(call APP_SHADER_RULE,$(f))))
 
@@ -1810,9 +1833,11 @@ $(EMBEDDED_PLATFORM_H): $(BUILDDIR)/libhull_platform.x86_64-cosmo.a \
                          $(BUILDDIR)/libhull_platform.aarch64-cosmo.a | $(BUILDDIR)
 	@echo "/* Auto-generated multi-arch — do not edit */" > $@
 	xxd -i $(BUILDDIR)/libhull_platform.x86_64-cosmo.a | \
-		sed 's/build_libhull_platform_x86_64_cosmo_a/hl_platform_x86_64_cosmo/g' >> $@
+		sed 's/build_libhull_platform_x86_64_cosmo_a/hl_platform_x86_64_cosmo/g' | \
+		$(XXD_CONST_PIPE) >> $@
 	xxd -i $(BUILDDIR)/libhull_platform.aarch64-cosmo.a | \
-		sed 's/build_libhull_platform_aarch64_cosmo_a/hl_platform_aarch64_cosmo/g' >> $@
+		sed 's/build_libhull_platform_aarch64_cosmo_a/hl_platform_aarch64_cosmo/g' | \
+		$(XXD_CONST_PIPE) >> $@
 	@echo "" >> $@
 	@echo "static const HlEmbeddedPlatform hl_embedded_platforms[] = {" >> $@
 	@echo '    { "x86_64-cosmo", hl_platform_x86_64_cosmo, sizeof(hl_platform_x86_64_cosmo) },' >> $@
@@ -1822,8 +1847,8 @@ $(EMBEDDED_PLATFORM_H): $(BUILDDIR)/libhull_platform.x86_64-cosmo.a \
 
 $(EMBEDDED_TEMPLATES_H): templates/app_main.c templates/entry.h | $(BUILDDIR)
 	@echo "/* Auto-generated — do not edit */" > $@
-	@xxd -i templates/app_main.c | sed 's/templates_app_main_c/hl_embedded_app_main_c/g' >> $@
-	@xxd -i templates/entry.h | sed 's/templates_entry_h/hl_embedded_entry_h/g' >> $@
+	@xxd -i templates/app_main.c | sed 's/templates_app_main_c/hl_embedded_app_main_c/g' | $(XXD_CONST_PIPE) >> $@
+	@xxd -i templates/entry.h | sed 's/templates_entry_h/hl_embedded_entry_h/g' | $(XXD_CONST_PIPE) >> $@
 
 CFLAGS += -DHL_BUILD_EMBEDDED -DHL_BUILD_EMBEDDED_MULTIARCH
 $(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H)
@@ -1831,12 +1856,12 @@ $(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H)
 else ifneq ($(EMBED_PLATFORM),)
 # Single-arch embedding (existing behavior)
 $(EMBEDDED_PLATFORM_H): $(PLATFORM_LIB) | $(BUILDDIR)
-	xxd -i $< | sed 's/build_libhull_platform_a/hl_embedded_platform_a/g' > $@
+	xxd -i $< | sed 's/build_libhull_platform_a/hl_embedded_platform_a/g' | $(XXD_CONST_PIPE) > $@
 
 $(EMBEDDED_TEMPLATES_H): templates/app_main.c templates/entry.h | $(BUILDDIR)
 	@echo "/* Auto-generated — do not edit */" > $@
-	@xxd -i templates/app_main.c | sed 's/templates_app_main_c/hl_embedded_app_main_c/g' >> $@
-	@xxd -i templates/entry.h | sed 's/templates_entry_h/hl_embedded_entry_h/g' >> $@
+	@xxd -i templates/app_main.c | sed 's/templates_app_main_c/hl_embedded_app_main_c/g' | $(XXD_CONST_PIPE) >> $@
+	@xxd -i templates/entry.h | sed 's/templates_entry_h/hl_embedded_entry_h/g' | $(XXD_CONST_PIPE) >> $@
 
 CFLAGS += -DHL_BUILD_EMBEDDED
 $(BUILD_ASSET_OBJ): $(EMBEDDED_PLATFORM_H) $(EMBEDDED_TEMPLATES_H)

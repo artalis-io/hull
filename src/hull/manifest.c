@@ -58,6 +58,13 @@ void hl_manifest_str_free(HlAllocator *alloc, const char **sp)
 void hl_manifest_free(HlManifest *m)
 {
     if (!m) return;
+    if (m->sealed) {
+        /* Strings live in a sealed (RO-mapped) arena; the arena owns
+         * them and will be unmapped by its destroy. Per-string free()
+         * here would fault. Just zero the bookkeeping. */
+        memset(m, 0, sizeof(*m));
+        return;
+    }
     HlAllocator *a = m->alloc;
 
     for (int i = 0; i < m->fs_read_count; i++)
@@ -114,8 +121,11 @@ int hl_manifest_seal(HlManifest *dst, const HlManifest *src, HlSealArena *arena)
      * as scalars and are immutable-by-copy here. */
     *dst = *src;
     /* The sealed manifest is NOT allocator-owned for its strings; clear
-     * the allocator pointer so hl_manifest_free on dst is a safe no-op. */
+     * the allocator pointer and set the `sealed` flag so hl_manifest_free
+     * on dst short-circuits (the arena owns the strings; the arena's
+     * destroy unmaps them). */
     dst->alloc = NULL;
+    dst->sealed = 1;
 
     /* Strings: walk and dup each one into the arena. If any fails we
      * bail with -1; the arena's already-allocated portion stays put

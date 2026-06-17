@@ -1511,17 +1511,18 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
 
     /* Cleanup — free manifest AFTER server stops (env_cfg and
      * http_cfg reference its strings during runtime). For a sealed
-     * manifest the hl_manifest_free is a no-op for strings; the
-     * actual memory is released when the seal arena is destroyed
-     * below. Order matters: zero the struct's pointers BEFORE
-     * munmap so no consumer can dereference into a freed mapping. */
+     * manifest hl_manifest_free is a no-op for strings (alloc=NULL);
+     * the actual memory is released when the seal arena is destroyed
+     * MUCH later — after hl_app_context_free, after WASM/GPU caches,
+     * after TLS contexts. Runtime shutdown still touches the cap
+     * configs (fs_cfg/http_cfg/env_cfg) which alias manifest string
+     * pointers, so the mapping must remain live until every consumer
+     * has had its turn. Without that ordering, the runtime's
+     * shutdown callbacks dereference into munmap'd pages and crash
+     * with SIGSEGV/SIGABRT mid-shutdown. */
     if (s->manifest_extracted) {
         hl_manifest_free(&s->manifest);
         s->manifest_extracted = 0;
-    }
-    if (s->manifest_sealed) {
-        hl_seal_arena_destroy(&s->seal_arena);
-        s->manifest_sealed = 0;
     }
 
     /* Detach the borrowed async_ctx + net_ctx pointers from the runtime
@@ -1571,6 +1572,16 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
     if (s->server_tls_ctx) {
         kl_tls_mbedtls_ctx_destroy(s->server_tls_ctx);
         s->server_tls_ctx = NULL;
+    }
+
+    /* Sealed manifest arena: LAST to be destroyed. Every consumer
+     * above (runtime / cap configs / WASM cache GC finalizers / TLS
+     * contexts that may have manifest-host pointers) has aliased
+     * pointers into this mapping; munmapping it earlier turns those
+     * aliases into faults. */
+    if (s->manifest_sealed) {
+        hl_seal_arena_destroy(&s->seal_arena);
+        s->manifest_sealed = 0;
     }
 }
 

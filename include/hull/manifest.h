@@ -122,6 +122,12 @@ typedef struct HlManifest {
 
     /* Whether app.manifest() was called */
     int         present;
+
+    /* 1 when this manifest's strings live in a sealed arena (see
+     * hl_manifest_seal). When set, hl_manifest_free skips the per-
+     * string free walk — the arena owns the memory and is RO-mapped,
+     * so free() would fault. */
+    int         sealed;
 } HlManifest;
 
 /* ── API ───────────────────────────────────────────────────────────── */
