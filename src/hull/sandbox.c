@@ -26,6 +26,90 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+/* Buffer size for cross-platform path resolution. Big enough to
+ * hold any realpath() output (PATH_MAX-bound) and any reasonable
+ * app_dir + relpath concatenation. Used by
+ * sandbox_resolve_manifest_path; the Apple-side SeatbeltScratch
+ * has its own equivalent (SEATBELT_PATH_SIZE) for SBPL-time
+ * scratch, kept separate so its name still telegraphs context. */
+#define SANDBOX_PATH_MAX  4096
+_Static_assert(SANDBOX_PATH_MAX >= PATH_MAX,
+               "SANDBOX_PATH_MAX must be >= PATH_MAX");
+
+/* Resolve a manifest fs.read / fs.write path against the app's
+ * root directory. The manifest declares paths like "data/" or
+ * "uploads/", which the capability layer interprets relative to
+ * app_dir (HlFsConfig.base_dir). The sandbox MUST match that
+ * resolution — otherwise the seatbelt subpath rule (or unveil
+ * subtree) covers a different directory than the one the app
+ * actually writes to. Steps:
+ *
+ *   1. Validate shape: reject absolute paths and any segment
+ *      containing "..". Defense-in-depth — manifest parser only
+ *      truncates.
+ *   2. Concatenate app_dir + "/" + relpath into a temp buffer.
+ *   3. mkdir -p so realpath() can canonicalize even when the
+ *      app hasn't created the dir yet (hull/blob@1 makes its
+ *      root lazily on init).
+ *   4. realpath() the result into out_abs.
+ *
+ * Returns 0 on success (out_abs filled), -1 on rejection or
+ * buffer overflow. On -1 the caller should log + skip — never
+ * fall back to an unresolved relative path, since unveil() and
+ * seatbelt both reject those.
+ *
+ * Platform-agnostic — both the seatbelt SBPL build (macOS) and
+ * the unveil setup (Linux / OpenBSD / Cosmopolitan) call this.
+ */
+static int sandbox_resolve_manifest_path(const char *app_dir,
+                                          const char *relpath,
+                                          char *out_abs,
+                                          size_t out_cap)
+{
+    if (!app_dir || !relpath || !out_abs) return -1;
+    if (relpath[0] == '/' || relpath[0] == '\0') return -1;
+    for (const char *p = relpath; *p; ) {
+        if (p[0] == '.' && p[1] == '.' &&
+            (p[2] == '/' || p[2] == '\0')) return -1;
+        const char *slash = strchr(p, '/');
+        if (!slash) break;
+        p = slash + 1;
+    }
+
+    size_t adir_len = strlen(app_dir);
+    size_t rel_len  = strlen(relpath);
+    while (adir_len > 1 && app_dir[adir_len - 1] == '/') adir_len--;
+    if (adir_len + 1 + rel_len + 1 > out_cap) return -1;
+
+    char joined[SANDBOX_PATH_MAX];
+    if (adir_len + 1 + rel_len + 1 > sizeof(joined)) return -1;
+    memcpy(joined, app_dir, adir_len);
+    joined[adir_len] = '/';
+    memcpy(joined + adir_len + 1, relpath, rel_len + 1);
+
+    /* mkdir -p — best-effort. EEXIST is harmless. */
+    char buf[SANDBOX_PATH_MAX];
+    size_t jlen = strlen(joined);
+    if (jlen >= sizeof(buf)) return -1;
+    memcpy(buf, joined, jlen + 1);
+    while (jlen > 1 && buf[jlen - 1] == '/') buf[--jlen] = '\0';
+    for (size_t k = 1; k <= jlen; k++) {
+        if (buf[k] == '/' || buf[k] == '\0') {
+            char saved = buf[k];
+            buf[k] = '\0';
+            (void)mkdir(buf, 0755);
+            buf[k] = saved;
+        }
+    }
+
+    if (realpath(joined, out_abs) == NULL) {
+        size_t need = strlen(joined) + 1;
+        if (need > out_cap) return -1;
+        memcpy(out_abs, joined, need);
+    }
+    return 0;
+}
+
 /* ── Platform pledge/unveil providers ──────────────────────────────── */
 
 #if defined(__COSMOPOLITAN__)
@@ -150,86 +234,6 @@ typedef struct {
     char fs_read_real[HL_MANIFEST_MAX_PATHS][SEATBELT_PATH_SIZE];
     char fs_write_real[HL_MANIFEST_MAX_PATHS][SEATBELT_PATH_SIZE];
 } SeatbeltScratch;
-
-/*
-/*
- * Resolve a manifest fs.read / fs.write path against the app's
- * root directory. The manifest declares paths like "data/" or
- * "uploads/", which the capability layer interprets relative to
- * app_dir (HlFsConfig.base_dir). The sandbox MUST match that
- * resolution — otherwise the seatbelt subpath rule (or unveil
- * subtree) covers a different directory than the one the app
- * actually writes to. Steps:
- *
- *   1. Validate shape: reject absolute paths and any segment
- *      containing "..". Defense-in-depth — manifest parser only
- *      truncates.
- *   2. Concatenate app_dir + "/" + relpath into `out_abs`.
- *   3. mkdir -p so realpath() can canonicalize even when the
- *      app hasn't created the dir yet (hull/blob@1 makes its
- *      root lazily on init).
- *   4. realpath() the result.
- *
- * Returns 0 on success (out_abs filled), -1 on rejection or
- * buffer overflow. On -1 the caller should log + skip — never
- * fall back to an unresolved relative path, since unveil() and
- * seatbelt both reject those.
- */
-static int sandbox_resolve_manifest_path(const char *app_dir,
-                                          const char *relpath,
-                                          char *out_abs,
-                                          size_t out_cap)
-{
-    if (!app_dir || !relpath || !out_abs) return -1;
-    if (relpath[0] == '/' || relpath[0] == '\0') return -1;
-    for (const char *p = relpath; *p; ) {
-        if (p[0] == '.' && p[1] == '.' &&
-            (p[2] == '/' || p[2] == '\0')) return -1;
-        const char *slash = strchr(p, '/');
-        if (!slash) break;
-        p = slash + 1;
-    }
-
-    size_t adir_len = strlen(app_dir);
-    size_t rel_len  = strlen(relpath);
-    /* Trim trailing slashes on app_dir; trailing slashes on
-     * relpath survive harmlessly through realpath. */
-    while (adir_len > 1 && app_dir[adir_len - 1] == '/') adir_len--;
-    if (adir_len + 1 + rel_len + 1 > out_cap) return -1;
-
-    char joined[SEATBELT_PATH_SIZE];
-    if (adir_len + 1 + rel_len + 1 > sizeof(joined)) return -1;
-    memcpy(joined, app_dir, adir_len);
-    joined[adir_len] = '/';
-    memcpy(joined + adir_len + 1, relpath, rel_len + 1);
-
-    /* mkdir -p — best-effort. Each segment is created with 0755;
-     * EEXIST is harmless. */
-    char buf[SEATBELT_PATH_SIZE];
-    size_t jlen = strlen(joined);
-    if (jlen >= sizeof(buf)) return -1;
-    memcpy(buf, joined, jlen + 1);
-    while (jlen > 1 && buf[jlen - 1] == '/') buf[--jlen] = '\0';
-    /* Start past the leading "/" so mkdir("") isn't attempted. */
-    for (size_t k = 1; k <= jlen; k++) {
-        if (buf[k] == '/' || buf[k] == '\0') {
-            char saved = buf[k];
-            buf[k] = '\0';
-            (void)mkdir(buf, 0755);
-            buf[k] = saved;
-        }
-    }
-
-    if (realpath(joined, out_abs) == NULL) {
-        /* mkdir failed (permission, ENOSPC, etc.). Fall back to
-         * the joined absolute path — sandbox at least gets a
-         * deterministic path even if the dir doesn't materialize. */
-        size_t need = strlen(joined) + 1;
-        if (need > out_cap) return -1;
-        memcpy(out_abs, joined, need);
-    }
-    return 0;
-}
 
 /*
  * Build a Seatbelt SBPL profile and params array from manifest + paths.
