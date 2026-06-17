@@ -123,7 +123,14 @@ function headerAttrs(column, current, opts) {
     const fullUrl  = url + sep + "sort=" + urlSort;
 
     const parts = [
-        'role="button"',
+        // NO role="button". <th> has the implicit `columnheader`
+        // ARIA role, and `aria-sort` is only valid on
+        // `columnheader` / `rowheader` / `gridcell`. Overriding
+        // with role="button" makes aria-sort an invalid combo
+        // (axe.aria-allowed-attr) AND screen readers say "button"
+        // instead of the more useful "column header, sorted
+        // ascending". Native <th> + tabindex + sort.js keyboard
+        // handler covers the click-by-key story.
         'tabindex="0"',
         `class="hull-sort-header hull-sort-${thisDirection}"`,
         `data-sort-column="${attrEscape(column)}"`,

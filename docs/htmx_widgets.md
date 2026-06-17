@@ -363,10 +363,14 @@ end)
 <th {{ name_sort | raw }}>Name</th>
 ```
 
-The emitted attrs include `role="button"` + `tabindex="0"` (keyboard
-activation), `aria-sort="ascending|descending|none"`, `data-sort-direction`
-+ `class="hull-sort-{none|asc|desc}"` for styling, `hx-get="<url>?sort=col:dir"`
-with the toggled direction.
+The emitted attrs include `tabindex="0"` (keyboard focusable),
+`aria-sort="ascending|descending|none"`, `data-sort-direction` +
+`class="hull-sort-{none|asc|desc}"` for styling, `hx-get="<url>?sort=col:dir"`
+with the toggled direction. No `role="button"` — `<th>` has the
+implicit `columnheader` role, and screen readers read "column
+header, sorted ascending" (more informative than "button"). Plus
+`aria-sort` is only valid on `columnheader` / `rowheader`, so
+`role=button` would invalidate it.
 
 `opts.swap` controls `hx-swap`: when `target` wraps the table + nav
 + actions (e.g. `"#grid"`), pass `"innerHTML"`. When `target` is the

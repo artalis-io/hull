@@ -135,6 +135,11 @@ table.hull-table th, table.hull-table td {
 }
 table.hull-table th {
     background: var(--hull-grey-100);
+    /* Explicit text color so contrast stays WCAG-AA regardless of
+     * Pico's color-scheme. Without it, dark-mode flips body text
+     * to light, leaving white-on-light-grey unreadable in the
+     * (declared-bg) header cells. */
+    color: var(--hull-grey-700);
     font-weight: 600;
 }
 .hull-table-empty td {
@@ -152,7 +157,10 @@ table.hull-table th {
 }
 .badge-active      { background: var(--hull-green-bg); color: var(--hull-green-fg); }
 .badge-maintenance { background: var(--hull-amber-bg); color: var(--hull-amber-fg); }
-.badge-retired     { background: var(--hull-grey-100); color: var(--hull-grey-500); }
+/* grey-500 on grey-100 is ~3.4:1, below WCAG AA (4.5:1) — bumped
+ * to grey-700 (~7.5:1) so "retired" still reads as muted but
+ * passes contrast. */
+.badge-retired     { background: var(--hull-grey-200); color: var(--hull-grey-700); }
 
 /* ── Action bar (per-row delete buttons) ──────────────────────── */
 .action-bar {

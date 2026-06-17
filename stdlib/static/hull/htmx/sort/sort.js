@@ -2,11 +2,13 @@
  * Hull HTMX sort widget — client runtime.
  *
  * Adds Enter / Space keyboard activation for sort headers
- * (which use role="button" tabindex="0"). The server-side
- * widget puts those ARIA roles on a <th>, but plain <th>
- * elements don't natively fire `click` on Enter/Space the way
- * a real <button> does — that's a JS responsibility for any
- * role=button on a non-button element.
+ * (which use `tabindex="0"` on a `<th>`). Native `<th>`
+ * elements don't fire `click` on Enter/Space the way a real
+ * `<button>` does — that's this script's job. The widget
+ * intentionally does NOT put `role="button"` on the th: that
+ * would invalidate `aria-sort` (axe.aria-allowed-attr) AND
+ * make screen readers say "Name, button" instead of the more
+ * informative "Name, column header, sorted ascending".
  *
  * We used to delegate this via an htmx hx-trigger filter like
  * `keyup[key=='Enter'] from:this`. Those bracket-filter
