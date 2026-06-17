@@ -224,8 +224,14 @@ UTEST(seal_arena, write_after_seal_faults)
 
     pid_t pid = fork();
     if (pid == 0) {
-        /* child: write into the sealed page, exit 0 if it somehow
-         * succeeded (which should never happen). */
+        /* child: reset SEGV/BUS handlers to SIG_DFL so the signal
+         * propagates as a termination (WIFSIGNALED) instead of being
+         * caught by a sanitizer runtime (ASan/MSan install their own
+         * handlers that print a diagnostic and _exit(1), which would
+         * make WIFSIGNALED false). Then write into the sealed page;
+         * exit 0 if it somehow succeeded (never expected). */
+        signal(SIGSEGV, SIG_DFL);
+        signal(SIGBUS,  SIG_DFL);
         p[0] = 'X';
         _exit(0);
     }
