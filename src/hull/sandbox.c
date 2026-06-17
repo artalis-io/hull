@@ -152,6 +152,86 @@ typedef struct {
 } SeatbeltScratch;
 
 /*
+/*
+ * Resolve a manifest fs.read / fs.write path against the app's
+ * root directory. The manifest declares paths like "data/" or
+ * "uploads/", which the capability layer interprets relative to
+ * app_dir (HlFsConfig.base_dir). The sandbox MUST match that
+ * resolution — otherwise the seatbelt subpath rule (or unveil
+ * subtree) covers a different directory than the one the app
+ * actually writes to. Steps:
+ *
+ *   1. Validate shape: reject absolute paths and any segment
+ *      containing "..". Defense-in-depth — manifest parser only
+ *      truncates.
+ *   2. Concatenate app_dir + "/" + relpath into `out_abs`.
+ *   3. mkdir -p so realpath() can canonicalize even when the
+ *      app hasn't created the dir yet (hull/blob@1 makes its
+ *      root lazily on init).
+ *   4. realpath() the result.
+ *
+ * Returns 0 on success (out_abs filled), -1 on rejection or
+ * buffer overflow. On -1 the caller should log + skip — never
+ * fall back to an unresolved relative path, since unveil() and
+ * seatbelt both reject those.
+ */
+static int sandbox_resolve_manifest_path(const char *app_dir,
+                                          const char *relpath,
+                                          char *out_abs,
+                                          size_t out_cap)
+{
+    if (!app_dir || !relpath || !out_abs) return -1;
+    if (relpath[0] == '/' || relpath[0] == '\0') return -1;
+    for (const char *p = relpath; *p; ) {
+        if (p[0] == '.' && p[1] == '.' &&
+            (p[2] == '/' || p[2] == '\0')) return -1;
+        const char *slash = strchr(p, '/');
+        if (!slash) break;
+        p = slash + 1;
+    }
+
+    size_t adir_len = strlen(app_dir);
+    size_t rel_len  = strlen(relpath);
+    /* Trim trailing slashes on app_dir; trailing slashes on
+     * relpath survive harmlessly through realpath. */
+    while (adir_len > 1 && app_dir[adir_len - 1] == '/') adir_len--;
+    if (adir_len + 1 + rel_len + 1 > out_cap) return -1;
+
+    char joined[SEATBELT_PATH_SIZE];
+    if (adir_len + 1 + rel_len + 1 > sizeof(joined)) return -1;
+    memcpy(joined, app_dir, adir_len);
+    joined[adir_len] = '/';
+    memcpy(joined + adir_len + 1, relpath, rel_len + 1);
+
+    /* mkdir -p — best-effort. Each segment is created with 0755;
+     * EEXIST is harmless. */
+    char buf[SEATBELT_PATH_SIZE];
+    size_t jlen = strlen(joined);
+    if (jlen >= sizeof(buf)) return -1;
+    memcpy(buf, joined, jlen + 1);
+    while (jlen > 1 && buf[jlen - 1] == '/') buf[--jlen] = '\0';
+    /* Start past the leading "/" so mkdir("") isn't attempted. */
+    for (size_t k = 1; k <= jlen; k++) {
+        if (buf[k] == '/' || buf[k] == '\0') {
+            char saved = buf[k];
+            buf[k] = '\0';
+            (void)mkdir(buf, 0755);
+            buf[k] = saved;
+        }
+    }
+
+    if (realpath(joined, out_abs) == NULL) {
+        /* mkdir failed (permission, ENOSPC, etc.). Fall back to
+         * the joined absolute path — sandbox at least gets a
+         * deterministic path even if the dir doesn't materialize. */
+        size_t need = strlen(joined) + 1;
+        if (need > out_cap) return -1;
+        memcpy(out_abs, joined, need);
+    }
+    return 0;
+}
+
+/*
  * Build a Seatbelt SBPL profile and params array from manifest + paths.
  *
  * profile_buf: output buffer for SBPL string (SEATBELT_PROFILE_SIZE)
@@ -276,70 +356,24 @@ static int seatbelt_build_profile(const HlSandboxPolicy *policy,
     for (int i = 0; i < policy->fs_write_count; i++) {
         snprintf(scratch->fs_write_keys[i],
                  sizeof(scratch->fs_write_keys[i]), "FS_W_%d", i);
-        /* Resolve symlinks — Seatbelt matches real paths. If the
-         * declared write directory doesn't exist yet, pre-create it
-         * so realpath() can canonicalize. Without this, modules like
-         * `hull/blob@1` that mkdir their root on init would race the
-         * sandbox: by the time the app calls blob.init() to mkdir,
-         * the sandbox is already active with a bogus relative path
-         * mapping. Pre-creating is safe — the path was declared
-         * writable, the sandbox is about to allow writes under it.
-         * mkdir-p the path's parent first if the path itself needs
-         * intermediate dirs; mkdir(2) returns EEXIST harmlessly when
-         * the path already exists. */
+        /* Resolve manifest fs.write path against app_dir so the
+         * seatbelt subpath rule covers the SAME absolute dir the
+         * capability layer (hl_cap_blob_init, hl_cap_fs_validate)
+         * resolves to. Mismatches here = silent app-init failures
+         * (blob.init returns -1 because its target dir isn't
+         * actually allowed by the sandbox). Helper also pre-mkdirs
+         * so realpath() can canonicalize even for lazily-created
+         * directories. */
         const char *wpath = policy->fs_write[i];
-        struct stat st;
-        if (stat(wpath, &st) != 0) {
-            /* Recursive create — best-effort. Mirrors mkdir -p. The
-             * pre-mkdir is what makes hull/blob@1 (and any other
-             * module that creates its own root dir lazily) work on
-             * first boot under the seatbelt: realpath() needs the
-             * path to exist to canonicalize it.
-             *
-             * Validate the path shape BEFORE mkdir so a manifest
-             * with "../escape" or "/etc" can't escape the app
-             * sandbox at sandbox-init time. The manifest parser
-             * doesn't currently validate fs.write paths beyond
-             * truncation, so defense-in-depth here. */
-            int rejected = 0;
-            if (wpath[0] == '/' || wpath[0] == '\0') rejected = 1;
-            if (!rejected) {
-                const char *p = wpath;
-                while (*p) {
-                    if (p[0] == '.' && p[1] == '.' &&
-                        (p[2] == '/' || p[2] == '\0')) { rejected = 1; break; }
-                    const char *slash = strchr(p, '/');
-                    if (!slash) break;
-                    p = slash + 1;
-                }
-            }
-            if (!rejected) {
-                char buf[SEATBELT_PATH_SIZE];
-                size_t plen = strlen(wpath);
-                if (plen > 0 && plen < sizeof(buf)) {
-                    memcpy(buf, wpath, plen + 1);
-                    /* Trim trailing slash for cleaner iteration. */
-                    while (plen > 1 && buf[plen - 1] == '/') buf[--plen] = '\0';
-                    for (size_t k = 1; k <= plen; k++) {
-                        if (buf[k] == '/' || buf[k] == '\0') {
-                            char saved = buf[k];
-                            buf[k] = '\0';
-                            (void)mkdir(buf, 0755);
-                            buf[k] = saved;
-                        }
-                    }
-                }
-            } else {
-                log_warn("[sandbox] fs.write path '%s' is absolute or "
-                         "contains '..' — skipping pre-mkdir; the "
-                         "seatbelt allow rule will fall through to a "
-                         "no-match subpath. Fix the manifest.",
-                         wpath);
-            }
+        if (sandbox_resolve_manifest_path(app_dir, wpath,
+                                           scratch->fs_write_real[i],
+                                           sizeof(scratch->fs_write_real[i])) != 0) {
+            log_warn("[sandbox] fs.write path '%s' rejected (absolute "
+                     "or contains '..') — skipping. Fix the manifest.",
+                     wpath);
+            continue;
         }
-        if (realpath(wpath, scratch->fs_write_real[i]))
-            wpath = scratch->fs_write_real[i];
-        PARAM_ADD(scratch->fs_write_keys[i], wpath);
+        PARAM_ADD(scratch->fs_write_keys[i], scratch->fs_write_real[i]);
         SBPL_FMT("(allow file-read* file-write*"
                   " (subpath (param \"%s\")))\n",
                   scratch->fs_write_keys[i]);
@@ -788,16 +822,30 @@ int hl_sandbox_apply(const HlSandboxPolicy *policy, const char *app_dir,
     /* /dev/urandom: needed by crypto.random and password hashing */
     unveil("/dev/urandom", "r");
 
+    /* Manifest fs.read / fs.write paths: resolve relative to
+     * app_dir (matching the capability layer) AND pre-mkdir so
+     * unveil() can canonicalize. Without app_dir-relative
+     * resolution, unveil sees "data/" and fails with ENOENT (the
+     * polyfill resolves relative to cwd, which often isn't
+     * app_dir under e.g. CI / hull build). */
     for (int i = 0; i < policy->fs_read_count; i++) {
-        if (unveil(policy->fs_read[i], "r") != 0)
+        char abs[SEATBELT_PATH_SIZE];
+        if (sandbox_resolve_manifest_path(app_dir, policy->fs_read[i],
+                                           abs, sizeof(abs)) != 0 ||
+            unveil(abs, "r") != 0) {
             log_warn("[sandbox] unveil failed for read path: %s",
                      policy->fs_read[i]);
+        }
     }
 
     for (int i = 0; i < policy->fs_write_count; i++) {
-        if (unveil(policy->fs_write[i], "rwc") != 0)
+        char abs[SEATBELT_PATH_SIZE];
+        if (sandbox_resolve_manifest_path(app_dir, policy->fs_write[i],
+                                           abs, sizeof(abs)) != 0 ||
+            unveil(abs, "rwc") != 0) {
             log_warn("[sandbox] unveil failed for write path: %s",
                      policy->fs_write[i]);
+        }
     }
 
     /* SQLite database always needs read + write + create */
