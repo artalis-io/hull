@@ -432,18 +432,17 @@ async function runPhotos(page) {
         else ko("search widget rendered without hx-get attribute (parity regression?)");
     }
 
-    // ── CRUD round-trip ──────────────────────────────────────────
-    // Real exercise: create an entry via the form. The CSRF token
-    // + session cookie travel automatically with the form submit,
-    // so a runtime-parity bug in either middleware would crash this
-    // test (and it caught the missing-search-widget gap above).
-    //
-    // We deliberately don't exercise the delete-via-confirm path
-    // here: htmx 2.0.9's `issueRequest()` from a deferred
-    // htmx:confirm event is a no-op for non-form-driven verbs
-    // (DELETE on a button) — investigated separately. Once that's
-    // resolved, the delete-via-confirm assertion can be added.
+    // ── CRUD round-trip: create + delete-via-confirm ─────────────
+    // Real exercise: create an entry via the form, then delete it
+    // via the confirm-dialog yes path. The CSRF token + session
+    // cookie travel automatically with form submits; the delete
+    // flow goes through hx-delete on a standalone button, which
+    // exercises the confirm widget's htmx.ajax resume path (the
+    // workaround for htmx 2.0.9's issueRequest no-op on non-form
+    // verbs). A regression in either CSRF / session / template /
+    // confirm-widget would surface here.
     const entryTitle = `e2e-${rt}-${Date.now()}`;
+    let entryRendered = false;
     {
         const respP = page.waitForResponse(
             (r) => r.url().endsWith("/entries") && r.request().method() === "POST"
@@ -456,11 +455,44 @@ async function runPhotos(page) {
             ko(`CRUD create: POST /entries never replied (CSRF/session issue?)`);
         } else {
             await sleep(150);
-            const matched = await page.locator(`#entry-feed :text("${entryTitle}")`)
+            entryRendered = await page.locator(`#entry-feed :text("${entryTitle}")`)
                 .first().waitFor({ timeout: 2000 })
                 .then(() => true).catch(() => false);
-            if (matched) ok(`CRUD create: new entry "${entryTitle}" rendered in feed`);
+            if (entryRendered) ok(`CRUD create: new entry "${entryTitle}" rendered in feed`);
             else ko(`CRUD create: entry submitted but title not visible in feed`);
+        }
+    }
+
+    if (entryRendered) {
+        const delBtn = page.locator(`#entry-feed`)
+            .locator(`text="${entryTitle}"`).first()
+            .locator('xpath=ancestor::*[@id and starts-with(@id, "entry-")]')
+            .locator('button[hx-delete]').first();
+        if ((await delBtn.count()) === 0) {
+            ko("CRUD delete: no delete button found on the new entry row");
+        } else {
+            await delBtn.click();
+            const dialogOpened = await page.locator("dialog#hull-confirm[open]")
+                .waitFor({ timeout: 2000 }).then(() => true).catch(() => false);
+            if (!dialogOpened) {
+                ko("CRUD delete: confirm dialog never opened on delete click");
+            } else {
+                const respP = page.waitForResponse(
+                    (r) => r.url().match(/\/entries\/\d+$/) && r.request().method() === "DELETE"
+                        && r.status() === 200,
+                    { timeout: 4000 }).catch(() => null);
+                await page.locator("dialog#hull-confirm .hull-confirm-yes").click();
+                const resp = await respP;
+                if (!resp) {
+                    ko("CRUD delete: DELETE /entries/:id never fired after confirm yes");
+                } else {
+                    await sleep(200);
+                    const gone = (await page.locator(
+                        `#entry-feed :text("${entryTitle}")`).count()) === 0;
+                    if (gone) ok(`CRUD delete: "${entryTitle}" removed from feed after confirm`);
+                    else ko(`CRUD delete: response succeeded but title still visible`);
+                }
+            }
         }
     }
 }

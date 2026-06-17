@@ -31,7 +31,7 @@
 (function () {
     "use strict";
 
-    var DIALOG_ID = "hull-confirm";
+    var DIALOG_ID  = "hull-confirm";
 
     // Single-instance state. When a dialog is open, `pending` holds
     // the htmx event whose issueRequest we'd call on confirm. A new
@@ -66,17 +66,45 @@
     }
 
     function close(d, reason) {
-        // Capture & clear `pending` BEFORE issueRequest fires —
-        // otherwise the confirm could re-enter via a synchronous
-        // htmx:confirm and we'd lose track.
+        // Capture & clear `pending` BEFORE we resume — otherwise a
+        // synchronous re-entry could lose track of which prompt
+        // we're answering.
         var p = pending;
         pending = null;
         try { d.close(reason); } catch (_) { /* already closed */ }
-        if (reason === "confirm" && p && typeof p.detail.issueRequest === "function") {
-            p.detail.issueRequest();
+        if (reason !== "confirm" || !p) return;
+
+        // Resume the original request. The obvious choice
+        // (p.detail.issueRequest()) is a silent no-op in htmx
+        // 2.0.9 for verbs like hx-delete on a standalone <button>
+        // — both sync inside the event AND deferred after the
+        // dialog closes. We instead use htmx.ajax() to issue a
+        // fresh request with the same verb / path / target the
+        // button would have used. This bypasses the broken
+        // deferred-resume path entirely and works for every
+        // verb/element combination.
+        if (typeof window.htmx === "undefined" || !window.htmx.ajax) return;
+        var verb   = p.detail.verb;     // "get" | "post" | "put" | "patch" | "delete"
+        var path   = p.detail.path;     // resolved URL
+        var elt    = p.detail.elt;      // triggering element (for hx-include etc.)
+        var target = p.detail.target;   // swap target
+        if (!verb || !path) return;
+
+        // htmx.ajax() fires its own htmx:confirm event for the new
+        // request and re-reads the source element's attributes —
+        // including hx-confirm, which would pop our dialog a
+        // second time (or htmx's native window.confirm, which
+        // auto-rejects in headless). Temporarily strip hx-confirm
+        // for the duration of the call so the resumed request
+        // sees a clean source. Restore in finally so the button
+        // keeps working for future clicks.
+        var question = elt && elt.getAttribute("hx-confirm");
+        if (question !== null && elt) elt.removeAttribute("hx-confirm");
+        try {
+            window.htmx.ajax(verb, path, { source: elt, target: target });
+        } finally {
+            if (question !== null && elt) elt.setAttribute("hx-confirm", question);
         }
-        // For reason === "cancel" or any other value: do nothing.
-        // The original request stays paused and is effectively dropped.
     }
 
     function wireDialogEvents(d) {
@@ -144,6 +172,7 @@
         // is htmx's signal that hx-confirm was on the triggering
         // element (htmx populates it from the attribute value).
         if (!evt.detail || !evt.detail.question) return;
+
 
         // Pause htmx's request pipeline. issueRequest() is the only
         // way to resume; we call it from the confirm-button path.
