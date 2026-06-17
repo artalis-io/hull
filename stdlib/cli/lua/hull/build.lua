@@ -206,9 +206,13 @@ local function find_html_files(dir)
     return tool.find_files(dir, "*.html")
 end
 
--- List all files recursively in a directory
+-- List all files recursively in a directory. Used for static-asset
+-- enumeration where `static/vendor/htmx.min.js` etc. are legitimate
+-- vendored assets that must be embedded — pass include_vendor=true
+-- so tool.find_files doesn't skip the vendor/ subdir (its default
+-- skip is for source-tree walks).
 local function find_all_files(dir)
-    return tool.find_files(dir, "*")
+    return tool.find_files(dir, "*", { include_vendor = true })
 end
 
 -- List .sql files in a directory (non-recursive, sorted)

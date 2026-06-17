@@ -100,6 +100,17 @@ char **hl_tool_find_files(const char *dir, const char *pattern,
                           const HlToolUnveilCtx *ctx);
 
 /*
+ * Same as hl_tool_find_files, but lets the caller opt OUT of the
+ * default "vendor" skip. Use for walking `static/` where
+ * `static/vendor/htmx.min.js` is a legitimate vendored asset that
+ * MUST be embedded. node_modules / dotfiles are still skipped
+ * unconditionally (no legitimate reason to recurse into them).
+ */
+char **hl_tool_find_files_ex(const char *dir, const char *pattern,
+                             const HlToolUnveilCtx *ctx,
+                             int include_vendor);
+
+/*
  * Copy a file (binary-safe).
  * Returns 0 on success, -1 on error.
  */

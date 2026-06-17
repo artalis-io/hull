@@ -154,15 +154,25 @@ static int l_tool_spawn_read(lua_State *L)
     return 1;
 }
 
-/* ── tool.find_files(dir, pattern) → table ────────────────────────── */
+/* ── tool.find_files(dir, pattern, opts?) → table ─────────────────
+ * opts.include_vendor (bool, default false): walk into directories
+ * named "vendor". Useful for `static/vendor/*` asset enumeration;
+ * source walks should leave it at the default. node_modules and
+ * dotfiles are still always skipped. */
 
 static int l_tool_find_files(lua_State *L)
 {
     const char *dir = luaL_checkstring(L, 1);
     const char *pattern = luaL_checkstring(L, 2);
+    int include_vendor = 0;
+    if (lua_type(L, 3) == LUA_TTABLE) {
+        lua_getfield(L, 3, "include_vendor");
+        include_vendor = lua_toboolean(L, -1);
+        lua_pop(L, 1);
+    }
     HlToolUnveilCtx *ctx = get_unveil_ctx(L);
 
-    char **files = hl_tool_find_files(dir, pattern, ctx);
+    char **files = hl_tool_find_files_ex(dir, pattern, ctx, include_vendor);
     if (!files) {
         lua_newtable(L);
         return 1;
