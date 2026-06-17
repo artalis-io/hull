@@ -147,6 +147,39 @@ Hull's security model depends on the shared `hl_cap_*` layer. Verify:
 | Env leakage | High | All env access through `hl_cap_env_get()` with allowlist |
 | Sandbox escape | Critical | `eval()` removed, `io`/`os` libs not loaded, `loadfile`/`dofile` removed |
 
+### 5b. Sealed runtime tables (read-only memory protection)
+
+Hull defends boot-built security policy via two mechanisms (see
+[docs/security.md §4b](../../../docs/security.md)):
+
+- `.rodata` for compile-time constants (`static const` tables —
+  automatic OS read-only via the linker).
+- `hl_seal_arena` (page-backed mmap RW → mprotect RO) for data that
+  can't be `static const` because it's built at boot from app input
+  (manifest, configuration, capability resolution).
+
+When auditing C runtime changes, look for these patterns:
+
+| Issue | Severity | What to check |
+|---|---|---|
+| **Boot-built mutable security policy not sealed.** A new C-level structure that's (a) built once at boot from app input, (b) read on every request by the capability/sandbox layer, (c) influences security policy (allowlists, dispatch, trust anchors), and DOESN'T flow through `hl_seal_arena`. | Critical | Find the boot-init site; verify it calls `hl_seal_arena_alloc` / `_strdup` / `_memdup` and seals before the resolver/sandbox runs. Example pattern: `HlManifest` in `src/hull/serve.c::hl_serve_wire_caps`. |
+| **`xxd -i` generated table without `const`.** Default xxd output emits `unsigned char foo[]` (writable). Any new embedded asset (CA bundle, signed manifest, embedded key, vendored binary) that lands in writable `.data` instead of read-only `.rodata`. | High | Grep the Makefile for `xxd -i` invocations; verify each is followed by a `sed` post-process prepending `const` to the `unsigned char` + `unsigned int` declarations. See the `EMBEDDED_CACERT_H` rule. |
+| **Long-lived C struct holding secret material.** Any new `struct { char key[N]; ... }` or `static uint8_t shared_secret[N]` that survives past the immediate operation. Hull's convention is Lua/JS-side `_state` tables + per-call stack-local `uint8_t key[128]` with `secure_zero` on return. | Critical | If C must cache secret material (e.g. parsed mbedTLS key context held across requests), seal it via `hl_seal_arena` or zero it on every use. Document the lifetime. |
+| **Sealing failure not fatal.** A call to `hl_seal_arena_seal` whose return code isn't checked, or where -1 is logged-and-continued. The whole point is to fail closed; shipping with unsealed policy silently weakens the hardening guarantee. | Critical | Sealing failure must propagate up the boot-error path (return -1 from the boot phase → process exits). The only acceptable test-only path is documented + gated. |
+| **Writable alias retained after seal.** A pointer to the to-be-sealed memory cached elsewhere (e.g. in a `HlRuntime` field) without being updated to the in-arena address. After sealing, the alias still points at the now-freed source. | High | Verify all consumers receive the sealed-copy pointer, not the source. The `hl_manifest_seal` pattern is to value-copy the struct, so consumers reading `&s->manifest` see the new pointers automatically. |
+| **Allocation after seal.** Code that tries to extend a sealed arena later (`hl_seal_arena_alloc` post-seal returns NULL — easy to miss in error paths if you assume alloc always succeeds). | Medium | Bump-arena alloc-after-seal is a programming bug; the call site should never reach that branch in production. Add an assertion. |
+
+**Cross-platform guard.** `hl_seal_arena` is POSIX (mmap/mprotect/
+sysconf). Cosmopolitan provides the POSIX shim transparently. If you
+ever add a native MSVC build, the arena needs a `#ifdef _WIN32`
+branch using `VirtualAlloc` / `VirtualProtect` — same API contract.
+
+**Death tests are non-negotiable.** Any new sealed surface needs a
+fork+SIGSEGV test that writes to a sealed page from a child process
+and asserts the child died with SIGSEGV/SIGBUS. Without it, a no-op
+mprotect would silently pass every other test. Pattern in
+`tests/hull/test_seal_arena.c::write_after_seal_faults`.
+
 ### 6. Defensive Macros
 
 Check for and suggest these patterns:

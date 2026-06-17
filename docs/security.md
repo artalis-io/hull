@@ -583,6 +583,111 @@ clause and the C-level capability layer still apply.
 
 ---
 
+## 4b. Sealed runtime tables (read-only memory protection)
+
+The kernel sandbox stops the app from *calling* dangerous things. The
+sealed-arena layer stops a memory-corruption bug from *rewriting the
+policy itself* to make dangerous things look benign.
+
+### Threat model
+
+An attacker who lands a linear-write heap-corruption bug in Hull
+post-boot — buffer overflow in a parser, double-free, use-after-free
+in WAMR / mbedTLS / SQLite, anything that yields "I can write N bytes
+to address X" — would otherwise be able to overwrite:
+
+- The manifest's `fs_write` allowlist: change `"data/"` to `"/etc/"`.
+- The manifest's `hosts` allowlist: add their C2 host.
+- The manifest's `env` allowlist: add `AWS_SECRET_ACCESS_KEY`.
+- The CA bundle bytes: insert their own attacker-controlled root CA.
+
+The capability layer (`hl_cap_fs_validate`, `hl_cap_http_request`,
+`hl_cap_env_get`) trusts the values it was handed; it has no way to
+detect "this allowlist was tampered with after boot." Sealing turns
+the attempted write into `SIGSEGV` at the syscall level — the OS page
+table says read-only, the CPU faults, the process dies. The attacker
+gets a crash instead of a silent capability escalation.
+
+### Two protection mechanisms
+
+**`.rodata` (compile-time constants).** Every `static const` table
+lands in the read-only data segment. The linker maps that segment with
+PROT_READ; the kernel rejects writes. No runtime mprotect needed.
+Hull's dispatch tables (vtables, command tables, module registry,
+CSP presets, MIME table, embedded CA bundle, embedded stdlib entries)
+are all `static const` and get this protection for free.
+
+**`hl_seal_arena` (boot-built data).** What's left is data that *can't*
+be `static const` because it's built at boot from app input (the
+manifest from `app.manifest({...})`, the sandbox policy derived from
+it). Hull allocates this into a page-aligned `mmap` arena, populates
+it during the boot phase, then calls `mprotect(PROT_READ)` once. Same
+protection as `.rodata` but for runtime-built data.
+
+### What's sealed today
+
+| Subsystem | Mechanism | Location |
+|---|---|---|
+| Embedded CA bundle (Mozilla roots, `embedded_cacert`) | `.rodata` (`const`-qualified via Makefile post-process of `xxd -i` output) | `src/hull/cacert.c` + `Makefile` `EMBEDDED_CACERT_H` rule |
+| Manifest `fs_read` / `fs_write` / `hosts` / `env` / `csp` / `cors_*` / `modules[].name` strings | `hl_seal_arena` | Sealed in `hl_serve_wire_caps` (`src/hull/serve.c`) post-extract, pre-resolver |
+| All dispatch tables (vtables, registries, command table, etc.) | `.rodata` (`static const`) | Compile-time |
+| Embedded stdlib entries (`hl_stdlib_entries[]`, ~130 files) | `.rodata` | `build/stdlib_registry.c` (generated) |
+
+### What's NOT sealed (by design)
+
+| Subsystem | Why mutable |
+|---|---|
+| Auth secrets (`auth-flows.state_secret`, `totp.encryption_keys`, `csrf.secret`, `jwt.secret`, `oauth.state_secret`, `audit-log.fingerprint_salt`) | Live in Lua/JS `_state` tables, passed to C as per-call stack-locals with `secure_zero` after the operation. No long-lived C-side cache exists. Rotation is a feature; sealing would block it. |
+| JWKS cache (oauth) | Lua-side `_state._jwks_cache`; PEM strings, not parsed mbedTLS contexts. No C-side cache. |
+| Session table, idempotency table, audit log | SQLite-backed; mutated every request by design. |
+| WASM module instances, GPU buffer pools, DB connection pool | Mutated every request by design. |
+
+### Convention for new code
+
+If you're adding a new C-level structure that:
+
+1. Is **built at boot** from configuration (manifest, env, file
+   parse — anything not compile-time-constant), AND
+2. Is **read-only at runtime** (consumed but not mutated after
+   the boot phase ends), AND
+3. **Affects security policy** (allowlists, capability gates,
+   trust anchors, dispatch tables that route to sensitive code),
+
+then it's a candidate for `hl_seal_arena`. The pattern:
+
+```c
+HlSealArena arena;
+hl_seal_arena_init(&arena, 16 * 1024, "what-this-protects");
+/* ...allocate + populate structures via hl_seal_arena_alloc / strdup / memdup... */
+if (hl_seal_arena_seal(&arena) != 0) FATAL("seal failed");
+/* ...subsequent reads are RO; writes SIGSEGV; allocation returns NULL... */
+```
+
+Seal failure should be fatal — the alternative is shipping with
+unsealed policy, which silently weakens the hardening posture in a
+way nobody notices until they're being exploited.
+
+If you're adding a generated table via `xxd -i`, post-process the
+output to prepend `const` (see the `EMBEDDED_CACERT_H` rule in the
+Makefile for the pattern). Default `xxd -i` emits writable arrays
+that land in `.data`, not `.rodata`.
+
+**The `/c-audit` skill checks for both patterns.** Run it before
+shipping any C runtime changes that touch security policy.
+
+### Tests prove the OS protection actually fires
+
+`tests/hull/test_seal_arena.c::write_after_seal_faults` and
+`test_manifest_seal.c::write_to_sealed_string_faults` are fork+SIGSEGV
+death tests: the child process attempts to write to a sealed page; the
+parent asserts the child died with SIGSEGV/SIGBUS. If `mprotect` were
+ever a no-op (kernel bug, platform incompatibility, configuration
+mistake), the child would write happily and exit 0, and the parent's
+`WIFSIGNALED` check would fail. The tests are the only way to
+guarantee the protection isn't theoretical.
+
+---
+
 ## 5. What the Manifest Tells You
 
 The manifest is the app's **declared behavior contract**:
