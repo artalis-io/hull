@@ -1355,21 +1355,21 @@ static int hl_serve_wire_caps(HlServerState *s)
 /* Cleanup if a phase fails after wire_caps has succeeded. */
 static void hl_serve_undo_caps(HlServerState *s)
 {
-    /* hl_manifest_free is a safe no-op on a sealed manifest (alloc=NULL
-     * → hl_manifest_str_free returns immediately for every string).
-     * The actual sealed strings live in seal_arena and are released by
-     * its munmap below. Order: zero the manifest pointers first, then
-     * destroy the arena, so nothing holds dangling refs into munmap'd
-     * memory after this returns. */
+    /* hl_manifest_free is a safe no-op on a sealed manifest (the
+     * `sealed` flag short-circuits the per-string free walk). */
     hl_manifest_free(&s->manifest);
-    if (s->manifest_sealed) {
-        hl_seal_arena_destroy(&s->seal_arena);
-        s->manifest_sealed = 0;
-    }
     s->manifest_extracted = 0;
     if (s->client_tls_ctx) {
         kl_tls_mbedtls_ctx_destroy(s->client_tls_ctx);
         s->client_tls_ctx = NULL;
+    }
+    /* Sealed manifest arena: LAST. The TLS ctx destroyed above (and
+     * any other cap-config consumer added in the future) may alias
+     * manifest string pointers; unmapping the arena earlier turns
+     * those aliases into faults. */
+    if (s->manifest_sealed) {
+        hl_seal_arena_destroy(&s->seal_arena);
+        s->manifest_sealed = 0;
     }
 }
 
@@ -1696,15 +1696,13 @@ static int hl_serve_wire_and_start(HlServerState *s)
  * success path (in hl_serve_wire_and_start, after kl_server_run). */
 static void hl_serve_cleanup(HlServerState *s)
 {
-    /* Free manifest if extracted but wire_and_start didn't finish */
+    /* Free manifest if extracted but wire_and_start didn't finish.
+     * For a sealed manifest this is a no-op (sealed flag short-circuits);
+     * the actual mapping is destroyed at the END of this function, AFTER
+     * every consumer that may hold aliased pointers into it (cap configs
+     * on the runtime, TLS ctxs, server's route table). */
     if (s->manifest_extracted)
         hl_manifest_free(&s->manifest);
-    /* Sealed manifest: hl_manifest_free above was a no-op (alloc=NULL);
-     * the actual mapping is freed here. */
-    if (s->manifest_sealed) {
-        hl_seal_arena_destroy(&s->seal_arena);
-        s->manifest_sealed = 0;
-    }
 
     /* Free thread pool BEFORE server (via the backend vtable) */
     if (s->thread_pool) {
@@ -1762,6 +1760,16 @@ static void hl_serve_cleanup(HlServerState *s)
     }
 
     free_route_allocs(&s->alloc);
+
+    /* Sealed manifest arena: LAST to be destroyed. Cap configs
+     * (env_cfg.allowed = manifest.env, http_cfg.allowed_hosts =
+     * manifest.hosts) and TLS contexts alias the sealed strings;
+     * unmapping the arena earlier would turn those aliases into
+     * faults during runtime/server cleanup above. */
+    if (s->manifest_sealed) {
+        hl_seal_arena_destroy(&s->seal_arena);
+        s->manifest_sealed = 0;
+    }
 
     log_debug("[hull:c] peak memory: %zu bytes", hl_alloc_peak(&s->alloc));
 }
