@@ -56,6 +56,13 @@ jobs:
       - name: Build
         run: make
 
+      - name: Hardening summary
+        run: make hardening
+
+      - name: Hardening verification (release flags present)
+        timeout-minutes: 1
+        run: make check-hardening
+
       - name: Unit tests
         timeout-minutes: 5
         run: make test
@@ -304,6 +311,9 @@ jobs:
 
       - name: Build hull
         run: make CC=cosmocc
+
+      - name: Hardening summary (cosmocc)
+        run: make CC=cosmocc hardening
 
       - name: Unit tests
         timeout-minutes: 5

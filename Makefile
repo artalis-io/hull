@@ -28,6 +28,7 @@ ifneq ($(findstring cosmo,$(CC)),)
 endif
 # Platform detection
 UNAME_S := $(shell uname -s)
+UNAME_M := $(shell uname -m)
 
 # ── Version string ────────────────────────────────────────────────────
 #
@@ -67,27 +68,120 @@ DEPFLAGS := -MMD -MP
 CFLAGS   += $(DEPFLAGS)
 
 ifndef COSMO
-  # Stack protection + PIE for ASLR. PIE is the macOS default since
-  # 10.7 — passing `-pie` to clang on Darwin emits a harmless
-  # "argument unused during compilation" warning that pollutes every
-  # link line. Only set it where the linker actually needs it.
-  CFLAGS  += -fstack-protector-strong -fPIE
-  ifneq ($(UNAME_S),Darwin)
-    LDFLAGS += -pie
-  endif
+  # ── Compiler/linker hardening ───────────────────────────────────────
+  #
+  # Goal: maximise practical ROP/JOP resistance using whatever the host
+  # toolchain supports, without breaking portability. Strategy:
+  #
+  #   1. Always-on, baseline-portable flags applied unconditionally.
+  #   2. Probe-and-add flags that newer compilers/linkers accept but
+  #      older ones reject — see hl_have_cflag / hl_have_ldflag below.
+  #   3. Skip the whole layer if HULL_DISABLE_HARDENING=1 (debug only;
+  #      do not ship release binaries with this unset).
+  #
+  # The probes write a tiny program to a tmpfile and discard the result;
+  # they run once at Makefile-parse time. -Werror upgrades warnings (the
+  # macOS clang "argument unused during compilation" class) to errors so
+  # flags that are accepted-with-warning are correctly rejected.
+  #
+  # Cosmocc is excluded from this entire block — APE format constraints
+  # mean ELF-specific options (PIE, RELRO, CET notes) are inapplicable
+  # or break the linker script.
+  ifndef HULL_DISABLE_HARDENING
+    # Baseline: stack canaries + PIE. PIE is the macOS default since
+    # 10.7 — passing `-pie` to clang on Darwin emits the
+    # "argument unused during compilation" warning that pollutes every
+    # link line. Only set the linker side where it actually matters.
+    CFLAGS  += -fstack-protector-strong -fPIE
+    ifneq ($(UNAME_S),Darwin)
+      LDFLAGS += -pie
+    endif
 
-  ifndef DEBUG
-    # _FORTIFY_SOURCE=3 requires glibc 2.34+ / gcc 12+ / clang 9+; on
-    # older toolchains it emits a noisy warning and behaves as =2.
-    # We intentionally leave the warning loud so stale CI is visible.
-    CFLAGS += -D_FORTIFY_SOURCE=3
-  endif
+    ifndef DEBUG
+      # _FORTIFY_SOURCE=3 requires glibc 2.34+ / gcc 12+ / clang 9+; on
+      # older toolchains it emits a noisy warning and behaves as =2.
+      # We intentionally leave the warning loud so stale CI is visible.
+      CFLAGS += -D_FORTIFY_SOURCE=3
+    endif
 
-  # Linux-only linker hardening: RELRO + BIND_NOW + non-executable
-  # stack. ld64 (macOS) rejects -z flags, so gate to Linux.
-  ifeq ($(UNAME_S),Linux)
-    CFLAGS  += -D_DEFAULT_SOURCE
-    LDFLAGS += -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack
+    # Probe macros. Echo the flag if accepted, empty otherwise.
+    # Use $(comma) inside the argument so calls like
+    # $(call hl_have_ldflag,-Wl$(comma)--as-needed) work — `$(call X,a,b)`
+    # would otherwise see two arguments split on the literal comma.
+    comma := ,
+    hl_have_cflag = $(shell tmp="$$(mktemp 2>/dev/null || echo /tmp/hlprobe$$$$.o)"; \
+        printf 'int main(void){return 0;}\n' \
+        | $(CC) -Werror $(1) -x c -c -o "$$tmp" - >/dev/null 2>&1 \
+        && echo "$(1)"; rm -f "$$tmp")
+    hl_have_ldflag = $(shell tmp="$$(mktemp 2>/dev/null || echo /tmp/hlprobe$$$$)"; \
+        printf 'int main(void){return 0;}\n' \
+        | $(CC) -x c - -o "$$tmp" $(1) >/dev/null 2>&1 \
+        && echo "$(1)"; rm -f "$$tmp")
+
+    # Universal CFLAGS. Each one is independently probed because old
+    # toolchains, ld variants, and Apple clang reject different subsets.
+    #
+    #  -fstack-clash-protection
+    #      gcc 8+ / clang 11+. Inserts a probe per stack frame >4K so
+    #      a large alloca can't jump the guard page and pivot the stack.
+    #  -fno-plt
+    #      Direct GOT calls instead of trampolining through the PLT.
+    #      Shrinks ROP gadget surface and lets RELRO+BIND_NOW eliminate
+    #      every writable function pointer.
+    #  -fno-common
+    #      Reject K&R-style tentative definitions (default in gcc 10+/
+    #      clang 11+; explicit here to lock behaviour on older
+    #      toolchains).
+    #  -ftrivial-auto-var-init=zero
+    #      Zero-initialise stack vars (clang 8+ / gcc 12+). Mitigates
+    #      info-leak primitives from uninitialised reads.
+    HARDEN_CFLAGS := \
+        $(call hl_have_cflag,-fstack-clash-protection) \
+        $(call hl_have_cflag,-fno-plt) \
+        $(call hl_have_cflag,-fno-common) \
+        $(call hl_have_cflag,-ftrivial-auto-var-init=zero) \
+        $(call hl_have_cflag,-fzero-call-used-regs=used-gpr)
+    # -fzero-call-used-regs=used-gpr (gcc 11+ / clang 15+): zero
+    # general-purpose registers on function return so a ROP gadget
+    # found in our text segment can't inherit useful values from the
+    # caller's register state. Cost: ~1-2% binary size, negligible
+    # runtime. Probed because older toolchains reject the flag.
+
+    # Architecture-specific CFI / branch hardening.
+    #
+    #  x86_64: -fcf-protection=full
+    #      Emits Intel CET markers (ENDBR for IBT + shadow-stack note).
+    #      Generated on any x86_64 build; CPUs without CET ignore the
+    #      NOPs. Linux kernels 5.18+ enforce when supported. Apple clang
+    #      accepts the flag silently.
+    #  arm64: -mbranch-protection=standard
+    #      Equivalent: pac-ret (signed return addresses) + BTI. clang
+    #      14+/gcc 9+. macOS arm64 accepts and emits the instructions;
+    #      enforcement is up to the kernel/runtime.
+    ifneq (,$(filter x86_64 amd64,$(UNAME_M)))
+      HARDEN_CFLAGS += $(call hl_have_cflag,-fcf-protection=full)
+    endif
+    ifneq (,$(filter arm64 aarch64,$(UNAME_M)))
+      HARDEN_CFLAGS += $(call hl_have_cflag,-mbranch-protection=standard)
+    endif
+
+    CFLAGS += $(HARDEN_CFLAGS)
+
+    # Linker hardening. Linux-only -z options are still gated by host
+    # OS — ld64 (macOS) rejects them. Some are universal.
+    ifeq ($(UNAME_S),Linux)
+      CFLAGS  += -D_DEFAULT_SOURCE
+      LDFLAGS += -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack
+      # -Wl,-z,separate-code: separates code/data pages so a write
+      #  primitive on a writable page cannot land in executable
+      #  memory by accident. GNU ld 2.30+ / lld.
+      HARDEN_LDFLAGS := $(call hl_have_ldflag,-Wl$(comma)-z$(comma)separate-code)
+      LDFLAGS += $(HARDEN_LDFLAGS)
+    endif
+    # -Wl,--as-needed drops unused DT_NEEDED entries; shrinks the
+    # loaded-library surface for ROP gadget hunters. Universal on
+    # GNU ld / gold / lld; ld64 ignores it harmlessly.
+    LDFLAGS += $(call hl_have_ldflag,-Wl$(comma)--as-needed)
   endif
 
   # (Earlier audit rounds added `-Wl,--build-id=none` here under the
@@ -1708,9 +1802,47 @@ $(shell test "$$(cat $(BUILD_CONFIG_FILE) 2>/dev/null)" = "$(BUILD_FINGERPRINT)"
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan e2e e2e-build e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-tcc e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-hypermedia-photos-upload e2e-jwt-asym hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-gpu bench-bytecode-cache wamrc coverage lint-lua lint-js lint platform platform-cosmo
+.PHONY: all clean test debug msan e2e e2e-build e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-tcc e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-hypermedia-photos-upload e2e-jwt-asym hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-gpu bench-bytecode-cache wamrc coverage lint-lua lint-js lint platform platform-cosmo hardening check-hardening
 
 all: $(BUILDDIR)/hull
+
+# Hardening summary. Prints which compiler/linker hardening flags the
+# Makefile detected as supported by this toolchain. Use `make hardening`
+# to see what your build is actually getting.
+hardening:
+	@echo "Hull hardening summary ($(CC) on $(UNAME_S)/$(UNAME_M)):"
+ifdef COSMO
+	@echo "  toolchain:        cosmocc (APE) — most ELF hardening flags inapplicable"
+	@echo "  stack canary:     skipped (cosmocc default)"
+	@echo "  PIE / ASLR:       skipped (APE is its own format)"
+	@echo "  RELRO+BIND_NOW:   skipped (no GNU dynamic linker)"
+	@echo "  noexecstack:      skipped (APE bootloader handles)"
+	@echo "  fortify:          skipped"
+	@echo "  CET / BTI:        skipped"
+else ifdef HULL_DISABLE_HARDENING
+	@echo "  *** HARDENING DISABLED via HULL_DISABLE_HARDENING=1 ***"
+	@echo "  Release binaries MUST NOT ship with this flag set."
+else
+	@echo "  stack canary:     -fstack-protector-strong"
+	@echo "  PIE:              -fPIE $(if $(filter -pie,$(LDFLAGS)),(linked with -pie),)"
+ifndef DEBUG
+	@echo "  fortify:          -D_FORTIFY_SOURCE=3"
+else
+	@echo "  fortify:          (disabled in DEBUG)"
+endif
+	@echo "  probed CFLAGS:    $(HARDEN_CFLAGS)"
+ifeq ($(UNAME_S),Linux)
+	@echo "  Linux LDFLAGS:    -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack $(HARDEN_LDFLAGS)"
+endif
+	@echo "  link-time:        $(call hl_have_ldflag,-Wl$(comma)--as-needed)"
+endif
+
+# Post-build hardening verifier. Runs scripts/check_hardening.sh
+# against build/hull. Exits non-zero in release/Linux builds if
+# required protections are missing; prints "skipped" for properties
+# this platform can't enforce.
+check-hardening: $(BUILDDIR)/hull
+	@scripts/check_hardening.sh $(BUILDDIR)/hull
 
 # Platform static library — everything except entry.o and build_assets.o
 # Used by `hull build` to produce standalone app binaries.
