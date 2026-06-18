@@ -688,6 +688,163 @@ guarantee the protection isn't theoretical.
 
 ---
 
+## 4c. Compiler/linker hardening (binary-level ROP/JOP resistance)
+
+§4 covers what a misbehaving app *can do*; §4b covers what a memory-
+corruption bug *can rewrite*. This section covers the rung below:
+what an attacker can do once they already control the instruction
+pointer.
+
+The capability layer cannot defend against an attacker who has
+already hijacked control flow. Compiler and linker hardening flags
+shrink the window between "bug present" and "exploit landed" by
+making the standard ROP/JOP chains used to escalate a memory-safety
+bug into RCE substantially harder to construct.
+
+Full reference: `Makefile` lines ~69-180 (the probe-based hardening
+layer) and `scripts/check_hardening.sh` (the post-build verifier).
+`make hardening` prints the resolved flag list for the current
+toolchain; `make check-hardening` runs the verifier against
+`build/hull`.
+
+### Threat model
+
+Hull's design already rules out the easiest escalation paths:
+
+- **No JIT.** Neither Lua 5.4 nor QuickJS JIT. WAMR is interpreter or
+  AOT (statically compiled at build time, never written at runtime).
+- **No RWX memory.** No mmap/mprotect path takes both `PROT_WRITE`
+  and `PROT_EXEC` simultaneously. The sealed-manifest arena
+  (`hl_seal_arena`, §4b) flips RW → RO via `mprotect` and never the
+  reverse.
+- **No writable function-pointer tables.** All dispatch vtables
+  (`HlRuntimeVtable`, `HlDbBackend`, `HlAsyncBackend`, etc.) live in
+  `.rodata` via `const` qualification (§5b of the C audit skill).
+
+Hardening flags push the residual surface further down: a memory bug
+that lands inside the `hl_cap_*` boundary still has to chain ROP
+gadgets through hardened text segments to do anything useful.
+
+### Flag set, by platform (release build)
+
+| Flag | Linux | macOS | Cosmo | Effect |
+|---|---|---|---|---|
+| `-fstack-protector-strong` | ✓ | ✓ | skip | Canaries on every function with a stack buffer or `&local` taken. |
+| `-fPIE` + `-pie` | ✓ | ✓ (MH_PIE) | skip | Position-independent → ASLR. |
+| `-D_FORTIFY_SOURCE=3` | ✓ | ✓ | skip | Compile-time bounds checks; runtime `*_chk` variants on `memcpy`/`strcpy`/`sprintf`/etc. |
+| `-Wl,-z,relro` + `-Wl,-z,now` | ✓ | n/a | skip | Full RELRO — GOT/PLT marked read-only after bind. |
+| `-Wl,-z,noexecstack` | ✓ | n/a | skip | PT_GNU_STACK without X. |
+| `-fstack-clash-protection` | ✓ (probed) | reject | skip | Per-frame probe; defeats stack-clash pivot. gcc 8 / clang 11+. |
+| `-fno-plt` | ✓ (probed) | ✓ (probed) | skip | Direct GOT calls — shrinks ROP gadget surface and lets RELRO+BIND_NOW eliminate writable function pointers. |
+| `-fno-common` | ✓ (probed) | ✓ (probed) | skip | Reject tentative definitions. |
+| `-ftrivial-auto-var-init=zero` | ✓ (probed) | ✓ (probed) | skip | Zero-init stack vars — mitigates info-leak primitives. clang 8 / gcc 12+. |
+| `-fzero-call-used-regs=used-gpr` | ✓ (probed) | ✓ (probed) | skip | Zero scratch GPRs on return — defeats register-based ROP gadgets. gcc 11 / clang 15+. |
+| `-fcf-protection=full` (x86_64) | ✓ (probed) | n/a | skip | Intel CET: ENDBR for IBT + shadow-stack note. gcc 8 / clang 7+. |
+| `-mbranch-protection=standard` (arm64) | ✓ (probed) | ✓ (probed) | skip | ARMv8.3 pac-ret + BTI. clang 14 / gcc 9+. |
+| `-Wl,-z,separate-code` | ✓ (probed) | n/a | skip | Separate code/data pages — write primitive can't land in executable memory. GNU ld 2.30+. |
+| `-Wl,--as-needed` | ✓ (probed) | n/a | skip | Drop unused DT_NEEDED entries — shrinks loaded-library surface. |
+
+"probed" means the Makefile runs a tiny compile/link test against
+`$(CC)` and only adds the flag if the toolchain accepts it cleanly
+(with `-Werror` so warn-then-pass flags are correctly rejected). The
+result is that the same Makefile produces a maximally hardened build
+on a modern Linux toolchain and a still-correct build on an older
+one without breaking either.
+
+### Cosmopolitan trade-off
+
+APE binaries skip the entire hardening layer. The format constraints
+(custom bootloader, no GNU dynamic linker, must run on pre-CET CPUs
+by design) make most ELF-specific options either inapplicable or
+actively break the linker script. `make CC=cosmocc hardening` prints
+each property as `skipped` with the reason. Operators choosing the
+cosmo build for portability accept this trade explicitly.
+
+### Build-time verification
+
+`make hardening` prints the resolved set:
+
+```
+$ make hardening
+Hull hardening summary (cc on Linux/x86_64):
+  stack canary:     -fstack-protector-strong
+  PIE:              -fPIE (linked with -pie)
+  fortify:          -D_FORTIFY_SOURCE=3
+  probed CFLAGS:    -fstack-clash-protection -fno-plt -fno-common
+                    -ftrivial-auto-var-init=zero
+                    -fzero-call-used-regs=used-gpr
+                    -fcf-protection=full
+  Linux LDFLAGS:    -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack
+                    -Wl,-z,separate-code
+  link-time:        -Wl,--as-needed
+```
+
+### Post-build verification
+
+`scripts/check_hardening.sh build/hull` inspects the binary and
+reports PASS/FAIL/SKIP per property. Format-aware (ELF / Mach-O /
+APE). Exits non-zero only when a *required* protection for that
+platform is missing — never for "not applicable to this format"
+properties. The CI matrix runs `make check-hardening` after every
+build (Linux x2, Linux aarch64, macOS). The release workflow runs it
+on every release native target. A regression that strips a required
+protection fails the release.
+
+Verified properties:
+
+- **PIE / ASLR**: ELF type `DYN` / Mach-O `MH_PIE`.
+- **RELRO + BIND_NOW**: PT_GNU_RELRO segment + DT_BIND_NOW or
+  DT_FLAGS_1 NOW.
+- **NX stack**: PT_GNU_STACK without X flag.
+- **Stack canaries**: `__stack_chk_fail` symbol referenced.
+- **W^X**: no LOAD segment with W+E permissions.
+- **FORTIFY**: any `*_chk` symbol present (informational; missing in
+  debug builds is expected).
+- **CET note** (x86_64): NT_GNU_PROPERTY x86 feature 1 IBT/SHSTK.
+- **BTI/PAC note** (arm64): NT_GNU_PROPERTY AArch64 feature 1.
+- **No RPATH/RUNPATH** (informational): runtime library path
+  embedded in the binary is an attack surface.
+- **Hardened Runtime** (macOS): `codesign -dv` runtime flag.
+
+### What's intentionally NOT added (yet)
+
+| Considered | Decision | Reason |
+|---|---|---|
+| `-flto` / `-flto=thin` | Deferred | Vendor TUs (mbedtls, sqlite, lua, qjs, miniz) carry their own CFLAGS with `-w` to suppress vendor warnings; mixing LTO across hardened and non-hardened TUs is fragile. Worth a follow-up `HL_ENABLE_LTO=1` build flag once vendor TU LTO compatibility is verified. |
+| `-fsanitize=cfi` (LLVM) | Deferred | Requires LTO. Indirect-call CFI is the strongest practical ROP mitigation we don't have today; the gating issue is LTO. |
+| `-fsanitize=safe-stack` | Deferred | clang-only, splits stacks. Runtime cost and incompatible with `setjmp` / coroutine patterns Hull uses extensively for Lua + JS async. |
+| `-fsanitize=shadow-call-stack` | Deferred | aarch64-only. Requires a free register reservation (`-ffixed-x18`). Worth measuring on Linux aarch64 release as a follow-up. |
+| `-fhardened` (GCC 14+) | Skipped | Meta-flag that conflicts with explicit overrides. We deliberately probe individual flags so the build still works on toolchains 5+ years old. |
+| Windows CFG | N/A | Hull doesn't currently target MSVC / clang-cl. |
+| Apply hardening CFLAGS to vendor TUs (mbedtls, sqlite, lua, qjs, miniz, tweetnacl, wamr) | Deferred | Vendor TUs use their own `CFLAGS := … -w …` arrays that clobber the global set. Worth doing per-vendor (mbedtls first; security-critical and well-tested under hardening flags elsewhere). |
+| Apply hardening to `libkeel.a` | Deferred | Keel has its own Makefile; needs separate opt-in or env-var passthrough. |
+
+### Residual ROP/JOP risk
+
+What an attacker still gets, even with this layer in place:
+
+- **Vendor TUs are not yet hardened.** Gadgets in mbedTLS, sqlite,
+  lua, qjs, miniz, tweetnacl, wamr text segments are reachable.
+  Tracked above.
+- **No CFI.** Indirect-call sites in the runtime are protected only
+  by `const` qualification of the dispatch vtables (§4b) and by
+  RELRO making the table itself read-only. A type-confusion bug that
+  lands a fake vtable pointer is not blocked.
+- **No kernel-enforced shadow stack on Linux x86_64** unless the CPU
+  supports CET *and* the kernel enables it
+  (`arch_prctl(ARCH_SHSTK_ENABLE)`). Hull emits the GNU property
+  note; runtime enforcement is the kernel's call.
+- **Cosmopolitan binaries have effectively no compiler-level
+  hardening**, as noted above.
+
+### Opt-out
+
+`HULL_DISABLE_HARDENING=1 make` skips the entire block. Debug-only;
+release CI fails if the verifier doesn't find the required
+protections — so this flag can't accidentally ship.
+
+---
+
 ## 5. What the Manifest Tells You
 
 The manifest is the app's **declared behavior contract**:

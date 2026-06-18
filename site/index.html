@@ -1259,6 +1259,14 @@ hull v0.4.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
               </div>
             </li>
 
+            <li class="flex items-start gap-4 p-5">
+              <i data-lucide="cpu" class="w-4 h-4 text-paper-100 mt-1 shrink-0"></i>
+              <div>
+                <div class="text-sm font-medium text-paper-50">Binary hardening verified at release</div>
+                <div class="text-sm text-mute-400 mt-1">PIE+ASLR, full RELRO, NX stack, stack canaries, FORTIFY_SOURCE, CET/IBT (x86_64) or PAC/BTI (arm64), zeroed call-used registers. Probed per toolchain; release fails if any required protection drops.</div>
+              </div>
+            </li>
+
           </ul>
         </div>
 
