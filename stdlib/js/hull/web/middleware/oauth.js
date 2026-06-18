@@ -119,6 +119,11 @@ const _state = {
     callbackPath:   "/auth/{provider}/callback",
     logoutPath:     "/auth/logout",
     _jwksCache:     {},  // name -> { fetchedAt, byKid: { kid: pem } }
+    // TTL on cached JWKS in seconds (forces a refresh past this age
+    // even if the kid is still present). Default 1 hour. IdPs may
+    // rotate a key while reusing the same kid for emergency
+    // revocation; without a TTL the stale PEM would verify forever.
+    jwksTtl:        3600,
 };
 
 // ── Provider presets ───────────────────────────────────────────────
@@ -237,65 +242,12 @@ function buildUrl(base, params) {
     return base + sep + parts.join("&");
 }
 
-// Standard base64 (JWKS x5c) -> base64url for direct binary decoding.
+// Standard base64 (JWKS x5c) -> base64url for cap-layer decode.
 function b64ToB64url(s) {
     return s.replace(/[\s\r\n]/g, "")
             .replace(/=/g, "")
             .replace(/\+/g, "-")
             .replace(/\//g, "_");
-}
-
-// QuickJS strings corrupt binary > 127 through UTF-8 inflation. JWKS
-// x5c is binary DER, so we use a Uint8Array decoder (mirrors jwt.js's
-// approach for binary JWS signatures).
-const B64_DEC = (() => {
-    const t = new Int8Array(256).fill(-1);
-    const a = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    for (let i = 0; i < a.length; i++) t[a.charCodeAt(i)] = i;
-    t["+".charCodeAt(0)] = 62;
-    t["/".charCodeAt(0)] = 63;
-    return t;
-})();
-function b64Lookup(s, i) {
-    const c = s.charCodeAt(i);
-    if (c > 255) return -1;
-    return B64_DEC[c];
-}
-function base64urlToBytes(s) {
-    let n = s.length;
-    while (n > 0 && s.charCodeAt(n - 1) === 61) n--;
-    const groups = n >> 2;
-    const tail = n & 3;
-    if (tail === 1) return null;
-    let outLen = groups * 3;
-    if (tail === 2) outLen += 1;
-    else if (tail === 3) outLen += 2;
-    const u8 = new Uint8Array(outLen);
-    let si = 0, di = 0;
-    for (let g = 0; g < groups; g++) {
-        const a = b64Lookup(s, si++);
-        const b = b64Lookup(s, si++);
-        const c = b64Lookup(s, si++);
-        const d = b64Lookup(s, si++);
-        if ((a | b | c | d) < 0) return null;
-        u8[di++] = (a << 2) | (b >> 4);
-        u8[di++] = ((b & 0xf) << 4) | (c >> 2);
-        u8[di++] = ((c & 0x3) << 6) | d;
-    }
-    if (tail === 2) {
-        const a = b64Lookup(s, si++);
-        const b = b64Lookup(s, si++);
-        if ((a | b) < 0) return null;
-        u8[di++] = (a << 2) | (b >> 4);
-    } else if (tail === 3) {
-        const a = b64Lookup(s, si++);
-        const b = b64Lookup(s, si++);
-        const c = b64Lookup(s, si++);
-        if ((a | b | c) < 0) return null;
-        u8[di++] = (a << 2) | (b >> 4);
-        u8[di++] = ((b & 0xf) << 4) | (c >> 2);
-    }
-    return u8;
 }
 
 // ── State cookie ───────────────────────────────────────────────────
@@ -334,9 +286,13 @@ async function refreshJwks(providerName) {
     const byKid = {};
     for (const k of doc.keys) {
         if (k && k.kid && Array.isArray(k.x5c) && typeof k.x5c[0] === "string") {
-            const u8 = base64urlToBytes(b64ToB64url(k.x5c[0]));
-            if (u8) {
-                const pem = crypto.x509PubkeyPem(u8.buffer);
+            // Cap-layer base64urlDecodeBytes returns an ArrayBuffer —
+            // binary-safe (cert bytes >= 0x80 would corrupt through
+            // JS_NewStringLen's UTF-8 validation). Mirrors the Lua
+            // sibling's crypto.base64url_decode call.
+            const ab = crypto.base64urlDecodeBytes(b64ToB64url(k.x5c[0]));
+            if (ab) {
+                const pem = crypto.x509PubkeyPem(ab);
                 if (pem) byKid[k.kid] = pem;
             }
         }
@@ -348,7 +304,12 @@ async function refreshJwks(providerName) {
 function jwksResolver(providerName) {
     return async (kid, _alg) => {
         const cache = _state._jwksCache[providerName];
-        if (cache && cache.byKid[kid]) return cache.byKid[kid];
+        const ttl   = _state.jwksTtl || 3600;
+        const fresh = cache
+                      && (time.now() - (cache.fetchedAt || 0)) < ttl;
+        if (fresh && cache.byKid[kid]) return cache.byKid[kid];
+        // Stale OR unknown kid: refresh once. A still-unknown kid
+        // after refresh returns null; signature verify then fails.
         const byKid = await refreshJwks(providerName);
         return byKid ? (byKid[kid] || null) : null;
     };
@@ -584,6 +545,7 @@ function init(opts) {
         _state.stateCookieSameSite = s;
     }
     _state.stateTtl    = opts.stateTtl    || _state.stateTtl;
+    _state.jwksTtl     = opts.jwksTtl     || _state.jwksTtl;
     if (opts.onLogin != null && typeof opts.findUser !== "function") {
         throw new Error("oauth.init: findUser(provider, claims) -> user is "
                         + "required when onLogin is set. See module docs.");
@@ -652,7 +614,6 @@ const _test = {
     signState,
     verifyState,
     b64ToB64url,
-    base64urlToBytes,
     refreshJwks,
     safeReturnTo,
     reset: () => {

@@ -149,6 +149,11 @@ local _state = {
     logout_path      = "/auth/logout",
     -- JWKS cache: provider_name -> { fetched_at, by_kid = { kid -> pem } }
     _jwks_cache      = {},
+    -- TTL on cached JWKS in seconds (forces a refresh past this age
+    -- even if the kid is still present). Default 1 hour. IdPs may
+    -- rotate a key while reusing the same kid for emergency
+    -- revocation; without a TTL the stale PEM would verify forever.
+    jwks_ttl         = 3600,
 }
 
 -- ── Provider presets ───────────────────────────────────────────────
@@ -330,9 +335,14 @@ end
 local function jwks_resolver(provider_name)
     return function(kid, _alg)
         local cache = _state._jwks_cache[provider_name]
-        if cache and cache.by_kid[kid] then
+        local ttl   = _state.jwks_ttl or 3600
+        local fresh = cache
+                      and (time.now() - (cache.fetched_at or 0)) < ttl
+        if fresh and cache.by_kid[kid] then
             return cache.by_kid[kid]
         end
+        -- Stale OR unknown kid: refresh once. A still-unknown kid
+        -- after refresh returns nil; signature verify then fails.
         local by_kid = refresh_jwks(provider_name)
         if by_kid then return by_kid[kid] end
         return nil
@@ -568,6 +578,7 @@ function oauth.init(opts)
         _state.state_cookie_samesite = s
     end
     _state.state_ttl    = opts.state_ttl or _state.state_ttl
+    _state.jwks_ttl     = opts.jwks_ttl  or _state.jwks_ttl
     if opts.on_login ~= nil and type(opts.find_user) ~= "function" then
         error("oauth.init: find_user(provider, claims) -> user is "
               .. "required when on_login is set. See module docs.")
