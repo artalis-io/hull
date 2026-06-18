@@ -614,7 +614,13 @@ static JSValue js_crypto_auth_verify(JSContext *ctx, JSValueConst this_val,
 
 /* ── Secretbox ────────────────────────────────────────────────────── */
 
-/* crypto.secretbox(msg, nonceHex, keyHex) -> hex */
+/* crypto.secretbox(msg, nonceHex, keyHex) -> hex
+ *
+ * Accept ArrayBuffer / TypedArray / MappedBuffer / WasmBuffer / string
+ * via the unified buffer protocol. JS_ToCStringLen alone UTF-8-inflates
+ * any byte >= 0x80, so a 20-byte binary secret would be ~30 bytes on
+ * the wire and would not round-trip with Lua-encrypted blobs. Same
+ * fix-shape as crypto.hmacSha1. */
 static JSValue js_crypto_secretbox(JSContext *ctx, JSValueConst this_val,
                                     int argc, JSValueConst *argv)
 {
@@ -622,22 +628,26 @@ static JSValue js_crypto_secretbox(JSContext *ctx, JSValueConst this_val,
     if (argc < 3)
         return JS_ThrowTypeError(ctx, "crypto.secretbox requires (msg, nonceHex, keyHex)");
 
-    size_t msg_len;
-    const char *msg = JS_ToCStringLen(ctx, &msg_len, argv[0]);
-    if (!msg) return JS_EXCEPTION;
+    HlBufferView msg_view = {0};
+    const char *msg_str = NULL;
+    int msg_needs_free = 0;
+    if (!js_get_buffer(ctx, argv[0], &msg_view, &msg_str, &msg_needs_free))
+        return JS_ThrowTypeError(ctx,
+            "crypto.secretbox: msg must be ArrayBuffer, TypedArray, "
+            "MappedBuffer, WasmBuffer, or string");
 
     size_t nonce_hex_len, key_hex_len;
     const char *nonce_hex = JS_ToCStringLen(ctx, &nonce_hex_len, argv[1]);
     const char *key_hex = JS_ToCStringLen(ctx, &key_hex_len, argv[2]);
     if (!nonce_hex || !key_hex) {
-        JS_FreeCString(ctx, msg);
+        if (msg_needs_free) JS_FreeCString(ctx, msg_str);
         if (nonce_hex) JS_FreeCString(ctx, nonce_hex);
         if (key_hex) JS_FreeCString(ctx, key_hex);
         return JS_EXCEPTION;
     }
 
     if (nonce_hex_len != 48 || key_hex_len != 64) {
-        JS_FreeCString(ctx, msg);
+        if (msg_needs_free) JS_FreeCString(ctx, msg_str);
         JS_FreeCString(ctx, nonce_hex);
         JS_FreeCString(ctx, key_hex);
         return JS_ThrowTypeError(ctx, "nonce must be 48 hex (24 bytes), key 64 hex (32 bytes)");
@@ -646,7 +656,7 @@ static JSValue js_crypto_secretbox(JSContext *ctx, JSValueConst this_val,
     uint8_t nonce[24], key[32];
     if (hex_decode_compat(nonce_hex, 48, nonce, 24) != 0 ||
         hex_decode_compat(key_hex, 64, key, 32) != 0) {
-        JS_FreeCString(ctx, msg);
+        if (msg_needs_free) JS_FreeCString(ctx, msg_str);
         JS_FreeCString(ctx, nonce_hex);
         JS_FreeCString(ctx, key_hex);
         return JS_ThrowTypeError(ctx, "invalid hex");
@@ -654,22 +664,27 @@ static JSValue js_crypto_secretbox(JSContext *ctx, JSValueConst this_val,
     JS_FreeCString(ctx, nonce_hex);
     JS_FreeCString(ctx, key_hex);
 
-    if (msg_len > SIZE_MAX - HL_SECRETBOX_MACBYTES) {
-        JS_FreeCString(ctx, msg);
+    if (msg_view.len > SIZE_MAX - HL_SECRETBOX_MACBYTES) {
+        if (msg_needs_free) JS_FreeCString(ctx, msg_str);
         secure_zero(key, sizeof(key));
         return JS_ThrowRangeError(ctx, "message too large");
     }
-    size_t ct_len = msg_len + HL_SECRETBOX_MACBYTES;
+    size_t ct_len = msg_view.len + HL_SECRETBOX_MACBYTES;
     uint8_t *ct = js_malloc(ctx, ct_len);
-    if (!ct) { JS_FreeCString(ctx, msg); secure_zero(key, sizeof(key)); return JS_EXCEPTION; }
+    if (!ct) {
+        if (msg_needs_free) JS_FreeCString(ctx, msg_str);
+        secure_zero(key, sizeof(key));
+        return JS_EXCEPTION;
+    }
 
-    if (hl_cap_crypto_secretbox(ct, msg, msg_len, nonce, key) != 0) {
-        JS_FreeCString(ctx, msg);
+    if (hl_cap_crypto_secretbox(ct, (const char *)msg_view.data,
+                                 msg_view.len, nonce, key) != 0) {
+        if (msg_needs_free) JS_FreeCString(ctx, msg_str);
         js_free(ctx, ct);
         secure_zero(key, sizeof(key));
         return JS_ThrowInternalError(ctx, "secretbox failed");
     }
-    JS_FreeCString(ctx, msg);
+    if (msg_needs_free) JS_FreeCString(ctx, msg_str);
     secure_zero(key, sizeof(key));
 
     /* Hex encode */
@@ -686,7 +701,13 @@ static JSValue js_crypto_secretbox(JSContext *ctx, JSValueConst this_val,
     return result;
 }
 
-/* crypto.secretboxOpen(ctHex, nonceHex, keyHex) -> string/null */
+/* crypto.secretboxOpen(ctHex, nonceHex, keyHex) -> ArrayBuffer/null
+ *
+ * Returns an ArrayBuffer so plaintext bytes round-trip without
+ * UTF-8 validation loss (JS_NewStringLen replaces invalid UTF-8
+ * sequences with U+FFFD, which would silently corrupt ~87% of
+ * random binary secrets). Callers wanting a binary-string view
+ * can wrap with `String.fromCharCode(...new Uint8Array(buf))`. */
 static JSValue js_crypto_secretbox_open(JSContext *ctx, JSValueConst this_val,
                                          int argc, JSValueConst *argv)
 {
@@ -757,7 +778,10 @@ static JSValue js_crypto_secretbox_open(JSContext *ctx, JSValueConst this_val,
     js_free(ctx, ct);
     secure_zero(key, sizeof(key));
 
-    JSValue result = JS_NewStringLen(ctx, (const char *)pt, pt_len);
+    /* Return as ArrayBuffer (copies pt; matches the convention used
+     * elsewhere in this file and in mod_db / mod_request). */
+    JSValue result = JS_NewArrayBufferCopy(ctx, pt, pt_len);
+    secure_zero(pt, pt_len);
     js_free(ctx, pt);
     return result;
 }
@@ -1164,7 +1188,13 @@ static JSValue js_crypto_base64url_encode(JSContext *ctx, JSValueConst this_val,
     return result;
 }
 
-/* crypto.base64urlDecode(str) -> string or null on error */
+/* crypto.base64urlDecode(str) -> string or null on error.
+ *
+ * Returns the decoded bytes as a JS string. SAFE for text payloads
+ * (JSON, ASCII). For arbitrary binary (cert DER, signatures, NaCl
+ * blobs), use crypto.base64urlDecodeBytes — JS_NewStringLen UTF-8-
+ * validates and replaces invalid sequences with U+FFFD, which would
+ * silently corrupt binary output. */
 static JSValue js_crypto_base64url_decode(JSContext *ctx, JSValueConst this_val,
                                            int argc, JSValueConst *argv)
 {
@@ -1189,6 +1219,40 @@ static JSValue js_crypto_base64url_decode(JSContext *ctx, JSValueConst this_val,
     JS_FreeCString(ctx, str);
 
     JSValue result = JS_NewStringLen(ctx, (const char *)out, out_len);
+    js_free(ctx, out);
+    return result;
+}
+
+/* crypto.base64urlDecodeBytes(str) -> ArrayBuffer or null on error.
+ *
+ * Binary-safe variant of base64urlDecode. Callers that decode binary
+ * payloads (cert DER, JWT signatures, NaCl blobs, JWKS x5c) must use
+ * this — the string-returning variant loses bytes >= 0x80 via UTF-8
+ * validation in JS_NewStringLen. */
+static JSValue js_crypto_base64url_decode_bytes(JSContext *ctx, JSValueConst this_val,
+                                                 int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1)
+        return JS_ThrowTypeError(ctx, "crypto.base64urlDecodeBytes requires (str)");
+
+    size_t str_len;
+    const char *str = JS_ToCStringLen(ctx, &str_len, argv[0]);
+    if (!str) return JS_EXCEPTION;
+
+    size_t out_size = (str_len * 3) / 4 + 1;
+    uint8_t *out = js_malloc(ctx, out_size);
+    if (!out) { JS_FreeCString(ctx, str); return JS_EXCEPTION; }
+
+    size_t out_len;
+    if (hl_cap_crypto_base64url_decode(str, str_len, out, out_size, &out_len) != 0) {
+        JS_FreeCString(ctx, str);
+        js_free(ctx, out);
+        return JS_NULL;
+    }
+    JS_FreeCString(ctx, str);
+
+    JSValue result = JS_NewArrayBufferCopy(ctx, out, out_len);
     js_free(ctx, out);
     return result;
 }
@@ -1437,6 +1501,8 @@ static int js_crypto_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_crypto_base64url_encode, "base64urlEncode", 1));
     JS_SetPropertyStr(ctx, crypto, "base64urlDecode",
                       JS_NewCFunction(ctx, js_crypto_base64url_decode, "base64urlDecode", 1));
+    JS_SetPropertyStr(ctx, crypto, "base64urlDecodeBytes",
+                      JS_NewCFunction(ctx, js_crypto_base64url_decode_bytes, "base64urlDecodeBytes", 1));
     JS_SetPropertyStr(ctx, crypto, "hexEncode",
                       JS_NewCFunction(ctx, js_crypto_hex_encode, "hexEncode", 1));
     JS_SetPropertyStr(ctx, crypto, "hexDecode",

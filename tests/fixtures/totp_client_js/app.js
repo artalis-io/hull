@@ -17,7 +17,20 @@ app.manifest({
     ],
 });
 
-totp.init({ issuer: "TestApp" });
+// Exercise at-rest encryption. A fixed key is fine for tests — the
+// purpose here is to drive the secretbox/secretboxOpen path so the
+// JS Uint8Array input + ArrayBuffer output round-trip is covered by
+// CI. Without a key, totp.init stores plaintext (encryption=0) and
+// the bug class fixed in js_crypto_secretbox is invisible.
+// Exercise at-rest encryption. A fixed 32-byte key is fine for tests —
+// the purpose here is to drive the secretbox / secretboxOpen path so
+// the JS Uint8Array input + ArrayBuffer output round-trip is covered
+// by CI. Without a key, totp.init stores plaintext (encryption=0) and
+// the bug class fixed in js_crypto_secretbox is invisible.
+totp.init({
+    issuer: "TestApp",
+    encryptionKey: "0123456789abcdef0123456789abcdef",  // 32 raw bytes
+});
 
 // P1 ASCII PBM. P4 (binary) would truncate at the first NUL byte
 // when res.html does its C-string conversion (every all-light QR

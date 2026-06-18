@@ -321,8 +321,26 @@ function encryptSecret(secretBytes) {
     const nonce = new Uint8Array(crypto.random(NONCE_LEN));
     let nonceStr = "";
     for (let i = 0; i < NONCE_LEN; i++) nonceStr += String.fromCharCode(nonce[i]);
-    const ctHex = crypto.secretbox(secretBytes, bytesToHex(nonceStr), keyHex);
+    // Pass plaintext as Uint8Array — crypto.secretbox now accepts the
+    // unified buffer protocol. Passing a JS binary string here would
+    // UTF-8-inflate every byte >= 0x80 via JS_ToCStringLen and produce
+    // a blob that doesn't round-trip with Lua-encrypted rows.
+    const plain = new Uint8Array(secretBytes.length);
+    for (let i = 0; i < secretBytes.length; i++) plain[i] = secretBytes.charCodeAt(i) & 0xff;
+    const ctHex = crypto.secretbox(plain, bytesToHex(nonceStr), keyHex);
     return [packVersionBE(cur) + nonceStr + hexToBytes(ctHex), 1, cur];
+}
+
+// crypto.secretboxOpen now returns an ArrayBuffer (binary-safe;
+// JS_NewStringLen would replace invalid UTF-8 bytes with U+FFFD and
+// corrupt ~87% of random secrets). Convert to a binary string for
+// downstream consumers that walk it via charCodeAt(i) & 0xff.
+function abToBinStr(ab) {
+    if (!ab) return null;
+    const u8 = new Uint8Array(ab);
+    let s = "";
+    for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
+    return s;
 }
 
 // Returns [plaintext, version] on success, [null, null] on failure.
@@ -341,8 +359,8 @@ function decryptSecret(blob, encrypted) {
             const nonceStr = blob.substring(VERSION_PREFIX_LEN,
                                             VERSION_PREFIX_LEN + NONCE_LEN);
             const ctStr    = blob.substring(VERSION_PREFIX_LEN + NONCE_LEN);
-            const pt = crypto.secretboxOpen(bytesToHex(ctStr),
-                                             bytesToHex(nonceStr), keyHex);
+            const pt = abToBinStr(crypto.secretboxOpen(bytesToHex(ctStr),
+                                             bytesToHex(nonceStr), keyHex));
             if (pt) return [pt, version];
             // Recognized version that fails to decrypt is a real
             // corruption; don't paper over with a legacy attempt.
@@ -356,8 +374,8 @@ function decryptSecret(blob, encrypted) {
     if (legacyKey && blob.length >= NONCE_LEN + MAC_LEN) {
         const nonceStr = blob.substring(0, NONCE_LEN);
         const ctStr    = blob.substring(NONCE_LEN);
-        const pt = crypto.secretboxOpen(bytesToHex(ctStr),
-                                         bytesToHex(nonceStr), legacyKey);
+        const pt = abToBinStr(crypto.secretboxOpen(bytesToHex(ctStr),
+                                         bytesToHex(nonceStr), legacyKey));
         if (pt) return [pt, 0];
     }
 
