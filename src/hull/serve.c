@@ -677,6 +677,11 @@ typedef struct {
     KlTlsConfig          client_tls_config;
     KlTlsCtx            *client_tls_ctx;
     const char           *ca_bundle_path;
+    /* CORS config — allocated INSIDE the seal arena (RO after seal)
+     * so the origin allowlist a heap-write primitive could otherwise
+     * mutate is mprotect-locked.  NULL when the manifest doesn't
+     * declare a cors section. */
+    KlCorsConfig        *cors_cfg;
 
     /* Agent API context */
     HlAgentApiCtx        agent_api_ctx;
@@ -1149,6 +1154,39 @@ static int hl_serve_wire_caps(HlServerState *s)
          * for strings (the arena owns them; destroyed at shutdown). */
         hl_manifest_free(&s->manifest);
         s->manifest = sealed;
+
+        /* CORS config — build it INSIDE the seal arena alongside the
+         * manifest strings, BEFORE the mprotect.  Previously the
+         * KlCorsConfig was a stack-local in hl_serve_wire_routes;
+         * kl_server_use stored the pointer, which dangled the moment
+         * wire_routes returned.  Allocating in the arena (a) fixes
+         * the dangling-pointer UAF, and (b) means the origin allowlist
+         * is mprotect-RO for the rest of process lifetime — a heap-
+         * write primitive can no longer punch a new origin into it. */
+        if (s->manifest.cors_set) {
+            KlCorsConfig *cc = hl_seal_arena_alloc(
+                &s->seal_arena, sizeof(*cc), _Alignof(KlCorsConfig));
+            if (!cc) {
+                log_error("[hull:c] seal arena alloc(cors) failed");
+                hl_seal_arena_destroy(&s->seal_arena);
+                return -1;
+            }
+            kl_cors_init(cc);
+            for (int i = 0; i < s->manifest.cors_origin_count; i++)
+                kl_cors_add_origin(cc, s->manifest.cors_origins[i]);
+            /* The cors_methods/cors_headers strings already live in
+             * the seal arena (sealed manifest pointers); cc just
+             * aliases them. */
+            if (s->manifest.cors_methods)
+                cc->allowed_methods = s->manifest.cors_methods;
+            if (s->manifest.cors_headers)
+                cc->allowed_headers = s->manifest.cors_headers;
+            cc->allow_credentials = s->manifest.cors_credentials;
+            if (s->manifest.cors_max_age > 0)
+                cc->max_age_seconds = s->manifest.cors_max_age;
+            s->cors_cfg = cc;
+        }
+
         if (hl_seal_arena_seal(&s->seal_arena) != 0) {
             log_error("[hull:c] seal arena mprotect failed");
             hl_seal_arena_destroy(&s->seal_arena);
@@ -1413,20 +1451,15 @@ static int hl_serve_wire_routes(HlServerState *s)
 {
     HlRuntime *rt = hl_app_context_runtime(s->app);
     const HlVfs *app_vfs = hl_app_context_app_vfs(s->app);
-    KlCorsConfig cors_cfg;
-    if (s->manifest.cors_set) {
-        kl_cors_init(&cors_cfg);
-        for (int i = 0; i < s->manifest.cors_origin_count; i++)
-            kl_cors_add_origin(&cors_cfg, s->manifest.cors_origins[i]);
-        if (s->manifest.cors_methods)
-            cors_cfg.allowed_methods = s->manifest.cors_methods;
-        if (s->manifest.cors_headers)
-            cors_cfg.allowed_headers = s->manifest.cors_headers;
-        cors_cfg.allow_credentials = s->manifest.cors_credentials;
-        if (s->manifest.cors_max_age > 0)
-            cors_cfg.max_age_seconds = s->manifest.cors_max_age;
-        kl_server_use(&s->server, "*", "/*", kl_cors_middleware, &cors_cfg);
-        log_info("[hull:c] CORS enabled (%d origin(s))",
+    if (s->cors_cfg) {
+        /* CORS config was built and sealed in hl_serve_wire_caps —
+         * the pointer is mprotect-RO and outlives the server.  Earlier
+         * versions stack-allocated this struct here and passed its
+         * address to kl_server_use; the moment this function returned
+         * the pointer dangled (Keel later dereferenced into whatever
+         * the stack had been reused for). */
+        kl_server_use(&s->server, "*", "/*", kl_cors_middleware, s->cors_cfg);
+        log_info("[hull:c] CORS enabled (%d origin(s), sealed)",
                  s->manifest.cors_origin_count);
     }
 
