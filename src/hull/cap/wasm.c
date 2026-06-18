@@ -15,6 +15,8 @@
 #include "hull/alloc.h"
 #include "hull/cap/audit.h"
 #include "hull/limits/wasm.h"
+#include "hull/macros.h"
+#include "hull/seal_arena.h"
 #include "hull/vfs.h"
 #include "log.h"
 #include "wasm_export.h"
@@ -170,7 +172,15 @@ static int32_t host_call_handler(wasm_exec_env_t exec_env,
     return -1; /* unknown opcode */
 }
 
-static NativeSymbol host_symbols[] = {
+/* The canonical template for WAMR's native-symbol table.  At init
+ * time we memdup this into the seal arena (see hl_cap_wasm_init);
+ * the runtime never touches the static copy.  WAMR qsorts the
+ * table in place during full_init (wasm_native.c:283), so the
+ * arena starts RW, is populated, used by full_init, and only THEN
+ * sealed — once sealed it's mprotect-RO for the rest of process
+ * lifetime, defeating any heap-write primitive against the
+ * host_call dispatcher. */
+static const NativeSymbol host_symbols_template[] = {
     { "host_call", (void *)(uintptr_t)host_call_handler, "(iii)i", NULL },
 };
 
@@ -291,6 +301,38 @@ int hl_cap_wasm_init(HlWasmCache *cache)
 
     memset(cache, 0, sizeof(*cache));
 
+    /* Stage the NativeSymbol table in a seal arena.  Plain `static
+     * const` won't work — WAMR's register_natives qsorts the table
+     * in place during wasm_runtime_full_init (wasm_native.c:283),
+     * which would SIGSEGV against rodata.  The arena starts RW, is
+     * sorted by WAMR during init, then sealed below; subsequent
+     * lookups (bsearch only) work fine against the RO mapping.
+     *
+     * Arena allocation: 1 page is plenty (host_symbols is tiny;
+     * each NativeSymbol is ~40 bytes, we have one entry, the
+     * mmap rounds up to a page regardless). */
+    const size_t n_symbols = HL_ARRAY_LEN(host_symbols_template);
+    HlSealArena *arena = calloc(1, sizeof(*arena));
+    if (!arena) {
+        log_error("[wasm] seal arena alloc failed");
+        return -1;
+    }
+    if (hl_seal_arena_init(arena, sizeof(host_symbols_template),
+                            "wasm-native-symbols") != 0) {
+        log_error("[wasm] seal arena init failed");
+        free(arena);
+        return -1;
+    }
+    NativeSymbol *host_symbols = hl_seal_arena_memdup(
+        arena, host_symbols_template, sizeof(host_symbols_template));
+    if (!host_symbols) {
+        log_error("[wasm] seal arena memdup failed");
+        hl_seal_arena_destroy(arena);
+        free(arena);
+        return -1;
+    }
+    cache->native_arena = arena;
+
     RuntimeInitArgs init_args;
     memset(&init_args, 0, sizeof(init_args));
 
@@ -309,20 +351,37 @@ int hl_cap_wasm_init(HlWasmCache *cache)
     /* Register host_call as a native function under "env" module */
     init_args.native_module_name = "env";
     init_args.native_symbols = host_symbols;
-    init_args.n_native_symbols = sizeof(host_symbols) / sizeof(NativeSymbol);
+    init_args.n_native_symbols = (uint32_t)n_symbols;
 
     if (!wasm_runtime_full_init(&init_args)) {
         log_error("[wasm] WAMR runtime init failed");
+        hl_seal_arena_destroy(arena);
+        free(arena);
+        cache->native_arena = NULL;
+        return -1;
+    }
+
+    /* WAMR has now sorted host_symbols in place.  Seal the arena —
+     * post-seal, the entire mapping is RO and any write fault. */
+    if (hl_seal_arena_seal(arena) != 0) {
+        log_error("[wasm] seal arena seal failed");
+        wasm_runtime_destroy();
+        hl_seal_arena_destroy(arena);
+        free(arena);
+        cache->native_arena = NULL;
         return -1;
     }
 
     if (pthread_mutex_init(&cache->pool_mutex, NULL) != 0) {
         log_error("[wasm] mutex init failed");
         wasm_runtime_destroy();
+        hl_seal_arena_destroy(arena);
+        free(arena);
+        cache->native_arena = NULL;
         return -1;
     }
     cache->initialized = 1;
-    log_debug("[wasm] WAMR runtime initialized");
+    log_debug("[wasm] WAMR runtime initialized (native symbols sealed)");
     return 0;
 }
 
@@ -349,6 +408,15 @@ void hl_cap_wasm_destroy(HlWasmCache *cache)
 
     pthread_mutex_destroy(&cache->pool_mutex);
     wasm_runtime_destroy();
+    /* Destroy the seal arena AFTER wasm_runtime_destroy so WAMR
+     * can no longer dereference its node->native_symbols pointer
+     * (g_native_symbols_list cleanup happens inside
+     * wasm_runtime_destroy). */
+    if (cache->native_arena) {
+        hl_seal_arena_destroy(cache->native_arena);
+        free(cache->native_arena);
+        cache->native_arena = NULL;
+    }
     log_debug("[wasm] WAMR runtime destroyed");
 }
 

@@ -99,11 +99,24 @@ typedef struct {
     pthread_mutex_t mutex;  /* guards pool + shared_data for this module */
 } HlWasmModule;
 
+/* Forward decl — the full HlSealArena type lives in hull/seal_arena.h.
+ * We embed by value to avoid a heap allocation for the per-process
+ * WAMR native-symbol table. */
+struct HlSealArena;
+
 typedef struct HlWasmCache {
     HlWasmModule modules[HL_WASM_CACHE_MAX];
     int          count;
     int          initialized;
     pthread_mutex_t pool_mutex; /* guards cache-level operations (module insertion/lookup) */
+    /* Sealed arena holding WAMR's NativeSymbol table after init.
+     * WAMR qsorts the table in place during wasm_runtime_full_init
+     * (vendor/wamr/core/iwasm/common/wasm_native.c:283); afterwards
+     * the table is only ever bsearched.  Hull seals the arena
+     * AFTER the qsort so subsequent reads happen against an mprotect-
+     * RO mapping, and any heap-write primitive against the table
+     * faults instead of pivoting the host_call dispatcher. */
+    struct HlSealArena *native_arena;  /* NULL until init succeeds */
 } HlWasmCache;
 
 /* ── Call options ──────────────────────────────────────────────────── */

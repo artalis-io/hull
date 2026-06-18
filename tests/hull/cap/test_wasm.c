@@ -2356,6 +2356,63 @@ UTEST(hl_cap_wasm, stream_gas_exhaustion)
     hl_cap_wasm_destroy(&cache);
 }
 
+/* ── Sealed native-symbol table (audit H1) ────────────────────────── */
+/*
+ * Fork+SIGSEGV death test: after hl_cap_wasm_init returns, the
+ * NativeSymbol table WAMR was registered with lives in a sealed
+ * (mprotect-RO) arena.  Any write to it must fault.  Without the
+ * H1 fix the table was a `static` writable global and a heap-write
+ * primitive could rewrite the host_call dispatcher pointer to pivot
+ * control flow on the next WASM→host call.
+ *
+ * The child resets SIGSEGV/SIGBUS to SIG_DFL before writing so the
+ * signal propagates as termination (WIFSIGNALED).  Without the
+ * reset, ASan/MSan's own SEGV handler intercepts, prints a
+ * diagnostic, and _exit(1)s — making WIFSIGNALED false and the test
+ * spuriously fail.  Same pattern as test_seal_arena.c and
+ * test_manifest_seal.c.
+ */
+#include "hull/seal_arena.h"
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+UTEST(hl_cap_wasm, host_symbols_table_sealed_after_init)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+
+    /* The host_call native is registered.  Its NativeSymbol slot
+     * lives in cache.native_arena which is now sealed RO.  We can't
+     * easily get the slot's address from outside without poking
+     * WAMR internals — so instead we write to the arena's base
+     * directly; if the seal worked, ANY page in the arena will
+     * fault on write. */
+    ASSERT_TRUE(cache.native_arena != NULL);
+    ASSERT_TRUE(cache.native_arena->base != NULL);
+    ASSERT_EQ(cache.native_arena->sealed, 1);
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        /* Reset sanitizer-installed handlers so the signal terminates
+         * the child instead of being intercepted. */
+        signal(SIGSEGV, SIG_DFL);
+        signal(SIGBUS,  SIG_DFL);
+        ((volatile char *)cache.native_arena->base)[0] = 'X';
+        _exit(0);
+    }
+    ASSERT_TRUE(pid > 0);
+
+    int status = 0;
+    pid_t w = waitpid(pid, &status, 0);
+    ASSERT_EQ(pid, w);
+    ASSERT_TRUE(WIFSIGNALED(status));
+    int sig = WTERMSIG(status);
+    ASSERT_TRUE(sig == SIGSEGV || sig == SIGBUS);
+
+    hl_cap_wasm_destroy(&cache);
+}
+
 #else /* !HL_ENABLE_WASM */
 
 UTEST(hl_cap_wasm, disabled_placeholder)
