@@ -3127,6 +3127,268 @@ with logs.
 
 ---
 
+## 8. Deep mbedTLS allocator seal — SHIPPED (client) / NOT VIABLE (server)
+
+**Status:** Client-side deep seal shipped as Keel v2.5.0 on 2026-06-19.
+Server-side deep seal investigated and ruled out due to per-sign RSA
+blinding writes (documented below).  Filing the full discovery here
+so the asymmetry is recorded.
+
+### Goal (achieved for client; ruled out for server)
+
+Extend Keel v2.3.3's "policy half seal" beyond the top-level
+`mbedtls_ssl_config` / `mbedtls_x509_crt` / `mbedtls_pk_context`
+structs to also cover the deep heap allocations those structs own
+(cert chain link list nodes, `cert.raw` DER bytes, `cert.pk` bignum
+limbs, `pkey.pk_info` function pointer table, `pkey.pk_ctx` private
+key material, full CA chain).
+
+**Client side (HTTPS-out / CA chain): SHIPPED in v2.5.0.**  CA chain
++ all deep allocations sealed mprotect-RO post-create.  Closes the
+silent-MITM attack against `hull update`, OAuth, JWKS, http.fetch.
+
+**Server side (own pkey): NOT VIABLE.**  See "Why server can't deep-
+seal" below.  Stays on v2.3.3 shallow seal (top-level struct only).
+
+### Shipped design (client side)
+
+1. `MBEDTLS_PLATFORM_MEMORY` enabled in `vendor/mbedtls/hull_config.h`
+   to unlock `mbedtls_platform_set_calloc_free()`.
+2. Per-context arena alloc/free adapter in
+   `vendor/keel/src/tls_mbedtls.c`:
+   - Global `g_current_arena` pointer set during `_ctx_create` body,
+     cleared after.
+   - `kl_mbed_arena_calloc` bumps from `g_current_arena` (zeroed),
+     falls through to heap `calloc` when not in the swap window.
+   - `kl_mbed_arena_free` walks a registry of live sealed arenas and
+     no-ops for any pointer in any registered arena range; else heap
+     `free`.  Registry covers post-swap-window frees of arena-resident
+     pointers.
+3. **Pre-warm walker** (`kl_mbed_prewarm_chain`) drives mbedTLS's two
+   verify-time lazy caches BEFORE seal:
+   - **RSA**: `ctx->RN` (Montgomery R² mod N) — populated lazily by
+     `mbedtls_mpi_exp_mod`.  Pre-warmed via `mbedtls_rsa_public(rsa,
+     zeros, output)` per pubkey.
+   - **ECP**: `grp->T` (precomputed comb table for generator G) —
+     populated lazily by `mbedtls_ecp_mul` on first mul-by-G.  Pre-
+     warmed via `mbedtls_ecp_mul(grp, R, 1, G, drbg)` per group.
+4. Per-context flag `deep_sealed` on `KlMbedtlsCtx` so destroy can
+   branch: deep-sealed ctxs skip `mbedtls_*_free` (arena reclaims
+   wholesale); shallow-sealed (server) ctxs keep the v2.3.3 stack-
+   local copy + `mbedtls_*_free` pattern.
+
+### Validation that landed v2.5.0
+
+- Keel `test_tls` 20/20 and `test_tls_integration` 3/3 PASS.
+- Hull `make e2e-ca-bundle` 8/8 PASS — real HTTPS handshake to
+  example.com against the macOS system store (128 CAs, 105 RSA + 23
+  EC) AND against the Mozilla bundle (145 CAs, 101 RSA + 44 EC)
+  with mbedTLS deep allocations sealed RO.
+- Hull `make test` 46/46 and `make e2e` 22/22.
+
+### Why server can't deep-seal
+
+`vendor/mbedtls/library/rsa.c::rsa_prepare_blinding` (lines
+1296-1304) rewrites `ctx->Vi` and `ctx->Vf` on **every** RSA sign
+operation as a documented timing-attack defense (Kocher 1996).  The
+"cached path" (line 1296) squares both blinding values in place via
+`mbedtls_mpi_mul_mpi` → can grow the limb arrays → triggers a write
+through `ctx->Vi.p` / `ctx->Vf.p`.
+
+`Vi` and `Vf` live INSIDE the rsa_context, which lives inside the
+sealed arena once we deep-seal.  No pre-warm helps — blinding has to
+be fresh per signature.  Skipping blinding would be a security
+regression (the original CVE driver).
+
+Server-side own_pkey therefore stays heap-resident (v2.3.3 shallow
+seal: the top-level `mbedtls_pk_context` struct is sealed inside the
+arena, but the bignum limbs it points at remain heap-allocated and
+mutable, which is exactly what blinding needs).
+
+A future two-arena scheme (seal `conf` + `cert` + `ca_cert` in arena
+A, keep `pkey` in arena B that stays mutable) could close this, but
+requires routing mbedTLS allocations by "which struct does this
+belong to" — not possible through the current
+`mbedtls_platform_set_calloc_free` API.  Would need an upstream
+patch to add per-call allocator context.  Not pursuing.
+
+### Original spike write-up (kept for context)
+
+The initial implementation (before the pre-warm walker) crashed
+during HTTPS verify with:
+
+```
+EXC_BAD_ACCESS (code=2, address=0x105090660)
+hull`mbedtls_mpi_exp_mod_optionally_safe + 472
+  -> str q0, [x25]
+```
+
+The `str q0, [x25]` is the `*prec_RR = RR;` assignment at
+`vendor/mbedtls/library/bignum.c::mbedtls_mpi_exp_mod_optionally_safe:1664`.
+Once identified, pre-warming RR per pubkey (and `grp->T` per EC
+group) eliminated the fault and unblocked the seal.
+
+### Memory cost
+
+Measured high-water for the client arena post pre-warm:
+
+| CA bundle              | n_certs | RSA | EC  | Arena used |
+|------------------------|---------|-----|-----|------------|
+| macOS system store     | 128     | 105 |  23 | 19 MB      |
+| Mozilla bundle (curl)  | 145     | 101 |  44 | 37 MB      |
+
+EC pre-warm dominates (~600 KB per pubkey — comb table + scratch).
+RSA is cheap (~25 KB per pubkey — RR cache).  Virtual address space
+is allocated more generously (`ca_len * 300 + 32 MB`) but only
+written pages are physically backed, so the 19 / 37 MB high-water is
+the real RAM cost.
+
+For Hull's typical HTTPS-out workload (one client TLS context loading
+the system or vendored CA bundle), this is acceptable.  Server-only
+deployments pay nothing additional.
+
+### What was previously tried (now superseded)
+
+1. Enabled `MBEDTLS_PLATFORM_MEMORY` in `vendor/mbedtls/hull_config.h`
+   to unlock `mbedtls_platform_set_calloc_free()`.
+2. Added a per-context arena alloc/free adapter in
+   `vendor/keel/src/tls_mbedtls.c`:
+   - Global `g_current_arena` pointer set during `_ctx_create` body,
+     cleared after.
+   - `kl_mbed_arena_calloc` bumps from `g_current_arena` (zeroed),
+     falls through to heap `calloc` when not in the swap window.
+   - `kl_mbed_arena_free` walks a registry of live sealed arenas and
+     no-ops for any pointer in any registered arena range; else heap
+     `free`.  Registry covers post-swap-window frees of arena-resident
+     pointers.
+3. Refactored both `kl_tls_mbedtls_ctx_create` (server) and
+   `client_ctx_create_from_mem` (client) to install the hook, open
+   the swap window, run the existing parse + `ssl_config_defaults`
+   calls unchanged, close the window, seal the arena.  Heuristic
+   sizing: `sizeof(KlMbedtlsCtxPolicy) + cert_len*4 + key_len*4 +
+   ca_len*5/6 + 32-64 KB floor`.
+4. Refactored `kl_tls_mbedtls_ctx_destroy` to skip the four
+   `mbedtls_*_free` calls for the sealed structs (the arena owns the
+   storage; `sh_seal_arena_destroy` reclaims wholesale).  DRBG and
+   entropy still freed normally (heap-resident, not in arena).
+
+### What worked
+
+- Keel `test_tls` 20/20 and `test_tls_integration` 3/3 PASSED (real
+  server-side TLS handshakes through the sealed cert + pkey).
+- Hull HTTPS-out to `example.com` with the small vendored Mozilla
+  bundle (`vendor/cacert/cacert.pem`, 226 KB / 145 CAs) PASSED.
+- Arena sizing heuristic was accurate — actual high-water for the
+  full system CA store was 553 KB used out of ~2 MB allocated.
+- All heap-write death tests (the v2.4.0-style fault-on-write
+  invariants) would have worked unchanged.
+
+### What broke
+
+`make e2e-ca-bundle` second case (default CA resolution loading
+`/etc/ssl/cert.pem`, 333 KB / 128 CAs) crashed the server with
+`Bus error: 10` during the first outbound HTTPS request.
+
+LLDB capture at the fault:
+
+```
+Process 32846 stopped
+* thread #1, queue = 'com.apple.main-thread',
+  stop reason = EXC_BAD_ACCESS (code=2, address=0x105090660)
+    frame #0: 0x00000001001b30e8
+      hull`mbedtls_mpi_exp_mod_optionally_safe + 472
+hull`mbedtls_mpi_exp_mod_optionally_safe:
+->  0x1001b30e8 <+472>: str    q0, [x25]   ; 16-byte SIMD store
+```
+
+`code=2` + the `str q0, [x25]` SIMD store pattern + the call site
+deep inside RSA modular exponentiation map to mbedTLS writing into a
+bignum-windowed-precompute table that lives inside the sealed RSA
+public key context.  Verified by recompiling with the seal disabled
+(arena alloc/free hook still installed, all allocations still landing
+in arena, just no `sh_seal_arena_seal` call): HTTPS handshake worked,
+`status=200` returned.
+
+### Root cause
+
+mbedTLS's RSA verify path performs lazy precomputation inside the
+caller-provided `mbedtls_rsa_context`.  Even though
+`mbedtls_ssl_config` is documented as const-after-`mbedtls_ssl_setup`,
+the underlying `pk_ctx` for cert pubkeys (the chain CAs and the leaf
+cert public key) gets MUTATED on first use — Montgomery table
+windows, blinding values, or related precompute state get written
+into the bignum limb storage that lives in our sealed arena.
+
+This is not a v2.3.3 problem because v2.3.3 only sealed the
+TOP-LEVEL structs (the `mbedtls_pk_context` itself); the bignum
+limb arrays under `pk_ctx` stayed heap-resident and freely mutable.
+Deep sealing crosses the boundary that mbedTLS treats as mutable.
+
+### Why test 1 (small Mozilla bundle) passed and test 2 failed
+
+Best hypothesis without further instrumentation: the chain CA that
+was actually MATCHED for `example.com` verification differs between
+the two stores.  Mozilla curated bundle may have matched an ECDSA
+intermediate first (no RSA precomputation needed); the macOS system
+store may have matched an RSA-rooted chain first.  Either way the
+failure isn't deterministic on bundle content — it's deterministic
+on "does verify use RSA on a key inside the sealed arena".
+
+### Path forward (the multi-week project)
+
+Three approaches, in increasing order of work:
+
+1. **Upstream patch to mbedTLS adding `mbedtls_rsa_complete_full()`
+   that pre-warms all lazy caches** (Montgomery window tables,
+   blinding pre-state, anything `mbedtls_mpi_exp_mod*` writes on
+   first use).  Walk the cert chain post-parse, call it on every
+   RSA pubkey, then seal.  Same for any ECDSA equivalent.  Estimated
+   2-3 weeks: reading mbedtls bignum code, identifying every lazy
+   write, adding the precompute API, upstream PR cycle.  If upstream
+   declines, vendor the patch.
+
+2. **Two-arena scheme** — separate "const" arena (cert.raw, asn1
+   buffers, ssl_config) from "mutable" arena (pk_ctx bignum limbs).
+   Routes allocations to one or the other based on call-stack
+   classification.  Needs hooking deeper than
+   `mbedtls_platform_set_calloc_free` allows — requires
+   patching the mbedtls source to thread a "category" through every
+   internal `mbedtls_calloc` call.  Estimated 4+ weeks; maintenance
+   burden grows with every mbedtls upgrade.
+
+3. **Manual cert-chain deep-copy** — walk every cert post-parse,
+   find every `mbedtls_rsa_context` / `mbedtls_ecp_keypair`, swap
+   their bignum storage out to heap-resident copies, leave only the
+   cert.raw + asn1 buffers in the arena.  Fragile across mbedTLS
+   minor versions; bignum struct layout changes between releases.
+
+Approach 1 is the only sustainable path.  Not picking it up until
+there's specific external pressure to close the residual risk.
+
+### Empirical findings worth preserving
+
+- **MBEDTLS_PLATFORM_MEMORY works as documented.**  The runtime swap
+  via `mbedtls_platform_set_calloc_free` is sound; the registry-based
+  free hook correctly distinguishes arena from heap allocations.
+- **Arena sizing heuristic for the client path:**
+  `ca_len * 6 + 32 KB + sizeof(KlMbedtlsCtxPolicy)` was within 30 %
+  of actual high-water for the macOS system CA store.  Page rounding
+  to a multiple of 16 KB on Darwin makes the over-provision
+  negligible.
+- **No crash from the arena hook or the destroy refactor** —
+  the bug is purely the seal-vs-runtime-write conflict.  If
+  approach 1 above ever lands, only the seal line needs to be
+  re-enabled; the rest of the scaffolding is correct.
+- **What's safe to seal today (v2.3.3 baseline)** without touching
+  mbedtls internals: `KlMbedtlsCtxPolicy` itself (the four top-level
+  struct copies + `is_server` + `has_ca` flags) plus the policy
+  arena's tiny page of metadata.  That's what shipped.
+- **What's NOT safe** without upstream changes: anything mbedTLS
+  reaches through `.MBEDTLS_PRIVATE(pk)`, `.pk_ctx`, or any bignum-
+  bearing struct.
+
+---
+
 ## ✅ Done: pre-v0.1.0 release gate
 
 Five operational steps that gated the v0.1.0 tag. All executed

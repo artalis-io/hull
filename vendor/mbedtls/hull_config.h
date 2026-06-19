@@ -16,6 +16,13 @@
 #define MBEDTLS_HAVE_TIME
 #define MBEDTLS_HAVE_TIME_DATE
 #define MBEDTLS_PLATFORM_C
+/* Enables mbedtls_platform_set_calloc_free(), which Keel uses to
+ * route setup-time mbedTLS allocations into a per-context
+ * sh_seal_arena (the v2.5.0+ "deep allocator seal" for client TLS
+ * contexts).  See vendor/keel/src/tls_mbedtls.c for the swap
+ * mechanism and the kl_mbed_prewarm_chain walker that makes the
+ * post-seal verify path fault-free. */
+#define MBEDTLS_PLATFORM_MEMORY
 
 /* ── Feature selection ───────────────────────────────────────────── */
 
