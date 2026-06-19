@@ -4490,4 +4490,129 @@ UTEST(js_template_cache, name_in_key)
     nftw(tmp, jbc_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
 }
 
+/* ── app.X phase-gate (registration_closed) tests ─────────────────────
+ *
+ * Mirrors the Lua-side tests in tests/hull/runtime/lua/test_lua.c.
+ * Once serve.c sets runtime.registration_closed = 1, all
+ * app.{get,post,...,use,usePost,ws,sse,every,daily} bindings must
+ * throw a TypeError naming the call and explaining the rule. */
+
+/* Pattern: a module body that calls into a binding is evaluated
+ * asynchronously by QuickJS — JS_IsException on the eval value gives
+ * promise-pending, not the inner throw.  These tests use a two-step
+ * dance instead:
+ *   1. eval a module that stashes the `app` import on globalThis;
+ *      this completes via hl_js_run_jobs.
+ *   2. flip registration_closed.
+ *   3. eval a SYNCHRONOUS (JS_EVAL_TYPE_GLOBAL) try/catch that calls
+ *      the binding and returns the caught error.toString() (or "" on
+ *      success), so we observe the throw via the returned string. */
+
+UTEST(js_runtime, app_get_rejected_after_registration_closed)
+{
+    init_js();
+
+    const char *setup =
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
+        "globalThis.__app = app;\n";
+    JSValue v = JS_Eval(js.ctx, setup, strlen(setup),
+                        "<reg-closed-get-setup>", JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(v)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, v);
+    hl_js_run_jobs(&js);
+
+    js.base.registration_closed = 1;
+
+    char *err = eval_str(
+        "(() => { try {"
+        "  globalThis.__app.get('/late', (req, res) => { res.json({}); });"
+        "  return '';"
+        "} catch (e) { return String(e); } })()");
+    ASSERT_NE(err, NULL);
+    ASSERT_NE(strstr(err, "app.get"), NULL);
+    ASSERT_NE(strstr(err, "app startup"), NULL);
+    free(err);
+    cleanup_js();
+}
+
+UTEST(js_runtime, app_use_rejected_after_registration_closed)
+{
+    init_js();
+    const char *setup =
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
+        "globalThis.__app = app;\n";
+    JSValue v = JS_Eval(js.ctx, setup, strlen(setup),
+                        "<reg-closed-use-setup>", JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(v)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, v);
+    hl_js_run_jobs(&js);
+
+    js.base.registration_closed = 1;
+
+    char *err = eval_str(
+        "(() => { try {"
+        "  globalThis.__app.use('*', '/api/*', (req, res) => 0);"
+        "  return '';"
+        "} catch (e) { return String(e); } })()");
+    ASSERT_NE(err, NULL);
+    ASSERT_NE(strstr(err, "app.use"), NULL);
+    free(err);
+    cleanup_js();
+}
+
+UTEST(js_runtime, app_every_rejected_after_registration_closed)
+{
+    init_js();
+    const char *setup =
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1', 'hull/timers@1'] });\n"
+        "globalThis.__app = app;\n";
+    JSValue v = JS_Eval(js.ctx, setup, strlen(setup),
+                        "<reg-closed-every-setup>", JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(v)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, v);
+    hl_js_run_jobs(&js);
+
+    js.base.registration_closed = 1;
+
+    char *err = eval_str(
+        "(() => { try {"
+        "  globalThis.__app.every(5000, () => {});"
+        "  return '';"
+        "} catch (e) { return String(e); } })()");
+    ASSERT_NE(err, NULL);
+    ASSERT_NE(strstr(err, "app.every"), NULL);
+    free(err);
+    cleanup_js();
+}
+
+UTEST(js_runtime, app_get_allowed_before_registration_closed)
+{
+    /* Sanity: the same call succeeds (returns "") with the flag
+     * clear.  Guards against an over-eager gate. */
+    init_js();
+    ASSERT_EQ(js.base.registration_closed, 0);
+    const char *setup =
+        "import { app } from 'hull:app';\n"
+        "app.manifest({ modules: ['hull/http-server@1'] });\n"
+        "globalThis.__app = app;\n";
+    JSValue v = JS_Eval(js.ctx, setup, strlen(setup),
+                        "<reg-open-allowed>", JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(v)) hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, v);
+    hl_js_run_jobs(&js);
+
+    char *err = eval_str(
+        "(() => { try {"
+        "  globalThis.__app.get('/ok', (req, res) => { res.json({}); });"
+        "  return '';"
+        "} catch (e) { return String(e); } })()");
+    ASSERT_NE(err, NULL);
+    ASSERT_STREQ(err, "");
+    free(err);
+    cleanup_js();
+}
+
 UTEST_MAIN();

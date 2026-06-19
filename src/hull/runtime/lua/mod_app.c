@@ -26,12 +26,26 @@ static int lua_app_main_registered(lua_State *L)
     return has;
 }
 
-/* No-op: kept for source compatibility with the call sites in this
- * file. app.main and route registration are no longer mutually
- * exclusive — see the lifecycle docs in CLAUDE.md and serve.c. */
-static int lua_app_reject_if_main(lua_State *L, const char *call)
+/* Phase gate.  Raises a structured Lua error if the runtime has moved
+ * past the boot phase (top-level + app.main).  Called at the top of
+ * every app.X registration binding so a route added from inside a
+ * request handler or timer callback produces a clear actionable
+ * message instead of silently disappearing into a registry table no
+ * consumer reads post wire_routes.  Function never returns when it
+ * rejects (luaL_error long-jumps). */
+static int lua_app_reject_if_serving(lua_State *L, const char *call)
 {
-    (void)L; (void)call;
+    HlLua *lua = get_hl_lua(L);
+    if (lua && lua->base.registration_closed) {
+        luaL_error(L,
+            "%s can only be called at app startup (top-level code or "
+            "inside app.main). Hull seals the router after wire-up so "
+            "dynamic registration from request handlers / timer "
+            "callbacks is intentionally not supported. Move the "
+            "registration to top level, or to an app.main(fn) that "
+            "runs before the serve loop starts.",
+            call);
+    }
     return 0;
 }
 
@@ -51,7 +65,7 @@ static int lua_app_reject_if_main(lua_State *L, const char *call)
  */
 static int lua_app_route(lua_State *L, const char *method)
 {
-    lua_app_reject_if_main(L, "app.get/post/put/delete/patch/options");
+    lua_app_reject_if_serving(L, "app.get/post/put/delete/patch/options");
     const char *pattern = luaL_checkstring(L, 1);
     luaL_checktype(L, 2, LUA_TFUNCTION);
     /* Arg 3 is the optional opts table — type-check only if present. */
@@ -124,7 +138,7 @@ static int lua_app_options(lua_State *L) { return lua_app_route(L, "OPTIONS"); }
 /* app.use(method, pattern, handler) — middleware registration */
 static int lua_app_use(lua_State *L)
 {
-    lua_app_reject_if_main(L, "app.use");
+    lua_app_reject_if_serving(L, "app.use");
     const char *method = luaL_checkstring(L, 1);
     const char *pattern = luaL_checkstring(L, 2);
     luaL_checktype(L, 3, LUA_TFUNCTION);
@@ -170,7 +184,7 @@ static int lua_app_use(lua_State *L)
 /* app.use_post(method, pattern, fn) — register post-body middleware */
 static int lua_app_use_post(lua_State *L)
 {
-    lua_app_reject_if_main(L, "app.use_post");
+    lua_app_reject_if_serving(L, "app.use_post");
     const char *method = luaL_checkstring(L, 1);
     const char *pattern = luaL_checkstring(L, 2);
     luaL_checktype(L, 3, LUA_TFUNCTION);
@@ -216,7 +230,7 @@ static int lua_app_use_post(lua_State *L)
 /* app.every(interval_ms, handler) — repeating timer */
 static int lua_app_every(lua_State *L)
 {
-    lua_app_reject_if_main(L, "app.every");
+    lua_app_reject_if_serving(L, "app.every");
     lua_Integer interval_ms = luaL_checkinteger(L, 1);
     luaL_checktype(L, 2, LUA_TFUNCTION);
 
@@ -264,7 +278,7 @@ static int lua_app_every(lua_State *L)
 /* app.daily(time_str, handler [, opts]) — daily timer at HH:MM */
 static int lua_app_daily(lua_State *L)
 {
-    lua_app_reject_if_main(L, "app.daily");
+    lua_app_reject_if_serving(L, "app.daily");
     const char *time_str = luaL_checkstring(L, 1);
     luaL_checktype(L, 2, LUA_TFUNCTION);
 
@@ -355,7 +369,7 @@ static lua_Integer store_handler(lua_State *L, int func_idx,
 
 static int lua_app_ws(lua_State *L)
 {
-    lua_app_reject_if_main(L, "app.ws");
+    lua_app_reject_if_serving(L, "app.ws");
     const char *path = luaL_checkstring(L, 1);
     luaL_checktype(L, 2, LUA_TTABLE);
 
@@ -408,7 +422,7 @@ static int lua_app_ws(lua_State *L)
 
 static int lua_app_sse(lua_State *L)
 {
-    lua_app_reject_if_main(L, "app.sse");
+    lua_app_reject_if_serving(L, "app.sse");
     const char *path = luaL_checkstring(L, 1);
     luaL_checktype(L, 2, LUA_TFUNCTION);
 

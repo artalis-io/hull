@@ -1718,6 +1718,19 @@ static int hl_serve_wire_and_start(HlServerState *s)
         return -1;
     }
 
+    /* Close the registration bindings (app.get / use / use_post / ws /
+     * sse / every / daily).  From here on, calls into those bindings
+     * (e.g. from a request handler that mistakenly tries dynamic route
+     * registration) throw a structured error instead of silently
+     * dropping the request into a table no consumer reads.  Matches the
+     * router freeze below — together they make "no registration after
+     * the serve loop starts" enforceable from both the script side
+     * (clear error message) and the C side (RO route table). */
+    {
+        HlRuntime *rt_close = hl_app_context_runtime(s->app);
+        if (rt_close) rt_close->registration_closed = 1;
+    }
+
     /* Freeze the routing tables (Keel v2.3.0+).  After this call,
      * KlRouter's route + middleware tables live in an mprotect-RO
      * arena — a heap-write primitive that would otherwise overwrite

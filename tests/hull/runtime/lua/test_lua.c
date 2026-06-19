@@ -4290,4 +4290,89 @@ UTEST(lua_template_cache, parse_error_returns_no_cache_write)
     nftw(tmp, bc_rm_entry, 16, FTW_DEPTH | FTW_PHYS);
 }
 
+/* ── app.X phase-gate (registration_closed) tests ─────────────────────
+ *
+ * After serve.c finishes wire_routes and sets
+ * runtime.registration_closed = 1, the app.{get,post,...} / use /
+ * use_post / ws / sse / every / daily bindings MUST throw a structured
+ * Lua error.  Pre-flag-flip the same calls succeed (covered by the
+ * many existing tests above — re-asserted here once for clarity).
+ *
+ * Implementation gate lives in lua_app_reject_if_serving(). */
+
+UTEST(lua_runtime, app_get_rejected_after_registration_closed)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "app.manifest({modules = {'hull/http-server@1'}})\n");
+    ASSERT_EQ(rc, LUA_OK);
+
+    /* Simulate the post-wire_routes / post-serve-loop entry state.
+     * In production this is set by hl_serve_wire_routes via the
+     * runtime pointer. */
+    lua_rt.base.registration_closed = 1;
+
+    rc = luaL_dostring(lua_rt.L,
+        "app.get('/late', function(req, res) res:json({late=true}) end)\n");
+    ASSERT_NE(rc, LUA_OK);
+    const char *err = lua_tostring(lua_rt.L, -1);
+    ASSERT_NE(err, NULL);
+    /* Error names the call and explains the rule.  Substring asserts
+     * cover both pieces without locking the wording too tightly. */
+    ASSERT_TRUE(strstr(err, "app.get") != NULL);
+    ASSERT_TRUE(strstr(err, "app startup") != NULL);
+    lua_pop(lua_rt.L, 1);
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, app_use_rejected_after_registration_closed)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "app.manifest({modules = {'hull/http-server@1'}})\n");
+    ASSERT_EQ(rc, LUA_OK);
+    lua_rt.base.registration_closed = 1;
+    rc = luaL_dostring(lua_rt.L,
+        "app.use('*', '/api/*', function(req, res) return 0 end)\n");
+    ASSERT_NE(rc, LUA_OK);
+    const char *err = lua_tostring(lua_rt.L, -1);
+    ASSERT_TRUE(err != NULL && strstr(err, "app.use") != NULL);
+    lua_pop(lua_rt.L, 1);
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, app_every_rejected_after_registration_closed)
+{
+    init_lua();
+    int rc = luaL_dostring(lua_rt.L,
+        "app.manifest({modules = {'hull/http-server@1', 'hull/timers@1'}})\n");
+    ASSERT_EQ(rc, LUA_OK);
+    lua_rt.base.registration_closed = 1;
+    /* Defense against a recursive registration: a timer callback that
+     * tries to install another timer must fail just like a fresh
+     * registration call would. */
+    rc = luaL_dostring(lua_rt.L,
+        "app.every(5000, function() end)\n");
+    ASSERT_NE(rc, LUA_OK);
+    const char *err = lua_tostring(lua_rt.L, -1);
+    ASSERT_TRUE(err != NULL && strstr(err, "app.every") != NULL);
+    lua_pop(lua_rt.L, 1);
+    cleanup_lua();
+}
+
+UTEST(lua_runtime, app_get_allowed_before_registration_closed)
+{
+    /* Sanity-check the boot-phase path: same registration succeeds
+     * pre-flag-flip.  Guards against an over-eager gate that fires
+     * during top-level execution. */
+    init_lua();
+    /* Flag defaults to 0 from memset in init_lua. */
+    ASSERT_EQ(lua_rt.base.registration_closed, 0);
+    int rc = luaL_dostring(lua_rt.L,
+        "app.manifest({modules = {'hull/http-server@1'}})\n"
+        "app.get('/ok', function(req, res) res:json({ok=true}) end)\n");
+    ASSERT_EQ(rc, LUA_OK);
+    cleanup_lua();
+}
+
 UTEST_MAIN();

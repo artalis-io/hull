@@ -17,12 +17,30 @@ static int js_app_main_registered(JSContext *ctx)
     return has;
 }
 
-/* No-op: kept for source compatibility with the call sites in this
- * file. app.main and route registration are no longer mutually
- * exclusive — see the lifecycle docs in CLAUDE.md and serve.c. */
-static int js_app_throw_if_main(JSContext *ctx, const char *call)
+/* Phase gate.  Throws a structured TypeError if the runtime has moved
+ * past the boot phase (top-level + app.main).  Returns 1 when it
+ * threw, 0 when the call should proceed.  Caller pattern matches the
+ * existing call sites:
+ *
+ *     if (js_app_throw_if_serving(ctx, "app.use")) return JS_EXCEPTION;
+ *
+ * Mirrors Lua's lua_app_reject_if_serving — see that doc-comment for
+ * the rationale (router seal + clear-error UX instead of silent drop).
+ */
+static int js_app_throw_if_serving(JSContext *ctx, const char *call)
 {
-    (void)ctx; (void)call;
+    HlJS *js = get_hl_js(ctx);
+    if (js && js->base.registration_closed) {
+        JS_ThrowTypeError(ctx,
+            "%s can only be called at app startup (top-level code or "
+            "inside app.main). Hull seals the router after wire-up so "
+            "dynamic registration from request handlers / timer "
+            "callbacks is intentionally not supported. Move the "
+            "registration to top level, or to an app.main(fn) that "
+            "runs before the serve loop starts.",
+            call);
+        return 1;
+    }
     return 0;
 }
 
@@ -44,7 +62,7 @@ static JSValue js_app_route(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv, int magic)
 {
     (void)this_val;
-    if (js_app_throw_if_main(ctx, "app.get/post/put/delete/patch/options"))
+    if (js_app_throw_if_serving(ctx, "app.get/post/put/delete/patch/options"))
         return JS_EXCEPTION;
     static const char *method_names[] = {
         "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "*"
@@ -133,7 +151,7 @@ static JSValue js_app_use(JSContext *ctx, JSValueConst this_val,
                            int argc, JSValueConst *argv)
 {
     (void)this_val;
-    if (js_app_throw_if_main(ctx, "app.use")) return JS_EXCEPTION;
+    if (js_app_throw_if_serving(ctx, "app.use")) return JS_EXCEPTION;
     if (argc < 3)
         return JS_ThrowTypeError(ctx, "app.use requires (method, pattern, handler)");
 
@@ -194,7 +212,7 @@ static JSValue js_app_use_post(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv)
 {
     (void)this_val;
-    if (js_app_throw_if_main(ctx, "app.usePost")) return JS_EXCEPTION;
+    if (js_app_throw_if_serving(ctx, "app.usePost")) return JS_EXCEPTION;
     if (argc < 3)
         return JS_ThrowTypeError(ctx, "app.usePost requires (method, pattern, handler)");
 
@@ -255,7 +273,7 @@ static JSValue js_app_every(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv)
 {
     (void)this_val;
-    if (js_app_throw_if_main(ctx, "app.every")) return JS_EXCEPTION;
+    if (js_app_throw_if_serving(ctx, "app.every")) return JS_EXCEPTION;
     if (argc < 2)
         return JS_ThrowTypeError(ctx, "app.every requires (interval_ms, handler)");
 
@@ -316,7 +334,7 @@ static JSValue js_app_daily(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv)
 {
     (void)this_val;
-    if (js_app_throw_if_main(ctx, "app.daily")) return JS_EXCEPTION;
+    if (js_app_throw_if_serving(ctx, "app.daily")) return JS_EXCEPTION;
     if (argc < 2)
         return JS_ThrowTypeError(ctx, "app.daily requires (time_str, handler)");
 
@@ -421,7 +439,7 @@ static JSValue js_app_ws(JSContext *ctx, JSValueConst this_val,
                            int argc, JSValueConst *argv)
 {
     (void)this_val;
-    if (js_app_throw_if_main(ctx, "app.ws")) return JS_EXCEPTION;
+    if (js_app_throw_if_serving(ctx, "app.ws")) return JS_EXCEPTION;
     if (argc < 2)
         return JS_ThrowTypeError(ctx, "app.ws requires (path, handlers)");
 
@@ -485,7 +503,7 @@ static JSValue js_app_sse(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
     (void)this_val;
-    if (js_app_throw_if_main(ctx, "app.sse")) return JS_EXCEPTION;
+    if (js_app_throw_if_serving(ctx, "app.sse")) return JS_EXCEPTION;
     if (argc < 2)
         return JS_ThrowTypeError(ctx, "app.sse requires (path, handler)");
 

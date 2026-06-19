@@ -205,6 +205,28 @@ struct HlRuntime {
 #ifdef HL_ENABLE_GPU
     HlGpuCtx *gpu_ctx;                /* GPU compute context (NULL if disabled) */
 #endif
+    /* Phase gate for the `app.X` registration bindings (app.get / use /
+     * use_post / ws / sse / every / daily).  Set to 1 by serve.c
+     * (hl_serve_wire_routes) after the route registry has been flushed
+     * to Keel and before kl_server_freeze.
+     *
+     * Once set, the bindings throw a structured Lua error / JS exception
+     * — "app.X() can only be called at app startup ..." — instead of
+     * silently accepting the registration and stashing it in a table
+     * that no consumer reads (the underlying KlRouter is also frozen
+     * post this point, so even if the binding did push, kl_router_add
+     * would return -1).
+     *
+     * Top-level app code, manifest extraction, and app.main(fn) all run
+     * BEFORE the flag is flipped, so they continue to register normally.
+     * Request handlers, app.every/app.daily timer callbacks, and any
+     * other code that executes after the serve loop begins see the flag
+     * set and get the clear error.
+     *
+     * Build-time gated: only meaningful on HL_ENABLE_HTTP_SERVER builds
+     * (CLI builds don't compile the registration bindings).  Kept on
+     * the base struct unconditionally so consumers don't need ifdefs. */
+    int registration_closed;
 };
 
 #endif /* HL_RUNTIME_H */
