@@ -587,26 +587,58 @@ clause and the C-level capability layer still apply.
 
 The kernel sandbox stops the app from *calling* dangerous things. The
 sealed-arena layer stops a memory-corruption bug from *rewriting the
-policy itself* to make dangerous things look benign.
+policy itself* to make dangerous things look benign, or from
+pivoting a function pointer to attacker-controlled code.
 
 ### Threat model
 
 An attacker who lands a linear-write heap-corruption bug in Hull
-post-boot — buffer overflow in a parser, double-free, use-after-free
+post-boot (buffer overflow in a parser, double-free, use-after-free
 in WAMR / mbedTLS / SQLite, anything that yields "I can write N bytes
-to address X" — would otherwise be able to overwrite:
+to address X") has two distinct escalation paths into the policy
+plane that this layer closes.
+
+**Policy tamper (silent capability escalation).** Overwriting an
+allowlist byte to relax a gate:
 
 - The manifest's `fs_write` allowlist: change `"data/"` to `"/etc/"`.
 - The manifest's `hosts` allowlist: add their C2 host.
 - The manifest's `env` allowlist: add `AWS_SECRET_ACCESS_KEY`.
-- The CA bundle bytes: insert their own attacker-controlled root CA.
+- The mTLS `authmode` byte: flip `VERIFY_REQUIRED` to `VERIFY_NONE`.
+- A DoS cap like `max_body_size`: raise to `SIZE_MAX`.
+- A CA chain root pointer: swap a Let's Encrypt root for an attacker
+  cert and turn every outgoing HTTPS into a silent MITM.
 
 The capability layer (`hl_cap_fs_validate`, `hl_cap_http_request`,
 `hl_cap_env_get`) trusts the values it was handed; it has no way to
-detect "this allowlist was tampered with after boot." Sealing turns
-the attempted write into `SIGSEGV` at the syscall level — the OS page
-table says read-only, the CPU faults, the process dies. The attacker
-gets a crash instead of a silent capability escalation.
+detect "this allowlist was tampered with after boot."
+
+**Function-pointer pivot (ROP/JOP data-plane variant).** Overwriting a
+function pointer in a dispatch table or callback slot to redirect a
+call site to an attacker-chosen address. This is the data-plane
+counterpart to the classic instruction-pointer hijack covered in §4c:
+instead of corrupting a return address on the stack, the attacker
+corrupts a vtable entry on the heap. The compiler-level mitigations
+(PAC, BTI, CFI, stack canaries) don't see this. The call is a
+normal indirect dispatch; the pointer just happens to point at a
+ROP/JOP gadget chain. Sealing the tables that *hold* the function
+pointers closes the primitive at the source.
+
+High-value pivot targets that are sealed today:
+
+- Router handler `vtable[i].handler` (per-route C fn ptr)
+- Pre/post middleware function pointers
+- `mbedtls_pk_info` dispatch table (every pk op routes through it)
+- `KlConfig.parser` factory (invoked on every accepted connection)
+- `KlConfig.log_fn` / `KlConfig.access_log` (invoked on every request)
+- `mbedtls_ssl_config` RNG callback + cert / CA chain pointers
+- WAMR `host_symbols` table (mapped on every WASM call)
+
+Sealing turns the attempted write (whether to allowlist data or to
+a function-pointer slot) into `SIGSEGV` at the syscall level. The
+OS page table says read-only, the CPU faults, the process dies. The
+attacker gets a crash instead of a silent capability escalation or
+control-flow hijack.
 
 ### Two protection mechanisms
 
@@ -617,21 +649,65 @@ Hull's dispatch tables (vtables, command tables, module registry,
 CSP presets, MIME table, embedded CA bundle, embedded stdlib entries)
 are all `static const` and get this protection for free.
 
-**`hl_seal_arena` (boot-built data).** What's left is data that *can't*
-be `static const` because it's built at boot from app input (the
-manifest from `app.manifest({...})`, the sandbox policy derived from
-it). Hull allocates this into a page-aligned `mmap` arena, populates
-it during the boot phase, then calls `mprotect(PROT_READ)` once. Same
-protection as `.rodata` but for runtime-built data.
+**`sh_seal_arena` (boot-built data, shared with Keel).** What's left
+is data that *can't* be `static const` because it's built at boot
+from app input: the manifest from `app.manifest({...})`, the
+sandbox policy derived from it, the router's per-route handler
+table, the parsed CA chain inside an mbedTLS context. Hull and Keel
+both allocate this kind of data into a page-aligned `mmap` arena,
+populate it during the boot phase, then call `mprotect(PROT_READ)`
+once. Same protection as `.rodata` but for runtime-built data.
+
+The arena primitive itself lives in `vendor/keel/vendor/sh_seal_arena/`
+as a shared `sh_*`-family utility (`sh_seal_arena.h` /
+`sh_seal_arena.c`, sibling to `sh_arena` and `sh_json`). Both Hull and
+Keel link it; Hull additionally builds a sanitizer-instrumented
+in-tree copy so ASan/MSan see arena allocations correctly when running
+the Hull test suite. The API is one-way: `init` → `alloc/strdup/memdup`
+→ `seal` → reads only; there's deliberately no unseal because the
+whole point is irreversibility.
 
 ### What's sealed today
 
-| Subsystem | Mechanism | Location |
-|---|---|---|
-| Embedded CA bundle (Mozilla roots, `embedded_cacert`) | `.rodata` (`const`-qualified via Makefile post-process of `xxd -i` output) | `src/hull/cacert.c` + `Makefile` `EMBEDDED_CACERT_H` rule |
-| Manifest `fs_read` / `fs_write` / `hosts` / `env` / `csp` / `cors_*` / `modules[].name` strings | `hl_seal_arena` | Sealed in `hl_serve_wire_caps` (`src/hull/serve.c`) post-extract, pre-resolver |
-| All dispatch tables (vtables, registries, command table, etc.) | `.rodata` (`static const`) | Compile-time |
-| Embedded stdlib entries (`hl_stdlib_entries[]`, ~130 files) | `.rodata` | `build/stdlib_registry.c` (generated) |
+The sealed surface spans both halves of the C boundary. Hull-side
+covers app policy + runtime hookpoints; Keel-side covers HTTP +
+TLS state. The two halves shipped over Keel v2.3.0 → v2.5.1.
+
+| Layer | Subsystem | Mechanism | Shipped in |
+|---|---|---|---|
+| Hull | Embedded CA bundle (Mozilla roots, `embedded_cacert`) | `.rodata` (`const`-qualified via Makefile post-process of `xxd -i` output) | (existing) |
+| Hull | All dispatch tables (`HlRuntimeVtable`, `HlDbBackend`, `HlAsyncBackend`, command table, module registry, MIME table, CSP presets) | `.rodata` (`static const`) | (existing) |
+| Hull | Embedded stdlib entries (`hl_stdlib_entries[]`, ~130 files) | `.rodata` (generated `build/stdlib_registry.c`) | (existing) |
+| Hull | Manifest `fs_read` / `fs_write` / `hosts` / `env` / `csp` / `cors_*` / `modules[].name` strings | `sh_seal_arena` | `hl_serve_wire_caps` (`src/hull/serve.c`) post-extract, pre-resolver |
+| Hull | WAMR `host_symbols` table (WASM-side native imports) | `sh_seal_arena` | `hl_cap_wasm_init` (`src/hull/cap/wasm.c`) |
+| Hull | CORS config (per-route allowlists) | `sh_seal_arena` | Allocated inside the manifest arena |
+| Keel | Router routes + pre-middleware + post-middleware tables | `sh_seal_arena` via `kl_router_freeze` | Keel v2.3.0 |
+| Keel | mbedTLS top-level policy: `ssl_config`, `cert`, `pkey`, `ca_cert`, `authmode`, cipher allowlist, RNG callback | `sh_seal_arena` (per-context) | Keel v2.3.3 |
+| Keel | `KlServer.config` mirror: `parser`, `log_fn`, `access_log`, `max_body_size`, `max_header_size`, `bind_addr`, TLS / H2 / compress storage | `sh_seal_arena` via `kl_server_freeze` + `kl_server_config(s)` accessor | Keel v2.4.0 |
+| Keel | mbedTLS deep allocations (client TLS): parsed DER bytes, RSA bignum limbs + Montgomery `RN` cache, EC `grp->T` comb tables, `pk_info` dispatchers, full CA chain link nodes | `sh_seal_arena` via `mbedtls_platform_set_calloc_free` arena hook + pre-warm walker | Keel v2.5.0 / fixes v2.5.1 |
+
+### Companion: phase-gated registration
+
+The C-side seal is paired with a script-side gate. After
+`hl_serve_wire_routes` flushes the runtime registry into the C router
+and before `kl_server_freeze` mprotects the tables, Hull sets
+`HlRuntime.registration_closed = 1`. From that point onward every
+`app.X()` registration binding (`app.get`, `app.post`, `app.use`,
+`app.use_post`, `app.ws`, `app.sse`, `app.every`, `app.daily`)
+raises a structured error:
+
+> `app.get` can only be called at app startup (top-level code or
+> inside `app.main`). Hull seals the router after wire-up so dynamic
+> registration from request handlers / timer callbacks is
+> intentionally not supported. Move the registration to top level,
+> or to an `app.main(fn)` that runs before the serve loop starts.
+
+This is a defense-in-depth pairing: the C-side seal makes
+`kl_router_add` fault on heap-write tamper, the script-side gate
+gives the developer a clear, actionable error if they try the same
+operation through the legitimate API path. Without the gate, a
+handler that called `app.get(...)` would silently push into a Lua/JS
+table that no consumer reads post wire-up.
 
 ### What's NOT sealed (by design)
 
@@ -641,29 +717,33 @@ protection as `.rodata` but for runtime-built data.
 | JWKS cache (oauth) | Lua-side `_state._jwks_cache`; PEM strings, not parsed mbedTLS contexts. No C-side cache. |
 | Session table, idempotency table, audit log | SQLite-backed; mutated every request by design. |
 | WASM module instances, GPU buffer pools, DB connection pool | Mutated every request by design. |
+| **Server-side own RSA private key (`mbedtls_rsa_context` for own_pkey)** | mbedTLS's `rsa_prepare_blinding` (Kocher 1996 timing-attack defense) rewrites `ctx->Vi` / `ctx->Vf` on every signature. The cached path squares both blinding values in place; the no-blinding path is a security regression. Pre-warm doesn't help: blinding has to be fresh per sign. Server own_pkey therefore stays heap-mutable (the top-level `pk_context` struct is still sealed via v2.3.3's policy half; only the bignum limbs the context points at remain heap-resident and mutable). Mitigated by the kernel sandbox + capability layer. Documented in [`roadmap_next.md` § 8](roadmap_next.md). |
+| `mbedtls_ctr_drbg` + `mbedtls_entropy` state | DRBG advances on every random draw; entropy accumulator updates per pool. Both structurally cannot live on RO pages. Initialised outside Keel's deep-seal arena window so their internal allocations stay on the heap and `mbedtls_*_free` at destroy can zero them normally. |
+| Per-handshake `mbedtls_ssl_context` (per-connection session state) | Mutated continuously during the handshake state machine and the post-handshake record layer. Each connection allocates a fresh one on the heap. The shared `ssl_config` it points to is sealed (above table). |
 
 ### Convention for new code
 
 If you're adding a new C-level structure that:
 
 1. Is **built at boot** from configuration (manifest, env, file
-   parse — anything not compile-time-constant), AND
+   parse, or anything else not compile-time-constant), AND
 2. Is **read-only at runtime** (consumed but not mutated after
    the boot phase ends), AND
 3. **Affects security policy** (allowlists, capability gates,
-   trust anchors, dispatch tables that route to sensitive code),
+   trust anchors, dispatch tables that route to sensitive code,
+   function-pointer slots invoked on every request),
 
-then it's a candidate for `hl_seal_arena`. The pattern:
+then it's a candidate for `sh_seal_arena`. The pattern:
 
 ```c
-HlSealArena arena;
-hl_seal_arena_init(&arena, 16 * 1024, "what-this-protects");
-/* ...allocate + populate structures via hl_seal_arena_alloc / strdup / memdup... */
-if (hl_seal_arena_seal(&arena) != 0) FATAL("seal failed");
+ShSealArena arena;
+sh_seal_arena_init(&arena, 16 * 1024, "what-this-protects");
+/* ...allocate + populate structures via sh_seal_arena_alloc / strdup / memdup... */
+if (sh_seal_arena_seal(&arena) != 0) FATAL("seal failed");
 /* ...subsequent reads are RO; writes SIGSEGV; allocation returns NULL... */
 ```
 
-Seal failure should be fatal — the alternative is shipping with
+Seal failure should be fatal: the alternative is shipping with
 unsealed policy, which silently weakens the hardening posture in a
 way nobody notices until they're being exploited.
 
@@ -677,14 +757,31 @@ shipping any C runtime changes that touch security policy.
 
 ### Tests prove the OS protection actually fires
 
-`tests/hull/test_seal_arena.c::write_after_seal_faults` and
-`test_manifest_seal.c::write_to_sealed_string_faults` are fork+SIGSEGV
-death tests: the child process attempts to write to a sealed page; the
-parent asserts the child died with SIGSEGV/SIGBUS. If `mprotect` were
-ever a no-op (kernel bug, platform incompatibility, configuration
-mistake), the child would write happily and exit 0, and the parent's
-`WIFSIGNALED` check would fail. The tests are the only way to
-guarantee the protection isn't theoretical.
+Sealed-arena protection is only worth anything if the `mprotect` call
+actually faults on write. Every layer ships a fork+SIGSEGV death test
+that proves it does.
+
+| Test | Covers |
+|---|---|
+| `vendor/keel/vendor/sh_seal_arena/tests/test_sh_seal_arena.c::write_after_seal_faults` | Bare arena: write to a sealed page → child dies with SIGSEGV/SIGBUS. Foundation. |
+| `tests/hull/test_manifest_seal.c::write_to_sealed_string_faults` | Hull manifest allowlist string write → SIGSEGV. |
+| `tests/hull/test_manifest_seal.c::write_to_sealed_csp_faults` | Hull CSP / CORS config write → SIGSEGV. |
+| `vendor/keel/tests/test_router.c::frozen_table_write_faults` | Router handler vtable entry overwrite → SIGSEGV (Keel v2.3.0). |
+| `vendor/keel/tests/test_server_freeze.c::frozen_config_write_faults` | `KlConfig.parser` function pointer overwrite → SIGSEGV (Keel v2.4.0). |
+| `vendor/keel/tests/test_server_freeze.c::frozen_max_body_size_write_faults` | DoS cap raise via heap-write → SIGSEGV. |
+| `vendor/keel/tests/test_server_freeze.c::frozen_bind_addr_write_faults` | Duplicated `bind_addr` string mutation → SIGSEGV. |
+| `tests/hull/cap/test_tls_mbedtls_multi_ctx.c` | Multi-context lifecycle for the v2.5.0 deep mbedTLS seal under ASan: confirms registry walk + branched destroy stay consistent across LIFO / FIFO / interleaved create-destroy patterns. |
+
+Each child process resets `SIGSEGV` AND `SIGBUS` to `SIG_DFL` before
+the offending write so sanitizer runtimes don't swallow the signal,
+and the parent's `WIFSIGNALED` check accepts both signals (macOS
+prefers SIGBUS for mprotect violations; Linux prefers SIGSEGV).
+
+If `mprotect` were ever a no-op (kernel bug, platform
+incompatibility, configuration mistake), the child would write
+happily and exit 0, and the parent's `WIFSIGNALED` check would fail.
+The tests are the only way to guarantee the protection isn't
+theoretical.
 
 ---
 
@@ -715,7 +812,7 @@ Hull's design already rules out the easiest escalation paths:
   AOT (statically compiled at build time, never written at runtime).
 - **No RWX memory.** No mmap/mprotect path takes both `PROT_WRITE`
   and `PROT_EXEC` simultaneously. The sealed-manifest arena
-  (`hl_seal_arena`, §4b) flips RW → RO via `mprotect` and never the
+  (`sh_seal_arena`, §4b) flips RW → RO via `mprotect` and never the
   reverse.
 - **No writable function-pointer tables.** All dispatch vtables
   (`HlRuntimeVtable`, `HlDbBackend`, `HlAsyncBackend`, etc.) live in
@@ -819,6 +916,22 @@ Verified properties:
 | Apply hardening CFLAGS to vendor TUs (mbedtls, sqlite, lua, qjs, miniz, tweetnacl, wamr) | Deferred | Vendor TUs use their own `CFLAGS := … -w …` arrays that clobber the global set. Worth doing per-vendor (mbedtls first; security-critical and well-tested under hardening flags elsewhere). |
 | Apply hardening to `libkeel.a` | Deferred | Keel has its own Makefile; needs separate opt-in or env-var passthrough. |
 
+### Relationship to §4b (data-plane vs. instruction-plane)
+
+§4c protects the instruction-plane: PAC, BTI, CFI-equivalents (via
+RELRO + `-fno-plt`), stack canaries, and shadow-stack notes all aim
+at the moment the CPU loads a corrupted address into PC. They don't
+see what's INSIDE the dispatch table being loaded from.
+
+§4b's `sh_seal_arena` mechanism covers the data-plane: it makes the
+dispatch tables themselves (router handler vtable, mbedTLS
+`pk_info`, `KlConfig.parser` factory, `KlConfig.log_fn`, the
+sealed mbedTLS chain) physically read-only via `mprotect`. A
+heap-write primitive that targets one of those function-pointer
+slots faults at the write itself, before PC ever loads the
+poisoned value. Together the two layers defend the same ROP/JOP
+escalation chain at different stages.
+
 ### Residual ROP/JOP risk
 
 What an attacker still gets, even with this layer in place:
@@ -826,16 +939,32 @@ What an attacker still gets, even with this layer in place:
 - **Vendor TUs are not yet hardened.** Gadgets in mbedTLS, sqlite,
   lua, qjs, miniz, tweetnacl, wamr text segments are reachable.
   Tracked above.
-- **No CFI.** Indirect-call sites in the runtime are protected only
-  by `const` qualification of the dispatch vtables (§4b) and by
-  RELRO making the table itself read-only. A type-confusion bug that
-  lands a fake vtable pointer is not blocked.
+- **No CFI.** Indirect-call sites in the runtime are protected by
+  `const` qualification of the dispatch vtables, RELRO making the
+  static tables read-only, AND (§4b) `sh_seal_arena` mprotect-RO on
+  boot-built tables that can't be `static const`. A type-confusion
+  bug that lands a fake vtable POINTER inside an unsealed object
+  (e.g. a per-connection struct on the heap) is not blocked. The
+  fake pointer can still target a hardened text segment, just no
+  longer one of the seal-protected dispatch tables.
+- **Server-side own private-key bignums.** Documented in §4b's
+  "What's NOT sealed" table. mbedTLS rewrites RSA blinding state
+  (`ctx->Vi` / `ctx->Vf`) on every signature as a Kocher 1996
+  timing-attack defense, which prevents sealing the per-server
+  signing key's deep allocations. Top-level `pk_context` struct is
+  still sealed (v2.3.3 policy half); only the bignum limbs the
+  context points at remain heap-mutable. Mitigated by the kernel
+  sandbox + the rest of the seal coverage.
 - **No kernel-enforced shadow stack on Linux x86_64** unless the CPU
   supports CET *and* the kernel enables it
   (`arch_prctl(ARCH_SHSTK_ENABLE)`). Hull emits the GNU property
   note; runtime enforcement is the kernel's call.
 - **Cosmopolitan binaries have effectively no compiler-level
-  hardening**, as noted above.
+  hardening**, as noted above. The `sh_seal_arena` data-plane
+  protection in §4b DOES apply to APE builds (pure POSIX
+  `mmap` + `mprotect`, no toolchain dependency), so cosmo users
+  still get the seal coverage even when they're skipping PAC /
+  BTI / CFI.
 
 ### Opt-out
 

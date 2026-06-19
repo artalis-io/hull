@@ -1263,7 +1263,7 @@ hull v0.4.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middo
               <i data-lucide="cpu" class="w-4 h-4 text-paper-100 mt-1 shrink-0"></i>
               <div>
                 <div class="text-sm font-medium text-paper-50">Binary hardening verified at release</div>
-                <div class="text-sm text-mute-400 mt-1">PIE+ASLR, full RELRO, NX stack, stack canaries, FORTIFY_SOURCE, CET/IBT (x86_64) or PAC/BTI (arm64), zeroed call-used registers. Probed per toolchain; release fails if any required protection drops.</div>
+                <div class="text-sm text-mute-400 mt-1">PIE+ASLR, full RELRO, NX stack, stack canaries, FORTIFY_SOURCE, CET/IBT (x86_64) or PAC/BTI (arm64), zeroed call-used registers. Probed per toolchain; release fails if any required protection drops. Plus <code class="text-paper-100 text-[0.78rem]">mprotect</code>-RO sealing on boot-built security policy (manifest allowlists, the router&apos;s handler vtable, the parsed mbedTLS trust chain), so a heap-write primitive that would otherwise pivot a function pointer or relax a capability gate faults at the write instead.</div>
               </div>
             </li>
 

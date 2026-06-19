@@ -3127,7 +3127,7 @@ with logs.
 
 ---
 
-## 8. Deep mbedTLS allocator seal — SHIPPED (client) / NOT VIABLE (server)
+## 8. Deep mbedTLS allocator seal: SHIPPED (client) / NOT VIABLE (server)
 
 **Status:** Client-side deep seal shipped as Keel v2.5.0 on 2026-06-19.
 Server-side deep seal investigated and ruled out due to per-sign RSA
