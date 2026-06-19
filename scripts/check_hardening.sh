@@ -232,6 +232,13 @@ case "$fmt" in
     *)      printf 'unknown format; cannot verify\n' >&2; exit 2 ;;
 esac
 
+# Link-Time Optimisation reporting.  LTO is a compile-time-only
+# optimisation: clang ThinLTO leaves no reliable runtime marker in
+# the binary (no GNU note, no characteristic symbol), so a post-
+# build verifier can't authoritatively detect it.  Report as info
+# with the verify-at-build path so users know where to look.
+report skip "LTO"                     "no runtime marker; verify build-time via 'make hardening' (HL_ENABLE_LTO=1)"
+
 printf -- '----------------------------------------------------------\n'
 printf 'summary: %d pass, %d fail, %d skip\n' "$PASS" "$FAIL" "$SKIP"
 

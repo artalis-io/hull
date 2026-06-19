@@ -375,7 +375,9 @@ ifneq ($(KEEL_LIB),)
 $(KEEL_LIB): $(MBEDTLS_OBJS)
 	$(MAKE) -C $(KEEL_DIR) CC=$(CC) AR=$(AR) \
 		KEEL_TLS=mbedtls MBEDTLS_CONFIG_FILE=hull_config.h \
-		KEEL_COMPRESS=miniz MINIZ_DIR=$(CURDIR)/$(MINIZ_DIR)
+		KEEL_COMPRESS=miniz MINIZ_DIR=$(CURDIR)/$(MINIZ_DIR) \
+		KEEL_EXTRA_CFLAGS="$(HL_LTO_CFLAG)" \
+		KEEL_EXTRA_LDFLAGS="$(HL_LTO_CFLAG)"
 endif
 
 # ── mbedTLS (vendored) ─────────────────────────────────────────────
@@ -719,6 +721,60 @@ else
 # WASM disabled
 WAMR_OBJS :=
 WAMR_INC  :=
+endif
+
+# ── Link-Time Optimisation (LTO) ─────────────────────────────────────
+#
+# Opt-in cross-TU optimisation.  Disabled by default because:
+#   - Clean build time roughly doubles (~54s vs ~27s on Apple M).
+#   - Binary size grows ~3.5% (LLVM ThinLTO metadata).
+#   - Cosmocc doesn't accept -flto (probe fails silently → no-op).
+#
+# Enable with: make HL_ENABLE_LTO=1
+#
+# What it does: every TU (Hull + every vendor: mbedtls, sqlite, lua,
+# qjs, miniz, tweetnacl, wamr, log.c, sh_arena, sh_json, plus Keel's
+# own + its vendored llhttp) gets -flto=thin; the final link gets the
+# same.  Lets the linker inline + dead-strip across TU boundaries and
+# is the prerequisite for meaningful clang -fsanitize=cfi-icall in a
+# future patch (per-call-site indirect-call type checks).
+#
+# Phase 1 audit (2026-06-19, Apple clang 17 arm64) confirmed clean
+# across all vendor TUs including byte-reproducible builds.  See
+# docs/security.md § 4c for the threat-model framing.
+ifeq ($(HL_ENABLE_LTO),1)
+  # Self-contained probe (doesn't depend on the hardening block's
+  # hl_have_cflag, which is gated on HULL_DISABLE_HARDENING).
+  HL_LTO_CFLAG := $(shell tmp="$$(mktemp 2>/dev/null || echo /tmp/hlltoprobe$$$$.o)"; \
+      printf 'int main(void){return 0;}\n' \
+      | $(CC) -Werror -flto=thin -x c -c -o "$$tmp" - >/dev/null 2>&1 \
+      && echo "-flto=thin"; rm -f "$$tmp")
+  ifeq ($(HL_LTO_CFLAG),)
+    HL_LTO_CFLAG := $(shell tmp="$$(mktemp 2>/dev/null || echo /tmp/hlltoprobe$$$$.o)"; \
+        printf 'int main(void){return 0;}\n' \
+        | $(CC) -Werror -flto -x c -c -o "$$tmp" - >/dev/null 2>&1 \
+        && echo "-flto"; rm -f "$$tmp")
+  endif
+  ifneq ($(HL_LTO_CFLAG),)
+    CFLAGS           += $(HL_LTO_CFLAG)
+    LDFLAGS          += $(HL_LTO_CFLAG)
+    QJS_CFLAGS       += $(HL_LTO_CFLAG)
+    LUA_CFLAGS       += $(HL_LTO_CFLAG)
+    MBEDTLS_CFLAGS   += $(HL_LTO_CFLAG)
+    SQLITE_CFLAGS    += $(HL_LTO_CFLAG)
+    LOG_CFLAGS       += $(HL_LTO_CFLAG)
+    SH_ARENA_CFLAGS  += $(HL_LTO_CFLAG)
+    SH_JSON_CFLAGS   += $(HL_LTO_CFLAG)
+    TWEETNACL_CFLAGS += $(HL_LTO_CFLAG)
+    STB_CFLAGS       += $(HL_LTO_CFLAG)
+    ifeq ($(HL_ENABLE_WASM),1)
+      WAMR_CFLAGS    += $(HL_LTO_CFLAG)
+    endif
+    # Keel passthrough is wired at the Keel sub-make invocation
+    # (KEEL_EXTRA_CFLAGS / KEEL_EXTRA_LDFLAGS).
+  else
+    $(warning HL_ENABLE_LTO=1 but $(CC) accepts neither -flto=thin nor -flto; building without LTO)
+  endif
 endif
 
 # ── TinyCC (embedded C compiler for zero-dependency hull build) ──────
@@ -1844,6 +1900,15 @@ ifeq ($(UNAME_S),Linux)
 	@echo "  Linux LDFLAGS:    -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack $(HARDEN_LDFLAGS)"
 endif
 	@echo "  link-time:        $(call hl_have_ldflag,-Wl$(comma)--as-needed)"
+ifeq ($(HL_ENABLE_LTO),1)
+ifneq ($(HL_LTO_CFLAG),)
+	@echo "  LTO:              $(HL_LTO_CFLAG) (HL_ENABLE_LTO=1)"
+else
+	@echo "  LTO:              probe failed (HL_ENABLE_LTO=1 requested but $(CC) rejected -flto*)"
+endif
+else
+	@echo "  LTO:              disabled (set HL_ENABLE_LTO=1 to enable)"
+endif
 endif
 
 # Post-build hardening verifier. Runs scripts/check_hardening.sh
