@@ -16,6 +16,7 @@
 
 #include "utest.h"
 #include "hull/manifest.h"
+#include "hull/module_resolver.h"
 #include <sh_seal_arena.h>
 #include "hull/alloc.h"
 
@@ -285,6 +286,56 @@ UTEST(manifest_seal, oom_returns_error)
     ASSERT_EQ(-1, hl_manifest_seal(&dst, &src, &arena));
 
     hl_manifest_free(&src);
+    sh_seal_arena_destroy(&arena);
+}
+
+/* ── HlResolvedModuleSet sealed in the manifest arena (v0.1.x+) ──────
+ *
+ * serve.c::hl_serve_wire_caps memdup's the resolver's output into the
+ * same arena that holds the manifest strings, then seals.  This test
+ * mirrors that pattern at the unit level: build a fixture, allocate a
+ * bitset in the arena, seal, then fork+SIGSEGV-test that a write into
+ * the bitset (which would otherwise admit an undeclared module) is
+ * caught by the OS.  The actual resolver isn't exercised here — this
+ * is purely a "OS mprotect is what's keeping bits in place" check. */
+
+UTEST(manifest_seal, write_to_sealed_module_set_faults)
+{
+    ShSealArena arena;
+    ASSERT_EQ(0, sh_seal_arena_init(&arena, 4096, NULL));
+
+    /* Populate a bitset in the arena and seal. */
+    HlResolvedModuleSet seed = {0};
+    seed.bits[0] = 0x00FF00FFu;  /* a few bits set, content doesn't matter */
+    seed.bits[1] = 0xAA55AA55u;
+    HlResolvedModuleSet *sealed =
+        (HlResolvedModuleSet *)sh_seal_arena_memdup(&arena, &seed,
+                                                     sizeof(seed));
+    ASSERT_TRUE(sealed != NULL);
+    ASSERT_EQ(0, sh_seal_arena_seal(&arena));
+
+    /* Reads still work post-seal — sanity. */
+    ASSERT_EQ(sealed->bits[0], (uint64_t)0x00FF00FFu);
+    ASSERT_EQ(sealed->bits[1], (uint64_t)0xAA55AA55u);
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        signal(SIGSEGV, SIG_DFL);
+        signal(SIGBUS,  SIG_DFL);
+        /* Try to flip a bit to admit an undeclared module — the
+         * exact gadget an attacker would use after landing a heap-
+         * write inside the bitset's storage.  Sealing turns the
+         * write into a fault. */
+        ((volatile HlResolvedModuleSet *)sealed)->bits[0] = (uint64_t)-1;
+        _exit(0);
+    }
+    ASSERT_TRUE(pid > 0);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    ASSERT_TRUE(WIFSIGNALED(status));
+    int sig = WTERMSIG(status);
+    ASSERT_TRUE(sig == SIGSEGV || sig == SIGBUS);
+
     sh_seal_arena_destroy(&arena);
 }
 

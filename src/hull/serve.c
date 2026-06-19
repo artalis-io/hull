@@ -1187,38 +1187,74 @@ static int hl_serve_wire_caps(HlServerState *s)
             s->cors_cfg = cc;
         }
 
+        /* Resolve the module set BEFORE sealing the arena.  The
+         * resolver writes its 16-byte bitset to s->module_set as a
+         * scratch buffer, then we memdup it into the arena so the
+         * sealed copy is what the runtime consults on every
+         * require/import.  This closes the "manifest declared ->
+         * resolved set sealed -> per-import check" loop:
+         * a heap-write primitive that flips a bit in the bitset to
+         * admit an undeclared module hits the mprotect-RO page and
+         * faults. */
+        {
+            char err[HL_MODULE_RESOLVER_ERR_MAX] = {0};
+            if (hl_module_resolver_resolve(&s->manifest, &s->module_set,
+                                            err, sizeof(err)) != 0) {
+                log_error("[hull:c] %s", err);
+                sh_seal_arena_destroy(&s->seal_arena);
+                return -1;
+            }
+            HlResolvedModuleSet *resolved =
+                (HlResolvedModuleSet *)sh_seal_arena_memdup(
+                    &s->seal_arena, &s->module_set,
+                    sizeof(HlResolvedModuleSet));
+            if (!resolved) {
+                log_error("[hull:c] seal arena alloc(module_set) failed");
+                sh_seal_arena_destroy(&s->seal_arena);
+                return -1;
+            }
+            rt->module_set = resolved;
+        }
+
         if (sh_seal_arena_seal(&s->seal_arena) != 0) {
             log_error("[hull:c] seal arena mprotect failed");
             sh_seal_arena_destroy(&s->seal_arena);
             return -1;
         }
         s->manifest_sealed = 1;
-    }
 
-    /* Resolve manifest.modules against the canonical registry. Always
-     * runs — with no manifest, only the intrinsic core is admitted. */
-    {
+        log_info("[hull:c] modules resolved: %d admitted",
+                 hl_module_set_count(rt->module_set));
+    } else {
+        /* No manifest: resolve admits only the intrinsic core.  No
+         * arena exists in this branch (nothing else to seal); the
+         * resolved bitset stays in the heap-resident s->module_set.
+         * That's fine because the attack surface a bitset seal
+         * defends — flipping bits to admit an undeclared module —
+         * needs a manifest with declarations to escalate FROM.
+         * "intrinsics only" is already the floor. */
         char err[HL_MODULE_RESOLVER_ERR_MAX] = {0};
-        if (hl_module_resolver_resolve(s->manifest_extracted ? &s->manifest : NULL,
-                                       &s->module_set, err, sizeof(err)) != 0) {
+        if (hl_module_resolver_resolve(NULL, &s->module_set,
+                                        err, sizeof(err)) != 0) {
             log_error("[hull:c] %s", err);
             return -1;
         }
-        log_info("[hull:c] modules resolved: %d admitted",
-                 hl_module_set_count(&s->module_set));
-        /* Borrow the set into the runtime so per-language gates can see
-         * it. The set lives in HlServerState; its lifetime exceeds the
-         * runtime, so storing the pointer is safe. */
         rt->module_set = &s->module_set;
+        log_info("[hull:c] modules resolved: %d admitted",
+                 hl_module_set_count(rt->module_set));
+    }
 
-        /* Validate the pre-manifest import tracker against the resolved
-         * set. Top-level Lua require / JS import statements run before
-         * the gate is wired, so the gate records the canonical names
-         * it lets through during that window into rt->import_tracker_*.
-         * Walking them here catches the silent-bypass case where an
-         * app imports e.g. hull:db but never declares hull/db@1. */
+    /* Validate the pre-manifest import tracker against the resolved
+     * set.  Top-level Lua require / JS import statements run before
+     * the gate is wired, so the gate records the canonical names it
+     * let through during that window into rt->import_tracker_*.
+     * Walking them here catches the silent-bypass case where an app
+     * imports e.g. hull:db but never declares hull/db@1.  Reads
+     * only — works against either the sealed (manifest path) or
+     * unsealed (no-manifest path) bitset. */
+    {
         char itrack_err[256] = {0};
-        if (hl_import_tracker_validate(rt, &s->module_set,
+        if (hl_import_tracker_validate(rt, rt->module_set,
                                         itrack_err, sizeof(itrack_err)) != 0) {
             log_error("[hull:c] %s", itrack_err);
             return -1;
