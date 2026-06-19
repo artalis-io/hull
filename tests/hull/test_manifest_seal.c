@@ -16,7 +16,7 @@
 
 #include "utest.h"
 #include "hull/manifest.h"
-#include "hull/seal_arena.h"
+#include <sh_seal_arena.h>
 #include "hull/alloc.h"
 
 #include <signal.h>
@@ -82,7 +82,7 @@ static void build_fixture(HlManifest *m, HlAllocator *alloc)
 /* ── helpers ──────────────────────────────────────────────────────── */
 
 /* Returns 1 if `p` points inside arena's backing region. */
-static int in_arena(const HlSealArena *a, const void *p)
+static int in_arena(const ShSealArena *a, const void *p)
 {
     if (!a || !a->base || !p) return 0;
     uintptr_t lo = (uintptr_t)a->base;
@@ -99,8 +99,8 @@ UTEST(manifest_seal, roundtrip_preserves_all_fields)
     HlManifest src;
     build_fixture(&src, &alloc);
 
-    HlSealArena arena;
-    ASSERT_EQ(0, hl_seal_arena_init(&arena, 4096, "manifest-test"));
+    ShSealArena arena;
+    ASSERT_EQ(0, sh_seal_arena_init(&arena, 4096, "manifest-test"));
 
     HlManifest dst;
     ASSERT_EQ(0, hl_manifest_seal(&dst, &src, &arena));
@@ -156,7 +156,7 @@ UTEST(manifest_seal, roundtrip_preserves_all_fields)
     ASSERT_TRUE(dst.csp        != src.csp);
 
     hl_manifest_free(&src);
-    hl_seal_arena_destroy(&arena);
+    sh_seal_arena_destroy(&arena);
 }
 
 UTEST(manifest_seal, strings_readable_after_seal)
@@ -165,12 +165,12 @@ UTEST(manifest_seal, strings_readable_after_seal)
     HlManifest src;
     build_fixture(&src, &alloc);
 
-    HlSealArena arena;
-    ASSERT_EQ(0, hl_seal_arena_init(&arena, 4096, NULL));
+    ShSealArena arena;
+    ASSERT_EQ(0, sh_seal_arena_init(&arena, 4096, NULL));
 
     HlManifest dst;
     ASSERT_EQ(0, hl_manifest_seal(&dst, &src, &arena));
-    ASSERT_EQ(0, hl_seal_arena_seal(&arena));
+    ASSERT_EQ(0, sh_seal_arena_seal(&arena));
 
     /* Reads still work after seal */
     ASSERT_STREQ("data/", dst.fs_write[0]);
@@ -178,7 +178,7 @@ UTEST(manifest_seal, strings_readable_after_seal)
     ASSERT_STREQ("hull/db", dst.modules[0].name);
 
     hl_manifest_free(&src);
-    hl_seal_arena_destroy(&arena);
+    sh_seal_arena_destroy(&arena);
 }
 
 UTEST(manifest_seal, write_to_sealed_string_faults)
@@ -187,12 +187,12 @@ UTEST(manifest_seal, write_to_sealed_string_faults)
     HlManifest src;
     build_fixture(&src, &alloc);
 
-    HlSealArena arena;
-    ASSERT_EQ(0, hl_seal_arena_init(&arena, 4096, NULL));
+    ShSealArena arena;
+    ASSERT_EQ(0, sh_seal_arena_init(&arena, 4096, NULL));
 
     HlManifest dst;
     ASSERT_EQ(0, hl_manifest_seal(&dst, &src, &arena));
-    ASSERT_EQ(0, hl_seal_arena_seal(&arena));
+    ASSERT_EQ(0, sh_seal_arena_seal(&arena));
 
     /* Fork: child tries to overwrite a sealed string (e.g. expand
      * fs_write from "data/" to "/etc/" via byte-write). Parent
@@ -221,7 +221,7 @@ UTEST(manifest_seal, write_to_sealed_string_faults)
     ASSERT_TRUE(sig == SIGSEGV || sig == SIGBUS);
 
     hl_manifest_free(&src);
-    hl_seal_arena_destroy(&arena);
+    sh_seal_arena_destroy(&arena);
 }
 
 /* ── error paths ──────────────────────────────────────────────────── */
@@ -229,11 +229,11 @@ UTEST(manifest_seal, write_to_sealed_string_faults)
 UTEST(manifest_seal, not_present_returns_error)
 {
     HlManifest src = {0}; /* present=0 */
-    HlSealArena arena;
-    ASSERT_EQ(0, hl_seal_arena_init(&arena, 4096, NULL));
+    ShSealArena arena;
+    ASSERT_EQ(0, sh_seal_arena_init(&arena, 4096, NULL));
     HlManifest dst;
     ASSERT_EQ(-1, hl_manifest_seal(&dst, &src, &arena));
-    hl_seal_arena_destroy(&arena);
+    sh_seal_arena_destroy(&arena);
 }
 
 UTEST(manifest_seal, sealed_arena_returns_error)
@@ -242,27 +242,27 @@ UTEST(manifest_seal, sealed_arena_returns_error)
     HlManifest src;
     build_fixture(&src, &alloc);
 
-    HlSealArena arena;
-    ASSERT_EQ(0, hl_seal_arena_init(&arena, 4096, NULL));
-    ASSERT_EQ(0, hl_seal_arena_seal(&arena));
+    ShSealArena arena;
+    ASSERT_EQ(0, sh_seal_arena_init(&arena, 4096, NULL));
+    ASSERT_EQ(0, sh_seal_arena_seal(&arena));
 
     HlManifest dst;
     ASSERT_EQ(-1, hl_manifest_seal(&dst, &src, &arena));
 
     hl_manifest_free(&src);
-    hl_seal_arena_destroy(&arena);
+    sh_seal_arena_destroy(&arena);
 }
 
 UTEST(manifest_seal, null_inputs_return_error)
 {
-    HlSealArena arena;
-    ASSERT_EQ(0, hl_seal_arena_init(&arena, 4096, NULL));
+    ShSealArena arena;
+    ASSERT_EQ(0, sh_seal_arena_init(&arena, 4096, NULL));
     HlManifest dst;
     HlManifest src = { .present = 1 };
     ASSERT_EQ(-1, hl_manifest_seal(NULL, &src,  &arena));
     ASSERT_EQ(-1, hl_manifest_seal(&dst, NULL,  &arena));
     ASSERT_EQ(-1, hl_manifest_seal(&dst, &src,  NULL));
-    hl_seal_arena_destroy(&arena);
+    sh_seal_arena_destroy(&arena);
 }
 
 UTEST(manifest_seal, oom_returns_error)
@@ -272,20 +272,20 @@ UTEST(manifest_seal, oom_returns_error)
     build_fixture(&src, &alloc);
 
     /* Tiny arena — won't fit all the strings. */
-    HlSealArena arena;
-    ASSERT_EQ(0, hl_seal_arena_init(&arena, 16, NULL));
+    ShSealArena arena;
+    ASSERT_EQ(0, sh_seal_arena_init(&arena, 16, NULL));
     /* Arena init rounds to one page (4096), so even 16-byte request
      * is fine. To actually OOM we need to exceed one page; fixture
      * is way under that. Instead, exhaust the arena manually then
      * try to seal. */
-    char *fill = hl_seal_arena_alloc(&arena, arena.capacity - 4, 1);
+    char *fill = sh_seal_arena_alloc(&arena, arena.capacity - 4, 1);
     ASSERT_TRUE(fill != NULL);
 
     HlManifest dst;
     ASSERT_EQ(-1, hl_manifest_seal(&dst, &src, &arena));
 
     hl_manifest_free(&src);
-    hl_seal_arena_destroy(&arena);
+    sh_seal_arena_destroy(&arena);
 }
 
 UTEST_MAIN()

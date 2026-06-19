@@ -17,7 +17,7 @@
 
 #include "hull/manifest.h"
 #include "hull/alloc.h"
-#include "hull/seal_arena.h"
+#include <sh_seal_arena.h>
 #include "manifest_internal.h"
 #include "log.h"
 #include <string.h>
@@ -91,16 +91,16 @@ void hl_manifest_free(HlManifest *m)
 /* Shared helper: copy one string into the arena, store the in-arena
  * pointer into *out, returning -1 on arena OOM. Treats NULL src as
  * success-with-NULL (some manifest fields are legitimately optional). */
-static int seal_str(HlSealArena *arena, const char **out, const char *src)
+static int seal_str(ShSealArena *arena, const char **out, const char *src)
 {
     if (!src) { *out = NULL; return 0; }
-    char *dup = hl_seal_arena_strdup(arena, src);
+    char *dup = sh_seal_arena_strdup(arena, src);
     if (!dup) return -1;
     *out = dup;
     return 0;
 }
 
-int hl_manifest_seal(HlManifest *dst, const HlManifest *src, HlSealArena *arena)
+int hl_manifest_seal(HlManifest *dst, const HlManifest *src, ShSealArena *arena)
 {
     if (!dst || !src || !arena) return -1;
     if (!src->present) {
@@ -109,7 +109,7 @@ int hl_manifest_seal(HlManifest *dst, const HlManifest *src, HlSealArena *arena)
         memset(dst, 0, sizeof(*dst));
         return -1;
     }
-    if (hl_seal_arena_is_sealed(arena)) {
+    if (sh_seal_arena_is_sealed(arena)) {
         /* Arena already sealed; can't allocate. Programming bug. */
         memset(dst, 0, sizeof(*dst));
         return -1;

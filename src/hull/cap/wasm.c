@@ -16,7 +16,7 @@
 #include "hull/cap/audit.h"
 #include "hull/limits/wasm.h"
 #include "hull/macros.h"
-#include "hull/seal_arena.h"
+#include <sh_seal_arena.h>
 #include "hull/vfs.h"
 #include "log.h"
 #include "wasm_export.h"
@@ -312,22 +312,22 @@ int hl_cap_wasm_init(HlWasmCache *cache)
      * each NativeSymbol is ~40 bytes, we have one entry, the
      * mmap rounds up to a page regardless). */
     const size_t n_symbols = HL_ARRAY_LEN(host_symbols_template);
-    HlSealArena *arena = calloc(1, sizeof(*arena));
+    ShSealArena *arena = calloc(1, sizeof(*arena));
     if (!arena) {
         log_error("[wasm] seal arena alloc failed");
         return -1;
     }
-    if (hl_seal_arena_init(arena, sizeof(host_symbols_template),
+    if (sh_seal_arena_init(arena, sizeof(host_symbols_template),
                             "wasm-native-symbols") != 0) {
         log_error("[wasm] seal arena init failed");
         free(arena);
         return -1;
     }
-    NativeSymbol *host_symbols = hl_seal_arena_memdup(
+    NativeSymbol *host_symbols = sh_seal_arena_memdup(
         arena, host_symbols_template, sizeof(host_symbols_template));
     if (!host_symbols) {
         log_error("[wasm] seal arena memdup failed");
-        hl_seal_arena_destroy(arena);
+        sh_seal_arena_destroy(arena);
         free(arena);
         return -1;
     }
@@ -355,7 +355,7 @@ int hl_cap_wasm_init(HlWasmCache *cache)
 
     if (!wasm_runtime_full_init(&init_args)) {
         log_error("[wasm] WAMR runtime init failed");
-        hl_seal_arena_destroy(arena);
+        sh_seal_arena_destroy(arena);
         free(arena);
         cache->native_arena = NULL;
         return -1;
@@ -363,10 +363,10 @@ int hl_cap_wasm_init(HlWasmCache *cache)
 
     /* WAMR has now sorted host_symbols in place.  Seal the arena —
      * post-seal, the entire mapping is RO and any write fault. */
-    if (hl_seal_arena_seal(arena) != 0) {
+    if (sh_seal_arena_seal(arena) != 0) {
         log_error("[wasm] seal arena seal failed");
         wasm_runtime_destroy();
-        hl_seal_arena_destroy(arena);
+        sh_seal_arena_destroy(arena);
         free(arena);
         cache->native_arena = NULL;
         return -1;
@@ -375,7 +375,7 @@ int hl_cap_wasm_init(HlWasmCache *cache)
     if (pthread_mutex_init(&cache->pool_mutex, NULL) != 0) {
         log_error("[wasm] mutex init failed");
         wasm_runtime_destroy();
-        hl_seal_arena_destroy(arena);
+        sh_seal_arena_destroy(arena);
         free(arena);
         cache->native_arena = NULL;
         return -1;
@@ -413,7 +413,7 @@ void hl_cap_wasm_destroy(HlWasmCache *cache)
      * (g_native_symbols_list cleanup happens inside
      * wasm_runtime_destroy). */
     if (cache->native_arena) {
-        hl_seal_arena_destroy(cache->native_arena);
+        sh_seal_arena_destroy(cache->native_arena);
         free(cache->native_arena);
         cache->native_arena = NULL;
     }

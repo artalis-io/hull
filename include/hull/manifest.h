@@ -160,7 +160,7 @@ int hl_manifest_extract_js(JSContext *ctx, HlManifest *out, HlAllocator *alloc);
 #endif /* HL_ENABLE_JS */
 
 /* Forward decl for the sealed-arena helper below. */
-typedef struct HlSealArena HlSealArena;
+typedef struct ShSealArena ShSealArena;
 
 /*
  * Copy a fully-extracted manifest into a sealed arena.
@@ -176,12 +176,12 @@ typedef struct HlSealArena HlSealArena;
  *   - The HlManifest struct itself stays where the CALLER put it
  *     (typically embedded in HlRuntime or HlServerState). If the
  *     caller wants the struct ALSO in the arena, they can allocate
- *     it via hl_seal_arena_alloc first and pass the in-arena address
+ *     it via sh_seal_arena_alloc first and pass the in-arena address
  *     as `dst`. Otherwise the parent struct's mutability is the
  *     caller's responsibility.
  *
  * The caller is responsible for:
- *   - Calling `hl_seal_arena_seal(arena)` ONCE after all desired
+ *   - Calling `sh_seal_arena_seal(arena)` ONCE after all desired
  *     seal-into-arena work is complete (sealing this manifest, any
  *     sandbox-policy derived from it, etc.). The seal flips the
  *     arena RO; subsequent writes to anything allocated here fault.
@@ -196,6 +196,6 @@ typedef struct HlSealArena HlSealArena;
  * Returns 0 on success, -1 on failure (arena out of space, NULL
  * inputs, src not present). On -1 `dst` is zero-initialized.
  */
-int hl_manifest_seal(HlManifest *dst, const HlManifest *src, HlSealArena *arena);
+int hl_manifest_seal(HlManifest *dst, const HlManifest *src, ShSealArena *arena);
 
 #endif /* HL_MANIFEST_H */

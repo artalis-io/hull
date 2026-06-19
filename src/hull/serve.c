@@ -35,7 +35,7 @@
 #include "hull/net/keel.h"
 #include "hull/cacert.h"
 #include "hull/csp.h"
-#include "hull/seal_arena.h"
+#include <sh_seal_arena.h>
 #ifdef HL_ENABLE_DB
 #include "hull/worker_db.h"
 #include "hull/cap/db.h"
@@ -667,7 +667,7 @@ typedef struct {
      * one page (4 KiB) is enough today, we round up to a few for
      * future-proofing without measurable cost (~unused mmap pages
      * never get faulted in). */
-    HlSealArena          seal_arena;
+    ShSealArena          seal_arena;
     int                  manifest_sealed; /* 1 after successful seal */
     HlResolvedModuleSet  module_set; /* frozen after resolver; consulted by gating */
     HlFsConfig           fs_cfg_storage;
@@ -1137,7 +1137,7 @@ static int hl_serve_wire_caps(HlServerState *s)
          * Sealing failure is FATAL — the alternative is shipping with
          * unsealed policy, which silently weakens the hardening
          * guarantee. See docs/security.md §Sealed runtime tables. */
-        if (hl_seal_arena_init(&s->seal_arena, 16 * 1024,
+        if (sh_seal_arena_init(&s->seal_arena, 16 * 1024,
                                 "manifest-policy") != 0) {
             log_error("[hull:c] seal arena init failed (mmap)");
             return -1;
@@ -1145,7 +1145,7 @@ static int hl_serve_wire_caps(HlServerState *s)
         HlManifest sealed;
         if (hl_manifest_seal(&sealed, &s->manifest, &s->seal_arena) != 0) {
             log_error("[hull:c] manifest seal failed (arena OOM?)");
-            hl_seal_arena_destroy(&s->seal_arena);
+            sh_seal_arena_destroy(&s->seal_arena);
             return -1;
         }
         /* Swap: free the original allocator-backed strings, then
@@ -1164,11 +1164,11 @@ static int hl_serve_wire_caps(HlServerState *s)
          * is mprotect-RO for the rest of process lifetime — a heap-
          * write primitive can no longer punch a new origin into it. */
         if (s->manifest.cors_set) {
-            KlCorsConfig *cc = hl_seal_arena_alloc(
+            KlCorsConfig *cc = sh_seal_arena_alloc(
                 &s->seal_arena, sizeof(*cc), _Alignof(KlCorsConfig));
             if (!cc) {
                 log_error("[hull:c] seal arena alloc(cors) failed");
-                hl_seal_arena_destroy(&s->seal_arena);
+                sh_seal_arena_destroy(&s->seal_arena);
                 return -1;
             }
             kl_cors_init(cc);
@@ -1187,9 +1187,9 @@ static int hl_serve_wire_caps(HlServerState *s)
             s->cors_cfg = cc;
         }
 
-        if (hl_seal_arena_seal(&s->seal_arena) != 0) {
+        if (sh_seal_arena_seal(&s->seal_arena) != 0) {
             log_error("[hull:c] seal arena mprotect failed");
-            hl_seal_arena_destroy(&s->seal_arena);
+            sh_seal_arena_destroy(&s->seal_arena);
             return -1;
         }
         s->manifest_sealed = 1;
@@ -1406,7 +1406,7 @@ static void hl_serve_undo_caps(HlServerState *s)
      * manifest string pointers; unmapping the arena earlier turns
      * those aliases into faults. */
     if (s->manifest_sealed) {
-        hl_seal_arena_destroy(&s->seal_arena);
+        sh_seal_arena_destroy(&s->seal_arena);
         s->manifest_sealed = 0;
     }
 }
@@ -1613,7 +1613,7 @@ static void hl_serve_teardown_after_serve(HlServerState *s)
      * pointers into this mapping; munmapping it earlier turns those
      * aliases into faults. */
     if (s->manifest_sealed) {
-        hl_seal_arena_destroy(&s->seal_arena);
+        sh_seal_arena_destroy(&s->seal_arena);
         s->manifest_sealed = 0;
     }
 }
@@ -1815,7 +1815,7 @@ static void hl_serve_cleanup(HlServerState *s)
      * unmapping the arena earlier would turn those aliases into
      * faults during runtime/server cleanup above. */
     if (s->manifest_sealed) {
-        hl_seal_arena_destroy(&s->seal_arena);
+        sh_seal_arena_destroy(&s->seal_arena);
         s->manifest_sealed = 0;
     }
 

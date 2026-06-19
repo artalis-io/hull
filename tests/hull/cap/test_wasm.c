@@ -2372,7 +2372,7 @@ UTEST(hl_cap_wasm, stream_gas_exhaustion)
  * spuriously fail.  Same pattern as test_seal_arena.c and
  * test_manifest_seal.c.
  */
-#include "hull/seal_arena.h"
+#include <sh_seal_arena.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
