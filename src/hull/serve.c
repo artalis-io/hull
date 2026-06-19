@@ -1717,6 +1717,21 @@ static int hl_serve_wire_and_start(HlServerState *s)
         hl_serve_undo_caps(s);
         return -1;
     }
+
+    /* Freeze the routing tables (Keel v2.3.0+).  After this call,
+     * KlRouter's route + middleware tables live in an mprotect-RO
+     * arena — a heap-write primitive that would otherwise overwrite
+     * a handler function pointer or relax a middleware gate faults
+     * instead.  Failure is non-fatal here (logged) because the
+     * server is still correct without the seal; the seal is a
+     * hardening measure, not a correctness one. */
+    if (kl_server_freeze(&s->server) != 0) {
+        log_warn("[hull:c] kl_server_freeze failed — server unfrozen "
+                 "(routing tables remain writable, hardening reduced)");
+    } else {
+        log_debug("[hull:c] router frozen (RO routing tables)");
+    }
+
     hl_serve_run(s);
     hl_serve_teardown_after_serve(s);
     return 0;
