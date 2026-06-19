@@ -32,7 +32,17 @@ static int lua_app_main_registered(lua_State *L)
  * request handler or timer callback produces a clear actionable
  * message instead of silently disappearing into a registry table no
  * consumer reads post wire_routes.  Function never returns when it
- * rejects (luaL_error long-jumps). */
+ * rejects (luaL_error long-jumps).
+ *
+ * lua==NULL is an intentional fall-through.  The accessor only ever
+ * returns NULL when there's no HlLua wired into the registry —
+ * which can only happen in test harnesses that drive the Lua state
+ * directly without spinning up a serve loop.  Those harnesses never
+ * reach hl_serve_wire_routes, so the flag is moot anyway.  In any
+ * code path that has a real HlLua, the accessor returns it and the
+ * registration_closed check fires correctly.  Keeping the NULL path
+ * permissive avoids breaking the test harness's freedom to call
+ * app.X without a full serve setup. */
 static int lua_app_reject_if_serving(lua_State *L, const char *call)
 {
     HlLua *lua = get_hl_lua(L);

@@ -1725,7 +1725,14 @@ static int hl_serve_wire_and_start(HlServerState *s)
      * dropping the request into a table no consumer reads.  Matches the
      * router freeze below — together they make "no registration after
      * the serve loop starts" enforceable from both the script side
-     * (clear error message) and the C side (RO route table). */
+     * (clear error message) and the C side (RO route table).
+     *
+     * Intentionally flipped BEFORE kl_server_freeze.  If the freeze
+     * itself fails (logged below, non-fatal), we WANT the flag to
+     * stay set anyway — the serve loop is about to start and no late
+     * registration should land regardless of whether the router seal
+     * succeeded.  The two seals are independent halves of the same
+     * "no late registration" invariant. */
     {
         HlRuntime *rt_close = hl_app_context_runtime(s->app);
         if (rt_close) rt_close->registration_closed = 1;

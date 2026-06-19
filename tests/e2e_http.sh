@@ -93,6 +93,7 @@ fi
 
 cc -std=c11 -Wall -Wextra -O2 \
     -I"$KEEL_DIR/include" \
+    -I"$KEEL_DIR/vendor/sh_seal_arena" \
     -o "$ECHO_BIN" \
     "$SRCDIR/tests/fixtures/http_echo_server.c" \
     "$KEEL_LIB" -lpthread 2>&1

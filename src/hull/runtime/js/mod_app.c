@@ -25,8 +25,10 @@ static int js_app_main_registered(JSContext *ctx)
  *     if (js_app_throw_if_serving(ctx, "app.use")) return JS_EXCEPTION;
  *
  * Mirrors Lua's lua_app_reject_if_serving — see that doc-comment for
- * the rationale (router seal + clear-error UX instead of silent drop).
- */
+ * the full rationale (router seal + clear-error UX instead of silent
+ * drop).  NULL HlJS is the test-harness-only path: real serve setups
+ * always have it wired; harnesses that drive QuickJS directly without
+ * spinning up a serve loop never set the flag anyway. */
 static int js_app_throw_if_serving(JSContext *ctx, const char *call)
 {
     HlJS *js = get_hl_js(ctx);
