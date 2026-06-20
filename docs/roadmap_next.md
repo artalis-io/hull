@@ -3389,6 +3389,166 @@ there's specific external pressure to close the residual risk.
 
 ---
 
+## 9. `-fsanitize=cfi-icall`: investigated 2026-06-19, not pursued
+
+**Status:** Spike attempted, validated on Linux clang 21 in Lima,
+rolled back.  LTO infrastructure (the prerequisite) shipped as the
+opt-in `HL_ENABLE_LTO=1` flag in commit `b679a83` and remains
+useful on its own.  Filing this so a future revisit doesn't
+re-spike the same dead end.
+
+### Goal
+
+Close the §4c documented residual: "a type-confusion bug that
+lands a fake vtable POINTER inside an unsealed object is not
+blocked."  CFI catches type-mismatched indirect calls at the
+call site, a different defense layer from §4b's sealed-arena
+mprotect-RO on the dispatch TABLES themselves.
+
+### What the spike confirmed works
+
+- Apple clang 17 (macOS) rejects `-fsanitize=cfi-icall` outright
+  ("unsupported option for target arm64-apple-darwin").  CFI is
+  Linux clang only; the probe-and-skip pattern in the Makefile
+  block handled this cleanly.
+- On Linux clang 21 (validated in Lima Ubuntu 25.04 aarch64),
+  `-flto=thin -fsanitize=cfi-icall` compiles + links + traps as
+  designed.  The minimal probe (cast wrong-typed `int(*)(int)`
+  to `void(*)(const char*)`, call) triggered SIGTRAP (exit 133)
+  as expected.
+- The LTO substrate from Phase 2 is fully sufficient for CFI's
+  cross-TU coverage requirement.  No upstream LTO compatibility
+  issues across any vendor TU.
+- The `llvm-ar` indexing requirement for LTO bitcode archives
+  (`libkeel.a`) was discovered and worked around with a probe for
+  `llvm-ar` / `llvm-ar-N` variants.  Apple's `ar` is already
+  bitcode-aware via Xcode's libtool so macOS didn't need the
+  probe.
+- A `-fsplit-lto-unit` consistency flag is required across all
+  LTO TUs when CFI is on for any subset.  Mixed CFI / non-CFI
+  LTO links otherwise fail with "inconsistent LTO Unit splitting".
+
+### Why the spike was rolled back
+
+Hull's architecture is built on six polymorphic vtable
+interfaces, each dispatching through `void *ctx` + typed function
+pointers in the vtable struct.  Every call site triggers CFI as
+a type mismatch by CFI's own model (correctly: the context
+pointer is type-erased).
+
+The six interfaces:
+
+| Vtable | Header | Consumers |
+|---|---|---|
+| `HlDbBackend` | `include/hull/cap/db_backend.h` | every DB-using cap module + every stdlib that touches SQLite |
+| `HlRuntimeVtable` | `include/hull/runtime.h` | the serve loop, the test runner, every command that loads an app |
+| `HlAsyncBackend` | `include/hull/async.h` | every cap module that yields (compute.async, gpu.async, http.fetch, db.async, ws.connect, sleep) |
+| `HlNetBackend` | `include/hull/net.h` | per-connection lifecycle (suspend, complete, error, cancel) |
+| `HlCompilerVtable` | `include/hull/compiler.h` | `hull build` |
+| `HlGpuVtable` | `include/hull/cap/gpu.h` | every GPU dispatch site |
+
+Plus two vendor interop patterns:
+
+- **QuickJS** registers C callbacks via
+  `JS_NewCFunctionMagic(..., (JSCFunctionMagic *)f, ...)` with
+  one of several disparate signatures cast through a generic
+  prototype.  Every Hull JS binding (`src/hull/runtime/js/*.c`,
+  ~30 TUs) hits this.
+- **WAMR** registers host imports as `NativeSymbol` entries
+  with a generic typed-erased dispatcher; every
+  `src/hull/cap/wasm*.c` + `worker_wasm.c` hits this.
+
+### Empirical findings
+
+Full clean build on Lima Ubuntu 25.04 aarch64, clang 21, with
+`HL_ENABLE_CFI=1 HL_ENABLE_TCC=0`:
+
+| Component | Result |
+|---|---|
+| `hull` binary builds | ✅ |
+| `hull version`, `hull doctor`, `hull help` | ✅ |
+| Lua runtime e2e | ✅ 6/6 |
+| **JS runtime e2e** | ❌ server fails to start (CFI trap in JS bindings) |
+| `test_db_backend` | ❌ SIGTRAP on `HlDbBackend->query` dispatch |
+| `test_lua` | ❌ SIGTRAP on `HlDbBackend->prepare` dispatch |
+| `test_js`, `test_wasm` | initially ❌ (worked around by per-TU CFI strip + recover-mode confirmed zero true violations remained) |
+| Hull unit tests | 45/47 with vendor strips applied; the last 2 failed because the strips don't reach the vtable dispatch in non-cap-wasm / non-runtime-js TUs |
+
+The `cap/db.c::295` and `cap/db_sqlite.c::280` sites are real
+CFI mismatches.  They are also intentional polymorphic vtable
+dispatch: the kind that the seal-arena work (§4b) defends
+differently.
+
+### Per-TU exclusion fanout
+
+To get a clean CFI build with the current architecture would
+require excluding CFI from:
+
+- All 30+ JS runtime TUs (`src/hull/runtime/js/*.c`)
+- The 4 WASM cap TUs (`cap/wasm.c`, `wasm_buffer.c`,
+  `wasm_data.c`, `wasm_stream.c`)
+- `worker_wasm.c`
+- `cap/db.c`, `cap/db_sqlite.c`
+- Any cap module that dispatches through any of the six
+  vtables (eventually most of them)
+- The test binaries that exercise those paths
+- Plus QJS and WAMR vendor objects (already excluded)
+
+Estimated effective coverage after full exclusion: roughly the
+sh_* utilities, log.c, parts of crypto, tweetnacl, mbedtls
+internals, sqlite internals.  About 20% of the binary.  The
+remaining 80% has CFI silently disabled, which is misleading
+to claim "CFI enabled."
+
+### Path forward (if ever)
+
+Two options if Hull architecture changes make CFI viable:
+
+1. **Refactor every vtable to typed dispatch wrappers**:
+   replace `backend->query(ctx, ...)` call sites with
+   `hl_db_query(backend, ...)` typed accessors.  But the
+   wrapper itself still has to do an indirect call internally;
+   CFI flags it the same way unless the vtable struct types
+   change.  Eliminating the polymorphism point means giving up
+   the `HL_ENABLE_DB=0` pure-compute build, alternative DB
+   backends, alternative async backends, etc.  3–5 weeks of
+   work touching ~80 files.
+
+2. **Skip CFI, harden the data plane instead** (current
+   posture):  the seal-arena work in §4b already covers the
+   highest-value attack: static dispatch tables (router
+   vtable, KlAllocator, KlConfig callbacks, mbedTLS chain) are
+   mprotect-RO.  CFI was meant to defend the dynamic
+   per-request callback slots (the residual after seals).
+   Those slots' types are erased by Hull's architecture, so
+   CFI can't help.  The §4c "What's intentionally NOT added"
+   table now documents this honestly.
+
+### What's worth preserving from the spike
+
+- `HL_ENABLE_LTO=1` (shipped, commit `b679a83`): the LTO
+  infrastructure stands on its own.  Future optimisations
+  (link-time inlining across vendor boundaries, dead-strip of
+  uncalled stdlib helpers) benefit from it.  Default off
+  because the only motivator was CFI.
+- Empirical evidence that clang 21 LTO is stable across every
+  Hull vendor TU including WAMR.  Reproducible build holds
+  byte-identical.
+- The h2_preface `unsigned char[24]` fix in
+  `vendor/keel/src/connection.c` (Keel v2.6.2). Clang 21
+  flags the original 24-byte string literal with
+  `-Wunterminated-string-initialization`.  Orthogonal to CFI;
+  shipping as its own patch.
+
+### What's NOT worth re-spiking without a different premise
+
+- The exclusion-everywhere approach.  Walked the path,
+  measured the coverage gap, documented the finding.
+- The vtable-refactor approach without a separately motivated
+  driver.  CFI alone isn't worth the architectural change.
+
+---
+
 ## ✅ Done: pre-v0.1.0 release gate
 
 Five operational steps that gated the v0.1.0 tag. All executed

@@ -907,8 +907,8 @@ Verified properties:
 
 | Considered | Decision | Reason |
 |---|---|---|
-| `-flto` / `-flto=thin` | Deferred | Vendor TUs (mbedtls, sqlite, lua, qjs, miniz) carry their own CFLAGS with `-w` to suppress vendor warnings; mixing LTO across hardened and non-hardened TUs is fragile. Worth a follow-up `HL_ENABLE_LTO=1` build flag once vendor TU LTO compatibility is verified. |
-| `-fsanitize=cfi` (LLVM) | Deferred | Requires LTO. Indirect-call CFI is the strongest practical ROP mitigation we don't have today; the gating issue is LTO. |
+| `-flto` / `-flto=thin` | **Shipped** as opt-in `HL_ENABLE_LTO=1` (2026-06-19). Per-vendor compatibility audit clean across mbedtls, sqlite, lua, qjs, miniz, tweetnacl, stb, wamr, log.c, sh_*. Reproducible build holds byte-identical under LTO. Build time roughly 2x, binary size +3.5%. Default off because the value is only realised together with CFI (which is now documented as not-pursued, see next row). | n/a |
+| `-fsanitize=cfi-icall` (LLVM) | **Investigated 2026-06-19, not pursued.** Spike confirmed that on Linux clang 21 the flag works as designed and traps wrong-typed indirect calls. But Hull's architecture relies on six polymorphic vtable interfaces (`HlDbBackend`, `HlRuntimeVtable`, `HlAsyncBackend`, `HlNetBackend`, `HlCompilerVtable`, `HlGpuVtable`) that dispatch through `void *ctx` typed-erased function pointers, the exact pattern CFI flags as a violation. Adopting CFI fully would require either (a) refactoring every vtable to typed dispatch wrappers (3 to 5 weeks, ~80 files), or (b) per-TU exclusions across so much of the tree that the residual coverage isn't meaningful. The sealed-arena work (§4b) already defends the static dispatch tables that were CFI's primary target; the gap CFI was meant to close (fake vtable pointer inside an unsealed per-request struct) remains as documented residual risk. Also platform-restricted: clang Linux only. Apple clang on Darwin rejects `-fsanitize=cfi-icall`. |
 | `-fsanitize=safe-stack` | Deferred | clang-only, splits stacks. Runtime cost and incompatible with `setjmp` / coroutine patterns Hull uses extensively for Lua + JS async. |
 | `-fsanitize=shadow-call-stack` | Deferred | aarch64-only. Requires a free register reservation (`-ffixed-x18`). Worth measuring on Linux aarch64 release as a follow-up. |
 | `-fhardened` (GCC 14+) | Skipped | Meta-flag that conflicts with explicit overrides. We deliberately probe individual flags so the build still works on toolchains 5+ years old. |
@@ -946,7 +946,12 @@ What an attacker still gets, even with this layer in place:
   bug that lands a fake vtable POINTER inside an unsealed object
   (e.g. a per-connection struct on the heap) is not blocked. The
   fake pointer can still target a hardened text segment, just no
-  longer one of the seal-protected dispatch tables.
+  longer one of the seal-protected dispatch tables. LLVM CFI was
+  investigated 2026-06-19 and found incompatible with Hull's
+  polymorphic-vtable architecture without invasive refactor: see
+  the §4c "What's intentionally NOT added" table for the full
+  finding, and `roadmap_next.md` §9 for the empirical evidence
+  from the Linux clang 21 spike.
 - **Server-side own private-key bignums.** Documented in §4b's
   "What's NOT sealed" table. mbedTLS rewrites RSA blinding state
   (`ctx->Vi` / `ctx->Vf`) on every signature as a Kocher 1996
