@@ -16,6 +16,7 @@
 
 /* Forward declarations */
 typedef struct HlAllocator HlAllocator;
+typedef struct HlDbHandle HlDbHandle;
 typedef int (*HlRowCallback)(void *ctx, HlColumn *cols, int ncols);
 
 /* ── Backend vtable ───────────────────────────────────────────────── */
@@ -24,6 +25,16 @@ typedef int (*HlRowCallback)(void *ctx, HlColumn *cols, int ncols);
  * in whatever order the backend's catalog returns them. */
 typedef void (*HlDbColumnCallback)(void *cb_ctx, const char *col_name);
 
+/* Vtable methods take `HlDbHandle *h` instead of `void *ctx`.  The
+ * concrete backend context lives in h->ctx and each method casts it
+ * to its own concrete type at the top of the function (the cast is
+ * a normal pointer access inside the body, not visible to CFI).
+ *
+ * Compared to the historical `void *ctx` shape, the typed handle
+ * gives clang -fsanitize=cfi-icall a matching signature at every
+ * call site (`int(*)(HlDbHandle*, ...)` registered, same expected at
+ * the dispatch site) so CFI no longer flags the polymorphic vtable
+ * dispatch as a type mismatch.  See docs/security.md § 4c. */
 typedef struct HlDbBackend {
     const char *name;   /* "sqlite", "none" */
 
@@ -34,19 +45,22 @@ typedef struct HlDbBackend {
      * a surrogate id is needed (audit-log, outbox). */
     const char *autoincrement_id_ddl;
 
-    int    (*open)(void **ctx, const char *dsn, HlAllocator *alloc);
-    void   (*close)(void *ctx);
-    int    (*query)(void *ctx, const char *sql,
+    /* `open` is the one method that doesn't take an HlDbHandle*
+     * because the handle is what `open` populates.  Output is
+     * written to *out_ctx for the caller to wire into a handle. */
+    int    (*open)(void **out_ctx, const char *dsn, HlAllocator *alloc);
+    void   (*close)(HlDbHandle *h);
+    int    (*query)(HlDbHandle *h, const char *sql,
                     const HlValue *params, int nparams,
                     HlRowCallback cb, void *cb_ctx, HlAllocator *alloc);
-    int    (*exec)(void *ctx, const char *sql,
+    int    (*exec)(HlDbHandle *h, const char *sql,
                    const HlValue *params, int nparams);
-    int    (*begin)(void *ctx);
-    int    (*commit)(void *ctx);
-    int    (*rollback)(void *ctx);
-    int64_t (*last_id)(void *ctx);
-    const char *(*errmsg)(void *ctx);
-    void   (*guard_stale_txn)(void *ctx);  /* NULL = no-op */
+    int    (*begin)(HlDbHandle *h);
+    int    (*commit)(HlDbHandle *h);
+    int    (*rollback)(HlDbHandle *h);
+    int64_t (*last_id)(HlDbHandle *h);
+    const char *(*errmsg)(HlDbHandle *h);
+    void   (*guard_stale_txn)(HlDbHandle *h);  /* NULL = no-op */
 
     /* Dialect-aware SQL helpers — moved into the vtable so the
      * stdlib stays DB-agnostic.
@@ -59,23 +73,23 @@ typedef struct HlDbBackend {
      * table_columns:    `PRAGMA table_info(t)` (SQLite) /
      *                   information_schema query (PG). Calls @p cb
      *                   once per column. */
-    int    (*insert_if_absent)(void *ctx, const char *table,
+    int    (*insert_if_absent)(HlDbHandle *h, const char *table,
                                 const char *const *conflict_cols,
                                 int n_conflict,
                                 const char *const *cols,
                                 const HlValue *values, int n_cols);
-    int    (*upsert)(void *ctx, const char *table,
+    int    (*upsert)(HlDbHandle *h, const char *table,
                      const char *const *conflict_cols, int n_conflict,
                      const char *const *cols,
                      const HlValue *values, int n_cols);
-    int    (*table_columns)(void *ctx, const char *table,
+    int    (*table_columns)(HlDbHandle *h, const char *table,
                             HlDbColumnCallback cb, void *cb_ctx);
 } HlDbBackend;
 
-typedef struct HlDbHandle {
+struct HlDbHandle {
     const HlDbBackend *backend;
     void              *ctx;
-} HlDbHandle;
+};
 
 /* ── Inline wrappers ──────────────────────────────────────────────── */
 
@@ -85,7 +99,7 @@ static inline int hl_db_query(HlDbHandle *h, const char *sql,
                               HlAllocator *alloc)
 {
     if (!h || !h->backend) return -1;
-    return h->backend->query(h->ctx, sql, params, nparams,
+    return h->backend->query(h, sql, params, nparams,
                              cb, cb_ctx, alloc);
 }
 
@@ -93,43 +107,43 @@ static inline int hl_db_exec(HlDbHandle *h, const char *sql,
                              const HlValue *params, int nparams)
 {
     if (!h || !h->backend) return -1;
-    return h->backend->exec(h->ctx, sql, params, nparams);
+    return h->backend->exec(h, sql, params, nparams);
 }
 
 static inline int hl_db_begin(HlDbHandle *h)
 {
     if (!h || !h->backend) return -1;
-    return h->backend->begin(h->ctx);
+    return h->backend->begin(h);
 }
 
 static inline int hl_db_commit(HlDbHandle *h)
 {
     if (!h || !h->backend) return -1;
-    return h->backend->commit(h->ctx);
+    return h->backend->commit(h);
 }
 
 static inline int hl_db_rollback(HlDbHandle *h)
 {
     if (!h || !h->backend) return -1;
-    return h->backend->rollback(h->ctx);
+    return h->backend->rollback(h);
 }
 
 static inline int64_t hl_db_last_id(HlDbHandle *h)
 {
     if (!h || !h->backend) return -1;
-    return h->backend->last_id(h->ctx);
+    return h->backend->last_id(h);
 }
 
 static inline const char *hl_db_errmsg(HlDbHandle *h)
 {
     if (!h || !h->backend) return "no database";
-    return h->backend->errmsg(h->ctx);
+    return h->backend->errmsg(h);
 }
 
 static inline void hl_db_guard_stale_txn(HlDbHandle *h)
 {
     if (!h || !h->backend || !h->backend->guard_stale_txn) return;
-    h->backend->guard_stale_txn(h->ctx);
+    h->backend->guard_stale_txn(h);
 }
 
 static inline const char *hl_db_autoincrement_id_ddl(HlDbHandle *h)
@@ -146,7 +160,7 @@ static inline int hl_db_insert_if_absent(HlDbHandle *h, const char *table,
                                           const HlValue *values, int n_cols)
 {
     if (!h || !h->backend || !h->backend->insert_if_absent) return -1;
-    return h->backend->insert_if_absent(h->ctx, table,
+    return h->backend->insert_if_absent(h, table,
                                          conflict_cols, n_conflict,
                                          cols, values, n_cols);
 }
@@ -158,7 +172,7 @@ static inline int hl_db_upsert(HlDbHandle *h, const char *table,
                                 const HlValue *values, int n_cols)
 {
     if (!h || !h->backend || !h->backend->upsert) return -1;
-    return h->backend->upsert(h->ctx, table, conflict_cols, n_conflict,
+    return h->backend->upsert(h, table, conflict_cols, n_conflict,
                               cols, values, n_cols);
 }
 
@@ -166,7 +180,7 @@ static inline int hl_db_table_columns(HlDbHandle *h, const char *table,
                                        HlDbColumnCallback cb, void *cb_ctx)
 {
     if (!h || !h->backend || !h->backend->table_columns) return -1;
-    return h->backend->table_columns(h->ctx, table, cb, cb_ctx);
+    return h->backend->table_columns(h, table, cb, cb_ctx);
 }
 
 /* ── SQLite backend ───────────────────────────────────────────────── */

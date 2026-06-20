@@ -117,7 +117,7 @@ static void init_lua_with_caps(void)
     if (lua_initialized)
         hl_lua_free(&lua_rt);
     if (test_db_handle.ctx) {
-        hl_db_backend_sqlite.close(test_db_handle.ctx);
+        hl_db_backend_sqlite.close(&test_db_handle);
         test_db_handle.ctx = NULL;
         test_db = NULL;
     }
@@ -144,7 +144,7 @@ static void cleanup_lua_caps(void)
         lua_initialized = 0;
     }
     if (test_db_handle.ctx) {
-        hl_db_backend_sqlite.close(test_db_handle.ctx);
+        hl_db_backend_sqlite.close(&test_db_handle);
         test_db_handle.ctx = NULL;
         test_db = NULL;
     }

@@ -315,7 +315,7 @@ void hl_app_context_free(HlAppContext *ctx)
 
 #ifdef HL_ENABLE_DB
     if (ctx->db_open) {
-        ctx->db_handle.backend->close(ctx->db_handle.ctx);
+        ctx->db_handle.backend->close(&ctx->db_handle);
         ctx->db_handle.ctx = NULL;
         ctx->db = NULL;
     }

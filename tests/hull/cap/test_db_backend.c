@@ -57,12 +57,12 @@ static int collect_vals_cb(void *ctx, HlColumn *cols, int ncols)
 
 UTEST(db_backend, sqlite_open_close)
 {
-    void *ctx = NULL;
-    int rc = hl_db_backend_sqlite.open(&ctx, ":memory:", NULL);
+    HlDbHandle h = { .backend = &hl_db_backend_sqlite, .ctx = NULL };
+    int rc = hl_db_backend_sqlite.open(&h.ctx, ":memory:", NULL);
     ASSERT_EQ(rc, 0);
-    ASSERT_TRUE(ctx != NULL);
+    ASSERT_TRUE(h.ctx != NULL);
 
-    hl_db_backend_sqlite.close(ctx);
+    hl_db_backend_sqlite.close(&h);
 }
 
 UTEST(db_backend, sqlite_exec_via_vtable)
@@ -82,7 +82,7 @@ UTEST(db_backend, sqlite_exec_via_vtable)
         "INSERT INTO t (name) VALUES (?)", params, 1);
     ASSERT_EQ(changes, 1);
 
-    hl_db_backend_sqlite.close(h.ctx);
+    hl_db_backend_sqlite.close(&h);
 }
 
 UTEST(db_backend, sqlite_query_via_vtable)
@@ -113,7 +113,7 @@ UTEST(db_backend, sqlite_query_via_vtable)
     ASSERT_STREQ(result.vals[0], "foo");
     ASSERT_STREQ(result.vals[1], "bar");
 
-    hl_db_backend_sqlite.close(h.ctx);
+    hl_db_backend_sqlite.close(&h);
 }
 
 UTEST(db_backend, sqlite_transaction_rollback)
@@ -137,7 +137,7 @@ UTEST(db_backend, sqlite_transaction_rollback)
     ASSERT_EQ(result.count, 1);
     ASSERT_EQ(result.ints[0], 0);
 
-    hl_db_backend_sqlite.close(h.ctx);
+    hl_db_backend_sqlite.close(&h);
 }
 
 UTEST(db_backend, sqlite_transaction_commit)
@@ -161,7 +161,7 @@ UTEST(db_backend, sqlite_transaction_commit)
     ASSERT_EQ(result.count, 1);
     ASSERT_EQ(result.ints[0], 1);
 
-    hl_db_backend_sqlite.close(h.ctx);
+    hl_db_backend_sqlite.close(&h);
 }
 
 UTEST(db_backend, sqlite_last_id)
@@ -186,7 +186,7 @@ UTEST(db_backend, sqlite_last_id)
     id = hl_db_last_id(&h);
     ASSERT_EQ(id, 2);
 
-    hl_db_backend_sqlite.close(h.ctx);
+    hl_db_backend_sqlite.close(&h);
 }
 
 UTEST(db_backend, sqlite_errmsg)
@@ -203,7 +203,7 @@ UTEST(db_backend, sqlite_errmsg)
     ASSERT_TRUE(msg != NULL);
     ASSERT_TRUE(strlen(msg) > 0);
 
-    hl_db_backend_sqlite.close(h.ctx);
+    hl_db_backend_sqlite.close(&h);
 }
 
 UTEST(db_backend, sqlite_raw_accessor)
@@ -215,7 +215,7 @@ UTEST(db_backend, sqlite_raw_accessor)
     sqlite3 *raw = hl_db_sqlite_raw(&h);
     ASSERT_TRUE(raw != NULL);
 
-    hl_db_backend_sqlite.close(h.ctx);
+    hl_db_backend_sqlite.close(&h);
 }
 
 UTEST(db_backend, sqlite_cache_accessor)
@@ -227,7 +227,7 @@ UTEST(db_backend, sqlite_cache_accessor)
     HlStmtCache *cache = hl_db_sqlite_cache(&h);
     ASSERT_TRUE(cache != NULL);
 
-    hl_db_backend_sqlite.close(h.ctx);
+    hl_db_backend_sqlite.close(&h);
 }
 
 UTEST(db_backend, null_handle_safety)
@@ -295,7 +295,7 @@ UTEST(db_backend, guard_stale_txn)
         collect_vals_cb, &result, NULL);
     ASSERT_EQ(result.ints[0], 1);
 
-    hl_db_backend_sqlite.close(h.ctx);
+    hl_db_backend_sqlite.close(&h);
 }
 
 UTEST(db_backend, sqlite_raw_returns_null_for_wrong_backend)
@@ -398,7 +398,7 @@ UTEST(db_backend, query_with_params)
     ASSERT_EQ(result.count, 1);
     ASSERT_STREQ(result.vals[0], "alpha");
 
-    hl_db_backend_sqlite.close(h.ctx);
+    hl_db_backend_sqlite.close(&h);
 }
 
 /* ── Dialect-aware helpers (insert_if_absent / upsert / table_columns) ── */
@@ -445,7 +445,7 @@ UTEST(db_backend, insert_if_absent_first_wins_dup_ignored)
     ASSERT_EQ(result.count, 1);
     ASSERT_EQ(result.ints[0], 1);
 
-    hl_db_backend_sqlite.close(h.ctx);
+    hl_db_backend_sqlite.close(&h);
 }
 
 UTEST(db_backend, upsert_replaces_existing_row)
@@ -477,7 +477,7 @@ UTEST(db_backend, upsert_replaces_existing_row)
     ASSERT_EQ(result.count, 1);
     ASSERT_EQ(result.ints[0], 42);
 
-    hl_db_backend_sqlite.close(h.ctx);
+    hl_db_backend_sqlite.close(&h);
 }
 
 UTEST(db_backend, upsert_composite_conflict_key)
@@ -512,7 +512,7 @@ UTEST(db_backend, upsert_composite_conflict_key)
     ASSERT_EQ(result.count, 1);
     ASSERT_EQ(result.ints[0], 70);
 
-    hl_db_backend_sqlite.close(h.ctx);
+    hl_db_backend_sqlite.close(&h);
 }
 
 typedef struct {
@@ -549,7 +549,7 @@ UTEST(db_backend, table_columns_lists_schema)
     ASSERT_STREQ(c.names[1], "name");
     ASSERT_STREQ(c.names[2], "created_at");
 
-    hl_db_backend_sqlite.close(h.ctx);
+    hl_db_backend_sqlite.close(&h);
 }
 
 UTEST(db_backend, table_columns_missing_table_returns_empty)
@@ -563,7 +563,7 @@ UTEST(db_backend, table_columns_missing_table_returns_empty)
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(c.n, 0);
 
-    hl_db_backend_sqlite.close(h.ctx);
+    hl_db_backend_sqlite.close(&h);
 }
 
 UTEST(db_backend, dialect_helpers_null_handle_safe)

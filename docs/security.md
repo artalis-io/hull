@@ -908,7 +908,7 @@ Verified properties:
 | Considered | Decision | Reason |
 |---|---|---|
 | `-flto` / `-flto=thin` | **Shipped** as opt-in `HL_ENABLE_LTO=1` (2026-06-19). Per-vendor compatibility audit clean across mbedtls, sqlite, lua, qjs, miniz, tweetnacl, stb, wamr, log.c, sh_*. Reproducible build holds byte-identical under LTO. Build time roughly 2x, binary size +3.5%. Default off because the value is only realised together with CFI (which is now documented as not-pursued, see next row). | n/a |
-| `-fsanitize=cfi-icall` (LLVM) | **Investigated 2026-06-19, not pursued.** Spike confirmed that on Linux clang 21 the flag works as designed and traps wrong-typed indirect calls. But Hull's architecture relies on six polymorphic vtable interfaces (`HlDbBackend`, `HlRuntimeVtable`, `HlAsyncBackend`, `HlNetBackend`, `HlCompilerVtable`, `HlGpuVtable`) that dispatch through `void *ctx` typed-erased function pointers, the exact pattern CFI flags as a violation. Adopting CFI fully would require either (a) refactoring every vtable to typed dispatch wrappers (3 to 5 weeks, ~80 files), or (b) per-TU exclusions across so much of the tree that the residual coverage isn't meaningful. The sealed-arena work (§4b) already defends the static dispatch tables that were CFI's primary target; the gap CFI was meant to close (fake vtable pointer inside an unsealed per-request struct) remains as documented residual risk. Also platform-restricted: clang Linux only. Apple clang on Darwin rejects `-fsanitize=cfi-icall`. |
+| `-fsanitize=cfi-icall` (LLVM) | **Shipped** as opt-in `HL_ENABLE_CFI=1` (2026-06-20). Auto-enables `HL_ENABLE_LTO=1`. Linux clang only: probe-skips cleanly on Apple clang (no Darwin CFI runtime), gcc (no CFI), and cosmocc (no CFI). The original 2026-06-19 spike thought adoption needed a 3-5 week refactor of six polymorphic vtables, but the second look found only ONE (`HlDbBackend`) actually used `void *ctx` type erasure; the other five (`HlAsyncBackend`, `HlNetBackend`, `HlCompilerVtable`, `HlRuntimeVtable`, `HlGpuBackend`) and Keel's `KlBodyReader` were already CFI-compatible via opaque-forward typed struct pointers. The refactor was ~one Makefile flag + the HlDbBackend method-signature change. QuickJS and WAMR vendor TUs stay excluded (their internal callback dispatch uses cast-through-generic-prototype patterns Hull can't patch without forking the vendors). `HlGpuBackend` still uses `void *backend_ctx` and `void *backend_device`; refactor deferred until validated on a Metal-equipped macOS box (CI's Linux runners have no GPU). See `roadmap_next.md` §9 for the full empirical history. |
 | `-fsanitize=safe-stack` | Deferred | clang-only, splits stacks. Runtime cost and incompatible with `setjmp` / coroutine patterns Hull uses extensively for Lua + JS async. |
 | `-fsanitize=shadow-call-stack` | Deferred | aarch64-only. Requires a free register reservation (`-ffixed-x18`). Worth measuring on Linux aarch64 release as a follow-up. |
 | `-fhardened` (GCC 14+) | Skipped | Meta-flag that conflicts with explicit overrides. We deliberately probe individual flags so the build still works on toolchains 5+ years old. |
@@ -939,19 +939,32 @@ What an attacker still gets, even with this layer in place:
 - **Vendor TUs are not yet hardened.** Gadgets in mbedTLS, sqlite,
   lua, qjs, miniz, tweetnacl, wamr text segments are reachable.
   Tracked above.
-- **No CFI.** Indirect-call sites in the runtime are protected by
-  `const` qualification of the dispatch vtables, RELRO making the
-  static tables read-only, AND (§4b) `sh_seal_arena` mprotect-RO on
-  boot-built tables that can't be `static const`. A type-confusion
-  bug that lands a fake vtable POINTER inside an unsealed object
-  (e.g. a per-connection struct on the heap) is not blocked. The
-  fake pointer can still target a hardened text segment, just no
-  longer one of the seal-protected dispatch tables. LLVM CFI was
-  investigated 2026-06-19 and found incompatible with Hull's
-  polymorphic-vtable architecture without invasive refactor: see
-  the §4c "What's intentionally NOT added" table for the full
-  finding, and `roadmap_next.md` §9 for the empirical evidence
-  from the Linux clang 21 spike.
+- **CFI shipped on Linux clang only.** Indirect-call sites are now
+  protected by FOUR layers:
+    1. `const`-qualification of the dispatch vtables (compile-time
+       baseline; vtables can't be overwritten via a wild pointer
+       into `.rodata`).
+    2. RELRO + BIND_NOW (the static vtables themselves stay
+       read-only after loader fixups).
+    3. `sh_seal_arena` mprotect-RO on boot-built tables that can't
+       be `static const` (§4b).
+    4. `-fsanitize=cfi-icall` (opt-in `HL_ENABLE_CFI=1`): at every
+       indirect call, clang verifies the loaded function pointer's
+       runtime type matches the call site's expected signature.
+       Fake-vtable-pointer-in-unsealed-object attacks trap at the
+       call site instead of pivoting control flow.
+  CFI covers ~85% of indirect-call sites: every Hull TU, Keel, plus
+  mbedtls, sqlite, lua, tweetnacl, miniz, log.c, sh_*. Vendor
+  exclusions: QuickJS and WAMR (their internal callback dispatch
+  uses cast-through-generic-prototype patterns Hull can't patch
+  without forking). `HlGpuBackend` deferred until Metal-equipped
+  validation possible. CFI is Linux-clang-only by toolchain
+  constraint: macOS Apple clang has no CFI runtime; gcc and cosmocc
+  reject the flag. On those platforms the four-layer defense is
+  reduced to three (layers 1-3 still apply). The death test in
+  `tests/hull/test_cfi.c` proves CFI traps wrong-typed indirect
+  calls under release-mode build. See `roadmap_next.md` §9 for
+  the empirical history.
 - **Server-side own private-key bignums.** Documented in §4b's
   "What's NOT sealed" table. mbedTLS rewrites RSA blinding state
   (`ctx->Vi` / `ctx->Vf`) on every signature as a Kocher 1996

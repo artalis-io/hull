@@ -57,7 +57,7 @@ static int cmd_run(const char *app_dir, const char *db_path)
 
     int result = hl_migrate_run(&handle, &vfs);
 
-    hl_db_backend_sqlite.close(handle.ctx);
+    hl_db_backend_sqlite.close(&handle);
 
     if (result == HL_MIGRATE_ERR) {
         fprintf(stderr, "hull migrate: migration failed\n");
@@ -94,7 +94,7 @@ static int cmd_status(const char *app_dir, const char *db_path)
     int count = 0;
     int rc = hl_migrate_status(&handle, &vfs, &entries, &count);
 
-    hl_db_backend_sqlite.close(handle.ctx);
+    hl_db_backend_sqlite.close(&handle);
 
     if (rc != 0) {
         fprintf(stderr, "hull migrate: failed to query status\n");

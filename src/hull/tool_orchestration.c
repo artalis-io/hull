@@ -242,7 +242,7 @@ static int l_tool_migrate_status(lua_State *L)
     HlMigrationStatus *entries = NULL;
     int count = 0;
     int rc = hl_migrate_status(&handle, &vfs, &entries, &count);
-    hl_db_backend_sqlite.close(handle.ctx);
+    hl_db_backend_sqlite.close(&handle);
 
     if (rc != 0) {
         lua_pushnil(L);

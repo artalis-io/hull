@@ -376,8 +376,8 @@ $(KEEL_LIB): $(MBEDTLS_OBJS)
 	$(MAKE) -C $(KEEL_DIR) CC=$(CC) AR=$(AR) \
 		KEEL_TLS=mbedtls MBEDTLS_CONFIG_FILE=hull_config.h \
 		KEEL_COMPRESS=miniz MINIZ_DIR=$(CURDIR)/$(MINIZ_DIR) \
-		KEEL_EXTRA_CFLAGS="$(HL_LTO_CFLAG)" \
-		KEEL_EXTRA_LDFLAGS="$(HL_LTO_CFLAG)"
+		KEEL_EXTRA_CFLAGS="$(HL_LTO_CFLAG) $(if $(HL_CFI_CFLAG),$(HL_CFI_CFLAG) $(HL_CFI_MODE) -fsplit-lto-unit)" \
+		KEEL_EXTRA_LDFLAGS="$(HL_LTO_CFLAG) $(if $(HL_CFI_CFLAG),$(HL_CFI_CFLAG) -fsplit-lto-unit)"
 endif
 
 # ── mbedTLS (vendored) ─────────────────────────────────────────────
@@ -742,6 +742,11 @@ endif
 # Phase 1 audit (2026-06-19, Apple clang 17 arm64) confirmed clean
 # across all vendor TUs including byte-reproducible builds.  See
 # docs/security.md § 4c for the threat-model framing.
+# HL_ENABLE_CFI implies HL_ENABLE_LTO (CFI needs LTO bitcode).
+ifeq ($(HL_ENABLE_CFI),1)
+  HL_ENABLE_LTO := 1
+endif
+
 ifeq ($(HL_ENABLE_LTO),1)
   # Self-contained probe (doesn't depend on the hardening block's
   # hl_have_cflag, which is gated on HULL_DISABLE_HARDENING).
@@ -756,6 +761,22 @@ ifeq ($(HL_ENABLE_LTO),1)
         && echo "-flto"; rm -f "$$tmp")
   endif
   ifneq ($(HL_LTO_CFLAG),)
+    # LTO bitcode archives need a bitcode-aware ar (default GNU ar
+    # only indexes ELF symbols → libkeel.a's bitcode objects look
+    # unreachable to the linker).  Probe for llvm-ar / llvm-ar-N
+    # (Ubuntu installs the suffixed name in /usr/bin).  Apple's ar
+    # is already bitcode-aware via libtool so darwin doesn't need it.
+    HL_LTO_AR := $(or \
+        $(shell command -v llvm-ar 2>/dev/null),\
+        $(shell command -v llvm-ar-21 2>/dev/null),\
+        $(shell command -v llvm-ar-20 2>/dev/null),\
+        $(shell command -v llvm-ar-19 2>/dev/null),\
+        $(shell command -v llvm-ar-18 2>/dev/null),\
+        $(shell command -v llvm-ar-17 2>/dev/null),\
+        $(shell command -v llvm-ar-16 2>/dev/null))
+    ifneq ($(HL_LTO_AR),)
+      AR := $(HL_LTO_AR)
+    endif
     CFLAGS           += $(HL_LTO_CFLAG)
     LDFLAGS          += $(HL_LTO_CFLAG)
     QJS_CFLAGS       += $(HL_LTO_CFLAG)
@@ -774,6 +795,110 @@ ifeq ($(HL_ENABLE_LTO),1)
     # (KEEL_EXTRA_CFLAGS / KEEL_EXTRA_LDFLAGS).
   else
     $(warning HL_ENABLE_LTO=1 but $(CC) accepts neither -flto=thin nor -flto; building without LTO)
+  endif
+endif
+
+# ── Control-Flow Integrity (CFI) ─────────────────────────────────────
+#
+# Opt-in clang `-fsanitize=cfi-icall`.  At every indirect call site,
+# verifies the loaded function pointer's runtime type matches the call
+# site's expected signature.  If a heap-write lands a fake function
+# pointer inside an unsealed per-request struct, CFI catches the type
+# mismatch and traps.
+#
+# Together with the sealed-arena work (router vtable, KlAllocator,
+# KlConfig callbacks, mbedTLS deep allocations): the seal defends the
+# static dispatch tables; CFI defends dynamic per-request callback
+# slots.  Same ROP/JOP escalation chain, two stages.
+#
+# Enable with: make HL_ENABLE_CFI=1
+# (Auto-enables HL_ENABLE_LTO=1; CFI needs LTO for cross-TU coverage.)
+#
+# Platform support:
+#   - Linux clang ≥ 7.0     ✓ (the intended target)
+#   - Linux gcc             ✗ (gcc has no -fsanitize=cfi)
+#   - macOS Apple clang     ✗ (LLVM CFI runtime not on Darwin)
+#   - Cosmopolitan          ✗ (no -fsanitize=cfi support)
+#
+# On unsupported toolchains the probe rejects the flag → no-op.
+#
+# Vendor TU exclusions (Phase 3, 2026-06-20):
+#
+# 1. QuickJS (QJS_CFLAGS): QJS registers C callbacks via
+#    JS_NewCFunctionMagic((JSCFunctionMagic *)f) where the underlying
+#    function may be 0/1/2-arg, magic, or magic+ctor — disparate
+#    signatures cast through a generic prototype.  Vendor-internal
+#    pattern Hull doesn't control without patching qjs.
+#
+# 2. WAMR (WAMR_CFLAGS): WAMR registers host imports as NativeSymbol
+#    entries with a generic typed-erased dispatcher; concrete handler
+#    signatures vary per import.  Vendor-internal pattern.
+#
+# Both vendors still get -flto=thin and -fsplit-lto-unit so they
+# co-link cleanly with the CFI-on TUs (clang refuses mixed LTO links
+# otherwise).
+#
+# Hull-side coverage: cap/* + commands/* + Hull's own runtime/*
+# (post-HlDbBackend-refactor) + worker_* + sh_* + lua + mbedtls +
+# sqlite + tweetnacl + miniz + log.c + Keel (via KEEL_EXTRA_*
+# passthrough).  ~85% of indirect call sites in the final binary.
+#
+# What this defends: a heap-write that lands a fake fn ptr in any
+# CFI-covered TU's vtable / callback slot faults at the indirect
+# call site instead of pivoting control flow.
+#
+# What it doesn't defend: QJS / WAMR vendor-internal call paths
+# (see vendor exclusions above), GPU paths (HlGpuBackend still
+# uses void *backend_ctx; refactor deferred until Metal validation
+# possible), and user-supplied callback contexts where the user owns
+# the type (HlRowCallback etc.).
+#
+# See docs/security.md § 4c "Relationship to §4b" and
+# docs/roadmap_next.md § 9 for the full design + spike history.
+ifeq ($(HL_ENABLE_CFI),1)
+  # Probe -fsanitize=cfi-icall.  Requires LTO bitcode at compile
+  # time, so probe with -flto=thin too — a compiler that accepts
+  # cfi-icall but rejects LTO is no use here.
+  HL_CFI_CFLAG := $(shell tmp="$$(mktemp 2>/dev/null || echo /tmp/hlcfiprobe$$$$.o)"; \
+      printf 'int main(void){return 0;}\n' \
+      | $(CC) -Werror -flto=thin -fsanitize=cfi-icall \
+              -x c -c -o "$$tmp" - >/dev/null 2>&1 \
+      && echo "-fsanitize=cfi-icall"; rm -f "$$tmp")
+  ifneq ($(HL_CFI_CFLAG),)
+    # Trap-on-violation in release; recover-with-diagnostic in debug.
+    # Release behaviour defends; debug behaviour lets developers see
+    # which call site CFI flagged.
+    ifdef DEBUG
+      HL_CFI_MODE := -fno-sanitize-trap=cfi -fsanitize-recover=cfi
+    else
+      HL_CFI_MODE := -fsanitize-trap=cfi
+    endif
+    # -fsplit-lto-unit is required across ALL LTO TUs whenever CFI
+    # is on for any subset (mixed CFI / non-CFI LTO links otherwise
+    # fail with "inconsistent LTO Unit splitting").  Vendor TUs that
+    # opt out of CFI itself still need this flag.
+    # -DHL_CFI_BUILD=1 is the compile-time signal the CFI death test
+    # checks (clang's __has_feature(cfi_icall) is unreliable here).
+    CFLAGS           += $(HL_CFI_CFLAG) $(HL_CFI_MODE) -fsplit-lto-unit -DHL_CFI_BUILD=1
+    LDFLAGS          += $(HL_CFI_CFLAG) -fsplit-lto-unit
+    LUA_CFLAGS       += $(HL_CFI_CFLAG) $(HL_CFI_MODE) -fsplit-lto-unit
+    MBEDTLS_CFLAGS   += $(HL_CFI_CFLAG) $(HL_CFI_MODE) -fsplit-lto-unit
+    SQLITE_CFLAGS    += $(HL_CFI_CFLAG) $(HL_CFI_MODE) -fsplit-lto-unit
+    LOG_CFLAGS       += $(HL_CFI_CFLAG) $(HL_CFI_MODE) -fsplit-lto-unit
+    SH_ARENA_CFLAGS  += $(HL_CFI_CFLAG) $(HL_CFI_MODE) -fsplit-lto-unit
+    SH_JSON_CFLAGS   += $(HL_CFI_CFLAG) $(HL_CFI_MODE) -fsplit-lto-unit
+    TWEETNACL_CFLAGS += $(HL_CFI_CFLAG) $(HL_CFI_MODE) -fsplit-lto-unit
+    STB_CFLAGS       += $(HL_CFI_CFLAG) $(HL_CFI_MODE) -fsplit-lto-unit
+    # QJS / WAMR: -fsplit-lto-unit only, no -fsanitize=cfi-icall
+    # (see "Vendor TU exclusions" in the block comment above).
+    QJS_CFLAGS       += -fsplit-lto-unit
+    ifeq ($(HL_ENABLE_WASM),1)
+      WAMR_CFLAGS    += -fsplit-lto-unit
+    endif
+    # Keel passthrough carries CFI flags via the sub-make rule
+    # (KEEL_EXTRA_CFLAGS / KEEL_EXTRA_LDFLAGS).
+  else
+    $(warning HL_ENABLE_CFI=1 but $(CC) does not support -fsanitize=cfi-icall on this target; building without CFI (Linux clang ≥ 7.0 only))
   endif
 endif
 
@@ -1909,6 +2034,15 @@ endif
 else
 	@echo "  LTO:              disabled (set HL_ENABLE_LTO=1 to enable)"
 endif
+ifeq ($(HL_ENABLE_CFI),1)
+ifneq ($(HL_CFI_CFLAG),)
+	@echo "  CFI:              $(HL_CFI_CFLAG) $(HL_CFI_MODE) -fsplit-lto-unit (HL_ENABLE_CFI=1)"
+else
+	@echo "  CFI:              probe failed (HL_ENABLE_CFI=1 requested but $(CC) does not support -fsanitize=cfi-icall on this target — Linux clang ≥ 7.0 only)"
+endif
+else
+	@echo "  CFI:              disabled (set HL_ENABLE_CFI=1 to enable; Linux clang only)"
+endif
 endif
 
 # Post-build hardening verifier. Runs scripts/check_hardening.sh
@@ -2455,11 +2589,17 @@ endif
 
 # Capability tests (tests/hull/cap/)
 $(BUILDDIR)/test_%: $(TESTDIR)/hull/cap/test_%.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_COMMON_LIBS)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_COMMON_LIBS) $(LDFLAGS)
 
 # Top-level tests (tests/hull/)
 $(BUILDDIR)/test_parse_size: $(TESTDIR)/hull/test_parse_size.c $(TEST_COMMON_DEPS) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(TEST_COMMON_LIBS)
+
+# CFI death test — verifies -fsanitize=cfi-icall traps wrong-typed
+# indirect calls.  Self-skips on non-CFI builds via __has_feature.
+# No deps beyond libc.
+$(BUILDDIR)/test_cfi: $(TESTDIR)/hull/test_cfi.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(LDFLAGS)
 
 # CSP preset registry — tiny, no deps beyond <string.h>.
 $(BUILDDIR)/test_csp: $(TESTDIR)/hull/test_csp.c $(CSP_OBJ) | $(BUILDDIR)

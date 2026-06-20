@@ -56,10 +56,10 @@ static int sqlite_open(void **ctx, const char *dsn, HlAllocator *alloc)
     return 0;
 }
 
-static void sqlite_close(void *ctx)
+static void sqlite_close(HlDbHandle *h)
 {
-    if (!ctx) return;
-    HlDbSqliteCtx *s = (HlDbSqliteCtx *)ctx;
+    if (!h || !h->ctx) return;
+    HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
 
     hl_stmt_cache_destroy(&s->cache);
     hl_cap_db_shutdown(s->db);
@@ -67,56 +67,56 @@ static void sqlite_close(void *ctx)
     free(s);
 }
 
-static int sqlite_query(void *ctx, const char *sql,
+static int sqlite_query(HlDbHandle *h, const char *sql,
                         const HlValue *params, int nparams,
                         HlRowCallback cb, void *cb_ctx,
                         HlAllocator *alloc)
 {
-    HlDbSqliteCtx *s = (HlDbSqliteCtx *)ctx;
+    HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
     return hl_cap_db_query(&s->cache, sql, params, nparams,
                            cb, cb_ctx, alloc);
 }
 
-static int sqlite_exec(void *ctx, const char *sql,
+static int sqlite_exec(HlDbHandle *h, const char *sql,
                        const HlValue *params, int nparams)
 {
-    HlDbSqliteCtx *s = (HlDbSqliteCtx *)ctx;
+    HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
     return hl_cap_db_exec(&s->cache, sql, params, nparams);
 }
 
-static int sqlite_begin(void *ctx)
+static int sqlite_begin(HlDbHandle *h)
 {
-    HlDbSqliteCtx *s = (HlDbSqliteCtx *)ctx;
+    HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
     return hl_cap_db_begin(s->db);
 }
 
-static int sqlite_commit(void *ctx)
+static int sqlite_commit(HlDbHandle *h)
 {
-    HlDbSqliteCtx *s = (HlDbSqliteCtx *)ctx;
+    HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
     return hl_cap_db_commit(s->db);
 }
 
-static int sqlite_rollback(void *ctx)
+static int sqlite_rollback(HlDbHandle *h)
 {
-    HlDbSqliteCtx *s = (HlDbSqliteCtx *)ctx;
+    HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
     return hl_cap_db_rollback(s->db);
 }
 
-static int64_t sqlite_last_id(void *ctx)
+static int64_t sqlite_last_id(HlDbHandle *h)
 {
-    HlDbSqliteCtx *s = (HlDbSqliteCtx *)ctx;
+    HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
     return hl_cap_db_last_id(s->db);
 }
 
-static const char *sqlite_errmsg(void *ctx)
+static const char *sqlite_errmsg(HlDbHandle *h)
 {
-    HlDbSqliteCtx *s = (HlDbSqliteCtx *)ctx;
+    HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
     return sqlite3_errmsg(s->db);
 }
 
-static void sqlite_guard_stale_txn(void *ctx)
+static void sqlite_guard_stale_txn(HlDbHandle *h)
 {
-    HlDbSqliteCtx *s = (HlDbSqliteCtx *)ctx;
+    HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
     hl_cap_db_guard_stale_txn(s->db);
 }
 
@@ -163,7 +163,7 @@ static int sqlite_append(char *buf, size_t cap, size_t *off, const char *fmt, ..
     return (int)(cap - *off);
 }
 
-static int sqlite_insert_if_absent(void *ctx, const char *table,
+static int sqlite_insert_if_absent(HlDbHandle *h, const char *table,
                                     const char *const *conflict_cols,
                                     int n_conflict,
                                     const char *const *cols,
@@ -173,7 +173,7 @@ static int sqlite_insert_if_absent(void *ctx, const char *table,
     /* conflict_cols may be NULL/0 — in that case we emit
      * "INSERT OR IGNORE" without an explicit conflict target,
      * which SQLite treats as "any constraint violation". */
-    HlDbSqliteCtx *s = (HlDbSqliteCtx *)ctx;
+    HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
     size_t cap = sqlite_estimate_sql_size(table, n_conflict, n_cols, 0);
     char stack_buf[4096];
     char *buf = (cap <= sizeof(stack_buf)) ? stack_buf : malloc(cap);
@@ -200,14 +200,14 @@ done:
     return rc;
 }
 
-static int sqlite_upsert(void *ctx, const char *table,
+static int sqlite_upsert(HlDbHandle *h, const char *table,
                           const char *const *conflict_cols, int n_conflict,
                           const char *const *cols,
                           const HlValue *values, int n_cols)
 {
     if (!table || n_cols < 1 || !cols || !values
         || n_conflict < 1 || !conflict_cols) return -1;
-    HlDbSqliteCtx *s = (HlDbSqliteCtx *)ctx;
+    HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
     size_t cap = sqlite_estimate_sql_size(table, n_conflict, n_cols, 1);
     char stack_buf[4096];
     char *buf = (cap <= sizeof(stack_buf)) ? stack_buf : malloc(cap);
@@ -284,11 +284,11 @@ static int sqlite_table_columns_row_cb(void *ctx, HlColumn *cols, int ncols)
     return 0;
 }
 
-static int sqlite_table_columns(void *ctx, const char *table,
+static int sqlite_table_columns(HlDbHandle *h, const char *table,
                                  HlDbColumnCallback cb, void *cb_ctx)
 {
     if (!table || !cb) return -1;
-    HlDbSqliteCtx *s = (HlDbSqliteCtx *)ctx;
+    HlDbSqliteCtx *s = (HlDbSqliteCtx *)h->ctx;
     /* PRAGMA table_info doesn't accept bound parameters in SQLite
      * <3.41; substitute table name directly. The stdlib never
      * passes user input here (table names come from module

@@ -136,7 +136,7 @@ static void init_js_with_caps(void)
     if (js_initialized)
         hl_js_free(&js);
     if (test_db_handle.ctx) {
-        hl_db_backend_sqlite.close(test_db_handle.ctx);
+        hl_db_backend_sqlite.close(&test_db_handle);
         test_db_handle.ctx = NULL;
         test_db = NULL;
     }
@@ -163,7 +163,7 @@ static void cleanup_js_caps(void)
         js_initialized = 0;
     }
     if (test_db_handle.ctx) {
-        hl_db_backend_sqlite.close(test_db_handle.ctx);
+        hl_db_backend_sqlite.close(&test_db_handle);
         test_db_handle.ctx = NULL;
         test_db = NULL;
     }

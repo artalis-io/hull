@@ -239,6 +239,22 @@ esac
 # with the verify-at-build path so users know where to look.
 report skip "LTO"                     "no runtime marker; verify build-time via 'make hardening' (HL_ENABLE_LTO=1)"
 
+# CFI (Control-Flow Integrity).  clang -fsanitize=cfi-icall is Linux-
+# only (LLVM CFI runtime not on Darwin; gcc has no equivalent;
+# cosmocc rejects).  In release (trap) mode there's no runtime
+# marker.  In debug (recover) mode the `__ubsan_handle_cfi_check_fail`
+# symbol is present (handler invoked when a CFI check fails).
+# Trap mode is what ships, so default to skip-with-verify-pointer.
+if [ "$fmt" = "elf" ] && command -v readelf >/dev/null 2>&1; then
+    if readelf -s "$BIN" 2>/dev/null | grep -qE '__ubsan_handle_cfi_check_fail'; then
+        report pass "CFI (cfi-icall)"     "__ubsan_handle_cfi_check_fail referenced (debug build)"
+    else
+        report skip "CFI (cfi-icall)"     "no runtime marker; verify build-time via 'make hardening' (HL_ENABLE_CFI=1; Linux clang only)"
+    fi
+else
+    report skip "CFI (cfi-icall)"     "no runtime marker; verify build-time via 'make hardening' (HL_ENABLE_CFI=1; Linux clang only)"
+fi
+
 printf -- '----------------------------------------------------------\n'
 printf 'summary: %d pass, %d fail, %d skip\n' "$PASS" "$FAIL" "$SKIP"
 
