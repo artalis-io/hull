@@ -97,10 +97,11 @@ ifndef COSMO
       LDFLAGS += -pie
     endif
 
-    ifndef DEBUG
+    ifeq ($(DEBUG)$(TSAN),)
       # _FORTIFY_SOURCE=3 requires glibc 2.34+ / gcc 12+ / clang 9+; on
       # older toolchains it emits a noisy warning and behaves as =2.
       # We intentionally leave the warning loud so stale CI is visible.
+      # Skipped under sanitizer builds (DEBUG/TSAN) which use -O0/-O1.
       CFLAGS += -D_FORTIFY_SOURCE=3
     endif
 
@@ -208,6 +209,13 @@ export ZERO_AR_DATE := 1
 ifdef DEBUG
 CFLAGS += -g -O0 -fsanitize=address,undefined -fno-omit-frame-pointer
 LDFLAGS += -fsanitize=address,undefined
+else ifdef TSAN
+# ThreadSanitizer build. Appends to the normal CFLAGS (Hull's own TUs get
+# instrumented; vendor TUs stay uninstrumented, which TSan tolerates — it
+# just won't flag races inside vendored code). Used to validate the
+# worker-pool / shared-state paths (cap/wasm.c segments, worker_*.c).
+CFLAGS += -g -O1 -fsanitize=thread -fno-omit-frame-pointer
+LDFLAGS += -fsanitize=thread
 else
 CFLAGS += -O2
 endif
@@ -2018,7 +2026,7 @@ $(shell test "$$(cat $(BUILD_CONFIG_FILE) 2>/dev/null)" = "$(BUILD_FINGERPRINT)"
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan e2e e2e-build e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-tcc e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-hypermedia-photos-upload e2e-jwt-asym hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-gpu bench-bytecode-cache wamrc coverage lint-lua lint-js lint platform platform-cosmo hardening check-hardening
+.PHONY: all clean test debug msan tsan e2e e2e-build e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-tcc e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-hypermedia-photos-upload e2e-jwt-asym hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-gpu bench-bytecode-cache wamrc coverage lint-lua lint-js lint platform platform-cosmo hardening check-hardening
 
 all: $(BUILDDIR)/hull
 
@@ -2917,6 +2925,29 @@ msan:
 		KEEL_TLS=mbedtls MBEDTLS_CONFIG_FILE=hull_config.h \
 		KEEL_COMPRESS=miniz MINIZ_DIR=$(CURDIR)/$(MINIZ_DIR)
 	$(MAKE) CC=clang MSAN=1 test
+
+# ThreadSanitizer — validate the worker-pool / shared-state paths under a
+# real race detector. Targeted at the suites that actually spin worker
+# threads, rather than the whole test set, to keep the signal on the
+# threading code and avoid TSan's cost on single-threaded suites:
+#   - test_wasm           : WASM compute worker + the shared-segment vs
+#                           in-flight-async-call path (cap/wasm.c +
+#                           worker_wasm.c; home of the inflight_async fix)
+#   - test_async_backend  : the Keel-backed thread-pool async backend
+#   - test_async_backend_poll : the poll-based thread-pool async backend
+# The db.async (worker_db.c) and gpu.async (worker_gpu.c) workers ride the
+# same pool backends covered here; their cap-layer suites are
+# single-threaded so they add no race coverage. TSAN=1 appends
+# -fsanitize=thread to Hull's own TUs; vendor objects (WAMR, mbedTLS,
+# keel.a) stay uninstrumented, which TSan tolerates.
+TSAN_TESTS := test_wasm test_async_backend test_async_backend_poll
+tsan:
+	$(MAKE) clean
+	$(MAKE) TSAN=1 $(addprefix $(BUILDDIR)/,$(TSAN_TESTS))
+	@for t in $(TSAN_TESTS); do \
+		echo "── TSan: $$t ──"; \
+		TSAN_OPTIONS="halt_on_error=1" $(BUILDDIR)/$$t || exit 1; \
+	done
 
 # ── E2E tests ──────────────────────────────────────────────────────
 

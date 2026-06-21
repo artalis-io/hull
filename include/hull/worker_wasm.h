@@ -46,6 +46,13 @@ typedef struct HlWorkerWasmOp {
     /* Persistent instance mode (NULL = use pooled call) */
     HlWasmInstance *persistent_inst;
 
+    /* Module this op targets, resolved at submit time on the event loop
+     * (pooled: looked up by name; persistent: persistent_inst->module).
+     * Used to bump/clear mod->inflight_async so segment mutation can be
+     * refused while this call is outstanding. NULL if the module was not
+     * resolvable at submit (the worker then fails as before). */
+    HlWasmModule  *mod;
+
     /* Buffer mode */
     int            want_buffer;   /* 1 = return HlWasmBuffer instead of raw bytes */
 

@@ -1774,6 +1774,146 @@ UTEST(hl_cap_wasm, shared_data_load_unload)
     hl_cap_wasm_destroy(&cache);
 }
 
+/* ── R1: segment mutation refused while async compute calls in flight ──
+ *
+ * A worker thread holds a snapshot of mod->shared_data / chain_head taken
+ * under mod->mutex (pool_acquire / the persistent path) and dereferences
+ * it unlocked during its gas-metered call. The event-loop-side
+ * hl_cap_wasm_data_load must NOT free/rebuild those segments while a call
+ * is outstanding, or the worker reads freed memory. The guard is the
+ * per-module inflight_async counter, bumped at async submit and cleared
+ * at completion (both event-loop-thread). */
+
+UTEST(hl_cap_wasm, data_load_refused_while_async_in_flight)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    const char *err = NULL;
+    const char data[] = "segment-bytes";
+
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", "seg0",
+                                    data, sizeof(data) - 1, NULL,
+                                    &vfs, NULL, &err), 0);
+
+    HlWasmModule *mod = hl_cap_wasm_module_lookup(&cache, "shared_read");
+    ASSERT_NE(mod, NULL);
+    ASSERT_EQ(mod->inflight_async, 0);       /* counter starts clear */
+    ASSERT_NE(mod->shared_data, NULL);
+    ASSERT_EQ(mod->shared_data->count, 1);
+
+    /* Reserve an in-flight slot, exactly as hl_worker_wasm_submit does. */
+    mod->inflight_async = 1;
+
+    /* All three mutation forms must refuse and leave the segment intact. */
+    err = NULL;                              /* add/replace */
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", "seg1",
+                                    data, sizeof(data) - 1, NULL,
+                                    &vfs, NULL, &err), -1);
+    ASSERT_STREQ(err, "async_calls_in_flight");
+
+    err = NULL;                              /* remove one */
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", "seg0",
+                                    NULL, 0, NULL, &vfs, NULL, &err), -1);
+    ASSERT_STREQ(err, "async_calls_in_flight");
+
+    err = NULL;                              /* remove all */
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", NULL,
+                                    NULL, 0, NULL, &vfs, NULL, &err), -1);
+    ASSERT_STREQ(err, "async_calls_in_flight");
+
+    ASSERT_NE(mod->shared_data, NULL);       /* nothing was freed */
+    ASSERT_EQ(mod->shared_data->count, 1);
+
+    /* Once the call completes, mutation is allowed again. */
+    mod->inflight_async = 0;
+    err = NULL;
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", NULL,
+                                    NULL, 0, NULL, &vfs, NULL, &err), 0);
+    ASSERT_EQ(mod->shared_data, NULL);
+
+    hl_cap_wasm_destroy(&cache);
+}
+
+/* Cross-thread regression test for R1: a worker thread holds a real
+ * shared_data snapshot (as pool_acquire hands to the gas-metered call)
+ * while the event loop attempts to free the segment. The guard must
+ * refuse the free, so the worker's snapshot stays valid. Run under TSan
+ * to prove no data race, and under ASan to prove no use-after-free; both
+ * would fire if the guard regressed and the free proceeded. */
+typedef struct {
+    HlWasmModule *mod;
+    atomic_int    snapshotted;
+    atomic_int    release;
+    int           observed_count;
+} SnapHoldCtx;
+
+static void *snapshot_holder(void *arg)
+{
+    SnapHoldCtx *c = (SnapHoldCtx *)arg;
+    /* Snapshot under the module mutex, exactly like pool_acquire. */
+    pthread_mutex_lock(&c->mod->mutex);
+    const HlWasmSharedData *sd = c->mod->shared_data;
+    pthread_mutex_unlock(&c->mod->mutex);
+
+    atomic_store(&c->snapshotted, 1);
+
+    /* Dereference the held snapshot until released. */
+    int last = -1;
+    while (!atomic_load(&c->release))
+        if (sd) last = sd->count;
+    if (sd) last = sd->count;
+    c->observed_count = last;
+    return NULL;
+}
+
+UTEST(hl_cap_wasm, data_load_free_blocked_while_worker_holds_snapshot)
+{
+    HlWasmCache cache;
+    ASSERT_EQ(hl_cap_wasm_init(&cache), 0);
+    HlVfs vfs;
+    hl_vfs_init(&vfs, test_entries, NULL);
+
+    const char *err = NULL;
+    const char data[] = "ABCDEFGHIJ";
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", "seg0",
+                                    data, sizeof(data) - 1, NULL,
+                                    &vfs, NULL, &err), 0);
+
+    HlWasmModule *mod = hl_cap_wasm_module_lookup(&cache, "shared_read");
+    ASSERT_NE(mod, NULL);
+
+    /* Reserve the in-flight slot as the event loop would at submit. */
+    mod->inflight_async = 1;
+
+    SnapHoldCtx ctx = { .mod = mod, .snapshotted = 0, .release = 0,
+                        .observed_count = -1 };
+    pthread_t th;
+    ASSERT_EQ(pthread_create(&th, NULL, snapshot_holder, &ctx), 0);
+
+    while (!atomic_load(&ctx.snapshotted)) { /* wait for the snapshot */ }
+
+    /* Event loop tries to free the held segment — must be refused. */
+    err = NULL;
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", NULL,
+                                    NULL, 0, NULL, &vfs, NULL, &err), -1);
+    ASSERT_STREQ(err, "async_calls_in_flight");
+
+    atomic_store(&ctx.release, 1);
+    pthread_join(th, NULL);
+    ASSERT_EQ(ctx.observed_count, 1);        /* snapshot stayed valid */
+
+    /* Free now succeeds with no call in flight. */
+    mod->inflight_async = 0;
+    err = NULL;
+    ASSERT_EQ(hl_cap_wasm_data_load(&cache, "shared_read", NULL,
+                                    NULL, 0, NULL, &vfs, NULL, &err), 0);
+
+    hl_cap_wasm_destroy(&cache);
+}
+
 /* Shared heap probe removed — the root cause was using invokeNative_general.c
  * (32-bit generic invoker) on 64-bit platforms, which mangled native function
  * arguments. Fixed by using platform-specific assembly invokers (em64_simd.s

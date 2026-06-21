@@ -78,9 +78,21 @@ static void wasm_work_fn(void *ud)
 
 /* ── done_fn: runs on event loop after work completes ──────────────── */
 
+/* Drop this op's in-flight reservation on its module (event loop only).
+ * Pairs with the bump in hl_worker_wasm_submit. Once it reaches zero,
+ * hl_cap_wasm_data_load may mutate the module's shared segments again. */
+static void wasm_inflight_release(HlWorkerWasmOp *op)
+{
+    if (op->mod && op->mod->inflight_async > 0)
+        op->mod->inflight_async--;
+    op->mod = NULL;
+}
+
 static void wasm_done_fn(void *ud)
 {
     HlWorkerWasmOp *op = (HlWorkerWasmOp *)ud;
+
+    wasm_inflight_release(op);
 
     /* Clear busy flag for persistent instances (event loop thread) */
     if (op->persistent_inst)
@@ -107,6 +119,8 @@ static void wasm_cancel_fn(void *ud)
 {
     HlWorkerWasmOp *op = (HlWorkerWasmOp *)ud;
 
+    wasm_inflight_release(op);
+
     /* Clear busy flag for persistent instances */
     if (op->persistent_inst)
         atomic_store(&op->persistent_inst->busy, 0);
@@ -122,9 +136,26 @@ static void wasm_cancel_fn(void *ud)
 int hl_worker_wasm_submit(HlAsyncBackendPool *pool, HlWorkerWasmOp *op)
 {
     if (!pool || !op) return -1;
+
+    /* Reserve an in-flight slot on the target module BEFORE the worker can
+     * run, so a concurrent compute.segment() (hl_cap_wasm_data_load, event
+     * loop) cannot free/rebuild segments this call is about to snapshot.
+     * Runs on the event loop; the bindings already pre-load the module, so
+     * the pooled lookup is a cache hit. Released in done/cancel. */
+    if (op->persistent_inst)
+        op->mod = op->persistent_inst->module;
+    else if (op->wasm_cache)
+        op->mod = hl_cap_wasm_module_lookup((HlWasmCache *)op->wasm_cache,
+                                            op->name);
+    if (op->mod)
+        op->mod->inflight_async++;
+
     const HlAsyncBackend *be = hl_async_backend();
-    return be->pool_submit(pool, wasm_work_fn, wasm_done_fn,
-                           wasm_cancel_fn, op);
+    int rc = be->pool_submit(pool, wasm_work_fn, wasm_done_fn,
+                             wasm_cancel_fn, op);
+    if (rc != 0)
+        wasm_inflight_release(op);  /* op reaches neither done nor cancel */
+    return rc;
 }
 
 void hl_worker_wasm_op_free(HlWorkerWasmOp *op)

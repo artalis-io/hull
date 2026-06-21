@@ -212,6 +212,18 @@ static HlWasmModule *cache_find(HlWasmCache *cache, const char *name)
     return NULL;
 }
 
+HlWasmModule *hl_cap_wasm_module_lookup(HlWasmCache *cache, const char *name)
+{
+    if (!cache || !cache->initialized || !name)
+        return NULL;
+    /* cache->count / modules[] reads race with concurrent inserts under
+     * C11; take the cache-level mutex (same as data_load's lookup). */
+    pthread_mutex_lock(&cache->pool_mutex);
+    HlWasmModule *mod = cache_find(cache, name);
+    pthread_mutex_unlock(&cache->pool_mutex);
+    return mod;
+}
+
 /* ── Instance pool ─────────────────────────────────────────────────── */
 
 /* Drain all pooled instances for a module. Caller must hold mod->mutex. */

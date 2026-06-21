@@ -97,6 +97,15 @@ typedef struct {
     HlWasmPool pool;       /* per-module instance pool */
     HlWasmSharedData *shared_data;  /* NULL until compute.data() called */
     pthread_mutex_t mutex;  /* guards pool + shared_data for this module */
+    /* Count of async compute calls (pooled or persistent) currently in
+     * flight on this module. A worker thread may hold a snapshot of
+     * shared_data/chain_head taken under mutex in pool_acquire / the
+     * persistent path and use it unlocked during its gas-metered call;
+     * hl_cap_wasm_data_load refuses to free/rebuild segments while this
+     * is non-zero to avoid a use-after-free. Touched ONLY on the event-
+     * loop thread (async submit/completion + data_load all run there),
+     * so it is a plain int and needs no atomics/lock. */
+    int inflight_async;
 } HlWasmModule;
 
 /* Forward decl — the full ShSealArena type lives in sh_seal_arena.h.
@@ -217,6 +226,16 @@ void hl_cap_wasm_destroy(HlWasmCache *cache);
  */
 int hl_cap_wasm_load(HlWasmCache *cache, const char *name,
                      const struct HlVfs *app_vfs, const char *app_dir);
+
+/**
+ * Look up an already-loaded module by name. Returns NULL if not loaded.
+ *
+ * Thread-safe (takes the cache pool mutex around the lookup). The
+ * returned pointer is stable for the cache's lifetime (module slots are
+ * append-only and never move). Used by the async worker layer to take a
+ * stable module handle at submit time for the in-flight-call counter.
+ */
+HlWasmModule *hl_cap_wasm_module_lookup(HlWasmCache *cache, const char *name);
 
 /**
  * Call a WASM compute module.

@@ -272,6 +272,30 @@ jobs:
         timeout-minutes: 15
         run: make msan
 
+  tsan:
+    name: TSan (worker pool)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      - name: Install clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      - name: TSan test (worker-pool / shared-state paths)
+        # ThreadSanitizer over the suites that spin worker threads: the
+        # WASM compute worker (cap/wasm.c + worker_wasm.c, home of the
+        # shared-segment vs in-flight-async-call fix) and both thread-pool
+        # async backends (Keel-backed + poll). Guards against a regression
+        # of the inflight_async use-after-free fix and any future race in
+        # the worker handoff shared by db.async / compute.async / gpu.async.
+        timeout-minutes: 15
+        run: make CC=clang tsan
+
   analyze:
     name: Static Analysis
     runs-on: ubuntu-latest

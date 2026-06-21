@@ -190,6 +190,7 @@ int hl_cap_wasm_data_load(HlWasmCache *cache, const char *module_name,
     static const char *err_too_many  = "too_many_segments";
     static const char *err_too_large = "data_too_large";
     static const char *err_bad_name  = "segment_name_too_long";
+    static const char *err_busy      = "async_calls_in_flight";
 
     if (!cache || !cache->initialized || !module_name) {
         if (err_msg) *err_msg = err_internal;
@@ -220,6 +221,21 @@ int hl_cap_wasm_data_load(HlWasmCache *cache, const char *module_name,
             if (err_msg) *err_msg = err_internal;
             return -1;
         }
+    }
+
+    /* Refuse to add/replace/remove segments while any async compute call
+     * on this module is in flight. A worker thread may hold a snapshot of
+     * shared_data / chain_head (taken under mod->mutex in pool_acquire or
+     * the persistent-instance path) and dereference it unlocked during its
+     * gas-metered call; freeing or rebuilding the chain here would be a
+     * use-after-free. inflight_async is event-loop-only (this function,
+     * the async submit, and the async completion all run on the event-loop
+     * thread), so the read needs no lock. The documented usage pattern
+     * loads all segments at startup before dispatching work, which never
+     * trips this; dynamic callers must drain in-flight calls first. */
+    if (mod->inflight_async > 0) {
+        if (err_msg) *err_msg = err_busy;
+        return -1;
     }
 
     pthread_mutex_lock(&mod->mutex);
