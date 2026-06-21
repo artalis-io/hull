@@ -838,20 +838,23 @@ endif
 # co-link cleanly with the CFI-on TUs (clang refuses mixed LTO links
 # otherwise).
 #
-# Hull-side coverage: cap/* + commands/* + Hull's own runtime/*
-# (post-HlDbBackend-refactor) + worker_* + sh_* + lua + mbedtls +
-# sqlite + tweetnacl + miniz + log.c + Keel (via KEEL_EXTRA_*
-# passthrough).  ~85% of indirect call sites in the final binary.
+# Hull-side coverage: cap/* (including the post-2026-06-21 typed-
+# handle HlGpuBackend) + commands/* + Hull's own runtime/* +
+# worker_* + sh_* + lua + mbedtls + sqlite + tweetnacl + miniz +
+# log.c + Keel (via KEEL_EXTRA_* passthrough).  ~85% of indirect
+# call sites in the final binary.  All six Hull polymorphic vtables
+# (HlDbBackend, HlGpuBackend, HlAsyncBackend, HlNetBackend,
+# HlCompilerVtable, HlRuntimeVtable) use typed-handle method
+# signatures so CFI sees a matching type-id at every dispatch site.
 #
 # What this defends: a heap-write that lands a fake fn ptr in any
 # CFI-covered TU's vtable / callback slot faults at the indirect
 # call site instead of pivoting control flow.
 #
 # What it doesn't defend: QJS / WAMR vendor-internal call paths
-# (see vendor exclusions above), GPU paths (HlGpuBackend still
-# uses void *backend_ctx; refactor deferred until Metal validation
-# possible), and user-supplied callback contexts where the user owns
-# the type (HlRowCallback etc.).
+# (see vendor exclusions above), and user-supplied callback
+# contexts where the user owns the type (HlRowCallback,
+# HlAsyncTimerFn, HlAsyncWorkFn etc. - intentional `void *cb_ctx`).
 #
 # See docs/security.md § 4c "Relationship to §4b" and
 # docs/roadmap_next.md § 9 for the full design + spike history.

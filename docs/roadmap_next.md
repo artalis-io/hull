@@ -3389,7 +3389,7 @@ there's specific external pressure to close the residual risk.
 
 ---
 
-## 9. `-fsanitize=cfi-icall`: shipped 2026-06-20
+## 9. `-fsanitize=cfi-icall`: shipped 2026-06-20, HlGpuBackend follow-up shipped 2026-06-21
 
 **Status:** Shipped as opt-in `HL_ENABLE_CFI=1` after a two-pass
 investigation.  The first pass (2026-06-19) framed CFI as needing
@@ -3397,9 +3397,25 @@ a 3-5 week vtable refactor across six interfaces and rolled back.
 The second pass (2026-06-20) re-examined the framing, found that
 five of those six vtables were already CFI-compatible via
 opaque-forward typed struct pointers, and only `HlDbBackend`
-needed a small typed-handle change.  Total Hull-side diff:
-one method-signature change in `db_backend.h` + matching updates
-in `db_sqlite.c` + nine call sites.  Plus a Makefile flag block.
+needed a small typed-handle change.  Total Hull-side diff on
+ship day: one method-signature change in `db_backend.h` +
+matching updates in `db_sqlite.c` + nine call sites.  Plus a
+Makefile flag block.
+
+The sixth vtable, `HlGpuBackend`, was deferred at ship time
+pending Metal validation and retyped 2026-06-21 (commit
+10d77cb) once that became possible.  Same recipe applied: all
+16 vtable methods now take `HlGpuCtx *ctx` / `HlGpuDevice *dev`
+typed handles; the wgpu backend casts to its own concrete type
+at each method's first line.  Validated with 18/18 `test_gpu`
+cases under real Metal on Apple M1 Max (compile, dispatch,
+persistent buffer round-trip, two-stage pipeline, texture
+write/read), plus 48/48 unit + 22/22 e2e under live CFI on
+Lima Ubuntu 25.04 aarch64.
+
+All six Hull polymorphic vtables now use typed-handle method
+signatures.  CFI sees a matching type-id at every Hull
+dispatch site.
 
 ### Goal
 
@@ -3461,13 +3477,15 @@ was right.  Survey on the second pass:
 | `HlNetBackend` | `void *ctx` erasure | No: `HlNetBackendCtx *` opaque-forward |
 | `HlCompilerVtable` | `void *ctx` erasure | No: `HlCompiler *c` typed |
 | `HlRuntimeVtable` | `void *ctx` erasure | No: `HlRuntime *rt` typed |
-| `HlGpuBackend` | `void *ctx` erasure | Yes, `void *backend_ctx` (deferred, see below) |
+| `HlGpuBackend` | `void *ctx` erasure | Yes, `void *backend_ctx` (retyped 2026-06-21) |
 
 The opaque-forward `typedef struct HlFooCtx HlFooCtx;` pattern
 gives CFI the typed parameter it needs without the implementer
 having to expose internal struct layout.  Five of the six
-vtables already used this idiom; only `HlDbBackend` had the
-exposed `void *ctx` shape that CFI flagged.
+vtables already used this idiom; `HlDbBackend` and
+`HlGpuBackend` had the exposed `void *ctx` shape and were
+retyped (HlDbBackend on ship day, HlGpuBackend the day after
+once Metal validation became available).
 
 Similarly, Keel's `KlBodyReader` vtable, which the first pass
 listed as a separate Keel-side blocker, already takes
@@ -3480,14 +3498,6 @@ the Hull-side CFI flags into Keel's sub-make via the existing
 `KEEL_EXTRA_CFLAGS` mechanism (v2.6.1).
 
 ### What's actually deferred
-
-**`HlGpuBackend`** still uses `void *backend_ctx` for the top-
-level backend and `void *backend_device` for per-device handles.
-Refactoring it to typed dispatch (same pattern as HlDbBackend's
-typed handle) is mechanical, but the validation gate is having
-a Metal-equipped macOS box to confirm GPU dispatch still works
-end-to-end under release-mode CFI.  Lima Linux aarch64 has no
-GPU so the spike couldn't validate.  Tracked as a follow-up.
 
 **User-supplied callback contexts** (`HlRowCallback`,
 `HlAsyncTimerFn`, `HlAsyncWorkFn`, etc.) intentionally
@@ -3504,6 +3514,8 @@ API.  Stays as documented gap.
 | Apple clang 17 (macOS arm64) | `HL_ENABLE_CFI=1` | probe-skips cleanly, builds + tests 48/48 |
 | Linux clang 21 (Lima aarch64) | `HL_ENABLE_CFI=1` | **48/48 unit, 22/22 e2e, 8/8 ca-bundle** under release-mode CFI trap |
 | Linux clang 21 (Lima aarch64) | `test_cfi` death test | **CFI traps wrong-typed indirect call** as designed |
+| Apple M1 Max (Metal) | `HL_ENABLE_GPU=1`, default mode | **18/18 `test_gpu` cases pass** after HlGpuBackend typed-handle retype (compile, dispatch, persistent buffer round-trip, two-stage pipeline, texture write/read) |
+| Linux clang 21 (Lima aarch64) | `HL_ENABLE_CFI=1`, post-HlGpuBackend-retype | **48/48 unit, 22/22 e2e** under live CFI; gpu.h typed signatures compile + link clean under split-LTO (Lima has no GPU adapter so runtime GPU dispatch validation stays on macOS) |
 
 ### Implementation notes
 
@@ -3543,11 +3555,15 @@ API.  Stays as documented gap.
   self-pointers.  Just needed CFI flags threaded through
   the existing `KEEL_EXTRA_CFLAGS` Makefile passthrough
   (added in v2.6.1).  No Keel source change required.
-- **`HlGpuBackend` is the right pattern to defer.**  Refactor
-  follows the same recipe as HlDbBackend, but the validation
-  gate (GPU dispatch under CFI) needs hardware Lima doesn't
-  have.  Worth doing when there's macOS Metal time to confirm
-  it; not worth blocking the rest of the ship on.
+- **Defer-with-clear-validation-gate worked.**  `HlGpuBackend`
+  was held back from ship day because the validation needed a
+  Metal-equipped macOS box that wasn't available right then.
+  The lesson is the gate, not the wait: deferring on "needs
+  hardware we don't have right now" produced a clean one-day
+  follow-up (commit 10d77cb) once Metal was available, vs. the
+  open-ended risk of shipping unvalidated.  All 18 `test_gpu`
+  cases pass under real Metal dispatch + 48/48 unit + 22/22 e2e
+  under live CFI on Linux.
 
 ### File diff
 

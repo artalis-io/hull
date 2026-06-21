@@ -908,7 +908,7 @@ Verified properties:
 | Considered | Decision | Reason |
 |---|---|---|
 | `-flto` / `-flto=thin` | **Shipped** as opt-in `HL_ENABLE_LTO=1` (2026-06-19). Per-vendor compatibility audit clean across mbedtls, sqlite, lua, qjs, miniz, tweetnacl, stb, wamr, log.c, sh_*. Reproducible build holds byte-identical under LTO. Build time roughly 2x, binary size +3.5%. Default off because the value is only realised together with CFI (which is now documented as not-pursued, see next row). | n/a |
-| `-fsanitize=cfi-icall` (LLVM) | **Shipped** as opt-in `HL_ENABLE_CFI=1` (2026-06-20). Auto-enables `HL_ENABLE_LTO=1`. Linux clang only: probe-skips cleanly on Apple clang (no Darwin CFI runtime), gcc (no CFI), and cosmocc (no CFI). The original 2026-06-19 spike thought adoption needed a 3-5 week refactor of six polymorphic vtables, but the second look found only ONE (`HlDbBackend`) actually used `void *ctx` type erasure; the other five (`HlAsyncBackend`, `HlNetBackend`, `HlCompilerVtable`, `HlRuntimeVtable`, `HlGpuBackend`) and Keel's `KlBodyReader` were already CFI-compatible via opaque-forward typed struct pointers. The refactor was ~one Makefile flag + the HlDbBackend method-signature change. QuickJS and WAMR vendor TUs stay excluded (their internal callback dispatch uses cast-through-generic-prototype patterns Hull can't patch without forking the vendors). `HlGpuBackend` still uses `void *backend_ctx` and `void *backend_device`; refactor deferred until validated on a Metal-equipped macOS box (CI's Linux runners have no GPU). See `roadmap_next.md` §9 for the full empirical history. |
+| `-fsanitize=cfi-icall` (LLVM) | **Shipped** as opt-in `HL_ENABLE_CFI=1` (2026-06-20, follow-up 2026-06-21). Auto-enables `HL_ENABLE_LTO=1`. Linux clang only: probe-skips cleanly on Apple clang (no Darwin CFI runtime), gcc (no CFI), and cosmocc (no CFI). The original 2026-06-19 spike thought adoption needed a 3-5 week refactor of six polymorphic vtables; the second look found five of the six (`HlAsyncBackend`, `HlNetBackend`, `HlCompilerVtable`, `HlRuntimeVtable`, plus Keel's `KlBodyReader`) were already CFI-compatible via opaque-forward typed struct pointers, and only `HlDbBackend` actually used `void *ctx` type erasure. `HlGpuBackend` was the sixth holdout (also `void *backend_ctx` / `void *backend_device`) and was retyped 2026-06-21 once Metal validation became available; all 18 `test_gpu` cases pass under real Metal on Apple M1 Max, plus 48/48 unit + 22/22 e2e under live CFI on Lima Ubuntu 25.04 aarch64. All six Hull vtables now use typed-handle method signatures. QuickJS and WAMR vendor TUs stay excluded (their internal callback dispatch uses cast-through-generic-prototype patterns Hull can't patch without forking the vendors). See `roadmap_next.md` §9 for the full empirical history. |
 | `-fsanitize=safe-stack` | Deferred | clang-only, splits stacks. Runtime cost and incompatible with `setjmp` / coroutine patterns Hull uses extensively for Lua + JS async. |
 | `-fsanitize=shadow-call-stack` | Deferred | aarch64-only. Requires a free register reservation (`-ffixed-x18`). Worth measuring on Linux aarch64 release as a follow-up. |
 | `-fhardened` (GCC 14+) | Skipped | Meta-flag that conflicts with explicit overrides. We deliberately probe individual flags so the build still works on toolchains 5+ years old. |
@@ -953,12 +953,15 @@ What an attacker still gets, even with this layer in place:
        runtime type matches the call site's expected signature.
        Fake-vtable-pointer-in-unsealed-object attacks trap at the
        call site instead of pivoting control flow.
-  CFI covers ~85% of indirect-call sites: every Hull TU, Keel, plus
-  mbedtls, sqlite, lua, tweetnacl, miniz, log.c, sh_*. Vendor
-  exclusions: QuickJS and WAMR (their internal callback dispatch
-  uses cast-through-generic-prototype patterns Hull can't patch
-  without forking). `HlGpuBackend` deferred until Metal-equipped
-  validation possible. CFI is Linux-clang-only by toolchain
+  CFI covers ~85% of indirect-call sites: every Hull TU (including
+  the GPU backend after the 2026-06-21 HlGpuBackend retype), Keel,
+  plus mbedtls, sqlite, lua, tweetnacl, miniz, log.c, sh_*. All six
+  Hull polymorphic vtables (HlDbBackend, HlGpuBackend, HlAsyncBackend,
+  HlNetBackend, HlCompilerVtable, HlRuntimeVtable) now use typed-
+  handle method signatures, so CFI matches type-ids at every Hull
+  dispatch site. Vendor exclusions: QuickJS and WAMR (their internal
+  callback dispatch uses cast-through-generic-prototype patterns Hull
+  can't patch without forking). CFI is Linux-clang-only by toolchain
   constraint: macOS Apple clang has no CFI runtime; gcc and cosmocc
   reject the flag. On those platforms the four-layer defense is
   reduced to three (layers 1-3 still apply). The death test in
