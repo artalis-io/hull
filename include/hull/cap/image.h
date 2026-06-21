@@ -40,6 +40,10 @@ typedef struct HlImage {
     size_t        pixel_len;
     int           owned;      /* 1 = we allocated pixels */
     HlAllocator  *alloc;
+    /* Codec-specific pixel free. Decoded images own pixels allocated by
+     * the codec's allocator (stb uses its own); NULL means the pixels
+     * came from plain malloc (image.new) and hl_image_free uses free(). */
+    void        (*free_pixels)(void *pixels);
 } HlImage;
 
 /* ── Codec vtable ──────────────────────────────────────────────────── */

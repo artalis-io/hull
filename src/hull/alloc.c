@@ -141,3 +141,50 @@ void hl_arena_free(HlAllocator *a, SHArena *arena)
     }
     sh_arena_free(arena);
 }
+
+/* ── Scoped scratch (mark / rewind) ────────────────────────────────────
+ *
+ * sh_arena is a non-growing bump allocator: pointers are stable for the
+ * arena's whole lifetime (it never reallocs), so a savepoint is just the
+ * current `used` offset and rewinding is restoring it. These wrap the
+ * hand-rolled `saved = arena->used; ...; arena->used = saved` idiom into a
+ * named, bounds-checked API so a REQUEST arena can host nested SCRATCH
+ * scopes without a second arena. Allocations made after the mark become
+ * invalid once rewound — do not retain pointers past the rewind.
+ */
+size_t hl_arena_mark(const SHArena *arena)
+{
+    return arena ? arena->used : 0;
+}
+
+void hl_arena_rewind(SHArena *arena, size_t mark)
+{
+    if (!arena)
+        return;
+    /* A mark can only ever be <= the current high-water mark; a larger
+     * value means the caller passed a mark from a different arena or a
+     * stale one. Clamp rather than expose uninitialised bytes. */
+    if (mark <= arena->used)
+        arena->used = mark;
+}
+
+char *hl_arena_strdup(SHArena *arena, const char *s)
+{
+    if (!arena || !s)
+        return NULL;
+    size_t n = strlen(s) + 1;
+    char *p = sh_arena_alloc(arena, n);
+    if (p)
+        memcpy(p, s, n);
+    return p;
+}
+
+void *hl_arena_memdup(SHArena *arena, const void *src, size_t n)
+{
+    if (!arena || (!src && n))
+        return NULL;
+    void *p = sh_arena_alloc(arena, n);
+    if (p && n)
+        memcpy(p, src, n);
+    return p;
+}

@@ -51,6 +51,24 @@ KlAllocator hl_alloc_kl(HlAllocator *a);
 SHArena *hl_arena_create(HlAllocator *a, size_t capacity);
 void     hl_arena_free(HlAllocator *a, SHArena *arena);
 
+/* Scoped scratch within one arena (lifetime helpers).
+ *
+ * sh_arena never grows or reallocs, so a savepoint is just the current
+ * used-offset. hl_arena_mark captures it; hl_arena_rewind restores it,
+ * invalidating every allocation made since the mark (do not retain
+ * pointers past a rewind). This lets a REQUEST arena host nested SCRATCH
+ * scopes without a second arena, replacing the hand-rolled
+ * `saved = arena->used; ...; arena->used = saved` idiom with a named,
+ * bounds-checked call.
+ *
+ * hl_arena_strdup / hl_arena_memdup copy into arena memory (lifetime =
+ * the arena), replacing repeated alloc+memcpy at call sites. They return
+ * NULL on NULL arena or when the arena is out of space. */
+size_t hl_arena_mark(const SHArena *arena);
+void   hl_arena_rewind(SHArena *arena, size_t mark);
+char  *hl_arena_strdup(SHArena *arena, const char *s);
+void  *hl_arena_memdup(SHArena *arena, const void *src, size_t n);
+
 /* Accessors */
 static inline size_t hl_alloc_used(const HlAllocator *a) { return a->used; }
 static inline size_t hl_alloc_peak(const HlAllocator *a) { return a->peak; }

@@ -159,6 +159,12 @@ int hl_ws_broadcast_text(HlWsRegistry *reg, const char *path,
         return 0;
 
     int sent = 0;
+    /* Load-bearing invariant: kl_ws_server_send_* only enqueues a frame and
+     * never re-enters Hull or closes the connection synchronously. on_close
+     * (which calls hl_ws_registry_remove and frees the node) is delivered as
+     * a separate Keel event on this same event-loop thread, so the cursor
+     * `c` cannot be freed mid-iteration. If send ever becomes reentrant,
+     * this loop must snapshot the connection list first. */
     for (HlWsConn *c = ep->conns; c; c = c->next) {
         if (!c->closed && c->kl_ws) {
             if (kl_ws_server_send_text(c->kl_ws, data, len) == 0)
@@ -179,6 +185,8 @@ int hl_ws_broadcast_binary(HlWsRegistry *reg, const char *path,
         return 0;
 
     int sent = 0;
+    /* See hl_ws_broadcast_text: safe only because send is non-reentrant and
+     * node frees are deferred to a separate on_close event on this thread. */
     for (HlWsConn *c = ep->conns; c; c = c->next) {
         if (!c->closed && c->kl_ws) {
             if (kl_ws_server_send_binary(c->kl_ws, (const char *)data, len) == 0)

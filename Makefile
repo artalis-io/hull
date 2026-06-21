@@ -2645,6 +2645,11 @@ $(BUILDDIR)/test_cfi: $(TESTDIR)/hull/test_cfi.c | $(BUILDDIR)
 $(BUILDDIR)/test_csp: $(TESTDIR)/hull/test_csp.c $(CSP_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(CSP_OBJ)
 
+# Arena lifetime helpers — mark/rewind/strdup/memdup over sh_arena.
+# Needs only the alloc wrapper + the sh_arena bump allocator.
+$(BUILDDIR)/test_arena: $(TESTDIR)/hull/test_arena.c $(ALLOC_OBJ) $(SH_ARENA_OBJ) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(ALLOC_OBJ) $(SH_ARENA_OBJ)
+
 # Sealed arena — POSIX-only, no deps beyond libc + mmap/mprotect.
 # Links Hull's locally-instrumented copy ($(SH_SEAL_ARENA_OBJ)) ahead
 # of libkeel.a so MSan can see the init writes.

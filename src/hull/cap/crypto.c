@@ -1045,6 +1045,9 @@ int hl_cap_crypto_ed25519_verify(const uint8_t *msg, size_t msg_len,
     int rc = crypto_sign_ed25519_open(m, &mlen, sm, (unsigned long long)sm_len,
                                        pubkey);
 
+    /* Scrub the signed-message scratch (sig || msg and recovered msg)
+     * before releasing it. Covers both the stack and heap buffers. */
+    hull_secure_zero(sm, sm_len * 2);
     if (heap)
         free(sm);
 
@@ -1075,6 +1078,9 @@ int hl_cap_crypto_ed25519_sign(const uint8_t *msg, size_t msg_len,
     if (rc == 0)
         memcpy(out_sig, sm, 64); /* first 64 bytes are the signature */
 
+    /* Scrub the signed-message scratch before releasing it. Covers both
+     * the stack and heap buffers. */
+    hull_secure_zero(sm, sm_len);
     if (sm != stack_sm)
         free(sm);
 
@@ -1251,6 +1257,9 @@ int hl_cap_crypto_secretbox(uint8_t *out, const void *msg, size_t msg_len,
     if (rc == 0)
         memcpy(out, ct + 16, msg_len + 16); /* skip BOXZEROBYTES */
 
+    /* Scrub plaintext from scratch (covers both stack and heap buffers)
+     * before releasing it. Matches the HMAC scrub convention above. */
+    hull_secure_zero(buf, padded_len * 2);
     free(heap);
     return rc;
 }
@@ -1287,6 +1296,9 @@ int hl_cap_crypto_secretbox_open(uint8_t *out, const void *ct, size_t ct_len,
     if (rc == 0)
         memcpy(out, padded_pt + 32, ct_len - 16); /* skip ZEROBYTES */
 
+    /* Scrub the decrypted plaintext from scratch (covers both stack and
+     * heap buffers) before releasing it. */
+    hull_secure_zero(buf, padded_len * 2);
     free(heap);
     return rc;
 }
@@ -1328,6 +1340,9 @@ int hl_cap_crypto_box(uint8_t *out, const void *msg, size_t msg_len,
     if (rc == 0)
         memcpy(out, ct_buf + 16, msg_len + 16); /* skip BOXZEROBYTES */
 
+    /* Scrub plaintext from scratch (covers both stack and heap buffers)
+     * before releasing it. */
+    hull_secure_zero(buf, padded_len * 2);
     free(heap);
     return rc;
 }
@@ -1365,6 +1380,9 @@ int hl_cap_crypto_box_open(uint8_t *out, const void *ct, size_t ct_len,
     if (rc == 0)
         memcpy(out, padded_pt + 32, ct_len - 16); /* skip ZEROBYTES */
 
+    /* Scrub the decrypted plaintext from scratch (covers both stack and
+     * heap buffers) before releasing it. */
+    hull_secure_zero(buf, padded_len * 2);
     free(heap);
     return rc;
 }

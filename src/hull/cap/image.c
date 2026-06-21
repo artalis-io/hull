@@ -211,9 +211,9 @@ HlImage *hl_image_decode(const void *data, size_t len,
     img->pixel_len = expected;
     img->owned     = 1;
     img->alloc     = alloc;
-
-    /* Store the codec's free_pixels function — stb uses its own allocator.
-     * We'll handle this in hl_image_free by checking if the codec is stb. */
+    /* Decoded pixels were allocated by the codec's allocator (stb uses its
+     * own), so free them through the codec, not plain free(). */
+    img->free_pixels = codec->free_pixels;
 
     return img;
 }
@@ -266,7 +266,13 @@ int hl_image_encode(const HlImage *img, const char *fmt_name,
 void hl_image_free(HlImage *img)
 {
     if (!img) return;
-    if (img->owned && img->pixels)
-        free(img->pixels);
+    if (img->owned && img->pixels) {
+        /* Decoded pixels are freed through the codec's allocator;
+         * image.new() pixels (free_pixels == NULL) use plain free(). */
+        if (img->free_pixels)
+            img->free_pixels(img->pixels);
+        else
+            free(img->pixels);
+    }
     free(img);
 }
