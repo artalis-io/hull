@@ -13,6 +13,7 @@
 #include "hull/cap/gpu.h"
 #include "hull/cap/audit.h"
 #include "hull/limits/gpu.h"
+#include "hull/thread_affinity.h"
 #include "log.h"
 
 #include <assert.h>
@@ -162,6 +163,9 @@ const char *hl_cap_gpu_device_name(HlGpuCtx *ctx, int device)
 int hl_cap_gpu_compile(HlGpuCtx *ctx, int device, const char *name,
                        const char *wgsl, size_t wgsl_len)
 {
+    /* Shader compile is event-loop-only (gpu.compile / gpu.load bindings);
+     * workers only look up already-compiled pipelines under the device lock. */
+    hl_assert_on_event_loop("hl_cap_gpu_compile (gpu.compile/load)");
     if (!ctx || !name || !wgsl)
         return HL_GPU_ERR_INTERNAL;
     if (ctx->device_count == 0)

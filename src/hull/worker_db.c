@@ -12,6 +12,7 @@
 #include "hull/worker_db.h"
 #include "hull/cap/db.h"
 #include "hull/async.h"
+#include "hull/thread_affinity.h"
 #include "hull/async_backend.h"
 #include "hull/net_backend.h"
 #include "hull/alloc.h"
@@ -391,6 +392,9 @@ static void db_cancel_fn(void *ud)
 int hl_worker_db_submit(HlAsyncBackendPool *pool, HlWorkerDbOp *op)
 {
     if (!pool || !op) return -1;
+    /* db.async submit is event-loop-only; workers use their own per-thread
+     * sqlite connection on deep-copied inputs. */
+    hl_assert_on_event_loop("hl_worker_db_submit (db.async)");
     const HlAsyncBackend *be = hl_async_backend();
     return be->pool_submit(pool, db_work_fn, db_done_fn, db_cancel_fn, op);
 }

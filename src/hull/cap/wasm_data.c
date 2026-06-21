@@ -12,6 +12,7 @@
 #include "hull/cap/wasm_data.h"
 #include "hull/cap/wasm.h"
 #include "hull/limits/wasm.h"
+#include "hull/thread_affinity.h"
 #include "hull/vfs.h"
 #include "log.h"
 #include "wasm_export.h"
@@ -191,6 +192,10 @@ int hl_cap_wasm_data_load(HlWasmCache *cache, const char *module_name,
     static const char *err_too_large = "data_too_large";
     static const char *err_bad_name  = "segment_name_too_long";
     static const char *err_busy      = "async_calls_in_flight";
+
+    /* Segment mutation is event-loop-only; the inflight_async guard below
+     * is correct only because this never races an async submit/complete. */
+    hl_assert_on_event_loop("hl_cap_wasm_data_load (compute.segment)");
 
     if (!cache || !cache->initialized || !module_name) {
         if (err_msg) *err_msg = err_internal;

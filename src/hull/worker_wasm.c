@@ -14,6 +14,7 @@
 #include "hull/worker_wasm.h"
 #include "hull/cap/wasm_buffer.h"
 #include "hull/alloc.h"
+#include "hull/thread_affinity.h"
 #include "hull/async.h"
 #include "hull/async_backend.h"
 #include "hull/net_backend.h"
@@ -136,6 +137,10 @@ static void wasm_cancel_fn(void *ud)
 int hl_worker_wasm_submit(HlAsyncBackendPool *pool, HlWorkerWasmOp *op)
 {
     if (!pool || !op) return -1;
+
+    /* Async submit (and the inflight_async accounting below) is
+     * event-loop-only — done/cancel clear the counter on the same thread. */
+    hl_assert_on_event_loop("hl_worker_wasm_submit (compute.async)");
 
     /* Reserve an in-flight slot on the target module BEFORE the worker can
      * run, so a concurrent compute.segment() (hl_cap_wasm_data_load, event

@@ -30,6 +30,7 @@
 #include "hull/alloc.h"
 #include "hull/app_context.h"
 #include "hull/async_backend.h"
+#include "hull/thread_affinity.h"
 #include "hull/async/keel.h"
 #include "hull/net_backend.h"
 #include "hull/net/keel.h"
@@ -1902,6 +1903,12 @@ int hull_serve(int argc, char **argv)
 
     /* Phase 7: Keel server + TLS */
     if (hl_serve_init_server(&s) != 0) { hl_serve_cleanup(&s); return 1; }
+
+    /* Mark this (the server's main) thread as the event-loop thread
+     * before the worker pool is created, so thread-affinity assertions on
+     * the loop-only paths (segment mutation, async submit, GPU compile)
+     * have a happens-before edge to every worker. Compiled out in release. */
+    hl_event_loop_mark_current();
 
     /* Phase 8: thread pool, client pool, compression (non-fatal) */
     hl_serve_init_infra(&s);

@@ -14,6 +14,7 @@
 #include "hull/worker_gpu.h"
 #include "hull/async.h"
 #include "hull/async_backend.h"
+#include "hull/thread_affinity.h"
 #include "hull/net_backend.h"
 #include "log.h"
 #include "keel/thread_pool.h"
@@ -120,6 +121,9 @@ static void gpu_cancel_fn(void *ud)
 int hl_worker_gpu_submit(HlAsyncBackendPool *pool, HlWorkerGpuOp *op)
 {
     if (!pool || !op) return -1;
+    /* gpu.async submit is event-loop-only; workers only dispatch
+     * pre-compiled pipelines, never compile or mutate caches. */
+    hl_assert_on_event_loop("hl_worker_gpu_submit (gpu.async)");
     const HlAsyncBackend *be = hl_async_backend();
     return be->pool_submit(pool, gpu_work_fn, gpu_done_fn,
                            gpu_cancel_fn, op);
