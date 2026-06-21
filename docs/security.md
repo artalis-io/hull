@@ -995,6 +995,212 @@ protections — so this flag can't accidentally ship.
 
 ---
 
+## 4d. Runtime enforcement (kernel + loader knobs)
+
+§4c emits the markers; the kernel and dynamic loader enforce them
+at runtime. The compiler can't turn that enforcement on from
+inside the process; the operator picks it up via deployment
+configuration. The defaults are conservative across distributions,
+so a Hull binary shipped without explicit runtime configuration
+may be running with weaker enforcement than the binary metadata
+suggests.
+
+This section is the **operator-facing companion** to §4c. Read
+§4c to understand what the binary advertises; read this section
+to make sure the platform actually honors those advertisements.
+
+### What's already automatic (no operator action)
+
+| Platform | Marker | Enforcement | Status |
+|---|---|---|---|
+| Linux aarch64 | BTI (Branch Target Identification) | Kernel ≥ 5.8 + CPU support. The GNU property note is read by `ld.so` at load time; if both the kernel and the CPU support BTI, every indirect branch must land on a `bti` instruction or the kernel raises SIGILL. | Automatic, no per-process opt-in. |
+| Linux aarch64 | PAC (Pointer Authentication Codes) | Kernel ≥ 5.0 + CPU support (Apple Silicon, Cortex-A78+). Return-address signing is automatic when `-mbranch-protection=standard` is set at compile time. | Automatic. |
+| macOS arm64 | BTI + PAC + Hardened Memory | Apple Silicon CPUs + macOS kernel enforce both unconditionally. Hardened Runtime adds W^X + library validation when codesigned with the `runtime` flag. | Automatic for SIP-protected paths; `codesign -o runtime` for distributed binaries. |
+| Linux any | NX stack | Universal on modern kernels. PT_GNU_STACK without the X flag (Hull emits) is honored by every loader. | Automatic. |
+| Linux any | ASLR (PIE) | Kernel default (`/proc/sys/kernel/randomize_va_space=2`). | Automatic; verify via `cat /proc/sys/kernel/randomize_va_space`. |
+| Linux any | RELRO + BIND_NOW | `ld.so` resolves all relocations at load and marks `.got` read-only. Hull emits both flags. | Automatic. |
+
+### What needs operator opt-in
+
+| Platform | Marker | Operator action |
+|---|---|---|
+| Linux x86_64 | CET / Intel SHSTK (shadow stack) | Kernel ≥ 6.6 + CPU support (Intel Tiger Lake+, AMD Zen 3+). Process opts in via `arch_prctl(ARCH_SHSTK_ENABLE)`. **Hull does NOT call this today.** Currently best done via glibc's `GLIBC_TUNABLES=glibc.cpu.x86_shstk=on` env var (glibc 2.39+) or via systemd's per-unit `Environment=GLIBC_TUNABLES=glibc.cpu.x86_shstk=on`. Future Hull may add a `--enable-shadow-stack` CLI flag that calls `arch_prctl` directly. |
+| Linux x86_64 | CET / Intel IBT (indirect branch tracking) | Same kernel + CPU requirement as SHSTK. The `endbr64` instructions are emitted by `-fcf-protection=full` (Hull does this); the kernel enforces them on every indirect branch. Enabled at process start via the same loader path as SHSTK. |
+| macOS arm64 (distributed) | Hardened Runtime | `codesign --options runtime --sign "Developer ID Application: ..."` at distribution time. Required for notarisation. `hull` is unsigned in dev builds; release `.tar.gz` should be signed and notarised. |
+
+### Recommended systemd unit
+
+For Linux deployments, this unit applies every kernel-side hardening
+knob that complements §4c. Designed for a Hull web app deployed as
+`hull-app.service`; adjust `User=`/`Group=`/`WorkingDirectory=` to taste:
+
+```ini
+[Unit]
+Description=Hull application
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/opt/hull-app/bin/myapp
+WorkingDirectory=/opt/hull-app
+User=hull
+Group=hull
+Restart=on-failure
+
+# Memory hardening
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+
+# Filesystem hardening
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ReadWritePaths=/var/lib/hull-app /var/log/hull-app
+
+# Network hardening (drop AF_NETLINK, AF_PACKET, raw sockets, etc.)
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+NoNewPrivileges=yes
+LockPersonality=yes
+
+# Capability drop (Hull doesn't need any after bind)
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# x86_64 CET enablement (glibc 2.39+, kernel 6.6+)
+Environment=GLIBC_TUNABLES=glibc.cpu.x86_shstk=on:glibc.cpu.x86_ibt=on
+
+# Optional: stack-clash + UMA protection at the kernel level
+ProcSubset=pid
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`MemoryDenyWriteExecute=yes` is the most important line: it makes
+the kernel reject any `mprotect(PROT_WRITE|PROT_EXEC)` /
+`mmap(PROT_WRITE|PROT_EXEC)` at the syscall boundary. Hull's
+code path never asks for W^X memory (no JIT, no runtime codegen
+(see §4b), so the policy holds at the kernel layer too.
+
+`LockPersonality=yes` blocks `personality(2)` writes, which would
+otherwise let a compromised process disable ASLR for itself.
+
+### Docker / Kubernetes
+
+Equivalent knobs for container deployments:
+
+```yaml
+# Kubernetes Pod spec
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: hull-app
+      image: myapp:latest
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+        seccompProfile:
+          type: RuntimeDefault
+      env:
+        - name: GLIBC_TUNABLES
+          value: "glibc.cpu.x86_shstk=on:glibc.cpu.x86_ibt=on"
+      volumeMounts:
+        - name: data
+          mountPath: /var/lib/hull-app
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: hull-app-data
+    - name: tmp
+      emptyDir: {}
+```
+
+Docker equivalent:
+
+```sh
+docker run --rm \
+  --read-only \
+  --tmpfs /tmp \
+  --cap-drop=ALL \
+  --security-opt=no-new-privileges \
+  --security-opt=seccomp=default.json \
+  --env GLIBC_TUNABLES=glibc.cpu.x86_shstk=on:glibc.cpu.x86_ibt=on \
+  -v /var/lib/hull-app:/data \
+  myapp:latest
+```
+
+### How to verify enforcement is active
+
+Use these to confirm runtime enforcement is actually engaged, not
+just available:
+
+```sh
+# Verify the binary's marker set (build-time)
+make hardening                     # Hull-side flag summary
+scripts/check_hardening.sh build/hull  # binary verifier (PIE, RELRO, etc.)
+readelf -nW build/hull | grep -E "IBT|SHSTK|BTI|PAC"  # GNU property notes
+
+# Verify ASLR is on
+cat /proc/sys/kernel/randomize_va_space  # 2 = full ASLR
+
+# Verify the running process has CET enabled (Linux x86_64)
+# (requires kernel 6.6+; the PR_GET_SHADOW_STACK_STATUS prctl is glibc 2.39+)
+gdb -p $(pgrep myapp) -batch -ex 'call (int)prctl(76, 0)' 2>&1 | grep -i shstk
+
+# Verify systemd applied the unit hardening
+systemd-analyze security myapp.service   # exposure score; aim < 1.0
+
+# Confirm MemoryDenyWriteExecute holds
+sudo strace -p $(pgrep myapp) -e trace=mmap,mprotect 2>&1 | grep -E "PROT_WRITE.*PROT_EXEC"
+# (should produce zero matches; non-zero = audit needed)
+```
+
+### What we still can't do from inside the process
+
+Some hardening requires kernel + loader cooperation that Hull
+can't trigger from C:
+
+- **`PROC_PDEATHSIG`** can't be set from inside without being a
+  child of a known parent; Hull is typically PID 1 in a container
+  so this is moot.
+- **`PR_SET_NO_NEW_PRIVS`** Hull could call `prctl(PR_SET_NO_NEW_PRIVS, 1)`
+  at startup; not done today. Low priority because the systemd /
+  Docker layer typically sets it. Worth adding as a one-liner in
+  `hl_serve_wire_caps` between phase 1 and phase 2 sandbox; tracked
+  as a follow-up.
+- **`landlock_*` syscalls (Linux ≥ 5.13)** Future direction for
+  Hull's filesystem capability layer. Currently uses `unveil`
+  (cosmocc polyfill) on Linux; landlock is the kernel-native
+  equivalent and could supplement.
+
+### Documenting the gap
+
+This section is intentionally an operator guide, not a Hull-side
+runtime feature. Adding `arch_prctl(ARCH_SHSTK_ENABLE)` at startup
+would close the gap for distribution binaries that need to work
+without operator config; tracked as a future enhancement (low
+priority because the systemd / container deployment path is the
+recommended one).
+
+---
+
 ## 5. What the Manifest Tells You
 
 The manifest is the app's **declared behavior contract**:

@@ -2252,9 +2252,23 @@ $(ASYNC_OBJ): $(SRCDIR)/hull/async.c | $(BUILDDIR)
 $(COMPRESS_OBJ): $(SRCDIR)/hull/compress.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# miniz (vendored compression library — compiled with relaxed warnings)
+# miniz (vendored compression library: relaxed warnings via -w, but
+# the full probe-based hardening set (stack-protector, FORTIFY,
+# fno-plt, trivial-auto-var-init, zero-call-used-regs, BTI/CET) still
+# applies so ROP gadgets in miniz's text segment are protected the
+# same way first-party Hull TUs are.  Without this, a heap-write
+# primitive that lands in miniz's decompression state inherits a
+# wide gadget surface.  Baseline (stack-protector + PIE) is gated
+# the same way as the main hardening block: skipped under cosmo
+# and HULL_DISABLE_HARDENING=1.  FORTIFY adds an extra release-only
+# gate so DEBUG builds (ASan/MSan) don't fight with FORTIFY's
+# string/mem intercepts.
+MINIZ_HARDEN := $(if $(or $(HULL_DISABLE_HARDENING),$(COSMO)),,-fstack-protector-strong -fPIE)
+MINIZ_FORTIFY := $(if $(or $(HULL_DISABLE_HARDENING),$(COSMO),$(DEBUG)),,-D_FORTIFY_SOURCE=3)
 $(MINIZ_OBJ): $(MINIZ_DIR)/miniz.c | $(BUILDDIR)
-	$(CC) -std=c11 -O2 -I$(MINIZ_DIR) -DMINIZ_NO_ARCHIVE_APIS -DMINIZ_NO_STDIO -w $(DEPFLAGS) -c -o $@ $<
+	$(CC) -std=c11 -O2 -I$(MINIZ_DIR) -DMINIZ_NO_ARCHIVE_APIS -DMINIZ_NO_STDIO \
+	    $(MINIZ_HARDEN) $(MINIZ_FORTIFY) $(HARDEN_CFLAGS) \
+	    -w $(DEPFLAGS) -c -o $@ $<
 
 # Worker DB (runtime-agnostic per-worker SQLite connections)
 $(WORKER_DB_OBJ): $(SRCDIR)/hull/worker_db.c | $(BUILDDIR)
