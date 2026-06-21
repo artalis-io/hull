@@ -213,24 +213,41 @@ typedef struct HlGpuPipelineResult {
 
 /* ── Backend vtable ──────────────────────────────────────────────── */
 
+typedef struct HlGpuCtx HlGpuCtx;
+
+/* Vtable methods take typed handles (HlGpuCtx * for backend-level
+ * ops, HlGpuDevice * for per-device ops) instead of the historical
+ * void *backend_ctx / void *backend_device.  The concrete backend
+ * context lives in ctx->backend_ctx / dev->backend_device; each
+ * method casts it to its own concrete type at the top of the body.
+ * The cast is a normal pointer access inside the body, invisible
+ * to CFI's call-site type check.
+ *
+ * Compared to the historical void * shape, the typed handles give
+ * clang -fsanitize=cfi-icall a matching signature at every call
+ * site so CFI no longer flags the polymorphic vtable dispatch as
+ * a type mismatch.  See docs/security.md § 4c. */
 typedef struct HlGpuBackend {
     const char *name;   /* "wgpu", "dawn", etc. */
 
-    /* Lifecycle */
-    int   (*init)(void **backend_ctx);
-    void  (*destroy)(void *backend_ctx);
+    /* Lifecycle.  `init` is special: writes its concrete backend
+     * context pointer to *out_ctx for the caller to wire into a
+     * HlGpuCtx.  All subsequent methods receive the HlGpuCtx /
+     * HlGpuDevice handle so CFI sees a typed parameter. */
+    int   (*init)(void **out_ctx);
+    void  (*destroy)(HlGpuCtx *ctx);
 
     /* Device enumeration — populates devices[] array */
-    int   (*enumerate_devices)(void *backend_ctx,
+    int   (*enumerate_devices)(HlGpuCtx *ctx,
                                HlGpuDevice *devices, int max_devices);
 
     /* Per-device ops */
-    int   (*compile)(void *backend_device, const char *name,
+    int   (*compile)(HlGpuDevice *dev, const char *name,
                      const char *wgsl, size_t wgsl_len,
                      HlGpuPipeline *out);
-    void  (*pipeline_destroy)(void *backend_device, HlGpuPipeline *pipeline);
+    void  (*pipeline_destroy)(HlGpuDevice *dev, HlGpuPipeline *pipeline);
 
-    int   (*dispatch)(void *backend_device, HlGpuPipeline *pipeline,
+    int   (*dispatch)(HlGpuDevice *dev, HlGpuPipeline *pipeline,
                       const HlGpuDispatchOpts *opts,
                       const HlGpuBuffer *persistent_buffers, int persistent_count,
                       const HlGpuTexture *persistent_textures, int persistent_tex_count,
@@ -238,7 +255,7 @@ typedef struct HlGpuBackend {
                       const char **err_msg);
 
     /* Multi-stage pipeline dispatch (NULL = not supported) */
-    int   (*dispatch_pipeline)(void *backend_device,
+    int   (*dispatch_pipeline)(HlGpuDevice *dev,
                                 HlGpuPipeline **pipelines, int stage_count,
                                 const HlGpuPipelineOpts *opts,
                                 const HlGpuBuffer *persistent_buffers,
@@ -249,32 +266,32 @@ typedef struct HlGpuBackend {
                                 const char **err_msg);
 
     /* GPU-side buffer copy (NULL = not supported) */
-    int   (*buffer_copy)(void *backend_device,
+    int   (*buffer_copy)(HlGpuDevice *dev,
                           HlGpuBuffer *src, HlGpuBuffer *dst,
                           size_t src_offset, size_t dst_offset, size_t size);
 
-    int   (*buffer_create)(void *backend_device, const char *name,
+    int   (*buffer_create)(HlGpuDevice *dev, const char *name,
                            size_t size, int usage, HlGpuBuffer *out);
-    int   (*buffer_write)(void *backend_device, HlGpuBuffer *buf,
+    int   (*buffer_write)(HlGpuDevice *dev, HlGpuBuffer *buf,
                           const void *data, size_t len, size_t offset);
-    int   (*buffer_read)(void *backend_device, HlGpuBuffer *buf,
+    int   (*buffer_read)(HlGpuDevice *dev, HlGpuBuffer *buf,
                          void **data, size_t *len);
-    void  (*buffer_destroy)(void *backend_device, HlGpuBuffer *buf);
+    void  (*buffer_destroy)(HlGpuDevice *dev, HlGpuBuffer *buf);
 
     /* Texture ops */
-    int   (*texture_create)(void *backend_device, uint32_t width, uint32_t height,
+    int   (*texture_create)(HlGpuDevice *dev, uint32_t width, uint32_t height,
                             HlGpuTexFormat format, int storage,
                             int filter, int address_u, int address_v,
                             HlGpuTexture *out);
-    int   (*texture_write)(void *backend_device, HlGpuTexture *tex,
+    int   (*texture_write)(HlGpuDevice *dev, HlGpuTexture *tex,
                            const void *data, size_t len);
-    int   (*texture_read)(void *backend_device, HlGpuTexture *tex,
+    int   (*texture_read)(HlGpuDevice *dev, HlGpuTexture *tex,
                           void **data, size_t *len);
-    void  (*texture_destroy)(void *backend_device, HlGpuTexture *tex);
+    void  (*texture_destroy)(HlGpuDevice *dev, HlGpuTexture *tex);
 } HlGpuBackend;
 
 /* Top-level GPU context */
-typedef struct HlGpuCtx {
+struct HlGpuCtx {
     const HlGpuBackend *backend;
     void               *backend_ctx;
     HlGpuDevice         devices[HL_GPU_MAX_DEVICES];
@@ -282,7 +299,7 @@ typedef struct HlGpuCtx {
     int                  default_device;
     int                  allowed_devices[HL_GPU_MAX_DEVICES]; /* 1 = allowed */
     int                  device_restriction;  /* 1 = allowlist active */
-} HlGpuCtx;
+};
 
 /* ── Public API ────────────────────────────────────────────────────── */
 

@@ -27,15 +27,15 @@
 #include <time.h>
 
 /* Forward declarations for texture functions (defined at bottom, used in dispatch) */
-static int wgpu_texture_create(void *backend_device, uint32_t width,
+static int wgpu_texture_create(HlGpuDevice *dev, uint32_t width,
                                 uint32_t height, HlGpuTexFormat format,
                                 int storage, int filter, int address_u,
                                 int address_v, HlGpuTexture *out);
-static int wgpu_texture_write(void *backend_device, HlGpuTexture *tex,
+static int wgpu_texture_write(HlGpuDevice *dev, HlGpuTexture *tex,
                                const void *data, size_t len);
-static int wgpu_texture_read(void *backend_device, HlGpuTexture *tex,
+static int wgpu_texture_read(HlGpuDevice *dev, HlGpuTexture *tex,
                               void **data, size_t *len);
-static void wgpu_texture_destroy(void *backend_device, HlGpuTexture *tex);
+static void wgpu_texture_destroy(HlGpuDevice *dev, HlGpuTexture *tex);
 
 static uint64_t gpu_now_ms(void)
 {
@@ -271,9 +271,10 @@ static int wgpu_init(void **backend_ctx)
 
 /* ── wgpu_destroy ──────────────────────────────────────────────────── */
 
-static void wgpu_destroy(void *backend_ctx)
+static void wgpu_destroy(HlGpuCtx *ctx)
 {
-    WgpuBackendCtx *bctx = (WgpuBackendCtx *)backend_ctx;
+    if (!ctx) return;
+    WgpuBackendCtx *bctx = (WgpuBackendCtx *)ctx->backend_ctx;
     if (!bctx)
         return;
 
@@ -294,10 +295,10 @@ static void wgpu_destroy(void *backend_ctx)
 
 /* ── wgpu_enumerate_devices ────────────────────────────────────────── */
 
-static int wgpu_enumerate_devices(void *backend_ctx,
+static int wgpu_enumerate_devices(HlGpuCtx *ctx,
                                    HlGpuDevice *devices, int max_devices)
 {
-    WgpuBackendCtx *bctx = (WgpuBackendCtx *)backend_ctx;
+    WgpuBackendCtx *bctx = (WgpuBackendCtx *)ctx->backend_ctx;
     if (!bctx || !bctx->instance)
         return 0;
 
@@ -405,11 +406,11 @@ static int wgpu_enumerate_devices(void *backend_ctx,
 
 /* ── wgpu_compile ──────────────────────────────────────────────────── */
 
-static int wgpu_compile(void *backend_device, const char *name,
+static int wgpu_compile(HlGpuDevice *dev, const char *name,
                          const char *wgsl, size_t wgsl_len,
                          HlGpuPipeline *out)
 {
-    WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)backend_device;
+    WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)dev->backend_device;
     if (!dctx || !dctx->device)
         return HL_GPU_ERR_DEVICE;
 
@@ -464,10 +465,10 @@ static int wgpu_compile(void *backend_device, const char *name,
 
 /* ── wgpu_pipeline_destroy ─────────────────────────────────────────── */
 
-static void wgpu_pipeline_destroy(void *backend_device,
+static void wgpu_pipeline_destroy(HlGpuDevice *dev,
                                     HlGpuPipeline *pipeline)
 {
-    (void)backend_device;
+    (void)dev;
     if (!pipeline)
         return;
 
@@ -484,7 +485,7 @@ static void wgpu_pipeline_destroy(void *backend_device,
 
 /* ── wgpu_dispatch ─────────────────────────────────────────────────── */
 
-static int wgpu_dispatch(void *backend_device, HlGpuPipeline *pipeline,
+static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
                           const HlGpuDispatchOpts *opts,
                           const HlGpuBuffer *persistent_buffers,
                           int persistent_count,
@@ -493,7 +494,7 @@ static int wgpu_dispatch(void *backend_device, HlGpuPipeline *pipeline,
                           void **output, size_t *output_len,
                           const char **err_msg)
 {
-    WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)backend_device;
+    WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)dev->backend_device;
     if (!dctx || !pipeline || !pipeline->handle || !opts) {
         if (err_msg) *err_msg = "invalid_device";
         return HL_GPU_ERR_DEVICE;
@@ -672,7 +673,7 @@ static int wgpu_dispatch(void *backend_device, HlGpuPipeline *pipeline,
                 inline_tex_count < 16) {
                 HlGpuTexture *itex = &inline_textures[inline_tex_count];
                 memset(itex, 0, sizeof(*itex));
-                int trc = wgpu_texture_create(backend_device, td->width,
+                int trc = wgpu_texture_create(dev, td->width,
                     td->height, td->format, td->storage,
                     HL_GPU_FILTER_NEAREST, HL_GPU_ADDRESS_CLAMP,
                     HL_GPU_ADDRESS_CLAMP, itex);
@@ -682,10 +683,10 @@ static int wgpu_dispatch(void *backend_device, HlGpuPipeline *pipeline,
                 }
                 itex->storage = td->storage;
                 if (td->data && td->data_len > 0) {
-                    trc = wgpu_texture_write(backend_device, itex,
+                    trc = wgpu_texture_write(dev, itex,
                                               td->data, td->data_len);
                     if (trc != HL_GPU_OK) {
-                        wgpu_texture_destroy(backend_device, itex);
+                        wgpu_texture_destroy(dev, itex);
                         if (err_msg) *err_msg = "texture_write_failed";
                         goto cleanup;
                     }
@@ -841,7 +842,7 @@ static int wgpu_dispatch(void *backend_device, HlGpuPipeline *pipeline,
             if (err_msg) *err_msg = "output_texture_not_found";
             goto cleanup;
         }
-        rc = wgpu_texture_read(backend_device, (HlGpuTexture *)tex,
+        rc = wgpu_texture_read(dev, (HlGpuTexture *)tex,
                                 output, output_len);
         if (rc != HL_GPU_OK && err_msg)
             *err_msg = "texture_readback_failed";
@@ -865,7 +866,7 @@ cleanup:
         }
     }
     for (int i = 0; i < inline_tex_count; i++)
-        wgpu_texture_destroy(backend_device, &inline_textures[i]);
+        wgpu_texture_destroy(dev, &inline_textures[i]);
     free(temp_bufs);
     free(entries);
     return rc;
@@ -873,10 +874,10 @@ cleanup:
 
 /* ── wgpu_buffer_create ────────────────────────────────────────────── */
 
-static int wgpu_buffer_create(void *backend_device, const char *name,
+static int wgpu_buffer_create(HlGpuDevice *dev, const char *name,
                                size_t size, int usage, HlGpuBuffer *out)
 {
-    WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)backend_device;
+    WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)dev->backend_device;
     if (!dctx || !dctx->device)
         return HL_GPU_ERR_DEVICE;
 
@@ -904,10 +905,10 @@ static int wgpu_buffer_create(void *backend_device, const char *name,
 
 /* ── wgpu_buffer_write ─────────────────────────────────────────────── */
 
-static int wgpu_buffer_write(void *backend_device, HlGpuBuffer *buf,
+static int wgpu_buffer_write(HlGpuDevice *dev, HlGpuBuffer *buf,
                               const void *data, size_t len, size_t offset)
 {
-    WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)backend_device;
+    WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)dev->backend_device;
     if (!dctx || !buf || !buf->handle)
         return HL_GPU_ERR_BUFFER;
 
@@ -918,10 +919,10 @@ static int wgpu_buffer_write(void *backend_device, HlGpuBuffer *buf,
 
 /* ── wgpu_buffer_read ──────────────────────────────────────────────── */
 
-static int wgpu_buffer_read(void *backend_device, HlGpuBuffer *buf,
+static int wgpu_buffer_read(HlGpuDevice *dev, HlGpuBuffer *buf,
                              void **data, size_t *len)
 {
-    WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)backend_device;
+    WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)dev->backend_device;
     if (!dctx || !buf || !buf->handle)
         return HL_GPU_ERR_BUFFER;
 
@@ -931,9 +932,9 @@ static int wgpu_buffer_read(void *backend_device, HlGpuBuffer *buf,
 
 /* ── wgpu_buffer_destroy ───────────────────────────────────────────── */
 
-static void wgpu_buffer_destroy(void *backend_device, HlGpuBuffer *buf)
+static void wgpu_buffer_destroy(HlGpuDevice *dev, HlGpuBuffer *buf)
 {
-    (void)backend_device;
+    (void)dev;
     if (!buf || !buf->handle)
         return;
 
@@ -1003,7 +1004,7 @@ static WGPUBuffer find_or_create_temp(WgpuDeviceCtx *dctx,
     return buf;
 }
 
-static int wgpu_dispatch_pipeline(void *backend_device,
+static int wgpu_dispatch_pipeline(HlGpuDevice *dev,
                                     HlGpuPipeline **pipelines, int stage_count,
                                     const HlGpuPipelineOpts *opts,
                                     const HlGpuBuffer *persistent_buffers,
@@ -1013,7 +1014,7 @@ static int wgpu_dispatch_pipeline(void *backend_device,
                                     HlGpuPipelineResult *result,
                                     const char **err_msg)
 {
-    WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)backend_device;
+    WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)dev->backend_device;
     if (!dctx || !opts || !pipelines) {
         if (err_msg) *err_msg = "invalid_device";
         return HL_GPU_ERR_DEVICE;
@@ -1444,13 +1445,13 @@ static WGPUAddressMode address_to_wgpu(int addr)
 
 /* ── wgpu_texture_create ───────────────────────────────────────────── */
 
-static int wgpu_texture_create(void *backend_device, uint32_t width,
+static int wgpu_texture_create(HlGpuDevice *dev, uint32_t width,
                                 uint32_t height, HlGpuTexFormat format,
                                 int storage, int filter,
                                 int address_u, int address_v,
                                 HlGpuTexture *out)
 {
-    WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)backend_device;
+    WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)dev->backend_device;
     if (!dctx || !dctx->device)
         return HL_GPU_ERR_DEVICE;
 
@@ -1513,10 +1514,10 @@ static int wgpu_texture_create(void *backend_device, uint32_t width,
 
 /* ── wgpu_texture_write ────────────────────────────────────────────── */
 
-static int wgpu_texture_write(void *backend_device, HlGpuTexture *tex,
+static int wgpu_texture_write(HlGpuDevice *dev, HlGpuTexture *tex,
                                const void *data, size_t len)
 {
-    WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)backend_device;
+    WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)dev->backend_device;
     if (!dctx || !tex || !tex->handle || !data)
         return HL_GPU_ERR_BUFFER;
 
@@ -1548,10 +1549,10 @@ static int wgpu_texture_write(void *backend_device, HlGpuTexture *tex,
 
 /* ── wgpu_texture_read ─────────────────────────────────────────────── */
 
-static int wgpu_texture_read(void *backend_device, HlGpuTexture *tex,
+static int wgpu_texture_read(HlGpuDevice *dev, HlGpuTexture *tex,
                               void **data, size_t *len)
 {
-    WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)backend_device;
+    WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)dev->backend_device;
     if (!dctx || !tex || !tex->handle)
         return HL_GPU_ERR_BUFFER;
 
@@ -1669,9 +1670,9 @@ static int wgpu_texture_read(void *backend_device, HlGpuTexture *tex,
 
 /* ── wgpu_texture_destroy ──────────────────────────────────────────── */
 
-static void wgpu_texture_destroy(void *backend_device, HlGpuTexture *tex)
+static void wgpu_texture_destroy(HlGpuDevice *dev, HlGpuTexture *tex)
 {
-    (void)backend_device;
+    (void)dev;
     if (!tex)
         return;
     if (tex->sampler)
@@ -1689,11 +1690,11 @@ static void wgpu_texture_destroy(void *backend_device, HlGpuTexture *tex)
 
 /* ── wgpu_buffer_copy ──────────────────────────────────────────────── */
 
-static int wgpu_buffer_copy(void *backend_device,
+static int wgpu_buffer_copy(HlGpuDevice *dev,
                              HlGpuBuffer *src, HlGpuBuffer *dst,
                              size_t src_offset, size_t dst_offset, size_t size)
 {
-    WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)backend_device;
+    WgpuDeviceCtx *dctx = (WgpuDeviceCtx *)dev->backend_device;
     if (!dctx || !src || !dst || !src->handle || !dst->handle)
         return HL_GPU_ERR_BUFFER;
 

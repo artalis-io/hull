@@ -82,11 +82,11 @@ int hl_cap_gpu_init(HlGpuCtx *ctx, const HlGpuBackend *backend)
 
     /* Enumerate GPU devices */
     ctx->device_count = backend->enumerate_devices(
-        ctx->backend_ctx, ctx->devices, HL_GPU_MAX_DEVICES);
+        ctx, ctx->devices, HL_GPU_MAX_DEVICES);
 
     if (ctx->device_count < 0) {
         log_warn("[hull:gpu] device enumeration failed");
-        backend->destroy(ctx->backend_ctx);
+        backend->destroy(ctx);
         ctx->backend_ctx = NULL;
         ctx->device_count = 0;
         return HL_GPU_ERR_NOT_AVAILABLE;
@@ -115,16 +115,16 @@ void hl_cap_gpu_destroy(HlGpuCtx *ctx)
         HlGpuDevice *dev = &ctx->devices[d];
 
         for (int i = 0; i < dev->pipeline_count; i++)
-            ctx->backend->pipeline_destroy(dev->backend_device,
+            ctx->backend->pipeline_destroy(dev,
                                            &dev->pipelines[i]);
 
         for (int i = 0; i < dev->buffer_count; i++)
-            ctx->backend->buffer_destroy(dev->backend_device,
+            ctx->backend->buffer_destroy(dev,
                                          &dev->buffers[i]);
 
         if (ctx->backend->texture_destroy) {
             for (int i = 0; i < dev->texture_count; i++)
-                ctx->backend->texture_destroy(dev->backend_device,
+                ctx->backend->texture_destroy(dev,
                                                &dev->textures[i]);
         }
 
@@ -133,7 +133,7 @@ void hl_cap_gpu_destroy(HlGpuCtx *ctx)
 
     /* Destroy backend instance */
     if (ctx->backend_ctx)
-        ctx->backend->destroy(ctx->backend_ctx);
+        ctx->backend->destroy(ctx);
 
     memset(ctx, 0, sizeof(*ctx));
 }
@@ -189,7 +189,7 @@ int hl_cap_gpu_compile(HlGpuCtx *ctx, int device, const char *name,
 
     /* Compile via backend */
     HlGpuPipeline *slot = &dev->pipelines[dev->pipeline_count];
-    int rc = ctx->backend->compile(dev->backend_device, name,
+    int rc = ctx->backend->compile(dev, name,
                                    wgsl, wgsl_len, slot);
     if (rc == HL_GPU_OK) {
         snprintf(slot->name, sizeof(slot->name), "%s", name);
@@ -249,7 +249,7 @@ int hl_cap_gpu_dispatch(HlGpuCtx *ctx, const char *shader_name,
     }
 
     /* Dispatch through backend */
-    int rc = ctx->backend->dispatch(dev->backend_device, pipeline, opts,
+    int rc = ctx->backend->dispatch(dev, pipeline, opts,
                                     dev->buffers, dev->buffer_count,
                                     dev->textures, dev->texture_count,
                                     output, output_len, err_msg);
@@ -324,7 +324,7 @@ int hl_cap_gpu_pipeline(HlGpuCtx *ctx, const HlGpuPipelineOpts *opts,
     memset(result, 0, sizeof(*result));
 
     int rc = ctx->backend->dispatch_pipeline(
-        dev->backend_device, pipelines, opts->stage_count, opts,
+        dev, pipelines, opts->stage_count, opts,
         dev->buffers, dev->buffer_count,
         dev->textures, dev->texture_count, result, err_msg);
 
@@ -380,7 +380,7 @@ int hl_cap_gpu_buffer_create(HlGpuCtx *ctx, int device, const char *name,
     }
 
     HlGpuBuffer *slot = &dev->buffers[dev->buffer_count];
-    int rc = ctx->backend->buffer_create(dev->backend_device, name,
+    int rc = ctx->backend->buffer_create(dev, name,
                                          size, usage, slot);
     if (rc == HL_GPU_OK) {
         snprintf(slot->name, sizeof(slot->name), "%s", name);
@@ -418,7 +418,7 @@ int hl_cap_gpu_buffer_write(HlGpuCtx *ctx, int device, const char *name,
         return HL_GPU_ERR_BUFFER;
     }
 
-    int rc = ctx->backend->buffer_write(dev->backend_device, buf,
+    int rc = ctx->backend->buffer_write(dev, buf,
                                         data, len, offset);
     pthread_mutex_unlock(&dev->mutex);
     return rc;
@@ -443,7 +443,7 @@ int hl_cap_gpu_buffer_read(HlGpuCtx *ctx, int device, const char *name,
         return HL_GPU_ERR_NOT_FOUND;
     }
 
-    int rc = ctx->backend->buffer_read(dev->backend_device, buf, data, len);
+    int rc = ctx->backend->buffer_read(dev, buf, data, len);
     pthread_mutex_unlock(&dev->mutex);
     return rc;
 }
@@ -462,7 +462,7 @@ void hl_cap_gpu_buffer_destroy(HlGpuCtx *ctx, int device, const char *name)
 
     for (int i = 0; i < dev->buffer_count; i++) {
         if (strcmp(dev->buffers[i].name, name) == 0) {
-            ctx->backend->buffer_destroy(dev->backend_device,
+            ctx->backend->buffer_destroy(dev,
                                          &dev->buffers[i]);
             /* Compact: move last element into gap */
             if (i < dev->buffer_count - 1)
@@ -510,7 +510,7 @@ int hl_cap_gpu_texture_create(HlGpuCtx *ctx, int device, const char *name,
     }
 
     HlGpuTexture *slot = &dev->textures[dev->texture_count];
-    int rc = ctx->backend->texture_create(dev->backend_device, width, height,
+    int rc = ctx->backend->texture_create(dev, width, height,
                                            format, storage, filter,
                                            address_u, address_v, slot);
     if (rc == HL_GPU_OK) {
@@ -543,7 +543,7 @@ int hl_cap_gpu_texture_write(HlGpuCtx *ctx, int device, const char *name,
         return HL_GPU_ERR_NOT_FOUND;
     }
 
-    int rc = ctx->backend->texture_write(dev->backend_device, tex, data, len);
+    int rc = ctx->backend->texture_write(dev, tex, data, len);
     pthread_mutex_unlock(&dev->mutex);
     return rc;
 }
@@ -571,7 +571,7 @@ int hl_cap_gpu_texture_read(HlGpuCtx *ctx, int device, const char *name,
         return HL_GPU_ERR_NOT_FOUND;
     }
 
-    int rc = ctx->backend->texture_read(dev->backend_device, tex, data, len);
+    int rc = ctx->backend->texture_read(dev, tex, data, len);
     if (rc == HL_GPU_OK) {
         if (out_width)  *out_width  = tex->width;
         if (out_height) *out_height = tex->height;
@@ -598,7 +598,7 @@ void hl_cap_gpu_texture_destroy(HlGpuCtx *ctx, int device, const char *name)
 
     for (int i = 0; i < dev->texture_count; i++) {
         if (strcmp(dev->textures[i].name, name) == 0) {
-            ctx->backend->texture_destroy(dev->backend_device,
+            ctx->backend->texture_destroy(dev,
                                            &dev->textures[i]);
             /* Compact: move last element into gap */
             if (i < dev->texture_count - 1)
@@ -661,7 +661,7 @@ int hl_cap_gpu_buffer_copy(HlGpuCtx *ctx, int device,
         return HL_GPU_ERR_INTERNAL;
     }
 
-    int rc = ctx->backend->buffer_copy(dev->backend_device,
+    int rc = ctx->backend->buffer_copy(dev,
                                         src, dst,
                                         src_offset, dst_offset, copy_size);
     pthread_mutex_unlock(&dev->mutex);
