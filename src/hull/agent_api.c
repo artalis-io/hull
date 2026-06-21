@@ -21,7 +21,7 @@
 static int agent_api_middleware(KlRequest *req, KlResponse *res, void *user_data)
 {
     HlAgentApiCtx *ctx = (HlAgentApiCtx *)user_data;
-    const char *path = req->path;
+    const char *path = kl_request_path(req);
 
     /* Strip /_hull/agent/ prefix */
     static const char prefix[] = "/_hull/agent/";

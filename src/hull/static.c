@@ -146,17 +146,21 @@ int hl_static_middleware(KlRequest *req, KlResponse *res, void *user_data)
      * GET-registered middleware (per RFC 7230 §4.3.2); Keel itself
      * drops the response body on HEAD so we can respond identically
      * to a GET without special-casing here. */
-    int is_get  = req->method_len == 3 && memcmp(req->method, "GET",  3) == 0;
-    int is_head = req->method_len == 4 && memcmp(req->method, "HEAD", 4) == 0;
+    const char *m = kl_request_method(req);
+    size_t      mlen = kl_request_method_len(req);
+    int is_get  = mlen == 3 && memcmp(m, "GET",  3) == 0;
+    int is_head = mlen == 4 && memcmp(m, "HEAD", 4) == 0;
     if (!is_get && !is_head)
         return 0;
 
     /* Must start with /static/ (8 chars minimum + at least 1 char filename) */
-    if (req->path_len < 9 || memcmp(req->path, "/static/", 8) != 0)
+    const char *path = kl_request_path(req);
+    size_t      plen = kl_request_path_len(req);
+    if (plen < 9 || memcmp(path, "/static/", 8) != 0)
         return 0;
 
-    const char *rel = req->path + 8;
-    size_t rel_len = req->path_len - 8;
+    const char *rel = path + 8;
+    size_t rel_len = plen - 8;
 
     /* Reject unsafe paths */
     if (!path_is_safe(rel, rel_len))

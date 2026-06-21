@@ -91,7 +91,16 @@ if [ ! -f "$KEEL_LIB" ]; then
     make -C "$KEEL_DIR" >/dev/null 2>&1
 fi
 
-cc -std=c11 -Wall -Wextra -O2 \
+# The fixture links Hull's libkeel.a, which is built with the per-request
+# sealed snapshot ON by default (-DKEEL_SEAL_REQUEST=1, see top-level
+# Makefile).  That define changes struct KlRequest's layout, so the
+# fixture MUST be compiled with the same define or its field offsets
+# diverge from the linked library -> segfault on first request.  Stay in
+# lockstep with the Makefile knob: KEEL_DISABLE_SEAL_REQUEST=1 drops it.
+SEAL_DEF="-DKEEL_SEAL_REQUEST=1"
+[ -n "${KEEL_DISABLE_SEAL_REQUEST:-}" ] && SEAL_DEF=""
+
+cc -std=c11 -Wall -Wextra -O2 $SEAL_DEF \
     -I"$KEEL_DIR/include" \
     -I"$KEEL_DIR/vendor/sh_seal_arena" \
     -o "$ECHO_BIN" \

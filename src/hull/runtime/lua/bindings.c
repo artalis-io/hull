@@ -92,27 +92,34 @@ void hl_lua_make_request(lua_State *L, KlRequest *req)
 {
     lua_newtable(L);
 
-    /* method (Keel stores as string) */
-    if (req->method)
-        lua_pushlstring(L, req->method, req->method_len);
+    /* method (Keel stores as string).  All reads via kl_request_*
+     * accessors so they route through req->sealed (mprotect-RO) when
+     * KEEL_SEAL_REQUEST=1 is in the Keel build, or fall back to direct
+     * fields otherwise.  See vendor/keel/include/keel/request.h. */
+    const char *m = kl_request_method(req);
+    if (m)
+        lua_pushlstring(L, m, kl_request_method_len(req));
     else
         lua_pushstring(L, "GET");
     lua_setfield(L, -2, "method");
 
     /* path */
-    if (req->path)
-        lua_pushlstring(L, req->path, req->path_len);
+    const char *p = kl_request_path(req);
+    if (p)
+        lua_pushlstring(L, p, kl_request_path_len(req));
     else
         lua_pushstring(L, "/");
     lua_setfield(L, -2, "path");
 
     /* query string → table */
     lua_newtable(L);
-    if (req->query && req->query_len > 0) {
+    const char *q = kl_request_query(req);
+    size_t q_len = kl_request_query_len(req);
+    if (q && q_len > 0) {
         char qbuf[HL_QUERY_BUF_SIZE];
-        size_t qlen = req->query_len < sizeof(qbuf) - 1
-                      ? req->query_len : sizeof(qbuf) - 1;
-        memcpy(qbuf, req->query, qlen);
+        size_t qlen = q_len < sizeof(qbuf) - 1
+                      ? q_len : sizeof(qbuf) - 1;
+        memcpy(qbuf, q, qlen);
         qbuf[qlen] = '\0';
 
         char *saveptr = NULL;
@@ -146,13 +153,15 @@ void hl_lua_make_request(lua_State *L, KlRequest *req)
 
     /* params — route params from Keel (e.g. :id → params.id) */
     lua_newtable(L);
-    for (int i = 0; i < req->num_params; i++) {
+    int n_params = kl_request_num_params(req);
+    for (int i = 0; i < n_params; i++) {
+        KlParam param = kl_request_param_at(req, i);
         char name[HL_PARAM_NAME_MAX];
-        size_t nlen = req->params[i].name_len < HL_PARAM_NAME_MAX - 1
-                      ? req->params[i].name_len : HL_PARAM_NAME_MAX - 1;
-        memcpy(name, req->params[i].name, nlen);
+        size_t nlen = param.name_len < HL_PARAM_NAME_MAX - 1
+                      ? param.name_len : HL_PARAM_NAME_MAX - 1;
+        memcpy(name, param.name, nlen);
         name[nlen] = '\0';
-        lua_pushlstring(L, req->params[i].value, req->params[i].value_len);
+        lua_pushlstring(L, param.value, param.value_len);
         lua_setfield(L, -2, name);
     }
     lua_setfield(L, -2, "params");
@@ -160,18 +169,19 @@ void hl_lua_make_request(lua_State *L, KlRequest *req)
     /* headers → table (names lowercased for case-insensitive lookup) */
     lua_newtable(L);
     lua_checkstack(L, 3); /* key + value + table */
-    for (int i = 0; i < req->num_headers; i++) {
-        if (req->headers[i].name && req->headers[i].value) {
+    int n_headers = kl_request_num_headers(req);
+    for (int i = 0; i < n_headers; i++) {
+        KlHeader hdr = kl_request_header_at(req, i);
+        if (hdr.name && hdr.value) {
             char hdr_name[256];
-            size_t nlen = req->headers[i].name_len;
+            size_t nlen = hdr.name_len;
             if (nlen >= sizeof(hdr_name)) continue; /* skip oversized */
             for (size_t j = 0; j < nlen; j++) {
-                unsigned char c = (unsigned char)req->headers[i].name[j];
+                unsigned char c = (unsigned char)hdr.name[j];
                 hdr_name[j] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : (char)c;
             }
             lua_pushlstring(L, hdr_name, nlen);
-            lua_pushlstring(L, req->headers[i].value,
-                            req->headers[i].value_len);
+            lua_pushlstring(L, hdr.value, hdr.value_len);
             lua_settable(L, -3);
         }
     }

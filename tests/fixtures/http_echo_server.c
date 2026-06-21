@@ -39,22 +39,24 @@ static void echo_handler(KlRequest *req, KlResponse *res, void *ctx)
 
     off += snprintf(json + off, sizeof(json) - (size_t)off,
                     "{\"method\":\"%.*s\",\"path\":\"%.*s\"",
-                    (int)req->method_len, req->method,
-                    (int)req->path_len, req->path);
+                    (int)kl_request_method_len(req), kl_request_method(req),
+                    (int)kl_request_path_len(req), kl_request_path(req));
 
     /* Echo selected headers as "headers" object */
     off += snprintf(json + off, sizeof(json) - (size_t)off, ",\"headers\":{");
     int first = 1;
-    for (int i = 0; i < req->num_headers; i++) {
+    int n_headers = kl_request_num_headers(req);
+    for (int i = 0; i < n_headers; i++) {
+        KlHeader hdr = kl_request_header_at(req, i);
         /* Skip internal headers (Host, Connection, Content-Length) for cleaner output */
-        if (req->headers[i].name_len == 4 &&
-            strncasecmp(req->headers[i].name, "Host", 4) == 0)
+        if (hdr.name_len == 4 &&
+            strncasecmp(hdr.name, "Host", 4) == 0)
             continue;
-        if (req->headers[i].name_len == 10 &&
-            strncasecmp(req->headers[i].name, "Connection", 10) == 0)
+        if (hdr.name_len == 10 &&
+            strncasecmp(hdr.name, "Connection", 10) == 0)
             continue;
-        if (req->headers[i].name_len == 14 &&
-            strncasecmp(req->headers[i].name, "Content-Length", 14) == 0)
+        if (hdr.name_len == 14 &&
+            strncasecmp(hdr.name, "Content-Length", 14) == 0)
             continue;
 
         if (!first)
@@ -63,8 +65,8 @@ static void echo_handler(KlRequest *req, KlResponse *res, void *ctx)
 
         off += snprintf(json + off, sizeof(json) - (size_t)off,
                         "\"%.*s\":\"%.*s\"",
-                        (int)req->headers[i].name_len, req->headers[i].name,
-                        (int)req->headers[i].value_len, req->headers[i].value);
+                        (int)hdr.name_len, hdr.name,
+                        (int)hdr.value_len, hdr.value);
     }
     off += snprintf(json + off, sizeof(json) - (size_t)off, "}");
 

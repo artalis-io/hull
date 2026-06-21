@@ -111,28 +111,35 @@ JSValue hl_js_make_request(JSContext *ctx, KlRequest *req)
 {
     JSValue obj = JS_NewObject(ctx);
 
-    /* method (Keel stores as string) */
-    if (req->method)
+    /* method (Keel stores as string).  All reads via kl_request_*
+     * accessors so they route through req->sealed (mprotect-RO) when
+     * KEEL_SEAL_REQUEST=1 is in the Keel build, or fall back to direct
+     * fields otherwise.  See vendor/keel/include/keel/request.h. */
+    const char *m = kl_request_method(req);
+    if (m)
         JS_SetPropertyStr(ctx, obj, "method",
-                          JS_NewStringLen(ctx, req->method, req->method_len));
+                          JS_NewStringLen(ctx, m, kl_request_method_len(req)));
     else
         JS_SetPropertyStr(ctx, obj, "method", JS_NewString(ctx, "GET"));
 
     /* path */
-    if (req->path)
+    const char *p = kl_request_path(req);
+    if (p)
         JS_SetPropertyStr(ctx, obj, "path",
-                          JS_NewStringLen(ctx, req->path, req->path_len));
+                          JS_NewStringLen(ctx, p, kl_request_path_len(req)));
     else
         JS_SetPropertyStr(ctx, obj, "path", JS_NewString(ctx, "/"));
 
     /* query string → object */
     JSValue query_obj = JS_NewObject(ctx);
-    if (req->query && req->query_len > 0) {
+    const char *q = kl_request_query(req);
+    size_t q_len = kl_request_query_len(req);
+    if (q && q_len > 0) {
         /* Parse query string: key=val&key2=val2 */
         char qbuf[HL_QUERY_BUF_SIZE];
-        size_t qlen = req->query_len < sizeof(qbuf) - 1
-                      ? req->query_len : sizeof(qbuf) - 1;
-        memcpy(qbuf, req->query, qlen);
+        size_t qlen = q_len < sizeof(qbuf) - 1
+                      ? q_len : sizeof(qbuf) - 1;
+        memcpy(qbuf, q, qlen);
         qbuf[qlen] = '\0';
 
         char *saveptr = NULL;
@@ -166,33 +173,35 @@ JSValue hl_js_make_request(JSContext *ctx, KlRequest *req)
 
     /* params — route params from Keel (e.g. :id → params.id) */
     JSValue params_obj = JS_NewObject(ctx);
-    for (int i = 0; i < req->num_params; i++) {
+    int n_params = kl_request_num_params(req);
+    for (int i = 0; i < n_params; i++) {
+        KlParam param = kl_request_param_at(req, i);
         char name[HL_PARAM_NAME_MAX];
-        size_t nlen = req->params[i].name_len < HL_PARAM_NAME_MAX - 1
-                      ? req->params[i].name_len : HL_PARAM_NAME_MAX - 1;
-        memcpy(name, req->params[i].name, nlen);
+        size_t nlen = param.name_len < HL_PARAM_NAME_MAX - 1
+                      ? param.name_len : HL_PARAM_NAME_MAX - 1;
+        memcpy(name, param.name, nlen);
         name[nlen] = '\0';
         JS_SetPropertyStr(ctx, params_obj, name,
-            JS_NewStringLen(ctx, req->params[i].value,
-                            req->params[i].value_len));
+            JS_NewStringLen(ctx, param.value, param.value_len));
     }
     JS_SetPropertyStr(ctx, obj, "params", params_obj);
 
     /* headers → object (names lowercased for case-insensitive lookup) */
     JSValue headers_obj = JS_NewObject(ctx);
-    for (int i = 0; i < req->num_headers; i++) {
-        if (req->headers[i].name && req->headers[i].value) {
+    int n_headers = kl_request_num_headers(req);
+    for (int i = 0; i < n_headers; i++) {
+        KlHeader hdr = kl_request_header_at(req, i);
+        if (hdr.name && hdr.value) {
             char name_buf[256];
-            size_t nlen = req->headers[i].name_len;
+            size_t nlen = hdr.name_len;
             if (nlen >= sizeof(name_buf)) continue; /* skip oversized names */
             for (size_t j = 0; j < nlen; j++) {
-                unsigned char c = (unsigned char)req->headers[i].name[j];
+                unsigned char c = (unsigned char)hdr.name[j];
                 name_buf[j] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : (char)c;
             }
             name_buf[nlen] = '\0';
             JS_SetPropertyStr(ctx, headers_obj, name_buf,
-                              JS_NewStringLen(ctx, req->headers[i].value,
-                                              req->headers[i].value_len));
+                              JS_NewStringLen(ctx, hdr.value, hdr.value_len));
         }
     }
     JS_SetPropertyStr(ctx, obj, "headers", headers_obj);
