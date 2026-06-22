@@ -112,7 +112,7 @@ UTEST(hl_arena, memdup_copies_bytes)
     const unsigned char src[4] = { 0xDE, 0xAD, 0xBE, 0xEF };
     unsigned char *copy = hl_arena_memdup(a, src, sizeof(src));
     ASSERT_TRUE(copy != NULL);
-    ASSERT_TRUE((void *)copy != (void *)src);
+    ASSERT_TRUE((const void *)copy != (const void *)src);
     ASSERT_EQ(0, memcmp(copy, src, sizeof(src)));
     /* n == 0 returns a non-crashing result (NULL or empty alloc). */
     (void)hl_arena_memdup(a, src, 0);

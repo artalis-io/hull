@@ -28,6 +28,7 @@
 #include "hull/alloc.h"
 #include "hull/reqctx.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -90,7 +91,7 @@ int hl_cap_test_dispatch(KlRouter *router, const char *method,
     KlBufReader fake_buf;
     memset(&fake_buf, 0, sizeof(fake_buf));
     if (body_data && body_len > 0) {
-        fake_buf.data = (char *)body_data;
+        fake_buf.data = (char *)(uintptr_t)body_data;  /* KlBody.data is char* but not modified here */
         fake_buf.len = body_len;
         fake_buf.cap = body_len;
         req.body_reader = &fake_buf.base;

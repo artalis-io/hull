@@ -210,7 +210,7 @@ static JSValue js_test_http(JSContext *ctx, const char *method,
             JS_FreeValue(ctx, json_str);
         }
 
-        hl_alloc_free(state->js->base.alloc, (void *)result.body,
+        hl_alloc_free_const(state->js->base.alloc, result.body,
                       result.body_len + 1);
     }
 
@@ -241,7 +241,7 @@ static JSValue js_test_http(JSContext *ctx, const char *method,
             while (p < end && (*p == '\r' || *p == '\n')) p++;
         }
         JS_SetPropertyStr(ctx, obj, "headers", hdrs);
-        hl_alloc_free(state->js->base.alloc, (void *)result.hdr_buf,
+        hl_alloc_free_const(state->js->base.alloc, result.hdr_buf,
                       result.hdr_len + 1);
     }
 

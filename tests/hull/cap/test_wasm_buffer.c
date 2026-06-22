@@ -85,7 +85,7 @@ UTEST(hl_wasm_buffer, materialize)
     ASSERT_EQ(memcmp(copy, data, len), 0);
 
     /* Copy should be independent of buffer */
-    ASSERT_NE(copy, (void *)hl_wasm_buffer_data(buf));
+    ASSERT_NE((const void *)copy, (const void *)hl_wasm_buffer_data(buf));
 
     free(copy);
     hl_wasm_buffer_destroy(buf);

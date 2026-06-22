@@ -86,8 +86,8 @@ static int js_object_to_kv(JSContext *ctx, JSValueConst obj,
             const char *sv = JS_ToCStringLen(ctx, &slen, val);
             kvs[count].value.type = HL_TYPE_TEXT;
             if (sv) {
-                kvs[count].value.s = malloc(slen + 1);
-                if (!kvs[count].value.s) {
+                char *buf = malloc(slen + 1);
+                if (!buf) {
                     /* OOM on string dup: mark NIL, bump count so op_free
                      * releases the already-strdup'd key. */
                     kvs[count].value.type = HL_TYPE_NIL;
@@ -100,8 +100,9 @@ static int js_object_to_kv(JSContext *ctx, JSValueConst obj,
                     hl_kv_free(kvs, count);
                     return -1;
                 }
-                memcpy((void *)kvs[count].value.s, sv, slen);
-                ((char *)kvs[count].value.s)[slen] = '\0';
+                memcpy(buf, sv, slen);
+                buf[slen] = '\0';
+                kvs[count].value.s = buf;
                 kvs[count].value.len = slen;
                 JS_FreeCString(ctx, sv);
             }

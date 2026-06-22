@@ -33,7 +33,7 @@ void hl_stmt_cache_destroy(HlStmtCache *cache)
 {
     for (int i = 0; i < cache->count; i++) {
         sqlite3_finalize(cache->entries[i].stmt);
-        hl_alloc_free(cache->alloc, (void *)cache->entries[i].sql,
+        hl_alloc_free_const(cache->alloc, cache->entries[i].sql,
                       cache->entries[i].sql_len + 1);
     }
     cache->count = 0;
@@ -68,7 +68,7 @@ static sqlite3_stmt *cache_get(HlStmtCache *cache, const char *sql)
     /* Evict oldest (LRU) if cache is full */
     if (cache->count >= HL_STMT_CACHE_SIZE) {
         sqlite3_finalize(cache->entries[0].stmt);
-        hl_alloc_free(cache->alloc, (void *)cache->entries[0].sql,
+        hl_alloc_free_const(cache->alloc, cache->entries[0].sql,
                       cache->entries[0].sql_len + 1);
         for (int j = 0; j < cache->count - 1; j++)
             cache->entries[j] = cache->entries[j + 1];

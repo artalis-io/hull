@@ -78,17 +78,19 @@ static int lua_table_to_kv(lua_State *L, int idx, HlKV **out_kvs, int *out_count
             size_t slen;
             const char *sv = lua_tolstring(L, -1, &slen);
             kvs[i].value.type = HL_TYPE_TEXT;
-            kvs[i].value.s = malloc(slen + 1);
-            if (!kvs[i].value.s) {
+            char *buf = malloc(slen + 1);
+            if (!buf) {
                 /* OOM on string dup: include this kv (with key + nil value
                  * slot) in the free count so the key is also released. */
+                kvs[i].value.s = NULL;
                 kvs[i].value.type = HL_TYPE_NIL;
                 lua_pop(L, 2);
                 hl_kv_free(kvs, i + 1);
                 return -1;
             }
-            memcpy((void *)kvs[i].value.s, sv, slen);
-            ((char *)kvs[i].value.s)[slen] = '\0';
+            memcpy(buf, sv, slen);
+            buf[slen] = '\0';
+            kvs[i].value.s = buf;
             kvs[i].value.len = slen;
             break;
         }

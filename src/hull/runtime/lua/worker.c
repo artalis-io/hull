@@ -230,17 +230,19 @@ static int capture_result(lua_State *L, HlLuaWorkerDispatchOp *op)
                 size_t slen;
                 const char *sv = lua_tolstring(L, -1, &slen);
                 op->result_kvs[idx].value.type = HL_TYPE_TEXT;
-                op->result_kvs[idx].value.s = malloc(slen + 1);
-                if (!op->result_kvs[idx].value.s) {
+                char *buf = malloc(slen + 1);
+                if (!buf) {
                     /* OOM on string dup: mark slot NIL but bump count so
                      * the key allocation is released by op_free. */
+                    op->result_kvs[idx].value.s = NULL;
                     op->result_kvs[idx].value.type = HL_TYPE_NIL;
                     op->result_count++;
                     lua_pop(L, 2);
                     return -1;
                 }
-                memcpy((void *)op->result_kvs[idx].value.s, sv, slen);
-                ((char *)op->result_kvs[idx].value.s)[slen] = '\0';
+                memcpy(buf, sv, slen);
+                buf[slen] = '\0';
+                op->result_kvs[idx].value.s = buf;
                 op->result_kvs[idx].value.len = slen;
                 break;
             }

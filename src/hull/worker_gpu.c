@@ -12,6 +12,7 @@
 #ifdef HL_ENABLE_GPU
 
 #include "hull/worker_gpu.h"
+#include "hull/alloc.h"
 #include "hull/async.h"
 #include "hull/async_backend.h"
 #include "hull/thread_affinity.h"
@@ -142,7 +143,7 @@ void hl_worker_gpu_op_free(HlWorkerGpuOp *op)
     }
     if (op->buffers) {
         for (int i = 0; i < op->buffer_count; i++)
-            free((void *)op->buffers[i].name);
+            hl_free_const(op->buffers[i].name);
     }
     free(op->buffers);
     op->buffers = NULL;
@@ -159,7 +160,7 @@ void hl_worker_gpu_op_free(HlWorkerGpuOp *op)
     }
     if (op->stages) {
         for (int s = 0; s < op->stage_count; s++)
-            free((void *)op->stages[s].shader);
+            hl_free_const(op->stages[s].shader);
         free(op->stages);
         op->stages = NULL;
     }

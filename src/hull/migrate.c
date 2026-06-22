@@ -11,6 +11,7 @@
 #ifdef HL_ENABLE_DB
 
 #include "hull/migrate.h"
+#include "hull/alloc.h"
 #include "hull/vfs.h"
 #include "hull/cap/db_backend.h"
 
@@ -151,7 +152,7 @@ static int execute_migration(sqlite3 *db, const char *name,
 
 static int cmp_strings(const void *a, const void *b)
 {
-    return strcmp(*(const char **)a, *(const char **)b);
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
 /* ── Discover filesystem migrations ───────────────────────────────── */
@@ -487,8 +488,8 @@ void hl_migrate_status_free(HlMigrationStatus *entries, int count)
     if (!entries)
         return;
     for (int i = 0; i < count; i++) {
-        free((void *)entries[i].name);
-        free((void *)entries[i].applied_at);
+        hl_free_const(entries[i].name);
+        hl_free_const(entries[i].applied_at);
     }
     free(entries);
 }

@@ -842,7 +842,9 @@ static int wgpu_dispatch(HlGpuDevice *dev, HlGpuPipeline *pipeline,
             if (err_msg) *err_msg = "output_texture_not_found";
             goto cleanup;
         }
-        rc = wgpu_texture_read(dev, (HlGpuTexture *)tex,
+        /* readback reads the texture, never mutates it; the backend vtable
+         * slot is non-const so launder through uintptr_t to keep it. */
+        rc = wgpu_texture_read(dev, (HlGpuTexture *)(uintptr_t)tex,
                                 output, output_len);
         if (rc != HL_GPU_OK && err_msg)
             *err_msg = "texture_readback_failed";

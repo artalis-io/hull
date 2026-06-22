@@ -210,7 +210,8 @@ UTEST(manifest_seal, write_to_sealed_string_faults)
          * also run leak detection on the still-live src manifest). */
         signal(SIGSEGV, SIG_DFL);
         signal(SIGBUS,  SIG_DFL);
-        char *target = (char *)dst.fs_write[0];
+        /* Deliberate write to a sealed (RO) string to prove it faults. */
+        char *target = (char *)(uintptr_t)dst.fs_write[0];
         target[0] = '/';
         _exit(0);
     }

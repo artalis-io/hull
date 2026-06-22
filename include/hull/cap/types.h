@@ -58,7 +58,7 @@ static inline void hl_kv_free(HlKV *kvs, int count)
         free(kvs[i].key);
         if ((kvs[i].value.type == HL_TYPE_TEXT ||
              kvs[i].value.type == HL_TYPE_BLOB) && kvs[i].value.s)
-            free((void *)kvs[i].value.s);
+            free((void *)(uintptr_t)kvs[i].value.s);  /* value.s is const-typed for the read API but owned here */
     }
     free(kvs);
 }

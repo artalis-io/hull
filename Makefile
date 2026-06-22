@@ -55,6 +55,14 @@ CFLAGS  := -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2
 # TU that includes them, and we can't edit the vendor source. Unused
 # parameters in Hull code itself should be silenced with `(void)x;`.
 CFLAGS  += -Werror=unused-function -Werror=unused-variable
+# Casts that drop `const` (or `volatile`) are a hard error in Hull code:
+# they're the primitive that would launder a sealed / .rodata table back
+# into something writable. Legitimate const-drops (freeing owned-but-
+# const-typed memory, POSIX execvp's argv, in-place scratch) go through
+# hl_free_const / hl_alloc_free_const or a documented `(T)(uintptr_t)x`.
+# Vendored TUs compile with their own relaxed *_CFLAGS, so this is
+# Hull-source-only.
+CFLAGS  += -Werror=cast-qual
 LDFLAGS :=
 
 # Header-dependency tracking. -MMD writes a sibling .d file listing every

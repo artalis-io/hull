@@ -16,6 +16,7 @@
 #include "hull/cap/audit.h"
 #include "hull/build_assets.h"
 #include "hull/compiler.h"
+#include "hull/alloc.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -86,8 +87,8 @@ void hl_tool_unveil_free(HlToolUnveilCtx *ctx)
 {
     if (!ctx) return;
     for (int i = 0; i < ctx->count; i++) {
-        free((void *)ctx->entries[i].path);
-        free((void *)ctx->entries[i].perms);
+        hl_free_const(ctx->entries[i].path);
+        hl_free_const(ctx->entries[i].perms);
     }
     memset(ctx, 0, sizeof(*ctx));
 }
@@ -213,7 +214,7 @@ int hl_tool_spawn(const char *const argv[])
 
     if (pid == 0) {
         /* Child: exec */
-        execvp(argv[0], (char *const *)argv);
+        execvp(argv[0], (char *const *)(uintptr_t)argv);  /* POSIX execvp takes char*const[] but does not modify argv */
         _exit(127);
     }
 
@@ -267,7 +268,7 @@ char *hl_tool_spawn_read(const char *const argv[], size_t *out_len)
         close(pipefd[0]);
         dup2(pipefd[1], STDOUT_FILENO);
         close(pipefd[1]);
-        execvp(argv[0], (char *const *)argv);
+        execvp(argv[0], (char *const *)(uintptr_t)argv);  /* POSIX execvp takes char*const[] but does not modify argv */
         _exit(127);
     }
 
@@ -381,7 +382,7 @@ static int find_files_recurse(const char *dir, const char *pattern,
 /* String comparison for qsort */
 static int str_compare(const void *a, const void *b)
 {
-    return strcmp(*(const char **)a, *(const char **)b);
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
 char **hl_tool_find_files_ex(const char *dir, const char *pattern,

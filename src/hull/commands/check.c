@@ -14,6 +14,7 @@
 #include "hull/commands/verify.h"
 #include "hull/commands/modules.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -25,7 +26,7 @@ int hl_cmd_check(int argc, char **argv, const HlCommandEnv *env)
     fprintf(stderr, "[hull:check] validating manifest...\n");
     {
         const char *list_argv[3] = { "check", "list", env->app_dir };
-        int rc = hl_cmd_modules(3, (char **)list_argv, env);
+        int rc = hl_cmd_modules(3, (char **)(uintptr_t)list_argv, env);  /* hl_cmd_modules does not modify argv */
         if (rc != 0) {
             fprintf(stderr, "[hull:check] manifest validation failed\n");
             return rc;
@@ -40,7 +41,7 @@ int hl_cmd_check(int argc, char **argv, const HlCommandEnv *env)
     fprintf(stderr, "[hull:check] analyzing imports...\n");
     {
         const char *analyze_argv[3] = { "check", "analyze", env->app_dir };
-        int rc = hl_cmd_modules(3, (char **)analyze_argv, env);
+        int rc = hl_cmd_modules(3, (char **)(uintptr_t)analyze_argv, env);  /* hl_cmd_modules does not modify argv */
         if (rc != 0) {
             fprintf(stderr, "[hull:check] import analysis failed\n");
             return rc;

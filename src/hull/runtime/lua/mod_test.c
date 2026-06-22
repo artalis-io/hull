@@ -181,7 +181,7 @@ static int l_test_http(lua_State *L, const char *method)
             }
         }
 
-        hl_alloc_free(lua->base.alloc, (void *)result.body,
+        hl_alloc_free_const(lua->base.alloc, result.body,
                       result.body_len + 1);
     }
 
@@ -216,7 +216,7 @@ static int l_test_http(lua_State *L, const char *method)
             while (p < end && (*p == '\r' || *p == '\n')) p++;
         }
         lua_setfield(L, -2, "headers");
-        hl_alloc_free(lua->base.alloc, (void *)result.hdr_buf,
+        hl_alloc_free_const(lua->base.alloc, result.hdr_buf,
                       result.hdr_len + 1);
     }
 

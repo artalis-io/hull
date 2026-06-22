@@ -317,13 +317,13 @@ static JSValue js_image_from_wasm(JSContext *ctx, JSValueConst this_val,
     if (argc < 1) return JS_ThrowTypeError(ctx, "image.fromWasm: data required");
 
     size_t len;
-    uint8_t *data = JS_GetArrayBuffer(ctx, &len, argv[0]);
+    const uint8_t *data = JS_GetArrayBuffer(ctx, &len, argv[0]);
     const char *str_data = NULL;
     if (!data) {
         /* Try string */
         str_data = JS_ToCStringLen(ctx, &len, argv[0]);
         if (!str_data) return JS_ThrowTypeError(ctx, "image.fromWasm: ArrayBuffer or string required");
-        data = (uint8_t *)str_data;
+        data = (const uint8_t *)str_data;
     }
 
     if (len < 9) {

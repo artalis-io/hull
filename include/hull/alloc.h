@@ -16,6 +16,8 @@
 #define HL_ALLOC_H
 
 #include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
 #include <keel/allocator.h>
 
 /* Forward declarations */
@@ -42,6 +44,23 @@ void *hl_alloc_calloc(HlAllocator *a, size_t count, size_t size);
 void *hl_alloc_realloc(HlAllocator *a, void *ptr,
                        size_t old_size, size_t new_size);
 void  hl_alloc_free(HlAllocator *a, void *ptr, size_t size);
+
+/* Free memory the caller OWNS but holds through a const-qualified pointer.
+ * Some structs type owned strings as `const char *` for a read-only API
+ * (e.g. HlValue.value.s, which is a borrowed query column in one context
+ * and a deep-copied owned string in another). When this code owns the
+ * bytes, freeing them is correct; the cast to mutable goes through
+ * uintptr_t so -Wcast-qual stays clean. The const here is a typing
+ * artifact, not an immutability guarantee — never use these on a pointer
+ * into sealed / .rodata memory. */
+static inline void hl_free_const(const void *p)
+{
+    free((void *)(uintptr_t)p);
+}
+static inline void hl_alloc_free_const(HlAllocator *a, const void *p, size_t size)
+{
+    hl_alloc_free(a, (void *)(uintptr_t)p, size);
+}
 
 /* Return a KlAllocator vtable routing through this tracker. */
 KlAllocator hl_alloc_kl(HlAllocator *a);

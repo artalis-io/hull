@@ -411,7 +411,7 @@ void hl_lua_free(HlLua *lua)
         lua->L = NULL;
     }
     if (lua->app_dir) {
-        hl_alloc_free(lua->base.alloc, (void *)lua->app_dir, lua->app_dir_size);
+        hl_alloc_free_const(lua->base.alloc, lua->app_dir, lua->app_dir_size);
         lua->app_dir = NULL;
         lua->app_dir_size = 0;
     }

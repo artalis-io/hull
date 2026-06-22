@@ -409,18 +409,19 @@ HlValue *hl_deep_copy_params(const HlValue *src, int n)
         dst[i] = src[i];
         if ((src[i].type == HL_TYPE_TEXT || src[i].type == HL_TYPE_BLOB) &&
             src[i].s && src[i].len > 0) {
-            dst[i].s = malloc(src[i].len + 1);
-            if (!dst[i].s) {
+            char *buf = malloc(src[i].len + 1);
+            if (!buf) {
                 /* Clean up already-copied strings */
                 for (int j = 0; j < i; j++) {
                     if ((dst[j].type == HL_TYPE_TEXT || dst[j].type == HL_TYPE_BLOB) && dst[j].s)
-                        free((void *)dst[j].s);
+                        hl_free_const(dst[j].s);
                 }
                 free(dst);
                 return NULL;
             }
-            memcpy((void *)dst[i].s, src[i].s, src[i].len);
-            ((char *)dst[i].s)[src[i].len] = '\0';
+            memcpy(buf, src[i].s, src[i].len);
+            buf[src[i].len] = '\0';
+            dst[i].s = buf;
         }
     }
     return dst;
@@ -434,7 +435,7 @@ void hl_worker_db_op_free(HlWorkerDbOp *op)
         for (int i = 0; i < op->nparams; i++) {
             if ((op->params[i].type == HL_TYPE_TEXT ||
                  op->params[i].type == HL_TYPE_BLOB) && op->params[i].s)
-                free((void *)op->params[i].s);
+                hl_free_const(op->params[i].s);
         }
         free(op->params);
     }

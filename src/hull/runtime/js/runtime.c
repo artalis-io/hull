@@ -981,7 +981,7 @@ void hl_js_free(HlJS *js)
         js->rt = NULL;
     }
     if (js->app_dir) {
-        hl_alloc_free(js->base.alloc, (void *)js->app_dir, js->app_dir_size);
+        hl_alloc_free_const(js->base.alloc, js->app_dir, js->app_dir_size);
         js->app_dir = NULL;
         js->app_dir_size = 0;
     }

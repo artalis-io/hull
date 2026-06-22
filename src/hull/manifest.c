@@ -48,7 +48,7 @@ const char *hl_manifest_strdup(HlAllocator *alloc, const char *s)
 void hl_manifest_str_free(HlAllocator *alloc, const char **sp)
 {
     if (*sp) {
-        hl_alloc_free(alloc, (void *)*sp, strlen(*sp) + 1);
+        hl_alloc_free_const(alloc, *sp, strlen(*sp) + 1);
         *sp = NULL;
     }
 }

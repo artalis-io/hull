@@ -18,6 +18,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -312,7 +313,7 @@ int hl_dev_state_reload(HlDevState *s)
         dup2(pfd_for_child, STDERR_FILENO);
         close(pfd_for_child);
         close(s->pipe_fd);
-        execvp(s->hull_exe, (char *const *)s->child_argv);
+        execvp(s->hull_exe, (char *const *)(uintptr_t)s->child_argv);  /* POSIX execvp does not modify argv */
         _exit(127);
     }
     close(pfd_for_child);
@@ -501,7 +502,7 @@ int hl_cmd_dev(int argc, char **argv, const HlCommandEnv *env)
             /* Child: restore default signal handlers and exec */
             signal(SIGINT, SIG_DFL);
             signal(SIGTERM, SIG_DFL);
-            execvp(hull_exe, (char *const *)child_argv);
+            execvp(hull_exe, (char *const *)(uintptr_t)child_argv);  /* POSIX execvp does not modify argv */
             _exit(127);
         }
 

@@ -6,6 +6,7 @@
 
 #include "hull/cap/image.h"
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -126,7 +127,7 @@ HlImage *hl_image_from_view(uint32_t w, uint32_t h, HlImageFormat fmt,
     HlImage *img = calloc(1, sizeof(*img));
     if (!img) return NULL;
 
-    img->pixels    = (void *)data; /* borrowed — NOT owned */
+    img->pixels    = (void *)(uintptr_t)data; /* borrowed — NOT owned, never written when owned=0 */
     img->width     = w;
     img->height    = h;
     img->format    = fmt;

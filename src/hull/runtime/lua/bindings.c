@@ -23,6 +23,7 @@
 #include <keel/response.h>
 #include <keel/router.h>
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -141,8 +142,8 @@ void hl_lua_make_request(lua_State *L, KlRequest *req)
             klen = hl_query_decode_inplace(pair, klen);
             pair[klen] = '\0';
             if (vlen > 0) {
-                vlen = hl_query_decode_inplace((char *)val, vlen);
-                ((char *)val)[vlen] = '\0';
+                vlen = hl_query_decode_inplace((char *)(uintptr_t)val, vlen);
+                ((char *)(uintptr_t)val)[vlen] = '\0';
             }
             lua_pushlstring(L, val, vlen);
             lua_setfield(L, -2, pair);

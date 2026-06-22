@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <dirent.h>
@@ -284,7 +285,7 @@ UTEST(hl_sig, verify_bad_sig)
     ASSERT_EQ(hl_sig_read(sig_path, &sig), 0);
 
     /* Tamper with the signature (cast away const for test only) */
-    ((char *)sig.signature_hex)[0] =
+    ((char *)(uintptr_t)sig.signature_hex)[0] =
         (sig.signature_hex[0] == 'a') ? 'b' : 'a';
 
     int rc = hl_sig_verify(&sig, test_pk);
@@ -335,7 +336,7 @@ UTEST(hl_sig, verify_platform_tampered_sig)
     ASSERT_EQ(hl_sig_read(sig_path, &sig), 0);
 
     /* Tamper with platform signature (cast away const for test only) */
-    ((char *)sig.platform.signature_hex)[0] =
+    ((char *)(uintptr_t)sig.platform.signature_hex)[0] =
         (sig.platform.signature_hex[0] == 'a') ? 'b' : 'a';
 
     int rc = hl_sig_verify_platform(&sig, plat_pk);

@@ -259,8 +259,8 @@ static int capture_result(JSContext *ctx, JSValue val,
                 const char *sv = JS_ToCStringLen(ctx, &slen, pval);
                 op->result_kvs[idx].value.type = HL_TYPE_TEXT;
                 if (sv) {
-                    op->result_kvs[idx].value.s = malloc(slen + 1);
-                    if (!op->result_kvs[idx].value.s) {
+                    char *buf = malloc(slen + 1);
+                    if (!buf) {
                         /* OOM on string dup: mark NIL, bump count so
                          * op_free releases the strdup'd key. */
                         op->result_kvs[idx].value.type = HL_TYPE_NIL;
@@ -272,8 +272,9 @@ static int capture_result(JSContext *ctx, JSValue val,
                         js_free(ctx, tab);
                         return -1;
                     }
-                    memcpy((void *)op->result_kvs[idx].value.s, sv, slen);
-                    ((char *)op->result_kvs[idx].value.s)[slen] = '\0';
+                    memcpy(buf, sv, slen);
+                    buf[slen] = '\0';
+                    op->result_kvs[idx].value.s = buf;
                     op->result_kvs[idx].value.len = slen;
                     JS_FreeCString(ctx, sv);
                 }
