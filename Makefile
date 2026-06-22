@@ -521,6 +521,13 @@ LOG_CFLAGS := -std=c11 -O2 -w -DLOG_USE_COLOR
 SH_ARENA_DIR    := $(VENDDIR)/sh_arena
 SH_ARENA_OBJ    := $(BUILDDIR)/sh_arena.o
 SH_ARENA_CFLAGS := -std=c11 -O2 -w
+# Under ASan (`make debug`) instrument the arena TU so its manual ASan
+# poison/unpoison calls activate (dangling-into-arena reads in Hull code
+# become hard ASan errors). Other vendored TUs intentionally stay
+# uninstrumented; this one is tiny and the integration needs it ASan-aware.
+ifdef DEBUG
+SH_ARENA_CFLAGS += -fsanitize=address,undefined -fno-omit-frame-pointer
+endif
 
 # ── sh_json (vendored from otto) ──────────────────────────────────────
 

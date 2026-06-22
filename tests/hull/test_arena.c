@@ -14,11 +14,25 @@
 #include "utest.h"
 #include "hull/alloc.h"
 #include <sh_arena.h>
+#include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 /* Create via the Hull wrapper with a NULL allocator (== sh_arena_create),
  * so the test covers the same construction path callers use. */
 static SHArena *make(void) { return hl_arena_create(NULL, 4096); }
+
+/* __has_feature is clang-only; 0 fallback so the #if parses on GCC. */
+#ifndef __has_feature
+#  define __has_feature(x) 0
+#endif
+#if defined(__SANITIZE_ADDRESS__) || __has_feature(address_sanitizer)
+#  define SH_ARENA_TEST_ASAN 1
+#else
+#  define SH_ARENA_TEST_ASAN 0
+#endif
 
 UTEST(hl_arena, mark_is_used_offset)
 {
@@ -117,5 +131,65 @@ UTEST(hl_arena, null_safety)
     ASSERT_EQ(hl_arena_memdup(a, NULL, 4), (void *)NULL);
     hl_arena_free(NULL, a);
 }
+
+/* ── Overflow guard (unconditional) ─────────────────────────────────── */
+
+UTEST(hl_arena, alloc_rejects_overflow)
+{
+    SHArena *a = make();  /* 4096-byte capacity */
+
+    /* Near-SIZE_MAX sizes must fail closed, not wrap through the
+     * alignment round-up / bounds check into an undersized region. */
+    ASSERT_EQ(sh_arena_alloc(a, SIZE_MAX), (void *)NULL);
+    ASSERT_EQ(sh_arena_alloc(a, SIZE_MAX - 3), (void *)NULL);
+    ASSERT_EQ(sh_arena_alloc(a, SIZE_MAX - (SH_ARENA_ALIGN - 1)), (void *)NULL);
+
+    /* A plain over-capacity request is also NULL (normal OOM). */
+    ASSERT_EQ(sh_arena_alloc(a, 1u << 20), (void *)NULL);
+
+    /* The arena is still usable after rejected requests. */
+    void *p = sh_arena_alloc(a, 64);
+    ASSERT_TRUE(p != NULL);
+    ASSERT_EQ(sh_arena_used(a), (size_t)64);
+
+    hl_arena_free(NULL, a);
+}
+
+/* ── ASan poisoning: reading a reset region traps ───────────────────── */
+
+#if SH_ARENA_TEST_ASAN
+UTEST(hl_arena, reset_poisons_arena_under_asan)
+{
+    pid_t pid = fork();
+    ASSERT_TRUE(pid >= 0);
+
+    if (pid == 0) {
+        /* Child: allocate, use, reset (re-poisons), then read the now-
+         * dangling region. ASan must trap the instrumented read. */
+        SHArena *a = hl_arena_create(NULL, 4096);
+        volatile unsigned char *p = sh_arena_alloc(a, 64);
+        if (!p) _exit(0);          /* unexpected — fail the test */
+        p[0] = 0x7;                /* live: fine */
+        sh_arena_reset(a);         /* re-poisons the whole buffer */
+        unsigned char sink = p[0]; /* dangling read → ASan error */
+        (void)sink;
+        _exit(0);                  /* reached only if poisoning is inactive */
+    }
+
+    int status = 0;
+    ASSERT_EQ(waitpid(pid, &status, 0), pid);
+    /* ASan aborts the child on the poisoned read: either a signal or a
+     * non-zero exit (depending on abort_on_error). Exit 0 means the read
+     * was NOT trapped — poisoning regressed. */
+    int trapped = WIFSIGNALED(status) ||
+                  (WIFEXITED(status) && WEXITSTATUS(status) != 0);
+    ASSERT_TRUE(trapped);
+}
+#else
+UTEST(hl_arena, reset_poisons_arena_under_asan)
+{
+    UTEST_SKIP("address sanitizer not enabled in this build");
+}
+#endif
 
 UTEST_MAIN();
