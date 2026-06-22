@@ -29,6 +29,8 @@
 
 #include "hull/app_context.h"
 #include "hull/shared/async_backend.h"
+#include "hull/shared/log_lock.h"
+#include "hull/shared/thread_affinity.h"
 #include "hull/manifest.h"
 #include "hull/module_resolver.h"
 #include "hull/runtime.h"
@@ -270,6 +272,16 @@ int hull_serve(int argc, char **argv)
         return 1;
     }
     rt->async_ctx = async_ctx;
+
+    /* Before the worker pool exists: make log.c thread-safe (workers run
+     * db.async / compute.async / gpu.async and log concurrently with this
+     * thread) and mark this as the event-loop thread so the loop-only
+     * thread-affinity assertions are live (not silently inert) in the CLI
+     * flavor. Mirrors serve.c's hl_serve_init_logging + the pre-infra mark.
+     * Both are required even though this flavor has no HTTP server, because
+     * it still spawns the same async worker pool below. */
+    hl_log_make_threadsafe();
+    hl_event_loop_mark_current();
 
     /* Worker pool for async ops that delegate to threads (db.async,
      * compute.async, gpu.async). Non-fatal if it fails — the runtime
