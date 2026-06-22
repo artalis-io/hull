@@ -12,6 +12,7 @@
 #include "hull/cap/wasm_buffer.h"
 #include "hull/cap/wasm_stream.h"
 #include "hull/limits/wasm.h"
+#include "hull/log_lock.h"
 #include "hull/vfs.h"
 #include "hull/entry.h"
 #include <limits.h>
@@ -2563,4 +2564,11 @@ UTEST(hl_cap_wasm, disabled_placeholder)
 
 #endif /* HL_ENABLE_WASM */
 
-UTEST_MAIN();
+/* Serialize log.c before any concurrent test (concurrent_load, pool_stress,
+ * the snapshot-hold test) — vendored log.c is not thread-safe without it. */
+UTEST_STATE();
+int main(int argc, const char *const argv[])
+{
+    hl_log_make_threadsafe();
+    return utest_main(argc, argv);
+}

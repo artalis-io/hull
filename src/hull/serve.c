@@ -30,6 +30,7 @@
 #include "hull/alloc.h"
 #include "hull/app_context.h"
 #include "hull/async_backend.h"
+#include "hull/log_lock.h"
 #include "hull/thread_affinity.h"
 #include "hull/async/keel.h"
 #include "hull/net_backend.h"
@@ -812,6 +813,7 @@ static int hl_serve_validate_config(HlServerState *s)
  * Depends on: parse_args (log_level, mem_limit). */
 static int hl_serve_init_logging(HlServerState *s)
 {
+    hl_log_make_threadsafe();  /* workers (db/wasm/gpu) log concurrently */
     log_set_level(s->cfg.log_level);
     log_set_quiet(true);  /* suppress default stderr callback */
     log_add_callback(hl_log_callback, stderr, s->cfg.log_level);
