@@ -1,0 +1,11 @@
+# Built fuzz harnesses
+fuzz_sh_json
+fuzz_path_normalize
+# Debug symbol bundles (macOS)
+*.dSYM/
+# libFuzzer artifacts
+crash-*
+leak-*
+timeout-*
+oom-*
+*.profraw

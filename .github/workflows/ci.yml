@@ -296,6 +296,35 @@ jobs:
         timeout-minutes: 15
         run: make CC=clang tsan
 
+  fuzz:
+    name: Fuzz Testing
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      - name: Install clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      - name: Build fuzz targets
+        run: make fuzz CC=clang
+
+      - name: Fuzz sh_json (60s)
+        # Parses untrusted request-body / config JSON. ASan + UBSan over
+        # 60s of libFuzzer; a crash writes crash-<sha> and fails the job.
+        timeout-minutes: 3
+        run: ./fuzz/fuzz_sh_json fuzz/corpus_sh_json/ -max_total_time=60
+
+      - name: Fuzz path_normalize (60s)
+        # require()/import() path canonicaliser — a .. escape or OOB write
+        # is a sandbox-traversal primitive.
+        timeout-minutes: 3
+        run: ./fuzz/fuzz_path_normalize fuzz/corpus_path_normalize/ -max_total_time=60
+
   analyze:
     name: Static Analysis
     runs-on: ubuntu-latest

@@ -2047,7 +2047,7 @@ $(shell test "$$(cat $(BUILD_CONFIG_FILE) 2>/dev/null)" = "$(BUILD_FINGERPRINT)"
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan tsan e2e e2e-build e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-tcc e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-hypermedia-photos-upload e2e-jwt-asym hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-gpu bench-bytecode-cache wamrc coverage lint-lua lint-js lint platform platform-cosmo hardening check-hardening
+.PHONY: all clean test debug msan tsan fuzz fuzz-run e2e e2e-build e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-tcc e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-hypermedia-photos-upload e2e-jwt-asym hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-gpu bench-bytecode-cache wamrc coverage lint-lua lint-js lint platform platform-cosmo hardening check-hardening
 
 all: $(BUILDDIR)/hull
 
@@ -2982,6 +2982,33 @@ tsan:
 		TSAN_OPTIONS="halt_on_error=1" $(BUILDDIR)/$$t || exit 1; \
 	done
 
+# ── Fuzzing (libFuzzer + ASan/UBSan) ────────────────────────────────
+# Mirrors vendor/keel/fuzz. Requires clang with libFuzzer support.
+#   Linux: make fuzz CC=clang
+#   macOS: make fuzz                 (Apple clang ships libFuzzer)
+#      or: make fuzz CC=/opt/homebrew/opt/llvm@18/bin/clang
+# Each harness compiles its parser sources fresh under the fuzzer
+# instrumentation — these parsers are small and self-contained, so no
+# libhull_platform.a link is needed. Keel already fuzzes the HTTP /
+# multipart / websocket / response parsers in its own tree; these cover
+# Hull's own untrusted-input parsers.
+FUZZ_CFLAGS := -std=c11 -g -O1 -fsanitize=fuzzer,address,undefined \
+               -fno-omit-frame-pointer -Iinclude -I$(SH_JSON_DIR) -I$(SH_ARENA_DIR)
+FUZZ_TIME ?= 60
+
+fuzz/fuzz_sh_json: fuzz/fuzz_sh_json.c $(SH_JSON_DIR)/sh_json.c $(SH_ARENA_DIR)/sh_arena.c
+	$(CC) $(FUZZ_CFLAGS) -o $@ $^
+
+fuzz/fuzz_path_normalize: fuzz/fuzz_path_normalize.c $(SRCDIR)/hull/path_normalize.c
+	$(CC) $(FUZZ_CFLAGS) -o $@ $^
+
+fuzz: fuzz/fuzz_sh_json fuzz/fuzz_path_normalize
+
+# Time-boxed run over the seed corpora (what CI runs). FUZZ_TIME overrides.
+fuzz-run: fuzz
+	./fuzz/fuzz_sh_json fuzz/corpus_sh_json/ -max_total_time=$(FUZZ_TIME)
+	./fuzz/fuzz_path_normalize fuzz/corpus_path_normalize/ -max_total_time=$(FUZZ_TIME)
+
 # ── E2E tests ──────────────────────────────────────────────────────
 
 e2e: $(BUILDDIR)/hull
@@ -3512,6 +3539,7 @@ docs-api-check:
 
 clean:
 	rm -rf $(BUILDDIR)
+	rm -f fuzz/fuzz_sh_json fuzz/fuzz_path_normalize
 	@$(MAKE) -s -C $(KEEL_DIR) clean 2>/dev/null || true
 
 # ── Header-dependency replay ────────────────────────────────────────
