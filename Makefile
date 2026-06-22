@@ -3002,12 +3002,16 @@ fuzz/fuzz_sh_json: fuzz/fuzz_sh_json.c $(SH_JSON_DIR)/sh_json.c $(SH_ARENA_DIR)/
 fuzz/fuzz_path_normalize: fuzz/fuzz_path_normalize.c $(SRCDIR)/hull/path_normalize.c
 	$(CC) $(FUZZ_CFLAGS) -o $@ $^
 
-fuzz: fuzz/fuzz_sh_json fuzz/fuzz_path_normalize
+fuzz/fuzz_mime_sniff: fuzz/fuzz_mime_sniff.c $(SRCDIR)/hull/cap/mime.c
+	$(CC) $(FUZZ_CFLAGS) -o $@ $^
+
+fuzz: fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff
 
 # Time-boxed run over the seed corpora (what CI runs). FUZZ_TIME overrides.
 fuzz-run: fuzz
 	./fuzz/fuzz_sh_json fuzz/corpus_sh_json/ -max_total_time=$(FUZZ_TIME)
 	./fuzz/fuzz_path_normalize fuzz/corpus_path_normalize/ -max_total_time=$(FUZZ_TIME)
+	./fuzz/fuzz_mime_sniff fuzz/corpus_mime_sniff/ -max_total_time=$(FUZZ_TIME)
 
 # ── E2E tests ──────────────────────────────────────────────────────
 
@@ -3539,7 +3543,7 @@ docs-api-check:
 
 clean:
 	rm -rf $(BUILDDIR)
-	rm -f fuzz/fuzz_sh_json fuzz/fuzz_path_normalize
+	rm -f fuzz/fuzz_sh_json fuzz/fuzz_path_normalize fuzz/fuzz_mime_sniff
 	@$(MAKE) -s -C $(KEEL_DIR) clean 2>/dev/null || true
 
 # ── Header-dependency replay ────────────────────────────────────────

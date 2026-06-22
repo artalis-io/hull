@@ -1,6 +1,7 @@
 # Built fuzz harnesses
 fuzz_sh_json
 fuzz_path_normalize
+fuzz_mime_sniff
 # Debug symbol bundles (macOS)
 *.dSYM/
 # libFuzzer artifacts

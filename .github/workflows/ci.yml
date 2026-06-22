@@ -325,6 +325,12 @@ jobs:
         timeout-minutes: 3
         run: ./fuzz/fuzz_path_normalize fuzz/corpus_path_normalize/ -max_total_time=60
 
+      - name: Fuzz mime_sniff (60s)
+        # Magic-byte / shape sniffer over the first ~4 KiB of untrusted stored
+        # upload bytes — an over-read past len is a crash / info-leak.
+        timeout-minutes: 3
+        run: ./fuzz/fuzz_mime_sniff fuzz/corpus_mime_sniff/ -max_total_time=60
+
   analyze:
     name: Static Analysis
     runs-on: ubuntu-latest
