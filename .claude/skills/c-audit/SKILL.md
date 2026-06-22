@@ -316,6 +316,155 @@ flag these:
 - [ ] `make check-hardening` passes on macOS + Linux + cosmo.
 - [ ] Sanitizer builds still build and pass.
 
+### 10. Lifetime classes & arena discipline
+
+Hull's trusted core avoids most use-after-free / double-free /
+lifetime bugs *by construction*: security-sensitive code does not
+individually `free()` objects, it lets an arena's destroy point free
+everything at once. When auditing allocation, classify every site by
+**lifetime class** and check it uses the right ownership model.
+
+| Lifetime class | What | Allocator / owner | Destroy point |
+|---|---|---|---|
+| **boot arena** | tables/config built once at init, then validated + sealed read-only | `sh_seal_arena` (RW→mprotect RO) | destroyed LAST in teardown, after every aliasing consumer (see §5b) |
+| **module arena** | lifetime tied to one module / runtime instance (WASM module cache, GPU device caches) | per-instance struct + its own mutex | instance `_free()` / `_destroy()` |
+| **request arena** | lifetime tied to ONE operation / call / RPC / tool invocation | `sh_arena` (bump), reset per request | one `sh_arena_reset` / `_destroy` per op |
+| **scratch arena** | transient parse/serialize workspace | `sh_arena` mark/rewind (`hl_arena_mark`/`_rewind` in `src/hull/utils/alloc.c`) | rewind at end of the local scope |
+| **third-party glue** | malloc/free required by an external API (SQLite, mbedTLS, QuickJS, Lua, WAMR, wgpu) | that library's allocator | that library's free; Hull must not cross allocators |
+
+Patterns to flag:
+
+| Issue | Severity | What to check |
+|---|---|---|
+| **Scattered request-temporary `malloc`/`free` in a security path** where an arena's lifetime would remove the manual free entirely. The danger is a `luaL_error`/longjmp or early-return path that skips the `free`. | High | Prefer arena-backed scratch (the request/scratch arena is freed wholesale regardless of how the function exits). Hull's `mod_db.c`/`mod_crypto.c`/`mod_http_client.c` already do this — new request-scoped scratch should too. |
+| **`free()` outside allocator/arena internals in core runtime code.** | Medium | Strongly discouraged. Every `free` is a UAF/double-free surface. Confirm the object isn't arena-owned (freeing an arena sub-allocation is a bug). `shared/` and `utils/` should approach zero raw `free`. |
+| **More than one owner / more than one destroy point for an arena.** | Critical | Each arena has exactly ONE owner and ONE destroy call. Two destroys = double-free of the whole region. |
+| **Pointer retained into an arena after the arena is reset/destroyed.** | Critical | A cached pointer into request/scratch memory used after reset is a UAF. Verify no long-lived struct field aliases arena memory across a reset. The seal pattern value-copies structs precisely to avoid this. |
+| **`realloc()` that may invalidate a pointer/iterator held across the call.** | High | Every `realloc` must reassign into the owning field and NO previously-obtained element pointer or loop cursor may survive the call. Re-derive the pointer after the realloc (e.g. `row = &r->values[i]` *after* `db_result_grow`). See §10.1. |
+| **Crossing allocators** — e.g. `free()`-ing a pointer that came from a codec/library allocator, or vice versa. | High | Free with the matching allocator. Image-codec output, mbedTLS buffers, SQLite strings each have their own free contract. |
+| **Missing debug poisoning after arena reset/destroy.** | Low | Under `make debug`, poison freed region so stale reads trap (sh_arena already ASan-poisons on create/reset). New arenas should match. |
+
+### 10.1. realloc / internal-mutable-pointer hazards
+
+Two specific sub-checks that catch the subtle lifetime bugs:
+
+- **Dangling-after-realloc.** Grep every `realloc`. For each, confirm
+  the result is stored back into the owning struct and that the code
+  does not hold a pointer/iterator obtained *before* the realloc.
+  Growable buffers (`tui` out_buf, `worker_db` value array, `tool`
+  result array, `agent` line buffers, `poll` timer/watcher/completion
+  arrays) are the usual sites. A bounded-size check (`SIZE_MAX/2`)
+  must precede the doubling.
+- **API returning a pointer into mutable internal storage.** A public
+  `hl_*` getter must return either a `const` pointer into immutable
+  `.rodata`/sealed memory (e.g. `hl_vfs_find` → `const HlEntry *`), a
+  freshly-allocated string with a documented caller-frees contract, or
+  a stable handle the caller is *meant* to drive. Flag any getter that
+  hands back a non-`const` pointer into a buffer a later call could
+  `realloc`/`free` (a latent dangling reference), or a write-through
+  into sealed security policy.
+
+### 11. Iterator invalidation
+
+The dangerous shape is **iterate a mutable container while it can be
+mutated during the walk**. The mutation almost always arrives through
+a **callback invoked inside the loop body that re-enters Hull** and
+adds/removes/grows the very container being walked.
+
+| Issue | Severity | What to check |
+|---|---|---|
+| **Callback-driven loop over a mutable container** (broadcast over a connection list, timer fire over a timer array, pool drain, cache eviction, per-row DB callback) where the callback can re-enter and mutate the container. | Critical/High | The callback must run in a context that *cannot* re-enter and mutate (sandbox/driver boundary), OR the loop must snapshot first, OR teardown must be deferred. Document the non-reentrancy invariant at the `cb()` call site (the WS-broadcast comment is the template). |
+| **Element pointer held across an add that may `realloc`/grow.** | High | Use index-based iteration that re-reads `count`, not a cached `&arr[i]`. |
+| **LRU/cache eviction nested inside iteration over the same cache.** | High | The prepared-statement cache is the canonical hazard: evicting (finalizing) the in-flight entry mid-loop is a UAF. Keep an explicit "in-use entry is pinned against eviction" rule. |
+
+Safe patterns to require: **snapshot array** (copy the elements/handles
+before the loop), **index-based iteration with explicit mutation rules**
+(append-only + re-read count), **two-phase update/delete queue** (mark in
+phase 1, apply after the loop), or **sealed immutable array** (registries
+that are `static const` — confirm they're never mutated at runtime).
+Document, per container, whether mutation during iteration is allowed.
+Do not expose raw container storage if growth/realloc can occur.
+
+### 12. Generational handles for long-lived objects
+
+For long-lived runtime objects currently referenced by raw pointers
+across an API boundary (script → C), prefer a **generational handle**
+over a raw pointer so a stale reference fails validation instead of
+dereferencing freed memory:
+
+```c
+typedef struct { uint32_t index; uint32_t generation; } HullHandle;
+```
+
+The backing table slot carries `generation` + an `alive` bit; lookup
+validates `slot.generation == handle.generation` and returns NULL on
+mismatch. Apply this ONLY where it improves safety without broad churn:
+
+| When to recommend | When NOT to |
+|---|---|
+| A script-visible object that outlives a single call, can be destroyed by app code while another reference exists, and is reached by raw pointer (the classic dangling-userdata risk). | Objects already protected by an index+generation pool, a per-call stack local, a `static const` table, or a monotonic ID under a lock (Hull's CFI/typed-handle work already covers the vtables — don't re-handle those). |
+| Connection / instance / buffer registries where "destroyed by name while a handle is held" is reachable. | Boot/sealed config (immutable — no stale-handle risk). |
+
+Today Hull's binding layer mostly uses the "null the userdata's opaque
+pointer on close/destroy, methods fail closed" pattern — an acceptable
+hand-rolled equivalent. Flag any binding where close/destroy frees the
+underlying struct but a *suspended/async* continuation can still resume
+against it (that's where the fail-closed null is insufficient).
+
+### 13. Aliasing & single-owner mutation
+
+| Issue | Severity | What to check |
+|---|---|---|
+| **Sealed/boot-built security state exposed as non-`const`** after init. | High | Configuration, policy, dispatch, vtable, capability, and manifest-derived tables must be reachable only as `const` once initialized (see §5b). |
+| **API exposing a mutable internal pointer** instead of mutating through the owner. | High | Prefer `hl_x_set(owner, ...)` over handing out `&owner->field`. See §10.1. |
+| **Two live aliases to the same object with unclear ownership**, one of which may free/realloc. | High | Establish a single explicit owner; others hold a borrow (read-only) or a handle. Document ownership transfer at the boundary. |
+| **Unclear borrow-vs-owned at a binding boundary** — handing app code a long-lived object that *borrows* a buffer the app can free/GC (the `*_from_buffer` / borrowed-view → long-lived-handle constructor pattern). | Critical | The long-lived object must PIN its source (dup/ref the backing buffer, or copy). A borrow that outlives its source is a UAF. |
+
+Recommended naming discipline in comments/types: **borrow / read-only
+view** (caller must not free; valid only for the call), **owned object**
+(caller frees), **arena-owned** (freed by the arena's destroy, never
+individually), **handle reference** (validated each use, may be stale).
+
+### 14. Data races & thread affinity
+
+Hull's model: a **single event-loop thread owns all core policy /
+security state**; a **worker thread pool** runs `db.async` /
+`compute.async` / `gpu.async` jobs on **deep-copied inputs**; Keel
+returns each job's `done_fn`/`cancel_fn` to the event-loop thread.
+
+| Issue | Severity | What to check |
+|---|---|---|
+| **Concurrent mutation of capability policy, dispatch/vtables, runtime config, or manifest-derived security state.** | Critical | These must be `static const`, sealed (`sh_seal_arena`), or mutated ONLY on the event loop. Never written from a worker. |
+| **Shared mutable cache touched by both the loop and a worker without a lock** (WASM module cache / instance pool, GPU device buffer/texture/pipeline caches, shared-data segments). | Critical | Must be under the owning mutex (`pool_mutex`, `mod->mutex`, `dev->mutex`) across the whole critical section, including the backend submit/poll. Mutation-while-async-in-flight needs an explicit reservation (the `inflight_async` counter pattern). |
+| **Event-loop-only mutation site missing a thread-affinity assertion.** | Medium | `hl_assert_on_event_loop()` (gated on `HL_THREAD_AFFINITY_CHECKS`) should guard each loop-only mutation of security state (segment load, async submit, GPU compile). |
+| **Event-loop thread never marked / log not made thread-safe in a build flavor that still spawns the worker pool.** | High | Every entry point that creates the worker pool must call BOTH `hl_event_loop_mark_current()` (so the affinity asserts are live, not silently inert) AND `hl_log_make_threadsafe()` (so `log.c`'s callback list + stream write is locked) BEFORE `pool_create`. Check **every** flavor (`serve.c` AND `serve_cli.c` / CLI-flavor `HL_ENABLE_HTTP_SERVER=0`), not just the default. |
+| **Unsynchronized writes to a shared output stream from multiple threads** (audit JSONL / log to stderr emitted from worker `work_fn`s). | Medium | Per-token `fwrite` from a worker can interleave byte-wise with an event-loop line, corrupting the JSONL. Hold a process lock around the whole record, or build the line in a buffer and emit with one `fwrite`. |
+| **Globals mutated without a lock**, or `_Atomic`/memory-ordering misuse at a boundary. | High | Init-before-threads globals are fine if written once before `pool_create`; anything written later from >1 thread needs an atomic or lock. |
+
+Prefer, in order: single-threaded event loop for policy state →
+immutable sealed shared config → message passing (deep-copied inputs to
+workers) → explicit atomic queues only at the boundary. Document thread
+affinity for security-sensitive state. TSan CI (`make tsan`) must cover
+the worker-pool paths for **each** build flavor that ships a pool.
+
+### 15. Debug-build defensive checks
+
+Under `make debug` (and TSAN/MSAN where relevant), the trusted core
+should carry lightweight, compiled-out-in-release checks. When auditing
+new code in a security path, expect (or recommend) these:
+
+- arena owner / lifetime asserts (alloc-after-destroy, alloc-after-seal
+  both return NULL / assert — the bump arena already does)
+- ASan poisoning of freed/reset arena regions (stale read traps)
+- stale-handle detection (generation mismatch → NULL)
+- mutation-during-iteration asserts (e.g. a `dispatch_depth`/`iterating`
+  flag that aborts on re-entrant mutation)
+- thread-affinity asserts for security-sensitive state
+  (`hl_assert_on_event_loop()`)
+
+These are the runtime tripwires that turn a latent lifetime/race bug
+into a loud test failure under the sanitizer matrix.
+
 ## Audit Procedure
 
 When `/c-audit` is invoked:
@@ -348,6 +497,19 @@ When `/c-audit` is invoked:
      - `__attribute__((no_stack_protector))` / `((naked))` / `((interrupt))`
      - hardcoded executable address literals (`0x[0-9a-f]{6,}`)
      - `-rdynamic` / `-Wl,-export-dynamic` in any Makefile change
+   - Search for lifetime / aliasing / race hazards (§§10-14):
+     - every `realloc(` → does any pointer/iterator held across it dangle? (§10.1)
+     - `free(` in `shared/` or `utils/` or any security path (should be ~zero; §10)
+     - callback invocations inside a loop over a mutable container (§11)
+     - `*_from_buffer` / borrowed-view constructors returning a long-lived
+       handle without pinning the source (§13)
+     - public `hl_*` getters returning a non-`const` pointer into a buffer a
+       later call can `realloc`/`free` (§10.1, §13)
+     - worker `work_fn` (db/wasm/gpu async) reads/writes of a shared cache,
+       global, or output stream without the owning mutex/lock (§14)
+     - every entry point that calls `pool_create` → does it FIRST call
+       `hl_event_loop_mark_current()` AND `hl_log_make_threadsafe()`? Check
+       `serve.c` AND `serve_cli.c` (CLI flavor) (§14)
 
 3. **Review Public API**
    - Check all public functions in headers (`hl_*` prefix)
@@ -395,7 +557,30 @@ When `/c-audit` is invoked:
      `XXD_CONST_PIPE` to land in `.rodata`.
    - Sealed-arena destroy stays LAST in every cleanup path.
 
-9. **Generate Report**
+9. **Check Lifetime, Iteration & Concurrency (§§10-15)**
+   - Classify each allocation cluster by lifetime class (boot / module /
+     request / scratch / third-party); flag scattered request-temporary
+     `malloc`/`free` an arena would make leak-proof (§10).
+   - One owner + one destroy per arena; no pointer retained past a reset
+     (§10).
+   - Every `realloc` re-derives held pointers; no getter returns a
+     mutable internal pointer a later call can invalidate (§10.1).
+   - No callback-driven loop mutates the container it walks; registries
+     iterated are `static const` (§11).
+   - Long-lived script-visible objects that app code can destroy while a
+     reference (esp. a suspended/async continuation) lives: handle or
+     fail-closed, never a bare dangling pointer (§12).
+   - Sealed/policy state exposed `const`; single-owner mutation; borrowed
+     buffers pinned by the long-lived objects that reference them (§13).
+   - No off-event-loop mutation of policy/dispatch/manifest state; shared
+     worker-touched caches under the owning mutex; **every** `pool_create`
+     entry point marks the loop thread + makes log thread-safe first;
+     audit/log stream writes from workers are lock-wrapped (§14).
+   - For a large audit, fan out §10/§11/§14 to parallel subagents (one per
+     dimension over `cap/` + `runtime/` + the worker files), then
+     reconcile against known prior hardening before reporting.
+
+10. **Generate Report**
    Format as markdown table with findings, severity, file:line, and suggested fix.
 
 ## Report Format
@@ -421,6 +606,17 @@ When `/c-audit` is invoked:
 
 ### Low Issues
 ...
+
+### Lifetime / ownership / concurrency summary (§§10-14)
+For a lifetime/race-focused audit, ALSO report these dimensions explicitly
+(state "CLEAN" where there is nothing — coverage matters):
+- Risky allocation / `free` sites (by lifetime class).
+- `realloc` / iterator-invalidation risks found.
+- Raw-pointer lifetime / borrow-outlives-source risks found.
+- Shared mutable state / data-race risks found (per build flavor).
+- Changes made vs. cases intentionally left unchanged.
+- Larger architectural changes recommended but NOT implemented.
+- Remaining residual risks.
 
 ### Recommendations
 1. ...
