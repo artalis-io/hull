@@ -16,7 +16,7 @@
  */
 
 #include "hull/sandbox.h"
-#include "hull/cache_dir.h"
+#include "hull/shared/cache_dir.h"
 #include "log.h"
 
 #include <limits.h>

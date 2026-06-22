@@ -13,9 +13,9 @@
 #include "hull/cap/fs.h"
 #include "hull/vfs.h"
 #include "hull/worker_wasm.h"
-#include "hull/async.h"
+#include "hull/shared/async.h"
 #include "hull/net_backend.h"
-#include "hull/alloc.h"
+#include "hull/utils/alloc.h"
 
 #include <keel/server.h>
 #include <stdatomic.h>

@@ -12,10 +12,10 @@
 #ifdef HL_ENABLE_GPU
 
 #include "hull/worker_gpu.h"
-#include "hull/alloc.h"
-#include "hull/async.h"
-#include "hull/async_backend.h"
-#include "hull/thread_affinity.h"
+#include "hull/utils/alloc.h"
+#include "hull/shared/async.h"
+#include "hull/shared/async_backend.h"
+#include "hull/shared/thread_affinity.h"
 #include "hull/net_backend.h"
 #include "log.h"
 #include "keel/thread_pool.h"

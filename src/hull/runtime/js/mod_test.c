@@ -14,8 +14,8 @@
 #include "hull/cap/test.h"
 #include "hull/runtime/test.h"
 #include "hull/runtime/js.h"
-#include "hull/alloc.h"
-#include "hull/async_backend.h"
+#include "hull/utils/alloc.h"
+#include "hull/shared/async_backend.h"
 
 #include <keel/request.h>
 

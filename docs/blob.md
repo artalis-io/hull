@@ -237,7 +237,7 @@ to constrain *app* code.
      hl_cap_blob_*                · all other entry points forward
                                  │
                                  ▼
-   include/hull/blob_store.h  blob_store.c (low-level)
+   include/hull/shared/blob_store.h  blob_store.c (low-level)
      HlBlobStore*                · pure CAS — no policy
      hl_blob_store_*             · atomic tmp+rename
                                  · sharded shards
@@ -643,7 +643,7 @@ runtime caches live outside the manifest:
   the active env var. JSON output includes `env_var` + `disabled`
   fields per kind.
 
-- **Registry-driven**: `include/hull/cache_registry.h` is the
+- **Registry-driven**: `include/hull/shared/cache_registry.h` is the
   single source of truth for cache kinds (display name +
   description + runtime/system flag + env_kind). Adding a new
   cache kind = one entry in `REGISTRY[]` and the new kind

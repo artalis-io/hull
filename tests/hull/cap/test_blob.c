@@ -18,8 +18,8 @@
 #include "hull/cap/blob.h"
 #include "hull/cap/fs.h"
 #include "hull/cap/crypto.h"
-#include "hull/blob_store.h"
-#include "hull/alloc.h"
+#include "hull/shared/blob_store.h"
+#include "hull/utils/alloc.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>

@@ -28,7 +28,7 @@
  */
 
 #include "hull/app_context.h"
-#include "hull/async_backend.h"
+#include "hull/shared/async_backend.h"
 #include "hull/manifest.h"
 #include "hull/module_resolver.h"
 #include "hull/runtime.h"

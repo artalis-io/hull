@@ -8,7 +8,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#include "hull/thread_affinity.h"
+#include "hull/shared/thread_affinity.h"
 
 #ifdef HL_THREAD_AFFINITY_CHECKS
 

@@ -4,12 +4,12 @@
  */
 
 #include "mod_buffer.h"
-#include "hull/alloc.h"
+#include "hull/utils/alloc.h"
 #include "hull/cap/fs.h"
 #include "hull/limits/core.h"
 #include "hull/module_registry.h"
 #include "hull/module_resolver.h"
-#include "hull/path_normalize.h"
+#include "hull/utils/path_normalize.h"
 #include "hull/runtime/lua_bytecode_cache.h"
 #include "hull/vfs.h"
 

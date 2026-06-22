@@ -12,7 +12,7 @@
 #include "hull/cap/wasm_stream.h"
 #include "hull/cap/wasm.h"
 #include "hull/cap/fs.h"
-#include "hull/alloc.h"
+#include "hull/utils/alloc.h"
 #include "hull/limits/wasm.h"
 #include "hull/vfs.h"
 #include "log.h"

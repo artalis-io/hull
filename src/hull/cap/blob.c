@@ -14,7 +14,7 @@
 
 #include "hull/cap/blob.h"
 #include "hull/cap/fs.h"
-#include "hull/alloc.h"
+#include "hull/utils/alloc.h"
 
 #include <limits.h>
 #include <stdio.h>

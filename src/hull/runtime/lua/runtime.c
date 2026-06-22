@@ -14,8 +14,8 @@
 
 #include "internal.h"
 
-#include "hull/alloc.h"
-#include "hull/async_backend.h"
+#include "hull/utils/alloc.h"
+#include "hull/shared/async_backend.h"
 #include "hull/manifest.h"
 #include "hull/cap/tool.h"
 #include "hull/runtime/tool.h"

@@ -7,7 +7,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#include "hull/path_normalize.h"
+#include "hull/utils/path_normalize.h"
 
 #include <string.h>
 

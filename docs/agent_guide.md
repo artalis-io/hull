@@ -927,7 +927,7 @@ const buf = await compute.async.call("score", inputBytes, opts);
 ### Zero-copy buffer protocol
 
 All compute and GPU functions accept any of these as input
-(`include/hull/buffer.h`):
+(`include/hull/utils/buffer.h`):
 
 | Type | Source |
 |---|---|

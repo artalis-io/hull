@@ -21,9 +21,9 @@
  */
 
 #include "hull/cap/tool.h"
-#include "hull/cache_dir.h"
-#include "hull/cache_registry.h"
-#include "hull/blob_store.h"
+#include "hull/shared/cache_dir.h"
+#include "hull/shared/cache_registry.h"
+#include "hull/shared/blob_store.h"
 #include "hull/runtime/tool.h"
 #include "hull/build_assets.h"
 #include "hull/compiler.h"

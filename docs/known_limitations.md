@@ -1,6 +1,6 @@
 # Known Limitations
 
-All limits are defined in `include/hull/limits.h` and can be overridden at compile time via `-D`.
+All limits are defined in `include/hull/utils/limits.h` and can be overridden at compile time via `-D`.
 
 ## Module System
 

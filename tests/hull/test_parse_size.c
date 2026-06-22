@@ -5,7 +5,7 @@
  */
 
 #include "utest.h"
-#include "hull/parse_size.h"
+#include "hull/utils/parse_size.h"
 
 /* ── Basic byte values ─────────────────────────────────────────────── */
 

@@ -6,7 +6,7 @@
 #define HULL_LUA_MOD_BUFFER_H
 
 #include "hull/runtime/lua.h"
-#include "hull/buffer.h"
+#include "hull/utils/buffer.h"
 
 #include "lua.h"
 #include "lualib.h"

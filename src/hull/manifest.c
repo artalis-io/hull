@@ -16,7 +16,7 @@
  */
 
 #include "hull/manifest.h"
-#include "hull/alloc.h"
+#include "hull/utils/alloc.h"
 #include <sh_seal_arena.h>
 #include "manifest_internal.h"
 #include "log.h"

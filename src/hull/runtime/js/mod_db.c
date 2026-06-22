@@ -10,9 +10,9 @@
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
 #include "hull/worker_db.h"
-#include "hull/async.h"
+#include "hull/shared/async.h"
 #include "hull/net_backend.h"
-#include "hull/alloc.h"
+#include "hull/utils/alloc.h"
 
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/db_udf.h"

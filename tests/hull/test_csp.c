@@ -9,7 +9,7 @@
  */
 
 #include "utest.h"
-#include "hull/csp.h"
+#include "hull/utils/csp.h"
 #include <string.h>
 
 UTEST(hl_csp, resolve_null_passthrough)

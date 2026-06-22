@@ -26,7 +26,7 @@
 #ifndef HL_RUNTIME_CACHE_COMMON_H
 #define HL_RUNTIME_CACHE_COMMON_H
 
-#include "hull/blob_store.h"
+#include "hull/shared/blob_store.h"
 
 #include <stddef.h>
 #include <stdint.h>

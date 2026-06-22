@@ -6,8 +6,8 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#include "hull/cache_registry.h"
-#include "hull/cache_dir.h"
+#include "hull/shared/cache_registry.h"
+#include "hull/shared/cache_dir.h"
 
 #include <errno.h>
 #include <limits.h>

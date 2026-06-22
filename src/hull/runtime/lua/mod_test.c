@@ -14,7 +14,7 @@
 #include "hull/cap/test.h"
 #include "hull/runtime/test.h"
 #include "hull/runtime/lua.h"
-#include "hull/alloc.h"
+#include "hull/utils/alloc.h"
 
 #include <keel/request.h>
 

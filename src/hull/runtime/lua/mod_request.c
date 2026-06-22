@@ -29,8 +29,8 @@
 
 #include "internal.h"
 
-#include "hull/alloc.h"
-#include "hull/async.h"
+#include "hull/utils/alloc.h"
+#include "hull/shared/async.h"
 #include "hull/cap/body.h"
 
 #include <keel/body_reader.h>

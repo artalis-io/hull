@@ -11,11 +11,11 @@
 
 #include "hull/worker_db.h"
 #include "hull/cap/db.h"
-#include "hull/async.h"
-#include "hull/thread_affinity.h"
-#include "hull/async_backend.h"
+#include "hull/shared/async.h"
+#include "hull/shared/thread_affinity.h"
+#include "hull/shared/async_backend.h"
 #include "hull/net_backend.h"
-#include "hull/alloc.h"
+#include "hull/utils/alloc.h"
 
 #include <keel/thread_pool.h>
 #include <keel/async.h>

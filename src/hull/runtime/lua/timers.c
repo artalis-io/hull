@@ -10,8 +10,8 @@
 
 #include "internal.h"
 
-#include "hull/alloc.h"
-#include "hull/async_backend.h"
+#include "hull/utils/alloc.h"
+#include "hull/shared/async_backend.h"
 #include "hull/cap/db.h"
 #include "hull/cap/db_backend.h"
 

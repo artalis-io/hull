@@ -25,7 +25,7 @@
 #include <keel/allocator.h>
 #include <keel/body_reader.h>
 
-#include "hull/alloc.h"
+#include "hull/utils/alloc.h"
 #include "hull/reqctx.h"
 
 #include <stdint.h>

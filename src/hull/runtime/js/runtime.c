@@ -16,13 +16,13 @@
 #include "internal.h"
 
 #include "hull/runtime/js_bytecode_cache.h"
-#include "hull/alloc.h"
-#include "hull/async_backend.h"
+#include "hull/utils/alloc.h"
+#include "hull/shared/async_backend.h"
 #include "hull/limits/runtime.h"
 #include "hull/manifest.h"
 #include "hull/module_registry.h"
 #include "hull/module_resolver.h"
-#include "hull/path_normalize.h"
+#include "hull/utils/path_normalize.h"
 #include "hull/cap/test.h"
 #include "hull/runtime/test.h"
 

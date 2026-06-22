@@ -12,10 +12,10 @@
 #include "hull/cap/wasm.h"
 #include "hull/cap/wasm_buffer.h"
 #include "hull/cap/wasm_data.h"
-#include "hull/alloc.h"
+#include "hull/utils/alloc.h"
 #include "hull/cap/audit.h"
 #include "hull/limits/wasm.h"
-#include "hull/macros.h"
+#include "hull/utils/macros.h"
 #include <sh_seal_arena.h>
 #include "hull/vfs.h"
 #include "log.h"

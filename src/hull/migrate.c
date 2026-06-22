@@ -11,7 +11,7 @@
 #ifdef HL_ENABLE_DB
 
 #include "hull/migrate.h"
-#include "hull/alloc.h"
+#include "hull/utils/alloc.h"
 #include "hull/vfs.h"
 #include "hull/cap/db_backend.h"
 

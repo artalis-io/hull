@@ -8,7 +8,7 @@
 
 #include "hull/cap/wasm_buffer.h"
 #include "hull/cap/wasm.h"
-#include "hull/alloc.h"
+#include "hull/utils/alloc.h"
 #include "wasm_export.h"
 
 #include <stdlib.h>

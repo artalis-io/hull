@@ -11,9 +11,9 @@
 
 #ifdef HL_ENABLE_TUI
 
-#include "hull/alloc.h"
-#include "hull/async.h"
-#include "hull/async_backend.h"
+#include "hull/utils/alloc.h"
+#include "hull/shared/async.h"
+#include "hull/shared/async_backend.h"
 #include "hull/cap/tui.h"
 
 #include <errno.h>

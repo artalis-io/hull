@@ -12,7 +12,7 @@
 #include "hull/cap/wasm_buffer.h"
 #include "hull/cap/wasm_stream.h"
 #include "hull/limits/wasm.h"
-#include "hull/log_lock.h"
+#include "hull/shared/log_lock.h"
 #include "hull/vfs.h"
 #include "hull/entry.h"
 #include <limits.h>

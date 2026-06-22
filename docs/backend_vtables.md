@@ -278,7 +278,7 @@ kl_async_suspend(server, conn, &ctx->op);
 ## Migration phases
 
 ### Phase 3d-1. Define the vtables, leave Keel in place
-- Author `include/hull/async_backend.h` and `include/hull/net_backend.h`
+- Author `include/hull/shared/async_backend.h` and `include/hull/net_backend.h`
 - Define opaque handle types (`HlAsyncOpHandle`, `HlReqHandle`, etc.)
 - No consumers yet; everything still uses `kl_*` directly
 - Outcome: API surface scoped. No behavior change. ~2 days.

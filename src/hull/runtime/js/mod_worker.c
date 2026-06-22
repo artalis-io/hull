@@ -7,9 +7,9 @@
 #include "mod_buffer.h"
 #include "internal.h"
 #include "hull/worker_db.h"
-#include "hull/async.h"
+#include "hull/shared/async.h"
 #include "hull/net_backend.h"
-#include "hull/alloc.h"
+#include "hull/utils/alloc.h"
 
 #include <keel/server.h>
 

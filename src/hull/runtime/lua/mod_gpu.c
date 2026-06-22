@@ -9,7 +9,7 @@
 #include "hull/cap/gpu.h"
 #include "hull/cap/image.h"
 #include "hull/worker_gpu.h"
-#include "hull/async.h"
+#include "hull/shared/async.h"
 #include "hull/net_backend.h"
 #include "hull/vfs.h"
 
@@ -19,7 +19,7 @@ static int lua_parse_texture_descs(lua_State *L, int tbl_idx,
 
 #ifdef HL_ENABLE_WASM
 #include "hull/cap/wasm_buffer.h"
-#include "hull/alloc.h"
+#include "hull/utils/alloc.h"
 #endif
 
 #include <keel/server.h>

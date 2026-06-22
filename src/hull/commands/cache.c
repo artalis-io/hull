@@ -29,9 +29,9 @@
  */
 
 #include "hull/commands/cache.h"
-#include "hull/blob_store.h"
-#include "hull/cache_dir.h"
-#include "hull/cache_registry.h"
+#include "hull/shared/blob_store.h"
+#include "hull/shared/cache_dir.h"
+#include "hull/shared/cache_registry.h"
 #include "hull/cap/crypto.h"
 #include "hull/runtime/cache_common.h"  /* hex_encode shared helper */
 #include "sh_json.h"

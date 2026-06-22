@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#include "hull/log_lock.h"
+#include "hull/shared/log_lock.h"
 #include "log.h"
 
 #include <pthread.h>

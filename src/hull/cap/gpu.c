@@ -13,7 +13,7 @@
 #include "hull/cap/gpu.h"
 #include "hull/cap/audit.h"
 #include "hull/limits/gpu.h"
-#include "hull/thread_affinity.h"
+#include "hull/shared/thread_affinity.h"
 #include "log.h"
 
 #include <assert.h>

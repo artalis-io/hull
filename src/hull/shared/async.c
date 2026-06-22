@@ -8,8 +8,8 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#include "hull/async.h"
-#include "hull/alloc.h"
+#include "hull/shared/async.h"
+#include "hull/utils/alloc.h"
 #include "hull/net_backend.h"
 #include <string.h>
 

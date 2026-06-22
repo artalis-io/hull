@@ -12,7 +12,7 @@
 #include "internal.h"
 #include "hull/app_context.h"
 #include "hull/runtime.h"
-#include "hull/limits.h"
+#include "hull/utils/limits.h"
 
 #ifdef HL_ENABLE_LUA
 #include "hull/runtime/lua.h"

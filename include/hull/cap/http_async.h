@@ -11,7 +11,7 @@
 #define HL_CAP_HTTP_ASYNC_H
 
 #include "hull/cap/http.h"
-#include "hull/async.h"
+#include "hull/shared/async.h"
 
 #include <keel/client.h>
 

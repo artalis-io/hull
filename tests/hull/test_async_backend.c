@@ -7,7 +7,7 @@
  */
 
 #include "utest.h"
-#include "hull/async_backend.h"
+#include "hull/shared/async_backend.h"
 
 #include <string.h>
 

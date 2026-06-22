@@ -15,7 +15,7 @@
 #ifdef HL_ENABLE_WASM
 
 #include "hull/cap/wasm.h"
-#include "hull/buffer.h"
+#include "hull/utils/buffer.h"
 #include <stddef.h>
 
 /* Forward declarations */

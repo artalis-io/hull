@@ -5,7 +5,7 @@
  */
 
 #include "hull/cap/ws.h"
-#include "hull/alloc.h"
+#include "hull/utils/alloc.h"
 
 #include <keel/websocket_server.h>
 

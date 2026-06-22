@@ -13,7 +13,7 @@
 #include "hull/cap/db_udf.h"
 #include "hull/cap/db_backend.h"
 #include "hull/cap/wasm.h"
-#include "hull/alloc.h"
+#include "hull/utils/alloc.h"
 #include "hull/vfs.h"
 #include "log.h"
 

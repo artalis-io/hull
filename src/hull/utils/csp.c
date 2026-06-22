@@ -21,7 +21,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#include "hull/csp.h"
+#include "hull/utils/csp.h"
 
 #include <string.h>
 

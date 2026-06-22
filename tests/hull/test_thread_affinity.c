@@ -13,7 +13,7 @@
  */
 
 #include "utest.h"
-#include "hull/thread_affinity.h"
+#include "hull/shared/thread_affinity.h"
 
 #include <pthread.h>
 #include <signal.h>

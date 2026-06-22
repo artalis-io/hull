@@ -38,7 +38,7 @@
 #include "mod_buffer.h"
 #include "hull/cap/blob.h"
 #include "hull/cap/fs.h"
-#include "hull/alloc.h"
+#include "hull/utils/alloc.h"
 #include "log.h"
 
 #include <lauxlib.h>

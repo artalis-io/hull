@@ -10,7 +10,7 @@
  */
 
 #include "utest.h"
-#include "hull/path_normalize.h"
+#include "hull/utils/path_normalize.h"
 
 #include <stdio.h>
 #include <string.h>

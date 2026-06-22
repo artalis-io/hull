@@ -360,14 +360,14 @@ For completeness, here's what Hull does *not* cache on disk:
 ## Internals (one paragraph each)
 
 **Storage primitive.** Every cache is an `HlBlobStore` (see
-`include/hull/blob_store.h`). Writes go through `hl_blob_store_writer_*`,
+`include/hull/shared/blob_store.h`). Writes go through `hl_blob_store_writer_*`,
 which writes to a unique tmp path and renames into the sharded blob
 directory. Reads go through `hl_blob_store_reader_*`, which `open`s
 the file and (for the bytecode/template caches) `mmap`s it for
 zero-copy parse. Iteration uses a snapshot of `readdir` results so
 concurrent writes don't cause double-counting in `list` / `prune`.
 
-**Cache registry.** All six kinds are listed in `src/hull/cache_registry.c`
+**Cache registry.** All six kinds are listed in `src/hull/shared/cache_registry.c`
 as a static `HlCacheKind[]` array. Adding a new cache means one row in
 that table — `list`, `prune`, `clear`, `verify`, `doctor`, and
 `inspect` all iterate the registry, so a new cache automatically

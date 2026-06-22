@@ -227,6 +227,12 @@ src/hull/               # Core source
   commands/             #   Subcommand implementations (build.c, test.c, verify.c, etc.)
   runtime/lua/          #   Lua 5.4 runtime (bindings.c, modules.c, runtime.c)
   runtime/js/           #   QuickJS runtime (bindings.c, modules.c, runtime.c)
+  utils/                #   Generic leaf utilities, no Hull-domain knowledge
+                        #   (alloc, path_normalize, compress, csp, plus the
+                        #   header-only parse_size/macros/buffer/limits)
+  shared/               #   Cross-cutting infrastructure used across cap/,
+                        #   commands/, and runtime/ (cache_dir, cache_registry,
+                        #   blob_store, thread_affinity, log_lock, async)
   vfs.c                 #   Unified Virtual Filesystem (O(log n) binary search over HlEntry arrays)
   static.c              #   Static file serving middleware (/static/* convention)
 stdlib/                 # Embedded standard library

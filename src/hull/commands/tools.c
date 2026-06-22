@@ -31,8 +31,8 @@
  */
 
 #include "hull/commands/tools.h"
-#include "hull/blob_store.h"
-#include "hull/cache_registry.h"
+#include "hull/shared/blob_store.h"
+#include "hull/shared/cache_registry.h"
 #include "hull/release.h"
 #include "hull/release_io.h"
 #include "hull/tools_install.h"

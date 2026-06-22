@@ -11,8 +11,8 @@
 
 #include "hull/runtime/js_bytecode_cache.h"
 #include "hull/runtime/cache_common.h"
-#include "hull/blob_store.h"
-#include "hull/cache_dir.h"
+#include "hull/shared/blob_store.h"
+#include "hull/shared/cache_dir.h"
 #include "hull/cap/crypto.h"
 
 #include "quickjs.h"

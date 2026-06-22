@@ -15,7 +15,7 @@
  */
 
 #include "utest.h"
-#include "hull/async_backend.h"
+#include "hull/shared/async_backend.h"
 
 #include <pthread.h>
 #include <stdint.h>

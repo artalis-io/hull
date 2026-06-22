@@ -10,8 +10,8 @@
 
 #include "hull/cap/http_async.h"
 #include "hull/cap/audit.h"
-#include "hull/alloc.h"
-#include "hull/async_backend.h"
+#include "hull/utils/alloc.h"
+#include "hull/shared/async_backend.h"
 #include "hull/net_backend.h"
 
 #include <keel/allocator.h>

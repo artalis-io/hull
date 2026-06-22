@@ -11,9 +11,9 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#include "hull/blob_store.h"
+#include "hull/shared/blob_store.h"
 #include "hull/cap/crypto.h"
-#include "hull/alloc.h"
+#include "hull/utils/alloc.h"
 
 #include <ctype.h>
 #include <dirent.h>

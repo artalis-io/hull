@@ -19,9 +19,9 @@
  */
 
 #include "hull/commands/doctor.h"
-#include "hull/blob_store.h"
+#include "hull/shared/blob_store.h"
 #include "hull/build_assets.h"
-#include "hull/cache_registry.h"
+#include "hull/shared/cache_registry.h"
 #include "hull/cacert.h"
 #include "hull/compiler.h"
 #include "hull/module_registry.h"

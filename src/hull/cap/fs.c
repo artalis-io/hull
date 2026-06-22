@@ -8,7 +8,7 @@
  */
 
 #include "hull/cap/fs.h"
-#include "hull/alloc.h"
+#include "hull/utils/alloc.h"
 #include "hull/cap/audit.h"
 #include <stdio.h>
 #include <stdlib.h>

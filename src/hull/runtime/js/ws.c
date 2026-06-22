@@ -12,7 +12,7 @@
 
 #include "internal.h"
 
-#include "hull/async.h"
+#include "hull/shared/async.h"
 #include "hull/cap/ws.h"
 
 #include "mod_buffer.h"

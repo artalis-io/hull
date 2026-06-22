@@ -6,7 +6,7 @@
  */
 
 #include "hull/runtime/cache_common.h"
-#include "hull/cache_dir.h"
+#include "hull/shared/cache_dir.h"
 
 #include <limits.h>
 #include <pthread.h>

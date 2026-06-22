@@ -23,7 +23,7 @@
 #ifndef HL_CAP_BLOB_H
 #define HL_CAP_BLOB_H
 
-#include "hull/blob_store.h"
+#include "hull/shared/blob_store.h"
 
 #include <stddef.h>
 #include <stdint.h>

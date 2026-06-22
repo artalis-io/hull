@@ -16,7 +16,7 @@
 #include "hull/cap/audit.h"
 #include "hull/build_assets.h"
 #include "hull/compiler.h"
-#include "hull/alloc.h"
+#include "hull/utils/alloc.h"
 
 #include <dirent.h>
 #include <errno.h>

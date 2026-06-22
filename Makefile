@@ -218,7 +218,7 @@ ifdef DEBUG
 CFLAGS += -g -O0 -fsanitize=address,undefined -fno-omit-frame-pointer
 LDFLAGS += -fsanitize=address,undefined
 # Event-loop thread-affinity tripwires (no-op in release). See
-# include/hull/thread_affinity.h.
+# include/hull/shared/thread_affinity.h.
 CFLAGS += -DHL_THREAD_AFFINITY_CHECKS
 else ifdef TSAN
 # ThreadSanitizer build. Appends to the normal CFLAGS (Hull's own TUs get
@@ -2293,15 +2293,15 @@ $(BUILDDIR)/lua_rt_%.o: $(SRCDIR)/hull/runtime/lua/%.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Hull allocator
-$(ALLOC_OBJ): $(SRCDIR)/hull/alloc.c | $(BUILDDIR)
+$(ALLOC_OBJ): $(SRCDIR)/hull/utils/alloc.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Hull async glue (runtime-agnostic HlAsyncCtx + callbacks)
-$(ASYNC_OBJ): $(SRCDIR)/hull/async.c | $(BUILDDIR)
+$(ASYNC_OBJ): $(SRCDIR)/hull/shared/async.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Hull compression helper
-$(COMPRESS_OBJ): $(SRCDIR)/hull/compress.c | $(BUILDDIR)
+$(COMPRESS_OBJ): $(SRCDIR)/hull/utils/compress.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # miniz (vendored compression library: relaxed warnings via -w, but
@@ -2455,25 +2455,25 @@ $(VFS_OBJ): $(SRCDIR)/hull/vfs.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Shared path-normalize helper (used by both runtimes' module loaders)
-$(PATH_NORM_OBJ): $(SRCDIR)/hull/path_normalize.c | $(BUILDDIR)
+$(PATH_NORM_OBJ): $(SRCDIR)/hull/utils/path_normalize.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-$(THREAD_AFFINITY_OBJ): $(SRCDIR)/hull/thread_affinity.c | $(BUILDDIR)
+$(THREAD_AFFINITY_OBJ): $(SRCDIR)/hull/shared/thread_affinity.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-$(LOG_LOCK_OBJ): $(SRCDIR)/hull/log_lock.c | $(BUILDDIR)
+$(LOG_LOCK_OBJ): $(SRCDIR)/hull/shared/log_lock.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # $HOME/.hull/cache/ resolver shared by every runtime cache consumer.
-$(CACHE_DIR_OBJ): $(SRCDIR)/hull/cache_dir.c $(INCDIR)/hull/cache_dir.h | $(BUILDDIR)
+$(CACHE_DIR_OBJ): $(SRCDIR)/hull/shared/cache_dir.c $(INCDIR)/hull/shared/cache_dir.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Low-level CAS shared by cap/blob.c and the runtime caches.
-$(BLOB_STORE_OBJ): $(SRCDIR)/hull/blob_store.c $(INCDIR)/hull/blob_store.h | $(BUILDDIR)
+$(BLOB_STORE_OBJ): $(SRCDIR)/hull/shared/blob_store.c $(INCDIR)/hull/shared/blob_store.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Cache kind registry — used by `hull cache list|prune|clear`.
-$(CACHE_REGISTRY_OBJ): $(SRCDIR)/hull/cache_registry.c $(INCDIR)/hull/cache_registry.h | $(BUILDDIR)
+$(CACHE_REGISTRY_OBJ): $(SRCDIR)/hull/shared/cache_registry.c $(INCDIR)/hull/shared/cache_registry.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # App context (shared init for agent, test, MCP)
@@ -2551,7 +2551,7 @@ $(SH_SEAL_ARENA_OBJ): $(KEEL_DIR)/vendor/sh_seal_arena/sh_seal_arena.c $(KEEL_DI
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Content-Security-Policy preset registry.
-$(CSP_OBJ): $(SRCDIR)/hull/csp.c $(INCDIR)/hull/csp.h | $(BUILDDIR)
+$(CSP_OBJ): $(SRCDIR)/hull/utils/csp.c $(INCDIR)/hull/utils/csp.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # QuickJS sources (relaxed warnings)
@@ -2999,7 +2999,7 @@ FUZZ_TIME ?= 60
 fuzz/fuzz_sh_json: fuzz/fuzz_sh_json.c $(SH_JSON_DIR)/sh_json.c $(SH_ARENA_DIR)/sh_arena.c
 	$(CC) $(FUZZ_CFLAGS) -o $@ $^
 
-fuzz/fuzz_path_normalize: fuzz/fuzz_path_normalize.c $(SRCDIR)/hull/path_normalize.c
+fuzz/fuzz_path_normalize: fuzz/fuzz_path_normalize.c $(SRCDIR)/hull/utils/path_normalize.c
 	$(CC) $(FUZZ_CFLAGS) -o $@ $^
 
 fuzz/fuzz_mime_sniff: fuzz/fuzz_mime_sniff.c $(SRCDIR)/hull/cap/mime.c
@@ -3299,7 +3299,7 @@ cppcheck:
 		--error-exitcode=1 \
 		-DHL_QJS_VERSION=\"$(QJS_VERSION)\" \
 		-I$(INCDIR) -I$(QJS_DIR) -I$(LUA_DIR) -I$(SQLITE_DIR) -I$(KEEL_INC) \
-		$(SRCDIR)/hull/main.c $(SRCDIR)/hull/alloc.c $(SRCDIR)/hull/static.c $(SRCDIR)/hull/app_context.c $(SRCDIR)/hull/agent/*.c $(SRCDIR)/hull/agent_api.c $(SRCDIR)/hull/cap/*.c \
+		$(SRCDIR)/hull/main.c $(SRCDIR)/hull/utils/alloc.c $(SRCDIR)/hull/static.c $(SRCDIR)/hull/app_context.c $(SRCDIR)/hull/agent/*.c $(SRCDIR)/hull/agent_api.c $(SRCDIR)/hull/cap/*.c \
 		$(SRCDIR)/hull/commands/*.c \
 		$(SRCDIR)/hull/runtime/js/*.c $(SRCDIR)/hull/runtime/lua/*.c 2>&1
 

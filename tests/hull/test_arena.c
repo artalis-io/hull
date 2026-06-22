@@ -12,7 +12,7 @@
  */
 
 #include "utest.h"
-#include "hull/alloc.h"
+#include "hull/utils/alloc.h"
 #include <sh_arena.h>
 #include <stdint.h>
 #include <stdlib.h>

@@ -24,9 +24,9 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-#include "hull/async_backend.h"
+#include "hull/shared/async_backend.h"
 #include "hull/async/keel.h"
-#include "hull/alloc.h"
+#include "hull/utils/alloc.h"
 
 #include <keel/event_ctx.h>
 #include <keel/timer.h>

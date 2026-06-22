@@ -12,7 +12,7 @@
 #define HULL_JS_MOD_BUFFER_H
 
 #include "hull/runtime/js.h"
-#include "hull/buffer.h"
+#include "hull/utils/buffer.h"
 #include "hull/cap/fs.h"
 #include "hull/module_registry.h"
 #include "hull/module_resolver.h"

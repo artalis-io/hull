@@ -12,7 +12,7 @@
 #include "hull/reqctx.h"
 #include "hull/limits/core.h"
 #include "hull/cap/body.h"
-#include "hull/compress.h"
+#include "hull/utils/compress.h"
 #include "internal.h"  /* hl_lua_request_install_multipart */
 
 #include "lua.h"

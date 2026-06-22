@@ -6,7 +6,7 @@
 #include "mod_buffer.h"
 #include "hull/cap/http.h"
 #include "hull/cap/http_async.h"
-#include "hull/async.h"
+#include "hull/shared/async.h"
 
 #include <keel/server.h>
 

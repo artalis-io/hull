@@ -12,7 +12,7 @@
 
 #include "hull/cap/db.h"
 #include "hull/cap/audit.h"
-#include "hull/alloc.h"
+#include "hull/utils/alloc.h"
 #include <sqlite3.h>
 #include <limits.h>
 #include <stdio.h>

@@ -12,7 +12,7 @@
 #include "hull/reqctx.h"
 #include "hull/limits/core.h"
 #include "hull/cap/body.h"
-#include "hull/compress.h"
+#include "hull/utils/compress.h"
 #include "mod_buffer.h"  /* js_get_buffer + HlBufferView (for res.bytes) */
 #include "internal.h"  /* hl_js_request_install_multipart */
 #include "quickjs.h"

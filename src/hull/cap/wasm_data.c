@@ -12,7 +12,7 @@
 #include "hull/cap/wasm_data.h"
 #include "hull/cap/wasm.h"
 #include "hull/limits/wasm.h"
-#include "hull/thread_affinity.h"
+#include "hull/shared/thread_affinity.h"
 #include "hull/vfs.h"
 #include "log.h"
 #include "wasm_export.h"

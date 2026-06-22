@@ -18,7 +18,7 @@
 #include "hull/manifest.h"
 #include "hull/module_resolver.h"
 #include <sh_seal_arena.h>
-#include "hull/alloc.h"
+#include "hull/utils/alloc.h"
 
 #include <signal.h>
 #include <stdint.h>
