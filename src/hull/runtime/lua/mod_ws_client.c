@@ -31,7 +31,10 @@
 #define HL_WS_CLIENT_CONN_MT "HlWsClientConn"
 
 typedef struct HlLuaWsClientUD {
-    KlWsClientConn *client;      /* NULL after free */
+    KlWsClientConn *client;      /* NULL after free (GC only) */
+    int             closed;      /* 1 after on_close: fail methods closed,
+                                  * but keep `client` so __gc still frees it
+                                  * (Keel does not free the conn on close) */
     int             on_open_ref;
     int             on_message_ref;
     int             on_close_ref;
@@ -47,7 +50,7 @@ static int lua_ws_client_send(lua_State *L)
 {
     HlLuaWsClientUD *ud = (HlLuaWsClientUD *)luaL_checkudata(L, 1,
                                                                 HL_WS_CLIENT_CONN_MT);
-    if (!ud->client)
+    if (!ud->client || ud->closed)
         return luaL_error(L, "client connection closed");
 
     size_t len;
@@ -62,7 +65,7 @@ static int lua_ws_client_send_binary(lua_State *L)
 {
     HlLuaWsClientUD *ud = (HlLuaWsClientUD *)luaL_checkudata(L, 1,
                                                                 HL_WS_CLIENT_CONN_MT);
-    if (!ud->client)
+    if (!ud->client || ud->closed)
         return luaL_error(L, "client connection closed");
 
     size_t len;
@@ -77,7 +80,7 @@ static int lua_ws_client_close(lua_State *L)
 {
     HlLuaWsClientUD *ud = (HlLuaWsClientUD *)luaL_checkudata(L, 1,
                                                                 HL_WS_CLIENT_CONN_MT);
-    if (!ud->client)
+    if (!ud->client || ud->closed)
         return 0;
 
     uint16_t code = (uint16_t)luaL_optinteger(L, 2, 1000);
@@ -92,7 +95,7 @@ static int lua_ws_client_ping(lua_State *L)
 {
     HlLuaWsClientUD *ud = (HlLuaWsClientUD *)luaL_checkudata(L, 1,
                                                                 HL_WS_CLIENT_CONN_MT);
-    if (!ud->client)
+    if (!ud->client || ud->closed)
         return 0;
 
     size_t len = 0;
@@ -207,7 +210,11 @@ static void lua_ws_client_on_close(KlWsClientConn *ws, uint16_t code,
         luaL_unref(ud->L, LUA_REGISTRYINDEX, ud->self_ref);
         ud->self_ref = LUA_NOREF;
     }
-    ud->client = NULL;
+    /* Mark closed (methods fail closed) but keep `client` non-NULL so __gc
+     * frees the KlWsClientConn — Keel does NOT free it on close, and we must
+     * not free it here either (Keel touches `ws` immediately after this
+     * callback returns: `ws->state = WSC_CLOSED; wsc_close_connection(ws)`). */
+    ud->closed = 1;
 }
 
 static void lua_ws_client_on_error(KlWsClientConn *ws, const char *msg,
@@ -265,6 +272,7 @@ static int lua_ws_connect(lua_State *L)
     HlLuaWsClientUD *ud = (HlLuaWsClientUD *)lua_newuserdata(L,
                                                                 sizeof(HlLuaWsClientUD));
     ud->client = NULL;
+    ud->closed = 0;
     ud->on_open_ref = LUA_NOREF;
     ud->on_message_ref = LUA_NOREF;
     ud->on_close_ref = LUA_NOREF;

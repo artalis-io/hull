@@ -28,7 +28,11 @@
 static JSClassID js_ws_client_conn_class_id;
 
 typedef struct {
-    KlWsClientConn *client;      /* NULL after free */
+    KlWsClientConn *client;      /* NULL after free (finalizer only) */
+    int             closed;      /* 1 after on_close: fail methods closed,
+                                  * but keep `client` so the finalizer still
+                                  * frees it (Keel does not free the conn on
+                                  * close) */
     JSValue         on_open;     /* DupValue'd callbacks */
     JSValue         on_message;
     JSValue         on_close;
@@ -88,7 +92,7 @@ static JSValue js_ws_client_send(JSContext *ctx, JSValueConst this_val,
     (void)argc;
     HlJSWsClientUD *ud = (HlJSWsClientUD *)JS_GetOpaque2(ctx, this_val,
                                                              js_ws_client_conn_class_id);
-    if (!ud || !ud->client)
+    if (!ud || !ud->client || ud->closed)
         return JS_ThrowTypeError(ctx, "client connection closed");
 
     size_t len;
@@ -106,7 +110,7 @@ static JSValue js_ws_client_send_binary(JSContext *ctx, JSValueConst this_val,
     (void)argc;
     HlJSWsClientUD *ud = (HlJSWsClientUD *)JS_GetOpaque2(ctx, this_val,
                                                              js_ws_client_conn_class_id);
-    if (!ud || !ud->client)
+    if (!ud || !ud->client || ud->closed)
         return JS_ThrowTypeError(ctx, "client connection closed");
 
     size_t len;
@@ -127,7 +131,7 @@ static JSValue js_ws_client_close(JSContext *ctx, JSValueConst this_val,
 {
     HlJSWsClientUD *ud = (HlJSWsClientUD *)JS_GetOpaque2(ctx, this_val,
                                                              js_ws_client_conn_class_id);
-    if (!ud || !ud->client)
+    if (!ud || !ud->client || ud->closed)
         return JS_UNDEFINED;
 
     uint32_t code = 1000;
@@ -149,7 +153,7 @@ static JSValue js_ws_client_ping(JSContext *ctx, JSValueConst this_val,
 {
     HlJSWsClientUD *ud = (HlJSWsClientUD *)JS_GetOpaque2(ctx, this_val,
                                                              js_ws_client_conn_class_id);
-    if (!ud || !ud->client)
+    if (!ud || !ud->client || ud->closed)
         return JS_UNDEFINED;
 
     const char *data = NULL;
@@ -257,7 +261,11 @@ static void js_ws_client_on_close(KlWsClientConn *ws, uint16_t code,
         JS_FreeValue(ud->ctx, ud->self_ref);
         ud->self_ref = JS_UNDEFINED;
     }
-    ud->client = NULL;
+    /* Mark closed (methods fail closed) but keep `client` non-NULL so the
+     * finalizer frees the KlWsClientConn — Keel does NOT free it on close,
+     * and we must not free it here (Keel touches `ws` immediately after this
+     * callback returns: `ws->state = WSC_CLOSED; wsc_close_connection(ws)`). */
+    ud->closed = 1;
 }
 
 static void js_ws_client_on_error(KlWsClientConn *ws, const char *msg,
@@ -373,6 +381,7 @@ static JSValue js_ws_connect(JSContext *ctx, JSValueConst this_val,
     ud->ctx = ctx;
     ud->js = js;
     ud->client = NULL;
+    ud->closed = 0;
 
     JS_SetOpaque(obj, ud);
 
