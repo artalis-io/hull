@@ -8,6 +8,25 @@ release-artifact layout).
 
 ## [Unreleased]
 
+### Build flavors
+
+- **All four HTTP build flavors now link clean and are CI-covered.**
+  Fixed the `HL_ENABLE_HTTP_CLIENT=0` (server-only) and `HL_ENABLE_HTTP=0`
+  (pure-compute) link breaks and added both to the `flavors` matrix in
+  `.github/workflows/ci.yml` (each builds, runs `hull version`, and runs
+  an `app.main` exit-code smoke). Server-only: `release_io.c`'s offline
+  helpers (used unconditionally by `hull verify-self`) are no longer gated
+  out alongside the HTTPS fetch path. Pure-compute: with both HTTP halves
+  off, mbedTLS is dropped entirely, so Hull's own hashing now runs on
+  in-tree implementations (hand-rolled SHA-1, the cap layer's
+  self-contained SHA-256, TweetNaCl SHA-512, and a portable HMAC backend)
+  instead of `mbedtls_sha*` / `mbedtls_md_hmac`. Default and HTTP-on builds
+  are byte-for-byte unchanged.
+- Documented the pure-compute flavor in `CLAUDE.md` ("Pure-compute builds")
+  with the mbedtls-free hashing path, the contributor invariant (core code
+  must hash via the cap layer, never mbedTLS directly), and refreshed the
+  flavor binary-size table to measured values.
+
 ## [0.4.0] — 2026-06-17
 
 HTMX widget tier completed (8 widgets total: toast, confirm, form,

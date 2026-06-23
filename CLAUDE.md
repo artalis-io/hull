@@ -146,18 +146,45 @@ Combine flags freely: `make HL_ENABLE_DB=0 HL_ENABLE_WASM=1 HL_ENABLE_TCC=0` yie
 
 ### HTTP build flavors
 
-The two HTTP flags are independent. Each combination produces a useful binary (arm64 Darwin sizes for the default `make` invocation):
+The two HTTP flags are independent. Each combination produces a useful binary (arm64 Darwin sizes for the default `make` invocation, i.e. DB + WASM + TUI + TCC all on):
 
 | Flavor | Server | Client | Binary | Use case |
 |---|---|---|---|---|
-| Default | 1 | 1 | ~5.0 MB | Full HTTP. Web apps that serve requests and call out to APIs. |
-| Server-only | 1 | 0 | ~5.0 MB | Apps that handle inbound HTTP but are forbidden from making outgoing HTTP calls (compliance, network isolation). |
-| **Client-only** | 0 | 1 | ~4.9 MB | CLI tools that call APIs over HTTPS. No HTTP listener; `http.fetch("https://...")` works from `app.main(fn)`. Keel + mbedTLS stay linked. |
-| Pure compute | 0 | 0 | ~4.4 MB | Compute / CLI binary with no HTTP, no Keel, no mbedTLS. Smallest possible build. |
+| Default | 1 | 1 | ~6.5 MB | Full HTTP. Web apps that serve requests and call out to APIs. |
+| Server-only | 1 | 0 | ~6.5 MB | Apps that handle inbound HTTP but are forbidden from making outgoing HTTP calls (compliance, network isolation). Keel + mbedTLS stay linked. |
+| **Client-only** | 0 | 1 | ~6.5 MB | CLI tools that call APIs over HTTPS. No HTTP listener; `http.fetch("https://...")` works from `app.main(fn)`. Keel + mbedTLS stay linked. |
+| Pure compute | 0 | 0 | ~5.8 MB | Compute / CLI binary with no HTTP, no Keel, no mbedTLS. See "Pure-compute builds" below. |
 
-**Linker dependencies.** Keel's `libkeel.a` and mbedTLS are linked whenever either HTTP flag is on (Keel ships both halves; the linker dead-strips the unused side). The compile-time `-DHL_ENABLE_HTTP` macro is defined in that same case, so existing source guards continue to work. `HL_ENABLE_HTTP_SERVER` / `HL_ENABLE_HTTP_CLIENT` are only used where the distinction matters.
+All four flavors are link-validated on every push by the `flavors` matrix in `.github/workflows/ci.yml` (each builds, runs `hull version`, and runs an `app.main` exit-code smoke).
+
+**Linker dependencies.** Keel's `libkeel.a` and mbedTLS are linked whenever either HTTP flag is on (Keel ships both halves; the linker dead-strips the unused side). The compile-time `-DHL_ENABLE_HTTP` macro is defined in that same case, so existing source guards continue to work. `HL_ENABLE_HTTP_SERVER` / `HL_ENABLE_HTTP_CLIENT` are only used where the distinction matters. When **both** halves are off, mbedTLS is dropped entirely; see "Pure-compute builds" for how Hull's own hashing stays available without it.
 
 **Migration note.** The single `HL_ENABLE_HTTP` flag is now a back-compat alias. New code targeting one half (e.g. an HTTP-server-only middleware, or a CLI tool that needs outbound HTTPS) should use the granular flags directly.
+
+### Pure-compute builds (`HL_ENABLE_HTTP=0`)
+
+`make HL_ENABLE_HTTP=0` turns **both** HTTP halves off (it's the back-compat alias that pins `HL_ENABLE_HTTP_SERVER=0` and `HL_ENABLE_HTTP_CLIENT=0`). This is the only flavor that drops **mbedTLS and Keel entirely**. Use it for an offline, network-free compute or signing binary: a WASM/GPU transform pipeline, a local data tool, an air-gapped batch job. Apps run via `app.main(fn)`.
+
+What's removed (on top of the server-only / client-only drops):
+- `vendor/mbedtls/**` (the whole TLS stack) and Keel's `libkeel.a`
+- Outbound `http.fetch` (cap/http + cap/http_async), SMTP (cap/smtp), `hull update`
+- The inbound HTTP server, routing, middleware, WebSocket, SSE, and the in-process test harness
+
+What's unavailable to app code:
+- `http`, `ws.*`, `sse` and every `hull/web/*` module; `hull/http-client`, `hull/http-server`, `hull/smtp`, `hull/email`
+- `hull dev` / `hull test` / `hull agent` / `hull mcp` (they need the HTTP server) and `hull update` (needs the HTTPS client)
+
+What still works:
+- Lua / QuickJS runtimes, sandbox, instruction limits, audit logging, `app.main`
+- `compute.*` (WASM), `gpu.*`, `fs.*`, `db.*` (unless also `HL_ENABLE_DB=0`), `time.*`, `env.*`, templates, image codecs, CSV, i18n, validation, `hull.tui`
+- **`crypto.*` in full, including `crypto.hmac_*` and `hull/jwt`.** mbedTLS is gone, so Hull's own hashing falls back to in-tree implementations: SHA-256 is the cap layer's self-contained transform (HW-accelerated where available), SHA-1 is hand-rolled in `cap/crypto.c` (RFC 3174), SHA-512 comes from TweetNaCl, and HMAC routes through the portable backend `hl_crypto_hmac_backend_portable` (selected via the `HL_HMAC_BACKEND` macro only in this flavor; HTTP builds keep the mbedTLS HMAC backend byte-for-byte). Ed25519 / NaCl box / secretbox are TweetNaCl as always.
+- `hull build`, `hull compute`, `hull sbom`, `hull doctor`, `hull cache`, `hull keygen`, `hull verify` / `verify-self` / `verify-release`
+
+> **Invariant for contributors:** core C code (`cap/`, `commands/`, `shared/`) must hash via `hl_cap_crypto_sha256` / the cap HMAC entry points, **never** `mbedtls_sha*` / `mbedtls_md_hmac` directly. A direct mbedTLS hash call re-breaks this flavor at link time (the `flavors` CI job catches it).
+
+Binary size on arm64 Darwin: ~5.8 MB vs ~6.5 MB for the default build. Combine with `HL_ENABLE_DB=0` (and optionally `HL_ENABLE_TUI=0` / `HL_ENABLE_TCC=0`) for the smallest possible compute runtime.
+
+Pure-compute is a **build flavor, not a published release artifact**. The signed `hull.sha256` release manifest covers the four standard binaries (`hull-linux-x86_64`, `hull-linux-aarch64`, `hull-darwin-arm64`, `hull-cosmo`), all full-HTTP. Build pure-compute from source with the flag above; publishing a signed pure-compute binary would be a separate release-pipeline decision (new matrix entry + manifest line + `install.sh` flavor).
 
 ### Compute-only builds (`HL_ENABLE_DB=0`)
 
