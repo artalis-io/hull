@@ -191,10 +191,13 @@ jobs:
             flags: HL_ENABLE_HTTP_CLIENT=0
           - name: compute-only (no db)
             flags: HL_ENABLE_DB=0
-          # NOTE: pure-compute (HL_ENABLE_HTTP=0) is NOT yet covered — core
-          # crypto.c uses mbedtls_sha256 but mbedTLS is dropped when both HTTP
-          # halves are off (and release_io.c's sha256_hex has the same dep).
-          # Add it here once core crypto has a SHA path without mbedTLS.
+          # pure-compute: both HTTP halves off, so mbedTLS is dropped entirely.
+          # Core hashing (crypto.c, release_io.c, sbom.c, verify_self.c) runs on
+          # the cap layer's self-contained SHA-256 + hand-rolled SHA-1, and HMAC
+          # routes through the portable backend. This flavor proves none of that
+          # silently regressed back onto an mbedTLS symbol.
+          - name: pure-compute (no http at all)
+            flags: HL_ENABLE_HTTP=0
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:

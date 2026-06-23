@@ -239,6 +239,15 @@ typedef struct HlCryptoHmacBackend {
  */
 extern const HlCryptoHmacBackend hl_crypto_hmac_backend_mbedtls;
 
+/** Portable, mbedTLS-free HMAC backend. Computes HMAC over the in-tree
+ *  hand-rolled hashes (SHA-256 incremental + SHA-1). Always compiled, so
+ *  it is testable in every build; the cap layer selects it as the active
+ *  backend only when mbedTLS is absent (the pure-compute flavor, built
+ *  with both HTTP halves off). Supports HMAC-SHA1 + HMAC-SHA256; rejects
+ *  HMAC-SHA512 (the cap layer never requests it).
+ */
+extern const HlCryptoHmacBackend hl_crypto_hmac_backend_portable;
+
 /**
  * @brief Compute HMAC-SHA1.
  *

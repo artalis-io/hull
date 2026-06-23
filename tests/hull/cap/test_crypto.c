@@ -350,6 +350,105 @@ UTEST(hl_cap_crypto, hmac_sha256_null_args)
     ASSERT_EQ(-1, hl_cap_crypto_hmac_sha256(key, sizeof(key), (const uint8_t *)msg, 1, NULL));
 }
 
+/* ── Portable (mbedtls-free) HMAC backend ───────────────────────────
+ *
+ * hl_crypto_hmac_backend_portable is the active HMAC backend in the
+ * pure-compute flavor (mbedTLS dropped). It is always compiled, so these
+ * tests cover it in every build — independently of which backend the cap
+ * entry points dispatch through here. RFC 4231 / RFC 2202 vectors prove
+ * the hand-rolled construction is correct; the cross-check proves it is
+ * byte-identical to whatever backend hl_cap_crypto_hmac_* uses. */
+UTEST(hl_cap_crypto, hmac_portable_sha256_rfc4231_vector1)
+{
+    const HlCryptoHmacBackend *b = &hl_crypto_hmac_backend_portable;
+    uint8_t key[20];
+    for (int i = 0; i < 20; i++) key[i] = 0x0b;
+    const char *msg = "Hi There";
+    uint8_t out[32];
+    ASSERT_EQ(1, b->supports(HL_CRYPTO_HMAC_SHA256));
+    ASSERT_EQ(0, b->compute(b, HL_CRYPTO_HMAC_SHA256, key, sizeof(key),
+                            (const uint8_t *)msg, 8, out, 32));
+    const uint8_t expected[32] = {
+        0xb0, 0x34, 0x4c, 0x61, 0xd8, 0xdb, 0x38, 0x53,
+        0x5c, 0xa8, 0xaf, 0xce, 0xaf, 0x0b, 0xf1, 0x2b,
+        0x88, 0x1d, 0xc2, 0x00, 0xc9, 0x83, 0x3d, 0xa7,
+        0x26, 0xe9, 0x37, 0x6c, 0x2e, 0x32, 0xcf, 0xf7,
+    };
+    ASSERT_EQ(0, memcmp(out, expected, 32));
+}
+
+UTEST(hl_cap_crypto, hmac_portable_sha1_rfc2202_vector1)
+{
+    const HlCryptoHmacBackend *b = &hl_crypto_hmac_backend_portable;
+    uint8_t key[20];
+    for (int i = 0; i < 20; i++) key[i] = 0x0b;
+    const char *msg = "Hi There";
+    uint8_t out[20];
+    ASSERT_EQ(1, b->supports(HL_CRYPTO_HMAC_SHA1));
+    ASSERT_EQ(0, b->compute(b, HL_CRYPTO_HMAC_SHA1, key, sizeof(key),
+                            (const uint8_t *)msg, 8, out, 20));
+    /* RFC 2202 HMAC-SHA1 Test Case 1. */
+    const uint8_t expected[20] = {
+        0xb6, 0x17, 0x31, 0x86, 0x55, 0x05, 0x72, 0x64,
+        0xe2, 0x8b, 0xc0, 0xb6, 0xfb, 0x37, 0x8c, 0x8e,
+        0xf1, 0x46, 0xbe, 0x00,
+    };
+    ASSERT_EQ(0, memcmp(out, expected, 20));
+}
+
+UTEST(hl_cap_crypto, hmac_portable_long_key_prehashed)
+{
+    /* RFC 2104 §2: keys longer than the 64-byte block are prehashed.
+     * Exercises the >block-size K' = H(K) branch for both algs. */
+    const HlCryptoHmacBackend *b = &hl_crypto_hmac_backend_portable;
+    uint8_t key[131];
+    for (int i = 0; i < 131; i++) key[i] = 0xaa;
+    const char *msg = "Test Using Larger Than Block-Size Key - Hash Key First";
+    size_t mlen = strlen(msg);
+
+    uint8_t mac256[32];
+    ASSERT_EQ(0, b->compute(b, HL_CRYPTO_HMAC_SHA256, key, sizeof(key),
+                            (const uint8_t *)msg, mlen, mac256, 32));
+    /* RFC 4231 Test Case 6 expected MAC. */
+    const uint8_t exp256[32] = {
+        0x60, 0xe4, 0x31, 0x59, 0x1e, 0xe0, 0xb6, 0x7f,
+        0x0d, 0x8a, 0x26, 0xaa, 0xcb, 0xf5, 0xb7, 0x7f,
+        0x8e, 0x0b, 0xc6, 0x21, 0x37, 0x28, 0xc5, 0x14,
+        0x05, 0x46, 0x04, 0x0f, 0x0e, 0xe3, 0x7f, 0x54,
+    };
+    ASSERT_EQ(0, memcmp(mac256, exp256, 32));
+}
+
+UTEST(hl_cap_crypto, hmac_portable_matches_cap_and_rejects_sha512)
+{
+    /* Whatever backend the cap entry points use here, the portable one
+     * must produce identical output (no silent divergence between flavors). */
+    const HlCryptoHmacBackend *b = &hl_crypto_hmac_backend_portable;
+    const uint8_t key[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    const char *msg = "cross-check the backends agree";
+    size_t mlen = strlen(msg);
+
+    uint8_t via_cap[32], via_portable[32];
+    ASSERT_EQ(0, hl_cap_crypto_hmac_sha256(key, sizeof(key),
+                                           (const uint8_t *)msg, mlen, via_cap));
+    ASSERT_EQ(0, b->compute(b, HL_CRYPTO_HMAC_SHA256, key, sizeof(key),
+                            (const uint8_t *)msg, mlen, via_portable, 32));
+    ASSERT_EQ(0, memcmp(via_cap, via_portable, 32));
+
+    uint8_t cap1[20], port1[20];
+    ASSERT_EQ(0, hl_cap_crypto_hmac_sha1(key, sizeof(key),
+                                         (const uint8_t *)msg, mlen, cap1));
+    ASSERT_EQ(0, b->compute(b, HL_CRYPTO_HMAC_SHA1, key, sizeof(key),
+                            (const uint8_t *)msg, mlen, port1, 20));
+    ASSERT_EQ(0, memcmp(cap1, port1, 20));
+
+    /* SHA-512 HMAC is intentionally unsupported by the portable backend. */
+    uint8_t out512[64];
+    ASSERT_EQ(0, b->supports(HL_CRYPTO_HMAC_SHA512));
+    ASSERT_EQ(-1, b->compute(b, HL_CRYPTO_HMAC_SHA512, key, sizeof(key),
+                             (const uint8_t *)msg, mlen, out512, 64));
+}
+
 /* ── PBKDF2 tests ───────────────────────────────────────────────────── */
 
 UTEST(hl_cap_crypto, pbkdf2_basic)

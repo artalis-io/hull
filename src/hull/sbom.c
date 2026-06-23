@@ -67,7 +67,11 @@
 
 #if defined(HL_EMBED_CA_BUNDLE) || defined(HL_SBOM_HASH_BLOBS)
 #define HL_SBOM_HAS_MBEDTLS 1
-#include "mbedtls/sha256.h"
+/* SHA-256 comes from the cap layer's self-contained implementation, not
+ * mbedTLS, so the SBOM hashing helpers link in the pure-compute flavor too
+ * (mbedTLS is dropped there). The gate name is retained for back-compat; it
+ * now just toggles whether these hashing helpers are compiled at all. */
+#include "hull/cap/crypto.h"
 
 /* Encode raw SHA-256 bytes as lowercase hex; writes exactly
  * HL_SHA256_HEX_LEN chars plus a NUL terminator into out_hex. */
@@ -87,7 +91,7 @@ static const char *compute_blob_sha256(const unsigned char *data, size_t len,
 {
     if (*cached) return cache;
     unsigned char digest[HL_SHA256_DIGEST_BYTES];
-    if (mbedtls_sha256(data, len, digest, 0) != 0) {
+    if (hl_cap_crypto_sha256(data, len, digest) != 0) {
         snprintf(cache, HL_SHA256_HEX_BUF, "error");
         *cached = 1;
         return cache;
@@ -132,17 +136,15 @@ void hl_sbom_set_binary_path(const char *path)
 
 #ifdef HL_SBOM_HAS_MBEDTLS
 /* Read the file at g_binary_path into a buffer and hash via the one-shot
- * mbedTLS SHA-256 API (same primitive used by release_io's sha256_hex
- * and by compute_blob_sha256 above; MSan-verified everywhere it's used).
+ * cap-layer SHA-256 (hl_cap_crypto_sha256, same primitive used by
+ * release_io's sha256_hex and by compute_blob_sha256 above).
  * Returns a cached static hex string, or NULL if the path is unset, the
  * file can't be opened, exceeds the size cap, or any I/O step fails.
  *
- * Implementation note: we initially used the streaming _starts/_update/
- * _finish API for memory friendliness but MSan-instrumented mbedTLS
- * misreports uninitialized context state through that path. The one-shot
- * API is well-trodden across Hull and ~15 MB of malloc for the binary is
- * trivially OK. The HL_SBOM_BINARY_MAX_BYTES cap prevents accidental
- * runaway allocation if the path is mis-targeted at a giant file. */
+ * Whole-file read rather than chunked streaming: ~15 MB of malloc for the
+ * binary is trivially OK, and the one-shot API is well-trodden across Hull.
+ * The HL_SBOM_BINARY_MAX_BYTES cap prevents accidental runaway allocation
+ * if the path is mis-targeted at a giant file. */
 static const char *sha256_binary(void)
 {
     if (g_binary_sha_tried) return g_binary_sha_cache[0] ? g_binary_sha_cache : NULL;
@@ -164,7 +166,7 @@ static const char *sha256_binary(void)
     if (got != (size_t)sz) { free(buf); return NULL; }
 
     unsigned char digest[HL_SHA256_DIGEST_BYTES];
-    int rc = mbedtls_sha256(buf, got, digest, 0);
+    int rc = hl_cap_crypto_sha256(buf, got, digest);
     free(buf);
     if (rc != 0) return NULL;
     hex_encode_sha256(digest, g_binary_sha_cache);

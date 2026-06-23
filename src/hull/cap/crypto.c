@@ -10,7 +10,8 @@
 
 #include "hull/cap/crypto.h"
 #include "tweetnacl.h"
-#include <mbedtls/sha1.h>  /* LEGACY: only for hl_cap_crypto_sha1 */
+/* SHA-1 is hand-rolled below (hl_cap_crypto_sha1) so it works in mbedtls-free
+ * builds, same as the hand-rolled SHA-256 in this file. No mbedtls include. */
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
@@ -707,6 +708,16 @@ int hl_cap_crypto_random(void *buf, size_t len)
 #endif
 }
 
+/* Active HMAC backend. mbedTLS when it is linked (any build with an HTTP
+ * half); the portable hand-rolled backend in the pure-compute flavor, where
+ * mbedTLS is dropped. Both symbols always exist — this only picks which one
+ * the cap entry points dispatch through. */
+#ifdef HL_ENABLE_HTTP
+#define HL_HMAC_BACKEND hl_crypto_hmac_backend_mbedtls
+#else
+#define HL_HMAC_BACKEND hl_crypto_hmac_backend_portable
+#endif
+
 /* ── HMAC-SHA256 (vtable-dispatched) ───────────────────────────────── */
 
 int hl_cap_crypto_hmac_sha256(const uint8_t *key, size_t key_len,
@@ -724,8 +735,8 @@ int hl_cap_crypto_hmac_sha256(const uint8_t *key, size_t key_len,
      * reach the backend implementation. */
     if (!key || !msg || !out)
         return -1;
-    return hl_crypto_hmac_backend_mbedtls.compute(
-        &hl_crypto_hmac_backend_mbedtls,
+    return HL_HMAC_BACKEND.compute(
+        &HL_HMAC_BACKEND,
         HL_CRYPTO_HMAC_SHA256,
         key, key_len, msg, msg_len, out, 32);
 }
@@ -746,8 +757,8 @@ int hl_cap_crypto_hmac_sha1(const uint8_t *key, size_t key_len,
      * depth (the backend would reject too) but keeps the two
      * cap entry points symmetric. */
     if (!key || !msg || !out) return -1;
-    return hl_crypto_hmac_backend_mbedtls.compute(
-        &hl_crypto_hmac_backend_mbedtls,
+    return HL_HMAC_BACKEND.compute(
+        &HL_HMAC_BACKEND,
         HL_CRYPTO_HMAC_SHA1,
         key, key_len, msg, msg_len, out, 20);
 }
@@ -1116,12 +1127,199 @@ int hl_cap_crypto_sha512(const void *data, size_t len, uint8_t out[64])
  * misuse.
  */
 
+/* ── SHA-1 (legacy interop only) ──────────────────────────────────────
+ *
+ * Hand-rolled (RFC 3174) so it works in mbedtls-free builds, the same way
+ * SHA-256 above is hand-rolled. SHA-1 is collision-broken — it is exposed
+ * only for legacy interop (e.g. the HIBP k-anonymity prefix in
+ * hull/web/pwned) and HMAC-SHA1 (HOTP/TOTP), never as a collision-resistant
+ * security primitive.
+ *
+ * Implemented in incremental (block-streaming) form, mirroring the SHA-256
+ * context above, so the portable HMAC backend below can absorb the ipad/opad
+ * block and the message without a heap concat. The context type stays
+ * file-local — SHA-1 is legacy, so it is not added to the public header. */
+static uint32_t sha1_rol(uint32_t v, int n) { return (v << n) | (v >> (32 - n)); }
+
+static void sha1_block(uint32_t h[5], const uint8_t *p)
+{
+    uint32_t w[80];
+    for (int i = 0; i < 16; i++)
+        w[i] = ((uint32_t)p[i*4] << 24) | ((uint32_t)p[i*4+1] << 16) |
+               ((uint32_t)p[i*4+2] << 8) | (uint32_t)p[i*4+3];
+    for (int i = 16; i < 80; i++)
+        w[i] = sha1_rol(w[i-3] ^ w[i-8] ^ w[i-14] ^ w[i-16], 1);
+
+    uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4];
+    for (int i = 0; i < 80; i++) {
+        uint32_t f, k;
+        if      (i < 20) { f = (b & c) | (~b & d);          k = 0x5A827999u; }
+        else if (i < 40) { f = b ^ c ^ d;                   k = 0x6ED9EBA1u; }
+        else if (i < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8F1BBCDCu; }
+        else             { f = b ^ c ^ d;                   k = 0xCA62C1D6u; }
+        uint32_t t = sha1_rol(a, 5) + f + e + k + w[i];
+        e = d; d = c; c = sha1_rol(b, 30); b = a; a = t;
+    }
+    h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e;
+}
+
+typedef struct {
+    uint32_t state[5];
+    uint8_t  buf[64];
+    size_t   buf_len;     /* unprocessed bytes in buf, always < 64 */
+    uint64_t total_bits;
+} Sha1Ctx;
+
+static void sha1_init(Sha1Ctx *c)
+{
+    c->state[0] = 0x67452301u; c->state[1] = 0xEFCDAB89u;
+    c->state[2] = 0x98BADCFEu; c->state[3] = 0x10325476u;
+    c->state[4] = 0xC3D2E1F0u;
+    c->buf_len = 0;
+    c->total_bits = 0;
+}
+
+static void sha1_update(Sha1Ctx *c, const void *data, size_t len)
+{
+    const uint8_t *p = (const uint8_t *)data;
+    c->total_bits += (uint64_t)len * 8;
+    if (c->buf_len) {
+        while (len && c->buf_len < 64) { c->buf[c->buf_len++] = *p++; len--; }
+        if (c->buf_len == 64) { sha1_block(c->state, c->buf); c->buf_len = 0; }
+    }
+    while (len >= 64) { sha1_block(c->state, p); p += 64; len -= 64; }
+    while (len) { c->buf[c->buf_len++] = *p++; len--; }
+}
+
+static void sha1_final(Sha1Ctx *c, uint8_t out[20])
+{
+    uint64_t bits = c->total_bits;
+    size_t bl = c->buf_len;          /* 0..63 */
+    c->buf[bl++] = 0x80;             /* always room: buf_len was < 64 */
+    if (bl > 56) {
+        if (bl < 64) memset(c->buf + bl, 0, 64 - bl);
+        sha1_block(c->state, c->buf);
+        memset(c->buf, 0, 56);
+    } else {
+        memset(c->buf + bl, 0, 56 - bl);
+    }
+    for (int i = 0; i < 8; i++)
+        c->buf[56 + i] = (uint8_t)(bits >> (56 - 8 * i));
+    sha1_block(c->state, c->buf);
+    for (int i = 0; i < 5; i++) {
+        out[i*4]   = (uint8_t)(c->state[i] >> 24);
+        out[i*4+1] = (uint8_t)(c->state[i] >> 16);
+        out[i*4+2] = (uint8_t)(c->state[i] >> 8);
+        out[i*4+3] = (uint8_t)(c->state[i]);
+    }
+}
+
 int hl_cap_crypto_sha1(const void *data, size_t len, uint8_t out[20])
 {
     if (!out || (!data && len > 0))
         return -1;
-    return mbedtls_sha1((const unsigned char *)data, len, out);
+    Sha1Ctx c;
+    sha1_init(&c);
+    sha1_update(&c, data, len);
+    sha1_final(&c, out);
+    return 0;
 }
+
+/* ── Portable HMAC backend (mbedtls-free) ─────────────────────────────
+ *
+ * HMAC per RFC 2104 over the in-tree hand-rolled hashes. Selected by the
+ * cap layer (HL_HMAC_BACKEND, above) only in the pure-compute flavor where
+ * mbedTLS is not linked; always compiled so test_crypto exercises it in
+ * every build. Block size is 64 for both SHA-1 and SHA-256. The ipad/opad
+ * block and the message are absorbed incrementally — no heap, any message
+ * length. HMAC-SHA512 is intentionally unsupported (no streaming SHA-512 in
+ * tree, and the cap layer never requests it). */
+static int hmac_sha256_portable(const uint8_t *key, size_t key_len,
+                                const uint8_t *msg, size_t msg_len,
+                                uint8_t out[32])
+{
+    uint8_t k[64] = {0}, ki[64], ko[64], inner[32];
+    if (key_len > 64) hl_cap_crypto_sha256(key, key_len, k);  /* K' = H(K) */
+    else              memcpy(k, key, key_len);
+    for (int i = 0; i < 64; i++) { ki[i] = k[i] ^ 0x36; ko[i] = k[i] ^ 0x5c; }
+
+    HlSha256Ctx c;
+    hl_cap_crypto_sha256_init(&c);
+    hl_cap_crypto_sha256_update(&c, ki, 64);
+    hl_cap_crypto_sha256_update(&c, msg, msg_len);
+    hl_cap_crypto_sha256_final(&c, inner);
+
+    hl_cap_crypto_sha256_init(&c);
+    hl_cap_crypto_sha256_update(&c, ko, 64);
+    hl_cap_crypto_sha256_update(&c, inner, 32);
+    hl_cap_crypto_sha256_final(&c, out);
+
+    /* Scrub the key-equivalent material (k = key or H(key); ki/ko = key XOR
+     * pad) before return, matching this file's hull_secure_zero convention
+     * and the at-rest behavior of the mbedTLS HMAC backend. */
+    hull_secure_zero(k, sizeof(k));
+    hull_secure_zero(ki, sizeof(ki));
+    hull_secure_zero(ko, sizeof(ko));
+    hull_secure_zero(inner, sizeof(inner));
+    return 0;
+}
+
+static int hmac_sha1_portable(const uint8_t *key, size_t key_len,
+                              const uint8_t *msg, size_t msg_len,
+                              uint8_t out[20])
+{
+    uint8_t k[64] = {0}, ki[64], ko[64], inner[20];
+    if (key_len > 64) { Sha1Ctx kc; sha1_init(&kc); sha1_update(&kc, key, key_len); sha1_final(&kc, k); }
+    else              memcpy(k, key, key_len);
+    for (int i = 0; i < 64; i++) { ki[i] = k[i] ^ 0x36; ko[i] = k[i] ^ 0x5c; }
+
+    Sha1Ctx c;
+    sha1_init(&c);
+    sha1_update(&c, ki, 64);
+    sha1_update(&c, msg, msg_len);
+    sha1_final(&c, inner);
+
+    sha1_init(&c);
+    sha1_update(&c, ko, 64);
+    sha1_update(&c, inner, 20);
+    sha1_final(&c, out);
+
+    hull_secure_zero(k, sizeof(k));
+    hull_secure_zero(ki, sizeof(ki));
+    hull_secure_zero(ko, sizeof(ko));
+    hull_secure_zero(inner, sizeof(inner));
+    return 0;
+}
+
+static int portable_hmac_supports(HlCryptoHmacAlg alg)
+{
+    return alg == HL_CRYPTO_HMAC_SHA1 || alg == HL_CRYPTO_HMAC_SHA256;
+}
+
+static int portable_hmac_compute(const HlCryptoHmacBackend *self,
+                                 HlCryptoHmacAlg alg,
+                                 const uint8_t *key, size_t key_len,
+                                 const uint8_t *msg, size_t msg_len,
+                                 uint8_t *out, size_t out_len)
+{
+    (void)self;
+    if (!key || !msg || !out) return -1;
+    switch (alg) {
+        case HL_CRYPTO_HMAC_SHA256:
+            if (out_len != 32) return -1;
+            return hmac_sha256_portable(key, key_len, msg, msg_len, out);
+        case HL_CRYPTO_HMAC_SHA1:
+            if (out_len != 20) return -1;
+            return hmac_sha1_portable(key, key_len, msg, msg_len, out);
+        default:
+            return -1;   /* SHA-512 / NONE: not supported by this backend */
+    }
+}
+
+const HlCryptoHmacBackend hl_crypto_hmac_backend_portable = {
+    .supports = portable_hmac_supports,
+    .compute  = portable_hmac_compute,
+};
 
 /* ── HMAC-SHA512/256 authentication ──────────────────────────────────
  *

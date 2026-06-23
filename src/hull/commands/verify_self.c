@@ -37,7 +37,7 @@
  * is mis-targeted. */
 #define HL_VERIFY_SELF_BINARY_MAX_BYTES (256U * 1024U * 1024U)
 
-#include "mbedtls/sha256.h"
+#include "hull/cap/crypto.h"
 
 static void usage(FILE *fp)
 {
@@ -100,12 +100,11 @@ static int read_file(const char *path, char **out_buf, size_t *out_len)
     return 0;
 }
 
-/* SHA-256 of the file at @p path -> hex. Uses one-shot mbedtls_sha256
- * (same primitive as release_io's sha256_hex; MSan-verified). Reads the
- * whole file into memory rather than streaming because MSan-instrumented
- * mbedTLS misreports uninitialized context state through the
- * _starts/_update/_finish API (see src/hull/sbom.c §0.3.11 fix for the
- * same pattern). Hull binaries are bounded at ~15 MiB so the whole-file
+/* SHA-256 of the file at @p path -> hex. Uses the one-shot cap-layer
+ * SHA-256 (hl_cap_crypto_sha256, same primitive as release_io's
+ * sha256_hex) so verify-self links in the pure-compute flavor where
+ * mbedTLS is dropped. Reads the whole file into memory rather than
+ * streaming; Hull binaries are bounded at ~15 MiB so the whole-file
  * malloc is trivially OK. The MAX_BYTES cap guards mis-targeted paths. */
 static int sha256_file_hex(const char *path, char hex_out[HL_SHA256_HEX_BUF])
 {
@@ -124,7 +123,7 @@ static int sha256_file_hex(const char *path, char hex_out[HL_SHA256_HEX_BUF])
     if (got != (size_t)sz) { free(buf); return -1; }
 
     unsigned char digest[32];
-    int rc = mbedtls_sha256(buf, got, digest, 0);
+    int rc = hl_cap_crypto_sha256(buf, got, digest);
     free(buf);
     if (rc != 0) return -1;
 

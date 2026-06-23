@@ -10,6 +10,7 @@
 
 #include "hull/release_io.h"
 #include "hull/cacert.h"
+#include "hull/cap/crypto.h"
 
 #include <keel/allocator.h>
 #include <keel/client.h>
@@ -199,16 +200,15 @@ int hl_release_io_json_str(const char *json, const char *key,
     return 0;
 }
 
-/* ── SHA-256 (mbedTLS) ───────────────────────────────────────────── */
-
-extern int mbedtls_sha256(const unsigned char *input, size_t ilen,
-                           unsigned char output[32], int is224);
+/* ── SHA-256 ─────────────────────────────────────────────────────── */
 
 int hl_release_io_sha256_hex(const unsigned char *data, size_t len,
                              char hex[65])
 {
     unsigned char digest[32];
-    if (mbedtls_sha256(data, len, digest, 0) != 0) return -1;
+    /* Use the cap layer's self-contained SHA-256 (not mbedTLS) so this
+     * helper links in the pure-compute flavor, where mbedTLS is dropped. */
+    if (hl_cap_crypto_sha256(data, len, digest) != 0) return -1;
     static const char *h = "0123456789abcdef";
     for (int i = 0; i < 32; i++) {
         hex[i*2]   = h[digest[i] >> 4];
