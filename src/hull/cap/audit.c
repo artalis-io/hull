@@ -10,15 +10,32 @@
 
 #include "hull/cap/audit.h"
 #include <stdio.h>
+#include <string.h>
 #include <time.h>
 
 int hl_audit_enabled = 0;
 
-static int audit_stderr_write(void *ctx, const char *data, size_t len)
+/* Per-record scratch buffer. Audit records are emitted from BOTH the event
+ * loop and worker threads (compute.async / gpu.async audit from their
+ * work_fn). The ShJsonWriter emits token-by-token, so writing straight to
+ * stderr lets two records interleave byte-wise and corrupt the JSONL.
+ * Instead each record accumulates into a thread-local buffer and is flushed
+ * with ONE fwrite, which the stdio stream lock makes atomic relative to
+ * other threads. A record is always built start-to-finish on one thread
+ * (tight begin/end pair, no nesting), so the buffer needs no further lock. */
+#define HL_AUDIT_BUF_MAX 4096
+typedef struct { char data[HL_AUDIT_BUF_MAX]; size_t len; } HlAuditBuf;
+static _Thread_local HlAuditBuf g_audit_buf;
+
+static int audit_buf_write(void *ctx, const char *data, size_t len)
 {
-    (void)ctx;
-    size_t w = fwrite(data, 1, len, stderr);
-    return w == len ? 0 : -1;
+    HlAuditBuf *b = (HlAuditBuf *)ctx;
+    if (!b) return -1;
+    size_t avail = sizeof(b->data) - b->len;
+    if (len > avail) len = avail; /* truncate oversized records (rare) */
+    memcpy(b->data + b->len, data, len);
+    b->len += len;
+    return 0;
 }
 
 ShJsonWriter hl_audit_begin(const char *cap)
@@ -27,12 +44,13 @@ ShJsonWriter hl_audit_begin(const char *cap)
 
     if (!hl_audit_enabled) {
         /* Return a writer with error=1 — all writes become no-ops */
-        sh_json_writer_init(&w, audit_stderr_write, NULL);
+        sh_json_writer_init(&w, audit_buf_write, NULL);
         w.error = 1;
         return w;
     }
 
-    sh_json_writer_init(&w, audit_stderr_write, NULL);
+    g_audit_buf.len = 0;
+    sh_json_writer_init(&w, audit_buf_write, &g_audit_buf);
     sh_json_write_object_start(&w);
 
     /* Timestamp: ISO 8601 UTC. L4: gmtime_r can fail (e.g. very large
@@ -61,6 +79,10 @@ void hl_audit_end(ShJsonWriter *w)
         return;
 
     sh_json_write_object_end(w);
-    /* Write newline directly to stderr (not through JSON writer) */
-    fputc('\n', stderr);
+    /* Append the newline into the buffer, then emit the whole record with a
+     * single fwrite so concurrent event-loop / worker audit lines cannot
+     * interleave byte-wise on the shared stderr. */
+    if (g_audit_buf.len < sizeof(g_audit_buf.data))
+        g_audit_buf.data[g_audit_buf.len++] = '\n';
+    fwrite(g_audit_buf.data, 1, g_audit_buf.len, stderr);
 }

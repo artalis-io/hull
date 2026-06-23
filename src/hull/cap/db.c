@@ -65,7 +65,9 @@ static sqlite3_stmt *cache_get(HlStmtCache *cache, const char *sql)
     if (rc != SQLITE_OK)
         return NULL;
 
-    /* Evict oldest (LRU) if cache is full */
+    /* Evict oldest (LRU) if cache is full. NOTE: this finalize is why row
+     * callbacks must not re-enter the cache mid-iteration — see the INVARIANT
+     * note at the cb() call site in the query loop below. */
     if (cache->count >= HL_STMT_CACHE_SIZE) {
         sqlite3_finalize(cache->entries[0].stmt);
         hl_alloc_free_const(cache->alloc, cache->entries[0].sql,
@@ -292,6 +294,14 @@ int hl_cap_db_query(HlStmtCache *cache, const char *sql,
             column_to_value(stmt, i, &vals[i]);
             cols[i].value = vals[i];
         }
+        /* INVARIANT: the row callback MUST NOT re-enter the statement cache
+         * (db.query / db.exec with a new SQL string). `stmt` is mid-iteration
+         * and is owned by the LRU cache; a re-entrant cache_get that evicts it
+         * (sqlite3_finalize) would dangle `stmt` for the next sqlite3_step ->
+         * use-after-free. All current callers are pure C result-marshallers
+         * that build the result set and only hand it to script AFTER this
+         * loop ends, so this holds. Preserve it if a streaming/per-row script
+         * callback API is ever added (pin the in-use stmt against eviction). */
         if (cb(ctx, cols, ncols) != 0)
             break; /* caller requested stop */
     }
