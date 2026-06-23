@@ -173,6 +173,63 @@ jobs:
   #      path into LC_UUID; same-path isolates the question we
   #      actually care about: link output stability for fixed
   #      inputs. See Makefile comment on the target.)
+  # Build the documented HL_ENABLE_* flavor combinations and smoke-test each.
+  # The default `build` job only covers the all-on flavor; without this, a
+  # reference to a feature-gated symbol from an always-compiled TU (e.g. a
+  # tool binding calling an HTTP-server-only hl_agent_*/hl_dev_state_*) would
+  # only break the flavor link, which nothing else exercises.
+  flavors:
+    name: Build flavor (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: client-only / CLI (no http server)
+            flags: HL_ENABLE_HTTP_SERVER=0
+          - name: compute-only (no db)
+            flags: HL_ENABLE_DB=0
+          # NOTE: server-only (HL_ENABLE_HTTP_CLIENT=0) and pure-compute
+          # (HL_ENABLE_HTTP=0) are NOT yet covered — they have separate
+          # pre-existing link breaks (release_io.c whole-file gating that
+          # also drops the offline verify-self helpers; pure-compute also
+          # needs mbedTLS SHA for core crypto). Add them here once fixed.
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      - name: Build
+        run: make ${{ matrix.flags }}
+
+      # Guards the link-regression class (a feature-gated symbol referenced
+      # from an always-compiled TU): the build step above is the real link
+      # check; `hull version` confirms the binary starts.
+      - name: Smoke (binary links + starts)
+        timeout-minutes: 1
+        run: ./build/hull version
+
+      # Exercises the runtime entry path (serve_cli.c for HL_ENABLE_HTTP_SERVER=0,
+      # serve.c otherwise), including the kernel sandbox, so a Linux-only crash
+      # like the serve_cli.c missing-phase-1-pledge SIGABRT can't regress.
+      - name: Smoke (app.main runs, return code propagates)
+        timeout-minutes: 1
+        run: |
+          tmp="$(mktemp -d)"
+          cat > "$tmp/app.lua" <<'LUA'
+          app.manifest({ name = "flavor-smoke" })
+          app.main(function(ctx) return 7 end)
+          LUA
+          set +e
+          ./build/hull "$tmp/app.lua" >"$tmp/out.log" 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -ne 7 ]; then
+            echo "expected exit 7, got $rc; hull output:"
+            cat "$tmp/out.log"
+            exit 1
+          fi
+
   reproducibility:
     name: Reproducible build (${{ matrix.name }})
     strategy:

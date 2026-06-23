@@ -1339,6 +1339,7 @@ ifeq ($(HL_ENABLE_HTTP_SERVER),0)
       $(SRCDIR)/hull/runtime/js/sse.c \
       $(SRCDIR)/hull/runtime/js/ws.c \
       $(SRCDIR)/hull/runtime/js/timers.c \
+      $(SRCDIR)/hull/runtime/js/mod_request.c \
       $(SRCDIR)/hull/runtime/js/bindings.c, \
       $(JS_RT_SRCS))
 endif
@@ -1370,6 +1371,7 @@ ifeq ($(HL_ENABLE_HTTP_SERVER),0)
       $(SRCDIR)/hull/runtime/lua/sse.c \
       $(SRCDIR)/hull/runtime/lua/ws.c \
       $(SRCDIR)/hull/runtime/lua/timers.c \
+      $(SRCDIR)/hull/runtime/lua/mod_request.c \
       $(SRCDIR)/hull/runtime/lua/bindings.c, \
       $(LUA_RT_SRCS))
 endif

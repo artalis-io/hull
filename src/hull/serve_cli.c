@@ -142,6 +142,41 @@ int hull_serve(int argc, char **argv)
         app_dir[1] = '\0';
     }
 
+    /* Create the async event loop + worker pool BEFORE any kernel sandbox.
+     * glibc registers a per-thread rseq area when each thread starts; once
+     * the phase-2 pledge's seccomp filter is installed, the rseq syscall is
+     * rejected and glibc aborts the whole process ("Fatal glibc error: rseq
+     * registration failed"). serve.c creates its pool (hl_serve_init_infra)
+     * before load + sandbox for exactly this reason; mirror that order here.
+     * The pool is assigned onto the runtime once it exists, below. */
+    const HlAsyncBackend *be = hl_async_backend();
+    HlAsyncBackendCtx *async_ctx = NULL;
+    if (be->init(&async_ctx, NULL) != 0) {
+        fprintf(stderr, "[hull:cli] failed to init async backend\n");
+        return 1;
+    }
+    /* Make log.c thread-safe + mark this as the event-loop thread before the
+     * worker threads spawn: workers (db/compute/gpu async) log concurrently,
+     * and the loop-only thread-affinity assertions must be live, not inert. */
+    hl_log_make_threadsafe();
+    hl_event_loop_mark_current();
+    HlAsyncBackendPool *pool = NULL;
+    if (be->pool_create(&pool, async_ctx, 4, 64) != 0) {
+        pool = NULL;
+        fprintf(stderr, "[hull:cli] thread pool init failed — async ops unavailable\n");
+    }
+
+    /* Phase 1 sandbox: block exec/proc/fork before loading user code.
+     * No-op on macOS (seatbelt is a single irreversible phase-2 profile). */
+    if (!no_sandbox) {
+        if (hl_sandbox_apply_pledge() != 0) {
+            fprintf(stderr, "hull: failed to apply phase 1 sandbox\n");
+            if (pool) be->pool_free(pool);
+            be->free(async_ctx);
+            return 1;
+        }
+    }
+
     /* Init app context — runs migrations + loads the app. */
     HlAppContext *ctx = NULL;
     HlAppContextOpts opts = {
@@ -155,6 +190,8 @@ int hull_serve(int argc, char **argv)
     };
     if (hl_app_context_init(&ctx, &opts) != 0) {
         fprintf(stderr, "hull: failed to initialize app context\n");
+        if (pool) be->pool_free(pool);
+        be->free(async_ctx);
         return 1;
     }
 
@@ -162,8 +199,14 @@ int hull_serve(int argc, char **argv)
     if (!rt || !rt->vt) {
         fprintf(stderr, "hull: no runtime available\n");
         hl_app_context_free(ctx);
+        if (pool) be->pool_free(pool);
+        be->free(async_ctx);
         return 1;
     }
+    /* The pool/async loop were created before the sandbox (above); hand them
+     * to the runtime now that it exists. run_main drives the loop. */
+    rt->async_ctx = async_ctx;
+    rt->thread_pool = pool;
 
     /* CLI mode requires app.main — server routes can't be registered
      * on HL_ENABLE_HTTP_SERVER=0 builds (the bindings are dropped). */
@@ -173,6 +216,10 @@ int hull_serve(int argc, char **argv)
             "compiled with HL_ENABLE_HTTP_SERVER=0 and cannot serve "
             "HTTP. Either add app.main(fn) to your app, or rebuild "
             "hull with HL_ENABLE_HTTP_SERVER=1.\n");
+        rt->async_ctx = NULL;
+        rt->thread_pool = NULL;
+        if (pool) be->pool_free(pool);
+        be->free(async_ctx);
         hl_app_context_free(ctx);
         return 1;
     }
@@ -248,6 +295,10 @@ int hull_serve(int argc, char **argv)
 #ifdef HL_ENABLE_HTTP_CLIENT
             if (tls_ctx) kl_tls_mbedtls_ctx_destroy(tls_ctx);
 #endif
+            rt->async_ctx = NULL;
+            rt->thread_pool = NULL;
+            if (pool) be->pool_free(pool);
+            be->free(async_ctx);
             hl_manifest_free(&manifest);
             hl_app_context_free(ctx);
             return 1;
@@ -256,43 +307,8 @@ int hull_serve(int argc, char **argv)
 
     const char **env_allow = build_env_allowlist(&manifest);
 
-    /* Create an event loop and worker pool for app.main. The runtime's
-     * vt_*_run_main drives this loop while main is suspended on async
-     * ops (hull.sleep, compute.async, db.async, etc.). */
-    const HlAsyncBackend *be = hl_async_backend();
-    HlAsyncBackendCtx *async_ctx = NULL;
-    if (be->init(&async_ctx, NULL) != 0) {
-        fprintf(stderr, "[hull:cli] failed to init async backend\n");
-#ifdef HL_ENABLE_HTTP_CLIENT
-        if (tls_ctx) kl_tls_mbedtls_ctx_destroy(tls_ctx);
-#endif
-        free((void *)env_allow);
-        hl_manifest_free(&manifest);
-        hl_app_context_free(ctx);
-        return 1;
-    }
-    rt->async_ctx = async_ctx;
-
-    /* Before the worker pool exists: make log.c thread-safe (workers run
-     * db.async / compute.async / gpu.async and log concurrently with this
-     * thread) and mark this as the event-loop thread so the loop-only
-     * thread-affinity assertions are live (not silently inert) in the CLI
-     * flavor. Mirrors serve.c's hl_serve_init_logging + the pre-infra mark.
-     * Both are required even though this flavor has no HTTP server, because
-     * it still spawns the same async worker pool below. */
-    hl_log_make_threadsafe();
-    hl_event_loop_mark_current();
-
-    /* Worker pool for async ops that delegate to threads (db.async,
-     * compute.async, gpu.async). Non-fatal if it fails — the runtime
-     * checks for NULL before submitting. */
-    HlAsyncBackendPool *pool = NULL;
-    if (be->pool_create(&pool, async_ctx, 4, 64) != 0) {
-        pool = NULL;
-        fprintf(stderr, "[hull:cli] thread pool init failed — async ops unavailable\n");
-    }
-    rt->thread_pool = pool;
-
+    /* async_ctx + pool were created up top, before the sandbox (see the rseq
+     * note there), and assigned onto rt after app-context init. */
     int rc = 1;
     int run = rt->vt->run_main(rt, NULL, app_argc, app_argv, env_allow, &rc);
 

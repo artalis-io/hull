@@ -185,6 +185,9 @@ static int l_tool_doctor_json(lua_State *L)
 
 /* ── tool.agent_errors(app_dir) / tool.agent_context(task, level) ── */
 
+#ifdef HL_ENABLE_HTTP_SERVER
+/* hl_agent_errors reads the dev server's .hull/last_error.json sidecar, so
+ * it ships only with the inbound HTTP server (which `hull dev` needs). */
 static int l_tool_agent_errors(lua_State *L)
 {
     const char *app_dir = luaL_optstring(L, 1, ".");
@@ -197,6 +200,7 @@ static int l_tool_agent_errors(lua_State *L)
     lua_pushinteger(L, rc);
     return 2;
 }
+#endif /* HL_ENABLE_HTTP_SERVER */
 
 static int l_tool_agent_context(lua_State *L)
 {
@@ -328,7 +332,10 @@ static int l_tool_modules_available(lua_State *L)
 
 /* All dev_* accessors consult hl_dev_state(), which is a no-op
  * (returns nil / safe defaults) when hull dev --tui isn't running.
- * That lets the stdlib's *_tui modules load cleanly in tests too. */
+ * That lets the stdlib's *_tui modules load cleanly in tests too.
+ * hl_dev_state lives in the inbound-HTTP-server set (it backs `hull dev`),
+ * so these bindings ship only when HL_ENABLE_HTTP_SERVER is on. */
+#ifdef HL_ENABLE_HTTP_SERVER
 
 static int l_tool_dev_status(lua_State *L)
 {
@@ -400,6 +407,8 @@ static int l_tool_dev_reload(lua_State *L)
     return 1;
 }
 
+#endif /* HL_ENABLE_HTTP_SERVER */
+
 /* ── Registration ──────────────────────────────────────────────────── */
 
 void hl_lua_tool_register_orchestration(lua_State *L)
@@ -416,14 +425,18 @@ void hl_lua_tool_register_orchestration(lua_State *L)
     static const luaL_Reg orchestration_funcs[] = {
         { "modules_resolve",        l_tool_modules_resolve },
         { "doctor_json",            l_tool_doctor_json },
+#ifdef HL_ENABLE_HTTP_SERVER
         { "agent_errors",           l_tool_agent_errors },
+#endif
         { "agent_context",          l_tool_agent_context },
         { "modules_available",      l_tool_modules_available },
+#ifdef HL_ENABLE_HTTP_SERVER
         { "dev_status",             l_tool_dev_status },
         { "dev_drain",              l_tool_dev_drain },
         { "dev_recent_lines",       l_tool_dev_recent_lines },
         { "dev_check_file_change",  l_tool_dev_check_file_change },
         { "dev_reload",             l_tool_dev_reload },
+#endif
 #ifdef HL_ENABLE_DB
         { "migrate_status",         l_tool_migrate_status },
 #endif
