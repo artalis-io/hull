@@ -85,6 +85,13 @@ int hl_release_io_self_path(char *out, size_t out_sz)
 #endif
 }
 
+/* The HTTPS fetch path (open_tls + get) is the only part of this TU that
+ * needs Keel's HTTP client; it ships only with HL_ENABLE_HTTP_CLIENT. The
+ * offline helpers below (platform, self_path, json_str, sha256_hex,
+ * find_checksum, atomic_write) are always built — `hull verify-self` and the
+ * platform-signature verifier need them regardless of the HTTP client. */
+#ifdef HL_ENABLE_HTTP_CLIENT
+
 /* ── TLS context backed by embedded CA bundle ────────────────────── */
 
 KlTlsCtx *hl_release_io_open_tls(KlAllocator *alloc)
@@ -163,6 +170,8 @@ int hl_release_io_get(const char *url,
     kl_client_response_free(&resp);
     return 0;
 }
+
+#endif /* HL_ENABLE_HTTP_CLIENT */
 
 /* ── JSON string extraction (deliberately tiny) ──────────────────── */
 

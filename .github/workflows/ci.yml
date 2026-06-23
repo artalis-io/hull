@@ -187,13 +187,14 @@ jobs:
         include:
           - name: client-only / CLI (no http server)
             flags: HL_ENABLE_HTTP_SERVER=0
+          - name: server-only (no http client)
+            flags: HL_ENABLE_HTTP_CLIENT=0
           - name: compute-only (no db)
             flags: HL_ENABLE_DB=0
-          # NOTE: server-only (HL_ENABLE_HTTP_CLIENT=0) and pure-compute
-          # (HL_ENABLE_HTTP=0) are NOT yet covered — they have separate
-          # pre-existing link breaks (release_io.c whole-file gating that
-          # also drops the offline verify-self helpers; pure-compute also
-          # needs mbedTLS SHA for core crypto). Add them here once fixed.
+          # NOTE: pure-compute (HL_ENABLE_HTTP=0) is NOT yet covered — core
+          # crypto.c uses mbedtls_sha256 but mbedTLS is dropped when both HTTP
+          # halves are off (and release_io.c's sha256_hex has the same dep).
+          # Add it here once core crypto has a SHA path without mbedTLS.
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:

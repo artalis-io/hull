@@ -1493,16 +1493,12 @@ CAP_TEST_LUA_OBJ := $(BUILDDIR)/cap_test_dispatch.o
 TOOL_OBJ       := $(BUILDDIR)/tool.o $(BUILDDIR)/tool_orchestration.o
 SIG_OBJ        := $(BUILDDIR)/signature.o
 RELEASE_OBJ    := $(BUILDDIR)/release.o
-# release_io.o is the shared HTTPS + manifest + atomic-install
-# plumbing used by `hull update` and `hull tools install`.
-# Only linked when HL_ENABLE_HTTP_CLIENT is on; without an HTTPS
-# client there's no remote-fetch surface, so neither command is
-# compiled in either.
-ifeq ($(HL_ENABLE_HTTP_CLIENT),0)
-RELEASE_IO_OBJ :=
-else
+# release_io.o holds the HTTPS fetch path (hull update / tools install) AND
+# the offline release helpers (platform, self_path, json_str, sha256_hex,
+# find_checksum, atomic_write). The HTTPS half is #ifdef HL_ENABLE_HTTP_CLIENT
+# inside the TU; the offline half is always needed (verify-self + the
+# platform-signature verifier), so the object is always built and linked.
 RELEASE_IO_OBJ := $(BUILDDIR)/release_io.o
-endif
 # tools_install.o is always linked — `hl_tools_lookup_path` is used by
 # cap/wasm.c for wamrc resolution even on HL_ENABLE_HTTP_CLIENT=0 builds.
 TOOLS_INSTALL_OBJ := $(BUILDDIR)/tools_install.o
@@ -2384,11 +2380,12 @@ $(SIG_OBJ): $(SRCDIR)/hull/signature.c | $(BUILDDIR)
 $(RELEASE_OBJ): $(SRCDIR)/hull/release.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# Shared HTTPS/manifest/atomic-install helpers (hull update + hull tools install)
-ifneq ($(HL_ENABLE_HTTP_CLIENT),0)
+# Shared HTTPS/manifest/atomic-install helpers (hull update + hull tools
+# install) plus the always-needed offline release helpers (verify-self +
+# platform-sig verifier). The HTTPS half is #ifdef'd inside the TU; the
+# object is always built.
 $(BUILDDIR)/release_io.o: $(SRCDIR)/hull/release_io.c $(INCDIR)/hull/release_io.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
-endif
 
 # Tool registry + on-disk install / lookup helpers
 # (TOOLS_INSTALL_OBJ var defined earlier so PLATFORM_OBJS sees it.)
