@@ -137,6 +137,8 @@ typedef struct HlMappedBuffer {
     size_t        len;    /**< Mapping length in bytes. */
     int           closed; /**< `1` iff already munmap'd; further `_munmap` is a no-op. */
     HlAllocator  *alloc;  /**< Tracked allocator (NULL = raw malloc). */
+    int           borrow_count;  /**< Live zero-copy borrowers (e.g. images). */
+    int           pending_free;  /**< close()/gc was deferred while borrowed. */
 } HlMappedBuffer;
 
 /**
@@ -168,7 +170,30 @@ HlMappedBuffer *hl_cap_fs_mmap(const HlFsConfig *cfg, const char *path,
  * no-op.
  *
  * @param buf  Buffer to unmap. May be NULL (no-op).
+ *
+ * If the buffer still has live borrowers (`borrow_count > 0`), the actual
+ * `munmap` + struct free is deferred: the call records `pending_free` and
+ * returns, keeping the mapping valid for the borrowers. The last
+ * @ref hl_cap_fs_mmap_release then completes the teardown.
  */
 void hl_cap_fs_munmap(HlMappedBuffer *buf);
+
+/**
+ * @brief Register a zero-copy borrower of a mapped buffer.
+ *
+ * Increments `borrow_count` so a subsequent @ref hl_cap_fs_munmap (explicit
+ * close or GC) defers the real unmap until the borrower releases. Event-loop
+ * thread only; not atomic. @param buf May be NULL (no-op).
+ */
+void hl_cap_fs_mmap_borrow(HlMappedBuffer *buf);
+
+/**
+ * @brief Release a borrow taken with @ref hl_cap_fs_mmap_borrow.
+ *
+ * Decrements `borrow_count`; if it reaches 0 and a close was deferred
+ * (`pending_free`), completes the `munmap` + struct free now. `void *` typed
+ * so it can be used directly as an `HlImage::on_free` hook. NULL-safe.
+ */
+void hl_cap_fs_mmap_release(void *buf);
 
 #endif /* HL_CAP_FS_H */

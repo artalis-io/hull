@@ -184,4 +184,35 @@ void hl_wasm_buffer_destroy(HlWasmBuffer *buf)
     buf->len = 0;
 }
 
+void hl_wasm_buffer_close(HlWasmBuffer *buf)
+{
+    if (!buf) return;
+    /* Keep the buffer (and its native `data`) alive while an image borrows
+     * it; the last hl_wasm_buffer_release completes teardown. */
+    if (buf->borrow_count > 0) {
+        buf->pending_free = 1;
+        return;
+    }
+    HlAllocator *a = buf->alloc;
+    hl_wasm_buffer_destroy(buf);
+    hl_alloc_free(a, buf, sizeof(*buf));
+}
+
+void hl_wasm_buffer_borrow(HlWasmBuffer *buf)
+{
+    if (buf) buf->borrow_count++;
+}
+
+void hl_wasm_buffer_release(void *p)
+{
+    HlWasmBuffer *buf = (HlWasmBuffer *)p;
+    if (!buf) return;
+    if (buf->borrow_count > 0) buf->borrow_count--;
+    if (buf->borrow_count == 0 && buf->pending_free) {
+        HlAllocator *a = buf->alloc;
+        hl_wasm_buffer_destroy(buf);
+        hl_alloc_free(a, buf, sizeof(*buf));
+    }
+}
+
 #endif /* HL_ENABLE_WASM */

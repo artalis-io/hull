@@ -6,6 +6,10 @@
 
 #include "mod_buffer.h"
 #include "hull/cap/image.h"
+#include "hull/cap/fs.h"
+#ifdef HL_ENABLE_WASM
+#include "hull/cap/wasm_buffer.h"
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -176,8 +180,40 @@ static JSValue js_image_from_buffer(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "unknown image format");
     }
 
-    HlImage *img = hl_image_from_view(w, h, (HlImageFormat)fmt,
-                                       view.data, view.len, NULL);
+    /* Borrow refcountable zero-copy sources (mmap / WASM buffer) with deferred
+     * source teardown; copy everything else (string, ArrayBuffer, TypedArray,
+     * image) since there is no stable refcountable object to pin. */
+    HlMappedBuffer *mmap_src = JS_GetOpaque(argv[0], js_mmap_class_id);
+    if (mmap_src && mmap_src->closed) mmap_src = NULL;
+#ifdef HL_ENABLE_WASM
+    HlWasmBuffer *wasm_src = JS_GetOpaque(argv[0], js_wasm_buf_class_id);
+    if (wasm_src && wasm_src->closed) wasm_src = NULL;
+#endif
+
+    HlImage *img;
+    if (mmap_src) {
+        img = hl_image_from_view(w, h, (HlImageFormat)fmt,
+                                 view.data, view.len, NULL);
+        if (img) {
+            hl_cap_fs_mmap_borrow(mmap_src);
+            img->on_free = hl_cap_fs_mmap_release;
+            img->on_free_ctx = mmap_src;
+        }
+    }
+#ifdef HL_ENABLE_WASM
+    else if (wasm_src) {
+        img = hl_image_from_view(w, h, (HlImageFormat)fmt,
+                                 view.data, view.len, NULL);
+        if (img) {
+            hl_wasm_buffer_borrow(wasm_src);
+            img->on_free = hl_wasm_buffer_release;
+            img->on_free_ctx = wasm_src;
+        }
+    }
+#endif
+    else {
+        img = hl_image_new(w, h, (HlImageFormat)fmt, view.data, view.len, NULL);
+    }
     if (needs_free) JS_FreeCString(ctx, str_out);
 
     if (!img)

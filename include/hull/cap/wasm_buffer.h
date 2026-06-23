@@ -40,6 +40,8 @@ typedef struct HlWasmBuffer {
     const void    *data;      /* native host pointer, always valid while !closed */
     size_t         len;
     int            closed;
+    int            borrow_count; /* live zero-copy borrowers (e.g. images) */
+    int            pending_free; /* close()/gc deferred while borrowed */
     HlAllocator   *alloc;     /* tracked allocator (NULL = raw malloc) */
 
     union {
@@ -115,8 +117,33 @@ void *hl_wasm_buffer_materialize(const HlWasmBuffer *buf, size_t *out_len,
  * Destroy buffer and release all backing resources.
  * For WASM kind: frees WASM allocation and returns instance to pool.
  * Safe to call multiple times (idempotent). Safe on NULL.
+ *
+ * NOTE: this releases the BACKING resources but does NOT free the
+ * HlWasmBuffer struct itself. Bindings should call hl_wasm_buffer_close()
+ * (below) for full teardown so borrow-deferral is honored.
  */
 void hl_wasm_buffer_destroy(HlWasmBuffer *buf);
+
+/**
+ * Full teardown for a binding close()/finalizer: destroys the backing AND
+ * frees the struct. If the buffer still has live zero-copy borrowers
+ * (borrow_count > 0), the teardown is deferred (records pending_free and
+ * returns); the last hl_wasm_buffer_release() completes it. Safe on NULL.
+ */
+void hl_wasm_buffer_close(HlWasmBuffer *buf);
+
+/**
+ * Register a zero-copy borrower so a subsequent close()/gc defers teardown.
+ * Event-loop thread only; not atomic. NULL-safe.
+ */
+void hl_wasm_buffer_borrow(HlWasmBuffer *buf);
+
+/**
+ * Release a borrow; if it was the last and a close was deferred, completes
+ * the teardown now. `void *` typed for use as an HlImage::on_free hook.
+ * NULL-safe.
+ */
+void hl_wasm_buffer_release(void *buf);
 
 #endif /* HL_ENABLE_WASM */
 #endif /* HL_CAP_WASM_BUFFER_H */

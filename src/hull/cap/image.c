@@ -267,6 +267,11 @@ int hl_image_encode(const HlImage *img, const char *fmt_name,
 void hl_image_free(HlImage *img)
 {
     if (!img) return;
+    /* Release a borrowed zero-copy source first (may complete the source's
+     * deferred munmap/free). Must run before we drop our borrowed `pixels`
+     * pointer; for owned images this is NULL. */
+    if (img->on_free)
+        img->on_free(img->on_free_ctx);
     if (img->owned && img->pixels) {
         /* Decoded pixels are freed through the codec's allocator;
          * image.new() pixels (free_pixels == NULL) use plain free(). */

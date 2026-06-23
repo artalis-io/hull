@@ -337,6 +337,8 @@ HlMappedBuffer *hl_cap_fs_mmap(const HlFsConfig *cfg, const char *path,
     buf->len = (size_t)st.st_size;
     buf->closed = 0;
     buf->alloc = alloc;
+    buf->borrow_count = 0;
+    buf->pending_free = 0;
 
 audit:
     {
@@ -351,9 +353,36 @@ audit:
 void hl_cap_fs_munmap(HlMappedBuffer *buf)
 {
     if (!buf) return;
+    /* Defer the real teardown while a zero-copy borrower (e.g. an image
+     * created via image.from_buffer) still points into the mapping. The
+     * last hl_cap_fs_mmap_release completes it. The owning userdata detaches
+     * (sets its pointer to NULL) regardless, so no new borrows can start. */
+    if (buf->borrow_count > 0) {
+        buf->pending_free = 1;
+        return;
+    }
     if (!buf->closed && buf->addr) {
         munmap(buf->addr, buf->len);
         buf->closed = 1;
     }
     hl_alloc_free(buf->alloc, buf, sizeof(HlMappedBuffer));
+}
+
+void hl_cap_fs_mmap_borrow(HlMappedBuffer *buf)
+{
+    if (buf) buf->borrow_count++;
+}
+
+void hl_cap_fs_mmap_release(void *p)
+{
+    HlMappedBuffer *buf = (HlMappedBuffer *)p;
+    if (!buf) return;
+    if (buf->borrow_count > 0) buf->borrow_count--;
+    if (buf->borrow_count == 0 && buf->pending_free) {
+        if (!buf->closed && buf->addr) {
+            munmap(buf->addr, buf->len);
+            buf->closed = 1;
+        }
+        hl_alloc_free(buf->alloc, buf, sizeof(HlMappedBuffer));
+    }
 }

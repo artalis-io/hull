@@ -65,9 +65,8 @@ static int lua_wasm_buf_close(lua_State *L)
 {
     HlWasmBuffer **pp = luaL_testudata(L, 1, HL_WASM_BUF_MT);
     if (pp && *pp) {
-        HlAllocator *a = (*pp)->alloc;
-        hl_wasm_buffer_destroy(*pp);
-        hl_alloc_free(a, *pp, sizeof(HlWasmBuffer));
+        /* Defers backing+struct teardown if an image still borrows it. */
+        hl_wasm_buffer_close(*pp);
         *pp = NULL;
     }
     return 0;

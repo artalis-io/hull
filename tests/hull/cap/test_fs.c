@@ -252,6 +252,53 @@ UTEST(hl_cap_fs, mmap_basic)
     teardown_fs();
 }
 
+/* Regression (audit F1): a zero-copy borrower (e.g. image.from_buffer)
+ * must keep the mapping alive even if the source is closed first. */
+UTEST(hl_cap_fs, mmap_borrow_defers_close)
+{
+    setup_fs();
+    const char *data = "borrowed mmap bytes";
+    ASSERT_EQ(hl_cap_fs_write(&test_cfg, "mmap_borrow.txt", data, strlen(data), NULL), 0);
+
+    HlMappedBuffer *buf = hl_cap_fs_mmap(&test_cfg, "mmap_borrow.txt", NULL, NULL);
+    ASSERT_NE(buf, NULL);
+
+    hl_cap_fs_mmap_borrow(buf);
+    ASSERT_EQ(buf->borrow_count, 1);
+
+    /* Close while borrowed: teardown is deferred, mapping stays valid. */
+    hl_cap_fs_munmap(buf);
+    ASSERT_EQ(buf->pending_free, 1);
+    ASSERT_EQ(buf->closed, 0);
+    ASSERT_EQ(memcmp(buf->addr, data, strlen(data)), 0);
+
+    /* Last release completes the deferred munmap + free (ASan/leak-san
+     * confirms it runs exactly once and nothing dangles). */
+    hl_cap_fs_mmap_release(buf);
+    teardown_fs();
+}
+
+/* A borrow that is released BEFORE any close must not tear the buffer down;
+ * the normal munmap still owns teardown. */
+UTEST(hl_cap_fs, mmap_release_without_close_keeps_buffer)
+{
+    setup_fs();
+    const char *data = "still open";
+    ASSERT_EQ(hl_cap_fs_write(&test_cfg, "mmap_rel.txt", data, strlen(data), NULL), 0);
+    HlMappedBuffer *buf = hl_cap_fs_mmap(&test_cfg, "mmap_rel.txt", NULL, NULL);
+    ASSERT_NE(buf, NULL);
+
+    hl_cap_fs_mmap_borrow(buf);
+    hl_cap_fs_mmap_release(buf);
+    ASSERT_EQ(buf->borrow_count, 0);
+    ASSERT_EQ(buf->pending_free, 0);
+    ASSERT_EQ(buf->closed, 0);
+    ASSERT_EQ(memcmp(buf->addr, data, strlen(data)), 0);
+
+    hl_cap_fs_munmap(buf); /* normal teardown, no borrowers */
+    teardown_fs();
+}
+
 UTEST(hl_cap_fs, mmap_path_traversal)
 {
     setup_fs();

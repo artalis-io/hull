@@ -26,11 +26,8 @@ static void js_wasm_buf_finalizer(JSRuntime *rt, JSValue val)
 {
     (void)rt;
     HlWasmBuffer *buf = JS_GetOpaque(val, js_wasm_buf_class_id);
-    if (buf) {
-        HlAllocator *a = buf->alloc;
-        hl_wasm_buffer_destroy(buf);
-        hl_alloc_free(a, buf, sizeof(HlWasmBuffer));
-    }
+    if (buf)
+        hl_wasm_buffer_close(buf); /* defers if still borrowed by an image */
 }
 
 static JSClassDef js_wasm_buf_class = {
@@ -44,9 +41,7 @@ static JSValue js_wasm_buf_close(JSContext *ctx, JSValueConst this_val,
     (void)argc; (void)argv;
     HlWasmBuffer *buf = JS_GetOpaque2(ctx, this_val, js_wasm_buf_class_id);
     if (buf) {
-        HlAllocator *a = buf->alloc;
-        hl_wasm_buffer_destroy(buf);
-        hl_alloc_free(a, buf, sizeof(HlWasmBuffer));
+        hl_wasm_buffer_close(buf); /* defers if still borrowed by an image */
         JS_SetOpaque(this_val, NULL);
     }
     return JS_UNDEFINED;

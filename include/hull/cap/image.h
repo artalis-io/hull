@@ -44,6 +44,13 @@ typedef struct HlImage {
      * the codec's allocator (stb uses its own); NULL means the pixels
      * came from plain malloc (image.new) and hl_image_free uses free(). */
     void        (*free_pixels)(void *pixels);
+    /* Optional borrow-release hook. Called by hl_image_free regardless of
+     * `owned`, BEFORE the pixels/struct are freed. image.from_buffer uses it
+     * to release a refcounted zero-copy source (HlMappedBuffer / HlWasmBuffer)
+     * whose teardown was deferred while this image borrowed its pixels. NULL
+     * for owned (copied) images. */
+    void        (*on_free)(void *ctx);
+    void         *on_free_ctx;
 } HlImage;
 
 /* ── Codec vtable ──────────────────────────────────────────────────── */

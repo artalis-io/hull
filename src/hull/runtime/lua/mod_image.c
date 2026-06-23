@@ -6,6 +6,10 @@
 
 #include "mod_buffer.h"
 #include "hull/cap/image.h"
+#include "hull/cap/fs.h"
+#ifdef HL_ENABLE_WASM
+#include "hull/cap/wasm_buffer.h"
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -139,9 +143,42 @@ static int l_image_from_buffer(lua_State *L)
     if (fmt < 0)
         return luaL_error(L, "unknown image format: %s", fmt_name);
 
-    HlImage *img = hl_image_from_view((uint32_t)w, (uint32_t)h,
-                                       (HlImageFormat)fmt,
-                                       view.data, view.len, NULL);
+    /* Refcountable zero-copy sources (mmap / WASM buffer) are borrowed and
+     * their teardown is deferred until this image is freed (so buf:close()
+     * while an image borrows it can't dangle the pixels). Other sources
+     * (Lua string, image) have no stable object to pin, so they are copied. */
+    HlMappedBuffer **mp = (HlMappedBuffer **)luaL_testudata(L, 1, HL_MMAP_MT);
+    HlMappedBuffer *mmap_src = (mp && *mp && !(*mp)->closed) ? *mp : NULL;
+#ifdef HL_ENABLE_WASM
+    HlWasmBuffer **wp = (HlWasmBuffer **)luaL_testudata(L, 1, HL_WASM_BUF_MT);
+    HlWasmBuffer *wasm_src = (wp && *wp && !(*wp)->closed) ? *wp : NULL;
+#endif
+
+    HlImage *img;
+    if (mmap_src) {
+        img = hl_image_from_view((uint32_t)w, (uint32_t)h, (HlImageFormat)fmt,
+                                 view.data, view.len, NULL);
+        if (img) {
+            hl_cap_fs_mmap_borrow(mmap_src);
+            img->on_free = hl_cap_fs_mmap_release;
+            img->on_free_ctx = mmap_src;
+        }
+    }
+#ifdef HL_ENABLE_WASM
+    else if (wasm_src) {
+        img = hl_image_from_view((uint32_t)w, (uint32_t)h, (HlImageFormat)fmt,
+                                 view.data, view.len, NULL);
+        if (img) {
+            hl_wasm_buffer_borrow(wasm_src);
+            img->on_free = hl_wasm_buffer_release;
+            img->on_free_ctx = wasm_src;
+        }
+    }
+#endif
+    else {
+        img = hl_image_new((uint32_t)w, (uint32_t)h, (HlImageFormat)fmt,
+                           view.data, view.len, NULL);
+    }
     if (!img)
         return luaL_error(L, "image.from_buffer: invalid dimensions or data size");
 

@@ -122,6 +122,29 @@ UTEST(hull_cap_image, from_view)
     hl_image_free(img);  /* should NOT free pixels */
 }
 
+/* Regression (audit F1): hl_image_free must invoke the on_free borrow-release
+ * hook exactly once, before dropping the (borrowed) pixels. This is the seam
+ * image.from_buffer uses to release a refcounted mmap/WASM source. */
+static void test_image_on_free(void *ctx) { (*(int *)ctx)++; }
+
+UTEST(hull_cap_image, on_free_hook_runs_once)
+{
+    uint8_t pixels[8];
+    memset(pixels, 0xAB, sizeof(pixels));
+
+    HlImage *img = hl_image_from_view(2, 1, HL_IMAGE_RGBA8,
+                                       pixels, sizeof(pixels), NULL);
+    ASSERT_TRUE(img != NULL);
+    ASSERT_EQ(0, img->owned);
+
+    int released = 0;
+    img->on_free = test_image_on_free;
+    img->on_free_ctx = &released;
+
+    hl_image_free(img);
+    ASSERT_EQ(1, released);  /* hook ran exactly once */
+}
+
 UTEST(hull_cap_image, free_null)
 {
     /* Should not crash */
