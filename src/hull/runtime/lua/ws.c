@@ -152,6 +152,16 @@ void hl_lua_ws_on_message(KlWsServerConn *ws_conn, const char *data,
     }
 }
 
+/* Deferred-teardown hook (HlLua::active_on_complete): invalidate the conn
+ * userdata and remove it from the registry once an async on_close handler
+ * has finally completed. Runs from hl_lua_async_resume's completion path. */
+static void hl_lua_ws_close_teardown(HlLua *lua, void *ctx)
+{
+    HlWsConn *conn = (HlWsConn *)ctx;
+    hl_lua_ws_invalidate_conn(lua->L, conn);
+    hl_ws_registry_remove(lua->base.ws_registry, conn);
+}
+
 void hl_lua_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
                                  const char *reason, size_t reason_len,
                                  void *user_data)
@@ -198,8 +208,18 @@ void hl_lua_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
                         INSTR_COUNT(lua->max_instructions));
         }
 
+        /* Arm the deferred-teardown hook: if the handler yields (async op),
+         * hl_lua_async_cont_create captures it so the teardown below runs
+         * only once the async handler completes, not while it is still
+         * suspended and holding the conn. */
+        lua->active_on_complete     = hl_lua_ws_close_teardown;
+        lua->active_on_complete_ctx = conn;
+
         int nres = 0;
         int status = lua_resume(co, lua->L, 3, &nres);
+
+        lua->active_on_complete     = NULL;
+        lua->active_on_complete_ctx = NULL;
 
         if (status == LUA_OK) {
             luaL_unref(lua->L, LUA_REGISTRYINDEX, thread_ref);
@@ -207,7 +227,11 @@ void hl_lua_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
             lua->active_co = NULL;
             lua->dispatch_depth--;
         } else if (status == LUA_YIELD) {
-            /* Async op in flight */
+            /* Async op in flight — the continuation captured `conn`; the
+             * teardown is deferred to hl_lua_async_resume's completion. Do
+             * NOT invalidate/remove the conn here while the handler still
+             * references it. */
+            return;
         } else {
             const char *err = lua_tostring(co, -1);
             log_error("[hull:ws] on_close error: %s", err ? err : "unknown");
@@ -218,7 +242,9 @@ void hl_lua_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
         }
     }
 
-    /* Invalidate conn userdata and remove from registry */
+    /* Invalidate conn userdata and remove from registry (sync completion,
+     * handler error, or no on_close handler). The async-yield path defers
+     * this to async-handler completion via active_ws_close_conn. */
     hl_lua_ws_invalidate_conn(lua->L, conn);
     hl_ws_registry_remove(lua->base.ws_registry, conn);
 }

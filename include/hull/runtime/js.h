@@ -132,6 +132,13 @@ typedef struct HlJS {
      * will wire timer_ctx on the new continuation. */
     void           *active_timer;    /* HlJSTimer* during timer callback */
 
+    /* Deferred-teardown hook: if set while a handler runs,
+     * hl_js_async_cont_create captures it so the action (e.g. ws on_close
+     * conn teardown in ws.c) runs only once the async handler completes,
+     * not while it is still suspended. Subsystem-agnostic. */
+    void          (*active_on_complete)(struct HlJS *js, void *ctx);
+    void           *active_on_complete_ctx;
+
     /* UDF lifecycle: 1 while JS runtime is valid, 0 before JS_FreeRuntime.
      * UDF destroy callbacks check this before calling JS_FreeValue. */
     int             udf_runtime_alive;

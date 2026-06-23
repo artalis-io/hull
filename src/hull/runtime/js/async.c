@@ -34,6 +34,12 @@ typedef struct HlJsAsyncCont {
     KlConn           *conn;         /* connection to resume (NULL = detached) */
     JSValue           handler_promise; /* outer handler promise */
     void             *timer_ctx;    /* HlJSTimer* if running in a timer callback */
+    /* Generic "handler finally completed" hook (subsystem-agnostic). Lets a
+     * dispatch site defer teardown that must not run while the handler is
+     * still suspended (e.g. the ws on_close conn teardown in ws.c). Called
+     * once on fulfilled / rejected completion. */
+    void            (*on_complete)(HlJS *js, void *ctx);
+    void             *on_complete_ctx;
 } HlJsAsyncCont;
 
 /*
@@ -93,8 +99,16 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
     jc->resolve = JS_UNDEFINED;
     jc->reject = JS_UNDEFINED;
 
+    /* Re-arm the deferred-teardown hook so a re-await inside the handler
+     * carries it onto the next continuation. */
+    js->active_on_complete     = jc->on_complete;
+    js->active_on_complete_ctx = jc->on_complete_ctx;
+
     /* Drain microtasks — this continues the handler past the await */
     hl_js_run_jobs(js);
+
+    js->active_on_complete     = NULL;
+    js->active_on_complete_ctx = NULL;
 
     /* Check outer handler promise state (per-continuation ref) */
     JSPromiseStateEnum state = JS_PromiseState(ctx, jc->handler_promise);
@@ -116,6 +130,13 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
         js->async_pending = 0;
         js->active_conn = NULL;
         js->dispatch_depth--;
+
+        /* Handler that awaited has now completed — run any deferred-teardown
+         * hook (e.g. ws on_close conn teardown). */
+        if (jc->on_complete) {
+            jc->on_complete(js, jc->on_complete_ctx);
+            jc->on_complete = NULL;
+        }
 
 #ifdef HL_ENABLE_HTTP_SERVER
         if (conn) {
@@ -159,6 +180,12 @@ static void hl_js_async_resume(HlAsyncCont *self, void *driver)
         js->async_pending = 0;
         js->active_conn = NULL;
         js->dispatch_depth--;
+
+        /* Run any deferred-teardown hook (handler rejected after awaiting). */
+        if (jc->on_complete) {
+            jc->on_complete(js, jc->on_complete_ctx);
+            jc->on_complete = NULL;
+        }
 
 #ifdef HL_ENABLE_HTTP_SERVER
         if (conn) {
@@ -284,6 +311,8 @@ HlAsyncCont *hl_js_async_cont_create(HlJS *js,
     jc->conn            = js->active_conn;
     jc->handler_promise = JS_UNDEFINED;
     jc->timer_ctx       = js->active_timer;  /* inherit timer ctx if in timer callback */
+    jc->on_complete     = js->active_on_complete;     /* deferred-teardown hook */
+    jc->on_complete_ctx = js->active_on_complete_ctx;
 
     /* Store pointer so dispatch/resume can wire handler_promise */
     js->last_async_cont = jc;

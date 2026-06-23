@@ -165,6 +165,16 @@ void hl_js_ws_on_message(KlWsServerConn *ws_conn, const char *data,
     js->dispatch_depth--;
 }
 
+/* Deferred-teardown hook (HlJS::active_on_complete): invalidate the conn
+ * object and remove it from the registry once an async on_close handler has
+ * finally completed. Runs from hl_js_async_resume's completion path. */
+static void hl_js_ws_close_teardown(HlJS *js, void *ctx)
+{
+    HlWsConn *conn = (HlWsConn *)ctx;
+    hl_js_ws_invalidate_conn(js->ctx, conn);
+    hl_ws_registry_remove(js->base.ws_registry, conn);
+}
+
 void hl_js_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
                                 const char *reason, size_t reason_len,
                                 void *user_data)
@@ -189,6 +199,12 @@ void hl_js_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
         js->last_async_cont = NULL;
         js->async_pending = 0;
         js->instruction_count = 0;
+
+        /* Arm the deferred-teardown hook: if the handler awaits, the
+         * continuation captures it so the conn teardown runs at completion,
+         * not while the handler is still suspended and holding the conn. */
+        js->active_on_complete     = hl_js_ws_close_teardown;
+        js->active_on_complete_ctx = conn;
 
         /* Look up handler */
         JSValue global = JS_GetGlobalObject(ctx);
@@ -223,10 +239,21 @@ void hl_js_ws_on_close(KlWsServerConn *ws_conn, uint16_t code,
         }
 
         JS_FreeValue(ctx, handler);
+        js->active_on_complete     = NULL;
+        js->active_on_complete_ctx = NULL;
         js->dispatch_depth--;
+
+        if (js->async_pending) {
+            /* Handler is suspended on an async op — the continuation captured
+             * the teardown hook; it runs once the handler completes. Do NOT
+             * tear the conn down now while the handler still references it. */
+            return;
+        }
     }
 
-    /* Invalidate conn object and remove from registry */
+    /* Invalidate conn object and remove from registry (sync completion, error,
+     * or no on_close handler). The async path defers this to handler
+     * completion via active_on_complete. */
     hl_js_ws_invalidate_conn(ctx, conn);
     hl_ws_registry_remove(js->base.ws_registry, conn);
 }

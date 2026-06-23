@@ -33,6 +33,12 @@ typedef struct HlLuaAsyncCont {
     int                thread_ref;    /* registry ref for coroutine */
     KlConn            *conn;          /* connection to resume (NULL = detached) */
     void              *timer_ctx;     /* HlLuaTimer* if running in a timer callback */
+    /* Generic "handler finally completed" hook. Lets a dispatch site defer
+     * teardown that must not run while the handler is still suspended (e.g.
+     * the ws on_close conn teardown in ws.c) without coupling this async
+     * core to any subsystem. Called once on LUA_OK / error completion. */
+    void             (*on_complete)(HlLua *lua, void *ctx);
+    void              *on_complete_ctx;
 } HlLuaAsyncCont;
 
 /*
@@ -70,6 +76,10 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
     lua->active_co = co;
     lua->active_conn = conn;
     lua->active_thread_ref = lc->thread_ref;
+    /* Re-arm the deferred-teardown hook so a further yield inside the handler
+     * carries it onto the next continuation. */
+    lua->active_on_complete     = lc->on_complete;
+    lua->active_on_complete_ctx = lc->on_complete_ctx;
 
     /* Push driver result onto the coroutine stack so lua_resume
      * delivers it as the return value of the yield point */
@@ -81,6 +91,9 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
 
     int nres = 0;
     int status = lua_resume(co, lua->L, nargs, &nres);
+
+    lua->active_on_complete     = NULL;
+    lua->active_on_complete_ctx = NULL;
 
     if (status == LUA_OK) {
         /* Handler completed */
@@ -103,6 +116,13 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
         lua->active_co = NULL;
         lua->active_conn = NULL;
         lua->dispatch_depth--;
+
+        /* Handler that yielded has now completed — run any deferred-teardown
+         * hook (e.g. ws on_close conn teardown). */
+        if (lc->on_complete) {
+            lc->on_complete(lua, lc->on_complete_ctx);
+            lc->on_complete = NULL;
+        }
 
         if (conn) {
             /* Attached mode — response is ready */
@@ -162,6 +182,12 @@ static void hl_lua_async_resume(HlAsyncCont *self, void *driver)
         lua->active_co = NULL;
         lua->active_conn = NULL;
         lua->dispatch_depth--;
+
+        /* Run any deferred-teardown hook (handler errored after yielding). */
+        if (lc->on_complete) {
+            lc->on_complete(lua, lc->on_complete_ctx);
+            lc->on_complete = NULL;
+        }
 
 #ifdef HL_ENABLE_HTTP_SERVER
         if (conn) {
@@ -240,6 +266,8 @@ HlAsyncCont *hl_lua_async_cont_create(HlLua *lua, HlAllocator *alloc,
     lc->thread_ref = lua->active_thread_ref;
     lc->conn       = lua->active_conn;
     lc->timer_ctx  = lua->active_timer;  /* inherit timer ctx if in timer callback */
+    lc->on_complete     = lua->active_on_complete;     /* deferred-teardown hook */
+    lc->on_complete_ctx = lua->active_on_complete_ctx;
 
     return &lc->base;
 }
