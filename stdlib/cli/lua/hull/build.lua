@@ -69,6 +69,11 @@ local function parse_args()
             opts.target = arg[i]
         elseif a == "--no-verify-platform" then
             opts.verify_platform = false
+        elseif a == "--flavor" then
+            i = i + 1
+            opts.flavor = arg[i]
+        elseif a:sub(1, 9) == "--flavor=" then
+            opts.flavor = a:sub(10)
         elseif a:sub(1, 1) ~= "-" then
             opts.app_dir = a
         end
@@ -358,6 +363,41 @@ local function generate_app_registry(app_dir, files)
     return table.concat(parts, "\n")
 end
 
+-- Execute the app entry to capture its manifest table (or nil). Lua entry
+-- runs in this same VM; JS entry runs in a transient HlJS via
+-- tool.extract_manifest_js and the JSON result is decoded into the same
+-- shape app.get_manifest() returns. Used by sign_app (to persist the
+-- resolved module set) and by main (to validate --flavor before building).
+local function extract_app_manifest(app_dir)
+    local manifest = nil
+    local lua_entry = app_dir .. "/app.lua"
+    local js_entry  = app_dir .. "/app.js"
+    if file_exists(lua_entry) then
+        local chunk = tool.loadfile(lua_entry)
+        if chunk then
+            local ok, err = pcall(chunk)
+            if ok then
+                manifest = app.get_manifest()
+            else
+                tool.stderr("hull build: warning: Lua manifest extraction failed: " .. tostring(err) .. "\n")
+            end
+        end
+    elseif file_exists(js_entry) then
+        local ok, js_json_or_err = pcall(tool.extract_manifest_js, js_entry)
+        if not ok then
+            tool.stderr("hull build: warning: JS manifest extraction failed: " .. tostring(js_json_or_err) .. "\n")
+        elseif js_json_or_err then
+            local decoded, decode_err = json.decode(js_json_or_err)
+            if decoded then
+                manifest = decoded
+            else
+                tool.stderr("hull build: warning: JS manifest JSON decode failed: " .. tostring(decode_err) .. "\n")
+            end
+        end
+    end
+    return manifest
+end
+
 local function sign_app(app_dir, key_file, sign_ctx, files)
     local key_data = read_file(key_file)
     if not key_data then
@@ -393,38 +433,8 @@ local function sign_app(app_dir, key_file, sign_ctx, files)
         end
     end
 
-    -- Execute the app entry to capture its manifest. Lua entry runs
-    -- in this same VM; JS entry runs in a transient HlJS spun up by
-    -- tool.extract_manifest_js and the resulting JSON-stringified
-    -- manifest is decoded into the same shape app.get_manifest() would
-    -- return on the Lua side. Either path is fine — the rest of the
-    -- build pipeline only cares about the resulting table.
-    local manifest = nil
-    local lua_entry = app_dir .. "/app.lua"
-    local js_entry  = app_dir .. "/app.js"
-    if file_exists(lua_entry) then
-        local chunk = tool.loadfile(lua_entry)
-        if chunk then
-            local ok, err = pcall(chunk)
-            if ok then
-                manifest = app.get_manifest()
-            else
-                tool.stderr("hull build: warning: Lua manifest extraction failed: " .. tostring(err) .. "\n")
-            end
-        end
-    elseif file_exists(js_entry) then
-        local ok, js_json_or_err = pcall(tool.extract_manifest_js, js_entry)
-        if not ok then
-            tool.stderr("hull build: warning: JS manifest extraction failed: " .. tostring(js_json_or_err) .. "\n")
-        elseif js_json_or_err then
-            local decoded, decode_err = json.decode(js_json_or_err)
-            if decoded then
-                manifest = decoded
-            else
-                tool.stderr("hull build: warning: JS manifest JSON decode failed: " .. tostring(decode_err) .. "\n")
-            end
-        end
-    end
+    -- Capture the app's manifest (shared with main's --flavor validation).
+    local manifest = extract_app_manifest(app_dir)
 
     -- Resolve the manifest's modules block against the canonical registry.
     -- The result is the full set of admitted modules (declared + intrinsic
@@ -434,7 +444,7 @@ local function sign_app(app_dir, key_file, sign_ctx, files)
     -- this field, so tampering invalidates the package.
     local modules_resolved = nil
     if manifest then
-        local r = tool.modules_resolve(manifest)
+        local r = tool.modules_resolve(manifest, sign_ctx.flavor)
         if r.ok then
             modules_resolved = r.modules
         else
@@ -687,6 +697,38 @@ typedef struct {
         is_cosmo = cc:find("cosmocc") ~= nil
     end
 
+    -- ── Build flavor (--flavor) ──
+    -- Validate the requested flavor and (for non-default flavors) check the
+    -- app's manifest against the TARGET flavor's caps, aborting if a declared
+    -- module needs a subsystem the flavor drops. MVP: the flavor's
+    -- libhull_platform-<flavor>.a must be built locally; signed fetch is a
+    -- follow-on phase. See docs/build_flavors.md.
+    local flavor_asset = nil
+    if opts.flavor and opts.flavor ~= "full" then
+        if is_cosmo then
+            tool.stderr("hull build: --flavor is not supported with cosmo builds yet\n")
+            tool.rmdir(tmpdir)
+            tool.exit(1)
+        end
+        local fr = tool.build_flavor(opts.flavor)
+        if not fr.ok then
+            tool.stderr("hull build: " .. tostring(fr.error) .. "\n")
+            tool.rmdir(tmpdir)
+            tool.exit(1)
+        end
+        flavor_asset = fr.asset
+        local manifest = extract_app_manifest(opts.app_dir)
+        if manifest then
+            local r = tool.modules_resolve(manifest, opts.flavor)
+            if not r.ok then
+                tool.stderr("hull build: --flavor=" .. opts.flavor .. ": "
+                            .. tostring(r.error) .. "\n")
+                tool.rmdir(tmpdir)
+                tool.exit(1)
+            end
+        end
+    end
+
     -- Guard: ensure compiler vtable is available
     if not tool.compiler then
         tool.stderr("hull build: no C compiler available\n")
@@ -830,6 +872,35 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
     -- Extract platform library (if embedded)
     local platform_extracted = false
     local platform_lib = tmpdir .. "/libhull_platform.a"
+
+    -- --flavor: link a locally-built non-default platform lib instead of the
+    -- embedded (full) one. The flavor lib isn't covered by the signed
+    -- platform manifest yet, so the platform-sig cross-check is skipped (MVP;
+    -- signed fetch is a follow-on phase). Native only (guarded above).
+    if flavor_asset then
+        local hull_dir = __hull_exe and (__hull_exe:match("(.*/)") or "") or ""
+        local cand = {
+            hull_dir .. flavor_asset .. ".a",
+            "build/" .. flavor_asset .. ".a",
+            "../build/" .. flavor_asset .. ".a",
+            flavor_asset .. ".a",
+        }
+        local found = nil
+        for _, p in ipairs(cand) do
+            if file_exists(p) then found = p; break end
+        end
+        if not found then
+            tool.stderr("hull build: --flavor=" .. opts.flavor .. " needs "
+                        .. flavor_asset .. ".a (not found)\n")
+            tool.stderr("hint: build it from source, e.g. `make platform-"
+                        .. opts.flavor .. "`\n")
+            tool.rmdir(tmpdir)
+            tool.exit(1)
+        end
+        tool.copy(found, platform_lib)
+        platform_extracted = true
+        opts.verify_platform = false
+    end
 
     -- Try to find platform library in known locations
     -- 1. Check if build_assets has it embedded (multi-arch cosmo)
@@ -1095,6 +1166,7 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
 
         local sign_ctx = {
             cc = cc,
+            flavor = opts.flavor,
             binary_hash = nil,
             trampoline_hash = crypto.sha256(app_main),
             platform_sig_path = platform_sig_path,

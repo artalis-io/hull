@@ -2045,7 +2045,7 @@ $(shell test "$$(cat $(BUILD_CONFIG_FILE) 2>/dev/null)" = "$(BUILD_FINGERPRINT)"
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan tsan fuzz fuzz-run e2e e2e-build e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-tcc e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-hypermedia-photos-upload e2e-jwt-asym hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-gpu bench-bytecode-cache wamrc coverage lint-lua lint-js lint platform platform-cosmo hardening check-hardening
+.PHONY: all clean test debug msan tsan fuzz fuzz-run e2e e2e-build e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-tcc e2e-build-flavor e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-hypermedia-photos-upload e2e-jwt-asym hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-gpu bench-bytecode-cache wamrc coverage lint-lua lint-js lint platform platform-cosmo platform-server-only platform-client-only platform-pure-compute hardening check-hardening
 
 all: $(BUILDDIR)/hull
 
@@ -2152,20 +2152,50 @@ $(PLATFORM_LIB): | $(BUILDDIR)
 	@test -f $@ || (echo "ERROR: TRUST_PLATFORM_LIB=1 but $@ is missing"; exit 1)
 	@echo "$@: trusting pre-built artifact (TRUST_PLATFORM_LIB=1)"
 else
-$(PLATFORM_LIB): $(PLATFORM_OBJS) $(CANARY_OBJ) $(KEEL_LIB) | $(BUILDDIR)
+# When both HTTP halves are off, KEEL_LIB is empty and the keel-merge below is
+# skipped. But the platform objects still reference sh_seal_arena (Hull's
+# manifest seal / sealed runtime tables), which normally arrives bundled inside
+# the merged keel archive. Add Hull's own instrumented sh_seal_arena.o directly
+# in that case so the no-keel (pure-compute) platform archive is self-contained.
+ifeq ($(KEEL_LIB),)
+PLATFORM_NOKEEL_OBJS := $(SH_SEAL_ARENA_OBJ)
+else
+PLATFORM_NOKEEL_OBJS :=
+endif
+$(PLATFORM_LIB): $(PLATFORM_OBJS) $(CANARY_OBJ) $(PLATFORM_NOKEEL_OBJS) $(KEEL_LIB) | $(BUILDDIR)
 	@rm -f $@
-	$(AR) rcs $@ $(PLATFORM_OBJS) $(CANARY_OBJ)
-	@# Merge keel objects into the platform archive
-	@tmpdir=$$(mktemp -d) && \
+	$(AR) rcs $@ $(PLATFORM_OBJS) $(CANARY_OBJ) $(PLATFORM_NOKEEL_OBJS)
+	@# Merge keel objects into the platform archive. KEEL_LIB is empty when
+	@# both HTTP halves are off (pure-compute flavor), in which case there is
+	@# nothing to merge -- skip rather than `ar x` the empty path (a dir).
+	@if [ -n "$(KEEL_LIB)" ]; then \
+		tmpdir=$$(mktemp -d) && \
 		cd $$tmpdir && \
 		$(AR) x $(CURDIR)/$(KEEL_LIB) && \
 		$(AR) rcs $(CURDIR)/$@ *.o && \
-		rm -rf $$tmpdir
+		rm -rf $$tmpdir ; \
+	fi
 	@# Record the CC used so hull build can auto-detect
 	@echo "$(CC)" > $(BUILDDIR)/platform_cc
 endif
 
 platform: $(PLATFORM_LIB)
+
+# ── Build-flavor platform libraries (hull build --flavor) ──────────────
+# Produce $(BUILDDIR)/libhull_platform-<flavor>.a, the platform archive a
+# non-default flavor links against. Each flavor compiles with a different
+# HL_ENABLE_* set, so it builds in a dedicated object dir (BUILDDIR override)
+# to avoid clobbering the default build or build/hull. `hull build
+# --flavor=<flavor>` discovers the result in $(BUILDDIR)/. See
+# docs/build_flavors.md.
+PLATFORM_FLAVOR_FLAGS_server-only  := HL_ENABLE_HTTP_CLIENT=0
+PLATFORM_FLAVOR_FLAGS_client-only  := HL_ENABLE_HTTP_SERVER=0
+PLATFORM_FLAVOR_FLAGS_pure-compute := HL_ENABLE_HTTP=0
+
+platform-server-only platform-client-only platform-pure-compute: platform-%:
+	$(MAKE) platform BUILDDIR=$(BUILDDIR)/flavor-$* $(PLATFORM_FLAVOR_FLAGS_$*)
+	cp $(BUILDDIR)/flavor-$*/libhull_platform.a $(BUILDDIR)/libhull_platform-$*.a
+	@echo "built $(BUILDDIR)/libhull_platform-$*.a"
 
 # Multi-arch cosmo platform: build x86_64 and aarch64 archives
 COSMO_STAGE := .cosmo_staging
@@ -3146,6 +3176,10 @@ e2e-cache-cosmo:
 
 e2e-tcc: $(BUILDDIR)/hull $(BUILDDIR)/libhull_platform.a
 	sh tests/e2e_tcc.sh
+
+# `hull build --flavor` MVP. Builds the pure-compute platform lib itself.
+e2e-build-flavor: $(BUILDDIR)/hull
+	sh tests/e2e_build_flavor.sh
 
 e2e-install:
 	sh tests/e2e_install.sh

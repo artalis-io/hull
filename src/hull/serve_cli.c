@@ -28,6 +28,7 @@
  */
 
 #include "hull/app_context.h"
+#include "hull/entry.h"        /* HlEntry / hl_app_entries[] (embedded apps) */
 #include "hull/shared/async_backend.h"
 #include "hull/shared/log_lock.h"
 #include "hull/shared/thread_affinity.h"
@@ -113,16 +114,35 @@ int hull_serve(int argc, char **argv)
     int entry_idx = cli_parse_args(argc, argv, &app_argc, &app_argv,
                                     &no_migrate, &no_sandbox, &db_path);
     if (!db_path) db_path = getenv("HULL_DB");
-    if (entry_idx < 0) {
-        fprintf(stderr,
-            "hull: no entry point given. Usage: hull run <app.lua|app.js> "
-            "[-- args...]\n");
-        return 1;
+
+    /* Resolve the entry point. A `hull build` binary embeds its app and is run
+     * with no argv entry, so when none is given fall back to the embedded
+     * entry the same way serve.c does (serve.c is not compiled in this
+     * HTTP-server-less flavor, so the scan is replicated here). The embedded
+     * Lua entry is registered as "./app", the JS entry as "./app.js"; the
+     * "app.lua"/"app.js" name then resolves from the app VFS, and realpath()
+     * below harmlessly fails for it (leaving app_dir = "."). */
+    const char *entry;
+    if (entry_idx >= 0) {
+        entry = argv[entry_idx];
+    } else {
+        extern const HlEntry hl_app_entries[];
+        const char *embedded = NULL;
+        for (int i = 0; hl_app_entries[i].name; i++) {
+            if (strcmp(hl_app_entries[i].name, "./app.js") == 0) { embedded = "app.js"; break; }
+            if (strcmp(hl_app_entries[i].name, "./app") == 0)    { embedded = "app.lua"; break; }
+        }
+        if (!embedded) {
+            fprintf(stderr,
+                "hull: no entry point given. Usage: hull run <app.lua|app.js> "
+                "[-- args...]\n");
+            return 1;
+        }
+        entry = embedded;
     }
 
     /* Derive app_dir from the entry point path (parent directory of
      * the .lua/.js file, or "." if no slash). app_context needs both. */
-    const char *entry = argv[entry_idx];
     char entry_abs[4096];
     if (realpath(entry, entry_abs) != NULL)
         entry = entry_abs;

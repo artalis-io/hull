@@ -91,15 +91,33 @@ static int l_tool_modules_resolve(lua_State *L)
         m.modules_declared = 1;
         lua_pushnil(L);
         while (lua_next(L, -2) != 0 && m.modules_count < HL_MANIFEST_MAX_MODULES) {
-            if (lua_type(L, -2) == LUA_TSTRING &&
-                lua_type(L, -1) == LUA_TSTRING) {
-                const char *name = lua_tostring(L, -2);
-                const char *vstr = lua_tostring(L, -1);
-                char *end = NULL;
-                long v = strtol(vstr, &end, 10);
-                if (end != vstr && v >= 1 && v <= 255) {
-                    char *copy = strdup(name);
+            if (lua_isstring(L, -1)) {
+                /* Canonical form: each VALUE is a spec "vendor/name@major"
+                 * (array `{"hull/db@1"}` or keyed `{db="hull/db@1"}`; the
+                 * value carries the spec either way). Same parse as
+                 * manifest_declares_module() in mod_app.c: strip the "@N"
+                 * major for the registry lookup. Falls back to the legacy
+                 * key=name / value=version-number form for a bare number. */
+                const char *val = lua_tostring(L, -1);
+                int is_spec = strchr(val, '/') != NULL || strchr(val, '@') != NULL;
+                const char *spec = NULL;
+                size_t nlen = 0;
+                long v = 0;
+                if (is_spec) {
+                    spec = val;
+                    const char *at = strchr(spec, '@');
+                    nlen = at ? (size_t)(at - spec) : strlen(spec);
+                    v = at ? strtol(at + 1, NULL, 10) : 1;
+                } else if (lua_type(L, -2) == LUA_TSTRING) {
+                    spec = lua_tostring(L, -2);
+                    nlen = strlen(spec);
+                    v = strtol(val, NULL, 10);
+                }
+                if (spec && nlen > 0 && v >= 1 && v <= 255) {
+                    char *copy = malloc(nlen + 1);
                     if (copy) {
+                        memcpy(copy, spec, nlen);
+                        copy[nlen] = '\0';
                         owned_names[owned_count] = copy;
                         m.modules[m.modules_count].name = copy;
                         m.modules[m.modules_count].api_major = (uint8_t)v;
