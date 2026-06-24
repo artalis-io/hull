@@ -143,6 +143,15 @@ int hl_build_flavor_all(const HlBuildFlavor **out);
  * `base` is normally hl_module_build_caps() (the running hull's caps). */
 uint32_t hl_build_flavor_caps(const HlBuildFlavor *f, uint32_t base);
 
+/* Aggregate required-caps (HL_MOD_CAP_* OR) of every module in a resolved
+ * set. The HTTP_SERVER / HTTP_CLIENT bits are what distinguish the flavors. */
+uint32_t hl_module_set_required_caps(const HlResolvedModuleSet *set);
+
+/* Pick the minimal flavor that still provides every cap in `needed_caps`:
+ * the flavor clearing the most caps without clearing a needed one. Always
+ * returns at least "full". Drives `hull build --flavor=auto`. */
+const HlBuildFlavor *hl_build_flavor_auto(uint32_t needed_caps);
+
 /* ── Pre-manifest import tracker ───────────────────────────────────── */
 
 /*

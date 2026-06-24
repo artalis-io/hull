@@ -587,4 +587,31 @@ UTEST(build_flavor, server_only_rejects_http_client)
     ASSERT_TRUE(strstr(err, "HTTP_CLIENT") != NULL);
 }
 
+UTEST(build_flavor, auto_picks_minimal)
+{
+    /* No caps needed -> pure-compute (clears the most). */
+    ASSERT_STREQ(hl_build_flavor_auto(0)->name, "pure-compute");
+    /* A non-HTTP cap (DB) doesn't constrain the flavor (all keep DB). */
+    ASSERT_STREQ(hl_build_flavor_auto(HL_MOD_CAP_DB)->name, "pure-compute");
+    ASSERT_STREQ(hl_build_flavor_auto(HL_MOD_CAP_HTTP_SERVER)->name, "server-only");
+    ASSERT_STREQ(hl_build_flavor_auto(HL_MOD_CAP_HTTP_CLIENT)->name, "client-only");
+    ASSERT_STREQ(hl_build_flavor_auto(HL_MOD_CAP_HTTP)->name, "full");
+}
+
+UTEST(build_flavor, auto_from_resolved_manifest)
+{
+    HlManifest m;
+    clear_manifest(&m);
+    add_module(&m, "hull/http-server", 1);
+
+    HlResolvedModuleSet s = {0};
+    char err[256] = {0};
+    ASSERT_EQ(0, hl_module_resolver_resolve_caps(&m, &s, hl_module_build_caps(),
+                                                 err, sizeof(err)));
+    uint32_t req = hl_module_set_required_caps(&s);
+    ASSERT_TRUE((req & HL_MOD_CAP_HTTP_SERVER) != 0);
+    /* An app needing the HTTP server but not the client -> server-only. */
+    ASSERT_STREQ(hl_build_flavor_auto(req)->name, "server-only");
+}
+
 UTEST_MAIN();

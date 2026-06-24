@@ -697,6 +697,23 @@ typedef struct {
         is_cosmo = cc:find("cosmocc") ~= nil
     end
 
+    -- --flavor=auto: infer the minimal flavor from the app's declared modules
+    -- (resolve with full caps, then pick the smallest flavor that still
+    -- satisfies them). Resolves to a concrete flavor name the block below
+    -- handles. Falls back to "full" if the manifest can't be read.
+    if opts.flavor == "auto" then
+        local picked = "full"
+        local manifest = extract_app_manifest(opts.app_dir)
+        if manifest then
+            local r = tool.modules_resolve(manifest)
+            if r.ok and r.auto and r.auto.name then
+                picked = r.auto.name
+            end
+        end
+        print("hull build: --flavor=auto selected '" .. picked .. "'")
+        opts.flavor = picked
+    end
+
     -- ── Build flavor (--flavor) ──
     -- Validate the requested flavor and (for non-default flavors) check the
     -- app's manifest against the TARGET flavor's caps, aborting if a declared

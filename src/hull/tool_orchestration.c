@@ -185,6 +185,20 @@ static int l_tool_modules_resolve(lua_State *L)
     }
     lua_setfield(L, -2, "modules");
 
+    /* auto = the minimal build flavor that still satisfies this app's
+     * declared modules (drives `hull build --flavor=auto`). Computed from
+     * the resolved set's aggregate required-caps. */
+    const HlBuildFlavor *autf =
+        hl_build_flavor_auto(hl_module_set_required_caps(&set));
+    if (autf) {
+        lua_newtable(L);
+        lua_pushstring(L, autf->name);
+        lua_setfield(L, -2, "name");
+        lua_pushstring(L, autf->asset);
+        lua_setfield(L, -2, "asset");
+        lua_setfield(L, -2, "auto");
+    }
+
     return 1;
 }
 

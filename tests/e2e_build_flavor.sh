@@ -69,4 +69,16 @@ if command -v nm >/dev/null 2>&1; then
     pass "zero mbedTLS hashing symbols"
 fi
 
+# ── 5. --flavor=auto infers the minimal flavor from the manifest ───────
+out=$("$HULL" build --flavor=auto "$WORK/pc" -o "$WORK/pc/auto" 2>&1) \
+    || fail "auto build failed: $out"
+echo "$out" | grep -q "auto selected 'pure-compute'" \
+    || fail "auto should select pure-compute for an app.main app: $out"
+set +e
+"$WORK/pc/auto" >/dev/null 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 7 ] || fail "auto pure-compute binary should exit 7, got $rc"
+pass "--flavor=auto -> pure-compute for an app.main app"
+
 echo "PASS: e2e_build_flavor"

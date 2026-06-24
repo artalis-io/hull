@@ -180,6 +180,45 @@ uint32_t hl_build_flavor_caps(const HlBuildFlavor *f, uint32_t base)
     return f ? (base & ~f->clear_caps) : base;
 }
 
+uint32_t hl_module_set_required_caps(const HlResolvedModuleSet *set)
+{
+    if (!set) return 0;
+    uint32_t caps = 0;
+    size_t total = 0;
+    const HlModuleSpec *all = hl_module_registry_all(&total);
+    for (size_t i = 0; i < total; i++) {
+        if (hl_module_set_contains_index(set, (int)i))
+            caps |= all[i].required_caps;
+    }
+    return caps;
+}
+
+/* Popcount without relying on a builtin (cosmo/older toolchains). */
+static int popcount32(uint32_t v)
+{
+    int n = 0;
+    while (v) { v &= v - 1; n++; }
+    return n;
+}
+
+const HlBuildFlavor *hl_build_flavor_auto(uint32_t needed_caps)
+{
+    /* Pick the flavor clearing the most caps without clearing one the app
+     * needs. Flavors only differ in the HTTP_SERVER / HTTP_CLIENT bits, so
+     * only those of `needed_caps` matter here; "full" (clears nothing) is
+     * always a valid fallback. */
+    const HlBuildFlavor *best = NULL;
+    int best_bits = -1;
+    size_t n = sizeof(BUILD_FLAVORS) / sizeof(BUILD_FLAVORS[0]);
+    for (size_t i = 0; i < n; i++) {
+        const HlBuildFlavor *f = &BUILD_FLAVORS[i];
+        if (f->clear_caps & needed_caps) continue;   /* would drop a needed cap */
+        int bits = popcount32(f->clear_caps);
+        if (bits > best_bits) { best_bits = bits; best = f; }
+    }
+    return best;
+}
+
 /* ── The resolver ──────────────────────────────────────────────────── */
 
 int hl_module_resolver_resolve(const HlManifest *manifest,

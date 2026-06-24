@@ -26,6 +26,15 @@ release-artifact layout).
   with the mbedtls-free hashing path, the contributor invariant (core code
   must hash via the cap layer, never mbedTLS directly), and refreshed the
   flavor binary-size table to measured values.
+- **`hull build --flavor=full|server-only|client-only|pure-compute`** builds
+  a flavored app binary from a full hull, linking a locally-built
+  `libhull_platform-<flavor>.a` (`make platform-<flavor>`) and validating the
+  app's manifest against the TARGET flavor's caps (a module needing a dropped
+  subsystem is rejected at build time). **`--flavor=auto`** infers the
+  minimal flavor from the declared modules. Design: `docs/build_flavors.md`.
+  Along the way: fixed the no-keel platform archive (missing `sh_seal_arena`),
+  a `tool.modules_resolve` parser that ignored the canonical array module
+  form, and `serve_cli.c` not detecting a built binary's embedded app.
 
 ## [0.4.0] — 2026-06-17
 
