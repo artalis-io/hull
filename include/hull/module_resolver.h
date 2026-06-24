@@ -99,6 +99,50 @@ int hl_module_resolver_resolve(const HlManifest *manifest,
                                 HlResolvedModuleSet *out,
                                 char *errbuf, size_t errlen);
 
+/*
+ * Compile-time capabilities THIS hull build provides, as an HL_MOD_CAP_*
+ * bitset (DB / WASM / GPU / HTTP_SERVER / HTTP_CLIENT / TUI). This is what
+ * the plain resolver validates declared modules against.
+ */
+uint32_t hl_module_build_caps(void);
+
+/*
+ * Resolve against an EXPLICIT build-cap set instead of this binary's
+ * compiled-in flags. Used by `hull build --flavor`, which must validate an
+ * app's manifest against the TARGET flavor's caps (e.g. reject hull/web/
+ * ws-server when building --flavor=pure-compute) even though the running
+ * hull is full-HTTP. hl_module_resolver_resolve() == this with
+ * hl_module_build_caps().
+ */
+int hl_module_resolver_resolve_caps(const HlManifest *manifest,
+                                     HlResolvedModuleSet *out,
+                                     uint32_t build_caps,
+                                     char *errbuf, size_t errlen);
+
+/* ── Build flavors ─────────────────────────────────────────────────────
+ *
+ * A build flavor is a named, finite cut of the platform's capability set,
+ * carried by a correspondingly-compiled libhull_platform.a. `hull build
+ * --flavor=<name>` selects one. The registry is the single source of truth
+ * (resolver target-caps, platform-lib asset name, doctor/agent listing).
+ * See docs/build_flavors.md.
+ */
+typedef struct {
+    const char *name;        /* "pure-compute" */
+    uint32_t    clear_caps;  /* HL_MOD_CAP_* this flavor turns OFF vs full */
+    const char *asset;       /* platform-lib stem, "libhull_platform-<flavor>" */
+} HlBuildFlavor;
+
+/* Look up a flavor by name; NULL if unknown. "full" is a zero-clear entry. */
+const HlBuildFlavor *hl_build_flavor_find(const char *name);
+
+/* Enumerate the flavor table. Returns count; writes the table base to *out. */
+int hl_build_flavor_all(const HlBuildFlavor **out);
+
+/* Target build-caps for a flavor: base with the flavor's clear_caps removed.
+ * `base` is normally hl_module_build_caps() (the running hull's caps). */
+uint32_t hl_build_flavor_caps(const HlBuildFlavor *f, uint32_t base);
+
 /* ── Pre-manifest import tracker ───────────────────────────────────── */
 
 /*

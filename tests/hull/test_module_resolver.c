@@ -513,4 +513,78 @@ UTEST(module_resolver, tiny_errbuf_truncates_safely)
     ASSERT_EQ((int)err[sizeof(err) - 1], 0);
 }
 
+/* ── Build flavors + resolve-against-target-caps (hull build --flavor) ── */
+
+UTEST(build_flavor, registry_lookup)
+{
+    ASSERT_TRUE(hl_build_flavor_find(NULL) == NULL);
+    ASSERT_TRUE(hl_build_flavor_find("bogus") == NULL);
+
+    const HlBuildFlavor *full = hl_build_flavor_find("full");
+    ASSERT_TRUE(full != NULL);
+    ASSERT_EQ((int)full->clear_caps, 0);
+
+    const HlBuildFlavor *po = hl_build_flavor_find("pure-compute");
+    ASSERT_TRUE(po != NULL);
+    /* HL_MOD_CAP_HTTP == HTTP_CLIENT | HTTP_SERVER. */
+    ASSERT_EQ((int)po->clear_caps, (int)HL_MOD_CAP_HTTP);
+
+    ASSERT_EQ((int)hl_build_flavor_find("server-only")->clear_caps,
+              (int)HL_MOD_CAP_HTTP_CLIENT);
+    ASSERT_EQ((int)hl_build_flavor_find("client-only")->clear_caps,
+              (int)HL_MOD_CAP_HTTP_SERVER);
+
+    const HlBuildFlavor *all = NULL;
+    ASSERT_GE(hl_build_flavor_all(&all), 4);
+    ASSERT_TRUE(all != NULL);
+}
+
+UTEST(build_flavor, caps_clear_http)
+{
+    uint32_t base = HL_MOD_CAP_DB | HL_MOD_CAP_HTTP_CLIENT | HL_MOD_CAP_HTTP_SERVER;
+    uint32_t pc = hl_build_flavor_caps(hl_build_flavor_find("pure-compute"), base);
+    ASSERT_TRUE((pc & HL_MOD_CAP_HTTP_CLIENT) == 0);
+    ASSERT_TRUE((pc & HL_MOD_CAP_HTTP_SERVER) == 0);
+    ASSERT_TRUE((pc & HL_MOD_CAP_DB) != 0);   /* unrelated caps preserved */
+    /* full and a NULL flavor pass the base through unchanged. */
+    ASSERT_EQ((int)hl_build_flavor_caps(hl_build_flavor_find("full"), base), (int)base);
+    ASSERT_EQ((int)hl_build_flavor_caps(NULL, base), (int)base);
+}
+
+UTEST(build_flavor, pure_compute_rejects_http_server)
+{
+    HlManifest m;
+    clear_manifest(&m);
+    add_module(&m, "hull/http-server", 1);
+
+    HlResolvedModuleSet s = {0};
+    char err[256] = {0};
+
+    /* This (default) test build is full, so full caps admit hull/http-server. */
+    uint32_t full = hl_module_build_caps();
+    ASSERT_EQ(hl_module_resolver_resolve_caps(&m, &s, full, err, sizeof(err)), 0);
+
+    /* Under pure-compute caps the HTTP_SERVER gate trips at build time. */
+    uint32_t pc = hl_build_flavor_caps(hl_build_flavor_find("pure-compute"), full);
+    ASSERT_EQ(hl_module_resolver_resolve_caps(&m, &s, pc, err, sizeof(err)), -1);
+    ASSERT_TRUE(strstr(err, "HTTP_SERVER") != NULL);
+}
+
+UTEST(build_flavor, server_only_rejects_http_client)
+{
+    HlManifest m;
+    clear_manifest(&m);
+    add_module(&m, "hull/http-client", 1);
+
+    HlResolvedModuleSet s = {0};
+    char err[256] = {0};
+
+    uint32_t full = hl_module_build_caps();
+    ASSERT_EQ(hl_module_resolver_resolve_caps(&m, &s, full, err, sizeof(err)), 0);
+
+    uint32_t so = hl_build_flavor_caps(hl_build_flavor_find("server-only"), full);
+    ASSERT_EQ(hl_module_resolver_resolve_caps(&m, &s, so, err, sizeof(err)), -1);
+    ASSERT_TRUE(strstr(err, "HTTP_CLIENT") != NULL);
+}
+
 UTEST_MAIN();

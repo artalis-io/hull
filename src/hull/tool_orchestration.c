@@ -113,9 +113,28 @@ static int l_tool_modules_resolve(lua_State *L)
     }
     lua_pop(L, 1);
 
+    /* Optional arg 2: a build flavor name. When set, validate against the
+     * TARGET flavor's caps (e.g. `hull build --flavor=pure-compute` rejects
+     * hull/web/ws-server) rather than this running hull's compiled-in caps. */
+    uint32_t caps = hl_module_build_caps();
+    if (lua_gettop(L) >= 2 && lua_isstring(L, 2)) {
+        const char *flavor = lua_tostring(L, 2);
+        const HlBuildFlavor *f = hl_build_flavor_find(flavor);
+        if (!f) {
+            for (int i = 0; i < owned_count; i++) free(owned_names[i]);
+            lua_newtable(L);
+            lua_pushboolean(L, 0);
+            lua_setfield(L, -2, "ok");
+            lua_pushfstring(L, "unknown build flavor '%s'", flavor);
+            lua_setfield(L, -2, "error");
+            return 1;
+        }
+        caps = hl_build_flavor_caps(f, caps);
+    }
+
     HlResolvedModuleSet set;
     char err[HL_MODULE_RESOLVER_ERR_MAX] = {0};
-    int rc = hl_module_resolver_resolve(&m, &set, err, sizeof(err));
+    int rc = hl_module_resolver_resolve_caps(&m, &set, caps, err, sizeof(err));
 
     for (int i = 0; i < owned_count; i++) free(owned_names[i]);
 
@@ -148,6 +167,41 @@ static int l_tool_modules_resolve(lua_State *L)
     }
     lua_setfield(L, -2, "modules");
 
+    return 1;
+}
+
+/* ── tool.build_flavor(name) → {ok, asset|error} ──────────────────── */
+
+/* Validate a `hull build --flavor=<name>` value against the flavor registry
+ * and return the platform-lib asset stem so build.lua can locate/link it.
+ * Unknown name → {ok=false, error=...} listing the valid flavors. */
+static int l_tool_build_flavor(lua_State *L)
+{
+    const char *name = luaL_checkstring(L, 1);
+    const HlBuildFlavor *f = hl_build_flavor_find(name);
+
+    lua_newtable(L);
+    if (!f) {
+        const HlBuildFlavor *all = NULL;
+        int n = hl_build_flavor_all(&all);
+        char valid[256];
+        size_t off = 0;
+        for (int i = 0; i < n && off + 1 < sizeof(valid); i++) {
+            int w = snprintf(valid + off, sizeof(valid) - off, "%s%s",
+                             i ? ", " : "", all[i].name);
+            if (w < 0) break;
+            off += (size_t)w;
+        }
+        lua_pushboolean(L, 0);
+        lua_setfield(L, -2, "ok");
+        lua_pushfstring(L, "unknown build flavor '%s' (valid: %s)", name, valid);
+        lua_setfield(L, -2, "error");
+        return 1;
+    }
+    lua_pushboolean(L, 1);
+    lua_setfield(L, -2, "ok");
+    lua_pushstring(L, f->asset);
+    lua_setfield(L, -2, "asset");
     return 1;
 }
 
@@ -424,6 +478,7 @@ void hl_lua_tool_register_orchestration(lua_State *L)
 
     static const luaL_Reg orchestration_funcs[] = {
         { "modules_resolve",        l_tool_modules_resolve },
+        { "build_flavor",           l_tool_build_flavor },
         { "doctor_json",            l_tool_doctor_json },
 #ifdef HL_ENABLE_HTTP_SERVER
         { "agent_errors",           l_tool_agent_errors },

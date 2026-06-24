@@ -141,11 +141,60 @@ static const char *cap_label(uint32_t cap)
     }
 }
 
+uint32_t hl_module_build_caps(void)
+{
+    return build_provided_caps();
+}
+
+/* ── Build flavors ─────────────────────────────────────────────────────
+ *
+ * Each flavor clears a subset of the build caps vs `full`. The asset stem
+ * names the matching libhull_platform-<flavor>.a. Single source of truth
+ * for the resolver target-caps, the platform-lib lookup, and listing.
+ * Note: HL_MOD_CAP_HTTP == HTTP_CLIENT | HTTP_SERVER (the alias). */
+static const HlBuildFlavor BUILD_FLAVORS[] = {
+    { "full",         0,                      "libhull_platform" },
+    { "server-only",  HL_MOD_CAP_HTTP_CLIENT, "libhull_platform-server-only" },
+    { "client-only",  HL_MOD_CAP_HTTP_SERVER, "libhull_platform-client-only" },
+    { "pure-compute", HL_MOD_CAP_HTTP,        "libhull_platform-pure-compute" },
+};
+
+const HlBuildFlavor *hl_build_flavor_find(const char *name)
+{
+    if (!name) return NULL;
+    for (size_t i = 0; i < sizeof(BUILD_FLAVORS) / sizeof(BUILD_FLAVORS[0]); i++) {
+        if (strcmp(BUILD_FLAVORS[i].name, name) == 0)
+            return &BUILD_FLAVORS[i];
+    }
+    return NULL;
+}
+
+int hl_build_flavor_all(const HlBuildFlavor **out)
+{
+    if (out) *out = BUILD_FLAVORS;
+    return (int)(sizeof(BUILD_FLAVORS) / sizeof(BUILD_FLAVORS[0]));
+}
+
+uint32_t hl_build_flavor_caps(const HlBuildFlavor *f, uint32_t base)
+{
+    return f ? (base & ~f->clear_caps) : base;
+}
+
 /* ── The resolver ──────────────────────────────────────────────────── */
 
 int hl_module_resolver_resolve(const HlManifest *manifest,
                                 HlResolvedModuleSet *out,
                                 char *errbuf, size_t errlen)
+{
+    return hl_module_resolver_resolve_caps(manifest, out,
+                                           build_provided_caps(),
+                                           errbuf, errlen);
+}
+
+int hl_module_resolver_resolve_caps(const HlManifest *manifest,
+                                     HlResolvedModuleSet *out,
+                                     uint32_t build_caps,
+                                     char *errbuf, size_t errlen)
 {
     if (!out) {
         ERR0("module resolver: null output");
@@ -163,7 +212,7 @@ int hl_module_resolver_resolve(const HlManifest *manifest,
     /* No manifest, or manifest with no `modules` key: intrinsic only. */
     if (!manifest || !manifest->modules_declared) return 0;
 
-    const uint32_t prov_build    = build_provided_caps();
+    const uint32_t prov_build    = build_caps;
     const uint32_t build_cap_mask = HL_MOD_CAP_DB | HL_MOD_CAP_WASM
                                     | HL_MOD_CAP_GPU | HL_MOD_CAP_HTTP
                                     | HL_MOD_CAP_TUI;
