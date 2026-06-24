@@ -2045,7 +2045,7 @@ $(shell test "$$(cat $(BUILD_CONFIG_FILE) 2>/dev/null)" = "$(BUILD_FINGERPRINT)"
 
 # ── Targets ─────────────────────────────────────────────────────────
 
-.PHONY: all clean test debug msan tsan fuzz fuzz-run e2e e2e-build e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-tcc e2e-build-flavor e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-hypermedia-photos-upload e2e-jwt-asym hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-gpu bench-bytecode-cache wamrc coverage lint-lua lint-js lint platform platform-cosmo platform-server-only platform-client-only platform-pure-compute hardening check-hardening
+.PHONY: all clean test debug msan tsan fuzz fuzz-run e2e e2e-build e2e-http e2e-sandbox e2e-examples e2e-cli e2e-migrate e2e-templates e2e-agent e2e-context e2e-mcp e2e-agent-api e2e-compute e2e-compute-dev e2e-aot-cache e2e-cache e2e-cache-concurrent e2e-cache-cosmo e2e-tcc e2e-build-flavor e2e-install e2e-ca-bundle e2e-update e2e-tools e2e-multipart e2e-attachment e2e-blob e2e-hypermedia-photos-upload e2e-jwt-asym hull-test-examples self-build check analyze cppcheck bench bench-template bench-wasm bench-gpu bench-bytecode-cache wamrc coverage lint-lua lint-js lint platform platform-cosmo platform-server-only platform-client-only platform-pure-compute platform-cosmo-server-only platform-cosmo-client-only platform-cosmo-pure-compute hardening check-hardening
 
 all: $(BUILDDIR)/hull
 
@@ -2220,6 +2220,32 @@ platform-cosmo:
 	cp $(COSMO_STAGE)/* $(BUILDDIR)/
 	echo "cosmocc" > $(BUILDDIR)/platform_cc
 	rm -rf $(COSMO_STAGE)
+
+# Per-flavor cosmo platform libs (dual-arch), for `hull build --flavor` on a
+# cosmo hull. Mirrors platform-cosmo with the flavor's HL_ENABLE_* flags and
+# names the output libhull_platform-<flavor>.{x86_64,aarch64}-cosmo.a. Like
+# platform-cosmo it `make clean`s between arches (cosmo needs a per-arch keel),
+# so it clobbers build/ -- build with an INSTALLED cosmo hull as the builder,
+# or copy the result aside before rebuilding the hull.
+platform-cosmo-server-only platform-cosmo-client-only platform-cosmo-pure-compute: platform-cosmo-%:
+	@rm -rf $(COSMO_STAGE) && mkdir -p $(COSMO_STAGE)
+	@echo "=== Building x86_64-cosmo platform ($* flavor) ==="
+	$(MAKE) clean
+	$(MAKE) -C $(KEEL_DIR) clean
+	$(MAKE) platform CC=x86_64-unknown-cosmo-cc AR=x86_64-unknown-cosmo-ar $(PLATFORM_FLAVOR_FLAGS_$*)
+	cp $(BUILDDIR)/libhull_platform.a $(COSMO_STAGE)/libhull_platform-$*.x86_64-cosmo.a
+	@echo "=== Building aarch64-cosmo platform ($* flavor) ==="
+	$(MAKE) clean
+	$(MAKE) -C $(KEEL_DIR) clean
+	$(MAKE) platform CC=aarch64-unknown-cosmo-cc AR=aarch64-unknown-cosmo-ar $(PLATFORM_FLAVOR_FLAGS_$*)
+	cp $(BUILDDIR)/libhull_platform.a $(COSMO_STAGE)/libhull_platform-$*.aarch64-cosmo.a
+	$(MAKE) clean
+	$(MAKE) -C $(KEEL_DIR) clean
+	mkdir -p $(BUILDDIR)
+	cp $(COSMO_STAGE)/libhull_platform-$*.x86_64-cosmo.a $(BUILDDIR)/
+	cp $(COSMO_STAGE)/libhull_platform-$*.aarch64-cosmo.a $(BUILDDIR)/
+	rm -rf $(COSMO_STAGE)
+	@echo "built $(BUILDDIR)/libhull_platform-$*.{x86_64,aarch64}-cosmo.a"
 
 # ── wamrc AOT compiler ──────────────────────────────────────────────
 #

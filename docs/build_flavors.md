@@ -259,8 +259,12 @@ smaller, produced by an unchanged full `hull`.
 1. ~~Named flavors only, or free-form flag composition?~~ **Resolved (§4.4):
    named flavors for published libs; free-form only via build-from-source.**
 2. Does `--flavor=auto` become the default, and when? (Behavior change.)
-3. Cosmo: per-flavor × per-arch doubles the published artifact count again.
-   Worth it, or cosmo stays full-only and native flavors carry the matrix?
+3. ~~Cosmo: per-flavor × per-arch, worth it?~~ **Building cosmo flavor libs
+   from source is supported** (`make platform-cosmo-<flavor>` -> dual-arch
+   `libhull_platform-<flavor>.{x86_64,aarch64}-cosmo.a`; `hull build --flavor`
+   lays them out in the `.aarch64/` apelink layout). Whether to *publish*
+   signed cosmo flavor libs in releases is still open (it does double the
+   per-flavor artifact count).
 4. Cache location: `~/.hull/platform/` as a sibling of `~/.hull/tools/`
    (signed durable store, not a prunable cache), consistent with
    [blob.md](blob.md)'s store split.

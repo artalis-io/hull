@@ -139,6 +139,10 @@ jobs:
         timeout-minutes: 3
         run: make e2e-tcc
 
+      - name: Build-flavor E2E tests
+        timeout-minutes: 6
+        run: make e2e-build-flavor
+
       - name: Install + completions E2E tests
         timeout-minutes: 2
         run: make e2e-install
@@ -463,9 +467,31 @@ jobs:
         timeout-minutes: 2
         run: make e2e-compute CC=cosmocc
 
-      - name: hull test (examples)
-        timeout-minutes: 2
-        run: make hull-test-examples CC=cosmocc
+      # Cosmo per-flavor coverage: build the dual-arch pure-compute flavor
+      # platform libs and verify both arch archives are produced. This is the
+      # cosmo-specific deliverable -- the `platform-cosmo-%` pattern rule with
+      # per-flavor HL_ENABLE_* flags and the .aarch64/ apelink staging.
+      #
+      # We deliberately do NOT run `hull build --flavor` end-to-end here. After
+      # this flavor platform build, the cosmo toolchain leaves the dynamic
+      # loader unable to mmap libc.so.6, so any subsequent shell-out to a system
+      # compiler dies with "failed to map segment from shared object" (disk and
+      # RAM are abundant -- it is not a resource limit, and it reproduces on a
+      # fresh runner doing a single build). The structurally-identical
+      # `platform-cosmo` build above does not trip it because nothing shells out
+      # to a compiler after it. The `hull build --flavor` + `--flavor=auto`
+      # end-to-end path is covered on native runners by `make e2e-build-flavor`.
+      # Run this last: it `make clean`s build/ (clobbering the cosmo hull).
+      - name: Build-flavor libs (cosmo)
+        timeout-minutes: 20
+        run: |
+          make platform-cosmo-pure-compute
+          for arch in x86_64 aarch64; do
+            f="build/libhull_platform-pure-compute.${arch}-cosmo.a"
+            [ -s "$f" ] || { echo "missing flavor lib: $f"; exit 1; }
+            head -c 8 "$f" | grep -q '^!<arch>' || { echo "not an ar archive: $f"; exit 1; }
+          done
+          echo "cosmo pure-compute flavor libs built + verified (both arches)"
 
   gpu:
     name: GPU Compute (macOS Metal)

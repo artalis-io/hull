@@ -722,11 +722,6 @@ typedef struct {
     -- follow-on phase. See docs/build_flavors.md.
     local flavor_asset = nil
     if opts.flavor and opts.flavor ~= "full" then
-        if is_cosmo then
-            tool.stderr("hull build: --flavor is not supported with cosmo builds yet\n")
-            tool.rmdir(tmpdir)
-            tool.exit(1)
-        end
         local fr = tool.build_flavor(opts.flavor)
         if not fr.ok then
             tool.stderr("hull build: " .. tostring(fr.error) .. "\n")
@@ -893,28 +888,46 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
     -- --flavor: link a locally-built non-default platform lib instead of the
     -- embedded (full) one. The flavor lib isn't covered by the signed
     -- platform manifest yet, so the platform-sig cross-check is skipped (MVP;
-    -- signed fetch is a follow-on phase). Native only (guarded above).
+    -- signed fetch is a follow-on phase).
     if flavor_asset then
         local hull_dir = __hull_exe and (__hull_exe:match("(.*/)") or "") or ""
-        local cand = {
-            hull_dir .. flavor_asset .. ".a",
-            "build/" .. flavor_asset .. ".a",
-            "../build/" .. flavor_asset .. ".a",
-            flavor_asset .. ".a",
-        }
-        local found = nil
-        for _, p in ipairs(cand) do
-            if file_exists(p) then found = p; break end
+        local dirs = { hull_dir, "build/", "../build/", "" }
+        if is_cosmo then
+            -- Dual-arch: <asset>.x86_64-cosmo.a + <asset>.aarch64-cosmo.a,
+            -- laid out the way cosmocc's apelink expects (.aarch64/ counterpart).
+            local x86, arm
+            for _, d in ipairs(dirs) do
+                local a = d .. flavor_asset .. ".x86_64-cosmo.a"
+                local b = d .. flavor_asset .. ".aarch64-cosmo.a"
+                if file_exists(a) and file_exists(b) then x86, arm = a, b; break end
+            end
+            if not (x86 and arm) then
+                tool.stderr("hull build: --flavor=" .. opts.flavor .. " needs "
+                            .. flavor_asset .. ".{x86_64,aarch64}-cosmo.a (not found)\n")
+                tool.stderr("hint: build it from source, e.g. `make platform-cosmo-"
+                            .. opts.flavor .. "`\n")
+                tool.rmdir(tmpdir)
+                tool.exit(1)
+            end
+            tool.copy(x86, platform_lib)
+            tool.mkdir(tmpdir .. "/.aarch64")
+            tool.copy(arm, tmpdir .. "/.aarch64/libhull_platform.a")
+        else
+            local found
+            for _, d in ipairs(dirs) do
+                local p = d .. flavor_asset .. ".a"
+                if file_exists(p) then found = p; break end
+            end
+            if not found then
+                tool.stderr("hull build: --flavor=" .. opts.flavor .. " needs "
+                            .. flavor_asset .. ".a (not found)\n")
+                tool.stderr("hint: build it from source, e.g. `make platform-"
+                            .. opts.flavor .. "`\n")
+                tool.rmdir(tmpdir)
+                tool.exit(1)
+            end
+            tool.copy(found, platform_lib)
         end
-        if not found then
-            tool.stderr("hull build: --flavor=" .. opts.flavor .. " needs "
-                        .. flavor_asset .. ".a (not found)\n")
-            tool.stderr("hint: build it from source, e.g. `make platform-"
-                        .. opts.flavor .. "`\n")
-            tool.rmdir(tmpdir)
-            tool.exit(1)
-        end
-        tool.copy(found, platform_lib)
         platform_extracted = true
         opts.verify_platform = false
     end

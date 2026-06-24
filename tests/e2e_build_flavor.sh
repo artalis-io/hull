@@ -8,7 +8,9 @@
 #   3. a valid pure-compute app builds, runs, and returns app.main's exit code
 #   4. the resulting binary has zero mbedTLS hashing symbols
 #
-# Native only (cosmo flavor libs are out of MVP scope). See docs/build_flavors.md.
+# Native flavor libs only (fast). Cosmo flavor builds work too
+# (`make platform-cosmo-<flavor>`) but are too slow to build here. See
+# docs/build_flavors.md.
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -17,7 +19,7 @@ LIB="$ROOT/build/libhull_platform-pure-compute.a"
 
 [ -x "$HULL" ] || { echo "SKIP: $HULL not built"; exit 0; }
 case "$(file "$HULL" 2>/dev/null || true)" in
-    *cosmo*|*"APE"*) echo "SKIP: --flavor not supported for cosmo builds yet"; exit 0;;
+    *cosmo*|*"APE"*) echo "SKIP: cosmo flavor builds are covered separately (too slow here)"; exit 0;;
 esac
 
 # Build the pure-compute platform lib if absent (CI builds it fresh).
