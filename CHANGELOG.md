@@ -35,6 +35,15 @@ release-artifact layout).
   Along the way: fixed the no-keel platform archive (missing `sh_seal_arena`),
   a `tool.modules_resolve` parser that ignored the canonical array module
   form, and `serve_cli.c` not detecting a built binary's embedded app.
+- **`hull platform install <flavor>` + signed published per-flavor platform
+  libs.** Releases now publish `libhull_platform-<flavor>-<arch>.a` for the
+  three native arches, covered by the Ed25519-signed `hull.sha256`. `hull
+  platform install` fetches + verifies them into `~/.hull/platform/`, and
+  `hull build --flavor` uses the cached lib, so end users no longer have to
+  build the platform lib from source. Same trust chain as `hull tools
+  install`, factored into one shared `hl_release_io_fetch_verified_manifest`.
+  Cosmo flavor libs stay build-from-source for now (`make
+  platform-cosmo-<flavor>`).
 
 ## [0.4.0] — 2026-06-17
 

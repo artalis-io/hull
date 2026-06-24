@@ -68,6 +68,25 @@ int hl_release_io_get(const char *url,
                       const char *user_agent);
 
 /**
+ * Download `hull.sha256` and (when a release pubkey is embedded) its
+ * `.sig`, verify the Ed25519 signature over the manifest, and return the
+ * verified manifest buffer. The caller `kl_free()`s *out_manifest.
+ *
+ * The single trust-chain entry shared by `hull tools install` and
+ * `hull platform install`. On a placeholder (all-zero) embedded pubkey the
+ * signature step is skipped with a warning (SHA-256 only), matching
+ * `hull update`. Refuses to proceed if a configured pubkey can't verify.
+ *
+ * @returns 0 on success, -1 on any download/verification failure (a message
+ *          prefixed with @p ua is printed to stderr).
+ */
+int hl_release_io_fetch_verified_manifest(const char *repo, const char *tag,
+                                          KlAllocator *alloc, KlTlsCtx *tls,
+                                          const char *ua,
+                                          char **out_manifest,
+                                          size_t *out_manifest_len);
+
+/**
  * Extract a flat `"key":"value"` entry from a JSON blob. Deliberately
  * tiny — sufficient for GitHub release metadata fields like
  * `tag_name`. Not a general parser.

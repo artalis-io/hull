@@ -713,6 +713,22 @@ static int l_tool_hull_cache_dir(lua_State *L)
     return 1;
 }
 
+/* ── tool.platform_cache_dir() → "$HOME/.hull/platform" | nil ──
+ *
+ * Where `hull platform install` stores fetched per-flavor platform libs.
+ * Returns the path (not guaranteed to exist) so `hull build --flavor` can
+ * look for a cached lib there; nil when HOME is unset. */
+static int l_tool_platform_cache_dir(lua_State *L)
+{
+    const char *home = getenv("HOME");
+    if (!home || !*home) { lua_pushnil(L); return 1; }
+    char out[PATH_MAX];
+    int n = snprintf(out, sizeof(out), "%s/.hull/platform", home);
+    if (n <= 0 || (size_t)n >= (int)sizeof(out)) { lua_pushnil(L); return 1; }
+    lua_pushstring(L, out);
+    return 1;
+}
+
 /* ── tool.hull_cache_disabled([kind]) → boolean ──
  *
  * Mirrors the C-side `hl_hull_cache_disabled` so Lua callers don't
@@ -1059,6 +1075,7 @@ static const luaL_Reg tool_funcs[] = {
     { "find_files",                  l_tool_find_files },
     { "find_tool",                   l_tool_find_tool },
     { "hull_cache_dir",              l_tool_hull_cache_dir },
+    { "platform_cache_dir",          l_tool_platform_cache_dir },
     { "hull_cache_disabled",         l_tool_hull_cache_disabled },
     { "cache_kinds",                 l_tool_cache_kinds },
     { "cache_override",              l_tool_cache_override },

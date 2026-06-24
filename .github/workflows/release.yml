@@ -50,6 +50,26 @@ jobs:
           name: platform-${{ matrix.name }}
           path: build/libhull_platform.a
 
+      # Per-flavor platform libs for `hull build --flavor` + `hull platform
+      # install`. Each native platform-<flavor> target builds into its own obj
+      # dir (build/flavor-<flavor>/), so the full libhull_platform.a above is
+      # untouched. Publish them arch-qualified: libhull_platform-<flavor>-<arch>.a.
+      # (Cosmo flavor libs are not published yet; build from source with
+      # `make platform-cosmo-<flavor>`. See docs/build_flavors.md §7.)
+      - name: Build platform flavors
+        run: |
+          for f in server-only client-only pure-compute; do
+            make "platform-$f"
+            mv "build/libhull_platform-$f.a" \
+               "build/libhull_platform-$f-${{ matrix.name }}.a"
+          done
+
+      - name: Upload platform flavors
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: platform-flavors-${{ matrix.name }}
+          path: build/libhull_platform-*-${{ matrix.name }}.a
+
   build-platform-cosmo:
     name: Build platform (cosmo, multi-arch)
     runs-on: ubuntu-latest
@@ -581,6 +601,13 @@ jobs:
           mv artifacts/hull-wamrc-linux-x86_64/hull-wamrc-linux-x86_64    dist/hull-wamrc-linux-x86_64
           mv artifacts/hull-wamrc-linux-aarch64/hull-wamrc-linux-aarch64  dist/hull-wamrc-linux-aarch64
           mv artifacts/hull-wamrc-darwin-arm64/hull-wamrc-darwin-arm64    dist/hull-wamrc-darwin-arm64
+          # Per-flavor platform libs (native arches). Consumed by
+          # `hull platform install <flavor>` -> `hull build --flavor`.
+          # Files: libhull_platform-<flavor>-<arch>.a. (Cosmo flavor libs
+          # are build-from-source, not published; see docs/build_flavors.md.)
+          mv artifacts/platform-flavors-linux-x86_64/*.a  dist/
+          mv artifacts/platform-flavors-linux-aarch64/*.a dist/
+          mv artifacts/platform-flavors-darwin-arm64/*.a  dist/
 
       - name: Make binaries executable
         run: chmod +x dist/*
@@ -645,6 +672,7 @@ jobs:
                     hull-wamrc-linux-x86_64 hull-wamrc-linux-aarch64 hull-wamrc-darwin-arm64 \
                     hull.sbom.json hull.sbom.cdx.json hull.sbom.spdx.json \
                     hull.build-env.json \
+                    libhull_platform-*.a \
                     > hull.sha256
           cat hull.sha256
 
@@ -740,6 +768,10 @@ jobs:
             dist/hull.sha256.cosign.sig
             dist/hull.sha256.cosign.pem
           )
+          # Per-flavor platform libs (libhull_platform-<flavor>-<arch>.a), so
+          # `hull platform install <flavor>` can fetch them. Covered by
+          # hull.sha256 above, so they inherit the release signature.
+          assets+=(dist/libhull_platform-*.a)
           if [ -f dist/hull.sha256.sig ]; then
             assets+=(dist/hull.sha256.sig)
           fi

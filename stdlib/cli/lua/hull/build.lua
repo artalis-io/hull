@@ -895,6 +895,8 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
         if is_cosmo then
             -- Dual-arch: <asset>.x86_64-cosmo.a + <asset>.aarch64-cosmo.a,
             -- laid out the way cosmocc's apelink expects (.aarch64/ counterpart).
+            -- Cosmo flavor libs are build-from-source only (not published /
+            -- `hull platform install`-able yet), so no ~/.hull/platform lookup.
             local x86, arm
             for _, d in ipairs(dirs) do
                 local a = d .. flavor_asset .. ".x86_64-cosmo.a"
@@ -913,15 +915,24 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
             tool.mkdir(tmpdir .. "/.aarch64")
             tool.copy(arm, tmpdir .. "/.aarch64/libhull_platform.a")
         else
-            local found
-            for _, d in ipairs(dirs) do
-                local p = d .. flavor_asset .. ".a"
+            local cand = {}
+            for _, d in ipairs(dirs) do cand[#cand + 1] = d .. flavor_asset .. ".a" end
+            -- Cached lib from `hull platform install <flavor>`: stored
+            -- platform-qualified (<asset>-<platform>.a) in ~/.hull/platform.
+            local cache = tool.platform_cache_dir and tool.platform_cache_dir()
+            if cache then
+                cand[#cand + 1] = cache .. "/" .. flavor_asset
+                                  .. "-" .. tool.platform_name() .. ".a"
+            end
+            local found = nil
+            for _, p in ipairs(cand) do
                 if file_exists(p) then found = p; break end
             end
             if not found then
-                tool.stderr("hull build: --flavor=" .. opts.flavor .. " needs "
-                            .. flavor_asset .. ".a (not found)\n")
-                tool.stderr("hint: build it from source, e.g. `make platform-"
+                tool.stderr("hull build: --flavor=" .. opts.flavor
+                            .. ": platform lib not found (locally or in ~/.hull/platform)\n")
+                tool.stderr("hint: `hull platform install " .. opts.flavor
+                            .. "`, or build from source: `make platform-"
                             .. opts.flavor .. "`\n")
                 tool.rmdir(tmpdir)
                 tool.exit(1)

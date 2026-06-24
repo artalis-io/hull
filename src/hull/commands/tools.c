@@ -197,71 +197,11 @@ static int print_list_json(const char *platform)
 
 /* ── `hull tools install` ────────────────────────────────────────── */
 
-/* Fetch hull.sha256 + signature, verify the signature, return both
- * buffers via out_manifest/out_manifest_len. The signature buffer is
- * freed internally; only the manifest is returned.
- *
- * Owns: allocates *out_manifest. Caller kl_free()s.
- *
- * On HL_RELEASE_PUBKEY_HEX = all-zeros placeholder the signature
- * step is skipped with a warning (matches hull update). */
-static int fetch_verified_manifest(const char *repo, const char *tag,
-                                   KlAllocator *alloc, KlTlsCtx *tls,
-                                   char **out_manifest, size_t *out_manifest_len)
-{
-    char sha_url[256];
-    snprintf(sha_url, sizeof(sha_url),
-             "https://github.com/%s/releases/download/%s/hull.sha256",
-             repo, tag);
-
-    char *manifest = NULL;
-    size_t manifest_len = 0;
-    if (hl_release_io_get(sha_url, &manifest, &manifest_len, alloc, tls,
-                          "hull-tools") != 0) {
-        fprintf(stderr,
-                "hull tools: failed to download checksum manifest (%s)\n",
-                sha_url);
-        return -1;
-    }
-
-    if (hl_release_pubkey_configured()) {
-        char sig_url[256];
-        snprintf(sig_url, sizeof(sig_url),
-                 "https://github.com/%s/releases/download/%s/hull.sha256.sig",
-                 repo, tag);
-
-        char *sig_hex = NULL;
-        size_t sig_len = 0;
-        if (hl_release_io_get(sig_url, &sig_hex, &sig_len, alloc, tls,
-                              "hull-tools") != 0) {
-            fprintf(stderr,
-                "hull tools: failed to download release signature (hull.sha256.sig)\n"
-                "             — this release is not signed; refusing to install\n");
-            kl_free(alloc, manifest, manifest_len);
-            return -1;
-        }
-
-        int sig_rc = hl_release_verify_manifest_sig(manifest, manifest_len,
-                                                    sig_hex, sig_len, NULL);
-        kl_free(alloc, sig_hex, sig_len);
-        if (sig_rc != 0) {
-            fprintf(stderr,
-                "hull tools: release signature verification FAILED\n"
-                "             — manifest does not match the embedded release public key\n");
-            kl_free(alloc, manifest, manifest_len);
-            return -1;
-        }
-        fprintf(stdout, "hull tools: release signature verified\n");
-    } else {
-        fprintf(stderr,
-            "hull tools: WARNING — this hull build has no embedded release public key,\n"
-            "             skipping Ed25519 signature check (SHA-256 only).\n");
-    }
-
-    *out_manifest = manifest;
-    *out_manifest_len = manifest_len;
-    return 0;
-}
+/* The verified-manifest fetch (download hull.sha256 + .sig, verify the
+ * Ed25519 signature) is the shared trust chain in release_io.c, used by
+ * both `hull tools install` and `hull platform install`:
+ *   hl_release_io_fetch_verified_manifest(repo, tag, alloc, tls,
+ *                                         "hull-tools", &manifest, &len). */
 
 static int install_one(const HlToolSpec *spec, const char *platform,
                        const char *repo, const char *tag,
@@ -486,8 +426,8 @@ static int cmd_install(int argc, char **argv, const char *repo)
     /* Fetch + verify manifest once, reuse for every asset. */
     char *manifest = NULL;
     size_t manifest_len = 0;
-    if (fetch_verified_manifest(repo, tag, &alloc, tls,
-                                &manifest, &manifest_len) != 0) {
+    if (hl_release_io_fetch_verified_manifest(repo, tag, &alloc, tls,
+                                "hull-tools", &manifest, &manifest_len) != 0) {
         kl_tls_mbedtls_ctx_destroy(tls);
         return 1;
     }

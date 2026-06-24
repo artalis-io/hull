@@ -11,6 +11,7 @@
 #include "hull/release_io.h"
 #include "hull/cacert.h"
 #include "hull/cap/crypto.h"
+#include "hull/release.h"   /* hl_release_verify_manifest_sig / pubkey_configured */
 
 #include <keel/allocator.h>
 #include <keel/client.h>
@@ -169,6 +170,65 @@ int hl_release_io_get(const char *url,
     resp.body = NULL;
     resp.body_len = 0;
     kl_client_response_free(&resp);
+    return 0;
+}
+
+/* ── Verified release manifest (shared trust chain) ──────────────────── */
+
+int hl_release_io_fetch_verified_manifest(const char *repo, const char *tag,
+                                          KlAllocator *alloc, KlTlsCtx *tls,
+                                          const char *ua,
+                                          char **out_manifest,
+                                          size_t *out_manifest_len)
+{
+    if (!repo || !tag || !alloc || !tls || !out_manifest || !out_manifest_len)
+        return -1;
+    if (!ua) ua = "hull";
+
+    char sha_url[256];
+    snprintf(sha_url, sizeof(sha_url),
+             "https://github.com/%s/releases/download/%s/hull.sha256", repo, tag);
+
+    char *manifest = NULL;
+    size_t manifest_len = 0;
+    if (hl_release_io_get(sha_url, &manifest, &manifest_len, alloc, tls, ua) != 0) {
+        fprintf(stderr, "%s: failed to download checksum manifest (%s)\n", ua, sha_url);
+        return -1;
+    }
+
+    if (hl_release_pubkey_configured()) {
+        char sig_url[256];
+        snprintf(sig_url, sizeof(sig_url),
+                 "https://github.com/%s/releases/download/%s/hull.sha256.sig", repo, tag);
+
+        char *sig_hex = NULL;
+        size_t sig_len = 0;
+        if (hl_release_io_get(sig_url, &sig_hex, &sig_len, alloc, tls, ua) != 0) {
+            fprintf(stderr,
+                    "%s: failed to download release signature (hull.sha256.sig); "
+                    "refusing to proceed\n", ua);
+            kl_free(alloc, manifest, manifest_len);
+            return -1;
+        }
+        int rc = hl_release_verify_manifest_sig(manifest, manifest_len,
+                                                sig_hex, sig_len, NULL);
+        kl_free(alloc, sig_hex, sig_len);
+        if (rc != 0) {
+            fprintf(stderr,
+                    "%s: release signature verification FAILED (manifest does not "
+                    "match the embedded release public key)\n", ua);
+            kl_free(alloc, manifest, manifest_len);
+            return -1;
+        }
+        fprintf(stdout, "%s: release signature verified\n", ua);
+    } else {
+        fprintf(stderr,
+                "%s: WARNING: no embedded release public key; skipping Ed25519 "
+                "signature check (SHA-256 only)\n", ua);
+    }
+
+    *out_manifest = manifest;
+    *out_manifest_len = manifest_len;
     return 0;
 }
 
