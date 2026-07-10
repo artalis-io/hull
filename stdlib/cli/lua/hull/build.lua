@@ -895,18 +895,24 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
         if is_cosmo then
             -- Dual-arch: <asset>.x86_64-cosmo.a + <asset>.aarch64-cosmo.a,
             -- laid out the way cosmocc's apelink expects (.aarch64/ counterpart).
-            -- Cosmo flavor libs are build-from-source only (not published /
-            -- `hull platform install`-able yet), so no ~/.hull/platform lookup.
+            -- Search local build dirs, then the ~/.hull/platform cache where
+            -- `hull platform install <flavor>` stores the fetched+verified pair
+            -- (as <asset>.x86_64-cosmo.a / <asset>.aarch64-cosmo.a).
+            local search = { hull_dir, "build/", "../build/", "" }
+            local cache = tool.platform_cache_dir and tool.platform_cache_dir()
+            if cache then search[#search + 1] = cache .. "/" end
             local x86, arm
-            for _, d in ipairs(dirs) do
+            for _, d in ipairs(search) do
                 local a = d .. flavor_asset .. ".x86_64-cosmo.a"
                 local b = d .. flavor_asset .. ".aarch64-cosmo.a"
                 if file_exists(a) and file_exists(b) then x86, arm = a, b; break end
             end
             if not (x86 and arm) then
-                tool.stderr("hull build: --flavor=" .. opts.flavor .. " needs "
-                            .. flavor_asset .. ".{x86_64,aarch64}-cosmo.a (not found)\n")
-                tool.stderr("hint: build it from source, e.g. `make platform-cosmo-"
+                tool.stderr("hull build: --flavor=" .. opts.flavor .. ": "
+                            .. flavor_asset .. ".{x86_64,aarch64}-cosmo.a not found"
+                            .. " (locally or in ~/.hull/platform)\n")
+                tool.stderr("hint: `hull platform install " .. opts.flavor
+                            .. "`, or build from source: `make platform-cosmo-"
                             .. opts.flavor .. "`\n")
                 tool.rmdir(tmpdir)
                 tool.exit(1)

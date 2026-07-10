@@ -55,6 +55,31 @@ assert_contains() {
     fi
 }
 
+# hull platform install <flavor> — LIVE fetch + verify of the published
+# per-flavor platform lib(s). Native binaries pull one
+# libhull_platform-<flavor>-<arch>.a; cosmo binaries pull the dual-arch pair
+# libhull_platform-<flavor>.{x86_64,aarch64}-cosmo.a. Uses an isolated HOME so
+# a real ~/.hull/platform is never touched. Works for both flavors of binary.
+smoke_platform_install() {
+    echo ""
+    echo "── hull platform install pure-compute (LIVE GitHub HTTPS download) ──"
+    PLAT_HOME=$(mktemp -d)
+    OUT=$(HOME="$PLAT_HOME" "$HULL" platform install pure-compute 2>&1)
+    RC=$?
+    echo "$OUT" | sed 's/^/    /'
+    assert "exits 0"                         [ "$RC" -eq 0 ]
+    assert_contains "SHA-256 verified"       "$OUT" "SHA-256 verified"
+    if echo "$OUT" | grep -q "release signature verified"; then
+        echo "  ok  release signature verified (Ed25519)"
+        PASS=$((PASS + 1))
+    fi
+    N=$(ls "$PLAT_HOME"/.hull/platform/libhull_platform-pure-compute*.a 2>/dev/null | wc -l | tr -d ' ')
+    assert "flavor lib(s) landed in ~/.hull/platform (got $N)"  [ "$N" -ge 1 ]
+    OUT=$(HOME="$PLAT_HOME" "$HULL" platform list 2>&1)
+    assert_contains "list shows pure-compute installed"  "$OUT" "pure-compute"
+    rm -rf "$PLAT_HOME"
+}
+
 if ! command -v "$HULL" >/dev/null 2>&1; then
     echo "release_smoke: '$HULL' not found on PATH — install hull first"
     exit 1
@@ -75,6 +100,9 @@ case "$VERSION" in
         OUT=$("$HULL" agent tools 2>&1)
         assert_contains "registry lists wamrc"             "$OUT" "\"name\":\"wamrc\""
         assert_contains "wamrc not available on cosmo"     "$OUT" "\"available_for_platform\":false"
+        # Cosmo DOES publish per-flavor platform libs (dual-arch), so the
+        # `hull platform install` path is exercised on cosmo binaries.
+        smoke_platform_install
         echo ""
         echo "── Summary ──"
         echo "  Passed: $PASS"
@@ -137,6 +165,9 @@ echo "── hull tools uninstall wamrc ──"
 OUT=$("$HULL" tools uninstall wamrc 2>&1)
 assert_contains "uninstalled"          "$OUT" "uninstalled wamrc"
 assert "file removed"                  [ ! -e "$WAMRC_PATH" ]
+
+# Per-flavor platform lib install (native single-arch lib).
+smoke_platform_install
 
 # ── Platform-sig E2E (post-§3.2: works on installed binaries) ──
 #
