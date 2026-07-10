@@ -6,7 +6,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) on the
 public surface (`hull` CLI flags, embedded stdlib API, manifest schema,
 release-artifact layout).
 
-## [Unreleased]
+## [0.6.0] — 2026-07-10
+
+### Build flavors
+
+- **Signed published cosmo per-flavor platform libs + cosmo `hull platform
+  install`.** The release pipeline now builds each cosmo flavor lib
+  (server-only / client-only / pure-compute) on its **own fresh runner** and
+  publishes the dual-arch pair
+  `libhull_platform-<flavor>.{x86_64,aarch64}-cosmo.a`, covered by the
+  Ed25519-signed `hull.sha256`. `hull platform install <flavor>` on a cosmo
+  hull fetches + verifies the pair into `~/.hull/platform/`, and `hull build
+  --flavor` finds it there (previously cosmo flavor libs were build-from-source
+  only). Isolated producer: a second cosmo platform build in one CI job
+  corrupts the dynamic loader (system cc/sh can't mmap libc; not a resource
+  limit), so each flavor builds alone. `platform.c` was already cosmo-ready;
+  `build.lua`'s cosmo `--flavor` branch gained the `~/.hull/platform` lookup.
+
+## [0.5.0] — 2026-07-10
 
 ### Build flavors
 
