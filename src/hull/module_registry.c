@@ -725,6 +725,17 @@ static const HlModuleSpec REGISTRY[] = {
 
 #define REGISTRY_COUNT (sizeof(REGISTRY) / sizeof(REGISTRY[0]))
 
+/* The module resolver indexes a fixed-width bitset (HlResolvedModuleSet,
+ * HL_MODULE_BITSET_WORDS*64 bits) by registry position, and
+ * hl_module_set_required_caps walks the whole registry through that set. If the
+ * registry ever outgrew the bitset, indices past the width would be dropped:
+ * gating fails closed (modules never admitted) but the required-caps count
+ * would UNDER-count, which feeds hl_build_flavor_auto — a fail-OPEN on flavor
+ * selection. Catch that at compile time instead. (C-audit 2026-07, Low-1.) */
+_Static_assert(REGISTRY_COUNT <= HL_MODULE_BITSET_WORDS * 64,
+               "module registry outgrew the resolved-set bitset width; "
+               "raise HL_MODULE_BITSET_WORDS in include/hull/limits/core.h");
+
 /* ── Binary search by name ─────────────────────────────────────────── */
 
 const HlModuleSpec *hl_module_registry_find(const char *name)

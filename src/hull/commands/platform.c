@@ -117,8 +117,14 @@ static int install_asset(const char *asset, const char *repo, const char *tag,
     }
 
     char url[512];
-    snprintf(url, sizeof(url),
+    int un = snprintf(url, sizeof(url),
              "https://github.com/%s/releases/download/%s/%s", repo, tag, asset);
+    if (un < 0 || (size_t)un >= sizeof(url)) {
+        /* --repo is user-controllable; a pathological value truncates the URL.
+         * Fail closed rather than fetch from a truncated target. (C-audit Low.) */
+        fprintf(stderr, "hull platform: download URL too long (check --repo)\n");
+        return -1;
+    }
     fprintf(stdout, "hull platform: downloading %s ...\n", asset);
 
     char *body = NULL;
