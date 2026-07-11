@@ -6,6 +6,31 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) on the
 public surface (`hull` CLI flags, embedded stdlib API, manifest schema,
 release-artifact layout).
 
+## [Unreleased]
+
+### Security / build flavors
+
+- **Build-time re-verify of installed per-flavor platform libs (closes the
+  install-to-build TOCTOU).** `hull platform install` now caches the signed
+  manifest (`hull.sha256` + `.sig`) in `~/.hull/platform/`, and `hull build
+  --flavor` re-verifies any lib it pulls from that cache before linking, fully
+  offline, via `hl_release_io_verify_local_asset` (`tool.platform_verify`): the
+  manifest signature is re-checked against the EMBEDDED release pubkey (the
+  trust anchor, not the writable cache dir), then the lib's SHA-256 is matched
+  to the signed manifest. A tampered cached lib or a swapped/absent manifest
+  fails the build with a reinstall hint; a lib the developer built locally
+  (`make platform-<flavor>`) is trusted as-is. Verified end-to-end against the
+  v0.6.0 release (valid lib links, tampered lib rejected).
+- **`crypto.constant_time_eq` / `crypto.constantTimeEq`** (Lua / JS): a
+  constant-time byte-string equality primitive compared in C. `hull/jwt`
+  (HS256) and `hull/web/middleware/csrf` now route their HMAC-signature compare
+  through it instead of an in-interpreter loop, matching `hull/crypto/envelope`
+  and removing interpreter-timing variance. Functionally identical (both were
+  already non-early-exit); this is a defense-in-depth consistency change.
+- **Fix:** the JS `csrf` middleware's session-cookie fallback defaulted to
+  `"hull.sid"` instead of the session/auth middleware's `"hull_session"`, so
+  the fallback could never find the cookie. Aligned to `"hull_session"`.
+
 ## [0.6.0] — 2026-07-10
 
 ### Build flavors
