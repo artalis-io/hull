@@ -729,6 +729,21 @@ static int l_tool_platform_cache_dir(lua_State *L)
     return 1;
 }
 
+/* ── tool.platform_verify(dir, asset) → boolean ──
+ *
+ * Offline re-verify of an installed platform lib against the signed manifest
+ * `hull platform install` cached in `dir`, anchored on the EMBEDDED release
+ * pubkey (not the writable dir). `hull build --flavor` calls this before
+ * linking a lib pulled from ~/.hull/platform, closing the install->build
+ * TOCTOU. Returns true iff the lib matches its signed digest. */
+static int l_tool_platform_verify(lua_State *L)
+{
+    const char *dir   = luaL_checkstring(L, 1);
+    const char *asset = luaL_checkstring(L, 2);
+    lua_pushboolean(L, hl_release_io_verify_local_asset(dir, asset) == 0);
+    return 1;
+}
+
 /* ── tool.hull_cache_disabled([kind]) → boolean ──
  *
  * Mirrors the C-side `hl_hull_cache_disabled` so Lua callers don't
@@ -1076,6 +1091,7 @@ static const luaL_Reg tool_funcs[] = {
     { "find_tool",                   l_tool_find_tool },
     { "hull_cache_dir",              l_tool_hull_cache_dir },
     { "platform_cache_dir",          l_tool_platform_cache_dir },
+    { "platform_verify",             l_tool_platform_verify },
     { "hull_cache_disabled",         l_tool_hull_cache_disabled },
     { "cache_kinds",                 l_tool_cache_kinds },
     { "cache_override",              l_tool_cache_override },

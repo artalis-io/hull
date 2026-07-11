@@ -21,6 +21,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -179,11 +180,15 @@ int hl_release_io_fetch_verified_manifest(const char *repo, const char *tag,
                                           KlAllocator *alloc, KlTlsCtx *tls,
                                           const char *ua,
                                           char **out_manifest,
-                                          size_t *out_manifest_len)
+                                          size_t *out_manifest_len,
+                                          char **out_sig,
+                                          size_t *out_sig_len)
 {
     if (!repo || !tag || !alloc || !tls || !out_manifest || !out_manifest_len)
         return -1;
     if (!ua) ua = "hull";
+    if (out_sig) *out_sig = NULL;
+    if (out_sig_len) *out_sig_len = 0;
 
     char sha_url[256];
     snprintf(sha_url, sizeof(sha_url),
@@ -212,8 +217,8 @@ int hl_release_io_fetch_verified_manifest(const char *repo, const char *tag,
         }
         int rc = hl_release_verify_manifest_sig(manifest, manifest_len,
                                                 sig_hex, sig_len, NULL);
-        kl_free(alloc, sig_hex, sig_len);
         if (rc != 0) {
+            kl_free(alloc, sig_hex, sig_len);
             fprintf(stderr,
                     "%s: release signature verification FAILED (manifest does not "
                     "match the embedded release public key)\n", ua);
@@ -221,6 +226,14 @@ int hl_release_io_fetch_verified_manifest(const char *repo, const char *tag,
             return -1;
         }
         fprintf(stdout, "%s: release signature verified\n", ua);
+        /* Hand the sig bytes back if the caller wants to cache them for a
+         * later offline re-verify; otherwise free them here. */
+        if (out_sig) {
+            *out_sig = sig_hex;
+            if (out_sig_len) *out_sig_len = sig_len;
+        } else {
+            kl_free(alloc, sig_hex, sig_len);
+        }
     } else {
         fprintf(stderr,
                 "%s: WARNING: no embedded release public key; skipping Ed25519 "
@@ -233,6 +246,101 @@ int hl_release_io_fetch_verified_manifest(const char *repo, const char *tag,
 }
 
 #endif /* HL_ENABLE_HTTP_CLIENT */
+
+/* ── Offline re-verify of an installed asset (build-time TOCTOU guard) ── */
+
+/* Constant-time compare of two 64-char hex digests (both NUL-terminated). */
+static int local_ct_hex_eq(const char *a, const char *b)
+{
+    unsigned diff = 0;
+    for (int i = 0; i < 64; i++) {
+        unsigned char ca = (unsigned char)a[i], cb = (unsigned char)b[i];
+        if (ca == 0 || cb == 0) return 0;  /* short digest: reject */
+        diff |= (unsigned)(ca ^ cb);
+    }
+    return a[64] == '\0' && b[64] == '\0' && diff == 0;
+}
+
+/* Read a whole small file into a malloc'd, NUL-terminated buffer.
+ * Returns 0 (with out and len set) on success, -1 otherwise. Caller frees. */
+static int local_read_file(const char *path, char **out, size_t *len)
+{
+    *out = NULL; *len = 0;
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
+    long sz = ftell(f);
+    if (sz < 0 || sz > (long)(64 * 1024 * 1024)) { fclose(f); return -1; }
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return -1; }
+    char *buf = malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return -1; }
+    size_t rd = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    if (rd != (size_t)sz) { free(buf); return -1; }
+    buf[sz] = '\0';
+    *out = buf; *len = (size_t)sz;
+    return 0;
+}
+
+int hl_release_io_verify_local_asset(const char *dir, const char *asset)
+{
+    if (!dir || !asset) return -1;
+    char path[PATH_MAX];
+    char *manifest = NULL, *sig = NULL, *lib = NULL;
+    size_t mlen = 0, slen = 0, llen = 0;
+    int result = -1;
+
+    /* 1. Cached signed manifest (required; its absence means we can't verify). */
+    if ((size_t)snprintf(path, sizeof(path), "%s/hull.sha256", dir) >= sizeof(path))
+        return -1;
+    if (local_read_file(path, &manifest, &mlen) != 0) {
+        fprintf(stderr, "hull platform: no cached signed manifest in %s "
+                        "(run `hull platform install` again)\n", dir);
+        return -1;
+    }
+
+    /* 2. Signature check against the EMBEDDED release pubkey (the trust anchor,
+     *    baked into this binary, NOT the writable cache dir). Skipped only on
+     *    a placeholder pubkey, matching install-time behavior. */
+    if (hl_release_pubkey_configured()) {
+        if ((size_t)snprintf(path, sizeof(path), "%s/hull.sha256.sig", dir) >= sizeof(path))
+            goto done;
+        if (local_read_file(path, &sig, &slen) != 0) {
+            fprintf(stderr, "hull platform: cached manifest has no signature; "
+                            "run `hull platform install` again\n");
+            goto done;
+        }
+        if (hl_release_verify_manifest_sig(manifest, mlen, sig, slen, NULL) != 0) {
+            fprintf(stderr, "hull platform: cached manifest signature INVALID "
+                            "(tampered ~/.hull/platform; reinstall)\n");
+            goto done;
+        }
+    }
+
+    /* 3. Expected digest from the now-verified manifest, actual from disk. */
+    char expected[65], actual[65];
+    if (hl_release_io_find_checksum(manifest, mlen, asset, expected) != 0) {
+        fprintf(stderr, "hull platform: %s not in cached manifest (reinstall)\n", asset);
+        goto done;
+    }
+    if ((size_t)snprintf(path, sizeof(path), "%s/%s", dir, asset) >= sizeof(path))
+        goto done;
+    if (local_read_file(path, &lib, &llen) != 0) goto done;
+    if (hl_release_io_sha256_hex((const unsigned char *)lib, llen, actual) != 0)
+        goto done;
+
+    /* 4. Constant-time compare. */
+    if (!local_ct_hex_eq(expected, actual)) {
+        fprintf(stderr, "hull platform: installed %s does not match its signed "
+                        "digest (tampered; reinstall)\n", asset);
+        goto done;
+    }
+    result = 0;
+
+done:
+    free(manifest); free(sig); free(lib);
+    return result;
+}
 
 /* ── JSON string extraction (deliberately tiny) ──────────────────── */
 

@@ -19,6 +19,7 @@
 
 #include "utest.h"
 #include "hull/release_io.h"
+#include "hull/release.h"   /* hl_release_pubkey_configured */
 
 #include <fcntl.h>
 #include <limits.h>
@@ -27,6 +28,66 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+/* ── verify_local (build-time re-verify of an installed asset) ─────── */
+
+static void vl_write(const char *dir, const char *name, const char *data) {
+    char p[PATH_MAX];
+    snprintf(p, sizeof(p), "%s/%s", dir, name);
+    FILE *f = fopen(p, "wb");
+    if (f) { fwrite(data, 1, strlen(data), f); fclose(f); }
+}
+static void vl_rm(const char *dir, const char *name) {
+    char p[PATH_MAX];
+    snprintf(p, sizeof(p), "%s/%s", dir, name);
+    unlink(p);
+}
+
+/* No cached manifest in the dir -> refuse (cannot verify). */
+UTEST(verify_local, missing_manifest_fails) {
+    char dir[] = "/tmp/hlvlXXXXXX";
+    ASSERT_TRUE(mkdtemp(dir) != NULL);
+    ASSERT_EQ(hl_release_io_verify_local_asset(dir, "libhull_platform-x.a"), -1);
+    rmdir(dir);
+}
+
+/* With a real embedded pubkey: a manifest lacking (or with a bad) signature
+ * fails closed. With a placeholder pubkey: the SHA-only path verifies a
+ * matching lib and rejects a tampered one. Adapts to the build's key. */
+UTEST(verify_local, tamper_and_signature_fail_closed) {
+    char dir[] = "/tmp/hlvlXXXXXX";
+    ASSERT_TRUE(mkdtemp(dir) != NULL);
+
+    const char *payload = "flavor platform lib bytes";
+    char hex[65];
+    ASSERT_EQ(hl_release_io_sha256_hex((const unsigned char *)payload,
+                                       strlen(payload), hex), 0);
+    char manifest[128];
+    snprintf(manifest, sizeof(manifest), "%s  libhull_platform-x.a\n", hex);
+    vl_write(dir, "hull.sha256", manifest);
+    vl_write(dir, "libhull_platform-x.a", payload);
+
+    if (hl_release_pubkey_configured()) {
+        /* No signature file -> refuse. */
+        ASSERT_EQ(hl_release_io_verify_local_asset(dir, "libhull_platform-x.a"), -1);
+        /* Garbage signature -> refuse. */
+        vl_write(dir, "hull.sha256.sig", "deadbeefdeadbeef");
+        ASSERT_EQ(hl_release_io_verify_local_asset(dir, "libhull_platform-x.a"), -1);
+        vl_rm(dir, "hull.sha256.sig");
+    } else {
+        /* Placeholder pubkey: SHA-only. Matching payload verifies. */
+        ASSERT_EQ(hl_release_io_verify_local_asset(dir, "libhull_platform-x.a"), 0);
+        /* Tampered payload -> reject. */
+        vl_write(dir, "libhull_platform-x.a", "TAMPERED");
+        ASSERT_EQ(hl_release_io_verify_local_asset(dir, "libhull_platform-x.a"), -1);
+    }
+    /* Unknown asset -> not in manifest (or fails earlier on sig). Either way, -1. */
+    ASSERT_EQ(hl_release_io_verify_local_asset(dir, "libhull_platform-nope.a"), -1);
+
+    vl_rm(dir, "hull.sha256");
+    vl_rm(dir, "libhull_platform-x.a");
+    rmdir(dir);
+}
 
 /* ── platform ─────────────────────────────────────────────────────── */
 

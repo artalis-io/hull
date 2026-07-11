@@ -197,10 +197,11 @@ static int cmd_install(const char *flavor, const char *repo)
         return 1;
     }
 
-    char *manifest = NULL;
-    size_t manifest_len = 0;
+    char *manifest = NULL, *sig = NULL;
+    size_t manifest_len = 0, sig_len = 0;
     if (hl_release_io_fetch_verified_manifest(repo, tag, &alloc, tls, "hull-platform",
-                                              &manifest, &manifest_len) != 0) {
+                                              &manifest, &manifest_len,
+                                              &sig, &sig_len) != 0) {
         kl_tls_mbedtls_ctx_destroy(tls);
         return 1;
     }
@@ -217,7 +218,22 @@ static int cmd_install(const char *flavor, const char *repo)
         }
     }
 
+    if (rc == 0) {
+        /* Cache the signed manifest so `hull build --flavor` can re-verify the
+         * installed lib offline against the embedded release pubkey (closes the
+         * install->build TOCTOU). Best-effort: a cache-write failure does not
+         * fail the install, but then the build-time re-verify asks for a
+         * reinstall rather than trusting an unverifiable lib. */
+        char p[PATH_MAX];
+        if ((size_t)snprintf(p, sizeof(p), "%s/hull.sha256", cache_dir) < sizeof(p))
+            hl_release_io_atomic_write(p, manifest, manifest_len, 0644);
+        if (sig && (size_t)snprintf(p, sizeof(p), "%s/hull.sha256.sig",
+                                    cache_dir) < sizeof(p))
+            hl_release_io_atomic_write(p, sig, sig_len, 0644);
+    }
+
     kl_free(&alloc, manifest, manifest_len);
+    if (sig) kl_free(&alloc, sig, sig_len);
     kl_tls_mbedtls_ctx_destroy(tls);
 
     if (rc == 0)

@@ -427,7 +427,8 @@ static int cmd_install(int argc, char **argv, const char *repo)
     char *manifest = NULL;
     size_t manifest_len = 0;
     if (hl_release_io_fetch_verified_manifest(repo, tag, &alloc, tls,
-                                "hull-tools", &manifest, &manifest_len) != 0) {
+                                "hull-tools", &manifest, &manifest_len,
+                                NULL, NULL) != 0) {
         kl_tls_mbedtls_ctx_destroy(tls);
         return 1;
     }

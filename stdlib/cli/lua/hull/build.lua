@@ -901,11 +901,15 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
             local search = { hull_dir, "build/", "../build/", "" }
             local cache = tool.platform_cache_dir and tool.platform_cache_dir()
             if cache then search[#search + 1] = cache .. "/" end
-            local x86, arm
+            local x86, arm, from_cache
             for _, d in ipairs(search) do
                 local a = d .. flavor_asset .. ".x86_64-cosmo.a"
                 local b = d .. flavor_asset .. ".aarch64-cosmo.a"
-                if file_exists(a) and file_exists(b) then x86, arm = a, b; break end
+                if file_exists(a) and file_exists(b) then
+                    x86, arm = a, b
+                    from_cache = (cache ~= nil and d == cache .. "/")
+                    break
+                end
             end
             if not (x86 and arm) then
                 tool.stderr("hull build: --flavor=" .. opts.flavor .. ": "
@@ -917,6 +921,19 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
                 tool.rmdir(tmpdir)
                 tool.exit(1)
             end
+            -- A lib pulled from ~/.hull/platform is re-verified against its
+            -- signed manifest (embedded release pubkey) before linking; a
+            -- lib the developer built locally is trusted as-is.
+            if from_cache and tool.platform_verify then
+                if not (tool.platform_verify(cache, flavor_asset .. ".x86_64-cosmo.a")
+                    and tool.platform_verify(cache, flavor_asset .. ".aarch64-cosmo.a")) then
+                    tool.stderr("hull build: --flavor=" .. opts.flavor
+                        .. ": cached cosmo platform lib failed re-verification; "
+                        .. "run `hull platform install " .. opts.flavor .. "` again\n")
+                    tool.rmdir(tmpdir)
+                    tool.exit(1)
+                end
+            end
             tool.copy(x86, platform_lib)
             tool.mkdir(tmpdir .. "/.aarch64")
             tool.copy(arm, tmpdir .. "/.aarch64/libhull_platform.a")
@@ -926,9 +943,11 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
             -- Cached lib from `hull platform install <flavor>`: stored
             -- platform-qualified (<asset>-<platform>.a) in ~/.hull/platform.
             local cache = tool.platform_cache_dir and tool.platform_cache_dir()
-            if cache then
-                cand[#cand + 1] = cache .. "/" .. flavor_asset
-                                  .. "-" .. tool.platform_name() .. ".a"
+            local cache_asset, cache_path
+            if cache and tool.platform_name then
+                cache_asset = flavor_asset .. "-" .. tool.platform_name() .. ".a"
+                cache_path = cache .. "/" .. cache_asset
+                cand[#cand + 1] = cache_path
             end
             local found = nil
             for _, p in ipairs(cand) do
@@ -942,6 +961,17 @@ int main(int argc, char **argv) { return hull_main(argc, argv); }
                             .. opts.flavor .. "`\n")
                 tool.rmdir(tmpdir)
                 tool.exit(1)
+            end
+            -- Re-verify a cache-sourced lib against its signed manifest before
+            -- linking (locally-built libs are trusted as-is).
+            if cache_path and found == cache_path and tool.platform_verify then
+                if not tool.platform_verify(cache, cache_asset) then
+                    tool.stderr("hull build: --flavor=" .. opts.flavor
+                        .. ": cached platform lib failed re-verification; "
+                        .. "run `hull platform install " .. opts.flavor .. "` again\n")
+                    tool.rmdir(tmpdir)
+                    tool.exit(1)
+                end
             end
             tool.copy(found, platform_lib)
         end

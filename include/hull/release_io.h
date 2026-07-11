@@ -77,6 +77,13 @@ int hl_release_io_get(const char *url,
  * signature step is skipped with a warning (SHA-256 only), matching
  * `hull update`. Refuses to proceed if a configured pubkey can't verify.
  *
+ * When @p out_sig / @p out_sig_len are non-NULL, the raw `hull.sha256.sig`
+ * bytes are returned too (caller `kl_free()`s *out_sig); they are set to
+ * NULL/0 on a placeholder pubkey where no signature was fetched. Pass NULL
+ * for both to ignore the signature (the common case). This lets
+ * `hull platform install` cache the signed manifest for a later offline
+ * re-verify (see hl_release_io_verify_local_asset).
+ *
  * @returns 0 on success, -1 on any download/verification failure (a message
  *          prefixed with @p ua is printed to stderr).
  */
@@ -84,7 +91,27 @@ int hl_release_io_fetch_verified_manifest(const char *repo, const char *tag,
                                           KlAllocator *alloc, KlTlsCtx *tls,
                                           const char *ua,
                                           char **out_manifest,
-                                          size_t *out_manifest_len);
+                                          size_t *out_manifest_len,
+                                          char **out_sig,
+                                          size_t *out_sig_len);
+
+/**
+ * Offline: re-verify an already-installed asset against a locally-cached
+ * signed manifest. @p dir must contain `hull.sha256`, `hull.sha256.sig`
+ * (when a release pubkey is embedded), and the asset file @p asset. The
+ * Ed25519 signature is checked against the EMBEDDED release pubkey (the
+ * trust anchor, baked into the hull binary, NOT the writable @p dir), then
+ * the asset's SHA-256 is looked up in the verified manifest and constant-
+ * time compared to the file on disk. Closes the install->build TOCTOU:
+ * `hull build --flavor` calls this before linking a lib from
+ * `~/.hull/platform/`. No network, no HTTP-client dependency.
+ *
+ * @returns 0 verified, -1 tampered / missing manifest-or-sig / mismatch.
+ *          On a placeholder (all-zero) embedded pubkey the signature step
+ *          is skipped (SHA-256-vs-cached-manifest only), matching the
+ *          install-time behavior.
+ */
+int hl_release_io_verify_local_asset(const char *dir, const char *asset);
 
 /**
  * Extract a flat `"key":"value"` entry from a JSON blob. Deliberately
