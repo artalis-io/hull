@@ -134,6 +134,25 @@ void hl_sbom_set_binary_path(const char *path)
     g_binary_sha_tried = 0;
 }
 
+/* When set, formatters scope output to the libhull embedding surface:
+ * subject named "libhull", components filtered to entries with in_libhull. */
+static int g_sbom_libhull = 0;
+
+void hl_sbom_set_scope_libhull(int on) { g_sbom_libhull = on ? 1 : 0; }
+
+/* Subject component name for the current scope. */
+static const char *sbom_subject_name(void)
+{
+    return g_sbom_libhull ? "libhull" : "hull";
+}
+
+/* True if entry @e should be emitted under the current scope. In libhull
+ * scope, runtime-only components (in_libhull == 0) are omitted. */
+static int sbom_entry_visible(const HlSbomEntry *e)
+{
+    return !g_sbom_libhull || e->in_libhull;
+}
+
 #ifdef HL_SBOM_HAS_MBEDTLS
 /* Read the file at g_binary_path into a buffer and hash via the one-shot
  * cap-layer SHA-256 (hl_cap_crypto_sha256, same primitive used by
@@ -195,6 +214,7 @@ static const HlSbomEntry sbom_entries[] = {
     /* ── Submodule: HTTP server library (own project) ── */
     {
         .name = "keel",
+        .in_libhull = 1,
         .version = HULL_VENDOR_KEEL_VERSION,
         .commit = HULL_VENDOR_KEEL_COMMIT,
         .license_spdx = "MIT",
@@ -235,6 +255,7 @@ static const HlSbomEntry sbom_entries[] = {
     /* ── Snapshot: SQLite ── */
     {
         .name = "sqlite",
+        .in_libhull = 1,
         .version = "3.x",
         .commit = "",
         .license_spdx = "blessing",   /* SQLite uses "Public Domain" / blessing */
@@ -248,6 +269,7 @@ static const HlSbomEntry sbom_entries[] = {
     /* ── Snapshot: mbedTLS ── */
     {
         .name = "mbedtls",
+        .in_libhull = 1,
         .version = "3.x",
         .commit = "",
         .license_spdx = "Apache-2.0",
@@ -260,6 +282,7 @@ static const HlSbomEntry sbom_entries[] = {
     /* ── Snapshot: TweetNaCl ── */
     {
         .name = "tweetnacl",
+        .in_libhull = 1,
         .version = "20140427",
         .commit = "",
         .license_spdx = "blessing",   /* public domain */
@@ -271,6 +294,7 @@ static const HlSbomEntry sbom_entries[] = {
     /* ── Snapshot: jart/pledge polyfill ── */
     {
         .name = "pledge",
+        .in_libhull = 1,
         .version = "",
         .commit = "",
         .license_spdx = "ISC",
@@ -282,6 +306,7 @@ static const HlSbomEntry sbom_entries[] = {
     /* ── Snapshot: log.c ── */
     {
         .name = "log.c",
+        .in_libhull = 1,
         .version = "",
         .commit = "",
         .license_spdx = "MIT",
@@ -293,6 +318,7 @@ static const HlSbomEntry sbom_entries[] = {
     /* ── Snapshot: sh_arena ── */
     {
         .name = "sh_arena",
+        .in_libhull = 1,
         .version = "",
         .commit = "",
         .license_spdx = "MIT",
@@ -304,6 +330,7 @@ static const HlSbomEntry sbom_entries[] = {
     /* ── Snapshot: sh_json ── */
     {
         .name = "sh_json",
+        .in_libhull = 1,
         .version = "",
         .commit = "",
         .license_spdx = "MIT",
@@ -315,6 +342,7 @@ static const HlSbomEntry sbom_entries[] = {
     /* ── Snapshot: miniz ── */
     {
         .name = "miniz",
+        .in_libhull = 1,
         .version = "",
         .commit = "",
         .license_spdx = "MIT",
@@ -327,6 +355,7 @@ static const HlSbomEntry sbom_entries[] = {
     /* ── Submodule: WAMR ── */
     {
         .name = "wamr",
+        .in_libhull = 1,
         .version = HULL_VENDOR_WAMR_VERSION,
         .commit = HULL_VENDOR_WAMR_COMMIT,
         .license_spdx = "Apache-2.0",
@@ -340,6 +369,7 @@ static const HlSbomEntry sbom_entries[] = {
     /* ── Snapshot: wgpu-native ── */
     {
         .name = "wgpu-native",
+        .in_libhull = 1,
         .version = "",
         .commit = "",
         .license_spdx = "MPL-2.0 OR Apache-2.0",
@@ -366,6 +396,7 @@ static const HlSbomEntry sbom_entries[] = {
     /* ── Snapshot: stb (image codecs) ── */
     {
         .name = "stb",
+        .in_libhull = 1,
         .version = "",
         .commit = "",
         .license_spdx = "MIT OR blessing",  /* dual-licensed */
@@ -378,6 +409,7 @@ static const HlSbomEntry sbom_entries[] = {
     /* ── Embedded blob: Mozilla CA bundle ── */
     {
         .name = "mozilla-ca-bundle",
+        .in_libhull = 1,
         .version = "",   /* upstream is dated; date lives in the PEM */
         .commit = "",
         .license_spdx = "MPL-2.0",
@@ -390,6 +422,15 @@ static const HlSbomEntry sbom_entries[] = {
 
 static const size_t sbom_entries_count =
     sizeof(sbom_entries) / sizeof(sbom_entries[0]);
+
+/* Count of entries visible under the current scope (see sbom_entry_visible). */
+static size_t sbom_visible_count(void)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < sbom_entries_count; i++)
+        if (sbom_entry_visible(&sbom_entries[i])) n++;
+    return n;
+}
 
 const HlSbomEntry *hl_sbom_entries(size_t *count)
 {
@@ -411,9 +452,15 @@ int hl_sbom_parse_format(const char *str)
 
 static void format_human(FILE *fp)
 {
-    fprintf(fp, "Hull SBOM\n");
-    fprintf(fp, "Hull %s, plus %zu component(s):\n",
-            HL_VERSION, sbom_entries_count - 1);
+    if (g_sbom_libhull) {
+        fprintf(fp, "libhull SBOM\n");
+        fprintf(fp, "libhull (Hull %s), plus %zu component(s):\n",
+                HL_VERSION, sbom_visible_count());
+    } else {
+        fprintf(fp, "Hull SBOM\n");
+        fprintf(fp, "Hull %s, plus %zu component(s):\n",
+                HL_VERSION, sbom_entries_count - 1);
+    }
     const char *bin_sha = sha256_binary();
     if (bin_sha) fprintf(fp, "Binary sha256: %s\n", bin_sha);
     fputc('\n', fp);
@@ -429,6 +476,7 @@ static void format_human(FILE *fp)
 
     for (size_t i = 0; i < sbom_entries_count; i++) {
         const HlSbomEntry *e = &sbom_entries[i];
+        if (!sbom_entry_visible(e)) continue;
         char vc[40];
         /* Prefer a tagged version string over the raw commit SHA — it
          * reads better in human output. Falls back to commit if no
@@ -450,6 +498,7 @@ static void format_human(FILE *fp)
     }
     fprintf(fp, "\nUrls (full):\n");
     for (size_t i = 0; i < sbom_entries_count; i++) {
+        if (!sbom_entry_visible(&sbom_entries[i])) continue;
         fprintf(fp, "  %-20s %s\n", sbom_entries[i].name, sbom_entries[i].url);
     }
 }
@@ -490,13 +539,17 @@ static void format_json(FILE *fp)
     sh_json_writer_init(&w, stdio_write_fn, fp);
     sh_json_write_object_start(&w);
     sh_json_write_kv_string(&w, "hull_version", HL_VERSION);
-    const char *bin_sha = sha256_binary();
+    sh_json_write_kv_string(&w, "subject", sbom_subject_name());
+    /* The runtime binary hash describes the hull binary, not libhull.a — omit
+     * it in libhull scope (the archive's own hash lives in libhull.a.sha256). */
+    const char *bin_sha = g_sbom_libhull ? NULL : sha256_binary();
     if (bin_sha)
         sh_json_write_kv_string(&w, "binary_sha256", bin_sha);
     sh_json_write_key(&w, "components");
     sh_json_write_array_start(&w);
     for (size_t i = 0; i < sbom_entries_count; i++) {
         const HlSbomEntry *e = &sbom_entries[i];
+        if (!sbom_entry_visible(e)) continue;
         sh_json_write_object_start(&w);
         sh_json_write_kv_string(&w, "name",         e->name);
         sh_json_write_kv_string(&w, "version",      e->version);
@@ -534,13 +587,13 @@ static void format_cyclonedx(FILE *fp)
     /* metadata.component describes the subject of the BOM (this binary).
      * Includes the SHA-256 of the running binary when known, so a consumer
      * can cross-check against the signed hull.sha256 release manifest. */
-    const char *bin_sha = sha256_binary();
+    const char *bin_sha = g_sbom_libhull ? NULL : sha256_binary();
     sh_json_write_key(&w, "metadata");
     sh_json_write_object_start(&w);
     sh_json_write_key(&w, "component");
     sh_json_write_object_start(&w);
-    sh_json_write_kv_string(&w, "type",    "application");
-    sh_json_write_kv_string(&w, "name",    "hull");
+    sh_json_write_kv_string(&w, "type",    g_sbom_libhull ? "library" : "application");
+    sh_json_write_kv_string(&w, "name",    sbom_subject_name());
     sh_json_write_kv_string(&w, "version", HL_VERSION);
     if (bin_sha) {
         sh_json_write_key(&w, "hashes");
@@ -558,6 +611,7 @@ static void format_cyclonedx(FILE *fp)
     sh_json_write_array_start(&w);
     for (size_t i = 0; i < sbom_entries_count; i++) {
         const HlSbomEntry *e = &sbom_entries[i];
+        if (!sbom_entry_visible(e)) continue;
         sh_json_write_object_start(&w);
         sh_json_write_kv_string(&w, "type", "library");
         sh_json_write_kv_string(&w, "name", e->name);
@@ -643,7 +697,7 @@ static void format_spdx(FILE *fp)
      * SPDX document is the running hull binary; binary_sha256 is emitted
      * as a checksum on that package so consumers can cross-reference the
      * signed release manifest. */
-    const char *bin_sha = sha256_binary();
+    const char *bin_sha = g_sbom_libhull ? NULL : sha256_binary();
     sh_json_write_key(&w, "documentDescribes");
     sh_json_write_array_start(&w);
     sh_json_write_string(&w, "SPDXRef-Package-hull-binary");
@@ -654,12 +708,14 @@ static void format_spdx(FILE *fp)
     /* The hull-binary package itself. */
     sh_json_write_object_start(&w);
     sh_json_write_kv_string(&w, "SPDXID",           "SPDXRef-Package-hull-binary");
-    sh_json_write_kv_string(&w, "name",             "hull");
+    sh_json_write_kv_string(&w, "name",             sbom_subject_name());
     sh_json_write_kv_string(&w, "versionInfo",      HL_VERSION);
     sh_json_write_kv_string(&w, "downloadLocation", "https://github.com/artalis-io/hull");
     sh_json_write_kv_string(&w, "licenseConcluded", "AGPL-3.0-or-later");
     sh_json_write_kv_string(&w, "licenseDeclared",  "AGPL-3.0-or-later");
-    sh_json_write_kv_string(&w, "comment",          "the running hull binary");
+    sh_json_write_kv_string(&w, "comment",
+                            g_sbom_libhull ? "the libhull embedding archive"
+                                           : "the running hull binary");
     if (bin_sha) {
         sh_json_write_key(&w, "checksums");
         sh_json_write_array_start(&w);
@@ -674,6 +730,7 @@ static void format_spdx(FILE *fp)
     /* Vendored components. */
     for (size_t i = 0; i < sbom_entries_count; i++) {
         const HlSbomEntry *e = &sbom_entries[i];
+        if (!sbom_entry_visible(e)) continue;
         sh_json_write_object_start(&w);
         {
             /* SPDX IDs must match [A-Za-z0-9.-]+; sanitize the name. */

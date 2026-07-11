@@ -2354,12 +2354,38 @@ LIBHULL_OBJS := $(EMBED_OBJ) $(CAP_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OB
 	$(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) \
 	$(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS)
 
+# Under the fat cosmocc driver, every object has a build/<dir>/.aarch64/<name>.o
+# sibling, and a linked archive must ship a concomitant build/.aarch64/libhull.a.
+# Mirror exactly how Keel builds .aarch64/libkeel.a: the per-object aarch64
+# siblings, archived with the single-arch cosmo ar for each arch (plain cosmoar
+# recurses into .aarch64/ and fails). `make CC=cosmocc` sets $(notdir CC)=cosmocc.
+ifeq ($(notdir $(CC)),cosmocc)
+  LIBHULL_COSMO_FAT  := 1
+  LIBHULL_OBJS_ARM64 := $(foreach o,$(LIBHULL_OBJS),$(dir $(o)).aarch64/$(notdir $(o)))
+endif
+
 .PHONY: libhull
-libhull: $(BUILDDIR)/libhull.a
+libhull: $(BUILDDIR)/libhull.a $(BUILDDIR)/libhull.a.sha256
 $(BUILDDIR)/libhull.a: $(LIBHULL_OBJS) | $(BUILDDIR)
 	@rm -f $@
+ifeq ($(LIBHULL_COSMO_FAT),1)
+	x86_64-unknown-cosmo-ar rcs $@ $(LIBHULL_OBJS)
+	@mkdir -p $(BUILDDIR)/.aarch64
+	@rm -f $(BUILDDIR)/.aarch64/libhull.a
+	aarch64-unknown-cosmo-ar rcs $(BUILDDIR)/.aarch64/libhull.a $(LIBHULL_OBJS_ARM64)
+	@echo "built $@ + .aarch64/libhull.a ($(words $(LIBHULL_OBJS)) objects, dual-arch)"
+else
 	$(AR) rcs $@ $(LIBHULL_OBJS)
 	@echo "built $@ ($(words $(LIBHULL_OBJS)) objects)"
+endif
+
+# Checksum sidecar: the raw SHA-256 of the archive, one hex line. This is the
+# value the signed release manifest (hull.sha256) carries for libhull.a, so a
+# consumer can verify a downloaded archive offline against the Ed25519-signed
+# manifest via hl_release_io_verify_local_asset.
+$(BUILDDIR)/libhull.a.sha256: $(BUILDDIR)/libhull.a
+	@$(SHA256CMD) $< | awk '{print $$1}' > $@
+	@echo "libhull.a sha256: $$(cat $@)"
 
 # embed-c-smoke: link the reference native host (examples/embed_c) against
 # libhull.a alone — no Lua/JS runtime linked — and run it. Proves the core
@@ -2757,16 +2783,6 @@ ifeq ($(HL_ENABLE_DB),0)
       %/test_db.c %/test_db_backend.c \
       %/test_js.c %/test_lua.c, \
       $(TEST_SRCS))
-endif
-
-# test_embed links the whole libhull.a archive the way a native host does.
-# Under cosmocc (fat APE) every archive needs a concomitant .aarch64/ sibling,
-# which the single-arch `make libhull` rule does not emit — a dual-arch cosmo
-# libhull.a is a later packaging concern (libhull L-4/L-5). Skip it under the
-# cosmo toolchain; the ABI stays covered by the Linux/macOS test_embed and the
-# standalone `make embed-c-smoke` host.
-ifneq ($(findstring cosmo,$(CC)),)
-  TEST_SRCS := $(filter-out %/test_embed.c,$(TEST_SRCS))
 endif
 
 # Flatten test paths to build/ binaries: tests/hull/cap/test_body.c → build/test_body

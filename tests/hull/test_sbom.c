@@ -322,4 +322,74 @@ UTEST(sbom, binary_sha256_present_when_path_set)
     hl_sbom_set_binary_path(NULL);
 }
 
+/* ── libhull scope (hull sbom --subject=libhull) ───────────────────── */
+
+static int sbom_count(const char *hay, const char *needle)
+{
+    int c = 0;
+    for (const char *p = hay; (p = strstr(p, needle)); p += strlen(needle)) c++;
+    return c;
+}
+
+/* The excluded set: script runtimes + compiler backend + the hull
+ * self-entry. Everything else is part of the libhull embedding surface. */
+static int sbom_is_excluded(const char *name)
+{
+    return strcmp(name, "lua") == 0 || strcmp(name, "quickjs") == 0 ||
+           strcmp(name, "tinycc") == 0 || strcmp(name, "hull") == 0;
+}
+
+UTEST(sbom, in_libhull_flags_match_policy)
+{
+    size_t n = 0;
+    const HlSbomEntry *e = hl_sbom_entries(&n);
+    ASSERT_GT(n, 0u);
+    for (size_t i = 0; i < n; i++) {
+        if (sbom_is_excluded(e[i].name))
+            ASSERT_EQ_MSG(e[i].in_libhull, 0, e[i].name);
+        else
+            ASSERT_EQ_MSG(e[i].in_libhull, 1, e[i].name);
+    }
+}
+
+UTEST(sbom, libhull_scope_filters_and_renames)
+{
+    hl_sbom_set_scope_libhull(0);
+    char *def = format_to_string(HL_SBOM_JSON);
+    ASSERT_NE(def, NULL);
+    int def_components = sbom_count(def, "\"name\"");
+
+    hl_sbom_set_scope_libhull(1);
+    char *lh = format_to_string(HL_SBOM_JSON);
+    ASSERT_NE(lh, NULL);
+    int lh_components = sbom_count(lh, "\"name\"");
+
+    /* Subject renamed, core kept, JS runtime dropped, strictly fewer
+     * components than the whole-hull SBOM. */
+    ASSERT_NE_MSG(strstr(lh, "libhull"), NULL, "libhull scope names the subject");
+    ASSERT_NE_MSG(strstr(lh, "mbedtls"), NULL, "libhull keeps the linked core");
+    ASSERT_EQ_MSG(strstr(lh, "quickjs"), NULL, "libhull drops the JS runtime");
+    ASSERT_LT(lh_components, def_components);
+
+    free(def);
+    free(lh);
+    hl_sbom_set_scope_libhull(0);  /* restore global for later tests */
+}
+
+UTEST(sbom, all_formats_render_under_libhull_scope)
+{
+    hl_sbom_set_scope_libhull(1);
+    const HlSbomFormat fmts[] = {
+        HL_SBOM_HUMAN, HL_SBOM_JSON, HL_SBOM_CYCLONEDX, HL_SBOM_SPDX,
+    };
+    for (size_t i = 0; i < sizeof(fmts) / sizeof(fmts[0]); i++) {
+        char *out = format_to_string(fmts[i]);
+        ASSERT_NE(out, NULL);
+        ASSERT_GT(strlen(out), 0u);
+        ASSERT_NE_MSG(strstr(out, "libhull"), NULL, "libhull subject present");
+        free(out);
+    }
+    hl_sbom_set_scope_libhull(0);
+}
+
 UTEST_MAIN()

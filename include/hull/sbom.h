@@ -50,12 +50,23 @@ typedef struct {
      * at runtime from the actual bytes. Returns a static hex string
      * (cached on first call) or NULL if no embedded blob. */
     const char *(*embedded_blob_sha256)(void);
+    /* 1 if this component is part of the libhull embedding surface (linked
+     * by a libhull.a + libkeel.a native host); 0 for runtime-only
+     * components (the Lua / QuickJS script engines) that libhull excludes.
+     * Consumed by the `hull sbom --subject=libhull` scope. */
+    int in_libhull;
 } HlSbomEntry;
 
 /* Returns a pointer to the static entry table. Sets *count to its length.
  * Build-flag gating (HL_ENABLE_*) is applied at compile time.
  * The returned pointer is valid for the lifetime of the process. */
 const HlSbomEntry *hl_sbom_entries(size_t *count);
+
+/* Scope the next hl_sbom_format() to the libhull embedding surface: the
+ * subject component is named "libhull" and components with in_libhull == 0
+ * (the script runtimes) are omitted. Pass 0 to restore the default
+ * whole-hull scope. Process-global, like hl_sbom_set_binary_path. */
+void hl_sbom_set_scope_libhull(int on);
 
 /* Format the SBOM and write to `fp`. Returns 0 on success, -1 on error.
  * Errors are printed to stderr. */
