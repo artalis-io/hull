@@ -1456,6 +1456,7 @@ MODULE_RESOLVER_OBJ := $(BUILDDIR)/module_resolver.o
 MODULE_OBJ       := $(MODULE_REGISTRY_OBJ) $(MODULE_RESOLVER_OBJ)
 SANDBOX_OBJ      := $(BUILDDIR)/sandbox.o
 SANDBOX_TOOL_OBJ := $(BUILDDIR)/sandbox_tool.o
+EMBED_OBJ        := $(BUILDDIR)/embed.o
 
 # Async backend implementations
 #   async/keel.c — wraps Keel's KlEventCtx + KlThreadPool. Compiled
@@ -2322,11 +2323,14 @@ $(BUILDDIR)/hull: $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_O
 	$(CC) $(LDFLAGS) -o $@ $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) $(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_OBJ) $(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) $(SANDBOX_TOOL_OBJ) $(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) $(PLATFORM_SIG_OBJ) $(EMBEDDED_PLATFORM_SIG_OBJ) $(TEST_RUNNER_OBJ) $(RUNTIME_FACTORY_OBJ) $(STATIC_OBJ) $(MIGRATE_OBJ) $(VFS_OBJ) $(PATH_NORM_OBJ) $(THREAD_AFFINITY_OBJ) $(CACHE_DIR_OBJ) $(BLOB_STORE_OBJ) $(CACHE_REGISTRY_OBJ) $(CACERT_OBJ) $(CSP_OBJ) $(SH_SEAL_ARENA_OBJ) $(SBOM_OBJ) $(APP_CONTEXT_OBJ) $(AGENT_LIB_OBJ) $(AGENT_API_OBJ) $(TOOL_OBJ) $(BUILD_ASSET_OBJ) $(COMPILER_OBJ) $(COMPILER_TCC_OBJ) $(MAIN_OBJ) $(SERVE_OBJ) $(ENTRY_OBJ) $(APP_EXTRA_OBJS) $(STDLIB_REGISTRY_O) $(WAMR_OBJS) $(VEND_OBJS) $(MBEDTLS_OBJS) \
 		$(SQLITE_OBJ) $(LOG_OBJ) $(LOG_LOCK_OBJ) $(SH_ARENA_OBJ) $(SH_JSON_OBJ) $(TWEETNACL_OBJ) $(STB_OBJ) $(PLEDGE_OBJS) $(KEEL_LIB) $(WGPU_LIB) $(WGPU_FRAMEWORKS) -lm -lpthread
 
-# ── libhull: no-runtime embedding library (Phase L-1) ────────────────
+# ── libhull: no-runtime embedding library (Phase L-1/L-2) ────────────
 # The runtime-agnostic hardened core as a static archive, for a native
 # host (C/Rust/Zig) that owns main() and drives the two-phase sandbox +
-# the capability layer directly (no Lua/JS runtime, no app.main lifecycle).
-# Includes ONLY runtime-free objects: cap/* (fs/db/crypto/env/time/image/
+# the capability layer (no Lua/JS runtime, no app.main lifecycle). The
+# host targets the stable ABI in <hull/embed.h> (embed.o, first object
+# below) and never includes an internal Hull header.
+# Includes ONLY runtime-free objects: embed.o (the hl_embed_* ABI),
+# cap/* (fs/db/crypto/env/time/image/
 # mime/wasm/gpu/blob/http/ws/smtp/body/audit), the async workers + async/
 # net backend vtables, manifest.o (runtime-free struct + seal helpers, NOT
 # the manifest_lua/js VM extractors), module registry/resolver, sandbox,
@@ -2336,9 +2340,10 @@ $(BUILDDIR)/hull: $(CAP_OBJS) $(CAP_TOOL_OBJ) $(CAP_TEST_OBJ) $(CMD_OBJS) $(RT_O
 # agent tooling, the build-tool VM (tool/compiler), BOTH runtimes
 # (RT_OBJS/VEND_OBJS) + their manifest extractors, app_context,
 # runtime_factory, static.c (HTTP-serving middleware), embedded stdlib.
-# Link a host with: build/libhull.a $(KEEL_LIB) -lm -lpthread.
+# Link a host with: build/libhull.a $(KEEL_LIB) build/libhull.a -lm -lpthread
+# (libhull.a repeated so GNU ld resolves the libhull<->Keel<->mbedTLS cycle).
 MANIFEST_CORE_OBJ := $(BUILDDIR)/manifest.o
-LIBHULL_OBJS := $(CAP_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) \
+LIBHULL_OBJS := $(EMBED_OBJ) $(CAP_OBJS) $(ALLOC_OBJ) $(ASYNC_OBJ) $(COMPRESS_OBJ) $(MINIZ_OBJ) \
 	$(WORKER_DB_OBJ) $(WORKER_WASM_OBJ) $(WORKER_GPU_OBJ) $(MANIFEST_CORE_OBJ) \
 	$(MODULE_OBJ) $(ASYNC_BACKEND_OBJS) $(NET_BACKEND_OBJS) $(SANDBOX_OBJ) \
 	$(SIG_OBJ) $(RELEASE_OBJ) $(RELEASE_IO_OBJ) $(TOOLS_INSTALL_OBJ) \
@@ -2363,10 +2368,16 @@ $(BUILDDIR)/libhull.a: $(LIBHULL_OBJS) | $(BUILDDIR)
 # capability-mediated fs I/O (incl. traversal rejection), crypto, the
 # module registry, and platform identity, and exits non-zero on any
 # capability failure.
+#
+# libhull.a is repeated after $(KEEL_LIB) because the two archives are
+# mutually dependent (libhull's cap/release_io -> Keel's TLS -> libhull's
+# mbedTLS). GNU ld resolves archives strictly left-to-right, so the second
+# pass over libhull.a supplies the mbedTLS symbols Keel pulls in; macOS ld64
+# resolves the cycle on its own and treats the repeat as a harmless no-op.
 .PHONY: embed-c-smoke
 embed-c-smoke: $(BUILDDIR)/libhull.a $(KEEL_LIB)
 	$(CC) -std=c11 $(INCLUDES) -o $(BUILDDIR)/embed_c \
-		examples/embed_c/main.c $(BUILDDIR)/libhull.a $(KEEL_LIB) -lm -lpthread
+		examples/embed_c/main.c $(BUILDDIR)/libhull.a $(KEEL_LIB) $(BUILDDIR)/libhull.a -lm -lpthread
 	@echo "── running embed_c (no-runtime host) ──"
 	@$(BUILDDIR)/embed_c
 	@echo "embed-c-smoke: OK"
@@ -2479,6 +2490,9 @@ $(SANDBOX_OBJ): $(SRCDIR)/hull/sandbox.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 $(SANDBOX_TOOL_OBJ): $(SRCDIR)/hull/sandbox_tool.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+$(EMBED_OBJ): $(SRCDIR)/hull/embed.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 # Signature verification
@@ -2745,6 +2759,16 @@ ifeq ($(HL_ENABLE_DB),0)
       $(TEST_SRCS))
 endif
 
+# test_embed links the whole libhull.a archive the way a native host does.
+# Under cosmocc (fat APE) every archive needs a concomitant .aarch64/ sibling,
+# which the single-arch `make libhull` rule does not emit — a dual-arch cosmo
+# libhull.a is a later packaging concern (libhull L-4/L-5). Skip it under the
+# cosmo toolchain; the ABI stays covered by the Linux/macOS test_embed and the
+# standalone `make embed-c-smoke` host.
+ifneq ($(findstring cosmo,$(CC)),)
+  TEST_SRCS := $(filter-out %/test_embed.c,$(TEST_SRCS))
+endif
+
 # Flatten test paths to build/ binaries: tests/hull/cap/test_body.c → build/test_body
 TEST_BINS := $(addprefix $(BUILDDIR)/,$(notdir $(basename $(TEST_SRCS))))
 
@@ -2787,6 +2811,13 @@ $(BUILDDIR)/test_cfi: $(TESTDIR)/hull/test_cfi.c | $(BUILDDIR)
 # CSP preset registry — tiny, no deps beyond <string.h>.
 $(BUILDDIR)/test_csp: $(TESTDIR)/hull/test_csp.c $(CSP_OBJ) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< $(CSP_OBJ)
+
+# Embedding ABI — links the whole libhull.a the way a native host does,
+# so this also link-tests the archive on every `make test`. Only the
+# non-sealing surface runs in-process; the sealed path is embed-c-smoke.
+$(BUILDDIR)/test_embed: $(TESTDIR)/hull/test_embed.c $(BUILDDIR)/libhull.a $(KEEL_LIB) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(VENDDIR) -o $@ $< \
+		$(BUILDDIR)/libhull.a $(KEEL_LIB) $(BUILDDIR)/libhull.a $(WGPU_LIB) $(WGPU_FRAMEWORKS) -lm -lpthread
 
 # Arena lifetime helpers — mark/rewind/strdup/memdup over sh_arena.
 # Needs only the alloc wrapper + the sh_arena bump allocator.

@@ -26,34 +26,60 @@ linked, an accidental dependency on Lua/QuickJS from the core would fail
 the link here — the smoke test is a standing witness that the archive is
 genuinely runtime-free.
 
-To link a host by hand:
+The host includes exactly **one** Hull header, `<hull/embed.h>` — the
+stable, versioned embedding ABI. It never reaches into an internal Hull
+header, so it is insulated from the internal sandbox / capability struct
+layout. To link a host by hand you only need the include root:
 
 ```sh
 make libhull
-cc -std=c11 -Iinclude -Ivendor/keel/include -Ivendor/mbedtls/include \
-   -Ivendor/wamr/core/iwasm/include \
-   -o my_host my_host.c build/libhull.a vendor/keel/libkeel.a -lm -lpthread
+cc -std=c11 -Iinclude \
+   -o my_host my_host.c build/libhull.a vendor/keel/libkeel.a build/libhull.a -lm -lpthread
 ```
+
+`build/libhull.a` is listed twice on purpose: it and Keel are mutually
+dependent (libhull's capability layer calls Keel's TLS, which calls
+libhull's mbedTLS), and GNU ld resolves static archives strictly
+left-to-right, so the second pass supplies the mbedTLS symbols Keel pulls
+in. macOS's linker resolves the cycle on its own and treats the repeat as a
+no-op.
 
 ## What the host demonstrates
 
-`main.c` runs the embedding sequence a real native consumer would:
+`main.c` runs the embedding sequence a real native consumer would, all
+through the `hl_embed_*` ABI:
 
-1. `hl_sandbox_apply_pledge()` — phase-1 syscall reduction.
-2. Build an `HlSandboxPolicy` **in C** (a native host is trusted; it does
-   not parse an `app.manifest` — it declares policy directly). Filesystem
-   paths in the policy are **app_dir-relative**, the same contract as a
-   manifest's `fs.read` / `fs.write`; absolute paths are rejected by the
-   sandbox path resolver.
-3. `hl_sandbox_apply()` — phase-2 default-deny sandbox.
-4. `hl_cap_fs_write` / `_read` — capability-mediated I/O, plus a
+1. `hl_embed_new(app_dir)` — create the handle (app_dir is absolute; all
+   capability fs access resolves under it).
+2. `hl_embed_sandbox_phase1()` — phase-1 syscall reduction.
+3. `hl_embed_allow_read` / `hl_embed_allow_write` — build the policy **in
+   C** (a native host is trusted; it does not parse an `app.manifest`).
+   Paths are **app_dir-relative**, the same contract as a manifest's
+   `fs.read` / `fs.write`; absolute paths are rejected.
+4. Fail-closed check: capability calls return `-1` **before** the sandbox
+   is sealed.
+5. `hl_embed_seal()` — phase-2 default-deny sandbox; the host treats a
+   non-zero return as fatal.
+6. `hl_embed_fs_write` / `_read` — capability-mediated I/O, plus a
    path-traversal rejection check.
-5. `hl_cap_crypto_sha256` — capability-mediated crypto (verified against a
-   known vector).
-6. `hl_release_io_platform` / `hl_module_registry_count` — signed-artifact
-   / SBOM identity.
+7. `hl_embed_sha256` — capability-mediated crypto (known-vector check).
+8. `hl_embed_platform` / `hl_embed_module_count` — signed-artifact / SBOM
+   identity.
 
-The host exits non-zero if any capability check fails.
+The host exits non-zero if any check fails.
+
+## The ABI
+
+`include/hull/embed.h` is the whole surface: an opaque `HlEmbed` handle,
+`hl_embed_abi_version()` for version negotiation, the `hl_embed_allow_*`
+policy builders, the `hl_embed_sandbox_phase1` / `hl_embed_seal`
+lifecycle, and the `hl_embed_fs_*` / `hl_embed_sha256` /
+`hl_embed_platform` / `hl_embed_module_count` capability calls. It depends
+only on `<stddef.h>` / `<stdint.h>`.
+
+Unit tests for the guard / limit / identity surface live in
+`tests/hull/test_embed.c` (run by `make test`); the sealed integration
+path is this example, run by `make embed-c-smoke`.
 
 ## What is NOT in libhull
 
