@@ -2979,6 +2979,33 @@ UTEST(js_stdlib, csrf_generate_and_verify)
     cleanup_js_caps();
 }
 
+UTEST(js_stdlib, crypto_constant_time_eq)
+{
+    init_js_with_caps();
+    ASSERT_TRUE(js_initialized);
+
+    const char *code =
+        "import { crypto } from 'hull:crypto';\n"
+        "globalThis.__cte1 = crypto.constantTimeEq('abc','abc') ? 1 : 0;\n"  /* equal */
+        "globalThis.__cte2 = crypto.constantTimeEq('abc','abd') ? 1 : 0;\n"  /* differ */
+        "globalThis.__cte3 = crypto.constantTimeEq('abc','ab') ? 1 : 0;\n"   /* length */
+        "globalThis.__cte4 = crypto.constantTimeEq('','') ? 1 : 0;\n";       /* empty */
+
+    JSValue val = JS_Eval(js.ctx, code, strlen(code), "<test>",
+                          JS_EVAL_TYPE_MODULE);
+    if (JS_IsException(val))
+        hl_js_dump_error(&js);
+    JS_FreeValue(js.ctx, val);
+    hl_js_run_jobs(&js);
+
+    ASSERT_EQ(eval_int("globalThis.__cte1"), 1);
+    ASSERT_EQ(eval_int("globalThis.__cte2"), 0);
+    ASSERT_EQ(eval_int("globalThis.__cte3"), 0);
+    ASSERT_EQ(eval_int("globalThis.__cte4"), 1);
+
+    cleanup_js_caps();
+}
+
 UTEST(js_stdlib, csrf_wrong_session_rejected)
 {
     init_js_with_caps();

@@ -2078,6 +2078,24 @@ UTEST(lua_cap, crypto_hmac_sha256)
     cleanup_lua_caps();
 }
 
+UTEST(lua_cap, crypto_constant_time_eq)
+{
+    init_lua_with_caps();
+    ASSERT_TRUE(lua_initialized);
+
+    char *r;
+    r = eval_str("crypto.constant_time_eq('abc','abc') and '1' or '0'");
+    ASSERT_NE(r, NULL); ASSERT_STREQ(r, "1"); free(r);          /* equal */
+    r = eval_str("crypto.constant_time_eq('abc','abd') and '1' or '0'");
+    ASSERT_NE(r, NULL); ASSERT_STREQ(r, "0"); free(r);          /* differ */
+    r = eval_str("crypto.constant_time_eq('abc','ab') and '1' or '0'");
+    ASSERT_NE(r, NULL); ASSERT_STREQ(r, "0"); free(r);          /* length */
+    r = eval_str("crypto.constant_time_eq('','') and '1' or '0'");
+    ASSERT_NE(r, NULL); ASSERT_STREQ(r, "1"); free(r);          /* empty */
+
+    cleanup_lua_caps();
+}
+
 UTEST(lua_cap, crypto_hmac_sha1)
 {
     init_lua_with_caps();

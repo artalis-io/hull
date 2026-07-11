@@ -94,12 +94,8 @@ function verify(token, sessionId, secret, maxAge) {
 
     const expected = computeHmac(sessionId, tsHex, secret);
 
-    if (mac.length !== expected.length)
-        return false;
-    let diff = 0;
-    for (let i = 0; i < mac.length; i++)
-        diff |= mac.charCodeAt(i) ^ expected.charCodeAt(i);
-    if (diff !== 0)
+    // Constant-time compare in C (crypto.constantTimeEq), not the interpreter.
+    if (!crypto.constantTimeEq(mac, expected))
         return false;
 
     const ts = parseInt(tsHex, 16);
@@ -147,7 +143,10 @@ function middleware(opts) {
     const o = opts || {};
     const secret = o.secret;
     const maxAge = o.maxAge !== undefined ? o.maxAge : 3600;
-    const cookieName = o.cookieName || "hull.sid";
+    // Fallback session-cookie name when upstream session middleware hasn't
+    // populated req.ctx[sessionKey]. Matches the session/auth middleware
+    // default ("hull_session") so the fallback actually finds the cookie.
+    const cookieName = o.cookieName || "hull_session";
     const sessionKey = o.sessionKey || "session_id";
     const headerName = o.headerName || "X-CSRF-Token";
     const fieldName = o.fieldName || "_csrf";

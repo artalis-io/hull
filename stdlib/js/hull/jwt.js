@@ -52,12 +52,11 @@ const SUPPORTED_ALGS = new Set([
     "ES256", "ES384",
 ]);
 
+// Constant-time comparison, done in C (crypto.constantTimeEq) so the timing is
+// not subject to interpreter variance. Length leak is acceptable: both inputs
+// are fixed-length HMAC outputs.
 function constantTimeCompare(a, b) {
-    if (a.length !== b.length) return false;
-    let diff = 0;
-    for (let i = 0; i < a.length; i++)
-        diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-    return diff === 0;
+    return crypto.constantTimeEq(a, b);
 }
 
 function secretToHex(secret) {

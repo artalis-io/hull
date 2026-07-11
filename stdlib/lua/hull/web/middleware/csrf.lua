@@ -39,15 +39,11 @@ local function str_to_hex(s)
     return table.concat(hex)
 end
 
---- Constant-time comparison of two strings.
--- Note: length leak is acceptable — both inputs are always fixed-length HMAC outputs
+--- Constant-time comparison of two strings, done in C
+--- (crypto.constant_time_eq) so timing is not subject to interpreter variance.
+-- Note: length leak is acceptable; both inputs are always fixed-length HMAC outputs.
 local function constant_time_compare(a, b)
-    if #a ~= #b then return false end
-    local diff = 0
-    for i = 1, #a do
-        diff = diff | (string.byte(a, i) ~ string.byte(b, i))
-    end
-    return diff == 0
+    return crypto.constant_time_eq(a, b)
 end
 
 --- Generate a CSRF token for `(session_id, secret)`.

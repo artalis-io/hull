@@ -1142,6 +1142,37 @@ static JSValue js_crypto_hmac_sha256_verify(JSContext *ctx, JSValueConst this_va
     return JS_NewBool(ctx, rc == 0);
 }
 
+/* crypto.constantTimeEq(a, b) -> boolean
+ *
+ * Constant-time equality of two strings, compared in C so the timing is not
+ * subject to interpreter variance. Length is NOT secret (callers compare
+ * fixed-size digests/MACs), so a length mismatch returns false immediately;
+ * equal-length inputs compare with no early exit. Used by jwt/csrf. */
+static JSValue js_crypto_constant_time_eq(JSContext *ctx, JSValueConst this_val,
+                                          int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 2)
+        return JS_ThrowTypeError(ctx, "crypto.constantTimeEq requires (a, b)");
+    size_t alen, blen;
+    const char *a = JS_ToCStringLen(ctx, &alen, argv[0]);
+    if (!a) return JS_EXCEPTION;
+    const char *b = JS_ToCStringLen(ctx, &blen, argv[1]);
+    if (!b) { JS_FreeCString(ctx, a); return JS_EXCEPTION; }
+    int eq;
+    if (alen != blen) {
+        eq = 0;
+    } else {
+        unsigned diff = 0;
+        for (size_t i = 0; i < alen; i++)
+            diff |= (unsigned)((unsigned char)a[i] ^ (unsigned char)b[i]);
+        eq = (diff == 0);
+    }
+    JS_FreeCString(ctx, a);
+    JS_FreeCString(ctx, b);
+    return JS_NewBool(ctx, eq);
+}
+
 /* crypto.base64urlEncode(data) -> string (no padding) */
 static JSValue js_crypto_base64url_encode(JSContext *ctx, JSValueConst this_val,
                                            int argc, JSValueConst *argv)
@@ -1497,6 +1528,8 @@ static int js_crypto_module_init(JSContext *ctx, JSModuleDef *m)
                       JS_NewCFunction(ctx, js_crypto_hmac_sha1, "hmacSha1", 2));
     JS_SetPropertyStr(ctx, crypto, "hmacSha256Verify",
                       JS_NewCFunction(ctx, js_crypto_hmac_sha256_verify, "hmacSha256Verify", 3));
+    JS_SetPropertyStr(ctx, crypto, "constantTimeEq",
+                      JS_NewCFunction(ctx, js_crypto_constant_time_eq, "constantTimeEq", 2));
     JS_SetPropertyStr(ctx, crypto, "base64urlEncode",
                       JS_NewCFunction(ctx, js_crypto_base64url_encode, "base64urlEncode", 1));
     JS_SetPropertyStr(ctx, crypto, "base64urlDecode",

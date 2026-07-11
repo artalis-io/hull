@@ -61,15 +61,12 @@ local function str_to_hex(s)
     return table.concat(hex)
 end
 
--- Constant-time comparison. Length leak is acceptable: both inputs
--- are always fixed-length HMAC outputs of the same size.
+-- Constant-time comparison, done in C (crypto.constant_time_eq) so timing is
+-- not subject to interpreter/bytecode-dispatch variance, matching
+-- crypto/envelope. Length leak is acceptable: both inputs are fixed-length
+-- HMAC outputs of the same size.
 local function constant_time_compare(a, b)
-    if #a ~= #b then return false end
-    local diff = 0
-    for i = 1, #a do
-        diff = diff | (string.byte(a, i) ~ string.byte(b, i))
-    end
-    return diff == 0
+    return crypto.constant_time_eq(a, b)
 end
 
 -- HS256 signature: HMAC-SHA256 over the signing input, returning the

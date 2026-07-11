@@ -812,6 +812,26 @@ static int lua_crypto_hmac_sha256_verify(lua_State *L)
     return 1;
 }
 
+/* crypto.constant_time_eq(a, b) → boolean
+ *
+ * Constant-time equality of two byte strings, compared in C so the timing is
+ * not subject to interpreter/bytecode-dispatch variance. Length is NOT secret
+ * (callers compare fixed-size digests/MACs), so a length mismatch returns
+ * false immediately; equal-length inputs are compared with no early exit. Used
+ * by jwt/csrf to compare HMAC signatures. */
+static int lua_crypto_constant_time_eq(lua_State *L)
+{
+    size_t alen, blen;
+    const char *a = luaL_checklstring(L, 1, &alen);
+    const char *b = luaL_checklstring(L, 2, &blen);
+    if (alen != blen) { lua_pushboolean(L, 0); return 1; }
+    unsigned diff = 0;
+    for (size_t i = 0; i < alen; i++)
+        diff |= (unsigned)((unsigned char)a[i] ^ (unsigned char)b[i]);
+    lua_pushboolean(L, diff == 0);
+    return 1;
+}
+
 /* crypto.base64url_encode(data) → string (no padding) */
 static int lua_crypto_base64url_encode(lua_State *L)
 {
@@ -1024,6 +1044,7 @@ static const luaL_Reg crypto_funcs[] = {
     {"box_keypair",       lua_crypto_box_keypair},
     {"hmac_sha256",       lua_crypto_hmac_sha256},
     {"hmac_sha256_verify", lua_crypto_hmac_sha256_verify},
+    {"constant_time_eq",  lua_crypto_constant_time_eq},
     {"hmac_sha1",         lua_crypto_hmac_sha1},
     {"base64url_encode",  lua_crypto_base64url_encode},
     {"base64url_decode",  lua_crypto_base64url_decode},
