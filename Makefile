@@ -2408,6 +2408,41 @@ embed-c-smoke: $(BUILDDIR)/libhull.a $(KEEL_LIB)
 	@$(BUILDDIR)/embed_c
 	@echo "embed-c-smoke: OK"
 
+# embed-rust-smoke / embed-zig-smoke: the non-C reference hosts (L-5). Each
+# links libhull.a the same way embed_c does (archive repeated for the GNU-ld /
+# lld cycle) and drives the hl_embed_* ABI from a foreign language. Both SKIP
+# CLEANLY when the toolchain is absent (like the Playwright targets), so a
+# plain `make check` on a box without cargo/zig is unaffected; CI installs the
+# toolchains and runs them for real.
+.PHONY: embed-rust-smoke
+embed-rust-smoke: $(BUILDDIR)/libhull.a $(KEEL_LIB)
+	@if ! command -v cargo >/dev/null 2>&1; then \
+		echo "embed-rust-smoke: cargo not found, skipping"; \
+	else \
+		echo "── building + running embed_rust (no-runtime host) ──"; \
+		HULL_LIBHULL_A="$(abspath $(BUILDDIR)/libhull.a)" \
+		HULL_LIBKEEL_A="$(abspath $(KEEL_LIB))" \
+		cargo run --quiet --release --manifest-path examples/embed_rust/Cargo.toml && \
+		echo "embed-rust-smoke: OK"; \
+	fi
+
+.PHONY: embed-zig-smoke
+embed-zig-smoke: $(BUILDDIR)/libhull.a $(KEEL_LIB)
+	@if ! command -v zig >/dev/null 2>&1; then \
+		echo "embed-zig-smoke: zig not found, skipping"; \
+	else \
+		echo "── building + running embed_zig (no-runtime host) ──"; \
+		zig build-exe examples/embed_zig/main.zig -I$(INCDIR) -lc \
+			-femit-bin=$(BUILDDIR)/embed_zig \
+			$(BUILDDIR)/libhull.a $(KEEL_LIB) $(BUILDDIR)/libhull.a -lm -lpthread && \
+		$(BUILDDIR)/embed_zig && \
+		echo "embed-zig-smoke: OK"; \
+	fi
+
+# Run every reference embedder that has a toolchain available.
+.PHONY: embed-smoke
+embed-smoke: embed-c-smoke embed-rust-smoke embed-zig-smoke
+
 # Capability sources
 $(BUILDDIR)/cap_%.o: $(SRCDIR)/hull/cap/%.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
