@@ -274,6 +274,12 @@ smaller, produced by an unchanged full `hull`.
 
 ## 8. Related direction: a no-runtime embedding flavor (`libhull`)
 
+> **Now partly shipped.** The `hl_embed_*` ABI, the `libhull.a` archive,
+> and the sealed fail-closed lifecycle described below have landed (phases
+> L-1..L-3). See **[libhull_flavor.md](libhull_flavor.md)** for the trust
+> boundary and seal lifecycle. The rest of this section is the original
+> design rationale.
+
 A separate idea surfaced alongside this: a flavor with **`HL_ENABLE_LUA=0`
 AND `HL_ENABLE_JS=0`** (no scripting runtime at all), exposing just the
 kernel sandbox (pledge/unveil/seatbelt) + the capability layer so an
