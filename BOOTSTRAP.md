@@ -678,6 +678,18 @@ hull build .                                    # produces ./app binary
 ./app -p 8080 -d /var/lib/myapp/data.db        # run it
 ```
 
+**Build flavors.** `hull build --flavor=<flavor>` produces a narrower,
+smaller binary matched to what the app needs: `full` (server + client
+HTTP, default), `server-only` (no outbound HTTP client), `client-only`
+(no inbound server; a CLI that calls APIs), `pure-compute` (no HTTP at
+all; smallest). `--flavor=auto` infers the minimal flavor from your
+declared modules. The build validates the manifest against the target
+flavor, so declaring a module that needs a dropped subsystem fails the
+build with a clear message (no silent runtime breakage). On a released
+hull, `hull platform install <flavor>` fetches the matching platform lib
+(signature + SHA verified) so `--flavor` works without building from
+source. See `docs/build_flavors.md`.
+
 Or wrap in `hull deploy` for systemd + Dockerfile + fly.toml generation.
 
 ---

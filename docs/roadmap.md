@@ -356,6 +356,15 @@ Full design + lifecycle + phased implementation: [docs/cli_mode.md](cli_mode.md)
 | 3c  | Sandbox narrowing | **Done** |. | `HlSandboxPolicy.network_inbound`: defaults to 1; serve.c sets to 0 when `rt->vt->has_main(rt)` is true. Pledge's `inet` promise is dropped entirely on CLI apps with no outbound either; macOS Seatbelt's `network-inbound`/`network-bind` rules become conditional on the same. |
 | 3d  | Async + Net backend vtables | Planned | ~14d | Reframed from "replace Keel primitives" to **define `HlAsyncBackend` + `HlNetBackend` vtables** (mirror of `HlDbBackend`). Keel becomes the default impl; a poll-based async backend ships for `HL_ENABLE_HTTP=0` builds, fully unlinking Keel and enabling async-in-main on CLI builds. Future backends (libuv, io_uring, sandboxed mini-server) slot into the same interface. Full design: [docs/backend_vtables.md](backend_vtables.md). |
 | 4   | Polish & documentation | **Mostly done** |. | `hull agent manifest` mode field, `examples/hello_cli/`, `tests/e2e_cli.sh`, AGENTS/CLAUDE doc markings for HTTP-build modules. Remaining: `hull build` mode validation (needs Phase 3b), more sample CLI apps. |
+| 5   | `hull build --flavor=full\|server-only\|client-only\|pure-compute` (+ `--flavor=auto`) | **Done** (v0.5.0) |. | Builds a flavored app binary; `--flavor=auto` infers the minimal flavor from the app's declared modules. Validates the app manifest against the TARGET flavor caps: a module needing a dropped subsystem is rejected at build time rather than link time. |
+| 6   | Signed published per-flavor platform libs + `hull platform install <flavor>` / `hull platform list` | **Done** (v0.5.0 native, v0.6.0 cosmo) |. | Fetches + Ed25519/SHA-256-verifies the per-flavor lib(s) into `~/.hull/platform/`; `hull build --flavor` uses the cache. Native `libhull_platform-<flavor>-<arch>.a` + cosmo dual-arch `libhull_platform-<flavor>.{x86_64,aarch64}-cosmo.a`, all covered by the signed `hull.sha256`. |
+| 7   | Build-time platform-lib re-verify | Planned | ~1d | Today `hull build --flavor` sets `verify_platform=false` and trusts the INSTALL-time release-signature verification; the flavor libs are release-signed but do NOT carry the inner platform-key signature that a normal embedded build cross-checks. Planned hardening: `hull platform install` records each lib's verified SHA-256 and `hull build --flavor` re-checks the installed lib against that digest before linking, closing the install->build TOCTOU. See [docs/build_flavors.md](build_flavors.md). |
+
+The **build-flavor epic is shipped** (phases 5 and 6 above): `hull build
+--flavor` produces a flavored app binary against a signed, per-flavor
+platform library installed via `hull platform install`, with target-flavor
+manifest validation at build time. Full design + the four flavor
+definitions live in [docs/build_flavors.md](build_flavors.md).
 
 ### Agent Platform. AI-Native Development Tooling
 

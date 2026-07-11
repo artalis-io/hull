@@ -900,6 +900,38 @@ hull verify myapp/
 hull inspect myapp/
 ```
 
+### Build flavors
+
+`hull build` can produce a flavored app binary that drops subsystems the
+app doesn't use. Smaller binary, smaller attack surface. Pass `--flavor`:
+
+```bash
+hull build myapp/ --flavor=full          # server + client HTTP (default)
+hull build myapp/ --flavor=server-only   # inbound HTTP, no outbound client
+hull build myapp/ --flavor=client-only   # no inbound server; CLI tools calling APIs
+hull build myapp/ --flavor=pure-compute  # no HTTP at all; drops mbedTLS + Keel; smallest
+hull build myapp/ --flavor=auto          # infer the minimal flavor from declared modules
+```
+
+The build validates the app manifest against the TARGET flavor's caps: a
+declared module that needs a dropped subsystem is rejected at build time
+with a clear error, so you get a build failure rather than a runtime
+surprise. `--flavor=auto` reads the app's declared modules and picks the
+smallest flavor that still satisfies them.
+
+To build a flavored binary on a released hull without compiling the
+platform lib from source, install the per-flavor platform lib first:
+
+```bash
+hull platform list                # show which flavor libs are installed / embedded
+hull platform install pure-compute  # fetch + verify (Ed25519 sig + SHA-256) into ~/.hull/platform/
+hull build myapp/ --flavor=pure-compute   # now uses the cached lib
+```
+
+`hull platform install` uses the same signed-release trust chain as
+`hull update` and `hull tools install` (no new keys). Reference:
+[docs/build_flavors.md](docs/build_flavors.md).
+
 ### Compute Modules (WASM)
 
 Compute modules are pure WASM functions invoked via `compute.call()` /

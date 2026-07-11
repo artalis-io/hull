@@ -179,6 +179,28 @@ hull build -o myapp . --compiler=/path/to/cc  # explicit compiler path
 
 Cosmopolitan APE binaries run on Linux, macOS, Windows, FreeBSD, OpenBSD, and NetBSD from a single file. Hull builds multi-architecture platform archives (`make platform-cosmo`) so the resulting APE binary is a true fat binary for both x86_64 and aarch64.
 
+### Build Flavors
+
+`hull build --flavor=<flavor>` builds a slimmer app binary by linking a matching per-flavor platform library instead of the full one. The flavor selects which HTTP halves are compiled in, and the app's manifest is validated against the target flavor at build time: an app that declares a module needing a dropped subsystem is rejected before it links.
+
+| Flavor | HTTP | Use case |
+|--------|------|----------|
+| `full` | server + client | Web apps that serve requests and call out to APIs (default) |
+| `server-only` | inbound only | Apps forbidden from making outbound HTTP calls |
+| `client-only` | outbound only | CLI tools that call APIs over HTTPS, no listener |
+| `pure-compute` | none | Offline compute / signing binary. Drops mbedTLS + Keel; smallest binary |
+| `auto` | inferred | Picks the minimal flavor from the app's declared modules |
+
+You do not build the platform library from source. `hull platform install <flavor>` (and `hull platform list`) fetches the per-flavor libs for this hull's platform from the matching signed release, verifies the Ed25519 signature on `hull.sha256` and the SHA-256 of each lib, and caches them under `~/.hull/platform/`; `hull build --flavor` then picks up the cached lib automatically.
+
+```bash
+hull platform install pure-compute        # fetch + verify + cache the platform lib
+hull build --flavor=pure-compute -o mytool .
+hull build --flavor=auto -o myapp .        # infer the minimal flavor
+```
+
+Releases publish signed per-flavor platform libs for every target: native `libhull_platform-<flavor>-<arch>.a` (linux-x86_64, linux-aarch64, darwin-arm64) and cosmo dual-arch `libhull_platform-<flavor>.{x86_64,aarch64}-cosmo.a`, all covered by the Ed25519-signed `hull.sha256` (plus Sigstore/cosign signatures and SLSA provenance). See [docs/build_flavors.md](docs/build_flavors.md) for the full design.
+
 ## Architecture
 
 ```
