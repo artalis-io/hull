@@ -15,9 +15,9 @@ parts an embedder must understand. For the build/flavor context see
 see [security.md §4b](security.md).
 
 Status: L-1 (archive + sandbox split), L-2 (`hl_embed_*` ABI), and L-3
-(policy sealing + fail-closed ordering + death test) and L-4 (release
-signing + SBOM for the archive, incl. the dual-arch cosmo build) have
-landed. L-5 (a non-C reference embedder) is pending.
+(policy sealing + fail-closed ordering + death test), L-4 (release signing
++ SBOM for the archive, incl. the dual-arch cosmo build), and L-5 (Rust +
+Zig reference embedders) have landed. The epic is complete.
 
 ## Building
 
@@ -176,10 +176,27 @@ inherit the release signature. The per-component membership is the
 | Full sealed integration (sandbox + cap fs I/O + traversal) | `examples/embed_c` (`make embed-c-smoke`) |
 | The underlying RO-arena mechanism | `tests/hull/test_seal_arena.c` |
 
-## Reference host
+## Reference hosts
 
-[`examples/embed_c`](../examples/embed_c/) is the canonical consumer. It
-includes only `<hull/embed.h>`, builds a policy in C, seals, and drives
-capability-mediated filesystem I/O, crypto, and identity — exiting
-non-zero on any failure. It is the L-2/L-3 link witness: a runtime
-dependency leaking into the core would fail its link.
+Three reference hosts drive the identical embedding sequence (build a
+policy in C-declared terms, seal, then capability-mediated fs I/O + crypto
++ identity), each exiting non-zero on any failure. They are the link
+witnesses: a runtime dependency leaking into the core would fail their
+link.
+
+| Host | Language | How it binds the ABI | Runs via |
+|---|---|---|---|
+| [`examples/embed_c`](../examples/embed_c/) | C | `#include <hull/embed.h>` | `make embed-c-smoke` |
+| [`examples/embed_rust`](../examples/embed_rust/) | Rust | an `extern "C"` block + `build.rs` link | `make embed-rust-smoke` |
+| [`examples/embed_zig`](../examples/embed_zig/) | Zig | `@cImport("hull/embed.h")` — the header directly | `make embed-zig-smoke` |
+
+`make embed-smoke` runs all three. The Rust/Zig targets **skip cleanly**
+when `cargo`/`zig` is absent (so a plain checkout is unaffected); CI
+installs both toolchains and asserts each host runs to completion. The Zig
+host is the strongest ABI-cleanliness proof: `@cImport` consumes
+`embed.h` as-is, so a clean compile means the header is FFI-consumable with
+no massaging.
+
+All three link `libhull.a` twice around Keel (`libhull.a libkeel.a
+libhull.a`) to resolve the archive cycle under GNU ld / lld; macOS's linker
+handles it without the repeat.

@@ -649,3 +649,53 @@ jobs:
 
       - name: Template Benchmark
         run: RUNTIME=${{ matrix.runtime }} DURATION=5s CONNECTIONS=50 THREADS=2 sh bench/bench_template.sh
+
+  # ── libhull reference embedders (L-5) ──
+  # Prove the hl_embed_* C ABI is consumable from a foreign language. Each job
+  # links libhull.a + Keel and runs examples/embed_{rust,zig} through the ABI.
+  # The make target skips when the toolchain is absent, so we assert it actually
+  # ran (grep for the OK line) rather than silently pass.
+  embed-rust:
+    name: libhull embedder (Rust)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      - name: Rust toolchain
+        run: rustc --version && cargo --version   # preinstalled on GitHub runners
+
+      - name: Run Rust reference embedder
+        run: |
+          out=$(make embed-rust-smoke 2>&1); echo "$out"
+          echo "$out" | grep -q "embed-rust-smoke: OK" \
+            || { echo "::error::embed_rust did not run to completion"; exit 1; }
+
+  embed-zig:
+    name: libhull embedder (Zig)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+
+      - name: Install Zig 0.13.0
+        run: |
+          set -eu
+          curl -fsSL https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz \
+            -o /tmp/zig.tar.xz
+          sudo mkdir -p /opt/zig
+          sudo tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
+          echo "/opt/zig" >> "$GITHUB_PATH"
+
+      - name: Zig version
+        run: zig version
+
+      - name: Run Zig reference embedder
+        run: |
+          out=$(make embed-zig-smoke 2>&1); echo "$out"
+          echo "$out" | grep -q "embed-zig-smoke: OK" \
+            || { echo "::error::embed_zig did not run to completion"; exit 1; }

@@ -49,3 +49,7 @@ Thumbs.db
 # regenerable on demand. Scoped to this path so other npm work
 # in the tree isn't accidentally swallowed.
 tests/.playwright/
+
+# libhull Rust reference embedder (examples/embed_rust)
+examples/embed_rust/target/
+examples/embed_rust/Cargo.lock
