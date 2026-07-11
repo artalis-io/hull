@@ -401,6 +401,23 @@ jobs:
           name: hull-cosmo
           path: hull-cosmo
 
+      # ── libhull: dual-arch cosmo embedding archive ──
+      # Under the fat cosmocc driver, `make libhull` emits build/libhull.a
+      # (x86_64) plus its build/.aarch64/libhull.a sibling. Publish them
+      # arch-qualified, mirroring libhull_platform.{x86_64,aarch64}-cosmo.a.
+      - name: Build + rename cosmo libhull.a (dual-arch)
+        run: |
+          make libhull CC=cosmocc
+          cp build/libhull.a          libhull.x86_64-cosmo.a
+          cp build/.aarch64/libhull.a libhull.aarch64-cosmo.a
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: libhull-cosmo
+          path: |
+            libhull.x86_64-cosmo.a
+            libhull.aarch64-cosmo.a
+
   build-native:
     name: Build (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
@@ -553,6 +570,20 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
 
+      # ── libhull: the no-runtime embedding archive for this arch ──
+      # Built from the same objects as the hull binary above; published so
+      # hl_embed_* native hosts can fetch + verify a known-good archive.
+      # Its SHA-256 goes into the release-signed hull.sha256 manifest.
+      - name: Build + rename libhull.a
+        run: |
+          make libhull
+          cp build/libhull.a libhull-${{ matrix.name }}.a
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: libhull-${{ matrix.name }}
+          path: libhull-${{ matrix.name }}.a
+
   build-wamrc:
     # Side-loaded `wamrc` (WAMR AOT compiler) shipped as a separate
     # release asset and pulled by `hull tools install wamrc`. See
@@ -656,6 +687,14 @@ jobs:
           mv artifacts/platform-cosmo-flavor-server-only/*.a   dist/
           mv artifacts/platform-cosmo-flavor-client-only/*.a   dist/
           mv artifacts/platform-cosmo-flavor-pure-compute/*.a  dist/
+          # libhull: the no-runtime embedding archive (libhull L-4). Native
+          # per-arch (libhull-<arch>.a) + dual-arch cosmo
+          # (libhull.{x86_64,aarch64}-cosmo.a). Added explicitly to the
+          # SHA-256 + publish steps below so they inherit the release signature.
+          mv artifacts/libhull-linux-x86_64/libhull-linux-x86_64.a    dist/
+          mv artifacts/libhull-linux-aarch64/libhull-linux-aarch64.a  dist/
+          mv artifacts/libhull-darwin-arm64/libhull-darwin-arm64.a    dist/
+          mv artifacts/libhull-cosmo/*.a                              dist/
 
       - name: Make binaries executable
         run: chmod +x dist/*
@@ -673,7 +712,12 @@ jobs:
           ./hull-linux-x86_64 sbom --format=json      > hull.sbom.json
           ./hull-linux-x86_64 sbom --format=cyclonedx > hull.sbom.cdx.json
           ./hull-linux-x86_64 sbom --format=spdx      > hull.sbom.spdx.json
-          ls -la hull.sbom.*
+          # libhull-scoped SBOM: describes the no-runtime embedding archive
+          # (drops the Lua/QuickJS runtimes). Same signature inheritance.
+          ./hull-linux-x86_64 sbom --subject=libhull --format=json      > libhull.sbom.json
+          ./hull-linux-x86_64 sbom --subject=libhull --format=cyclonedx > libhull.sbom.cdx.json
+          ./hull-linux-x86_64 sbom --subject=libhull --format=spdx      > libhull.sbom.spdx.json
+          ls -la hull.sbom.* libhull.sbom.*
 
       - name: Generate build-environment manifest
         # §0.3.14. Capture the release-workflow runner identity, commit,
@@ -719,8 +763,11 @@ jobs:
           sha256sum hull-cosmo hull-linux-x86_64 hull-linux-aarch64 hull-darwin-arm64 \
                     hull-wamrc-linux-x86_64 hull-wamrc-linux-aarch64 hull-wamrc-darwin-arm64 \
                     hull.sbom.json hull.sbom.cdx.json hull.sbom.spdx.json \
+                    libhull.sbom.json libhull.sbom.cdx.json libhull.sbom.spdx.json \
                     hull.build-env.json \
                     libhull_platform-*.a \
+                    libhull-linux-x86_64.a libhull-linux-aarch64.a libhull-darwin-arm64.a \
+                    libhull.x86_64-cosmo.a libhull.aarch64-cosmo.a \
                     > hull.sha256
           cat hull.sha256
 
@@ -820,6 +867,18 @@ jobs:
           # `hull platform install <flavor>` can fetch them. Covered by
           # hull.sha256 above, so they inherit the release signature.
           assets+=(dist/libhull_platform-*.a)
+          # libhull no-runtime embedding archives (native per-arch + dual-arch
+          # cosmo) and the libhull-scoped SBOMs. Also covered by hull.sha256.
+          assets+=(
+            dist/libhull-linux-x86_64.a
+            dist/libhull-linux-aarch64.a
+            dist/libhull-darwin-arm64.a
+            dist/libhull.x86_64-cosmo.a
+            dist/libhull.aarch64-cosmo.a
+            dist/libhull.sbom.json
+            dist/libhull.sbom.cdx.json
+            dist/libhull.sbom.spdx.json
+          )
           if [ -f dist/hull.sha256.sig ]; then
             assets+=(dist/hull.sha256.sig)
           fi

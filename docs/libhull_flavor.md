@@ -15,16 +15,21 @@ parts an embedder must understand. For the build/flavor context see
 see [security.md §4b](security.md).
 
 Status: L-1 (archive + sandbox split), L-2 (`hl_embed_*` ABI), and L-3
-(policy sealing + fail-closed ordering + death test) have landed. L-4
-(sign/SBOM for the archive) and L-5 (a non-C reference embedder) are
-pending.
+(policy sealing + fail-closed ordering + death test) and L-4 (release
+signing + SBOM for the archive, incl. the dual-arch cosmo build) have
+landed. L-5 (a non-C reference embedder) is pending.
 
 ## Building
 
 ```sh
-make libhull            # -> build/libhull.a  (runtime-free core)
+make libhull            # -> build/libhull.a (+ .sha256 sidecar)
 make embed-c-smoke      # links examples/embed_c against it and runs it
 ```
+
+`make libhull` also writes `build/libhull.a.sha256` (the raw archive hash,
+one hex line). Under the fat cosmocc driver (`make libhull CC=cosmocc`) it
+additionally emits `build/.aarch64/libhull.a`, the concomitant sibling
+cosmocc requires to link a dual-arch APE.
 
 A host links only the archive, Keel, and libm/pthread; the sole Hull
 include is the ABI header. `build/libhull.a` is listed twice because it and
@@ -125,12 +130,49 @@ seals, then writes to the base_dir mapping and must die with SIGSEGV /
 SIGBUS. Without a real RO mapping the write would silently succeed and the
 test would fail.
 
+## Signing and verification
+
+Each release publishes `libhull.a` as signed artifacts, so an embedder can
+verify the exact archive it links:
+
+- **Native, per-arch:** `libhull-linux-x86_64.a`, `libhull-linux-aarch64.a`,
+  `libhull-darwin-arm64.a`.
+- **Cosmo, dual-arch:** `libhull.x86_64-cosmo.a`, `libhull.aarch64-cosmo.a`.
+
+Their SHA-256s are lines in the release `hull.sha256` manifest, which is
+signed with the Ed25519 **release** key (and Sigstore + SLSA), exactly like
+the `hull` binaries and the per-flavor platform libs. This is the same
+trust chain [`hull platform install`](build_flavors.md) uses. To verify a
+downloaded archive offline, cross-check its SHA-256 against the
+signature-verified manifest via `hl_release_io_verify_local_asset(dir,
+asset)` — it re-checks the manifest signature against the **embedded**
+release pubkey (the trust anchor baked into the binary), then matches the
+asset's hash to the signed manifest line. `make libhull` also drops a
+`build/libhull.a.sha256` sidecar for local checks.
+
+Note the asymmetry (same as `hull build --flavor`): `libhull.a` is covered
+by the **release** signature, not the inner **platform** signature — it is
+a standalone archive a foreign host links, not an embedded platform lib
+cross-checked at app-build time.
+
+## SBOM
+
+`hull sbom --subject=libhull [--format=human|json|cyclonedx|spdx]` emits an
+SBOM scoped to the embedding surface: the subject component is named
+`libhull`, the script runtimes (Lua, QuickJS) and the `hull build` compiler
+backend (TinyCC) are dropped, and the linked core (Keel, mbedTLS, WAMR,
+SQLite, tweetnacl, the CA bundle, …) is kept. Each release also publishes
+`libhull.sbom.{json,cdx.json,spdx.json}`, covered by `hull.sha256` so they
+inherit the release signature. The per-component membership is the
+`in_libhull` flag on `HlSbomEntry` (`src/hull/sbom.c`).
+
 ## Testing
 
 | Surface | Where |
 |---|---|
 | ABI guards, policy limits, fail-closed-before-seal, crypto, identity, NULL-safety | `tests/hull/test_embed.c` (`make test`) |
 | Sealed base_dir is read-only (fork+SIGSEGV) | `tests/hull/test_embed.c` (`make test`) |
+| libhull SBOM scope (flags + filter + subject rename) | `tests/hull/test_sbom.c` (`make test`) |
 | Full sealed integration (sandbox + cap fs I/O + traversal) | `examples/embed_c` (`make embed-c-smoke`) |
 | The underlying RO-arena mechanism | `tests/hull/test_seal_arena.c` |
 

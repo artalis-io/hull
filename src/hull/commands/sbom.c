@@ -22,9 +22,14 @@
 static void usage(FILE *fp)
 {
     fprintf(fp,
-        "Usage: hull sbom [--format=<format>]\n"
+        "Usage: hull sbom [--format=<format>] [--subject=<hull|libhull>]\n"
         "\n"
         "Print the Software Bill of Materials for this hull binary.\n"
+        "\n"
+        "Subject (default hull):\n"
+        "  hull        The whole hull binary.\n"
+        "  libhull     The no-runtime embedding archive (libhull.a): drops the\n"
+        "              Lua/QuickJS runtimes; keeps the linked core + Keel.\n"
         "\n"
         "Formats:\n"
         "  human       Default. Pretty table mirroring LICENSING.md style.\n"
@@ -53,6 +58,26 @@ int hl_cmd_sbom(int argc, char **argv, const HlCommandEnv *env)
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             usage(stdout);
             return 0;
+        }
+        /* --subject=<hull|libhull>: scope the SBOM. "libhull" describes the
+         * no-runtime embedding archive (drops the Lua/QuickJS runtimes). */
+        const char *sub = NULL;
+        if (strncmp(argv[i], "--subject=", 10) == 0) {
+            sub = argv[i] + 10;
+        } else if (strcmp(argv[i], "--subject") == 0 && i + 1 < argc) {
+            sub = argv[++i];
+        }
+        if (sub) {
+            if (strcmp(sub, "libhull") == 0)   hl_sbom_set_scope_libhull(1);
+            else if (strcmp(sub, "hull") == 0) hl_sbom_set_scope_libhull(0);
+            else {
+                fprintf(stderr,
+                        "hull sbom: unknown subject '%s' (expected hull|libhull)\n",
+                        sub);
+                usage(stderr);
+                return 1;
+            }
+            continue;
         }
         const char *val = NULL;
         if (strncmp(argv[i], "--format=", 9) == 0) {
