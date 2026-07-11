@@ -60,14 +60,23 @@ int hl_cmd_sbom(int argc, char **argv, const HlCommandEnv *env)
             return 0;
         }
         /* --subject=<hull|libhull>: scope the SBOM. "libhull" describes the
-         * no-runtime embedding archive (drops the Lua/QuickJS runtimes). */
-        const char *sub = NULL;
-        if (strncmp(argv[i], "--subject=", 10) == 0) {
-            sub = argv[i] + 10;
-        } else if (strcmp(argv[i], "--subject") == 0 && i + 1 < argc) {
-            sub = argv[++i];
-        }
-        if (sub) {
+         * no-runtime embedding archive (drops the Lua/QuickJS runtimes).
+         * Self-contained: a --subject arg always continues or returns, so no
+         * value-consuming (i-advancing) path falls through to --format below. */
+        if (strcmp(argv[i], "--subject") == 0 ||
+            strncmp(argv[i], "--subject=", 10) == 0) {
+            const char *sub = NULL;
+            if (argv[i][9] == '=') {
+                sub = argv[i] + 10;          /* --subject=VALUE */
+            } else if (i + 1 < argc) {
+                sub = argv[++i];             /* --subject VALUE */
+            }
+            if (!sub) {
+                fprintf(stderr,
+                        "hull sbom: --subject requires a value (hull|libhull)\n");
+                usage(stderr);
+                return 1;
+            }
             if (strcmp(sub, "libhull") == 0)   hl_sbom_set_scope_libhull(1);
             else if (strcmp(sub, "hull") == 0) hl_sbom_set_scope_libhull(0);
             else {
