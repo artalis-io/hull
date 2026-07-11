@@ -6,7 +6,11 @@ HTTP/WebSocket server layer. Mirrors the `HlDbBackend` pattern that
 already lets `db.*` consume SQLite (today) or Postgres (later) through one
 interface.
 
-This document is the design plan. Status: not yet implemented.
+This document is the design plan. Status: **implemented** (Phases 3d-1
+through 3d-5 shipped; `HlAsyncBackend` + `HlNetBackend` vtables, the Keel
+default adapters in `async/keel.c` + `net/keel.c`, the poll(2)/pthread
+backend in `async/poll.c`, and the Keel unlink for `HL_ENABLE_HTTP_ANY=0`
+are all merged, with two follow-up c-audit passes).
 
 ## Why this and not "replace primitives"
 
