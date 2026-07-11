@@ -1,16 +1,25 @@
 /*
  * embed.c — implementation of the libhull embedding ABI (embed.h).
  *
- * Thin, allocation-light wrapper over the internal sandbox + capability
- * layer. The opaque HlEmbed handle accumulates a C-built policy, then
- * hl_embed_seal() resolves it into an HlSandboxPolicy and applies the
- * kernel sandbox. The filesystem capability calls fail closed until that
- * seal has succeeded.
+ * Thin wrapper over the internal sandbox + capability layer. The opaque
+ * HlEmbed handle accumulates a C-built policy; hl_embed_seal() resolves
+ * it into an HlSandboxPolicy, applies the kernel sandbox, and seals the
+ * one datum the capability layer reads on every call — the filesystem
+ * base directory (HlFsConfig.base_dir) — into a page-backed read-only
+ * arena (sh_seal_arena). After a successful seal there is no writable
+ * alias of that path left in the process, so an arbitrary-write primitive
+ * cannot repoint the app's filesystem root. See docs/security.md §4b and
+ * the c-audit §5b sealed-runtime-table rules.
+ *
+ * Fail-closed: the fs capability calls refuse to run until the handle is
+ * SEALED, and hl_embed_seal marks SEALED only after BOTH the arena seal
+ * and the kernel sandbox have succeeded.
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
 #include "hull/embed.h"
+#include "hull/embed_internal.h"
 
 #include "hull/sandbox.h"
 #include "hull/manifest.h"
@@ -19,16 +28,21 @@
 #include "hull/module_registry.h"
 #include "hull/release_io.h"
 
+#include <sh_seal_arena.h>
+
 #include <stdlib.h>
 #include <string.h>
 
 enum { HL_EMBED_NEW = 0, HL_EMBED_SEALED = 1 };
 
-struct HlEmbed {
-    char       *app_dir;                          /* absolute, owned */
-    HlFsConfig  fs;                               /* base_dir aliases app_dir */
+/* One page is ample for a single base_dir path plus alignment slack. */
+#define HL_EMBED_ARENA_SIZE 8192
 
-    char       *reads[HL_MANIFEST_MAX_PATHS];     /* owned dups */
+struct HlEmbed {
+    char       *app_dir;                          /* owned pre-seal; NULLed after seal */
+    HlFsConfig  fs;                               /* base_dir: app_dir pre-seal, sealed copy post-seal */
+
+    char       *reads[HL_MANIFEST_MAX_PATHS];     /* owned dups; freed at seal or free */
     int         nreads;
     char       *writes[HL_MANIFEST_MAX_PATHS];    /* owned dups */
     int         nwrites;
@@ -38,6 +52,8 @@ struct HlEmbed {
     int         gpu;
     int         tui;
 
+    ShSealArena arena;                            /* holds the sealed base_dir */
+    int         arena_ready;                      /* 1 once arena is initialised */
     int         state;                            /* HL_EMBED_NEW / _SEALED */
 };
 
@@ -66,12 +82,24 @@ HlEmbed *hl_embed_new(const char *app_dir)
     return e;
 }
 
+static void embed_free_heap_policy(HlEmbed *e)
+{
+    for (int i = 0; i < e->nreads; i++)  { free(e->reads[i]);  e->reads[i]  = NULL; }
+    for (int i = 0; i < e->nwrites; i++) { free(e->writes[i]); e->writes[i] = NULL; }
+    e->nreads = 0;
+    e->nwrites = 0;
+    free(e->app_dir);
+    e->app_dir = NULL;
+}
+
 void hl_embed_free(HlEmbed *e)
 {
     if (!e) return;
-    for (int i = 0; i < e->nreads; i++) free(e->reads[i]);
-    for (int i = 0; i < e->nwrites; i++) free(e->writes[i]);
-    free(e->app_dir);
+    /* Free heap-owned policy strings first, then destroy the sealed arena
+     * LAST — fs.base_dir may alias into it (c-audit §5b: arena destroyed
+     * after every consumer). No capability call can run during teardown. */
+    embed_free_heap_policy(e);
+    if (e->arena_ready) sh_seal_arena_destroy(&e->arena);
     free(e);
 }
 
@@ -126,16 +154,49 @@ int hl_embed_sandbox_phase1(HlEmbed *e)
     return hl_sandbox_apply_pledge();
 }
 
+/*
+ * Seal the per-call base_dir into the read-only arena. On success sets
+ * e->fs.base_dir to the in-arena (RO) copy and returns 0. On any failure
+ * the arena is torn down and e->fs.base_dir is left pointing at the
+ * original heap copy (harmless — the caller aborts the seal). Must run
+ * BEFORE hl_sandbox_apply so a seal failure aborts before the (on macOS
+ * irreversible) kernel sandbox is applied.
+ */
+static int embed_seal_base_dir(HlEmbed *e)
+{
+    if (sh_seal_arena_init(&e->arena, HL_EMBED_ARENA_SIZE, "hl_embed") != 0)
+        return -1;
+    char *sealed = sh_seal_arena_strdup(&e->arena, e->app_dir);
+    if (!sealed) {
+        sh_seal_arena_destroy(&e->arena);
+        return -1;
+    }
+    if (sh_seal_arena_seal(&e->arena) != 0) {  /* fail closed on seal error */
+        sh_seal_arena_destroy(&e->arena);
+        return -1;
+    }
+    e->arena_ready = 1;
+    e->fs.base_dir = sealed;         /* now points into the RO mapping */
+    e->fs.base_len = strlen(sealed);
+    return 0;
+}
+
 int hl_embed_seal(HlEmbed *e, const char *db_path)
 {
     if (!e || e->state == HL_EMBED_SEALED) return -1;
 
+    /* 1. Seal the per-call base_dir first (nothing irreversible yet). */
+    if (embed_seal_base_dir(e) != 0) return -1;
+
+    /* 2. Build the resolved policy. Path arrays are read once by
+     *    hl_sandbox_apply and never again, so they may stay on the heap;
+     *    base_dir (read every cap call) is already the sealed copy. */
     HlSandboxPolicy policy;
     memset(&policy, 0, sizeof(policy));
-    policy.fs_read         = (const char *const *)e->reads;
-    policy.fs_read_count   = e->nreads;
-    policy.fs_write        = (const char *const *)e->writes;
-    policy.fs_write_count  = e->nwrites;
+    policy.fs_read          = (const char *const *)e->reads;
+    policy.fs_read_count    = e->nreads;
+    policy.fs_write         = (const char *const *)e->writes;
+    policy.fs_write_count   = e->nwrites;
     policy.network_inbound  = e->net_inbound;
     policy.network_outbound = e->net_outbound;
     policy.gpu              = e->gpu;
@@ -143,8 +204,14 @@ int hl_embed_seal(HlEmbed *e, const char *db_path)
     policy.wx_enforced      = 1;   /* no runtime dynamic code */
     /* allow_dynamic_code / allow_dynamic_libraries stay 0 (zeroed above). */
 
-    int rc = hl_sandbox_apply(&policy, e->app_dir, db_path, NULL, NULL, NULL);
+    /* 3. Apply the kernel sandbox against the sealed base_dir. */
+    int rc = hl_sandbox_apply(&policy, e->fs.base_dir, db_path,
+                              NULL, NULL, NULL);
     if (rc != 0) return -1;        /* fail closed: leave state NEW */
+
+    /* 4. Success. Drop every writable alias of the policy — the sealed
+     *    base_dir is the only path the cap layer will read from here on. */
+    embed_free_heap_policy(e);
 
     e->state = HL_EMBED_SEALED;
     return 0;
@@ -200,4 +267,16 @@ const char *hl_embed_platform(void)
 size_t hl_embed_module_count(void)
 {
     return hl_module_registry_count();
+}
+
+/* ── Internal test accessors (embed_internal.h — NOT the stable ABI) ── */
+
+const char *hl_embed_base_dir(const HlEmbed *e)
+{
+    return e ? e->fs.base_dir : NULL;
+}
+
+int hl_embed_is_sealed(const HlEmbed *e)
+{
+    return (e && e->state == HL_EMBED_SEALED) ? 1 : 0;
 }

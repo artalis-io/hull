@@ -17,9 +17,13 @@
 
 #include "utest.h"
 #include "hull/embed.h"
+#include "hull/embed_internal.h"
 
 #include <string.h>
 #include <stdint.h>
+#include <unistd.h>
+#include <signal.h>
+#include <sys/wait.h>
 
 UTEST(embed, abi_version)
 {
@@ -126,6 +130,59 @@ UTEST(embed, identity)
     ASSERT_TRUE(plat != NULL);
     ASSERT_TRUE(plat[0] != '\0');
     ASSERT_TRUE(hl_embed_module_count() > 0);
+}
+
+/*
+ * Death test: after hl_embed_seal(), the base_dir the capability layer
+ * reads on every call must live in a read-only mapping. Fork a child,
+ * seal, then write to that mapping — the child MUST die with SIGSEGV /
+ * SIGBUS. Runs in a child because hl_embed_seal also applies the (on
+ * macOS irreversible) kernel sandbox to the calling process.
+ *
+ * Child exit codes: 42 = sandbox unavailable in this environment (soft
+ * skip), 43 = sealed-flag wrong, 44 = base_dir NULL, 0 = write did NOT
+ * fault (which is a failure — the page was writable).
+ */
+UTEST(embed, sealed_base_dir_is_readonly)
+{
+    pid_t pid = fork();
+    ASSERT_TRUE(pid >= 0);
+
+    if (pid == 0) {
+        HlEmbed *e = hl_embed_new("/tmp");
+        if (!e) _exit(44);
+        if (hl_embed_is_sealed(e) != 0) _exit(43);
+        hl_embed_allow_read(e, ".");
+        if (hl_embed_seal(e, NULL) != 0) _exit(42);   /* no kernel sandbox here */
+        if (hl_embed_is_sealed(e) != 1) _exit(43);
+
+        const char *bd = hl_embed_base_dir(e);
+        if (!bd) _exit(44);
+
+        /* Restore default fault handlers so the fault terminates the child
+         * (WIFSIGNALED) instead of being caught by a sanitizer handler that
+         * prints and _exit(1)s — same rationale as test_seal_arena. */
+        signal(SIGSEGV, SIG_DFL);
+        signal(SIGBUS,  SIG_DFL);
+
+        /* Deliberately cast away const to prove the mapping is RO. */
+        char *w = (char *)(uintptr_t)bd;
+        w[0] = 'Z';           /* expected: SIGSEGV / SIGBUS */
+        _exit(0);             /* reached only if the page was writable */
+    }
+
+    int status = 0;
+    ASSERT_EQ(waitpid(pid, &status, 0), pid);
+
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 42) {
+        /* Kernel sandbox couldn't be applied (restricted CI sandbox);
+         * the RO-arena guarantee is still covered by test_seal_arena. */
+        UTEST_SKIP("kernel sandbox unavailable in this environment");
+    }
+
+    ASSERT_TRUE(WIFSIGNALED(status));
+    int sig = WTERMSIG(status);
+    ASSERT_TRUE(sig == SIGSEGV || sig == SIGBUS);
 }
 
 UTEST_MAIN();

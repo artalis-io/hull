@@ -81,6 +81,10 @@ Unit tests for the guard / limit / identity surface live in
 `tests/hull/test_embed.c` (run by `make test`); the sealed integration
 path is this example, run by `make embed-c-smoke`.
 
+For the trust boundary between the host and libhull, and how the seal
+lifecycle stays fail-closed, see
+[docs/libhull_flavor.md](../../docs/libhull_flavor.md).
+
 ## What is NOT in libhull
 
 The archive deliberately excludes `main`/`serve`/`entry`, the CLI command
