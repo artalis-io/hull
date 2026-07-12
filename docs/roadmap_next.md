@@ -213,20 +213,35 @@ not implementation cost.
 
 #### Tier 1. Load-bearing (the trust claim depends on these)
 
-- [ ] **0.3.1. Pin the CI build environment.** **Runner-pin done;
-  immutable base still open.** Every `runs-on:` across `ci.yml`,
-  `release.yml`, `deploy-site.yml`, and `dco.yml` now pins a versioned
-  label (`ubuntu-24.04`, `ubuntu-24.04-arm`, `macos-15`) — no more
-  mutable `ubuntu-latest` / `macos-latest`. This removes the big
-  reproducibility killer: a `latest` label silently jumping to the next
-  major OS (24.04 -> 26.04, macOS 15 -> 16) between a release and a
-  rebuild. **Remaining:** versioned labels still receive GitHub's monthly
-  patch updates, so the image is not byte-immutable across time. Closing
-  that needs a digest-pinned Docker base image (medium) or a Nix flake
-  (high) for the reproducibility-critical build/release jobs; until then
-  "reproducible" holds within a major-version window, not indefinitely.
-  **Effort:** ~~low for runner-pin~~ (done); medium for Docker base; high
-  for Nix flake.
+- [x] **0.3.1. Pin the CI build environment. ✅ Done (2026-07-13).**
+  Two layers, both shipped. **(1) Runner-pin:** every `runs-on:` across
+  `ci.yml`, `release.yml`, `deploy-site.yml`, and `dco.yml` pins a
+  versioned label (`ubuntu-24.04`, `ubuntu-24.04-arm`, `macos-15`), no
+  mutable `ubuntu-latest` / `macos-latest`, removing the big
+  reproducibility killer (a `latest` label jumping a major OS between a
+  release and a rebuild). **(2) Immutable base:** the reproducibility-
+  critical Linux and cosmo build/release jobs now build inside a
+  registry-less, snapshot-pinned container (base pinned by manifest-list
+  digest + apt pinned to `snapshot.ubuntu.com` via `SOURCE_DATE_EPOCH` +
+  baked SHA-pinned cosmocc), so the toolchain is byte-frozen indefinitely,
+  not just within a major-version window. CI-gated by
+  `reproducibility-container`, `reproducibility-container-interleave`, and
+  `reproducibility-cosmo`; the release jobs (`build-platform-native`,
+  `build-platform-cosmo`, `build-platform-cosmo-flavors`, `build-native`,
+  `build-cosmo`) build in the same container on their Linux/cosmo rows.
+  Design + rationale (Docker over Nix, registry-less over GHCR) in
+  [security.md "Build-environment immutability"](security.md); mechanism +
+  bump procedures in [.github/docker/README.md](../.github/docker/README.md).
+  **Honest scope:** holds indefinitely for `linux-x86_64` /
+  `linux-aarch64` / cosmo; macOS stays bounded by the `macos-15` image (no
+  container touches the Xcode runner). `release.yml` is tag-only, so the
+  release-path wiring's first live exercise is the next release (recommend
+  a throwaway pre-release tag first). Bumping the base digest or
+  `SOURCE_DATE_EPOCH` is a reviewed re-pin of the whole toolchain.
+  **Remaining (optional):** a `snapshot.debian.org`-style reproducible
+  image build would make the image itself byte-reproducible, but Hull
+  rebuilds and runs inside the image rather than shipping it, so it is a
+  nice-to-have, not required.
 
 - [x] **0.3.2. Bootstrap trust path. ✅ Done (minisign).** The
   `curl ... | sh` install was TOFU on top of TLS + GitHub account
