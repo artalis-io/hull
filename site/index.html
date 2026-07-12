@@ -452,6 +452,16 @@
             distribution needed.
           </p>
           <p class="mt-3 text-[11px] text-mute-500 leading-relaxed">
+            Don't want to pipe a script from a host you haven't verified?
+            The installer is minisign-signed. Check
+            <code class="text-paper-100 text-[0.72rem]">install.sh</code>
+            against
+            <code class="text-paper-100 text-[0.72rem]">install.sh.minisig</code>
+            offline before running it (no Hull needed); the key is
+            cross-checkable on
+            <a href="https://github.com/artalis-io/hull/blob/main/minisign.pub" class="link">GitHub</a>.
+          </p>
+          <p class="mt-3 text-[11px] text-mute-500 leading-relaxed">
             Linux x86_64 &middot; Linux aarch64 (Graviton, DGX, Ampere, Pi&nbsp;4+) &middot; macOS arm64 &middot; Cosmopolitan APE fallback.
           </p>
         </div>
@@ -463,19 +473,28 @@
               <span>shell</span>
               <span class="ml-auto text-[10px] text-mute-500">copy &amp; paste</span>
             </header>
-<pre><span class="tk-com"># 1. Install. install.sh verifies the SHA-256 manifest as it downloads.</span>
+<pre><span class="tk-com"># Install (trusts TLS + our GitHub). install.sh verifies each</span>
+<span class="tk-com"># binary's SHA-256 against the manifest as it downloads.</span>
 $ curl -fsSL <span class="tk-str">https://gethull.dev/install.sh</span> | sh
-hull installed to ~/.local/bin/hull  (v0.4.0)
+hull installed to ~/.local/bin/hull  (v0.6.0)
 
-<span class="tk-com"># 2. Verify the release signature (Ed25519, embedded pubkey).</span>
+<span class="tk-com"># Don't trust gethull.dev? Verify the installer offline first</span>
+<span class="tk-com"># (minisign, no Hull needed). Cross-check the key below against</span>
+<span class="tk-com"># github.com/artalis-io/hull/blob/main/minisign.pub.</span>
+$ <span class="tk-kw">URL</span>=https://gethull.dev
+$ curl -fsSLO $URL/install.sh $URL/install.sh.minisig
+$ minisign -Vm install.sh -P <span class="tk-str">RWRqvc6NndheWcLIi3vsL+xoZfZw2j7fybSZ3rHJIOTHA2O3rrr6hD8h</span>
+<span class="tk-acc">Signature and comment signature verified</span>
+$ sh install.sh
+
+<span class="tk-com"># Then verify the release signature (Ed25519, embedded pubkey).</span>
 $ <span class="tk-kw">REL</span>=https://github.com/artalis-io/hull/releases/latest/download
 $ curl -fsSLO $REL/hull.sha256 $REL/hull.sha256.sig
 $ hull verify-release hull.sha256 hull.sha256.sig
 <span class="tk-acc">ok</span>. Signature valid
 
-<span class="tk-com"># 3. Inspect the toolchain.</span>
 $ hull doctor
-hull v0.4.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middot;  cc: ok
+hull v0.6.0  &middot;  ca-bundle: embedded  &middot;  platform: embedded  &middot;  cc: ok
 </pre>
           </div>
           <p class="mt-3 text-[11px] text-mute-400 leading-relaxed">
