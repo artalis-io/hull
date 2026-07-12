@@ -350,14 +350,25 @@ not implementation cost.
   **Effort:** small. One field per entry plus a CycloneDX
   formatter line.
 
-- [ ] **0.3.13. Vendored static archives reproducibility check.**
-  The submodule SHA pin is trusted; nobody independently verifies
-  that rebuilding e.g. WAMR from `c3a78cd159e5` produces a
-  byte-identical `.a`. Probably fine for most deps, but currently
-  undocumented as either a goal or non-goal. **Fix:** either add
-  a per-vendor `make verify-vendor-repro` target or explicitly
-  document this as a non-goal. **Effort:** low for docs; medium
-  for full per-dep verification.
+- [x] **0.3.13. Vendored static archives reproducibility check. ✅ Documented (2026-07-12).**
+  The concern (does rebuilding e.g. WAMR from `c3a78cd159e5` produce
+  byte-identical output?) turned out to be **already transitively
+  verified** and just undocumented. Every vendored dep is compiled
+  from pinned source on every `make`; the whole-build reproducibility
+  gate (`make reproducible-check` = `make` then `make clean` then
+  `make` then `cmp`) wipes `build/` and recompiles every vendored TU,
+  so a byte-identical `hull` proves the vendored objects rebuilt
+  identically. A separate per-dep `make verify-vendor-repro` target
+  would be redundant with that gate, so the deliverable was the
+  documentation decision the item asked for: a new
+  "Vendored-dependency reproducibility" subsection in
+  [security.md §7.1](security.md) states it as a **goal**
+  (transitively enforced, load-bearing pieces = pinned submodule
+  SHAs + `ZERO_AR_DATE` + `-ffile-prefix-map` + pinned runners) and
+  names the one **non-goal**: upstream deps being byte-reproducible
+  across *different* toolchain versions is each project's own
+  concern; Hull pins both source SHA and toolchain, which is what
+  its claim rests on.
 
 - [x] **0.3.14. Published build-environment manifest. ✅ Partial.** Specify
   what ubuntu image, what Xcode version, what cosmocc commit, what

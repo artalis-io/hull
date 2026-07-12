@@ -1433,6 +1433,44 @@ Tier 4 makes that detectable as soon as anyone re-derives.
    runners and byte-compares them (identical across runners, not just
    same-machine).
 
+#### Vendored-dependency reproducibility
+
+Every dependency is vendored (submodules: keel, wamr, tcc; source
+snapshots: lua, quickjs, sqlite, mbedtls, tweetnacl, miniz, stb,
+sh_arena, sh_json, log.c, pledge). None ship as a prebuilt binary;
+every vendored translation unit is compiled from the pinned source on
+every `make`. That makes vendored-dependency reproducibility a **goal**,
+and it is transitively enforced by the whole-build reproducibility gate
+above: `make reproducible-check` runs `make` then `make clean` then
+`make` then `cmp`, and `make clean` wipes `build/`, so the second `make`
+recompiles every vendored TU from the pinned source. A byte-identical
+`hull` therefore proves the vendored objects rebuilt byte-for-byte too.
+There is no separate "did WAMR rebuild identically" question to answer:
+if it hadn't, `hull` would not match. This holds for all three artifact
+types (native Linux, native macOS, and the cosmo APE, the last
+byte-compared across two independent runners by `reproducibility-cosmo`).
+
+Load-bearing pieces:
+
+- **Pinned source.** Submodules are locked to exact SHAs; snapshots are
+  committed verbatim. The rebuild always starts from identical bytes.
+- **`ZERO_AR_DATE=1`** makes the vendored archives (`libkeel.a`, the
+  platform library) mtime-free.
+- **`-ffile-prefix-map`** strips per-build tempdir paths out of vendored
+  `.o` content.
+- **Pinned CI runners** (`ubuntu-24.04` / `macos-15`, see roadmap
+  §0.3.1) fix the toolchain version so the two rebuild passes share one
+  compiler.
+
+**Non-goal:** whether an upstream dependency (WAMR, Keel, mbedTLS, ...)
+is itself byte-reproducible across *different* toolchain versions is the
+dependency's own concern, not Hull's. Hull's reproducibility claim rests
+on pinning both the dependency *source* (the SHA) and the *toolchain*
+(the runner); with those two fixed, the rebuild is deterministic.
+Reproducing Hull under a different compiler version is out of scope: that
+is a property of each upstream project, and pinning the runner is
+precisely how Hull sidesteps needing it.
+
 #### Self-hosted alternative
 
 Run your own build host. Pin your own platform key. Your customers
