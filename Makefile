@@ -2035,7 +2035,7 @@ $(shell test "$$(cat $(BUILD_CONFIG_FILE) 2>/dev/null)" = "$(BUILD_FINGERPRINT)"
           $(BUILDDIR)/sandbox.o $(BUILDDIR)/sandbox_tool.o $(BUILDDIR)/signature.o $(BUILDDIR)/release.o $(BUILDDIR)/release_io.o $(BUILDDIR)/tools_install.o $(BUILDDIR)/platform_sig.o \
           $(BUILDDIR)/test_runner.o $(BUILDDIR)/runtime_factory.o $(BUILDDIR)/hull_static.o \
           $(BUILDDIR)/migrate.o $(BUILDDIR)/vfs.o $(BUILDDIR)/cacert.o \
-          $(BUILDDIR)/app_context.o $(BUILDDIR)/tool.o $(BUILDDIR)/build_assets.o \
+          $(BUILDDIR)/app_context.o $(BUILDDIR)/tool.o $(BUILDDIR)/tool_orchestration.o $(BUILDDIR)/build_assets.o \
           $(BUILDDIR)/compiler.o $(BUILDDIR)/compiler_tcc.o \
           $(BUILDDIR)/hull_alloc.o $(BUILDDIR)/hull_async.o $(BUILDDIR)/hull_compress.o \
           $(BUILDDIR)/worker_db.o $(BUILDDIR)/worker_wasm.o $(BUILDDIR)/worker_gpu.o \
