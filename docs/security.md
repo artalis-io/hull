@@ -1471,6 +1471,58 @@ Reproducing Hull under a different compiler version is out of scope: that
 is a property of each upstream project, and pinning the runner is
 precisely how Hull sidesteps needing it.
 
+#### Build-environment immutability (why a snapshot-pinned Dockerfile, not Nix)
+
+The gate above proves the build is deterministic *given a fixed
+toolchain*. What fixes the toolchain across time is the CI runner.
+Pinning `runs-on:` to versioned labels (`ubuntu-24.04`, `macos-15`, see
+roadmap §0.3.1) removed the largest source of drift, a `latest` label
+silently jumping a major OS between a release and a rebuild, but
+versioned images still receive GitHub's monthly patch updates. So the
+toolchain is fixed only within a major-version window, not indefinitely.
+
+The chosen mechanism to close that gap for the Linux and cosmo
+build/release jobs is a **reproducible, snapshot-pinned Dockerfile built
+in CI, with no image registry**. The Dockerfile pins its base by digest
+(`FROM ubuntu:24.04@sha256:...`) and pins the apt archive to a fixed
+point in time via the Ubuntu snapshot service (`snapshot.ubuntu.com`,
+driven by a recorded `SOURCE_DATE_EPOCH` using the upstream
+`repro-sources-list.sh` helper), so `apt-get install` resolves to
+byte-identical package versions (gcc, glibc, binutils) on every rebuild,
+anywhere, indefinitely. The SHA-pinned cosmocc is baked in the same way.
+A verifier reproduces the toolchain by rebuilding the Dockerfile from
+this repo at the recorded timestamp; nothing is pulled from a registry
+Hull controls, so there is no hosted image to trust or to rot.
+
+This was chosen over both a published+digest-pinned image and a Nix flake:
+
+- **vs. a published image (GHCR + `container: @sha256`).** A pushed image
+  pinned by digest is also immutable, but it moves the trust anchor to a
+  registry artifact and adds hosting plus a publish workflow. The
+  snapshot-pinned Dockerfile achieves the same fixed toolchain *from
+  source in the repo*, which fits a project whose whole verification
+  story is "rebuild from source and compare."
+- **vs. Nix.** (1) The claim needs the environment *fixed*, not itself
+  rebuildable-from-a-compiler-source: pinning the base digest plus the
+  apt snapshot fixes the toolchain bytes, and nobody re-derives clang to
+  verify Hull. (2) Hull's dependencies are already fetch-and-pin (cosmocc
+  SHA-pinned, wgpu-native, the LLVM for `wamrc`, every vendored archive),
+  which a Dockerfile matches and a Nix derivation would fight (cosmocc in
+  particular is awkward to package). (3) macOS cannot be containerized
+  regardless: `hull-darwin-arm64` builds on a real `macos-15` runner with
+  Xcode, so the immutable base only ever covers `linux-x86_64`,
+  `linux-aarch64`, and the cosmo APE. That caps the payoff and argues for
+  the option that fits the existing grain.
+
+The honest resulting claim: with the snapshot-pinned Dockerfile,
+"reproducible across time" holds indefinitely for the Linux and cosmo
+artifacts and within a major-version window for macOS (a real `macos-15`
+runner with Xcode, which no container touches). BuildKit's
+`rewrite-timestamp` can additionally make the produced image itself
+byte-reproducible, but Hull does not depend on that: it rebuilds the
+image and runs the build inside it rather than shipping the image.
+Rollout status is tracked in roadmap §0.3.1.
+
 #### Self-hosted alternative
 
 Run your own build host. Pin your own platform key. Your customers
