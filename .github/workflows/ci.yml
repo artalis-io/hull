@@ -277,6 +277,64 @@ jobs:
         timeout-minutes: 5
         run: make reproducible-check
 
+  # Cosmo APE byte-reproducibility (roadmap 0.3.7). The reproducibility job
+  # above builds twice in ONE job and cmps; that pattern can't be used for
+  # cosmo because a second `make platform-cosmo` in one job corrupts the
+  # dynamic loader. So build hull-cosmo on two independent runners (each does
+  # exactly one platform-cosmo build) and byte-compare the artifacts in a
+  # third job. This tests cross-runner reproducibility and verifies the
+  # "Cosmopolitan produces deterministic output" claim (docs/security.md) for
+  # the hull-cosmo release binary itself.
+  reproducibility-cosmo:
+    name: Reproducible build (Cosmo ${{ matrix.n }})
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [a, b]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+      - name: Install cosmocc
+        run: |
+          COSMOCC_DIR=/opt/cosmo make fetch-cosmocc
+          echo "/opt/cosmo/bin" >> $GITHUB_PATH
+      - name: Build platform (multi-arch)
+        run: make platform-cosmo
+      - name: Build hull (cosmocc APE)
+        run: make CC=cosmocc
+      - name: Upload hull-cosmo
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: hull-cosmo-repro-${{ matrix.n }}
+          path: build/hull
+          if-no-files-found: error
+
+  reproducibility-cosmo-compare:
+    name: Reproducible build (Cosmo compare)
+    needs: reproducibility-cosmo
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          path: artifacts
+      - name: Byte-compare the two independent cosmo builds
+        run: |
+          set -eu
+          A=artifacts/hull-cosmo-repro-a/hull
+          B=artifacts/hull-cosmo-repro-b/hull
+          ls -la "$A" "$B"
+          if cmp -s "$A" "$B"; then
+            echo "PASS: hull-cosmo is byte-identical across independent runners ($(wc -c < "$A") bytes)"
+          else
+            echo "::error::hull-cosmo differs between builds; the cosmo APE is not byte-reproducible"
+            sha256sum "$A" "$B"
+            echo "--- first differing bytes ---"
+            cmp -l "$A" "$B" | head -20 || true
+            exit 1
+          fi
+
   build-pipeline:
     strategy:
       fail-fast: false
