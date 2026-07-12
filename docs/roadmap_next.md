@@ -209,19 +209,20 @@ not implementation cost.
 
 #### Tier 1. Load-bearing (the trust claim depends on these)
 
-- [ ] **0.3.1. Pin the CI build environment.** **Partial.** ARM
-  runners now pin `ubuntu-24.04-arm`; the rest of `ci.yml` and
-  `release.yml` still uses mutable `ubuntu-latest` / `macos-latest`
-  labels at ~10 sites. No Docker base or Nix flake yet. `ubuntu-latest`
-  and `macos-latest` are mutable labels. GitHub rotates the runner
-  image without notice. Reproducibility passes today against
-  today's image. Six months from now, a rebuild of v0.1.5 source
-  against the new image may not reproduce. **Fix (remainder):** complete
-  the pin across all `runs-on:` entries (digest-pinned Docker base or
-  a Nix flake). Without this, "reproducible" has a sliding expiry date
-  and the reproducibility-from-clean-room claim is only true in a
-  narrow time window. **Effort:** low for runner-pin; medium for Docker
-  base; high for Nix flake. Start with runner-pin.
+- [ ] **0.3.1. Pin the CI build environment.** **Runner-pin done;
+  immutable base still open.** Every `runs-on:` across `ci.yml`,
+  `release.yml`, `deploy-site.yml`, and `dco.yml` now pins a versioned
+  label (`ubuntu-24.04`, `ubuntu-24.04-arm`, `macos-15`) — no more
+  mutable `ubuntu-latest` / `macos-latest`. This removes the big
+  reproducibility killer: a `latest` label silently jumping to the next
+  major OS (24.04 -> 26.04, macOS 15 -> 16) between a release and a
+  rebuild. **Remaining:** versioned labels still receive GitHub's monthly
+  patch updates, so the image is not byte-immutable across time. Closing
+  that needs a digest-pinned Docker base image (medium) or a Nix flake
+  (high) for the reproducibility-critical build/release jobs; until then
+  "reproducible" holds within a major-version window, not indefinitely.
+  **Effort:** ~~low for runner-pin~~ (done); medium for Docker base; high
+  for Nix flake.
 
 - [ ] **0.3.2. Bootstrap trust path.** The `curl ... | sh` install
   is TOFU on top of TLS to `raw.githubusercontent.com` + GitHub

@@ -14,7 +14,7 @@ on:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     # Promote the CF distribution ID to job-level env so step-level `if:`
     # conditions can read it. (`secrets` context is not allowed in `if:`;

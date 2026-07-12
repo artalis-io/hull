@@ -34,14 +34,14 @@ jobs:
       matrix:
         include:
           - name: Linux
-            os: ubuntu-latest
+            os: ubuntu-24.04
           - name: Linux (clang)
-            os: ubuntu-latest
+            os: ubuntu-24.04
             cc: clang
           - name: Linux (aarch64)
             os: ubuntu-24.04-arm
           - name: macOS
-            os: macos-latest
+            os: macos-15
 
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -184,7 +184,7 @@ jobs:
   # only break the flavor link, which nothing else exercises.
   flavors:
     name: Build flavor (${{ matrix.name }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -245,9 +245,9 @@ jobs:
       matrix:
         include:
           - name: Linux
-            os: ubuntu-latest
+            os: ubuntu-24.04
           - name: macOS
-            os: macos-latest
+            os: macos-15
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -283,9 +283,9 @@ jobs:
       matrix:
         include:
           - name: Linux
-            os: ubuntu-latest
+            os: ubuntu-24.04
           - name: macOS
-            os: macos-latest
+            os: macos-15
 
     name: Build Pipeline (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
@@ -301,7 +301,7 @@ jobs:
 
   sanitizers:
     name: ASan + UBSan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -316,7 +316,7 @@ jobs:
 
   msan:
     name: MSan + UBSan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -339,7 +339,7 @@ jobs:
 
   tsan:
     name: TSan (worker pool)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -363,7 +363,7 @@ jobs:
 
   fuzz:
     name: Fuzz Testing
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -398,7 +398,7 @@ jobs:
 
   analyze:
     name: Static Analysis
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -418,7 +418,7 @@ jobs:
 
   cosmo:
     name: Cosmopolitan (APE)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -495,7 +495,7 @@ jobs:
 
   gpu:
     name: GPU Compute (macOS Metal)
-    runs-on: macos-latest
+    runs-on: macos-15
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -522,7 +522,7 @@ jobs:
 
   coverage:
     name: Code Coverage
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -544,7 +544,7 @@ jobs:
 
   lint:
     name: Lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -570,9 +570,9 @@ jobs:
       matrix:
         include:
           - name: Linux
-            os: ubuntu-latest
+            os: ubuntu-24.04
           - name: macOS
-            os: macos-latest
+            os: macos-15
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -624,7 +624,7 @@ jobs:
 
   benchmark:
     name: Benchmark (${{ matrix.runtime }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: github.event_name == 'push'
 
     strategy:
@@ -657,7 +657,7 @@ jobs:
   # ran (grep for the OK line) rather than silently pass.
   embed-rust:
     name: libhull embedder (Rust)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -675,7 +675,7 @@ jobs:
 
   embed-zig:
     name: libhull embedder (Zig)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
