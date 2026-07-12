@@ -309,6 +309,34 @@ jobs:
               exit 1
             fi
 
+  # Proves the release build-native interleaving: build hull inside the
+  # container as the runner user (user: host), then on the HOST run the produced
+  # binary and write alongside it in build/. release.yml's Platform-sig E2E does
+  # exactly this (host-side keygen/sign into build/ + running the freshly built
+  # hull), and release.yml is tag-only so it cannot be exercised on a PR. This
+  # job is the PR-validatable proxy for that ownership + run path. Roadmap 0.3.1.
+  reproducibility-container-interleave:
+    name: Reproducible build (Linux container, host interleave)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+      - name: Build hull in-container as the runner user
+        uses: ./.github/actions/hull-build-container
+        with:
+          user: host
+          run: make
+      - name: Host runs the container-built binary and writes into build/
+        run: |
+          set -eu
+          ./build/hull version
+          # build/ must be host-writable (user: host), exactly as the release
+          # Platform-sig E2E requires when it does keygen/sign into build/.
+          touch build/interleave-probe
+          test -f build/interleave-probe
+          echo "PASS: host ran the container-built hull and wrote into build/"
+
   # Cosmo APE byte-reproducibility (roadmap 0.3.7). The reproducibility job
   # above builds twice in ONE job and cmps; that pattern can't be used for
   # cosmo because a second `make platform-cosmo` in one job corrupts the
