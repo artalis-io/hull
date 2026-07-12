@@ -211,7 +211,11 @@ static const HlSbomEntry sbom_entries[] = {
         .embedded_blob_sha256 = NULL,
     },
 
-    /* ── Submodule: HTTP server library (own project) ── */
+#if defined(HL_ENABLE_HTTP)
+    /* ── Submodule: HTTP server library (own project) ──
+     * Linked whenever either HTTP half is on; the pure-compute flavor
+     * (HL_ENABLE_HTTP=0) fully unlinks Keel (poll backend replaces it), so
+     * gate the SBOM entry on the same macro. */
     {
         .name = "keel",
         .in_libhull = 1,
@@ -222,6 +226,7 @@ static const HlSbomEntry sbom_entries[] = {
         .role = "HTTP/WS server, event loop, async, thread pool",
         .embedded_blob_sha256 = NULL,
     },
+#endif
 
 #ifdef HL_ENABLE_LUA
     /* ── Snapshot: Lua 5.4 ── */
@@ -266,7 +271,11 @@ static const HlSbomEntry sbom_entries[] = {
     },
 #endif
 
-    /* ── Snapshot: mbedTLS ── */
+#if defined(HL_ENABLE_HTTP)
+    /* ── Snapshot: mbedTLS ──
+     * Linked whenever either HTTP half is on (Keel ships both); the
+     * pure-compute flavor drops it entirely (crypto falls back to the
+     * in-tree SHA + TweetNaCl), so gate the SBOM entry to match. */
     {
         .name = "mbedtls",
         .in_libhull = 1,
@@ -278,6 +287,7 @@ static const HlSbomEntry sbom_entries[] = {
         .cpe = "cpe:2.3:a:arm:mbed_tls:*:*:*:*:*:*:*:*",
         .embedded_blob_sha256 = NULL,
     },
+#endif
 
     /* ── Snapshot: TweetNaCl ── */
     {
