@@ -1428,7 +1428,10 @@ Tier 4 makes that detectable as soon as anyone re-derives.
 5. Build metadata is signed. `cc_version` + `flags` are attested
    by the developer in `package.sig`.
 6. Cosmopolitan produces deterministic output. Static linking, no
-   timestamps.
+   timestamps. CI-verified: the `reproducibility-cosmo` job in
+   `.github/workflows/ci.yml` builds `hull-cosmo` on two independent
+   runners and byte-compares them (identical across runners, not just
+   same-machine).
 
 #### Self-hosted alternative
 
