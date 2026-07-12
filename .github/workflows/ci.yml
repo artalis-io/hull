@@ -277,6 +277,38 @@ jobs:
         timeout-minutes: 5
         run: make reproducible-check
 
+  # Reproducible build inside the registry-less, snapshot-pinned container
+  # (roadmap 0.3.1). Proves the containerized toolchain yields a byte-identical
+  # hull across a clean rebuild, and exercises the whole mechanism (base-image
+  # digest pin + apt snapshot pin + baked SHA-pinned cosmocc) that the Linux and
+  # cosmo release jobs will adopt. This is what makes "reproducible across time"
+  # hold indefinitely for the Linux artifacts, not just within the runner's
+  # major-version window. macOS is intentionally excluded: no container touches
+  # the macos-15 Xcode runner. See docs/security.md "Build-environment
+  # immutability" and .github/docker/README.md.
+  reproducibility-container:
+    name: Reproducible build (Linux container)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: true
+      - name: Build twice in the reproducible container and cmp
+        uses: ./.github/actions/hull-build-container
+        with:
+          run: |
+            make
+            cp build/hull /tmp/hull-c1
+            make clean
+            make
+            if cmp -s /tmp/hull-c1 build/hull; then
+              echo "PASS: containerized build byte-identical across rebuilds ($(wc -c < build/hull) bytes)"
+            else
+              echo "FAIL: containerized build differs between rebuilds"
+              sha256sum /tmp/hull-c1 build/hull
+              exit 1
+            fi
+
   # Cosmo APE byte-reproducibility (roadmap 0.3.7). The reproducibility job
   # above builds twice in ONE job and cmps; that pattern can't be used for
   # cosmo because a second `make platform-cosmo` in one job corrupts the
@@ -296,14 +328,16 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           submodules: true
-      - name: Install cosmocc
-        run: |
-          COSMOCC_DIR=/opt/cosmo make fetch-cosmocc
-          echo "/opt/cosmo/bin" >> $GITHUB_PATH
-      - name: Build platform (multi-arch)
-        run: make platform-cosmo
-      - name: Build hull (cosmocc APE)
-        run: make CC=cosmocc
+      # Build inside the snapshot-pinned reproducible container (roadmap 0.3.1).
+      # cosmocc is baked into the image, so there is no fetch step. One
+      # `make platform-cosmo` per job: the a/b split exists because a second
+      # cosmo platform build in one job corrupts the loader.
+      - name: Build hull-cosmo in the reproducible container
+        uses: ./.github/actions/hull-build-container
+        with:
+          run: |
+            make platform-cosmo
+            make CC=cosmocc
       - name: Upload hull-cosmo
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
