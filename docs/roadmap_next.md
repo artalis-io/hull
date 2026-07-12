@@ -239,15 +239,16 @@ not implementation cost.
   (key publication, KEYS file maintenance, docs) rather than code.
 
 - [ ] **0.3.3. Move release signing off GitHub Actions secrets.**
-  The release private key currently lives encrypted in GitHub's
-  KMS as a workflow secret. Compromise of the gethull GitHub org
-  gives an attacker the ability to sign arbitrary artifacts as
-  gethull. No HSM, no hardware token, no offline ceremony, no
-  multi-party signing. **Fix progression:** (a) document the
-  current threat model honestly in `release_signing.md`; (b) move
-  to a YubiKey OpenPGP / Ed25519 token operated by a person, with
+  **(a) done; (b)/(c) need hardware + org process.** The release
+  private key currently lives encrypted in GitHub's KMS as a workflow
+  secret. Compromise of the gethull GitHub org gives an attacker the
+  ability to sign arbitrary artifacts as gethull. No HSM, no hardware
+  token, no offline ceremony, no multi-party signing. **Fix progression:**
+  (a) ✅ document the current posture honestly, see
+  [`release_signing.md` "Release-key custody"](release_signing.md);
+  (b) move to a YubiKey OpenPGP / Ed25519 token operated by a person, with
   CI just preparing the manifest for human-attested signing; (c)
-  multi-party signing for major releases. **Effort:** (a) hours,
+  multi-party signing for major releases. **Effort:** (a) done,
   (b) days + operational discipline, (c) weeks + organisational
   process. Even (a) materially improves the story.
 
