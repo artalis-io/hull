@@ -10,6 +10,12 @@ on:
       # Changing it should redeploy so `curl gethull.dev/install.sh`
       # picks up new platform support, knobs, etc.
       - 'install.sh'
+      # The minisign signature + public key served next to install.sh for
+      # the offline "verify the installer" path. Re-sign install.sh whenever
+      # it changes; the verify-guard step below fails the deploy on a stale
+      # or missing signature.
+      - 'install.sh.minisig'
+      - 'minisign.pub'
       - '.github/workflows/deploy-site.yml'
 
 jobs:
@@ -32,6 +38,21 @@ jobs:
           cd site && make build
           echo "Build contents:"
           find build -type f
+
+      - name: Verify installer signature (fail deploy on stale/missing sig)
+        # The offline "verify the installer" path on gethull.dev tells users
+        # to check install.sh against minisign.pub. Enforce that the published
+        # signature actually matches the published install.sh, so a forgotten
+        # re-sign after editing install.sh blocks the deploy instead of
+        # shipping a broken verify path. The pubkey is the repo's committed
+        # minisign.pub (also cross-checkable on GitHub, a different origin
+        # than the S3 site).
+        run: |
+          set -eu
+          sudo apt-get update
+          sudo apt-get install -y minisign
+          cd site/build
+          minisign -Vm install.sh -p minisign.pub
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a  # v4
