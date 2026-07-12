@@ -1,0 +1,69 @@
+# Hull reproducible build container (roadmap 0.3.1).
+#
+# Registry-less: this image is rebuilt in CI from source on every run and is
+# never pushed. Immutability across time comes from two pins, not from a
+# published digest:
+#
+#   1. the base image is pinned by manifest-list digest (below), and
+#   2. the apt archive is pinned to a snapshot.ubuntu.com point-in-time via
+#      the vendored repro-sources-list.sh (SOURCE_DATE_EPOCH).
+#
+# Given both, apt-get resolves byte-identical gcc / glibc / binutils on every
+# rebuild, so a `hull` built inside this container is byte-reproducible across
+# time, not just same-machine. macOS is out of scope: no container touches the
+# macos-15 Xcode runner. See docs/security.md "Build-environment immutability"
+# and .github/docker/README.md.
+#
+# No `# syntax=` directive on purpose: it would pull a frontend image at build
+# time, a network dependency and a drift source. Plain COPY/RUN builds with any
+# builder and stays hermetic.
+
+# ubuntu:24.04 multi-arch manifest-list digest. Resolves the arch-correct
+# sub-image on both ubuntu-24.04 (amd64) and ubuntu-24.04-arm (arm64) runners.
+# Bumping this is an explicit, reviewed change (it re-pins the whole toolchain).
+FROM ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
+
+# Snapshot timestamp for the apt archive. Empty => repro-sources-list.sh
+# derives it from the mtime of the base image's ubuntu.sources, which is
+# constant because the base is digest-pinned, so the derived snapshot is
+# already deterministic. Pass a value to record the pin explicitly in logs.
+ARG SOURCE_DATE_EPOCH=""
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+
+# Pin apt to a point-in-time snapshot, then install the toolchain that
+# determines the Linux hull binary's bytes. The vendored helper covers the
+# main / restricted / universe / multiverse / -updates / -security / -backports
+# pockets, so security-patched package versions are frozen too.
+COPY repro-sources-list.sh /usr/local/bin/repro-sources-list.sh
+RUN chmod 0755 /usr/local/bin/repro-sources-list.sh \
+ && /usr/local/bin/repro-sources-list.sh \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      build-essential clang xxd curl ca-certificates git unzip \
+ && rm -rf /var/lib/apt/lists/*
+
+# LC_ALL is load-bearing: the Makefile sorts VFS entries with `LC_ALL=C sort`,
+# so a differing collation order would reorder embedded assets.
+ENV LC_ALL=C.UTF-8 LANG=C.UTF-8
+
+# Trust any bind-mounted repo (the build runs via `docker run -v <repo>:/src`
+# as root over host-owned files; without this git aborts with "dubious
+# ownership" and the Makefile's submodule-SHA stamping fails).
+RUN git config --system --add safe.directory '*'
+
+# Bake the SHA-pinned cosmocc so the cosmo jobs are hermetic and the APE
+# toolchain freezes with the image. These MUST stay in sync with the Makefile
+# (COSMOCC_VERSION / COSMOCC_SHA256); .github/docker/README.md documents the
+# bump procedure.
+ARG COSMOCC_VERSION=4.0.2
+ARG COSMOCC_SHA256=85b8c37a406d862e656ad4ec14be9f6ce474c1b436b9615e91a55208aced3f44
+RUN curl -fsSL -o /tmp/cosmocc.zip "https://cosmo.zip/pub/cosmocc/cosmocc-${COSMOCC_VERSION}.zip" \
+ && echo "${COSMOCC_SHA256}  /tmp/cosmocc.zip" | sha256sum -c - \
+ && mkdir -p /opt/cosmo \
+ && unzip -q -o /tmp/cosmocc.zip -d /opt/cosmo \
+ && rm -f /tmp/cosmocc.zip
+ENV PATH="/opt/cosmo/bin:${PATH}"
+
+# The build itself runs with the repo bind-mounted at /src; nothing is COPYed
+# into the image. See .github/actions/hull-build-container.
+WORKDIR /src
