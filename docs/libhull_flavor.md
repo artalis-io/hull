@@ -19,6 +19,53 @@ Status: L-1 (archive + sandbox split), L-2 (`hl_embed_*` ABI), and L-3
 + SBOM for the archive, incl. the dual-arch cosmo build), and L-5 (Rust +
 Zig reference embedders) have landed. The epic is complete.
 
+## When to reach for libhull (and when not)
+
+libhull is for an **existing native codebase** that wants one of Hull's
+guarantees without adopting a scripting runtime. The sweet spot is a native
+program that must (a) run untrusted compute, or (b) enforce a capability
+boundary on its own I/O — and stay native.
+
+Genuinely useful:
+
+- **Untrusted compute in a native service.** A daemon that runs
+  user-supplied transforms / scoring / dedup / SQL UDFs gets WAMR's
+  gas-metered, no-I/O linear-memory isolation (and optional GPU compute)
+  without embedding Lua/JS. The host keeps its own control plane; libhull is
+  the compute-plane SDK.
+- **A capability boundary on a native CLI / batch tool.** "pledge/unveil for
+  my C program, but portable across Linux / macOS / cosmo and with a
+  declared fs / host / env allowlist." A parsing bug or hostile input can't
+  read or write outside what the program declared, and can't `exec`/`fork`.
+- **Defense-in-depth for a Rust / Zig service.** Memory-safe languages don't
+  give you the *kernel* sandbox (seatbelt / landlock / seccomp), W^X
+  enforcement, or a declared network/filesystem allowlist. libhull adds that
+  second, OS-enforced layer around the whole process.
+- **Signed-artifact / SBOM tooling.** Link the Ed25519 verification, SBOM
+  generation, and release-manifest machinery rather than reimplementing it —
+  e.g. an updater, a verifier, or an air-gapped signing utility.
+- **Regulated / air-gapped deployments.** A small, auditable, signed binary
+  with a provable capability boundary and an SBOM, and no scripting runtime
+  in the trust base, is often a compliance requirement in itself.
+
+Reach for something else when:
+
+- **You're writing a new app from scratch.** Use Hull's Lua/JS runtime — you
+  get the same sandbox + capability layer with `app.manifest`, hot reload,
+  the stdlib, and far less boilerplate. libhull is the "I can't rewrite in a
+  script" escape hatch, not the default.
+- **You need Hull to police code it didn't compile.** libhull sandboxes the
+  *process* you link it into; it is not a way to sandbox an arbitrary
+  third-party shared library you call after seal (beyond the kernel
+  boundary).
+- **You want the app framework.** No routing, middleware, sessions, or
+  `app.manifest` — libhull is the enforcement primitives, not the framework.
+
+Trust note: the host owns `main()` and is **trusted to sequence the
+lifecycle** (phase-1 → policy → seal before any capability use). That is a
+weaker, documented contract than "Hull owns main" — a host bug *before* seal
+is outside Hull's enforcement. See the trust boundary below.
+
 ## Building
 
 ```sh
