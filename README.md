@@ -201,6 +201,8 @@ hull build --flavor=auto -o myapp .        # infer the minimal flavor
 
 Releases publish signed per-flavor platform libs for every target: native `libhull_platform-<flavor>-<arch>.a` (linux-x86_64, linux-aarch64, darwin-arm64) and cosmo dual-arch `libhull_platform-<flavor>.{x86_64,aarch64}-cosmo.a`, all covered by the Ed25519-signed `hull.sha256` (plus Sigstore/cosign signatures and SLSA provenance). See [docs/build_flavors.md](docs/build_flavors.md) for the full design.
 
+Each flavor also gets a signed SBOM (`libhull_platform-<flavor>.sbom.{json,cdx.json,spdx.json}`), generated with `hull sbom --flavor=<flavor>` — it reports the exact dependency set that flavor links (e.g. `pure-compute` omits Keel + mbedTLS). Run it locally against any hull binary to inspect a flavor's bill of materials without building it.
+
 ### libhull: embed the hardened core (no runtime)
 
 `make libhull` produces `libhull.a`, Hull's runtime-free core as a static archive a native program (C / Rust / Zig) links directly. There is no Lua/QuickJS runtime and no `app.main` lifecycle: the host owns `main()` and drives the two-phase kernel sandbox, the capability-mediated I/O layer, the WASM/GPU compute isolation, and the signed-artifact/SBOM machinery itself, through one stable header, [`<hull/embed.h>`](include/hull/embed.h).

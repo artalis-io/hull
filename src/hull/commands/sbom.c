@@ -23,6 +23,7 @@ static void usage(FILE *fp)
 {
     fprintf(fp,
         "Usage: hull sbom [--format=<format>] [--subject=<hull|libhull>]\n"
+        "                 [--flavor=<full|server-only|client-only|pure-compute>]\n"
         "\n"
         "Print the Software Bill of Materials for this hull binary.\n"
         "\n"
@@ -30,6 +31,10 @@ static void usage(FILE *fp)
         "  hull        The whole hull binary.\n"
         "  libhull     The no-runtime embedding archive (libhull.a): drops the\n"
         "              Lua/QuickJS runtimes; keeps the linked core + Keel.\n"
+        "\n"
+        "Flavor (report a `hull build --flavor` platform lib's deps):\n"
+        "  full / server-only / client-only   Same vendored set as the binary.\n"
+        "  pure-compute                       Drops Keel + mbedTLS (no HTTP).\n"
         "\n"
         "Formats:\n"
         "  human       Default. Pretty table mirroring LICENSING.md style.\n"
@@ -83,6 +88,32 @@ int hl_cmd_sbom(int argc, char **argv, const HlCommandEnv *env)
                 fprintf(stderr,
                         "hull sbom: unknown subject '%s' (expected hull|libhull)\n",
                         sub);
+                usage(stderr);
+                return 1;
+            }
+            continue;
+        }
+        /* --flavor=<full|server-only|client-only|pure-compute>: report the
+         * dependency set that flavor's platform lib links (the SBOM analogue
+         * of `hull build --flavor`). Self-contained like --subject above. */
+        if (strcmp(argv[i], "--flavor") == 0 ||
+            strncmp(argv[i], "--flavor=", 9) == 0) {
+            const char *fl = NULL;
+            if (argv[i][8] == '=') {
+                fl = argv[i] + 9;            /* --flavor=VALUE */
+            } else if (i + 1 < argc) {
+                fl = argv[++i];              /* --flavor VALUE */
+            }
+            if (!fl) {
+                fprintf(stderr, "hull sbom: --flavor requires a value "
+                        "(full|server-only|client-only|pure-compute)\n");
+                usage(stderr);
+                return 1;
+            }
+            if (hl_sbom_set_scope_flavor(fl) != 0) {
+                fprintf(stderr, "hull sbom: unknown flavor '%s' "
+                        "(expected full|server-only|client-only|pure-compute)\n",
+                        fl);
                 usage(stderr);
                 return 1;
             }

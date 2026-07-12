@@ -717,7 +717,17 @@ jobs:
           ./hull-linux-x86_64 sbom --subject=libhull --format=json      > libhull.sbom.json
           ./hull-linux-x86_64 sbom --subject=libhull --format=cyclonedx > libhull.sbom.cdx.json
           ./hull-linux-x86_64 sbom --subject=libhull --format=spdx      > libhull.sbom.spdx.json
-          ls -la hull.sbom.* libhull.sbom.*
+          # Per-flavor SBOMs for the published `hull build --flavor` platform
+          # libs. Named to match libhull_platform-<flavor>.a. Today only
+          # pure-compute differs (drops Keel + mbedTLS); the others equal the
+          # full hull SBOM minus the binary hash, published for symmetry so a
+          # `hull platform install <flavor>` consumer has its own bill.
+          for f in server-only client-only pure-compute; do
+            ./hull-linux-x86_64 sbom --flavor="$f" --format=json      > "libhull_platform-$f.sbom.json"
+            ./hull-linux-x86_64 sbom --flavor="$f" --format=cyclonedx > "libhull_platform-$f.sbom.cdx.json"
+            ./hull-linux-x86_64 sbom --flavor="$f" --format=spdx      > "libhull_platform-$f.sbom.spdx.json"
+          done
+          ls -la hull.sbom.* libhull.sbom.* libhull_platform-*.sbom.*
 
       - name: Generate build-environment manifest
         # §0.3.14. Capture the release-workflow runner identity, commit,
@@ -764,6 +774,7 @@ jobs:
                     hull-wamrc-linux-x86_64 hull-wamrc-linux-aarch64 hull-wamrc-darwin-arm64 \
                     hull.sbom.json hull.sbom.cdx.json hull.sbom.spdx.json \
                     libhull.sbom.json libhull.sbom.cdx.json libhull.sbom.spdx.json \
+                    libhull_platform-*.sbom.* \
                     hull.build-env.json \
                     libhull_platform-*.a \
                     libhull-linux-x86_64.a libhull-linux-aarch64.a libhull-darwin-arm64.a \
@@ -879,6 +890,8 @@ jobs:
             dist/libhull.sbom.cdx.json
             dist/libhull.sbom.spdx.json
           )
+          # Per-flavor platform-lib SBOMs (hull sbom --flavor).
+          assets+=(dist/libhull_platform-*.sbom.*)
           if [ -f dist/hull.sha256.sig ]; then
             assets+=(dist/hull.sha256.sig)
           fi

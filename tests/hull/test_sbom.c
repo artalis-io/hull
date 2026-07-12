@@ -392,4 +392,45 @@ UTEST(sbom, all_formats_render_under_libhull_scope)
     hl_sbom_set_scope_libhull(0);
 }
 
+/* ── flavor scope (hull sbom --flavor=X) ───────────────────────────── */
+
+UTEST(sbom, needs_http_flags_match_policy)
+{
+    size_t n = 0;
+    const HlSbomEntry *e = hl_sbom_entries(&n);
+    for (size_t i = 0; i < n; i++) {
+        int http = strcmp(e[i].name, "keel") == 0 || strcmp(e[i].name, "mbedtls") == 0;
+        ASSERT_EQ_MSG(e[i].needs_http, http, e[i].name);
+    }
+}
+
+UTEST(sbom, flavor_scope_unknown_rejected)
+{
+    ASSERT_EQ(hl_sbom_set_scope_flavor("bogus"), -1);
+    ASSERT_EQ(hl_sbom_set_scope_flavor("full"), 0);
+    ASSERT_EQ(hl_sbom_set_scope_flavor("pure-compute"), 0);
+    ASSERT_EQ(hl_sbom_set_scope_flavor(NULL), 0);   /* clears */
+}
+
+UTEST(sbom, pure_compute_flavor_drops_http_deps)
+{
+    hl_sbom_set_scope_flavor("pure-compute");
+    char *pc = format_to_string(HL_SBOM_JSON);
+    ASSERT_NE(pc, NULL);
+    ASSERT_NE_MSG(strstr(pc, "pure-compute"), NULL, "subject names the flavor");
+    ASSERT_EQ_MSG(strstr(pc, "\"mbedtls\""), NULL, "pure-compute drops mbedTLS");
+    ASSERT_EQ_MSG(strstr(pc, "\"keel\""), NULL, "pure-compute drops Keel");
+
+    /* full / server-only keep the HTTP deps (same vendored set as the binary). */
+    hl_sbom_set_scope_flavor("server-only");
+    char *so = format_to_string(HL_SBOM_JSON);
+    ASSERT_NE(so, NULL);
+    ASSERT_NE_MSG(strstr(so, "mbedtls"), NULL, "server-only keeps mbedTLS");
+    ASSERT_LT(sbom_count(pc, "\"name\""), sbom_count(so, "\"name\""));
+
+    free(pc);
+    free(so);
+    hl_sbom_set_scope_flavor(NULL);
+}
+
 UTEST_MAIN()

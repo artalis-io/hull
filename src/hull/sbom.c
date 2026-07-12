@@ -140,17 +140,70 @@ static int g_sbom_libhull = 0;
 
 void hl_sbom_set_scope_libhull(int on) { g_sbom_libhull = on ? 1 : 0; }
 
-/* Subject component name for the current scope. */
-static const char *sbom_subject_name(void)
+/* Build-flavor scope (hull build --flavor). NONE = the binary's actual set. */
+typedef enum {
+    SBOM_FLAVOR_NONE = 0,
+    SBOM_FLAVOR_FULL,
+    SBOM_FLAVOR_SERVER_ONLY,
+    SBOM_FLAVOR_CLIENT_ONLY,
+    SBOM_FLAVOR_PURE_COMPUTE,
+} SbomFlavor;
+
+static SbomFlavor  g_sbom_flavor      = SBOM_FLAVOR_NONE;
+static const char *g_sbom_flavor_name = NULL;   /* static string; for the subject */
+
+int hl_sbom_set_scope_flavor(const char *flavor)
 {
-    return g_sbom_libhull ? "libhull" : "hull";
+    if (!flavor || !flavor[0]) {
+        g_sbom_flavor = SBOM_FLAVOR_NONE;
+        g_sbom_flavor_name = NULL;
+        return 0;
+    }
+    static const struct { const char *name; SbomFlavor f; } tbl[] = {
+        { "full",         SBOM_FLAVOR_FULL },
+        { "server-only",  SBOM_FLAVOR_SERVER_ONLY },
+        { "client-only",  SBOM_FLAVOR_CLIENT_ONLY },
+        { "pure-compute", SBOM_FLAVOR_PURE_COMPUTE },
+    };
+    for (size_t i = 0; i < sizeof(tbl) / sizeof(tbl[0]); i++) {
+        if (strcmp(flavor, tbl[i].name) == 0) {
+            g_sbom_flavor = tbl[i].f;
+            g_sbom_flavor_name = tbl[i].name;
+            return 0;
+        }
+    }
+    return -1;
 }
 
-/* True if entry @e should be emitted under the current scope. In libhull
- * scope, runtime-only components (in_libhull == 0) are omitted. */
+/* Subject component name for the current scope. Static-buffer for the flavor
+ * form; single-threaded CLI use, like the rest of the sbom module. */
+static const char *sbom_subject_name(void)
+{
+    if (g_sbom_libhull) return "libhull";
+    if (g_sbom_flavor != SBOM_FLAVOR_NONE && g_sbom_flavor_name) {
+        static char buf[48];
+        snprintf(buf, sizeof(buf), "hull (%s)", g_sbom_flavor_name);
+        return buf;
+    }
+    return "hull";
+}
+
+/* True if entry @e should be emitted under the current scope. libhull scope
+ * drops runtime-only components; the pure-compute flavor drops needs_http
+ * ones (Keel + mbedTLS). */
 static int sbom_entry_visible(const HlSbomEntry *e)
 {
-    return !g_sbom_libhull || e->in_libhull;
+    if (g_sbom_libhull && !e->in_libhull) return 0;
+    if (g_sbom_flavor == SBOM_FLAVOR_PURE_COMPUTE && e->needs_http) return 0;
+    return 1;
+}
+
+/* True when any non-default scope (libhull or a flavor) is active. Such an
+ * SBOM describes an archive/flavor, not the running binary, so the binary
+ * hash is omitted. */
+static int sbom_scoped(void)
+{
+    return g_sbom_libhull || g_sbom_flavor != SBOM_FLAVOR_NONE;
 }
 
 #ifdef HL_SBOM_HAS_MBEDTLS
@@ -219,6 +272,7 @@ static const HlSbomEntry sbom_entries[] = {
     {
         .name = "keel",
         .in_libhull = 1,
+        .needs_http = 1,
         .version = HULL_VENDOR_KEEL_VERSION,
         .commit = HULL_VENDOR_KEEL_COMMIT,
         .license_spdx = "MIT",
@@ -279,6 +333,7 @@ static const HlSbomEntry sbom_entries[] = {
     {
         .name = "mbedtls",
         .in_libhull = 1,
+        .needs_http = 1,
         .version = "3.x",
         .commit = "",
         .license_spdx = "Apache-2.0",
@@ -466,12 +521,16 @@ static void format_human(FILE *fp)
         fprintf(fp, "libhull SBOM\n");
         fprintf(fp, "libhull (Hull %s), plus %zu component(s):\n",
                 HL_VERSION, sbom_visible_count());
+    } else if (g_sbom_flavor != SBOM_FLAVOR_NONE) {
+        fprintf(fp, "%s SBOM\n", sbom_subject_name());
+        fprintf(fp, "Hull %s (%s flavor), plus %zu component(s):\n",
+                HL_VERSION, g_sbom_flavor_name, sbom_visible_count());
     } else {
         fprintf(fp, "Hull SBOM\n");
         fprintf(fp, "Hull %s, plus %zu component(s):\n",
                 HL_VERSION, sbom_entries_count - 1);
     }
-    const char *bin_sha = sha256_binary();
+    const char *bin_sha = sbom_scoped() ? NULL : sha256_binary();
     if (bin_sha) fprintf(fp, "Binary sha256: %s\n", bin_sha);
     fputc('\n', fp);
 
@@ -552,7 +611,7 @@ static void format_json(FILE *fp)
     sh_json_write_kv_string(&w, "subject", sbom_subject_name());
     /* The runtime binary hash describes the hull binary, not libhull.a — omit
      * it in libhull scope (the archive's own hash lives in libhull.a.sha256). */
-    const char *bin_sha = g_sbom_libhull ? NULL : sha256_binary();
+    const char *bin_sha = sbom_scoped() ? NULL : sha256_binary();
     if (bin_sha)
         sh_json_write_kv_string(&w, "binary_sha256", bin_sha);
     sh_json_write_key(&w, "components");
@@ -597,7 +656,7 @@ static void format_cyclonedx(FILE *fp)
     /* metadata.component describes the subject of the BOM (this binary).
      * Includes the SHA-256 of the running binary when known, so a consumer
      * can cross-check against the signed hull.sha256 release manifest. */
-    const char *bin_sha = g_sbom_libhull ? NULL : sha256_binary();
+    const char *bin_sha = sbom_scoped() ? NULL : sha256_binary();
     sh_json_write_key(&w, "metadata");
     sh_json_write_object_start(&w);
     sh_json_write_key(&w, "component");
@@ -707,7 +766,7 @@ static void format_spdx(FILE *fp)
      * SPDX document is the running hull binary; binary_sha256 is emitted
      * as a checksum on that package so consumers can cross-reference the
      * signed release manifest. */
-    const char *bin_sha = g_sbom_libhull ? NULL : sha256_binary();
+    const char *bin_sha = sbom_scoped() ? NULL : sha256_binary();
     sh_json_write_key(&w, "documentDescribes");
     sh_json_write_array_start(&w);
     sh_json_write_string(&w, "SPDXRef-Package-hull-binary");
@@ -724,8 +783,10 @@ static void format_spdx(FILE *fp)
     sh_json_write_kv_string(&w, "licenseConcluded", "AGPL-3.0-or-later");
     sh_json_write_kv_string(&w, "licenseDeclared",  "AGPL-3.0-or-later");
     sh_json_write_kv_string(&w, "comment",
-                            g_sbom_libhull ? "the libhull embedding archive"
-                                           : "the running hull binary");
+                            g_sbom_libhull ? "the libhull embedding archive" :
+                            g_sbom_flavor != SBOM_FLAVOR_NONE
+                                ? "a hull build --flavor platform library"
+                                : "the running hull binary");
     if (bin_sha) {
         sh_json_write_key(&w, "checksums");
         sh_json_write_array_start(&w);
