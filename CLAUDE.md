@@ -112,6 +112,8 @@ make analyze            # Clang static analyzer (scan-build)
 make cppcheck           # cppcheck static analysis
 make platform           # build libhull_platform.a (everything except main/build-tool code)
 make platform-cosmo     # build multi-arch cosmo platform archives (x86_64 + aarch64)
+make libhull            # build libhull.a: the runtime-free core for native embedders (no Lua/JS). See docs/libhull_flavor.md
+make embed-smoke        # build + run the C/Rust/Zig reference embedders (rust/zig skip if toolchain absent)
 make self-build         # reproducible build chain: hull → hull2 → hull3
 make CC=cosmocc         # build with Cosmopolitan (APE binary)
 make EMBED_PLATFORM=1   # embed platform library in hull binary (distribution mode)

@@ -201,6 +201,19 @@ hull build --flavor=auto -o myapp .        # infer the minimal flavor
 
 Releases publish signed per-flavor platform libs for every target: native `libhull_platform-<flavor>-<arch>.a` (linux-x86_64, linux-aarch64, darwin-arm64) and cosmo dual-arch `libhull_platform-<flavor>.{x86_64,aarch64}-cosmo.a`, all covered by the Ed25519-signed `hull.sha256` (plus Sigstore/cosign signatures and SLSA provenance). See [docs/build_flavors.md](docs/build_flavors.md) for the full design.
 
+### libhull: embed the hardened core (no runtime)
+
+`make libhull` produces `libhull.a`, Hull's runtime-free core as a static archive a native program (C / Rust / Zig) links directly. There is no Lua/QuickJS runtime and no `app.main` lifecycle: the host owns `main()` and drives the two-phase kernel sandbox, the capability-mediated I/O layer, the WASM/GPU compute isolation, and the signed-artifact/SBOM machinery itself, through one stable header, [`<hull/embed.h>`](include/hull/embed.h).
+
+Reach for it when you have an **existing native codebase** that needs one of Hull's guarantees but shouldn't adopt a scripting runtime to get it:
+
+- **Run untrusted compute inside a native service** — WAMR gas-metered, no-I/O WASM isolation for user-supplied transforms/scoring/UDFs, without embedding a script engine.
+- **Put a capability boundary on a native tool's own I/O** — a portable (Linux / macOS / cosmo) pledge/unveil + a declared fs / host / env allowlist, so a bug or malicious input can't reach outside what the program declared.
+- **Defense-in-depth for a Rust/Zig service** — add the kernel sandbox (seatbelt / landlock / pledge) + W^X enforcement + a filesystem/network allowlist that the language runtime alone does not give you.
+- **Signed-artifact / SBOM tooling** — link the Ed25519 verify + SBOM + release-verification machinery instead of reimplementing it.
+
+Writing a **new** app from scratch? Use Hull's Lua/JS instead — same hardening, far less glue. libhull is for the case where the host must stay native and is trusted to sequence the lifecycle. `libhull.a` is release-signed per arch (native + dual-arch cosmo) with its own scoped SBOM (`hull sbom --subject=libhull`). Reference hosts in C, Rust, and Zig live under `examples/embed_{c,rust,zig}`; the trust boundary and seal lifecycle are in [docs/libhull_flavor.md](docs/libhull_flavor.md).
+
 ## Architecture
 
 ```
