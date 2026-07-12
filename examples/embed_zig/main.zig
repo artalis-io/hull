@@ -89,10 +89,14 @@ pub fn main() u8 {
     const plat = c.hl_embed_platform();
     check(plat != null and plat[0] != 0, "hl_embed_platform reports arch");
     check(c.hl_embed_module_count() > 0, "hl_embed_module_count populated");
-    std.debug.print(
-        "  platform={s} modules={d}\n",
-        .{ if (plat != null) plat else "(null)", c.hl_embed_module_count() },
-    );
+    if (plat != null) {
+        std.debug.print(
+            "  platform={s} modules={d}\n",
+            .{ std.mem.span(plat), c.hl_embed_module_count() },
+        );
+    } else {
+        std.debug.print("  platform=(null) modules={d}\n", .{c.hl_embed_module_count()});
+    }
 
     _ = c.hl_embed_fs_delete(e, "note.txt", &err);
     c.hl_embed_free(e);
